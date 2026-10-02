@@ -50,7 +50,7 @@ requests_end:
 
 # --- strings ----------------------------------------------------------
         .section .rodata
-msg_banner:     .asciz "PAZ\n"
+msg_banner:     .asciz "PAX\n"
 msg_bios:       .asciz "firmware: bios\n"
 msg_uefi:       .asciz "firmware: uefi\n"
 msg_other:      .asciz "firmware: other\n"
