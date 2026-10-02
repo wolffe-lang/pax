@@ -52,7 +52,7 @@ Where each runs today (2026-10-02, px00):
     nix-shell -p qemu xorriso --run 'PAX_QEMU=$(command -v qemu-system-x86_64) tests/proof'
   ```
 - **kasumi** (CachyOS): no QEMU, no xorriso, no OVMF installed; not a harness host until the maintainer installs them.
-- **macOS** (this repo's maintainers' laptops): `tests/proof --image` on an ISO built elsewhere.
+- **macOS** (nomad-1, arm64): `tests/proof --image` on an ISO built elsewhere, as CI's `macos-run` does.
 
 The QEMU binary is `$PAX_QEMU` (default `qemu-system-x86_64` on `PATH`) and the UEFI firmware `$PAX_OVMF_CODE` / `$PAX_OVMF_VARS`, so every host supplies its own. `tools/mkimage` is reproducible: every date in the ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so one commit builds one digest.
 
