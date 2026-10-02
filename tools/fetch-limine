@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# fetch-limine — stage the pinned Limine release into .pax-cache/.
+#
+#   tools/fetch-limine
+#
+# Downloads boot/limine.pin's archive, refuses on a sha256 mismatch,
+# unpacks it, and builds its host tool (`limine`, BSD-2-Clause, used
+# only for `limine bios-install`) with the host's cc. Idempotent: a
+# staged, verified release is reused.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+load_limine_pin
+
+stamp=$LIMINE_DIR/.verified
+if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$LIMINE_SHA256" ] && [ -x "$LIMINE_DIR/limine" ]; then
+    say "limine $LIMINE_VERSION already staged ($LIMINE_DIR)"
+    exit 0
+fi
+
+need curl tar make cc
+mkdir -p "$PAX_CACHE"
+tmp=$(mktemp -d "$PAX_CACHE/fetch.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+
+curl -fsSL --retry 3 -o "$tmp/limine.tar.gz" "$LIMINE_URL"
+got=$(sha256_of "$tmp/limine.tar.gz")
+if [ "$got" != "$LIMINE_SHA256" ]; then
+    die "digest mismatch for $LIMINE_URL: pinned $LIMINE_SHA256, got $got"
+fi
+
+tar -xzf "$tmp/limine.tar.gz" -C "$tmp"
+[ -d "$tmp/limine-binary" ] || die "archive has no limine-binary/ directory"
+make -s -C "$tmp/limine-binary" limine >/dev/null
+rm -rf "$LIMINE_DIR"
+mv "$tmp/limine-binary" "$LIMINE_DIR"
+printf '%s\n' "$LIMINE_SHA256" > "$stamp"
+say "limine $LIMINE_VERSION staged ($LIMINE_DIR, sha256 $got)"
