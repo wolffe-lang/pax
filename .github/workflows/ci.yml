@@ -1,0 +1,96 @@
+# pax — CI.
+#
+# The harness proof on every push to trunk and every pull request:
+# build the assembly stub, wrap it in the Limine ISO, boot it under
+# SeaBIOS and OVMF, assert the serial log and QEMU's exit status, and
+# stop it under gdb at _start. Then a macOS job boots the SAME ISO with
+# Homebrew's QEMU, so the harness's macOS claim is measured, not stated.
+#
+# QEMU, OVMF, xorriso and gdb come from the distro (apt) and Homebrew;
+# Limine comes from its release archive BY DIGEST (tools/fetch-limine
+# refuses on a mismatch). Every step runs bare and its exit code is read
+# directly: no pipes, so nothing masks a failure.
+
+name: ci
+
+on:
+  push:
+    branches: [trunk]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, gdb (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso gdb
+          qemu-system-x86_64 --version
+          xorriso -version 2>&1 | head -n 1
+          ls -l /usr/share/OVMF/
+
+      - uses: actions/cache@v4
+        with:
+          path: .pax-cache
+          key: limine-${{ hashFiles('boot/limine.pin') }}
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: expect-serial can say no
+        run: tests/expect-serial-selftest
+
+      - name: the proof, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/proof
+
+      - name: gdb stops at _start (BIOS)
+        run: tests/gdb-attach --firmware bios
+
+      - name: gdb stops at _start (UEFI)
+        run: tests/gdb-attach --firmware uefi
+
+      - name: keep the image and the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-proof-linux
+          path: |
+            build/pax-stub.iso
+            build/stub/pax-stub.elf
+            build/*.log
+            build/*.meta
+            build/*.out
+          retention-days: 14
+          if-no-files-found: warn
+
+  macos-run:
+    needs: proof
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pax-proof-linux
+          path: build
+
+      - name: qemu (Homebrew)
+        run: |
+          brew install qemu
+          qemu-system-x86_64 --version
+
+      - name: the proof on the linux-built ISO, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/proof --image build/pax-stub.iso
