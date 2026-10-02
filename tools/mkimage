@@ -25,6 +25,14 @@ cp "$LIMINE_DIR/limine-bios.sys" "$LIMINE_DIR/limine-bios-cd.bin" \
    "$LIMINE_DIR/limine-uefi-cd.bin" "$root/boot/limine/"
 cp "$LIMINE_DIR/BOOTX64.EFI" "$root/EFI/BOOT/"
 
+# Reproducible: every date in the image is SOURCE_DATE_EPOCH (default
+# the last commit's time), which xorriso honours for its own volume
+# dates; the staged files' mtimes are set to it too. Two builds of one
+# commit give one digest.
+SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$PAX_ROOT" log -1 --format=%ct 2>/dev/null || echo 0)}
+export SOURCE_DATE_EPOCH
+find "$root" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
+
 mkdir -p "$(dirname "$iso")"
 xorriso -as mkisofs -R -r -J \
     -b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table \
