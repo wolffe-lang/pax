@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# build-stub — assemble and link the harness proof.
+#
+#   tools/build-stub            -> build/stub/pax-stub.elf
+#
+# Needs GNU as and ld for x86-64 ELF: linux hosts only (see README.md,
+# 'Hosts').
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+need as ld
+
+src=$PAX_ROOT/boot/stub
+out=$PAX_BUILD/stub
+mkdir -p "$out"
+as --64 -o "$out/pax-stub.o" "$src/pax-stub.s"
+ld -m elf_x86_64 -nostdlib -static -z max-page-size=0x1000 \
+   -T "$src/linker.ld" -o "$out/pax-stub.elf" "$out/pax-stub.o"
+printf '%s\n' "$out/pax-stub.elf"
