@@ -4,7 +4,7 @@
 #   tools/qemu-run [--firmware bios|uefi] [--serial FILE] [--timeout SECS]
 #                  [--accel auto|kvm|tcg] [--gdb PORT] IMAGE.iso [-- QEMU-ARGS...]
 #
-# The machine: q35, 256 MiB, `-nographic`, COM1 to FILE (default
+# The machine: q35, 256 MiB, no NIC, `-nographic`, COM1 to FILE (default
 # build/serial.log), `-no-reboot` (a triple fault ends the run instead of
 # looping), no monitor, and isa-debug-exit at port 0xf4.
 #
@@ -55,7 +55,7 @@ trap 'rm -rf "$work"' EXIT
 
 cmd=(qemu-system-x86_64
      -machine q35 -cpu max -m 256M -accel "$accel"
-     -nographic -monitor none -parallel none
+     -nographic -monitor none -parallel none -nic none
      -serial "file:$serial"
      -no-reboot
      -device isa-debug-exit,iobase=0xf4,iosize=0x04
@@ -85,6 +85,10 @@ cmd+=("$@")
     [ "$firmware" = uefi ] && printf 'ovmf: %s %s\n' "$ovmf_code" "${ovmf_vars:-}"
 } > "$serial.meta"
 
+now() { # seconds, to the millisecond where bash has EPOCHREALTIME (5.0+)
+    if [ -n "${EPOCHREALTIME:-}" ]; then printf '%s\n' "${EPOCHREALTIME/,/.}"; else date +%s; fi
+}
+t0=$(now)
 start=$SECONDS
 "${cmd[@]}" </dev/null >"$serial.qemu.log" 2>&1 &
 qpid=$!
@@ -103,5 +107,5 @@ done
 rc=0
 wait "$qpid" || rc=$?
 [ "$timed_out" = 0 ] || rc=124
-printf 'elapsed: %ss\nstatus: %s\n' "$((SECONDS - start))" "$rc" >> "$serial.meta"
+printf 'elapsed: %ss\nstatus: %s\n' "$(awk -v a="$t0" -v b="$(now)" 'BEGIN { printf "%.3f", b - a }')" "$rc" >> "$serial.meta"
 exit "$rc"
