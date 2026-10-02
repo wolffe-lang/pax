@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# tests/proof — the harness proof: boot the assembly stub, assert it.
+#
+#   tests/proof [--image IMAGE.iso] [--firmware bios|uefi|both]
+#
+# Builds the stub and its ISO (linux) unless --image names a prebuilt
+# one (any host with QEMU, macOS included), then boots it under each
+# firmware and asserts: QEMU's status is 33 (the stub wrote 0x10 to
+# isa-debug-exit) and COM1 carried "PAX" then "firmware: <leg>".
+#
+# The UEFI leg needs OVMF. Without it the leg is SKIPPED LOUDLY, unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when a missing firmware is a failure.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+
+image= legs=both
+while [ $# -gt 0 ]; do
+    case $1 in
+        --image)    image=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        *)          die "usage: tests/proof [--image IMAGE.iso] [--firmware bios|uefi|both]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+
+if [ -z "$image" ]; then
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    elf=$("$PAX_ROOT/tools/build-stub") || exit 2
+    image=$("$PAX_ROOT/tools/mkimage" "$elf" "$PAX_BUILD/pax-stub.iso") || exit 2
+fi
+say "image $image (sha256 $(sha256_of "$image"))"
+
+fail=0 ran=0
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            say "FAIL uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"; fail=1
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    log=$PAX_BUILD/proof-$leg.serial.log
+    rc=0
+    "$PAX_ROOT/tools/qemu-run" --firmware "$leg" --serial "$log" --timeout 60 "$image" || rc=$?
+    elapsed=$(sed -n 's/^elapsed: //p' "$log.meta")
+    accel=$(sed -n 's/^accel: //p' "$log.meta")
+    ran=$((ran + 1))
+    if [ "$rc" != 33 ]; then
+        say "FAIL $leg: QEMU status $rc, want 33 (elapsed $elapsed, accel $accel)"
+        sed 's/^/  qemu: /' "$log.qemu.log" >&2
+        "$PAX_ROOT/tools/expect-serial" "$log" PAX "firmware: $leg" >&2 || true
+        fail=1
+        continue
+    fi
+    if ! "$PAX_ROOT/tools/expect-serial" "$log" PAX "firmware: $leg"; then
+        say "FAIL $leg: serial assertion (status was 33, elapsed $elapsed, accel $accel)"
+        fail=1
+        continue
+    fi
+    say "PASS $leg: status 33, serial PAX + firmware: $leg, elapsed $elapsed, accel $accel"
+done
+[ "$ran" -gt 0 ] || { say "FAIL: no leg ran"; exit 1; }
+exit "$fail"

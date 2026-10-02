@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# tests/gdb-attach — prove tools/qemu-gdb stops the stub at its entry.
+#
+#   tests/gdb-attach [--firmware bios|uefi]
+#
+# Builds the stub and its ISO, boots it frozen under tools/qemu-gdb, sets
+# a hardware breakpoint on _start, continues through the firmware and
+# Limine, and asserts gdb stopped with rip at _start's address (read
+# from the ELF with nm). Linux only (needs the build and gdb).
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+firmware=bios
+case $# in
+    0) ;;
+    2) [ "$1" = --firmware ] || die "usage: tests/gdb-attach [--firmware bios|uefi]"; firmware=$2 ;;
+    *) die "usage: tests/gdb-attach [--firmware bios|uefi]" ;;
+esac
+need nm gdb
+
+"$PAX_ROOT/tools/fetch-limine" || exit 2
+elf=$("$PAX_ROOT/tools/build-stub") || exit 2
+image=$("$PAX_ROOT/tools/mkimage" "$elf" "$PAX_BUILD/pax-stub.iso") || exit 2
+want=$(nm "$elf" | awk '$3 == "_start" { print "0x" $1 }')
+[ -n "$want" ] || die "no _start in $elf"
+
+cmds=$PAX_BUILD/gdb-attach.gdb
+cat > "$cmds" <<'GDB'
+hbreak _start
+continue
+printf "PAX-GDB rip=%#lx\n", $rip
+kill
+GDB
+out=$PAX_BUILD/gdb-attach-$firmware.out
+"$PAX_ROOT/tools/qemu-gdb" --firmware "$firmware" --port "${PAX_GDB_PORT:-1234}" \
+    --timeout 120 --batch "$cmds" "$image" "$elf" > "$out" 2>&1
+got=$(sed -n 's/^PAX-GDB rip=//p' "$out")
+# gdb prints the address without leading zeros; _start has none to lose.
+if [ "$got" = "$want" ]; then
+    say "PASS $firmware: gdb stopped at _start, rip=$got"
+    exit 0
+fi
+say "FAIL $firmware: rip=${got:-<none>}, want $want"
+sed 's/^/  gdb: /' "$out" >&2
+exit 1
