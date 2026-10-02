@@ -13,6 +13,8 @@ trap 'rm -rf "$t"' EXIT
 # A firmware-console shaped log: CRs, CSI sequences, a charset switch.
 printf 'BdsDxe: loading\r\n\033[2J\033[01;01H\033(BPAX\r\nfirmware: uefi\r\n' > "$t/uefi.log"
 printf 'PAX\nfirmware: bios\n' > "$t/bios.log"
+# The shapes CI met first (run 37058843828): SeaBIOS's ESC c, OVMF's ESC [=3h.
+printf '\033cSeaBIOS (version x)\r\n\033[=3h\033[=3hBdsDxe: x\r\n\033cPAX\r\nfirmware: bios\r\n' > "$t/real.log"
 printf 'PAZ\nfirmware: bios\n' > "$t/planted.log"
 printf 'PAXX\nxPAX\nfirmware: bios\n' > "$t/partial.log"
 : > "$t/empty.log"
@@ -29,6 +31,7 @@ check() { # want-status description args...
 }
 check 0 "bios log accepted"                 "$t/bios.log" PAX "firmware: bios"
 check 0 "uefi log accepted through escapes" "$t/uefi.log" PAX "firmware: uefi"
+check 0 "ESC c and ESC [=3h are stripped"     "$t/real.log" PAX "firmware: bios"
 check 1 "planted PAZ refused"               "$t/planted.log" PAX "firmware: bios"
 check 1 "a partial line is not a match"     "$t/partial.log" PAX
 check 1 "order is enforced"                 "$t/bios.log" "firmware: bios" PAX

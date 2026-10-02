@@ -15,7 +15,14 @@ log=$1; shift
 [ -f "$log" ] || die "no log: $log"
 
 esc=$(printf '\033')
-norm=$(LC_ALL=C sed -e "s/${esc}\[[0-9;?]*[A-Za-z]//g" -e "s/${esc}[()][A-Za-z0-9]//g" -e 's/\r//g' "$log")
+# CSI sequences (ESC [ params letter, params including the private
+# markers ? = < > that OVMF's console uses), charset switches (ESC ( B)
+# and the single-character escapes (ESC c, SeaBIOS's reset; ESC 7 / 8).
+norm=$(LC_ALL=C sed \
+    -e "s/${esc}\[[0-9;?=<>]*[A-Za-z]//g" \
+    -e "s/${esc}[()][A-Za-z0-9]//g" \
+    -e "s/${esc}[c78DEHM=>]//g" \
+    -e 's/\r//g' "$log")
 
 after=0 n=0
 for want in "$@"; do
