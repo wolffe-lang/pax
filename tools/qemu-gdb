@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# qemu-gdb — boot a PAX image frozen at reset and attach gdb to it.
+#
+#   tools/qemu-gdb [--firmware bios|uefi] [--port N] [--batch CMDS]
+#                  [--serial FILE] [--timeout SECS] IMAGE.iso KERNEL.elf
+#
+# Runs tools/qemu-run with QEMU's gdb stub on 127.0.0.1:PORT (default
+# 1234) and the CPU stopped before the firmware's first instruction,
+# loads KERNEL.elf's symbols, and connects. Interactive by default; with
+# --batch CMDS, gdb runs the commands in file CMDS and exits (the tests
+# use this). QEMU is stopped when gdb exits.
+#
+# Hosts: needs gdb with x86-64 support. Linux distros' gdb has it; on
+# macOS (no gdb in the base system) this tool says so and stops — lldb's
+# `gdb-remote 1234` against `tools/qemu-run --gdb 1234` is the manual
+# route there.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+
+firmware=bios port=1234 batch= serial=$PAX_BUILD/serial-gdb.log timeout=120 image= kernel=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --firmware) firmware=$2; shift 2 ;;
+        --port)     port=$2; shift 2 ;;
+        --batch)    batch=$2; shift 2 ;;
+        --serial)   serial=$2; shift 2 ;;
+        --timeout)  timeout=$2; shift 2 ;;
+        -h|--help)  sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
+        -*)         die "unknown option: $1" ;;
+        *)          if [ -z "$image" ]; then image=$1; elif [ -z "$kernel" ]; then kernel=$1; else die "too many operands"; fi; shift ;;
+    esac
+done
+[ -n "$image" ] && [ -n "$kernel" ] || die "usage: qemu-gdb [options] IMAGE.iso KERNEL.elf"
+[ -f "$kernel" ] || die "no kernel: $kernel"
+[ -z "$batch" ] || [ -f "$batch" ] || die "no command file: $batch"
+need gdb
+
+"$PAX_ROOT/tools/qemu-run" --firmware "$firmware" --serial "$serial" \
+    --timeout "$timeout" --gdb "$port" "$image" &
+qrun=$!
+cleanup() { kill "$qrun" 2>/dev/null || true; wait "$qrun" 2>/dev/null || true; }
+trap cleanup EXIT
+
+# Wait for the stub to listen (bash's /dev/tcp; no extra tool).
+for _ in $(seq 1 100); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then break; fi
+    kill -0 "$qrun" 2>/dev/null || die "qemu-run exited before the gdb stub listened (see $serial.qemu.log)"
+    sleep 0.1
+done
+
+args=(-q -nx -ex "set confirm off" -ex "set pagination off"
+      -ex "set architecture i386:x86-64"
+      -ex "file $kernel" -ex "target remote 127.0.0.1:$port")
+if [ -n "$batch" ]; then
+    gdb -batch "${args[@]}" -x "$batch"
+else
+    gdb "${args[@]}"
+fi
