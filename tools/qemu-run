@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# qemu-run — boot a PAX image headless and return how it ended.
+#
+#   tools/qemu-run [--firmware bios|uefi] [--serial FILE] [--timeout SECS]
+#                  [--accel auto|kvm|tcg] [--gdb PORT] IMAGE.iso [-- QEMU-ARGS...]
+#
+# The machine: q35, 256 MiB, `-nographic`, COM1 to FILE (default
+# build/serial.log), `-no-reboot` (a triple fault ends the run instead of
+# looping), no monitor, and isa-debug-exit at port 0xf4.
+#
+# Exit status is QEMU's, with one addition:
+#   (v << 1) | 1   the guest wrote v to port 0xf4 (the proof's success,
+#                  v = 0x10, is 33);
+#   0              the guest reset, triple-faulted or powered off;
+#   124            the timeout (default 30 s) expired and the run was killed;
+#   anything else  QEMU itself failed (see FILE.qemu.log).
+# FILE.meta records the command line, the accelerator and the elapsed time.
+#
+# --gdb PORT starts QEMU's gdb stub on localhost:PORT with the CPU frozen
+# at reset (-S); tools/qemu-gdb drives it.
+#
+# Hosts: linux (KVM when /dev/kvm is usable, TCG otherwise) and macOS
+# (TCG; Homebrew's qemu, which ships its own UEFI firmware).
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+
+firmware=bios serial=$PAX_BUILD/serial.log timeout=30 accel=auto gdb_port= image=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --firmware) firmware=$2; shift 2 ;;
+        --serial)   serial=$2; shift 2 ;;
+        --timeout)  timeout=$2; shift 2 ;;
+        --accel)    accel=$2; shift 2 ;;
+        --gdb)      gdb_port=$2; shift 2 ;;
+        --)         shift; break ;;
+        -h|--help)  sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
+        -*)         die "unknown option: $1" ;;
+        *)          [ -z "$image" ] || die "one image only"; image=$1; shift ;;
+    esac
+done
+[ -n "$image" ] || die "usage: qemu-run [options] IMAGE.iso [-- QEMU-ARGS...]"
+[ -f "$image" ] || die "no image: $image"
+case $timeout in ''|*[!0-9]*) die "--timeout takes whole seconds" ;; esac
+need qemu-system-x86_64
+
+if [ "$accel" = auto ]; then
+    if [ "$(uname -s)" = Linux ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then accel=kvm; else accel=tcg; fi
+fi
+case $accel in kvm|tcg) ;; *) die "--accel takes auto, kvm or tcg" ;; esac
+
+mkdir -p "$(dirname "$serial")"
+: > "$serial"
+work=$(mktemp -d "${TMPDIR:-/tmp}/pax-qemu.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+
+cmd=(qemu-system-x86_64
+     -machine q35 -cpu max -m 256M -accel "$accel"
+     -nographic -monitor none -parallel none
+     -serial "file:$serial"
+     -no-reboot
+     -device isa-debug-exit,iobase=0xf4,iosize=0x04
+     -drive "file=$image,format=raw,media=cdrom,readonly=on"
+     -boot d)
+
+case $firmware in
+    bios) ;;
+    uefi)
+        read -r ovmf_code ovmf_vars <<<"$(find_ovmf)" || true
+        [ -n "${ovmf_code:-}" ] || die "no UEFI firmware found (set PAX_OVMF_CODE, or install your distro's OVMF / edk2 package)"
+        cmd+=(-drive "if=pflash,format=raw,unit=0,readonly=on,file=$ovmf_code")
+        if [ -n "${ovmf_vars:-}" ]; then
+            cp "$ovmf_vars" "$work/vars.fd"
+            chmod u+w "$work/vars.fd"
+            cmd+=(-drive "if=pflash,format=raw,unit=1,file=$work/vars.fd")
+        fi
+        ;;
+    *) die "--firmware takes bios or uefi" ;;
+esac
+[ -z "$gdb_port" ] || cmd+=(-gdb "tcp:127.0.0.1:$gdb_port" -S)
+cmd+=("$@")
+
+{
+    printf 'cmd:'; printf ' %q' "${cmd[@]}"; printf '\n'
+    printf 'firmware: %s\naccel: %s\ntimeout: %s\n' "$firmware" "$accel" "$timeout"
+    [ "$firmware" = uefi ] && printf 'ovmf: %s %s\n' "$ovmf_code" "${ovmf_vars:-}"
+} > "$serial.meta"
+
+start=$SECONDS
+"${cmd[@]}" </dev/null >"$serial.qemu.log" 2>&1 &
+qpid=$!
+trap 'kill "$qpid" 2>/dev/null || true; rm -rf "$work"; exit 143' TERM INT
+timed_out=0
+while kill -0 "$qpid" 2>/dev/null; do
+    if [ $((SECONDS - start)) -ge "$timeout" ]; then
+        timed_out=1
+        kill "$qpid" 2>/dev/null || true
+        for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$qpid" 2>/dev/null || break; sleep 0.5; done
+        kill -9 "$qpid" 2>/dev/null || true
+        break
+    fi
+    sleep 0.1
+done
+rc=0
+wait "$qpid" || rc=$?
+[ "$timed_out" = 0 ] || rc=124
+printf 'elapsed: %ss\nstatus: %s\n' "$((SECONDS - start))" "$rc" >> "$serial.meta"
+exit "$rc"
