@@ -16,6 +16,10 @@
 #   anything else  QEMU itself failed (see FILE.qemu.log).
 # FILE.meta records the command line, the accelerator and the elapsed time.
 #
+# The QEMU binary is $PAX_QEMU, default `qemu-system-x86_64` on PATH, so
+# each host supplies its own (apt, Homebrew, a nix-shell); the UEFI
+# firmware is $PAX_OVMF_CODE / $PAX_OVMF_VARS, or a known distro path.
+#
 # --gdb PORT starts QEMU's gdb stub on localhost:PORT with the CPU frozen
 # at reset (-S); tools/qemu-gdb drives it.
 #
@@ -41,7 +45,8 @@ done
 [ -n "$image" ] || die "usage: qemu-run [options] IMAGE.iso [-- QEMU-ARGS...]"
 [ -f "$image" ] || die "no image: $image"
 case $timeout in ''|*[!0-9]*) die "--timeout takes whole seconds" ;; esac
-need qemu-system-x86_64
+qemu=${PAX_QEMU:-qemu-system-x86_64}
+need "$qemu"
 
 if [ "$accel" = auto ]; then
     if [ "$(uname -s)" = Linux ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then accel=kvm; else accel=tcg; fi
@@ -53,7 +58,7 @@ mkdir -p "$(dirname "$serial")"
 work=$(mktemp -d "${TMPDIR:-/tmp}/pax-qemu.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
-cmd=(qemu-system-x86_64
+cmd=("$qemu"
      -machine q35 -cpu max -m 256M -accel "$accel"
      -nographic -monitor none -parallel none -nic none
      -serial "file:$serial"
@@ -81,6 +86,7 @@ cmd+=("$@")
 
 {
     printf 'cmd:'; printf ' %q' "${cmd[@]}"; printf '\n'
+    printf 'qemu: %s\n' "$("$qemu" --version | head -n 1)"
     printf 'firmware: %s\naccel: %s\ntimeout: %s\n' "$firmware" "$accel" "$timeout"
     [ "$firmware" = uefi ] && printf 'ovmf: %s %s\n' "$ovmf_code" "${ovmf_vars:-}"
 } > "$serial.meta"
