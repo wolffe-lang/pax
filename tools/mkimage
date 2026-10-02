@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# mkimage — wrap a kernel ELF into a hybrid BIOS + UEFI ISO with Limine.
+#
+#   tools/mkimage KERNEL.elf OUT.iso
+#
+# The ISO holds /boot/pax (the kernel), Limine's BIOS and UEFI stages,
+# and boot/limine.conf. It boots under SeaBIOS and OVMF alike, and is
+# the shape a USB stick takes later (an isohybrid image). Needs xorriso
+# and a staged Limine (tools/fetch-limine).
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 2 ] || die "usage: mkimage KERNEL.elf OUT.iso"
+kernel=$1; iso=$2
+[ -f "$kernel" ] || die "no kernel: $kernel"
+need xorriso
+load_limine_pin
+[ -x "$LIMINE_DIR/limine" ] || die "Limine $LIMINE_VERSION is not staged; run tools/fetch-limine"
+
+root=$(mktemp -d "${TMPDIR:-/tmp}/pax-iso.XXXXXX")
+trap 'rm -rf "$root"' EXIT
+mkdir -p "$root/boot/limine" "$root/EFI/BOOT"
+cp "$kernel" "$root/boot/pax"
+cp "$PAX_ROOT/boot/limine.conf" "$root/boot/limine/limine.conf"
+cp "$LIMINE_DIR/limine-bios.sys" "$LIMINE_DIR/limine-bios-cd.bin" \
+   "$LIMINE_DIR/limine-uefi-cd.bin" "$root/boot/limine/"
+cp "$LIMINE_DIR/BOOTX64.EFI" "$root/EFI/BOOT/"
+
+mkdir -p "$(dirname "$iso")"
+xorriso -as mkisofs -R -r -J \
+    -b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table \
+    -hfsplus -apm-block-size 2048 \
+    --efi-boot boot/limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image \
+    --protective-msdos-label "$root" -o "$iso" 2>"$iso.xorriso.log" \
+    || { cat "$iso.xorriso.log" >&2; die "xorriso failed"; }
+"$LIMINE_DIR/limine" bios-install "$iso" >"$iso.bios-install.log" 2>&1 \
+    || { cat "$iso.bios-install.log" >&2; die "limine bios-install failed"; }
+printf '%s\n' "$iso"
