@@ -53,6 +53,11 @@ jobs:
           PAX_REQUIRE_UEFI: "1"
         run: tests/proof
 
+      - name: the proof's ISO, by digest
+        run: |
+          sha256sum build/pax-stub.iso > build/pax-stub.iso.sha256
+          cat build/pax-stub.iso.sha256
+
       - name: gdb stops at _start (BIOS)
         run: tests/gdb-attach --firmware bios
 
@@ -66,6 +71,7 @@ jobs:
           name: pax-proof-linux
           path: |
             build/pax-stub.iso
+            build/pax-stub.iso.sha256
             build/stub/pax-stub.elf
             build/*.log
             build/*.meta
@@ -84,6 +90,9 @@ jobs:
         with:
           name: pax-proof-linux
           path: build
+
+      - name: the very ISO the linux proof booted
+        run: shasum -a 256 -c build/pax-stub.iso.sha256
 
       - name: qemu (Homebrew)
         run: |
