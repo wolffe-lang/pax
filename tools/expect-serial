@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# expect-serial — assert lines, in order, in a serial log.
+#
+#   tools/expect-serial LOG LINE [LINE...]
+#
+# The log is normalised first: carriage returns and ANSI escape
+# sequences (firmware consoles write both) are removed. Each LINE must
+# then equal a whole line of the log, after the line the previous LINE
+# matched. Exit 0 when every LINE is found, 1 naming the first that is
+# not (and printing the log), 2 on a usage error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -ge 2 ] || die "usage: expect-serial LOG LINE [LINE...]"
+log=$1; shift
+[ -f "$log" ] || die "no log: $log"
+
+esc=$(printf '\033')
+norm=$(LC_ALL=C sed -e "s/${esc}\[[0-9;?]*[A-Za-z]//g" -e "s/${esc}[()][A-Za-z0-9]//g" -e 's/\r//g' "$log")
+
+after=0 n=0
+for want in "$@"; do
+    n=$((n + 1))
+    hit=$(printf '%s\n' "$norm" | awk -v want="$want" -v after="$after" \
+        'NR > after && $0 == want { print NR; exit }')
+    if [ -z "$hit" ]; then
+        printf 'expect-serial: FAIL: line %d not found after log line %d: %s\n' "$n" "$after" "$want" >&2
+        printf -- '--- %s (normalised) ---\n%s\n--- end ---\n' "$log" "$norm" >&2
+        exit 1
+    fi
+    printf 'expect-serial: ok: %s (log line %s)\n' "$want" "$hit"
+    after=$hit
+done
