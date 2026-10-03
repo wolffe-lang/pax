@@ -6,18 +6,24 @@
 #
 # Step 2: `wolf build FILE.lu --target x86_64-unknown-none --emit=obj`
 # (FILE defaults to kernel/kmain.lu; `--release` for the LLVM tier),
-# which also assembles kernel/wolf.pkg's `asm` sources beside the
-# object (OUTDIR/kmain.asm-io.o), then asserts on the objects:
-#   - `nm -u` is a subset of the freestanding hook list plus io.S's
-#     routines: {pax_outb, pax_exit, pax_big, wolf_trap, memcpy,
-#     memmove, memset, memcmp};
+# which also assembles the `asm` sources of the wolf.pkg beside FILE
+# (OUTDIR/NAME.asm-<stem>.o). The wolf objects are OUTDIR/NAME.o, or,
+# for a package of several modules on the native tier, one per module:
+# OUTDIR/NAME.root.o and OUTDIR/NAME.<module>.o (wolf 0.2.22's driver
+# writes `-o K.o` that way when it has more than one object). Then it
+# asserts on the wolf objects:
+#   - every undefined symbol is the freestanding hook list {wolf_trap,
+#     memcpy, memmove, memset, memcmp}, a routine the asm objects define
+#     (their roster), or a symbol another wolf object defines;
 #   - `kmain` is a defined global (T), and nothing defines `main`;
 #   - `objdump -d` names no xmm/ymm register and addresses nothing below
 #     %rsp (no red zone);
 #   - release only: `--emit=llvm-ir` puts `noredzone` and the no-SSE
 #     "target-features" on every defined function.
+# It reports whether the wolf objects define `wolf_trap` (a kernel whose
+# trap hook is wolf, px01) or import it (M-KW's, from assembly).
 # Step 3: assembles boot/start.S (the Limine entry) and links
-#   ld.lld -T boot/kernel.ld start.o kmain.asm-io.o kmain.o -> OUTDIR/pax.elf
+#   ld.lld -T boot/kernel.ld start.o NAME.asm-*.o <wolf objects> -> OUTDIR/NAME.elf
 #
 # `--hosted` drops `--target` (M-KW step 7's seen-red variant): the build
 # is then a hosted one, which this script expects to FAIL; it exits 0
@@ -50,11 +56,12 @@ out=$(cd "$out" && pwd)
 srcdir=$(cd "$(dirname "$src")" && pwd)
 name=$(basename "$src" .lu)
 obj=$out/$name.o
+asmobjs=() wobjs=()
 fail() { printf 'build-kernel: FAIL %s (%s, %s)\n' "$*" "$name" "$tier" >&2; exit 1; }
 
 tierflag=()
 [ "$tier" = release ] && tierflag=(--release)
-rm -f "$obj" "$out/$name".asm-*.o
+rm -f "$obj" "$out/$name".*.o
 
 if [ "$hosted" = 1 ]; then
     rc=0
@@ -75,23 +82,40 @@ fi
 rc=0
 (cd "$srcdir" && "$wolf" build "$name.lu" --target x86_64-unknown-none --emit=obj -o "$obj" \
     ${tierflag[@]+"${tierflag[@]}"}) >"$out/$name.build.log" 2>&1 || rc=$?
-if [ "$rc" != 0 ] || [ ! -f "$obj" ]; then
+if [ "$rc" != 0 ]; then
     sed 's/^/  wolf: /' "$out/$name.build.log" >&2
     fail "wolf build --target x86_64-unknown-none --emit=obj exited $rc"
 fi
-io=$out/$name.asm-io.o
-[ -f "$io" ] || fail "wolf placed no $io beside the object (kernel/wolf.pkg lists ../boot/io.S)"
+for f in "$out/$name".asm-*.o; do [ -f "$f" ] && asmobjs+=("$f"); done
+[ ${#asmobjs[@]} -gt 0 ] || fail "wolf placed no $name.asm-*.o beside the object (the wolf.pkg lists no asm?)"
+if [ -f "$obj" ]; then
+    wobjs=("$obj")
+else
+    for f in "$out/$name".*.o; do
+        case $f in "$out/$name".asm-*.o) ;; *) [ -f "$f" ] && wobjs+=("$f") ;; esac
+    done
+fi
+[ ${#wobjs[@]} -gt 0 ] || fail "wolf build exited 0 and wrote no object ($obj or $name.<module>.o)"
 
-allowed=" pax_outb pax_exit pax_big wolf_trap memcpy memmove memset memcmp "
-for s in $(nm -u "$obj" | awk '{print $NF}'); do
-    case $allowed in *" $s "*) ;; *) fail "imports $s, outside the hooks and io.S" ;; esac
+# The roster: what the asm objects define, as the link sees it.
+roster=" $(nm -g --defined-only "${asmobjs[@]}" | awk 'NF == 3 { print $3 }' | sort -u | paste -sd' ' -) "
+defined=" $(nm -g --defined-only "${wobjs[@]}" | awk 'NF == 3 { print $3 }' | sort -u | paste -sd' ' -) "
+hooks=" wolf_trap memcpy memmove memset memcmp "
+imports=$(nm -u "${wobjs[@]}" | awk 'NF >= 2 && $1 == "U" { print $2 }' | sort -u)
+ext=
+for s in $imports; do
+    case $defined in *" $s "*) continue ;; esac
+    case "$hooks$roster" in *" $s "*) ext+="$s," ;; *) fail "imports $s, outside the hooks and the asm roster{$roster}" ;; esac
 done
-nm "$obj" | awk '$2 == "T" && $3 == "kmain" { f = 1 } END { exit !f }' \
+nm "${wobjs[@]}" | awk '$2 == "T" && $3 == "kmain" { f = 1 } END { exit !f }' \
     || fail "kmain is not a defined global (T)"
-if nm "$obj" | awk '$3 == "main" { f = 1 } END { exit !f }'; then
+if nm "${wobjs[@]}" | awk '$3 == "main" { f = 1 } END { exit !f }'; then
     fail "the object has a main symbol (the hosted shim)"
 fi
-objdump -d --no-show-raw-insn "$obj" > "$out/$name.dis"
+trap_by="wolf_trap unreferenced"
+case " $(printf '%s ' $imports)" in *" wolf_trap "*) trap_by="wolf_trap imported" ;; esac
+case $defined in *" wolf_trap "*) trap_by="wolf_trap defined in wolf" ;; esac
+objdump -d --no-show-raw-insn "${wobjs[@]}" > "$out/$name.dis"
 if grep -Eq '%[xy]mm[0-9]' "$out/$name.dis"; then
     fail "the code names an xmm/ymm register: $(grep -Em1 '%[xy]mm[0-9]' "$out/$name.dis")"
 fi
@@ -116,8 +140,8 @@ if [ "$tier" = release ]; then
             for (g in used) if (!red[g] || !sse[g]) { print "attribute group #" g " lacks noredzone or -sse2"; exit 1 }
         }' "$out/$name.ll" >&2 || fail "the release IR is not kernel code (noredzone, no SSE)"
 fi
-printf 'build-kernel: ok: step 2 (%s, %s): imports {%s}, kmain T, no main, no xmm/ymm, nothing below %%rsp%s\n' \
-    "$name" "$tier" "$(nm -u "$obj" | awk '{print $NF}' | paste -sd, -)" \
+printf 'build-kernel: ok: step 2 (%s, %s): %d wolf object(s), imports {%s}, %s, kmain T, no main, no xmm/ymm, nothing below %%rsp%s\n' \
+    "$name" "$tier" ${#wobjs[@]} "${ext%,}" "$trap_by" \
     "$([ "$tier" = release ] && echo ', IR noredzone + no-SSE')" >&2
 
 # --- step 3: the link ------------------------------------------------------
@@ -131,10 +155,10 @@ fi
 elf=$out/$name.elf
 if command -v ld.lld >/dev/null 2>&1; then
     ld.lld -nostdlib -static -z max-page-size=0x1000 -T "$PAX_ROOT/boot/kernel.ld" \
-        -o "$elf" "$start" "$io" "$obj"
+        -o "$elf" "$start" "${asmobjs[@]}" "${wobjs[@]}"
 else
     need ld
     ld -m elf_x86_64 -nostdlib -static -z max-page-size=0x1000 -T "$PAX_ROOT/boot/kernel.ld" \
-        -o "$elf" "$start" "$io" "$obj"
+        -o "$elf" "$start" "${asmobjs[@]}" "${wobjs[@]}"
 fi
 printf '%s\n' "$elf"
