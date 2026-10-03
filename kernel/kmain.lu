@@ -1,19 +1,72 @@
 //! member: false
-// kmain.lu — M-KW's kernel (kw00 §3e step 1): the first wolf to run on
-// PAX. Limine enters boot/start.S, which calls `kmain`; `kmain` writes
-// "KWC\n" to COM1 through io.S's `outb` and leaves QEMU with status 33.
-// Built `--target x86_64-unknown-none`, both tiers (tools/build-kernel).
-// `member: false`: kmain_trap.lu beside it is a second kernel, not a
-// module file of this one (D32: a directory is one module).
-extern "c" fn pax_outb(port: u16, v: u8)
-extern "c" fn pax_exit(code: u8)
+// kmain.lu — first light (px01, M-PX1). Limine enters boot/start.S,
+// which checks the base revision and calls `kmain`. The kernel brings
+// up COM1 (kernel/serial), then writes, one line each:
+//
+//     PAX first light
+//     serial: 16550 at 0x3f8, 115200 8N1, scratch ok, loopback ok
+//     boot: Limine <version>, base revision 6
+//     boot: firmware bios | uefi64
+//     mem: <entries> entries, <bytes> bytes usable
+//     hhdm: 0x<offset>
+//     halt
+//
+// and halts (kernel/panic, io.S's `cli; hlt`). tests/mpx1 asserts the
+// transcript and proves the halt through QEMU's monitor. Built
+// `--target x86_64-unknown-none` on both tiers (tools/build-kernel).
+// `member: false`: kmain_panic.lu beside it is a second kernel.
+use log
+use serial
+use boot_info
+use panic
 
 export fn kmain() {
-    let msg = "KWC\n"
-    for b in msg.bytes() {
-        // # Safety: pax_outb is io.S's `outb`; 0x3f8 is COM1.
-        unsafe { pax_outb(1016, b as int as u8) }
+    let st = serial.init()
+    log.line("PAX first light")
+
+    log.put("serial: 16550 at 0x3f8, 115200 8N1, scratch ")
+    log.put(if st % 2 == 1 { "ok" } else { "FAILED" })
+    log.put(", loopback ")
+    log.put(if st / 2 % 2 == 1 { "ok" } else { "FAILED" })
+    log.end()
+
+    log.put("boot: ")
+    loader_string(0)
+    log.put(" ")
+    loader_string(1)
+    log.put(if boot_info.revision_ok() { ", base revision 6" } else { ", base revision NOT honoured" })
+    log.end()
+
+    log.put("boot: firmware ")
+    log.put(boot_info.firmware_name(boot_info.firmware()))
+    log.end()
+
+    log.put("mem: ")
+    log.dec(boot_info.memmap_count())
+    log.put(" entries, ")
+    log.dec(boot_info.usable_bytes() as int)
+    log.put(" bytes usable")
+    log.end()
+
+    log.put("hhdm: ")
+    log.hex(boot_info.hhdm())
+    log.end()
+
+    log.line("halt")
+    panic.halt()
+}
+
+// The bootloader's name (0) or version (1), byte by byte; `?` when
+// Limine gave no bootloader-info response.
+fn loader_string(which: int) {
+    var i = 0
+    var b = boot_info.loader_byte(which, 0)
+    if b < 0 {
+        log.put("?")
     }
-    // # Safety: isa-debug-exit; QEMU ends with status (16 << 1) | 1.
-    unsafe { pax_exit(16) }
+    while b >= 0 {
+        log.put_byte(b)
+        i = i + 1
+        b = boot_info.loader_byte(which, i)
+    }
 }
