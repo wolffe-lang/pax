@@ -4,22 +4,23 @@ A Linux-compatible operating system written in wolf: a kernel that runs Linux's 
 
 PAX is a clean-room implementation of Linux's userspace ABI. It does not contain, translate or derive from Linux kernel source. See `CLAUDE.md` for the rule and `docs/SOURCES.md` for what each part was written from.
 
-Status: scaffolding. The harness boots an assembly proof under QEMU, and M-KW (kw05) boots the first wolf kernel: `kmain` prints `KWC` over serial on both of wolf's compiling tiers, under BIOS and UEFI (`tests/mkw`). px01 grows it. The plan lives in the wolf planning repository under `sprints/pax/`.
+Status: first light (M-PX1, px01). The wolf kernel, built by the wolf 0.2.22 release, owns the serial console (a 16550 driver in wolf), prints what Limine handed it (bootloader, firmware, memory map, HHDM offset) and halts; a trap reaches its panic path, which prints `PANIC <kind> <file>:<line>` and halts. Both of wolf's compiling tiers, under BIOS and UEFI (`tests/mpx1`). The harness's assembly proof (`tests/proof`) and M-KW's first wolf kernel (`tests/mkw`) still run. The plan lives in the wolf planning repository under `sprints/pax/`.
 
 Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA`).
 
 ## Layout
 
-    kernel/   the wolf kernel (M-KW's kmain today; kernel/README.md),
-              its wolf.pkg and the wolf/lupin pin
+    kernel/   the wolf kernel (first light: serial, log, boot_info,
+              panic; kernel/README.md), its wolf.pkg and the wolf/lupin pin
     boot/     boot-protocol glue: the Limine pin and config, the kernel's
-              entry and port I/O (start.S, io.S, kernel.ld), and the
-              assembly proof under boot/stub/
+              entry, requests, port I/O and response readers (start.S,
+              io.S, limine.S, kernel.ld), and the assembly proof under
+              boot/stub/
     tools/    the harness: fetch-limine, fetch-wolf, fetch-lupin,
-              build-stub, build-kernel, mkimage, qemu-run, qemu-gdb,
-              expect-serial
-    tests/    scripted QEMU tests: proof, mkw, gdb-attach,
-              expect-serial-selftest
+              build-stub, build-kernel, mkimage, qemu-run, qemu-halt,
+              qemu-gdb, expect-serial
+    tests/    scripted QEMU tests: proof, mkw (with M-KW's frozen kernels
+              in mkw.d/), mpx1, gdb-attach, expect-serial-selftest
     docs/     BOOT.md (the boot protocol, argued), SOURCES.md (the
               consulted-sources log), ABI notes as they come
     notes/    one note per lane: its contract and evidence
@@ -34,11 +35,14 @@ tests/proof                                # build the stub + ISO, boot it under
 tools/qemu-run --firmware uefi build/pax-stub.iso; echo $?    # 33 = the stub's success code
 tools/expect-serial build/serial.log PAX "firmware: uefi"
 tools/qemu-gdb build/pax-stub.iso build/stub/pax-stub.elf     # gdb, frozen at reset
-PAX_WOLF=$(tools/fetch-wolf) PAX_LUPIN=$(tools/fetch-lupin) tests/mkw   # M-KW: the wolf kernel, both tiers
+PAX_WOLF=$(tools/fetch-wolf) tests/mpx1    # M-PX1: first light, both tiers, BIOS and UEFI
+tests/mpx1 --images build/mpx1             # boot ISOs built elsewhere (any host with QEMU)
+tools/qemu-halt --elf build/mpx1/native/kmain.elf --marker halt build/mpx1/native/kmain.iso   # is it halted?
+PAX_WOLF=$(tools/fetch-wolf) PAX_LUPIN=$(tools/fetch-lupin) tests/mkw   # M-KW: the first wolf kernel, both tiers
 tests/mkw --images build/mkw               # boot ISOs built elsewhere (any host with QEMU)
 ```
 
-`tools/qemu-run` runs QEMU headless (`-nographic`, COM1 to a file, `-no-reboot`, a timeout, `isa-debug-exit` at port `0xf4`) and returns QEMU's status: `(v << 1) | 1` when the kernel writes `v` to the exit port, 0 for a reset or triple fault, 124 for a timeout. Each tool's header comment states its usage; `qemu-run` and `qemu-gdb` print it with `--help`.
+`tools/qemu-run` runs QEMU headless (`-nographic`, COM1 to a file, `-no-reboot`, a timeout, `isa-debug-exit` at port `0xf4`) and returns QEMU's status: `(v << 1) | 1` when the kernel writes `v` to the exit port, 0 for a reset or triple fault, 124 for a timeout. A kernel that halts never exits QEMU, so `tools/qemu-halt` boots it with QEMU's monitor on a pipe and, after the kernel's last line, holds it to RIP inside `pax_halt`, IF clear and HLT=1 at two probes a second apart, with no further serial output. Each tool's header comment states its usage; `qemu-run` and `qemu-gdb` print it with `--help`.
 
 ## Hosts
 
@@ -57,7 +61,7 @@ Where each runs today (2026-10-02, px00):
   PAX_OVMF_CODE=$ovmf/OVMF.fd PAX_OVMF_VARS= \
     nix-shell -p qemu xorriso --run 'PAX_QEMU=$(command -v qemu-system-x86_64) tests/proof'
   ```
-- **kasumi** (CachyOS): QEMU 11.1.1, xorriso and OVMF since the 2026-10-02 upgrade; M-KW's builds (wolf, the objects, the ISOs: `tests/mkw --no-boot`) run here, and kw05 booted them on hasu.
+- **kasumi** (CachyOS): QEMU 11.1.1, xorriso and OVMF since the 2026-10-02 upgrade; the kernel builds (wolf, the objects, the ISOs) and boots here (TCG); px01 booted the same ISOs on hasu under KVM (`tests/mpx1 --images`).
 - **macOS** (nomad-1, arm64): `tests/proof --image` on an ISO built elsewhere, as CI's `macos-run` does.
 
 The QEMU binary is `$PAX_QEMU` (default `qemu-system-x86_64` on `PATH`) and the UEFI firmware `$PAX_OVMF_CODE` / `$PAX_OVMF_VARS`, so every host supplies its own. `tools/mkimage` is reproducible: every date in the ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so one commit builds one digest.
