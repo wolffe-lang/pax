@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 # expect-serial — assert lines, in order, in a serial log.
 #
-#   tools/expect-serial LOG LINE [LINE...]
+#   tools/expect-serial [--tail] LOG LINE [LINE...]
 #
 # The log is normalised first: carriage returns and ANSI escape
 # sequences (firmware consoles write both) are removed. Each LINE must
 # then equal a whole line of the log, after the line the previous LINE
 # matched. Exit 0 when every LINE is found, 1 naming the first that is
 # not (and printing the log), 2 on a usage error.
+#
+# --tail: the LINEs must instead be exactly the log's last non-empty
+# lines, in order — "the kernel wrote this and nothing after it". The
+# firmware writes to COM1 before the bootloader hands over, so a
+# kernel's whole output is the log's tail, never the whole log (M-KW).
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
-[ $# -ge 2 ] || die "usage: expect-serial LOG LINE [LINE...]"
+tail_mode=0
+if [ "${1:-}" = --tail ]; then tail_mode=1; shift; fi
+[ $# -ge 2 ] || die "usage: expect-serial [--tail] LOG LINE [LINE...]"
 log=$1; shift
 [ -f "$log" ] || die "no log: $log"
 
@@ -23,6 +30,19 @@ norm=$(LC_ALL=C sed \
     -e "s/${esc}[()][A-Za-z0-9]//g" \
     -e "s/${esc}[c78DEHM=>]//g" \
     -e 's/\r//g' "$log")
+
+if [ "$tail_mode" = 1 ]; then
+    got=$(printf '%s\n' "$norm" | awk 'NF' | tail -n $#)
+    want=$(printf '%s\n' "$@")
+    if [ "$got" != "$want" ]; then
+        printf 'expect-serial: FAIL: the log does not end with the %d line(s) given\n' $# >&2
+        printf -- '--- want ---\n%s\n--- got (last %d non-empty) ---\n%s\n' "$want" $# "$got" >&2
+        printf -- '--- %s (normalised) ---\n%s\n--- end ---\n' "$log" "$norm" >&2
+        exit 1
+    fi
+    printf 'expect-serial: ok: the log ends with: %s\n' "$(printf '%s\n' "$@" | paste -sd'|' -)"
+    exit 0
+fi
 
 after=0 n=0
 for want in "$@"; do

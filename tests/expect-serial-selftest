@@ -38,5 +38,19 @@ check 1 "order is enforced"                 "$t/bios.log" "firmware: bios" PAX
 check 1 "wrong firmware refused"            "$t/bios.log" PAX "firmware: uefi"
 check 1 "empty log refused"                 "$t/empty.log" PAX
 check 2 "missing log is a usage error"      "$t/nope.log" PAX
+
+# --tail (M-KW): the kernel's output is the log's tail, firmware first.
+printf '\033cSeaBIOS (version x)\r\n\033[=3hBdsDxe: x\r\nKWC\r\n\r\n' > "$t/kwc.log"
+printf 'BdsDxe: x\r\nKWC\r\nKWC\r\n' > "$t/kwc2.log"
+printf 'BdsDxe: x\r\nKWD\r\n' > "$t/kwd.log"
+printf 'KWC\nstray\n' > "$t/after.log"
+printf 'TRAP 1\n' > "$t/trap.log"
+check 0 "--tail: the kernel's line ends the log"  --tail "$t/kwc.log" KWC
+check 0 "--tail: a bare log"                      --tail "$t/trap.log" "TRAP 1"
+check 1 "--tail: planted KWD refused"             --tail "$t/kwd.log" KWC
+check 1 "--tail: output after the line refused"   --tail "$t/after.log" KWC
+check 1 "--tail: a doubled line is two lines"     --tail "$t/kwc2.log" BdsDxe:\ x KWC
+check 1 "--tail: empty log refused"               --tail "$t/empty.log" KWC
+check 2 "--tail: missing log is a usage error"    --tail "$t/nope.log" KWC
 check 2 "no expectation is a usage error"   "$t/bios.log"
 exit "$fail"
