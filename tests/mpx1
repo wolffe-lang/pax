@@ -27,13 +27,17 @@
 #      at two probes a second apart, IF clear, HLT=1 under TCG, no serial
 #      byte after the last line.
 #   A4 panic: kmain_panic's log ends with its banner line and
-#        PANIC overflow kmain_panic.lu:<L>
-#      where L is the line of kmain_panic.lu marked `// the trap site`.
+#        PANIC overflow ./kmain_panic.lu:<L>
+#      where L is the line of kmain_panic.lu marked `// the trap site`
+#      and the path is the display path wolf hands `wolf_trap` (the
+#      build runs in kernel/, so it is `./kmain_panic.lu`).
 #   A5 the panic kernel halted (as A3).
 #   A6 seen red, every run: a kernel identical to kmain but for a spin
-#      (`while true {}`) where it halts prints the whole transcript (A2
-#      holds) and tools/qemu-halt must refuse it — a marker line and a
-#      timeout would have called it halted.
+#      before it halts (`while serial.init() >= 0 {}`: forever, port I/O
+#      every turn, nothing written to the console; the halt after it
+#      keeps the panic module in use) prints the whole transcript and
+#      tools/qemu-halt must refuse it — a marker line and a timeout
+#      would have called it halted.
 #
 # --images DIR boots ISOs and ELFs built earlier by this script (DIR
 # holds <tier>/{kmain,kmain_panic,spin}.{iso,elf}): any host with QEMU,
@@ -80,8 +84,9 @@ if [ -z "$images" ]; then
     cp -R "$PAX_ROOT/kernel" "$work/spin/kernel"
     cp -R "$PAX_ROOT/boot" "$work/spin/boot"
     rm -rf "$work/spin/kernel/.lu-cache"
-    sed 's/^    panic\.halt()$/    while true {}/' "$PAX_ROOT/kernel/kmain.lu" > "$work/spin/kernel/spin.lu"
-    grep -q '^    while true {}$' "$work/spin/kernel/spin.lu" || bad "A6: the spin variant was not made (kmain.lu has no '    panic.halt()' line)"
+    sed 's/^    panic\.halt()$/    while serial.init() >= 0 {}\
+    panic.halt()/' "$PAX_ROOT/kernel/kmain.lu" > "$work/spin/kernel/spin.lu"
+    grep -q '^    while serial.init() >= 0 {}$' "$work/spin/kernel/spin.lu" || bad "A6: the spin variant was not made (kmain.lu has no '    panic.halt()' line)"
     for tier in $tiers; do
         flag=(); [ "$tier" = release ] && flag=(--release)
         for k in kmain kmain_panic spin; do
@@ -170,8 +175,8 @@ for leg in $legs; do
         if [ -z "$site_line" ]; then
             bad "A4 $tier kmain_panic $leg: kernel/kmain_panic.lu has no '// the trap site' line"
         elif "$PAX_ROOT/tools/expect-serial" --tail "$log" \
-            'PAX first light (panic kernel)' "PANIC overflow kmain_panic.lu:$site_line"; then
-            say "PASS A4 $tier kmain_panic $leg: PANIC overflow kmain_panic.lu:$site_line"
+            'PAX first light (panic kernel)' "PANIC overflow ./kmain_panic.lu:$site_line"; then
+            say "PASS A4 $tier kmain_panic $leg: PANIC overflow ./kmain_panic.lu:$site_line"
         else
             bad "A4 $tier kmain_panic $leg: the panic line"
         fi
