@@ -21,7 +21,7 @@
 #
 # `--hosted` drops `--target` (M-KW step 7's seen-red variant): the build
 # is then a hosted one, which this script expects to FAIL; it exits 0
-# only if wolf refused it.
+# only if wolf refused it for want of a `main`.
 #
 # wolf is $PAX_WOLF (default `wolf` on PATH); the toolchain is the host's
 # (nm, objdump, an x86-64 assembler through cc or as, ld.lld or ld).
@@ -64,7 +64,10 @@ if [ "$hosted" = 1 ]; then
     if [ "$rc" = 0 ]; then
         fail "a hosted build (no --target) of a kernel with no main must be refused; it built"
     fi
-    printf 'build-kernel: ok: the hosted build is refused (exit %s, %s)\n' "$rc" "$tier" >&2
+    # Refused for the right reason: the hosted target wants a `main`.
+    grep -q 'no `main` function' "$out/$name.hosted.log" \
+        || fail "the hosted build failed (exit $rc), but not for want of a main"
+    printf 'build-kernel: ok: the hosted build is refused for want of a main (exit %s, %s)\n' "$rc" "$tier" >&2
     exit 0
 fi
 
