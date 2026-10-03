@@ -1,4 +1,4 @@
-/* start.S — the Limine entry of the wolf kernel (M-KW).
+/* start.S — the Limine entry of the wolf kernel (M-KW; requests, px01).
 
    Limine (base revision 6, docs/BOOT.md) enters `_start` in 64-bit long
    mode, in the higher half, on a bootloader stack of at least 64 KiB
@@ -12,6 +12,15 @@
    base revision's third word — is read here, in assembly, so no wolf
    code has to read a bootloader-written word before wolf has volatile
    access (KWC kw07).
+
+   px01 adds four requests between the markers: bootloader info,
+   firmware type, memory map and HHDM. Their response pointers are
+   bootloader-written too, so wolf never reads them: boot/limine.S (on
+   wolf's roster) reads them, a fresh load per call, and hands wolf
+   plain integers until wolf has volatile access (kw07) and
+   integer-to-pointer lowering (kw06). Each request is global so
+   limine.S can name it; the layout is PROTOCOL.md's: four id words, a
+   revision (0), a response pointer (0 until Limine writes it).
 
    Not listed in kernel/wolf.pkg: the boot code is the consumer's, and
    links wolf's object (K6(b)); tools/build-kernel assembles it.
@@ -34,6 +43,32 @@ requests_start:
 
 base_revision:                          /* Limine zeroes the third word */
         .quad 0xf9562b2d5c95a6c8, 0x6a7b384944536bdc, 6
+
+        .set LIMINE_MAGIC_0, 0xc7b1dd30df4c8b88
+        .set LIMINE_MAGIC_1, 0x0a82e883a194f07b
+
+        .globl limine_bootloader_info_request
+limine_bootloader_info_request:
+        .quad LIMINE_MAGIC_0, LIMINE_MAGIC_1, 0xf55038d8e2a1202f, 0x279426fcf5f59740
+        .quad 0, 0
+
+        .globl limine_firmware_type_request
+limine_firmware_type_request:
+        .quad LIMINE_MAGIC_0, LIMINE_MAGIC_1, 0x8c2f75d90bef28a8, 0x7045a4688eac00c3
+        .quad 0, 0
+
+        .globl limine_memmap_request
+limine_memmap_request:
+        .quad LIMINE_MAGIC_0, LIMINE_MAGIC_1, 0x67cf3d9d378a806f, 0xe304acdfc50c3c62
+        .quad 0, 0
+
+        .globl limine_hhdm_request
+limine_hhdm_request:
+        .quad LIMINE_MAGIC_0, LIMINE_MAGIC_1, 0x48dcf1cb8ad2b852, 0x63984e959a98244b
+        .quad 0, 0
+
+        .globl limine_base_revision
+        .set limine_base_revision, base_revision
 
 requests_end:
         .quad 0xadc0e0531bb10d03, 0x9572709f31764c62
