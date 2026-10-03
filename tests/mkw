@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# tests/mkw — M-KW (kw00 §3e): a freestanding wolf kernel boots under
+# Limine and prints KWC over serial, on both tiers.
+#
+#   tests/mkw [--images DIR | --no-boot] [--firmware bios|uefi|both]
+#             [--tier native|release|both]
+#
+# Steps, per tier (native, release):
+#   1.   inputs: kernel/{kmain.lu,kmain_trap.lu,wolf.pkg}, boot/{io.S,
+#        start.S,kernel.ld};
+#   2,3. tools/build-kernel: the object for x86_64-unknown-none, its
+#        assertions, the link (pax.elf), then tools/mkimage (the ISO);
+#   4.   boot under each firmware: QEMU status 33, serial ends `KWC`;
+#   5.   the trap kernel: status 3, serial ends `TRAP 1`;
+#   6.   the machines: `wolf conform-run --checked` and `lupin
+#        conform-run` answer `unsupported` with the construct named,
+#        compared with the records written here (so a machine that
+#        starts guessing goes red);
+#   7.   seen red, every run: the hosted build (no --target) is refused;
+#        a kernel printing `KWD` boots (status 33) and fails `--tail KWC`.
+#
+# --images DIR boots ISOs built earlier by this script (DIR holds
+# <tier>/{kmain,kmain_trap,kwd}.iso): any host with QEMU, no wolf needed
+# (steps 4, 5 and 7's boot). Without it the script builds (linux: wolf
+# from $PAX_WOLF, lupin from $PAX_LUPIN, both required); --no-boot
+# stops after the build and step 6 (a build host with no QEMU), leaving
+# the ISOs in build/mkw for --images.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+
+images= legs=both tiers=both noboot=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "usage: tests/mkw [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+
+work=$PAX_BUILD/mkw
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf" "${PAX_LUPIN:-lupin}"
+    lupin=${PAX_LUPIN:-lupin}
+    say "wolf: $("$wolf" --version | head -n 1)"
+    say "lupin: $("$lupin" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"; mkdir -p "$work"
+    # Step 7's KWD kernel: kernel/kmain.lu with one letter changed, in a
+    # tree laid out like the repository so wolf.pkg's ../boot/io.S holds.
+    mkdir -p "$work/kwd/kernel" "$work/kwd/boot"
+    cp "$PAX_ROOT/kernel/wolf.pkg" "$work/kwd/kernel/"
+    cp "$PAX_ROOT/boot/io.S" "$work/kwd/boot/"
+    sed 's/"KWC\\n"/"KWD\\n"/' "$PAX_ROOT/kernel/kmain.lu" > "$work/kwd/kernel/kwd.lu"
+    grep -q '"KWD\\n"' "$work/kwd/kernel/kwd.lu" || die "the KWD variant was not made"
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        for k in kmain kmain_trap kwd; do
+            src=$PAX_ROOT/kernel/$k.lu; [ "$k" = kwd ] && src=$work/kwd/kernel/kwd.lu
+            if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$src" "$work/$tier"); then
+                "$PAX_ROOT/tools/mkimage" "$elf" "$work/$tier/$k.iso" >/dev/null || bad "$tier $k: mkimage"
+                say "built $tier $k: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/$k.iso")"
+            else
+                bad "$tier $k: steps 2-3 (tools/build-kernel)"
+            fi
+        done
+        # Step 7, the build half: without --target the kernel is refused.
+        PAX_WOLF=$wolf "$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --hosted "$work/$tier/hosted" \
+            || bad "$tier: step 7, the hosted build was not refused"
+    done
+
+    # Step 6: the machines, against the records they must give.
+    m6() { # label, want-substring..., -- command...
+        local label=$1; shift
+        local wants=()
+        while [ "$1" != -- ]; do wants+=("$1"); shift; done; shift
+        local out rc=0
+        out=$(cd "$PAX_ROOT/kernel" && "$@" 2>&1) || rc=$?
+        printf '%s\n' "$out" > "$work/m6-$label.log"
+        for w in "${wants[@]}"; do
+            if ! printf '%s\n' "$out" | grep -qF -- "$w"; then
+                bad "step 6 $label: the answer lacks: $w"; sed 's/^/  /' "$work/m6-$label.log" >&2; return
+            fi
+        done
+        say "PASS step 6 $label (exit $rc)"
+    }
+    m6 wolf-checked '"verdict":"unsupported"' '"x-unsupported-construct":"checked execution without a `main` entry"' \
+        -- "$wolf" conform-run --json --checked kmain.lu
+    m6 wolf-checked-target '"verdict":"unsupported"' '"x-unsupported-construct":"the freestanding target x86_64-unknown-none"' \
+        -- "$wolf" conform-run --json --checked --target x86_64-unknown-none kmain.lu
+    # lupin 0.1.44 (boot/../kernel/wolf.pin): no `main` by name; `--target`
+    # is clap's error until wolf-interp#182.
+    m6 lupin '"verdict":"unsupported"' '"x-unsupported":"the program has no `main` in its root module' \
+        -- "$lupin" conform-run --json kmain.lu
+    m6 lupin-target "unexpected argument '--target'" \
+        -- "$lupin" conform-run --json --target x86_64-unknown-none kmain.lu
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "M-KW build and step 6: PASS (no boot: --no-boot)" || say "M-KW build: FAIL"
+        exit "$fail"
+    fi
+fi
+
+boot() { # tier kernel leg want-status tail-line
+    local tier=$1 k=$2 leg=$3 want=$4 line=$5 iso=$images/$1/$2.iso
+    local log=$PAX_BUILD/mkw-$tier-$k-$leg.serial.log rc=0
+    [ -f "$iso" ] || { bad "$tier $k $leg: no image $iso"; return 1; }
+    "$PAX_ROOT/tools/qemu-run" --firmware "$leg" --serial "$log" --timeout 60 "$iso" || rc=$?
+    ran=$((ran + 1))
+    local elapsed accel
+    elapsed=$(sed -n 's/^elapsed: //p' "$log.meta"); accel=$(sed -n 's/^accel: //p' "$log.meta")
+    printf '%s %s %s status=%s elapsed=%s accel=%s serial=%s iso=%s\n' "$tier" "$k" "$leg" "$rc" \
+        "$elapsed" "$accel" "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$PAX_BUILD/mkw-runs.txt"
+    if [ "$rc" != "$want" ]; then
+        bad "$tier $k $leg: QEMU status $rc, want $want (elapsed $elapsed, accel $accel)"
+        sed 's/^/  qemu: /' "$log.qemu.log" >&2
+        "$PAX_ROOT/tools/expect-serial" --tail "$log" "$line" >&2 || true
+        return 1
+    fi
+    "$PAX_ROOT/tools/expect-serial" --tail "$log" "$line" || return 1
+    say "PASS $tier $k $leg: status $rc, serial ends '$line', elapsed $elapsed, accel $accel"
+}
+
+: > "$PAX_BUILD/mkw-runs.txt"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        boot "$tier" kmain "$leg" 33 KWC || bad "$tier kmain $leg: step 4"
+        boot "$tier" kmain_trap "$leg" 3 "TRAP 1" || bad "$tier kmain_trap $leg: step 5"
+        # Step 7, the boot half: KWD boots and exits 33, and --tail KWC
+        # must refuse it — the assertion that turns M-KW red.
+        if boot "$tier" kwd "$leg" 33 KWC >/dev/null 2>&1; then
+            bad "$tier kwd $leg: step 7, a kernel printing KWD passed --tail KWC"
+        elif "$PAX_ROOT/tools/expect-serial" --tail "$PAX_BUILD/mkw-$tier-kwd-$leg.serial.log" KWD >/dev/null; then
+            say "PASS $tier kwd $leg: step 7, KWD is refused by --tail KWC (and ends the log)"
+        else
+            bad "$tier kwd $leg: step 7, the KWD kernel did not print KWD"
+        fi
+    done
+done
+cat "$PAX_BUILD/mkw-runs.txt"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "M-KW: PASS" || say "M-KW: FAIL"
+exit "$fail"
