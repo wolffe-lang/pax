@@ -84,6 +84,24 @@ the exit and the trap hook (`wolf_trap`), listed under `asm` in
 `boot/kernel.ld` is the stub's layout plus what a compiled object brings
 (`.rodata.*`, `.data.rel.ro`, the small-PIC GOT, `.bss`).
 
+**First light (px01, M-PX1).** `boot/start.S` carries four more requests
+between the markers — bootloader info, firmware type, memory map and
+HHDM — each with its PROTOCOL.md id words, revision 0 and a null response
+pointer. Clause 5 is still met by not needing it in wolf: `boot/limine.S`
+(listed under `asm`, so on wolf's roster) loads each response pointer
+afresh on every call, follows it, and returns plain integers (a string
+byte by byte; a memory-map field by entry and index), so wolf code never
+holds a pointer the bootloader wrote. When wolf has volatile access (kw07)
+and integer-to-pointer lowering (kw06) the readers can move into wolf;
+the requests stay in `start.S`. Measured on QEMU (q35, 256 MiB, Limine
+12.9.1): SeaBIOS gives 18 memory-map entries and ~254.5 MiB usable, OVMF
+30–33 entries and ~210–214 MiB usable (boot-services memory is reported
+bootloader-reclaimable), and the HHDM offset was `0xffff800000000000` on
+every boot (4-level paging) — which the test asserts only by shape, since
+the protocol lets it vary. The kernel ends in `cli; hlt` (`boot/io.S`'s
+`pax_halt`), not `isa-debug-exit`; `tools/qemu-halt` proves the halt
+through QEMU's monitor.
+
 ## The image
 
 `tools/mkimage KERNEL.elf OUT.iso` lays out:
