@@ -170,3 +170,61 @@ jobs:
             build/mkw-runs.txt
           retention-days: 14
           if-no-files-found: warn
+
+  # M-PX1 (px01): first light. The wolf kernel (kernel/), built by the
+  # pinned wolf release on both tiers, booted under SeaBIOS and OVMF:
+  # its transcript (A2), its halt proven through QEMU's monitor (A3), the
+  # panic kernel's `PANIC <kind> <file>:<line>` and halt (A4, A5), and a
+  # spinning kernel refused by the halt probe in the same run (A6).
+  mpx1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils
+          qemu-system-x86_64 --version
+          clang --version
+          ld.lld --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+            .pax-cache/wolf-*
+          key: mpx1-${{ hashFiles('boot/limine.pin', 'kernel/wolf.pin') }}
+
+      - name: wolf at the pin (release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: expect-serial can say no (incl. --tail, --regex)
+        run: tests/expect-serial-selftest
+
+      - name: M-PX1, both tiers, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx1
+
+      - name: keep the kernels, the transcripts and the halt probes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx1-linux
+          path: |
+            build/mpx1/
+            build/mpx1-*.log
+            build/mpx1-*.meta
+            build/mpx1-*.halt
+            build/mpx1-*.verdict
+            build/mpx1-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
