@@ -1,0 +1,65 @@
+//! panic — the trap hook and the halt (px01, M-PX1).
+//!
+//! `wolf_trap` is the freestanding target's one trap hook
+//! ([abi.target.none.hooks]): every trap on either tier calls it with
+//! the kind (numbered as wolf's runtime numbers `[conf.trap.set]`:
+//! overflow 1, div-zero 2, bounds 3, assert 4, …) and the site — the
+//! source path's bytes and the 1-based line — or `(null, 0, 0, 0)`
+//! where the tier has none. It writes one line,
+//! `PANIC <kind> <file>:<line>` (`PANIC <kind> ?:0` without a site),
+//! and halts; it must not return, and it does not.
+//!
+//! A trap inside the hook would re-enter it: the hook's own arithmetic
+//! is bounded by `file_len` and the line, so it cannot overflow, and
+//! there is no recursion guard because the target has no module-level
+//! state to keep one in (KWC kw09).
+
+use log
+
+extern "c" fn pax_halt()
+
+/// The trap kind's name in `[conf.trap.set]`'s vocabulary.
+pub fn kind_name(kind: int) -> str {
+    if kind == 1 { return "overflow" }
+    if kind == 2 { return "div-zero" }
+    if kind == 3 { return "bounds" }
+    if kind == 4 { return "assert" }
+    if kind == 5 { return "use-after-move" }
+    if kind == 6 { return "exclusivity" }
+    if kind == 7 { return "region-fault" }
+    if kind == 8 { return "stale-handle" }
+    if kind == 9 { return "alloc-contract" }
+    if kind == 10 { return "race" }
+    if kind == 11 { return "ub" }
+    if kind == 12 { return "deadlock" }
+    "unknown"
+}
+
+/// Halt the CPU for good: interrupts off, `hlt`, forever (io.S).
+pub fn halt() {
+    // # Safety: io.S's `cli; hlt` loop; it never returns.
+    unsafe { pax_halt() }
+}
+
+/// The trap hook. Writes `PANIC <kind> <file>:<line>` and halts.
+export fn wolf_trap(kind: i32, file: *u8, file_len: i64, line: i64, col: i64) {
+    log.put("PANIC ")
+    log.put(kind_name(kind as int))
+    log.put(" ")
+    let n = file_len as int
+    if n <= 0 {
+        log.put("?")
+    }
+    var i = 0
+    while i < n {
+        // # Safety: the compiler hands the site's path as file_len bytes
+        // at file ([abi.target.none.hooks]).
+        let b = unsafe { file[i] }
+        log.put_byte(b as int)
+        i = i + 1
+    }
+    log.put(":")
+    log.dec(line as int)
+    log.end()
+    halt()
+}
