@@ -1,0 +1,69 @@
+//! log — the kernel's line writer, over the serial console (px01).
+//!
+//! Every piece of a line goes through `serial.put`; `end` closes the
+//! line with CR LF (a terminal on a real serial line wants both; the
+//! harness strips the CR). Numbers are written digit by digit: string
+//! interpolation allocates, and the freestanding target has no
+//! allocator (K8(b)). The module keeps no state (wolf has no
+//! module-level state on this target yet, KWC kw09), so a line is
+//! whatever its caller writes between two `end`s.
+
+use serial
+
+/// Write the bytes of `s`, with no line end.
+pub fn put(s: str) {
+    for b in s.bytes() {
+        serial.put(b as int as u8)
+    }
+}
+
+/// End the current line (CR LF).
+pub fn end() {
+    serial.put(13)
+    serial.put(10)
+}
+
+/// Write `s` as a whole line.
+pub fn line(s: str) {
+    put(s)
+    end()
+}
+
+/// Write one byte, given as an int in 0..=255 (a narrowing cast traps
+/// otherwise).
+pub fn put_byte(b: int) {
+    serial.put(b as u8)
+}
+
+/// Write `v` in decimal, with a `-` when it is negative. `int`'s least
+/// value has no positive counterpart and traps `overflow` here.
+pub fn dec(v: int) {
+    var n = v
+    if n < 0 {
+        serial.put(45)
+        n = 0 - n
+    }
+    var p = 1
+    while n / p >= 10 {
+        p = p * 10
+    }
+    while p > 0 {
+        serial.put((n / p % 10 + 48) as u8)
+        p = p / 10
+    }
+}
+
+/// Write `v` as `0x` and sixteen lowercase hex digits.
+pub fn hex(v: u64) {
+    put("0x")
+    var shift: u64 = 64
+    while shift > 0 {
+        shift = shift - 4
+        let d = (v >> shift) & 15
+        if d < 10 {
+            serial.put((d + 48) as u8)
+        } else {
+            serial.put((d + 87) as u8)
+        }
+    }
+}
