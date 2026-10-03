@@ -1,0 +1,19 @@
+//! member: false
+// kmain.lu — M-KW's kernel (kw00 §3e step 1): the first wolf to run on
+// PAX. Limine enters boot/start.S, which calls `kmain`; `kmain` writes
+// "KWC\n" to COM1 through io.S's `outb` and leaves QEMU with status 33.
+// Built `--target x86_64-unknown-none`, both tiers (tools/build-kernel).
+// `member: false`: kmain_trap.lu beside it is a second kernel, not a
+// module file of this one (D32: a directory is one module).
+extern "c" fn pax_outb(port: u16, v: u8)
+extern "c" fn pax_exit(code: u8)
+
+export fn kmain() {
+    let msg = "KWC\n"
+    for b in msg.bytes() {
+        // # Safety: pax_outb is io.S's `outb`; 0x3f8 is COM1.
+        unsafe { pax_outb(1016, b as int as u8) }
+    }
+    // # Safety: isa-debug-exit; QEMU ends with status (16 << 1) | 1.
+    unsafe { pax_exit(16) }
+}

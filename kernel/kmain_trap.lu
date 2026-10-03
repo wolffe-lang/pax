@@ -1,0 +1,23 @@
+//! member: false
+// kmain_trap.lu — M-KW's trap path (kw00 §3e step 5): kmain.lu with one
+// overflowing addition before the loop. The operand is io.S's `pax_big`
+// (i64::MAX), from outside the program, so no tier can fold the check
+// away: the addition traps `overflow` (kind 1) into io.S's `wolf_trap`,
+// which writes "TRAP 1" to COM1 and leaves QEMU with status 3. The loop
+// and the exit are never reached.
+extern "c" fn pax_outb(port: u16, v: u8)
+extern "c" fn pax_exit(code: u8)
+extern "c" fn pax_big() -> i64
+
+export fn kmain() {
+    // # Safety: pax_big is io.S's constant.
+    let n = unsafe { pax_big() }
+    let m = n + 1
+    let msg = "KWC\n"
+    for b in msg.bytes() {
+        // # Safety: pax_outb is io.S's `outb`; 0x3f8 is COM1.
+        unsafe { pax_outb(1016, b as int as u8) }
+    }
+    // # Safety: isa-debug-exit; QEMU ends with status (m << 1) | 1.
+    unsafe { pax_exit(m as wrapping[u8] as u8) }
+}
