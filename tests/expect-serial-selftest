@@ -52,5 +52,20 @@ check 1 "--tail: output after the line refused"   --tail "$t/after.log" KWC
 check 1 "--tail: a doubled line is two lines"     --tail "$t/kwc2.log" BdsDxe:\ x KWC
 check 1 "--tail: empty log refused"               --tail "$t/empty.log" KWC
 check 2 "--tail: missing log is a usage error"    --tail "$t/nope.log" KWC
+
+# --regex (px01): whole-line EREs, in order or as the tail.
+printf 'BdsDxe: x\r\nmem: 9 entries, 264 bytes usable\r\nhhdm: 0xffff800000000000\r\nhalt\r\n' > "$t/fl.log"
+printf 'mem: 9 entries, 264 bytes usable\nhhdm: 0xffff80000000000\nhalt\n' > "$t/fl-short.log"
+printf 'mem: 9 entries, 264 bytes usable\nhhdm: 0xffff800000000000\nhalt\nhalted\n' > "$t/fl-after.log"
+mem='mem: [0-9]+ entries, [0-9]+ bytes usable' hhdm='hhdm: 0x[0-9a-f]{16}'
+check 0 "--regex: whole lines, in order"          --regex "$t/fl.log" "$mem" "$hhdm" halt
+check 0 "--tail --regex: the transcript's tail"   --tail --regex "$t/fl.log" "$mem" "$hhdm" halt
+check 0 "--regex --tail: either flag order"       --regex --tail "$t/fl.log" "$mem" "$hhdm" halt
+check 1 "--regex: a 15-digit hhdm refused"        --regex "$t/fl-short.log" "$mem" "$hhdm"
+check 1 "--regex: anchored, no partial match"     --regex "$t/fl.log" "hhdm: 0x"
+check 1 "--regex: anchored at the start too"      --regex "$t/fl.log" "x"
+check 1 "--tail --regex: a line after refused"    --tail --regex "$t/fl-after.log" "$hhdm" halt
+check 1 "--tail --regex: order is enforced"       --tail --regex "$t/fl.log" "$hhdm" "$mem" halt
+check 1 "--tail --regex: empty log refused"       --tail --regex "$t/empty.log" halt
 check 2 "no expectation is a usage error"   "$t/bios.log"
 exit "$fail"
