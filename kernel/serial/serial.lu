@@ -1,0 +1,93 @@
+//! serial — the 16550 UART driver on COM1 (px01, M-PX1).
+//!
+//! The kernel's console. `init` programs the UART (no interrupts,
+//! 115200 baud, 8 data bits, no parity, one stop bit, FIFOs on), proves
+//! the chip is there through its scratch register and its loopback
+//! mode, and leaves it in normal mode; `put` waits for the transmit
+//! holding register to be empty (LSR bit 5) before each byte. All port
+//! I/O goes through boot/io.S (`pax_outb`, `pax_inb`): wolf has no
+//! inline assembly yet (KWC kw13).
+//!
+//! Written from the PC16550D register map (public datasheet facts:
+//! the register offsets, the DLAB bit, LCR/FCR/MCR/LSR bit meanings, the
+//! 1.8432 MHz clock's divisor 1 for 115200 baud). No Linux source.
+
+extern "c" fn pax_outb(port: u16, v: u8)
+extern "c" fn pax_inb(port: u16) -> u8
+
+// COM1's I/O base is 0x3f8 (1016); the registers are at offsets from
+// it. Written as literals, each named where it is used: wolf 0.2.22
+// refuses a module-level `const` on both compiling tiers
+// (wolf-lang#560).
+//   0 THR transmit holding (write) / receive buffer (read); DLL under DLAB
+//   1 IER interrupt enable; DLM under DLAB
+//   2 FCR FIFO control (write)
+//   3 LCR line control (bit 7 DLAB)
+//   4 MCR modem control (bit 4 loopback)
+//   5 LSR line status (bit 0 data ready, bit 5 THR empty)
+//   7 SCR scratch
+// `put` polls LSR at most 1048576 times before giving a byte up: a UART
+// that never drains must not hang the kernel (on QEMU the first poll
+// succeeds).
+
+fn out(reg: int, v: int) {
+    // # Safety: io.S's `outb` on a COM1 register; the port and the value
+    // are in range by construction (the narrowing casts trap otherwise).
+    unsafe { pax_outb((1016 + reg) as u16, v as u8) }
+}
+
+fn inp(reg: int) -> int {
+    // # Safety: io.S's `inb` on a COM1 register.
+    let v = unsafe { pax_inb((1016 + reg) as u16) }
+    v as int
+}
+
+/// Initialise COM1: interrupts off, 115200 8N1, FIFOs enabled and
+/// cleared, DTR/RTS/OUT2 up. Returns a bit set: 1 if the scratch
+/// register holds what was written (a UART is there), 2 if a byte sent
+/// in loopback mode came back (the transmitter and receiver work). It
+/// never traps.
+pub fn init() -> int {
+    out(1, 0) // IER: no interrupts, the kernel polls
+    out(3, 128) // LCR: DLAB on, so offsets 0 and 1 are the divisor latch
+    out(0, 1) // DLL: divisor 1 = 115200 baud (1.8432 MHz / 16)
+    out(1, 0) // DLM
+    out(3, 3) // LCR: DLAB off; 8 data bits, no parity, 1 stop bit
+    out(2, 199) // FCR: FIFOs on, both cleared, receive trigger 14 bytes
+    var status = 0
+    out(7, 90) // SCR
+    if inp(7) == 90 {
+        out(7, 165)
+        if inp(7) == 165 {
+            status = status + 1
+        }
+    }
+    out(4, 30) // MCR: loopback, OUT1, OUT2, RTS
+    out(0, 174) // THR
+    var spins = 0
+    while inp(5) % 2 == 0 && spins < 1048576 {
+        spins = spins + 1 // LSR bit 0: data ready
+    }
+    if inp(0) == 174 { // RBR
+        status = status + 2
+    }
+    out(4, 11) // MCR: normal mode; DTR, RTS, OUT2
+    status
+}
+
+/// Write one byte to COM1 once the transmit holding register is empty.
+/// A UART that stays busy for 1048576 polls loses the byte rather
+/// than hang the kernel. It never traps.
+pub fn put(b: u8) {
+    var spins = 0
+    while spins < 1048576 {
+        // # Safety: io.S's `inb` on COM1's LSR (0x3fd).
+        let lsr = unsafe { pax_inb(1021) }
+        if lsr & 32 != 0 { // LSR bit 5: THR empty
+            // # Safety: io.S's `outb` on COM1's THR (0x3f8).
+            unsafe { pax_outb(1016, b) }
+            return
+        }
+        spins = spins + 1
+    }
+}
