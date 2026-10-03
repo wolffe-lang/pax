@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # expect-serial — assert lines, in order, in a serial log.
 #
-#   tools/expect-serial [--tail] LOG LINE [LINE...]
+#   tools/expect-serial [--tail] [--regex] LOG LINE [LINE...]
 #
 # The log is normalised first: carriage returns and ANSI escape
 # sequences (firmware consoles write both) are removed. Each LINE must
@@ -13,28 +13,45 @@
 # lines, in order — "the kernel wrote this and nothing after it". The
 # firmware writes to COM1 before the bootloader hands over, so a
 # kernel's whole output is the log's tail, never the whole log (M-KW).
+#
+# --regex: each LINE is a POSIX extended regular expression that must
+# match a WHOLE line (it is anchored at both ends), in either mode
+# (px01: the transcript's numbers vary with the firmware).
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
-tail_mode=0
-if [ "${1:-}" = --tail ]; then tail_mode=1; shift; fi
-[ $# -ge 2 ] || die "usage: expect-serial [--tail] LOG LINE [LINE...]"
+tail_mode=0 regex=0
+while :; do
+    case ${1:-} in
+        --tail)  tail_mode=1; shift ;;
+        --regex) regex=1; shift ;;
+        *) break ;;
+    esac
+done
+[ $# -ge 2 ] || die "usage: expect-serial [--tail] [--regex] LOG LINE [LINE...]"
 log=$1; shift
 [ -f "$log" ] || die "no log: $log"
 
-esc=$(printf '\033')
-# CSI sequences (ESC [ params letter, params including the private
-# markers ? = < > that OVMF's console uses), charset switches (ESC ( B)
-# and the single-character escapes (ESC c, SeaBIOS's reset; ESC 7 / 8).
-norm=$(LC_ALL=C sed \
-    -e "s/${esc}\[[0-9;?=<>]*[A-Za-z]//g" \
-    -e "s/${esc}[()][A-Za-z0-9]//g" \
-    -e "s/${esc}[c78DEHM=>]//g" \
-    -e 's/\r//g' "$log")
+norm=$(serial_norm "$log")
+
+# Does line $1 satisfy expectation $2? Equality, or a whole-line ERE.
+line_ok() {
+    if [ "$regex" = 1 ]; then
+        printf '%s\n' "$1" | LC_ALL=C grep -Eqx -- "$2"
+    else
+        [ "$1" = "$2" ]
+    fi
+}
 
 if [ "$tail_mode" = 1 ]; then
     got=$(printf '%s\n' "$norm" | awk 'NF' | tail -n $#)
     want=$(printf '%s\n' "$@")
-    if [ "$got" != "$want" ]; then
+    ok=1 i=0
+    if [ "$(printf '%s\n' "$got" | awk 'NF' | wc -l)" -ne $# ]; then ok=0; fi
+    while [ "$ok" = 1 ] && IFS= read -r g; do
+        i=$((i + 1))
+        line_ok "$g" "${!i}" || ok=0
+    done <<<"$got"
+    if [ "$ok" = 0 ]; then
         printf 'expect-serial: FAIL: the log does not end with the %d line(s) given\n' $# >&2
         printf -- '--- want ---\n%s\n--- got (last %d non-empty) ---\n%s\n' "$want" $# "$got" >&2
         printf -- '--- %s (normalised) ---\n%s\n--- end ---\n' "$log" "$norm" >&2
@@ -47,8 +64,14 @@ fi
 after=0 n=0
 for want in "$@"; do
     n=$((n + 1))
-    hit=$(printf '%s\n' "$norm" | awk -v want="$want" -v after="$after" \
-        'NR > after && $0 == want { print NR; exit }')
+    hit=
+    if [ "$regex" = 1 ]; then
+        hit=$(printf '%s\n' "$norm" | awk -v after="$after" 'NR > after { print NR "\t" $0 }' \
+            | LC_ALL=C grep -E -m1 -- "^[0-9]+	(${want})\$" | cut -f1 || true)
+    else
+        hit=$(printf '%s\n' "$norm" | awk -v want="$want" -v after="$after" \
+            'NR > after && $0 == want { print NR; exit }')
+    fi
     if [ -z "$hit" ]; then
         printf 'expect-serial: FAIL: line %d not found after log line %d: %s\n' "$n" "$after" "$want" >&2
         printf -- '--- %s (normalised) ---\n%s\n--- end ---\n' "$log" "$norm" >&2
