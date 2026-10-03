@@ -13,9 +13,10 @@ px01 (first light) grows `kmain` from here.
   M-KW's seen-red variant (the flag removed) is a hosted build that fails.
 - Each kernel file is a standalone entry (`//! member: false`): a
   directory is one wolf module, and two `kmain`s would collide.
-- `wolf.pin` names the wolf-lang commit wolf is built from
-  (`tools/fetch-wolf`) and lupin's release and digest (`tools/fetch-lupin`);
-  moving the wolf pin is one line.
+- `wolf.pin` names wolf's release archive and its digest
+  (`tools/fetch-wolf`, which also checks the binary's `--version` against
+  the release's wolf-lang commit) and lupin's release and digest
+  (`tools/fetch-lupin`).
 
 `tests/mkw` builds both kernels on both tiers, boots them under SeaBIOS and
 OVMF, and checks the machines' refusals; `docs/BOOT.md` says what the boot
