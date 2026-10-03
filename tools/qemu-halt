@@ -57,6 +57,9 @@ read -r lo size <<<"$(nm -S "$elf" | awk -v s="$sym" '$NF == s && NF == 4 { prin
 lo=$((16#$lo)); hi=$((lo + 16#$size))
 
 mkdir -p "$(dirname "$serial")"
+# Empty the log before QEMU starts: a previous run's log at the same
+# path must never satisfy the marker.
+: > "$serial"
 mon=$serial.mon
 rm -f "$mon.in" "$mon.out"
 mkfifo "$mon.in" "$mon.out"
@@ -90,16 +93,23 @@ while :; do
 done
 size0=$(wc -c < "$serial")
 
-# One `info registers` through the pipe: the RIP= ... HLT= line.
+# One `info registers` through the pipe, read until the RIP= ... HLT=
+# line is whole. A `read -t` that times out mid-line keeps the partial
+# line in its variable; it is kept here too, so a line split across two
+# reads is joined, not lost.
 probe() {
     local out= line
     printf 'info registers\n' >&3
     local t0=$SECONDS
-    while [ $((SECONDS - t0)) -lt 10 ]; do
+    while [ $((SECONDS - t0)) -lt 15 ]; do
+        line=
         if IFS= read -r -t 1 line <&4; then
-            line=${line//$'\r'/}
-            out+="$line"$'\n'
-            case $line in *RIP=*HLT=*) printf '%s' "$out"; return 0 ;; esac
+            out+="${line//$'\r'/}"$'\n'
+        else
+            out+="${line//$'\r'/}"
+        fi
+        if printf '%s' "$out" | grep -Eq 'RIP=[0-9a-f]+ .*HLT=[01]'; then
+            printf '%s' "$out"; return 0
         fi
     done
     printf '%s' "$out"; return 1
