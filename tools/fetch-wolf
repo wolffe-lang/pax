@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# fetch-wolf — build wolf at kernel/wolf.pin's wolf-lang commit.
+#
+#   tools/fetch-wolf        -> prints the wolf binary's path
+#
+# Clones wolffe-lang/wolf-lang (public) into .pax-cache/, checks out
+# WOLF_LANG_COMMIT, refuses if HEAD is not exactly that commit, and runs
+# `cargo build --release -p wolf_driver --locked`. The release tier also
+# needs clang >= 15 at run time (system LLVM, wolf's D33). Idempotent: a
+# staged build of the pinned commit is reused.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+load_wolf_pin
+
+bin=$WOLF_DIR/bin/wolf
+stamp=$WOLF_DIR/.built
+if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$WOLF_LANG_COMMIT" ] && [ -x "$bin" ]; then
+    say "wolf at $WOLF_LANG_COMMIT already built ($bin)"
+    printf '%s\n' "$bin"
+    exit 0
+fi
+need git cargo
+src=$WOLF_DIR/src
+if [ ! -d "$src/.git" ]; then
+    rm -rf "$src"; mkdir -p "$WOLF_DIR"
+    git init -q "$src"
+    git -C "$src" remote add origin https://github.com/wolffe-lang/wolf-lang.git
+fi
+git -C "$src" fetch -q --depth 1 origin "$WOLF_LANG_COMMIT" \
+    || die "cannot fetch wolf-lang commit $WOLF_LANG_COMMIT"
+git -C "$src" checkout -q -f --detach FETCH_HEAD
+got=$(git -C "$src" rev-parse HEAD)
+[ "$got" = "$WOLF_LANG_COMMIT" ] || die "wolf-lang HEAD is $got, the pin says $WOLF_LANG_COMMIT"
+(cd "$src" && cargo build --release -p wolf_driver --locked) >&2
+mkdir -p "$WOLF_DIR/bin"
+cp "$src/target/release/wolf" "$bin"
+printf '%s\n' "$WOLF_LANG_COMMIT" > "$stamp"
+say "wolf at $WOLF_LANG_COMMIT built: $("$bin" --version | head -n 1), sha256 $(sha256_of "$bin")"
+printf '%s\n' "$bin"

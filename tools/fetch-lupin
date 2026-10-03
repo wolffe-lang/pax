@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# fetch-lupin — stage kernel/wolf.pin's lupin release, BY DIGEST.
+#
+#   tools/fetch-lupin       -> prints the lupin binary's path
+#
+# Downloads lupin-<version>-x86_64-unknown-linux-gnu.tar.gz from
+# wolffe-lang/wolf-interp's release page, refuses on a sha256 mismatch,
+# unpacks it under .pax-cache/. Linux x86-64 hosts. Idempotent.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+load_wolf_pin
+
+stamp=$LUPIN_DIR/.verified
+if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$LUPIN_SHA256" ]; then
+    bin=$(find "$LUPIN_DIR" -name lupin -type f -perm -u+x | head -n 1)
+    if [ -n "$bin" ]; then
+        say "lupin $LUPIN_VERSION already staged ($bin)"
+        printf '%s\n' "$bin"
+        exit 0
+    fi
+fi
+need curl tar
+asset=lupin-$LUPIN_VERSION-x86_64-unknown-linux-gnu.tar.gz
+url=https://github.com/wolffe-lang/wolf-interp/releases/download/v$LUPIN_VERSION/$asset
+mkdir -p "$PAX_CACHE"
+tmp=$(mktemp -d "$PAX_CACHE/fetch.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+curl -fsSL --retry 3 -o "$tmp/$asset" "$url"
+got=$(sha256_of "$tmp/$asset")
+[ "$got" = "$LUPIN_SHA256" ] || die "digest mismatch for $url: pinned $LUPIN_SHA256, got $got"
+mkdir -p "$tmp/x"
+tar -xzf "$tmp/$asset" -C "$tmp/x"
+rm -rf "$LUPIN_DIR"
+mv "$tmp/x" "$LUPIN_DIR"
+printf '%s\n' "$LUPIN_SHA256" > "$stamp"
+bin=$(find "$LUPIN_DIR" -name lupin -type f -perm -u+x | head -n 1)
+[ -n "$bin" ] || die "the lupin archive holds no lupin binary"
+say "lupin $LUPIN_VERSION staged ($bin, sha256 $got)"
+printf '%s\n' "$bin"
