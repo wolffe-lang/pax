@@ -70,6 +70,20 @@ The stub `boot/stub/pax-stub.s` exercises 1, 2, 4, 6 and the firmware-type
 request, in assembly, so the harness has something to boot. px01 replaces it
 with wolf.
 
+**The wolf kernel's boot path (kw05, M-KW).** `boot/start.S` holds the
+request markers and the base-revision tag, checks the tag's third word and
+calls wolf's `kmain` (an `export fn`) with the stack aligned to 16 bytes:
+clauses 1, 2, 4 and 6. Clause 3 is the compiler's: `wolf build --target
+x86_64-unknown-none` emits no SSE and no red zone on either tier, and
+`tools/build-kernel` checks every object for it. Clause 5 is met by not
+needing it yet: the one bootloader-written word M-KW reads (the base
+revision) is read in assembly, so no wolf code reads a response pointer
+before wolf has volatile access (KWC kw07). `boot/io.S` holds the port I/O,
+the exit and the trap hook (`wolf_trap`), listed under `asm` in
+`kernel/wolf.pkg` so wolf assembles it for the kernel's target.
+`boot/kernel.ld` is the stub's layout plus what a compiled object brings
+(`.rodata.*`, `.data.rel.ro`, the small-PIC GOT, `.bss`).
+
 ## The image
 
 `tools/mkimage KERNEL.elf OUT.iso` lays out:
