@@ -4,18 +4,22 @@ A Linux-compatible operating system written in wolf: a kernel that runs Linux's 
 
 PAX is a clean-room implementation of Linux's userspace ABI. It does not contain, translate or derive from Linux kernel source. See `CLAUDE.md` for the rule and `docs/SOURCES.md` for what each part was written from.
 
-Status: scaffolding. The harness boots an assembly proof under QEMU; the wolf kernel starts at px01. The plan lives in the wolf planning repository under `sprints/pax/`.
+Status: scaffolding. The harness boots an assembly proof under QEMU, and M-KW (kw05) boots the first wolf kernel: `kmain` prints `KWC` over serial on both of wolf's compiling tiers, under BIOS and UEFI (`tests/mkw`). px01 grows it. The plan lives in the wolf planning repository under `sprints/pax/`.
 
 Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA`).
 
 ## Layout
 
-    kernel/   the wolf kernel (from px01)
-    boot/     boot-protocol glue: the Limine pin and config, and the
-              assembly proof under boot/stub/ (the only non-wolf code)
-    tools/    the harness: fetch-limine, build-stub, mkimage, qemu-run,
-              qemu-gdb, expect-serial
-    tests/    scripted QEMU tests: proof, gdb-attach, expect-serial-selftest
+    kernel/   the wolf kernel (M-KW's kmain today; kernel/README.md),
+              its wolf.pkg and the wolf/lupin pin
+    boot/     boot-protocol glue: the Limine pin and config, the kernel's
+              entry and port I/O (start.S, io.S, kernel.ld), and the
+              assembly proof under boot/stub/
+    tools/    the harness: fetch-limine, fetch-wolf, fetch-lupin,
+              build-stub, build-kernel, mkimage, qemu-run, qemu-gdb,
+              expect-serial
+    tests/    scripted QEMU tests: proof, mkw, gdb-attach,
+              expect-serial-selftest
     docs/     BOOT.md (the boot protocol, argued), SOURCES.md (the
               consulted-sources log), ABI notes as they come
     notes/    one note per lane: its contract and evidence
@@ -30,6 +34,8 @@ tests/proof                                # build the stub + ISO, boot it under
 tools/qemu-run --firmware uefi build/pax-stub.iso; echo $?    # 33 = the stub's success code
 tools/expect-serial build/serial.log PAX "firmware: uefi"
 tools/qemu-gdb build/pax-stub.iso build/stub/pax-stub.elf     # gdb, frozen at reset
+PAX_WOLF=$(tools/fetch-wolf) PAX_LUPIN=$(tools/fetch-lupin) tests/mkw   # M-KW: the wolf kernel, both tiers
+tests/mkw --images build/mkw               # boot ISOs built elsewhere (any host with QEMU)
 ```
 
 `tools/qemu-run` runs QEMU headless (`-nographic`, COM1 to a file, `-no-reboot`, a timeout, `isa-debug-exit` at port `0xf4`) and returns QEMU's status: `(v << 1) | 1` when the kernel writes `v` to the exit port, 0 for a reset or triple fault, 124 for a timeout. Each tool's header comment states its usage; `qemu-run` and `qemu-gdb` print it with `--help`.
@@ -51,7 +57,7 @@ Where each runs today (2026-10-02, px00):
   PAX_OVMF_CODE=$ovmf/OVMF.fd PAX_OVMF_VARS= \
     nix-shell -p qemu xorriso --run 'PAX_QEMU=$(command -v qemu-system-x86_64) tests/proof'
   ```
-- **kasumi** (CachyOS): no QEMU, no xorriso, no OVMF installed; not a harness host until the maintainer installs them.
+- **kasumi** (CachyOS): QEMU 11.1.1, xorriso and OVMF since the 2026-10-02 upgrade; M-KW's builds (wolf, the objects, the ISOs: `tests/mkw --no-boot`) run here, and kw05 booted them on hasu.
 - **macOS** (nomad-1, arm64): `tests/proof --image` on an ISO built elsewhere, as CI's `macos-run` does.
 
 The QEMU binary is `$PAX_QEMU` (default `qemu-system-x86_64` on `PATH`) and the UEFI firmware `$PAX_OVMF_CODE` / `$PAX_OVMF_VARS`, so every host supplies its own. `tools/mkimage` is reproducible: every date in the ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so one commit builds one digest.
