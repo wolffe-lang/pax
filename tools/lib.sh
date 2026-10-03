@@ -23,6 +23,21 @@ sha256_of() {
     fi
 }
 
+# The serial log FILE, normalised: carriage returns and the ANSI escape
+# sequences firmware consoles write are removed — CSI sequences (ESC [
+# params letter, params including the private markers ? = < > that
+# OVMF's console uses), charset switches (ESC ( B) and the
+# single-character escapes (ESC c, SeaBIOS's reset; ESC 7 / 8).
+serial_norm() {
+    local esc
+    esc=$(printf '\033')
+    LC_ALL=C sed \
+        -e "s/${esc}\[[0-9;?=<>]*[A-Za-z]//g" \
+        -e "s/${esc}[()][A-Za-z0-9]//g" \
+        -e "s/${esc}[c78DEHM=>]//g" \
+        -e 's/\r//g' "$1"
+}
+
 # Load boot/limine.pin into LIMINE_VERSION / LIMINE_URL / LIMINE_SHA256.
 load_limine_pin() {
     local pin=$PAX_ROOT/boot/limine.pin
