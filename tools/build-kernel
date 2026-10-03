@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# build-kernel — build a wolf kernel into a bootable ELF (M-KW, kw00 §3e
+# steps 2 and 3).
+#
+#   tools/build-kernel [--release] [--hosted] [--src FILE.lu] OUTDIR
+#
+# Step 2: `wolf build FILE.lu --target x86_64-unknown-none --emit=obj`
+# (FILE defaults to kernel/kmain.lu; `--release` for the LLVM tier),
+# which also assembles kernel/wolf.pkg's `asm` sources beside the
+# object (OUTDIR/kmain.asm-io.o), then asserts on the objects:
+#   - `nm -u` is a subset of the freestanding hook list plus io.S's
+#     routines: {pax_outb, pax_exit, pax_big, wolf_trap, memcpy,
+#     memmove, memset, memcmp};
+#   - `kmain` is a defined global (T), and nothing defines `main`;
+#   - `objdump -d` names no xmm/ymm register and addresses nothing below
+#     %rsp (no red zone);
+#   - release only: `--emit=llvm-ir` puts `noredzone` and the no-SSE
+#     "target-features" on every defined function.
+# Step 3: assembles boot/start.S (the Limine entry) and links
+#   ld.lld -T boot/kernel.ld start.o kmain.asm-io.o kmain.o -> OUTDIR/pax.elf
+#
+# `--hosted` drops `--target` (M-KW step 7's seen-red variant): the build
+# is then a hosted one, which this script expects to FAIL; it exits 0
+# only if wolf refused it.
+#
+# wolf is $PAX_WOLF (default `wolf` on PATH); the toolchain is the host's
+# (nm, objdump, an x86-64 assembler through cc or as, ld.lld or ld).
+# Exit 0 and the ELF's path on stdout, 1 on a failed assertion, 2 on a
+# usage or tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+
+tier=native hosted=0 src=$PAX_ROOT/kernel/kmain.lu out=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --release) tier=release; shift ;;
+        --hosted)  hosted=1; shift ;;
+        --src)     src=$2; shift 2 ;;
+        -h|--help) sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
+        -*)        die "unknown option: $1" ;;
+        *)         [ -z "$out" ] || die "one OUTDIR only"; out=$1; shift ;;
+    esac
+done
+[ -n "$out" ] || die "usage: build-kernel [--release] [--hosted] [--src FILE.lu] OUTDIR"
+[ -f "$src" ] || die "no source: $src"
+wolf=${PAX_WOLF:-wolf}
+need "$wolf" nm objdump
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+srcdir=$(cd "$(dirname "$src")" && pwd)
+name=$(basename "$src" .lu)
+obj=$out/$name.o
+fail() { printf 'build-kernel: FAIL %s (%s, %s)\n' "$*" "$name" "$tier" >&2; exit 1; }
+
+tierflag=()
+[ "$tier" = release ] && tierflag=(--release)
+rm -f "$obj" "$out/$name".asm-*.o
+
+if [ "$hosted" = 1 ]; then
+    rc=0
+    (cd "$srcdir" && "$wolf" build "$name.lu" --emit=obj -o "$obj" ${tierflag[@]+"${tierflag[@]}"}) \
+        >"$out/$name.hosted.log" 2>&1 || rc=$?
+    sed 's/^/  wolf: /' "$out/$name.hosted.log" >&2
+    if [ "$rc" = 0 ]; then
+        fail "a hosted build (no --target) of a kernel with no main must be refused; it built"
+    fi
+    printf 'build-kernel: ok: the hosted build is refused (exit %s, %s)\n' "$rc" "$tier" >&2
+    exit 0
+fi
+
+# --- step 2: the object --------------------------------------------------
+rc=0
+(cd "$srcdir" && "$wolf" build "$name.lu" --target x86_64-unknown-none --emit=obj -o "$obj" \
+    ${tierflag[@]+"${tierflag[@]}"}) >"$out/$name.build.log" 2>&1 || rc=$?
+if [ "$rc" != 0 ] || [ ! -f "$obj" ]; then
+    sed 's/^/  wolf: /' "$out/$name.build.log" >&2
+    fail "wolf build --target x86_64-unknown-none --emit=obj exited $rc"
+fi
+io=$out/$name.asm-io.o
+[ -f "$io" ] || fail "wolf placed no $io beside the object (kernel/wolf.pkg lists ../boot/io.S)"
+
+allowed=" pax_outb pax_exit pax_big wolf_trap memcpy memmove memset memcmp "
+for s in $(nm -u "$obj" | awk '{print $NF}'); do
+    case $allowed in *" $s "*) ;; *) fail "imports $s, outside the hooks and io.S" ;; esac
+done
+nm "$obj" | awk '$2 == "T" && $3 == "kmain" { f = 1 } END { exit !f }' \
+    || fail "kmain is not a defined global (T)"
+if nm "$obj" | awk '$3 == "main" { f = 1 } END { exit !f }'; then
+    fail "the object has a main symbol (the hosted shim)"
+fi
+objdump -d --no-show-raw-insn "$obj" > "$out/$name.dis"
+if grep -Eq '%[xy]mm[0-9]' "$out/$name.dis"; then
+    fail "the code names an xmm/ymm register: $(grep -Em1 '%[xy]mm[0-9]' "$out/$name.dis")"
+fi
+if grep -Eq -- '-0x[0-9a-f]+\(%rsp\)' "$out/$name.dis"; then
+    fail "the code addresses below %rsp (a red zone): $(grep -Em1 -- '-0x[0-9a-f]+\(%rsp\)' "$out/$name.dis")"
+fi
+if [ "$tier" = release ]; then
+    (cd "$srcdir" && "$wolf" build "$name.lu" --target x86_64-unknown-none --release \
+        --emit=llvm-ir -o "$out/$name.ll") >"$out/$name.ir.log" 2>&1 \
+        || fail "wolf build --release --emit=llvm-ir exited non-zero"
+    # Every `define … #N` names attribute group N; each such group must
+    # carry noredzone and the no-SSE feature string.
+    awk '
+        /^define / { if (match($0, /#[0-9]+/)) used[substr($0, RSTART + 1, RLENGTH - 1)] = 1; n++ }
+        /^attributes #[0-9]+ = / {
+            id = $2; sub(/#/, "", id)
+            red[id] = ($0 ~ /noredzone/)
+            sse[id] = ($0 ~ /"target-features"="[^"]*-sse2[^"]*"/)
+        }
+        END {
+            if (n == 0) { print "no define"; exit 1 }
+            for (g in used) if (!red[g] || !sse[g]) { print "attribute group #" g " lacks noredzone or -sse2"; exit 1 }
+        }' "$out/$name.ll" >&2 || fail "the release IR is not kernel code (noredzone, no SSE)"
+fi
+printf 'build-kernel: ok: step 2 (%s, %s): imports {%s}, kmain T, no main, no xmm/ymm, nothing below %%rsp%s\n' \
+    "$name" "$tier" "$(nm -u "$obj" | awk '{print $NF}' | paste -sd, -)" \
+    "$([ "$tier" = release ] && echo ', IR noredzone + no-SSE')" >&2
+
+# --- step 3: the link ------------------------------------------------------
+start=$out/start.o
+if command -v cc >/dev/null 2>&1; then
+    cc -c "$PAX_ROOT/boot/start.S" -o "$start"
+else
+    need as
+    as --64 -o "$start" "$PAX_ROOT/boot/start.S"
+fi
+elf=$out/$name.elf
+if command -v ld.lld >/dev/null 2>&1; then
+    ld.lld -nostdlib -static -z max-page-size=0x1000 -T "$PAX_ROOT/boot/kernel.ld" \
+        -o "$elf" "$start" "$io" "$obj"
+else
+    need ld
+    ld -m elf_x86_64 -nostdlib -static -z max-page-size=0x1000 -T "$PAX_ROOT/boot/kernel.ld" \
+        -o "$elf" "$start" "$io" "$obj"
+fi
+printf '%s\n' "$elf"
