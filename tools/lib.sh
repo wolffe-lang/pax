@@ -62,16 +62,17 @@ find_ovmf() {
     done
 }
 
-# Load kernel/wolf.pin into WOLF_LANG_COMMIT / LUPIN_VERSION / LUPIN_SHA256
-# and the staged paths WOLF_DIR and LUPIN_DIR (tools/fetch-wolf,
-# tools/fetch-lupin).
+# Load kernel/wolf.pin into WOLF_VERSION / WOLF_URL / WOLF_SHA256 /
+# WOLF_PIN_COMMIT / LUPIN_VERSION / LUPIN_SHA256 and the staged paths
+# WOLF_DIR and LUPIN_DIR (tools/fetch-wolf, tools/fetch-lupin).
 load_wolf_pin() {
     local pin=$PAX_ROOT/kernel/wolf.pin
     [ -f "$pin" ] || die "no $pin"
     # shellcheck disable=SC1090
     . "$pin"
-    [ -n "${WOLF_LANG_COMMIT:-}" ] && [ -n "${LUPIN_VERSION:-}" ] && [ -n "${LUPIN_SHA256:-}" ] \
-        || die "$pin must set WOLF_LANG_COMMIT, LUPIN_VERSION and LUPIN_SHA256"
-    WOLF_DIR=$PAX_CACHE/wolf-$WOLF_LANG_COMMIT
+    [ -n "${WOLF_VERSION:-}" ] && [ -n "${WOLF_URL:-}" ] && [ -n "${WOLF_SHA256:-}" ] \
+        && [ -n "${WOLF_PIN_COMMIT:-}" ] && [ -n "${LUPIN_VERSION:-}" ] && [ -n "${LUPIN_SHA256:-}" ] \
+        || die "$pin must set WOLF_VERSION, WOLF_URL, WOLF_SHA256, WOLF_PIN_COMMIT, LUPIN_VERSION and LUPIN_SHA256"
+    WOLF_DIR=$PAX_CACHE/wolf-$WOLF_VERSION
     LUPIN_DIR=$PAX_CACHE/lupin-$LUPIN_VERSION
 }
