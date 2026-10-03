@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# tests/mpx1 — M-PX1, first light (px01): a wolf kernel owns the serial
+# console, reads what Limine handed it, prints it, and halts; its panic
+# path prints the trap's kind and site, and halts.
+#
+#   tests/mpx1 [--images DIR | --no-boot] [--firmware bios|uefi|both]
+#              [--tier native|release|both]
+#
+# Assertions, per tier (native, release) and firmware (bios, uefi):
+#   A1 build: tools/build-kernel's object assertions for kernel/kmain.lu
+#      and kernel/kmain_panic.lu (imports within the hooks and the asm
+#      roster, kmain T, no main, no xmm/ymm, no red zone, release IR
+#      noredzone + no-SSE), and `wolf_trap` DEFINED by the wolf objects
+#      (the panic module), not imported from assembly.
+#   A2 transcript: the serial log ENDS with exactly these seven lines
+#      (whole-line EREs, tools/expect-serial --tail --regex):
+#        PAX first light
+#        serial: 16550 at 0x3f8, 115200 8N1, scratch ok, loopback ok
+#        boot: Limine <boot/limine.pin's version>, base revision 6
+#        boot: firmware bios | boot: firmware uefi64   (by the leg)
+#        mem: N entries, U bytes usable                (N >= 1; U in
+#                                                        64 MiB..256 MiB,
+#                                                        the machine's RAM)
+#        hhdm: 0x<16 hex>   (canonical higher half, 4 KiB aligned)
+#        halt
+#   A3 halted: tools/qemu-halt — QEMU still running, RIP inside pax_halt
+#      at two probes a second apart, IF clear, HLT=1 under TCG, no serial
+#      byte after the last line.
+#   A4 panic: kmain_panic's log ends with its banner line and
+#        PANIC overflow kmain_panic.lu:<L>
+#      where L is the line of kmain_panic.lu marked `// the trap site`.
+#   A5 the panic kernel halted (as A3).
+#   A6 seen red, every run: a kernel identical to kmain but for a spin
+#      (`while true {}`) where it halts prints the whole transcript (A2
+#      holds) and tools/qemu-halt must refuse it — a marker line and a
+#      timeout would have called it halted.
+#
+# --images DIR boots ISOs and ELFs built earlier by this script (DIR
+# holds <tier>/{kmain,kmain_panic,spin}.{iso,elf}): any host with QEMU,
+# no wolf needed. Without it the script builds with $PAX_WOLF (linux);
+# --no-boot stops after the build (A1), leaving them in build/mpx1.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+
+images= legs=both tiers=both noboot=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "usage: tests/mpx1 [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+
+work=$PAX_BUILD/mpx1
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+load_limine_pin
+
+# A4's line: the marked line of the panic kernel.
+panic_src=$PAX_ROOT/kernel/kmain_panic.lu
+site_line=
+[ -f "$panic_src" ] && site_line=$(grep -n '// the trap site' "$panic_src" | head -n 1 | cut -d: -f1)
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"; mkdir -p "$work/spin"
+    # A6's kernel: kernel/ copied whole, kmain's halt replaced by a spin.
+    cp -R "$PAX_ROOT/kernel" "$work/spin/kernel"
+    cp -R "$PAX_ROOT/boot" "$work/spin/boot"
+    rm -rf "$work/spin/kernel/.lu-cache"
+    sed 's/^    panic\.halt()$/    while true {}/' "$PAX_ROOT/kernel/kmain.lu" > "$work/spin/kernel/spin.lu"
+    grep -q '^    while true {}$' "$work/spin/kernel/spin.lu" || bad "A6: the spin variant was not made (kmain.lu has no '    panic.halt()' line)"
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        for k in kmain kmain_panic spin; do
+            src=$PAX_ROOT/kernel/$k.lu; [ "$k" = spin ] && src=$work/spin/kernel/spin.lu
+            log=$work/$tier/$k.build-kernel.log
+            mkdir -p "$work/$tier"
+            if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$src" "$work/$tier" 2>"$log"); then
+                cat "$log" >&2
+                if grep -q 'wolf_trap defined in wolf' "$log"; then
+                    say "PASS A1 $tier $k: build-kernel's assertions, wolf_trap defined in wolf"
+                else
+                    bad "A1 $tier $k: wolf_trap is not defined by the wolf objects"
+                fi
+                "$PAX_ROOT/tools/mkimage" "$elf" "$work/$tier/$k.iso" >/dev/null || bad "$tier $k: mkimage"
+                say "built $tier $k: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/$k.iso")"
+            else
+                cat "$log" >&2
+                bad "A1 $tier $k: tools/build-kernel"
+            fi
+        done
+    done
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "M-PX1 build (A1): PASS (no boot: --no-boot)" || say "M-PX1 build: FAIL"
+        exit "$fail"
+    fi
+fi
+
+ver_re=$(printf '%s' "$LIMINE_VERSION" | sed 's/\./\\./g')
+mib=1048576
+
+# Boot one kernel to its halt; leaves the log in $log. Status: qemu-halt's.
+halt_boot() { # tier kernel leg marker-ERE
+    local tier=$1 k=$2 leg=$3 marker=$4
+    log=$PAX_BUILD/mpx1-$tier-$k-$leg.serial.log
+    local iso=$images/$tier/$k.iso elf=$images/$tier/$k.elf rc=0
+    [ -f "$iso" ] && [ -f "$elf" ] || { say "no image or ELF for $tier $k ($iso)"; return 2; }
+    "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 90 \
+        --elf "$elf" --marker "$marker" "$iso" >"$log.verdict" 2>&1 || rc=$?
+    ran=$((ran + 1))
+    printf '%s %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$tier" "$k" "$leg" "$rc" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" "$(sha256_of "$iso")" \
+        >> "$PAX_BUILD/mpx1-runs.txt"
+    return "$rc"
+}
+
+: > "$PAX_BUILD/mpx1-runs.txt"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    fw=bios; [ "$leg" = uefi ] && fw=uefi64
+    for tier in $tiers; do
+        # --- kmain: A2, A3 ---------------------------------------------
+        hrc=0; halt_boot "$tier" kmain "$leg" halt || hrc=$?
+        if "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
+            'PAX first light' \
+            'serial: 16550 at 0x3f8, 115200 8N1, scratch ok, loopback ok' \
+            "boot: Limine $ver_re, base revision 6" \
+            "boot: firmware $fw" \
+            'mem: [1-9][0-9]* entries, [1-9][0-9]* bytes usable' \
+            'hhdm: 0xffff[89a-f][0-9a-f]{8}000' \
+            'halt'; then
+            usable=$(serial_norm "$log" | sed -n 's/^mem: [0-9]* entries, \([0-9]*\) bytes usable$/\1/p' | tail -n 1)
+            if [ "$usable" -ge $((64 * mib)) ] && [ "$usable" -le $((256 * mib)) ]; then
+                say "PASS A2 $tier kmain $leg: the transcript ($(serial_norm "$log" | grep -E '^(mem|hhdm): ' | paste -sd';' -))"
+            else
+                bad "A2 $tier kmain $leg: $usable bytes usable, outside 64..256 MiB"
+            fi
+        else
+            bad "A2 $tier kmain $leg: the transcript"
+        fi
+        if [ "$hrc" = 0 ]; then
+            say "PASS A3 $tier kmain $leg: $(tail -n 1 "$log.verdict")"
+        else
+            bad "A3 $tier kmain $leg: not halted (qemu-halt $hrc): $(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict")"
+        fi
+
+        # --- kmain_panic: A4, A5 ---------------------------------------
+        hrc=0; halt_boot "$tier" kmain_panic "$leg" 'PANIC .*' || hrc=$?
+        if [ -z "$site_line" ]; then
+            bad "A4 $tier kmain_panic $leg: kernel/kmain_panic.lu has no '// the trap site' line"
+        elif "$PAX_ROOT/tools/expect-serial" --tail "$log" \
+            'PAX first light (panic kernel)' "PANIC overflow kmain_panic.lu:$site_line"; then
+            say "PASS A4 $tier kmain_panic $leg: PANIC overflow kmain_panic.lu:$site_line"
+        else
+            bad "A4 $tier kmain_panic $leg: the panic line"
+        fi
+        if [ "$hrc" = 0 ]; then
+            say "PASS A5 $tier kmain_panic $leg: $(tail -n 1 "$log.verdict")"
+        else
+            bad "A5 $tier kmain_panic $leg: not halted (qemu-halt $hrc): $(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict")"
+        fi
+
+        # --- A6: a spin is not a halt ----------------------------------
+        hrc=0; halt_boot "$tier" spin "$leg" halt || hrc=$?
+        if [ "$hrc" = 1 ] && grep -q 'NOT HALTED' "$log.verdict" \
+            && "$PAX_ROOT/tools/expect-serial" --tail "$log" halt >/dev/null; then
+            say "PASS A6 $tier spin $leg: it printed 'halt' and qemu-halt refused it: $(grep -m1 'NOT HALTED' "$log.verdict")"
+        else
+            bad "A6 $tier spin $leg: the spinning kernel was not refused (qemu-halt $hrc)"
+            sed 's/^/  /' "$log.verdict" >&2
+        fi
+    done
+done
+cat "$PAX_BUILD/mpx1-runs.txt"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "M-PX1: PASS" || say "M-PX1: FAIL"
+exit "$fail"
