@@ -6,8 +6,10 @@
 #             [--tier native|release|both]
 #
 # Steps, per tier (native, release):
-#   1.   inputs: kernel/{kmain.lu,kmain_trap.lu,wolf.pkg}, boot/{io.S,
-#        start.S,kernel.ld};
+#   1.   inputs: tests/mkw.d/kernel/{kmain.lu,kmain_trap.lu,wolf.pkg} and
+#        tests/mkw.d/boot/io.S (M-KW's kernels, frozen at 7840d79 when
+#        px01 grew kernel/; tests/mkw.d/README.md), boot/{start.S,
+#        kernel.ld};
 #   2,3. tools/build-kernel: the object for x86_64-unknown-none, its
 #        assertions, the link (pax.elf), then tools/mkimage (the ISO);
 #   4.   boot under each firmware: QEMU status 33, serial ends `KWC`;
@@ -47,6 +49,7 @@ case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes b
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
 
 work=$PAX_BUILD/mkw
+kdir=$here/mkw.d/kernel
 fail=0 ran=0
 bad() { say "FAIL $*"; fail=1; }
 
@@ -58,17 +61,17 @@ if [ -z "$images" ]; then
     say "lupin: $("$lupin" --version | head -n 1)"
     "$PAX_ROOT/tools/fetch-limine" || exit 2
     rm -rf "$work"; mkdir -p "$work"
-    # Step 7's KWD kernel: kernel/kmain.lu with one letter changed, in a
+    # Step 7's KWD kernel: M-KW's kmain.lu with one letter changed, in a
     # tree laid out like the repository so wolf.pkg's ../boot/io.S holds.
     mkdir -p "$work/kwd/kernel" "$work/kwd/boot"
-    cp "$PAX_ROOT/kernel/wolf.pkg" "$work/kwd/kernel/"
-    cp "$PAX_ROOT/boot/io.S" "$work/kwd/boot/"
-    sed 's/"KWC\\n"/"KWD\\n"/' "$PAX_ROOT/kernel/kmain.lu" > "$work/kwd/kernel/kwd.lu"
+    cp "$kdir/wolf.pkg" "$work/kwd/kernel/"
+    cp "$kdir/../boot/io.S" "$work/kwd/boot/"
+    sed 's/"KWC\\n"/"KWD\\n"/' "$kdir/kmain.lu" > "$work/kwd/kernel/kwd.lu"
     grep -q '"KWD\\n"' "$work/kwd/kernel/kwd.lu" || die "the KWD variant was not made"
     for tier in $tiers; do
         flag=(); [ "$tier" = release ] && flag=(--release)
         for k in kmain kmain_trap kwd; do
-            src=$PAX_ROOT/kernel/$k.lu; [ "$k" = kwd ] && src=$work/kwd/kernel/kwd.lu
+            src=$kdir/$k.lu; [ "$k" = kwd ] && src=$work/kwd/kernel/kwd.lu
             if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$src" "$work/$tier"); then
                 "$PAX_ROOT/tools/mkimage" "$elf" "$work/$tier/$k.iso" >/dev/null || bad "$tier $k: mkimage"
                 say "built $tier $k: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/$k.iso")"
@@ -77,7 +80,7 @@ if [ -z "$images" ]; then
             fi
         done
         # Step 7, the build half: without --target the kernel is refused.
-        PAX_WOLF=$wolf "$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --hosted "$work/$tier/hosted" \
+        PAX_WOLF=$wolf "$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --hosted --src "$kdir/kmain.lu" "$work/$tier/hosted" \
             || bad "$tier: step 7, the hosted build was not refused"
     done
 
@@ -87,7 +90,7 @@ if [ -z "$images" ]; then
         local wants=()
         while [ "$1" != -- ]; do wants+=("$1"); shift; done; shift
         local out rc=0
-        out=$(cd "$PAX_ROOT/kernel" && "$@" 2>&1) || rc=$?
+        out=$(cd "$kdir" && "$@" 2>&1) || rc=$?
         printf '%s\n' "$out" > "$work/m6-$label.log"
         for w in "${wants[@]}"; do
             if ! printf '%s\n' "$out" | grep -qF -- "$w"; then
@@ -100,7 +103,7 @@ if [ -z "$images" ]; then
         -- "$wolf" conform-run --json --checked kmain.lu
     m6 wolf-checked-target '"verdict":"unsupported"' '"x-unsupported-construct":"the freestanding target x86_64-unknown-none"' \
         -- "$wolf" conform-run --json --checked --target x86_64-unknown-none kmain.lu
-    # lupin 0.1.44 (boot/../kernel/wolf.pin): no `main` by name; `--target`
+    # lupin 0.1.44 (kernel/wolf.pin): no `main` by name; `--target`
     # is clap's error until wolf-interp#182.
     m6 lupin '"verdict":"unsupported"' '"x-unsupported":"the program has no `main` in its root module' \
         -- "$lupin" conform-run --json kmain.lu
