@@ -17,9 +17,9 @@
 #   - RIP inside NAME (default pax_halt), from `nm -S` of KERNEL.elf,
 #     at both probes;
 #   - IF clear (RFL bit 9), so no interrupt can wake the CPU;
-#   - HLT=1 at both probes under TCG (KVM keeps the halted state in the
-#     kernel's vCPU, and QEMU may print HLT=0 there: recorded, not
-#     asserted);
+#   - HLT=1 at both probes (QEMU's halted flag; measured under TCG on
+#     kasumi and CI and under KVM on hasu, where QEMU syncs it from the
+#     kernel's vCPU before `info registers` prints);
 #   - not one serial byte written between the marker and the second
 #     probe.
 # Then `quit`. FILE.halt records both register dumps and the verdict.
@@ -126,8 +126,7 @@ check() { # n dump
     # both bounds are too, so the comparison holds.
     [ "$r" -ge "$lo" ] && [ "$r" -lt "$hi" ] || no "probe $n: RIP $rip is outside $sym [$(printf %x "$lo"), $(printf %x "$hi"))"
     [ $(( 16#$rfl & 0x200 )) = 0 ] || no "probe $n: IF is set (RFL=$rfl)"
-    accel_used=$(sed -n 's/^accel: //p' "$serial.meta" 2>/dev/null || true)
-    if [ "$accel_used" = tcg ] && [ "${hlt:-0}" != 1 ]; then no "probe $n: HLT=${hlt:-?} under TCG"; fi
+    [ "${hlt:-0}" = 1 ] || no "probe $n: HLT=${hlt:-?}, the CPU is not halted"
     printf '%s' "$rip"
 }
 d1=$(probe) || no "probe 1: the monitor did not answer: $d1"
