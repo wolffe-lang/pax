@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# qemu-halt — boot a PAX image and prove the kernel HALTED (px01, M-PX1).
+#
+#   tools/qemu-halt [--firmware bios|uefi] [--serial FILE] [--timeout SECS]
+#                   [--accel auto|kvm|tcg] --elf KERNEL.elf [--symbol NAME]
+#                   --marker ERE IMAGE.iso
+#
+# A kernel that ends in `cli; hlt` never exits QEMU, so its end cannot
+# be read from QEMU's status (tools/qemu-run's isa-debug-exit) and a
+# marker line plus a timeout cannot tell a halt from a spin or a hang.
+# This boots IMAGE through tools/qemu-run with QEMU's human monitor on a
+# pipe (FILE.mon.in / FILE.mon.out, no tool beyond QEMU and bash), waits
+# for a serial line matching the whole-line ERE --marker (the kernel's
+# last line), then asks the monitor `info registers` twice, a second
+# apart, and holds the machine to:
+#   - QEMU still running (no exit, reset, triple fault or debug-exit);
+#   - RIP inside NAME (default pax_halt), from `nm -S` of KERNEL.elf,
+#     at both probes;
+#   - IF clear (RFL bit 9), so no interrupt can wake the CPU;
+#   - HLT=1 at both probes under TCG (KVM keeps the halted state in the
+#     kernel's vCPU, and QEMU may print HLT=0 there: recorded, not
+#     asserted);
+#   - not one serial byte written between the marker and the second
+#     probe.
+# Then `quit`. FILE.halt records both register dumps and the verdict.
+#
+# Exit 0 halted; 1 not halted (the reason on stderr); 2 usage or tool
+# error. The timeout (default 60 s) bounds the wait for the marker.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+
+firmware=bios serial=$PAX_BUILD/serial.log timeout=60 accel=auto elf= sym=pax_halt marker= image=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --firmware) firmware=$2; shift 2 ;;
+        --serial)   serial=$2; shift 2 ;;
+        --timeout)  timeout=$2; shift 2 ;;
+        --accel)    accel=$2; shift 2 ;;
+        --elf)      elf=$2; shift 2 ;;
+        --symbol)   sym=$2; shift 2 ;;
+        --marker)   marker=$2; shift 2 ;;
+        -h|--help)  sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
+        -*)         die "unknown option: $1" ;;
+        *)          [ -z "$image" ] || die "one image only"; image=$1; shift ;;
+    esac
+done
+[ -n "$image" ] && [ -n "$elf" ] && [ -n "$marker" ] \
+    || die "usage: qemu-halt [options] --elf KERNEL.elf --marker ERE IMAGE.iso"
+[ -f "$image" ] || die "no image: $image"
+[ -f "$elf" ] || die "no kernel: $elf"
+case $timeout in ''|*[!0-9]*) die "--timeout takes whole seconds" ;; esac
+need nm mkfifo
+
+# The halt routine's [start, end) from the symbol table.
+read -r lo size <<<"$(nm -S "$elf" | awk -v s="$sym" '$NF == s && NF == 4 { print $1, $2; exit }')" || true
+[ -n "${lo:-}" ] || die "$elf has no sized symbol $sym"
+lo=$((16#$lo)); hi=$((lo + 16#$size))
+
+mkdir -p "$(dirname "$serial")"
+mon=$serial.mon
+rm -f "$mon.in" "$mon.out"
+mkfifo "$mon.in" "$mon.out"
+rec=$serial.halt
+: > "$rec"
+qpid=
+cleanup() {
+    [ -z "$qpid" ] || kill "$qpid" 2>/dev/null || true
+    exec 3>&- 4<&- 2>/dev/null || true
+    rm -f "$mon.in" "$mon.out"
+}
+trap cleanup EXIT
+# Both ends open read-write: neither open blocks, and QEMU never sees EOF.
+exec 3<>"$mon.in" 4<>"$mon.out"
+"$PAX_ROOT/tools/qemu-run" --firmware "$firmware" --serial "$serial" --timeout $((timeout + 30)) \
+    --accel "$accel" "$image" -- -monitor "pipe:$mon" &
+qpid=$!
+
+no() { printf 'qemu-halt: NOT HALTED: %s\n' "$*" | tee -a "$rec" >&2; exit 1; }
+
+# Wait for the marker (or QEMU's end, or the timeout).
+start=$SECONDS
+while :; do
+    if [ -f "$serial" ] && serial_norm "$serial" | LC_ALL=C grep -Eqx -- "$marker"; then break; fi
+    if ! kill -0 "$qpid" 2>/dev/null; then
+        rc=0; wait "$qpid" || rc=$?; qpid=
+        no "QEMU ended (qemu-run status $rc) before a line matching /$marker/"
+    fi
+    [ $((SECONDS - start)) -lt "$timeout" ] || no "no line matching /$marker/ within ${timeout}s"
+    sleep 0.2
+done
+size0=$(wc -c < "$serial")
+
+# One `info registers` through the pipe: the RIP= ... HLT= line.
+probe() {
+    local out= line
+    printf 'info registers\n' >&3
+    local t0=$SECONDS
+    while [ $((SECONDS - t0)) -lt 10 ]; do
+        if IFS= read -r -t 1 line <&4; then
+            line=${line//$'\r'/}
+            out+="$line"$'\n'
+            case $line in *RIP=*HLT=*) printf '%s' "$out"; return 0 ;; esac
+        fi
+    done
+    printf '%s' "$out"; return 1
+}
+check() { # n dump
+    local n=$1 dump=$2 rip rfl hlt
+    rip=$(printf '%s\n' "$dump" | sed -n 's/.*RIP=\([0-9a-f]*\).*/\1/p' | tail -n 1)
+    rfl=$(printf '%s\n' "$dump" | sed -n 's/.*RFL=\([0-9a-f]*\).*/\1/p' | tail -n 1)
+    hlt=$(printf '%s\n' "$dump" | sed -n 's/.*HLT=\([01]\).*/\1/p' | tail -n 1)
+    [ -n "$rip" ] && [ -n "$rfl" ] || no "probe $n: no RIP/RFL in the monitor's answer"
+    local r=$((16#$rip))
+    printf 'probe %s: RIP=%s RFL=%s HLT=%s %s=[%x,%x)\n' "$n" "$rip" "$rfl" "${hlt:-?}" "$sym" "$lo" "$hi" >> "$rec"
+    # bash arithmetic is signed 64-bit; the higher half is negative, and
+    # both bounds are too, so the comparison holds.
+    [ "$r" -ge "$lo" ] && [ "$r" -lt "$hi" ] || no "probe $n: RIP $rip is outside $sym [$(printf %x "$lo"), $(printf %x "$hi"))"
+    [ $(( 16#$rfl & 0x200 )) = 0 ] || no "probe $n: IF is set (RFL=$rfl)"
+    accel_used=$(sed -n 's/^accel: //p' "$serial.meta" 2>/dev/null || true)
+    if [ "$accel_used" = tcg ] && [ "${hlt:-0}" != 1 ]; then no "probe $n: HLT=${hlt:-?} under TCG"; fi
+    printf '%s' "$rip"
+}
+d1=$(probe) || no "probe 1: the monitor did not answer: $d1"
+printf -- '--- probe 1 ---\n%s\n' "$d1" >> "$rec"
+rip1=$(check 1 "$d1")
+sleep 1
+d2=$(probe) || no "probe 2: the monitor did not answer: $d2"
+printf -- '--- probe 2 ---\n%s\n' "$d2" >> "$rec"
+rip2=$(check 2 "$d2")
+kill -0 "$qpid" 2>/dev/null || no "QEMU ended during the probes"
+size1=$(wc -c < "$serial")
+[ "$size1" = "$size0" ] || no "the serial log grew from $size0 to $size1 bytes after the marker"
+printf 'quit\n' >&3
+rc=0; wait "$qpid" || rc=$?; qpid=
+accel_used=$(sed -n 's/^accel: //p' "$serial.meta")
+printf 'qemu-halt: HALTED in %s (RIP %s, %s; IF clear; serial still at %s bytes; accel %s; quit -> %s)\n' \
+    "$sym" "$rip1" "$([ "$rip1" = "$rip2" ] && echo 'unchanged a second later' || echo "then $rip2")" \
+    "$size1" "$accel_used" "$rc" | tee -a "$rec"
