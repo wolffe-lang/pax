@@ -51,10 +51,11 @@ done
 case $timeout in ''|*[!0-9]*) die "--timeout takes whole seconds" ;; esac
 need nm mkfifo
 
-# The halt routine's [start, end) from the symbol table.
+# The halt routine's [start, end) from the symbol table. A kernel
+# without it still boots (its log is evidence), and is not halted.
 read -r lo size <<<"$(nm -S "$elf" | awk -v s="$sym" '$NF == s && NF == 4 { print $1, $2; exit }')" || true
-[ -n "${lo:-}" ] || die "$elf has no sized symbol $sym"
-lo=$((16#$lo)); hi=$((lo + 16#$size))
+nosym=
+if [ -n "${lo:-}" ]; then lo=$((16#$lo)); hi=$((lo + 16#$size)); else nosym=1 lo=0 hi=0; fi
 
 mkdir -p "$(dirname "$serial")"
 # Empty the log before QEMU starts: a previous run's log at the same
@@ -92,6 +93,7 @@ while :; do
     sleep 0.2
 done
 size0=$(wc -c < "$serial")
+[ -z "$nosym" ] || no "$elf has no sized symbol $sym (QEMU was running at the marker)"
 
 # One `info registers` through the pipe, read until the RIP= ... HLT=
 # line is whole. A `read -t` that times out mid-line keeps the partial
