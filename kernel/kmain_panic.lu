@@ -1,0 +1,24 @@
+//! member: false
+// kmain_panic.lu — the panic path (px01, M-PX1, tests/mpx1 A4/A5): a
+// second kernel that brings up the console, writes its banner, then
+// overflows an addition. The operand is io.S's `pax_big` (i64::MAX),
+// from outside the program, so no tier can fold the check away: the
+// addition traps `overflow` into kernel/panic's `wolf_trap`, which
+// writes `PANIC overflow kmain_panic.lu:<line>` and halts. The line
+// after the trap is never reached.
+use log
+use serial
+use panic
+
+extern "c" fn pax_big() -> i64
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX first light (panic kernel)")
+    // # Safety: pax_big is io.S's constant.
+    let n = unsafe { pax_big() }
+    let m = n + 1 // the trap site
+    log.dec(m as int)
+    log.line("unreachable")
+    panic.halt()
+}
