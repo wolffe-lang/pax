@@ -22,6 +22,12 @@
    limine.S can name it; the layout is PROTOCOL.md's: four id words, a
    revision (0), a response pointer (0 until Limine writes it).
 
+   px02 adds a sixth, the executable address (the kernel image's
+   physical and virtual base), and moves the reading into wolf: since
+   wolf-lang eb955c3b, kernel/boot_info follows each response pointer
+   with `read_volatile` (kw07) through `N as *T` (kw06); limine.S only
+   hands wolf each request's address (wolf-lang#529).
+
    Not listed in kernel/wolf.pkg: the boot code is the consumer's, and
    links wolf's object (K6(b)); tools/build-kernel assembles it.
 
@@ -65,6 +71,11 @@ limine_memmap_request:
         .globl limine_hhdm_request
 limine_hhdm_request:
         .quad LIMINE_MAGIC_0, LIMINE_MAGIC_1, 0x48dcf1cb8ad2b852, 0x63984e959a98244b
+        .quad 0, 0
+
+        .globl limine_executable_address_request
+limine_executable_address_request:      /* px02: the image's physical base */
+        .quad LIMINE_MAGIC_0, LIMINE_MAGIC_1, 0x71ba76863cc55f63, 0xb2644a48c516a487
         .quad 0, 0
 
         .globl limine_base_revision

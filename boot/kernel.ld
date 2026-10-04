@@ -17,6 +17,8 @@ PHDRS
 SECTIONS
 {
     . = 0xffffffff80000000;
+    __pax_image_start = .;      /* px02: the image's extent, for the */
+                                /* frame allocator's test (limine.S) */
 
     .text : { *(.text .text.*) } :text
 
@@ -37,6 +39,7 @@ SECTIONS
         *(.bss .bss.*)
         *(COMMON)
     } :data
+    __pax_image_end = .;
 
     /DISCARD/ : { *(.note .note.*) *(.comment) *(.eh_frame) }
 }
