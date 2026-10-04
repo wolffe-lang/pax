@@ -12,10 +12,15 @@
 #      roster, kmain T, no main, no xmm/ymm, no red zone, release IR
 #      noredzone + no-SSE), and `wolf_trap` DEFINED by the wolf objects
 #      (the panic module), not imported from assembly.
-#   A2 transcript: the serial log ENDS with exactly these nine lines
+#   A2 transcript: the serial log ENDS with exactly these eleven lines
 #      (whole-line EREs, tools/expect-serial --tail --regex):
 #        PAX first light
 #        serial: 16550 at 0x3f8, 115200 8N1, scratch ok, loopback ok
+#        gdt: 0x<16 hex>, 7 descriptors, tss 0x28 at 0x<16 hex>, ist1 0x<16 hex> to 0x<16 hex>
+#        idt: 0x<16 hex>, 256 gates, 48 routed, #DF on ist1
+#                           (kw10: the kernel's own tables, loaded before
+#                            anything else; tests/mpx2-interrupts reads
+#                            them back through QEMU's monitor)
 #        boot: Limine <boot/limine.pin's version>, base revision 6
 #        boot: firmware bios | boot: firmware uefi64   (by the leg)
 #        mem: N entries, U bytes usable                (N >= 1; U in
@@ -155,6 +160,8 @@ for leg in $legs; do
         if "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
             'PAX first light' \
             'serial: 16550 at 0x3f8, 115200 8N1, scratch ok, loopback ok' \
+            'gdt: 0x[0-9a-f]{16}, 7 descriptors, tss 0x28 at 0x[0-9a-f]{16}, ist1 0x[0-9a-f]{16} to 0x[0-9a-f]{16}' \
+            'idt: 0x[0-9a-f]{16}, 256 gates, 48 routed, #DF on ist1' \
             "boot: Limine $ver_re, base revision 6" \
             "boot: firmware $fw" \
             'mem: [1-9][0-9]* entries, [1-9][0-9]* bytes usable' \
