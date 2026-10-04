@@ -56,6 +56,11 @@ Contract: `sprints/pax/05-the-archive-pin/px05-the-archive-pin.md`
    outside this contract, so lupin stays 0.1.44 and the move is a later
    lane's.
 
+**CI time.** Each kernel job now takes 1–2 minutes, against about 7 on
+trunk's run 37191531201. That run compiled wolf from source in every
+job (`Compiling proc-macro2…` in its log: the source pin's cache missed);
+the archive is a download and a digest check.
+
 ## Prediction against measurement
 
 | predicted (b2b739c) | measured | verdict |
@@ -114,7 +119,10 @@ is `7678dc6`'s.
   - `7678dc6`: 37229667793 green, for `ef513b1` (paging) and the docs,
     pushed together; the kernel tree is the same.
   - `7ccf0b4` (plant): 37230193011 red.
-  - `a25d3fc` (revert): see the PR.
+  - `a25d3fc` (revert): 37231156348 green.
+  - `ff7c1e0` (this note's first version): 37231280975 green. Same
+    PASS counts as trunk (mkw 17, mpx1 27, mpx2-frames 45, mpx2-paging
+    27, mpx2-interrupts 35), 0 FAIL, 0 SKIP; log `cc036d38…`.
   - Trunk baseline: 37191531201.
 - kasumi (QEMU 11.1.1), every suite plus census and the selftest, in
   parallel, one tree each, `PAX_REQUIRE_UEFI=1`, full logs under
