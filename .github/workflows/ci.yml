@@ -262,3 +262,67 @@ jobs:
 
       - name: the census tools, C1-C3
         run: tests/census
+
+  # px02: physical frames. kernel/frames, built from Limine's memory map
+  # by the pinned wolf on both tiers, booted under SeaBIOS and OVMF: the
+  # totals against the map (F2), every frame handed out exactly once,
+  # aligned, usable, above 1 MiB, outside the image and the allocator's
+  # state (F3), written and read back through the HHDM (F4), freed and
+  # handed out again (F5), and a double free and a free of a frame never
+  # usable each panicking by name (F6, F7), every halt proven (F8).
+  mpx2-frames:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils
+          qemu-system-x86_64 --version
+          clang --version
+          ld.lld --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx2-${{ hashFiles('boot/limine.pin') }}
+
+      - name: the staged wolf (cached by the pin; a source pin's src/ and target/ are not kept)
+        uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/wolf-*
+            !.pax-cache/wolf-*/src
+          key: wolf-${{ hashFiles('kernel/wolf.pin') }}
+
+      - name: wolf at the pin (built from source, or the release archive by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: physical frames, both tiers, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx2-frames
+
+      - name: keep the kernels, the transcripts and the halt probes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx2-frames-linux
+          path: |
+            build/mpx2/
+            build/mpx2-*.log
+            build/mpx2-*.meta
+            build/mpx2-*.halt
+            build/mpx2-*.verdict
+            build/mpx2-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
