@@ -9,6 +9,8 @@
    INVLPG have no other spelling.
 
      pax_cr0() -> u64          MOV from CR0
+     pax_cr2() -> u64          MOV from CR2: the linear address of the
+                               last page fault (kw10, kernel/interrupts)
      pax_cr3() -> u64          MOV from CR3
      pax_cr4() -> u64          MOV from CR4
      pax_set_cr3(v: u64)       MOV to CR3: the switch to the paging
@@ -16,6 +18,9 @@
                                (bits 51:12; PCD and PWT clear), and a
                                flush of every non-global TLB entry
      pax_efer() -> u64         RDMSR of IA32_EFER (0xC0000080)
+     pax_apic_base() -> u64    RDMSR of IA32_APIC_BASE (0x1B): the local
+                               APIC's physical base in bits 51:12, its
+                               global enable in bit 11 (kw10, kernel/apic)
      pax_set_efer(v: u64)      WRMSR of IA32_EFER (edx:eax = v)
      pax_invlpg(va: u64)       INVLPG va: drop the TLB entries for the
                                page holding va
@@ -29,8 +34,8 @@
 
    Written from: the Intel 64 and IA-32 SDM vol. 2 (MOV to/from control
    registers, RDMSR, WRMSR, INVLPG, CPUID leaf 0x80000001), vol. 3A §2.5
-   (control registers), §2.2.1 (IA32_EFER: SCE bit 0, LME 8, LMA 10,
-   NXE 11), §4.10.4.1 (what MOV to CR3 and INVLPG invalidate); the AMD64
+   (control registers; CR2, the page-fault linear address, kw10), §2.2.1 (IA32_EFER: SCE bit 0, LME 8, LMA 10,
+   NXE 11), §11.4.4 (IA32_APIC_BASE, kw10), §4.10.4.1 (what MOV to CR3 and INVLPG invalidate); the AMD64
    APM vol. 2 §3.1.7 (EFER) and §5.5 (TLB invalidation); the x86-64
    psABI. No Linux source; no other kernel's source. */
 
@@ -42,6 +47,13 @@ pax_cr0:
         movq    %cr0, %rax
         ret
         .size pax_cr0, . - pax_cr0
+
+        .globl pax_cr2
+        .type pax_cr2, @function
+pax_cr2:
+        movq    %cr2, %rax
+        ret
+        .size pax_cr2, . - pax_cr2
 
         .globl pax_cr3
         .type pax_cr3, @function
@@ -74,6 +86,17 @@ pax_efer:
         orq     %rdx, %rax
         ret
         .size pax_efer, . - pax_efer
+
+        .globl pax_apic_base
+        .type pax_apic_base, @function
+pax_apic_base:
+        movl    $0x1b, %ecx
+        rdmsr
+        shlq    $32, %rdx
+        movl    %eax, %eax
+        orq     %rdx, %rax
+        ret
+        .size pax_apic_base, . - pax_apic_base
 
         .globl pax_set_efer
         .type pax_set_efer, @function
