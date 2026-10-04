@@ -13,8 +13,9 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
     kernel/   the wolf kernel (serial, log, boot_info, frames, paging, panic;
               kernel/README.md), its wolf.pkg and the wolf/lupin pin
     boot/     boot-protocol glue: the Limine pin and config, the kernel's
-              entry, requests, port I/O and the requests' addresses
-              (start.S, io.S, limine.S, cpu.S, kernel.ld), and the assembly proof under
+              entry and requests, port I/O, the control registers, the
+              interrupt trampolines and the descriptor tables' storage
+              (start.S, io.S, cpu.S, isr.S, kernel.ld), and the assembly proof under
               boot/stub/
     tools/    the harness: fetch-limine, fetch-wolf, fetch-lupin,
               build-stub, build-kernel, mkimage, qemu-run, qemu-halt,
