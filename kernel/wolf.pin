@@ -1,13 +1,21 @@
 # The toolchain the kernel is built with (tools/fetch-wolf,
-# tools/fetch-lupin). wolf comes from its RELEASE archive, BY DIGEST
-# (px01: 0.2.22 is the first release carrying `--target
-# x86_64-unknown-none` and `asm` in wolf.pkg). tools/fetch-wolf refuses
-# on a digest mismatch and on a binary whose `--version` does not name
-# WOLF_PIN_COMMIT. Bump the four WOLF_ lines together.
-WOLF_VERSION=0.2.22
-WOLF_URL=https://github.com/wolffe-lang/wolf-lang/releases/download/v0.2.22/wolf-0.2.22-x86_64-unknown-linux-gnu.tar.gz
-WOLF_SHA256=df0f2fea26d9d26de5e577ee5d2cbabeaafe6d93ecfa447cb6be97ae442d8dba
-WOLF_PIN_COMMIT=8e36bc1a0f92bbbbc6861b10d5b2638f76412d6a
+# tools/fetch-lupin; tools/lib.sh's load_wolf_pin takes one of two
+# shapes).
+#
+# px02: a SOURCE pin. The frame allocator touches memory through the
+# HHDM with kw06's `N as *T`, `*p` and `with_addr` (wolf-lang 50830027)
+# and kw07's `read_volatile`/`write_volatile` (eb955c3b); both are on
+# wolf-lang trunk and in no release yet (0.2.22 is 8e36bc1a). So wolf is
+# built from source at this commit, as kw05 pinned af397195:
+# tools/fetch-wolf fetches exactly this commit, refuses any other HEAD,
+# builds `wolf_driver --locked` stamped with the commit, and checks
+# `--version`'s pin clause.
+#
+# Back to a RELEASE pin when 0.2.23 ships: delete WOLF_LANG_COMMIT and
+# set the four lines px01 used (WOLF_VERSION, WOLF_URL, WOLF_SHA256 of
+# the x86_64-unknown-linux-gnu archive, WOLF_PIN_COMMIT); tools/fetch-wolf
+# then stages the archive by digest and never builds.
+WOLF_LANG_COMMIT=eb955c3bbaf534669b048a031f9c0a44dd84f509
 # lupin, M-KW step 6's second machine, from its release BY DIGEST.
 # Held at 0.1.44 (0.2.22 pairs with 0.1.45): wolf-interp#182, the
 # `--target` refusal step 6 records, is open on both.
