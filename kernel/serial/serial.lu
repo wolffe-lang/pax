@@ -15,30 +15,49 @@
 extern "c" fn pax_outb(port: u16, v: u8)
 extern "c" fn pax_inb(port: u16) -> u8
 
-// COM1's I/O base is 0x3f8 (1016); the registers are at offsets from
-// it. Written as literals, each named where it is used: wolf 0.2.22
-// refuses a module-level `const` on both compiling tiers
-// (wolf-lang#560).
-//   0 THR transmit holding (write) / receive buffer (read); DLL under DLAB
-//   1 IER interrupt enable; DLM under DLAB
-//   2 FCR FIFO control (write)
-//   3 LCR line control (bit 7 DLAB)
-//   4 MCR modem control (bit 4 loopback)
-//   5 LSR line status (bit 0 data ready, bit 5 THR empty)
-//   7 SCR scratch
-// `put` polls LSR at most 1048576 times before giving a byte up: a UART
-// that never drains must not hang the kernel (on QEMU the first poll
-// succeeds).
+// COM1's I/O base and its registers, as offsets from it (PC16550D).
+// Module `const`s since px05 (wolf 0.2.23; 0.2.22 refused them,
+// wolf-lang#560, so px01 wrote them as commented literals).
+const COM1: int = 0x3f8
+const THR: int = 0 // transmit holding (write) / receive buffer (read); DLL under DLAB
+const IER: int = 1 // interrupt enable; DLM under DLAB
+const FCR: int = 2 // FIFO control (write)
+const LCR: int = 3 // line control (bit 7 DLAB)
+const MCR: int = 4 // modem control (bit 4 loopback)
+const LSR: int = 5 // line status (bit 0 data ready, bit 5 THR empty)
+const SCR: int = 7 // scratch
+const DLL: int = 0
+const DLM: int = 1
+
+const LCR_DLAB: int = 0x80 // offsets 0 and 1 are the divisor latch
+const LCR_8N1: int = 0x03 // DLAB off; 8 data bits, no parity, 1 stop bit
+const DIVISOR: int = 1 // 115200 baud (1.8432 MHz / 16)
+const FCR_ON: int = 0xc7 // FIFOs on, both cleared, receive trigger 14 bytes
+const MCR_LOOPBACK: int = 0x1e // loopback, OUT1, OUT2, RTS
+const MCR_NORMAL: int = 0x0b // DTR, RTS, OUT2
+const LSR_DATA_READY: int = 0x01
+const LSR_THR_EMPTY: int = 0x20
+
+// What `init` writes to prove the chip: two scratch patterns and a
+// byte sent round the loopback.
+const SCRATCH_A: int = 0x5a
+const SCRATCH_B: int = 0xa5
+const LOOPBACK_BYTE: int = 0xae
+
+// `put` polls LSR at most this many times before giving a byte up: a
+// UART that never drains must not hang the kernel (on QEMU the first
+// poll succeeds). `init`'s loopback wait has the same bound.
+const POLLS: int = 1048576
 
 fn out(reg: int, v: int) {
     // # Safety: io.S's `outb` on a COM1 register; the port and the value
     // are in range by construction (the narrowing casts trap otherwise).
-    unsafe { pax_outb((1016 + reg) as u16, v as u8) }
+    unsafe { pax_outb((COM1 + reg) as u16, v as u8) }
 }
 
 fn inp(reg: int) -> int {
     // # Safety: io.S's `inb` on a COM1 register.
-    let v = unsafe { pax_inb((1016 + reg) as u16) }
+    let v = unsafe { pax_inb((COM1 + reg) as u16) }
     v as int
 }
 
@@ -48,30 +67,30 @@ fn inp(reg: int) -> int {
 /// in loopback mode came back (the transmitter and receiver work). It
 /// never traps.
 pub fn init() -> int {
-    out(1, 0) // IER: no interrupts, the kernel polls
-    out(3, 128) // LCR: DLAB on, so offsets 0 and 1 are the divisor latch
-    out(0, 1) // DLL: divisor 1 = 115200 baud (1.8432 MHz / 16)
-    out(1, 0) // DLM
-    out(3, 3) // LCR: DLAB off; 8 data bits, no parity, 1 stop bit
-    out(2, 199) // FCR: FIFOs on, both cleared, receive trigger 14 bytes
+    out(IER, 0) // no interrupts, the kernel polls
+    out(LCR, LCR_DLAB)
+    out(DLL, DIVISOR)
+    out(DLM, 0)
+    out(LCR, LCR_8N1)
+    out(FCR, FCR_ON)
     var status = 0
-    out(7, 90) // SCR
-    if inp(7) == 90 {
-        out(7, 165)
-        if inp(7) == 165 {
+    out(SCR, SCRATCH_A)
+    if inp(SCR) == SCRATCH_A {
+        out(SCR, SCRATCH_B)
+        if inp(SCR) == SCRATCH_B {
             status = status + 1
         }
     }
-    out(4, 30) // MCR: loopback, OUT1, OUT2, RTS
-    out(0, 174) // THR
+    out(MCR, MCR_LOOPBACK)
+    out(THR, LOOPBACK_BYTE)
     var spins = 0
-    while inp(5) % 2 == 0 && spins < 1048576 {
-        spins = spins + 1 // LSR bit 0: data ready
+    while inp(LSR) & LSR_DATA_READY == 0 && spins < POLLS {
+        spins = spins + 1
     }
-    if inp(0) == 174 { // RBR
+    if inp(THR) == LOOPBACK_BYTE { // RBR
         status = status + 2
     }
-    out(4, 11) // MCR: normal mode; DTR, RTS, OUT2
+    out(MCR, MCR_NORMAL)
     status
 }
 
@@ -80,12 +99,11 @@ pub fn init() -> int {
 /// than hang the kernel. It never traps.
 pub fn put(b: u8) {
     var spins = 0
-    while spins < 1048576 {
-        // # Safety: io.S's `inb` on COM1's LSR (0x3fd).
-        let lsr = unsafe { pax_inb(1021) }
-        if lsr & 32 != 0 { // LSR bit 5: THR empty
-            // # Safety: io.S's `outb` on COM1's THR (0x3f8).
-            unsafe { pax_outb(1016, b) }
+    while spins < POLLS {
+        let lsr = inp(LSR)
+        if lsr & LSR_THR_EMPTY != 0 {
+            // # Safety: io.S's `outb` on COM1's THR.
+            unsafe { pax_outb((COM1 + THR) as u16, b) }
             return
         }
         spins = spins + 1
