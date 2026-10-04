@@ -1,0 +1,119 @@
+//! idt — the kernel's interrupt descriptor table (kw10, M-PX2's
+//! interrupt piece).
+//!
+//! Limine leaves IDTR's limit at 0, so until `start` runs every
+//! exception escalates to a triple fault (px03's G7). `start` fills the
+//! 256-gate table boot/isr.S reserves in .bss (wolf's module state
+//! holds scalars only, [mem.static.3]) and loads it with LIDT:
+//!
+//! - vectors 0-31, the exceptions, and 32-47, the 8259's sixteen lines
+//!   once kernel/timer remaps them there: a 64-bit interrupt gate each
+//!   (type 0xE: IF is cleared on entry, so a handler is never
+//!   interrupted), present, DPL 0, selector 0x08 (kernel/gdt's kernel
+//!   code), its offset the vector's trampoline in boot/isr.S
+//!   (pax_isr_table), which calls kernel/interrupts' `pax_interrupt`;
+//! - vector 8, the double fault, with IST 1: the CPU switches to the
+//!   TSS's IST1 stack (kernel/gdt) before it pushes the frame, whatever
+//!   %rsp was — a #DF on a broken stack still runs;
+//! - 48-255 not present (zero): a stray vector there is #NP with the
+//!   IDT bit set in its error code, which kernel/interrupts panics by
+//!   name.
+//!
+//! A gate (Intel SDM vol. 3A §6.14.1, Figure 6-8; AMD64 APM vol. 2
+//! §4.8.4, §8.9.1): offset 15:0, the selector, the IST index (bits
+//! 2:0), the type and attribute byte (P, DPL, 0, type), offset 31:16,
+//! offset 63:32, four reserved bytes: 16 bytes, `#[repr(c)]` with no
+//! padding. IDTR (SDM vol. 3A §6.10): a 16-bit limit (the table's size
+//! less one) and a 64-bit base, `#[repr(c, packed)]`. No Linux source;
+//! no other kernel's source.
+
+use log
+
+extern "c" fn pax_lidt(idtr: *Idtr)
+
+extern "c" let pax_idt: *Gate
+extern "c" let pax_idtr: *Idtr
+extern "c" let pax_isr_table: *u64
+
+/// A 64-bit IDT gate.
+#[repr(c)]
+struct Gate {
+    offset_lo: u16,
+    selector: u16,
+    ist: u8,
+    attr: u8,
+    offset_mid: u16,
+    offset_hi: u32,
+    reserved: u32,
+}
+
+/// LIDT's operand.
+#[repr(c, packed)]
+struct Idtr {
+    limit: u16,
+    base: u64,
+}
+
+/// Vectors with a trampoline: the 32 exceptions and the 8259's 16 lines.
+const ROUTED: int = 48
+
+/// The table's gates.
+const GATES: int = 256
+
+/// P, DPL 0, a 64-bit interrupt gate (type 0xE).
+const INTERRUPT_GATE: u8 = 0x8e
+
+/// kernel/gdt's kernel code selector.
+const KERNEL_CODE: u16 = 8
+
+/// Gate `v`: the trampoline at `at`, on interrupt stack `ist` (0: none).
+fn set(v: int, at: u64, ist: u8) {
+    // # Safety: pax_idt is boot/isr.S's 4096-byte table; v < 256.
+    unsafe {
+        pax_idt[v] = Gate {
+            offset_lo: (at & 0xffff) as u16,
+            selector: KERNEL_CODE,
+            ist: ist,
+            attr: INTERRUPT_GATE,
+            offset_mid: ((at >> 16) & 0xffff) as u16,
+            offset_hi: ((at >> 32) & 0xffffffff) as u32,
+            reserved: 0,
+        }
+    }
+}
+
+/// Fill gates 0-47 (8 on IST1) and load the table.
+pub fn start() {
+    var v = 0
+    while v < ROUTED {
+        // # Safety: pax_isr_table holds the 48 trampolines' addresses.
+        let at = unsafe { pax_isr_table[v] }
+        set(v, at, if v == 8 { 1 } else { 0 })
+        v += 1
+    }
+    // # Safety: pax_idtr is boot/isr.S's 16 bytes; the table it names
+    // is complete, and every present gate's selector is kernel/gdt's
+    // loaded kernel code.
+    unsafe {
+        pax_idtr[0] = Idtr { limit: (GATES * 16 - 1) as u16, base: pax_idt as u64 }
+        pax_lidt(pax_idtr)
+    }
+}
+
+/// The IDT's linear address.
+pub fn base() -> u64 {
+    // # Safety: the address of boot/isr.S's table; nothing is read.
+    unsafe { pax_idt as u64 }
+}
+
+/// Write the table's line: `idt: 0x<base>, 256 gates, 48 routed, #DF on ist1`.
+pub fn report() {
+    log.put("idt: ")
+    log.hex(base())
+    log.put(", ")
+    log.dec(GATES)
+    log.put(" gates, ")
+    log.dec(ROUTED)
+    log.put(" routed, #DF on ist1")
+    log.end()
+}
