@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+# tests/mpx2-frames — physical frames (px02, M-PX2's first piece): the
+# frame allocator (kernel/frames), built from Limine's memory map, hands
+# out every usable frame above 1 MiB exactly once, never the first MiB,
+# the kernel image or its own state, takes frames back, and panics by
+# name on a double free and on a free of a frame never usable.
+#
+#   tests/mpx2-frames [--images DIR | --no-boot] [--firmware bios|uefi|both]
+#                     [--tier native|release|both]
+#
+# Four kernels, from kernel/: kmain (first light plus the totals line),
+# kmain_frames (the exercise), kmain_double_free, kmain_free_unusable.
+# Assertions, per tier (native, release) and firmware (bios, uefi):
+#   F1 build: tools/build-kernel's object assertions for all four.
+#   F2 totals: kmain's transcript carries, right before `halt`,
+#        frames: T usable, L below 1 MiB, S allocator, F free
+#      with T * 4096 = the `mem:` line's usable bytes (the map, summed
+#      independently by kernel/boot_info), F = T - L - S, L <= 256 (the
+#      first MiB's frames), 1 <= S <= 8; kmain_frames' line obeys the
+#      same F = T - L - S.
+#   F3 exhaust: kmain_frames allocates exactly F frames, then
+#      `out_of_memory` by name; every frame checked against the map read
+#      independently: `checks: misaligned 0, outside usable 0, below
+#      1 MiB 0, in image 0, in allocator 0` (the image's physical extent
+#      from Limine's Executable Address response and the linker's
+#      bounds, printed on the `image:` line, which must be non-empty).
+#   F4 touch: every one of the F frames written through the HHDM (its
+#      address, a chain link, its address xor a pattern; volatile) and
+#      read back along the chain: `touch: F frames written and read
+#      back, 0 mismatches` — a frame handed out twice loses its first
+#      tag and shortens the chain, so this is also distinctness.
+#   F5 reuse: freeing the last frame and allocating once returns that
+#      frame (`reuse: freed 0x<a>, alloc returned 0x<a>`); freeing all
+#      F restores `F free`; a second exhaust gets F again, then
+#      `out_of_memory`.
+#   F6 double free: kmain_double_free's log ends
+#        free twice: 0x<a>
+#        PANIC frames: double free 0x<a>
+#      (the same address), and the kernel halted.
+#   F7 never usable: kmain_free_unusable's log ends
+#        free the image: 0x<a>
+#        PANIC frames: free of a frame never usable 0x<a>
+#      (the image's physical base, non-zero), and the kernel halted.
+#   F8 halted: kmain and kmain_frames end in `halt` and tools/qemu-halt
+#      holds each to RIP in pax_halt, IF clear, HLT=1, no further byte.
+#
+# --images DIR boots ISOs and ELFs built earlier by this script (DIR
+# holds <tier>/<kernel>.{iso,elf}): any host with QEMU, no wolf needed.
+# Without it the script builds with $PAX_WOLF (linux); --no-boot stops
+# after the build (F1), leaving them in build/mpx2.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+
+images= legs=both tiers=both noboot=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "usage: tests/mpx2-frames [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+
+kernels="kmain kmain_frames kmain_double_free kmain_free_unusable"
+work=$PAX_BUILD/mpx2
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        for k in $kernels; do
+            log=$work/$tier/$k.build-kernel.log
+            if [ ! -f "$PAX_ROOT/kernel/$k.lu" ]; then
+                bad "F1 $tier $k: no kernel/$k.lu"
+                continue
+            fi
+            if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/$k.lu" "$work/$tier" 2>"$log"); then
+                cat "$log" >&2
+                say "PASS F1 $tier $k: build-kernel's assertions"
+                "$PAX_ROOT/tools/mkimage" "$elf" "$work/$tier/$k.iso" >/dev/null || bad "$tier $k: mkimage"
+                say "built $tier $k: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/$k.iso")"
+            else
+                cat "$log" >&2
+                bad "F1 $tier $k: tools/build-kernel"
+            fi
+        done
+    done
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx2-frames build (F1): PASS (no boot: --no-boot)" || say "mpx2-frames build: FAIL"
+        exit "$fail"
+    fi
+fi
+
+# Boot one kernel to its halt; leaves the log in $log. Status: qemu-halt's.
+halt_boot() { # tier kernel leg marker-ERE
+    local tier=$1 k=$2 leg=$3 marker=$4
+    log=$PAX_BUILD/mpx2-$tier-$k-$leg.serial.log
+    local iso=$images/$tier/$k.iso elf=$images/$tier/$k.elf rc=0
+    rm -f "$log" "$log.verdict"
+    [ -f "$iso" ] && [ -f "$elf" ] || { say "no image or ELF for $tier $k ($iso)"; : > "$log"; return 2; }
+    "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 180 \
+        --elf "$elf" --marker "$marker" "$iso" >"$log.verdict" 2>&1 || rc=$?
+    ran=$((ran + 1))
+    printf '%s %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$tier" "$k" "$leg" "$rc" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" "$(sha256_of "$iso")" \
+        >> "$PAX_BUILD/mpx2-runs.txt"
+    return "$rc"
+}
+
+# The value of the last line of the normalised log matching sed BRE $2
+# with one group.
+grab() { serial_norm "$1" | sed -n "s/^$2\$/\\1/p" | tail -n 1; }
+
+halted() { # assertion label status
+    if [ "$3" = 0 ]; then
+        say "PASS $1 $2: halted: $(tail -n 1 "$log.verdict")"
+    else
+        bad "$1 $2: not halted (qemu-halt $3): $(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict")"
+    fi
+}
+
+FRAMES_RE='frames: [0-9]+ usable, [0-9]+ below 1 MiB, [0-9]+ allocator, [0-9]+ free'
+HEX='0x[0-9a-f]{16}'
+
+: > "$PAX_BUILD/mpx2-runs.txt"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        # --- kmain: F2, F8 ---------------------------------------------
+        hrc=0; halt_boot "$tier" kmain "$leg" halt || hrc=$?
+        if "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
+            'hhdm: 0xffff[89a-f][0-9a-f]{8}000' "$FRAMES_RE" 'halt'; then
+            u=$(grab "$log" 'mem: [0-9]* entries, \([0-9]*\) bytes usable')
+            T=$(grab "$log" 'frames: \([0-9]*\) usable, .*')
+            L=$(grab "$log" 'frames: [0-9]* usable, \([0-9]*\) below 1 MiB, .*')
+            S=$(grab "$log" 'frames: .* below 1 MiB, \([0-9]*\) allocator, .*')
+            F=$(grab "$log" 'frames: .* allocator, \([0-9]*\) free')
+            if [ -n "$u" ] && [ $((T * 4096)) = "$u" ] && [ "$F" = $((T - L - S)) ] \
+                && [ "$L" -le 256 ] && [ "$S" -ge 1 ] && [ "$S" -le 8 ]; then
+                say "PASS F2 $tier kmain $leg: T=$T (x4096 = $u, the mem line) L=$L S=$S F=$F"
+            else
+                bad "F2 $tier kmain $leg: mem $u bytes; T=$T L=$L S=$S F=$F"
+            fi
+        else
+            bad "F2 $tier kmain $leg: the transcript does not end hhdm, frames, halt"
+        fi
+        halted F8 "$tier kmain $leg" "$hrc"
+
+        # --- kmain_frames: F2..F5, F8 ----------------------------------
+        hrc=0; halt_boot "$tier" kmain_frames "$leg" halt || hrc=$?
+        if "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
+            'PAX frames test' "$FRAMES_RE" \
+            "image: $HEX to $HEX, allocator $HEX to $HEX" \
+            'exhaust: [0-9]+ frames, then out_of_memory' \
+            'checks: misaligned 0, outside usable 0, below 1 MiB 0, in image 0, in allocator 0' \
+            'touch: [0-9]+ frames written and read back, 0 mismatches' \
+            "reuse: freed $HEX, alloc returned $HEX" \
+            'free: [0-9]+ frames freed, [0-9]+ free' \
+            'again: [0-9]+ frames, then out_of_memory' \
+            'halt'; then
+            T=$(grab "$log" 'frames: \([0-9]*\) usable, .*')
+            L=$(grab "$log" 'frames: [0-9]* usable, \([0-9]*\) below 1 MiB, .*')
+            S=$(grab "$log" 'frames: .* below 1 MiB, \([0-9]*\) allocator, .*')
+            F=$(grab "$log" 'frames: .* allocator, \([0-9]*\) free')
+            il=$(grab "$log" 'image: \(0x[0-9a-f]*\) to .*'); ih=$(grab "$log" 'image: 0x[0-9a-f]* to \(0x[0-9a-f]*\), .*')
+            N=$(grab "$log" 'exhaust: \([0-9]*\) frames, .*')
+            M=$(grab "$log" 'touch: \([0-9]*\) frames .*')
+            ra=$(grab "$log" 'reuse: freed \(0x[0-9a-f]*\), .*'); rb=$(grab "$log" 'reuse: .*, alloc returned \(0x[0-9a-f]*\)')
+            fr=$(grab "$log" 'free: \([0-9]*\) frames freed, .*'); fc=$(grab "$log" 'free: .* freed, \([0-9]*\) free')
+            A=$(grab "$log" 'again: \([0-9]*\) frames, .*')
+            [ "$F" = $((T - L - S)) ] && [ "$F" -gt 0 ] \
+                && say "PASS F2 $tier kmain_frames $leg: T=$T L=$L S=$S F=$F" \
+                || bad "F2 $tier kmain_frames $leg: T=$T L=$L S=$S F=$F"
+            [ "$N" = "$F" ] && [ $((ih)) -gt $((il)) ] && [ $((il)) -gt 0 ] \
+                && say "PASS F3 $tier kmain_frames $leg: $N = F frames, then out_of_memory; every check 0; image $il..$ih" \
+                || bad "F3 $tier kmain_frames $leg: exhaust $N, F $F, image $il..$ih"
+            [ "$M" = "$F" ] \
+                && say "PASS F4 $tier kmain_frames $leg: $M frames written and read back, 0 mismatches" \
+                || bad "F4 $tier kmain_frames $leg: touched $M, F $F"
+            [ "$ra" = "$rb" ] && [ "$fr" = "$F" ] && [ "$fc" = "$F" ] && [ "$A" = "$F" ] \
+                && say "PASS F5 $tier kmain_frames $leg: freed $ra, got $rb back; $fr freed, $fc free; again $A" \
+                || bad "F5 $tier kmain_frames $leg: reuse $ra/$rb, freed $fr, free $fc, again $A, F $F"
+        else
+            bad "F2-F5 $tier kmain_frames $leg: the transcript"
+        fi
+        halted F8 "$tier kmain_frames $leg" "$hrc"
+
+        # --- kmain_double_free: F6 -------------------------------------
+        hrc=0; halt_boot "$tier" kmain_double_free "$leg" 'PANIC .*' || hrc=$?
+        a=$(grab "$log" 'free twice: \(0x[0-9a-f]*\)')
+        if [ -n "$a" ] && [ "$a" != 0x0000000000000000 ] && "$PAX_ROOT/tools/expect-serial" --tail "$log" \
+            "free twice: $a" "PANIC frames: double free $a" && [ "$hrc" = 0 ]; then
+            say "PASS F6 $tier kmain_double_free $leg: PANIC frames: double free $a, halted"
+        else
+            bad "F6 $tier kmain_double_free $leg: the panic line or the halt (qemu-halt $hrc, address '$a')"
+        fi
+
+        # --- kmain_free_unusable: F7 -----------------------------------
+        hrc=0; halt_boot "$tier" kmain_free_unusable "$leg" 'PANIC .*' || hrc=$?
+        a=$(grab "$log" 'free the image: \(0x[0-9a-f]*\)')
+        if [ -n "$a" ] && [ "$a" != 0x0000000000000000 ] && "$PAX_ROOT/tools/expect-serial" --tail "$log" \
+            "free the image: $a" "PANIC frames: free of a frame never usable $a" && [ "$hrc" = 0 ]; then
+            say "PASS F7 $tier kmain_free_unusable $leg: PANIC frames: free of a frame never usable $a, halted"
+        else
+            bad "F7 $tier kmain_free_unusable $leg: the panic line or the halt (qemu-halt $hrc, address '$a')"
+        fi
+    done
+done
+cat "$PAX_BUILD/mpx2-runs.txt"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx2-frames: PASS" || say "mpx2-frames: FAIL"
+exit "$fail"
