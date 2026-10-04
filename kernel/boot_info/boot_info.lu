@@ -1,38 +1,91 @@
-//! boot_info — what Limine handed the kernel (px01, M-PX1).
+//! boot_info — what Limine handed the kernel (px01, M-PX1; px02).
 //!
-//! The requests are in boot/start.S and their responses are read in
-//! boot/limine.S, one fresh load per call, because Limine writes the
-//! response pointers after the image is built and wolf has neither
-//! volatile access (KWC kw07) nor integer-to-pointer lowering (kw06)
-//! yet. This module turns those integers into the kernel's vocabulary.
-//! Written from Limine's PROTOCOL.md (limine-protocol 3a0526b7).
+//! The requests are in boot/start.S. Limine writes each response
+//! pointer after the image is built (docs/BOOT.md clause 5), so every
+//! read of a bootloader-written word here is one `read_volatile`
+//! (wolf-lang kw07), through an address cast to a pointer (`N as *T`,
+//! kw06), afresh on every call. boot/limine.S only hands over each
+//! request's address: wolf cannot name a symbol the assembler defines
+//! (wolf-lang#529). Responses are bootloader memory (bootloader-
+//! reclaimable, mapped in the HHDM); their pointers are virtual
+//! addresses the kernel can follow as they are.
+//!
+//! Layouts, from Limine's PROTOCOL.md (limine-protocol 3a0526b7),
+//! read word by word at fixed offsets until kw08's `offset_of`:
+//!   request: id[4] (0..31), revision (32), response pointer (40)
+//!   bootloader info: revision, name (8), version (16): C strings
+//!   firmware type: revision, type (8)
+//!   HHDM: revision, offset (8)
+//!   memory map: revision, entry_count (8), entries (16): an array of
+//!     pointers to {base (0), length (8), type (16)}
+//!   executable address: revision, physical_base (8), virtual_base (16)
+//!   base revision tag: three words; Limine zeroes the third (16)
 
-extern "c" fn pax_boot_revision_ok() -> int
-extern "c" fn pax_boot_str(which: int, i: int) -> int
-extern "c" fn pax_boot_firmware() -> int
-extern "c" fn pax_boot_hhdm() -> u64
-extern "c" fn pax_boot_memmap_count() -> int
-extern "c" fn pax_boot_memmap(i: int, field: int) -> u64
+extern "c" fn pax_limine_request(which: int) -> u64
+extern "c" fn pax_image_bounds(which: int) -> u64
+
+/// One bootloader-written 64-bit word at virtual address `a` (8-aligned).
+fn word(a: u64) -> u64 {
+    // # Safety: `a` is inside a Limine request or response (each read
+    // below names which), mapped and 8-aligned by the protocol.
+    unsafe { (a as *u64).read_volatile() }
+}
+
+/// Request `which`'s response pointer (limine.S's numbering: 1
+/// bootloader info, 2 firmware type, 3 memory map, 4 HHDM, 5 executable
+/// address), or 0 when Limine gave none.
+fn response(which: int) -> u64 {
+    // # Safety: limine.S returns a request's address and reads nothing.
+    let req = unsafe { pax_limine_request(which) }
+    if req == 0 {
+        return 0
+    }
+    word(req + 40)
+}
 
 /// The bootloader's name (`which` 0) or version (`which` 1): its byte
-/// `i`, or -1 past the end or without a response.
+/// `i` (0..=255), or -1 past the end, past 255 or without a response.
 pub fn loader_byte(which: int, i: int) -> int {
-    // # Safety: limine.S reads the bootloader-info response.
-    unsafe { pax_boot_str(which, i) }
+    let r = response(1)
+    if r == 0 || i < 0 || i > 255 {
+        return -1
+    }
+    let s = if which == 0 { word(r + 8) } else { word(r + 16) }
+    if s == 0 {
+        return -1
+    }
+    var k = 0
+    while k <= i {
+        // # Safety: a C string Limine wrote; bytes up to its NUL are
+        // inside it, and k never passes the NUL (the loop stops there).
+        let b = unsafe { ((s + k as u64) as *u8).read_volatile() } as int
+        if b == 0 {
+            return -1
+        }
+        if k == i {
+            return b
+        }
+        k = k + 1
+    }
+    -1
 }
 
 /// Whether Limine honoured base revision 6 (boot/start.S refuses to
 /// call kmain otherwise, so a running kernel sees true).
 pub fn revision_ok() -> bool {
-    // # Safety: limine.S reads the base revision tag.
-    unsafe { pax_boot_revision_ok() } == 1
+    // # Safety: limine.S returns the tag's address and reads nothing.
+    let tag = unsafe { pax_limine_request(0) }
+    tag != 0 && word(tag + 16) == 0
 }
 
 /// The firmware type: 0 x86 BIOS, 1 32-bit UEFI, 2 64-bit UEFI, 3 SBI;
 /// -1 without a response.
 pub fn firmware() -> int {
-    // # Safety: limine.S reads the firmware-type response.
-    unsafe { pax_boot_firmware() }
+    let r = response(2)
+    if r == 0 {
+        return -1
+    }
+    word(r + 8) as int
 }
 
 /// The firmware type's name as the transcript prints it.
@@ -54,28 +107,51 @@ pub fn firmware_name(t: int) -> str {
 
 /// The higher-half direct map's offset, or 0 without a response.
 pub fn hhdm() -> u64 {
-    // # Safety: limine.S reads the HHDM response.
-    unsafe { pax_boot_hhdm() }
+    let r = response(4)
+    if r == 0 {
+        return 0
+    }
+    word(r + 8)
 }
 
 /// The memory map's entry count, or -1 without a response.
 pub fn memmap_count() -> int {
-    // # Safety: limine.S reads the memory-map response.
-    unsafe { pax_boot_memmap_count() }
+    let r = response(3)
+    if r == 0 {
+        return -1
+    }
+    word(r + 8) as int
+}
+
+/// Entry `i`'s field `f` (0 base, 1 length, 2 type), or 0 when `i` is
+/// out of range or there is no response (so check `i` first).
+fn memmap_field(i: int, f: int) -> u64 {
+    let r = response(3)
+    if r == 0 || i < 0 || i >= word(r + 8) as int {
+        return 0
+    }
+    let e = word(word(r + 16) + i as u64 * 8)
+    if e == 0 {
+        return 0
+    }
+    word(e + f as u64 * 8)
+}
+
+/// Entry `i`'s physical base address (0 out of range).
+pub fn memmap_base(i: int) -> u64 {
+    memmap_field(i, 0)
 }
 
 /// Entry `i`'s length in bytes (0 out of range).
 pub fn memmap_length(i: int) -> u64 {
-    // # Safety: limine.S bounds-checks i against the entry count.
-    unsafe { pax_boot_memmap(i, 1) }
+    memmap_field(i, 1)
 }
 
 /// Entry `i`'s type (0 usable, 1 reserved, 2 ACPI reclaimable, 3 ACPI
 /// NVS, 4 bad, 5 bootloader reclaimable, 6 executable and modules,
 /// 7 framebuffer, 8 reserved mapped; 0 out of range, so check `i`).
 pub fn memmap_type(i: int) -> u64 {
-    // # Safety: limine.S bounds-checks i against the entry count.
-    unsafe { pax_boot_memmap(i, 2) }
+    memmap_field(i, 2)
 }
 
 /// The bytes of every usable entry, summed (0 without a response).
@@ -90,4 +166,34 @@ pub fn usable_bytes() -> u64 {
         i = i + 1
     }
     total
+}
+
+/// The kernel image's physical base (the Executable Address response),
+/// or 0 without one.
+pub fn image_phys() -> u64 {
+    let r = response(5)
+    if r == 0 {
+        return 0
+    }
+    word(r + 8)
+}
+
+/// The kernel image's virtual base (the Executable Address response),
+/// or 0 without one.
+pub fn image_virt() -> u64 {
+    let r = response(5)
+    if r == 0 {
+        return 0
+    }
+    word(r + 16)
+}
+
+/// The kernel image's size in bytes, from its first byte to the end of
+/// its .bss (boot/kernel.ld's bounds, read by limine.S).
+pub fn image_bytes() -> u64 {
+    // # Safety: limine.S returns two link-time addresses, reads nothing.
+    let lo = unsafe { pax_image_bounds(0) }
+    // # Safety: as above.
+    let hi = unsafe { pax_image_bounds(1) }
+    hi - lo
 }
