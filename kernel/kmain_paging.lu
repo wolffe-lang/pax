@@ -1,0 +1,170 @@
+//! member: false
+// kmain_paging.lu — the paging exercise kernel (px03, tests/mpx2-paging
+// G2, G3, G4, G6, G8). It builds the frame allocator, then PAX's own
+// paging structures (kernel/paging), switches CR3 to them, and prints
+// what the test checks against QEMU's monitor:
+//
+//     PAX paging test
+//     frames: <T> usable, <L> below 1 MiB, <S> allocator, <F> free
+//     hhdm: 0x<offset>
+//     paging: limine cr3 0x<A>, pax cr3 0x<B>, <P> table frames
+//     image: phys 0x<p>, virt 0x<v>, text 0x<a> to 0x<b>, rodata 0x<c> to 0x<d>, data 0x<e> to 0x<f>
+//     cpu: cr0 0x<x>, cr4 0x<y>, efer 0x<z>
+//     map: 0x<va> to 0x<a>, <n> table frames, read 0x<a ^ pattern>, write seen at 0x<w>
+//     translate: 0x<va> is 0x<a>
+//     unmap: 0x<va> was 0x<a>, then not_mapped
+//     remap: 0x<va> to 0x<b>, read 0x<b ^ pattern>
+//     gone: 0x<va + 4096> mapped to 0x<a> and unmapped, then not_mapped
+//     halt
+//
+// The round trip (G6): two frames tagged through the HHDM (word 0 their
+// address xor 0x5a5a5a5a5a5a5a5a), the first mapped at a scratch address
+// in PML4 slot 320 (0xffffa00000000000), read there; a word written
+// there and read back through the HHDM; unmapped (with INVLPG); then the
+// second frame mapped at the same address and read there. Without the
+// INVLPG the processor may keep the first translation and read the
+// first tag. The second mapping is left in place for the monitor; a
+// second scratch page is mapped and unmapped, and must be absent.
+use boot_info
+use frames
+use log
+use paging
+use panic
+use serial
+
+fn word(va: u64) -> u64 {
+    // # Safety: `va` is mapped (the scratch page, or a frame in the
+    // HHDM) when this is called; 8-aligned.
+    unsafe { (va as *u64).read_volatile() }
+}
+
+fn set_word(va: u64, v: u64) {
+    // # Safety: as `word`.
+    unsafe { (va as *u64).write_volatile(v) }
+}
+
+fn range(label: str, lo: u64, hi: u64) {
+    log.put(label)
+    log.hex(lo)
+    log.put(" to ")
+    log.hex(hi)
+}
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX paging test")
+    let st = frames.start()
+    frames.report(st)
+    let hhdm = frames.hhdm(st)
+    log.put("hhdm: ")
+    log.hex(hhdm)
+    log.end()
+
+    let limine = paging.cr3()
+    let before = frames.free_count(st)
+    let pml4 = paging.start(st)
+    paging.report(st, limine, before)
+
+    log.put("image: phys ")
+    log.hex(boot_info.image_phys())
+    log.put(", virt ")
+    log.hex(boot_info.image_virt())
+    range(", text ", paging.bound(2), paging.bound(3))
+    range(", rodata ", paging.bound(4), paging.bound(5))
+    range(", data ", paging.bound(6), paging.bound(7))
+    log.end()
+
+    log.put("cpu: cr0 ")
+    log.hex(paging.cr0())
+    log.put(", cr4 ")
+    log.hex(paging.cr4())
+    log.put(", efer ")
+    log.hex(paging.efer())
+    log.end()
+
+    // G6: the round trip
+    let pat: u64 = 0x5a5a5a5a5a5a5a5a
+    let a = frames.alloc(st) else 0
+    let b = frames.alloc(st) else 0
+    if a == 0 || b == 0 {
+        panic.fail("paging test: no frames for the round trip", 0)
+    }
+    set_word(hhdm + a, a ^ pat)
+    set_word(hhdm + a + 8, 0)
+    set_word(hhdm + b, b ^ pat)
+    let va: u64 = 0xffffa00000000000
+    let rw_nx = paging.no_exec() | paging.writable()
+    let n = paging.map(st, pml4, va, a, rw_nx) else 9
+    if n == 9 {
+        panic.fail("paging test: map refused", va)
+    }
+    let r1 = word(va)
+    set_word(va + 8, 0x0123456789abcdef)
+    let seen = word(hhdm + a + 8)
+    log.put("map: ")
+    log.hex(va)
+    log.put(" to ")
+    log.hex(a)
+    log.put(", ")
+    log.dec(n as int)
+    log.put(" table frames, read ")
+    log.hex(r1)
+    log.put(", write seen at ")
+    log.hex(seen)
+    log.end()
+
+    let t = paging.translate(st, pml4, va) else 0
+    log.put("translate: ")
+    log.hex(va)
+    log.put(" is ")
+    log.hex(t)
+    log.end()
+
+    let was = paging.unmap(st, pml4, va) else 0
+    let gone = paging.translate(st, pml4, va) else |e| match e {
+        not_mapped => { 1 },
+        out_of_memory => { 2 },
+        misaligned => { 2 },
+        not_canonical => { 2 },
+        already_mapped => { 2 },
+        large_page => { 2 },
+    }
+    log.put("unmap: ")
+    log.hex(va)
+    log.put(" was ")
+    log.hex(was)
+    log.put(if gone == 1 { ", then not_mapped" } else { ", then STILL MAPPED" })
+    log.end()
+
+    let n2 = paging.map(st, pml4, va, b, rw_nx) else 9
+    if n2 == 9 {
+        panic.fail("paging test: remap refused", va)
+    }
+    let r2 = word(va)
+    log.put("remap: ")
+    log.hex(va)
+    log.put(" to ")
+    log.hex(b)
+    log.put(", read ")
+    log.hex(r2)
+    log.end()
+
+    let va2 = va + 4096
+    let n3 = paging.map(st, pml4, va2, a, rw_nx) else 9
+    if n3 == 9 {
+        panic.fail("paging test: map of the second page refused", va2)
+    }
+    let r3 = word(va2)
+    let was2 = paging.unmap(st, pml4, va2) else 0
+    let gone2 = paging.translate(st, pml4, va2) else 1
+    log.put("gone: ")
+    log.hex(va2)
+    log.put(" mapped to ")
+    log.hex(was2)
+    log.put(if r3 == a ^ pat && gone2 == 1 { " and unmapped, then not_mapped" } else { " and unmapped, then WRONG" })
+    log.end()
+    frames.free(st, a)
+
+    log.line("halt")
+    panic.halt()
+}

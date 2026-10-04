@@ -1,0 +1,41 @@
+//! member: false
+// kmain_text_write.lu — a write to the kernel's own text, after the
+// switch to PAX's paging structures, must fault (px03, tests/mpx2-paging
+// G7). The kernel prints the address it will write, writes one word
+// there, and would print one more line if the write returned:
+//
+//     PAX paging: write to text
+//     paging: limine cr3 0x<A>, pax cr3 0x<B>, <P> table frames
+//     write: text at 0x<a>
+//
+// Text is mapped read-execute (kernel/paging) and CR0.WP is set, so the
+// write takes a page fault (error code 0x3: present, a write,
+// supervisor; CR2 the address). There is no IDT yet (the interrupt
+// lanes'), and Limine leaves IDTR's limit at 0, so the fault cannot be
+// delivered: #GP, then #DF, then a triple fault. tests/mpx2-paging runs
+// QEMU with -no-reboot -no-shutdown, so the triple fault pauses the
+// machine, and reads CR2 and the fault through its monitor (and, under
+// TCG, `-d int`).
+use frames
+use log
+use paging
+use panic
+use serial
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX paging: write to text")
+    let st = frames.start()
+    let limine = paging.cr3()
+    let before = frames.free_count(st)
+    paging.start(st)
+    paging.report(st, limine, before)
+    let a = paging.bound(2) + 64
+    log.put("write: text at ")
+    log.hex(a)
+    log.end()
+    // # Safety: none — this write must fault; text is read-execute.
+    unsafe { (a as *u64).write_volatile(0) }
+    log.line("write: returned")
+    panic.halt()
+}
