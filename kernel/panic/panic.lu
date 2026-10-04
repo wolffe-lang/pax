@@ -1,4 +1,5 @@
-//! panic — the trap hook and the halt (px01, M-PX1).
+//! panic — the trap hook, the kernel's named faults and the halt
+//! (px01, M-PX1; `fail`, px02).
 //!
 //! `wolf_trap` is the freestanding target's one trap hook
 //! ([abi.target.none.hooks]): every trap on either tier calls it with
@@ -39,6 +40,19 @@ pub fn kind_name(kind: int) -> str {
 pub fn halt() {
     // # Safety: io.S's `cli; hlt` loop; it never returns.
     unsafe { pax_halt() }
+}
+
+/// A fault the kernel itself detects, by name (px02: the frame
+/// allocator's double free and its free of a frame never usable).
+/// Writes `PANIC <what> 0x<v>` (sixteen hex digits) and halts; it never
+/// returns.
+pub fn fail(what: str, v: u64) {
+    log.put("PANIC ")
+    log.put(what)
+    log.put(" ")
+    log.hex(v)
+    log.end()
+    halt()
 }
 
 /// The trap hook. Writes `PANIC <kind> <file>:<line>` and halts.
