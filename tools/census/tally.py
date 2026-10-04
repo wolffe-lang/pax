@@ -219,10 +219,10 @@ def tally(out, w, nums):
         for k, name, args, val, err in ev:
             if k != "call":
                 continue
+            if name in ("execve", "execveat") and val == "0":
+                img = exec_path(name, args)
             if not inscope(img):
                 excluded[img] += 1
-                if name in ("execve", "execveat") and val == "0":
-                    img = exec_path(name, args)
                 continue
             nprocs.add(pid)
             images[img] += 1
