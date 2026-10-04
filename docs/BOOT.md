@@ -112,7 +112,9 @@ into wolf: `kernel/boot_info` follows each response pointer with one
 volatile load per word, afresh per call, which is clause 5 met in wolf
 itself. `boot/limine.S` keeps only what wolf cannot spell: a symbol's
 address (each request's, and `boot/kernel.ld`'s `__pax_image_start` /
-`__pax_image_end`; wolf-lang#529). Measured on QEMU (q35, 256 MiB,
+`__pax_image_end`; wolf-lang#529) — until kw10, which retired it:
+with wolf-lang kw09's `extern "c" let`, `kernel/boot_info` and
+`kernel/paging` name those symbols themselves. Measured on QEMU (q35, 256 MiB,
 Limine 12.9.1): SeaBIOS 65147–65157 usable frames, 44 of them below
 1 MiB, the highest usable byte below `0x10000000`; OVMF 53784–54863
 usable frames (the count moves by about a thousand between the OVMF

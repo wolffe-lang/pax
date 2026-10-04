@@ -6,8 +6,8 @@
    so the NX and write bits it applies from p_flags are honest.
 
    px03: kernel/paging maps the image itself, one permission per
-   section, from the bounds below (returned to wolf by limine.S's
-   pax_image_bounds, wolf-lang#529): text [__pax_text_start,
+   section, from the bounds below (named in wolf with `extern "c" let`
+   since kw10; boot/limine.S returned them before): text [__pax_text_start,
    __pax_text_end) read-execute, rodata [__pax_rodata_start,
    __pax_rodata_end) read-only, data and bss [__pax_data_start,
    __pax_image_end) read-write no-execute. Each section starts on a page
@@ -27,7 +27,7 @@ SECTIONS
 {
     . = 0xffffffff80000000;
     __pax_image_start = .;      /* px02: the image's extent, for the */
-                                /* frame allocator's test (limine.S) */
+                                /* frame allocator's test (boot_info) */
 
     __pax_text_start = .;
     .text : { *(.text .text.*) } :text

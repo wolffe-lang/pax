@@ -26,7 +26,9 @@
    physical and virtual base), and moves the reading into wolf: since
    wolf-lang eb955c3b, kernel/boot_info follows each response pointer
    with `read_volatile` (kw07) through `N as *T` (kw06); limine.S only
-   hands wolf each request's address (wolf-lang#529).
+   handed wolf each request's address (wolf-lang#529). kw10 retires
+   limine.S: kernel/boot_info names each request with `extern "c" let`
+   (wolf-lang kw09), which is why each is global.
 
    Not listed in kernel/wolf.pkg: the boot code is the consumer's, and
    links wolf's object (K6(b)); tools/build-kernel assembles it.
