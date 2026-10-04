@@ -56,14 +56,14 @@ export fn kmain() {
     interrupts.start()
     log.line("PAX paging test")
     let st = frames.start()
-    frames.report(st)
-    let hhdm = frames.hhdm(st)
+    frames.report()
+    let hhdm = frames.hhdm()
     log.put("hhdm: ")
     log.hex(hhdm)
     log.end()
 
     let limine = paging.cr3()
-    let before = frames.free_count(st)
+    let before = frames.free_count()
     let pml4 = paging.start(st)
     paging.report(st, limine, before)
 
@@ -86,8 +86,8 @@ export fn kmain() {
 
     // G6: the round trip
     let pat: u64 = 0x5a5a5a5a5a5a5a5a
-    let a = frames.alloc(st) else 0
-    let b = frames.alloc(st) else 0
+    let a = frames.alloc() else 0
+    let b = frames.alloc() else 0
     if a == 0 || b == 0 {
         panic.fail("paging test: no frames for the round trip", 0)
     }
@@ -165,7 +165,7 @@ export fn kmain() {
     log.hex(was2)
     log.put(if r3 == a ^ pat && gone2 == 1 { " and unmapped, then not_mapped" } else { " and unmapped, then WRONG" })
     log.end()
-    frames.free(st, a)
+    frames.free(a)
 
     log.line("halt")
     panic.halt()

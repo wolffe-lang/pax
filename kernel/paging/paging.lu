@@ -180,19 +180,19 @@ pub fn bound(which: int) -> u64 {
 fn entry(st: u64, t: u64, i: u64) -> u64 {
     // # Safety: `t` is a page table this module allocated (or the live
     // PML4), a usable frame mapped in the HHDM; i < 512 keeps it inside.
-    unsafe { ((frames.hhdm(st) + t + i * 8) as *u64).read_volatile() }
+    unsafe { ((frames.hhdm() + t + i * 8) as *u64).read_volatile() }
 }
 
 /// Write entry `i` of the table at physical `t`.
 fn set_entry(st: u64, t: u64, i: u64, v: u64) {
     // # Safety: as `entry`.
-    unsafe { ((frames.hhdm(st) + t + i * 8) as *u64).write_volatile(v) }
+    unsafe { ((frames.hhdm() + t + i * 8) as *u64).write_volatile(v) }
 }
 
 /// A fresh frame, zeroed, for a table; 0 when the allocator is empty
 /// (frame 0 is never handed out: px02 withholds the first MiB).
 fn table_frame(st: u64) -> u64 {
-    let t = frames.alloc(st) else 0
+    let t = frames.alloc() else 0
     if t == 0 {
         return 0
     }
@@ -257,7 +257,7 @@ pub fn map(st: u64, pml4: u64, va: u64, pa: u64, flags: u64) -> u64 ! MapError {
     if !canonical(va) {
         return not_canonical
     }
-    let before = frames.free_count(st)
+    let before = frames.free_count()
     let pd = pd_of(st, pml4, va)
     if pd == 0 {
         return out_of_memory
@@ -277,7 +277,7 @@ pub fn map(st: u64, pml4: u64, va: u64, pa: u64, flags: u64) -> u64 ! MapError {
         return already_mapped
     }
     set_entry(st, pt, i, pa | flags | 1)
-    before - frames.free_count(st)
+    before - frames.free_count()
 }
 
 /// Map the 2 MiB page at `va` to `pa` (both 2 MiB aligned) with `flags`
@@ -290,7 +290,7 @@ pub fn map_large(st: u64, pml4: u64, va: u64, pa: u64, flags: u64) -> u64 ! MapE
     if !canonical(va) {
         return not_canonical
     }
-    let before = frames.free_count(st)
+    let before = frames.free_count()
     let pd = pd_of(st, pml4, va)
     if pd == 0 {
         return out_of_memory
@@ -303,7 +303,7 @@ pub fn map_large(st: u64, pml4: u64, va: u64, pa: u64, flags: u64) -> u64 ! MapE
         return already_mapped
     }
     set_entry(st, pd, i, pa | flags | 129)
-    before - frames.free_count(st)
+    before - frames.free_count()
 }
 
 /// The physical address `va` translates to in the structures at
@@ -415,7 +415,7 @@ fn map_section(st: u64, pml4: u64, lo: u64, hi: u64, flags: u64) {
 /// no-execute: 2 MiB pages where a whole aligned 2 MiB lies inside,
 /// 4 KiB pages elsewhere.
 fn map_run(st: u64, pml4: u64, lo: u64, hi: u64) {
-    let hhdm = frames.hhdm(st)
+    let hhdm = frames.hhdm()
     let rw_nx = no_exec() | 2
     var a = lo
     while a < hi {
@@ -544,7 +544,7 @@ pub fn report(st: u64, limine_cr3: u64, free_before: u64) {
     log.put(", pax cr3 ")
     log.hex(cr3())
     log.put(", ")
-    log.dec((free_before - frames.free_count(st)) as int)
+    log.dec((free_before - frames.free_count()) as int)
     log.put(" table frames")
     log.end()
 }
