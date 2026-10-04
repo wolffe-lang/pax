@@ -1,0 +1,28 @@
+//! member: false
+// kmain_double_free.lu — a double free, caught (px02, tests/mpx2-frames
+// F6). Builds the allocator, allocates one frame, frees it, and frees it
+// again: kernel/frames must panic by name,
+//
+//     PANIC frames: double free 0x<pa>
+//
+// with the address the line before printed, and halt. The line after
+// the second free is never reached.
+use frames
+use log
+use panic
+use serial
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX frames: double free")
+    let st = frames.start()
+    frames.report(st)
+    let pa = frames.alloc(st) else 0
+    log.put("free twice: ")
+    log.hex(pa)
+    log.end()
+    frames.free(st, pa)
+    frames.free(st, pa) // the double free
+    log.line("unreachable")
+    panic.halt()
+}

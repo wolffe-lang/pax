@@ -1,0 +1,226 @@
+//! member: false
+// kmain_frames.lu — the frame allocator's exercise kernel (px02,
+// tests/mpx2-frames F2–F5). It builds the allocator, then:
+//
+//   1. allocates until `out_of_memory`, checking every frame against
+//      the memory map read independently (aligned, inside a usable
+//      entry, at or above 1 MiB, outside the kernel image, outside the
+//      allocator's own state) and writing a tag into it through the
+//      HHDM: word 0 its own address, word 1 the previous frame's
+//      (a chain through every allocated frame), word 511 its address
+//      xor 0x5a5a5a5a5a5a5a5a;
+//   2. walks the chain back, reading every tag (a frame handed out
+//      twice loses its first holder's tag and shortens the chain);
+//   3. frees the last frame and allocates once: the allocator, empty
+//      but for that frame, must hand that frame back;
+//   4. frees every frame along the chain: the free count returns to
+//      what `init` left;
+//   5. allocates until `out_of_memory` again.
+//
+// Volatile accesses for the tags: a write followed by a read of the
+// same word is exactly what an optimiser folds, and the point is that
+// the frame's memory holds them.
+//
+//     PAX frames test
+//     frames: <T> usable, <L> below 1 MiB, <S> allocator, <F> free
+//     image: 0x<lo> to 0x<hi>, allocator 0x<lo> to 0x<hi>
+//     exhaust: <N> frames, then out_of_memory
+//     checks: misaligned 0, outside usable 0, below 1 MiB 0, in image 0, in allocator 0
+//     touch: <N> frames written and read back, 0 mismatches
+//     reuse: freed 0x<pa>, alloc returned 0x<pa>
+//     free: <N> frames freed, <F> free
+//     again: <N> frames, then out_of_memory
+//     halt
+use boot_info
+use frames
+use log
+use panic
+use serial
+
+/// Whether [pa, pa + 4096) lies inside one usable entry of the map.
+fn in_usable(pa: u64) -> bool {
+    let n = boot_info.memmap_count()
+    var i = 0
+    while i < n {
+        if boot_info.memmap_type(i) == 0 {
+            let b = boot_info.memmap_base(i)
+            if pa >= b && pa + 4096 <= b + boot_info.memmap_length(i) {
+                return true
+            }
+        }
+        i += 1
+    }
+    false
+}
+
+/// Tag frame `pa` through the HHDM: its address, the chain link, the
+/// address xor the pattern.
+fn tag(hhdm: u64, pa: u64, prev: u64) {
+    // # Safety: `pa` is a frame the allocator just handed out (so usable
+    // RAM, mapped in the HHDM); words 0, 1 and 511 are inside it.
+    unsafe {
+        let p = (hhdm + pa) as *u64
+        p.write_volatile(pa)
+        let q = p.with_addr(p.addr() + 8)
+        q.write_volatile(prev)
+        let z = p.with_addr(p.addr() + 4088)
+        z.write_volatile(pa ^ 0x5a5a5a5a5a5a5a5a)
+    }
+}
+
+/// Word `k` (0..=511) of frame `pa`, through the HHDM.
+fn frame_word(hhdm: u64, pa: u64, k: u64) -> u64 {
+    // # Safety: `pa` is a frame this kernel holds; word k is inside it.
+    unsafe {
+        let p = (hhdm + pa) as *u64
+        let q = p.with_addr(p.addr() + (k * 8) as uint)
+        q.read_volatile()
+    }
+}
+
+fn line_range(label: str, lo: u64, hi: u64) {
+    log.put(label)
+    log.hex(lo)
+    log.put(" to ")
+    log.hex(hi)
+}
+
+/// Allocate until `out_of_memory`; the count. Asserts the row by name.
+fn drain(st: u64) -> u64 {
+    var n: u64 = 0
+    var pa = frames.alloc(st) else 0
+    while pa != 0 {
+        n += 1
+        pa = frames.alloc(st) else 0
+    }
+    n
+}
+
+/// Whether one more `alloc` answers `out_of_memory`, by name.
+fn is_oom(st: u64) -> bool {
+    let r = frames.alloc(st) else |e| match e {
+        out_of_memory => { 1 },
+    }
+    r == 1
+}
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX frames test")
+    let st = frames.start()
+    frames.report(st)
+    let hhdm = boot_info.hhdm()
+    let img_lo = boot_info.image_phys()
+    let img_hi = img_lo + boot_info.image_bytes()
+    let own_lo = frames.state_phys(st)
+    let own_hi = own_lo + frames.own(st) * 4096
+    line_range("image: ", img_lo, img_hi)
+    line_range(", allocator ", own_lo, own_hi)
+    log.end()
+
+    // 1. exhaust, checking and tagging every frame
+    var n: u64 = 0
+    var head: u64 = 0
+    var misaligned = 0
+    var outside = 0
+    var below = 0
+    var in_image = 0
+    var in_own = 0
+    var pa = frames.alloc(st) else 0
+    while pa != 0 {
+        if pa % 4096 != 0 {
+            misaligned += 1
+        }
+        if !in_usable(pa) {
+            outside += 1
+        }
+        if pa < 1048576 {
+            below += 1
+        }
+        if pa + 4096 > img_lo && pa < img_hi {
+            in_image += 1
+        }
+        if pa + 4096 > own_lo && pa < own_hi {
+            in_own += 1
+        }
+        if pa % 4096 == 0 {
+            tag(hhdm, pa, head)
+            head = pa
+        }
+        n += 1
+        pa = frames.alloc(st) else 0
+    }
+    log.put("exhaust: ")
+    log.dec(n as int)
+    log.put(if is_oom(st) { " frames, then out_of_memory" } else { " frames, then NOT out_of_memory" })
+    log.end()
+    log.put("checks: misaligned ")
+    log.dec(misaligned)
+    log.put(", outside usable ")
+    log.dec(outside)
+    log.put(", below 1 MiB ")
+    log.dec(below)
+    log.put(", in image ")
+    log.dec(in_image)
+    log.put(", in allocator ")
+    log.dec(in_own)
+    log.end()
+
+    // 2. read every tag back along the chain
+    var seen: u64 = 0
+    var bad: u64 = 0
+    var at = head
+    while at != 0 && seen < n {
+        if frame_word(hhdm, at, 0) != at || frame_word(hhdm, at, 511) != at ^ 0x5a5a5a5a5a5a5a5a {
+            bad += 1
+        }
+        seen += 1
+        at = frame_word(hhdm, at, 1)
+    }
+    if seen < n {
+        bad = bad + (n - seen)
+    }
+    if at != 0 {
+        bad += 1 // the chain runs past n frames
+    }
+    log.put("touch: ")
+    log.dec(seen as int)
+    log.put(" frames written and read back, ")
+    log.dec(bad as int)
+    log.put(" mismatches")
+    log.end()
+
+    // 3. free one, allocate one: the same frame
+    frames.free(st, head)
+    let back = frames.alloc(st) else 0
+    log.put("reuse: freed ")
+    log.hex(head)
+    log.put(", alloc returned ")
+    log.hex(back)
+    log.end()
+
+    // 4. free every frame along the chain
+    var freed: u64 = 0
+    at = head
+    while at != 0 && freed < n {
+        let next = frame_word(hhdm, at, 1)
+        frames.free(st, at)
+        freed += 1
+        at = next
+    }
+    log.put("free: ")
+    log.dec(freed as int)
+    log.put(" frames freed, ")
+    log.dec(frames.free_count(st) as int)
+    log.put(" free")
+    log.end()
+
+    // 5. exhaust again
+    let again = drain(st)
+    log.put("again: ")
+    log.dec(again as int)
+    log.put(if is_oom(st) { " frames, then out_of_memory" } else { " frames, then NOT out_of_memory" })
+    log.end()
+    log.line("halt")
+    panic.halt()
+}
