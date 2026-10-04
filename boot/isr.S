@@ -104,7 +104,7 @@ pax_isr\v:
         ISR_ERR   11
         ISR_ERR   12
         ISR_ERR   13
-        ISR_ERR   14
+        ISR_NOERR 14
         ISR_NOERR 15
         ISR_NOERR 16
         ISR_ERR   17
