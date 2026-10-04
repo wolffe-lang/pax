@@ -34,8 +34,9 @@
 
    Written from: the Intel 64 and IA-32 SDM vol. 2 (MOV to/from control
    registers, RDMSR, WRMSR, INVLPG, CPUID leaf 0x80000001), vol. 3A §2.5
-   (control registers; CR2, the page-fault linear address, kw10), §2.2.1 (IA32_EFER: SCE bit 0, LME 8, LMA 10,
-   NXE 11), §11.4.4 (IA32_APIC_BASE, kw10), §4.10.4.1 (what MOV to CR3 and INVLPG invalidate); the AMD64
+   (control registers; kw10: CR2, the page-fault linear address), §2.2.1
+   (IA32_EFER: SCE bit 0, LME 8, LMA 10, NXE 11), §4.10.4.1 (what MOV to
+   CR3 and INVLPG invalidate), §11.4.4 (kw10: IA32_APIC_BASE); the AMD64
    APM vol. 2 §3.1.7 (EFER) and §5.5 (TLB invalidation); the x86-64
    psABI. No Linux source; no other kernel's source. */
 
