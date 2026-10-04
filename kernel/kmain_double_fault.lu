@@ -1,0 +1,43 @@
+//! member: false
+// kmain_double_fault.lu — a double fault on a known-bad stack lands on
+// IST1 and panics by name (kw10, tests/mpx2-interrupts I4). The kernel
+// switches to PAX's paging structures (nothing in the lower half,
+// tests/mpx2-paging G4), loads its GDT, TSS and IDT, and calls
+// boot/isr.S's pax_bad_stack: %rsp = 0x1000, then a push. The push
+// faults (#PF at 0xff8); delivering it needs the same stack, so the
+// CPU faults again while delivering a page fault — a double fault
+// (Intel SDM vol. 3A §6.15, interrupt 8, Table 6-5). Vector 8's gate
+// names IST1 (kernel/idt), so the CPU switches to the TSS's IST1 stack
+// first (SDM vol. 3A §6.14.5) and the handler runs there:
+//
+//     PAX interrupts: double fault
+//     paging: limine cr3 0x<A>, pax cr3 0x<B>, <P> table frames
+//     gdt: 0x<base>, 7 descriptors, tss 0x28 at 0x<tss>, ist1 0x<lo> to 0x<hi>
+//     idt: 0x<base>, 256 gates, 48 routed, #DF on ist1
+//     PANIC double fault vector 8 error 0x0000000000000000 rip 0x<r> rsp 0x<s> frame 0x<f>
+//
+// with the frame inside [lo, hi), and halts.
+use frames
+use interrupts
+use log
+use paging
+use panic
+use serial
+
+extern "c" fn pax_bad_stack()
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX interrupts: double fault")
+    let st = frames.start()
+    let limine = paging.cr3()
+    let before = frames.free_count(st)
+    paging.start(st)
+    paging.report(st, limine, before)
+    interrupts.start()
+    interrupts.report()
+    // # Safety: none — this must double-fault; the handler halts.
+    unsafe { pax_bad_stack() }
+    log.line("bad stack: returned")
+    panic.halt()
+}
