@@ -1,0 +1,81 @@
+#!/bin/sh
+# tests/census — the census tools' own proof (px04). No container, no
+# tracing: python3 only.
+#
+#   C1  tally.py on a hand-written strace -ff fixture (tests/census.d):
+#       attribution by process image (a fork child's pre-exec calls belong
+#       to the parent; the execve that succeeds belongs to the new image;
+#       a thread inherits its creator's image), unfinished/resumed lines,
+#       errnos (incl. ERESTARTSYS), /proc and /dev paths (from path
+#       arguments only, never a buffer), ioctl requests.
+#   C2  report.py --check: the committed union, milestone tables and
+#       docs/CENSUS.md are exactly what the committed tallies generate.
+#   C3  every system call in the committed census has a number in
+#       tools/census/syscall_64.csv and a P3 lane.
+set -eu
+cd "$(dirname "$0")/.."
+fail=0
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+cp -R tests/census.d/out "$tmp/out"
+python3 tools/census/tally.py "$tmp/out" boreutils-static > "$tmp/tally.log"
+if python3 - "$tmp/out" <<'PY'
+import json, sys
+t = json.load(open(sys.argv[1] + "/boreutils-static/tally.json"))
+sc = t["syscalls"]
+want = {
+    "execve": (1, 0), "arch_prctl": (1, 0), "brk": (2, 0), "readlinkat": (1, 0),
+    "openat": (2, 1), "ioctl": (1, 1), "clone3": (1, 0), "read": (1, 0),
+    "write": (2, 0), "exit_group": (1, 0), "rseq": (1, 0), "set_robust_list": (1, 0),
+    "futex": (1, 1), "exit": (1, 0),
+}
+bad = []
+for n, (calls, errs) in want.items():
+    got = sc.get(n)
+    if not got or (got["calls"], got["errors"]) != (calls, errs):
+        bad.append(f"{n}: want {calls} calls/{errs} errors, got {got and (got['calls'], got['errors'])}")
+extra = sorted(set(sc) - set(want))
+if extra:
+    bad.append(f"counted outside the boreutils image: {extra}")
+if sc.get("futex", {}).get("errnos") != {"ERESTARTSYS": 1}:
+    bad.append(f"futex errnos {sc.get('futex', {}).get('errnos')}")
+if sc.get("openat", {}).get("errnos") != {"EACCES": 1}:
+    bad.append(f"openat errnos {sc.get('openat', {}).get('errnos')}")
+if t["images"] != {"/stage/bore/static/echo": 17}:
+    bad.append(f"images {t['images']}")
+if t["excluded_images"] != {"/usr/bin/python3": 10}:
+    bad.append(f"excluded {t['excluded_images']}")
+paths = set(t["paths"])
+for p in ("/proc/self/exe", "/proc/[pid]/status", "/dev/stdout"):
+    if p not in paths:
+        bad.append(f"path {p} missing from {sorted(paths)}")
+if len(paths) != 3:
+    bad.append(f"a buffer was read as a path: {sorted(paths)}")
+if t["ops"].get("ioctl") != {"TCGETS on pipe": 1}:
+    bad.append(f"ioctl ops {t['ops'].get('ioctl')}")
+if t["ops"].get("arch_prctl") != {"ARCH_SET_FS": 1}:
+    bad.append(f"arch_prctl ops {t['ops'].get('arch_prctl')}")
+if t["processes_in_scope"] != 2 or t["processes_traced"] != 3:
+    bad.append(f"processes {t['processes_in_scope']}/{t['processes_traced']}")
+for b in bad:
+    print("  " + b)
+sys.exit(1 if bad else 0)
+PY
+then echo "C1 PASS tally attribution on the fixture"; else echo "C1 FAIL tally attribution on the fixture"; fail=1; fi
+
+if python3 tools/census/report.py tools/census/out docs/CENSUS.md --check; then
+    echo "C2 PASS committed census regenerates byte-identically"
+else
+    echo "C2 FAIL committed census is stale"; fail=1
+fi
+
+if python3 - <<'PY'
+import csv, sys
+nums = {r["name"] for r in csv.DictReader(l for l in open("tools/census/syscall_64.csv") if not l.startswith("#"))}
+bad = [r["syscall"] for r in csv.DictReader(open("tools/census/out/union.csv"))
+       if r["syscall"] not in nums or not r["number"] or r["lane"] in ("", "UNASSIGNED")]
+print("  unnumbered or unassigned:", bad) if bad else None
+sys.exit(1 if bad else 0)
+PY
+then echo "C3 PASS every census call has a number and a lane"; else echo "C3 FAIL"; fail=1; fi
+exit $fail
