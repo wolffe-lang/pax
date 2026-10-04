@@ -91,7 +91,7 @@ fn line_range(label: str, lo: u64, hi: u64) {
 }
 
 /// Allocate until `out_of_memory`; the count. Asserts the row by name.
-fn drain(st: u64) -> u64 {
+fn drain() -> u64 {
     var n: u64 = 0
     var pa = frames.alloc() else 0
     while pa != 0 {
@@ -102,7 +102,7 @@ fn drain(st: u64) -> u64 {
 }
 
 /// Whether one more `alloc` answers `out_of_memory`, by name.
-fn is_oom(st: u64) -> bool {
+fn is_oom() -> bool {
     let r = frames.alloc() else |e| match e {
         out_of_memory => { 1 },
     }
@@ -113,12 +113,12 @@ export fn kmain() {
     serial.init()
     interrupts.start()
     log.line("PAX frames test")
-    let st = frames.start()
+    frames.start()
     frames.report()
     let limine = paging.cr3()
     let before = frames.free_count()
-    paging.start(st)
-    paging.report(st, limine, before)
+    paging.start()
+    paging.report(limine, before)
     let hhdm = boot_info.hhdm()
     let img_lo = boot_info.image_phys()
     let img_hi = img_lo + boot_info.image_bytes()
@@ -162,7 +162,7 @@ export fn kmain() {
     }
     log.put("exhaust: ")
     log.dec(n as int)
-    log.put(if is_oom(st) { " frames, then out_of_memory" } else { " frames, then NOT out_of_memory" })
+    log.put(if is_oom() { " frames, then out_of_memory" } else { " frames, then NOT out_of_memory" })
     log.end()
     log.put("checks: misaligned ")
     log.dec(misaligned)
@@ -226,10 +226,10 @@ export fn kmain() {
     log.end()
 
     // 5. exhaust again
-    let again = drain(st)
+    let again = drain()
     log.put("again: ")
     log.dec(again as int)
-    log.put(if is_oom(st) { " frames, then out_of_memory" } else { " frames, then NOT out_of_memory" })
+    log.put(if is_oom() { " frames, then out_of_memory" } else { " frames, then NOT out_of_memory" })
     log.end()
     log.line("halt")
     panic.halt()

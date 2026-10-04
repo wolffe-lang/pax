@@ -75,15 +75,15 @@ fn write(offset: u64, v: u32) {
 }
 
 /// Map the APIC's page at DEVICE_VA in the structures at `pml4` (from
-/// `st`'s frames: kernel/paging must have switched to them), and set
+/// the frame allocator's frames: kernel/paging must have switched to them), and set
 /// LINT0 to ExtINT, unmasked: the 8259's requests reach the CPU.
-pub fn start(st: u64, pml4: u64) {
+pub fn start(pml4: u64) {
     if !enabled() {
         panic.fail("apic: the local APIC is globally disabled; IA32_APIC_BASE", phys())
         return
     }
     let uncached: u64 = 24 // PWT (bit 3), PCD (bit 4)
-    let n = paging.map(st, pml4, DEVICE_VA, phys(), paging.no_exec() | paging.writable() | uncached) else 9
+    let n = paging.map(pml4, DEVICE_VA, phys(), paging.no_exec() | paging.writable() | uncached) else 9
     if n == 9 {
         panic.fail("apic: cannot map the local APIC's page at", DEVICE_VA)
         return

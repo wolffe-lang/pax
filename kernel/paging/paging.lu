@@ -50,16 +50,21 @@
 //! live structures needs INVLPG for its page (SDM vol. 3A §4.10.4.1,
 //! APM vol. 2 §5.5), which `unmap` issues.
 //!
-//! Every function takes `st`, the frame allocator's state: page tables
-//! come from it (each zeroed here: frames come back unzeroed) and are
-//! reached through its HHDM offset. wolf has no module state yet
-//! (wolf-lang#529, KWC kw09), so `st` and the PML4's physical address
-//! are threaded through every call. Table entries are read and written
+//! Page tables come from px02's frame allocator (each zeroed here:
+//! frames come back unzeroed) and are reached through its HHDM offset;
+//! the allocator finds its own state (a module `var`, px05), so no
+//! function here takes it (px03 threaded the allocator's `st` through
+//! every call, because wolf had no module state, wolf-lang#529). The
+//! PML4's physical address is still an argument: `build` fills
+//! structures that are not live yet. Table entries are read and written
 //! with `read_volatile`/`write_volatile`: the processor's page walker
 //! reads them behind the compiler's back.
 //!
-//! Flag values are literals named where they are used: wolf refuses a
-//! module-level `const` on both compiling tiers (wolf-lang#560).
+//! Flag values, masks and sizes are module `const`s (px05; px03 wrote
+//! them as literals, wolf-lang#560). The flags other modules use are
+//! also `pub fn`s (`present`, `writable`, `no_exec`): a `pub const`
+//! read from another module is refused (wolf-lang#579). wolf has no
+//! bitwise complement (wolf-lang#575), so masks are spelled whole.
 //!
 //! Written from the Intel 64 and IA-32 SDM vol. 3A ch. 4 (§4.1.3, §4.5,
 //! §4.6, §4.10.4) and the AMD64 APM vol. 2 ch. 5 (§5.3, §5.4, §5.5, §5.6)
@@ -95,25 +100,47 @@ pub error MapError = {out_of_memory, misaligned, not_canonical, already_mapped, 
 
 // --- flags -----------------------------------------------------------------
 
+const P: u64 = 0x1 // present
+const RW: u64 = 0x2 // writable
+const PS: u64 = 0x80 // a 2 MiB page (in a PD entry) or 1 GiB (in a PDPT entry)
+const NX: u64 = 0x8000000000000000 // XD/NX, bit 63: no-execute
+const ADDR: u64 = 0x000ffffffffff000 // bits 51:12: the next table's or a 4 KiB page's address
+const ADDR_2M: u64 = 0x000fffffffe00000 // bits 51:21: a 2 MiB page's address
+const TABLE: u64 = P | RW // an upper-level entry: present, writable, supervisor; the leaf decides
+
+const PAGE: u64 = 4096
+const LARGE: u64 = 2097152 // 2 MiB
+const ENTRIES: u64 = 512
+const ENTRY_BYTES: u64 = 8
+const INDEX_BITS: u64 = 9
+const PAGE_SHIFT: u64 = 12
+const CANONICAL_SHIFT: u64 = 47 // bits 63:47 must all equal bit 47
+const CANONICAL_HIGH: u64 = 0x1ffff // bits 63:47 of a higher-half address
+
+const EFER_NXE: u64 = 0x800 // IA32_EFER bit 11
+const CR0_WP: u64 = 0x10000 // CR0 bit 16
+const CR4_PGE: u64 = 0x80 // CR4 bit 7
+
+// Limine's memory-map types (kernel/boot_info).
+const MEM_USABLE: u64 = 0
+const MEM_ACPI_RECLAIMABLE: u64 = 2
+const MEM_ACPI_NVS: u64 = 3
+const MEM_BOOTLOADER_RECLAIMABLE: u64 = 5
+const MEM_RESERVED_MAPPED: u64 = 8
+
 /// P: present.
 pub fn present() -> u64 {
-    1
+    P
 }
 
 /// RW: writable.
 pub fn writable() -> u64 {
-    2
+    RW
 }
 
 /// XD/NX: no-execute (bit 63).
 pub fn no_exec() -> u64 {
-    let one: u64 = 1
-    one << 63
-}
-
-/// Bits 51:12 of an entry: the next table's (or a 4 KiB page's) address.
-fn addr_mask() -> u64 {
-    0x000ffffffffff000
+    NX
 }
 
 // --- the registers ---------------------------------------------------------
@@ -177,28 +204,28 @@ pub fn bound(which: int) -> u64 {
 // --- the structures --------------------------------------------------------
 
 /// Entry `i` of the table at physical `t`, through the HHDM.
-fn entry(st: u64, t: u64, i: u64) -> u64 {
+fn entry(t: u64, i: u64) -> u64 {
     // # Safety: `t` is a page table this module allocated (or the live
     // PML4), a usable frame mapped in the HHDM; i < 512 keeps it inside.
-    unsafe { ((frames.hhdm() + t + i * 8) as *u64).read_volatile() }
+    unsafe { ((frames.hhdm() + t + i * ENTRY_BYTES) as *u64).read_volatile() }
 }
 
 /// Write entry `i` of the table at physical `t`.
-fn set_entry(st: u64, t: u64, i: u64, v: u64) {
+fn set_entry(t: u64, i: u64, v: u64) {
     // # Safety: as `entry`.
-    unsafe { ((frames.hhdm() + t + i * 8) as *u64).write_volatile(v) }
+    unsafe { ((frames.hhdm() + t + i * ENTRY_BYTES) as *u64).write_volatile(v) }
 }
 
 /// A fresh frame, zeroed, for a table; 0 when the allocator is empty
 /// (frame 0 is never handed out: px02 withholds the first MiB).
-fn table_frame(st: u64) -> u64 {
+fn table_frame() -> u64 {
     let t = frames.alloc() else 0
     if t == 0 {
         return 0
     }
     var i: u64 = 0
-    while i < 512 {
-        set_entry(st, t, i, 0)
+    while i < ENTRIES {
+        set_entry(t, i, 0)
         i += 1
     }
     t
@@ -206,42 +233,42 @@ fn table_frame(st: u64) -> u64 {
 
 /// Index of `va` at `level` (4 PML4, 3 PDPT, 2 PD, 1 PT).
 fn index(va: u64, level: u64) -> u64 {
-    (va >> (12 + 9 * (level - 1))) & 511
+    (va >> (PAGE_SHIFT + INDEX_BITS * (level - 1))) & (ENTRIES - 1)
 }
 
 /// Whether `va` is canonical (bits 63:47 all equal) for 4-level paging.
 fn canonical(va: u64) -> bool {
-    let top = va >> 47
-    top == 0 || top == 0x1ffff
+    let top = va >> CANONICAL_SHIFT
+    top == 0 || top == CANONICAL_HIGH
 }
 
 /// The table entry `i` of table `t` points to, made (zeroed, present,
 /// writable) when absent. 0 when the allocator is empty; 1 when the
 /// entry is a 2 MiB page, not a table (no table address is 1).
-fn descend(st: u64, t: u64, i: u64) -> u64 {
-    let e = entry(st, t, i)
-    if e & 1 == 0 {
-        let n = table_frame(st)
+fn descend(t: u64, i: u64) -> u64 {
+    let e = entry(t, i)
+    if e & P == 0 {
+        let n = table_frame()
         if n == 0 {
             return 0
         }
-        set_entry(st, t, i, n | 3) // P, RW; supervisor; the leaf decides
+        set_entry(t, i, n | TABLE)
         return n
     }
-    if e & 128 != 0 {
+    if e & PS != 0 {
         return 1
     }
-    e & addr_mask()
+    e & ADDR
 }
 
 /// The PD that maps `va` in the structures at `pml4`, made as needed;
 /// 0 out of frames, 1 when the PDPT entry is a 1 GiB page.
-fn pd_of(st: u64, pml4: u64, va: u64) -> u64 {
-    let pdpt = descend(st, pml4, index(va, 4))
+fn pd_of(pml4: u64, va: u64) -> u64 {
+    let pdpt = descend(pml4, index(va, 4))
     if pdpt <= 1 {
         return pdpt
     }
-    descend(st, pdpt, index(va, 3))
+    descend(pdpt, index(va, 3))
 }
 
 /// Map the 4 KiB page at `va` to the frame at `pa` with `flags` (P is
@@ -250,22 +277,22 @@ fn pd_of(st: u64, pml4: u64, va: u64) -> u64 {
 /// pa not 4 KiB aligned), `not_canonical`, `out_of_memory` (a table
 /// frame), `large_page` (a 2 MiB page already covers va),
 /// `already_mapped`.
-pub fn map(st: u64, pml4: u64, va: u64, pa: u64, flags: u64) -> u64 ! MapError {
-    if va % 4096 != 0 || pa % 4096 != 0 {
+pub fn map(pml4: u64, va: u64, pa: u64, flags: u64) -> u64 ! MapError {
+    if va % PAGE != 0 || pa % PAGE != 0 {
         return misaligned
     }
     if !canonical(va) {
         return not_canonical
     }
     let before = frames.free_count()
-    let pd = pd_of(st, pml4, va)
+    let pd = pd_of(pml4, va)
     if pd == 0 {
         return out_of_memory
     }
     if pd == 1 {
         return large_page
     }
-    let pt = descend(st, pd, index(va, 2))
+    let pt = descend(pd, index(va, 2))
     if pt == 0 {
         return out_of_memory
     }
@@ -273,25 +300,25 @@ pub fn map(st: u64, pml4: u64, va: u64, pa: u64, flags: u64) -> u64 ! MapError {
         return large_page
     }
     let i = index(va, 1)
-    if entry(st, pt, i) & 1 != 0 {
+    if entry(pt, i) & P != 0 {
         return already_mapped
     }
-    set_entry(st, pt, i, pa | flags | 1)
+    set_entry(pt, i, pa | flags | P)
     before - frames.free_count()
 }
 
 /// Map the 2 MiB page at `va` to `pa` (both 2 MiB aligned) with `flags`
 /// (P and PS are added). Returns the table frames allocated (0..2).
 /// Rows as `map`; `already_mapped` also when a page table is there.
-pub fn map_large(st: u64, pml4: u64, va: u64, pa: u64, flags: u64) -> u64 ! MapError {
-    if va % 2097152 != 0 || pa % 2097152 != 0 {
+pub fn map_large(pml4: u64, va: u64, pa: u64, flags: u64) -> u64 ! MapError {
+    if va % LARGE != 0 || pa % LARGE != 0 {
         return misaligned
     }
     if !canonical(va) {
         return not_canonical
     }
     let before = frames.free_count()
-    let pd = pd_of(st, pml4, va)
+    let pd = pd_of(pml4, va)
     if pd == 0 {
         return out_of_memory
     }
@@ -299,42 +326,42 @@ pub fn map_large(st: u64, pml4: u64, va: u64, pa: u64, flags: u64) -> u64 ! MapE
         return large_page
     }
     let i = index(va, 2)
-    if entry(st, pd, i) & 1 != 0 {
+    if entry(pd, i) & P != 0 {
         return already_mapped
     }
-    set_entry(st, pd, i, pa | flags | 129)
+    set_entry(pd, i, pa | flags | P | PS)
     before - frames.free_count()
 }
 
 /// The physical address `va` translates to in the structures at
 /// `pml4`, walked in software (4 KiB and 2 MiB pages). Row `not_mapped`.
-pub fn translate(st: u64, pml4: u64, va: u64) -> u64 ! MapError {
+pub fn translate(pml4: u64, va: u64) -> u64 ! MapError {
     if !canonical(va) {
         return not_canonical
     }
-    let e4 = entry(st, pml4, index(va, 4))
-    if e4 & 1 == 0 {
+    let e4 = entry(pml4, index(va, 4))
+    if e4 & P == 0 {
         return not_mapped
     }
-    let e3 = entry(st, e4 & addr_mask(), index(va, 3))
-    if e3 & 1 == 0 {
+    let e3 = entry(e4 & ADDR, index(va, 3))
+    if e3 & P == 0 {
         return not_mapped
     }
-    if e3 & 128 != 0 {
+    if e3 & PS != 0 {
         return large_page // a 1 GiB page: PAX makes none
     }
-    let e2 = entry(st, e3 & addr_mask(), index(va, 2))
-    if e2 & 1 == 0 {
+    let e2 = entry(e3 & ADDR, index(va, 2))
+    if e2 & P == 0 {
         return not_mapped
     }
-    if e2 & 128 != 0 {
-        return (e2 & 0x000fffffffe00000) + va % 2097152
+    if e2 & PS != 0 {
+        return (e2 & ADDR_2M) + va % LARGE
     }
-    let e1 = entry(st, e2 & addr_mask(), index(va, 1))
-    if e1 & 1 == 0 {
+    let e1 = entry(e2 & ADDR, index(va, 1))
+    if e1 & P == 0 {
         return not_mapped
     }
-    (e1 & addr_mask()) + va % 4096
+    (e1 & ADDR) + va % PAGE
 }
 
 /// Unmap the 4 KiB page at `va`: clear its entry and, when `pml4` is
@@ -342,89 +369,89 @@ pub fn translate(st: u64, pml4: u64, va: u64) -> u64 ! MapError {
 /// Returns the frame it mapped (the caller's to free). Rows:
 /// `misaligned`, `not_canonical`, `not_mapped`, `large_page` (a 2 MiB
 /// page covers va; PAX never splits one). Tables left empty stay.
-pub fn unmap(st: u64, pml4: u64, va: u64) -> u64 ! MapError {
-    if va % 4096 != 0 {
+pub fn unmap(pml4: u64, va: u64) -> u64 ! MapError {
+    if va % PAGE != 0 {
         return misaligned
     }
     if !canonical(va) {
         return not_canonical
     }
-    let e4 = entry(st, pml4, index(va, 4))
-    if e4 & 1 == 0 {
+    let e4 = entry(pml4, index(va, 4))
+    if e4 & P == 0 {
         return not_mapped
     }
-    let e3 = entry(st, e4 & addr_mask(), index(va, 3))
-    if e3 & 1 == 0 {
+    let e3 = entry(e4 & ADDR, index(va, 3))
+    if e3 & P == 0 {
         return not_mapped
     }
-    if e3 & 128 != 0 {
+    if e3 & PS != 0 {
         return large_page
     }
-    let e2 = entry(st, e3 & addr_mask(), index(va, 2))
-    if e2 & 1 == 0 {
+    let e2 = entry(e3 & ADDR, index(va, 2))
+    if e2 & P == 0 {
         return not_mapped
     }
-    if e2 & 128 != 0 {
+    if e2 & PS != 0 {
         return large_page
     }
-    let pt = e2 & addr_mask()
+    let pt = e2 & ADDR
     let i = index(va, 1)
-    let e1 = entry(st, pt, i)
-    if e1 & 1 == 0 {
+    let e1 = entry(pt, i)
+    if e1 & P == 0 {
         return not_mapped
     }
-    set_entry(st, pt, i, 0)
-    if cr3() & addr_mask() == pml4 {
+    set_entry(pt, i, 0)
+    if cr3() & ADDR == pml4 {
         // # Safety: cpu.S's INVLPG; it only drops TLB entries.
         unsafe { pax_invlpg(va) }
     }
-    e1 & addr_mask()
+    e1 & ADDR
 }
 
 // --- the kernel's structures -----------------------------------------------
 
 /// `map` or a named panic (the kernel's own structures cannot be half
 /// built).
-fn must_map(st: u64, pml4: u64, va: u64, pa: u64, flags: u64) {
-    let r = map(st, pml4, va, pa, flags) else 9
+fn must_map(pml4: u64, va: u64, pa: u64, flags: u64) {
+    let r = map(pml4, va, pa, flags) else 9
     if r == 9 {
         panic.fail("paging: cannot map the kernel's page at", va)
     }
 }
 
 /// `map_large` or a named panic.
-fn must_map_large(st: u64, pml4: u64, va: u64, pa: u64, flags: u64) {
-    let r = map_large(st, pml4, va, pa, flags) else 9
+fn must_map_large(pml4: u64, va: u64, pa: u64, flags: u64) {
+    let r = map_large(pml4, va, pa, flags) else 9
     if r == 9 {
         panic.fail("paging: cannot map the kernel's 2 MiB page at", va)
     }
 }
 
 /// Map the image's pages [lo, hi) (virtual) at `flags`.
-fn map_section(st: u64, pml4: u64, lo: u64, hi: u64, flags: u64) {
+fn map_section(pml4: u64, lo: u64, hi: u64, flags: u64) {
     let virt = boot_info.image_virt()
     let phys = boot_info.image_phys()
     var va = lo
     while va < hi {
-        must_map(st, pml4, va, va - virt + phys, flags)
-        va += 4096
+        must_map(pml4, va, va - virt + phys, flags)
+        va += PAGE
     }
 }
 
 /// Map physical [lo, hi) (4 KiB aligned) in the HHDM, read-write
 /// no-execute: 2 MiB pages where a whole aligned 2 MiB lies inside,
 /// 4 KiB pages elsewhere.
-fn map_run(st: u64, pml4: u64, lo: u64, hi: u64) {
+fn map_run(pml4: u64, lo: u64, hi: u64) {
     let hhdm = frames.hhdm()
-    let rw_nx = no_exec() | 2
+    let rw_nx = NX | RW
     var a = lo
     while a < hi {
-        if a % 2097152 == 0 && a + 2097152 <= hi {
-            must_map_large(st, pml4, hhdm + a, a, rw_nx)
-            a += 2097152
+        if a % LARGE == 0 && a + LARGE <= hi {
+            must_map_large(pml4, hhdm + a, a, rw_nx)
+            a += LARGE
         } else {
-            must_map(st, pml4, hhdm + a, a, rw_nx)
-            a += 4096
+            must_map(pml4, hhdm + a, a, rw_nx)
+            a += PAGE
         }
     }
 }
@@ -434,14 +461,14 @@ fn map_run(st: u64, pml4: u64, lo: u64, hi: u64) {
 /// mapped (8). Not reserved (1), bad (4), executable and modules (6),
 /// framebuffer (7).
 fn in_hhdm(t: u64) -> bool {
-    t == 0 || t == 2 || t == 3 || t == 5 || t == 8
+    t == MEM_USABLE || t == MEM_ACPI_RECLAIMABLE || t == MEM_ACPI_NVS || t == MEM_BOOTLOADER_RECLAIMABLE || t == MEM_RESERVED_MAPPED
 }
 
 /// Build PAX's structures: a zeroed PML4, the image with W^X, the HHDM.
 /// Returns the PML4's physical address. Panics by name when the
 /// allocator runs dry or the image is not where the linker put it.
-pub fn build(st: u64) -> u64 {
-    let pml4 = table_frame(st)
+pub fn build() -> u64 {
+    let pml4 = table_frame()
     if pml4 == 0 {
         panic.fail("paging: no frame for the PML4", 0)
         return 0
@@ -451,9 +478,9 @@ pub fn build(st: u64) -> u64 {
         return 0
     }
     // The image, W^X (each bound a page boundary, boot/kernel.ld).
-    map_section(st, pml4, bound(2), bound(3), 0) // text: R-X
-    map_section(st, pml4, bound(4), bound(5), no_exec()) // rodata: R--
-    map_section(st, pml4, bound(6), bound(7), no_exec() | 2) // data, bss: RW-
+    map_section(pml4, bound(2), bound(3), 0) // text: R-X
+    map_section(pml4, bound(4), bound(5), NX) // rodata: R--
+    map_section(pml4, bound(6), bound(7), NX | RW) // data, bss: RW-
     // The HHDM: the map's entries of the types above, merged into runs
     // (the map is sorted and its entries never overlap; an entry that is
     // not 4 KiB aligned is rounded out to whole pages, as Limine does).
@@ -465,16 +492,16 @@ pub fn build(st: u64) -> u64 {
     while i < n {
         if in_hhdm(boot_info.memmap_type(i)) {
             let b = boot_info.memmap_base(i)
-            let lo = b - b % 4096
+            let lo = b - b % PAGE
             let e = b + boot_info.memmap_length(i)
-            let hi = (e + 4095) - (e + 4095) % 4096
+            let hi = (e + PAGE - 1) - (e + PAGE - 1) % PAGE
             if have && lo <= rh {
                 if hi > rh {
                     rh = hi
                 }
             } else {
                 if have {
-                    map_run(st, pml4, rl, rh)
+                    map_run(pml4, rl, rh)
                 }
                 rl = lo
                 rh = hi
@@ -484,7 +511,7 @@ pub fn build(st: u64) -> u64 {
         i += 1
     }
     if have {
-        map_run(st, pml4, rl, rh)
+        map_run(pml4, rl, rh)
     }
     pml4
 }
@@ -494,28 +521,28 @@ pub fn build(st: u64) -> u64 {
 /// read-only page must fault), CR4.PGE required clear (no global entry
 /// may outlive the switch), the stack required mapped in them; then
 /// MOV to CR3.
-pub fn switch_to(st: u64, pml4: u64) {
+pub fn switch_to(pml4: u64) {
     let e = efer()
-    if e & 2048 == 0 {
+    if e & EFER_NXE == 0 {
         // # Safety: cpu.S's CPUID.
         if unsafe { pax_cpuid_nx() } == 0 {
             panic.fail("paging: the CPU has no execute-disable bit; EFER", e)
             return
         }
         // # Safety: cpu.S's WRMSR of IA32_EFER, NXE added to its bits.
-        unsafe { pax_set_efer(e | 2048) }
+        unsafe { pax_set_efer(e | EFER_NXE) }
     }
-    if cr0() & 65536 == 0 {
+    if cr0() & CR0_WP == 0 {
         panic.fail("paging: CR0.WP is clear; CR0", cr0())
         return
     }
-    if cr4() & 128 != 0 {
+    if cr4() & CR4_PGE != 0 {
         panic.fail("paging: CR4.PGE is set; CR4", cr4())
         return
     }
     // # Safety: cpu.S returns the caller's stack pointer; reads nothing.
     let sp = unsafe { pax_rsp() }
-    let probe = translate(st, pml4, sp - sp % 4096) else 0
+    let probe = translate(pml4, sp - sp % PAGE) else 0
     if probe == 0 {
         panic.fail("paging: the stack is not mapped in the new structures", sp)
         return
@@ -526,11 +553,11 @@ pub fn switch_to(st: u64, pml4: u64) {
     unsafe { pax_set_cr3(pml4) }
 }
 
-/// Build PAX's structures from `st`'s frames and switch to them.
+/// Build PAX's structures from the allocator's frames and switch to them.
 /// Returns the PML4's physical address.
-pub fn start(st: u64) -> u64 {
-    let pml4 = build(st)
-    switch_to(st, pml4)
+pub fn start() -> u64 {
+    let pml4 = build()
+    switch_to(pml4)
     pml4
 }
 
@@ -538,7 +565,7 @@ pub fn start(st: u64) -> u64 {
 /// `paging: limine cr3 0x<A>, pax cr3 0x<B>, <P> table frames`, where
 /// A is CR3 before `start`, B is CR3 now and P the frames `start` took
 /// (`free_before`, the allocator's free count before it).
-pub fn report(st: u64, limine_cr3: u64, free_before: u64) {
+pub fn report(limine_cr3: u64, free_before: u64) {
     log.put("paging: limine cr3 ")
     log.hex(limine_cr3)
     log.put(", pax cr3 ")

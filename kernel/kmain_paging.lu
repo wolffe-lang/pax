@@ -55,7 +55,7 @@ export fn kmain() {
     serial.init()
     interrupts.start()
     log.line("PAX paging test")
-    let st = frames.start()
+    frames.start()
     frames.report()
     let hhdm = frames.hhdm()
     log.put("hhdm: ")
@@ -64,8 +64,8 @@ export fn kmain() {
 
     let limine = paging.cr3()
     let before = frames.free_count()
-    let pml4 = paging.start(st)
-    paging.report(st, limine, before)
+    let pml4 = paging.start()
+    paging.report(limine, before)
 
     log.put("image: phys ")
     log.hex(boot_info.image_phys())
@@ -96,7 +96,7 @@ export fn kmain() {
     set_word(hhdm + b, b ^ pat)
     let va: u64 = 0xffffa00000000000
     let rw_nx = paging.no_exec() | paging.writable()
-    let n = paging.map(st, pml4, va, a, rw_nx) else 9
+    let n = paging.map(pml4, va, a, rw_nx) else 9
     if n == 9 {
         panic.fail("paging test: map refused", va)
     }
@@ -115,15 +115,15 @@ export fn kmain() {
     log.hex(seen)
     log.end()
 
-    let t = paging.translate(st, pml4, va) else 0
+    let t = paging.translate(pml4, va) else 0
     log.put("translate: ")
     log.hex(va)
     log.put(" is ")
     log.hex(t)
     log.end()
 
-    let was = paging.unmap(st, pml4, va) else 0
-    let gone = paging.translate(st, pml4, va) else |e| match e {
+    let was = paging.unmap(pml4, va) else 0
+    let gone = paging.translate(pml4, va) else |e| match e {
         not_mapped => { 1 },
         out_of_memory => { 2 },
         misaligned => { 2 },
@@ -138,7 +138,7 @@ export fn kmain() {
     log.put(if gone == 1 { ", then not_mapped" } else { ", then STILL MAPPED" })
     log.end()
 
-    let n2 = paging.map(st, pml4, va, b, rw_nx) else 9
+    let n2 = paging.map(pml4, va, b, rw_nx) else 9
     if n2 == 9 {
         panic.fail("paging test: remap refused", va)
     }
@@ -152,13 +152,13 @@ export fn kmain() {
     log.end()
 
     let va2 = va + 4096
-    let n3 = paging.map(st, pml4, va2, a, rw_nx) else 9
+    let n3 = paging.map(pml4, va2, a, rw_nx) else 9
     if n3 == 9 {
         panic.fail("paging test: map of the second page refused", va2)
     }
     let r3 = word(va2)
-    let was2 = paging.unmap(st, pml4, va2) else 0
-    let gone2 = paging.translate(st, pml4, va2) else 1
+    let was2 = paging.unmap(pml4, va2) else 0
+    let gone2 = paging.translate(pml4, va2) else 1
     log.put("gone: ")
     log.hex(va2)
     log.put(" mapped to ")
