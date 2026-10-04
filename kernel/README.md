@@ -1,6 +1,6 @@
 # kernel/
 
-The wolf kernel: first light (px01, M-PX1), physical frames (px02), paging (px03) and interrupts (kw10). `kmain.lu` brings up COM1,
+The wolf kernel: first light (px01, M-PX1), physical frames (px02), paging (px03) and interrupts (kw10), on the wolf 0.2.23 release archive (px05). `kmain.lu` brings up COM1,
 reads what Limine handed it and prints one line each — the banner, the
 UART, the bootloader and base revision, the firmware, a memory-map
 summary, the HHDM offset, the frame allocator's totals — switches to its own
@@ -49,35 +49,43 @@ double-faults onto IST1, and `kmain_timer.lu` counts 20 PIT ticks
   only its `wolf_trap`.
 - Limine's response pointers are bootloader-written, so every read of
   one is a `read_volatile` (KWC kw07, wolf-lang `eb955c3b`), afresh per
-  call, through an address cast to a pointer (kw06). Struct layouts are
-  read word by word at fixed offsets until kw08's `offset_of`. A
+  call, through an address cast to a pointer (kw06). Limine's struct
+  layouts are still read word by word at fixed offsets (`boot_info`;
+  kw08's `offset_of` on `#[repr(c)]` mirrors is open to a later lane). A
   symbol's address (each request in `boot/start.S`, `boot/kernel.ld`'s
   bounds, `boot/isr.S`'s tables) is named with `extern "c" let` since
   kw10 (wolf-lang kw09); `boot/limine.S`, which returned those
   addresses while wolf could not spell them (wolf-lang#529), is
   retired.
-- The frame allocator keeps its state in memory it owns, not in module
-  state (wolf-lang#529, KWC kw09): `frames.start()` returns the state's
-  HHDM address and every call takes it. `paging` takes the same `st`
-  (its tables come from it, reached through its HHDM offset) and the
-  PML4's physical address.
+- The frame allocator keeps its state in memory it owns (module state
+  holds scalars only, `[mem.static.3]`), and that memory's HHDM address
+  in a module `var`, read through one unsafe accessor (`st()`, px05;
+  px02 and px03 threaded it through every call of `frames` and `paging`
+  while wolf had no module state, wolf-lang#529). Its header is a
+  `#[repr(c)] struct FrameState` whose fields are read and written as
+  `u64`s at their `offset_of` (`[abi.layout.query]`), the bitmaps at
+  `size_of(FrameState)`. `paging` asks `frames` for table frames and the
+  HHDM offset and takes only the PML4's physical address.
 - wolf has no bitwise complement (wolf-lang#575): alignment is written
-  `x - x % 4096`, masks as literals.
-- Constants: px01-px03's modules write them as literals, each named
-  where it is used (wolf 0.2.22 refused a module-level `const`,
-  wolf-lang#560); kw10's modules use `const` (kw09). A `pub const` read
-  from another module is still refused (wolf-lang#579), so
-  `kernel/timer` exports its constants as functions.
+  `x - x % PAGE`, masks spelled whole (`paging`'s `ADDR`, `ADDR_2M`).
+- Constants are module `const`s in every module (px05 retired
+  px01-px03's commented literals in `serial`, `frames` and `paging`;
+  wolf 0.2.22 refused a module-level `const`, wolf-lang#560, closed by
+  kw09). A `pub const` read from another module is still refused
+  (wolf-lang#579), so `kernel/timer` exports its constants, and
+  `kernel/paging` its flags, as functions.
 - Module state: kw10's modules keep scalars in module `var`s (the tick
   and breakpoint counters, kw09); tables live in `.bss` that
   `boot/isr.S` reserves, because module state holds scalars only
   (`[mem.static.3]`). A handler resuming past a fault would write the
   frame's RIP through `f as *u64` at `offset_of(Frame, rip) / 8`: a
   store to a field of a raw element is refused (wolf-lang#577).
-- `wolf.pin` names wolf: since px02 a wolf-lang commit (`eb955c3b`; kw10: `6a4e6151`)
-  built from source by `tools/fetch-wolf` (kw06/kw07 are in no release
-  yet; back to a release archive by digest at 0.2.23), and lupin's
-  release and digest (`tools/fetch-lupin`).
+- `wolf.pin` names wolf: the 0.2.23 release archive by digest (px05;
+  `tools/fetch-wolf` stages it and never builds; px02 and kw10 built
+  wolf-lang `eb955c3b` and `6a4e6151` from source while no release
+  carried kw06-kw09), and lupin's release and digest
+  (`tools/fetch-lupin`; held at 0.1.44 for `tests/mkw` step 6's
+  recorded refusal).
 
 `tests/mpx2-frames` builds kmain and the three frames kernels on both
 tiers, boots them under SeaBIOS and OVMF, and checks the totals against
