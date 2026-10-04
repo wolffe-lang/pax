@@ -100,6 +100,9 @@ def build(out):
                 first_ms.setdefault(n, ms)
     inj = {k: {r["syscall"]: r for r in read_csv(os.path.join(out, f"inject-{k}.csv"))}
            for k in ("static", "dynamic")}
+    for k in inj:  # strace starts the program by the execve it would inject: never answered
+        if "execve" in inj[k]:
+            inj[k]["execve"]["verdict"] = "not injectable"
     rows = []
     for n in names:
         groups = [g for g in GROUPS if any(n in t[w]["syscalls"] for w in t if GROUP[w] == g)]
@@ -177,12 +180,25 @@ def blocks(out, t, rows, inj):
         v = inj["static"].get(n, {})
         verdict = v.get("verdict", "")
         if n == "execve":
-            verdict = "required (the program's own start; strace does not inject it)"
+            verdict = "not injectable (the program's own start: strace begins tracing after it)"
         mrows.append([f"`{n}`", st[n]["number"], LANE.get(n), st[n]["calls"],
                       verdict, f"{v.get('passed', '')}/{v.get('baseline_passed', '')}",
                       v.get("first_failures", "")[:90]])
     B["mpx3"] = md_table(["syscall", "nr", "lane", "calls in the suite", "answered ENOSYS",
                           "cases passing", "first cases lost"], mrows)
+    sets = read_csv(os.path.join(out, "inject-static-sets.csv"))
+    B["mpx3sets"] = md_table(["set", "answered ENOSYS together", "cases passing", "lost"],
+                             [[r["label"], ", ".join(f"`{c}`" for c in r["calls_answered_enosys"].split(",")),
+                               f"{r['passed']}/{r['baseline_passed']}", r["lost"]] for r in sets])
+    dy = t.get("boreutils-dynamic", {}).get("syscalls", {})
+    drows = []
+    for n in sorted(dy, key=lambda n: ({"required": 0, "degraded": 1, "tolerated": 2}.get(
+            inj["dynamic"].get(n, {}).get("verdict"), 3), int(dy[n]["number"]))):
+        v = inj["dynamic"].get(n, {})
+        sv = inj["static"].get(n, {}).get("verdict", "not made")
+        drows.append([f"`{n}`", dy[n]["calls"], v.get("verdict", ""), f"{v.get('passed', '')}/{v.get('baseline_passed', '')}", sv])
+    B["dynamic"] = md_table(["syscall", "calls in the suite", "answered ENOSYS (dynamic)", "cases passing",
+                             "the static build's verdict"], drows)
     # lanes
     lrows = []
     for l in LANES:
@@ -230,6 +246,10 @@ def blocks(out, t, rows, inj):
         if r["entry"] not in entries:
             entries.append(r["entry"])
     cell = {(r["subject"], r["entry"]): r for r in ax}
+    rd = {}
+    for r in read_csv(os.path.join(out, "auxv-reads.csv")):
+        rd.setdefault(r["entry"], {})[r["subject"]] = r["read_by"].split()
+    wsubj = sorted({s for v in rd.values() for s in v}, key=subjects.index) if rd else []
     arows = []
     for e in entries:
         need = [s for s in subjects if cell.get((s, e), {}).get("when_hidden") == "required"]
@@ -237,9 +257,17 @@ def blocks(out, t, rows, inj):
         for s in need:
             c = cell[(s, e)]
             how.append(f"{s} ({'signal ' + c['exitsignal'] if c['exitsignal'] else 'exit ' + str(c['exitcode'])})")
-        arows.append([f"`{e}`", len(need), ", ".join(how) or "—"])
+        readers = []
+        for s in wsubj:
+            who = rd.get(e, {}).get(s)
+            if who is None:
+                continue
+            objs = Counter(w.split(":")[0] for w in who)
+            readers.append(f"{s}: " + (", ".join(f"{o} ({k} site{'s' if k > 1 else ''})" for o, k in sorted(objs.items())) or "not read"))
+        arows.append([f"`{e}`", len(need), ", ".join(how) or "—", "; ".join(readers) or "—"])
     arows.sort(key=lambda r: (-r[1], r[0]))
-    B["auxv"] = md_table(["entry", "subjects that fail without it", "which (how they fail)"], arows) + \
+    B["auxv"] = md_table(["entry", "subjects that fail without it", "which (how they fail)",
+                          "read by (hardware watchpoint on the value)"], arows) + \
         f"\nSubjects ({len(subjects)}): " + ", ".join(f"`{s}`" for s in subjects) + ".\n"
     vd = read_csv(os.path.join(out, "vdso.csv"))
     vrows = []
