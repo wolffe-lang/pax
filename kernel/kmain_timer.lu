@@ -1,0 +1,59 @@
+//! member: false
+// kmain_timer.lu — the timer ticks (kw10, tests/mpx2-interrupts I5).
+// The kernel switches to PAX's paging structures, loads its GDT, TSS
+// and IDT, maps the local APIC and unmasks its LINT0 as ExtINT
+// (kernel/apic: Limine leaves it masked, so no 8259 request would
+// arrive), remaps and masks the 8259s and starts the PIT at 99.998 Hz
+// with line 0 alone unmasked (kernel/timer), then sleeps with
+// interrupts enabled only inside each wait (boot/isr.S's STI; HLT; CLI)
+// until 20 ticks have been handled, masks every line again and halts
+// with interrupts off:
+//
+//     PAX interrupts: timer
+//     paging: limine cr3 0x<A>, pax cr3 0x<B>, <P> table frames
+//     apic: 0x00000000fee00000 at 0xffffb00000000000, id 0, svr 0x<s>, lint0 0x<old> -> 0x0000000000008700
+//     timer: pit divisor 11932 (99.998 Hz), 8259 at 32 and 40, line 0 unmasked
+//     timer: 20 ticks on vector 32, 0 spurious
+//     halt
+use apic
+use frames
+use interrupts
+use log
+use paging
+use panic
+use serial
+use timer
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX interrupts: timer")
+    let st = frames.start()
+    let limine = paging.cr3()
+    let before = frames.free_count(st)
+    let pml4 = paging.start(st)
+    paging.report(st, limine, before)
+    interrupts.start()
+    apic.start(st, pml4)
+    apic.report()
+    timer.start()
+    log.put("timer: pit divisor ")
+    log.dec(timer.divisor() as int)
+    log.put(" (99.998 Hz), 8259 at ")
+    log.dec(timer.master_base() as int)
+    log.put(" and ")
+    log.dec(timer.slave_base() as int)
+    log.put(", line 0 unmasked")
+    log.end()
+    while timer.ticks() < 20 {
+        timer.wait()
+    }
+    timer.stop()
+    log.put("timer: ")
+    log.dec(timer.ticks() as int)
+    log.put(" ticks on vector 32, ")
+    log.dec(timer.spurious_count() as int)
+    log.put(" spurious")
+    log.end()
+    log.line("halt")
+    panic.halt()
+}
