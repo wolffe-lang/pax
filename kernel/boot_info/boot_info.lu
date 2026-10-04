@@ -4,9 +4,11 @@
 //! pointer after the image is built (docs/BOOT.md clause 5), so every
 //! read of a bootloader-written word here is one `read_volatile`
 //! (wolf-lang kw07), through an address cast to a pointer (`N as *T`,
-//! kw06), afresh on every call. boot/limine.S only hands over each
-//! request's address: wolf cannot name a symbol the assembler defines
-//! (wolf-lang#529). Responses are bootloader memory (bootloader-
+//! kw06), afresh on every call. Each request's address is its symbol in
+//! boot/start.S, named with `extern "c" let` (kw10, over wolf-lang
+//! kw09: until then boot/limine.S returned the addresses, because wolf
+//! could not name a symbol the assembler defines, wolf-lang#529).
+//! Responses are bootloader memory (bootloader-
 //! reclaimable, mapped in the HHDM); their pointers are virtual
 //! addresses the kernel can follow as they are.
 //!
@@ -21,8 +23,42 @@
 //!   executable address: revision, physical_base (8), virtual_base (16)
 //!   base revision tag: three words; Limine zeroes the third (16)
 
-extern "c" fn pax_limine_request(which: int) -> u64
-extern "c" fn pax_image_bounds(which: int) -> u64
+extern "c" let limine_base_revision: *u64
+extern "c" let limine_bootloader_info_request: *u64
+extern "c" let limine_firmware_type_request: *u64
+extern "c" let limine_memmap_request: *u64
+extern "c" let limine_hhdm_request: *u64
+extern "c" let limine_executable_address_request: *u64
+extern "c" let __pax_image_start: *u8
+extern "c" let __pax_image_end: *u8
+
+/// The address of request `which` in boot/start.S: 0 the base revision
+/// tag, 1 bootloader info, 2 firmware type, 3 memory map, 4 HHDM, 5
+/// executable address; 0 for any other `which`.
+fn request(which: int) -> u64 {
+    // # Safety: link-time addresses; nothing is read.
+    unsafe {
+        if which == 0 {
+            return limine_base_revision as u64
+        }
+        if which == 1 {
+            return limine_bootloader_info_request as u64
+        }
+        if which == 2 {
+            return limine_firmware_type_request as u64
+        }
+        if which == 3 {
+            return limine_memmap_request as u64
+        }
+        if which == 4 {
+            return limine_hhdm_request as u64
+        }
+        if which == 5 {
+            return limine_executable_address_request as u64
+        }
+    }
+    0
+}
 
 /// One bootloader-written 64-bit word at virtual address `a` (8-aligned).
 fn word(a: u64) -> u64 {
@@ -31,12 +67,11 @@ fn word(a: u64) -> u64 {
     unsafe { (a as *u64).read_volatile() }
 }
 
-/// Request `which`'s response pointer (limine.S's numbering: 1
+/// Request `which`'s response pointer (`request`'s numbering: 1
 /// bootloader info, 2 firmware type, 3 memory map, 4 HHDM, 5 executable
 /// address), or 0 when Limine gave none.
 fn response(which: int) -> u64 {
-    // # Safety: limine.S returns a request's address and reads nothing.
-    let req = unsafe { pax_limine_request(which) }
+    let req = request(which)
     if req == 0 {
         return 0
     }
@@ -73,8 +108,7 @@ pub fn loader_byte(which: int, i: int) -> int {
 /// Whether Limine honoured base revision 6 (boot/start.S refuses to
 /// call kmain otherwise, so a running kernel sees true).
 pub fn revision_ok() -> bool {
-    // # Safety: limine.S returns the tag's address and reads nothing.
-    let tag = unsafe { pax_limine_request(0) }
+    let tag = request(0)
     tag != 0 && word(tag + 16) == 0
 }
 
@@ -189,11 +223,8 @@ pub fn image_virt() -> u64 {
 }
 
 /// The kernel image's size in bytes, from its first byte to the end of
-/// its .bss (boot/kernel.ld's bounds, read by limine.S).
+/// its .bss (boot/kernel.ld's bounds).
 pub fn image_bytes() -> u64 {
-    // # Safety: limine.S returns two link-time addresses, reads nothing.
-    let lo = unsafe { pax_image_bounds(0) }
-    // # Safety: as above.
-    let hi = unsafe { pax_image_bounds(1) }
-    hi - lo
+    // # Safety: two link-time addresses; nothing is read.
+    unsafe { __pax_image_end as u64 - __pax_image_start as u64 }
 }

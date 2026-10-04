@@ -8,7 +8,8 @@
 //! - the kernel image, one permission per section, 4 KiB pages: text
 //!   read-execute, rodata read-only no-execute, data and bss read-write
 //!   no-execute (W^X: no page is both writable and executable); the
-//!   bounds are boot/kernel.ld's, returned by limine.S (wolf-lang#529);
+//!   bounds are boot/kernel.ld's symbols, named with `extern "c" let`
+//!   (kw10; limine.S returned them until wolf-lang kw09);
 //! - the HHDM (Limine's offset, kept, because the frame allocator's
 //!   state, every frame it hands out, Limine's responses and the stack
 //!   are reached through it), read-write no-execute, over the memory
@@ -81,7 +82,13 @@ extern "c" fn pax_set_efer(v: u64)
 extern "c" fn pax_invlpg(va: u64)
 extern "c" fn pax_cpuid_nx() -> u64
 extern "c" fn pax_rsp() -> u64
-extern "c" fn pax_image_bounds(which: int) -> u64
+extern "c" let __pax_image_start: *u8
+extern "c" let __pax_image_end: *u8
+extern "c" let __pax_text_start: *u8
+extern "c" let __pax_text_end: *u8
+extern "c" let __pax_rodata_start: *u8
+extern "c" let __pax_rodata_end: *u8
+extern "c" let __pax_data_start: *u8
 
 /// Why `map`, `map_large`, `unmap` or `translate` refused.
 pub error MapError = {out_of_memory, misaligned, not_canonical, already_mapped, large_page, not_mapped}
@@ -135,11 +142,36 @@ pub fn efer() -> u64 {
     unsafe { pax_efer() }
 }
 
-/// The image's section bounds (limine.S's numbering): 2/3 text, 4/5
-/// rodata, 6/7 data and bss, each a page boundary.
+/// The image's bounds, boot/kernel.ld's symbols named with `extern "c"
+/// let` (kw10; boot/limine.S returned them before wolf-lang kw09): 0/1
+/// the image's first and one-past-last address, 2/3 text, 4/5 rodata,
+/// 6/7 data and bss, each a page boundary; 0 otherwise.
 pub fn bound(which: int) -> u64 {
-    // # Safety: limine.S returns a link-time address and reads nothing.
-    unsafe { pax_image_bounds(which) }
+    // # Safety: link-time addresses; nothing is read.
+    unsafe {
+        if which == 0 {
+            return __pax_image_start as u64
+        }
+        if which == 1 || which == 7 {
+            return __pax_image_end as u64
+        }
+        if which == 2 {
+            return __pax_text_start as u64
+        }
+        if which == 3 {
+            return __pax_text_end as u64
+        }
+        if which == 4 {
+            return __pax_rodata_start as u64
+        }
+        if which == 5 {
+            return __pax_rodata_end as u64
+        }
+        if which == 6 {
+            return __pax_data_start as u64
+        }
+    }
+    0
 }
 
 // --- the structures --------------------------------------------------------
