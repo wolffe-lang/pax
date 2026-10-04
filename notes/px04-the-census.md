@@ -46,9 +46,9 @@ release; Arch rolled since the base image). Found while measuring:
 ## 3. Prediction against measurement
 
 The full table is in `docs/CENSUS.md` § "Prediction against
-measurement". Of seven claims, three held (the union in 120..180 at
-127; static boreutils in 15..30 at 26; and every per-workload count was
-the right order) and two were wrong: **pacman is not the largest
+measurement". Of the four claims with a falsifier, two held (the union
+in 120..180, at 127; static boreutils in 15..30, at 26) and two were
+wrong: **pacman is not the largest
 workload** (88; sshd is 89), and **8 of my top 20 by calls are absent**
 (the falsifier was 6): start-up calls made 5,284 times outrank
 `futex`, `ioctl` and `fcntl`.
@@ -85,12 +85,14 @@ workload** (88; sshd is 89), and **8 of my top 20 by calls are absent**
   orchestrator to keep or delete; everything else under `~/lanes/px04`
   was pruned.
 - Injection verdicts: `tools/census/out/inject-static.csv`,
-  `inject-dynamic.csv`, `inject-static-sets.csv`. The static single-call
-  runs were made with the wrapper of `c093ba9` and its 60 s watchdog
-  (the `write` run hung on `tee` until the fork watchdog of `192c3f8`,
-  which also made `write`, `clock_gettime` and both set runs); the
-  dynamic runs all used `192c3f8`'s. The verdict logic is the same in
-  both; only a hang's handling differs.
+  `inject-dynamic.csv`, `inject-static-sets.csv`. The static
+  single-call runs except `write` and `clock_gettime` were made with an
+  intermediate wrapper, never committed: `192c3f8`'s, minus the fork
+  watchdog, with an `alarm(60)` that strace blocks. Its `write` run
+  hung on a `tee` case and was killed; `write`, `clock_gettime`, both
+  set runs and every dynamic run used `192c3f8`'s wrapper. The
+  injection and the comparison are the same in both; only a hang's
+  handling differs, and no other run hung.
 - auxv and vDSO: `tools/census/out/auxv.csv`, `auxv-reads.csv`,
   `vdso.csv`.
 - The census tools' own test, seen red: CI run **37173258264** (census
