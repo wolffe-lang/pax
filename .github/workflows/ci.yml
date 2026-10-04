@@ -397,3 +397,71 @@ jobs:
             build/mpx2-paging-runs.txt
           retention-days: 14
           if-no-files-found: warn
+
+  # kw10: interrupts. The kernel's own GDT, TSS (IST1) and IDT; all 32
+  # exceptions and the 8259's 16 lines through boot/isr.S's trampolines
+  # to wolf (kernel/gdt, kernel/idt, kernel/interrupts); the timer
+  # (kernel/apic, kernel/timer). tests/mpx2-interrupts: the trampolines'
+  # shapes in the ELF (I0), a write to text panicking `page fault` with
+  # CR2 (I1), `ud2` panicking `invalid opcode` (I2), `int3` returning
+  # (I3), a double fault on IST1 (I4), 20 PIT ticks on vector 32 (I5),
+  # the descriptor-table registers read back from the halted machine
+  # (I6).
+  mpx2-interrupts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils
+          qemu-system-x86_64 --version
+          clang --version
+          ld.lld --version
+          objdump --version | head -n 1
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx2-interrupts-${{ hashFiles('boot/limine.pin') }}
+
+      - name: the staged wolf (cached by the pin; a source pin's src/ and target/ are not kept)
+        uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/wolf-*
+            !.pax-cache/wolf-*/src
+          key: wolf-${{ hashFiles('kernel/wolf.pin') }}
+
+      - name: wolf at the pin (built from source, or the release archive by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: interrupts, both tiers, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx2-interrupts
+
+      - name: keep the kernels, the transcripts, the monitor's answers
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx2-interrupts-linux
+          path: |
+            build/mpx2-interrupts/
+            build/mpx2-interrupts-*.log
+            build/mpx2-interrupts-*.meta
+            build/mpx2-interrupts-*.halt
+            build/mpx2-interrupts-*.verdict
+            build/mpx2-interrupts-*.cmd*
+            build/mpx2-interrupts-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
