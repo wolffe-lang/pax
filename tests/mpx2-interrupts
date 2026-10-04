@@ -1,0 +1,339 @@
+#!/usr/bin/env bash
+# tests/mpx2-interrupts — interrupts (kw10, M-PX2's interrupt and timer
+# pieces): the kernel's own GDT, TSS (IST1) and IDT, all 32 exceptions
+# and the 8259's 16 lines routed through boot/isr.S's trampolines to
+# wolf (kernel/gdt, kernel/idt, kernel/interrupts), named panics, a
+# breakpoint that returns, a double fault on IST1, and the PIT ticking
+# (kernel/apic, kernel/timer). Read back through QEMU's monitor, not
+# only the kernel's word.
+#
+#   tests/mpx2-interrupts [--images DIR | --no-boot] [--firmware bios|uefi|both]
+#                         [--tier native|release|both]
+#
+# Five kernels, from kernel/. Assertions, per tier (native, release) and
+# firmware (bios, uefi):
+#   I0 build: tools/build-kernel's object assertions for each kernel;
+#      the ELF defines pax_isr0 … pax_isr47, pax_isr_common and
+#      pax_interrupt (global); `objdump -d` of each trampoline begins
+#      `push $0x<v>` for the vectors whose exceptions push an error code
+#      (8, 10-14, 17, 21, 29, 30) and `push $0x0` then `push $0x<v>`
+#      for every other one, and pax_isr_common's last instruction is
+#      `iretq`.
+#   I1 page fault: kmain_text_write's log ends
+#        write: text at 0x<a>
+#        PANIC page fault vector 14 error 0x0000000000000003 rip 0x<r> rsp 0x<s> frame 0x<f> cr2 0x<a>
+#      with a = the text's first address + 0x40 (0xffffffff80000040),
+#      r inside text; tools/qemu-halt holds the machine halted in
+#      pax_halt with IF clear, and the monitor's CR2 is a.
+#   I2 invalid opcode: kmain_ud2's log ends
+#        PANIC invalid opcode vector 6 error 0x0000000000000000 rip 0x<r> …
+#      with r = pax_ud2 (the ud2 is its first instruction: a fault
+#      saves the faulting RIP); halted.
+#   I3 breakpoint: kmain_int3's log ends
+#        int3: breakpoint vector 3, rip 0x<r>
+#        int3: returned, 1 breakpoint
+#        halt
+#      with r = pax_int3 + 1 (a trap saves the next instruction; INT3
+#      is one byte): the handler returned through iretq and the kernel
+#      went on; halted.
+#   I4 double fault: kmain_double_fault's log ends
+#        PANIC double fault vector 8 error 0x0000000000000000 rip 0x<r> rsp 0x0000000000001000 frame 0x<f>
+#      with r inside pax_bad_stack and the frame on IST1: f in
+#      [pax_ist1_stack, pax_ist1_top) and f = pax_ist1_top - 176; the
+#      monitor's RSP on the halted machine inside IST1 too; halted.
+#   I5 timer: kmain_timer's log ends
+#        apic: 0x00000000fee00000 at 0xffffb00000000000, id 0, svr 0x<s>, lint0 0x<old> -> 0x0000000000008700
+#        timer: pit divisor 11932 (99.998 Hz), 8259 at 32 and 40, line 0 unmasked
+#        timer: 20 ticks on vector 32, 0 spurious
+#        halt
+#      and the machine is halted with IF clear (the ticks stopped
+#      because every line is masked again, not because the CPU hung).
+#   I6 tables: on the halted int3 machine the monitor's `info registers`
+#      reads CS 0x0008 (64-bit), SS 0x0010, TR 0x0028 with base pax_tss
+#      and limit 0x67, GDT base pax_gdt limit 0x37, IDT base pax_idt
+#      limit 0xfff — the ELF's own symbols; and the kernel's gdt/idt
+#      lines name the same addresses.
+#
+# --images DIR boots ISOs and ELFs built earlier by this script (DIR
+# holds <tier>/<kernel>.{iso,elf}): any host with QEMU and nm, no wolf
+# needed. Without it the script builds with $PAX_WOLF (linux); --no-boot
+# stops after the build (I0), leaving them in build/mpx2-interrupts.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+
+images= legs=both tiers=both noboot=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "usage: tests/mpx2-interrupts [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+need nm objdump
+
+kernels="kmain_text_write kmain_ud2 kmain_int3 kmain_double_fault kmain_timer"
+work=$PAX_BUILD/mpx2-interrupts
+runs=$PAX_BUILD/mpx2-interrupts-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+HEX='0x[0-9a-f]{16}'
+ERRV=" 8 10 11 12 13 14 17 21 29 30 "
+
+# The value of symbol $2 in ELF $1, as 0x + 16 hex digits ('' if none).
+sym() { nm "$1" | awk -v s="$2" '$3 == s { print "0x" $1; exit }'; }
+# Its size in bytes ('' if unsized).
+symsize() { local z; z=$(nm -S "$1" | awk -v s="$2" 'NF == 4 && $4 == s { print $2; exit }'); [ -z "$z" ] || echo $((16#$z)); }
+hx() { printf '0x%016x' "$1"; }
+
+# I0's ELF half: the trampolines' symbols and shapes. Prints the
+# reason on failure.
+isr_ok() { # elf
+    local elf=$1 v dis first second want
+    for s in pax_isr_common pax_interrupt pax_idt pax_gdt pax_tss pax_ist1_stack pax_ist1_top pax_isr_table; do
+        [ -n "$(sym "$elf" "$s")" ] || { echo "no symbol $s"; return 1; }
+    done
+    nm "$elf" | awk '$3 == "pax_interrupt" && $2 == "T" { f = 1 } END { exit !f }' \
+        || { echo "pax_interrupt is not a global function (T)"; return 1; }
+    [ $(( $(sym "$elf" pax_idt) % 4096 )) = 0 ] || { echo "pax_idt is not page-aligned"; return 1; }
+    objdump -d --no-show-raw-insn "$elf" > "$elf.dis" || { echo "objdump -d"; return 1; }
+    for v in $(seq 0 47); do
+        dis=$(awk -v f="<pax_isr$v>:" '$2 == f { on = 1; next } on && NF == 0 { exit } on { sub(/^[^\t]*\t/, ""); print }' "$elf.dis")
+        [ -n "$dis" ] || { echo "no pax_isr$v in the disassembly"; return 1; }
+        first=$(sed -n 1p <<<"$dis" | tr -s ' '); second=$(sed -n 2p <<<"$dis" | tr -s ' ')
+        if [ "$v" -lt 32 ] && [ "${ERRV/ $v /}" != "$ERRV" ]; then
+            want=$(printf 'push $0x%x' "$v")
+            [ "$first" = "$want" ] || { echo "pax_isr$v (error code) begins '$first', not '$want'"; return 1; }
+        else
+            want=$(printf 'push $0x%x' "$v")
+            [ "$first" = 'push $0x0' ] && [ "$second" = "$want" ] \
+                || { echo "pax_isr$v (no error code) begins '$first; $second', not 'push \$0x0; $want'"; return 1; }
+        fi
+    done
+    last=$(awk '$2 == "<pax_isr_common>:" { on = 1; next } on && NF == 0 { exit } on { sub(/^[^\t]*\t/, ""); l = $0 } END { print l }' "$elf.dis" | tr -s ' ')
+    [ "$last" = iretq ] || { echo "pax_isr_common ends '$last', not iretq"; return 1; }
+    echo "48 trampolines: push \$0 for the 38 without an error code, none for 8 10 11 12 13 14 17 21 29 30; pax_isr_common ends in iretq; pax_interrupt T"
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        for k in $kernels; do
+            log=$work/$tier/$k.build-kernel.log
+            if [ ! -f "$PAX_ROOT/kernel/$k.lu" ]; then
+                bad "I0 $tier $k: no kernel/$k.lu"
+                continue
+            fi
+            if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/$k.lu" "$work/$tier" 2>"$log"); then
+                cat "$log" >&2
+                if why=$(isr_ok "$elf"); then
+                    say "PASS I0 $tier $k: build-kernel's assertions; $why"
+                else
+                    bad "I0 $tier $k: $why"
+                fi
+                "$PAX_ROOT/tools/mkimage" "$elf" "$work/$tier/$k.iso" >/dev/null || bad "$tier $k: mkimage"
+                say "built $tier $k: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/$k.iso")"
+            else
+                cat "$log" >&2
+                bad "I0 $tier $k: tools/build-kernel"
+            fi
+        done
+    done
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx2-interrupts build (I0): PASS (no boot: --no-boot)" || say "mpx2-interrupts build: FAIL"
+        exit "$fail"
+    fi
+fi
+
+# The value of the last line of the normalised log matching sed BRE $2
+# with one group.
+grab() { serial_norm "$1" | sed -n "s/^$2\$/\\1/p" | tail -n 1; }
+# A register's hex digits from a monitor `info registers` answer.
+reg() { sed -n "s/.*[^A-Z]$2=\\([0-9a-f]*\\).*/\\1/p; s/^$2=\\([0-9a-f]*\\).*/\\1/p" "$1" | tail -n 1; }
+# A segment-like line of `info registers` (`CS =0008 base limit flags`,
+# `GDT=     base limit`): its fields after the '='.
+seg() { sed -n "s/^$2 *= *//p" "$1" | tail -n 1 | tr -s ' '; }
+
+record() { # tier kernel leg status
+    ran=$((ran + 1))
+    printf '%s %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" \
+        "$(sha256_of "$images/$1/$2.iso")" >> "$runs"
+}
+
+# Boot kernel $2 of tier $1 under firmware $3 until a line matching $4,
+# prove the halt and save the monitor's `info registers` (FILE.cmd1).
+# Sets log, elf; returns qemu-halt's status.
+halt_boot() {
+    local tier=$1 k=$2 leg=$3 marker=$4 hrc=0
+    log=$PAX_BUILD/mpx2-interrupts-$tier-$k-$leg.serial.log
+    elf=$images/$tier/$k.elf
+    local iso=$images/$tier/$k.iso
+    rm -f "$log" "$log.verdict" "$log".cmd*
+    if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+        say "no image or ELF: $iso"
+        return 3
+    fi
+    "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 180 \
+        --elf "$elf" --marker "$marker" --cmd 'info registers' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+    record "$tier" "$k" "$leg" "$hrc"
+    return "$hrc"
+}
+halted() { tail -n 1 "$log.verdict"; }
+not_halted() { grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"; }
+tail_lines() { serial_norm "$log" | awk 'NF' | tail -n "${1:-3}" | sed 's/^/  /' >&2; }
+
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        # --- I1: the page fault --------------------------------------------
+        hrc=0; halt_boot "$tier" kmain_text_write "$leg" 'PANIC .*' || hrc=$?
+        if [ "$hrc" = 3 ]; then bad "I1 $tier kmain_text_write $leg: no image"; else
+            a=$(grab "$log" 'write: text at \(0x[0-9a-f]*\)')
+            tl=$(sym "$elf" __pax_text_start); th=$(sym "$elf" __pax_text_end)
+            want=$(hx $((tl + 64)))
+            r=$(grab "$log" 'PANIC page fault vector 14 error 0x0000000000000003 rip \(0x[0-9a-f]*\) .*')
+            kc2=$(grab "$log" 'PANIC page fault .* cr2 \(0x[0-9a-f]*\)')
+            mc2=0x$(reg "$log.cmd1" CR2)
+            why=
+            [ "$hrc" = 0 ] || why+=" not halted ($(not_halted));"
+            "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" "write: text at $HEX" \
+                "PANIC page fault vector 14 error 0x0000000000000003 rip $HEX rsp $HEX frame $HEX cr2 $HEX" >/dev/null \
+                || why+=" the log does not end write: …, PANIC page fault … error 0x…3 … cr2 …;"
+            [ "$a" = "$want" ] || why+=" wrote '$a', not text + 0x40 ($want);"
+            [ "$kc2" = "$a" ] || why+=" the kernel's cr2 '$kc2' is not the address '$a';"
+            [ $((mc2)) = $((a)) ] || why+=" the monitor's CR2 $mc2 is not '$a';"
+            [ -n "$r" ] && [ $((r)) -ge $((tl)) ] && [ $((r)) -lt $((th)) ] || why+=" rip '$r' outside text [$tl, $th);"
+            if [ -z "$why" ]; then
+                say "PASS I1 $tier kmain_text_write $leg: PANIC page fault error 0x3 rip $r cr2 $kc2 (= the monitor's CR2 $mc2 = text + 0x40); $(halted)"
+            else
+                bad "I1 $tier kmain_text_write $leg:$why"; tail_lines 3
+            fi
+        fi
+
+        # --- I2: the invalid opcode ----------------------------------------
+        hrc=0; halt_boot "$tier" kmain_ud2 "$leg" 'PANIC .*' || hrc=$?
+        if [ "$hrc" = 3 ]; then bad "I2 $tier kmain_ud2 $leg: no image"; else
+            r=$(grab "$log" 'PANIC invalid opcode vector 6 error 0x0000000000000000 rip \(0x[0-9a-f]*\) .*')
+            u=$(sym "$elf" pax_ud2)
+            why=
+            [ "$hrc" = 0 ] || why+=" not halted ($(not_halted));"
+            "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'PAX interrupts: ud2' \
+                "PANIC invalid opcode vector 6 error 0x0000000000000000 rip $HEX rsp $HEX frame $HEX" >/dev/null \
+                || why+=" the log does not end PANIC invalid opcode vector 6 …;"
+            [ -n "$r" ] && [ -n "$u" ] && [ $((r)) = $((u)) ] || why+=" rip '$r' is not pax_ud2 ($u);"
+            if [ -z "$why" ]; then
+                say "PASS I2 $tier kmain_ud2 $leg: PANIC invalid opcode at rip $r = pax_ud2; $(halted)"
+            else
+                bad "I2 $tier kmain_ud2 $leg:$why"; tail_lines 2
+            fi
+        fi
+
+        # --- I3: the breakpoint returns; I6: the tables --------------------
+        hrc=0; halt_boot "$tier" kmain_int3 "$leg" 'halt' || hrc=$?
+        if [ "$hrc" = 3 ]; then bad "I3 $tier kmain_int3 $leg: no image"; else
+            r=$(grab "$log" 'int3: breakpoint vector 3, rip \(0x[0-9a-f]*\)')
+            i=$(sym "$elf" pax_int3)
+            why=
+            [ "$hrc" = 0 ] || why+=" not halted ($(not_halted));"
+            "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
+                "gdt: $HEX, 7 descriptors, tss 0x28 at $HEX, ist1 $HEX to $HEX" \
+                "idt: $HEX, 256 gates, 48 routed, #DF on ist1" \
+                "int3: breakpoint vector 3, rip $HEX" 'int3: returned, 1 breakpoint' 'halt' >/dev/null \
+                || why+=" the log does not end gdt, idt, int3: breakpoint …, int3: returned, 1 breakpoint, halt;"
+            [ -n "$r" ] && [ -n "$i" ] && [ $((r)) = $((i + 1)) ] || why+=" rip '$r' is not pax_int3 + 1 ($i + 1);"
+            if [ -z "$why" ]; then
+                say "PASS I3 $tier kmain_int3 $leg: the breakpoint at $i returned (saved rip $r = pax_int3 + 1), the kernel went on and halted; $(halted)"
+            else
+                bad "I3 $tier kmain_int3 $leg:$why"; tail_lines 5
+            fi
+            # I6: the monitor's descriptor-table registers against the ELF
+            regs=$log.cmd1
+            gdt=$(seg "$regs" GDT); idt=$(seg "$regs" IDT); tr=$(seg "$regs" TR); cs=$(seg "$regs" CS); ss=$(seg "$regs" SS)
+            g=$(sym "$elf" pax_gdt); t=$(sym "$elf" pax_tss); d=$(sym "$elf" pax_idt)
+            kg=$(grab "$log" 'gdt: \(0x[0-9a-f]*\), .*'); kt=$(grab "$log" 'gdt: .* tss 0x28 at \(0x[0-9a-f]*\), .*')
+            kd=$(grab "$log" 'idt: \(0x[0-9a-f]*\), .*')
+            why=
+            [ "$gdt" = "${g#0x} 00000037" ] || why+=" GDT '$gdt', want '${g#0x} 00000037';"
+            [ "$idt" = "${d#0x} 00000fff" ] || why+=" IDT '$idt', want '${d#0x} 00000fff';"
+            case $tr in "0028 ${t#0x} 00000067 "*) ;; *) why+=" TR '$tr', want '0028 ${t#0x} 00000067 …';" ;; esac
+            case $cs in 0008*CS64*) ;; *) why+=" CS '$cs', want 0008 … CS64;" ;; esac
+            case $ss in 0010*) ;; *) why+=" SS '$ss', want 0010 …;" ;; esac
+            [ "$kg" = "$g" ] && [ "$kt" = "$t" ] && [ "$kd" = "$d" ] || why+=" the kernel's lines (gdt $kg tss $kt idt $kd) are not the ELF's ($g $t $d);"
+            if [ -z "$why" ]; then
+                say "PASS I6 $tier kmain_int3 $leg: the monitor: GDT $gdt, IDT $idt, TR $tr, CS ${cs%% *}, SS ${ss%% *} = pax_gdt, pax_idt, pax_tss"
+            else
+                bad "I6 $tier kmain_int3 $leg:$why"
+            fi
+        fi
+
+        # --- I4: the double fault on IST1 ----------------------------------
+        hrc=0; halt_boot "$tier" kmain_double_fault "$leg" 'PANIC .*' || hrc=$?
+        if [ "$hrc" = 3 ]; then bad "I4 $tier kmain_double_fault $leg: no image"; else
+            f=$(grab "$log" 'PANIC double fault vector 8 error 0x0000000000000000 .* frame \(0x[0-9a-f]*\)')
+            r=$(grab "$log" 'PANIC double fault vector 8 error 0x0000000000000000 rip \(0x[0-9a-f]*\) .*')
+            lo=$(sym "$elf" pax_ist1_stack); hi=$(sym "$elf" pax_ist1_top)
+            b=$(sym "$elf" pax_bad_stack); bs=$(symsize "$elf" pax_bad_stack)
+            mrsp=0x$(reg "$log.cmd1" RSP)
+            why=
+            [ "$hrc" = 0 ] || why+=" not halted ($(not_halted));"
+            "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
+                "idt: $HEX, 256 gates, 48 routed, #DF on ist1" \
+                "PANIC double fault vector 8 error 0x0000000000000000 rip $HEX rsp 0x0000000000001000 frame $HEX" >/dev/null \
+                || why+=" the log does not end idt …, PANIC double fault vector 8 … rsp 0x…1000 …;"
+            [ -n "$f" ] && [ $((f)) -ge $((lo)) ] && [ $((f)) -lt $((hi)) ] || why+=" frame '$f' outside IST1 [$lo, $hi);"
+            [ -n "$f" ] && [ $((f)) = $((hi - 176)) ] || why+=" frame '$f' is not pax_ist1_top - 176 ($(hx $((hi - 176))));"
+            [ $((mrsp)) -ge $((lo)) ] && [ $((mrsp)) -lt $((hi)) ] || why+=" the monitor's RSP $mrsp is outside IST1;"
+            [ -n "$r" ] && [ -n "$bs" ] && [ $((r)) -ge $((b)) ] && [ $((r)) -lt $((b + bs)) ] || why+=" rip '$r' outside pax_bad_stack;"
+            if [ -z "$why" ]; then
+                say "PASS I4 $tier kmain_double_fault $leg: PANIC double fault, rsp 0x1000, frame $f = pax_ist1_top - 176 (IST1 [$lo, $hi)), the monitor's RSP $mrsp on IST1; $(halted)"
+            else
+                bad "I4 $tier kmain_double_fault $leg:$why"; tail_lines 2
+            fi
+        fi
+
+        # --- I5: the timer -------------------------------------------------
+        hrc=0; halt_boot "$tier" kmain_timer "$leg" 'halt' || hrc=$?
+        if [ "$hrc" = 3 ]; then bad "I5 $tier kmain_timer $leg: no image"; else
+            why=
+            [ "$hrc" = 0 ] || why+=" not halted ($(not_halted));"
+            "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
+                "apic: 0x00000000fee00000 at 0xffffb00000000000, id 0, svr $HEX, lint0 $HEX -> 0x0000000000008700" \
+                'timer: pit divisor 11932 \(99\.998 Hz\), 8259 at 32 and 40, line 0 unmasked' \
+                'timer: 20 ticks on vector 32, 0 spurious' 'halt' >/dev/null \
+                || why+=" the log does not end apic …, timer: pit …, timer: 20 ticks on vector 32, 0 spurious, halt;"
+            if [ -z "$why" ]; then
+                say "PASS I5 $tier kmain_timer $leg: $(grab "$log" '\(apic: .*\)'); 20 ticks on vector 32; $(halted)"
+            else
+                bad "I5 $tier kmain_timer $leg:$why"; tail_lines 4
+            fi
+        fi
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx2-interrupts: PASS" || say "mpx2-interrupts: FAIL"
+exit "$fail"
