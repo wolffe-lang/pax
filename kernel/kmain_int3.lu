@@ -1,0 +1,37 @@
+//! member: false
+// kmain_int3.lu — a breakpoint returns (kw10, tests/mpx2-interrupts I3,
+// I6). The kernel loads its own GDT, TSS and IDT (kernel/gdt,
+// kernel/idt), executes `int3` (boot/isr.S's pax_int3), whose handler
+// (kernel/interrupts) prints one line and returns through the
+// trampoline's `iretq`, and carries on:
+//
+//     PAX interrupts: int3
+//     gdt: 0x<base>, 7 descriptors, tss 0x28 at 0x<tss>, ist1 0x<lo> to 0x<hi>
+//     idt: 0x<base>, 256 gates, 48 routed, #DF on ist1
+//     int3: breakpoint vector 3, rip 0x<the ret after the int3>
+//     int3: returned, 1 breakpoint
+//     halt
+//
+// and halts. The tables are read back through QEMU's monitor on the
+// halted machine (I6).
+use interrupts
+use log
+use panic
+use serial
+
+extern "c" fn pax_int3()
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX interrupts: int3")
+    interrupts.start()
+    interrupts.report()
+    // # Safety: boot/isr.S's INT3; vector 3's gate is loaded.
+    unsafe { pax_int3() }
+    log.put("int3: returned, ")
+    log.dec(interrupts.breakpoints() as int)
+    log.put(" breakpoint")
+    log.end()
+    log.line("halt")
+    panic.halt()
+}
