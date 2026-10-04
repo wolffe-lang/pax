@@ -1,0 +1,165 @@
+//! gdt — the kernel's own global descriptor table and task-state
+//! segment (kw10, M-PX2's interrupt piece).
+//!
+//! Limine enters the kernel on its own GDT, in bootloader-reclaimable
+//! memory, with no TSS. `start` builds PAX's in the image's .bss (the
+//! storage boot/isr.S reserves: wolf's module state holds scalars only,
+//! [mem.static.3]) and loads it:
+//!
+//!     0x00  null
+//!     0x08  kernel code   64-bit (L), DPL 0, present, execute/read
+//!     0x10  kernel data   DPL 0, present, read/write
+//!     0x18  user data     DPL 3 (for the ring-3 lane; nothing loads it yet)
+//!     0x20  user code     64-bit, DPL 3 (SYSRET's order: user data at
+//!                         STAR's base + 8, user code at + 16)
+//!     0x28  the TSS       a 16-byte system descriptor, type 9 (an
+//!                         available 64-bit TSS), limit 103
+//!
+//! In 64-bit mode a code or data descriptor's base and limit are
+//! ignored (flat), but the limit is written whole (0xfffff, G) as a
+//! 32-bit-compatible descriptor would be. The TSS holds no stack for a
+//! privilege change yet (RSP0, the ring-3 lane's) and one interrupt
+//! stack: IST1, the top of a 16 KiB .bss stack, where kernel/idt sends
+//! the double fault, so a #DF on a broken stack still has one to run
+//! on. Its I/O permission map base is 104, the TSS's size: no bitmap,
+//! so ring 3 has no port access.
+//!
+//! A descriptor (Intel SDM vol. 3A §3.4.5, Figure 3-8; AMD64 APM vol. 2
+//! §4.8): limit 15:0 in bits 15:0, base 23:0 in 39:16, the access byte
+//! (P, DPL, S, type) in 47:40, limit 19:16 in 51:48, the flags (G, D/B,
+//! L, AVL) in 55:52, base 31:24 in 63:56. The 64-bit TSS descriptor
+//! (SDM vol. 3A §7.2.3, Figure 7-4; APM vol. 2 §4.8.3) is that, then
+//! base 63:32 in the next eight bytes. The 64-bit TSS (SDM vol. 3A §7.7,
+//! Figure 7-11; APM vol. 2 §12.2.5): RSP0-2 at 4, 12, 20, IST1-7 at 36
+//! .. 84, the I/O map base at 102, 104 bytes, its 8-byte fields at
+//! 4-byte offsets — `#[repr(c, packed)]` (kw08). No Linux source; no
+//! other kernel's source.
+
+use log
+
+extern "c" fn pax_load_gdt(gdtr: *Gdtr)
+extern "c" fn pax_ltr(sel: u16)
+
+extern "c" let pax_gdt: *u64
+extern "c" let pax_tss: *Tss
+extern "c" let pax_gdtr: *Gdtr
+extern "c" let pax_ist1_stack: *u8
+extern "c" let pax_ist1_top: *u8
+
+/// LGDT's operand.
+#[repr(c, packed)]
+struct Gdtr {
+    limit: u16,
+    base: u64,
+}
+
+/// The 64-bit task-state segment.
+#[repr(c, packed)]
+struct Tss {
+    reserved0: u32,
+    rsp0: u64,
+    rsp1: u64,
+    rsp2: u64,
+    reserved1: u64,
+    ist1: u64,
+    ist2: u64,
+    ist3: u64,
+    ist4: u64,
+    ist5: u64,
+    ist6: u64,
+    ist7: u64,
+    reserved2: u64,
+    reserved3: u16,
+    iomap_base: u16,
+}
+
+/// The TSS's selector (index 5, RPL 0). Kernel code is 0x08 and data
+/// 0x10 (boot/isr.S's pax_load_gdt loads them).
+const TSS_SEL: u64 = 40
+
+/// Descriptors in the table, the TSS's two included.
+const COUNT: u64 = 7
+
+/// One 8-byte segment descriptor.
+fn descriptor(base: u64, limit: u64, access: u64, flags: u64) -> u64 {
+    (limit & 0xffff) | ((base & 0xffffff) << 16) | (access << 40) | (((limit >> 16) & 0xf) << 48) | (flags << 52) | (((base >> 24) & 0xff) << 56)
+}
+
+/// Build the GDT and the TSS, load the GDT (CS 0x08; DS, ES, SS, FS, GS
+/// 0x10) and the task register (0x28).
+pub fn start() {
+    // # Safety: pax_gdt, pax_tss and pax_gdtr are boot/isr.S's .bss
+    // storage (64, 112 and 16 bytes), written by nothing else; the GDT
+    // loaded is complete before LGDT and the TSS before LTR, and the
+    // selectors reloaded name descriptors this table has.
+    unsafe {
+        let tss = pax_tss as u64
+        pax_tss[0] = Tss {
+            reserved0: 0,
+            rsp0: 0,
+            rsp1: 0,
+            rsp2: 0,
+            reserved1: 0,
+            ist1: pax_ist1_top as u64,
+            ist2: 0,
+            ist3: 0,
+            ist4: 0,
+            ist5: 0,
+            ist6: 0,
+            ist7: 0,
+            reserved2: 0,
+            reserved3: 0,
+            iomap_base: size_of(Tss) as u16,
+        }
+        pax_gdt[0] = 0
+        pax_gdt[1] = descriptor(0, 0xfffff, 0x9a, 0xa) // P, DPL 0, code, exec/read; G, L
+        pax_gdt[2] = descriptor(0, 0xfffff, 0x92, 0xc) // P, DPL 0, data, read/write; G, D/B
+        pax_gdt[3] = descriptor(0, 0xfffff, 0xf2, 0xc) // P, DPL 3, data
+        pax_gdt[4] = descriptor(0, 0xfffff, 0xfa, 0xa) // P, DPL 3, code; L
+        pax_gdt[5] = descriptor(tss, size_of(Tss) as u64 - 1, 0x89, 0) // P, DPL 0, type 9
+        pax_gdt[6] = tss >> 32
+        pax_gdtr[0] = Gdtr { limit: (COUNT * 8 - 1) as u16, base: pax_gdt as u64 }
+        pax_load_gdt(pax_gdtr)
+        pax_ltr(TSS_SEL as u16)
+    }
+}
+
+/// The GDT's linear address.
+pub fn base() -> u64 {
+    // # Safety: the address of boot/isr.S's table; nothing is read.
+    unsafe { pax_gdt as u64 }
+}
+
+/// The TSS's linear address.
+pub fn tss() -> u64 {
+    // # Safety: the address of boot/isr.S's TSS; nothing is read.
+    unsafe { pax_tss as u64 }
+}
+
+/// The IST1 stack's bounds: its first byte (0) and its top (1), the
+/// first byte past it (the TSS's IST1).
+pub fn ist1(which: int) -> u64 {
+    // # Safety: the addresses of boot/isr.S's stack; nothing is read.
+    unsafe {
+        if which == 0 {
+            return pax_ist1_stack as u64
+        }
+        pax_ist1_top as u64
+    }
+}
+
+/// Write the tables' line:
+/// `gdt: 0x<base>, 7 descriptors, tss 0x28 at 0x<tss>, ist1 0x<lo> to 0x<hi>`.
+pub fn report() {
+    log.put("gdt: ")
+    log.hex(base())
+    log.put(", ")
+    log.dec(COUNT as int)
+    log.put(" descriptors, tss 0x28 at ")
+    log.hex(tss())
+    log.put(", ist1 ")
+    log.hex(ist1(0))
+    log.put(" to ")
+    log.hex(ist1(1))
+    log.end()
+}
