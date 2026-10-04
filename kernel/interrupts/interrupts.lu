@@ -1,0 +1,177 @@
+//! interrupts — where every routed vector lands (kw10, M-PX2's
+//! interrupt piece).
+//!
+//! Wolf has no interrupt calling convention ([abi.interrupt], wolf-lang
+//! kw10): boot/isr.S's trampoline for each vector 0-47 saves the
+//! registers, builds a `Frame` and calls `pax_interrupt` under the C
+//! convention, then returns with `iretq` if it returns. Interrupts are
+//! off throughout (every gate is an interrupt gate, kernel/idt).
+//!
+//! - vector 3, the breakpoint (`int3`, a trap: the saved RIP is the next
+//!   instruction): one line, `int3: breakpoint vector 3, rip 0x<rip>`,
+//!   and it returns — the kernel continues after the `int3`;
+//! - vector 32, the timer (kernel/timer, the 8259's line 0): a tick, and
+//!   it returns;
+//! - vectors 39 and 47, an 8259 line 7 or 15: a spurious request
+//!   (kernel/timer reads the in-service register) returns; a real one
+//!   is unexpected (every other line is masked) and panics;
+//! - every other exception, 0-31: a named panic — the vector's name
+//!   (Intel SDM vol. 3A Table 6-1 and §6.15; AMD64 APM vol. 2 Table 8-1
+//!   for 28-30), its number, the error code (0 for a vector whose CPU
+//!   pushes none: boot/isr.S pushes the zero), the saved RIP and RSP,
+//!   the frame's own address (on IST1 for the double fault), and for a
+//!   page fault CR2, the linear address that faulted (SDM vol. 3A §6.15,
+//!   interrupt 14; §4.7):
+//!
+//!     PANIC <name> vector <v> error 0x<e> rip 0x<r> rsp 0x<s> frame 0x<f>[ cr2 0x<a>]
+//!
+//!   then halt (kernel/panic: `cli; hlt`, forever).
+//!
+//! The frame is boot/isr.S's: 22 eight-byte words, lowest address
+//! first (`[abi.interrupt]`). The handler only reads it here; a handler
+//! that resumes past a fault writes `rip` through `f as *u64` at
+//! `offset_of(Frame, rip) / 8`, because a store to a field of a raw
+//! element (`f[0].rip = v`) is refused by wolf (wolf-lang#577).
+//!
+//! No Linux source; no other kernel's source.
+
+use gdt
+use idt
+use log
+use panic
+use timer
+
+extern "c" fn pax_cr2() -> u64
+
+/// What boot/isr.S hands `pax_interrupt`.
+#[repr(c)]
+struct Frame {
+    r15: u64,
+    r14: u64,
+    r13: u64,
+    r12: u64,
+    r11: u64,
+    r10: u64,
+    r9: u64,
+    r8: u64,
+    rbp: u64,
+    rdi: u64,
+    rsi: u64,
+    rdx: u64,
+    rcx: u64,
+    rbx: u64,
+    rax: u64,
+    vector: u64,
+    error: u64,
+    rip: u64,
+    cs: u64,
+    rflags: u64,
+    rsp: u64,
+    ss: u64,
+}
+
+/// Breakpoints taken (vector 3).
+var breakpoint_count: u64 = 0
+
+/// The name of exception vector `v` (0-31).
+pub fn name(v: u64) -> str {
+    if v == 0 { return "divide error" }
+    if v == 1 { return "debug" }
+    if v == 2 { return "nmi" }
+    if v == 3 { return "breakpoint" }
+    if v == 4 { return "overflow" }
+    if v == 5 { return "bound range exceeded" }
+    if v == 6 { return "invalid opcode" }
+    if v == 7 { return "device not available" }
+    if v == 8 { return "double fault" }
+    if v == 9 { return "coprocessor segment overrun" }
+    if v == 10 { return "invalid tss" }
+    if v == 11 { return "segment not present" }
+    if v == 12 { return "stack-segment fault" }
+    if v == 13 { return "general protection" }
+    if v == 14 { return "page fault" }
+    if v == 16 { return "x87 floating-point error" }
+    if v == 17 { return "alignment check" }
+    if v == 18 { return "machine check" }
+    if v == 19 { return "simd floating-point exception" }
+    if v == 20 { return "virtualization exception" }
+    if v == 21 { return "control protection exception" }
+    if v == 28 { return "hypervisor injection exception" }
+    if v == 29 { return "vmm communication exception" }
+    if v == 30 { return "security exception" }
+    if v < 32 { return "reserved" }
+    "unexpected interrupt"
+}
+
+/// Load the kernel's own GDT and TSS (kernel/gdt) and IDT (kernel/idt):
+/// from here on every exception reaches `pax_interrupt`. Every kernel
+/// calls this first: boot/isr.S is on the package's `asm` list, so every
+/// kernel links the trampolines, and they call this module.
+pub fn start() {
+    gdt.start()
+    idt.start()
+}
+
+/// Write the tables' two lines (kernel/gdt's and kernel/idt's).
+pub fn report() {
+    gdt.report()
+    idt.report()
+}
+
+/// Breakpoints taken since boot.
+pub fn breakpoints() -> u64 {
+    // # Safety: a read of the counter; the kernel's interrupts are off.
+    unsafe { breakpoint_count }
+}
+
+/// Write the panic line for the frame at `f` and halt.
+fn fatal(f: *Frame) {
+    // # Safety: `f` is the trampoline's frame, live for this call.
+    let (v, e, rip, rsp) = unsafe { (f[0].vector, f[0].error, f[0].rip, f[0].rsp) }
+    log.put("PANIC ")
+    log.put(name(v))
+    log.put(" vector ")
+    log.dec(v as int)
+    log.put(" error ")
+    log.hex(e)
+    log.put(" rip ")
+    log.hex(rip)
+    log.put(" rsp ")
+    log.hex(rsp)
+    log.put(" frame ")
+    // # Safety: the frame's address; nothing is read.
+    log.hex(unsafe { f as u64 })
+    if v == 14 {
+        log.put(" cr2 ")
+        // # Safety: cpu.S's MOV from CR2; the fault being reported set it.
+        log.hex(unsafe { pax_cr2() })
+    }
+    log.end()
+    panic.halt()
+}
+
+/// boot/isr.S's common path calls this for every routed vector.
+export fn pax_interrupt(f: *Frame) {
+    // # Safety: `f` is the trampoline's frame, live for this call.
+    let v = unsafe { f[0].vector }
+    if v == 3 {
+        // # Safety: as above.
+        let rip = unsafe { f[0].rip }
+        // # Safety: the counter is touched with interrupts off.
+        unsafe {
+            breakpoint_count += 1
+        }
+        log.put("int3: breakpoint vector 3, rip ")
+        log.hex(rip)
+        log.end()
+        return
+    }
+    if v == timer.master_base() {
+        timer.tick()
+        return
+    }
+    if (v == 39 || v == 47) && timer.spurious(v) {
+        return
+    }
+    fatal(f)
+}
