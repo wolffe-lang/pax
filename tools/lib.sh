@@ -77,17 +77,34 @@ find_ovmf() {
     done
 }
 
-# Load kernel/wolf.pin into WOLF_VERSION / WOLF_URL / WOLF_SHA256 /
-# WOLF_PIN_COMMIT / LUPIN_VERSION / LUPIN_SHA256 and the staged paths
-# WOLF_DIR and LUPIN_DIR (tools/fetch-wolf, tools/fetch-lupin).
+# Load kernel/wolf.pin. Two shapes (tools/fetch-wolf):
+#   a SOURCE pin: WOLF_LANG_COMMIT (a full wolf-lang sha), built from
+#     source, for a compiler feature no release carries yet (kw05, px02);
+#   a RELEASE pin: WOLF_VERSION / WOLF_URL / WOLF_SHA256 /
+#     WOLF_PIN_COMMIT, the archive by digest (px01).
+# Exactly one shape, never both. Both set LUPIN_VERSION / LUPIN_SHA256.
+# Sets WOLF_PIN_KIND (source | release) and the staged paths WOLF_DIR
+# and LUPIN_DIR (tools/fetch-wolf, tools/fetch-lupin).
 load_wolf_pin() {
     local pin=$PAX_ROOT/kernel/wolf.pin
     [ -f "$pin" ] || die "no $pin"
     # shellcheck disable=SC1090
     . "$pin"
-    [ -n "${WOLF_VERSION:-}" ] && [ -n "${WOLF_URL:-}" ] && [ -n "${WOLF_SHA256:-}" ] \
-        && [ -n "${WOLF_PIN_COMMIT:-}" ] && [ -n "${LUPIN_VERSION:-}" ] && [ -n "${LUPIN_SHA256:-}" ] \
-        || die "$pin must set WOLF_VERSION, WOLF_URL, WOLF_SHA256, WOLF_PIN_COMMIT, LUPIN_VERSION and LUPIN_SHA256"
-    WOLF_DIR=$PAX_CACHE/wolf-$WOLF_VERSION
+    [ -n "${LUPIN_VERSION:-}" ] && [ -n "${LUPIN_SHA256:-}" ] \
+        || die "$pin must set LUPIN_VERSION and LUPIN_SHA256"
+    if [ -n "${WOLF_LANG_COMMIT:-}" ]; then
+        [ -z "${WOLF_VERSION:-}${WOLF_URL:-}${WOLF_SHA256:-}${WOLF_PIN_COMMIT:-}" ] \
+            || die "$pin sets WOLF_LANG_COMMIT (a source pin) and release lines: one shape only"
+        printf '%s' "$WOLF_LANG_COMMIT" | grep -Eq '^[0-9a-f]{40}$' \
+            || die "$pin: WOLF_LANG_COMMIT must be a full 40-hex wolf-lang sha"
+        WOLF_PIN_KIND=source
+        WOLF_DIR=$PAX_CACHE/wolf-$WOLF_LANG_COMMIT
+    else
+        [ -n "${WOLF_VERSION:-}" ] && [ -n "${WOLF_URL:-}" ] && [ -n "${WOLF_SHA256:-}" ] \
+            && [ -n "${WOLF_PIN_COMMIT:-}" ] \
+            || die "$pin must set WOLF_LANG_COMMIT, or WOLF_VERSION, WOLF_URL, WOLF_SHA256 and WOLF_PIN_COMMIT"
+        WOLF_PIN_KIND=release
+        WOLF_DIR=$PAX_CACHE/wolf-$WOLF_VERSION
+    fi
     LUPIN_DIR=$PAX_CACHE/lupin-$LUPIN_VERSION
 }

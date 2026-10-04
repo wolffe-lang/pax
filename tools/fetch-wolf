@@ -1,18 +1,74 @@
 #!/usr/bin/env bash
-# fetch-wolf — stage kernel/wolf.pin's wolf release, BY DIGEST.
+# fetch-wolf — stage kernel/wolf.pin's wolf.
 #
 #   tools/fetch-wolf        -> prints the wolf binary's path
 #
-# Downloads WOLF_URL (the release's x86_64-unknown-linux-gnu archive),
-# refuses on a sha256 mismatch with WOLF_SHA256, unpacks it under
+# kernel/wolf.pin has one of two shapes (tools/lib.sh, load_wolf_pin):
+#
+# A SOURCE pin (WOLF_LANG_COMMIT, a full sha; kw05's shape, px02's):
+# the compiler feature the kernel needs is on wolf-lang trunk but in no
+# release. Fetches exactly that commit of wolffe-lang/wolf-lang (public)
+# into .pax-cache/wolf-<sha>/src, refuses if HEAD is not that commit,
+# runs `cargo build --release -p wolf_driver --locked` with WOLF_COMMIT
+# set to the commit's first 8 hex (the stamp wolf's dist build sets, so
+# `--version` reads `wolf <v>+dev.<hex> (wolfgang, pin <hex>)`; unset, it
+# reads `+dev.unknown` with no pin clause), and refuses a binary whose
+# `--version` does not name the commit's first 7 hex. Needs
+# git and cargo. Nothing is trusted by digest here: the commit IS the
+# pin, and the lockfile pins the crates.
+#
+# A RELEASE pin (WOLF_VERSION, WOLF_URL, WOLF_SHA256, WOLF_PIN_COMMIT;
+# px01's): downloads the release's x86_64-unknown-linux-gnu archive,
+# refuses on a sha256 mismatch, unpacks it under
 # .pax-cache/wolf-<version>/, and refuses a binary whose `--version`
-# does not name the first 7 hex of WOLF_PIN_COMMIT (the wolf-lang
-# commit the release was cut from). Never builds wolf. The release tier
-# also needs clang >= 15 at run time (system LLVM, wolf's D33).
-# Linux x86-64 hosts. Idempotent: a verified archive is reused.
+# does not name WOLF_PIN_COMMIT's first 7 hex. Never builds.
+#
+# The release tier also needs clang >= 15 at run time (system LLVM,
+# wolf's D33). Linux x86-64 hosts. Idempotent: a staged wolf whose stamp
+# names the pin is reused.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 load_wolf_pin
+
+check_version() { # bin sha
+    local ver
+    ver=$("$1" --version | head -n 1)
+    case $ver in
+        *"pin ${2:0:7}"*) ;;
+        *) die "wolf --version says '$ver'; the pin says ${2:0:7}" ;;
+    esac
+    printf '%s\n' "$ver"
+}
+
+if [ "$WOLF_PIN_KIND" = source ]; then
+    bin=$WOLF_DIR/bin/wolf
+    stamp=$WOLF_DIR/.built
+    if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$WOLF_LANG_COMMIT" ] && [ -x "$bin" ]; then
+        say "wolf at $WOLF_LANG_COMMIT already built ($bin)"
+        printf '%s\n' "$bin"
+        exit 0
+    fi
+    need git cargo
+    src=$WOLF_DIR/src
+    if [ ! -d "$src/.git" ]; then
+        rm -rf "$src"; mkdir -p "$WOLF_DIR"
+        git init -q "$src"
+        git -C "$src" remote add origin https://github.com/wolffe-lang/wolf-lang.git
+    fi
+    git -C "$src" fetch -q --depth 1 origin "$WOLF_LANG_COMMIT" \
+        || die "cannot fetch wolf-lang commit $WOLF_LANG_COMMIT"
+    git -C "$src" checkout -q -f --detach FETCH_HEAD
+    got=$(git -C "$src" rev-parse HEAD)
+    [ "$got" = "$WOLF_LANG_COMMIT" ] || die "wolf-lang HEAD is $got, the pin says $WOLF_LANG_COMMIT"
+    (cd "$src" && WOLF_COMMIT=${WOLF_LANG_COMMIT:0:8} cargo build --release -p wolf_driver --locked) >&2
+    mkdir -p "$WOLF_DIR/bin"
+    cp "$src/target/release/wolf" "$bin"
+    ver=$(check_version "$bin" "$WOLF_LANG_COMMIT")
+    printf '%s\n' "$WOLF_LANG_COMMIT" > "$stamp"
+    say "wolf at $WOLF_LANG_COMMIT built from source (sha256 $(sha256_of "$bin")): $ver"
+    printf '%s\n' "$bin"
+    exit 0
+fi
 
 stamp=$WOLF_DIR/.verified
 find_bin() { find "$WOLF_DIR" -name wolf -type f -perm -u+x | head -n 1; }
@@ -38,11 +94,7 @@ rm -rf "$WOLF_DIR"
 mv "$tmp/x" "$WOLF_DIR"
 bin=$(find_bin)
 [ -n "$bin" ] || die "the wolf archive holds no wolf binary"
-ver=$("$bin" --version | head -n 1)
-case $ver in
-    *"pin ${WOLF_PIN_COMMIT:0:7}"*) ;;
-    *) die "wolf --version says '$ver'; the pin says ${WOLF_PIN_COMMIT:0:7}" ;;
-esac
+ver=$(check_version "$bin" "$WOLF_PIN_COMMIT")
 printf '%s\n' "$WOLF_SHA256" > "$stamp"
 say "wolf $WOLF_VERSION staged ($bin, archive sha256 $got): $ver"
 printf '%s\n' "$bin"
