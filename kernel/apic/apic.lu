@@ -1,0 +1,115 @@
+//! apic — the local APIC, mapped and set to pass the 8259 through
+//! (kw10, M-PX2's timer).
+//!
+//! Measured (QEMU's monitor, `info lapic` and `info pic`, kasumi,
+//! kw10): Limine hands over with the local APIC enabled (SVR 0x1ff) and
+//! its LINT0 entry masked (LVT0 0x00018700: ExtINT, level, masked). An
+//! 8259 request then never reaches the CPU: the master's IRR holds line
+//! 0 forever and the kernel sleeps in HLT. A processor with an enabled
+//! local APIC takes the 8259's INTR only through LINT0 programmed as
+//! ExtINT and unmasked ("virtual wire": Intel SDM vol. 3A §11.5.1, the
+//! LVT's delivery modes — ExtINT is always level-triggered — and the
+//! mask bit 16). Globally disabling the APIC (IA32_APIC_BASE bit 11)
+//! would pass INTR straight through as well, but the scheduler lane
+//! wants the local APIC's timer and the SMP lanes its IPIs, so it stays
+//! enabled.
+//!
+//! The APIC's registers are a 4 KiB page of memory-mapped I/O at the
+//! physical base IA32_APIC_BASE names (bits 51:12; 0xfee00000 on every
+//! machine PAX has met; SDM vol. 3A §11.4.1, §11.4.4). PAX's paging
+//! maps no reserved memory (kernel/paging), so `start` maps that page
+//! at DEVICE_VA, the first page of PML4 slot 352 (0xffffb00000000000,
+//! outside the HHDM's 256, the scratch 320 and the image's 511), present,
+//! writable, no-execute, with PCD and PWT set: uncached (PAT entry 3 at
+//! its power-on value; SDM vol. 3A §11.12.3, §4.9.2). Each register is
+//! one aligned 32-bit access (`read_volatile`/`write_volatile` of a
+//! `u32`, kw07; SDM vol. 3A §11.4.1: 128-bit aligned registers,
+//! accessed with 32-bit loads and stores).
+//!
+//! Registers used (offsets from the base, SDM vol. 3A Table 11-1): 0x20
+//! the local APIC ID (bits 31:24), 0xf0 the spurious-interrupt vector
+//! register (bit 8: software enable), 0x350 LVT LINT0. No Linux source;
+//! no other kernel's source.
+
+use log
+use panic
+use paging
+
+extern "c" fn pax_apic_base() -> u64
+
+/// Where `start` maps the local APIC's page: PML4 slot 352's first page.
+const DEVICE_VA: u64 = 0xffffb00000000000
+
+/// LVT LINT0: ExtINT (delivery mode 0b111 in bits 10:8), level (bit 15),
+/// unmasked (bit 16 clear), vector 0 (ignored for ExtINT).
+const LINT0_EXTINT: u32 = 0x8700
+
+/// LINT0's value as Limine left it (`start` records it).
+var lint0_before: u64 = 0
+
+/// The local APIC's physical base (IA32_APIC_BASE bits 51:12).
+pub fn phys() -> u64 {
+    // # Safety: cpu.S's RDMSR of IA32_APIC_BASE.
+    let b = unsafe { pax_apic_base() }
+    (b - b % 4096) - ((b >> 52) << 52)
+}
+
+/// Whether IA32_APIC_BASE's global enable (bit 11) is set.
+pub fn enabled() -> bool {
+    // # Safety: as `phys`.
+    let b = unsafe { pax_apic_base() }
+    ((b >> 11) & 1) == 1
+}
+
+/// The register at `offset`.
+pub fn read(offset: u64) -> u64 {
+    // # Safety: DEVICE_VA maps the APIC's page once `start` has run;
+    // offset < 4096, 16-aligned; one 32-bit access.
+    let v = unsafe { ((DEVICE_VA + offset) as *u32).read_volatile() }
+    v as u64
+}
+
+fn write(offset: u64, v: u32) {
+    // # Safety: as `read`.
+    unsafe { ((DEVICE_VA + offset) as *u32).write_volatile(v) }
+}
+
+/// Map the APIC's page at DEVICE_VA in the structures at `pml4` (from
+/// `st`'s frames: kernel/paging must have switched to them), and set
+/// LINT0 to ExtINT, unmasked: the 8259's requests reach the CPU.
+pub fn start(st: u64, pml4: u64) {
+    if !enabled() {
+        panic.fail("apic: the local APIC is globally disabled; IA32_APIC_BASE", phys())
+        return
+    }
+    let uncached: u64 = 24 // PWT (bit 3), PCD (bit 4)
+    let n = paging.map(st, pml4, DEVICE_VA, phys(), paging.no_exec() | paging.writable() | uncached) else 9
+    if n == 9 {
+        panic.fail("apic: cannot map the local APIC's page at", DEVICE_VA)
+        return
+    }
+    // # Safety: the counter is written once, interrupts off.
+    unsafe {
+        lint0_before = read(0x350)
+    }
+    write(0x350, LINT0_EXTINT)
+}
+
+/// Write the APIC's line:
+/// `apic: 0x<phys> at 0x<va>, id <n>, svr 0x<s>, lint0 0x<old> -> 0x<new>`.
+pub fn report() {
+    log.put("apic: ")
+    log.hex(phys())
+    log.put(" at ")
+    log.hex(DEVICE_VA)
+    log.put(", id ")
+    log.dec((read(0x20) >> 24) as int)
+    log.put(", svr ")
+    log.hex(read(0xf0))
+    log.put(", lint0 ")
+    // # Safety: a read of the recorded value; interrupts off.
+    log.hex(unsafe { lint0_before })
+    log.put(" -> ")
+    log.hex(read(0x350))
+    log.end()
+}
