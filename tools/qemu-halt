@@ -3,7 +3,7 @@
 #
 #   tools/qemu-halt [--firmware bios|uefi] [--serial FILE] [--timeout SECS]
 #                   [--accel auto|kvm|tcg] --elf KERNEL.elf [--symbol NAME]
-#                   --marker ERE IMAGE.iso
+#                   [--cmd MONITOR-COMMAND]... --marker ERE IMAGE.iso
 #
 # A kernel that ends in `cli; hlt` never exits QEMU, so its end cannot
 # be read from QEMU's status (tools/qemu-run's isa-debug-exit) and a
@@ -22,14 +22,17 @@
 #     kernel's vCPU before `info registers` prints);
 #   - not one serial byte written between the marker and the second
 #     probe.
-# Then `quit`. FILE.halt records both register dumps and the verdict.
+# Then each --cmd (px03: `info tlb`, `xp /256gx 0x…`) goes to the monitor
+# of the halted machine, its answer saved in FILE.cmd1, FILE.cmd2, … in
+# order (lib.sh's mon_cmd: echo, prompt and escapes removed), and then
+# `quit`. FILE.halt records both register dumps and the verdict.
 #
 # Exit 0 halted; 1 not halted (the reason on stderr); 2 usage or tool
 # error. The timeout (default 60 s) bounds the wait for the marker.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
-firmware=bios serial=$PAX_BUILD/serial.log timeout=60 accel=auto elf= sym=pax_halt marker= image=
+firmware=bios serial=$PAX_BUILD/serial.log timeout=60 accel=auto elf= sym=pax_halt marker= image= cmds=()
 while [ $# -gt 0 ]; do
     case $1 in
         --firmware) firmware=$2; shift 2 ;;
@@ -39,6 +42,7 @@ while [ $# -gt 0 ]; do
         --elf)      elf=$2; shift 2 ;;
         --symbol)   sym=$2; shift 2 ;;
         --marker)   marker=$2; shift 2 ;;
+        --cmd)      cmds+=("$2"); shift 2 ;;
         -h|--help)  sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
         -*)         die "unknown option: $1" ;;
         *)          [ -z "$image" ] || die "one image only"; image=$1; shift ;;
@@ -62,7 +66,7 @@ mkdir -p "$(dirname "$serial")"
 # path must never satisfy the marker.
 : > "$serial"
 mon=$serial.mon
-rm -f "$mon.in" "$mon.out"
+rm -f "$mon.in" "$mon.out" "$serial".cmd[0-9]*
 mkfifo "$mon.in" "$mon.out"
 rec=$serial.halt
 : > "$rec"
@@ -141,6 +145,12 @@ rip2=$(check 2 "$d2")
 kill -0 "$qpid" 2>/dev/null || no "QEMU ended during the probes"
 size1=$(wc -c < "$serial")
 [ "$size1" = "$size0" ] || no "the serial log grew from $size0 to $size1 bytes after the marker"
+n=0
+for c in ${cmds[@]+"${cmds[@]}"}; do
+    n=$((n + 1))
+    mon_cmd "$c" "$serial.cmd$n" || no "the monitor did not answer --cmd '$c'"
+    printf 'cmd%s: %s (%s lines)\n' "$n" "$c" "$(wc -l < "$serial.cmd$n" | tr -d ' ')" >> "$rec"
+done
 printf 'quit\n' >&3
 rc=0; wait "$qpid" || rc=$?; qpid=
 accel_used=$(sed -n 's/^accel: //p' "$serial.meta")

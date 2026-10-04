@@ -108,3 +108,45 @@ load_wolf_pin() {
     fi
     LUPIN_DIR=$PAX_CACHE/lupin-$LUPIN_VERSION
 }
+
+# --- QEMU's human monitor on a pipe (px03) ----------------------------------
+# tools/qemu-halt and tools/qemu-fault open the monitor's input on fd 3
+# and its output on fd 4 (`-monitor pipe:BASE`, BASE.in / BASE.out).
+# QEMU's readline echoes each command with cursor escapes and a
+# `(qemu)` prompt; an answer has no end marker of its own, so every
+# command is followed by `print` of a sentinel number, whose answer is
+# that number alone on a line, and the reply is read up to it.
+PAX_MON_SENTINEL=0x7061786d6f6e   # "paxmon"
+
+# Read the monitor's output up to the sentinel's answer line; the raw
+# text on stdout. Status 1 when it does not come within 20 seconds.
+mon_until_sentinel() {
+    local raw= line t0=$SECONDS
+    while [ $((SECONDS - t0)) -lt 20 ]; do
+        line=
+        if IFS= read -r -t 1 line <&4; then
+            raw+="$line"$'\n'
+            [ "${line//$'\r'/}" = "$PAX_MON_SENTINEL" ] && { printf '%s' "$raw"; return 0; }
+        else
+            raw+="$line"   # a partial line: the rest comes with the next read
+        fi
+    done
+    printf '%s' "$raw"
+    return 1
+}
+
+# mon_cmd CMD OUT: send CMD to the monitor and write its answer to OUT,
+# cleaned (CRs, escape sequences, the prompt and echo lines and the
+# sentinel removed). Whatever an earlier exchange left unread in the
+# pipe is drained first, so OUT holds CMD's answer only. Status 1 when
+# the monitor does not answer.
+mon_cmd() {
+    local esc raw
+    esc=$(printf '\033')
+    printf 'print %s\n' "$PAX_MON_SENTINEL" >&3
+    mon_until_sentinel >/dev/null || return 1
+    printf '%s\nprint %s\n' "$1" "$PAX_MON_SENTINEL" >&3
+    raw=$(mon_until_sentinel) || { printf '%s' "$raw" > "$2"; return 1; }
+    printf '%s\n' "$raw" | LC_ALL=C sed -e 's/\r//g' -e "s/${esc}\[[0-9;?]*[A-Za-z]//g" \
+        | LC_ALL=C grep -v -e '^(qemu)' -e "^$PAX_MON_SENTINEL\$" > "$2" || true
+}
