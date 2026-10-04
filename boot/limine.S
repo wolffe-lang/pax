@@ -24,7 +24,13 @@
                                         one-past-last (1) virtual
                                         address, boot/kernel.ld's
                                         __pax_image_start and
-                                        __pax_image_end; 0 otherwise
+                                        __pax_image_end; px03: each
+                                        section's first and one-past-
+                                        last page, 2/3 text, 4/5
+                                        rodata, 6/7 data and bss
+                                        (__pax_text_start …
+                                        __pax_data_start, the end 1's);
+                                        0 otherwise
 
    Written from: the Limine protocol (PROTOCOL.md, limine-protocol
    3a0526b7: the request layout) and the x86-64 psABI. No Linux source. */
@@ -69,11 +75,33 @@ pax_image_bounds:
         je      0f
         cmpq    $1, %rdi
         je      1f
+        cmpq    $2, %rdi
+        je      2f
+        cmpq    $3, %rdi
+        je      3f
+        cmpq    $4, %rdi
+        je      4f
+        cmpq    $5, %rdi
+        je      5f
+        cmpq    $6, %rdi
+        je      6f
+        cmpq    $7, %rdi
+        je      1f
         xorl    %eax, %eax
         ret
 0:      leaq    __pax_image_start(%rip), %rax
         ret
 1:      leaq    __pax_image_end(%rip), %rax
+        ret
+2:      leaq    __pax_text_start(%rip), %rax
+        ret
+3:      leaq    __pax_text_end(%rip), %rax
+        ret
+4:      leaq    __pax_rodata_start(%rip), %rax
+        ret
+5:      leaq    __pax_rodata_end(%rip), %rax
+        ret
+6:      leaq    __pax_data_start(%rip), %rax
         ret
         .size pax_image_bounds, . - pax_image_bounds
 
