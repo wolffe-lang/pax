@@ -9,15 +9,20 @@
 //     boot: firmware bios | uefi64
 //     mem: <entries> entries, <bytes> bytes usable
 //     hhdm: 0x<offset>
+//     frames: <T> usable, <L> below 1 MiB, <S> allocator, <F> free
 //     halt
 //
 // and halts (kernel/panic, io.S's `cli; hlt`). tests/mpx1 asserts the
-// transcript and proves the halt through QEMU's monitor. Built
-// `--target x86_64-unknown-none` on both tiers (tools/build-kernel).
-// `member: false`: kmain_panic.lu beside it is a second kernel.
+// transcript and proves the halt through QEMU's monitor; the frames line
+// (px02, kernel/frames) is checked against the mem line by
+// tests/mpx2-frames. Built `--target x86_64-unknown-none` on both
+// tiers (tools/build-kernel). `member: false`: kmain_panic.lu,
+// kmain_frames.lu, kmain_double_free.lu and kmain_free_unusable.lu
+// beside it are kernels of their own.
 use log
 use serial
 use boot_info
+use frames
 use panic
 
 export fn kmain() {
@@ -51,6 +56,8 @@ export fn kmain() {
     log.put("hhdm: ")
     log.hex(boot_info.hhdm())
     log.end()
+
+    frames.report(frames.start())
 
     log.line("halt")
     panic.halt()
