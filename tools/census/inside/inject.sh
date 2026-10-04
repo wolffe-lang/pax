@@ -8,10 +8,27 @@
 #   syscall,number,passed,failed,baseline_passed,verdict,first_failures
 # verdict: tolerated (same passing set), degraded (some cases now fail),
 # required (no case passes, or the binary never starts).
+# `inject.sh <kind> set <label> <a,b,...>` answers several calls ENOSYS at
+# once (out/inject-<kind>/set-<label>.log): one call tolerated alone is not
+# a set tolerated together (brk and mmap are each other's fallback).
 set -eu
 K=${1:-static}
 case $K in static) B=static ;; dynamic) B=dyn ;; *) echo "inject: static or dynamic" >&2; exit 2 ;; esac
 OUT=/out/inject-$K
+if [ "${2:-}" = set ]; then # inject.sh <kind> set <label> <a,b,c>: several calls at once
+    [ -x /work/inj/inject-wrap ] || { mkdir -p "$OUT" /work/inj; cc -O2 -o /work/inj/inject-wrap /census/inside/inject-wrap.c; }
+    d=/work/inj/$3
+    rm -rf "$d"; mkdir -p "$d/bin"
+    for u in /stage/bore/$B/*; do cp /work/inj/inject-wrap "$d/bin/$(basename "$u")"; done
+    printf '%s\n%s\n' "$4" "/stage/bore/$B" > "$d/bin/.census-inject"
+    cp -R /stage/boreutils "$d/tree"
+    ( cd "$d/tree" && BORE_ORACLE_ANY=1 BORE_GNU_PREFIX= \
+        python3 tools/difftest --bin "$d/bin" > "$OUT/set-$3.log" 2>&1 ) || true
+    rm -rf "$d"
+    printf '%s\n' "$4" > "$OUT/set-$3.calls"
+    echo "inject-$K: set $3 ($4): $(tail -n 1 "$OUT/set-$3.log")"
+    exit 0
+fi
 if [ "${2:-}" = one ]; then # inject.sh <kind> one <name>: one rerun of the suite
     [ -x /work/inj/inject-wrap ] || { mkdir -p "$OUT" /work/inj; cc -O2 -o /work/inj/inject-wrap /census/inside/inject-wrap.c; }
     d=/work/inj/$3
@@ -62,6 +79,17 @@ with open(f"/out/inject-{k}.csv", "w", newline="") as f:
     w.writerow(["syscall", "number", "passed", "failed", "baseline_passed", "verdict", "first_failures"])
     for r in sorted(rows, key=lambda r: ({"required": 0, "degraded": 1, "tolerated": 2}.get(r[5], 3), int(r[1]))):
         w.writerow(r)
+sets = []
+for fn in sorted(os.listdir(out)):
+    if fn.startswith("set-") and fn.endswith(".calls"):
+        label = fn[4:-6]
+        ok, bad = res("set-" + label)
+        calls = open(os.path.join(out, fn)).read().strip()
+        sets.append([label, calls, len(ok), len(bad), len(base), len(base - ok)])
+with open(f"/out/inject-{k}-sets.csv", "w", newline="") as f:
+    w = csv.writer(f, lineterminator="\n")
+    w.writerow(["label", "calls_answered_enosys", "passed", "failed", "baseline_passed", "lost"])
+    w.writerows(sets)
 print(f"inject-{k}: baseline {len(base)} passed; " +
       ", ".join(f"{v} {sum(1 for r in rows if r[5]==v)}" for v in ("required", "degraded", "tolerated")))
 PY
