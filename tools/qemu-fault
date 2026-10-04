@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# qemu-fault — boot a PAX image whose kernel must FAULT with no way to
+# handle it, and read the fault through QEMU's monitor (px03).
+#
+#   tools/qemu-fault [--firmware bios|uefi] [--serial FILE] [--timeout SECS]
+#                    [--accel auto|kvm|tcg] [--cmd MONITOR-COMMAND]...
+#                    --marker ERE IMAGE.iso
+#
+# Until the interrupt lanes load an IDT, an exception in the kernel
+# cannot be delivered: Limine leaves IDTR's limit at 0 (base revision 5
+# and later), so the exception becomes #GP, then #DF, then a triple
+# fault (Intel SDM vol. 3A §6.15, interrupt 8). QEMU is run with
+# `-no-reboot -no-shutdown`, under which a triple fault STOPS the
+# machine ("paused (shutdown)") instead of resetting it or exiting, so
+# its registers — CR2 above all — can be read afterwards, under TCG and
+# KVM alike. Under TCG QEMU also logs every exception and the triple
+# fault (`-d int,cpu_reset`) to FILE.int.
+#
+# This boots IMAGE through tools/qemu-run with the monitor on a pipe,
+# waits for a serial line matching the whole-line ERE --marker (the
+# kernel's last line before the faulting access), then asks `info
+# status` every half second until the machine is paused by the shutdown,
+# and then saves `info registers` to FILE.regs and each --cmd's answer to
+# FILE.cmd1, FILE.cmd2, … (lib.sh's mon_cmd), and quits. FILE.fault
+# records the verdict and the serial size.
+#
+# Exit 0 when the machine stopped on a shutdown (a triple fault) after
+# the marker, with no serial byte after it; 1 otherwise (QEMU ended, the
+# machine kept running, more output) with the reason on stderr; 2 on a
+# usage or tool error. The timeout (default 60 s) bounds the wait for
+# the marker and then for the stop.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+
+firmware=bios serial=$PAX_BUILD/serial.log timeout=60 accel=auto marker= image= cmds=()
+while [ $# -gt 0 ]; do
+    case $1 in
+        --firmware) firmware=$2; shift 2 ;;
+        --serial)   serial=$2; shift 2 ;;
+        --timeout)  timeout=$2; shift 2 ;;
+        --accel)    accel=$2; shift 2 ;;
+        --marker)   marker=$2; shift 2 ;;
+        --cmd)      cmds+=("$2"); shift 2 ;;
+        -h|--help)  sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
+        -*)         die "unknown option: $1" ;;
+        *)          [ -z "$image" ] || die "one image only"; image=$1; shift ;;
+    esac
+done
+[ -n "$image" ] && [ -n "$marker" ] || die "usage: qemu-fault [options] --marker ERE IMAGE.iso"
+[ -f "$image" ] || die "no image: $image"
+case $timeout in ''|*[!0-9]*) die "--timeout takes whole seconds" ;; esac
+need mkfifo
+if [ "$accel" = auto ]; then
+    if [ "$(uname -s)" = Linux ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then accel=kvm; else accel=tcg; fi
+fi
+
+mkdir -p "$(dirname "$serial")"
+: > "$serial"
+mon=$serial.mon
+rec=$serial.fault
+rm -f "$mon.in" "$mon.out" "$serial.regs" "$serial.int" "$serial".cmd[0-9]*
+mkfifo "$mon.in" "$mon.out"
+: > "$rec"
+qpid=
+cleanup() {
+    [ -z "$qpid" ] || kill "$qpid" 2>/dev/null || true
+    exec 3>&- 4<&- 2>/dev/null || true
+    rm -f "$mon.in" "$mon.out"
+}
+trap cleanup EXIT
+exec 3<>"$mon.in" 4<>"$mon.out"
+extra=(-monitor "pipe:$mon" -no-shutdown)
+[ "$accel" = tcg ] && extra+=(-d int,cpu_reset -D "$serial.int")
+"$PAX_ROOT/tools/qemu-run" --firmware "$firmware" --serial "$serial" --timeout $((2 * timeout + 30)) \
+    --accel "$accel" "$image" -- "${extra[@]}" &
+qpid=$!
+
+no() { printf 'qemu-fault: NO FAULT STOP: %s\n' "$*" | tee -a "$rec" >&2; exit 1; }
+
+start=$SECONDS
+while :; do
+    if [ -f "$serial" ] && serial_norm "$serial" | LC_ALL=C grep -Eqx -- "$marker"; then break; fi
+    if ! kill -0 "$qpid" 2>/dev/null; then
+        rc=0; wait "$qpid" || rc=$?; qpid=
+        no "QEMU ended (qemu-run status $rc) before a line matching /$marker/"
+    fi
+    [ $((SECONDS - start)) -lt "$timeout" ] || no "no line matching /$marker/ within ${timeout}s"
+    sleep 0.2
+done
+size0=$(wc -c < "$serial")
+
+# Wait for the stop: `info status` says "paused (shutdown)".
+start=$SECONDS
+status=
+while :; do
+    kill -0 "$qpid" 2>/dev/null || { rc=0; wait "$qpid" || rc=$?; qpid=; no "QEMU ended (qemu-run status $rc) instead of stopping"; }
+    mon_cmd "info status" "$serial.status" || no "the monitor did not answer 'info status'"
+    status=$(sed -n 's/^VM status: //p' "$serial.status" | tail -n 1)
+    case $status in *shutdown*) break ;; esac
+    [ $((SECONDS - start)) -lt "$timeout" ] || no "still '$status' ${timeout}s after the marker: the kernel did not fault"
+    sleep 0.5
+done
+mon_cmd "info registers" "$serial.regs" || no "the monitor did not answer 'info registers'"
+n=0
+for c in ${cmds[@]+"${cmds[@]}"}; do
+    n=$((n + 1))
+    mon_cmd "$c" "$serial.cmd$n" || no "the monitor did not answer --cmd '$c'"
+done
+size1=$(wc -c < "$serial")
+printf 'quit\n' >&3
+rc=0; wait "$qpid" || rc=$?; qpid=
+[ "$size1" = "$size0" ] || no "the serial log grew from $size0 to $size1 bytes after the marker"
+cr2=$(sed -n 's/.*CR2=\([0-9a-f]*\).*/\1/p' "$serial.regs" | tail -n 1)
+rip=$(sed -n 's/.*RIP=\([0-9a-f]*\).*/\1/p' "$serial.regs" | tail -n 1)
+printf 'qemu-fault: STOPPED (%s) after the marker; CR2=%s RIP=%s; serial still at %s bytes; accel %s; quit -> %s\n' \
+    "$status" "${cr2:-?}" "${rip:-?}" "$size1" "$accel" "$rc" | tee -a "$rec"
