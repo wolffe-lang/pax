@@ -1,0 +1,28 @@
+//! member: false
+// kmain_ud2.lu — an invalid opcode panics by name (kw10,
+// tests/mpx2-interrupts I2). The kernel loads its GDT, TSS and IDT and
+// executes `ud2` (boot/isr.S's pax_ud2, whose first instruction it is).
+// #UD is a fault, so the saved RIP is the ud2 itself; kernel/interrupts
+// prints
+//
+//     PAX interrupts: ud2
+//     PANIC invalid opcode vector 6 error 0x0000000000000000 rip 0x<pax_ud2> rsp 0x<s> frame 0x<f>
+//
+// and halts. The line after the call is never reached.
+use interrupts
+use log
+use panic
+use serial
+
+extern "c" fn pax_ud2()
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX interrupts: ud2")
+    interrupts.start()
+    // # Safety: boot/isr.S's UD2; vector 6's gate is loaded, and its
+    // handler halts.
+    unsafe { pax_ud2() }
+    log.line("ud2: returned")
+    panic.halt()
+}
