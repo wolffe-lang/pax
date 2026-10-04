@@ -1,0 +1,15 @@
+# px04 — the census image. Arch's base-devel at a pinned digest, brought
+# to today's Arch (pacman -Syu), plus the tracers and the workloads'
+# programs (clang and lld: the wolf release tier links through them). Built and run rootless on kasumi by tools/census/census;
+# nothing here touches the host.
+#
+# The base digest is the one podman recorded when the image was pulled
+# (`podman image inspect --format '{{.Digest}}'`). The packages are
+# whatever Arch ships on the day the image is built: `census image`
+# records `pacman -Q` into the evidence, so the traced userspace is named
+# by version even though the mirror moves.
+FROM docker.io/library/archlinux:base-devel@sha256:8185e444e45ba166146b244b41f1cba2d7d91f3eddce533a839cc9591e0fa785
+RUN pacman -Syu --noconfirm --needed \
+        strace gdb openssh dash python git curl clang lld \
+    && pacman -Scc --noconfirm \
+    && pacman -Q > /census-pacman-Q.txt

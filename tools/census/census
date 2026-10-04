@@ -1,0 +1,83 @@
+#!/bin/sh
+# census — px04's syscall census, driven from the host (kasumi), run
+# entirely inside throwaway rootless podman containers.
+#
+#   tools/census/census image            build localhost/px04-census:1
+#   tools/census/census stage            fetch + build the workloads' programs
+#   tools/census/census trace W [W...]   each workload in two fresh containers
+#                                        (strace -ff -o, then strace -f -c)
+#   tools/census/census tally            raw traces -> out/<W>.csv and the union
+#   tools/census/census probe            auxv and vDSO probes (gdb, black-box)
+#   tools/census/census inject [K]       ENOSYS each boreutils call, rerun the suite
+#                                        (K: static, dynamic; or K one NAME, K summary)
+#   tools/census/census all              every step, in order
+#
+# $CENSUS_HOME (default ~/lanes/px04) holds stage/, out/ and, when
+# $CENSUS_PODMAN_ROOT is set, a lane-private podman store (kasumi's
+# shared store answered EIO on every overlay mount on 2026-10-04).
+# Nothing runs on the host but podman; nothing is installed on it.
+set -eu
+HERE=$(cd "$(dirname "$0")" && pwd)
+H=${CENSUS_HOME:-$HOME/lanes/px04}
+IMAGE=localhost/px04-census:1
+WORKLOADS="boreutils-static boreutils-dynamic lobo dash bash pacman cc sshd curl"
+mkdir -p "$H/stage" "$H/out"
+if [ -n "${CENSUS_PODMAN_ROOT:-}" ]; then
+    mkdir -p "$CENSUS_PODMAN_ROOT/storage" "$CENSUS_PODMAN_ROOT/runroot"
+    P="podman --root $CENSUS_PODMAN_ROOT/storage --runroot $CENSUS_PODMAN_ROOT/runroot"
+else
+    P=podman
+fi
+# seccomp=unconfined: podman's default filter answers EPERM/ENOSYS for
+# calls a real system makes, which would be recorded as the programs'
+# errors. SYS_PTRACE (in the container's user namespace only): without it
+# strace cannot read the arguments of a process that dropped privileges
+# (sshd's session child), and prints bare addresses. The container is
+# still a rootless user namespace.
+RUN="$P run --rm --security-opt seccomp=unconfined --cap-add SYS_PTRACE --hostname census \
+    -v $HERE:/census:ro -v $H/out:/out"
+
+step=${1:-}
+[ $# -gt 0 ] && shift
+case $step in
+    image)
+        $P build -t "$IMAGE" -f "$HERE/Containerfile" "$HERE"
+        $P image inspect "$IMAGE" --format '{{.Id}}' > "$H/out/image-id.txt"
+        $P run --rm "$IMAGE" cat /census-pacman-Q.txt > "$H/out/image-pacman-Q.txt"
+        echo "census: image $(cat "$H/out/image-id.txt")"
+        ;;
+    stage)
+        $RUN -v "$H/stage:/stage" "$IMAGE" sh /census/inside/stage.sh
+        ;;
+    trace)
+        [ $# -gt 0 ] || set -- $WORKLOADS
+        for w in "$@"; do
+            [ -f "$HERE/workloads/$w.sh" ] || { echo "census: no workload $w" >&2; exit 2; }
+            for m in o c; do
+                echo "census: $w ($m)"
+                $RUN -v "$H/stage:/stage:ro" "$IMAGE" sh /census/inside/trace.sh "$w" "$m" ||
+                    echo "census: $w ($m) workload exited non-zero (recorded in out/$w/$m/meta.txt)"
+            done
+        done
+        ;;
+    tally)
+        $RUN "$IMAGE" python3 /census/tally.py /out $WORKLOADS
+        ;;
+    probe)
+        $RUN -v "$H/stage:/stage:ro" "$IMAGE" sh /census/inside/probe.sh
+        ;;
+    inject)
+        if [ $# -ge 2 ]; then # inject <kind> one <name> | inject <kind> summary
+            $RUN -v "$H/stage:/stage:ro" "$IMAGE" sh /census/inside/inject.sh "$@"
+        else
+            for k in ${*:-static dynamic}; do
+                $RUN -v "$H/stage:/stage:ro" "$IMAGE" sh /census/inside/inject.sh "$k"
+            done
+        fi
+        ;;
+    all)
+        "$0" image && "$0" stage && "$0" trace && "$0" tally && "$0" inject && "$0" probe
+        ;;
+    *)
+        sed -n '2,20p' "$0"; exit 2 ;;
+esac
