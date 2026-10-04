@@ -86,10 +86,11 @@ installing need); sshd counts sshd, `sshd-session`, `sshd-auth` and
 **Union: 127 distinct system calls** of the 386 the x86-64 table names.
 <!-- /census:summary -->
 
-The raw traces are `tools/census/out/<workload>/o/raw/` on the host that
-ran them; the manifest digest above is the sha256 of the sorted list of
-`<file> <sha256>` lines, and the compressed archives' digests are in
-`tools/census/out/raw-archives.sha256`.
+The raw traces (`tools/census/out/<workload>/o/raw/` where they were
+made) are archived, one `.tar.xz` per workload plus the injection logs,
+in kasumi's `~/lanes/px04/evidence/` (8.8 MB; digests in
+`tools/census/out/raw-archives.sha256`); the manifest digest above is
+the sha256 of the sorted list of `<file> <sha256>` lines inside each.
 
 ## Prediction against measurement
 
