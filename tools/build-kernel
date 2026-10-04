@@ -13,8 +13,11 @@
 # writes `-o K.o` that way when it has more than one object). Then it
 # asserts on the wolf objects:
 #   - every undefined symbol is the freestanding hook list {wolf_trap,
-#     memcpy, memmove, memset, memcmp}, a routine the asm objects define
-#     (their roster), or a symbol another wolf object defines;
+#     memcpy, memmove, memset, memcmp}, a symbol the asm objects define
+#     (their roster: routines, and since kw10 the tables boot/isr.S
+#     reserves), a symbol another wolf object defines, or (kw10, wolf's
+#     `extern "c" let`) a global boot/start.S defines (the Limine
+#     requests) or a symbol boot/kernel.ld assigns (`__pax_*`);
 #   - `kmain` is a defined global (T), and nothing defines `main`;
 #   - `objdump -d` names no xmm/ymm register and addresses nothing below
 #     %rsp (no red zone);
@@ -101,11 +104,21 @@ fi
 roster=" $(nm -g --defined-only "${asmobjs[@]}" | awk 'NF == 3 { print $3 }' | sort -u | paste -sd' ' -) "
 defined=" $(nm -g --defined-only "${wobjs[@]}" | awk 'NF == 3 { print $3 }' | sort -u | paste -sd' ' -) "
 hooks=" wolf_trap memcpy memmove memset memcmp "
+# The link's own symbols wolf may name with `extern "c" let` (kw10):
+# start.S's globals and the linker script's assignments.
+start=$out/start.o
+if command -v cc >/dev/null 2>&1; then
+    cc -c "$PAX_ROOT/boot/start.S" -o "$start"
+else
+    need as
+    as --64 -o "$start" "$PAX_ROOT/boot/start.S"
+fi
+linksyms=" $(nm -g --defined-only "$start" | awk 'NF == 3 { print $3 }' | sort -u | paste -sd' ' -) $(sed -n 's/^[[:space:]]*\(__pax_[A-Za-z0-9_]*\)[[:space:]]*=.*/\1/p' "$PAX_ROOT/boot/kernel.ld" | sort -u | paste -sd' ' -) "
 imports=$(nm -u "${wobjs[@]}" | awk 'NF >= 2 && $1 == "U" { print $2 }' | sort -u)
 ext=
 for s in $imports; do
     case $defined in *" $s "*) continue ;; esac
-    case "$hooks$roster" in *" $s "*) ext+="$s," ;; *) fail "imports $s, outside the hooks and the asm roster{$roster}" ;; esac
+    case "$hooks$roster$linksyms" in *" $s "*) ext+="$s," ;; *) fail "imports $s, outside the hooks, the asm roster{$roster} and the link's symbols{$linksyms}" ;; esac
 done
 nm "${wobjs[@]}" | awk '$2 == "T" && $3 == "kmain" { f = 1 } END { exit !f }' \
     || fail "kmain is not a defined global (T)"
@@ -144,14 +157,7 @@ printf 'build-kernel: ok: step 2 (%s, %s): %d wolf object(s), imports {%s}, %s, 
     "$name" "$tier" ${#wobjs[@]} "${ext%,}" "$trap_by" \
     "$([ "$tier" = release ] && echo ', IR noredzone + no-SSE')" >&2
 
-# --- step 3: the link ------------------------------------------------------
-start=$out/start.o
-if command -v cc >/dev/null 2>&1; then
-    cc -c "$PAX_ROOT/boot/start.S" -o "$start"
-else
-    need as
-    as --64 -o "$start" "$PAX_ROOT/boot/start.S"
-fi
+# --- step 3: the link (start.o was assembled for step 2's import check) ----
 elf=$out/$name.elf
 if command -v ld.lld >/dev/null 2>&1; then
     ld.lld -nostdlib -static -z max-page-size=0x1000 -T "$PAX_ROOT/boot/kernel.ld" \
