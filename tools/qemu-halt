@@ -22,10 +22,12 @@
 #     kernel's vCPU before `info registers` prints);
 #   - not one serial byte written between the marker and the second
 #     probe.
-# Then each --cmd (px03: `info tlb`, `xp /256gx 0x…`) goes to the monitor
-# of the halted machine, its answer saved in FILE.cmd1, FILE.cmd2, … in
-# order (lib.sh's mon_cmd: echo, prompt and escapes removed), and then
-# `quit`. FILE.halt records both register dumps and the verdict.
+# Then each --cmd (px03: `info tlb`, `xp /256gx {cr3}`) goes to the
+# monitor of the halted machine, its answer saved in FILE.cmd1,
+# FILE.cmd2, … in order (lib.sh's mon_cmd: echo, prompt and escapes
+# removed), and then `quit`. `{cr3}` in a command is replaced by CR3 as
+# the monitor's `info registers` reads it just before (QEMU 8.2's
+# monitor has no `$cr3`). FILE.halt records both register dumps and the verdict.
 #
 # Exit 0 halted; 1 not halted (the reason on stderr); 2 usage or tool
 # error. The timeout (default 60 s) bounds the wait for the marker.
@@ -148,6 +150,13 @@ size1=$(wc -c < "$serial")
 n=0
 for c in ${cmds[@]+"${cmds[@]}"}; do
     n=$((n + 1))
+    case $c in
+        *'{cr3}'*)
+            mon_cmd "info registers" "$serial.cr3" || no "the monitor did not answer 'info registers'"
+            cr3=$(sed -n 's/.* CR3=\([0-9a-f]*\) .*/\1/p' "$serial.cr3" | tail -n 1)
+            [ -n "$cr3" ] || no "no CR3 in the monitor's 'info registers'"
+            c=${c//\{cr3\}/0x$cr3} ;;
+    esac
     mon_cmd "$c" "$serial.cmd$n" || no "the monitor did not answer --cmd '$c'"
     printf 'cmd%s: %s (%s lines)\n' "$n" "$c" "$(wc -l < "$serial.cmd$n" | tr -d ' ')" >> "$rec"
 done

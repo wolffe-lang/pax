@@ -35,7 +35,7 @@
 #      no-execute, not user, and no such page holds a frame of the
 #      image (no writable alias of text); no entry below
 #      0xffff800000000000 (no lower half), and the monitor's
-#      `xp /256gx $cr3` (the PML4's lower half) reads 256 zero entries;
+#      `xp /256gx` at CR3 (the PML4's lower half) reads 256 zero entries;
 #      the HHDM offset is the kernel's `hhdm:` line (Limine's).
 #   G6 map/unmap: the kernel's round trip —
 #        map: 0x<va> to 0x<a>, 3 table frames, read 0x<a ^ pat>, write seen at 0x0123456789abcdef
@@ -252,11 +252,12 @@ for leg in $legs; do
             bad "G2-G8 $tier $k $leg: no image or ELF ($iso)"
         else
             # on the halted machine: the registers, every leaf translation,
-            # and the PML4's lower half read at CR3 (the monitor's $cr3)
+            # and the PML4's lower half read at CR3 (qemu-halt's {cr3}: the
+            # monitor's CR3)
             hrc=0
             "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 180 \
                 --elf "$elf" --marker halt --cmd 'info registers' --cmd 'info tlb' \
-                --cmd 'xp /256gx $cr3' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+                --cmd 'xp /256gx {cr3}' "$iso" >"$log.verdict" 2>&1 || hrc=$?
             record "$tier" "$k" "$leg" "$hrc" halt
             if [ "$hrc" = 0 ]; then
                 say "PASS G8 $tier $k $leg: halted: $(tail -n 1 "$log.verdict")"
@@ -331,7 +332,7 @@ for leg in $legs; do
                 nz=$(grep -Eo '0x[0-9a-f]{16}' "$log.cmd3" 2>/dev/null | grep -vc '^0x0000000000000000$')
                 nt=$(grep -Eo '0x[0-9a-f]{16}' "$log.cmd3" 2>/dev/null | wc -l | tr -d ' ')
                 if [ "$nt" = 256 ] && [ "$nz" = 0 ]; then
-                    say "PASS G4 $tier $k $leg: xp /256gx \$cr3 ($mc3): 256 PML4 entries, all zero: no lower half"
+                    say "PASS G4 $tier $k $leg: xp /256gx $(sed -n 's/^cmd3: xp \/256gx \(0x[0-9a-f]*\).*/\1/p' "$log.halt") (CR3 $mc3): 256 PML4 entries, all zero: no lower half"
                 else
                     bad "G4 $tier $k $leg: xp of the PML4's lower half at $mc3: $nt entries, $nz non-zero"
                 fi
