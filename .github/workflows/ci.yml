@@ -7,7 +7,9 @@
 # Homebrew's QEMU, so the harness's macOS claim is measured, not stated.
 #
 # The `mkw` job is M-KW (kw05): the first wolf kernel, built by the wolf
-# release kernel/wolf.pin names (fetched by digest), booted the same way.
+# kernel/wolf.pin names, booted the same way. The pin is a wolf-lang
+# commit built from source (px02: eb955c3b, for kw06/kw07) or a release
+# archive fetched by digest (px01); tools/fetch-wolf says which.
 #
 # QEMU, OVMF, xorriso and gdb come from the distro (apt) and Homebrew;
 # Limine comes from its release archive BY DIGEST (tools/fetch-limine
@@ -108,7 +110,7 @@ jobs:
         run: tests/proof --image build/pax-stub.iso
 
   # M-KW (kw05, kw00 §3e): a freestanding wolf kernel, built by the wolf
-  # release kernel/wolf.pin names (by digest) on both tiers, linked with the Limine boot
+  # kernel/wolf.pin names on both tiers, linked with the Limine boot
   # path, booted under SeaBIOS and OVMF: serial ends `KWC`, status 33;
   # the trap kernel ends `TRAP 1`, status 3; the machines' refusals as
   # recorded; and the seen-red variants (no --target; KWD) refused in the
@@ -132,10 +134,17 @@ jobs:
           path: |
             .pax-cache/limine-*
             .pax-cache/lupin-*
-            .pax-cache/wolf-*
           key: mkw-${{ hashFiles('boot/limine.pin', 'kernel/wolf.pin') }}
 
-      - name: wolf at the pin (release archive, by digest)
+      - name: the staged wolf (cached by the pin; a source pin's src/ and target/ are not kept)
+        uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/wolf-*
+            !.pax-cache/wolf-*/src
+          key: wolf-${{ hashFiles('kernel/wolf.pin') }}
+
+      - name: wolf at the pin (built from source, or the release archive by digest)
         run: |
           bin=$(tools/fetch-wolf)
           echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
@@ -172,7 +181,7 @@ jobs:
           if-no-files-found: warn
 
   # M-PX1 (px01): first light. The wolf kernel (kernel/), built by the
-  # pinned wolf release on both tiers, booted under SeaBIOS and OVMF:
+  # pinned wolf on both tiers, booted under SeaBIOS and OVMF:
   # its transcript (A2), its halt proven through QEMU's monitor (A3), the
   # panic kernel's `PANIC <kind> <file>:<line>` and halt (A4, A5), and a
   # spinning kernel refused by the halt probe in the same run (A6).
@@ -194,10 +203,17 @@ jobs:
         with:
           path: |
             .pax-cache/limine-*
-            .pax-cache/wolf-*
-          key: mpx1-${{ hashFiles('boot/limine.pin', 'kernel/wolf.pin') }}
+          key: mpx1-${{ hashFiles('boot/limine.pin') }}
 
-      - name: wolf at the pin (release archive, by digest)
+      - name: the staged wolf (cached by the pin; a source pin's src/ and target/ are not kept)
+        uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/wolf-*
+            !.pax-cache/wolf-*/src
+          key: wolf-${{ hashFiles('kernel/wolf.pin') }}
+
+      - name: wolf at the pin (built from source, or the release archive by digest)
         run: |
           bin=$(tools/fetch-wolf)
           echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
