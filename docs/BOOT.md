@@ -102,6 +102,26 @@ the protocol lets it vary. The kernel ends in `cli; hlt` (`boot/io.S`'s
 `pax_halt`), not `isa-debug-exit`; `tools/qemu-halt` proves the halt
 through QEMU's monitor.
 
+**Physical frames (px02).** `boot/start.S` carries a sixth request,
+the executable address (id `0x71ba76863cc55f63, 0xb2644a48c516a487`):
+Limine answers with the image's physical and virtual base, which the
+frame allocator's test needs, because executable-and-modules entries in
+the memory map are "illustrative only" (PROTOCOL.md). With wolf-lang
+`eb955c3b` (kw06's `N as *T`, kw07's `read_volatile`) the readers moved
+into wolf: `kernel/boot_info` follows each response pointer with one
+volatile load per word, afresh per call, which is clause 5 met in wolf
+itself. `boot/limine.S` keeps only what wolf cannot spell: a symbol's
+address (each request's, and `boot/kernel.ld`'s `__pax_image_start` /
+`__pax_image_end`; wolf-lang#529). Measured on QEMU (q35, 256 MiB,
+Limine 12.9.1): SeaBIOS 65147–65157 usable frames, 44 of them below
+1 MiB, the highest usable byte below `0x10000000`; OVMF 53784–54863
+usable frames (the count moves by about a thousand between the OVMF
+builds of kasumi, CI and hasu), 159 below 1 MiB; the image near the top
+of RAM (`0xff7f000` under SeaBIOS; `0xbfb1000` or `0xe72b000` under
+OVMF, by build). Usable memory is mapped in the
+HHDM at this base revision, so the allocator reaches every frame it
+hands out through it.
+
 ## The image
 
 `tools/mkimage KERNEL.elf OUT.iso` lays out:
