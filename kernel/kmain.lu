@@ -10,19 +10,24 @@
 //     mem: <entries> entries, <bytes> bytes usable
 //     hhdm: 0x<offset>
 //     frames: <T> usable, <L> below 1 MiB, <S> allocator, <F> free
+//     paging: limine cr3 0x<A>, pax cr3 0x<B>, <P> table frames
 //     halt
 //
 // and halts (kernel/panic, io.S's `cli; hlt`). tests/mpx1 asserts the
 // transcript and proves the halt through QEMU's monitor; the frames line
 // (px02, kernel/frames) is checked against the mem line by
-// tests/mpx2-frames. Built `--target x86_64-unknown-none` on both
+// tests/mpx2-frames. Since px03 the kernel then switches to its own
+// paging structures (kernel/paging, tests/mpx2-paging) and halts on
+// them. Built `--target x86_64-unknown-none` on both
 // tiers (tools/build-kernel). `member: false`: kmain_panic.lu,
-// kmain_frames.lu, kmain_double_free.lu and kmain_free_unusable.lu
-// beside it are kernels of their own.
+// kmain_frames.lu, kmain_double_free.lu, kmain_free_unusable.lu,
+// kmain_paging.lu and kmain_text_write.lu beside it are kernels of their
+// own.
 use log
 use serial
 use boot_info
 use frames
+use paging
 use panic
 
 export fn kmain() {
@@ -57,7 +62,13 @@ export fn kmain() {
     log.hex(boot_info.hhdm())
     log.end()
 
-    frames.report(frames.start())
+    let fst = frames.start()
+    frames.report(fst)
+
+    let limine = paging.cr3()
+    let before = frames.free_count(fst)
+    paging.start(fst)
+    paging.report(fst, limine, before)
 
     log.line("halt")
     panic.halt()

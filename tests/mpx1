@@ -12,7 +12,7 @@
 #      roster, kmain T, no main, no xmm/ymm, no red zone, release IR
 #      noredzone + no-SSE), and `wolf_trap` DEFINED by the wolf objects
 #      (the panic module), not imported from assembly.
-#   A2 transcript: the serial log ENDS with exactly these eight lines
+#   A2 transcript: the serial log ENDS with exactly these nine lines
 #      (whole-line EREs, tools/expect-serial --tail --regex):
 #        PAX first light
 #        serial: 16550 at 0x3f8, 115200 8N1, scratch ok, loopback ok
@@ -24,6 +24,9 @@
 #        hhdm: 0x<16 hex>   (canonical higher half, 4 KiB aligned)
 #        frames: T usable, L below 1 MiB, S allocator, F free
 #                           (px02; its numbers are tests/mpx2-frames')
+#        paging: limine cr3 0x<16 hex>, pax cr3 0x<16 hex>, P table frames
+#                           (px03; checked against QEMU's monitor by
+#                            tests/mpx2-paging)
 #        halt
 #   A3 halted: tools/qemu-halt — QEMU still running, RIP inside pax_halt
 #      at two probes a second apart, IF clear, HLT=1, no serial byte
@@ -157,6 +160,7 @@ for leg in $legs; do
             'mem: [1-9][0-9]* entries, [1-9][0-9]* bytes usable' \
             'hhdm: 0xffff[89a-f][0-9a-f]{8}000' \
             'frames: [0-9]+ usable, [0-9]+ below 1 MiB, [0-9]+ allocator, [0-9]+ free' \
+            'paging: limine cr3 0x[0-9a-f]{16}, pax cr3 0x[0-9a-f]{16}, [0-9]+ table frames' \
             'halt'; then
             usable=$(serial_norm "$log" | sed -n 's/^mem: [0-9]* entries, \([0-9]*\) bytes usable$/\1/p' | tail -n 1)
             if [ "$usable" -ge $((64 * mib)) ] && [ "$usable" -le $((256 * mib)) ]; then
