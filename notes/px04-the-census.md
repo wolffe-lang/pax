@@ -92,7 +92,7 @@ workload** (88; sshd is 89), and **8 of my top 20 by calls are absent**
   hung on a `tee` case and was killed; `write`, `clock_gettime`, both
   set runs and every dynamic run used `192c3f8`'s wrapper. The
   injection and the comparison are the same in both; only a hang's
-  handling differs, and no other run hung.
+  handling differs.
 - auxv and vDSO: `tools/census/out/auxv.csv`, `auxv-reads.csv`,
   `vdso.csv`.
 - The census tools' own test, seen red: CI run **37173258264** (census
