@@ -1,0 +1,172 @@
+//! timer — the 8259 interrupt controllers and the 8254 interval timer
+//! (kw10, M-PX2's timer).
+//!
+//! **Why the PIT, not the local APIC timer.** The PIT's input clock is
+//! fixed (1.193182 MHz), so a divisor is a rate with no calibration; it
+//! is reached by port I/O, which the kernel already has (boot/io.S),
+//! with nothing to map. The local APIC timer counts the bus or core
+//! clock, whose rate is unknown until it is calibrated against a timer
+//! of known rate (this one) or read from CPUID leaf 0x15 where a CPU
+//! reports it; its registers are a 4 KiB MMIO page at 0xfee00000 that
+//! PAX's paging does not map (reserved memory is outside its HHDM,
+//! kernel/paging); and it is per-CPU, which matters only once there is
+//! more than one. The scheduler lane wants the per-CPU timer and can
+//! calibrate it with this one; the first tick does not need it.
+//!
+//! `start`:
+//! - the two 8259s are re-initialised (ICW1-ICW4: edge-triggered,
+//!   cascaded, the slave on the master's line 2, 8086 mode) with their
+//!   vector bases at 32 and 40, off the exception vectors 0-31 (the
+//!   PC's power-on bases, 8 and 0x70, put IRQ 0-7 on vectors 8-15), and
+//!   every line masked (OCW1 0xff on both);
+//! - the PIT's channel 0 is programmed in mode 2 (rate generator,
+//!   binary, low byte then high byte) with divisor 11932: 1193182 /
+//!   11932 = 99.998 Hz, one tick every 10.0002 ms;
+//! - line 0 alone is unmasked on the master: vector 32.
+//! `tick` (kernel/interrupts, vector 32) counts and sends the master a
+//! non-specific end of interrupt (OCW2 0x20). `stop` masks every line.
+//! `wait` sleeps until one interrupt has been handled (boot/isr.S's
+//! STI; HLT; CLI): the kernel otherwise runs with interrupts off.
+//! `spurious` reads a controller's in-service register (OCW3 0x0b): a
+//! line-7 (vector 39) or line-15 (vector 47) request whose in-service
+//! bit is clear was withdrawn before it was acknowledged and must not be
+//! acknowledged (the master is, for a spurious slave request, because it
+//! did see line 2).
+//!
+//! Written from Intel's 8259A programmable interrupt controller data
+//! sheet (ICW1-ICW4, OCW1-OCW3, the in-service register, the spurious
+//! IR7 request) and Intel's 8254 programmable interval timer data sheet
+//! (the control word, mode 2, the 1.193182 MHz input as the PC wires
+//! it), and the I/O ports the PC assigns them (master 0x20/0x21, slave
+//! 0xa0/0xa1, PIT 0x40-0x43); the local APIC timer's description is
+//! the Intel SDM vol. 3A §11.5.4 ("APIC Timer") and §11.4.1. No Linux
+//! source; no other kernel's source.
+
+extern "c" fn pax_outb(port: u16, v: u8)
+extern "c" fn pax_inb(port: u16) -> u8
+extern "c" fn pax_wait()
+
+const MASTER_CMD: u16 = 0x20
+const MASTER_DATA: u16 = 0x21
+const SLAVE_CMD: u16 = 0xa0
+const SLAVE_DATA: u16 = 0xa1
+const PIT_CH0: u16 = 0x40
+const PIT_CTRL: u16 = 0x43
+
+// The master 8259's vector base after `start` (line 0, the PIT, is
+// 32), the slave's, and the PIT's divisor (1193182 / 11932 = 99.998
+// Hz). Other modules read them through `master_base`, `slave_base` and
+// `divisor`: a `pub const` read from another module is refused by wolf
+// (wolf-lang#579).
+const MASTER_BASE: u64 = 32
+const SLAVE_BASE: u64 = 40
+const DIVISOR: u64 = 11932
+
+/// The master 8259's vector base after `start`: 32, so the PIT is vector 32.
+pub fn master_base() -> u64 {
+    MASTER_BASE
+}
+
+/// The slave 8259's vector base after `start`: 40.
+pub fn slave_base() -> u64 {
+    SLAVE_BASE
+}
+
+/// The PIT's divisor: 11932, 1193182 / 11932 = 99.998 Hz.
+pub fn divisor() -> u64 {
+    DIVISOR
+}
+
+/// Timer interrupts handled since `start`.
+var tick_count: u64 = 0
+
+/// Spurious requests seen (vectors 39 and 47).
+var spurious_seen: u64 = 0
+
+fn out(port: u16, v: u64) {
+    // # Safety: io.S's OUT to an 8259 or 8254 port; v < 256.
+    unsafe { pax_outb(port, v as u8) }
+}
+
+fn inp(port: u16) -> u64 {
+    // # Safety: io.S's IN from an 8259 port.
+    let v = unsafe { pax_inb(port) }
+    v as u64
+}
+
+/// Remap and mask the 8259s, start the PIT at 99.998 Hz, unmask line 0.
+pub fn start() {
+    // # Safety: the counters are touched with interrupts off.
+    unsafe {
+        tick_count = 0
+        spurious_seen = 0
+    }
+    out(MASTER_CMD, 0x11) // ICW1: initialise, ICW4 follows (edge, cascade)
+    out(SLAVE_CMD, 0x11)
+    out(MASTER_DATA, MASTER_BASE) // ICW2: vector base
+    out(SLAVE_DATA, SLAVE_BASE)
+    out(MASTER_DATA, 4) // ICW3: a slave on line 2
+    out(SLAVE_DATA, 2) // ICW3: its cascade identity, 2
+    out(MASTER_DATA, 1) // ICW4: 8086 mode
+    out(SLAVE_DATA, 1)
+    out(MASTER_DATA, 0xff) // OCW1: every line masked
+    out(SLAVE_DATA, 0xff)
+    out(PIT_CTRL, 0x34) // channel 0, low then high byte, mode 2, binary
+    out(PIT_CH0, DIVISOR & 0xff)
+    out(PIT_CH0, DIVISOR >> 8)
+    out(MASTER_DATA, 0xfe) // OCW1: line 0 (the PIT) alone unmasked
+}
+
+/// Mask every line on both controllers.
+pub fn stop() {
+    out(MASTER_DATA, 0xff)
+    out(SLAVE_DATA, 0xff)
+}
+
+/// Vector 32: count the tick and acknowledge it (non-specific EOI).
+pub fn tick() {
+    // # Safety: called from the interrupt handler, interrupts off.
+    unsafe {
+        tick_count += 1
+    }
+    out(MASTER_CMD, 0x20)
+}
+
+/// Timer interrupts handled since `start`.
+pub fn ticks() -> u64 {
+    // # Safety: a read of the counter; the kernel's interrupts are off
+    // outside `wait`.
+    unsafe { tick_count }
+}
+
+/// Spurious requests seen since `start`.
+pub fn spurious_count() -> u64 {
+    // # Safety: as `ticks`.
+    unsafe { spurious_seen }
+}
+
+/// Sleep until one interrupt has been handled.
+pub fn wait() {
+    // # Safety: boot/isr.S's STI; HLT; CLI. Every routed vector has a
+    // gate (kernel/idt) before the kernel calls this.
+    unsafe { pax_wait() }
+}
+
+/// Whether vector `v` (39 or 47) is a spurious request: its line's
+/// in-service bit is clear. A spurious slave request still
+/// acknowledges the master's line 2.
+pub fn spurious(v: u64) -> bool {
+    let cmd = if v == 47 { SLAVE_CMD } else { MASTER_CMD }
+    out(cmd, 0x0b) // OCW3: read the in-service register
+    if inp(cmd) & 0x80 != 0 {
+        return false
+    }
+    if v == 47 {
+        out(MASTER_CMD, 0x20)
+    }
+    // # Safety: interrupts are off in a handler.
+    unsafe {
+        spurious_seen += 1
+    }
+    true
+}
