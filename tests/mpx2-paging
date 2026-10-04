@@ -9,8 +9,11 @@
 #   tests/mpx2-paging [--images DIR | --no-boot] [--firmware bios|uefi|both]
 #                     [--tier native|release|both]
 #
-# Two kernels, from kernel/: kmain_paging (the switch, the round trip,
-# then halt) and kmain_text_write (the switch, then a write to text).
+# One kernel, from kernel/: kmain_paging (the switch, the round trip,
+# then halt). px03's second, kmain_text_write (the switch, then a write
+# to text), moved to tests/mpx2-interrupts at kw10: since the kernel
+# has an IDT the write no longer triple-faults but panics by name, and
+# I1 there holds it to the same address, error code and CR2.
 # Assertions, per tier (native, release) and firmware (bios, uefi):
 #   G1 build: tools/build-kernel's object assertions for both, and each
 #      ELF has exactly three PT_LOAD segments — R E, R, RW — each inside
@@ -46,15 +49,10 @@
 #      (pat = 0x5a5a5a5a5a5a5a5a; computed here, not taken from the
 #      kernel) — and the monitor's `info tlb` holds va -> b, writable,
 #      no-execute, and nothing at va + 4096.
-#   G7 text write: kmain_text_write's log ends
-#        write: text at 0x<a>
-#      with a inside text; tools/qemu-fault sees the machine stop on a
-#      shutdown (a triple fault: no IDT) with no byte after that line,
-#      CR2 = a and RIP inside text; under TCG, QEMU's `-d int` log ends
-#      in a #PF (v=0e) with error code 0003 (present, write,
-#      supervisor) and CR2 = a, then #DF (v=08), then `Triple fault`
-#      (`-d int,cpu_reset`).
-#      Under KVM QEMU logs no exceptions; CR2 from the monitor stands.
+#   G7 text write: retired into tests/mpx2-interrupts I1 (kw10): the
+#      write's #PF, error code 0x3 and CR2 = the address, now reported
+#      by the kernel's own handler and read back from the halted
+#      machine's CR2.
 #   G8 halted: kmain_paging ends in `halt` and tools/qemu-halt holds it
 #      to RIP in pax_halt, IF clear, HLT=1, no further byte.
 # px02's frame test on PAX's structures is tests/mpx2-frames (its own CI
@@ -86,7 +84,7 @@ case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes b
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
 need nm
 
-kernels="kmain_paging kmain_text_write"
+kernels="kmain_paging"
 work=$PAX_BUILD/mpx2-paging
 fail=0 ran=0
 bad() { say "FAIL $*"; fail=1; }
@@ -340,49 +338,6 @@ for leg in $legs; do
                 bad "G2-G6 $tier $k $leg: the transcript"
                 serial_norm "$log" | tail -n 12 | sed 's/^/  /' >&2
             fi
-        fi
-
-        # --- kmain_text_write: G7 ------------------------------------------
-        k=kmain_text_write
-        log=$PAX_BUILD/mpx2-paging-$tier-$k-$leg.serial.log
-        iso=$images/$tier/$k.iso elf=$images/$tier/$k.elf
-        rm -f "$log" "$log.verdict"
-        if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
-            bad "G7 $tier $k $leg: no image or ELF ($iso)"
-            continue
-        fi
-        frc=0
-        "$PAX_ROOT/tools/qemu-fault" --firmware "$leg" --serial "$log" --timeout 120 \
-            --marker "write: text at $HEX" "$iso" >"$log.verdict" 2>&1 || frc=$?
-        record "$tier" "$k" "$leg" "$frc" fault
-        a=$(grab "$log" 'write: text at \(0x[0-9a-f]*\)')
-        tl=$(sym "$elf" __pax_text_start); th=$(sym "$elf" __pax_text_end)
-        cr2=0x$(reg "$log.regs" CR2 2>/dev/null); rip=0x$(reg "$log.regs" RIP 2>/dev/null)
-        accel=$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)
-        why=
-        [ "$frc" = 0 ] || why+=" qemu-fault $frc ($(grep -m1 'NO FAULT STOP' "$log.verdict"));"
-        "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" "paging: limine cr3 $HEX, pax cr3 $HEX, [0-9]+ table frames" \
-            "write: text at $HEX" >/dev/null || why+=" the log does not end at the write;"
-        [ -n "$a" ] && [ $((a)) -ge $((tl)) ] && [ $((a)) -lt $((th)) ] || why+=" '$a' is not in text [$tl, $th);"
-        [ -n "$a" ] && [ $((cr2)) = $((a)) ] || why+=" CR2 $cr2, not $a;"
-        [ $((rip)) -ge $((tl)) ] && [ $((rip)) -lt $((th)) ] || why+=" RIP $rip outside text;"
-        intl=
-        if [ "$accel" = tcg ]; then
-            # the log's last exceptions: #PF, #DF, then the triple fault
-            pf=$(grep -E '^ +[0-9]+: v=' "$log.int" | tail -n 2 | head -n 1)
-            df=$(grep -E '^ +[0-9]+: v=' "$log.int" | tail -n 1)
-            last=$(grep -v '^$' "$log.int" | tail -n 1)
-            case $pf in *" v=0e e=0003 "*"CR2=${a#0x}"*) ;; *) why+=" -d int: the #PF line is '$pf';" ;; esac
-            case $df in *" v=08 "*) ;; *) why+=" -d int: no #DF after the #PF ('$df');" ;; esac
-            [ "$last" = "Triple fault" ] || why+=" -d int ends '$last', not 'Triple fault';"
-            intl="; -d int: v=0e e=0003 CR2=$a, v=08, Triple fault"
-        else
-            intl="; $accel: QEMU logs no exceptions, CR2 from the monitor"
-        fi
-        if [ -z "$why" ]; then
-            say "PASS G7 $tier $k $leg: wrote $a (text), stopped by a triple fault: CR2 $cr2, RIP $rip$intl"
-        else
-            bad "G7 $tier $k $leg:$why"
         fi
     done
 done

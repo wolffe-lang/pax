@@ -1,22 +1,25 @@
 //! member: false
 // kmain_text_write.lu — a write to the kernel's own text, after the
 // switch to PAX's paging structures, must fault (px03, tests/mpx2-paging
-// G7). The kernel prints the address it will write, writes one word
-// there, and would print one more line if the write returned:
+// G7) — and, since kw10, panic by name (tests/mpx2-interrupts I1). The
+// kernel loads its GDT, TSS and IDT (kernel/gdt, kernel/idt), prints the
+// address it will write, writes one word there, and would print one
+// more line if the write returned:
 //
 //     PAX paging: write to text
 //     paging: limine cr3 0x<A>, pax cr3 0x<B>, <P> table frames
 //     write: text at 0x<a>
+//     PANIC page fault vector 14 error 0x0000000000000003 rip 0x<r> rsp 0x<s> frame 0x<f> cr2 0x<a>
 //
 // Text is mapped read-execute (kernel/paging) and CR0.WP is set, so the
-// write takes a page fault (error code 0x3: present, a write,
-// supervisor; CR2 the address). There is no IDT yet (the interrupt
-// lanes'), and Limine leaves IDTR's limit at 0, so the fault cannot be
-// delivered: #GP, then #DF, then a triple fault. tests/mpx2-paging runs
-// QEMU with -no-reboot -no-shutdown, so the triple fault pauses the
-// machine, and reads CR2 and the fault through its monitor (and, under
-// TCG, `-d int`).
+// write takes a page fault: error code 0x3 (present, a write,
+// supervisor; Intel SDM vol. 3A §4.7), CR2 the address. Before kw10
+// there was no IDT (Limine leaves IDTR's limit at 0), so the fault
+// became #GP, #DF and a triple fault, which px03 read from the stopped
+// machine; now vector 14's gate reaches kernel/interrupts, which prints
+// the panic and halts.
 use frames
+use interrupts
 use log
 use paging
 use panic
@@ -30,6 +33,7 @@ export fn kmain() {
     let before = frames.free_count(st)
     paging.start(st)
     paging.report(st, limine, before)
+    interrupts.start()
     let a = paging.bound(2) + 64
     log.put("write: text at ")
     log.hex(a)
