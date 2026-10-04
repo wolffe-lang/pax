@@ -326,3 +326,74 @@ jobs:
             build/mpx2-runs.txt
           retention-days: 14
           if-no-files-found: warn
+
+  # px03: paging. kernel/paging builds PAX's own four-level structures
+  # from px02's frames and switches CR3 to them; tests/mpx2-paging reads
+  # them back through QEMU's monitor on the halted machine (`info
+  # registers`, `info tlb`, `xp /256gx $cr3`): the switch (G2), the
+  # image's W^X per section (G3), the HHDM kept and nothing in the lower
+  # half (G4), a map/unmap round trip (G6), a write to text stopping the
+  # machine with CR2 = the address and QEMU's `-d int` #PF 0003 (G7),
+  # the halt (G8). px02's frame exercise on the new structures is the
+  # mpx2-frames job's (G5).
+  mpx2-paging:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils
+          qemu-system-x86_64 --version
+          clang --version
+          ld.lld --version
+          readelf --version | head -n 1
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx2-paging-${{ hashFiles('boot/limine.pin') }}
+
+      - name: the staged wolf (cached by the pin; a source pin's src/ and target/ are not kept)
+        uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/wolf-*
+            !.pax-cache/wolf-*/src
+          key: wolf-${{ hashFiles('kernel/wolf.pin') }}
+
+      - name: wolf at the pin (built from source, or the release archive by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: paging, both tiers, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx2-paging
+
+      - name: keep the kernels, the transcripts, the monitor's answers
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx2-paging-linux
+          path: |
+            build/mpx2-paging/
+            build/mpx2-paging-*.log
+            build/mpx2-paging-*.meta
+            build/mpx2-paging-*.halt
+            build/mpx2-paging-*.fault
+            build/mpx2-paging-*.verdict
+            build/mpx2-paging-*.regs
+            build/mpx2-paging-*.cmd*
+            build/mpx2-paging-*.int
+            build/mpx2-paging-runs.txt
+          retention-days: 14
+          if-no-files-found: warn

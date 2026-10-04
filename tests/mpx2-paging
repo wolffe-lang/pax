@@ -1,0 +1,391 @@
+#!/usr/bin/env bash
+# tests/mpx2-paging — paging (px03, M-PX2's second piece): the kernel
+# builds its own x86-64 four-level paging structures from px02's frames
+# (kernel/paging), maps its image with one permission per section (W^X)
+# and the HHDM, switches CR3 to them, maps and unmaps, and a write to its
+# own text faults. Read back through QEMU's monitor, not only the
+# kernel's word.
+#
+#   tests/mpx2-paging [--images DIR | --no-boot] [--firmware bios|uefi|both]
+#                     [--tier native|release|both]
+#
+# Two kernels, from kernel/: kmain_paging (the switch, the round trip,
+# then halt) and kmain_text_write (the switch, then a write to text).
+# Assertions, per tier (native, release) and firmware (bios, uefi):
+#   G1 build: tools/build-kernel's object assertions for both, and each
+#      ELF has exactly three PT_LOAD segments — R E, R, RW — each inside
+#      its section's bounds as the ELF's own symbols name them
+#      (__pax_text_start/_end, __pax_rodata_start/_end,
+#      __pax_data_start/__pax_image_end; boot/kernel.ld).
+#   G2 switch: kmain_paging prints
+#        paging: limine cr3 0x<A>, pax cr3 0x<B>, <P> table frames
+#      with A != B, B a frame at or above 1 MiB and P >= 6 (a PML4, the
+#      image's PDPT, PD and PT, the HHDM's PDPT and PD); QEMU's monitor
+#      (`info registers` on the halted machine) reads CR3 = B, CR0.WP
+#      (bit 16) and EFER.NXE (bit 11) set, and the kernel's `cpu:` line
+#      agrees with it on CR0, CR4 and EFER.
+#   G3 sections: the monitor's `info tlb` maps every page of the image
+#      — and nothing else at or above 0xffffffff80000000 — at physical
+#      va - virt + phys (the kernel's `image:` line), with text pages
+#      neither writable nor no-execute, rodata no-execute and not
+#      writable, data and bss writable and no-execute, none user; the
+#      bounds from the ELF's symbols, equal to the `image:` line's.
+#   G4 HHDM: every `info tlb` entry at or above the HHDM offset and below
+#      0xffff900000000000 maps va - hhdm (a direct map), is writable and
+#      no-execute, not user, and no such page holds a frame of the
+#      image (no writable alias of text); no entry below
+#      0xffff800000000000 (no lower half), and the monitor's
+#      `xp /256gx $cr3` (the PML4's lower half) reads 256 zero entries;
+#      the HHDM offset is the kernel's `hhdm:` line (Limine's).
+#   G6 map/unmap: the kernel's round trip —
+#        map: 0x<va> to 0x<a>, 3 table frames, read 0x<a ^ pat>, write seen at 0x0123456789abcdef
+#        translate: 0x<va> is 0x<a>
+#        unmap: 0x<va> was 0x<a>, then not_mapped
+#        remap: 0x<va> to 0x<b>, read 0x<b ^ pat>
+#        gone: 0x<va + 4096> mapped to 0x<a> and unmapped, then not_mapped
+#      (pat = 0x5a5a5a5a5a5a5a5a; computed here, not taken from the
+#      kernel) — and the monitor's `info tlb` holds va -> b, writable,
+#      no-execute, and nothing at va + 4096.
+#   G7 text write: kmain_text_write's log ends
+#        write: text at 0x<a>
+#      with a inside text; tools/qemu-fault sees the machine stop on a
+#      shutdown (a triple fault: no IDT) with no byte after that line,
+#      CR2 = a and RIP inside text; under TCG, QEMU's `-d int` log ends
+#      in a #PF (v=0e) with error code 0003 (present, write,
+#      supervisor) and CR2 = a, then #DF (v=08), then `Triple fault`
+#      (`-d int,cpu_reset`).
+#      Under KVM QEMU logs no exceptions; CR2 from the monitor stands.
+#   G8 halted: kmain_paging ends in `halt` and tools/qemu-halt holds it
+#      to RIP in pax_halt, IF clear, HLT=1, no further byte.
+# px02's frame test on PAX's structures is tests/mpx2-frames (its own CI
+# job): kmain_frames switches before its exhaust (G5).
+#
+# --images DIR boots ISOs and ELFs built earlier by this script (DIR
+# holds <tier>/<kernel>.{iso,elf}): any host with QEMU and nm, no wolf
+# needed. Without it the script builds with $PAX_WOLF (linux); --no-boot
+# stops after the build (G1), leaving them in build/mpx2-paging.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+
+images= legs=both tiers=both noboot=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "usage: tests/mpx2-paging [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+need nm
+
+kernels="kmain_paging kmain_text_write"
+work=$PAX_BUILD/mpx2-paging
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+PAT=0x5a5a5a5a5a5a5a5a
+HEX='0x[0-9a-f]{16}'
+
+# The value of symbol $2 in ELF $1, as 0x + 16 hex digits ('' if none).
+sym() { nm "$1" | awk -v s="$2" '$3 == s { print "0x" $1; exit }'; }
+# Print a number as 0x + 16 hex digits.
+hx() { printf '0x%016x' "$1"; }
+
+# G1's ELF half: three PT_LOADs, R E / R / RW, each inside its bounds.
+loads_ok() { # elf -> 0 or 1, the reason on stdout
+    local elf=$1 ts te rs re ds de n
+    ts=$(sym "$elf" __pax_text_start); te=$(sym "$elf" __pax_text_end)
+    rs=$(sym "$elf" __pax_rodata_start); re=$(sym "$elf" __pax_rodata_end)
+    ds=$(sym "$elf" __pax_data_start); de=$(sym "$elf" __pax_image_end)
+    [ -n "$ts" ] && [ -n "$te" ] && [ -n "$rs" ] && [ -n "$re" ] && [ -n "$ds" ] && [ -n "$de" ] \
+        || { echo "missing a section bound symbol"; return 1; }
+    need readelf
+    readelf -lW "$elf" | awk '$1 == "LOAD"' > "$elf.loads"
+    n=$(wc -l < "$elf.loads" | tr -d ' ')
+    [ "$n" = 3 ] || { echo "$n PT_LOADs, not 3"; return 1; }
+    # readelf -lW: LOAD Offset VirtAddr PhysAddr FileSiz MemSiz Flg Align,
+    # where Flg may be two words ("R E").
+    local i=0 va msz flg lo hi want line
+    while IFS= read -r line; do
+        i=$((i + 1))
+        va=$(awk '{ print $3 }' <<<"$line"); msz=$(awk '{ print $6 }' <<<"$line")
+        flg=$(sed -E 's/^ *LOAD( +[^ ]+){5} +(.*) +0x[0-9a-f]+$/\2/' <<<"$line" | sed 's/ *$//')
+        case $i in 1) lo=$ts hi=$te want='R E' ;; 2) lo=$rs hi=$re want='R' ;; 3) lo=$ds hi=$de want='RW' ;; esac
+        [ "$flg" = "$want" ] || { echo "PT_LOAD $i flags '$flg', want '$want'"; return 1; }
+        [ $((va)) -ge $((lo)) ] && [ $((va + msz)) -le $((hi)) ] \
+            || { echo "PT_LOAD $i [$va, +$msz) outside [$lo, $hi)"; return 1; }
+    done < "$elf.loads"
+    echo "3 PT_LOADs: R E in text [$ts, $te), R in rodata [$rs, $re), RW in data [$ds, $de)"
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        for k in $kernels; do
+            log=$work/$tier/$k.build-kernel.log
+            if [ ! -f "$PAX_ROOT/kernel/$k.lu" ]; then
+                bad "G1 $tier $k: no kernel/$k.lu"
+                continue
+            fi
+            if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/$k.lu" "$work/$tier" 2>"$log"); then
+                cat "$log" >&2
+                if why=$(loads_ok "$elf"); then
+                    say "PASS G1 $tier $k: build-kernel's assertions; $why"
+                else
+                    bad "G1 $tier $k: $why"
+                fi
+                "$PAX_ROOT/tools/mkimage" "$elf" "$work/$tier/$k.iso" >/dev/null || bad "$tier $k: mkimage"
+                say "built $tier $k: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/$k.iso")"
+            else
+                cat "$log" >&2
+                bad "G1 $tier $k: tools/build-kernel"
+            fi
+        done
+    done
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx2-paging build (G1): PASS (no boot: --no-boot)" || say "mpx2-paging build: FAIL"
+        exit "$fail"
+    fi
+fi
+
+# The value of the last line of the normalised log matching sed BRE $2
+# with one group.
+grab() { serial_norm "$1" | sed -n "s/^$2\$/\\1/p" | tail -n 1; }
+# A register's hex digits from a monitor `info registers` answer.
+reg() { sed -n "s/.*[^A-Z]$2=\\([0-9a-f]*\\).*/\\1/p; s/^$2=\\([0-9a-f]*\\).*/\\1/p" "$1" | tail -n 1; }
+
+record() { # tier kernel leg status tool
+    ran=$((ran + 1))
+    printf '%s %s %s %s-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" "$5" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" \
+        "$(sha256_of "$images/$1/$2.iso")" >> "$PAX_BUILD/mpx2-paging-runs.txt"
+}
+
+# G3/G4/G6 over one `info tlb` answer. Args: tlb-file img-virt img-phys
+# text-lo text-hi ro-lo ro-hi data-lo data-hi hhdm va b. Prints one
+# "G<n> ok|bad: …" line per assertion.
+tlb_check() {
+    local tlb=$1 virt=$2 phys=$3 tl=$4 th=$5 rl=$6 rh=$7 dl=$8 dh=$9 hhdm=${10} va=${11} b=${12}
+    local isz=$((dh - virt)) line v p f nimg=0 bad3= bad4= low=0 nh=0 seen_va= seen_va2=
+    while IFS= read -r line; do
+        case $line in
+            [0-9a-f]*': '[0-9a-f]*' '?????????) ;;
+            *) continue ;;
+        esac
+        v=0x${line%%:*}; p=${line#*: }; f=${p#* }; p=0x${p%% *}
+        case $v in
+            0x0000*) low=$((low + 1)); continue ;;
+        esac
+        if [ $((v)) -ge $((virt)) ] && [ "${v:2:8}" = ffffffff ]; then
+            nimg=$((nimg + 1))
+            local want
+            if [ $((v)) -ge $((tl)) ] && [ $((v)) -lt $((th)) ]; then want='-' wx='-'
+            elif [ $((v)) -ge $((rl)) ] && [ $((v)) -lt $((rh)) ]; then want='X' wx='-'
+            elif [ $((v)) -ge $((dl)) ] && [ $((v)) -lt $((dh)) ]; then want='X' wx='W'
+            else bad3+=" $v outside every section;"; continue; fi
+            [ "${f:0:1}" = "$want" ] && [ "${f:8:1}" = "$wx" ] && [ "${f:7:1}" = - ] \
+                || bad3+=" $v flags $f;"
+            [ $((p)) = $((v - virt + phys)) ] || bad3+=" $v at $p, not $(hx $((v - virt + phys)));"
+        elif [ $((v)) -ge $((hhdm)) ] && [ $((v)) -lt $((0xffff900000000000)) ]; then
+            nh=$((nh + 1))
+            [ $((p)) = $((v - hhdm)) ] || bad4+=" $v maps $p, not a direct map;"
+            [ "${f:0:1}" = X ] && [ "${f:8:1}" = W ] && [ "${f:7:1}" = - ] || bad4+=" $v flags $f;"
+            # a 2 MiB entry (P) covers [p, p + 2 MiB)
+            local span=4096
+            [ "${f:2:1}" = P ] && span=2097152
+            [ $((p + span)) -le $((phys)) ] || [ $((p)) -ge $((phys + isz)) ] \
+                || bad4+=" $v (phys $p) aliases the image [$(hx "$phys"), $(hx $((phys + isz))));"
+        elif [ "$v" = "$va" ]; then
+            seen_va="$p $f"
+        elif [ $((v)) = $((va + 4096)) ]; then
+            seen_va2="$p $f"
+        else
+            bad4+=" $v: an entry outside the image, the HHDM and the scratch page;"
+        fi
+    done < "$tlb"
+    [ "$nimg" = $((isz / 4096)) ] || bad3+=" $nimg image pages, the image has $((isz / 4096));"
+    [ -z "$bad3" ] && echo "G3 ok: $nimg image pages: text $(( (th - tl) / 4096 )) R-X, rodata $(( (rh - rl) / 4096 )) R--, data $(( (dh - dl) / 4096 )) RW-, at phys $phys + (va - virt)" \
+        || echo "G3 bad:$bad3"
+    [ "$low" = 0 ] || bad4+=" $low entries in the lower half;"
+    [ "$nh" -gt 0 ] || bad4+=" no HHDM entry;"
+    [ -z "$bad4" ] && echo "G4 ok: $nh HHDM entries, every one a direct map, RW and NX, none aliasing the image; no lower-half entry" \
+        || echo "G4 bad:$bad4"
+    if [ -n "$seen_va" ] && [ "${seen_va%% *}" = "$b" ] && [ "${seen_va#* }" != "${seen_va#* X}" ] \
+        && [ "${seen_va: -1}" = W ] && [ -z "$seen_va2" ]; then
+        echo "G6 ok: the monitor: $va -> $seen_va; nothing at $(hx $((va + 4096)))"
+    else
+        echo "G6 bad: the monitor: $va -> '${seen_va:-nothing}' (want $b, X, W); $(hx $((va + 4096))) -> '${seen_va2:-nothing}'"
+    fi
+}
+
+: > "$PAX_BUILD/mpx2-paging-runs.txt"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        # --- kmain_paging: G2, G3, G4, G6, G8 ---------------------------
+        k=kmain_paging
+        log=$PAX_BUILD/mpx2-paging-$tier-$k-$leg.serial.log
+        iso=$images/$tier/$k.iso elf=$images/$tier/$k.elf
+        rm -f "$log" "$log.verdict"
+        if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+            bad "G2-G8 $tier $k $leg: no image or ELF ($iso)"
+        else
+            # on the halted machine: the registers, every leaf translation,
+            # and the PML4's lower half read at CR3 (the monitor's $cr3)
+            hrc=0
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 180 \
+                --elf "$elf" --marker halt --cmd 'info registers' --cmd 'info tlb' \
+                --cmd 'xp /256gx $cr3' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+            record "$tier" "$k" "$leg" "$hrc" halt
+            if [ "$hrc" = 0 ]; then
+                say "PASS G8 $tier $k $leg: halted: $(tail -n 1 "$log.verdict")"
+            else
+                bad "G8 $tier $k $leg: not halted (qemu-halt $hrc): $(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict")"
+            fi
+            if "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
+                'PAX paging test' \
+                'frames: [0-9]+ usable, [0-9]+ below 1 MiB, [0-9]+ allocator, [0-9]+ free' \
+                'hhdm: 0xffff[89a-f][0-9a-f]{8}000' \
+                "paging: limine cr3 $HEX, pax cr3 $HEX, [0-9]+ table frames" \
+                "image: phys $HEX, virt $HEX, text $HEX to $HEX, rodata $HEX to $HEX, data $HEX to $HEX" \
+                "cpu: cr0 $HEX, cr4 $HEX, efer $HEX" \
+                "map: $HEX to $HEX, [0-9]+ table frames, read $HEX, write seen at $HEX" \
+                "translate: $HEX is $HEX" \
+                "unmap: $HEX was $HEX, then not_mapped" \
+                "remap: $HEX to $HEX, read $HEX" \
+                "gone: $HEX mapped to $HEX and unmapped, then not_mapped" \
+                'halt' >/dev/null; then
+                A=$(grab "$log" 'paging: limine cr3 \(0x[0-9a-f]*\), .*')
+                B=$(grab "$log" 'paging: .*, pax cr3 \(0x[0-9a-f]*\), .*')
+                P=$(grab "$log" 'paging: .*, \([0-9]*\) table frames')
+                c0=$(grab "$log" 'cpu: cr0 \(0x[0-9a-f]*\), .*'); c4=$(grab "$log" 'cpu: .*, cr4 \(0x[0-9a-f]*\), .*')
+                ef=$(grab "$log" 'cpu: .*, efer \(0x[0-9a-f]*\)')
+                regs=$log.cmd1
+                mc3=0x$(reg "$regs" CR3); mc0=0x$(reg "$regs" CR0); mc4=0x$(reg "$regs" CR4); mef=0x$(reg "$regs" EFER)
+                if [ "$A" != "$B" ] && [ $((B)) -ge 1048576 ] && [ $((B % 4096)) = 0 ] && [ "$P" -ge 6 ] \
+                    && [ $((mc3)) = $((B)) ] && [ $((mc0 & 0x10000)) != 0 ] && [ $((mef & 0x800)) != 0 ] \
+                    && [ $((mc0)) = $((c0)) ] && [ $((mc4)) = $((c4)) ] && [ $((mef)) = $((ef)) ]; then
+                    say "PASS G2 $tier $k $leg: limine cr3 $A, pax cr3 $B = the monitor's CR3 $mc3; P=$P; CR0 $mc0 (WP), CR4 $mc4, EFER $mef (NXE), as the kernel read them"
+                else
+                    bad "G2 $tier $k $leg: limine $A, pax $B, P=$P; monitor CR3 $mc3 CR0 $mc0 CR4 $mc4 EFER $mef; kernel cr0 $c0 cr4 $c4 efer $ef"
+                fi
+                virt=$(grab "$log" 'image: phys 0x[0-9a-f]*, virt \(0x[0-9a-f]*\), .*')
+                phys=$(grab "$log" 'image: phys \(0x[0-9a-f]*\), .*')
+                tl=$(sym "$elf" __pax_text_start); th=$(sym "$elf" __pax_text_end)
+                rl=$(sym "$elf" __pax_rodata_start); rh=$(sym "$elf" __pax_rodata_end)
+                dl=$(sym "$elf" __pax_data_start); dh=$(sym "$elf" __pax_image_end)
+                kimg=$(grab "$log" 'image: phys 0x[0-9a-f]*, virt 0x[0-9a-f]*, \(.*\)')
+                want_img="text $tl to $th, rodata $rl to $rh, data $dl to $dh"
+                [ "$kimg" = "$want_img" ] || bad "G3 $tier $k $leg: the kernel's bounds '$kimg' are not the ELF's '$want_img'"
+                va=$(grab "$log" 'map: \(0x[0-9a-f]*\) to .*')
+                a=$(grab "$log" 'map: 0x[0-9a-f]* to \(0x[0-9a-f]*\), .*')
+                n=$(grab "$log" 'map: .*, \([0-9]*\) table frames, .*')
+                r1=$(grab "$log" 'map: .*, read \(0x[0-9a-f]*\), .*')
+                w=$(grab "$log" 'map: .*, write seen at \(0x[0-9a-f]*\)')
+                t=$(grab "$log" 'translate: 0x[0-9a-f]* is \(0x[0-9a-f]*\)')
+                was=$(grab "$log" 'unmap: 0x[0-9a-f]* was \(0x[0-9a-f]*\), .*')
+                b=$(grab "$log" 'remap: 0x[0-9a-f]* to \(0x[0-9a-f]*\), .*')
+                r2=$(grab "$log" 'remap: .*, read \(0x[0-9a-f]*\)')
+                g2=$(grab "$log" 'gone: \(0x[0-9a-f]*\) mapped .*')
+                ga=$(grab "$log" 'gone: 0x[0-9a-f]* mapped to \(0x[0-9a-f]*\) .*')
+                hhdm=$(grab "$log" 'hhdm: \(0x[0-9a-f]*\)')
+                if [ "$va" = 0xffffa00000000000 ] && [ "$n" = 3 ] && [ "$r1" = "$(hx $((a ^ PAT)))" ] \
+                    && [ "$w" = 0x0123456789abcdef ] && [ "$t" = "$a" ] && [ "$was" = "$a" ] \
+                    && [ "$b" != "$a" ] && [ "$r2" = "$(hx $((b ^ PAT)))" ] \
+                    && [ "$g2" = "$(hx $((va + 4096)))" ] && [ "$ga" = "$a" ]; then
+                    g6k="the kernel: $va -> $a read $r1, written through; unmapped; -> $b read $r2"
+                else
+                    g6k=; bad "G6 $tier $k $leg: the round trip: va $va n $n a $a r1 $r1 w $w t $t was $was b $b r2 $r2 gone $g2 -> $ga"
+                fi
+                while IFS= read -r res; do
+                    case $res in
+                        "G3 ok:"*) say "PASS G3 $tier $k $leg:${res#G3 ok:}" ;;
+                        "G4 ok:"*) say "PASS G4 $tier $k $leg:${res#G4 ok:}" ;;
+                        "G6 ok:"*) [ -n "$g6k" ] && say "PASS G6 $tier $k $leg: $g6k;${res#G6 ok:}" ;;
+                        *) bad "${res%% *} $tier $k $leg:${res#* bad:}" ;;
+                    esac
+                done < <(tlb_check "$log.cmd2" "$virt" "$phys" "$tl" "$th" "$rl" "$rh" "$dl" "$dh" "$hhdm" "$va" "$b")
+                # G4's lower half: the PML4's first 256 entries, read at
+                # the monitor's own CR3
+                nz=$(grep -Eo '0x[0-9a-f]{16}' "$log.cmd3" 2>/dev/null | grep -vc '^0x0000000000000000$')
+                nt=$(grep -Eo '0x[0-9a-f]{16}' "$log.cmd3" 2>/dev/null | wc -l | tr -d ' ')
+                if [ "$nt" = 256 ] && [ "$nz" = 0 ]; then
+                    say "PASS G4 $tier $k $leg: xp /256gx \$cr3 ($mc3): 256 PML4 entries, all zero: no lower half"
+                else
+                    bad "G4 $tier $k $leg: xp of the PML4's lower half at $mc3: $nt entries, $nz non-zero"
+                fi
+            else
+                bad "G2-G6 $tier $k $leg: the transcript"
+                serial_norm "$log" | tail -n 12 | sed 's/^/  /' >&2
+            fi
+        fi
+
+        # --- kmain_text_write: G7 ------------------------------------------
+        k=kmain_text_write
+        log=$PAX_BUILD/mpx2-paging-$tier-$k-$leg.serial.log
+        iso=$images/$tier/$k.iso elf=$images/$tier/$k.elf
+        rm -f "$log" "$log.verdict"
+        if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+            bad "G7 $tier $k $leg: no image or ELF ($iso)"
+            continue
+        fi
+        frc=0
+        "$PAX_ROOT/tools/qemu-fault" --firmware "$leg" --serial "$log" --timeout 120 \
+            --marker "write: text at $HEX" "$iso" >"$log.verdict" 2>&1 || frc=$?
+        record "$tier" "$k" "$leg" "$frc" fault
+        a=$(grab "$log" 'write: text at \(0x[0-9a-f]*\)')
+        tl=$(sym "$elf" __pax_text_start); th=$(sym "$elf" __pax_text_end)
+        cr2=0x$(reg "$log.regs" CR2 2>/dev/null); rip=0x$(reg "$log.regs" RIP 2>/dev/null)
+        accel=$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)
+        why=
+        [ "$frc" = 0 ] || why+=" qemu-fault $frc ($(grep -m1 'NO FAULT STOP' "$log.verdict"));"
+        "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" "paging: limine cr3 $HEX, pax cr3 $HEX, [0-9]+ table frames" \
+            "write: text at $HEX" >/dev/null || why+=" the log does not end at the write;"
+        [ -n "$a" ] && [ $((a)) -ge $((tl)) ] && [ $((a)) -lt $((th)) ] || why+=" '$a' is not in text [$tl, $th);"
+        [ -n "$a" ] && [ $((cr2)) = $((a)) ] || why+=" CR2 $cr2, not $a;"
+        [ $((rip)) -ge $((tl)) ] && [ $((rip)) -lt $((th)) ] || why+=" RIP $rip outside text;"
+        intl=
+        if [ "$accel" = tcg ]; then
+            # the log's last exceptions: #PF, #DF, then the triple fault
+            pf=$(grep -E '^ +[0-9]+: v=' "$log.int" | tail -n 2 | head -n 1)
+            df=$(grep -E '^ +[0-9]+: v=' "$log.int" | tail -n 1)
+            last=$(grep -v '^$' "$log.int" | tail -n 1)
+            case $pf in *" v=0e e=0003 "*"CR2=${a#0x}"*) ;; *) why+=" -d int: the #PF line is '$pf';" ;; esac
+            case $df in *" v=08 "*) ;; *) why+=" -d int: no #DF after the #PF ('$df');" ;; esac
+            [ "$last" = "Triple fault" ] || why+=" -d int ends '$last', not 'Triple fault';"
+            intl="; -d int: v=0e e=0003 CR2=$a, v=08, Triple fault"
+        else
+            intl="; $accel: QEMU logs no exceptions, CR2 from the monitor"
+        fi
+        if [ -z "$why" ]; then
+            say "PASS G7 $tier $k $leg: wrote $a (text), stopped by a triple fault: CR2 $cr2, RIP $rip$intl"
+        else
+            bad "G7 $tier $k $leg:$why"
+        fi
+    done
+done
+cat "$PAX_BUILD/mpx2-paging-runs.txt"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx2-paging: PASS" || say "mpx2-paging: FAIL"
+exit "$fail"
