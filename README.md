@@ -4,23 +4,23 @@ A Linux-compatible operating system written in wolf: a kernel that runs Linux's 
 
 PAX is a clean-room implementation of Linux's userspace ABI. It does not contain, translate or derive from Linux kernel source. See `CLAUDE.md` for the rule and `docs/SOURCES.md` for what each part was written from.
 
-Status: physical frames (px02, M-PX2's first piece) on first light (M-PX1, px01). The kernel's frame allocator (`kernel/frames`, two bitmaps over Limine's memory map, its state in frames it takes for itself) hands out every usable frame above 1 MiB exactly once and takes them back, and panics by name on a double free or a free of a frame never usable (`tests/mpx2-frames`). wolf is built from source at wolf-lang `eb955c3b` (volatile access and integer-to-pointer casts are in no release yet). The wolf kernel owns the serial console (a 16550 driver in wolf), prints what Limine handed it (bootloader, firmware, memory map, HHDM offset) and halts; a trap reaches its panic path, which prints `PANIC <kind> <file>:<line>` and halts. Both of wolf's compiling tiers, under BIOS and UEFI (`tests/mpx1`). The harness's assembly proof (`tests/proof`) and M-KW's first wolf kernel (`tests/mkw`) still run. The plan lives in the wolf planning repository under `sprints/pax/`.
+Status: paging (px03, M-PX2's second piece) on physical frames (px02) and first light (M-PX1, px01). The kernel builds its own x86-64 four-level paging structures from its frame allocator (`kernel/paging`): its image mapped one permission per section (text read-execute, rodata read-only, data and bss read-write no-execute), Limine's HHDM kept for RAM (without a writable alias of the image), nothing in the lower half; it switches CR3 to them, maps and unmaps pages with INVLPG, and a write to its own text faults — each read back through QEMU's monitor (`tests/mpx2-paging`). The kernel's frame allocator (`kernel/frames`, two bitmaps over Limine's memory map, its state in frames it takes for itself) hands out every usable frame above 1 MiB exactly once and takes them back, and panics by name on a double free or a free of a frame never usable (`tests/mpx2-frames`). wolf is built from source at wolf-lang `eb955c3b` (volatile access and integer-to-pointer casts are in no release yet). The wolf kernel owns the serial console (a 16550 driver in wolf), prints what Limine handed it (bootloader, firmware, memory map, HHDM offset) and halts; a trap reaches its panic path, which prints `PANIC <kind> <file>:<line>` and halts. Both of wolf's compiling tiers, under BIOS and UEFI (`tests/mpx1`). The harness's assembly proof (`tests/proof`) and M-KW's first wolf kernel (`tests/mkw`) still run. The plan lives in the wolf planning repository under `sprints/pax/`.
 
 Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA`).
 
 ## Layout
 
-    kernel/   the wolf kernel (serial, log, boot_info, frames, panic;
+    kernel/   the wolf kernel (serial, log, boot_info, frames, paging, panic;
               kernel/README.md), its wolf.pkg and the wolf/lupin pin
     boot/     boot-protocol glue: the Limine pin and config, the kernel's
               entry, requests, port I/O and the requests' addresses
-              (start.S, io.S, limine.S, kernel.ld), and the assembly proof under
+              (start.S, io.S, limine.S, cpu.S, kernel.ld), and the assembly proof under
               boot/stub/
     tools/    the harness: fetch-limine, fetch-wolf, fetch-lupin,
               build-stub, build-kernel, mkimage, qemu-run, qemu-halt,
-              qemu-gdb, expect-serial
+              qemu-fault, qemu-gdb, expect-serial
     tests/    scripted QEMU tests: proof, mkw (with M-KW's frozen kernels
-              in mkw.d/), mpx1, mpx2-frames, gdb-attach,
+              in mkw.d/), mpx1, mpx2-frames, mpx2-paging, gdb-attach,
               expect-serial-selftest
     docs/     BOOT.md (the boot protocol, argued), SOURCES.md (the
               consulted-sources log), ABI notes as they come
@@ -39,6 +39,9 @@ tools/qemu-gdb build/pax-stub.iso build/stub/pax-stub.elf     # gdb, frozen at r
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx1    # M-PX1: first light, both tiers, BIOS and UEFI
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx2-frames   # px02: the frame allocator, both tiers, BIOS and UEFI
 tests/mpx2-frames --images build/mpx2      # boot them elsewhere (hasu under KVM)
+PAX_WOLF=$(tools/fetch-wolf) tests/mpx2-paging   # px03: paging, read back through QEMU's monitor
+tools/qemu-halt --elf K.elf --marker halt --cmd 'info tlb' K.iso   # monitor answers on the halted machine (K.log.cmd1)
+tools/qemu-fault --marker 'write: .*' K.iso                        # a kernel that must fault: CR2 from the stopped machine
 tests/mpx1 --images build/mpx1             # boot ISOs built elsewhere (any host with QEMU)
 tools/qemu-halt --elf build/mpx1/native/kmain.elf --marker halt build/mpx1/native/kmain.iso   # is it halted?
 PAX_WOLF=$(tools/fetch-wolf) PAX_LUPIN=$(tools/fetch-lupin) tests/mkw   # M-KW: the first wolf kernel, both tiers
