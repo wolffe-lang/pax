@@ -18,21 +18,26 @@
 #      independently by kernel/boot_info), F = T - L - S, L <= 256 (the
 #      first MiB's frames), 1 <= S <= 8; kmain_frames' line obeys the
 #      same F = T - L - S.
-#   F3 exhaust: kmain_frames allocates exactly F frames, then
+#      Since px03 both kernels then switch to PAX's own paging
+#      structures (kernel/paging), which take P frames from the allocator:
+#        paging: limine cr3 0x<A>, pax cr3 0x<B>, P table frames
+#      follows the frames line (P >= 6, A != B), and every count below is
+#      F - P; the exercise runs on PAX's structures (px03's G5).
+#   F3 exhaust: kmain_frames allocates exactly F - P frames, then
 #      `out_of_memory` by name; every frame checked against the map read
 #      independently: `checks: misaligned 0, outside usable 0, below
 #      1 MiB 0, in image 0, in allocator 0` (the image's physical extent
 #      from Limine's Executable Address response and the linker's
 #      bounds, printed on the `image:` line, which must be non-empty).
-#   F4 touch: every one of the F frames written through the HHDM (its
+#   F4 touch: every one of the F - P frames written through the HHDM (its
 #      address, a chain link, its address xor a pattern; volatile) and
 #      read back along the chain: `touch: F frames written and read
 #      back, 0 mismatches` — a frame handed out twice loses its first
 #      tag and shortens the chain, so this is also distinctness.
 #   F5 reuse: freeing the last frame and allocating once returns that
 #      frame (`reuse: freed 0x<a>, alloc returned 0x<a>`); freeing all
-#      F restores `F free`; a second exhaust gets F again, then
-#      `out_of_memory`.
+#      F - P restores `F - P free`; a second exhaust gets F - P again,
+#      then `out_of_memory`.
 #   F6 double free: kmain_double_free's log ends
 #        free twice: 0x<a>
 #        PANIC frames: double free 0x<a>
@@ -137,6 +142,7 @@ halted() { # assertion label status
 
 FRAMES_RE='frames: [0-9]+ usable, [0-9]+ below 1 MiB, [0-9]+ allocator, [0-9]+ free'
 HEX='0x[0-9a-f]{16}'
+PAGING_RE="paging: limine cr3 $HEX, pax cr3 $HEX, [0-9]+ table frames"
 
 : > "$PAX_BUILD/mpx2-runs.txt"
 for leg in $legs; do
@@ -152,7 +158,7 @@ for leg in $legs; do
         # --- kmain: F2, F8 ---------------------------------------------
         hrc=0; halt_boot "$tier" kmain "$leg" halt || hrc=$?
         if "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
-            'hhdm: 0xffff[89a-f][0-9a-f]{8}000' "$FRAMES_RE" 'halt'; then
+            'hhdm: 0xffff[89a-f][0-9a-f]{8}000' "$FRAMES_RE" "$PAGING_RE" 'halt'; then
             u=$(grab "$log" 'mem: [0-9]* entries, \([0-9]*\) bytes usable')
             T=$(grab "$log" 'frames: \([0-9]*\) usable, .*')
             L=$(grab "$log" 'frames: [0-9]* usable, \([0-9]*\) below 1 MiB, .*')
@@ -165,14 +171,14 @@ for leg in $legs; do
                 bad "F2 $tier kmain $leg: mem $u bytes; T=$T L=$L S=$S F=$F"
             fi
         else
-            bad "F2 $tier kmain $leg: the transcript does not end hhdm, frames, halt"
+            bad "F2 $tier kmain $leg: the transcript does not end hhdm, frames, paging, halt"
         fi
         halted F8 "$tier kmain $leg" "$hrc"
 
         # --- kmain_frames: F2..F5, F8 ----------------------------------
         hrc=0; halt_boot "$tier" kmain_frames "$leg" halt || hrc=$?
         if "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
-            'PAX frames test' "$FRAMES_RE" \
+            'PAX frames test' "$FRAMES_RE" "$PAGING_RE" \
             "image: $HEX to $HEX, allocator $HEX to $HEX" \
             'exhaust: [0-9]+ frames, then out_of_memory' \
             'checks: misaligned 0, outside usable 0, below 1 MiB 0, in image 0, in allocator 0' \
@@ -185,17 +191,20 @@ for leg in $legs; do
             L=$(grab "$log" 'frames: [0-9]* usable, \([0-9]*\) below 1 MiB, .*')
             S=$(grab "$log" 'frames: .* below 1 MiB, \([0-9]*\) allocator, .*')
             F=$(grab "$log" 'frames: .* allocator, \([0-9]*\) free')
+            P=$(grab "$log" 'paging: .*, \([0-9]*\) table frames')
+            pa=$(grab "$log" 'paging: limine cr3 \(0x[0-9a-f]*\), .*'); pb=$(grab "$log" 'paging: .*, pax cr3 \(0x[0-9a-f]*\), .*')
             il=$(grab "$log" 'image: \(0x[0-9a-f]*\) to .*'); ih=$(grab "$log" 'image: 0x[0-9a-f]* to \(0x[0-9a-f]*\), .*')
             N=$(grab "$log" 'exhaust: \([0-9]*\) frames, .*')
             M=$(grab "$log" 'touch: \([0-9]*\) frames .*')
             ra=$(grab "$log" 'reuse: freed \(0x[0-9a-f]*\), .*'); rb=$(grab "$log" 'reuse: .*, alloc returned \(0x[0-9a-f]*\)')
             fr=$(grab "$log" 'free: \([0-9]*\) frames freed, .*'); fc=$(grab "$log" 'free: .* freed, \([0-9]*\) free')
             A=$(grab "$log" 'again: \([0-9]*\) frames, .*')
-            [ "$F" = $((T - L - S)) ] && [ "$F" -gt 0 ] \
-                && say "PASS F2 $tier kmain_frames $leg: T=$T L=$L S=$S F=$F" \
-                || bad "F2 $tier kmain_frames $leg: T=$T L=$L S=$S F=$F"
+            [ "$F" = $((T - L - S)) ] && [ "$F" -gt 0 ] && [ "$P" -ge 6 ] && [ "$pa" != "$pb" ] \
+                && say "PASS F2 $tier kmain_frames $leg: T=$T L=$L S=$S F=$F; on PAX's paging (cr3 $pa -> $pb, P=$P)" \
+                || bad "F2 $tier kmain_frames $leg: T=$T L=$L S=$S F=$F; paging $pa -> $pb, P=$P"
+            F=$((F - P)) # every frame the exercise can have: PAX's tables took P
             [ "$N" = "$F" ] && [ $((ih)) -gt $((il)) ] && [ $((il)) -gt 0 ] \
-                && say "PASS F3 $tier kmain_frames $leg: $N = F frames, then out_of_memory; every check 0; image $il..$ih" \
+                && say "PASS F3 $tier kmain_frames $leg: $N = F - P frames, then out_of_memory; every check 0; image $il..$ih" \
                 || bad "F3 $tier kmain_frames $leg: exhaust $N, F $F, image $il..$ih"
             [ "$M" = "$F" ] \
                 && say "PASS F4 $tier kmain_frames $leg: $M frames written and read back, 0 mismatches" \

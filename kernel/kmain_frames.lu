@@ -1,6 +1,8 @@
 //! member: false
 // kmain_frames.lu — the frame allocator's exercise kernel (px02,
-// tests/mpx2-frames F2–F5). It builds the allocator, then:
+// tests/mpx2-frames F2–F5). It builds the allocator, switches to PAX's
+// own paging structures (px03, kernel/paging: they take P frames, so
+// every count below is F - P), then:
 //
 //   1. allocates until `out_of_memory`, checking every frame against
 //      the memory map read independently (aligned, inside a usable
@@ -23,17 +25,19 @@
 //
 //     PAX frames test
 //     frames: <T> usable, <L> below 1 MiB, <S> allocator, <F> free
+//     paging: limine cr3 0x<A>, pax cr3 0x<B>, <P> table frames
 //     image: 0x<lo> to 0x<hi>, allocator 0x<lo> to 0x<hi>
 //     exhaust: <N> frames, then out_of_memory
 //     checks: misaligned 0, outside usable 0, below 1 MiB 0, in image 0, in allocator 0
 //     touch: <N> frames written and read back, 0 mismatches
 //     reuse: freed 0x<pa>, alloc returned 0x<pa>
-//     free: <N> frames freed, <F> free
+//     free: <N> frames freed, <F - P> free
 //     again: <N> frames, then out_of_memory
 //     halt
 use boot_info
 use frames
 use log
+use paging
 use panic
 use serial
 
@@ -109,6 +113,10 @@ export fn kmain() {
     log.line("PAX frames test")
     let st = frames.start()
     frames.report(st)
+    let limine = paging.cr3()
+    let before = frames.free_count(st)
+    paging.start(st)
+    paging.report(st, limine, before)
     let hhdm = boot_info.hhdm()
     let img_lo = boot_info.image_phys()
     let img_hi = img_lo + boot_info.image_bytes()
