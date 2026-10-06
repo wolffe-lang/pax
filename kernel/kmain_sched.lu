@@ -10,7 +10,9 @@
 //   S3: the frames free before, during and after S2, and S2's stacks
 //       unmapped once they exited;
 //   S4: two threads counting under the spinlock, then two counting
-//       without it (the control).
+//       without it (the control);
+//   S7: a thread reads the tick count, a storage word and a module var
+//       across a yield another thread writes them in (wolf-lang#598).
 // Then interrupts off, the timer stopped, `halt`:
 //
 //     PAX sched: threads
@@ -33,6 +35,7 @@
 //     nolock: t<i> <n> increments in <r> runs
 //     nolock: t<j> <m> increments in <r> runs
 //     nolock: counter <s>, lost <n + m - s>
+//     t<i>: across a yield: ticks <t0> -> <t1 >= t0 + 2>, storage 1 -> 2, module var 1 -> <p>
 //     halt
 use apic
 use frames
@@ -50,6 +53,8 @@ extern "c" let pax_t_spin: *u8
 extern "c" let pax_t_sleep: *u8
 extern "c" let pax_t_locked: *u8
 extern "c" let pax_t_unlocked: *u8
+extern "c" let pax_t_stale_a: *u8
+extern "c" let pax_t_stale_b: *u8
 
 /// The test page's words: the locked counter (0), its lock (8), the
 /// unlocked counter (16), the locked threads' own total (24), the
@@ -172,6 +177,15 @@ export fn kmain() {
     log.dec((sum - got) as int)
     log.end()
     sync.release(sync.console(), s2)
+
+    // S7: values read across a switch are fresh (wolf-lang#598's shape).
+    // # Safety: the addresses of kernel/schedtest's exports.
+    let (sa, sb) = unsafe { (pax_t_stale_a as u64, pax_t_stale_b as u64) }
+    saved = sync.irq_save()
+    sched.create(sa, page)
+    sched.create(sb, page)
+    sync.irq_restore(saved)
+    sched.wait_all()
 
     let _off = sync.irq_save()
     timer.stop()

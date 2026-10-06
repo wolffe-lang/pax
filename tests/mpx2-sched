@@ -49,6 +49,14 @@
 #      the same id and bounds on both lines, g <= a < lo, hi - lo = 16
 #      KiB; tools/qemu-halt holds the machine halted in pax_halt.
 #   S6 halt: kmain_sched ends `halt`, halted with IF clear (qemu-halt).
+#   S7 across a switch (the wolf-lang#598 witness): kmain_sched's
+#        t<id>: across a yield: ticks <t0> -> <t1>, storage 1 -> <w>, module var 1 -> <p>
+#      with t1 >= t0 + 2 and w = 2: the tick count and a storage word a
+#      thread read, then another thread rewrote while it was switched
+#      out, are read fresh after the switch. A value forwarded across the
+#      call (#598: wolf 0.2.24's compiled tiers do it for module vars
+#      and extern "c" let storage) gives t1 = t0 or w = 1. p, the same
+#      shape on a module var, is reported, not asserted.
 #
 # --images DIR boots ISOs and ELFs built earlier by this script (DIR
 # holds <tier>/<kernel>.{iso,elf}): any host with QEMU and nm, no wolf
@@ -225,7 +233,7 @@ for leg in $legs; do
         # --- S1-S4, S6: kmain_sched ---------------------------------------
         hrc=0; halt_boot "$tier" kmain_sched "$leg" 'halt' || hrc=$?
         if [ "$hrc" = 3 ]; then
-            for s in S1 S2 S3 S4 S6; do bad "$s $tier kmain_sched $leg: no image"; done
+            for s in S1 S2 S3 S4 S6 S7; do bad "$s $tier kmain_sched $leg: no image"; done
         else
             norm=$log.norm; serial_norm "$log" > "$norm"
             if v=$(s1_check < "$norm"); then
@@ -279,12 +287,26 @@ for leg in $legs; do
             # S6
             why=
             [ "$hrc" = 0 ] || why+=" not halted ($(not_halted));"
-            "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'nolock: counter [0-9]+, lost [0-9]+' 'halt' >/dev/null \
-                || why+=" the log does not end nolock: counter …, halt;"
+            "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'nolock: counter [0-9]+, lost [0-9]+' \
+                't[0-9]+: across a yield: ticks [0-9]+ -> [0-9]+, storage 1 -> [0-9]+, module var 1 -> [0-9]+' 'halt' >/dev/null \
+                || why+=" the log does not end nolock: counter …, t…: across a yield …, halt;"
             if [ -z "$why" ]; then
                 say "PASS S6 $tier kmain_sched $leg: $(halted)"
             else
                 bad "S6 $tier kmain_sched $leg:$why"; tail_lines 4
+            fi
+            # S7 (#598)
+            why=
+            l=$(grep -E '^t[0-9]+: across a yield: ticks [0-9]+ -> [0-9]+, storage 1 -> [0-9]+, module var 1 -> [0-9]+$' "$norm" | tail -n 1)
+            if [ -z "$l" ]; then why=" no across-a-yield line;"; else
+                set -- $l; t0=$6 t1=${8%,} w=${12%,} p=${17}
+                [ "$t1" -ge $((t0 + 2)) ] || why+=" ticks $t0 -> $t1: not fresh after the switch (want >= $((t0 + 2)));"
+                [ "$w" = 2 ] || why+=" storage read $w after the switch, not 2 (stale);"
+            fi
+            if [ -z "$why" ]; then
+                say "PASS S7 $tier kmain_sched $leg: across a yield the tick count read $t0 -> $t1 and the storage word 1 -> $w, fresh; the module var (#598 probe, not asserted) read 1 -> $p"
+            else
+                bad "S7 $tier kmain_sched $leg:$why"; grep -E 'across a yield' "$norm" | sed 's/^/  /' >&2
             fi
         fi
 
