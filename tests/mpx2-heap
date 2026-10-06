@@ -54,6 +54,12 @@
 #        PANIC heap: out of memory, asked 0x0000000000100000
 #      (the limit, 128 MiB, reached exactly; the hook panics rather than
 #      return the null the runtime would trap), and the kernel halted.
+#   H10 wolf-lang#598 witness: right after H2's line kmain_heap prints
+#        598: up false -> true, pages 0 -> 16, live 0 -> 1 -> 0
+#      — the heap's module `var` read before and after `heap.start`,
+#      and its books read before and after a 64 KiB alloc and its free:
+#      a compiled tier that forwards a read across a call that writes
+#      the state (wolf-lang#598) prints a stale value here.
 #   H9 heap fault: kmain_heap_fault's log ends
 #        block 0x<p>, read past the heap: 0x<a>
 #        PANIC page fault vector 14 error 0x0000000000000000 rip … cr2 0x<a> (heap)
@@ -200,7 +206,7 @@ for leg in $legs; do
     for tier in $tiers; do
         # --- kmain_heap: H2..H5 ----------------------------------------
         hrc=0; halt_boot "$tier" kmain_heap "$leg" halt || hrc=$?
-        want=('PAX heap test' "$FRAMES_RE" "$PAGING_RE" 'frames before the heap: [0-9]+' "$HEAP0_RE")
+        want=('PAX heap test' "$FRAMES_RE" "$PAGING_RE" 'frames before the heap: [0-9]+' "$HEAP0_RE" '598: up .*')
         r=1
         while [ "$r" -le "$ROUNDS" ]; do
             want+=("$INTERP_RE$r" "round $r: $ROUND_TAIL" "$AFTER_RE")
@@ -215,6 +221,12 @@ for leg in $legs; do
             [ -n "$T0" ] && [ "$T0" -ge 1 ] && [ "$T0" -le 3 ] && [ "$N0" = $((T0 + 1)) ] \
                 && say "PASS H2 $tier kmain_heap $leg: the empty heap at slot 384, state page + $T0 table frames = $N0 frames taken (of G=$G)" \
                 || bad "H2 $tier kmain_heap $leg: T0=$T0 N0=$N0"
+            # H10: wolf-lang#598's witness.
+            if serial_norm "$log" | grep -qx '598: up false -> true, pages 0 -> 16, live 0 -> 1 -> 0'; then
+                say "PASS H10 $tier kmain_heap $leg: 598: up false -> true, pages 0 -> 16, live 0 -> 1 -> 0 (each read after a call that wrote it)"
+            else
+                bad "H10 $tier kmain_heap $leg: the #598 witness: $(serial_norm "$log" | grep '^598:')"
+            fi
             # H4: every `after` line, then the closing heap line.
             afters=$(serial_norm "$log" | sed -n 's/^after \([0-9]*\): live \([0-9]*\) blocks \([0-9]*\) bytes, regions \([0-9]*\) bytes, heap \([0-9]*\) pages, frames \([0-9]*\) free$/\1 \2 \3 \4 \5 \6/p')
             P1= F1= ok4=1 seen=0
