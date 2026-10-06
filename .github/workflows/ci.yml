@@ -425,3 +425,63 @@ jobs:
             build/mpx2-interrupts-runs.txt
           retention-days: 14
           if-no-files-found: warn
+
+  # px07: the scheduler. Kernel threads on one CPU, switched by the timer
+  # (boot/isr.S's trampoline resumes the frame pax_interrupt returns),
+  # each on a stack from frames with an unmapped guard (kernel/sched),
+  # a spinlock on wolf's atomics (kernel/sync). tests/mpx2-sched: the
+  # trampoline's shape (S0), three threads alternating by preemption
+  # alone (S1), sleep waking on the tick (S2), exit reclaiming the stack
+  # (S3), a locked counter exact where the unlocked control loses
+  # updates (S4), a stack overflow into the guard panicking by name
+  # (S5), the halt (S6).
+  mpx2-sched:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils
+          qemu-system-x86_64 --version
+          clang --version
+          ld.lld --version
+          objdump --version | head -n 1
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx2-sched-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the scheduler, both tiers, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx2-sched
+
+      - name: keep the kernels, the transcripts, the halt probes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx2-sched-linux
+          path: |
+            build/mpx2-sched/
+            build/mpx2-sched-*.log
+            build/mpx2-sched-*.norm
+            build/mpx2-sched-*.meta
+            build/mpx2-sched-*.halt
+            build/mpx2-sched-*.verdict
+            build/mpx2-sched-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
