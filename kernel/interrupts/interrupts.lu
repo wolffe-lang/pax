@@ -5,14 +5,20 @@
 //! kw10): boot/isr.S's trampoline for each vector 0-47 saves the
 //! registers, builds a `Frame` and calls `pax_interrupt` under the C
 //! convention, then resumes the frame `pax_interrupt` RETURNS (px07):
-//! its argument, to go on where the interrupt landed. Interrupts are
-//! off throughout (every gate is an interrupt gate, kernel/idt).
+//! its argument to go on where the interrupt landed, or another
+//! thread's saved frame to switch (kernel/sched). Interrupts are off
+//! throughout (every gate is an interrupt gate, kernel/idt).
 //!
 //! - vector 3, the breakpoint (`int3`, a trap: the saved RIP is the next
 //!   instruction): one line, `int3: breakpoint vector 3, rip 0x<rip>`,
 //!   and it returns — the kernel continues after the `int3`;
-//! - vector 32, the timer (kernel/timer, the 8259's line 0): a tick, and
-//!   it returns;
+//! - vector 32, the timer (kernel/timer, the 8259's line 0): a tick,
+//!   then kernel/sched's `preempt`, which returns the frame to resume
+//!   (the same one until the scheduler is started);
+//! - vector 0x81, PAX_SWITCH (px07): no gate routes it; boot/sched.S's
+//!   `pax_switch` builds the frame by hand for a thread that yields,
+//!   sleeps, waits or exits, and kernel/sched's `switched` returns the
+//!   next thread's frame;
 //! - vectors 39 and 47, an 8259 line 7 or 15: a spurious request
 //!   (kernel/timer reads the in-service register) returns; a real one
 //!   is unexpected (every other line is masked) and panics;
@@ -26,7 +32,11 @@
 //!
 //!     PANIC <name> vector <v> error 0x<e> rip 0x<r> rsp 0x<s> frame 0x<f>[ cr2 0x<a>]
 //!
-//!   then halt (kernel/panic: `cli; hlt`, forever).
+//!   then halt (kernel/panic: `cli; hlt`, forever). A double fault or
+//!   page fault whose CR2 lies in a thread's stack guard (kernel/sched)
+//!   is a stack overflow, and says so (px07):
+//!
+//!     PANIC stack overflow thread <id> cr2 0x<a> guard 0x<lo> to 0x<hi>
 //!
 //! The frame is boot/isr.S's: 22 eight-byte words, lowest address
 //! first (`[abi.interrupt]`). The handler only reads it here; a handler
@@ -40,6 +50,7 @@ use gdt
 use idt
 use log
 use panic
+use sched
 use timer
 
 extern "c" fn pax_cr2() -> u64
@@ -125,10 +136,37 @@ pub fn breakpoints() -> u64 {
     unsafe { breakpoint_count }
 }
 
+/// PAX_SWITCH: the vector boot/sched.S's `pax_switch` writes into the
+/// frame it builds (no gate routes it).
+const SWITCH: u64 = 0x81
+
+/// A stack overflow (px07): CR2 in thread `id`'s guard. Halts.
+fn overflow(id: u64, cr2: u64) {
+    log.put("PANIC stack overflow thread ")
+    log.dec(id as int)
+    log.put(" cr2 ")
+    log.hex(cr2)
+    log.put(" guard ")
+    log.hex(sched.guard_lo(id))
+    log.put(" to ")
+    log.hex(sched.stack_lo(id))
+    log.end()
+    panic.halt()
+}
+
 /// Write the panic line for the frame at `f` and halt.
 fn fatal(f: *Frame) {
     // # Safety: `f` is the trampoline's frame, live for this call.
     let (v, e, rip, rsp) = unsafe { (f[0].vector, f[0].error, f[0].rip, f[0].rsp) }
+    if v == 8 || v == 14 {
+        // # Safety: cpu.S's MOV from CR2: the last page fault's address,
+        // the one that raised this (or, for #DF, the fault inside it).
+        let a = unsafe { pax_cr2() }
+        let t = sched.guard_of(a)
+        if t != 0 {
+            overflow(t - 1, a)
+        }
+    }
     log.put("PANIC ")
     log.put(name(v))
     log.put(" vector ")
@@ -151,8 +189,9 @@ fn fatal(f: *Frame) {
     panic.halt()
 }
 
-/// boot/isr.S's common path calls this for every routed vector and
-/// resumes the frame it returns.
+/// boot/isr.S's common path calls this for every routed vector (and
+/// boot/sched.S's `pax_switch` for PAX_SWITCH), and resumes the frame it
+/// returns.
 export fn pax_interrupt(f: *Frame) -> *Frame {
     // # Safety: `f` is the trampoline's frame, live for this call.
     let v = unsafe { f[0].vector }
@@ -170,7 +209,13 @@ export fn pax_interrupt(f: *Frame) -> *Frame {
     }
     if v == timer.master_base() {
         timer.tick()
-        return f
+        // # Safety: the frame's address, and the one sched hands back is
+        // a saved frame on a live thread's stack.
+        return unsafe { sched.preempt(f as u64) as *Frame }
+    }
+    if v == SWITCH {
+        // # Safety: as above.
+        return unsafe { sched.switched(f as u64) as *Frame }
     }
     if (v == 39 || v == 47) && timer.spurious(v) {
         return f
