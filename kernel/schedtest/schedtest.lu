@@ -23,6 +23,16 @@
 //!   added to the word at `page + 32`. A
 //!   preemption between its read and its write loses every increment
 //!   the other thread made meanwhile.
+//! - `pax_t_stale_a(page)` and `pax_t_stale_b(page)` (S7, the
+//!   wolf-lang#598 witness): A reads the tick count, stores 1 to the
+//!   word at `page + 40` and to this module's `probe` var, and yields;
+//!   B, switched in, stores 2 to both and spins three ticks; A, back,
+//!   reads all three again: `switch: t<id> across a yield: ticks <t0>
+//!   -> <t1>, storage 1 -> <w>, module var 1 -> <p>`. Fresh reads give
+//!   t1 >= t0 + 2 and w = 2. A value forwarded across the switch (the
+//!   #598 shape: a store, a call that writes the location, a load)
+//!   gives t1 = t0 or w = 1. `p` is the module var's answer on this
+//!   tier: reported, not asserted.
 //! - `pax_t_deep(page)`: recurses (a volatile write before and after
 //!   each call, so no tier turns it into a loop) until it runs into its
 //!   stack's guard.
@@ -33,6 +43,10 @@ use log
 use sched
 use sync
 use timer
+
+/// S7's module var: stored by A before its yield, by B during it (#598
+/// probe: the kernel keeps no state of its own in a module var).
+var probe: u64 = 0
 
 /// Ticks the counting threads run for.
 const COUNT_TICKS: u64 = 20
@@ -158,6 +172,47 @@ export fn pax_t_unlocked(page: u64) {
     let n = count(page + 16, 0)
     add(page + 32, n)
     counted("nolock: ", n)
+}
+
+export fn pax_t_stale_a(page: u64) {
+    let w = page + 40
+    let t0 = timer.ticks()
+    // # Safety: a word of the test's page.
+    unsafe { (w as *u64).write_volatile(1) }
+    // # Safety: one CPU; B writes it only while A is switched out.
+    unsafe {
+        probe = 1
+    }
+    sched.yield() // #598: a call that writes all three
+    let t1 = timer.ticks()
+    // # Safety: as above.
+    let got = unsafe { (w as *u64).read_volatile() }
+    // # Safety: as above.
+    let p = unsafe { probe }
+    let s = say_begin()
+    me()
+    log.put(": across a yield: ticks ")
+    log.dec(t0 as int)
+    log.put(" -> ")
+    log.dec(t1 as int)
+    log.put(", storage 1 -> ")
+    log.dec(got as int)
+    log.put(", module var 1 -> ")
+    log.dec(p as int)
+    say_end(s)
+}
+
+export fn pax_t_stale_b(page: u64) {
+    // # Safety: as `pax_t_stale_a`.
+    unsafe { ((page + 40) as *u64).write_volatile(2) }
+    // # Safety: as `pax_t_stale_a`.
+    unsafe {
+        probe = 2
+    }
+    let end = timer.ticks() + 3
+    while timer.ticks() < end {
+        sync.relax()
+    }
 }
 
 fn deep(n: u64, p: u64) -> u64 {
