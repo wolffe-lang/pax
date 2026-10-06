@@ -1,0 +1,129 @@
+//! sync — the spinlock and the interrupt flag (px07, M-PX2's locking).
+//!
+//! A lock is the address of one 8-byte word, 0 free and 1 held, in any
+//! memory the kernel owns (boot/sched.S reserves eight in .bss,
+//! `pax_sched_locks`; word 0 is the console's). wolf's module state
+//! holds scalars only ([mem.static.3]) and wolf names no module `var`'s
+//! address, so a lock is a word in storage, reached as a `*u64`.
+//!
+//! `acquire(lock)` saves RFLAGS and clears IF (boot/sched.S's
+//! pax_irq_save), then takes the word by test-and-test-and-set: spin on
+//! `atomic_load(Order.relaxed)` until it reads 0 (with PAUSE between
+//! reads), then `atomic_cas(0, 1, Order.acquire, Order.relaxed)`; a
+//! failed exchange goes back to spinning. It returns the saved RFLAGS.
+//! `release(lock, saved)` is `atomic_store(0, Order.release)` and then
+//! IF as it was saved (STI only if it was set): the release store makes
+//! every write of the critical section visible to the next acquirer's
+//! acquire exchange (wolf spec/03 [conc.mm.atomic.order]; kw11's
+//! shapes: CAS acquire/relaxed to lock, a release store to unlock).
+//!
+//! Why interrupts are off while a lock is held: on one CPU a holder
+//! preempted by the timer would leave every other thread spinning on a
+//! word only the holder can clear — a whole quantum lost each time, and
+//! a deadlock if the spinner is the timer's own path. With IF clear no
+//! interrupt can preempt the holder, so on one CPU the exchange always
+//! succeeds the first time and the lock never spins; the deferred tick
+//! is taken at the STI in `release` (the 8259 keeps the request until
+//! it is acknowledged; Intel's 8259A data sheet, the IRR). On more than
+//! one CPU the exchange is what excludes the others, and the
+//! acquire/release pair orders the critical sections; nothing here
+//! assumes one CPU but the absence of a per-CPU flag save. A lock
+//! taken twice by one holder spins forever with IF clear: not detected.
+//!
+//! The native tier lowers every order as seq_cst (`lock cmpxchg`, a
+//! plain load, `xchg`/`mfence` for the store); the release tier passes
+//! acquire, release and relaxed to LLVM (spec/03
+//! [conc.mm.atomic.raw.3]). Written from wolf's spec/03 §1
+//! [conc.mm.atomic], the Intel SDM vol. 3A §6.8.1 (IF, CLI, STI), §9.1.2
+//! (bus locking: a LOCK-prefixed CMPXCHG is atomic against every other
+//! processor) and vol. 2 (CMPXCHG, PAUSE). No Linux source; no other
+//! kernel's source.
+
+extern "c" fn pax_irq_save() -> u64
+extern "c" fn pax_irq_restore(flags: u64)
+extern "c" fn pax_pause()
+
+extern "c" let pax_sched_locks: *u64
+
+/// RFLAGS' interrupt-enable bit (bit 9).
+const IF: u64 = 0x200
+
+/// Save RFLAGS and clear IF. Returns what `irq_restore` takes.
+pub fn irq_save() -> u64 {
+    // # Safety: boot/sched.S's PUSHF; POP; CLI. It touches no memory.
+    unsafe { pax_irq_save() }
+}
+
+/// Set IF again if `saved` (from `irq_save` or `acquire`) had it set.
+pub fn irq_restore(saved: u64) {
+    // # Safety: boot/sched.S's conditional STI. Every routed vector has a
+    // gate before any kernel sets IF (kernel/idt).
+    unsafe { pax_irq_restore(saved) }
+}
+
+/// Whether `saved` had interrupts enabled.
+pub fn was_enabled(saved: u64) -> bool {
+    saved & IF != 0
+}
+
+/// Enable interrupts (a kernel thread's normal state once the scheduler
+/// runs).
+pub fn enable() {
+    irq_restore(IF)
+}
+
+/// A spin-wait hint, and an opaque call: a loop polling memory another
+/// thread or the timer writes rereads it after this.
+pub fn relax() {
+    // # Safety: boot/sched.S's PAUSE; RET.
+    unsafe { pax_pause() }
+}
+
+/// The address of lock word `i` (0-7) of boot/sched.S's storage.
+pub fn word(i: u64) -> u64 {
+    // # Safety: the address of boot/sched.S's eight lock words; nothing
+    // is read.
+    unsafe { pax_sched_locks as u64 + i * 8 }
+}
+
+/// The console's lock: kernel threads write whole lines under it.
+pub fn console() -> u64 {
+    word(0)
+}
+
+/// Take the lock at `lock` (an 8-aligned word, 0 free) with interrupts
+/// off. Returns the RFLAGS `release` restores.
+pub fn acquire(lock: u64) -> u64 {
+    let saved = irq_save()
+    // # Safety: the cast only; every access below states its own.
+    let p = unsafe { lock as *u64 }
+    var held = false
+    while !held {
+        // # Safety: `lock` is a word the kernel owns, 8-aligned
+        // ([conc.mm.atomic.raw.4]); every access to it is atomic.
+        let seen = unsafe { p.atomic_load(Order.relaxed) }
+        if seen == 0 {
+            // # Safety: as above.
+            let (old, ok) = unsafe { p.atomic_cas(0, 1, Order.acquire, Order.relaxed) }
+            held = ok && old == 0
+        }
+        if !held {
+            relax()
+        }
+    }
+    saved
+}
+
+/// Give the lock at `lock` back and restore IF as `acquire` saved it.
+pub fn release(lock: u64, saved: u64) {
+    // # Safety: the holder's store; as `acquire`.
+    unsafe { (lock as *u64).atomic_store(0, Order.release) }
+    irq_restore(saved)
+}
+
+/// Whether the lock at `lock` is held (a relaxed read: a report, not a
+/// decision).
+pub fn held(lock: u64) -> bool {
+    // # Safety: as `acquire`.
+    unsafe { (lock as *u64).atomic_load(Order.relaxed) != 0 }
+}
