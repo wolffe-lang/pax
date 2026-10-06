@@ -60,6 +60,17 @@
 #      and its books read before and after a 64 KiB alloc and its free:
 #      a compiled tier that forwards a read across a call that writes
 #      the state (wolf-lang#598) prints a stale value here.
+#   H11 threads (px07's scheduler): kmain_heap_threads runs two kernel
+#      threads that allocate inside their own regions across yields,
+#      every allocation under the heap's lock (sync.heap()); its log ends
+#        threads: A list 64, region ra <x> bytes, region rb <y> bytes, both exited
+#        ambient: the List landed in ra|rb
+#        heap: … 0 live blocks, 0 live bytes, A allocs, A frees, …
+#        halt
+#      — both threads ran to their exit and every block came back. Where
+#      the List landed is wolf-lang#611 (the runtime's one ambient-region
+#      slot does not follow a thread across a switch; on 0.2.24 it lands
+#      in rb): REPORTED, not asserted, until #611 is fixed.
 #   H9 heap fault: kmain_heap_fault's log ends
 #        block 0x<p>, read past the heap: 0x<a>
 #        PANIC page fault vector 14 error 0x0000000000000000 rip … cr2 0x<a> (heap)
@@ -92,7 +103,7 @@ done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
 
-kernels="kmain_heap kmain_heap_double_free kmain_heap_wild_free kmain_heap_oom kmain_heap_fault"
+kernels="kmain_heap kmain_heap_double_free kmain_heap_wild_free kmain_heap_oom kmain_heap_fault kmain_heap_threads"
 work=$PAX_BUILD/mpx2-heap
 ROUNDS=8
 fail=0 ran=0
@@ -253,6 +264,25 @@ for leg in $legs; do
             bad "H2-H4 $tier kmain_heap $leg: the transcript (the first line expect-serial names above)"
         fi
         halted H5 "$tier kmain_heap $leg" "$hrc"
+
+        # --- kmain_heap_threads: H11 -----------------------------------
+        hrc=0; halt_boot "$tier" kmain_heap_threads "$leg" halt || hrc=$?
+        if "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
+            'threads: A list 64, region ra [0-9]+ bytes, region rb [0-9]+ bytes, both exited' \
+            'ambient: the List landed in (ra|rb)' "$HEAPN_RE" 'halt' >"$log.expect" 2>&1 && [ "$hrc" = 0 ]; then
+            hl=$(serial_norm "$log" | grep -E "^$HEAPN_RE\$" | tail -n 1)
+            lb=$(printf '%s\n' "$hl" | sed -n 's/.*, \([0-9]*\) live blocks, \([0-9]*\) live bytes, \([0-9]*\) allocs, \([0-9]*\) frees, .*/\1 \2 \3 \4/p')
+            read -r b y al fr <<< "$lb"
+            where=$(grab "$log" 'ambient: the List landed in \(r[ab]\)')
+            if [ "$b" = 0 ] && [ "$y" = 0 ] && [ "$al" = "$fr" ] && [ "$al" -gt 0 ]; then
+                say "PASS H11 $tier kmain_heap_threads $leg: two threads, both exited, $al allocs = $fr frees under the heap lock, live 0; the List landed in $where (wolf-lang#611: reported, not asserted)"
+            else
+                bad "H11 $tier kmain_heap_threads $leg: the heap after the threads: live $b blocks $y bytes, $al allocs, $fr frees"
+            fi
+        else
+            cat "$log.expect" >&2
+            bad "H11 $tier kmain_heap_threads $leg: the transcript or the halt (qemu-halt $hrc)"
+        fi
 
         # --- kmain_heap_double_free: H6 --------------------------------
         hrc=0; halt_boot "$tier" kmain_heap_double_free "$leg" 'PANIC .*' || hrc=$?
