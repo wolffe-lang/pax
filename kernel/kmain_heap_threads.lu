@@ -1,0 +1,80 @@
+//! member: false
+// kmain_heap_threads.lu — the heap under px07's scheduler (px06,
+// tests/mpx2-heap H11). Brings up frames, paging, the interrupts, the
+// timer, the scheduler and the heap, runs kernel/heapthreads' two
+// bodies (A and B, each in its own `region`, switching by yield with
+// the timer preempting too), and prints
+//
+//     PAX heap: threads
+//     threads: A list 64, region ra <x> bytes, region rb <y> bytes, both exited
+//     ambient: the List landed in ra | rb
+//     heap: … 0 live blocks, 0 live bytes, …
+//     halt
+//
+// Every allocation goes through kernel/heap's lock (sync.heap()). The
+// `ambient` line is the runtime's one ambient-region slot across a
+// thread switch (wolf-lang's ambient-slot issue): reported, not
+// asserted.
+use apic
+use frames
+use heap
+use heapthreads
+use interrupts
+use log
+use paging
+use panic
+use sched
+use serial
+use sync
+use timer
+
+extern "c" let pax_h_a: *u8
+extern "c" let pax_h_b: *u8
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX heap: threads")
+    frames.start()
+    let pml4 = paging.start()
+    interrupts.start()
+    apic.start(pml4)
+    timer.start()
+    sched.start(pml4)
+    heap.start()
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        panic.fail("heap threads: no frame for the test page", 0)
+    }
+    let page = pa + frames.hhdm()
+    var i: u64 = 0
+    while i < 512 {
+        // # Safety: the frame just taken, through the HHDM.
+        unsafe { ((page + i * 8) as *u64).write_volatile(0) }
+        i += 1
+    }
+    // # Safety: the addresses of kernel/heapthreads' exports; nothing is read.
+    let (a, b) = unsafe { (pax_h_a as u64, pax_h_b as u64) }
+    sync.enable()
+    let saved = sync.irq_save()
+    sched.create(a, page)
+    sched.create(b, page)
+    sync.irq_restore(saved)
+    sched.wait_all()
+    let s = sync.irq_save()
+    log.put("threads: A list ")
+    log.dec(heapthreads.get(page, 2) as int)
+    log.put(", region ra ")
+    log.dec(heapthreads.get(page, 0) as int)
+    log.put(" bytes, region rb ")
+    log.dec(heapthreads.get(page, 1) as int)
+    log.put(" bytes, ")
+    log.put(if heapthreads.get(page, 3) == 1 && heapthreads.get(page, 4) == 1 { "both exited" } else { "NOT both exited" })
+    log.end()
+    log.put("ambient: the List landed in ")
+    log.put(if heapthreads.get(page, 0) > 0 { "ra" } else { "rb" })
+    log.end()
+    heap.report()
+    log.line("halt")
+    panic.halt()
+    sync.irq_restore(s)
+}

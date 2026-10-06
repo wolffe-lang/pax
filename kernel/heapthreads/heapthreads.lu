@@ -1,0 +1,64 @@
+//! heapthreads — the thread bodies tests/mpx2-heap H11 runs (px06): two
+//! kernel threads allocating through wolf's runtime and kernel/heap
+//! under px07's scheduler.
+//!
+//! wolf's freestanding runtime keeps ONE ambient-region slot (wolf-lang
+//! kw12, `[abi.target.none.alloc]`: "one CPU at a time"); `region`
+//! entry swaps it in and exit swaps the previous one back. A thread
+//! switch inside a region does not save it. So:
+//!
+//! - `pax_h_a(page)`: enters region `ra` and yields;
+//! - `pax_h_b(page)`: enters region `rb` and yields;
+//! - A, back: builds a `List[int]` of 64 (inside `ra`, as written),
+//!   stores `region_bytes(ra)` at `page + 0`, and yields;
+//! - B, back: stores `region_bytes(rb)` at `page + 8`, leaves `rb`
+//!   (freeing it) and exits; A leaves `ra` and exits.
+//!
+//! Where the List landed is the answer: `ra` holds it if the slot
+//! followed the thread, `rb` if the runtime's slot was B's when A
+//! allocated (B then frees A's List with its region). The kernel prints
+//! both; tests/mpx2-heap H11 asserts the heap's books balance (every
+//! block back, whatever region took it) and reports where the List
+//! landed, it does not assert it.
+//!
+//! The bodies live here and the kernel names them with `extern "c" let`
+//! (wolf-lang#520, E0302; px07's schedtest does the same).
+//!
+//! No Linux source; no other kernel's source.
+
+use sched
+
+fn put(page: u64, i: u64, v: u64) {
+    // # Safety: a word of the test's page, a frame mapped by the HHDM.
+    unsafe { ((page + i * 8) as *u64).write_volatile(v) }
+}
+
+/// Word `i` of the test's page (the kernel reads the bodies' answers
+/// through this, which also keeps this module imported: a kernel must
+/// name it to link the bodies).
+pub fn get(page: u64, i: u64) -> u64 {
+    // # Safety: as `put`.
+    unsafe { ((page + i * 8) as *u64).read_volatile() }
+}
+
+export fn pax_h_a(page: u64) {
+    region ra {
+        sched.yield() // B enters rb
+        var xs = List[int]()
+        for i in 0..64 {
+            (mut xs).push(i)
+        }
+        put(page, 0, region_bytes(ra) as u64)
+        put(page, 2, xs.len as u64)
+        sched.yield() // B reads rb and leaves it
+    }
+    put(page, 3, 1)
+}
+
+export fn pax_h_b(page: u64) {
+    region rb {
+        sched.yield() // A allocates
+        put(page, 1, region_bytes(rb) as u64)
+    }
+    put(page, 4, 1)
+}
