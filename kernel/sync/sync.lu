@@ -2,7 +2,7 @@
 //!
 //! A lock is the address of one 8-byte word, 0 free and 1 held, in any
 //! memory the kernel owns (boot/sched.S reserves eight in .bss,
-//! `pax_sched_locks`; word 0 is the console's). wolf's module state
+//! `pax_sched_locks`; word 0 is the console's, word 1 the heap's, px06). wolf's module state
 //! holds scalars only ([mem.static.3]) and wolf names no module `var`'s
 //! address, so a lock is a word in storage, reached as a `*u64`.
 //!
@@ -89,6 +89,13 @@ pub fn word(i: u64) -> u64 {
 /// The console's lock: kernel threads write whole lines under it.
 pub fn console() -> u64 {
     word(0)
+}
+
+/// The heap's lock (px06): kernel/heap's `alloc` and `free` run under
+/// it, so a thread preempted inside the allocator cannot be overtaken
+/// by another thread's allocation.
+pub fn heap() -> u64 {
+    word(1)
 }
 
 /// Take the lock at `lock` (an 8-aligned word, 0 free) with interrupts
