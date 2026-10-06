@@ -67,8 +67,21 @@
 //! second CPU or a preempted allocation exists, takes a spinlock from
 //! kw11's atomics around `alloc` and `free`.
 //!
-//! State: the scalars are module `var`s (kw09); everything else is in
-//! the heap's own pages, read and written with ordinary raw accesses.
+//! State: the books are a `#[repr(c)] struct HeapState` at the start of
+//! the heap's own state page, each field read and written as a `u64` at
+//! its `offset_of` through `rd`/`wr` (module state is read only inside
+//! `unsafe`, E1301, so one unsafe site serves them all, as in
+//! kernel/frames); the one module `var` is `up`.
+//!
+//! wolf-lang#598 (native and release forward a module `var`'s value
+//! across a call that writes it): audited 2026-10-06. The books are
+//! reached through int-cast raw pointers, which both tiers reload after
+//! a call that writes them (px06's probe: store or load, a call to a
+//! writer, load again, all 99 on both tiers; only the module-`var`
+//! shape answers stale). `up` is written only by `start` and no
+//! function reads it, calls something that writes it, and reads it
+//! again, so no site needs a reload. tests/mpx2-heap H10 is the
+//! witness: `up` and the books read on either side of a writing call.
 //!
 //! The author's own design. The paging facts are px03's (Intel SDM
 //! vol. 3A ch. 4, AMD64 APM vol. 2 ch. 5); the hook's contract is
@@ -142,12 +155,14 @@ struct HeapState {
 }
 
 /// Whether `start` has mapped the state page; the module's one `var`.
-var started: bool = false
+var up: bool = false
 
-fn is_started() -> bool {
+/// Whether `start` has run (the heap's one module `var`; tests/mpx2-heap
+/// H10 reads it on either side of `start`, a wolf-lang#598 witness).
+pub fn is_up() -> bool {
     // # Safety: a read of the module's own `var`, written once by
     // `start`; one CPU (see "No lock").
-    unsafe { started }
+    unsafe { up }
 }
 
 // --- raw words ---------------------------------------------------------------
@@ -576,14 +591,14 @@ pub fn start() {
     set(offset_of(HeapState, free_runs), NIL)
     // # Safety: the module's own `var`, written once, here.
     unsafe {
-        started = true
+        up = true
     }
 }
 
 /// `size` bytes at a multiple of `align` (a power of two, at most 4096):
 /// the address. Never 0; out of memory panics. Not zeroed.
 pub fn alloc(size: u64, align: u64) -> u64 {
-    if !is_started() {
+    if !is_up() {
         panic.fail("heap: alloc before heap.start, asked", size)
         return 0
     }
@@ -619,7 +634,7 @@ pub fn alloc(size: u64, align: u64) -> u64 {
 /// Panics by name on a double free, an address outside the heap or
 /// inside a block, and a size that is not the block's.
 pub fn free(p: u64, size: u64, align: u64) {
-    if !is_started() || !in_zones(p) {
+    if !is_up() || !in_zones(p) {
         panic.fail("heap: free outside the heap", p)
         return
     }
@@ -669,7 +684,7 @@ pub fn base() -> u64 {
 /// Heap pages mapped, both zones (the high-water mark: the heap never
 /// shrinks).
 pub fn pages() -> u64 {
-    if is_started() { top() + get(offset_of(HeapState, class_top)) } else { 0 }
+    if is_up() { top() + get(offset_of(HeapState, class_top)) } else { 0 }
 }
 
 /// Pages mapped in the class zone.
