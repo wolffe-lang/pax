@@ -1,0 +1,772 @@
+//! heap — the kernel heap and wolf's allocator hook (px06, M-PX2's
+//! third piece).
+//!
+//! On `x86_64-unknown-none` wolf's `List`, `Map`, string interpolation,
+//! capturing closures and `region` allocate through two functions the
+//! program supplies (wolf-lang kw12, spec/04 `[abi.target.none.alloc]`):
+//! `wolf_alloc(size, align) -> *u8` and `wolf_free(p, size, align)`.
+//! This module is that pair, written in wolf, over px02's frames and
+//! px03's paging. The runtime (`libwolf_rt_none.a`) asks for align 16
+//! and sizes that are positive multiples of 16; it frees each block
+//! exactly once, with its own size; a block it allocated outside every
+//! `region` (the process root) it never frees. A null answer is
+//! `alloc-contract` in the runtime, so this hook never returns one: out
+//! of memory is a named panic here (the policy kw12 leaves to the hook).
+//!
+//! **Where.** PML4 slot 384, 0xffffc00000000000 (px03 and kw10 left
+//! slots 256, 320, 352 and 511 taken). The slot's first 1 GiB holds the
+//! heap's own books: one state page (the size classes' list heads) at
+//! `META`, then a table of 64-byte page descriptors at `DESC`, one per
+//! heap page, mapped a page at a time as the heap grows. The heap's
+//! pages start at `BASE` (0xffffc04000000000) and grow upward from
+//! there: `top` pages are mapped, each a `frames.alloc()` frame mapped
+//! read-write no-execute by `paging.map` in the live structures. Pages
+//! are never unmapped or handed back to `frames`: a page the heap has
+//! once used stays the heap's, so no TLB entry ever goes stale (no
+//! INVLPG to get right before a second CPU exists). The limit is
+//! `MAX_PAGES` (128 MiB); past it, or when `frames` runs dry, the hook
+//! panics `heap: out of memory`.
+//!
+//! **Two layers.**
+//! - Pages. Runs of free heap pages sit on one doubly linked list in
+//!   address order, found first-fit (the lowest run that fits); each run's first and last descriptors are its
+//!   boundary tags (FREE_HEAD with the length, FREE_TAIL with the
+//!   head), so a freed run merges with a free neighbour on either side
+//!   in O(1). When no run fits, the heap grows at `top`, and a free run
+//!   ending at `top` is extended rather than left behind.
+//! - Blocks. A size up to 2048 bytes is rounded up to one of eight
+//!   power-of-two classes, 16 to 2048 (or to its alignment, if larger).
+//!   A class page is carved into equal blocks; its free blocks are
+//!   threaded through their own first word on the class's list (the
+//!   head in the state page); its descriptor keeps a 256-bit map of
+//!   which blocks are allocated. A class page stays in its class: a
+//!   freed block goes back to its class's list, never to the page
+//!   layer. A larger size takes a whole run of pages, which goes back
+//!   to the page layer on free.
+//!
+//! Why not one free list over all sizes: it cannot tell a double free,
+//! or a free with the wrong size, without a header on every block; the
+//! allocated map and the run tags catch both in O(1) with no header.
+//! The runtime's sizes are few and power-of-two shaped (region chunks
+//! of 1 KiB doubling to 1 MiB, 16- to 64-byte headers, the
+//! interpolation buffer doubling from 64), so the classes waste little.
+//! Why not a buddy system for pages: a region's 1 MiB + 16 chunk would
+//! take 2 MiB.
+//!
+//! **Faults**, each `PANIC heap: <what> 0x<v>` (kernel/panic) and a
+//! halt: a double free; a free outside the heap; a free whose size
+//! does not match the block's; a free of an address that is not a
+//! block's start; an alignment that is not a power of two or is above
+//! 4096; a size that is not positive; out of memory; a call before
+//! `start`. A page fault at a heap address names the heap
+//! (kernel/interrupts).
+//!
+//! **No lock.** wolf's freestanding runtime takes none (one CPU at a
+//! time, kw12), and neither does this: PAX runs on one CPU and no
+//! interrupt handler allocates. The scheduler lane (px07), when a
+//! second CPU or a preempted allocation exists, takes a spinlock from
+//! kw11's atomics around `alloc` and `free`.
+//!
+//! State: the scalars are module `var`s (kw09); everything else is in
+//! the heap's own pages, read and written with ordinary raw accesses.
+//!
+//! The author's own design. The paging facts are px03's (Intel SDM
+//! vol. 3A ch. 4, AMD64 APM vol. 2 ch. 5); the hook's contract is
+//! wolf-lang spec/04 `[abi.target.none.alloc]` and wolf_rt_none's own
+//! documentation. No Linux source; no other kernel's or libc's source.
+
+use frames
+use log
+use paging
+use panic
+
+const SLOT: u64 = 384
+const META: u64 = 0xffffc00000000000 // the state page
+const DESC: u64 = 0xffffc00000001000 // descriptor i at DESC + 64 i
+const BASE: u64 = 0xffffc04000000000 // heap page i at BASE + 4096 i
+const PAGE: u64 = 4096
+const DESC_BYTES: u64 = 64
+const DESC_PER_PAGE: u64 = 64 // PAGE / DESC_BYTES
+const MAX_PAGES: u64 = 32768 // 128 MiB, both zones together
+const CLASS_ZONE: u64 = 0x1000000 // the class zone's first page index: BASE + 64 GiB
+const NIL: u64 = 0xffffffffffffffff // no page
+const SMALL_MAX: u64 = 2048
+const MIN_BLOCK: u64 = 16
+const CLASSES: u64 = 8 // 16, 32, ..., 2048
+
+// A descriptor's words (byte offsets).
+const D_KIND: u64 = 0
+const D_LEN: u64 = 8 // FREE_HEAD, LARGE: pages; FREE_TAIL: the head; SMALL: the block size
+const D_NEXT: u64 = 16 // FREE_HEAD: the next free run's head, or NIL
+const D_PREV: u64 = 24 // FREE_HEAD: the previous free run's head, or NIL
+const D_LIVE: u64 = 24 // SMALL: allocated blocks in the page
+const D_MAP: u64 = 32 // SMALL: the allocated map, four words (256 blocks of 16)
+
+// Descriptor kinds. Every page of a free run is FREE_*, so a free of
+// any page-aligned address in one is a double free; INNER is a page of
+// a large block other than its first.
+const INNER: u64 = 0
+const FREE_HEAD: u64 = 1
+const FREE_TAIL: u64 = 2
+const LARGE: u64 = 3
+const SMALL: u64 = 4
+const FREE_INNER: u64 = 5
+
+/// The heap's books, at the start of its state page (META), each field
+/// read and written as a `u64` at its `offset_of` (as kernel/frames'
+/// FrameState): module state is read only inside `unsafe`
+/// ([mem.static], E1301), and a `#[repr(c)]` header in memory the heap
+/// owns keeps one unsafe site, `rd`/`wr`.
+#[repr(c)]
+struct HeapState {
+    class16: u64, // the eight class lists' heads (a block's address, 0 = empty) ...
+    class32: u64,
+    class64: u64,
+    class128: u64,
+    class256: u64,
+    class512: u64,
+    class1024: u64,
+    class2048: u64, // ... in class order
+    top: u64, // heap pages mapped: [0, top)
+    desc_pages: u64, // descriptor pages mapped
+    free_runs: u64, // the first free run's head, or NIL
+    live_n: u64, // blocks handed out and not freed
+    live_b: u64, // their bytes, as asked
+    allocs_n: u64,
+    frees_n: u64,
+    table_n: u64, // page-table frames paging.map took for the heap
+    class_top: u64, // class-zone pages mapped: [CLASS_ZONE, CLASS_ZONE + class_top)
+    class_desc_pages: u64, // the class zone's descriptor pages mapped
+    frames_n: u64, // every frame the heap took from kernel/frames: its pages, its books, their tables
+}
+
+/// Whether `start` has mapped the state page; the module's one `var`.
+var started: bool = false
+
+fn is_started() -> bool {
+    // # Safety: a read of the module's own `var`, written once by
+    // `start`; one CPU (see "No lock").
+    unsafe { started }
+}
+
+// --- raw words ---------------------------------------------------------------
+
+/// The 64-bit word at `a` in the heap's own memory.
+fn rd(a: u64) -> u64 {
+    // # Safety: `a` lies in a page this module mapped (the state page,
+    // a descriptor page, a heap page below `top`), 8-aligned.
+    unsafe { *(a as *u64) }
+}
+
+/// Write the 64-bit word at `a`.
+fn wr(a: u64, v: u64) {
+    // # Safety: as `rd`.
+    unsafe {
+        let p = a as *u64
+        *p = v
+    }
+}
+
+fn desc(i: u64) -> u64 {
+    DESC + i * DESC_BYTES
+}
+
+fn kind(i: u64) -> u64 {
+    rd(desc(i) + D_KIND)
+}
+
+fn page_va(i: u64) -> u64 {
+    BASE + i * PAGE
+}
+
+/// The class list head of class `c` (0 = 16 bytes ... 7 = 2048), in the
+/// state page.
+fn class_head(c: u64) -> u64 {
+    rd(META + offset_of(HeapState, class16) as u64 + c * 8)
+}
+
+fn set_class_head(c: u64, v: u64) {
+    wr(META + offset_of(HeapState, class16) as u64 + c * 8, v)
+}
+
+/// The books' field at byte offset `off` (an `offset_of(HeapState, …)`).
+fn get(off: int) -> u64 {
+    rd(META + off as u64)
+}
+
+fn set(off: int, v: u64) {
+    wr(META + off as u64, v)
+}
+
+fn top() -> u64 {
+    get(offset_of(HeapState, top))
+}
+
+// --- mapping -----------------------------------------------------------------
+
+fn live_pml4() -> u64 {
+    let c = paging.cr3()
+    c - c % PAGE
+}
+
+/// Map one fresh frame at `va`, read-write no-execute. `false` when
+/// `frames` is empty.
+fn map_fresh(va: u64) -> bool {
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        return false
+    }
+    let n = paging.map(live_pml4(), va, pa, paging.no_exec() | paging.writable()) else 99
+    if n == 99 {
+        panic.fail("heap: paging refused a heap page at", va)
+        return false
+    }
+    set(offset_of(HeapState, table_n), get(offset_of(HeapState, table_n)) + n)
+    set(offset_of(HeapState, frames_n), get(offset_of(HeapState, frames_n)) + 1 + n)
+    true
+}
+
+/// Zero the page at `va`.
+fn zero_page(va: u64) {
+    var a = va
+    while a < va + PAGE {
+        wr(a, 0)
+        a += 8
+    }
+}
+
+fn oom(size: u64) {
+    panic.fail("heap: out of memory, asked", size)
+}
+
+/// Map `k` more heap pages at `top` (and the descriptor pages they
+/// need), and give them to the page layer as one free run.
+fn grow(k: u64, size: u64) {
+    if top() + get(offset_of(HeapState, class_top)) + k > MAX_PAGES {
+        oom(size)
+        return
+    }
+    while get(offset_of(HeapState, desc_pages)) * DESC_PER_PAGE < top() + k {
+        let va = DESC + get(offset_of(HeapState, desc_pages)) * PAGE
+        if !map_fresh(va) {
+            oom(size)
+            return
+        }
+        zero_page(va)
+        set(offset_of(HeapState, desc_pages), get(offset_of(HeapState, desc_pages)) + 1)
+    }
+    let first = top()
+    var i: u64 = 0
+    while i < k {
+        let t = top()
+        if !map_fresh(page_va(t)) {
+            oom(size)
+            return
+        }
+        wr(desc(t) + D_KIND, INNER)
+        set(offset_of(HeapState, top), t + 1)
+        i += 1
+    }
+    release_run(first, k)
+}
+
+// --- the page layer ----------------------------------------------------------
+
+/// Put the run [h, h + n) on the free list, tagged, in address order
+/// (the list is kept sorted by head, so first-fit takes the lowest run
+/// that fits and the same sequence of asks lands in the same places
+/// every time the heap is empty again; a LIFO list grew the heap by a
+/// page in round 2, px06's measurement).
+fn push_run(h: u64, n: u64) {
+    wr(desc(h) + D_KIND, FREE_HEAD)
+    wr(desc(h) + D_LEN, n)
+    var prev = NIL
+    var next = get(offset_of(HeapState, free_runs))
+    while next != NIL && next < h {
+        prev = next
+        next = rd(desc(next) + D_NEXT)
+    }
+    wr(desc(h) + D_PREV, prev)
+    wr(desc(h) + D_NEXT, next)
+    if prev == NIL {
+        set(offset_of(HeapState, free_runs), h)
+    } else {
+        wr(desc(prev) + D_NEXT, h)
+    }
+    if next != NIL {
+        wr(desc(next) + D_PREV, h)
+    }
+    if n > 1 {
+        wr(desc(h + n - 1) + D_KIND, FREE_TAIL)
+        wr(desc(h + n - 1) + D_LEN, h)
+    }
+}
+
+/// Take the free run headed at `h` off the free list (its pages'
+/// kinds are the caller's to rewrite).
+fn unlink_run(h: u64) {
+    let next = rd(desc(h) + D_NEXT)
+    let prev = rd(desc(h) + D_PREV)
+    if prev == NIL {
+        set(offset_of(HeapState, free_runs), next)
+    } else {
+        wr(desc(prev) + D_NEXT, next)
+    }
+    if next != NIL {
+        wr(desc(next) + D_PREV, prev)
+    }
+}
+
+fn is_free(k: u64) -> bool {
+    k == FREE_HEAD || k == FREE_TAIL || k == FREE_INNER
+}
+
+/// Give the run [h, h + n) back to the page layer, merged with a free
+/// run on either side.
+fn release_run(h: u64, n: u64) {
+    var head = h
+    var len = n
+    var i: u64 = 0
+    while i < n {
+        wr(desc(h + i) + D_KIND, FREE_INNER)
+        i += 1
+    }
+    // The run after: free when its first page is a FREE_HEAD.
+    let after = h + n
+    if after < top() && kind(after) == FREE_HEAD {
+        let an = rd(desc(after) + D_LEN)
+        unlink_run(after)
+        wr(desc(after) + D_KIND, FREE_INNER)
+        len += an
+    }
+    // The run before: its last page is a FREE_TAIL (naming its head) or
+    // a one-page FREE_HEAD.
+    if h > 0 {
+        let k = kind(h - 1)
+        var bh = NIL
+        if k == FREE_TAIL {
+            bh = rd(desc(h - 1) + D_LEN)
+        } else if k == FREE_HEAD {
+            bh = h - 1
+        }
+        if bh != NIL {
+            let bn = rd(desc(bh) + D_LEN)
+            unlink_run(bh)
+            wr(desc(h - 1) + D_KIND, FREE_INNER)
+            head = bh
+            len += bn
+        }
+    }
+    push_run(head, len)
+}
+
+/// The first free run of at least `n` pages, or NIL.
+fn first_fit(n: u64) -> u64 {
+    var h = get(offset_of(HeapState, free_runs))
+    while h != NIL {
+        if rd(desc(h) + D_LEN) >= n {
+            return h
+        }
+        h = rd(desc(h) + D_NEXT)
+    }
+    NIL
+}
+
+/// `n` contiguous heap pages: the first page's index. Grows the heap
+/// when no free run fits (out of memory panics).
+fn take_pages(n: u64, size: u64) -> u64 {
+    var h = first_fit(n)
+    if h == NIL {
+        // A free run ending at `top` is extended, not stranded.
+        var have: u64 = 0
+        let t = top()
+        if t > 0 {
+            let k = kind(t - 1)
+            if k == FREE_TAIL {
+                have = rd(desc(rd(desc(t - 1) + D_LEN)) + D_LEN)
+            } else if k == FREE_HEAD {
+                have = 1
+            }
+        }
+        grow(n - have, size)
+        h = first_fit(n)
+        if h == NIL {
+            panic.fail("heap: no run after growing, pages", n)
+            return 0
+        }
+    }
+    let len = rd(desc(h) + D_LEN)
+    unlink_run(h)
+    if len > n {
+        push_run(h + n, len - n)
+    }
+    var i: u64 = 0
+    while i < n {
+        wr(desc(h + i) + D_KIND, INNER)
+        i += 1
+    }
+    h
+}
+
+/// One fresh page for a size class, from the class zone: mapped at
+/// the zone's bump (with its descriptor page as needed), never
+/// returned. Class pages live apart from the run layer so they never
+/// split a run: with no large block live, the run layer is one free
+/// run again, and the next round's asks land where the last round's
+/// did (px06: class pages taken from the run layer grew the heap by a
+/// page in round 2).
+fn take_class_page(size: u64) -> u64 {
+    let ct = get(offset_of(HeapState, class_top))
+    if top() + ct + 1 > MAX_PAGES {
+        oom(size)
+        return 0
+    }
+    let i = CLASS_ZONE + ct
+    let dp = get(offset_of(HeapState, class_desc_pages))
+    if dp * DESC_PER_PAGE < ct + 1 {
+        let va = DESC + CLASS_ZONE * DESC_BYTES + dp * PAGE
+        if !map_fresh(va) {
+            oom(size)
+            return 0
+        }
+        zero_page(va)
+        set(offset_of(HeapState, class_desc_pages), dp + 1)
+    }
+    if !map_fresh(page_va(i)) {
+        oom(size)
+        return 0
+    }
+    set(offset_of(HeapState, class_top), ct + 1)
+    i
+}
+
+// --- the block layer ---------------------------------------------------------
+
+/// The class of a small block of `size` bytes at `align`: 0 for 16 ...
+/// 7 for 2048; CLASSES when it is not small.
+fn class_of(size: u64, align: u64) -> u64 {
+    var need = size
+    if align > need {
+        need = align
+    }
+    var c: u64 = 0
+    var b = MIN_BLOCK
+    while c < CLASSES {
+        if need <= b {
+            return c
+        }
+        b = b * 2
+        c += 1
+    }
+    CLASSES
+}
+
+fn class_bytes(c: u64) -> u64 {
+    MIN_BLOCK << c
+}
+
+/// Bit `k` of a small page's allocated map.
+fn map_bit(i: u64, k: u64) -> bool {
+    (rd(desc(i) + D_MAP + k / 64 * 8) >> (k % 64)) & 1 == 1
+}
+
+fn flip_map_bit(i: u64, k: u64) {
+    let a = desc(i) + D_MAP + k / 64 * 8
+    let one: u64 = 1
+    wr(a, rd(a) ^ (one << (k % 64)))
+}
+
+/// A fresh page for class `c`, its blocks threaded on the class list
+/// in address order.
+fn carve(c: u64, size: u64) {
+    let i = take_class_page(size)
+    let bs = class_bytes(c)
+    wr(desc(i) + D_KIND, SMALL)
+    wr(desc(i) + D_LEN, bs)
+    wr(desc(i) + D_LIVE, 0)
+    var w: u64 = 0
+    while w < 4 {
+        wr(desc(i) + D_MAP + w * 8, 0)
+        w += 1
+    }
+    let va = page_va(i)
+    var a = va + PAGE - bs
+    var next = class_head(c)
+    while a >= va && a < va + PAGE {
+        wr(a, next)
+        next = a
+        if a == va {
+            a = 0
+        } else {
+            a -= bs
+        }
+    }
+    set_class_head(c, next)
+}
+
+fn alloc_small(c: u64, size: u64) -> u64 {
+    if class_head(c) == 0 {
+        carve(c, size)
+    }
+    let a = class_head(c)
+    set_class_head(c, rd(a))
+    let i = (a - BASE) / PAGE
+    let k = (a - page_va(i)) / class_bytes(c)
+    flip_map_bit(i, k)
+    wr(desc(i) + D_LIVE, rd(desc(i) + D_LIVE) + 1)
+    a
+}
+
+fn free_small(i: u64, p: u64, size: u64, align: u64) {
+    let bs = rd(desc(i) + D_LEN)
+    let c = class_of(size, align)
+    if c == CLASSES || class_bytes(c) != bs {
+        panic.fail("heap: free with the wrong size, asked", size)
+        return
+    }
+    let off = p - page_va(i)
+    if off % bs != 0 {
+        panic.fail("heap: free of an address inside a block", p)
+        return
+    }
+    let k = off / bs
+    if !map_bit(i, k) {
+        panic.fail("heap: double free", p)
+        return
+    }
+    flip_map_bit(i, k)
+    wr(desc(i) + D_LIVE, rd(desc(i) + D_LIVE) - 1)
+    wr(p, class_head(c))
+    set_class_head(c, p)
+}
+
+fn pages_of(size: u64) -> u64 {
+    (size + PAGE - 1) / PAGE
+}
+
+fn free_large(i: u64, p: u64, size: u64) {
+    if p % PAGE != 0 {
+        panic.fail("heap: free of an address inside a block", p)
+        return
+    }
+    let n = rd(desc(i) + D_LEN)
+    if pages_of(size) != n {
+        panic.fail("heap: free with the wrong size, asked", size)
+        return
+    }
+    release_run(i, n)
+}
+
+// --- the interface -----------------------------------------------------------
+
+/// Bring the heap up: map and zero its state page. Needs `frames`
+/// started and PAX's own paging live (`paging.start`). Panics by name
+/// when `frames` cannot give the state page.
+pub fn start() {
+    let before = frames.free_count()
+    if !map_fresh(META) {
+        oom(PAGE)
+        return
+    }
+    zero_page(META) // the books start at zero: count the state page's own frames again
+    let taken = before - frames.free_count()
+    set(offset_of(HeapState, table_n), taken - 1)
+    set(offset_of(HeapState, frames_n), taken)
+    set(offset_of(HeapState, free_runs), NIL)
+    // # Safety: the module's own `var`, written once, here.
+    unsafe {
+        started = true
+    }
+}
+
+/// `size` bytes at a multiple of `align` (a power of two, at most 4096):
+/// the address. Never 0; out of memory panics. Not zeroed.
+pub fn alloc(size: u64, align: u64) -> u64 {
+    if !is_started() {
+        panic.fail("heap: alloc before heap.start, asked", size)
+        return 0
+    }
+    if size == 0 || size > 0x7fffffffffffffff {
+        panic.fail("heap: alloc of a size that is not positive", size)
+        return 0
+    }
+    if align == 0 || align & (align - 1) != 0 || align > PAGE {
+        panic.fail("heap: alloc with a bad alignment", align)
+        return 0
+    }
+    var a: u64 = 0
+    let c = class_of(size, align)
+    if c < CLASSES {
+        a = alloc_small(c, size)
+    } else {
+        if size > MAX_PAGES * PAGE {
+            oom(size)
+            return 0
+        }
+        let i = take_pages(pages_of(size), size)
+        wr(desc(i) + D_KIND, LARGE)
+        wr(desc(i) + D_LEN, pages_of(size))
+        a = page_va(i)
+    }
+    set(offset_of(HeapState, live_n), get(offset_of(HeapState, live_n)) + 1)
+    set(offset_of(HeapState, live_b), get(offset_of(HeapState, live_b)) + size)
+    set(offset_of(HeapState, allocs_n), get(offset_of(HeapState, allocs_n)) + 1)
+    a
+}
+
+/// Give back the block at `p`, allocated with `size` and `align`.
+/// Panics by name on a double free, an address outside the heap or
+/// inside a block, and a size that is not the block's.
+pub fn free(p: u64, size: u64, align: u64) {
+    if !is_started() || !in_zones(p) {
+        panic.fail("heap: free outside the heap", p)
+        return
+    }
+    let i = (p - BASE) / PAGE
+    let k = kind(i)
+    if k == SMALL {
+        free_small(i, p, size, align)
+    } else if k == LARGE {
+        free_large(i, p, size)
+    } else if is_free(k) && p % PAGE == 0 {
+        panic.fail("heap: double free", p)
+        return
+    } else {
+        panic.fail("heap: free of an address no block starts at", p)
+        return
+    }
+    set(offset_of(HeapState, live_n), get(offset_of(HeapState, live_n)) - 1)
+    set(offset_of(HeapState, live_b), get(offset_of(HeapState, live_b)) - size)
+    set(offset_of(HeapState, frees_n), get(offset_of(HeapState, frees_n)) + 1)
+}
+
+/// Whether `p` lies in a mapped heap page of either zone.
+fn in_zones(p: u64) -> bool {
+    let runs = p >= BASE && p < page_va(top())
+    let cz = page_va(CLASS_ZONE)
+    runs || (p >= cz && p < cz + get(offset_of(HeapState, class_top)) * PAGE)
+}
+
+/// Whether `va` lies in the heap's slot (its books or its pages).
+pub fn contains(va: u64) -> bool {
+    va >> 39 == 0x1fffe00 | SLOT // bits 63:48 set (canonical high), 47:39 the slot
+}
+
+/// The heap's PML4 slot.
+pub fn slot() -> u64 {
+    SLOT
+}
+
+/// The first heap page's address.
+pub fn base() -> u64 {
+    BASE
+}
+
+/// Heap pages mapped, both zones (the high-water mark: the heap never
+/// shrinks).
+pub fn pages() -> u64 {
+    if is_started() { top() + get(offset_of(HeapState, class_top)) } else { 0 }
+}
+
+/// Pages mapped in the class zone.
+pub fn class_pages() -> u64 {
+    get(offset_of(HeapState, class_top))
+}
+
+/// Descriptor pages mapped, and the state page: the heap's books.
+pub fn book_pages() -> u64 {
+    get(offset_of(HeapState, desc_pages)) + get(offset_of(HeapState, class_desc_pages)) + 1
+}
+
+/// Every frame the heap has taken from kernel/frames (its pages, its
+/// books and the page tables mapping them); it never gives one back.
+pub fn frames_taken() -> u64 {
+    get(offset_of(HeapState, frames_n))
+}
+
+/// Page-table frames `paging.map` took for the heap's slot.
+pub fn table_frames() -> u64 {
+    get(offset_of(HeapState, table_n))
+}
+
+/// Blocks handed out and not yet freed.
+pub fn live_blocks() -> u64 {
+    get(offset_of(HeapState, live_n))
+}
+
+/// Their bytes, as asked.
+pub fn live_bytes() -> u64 {
+    get(offset_of(HeapState, live_b))
+}
+
+pub fn allocs() -> u64 {
+    get(offset_of(HeapState, allocs_n))
+}
+
+pub fn frees() -> u64 {
+    get(offset_of(HeapState, frees_n))
+}
+
+/// Free page runs, and the pages in them.
+pub fn free_pages() -> u64 {
+    var n: u64 = 0
+    var h = get(offset_of(HeapState, free_runs))
+    while h != NIL {
+        n += rd(desc(h) + D_LEN)
+        h = rd(desc(h) + D_NEXT)
+    }
+    n
+}
+
+/// `heap: slot 384 at 0x<base>, P pages, C class pages, Q free, B live
+/// blocks, Y live bytes, A allocs, F frees, M book pages, T table
+/// frames, N frames taken` (P counts both zones; Q is the run layer's
+/// free pages; N = P + M + T).
+pub fn report() {
+    log.put("heap: slot ")
+    log.dec(SLOT as int)
+    log.put(" at ")
+    log.hex(BASE)
+    log.put(", ")
+    log.dec(pages() as int)
+    log.put(" pages, ")
+    log.dec(class_pages() as int)
+    log.put(" class pages, ")
+    log.dec(free_pages() as int)
+    log.put(" free, ")
+    log.dec(live_blocks() as int)
+    log.put(" live blocks, ")
+    log.dec(live_bytes() as int)
+    log.put(" live bytes, ")
+    log.dec(allocs() as int)
+    log.put(" allocs, ")
+    log.dec(frees() as int)
+    log.put(" frees, ")
+    log.dec(book_pages() as int)
+    log.put(" book pages, ")
+    log.dec(table_frames() as int)
+    log.put(" table frames, ")
+    log.dec(frames_taken() as int)
+    log.put(" frames taken")
+    log.end()
+}
+
+// --- wolf's allocator hook (kw12, [abi.target.none.hooks] (d)) -------------
+
+/// The freestanding runtime's allocation: `size` bytes at `align`.
+export fn wolf_alloc(size: i64, align: i64) -> *u8 {
+    if size <= 0 || align <= 0 {
+        panic.fail("heap: wolf_alloc of a size that is not positive", size as u64)
+    }
+    let a = alloc(size as u64, align as u64)
+    // # Safety: an address in the heap's mapped pages, `size` bytes long.
+    unsafe { a as *u8 }
+}
+
+/// The freestanding runtime's free: the block at `p`, with its own size
+/// and alignment.
+export fn wolf_free(p: *u8, size: i64, align: i64) {
+    // # Safety: the pointer's address only; nothing is read through it.
+    let a = unsafe { p as u64 }
+    free(a, size as u64, align as u64)
+}
