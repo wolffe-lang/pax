@@ -1,0 +1,73 @@
+//! member: false
+// kmain_sched_overflow.lu — a thread runs off its stack (px07,
+// tests/mpx2-sched S5). The kernel starts the scheduler as kmain_sched
+// does, spawns one thread running kernel/schedtest's `pax_t_deep` (a
+// recursion that never ends), writes the thread's stack and guard, and
+// waits. The thread's write into its guard page faults; pushing the
+// page fault's frame on that stack faults again, so the CPU raises a
+// double fault onto IST1 (kernel/idt), and kernel/interrupts finds CR2
+// inside the thread's guard (kernel/sched):
+//
+//     PAX sched: stack overflow
+//     paging: limine cr3 0x<A>, pax cr3 0x<B>, <P> table frames
+//     sched: main 0, idle 1, 16 slots, stacks 16 KiB above a 48 KiB guard from 0xffffd00000000000, quantum 2 ticks
+//     overflow: t2 stack 0x<lo> to 0x<lo + 16 KiB>, guard 0x<g> to 0x<lo>
+//     PANIC stack overflow thread 2 cr2 0x<a> guard 0x<g> to 0x<lo>
+//
+// with g <= a < lo, then halts.
+use apic
+use frames
+use interrupts
+use log
+use paging
+use panic
+use sched
+use schedtest
+use serial
+use sync
+use timer
+
+extern "c" let pax_t_deep: *u8
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX sched: stack overflow")
+    frames.start()
+    let limine = paging.cr3()
+    let before = frames.free_count()
+    let pml4 = paging.start()
+    paging.report(limine, before)
+    interrupts.start()
+    apic.start(pml4)
+    timer.start()
+    sched.start(pml4)
+    sched.report()
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        panic.fail("sched test: no frame for the test page", 0)
+    }
+    let page = pa + frames.hhdm()
+    // # Safety: the address of kernel/schedtest's export; nothing is read.
+    let deep = unsafe { pax_t_deep as u64 }
+    let saved = sync.irq_save()
+    let t = sched.create(deep, page)
+    log.put("overflow: t")
+    log.dec(t as int)
+    log.put(" stack ")
+    log.hex(sched.stack_lo(t))
+    log.put(" to ")
+    log.hex(sched.stack_hi(t))
+    log.put(", guard ")
+    log.hex(sched.guard_lo(t))
+    log.put(" to ")
+    log.hex(sched.stack_lo(t))
+    log.end()
+    sync.irq_restore(saved)
+    sync.enable()
+    sched.wait_all()
+    schedtest.line("overflow: the thread exited (it must not)")
+    let _off = sync.irq_save()
+    timer.stop()
+    log.line("halt")
+    panic.halt()
+}
