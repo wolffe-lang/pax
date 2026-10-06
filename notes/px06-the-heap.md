@@ -192,21 +192,44 @@ summary from `1346bfd` (H10).
   const` across modules (wolf-lang#579, open) — `interrupts` keeps its
   own copy of the heap's range.
 
+## Rebased onto px07 (trunk `94364ad`)
+
+px07 merged first, so px06 rebased: the pin commit dropped (trunk's pin
+lines are the same), the CI job, `interrupts.lu`'s doc block, both
+READMEs and `SOURCES.md` merged by hand; `interrupts.lu`'s code merged
+cleanly (px07's guard check precedes the heap label in `fatal`).
+What px07's preemption changed for the heap:
+
+- **The lock is now needed, and taken.** Threads run with IF set and
+  the timer switches them, so two threads can be inside `heap.alloc`
+  or `free`. Both now run under `sync.heap()` (lock word 1 in
+  `boot/sched.S`'s storage), px07's spinlock, which clears IF while
+  held, so on one CPU it never spins.
+- **`region` across a thread switch is broken in wolf's runtime**
+  (wolf-lang#611, filed): the freestanding runtime's one ambient-region
+  slot does not follow the thread, so `kmain_heap_threads`' thread A,
+  inside `region ra`, allocates into B's `region rb`, which B's exit
+  frees under it (`threads: A list 64, region ra 0 bytes, region rb
+  1008 bytes`, every leg). The heap's books still balance (3 allocs, 3
+  frees, live 0). H11 asserts the balance and reports where the List
+  landed. Kernel code must not hold a `region` open across a yield or
+  with preemption enabled until #611 gives the scheduler a slot to save.
+- `kmain_heap` (no threads) is unchanged by the lock: 1156 pages after
+  every round, live 0, on both tiers.
+
 ## What the scheduler (px07) and user-mode lanes inherit
 
-- **The lock.** `heap.alloc`/`heap.free` and wolf's runtime take no
-  lock. Before a second CPU runs wolf code, or a preempted task can be
-  inside the allocator, take a spinlock around both (kw11's
-  `atomic_cas` acquire / `atomic_store` release). No interrupt handler
-  may allocate (a handler that interpolates would re-enter the heap).
+- **The lock.** `heap.alloc`/`heap.free` run under `sync.heap()`
+  since the rebase. wolf's runtime itself takes none. No interrupt
+  handler may allocate: it would spin forever on a lock its own CPU
+  holds.
 - **The runtime's root never frees.** A `List`, `Map` or string built
   outside every `region` is a root allocation, kept forever. Long-lived
   kernel loops run each iteration in a `region` (as `kmain_heap`);
   per-task scratch belongs in a task's region.
-- **The runtime's ambient-region slot is one word**, not per-task: a
-  context switch inside a `region` changes what the next task allocates
-  into. The scheduler must save and restore it per task (wolf's runtime
-  exposes no API for it today; a wolf-lang issue when px07 meets it).
+- **The runtime's ambient-region slot is one word**, not per-thread:
+  measured (H11) and filed as wolf-lang#611. No `region` across a
+  switch until the runtime gives the scheduler a slot to save.
 - **Kernel stacks are not heap**: the heap never unmaps, and a guard
   page needs an unmapped page below each stack. Stacks belong in their
   own slot.
