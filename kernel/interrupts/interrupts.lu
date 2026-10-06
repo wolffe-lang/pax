@@ -4,7 +4,8 @@
 //! Wolf has no interrupt calling convention ([abi.interrupt], wolf-lang
 //! kw10): boot/isr.S's trampoline for each vector 0-47 saves the
 //! registers, builds a `Frame` and calls `pax_interrupt` under the C
-//! convention, then returns with `iretq` if it returns. Interrupts are
+//! convention, then resumes the frame `pax_interrupt` RETURNS (px07):
+//! its argument, to go on where the interrupt landed. Interrupts are
 //! off throughout (every gate is an interrupt gate, kernel/idt).
 //!
 //! - vector 3, the breakpoint (`int3`, a trap: the saved RIP is the next
@@ -150,8 +151,9 @@ fn fatal(f: *Frame) {
     panic.halt()
 }
 
-/// boot/isr.S's common path calls this for every routed vector.
-export fn pax_interrupt(f: *Frame) {
+/// boot/isr.S's common path calls this for every routed vector and
+/// resumes the frame it returns.
+export fn pax_interrupt(f: *Frame) -> *Frame {
     // # Safety: `f` is the trampoline's frame, live for this call.
     let v = unsafe { f[0].vector }
     if v == 3 {
@@ -164,14 +166,15 @@ export fn pax_interrupt(f: *Frame) {
         log.put("int3: breakpoint vector 3, rip ")
         log.hex(rip)
         log.end()
-        return
+        return f
     }
     if v == timer.master_base() {
         timer.tick()
-        return
+        return f
     }
     if (v == 39 || v == 47) && timer.spurious(v) {
-        return
+        return f
     }
     fatal(f)
+    f
 }

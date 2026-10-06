@@ -16,9 +16,15 @@
    place, so every frame has one shape; then the vector. The common path
    saves the fifteen general registers (%rax first, %r15 last), passes
    the frame's address in %rdi to wolf's `export fn pax_interrupt(f:
-   *Frame)` (kernel/interrupts) with %rsp 16-aligned and DF clear,
-   restores the registers, drops the vector and the error code and
-   returns with `iretq`. The frame, lowest address first:
+   *Frame) -> *Frame` (kernel/interrupts) with %rsp 16-aligned and DF
+   clear, moves the frame it RETURNS into %rsp (px07), restores the
+   registers from it, drops the vector and the error code and returns
+   with `iretq`. A handler that returns its argument resumes the
+   interrupted code; one that returns another thread's saved frame
+   switches to that thread (kernel/sched, boot/sched.S: the frame lives
+   on that thread's stack, where the CPU or pax_switch built it, and
+   `iretq` restores its RSP with its RIP). The frame, lowest address
+   first:
 
        r15 r14 r13 r12 r11 r10 r9 r8 rbp rdi rsi rdx rcx rbx rax   (0..112)
        vector (120)  error (128)                                   (ours)
@@ -68,7 +74,8 @@
    and §7.7 (the TSS descriptor and the 64-bit TSS), Table 6-1; vol. 2
    (LGDT, LIDT, LTR, IRETQ, STI's interrupt shadow, HLT); the AMD64 APM
    vol. 2 §4.8 (long-mode segment descriptors), §8.2 (vectors), §8.9
-   (long-mode interrupt control transfers: gates, the stack frame, IST),
+   (long-mode interrupt control transfers: gates, the stack frame, IST;
+   §8.9.3 and §8.9.5 for px07's resumed frame),
    §12.2.5 (the 64-bit TSS); the x86-64 psABI. No Linux source; no other
    kernel's source. */
 
@@ -158,11 +165,10 @@ pax_isr_common:
         pushq   %r14
         pushq   %r15
         movq    %rsp, %rdi              /* the frame */
-        movq    %rsp, %rbx              /* callee-saved: survives the call */
         andq    $-16, %rsp
         cld
         call    pax_interrupt
-        movq    %rbx, %rsp
+        movq    %rax, %rsp              /* the frame to resume (px07) */
         popq    %r15
         popq    %r14
         popq    %r13
