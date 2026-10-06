@@ -1,0 +1,598 @@
+//! sched — preemptive kernel threads on one CPU (px07, M-PX2's
+//! scheduler).
+//!
+//! **A thread** is a record in boot/sched.S's `pax_threads` (16 slots;
+//! module state holds scalars only, [mem.static.3]), a stack, and, while
+//! it is not running, the frame it resumes from. Slot 0 is the kernel's
+//! own first context (kmain on Limine's stack), adopted by `start` as
+//! thread 0; slot 1 is the idle thread (boot/sched.S's `pax_idle`, HLT
+//! with IF set), run only when no other thread is ready and never
+//! queued; slots 2-15 are spawned threads. Ids are 0 (main), 1 (idle),
+//! then 2, 3, … in spawn order, never reused; slots are.
+//!
+//! **A stack** (slots 1-15): slot s owns the 64 KiB of virtual space at
+//! `STACKS + s * SPAN`, PML4 slot 416 (0xffffd00000000000, free since
+//! px03: PAX maps 256, 320, 352 and 511). Its low 48 KiB are never
+//! mapped — the guard — and its high 16 KiB are four frames from
+//! `frames.alloc`, mapped read-write no-execute by `paging.map`. A
+//! thread that runs off its stack writes into the guard and faults;
+//! the CPU's attempt to push the page fault's frame on that same stack
+//! faults again, which is a double fault (Intel SDM vol. 3A §6.15,
+//! interrupt 8, Table 6-5), delivered on IST1 (kernel/idt). The fatal
+//! path in kernel/interrupts asks `guard_of` whether CR2 lies in a
+//! thread's guard and panics `stack overflow` by name.
+//!
+//! **A switch** is boot/isr.S's common path resuming the frame
+//! `pax_interrupt` returns (boot/sched.S explains why a saved frame is
+//! enough). Two ways in:
+//! - `preempt(f)`, from the timer (vector 32, after the tick and its
+//!   EOI): every sleeper whose tick has come is made ready (in slot
+//!   order); then the current thread keeps the CPU if its quantum (two
+//!   ticks) is not used up or no other thread is ready — except the
+//!   idle thread, which gives way the moment anything is ready;
+//!   otherwise its frame is saved, it goes to the run queue's tail and
+//!   the head runs.
+//! - `switched(f)`, from `pax_switch` (vector 0x81, boot/sched.S), after
+//!   the current thread has set its own state: `yield` (ready: to the
+//!   tail), `sleep` (sleeping until a tick), `wait_all` (blocked until
+//!   its threads have exited), `exit` (dead). Its frame is saved and the
+//!   head runs.
+//! The run queue is FIFO, linked through each record's `next` (slot + 1;
+//! 0 ends it), its ends in module `var`s. A quantum is two ticks (~20
+//! ms): a thread switched in voluntarily, part-way through a tick, still
+//! gets at least one whole tick. Every queue and record change is made
+//! with IF clear (a handler, or `sync.irq_save`).
+//!
+//! **A new thread's first frame** sits at its stack's top: RIP
+//! `pax_thread_entry`, CS 0x08, RFLAGS 0x202 (IF), RSP the top, SS 0x10,
+//! %r12 the body's address, %r13 its argument (boot/sched.S calls the
+//! body, then `pax_thread_exit`). A body is an `export fn NAME(arg: u64)`
+//! whose address the caller names with `extern "c" let NAME: *u8`: wolf
+//! has no C function-pointer value (wolf-lang#520), and the `extern`
+//! must sit in another module than the export (E0302 in the same one).
+//!
+//! **Exit** marks the thread dead and switches away for good; the code
+//! that switched away is running on the dead thread's stack, so the
+//! stack is reclaimed later, from another thread: `create` and `wait_all`
+//! reap every dead thread first (unmap its four pages, INVLPG through
+//! `paging.unmap`, give the frames back, free the slot). Reaping is
+//! never done in a handler, so `frames` and `paging` are only ever
+//! entered from thread context with IF clear.
+//!
+//! The record's fields are read and written as words at their
+//! `offset_of`: a store to a field of a raw element is refused
+//! (wolf-lang#577). Written from the Intel SDM vol. 3A §6.12.1, §6.14.2,
+//! §6.14.3, §6.15 (interrupt 8, Table 6-5), §4.7 (page-fault CR2) and
+//! the AMD64 APM vol. 2 §8.9.3; the design (a FIFO run queue, a frame
+//! saved on the thread's own stack, deferred reaping) is the textbook
+//! one, consulted from no kernel's source. No Linux source.
+
+use frames
+use log
+use paging
+use panic
+use sync
+use timer
+
+extern "c" fn pax_switch()
+
+extern "c" let pax_threads: *u64
+extern "c" let pax_thread_entry: *u8
+extern "c" let pax_idle: *u8
+
+/// One thread's record (boot/sched.S: 16 of them, 72 bytes each).
+#[repr(c)]
+struct Thread {
+    frame: u64, // the saved frame's address; 0 while running
+    state: u64, // FREE … DEAD
+    wake: u64, // the tick a sleeper wakes at
+    next: u64, // the run queue's link: slot + 1, 0 ends it
+    id: u64, // 0 main, 1 idle, then 2, 3, …
+    stack_lo: u64, // the lowest mapped stack byte (0 for main)
+    stack_hi: u64, // the first byte past the stack
+    runs: u64, // times switched in
+    yields: u64, // calls of `yield`
+}
+
+const SLOTS: u64 = 16
+const MAIN: u64 = 0
+const IDLE: u64 = 1
+const FIRST: u64 = 2 // the first spawnable slot
+
+const FREE: u64 = 0
+const READY: u64 = 1
+const RUNNING: u64 = 2
+const SLEEPING: u64 = 3
+const BLOCKED: u64 = 4
+const DEAD: u64 = 5
+
+const STACKS: u64 = 0xffffd00000000000 // PML4 slot 416
+const SPAN: u64 = 65536 // each slot's virtual space
+const GUARD: u64 = 49152 // its low part, never mapped
+const STACK: u64 = 16384 // its high part, mapped
+const PAGE: u64 = 4096
+const PAGES: u64 = 4
+
+const QUANTUM: u64 = 2 // ticks
+
+// boot/isr.S's frame, as word indices (kernel/interrupts' Frame: r15 r14
+// r13 r12 … vector error rip cs rflags rsp ss).
+const FRAME_WORDS: u64 = 22
+const W_R13: u64 = 2
+const W_R12: u64 = 3
+const W_RIP: u64 = 17
+const W_CS: u64 = 18
+const W_RFLAGS: u64 = 19
+const W_RSP: u64 = 20
+const W_SS: u64 = 21
+const KERNEL_CS: u64 = 0x08
+const KERNEL_SS: u64 = 0x10
+const RFLAGS_IF: u64 = 0x202 // IF and the always-one bit 1
+
+var started: u64 = 0
+var current: u64 = 0 // the running thread's slot
+var head: u64 = 0 // slot + 1; 0 when the queue is empty
+var tail: u64 = 0
+var slice_start: u64 = 0 // the tick the current thread was switched in at
+var next_id: u64 = 2
+var live: u64 = 0 // spawned threads not yet exited
+var waiter: u64 = 0 // slot + 1 of the thread in wait_all; 0 none
+var pml4_pa: u64 = 0
+
+/// Field `off` of slot `s`'s record. Volatile: threads poll their own
+/// record while the timer rewrites it.
+fn field(s: u64, off: int) -> u64 {
+    // # Safety: s < SLOTS, so the word is inside boot/sched.S's table.
+    unsafe { ((pax_threads as u64 + s * size_of(Thread) as u64 + off as u64) as *u64).read_volatile() }
+}
+
+fn put_field(s: u64, off: int, v: u64) {
+    // # Safety: as `get`.
+    unsafe { ((pax_threads as u64 + s * size_of(Thread) as u64 + off as u64) as *u64).write_volatile(v) }
+}
+
+fn cur() -> u64 {
+    // # Safety: a read of the scheduler's scalar.
+    unsafe { current }
+}
+
+/// Slot `s`'s virtual space: [base, base + SPAN).
+fn base_of(s: u64) -> u64 {
+    STACKS + s * SPAN
+}
+
+fn enqueue(s: u64) {
+    put_field(s, offset_of(Thread, next), 0)
+    // # Safety: the queue's ends; IF is clear.
+    unsafe {
+        if tail == 0 {
+            head = s + 1
+        } else {
+            put_field(tail - 1, offset_of(Thread, next), s + 1)
+        }
+        tail = s + 1
+    }
+}
+
+/// The queue's head (slot + 1), removed; 0 when it is empty.
+fn dequeue() -> u64 {
+    // # Safety: as `enqueue`.
+    unsafe {
+        if head == 0 {
+            return 0
+        }
+        let s = head - 1
+        head = field(s, offset_of(Thread, next))
+        if head == 0 {
+            tail = 0
+        }
+        s + 1
+    }
+}
+
+/// Make every sleeper whose tick has come ready, in slot order.
+fn wake_sleepers() {
+    let now = timer.ticks()
+    var s: u64 = FIRST
+    while s < SLOTS {
+        if field(s, offset_of(Thread, state)) == SLEEPING && field(s, offset_of(Thread, wake)) <= now {
+            put_field(s, offset_of(Thread, state), READY)
+            enqueue(s)
+        }
+        s += 1
+    }
+    let w = field(MAIN, offset_of(Thread, state))
+    if w == SLEEPING && field(MAIN, offset_of(Thread, wake)) <= now {
+        put_field(MAIN, offset_of(Thread, state), READY)
+        enqueue(MAIN)
+    }
+}
+
+/// Switch in the queue's head (the idle thread if it is empty): count
+/// its run, start its quantum, return its frame.
+fn run_next() -> u64 {
+    let n = dequeue()
+    let s = if n == 0 { IDLE } else { n - 1 }
+    put_field(s, offset_of(Thread, state), RUNNING)
+    put_field(s, offset_of(Thread, runs), field(s, offset_of(Thread, runs)) + 1)
+    // # Safety: the scheduler's scalars; IF is clear.
+    unsafe {
+        current = s
+        slice_start = timer.ticks()
+    }
+    let f = field(s, offset_of(Thread, frame))
+    put_field(s, offset_of(Thread, frame), 0)
+    f
+}
+
+/// The timer's half of a switch (kernel/interrupts, vector 32, after
+/// the tick). Returns the frame to resume: `f` itself, or another
+/// thread's.
+pub fn preempt(f: u64) -> u64 {
+    // # Safety: a read of the scheduler's scalars; IF is clear.
+    let (on, start) = unsafe { (started, slice_start) }
+    if on == 0 {
+        return f
+    }
+    wake_sleepers()
+    let c = cur()
+    // # Safety: as above.
+    let ready = unsafe { head } != 0
+    if !ready {
+        return f
+    }
+    if c != IDLE && timer.ticks() - start < QUANTUM {
+        return f
+    }
+    put_field(c, offset_of(Thread, frame), f)
+    if c != IDLE {
+        put_field(c, offset_of(Thread, state), READY)
+        enqueue(c)
+    }
+    run_next()
+}
+
+/// The voluntary half (kernel/interrupts, vector 0x81 from
+/// `pax_switch`): the current thread has set its own state.
+pub fn switched(f: u64) -> u64 {
+    let c = cur()
+    put_field(c, offset_of(Thread, frame), f)
+    let st = field(c, offset_of(Thread, state))
+    if st == RUNNING {
+        put_field(c, offset_of(Thread, state), READY)
+    }
+    if (st == READY || st == RUNNING) && c != IDLE {
+        enqueue(c)
+    }
+    wake_sleepers()
+    run_next()
+}
+
+/// Map four fresh frames as slot `s`'s stack; record its bounds.
+fn make_stack(s: u64) {
+    // # Safety: a read of the scheduler's scalar.
+    let pml4 = unsafe { pml4_pa }
+    let lo = base_of(s) + GUARD
+    var k: u64 = 0
+    while k < PAGES {
+        let pa = frames.alloc() else 0
+        if pa == 0 {
+            panic.fail("sched: no frame for a stack, slot", s)
+        }
+        let n = paging.map(pml4, lo + k * PAGE, pa, paging.writable() | paging.no_exec()) else 99
+        if n == 99 {
+            panic.fail("sched: stack map refused at", lo + k * PAGE)
+        }
+        k += 1
+    }
+    put_field(s, offset_of(Thread, stack_lo), lo)
+    put_field(s, offset_of(Thread, stack_hi), lo + STACK)
+}
+
+/// Unmap slot `s`'s stack and give its frames back.
+fn free_stack(s: u64) {
+    // # Safety: as `make_stack`.
+    let pml4 = unsafe { pml4_pa }
+    let lo = field(s, offset_of(Thread, stack_lo))
+    var k: u64 = 0
+    while k < PAGES {
+        let pa = paging.unmap(pml4, lo + k * PAGE) else 0
+        if pa == 0 {
+            panic.fail("sched: a dead thread's stack page was not mapped", lo + k * PAGE)
+        }
+        frames.free(pa)
+        k += 1
+    }
+}
+
+/// Write slot `s`'s first frame at its stack's top: it resumes in
+/// `pax_thread_entry` with `entry` in %r12 and `arg` in %r13.
+fn first_frame(s: u64, rip: u64, entry: u64, arg: u64) {
+    let hi = field(s, offset_of(Thread, stack_hi))
+    let f = hi - FRAME_WORDS * 8
+    var i: u64 = 0
+    while i < FRAME_WORDS {
+        // # Safety: [f, hi) is inside the stack just mapped.
+        unsafe { ((f + i * 8) as *u64).write_volatile(0) }
+        i += 1
+    }
+    // # Safety: as above.
+    unsafe {
+        ((f + W_R12 * 8) as *u64).write_volatile(entry)
+        ((f + W_R13 * 8) as *u64).write_volatile(arg)
+        ((f + W_RIP * 8) as *u64).write_volatile(rip)
+        ((f + W_CS * 8) as *u64).write_volatile(KERNEL_CS)
+        ((f + W_RFLAGS * 8) as *u64).write_volatile(RFLAGS_IF)
+        ((f + W_RSP * 8) as *u64).write_volatile(hi)
+        ((f + W_SS * 8) as *u64).write_volatile(KERNEL_SS)
+    }
+    put_field(s, offset_of(Thread, frame), f)
+}
+
+fn clear(s: u64) {
+    put_field(s, offset_of(Thread, frame), 0)
+    put_field(s, offset_of(Thread, state), FREE)
+    put_field(s, offset_of(Thread, wake), 0)
+    put_field(s, offset_of(Thread, next), 0)
+    put_field(s, offset_of(Thread, id), 0)
+    put_field(s, offset_of(Thread, stack_lo), 0)
+    put_field(s, offset_of(Thread, stack_hi), 0)
+    put_field(s, offset_of(Thread, runs), 0)
+    put_field(s, offset_of(Thread, yields), 0)
+}
+
+/// Start the scheduler on the paging structures at `pml4` (the PML4's
+/// physical address, from `paging.start`): the caller becomes thread 0,
+/// the idle thread gets its stack. Interrupts stay as they are; the
+/// caller enables them (`sync.enable`) when it wants preemption.
+pub fn start(pml4: u64) {
+    let saved = sync.irq_save()
+    var s: u64 = 0
+    while s < SLOTS {
+        clear(s)
+        s += 1
+    }
+    // # Safety: the scheduler's scalars; IF is clear.
+    unsafe {
+        pml4_pa = pml4
+        current = MAIN
+        head = 0
+        tail = 0
+        next_id = 2
+        live = 0
+        waiter = 0
+        slice_start = timer.ticks()
+    }
+    put_field(MAIN, offset_of(Thread, state), RUNNING)
+    put_field(MAIN, offset_of(Thread, id), 0)
+    put_field(MAIN, offset_of(Thread, runs), 1)
+    make_stack(IDLE)
+    // # Safety: the address of boot/sched.S's idle loop; nothing is read.
+    first_frame(IDLE, unsafe { pax_idle as u64 }, 0, 0)
+    put_field(IDLE, offset_of(Thread, id), 1)
+    put_field(IDLE, offset_of(Thread, state), READY)
+    // # Safety: as above.
+    unsafe {
+        started = 1
+    }
+    sync.irq_restore(saved)
+}
+
+/// Reap every dead thread but the running one: its stack unmapped, its
+/// frames freed, its slot free. Thread context only, IF clear.
+fn reap() {
+    var s: u64 = FIRST
+    while s < SLOTS {
+        if s != cur() && field(s, offset_of(Thread, state)) == DEAD {
+            free_stack(s)
+            clear(s)
+        }
+        s += 1
+    }
+}
+
+/// Start a thread running `body` (an `export fn body(arg: u64)`'s
+/// address) with `arg`, queued at the tail. Returns its id.
+pub fn create(body: u64, arg: u64) -> u64 {
+    let saved = sync.irq_save()
+    reap()
+    var s: u64 = FIRST
+    while s < SLOTS && field(s, offset_of(Thread, state)) != FREE {
+        s += 1
+    }
+    if s == SLOTS {
+        panic.fail("sched: no free thread slot, live", live_count())
+    }
+    make_stack(s)
+    // # Safety: the address of boot/sched.S's entry; nothing is read.
+    first_frame(s, unsafe { pax_thread_entry as u64 }, body, arg)
+    // # Safety: the scheduler's scalars; IF is clear.
+    let id = unsafe { next_id }
+    // # Safety: as above.
+    unsafe {
+        next_id += 1
+        live += 1
+    }
+    put_field(s, offset_of(Thread, id), id)
+    put_field(s, offset_of(Thread, state), READY)
+    enqueue(s)
+    sync.irq_restore(saved)
+    id
+}
+
+/// Give the CPU to the next ready thread (back to this one if none).
+pub fn yield() {
+    let saved = sync.irq_save()
+    let c = cur()
+    put_field(c, offset_of(Thread, yields), field(c, offset_of(Thread, yields)) + 1)
+    put_field(c, offset_of(Thread, state), READY)
+    // # Safety: boot/sched.S's voluntary switch; it returns when this
+    // thread is switched in again.
+    unsafe { pax_switch() }
+    sync.irq_restore(saved)
+}
+
+/// Sleep `n` ticks: ready again at the tick `from + n`. Returns `(from,
+/// woke)`, both read with IF clear: the tick the sleep began at and the
+/// tick this thread ran again at.
+pub fn sleep(n: u64) -> (u64, u64) {
+    let saved = sync.irq_save()
+    let c = cur()
+    let from = timer.ticks()
+    put_field(c, offset_of(Thread, wake), from + n)
+    put_field(c, offset_of(Thread, state), SLEEPING)
+    // # Safety: as `yield`.
+    unsafe { pax_switch() }
+    let woke = timer.ticks()
+    sync.irq_restore(saved)
+    (from, woke)
+}
+
+/// Block until every spawned thread has exited, then reap them.
+pub fn wait_all() {
+    let saved = sync.irq_save()
+    if live_count() > 0 {
+        let c = cur()
+        // # Safety: the scheduler's scalar; IF is clear.
+        unsafe {
+            waiter = c + 1
+        }
+        put_field(c, offset_of(Thread, state), BLOCKED)
+        // # Safety: as `yield`.
+        unsafe { pax_switch() }
+    }
+    reap()
+    sync.irq_restore(saved)
+}
+
+/// End the running thread. Its stack is reclaimed by the next `create` or
+/// `wait_all`. Never returns.
+pub fn exit() {
+    let _saved = sync.irq_save()
+    let c = cur()
+    // # Safety: the scheduler's scalars; IF is clear.
+    unsafe {
+        live -= 1
+        if live == 0 && waiter != 0 {
+            put_field(waiter - 1, offset_of(Thread, state), READY)
+            enqueue(waiter - 1)
+            waiter = 0
+        }
+    }
+    put_field(c, offset_of(Thread, state), DEAD)
+    // # Safety: as `yield`; a dead thread is never switched in again.
+    unsafe { pax_switch() }
+    panic.fail("sched: a dead thread ran again, slot", c)
+}
+
+/// boot/sched.S's pax_thread_entry calls this when a body returns.
+export fn pax_thread_exit() {
+    exit()
+}
+
+/// The running thread's id.
+pub fn self_id() -> u64 {
+    field(cur(), offset_of(Thread, id))
+}
+
+/// How many times the running thread has been switched in (1 on its
+/// first run).
+pub fn self_runs() -> u64 {
+    field(cur(), offset_of(Thread, runs))
+}
+
+/// How many times the running thread has called `yield`.
+pub fn self_yields() -> u64 {
+    field(cur(), offset_of(Thread, yields))
+}
+
+/// How many times the idle thread has been switched in.
+pub fn idle_runs() -> u64 {
+    field(IDLE, offset_of(Thread, runs))
+}
+
+/// Spawned threads not yet exited.
+pub fn live_count() -> u64 {
+    // # Safety: a read of the scheduler's scalar.
+    unsafe { live }
+}
+
+/// The slot of the live thread with id `id`; SLOTS if none.
+fn slot_of(id: u64) -> u64 {
+    var s: u64 = IDLE
+    while s < SLOTS {
+        if field(s, offset_of(Thread, state)) != FREE && field(s, offset_of(Thread, id)) == id {
+            return s
+        }
+        s += 1
+    }
+    SLOTS
+}
+
+/// Thread `id`'s lowest stack byte (0 if no such thread).
+pub fn stack_lo(id: u64) -> u64 {
+    let s = slot_of(id)
+    if s == SLOTS {
+        return 0
+    }
+    field(s, offset_of(Thread, stack_lo))
+}
+
+/// Thread `id`'s first byte past its stack (0 if no such thread).
+pub fn stack_hi(id: u64) -> u64 {
+    let s = slot_of(id)
+    if s == SLOTS {
+        return 0
+    }
+    field(s, offset_of(Thread, stack_hi))
+}
+
+/// Thread `id`'s guard's lowest byte (0 if no such thread); the guard
+/// ends at `stack_lo(id)`.
+pub fn guard_lo(id: u64) -> u64 {
+    let s = slot_of(id)
+    if s == SLOTS {
+        return 0
+    }
+    base_of(s)
+}
+
+/// The id of the thread whose guard holds `a`, plus one; 0 when `a` is
+/// in no live thread's guard (kernel/interrupts' fatal path).
+pub fn guard_of(a: u64) -> u64 {
+    // # Safety: a read of the scheduler's scalar.
+    if unsafe { started } == 0 || a < STACKS || a >= STACKS + SLOTS * SPAN {
+        return 0
+    }
+    let s = (a - STACKS) / SPAN
+    if s == MAIN || field(s, offset_of(Thread, state)) == FREE {
+        return 0
+    }
+    if a - base_of(s) >= GUARD {
+        return 0
+    }
+    field(s, offset_of(Thread, id)) + 1
+}
+
+/// The PML4 the stacks are mapped in.
+pub fn pml4() -> u64 {
+    // # Safety: a read of the scheduler's scalar.
+    unsafe { pml4_pa }
+}
+
+/// The scheduler's line:
+/// `sched: main 0, idle 1, 16 slots, stacks 16 KiB above a 48 KiB guard from 0x<STACKS>, quantum 2 ticks`.
+pub fn report() {
+    log.put("sched: main 0, idle 1, ")
+    log.dec(SLOTS as int)
+    log.put(" slots, stacks ")
+    log.dec((STACK / 1024) as int)
+    log.put(" KiB above a ")
+    log.dec((GUARD / 1024) as int)
+    log.put(" KiB guard from ")
+    log.hex(STACKS)
+    log.put(", quantum ")
+    log.dec(QUANTUM as int)
+    log.put(" ticks")
+    log.end()
+}
