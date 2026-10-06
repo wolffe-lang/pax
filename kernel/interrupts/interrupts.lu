@@ -86,11 +86,14 @@ struct Frame {
 /// Breakpoints taken (vector 3).
 var breakpoint_count: u64 = 0
 
-/// Bits 63:39 of an address in kernel/heap's PML4 slot, 384 (px06): a
-/// page fault there is named ` (heap)` after CR2. kernel/heap is not
+/// kernel/heap's PML4 slot, 384 (px06), as an address range: a page
+/// fault there is named ` (heap)` after CR2. kernel/heap is not
 /// imported here (every kernel would carry the allocator hook); its
-/// `slot()` and this agree in tests/mpx2-heap H9.
-const HEAP_TOP_BITS: u64 = 0x1ffff80 // 0x1fffe00 (bits 63:48 set) | 384
+/// `slot()` and this agree in tests/mpx2-heap H9. A range, not
+/// `cr2 >> 39 == 0x1ffff80`: the release tier deletes a branch on the
+/// top half of a `u64 >> k` (wolf-lang#600).
+const HEAP_LO: u64 = 0xffffc00000000000 // slot 384's first address
+const HEAP_HI: u64 = 0xffffc08000000000 // slot 385's
 
 /// The name of exception vector `v` (0-31).
 pub fn name(v: u64) -> str {
@@ -192,7 +195,7 @@ fn fatal(f: *Frame) {
         let a = unsafe { pax_cr2() }
         log.put(" cr2 ")
         log.hex(a)
-        if a >> 39 == HEAP_TOP_BITS {
+        if a >= HEAP_LO && a < HEAP_HI {
             log.put(" (heap)")
         }
     }
