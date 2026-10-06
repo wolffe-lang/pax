@@ -61,11 +61,15 @@
 //! `start`. A page fault at a heap address names the heap
 //! (kernel/interrupts).
 //!
-//! **No lock.** wolf's freestanding runtime takes none (one CPU at a
-//! time, kw12), and neither does this: PAX runs on one CPU and no
-//! interrupt handler allocates. The scheduler lane (px07), when a
-//! second CPU or a preempted allocation exists, takes a spinlock from
-//! kw11's atomics around `alloc` and `free`.
+//! **The lock.** Since px07 kernel threads are preempted by the timer,
+//! so two threads can both be inside the allocator: `alloc` and `free`
+//! run under kernel/sync's heap lock (`sync.heap()`, a spinlock on
+//! kw11's atomics that also clears IF, so on one CPU the holder is
+//! never preempted and the lock never spins). wolf's freestanding
+//! runtime takes no lock of its own (kw12); its region bump and its one
+//! ambient-region slot are not the heap's to guard (see px06's notes
+//! and wolf-lang's ambient-slot issue). No interrupt handler allocates:
+//! one that did would spin forever on the lock its own CPU holds.
 //!
 //! State: the books are a `#[repr(c)] struct HeapState` at the start of
 //! the heap's own state page, each field read and written as a `u64` at
@@ -92,6 +96,7 @@ use frames
 use log
 use paging
 use panic
+use sync
 
 const SLOT: u64 = 384
 const META: u64 = 0xffffc00000000000 // the state page, and the slot's first address
@@ -598,6 +603,13 @@ pub fn start() {
 /// `size` bytes at a multiple of `align` (a power of two, at most 4096):
 /// the address. Never 0; out of memory panics. Not zeroed.
 pub fn alloc(size: u64, align: u64) -> u64 {
+    let s = sync.acquire(sync.heap())
+    let a = alloc_locked(size, align)
+    sync.release(sync.heap(), s)
+    a
+}
+
+fn alloc_locked(size: u64, align: u64) -> u64 {
     if !is_up() {
         panic.fail("heap: alloc before heap.start, asked", size)
         return 0
@@ -634,6 +646,12 @@ pub fn alloc(size: u64, align: u64) -> u64 {
 /// Panics by name on a double free, an address outside the heap or
 /// inside a block, and a size that is not the block's.
 pub fn free(p: u64, size: u64, align: u64) {
+    let s = sync.acquire(sync.heap())
+    free_locked(p, size, align)
+    sync.release(sync.heap(), s)
+}
+
+fn free_locked(p: u64, size: u64, align: u64) {
     if !is_up() || !in_zones(p) {
         panic.fail("heap: free outside the heap", p)
         return
