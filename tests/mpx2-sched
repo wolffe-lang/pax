@@ -21,7 +21,10 @@
 #      sleep: each only watches its own run count) print one line per
 #      run, `t<id>: run <r> at tick <k>`, five runs each: the 15 lines'
 #      ids are three distinct ids cycling (line i's id = line i-3's),
-#      each thread's r is 1..5 in order, k strictly rises; and each
+#      each thread's r is 1..5 in order, k never falls and strictly
+#      rises on every line before the first `done` (until a thread exits,
+#      every switch between them is the timer's; an exit hands the CPU
+#      over mid-tick, so the next line may share its tick); and each
 #      thread's `t<id>: done, <R> runs, 0 yields` (R >= 5). The
 #      alternation is the timer's: nothing in them yields.
 #   S2 sleep: three threads sleep 3, 7 and 5 ticks; their lines come in
@@ -171,11 +174,12 @@ s1_check() {
             if (!(id in want)) { want[id] = 1; order = order " t" id; distinct++ }
             if (r != want[id]) { why = why " t" id " run " r " where " want[id] " was next;" }
             want[id] = r + 1
-            if (n > 1 && k <= lastk) { why = why " tick " k " after " lastk " (line " n ");" }
+            if (n > 1 && k < lastk) { why = why " tick " k " after " lastk " (line " n ");" }
+            if (n > 1 && !anydone && k <= lastk) { why = why " tick " k " not after " lastk " (line " n ", before any exit);" }
             lastk = k; ticks = ticks " " k
         }
         /^t[0-9]+: done, [0-9]+ runs, [0-9]+ yields$/ {
-            id = substr($1, 2, length($1) - 2); done[id] = 1
+            id = substr($1, 2, length($1) - 2); done[id] = 1; anydone = 1
             if ($3 + 0 < 5) why = why " t" id " done after " $3 " runs;"
             if ($5 + 0 != 0) why = why " t" id " yielded " $5 " times;"
         }
@@ -238,7 +242,7 @@ for leg in $legs; do
             l=$(grep -E '^exit: frames free [0-9]+ before, [0-9]+ with 3 stacks, [0-9]+ after, [0-9]+ of 3 stacks unmapped$' "$norm" | tail -n 1)
             why=
             if [ -z "$l" ]; then why=" no exit: frames line;"; else
-                set -- $l; A=$4 B=$6 C=$10 U=${12}
+                set -- $l; A=$4 B=$6 C=${10} U=${12}
                 [ "$B" = $((A - 12)) ] || why+=" $B free with 3 stacks, not $A - 12;"
                 [ "$C" = "$A" ] || why+=" $C free after exit, not $A;"
                 [ "$U" = 3 ] || why+=" $U of 3 stacks unmapped;"
