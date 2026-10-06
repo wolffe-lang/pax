@@ -1,0 +1,41 @@
+//! member: false
+// kmain_heap_oom.lu — the heap's out-of-memory policy (px06,
+// tests/mpx2-heap H8). Asks the hook for 1 MiB blocks, never freeing,
+// until the heap's limit (32768 pages, 128 MiB): wolf's runtime would
+// trap `alloc-contract` on a null, so the hook never returns one and
+// panics by name instead,
+//
+//     PANIC heap: out of memory, asked 0x0000000000100000
+//
+// after the line naming how many blocks it got, and halts.
+use frames
+use heap
+use interrupts
+use log
+use paging
+use panic
+use serial
+
+export fn kmain() {
+    serial.init()
+    interrupts.start()
+    log.line("PAX heap: out of memory")
+    frames.start()
+    paging.start()
+    heap.start()
+    var n = 0
+    while n < 1000 {
+        if heap.pages() + 256 > 32768 {
+            log.put("oom: ")
+            log.dec(n)
+            log.put(" blocks of 1 MiB, heap ")
+            log.dec(heap.pages() as int)
+            log.put(" pages; one more")
+            log.end()
+        }
+        heap.alloc(1048576, 16)
+        n += 1
+    }
+    log.line("unreachable")
+    panic.halt()
+}

@@ -1,0 +1,36 @@
+//! member: false
+// kmain_heap_wild_free.lu — a free of an address outside the heap,
+// caught (px06, tests/mpx2-heap H7). Brings up frames, paging and the
+// heap, takes one block so the heap is not empty, then frees an address
+// in the HHDM (a frame's direct-map address, never a heap block):
+// kernel/heap must panic by name,
+//
+//     PANIC heap: free outside the heap 0x<a>
+//
+// with the address the line before printed, and halt.
+use frames
+use heap
+use interrupts
+use log
+use paging
+use panic
+use serial
+
+export fn kmain() {
+    serial.init()
+    interrupts.start()
+    log.line("PAX heap: wild free")
+    frames.start()
+    paging.start()
+    heap.start()
+    let p = heap.alloc(64, 16)
+    let a = frames.hhdm() + 0x200000
+    log.put("block ")
+    log.hex(p)
+    log.put(", free outside: ")
+    log.hex(a)
+    log.end()
+    heap.free(a, 64, 16) // not a heap address
+    log.line("unreachable")
+    panic.halt()
+}

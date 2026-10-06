@@ -1,0 +1,40 @@
+//! member: false
+// kmain_heap_fault.lu — a page fault in the heap names the heap (px06,
+// tests/mpx2-heap H9). Brings up frames, paging and the heap, takes one
+// page-sized block, then reads the word just past the heap's last
+// mapped page: kw10's handler panics `page fault` with CR2, and since
+// px06 marks an address in the heap's PML4 slot,
+//
+//     PANIC page fault vector 14 error 0x… rip 0x… rsp 0x… frame 0x… cr2 0x<a> (heap)
+//
+// with the address the line before printed.
+use frames
+use heap
+use interrupts
+use log
+use paging
+use panic
+use serial
+
+export fn kmain() {
+    serial.init()
+    interrupts.start()
+    log.line("PAX heap: page fault")
+    frames.start()
+    paging.start()
+    heap.start()
+    let p = heap.alloc(4096, 16)
+    let a = heap.base() + heap.pages() * 4096
+    log.put("block ")
+    log.hex(p)
+    log.put(", read past the heap: ")
+    log.hex(a)
+    log.end()
+    // # Safety: none — the address is unmapped on purpose; the read
+    // must fault.
+    let v = unsafe { (a as *u64).read_volatile() }
+    log.put("read returned ")
+    log.hex(v)
+    log.end()
+    panic.halt()
+}

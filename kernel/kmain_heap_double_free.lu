@@ -1,0 +1,34 @@
+//! member: false
+// kmain_heap_double_free.lu — a double free, caught (px06,
+// tests/mpx2-heap H6). Brings up frames, paging and the heap, takes one
+// 48-byte block (the 64-byte class), frees it, and frees it again:
+// kernel/heap must panic by name,
+//
+//     PANIC heap: double free 0x<p>
+//
+// with the address the line before printed, and halt. The line after
+// the second free is never reached.
+use frames
+use heap
+use interrupts
+use log
+use paging
+use panic
+use serial
+
+export fn kmain() {
+    serial.init()
+    interrupts.start()
+    log.line("PAX heap: double free")
+    frames.start()
+    paging.start()
+    heap.start()
+    let p = heap.alloc(48, 16)
+    log.put("free twice: ")
+    log.hex(p)
+    log.end()
+    heap.free(p, 48, 16)
+    heap.free(p, 48, 16) // the double free
+    log.line("unreachable")
+    panic.halt()
+}
