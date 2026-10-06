@@ -25,8 +25,20 @@
 #     "target-features" on every defined function.
 # It reports whether the wolf objects define `wolf_trap` (a kernel whose
 # trap hook is wolf, px01) or import it (M-KW's, from assembly).
+# A kernel that allocates (px06: `List`, `Map`, interpolation, closures,
+# `region`; wolf-lang kw12, spec/04 [abi.target.none.alloc]) calls into
+# wolf's freestanding runtime, which wolf writes beside the object as
+# OUTDIR/NAME.rt-none.a. Then also:
+#   - the wolf objects may import the archive's `__wolf_rt_*` symbols
+#     (each one the archive defines), and must define `wolf_alloc` and
+#     `wolf_free` (the hook pair, kernel/heap);
+#   - the archive, taken whole, imports nothing but wolf_alloc,
+#     wolf_free and wolf_trap (it defines the C memory functions
+#     itself, weak, and its members' other imports among themselves);
+#   - the linked ELF, archive included, names no xmm/ymm register.
 # Step 3: assembles boot/start.S (the Limine entry) and links
-#   ld.lld -T boot/kernel.ld start.o NAME.asm-*.o <wolf objects> -> OUTDIR/NAME.elf
+#   ld.lld -T boot/kernel.ld start.o NAME.asm-*.o <wolf objects> [NAME.rt-none.a] -> OUTDIR/NAME.elf
+# (the archive after every kernel object, as kw12 asks).
 #
 # `--hosted` drops `--target` (M-KW step 7's seen-red variant): the build
 # is then a hosted one, which this script expects to FAIL; it exits 0
@@ -64,7 +76,7 @@ fail() { printf 'build-kernel: FAIL %s (%s, %s)\n' "$*" "$name" "$tier" >&2; exi
 
 tierflag=()
 [ "$tier" = release ] && tierflag=(--release)
-rm -f "$obj" "$out/$name".*.o
+rm -f "$obj" "$out/$name".*.o "$out/$name.rt-none.a"
 
 if [ "$hosted" = 1 ]; then
     rc=0
@@ -114,11 +126,25 @@ else
     as --64 -o "$start" "$PAX_ROOT/boot/start.S"
 fi
 linksyms=" $(nm -g --defined-only "$start" | awk 'NF == 3 { print $3 }' | sort -u | paste -sd' ' -) $(sed -n 's/^[[:space:]]*\(__pax_[A-Za-z0-9_]*\)[[:space:]]*=.*/\1/p' "$PAX_ROOT/boot/kernel.ld" | sort -u | paste -sd' ' -) "
+# wolf's freestanding runtime (kw12), when the kernel allocates.
+rt=$out/$name.rt-none.a rtsyms=" " rtn=0
+if [ -f "$rt" ]; then
+    rtsyms=" $(nm -g --defined-only "$rt" 2>/dev/null | awk 'NF == 3 { print $3 }' | sort -u | paste -sd' ' -) "
+    for s in $(nm -u "$rt" 2>/dev/null | awk 'NF >= 2 && $1 == "U" { print $2 }' | sort -u); do
+        case " wolf_alloc wolf_free wolf_trap " in *" $s "*) continue ;; esac
+        case $rtsyms in *" $s "*) continue ;; esac # one member's import, another's definition
+        fail "the runtime archive imports $s, which it does not define and which is not wolf_alloc, wolf_free or wolf_trap"
+    done
+    for s in wolf_alloc wolf_free; do
+        case $defined in *" $s "*) ;; *) fail "the kernel allocates (wolf wrote $name.rt-none.a) but its objects do not define $s" ;; esac
+    done
+fi
 imports=$(nm -u "${wobjs[@]}" | awk 'NF >= 2 && $1 == "U" { print $2 }' | sort -u)
 ext=
 for s in $imports; do
     case $defined in *" $s "*) continue ;; esac
-    case "$hooks$roster$linksyms" in *" $s "*) ext+="$s," ;; *) fail "imports $s, outside the hooks, the asm roster{$roster} and the link's symbols{$linksyms}" ;; esac
+    case $s in __wolf_rt_*) case $rtsyms in *" $s "*) rtn=$((rtn + 1)); continue ;; esac ;; esac
+    case "$hooks$roster$linksyms" in *" $s "*) ext+="$s," ;; *) fail "imports $s, outside the hooks, the asm roster{$roster}, the link's symbols{$linksyms} and the runtime archive" ;; esac
 done
 nm "${wobjs[@]}" | awk '$2 == "T" && $3 == "kmain" { f = 1 } END { exit !f }' \
     || fail "kmain is not a defined global (T)"
@@ -153,18 +179,28 @@ if [ "$tier" = release ]; then
             for (g in used) if (!red[g] || !sse[g]) { print "attribute group #" g " lacks noredzone or -sse2"; exit 1 }
         }' "$out/$name.ll" >&2 || fail "the release IR is not kernel code (noredzone, no SSE)"
 fi
-printf 'build-kernel: ok: step 2 (%s, %s): %d wolf object(s), imports {%s}, %s, kmain T, no main, no xmm/ymm, nothing below %%rsp%s\n' \
+printf 'build-kernel: ok: step 2 (%s, %s): %d wolf object(s), imports {%s}, %s, kmain T, no main, no xmm/ymm, nothing below %%rsp%s%s\n' \
     "$name" "$tier" ${#wobjs[@]} "${ext%,}" "$trap_by" \
-    "$([ "$tier" = release ] && echo ', IR noredzone + no-SSE')" >&2
+    "$([ "$tier" = release ] && echo ', IR noredzone + no-SSE')" \
+    "$([ -f "$rt" ] && echo ", $rtn __wolf_rt_* from $name.rt-none.a, wolf_alloc and wolf_free defined in wolf")" >&2
 
 # --- step 3: the link (start.o was assembled for step 2's import check) ----
 elf=$out/$name.elf
+rtlink=()
+[ -f "$rt" ] && rtlink=("$rt")
 if command -v ld.lld >/dev/null 2>&1; then
     ld.lld -nostdlib -static -z max-page-size=0x1000 -T "$PAX_ROOT/boot/kernel.ld" \
-        -o "$elf" "$start" "${asmobjs[@]}" "${wobjs[@]}"
+        -o "$elf" "$start" "${asmobjs[@]}" "${wobjs[@]}" ${rtlink[@]+"${rtlink[@]}"}
 else
     need ld
     ld -m elf_x86_64 -nostdlib -static -z max-page-size=0x1000 -T "$PAX_ROOT/boot/kernel.ld" \
-        -o "$elf" "$start" "${asmobjs[@]}" "${wobjs[@]}"
+        -o "$elf" "$start" "${asmobjs[@]}" "${wobjs[@]}" ${rtlink[@]+"${rtlink[@]}"}
+fi
+if [ -f "$rt" ]; then
+    objdump -d --no-show-raw-insn "$elf" > "$out/$name.elf.dis"
+    if grep -Eq '%[xy]mm[0-9]' "$out/$name.elf.dis"; then
+        fail "the linked kernel (runtime archive included) names an xmm/ymm register: $(grep -Em1 '%[xy]mm[0-9]' "$out/$name.elf.dis")"
+    fi
+    printf 'build-kernel: ok: step 3 (%s, %s): linked with %s.rt-none.a; the whole ELF names no xmm/ymm\n' "$name" "$tier" "$name" >&2
 fi
 printf '%s\n' "$elf"
