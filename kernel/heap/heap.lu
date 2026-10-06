@@ -81,7 +81,8 @@ use paging
 use panic
 
 const SLOT: u64 = 384
-const META: u64 = 0xffffc00000000000 // the state page
+const META: u64 = 0xffffc00000000000 // the state page, and the slot's first address
+const SLOT_END: u64 = 0xffffc08000000000 // slot 385's first address
 const DESC: u64 = 0xffffc00000001000 // descriptor i at DESC + 64 i
 const BASE: u64 = 0xffffc04000000000 // heap page i at BASE + 4096 i
 const PAGE: u64 = 4096
@@ -647,9 +648,12 @@ fn in_zones(p: u64) -> bool {
     runs || (p >= cz && p < cz + get(offset_of(HeapState, class_top)) * PAGE)
 }
 
-/// Whether `va` lies in the heap's slot (its books or its pages).
+/// Whether `va` lies in the heap's slot (its books or its pages). A
+/// range, not `va >> 39 == …`: the release tier deletes a branch on the
+/// top half of a `u64 >> k` (wolf-lang#600), and a caller's `if` on this
+/// would be one once inlined.
 pub fn contains(va: u64) -> bool {
-    va >> 39 == 0x1fffe00 | SLOT // bits 63:48 set (canonical high), 47:39 the slot
+    va >= META && va < SLOT_END
 }
 
 /// The heap's PML4 slot.
