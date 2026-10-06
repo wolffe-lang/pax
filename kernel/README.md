@@ -1,6 +1,6 @@
 # kernel/
 
-The wolf kernel: first light (px01, M-PX1), physical frames (px02), paging (px03), interrupts (kw10) and preemptive kernel threads (px07), on the wolf 0.2.24 release archive (px05 moved pax to the archive at 0.2.23; px07 to 0.2.24 for kw11's atomics). `kmain.lu` brings up COM1,
+The wolf kernel: first light (px01, M-PX1), physical frames (px02), paging (px03), interrupts (kw10), preemptive kernel threads (px07) and the heap (px06), on the wolf 0.2.24 release archive (px05 moved pax to the archive at 0.2.23; px07 to 0.2.24 for kw11's atomics). `kmain.lu` brings up COM1,
 reads what Limine handed it and prints one line each — the banner, the
 UART, the bootloader and base revision, the firmware, a memory-map
 summary, the HHDM offset, the frame allocator's totals — switches to its own
@@ -32,9 +32,10 @@ thread off its stack into its guard (`tests/mpx2-sched`).
 | `paging/` | x86-64 four-level paging (px03): `build` (a zeroed PML4; the image W^X per section from `boot/kernel.ld`'s bounds; the HHDM over usable, bootloader-reclaimable, ACPI and reserved-mapped memory, 2 MiB pages where they fit, without the image or the framebuffer), `switch_to` (EFER.NXE, CR0.WP and CR4.PGE checked, the stack mapped, MOV to CR3), `start` (both), `map`/`map_large`/`unmap` (INVLPG on the live structures)/`translate` (rows: `out_of_memory`, `misaligned`, `not_canonical`, `already_mapped`, `large_page`, `not_mapped`), `report` |
 | `gdt/` | the kernel's GDT (null, kernel code 0x08 and data 0x10, user data 0x18 and code 0x20, the TSS at 0x28) and the 64-bit TSS with IST1 (a 16 KiB .bss stack), built in wolf in storage `boot/isr.S` reserves, loaded (LGDT, the segment reloads, LTR) (kw10) |
 | `idt/` | 256 gates: 0-31 and 32-47 interrupt gates through `boot/isr.S`'s trampolines, #DF on IST1, the rest not present; LIDT (kw10) |
-| `interrupts/` | `pax_interrupt`, the `export fn` every trampoline calls with its frame (`[abi.interrupt]`): a breakpoint prints and returns, vector 32 ticks the timer, a spurious 8259 request returns, every other vector panics `PANIC <name> vector <v> error … rip … rsp … frame …[ cr2 …]`; `start`/`report` for the tables (kw10) |
+| `interrupts/` | `pax_interrupt`, the `export fn` every trampoline calls with its frame (`[abi.interrupt]`): a breakpoint prints and returns, vector 32 ticks the timer, a spurious 8259 request returns, every other vector panics `PANIC <name> vector <v> error … rip … rsp … frame …[ cr2 …[ (heap)]]` (` (heap)` for an address in the heap's slot, px06); `start`/`report` for the tables (kw10) |
 | `apic/` | the local APIC's page mapped uncached at PML4 slot 352 (`0xffffb00000000000`) and LINT0 set to ExtINT, unmasked: Limine leaves it masked, and an 8259 request would never arrive (kw10) |
 | `timer/` | the 8259s remapped to 32/40 and masked; the PIT's channel 0 at divisor 11932 (99.998 Hz) with line 0 alone unmasked; `tick` (EOI), `ticks`, `wait` (STI; HLT; CLI), `spurious`, `stop` (kw10; the PIT argued against the local APIC timer in the module's header) |
+| `heap/` | the kernel heap and wolf's allocator hook (px06): `wolf_alloc`/`wolf_free` as `export fn`s over `alloc`/`free`; PML4 slot 384 (`0xffffc00000000000`): a state page and 64-byte page descriptors, then the heap's pages from `0xffffc04000000000`, each a `frames.alloc()` frame mapped RW+NX by `paging.map` as the heap grows, never unmapped; address-ordered first-fit page runs with boundary tags for sizes above 2048, eight power-of-two size classes (16-2048) in their own zone (`0xffffc05000000000`) with a per-page allocated map; limit 32768 pages (128 MiB); named panics (`PANIC heap: double free …`, `free outside the heap`, `free with the wrong size`, `out of memory`, …); `report`, `pages`, `live_blocks`, `frames_taken`, … |
 | `panic/` | `wolf_trap`, the freestanding trap hook, in wolf; `fail(what, v)`, a fault the kernel detects, by name; `halt` |
 | `sync/` | the spinlock (px07): a lock is an 8-byte word's address; `acquire` saves RFLAGS and clears IF, then test-and-test-and-set (`atomic_load` relaxed, `atomic_cas` acquire/relaxed, kw11), `release` is a release store and IF as saved; `irq_save`/`irq_restore`/`enable`, `relax` (PAUSE), `console()` (the lock threads write whole lines under) |
 | `sched/` | kernel threads on one CPU (px07): 16 records in `boot/sched.S`'s `.bss` (`#[repr(c)] Thread`, its words at `offset_of`), slot 0 the kernel's own context, slot 1 the idle thread (`pax_idle`, HLT with IF set); each stack four frames mapped RW NX at the top of its slot's 64 KiB in PML4 slot 416 (`0xffffd00000000000`), the 48 KiB below never mapped (the guard); a FIFO run queue; `preempt` (the tick: wake sleepers, rotate after a two-tick quantum, idle gives way at once), `switched` (after `pax_switch`), `create(body, arg)`, `yield`, `sleep(n) -> (from, woke)`, `wait_all`, `exit` (the stack reaped by the next `create` or `wait_all`), `guard_of` (for the overflow panic), `report` |
@@ -115,7 +116,30 @@ and checks the trampoline's shape (S0), three threads alternating by
 preemption alone (S1), sleep waking on the tick (S2), exit reclaiming
 the stacks (S3), the locked counter exact where the unlocked control
 loses updates (S4), the overflow into the guard panicking by name (S5)
-and the halt (S6). `tests/mpx2-frames` builds kmain and the three frames kernels on both
+and the halt (S6).
+
+- A kernel that uses `List`, `Map`, interpolation, a capturing closure
+  or `region` calls into wolf's freestanding runtime (wolf-lang kw12):
+  wolf writes `libwolf_rt_none.a` beside the object as
+  `NAME.rt-none.a`, `tools/build-kernel` links it after the kernel's
+  objects, and the kernel supplies `wolf_alloc`/`wolf_free` by `use
+  heap` (and calls `heap.start()` after `paging.start()`). A block made
+  outside every `region` is never freed (the runtime's process root),
+  so long-running kernel code allocates inside a `region` (px06's
+  `kmain_heap` runs each round in one). Module `var`s are read only
+  inside `unsafe` (E1301), so the heap's books are a `#[repr(c)] struct
+  HeapState` in its own state page at `offset_of`, as `frames` keeps
+  its own. The release tier deletes a branch on the top half of a
+  `u64 >> k` (wolf-lang#600): address checks are written as ranges.
+
+`tests/mpx2-heap` builds kmain_heap and the four heap fault kernels on
+both tiers, boots them under SeaBIOS and OVMF, and checks the runtime
+linked, eight rounds of allocating kernel code, no leak (live blocks
+back to zero, the heap's pages and the free frames unchanged after
+every round, every frame the heap holds accounted for), and the double
+free, wild free, out-of-memory and heap page-fault panics by name.
+
+`tests/mpx2-frames` builds kmain and the three frames kernels on both
 tiers, boots them under SeaBIOS and OVMF, and checks the totals against
 the map, the exhaust, the touch, the reuse, the two named panics and
 every halt. `tests/mpx1` builds kmain and kmain_panic on both tiers, boots them under SeaBIOS
