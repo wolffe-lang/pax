@@ -94,10 +94,23 @@ pub fn console() -> u64 {
 /// Take the lock at `lock` (an 8-aligned word, 0 free) with interrupts
 /// off. Returns the RFLAGS `release` restores.
 pub fn acquire(lock: u64) -> u64 {
-    // PLANT (px07, reverted next): no exchange and IF left on — S4's
-    // locked counter must lose updates and go red in CI.
     let saved = irq_save()
-    irq_restore(saved)
+    // # Safety: the cast only; every access below states its own.
+    let p = unsafe { lock as *u64 }
+    var held = false
+    while !held {
+        // # Safety: `lock` is a word the kernel owns, 8-aligned
+        // ([conc.mm.atomic.raw.4]); every access to it is atomic.
+        let seen = unsafe { p.atomic_load(Order.relaxed) }
+        if seen == 0 {
+            // # Safety: as above.
+            let (old, ok) = unsafe { p.atomic_cas(0, 1, Order.acquire, Order.relaxed) }
+            held = ok && old == 0
+        }
+        if !held {
+            relax()
+        }
+    }
     saved
 }
 
