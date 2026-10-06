@@ -1,6 +1,6 @@
 # kernel/
 
-The wolf kernel: first light (px01, M-PX1), physical frames (px02), paging (px03) and interrupts (kw10), on the wolf 0.2.23 release archive (px05). `kmain.lu` brings up COM1,
+The wolf kernel: first light (px01, M-PX1), physical frames (px02), paging (px03), interrupts (kw10) and preemptive kernel threads (px07), on the wolf 0.2.24 release archive (px05 moved pax to the archive at 0.2.23; px07 to 0.2.24 for kw11's atomics). `kmain.lu` brings up COM1,
 reads what Limine handed it and prints one line each — the banner, the
 UART, the bootloader and base revision, the firmware, a memory-map
 summary, the HHDM offset, the frame allocator's totals — switches to its own
@@ -17,7 +17,11 @@ kernel loads its own GDT, TSS and IDT first (`interrupts.start()`), so
 any exception panics by name; `kmain_int3.lu` takes a breakpoint and
 goes on, `kmain_ud2.lu` panics `invalid opcode`, `kmain_double_fault.lu`
 double-faults onto IST1, and `kmain_timer.lu` counts 20 PIT ticks
-(`tests/mpx2-interrupts`).
+(`tests/mpx2-interrupts`). Since px07 `kmain_sched.lu` starts the
+scheduler and runs rounds of threads (three that only spin and are
+switched by the timer alone, three sleepers, two counting under the
+spinlock and two without it), and `kmain_sched_overflow.lu` runs a
+thread off its stack into its guard (`tests/mpx2-sched`).
 
 | module | what |
 |---|---|
@@ -32,11 +36,17 @@ double-faults onto IST1, and `kmain_timer.lu` counts 20 PIT ticks
 | `apic/` | the local APIC's page mapped uncached at PML4 slot 352 (`0xffffb00000000000`) and LINT0 set to ExtINT, unmasked: Limine leaves it masked, and an 8259 request would never arrive (kw10) |
 | `timer/` | the 8259s remapped to 32/40 and masked; the PIT's channel 0 at divisor 11932 (99.998 Hz) with line 0 alone unmasked; `tick` (EOI), `ticks`, `wait` (STI; HLT; CLI), `spurious`, `stop` (kw10; the PIT argued against the local APIC timer in the module's header) |
 | `panic/` | `wolf_trap`, the freestanding trap hook, in wolf; `fail(what, v)`, a fault the kernel detects, by name; `halt` |
+| `sync/` | the spinlock (px07): a lock is an 8-byte word's address; `acquire` saves RFLAGS and clears IF, then test-and-test-and-set (`atomic_load` relaxed, `atomic_cas` acquire/relaxed, kw11), `release` is a release store and IF as saved; `irq_save`/`irq_restore`/`enable`, `relax` (PAUSE), `console()` (the lock threads write whole lines under) |
+| `sched/` | kernel threads on one CPU (px07): 16 records in `boot/sched.S`'s `.bss` (`#[repr(c)] Thread`, its words at `offset_of`), slot 0 the kernel's own context, slot 1 the idle thread (`pax_idle`, HLT with IF set); each stack four frames mapped RW NX at the top of its slot's 64 KiB in PML4 slot 416 (`0xffffd00000000000`), the 48 KiB below never mapped (the guard); a FIFO run queue; `preempt` (the tick: wake sleepers, rotate after a two-tick quantum, idle gives way at once), `switched` (after `pax_switch`), `create(body, arg)`, `yield`, `sleep(n) -> (from, woke)`, `wait_all`, `exit` (the stack reaped by the next `create` or `wait_all`), `guard_of` (for the overflow panic), `report` |
+| `schedtest/` | the thread bodies `tests/mpx2-sched` runs, as `export fn`s the kernels name with `extern "c" let` (px07) |
 
 - `wolf.pkg` lists `../boot/io.S` (port I/O, the halt),
   `../boot/cpu.S` (px03: CR0, CR3, CR4, EFER, INVLPG, CPUID's NX bit;
-  kw10: CR2, IA32_APIC_BASE) and `../boot/isr.S` (kw10: the 48
-  trampolines, the GDT/TSS/IDT/IST1 storage, LGDT/LTR/LIDT, STI-HLT-CLI)
+  kw10: CR2, IA32_APIC_BASE), `../boot/isr.S` (kw10: the 48
+  trampolines, the GDT/TSS/IDT/IST1 storage, LGDT/LTR/LIDT, STI-HLT-CLI;
+  px07: the common path resumes the frame `pax_interrupt` returns) and
+  `../boot/sched.S` (px07: `pax_switch`, `pax_thread_entry`, `pax_idle`,
+  PAUSE, the IF routines, the thread table and lock words)
   under `asm`: wolf
   assembles them for the kernel's target and refuses a call into anything
   off their roster (`[abi.asm.roster]`, E1306). The target is passed by
@@ -80,14 +90,32 @@ double-faults onto IST1, and `kmain_timer.lu` counts 20 PIT ticks
   (`[mem.static.3]`). A handler resuming past a fault would write the
   frame's RIP through `f as *u64` at `offset_of(Frame, rip) / 8`: a
   store to a field of a raw element is refused (wolf-lang#577).
-- `wolf.pin` names wolf: the 0.2.23 release archive by digest (px05;
+- A context switch (px07) is the trampoline returning another
+  thread's frame: `pax_interrupt` returns `*Frame`, the common path
+  moves it into %rsp before the pops, and since a kernel thread is
+  interrupted at CPL 0 its frame is on its own stack, so `iretq`
+  restores that thread's RSP with its RIP. A voluntary switch builds
+  the same frame by hand (`boot/sched.S`'s `pax_switch`, vector 0x81).
+  A thread body is an `export fn` in a module other than the one
+  naming it with `extern "c" let NAME: *u8`: wolf has no C
+  function-pointer value (wolf-lang#520) and the `extern` in the
+  export's own module is E0302. A lock word lives in assembly-reserved
+  `.bss` because a module `var` has no address (wolf-lang#597).
+- `wolf.pin` names wolf: the 0.2.24 release archive by digest (px07;
+  0.2.23 from px05;
   `tools/fetch-wolf` stages it and never builds; px02 and kw10 built
   wolf-lang `eb955c3b` and `6a4e6151` from source while no release
   carried kw06-kw09), and lupin's release and digest
   (`tools/fetch-lupin`; held at 0.1.44 for `tests/mkw` step 6's
   recorded refusal).
 
-`tests/mpx2-frames` builds kmain and the three frames kernels on both
+`tests/mpx2-sched` (px07) builds kmain_sched and
+kmain_sched_overflow on both tiers, boots them under SeaBIOS and OVMF,
+and checks the trampoline's shape (S0), three threads alternating by
+preemption alone (S1), sleep waking on the tick (S2), exit reclaiming
+the stacks (S3), the locked counter exact where the unlocked control
+loses updates (S4), the overflow into the guard panicking by name (S5)
+and the halt (S6). `tests/mpx2-frames` builds kmain and the three frames kernels on both
 tiers, boots them under SeaBIOS and OVMF, and checks the totals against
 the map, the exhaust, the touch, the reuse, the two named panics and
 every halt. `tests/mpx1` builds kmain and kmain_panic on both tiers, boots them under SeaBIOS
