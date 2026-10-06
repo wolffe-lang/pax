@@ -1,0 +1,166 @@
+//! member: false
+// kmain_heap.lu — the heap exercise kernel (px06, tests/mpx2-heap H2-H6,
+// H9). It brings up frames, PAX's paging and the heap (kernel/heap),
+// then runs ROUNDS rounds of kernel code that allocates through wolf's
+// freestanding runtime and the heap's hook — a List, a Map with str
+// keys, interpolation, a capturing closure, a nested region — each
+// round inside one `region`, so every block it takes goes back through
+// `wolf_free` when the round ends. It prints:
+//
+//     PAX heap test
+//     frames: <T> usable, <L> below 1 MiB, <S> allocator, <F> free
+//     paging: limine cr3 0x<A>, pax cr3 0x<B>, <P> table frames
+//     frames before the heap: <G>
+//     heap: slot 384 at 0xffffc04000000000, 0 pages, ... (the empty heap)
+//     round <r>: list 100000 sum 4999950000 bad 0, map 1000 keys bad 0 absent ok, closure 42, nested ok
+//     interp: n=100000 hex=186a0 neg=-7 pad=[  100000] ok=true c=w s=pax r=<r>
+//     after <r>: live <B> blocks <Y> bytes, regions <R> bytes, heap <Q> pages, frames <F> free
+//     ... (rounds 2..ROUNDS)
+//     heap: ... (the heap after the last round)
+//     halt
+//
+// The no-leak check (tests/mpx2-heap H4) reads the `after` lines: live
+// blocks and bytes back to their value before round 1 after every
+// round, regions 0 bytes, and the heap's pages and the frame count the
+// same after every round from the first on (the high-water mark does
+// not move). Nothing here allocates outside a region: the per-round
+// lines are written with kernel/log, digit by digit.
+use frames
+use heap
+use interrupts
+use log
+use paging
+use panic
+use serial
+
+const ROUNDS: int = 8
+const LIST_N: int = 100000
+const MAP_N: int = 1000
+
+/// One round's work, inside the round's region. Writes the round line
+/// and the interpolation line.
+fn round(r: int) {
+    var sum = 0
+    var list_bad = 0
+    var list_len = 0
+    var map_bad = 0
+    var map_len = 0
+    var absent_ok = false
+    var closure = 0
+    var nested_ok = false
+    region work {
+        // A List[int] of LIST_N, every element checked.
+        var ys = List[int]()
+        for i in 0..LIST_N {
+            (mut ys).push(i)
+        }
+        list_len = ys.len
+        var k = 0
+        for y in ys {
+            if y != k {
+                list_bad += 1
+            }
+            sum += y
+            k += 1
+        }
+
+        // A Map[str, int], keys built by interpolation, found by fresh
+        // keys (byte equality inside the runtime), one key absent.
+        var m = Map[str, int]()
+        for i in 0..MAP_N {
+            m["k{i}"] = i * i
+        }
+        map_len = m.len
+        for i in 0..MAP_N {
+            let v = m["k{i}"] else -1
+            if v != i * i {
+                map_bad += 1
+            }
+        }
+        let z = m["absent"] else -1
+        absent_ok = z == -1
+
+        // A capturing closure.
+        let factor = 7
+        let f = fn(x) x * factor
+        closure = f(6)
+
+        // A nested region: its bytes are live inside it and gone after.
+        let outer = live_region_bytes()
+        var inner_peak = 0
+        region inner {
+            var zs = List[int]()
+            for i in 0..10000 {
+                (mut zs).push(i * 2)
+            }
+            inner_peak = live_region_bytes()
+        }
+        let after = live_region_bytes()
+        nested_ok = inner_peak > outer && after == outer
+
+        // Interpolation, printed for the test to compare byte for byte.
+        let n = LIST_N
+        let neg = 0 - 7
+        let ok = true
+        let c = 'w'
+        let s = "pax"
+        log.line("interp: n={n} hex={n:x} neg={neg} pad=[{n:>8}] ok={ok} c={c} s={s} r={r}")
+    }
+    log.put("round ")
+    log.dec(r)
+    log.put(": list ")
+    log.dec(list_len)
+    log.put(" sum ")
+    log.dec(sum)
+    log.put(" bad ")
+    log.dec(list_bad)
+    log.put(", map ")
+    log.dec(map_len)
+    log.put(" keys bad ")
+    log.dec(map_bad)
+    log.put(if absent_ok { " absent ok" } else { " absent FOUND" })
+    log.put(", closure ")
+    log.dec(closure)
+    log.put(if nested_ok { ", nested ok" } else { ", nested WRONG" })
+    log.end()
+}
+
+export fn kmain() {
+    serial.init()
+    interrupts.start()
+    log.line("PAX heap test")
+    frames.start()
+    frames.report()
+    let limine = paging.cr3()
+    let before = frames.free_count()
+    paging.start()
+    paging.report(limine, before)
+    log.put("frames before the heap: ")
+    log.dec(frames.free_count() as int)
+    log.end()
+    heap.start()
+    heap.report()
+
+    var r = 1
+    while r <= ROUNDS {
+        round(r)
+        log.put("after ")
+        log.dec(r)
+        log.put(": live ")
+        log.dec(heap.live_blocks() as int)
+        log.put(" blocks ")
+        log.dec(heap.live_bytes() as int)
+        log.put(" bytes, regions ")
+        log.dec(live_region_bytes())
+        log.put(" bytes, heap ")
+        log.dec(heap.pages() as int)
+        log.put(" pages, frames ")
+        log.dec(frames.free_count() as int)
+        log.put(" free")
+        log.end()
+        r += 1
+    }
+    heap.report()
+    log.line("halt")
+    panic.halt()
+}
