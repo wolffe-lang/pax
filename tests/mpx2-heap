@@ -1,0 +1,292 @@
+#!/usr/bin/env bash
+# tests/mpx2-heap — the kernel heap (px06, M-PX2's third piece): kernel
+# code uses wolf's `List`, `Map`, string interpolation, a capturing
+# closure and `region` on PAX, through wolf's freestanding runtime
+# (libwolf_rt_none.a, wolf-lang kw12) and the allocator hook PAX writes
+# in wolf (kernel/heap) over px02's frames and px03's paging; every
+# block comes back, the heap does not grow round over round, and its
+# faults panic by name.
+#
+#   tests/mpx2-heap [--images DIR | --no-boot] [--firmware bios|uefi|both]
+#                   [--tier native|release|both]
+#
+# Five kernels, from kernel/: kmain_heap (the exercise), and
+# kmain_heap_double_free, kmain_heap_wild_free, kmain_heap_oom,
+# kmain_heap_fault (each ends in a named panic).
+# Assertions, per tier (native, release) and firmware (bios, uefi):
+#   H1 build: tools/build-kernel's object assertions for all five; for
+#      kmain_heap also its runtime ones — wolf wrote kmain_heap.rt-none.a,
+#      the archive imports only wolf_alloc, wolf_free and wolf_trap, the
+#      link took it after the kernel's objects, the linked ELF names no
+#      xmm/ymm — and the ELF defines wolf_alloc and wolf_free (T, from
+#      kernel/heap) and the runtime's __wolf_rt_region_new.
+#   H2 start: kmain_heap's transcript begins, after the firmware's bytes,
+#        PAX heap test / frames: … / paging: … / frames before the heap: G
+#        heap: slot 384 at 0xffffc04000000000, 0 pages, 0 class pages, 0 free, 0 live blocks, 0 live bytes, 0 allocs, 0 frees, 1 book pages, T0 table frames, N0 frames taken
+#      with N0 = T0 + 1 (the state page) and 1 <= T0 <= 3.
+#   H3 values: each of the 8 rounds prints, exactly,
+#        interp: n=100000 hex=186a0 neg=-7 pad=[  100000] ok=true c=w s=pax r=<r>
+#        round <r>: list 100000 sum 4999950000 bad 0, map 1000 keys bad 0 absent ok, closure 42, nested ok
+#      (the List's every element and sum, the Map's 1000 interpolated
+#      keys found by fresh keys and one absent, the closure, the nested
+#      region's bytes live inside it and gone after; the expected text is
+#      written here, not taken from the kernel).
+#   H4 no leak: after every round,
+#        after <r>: live 0 blocks 0 bytes, regions 0 bytes, heap P pages, frames F free
+#      with P > 0 and P, F the SAME for r = 1..8 (the high-water mark
+#      does not move after the first round); the closing `heap:` line
+#      has P pages, 0 live blocks and bytes, allocs = frees > 0, its run
+#      layer whole again (free = P - class pages), and its frames taken
+#      N = P + book pages + table frames = G - F (every frame the heap
+#      holds is accounted for, and no other frame went missing).
+#   H5 halted: kmain_heap ends `halt` and tools/qemu-halt holds it to RIP
+#      in pax_halt, IF clear, HLT=1, no further byte.
+#   H6 double free: kmain_heap_double_free's log ends
+#        free twice: 0x<p>
+#        PANIC heap: double free 0x<p>
+#      (the same address, in the heap's slot), and the kernel halted.
+#   H7 wild free: kmain_heap_wild_free's log ends
+#        block 0x<p>, free outside: 0x<a>
+#        PANIC heap: free outside the heap 0x<a>
+#      (a an HHDM address), and the kernel halted.
+#   H8 out of memory: kmain_heap_oom's log ends
+#        oom: 128 blocks of 1 MiB, heap 32768 pages; one more
+#        PANIC heap: out of memory, asked 0x0000000000100000
+#      (the limit, 128 MiB, reached exactly; the hook panics rather than
+#      return the null the runtime would trap), and the kernel halted.
+#   H9 heap fault: kmain_heap_fault's log ends
+#        block 0x<p>, read past the heap: 0x<a>
+#        PANIC page fault vector 14 error 0x0000000000000000 rip … cr2 0x<a> (heap)
+#      (kw10's handler names the heap for an address in slot 384, the
+#      slot H2's line reports), and the kernel halted.
+#
+# --images DIR boots ISOs and ELFs built earlier by this script (DIR
+# holds <tier>/<kernel>.{iso,elf}): any host with QEMU and nm, no wolf
+# needed (H1's archive rows then read the ELF only). Without it the
+# script builds with $PAX_WOLF (linux); --no-boot stops after the build
+# (H1), leaving them in build/mpx2-heap.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+
+images= legs=both tiers=both noboot=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "usage: tests/mpx2-heap [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+
+kernels="kmain_heap kmain_heap_double_free kmain_heap_wild_free kmain_heap_oom kmain_heap_fault"
+work=$PAX_BUILD/mpx2-heap
+ROUNDS=8
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+need nm
+
+# H1's ELF rows: the hook pair from wolf, the runtime from the archive.
+elf_rows() { # tier elf
+    local syms
+    syms=$(nm "$2" 2>/dev/null)
+    if printf '%s\n' "$syms" | awk '$2 == "T" && $3 == "wolf_alloc" { a = 1 } $2 == "T" && $3 == "wolf_free" { f = 1 } $2 ~ /^[Tt]$/ && $3 == "__wolf_rt_region_new" { r = 1 } END { exit !(a && f && r) }'; then
+        say "PASS H1 $1 kmain_heap: the ELF defines wolf_alloc and wolf_free (T) and __wolf_rt_region_new"
+    else
+        bad "H1 $1 kmain_heap: the ELF lacks wolf_alloc, wolf_free (T) or __wolf_rt_region_new"
+    fi
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        for k in $kernels; do
+            log=$work/$tier/$k.build-kernel.log
+            if [ ! -f "$PAX_ROOT/kernel/$k.lu" ]; then
+                bad "H1 $tier $k: no kernel/$k.lu"
+                continue
+            fi
+            if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/$k.lu" "$work/$tier" 2>"$log"); then
+                cat "$log" >&2
+                say "PASS H1 $tier $k: build-kernel's assertions"
+                "$PAX_ROOT/tools/mkimage" "$elf" "$work/$tier/$k.iso" >/dev/null || bad "$tier $k: mkimage"
+                say "built $tier $k: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/$k.iso")"
+                if [ "$k" = kmain_heap ]; then
+                    if grep -q "step 3 (kmain_heap, $tier): linked with kmain_heap.rt-none.a; the whole ELF names no xmm/ymm" "$log" \
+                        && grep -q "__wolf_rt_\* from kmain_heap.rt-none.a, wolf_alloc and wolf_free defined in wolf" "$log"; then
+                        say "PASS H1 $tier kmain_heap: linked with wolf's freestanding runtime (kmain_heap.rt-none.a $(sha256_of "$work/$tier/kmain_heap.rt-none.a" | cut -c1-8)…), its imports the hook trio, no xmm/ymm in the ELF"
+                    else
+                        bad "H1 $tier kmain_heap: build-kernel did not report the runtime archive linked (an allocating kernel without libwolf_rt_none.a?)"
+                    fi
+                    elf_rows "$tier" "$elf"
+                fi
+            else
+                cat "$log" >&2
+                bad "H1 $tier $k: tools/build-kernel"
+            fi
+        done
+    done
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx2-heap build (H1): PASS (no boot: --no-boot)" || say "mpx2-heap build: FAIL"
+        exit "$fail"
+    fi
+else
+    for tier in $tiers; do
+        [ -f "$images/$tier/kmain_heap.elf" ] && elf_rows "$tier" "$images/$tier/kmain_heap.elf"
+    done
+fi
+
+# Boot one kernel to its halt; leaves the log in $log. Status: qemu-halt's.
+halt_boot() { # tier kernel leg marker-ERE
+    local tier=$1 k=$2 leg=$3 marker=$4
+    log=$PAX_BUILD/mpx2-heap-$tier-$k-$leg.serial.log
+    local iso=$images/$tier/$k.iso elf=$images/$tier/$k.elf rc=0
+    rm -f "$log" "$log.verdict"
+    [ -f "$iso" ] && [ -f "$elf" ] || { say "no image or ELF for $tier $k ($iso)"; : > "$log"; return 2; }
+    "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 240 \
+        --elf "$elf" --marker "$marker" "$iso" >"$log.verdict" 2>&1 || rc=$?
+    ran=$((ran + 1))
+    printf '%s %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$tier" "$k" "$leg" "$rc" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" "$(sha256_of "$iso")" \
+        >> "$PAX_BUILD/mpx2-heap-runs.txt"
+    return "$rc"
+}
+
+# The value of the last line of the normalised log matching sed BRE $2
+# with one group.
+grab() { serial_norm "$1" | sed -n "s/^$2\$/\\1/p" | tail -n 1; }
+
+halted() { # assertion label status
+    if [ "$3" = 0 ]; then
+        say "PASS $1 $2: halted: $(tail -n 1 "$log.verdict")"
+    else
+        bad "$1 $2: not halted (qemu-halt $3): $(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict")"
+    fi
+}
+
+HEX='0x[0-9a-f]{16}'
+FRAMES_RE='frames: [0-9]+ usable, [0-9]+ below 1 MiB, [0-9]+ allocator, [0-9]+ free'
+PAGING_RE="paging: limine cr3 $HEX, pax cr3 $HEX, [0-9]+ table frames"
+HEAP0_RE='heap: slot 384 at 0xffffc04000000000, 0 pages, 0 class pages, 0 free, 0 live blocks, 0 live bytes, 0 allocs, 0 frees, 1 book pages, [0-9]+ table frames, [0-9]+ frames taken'
+AFTER_RE='after [0-9]+: live [0-9]+ blocks [0-9]+ bytes, regions [0-9]+ bytes, heap [0-9]+ pages, frames [0-9]+ free'
+HEAPN_RE='heap: slot 384 at 0xffffc04000000000, [0-9]+ pages, [0-9]+ class pages, [0-9]+ free, [0-9]+ live blocks, [0-9]+ live bytes, [0-9]+ allocs, [0-9]+ frees, [0-9]+ book pages, [0-9]+ table frames, [0-9]+ frames taken'
+ROUND_TAIL='list 100000 sum 4999950000 bad 0, map 1000 keys bad 0 absent ok, closure 42, nested ok'
+INTERP_HEAD='interp: n=100000 hex=186a0 neg=-7 pad=[  100000] ok=true c=w s=pax r='
+
+: > "$PAX_BUILD/mpx2-heap-runs.txt"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        # --- kmain_heap: H2..H5 ----------------------------------------
+        hrc=0; halt_boot "$tier" kmain_heap "$leg" halt || hrc=$?
+        want=('PAX heap test' "$FRAMES_RE" "$PAGING_RE" 'frames before the heap: [0-9]+' "$HEAP0_RE")
+        r=1
+        while [ "$r" -le "$ROUNDS" ]; do
+            want+=("$(printf '%s' "$INTERP_HEAD$r" | sed 's/[][.]/\\&/g')" "round $r: $ROUND_TAIL" "$AFTER_RE")
+            r=$((r + 1))
+        done
+        want+=("$HEAPN_RE" 'halt')
+        if "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" "${want[@]}" >"$log.expect" 2>&1; then
+            say "PASS H3 $tier kmain_heap $leg: $ROUNDS rounds, each: the List's 100000 elements and sum, the Map's 1000 keys and one absent, closure 42, the nested region, the interpolation line byte for byte"
+            G=$(grab "$log" 'frames before the heap: \([0-9]*\)')
+            T0=$(serial_norm "$log" | sed -n 's/^heap: slot 384 at 0xffffc04000000000, 0 pages, .*, \([0-9]*\) table frames, [0-9]* frames taken$/\1/p' | head -n 1)
+            N0=$(serial_norm "$log" | sed -n 's/^heap: slot 384 at 0xffffc04000000000, 0 pages, .*, \([0-9]*\) frames taken$/\1/p' | head -n 1)
+            [ -n "$T0" ] && [ "$T0" -ge 1 ] && [ "$T0" -le 3 ] && [ "$N0" = $((T0 + 1)) ] \
+                && say "PASS H2 $tier kmain_heap $leg: the empty heap at slot 384, state page + $T0 table frames = $N0 frames taken (of G=$G)" \
+                || bad "H2 $tier kmain_heap $leg: T0=$T0 N0=$N0"
+            # H4: every `after` line, then the closing heap line.
+            afters=$(serial_norm "$log" | sed -n 's/^after \([0-9]*\): live \([0-9]*\) blocks \([0-9]*\) bytes, regions \([0-9]*\) bytes, heap \([0-9]*\) pages, frames \([0-9]*\) free$/\1 \2 \3 \4 \5 \6/p')
+            P1= F1= ok4=1 seen=0
+            while read -r rr lb ly rg pp ff; do
+                [ -n "$rr" ] || continue
+                seen=$((seen + 1))
+                [ -z "$P1" ] && { P1=$pp; F1=$ff; }
+                if [ "$lb" != 0 ] || [ "$ly" != 0 ] || [ "$rg" != 0 ] || [ "$pp" != "$P1" ] || [ "$ff" != "$F1" ]; then
+                    bad "H4 $tier kmain_heap $leg: after $rr: live $lb blocks $ly bytes, regions $rg, heap $pp pages (round 1: $P1), frames $ff (round 1: $F1)"
+                    ok4=0
+                fi
+            done <<< "$afters"
+            hl=$(serial_norm "$log" | grep -E "^$HEAPN_RE\$" | tail -n 1)
+            read -r Pn Cn Qn Bn Yn An Fn Mn Tn Nn <<< "$(printf '%s\n' "$hl" | sed -n 's/^heap: slot 384 at 0xffffc04000000000, \([0-9]*\) pages, \([0-9]*\) class pages, \([0-9]*\) free, \([0-9]*\) live blocks, \([0-9]*\) live bytes, \([0-9]*\) allocs, \([0-9]*\) frees, \([0-9]*\) book pages, \([0-9]*\) table frames, \([0-9]*\) frames taken$/\1 \2 \3 \4 \5 \6 \7 \8 \9/p') $(printf '%s\n' "$hl" | sed -n 's/.*, \([0-9]*\) frames taken$/\1/p')"
+            if [ "$ok4" = 1 ] && [ "$seen" = "$ROUNDS" ] && [ -n "$P1" ] && [ "$P1" -gt 0 ] \
+                && [ "$Pn" = "$P1" ] && [ "$Bn" = 0 ] && [ "$Yn" = 0 ] && [ "$An" = "$Fn" ] && [ "$An" -gt 0 ] \
+                && [ "$Qn" = $((Pn - Cn)) ] && [ "$Nn" = $((Pn + Mn + Tn)) ] && [ "$Nn" = $((G - F1)) ]; then
+                say "PASS H4 $tier kmain_heap $leg: $ROUNDS rounds, live 0 after each, heap $P1 pages and frames $F1 free after every one; $An allocs = $Fn frees; run layer whole ($Qn = $Pn - $Cn class pages); frames taken $Nn = $Pn + $Mn books + $Tn tables = $G - $F1"
+            else
+                bad "H4 $tier kmain_heap $leg: rounds seen $seen, P1=$P1 F1=$F1; closing line P=$Pn C=$Cn free=$Qn live=$Bn/$Yn allocs=$An frees=$Fn books=$Mn tables=$Tn taken=$Nn; G=$G"
+            fi
+        else
+            cat "$log.expect" >&2
+            bad "H2-H4 $tier kmain_heap $leg: the transcript (the first line expect-serial names above)"
+        fi
+        halted H5 "$tier kmain_heap $leg" "$hrc"
+
+        # --- kmain_heap_double_free: H6 --------------------------------
+        hrc=0; halt_boot "$tier" kmain_heap_double_free "$leg" 'PANIC .*' || hrc=$?
+        a=$(grab "$log" 'free twice: \(0x[0-9a-f]*\)')
+        if [ -n "$a" ] && [ "${a:0:8}" = 0xffffc0 ] && "$PAX_ROOT/tools/expect-serial" --tail "$log" \
+            "free twice: $a" "PANIC heap: double free $a" && [ "$hrc" = 0 ]; then
+            say "PASS H6 $tier kmain_heap_double_free $leg: PANIC heap: double free $a, halted"
+        else
+            bad "H6 $tier kmain_heap_double_free $leg: the panic line or the halt (qemu-halt $hrc, address '$a')"
+        fi
+
+        # --- kmain_heap_wild_free: H7 ----------------------------------
+        hrc=0; halt_boot "$tier" kmain_heap_wild_free "$leg" 'PANIC .*' || hrc=$?
+        p=$(grab "$log" 'block \(0x[0-9a-f]*\), free outside: 0x[0-9a-f]*')
+        a=$(grab "$log" 'block 0x[0-9a-f]*, free outside: \(0x[0-9a-f]*\)')
+        if [ -n "$a" ] && [ "${a:0:6}" = 0xffff ] && [ "${a:0:8}" != 0xffffc0 ] && "$PAX_ROOT/tools/expect-serial" --tail "$log" \
+            "block $p, free outside: $a" "PANIC heap: free outside the heap $a" && [ "$hrc" = 0 ]; then
+            say "PASS H7 $tier kmain_heap_wild_free $leg: PANIC heap: free outside the heap $a, halted"
+        else
+            bad "H7 $tier kmain_heap_wild_free $leg: the panic line or the halt (qemu-halt $hrc, address '$a')"
+        fi
+
+        # --- kmain_heap_oom: H8 ----------------------------------------
+        hrc=0; halt_boot "$tier" kmain_heap_oom "$leg" 'PANIC .*' || hrc=$?
+        if "$PAX_ROOT/tools/expect-serial" --tail "$log" \
+            'oom: 128 blocks of 1 MiB, heap 32768 pages; one more' \
+            'PANIC heap: out of memory, asked 0x0000000000100000' && [ "$hrc" = 0 ]; then
+            say "PASS H8 $tier kmain_heap_oom $leg: 128 MiB, then PANIC heap: out of memory, halted"
+        else
+            bad "H8 $tier kmain_heap_oom $leg: the panic line or the halt (qemu-halt $hrc)"
+        fi
+
+        # --- kmain_heap_fault: H9 --------------------------------------
+        hrc=0; halt_boot "$tier" kmain_heap_fault "$leg" 'PANIC .*' || hrc=$?
+        p=$(grab "$log" 'block \(0x[0-9a-f]*\), read past the heap: 0x[0-9a-f]*')
+        a=$(grab "$log" 'block 0x[0-9a-f]*, read past the heap: \(0x[0-9a-f]*\)')
+        if [ -n "$a" ] && [ $(( (a >> 39) & 511 )) = 384 ] && "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
+            "block $p, read past the heap: $a" \
+            "PANIC page fault vector 14 error 0x0000000000000000 rip $HEX rsp $HEX frame $HEX cr2 $a \\(heap\\)" && [ "$hrc" = 0 ]; then
+            say "PASS H9 $tier kmain_heap_fault $leg: PANIC page fault … cr2 $a (heap), slot 384, halted"
+        else
+            bad "H9 $tier kmain_heap_fault $leg: the panic line or the halt (qemu-halt $hrc, address '$a')"
+        fi
+    done
+done
+cat "$PAX_BUILD/mpx2-heap-runs.txt"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx2-heap: PASS" || say "mpx2-heap: FAIL"
+exit "$fail"

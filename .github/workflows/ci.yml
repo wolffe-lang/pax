@@ -485,3 +485,66 @@ jobs:
             build/mpx2-sched-runs.txt
           retention-days: 14
           if-no-files-found: warn
+
+  # px06: the kernel heap. kernel/heap is wolf's allocator hook
+  # (wolf_alloc, wolf_free; wolf-lang kw12) written in wolf over px02's
+  # frames and px03's paging; kernel code allocates through wolf's
+  # freestanding runtime (libwolf_rt_none.a, from the pinned archive).
+  # tests/mpx2-heap: the archive linked (H1); the empty heap (H2); eight
+  # rounds of a List, a Map with str keys, interpolation, a closure and
+  # a nested region, every value checked (H3); no leak — live blocks
+  # back to zero and the heap's pages and the free frames unchanged
+  # after every round (H4); the halt (H5); a double free (H6), a free
+  # outside the heap (H7), out of memory (H8) and a page fault in the
+  # heap (H9) each panicking by name.
+  mpx2-heap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils
+          qemu-system-x86_64 --version
+          clang --version
+          ld.lld --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx2-heap-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the heap, both tiers, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx2-heap
+
+      - name: keep the kernels, the transcripts and the halt probes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx2-heap-linux
+          path: |
+            build/mpx2-heap/*/*.elf
+            build/mpx2-heap/*/*.iso
+            build/mpx2-heap/*/*.log
+            build/mpx2-heap-*.log
+            build/mpx2-heap-*.meta
+            build/mpx2-heap-*.halt
+            build/mpx2-heap-*.verdict
+            build/mpx2-heap-*.expect
+            build/mpx2-heap-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
