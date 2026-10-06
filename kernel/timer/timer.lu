@@ -46,6 +46,8 @@ extern "c" fn pax_outb(port: u16, v: u8)
 extern "c" fn pax_inb(port: u16) -> u8
 extern "c" fn pax_wait()
 
+extern "c" let pax_tick_count: *u64
+
 const MASTER_CMD: u16 = 0x20
 const MASTER_DATA: u16 = 0x21
 const SLAVE_CMD: u16 = 0xa0
@@ -77,8 +79,20 @@ pub fn divisor() -> u64 {
     DIVISOR
 }
 
-/// Timer interrupts handled since `start`.
-var tick_count: u64 = 0
+// Timer interrupts handled since `start`: boot/isr.S's `pax_tick_count`,
+// read and written volatile (px07, #598). It was a module `var`; wolf
+// 0.2.24's compiled tiers forward a module var's value across a call
+// that writes it (wolf-lang#598), and the handler writes this one
+// behind every call a polling loop makes (`wait`, a switch).
+fn count() -> u64 {
+    // # Safety: boot/isr.S's 8-byte word, written only here and by `tick`.
+    unsafe { pax_tick_count.read_volatile() }
+}
+
+fn set_count(v: u64) {
+    // # Safety: as `count`.
+    unsafe { pax_tick_count.write_volatile(v) }
+}
 
 /// Spurious requests seen (vectors 39 and 47).
 var spurious_seen: u64 = 0
@@ -96,9 +110,9 @@ fn inp(port: u16) -> u64 {
 
 /// Remap and mask the 8259s, start the PIT at 99.998 Hz, unmask line 0.
 pub fn start() {
-    // # Safety: the counters are touched with interrupts off.
+    set_count(0) // #598
+    // # Safety: the counter is touched with interrupts off.
     unsafe {
-        tick_count = 0
         spurious_seen = 0
     }
     out(MASTER_CMD, 0x11) // ICW1: initialise, ICW4 follows (edge, cascade)
@@ -125,18 +139,13 @@ pub fn stop() {
 
 /// Vector 32: count the tick and acknowledge it (non-specific EOI).
 pub fn tick() {
-    // # Safety: called from the interrupt handler, interrupts off.
-    unsafe {
-        tick_count += 1
-    }
+    set_count(count() + 1) // #598
     out(MASTER_CMD, 0x20)
 }
 
 /// Timer interrupts handled since `start`.
 pub fn ticks() -> u64 {
-    // # Safety: a read of the counter; the kernel's interrupts are off
-    // outside `wait`.
-    unsafe { tick_count }
+    count() // #598: a volatile read, never a value from before a call
 }
 
 /// Spurious requests seen since `start`.

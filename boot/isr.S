@@ -48,6 +48,9 @@
      pax_idtr       LIDT's 10-byte operand
      pax_ist1_stack 16 KiB; pax_ist1_top is its first byte past the end,
                     the TSS's IST1: #DF runs there whatever %rsp was
+     pax_tick_count kernel/timer's tick count (px07): written by the
+                    handler, polled by threads, so it is a word read
+                    volatile, not a module `var` (wolf-lang#598)
 
    Routines:
      pax_load_gdt(gdtr)   LGDT, then CS = 0x08 (a far return), DS, ES, SS,
@@ -276,6 +279,9 @@ pax_gdtr:
         .globl pax_idtr
 pax_idtr:
         .zero 16
+        .globl pax_tick_count
+pax_tick_count:
+        .zero 8
         .p2align 4
         .globl pax_ist1_stack
 pax_ist1_stack:
