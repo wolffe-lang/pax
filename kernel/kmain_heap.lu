@@ -12,6 +12,7 @@
 //     paging: limine cr3 0x<A>, pax cr3 0x<B>, <P> table frames
 //     frames before the heap: <G>
 //     heap: slot 384 at 0xffffc04000000000, 0 pages, ... (the empty heap)
+//     598: up false -> true, pages 0 -> 16, live 0 -> 1 -> 0
 //     round <r>: list 100000 sum 4999950000 bad 0, map 1000 keys bad 0 absent ok, closure 42, nested ok
 //     interp: n=100000 hex=186a0 neg=-7 pad=[  100000] ok=true c=w s=pax r=<r>
 //     after <r>: live <B> blocks <Y> bytes, regions <R> bytes, heap <Q> pages, frames <F> free
@@ -138,8 +139,36 @@ export fn kmain() {
     log.put("frames before the heap: ")
     log.dec(frames.free_count() as int)
     log.end()
+    let up0 = heap.is_up()
     heap.start()
     heap.report()
+
+    // wolf-lang#598 witness (H10): the heap's state read, a call that
+    // writes it, read again — a compiled tier that forwards the first
+    // read across the call prints the old value.
+    let up1 = heap.is_up()
+    let p0 = heap.pages()
+    let l0 = heap.live_blocks()
+    let blk = heap.alloc(65536, 16)
+    let p1 = heap.pages()
+    let l1 = heap.live_blocks()
+    heap.free(blk, 65536, 16)
+    let l2 = heap.live_blocks()
+    log.put("598: up ")
+    log.put(if up0 { "true" } else { "false" })
+    log.put(" -> ")
+    log.put(if up1 { "true" } else { "false" })
+    log.put(", pages ")
+    log.dec(p0 as int)
+    log.put(" -> ")
+    log.dec(p1 as int)
+    log.put(", live ")
+    log.dec(l0 as int)
+    log.put(" -> ")
+    log.dec(l1 as int)
+    log.put(" -> ")
+    log.dec(l2 as int)
+    log.end()
 
     var r = 1
     while r <= ROUNDS {
