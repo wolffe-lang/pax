@@ -77,6 +77,7 @@ use timer
 extern "c" fn pax_switch()
 
 extern "c" let pax_threads: *u64
+extern "c" let pax_sched_state: *u64
 extern "c" let pax_thread_entry: *u8
 extern "c" let pax_idle: *u8
 
@@ -129,15 +130,24 @@ const KERNEL_CS: u64 = 0x08
 const KERNEL_SS: u64 = 0x10
 const RFLAGS_IF: u64 = 0x202 // IF and the always-one bit 1
 
-var started: u64 = 0
-var current: u64 = 0 // the running thread's slot
-var head: u64 = 0 // slot + 1; 0 when the queue is empty
-var tail: u64 = 0
-var slice_start: u64 = 0 // the tick the current thread was switched in at
-var next_id: u64 = 2
-var live: u64 = 0 // spawned threads not yet exited
-var waiter: u64 = 0 // slot + 1 of the thread in wait_all; 0 none
-var pml4_pa: u64 = 0
+// The scheduler's scalars, as words of boot/sched.S's `pax_sched_state`
+// read and written volatile — NOT module `var`s (#598): wolf 0.2.24's
+// compiled tiers forward a module var's value (and a store through an
+// `extern "c" let` pointer) across a call that writes it
+// (wolf-lang#598), and every switch is such a call — `pax_switch`
+// returns after the timer and other threads have rewritten the run
+// queue, the current slot and the tick count. A volatile access is
+// never forwarded or merged ([mem.unsafe.volatile]), so each read here
+// is the word as it is now.
+const S_STARTED: u64 = 0
+const S_CURRENT: u64 = 1 // the running thread's slot
+const S_HEAD: u64 = 2 // slot + 1; 0 when the queue is empty
+const S_TAIL: u64 = 3
+const S_SLICE: u64 = 4 // the tick the current thread was switched in at
+const S_NEXT_ID: u64 = 5
+const S_LIVE: u64 = 6 // created threads not yet exited
+const S_WAITER: u64 = 7 // slot + 1 of the thread in wait_all; 0 none
+const S_PML4: u64 = 8
 
 /// Field `off` of slot `s`'s record. Volatile: threads poll their own
 /// record while the timer rewrites it.
@@ -151,9 +161,20 @@ fn put_field(s: u64, off: int, v: u64) {
     unsafe { ((pax_threads as u64 + s * size_of(Thread) as u64 + off as u64) as *u64).write_volatile(v) }
 }
 
+/// Scheduler word `i` (S_*), read volatile (#598).
+fn sv(i: u64) -> u64 {
+    // # Safety: i < 16, inside boot/sched.S's 128-byte pax_sched_state.
+    unsafe { ((pax_sched_state as u64 + i * 8) as *u64).read_volatile() }
+}
+
+/// Write scheduler word `i` (#598).
+fn put_sv(i: u64, v: u64) {
+    // # Safety: as `sv`.
+    unsafe { ((pax_sched_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
 fn cur() -> u64 {
-    // # Safety: a read of the scheduler's scalar.
-    unsafe { current }
+    sv(S_CURRENT) // #598: reread after every switch
 }
 
 /// Slot `s`'s virtual space: [base, base + SPAN).
@@ -163,31 +184,28 @@ fn base_of(s: u64) -> u64 {
 
 fn enqueue(s: u64) {
     put_field(s, offset_of(Thread, next), 0)
-    // # Safety: the queue's ends; IF is clear.
-    unsafe {
-        if tail == 0 {
-            head = s + 1
-        } else {
-            put_field(tail - 1, offset_of(Thread, next), s + 1)
-        }
-        tail = s + 1
+    let t = sv(S_TAIL) // #598
+    if t == 0 {
+        put_sv(S_HEAD, s + 1)
+    } else {
+        put_field(t - 1, offset_of(Thread, next), s + 1)
     }
+    put_sv(S_TAIL, s + 1)
 }
 
 /// The queue's head (slot + 1), removed; 0 when it is empty.
 fn dequeue() -> u64 {
-    // # Safety: as `enqueue`.
-    unsafe {
-        if head == 0 {
-            return 0
-        }
-        let s = head - 1
-        head = field(s, offset_of(Thread, next))
-        if head == 0 {
-            tail = 0
-        }
-        s + 1
+    let h = sv(S_HEAD) // #598
+    if h == 0 {
+        return 0
     }
+    let s = h - 1
+    let n = field(s, offset_of(Thread, next))
+    put_sv(S_HEAD, n)
+    if n == 0 {
+        put_sv(S_TAIL, 0)
+    }
+    s + 1
 }
 
 /// Make every sleeper whose tick has come ready, in slot order.
@@ -215,11 +233,8 @@ fn run_next() -> u64 {
     let s = if n == 0 { IDLE } else { n - 1 }
     put_field(s, offset_of(Thread, state), RUNNING)
     put_field(s, offset_of(Thread, runs), field(s, offset_of(Thread, runs)) + 1)
-    // # Safety: the scheduler's scalars; IF is clear.
-    unsafe {
-        current = s
-        slice_start = timer.ticks()
-    }
+    put_sv(S_CURRENT, s)
+    put_sv(S_SLICE, timer.ticks())
     let f = field(s, offset_of(Thread, frame))
     put_field(s, offset_of(Thread, frame), 0)
     f
@@ -229,19 +244,16 @@ fn run_next() -> u64 {
 /// the tick). Returns the frame to resume: `f` itself, or another
 /// thread's.
 pub fn preempt(f: u64) -> u64 {
-    // # Safety: a read of the scheduler's scalars; IF is clear.
-    let (on, start) = unsafe { (started, slice_start) }
-    if on == 0 {
+    if sv(S_STARTED) == 0 {
         return f
     }
     wake_sleepers()
     let c = cur()
-    // # Safety: as above.
-    let ready = unsafe { head } != 0
-    if !ready {
+    // #598: the queue's head is read after wake_sleepers wrote it.
+    if sv(S_HEAD) == 0 {
         return f
     }
-    if c != IDLE && timer.ticks() - start < QUANTUM {
+    if c != IDLE && timer.ticks() - sv(S_SLICE) < QUANTUM {
         return f
     }
     put_field(c, offset_of(Thread, frame), f)
@@ -270,8 +282,7 @@ pub fn switched(f: u64) -> u64 {
 
 /// Map four fresh frames as slot `s`'s stack; record its bounds.
 fn make_stack(s: u64) {
-    // # Safety: a read of the scheduler's scalar.
-    let pml4 = unsafe { pml4_pa }
+    let pml4 = sv(S_PML4)
     let lo = base_of(s) + GUARD
     var k: u64 = 0
     while k < PAGES {
@@ -291,8 +302,7 @@ fn make_stack(s: u64) {
 
 /// Unmap slot `s`'s stack and give its frames back.
 fn free_stack(s: u64) {
-    // # Safety: as `make_stack`.
-    let pml4 = unsafe { pml4_pa }
+    let pml4 = sv(S_PML4)
     let lo = field(s, offset_of(Thread, stack_lo))
     var k: u64 = 0
     while k < PAGES {
@@ -352,17 +362,15 @@ pub fn start(pml4: u64) {
         clear(s)
         s += 1
     }
-    // # Safety: the scheduler's scalars; IF is clear.
-    unsafe {
-        pml4_pa = pml4
-        current = MAIN
-        head = 0
-        tail = 0
-        next_id = 2
-        live = 0
-        waiter = 0
-        slice_start = timer.ticks()
-    }
+    put_sv(S_STARTED, 0)
+    put_sv(S_PML4, pml4)
+    put_sv(S_CURRENT, MAIN)
+    put_sv(S_HEAD, 0)
+    put_sv(S_TAIL, 0)
+    put_sv(S_NEXT_ID, 2)
+    put_sv(S_LIVE, 0)
+    put_sv(S_WAITER, 0)
+    put_sv(S_SLICE, timer.ticks())
     put_field(MAIN, offset_of(Thread, state), RUNNING)
     put_field(MAIN, offset_of(Thread, id), 0)
     put_field(MAIN, offset_of(Thread, runs), 1)
@@ -371,10 +379,7 @@ pub fn start(pml4: u64) {
     first_frame(IDLE, unsafe { pax_idle as u64 }, 0, 0)
     put_field(IDLE, offset_of(Thread, id), 1)
     put_field(IDLE, offset_of(Thread, state), READY)
-    // # Safety: as above.
-    unsafe {
-        started = 1
-    }
+    put_sv(S_STARTED, 1)
     sync.irq_restore(saved)
 }
 
@@ -406,13 +411,9 @@ pub fn create(body: u64, arg: u64) -> u64 {
     make_stack(s)
     // # Safety: the address of boot/sched.S's entry; nothing is read.
     first_frame(s, unsafe { pax_thread_entry as u64 }, body, arg)
-    // # Safety: the scheduler's scalars; IF is clear.
-    let id = unsafe { next_id }
-    // # Safety: as above.
-    unsafe {
-        next_id += 1
-        live += 1
-    }
+    let id = sv(S_NEXT_ID)
+    put_sv(S_NEXT_ID, id + 1)
+    put_sv(S_LIVE, sv(S_LIVE) + 1)
     put_field(s, offset_of(Thread, id), id)
     put_field(s, offset_of(Thread, state), READY)
     enqueue(s)
@@ -443,9 +444,9 @@ pub fn sleep(n: u64) -> (u64, u64) {
     put_field(c, offset_of(Thread, state), SLEEPING)
     // # Safety: as `yield`.
     unsafe { pax_switch() }
-    let woke = timer.ticks()
+    let woke = timer.ticks() // #598: a volatile read (kernel/timer)
     sync.irq_restore(saved)
-    (from, woke)
+    (from, woke) // #598: `woke` is read after the switch; S2 asserts woke = from + n
 }
 
 /// Block until every spawned thread has exited, then reap them.
@@ -453,10 +454,7 @@ pub fn wait_all() {
     let saved = sync.irq_save()
     if live_count() > 0 {
         let c = cur()
-        // # Safety: the scheduler's scalar; IF is clear.
-        unsafe {
-            waiter = c + 1
-        }
+        put_sv(S_WAITER, c + 1)
         put_field(c, offset_of(Thread, state), BLOCKED)
         // # Safety: as `yield`.
         unsafe { pax_switch() }
@@ -470,14 +468,13 @@ pub fn wait_all() {
 pub fn exit() {
     let _saved = sync.irq_save()
     let c = cur()
-    // # Safety: the scheduler's scalars; IF is clear.
-    unsafe {
-        live -= 1
-        if live == 0 && waiter != 0 {
-            put_field(waiter - 1, offset_of(Thread, state), READY)
-            enqueue(waiter - 1)
-            waiter = 0
-        }
+    let n = sv(S_LIVE) - 1
+    put_sv(S_LIVE, n)
+    let w = sv(S_WAITER)
+    if n == 0 && w != 0 {
+        put_field(w - 1, offset_of(Thread, state), READY)
+        enqueue(w - 1)
+        put_sv(S_WAITER, 0)
     }
     put_field(c, offset_of(Thread, state), DEAD)
     // # Safety: as `yield`; a dead thread is never switched in again.
@@ -513,8 +510,7 @@ pub fn idle_runs() -> u64 {
 
 /// Spawned threads not yet exited.
 pub fn live_count() -> u64 {
-    // # Safety: a read of the scheduler's scalar.
-    unsafe { live }
+    sv(S_LIVE)
 }
 
 /// The slot of the live thread with id `id`; SLOTS if none.
@@ -560,8 +556,7 @@ pub fn guard_lo(id: u64) -> u64 {
 /// The id of the thread whose guard holds `a`, plus one; 0 when `a` is
 /// in no live thread's guard (kernel/interrupts' fatal path).
 pub fn guard_of(a: u64) -> u64 {
-    // # Safety: a read of the scheduler's scalar.
-    if unsafe { started } == 0 || a < STACKS || a >= STACKS + SLOTS * SPAN {
+    if sv(S_STARTED) == 0 || a < STACKS || a >= STACKS + SLOTS * SPAN {
         return 0
     }
     let s = (a - STACKS) / SPAN
@@ -576,8 +571,7 @@ pub fn guard_of(a: u64) -> u64 {
 
 /// The PML4 the stacks are mapped in.
 pub fn pml4() -> u64 {
-    // # Safety: a read of the scheduler's scalar.
-    unsafe { pml4_pa }
+    sv(S_PML4)
 }
 
 /// The scheduler's line:

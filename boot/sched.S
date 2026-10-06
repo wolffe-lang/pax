@@ -61,6 +61,11 @@
                        #[repr(c)] Thread)
      pax_sched_locks   eight 8-byte lock words (kernel/sync; word 0 is
                        the console's)
+     pax_sched_state   sixteen 8-byte words: the scheduler's scalars
+                       (the current slot, the run queue's ends, …),
+                       kept here and read volatile rather than in module
+                       `var`s, which wolf 0.2.24 forwards across a call
+                       that writes them (wolf-lang#598)
 
    Written from: the Intel SDM vol. 3A §6.8.1 (masking maskable
    interrupts: IF, CLI, STI), §6.12.1 (exception and interrupt handler
@@ -139,5 +144,9 @@ pax_threads:
         .globl pax_sched_locks
 pax_sched_locks:
         .zero 64
+        .p2align 6
+        .globl pax_sched_state
+pax_sched_state:
+        .zero 128
 
         .section .note.GNU-stack, "", @progbits
