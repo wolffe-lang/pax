@@ -1,0 +1,197 @@
+//! schedtest — the thread bodies tests/mpx2-sched runs (px07).
+//!
+//! Each body is an `export fn NAME(arg: u64)`: kernel/sched starts a
+//! thread at a body's address, which the kernel names with `extern "c"
+//! let NAME: *u8` (wolf has no C function-pointer value, wolf-lang#520,
+//! and an `extern "c" let` may not name an export of its own module,
+//! E0302, so the bodies live here and the kernels name them). Every
+//! line a thread writes is one whole line under the console lock
+//! (kernel/sync), so lines never interleave mid-way.
+//!
+//! - `pax_t_spin(n)`: spins, never yields or sleeps, and writes `t<id>:
+//!   run <r> at tick <k>` each time it finds its run count moved — that
+//!   is, each time the timer switched it back in — until it has seen n
+//!   runs; then `t<id>: done, <R> runs, <Y> yields`.
+//! - `pax_t_sleep(n)`: sleeps n ticks: `t<id>: slept <n> ticks, tick <a>
+//!   -> <b>`.
+//! - `pax_t_locked(page)`: for 20 ticks, increments the word at `page`
+//!   under the lock at `page + 8` — a volatile read, a delay, a volatile
+//!   write — counting its own increments: `lock: t<id> <n> increments in
+//!   <r> runs`; adds n to the word at `page + 24` (atomically).
+//! - `pax_t_unlocked(page)`: the same on the word at `page + 16` with no
+//!   lock, the control: `nolock: t<id> <n> increments in <r> runs`, n
+//!   added to the word at `page + 32`. A
+//!   preemption between its read and its write loses every increment
+//!   the other thread made meanwhile.
+//! - `pax_t_deep(page)`: recurses (a volatile write before and after
+//!   each call, so no tier turns it into a loop) until it runs into its
+//!   stack's guard.
+//!
+//! No Linux source; no other kernel's source.
+
+use log
+use sched
+use sync
+use timer
+
+/// Ticks the counting threads run for.
+const COUNT_TICKS: u64 = 20
+
+/// PAUSEs between a counter's read and its write: the window a
+/// preemption must land in to lose updates, most of each iteration.
+const DELAY: u64 = 64
+
+fn say_begin() -> u64 {
+    sync.acquire(sync.console())
+}
+
+fn say_end(saved: u64) {
+    log.end()
+    sync.release(sync.console(), saved)
+}
+
+fn me() {
+    log.put("t")
+    log.dec(sched.self_id() as int)
+}
+
+fn delay() {
+    var i: u64 = 0
+    while i < DELAY {
+        sync.relax()
+        i += 1
+    }
+}
+
+export fn pax_t_spin(n: u64) {
+    var seen: u64 = 0
+    var last: u64 = 0
+    while seen < n {
+        let r = sched.self_runs()
+        if r != last {
+            last = r
+            seen += 1
+            let s = say_begin()
+            me()
+            log.put(": run ")
+            log.dec(seen as int)
+            log.put(" at tick ")
+            log.dec(timer.ticks() as int)
+            say_end(s)
+        }
+        sync.relax()
+    }
+    let s = say_begin()
+    me()
+    log.put(": done, ")
+    log.dec(sched.self_runs() as int)
+    log.put(" runs, ")
+    log.dec(sched.self_yields() as int)
+    log.put(" yields")
+    say_end(s)
+}
+
+export fn pax_t_sleep(n: u64) {
+    let (a, b) = sched.sleep(n)
+    let s = say_begin()
+    me()
+    log.put(": slept ")
+    log.dec(n as int)
+    log.put(" ticks, tick ")
+    log.dec(a as int)
+    log.put(" -> ")
+    log.dec(b as int)
+    say_end(s)
+}
+
+/// Count into the word at `ctr` for COUNT_TICKS ticks, under the lock at
+/// `lock` unless it is 0. Returns this thread's increments.
+fn count(ctr: u64, lock: u64) -> u64 {
+    let end = timer.ticks() + COUNT_TICKS
+    var mine: u64 = 0
+    while timer.ticks() < end {
+        var saved: u64 = 0
+        if lock != 0 {
+            saved = sync.acquire(lock)
+        }
+        // # Safety: `ctr` is a word of the test's page, mapped by the
+        // HHDM and 8-aligned.
+        let v = unsafe { (ctr as *u64).read_volatile() }
+        delay()
+        // # Safety: as above.
+        unsafe { (ctr as *u64).write_volatile(v + 1) }
+        if lock != 0 {
+            sync.release(lock, saved)
+        }
+        mine += 1
+    }
+    mine
+}
+
+fn counted(what: str, n: u64) {
+    let s = say_begin()
+    log.put(what)
+    me()
+    log.put(" ")
+    log.dec(n as int)
+    log.put(" increments in ")
+    log.dec(sched.self_runs() as int)
+    log.put(" runs")
+    say_end(s)
+}
+
+/// Add `n` to the word at `sum`: the threads' own total, which the
+/// kernel compares with the counter.
+fn add(sum: u64, n: u64) {
+    // # Safety: a word of the test's page, 8-aligned; atomic, so the two
+    // threads' additions never race.
+    let _before = unsafe { (sum as *u64).atomic_add(n, Order.relaxed) }
+}
+
+export fn pax_t_locked(page: u64) {
+    let n = count(page, page + 8)
+    add(page + 24, n)
+    counted("lock: ", n)
+}
+
+export fn pax_t_unlocked(page: u64) {
+    let n = count(page + 16, 0)
+    add(page + 32, n)
+    counted("nolock: ", n)
+}
+
+fn deep(n: u64, p: u64) -> u64 {
+    // # Safety: `p` is a word of the test's page.
+    unsafe { (p as *u64).write_volatile(n) }
+    if n == 0xffffffff {
+        return n
+    }
+    let r = deep(n + 1, p)
+    // # Safety: as above.
+    unsafe { (p as *u64).write_volatile(r) }
+    r
+}
+
+export fn pax_t_deep(page: u64) {
+    let r = deep(0, page)
+    let s = say_begin()
+    me()
+    log.put(": deep returned ")
+    log.dec(r as int)
+    say_end(s)
+}
+
+/// Write `what` as one line under the console lock.
+pub fn line(what: str) {
+    let s = say_begin()
+    log.put(what)
+    say_end(s)
+}
+
+/// Write one line under the console lock: `what` then `v` in decimal.
+pub fn say(what: str, v: u64) {
+    let s = say_begin()
+    log.put(what)
+    log.dec(v as int)
+    say_end(s)
+}
