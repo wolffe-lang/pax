@@ -30,9 +30,10 @@
 //!   page fault CR2, the linear address that faulted (SDM vol. 3A §6.15,
 //!   interrupt 14; §4.7):
 //!
-//!     PANIC <name> vector <v> error 0x<e> rip 0x<r> rsp 0x<s> frame 0x<f>[ cr2 0x<a>]
+//!     PANIC <name> vector <v> error 0x<e> rip 0x<r> rsp 0x<s> frame 0x<f>[ cr2 0x<a>[ (heap)]]
 //!
-//!   then halt (kernel/panic: `cli; hlt`, forever). A double fault or
+//!   (` (heap)` when CR2 lies in kernel/heap's PML4 slot, px06), then
+//!   halt (kernel/panic: `cli; hlt`, forever). A double fault or
 //!   page fault whose CR2 lies in a thread's stack guard (kernel/sched)
 //!   is a stack overflow, and says so (px07):
 //!
@@ -84,6 +85,12 @@ struct Frame {
 
 /// Breakpoints taken (vector 3).
 var breakpoint_count: u64 = 0
+
+/// Bits 63:39 of an address in kernel/heap's PML4 slot, 384 (px06): a
+/// page fault there is named ` (heap)` after CR2. kernel/heap is not
+/// imported here (every kernel would carry the allocator hook); its
+/// `slot()` and this agree in tests/mpx2-heap H9.
+const HEAP_TOP_BITS: u64 = 0x1ffff80 // 0x1fffe00 (bits 63:48 set) | 384
 
 /// The name of exception vector `v` (0-31).
 pub fn name(v: u64) -> str {
@@ -181,9 +188,13 @@ fn fatal(f: *Frame) {
     // # Safety: the frame's address; nothing is read.
     log.hex(unsafe { f as u64 })
     if v == 14 {
-        log.put(" cr2 ")
         // # Safety: cpu.S's MOV from CR2; the fault being reported set it.
-        log.hex(unsafe { pax_cr2() })
+        let a = unsafe { pax_cr2() }
+        log.put(" cr2 ")
+        log.hex(a)
+        if a >> 39 == HEAP_TOP_BITS {
+            log.put(" (heap)")
+        }
     }
     log.end()
     panic.halt()
