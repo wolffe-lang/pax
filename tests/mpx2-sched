@@ -1,0 +1,317 @@
+#!/usr/bin/env bash
+# tests/mpx2-sched — the scheduler (px07, M-PX2's preemptive-threads
+# piece): kernel threads on one CPU, each on its own stack from frames
+# with an unmapped guard below it, switched by the timer interrupt
+# (boot/isr.S's trampoline returns the frame to resume), with yield,
+# sleep(N ticks), exit and wait_all (kernel/sched) and a spinlock on
+# wolf's atomics with interrupts off while held (kernel/sync).
+#
+#   tests/mpx2-sched [--images DIR | --no-boot] [--firmware bios|uefi|both]
+#                    [--tier native|release|both]
+#
+# Two kernels, from kernel/: kmain_sched (S1-S4, S6) and
+# kmain_sched_overflow (S5). Assertions, per tier (native, release) and
+# firmware (bios, uefi):
+#   S0 build: tools/build-kernel's object assertions for both; the ELF
+#      defines pax_switch, pax_thread_entry, pax_idle, pax_interrupt (T);
+#      in `objdump -d` of pax_isr_common the instruction right after
+#      `call <pax_interrupt>` is `mov %rax,%rsp` (the handler's result is
+#      the frame resumed) and the last is `iretq`.
+#   S1 preemption: kmain_sched's three spinning threads (no yield, no
+#      sleep: each only watches its own run count) print one line per
+#      run, `t<id>: run <r> at tick <k>`, five runs each: the 15 lines'
+#      ids are three distinct ids cycling (line i's id = line i-3's),
+#      each thread's r is 1..5 in order, k strictly rises; and each
+#      thread's `t<id>: done, <R> runs, 0 yields` (R >= 5). The
+#      alternation is the timer's: nothing in them yields.
+#   S2 sleep: three threads sleep 3, 7 and 5 ticks; their lines come in
+#      wake order, `t<id>: slept 3 ticks, tick <a> -> <b>` then 5 then 7,
+#      each with b = a + n exactly (woken on the tick); and
+#      `sleep: idle ran <I> times` with I > 0 (the idle thread ran, with
+#      interrupts on, while every thread slept).
+#   S3 exit reclaims: `exit: frames free <A> before, <B> with 3 stacks,
+#      <C> after, 3 of 3 stacks unmapped` with B = A - 12 (four frames a
+#      stack) and C = A.
+#   S4 lock: two threads increment one counter (volatile read, a delay,
+#      volatile write) under kernel/sync's spinlock for 20 ticks each:
+#      `lock: t<id> <n> increments in <r> runs` twice, r >= 3 each (both
+#      were preempted mid-loop), then `lock: counter <s>` with s = the
+#      sum of the two n exactly. The control, the same loop with no
+#      lock: `nolock: t<id> <n> increments in <r> runs` twice and
+#      `nolock: counter <s>, lost <L>` with s < the sum and L = sum - s
+#      > 0 — the race the lock closes is real in this very kernel.
+#   S5 overflow: kmain_sched_overflow's thread recurses into its guard:
+#        overflow: t<id> stack 0x<lo> to 0x<hi>, guard 0x<g> to 0x<lo>
+#        PANIC stack overflow thread <id> cr2 0x<a> guard 0x<g> to 0x<lo>
+#      the same id and bounds on both lines, g <= a < lo, hi - lo = 16
+#      KiB; tools/qemu-halt holds the machine halted in pax_halt.
+#   S6 halt: kmain_sched ends `halt`, halted with IF clear (qemu-halt).
+#
+# --images DIR boots ISOs and ELFs built earlier by this script (DIR
+# holds <tier>/<kernel>.{iso,elf}): any host with QEMU and nm, no wolf
+# needed. Without it the script builds with $PAX_WOLF (linux); --no-boot
+# stops after the build (S0), leaving them in build/mpx2-sched.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+
+images= legs=both tiers=both noboot=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "usage: tests/mpx2-sched [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+need nm objdump
+
+kernels="kmain_sched kmain_sched_overflow"
+work=$PAX_BUILD/mpx2-sched
+runs=$PAX_BUILD/mpx2-sched-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+HEX='0x[0-9a-f]{16}'
+
+sym() { nm "$1" | awk -v s="$2" '$3 == s { print "0x" $1; exit }'; }
+
+# S0's ELF half. Prints the reason on failure.
+sched_ok() { # elf
+    local elf=$1 s after last
+    for s in pax_switch pax_thread_entry pax_idle pax_isr_common; do
+        [ -n "$(sym "$elf" "$s")" ] || { echo "no symbol $s"; return 1; }
+    done
+    nm "$elf" | awk '$3 == "pax_interrupt" && $2 == "T" { f = 1 } END { exit !f }' \
+        || { echo "pax_interrupt is not a global function (T)"; return 1; }
+    objdump -d --no-show-raw-insn "$elf" > "$elf.dis" || { echo "objdump -d"; return 1; }
+    after=$(awk '$2 == "<pax_isr_common>:" { on = 1; next } on && NF == 0 { exit }
+                 on { sub(/^[^\t]*\t/, ""); if (seen) { print; exit } if ($0 ~ /^call.*<pax_interrupt>/) seen = 1 }' "$elf.dis" | tr -s ' ')
+    [ "$after" = 'mov %rax,%rsp' ] || { echo "pax_isr_common: after the call to pax_interrupt comes '$after', not 'mov %rax,%rsp'"; return 1; }
+    last=$(awk '$2 == "<pax_isr_common>:" { on = 1; next } on && NF == 0 { exit } on { sub(/^[^\t]*\t/, ""); l = $0 } END { print l }' "$elf.dis" | tr -s ' ')
+    [ "$last" = iretq ] || { echo "pax_isr_common ends '$last', not iretq"; return 1; }
+    echo "pax_isr_common resumes the frame pax_interrupt returns (mov %rax,%rsp) and ends in iretq; pax_switch, pax_thread_entry, pax_idle defined"
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        for k in $kernels; do
+            log=$work/$tier/$k.build-kernel.log
+            if [ ! -f "$PAX_ROOT/kernel/$k.lu" ]; then
+                bad "S0 $tier $k: no kernel/$k.lu"
+                continue
+            fi
+            if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/$k.lu" "$work/$tier" 2>"$log"); then
+                cat "$log" >&2
+                if why=$(sched_ok "$elf"); then
+                    say "PASS S0 $tier $k: build-kernel's assertions; $why"
+                else
+                    bad "S0 $tier $k: $why"
+                fi
+                "$PAX_ROOT/tools/mkimage" "$elf" "$work/$tier/$k.iso" >/dev/null || bad "$tier $k: mkimage"
+                say "built $tier $k: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/$k.iso")"
+            else
+                cat "$log" >&2
+                bad "S0 $tier $k: tools/build-kernel"
+            fi
+        done
+    done
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx2-sched build (S0): PASS (no boot: --no-boot)" || say "mpx2-sched build: FAIL"
+        exit "$fail"
+    fi
+fi
+
+grab() { serial_norm "$1" | sed -n "s/^$2\$/\\1/p" | tail -n 1; }
+record() { # tier kernel leg status
+    ran=$((ran + 1))
+    printf '%s %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" \
+        "$(sha256_of "$images/$1/$2.iso")" >> "$runs"
+}
+halt_boot() { # tier kernel leg marker
+    local tier=$1 k=$2 leg=$3 marker=$4 hrc=0
+    log=$PAX_BUILD/mpx2-sched-$tier-$k-$leg.serial.log
+    elf=$images/$tier/$k.elf
+    local iso=$images/$tier/$k.iso
+    rm -f "$log" "$log.verdict" "$log".cmd*
+    if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+        say "no image or ELF: $iso"
+        return 3
+    fi
+    "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 240 \
+        --elf "$elf" --marker "$marker" "$iso" >"$log.verdict" 2>&1 || hrc=$?
+    record "$tier" "$k" "$leg" "$hrc"
+    return "$hrc"
+}
+halted() { tail -n 1 "$log.verdict"; }
+not_halted() { grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"; }
+tail_lines() { serial_norm "$log" | awk 'NF' | tail -n "${1:-3}" | sed 's/^/  /' >&2; }
+
+# S1 over the normalised log on stdin: prints "ok <summary>" or the reason.
+s1_check() {
+    awk '
+        /^t[0-9]+: run [0-9]+ at tick [0-9]+$/ {
+            id = substr($1, 2, length($1) - 2); r = $3 + 0; k = $6 + 0
+            n++; ids[n] = id
+            if (!(id in want)) { want[id] = 1; order = order " t" id; distinct++ }
+            if (r != want[id]) { why = why " t" id " run " r " where " want[id] " was next;" }
+            want[id] = r + 1
+            if (n > 1 && k <= lastk) { why = why " tick " k " after " lastk " (line " n ");" }
+            lastk = k; ticks = ticks " " k
+        }
+        /^t[0-9]+: done, [0-9]+ runs, [0-9]+ yields$/ {
+            id = substr($1, 2, length($1) - 2); done[id] = 1
+            if ($3 + 0 < 5) why = why " t" id " done after " $3 " runs;"
+            if ($5 + 0 != 0) why = why " t" id " yielded " $5 " times;"
+        }
+        END {
+            if (n != 15) why = why " " n " run lines, not 15;"
+            if (distinct != 3) why = why " " distinct " thread ids, not 3;"
+            for (i = 4; i <= n; i++) if (ids[i] != ids[i - 3]) { why = why " line " i " is t" ids[i] ", not t" ids[i - 3] " (no cycle);"; break }
+            for (id in want) if (!(id in done)) why = why " no done line for t" id ";"
+            if (why != "") { print "no:" why; exit 1 }
+            print "ok 15 runs cycling" order " at ticks" ticks ", 0 yields"
+        }'
+}
+# S2: the three sleepers' lines in wake order, b = a + n, idle ran.
+s2_check() {
+    awk '
+        /^t[0-9]+: slept [0-9]+ ticks, tick [0-9]+ -> [0-9]+$/ {
+            n++; s = $3 + 0; a = $6 + 0; b = $8 + 0; seq = seq " " s
+            if (b != a + s) why = why " " $1 " slept " s " but " a " -> " b ";"
+            got = got " " $1 s "@" a "->" b
+        }
+        /^sleep: idle ran [0-9]+ times$/ { idle = $4 + 0; saw = 1 }
+        END {
+            if (seq != " 3 5 7") why = why " wake order" seq ", not 3 5 7;"
+            if (!saw) why = why " no sleep: idle line;"
+            else if (idle <= 0) why = why " idle ran " idle " times;"
+            if (why != "") { print "no:" why; exit 1 }
+            print "ok" got ", idle ran " idle " times"
+        }'
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        # --- S1-S4, S6: kmain_sched ---------------------------------------
+        hrc=0; halt_boot "$tier" kmain_sched "$leg" 'halt' || hrc=$?
+        if [ "$hrc" = 3 ]; then
+            for s in S1 S2 S3 S4 S6; do bad "$s $tier kmain_sched $leg: no image"; done
+        else
+            norm=$log.norm; serial_norm "$log" > "$norm"
+            if v=$(s1_check < "$norm"); then
+                say "PASS S1 $tier kmain_sched $leg: ${v#ok }"
+            else
+                bad "S1 $tier kmain_sched $leg: ${v#no:}"; grep -E '^t[0-9]+: (run|done)' "$norm" | sed 's/^/  /' >&2
+            fi
+            if v=$(s2_check < "$norm"); then
+                say "PASS S2 $tier kmain_sched $leg: ${v#ok }"
+            else
+                bad "S2 $tier kmain_sched $leg: ${v#no:}"; grep -E '^(t[0-9]+: slept|sleep:)' "$norm" | sed 's/^/  /' >&2
+            fi
+            # S3
+            l=$(grep -E '^exit: frames free [0-9]+ before, [0-9]+ with 3 stacks, [0-9]+ after, [0-9]+ of 3 stacks unmapped$' "$norm" | tail -n 1)
+            why=
+            if [ -z "$l" ]; then why=" no exit: frames line;"; else
+                set -- $l; A=$4 B=$6 C=$10 U=${12}
+                [ "$B" = $((A - 12)) ] || why+=" $B free with 3 stacks, not $A - 12;"
+                [ "$C" = "$A" ] || why+=" $C free after exit, not $A;"
+                [ "$U" = 3 ] || why+=" $U of 3 stacks unmapped;"
+            fi
+            if [ -z "$why" ]; then
+                say "PASS S3 $tier kmain_sched $leg: frames free $A before, $B with 3 stacks (- 12), $C after; 3 of 3 stacks unmapped"
+            else
+                bad "S3 $tier kmain_sched $leg:$why"
+            fi
+            # S4
+            why=
+            lk=$(grep -E '^lock: t[0-9]+ [0-9]+ increments in [0-9]+ runs$' "$norm")
+            nk=$(grep -E '^nolock: t[0-9]+ [0-9]+ increments in [0-9]+ runs$' "$norm")
+            ls=$(grab "$log" 'lock: counter \([0-9]*\)')
+            ns=$(grab "$log" 'nolock: counter \([0-9]*\), lost [0-9]*')
+            nl=$(grab "$log" 'nolock: counter [0-9]*, lost \([0-9]*\)')
+            [ "$(printf '%s\n' "$lk" | grep -c .)" = 2 ] || why+=" $(printf '%s\n' "$lk" | grep -c .) lock: thread lines, not 2;"
+            [ "$(printf '%s\n' "$nk" | grep -c .)" = 2 ] || why+=" $(printf '%s\n' "$nk" | grep -c .) nolock: thread lines, not 2;"
+            lsum=$(printf '%s\n' "$lk" | awk '{ s += $3 } END { print s + 0 }')
+            nsum=$(printf '%s\n' "$nk" | awk '{ s += $3 } END { print s + 0 }')
+            lmin=$(printf '%s\n' "$lk" | awk 'BEGIN { m = -1 } { if (m < 0 || $6 < m) m = $6 } END { print m }')
+            nmin=$(printf '%s\n' "$nk" | awk '{ if ($3 + 0 > 0) c++ } END { print c + 0 }')
+            [ -n "$ls" ] && [ "$ls" = "$lsum" ] || why+=" lock: counter '$ls' is not the threads' sum $lsum;"
+            [ "$lmin" -ge 3 ] 2>/dev/null || why+=" a locked thread ran $lmin times (< 3: not preempted mid-loop);"
+            [ "$lsum" -gt 0 ] || why+=" no locked increments;"
+            [ "$nmin" = 2 ] || why+=" a control thread made no increments;"
+            [ -n "$ns" ] && [ -n "$nl" ] && [ "$ns" -lt "$nsum" ] && [ "$nl" = $((nsum - ns)) ] && [ "$nl" -gt 0 ] \
+                || why+=" nolock: counter '$ns', lost '$nl' against the threads' sum $nsum (the control must lose updates);"
+            if [ -z "$why" ]; then
+                say "PASS S4 $tier kmain_sched $leg: locked $(printf '%s\n' "$lk" | awk '{ printf "%s%s %s in %s runs", (NR > 1 ? " + " : ""), $2, $3, $6 }') = counter $ls exactly; unlocked control counter $ns of $nsum, lost $nl"
+            else
+                bad "S4 $tier kmain_sched $leg:$why"; grep -E '^(no)?lock:' "$norm" | sed 's/^/  /' >&2
+            fi
+            # S6
+            why=
+            [ "$hrc" = 0 ] || why+=" not halted ($(not_halted));"
+            "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'nolock: counter [0-9]+, lost [0-9]+' 'halt' >/dev/null \
+                || why+=" the log does not end nolock: counter …, halt;"
+            if [ -z "$why" ]; then
+                say "PASS S6 $tier kmain_sched $leg: $(halted)"
+            else
+                bad "S6 $tier kmain_sched $leg:$why"; tail_lines 4
+            fi
+        fi
+
+        # --- S5: the guard ---------------------------------------------------
+        hrc=0; halt_boot "$tier" kmain_sched_overflow "$leg" 'PANIC .*' || hrc=$?
+        if [ "$hrc" = 3 ]; then bad "S5 $tier kmain_sched_overflow $leg: no image"; else
+            why=
+            [ "$hrc" = 0 ] || why+=" not halted ($(not_halted));"
+            "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
+                "overflow: t[0-9]+ stack $HEX to $HEX, guard $HEX to $HEX" \
+                "PANIC stack overflow thread [0-9]+ cr2 $HEX guard $HEX to $HEX" >/dev/null \
+                || why+=" the log does not end overflow: …, PANIC stack overflow thread …;"
+            o=$(serial_norm "$log" | grep -E "^overflow: t[0-9]+ stack $HEX to $HEX, guard $HEX to $HEX\$" | tail -n 1)
+            p=$(serial_norm "$log" | grep -E "^PANIC stack overflow thread [0-9]+ cr2 $HEX guard $HEX to $HEX\$" | tail -n 1)
+            if [ -n "$o" ] && [ -n "$p" ]; then
+                set -- $o; oid=${2#t}; oid=${oid%:}; lo=$4 hi=${6%,} g=$8 glo=${10}
+                set -- $p; pid=$5 a=$7 pg=$9 plo=${11}
+                [ "$oid" = "$pid" ] || why+=" thread $pid panicked, t$oid was the one;"
+                [ "$pg" = "$g" ] && [ "$plo" = "$glo" ] && [ "$glo" = "$lo" ] || why+=" guard [$pg, $plo) is not t$oid's [$g, $lo);"
+                [ $((a)) -ge $((g)) ] && [ $((a)) -lt $((lo)) ] || why+=" cr2 $a outside the guard [$g, $lo);"
+                [ $((hi - lo)) = 16384 ] || why+=" stack $lo to $hi is not 16 KiB;"
+            fi
+            if [ -z "$why" ]; then
+                say "PASS S5 $tier kmain_sched_overflow $leg: thread $pid ran into its guard at cr2 $a ([$g, $lo), stack $lo to $hi) and panicked by name; $(halted)"
+            else
+                bad "S5 $tier kmain_sched_overflow $leg:$why"; tail_lines 3
+            fi
+        fi
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx2-sched: PASS" || say "mpx2-sched: FAIL"
+exit "$fail"
