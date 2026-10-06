@@ -54,7 +54,24 @@
    pax_pause()           PAUSE (SDM vol. 2): a spin-wait hint; also an
                          opaque call, so a polling loop rereads memory.
    pax_irq_save()        RFLAGS (the caller's IF in bit 9), then CLI.
-   pax_irq_restore(fl)   STI if bit 9 of fl is set; otherwise nothing.
+   pax_irq_restore(fl)   STI if bit 9 of fl is set (then NOP, STI's
+                         one-instruction shadow, then PAUSE); otherwise
+                         nothing. The PAUSE is for QEMU 8.2's TCG (pax
+                         CI's): measured in CI run 37522542792, a tick
+                         that went pending while IF was clear was never
+                         taken in S4's locked loop, where IF is set only
+                         for the few instructions between this STI and
+                         the next CLI — the run hung after S3 on both
+                         tiers and firmwares, while QEMU 11.1's TCG
+                         (kasumi) and KVM (hasu) took every tick. That
+                         emulator recognizes the pending request only when
+                         it next returns to its main loop with IF set,
+                         and PAUSE is an instruction it executes by
+                         returning there; the NOP first lets the shadow
+                         end. On hardware the pending interrupt is taken
+                         right after the shadow (SDM vol. 3A §6.8.3 and
+                         vol. 2 STI) and PAUSE is a hint, so neither
+                         changes what the kernel does.
 
    Storage (.bss, zero until kernel/sched writes it):
      pax_threads       16 thread records, 72 bytes each (kernel/sched's
@@ -132,6 +149,8 @@ pax_irq_restore:
         testl   $0x200, %edi
         jz      1f
         sti
+        nop                             /* STI's shadow */
+        pause                           /* QEMU 8.2 TCG: see above */
 1:      ret
         .size pax_irq_restore, . - pax_irq_restore
 
