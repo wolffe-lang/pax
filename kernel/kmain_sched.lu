@@ -1,0 +1,180 @@
+//! member: false
+// kmain_sched.lu — preemptive kernel threads (px07, tests/mpx2-sched
+// S1-S4, S6). The kernel switches to PAX's paging structures, loads
+// its tables, starts the timer (kw10) and the scheduler (kernel/sched:
+// it becomes thread 0), enables interrupts, and runs four rounds of
+// threads (kernel/schedtest's bodies), waiting for each round to exit:
+//   S1: three threads that only spin, each writing a line whenever it
+//       finds the timer switched it back in;
+//   S2: three threads sleeping 3, 7 and 5 ticks;
+//   S3: the frames free before, during and after S2, and S2's stacks
+//       unmapped once they exited;
+//   S4: two threads counting under the spinlock, then two counting
+//       without it (the control).
+// Then interrupts off, the timer stopped, `halt`:
+//
+//     PAX sched: threads
+//     paging: limine cr3 0x<A>, pax cr3 0x<B>, <P> table frames
+//     sched: main 0, idle 1, 16 slots, stacks 16 KiB above a 48 KiB guard from 0xffffd00000000000, quantum 2 ticks
+//     preempt: 3 threads spin, none yields
+//     t2: run 1 at tick <k>
+//     t3: run 1 at tick <k>
+//     t4: run 1 at tick <k>
+//     … (five runs each, cycling; `t<id>: done, <R> runs, 0 yields`)
+//     preempt: 3 exited
+//     t5: slept 3 ticks, tick <a> -> <a + 3>
+//     t7: slept 5 ticks, tick <a> -> <a + 5>
+//     t6: slept 7 ticks, tick <a> -> <a + 7>
+//     sleep: idle ran <I> times
+//     exit: frames free <A> before, <A - 12> with 3 stacks, <A> after, 3 of 3 stacks unmapped
+//     lock: t<i> <n> increments in <r> runs
+//     lock: t<j> <m> increments in <r> runs
+//     lock: counter <n + m>
+//     nolock: t<i> <n> increments in <r> runs
+//     nolock: t<j> <m> increments in <r> runs
+//     nolock: counter <s>, lost <n + m - s>
+//     halt
+use apic
+use frames
+use interrupts
+use log
+use paging
+use panic
+use sched
+use schedtest
+use serial
+use sync
+use timer
+
+extern "c" let pax_t_spin: *u8
+extern "c" let pax_t_sleep: *u8
+extern "c" let pax_t_locked: *u8
+extern "c" let pax_t_unlocked: *u8
+
+/// The test page's words: the locked counter (0), its lock (8), the
+/// unlocked counter (16), the locked threads' own total (24), the
+/// unlocked threads' (32).
+fn word(page: u64, i: u64) -> u64 {
+    // # Safety: the page is a frame the kernel took, mapped by the HHDM.
+    unsafe { ((page + i * 8) as *u64).read_volatile() }
+}
+
+/// Whether all four pages of the stack at `lo` are unmapped.
+fn unmapped(pml4: u64, lo: u64) -> bool {
+    var k: u64 = 0
+    var gone = true
+    while k < 4 {
+        let t = paging.translate(pml4, lo + k * 4096) else |e| match e {
+            not_mapped => { 1 },
+            out_of_memory => { 2 },
+            misaligned => { 2 },
+            not_canonical => { 2 },
+            already_mapped => { 2 },
+            large_page => { 2 },
+        }
+        if t != 1 {
+            gone = false
+        }
+        k += 1
+    }
+    gone
+}
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX sched: threads")
+    frames.start()
+    let limine = paging.cr3()
+    let before = frames.free_count()
+    let pml4 = paging.start()
+    paging.report(limine, before)
+    interrupts.start()
+    apic.start(pml4)
+    timer.start()
+    sched.start(pml4)
+    sched.report()
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        panic.fail("sched test: no frame for the test page", 0)
+    }
+    let page = pa + frames.hhdm()
+    var i: u64 = 0
+    while i < 512 {
+        // # Safety: the frame just taken, through the HHDM.
+        unsafe { ((page + i * 8) as *u64).write_volatile(0) }
+        i += 1
+    }
+    // # Safety: the addresses of kernel/schedtest's exports; nothing is read.
+    let (spin, sleeper, locked, unlocked) = unsafe { (pax_t_spin as u64, pax_t_sleep as u64, pax_t_locked as u64, pax_t_unlocked as u64) }
+    sync.enable()
+
+    // S1: preemption alone.
+    schedtest.line("preempt: 3 threads spin, none yields")
+    var saved = sync.irq_save()
+    sched.create(spin, 5)
+    sched.create(spin, 5)
+    sched.create(spin, 5)
+    sync.irq_restore(saved)
+    sched.wait_all()
+    schedtest.line("preempt: 3 exited")
+
+    // S2 and S3: sleep, and the stacks given back.
+    let a = frames.free_count()
+    let idle0 = sched.idle_runs()
+    saved = sync.irq_save()
+    let t1 = sched.create(sleeper, 3)
+    let t2 = sched.create(sleeper, 7)
+    let t3 = sched.create(sleeper, 5)
+    let b = frames.free_count()
+    let (lo1, lo2, lo3) = (sched.stack_lo(t1), sched.stack_lo(t2), sched.stack_lo(t3))
+    sync.irq_restore(saved)
+    sched.wait_all()
+    let c = frames.free_count()
+    let s0 = sync.acquire(sync.console())
+    log.put("sleep: idle ran ")
+    log.dec((sched.idle_runs() - idle0) as int)
+    log.put(" times")
+    log.end()
+    sync.release(sync.console(), s0)
+    saved = sync.irq_save()
+    var gone: u64 = 0
+    if unmapped(pml4, lo1) { gone += 1 }
+    if unmapped(pml4, lo2) { gone += 1 }
+    if unmapped(pml4, lo3) { gone += 1 }
+    sync.irq_restore(saved)
+    let s = sync.acquire(sync.console())
+    log.put("exit: frames free ")
+    log.dec(a as int)
+    log.put(" before, ")
+    log.dec(b as int)
+    log.put(" with 3 stacks, ")
+    log.dec(c as int)
+    log.put(" after, ")
+    log.dec(gone as int)
+    log.put(" of 3 stacks unmapped")
+    log.end()
+    sync.release(sync.console(), s)
+
+    // S4: the lock, then the control without it.
+    sched.create(locked, page)
+    sched.create(locked, page)
+    sched.wait_all()
+    schedtest.say("lock: counter ", word(page, 0))
+    sched.create(unlocked, page)
+    sched.create(unlocked, page)
+    sched.wait_all()
+    let got = word(page, 2)
+    let sum = word(page, 4)
+    let s2 = sync.acquire(sync.console())
+    log.put("nolock: counter ")
+    log.dec(got as int)
+    log.put(", lost ")
+    log.dec((sum - got) as int)
+    log.end()
+    sync.release(sync.console(), s2)
+
+    let _off = sync.irq_save()
+    timer.stop()
+    log.line("halt")
+    panic.halt()
+}
