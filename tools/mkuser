@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# mkuser — build px10's user programs (user/elf/hello.S) into OUTDIR.
+#
+#   tools/mkuser OUTDIR
+#
+# Writes, from the one source, with the host's cc (gcc or clang) and
+# binutils, no libc anywhere (-nostdlib):
+#   hello      -static -no-pie: an ET_EXEC with no PT_INTERP (the program
+#              PAX runs)
+#   hello-pie  -static-pie: an ET_DYN (PAX refuses a PIE by name: later)
+#   hello-dyn  -no-pie with a PT_INTERP naming /lib64/ld-linux-x86-64.so.2
+#              (PAX refuses a dynamic program by name): linked against
+#              libc.so with --no-as-needed only so that ld makes it
+#              dynamic (with no shared object ld writes no PT_INTERP,
+#              whatever -dynamic-linker says); it calls nothing in it
+#   hello32    hello with EI_CLASS (byte 4) set to 1, ELFCLASS32
+#   hello-arm  hello with e_machine (bytes 18-19) set to 183, EM_AARCH64
+# and prints one line per file: `<name> <sha256> <bytes>`. Every link
+# passes --build-id=none, so two builds by one toolchain give one digest.
+# Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkuser OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+src=$PAX_ROOT/user/elf/hello.S
+cc=${CC:-cc}
+need "$cc" python3
+common=(-nostdlib -Wl,--build-id=none -Wl,-z,noexecstack)
+"$cc" "${common[@]}" -static -no-pie -o "$out/hello" "$src" || die "cc: hello"
+"$cc" "${common[@]}" -static-pie -o "$out/hello-pie" "$src" || die "cc: hello-pie"
+"$cc" "${common[@]}" -no-pie -Wl,-dynamic-linker,/lib64/ld-linux-x86-64.so.2 \
+    -Wl,--no-as-needed -lc -o "$out/hello-dyn" "$src" || die "cc: hello-dyn"
+python3 - "$out" <<'PY' || die "patching hello32 / hello-arm"
+import sys, os
+out = sys.argv[1]
+b = bytearray(open(os.path.join(out, "hello"), "rb").read())
+c = bytearray(b); c[4] = 1                    # EI_CLASS: ELFCLASS32
+open(os.path.join(out, "hello32"), "wb").write(c)
+a = bytearray(b); a[18:20] = (183).to_bytes(2, "little")   # e_machine
+open(os.path.join(out, "hello-arm"), "wb").write(a)
+PY
+for f in hello hello-pie hello-dyn hello32 hello-arm; do
+    printf '%s %s %s\n' "$f" "$(sha256_of "$out/$f")" "$(wc -c < "$out/$f" | tr -d ' ')"
+done
