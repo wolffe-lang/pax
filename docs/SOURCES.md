@@ -201,3 +201,17 @@ from the manuals' mechanics below.
 | man-pages: `write(2)` (EFAULT: "buf is outside your accessible address space"), `_exit(2)`, `syscall(2)` (x86-64: `syscall`, %rax, the argument registers, %rcx and %r11 clobbered) | man-pages 6.x | the man-pages project's licences | the author's own knowledge | `write`'s -EFAULT instead of a kill (notes/px09-user-mode.md §2), the register convention |
 | the wolf spec at v0.2.24: `[gram.inv.kw]` (`shared` and `spawn` are reserved: `paging.kernel_half`, `sched.start_thread`), `[abi.asm.roster]`, `[abi.link.extern]`; and the target's limit that `str` comparison needs the hosted runtime (a refusal met while building, so programs go by number) | wolf-lang `v0.2.24` (`294d626d`) | the project's own | read (and the compiler's refusals) | the names, the roster, the numbering |
 | QEMU (`-cpu max`: TCG 8.2 in CI and 11.1.1 on kasumi, KVM on hasu passing the host's i7-12700KF features) | — | GPL-2.0 (a program we run) | black-box: SMEP and SMAP present on all three, as `kernel/user`'s CPUID read and the two witnesses show | `tests/mpx3-user` U1, U7, U8 |
+
+## px08 — the reel (2026-10-06)
+
+**Linux: nothing.** No Linux file of any kind was read, and no glibc,
+musl or other libc or kernel source. Permissively licensed kernels:
+none consulted. The reel adds no capability: its stages call the
+subsystems px01-px07 wrote, whose sources are cited above.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| Limine's `CONFIG.md` (`timeout`, `quiet`, `serial`, `default_entry`, `interface_branding`, entry syntax) | v12.9.1 (the pinned release) | BSD-2-Clause | read, the bootloader's user documentation | `boot/limine-reel.conf`: a menu with two entries, mirrored to the serial console |
+| Intel 8254 programmable interval timer data sheet: the counter-latch command (control word with RW bits 00), mode 2's count from N down to 1 and reload | — | — | the author's own knowledge | `kernel/reel`'s early pause (`pit_count`, `pause_early`) |
+| Intel SDM vol. 3A §4.5 (the four-level entry formats: P, R/W, PS, XD, the address bits) | — | — | the author's own knowledge, as kernel/paging cites | `kernel/reel`'s read-only walk (`leaf`), the permissions stage 3 prints |
+| `~/scratch/wolf/lobo-demo/SHOTLIST.md` (lobo's reel, 2026-10-03) | — | the project's own | read only | the shape of `~/scratch/wolf/pax-demo/SHOTLIST.md` |
