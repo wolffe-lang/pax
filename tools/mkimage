@@ -1,16 +1,32 @@
 #!/usr/bin/env bash
 # mkimage — wrap a kernel ELF into a hybrid BIOS + UEFI ISO with Limine.
 #
-#   tools/mkimage KERNEL.elf OUT.iso
+#   tools/mkimage [--conf LIMINE.conf] [--add ELF NAME]... KERNEL.elf OUT.iso
 #
 # The ISO holds /boot/pax (the kernel), Limine's BIOS and UEFI stages,
-# and boot/limine.conf. It boots under SeaBIOS and OVMF alike, and is
+# and boot/limine.conf. `--conf` puts another Limine configuration in
+# its place (px08's reel: a menu); each `--add ELF NAME` adds one more
+# kernel at /boot/NAME for that configuration's entries to name. It boots under SeaBIOS and OVMF alike, and is
 # the shape a USB stick takes later (an isohybrid image). Needs xorriso
 # and a staged Limine (tools/fetch-limine).
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
-[ $# -eq 2 ] || die "usage: mkimage KERNEL.elf OUT.iso"
+conf=$PAX_ROOT/boot/limine.conf
+adds=()
+while [ $# -gt 0 ]; do
+    case $1 in
+        --conf) conf=$2; shift 2 ;;
+        --add)  [ $# -ge 3 ] || die "--add takes ELF NAME"; adds+=("$2" "$3"); shift 3 ;;
+        *)      break ;;
+    esac
+done
+[ $# -eq 2 ] || die "usage: mkimage [--conf LIMINE.conf] [--add ELF NAME]... KERNEL.elf OUT.iso"
 kernel=$1; iso=$2
+[ -f "$conf" ] || die "no Limine configuration: $conf"
+for ((i = 0; i < ${#adds[@]}; i += 2)); do
+    [ -f "${adds[i]}" ] || die "no kernel: ${adds[i]}"
+    case ${adds[i + 1]} in ''|*/*|pax) die "--add NAME must be a plain file name other than pax: ${adds[i + 1]}" ;; esac
+done
 [ -f "$kernel" ] || die "no kernel: $kernel"
 need xorriso
 load_limine_pin
@@ -20,7 +36,10 @@ root=$(mktemp -d "${TMPDIR:-/tmp}/pax-iso.XXXXXX")
 trap 'rm -rf "$root"' EXIT
 mkdir -p "$root/boot/limine" "$root/EFI/BOOT"
 cp "$kernel" "$root/boot/pax"
-cp "$PAX_ROOT/boot/limine.conf" "$root/boot/limine/limine.conf"
+for ((i = 0; i < ${#adds[@]}; i += 2)); do
+    cp "${adds[i]}" "$root/boot/${adds[i + 1]}"
+done
+cp "$conf" "$root/boot/limine/limine.conf"
 cp "$LIMINE_DIR/limine-bios.sys" "$LIMINE_DIR/limine-bios-cd.bin" \
    "$LIMINE_DIR/limine-uefi-cd.bin" "$root/boot/limine/"
 cp "$LIMINE_DIR/BOOTX64.EFI" "$root/EFI/BOOT/"
