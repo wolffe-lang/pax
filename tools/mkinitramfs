@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+# mkinitramfs — write a `newc` cpio archive, the initramfs buffer format
+# PAX reads (kernel/initramfs; Documentation/driver-api/early-userspace/
+# buffer-format.rst; cpio(5)).
+#
+#   tools/mkinitramfs OUT.cpio /PATH=FILE[:MODE]...
+#
+# Each argument puts FILE's bytes at PATH (a leading `/` is dropped, as
+# cpio writes names); MODE is octal permission bits (default 755 when
+# FILE is executable, else 644). Every directory a PATH passes through
+# gets its own entry first (mode 040755). Reproducible: inodes numbered
+# 1, 2, … in the order written, mtime 0, uid and gid 0, nlink 1 (2 for a
+# directory), devices 0, check 0 (`070701`), entries sorted by path,
+# the archive ending with `TRAILER!!!`. Prints one line per entry and
+# the archive's sha256. Exit 0, or 2 on a usage error.
+import hashlib
+import os
+import sys
+
+
+def die(msg):
+    sys.stderr.write("mkinitramfs: %s\n" % msg)
+    sys.exit(2)
+
+
+def header(ino, mode, nlink, size, name):
+    fields = [ino, mode, 0, 0, nlink, 0, size, 0, 0, 0, 0, len(name) + 1, 0]
+    return b"070701" + b"".join(b"%08x" % f for f in fields)
+
+
+def pad4(buf):
+    return buf + b"\0" * (-len(buf) % 4)
+
+
+def main(argv):
+    if len(argv) < 3:
+        die("usage: mkinitramfs OUT.cpio /PATH=FILE[:MODE]...")
+    out = argv[1]
+    files = {}
+    for arg in argv[2:]:
+        if "=" not in arg:
+            die("not PATH=FILE: %s" % arg)
+        path, src = arg.split("=", 1)
+        mode = None
+        if ":" in src:
+            src, m = src.rsplit(":", 1)
+            mode = int(m, 8)
+        name = path.lstrip("/")
+        if not name or name.startswith("/") or ".." in name.split("/"):
+            die("bad path: %s" % path)
+        try:
+            data = open(src, "rb").read()
+        except OSError as e:
+            die("%s: %s" % (src, e))
+        if mode is None:
+            mode = 0o755 if os.access(src, os.X_OK) else 0o644
+        files[name] = (data, mode)
+    dirs = set()
+    for name in files:
+        parts = name.split("/")[:-1]
+        for i in range(1, len(parts) + 1):
+            dirs.add("/".join(parts[:i]))
+    entries = [(d, None, 0o040755) for d in dirs] + [(n, d, m | 0o100000) for n, (d, m) in files.items()]
+    entries.sort(key=lambda e: e[0])
+    buf = b""
+    ino = 1
+    for name, data, mode in entries:
+        nb = name.encode()
+        size = 0 if data is None else len(data)
+        nlink = 2 if data is None else 1
+        buf = pad4(buf + header(ino, mode, nlink, size, nb) + nb + b"\0")
+        if data is not None:
+            buf = pad4(buf + data)
+        print("%s %o %d %s" % ("dir " if data is None else "file", mode, size, name))
+        ino += 1
+    buf = pad4(buf + header(0, 0, 1, 0, b"TRAILER!!!") + b"TRAILER!!!\0")
+    with open(out, "wb") as f:
+        f.write(buf)
+    print("%s %d bytes sha256 %s" % (out, len(buf), hashlib.sha256(buf).hexdigest()))
+
+
+if __name__ == "__main__":
+    main(sys.argv)
