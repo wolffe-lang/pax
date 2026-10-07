@@ -107,13 +107,15 @@ text (`tests/tour`, `tools/tour`).
   function-pointer value (wolf-lang#520) and the `extern` in the
   export's own module is E0302. A lock word lives in assembly-reserved
   `.bss` because a module `var` has no address (wolf-lang#597).
-- `wolf.pin` names wolf: the 0.2.24 release archive by digest (px07;
-  0.2.23 from px05;
+- `wolf.pin` names wolf: the 0.2.25 release archive by digest (px10;
+  0.2.24 from px07, 0.2.23 from px05;
   `tools/fetch-wolf` stages it and never builds; px02 and kw10 built
   wolf-lang `eb955c3b` and `6a4e6151` from source while no release
   carried kw06-kw09), and lupin's release and digest
-  (`tools/fetch-lupin`; held at 0.1.44 for `tests/mkw` step 6's
-  recorded refusal).
+  (`tools/fetch-lupin`; 0.1.48, 0.2.25's pairing, since px10: it had
+  been held at 0.1.44 for `tests/mkw` step 6's recorded clap error,
+  which 0.1.48 replaces with an `unsupported` verdict naming the
+  target).
 
 `tests/mpx2-sched` (px07) builds kmain_sched and
 kmain_sched_overflow on both tiers, boots them under SeaBIOS and OVMF,
