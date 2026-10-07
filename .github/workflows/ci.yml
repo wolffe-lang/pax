@@ -611,3 +611,62 @@ jobs:
             build/mpx3-user-runs.txt
           retention-days: 14
           if-no-files-found: warn
+
+  # px08: the boot reel. kmain_reel and kmain_reel_text (kernel/reel's
+  # stages over the test kernels' paths), two ISOs behind Limine's menu
+  # (tools/reel build), both tiers, BIOS and UEFI. tests/reel: the build
+  # (R0), the stages in order (R1), the frame round trip (R2), W^X read
+  # back from the live tables (R3), four named threads interleaved and
+  # joined (R4), finale (a) a stack overflow and (b) a write to text,
+  # each panicking by name and halted (R5, R6), the pauses (R7).
+  reel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils
+          qemu-system-x86_64 --version
+          clang --version
+          ld.lld --version
+          python3 --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: reel-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the reel, both tiers, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/reel
+
+      - name: keep the ISOs, the transcripts, the timings, the halt probes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-reel-linux
+          path: |
+            build/reel/
+            build/reel-*.log
+            build/reel-*.norm
+            build/reel-*.times
+            build/reel-*.meta
+            build/reel-*.halt
+            build/reel-*.verdict
+            build/reel-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
