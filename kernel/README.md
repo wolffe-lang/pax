@@ -22,8 +22,8 @@ scheduler and runs rounds of threads (three that only spin and are
 switched by the timer alone, three sleepers, two counting under the
 spinlock and two without it), and `kmain_sched_overflow.lu` runs a
 thread off its stack into its guard (`tests/mpx2-sched`). Since px08
-`kmain_reel.lu` and `kmain_reel_text.lu` are the boot reel: the stages
-above in one boot, each under a heading with a pause for the viewer
+`kmain_reel.lu` and `kmain_reel_text.lu` are the boot reel: px01-px07's
+stages in one boot (not yet the heap), each under a heading with a pause for the viewer
 between them (`kernel/reel`), ending in a stack overflow or a write to
 text (`tests/reel`, `tools/reel`).
 
