@@ -1,0 +1,311 @@
+#!/usr/bin/env bash
+# tests/reel — the boot reel (px08): kernel/kmain_reel.lu and
+# kernel/kmain_reel_text.lu, the stages in kernel/reel, two ISOs behind
+# Limine's menu (tools/reel build).
+#
+#   tests/reel [--images DIR | --no-boot] [--firmware bios|uefi|both]
+#              [--tier native|release|both]
+#
+# Per tier (native, release) and firmware (bios, uefi), each ISO is
+# booted under tools/qemu-halt (the menu's 5 s timeout boots its default
+# entry), which waits for the `PANIC` line and proves the machine halted
+# in pax_halt with IF clear and silent after it. Assertions:
+#   R0 build: tools/reel build wrote both ISOs and SHA256SUMS; both
+#      kernels passed tools/build-kernel's object assertions.
+#   R1 the stages, in order, on both ISOs: the banner (its wolf version
+#      is kernel/wolf.pin's WOLF_VERSION), then `[1/5] boot` … `[5/5]
+#      threads`, each followed by its lines (the firmware line names the
+#      leg's firmware), the closing lines, `finale in 3... 2... 1...`.
+#      expect-serial --regex, in order: a stage out of order is a FAIL.
+#   R2 frames: the round trip's free counts go F -> F-1 -> F and the
+#      word reads back the same.
+#   R3 paging: text r-x, rodata r--, data rw-, every page of each alike,
+#      the HHDM page rw-, 0 of 256 lower-half top-level entries present.
+#   R4 threads: four named workers (wolf, lupin, lobo, pax), six lines
+#      each at runs 5, 10, … 30, ticks never falling; interleaved (all
+#      four first lines come before any thread's last line); joined: 4
+#      of 4 exited and the free frame count before = after.
+#   R5 finale (a), pax-reel.iso: the log ENDS with the overflow line and
+#      `PANIC stack overflow thread <id> cr2 0x<a> guard 0x<g> to 0x<lo>`,
+#      the same thread and guard, g <= a < lo; halted.
+#   R6 finale (b), pax-reel-b.iso: the log ENDS with `write: text at
+#      0x<a>` and `PANIC page fault vector 14 error 0x…03 … cr2 0x<a>`,
+#      the same address, inside stage 3's text; halted.
+#   R7 pacing (native, pax-reel.iso, tools/reel time): each stage's
+#      heading comes at least 2.5 s after the one before (the pauses for
+#      the viewer are there), and the PANIC within 60 s of the banner.
+#
+# --images DIR boots ISOs built earlier by this script (DIR holds
+# <tier>/{pax-reel.iso,pax-reel-b.iso,kmain_reel.elf,kmain_reel_text.elf}):
+# any host with QEMU, nm and python3, no wolf needed. Without it the
+# script builds with $PAX_WOLF (linux); --no-boot stops after R0.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+
+images= legs=both tiers=both noboot=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "usage: tests/reel [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+need nm python3
+
+load_wolf_pin
+V=$WOLF_VERSION
+work=$PAX_BUILD/reel
+runs=$PAX_BUILD/reel-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+HEX='0x[0-9a-f]{16}'
+N='[0-9]+'
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    rm -rf "$work"
+    for tier in $tiers; do
+        mkdir -p "$work/$tier"
+        if "$PAX_ROOT/tools/reel" build --tier "$tier" "$work/$tier" > "$work/$tier/build.log" 2>&1; then
+            cat "$work/$tier/build.log" >&2
+            if [ -f "$work/$tier/pax-reel.iso" ] && [ -f "$work/$tier/pax-reel-b.iso" ] \
+                && grep -q 'build-kernel: ok: step 2 (kmain_reel,' "$work/$tier/build.log" \
+                && grep -q 'build-kernel: ok: step 2 (kmain_reel_text,' "$work/$tier/build.log" \
+                && (cd "$work/$tier" && sha256_of pax-reel.iso >/dev/null && grep -c 'pax-reel' SHA256SUMS | grep -qx 2); then
+                say "PASS R0 $tier: both kernels pass build-kernel's assertions; $(paste -sd' ' "$work/$tier/SHA256SUMS")"
+            else
+                bad "R0 $tier: tools/reel build left no ISO pair or SHA256SUMS"
+            fi
+        else
+            cat "$work/$tier/build.log" >&2
+            bad "R0 $tier: tools/reel build"
+        fi
+    done
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "reel build (R0): PASS (no boot: --no-boot)" || say "reel build: FAIL"
+        exit "$fail"
+    fi
+fi
+
+record() { # tier iso leg status
+    ran=$((ran + 1))
+    printf '%s %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" \
+        "$(sha256_of "$images/$1/$2.iso")" >> "$runs"
+}
+halt_boot() { # tier iso elf leg
+    local tier=$1 iso=$2 k=$3 leg=$4 hrc=0
+    log=$PAX_BUILD/reel-$tier-$iso-$leg.serial.log
+    rm -f "$log" "$log".*
+    if [ ! -f "$images/$tier/$iso.iso" ] || [ ! -f "$images/$tier/$k.elf" ]; then
+        say "no image or ELF: $images/$tier/$iso.iso, $k.elf"
+        return 3
+    fi
+    "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 240 \
+        --elf "$images/$tier/$k.elf" --marker 'PANIC .*' "$images/$tier/$iso.iso" >"$log.verdict" 2>&1 || hrc=$?
+    record "$tier" "$iso" "$leg" "$hrc"
+    serial_norm "$log" > "$log.norm"
+    return "$hrc"
+}
+halted() { tail -n 1 "$log.verdict"; }
+not_halted() { grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"; }
+
+# R1: the stages in order. $1 the leg's firmware name as the kernel writes it.
+r1_lines() {
+    local fwname=$1
+    printf '%s\n' \
+        'PAX: a kernel written in wolf' \
+        "wolf ${V//./\\.}, target x86_64-unknown-none; every line below is printed by this kernel" \
+        '\[1/5\] boot: what Limine handed over' \
+        'boot: Limine [0-9.]+, base revision 6' \
+        "boot: firmware $fwname" \
+        "mem: $N map entries, $N MiB usable" \
+        "hhdm: $HEX, all of physical memory at one offset" \
+        "image: $HEX physical at $HEX, $N KiB" \
+        '\[2/5\] frames: physical memory, one bit per 4 KiB frame' \
+        "frames: $N usable, $N below 1 MiB, $N allocator, $N free" \
+        "alloc: frame $HEX, free $N -> $N" \
+        "write: $HEX at $HEX, read back $HEX, same" \
+        "free: frame $HEX, free $N -> $N" \
+        "\\[3/5\\] paging: the kernel's own page tables, CR3 switched" \
+        "paging: limine cr3 $HEX, pax cr3 $HEX, $N table frames" \
+        "paging: text   $HEX to $HEX r-x, 4 KiB pages, every page alike" \
+        "paging: rodata $HEX to $HEX r--, 4 KiB pages, every page alike" \
+        "paging: data   $HEX to $HEX rw-, 4 KiB pages, every page alike" \
+        "paging: hhdm   $HEX rw-, $N KiB pages" \
+        'paging: lower half 0 of 256 top-level entries present' \
+        "\\[4/5\\] interrupts: the kernel's GDT, TSS and IDT; the timer on vector 32" \
+        "gdt: $HEX, 7 descriptors, tss 0x28 at $HEX, ist1 $HEX to $HEX" \
+        "idt: $HEX, 256 gates, 48 routed, #DF on ist1" \
+        "apic: $HEX at 0xffffb00000000000, id $N, svr $HEX, lint0 $HEX -> 0x0000000000008700" \
+        'timer: pit divisor 11932 \(99.998 Hz\), 8259 at 32 and 40, line 0 unmasked' \
+        'tick: 50 ticks handled, 0\.5 s' 'tick: 100 ticks handled, 1\.0 s' 'tick: 150 ticks handled, 1\.5 s' \
+        'tick: 200 ticks handled, 2\.0 s' 'tick: 250 ticks handled, 2\.5 s' 'tick: 300 ticks handled, 3\.0 s' \
+        "tick: $N spurious" \
+        '\[5/5\] threads: four kernel threads, preempted by the timer, then joined' \
+        "sched: main 0, idle 1, 16 slots, stacks 16 KiB above a 48 KiB guard from 0xffffd00000000000, quantum 2 ticks" \
+        "spawn: wolf t$N, lupin t$N, lobo t$N, pax t$N; none yields, each writes every 5th run" \
+        "join: 4 of 4 exited; frames free $N before, $N after: every stack given back" \
+        'PAX today: Limine boot on BIOS and UEFI, frames, paging, interrupts,' \
+        'a timer and preemptive threads, all in wolf. Next: user mode, then' \
+        'Linux binaries, unmodified.' \
+        'finale in 3\.\.\. 2\.\.\. 1\.\.\.'
+}
+r1_check() { # fwname -> 0/1, the first missing line on stderr
+    local -a want=()
+    while IFS= read -r l; do want+=("$l"); done <<<"$(r1_lines "$1")"
+    "$PAX_ROOT/tools/expect-serial" --regex "$log" "${want[@]}" > "$log.r1" 2>&1
+}
+# R2: the frame round trip.
+r2_check() {
+    awk '
+        /^alloc: frame 0x[0-9a-f]+, free [0-9]+ -> [0-9]+$/ { a = $5 + 0; b = $7 + 0; fa = $3; sub(/,$/, "", fa); s1 = 1 }
+        /^free: frame 0x[0-9a-f]+, free [0-9]+ -> [0-9]+$/ { c = $5 + 0; d = $7 + 0; fb = $3; sub(/,$/, "", fb); s2 = 1 }
+        END {
+            if (!s1 || !s2) { print "no: no alloc/free lines"; exit 1 }
+            if (b != a - 1 || c != b || d != a || fa != fb) { print "no: free " a " -> " b ", " c " -> " d " (frames " fa ", " fb ")"; exit 1 }
+            print "ok frame " fa ": free " a " -> " b " -> " d
+        }' "$log.norm"
+}
+# R4: the four workers.
+r4_check() {
+    awk '
+        /^(wolf |lupin|lobo |pax  )  t[0-9]+ run [0-9]+ at tick [0-9]+$/ {
+            nm = $1; r = $4 + 0; k = $7 + 0; n++
+            c[nm]++
+            if (r != c[nm] * 5) why = why " " nm " line " c[nm] " at run " r ";"
+            if (n > 1 && k < lastk) why = why " tick " k " after " lastk ";"
+            lastk = k
+            if (c[nm] == 1) { firsts++; if (firsts == 4) allfirst = n }
+            if (c[nm] == 6 && !lastseen) lastseen = n
+        }
+        /^join: 4 of 4 exited; frames free [0-9]+ before, [0-9]+ after: every stack given back$/ { j = 1; jb = $8 + 0; ja = $10 + 0; if (jb == 0) why = why " join line read 0 free frames;" }
+        END {
+            if (n != 24) why = why " " n " worker lines, not 24;"
+            if (firsts != 4) why = why " " firsts " distinct workers, not 4;"
+            else if (allfirst > lastseen) why = why " a worker finished (line " lastseen ") before all four had run (line " allfirst ");"
+            if (!j) why = why " no join line;"
+            else if (ja != jb) why = why " frames free " jb " before, " ja " after the join;"
+            if (why != "") { print "no:" why; exit 1 }
+            print "ok 24 lines, 6 per worker at runs 5..30, all four under way by line " allfirst ", the first finished at line " lastseen "; joined, frames free " jb " = " ja
+        }' "$log.norm"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    fwname=bios; [ "$leg" = uefi ] && fwname=uefi64
+    for tier in $tiers; do
+        for iso in pax-reel pax-reel-b; do
+            k=kmain_reel; [ "$iso" = pax-reel-b ] && k=kmain_reel_text
+            hrc=0; halt_boot "$tier" "$iso" "$k" "$leg" || hrc=$?
+            if [ "$hrc" = 3 ]; then bad "R1-R6 $tier $iso $leg: no image"; continue; fi
+            id="$tier $iso $leg"
+            if r1_check "$fwname"; then
+                say "PASS R1 $id: banner (wolf $V), stages 1/5 to 5/5 in order, closing lines, countdown"
+            else
+                bad "R1 $id: $(grep -m1 'FAIL' "$log.r1")"
+            fi
+            if v=$(r2_check); then say "PASS R2 $id: ${v#ok }"; else bad "R2 $id: ${v#no: }"; fi
+            # R3 is R1's paging lines, held to their exact permissions.
+            if grep -Eq "^paging: text   $HEX to $HEX r-x, 4 KiB pages, every page alike\$" "$log.norm" \
+                && grep -Eq "^paging: rodata $HEX to $HEX r--, 4 KiB pages, every page alike\$" "$log.norm" \
+                && grep -Eq "^paging: data   $HEX to $HEX rw-, 4 KiB pages, every page alike\$" "$log.norm" \
+                && grep -Eq "^paging: hhdm   $HEX rw-, $N KiB pages\$" "$log.norm" \
+                && grep -Eq '^paging: lower half 0 of 256 top-level entries present$' "$log.norm"; then
+                say "PASS R3 $id: text r-x, rodata r--, data rw- (every page alike), hhdm rw-, lower half empty"
+            else
+                bad "R3 $id: the permissions read back are not W^X as built"; grep '^paging:' "$log.norm" | sed 's/^/  /' >&2
+            fi
+            if v=$(r4_check); then say "PASS R4 $id: ${v#ok }"; else bad "R4 $id: ${v#no:}"; grep -E '^(wolf |lupin|lobo |pax  )  t|^join' "$log.norm" | sed 's/^/  /' >&2; fi
+            why=
+            [ "$hrc" = 0 ] || why+=" not halted ($(not_halted));"
+            if [ "$iso" = pax-reel ]; then
+                "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
+                    'finale: a thread recurses until it runs off its stack' \
+                    "overflow: t$N stack $HEX to $HEX, guard $HEX to $HEX" \
+                    "PANIC stack overflow thread $N cr2 $HEX guard $HEX to $HEX" >/dev/null \
+                    || why+=" the log does not end finale, overflow: …, PANIC stack overflow thread …;"
+                o=$(grep -E "^overflow: t$N stack $HEX to $HEX, guard $HEX to $HEX\$" "$log.norm" | tail -n 1)
+                p=$(grep -E "^PANIC stack overflow thread $N cr2 $HEX guard $HEX to $HEX\$" "$log.norm" | tail -n 1)
+                if [ -n "$o" ] && [ -n "$p" ]; then
+                    set -- $o; oid=${2#t}; lo=$4 g=$8
+                    set -- $p; pid=$5 a=$7 pg=$9 plo=${11}
+                    [ "$oid" = "$pid" ] || why+=" thread $pid panicked, t$oid overflowed;"
+                    [ "$pg" = "$g" ] && [ "$plo" = "$lo" ] || why+=" guard [$pg, $plo) is not t$oid's [$g, $lo);"
+                    [ $((a)) -ge $((g)) ] && [ $((a)) -lt $((lo)) ] || why+=" cr2 $a outside the guard [$g, $lo);"
+                fi
+                if [ -z "$why" ]; then
+                    say "PASS R5 $id: thread $pid overran its stack, cr2 $a in its guard [$g, $lo), PANIC stack overflow by name; $(halted)"
+                else
+                    bad "R5 $id:$why"; tail -n 4 "$log.norm" | sed 's/^/  /' >&2
+                fi
+            else
+                "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
+                    "finale: the kernel writes to its own text, which paging mapped r-x" \
+                    "write: text at $HEX" \
+                    "PANIC page fault vector 14 error 0x0000000000000003 rip $HEX rsp $HEX frame $HEX cr2 $HEX" >/dev/null \
+                    || why+=" the log does not end finale, write: text at …, PANIC page fault vector 14 …;"
+                w=$(sed -n 's/^write: text at \(0x[0-9a-f]*\)$/\1/p' "$log.norm" | tail -n 1)
+                c=$(sed -n 's/^PANIC page fault vector 14 .* cr2 \(0x[0-9a-f]*\)$/\1/p' "$log.norm" | tail -n 1)
+                t=$(grep -E "^paging: text   $HEX to $HEX " "$log.norm" | tail -n 1)
+                if [ -n "$w" ] && [ -n "$c" ] && [ -n "$t" ]; then
+                    set -- $t; tlo=$3 thi=$5
+                    [ "$w" = "$c" ] || why+=" cr2 $c is not the address written, $w;"
+                    [ $((w)) -ge $((tlo)) ] && [ $((w)) -lt $((thi)) ] || why+=" $w is outside stage 3's text [$tlo, $thi);"
+                fi
+                if [ -z "$why" ]; then
+                    say "PASS R6 $id: the write to text at $w (in [$tlo, $thi), r-x) panicked page fault vector 14, cr2 $c; $(halted)"
+                else
+                    bad "R6 $id:$why"; tail -n 4 "$log.norm" | sed 's/^/  /' >&2
+                fi
+            fi
+        done
+    done
+    # R7: the pacing, timed line by line (native, finale a).
+    if [ -f "$images/native/pax-reel.iso" ]; then
+        tlog=$PAX_BUILD/reel-time-$leg.log
+        trc=0; "$PAX_ROOT/tools/reel" time --firmware "$leg" "$images/native/pax-reel.iso" "$tlog" >/dev/null 2>&1 || trc=$?
+        v=$(awk '
+            { t = $1 + 0; line = substr($0, 11) }
+            line ~ /^PAX: a kernel written in wolf$/ { banner = t }
+            line ~ /^\[[1-5]\/5\] / { n++; h[n] = t }
+            line ~ /^PANIC / { panic = t }
+            END {
+                if (!banner || n != 5 || !panic) { print "no: banner " banner ", " n " headings, panic " panic; exit 1 }
+                for (i = 2; i <= 5; i++) if (h[i] - h[i - 1] < 2.5) why = why " heading " i " came " (h[i] - h[i - 1]) " s after heading " i - 1 ";"
+                if (panic - banner > 60) why = why " the PANIC came " (panic - banner) " s after the banner;"
+                if (why != "") { print "no:" why; exit 1 }
+                printf "ok headings at %.2f %.2f %.2f %.2f %.2f s, PANIC at %.2f s (QEMU start = 0)\n", h[1], h[2], h[3], h[4], h[5], panic
+            }' "$tlog.times" 2>/dev/null)
+        if [ "$trc" = 0 ] && [ "${v%% *}" = ok ]; then
+            say "PASS R7 native pax-reel $leg: ${v#ok }"
+        else
+            bad "R7 native pax-reel $leg: tools/reel time exit $trc; ${v#no:}"
+        fi
+    fi
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "reel: PASS" || say "reel: FAIL"
+exit "$fail"
