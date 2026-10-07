@@ -214,8 +214,8 @@ first fatal one `arch_prctl`.
 
 | predicted | measured |
 |---|---|
-| Q1: every gate's assertions hold, one exception (mkw's `lupin-target` row) | **wrong once more**: two exceptions. mkw's row, as predicted (kasumi gauntlet at the pin, `ev/pin`: mkw 15 PASS 1 FAIL), and px08's suite R1 on all eight legs (36 PASS 8 FAIL): its kernel prints the wolf version as a literal (`wolf 0.2.24`) and its test checks it against `kernel/wolf.pin`. CI at the head: run 37702508398, job 113069055939, the same 8. That literal is px08's file and now px11's; it moves after px11 lands (§2 drift 3). Every other suite: PASS counts as px09's head (mkw 16, mpx1 26, mpx2-frames 44, mpx2-paging 26, mpx2-interrupts 34, mpx2-sched 32, mpx2-heap 56, mpx3-user 38, proof 2 on kasumi, census 3) |
-| Q2: every kernel ELF moves, native and release (reloads after calls); kmain_user's text grows 0.5–5% | **wrong**: **no loaded byte of any kernel moved.** 31 of 59 ELFs differ (`ev/elfdiff-base-pin.txt`): all 29 native ones and px08's two native ones only in `.debug_info`, `.symtab`, `.strtab` (and `.debug_str`/`.debug_aranges`); 26 of 28 release ELFs are byte-identical, and the two that move (kmain_heap, kmain_heap_threads) move only through wolf's runtime archive's debug sections (`kmain_heap.rt-none.a` `50da6b26…` → `110f062a…`; every release `.o` byte-identical). kmain_user `.text` 59,696 bytes at both pins (native), 65,068 (release). Why: #598/#601 change plain loads and stores of foreign memory that a call may write; PAX reads and writes every such word volatile since px07 (the scheduler's rule), so no plain foreign load sits across a call for the fix to reload |
+| Q1: every gate's assertions hold, one exception (mkw's `lupin-target` row) | **wrong once more**: two exceptions. mkw's row, as predicted (kasumi gauntlet at the pin, `notes/px10/kasumi-gauntlet-0.2.25-pin.summary`: mkw 15 PASS 1 FAIL), and px08's suite R1 on all eight legs (36 PASS 8 FAIL): its kernel prints the wolf version as a literal (`wolf 0.2.24`) and its test checks it against `kernel/wolf.pin`. CI at the head: run 37702508398, job 113069055939, the same 8. That literal is px08's file and now px11's; it moves after px11 lands (§2 drift 3). Every other suite: PASS counts as px09's head (mkw 16, mpx1 26, mpx2-frames 44, mpx2-paging 26, mpx2-interrupts 34, mpx2-sched 32, mpx2-heap 56, mpx3-user 38, proof 2 on kasumi, census 3) |
+| Q2: every kernel ELF moves, native and release (reloads after calls); kmain_user's text grows 0.5–5% | **wrong**: **no loaded byte of any kernel moved.** 31 of 59 ELFs differ (`notes/px10/kasumi-elfdiff-0.2.24-0.2.25.txt`): all 29 native ones and px08's two native ones only in `.debug_info`, `.symtab`, `.strtab` (and `.debug_str`/`.debug_aranges`); 26 of 28 release ELFs are byte-identical, and the two that move (kmain_heap, kmain_heap_threads) move only through wolf's runtime archive's debug sections (`kmain_heap.rt-none.a` `50da6b26…` → `110f062a…`; every release `.o` byte-identical). kmain_user `.text` 59,696 bytes at both pins (native), 65,068 (release). Why: #598/#601 change plain loads and stores of foreign memory that a call may write; PAX reads and writes every such word volatile since px07 (the scheduler's rule), so no plain foreign load sits across a call for the fix to reload |
 | Q3: no behaviour moves; transcripts move only in addresses and image-derived counts | **right on behaviour, wrong on the mechanism**: S7 `module var 1 -> 2`, H10 unchanged; 10 of 16 compared transcripts moved, and only in timing (mpx2-sched's lock/nolock increments, mpx3-user's spinner runs, px08's suite's ticks: TCG run-to-run noise), none in an address: the code did not move |
 | Q4: lupin 0.1.48 answers `unsupported` for `--target` | **right**: `"verdict":"unsupported","x-unsupported":"the freestanding target x86_64-unknown-none"`; the no-target row unchanged |
 | Q5: `pin 6710f9e` | right: `wolf 0.2.25 (wolfgang, pin 6710f9e)`, `lupin 0.1.48 (wolf-interp, reference interpreter at pin 294d626)` |
@@ -245,14 +245,14 @@ first fatal one `arch_prctl`.
 - wolf 0.2.25 `wolf-0.2.25-x86_64-unknown-linux-gnu.tar.gz` `9d91f533…` (release 406122367, wolf-lang `6710f9e0`); lupin 0.1.48 linux x86-64 `81cfd77a…` (release 405340127, wolf-interp `531bf058`): `kernel/wolf.pin`, the pin's commit (§5); fetch-wolf and fetch-lupin re-hash both on every run.
 - The prediction: `d323de2`, pushed before either archive was unpacked.
 
-### The move table (kasumi, QEMU 11.1.1 TCG, strict env; `~/lanes/px10/ev/`)
+### The move table (kasumi, QEMU 11.1.1 TCG, strict env)
 
-| suite | 0.2.24 (`ev/base`, tree `d323de2`) | 0.2.25 (`ev/pin`, the pin's tree) |
+| suite | 0.2.24 (tree `d323de2`) | 0.2.25 (the pin's tree) |
 |---|---|---|
 | expect-serial-selftest | rc 0 | rc 0 |
 | proof | 2 PASS | 2 PASS |
 | census | 3 | 3 |
-| mkw | 16 | **15 / 1 FAIL** (`lupin-target`: Q4) → 16 with the row re-recorded (`ev/pin2`) |
+| mkw | 16 | **15 / 1 FAIL** (`lupin-target`: Q4) → 16 with the row re-recorded |
 | mpx1 | 26 | 26 |
 | mpx2-frames | 44 | 44 |
 | mpx2-paging | 26 | 26 |
@@ -260,9 +260,9 @@ first fatal one `arch_prctl`.
 | mpx2-sched | 32 | 32 |
 | mpx2-heap | 56 | 56 |
 | mpx3-user | 38 | 38 |
-| px08's suite | 44 | **36 / 8 FAIL** (R1, the version literal) |
+| px08's suite | 44 | **36 / 8 FAIL** (R1, the version literal) → 44 with the literal at 0.2.25 |
 
-ELFs: 59 compared, 28 byte-identical, 31 moved in non-loaded sections only (`ev/elfdiff-base-pin.txt`). 0 FAIL elsewhere; 0 SKIP lines in any suite's full output.
+ELFs: 59 compared, 28 byte-identical, 31 moved in non-loaded sections only. 0 FAIL elsewhere; 0 SKIP lines in any suite's full output. Files: `notes/px10/kasumi-gauntlet-0.2.24-d323de2.summary`, `kasumi-gauntlet-0.2.25-pin.summary`, `kasumi-gauntlet-0.2.25-pin-mkw-row-and-version-literal.summary` (the pin's tree with mkw's row re-recorded and px08's literal moved to 0.2.25: every suite green, px08's 44), `kasumi-elf-sha256-0.2.24-0.2.25.txt` (path, sha at 0.2.24, sha at 0.2.25), `kasumi-elfdiff-0.2.24-0.2.25.txt` (which sections moved, which of them are loaded: none).
 
 ### Red, then green (CI)
 
