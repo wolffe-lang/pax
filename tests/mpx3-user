@@ -51,12 +51,15 @@
 #      program, and `exit 14` (it exits 14 only when all three came back
 #      -14, Linux's EFAULT; drift from the contract, argued in
 #      notes/px09-user-mode.md §2).
-#   U5 two at once: spin1 and spin2 run together, each writing `spin:
-#      begin` and `spin: end` around a busy loop with no system call in
-#      it: four lines, both `exit 0 after <r> runs` with r >= 2 (each
-#      preempted in ring 3 and resumed there, with the other process's
-#      CR3 and kernel stack in between), and at the end `user: ticks in
-#      ring 3 <n>` with n > 0.
+#   U5 two at once: spin1 and spin2 run together, each writing `spinN:
+#      begin` and `spinN: end` around a busy loop with no system call in
+#      it, and keeping a mark of its own in %r12 and on its own stack
+#      that it checks after the loop (exit 3 and no end line if either
+#      changed): both begin lines before either end line, both `exit 0
+#      after <r> runs` with r >= 2 (each preempted in ring 3 and resumed
+#      there, with the other process's CR3 and kernel stack in between,
+#      and resumed with its own registers on its own stack), and at the
+#      end `user: ticks in ring 3 <n>` with n > 0.
 #   U6 after: `after` (hello's blob under another name) prints its hello
 #      line and exits 0 after every fault above: the kernel survived.
 #      Every batch's `user: frames free <A> before, <B> with <n>
@@ -323,22 +326,22 @@ for leg in $legs; do
             fi
             # U5
             why=
-            [ "$(grep -cx 'spin: begin' "$norm")" = 2 ] || why+=" $(grep -cx 'spin: begin' "$norm") 'spin: begin' lines, not 2;"
-            [ "$(grep -cx 'spin: end' "$norm")" = 2 ] || why+=" $(grep -cx 'spin: end' "$norm") 'spin: end' lines, not 2;"
             for n in spin1 spin2; do
+                [ "$(grep -cx "$n: begin" "$norm")" = 1 ] || why+=" $(grep -cx "$n: begin" "$norm") '$n: begin' lines, not 1;"
+                [ "$(grep -cx "$n: end" "$norm")" = 1 ] || why+=" $(grep -cx "$n: end" "$norm") '$n: end' lines, not 1 (a lost mark exits 3 without it);"
                 [ "$(exited $n "$norm")" = 0 ] || why+=" $n exit '$(exited $n "$norm")';"
                 r=$(runs_of $n "$norm")
                 [ -n "$r" ] && [ "$r" -ge 2 ] || why+=" $n ran $r times (< 2: never preempted in ring 3 and resumed);"
             done
             # both began before either ended: they ran at once
-            order=$(grep -E -x 'spin: (begin|end)' "$norm" | awk '{ printf "%s ", $2 }')
+            order=$(grep -E -x 'spin[12]: (begin|end)' "$norm" | awk '{ printf "%s ", $2 }')
             [ "$order" = 'begin begin end end ' ] || why+=" spin lines '$order', not both begins before both ends;"
             tk=$(sed -n -E 's/^user: ticks in ring 3 ([0-9]+)$/\1/p' "$norm" | tail -n 1)
             [ -n "$tk" ] && [ "$tk" -gt 0 ] || why+=" ticks in ring 3 '$tk';"
             if [ -z "$why" ]; then
                 say "PASS U5 $tier kmain_user $leg: spin1 $(runs_of spin1 "$norm") runs, spin2 $(runs_of spin2 "$norm") runs, both exit 0; $tk ticks taken in ring 3"
             else
-                bad "U5 $tier kmain_user $leg:$why"; grep -E '^(spin:|user: spin|user: ticks)' "$norm" | sed 's/^/  /' >&2
+                bad "U5 $tier kmain_user $leg:$why"; grep -E '^(spin[12]:|user: spin|user: ticks)' "$norm" | sed 's/^/  /' >&2
             fi
             # U6
             why=
