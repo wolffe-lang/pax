@@ -1,0 +1,79 @@
+//! member: false
+// kmain_reel.lu — the boot reel, finale (a): a thread overruns its stack
+// (px08, tests/reel). kernel/reel walks the stages, each the test
+// kernels' own path, under a heading, with a pause for the viewer
+// between them:
+//
+//     PAX: a kernel written in wolf
+//     [1/5] boot: what Limine handed over          (kmain's lines)
+//     [2/5] frames: …                              (kmain_frames' path)
+//     [3/5] paging: …                              (kmain_paging's)
+//     [4/5] interrupts: …                          (kmain_timer's)
+//     [5/5] threads: …                             (kmain_sched's)
+//     PAX today: … Next: user mode, then Linux binaries, unmodified.
+//     finale in 3... 2... 1...
+//
+// then the finale, kmain_sched_overflow's path: one thread runs
+// kernel/schedtest's `pax_t_deep`, a recursion that never ends, into
+// the guard page under its stack; the page fault cannot push its frame
+// there, so the CPU raises a double fault onto IST1 and
+// kernel/interrupts names it:
+//
+//     finale: a thread recurses until it runs off its stack
+//     overflow: t<id> stack 0x<lo> to 0x<hi>, guard 0x<g> to 0x<lo>
+//     PANIC stack overflow thread <id> cr2 0x<a> guard 0x<g> to 0x<lo>
+//
+// and halts. kmain_reel_text.lu is the same reel with finale (b).
+use frames
+use log
+use panic
+use reel
+use sched
+use schedtest
+use serial
+use sync
+
+extern "c" let pax_reel_worker: *u8
+extern "c" let pax_t_deep: *u8
+
+export fn kmain() {
+    serial.init()
+    reel.stage_boot()
+    reel.pause_early(300) // PAUSE for the viewer
+    let pa = reel.stage_frames()
+    reel.pause_early(300) // PAUSE for the viewer
+    let pml4 = reel.stage_paging(pa)
+    reel.pause_early(300) // PAUSE for the viewer
+    reel.stage_interrupts(pml4)
+    reel.pause_ticks(200) // PAUSE for the viewer
+    // # Safety: the address of kernel/reel's export; nothing is read.
+    let worker = unsafe { pax_reel_worker as u64 }
+    reel.stage_threads(pml4, worker)
+    reel.pause_sleep(300) // PAUSE for the viewer
+    reel.closing()
+
+    log.line("finale: a thread recurses until it runs off its stack")
+    let pa2 = frames.alloc() else 0
+    if pa2 == 0 {
+        panic.fail("reel: no frame for the finale's page", 0)
+    }
+    // # Safety: the address of kernel/schedtest's export; nothing is read.
+    let deep = unsafe { pax_t_deep as u64 }
+    let saved = sync.irq_save()
+    let t = sched.create(deep, pa2 + frames.hhdm())
+    log.put("overflow: t")
+    log.dec(t as int)
+    log.put(" stack ")
+    log.hex(sched.stack_lo(t))
+    log.put(" to ")
+    log.hex(sched.stack_hi(t))
+    log.put(", guard ")
+    log.hex(sched.guard_lo(t))
+    log.put(" to ")
+    log.hex(sched.stack_lo(t))
+    log.end()
+    sync.irq_restore(saved)
+    sched.wait_all()
+    schedtest.line("overflow: the thread exited (it must not)")
+    panic.halt()
+}
