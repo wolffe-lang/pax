@@ -612,14 +612,15 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
-  # px08: the boot reel. kmain_reel and kmain_reel_text (kernel/reel's
-  # stages over the test kernels' paths), two ISOs behind Limine's menu
-  # (tools/reel build), both tiers, BIOS and UEFI. tests/reel: the build
-  # (R0), the stages in order (R1), the frame round trip (R2), W^X read
-  # back from the live tables (R3), four named threads interleaved and
-  # joined (R4), finale (a) a stack overflow and (b) a write to text,
-  # each panicking by name and halted (R5, R6), the pauses (R7).
-  reel:
+  # px08: the tour of the kernel. kmain_tour and kmain_tour_text
+  # (kernel/tour's stages over the test kernels' paths), two ISOs behind
+  # Limine's menu (tools/tour build), both tiers, BIOS and UEFI.
+  # tests/tour: the build (R0), the stages in order (R1), the frame round
+  # trip (R2), W^X read back from the live tables (R3), four named threads
+  # interleaved and joined (R4), ending (a) a stack overflow and (b) a
+  # write to text, each panicking by name and halted (R5, R6), the pauses
+  # (R7).
+  tour:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -638,7 +639,7 @@ jobs:
         with:
           path: |
             .pax-cache/limine-*
-          key: reel-${{ hashFiles('boot/limine.pin') }}
+          key: tour-${{ hashFiles('boot/limine.pin') }}
 
       - name: wolf at the pin (the release archive, by digest)
         run: |
@@ -649,24 +650,24 @@ jobs:
       - name: fetch limine (by digest)
         run: tools/fetch-limine
 
-      - name: the reel, both tiers, BIOS and UEFI
+      - name: the tour, both tiers, BIOS and UEFI
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/reel
+        run: tests/tour
 
       - name: keep the ISOs, the transcripts, the timings, the halt probes
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pax-reel-linux
+          name: pax-tour-linux
           path: |
-            build/reel/
-            build/reel-*.log
-            build/reel-*.norm
-            build/reel-*.times
-            build/reel-*.meta
-            build/reel-*.halt
-            build/reel-*.verdict
-            build/reel-runs.txt
+            build/tour/
+            build/tour-*.log
+            build/tour-*.norm
+            build/tour-*.times
+            build/tour-*.meta
+            build/tour-*.halt
+            build/tour-*.verdict
+            build/tour-runs.txt
           retention-days: 14
           if-no-files-found: warn
