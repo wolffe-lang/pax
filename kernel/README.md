@@ -147,3 +147,41 @@ and OVMF, asserts the transcript and the panic line, and proves each halt
 through QEMU's monitor (`tools/qemu-halt`). M-KW's kernels (`KWC`,
 `TRAP 1`) are frozen in `tests/mkw.d` and still booted by `tests/mkw`.
 `docs/BOOT.md` says what the boot protocol asks of the object.
+
+## User mode (px09)
+
+`kmain_user.lu` runs programs in ring 3, each in an address space of
+its own, on a kernel thread of its own that enters ring 3 by `iretq`;
+`kmain_user_smap.lu` and `kmain_user_smep.lu` are the SMAP and SMEP
+witnesses (`tests/mpx3-user`).
+
+| module or file | what |
+|---|---|
+| `user/` | the SYSCALL MSRs (EFER.SCE, STAR `0x0010_0008 << 32`, LSTAR, FMASK `0x44700`), SMEP and SMAP when CPUID has them; `load(prog)` (a process's PML4 from `paging.new_space`, its program's bytes at `0x400000` read-execute user, a 16 KiB stack below `0x7ffffffff000` read-write no-execute user, the page below it never mapped), `describe`, `pax_user_thread` (the thread body that enters ring 3); `syscall` (Linux's numbers: `write` 1 to the serial console with every page of the buffer checked present and user first, else `-EFAULT`; `exit` 60; anything else `-ENOSYS`), `kill` (an exception in ring 3 ends the program by name), `from_user`, the ring-3 tick count |
+| `paging/` (px09 additions) | `new_space` (entries 256-511 copied from the kernel's PML4: the kernel half's tables shared), `map_user` (U/S at every level), `user_ok` (the walk a user read takes), `free_user` (the user half's pages, tables and the PML4 back to `frames`), `live`, `load` (MOV to CR3), `kernel_half` |
+| `gdt/` (px09 additions) | `set_rsp0`/`rsp0`: the TSS's RSP0 as two aligned 32-bit halves (offset 4; a misaligned 8-byte store is a UB row, ruling #36) |
+| `sched/` (px09 additions) | a thread's `cr3` and `prog` (the record is 88 bytes); `run_next` makes the switched-in thread's space live and points RSP0 and SYSCALL's stack word at its kernel stack's top; `create_user(body, prog, cr3)`; `end_current(f)` ends the running thread from a handler and returns the next thread's frame; `reap` frees a dead thread's address space with its stack |
+| `../boot/user.S` | `pax_syscall_entry` (LSTAR: onto the thread's kernel stack, the interrupt-shaped frame, vector 0x100, into `pax_isr_common`), `pax_enter_user` (`iretq` to CPL 3, registers zeroed), `pax_peek_user` (a user byte, STAC/CLAC under SMAP), `pax_jump`, `pax_syscall_state` |
+| `../boot/isr.S` (px09 addition) | `pax_sysret`: a resumed frame with vector 0x100, CS 0x23 and a RIP below `0x7ffffffff000` leaves by `sysretq`; every other by `iretq` |
+| `../user/programs.S` | the first user programs, flat position-independent blobs in the kernel's `.rodata` (never executable in ring 0): hello, the five fault cases, badptr, spin; `pax_uprogs` their bounds |
+
+- The way in: `user.load` and `sched.create_user` (thread context, IF
+  clear); `run_next` loads the thread's CR3; the body
+  `pax_user_thread` calls `pax_enter_user`, whose `iretq` drops to CPL
+  3. Interrupts and exceptions from ring 3 arrive on RSP0, system calls
+  on the same stack top through `pax_syscall_state` word 0: SYSCALL
+  switches no stack.
+- The way out: `exit` and a fault both end the thread in the handler
+  (`sched.end_current`): `sched.exit` switches by `pax_switch`, which
+  is for thread context. The address space is freed by `reap`, in
+  thread context, as stacks are (px07).
+- Every word of a frame is read and written at its index (a store to a
+  field of a raw element is refused, wolf-lang#577); the state handlers
+  write lives in `pax_syscall_state` and the thread records, read
+  volatile, never in module `var`s (wolf-lang#598, not fixed in 0.2.24);
+  no `region` anywhere near a return to ring 3 (wolf-lang#611).
+- Not yet: FXSAVE/XSAVE per thread (no program here touches x87 or
+  SSE, and the kernel uses neither; px10's static binaries will),
+  `exit_group` (231), an ELF loader, argv/envp/auxv on the stack (px10),
+  SWAPGS and per-CPU state (SMP), an IST for NMI (the window between
+  `pax_sysret`'s stack load and `sysretq`).
