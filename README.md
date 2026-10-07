@@ -17,12 +17,14 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
               interrupt trampolines and the descriptor tables' storage
               (start.S, io.S, cpu.S, isr.S, kernel.ld), and the assembly proof under
               boot/stub/
+    user/     the first user programs (px09): flat assembly blobs the
+              kernel copies into each process (programs.S)
     tools/    the harness: fetch-limine, fetch-wolf, fetch-lupin,
               build-stub, build-kernel, mkimage, qemu-run, qemu-halt,
               qemu-fault, qemu-gdb, expect-serial
     tests/    scripted QEMU tests: proof, mkw (with M-KW's frozen kernels
               in mkw.d/), mpx1, mpx2-frames, mpx2-paging, mpx2-interrupts,
-              mpx2-sched, gdb-attach,
+              mpx2-sched, mpx3-user, gdb-attach,
               expect-serial-selftest
     docs/     BOOT.md (the boot protocol, argued), SOURCES.md (the
               consulted-sources log), ABI notes as they come
@@ -44,6 +46,7 @@ tests/mpx2-frames --images build/mpx2      # boot them elsewhere (hasu under KVM
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx2-paging   # px03: paging, read back through QEMU's monitor
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx2-interrupts   # kw10: named panics, int3, #DF on IST1, the timer
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx2-sched   # px07: threads switched by the timer, sleep, exit, the lock, the guard
+PAX_WOLF=$(tools/fetch-wolf) tests/mpx3-user   # px09: ring 3 — syscall write/exit, faults killed by name, SMEP/SMAP
 tools/qemu-halt --elf K.elf --marker halt --cmd 'info tlb' K.iso   # monitor answers on the halted machine (K.log.cmd1)
 tools/qemu-fault --marker 'write: .*' K.iso                        # a kernel that must fault: CR2 from the stopped machine
 tests/mpx1 --images build/mpx1             # boot ISOs built elsewhere (any host with QEMU)
