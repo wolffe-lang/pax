@@ -3,7 +3,7 @@
 Contract: `sprints/pax/10-the-loader/px10-the-loader.md` in wolffe-lang/wolf
 (planning trunk `f6a6f343` at the time of reading; the contract's only
 commit is wolffe-lang/wolf `4766fff`, 2026-10-07). Branch `px10` in pax, cut from px08's head
-`7c42f5b` (pax#11, the reel, rebased on pax trunk `a01e2e4` and green;
+`7c42f5b` (pax#11, rebased on pax trunk `a01e2e4` and green;
 it merges first, and this branch is rebased on trunk once it lands).
 This note is committed whole, §1–§3 first, before either release archive
 is unpacked; §4 and §5 are filled in as the evidence lands.
@@ -31,11 +31,14 @@ is unpacked; §4 and §5 are filled in as the evidence lands.
 - No `region` is held open across a yield, a switch or a return to user
   mode (wolf-lang#611): this lane allocates nothing from wolf's heap; the
   initramfs is read in place and every process's pages are frames.
-- px08's files are not touched: `kernel/reel`, `kernel/kmain_reel*`,
-  `demo/reel`, `tools/reel`, `tests/reel` (and its `tools/mkimage`
-  options are used as px08 wrote them). Shared files this lane must
-  edit: `.github/workflows/ci.yml` (a new job), `docs/SOURCES.md`,
-  `kernel/README.md`, `README.md` (appended sections).
+- px08's and px11's files are not touched (px11, launched after this
+  contract, renames px08's work and merges before this lane): this lane
+  edits none of `kernel/reel`, `kernel/kmain_reel*`,
+  `boot/limine-reel.conf`, `tools/reel`, `tests/reel`, `demo/`, and
+  uses px08's `tools/mkimage` options (`--conf`, `--add`) as written.
+  Shared files this lane must edit: `.github/workflows/ci.yml` (a new
+  job), `docs/SOURCES.md`, `kernel/README.md`, `README.md` (appended
+  sections).
 - No `rm` outside `~/lanes/px10/` and this lane's worktrees; no deletion
   in a tree this lane did not create; no `git add -A`; nothing under
   `~/.claude`; no merge, tag or release; no attribution trailers.
@@ -74,8 +77,16 @@ is unpacked; §4 and §5 are filled in as the evidence lands.
    wolf-interp#182). px05 and px07 deferred that move to "a lane of its
    own"; this contract makes it this lane's, so the row is re-recorded
    in the pin's commit and the move is in §3.
-2. px08 is still open: this branch is cut from its head and rebased on
-   trunk after it merges (its commits disappear from the diff then).
+2. px08 merged (trunk `7c42f5b`) while §1–§3 were being written: this
+   branch was already cut from that commit. The orchestrator then
+   launched px11 (it renames px08's suite and removes `demo/`), which
+   merges before this lane; this branch is rebased on it when it lands.
+3. (Found after §3, by the pin's gauntlet, `notes/px10/` §4) px08's suite
+   checks that its kernel prints the pinned wolf version, and its kernel
+   spells the version as a literal (`wolf 0.2.24`): the pin bump reds
+   it until that literal moves, which is px08's file and now px11's.
+   The move is made after px11 lands, in its renamed file, as the one
+   line the bump needs (§4).
 
 ## 3. Prediction (committed before either archive is unpacked)
 
@@ -84,7 +95,7 @@ is unpacked; §4 and §5 are filled in as the evidence lands.
 - **Q1.** Every gate's assertions hold unchanged at 0.2.25 / 0.1.48, PASS
   counts per job identical to px09's head run (mkw 16, mpx1 26,
   mpx2-frames 44, mpx2-paging 26, mpx2-interrupts 34, mpx2-sched 32,
-  mpx2-heap 56, mpx3-user 38, proof 4, census 3, and px08's reel as it
+  mpx2-heap 56, mpx3-user 38, proof 4, census 3, and px08's suite as it
   stands), with **one** exception: tests/mkw step 6's `lupin-target`
   row, which must be re-recorded (Q4).
 - **Q2. Every kernel ELF moves**, native and release, every kernel in
