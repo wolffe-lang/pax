@@ -15,6 +15,14 @@
 //! - vector 32, the timer (kernel/timer, the 8259's line 0): a tick,
 //!   then kernel/sched's `preempt`, which returns the frame to resume
 //!   (the same one until the scheduler is started);
+//! - vector 0x100, PAX_SYSCALL (px09): no gate routes it; boot/user.S's
+//!   `pax_syscall_entry` builds the frame for a `syscall` in ring 3, and
+//!   kernel/user's `syscall` returns the frame to resume (the caller's,
+//!   its %rax the result, or after `exit` the next thread's);
+//! - an exception 0-31 from ring 3 (the frame's CS has RPL 3), except
+//!   the double fault and the machine check (px09): kernel/user's `kill`
+//!   ends the program by name and returns the next thread's frame — the
+//!   kernel goes on;
 //! - vector 0x81, PAX_SWITCH (px07): no gate routes it; boot/sched.S's
 //!   `pax_switch` builds the frame by hand for a thread that yields,
 //!   sleeps, waits or exits, and kernel/sched's `switched` returns the
@@ -53,6 +61,7 @@ use log
 use panic
 use sched
 use timer
+use user
 
 extern "c" fn pax_cr2() -> u64
 
@@ -223,6 +232,10 @@ export fn pax_interrupt(f: *Frame) -> *Frame {
     }
     if v == timer.master_base() {
         timer.tick()
+        // # Safety: the frame's address; nothing is read here.
+        if user.from_user(unsafe { f as u64 }) {
+            user.count_tick() // px09: a tick that landed in ring 3
+        }
         // # Safety: the frame's address, and the one sched hands back is
         // a saved frame on a live thread's stack.
         return unsafe { sched.preempt(f as u64) as *Frame }
@@ -231,8 +244,18 @@ export fn pax_interrupt(f: *Frame) -> *Frame {
         // # Safety: as above.
         return unsafe { sched.switched(f as u64) as *Frame }
     }
+    if v == user.vector() {
+        // # Safety: as above; the frame user.syscall returns is this one
+        // or a saved frame on a live thread's stack.
+        return unsafe { user.syscall(f as u64) as *Frame }
+    }
     if (v == 39 || v == 47) && timer.spurious(v) {
         return f
+    }
+    // # Safety: the frame's address; nothing is read here.
+    if v < 32 && v != 8 && v != 18 && user.from_user(unsafe { f as u64 }) {
+        // # Safety: as above.
+        return unsafe { user.kill(f as u64, name(v)) as *Frame }
     }
     fatal(f)
     f
