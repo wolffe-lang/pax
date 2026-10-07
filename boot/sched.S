@@ -74,8 +74,8 @@
                          changes what the kernel does.
 
    Storage (.bss, zero until kernel/sched writes it):
-     pax_threads       16 thread records, 72 bytes each (kernel/sched's
-                       #[repr(c)] Thread)
+     pax_threads       16 thread records, 88 bytes each (kernel/sched's
+                       #[repr(c)] Thread; 72 before px09's cr3 and prog)
      pax_sched_locks   eight 8-byte lock words (kernel/sync; word 0 is
                        the console's)
      pax_sched_state   sixteen 8-byte words: the scheduler's scalars
@@ -158,7 +158,7 @@ pax_irq_restore:
         .p2align 6
         .globl pax_threads
 pax_threads:
-        .zero 16 * 72
+        .zero 16 * 88
         .p2align 6
         .globl pax_sched_locks
 pax_sched_locks:

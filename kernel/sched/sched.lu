@@ -59,6 +59,20 @@
 //! never done in a handler, so `frames` and `paging` are only ever
 //! entered from thread context with IF clear.
 //!
+//! **User threads** (px09): a thread may own an address space, a PML4
+//! from `paging.new_space` (its `cr3` field; 0 for a kernel thread,
+//! which runs on the kernel's PML4) and a user program (`prog`,
+//! kernel/user's number plus one). `run_next` makes the switched-in
+//! thread's space live (MOV to CR3 only when it differs from the live
+//! one) and points the TSS's RSP0 (kernel/gdt) and SYSCALL's stack word
+//! (boot/user.S's `pax_syscall_state` word 0) at the top of its kernel
+//! stack, so an interrupt, exception or system call from ring 3 lands
+//! on the stack of the thread that was running. A thread ended from a
+//! handler (a system call's exit, a fault in ring 3: `end_current`)
+//! is dead at once and the handler resumes the next thread's frame;
+//! `reap` gives back its address space with its stack, in thread
+//! context, as every reap is.
+//!
 //! The record's fields are read and written as words at their
 //! `offset_of`: a store to a field of a raw element is refused
 //! (wolf-lang#577). Written from the Intel SDM vol. 3A §6.12.1, §6.14.2,
@@ -68,6 +82,7 @@
 //! one, consulted from no kernel's source. No Linux source.
 
 use frames
+use gdt
 use log
 use paging
 use panic
@@ -80,8 +95,10 @@ extern "c" let pax_threads: *u64
 extern "c" let pax_sched_state: *u64
 extern "c" let pax_thread_entry: *u8
 extern "c" let pax_idle: *u8
+extern "c" let pax_syscall_state: *u64
 
-/// One thread's record (boot/sched.S: 16 of them, 72 bytes each).
+/// One thread's record (boot/sched.S: 16 of them, 88 bytes each; 72
+/// before px09 added `cr3` and `prog`).
 #[repr(c)]
 struct Thread {
     frame: u64, // the saved frame's address; 0 while running
@@ -93,6 +110,8 @@ struct Thread {
     stack_hi: u64, // the first byte past the stack
     runs: u64, // times switched in
     yields: u64, // calls of `yield`
+    cr3: u64, // px09: the thread's PML4 (physical); 0 the kernel's
+    prog: u64, // px09: kernel/user's program number + 1; 0 a kernel thread
 }
 
 const SLOTS: u64 = 16
@@ -226,8 +245,25 @@ fn wake_sleepers() {
     }
 }
 
+/// Slot `s`'s address space made live, and its kernel stack's top made
+/// the stack ring 3 enters on (px09): the TSS's RSP0 and SYSCALL's stack
+/// word. IF clear (a handler, or `pax_switch`'s path).
+fn enter_space(s: u64) {
+    let c = field(s, offset_of(Thread, cr3))
+    let want = if c == 0 { sv(S_PML4) } else { c }
+    if paging.live() != want {
+        paging.load(want)
+    }
+    let hi = field(s, offset_of(Thread, stack_hi))
+    if hi != 0 {
+        gdt.set_rsp0(hi)
+        // # Safety: word 0 of boot/user.S's 64-byte pax_syscall_state.
+        unsafe { (pax_syscall_state as *u64).write_volatile(hi) }
+    }
+}
+
 /// Switch in the queue's head (the idle thread if it is empty): count
-/// its run, start its quantum, return its frame.
+/// its run, start its quantum, make its space live, return its frame.
 fn run_next() -> u64 {
     let n = dequeue()
     let s = if n == 0 { IDLE } else { n - 1 }
@@ -235,6 +271,7 @@ fn run_next() -> u64 {
     put_field(s, offset_of(Thread, runs), field(s, offset_of(Thread, runs)) + 1)
     put_sv(S_CURRENT, s)
     put_sv(S_SLICE, timer.ticks())
+    enter_space(s)
     let f = field(s, offset_of(Thread, frame))
     put_field(s, offset_of(Thread, frame), 0)
     f
@@ -349,6 +386,8 @@ fn clear(s: u64) {
     put_field(s, offset_of(Thread, stack_hi), 0)
     put_field(s, offset_of(Thread, runs), 0)
     put_field(s, offset_of(Thread, yields), 0)
+    put_field(s, offset_of(Thread, cr3), 0)
+    put_field(s, offset_of(Thread, prog), 0)
 }
 
 /// Start the scheduler on the paging structures at `pml4` (the PML4's
@@ -390,6 +429,10 @@ fn reap() {
     while s < SLOTS {
         if s != cur() && field(s, offset_of(Thread, state)) == DEAD {
             free_stack(s)
+            let c = field(s, offset_of(Thread, cr3))
+            if c != 0 {
+                let _freed = paging.free_user(c) // px09: the user half, its tables, its PML4
+            }
             clear(s)
         }
         s += 1
@@ -399,6 +442,18 @@ fn reap() {
 /// Start a thread running `body` (an `export fn body(arg: u64)`'s
 /// address) with `arg`, queued at the tail. Returns its id.
 pub fn create(body: u64, arg: u64) -> u64 {
+    start_thread(body, arg, 0, 0)
+}
+
+/// Start a thread in the address space whose PML4 is at `cr3` (px09):
+/// `body(prog)` runs in that space from its first instruction (kernel/
+/// user's `pax_user_thread`, which enters ring 3). The space becomes the
+/// thread's: `reap` frees it with the stack. Returns its id.
+pub fn create_user(body: u64, prog: u64, cr3: u64) -> u64 {
+    start_thread(body, prog, cr3, prog + 1)
+}
+
+fn start_thread(body: u64, arg: u64, cr3: u64, prog: u64) -> u64 {
     let saved = sync.irq_save()
     reap()
     var s: u64 = FIRST
@@ -415,6 +470,8 @@ pub fn create(body: u64, arg: u64) -> u64 {
     put_sv(S_NEXT_ID, id + 1)
     put_sv(S_LIVE, sv(S_LIVE) + 1)
     put_field(s, offset_of(Thread, id), id)
+    put_field(s, offset_of(Thread, cr3), cr3)
+    put_field(s, offset_of(Thread, prog), prog)
     put_field(s, offset_of(Thread, state), READY)
     enqueue(s)
     sync.irq_restore(saved)
@@ -468,6 +525,15 @@ pub fn wait_all() {
 pub fn exit() {
     let _saved = sync.irq_save()
     let c = cur()
+    finish(c)
+    // # Safety: as `yield`; a dead thread is never switched in again.
+    unsafe { pax_switch() }
+    panic.fail("sched: a dead thread ran again, slot", c)
+}
+
+/// Mark slot `c` dead: one live thread fewer, the waiter readied when it
+/// was the last. IF clear.
+fn finish(c: u64) {
     let n = sv(S_LIVE) - 1
     put_sv(S_LIVE, n)
     let w = sv(S_WAITER)
@@ -477,9 +543,18 @@ pub fn exit() {
         put_sv(S_WAITER, 0)
     }
     put_field(c, offset_of(Thread, state), DEAD)
-    // # Safety: as `yield`; a dead thread is never switched in again.
-    unsafe { pax_switch() }
-    panic.fail("sched: a dead thread ran again, slot", c)
+}
+
+/// End the running thread from a handler (px09: a system call's `exit`,
+/// a fault in ring 3), where `exit`'s `pax_switch` cannot be used: the
+/// thread is dead at once, its frame `_f` is dropped, and the frame
+/// returned is the next thread's, for the handler to resume. Its stack
+/// and address space are reaped later, in thread context.
+pub fn end_current(_f: u64) -> u64 {
+    let c = cur()
+    finish(c)
+    wake_sleepers()
+    run_next()
 }
 
 /// boot/sched.S's pax_thread_entry calls this when a body returns.
@@ -496,6 +571,12 @@ pub fn self_id() -> u64 {
 /// first run).
 pub fn self_runs() -> u64 {
     field(cur(), offset_of(Thread, runs))
+}
+
+/// The running thread's program (kernel/user's number + 1; 0 for a
+/// kernel thread, px09).
+pub fn self_prog() -> u64 {
+    field(cur(), offset_of(Thread, prog))
 }
 
 /// How many times the running thread has called `yield`.
