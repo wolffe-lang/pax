@@ -1,0 +1,381 @@
+#!/usr/bin/env bash
+# tests/mpx3-loader — the ELF loader and the initramfs (px10, toward
+# M-PX3): static x86-64 Linux executables, read from a `newc` initramfs
+# Limine hands over as a module, run unmodified in ring 3 with the
+# psABI's initial stack, and print what they print on Linux.
+#
+#   tests/mpx3-loader [--images DIR | --no-boot] [--firmware bios|uefi|both]
+#                     [--tier native|release|both] [--wolf-hello FILE]
+#
+# The kernel is kmain_loader; the programs are user/elf/hello.S built by
+# tools/mkuser (hello, hello-pie, hello-dyn, hello32, hello-arm), the
+# initramfs is tools/mkinitramfs's, the image tools/mkimage's with
+# boot/limine-initramfs.conf naming it as a module. Assertions, per tier
+# (native, release) and firmware (bios, uefi):
+#   L0 build: tools/build-kernel's object assertions; the ELF defines
+#      pax_fpu_save (it holds `xsave64` and `fxsave64`) and
+#      pax_fpu_restore (`xrstor64`, `fxrstor64`), and sched's run_next
+#      calls fpu's switch; the programs and the initramfs built (their
+#      digests printed).
+#   L1 initramfs: `initramfs: module 0x…, <b> bytes, <n> entries` with b
+#      the archive's size and n its entry count, then one `initramfs:
+#      <kind> <size> <name>` per entry, each size the file's.
+#   L2 hello, differential: the program's own lines on PAX, between its
+#      exec line and `user: hello pid <p> exit_group 0 after <r> runs`,
+#      are byte-identical to the same binary's stdout on this host's
+#      Linux with the same argv (/bin/hello one two) and environment
+#      (HOME=/ TERM=linux PAX=1), whose exit status is 0 too (on a host
+#      that is not Linux, the comparison is against the transcript
+#      recorded in this script, and says so). Every check the program
+#      makes (argc/argv/envp, AT_PAGESZ, AT_PHENT, AT_PHNUM, AT_PHDR,
+#      AT_ENTRY, AT_RANDOM, the stack's alignment, %rdx, the FPU's
+#      initial state, data, bss, rodata, xmm) printed `ok` or its value.
+#   L3 the image: the exec line names the PT_LOAD segments readelf finds
+#      in hello, at their addresses with their permissions (r--, r-x,
+#      r--, rw-), none both w and x, and the entry readelf names.
+#   L4 refusals: hello-pie `ET_DYN: a PIE or shared object (PIE is
+#      later)`, hello-dyn `PT_INTERP: a dynamic program (needs ld.so)`,
+#      hello32 `not ELFCLASS64 (a 32-bit file)`, hello-arm `not for
+#      x86-64 (e_machine)`, /etc/motd `not an ELF file`, /bin/nothing
+#      `no such file`: each `user: exec <path>: refused: <why>`, then
+#      its batch's frames line with 0 processes and nothing taken.
+#   L5 the FPU per thread: `fpu: xsave 1, xcr0 0x0000000000000007, area
+#      832 bytes, cr0.em 0, cr0.ts 0, cr4.osfxsr 1, cr4.osxsave 1` (CI's
+#      QEMU 8.2 and kasumi's 11.1 `-cpu max` and hasu's KVM all have
+#      XSAVE and AVX); `hello spin 1` and `hello spin 2` run at once,
+#      both execs before either result, each prints `spin <k>: xmm ok`
+#      (as on Linux), exits 0 and was switched in at least twice: each
+#      kept its own sixteen xmm registers across the other's.
+#   L6 frames: every batch's `user: frames free <A> before, <B> with <n>
+#      processes, <C> after` has C = A, and B < A when n > 0.
+#   L7 the end: `user: ticks in ring 3 <n>` (n > 0), `halt`, and
+#      qemu-halt holds the machine halted.
+#   L8 (with --wolf-hello FILE) the gap census: FILE (a wolf program
+#      linked static) is added as /bin/wolf-hello; PAX loads it (its
+#      exec line), it runs in ring 3 and ends by exit or by a fault
+#      killed by name, the kernel goes on to `halt`; its `-ENOSYS` lines
+#      (the system calls it made that PAX lacks, in order) are written
+#      to build/mpx3-loader-<tier>-<leg>.census.
+#
+# --images DIR boots ISOs and ELFs built earlier by this script (DIR
+# holds <tier>/kmain_loader.{iso,elf} and user/): any host with QEMU,
+# readelf and python3, no wolf needed. Without it the script builds with
+# $PAX_WOLF (linux); --no-boot stops after the build (L0), leaving them
+# in build/mpx3-loader.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 wolfhello=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)     images=$2; shift 2 ;;
+        --no-boot)    noboot=1; shift ;;
+        --firmware)   legs=$2; shift 2 ;;
+        --tier)       tiers=$2; shift 2 ;;
+        --wolf-hello) wolfhello=$2; shift 2 ;;
+        *)            die "usage: tests/mpx3-loader [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both] [--wolf-hello FILE]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+need nm objdump readelf python3
+[ -z "$wolfhello" ] || [ -f "$wolfhello" ] || die "--wolf-hello: no file $wolfhello"
+
+work=$PAX_BUILD/mpx3-loader
+runs=$PAX_BUILD/mpx3-loader-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+HEX='0x[0-9a-f]{16}'
+ENVS='HOME=/ TERM=linux PAX=1'
+
+sym() { nm "$1" | awk -v s="$2" '$3 == s { print "0x" $1; exit }'; }
+
+# L0's ELF half. Prints the reason on failure.
+loader_ok() { # elf
+    local elf=$1 s
+    for s in pax_fpu_save pax_fpu_restore pax_xsetbv0 pax_cpuid; do
+        [ -n "$(sym "$elf" "$s")" ] || { echo "no symbol $s"; return 1; }
+    done
+    objdump -d --no-show-raw-insn "$elf" > "$elf.dis" || { echo "objdump -d"; return 1; }
+    body() { awk -v f="<$1>:" '$2 == f { on = 1; next } on && NF == 0 { exit } on { sub(/^[^\t]*\t/, ""); print }' "$elf.dis" | tr -s ' '; }
+    body pax_fpu_save | command grep -q '^xsave64' || { echo "pax_fpu_save has no xsave64"; return 1; }
+    body pax_fpu_save | command grep -q '^fxsave64' || { echo "pax_fpu_save has no fxsave64"; return 1; }
+    body pax_fpu_restore | command grep -q '^xrstor64' || { echo "pax_fpu_restore has no xrstor64"; return 1; }
+    body pax_fpu_restore | command grep -q '^fxrstor64' || { echo "pax_fpu_restore has no fxrstor64"; return 1; }
+    echo "pax_fpu_save (xsave64, fxsave64), pax_fpu_restore (xrstor64, fxrstor64), pax_xsetbv0, pax_cpuid defined"
+}
+
+# The initramfs's contents: /PATH=FILE pairs.
+ramfs_args() { # userdir
+    local u=$1
+    printf '%s\n' "/bin/hello=$u/hello" "/bin/hello-pie=$u/hello-pie" "/bin/hello-dyn=$u/hello-dyn" \
+        "/bin/hello32=$u/hello32" "/bin/hello-arm=$u/hello-arm" "/etc/motd=$u/motd"
+    [ -z "$wolfhello" ] || printf '%s\n' "/bin/wolf-hello=$u/wolf-hello"
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/user"
+    if "$PAX_ROOT/tools/mkuser" "$work/user" > "$work/user/sums.txt"; then
+        sed 's/^/  user: /' "$work/user/sums.txt" >&2
+    else
+        bad "L0: tools/mkuser"
+    fi
+    # Not an ELF, and longer than an ELF header, so the magic is what
+    # refuses it.
+    printf 'PAX: this is /etc/motd, a text file in the initramfs, and not an ELF executable.\n' > "$work/user/motd"
+    [ -z "$wolfhello" ] || cp "$wolfhello" "$work/user/wolf-hello"
+    mapfile -t pairs < <(ramfs_args "$work/user")
+    if "$PAX_ROOT/tools/mkinitramfs" "$work/user/initramfs.cpio" "${pairs[@]}" > "$work/user/initramfs.txt"; then
+        sed 's/^/  initramfs: /' "$work/user/initramfs.txt" >&2
+    else
+        bad "L0: tools/mkinitramfs"
+    fi
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_loader.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_loader.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            if why=$(loader_ok "$elf"); then
+                say "PASS L0 $tier kmain_loader: build-kernel's assertions; $why"
+            else
+                bad "L0 $tier kmain_loader: $why"
+            fi
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                --add "$work/user/initramfs.cpio" initramfs.cpio "$elf" "$work/$tier/kmain_loader.iso" >/dev/null \
+                || bad "$tier kmain_loader: mkimage"
+            say "built $tier kmain_loader: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/kmain_loader.iso"), initramfs $(sha256_of "$work/user/initramfs.cpio")"
+        else
+            cat "$log" >&2
+            bad "L0 $tier kmain_loader: tools/build-kernel"
+        fi
+    done
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx3-loader build (L0): PASS (no boot: --no-boot)" || say "mpx3-loader build: FAIL"
+        exit "$fail"
+    fi
+fi
+user=$images/user
+[ -f "$user/hello" ] && [ -f "$user/initramfs.cpio" ] || die "no $user/hello or $user/initramfs.cpio (build first)"
+
+# --- the Linux side of L2 and L5 -------------------------------------------
+# hello on this host's Linux, argv and envp exactly as PAX gives them.
+linux_run() { # out args...
+    local out=$1; shift
+    python3 - "$user/hello" "$out" "$@" <<'PY'
+import os, sys
+prog, out, argv = sys.argv[1], sys.argv[2], sys.argv[3:]
+env = {"HOME": "/", "TERM": "linux", "PAX": "1"}
+r, w = os.pipe()
+pid = os.fork()
+if pid == 0:
+    os.close(r); os.dup2(w, 1)
+    # env order as PAX writes it
+    os.execve(prog, argv, env)
+os.close(w)
+data = b""
+while True:
+    chunk = os.read(r, 65536)
+    if not chunk:
+        break
+    data += chunk
+_, st = os.waitpid(pid, 0)
+open(out, "wb").write(data)
+sys.exit(os.waitstatus_to_exitcode(st) if hasattr(os, "waitstatus_to_exitcode") else (st >> 8))
+PY
+}
+# The transcript Linux gave on kasumi (Arch, 7.2 kernel), for hosts that
+# are not Linux: the program prints nothing host-specific.
+RECORDED='argc 3
+argv[0] /bin/hello
+argv[1] one
+argv[2] two
+envp[0] HOME=/
+envp[1] TERM=linux
+envp[2] PAX=1
+AT_PAGESZ 4096
+AT_PHENT 56
+AT_PHNUM 7 ok
+AT_PHDR ok
+AT_ENTRY ok
+AT_RANDOM ok
+rsp 16-aligned
+rdx 0
+fcw 0x037f mxcsr 0x1f80
+data ok
+bss ok
+rodata ok
+xmm ok'
+mkdir -p "$PAX_BUILD"
+lx=$PAX_BUILD/mpx3-loader-linux
+mkdir -p "$lx"
+linux_rc= spin_rc=
+if [ "$(uname -s)" = Linux ]; then
+    linux_rc=0; linux_run "$lx/hello.out" /bin/hello one two || linux_rc=$?
+    spin_rc=0; linux_run "$lx/spin1.out" /bin/hello spin 1 || spin_rc=$?
+    say "linux: hello exit $linux_rc ($(wc -l < "$lx/hello.out" | tr -d ' ') lines, sha256 $(sha256_of "$lx/hello.out")); hello spin 1 exit $spin_rc: $(cat "$lx/spin1.out")"
+    [ "$linux_rc" = 0 ] || bad "L2 linux: hello exited $linux_rc on Linux"
+else
+    printf '%s\n' "$RECORDED" > "$lx/hello.out"
+    printf 'spin 1: xmm ok\n' > "$lx/spin1.out"
+    say "linux: this host is $(uname -s), not Linux: L2 compares with the transcript recorded on kasumi's Linux"
+fi
+
+record() { # tier leg status
+    ran=$((ran + 1))
+    printf '%s kmain_loader %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" \
+        "$(sha256_of "$images/$1/kmain_loader.iso")" >> "$runs"
+}
+
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        id="$tier kmain_loader $leg"
+        log=$PAX_BUILD/mpx3-loader-$tier-$leg.serial.log
+        elf=$images/$tier/kmain_loader.elf iso=$images/$tier/kmain_loader.iso
+        rm -f "$log" "$log.verdict"
+        if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+            for s in L1 L2 L3 L4 L5 L6 L7; do bad "$s $id: no image"; done
+            continue
+        fi
+        hrc=0
+        "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 300 \
+            --elf "$elf" --marker 'halt' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+        record "$tier" "$leg" "$hrc"
+        norm=$log.norm; serial_norm "$log" > "$norm"
+
+        # L1
+        why=
+        n=$(sed -n 's/^\(dir \|file\) .*/x/p' "$user/initramfs.txt" | wc -l | tr -d ' ')
+        b=$(wc -c < "$user/initramfs.cpio" | tr -d ' ')
+        grep -Eqx "initramfs: module $HEX, $b bytes, $n entries" "$norm" || why+=" no 'initramfs: module …, $b bytes, $n entries' line ($(grep -m1 '^initramfs: ' "$norm"));"
+        while read -r kind _mode size name; do
+            case $kind in dir|file) ;; *) continue ;; esac
+            grep -qx "initramfs: $kind $size $name" "$norm" || why+=" no 'initramfs: $kind $size $name';"
+        done < "$user/initramfs.txt"
+        [ -z "$why" ] && say "PASS L1 $id: the module, $b bytes, $n entries, each listed with its size" || bad "L1 $id:$why"
+
+        # L2
+        why=
+        hpid=$(sed -n -E 's/^user: hello pid ([0-9]+) exit_group [0-9]+ after [0-9]+ runs$/\1/p' "$norm" | head -n 1)
+        if [ -z "$hpid" ]; then
+            why+=" hello never exited ($(grep -E '^user: hello pid [0-9]+ ' "$norm" | head -n 2 | tr '\n' ' '));"
+        else
+            awk -v p="$hpid" '$0 ~ "^user: exec pid " p " " { on = 1; next } on && $0 ~ "^user: hello pid " p " exit_group" { exit } on && $0 !~ "^user: " { print }' "$norm" > "$lx/hello.pax-$tier-$leg.out"
+            if cmp -s "$lx/hello.out" "$lx/hello.pax-$tier-$leg.out"; then :; else
+                why+=" PAX's output differs from Linux's: $(diff "$lx/hello.out" "$lx/hello.pax-$tier-$leg.out" | head -n 6 | tr '\n' '|');"
+            fi
+            grep -qx "user: hello pid $hpid exit_group 0 after [0-9]* runs" "$norm" \
+                || grep -Eqx "user: hello pid $hpid exit_group 0 after [0-9]+ runs" "$norm" || why+=" hello's exit_group is not 0;"
+            ! grep -q ' BAD' "$lx/hello.pax-$tier-$leg.out" || why+=" a check printed BAD;"
+        fi
+        [ -z "$why" ] && say "PASS L2 $id: hello's $(wc -l < "$lx/hello.out" | tr -d ' ') lines byte-identical to Linux's (sha256 $(sha256_of "$lx/hello.out")), exit_group 0 on both" || bad "L2 $id:$why"
+
+        # L3
+        why=
+        want=$(readelf -lW "$user/hello" | awk '$1 == "LOAD" { va = strtonum($3); ms = strtonum($6); f = $7; if ($8 != "" && $8 !~ /^0x/) f = f $8; r = (f ~ /R/) ? "r" : "-"; w = (f ~ /W/) ? "w" : "-"; x = (f ~ /E/) ? "x" : "-"; printf " 0x%016x-0x%016x %s%s%s", va, va + ms, r, w, x; n++ } END { printf "|%d", n }')
+        segs=${want%|*} nseg=${want##*|}
+        entry=$(readelf -hW "$user/hello" | awk '/Entry point address/ { printf "0x%016x", strtonum($4) }')
+        hl=$(grep -E "^user: exec pid $hpid cr3 $HEX entry " "$norm" | head -n 1)
+        case $hl in
+            *" entry $entry rsp "*", $nseg PT_LOAD:$segs, stack 32 pages below 0x00007ffffffff000") ;;
+            *) why+=" the exec line '$hl' does not name entry $entry and$segs;" ;;
+        esac
+        case $segs in *rwx*) why+=" a segment is both w and x;" ;; esac
+        [ -z "$why" ] && say "PASS L3 $id: $nseg PT_LOAD at readelf's addresses and permissions:$segs; entry $entry" || bad "L3 $id:$why"
+
+        # L4
+        why=
+        for c in "/bin/hello-pie|ET_DYN: a PIE or shared object (PIE is later)" \
+                 "/bin/hello-dyn|PT_INTERP: a dynamic program (needs ld.so)" \
+                 "/bin/hello32|not ELFCLASS64 (a 32-bit file)" \
+                 "/bin/hello-arm|not for x86-64 (e_machine)" \
+                 "/etc/motd|not an ELF file" \
+                 "/bin/nothing|no such file"; do
+            IFS='|' read -r p r <<<"$c"
+            nxt=$(awk -v l="user: exec $p: refused: $r" '$0 == l { getline; print; exit }' "$norm")
+            if [ -z "$nxt" ]; then
+                why+=" no 'user: exec $p: refused: $r';"
+            elif ! printf '%s\n' "$nxt" | grep -Eqx 'user: frames free ([0-9]+) before, \1 with 0 processes, \1 after'; then
+                why+=" $p's batch: '$nxt';"
+            fi
+        done
+        [ -z "$why" ] && say "PASS L4 $id: six refusals by name (ET_DYN, PT_INTERP, ELFCLASS32, e_machine, not an ELF, no such file), nothing taken" || bad "L4 $id:$why"
+
+        # L5
+        why=
+        grep -qx 'fpu: xsave 1, xcr0 0x0000000000000007, area 832 bytes, cr0.em 0, cr0.ts 0, cr4.osfxsr 1, cr4.osxsave 1' "$norm" \
+            || why+=" fpu line '$(grep -m1 '^fpu: ' "$norm")';"
+        for k in 1 2; do
+            [ "$(grep -cx "spin $k: xmm ok" "$norm")" = 1 ] || why+=" $(grep -cx "spin $k: xmm ok" "$norm") 'spin $k: xmm ok' lines ($(grep "^spin $k:" "$norm" | head -n 1));"
+        done
+        # the two spinners: the two exec lines after hello's exit, then
+        # two results, each exit_group 0 after >= 2 runs
+        # (hello's batch ends at its frames line; the spinners' batch is
+        # the next one)
+        order=$(awk -v p="$hpid" '$0 ~ "^user: hello pid " p " exit_group" { on = 1; next } on == 1 && /^user: frames free/ { on = 2; next } on == 2 && /^user: exec pid / { printf "exec " } on == 2 && /^spin [12]: / { printf "result " } on == 2 && /^user: frames free/ { exit }' "$norm")
+        [ "$order" = 'exec exec result result ' ] || why+=" the spinners' lines run '$order', not both execs before either result;"
+        sp=$(awk -v p="$hpid" '$0 ~ "^user: hello pid " p " exit_group" { on = 1; next } on == 1 && /^user: frames free/ { on = 2; next } on == 2 && /^user: hello pid [0-9]+ exit_group/ { print } on == 2 && /^user: frames free/ { exit }' "$norm")
+        [ "$(printf '%s\n' "$sp" | grep -cE 'exit_group 0 after ([2-9]|[1-9][0-9]+) runs$')" = 2 ] || why+=" the spinners' exits: $(printf '%s' "$sp" | tr '\n' '|') (each exit_group 0 after >= 2 runs);"
+        [ "$(cat "$lx/spin1.out")" = 'spin 1: xmm ok' ] || why+=" Linux's spin 1 said '$(cat "$lx/spin1.out")';"
+        [ -z "$why" ] && say "PASS L5 $id: XSAVE x87|SSE|AVX, 832-byte areas; spin 1 and spin 2 at once, xmm ok each (as Linux), $(printf '%s\n' "$sp" | sed -E 's/.* after ([0-9]+) runs/\1/' | paste -sd/ -) runs" || bad "L5 $id:$why"
+
+        # L6
+        why=
+        v=$(awk '
+            /^user: frames free [0-9]+ before, [0-9]+ with [0-9]+ processes, [0-9]+ after$/ {
+                n++; a = $4; b = $6; k = $8; c = $10
+                if (c != a) why = why " batch " n ": " c " after, not " a ";"
+                if (k > 0 && b >= a) why = why " batch " n ": " k " processes took nothing;"
+                got = got " " a "/" b "/" c
+            }
+            END { if (n < 8) why = why " " n " frames lines;"; if (why != "") { print "no:" why; exit 1 } print "ok" got }' "$norm") || why=" ${v#no:}"
+        [ -z "$why" ] && say "PASS L6 $id: every batch's frames back:${v#ok}" || bad "L6 $id:$why"
+
+        # L7
+        why=
+        tk=$(sed -n -E 's/^user: ticks in ring 3 ([0-9]+)$/\1/p' "$norm" | tail -n 1)
+        [ -n "$tk" ] && [ "$tk" -gt 0 ] || why+=" ticks in ring 3 '$tk';"
+        [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+        "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'user: ticks in ring 3 [0-9]+' 'halt' >/dev/null \
+            || why+=" the log does not end with the ticks line and halt;"
+        [ -z "$why" ] && say "PASS L7 $id: $tk ticks in ring 3; $(tail -n 1 "$log.verdict")" || bad "L7 $id:$why"
+
+        # L8
+        if [ -n "$wolfhello" ]; then
+            why=
+            wl=$(grep -E "^user: exec pid [0-9]+ cr3 $HEX entry $HEX rsp $HEX argc 1 envc 3, " "$norm" | tail -n 1)
+            wpid=$(printf '%s\n' "$wl" | sed -n -E 's/^user: exec pid ([0-9]+) .*/\1/p')
+            [ -n "$wpid" ] || why+=" no exec line for /bin/wolf-hello ($(grep -m1 '^user: exec /bin/wolf-hello' "$norm"));"
+            end=$(grep -E "^user: wolf-hello pid $wpid (exit|exit_group) [0-9]+ after|^user: wolf-hello pid $wpid killed: " "$norm" | tail -n 1)
+            [ -n "$end" ] || why+=" wolf-hello neither exited nor was killed by name;"
+            grep -E "^user: wolf-hello pid $wpid syscall [0-9x]+: -ENOSYS$" "$norm" | sed -E 's/.* syscall ([0-9a-fx]+): -ENOSYS$/\1/' > "$PAX_BUILD/mpx3-loader-$tier-$leg.census"
+            [ -z "$why" ] && say "PASS L8 $id: wolf-hello ran in ring 3: $(wc -l < "$PAX_BUILD/mpx3-loader-$tier-$leg.census" | tr -d ' ') system calls PAX lacks ($(tr '\n' ' ' < "$PAX_BUILD/mpx3-loader-$tier-$leg.census")), then '$end'" || bad "L8 $id:$why"
+        fi
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx3-loader: PASS" || say "mpx3-loader: FAIL"
+exit "$fail"
