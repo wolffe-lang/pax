@@ -37,7 +37,7 @@ lobo/lobo -v 2>&1 | head -1
 
 tree "$STD_REPO" "$STD_REV" std std
 tree "$BORE_REPO" "$BORE_REV" boreutils
-tree "$LOBO_REPO" "$LOBO_REV" reel demo/reel
+tree "$LOBO_REPO" "$LOBO_REV" lobo-site demo/reel
 
 # boreutils, two ways. dyn: exactly as tools/build does (wolf links with
 # `cc`: PIE, ld.so, libc/libm/libgcc_s). static: the same objects and
@@ -60,9 +60,9 @@ done
 cd "$S"
 file bore/dyn/echo bore/static/echo
 
-# The reel's site (index.html, files/big.bin), written by the reel's own
+# lobo's demo site (index.html, files/big.bin), written by the site's own
 # wolf program. lobo serves it in the lobo workload.
-cd reel
+cd lobo-site
 WOLF_STD=$S/std "$S/wolf/wolf" run build/main.lu
 cd "$S"
 ( cd bore && sha256sum dyn/* static/* ) > bore.sha256

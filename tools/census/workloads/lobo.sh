@@ -1,13 +1,13 @@
-# lobo 0.1.1 (the release archive) serving the reel's site, as the
-# reel's scripts drive it: lobo -t, serve, pages, the 1.3 MB file, a
-# range, a 404, /metrics, the control socket, then scene 4's reload
+# lobo 0.1.1 (the release archive) serving its demo site, as the
+# site's own scripts drive it: lobo -t, serve, pages, the 1.3 MB file, a
+# range, a 404, /metrics, the control socket, then a reload
 # with a slow download held across it, the old generation retired, and
 # a stop over the control socket. Scope: every lobo process (the server,
 # its threads, and the lobo control clients); curl is the untraced driver.
 SCOPE='/stage/lobo/lobo'
 workload() {
-    cp -R /stage/reel /work/reel
-    cd /work/reel
+    cp -R /stage/lobo-site /work/lobo-site
+    cd /work/lobo-site
     mkdir -p logs
     PATH=/stage/lobo:$PATH
     T /stage/lobo/lobo -t

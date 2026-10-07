@@ -53,9 +53,9 @@ installing need); sshd counts sshd, `sshd-session`, `sshd-auth` and
   cases differ from 9.12 (workload rc 1; the same five in every run,
   traced, untraced and wrapped); the calls are the subject, not the
   verdicts.
-- `lobo`: lobo 0.1.1 serving the reel's site as the reel drives it:
+- `lobo`: lobo 0.1.1 serving its demo site as the site's scripts drive it:
   `lobo -t`, `serve`, pages, the 1.3 MB file, a range, a 404,
-  `/metrics`, keep-alive, the control socket, then scene 4's reload with
+  `/metrics`, keep-alive, the control socket, then a reload with
   a slow download held across it, the old generation retired, and
   `lobo -s stop`.
 - `dash`, `bash`: `tools/census/shell/census.sh` (the POSIX shapes real
@@ -637,7 +637,7 @@ used a lane-private store):
 ```sh
 export CENSUS_PODMAN_ROOT=~/lanes/px04/pod   # optional: a private store
 tools/census/census image     # the container image
-tools/census/census stage     # wolf, boreutils x2, lobo, the reel, by digest
+tools/census/census stage     # wolf, boreutils x2, lobo, its demo site, by digest
 tools/census/census trace     # nine workloads, -ff -o then -c
 tools/census/census tally     # out/<workload>.csv, paths.csv, ops.csv
 tools/census/census inject    # ENOSYS, one call at a time, static and dynamic

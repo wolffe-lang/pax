@@ -11,7 +11,7 @@ set -eu
 O=/out/auxv.jsonl
 rm -f "$O"
 mkdir -p /work
-cp -R /stage/reel /work/reel
+cp -R /stage/lobo-site /work/lobo-site
 ssh-keygen -A > /dev/null
 cd /work
 probe() { # probe <subject> <dir> <prog> <args...as one shell string> [watch]
@@ -51,7 +51,7 @@ probe bore-static-sleep /work "$B/static/sleep" "0.01"
 probe bore-dyn-seq /work "$B/dyn/seq" "1 1000" watch
 probe bore-dyn-sort /work "$B/dyn/sort" "/etc/passwd"
 probe bore-dyn-sleep /work "$B/dyn/sleep" "0.01"
-probe lobo-t /work/reel /stage/lobo/lobo "-t" watch
+probe lobo-t /work/lobo-site /stage/lobo/lobo "-t" watch
 probe dash /work /usr/bin/dash "-c 'echo hi; x=\$(echo sub); echo \$x'"
 probe bash /work /usr/bin/bash "-c 'echo hi; x=\$(echo sub); echo \$x'"
 probe pacman /work /usr/bin/pacman "-Q glibc"
