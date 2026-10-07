@@ -14,10 +14,10 @@ Everything needed to film PAX booting on this MacBook. Start with `SHOTLIST.md`.
 
 ## Where it came from
 
-- pax PR #11 (branch `px08`, lane px08), source snapshot at commit `00541aa`: `kernel/kmain_reel.lu`, `kernel/kmain_reel_text.lu`, `kernel/reel/`, `boot/limine-reel.conf`, `tools/reel`, `tests/reel`.
+- pax PR #11 (branch `px08`, lane px08), source snapshot at commit `9986eb7` (rebased onto pax trunk `bc86ea5`, px06's heap): `kernel/kmain_reel.lu`, `kernel/kmain_reel_text.lu`, `kernel/reel/`, `boot/limine-reel.conf`, `tools/reel`, `tests/reel`.
 - Built on kasumi (Linux) with `tools/reel build` by wolf 0.2.24 (the release archive, sha256 `501d6d3f…`), native tier, Limine 12.9.1:
-  - `pax-reel.iso` `a41ba883729ccf18c929536d6282c6161fecb2f82f3733ca6bf24f8e586c747e`
-  - `pax-reel-b.iso` `755b433aa0b50987080dd131be9befb5bca8dc70199f5fab9006ff3b9031e64a`
+  - `pax-reel.iso` `a3bd4b6e632c71ad49d3c46662273dda0737d7ab4290dba97aac7f65f0740304`
+  - `pax-reel-b.iso` `002fe970fd58ba33a7709673ccacdcad7d06cb0d8c2063ec99ccce2493428f05`
   (built from a tree without `.git`, so `SOURCE_DATE_EPOCH` is 0 and a rebuild of the same sources gives the same shas; CI's builds, with history, differ only in the image's dates.)
 - QEMU here: Homebrew's `qemu-system-x86_64` 11.1.1, TCG (Apple Silicon has no x86 virtualisation). The film boots BIOS (SeaBIOS); UEFI works too (`edk2-x86_64-code.fd`, see the SHOTLIST's last section).
 

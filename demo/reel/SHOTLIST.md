@@ -4,7 +4,7 @@ A short film in four scenes: a kernel written in wolf boots on this MacBook, ins
 
 How to read a scene: **SHOW** means put this on screen and hold it; **RUN** means type this command and let the output land; the time is how long the shot holds. Times are targets for the edit, not limits. The times inside the boot (scene 2) are measured, not targets: the kernel paces itself.
 
-Every command on camera is typed by you, in full, in fish: no scene scripts. Every line the boot prints is printed by the running kernel; the pauses between its stages are pauses for the viewer, written into the kernel as such (`src/kernel/reel/reel.lu`, every `PAUSE` comment). Only `preflight.sh` stays a script, and it runs off camera. Rehearsed end to end on this MacBook on 2026-10-06 (the timings below are from that rehearsal).
+Every command on camera is typed by you, in full, in fish: no scene scripts. Every line the boot prints is printed by the running kernel; the pauses between its stages are pauses for the viewer, written into the kernel as such (`src/kernel/reel/reel.lu`, every `PAUSE` comment). Only `preflight.sh` stays a script, and it runs off camera. Rehearsed end to end on this MacBook on 2026-10-06, and again on 2026-10-07 after the rebase onto px06's heap (new ISOs: finale a prints the same bytes, finale b's `rip` moved); the timings below are from the second rehearsal.
 
 ---
 
@@ -26,11 +26,11 @@ Nothing runs in the background. Each boot is one QEMU in the foreground of your 
 
 | # | action | command | hold |
 |---|---|---|---|
-| 0.1 | SHOW the size of the thing | `find src/kernel -name '*.lu' \| xargs cat \| wc -l` | 3 s: `4890` (lines of wolf in the kernel; `src/` is a copy of pax's `kernel/` and `boot/` at px08's head) |
+| 0.1 | SHOW the size of the thing | `find src/kernel -name '*.lu' \| xargs cat \| wc -l` | 3 s: `6210` (lines of wolf in the kernel, the heap px06 added included, though the reel does not use it; `src/` is a copy of pax's `kernel/` and `boot/` at px08's head) |
 | 0.2 | SHOW the reel's kernel | `mat src/kernel/kmain_reel.lu` | 10 s, scroll slowly: 79 lines, none wider than 75 columns. It calls the stages one by one, with a `// PAUSE for the viewer` after each, then starts the thread that will overrun its stack |
 | 0.3 | *(optional)* SHOW the rest | `cat src/boot/*.S \| wc -l` | 3 s: `796`. The assembly ring: the Limine entry, port I/O, control registers, the interrupt trampolines, the context switch. Everything else is wolf |
 
-**Caption idea:** "4,890 lines of wolf. One ISO." *(True: the wolf is in `src/kernel`; say "plus 796 lines of assembly" if a viewer will ask.)*
+**Caption idea:** "6,210 lines of wolf. One ISO." *(True: the wolf is in `src/kernel`; say "plus 796 lines of assembly" if a viewer will ask.)*
 
 ---
 
@@ -89,7 +89,7 @@ Either choose it in the menu on camera:
 | 3.1 | RUN the same boot | `qemu-system-x86_64 -machine q35 -cpu max -m 256M -display none -serial stdio -monitor none -nic none -no-reboot -cdrom pax-reel.iso` | the menu |
 | 3.2 | in the menu, within 5 s | **Down arrow**, then **Enter** | the second entry highlights, then `limine: Loading executable 'boot():/boot/pax-text'...` |
 | 3.3 | the same stages | (hands off) | as scene 2 (times count from the Enter) |
-| 3.4 | the ending | | `finale: the kernel writes to its own text, which paging mapped r-x` / `write: text at 0xffffffff80000040` / **`PANIC page fault vector 14 error 0x0000000000000003 rip 0xffffffff8000a9ab rsp … frame … cr2 0xffffffff80000040`**: `cr2` is the address it wrote; error `0x3` is present + write |
+| 3.4 | the ending | | `finale: the kernel writes to its own text, which paging mapped r-x` / `write: text at 0xffffffff80000040` / **`PANIC page fault vector 14 error 0x0000000000000003 rip 0xffffffff8000aa1b rsp … frame … cr2 0xffffffff80000040`**: `cr2` is the address it wrote; error `0x3` is present + write |
 | 3.5 | | **Ctrl-C** | QEMU ends |
 
 or boot the image whose menu defaults to finale b (no keys): `-cdrom pax-reel-b.iso` in the same command.
@@ -105,10 +105,10 @@ The rehearsal typed every command above, as written, into an interactive fish in
 | scene | measured | log |
 |---|---|---|
 | preflight | five `ok`, `GO`; its headless boot reached the PANIC line in about 29 s, the whole preflight about 30 s | `logs/rehearsal-preflight.out` |
-| 0 | `4890`; `kmain_reel.lu` shown whole (rehearsed as `mat … \| cat`: the script cannot scroll a pager; by hand, `mat` alone); `796` | `logs/rehearsal-scene0-1.times` |
+| 0 | `6210`; `kmain_reel.lu` shown whole (rehearsed as `mat … \| cat`: the script cannot scroll a pager; by hand, `mat` alone); `796` | `logs/rehearsal-scene0-1.times` |
 | 1 | `pax-reel.iso: OK`, `pax-reel-b.iso: OK`; `QEMU emulator version 11.1.1` | `logs/rehearsal-scene0-1.times` |
 | 2 | from Enter: menu at once; `PAX: a kernel written in wolf` 5.13 s; headings [1/5] 5.13, [2/5] 8.13, [3/5] 11.14, [4/5] 14.14, [5/5] 19.15 s; the threads' 24 lines 19.47 to 21.46 s; `join` 21.47 s; `PAX today` 24.47 s; the PANIC line 28.47 s; Ctrl-C at 31.5 s ended QEMU at once (`terminating on signal 2`) | `logs/rehearsal-scene2.times` |
-| 3 | Down at 2.00 s, Enter at 2.73 s: `Loading executable 'boot():/boot/pax-text'` at 2.74 s; headings 2.77, 5.77, 8.78, 11.78, 16.78 s; the PANIC line (page fault, cr2 = the address written) 26.10 s, 23.4 s after Enter; Ctrl-C ended QEMU | `logs/rehearsal-scene3.times` |
+| 3 | Down at 2.01 s, Enter at 2.76 s: `Loading executable 'boot():/boot/pax-text'` at 2.80 s; headings 2.83, 5.83, 8.84, 11.84, 16.85 s; the PANIC line (page fault, cr2 = the address written) 26.17 s, 23.4 s after Enter; Ctrl-C ended QEMU | `logs/rehearsal-scene3.times` |
 
 ## If something goes wrong
 
