@@ -23,7 +23,7 @@ switched by the timer alone, three sleepers, two counting under the
 spinlock and two without it), and `kmain_sched_overflow.lu` runs a
 thread off its stack into its guard (`tests/mpx2-sched`). Since px08
 `kmain_reel.lu` and `kmain_reel_text.lu` are the boot reel: px01-px07's
-stages in one boot (not yet the heap), each under a heading with a pause for the viewer
+stages in one boot (not the heap or user mode), each under a heading with a pause for the viewer
 between them (`kernel/reel`), ending in a stack overflow or a write to
 text (`tests/reel`, `tools/reel`).
 
