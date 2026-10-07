@@ -1,0 +1,481 @@
+//! initramfs — a read-only view of the `newc` archive Limine hands the
+//! kernel as its first module (px10, M-PX3's second piece).
+//!
+//! The format is the initramfs buffer format (Documentation/driver-api/
+//! early-userspace/buffer-format.rst, allowed by ruling #22) and
+//! `cpio(5)`'s "new ASCII" format: an archive is a run of entries, each
+//! a 110-byte header — the magic `070701` (or `070702`, whose data sum
+//! is not checked here), then thirteen fields of eight ASCII hex digits:
+//! ino, mode, uid, gid, nlink, mtime, filesize, devmajor, devminor,
+//! rdevmajor, rdevminor, namesize (counting the NUL), check — then the
+//! name and its NUL, padded with NULs to a multiple of four bytes from
+//! the archive's start, then `filesize` bytes of data, padded the same
+//! way. The entry named `TRAILER!!!` ends an archive; NUL bytes between
+//! archives are skipped, and more archives may follow. A compressed
+//! archive (gzip, bzip2, xz, lzma, lzo, lz4, zstd by their magic bytes)
+//! is refused by name: PAX has no decompressor.
+//!
+//! **The view.** Nothing is copied and nothing allocated: the module's
+//! pages are mapped read-only in the HHDM (kernel/paging, px10) and
+//! every read here is a byte of them. An entry is named by the offset of
+//! its header from the module's start, and `find` answers a path with
+//! one; `data` and `size` give its bytes. Paths are compared byte for
+//! byte after dropping one leading `/` from the query and a leading
+//! `./` or `/` from the entry's name (cpio writes `bin/hello` or
+//! `./bin/hello`); only a regular file (mode's type 0o100000) is found.
+//! Hard links, devices and symlinks are listed and never followed.
+//!
+//! Every read is checked against the module's size first, so a
+//! malformed archive is refused by name (`check`'s rows), never read
+//! past. No region, no heap, no module `var`: the module's address and
+//! size are Limine's response, read afresh (kernel/boot_info). No Linux
+//! source; no other kernel's source.
+
+use boot_info
+use log
+use panic
+
+/// Why the archive, or a lookup in it, was refused.
+pub error ArchiveError = {no_module, compressed, bad_magic, truncated, bad_hex, not_found, not_regular}
+
+const HEADER: u64 = 110
+const END: u64 = 0xffffffffffffffff // no entry
+const S_IFMT: u64 = 0xf000 // 0o170000
+const S_IFREG: u64 = 0x8000 // 0o100000
+const S_IFDIR: u64 = 0x4000 // 0o040000
+const S_IFLNK: u64 = 0xa000 // 0o120000
+
+// Field indices, each eight hex digits after the six-byte magic.
+const F_MODE: u64 = 1
+const F_FILESIZE: u64 = 6
+const F_NAMESIZE: u64 = 11
+
+/// The archive's first byte (a virtual address in the HHDM); 0 without
+/// a module.
+fn base() -> u64 {
+    if boot_info.module_count() == 0 {
+        return 0
+    }
+    boot_info.module_addr(0)
+}
+
+/// The archive's size in bytes (0 without a module).
+pub fn bytes() -> u64 {
+    if boot_info.module_count() == 0 {
+        return 0
+    }
+    boot_info.module_size(0)
+}
+
+/// Byte `o` of the archive (o < bytes(), which every caller checks).
+fn at(o: u64) -> u64 {
+    // # Safety: base() + o lies inside the module, whose pages
+    // kernel/paging mapped read-only in the HHDM; o < bytes().
+    unsafe { ((base() + o) as *u8).read_volatile() as u64 }
+}
+
+fn align4(o: u64) -> u64 {
+    (o + 3) - (o + 3) % 4
+}
+
+/// The value of a hex digit's byte, or 16 for a byte that is not one.
+fn hexval(b: u64) -> u64 {
+    if b >= 48 && b <= 57 {
+        return b - 48
+    }
+    if b >= 97 && b <= 102 {
+        return b - 87
+    }
+    if b >= 65 && b <= 70 {
+        return b - 55
+    }
+    16
+}
+
+/// Field `f` of the header at `h` (eight hex digits); `bad_hex` when one
+/// is not a digit. The caller has checked h + HEADER <= bytes().
+fn field(h: u64, f: u64) -> u64 ! ArchiveError {
+    let p = h + 6 + f * 8
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        let d = hexval(at(p + i))
+        if d == 16 {
+            return bad_hex
+        }
+        v = v * 16 + d
+        i += 1
+    }
+    v
+}
+
+/// Whether the bytes at `o` begin a compressed stream PAX cannot read:
+/// gzip 1f 8b, zstd 28 b5 2f fd, xz fd 37 7a 58, bzip2 `BZh`, lz4 02 21
+/// 4c 18, lzo 89 4c 5a 4f, lzma 5d 00 00.
+fn compressed_at(o: u64) -> bool {
+    let n = bytes()
+    if o + 4 > n {
+        return false
+    }
+    let (a, b, c, d) = (at(o), at(o + 1), at(o + 2), at(o + 3))
+    if a == 0x1f && b == 0x8b {
+        return true
+    }
+    if a == 0x28 && b == 0xb5 && c == 0x2f && d == 0xfd {
+        return true
+    }
+    if a == 0xfd && b == 0x37 && c == 0x7a && d == 0x58 {
+        return true
+    }
+    if a == 0x42 && b == 0x5a && c == 0x68 {
+        return true
+    }
+    if a == 0x02 && b == 0x21 && c == 0x4c && d == 0x18 {
+        return true
+    }
+    if a == 0x89 && b == 0x4c && c == 0x5a && d == 0x4f {
+        return true
+    }
+    a == 0x5d && b == 0 && c == 0
+}
+
+/// Whether the header at `h` starts with `070701` or `070702`.
+fn magic_ok(h: u64) -> bool {
+    at(h) == 48 && at(h + 1) == 55 && at(h + 2) == 48 && at(h + 3) == 55 && at(h + 4) == 48 && (at(h + 5) == 49 || at(h + 5) == 50)
+}
+
+/// The first header at or after `o`, skipping NUL padding; END at the
+/// archive's end. Refusals: `compressed`, `bad_magic`, `truncated`.
+fn header_from(o: u64) -> u64 ! ArchiveError {
+    let n = bytes()
+    var p = o
+    while p < n && at(p) == 0 {
+        p += 1
+    }
+    if p >= n {
+        return END
+    }
+    if compressed_at(p) {
+        return compressed
+    }
+    if p + HEADER > n {
+        return truncated
+    }
+    if !magic_ok(p) {
+        return bad_magic
+    }
+    p
+}
+
+/// The name's length (without its NUL) of the entry at `h`.
+fn name_len(h: u64) -> u64 ! ArchiveError {
+    let ns = field(h, F_NAMESIZE)?
+    if ns == 0 {
+        return truncated
+    }
+    if h + HEADER + ns > bytes() {
+        return truncated
+    }
+    ns - 1
+}
+
+/// Whether the entry at `h` is the trailer `TRAILER!!!`.
+fn is_trailer(h: u64) -> bool {
+    let l = name_len(h) else 0
+    if l != 10 {
+        return false
+    }
+    let t = "TRAILER!!!"
+    var k: u64 = 0
+    for b in t.bytes() {
+        if at(h + HEADER + k) != b as int as u64 {
+            return false
+        }
+        k += 1
+    }
+    true
+}
+
+/// The offset of the entry after the one at `h` (END past the last).
+fn after(h: u64) -> u64 ! ArchiveError {
+    let ns = field(h, F_NAMESIZE)?
+    let fs = field(h, F_FILESIZE)?
+    let d = align4(h + HEADER + ns)
+    if d + fs > bytes() {
+        return truncated
+    }
+    header_from(align4(d + fs))
+}
+
+/// The first entry that is not a trailer at or after the header at `h`.
+fn skip_trailers(h: u64) -> u64 ! ArchiveError {
+    var e = h
+    while e != END && is_trailer(e) {
+        e = after(e)?
+    }
+    e
+}
+
+/// The first entry (END for an empty archive). Refusals as `check`.
+pub fn first() -> u64 ! ArchiveError {
+    if base() == 0 {
+        return no_module
+    }
+    let h = header_from(0)?
+    skip_trailers(h)
+}
+
+/// The entry after `e` (END past the last).
+pub fn next(e: u64) -> u64 ! ArchiveError {
+    let h = after(e)?
+    skip_trailers(h)
+}
+
+/// END, the offset no entry has.
+pub fn end() -> u64 {
+    END
+}
+
+/// Walk the whole archive once: the entry count, or the first refusal.
+pub fn check() -> u64 ! ArchiveError {
+    var n: u64 = 0
+    var e = first()?
+    while e != END {
+        let _l = name_len(e)?
+        let _m = field(e, F_MODE)?
+        n += 1
+        e = next(e)?
+    }
+    n
+}
+
+/// Entry `e`'s data: its first byte's address (in the HHDM).
+pub fn data(e: u64) -> u64 {
+    let ns = field(e, F_NAMESIZE) else 0
+    base() + align4(e + HEADER + ns)
+}
+
+/// Entry `e`'s size in bytes.
+pub fn size(e: u64) -> u64 {
+    field(e, F_FILESIZE) else 0
+}
+
+/// Entry `e`'s mode (type and permission bits).
+pub fn mode(e: u64) -> u64 {
+    field(e, F_MODE) else 0
+}
+
+/// Entry `e`'s name: the offset of its first byte past a leading `./`
+/// or `/` (0) and its length from there (1).
+fn name_span(e: u64, which: int) -> u64 {
+    let l = name_len(e) else 0
+    var s = e + HEADER
+    var k = l
+    if k >= 2 && at(s) == 46 && at(s + 1) == 47 {
+        s += 2
+        k -= 2
+    } else if k >= 1 && at(s) == 47 {
+        s += 1
+        k -= 1
+    }
+    if which == 0 {
+        return s
+    }
+    k
+}
+
+/// The address (in the HHDM) of entry `e`'s name's first byte, after a
+/// leading `./` or `/`: it stays readable as long as the kernel runs.
+pub fn name_addr(e: u64) -> u64 {
+    base() + name_span(e, 0)
+}
+
+/// Entry `e`'s name's length (after a leading `./` or `/`).
+pub fn name_length(e: u64) -> u64 {
+    name_span(e, 1)
+}
+
+/// Byte `k` of entry `e`'s name (after a leading `./` or `/`); k <
+/// name_length(e).
+pub fn name_byte(e: u64, k: u64) -> u64 {
+    at(name_span(e, 0) + k)
+}
+
+/// The entry whose name is `path` (one leading `/` dropped), when it is
+/// a regular file. Refusals: the archive's own, `not_found`,
+/// `not_regular`.
+pub fn find(path: str) -> u64 ! ArchiveError {
+    var e = first()?
+    while e != END {
+        if same(e, path) {
+            if mode(e) & S_IFMT != S_IFREG {
+                return not_regular
+            }
+            return e
+        }
+        e = next(e)?
+    }
+    not_found
+}
+
+/// Whether entry `e`'s name is `path`, one leading `/` dropped.
+fn same(e: u64, path: str) -> bool {
+    let l = name_length(e)
+    var k: u64 = 0
+    var lead = true
+    for b in path.bytes() {
+        let c = b as int as u64
+        if lead && c == 47 {
+            lead = false
+            continue
+        }
+        lead = false
+        if k >= l || name_byte(e, k) != c {
+            return false
+        }
+        k += 1
+    }
+    k == l
+}
+
+/// A refusal's code (0 none): the row's tag as a number, so it can be
+/// passed and named (an error row is not a value type,
+/// [type.err.alias.transparent]).
+const C_NO_MODULE: u64 = 1
+const C_COMPRESSED: u64 = 2
+const C_BAD_MAGIC: u64 = 3
+const C_TRUNCATED: u64 = 4
+const C_BAD_HEX: u64 = 5
+const C_NOT_FOUND: u64 = 6
+const C_NOT_REGULAR: u64 = 7
+
+/// The entry for `path` (as `find`), or END; `lookup_why` names why.
+pub fn lookup(path: str) -> u64 {
+    find(path) else END
+}
+
+/// Why `path` has no entry: a refusal's name ("" when it has one).
+pub fn lookup_why(path: str) -> str {
+    let c = find(path) else |e| match e {
+        no_module => C_NO_MODULE,
+        compressed => C_COMPRESSED,
+        bad_magic => C_BAD_MAGIC,
+        truncated => C_TRUNCATED,
+        bad_hex => C_BAD_HEX,
+        not_found => C_NOT_FOUND,
+        not_regular => C_NOT_REGULAR,
+    }
+    why_code(c) // an entry's offset is 0 or past 109: no code
+}
+
+/// The archive's refusal code: 0 when `check` walks it whole.
+pub fn problem() -> u64 {
+    let _n = check() else |e| match e {
+        no_module => { return C_NO_MODULE },
+        compressed => { return C_COMPRESSED },
+        bad_magic => { return C_BAD_MAGIC },
+        truncated => { return C_TRUNCATED },
+        bad_hex => { return C_BAD_HEX },
+        not_found => { return C_NOT_FOUND },
+        not_regular => { return C_NOT_REGULAR },
+    }
+    0
+}
+
+/// A refusal code's name, as the log writes it ("" for 0 or an entry
+/// offset, which `lookup_why` passes through when the path exists).
+fn why_code(c: u64) -> str {
+    if c == C_NO_MODULE {
+        return "no module"
+    }
+    if c == C_COMPRESSED {
+        return "a compressed archive (PAX has no decompressor)"
+    }
+    if c == C_BAD_MAGIC {
+        return "not a newc archive (no 070701 or 070702)"
+    }
+    if c == C_TRUNCATED {
+        return "truncated"
+    }
+    if c == C_BAD_HEX {
+        return "a header field that is not hex"
+    }
+    if c == C_NOT_FOUND {
+        return "no such file"
+    }
+    if c == C_NOT_REGULAR {
+        return "not a regular file"
+    }
+    ""
+}
+
+/// Entry `e`'s type as the log writes it.
+fn kind(e: u64) -> str {
+    let t = mode(e) & S_IFMT
+    if t == S_IFREG {
+        return "file"
+    }
+    if t == S_IFDIR {
+        return "dir"
+    }
+    if t == S_IFLNK {
+        return "link"
+    }
+    "other"
+}
+
+/// Write entry `e`'s name.
+pub fn put_name(e: u64) {
+    let l = name_length(e)
+    var k: u64 = 0
+    while k < l {
+        log.put_byte(name_byte(e, k) as int)
+        k += 1
+    }
+}
+
+/// The archive's lines:
+/// `initramfs: module 0x<a>, <b> bytes, <n> entries` (or `initramfs:
+/// refused: <why>`), then one `initramfs: <kind> <size> <name>` per
+/// entry.
+pub fn report() {
+    let c = problem()
+    if c != 0 {
+        log.put("initramfs: refused: ")
+        log.put(why_code(c))
+        log.end()
+        return
+    }
+    let n = check() else 0
+    log.put("initramfs: module ")
+    log.hex(base())
+    log.put(", ")
+    log.dec(bytes() as int)
+    log.put(" bytes, ")
+    log.dec(n as int)
+    log.put(" entries")
+    log.end()
+    var e = first() else END
+    while e != END {
+        log.put("initramfs: ")
+        log.put(kind(e))
+        log.put(" ")
+        log.dec(size(e) as int)
+        log.put(" ")
+        put_name(e)
+        log.end()
+        e = next(e) else END
+    }
+}
+
+/// Panic by name unless the archive checks (for a kernel that cannot
+/// run without it).
+pub fn require() {
+    let c = problem()
+    if c != 0 {
+        log.put("initramfs: ")
+        log.put(why_code(c))
+        log.end()
+        panic.fail("initramfs: refused, module bytes", bytes())
+    }
+}
