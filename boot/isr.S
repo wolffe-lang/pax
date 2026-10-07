@@ -19,7 +19,8 @@
    *Frame) -> *Frame` (kernel/interrupts) with %rsp 16-aligned and DF
    clear, moves the frame it RETURNS into %rsp (px07), restores the
    registers from it, drops the vector and the error code and returns
-   with `iretq`. A handler that returns its argument resumes the
+   with `iretq` (or, for a system call's frame, px09, `sysretq`:
+   pax_sysret below). A handler that returns its argument resumes the
    interrupted code; one that returns another thread's saved frame
    switches to that thread (kernel/sched, boot/sched.S: the frame lives
    on that thread's stack, where the CPU or pax_switch built it, and
@@ -172,6 +173,9 @@ pax_isr_common:
         cld
         call    pax_interrupt
         movq    %rax, %rsp              /* the frame to resume (px07) */
+        cmpq    $0x100, 120(%rsp)       /* PAX_SYSCALL's frame (px09) */
+        je      pax_sysret
+.Lpax_iret:
         popq    %r15
         popq    %r14
         popq    %r13
@@ -190,6 +194,52 @@ pax_isr_common:
         addq    $16, %rsp               /* the vector and the error code */
         iretq
         .size pax_isr_common, . - pax_isr_common
+
+/* pax_sysret (px09): the return from a system call. A frame
+   boot/user.S's pax_syscall_entry built (vector 0x100) is resumed by
+   SYSRETQ: RIP from %rcx, RFLAGS from %r11, CS 0x23 and SS 0x1b from
+   STAR[63:48] (Intel SDM vol. 2 SYSRET; AMD64 APM vol. 2 §6.1.1), so a
+   caller sees %rcx = its return address and %r11 = its RFLAGS, as the
+   psABI's A.2.1 says the kernel leaves them. Two checks first, either
+   of which sends the frame to the IRETQ path instead: CS must be 0x23
+   (only a ring-3 syscall builds this vector), and RIP must lie below
+   0x7ffffffff000. SYSRETQ with a non-canonical %rcx raises #GP in ring
+   0 on the user's stack on Intel CPUs (SDM vol. 2 SYSRET, "If RCX is not
+   canonical"), and the only way a syscall can return there is a
+   `syscall` in the last bytes below 0x800000000000, a page PAX never
+   maps; the check costs one compare. Interrupts are off from here to
+   SYSRETQ (every path into pax_isr_common clears IF), which loads IF
+   from %r11 with the rest of RFLAGS. An NMI between the stack load
+   and SYSRETQ would run on the user's stack in ring 0: PAX enables no
+   NMI source, and an NMI gate on an IST is the fix when one exists. */
+        .globl pax_sysret
+        .type pax_sysret, @function
+pax_sysret:
+        cmpq    $0x23, 144(%rsp)        /* the frame's CS */
+        jne     .Lpax_iret
+        movabsq $0x00007ffffffff000, %rcx
+        cmpq    %rcx, 136(%rsp)         /* the frame's RIP */
+        jae     .Lpax_iret
+        popq    %r15
+        popq    %r14
+        popq    %r13
+        popq    %r12
+        popq    %r11
+        popq    %r10
+        popq    %r9
+        popq    %r8
+        popq    %rbp
+        popq    %rdi
+        popq    %rsi
+        popq    %rdx
+        popq    %rcx
+        popq    %rbx
+        popq    %rax
+        movq    16(%rsp), %rcx          /* rip (the vector is at 0, error 8) */
+        movq    32(%rsp), %r11          /* rflags */
+        movq    40(%rsp), %rsp          /* the user's rsp */
+        sysretq
+        .size pax_sysret, . - pax_sysret
 
         .globl pax_load_gdt
         .type pax_load_gdt, @function
