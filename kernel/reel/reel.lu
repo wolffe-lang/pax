@@ -1,0 +1,457 @@
+//! reel — the showcase kernel's stages (px08, the boot reel).
+//!
+//! `kmain_reel` and `kmain_reel_text` walk through what PAX does today,
+//! one stage at a time, each under a heading a viewer can read, with a
+//! pause between stages so the output can be read as it lands. Every
+//! stage is the test suites' own path: the same calls the test kernels
+//! make (kmain, kmain_frames, kmain_paging, kmain_timer, kmain_sched,
+//! kmain_sched_overflow, kmain_text_write), in the same order, and the
+//! reports they print. This module adds no capability; its own code is
+//! display and pacing:
+//!
+//! - **Headings and the closing lines**: text.
+//! - **`leaf`**, a read-only walk of the live page tables (through the
+//!   frame allocator's HHDM offset, as kernel/paging walks them), so the
+//!   permissions stage 3 prints are the bits the processor reads, not
+//!   what the code meant to write.
+//! - **Pauses for the viewer.** Nothing runs during a pause and no
+//!   pause stands in for work; each is labelled `PAUSE` where it is
+//!   called. Before the timer interrupt is live (stages 1-3) a pause
+//!   polls the 8254's channel 0, which `timer.start` has set counting
+//!   down from 11932 every 10 ms (mode 2): a reload (the count going
+//!   up) is one period (Intel's 8254 data sheet, the counter-latch
+//!   command: control word 0x00 latches channel 0, then two reads of
+//!   port 0x40, low byte first). Interrupts stay off. Once the timer
+//!   interrupt is live a pause is `timer.wait` until enough ticks have
+//!   been handled; once the scheduler runs it is `sched.sleep` on
+//!   thread 0.
+//! - **`pax_reel_worker`**, the thread body of stage 5: it spins, never
+//!   yields, and writes a line every fifth time the timer switches it
+//!   back in — kernel/schedtest's `pax_t_spin` with a name and a
+//!   slower line rate.
+//!
+//! No module `var` (wolf-lang#598) and no `region` (wolf-lang#611).
+//! Masks, never a shift's top half, decide a branch (wolf-lang#600).
+//! No Linux source; no other kernel's source.
+
+use apic
+use boot_info
+use frames
+use interrupts
+use log
+use paging
+use panic
+use sched
+use sync
+use timer
+
+extern "c" fn pax_outb(port: u16, v: u8)
+extern "c" fn pax_inb(port: u16) -> u8
+
+const PIT_CH0: u16 = 0x40
+const PIT_CTRL: u16 = 0x43
+
+/// Stages in the reel (the heap joins when pax#10 lands).
+const STAGES: int = 5
+
+// Page-table entry bits (Intel SDM vol. 3A §4.5, as kernel/paging).
+const E_P: u64 = 0x1
+const E_RW: u64 = 0x2
+const E_PS: u64 = 0x80
+const E_NX: u64 = 0x8000000000000000
+const E_ADDR: u64 = 0x000ffffffffff000
+
+/// The runs between two of a worker's lines, and its lines.
+const EVERY: u64 = 5
+const LINES: u64 = 6
+
+// --- pacing -----------------------------------------------------------------
+
+/// Channel 0's current count (the counter-latch command, then the low
+/// and the high byte).
+fn pit_count() -> u64 {
+    // # Safety: io.S's OUT to the 8254's control port: latch channel 0.
+    unsafe { pax_outb(PIT_CTRL, 0) }
+    // # Safety: io.S's IN of the latched count, low byte then high.
+    let lo = unsafe { pax_inb(PIT_CH0) }
+    // # Safety: as above.
+    let hi = unsafe { pax_inb(PIT_CH0) }
+    (lo as u64) | ((hi as u64) * 256)
+}
+
+/// PAUSE for the viewer, before the timer interrupt is live: `cs`
+/// hundredths of a second, counted as channel 0's reloads. `timer.start`
+/// must have run (it programs channel 0); interrupts are off.
+pub fn pause_early(cs: u64) {
+    var seen: u64 = 0
+    var last = pit_count()
+    while seen < cs {
+        let c = pit_count()
+        if c > last {
+            seen += 1
+        }
+        last = c
+    }
+}
+
+/// PAUSE for the viewer, the timer interrupt live and the scheduler not
+/// yet started: until `n` more ticks have been handled (interrupts on
+/// only inside each wait, as kmain_timer).
+pub fn pause_ticks(n: u64) {
+    let end = timer.ticks() + n
+    while timer.ticks() < end {
+        timer.wait()
+    }
+}
+
+/// PAUSE for the viewer once the scheduler runs: thread 0 sleeps `n`
+/// ticks (the idle thread halts meanwhile).
+pub fn pause_sleep(n: u64) {
+    let (_from, _woke) = sched.sleep(n)
+}
+
+// --- display ------------------------------------------------------------------
+
+/// A blank line, then `[n/STAGES] what`.
+pub fn heading(n: int, what: str) {
+    log.end()
+    log.put("[")
+    log.dec(n)
+    log.put("/")
+    log.dec(STAGES)
+    log.put("] ")
+    log.put(what)
+    log.end()
+}
+
+/// The bootloader's name (0) or version (1), as kmain.lu writes it.
+fn loader_string(which: int) {
+    var i = 0
+    var b = boot_info.loader_byte(which, 0)
+    if b < 0 {
+        log.put("?")
+    }
+    while b >= 0 {
+        log.put_byte(b)
+        i = i + 1
+        b = boot_info.loader_byte(which, i)
+    }
+}
+
+/// `r`, `w` and `x` (or `-`) for a leaf entry's P, RW and NX bits.
+fn perms(e: u64) {
+    log.put(if e & E_P != 0 { "r" } else { "-" })
+    log.put(if e & E_RW != 0 { "w" } else { "-" })
+    log.put(if e & E_NX == 0 && e & E_P != 0 { "x" } else { "-" })
+}
+
+/// Entry `i` of the table at physical `t`, through the HHDM.
+fn ent(t: u64, i: u64) -> u64 {
+    // # Safety: `t` is a page table the kernel built from frames the
+    // allocator handed out, mapped by the HHDM; i < 512. A read only.
+    unsafe { ((frames.hhdm() + t + i * 8) as *u64).read_volatile() }
+}
+
+/// The leaf entry that maps `va` in the structures at `pml4`, and the
+/// size of its page (4096 or 2 MiB); (0, 0) when `va` is not mapped.
+/// A read-only walk (Intel SDM vol. 3A §4.5); the index of each level is
+/// masked to 9 bits.
+fn leaf(pml4: u64, va: u64) -> (u64, u64) {
+    var t = pml4
+    var shift: u64 = 39
+    var size: u64 = 281474976710656 // 2^48: each level divides it by 512 first
+    while shift >= 12 {
+        let e = ent(t, (va >> shift) & 511)
+        if e & E_P == 0 {
+            return (0, 0)
+        }
+        size = size / 512
+        if shift == 12 || (shift < 39 && e & E_PS != 0) {
+            return (e, size)
+        }
+        t = e & E_ADDR
+        shift = shift - 9
+    }
+    (0, 0)
+}
+
+/// One section's line: `paging: <name> 0x<lo> to 0x<hi> <perms>, 4 KiB pages`,
+/// the permissions read from the leaf that maps `lo`, and every page of
+/// the section checked to carry the same bits.
+fn section(pml4: u64, name: str, lo: u64, hi: u64) {
+    let (e0, size) = leaf(pml4, lo)
+    var same = true
+    var va = lo
+    while va < hi {
+        let (e, _s) = leaf(pml4, va)
+        if (e & (E_P | E_RW | E_NX)) != (e0 & (E_P | E_RW | E_NX)) {
+            same = false
+        }
+        va = va + 4096
+    }
+    log.put("paging: ")
+    log.put(name)
+    log.hex(lo)
+    log.put(" to ")
+    log.hex(hi)
+    log.put(" ")
+    perms(e0)
+    log.put(", ")
+    log.dec((size / 1024) as int)
+    log.put(" KiB pages")
+    log.put(if same { ", every page alike" } else { ", pages DIFFER" })
+    log.end()
+}
+
+// --- the stages ---------------------------------------------------------------
+
+/// The banner and stage 1: what Limine handed over. Programs the PIT
+/// (`timer.start`, no interrupt delivered: they stay off) so the early
+/// pauses can count its periods.
+pub fn stage_boot() {
+    log.end()
+    log.line("PAX: a kernel written in wolf")
+    // The wolf version is the one kernel/wolf.pin names; tests/reel
+    // checks the two agree.
+    log.line("wolf 0.2.24, target x86_64-unknown-none; every line below is printed by this kernel")
+    heading(1, "boot: what Limine handed over")
+    log.put("boot: ")
+    loader_string(0)
+    log.put(" ")
+    loader_string(1)
+    log.put(if boot_info.revision_ok() { ", base revision 6" } else { ", base revision NOT honoured" })
+    log.end()
+    log.put("boot: firmware ")
+    log.put(boot_info.firmware_name(boot_info.firmware()))
+    log.end()
+    log.put("mem: ")
+    log.dec(boot_info.memmap_count())
+    log.put(" map entries, ")
+    log.dec((boot_info.usable_bytes() / 1048576) as int)
+    log.put(" MiB usable")
+    log.end()
+    log.put("hhdm: ")
+    log.hex(boot_info.hhdm())
+    log.put(", all of physical memory at one offset")
+    log.end()
+    log.put("image: ")
+    log.hex(boot_info.image_phys())
+    log.put(" physical at ")
+    log.hex(boot_info.image_virt())
+    log.put(", ")
+    log.dec((boot_info.image_bytes() / 1024) as int)
+    log.put(" KiB")
+    log.end()
+    timer.start()
+}
+
+/// Stage 2: the frame allocator, and one frame's round trip. Returns
+/// the frame (free again; stage 3 shows how the HHDM maps it).
+pub fn stage_frames() -> u64 {
+    heading(2, "frames: physical memory, one bit per 4 KiB frame")
+    frames.start()
+    frames.report()
+    let before = frames.free_count()
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        panic.fail("reel: no frame for the round trip", 0)
+    }
+    let mid = frames.free_count()
+    let va = pa + frames.hhdm()
+    let word: u64 = 0x50415820776f6c66 // "PAX wolf"
+    // # Safety: the frame just taken, through the HHDM.
+    unsafe { (va as *u64).write_volatile(word) }
+    // # Safety: as above.
+    let got = unsafe { (va as *u64).read_volatile() }
+    log.put("alloc: frame ")
+    log.hex(pa)
+    log.put(", free ")
+    log.dec(before as int)
+    log.put(" -> ")
+    log.dec(mid as int)
+    log.end()
+    log.put("write: ")
+    log.hex(word)
+    log.put(" at ")
+    log.hex(va)
+    log.put(", read back ")
+    log.hex(got)
+    log.put(if got == word { ", same" } else { ", DIFFERENT" })
+    log.end()
+    frames.free(pa)
+    log.put("free: frame ")
+    log.hex(pa)
+    log.put(", free ")
+    log.dec(mid as int)
+    log.put(" -> ")
+    log.dec(frames.free_count() as int)
+    log.end()
+    pa
+}
+
+/// Stage 3: PAX's own page tables, switched to; the image's sections by
+/// permission, read back from the live tables; the HHDM's page over
+/// stage 2's frame `pa`. Returns the PML4.
+pub fn stage_paging(pa: u64) -> u64 {
+    heading(3, "paging: the kernel's own page tables, CR3 switched")
+    let limine = paging.cr3()
+    let before = frames.free_count()
+    let pml4 = paging.start()
+    paging.report(limine, before)
+    section(pml4, "text   ", paging.bound(2), paging.bound(3))
+    section(pml4, "rodata ", paging.bound(4), paging.bound(5))
+    section(pml4, "data   ", paging.bound(6), paging.bound(7))
+    let h = frames.hhdm() + pa
+    let (he, hs) = leaf(pml4, h)
+    log.put("paging: hhdm   ")
+    log.hex(h)
+    log.put(" ")
+    perms(he)
+    log.put(", ")
+    log.dec((hs / 1024) as int)
+    log.put(" KiB pages")
+    log.end()
+    var low: u64 = 0
+    var i: u64 = 0
+    while i < 256 {
+        if ent(pml4, i) & E_P != 0 {
+            low += 1
+        }
+        i += 1
+    }
+    log.put("paging: lower half ")
+    log.dec(low as int)
+    log.put(" of 256 top-level entries present")
+    log.end()
+    pml4
+}
+
+/// Stage 4: the descriptor tables, the local APIC, the PIT's tick
+/// counted live for three seconds.
+pub fn stage_interrupts(pml4: u64) {
+    heading(4, "interrupts: the kernel's GDT, TSS and IDT; the timer on vector 32")
+    interrupts.start()
+    interrupts.report()
+    apic.start(pml4)
+    apic.report()
+    timer.start()
+    log.put("timer: pit divisor ")
+    log.dec(timer.divisor() as int)
+    log.put(" (99.998 Hz), 8259 at ")
+    log.dec(timer.master_base() as int)
+    log.put(" and ")
+    log.dec(timer.slave_base() as int)
+    log.put(", line 0 unmasked")
+    log.end()
+    var next: u64 = 50
+    while next <= 300 {
+        while timer.ticks() < next {
+            timer.wait()
+        }
+        log.put("tick: ")
+        log.dec(timer.ticks() as int)
+        log.put(" ticks handled, ")
+        log.dec((next / 100) as int)
+        log.put(".")
+        log.dec((next / 10 % 10) as int)
+        log.put(" s")
+        log.end()
+        next = next + 50
+    }
+    log.put("tick: ")
+    log.dec(timer.spurious_count() as int)
+    log.put(" spurious")
+    log.end()
+}
+
+/// A worker's name: `arg` 0-3.
+fn name(i: u64) -> str {
+    if i == 0 { return "wolf " }
+    if i == 1 { return "lupin" }
+    if i == 2 { return "lobo " }
+    "pax  "
+}
+
+/// Stage 5's thread body: spin, never yield; every EVERY-th time the
+/// timer switches this thread back in, one line under the console lock;
+/// return after LINES lines (boot/sched.S's entry then exits it).
+export fn pax_reel_worker(arg: u64) {
+    var last: u64 = 0
+    var lines: u64 = 0
+    while lines < LINES {
+        let r = sched.self_runs()
+        if r != last {
+            last = r
+            if r % EVERY == 0 {
+                lines += 1
+                let s = sync.acquire(sync.console())
+                log.put(name(arg))
+                log.put("  t")
+                log.dec(sched.self_id() as int)
+                log.put(" run ")
+                log.dec(r as int)
+                log.put(" at tick ")
+                log.dec(timer.ticks() as int)
+                log.end()
+                sync.release(sync.console(), s)
+            }
+        }
+        sync.relax()
+    }
+}
+
+/// Stage 5: the scheduler; four named threads (bodies at `worker`)
+/// interleave under preemption and are joined. Interrupts are enabled
+/// here and stay on.
+pub fn stage_threads(pml4: u64, worker: u64) {
+    heading(5, "threads: four kernel threads, preempted by the timer, then joined")
+    sched.start(pml4)
+    sched.report()
+    let before = frames.free_count()
+    let saved = sync.irq_save()
+    let a = sched.create(worker, 0)
+    let b = sched.create(worker, 1)
+    let c = sched.create(worker, 2)
+    let d = sched.create(worker, 3)
+    log.put("spawn: wolf t")
+    log.dec(a as int)
+    log.put(", lupin t")
+    log.dec(b as int)
+    log.put(", lobo t")
+    log.dec(c as int)
+    log.put(", pax t")
+    log.dec(d as int)
+    log.put("; none yields, each writes every 5th run")
+    log.end()
+    sync.irq_restore(saved)
+    sync.enable()
+    sched.wait_all()
+    let s = sync.acquire(sync.console())
+    log.put("join: ")
+    log.dec((4 - sched.live_count()) as int)
+    log.put(" of 4 exited; frames free ")
+    log.dec(before as int)
+    log.put(" before, ")
+    log.dec(frames.free_count() as int)
+    log.put(" after: every stack given back")
+    log.end()
+    sync.release(sync.console(), s)
+}
+
+/// The closing lines, and a countdown to the finale (a PAUSE for the
+/// viewer, one second a number).
+pub fn closing() {
+    log.end()
+    log.line("PAX today: Limine boot on BIOS and UEFI, frames, paging, interrupts,")
+    log.line("a timer and preemptive threads, all in wolf. Next: user mode, then")
+    log.line("Linux binaries, unmodified.")
+    pause_sleep(100) // PAUSE for the viewer
+    log.end()
+    log.put("finale in 3...")
+    pause_sleep(100) // PAUSE for the viewer
+    log.put(" 2...")
+    pause_sleep(100) // PAUSE for the viewer
+    log.put(" 1...")
+    pause_sleep(100) // PAUSE for the viewer
+    log.end()
+}
