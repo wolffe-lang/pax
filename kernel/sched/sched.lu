@@ -73,6 +73,15 @@
 //! `reap` gives back its address space with its stack, in thread
 //! context, as every reap is.
 //!
+//! **ELF processes** (px10): a user thread may also carry a program
+//! loaded from the initramfs (kernel/user's `exec`): its entry point,
+//! its initial stack pointer (the psABI's argc/argv/envp/auxv block) and
+//! its name (a pointer into the initramfs and a length), so `who` lines
+//! name it and `pax_user_thread` enters it where the loader said. And
+//! every switch between two threads moves the FPU state with them
+//! (`fpu.switch` in `run_next`; a new thread's area starts as the
+//! template, `fpu.reset`), once kernel/fpu has started.
+//!
 //! The record's fields are read and written as words at their
 //! `offset_of`: a store to a field of a raw element is refused
 //! (wolf-lang#577). Written from the Intel SDM vol. 3A §6.12.1, §6.14.2,
@@ -81,6 +90,7 @@
 //! saved on the thread's own stack, deferred reaping) is the textbook
 //! one, consulted from no kernel's source. No Linux source.
 
+use fpu
 use frames
 use gdt
 use log
@@ -97,8 +107,8 @@ extern "c" let pax_thread_entry: *u8
 extern "c" let pax_idle: *u8
 extern "c" let pax_syscall_state: *u64
 
-/// One thread's record (boot/sched.S: 16 of them, 88 bytes each; 72
-/// before px09 added `cr3` and `prog`).
+/// One thread's record (boot/sched.S: 16 of them, 120 bytes each; 72
+/// before px09 added `cr3` and `prog`, 88 before px10's four).
 #[repr(c)]
 struct Thread {
     frame: u64, // the saved frame's address; 0 while running
@@ -112,6 +122,10 @@ struct Thread {
     yields: u64, // calls of `yield`
     cr3: u64, // px09: the thread's PML4 (physical); 0 the kernel's
     prog: u64, // px09: kernel/user's program number + 1; 0 a kernel thread
+    entry: u64, // px10: an ELF process's entry point (0 otherwise)
+    usp: u64, // px10: its initial user stack pointer
+    name: u64, // px10: its name's first byte (in the initramfs)
+    name_len: u64, // px10: its name's length
 }
 
 const SLOTS: u64 = 16
@@ -134,6 +148,8 @@ const PAGE: u64 = 4096
 const PAGES: u64 = 4
 
 const QUANTUM: u64 = 2 // ticks
+
+const ELF_PROG: u64 = 0x100 // px10: an ELF process's `prog`
 
 // boot/isr.S's frame, as word indices (kernel/interrupts' Frame: r15 r14
 // r13 r12 … vector error rip cs rflags rsp ss).
@@ -265,8 +281,12 @@ fn enter_space(s: u64) {
 /// Switch in the queue's head (the idle thread if it is empty): count
 /// its run, start its quantum, make its space live, return its frame.
 fn run_next() -> u64 {
+    let from = cur()
     let n = dequeue()
     let s = if n == 0 { IDLE } else { n - 1 }
+    if s != from {
+        fpu.switch(from, s) // px10: a no-op before fpu.start
+    }
     put_field(s, offset_of(Thread, state), RUNNING)
     put_field(s, offset_of(Thread, runs), field(s, offset_of(Thread, runs)) + 1)
     put_sv(S_CURRENT, s)
@@ -388,6 +408,10 @@ fn clear(s: u64) {
     put_field(s, offset_of(Thread, yields), 0)
     put_field(s, offset_of(Thread, cr3), 0)
     put_field(s, offset_of(Thread, prog), 0)
+    put_field(s, offset_of(Thread, entry), 0)
+    put_field(s, offset_of(Thread, usp), 0)
+    put_field(s, offset_of(Thread, name), 0)
+    put_field(s, offset_of(Thread, name_len), 0)
 }
 
 /// Start the scheduler on the paging structures at `pml4` (the PML4's
@@ -414,6 +438,7 @@ pub fn start(pml4: u64) {
     put_field(MAIN, offset_of(Thread, id), 0)
     put_field(MAIN, offset_of(Thread, runs), 1)
     make_stack(IDLE)
+    fpu.reset(IDLE)
     // # Safety: the address of boot/sched.S's idle loop; nothing is read.
     first_frame(IDLE, unsafe { pax_idle as u64 }, 0, 0)
     put_field(IDLE, offset_of(Thread, id), 1)
@@ -453,6 +478,28 @@ pub fn create_user(body: u64, prog: u64, cr3: u64) -> u64 {
     start_thread(body, prog, cr3, prog + 1)
 }
 
+/// Start an ELF process (px10): a user thread in the address space at
+/// `cr3`, whose body (kernel/user's `pax_user_thread`, given `arg`)
+/// enters ring 3 at `entry` with RSP `usp`, named by the `len` bytes at
+/// `name`. Its `prog` is `elf_prog()`. Returns its id.
+pub fn create_process(body: u64, arg: u64, cr3: u64, entry: u64, usp: u64, name: u64, len: u64) -> u64 {
+    let saved = sync.irq_save()
+    let id = start_thread(body, arg, cr3, ELF_PROG)
+    let s = slot_of(id)
+    put_field(s, offset_of(Thread, entry), entry)
+    put_field(s, offset_of(Thread, usp), usp)
+    put_field(s, offset_of(Thread, name), name)
+    put_field(s, offset_of(Thread, name_len), len)
+    sync.irq_restore(saved)
+    id
+}
+
+/// The `prog` an ELF process carries (px10): past every kernel/user
+/// blob's number + 1.
+pub fn elf_prog() -> u64 {
+    ELF_PROG
+}
+
 fn start_thread(body: u64, arg: u64, cr3: u64, prog: u64) -> u64 {
     let saved = sync.irq_save()
     reap()
@@ -464,6 +511,7 @@ fn start_thread(body: u64, arg: u64, cr3: u64, prog: u64) -> u64 {
         panic.fail("sched: no free thread slot, live", live_count())
     }
     make_stack(s)
+    fpu.reset(s)
     // # Safety: the address of boot/sched.S's entry; nothing is read.
     first_frame(s, unsafe { pax_thread_entry as u64 }, body, arg)
     let id = sv(S_NEXT_ID)
@@ -577,6 +625,23 @@ pub fn self_runs() -> u64 {
 /// kernel thread, px09).
 pub fn self_prog() -> u64 {
     field(cur(), offset_of(Thread, prog))
+}
+
+/// The running thread's entry point and initial user stack pointer
+/// (`which` 0 and 1), and its name's first byte and length (2 and 3):
+/// an ELF process's (px10), 0 for any other thread.
+pub fn self_exec(which: int) -> u64 {
+    let c = cur()
+    if which == 0 {
+        return field(c, offset_of(Thread, entry))
+    }
+    if which == 1 {
+        return field(c, offset_of(Thread, usp))
+    }
+    if which == 2 {
+        return field(c, offset_of(Thread, name))
+    }
+    field(c, offset_of(Thread, name_len))
 }
 
 /// How many times the running thread has called `yield`.
