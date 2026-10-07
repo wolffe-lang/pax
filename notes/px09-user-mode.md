@@ -1,7 +1,7 @@
 # px09 — user mode (PAX P3's first step)
 
 Contract: `sprints/pax/09-user-mode/px09-user-mode.md` in wolffe-lang/wolf
-(planning trunk `c5fd1e3` at the time of reading; the contract at `a3ccbb7`, its only
+(wolffe-lang/wolf trunk `c5fd1e3` at the time of reading; the contract at wolffe-lang/wolf `a3ccbb7`, its only
 commit, 2026-10-07). Branch `px09` off pax
 `94364ad`. This note is committed whole, §1–§3 first, before any change;
 §4 and §5 are filled in as the evidence lands.
@@ -139,7 +139,7 @@ falsifier is the first boot's serial log, kept in §4 either way.
 | P4: three -EFAULT, nothing written, exit 14 | as predicted |
 | P5: two spinners each switched in ≥ 2 times, exit 0 | as predicted: 54–60 runs each under TCG (215–236 ring-3 ticks), 6–7 under KVM (22–24 ticks) |
 | P6: SMEP and SMAP on in all three places; U7 error 0x1, U8 0x11 rip 0x400000 | as predicted on CI QEMU 8.2.2 TCG, kasumi 11.1.1 TCG, hasu 11.1.0 KVM |
-| P7: every existing suite unchanged | **wrong once**: `tests/mpx1` A6 copies `kernel/` and `boot/` to build its spin variant and the new `../user/programs.S` was not there (kasumi gauntlet at `f3f0fa1`: mpx1 20 PASS 8 FAIL, `notes/px09/kasumi-gauntlet-f3f0fa1.summary`). Fixed by copying `user/` too (the test's assertions unchanged); green since |
+| P7: every existing suite unchanged | **wrong once**: `tests/mpx1` A6 copies `kernel/` and `boot/` to build its spin variant and the new `../user/programs.S` was not there (kasumi gauntlet at `8ec780a`: mpx1 20 PASS 8 FAIL, `notes/px09/kasumi-gauntlet-8ec780a-prerebase.summary`). Fixed by copying `user/` too (the test's assertions unchanged); green since |
 | first build fails on a refusal | **right, the shape guessed wrong**: `shared` and `spawn` are reserved keywords (px07 had noted `spawn`), then an unused `u64` value, then `str` comparison needs the hosted runtime (programs go by number). `notes/px09/kasumi-first-build.out` |
 | first boot does not reach the hello line (a #GP on the return to ring 3, or #PF 0x15) | **wrong**: the first boot that built passed every assertion, U1–U8, both tiers, BIOS and UEFI (kasumi, `~/lanes/px09/out/boot1-first.out` `4f626da9…`) |
 
@@ -154,12 +154,17 @@ U4–U6 red (R2 below).
 
 ### Red then green
 
+Shas are the branch's after the rebase onto px06 (`bc86ea5`). Runs
+before it tested the same commits' pre-rebase twins (same content but
+for px06's files): `6f4a0dd`, `8ec780a`, `128355e` here stand for them,
+and the run ids are the artifacts.
+
 - **Red** at `128355e` (the test and its CI job, no kernel): run
   **37690204213**, job 113028128778 (log `f7ee1f03…`): 0 PASS, 38 FAIL,
   0 SKIP lines (U0 ×6 "no kernel/kmain_user*.lu", U1–U8 "no image").
   Before the rebase onto px06 the same tree was red in run 37677944220,
-  job 112986175039 (`c9eb6ec`), 0/38/0.
-- **Green** at `8a7a37a` (before the rebase): run **37681206949**,
+  job 112986175039 (the same commit before the rebase, now `128355e`), 0/38/0.
+- **Green** at `6f4a0dd`'s tree before the rebase onto px06 (its pre-rebase twin; the rebase moved no line of it): run **37681206949**,
   attempt 2: mpx3-user 38 PASS (job 113013553505); mkw 16, mpx1 26,
   mpx2-frames 44, mpx2-paging 26, mpx2-interrupts 34, mpx2-sched 32,
   proof 4, census 3, macos-run 2 PASS; 0 FAIL, 0 SKIP lines. Attempt 1's
@@ -187,8 +192,8 @@ U4–U6 red (R2 below).
 - **kasumi** (QEMU 11.1.1 TCG, strict `PAX_REQUIRE_UEFI=1`,
   `WOLF_PAIRING_REQUIRE_SIBLING=1`, lupin present), every suite on the
   `git archive` of one commit:
-  - `8a7a37a`: all rc 0, 0 FAIL, 0 SKIP lines
-    (`notes/px09/kasumi-gauntlet-8a7a37a.summary`);
+  - `6f4a0dd`: all rc 0, 0 FAIL, 0 SKIP lines
+    (`notes/px09/kasumi-gauntlet-6f4a0dd-prerebase.summary`);
   - `197fb4f` (rebased on px06's `bc86ea5`, the code of the head): proof
     2, mkw 16, mpx1 26, mpx2-frames 44, mpx2-paging 26, mpx2-interrupts
     34, mpx2-sched 32, mpx2-heap 56, mpx3-user 38 PASS; all rc 0, 0 FAIL,
@@ -196,10 +201,10 @@ U4–U6 red (R2 below).
     `84070966…`; images `b7a5a697…`).
 - **hasu** (nix-shell QEMU 11.1.0, **KVM**, i7-12700KF with smep and
   smap), the kasumi images by `--images`:
-  - `8a7a37a`: mpx3-user 4 rounds × 12 boots (32 PASS each), mkw 12,
+  - `6f4a0dd`: mpx3-user 4 rounds × 12 boots (32 PASS each), mkw 12,
     mpx1 12, mpx2-frames 16, mpx2-paging 4, mpx2-interrupts 20,
     mpx2-sched 8: **120/120 boots, all accel=kvm**, 0 FAIL, 0 SKIP
-    (`notes/px09/hasu-kvm-8a7a37a.log`);
+    (`notes/px09/hasu-kvm-6f4a0dd-prerebase.log`);
   - `197fb4f`: the same plus mpx2-heap 24: **144/144 boots, all
     accel=kvm**, 0 FAIL, 0 SKIP (`notes/px09/hasu-kvm-197fb4f.log`
     `73038635…`).
