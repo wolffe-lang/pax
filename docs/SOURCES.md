@@ -214,3 +214,26 @@ subsystems px01-px07 wrote, whose sources are cited above.
 | Limine's `CONFIG.md` (`timeout`, `quiet`, `serial`, `default_entry`, `interface_branding`, entry syntax) | v12.9.1 (the pinned release) | BSD-2-Clause | read, the bootloader's user documentation | `boot/limine-tour.conf`: a menu with two entries, mirrored to the serial console |
 | Intel 8254 programmable interval timer data sheet: the counter-latch command (control word with RW bits 00), mode 2's count from N down to 1 and reload | — | — | the author's own knowledge | `kernel/pax_tour`'s early pause (`pit_count`, `pause_early`) |
 | Intel SDM vol. 3A §4.5 (the four-level entry formats: P, R/W, PS, XD, the address bits) | — | — | the author's own knowledge, as kernel/paging cites | `kernel/pax_tour`'s read-only walk (`leaf`), the permissions stage 3 prints |
+
+## px10 — the loader (2026-10-07)
+
+**Linux: only allowed paths, from the refs clone's sparse checkout, never
+widened.** No Linux source (`.c`, `.S`, non-uapi headers), no glibc,
+musl or other libc or kernel source was read. glibc's behaviour was
+observed black-box only: `strace` of a static program on kasumi and the
+CI runner, and `objdump -d` of one instruction where PAX killed it (the
+static start-up's `_dl_aux_init`, an AVX-512 store). Permissively
+licensed kernels: none consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| Linux `include/uapi/linux/auxvec.h`, `arch/x86/include/uapi/asm/auxvec.h` | the refs clone's sparse checkout | GPL-2.0 WITH Linux-syscall-note | read: the AT_* numbers | `kernel/user`'s auxiliary vector; `user/elf/hello.S` |
+| Linux `arch/x86/entry/syscalls/syscall_64.tbl` | the same | facts of the ABI | read: `exit_group` 231, `arch_prctl` 158 | `kernel/user`'s dispatch; the census |
+| Linux `Documentation/driver-api/early-userspace/buffer-format.rst` (the initramfs buffer format: `newc`, ALGN(4), NUL padding between archives, `TRAILER!!!`, compression) | the same | GPL-2.0 (prose) | read, allowed by ruling #22 | `kernel/initramfs`, `tools/mkinitramfs` |
+| System V gABI, "Object Files" and "Program Loading" (the ELF header, program headers, `PT_LOAD`, `PT_INTERP`, `PT_PHDR`, congruence modulo the page) and `elf(5)` | gABI 4.1 / man-pages 6.x | — | the author's own knowledge, checked against `readelf -lhW` of the built programs | `kernel/elf` |
+| System V AMD64 psABI §3.4.1 (the initial process stack: argc, argv, envp, auxv, 16-byte alignment, %rdx), §5 (program loading) | 1.0 | — | the author's own knowledge | `kernel/user.exec`, `user/elf/hello.S` |
+| man-pages `execve(2)`, `exit_group(2)`, `getauxval(3)` (AT_RANDOM, AT_EXECFN, AT_PHDR …), `cpio(5)` | 6.x | the man-pages project's licences | the author's own knowledge | the same |
+| Intel SDM vol. 1 §10.5 and ch. 13 (FXSAVE's area: FCW at 0, MXCSR at 24; XSAVE's enumeration by CPUID leaf 0DH, enabling with CR4.OSXSAVE and XCR0, the area's header at 512, XSTATE_BV, the standard form, the init state), §8.1.5/§10.2.3 (FNINIT's and the reset values: FCW 0x037f, MXCSR 0x1f80); vol. 2 (CPUID, XGETBV, XSETBV, XSAVE64, XRSTOR64, FXSAVE64, FXRSTOR64, RDRAND, RDTSC); vol. 3A §2.5–§2.6 (CR0.MP/EM/TS, CR4.OSFXSR/OSXMMEXCPT/OSXSAVE, XCR0) | — | — | the author's own knowledge | `kernel/fpu`, `boot/fpu.S` |
+| AMD64 APM vol. 2 §11.5 (saving media and x87 state) | — | — | the author's own knowledge, as a cross-check | the same |
+| Limine `PROTOCOL.md` (the Module Feature, `struct limine_file`, the x86-64 machine state at entry: every CR0/CR4 bit not named cleared) and `CONFIG.md` (`module_path`) | limine-protocol `3a0526b7`; Limine v12.9.1 | BSD-2-Clause | read | `boot/start.S`'s module request, `kernel/boot_info`, `boot/limine-initramfs.conf`, `kernel/fpu` |
+| black-box Linux: `user/elf/hello.S` run natively on kasumi (CachyOS, kernel 7.2.8) and on the CI runner (Ubuntu); `strace` 7.2 of the static wolf program | — | — | measured | `fcw 0x037f mxcsr 0x1f80` at execve; the census's Linux half |
