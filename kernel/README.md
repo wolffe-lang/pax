@@ -192,3 +192,32 @@ witnesses (`tests/mpx3-user`).
   `exit_group` (231), an ELF loader, argv/envp/auxv on the stack (px10),
   SWAPGS and per-CPU state (SMP), an IST for NMI (the window between
   `pax_sysret`'s stack load and `sysretq`).
+
+## The loader (px10)
+
+| module or file | what |
+|---|---|
+| `initramfs/` | a read-only view of the `newc` archive Limine hands over as the first module (Documentation's initramfs buffer format, `cpio(5)`): `check`/`problem` walk it once (NUL padding between archives skipped, `TRAILER!!!` ends one; a compressed archive, a bad magic, a field that is not hex or a size past the end refused by name), `lookup(path)` finds a regular file (one leading `/` dropped from the query, `./` or `/` from the entry), `data`/`size`/`name_*` read it in place, `report` lists it |
+| `elf/` | the ELF64 loader for a static `ET_EXEC` x86-64 file: `refusal` checks the header and every `PT_LOAD` before anything is mapped (`ET_DYN`, `PT_INTERP`, a 32-bit, big-endian or non-x86-64 file, segments misaligned, past the file, below 64 KiB, past `0x7f0000000000`, overlapping or sharing a page with different permissions, each refused by name), `load` maps each segment's pages with its permissions (W → RW, no X → NX) in a fresh user half and copies `p_filesz` bytes, the rest zero; `aux` gives AT_PHDR (`PT_PHDR`, else where the headers land), AT_PHNUM, AT_PHENT, AT_ENTRY |
+| `fpu/` and `../boot/fpu.S` | CR0 (EM and TS clear, MP set), CR4 (OSFXSR, OSXMMEXCPT, and OSXSAVE with XCR0 = x87 \| SSE \| AVX when CPUID has XSAVE and AVX), one area per thread slot from a frame each, a template (FCW 0x037f, MXCSR 0x1f80: Linux's state at execve) copied into a new thread's area, and at every switch XSAVE64 (or FXSAVE64) of the outgoing thread, XRSTOR64 (or FXRSTOR64) of the incoming one; nothing before `fpu.start` |
+| `user/` (px10 additions) | `exec(body, path, argv, envp)`: the file from the initramfs, `elf.refusal`, a fresh space, `elf.load`, a 32-page stack below `0x7ffffffff000` holding the psABI's initial block (argc, argv, envp, the auxiliary vector AT_PHDR … AT_EXECFN, AT_RANDOM's 16 bytes, the strings), and a process thread; `exit_group` (231) |
+| `sched/` (px10 additions) | the record grows to 120 bytes (an ELF process's entry, user stack pointer and name); `create_process`; `run_next` calls `fpu.switch` when the slot changes; a new thread's area is reset to the template |
+| `paging/` (px10 addition) | `map_modules`: each Limine module's own pages, read-only no-execute in the HHDM (memory-map type 6 is left out of the HHDM with the image) |
+| `boot_info/`, `../boot/start.S` (px10) | the module request; `module_count`, `module_addr`, `module_size`, `module_path_byte` |
+| `kmain_loader.lu` | lists the initramfs, runs `/bin/hello one two`, two `hello spin` at once, six refusals and `/bin/wolf-hello` when present, checks every frame came back, halts (`tests/mpx3-loader`) |
+| `../user/elf/hello.S`, `../user/elf/wolf_hello.lu` | the test program (no libc; checks what execve hands it and prints it the same way on Linux) and the gap census's wolf program |
+
+- The programs are built on the host: `tools/mkuser` (hello and its
+  refused variants), `tools/mkwolf-hello` (the wolf program, linked
+  static through a `cc -static` wrapper), `tools/mkinitramfs` (a
+  reproducible archive), `tools/mkimage --conf
+  boot/limine-initramfs.conf --add … initramfs.cpio` (the module).
+- No `region`, no heap: the archive is read in place, a process's pages
+  and stack are frames written through the HHDM before its space is
+  live, and the FPU areas are frames (wolf-lang#611's rule holds).
+- Not yet (the gap to M-PX3, `notes/px10-the-loader.md` §4): `brk`,
+  `arch_prctl(ARCH_SET_FS)` and FS per thread, `mprotect`, anonymous
+  `mmap`, `getrandom`, `readlinkat` of `/proc/self/exe`, the files
+  lane's calls; PIE (a load bias); `PT_INTERP` (M-PX4); AVX-512 state
+  (XCR0 bits 5–7: no PAX host offers it, and a glibc built for
+  x86-64-v4 needs it before its first system call).
