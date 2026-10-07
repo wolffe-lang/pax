@@ -1,8 +1,8 @@
-//! reel — the showcase kernel's stages (px08, the boot reel).
+//! tour — the stages of a tour of the kernel (px08; kmain_tour.lu).
 //!
-//! `kmain_reel` and `kmain_reel_text` walk through what PAX does today,
-//! one stage at a time, each under a heading a viewer can read, with a
-//! pause between stages so the output can be read as it lands. Every
+//! `kmain_tour` and `kmain_tour_text` walk through what PAX does today,
+//! one stage at a time, each under a heading, with a pause between
+//! stages so each heading and its lines can be read as they land. Every
 //! stage is the test suites' own path: the same calls the test kernels
 //! make (kmain, kmain_frames, kmain_paging, kmain_timer, kmain_sched,
 //! kmain_sched_overflow, kmain_text_write), in the same order, and the
@@ -14,7 +14,7 @@
 //!   frame allocator's HHDM offset, as kernel/paging walks them), so the
 //!   permissions stage 3 prints are the bits the processor reads, not
 //!   what the code meant to write.
-//! - **Pauses for the viewer.** Nothing runs during a pause and no
+//! - **Pauses between stages.** Nothing runs during a pause and no
 //!   pause stands in for work; each is labelled `PAUSE` where it is
 //!   called. Before the timer interrupt is live (stages 1-3) a pause
 //!   polls the 8254's channel 0, which `timer.start` has set counting
@@ -25,7 +25,7 @@
 //!   interrupt is live a pause is `timer.wait` until enough ticks have
 //!   been handled; once the scheduler runs it is `sched.sleep` on
 //!   thread 0.
-//! - **`pax_reel_worker`**, the thread body of stage 5: it spins, never
+//! - **`pax_tour_worker`**, the thread body of stage 5: it spins, never
 //!   yields, and writes a line every fifth time the timer switches it
 //!   back in — kernel/schedtest's `pax_t_spin` with a name and a
 //!   slower line rate.
@@ -51,7 +51,7 @@ extern "c" fn pax_inb(port: u16) -> u8
 const PIT_CH0: u16 = 0x40
 const PIT_CTRL: u16 = 0x43
 
-/// Stages in the reel (the heap joins when pax#10 lands).
+/// Stages in the tour (the heap and user mode are not among them).
 const STAGES: int = 5
 
 // Page-table entry bits (Intel SDM vol. 3A §4.5, as kernel/paging).
@@ -79,7 +79,7 @@ fn pit_count() -> u64 {
     (lo as u64) | ((hi as u64) * 256)
 }
 
-/// PAUSE for the viewer, before the timer interrupt is live: `cs`
+/// PAUSE, before the timer interrupt is live: `cs`
 /// hundredths of a second, counted as channel 0's reloads. `timer.start`
 /// must have run (it programs channel 0); interrupts are off.
 pub fn pause_early(cs: u64) {
@@ -94,8 +94,8 @@ pub fn pause_early(cs: u64) {
     }
 }
 
-/// PAUSE for the viewer, the timer interrupt live and the scheduler not
-/// yet started: until `n` more ticks have been handled (interrupts on
+/// PAUSE, the timer interrupt live and the scheduler not yet
+/// started: until `n` more ticks have been handled (interrupts on
 /// only inside each wait, as kmain_timer).
 pub fn pause_ticks(n: u64) {
     let end = timer.ticks() + n
@@ -104,7 +104,7 @@ pub fn pause_ticks(n: u64) {
     }
 }
 
-/// PAUSE for the viewer once the scheduler runs: thread 0 sleeps `n`
+/// PAUSE once the scheduler runs: thread 0 sleeps `n`
 /// ticks (the idle thread halts meanwhile).
 pub fn pause_sleep(n: u64) {
     let (_from, _woke) = sched.sleep(n)
@@ -211,7 +211,7 @@ fn section(pml4: u64, name: str, lo: u64, hi: u64) {
 pub fn stage_boot() {
     log.end()
     log.line("PAX: a kernel written in wolf")
-    // The wolf version is the one kernel/wolf.pin names; tests/reel
+    // The wolf version is the one kernel/wolf.pin names; tests/tour
     // checks the two agree.
     log.line("wolf 0.2.24, target x86_64-unknown-none; every line below is printed by this kernel")
     heading(1, "boot: what Limine handed over")
@@ -254,7 +254,7 @@ pub fn stage_frames() -> u64 {
     let before = frames.free_count()
     let pa = frames.alloc() else 0
     if pa == 0 {
-        panic.fail("reel: no frame for the round trip", 0)
+        panic.fail("tour: no frame for the round trip", 0)
     }
     let mid = frames.free_count()
     let va = pa + frames.hhdm()
@@ -375,7 +375,7 @@ fn name(i: u64) -> str {
 /// Stage 5's thread body: spin, never yield; every EVERY-th time the
 /// timer switches this thread back in, one line under the console lock;
 /// return after LINES lines (boot/sched.S's entry then exits it).
-export fn pax_reel_worker(arg: u64) {
+export fn pax_tour_worker(arg: u64) {
     var last: u64 = 0
     var lines: u64 = 0
     while lines < LINES {
@@ -438,20 +438,20 @@ pub fn stage_threads(pml4: u64, worker: u64) {
     sync.release(sync.console(), s)
 }
 
-/// The closing lines, and a countdown to the finale (a PAUSE for the
-/// viewer, one second a number).
+/// The closing lines, and a countdown to the ending (a PAUSE, one
+/// second a number).
 pub fn closing() {
     log.end()
     log.line("PAX today: Limine boot on BIOS and UEFI, frames, paging, interrupts,")
     log.line("a timer and preemptive threads; a heap and ring 3 too, not shown here.")
     log.line("All in wolf. Next: Linux binaries, unmodified.")
-    pause_sleep(100) // PAUSE for the viewer
+    pause_sleep(100) // PAUSE
     log.end()
-    log.put("finale in 3...")
-    pause_sleep(100) // PAUSE for the viewer
+    log.put("ending in 3...")
+    pause_sleep(100) // PAUSE
     log.put(" 2...")
-    pause_sleep(100) // PAUSE for the viewer
+    pause_sleep(100) // PAUSE
     log.put(" 1...")
-    pause_sleep(100) // PAUSE for the viewer
+    pause_sleep(100) // PAUSE
     log.end()
 }
