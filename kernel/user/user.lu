@@ -35,7 +35,7 @@
 //! user/programs.S's blobs, by number:
 //!
 //!     0 hello  1 segv  2 kread  3 textwrite  4 guard  5 priv
-//!     6 badptr  7 spin1  8 spin2 (both the spin blob)  9 after (hello's)
+//!     6 badptr  7 spin1  8 spin2  9 after (hello's bytes)
 //!
 //! **System calls** (`syscall`, vector PAX_SYSCALL = 0x100 from
 //! boot/user.S): Linux's x86-64 ABI, the psABI's A.2.1 (number in %rax,
@@ -182,7 +182,6 @@ pub fn programs() -> u64 {
 
 /// Program `p`'s blob in user/programs.S's `pax_uprogs` table.
 fn blob(p: u64) -> u64 {
-    if p == 8 { return 7 } // spin2: the spin blob
     if p == 9 { return 0 } // after: hello's
     p
 }
@@ -191,7 +190,7 @@ fn blob(p: u64) -> u64 {
 /// (1), in the kernel's .rodata.
 fn bounds(p: u64, which: int) -> u64 {
     let i = (blob(p) * 2) as int + which
-    // # Safety: pax_uprogs holds 8 pairs; blob(p) < 8 for p < PROGS.
+    // # Safety: pax_uprogs holds 9 pairs; blob(p) < 9 for p < PROGS.
     unsafe { pax_uprogs[i] }
 }
 

@@ -40,13 +40,20 @@
                 user address (0x10), and the stack's top less 8 (8 bytes
                 mapped, then the unmapped page above); exit(14) when all
                 three returned -14 (EFAULT), exit(1) otherwise
-     spin       write(1, "spin: begin\n", 12); 2^29 decrements of a
-                register (no system call, no memory); write(1, "spin:
-                end\n", 10); exit(0) — run twice at once, each must be
-                preempted in ring 3 and resumed
+     spin1, spin2
+                write(1, "spinN: begin\n", 13); a mark of its own
+                ("SPIN11" or "SPIN22") in %r12 and pushed on its own
+                stack; 2^29 decrements of a register (no system call);
+                then both marks checked: write(1, "spinN: end\n", 11)
+                and exit(0) when both hold, exit(3) and no end line when
+                either was lost — run at once, each preempted in ring 3
+                and resumed many times, so a frame resumed in the wrong
+                process (another's registers under its own CR3: the
+                blobs share a layout) or a stack swapped under it shows
 
    pax_uprogs: the blobs' bounds, a [start, end) pair of addresses per
-   blob, in the order kernel/user numbers them (0 hello … 7 spin).
+   blob, in the order kernel/user numbers them (0 hello … 7 spin1, 8
+   spin2).
 
    Written from the Intel SDM vol. 2 (SYSCALL, HLT, MOV from a segment
    register), vol. 3A §4.7 (page-fault error codes), §6.15 (interrupt
@@ -184,31 +191,74 @@ pax_uprog_badptr:
 pax_uprog_badptr_end:
 
         .p2align 4
-pax_uprog_spin:
+pax_uprog_spin1:
         movl    $1, %eax
         movl    $1, %edi
-        leaq    .Lspin_begin(%rip), %rsi
-        movl    $(.Lspin_begin_end - .Lspin_begin), %edx
+        leaq    .Lspin1_begin(%rip), %rsi
+        movl    $(.Lspin1_begin_end - .Lspin1_begin), %edx
         syscall
+        movabsq $0x31314e495053, %r12   /* "SPIN11": this process's mark */
+        pushq   %r12                    /* and on its own stack */
         movl    $0x20000000, %ebx       /* 2^29 */
 1:      decq    %rbx
         jnz     1b
+        movabsq $0x31314e495053, %rax
+        movl    $3, %edi                /* a mark lost: exit 3, no end line */
+        cmpq    %rax, %r12
+        jne     2f
+        cmpq    %rax, (%rsp)
+        jne     2f
         movl    $1, %eax
         movl    $1, %edi
-        leaq    .Lspin_end(%rip), %rsi
-        movl    $(.Lspin_end_end - .Lspin_end), %edx
+        leaq    .Lspin1_end(%rip), %rsi
+        movl    $(.Lspin1_end_end - .Lspin1_end), %edx
         syscall
         xorl    %edi, %edi
-        movl    $60, %eax
+2:      movl    $60, %eax
         syscall
         ud2
-.Lspin_begin:
-        .ascii  "spin: begin\n"
-.Lspin_begin_end:
-.Lspin_end:
-        .ascii  "spin: end\n"
-.Lspin_end_end:
-pax_uprog_spin_end:
+.Lspin1_begin:
+        .ascii  "spin1: begin\n"
+.Lspin1_begin_end:
+.Lspin1_end:
+        .ascii  "spin1: end\n"
+.Lspin1_end_end:
+pax_uprog_spin1_end:
+
+        .p2align 4
+pax_uprog_spin2:
+        movl    $1, %eax
+        movl    $1, %edi
+        leaq    .Lspin2_begin(%rip), %rsi
+        movl    $(.Lspin2_begin_end - .Lspin2_begin), %edx
+        syscall
+        movabsq $0x32324e495053, %r12   /* "SPIN22" */
+        pushq   %r12
+        movl    $0x20000000, %ebx
+1:      decq    %rbx
+        jnz     1b
+        movabsq $0x32324e495053, %rax
+        movl    $3, %edi
+        cmpq    %rax, %r12
+        jne     2f
+        cmpq    %rax, (%rsp)
+        jne     2f
+        movl    $1, %eax
+        movl    $1, %edi
+        leaq    .Lspin2_end(%rip), %rsi
+        movl    $(.Lspin2_end_end - .Lspin2_end), %edx
+        syscall
+        xorl    %edi, %edi
+2:      movl    $60, %eax
+        syscall
+        ud2
+.Lspin2_begin:
+        .ascii  "spin2: begin\n"
+.Lspin2_begin_end:
+.Lspin2_end:
+        .ascii  "spin2: end\n"
+.Lspin2_end_end:
+pax_uprog_spin2_end:
 
         .section .rodata
         .p2align 3
@@ -221,6 +271,7 @@ pax_uprogs:
         .quad   pax_uprog_guard, pax_uprog_guard_end
         .quad   pax_uprog_priv, pax_uprog_priv_end
         .quad   pax_uprog_badptr, pax_uprog_badptr_end
-        .quad   pax_uprog_spin, pax_uprog_spin_end
+        .quad   pax_uprog_spin1, pax_uprog_spin1_end
+        .quad   pax_uprog_spin2, pax_uprog_spin2_end
 
         .section .note.GNU-stack, "", @progbits
