@@ -1,0 +1,384 @@
+#!/usr/bin/env bash
+# tests/mpx3-user — user mode (px09, M-PX3's first step): programs run in
+# ring 3 in address spaces of their own, call the kernel through
+# `syscall` with Linux's x86-64 numbering (write 1, exit 60; anything
+# else -ENOSYS), print through the serial console and exit; a fault in
+# ring 3 kills the program by name and the kernel goes on.
+#
+#   tests/mpx3-user [--images DIR | --no-boot] [--firmware bios|uefi|both]
+#                   [--tier native|release|both]
+#
+# Three kernels, from kernel/: kmain_user (U1-U6), kmain_user_smap (U7),
+# kmain_user_smep (U8). Assertions, per tier (native, release) and
+# firmware (bios, uefi):
+#   U0 build: tools/build-kernel's object assertions for all three; the
+#      ELF defines pax_syscall_entry, pax_enter_user, pax_peek_user,
+#      pax_sysret, pax_isr_common and pax_interrupt (T); in `objdump -d`
+#      pax_isr_common still has `mov %rax,%rsp` right after the call to
+#      pax_interrupt and still ends `iretq`, and between the two it
+#      compares the frame's vector with PAX_SYSCALL (0x100) and jumps to
+#      pax_sysret, which ends `sysretq`.
+#   U1 setup: `user: syscall star 0x0010000800000000 lstar 0x<L> fmask
+#      0x0000000000044700, efer.sce 1, smep 1, smap 1`, the MSRs read back
+#      after writing them, with L = pax_syscall_entry's address in the
+#      ELF (STAR: SYSCALL's CS 0x08, SYSRET's base 0x10, so CS 0x23 and
+#      SS 0x1b in ring 3; FMASK clears TF IF DF NT AC). SMEP and SMAP are
+#      required on: CI's and kasumi's TCG `-cpu max` emulate both and
+#      hasu's KVM passes the host's.
+#   U2 hello: its address space line,
+#        user: hello pid <p> cr3 0x<c> code 0x0000000000400000 1 pages r-x, stack 0x00007fffffffb000 to 0x00007ffffffff000 rw- nx, guard 0x00007fffffffa000, kernel half <k> of <k> entries shared
+#      (k >= 4: the HHDM, the image, the APIC page and the thread
+#      stacks' slot at least; cr3 differs from the kernel's), then the
+#      program's own line `hello from ring 3: cpl 3` (the 3 computed in
+#      ring 3 from CS and stored on the user stack), the kernel's
+#      `user: hello pid <p> syscall 39: -ENOSYS` and `… syscall 500:
+#      -ENOSYS`, and `user: hello pid <p> exit 0 after <r> runs` (the
+#      program exits non-zero if either write returned short or either
+#      unknown number came back other than -38).
+#   U3 faults, each killing the program by name, the next one running:
+#        user: <name> pid <p> killed: <exception> vector <v> error 0x<e> rip 0x<r>[ cr2 0x<a>] after <r> runs
+#      segv: page fault 14, error 0x4 (a user read, not present), cr2 0;
+#      kread: page fault, error 0x5 (present: a supervisor page), cr2 the
+#      kernel image 0xffffffff80000000; textwrite: page fault, error 0x7
+#      (a user write to a present read-only page), cr2 0x400000 (its own
+#      code); guard: page fault, error 0x6, cr2 in the guard page
+#      [0x7fffffffa000, 0x7fffffffb000); priv: general protection 13,
+#      error 0, no cr2 (`hlt` at CPL 3). Every rip lies in the code page.
+#   U4 badptr: `write(1, p, 16)` with a kernel-half pointer, an unmapped
+#      user pointer and a stack pointer whose 16 bytes run off the top of
+#      the stack: three `user: badptr pid <p> write fd 1 buf 0x<b> len
+#      16: -EFAULT` lines with those three bufs, nothing written by the
+#      program, and `exit 14` (it exits 14 only when all three came back
+#      -14, Linux's EFAULT; drift from the contract, argued in
+#      notes/px09-user-mode.md §2).
+#   U5 two at once: spin1 and spin2 run together, each writing `spin:
+#      begin` and `spin: end` around a busy loop with no system call in
+#      it: four lines, both `exit 0 after <r> runs` with r >= 2 (each
+#      preempted in ring 3 and resumed there, with the other process's
+#      CR3 and kernel stack in between), and at the end `user: ticks in
+#      ring 3 <n>` with n > 0.
+#   U6 after: `after` (hello's blob under another name) prints its hello
+#      line and exits 0 after every fault above: the kernel survived.
+#      Every batch's `user: frames free <A> before, <B> with <n>
+#      processes, <C> after` has B = A - 16n (twelve frames for the
+#      address space, four for the kernel stack) and C = A; the log
+#      ends `halt` and qemu-halt holds the machine halted.
+#   U7 smap: kmain_user_smap reads a user byte in ring 0 without STAC:
+#      `smap: ring 0 reads user 0x0000000000400000 without stac` then
+#      `PANIC page fault vector 14 error 0x0000000000000001 rip 0x<r>
+#      rsp 0x<s> frame 0x<f> cr2 0x0000000000400000`, halted.
+#   U8 smep: kmain_user_smep jumps to a user page in ring 0:
+#      `smep: ring 0 jumps to user 0x0000000000400000` then `PANIC page
+#      fault vector 14 error 0x0000000000000011 rip 0x0000000000400000 …
+#      cr2 0x0000000000400000`, halted.
+#
+# --images DIR boots ISOs and ELFs built earlier by this script (DIR
+# holds <tier>/<kernel>.{iso,elf}): any host with QEMU and nm, no wolf
+# needed. Without it the script builds with $PAX_WOLF (linux); --no-boot
+# stops after the build (U0), leaving them in build/mpx3-user.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+
+images= legs=both tiers=both noboot=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "usage: tests/mpx3-user [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+need nm objdump
+
+kernels="kmain_user kmain_user_smap kmain_user_smep"
+work=$PAX_BUILD/mpx3-user
+runs=$PAX_BUILD/mpx3-user-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+HEX='0x[0-9a-f]{16}'
+
+sym() { nm "$1" | awk -v s="$2" '$3 == s { print "0x" $1; exit }'; }
+
+# U0's ELF half. Prints the reason on failure.
+user_ok() { # elf
+    local elf=$1 s after last cmp sys
+    for s in pax_syscall_entry pax_enter_user pax_peek_user pax_sysret pax_isr_common; do
+        [ -n "$(sym "$elf" "$s")" ] || { echo "no symbol $s"; return 1; }
+    done
+    nm "$elf" | awk '$3 == "pax_interrupt" && $2 == "T" { f = 1 } END { exit !f }' \
+        || { echo "pax_interrupt is not a global function (T)"; return 1; }
+    objdump -d --no-show-raw-insn "$elf" > "$elf.dis" || { echo "objdump -d"; return 1; }
+    body() { awk -v f="<$1>:" '$2 == f { on = 1; next } on && NF == 0 { exit } on { sub(/^[^\t]*\t/, ""); print }' "$elf.dis" | tr -s ' '; }
+    after=$(body pax_isr_common | awk 'seen { print; exit } /^call.*<pax_interrupt>/ { seen = 1 }')
+    [ "$after" = 'mov %rax,%rsp' ] || { echo "pax_isr_common: after the call to pax_interrupt comes '$after', not 'mov %rax,%rsp'"; return 1; }
+    last=$(body pax_isr_common | tail -n 1)
+    [ "$last" = iretq ] || { echo "pax_isr_common ends '$last', not iretq"; return 1; }
+    cmp=$(body pax_isr_common | awk 'seen && /^cmpq \$0x100,0x78\(%rsp\)/ { c = 1; next } c { print; exit } /^mov %rax,%rsp/ { seen = 1 }')
+    case $cmp in je*'<pax_sysret>') ;; *) echo "pax_isr_common does not compare the vector (0x78(%rsp)) with 0x100 and je <pax_sysret> after resuming (got '$cmp')"; return 1 ;; esac
+    sys=$(body pax_sysret | tail -n 1)
+    [ "$sys" = sysretq ] || [ "$sys" = 'sysretq ' ] || { echo "pax_sysret ends '$sys', not sysretq"; return 1; }
+    echo "pax_isr_common resumes the returned frame (mov %rax,%rsp), sends vector 0x100 to pax_sysret (ends sysretq), ends iretq; pax_syscall_entry, pax_enter_user, pax_peek_user defined"
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        for k in $kernels; do
+            log=$work/$tier/$k.build-kernel.log
+            if [ ! -f "$PAX_ROOT/kernel/$k.lu" ]; then
+                bad "U0 $tier $k: no kernel/$k.lu"
+                continue
+            fi
+            if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/$k.lu" "$work/$tier" 2>"$log"); then
+                cat "$log" >&2
+                if why=$(user_ok "$elf"); then
+                    say "PASS U0 $tier $k: build-kernel's assertions; $why"
+                else
+                    bad "U0 $tier $k: $why"
+                fi
+                "$PAX_ROOT/tools/mkimage" "$elf" "$work/$tier/$k.iso" >/dev/null || bad "$tier $k: mkimage"
+                say "built $tier $k: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/$k.iso")"
+            else
+                cat "$log" >&2
+                bad "U0 $tier $k: tools/build-kernel"
+            fi
+        done
+    done
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx3-user build (U0): PASS (no boot: --no-boot)" || say "mpx3-user build: FAIL"
+        exit "$fail"
+    fi
+fi
+
+record() { # tier kernel leg status
+    ran=$((ran + 1))
+    printf '%s %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" \
+        "$(sha256_of "$images/$1/$2.iso")" >> "$runs"
+}
+halt_boot() { # tier kernel leg marker
+    local tier=$1 k=$2 leg=$3 marker=$4 hrc=0
+    log=$PAX_BUILD/mpx3-user-$tier-$k-$leg.serial.log
+    elf=$images/$tier/$k.elf
+    local iso=$images/$tier/$k.iso
+    rm -f "$log" "$log.verdict" "$log".cmd*
+    if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+        say "no image or ELF: $iso"
+        return 3
+    fi
+    "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 240 \
+        --elf "$elf" --marker "$marker" "$iso" >"$log.verdict" 2>&1 || hrc=$?
+    record "$tier" "$k" "$leg" "$hrc"
+    return "$hrc"
+}
+halted() { tail -n 1 "$log.verdict"; }
+not_halted() { grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"; }
+tail_lines() { serial_norm "$log" | awk 'NF' | tail -n "${1:-3}" | sed 's/^/  /' >&2; }
+
+# The kill line of program $1 in the normalised log $2, or nothing.
+killed() { grep -E "^user: $1 pid [0-9]+ killed: " "$2" | tail -n 1; }
+# The exit code of program $1 (the last exit line), or nothing.
+exited() { sed -n -E "s/^user: $1 pid [0-9]+ exit ([0-9]+) after [0-9]+ runs\$/\\1/p" "$2" | tail -n 1; }
+runs_of() { sed -n -E "s/^user: $1 pid [0-9]+ (exit [0-9]+|killed: .*) after ([0-9]+) runs\$/\\2/p" "$2" | tail -n 1; }
+
+# U3: one fault case. name exception vector error cr2-check(ERE on the
+# cr2 field, or "none") norm
+fault_case() {
+    local name=$1 exc=$2 vec=$3 err=$4 cr2re=$5 norm=$6 l why= rip cr2
+    l=$(killed "$name" "$norm")
+    if [ -z "$l" ]; then
+        echo "no kill line for $name (exit '$(exited "$name" "$norm")')"
+        return 1
+    fi
+    printf '%s\n' "$l" | grep -Eq "^user: $name pid [0-9]+ killed: $exc vector $vec error $err rip $HEX( cr2 $HEX)? after [0-9]+ runs\$" \
+        || why+=" '$l' is not $exc vector $vec error $err;"
+    rip=$(printf '%s\n' "$l" | sed -n -E 's/.* rip (0x[0-9a-f]{16}).*/\1/p')
+    cr2=$(printf '%s\n' "$l" | sed -n -E 's/.* cr2 (0x[0-9a-f]{16}).*/\1/p')
+    [ -n "$rip" ] && [ $((rip)) -ge $((0x400000)) ] && [ $((rip)) -lt $((0x401000)) ] || why+=" rip $rip outside the code page;"
+    if [ "$cr2re" = none ]; then
+        [ -z "$cr2" ] || why+=" a cr2 ($cr2) on a non-page fault;"
+    else
+        printf '%s\n' "$cr2" | grep -Eq "^($cr2re)\$" || why+=" cr2 '$cr2' is not $cr2re;"
+    fi
+    [ -z "$why" ] || { echo "${why# }"; return 1; }
+    echo "$name: $exc error $err rip $rip${cr2:+ cr2 $cr2}"
+}
+
+# U6's frames lines: every one has B = A - 16n and C = A. Prints a
+# summary or the reason.
+frames_check() { # norm
+    awk '
+        /^user: frames free [0-9]+ before, [0-9]+ with [0-9]+ processes, [0-9]+ after$/ {
+            n++; a = $4; b = $6; k = $8; c = $10
+            if (b != a - 16 * k) why = why " batch " n ": " b " with " k " processes, not " a " - " 16 * k ";"
+            if (c != a) why = why " batch " n ": " c " after, not " a ";"
+            got = got " " a "/" b "/" c
+        }
+        END {
+            if (n != 9) why = why " " n " frames lines, not 9;"
+            if (why != "") { print "no:" why; exit 1 }
+            print "ok" got
+        }' "$1"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        # --- U1-U6: kmain_user ----------------------------------------------
+        hrc=0; halt_boot "$tier" kmain_user "$leg" 'halt' || hrc=$?
+        if [ "$hrc" = 3 ]; then
+            for s in U1 U2 U3 U4 U5 U6; do bad "$s $tier kmain_user $leg: no image"; done
+        else
+            norm=$log.norm; serial_norm "$log" > "$norm"
+            # U1
+            why=
+            l=$(grep -E "^user: syscall star $HEX lstar $HEX fmask $HEX, efer\.sce [01], smep [01], smap [01]\$" "$norm" | tail -n 1)
+            entry=$(sym "$elf" pax_syscall_entry)
+            if [ -z "$l" ]; then why=" no setup line;"; else
+                set -- $l
+                [ "$4" = 0x0010000800000000 ] || why+=" star $4, not 0x0010000800000000;"
+                [ "$6" = "$entry" ] || why+=" lstar $6, not pax_syscall_entry $entry;"
+                [ "${8%,}" = 0x0000000000044700 ] || why+=" fmask ${8%,}, not 0x0000000000044700;"
+                [ "${10%,}" = 1 ] || why+=" efer.sce ${10%,};"
+                [ "${12%,}" = 1 ] || why+=" smep ${12%,} (required on: -cpu max, KVM on hasu);"
+                [ "${14}" = 1 ] || why+=" smap ${14} (required on);"
+            fi
+            if [ -z "$why" ]; then
+                say "PASS U1 $tier kmain_user $leg: star 0x0010000800000000, lstar = pax_syscall_entry $entry, fmask 0x44700, EFER.SCE, SMEP and SMAP on"
+            else
+                bad "U1 $tier kmain_user $leg:$why"; grep -E '^user: syscall' "$norm" | sed 's/^/  /' >&2
+            fi
+            # U2
+            why=
+            sp=$(grep -E "^user: hello pid [0-9]+ cr3 $HEX code 0x0000000000400000 1 pages r-x, stack 0x00007fffffffb000 to 0x00007ffffffff000 rw- nx, guard 0x00007fffffffa000, kernel half [0-9]+ of [0-9]+ entries shared\$" "$norm" | head -n 1)
+            if [ -z "$sp" ]; then why+=" no address-space line for hello;"; else
+                set -- $sp; hpid=$4 hcr3=$6 k1=${22} k2=${24}
+                [ "$k1" = "$k2" ] && [ "$k1" -ge 4 ] || why+=" kernel half $k1 of $k2 shared (want all, >= 4);"
+                kcr3=$(sed -n -E 's/^paging: limine cr3 0x[0-9a-f]{16}, pax cr3 (0x[0-9a-f]{16}), .*/\1/p' "$norm" | head -n 1)
+                [ -n "$kcr3" ] && [ "$hcr3" != "$kcr3" ] || why+=" hello's cr3 $hcr3 is the kernel's ($kcr3);"
+                grep -qx 'hello from ring 3: cpl 3' "$norm" || why+=" no 'hello from ring 3: cpl 3' line;"
+                grep -qx "user: hello pid $hpid syscall 39: -ENOSYS" "$norm" || why+=" no -ENOSYS line for 39;"
+                grep -qx "user: hello pid $hpid syscall 500: -ENOSYS" "$norm" || why+=" no -ENOSYS line for 500;"
+                [ "$(exited hello "$norm")" = 0 ] || why+=" hello exit '$(exited hello "$norm")', not 0;"
+            fi
+            if [ -z "$why" ]; then
+                say "PASS U2 $tier kmain_user $leg: hello (pid $hpid, cr3 $hcr3, kernel half $k1 of $k2 shared) wrote 'hello from ring 3: cpl 3', 39 and 500 -ENOSYS, exit 0"
+            else
+                bad "U2 $tier kmain_user $leg:$why"; grep -E '^(user: hello|hello)' "$norm" | sed 's/^/  /' >&2
+            fi
+            # U3
+            why= got=
+            for c in "segv|page fault|14|0x0000000000000004|0x0000000000000000" \
+                     "kread|page fault|14|0x0000000000000005|0xffffffff80000000" \
+                     "textwrite|page fault|14|0x0000000000000007|0x0000000000400[0-9a-f]{3}" \
+                     "guard|page fault|14|0x0000000000000006|0x00007fffffffa[0-9a-f]{3}" \
+                     "priv|general protection|13|0x0000000000000000|none"; do
+                IFS='|' read -r n e v r c2 <<<"$c"
+                if v1=$(fault_case "$n" "$e" "$v" "$r" "$c2" "$norm"); then got+="; $v1"; else why+=" $n: $v1;"; fi
+            done
+            if [ -z "$why" ]; then
+                say "PASS U3 $tier kmain_user $leg: killed by name, the kernel went on${got}"
+            else
+                bad "U3 $tier kmain_user $leg:$why"; grep -E '^user: [a-z]+ pid [0-9]+ (killed|exit)' "$norm" | sed 's/^/  /' >&2
+            fi
+            # U4
+            why=
+            bpid=$(sed -n -E 's/^user: badptr pid ([0-9]+) cr3 .*/\1/p' "$norm" | head -n 1)
+            for b in 0xffffffff80000000 0x0000000000000010 0x00007fffffffeff8; do
+                grep -qx "user: badptr pid $bpid write fd 1 buf $b len 16: -EFAULT" "$norm" || why+=" no -EFAULT line for buf $b;"
+            done
+            [ "$(exited badptr "$norm")" = 14 ] || why+=" badptr exit '$(exited badptr "$norm")', not 14;"
+            # nothing the program wrote reached the console: between its
+            # space line and its exit line, only the kernel's lines
+            stray=$(awk -v p="$bpid" '$0 ~ "^user: badptr pid " p " cr3 " { on = 1; next } on && $0 ~ "^user: badptr pid " p " exit " { exit } on && $0 !~ "^user: badptr " { print }' "$norm" | head -n 3)
+            [ -z "$stray" ] || why+=" bytes reached the console: '$stray';"
+            if [ -z "$why" ]; then
+                say "PASS U4 $tier kmain_user $leg: write(1, kernel half / unmapped / off the stack's top, 16) each -EFAULT, nothing written, exit 14"
+            else
+                bad "U4 $tier kmain_user $leg:$why"; grep -E '^user: badptr' "$norm" | sed 's/^/  /' >&2
+            fi
+            # U5
+            why=
+            [ "$(grep -cx 'spin: begin' "$norm")" = 2 ] || why+=" $(grep -cx 'spin: begin' "$norm") 'spin: begin' lines, not 2;"
+            [ "$(grep -cx 'spin: end' "$norm")" = 2 ] || why+=" $(grep -cx 'spin: end' "$norm") 'spin: end' lines, not 2;"
+            for n in spin1 spin2; do
+                [ "$(exited $n "$norm")" = 0 ] || why+=" $n exit '$(exited $n "$norm")';"
+                r=$(runs_of $n "$norm")
+                [ -n "$r" ] && [ "$r" -ge 2 ] || why+=" $n ran $r times (< 2: never preempted in ring 3 and resumed);"
+            done
+            # both began before either ended: they ran at once
+            order=$(grep -E -x 'spin: (begin|end)' "$norm" | awk '{ printf "%s ", $2 }')
+            [ "$order" = 'begin begin end end ' ] || why+=" spin lines '$order', not both begins before both ends;"
+            tk=$(sed -n -E 's/^user: ticks in ring 3 ([0-9]+)$/\1/p' "$norm" | tail -n 1)
+            [ -n "$tk" ] && [ "$tk" -gt 0 ] || why+=" ticks in ring 3 '$tk';"
+            if [ -z "$why" ]; then
+                say "PASS U5 $tier kmain_user $leg: spin1 $(runs_of spin1 "$norm") runs, spin2 $(runs_of spin2 "$norm") runs, both exit 0; $tk ticks taken in ring 3"
+            else
+                bad "U5 $tier kmain_user $leg:$why"; grep -E '^(spin:|user: spin|user: ticks)' "$norm" | sed 's/^/  /' >&2
+            fi
+            # U6
+            why=
+            [ "$(exited after "$norm")" = 0 ] || why+=" after exit '$(exited after "$norm")', not 0;"
+            [ "$(grep -cx 'hello from ring 3: cpl 3' "$norm")" = 2 ] || why+=" $(grep -cx 'hello from ring 3: cpl 3' "$norm") hello lines, not 2 (hello and after);"
+            if v=$(frames_check "$norm"); then fr=${v#ok }; else why+=" frames:${v#no:};"; fi
+            [ "$hrc" = 0 ] || why+=" not halted ($(not_halted));"
+            "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'user: after pid [0-9]+ exit 0 after [0-9]+ runs' \
+                'user: frames free [0-9]+ before, [0-9]+ with 1 processes, [0-9]+ after' 'user: ticks in ring 3 [0-9]+' 'halt' >/dev/null \
+                || why+=" the log does not end after's exit, its frames, the ring-3 ticks, halt;"
+            if [ -z "$why" ]; then
+                say "PASS U6 $tier kmain_user $leg: after exit 0 after every fault; frames A/B/C per batch$fr; $(halted)"
+            else
+                bad "U6 $tier kmain_user $leg:$why"; tail_lines 6
+            fi
+        fi
+
+        # --- U7: SMAP; U8: SMEP ----------------------------------------------
+        for k in kmain_user_smap kmain_user_smep; do
+            if [ "$k" = kmain_user_smap ]; then
+                u=U7 pre='smap: ring 0 reads user 0x0000000000400000 without stac' err=0x0000000000000001 riprx=$HEX
+            else
+                u=U8 pre='smep: ring 0 jumps to user 0x0000000000400000' err=0x0000000000000011 riprx=0x0000000000400000
+            fi
+            hrc=0; halt_boot "$tier" $k "$leg" 'PANIC .*' || hrc=$?
+            if [ "$hrc" = 3 ]; then bad "$u $tier $k $leg: no image"; continue; fi
+            why=
+            [ "$hrc" = 0 ] || why+=" not halted ($(not_halted));"
+            "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" "$pre" \
+                "PANIC page fault vector 14 error $err rip $riprx rsp $HEX frame $HEX cr2 0x0000000000400000" >/dev/null \
+                || why+=" the log does not end '$pre', PANIC page fault error $err … cr2 0x400000;"
+            if [ -z "$why" ]; then
+                say "PASS $u $tier $k $leg: $pre: PANIC page fault error $err cr2 0x400000; $(halted)"
+            else
+                bad "$u $tier $k $leg:$why"; tail_lines 3
+            fi
+        done
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx3-user: PASS" || say "mpx3-user: FAIL"
+exit "$fail"
