@@ -29,6 +29,9 @@
    handed wolf each request's address (wolf-lang#529). kw10 retires
    limine.S: kernel/boot_info names each request with `extern "c" let`
    (wolf-lang kw09), which is why each is global.
+   px10 adds a seventh, the module request (revision 0: the modules a
+   Limine configuration names with `module_path`, px10's initramfs;
+   PROTOCOL.md's Module Feature).
 
    Not listed in kernel/wolf.pkg: the boot code is the consumer's, and
    links wolf's object (K6(b)); tools/build-kernel assembles it.
@@ -78,6 +81,11 @@ limine_hhdm_request:
         .globl limine_executable_address_request
 limine_executable_address_request:      /* px02: the image's physical base */
         .quad LIMINE_MAGIC_0, LIMINE_MAGIC_1, 0x71ba76863cc55f63, 0xb2644a48c516a487
+        .quad 0, 0
+
+        .globl limine_module_request
+limine_module_request:                  /* px10: the initramfs, a module */
+        .quad LIMINE_MAGIC_0, LIMINE_MAGIC_1, 0x3e7e279702be32af, 0xca1c4f3bd1280cee
         .quad 0, 0
 
         .globl limine_base_revision
