@@ -1,0 +1,447 @@
+//! elf — the ELF64 loader for a static x86-64 executable (px10, M-PX3's
+//! third piece).
+//!
+//! Written from the System V gABI's "Object Files" and "Program Loading"
+//! chapters, `elf(5)`, and the x86-64 psABI (§4: EM_X86_64 = 62, the
+//! page size; §5.1 program loading). No Linux source; no other kernel's
+//! source.
+//!
+//! **What it loads**: an `ET_EXEC` (2) file, ELFCLASS64, ELFDATA2LSB,
+//! EV_CURRENT, EM_X86_64, with 56-byte program headers and no
+//! `PT_INTERP`: a static, non-PIE executable, which is what `cc -static
+//! -no-pie` and wolf's static link make. Every `PT_LOAD` is mapped at
+//! its own `p_vaddr` (nothing is relocated) in the process's user half,
+//! one fresh zeroed frame per page, with the segment's permissions: R
+//! is a present page, W adds RW, and a segment without X is NX. Its
+//! first `p_filesz` bytes are copied from the file; the rest of
+//! `p_memsz` stays zero (the `.bss`). Other segments (`PT_NOTE`,
+//! `PT_TLS`, `PT_GNU_STACK`, `PT_GNU_RELRO`, `PT_GNU_PROPERTY`, …) are
+//! userspace's business and ignored; `PT_PHDR`, when present, names
+//! AT_PHDR.
+//!
+//! **What it refuses, by name, before anything is mapped** (`ElfError`,
+//! `why`): a file too small for its header, no `\x7fELF`, a 32-bit or
+//! big-endian file, a version other than 1, a machine other than
+//! x86-64, `ET_DYN` (a PIE or a shared object: PIE is later, it needs a
+//! load bias), any other type than `ET_EXEC`, a program-header size
+//! other than 56 or a table outside the file (or more than 64 entries),
+//! no `PT_LOAD`, a `PT_INTERP` (a dynamic program: it needs `ld.so`,
+//! M-PX4's), a segment whose `p_vaddr` and `p_offset` disagree modulo
+//! the page size, `p_filesz > p_memsz`, file bytes past the file's end,
+//! memory below 64 KiB (Linux's default `vm.mmap_min_addr`, a black-box
+//! fact) or past 0x7f0000000000 (PAX keeps the top of the user half for
+//! the stack), two segments that share a page with different
+//! permissions, and segments that overlap. A page two segments share
+//! with the same permissions is mapped once and holds both.
+//!
+//! The file is read in place (the initramfs's pages, read-only in the
+//! HHDM); the process's pages are written through the HHDM too, before
+//! its address space is ever live. No region, no heap.
+
+use frames
+use paging
+
+/// Why a file was refused.
+pub error ElfError = {too_small, not_elf, not_64, not_le, bad_version, not_x86_64, pie, not_exec, bad_phdrs, no_load, interp, misaligned, past_file, filesz, too_low, too_high, perm_conflict, overlap, out_of_memory}
+
+const EHDR: u64 = 64
+const PHENT: u64 = 56
+const MAX_PHNUM: u64 = 64
+const PAGE: u64 = 4096
+const LOW: u64 = 0x10000 // 64 KiB: Linux's default vm.mmap_min_addr
+const HIGH: u64 = 0x00007f0000000000 // the stack lives above
+
+const ET_EXEC: u64 = 2
+const ET_DYN: u64 = 3
+const EM_X86_64: u64 = 62
+const PT_LOAD: u64 = 1
+const PT_INTERP: u64 = 3
+const PT_PHDR: u64 = 6
+const PF_X: u64 = 1
+const PF_W: u64 = 2
+
+/// `n` bytes (1, 2, 4 or 8) at offset `o` of the file at `f`, little
+/// endian. The caller has checked o + n <= the file's size.
+fn le(f: u64, o: u64, n: u64) -> u64 {
+    var v: u64 = 0
+    var i = n
+    while i > 0 {
+        i -= 1
+        // # Safety: f + o + i lies inside the file (the caller's
+        // check), which is the initramfs's read-only pages.
+        let b = unsafe { ((f + o + i) as *u8).read_volatile() } as u64
+        v = v * 256 + b
+    }
+    v
+}
+
+/// Program header `i`'s field at byte `off` (`n` bytes).
+fn ph(f: u64, i: u64, off: u64, n: u64) -> u64 {
+    le(f, le(f, 32, 8) + i * PHENT + off, n)
+}
+
+fn page_down(a: u64) -> u64 {
+    a - a % PAGE
+}
+
+fn page_up(a: u64) -> u64 {
+    (a + PAGE - 1) - (a + PAGE - 1) % PAGE
+}
+
+/// The flags `paging.map_user` takes for a segment's `p_flags`.
+fn flags_of(pf: u64) -> u64 {
+    var fl: u64 = 0
+    if pf & PF_W != 0 {
+        fl = fl | paging.writable()
+    }
+    if pf & PF_X == 0 {
+        fl = fl | paging.no_exec()
+    }
+    fl
+}
+
+/// Check the file at `f` (`size` bytes): the header, the program
+/// headers, every `PT_LOAD`. Returns the number of program headers.
+pub fn check(f: u64, size: u64) -> u64 ! ElfError {
+    if size < EHDR {
+        return too_small
+    }
+    if le(f, 0, 4) != 0x464c457f {
+        return not_elf
+    }
+    if le(f, 4, 1) != 2 {
+        return not_64
+    }
+    if le(f, 5, 1) != 1 {
+        return not_le
+    }
+    if le(f, 6, 1) != 1 || le(f, 20, 4) != 1 {
+        return bad_version
+    }
+    if le(f, 18, 2) != EM_X86_64 {
+        return not_x86_64
+    }
+    let t = le(f, 16, 2)
+    if t == ET_DYN {
+        return pie
+    }
+    if t != ET_EXEC {
+        return not_exec
+    }
+    let phoff = le(f, 32, 8)
+    let phentsize = le(f, 54, 2)
+    let phnum = le(f, 56, 2)
+    if phentsize != PHENT || phnum == 0 || phnum > MAX_PHNUM || phoff > size || phnum * PHENT > size - phoff {
+        return bad_phdrs
+    }
+    var loads: u64 = 0
+    var i: u64 = 0
+    while i < phnum {
+        let pt = ph(f, i, 0, 4)
+        if pt == PT_INTERP {
+            return interp
+        }
+        if pt == PT_LOAD {
+            loads += 1
+            let pf = ph(f, i, 4, 4)
+            let off = ph(f, i, 8, 8)
+            let va = ph(f, i, 16, 8)
+            let fsz = ph(f, i, 32, 8)
+            let msz = ph(f, i, 40, 8)
+            if va % PAGE != off % PAGE {
+                return misaligned
+            }
+            if fsz > msz {
+                return filesz
+            }
+            if off > size || fsz > size - off {
+                return past_file
+            }
+            if va < LOW {
+                return too_low
+            }
+            if va >= HIGH || msz > HIGH - va {
+                return too_high
+            }
+            // Every earlier PT_LOAD: no byte overlap; a shared page only
+            // with the same permissions.
+            var j: u64 = 0
+            while j < i {
+                if ph(f, j, 0, 4) == PT_LOAD && msz > 0 {
+                    let vb = ph(f, j, 16, 8)
+                    let mb = ph(f, j, 40, 8)
+                    if mb > 0 {
+                        if va < vb + mb && vb < va + msz {
+                            return overlap
+                        }
+                        if page_down(va) < page_up(vb + mb) && page_down(vb) < page_up(va + msz) {
+                            if flags_of(ph(f, j, 4, 4)) != flags_of(pf) {
+                                return perm_conflict
+                            }
+                        }
+                    }
+                }
+                j += 1
+            }
+        }
+        i += 1
+    }
+    if loads == 0 {
+        return no_load
+    }
+    phnum
+}
+
+/// The frame mapped at user page `va` in `pml4`, or a fresh zeroed one
+/// mapped there with `fl` (0 out of memory).
+fn page_at(pml4: u64, va: u64, fl: u64) -> u64 {
+    let have = paging.translate(pml4, va) else 0
+    if have != 0 {
+        return have - have % PAGE
+    }
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        return 0
+    }
+    let v = pa + frames.hhdm()
+    var i: u64 = 0
+    while i < PAGE / 8 {
+        // # Safety: the frame just taken, through the HHDM.
+        unsafe { ((v + i * 8) as *u64).write_volatile(0) }
+        i += 1
+    }
+    let r = paging.map_user(pml4, va, pa, fl) else 99
+    if r == 99 {
+        frames.free(pa)
+        return 0
+    }
+    pa
+}
+
+/// Copy `n` bytes from `src` (the file, in the HHDM) to `dst` (a frame,
+/// in the HHDM): words where both are 8-aligned (they agree modulo 8,
+/// since p_vaddr and p_offset agree modulo the page), bytes elsewhere.
+fn copy_bytes(dst: u64, src: u64, n: u64) {
+    var i: u64 = 0
+    while i < n && (dst + i) % 8 != 0 {
+        // # Safety: [src, src + n) is inside the file, [dst, dst + n)
+        // inside one frame (the caller's bounds).
+        unsafe { ((dst + i) as *u8).write_volatile(((src + i) as *u8).read_volatile()) }
+        i += 1
+    }
+    while i + 8 <= n && (src + i) % 8 == 0 {
+        // # Safety: as above, both 8-aligned.
+        unsafe { ((dst + i) as *u64).write_volatile(((src + i) as *u64).read_volatile()) }
+        i += 8
+    }
+    while i < n {
+        // # Safety: as above.
+        unsafe { ((dst + i) as *u8).write_volatile(((src + i) as *u8).read_volatile()) }
+        i += 1
+    }
+}
+
+/// Load the file at `f` (`size` bytes, `refusal` 0) into the user half
+/// of `pml4` (a fresh space, not live): every `PT_LOAD` mapped and
+/// filled. Returns the entry point, or 0 out of frames (what was mapped
+/// is left for the caller's `paging.free_user`).
+pub fn load(f: u64, size: u64, pml4: u64) -> u64 {
+    let phnum = check(f, size) else 0
+    if phnum == 0 {
+        return 0
+    }
+    let hhdm = frames.hhdm()
+    var i: u64 = 0
+    while i < phnum {
+        if ph(f, i, 0, 4) == PT_LOAD {
+            let fl = flags_of(ph(f, i, 4, 4))
+            let off = ph(f, i, 8, 8)
+            let va = ph(f, i, 16, 8)
+            let fsz = ph(f, i, 32, 8)
+            let msz = ph(f, i, 40, 8)
+            var pg = page_down(va)
+            while pg < va + msz {
+                let pa = page_at(pml4, pg, fl)
+                if pa == 0 {
+                    return 0
+                }
+                // The file's bytes that land on this page.
+                let lo = if pg > va { pg } else { va }
+                let top = va + fsz
+                let hi = if pg + PAGE < top { pg + PAGE } else { top }
+                if lo < hi {
+                    copy_bytes(pa + hhdm + (lo - pg), f + off + (lo - va), hi - lo)
+                }
+                pg += PAGE
+            }
+        }
+        i += 1
+    }
+    le(f, 24, 8)
+}
+
+/// The auxiliary vector's facts about the file at `f` (checked):
+/// AT_PHDR (`which` 0: `PT_PHDR`'s `p_vaddr`, else the address the
+/// loaded program headers land at, else 0), AT_PHNUM (1), AT_PHENT (2),
+/// AT_ENTRY (3).
+pub fn aux(f: u64, which: int) -> u64 {
+    let phnum = le(f, 56, 2)
+    if which == 1 {
+        return phnum
+    }
+    if which == 2 {
+        return PHENT
+    }
+    if which == 3 {
+        return le(f, 24, 8)
+    }
+    let phoff = le(f, 32, 8)
+    var i: u64 = 0
+    while i < phnum {
+        if ph(f, i, 0, 4) == PT_PHDR {
+            return ph(f, i, 16, 8)
+        }
+        i += 1
+    }
+    i = 0
+    while i < phnum {
+        if ph(f, i, 0, 4) == PT_LOAD {
+            let off = ph(f, i, 8, 8)
+            let fsz = ph(f, i, 32, 8)
+            if off <= phoff && phoff + phnum * PHENT <= off + fsz {
+                return ph(f, i, 16, 8) + (phoff - off)
+            }
+        }
+        i += 1
+    }
+    0
+}
+
+/// The segments' line for the log: `<n> PT_LOAD: <va>-<end> <rwx> …`,
+/// written by the caller piece by piece (`seg`).
+pub fn loads(f: u64) -> u64 {
+    let phnum = le(f, 56, 2)
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < phnum {
+        if ph(f, i, 0, 4) == PT_LOAD {
+            n += 1
+        }
+        i += 1
+    }
+    n
+}
+
+/// The `k`th `PT_LOAD`'s field: 0 its p_vaddr, 1 its end (p_vaddr +
+/// p_memsz), 2 its p_flags; 0 when there is no `k`th.
+pub fn seg(f: u64, k: u64, which: int) -> u64 {
+    let phnum = le(f, 56, 2)
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < phnum {
+        if ph(f, i, 0, 4) == PT_LOAD {
+            if n == k {
+                if which == 0 {
+                    return ph(f, i, 16, 8)
+                }
+                if which == 1 {
+                    return ph(f, i, 16, 8) + ph(f, i, 40, 8)
+                }
+                return ph(f, i, 4, 4)
+            }
+            n += 1
+        }
+        i += 1
+    }
+    0
+}
+
+/// A refusal's code (0 none) for the file at `f` (`size` bytes): its
+/// row's tag as a number, so it can be passed and named (an error row
+/// is not a value type, [type.err.alias.transparent]).
+pub fn refusal(f: u64, size: u64) -> u64 {
+    let _n = check(f, size) else |e| match e {
+        too_small => { return 1 },
+        not_elf => { return 2 },
+        not_64 => { return 3 },
+        not_le => { return 4 },
+        bad_version => { return 5 },
+        not_x86_64 => { return 6 },
+        pie => { return 7 },
+        not_exec => { return 8 },
+        bad_phdrs => { return 9 },
+        no_load => { return 10 },
+        interp => { return 11 },
+        misaligned => { return 12 },
+        past_file => { return 13 },
+        filesz => { return 14 },
+        too_low => { return 15 },
+        too_high => { return 16 },
+        perm_conflict => { return 17 },
+        overlap => { return 18 },
+        out_of_memory => { return 19 },
+    }
+    0
+}
+
+/// A refusal code's name, as the log writes it.
+pub fn why(c: u64) -> str {
+    if c == 1 {
+        return "too small for an ELF header"
+    }
+    if c == 2 {
+        return "not an ELF file"
+    }
+    if c == 3 {
+        return "not ELFCLASS64 (a 32-bit file)"
+    }
+    if c == 4 {
+        return "not little-endian"
+    }
+    if c == 5 {
+        return "not ELF version 1"
+    }
+    if c == 6 {
+        return "not for x86-64 (e_machine)"
+    }
+    if c == 7 {
+        return "ET_DYN: a PIE or shared object (PIE is later)"
+    }
+    if c == 8 {
+        return "not ET_EXEC"
+    }
+    if c == 9 {
+        return "bad program headers"
+    }
+    if c == 10 {
+        return "no PT_LOAD"
+    }
+    if c == 11 {
+        return "PT_INTERP: a dynamic program (needs ld.so)"
+    }
+    if c == 12 {
+        return "a PT_LOAD whose p_vaddr and p_offset disagree modulo the page"
+    }
+    if c == 13 {
+        return "a PT_LOAD past the file's end"
+    }
+    if c == 14 {
+        return "a PT_LOAD with p_filesz > p_memsz"
+    }
+    if c == 15 {
+        return "a PT_LOAD below 64 KiB"
+    }
+    if c == 16 {
+        return "a PT_LOAD past 0x7f0000000000"
+    }
+    if c == 17 {
+        return "two PT_LOADs share a page with different permissions"
+    }
+    if c == 18 {
+        return "two PT_LOADs overlap"
+    }
+    if c == 19 {
+        return "out of frames"
+    }
+    ""
+}
