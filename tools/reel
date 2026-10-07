@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# reel — build, boot and time the boot reel (px08: kernel/kmain_reel.lu,
+# kernel/kmain_reel_text.lu, kernel/reel/, boot/limine-reel.conf).
+#
+#   tools/reel build [--tier native|release] OUTDIR
+#       (a Linux host with the pinned wolf: $PAX_WOLF or `wolf`)
+#       Builds both reel kernels and two ISOs, each holding both kernels
+#       behind Limine's menu:
+#         OUTDIR/pax-reel.iso    default entry 1, finale (a): stack overflow
+#         OUTDIR/pax-reel-b.iso  default entry 2, finale (b): write to text
+#       and prints each ISO's sha256, also written to OUTDIR/SHA256SUMS.
+#       The tier defaults to native.
+#
+#   tools/reel boot [--firmware bios|uefi] ISO
+#       (any host with qemu-system-x86_64; the launcher for nomad-1)
+#       Boots ISO with the serial console on this terminal: Limine's menu
+#       (arrow keys and Enter choose; 5 s timeout), then the kernel's
+#       lines. The machine halts on the finale's PANIC; Ctrl-C ends QEMU.
+#       Prints the QEMU command line first, so it can be typed by hand.
+#
+#   tools/reel time [--firmware bios|uefi] [--accel tcg|kvm] ISO LOG
+#       Boots ISO headless and writes the serial console to LOG and, to
+#       LOG.times, each line with the seconds from QEMU's start to its
+#       arrival; stops at the first `PANIC` line (or after 120 s) and
+#       kills QEMU. Exit 0 when a PANIC line came, 1 otherwise.
+#
+# The machine everywhere: q35, `-cpu max`, 256 MiB, no NIC, BIOS
+# (SeaBIOS) or UEFI (OVMF / Homebrew's edk2, found as tools/qemu-run
+# finds it). QEMU is $PAX_QEMU, default `qemu-system-x86_64` on PATH.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+
+usage() { sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit "${1:-0}"; }
+[ $# -ge 1 ] || usage 2
+cmd=$1; shift
+
+# The UEFI firmware's pflash drive argument (tools/lib.sh's find_ovmf).
+ovmf_drive() {
+    local code vars
+    read -r code vars <<<"$(find_ovmf)" || true
+    [ -n "${code:-}" ] || die "no UEFI firmware found (set PAX_OVMF_CODE)"
+    printf 'if=pflash,format=raw,unit=0,readonly=on,file=%s\n' "$code"
+}
+
+case $cmd in
+build)
+    tier=native out=
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --tier) tier=$2; shift 2 ;;
+            -*)     die "unknown option: $1" ;;
+            *)      [ -z "$out" ] || die "one OUTDIR only"; out=$1; shift ;;
+        esac
+    done
+    [ -n "$out" ] || usage 2
+    case $tier in native) tflag= ;; release) tflag=--release ;; *) die "--tier takes native or release" ;; esac
+    "$PAX_ROOT/tools/fetch-limine" >&2
+    mkdir -p "$out"
+    out=$(cd "$out" && pwd)
+    a=$("$PAX_ROOT/tools/build-kernel" $tflag --src "$PAX_ROOT/kernel/kmain_reel.lu" "$out")
+    b=$("$PAX_ROOT/tools/build-kernel" $tflag --src "$PAX_ROOT/kernel/kmain_reel_text.lu" "$out")
+    sed 's/^default_entry: 1$/default_entry: 2/' "$PAX_ROOT/boot/limine-reel.conf" > "$out/limine-reel-b.conf"
+    grep -qx 'default_entry: 2' "$out/limine-reel-b.conf" || die "boot/limine-reel.conf has no 'default_entry: 1' line"
+    "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-reel.conf" --add "$b" pax-text "$a" "$out/pax-reel.iso" >/dev/null
+    "$PAX_ROOT/tools/mkimage" --conf "$out/limine-reel-b.conf" --add "$b" pax-text "$a" "$out/pax-reel-b.iso" >/dev/null
+    (cd "$out" && for f in pax-reel.iso pax-reel-b.iso; do printf '%s  %s\n' "$(sha256_of "$f")" "$f"; done) > "$out/SHA256SUMS"
+    say "built $tier with $("${PAX_WOLF:-wolf}" --version | head -n 1)"
+    cat "$out/SHA256SUMS"
+    ;;
+boot)
+    fw=bios iso=
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --firmware) fw=$2; shift 2 ;;
+            -*)         die "unknown option: $1" ;;
+            *)          [ -z "$iso" ] || die "one ISO only"; iso=$1; shift ;;
+        esac
+    done
+    [ -n "$iso" ] && [ -f "$iso" ] || die "usage: reel boot [--firmware bios|uefi] ISO"
+    qemu=${PAX_QEMU:-qemu-system-x86_64}
+    need "$qemu"
+    set -- "$qemu" -machine q35 -cpu max -m 256M -display none -serial stdio -monitor none -nic none -no-reboot -cdrom "$iso"
+    case $fw in
+        bios) ;;
+        uefi) d=$(ovmf_drive) || exit 2; set -- "$@" -drive "$d" ;;
+        *)    die "--firmware takes bios or uefi" ;;
+    esac
+    printf '%s\n' "$*" >&2
+    exec "$@"
+    ;;
+time)
+    fw=bios accel=tcg iso= log=
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --firmware) fw=$2; shift 2 ;;
+            --accel)    accel=$2; shift 2 ;;
+            -*)         die "unknown option: $1" ;;
+            *)          if [ -z "$iso" ]; then iso=$1; elif [ -z "$log" ]; then log=$1; else die "ISO LOG only"; fi; shift ;;
+        esac
+    done
+    [ -n "$log" ] && [ -f "$iso" ] || die "usage: reel time [--firmware bios|uefi] [--accel tcg|kvm] ISO LOG"
+    qemu=${PAX_QEMU:-qemu-system-x86_64}
+    need "$qemu" python3
+    set -- "$qemu" -machine q35 -cpu max -m 256M -accel "$accel" -display none -serial stdio -monitor none -nic none -no-reboot -cdrom "$iso"
+    case $fw in
+        bios) ;;
+        uefi) d=$(ovmf_drive) || exit 2; set -- "$@" -drive "$d" ;;
+        *)    die "--firmware takes bios or uefi" ;;
+    esac
+    mkdir -p "$(dirname "$log")"
+    printf 'cmd: %s\nqemu: %s\nfirmware: %s\naccel: %s\n' "$*" "$("$qemu" --version | head -n 1)" "$fw" "$accel" > "$log.meta"
+    # QEMU's stdout (the serial console) into a reader that stamps each
+    # line on arrival and kills QEMU once a PANIC line has come.
+    python3 - "$log" "$@" <<'PY'
+import os, re, subprocess, sys, time
+log, argv = sys.argv[1], sys.argv[2:]
+t0 = time.monotonic()
+p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+esc = re.compile(rb'\x1b\[[0-9;?=<>]*[A-Za-z]|\x1b[()][A-Za-z0-9]|\x1b[c78DEHM=>]')
+ok, buf = False, b''
+os.set_blocking(p.stdout.fileno(), False)
+with open(log, 'wb') as raw, open(log + '.times', 'w') as tl:
+    while True:
+        if time.monotonic() - t0 > 120:
+            break
+        try:
+            chunk = p.stdout.read()
+        except BlockingIOError:
+            chunk = None
+        if chunk:
+            raw.write(chunk); raw.flush()
+            buf += chunk
+            while b'\n' in buf:
+                line, buf = buf.split(b'\n', 1)
+                text = esc.sub(b'', line).replace(b'\r', b'').decode('utf-8', 'replace')
+                tl.write('%8.2f  %s\n' % (time.monotonic() - t0, text)); tl.flush()
+                if text.startswith('PANIC '):
+                    ok = True
+            if ok:
+                break
+        elif p.poll() is not None:
+            break
+        else:
+            time.sleep(0.01)
+p.kill(); p.wait()
+sys.exit(0 if ok else 1)
+PY
+    ;;
+-h|--help) usage 0 ;;
+*) usage 2 ;;
+esac
