@@ -1,0 +1,160 @@
+//! member: false
+// kmain_loader.lu — the ELF loader and the initramfs (px10, tests/
+// mpx3-loader L1-L7). The kernel switches to PAX's paging structures
+// (the initramfs module mapped read-only), lists the initramfs, loads
+// its tables, starts the timer, the FPU state (kernel/fpu), the
+// scheduler and SYSCALL, enables interrupts, and runs static x86-64
+// Linux executables read from the initramfs, unmodified, each in an
+// address space of its own with the psABI's initial stack:
+//   /bin/hello one two      every check of user/elf/hello.S (argv,
+//                           envp, the auxiliary vector, the FPU's
+//                           initial state, data, bss, rodata, xmm);
+//                           exit_group 0
+//   /bin/hello spin 1 and /bin/hello spin 2, at once
+//                           each holds its own xmm registers across
+//                           many preemptions: the FPU state is
+//                           switched with the thread
+//   /bin/hello-pie, /bin/hello-dyn, /bin/hello32, /bin/hello-arm,
+//   /etc/motd, /bin/nothing refused by name, nothing kept
+//   /bin/wolf-hello         when the initramfs holds it: a wolf program
+//                           linked static (glibc), run until PAX lacks
+//                           what it asks for (the gap census)
+// It waits for each batch and checks every frame came back. Then
+// interrupts off, the timer stopped, `halt`:
+//
+//     PAX loader: static ELF from the initramfs
+//     paging: limine cr3 0x<A>, pax cr3 0x<B>, <P> table frames
+//     initramfs: module 0x<m>, <b> bytes, <n> entries
+//     initramfs: file <size> bin/hello
+//     …
+//     fpu: xsave 1, xcr0 0x…7, area 832 bytes, cr0.em 0, cr0.ts 0, cr4.osfxsr 1, cr4.osxsave 1
+//     sched: main 0, idle 1, 16 slots, …
+//     user: syscall star … smep 1, smap 1
+//     user: exec pid 2 cr3 0x<c> entry 0x… rsp 0x… argc 3 envc 3, 4 PT_LOAD: …, stack 32 pages below 0x00007ffffffff000
+//     argc 3
+//     argv[0] /bin/hello
+//     …
+//     xmm ok
+//     user: hello pid 2 exit_group 0 after <r> runs
+//     user: frames free <A> before, <B> with 1 processes, <A> after
+//     … (the spinners, the refusals, wolf-hello)
+//     user: ticks in ring 3 <n>
+//     halt
+use apic
+use fpu
+use frames
+use initramfs
+use interrupts
+use log
+use paging
+use panic
+use sched
+use serial
+use sync
+use timer
+use user
+
+extern "c" let pax_user_thread: *u8
+
+const ENV: str = "HOME=/ TERM=linux PAX=1"
+
+/// The body ELF processes run (kernel/user's export).
+fn body() -> u64 {
+    // # Safety: the address of kernel/user's export; nothing is read.
+    unsafe { pax_user_thread as u64 }
+}
+
+/// Write the frames line for a batch of `n` processes.
+fn frames_line(before: u64, during: u64, n: u64) {
+    let after = frames.free_count()
+    let s = sync.acquire(sync.console())
+    log.put("user: frames free ")
+    log.dec(before as int)
+    log.put(" before, ")
+    log.dec(during as int)
+    log.put(" with ")
+    log.dec(n as int)
+    log.put(" processes, ")
+    log.dec(after as int)
+    log.put(" after")
+    log.end()
+    sync.release(sync.console(), s)
+}
+
+/// Run `path` with `argv` (and ENV), wait for it, write the frames line.
+/// A refused `path` starts nothing (its line says why).
+fn run(path: str, argv: str) {
+    let saved = sync.irq_save()
+    let before = frames.free_count()
+    let id = user.exec(body(), path, argv, ENV)
+    let during = frames.free_count()
+    sync.irq_restore(saved)
+    sched.wait_all()
+    frames_line(before, during, if id == 0 { 0 } else { 1 })
+}
+
+/// Run two at once (the FPU's witness).
+fn run2(path: str, a1: str, a2: str) {
+    let saved = sync.irq_save()
+    let before = frames.free_count()
+    let i1 = user.exec(body(), path, a1, ENV)
+    let i2 = user.exec(body(), path, a2, ENV)
+    let during = frames.free_count()
+    sync.irq_restore(saved)
+    sched.wait_all()
+    var n: u64 = 0
+    if i1 != 0 {
+        n += 1
+    }
+    if i2 != 0 {
+        n += 1
+    }
+    frames_line(before, during, n)
+}
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX loader: static ELF from the initramfs")
+    frames.start()
+    let limine = paging.cr3()
+    let before = frames.free_count()
+    let pml4 = paging.start()
+    paging.report(limine, before)
+    initramfs.report()
+    initramfs.require()
+    interrupts.start()
+    apic.start(pml4)
+    timer.start()
+    fpu.start()
+    fpu.report()
+    sched.start(pml4)
+    sched.report()
+    user.start()
+    user.report()
+    sync.enable()
+
+    run("/bin/hello", "/bin/hello one two")
+    run2("/bin/hello", "/bin/hello spin 1", "/bin/hello spin 2")
+    run("/bin/hello-pie", "/bin/hello-pie")
+    run("/bin/hello-dyn", "/bin/hello-dyn")
+    run("/bin/hello32", "/bin/hello32")
+    run("/bin/hello-arm", "/bin/hello-arm")
+    run("/etc/motd", "/etc/motd")
+    run("/bin/nothing", "/bin/nothing")
+    if initramfs.lookup("/bin/wolf-hello") != initramfs.end() {
+        run("/bin/wolf-hello", "/bin/wolf-hello")
+    } else {
+        log.line("loader: no /bin/wolf-hello in the initramfs")
+    }
+
+    let s = sync.acquire(sync.console())
+    log.put("user: ticks in ring 3 ")
+    log.dec(user.ticks() as int)
+    log.end()
+    sync.release(sync.console(), s)
+
+    let _off = sync.irq_save()
+    timer.stop()
+    log.line("halt")
+    panic.halt()
+}
