@@ -20,6 +20,9 @@
 //!   image (executable and modules: an alias of text through the HHDM
 //!   would be writable, which defeats W^X) and the framebuffer (it wants
 //!   write-combining, a PAT choice for the lane that draws).
+//! - px10: each Limine module's own pages (the initramfs), read-only
+//!   no-execute at their HHDM addresses: type 6 holds modules as well
+//!   as the image, and a module is data the kernel only reads.
 //!
 //! Nothing is mapped in the lower half and nothing is user-accessible
 //! in the kernel's own structures. px09 adds the user half: a process's
@@ -719,7 +722,33 @@ pub fn build() -> u64 {
     if have {
         map_run(pml4, rl, rh)
     }
+    map_modules(pml4)
     pml4
+}
+
+/// px10: each Limine module's pages, at their HHDM addresses, read-only
+/// no-execute, 4 KiB pages. A module lies in memory-map type 6
+/// (executable and modules), which the HHDM leaves out with the image,
+/// and every 4 KiB it covers is its own (PROTOCOL.md, `struct
+/// limine_file`), so no page here is mapped twice and none is
+/// writable: the initramfs is read in place and never written.
+fn map_modules(pml4: u64) {
+    let hhdm = frames.hhdm()
+    let n = boot_info.module_count()
+    var m: u64 = 0
+    while m < n {
+        let va = boot_info.module_addr(m)
+        let size = boot_info.module_size(m)
+        if va < hhdm || va % PAGE != 0 {
+            panic.fail("paging: a module is not a page in the HHDM:", va)
+        }
+        var off: u64 = 0
+        while off < size {
+            must_map(pml4, va + off, va - hhdm + off, NX)
+            off += PAGE
+        }
+        m += 1
+    }
 }
 
 /// Switch to the structures at `pml4`: NX on (EFER.NXE; panic without
