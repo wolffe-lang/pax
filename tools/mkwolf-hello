@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# mkwolf-hello — build user/elf/wolf_hello.lu with the pinned wolf into a
+# static x86-64 Linux executable, the gap census's subject (px10).
+#
+#   tools/mkwolf-hello OUT
+#
+# `wolf build --release` links through the `cc` it finds first on PATH;
+# a wrapper that adds `-static` is put first, exactly the census's shape
+# (px04, tools/census/inside/stage.sh), so the program is a static glibc
+# executable, ET_EXEC, no PT_INTERP. The host's glibc decides what the
+# start-up code does: a glibc built for x86-64-v4 (CachyOS's, kasumi's)
+# puts AVX-512 instructions in the static start-up, so its binary needs
+# a CPU with AVX-512 whatever the kernel; CI's Ubuntu glibc is baseline
+# x86-64. Prints `wolf-hello <sha256> <bytes>` and the libc it linked.
+# wolf is $PAX_WOLF. Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkwolf-hello OUT"
+out=$1
+wolf=${PAX_WOLF:-wolf}
+need "$wolf" cc
+mkdir -p "$(dirname "$out")"
+out=$(cd "$(dirname "$out")" && pwd)/$(basename "$out")
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-wolf-hello.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+mkdir -p "$w/bin"
+real=$(command -v cc)
+printf '#!/bin/sh\nexec %s -static "$@"\n' "$real" > "$w/bin/cc"
+chmod +x "$w/bin/cc"
+cp "$PAX_ROOT/user/elf/wolf_hello.lu" "$w/wolf_hello.lu"
+(cd "$w" && PATH="$w/bin:$PATH" "$wolf" build --release --no-cache wolf_hello.lu -o "$out") >&2 \
+    || die "wolf build of wolf_hello.lu"
+printf 'wolf-hello %s %s\n' "$(sha256_of "$out")" "$(wc -c < "$out" | tr -d ' ')"
+printf 'linked against: %s\n' "$("$real" -print-file-name=libc.a)"
