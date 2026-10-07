@@ -129,10 +129,128 @@ a `#GP` on `sysretq`/`iretq` from a selector or RFLAGS bit I got wrong,
 or a `#PF` with error 0x15 if a user-half table is supervisor. The
 falsifier is the first boot's serial log, kept in §4 either way.
 
+### §3 against what was measured
+
+| predicted | measured |
+|---|---|
+| P1: 12 frames a process + 4 for its kernel stack, all back after `wait_all` | as predicted: every batch `A / A - 16n / A` on every leg, three hosts (e.g. `65047 / 65031 / 65047`, the pair `65047 / 65015 / 65047`) |
+| P2: hello line, write = len, 39 and 500 → -38, exit 0 | as predicted |
+| P3: segv 0x4 cr2 0; kread 0x5; textwrite 0x7 cr2 0x400000; guard 0x6 in 0x7fffffffa000–afff; priv #GP 0 | as predicted (guard cr2 `0x00007fffffffaff0`; rips 0x400000, 0x40000a, 0x400007, 0x400000, 0x400000) |
+| P4: three -EFAULT, nothing written, exit 14 | as predicted |
+| P5: two spinners each switched in ≥ 2 times, exit 0 | as predicted: 54–60 runs each under TCG (215–236 ring-3 ticks), 6–7 under KVM (22–24 ticks) |
+| P6: SMEP and SMAP on in all three places; U7 error 0x1, U8 0x11 rip 0x400000 | as predicted on CI QEMU 8.2.2 TCG, kasumi 11.1.1 TCG, hasu 11.1.0 KVM |
+| P7: every existing suite unchanged | **wrong once**: `tests/mpx1` A6 copies `kernel/` and `boot/` to build its spin variant and the new `../user/programs.S` was not there (kasumi gauntlet at `f3f0fa1`: mpx1 20 PASS 8 FAIL, `notes/px09/kasumi-gauntlet-f3f0fa1.summary`). Fixed by copying `user/` too (the test's assertions unchanged); green since |
+| first build fails on a refusal | **right, the shape guessed wrong**: `shared` and `spawn` are reserved keywords (px07 had noted `spawn`), then an unused `u64` value, then `str` comparison needs the hosted runtime (programs go by number). `notes/px09/kasumi-first-build.out` |
+| first boot does not reach the hello line (a #GP on the return to ring 3, or #PF 0x15) | **wrong**: the first boot that built passed every assertion, U1–U8, both tiers, BIOS and UEFI (kasumi, `~/lanes/px09/out/boot1-first.out` `4f626da9…`) |
+
+Not predicted: GNU grep reads a serial log holding a NUL as binary and
+answers "binary file matches" instead of the line; under plant A (the
+kernel image written to the console) U1–U3 went red for that reason
+alone (run 37686356366, before the rebase). `tests/mpx3-user` now greps
+with `-a` (`1a837bf`), and plant A was re-run on the fixed test: only
+U4–U6 red (R2 below).
+
 ## 4. Evidence index
 
-(filled as it lands)
+### Red then green
+
+- **Red** at `128355e` (the test and its CI job, no kernel): run
+  **37690204213**, job 113028128778 (log `f7ee1f03…`): 0 PASS, 38 FAIL,
+  0 SKIP lines (U0 ×6 "no kernel/kmain_user*.lu", U1–U8 "no image").
+  Before the rebase onto px06 the same tree was red in run 37677944220,
+  job 112986175039 (`c9eb6ec`), 0/38/0.
+- **Green** at `8a7a37a` (before the rebase): run **37681206949**,
+  attempt 2: mpx3-user 38 PASS (job 113013553505); mkw 16, mpx1 26,
+  mpx2-frames 44, mpx2-paging 26, mpx2-interrupts 34, mpx2-sched 32,
+  proof 4, census 3, macos-run 2 PASS; 0 FAIL, 0 SKIP lines. Attempt 1's
+  mpx2-sched and mpx2-frames jobs, and the red run's mpx2-sched, hung in
+  `apt-get update` (the last line `Get:5 … noble-security InRelease`,
+  then nothing until the cancel): the runner's mirror, not a test.
+- **Green at the head**: see §5.
+
+### The planted breaks (each pushed alone, CI run of its own)
+
+- **A** `b2b0e1a`: `write` checks no user pointer. Run **37690385812**,
+  job 113028741911 (log `64cff4b4…`): 26 PASS, 12 FAIL, 0 SKIP lines:
+  U4, U5, U6 red on all four legs (the kernel writes its own image to
+  the console, then reads 0x10 in ring 0: `PANIC page fault … cr2
+  0x0000000000000010`), U0–U3, U7, U8 green. Reverted `3048a93`.
+- **B** `3cb590e`: RSP0 written at the first switch only. Run
+  **37692653466**, job 113036422375 (log `64090179…`): 34 PASS, 4 FAIL,
+  0 SKIP lines: only U5, all four legs (`spin1 exit 3`, its mark lost;
+  spin2 killed `invalid opcode` at 0x400069, its frame resumed with the
+  other process's registers). Reverted `197fb4f`. The same plant on
+  kasumi first: `notes/px09/kasumi-tcg-native-bios-kmain_user-plantB-rsp0-once.serial.log`.
+
+### Runs off CI
+
+- **kasumi** (QEMU 11.1.1 TCG, strict `PAX_REQUIRE_UEFI=1`,
+  `WOLF_PAIRING_REQUIRE_SIBLING=1`, lupin present), every suite on the
+  `git archive` of one commit:
+  - `8a7a37a`: all rc 0, 0 FAIL, 0 SKIP lines
+    (`notes/px09/kasumi-gauntlet-8a7a37a.summary`);
+  - `197fb4f` (rebased on px06's `bc86ea5`, the code of the head): proof
+    2, mkw 16, mpx1 26, mpx2-frames 44, mpx2-paging 26, mpx2-interrupts
+    34, mpx2-sched 32, mpx2-heap 56, mpx3-user 38 PASS; all rc 0, 0 FAIL,
+    0 SKIP lines (`notes/px09/kasumi-gauntlet-197fb4f.summary`
+    `84070966…`; images `b7a5a697…`).
+- **hasu** (nix-shell QEMU 11.1.0, **KVM**, i7-12700KF with smep and
+  smap), the kasumi images by `--images`:
+  - `8a7a37a`: mpx3-user 4 rounds × 12 boots (32 PASS each), mkw 12,
+    mpx1 12, mpx2-frames 16, mpx2-paging 4, mpx2-interrupts 20,
+    mpx2-sched 8: **120/120 boots, all accel=kvm**, 0 FAIL, 0 SKIP
+    (`notes/px09/hasu-kvm-8a7a37a.log`);
+  - `197fb4f`: the same plus mpx2-heap 24: **144/144 boots, all
+    accel=kvm**, 0 FAIL, 0 SKIP (`notes/px09/hasu-kvm-197fb4f.log`
+    `73038635…`).
+
+### Ring 3, the serial log (kasumi TCG, native, BIOS; `notes/px09/kasumi-tcg-native-bios-kmain_user.serial.log`; KVM's in `hasu-kvm-native-bios-kmain_user.serial.log`)
+
+    PAX user: ring 3
+    user: syscall star 0x0010000800000000 lstar 0xffffffff800003ac fmask 0x0000000000044700, efer.sce 1, smep 1, smap 1
+    user: hello pid 2 cr3 0x0000000000117000 code 0x0000000000400000 1 pages r-x, stack 0x00007fffffffb000 to 0x00007ffffffff000 rw- nx, guard 0x00007fffffffa000, kernel half 4 of 4 entries shared
+    hello from ring 3: cpl 3
+    user: hello pid 2 syscall 39: -ENOSYS
+    user: hello pid 2 syscall 500: -ENOSYS
+    user: hello pid 2 exit 0 after 1 runs
+    user: frames free 65047 before, 65031 with 1 processes, 65047 after
+    user: segv pid 3 killed: page fault vector 14 error 0x0000000000000004 rip 0x0000000000400000 cr2 0x0000000000000000 after 1 runs
+    user: kread pid 4 killed: page fault vector 14 error 0x0000000000000005 rip 0x000000000040000a cr2 0xffffffff80000000 after 1 runs
+    user: textwrite pid 5 killed: page fault vector 14 error 0x0000000000000007 rip 0x0000000000400007 cr2 0x0000000000400000 after 1 runs
+    user: guard pid 6 killed: page fault vector 14 error 0x0000000000000006 rip 0x0000000000400000 cr2 0x00007fffffffaff0 after 1 runs
+    user: priv pid 7 killed: general protection vector 13 error 0x0000000000000000 rip 0x0000000000400000 after 1 runs
+    user: badptr pid 8 write fd 1 buf 0xffffffff80000000 len 16: -EFAULT
+    user: badptr pid 8 write fd 1 buf 0x0000000000000010 len 16: -EFAULT
+    user: badptr pid 8 write fd 1 buf 0x00007fffffffeff8 len 16: -EFAULT
+    user: badptr pid 8 exit 14 after 1 runs
+    spin1: begin
+    spin2: begin
+    spin2: end
+    user: spin2 pid 10 exit 0 after 59 runs
+    spin1: end
+    user: spin1 pid 9 exit 0 after 60 runs
+    hello from ring 3: cpl 3
+    user: after pid 11 exit 0 after 1 runs
+    user: ticks in ring 3 236
+    halt
+
+(space and frames lines between batches elided; the file has them all.)
+
+### Filed
+
+Nothing new: every wolf limitation met was already open (#526 no inline
+asm, #577, #579, #598, #611) or a documented refusal (reserved
+keywords; `str` comparison on the freestanding target).
 
 ## 5. Done-when
 
-(filled at the end)
+- Branch `px09` on origin, rebased on pax trunk `bc86ea5` (px06 merged);
+  PR wolffe-lang/pax#12, open, unmerged.
+- CI green at the head: the run id is in the PR body (the head is this
+  note's commit; the kernel code is `197fb4f`'s).
+- Close nothing. To close: none (no pax issue names this work).
+- Worktrees: kasumi `~/lanes/px09/` and hasu `~/lanes/px09/` hold the
+  lane's clones, trees and evidence; `build/` and the gauntlet trees
+  pruned at the end. One stray: the first `scp` to hasu wrote
+  `~/lanes/px09-hasu-kvm.sh` outside the lane's directory; it was moved
+  into `~/lanes/px09/` at once (no `rm`).
