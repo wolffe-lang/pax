@@ -1,0 +1,527 @@
+//! user — ring 3 (px09, M-PX3's first step): the SYSCALL MSRs, SMEP and
+//! SMAP, a process's address space, the way in, the system calls and
+//! the faults that kill.
+//!
+//! **The MSRs** (`start`; Intel SDM vol. 3A §5.8.8, vol. 4 for the
+//! addresses; AMD64 APM vol. 2 §6.1.1): IA32_EFER.SCE (bit 0) enables
+//! SYSCALL; STAR = 0x0010_0008 << 32, so SYSCALL loads CS 0x08 and SS
+//! 0x10 (kernel/gdt's kernel code and data) and SYSRETQ loads CS 0x10 +
+//! 16 = 0x20 and SS 0x10 + 8 = 0x18, each with RPL 3 (0x23, 0x1b:
+//! kernel/gdt's user code and data, kw10 put them in SYSRET's order);
+//! LSTAR = boot/user.S's `pax_syscall_entry`; FMASK = 0x44700 clears TF
+//! (8), IF (9), DF (10), NT (14) and AC (18) on entry, so the kernel
+//! runs with interrupts off, string operations forward and no access to
+//! user pages until STAC says so.
+//!
+//! **SMEP and SMAP** (SDM vol. 3A §4.6.1; CPUID.(EAX=7,ECX=0):EBX bit 7
+//! and bit 20): set in CR4 (bits 20 and 21) when the CPU has them, and
+//! reported (`report`). With SMEP the kernel cannot execute a user page;
+//! with SMAP it cannot read or write one except between STAC and CLAC,
+//! which only boot/user.S's `pax_peek_user` issues, for `write`'s copy.
+//! kmain_user_smap and kmain_user_smep are the witnesses.
+//!
+//! **A process** is a PML4 from `paging.new_space` (the kernel half
+//! shared, the user half its own) holding its program's bytes at CODE
+//! (0x400000), mapped read-execute user, as many pages as the blob
+//! needs; a 16 KiB stack below STACK_TOP (0x7ffffffff000), read-write,
+//! no-execute, user; and nothing else in the user half, so the page
+//! below the stack (0x7fffffffa000) is a guard, and so is the page above
+//! it. `load` builds one (12 frames for a one-page program: the PML4,
+//! two PDPTs, two PDs, two PTs, one code page, four stack pages);
+//! kernel/sched's `create_user` gives it to a new thread, whose body is
+//! `pax_user_thread`: it enters ring 3 at CODE with RSP STACK_TOP by
+//! `iretq` (boot/user.S's `pax_enter_user`). The thread's death, by
+//! `exit` or by a fault, frees it (sched's `reap`). The programs are
+//! user/programs.S's blobs, by number:
+//!
+//!     0 hello  1 segv  2 kread  3 textwrite  4 guard  5 priv
+//!     6 badptr  7 spin1  8 spin2 (both the spin blob)  9 after (hello's)
+//!
+//! **System calls** (`syscall`, vector PAX_SYSCALL = 0x100 from
+//! boot/user.S): Linux's x86-64 ABI, the psABI's A.2.1 (number in %rax,
+//! arguments in %rdi, %rsi, %rdx, %r10, %r8, %r9, the result in %rax, an
+//! error as -errno), numbers from `syscall_64.tbl`, errnos from the uapi
+//! `errno-base.h`/`errno.h`:
+//! - `write` (1): fd 1 or 2 only (else -EBADF, 9), to the serial
+//!   console, each `\n` sent as CR LF (a terminal's ONLCR). Every page of
+//!   [buf, buf + count) must lie below 0x800000000000 and be present and
+//!   user-accessible in the caller's tables (`paging.user_ok`), checked
+//!   before one byte is read; otherwise nothing is written, the kernel
+//!   logs the refusal by name and returns -EFAULT (14), as Linux's
+//!   `write(2)` does for a buffer "outside your accessible address
+//!   space". Returns count. (Linux may write a prefix of a buffer that
+//!   faults part-way; PAX writes all or nothing.)
+//! - `exit` (60): ends the thread (one thread a process, so the process)
+//!   with status `%rdi & 0xff`: `user: <name> pid <id> exit <code> after
+//!   <r> runs`.
+//! - anything else: -ENOSYS (38), logged `user: <name> pid <id> syscall
+//!   <n>: -ENOSYS`.
+//!
+//! **Faults** (`kill`, from kernel/interrupts for an exception 0-31 whose
+//! frame's CS has RPL 3, except #DF and #MC, which stay kernel panics):
+//! `user: <name> pid <id> killed: <exception> vector <v> error 0x<e> rip
+//! 0x<r>[ cr2 0x<a>] after <r> runs`, and the thread ends as `exit` ends
+//! it; the kernel resumes the next thread.
+//!
+//! Every word of the frame is read and written at its index (boot/isr.S's
+//! 22 words): a store to a field of a raw element is refused
+//! (wolf-lang#577). State the handlers write is in boot/user.S's
+//! `pax_syscall_state`, read volatile, not in module `var`s
+//! (wolf-lang#598, not fixed in 0.2.24). No `region` is used anywhere
+//! here (wolf-lang#611). No Linux source; no other kernel's source.
+
+use frames
+use log
+use paging
+use panic
+use sched
+use serial
+
+extern "c" fn pax_rdmsr(msr: u64) -> u64
+extern "c" fn pax_wrmsr(msr: u64, v: u64)
+extern "c" fn pax_set_cr4(v: u64)
+extern "c" fn pax_cpuid7_ebx() -> u64
+extern "c" fn pax_enter_user(rip: u64, rsp: u64)
+extern "c" fn pax_peek_user(va: u64, smap: u64) -> u64
+extern "c" fn pax_cr2() -> u64
+
+extern "c" let pax_syscall_entry: *u8
+extern "c" let pax_syscall_state: *u64
+extern "c" let pax_uprogs: *u64
+
+// The MSRs (SDM vol. 4) and their values.
+const EFER: u64 = 0xc0000080
+const STAR: u64 = 0xc0000081
+const LSTAR: u64 = 0xc0000082
+const FMASK: u64 = 0xc0000084
+const EFER_SCE: u64 = 0x1
+const STAR_VALUE: u64 = 0x0010000800000000 // SYSRET base 0x10, SYSCALL CS 0x08
+const FMASK_VALUE: u64 = 0x44700 // TF, IF, DF, NT, AC
+const CPUID7_SMEP: u64 = 0x80 // EBX bit 7
+const CPUID7_SMAP: u64 = 0x100000 // EBX bit 20
+const CR4_SMEP: u64 = 0x100000 // bit 20
+const CR4_SMAP: u64 = 0x200000 // bit 21
+
+/// PAX_SYSCALL: the vector boot/user.S's entry writes into its frame.
+const SYSCALL: u64 = 0x100
+
+// A process's user half.
+const CODE: u64 = 0x400000
+const STACK_TOP: u64 = 0x00007ffffffff000
+const STACK_PAGES: u64 = 4
+const PAGE: u64 = 4096
+const PROGS: u64 = 10
+
+// Linux's numbers (syscall_64.tbl) and -errno as the u64 %rax carries.
+const SYS_WRITE: u64 = 1
+const SYS_EXIT: u64 = 60
+const NEG_EBADF: u64 = 0xfffffffffffffff7 // -9
+const NEG_EFAULT: u64 = 0xfffffffffffffff2 // -14
+const NEG_ENOSYS: u64 = 0xffffffffffffffda // -38
+
+// boot/user.S's pax_syscall_state words.
+const U_TICKS: u64 = 2
+const U_SMAP: u64 = 3
+const U_SMEP: u64 = 4
+
+// boot/isr.S's frame, as word indices.
+const W_RDI: u64 = 9
+const W_RSI: u64 = 10
+const W_RDX: u64 = 11
+const W_RAX: u64 = 14
+const W_VECTOR: u64 = 15
+const W_ERROR: u64 = 16
+const W_RIP: u64 = 17
+const W_CS: u64 = 18
+
+/// Word `i` of the frame at `f`.
+fn word(f: u64, i: u64) -> u64 {
+    // # Safety: `f` is the trampoline's frame (22 words), live for the
+    // handler that passed it; i < 22.
+    unsafe { ((f + i * 8) as *u64).read_volatile() }
+}
+
+fn put_word(f: u64, i: u64, v: u64) {
+    // # Safety: as `word`.
+    unsafe { ((f + i * 8) as *u64).write_volatile(v) }
+}
+
+/// boot/user.S's state word `i`, read volatile (#598).
+fn state(i: u64) -> u64 {
+    // # Safety: i < 8, inside the 64-byte pax_syscall_state.
+    unsafe { ((pax_syscall_state as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_state(i: u64, v: u64) {
+    // # Safety: as `state`.
+    unsafe { ((pax_syscall_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+/// Program `p`'s name.
+pub fn name(p: u64) -> str {
+    if p == 0 { return "hello" }
+    if p == 1 { return "segv" }
+    if p == 2 { return "kread" }
+    if p == 3 { return "textwrite" }
+    if p == 4 { return "guard" }
+    if p == 5 { return "priv" }
+    if p == 6 { return "badptr" }
+    if p == 7 { return "spin1" }
+    if p == 8 { return "spin2" }
+    if p == 9 { return "after" }
+    "?"
+}
+
+/// How many programs there are (numbered 0 .. programs() - 1; a `pub
+/// const` read from another module is refused, wolf-lang#579, and
+/// looking one up by name would compare `str`s, which needs the hosted
+/// runtime on this target).
+pub fn programs() -> u64 {
+    PROGS
+}
+
+/// Program `p`'s blob in user/programs.S's `pax_uprogs` table.
+fn blob(p: u64) -> u64 {
+    if p == 8 { return 7 } // spin2: the spin blob
+    if p == 9 { return 0 } // after: hello's
+    p
+}
+
+/// Program `p`'s bytes: their first address (0) or the first past them
+/// (1), in the kernel's .rodata.
+fn bounds(p: u64, which: int) -> u64 {
+    let i = (blob(p) * 2) as int + which
+    // # Safety: pax_uprogs holds 8 pairs; blob(p) < 8 for p < PROGS.
+    unsafe { pax_uprogs[i] }
+}
+
+/// Pages program `p`'s bytes take.
+fn code_pages(p: u64) -> u64 {
+    (bounds(p, 1) - bounds(p, 0) + PAGE - 1) / PAGE
+}
+
+/// Turn on SYSCALL (EFER.SCE, STAR, LSTAR, FMASK) and, when the CPU has
+/// them, SMEP and SMAP.
+pub fn start() {
+    // # Safety: cpu.S's RDMSR/WRMSR of architectural MSRs every x86-64
+    // CPU has; LSTAR is boot/user.S's entry; CR4 gains only the bits
+    // CPUID says exist, and nothing the kernel does touches a user page
+    // outside `pax_peek_user`.
+    unsafe {
+        let e = pax_rdmsr(EFER)
+        pax_wrmsr(EFER, e | EFER_SCE)
+        pax_wrmsr(STAR, STAR_VALUE)
+        pax_wrmsr(LSTAR, pax_syscall_entry as u64)
+        pax_wrmsr(FMASK, FMASK_VALUE)
+        let b = pax_cpuid7_ebx()
+        var cr4 = paging.cr4()
+        var smep: u64 = 0
+        var smap: u64 = 0
+        if b & CPUID7_SMEP != 0 {
+            cr4 = cr4 | CR4_SMEP
+            smep = 1
+        }
+        if b & CPUID7_SMAP != 0 {
+            cr4 = cr4 | CR4_SMAP
+            smap = 1
+        }
+        pax_set_cr4(cr4)
+        put_state(U_SMEP, smep)
+        put_state(U_SMAP, smap)
+        put_state(U_TICKS, 0)
+    }
+}
+
+fn bit(v: u64, b: u64) -> int {
+    if v & b != 0 {
+        return 1
+    }
+    0
+}
+
+/// The MSRs and CR4 read back:
+/// `user: syscall star 0x<S> lstar 0x<L> fmask 0x<F>, efer.sce <0|1>, smep <0|1>, smap <0|1>`.
+pub fn report() {
+    // # Safety: cpu.S's RDMSR, as `start`.
+    let (star, lstar, fmask, efer) = unsafe { (pax_rdmsr(STAR), pax_rdmsr(LSTAR), pax_rdmsr(FMASK), pax_rdmsr(EFER)) }
+    let cr4 = paging.cr4()
+    log.put("user: syscall star ")
+    log.hex(star)
+    log.put(" lstar ")
+    log.hex(lstar)
+    log.put(" fmask ")
+    log.hex(fmask)
+    log.put(", efer.sce ")
+    log.dec(bit(efer, EFER_SCE))
+    log.put(", smep ")
+    log.dec(bit(cr4, CR4_SMEP))
+    log.put(", smap ")
+    log.dec(bit(cr4, CR4_SMAP))
+    log.end()
+}
+
+/// A frame, zeroed through the HHDM; a named panic when there is none.
+fn fresh(p: u64) -> u64 {
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        panic.fail("user: no frame for program", p)
+    }
+    let v = pa + frames.hhdm()
+    var i: u64 = 0
+    while i < PAGE / 8 {
+        // # Safety: the frame just taken, through the HHDM.
+        unsafe { ((v + i * 8) as *u64).write_volatile(0) }
+        i += 1
+    }
+    pa
+}
+
+/// `paging.map_user` or a named panic.
+fn must_map(pml4: u64, va: u64, pa: u64, flags: u64) {
+    let r = paging.map_user(pml4, va, pa, flags) else 99
+    if r == 99 {
+        panic.fail("user: cannot map the user page at", va)
+    }
+}
+
+/// Build program `p`'s address space: its bytes copied to fresh frames
+/// at CODE (read-execute), a zeroed stack below STACK_TOP (read-write,
+/// no-execute). Returns the PML4's physical address. Thread context, IF
+/// clear (frames and paging are never entered with IF set).
+pub fn load(p: u64) -> u64 {
+    if p >= PROGS {
+        panic.fail("user: no such program", p)
+    }
+    let pml4 = paging.new_space(sched.pml4())
+    if pml4 == 0 {
+        panic.fail("user: no frame for a PML4, program", p)
+    }
+    let lo = bounds(p, 0)
+    let hi = bounds(p, 1)
+    let n = code_pages(p)
+    var k: u64 = 0
+    while k < n {
+        let pa = fresh(p)
+        let dst = pa + frames.hhdm()
+        var i: u64 = 0
+        while i < PAGE && lo + k * PAGE + i < hi {
+            // # Safety: the blob's bytes in the kernel's .rodata, and the
+            // frame just taken, through the HHDM.
+            unsafe {
+                let b = ((lo + k * PAGE + i) as *u8).read_volatile()
+                ((dst + i) as *u8).write_volatile(b)
+            }
+            i += 1
+        }
+        must_map(pml4, CODE + k * PAGE, pa, 0) // r-x
+        k += 1
+    }
+    k = 0
+    while k < STACK_PAGES {
+        let pa = fresh(p)
+        must_map(pml4, STACK_TOP - (k + 1) * PAGE, pa, paging.writable() | paging.no_exec())
+        k += 1
+    }
+    pml4
+}
+
+/// Program `p`'s address-space line, for thread `id`:
+/// `user: <name> pid <id> cr3 0x<c> code 0x<CODE> <n> pages r-x, stack 0x<lo> to 0x<TOP> rw- nx, guard 0x<g>, kernel half <s> of <k> entries shared`.
+pub fn describe(p: u64, id: u64, cr3: u64) {
+    let lo = STACK_TOP - STACK_PAGES * PAGE
+    log.put("user: ")
+    log.put(name(p))
+    log.put(" pid ")
+    log.dec(id as int)
+    log.put(" cr3 ")
+    log.hex(cr3)
+    log.put(" code ")
+    log.hex(CODE)
+    log.put(" ")
+    log.dec(code_pages(p) as int)
+    log.put(" pages r-x, stack ")
+    log.hex(lo)
+    log.put(" to ")
+    log.hex(STACK_TOP)
+    log.put(" rw- nx, guard ")
+    log.hex(lo - PAGE)
+    log.put(", kernel half ")
+    log.dec(paging.kernel_half(cr3, sched.pml4(), 0) as int)
+    log.put(" of ")
+    log.dec(paging.kernel_half(cr3, sched.pml4(), 1) as int)
+    log.put(" entries shared")
+    log.end()
+}
+
+/// A user thread's body (kernel/sched's `create_user` starts it in the
+/// program's address space, already live): into ring 3 at CODE, the
+/// stack's top as RSP. Never returns.
+export fn pax_user_thread(p: u64) {
+    // # Safety: boot/user.S's IRETQ to CPL 3; CODE and the stack are
+    // mapped user in the live tables (`load`), RSP0 and SYSCALL's stack
+    // word are this thread's (sched's `enter_space`).
+    unsafe { pax_enter_user(CODE, STACK_TOP) }
+    panic.fail("user: pax_enter_user returned, program", p)
+}
+
+/// PAX_SYSCALL, for kernel/interrupts (a `pub const` read from another
+/// module is refused, wolf-lang#579).
+pub fn vector() -> u64 {
+    SYSCALL
+}
+
+/// Whether the frame at `f` was pushed by an interrupt, exception or
+/// system call in ring 3 (its CS's RPL).
+pub fn from_user(f: u64) -> bool {
+    word(f, W_CS) & 3 == 3
+}
+
+/// A timer tick that landed in ring 3 (kernel/interrupts).
+pub fn count_tick() {
+    put_state(U_TICKS, state(U_TICKS) + 1)
+}
+
+/// Ticks that landed in ring 3 since `start`.
+pub fn ticks() -> u64 {
+    state(U_TICKS)
+}
+
+/// `n` in decimal when it fits in 31 bits, else in hex: a number ring 3
+/// chose (a system call's number, a length) can be any u64, and a
+/// narrowing cast traps (kernel/log's `dec` takes an int).
+fn num(n: u64) {
+    if n < 0x80000000 {
+        log.dec(n as int)
+    } else {
+        log.hex(n)
+    }
+}
+
+/// `user: <name> pid <id>`, for the running thread.
+fn who() {
+    let p = sched.self_prog()
+    log.put("user: ")
+    if p == 0 {
+        log.put("kernel")
+    } else {
+        log.put(name(p - 1))
+    }
+    log.put(" pid ")
+    log.dec(sched.self_id() as int)
+}
+
+/// ` after <r> runs`, for the running thread.
+fn runs_tail() {
+    log.put(" after ")
+    log.dec(sched.self_runs() as int)
+    log.put(" runs")
+}
+
+/// Whether every page of [buf, buf + len) (len > 0) is user-readable in
+/// the live tables, the whole range below 0x800000000000.
+fn readable(buf: u64, len: u64) -> bool {
+    let top = paging.user_top()
+    if buf >= top || len > top - buf {
+        return false
+    }
+    let pml4 = paging.live()
+    let end = buf + len
+    var pg = buf - buf % PAGE
+    while pg < end {
+        if !paging.user_ok(pml4, pg) {
+            return false
+        }
+        pg += PAGE
+    }
+    true
+}
+
+/// `write(fd, buf, len)`: the result for %rax.
+fn write(fd: u64, buf: u64, len: u64) -> u64 {
+    if fd != 1 && fd != 2 {
+        who()
+        log.put(" write fd ")
+        num(fd)
+        log.put(": -EBADF")
+        log.end()
+        return NEG_EBADF
+    }
+    if len == 0 {
+        return 0
+    }
+    if !readable(buf, len) {
+        who()
+        log.put(" write fd ")
+        num(fd)
+        log.put(" buf ")
+        log.hex(buf)
+        log.put(" len ")
+        num(len)
+        log.put(": -EFAULT")
+        log.end()
+        return NEG_EFAULT
+    }
+    let smap = state(U_SMAP)
+    var i: u64 = 0
+    while i < len {
+        // # Safety: buf + i lies in a page `readable` found present and
+        // user in the live tables, and nothing unmaps it meanwhile (IF
+        // is clear: one CPU, no switch); boot/user.S brackets the read
+        // with STAC/CLAC under SMAP.
+        let b = unsafe { pax_peek_user(buf + i, smap) }
+        if b == 10 {
+            serial.put(13)
+        }
+        serial.put((b & 0xff) as u8)
+        i += 1
+    }
+    len
+}
+
+/// A system call (kernel/interrupts, vector PAX_SYSCALL): the frame to
+/// resume — `f` with %rax set, or, after `exit`, the next thread's.
+pub fn syscall(f: u64) -> u64 {
+    let nr = word(f, W_RAX)
+    if nr == SYS_WRITE {
+        put_word(f, W_RAX, write(word(f, W_RDI), word(f, W_RSI), word(f, W_RDX)))
+        return f
+    }
+    if nr == SYS_EXIT {
+        who()
+        log.put(" exit ")
+        log.dec((word(f, W_RDI) & 0xff) as int)
+        runs_tail()
+        log.end()
+        return sched.end_current(f)
+    }
+    who()
+    log.put(" syscall ")
+    num(nr)
+    log.put(": -ENOSYS")
+    log.end()
+    put_word(f, W_RAX, NEG_ENOSYS)
+    f
+}
+
+/// An exception in ring 3 (kernel/interrupts; `what` its name): the
+/// program is killed by name and the next thread's frame returned.
+pub fn kill(f: u64, what: str) -> u64 {
+    let v = word(f, W_VECTOR)
+    who()
+    log.put(" killed: ")
+    log.put(what)
+    log.put(" vector ")
+    log.dec(v as int)
+    log.put(" error ")
+    log.hex(word(f, W_ERROR))
+    log.put(" rip ")
+    log.hex(word(f, W_RIP))
+    if v == 14 {
+        log.put(" cr2 ")
+        // # Safety: cpu.S's MOV from CR2; this page fault set it.
+        log.hex(unsafe { pax_cr2() })
+    }
+    runs_tail()
+    log.end()
+    sched.end_current(f)
+}
