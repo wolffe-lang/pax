@@ -227,6 +227,17 @@ if [ "$(uname -s)" = Linux ]; then
     spin_rc=0; linux_run "$lx/spin1.out" /bin/hello spin 1 || spin_rc=$?
     say "linux: hello exit $linux_rc ($(wc -l < "$lx/hello.out" | tr -d ' ') lines, sha256 $(sha256_of "$lx/hello.out")); hello spin 1 exit $spin_rc: $(cat "$lx/spin1.out")"
     [ "$linux_rc" = 0 ] || bad "L2 linux: hello exited $linux_rc on Linux"
+    if [ -n "$wolfhello" ]; then
+        # The census's Linux half: what the same binary asks of Linux.
+        wrc=0
+        if command -v strace >/dev/null 2>&1; then
+            strace -o "$lx/wolf-hello.strace" "$wolfhello" > "$lx/wolf-hello.out" 2>&1 || wrc=$?
+            say "linux: wolf-hello exit $wrc, '$(head -c 80 "$lx/wolf-hello.out")', $(grep -c '' "$lx/wolf-hello.strace") strace lines, distinct calls: $(sed -E 's/^([a-z_0-9]+)\(.*/\1/;t;d' "$lx/wolf-hello.strace" | sort -u | tr '\n' ' ')"
+        else
+            "$wolfhello" > "$lx/wolf-hello.out" 2>&1 || wrc=$?
+            say "linux: wolf-hello exit $wrc, '$(head -c 80 "$lx/wolf-hello.out")' (no strace on this host)"
+        fi
+    fi
 else
     printf '%s\n' "$RECORDED" > "$lx/hello.out"
     printf 'spin 1: xmm ok\n' > "$lx/spin1.out"

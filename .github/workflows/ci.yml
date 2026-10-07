@@ -619,18 +619,19 @@ jobs:
   # byte for byte with its output on this runner's own Linux. tests/
   # mpx3-loader: the build (L0), the initramfs (L1), hello against Linux
   # (L2), the segments (L3), six refusals by name (L4), the FPU state per
-  # thread (L5), the frames (L6), the halt (L7); both tiers, BIOS and
-  # UEFI.
+  # thread (L5), the frames (L6), the halt (L7), and a wolf program
+  # linked static against the runner's glibc run until PAX lacks what it
+  # asks for (L8, the gap census); both tiers, BIOS and UEFI.
   mpx3-loader:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
-      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace (apt)
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace
           qemu-system-x86_64 --version
           clang --version
           ld.lld --version
@@ -653,10 +654,15 @@ jobs:
       - name: fetch limine (by digest)
         run: tools/fetch-limine
 
+      - name: the census subject, a wolf program linked static (baseline glibc)
+        run: |
+          tools/mkwolf-hello build/wolf-hello
+          file build/wolf-hello
+
       - name: the loader, both tiers, BIOS and UEFI
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx3-loader
+        run: tests/mpx3-loader --wolf-hello build/wolf-hello
 
       - name: keep the kernels, the programs, the initramfs, the transcripts
         if: always()
@@ -672,6 +678,8 @@ jobs:
             build/mpx3-loader-*.halt
             build/mpx3-loader-*.verdict
             build/mpx3-loader-runs.txt
+            build/mpx3-loader-*.census
+            build/wolf-hello
           retention-days: 14
           if-no-files-found: warn
 
