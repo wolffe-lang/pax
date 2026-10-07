@@ -21,7 +21,19 @@
 //!   would be writable, which defeats W^X) and the framebuffer (it wants
 //!   write-combining, a PAT choice for the lane that draws).
 //!
-//! Nothing is mapped in the lower half and nothing is user-accessible.
+//! Nothing is mapped in the lower half and nothing is user-accessible
+//! in the kernel's own structures. px09 adds the user half: a process's
+//! PML4 (`new_space`) is a fresh table whose entries 256-511 are copied
+//! from the kernel's, so the kernel half's tables are shared and every
+//! kernel mapping made in an existing slot shows in every process (a
+//! slot the kernel first fills after a process was made does not: PAX
+//! makes its slots at boot), and whose entries 0-255 are the process's
+//! own. `map_user` maps there with U/S set at every level (the access
+//! rights of a translation are the most restrictive of every level's,
+//! so a user page needs U/S on its PML4, PDPT and PD entries too);
+//! `user_ok` walks a page the way the CPU would for a user read;
+//! `free_user` gives the user half's frames and tables and the PML4
+//! back.
 //! Upper-level entries are present and writable, supervisor, and carry
 //! no NX: the leaf alone decides (the access rights of a translation
 //! are the most restrictive of every level's, Intel SDM vol. 3A §4.6.1,
@@ -107,6 +119,10 @@ const NX: u64 = 0x8000000000000000 // XD/NX, bit 63: no-execute
 const ADDR: u64 = 0x000ffffffffff000 // bits 51:12: the next table's or a 4 KiB page's address
 const ADDR_2M: u64 = 0x000fffffffe00000 // bits 51:21: a 2 MiB page's address
 const TABLE: u64 = P | RW // an upper-level entry: present, writable, supervisor; the leaf decides
+const US: u64 = 0x4 // user-accessible (px09)
+const USER_TABLE: u64 = P | RW | US // an upper-level entry in the user half
+const USER_TOP: u64 = 0x0000800000000000 // the first address past the user half (PML4 slots 0-255)
+const KERNEL_FIRST: u64 = 256 // the kernel half's first PML4 slot
 
 const PAGE: u64 = 4096
 const LARGE: u64 = 2097152 // 2 MiB
@@ -143,12 +159,37 @@ pub fn no_exec() -> u64 {
     NX
 }
 
+/// U/S: user-accessible (bit 2, px09).
+pub fn user() -> u64 {
+    US
+}
+
+/// The first address past the user half (px09).
+pub fn user_top() -> u64 {
+    USER_TOP
+}
+
 // --- the registers ---------------------------------------------------------
 
 /// CR3 now (the physical address of the live PML4, in bits 51:12).
 pub fn cr3() -> u64 {
     // # Safety: cpu.S's MOV from CR3; reads nothing else.
     unsafe { pax_cr3() }
+}
+
+/// The live PML4's physical address (CR3's bits 51:12, px09).
+pub fn live() -> u64 {
+    cr3() & ADDR
+}
+
+/// Make the structures at `pml4` live: MOV to CR3, which flushes every
+/// non-global TLB entry (px09: kernel/sched, at a switch to a thread in
+/// another address space). Every structure `new_space` makes maps the
+/// kernel half, so the code making the switch stays mapped.
+pub fn load(pml4: u64) {
+    // # Safety: cpu.S's MOV to CR3; `pml4` is the kernel's PML4 or one
+    // `new_space` made from it.
+    unsafe { pax_set_cr3(pml4) }
 }
 
 /// CR0 now.
@@ -246,13 +287,19 @@ fn canonical(va: u64) -> bool {
 /// writable) when absent. 0 when the allocator is empty; 1 when the
 /// entry is a 2 MiB page, not a table (no table address is 1).
 fn descend(t: u64, i: u64) -> u64 {
+    descend_as(t, i, TABLE)
+}
+
+/// `descend`, an absent entry made with `flags` (TABLE, or USER_TABLE in
+/// the user half, px09).
+fn descend_as(t: u64, i: u64, flags: u64) -> u64 {
     let e = entry(t, i)
     if e & P == 0 {
         let n = table_frame()
         if n == 0 {
             return 0
         }
-        set_entry(t, i, n | TABLE)
+        set_entry(t, i, n | flags)
         return n
     }
     if e & PS != 0 {
@@ -406,6 +453,165 @@ pub fn unmap(pml4: u64, va: u64) -> u64 ! MapError {
         unsafe { pax_invlpg(va) }
     }
     e1 & ADDR
+}
+
+// --- the user half (px09) ---------------------------------------------------
+
+/// A process's PML4: a fresh zeroed table with the kernel half (entries
+/// 256-511) copied from the kernel's PML4 at `kernel`. Returns its
+/// physical address; 0 when the allocator is empty.
+pub fn new_space(kernel: u64) -> u64 {
+    let t = table_frame()
+    if t == 0 {
+        return 0
+    }
+    var i: u64 = KERNEL_FIRST
+    while i < ENTRIES {
+        set_entry(t, i, entry(kernel, i))
+        i += 1
+    }
+    t
+}
+
+/// How many of the kernel half's present PML4 entries `pml4` carries
+/// unchanged (0) and how many the kernel's PML4 at `kernel` has present
+/// (1).
+pub fn kernel_half(pml4: u64, kernel: u64, which: int) -> u64 {
+    var have: u64 = 0
+    var same: u64 = 0
+    var i: u64 = KERNEL_FIRST
+    while i < ENTRIES {
+        let k = entry(kernel, i)
+        if k & P != 0 {
+            have += 1
+            if entry(pml4, i) == k {
+                same += 1
+            }
+        }
+        i += 1
+    }
+    if which == 0 {
+        return same
+    }
+    have
+}
+
+/// Map the user page at `va` (4 KiB aligned, below 0x800000000000) to
+/// the frame at `pa` with `flags` (P and U/S are added; RW and NX are
+/// the caller's) in the process structures at `pml4`, upper levels made
+/// P | RW | U/S. Returns the table frames it allocated. Rows as `map`;
+/// `not_canonical` for an address outside the user half.
+pub fn map_user(pml4: u64, va: u64, pa: u64, flags: u64) -> u64 ! MapError {
+    if va % PAGE != 0 || pa % PAGE != 0 {
+        return misaligned
+    }
+    if va >= USER_TOP {
+        return not_canonical
+    }
+    let before = frames.free_count()
+    let pdpt = descend_as(pml4, index(va, 4), USER_TABLE)
+    if pdpt == 0 {
+        return out_of_memory
+    }
+    if pdpt == 1 {
+        return large_page
+    }
+    let pd = descend_as(pdpt, index(va, 3), USER_TABLE)
+    if pd == 0 {
+        return out_of_memory
+    }
+    if pd == 1 {
+        return large_page
+    }
+    let pt = descend_as(pd, index(va, 2), USER_TABLE)
+    if pt == 0 {
+        return out_of_memory
+    }
+    if pt == 1 {
+        return large_page
+    }
+    let i = index(va, 1)
+    if entry(pt, i) & P != 0 {
+        return already_mapped
+    }
+    set_entry(pt, i, pa | flags | US | P)
+    before - frames.free_count()
+}
+
+/// Whether a user-mode read of `va` in the structures at `pml4` would
+/// translate: below 0x800000000000, and present and U/S at every level
+/// (4 KiB pages only: the user half has no large page).
+pub fn user_ok(pml4: u64, va: u64) -> bool {
+    if va >= USER_TOP {
+        return false
+    }
+    let want = P | US
+    let e4 = entry(pml4, index(va, 4))
+    if e4 & want != want {
+        return false
+    }
+    let e3 = entry(e4 & ADDR, index(va, 3))
+    if e3 & want != want || e3 & PS != 0 {
+        return false
+    }
+    let e2 = entry(e3 & ADDR, index(va, 2))
+    if e2 & want != want || e2 & PS != 0 {
+        return false
+    }
+    let e1 = entry(e2 & ADDR, index(va, 1))
+    e1 & want == want
+}
+
+/// Give back everything in the user half of the structures at `pml4`
+/// (every page's frame, every table) and the PML4 itself. The kernel
+/// half is shared and left alone. `pml4` must not be live. Returns the
+/// frames freed.
+pub fn free_user(pml4: u64) -> u64 {
+    if live() == pml4 {
+        panic.fail("paging: free_user of the live PML4", pml4)
+    }
+    var n: u64 = 0
+    var i4: u64 = 0
+    while i4 < KERNEL_FIRST {
+        let e4 = entry(pml4, i4)
+        if e4 & P != 0 {
+            let pdpt = e4 & ADDR
+            var i3: u64 = 0
+            while i3 < ENTRIES {
+                let e3 = entry(pdpt, i3)
+                if e3 & P != 0 {
+                    let pd = e3 & ADDR
+                    var i2: u64 = 0
+                    while i2 < ENTRIES {
+                        let e2 = entry(pd, i2)
+                        if e2 & P != 0 {
+                            let pt = e2 & ADDR
+                            var i1: u64 = 0
+                            while i1 < ENTRIES {
+                                let e1 = entry(pt, i1)
+                                if e1 & P != 0 {
+                                    frames.free(e1 & ADDR)
+                                    n += 1
+                                }
+                                i1 += 1
+                            }
+                            frames.free(pt)
+                            n += 1
+                        }
+                        i2 += 1
+                    }
+                    frames.free(pd)
+                    n += 1
+                }
+                i3 += 1
+            }
+            frames.free(pdpt)
+            n += 1
+        }
+        i4 += 1
+    }
+    frames.free(pml4)
+    n + 1
 }
 
 // --- the kernel's structures -----------------------------------------------
