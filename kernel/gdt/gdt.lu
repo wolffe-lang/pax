@@ -9,17 +9,25 @@
 //!     0x00  null
 //!     0x08  kernel code   64-bit (L), DPL 0, present, execute/read
 //!     0x10  kernel data   DPL 0, present, read/write
-//!     0x18  user data     DPL 3 (for the ring-3 lane; nothing loads it yet)
+//!     0x18  user data     DPL 3 (px09: ring 3's SS, 0x1b)
 //!     0x20  user code     64-bit, DPL 3 (SYSRET's order: user data at
-//!                         STAR's base + 8, user code at + 16)
+//!                         STAR's base + 8, user code at + 16; px09:
+//!                         ring 3's CS, 0x23)
 //!     0x28  the TSS       a 16-byte system descriptor, type 9 (an
 //!                         available 64-bit TSS), limit 103
 //!
+//! px09 puts the user segments to use (ring 3 runs on 0x23 and 0x1b,
+//! the selectors with RPL 3) and keeps RSP0 current: `set_rsp0`, called
+//! by kernel/sched at every switch with the switched-in thread's kernel
+//! stack top, so an interrupt or exception from ring 3 lands on the
+//! stack of the thread that was running (SDM vol. 3A §6.12.1: a change
+//! to CPL 0 loads RSP from the TSS's RSP0).
+//!
 //! In 64-bit mode a code or data descriptor's base and limit are
 //! ignored (flat), but the limit is written whole (0xfffff, G) as a
-//! 32-bit-compatible descriptor would be. The TSS holds no stack for a
-//! privilege change yet (RSP0, the ring-3 lane's) and one interrupt
-//! stack: IST1, the top of a 16 KiB .bss stack, where kernel/idt sends
+//! 32-bit-compatible descriptor would be. The TSS holds RSP0, the
+//! stack for a change to CPL 0 (0 until kernel/sched's first switch;
+//! px09 sets it per thread), and one interrupt stack: IST1, the top of a 16 KiB .bss stack, where kernel/idt sends
 //! the double fault, so a #DF on a broken stack still has one to run
 //! on. Its I/O permission map base is 104, the TSS's size: no bitmap,
 //! so ring 3 has no port access.
@@ -121,6 +129,34 @@ pub fn start() {
         pax_gdtr[0] = Gdtr { limit: (COUNT * 8 - 1) as u16, base: pax_gdt as u64 }
         pax_load_gdt(pax_gdtr)
         pax_ltr(TSS_SEL as u16)
+    }
+}
+
+/// Set the TSS's RSP0, the stack an interrupt or exception from ring 3
+/// switches to (px09). RSP0 sits at byte 4 of the packed TSS, so it is
+/// written as two aligned 32-bit halves (bytes 4 and 8): an 8-byte
+/// store at offset 4 is misaligned, a UB row (ruling #36), and a store
+/// to a field of a raw element is refused (wolf-lang#577). Only the CPU
+/// reads RSP0, and only on an interrupt, which cannot land between the
+/// two writes: every caller runs with IF clear.
+pub fn set_rsp0(v: u64) {
+    // # Safety: pax_tss is boot/isr.S's 112 bytes; bytes 4-11 are RSP0,
+    // both halves 4-aligned.
+    unsafe {
+        let t = pax_tss as u64
+        ((t + 4) as *u32).write_volatile((v & 0xffffffff) as u32)
+        ((t + 8) as *u32).write_volatile((v >> 32) as u32)
+    }
+}
+
+/// The TSS's RSP0 now (px09), read as its two halves.
+pub fn rsp0() -> u64 {
+    // # Safety: as `set_rsp0`.
+    unsafe {
+        let t = pax_tss as u64
+        let lo = ((t + 4) as *u32).read_volatile() as u64
+        let hi = ((t + 8) as *u32).read_volatile() as u64
+        (hi << 32) | lo
     }
 }
 
