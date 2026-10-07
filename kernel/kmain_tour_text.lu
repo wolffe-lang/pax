@@ -1,7 +1,7 @@
 //! member: false
 // kmain_tour_text.lu — a tour of the kernel, ending (b): the kernel writes
 // to its own text (px08, tests/tour). The stages are kmain_tour.lu's
-// (kernel/tour); the ending is kmain_text_write's path: stage 3 showed
+// (kernel/pax_tour); the ending is kmain_text_write's path: stage 3 showed
 // text mapped r-x and CR0.WP set refuses a supervisor write to it, so
 // the write takes a page fault (error 0x3: present, a write,
 // supervisor; Intel SDM vol. 3A §4.7) and kernel/interrupts names it:
@@ -14,26 +14,26 @@
 use log
 use panic
 use paging
-use tour
+use pax_tour
 use serial
 
 extern "c" let pax_tour_worker: *u8
 
 export fn kmain() {
     serial.init()
-    tour.stage_boot()
-    tour.pause_early(300) // PAUSE
-    let pa = tour.stage_frames()
-    tour.pause_early(300) // PAUSE
-    let pml4 = tour.stage_paging(pa)
-    tour.pause_early(300) // PAUSE
-    tour.stage_interrupts(pml4)
-    tour.pause_ticks(200) // PAUSE
-    // # Safety: the address of kernel/tour's export; nothing is read.
+    pax_tour.stage_boot()
+    pax_tour.pause_early(300) // PAUSE
+    let pa = pax_tour.stage_frames()
+    pax_tour.pause_early(300) // PAUSE
+    let pml4 = pax_tour.stage_paging(pa)
+    pax_tour.pause_early(300) // PAUSE
+    pax_tour.stage_interrupts(pml4)
+    pax_tour.pause_ticks(200) // PAUSE
+    // # Safety: the address of kernel/pax_tour's export; nothing is read.
     let worker = unsafe { pax_tour_worker as u64 }
-    tour.stage_threads(pml4, worker)
-    tour.pause_sleep(300) // PAUSE
-    tour.closing()
+    pax_tour.stage_threads(pml4, worker)
+    pax_tour.pause_sleep(300) // PAUSE
+    pax_tour.closing()
 
     log.line("ending: the kernel writes to its own text, which paging mapped r-x")
     let a = paging.bound(2) + 64
