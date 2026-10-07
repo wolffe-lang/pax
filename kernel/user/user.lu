@@ -57,6 +57,32 @@
 //! - anything else: -ENOSYS (38), logged `user: <name> pid <id> syscall
 //!   <n>: -ENOSYS`.
 //!
+//! - `exit_group` (231, px10): ends the process, all of its threads (it
+//!   has one): `user: <name> pid <id> exit_group <code> after <r> runs`.
+//!
+//! **ELF processes** (px10, `exec`): a static x86-64 executable read
+//! from the initramfs (kernel/initramfs) and loaded by kernel/elf into
+//! a fresh address space, with a stack of ELF_STACK_PAGES pages below
+//! STACK_TOP (the page below them the guard) holding what the x86-64
+//! psABI §3.4.1 puts on a process's initial stack, from the top down:
+//! eight zero bytes; the strings (argv's, envp's, then the path,
+//! AT_EXECFN's), each with its NUL; sixteen random bytes (AT_RANDOM:
+//! RDRAND when CPUID.1:ECX bit 30 says the CPU has it, else a mix of
+//! the TSC: named, not cryptographic); then, 16-aligned at the bottom,
+//! argc, the argv pointers and a NULL, the envp pointers and a NULL,
+//! and the auxiliary vector's pairs (uapi `linux/auxvec.h`): AT_PHDR,
+//! AT_PHENT, AT_PHNUM, AT_PAGESZ (4096), AT_BASE (0: no interpreter),
+//! AT_FLAGS (0), AT_ENTRY, AT_UID, AT_EUID, AT_GID, AT_EGID (all 0),
+//! AT_CLKTCK (100), AT_SECURE (0), AT_RANDOM, AT_EXECFN, AT_NULL. RSP
+//! points at argc; every general register is zero (so %rdx, the psABI's
+//! function for atexit, is none); the x87/SSE state is kernel/fpu's
+//! template (FCW 0x037f, MXCSR 0x1f80), Linux's at execve. argv and
+//! envp come from the kernel as space-separated strings (the boot's
+//! only source of them until a process can call `execve`). A refusal
+//! (no such file, not a static x86-64 ELF: kernel/elf's names) is a
+//! line `user: exec <path>: refused: <why>`, and nothing of the space
+//! survives.
+//!
 //! **Faults** (`kill`, from kernel/interrupts for an exception 0-31 whose
 //! frame's CS has RPL 3, except #DF and #MC, which stay kernel panics):
 //! `user: <name> pid <id> killed: <exception> vector <v> error 0x<e> rip
@@ -70,7 +96,9 @@
 //! (wolf-lang#598, not fixed in 0.2.24). No `region` is used anywhere
 //! here (wolf-lang#611). No Linux source; no other kernel's source.
 
+use elf
 use frames
+use initramfs
 use log
 use paging
 use panic
@@ -84,6 +112,9 @@ extern "c" fn pax_cpuid7_ebx() -> u64
 extern "c" fn pax_enter_user(rip: u64, rsp: u64)
 extern "c" fn pax_peek_user(va: u64, smap: u64) -> u64
 extern "c" fn pax_cr2() -> u64
+extern "c" fn pax_cpuid(leaf: u64, sub: u64, reg: u64) -> u64
+extern "c" fn pax_rdtsc() -> u64
+extern "c" fn pax_rdrand() -> u64
 
 extern "c" let pax_syscall_entry: *u8
 extern "c" let pax_syscall_state: *u64
@@ -111,10 +142,32 @@ const STACK_TOP: u64 = 0x00007ffffffff000
 const STACK_PAGES: u64 = 4
 const PAGE: u64 = 4096
 const PROGS: u64 = 10
+const ELF_STACK_PAGES: u64 = 32 // px10: an ELF process's stack, 128 KiB
+const CPUID1_RDRAND: u64 = 0x40000000 // ECX bit 30
+
+// The auxiliary vector's types (include/uapi/linux/auxvec.h).
+const AT_NULL: u64 = 0
+const AT_PHDR: u64 = 3
+const AT_PHENT: u64 = 4
+const AT_PHNUM: u64 = 5
+const AT_PAGESZ: u64 = 6
+const AT_BASE: u64 = 7
+const AT_FLAGS: u64 = 8
+const AT_ENTRY: u64 = 9
+const AT_UID: u64 = 11
+const AT_EUID: u64 = 12
+const AT_GID: u64 = 13
+const AT_EGID: u64 = 14
+const AT_CLKTCK: u64 = 17
+const AT_SECURE: u64 = 23
+const AT_RANDOM: u64 = 25
+const AT_EXECFN: u64 = 31
+const AUX_PAIRS: u64 = 16 // AT_NULL's included
 
 // Linux's numbers (syscall_64.tbl) and -errno as the u64 %rax carries.
 const SYS_WRITE: u64 = 1
 const SYS_EXIT: u64 = 60
+const SYS_EXIT_GROUP: u64 = 231
 const NEG_EBADF: u64 = 0xfffffffffffffff7 // -9
 const NEG_EFAULT: u64 = 0xfffffffffffffff2 // -14
 const NEG_ENOSYS: u64 = 0xffffffffffffffda // -38
@@ -356,6 +409,12 @@ pub fn describe(p: u64, id: u64, cr3: u64) {
 /// program's address space, already live): into ring 3 at CODE, the
 /// stack's top as RSP. Never returns.
 export fn pax_user_thread(p: u64) {
+    if sched.self_prog() == sched.elf_prog() {
+        // # Safety: as below; an ELF process's entry and stack were
+        // mapped user by `exec` (kernel/elf's segments, the stack).
+        unsafe { pax_enter_user(sched.self_exec(0), sched.self_exec(1)) }
+        panic.fail("user: pax_enter_user returned, an ELF process", p)
+    }
     // # Safety: boot/user.S's IRETQ to CPL 3; CODE and the stack are
     // mapped user in the live tables (`load`), RSP0 and SYSCALL's stack
     // word are this thread's (sched's `enter_space`).
@@ -402,6 +461,8 @@ fn who() {
     log.put("user: ")
     if p == 0 {
         log.put("kernel")
+    } else if p == sched.elf_prog() {
+        put_bytes(sched.self_exec(2), sched.self_exec(3))
     } else {
         log.put(name(p - 1))
     }
@@ -493,6 +554,14 @@ pub fn syscall(f: u64) -> u64 {
         log.end()
         return sched.end_current(f)
     }
+    if nr == SYS_EXIT_GROUP {
+        who()
+        log.put(" exit_group ")
+        log.dec((word(f, W_RDI) & 0xff) as int)
+        runs_tail()
+        log.end()
+        return sched.end_current(f) // one thread a process: the group
+    }
     who()
     log.put(" syscall ")
     num(nr)
@@ -523,4 +592,291 @@ pub fn kill(f: u64, what: str) -> u64 {
     runs_tail()
     log.end()
     sched.end_current(f)
+}
+
+// --- ELF processes (px10) ---------------------------------------------------
+
+/// Write the `n` bytes at `a` (a name in the initramfs) to the log.
+fn put_bytes(a: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        // # Safety: a name inside the initramfs, mapped read-only in the
+        // HHDM for as long as the kernel runs (kernel/paging, px10).
+        let b = unsafe { ((a + i) as *u8).read_volatile() }
+        log.put_byte(b as int)
+        i += 1
+    }
+}
+
+/// How many space-separated words `s` holds.
+fn words(s: str) -> u64 {
+    var n: u64 = 0
+    var inw = false
+    for b in s.bytes() {
+        if b as int as u64 == 32 {
+            inw = false
+        } else if !inw {
+            inw = true
+            n += 1
+        }
+    }
+    n
+}
+
+/// The bytes `s`'s words take as C strings (each word and its NUL).
+fn words_bytes(s: str) -> u64 {
+    var n: u64 = 0
+    var inw = false
+    for b in s.bytes() {
+        if b as int as u64 == 32 {
+            if inw {
+                n += 1
+            }
+            inw = false
+        } else {
+            inw = true
+            n += 1
+        }
+    }
+    if inw {
+        n += 1
+    }
+    n
+}
+
+/// User address `va` of the space at `pml4` (not live), through the
+/// HHDM: the frame `exec` mapped there.
+fn kva(pml4: u64, va: u64) -> u64 {
+    let pa = paging.translate(pml4, va) else 0
+    if pa == 0 {
+        panic.fail("user: exec: a stack byte is not mapped at", va)
+    }
+    pa + frames.hhdm()
+}
+
+fn poke8(pml4: u64, va: u64, b: u64) {
+    // # Safety: kva's frame, one `exec` mapped in this space's stack.
+    unsafe { (kva(pml4, va) as *u8).write_volatile((b & 0xff) as u8) }
+}
+
+fn poke64(pml4: u64, va: u64, v: u64) {
+    // # Safety: as poke8; va is 8-aligned, so the word is in one page.
+    unsafe { (kva(pml4, va) as *u64).write_volatile(v) }
+}
+
+/// Write `s`'s words as C strings from `va` up; the address past them.
+fn put_words(pml4: u64, va: u64, s: str) -> u64 {
+    var p = va
+    var inw = false
+    for b in s.bytes() {
+        if b as int as u64 == 32 {
+            if inw {
+                poke8(pml4, p, 0)
+                p += 1
+            }
+            inw = false
+        } else {
+            inw = true
+            poke8(pml4, p, b as int as u64)
+            p += 1
+        }
+    }
+    if inw {
+        poke8(pml4, p, 0)
+        p += 1
+    }
+    p
+}
+
+/// Write the pointers to `s`'s words (laid out from `strs` by
+/// `put_words`) from `va` up, then a NULL; the address past it.
+fn put_ptrs(pml4: u64, va: u64, strs: u64, s: str) -> u64 {
+    var p = va
+    var at = strs
+    var inw = false
+    for b in s.bytes() {
+        if b as int as u64 == 32 {
+            if inw {
+                at += 1 // the NUL
+            }
+            inw = false
+        } else {
+            if !inw {
+                poke64(pml4, p, at)
+                p += 8
+            }
+            inw = true
+            at += 1
+        }
+    }
+    poke64(pml4, p, 0)
+    p + 8
+}
+
+/// One auxiliary-vector pair at `a`; the address past it.
+fn put_aux(pml4: u64, a: u64, t: u64, v: u64) -> u64 {
+    poke64(pml4, a, t)
+    poke64(pml4, a + 8, v)
+    a + 16
+}
+
+/// Eight bytes for AT_RANDOM: RDRAND when the CPU has it (every PAX
+/// host: QEMU's `-cpu max` and the KVM hosts), else the TSC folded on
+/// itself (named, not cryptographic: a CPU without RDRAND gets bytes
+/// that differ per boot and per word, nothing more).
+fn random_word(k: u64) -> u64 {
+    // # Safety: CPUID reads nothing and writes only its registers.
+    let has = unsafe { pax_cpuid(1, 0, 2) } & CPUID1_RDRAND != 0
+    if has {
+        // # Safety: RDRAND exists (CPUID.1:ECX bit 30).
+        let r = unsafe { pax_rdrand() }
+        if r != 0 {
+            return r
+        }
+    }
+    // # Safety: RDTSC reads the time-stamp counter, nothing else.
+    let t = unsafe { pax_rdtsc() }
+    (t ^ (t >> 17) ^ (t >> 31)) + k
+}
+
+/// `user: exec <path>: refused: <why>`.
+fn refuse(path: str, why: str) {
+    log.put("user: exec ")
+    log.put(path)
+    log.put(": refused: ")
+    log.put(why)
+    log.end()
+}
+
+/// Load `path` from the initramfs as an ELF process with `argv` and
+/// `envp` (space-separated words) and start its thread, whose body is
+/// `body` (kernel/user's `pax_user_thread`, whose address the caller
+/// names with `extern "c" let`). Returns its id, or 0 when refused (a
+/// line says why; nothing of the space is kept). Thread context, IF
+/// clear (frames and paging are never entered with IF set).
+pub fn exec(body: u64, path: str, argv: str, envp: str) -> u64 {
+    let e = initramfs.lookup(path)
+    if e == initramfs.end() {
+        refuse(path, initramfs.lookup_why(path))
+        return 0
+    }
+    let file = initramfs.data(e)
+    let size = initramfs.size(e)
+    let r = elf.refusal(file, size)
+    if r != 0 {
+        refuse(path, elf.why(r))
+        return 0
+    }
+    let pml4 = paging.new_space(sched.pml4())
+    if pml4 == 0 {
+        panic.fail("user: exec: no frame for a PML4", 0)
+    }
+    let entry = elf.load(file, size, pml4)
+    if entry == 0 {
+        refuse(path, "out of frames")
+        let _freed = paging.free_user(pml4)
+        return 0
+    }
+    // The stack: ELF_STACK_PAGES pages below STACK_TOP, read-write,
+    // no-execute; the page below them is never mapped.
+    var k: u64 = 0
+    while k < ELF_STACK_PAGES {
+        let pa = fresh(0)
+        must_map(pml4, STACK_TOP - (k + 1) * PAGE, pa, paging.writable() | paging.no_exec())
+        k += 1
+    }
+    // The strings' block, under eight zero bytes at the top: argv's,
+    // envp's, the path's.
+    let argc = words(argv)
+    let envc = words(envp)
+    let sbytes = words_bytes(argv) + words_bytes(envp) + words_bytes(path)
+    let strs = STACK_TOP - 8 - sbytes
+    let env_at = put_words(pml4, strs, argv)
+    let path_at = put_words(pml4, env_at, envp)
+    let path_end = put_words(pml4, path_at, path)
+    if path_end != STACK_TOP - 8 {
+        panic.fail("user: exec: the strings' block ends at", path_end)
+    }
+    // AT_RANDOM's sixteen bytes, 16-aligned below the strings.
+    let rnd = (strs - 16) - (strs - 16) % 16
+    poke64(pml4, rnd, random_word(1))
+    poke64(pml4, rnd + 8, random_word(2))
+    // The vector: argc, argv + NULL, envp + NULL, the pairs; its first
+    // word (argc, where RSP points) 16-aligned.
+    let nwords = 1 + (argc + 1) + (envc + 1) + 2 * AUX_PAIRS
+    let sp = (rnd - nwords * 8) - (rnd - nwords * 8) % 16
+    poke64(pml4, sp, argc)
+    let after_argv = put_ptrs(pml4, sp + 8, strs, argv)
+    var a = put_ptrs(pml4, after_argv, env_at, envp)
+    a = put_aux(pml4, a, AT_PHDR, elf.aux(file, 0))
+    a = put_aux(pml4, a, AT_PHENT, elf.aux(file, 2))
+    a = put_aux(pml4, a, AT_PHNUM, elf.aux(file, 1))
+    a = put_aux(pml4, a, AT_PAGESZ, PAGE)
+    a = put_aux(pml4, a, AT_BASE, 0)
+    a = put_aux(pml4, a, AT_FLAGS, 0)
+    a = put_aux(pml4, a, AT_ENTRY, entry)
+    a = put_aux(pml4, a, AT_UID, 0)
+    a = put_aux(pml4, a, AT_EUID, 0)
+    a = put_aux(pml4, a, AT_GID, 0)
+    a = put_aux(pml4, a, AT_EGID, 0)
+    a = put_aux(pml4, a, AT_CLKTCK, 100)
+    a = put_aux(pml4, a, AT_SECURE, 0)
+    a = put_aux(pml4, a, AT_RANDOM, rnd)
+    a = put_aux(pml4, a, AT_EXECFN, path_at)
+    a = put_aux(pml4, a, AT_NULL, 0)
+    if a > rnd {
+        panic.fail("user: exec: the vector runs into AT_RANDOM's bytes at", a)
+    }
+    // The name the log gives it: the entry's name after its last `/`.
+    let nl = initramfs.name_length(e)
+    var base: u64 = 0
+    var i: u64 = 0
+    while i < nl {
+        if initramfs.name_byte(e, i) == 47 {
+            base = i + 1
+        }
+        i += 1
+    }
+    let id = sched.create_process(body, sched.elf_prog() - 1, pml4, entry, sp, initramfs.name_addr(e) + base, nl - base)
+    describe_elf(file, id, pml4, entry, sp, argc, envc)
+    id
+}
+
+/// An ELF process's line:
+/// `user: exec pid <id> cr3 0x<c> entry 0x<e> rsp 0x<s> argc <a> envc <n>, <k> PT_LOAD: 0x<lo>-0x<hi> <rwx> …, stack <pages> pages below 0x<TOP>`.
+fn describe_elf(file: u64, id: u64, cr3: u64, entry: u64, sp: u64, argc: u64, envc: u64) {
+    log.put("user: exec pid ")
+    log.dec(id as int)
+    log.put(" cr3 ")
+    log.hex(cr3)
+    log.put(" entry ")
+    log.hex(entry)
+    log.put(" rsp ")
+    log.hex(sp)
+    log.put(" argc ")
+    log.dec(argc as int)
+    log.put(" envc ")
+    log.dec(envc as int)
+    log.put(", ")
+    let n = elf.loads(file)
+    log.dec(n as int)
+    log.put(" PT_LOAD:")
+    var k: u64 = 0
+    while k < n {
+        log.put(" ")
+        log.hex(elf.seg(file, k, 0))
+        log.put("-")
+        log.hex(elf.seg(file, k, 1))
+        log.put(" ")
+        let pf = elf.seg(file, k, 2)
+        log.put(if pf & 4 != 0 { "r" } else { "-" })
+        log.put(if pf & 2 != 0 { "w" } else { "-" })
+        log.put(if pf & 1 != 0 { "x" } else { "-" })
+        k += 1
+    }
+    log.put(", stack ")
+    log.dec(ELF_STACK_PAGES as int)
+    log.put(" pages below ")
+    log.hex(STACK_TOP)
+    log.end()
 }
