@@ -2,14 +2,15 @@
 
 Contract: `sprints/pax/08-the-reel/px08-the-reel.md` in wolffe-lang/wolf
 (planning trunk `e51691d`). Branch `px08` off pax `94364ad`, rebased
-2026-10-07 onto `bc86ea5` (px06's heap merged; see § Rebase); PR pax#11.
-The five sections were committed whole in `3f2ecc8` (`7387076` before
-the rebase), an empty commit pushed before the first change. This note carries §2's drift, §3
+2026-10-07 onto `bc86ea5` (px06's heap) and then onto `a01e2e4` (px09's
+user mode; see § Rebases); PR pax#11. The five sections were committed
+whole in `e9b3321` (`7387076` before the rebases), an empty commit
+pushed before the first change. This note carries §2's drift, §3
 against what was measured, §4 and §5.
 
 ## 1. Forbidden
 
-As committed in `3f2ecc8`, and kept:
+As committed in `e9b3321`, and kept:
 - No Linux, glibc, musl or other kernel's or libc's source was read.
   Read: pax's own tree, Limine 12.9.1's `CONFIG.md`, the lobo reel's
   SHOTLIST (read only). `docs/SOURCES.md` § px08.
@@ -23,7 +24,7 @@ As committed in `3f2ecc8`, and kept:
 
 ## 2. Inputs, verified (drift)
 
-Stated in `3f2ecc8`. Two drifts in the contract's inputs:
+Stated in `e9b3321`. Two drifts in the contract's inputs:
 - **kasumi has no KVM**: no `/dev/kvm`, no kvm module loaded (since the
   2026-10-04 reboot). The contract's "kasumi (KVM and TCG)" became kasumi
   TCG plus hasu KVM.
@@ -72,7 +73,7 @@ it; with neither it builds what it built before.
 
 ## 3. Prediction against measurement
 
-| predicted (`3f2ecc8`) | measured | verdict |
+| predicted (`e9b3321`) | measured | verdict |
 |---|---|---|
 | stages: menu, 1-5, the closing line, finale a/b; no heap stage (pax#10 not merged) | as predicted | right |
 | nomad-1 TCG BIOS boot-to-last-line 28.7 s | 28.47 s (`notes/px08/nomad1-tcg-bios-pax-reel.times`) | right (−0.2) |
@@ -96,40 +97,44 @@ threads' interleaving is decided by ticks, not by host speed.
 ## 4. Evidence index
 
 - **Serial logs**: nomad-1 TCG BIOS `notes/px08/nomad1-tcg-bios-pax-reel.serial.log`
-  `a761e009…`; kasumi TCG BIOS `notes/px08/kasumi-tcg-bios-pax-reel.serial.log`
-  `a761e009…` (identical). Per-line timings beside them (`*.times`),
+  `805af30f…`; kasumi TCG BIOS `notes/px08/kasumi-tcg-bios-pax-reel.serial.log`
+  `805af30f…` (identical; the ISO at the head). Per-line timings beside them (`*.times`),
   plus nomad-1 UEFI finale b and hasu KVM BIOS.
 - **Per-scene timings on nomad-1**: `notes/px08/rehearsal-scene2.times`
   (`86cda6cb…`), `notes/px08/rehearsal-scene3.times` (`989e1a65…`); the
   SHOTLIST's table (`demo/reel/SHOTLIST.md`).
 - **ISO shas** (kasumi, native, `tools/reel build`, no `.git`, so
-  `SOURCE_DATE_EPOCH` 0), after the rebase: `pax-reel.iso` `a3bd4b6e…`,
-  `pax-reel-b.iso` `002fe970…`; release tier `baa91a93…`, `585d2340…`.
-  Before it: `a41ba883…`, `755b433a…` (release `d1b4dc62…`,
-  `54277dcd…`); each rebuilt from the same sources gave the same shas.
+  `SOURCE_DATE_EPOCH` 0), at the head (after both rebases):
+  `pax-reel.iso` `25232dbf…`, `pax-reel-b.iso` `87aae34e…`; release tier
+  `af1d7b26…`, `1b5427ce…`. After the px06 rebase only: `a3bd4b6e…`,
+  `002fe970…`. Before any rebase: `a41ba883…`, `755b433a…` (release
+  `d1b4dc62…`, `54277dcd…`). Each rebuilt from the same sources gave the
+  same shas.
 - **tests/reel, kasumi**, QEMU 11.1.1 TCG, `PAX_REQUIRE_UEFI=1`, both
   tiers and firmwares: 44 PASS, 0 FAIL, 0 SKIP (`~/lanes/px08/reel1.out`
   `2319931a…`). It found its own hole on the way: R4's join check read
   the wrong fields and compared 0 with 0; fixed before the first push
   (the PASS line now prints the counts, 65040 = 65040).
-- **Planted red**: `e28dd18` (`9004374` before the rebase, the same
+- **Planted red**: `4c14608` (`9004374` before the rebases, the same
   change) puts stage 2's heading after its frames line. kasumi: R1 FAIL on both ISOs, everything else PASS
   (`~/lanes/px08/plant.out` `bd712531…`). CI: run 37561248505,
   job `reel` 112598767198: R1 FAIL on all eight legs (two tiers, two
   ISOs, BIOS and UEFI; `line 10 not found after log line 25: frames: …`),
   R0 and R2-R7 PASS; every other job green. That run is of the
   pre-rebase `9004374`; the rebased plant was not re-run in CI. Reverted
-  in `6ebe5d4`.
+  in `d0925dd`.
 - **CI green at head**: the run id is in the PR body (a note cannot name the run of the commit that carries it).
 
-## Rebase onto px06 (2026-10-07)
+## Rebases (2026-10-07)
+
+### onto px06, the heap (`bc86ea5`)
 
 The orchestrator merged px06 (pax trunk `bc86ea5`) and asked for a
 rebase with the reel unchanged. Conflicts in `.github/workflows/ci.yml`
 (both lanes appended a job: trunk's file plus the `reel` job, every
 trunk line kept) and `docs/SOURCES.md` (trunk's file plus § px08);
 `kernel/README.md` merged clean, and its reel sentence now says the
-stages are px01-px07's, not the heap (`9986eb7`). No reel source
+stages are px01-px07's, not the heap (`abddacd`). No reel source
 changed. Every sha above was re-pointed to the rebased branch.
 
 The reel kernels' bytes changed all the same: px06 edited
@@ -143,6 +148,33 @@ rebased tree: 44 PASS, 0 FAIL, 0 SKIP (`~/lanes/px08/reel2.out`
 ISOs: preflight GO, scene 2's timings unchanged to the 10 ms, scene 3's
 PANIC 23.4 s after Enter; scene 0's line count is now 6210 (the heap's
 modules are in `kernel/`, though the reel does not call them).
+
+### onto px09, user mode (`a01e2e4`)
+
+The orchestrator merged px09 and asked for a second rebase, no new
+stages. The same two files conflicted (both appended), resolved the
+same way. px09 put `boot/user.S` and `user/programs.S` on the kernel's
+asm roster and grew `sched`, `paging`, `gdt` and `interrupts`, so every
+kernel, the reel's included, links more: the image went from 96 to 112
+KiB (finale a), and stage 1-5's addresses and frame counts moved
+(65107 usable frames -> 65096; the threads' join at 65040 -> 65029);
+finale b's `rip` moved to `…bd53`. Finale a's last three lines are
+unchanged. The ISOs were rebuilt (shas in §4).
+
+One text change: the closing lines said "Next: user mode", which px09
+made false. They now read "…a timer and preemptive threads; a heap and
+ring 3 too, not shown here. / All in wolf. Next: Linux binaries,
+unmodified." (`cde8fa8`; tests/reel's R1 follows it). No stage added.
+
+tests/reel on kasumi at the rebased tree: 44 PASS, 0 FAIL, 0 SKIP
+(`~/lanes/px08/reel3.out` `b2c11706…`). The serial log of `pax-reel.iso`
+under BIOS is again byte-identical on nomad-1 and kasumi (`805af30f…`,
+`notes/px08/*-tcg-bios-pax-reel.serial.log`). hasu's KVM timings in
+`notes/px08/hasu-kvm-bios-pax-reel.times` are of the first ISO
+(`a41ba883…`) and were not retaken. The SHOTLIST was rehearsed a third
+time on nomad-1: preflight GO; scene 2's headings 5.13, 8.13, 11.14,
+14.14, 19.14 s, PANIC 28.46 s; scene 3's PANIC 23.4 s after Enter;
+scene 0 now counts 7344 lines of wolf and 1051 of assembly.
 
 ## 5. Done-when
 
