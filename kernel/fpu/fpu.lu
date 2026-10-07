@@ -1,0 +1,246 @@
+//! fpu — each thread's x87, SSE and AVX state, saved and restored at
+//! every switch (px10; px09's note owed it to user mode).
+//!
+//! Limine enters the kernel with every CR0 and CR4 bit it does not name
+//! cleared (PROTOCOL.md, the x86-64 machine state), so CR4.OSFXSR is
+//! clear and an SSE instruction is `#UD`: before px10 a ring-3 program
+//! that touched an xmm register was killed `invalid opcode`. `start`
+//! makes the state usable and switchable (Intel SDM vol. 3A §2.5, vol. 1
+//! §13.3):
+//! - CR0: EM clear (no x87 emulation), MP set (WAIT honours TS), TS
+//!   clear (no `#NM`: the state is switched eagerly, below);
+//! - CR4: OSFXSR (bit 9) and OSXMMEXCPT (bit 10); and, when CPUID.1:ECX
+//!   bit 26 says the CPU has XSAVE, OSXSAVE (bit 18) and XCR0 = x87 (bit
+//!   0) | SSE (bit 1), plus AVX (bit 2) when CPUID.1:ECX bit 28 says so.
+//!   Nothing past AVX is enabled (no AVX-512, no AMX: their state is
+//!   larger and no program PAX runs asks for it yet). The area's size
+//!   is CPUID.(EAX=0DH, ECX=0):EBX once XCR0 is set (the SDM's
+//!   "size required by the enabled features"), at most a page;
+//! - without XSAVE, FXSAVE's 512-byte area.
+//!
+//! **One area per thread slot**, a frame each from the allocator (17
+//! frames: one per slot and the template), reached through the HHDM,
+//! so 4096-aligned (XSAVE wants 64). The template is the state a new
+//! thread starts in — Linux's at execve, measured on kasumi by
+//! user/elf/hello.S (`fcw 0x037f mxcsr 0x1f80`) and the SDM's FNINIT
+//! values: FCW 0x037f, every tag empty, MXCSR 0x1f80 (every exception
+//! masked, round to nearest), every register zero; with XSAVE, the
+//! header's XSTATE_BV = x87 | SSE (both loaded from the legacy region)
+//! and every other component in its init state (XSTATE_BV bit clear,
+//! SDM §13.8.1), XCOMP_BV 0 (the standard form). kernel/sched copies it
+//! into a slot's area when it makes a thread (`reset`).
+//!
+//! **The switch** (`switch`, from kernel/sched's `run_next`, IF clear):
+//! XSAVE (or FXSAVE) of the live state into the outgoing slot's area,
+//! XRSTOR (or FXRSTOR) of the incoming slot's. Eager, every switch: a
+//! lazy scheme (CR0.TS and `#NM`) saves work only when threads rarely
+//! touch the registers, and glibc's string functions touch them on
+//! every call. The kernel itself never touches them (no SSE in its
+//! code), so what the registers hold at a switch is the outgoing
+//! thread's. A kernel that never calls `start` switches as before
+//! (mode 0: `switch` and `reset` do nothing).
+//!
+//! State lives in boot/fpu.S's `pax_fpu_state` words, read and written
+//! volatile (the scheduler's rule since px07). No region, no heap. No
+//! Linux source; no other kernel's source.
+
+use frames
+use log
+use panic
+use paging
+
+extern "c" fn pax_set_cr0(v: u64)
+extern "c" fn pax_set_cr4(v: u64)
+extern "c" fn pax_cpuid(leaf: u64, sub: u64, reg: u64) -> u64
+extern "c" fn pax_xgetbv0() -> u64
+extern "c" fn pax_xsetbv0(v: u64)
+extern "c" fn pax_fpu_save(area: u64, mode: u64)
+extern "c" fn pax_fpu_restore(area: u64, mode: u64)
+
+extern "c" let pax_fpu_state: *u64
+
+const OFF: u64 = 0
+const XSAVE: u64 = 1
+const FXSAVE: u64 = 2
+
+const SLOTS: u64 = 16 // kernel/sched's
+const PAGE: u64 = 4096
+
+const CR0_MP: u64 = 0x2 // bit 1
+const CR0_EM: u64 = 0x4 // bit 2
+const CR0_TS: u64 = 0x8 // bit 3
+const CR0_KEEP: u64 = 0xfffffffffffffff3 // every bit but EM (2) and TS (3)
+const CR4_OSFXSR: u64 = 0x200 // bit 9
+const CR4_OSXMMEXCPT: u64 = 0x400 // bit 10
+const CR4_OSXSAVE: u64 = 0x40000 // bit 18
+const CPUID1_XSAVE: u64 = 0x4000000 // ECX bit 26
+const CPUID1_AVX: u64 = 0x10000000 // ECX bit 28
+const XCR0_X87: u64 = 0x1
+const XCR0_SSE: u64 = 0x2
+const XCR0_AVX: u64 = 0x4
+
+const FCW_INIT: u64 = 0x037f
+const MXCSR_INIT: u64 = 0x1f80
+
+// pax_fpu_state's words.
+const S_MODE: u64 = 0
+const S_SIZE: u64 = 1
+const S_XCR0: u64 = 2
+const S_TEMPLATE: u64 = 3
+const S_AREAS: u64 = 4
+
+fn sw(i: u64) -> u64 {
+    // # Safety: i < 20, inside boot/fpu.S's 160-byte pax_fpu_state.
+    unsafe { ((pax_fpu_state as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_sw(i: u64, v: u64) {
+    // # Safety: as `sw`.
+    unsafe { ((pax_fpu_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+fn cpuid(leaf: u64, sub: u64, reg: u64) -> u64 {
+    // # Safety: CPUID reads nothing and writes only its four registers.
+    unsafe { pax_cpuid(leaf, sub, reg) }
+}
+
+/// A zeroed frame's HHDM address; a named panic when there is none.
+fn page() -> u64 {
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        panic.fail("fpu: no frame for an area", 0)
+    }
+    let v = pa + frames.hhdm()
+    var i: u64 = 0
+    while i < PAGE / 8 {
+        // # Safety: the frame just taken, through the HHDM.
+        unsafe { ((v + i * 8) as *u64).write_volatile(0) }
+        i += 1
+    }
+    v
+}
+
+/// Enable the state (CR0, CR4, XCR0), size the area, build the template
+/// and one area per slot. Before kernel/sched's `start` (so the idle
+/// thread's area is reset too), IF clear.
+pub fn start() {
+    let cr0 = paging.cr0()
+    let ecx1 = cpuid(1, 0, 2)
+    var cr4 = paging.cr4() | CR4_OSFXSR | CR4_OSXMMEXCPT
+    var mode = FXSAVE
+    var size: u64 = 512
+    var xcr0: u64 = 0
+    // # Safety: CR0 keeps PE, PG, WP and the rest; only EM and TS clear
+    // and MP set, which no code the kernel runs depends on (it has no
+    // x87 or SSE instruction).
+    unsafe { pax_set_cr0((cr0 & CR0_KEEP) | CR0_MP) }
+    if ecx1 & CPUID1_XSAVE != 0 {
+        cr4 = cr4 | CR4_OSXSAVE
+    }
+    // # Safety: CR4 gains only the bits CPUID says exist (OSFXSR and
+    // OSXMMEXCPT on every x86-64 CPU).
+    unsafe { pax_set_cr4(cr4) }
+    if ecx1 & CPUID1_XSAVE != 0 {
+        xcr0 = XCR0_X87 | XCR0_SSE
+        if ecx1 & CPUID1_AVX != 0 {
+            xcr0 = xcr0 | XCR0_AVX
+        }
+        // # Safety: XSETBV of XCR0 with bits CPUID.(0DH,0):EAX allows
+        // (x87 and SSE always; AVX when CPUID.1 says AVX), CR4.OSXSAVE
+        // set just above.
+        unsafe { pax_xsetbv0(xcr0) }
+        size = cpuid(13, 0, 1)
+        mode = XSAVE
+    }
+    if size > PAGE || size < 512 {
+        panic.fail("fpu: the state area does not fit a page, bytes", size)
+    }
+    let t = page()
+    // # Safety: the template's frame, through the HHDM: FCW at byte 0,
+    // MXCSR at byte 24 (SDM vol. 1 Table 10-2), XSTATE_BV at byte 512
+    // (§13.4.2), each in an aligned word whose other bytes stay zero.
+    unsafe {
+        (t as *u64).write_volatile(FCW_INIT)
+        ((t + 24) as *u64).write_volatile(MXCSR_INIT)
+        if mode == XSAVE {
+            ((t + 512) as *u64).write_volatile(XCR0_X87 | XCR0_SSE)
+        }
+    }
+    put_sw(S_TEMPLATE, t)
+    put_sw(S_SIZE, size)
+    put_sw(S_XCR0, xcr0)
+    var s: u64 = 0
+    while s < SLOTS {
+        put_sw(S_AREAS + s, page())
+        s += 1
+    }
+    put_sw(S_MODE, mode)
+    s = 0
+    while s < SLOTS {
+        reset(s)
+        s += 1
+    }
+}
+
+/// Slot `s`'s area starts as the template (kernel/sched, for a new
+/// thread). Nothing before `start`.
+pub fn reset(s: u64) {
+    if sw(S_MODE) == OFF || s >= SLOTS {
+        return
+    }
+    let t = sw(S_TEMPLATE)
+    let a = sw(S_AREAS + s)
+    var i: u64 = 0
+    while i < PAGE / 8 {
+        // # Safety: two of `start`'s frames, through the HHDM.
+        unsafe { ((a + i * 8) as *u64).write_volatile(((t + i * 8) as *u64).read_volatile()) }
+        i += 1
+    }
+}
+
+/// The switch from slot `from` to slot `to` (kernel/sched's `run_next`,
+/// IF clear, from != to): the live state saved in `from`'s area, `to`'s
+/// loaded. Nothing before `start`.
+pub fn switch(from: u64, to: u64) {
+    let mode = sw(S_MODE)
+    if mode == OFF || from >= SLOTS || to >= SLOTS {
+        return
+    }
+    // # Safety: each area is a page of its own, 4096-aligned, as large
+    // as CPUID says the enabled state is; `to`'s holds the template or
+    // what XSAVE/FXSAVE wrote, so XRSTOR/FXRSTOR's checks (the header's
+    // reserved bytes, MXCSR's reserved bits) hold.
+    unsafe {
+        pax_fpu_save(sw(S_AREAS + from), mode)
+        pax_fpu_restore(sw(S_AREAS + to), mode)
+    }
+}
+
+/// Whether `start` ran.
+pub fn on() -> bool {
+    sw(S_MODE) != OFF
+}
+
+/// The line:
+/// `fpu: xsave <0|1>, xcr0 0x<x>, area <n> bytes, cr0.em 0, cr0.ts 0, cr4.osfxsr 1, cr4.osxsave <0|1>`.
+pub fn report() {
+    let cr0 = paging.cr0()
+    let cr4 = paging.cr4()
+    log.put("fpu: xsave ")
+    log.dec(if sw(S_MODE) == XSAVE { 1 } else { 0 })
+    log.put(", xcr0 ")
+    // # Safety: XGETBV is #UD without CR4.OSXSAVE, so it is read only
+    // when that bit is set.
+    log.hex(if cr4 & CR4_OSXSAVE != 0 { unsafe { pax_xgetbv0() } } else { 0 })
+    log.put(", area ")
+    log.dec(sw(S_SIZE) as int)
+    log.put(" bytes, cr0.em ")
+    log.dec(if cr0 & CR0_EM != 0 { 1 } else { 0 })
+    log.put(", cr0.ts ")
+    log.dec(if cr0 & CR0_TS != 0 { 1 } else { 0 })
+    log.put(", cr4.osfxsr ")
+    log.dec(if cr4 & CR4_OSFXSR != 0 { 1 } else { 0 })
+    log.put(", cr4.osxsave ")
+    log.dec(if cr4 & CR4_OSXSAVE != 0 { 1 } else { 0 })
+    log.end()
+}
