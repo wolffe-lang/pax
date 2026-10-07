@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# tests/reel — the boot reel (px08): kernel/kmain_reel.lu and
-# kernel/kmain_reel_text.lu, the stages in kernel/reel, two ISOs behind
-# Limine's menu (tools/reel build).
+# tests/tour — the tour of the kernel (px08): kernel/kmain_tour.lu and
+# kernel/kmain_tour_text.lu, the stages in kernel/tour, two ISOs behind
+# Limine's menu (tools/tour build).
 #
-#   tests/reel [--images DIR | --no-boot] [--firmware bios|uefi|both]
+#   tests/tour [--images DIR | --no-boot] [--firmware bios|uefi|both]
 #              [--tier native|release|both]
 #
 # Per tier (native, release) and firmware (bios, uefi), each ISO is
 # booted under tools/qemu-halt (the menu's 5 s timeout boots its default
 # entry), which waits for the `PANIC` line and proves the machine halted
 # in pax_halt with IF clear and silent after it. Assertions:
-#   R0 build: tools/reel build wrote both ISOs and SHA256SUMS; both
+#   R0 build: tools/tour build wrote both ISOs and SHA256SUMS; both
 #      kernels passed tools/build-kernel's object assertions.
 #   R1 the stages, in order, on both ISOs: the banner (its wolf version
 #      is kernel/wolf.pin's WOLF_VERSION), then `[1/5] boot` … `[5/5]
 #      threads`, each followed by its lines (the firmware line names the
-#      leg's firmware), the closing lines, `finale in 3... 2... 1...`.
+#      leg's firmware), the closing lines, `ending in 3... 2... 1...`.
 #      expect-serial --regex, in order: a stage out of order is a FAIL.
 #   R2 frames: the round trip's free counts go F -> F-1 -> F and the
 #      word reads back the same.
@@ -25,18 +25,18 @@
 #      each at runs 5, 10, … 30, ticks never falling; interleaved (all
 #      four first lines come before any thread's last line); joined: 4
 #      of 4 exited and the free frame count before = after.
-#   R5 finale (a), pax-reel.iso: the log ENDS with the overflow line and
+#   R5 ending (a), pax-tour.iso: the log ENDS with the overflow line and
 #      `PANIC stack overflow thread <id> cr2 0x<a> guard 0x<g> to 0x<lo>`,
 #      the same thread and guard, g <= a < lo; halted.
-#   R6 finale (b), pax-reel-b.iso: the log ENDS with `write: text at
+#   R6 ending (b), pax-tour-b.iso: the log ENDS with `write: text at
 #      0x<a>` and `PANIC page fault vector 14 error 0x…03 … cr2 0x<a>`,
 #      the same address, inside stage 3's text; halted.
-#   R7 pacing (native, pax-reel.iso, tools/reel time): each stage's
-#      heading comes at least 2.5 s after the one before (the pauses for
-#      the viewer are there), and the PANIC within 60 s of the banner.
+#   R7 pacing (native, pax-tour.iso, tools/tour time): each stage's
+#      heading comes at least 2.5 s after the one before (the pauses
+#      between stages are there), and the PANIC within 60 s of the banner.
 #
 # --images DIR boots ISOs built earlier by this script (DIR holds
-# <tier>/{pax-reel.iso,pax-reel-b.iso,kmain_reel.elf,kmain_reel_text.elf}):
+# <tier>/{pax-tour.iso,pax-tour-b.iso,kmain_tour.elf,kmain_tour_text.elf}):
 # any host with QEMU, nm and python3, no wolf needed. Without it the
 # script builds with $PAX_WOLF (linux); --no-boot stops after R0.
 #
@@ -54,7 +54,7 @@ while [ $# -gt 0 ]; do
         --no-boot)  noboot=1; shift ;;
         --firmware) legs=$2; shift 2 ;;
         --tier)     tiers=$2; shift 2 ;;
-        *)          die "usage: tests/reel [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+        *)          die "usage: tests/tour [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
     esac
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
@@ -63,8 +63,8 @@ need nm python3
 
 load_wolf_pin
 V=$WOLF_VERSION
-work=$PAX_BUILD/reel
-runs=$PAX_BUILD/reel-runs.txt
+work=$PAX_BUILD/tour
+runs=$PAX_BUILD/tour-runs.txt
 fail=0 ran=0
 bad() { say "FAIL $*"; fail=1; }
 HEX='0x[0-9a-f]{16}'
@@ -77,24 +77,24 @@ if [ -z "$images" ]; then
     rm -rf "$work"
     for tier in $tiers; do
         mkdir -p "$work/$tier"
-        if "$PAX_ROOT/tools/reel" build --tier "$tier" "$work/$tier" > "$work/$tier/build.log" 2>&1; then
+        if "$PAX_ROOT/tools/tour" build --tier "$tier" "$work/$tier" > "$work/$tier/build.log" 2>&1; then
             cat "$work/$tier/build.log" >&2
-            if [ -f "$work/$tier/pax-reel.iso" ] && [ -f "$work/$tier/pax-reel-b.iso" ] \
-                && grep -q 'build-kernel: ok: step 2 (kmain_reel,' "$work/$tier/build.log" \
-                && grep -q 'build-kernel: ok: step 2 (kmain_reel_text,' "$work/$tier/build.log" \
-                && (cd "$work/$tier" && sha256_of pax-reel.iso >/dev/null && grep -c 'pax-reel' SHA256SUMS | grep -qx 2); then
+            if [ -f "$work/$tier/pax-tour.iso" ] && [ -f "$work/$tier/pax-tour-b.iso" ] \
+                && grep -q 'build-kernel: ok: step 2 (kmain_tour,' "$work/$tier/build.log" \
+                && grep -q 'build-kernel: ok: step 2 (kmain_tour_text,' "$work/$tier/build.log" \
+                && (cd "$work/$tier" && sha256_of pax-tour.iso >/dev/null && grep -c 'pax-tour' SHA256SUMS | grep -qx 2); then
                 say "PASS R0 $tier: both kernels pass build-kernel's assertions; $(paste -sd' ' "$work/$tier/SHA256SUMS")"
             else
-                bad "R0 $tier: tools/reel build left no ISO pair or SHA256SUMS"
+                bad "R0 $tier: tools/tour build left no ISO pair or SHA256SUMS"
             fi
         else
             cat "$work/$tier/build.log" >&2
-            bad "R0 $tier: tools/reel build"
+            bad "R0 $tier: tools/tour build"
         fi
     done
     images=$work
     if [ "$noboot" = 1 ]; then
-        [ "$fail" = 0 ] && say "reel build (R0): PASS (no boot: --no-boot)" || say "reel build: FAIL"
+        [ "$fail" = 0 ] && say "tour build (R0): PASS (no boot: --no-boot)" || say "tour build: FAIL"
         exit "$fail"
     fi
 fi
@@ -107,7 +107,7 @@ record() { # tier iso leg status
 }
 halt_boot() { # tier iso elf leg
     local tier=$1 iso=$2 k=$3 leg=$4 hrc=0
-    log=$PAX_BUILD/reel-$tier-$iso-$leg.serial.log
+    log=$PAX_BUILD/tour-$tier-$iso-$leg.serial.log
     rm -f "$log" "$log".*
     if [ ! -f "$images/$tier/$iso.iso" ] || [ ! -f "$images/$tier/$k.elf" ]; then
         say "no image or ELF: $images/$tier/$iso.iso, $k.elf"
@@ -161,7 +161,7 @@ r1_lines() {
         'PAX today: Limine boot on BIOS and UEFI, frames, paging, interrupts,' \
         'a timer and preemptive threads; a heap and ring 3 too, not shown here.' \
         'All in wolf. Next: Linux binaries, unmodified.' \
-        'finale in 3\.\.\. 2\.\.\. 1\.\.\.'
+        'ending in 3\.\.\. 2\.\.\. 1\.\.\.'
 }
 r1_check() { # fwname -> 0/1, the first missing line on stderr
     local -a want=()
@@ -216,8 +216,8 @@ for leg in $legs; do
     fi
     fwname=bios; [ "$leg" = uefi ] && fwname=uefi64
     for tier in $tiers; do
-        for iso in pax-reel pax-reel-b; do
-            k=kmain_reel; [ "$iso" = pax-reel-b ] && k=kmain_reel_text
+        for iso in pax-tour pax-tour-b; do
+            k=kmain_tour; [ "$iso" = pax-tour-b ] && k=kmain_tour_text
             hrc=0; halt_boot "$tier" "$iso" "$k" "$leg" || hrc=$?
             if [ "$hrc" = 3 ]; then bad "R1-R6 $tier $iso $leg: no image"; continue; fi
             id="$tier $iso $leg"
@@ -240,12 +240,12 @@ for leg in $legs; do
             if v=$(r4_check); then say "PASS R4 $id: ${v#ok }"; else bad "R4 $id: ${v#no:}"; grep -E '^(wolf |lupin|lobo |pax  )  t|^join' "$log.norm" | sed 's/^/  /' >&2; fi
             why=
             [ "$hrc" = 0 ] || why+=" not halted ($(not_halted));"
-            if [ "$iso" = pax-reel ]; then
+            if [ "$iso" = pax-tour ]; then
                 "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
-                    'finale: a thread recurses until it runs off its stack' \
+                    'ending: a thread recurses until it runs off its stack' \
                     "overflow: t$N stack $HEX to $HEX, guard $HEX to $HEX" \
                     "PANIC stack overflow thread $N cr2 $HEX guard $HEX to $HEX" >/dev/null \
-                    || why+=" the log does not end finale, overflow: …, PANIC stack overflow thread …;"
+                    || why+=" the log does not end with ending: …, overflow: …, PANIC stack overflow thread …;"
                 o=$(grep -E "^overflow: t$N stack $HEX to $HEX, guard $HEX to $HEX\$" "$log.norm" | tail -n 1)
                 p=$(grep -E "^PANIC stack overflow thread $N cr2 $HEX guard $HEX to $HEX\$" "$log.norm" | tail -n 1)
                 if [ -n "$o" ] && [ -n "$p" ]; then
@@ -262,10 +262,10 @@ for leg in $legs; do
                 fi
             else
                 "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
-                    "finale: the kernel writes to its own text, which paging mapped r-x" \
+                    "ending: the kernel writes to its own text, which paging mapped r-x" \
                     "write: text at $HEX" \
                     "PANIC page fault vector 14 error 0x0000000000000003 rip $HEX rsp $HEX frame $HEX cr2 $HEX" >/dev/null \
-                    || why+=" the log does not end finale, write: text at …, PANIC page fault vector 14 …;"
+                    || why+=" the log does not end with ending: …, write: text at …, PANIC page fault vector 14 …;"
                 w=$(sed -n 's/^write: text at \(0x[0-9a-f]*\)$/\1/p' "$log.norm" | tail -n 1)
                 c=$(sed -n 's/^PANIC page fault vector 14 .* cr2 \(0x[0-9a-f]*\)$/\1/p' "$log.norm" | tail -n 1)
                 t=$(grep -E "^paging: text   $HEX to $HEX " "$log.norm" | tail -n 1)
@@ -282,10 +282,10 @@ for leg in $legs; do
             fi
         done
     done
-    # R7: the pacing, timed line by line (native, finale a).
-    if [ -f "$images/native/pax-reel.iso" ]; then
-        tlog=$PAX_BUILD/reel-time-$leg.log
-        trc=0; "$PAX_ROOT/tools/reel" time --firmware "$leg" "$images/native/pax-reel.iso" "$tlog" >/dev/null 2>&1 || trc=$?
+    # R7: the pacing, timed line by line (native, ending a).
+    if [ -f "$images/native/pax-tour.iso" ]; then
+        tlog=$PAX_BUILD/tour-time-$leg.log
+        trc=0; "$PAX_ROOT/tools/tour" time --firmware "$leg" "$images/native/pax-tour.iso" "$tlog" >/dev/null 2>&1 || trc=$?
         v=$(awk '
             { t = $1 + 0; line = substr($0, 11) }
             line ~ /^PAX: a kernel written in wolf$/ { banner = t }
@@ -299,13 +299,13 @@ for leg in $legs; do
                 printf "ok headings at %.2f %.2f %.2f %.2f %.2f s, PANIC at %.2f s (QEMU start = 0)\n", h[1], h[2], h[3], h[4], h[5], panic
             }' "$tlog.times" 2>/dev/null)
         if [ "$trc" = 0 ] && [ "${v%% *}" = ok ]; then
-            say "PASS R7 native pax-reel $leg: ${v#ok }"
+            say "PASS R7 native pax-tour $leg: ${v#ok }"
         else
-            bad "R7 native pax-reel $leg: tools/reel time exit $trc; ${v#no:}"
+            bad "R7 native pax-tour $leg: tools/tour time exit $trc; ${v#no:}"
         fi
     fi
 done
 cat "$runs"
 [ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
-[ "$fail" = 0 ] && say "reel: PASS" || say "reel: FAIL"
+[ "$fail" = 0 ] && say "tour: PASS" || say "tour: FAIL"
 exit "$fail"
