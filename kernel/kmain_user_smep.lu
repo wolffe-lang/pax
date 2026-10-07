@@ -1,0 +1,59 @@
+//! member: false
+// kmain_user_smep.lu — the SMEP witness (px09, tests/mpx3-user U8).
+// With kernel/user's `start` having set CR4.SMEP, the kernel makes
+// hello's address space live and jumps to its first code byte in ring
+// 0 (boot/user.S's `pax_jump`): an instruction fetch from a user page
+// at CPL 0, which SMEP turns into a page fault (Intel SDM vol. 3A
+// §4.6.1), error 0x11 (present, an instruction fetch, supervisor), RIP
+// and CR2 both 0x400000:
+//
+//     PAX user: smep
+//     …
+//     smep: ring 0 jumps to user 0x0000000000400000
+//     PANIC page fault vector 14 error 0x0000000000000011 rip 0x0000000000400000 rsp 0x… frame 0x… cr2 0x0000000000400000
+//
+// Without SMEP the kernel would run hello's code in ring 0; its first
+// `syscall` from CPL 0 lands in the entry on the kernel's stack. The
+// test fails anything but the panic.
+use apic
+use frames
+use interrupts
+use log
+use paging
+use panic
+use sched
+use serial
+use timer
+use user
+
+/// hello's first code byte, in its address space.
+const USER_VA: u64 = 0x400000
+
+extern "c" fn pax_jump(va: u64)
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX user: smep")
+    frames.start()
+    let limine = paging.cr3()
+    let before = frames.free_count()
+    let pml4 = paging.start()
+    paging.report(limine, before)
+    interrupts.start()
+    apic.start(pml4)
+    timer.start()
+    sched.start(pml4)
+    user.start()
+    user.report()
+    timer.stop()
+    let c = user.load(0) // hello
+    paging.load(c)
+    log.put("smep: ring 0 jumps to user ")
+    log.hex(USER_VA)
+    log.end()
+    // # Safety: none — this is the fault under test: SMEP must refuse
+    // the fetch.
+    unsafe { pax_jump(USER_VA) }
+    log.line("smep: returned, no fault")
+    panic.halt()
+}

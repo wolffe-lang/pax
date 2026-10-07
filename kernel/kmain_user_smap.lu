@@ -1,0 +1,60 @@
+//! member: false
+// kmain_user_smap.lu — the SMAP witness (px09, tests/mpx3-user U7).
+// With kernel/user's `start` having set CR4.SMAP, the kernel makes
+// hello's address space live and reads its first code byte in ring 0
+// with a plain load, no STAC: a supervisor data access to a user page,
+// which SMAP turns into a page fault (Intel SDM vol. 3A §4.6.1), error
+// 0x1 (present, a read, supervisor):
+//
+//     PAX user: smap
+//     …
+//     user: syscall star … smep 1, smap 1
+//     smap: ring 0 reads user 0x0000000000400000 without stac
+//     PANIC page fault vector 14 error 0x0000000000000001 rip 0x… rsp 0x… frame 0x… cr2 0x0000000000400000
+//
+// Without SMAP the read succeeds and the kernel says so and halts:
+// `smap: read 0x<byte>, no fault` (the test fails it).
+use apic
+use frames
+use interrupts
+use log
+use paging
+use panic
+use sched
+use serial
+use timer
+use user
+
+/// hello's first code byte, in its address space.
+const USER_VA: u64 = 0x400000
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX user: smap")
+    frames.start()
+    let limine = paging.cr3()
+    let before = frames.free_count()
+    let pml4 = paging.start()
+    paging.report(limine, before)
+    interrupts.start()
+    apic.start(pml4)
+    timer.start()
+    sched.start(pml4)
+    user.start()
+    user.report()
+    timer.stop()
+    let c = user.load(0) // hello
+    paging.load(c)
+    log.put("smap: ring 0 reads user ")
+    log.hex(USER_VA)
+    log.put(" without stac")
+    log.end()
+    // # Safety: none — this is the fault under test: 0x400000 is mapped
+    // (hello's first code page, user), and SMAP must refuse the read.
+    let b = unsafe { (USER_VA as *u8).read_volatile() }
+    log.put("smap: read ")
+    log.hex(b as u64)
+    log.put(", no fault")
+    log.end()
+    panic.halt()
+}

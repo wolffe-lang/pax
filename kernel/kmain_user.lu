@@ -1,0 +1,143 @@
+//! member: false
+// kmain_user.lu — user mode (px09, tests/mpx3-user U1-U6). The kernel
+// switches to PAX's paging structures, loads its tables, starts the
+// timer and the scheduler, turns on SYSCALL, SMEP and SMAP (kernel/user),
+// enables interrupts, and runs user programs, each in an address space
+// of its own and on a kernel thread of its own that enters ring 3 by
+// `iretq`; it waits for each batch and checks every frame came back:
+//   hello      writes, computes its CPL, tries two numbers PAX lacks
+//   segv, kread, textwrite, guard, priv
+//              fault in ring 3: each killed by name
+//   badptr     write with three bad pointers: -EFAULT each
+//   spin1, spin2
+//              at once: preempted in ring 3 and resumed, each in its
+//              own space
+//   after      hello's bytes again, after every fault: the kernel lived
+// Then interrupts off, the timer stopped, `halt`:
+//
+//     PAX user: ring 3
+//     paging: limine cr3 0x<A>, pax cr3 0x<B>, <P> table frames
+//     sched: main 0, idle 1, 16 slots, …
+//     user: syscall star 0x0010000800000000 lstar 0x<L> fmask 0x0000000000044700, efer.sce 1, smep 1, smap 1
+//     user: hello pid 2 cr3 0x<c> code 0x0000000000400000 1 pages r-x, stack 0x00007fffffffb000 to 0x00007ffffffff000 rw- nx, guard 0x00007fffffffa000, kernel half <k> of <k> entries shared
+//     hello from ring 3: cpl 3
+//     user: hello pid 2 syscall 39: -ENOSYS
+//     user: hello pid 2 syscall 500: -ENOSYS
+//     user: hello pid 2 exit 0 after 1 runs
+//     user: frames free <A> before, <A - 16> with 1 processes, <A> after
+//     user: segv pid 3 …
+//     user: segv pid 3 killed: page fault vector 14 error 0x…4 rip 0x… cr2 0x…0 after 1 runs
+//     … (kread, textwrite, guard, priv, badptr, spin1 + spin2, after)
+//     user: ticks in ring 3 <n>
+//     halt
+use apic
+use frames
+use interrupts
+use log
+use paging
+use panic
+use sched
+use serial
+use sync
+use timer
+use user
+
+extern "c" let pax_user_thread: *u8
+
+// kernel/user's program numbers (its module doc's table).
+const HELLO: u64 = 0
+const SEGV: u64 = 1
+const KREAD: u64 = 2
+const TEXTWRITE: u64 = 3
+const GUARD: u64 = 4
+const PRIV: u64 = 5
+const BADPTR: u64 = 6
+const SPIN1: u64 = 7
+const SPIN2: u64 = 8
+const AFTER: u64 = 9
+const NONE: u64 = 10
+
+/// One line under the console lock.
+fn say(what: str) {
+    let s = sync.acquire(sync.console())
+    log.put(what)
+    log.end()
+    sync.release(sync.console(), s)
+}
+
+/// Run program `pa` and, unless `pb` is NONE, `pb` at once, each in its
+/// own address space; wait for them; write the frames line.
+fn run(pa: u64, pb: u64) {
+    // # Safety: the address of kernel/user's export; nothing is read.
+    let body = unsafe { pax_user_thread as u64 }
+    let saved = sync.irq_save()
+    let before = frames.free_count()
+    if pa >= user.programs() || (pb != NONE && pb >= user.programs()) {
+        panic.fail("user test: no such program", pa)
+    }
+    let ca = user.load(pa)
+    let ia = sched.create_user(body, pa, ca)
+    user.describe(pa, ia, ca)
+    var n: u64 = 1
+    if pb != NONE {
+        let cb = user.load(pb)
+        let ib = sched.create_user(body, pb, cb)
+        user.describe(pb, ib, cb)
+        n = 2
+    }
+    let during = frames.free_count()
+    sync.irq_restore(saved)
+    sched.wait_all()
+    let after = frames.free_count()
+    let s = sync.acquire(sync.console())
+    log.put("user: frames free ")
+    log.dec(before as int)
+    log.put(" before, ")
+    log.dec(during as int)
+    log.put(" with ")
+    log.dec(n as int)
+    log.put(" processes, ")
+    log.dec(after as int)
+    log.put(" after")
+    log.end()
+    sync.release(sync.console(), s)
+}
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX user: ring 3")
+    frames.start()
+    let limine = paging.cr3()
+    let before = frames.free_count()
+    let pml4 = paging.start()
+    paging.report(limine, before)
+    interrupts.start()
+    apic.start(pml4)
+    timer.start()
+    sched.start(pml4)
+    sched.report()
+    user.start()
+    user.report()
+    sync.enable()
+
+    run(HELLO, NONE)
+    run(SEGV, NONE)
+    run(KREAD, NONE)
+    run(TEXTWRITE, NONE)
+    run(GUARD, NONE)
+    run(PRIV, NONE)
+    run(BADPTR, NONE)
+    run(SPIN1, SPIN2)
+    run(AFTER, NONE)
+
+    let s = sync.acquire(sync.console())
+    log.put("user: ticks in ring 3 ")
+    log.dec(user.ticks() as int)
+    log.end()
+    sync.release(sync.console(), s)
+
+    let _off = sync.irq_save()
+    timer.stop()
+    log.line("halt")
+    panic.halt()
+}
