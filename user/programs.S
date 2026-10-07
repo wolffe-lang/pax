@@ -1,0 +1,226 @@
+/* programs.S — the first user programs (px09): flat, position-
+   independent x86-64 blobs the kernel carries in its .rodata and copies,
+   one per process, into fresh frames mapped at 0x400000 in that
+   process's user half (kernel/user). Each starts executing at its first
+   byte, in ring 3, with %rsp the top of a 16 KiB stack at 0x7ffffffff000
+   and every other general register zero (boot/user.S's pax_enter_user).
+   They reach their own bytes only RIP-relative, so the copy runs at any
+   address; and since .rodata is mapped no-execute in the kernel's
+   tables, none of this can run in ring 0 where it is linked.
+
+   Why assembly and not wolf (argued in notes/px09-user-mode.md): wolf
+   has no inline assembly (wolf-lang#526), so a wolf program still needs
+   an assembly `syscall` shim; the fault cases need the exact faulting
+   instruction (a `hlt`, a read of address 0); and the general ELF loader
+   that a wolf-built program wants is px10's. These blobs test the
+   kernel's ring-3 path and nothing else.
+
+   System calls follow Linux's x86-64 ABI (the psABI's A.2.1, numbers
+   from arch/x86/entry/syscalls/syscall_64.tbl): %rax the number, %rdi,
+   %rsi, %rdx the first three arguments, `syscall`, the result in %rax,
+   -4095..-1 an errno (EFAULT 14, ENOSYS 38 from the uapi errno headers).
+   write is 1, getpid 39, exit 60; PAX implements write and exit only,
+   so 39 must come back -38 (ENOSYS), as must 500 (no such number).
+
+     hello      write(1, "hello from ring 3: cpl ", 23); then the CPL,
+                computed here as CS & 3 and written as a digit and a
+                newline into two bytes of its own stack, write(1, sp, 2);
+                getpid and 500, each expected -38; exit(0), or 1-4 naming
+                the first expectation that failed
+     segv       reads address 0 (nothing is mapped there): #PF, a user
+                read of a page not present (error 0x4)
+     kread      reads the kernel image at 0xffffffff80000000: present
+                but supervisor (error 0x5)
+     textwrite  writes its own first instruction: present, user, read-
+                only (error 0x7)
+     guard      writes 16 bytes below the stack's lowest page, into the
+                guard page the kernel leaves unmapped (error 0x6)
+     priv       `hlt` at CPL 3: #GP(0) (SDM vol. 2 HLT)
+     badptr     write(1, p, 16) with p a kernel-half address, an unmapped
+                user address (0x10), and the stack's top less 8 (8 bytes
+                mapped, then the unmapped page above); exit(14) when all
+                three returned -14 (EFAULT), exit(1) otherwise
+     spin       write(1, "spin: begin\n", 12); 2^29 decrements of a
+                register (no system call, no memory); write(1, "spin:
+                end\n", 10); exit(0) — run twice at once, each must be
+                preempted in ring 3 and resumed
+
+   pax_uprogs: the blobs' bounds, a [start, end) pair of addresses per
+   blob, in the order kernel/user numbers them (0 hello … 7 spin).
+
+   Written from the Intel SDM vol. 2 (SYSCALL, HLT, MOV from a segment
+   register), vol. 3A §4.7 (page-fault error codes), §6.15 (interrupt
+   13, 14); the x86-64 psABI A.2.1; syscall_64.tbl and the uapi errno
+   headers. No Linux source; no other kernel's source. */
+
+        .section .rodata.pax_user, "a"
+        .p2align 4
+
+        .globl pax_uprog_hello
+pax_uprog_hello:
+        movl    $1, %eax                /* write */
+        movl    $1, %edi                /* stdout */
+        leaq    .Lhello_msg(%rip), %rsi
+        movl    $(.Lhello_msg_end - .Lhello_msg), %edx
+        syscall
+        cmpq    $(.Lhello_msg_end - .Lhello_msg), %rax
+        movl    $1, %edi
+        jne     .Lhello_exit
+        movw    %cs, %ax                /* CPL = CS's RPL */
+        andl    $3, %eax
+        addl    $0x30, %eax             /* '0' + CPL */
+        subq    $16, %rsp
+        movb    %al, (%rsp)
+        movb    $10, 1(%rsp)            /* '\n' */
+        movl    $1, %eax
+        movl    $1, %edi
+        movq    %rsp, %rsi
+        movl    $2, %edx
+        syscall
+        cmpq    $2, %rax
+        movl    $2, %edi
+        jne     .Lhello_exit
+        movl    $39, %eax               /* getpid: not implemented */
+        syscall
+        cmpq    $-38, %rax
+        movl    $3, %edi
+        jne     .Lhello_exit
+        movl    $500, %eax              /* no such number */
+        syscall
+        cmpq    $-38, %rax
+        movl    $4, %edi
+        jne     .Lhello_exit
+        xorl    %edi, %edi
+.Lhello_exit:
+        movl    $60, %eax               /* exit */
+        syscall
+        ud2
+.Lhello_msg:
+        .ascii  "hello from ring 3: cpl "
+.Lhello_msg_end:
+pax_uprog_hello_end:
+
+        .p2align 4
+pax_uprog_segv:
+        movq    0x0, %rax               /* a read of address 0 */
+        movl    $99, %edi
+        movl    $60, %eax
+        syscall
+        ud2
+pax_uprog_segv_end:
+
+        .p2align 4
+pax_uprog_kread:
+        movabsq $0xffffffff80000000, %rbx
+        movq    (%rbx), %rax            /* the kernel image */
+        movl    $99, %edi
+        movl    $60, %eax
+        syscall
+        ud2
+pax_uprog_kread_end:
+
+        .p2align 4
+pax_uprog_textwrite:
+        leaq    pax_uprog_textwrite(%rip), %rbx
+        movq    $1, (%rbx)              /* its own code */
+        movl    $99, %edi
+        movl    $60, %eax
+        syscall
+        ud2
+pax_uprog_textwrite_end:
+
+        .p2align 4
+pax_uprog_guard:
+        movq    %rax, -16400(%rsp)      /* 16 bytes below the stack's 16 KiB */
+        movl    $99, %edi
+        movl    $60, %eax
+        syscall
+        ud2
+pax_uprog_guard_end:
+
+        .p2align 4
+pax_uprog_priv:
+        hlt
+        movl    $99, %edi
+        movl    $60, %eax
+        syscall
+        ud2
+pax_uprog_priv_end:
+
+        .p2align 4
+pax_uprog_badptr:
+        xorl    %r12d, %r12d            /* how many came back -EFAULT */
+        movl    $1, %eax
+        movl    $1, %edi
+        movabsq $0xffffffff80000000, %rsi
+        movl    $16, %edx
+        syscall
+        cmpq    $-14, %rax
+        jne     1f
+        incl    %r12d
+1:      movl    $1, %eax
+        movl    $1, %edi
+        movl    $0x10, %esi
+        movl    $16, %edx
+        syscall
+        cmpq    $-14, %rax
+        jne     2f
+        incl    %r12d
+2:      movl    $1, %eax
+        movl    $1, %edi
+        leaq    -8(%rsp), %rsi          /* 8 bytes of stack, then unmapped */
+        movl    $16, %edx
+        syscall
+        cmpq    $-14, %rax
+        jne     3f
+        incl    %r12d
+3:      movl    $1, %edi
+        cmpl    $3, %r12d
+        jne     4f
+        movl    $14, %edi
+4:      movl    $60, %eax
+        syscall
+        ud2
+pax_uprog_badptr_end:
+
+        .p2align 4
+pax_uprog_spin:
+        movl    $1, %eax
+        movl    $1, %edi
+        leaq    .Lspin_begin(%rip), %rsi
+        movl    $(.Lspin_begin_end - .Lspin_begin), %edx
+        syscall
+        movl    $0x20000000, %ebx       /* 2^29 */
+1:      decq    %rbx
+        jnz     1b
+        movl    $1, %eax
+        movl    $1, %edi
+        leaq    .Lspin_end(%rip), %rsi
+        movl    $(.Lspin_end_end - .Lspin_end), %edx
+        syscall
+        xorl    %edi, %edi
+        movl    $60, %eax
+        syscall
+        ud2
+.Lspin_begin:
+        .ascii  "spin: begin\n"
+.Lspin_begin_end:
+.Lspin_end:
+        .ascii  "spin: end\n"
+.Lspin_end_end:
+pax_uprog_spin_end:
+
+        .section .rodata
+        .p2align 3
+        .globl pax_uprogs
+pax_uprogs:
+        .quad   pax_uprog_hello, pax_uprog_hello_end
+        .quad   pax_uprog_segv, pax_uprog_segv_end
+        .quad   pax_uprog_kread, pax_uprog_kread_end
+        .quad   pax_uprog_textwrite, pax_uprog_textwrite_end
+        .quad   pax_uprog_guard, pax_uprog_guard_end
+        .quad   pax_uprog_priv, pax_uprog_priv_end
+        .quad   pax_uprog_badptr, pax_uprog_badptr_end
+        .quad   pax_uprog_spin, pax_uprog_spin_end
+
+        .section .note.GNU-stack, "", @progbits
