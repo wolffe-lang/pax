@@ -46,7 +46,9 @@ const S_IFDIR: u64 = 0x4000 // 0o040000
 const S_IFLNK: u64 = 0xa000 // 0o120000
 
 // Field indices, each eight hex digits after the six-byte magic.
+const F_INO: u64 = 0
 const F_MODE: u64 = 1
+const F_NLINK: u64 = 4
 const F_FILESIZE: u64 = 6
 const F_NAMESIZE: u64 = 11
 
@@ -265,6 +267,26 @@ pub fn mode(e: u64) -> u64 {
     field(e, F_MODE) else 0
 }
 
+/// Entry `e`'s inode number (the header's `ino`; px12, `stat`).
+pub fn ino(e: u64) -> u64 {
+    field(e, F_INO) else 0
+}
+
+/// Entry `e`'s link count (the header's `nlink`; px12, `stat`).
+pub fn nlink(e: u64) -> u64 {
+    field(e, F_NLINK) else 0
+}
+
+/// Whether entry `e` is a directory (px12).
+pub fn is_dir(e: u64) -> bool {
+    mode(e) & S_IFMT == S_IFDIR
+}
+
+/// Whether entry `e` is a regular file (px12).
+pub fn is_file(e: u64) -> bool {
+    mode(e) & S_IFMT == S_IFREG
+}
+
 /// Entry `e`'s name: the offset of its first byte past a leading `./`
 /// or `/` (0) and its length from there (1).
 fn name_span(e: u64, which: int) -> u64 {
@@ -316,6 +338,66 @@ pub fn find(path: str) -> u64 ! ArchiveError {
         e = next(e)?
     }
     not_found
+}
+
+/// `find` for the `n` bytes at kernel address `p` (px12: a path read
+/// from the initramfs itself, kmain_boreutils's run list).
+pub fn find_span(p: u64, n: u64) -> u64 ! ArchiveError {
+    var e = first()?
+    while e != END {
+        if same_span(e, p, n) {
+            if mode(e) & S_IFMT != S_IFREG {
+                return not_regular
+            }
+            return e
+        }
+        e = next(e)?
+    }
+    not_found
+}
+
+/// Whether entry `e`'s name is the `n` bytes at `p`, one leading `/`
+/// dropped.
+fn same_span(e: u64, p: u64, n: u64) -> bool {
+    var s = p
+    var k = n
+    // # Safety: [p, p + n) is the caller's kernel memory.
+    if k > 0 && unsafe { (s as *u8).read_volatile() } == 47 {
+        s += 1
+        k -= 1
+    }
+    if name_length(e) != k {
+        return false
+    }
+    var i: u64 = 0
+    while i < k {
+        // # Safety: as above.
+        let b = unsafe { ((s + i) as *u8).read_volatile() as u64 }
+        if name_byte(e, i) != b {
+            return false
+        }
+        i += 1
+    }
+    true
+}
+
+/// The entry for the path at [p, p + n) (as `find_span`), or END.
+pub fn lookup_span(p: u64, n: u64) -> u64 {
+    find_span(p, n) else END
+}
+
+/// Why the path at [p, p + n) has no entry ("" when it has one).
+pub fn lookup_why_span(p: u64, n: u64) -> str {
+    let c = find_span(p, n) else |e| match e {
+        no_module => C_NO_MODULE,
+        compressed => C_COMPRESSED,
+        bad_magic => C_BAD_MAGIC,
+        truncated => C_TRUNCATED,
+        bad_hex => C_BAD_HEX,
+        not_found => C_NOT_FOUND,
+        not_regular => C_NOT_REGULAR,
+    }
+    why_code(c)
 }
 
 /// Whether entry `e`'s name is `path`, one leading `/` dropped.
