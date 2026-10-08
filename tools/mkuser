@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# mkuser — build px10's user programs (user/elf/hello.S) into OUTDIR.
+# mkuser — build px10's user programs (user/elf/hello.S) and px13's
+# (user/elf/ask.S) into OUTDIR.
 #
 #   tools/mkuser OUTDIR
 #
@@ -15,6 +16,8 @@
 #              whatever -dynamic-linker says); it calls nothing in it
 #   hello32    hello with EI_CLASS (byte 4) set to 1, ELFCLASS32
 #   hello-arm  hello with e_machine (bytes 18-19) set to 183, EM_AARCH64
+#   ask        user/elf/ask.S (px13), -static -no-pie: the console's test
+#              program (prompts, reads, says what it read)
 # and prints one line per file: `<name> <sha256> <bytes>`. Every link
 # passes --build-id=none, so two builds by one toolchain give one digest.
 # Exit 0, or 2 on a tool error.
@@ -41,6 +44,7 @@ open(os.path.join(out, "hello32"), "wb").write(c)
 a = bytearray(b); a[18:20] = (183).to_bytes(2, "little")   # e_machine
 open(os.path.join(out, "hello-arm"), "wb").write(a)
 PY
-for f in hello hello-pie hello-dyn hello32 hello-arm; do
+"$cc" "${common[@]}" -static -no-pie -o "$out/ask" "$PAX_ROOT/user/elf/ask.S" || die "cc: ask"
+for f in hello hello-pie hello-dyn hello32 hello-arm ask; do
     printf '%s %s %s\n' "$f" "$(sha256_of "$out/$f")" "$(wc -c < "$out/$f" | tr -d ' ')"
 done
