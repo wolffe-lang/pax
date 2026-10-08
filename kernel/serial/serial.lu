@@ -109,3 +109,32 @@ pub fn put(b: u8) {
         spins = spins + 1
     }
 }
+
+// --- receiving (px13) ----------------------------------------------------
+
+const IER_RX: int = 0x01 // received data available
+const FCR_RX1: int = 0x07 // FIFOs on, both cleared, receive trigger 1 byte
+
+/// Turn the receiver's interrupt on (px13, kernel/console): a receive
+/// trigger of one byte, so each keystroke raises it at once (px01's
+/// trigger of 14 would wait for the FIFO's character timeout), and IER
+/// bit 0, received data available. MCR's OUT2, the PC's gate on the
+/// UART's interrupt line, is already up (`init`). The 8259 line (4) is
+/// kernel/console's to unmask.
+pub fn receive_on() {
+    out(FCR, FCR_RX1)
+    while inp(LSR) & LSR_DATA_READY != 0 {
+        let _b = inp(THR) // RBR: whatever arrived before
+    }
+    out(IER, IER_RX)
+}
+
+/// Whether a received byte is waiting (LSR bit 0).
+pub fn ready() -> bool {
+    inp(LSR) & LSR_DATA_READY != 0
+}
+
+/// The received byte (RBR); call after `ready` (`take` is a keyword).
+pub fn receive() -> u64 {
+    inp(THR) as u64
+}
