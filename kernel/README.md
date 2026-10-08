@@ -29,7 +29,7 @@ text (`tests/tour`, `tools/tour`).
 
 | module | what |
 |---|---|
-| `serial/` | the 16550 driver on COM1: `init` (no interrupts, 115200 8N1, FIFOs; scratch and loopback checks), `put` (LSR-polled) |
+| `serial/` | the 16550 driver on COM1: `init` (no interrupts, 115200 8N1, FIFOs; scratch and loopback checks), `put` (LSR-polled); px13: `receive_on` (a one-byte receive trigger, IER's received-data interrupt), `ready`, `receive` |
 | `log/` | a line writer over `serial`: `put`, `line`, `end` (CR LF), `put_byte`, `dec`, `hex`, all without allocation |
 | `boot_info/` | Limine's responses (bootloader name and version, firmware type, memory map, HHDM, the image's physical base) read in wolf with `read_volatile` through `N as *T`; each request named with `extern "c" let` (kw10; `boot/limine.S` supplied the addresses before) |
 | `frames/` | the physical page-frame allocator (px02): two bitmaps (free, ever-usable) over the memory map, its state in frames it takes for itself above 1 MiB, reached through the HHDM; `init`/`start`, `alloc` (row `out_of_memory`), `free` (named panics), the totals |
@@ -243,8 +243,44 @@ witnesses (`tests/mpx3-user`).
 - No `region`, no heap: a process's state is words in its area and
   frames; a path goes through `../boot/user.S`'s `pax_kbuf` (one CPU,
   IF clear for the whole call).
-- Not yet: `fork`/`execve`/`wait4` (px14), console input (px13: `read`
-  on the console is end-of-file), signals, threads (`clone`, futexes,
+- Not yet: `fork`/`execve`/`wait4` (px14), console input (px13, below:
+  kmain_boreutils never starts it, so `read` on its console is
+  end-of-file), signals, threads (`clone`, futexes,
   `set_robust_list` and `rseq` -ENOSYS), a writable file system, a wall
   clock, the vDSO, demand paging, PIE and `PT_INTERP`.
 
+
+## The console (px13)
+
+`kmain_console.lu` starts the console's input and runs the
+initramfs's `/etc/pax-run` as kmain_boreutils does, one command at a
+time, but with descriptors 0-2 a terminal: the first command is init
+(PID 1 in role; PAX's ids number kernel threads first, so the log says
+`pid 2`), and when the list is done the kernel says how init ended
+(`PAX: init /bin/pelt ended with status 0; nothing left to run`) and
+halts (`tests/mpx3-console`).
+
+| module or file | what |
+|---|---|
+| `console/` | COM1's receiver (vector 36, the 8259 master's line 4) and the i8042's keyboard (vector 33, line 1; the configuration byte set to interrupt and translate to scancode set 1; set 1 decoded for a US layout: shifts, controls, Caps Lock, Ctrl with a letter) into one input queue and one line discipline: canonical mode (echo, erase, kill, word erase, Enter, Ctrl-D at an empty line for end of file, Ctrl-D on a non-empty one to hand it over) and non-canonical (VMIN 0 or at least 1); the settings a Linux pseudo-terminal starts with, measured, less ISIG and IXON (no signals yet: Ctrl-C is the byte 0x03); `read` (one line a call in canonical mode, `restart()` when nothing is ready), the terminal ioctls (TCGETS, TCSETS, TCSETSW, TCSETSF, TIOCGWINSZ 0x0, TIOCSWINSZ; anything else refused by name), `report`, `summary`. Before `start` it is px12's console: reads end of file, every ioctl -ENOTTY |
+| `../boot/console.S` | the console's storage: 64 state words and a 4096-byte input ring in `.bss` |
+| `sched/` (px13 additions) | a wait state for console input: `block_input` (from a system call), `wake_input` (from the console's interrupt), `kick` (switch to a woken thread at once when the CPU was idle) |
+| `user/` (px13 additions) | a console `read` with nothing ready rewinds its frame to the `syscall` instruction (RIP − 2, RAX the call's number) and waits for input, so the read runs afresh in its own address space when woken; a refused tty ioctl is a `refused: tty ioctl 0x…` line and -ENOTTY; a `write` to the console turns NL into CR NL only under OPOST and ONLCR; `last_exit` |
+| `timer/` (px13 additions) | `unmask` (a master line), `master_mask`, `eoi` (any 8259 vector) |
+| `files/` (px13 change) | a console descriptor's `read` and `ioctl` go to `console/` |
+| `../user/elf/ask.S` | the console's test program: prompts, makes one read, says what it read; `ask tty` asks the terminal first, reads a line with echo off and bytes in non-canonical mode |
+
+- Both lines stay masked until `console.start()`, so every earlier
+  kernel (the tour, kmain_boreutils) behaves as before: a batch
+  program's descriptors are not a terminal there, as Linux's pipe is
+  not, and `tests/mpx3-boreutils` still compares with Linux's pipe.
+- No `region`, no heap: the queue is bytes in `.bss`, read and
+  written volatile (the interrupt writes them behind every thread's
+  back), every entry with IF clear.
+- Not yet: signals (Ctrl-C, Ctrl-\, Ctrl-Z deliver their bytes; ISIG
+  is clear), output flow control (IXON clear), VTIME, VREPRINT,
+  VLNEXT, arrows and function keys (no escape sequences), line
+  editing beyond the discipline's, more than one reader's fairness, a
+  framebuffer console (the echo and every write go to COM1), process
+  groups and a controlling terminal (TIOCGPGRP and friends are refused
+  by name), process creation (`clone`/`execve`/`wait4`, px14).
