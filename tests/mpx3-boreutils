@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+# tests/mpx3-boreutils — M-PX3 (px12): unmodified static x86-64 Linux
+# programs, boreutils' own built from boreutils' own tree, run on PAX
+# from the initramfs, their output and exit status byte-identical to the
+# same binaries on Linux.
+#
+#   tests/mpx3-boreutils [--images DIR | --no-boot] [--bore DIR]
+#                        [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# The programs: boreutils (user/boreutils.pin's tree, tools/mkboreutils:
+# echo cat head wc tail pwd sleep, linked static against this host's
+# glibc) and busybox-static's busybox (/bin/busybox: boreutils has no
+# `ls`), each unmodified. The tree ROOT holds them under bin/, two text
+# files under etc/ and the run list user/mpx3-boreutils.run as
+# etc/pax-run; the initramfs is ROOT (tools/mkinitramfs); the kernel is
+# kmain_boreutils, which runs etc/pax-run's commands one at a time.
+# tools/linux-run runs the same list on this host's Linux, chrooted in
+# ROOT (root needed: sudo -n), under strace too. Assertions, per tier
+# (native, release) and firmware (bios, uefi):
+#   B0 build: tools/build-kernel's object assertions for kmain_boreutils;
+#      every program static (ET_EXEC, no PT_INTERP: mkboreutils checks
+#      boreutils', this script busybox's); the initramfs and ISO built
+#      (digests printed); the Linux side ran every command.
+#   B1 initramfs: `initramfs: module 0x…, <b> bytes, <n> entries` with b
+#      the archive's size and n its entry count, each entry listed with
+#      its size.
+#   B2 the programs, differential: for each command k, `run k: <line>`,
+#      its exec line, and its end `user: <name> pid <p> exit_group <s>`
+#      (or `exit <s>`; never `killed`); the lines between the exec line
+#      and the end that are not the kernel's (`user: …`) are
+#      byte-identical to Linux's output for command k, and s is Linux's
+#      exit status. The milestone's five are commands 1-5.
+#   B3 frames: every command's `user: frames free <A> before, <B> with 1
+#      processes, <C> after` has C = A and B < A: everything a program
+#      mapped (its image, stack, break, mmap) came back.
+#   B4 what PAX lacks: the system calls answered -ENOSYS over the whole
+#      run are exactly set_robust_list (273) and rseq (334), which glibc
+#      tolerates; no `refused:` line.
+#   B5 the end: `run: <n> commands` (n the list's), `user: ticks in ring
+#      3 <t>` (t > 0), `halt`, and qemu-halt holds the machine halted.
+#
+# --images DIR boots ISOs and ELFs built earlier by this script (DIR holds
+# <tier>/kmain_boreutils.{iso,elf}, root/ and linux/): any host with
+# QEMU, no wolf, no root. Without it the script builds (linux x86-64);
+# --no-boot stops after B0, leaving everything in build/mpx3-boreutils.
+# --bore DIR takes boreutils' binaries from DIR instead of building them.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when every
+# assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 bore=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --bore)     bore=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "usage: tests/mpx3-boreutils [--images DIR | --no-boot] [--bore DIR] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+need readelf python3
+
+UTILS="echo cat head wc tail pwd sleep"
+work=$PAX_BUILD/mpx3-boreutils
+runs=$PAX_BUILD/mpx3-boreutils-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+HEX='0x[0-9a-f]{16}'
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/root/bin" "$work/root/etc"
+    root=$work/root
+    # The programs.
+    if [ -n "$bore" ]; then
+        for u in $UTILS; do
+            cp "$bore/$u" "$root/bin/$u" || bad "B0: no $bore/$u"
+        done
+        say "boreutils from $bore"
+    elif "$PAX_ROOT/tools/mkboreutils" "$work/bore" $UTILS > "$work/bore.txt"; then
+        for u in $UTILS; do cp "$work/bore/$u" "$root/bin/$u"; done
+    else
+        bad "B0: tools/mkboreutils"
+    fi
+    bb=${PAX_BUSYBOX:-/bin/busybox}
+    cp "$bb" "$root/bin/busybox" || bad "B0: no busybox at $bb (busybox-static)"
+    why=
+    for u in $UTILS busybox; do
+        [ -f "$root/bin/$u" ] || { why+=" no bin/$u;"; continue; }
+        r=$(static_ok "$root/bin/$u") || why+=" $r;"
+        say "  program: bin/$u $(sha256_of "$root/bin/$u") $(wc -c < "$root/bin/$u" | tr -d ' ') bytes"
+    done
+    printf 'PAX: this is /etc/motd, a text file in the initramfs, and not an ELF executable.\n' > "$root/etc/motd"
+    printf 'alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\n' > "$root/etc/words"
+    cp "$PAX_ROOT/user/mpx3-boreutils.run" "$root/etc/pax-run"
+    pairs=()
+    while IFS= read -r f; do pairs+=("/$f=$root/$f"); done < <(cd "$root" && find bin etc -type f | sort)
+    if "$PAX_ROOT/tools/mkinitramfs" "$work/initramfs.cpio" "${pairs[@]}" > "$work/initramfs.txt"; then
+        sed 's/^/  initramfs: /' "$work/initramfs.txt" >&2
+    else
+        bad "B0: tools/mkinitramfs"
+    fi
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_boreutils.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_boreutils.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                --add "$work/initramfs.cpio" initramfs.cpio "$elf" "$work/$tier/kmain_boreutils.iso" >/dev/null \
+                || bad "B0 $tier kmain_boreutils: mkimage"
+            say "built $tier kmain_boreutils: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/kmain_boreutils.iso"), initramfs $(sha256_of "$work/initramfs.cpio")"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_boreutils: tools/build-kernel;"
+        fi
+    done
+    # The Linux side: the same binaries, the same tree, the same list.
+    if [ "$(uname -s)" != Linux ]; then
+        why+=" the Linux side needs Linux (this is $(uname -s)): build on Linux, boot here with --images;"
+    else
+        sudo=(); [ "$(id -u)" = 0 ] || sudo=(sudo -n)
+        st=(); command -v strace >/dev/null 2>&1 && st=(--strace)
+        if "${sudo[@]}" "$PAX_ROOT/tools/linux-run" "${st[@]}" "$root" "$root/etc/pax-run" "$work/linux" > "$work/linux.txt"; then
+            sed 's/^/  linux: /' "$work/linux.txt" >&2
+            [ "${#sudo[@]}" = 0 ] || "${sudo[@]}" chown -R "$(id -u):$(id -g)" "$work/linux"
+        else
+            why+=" tools/linux-run (needs root);"
+        fi
+    fi
+    [ -z "$why" ] && say "PASS B0: kmain_boreutils built ($tiers), every program static, initramfs $(wc -c < "$work/initramfs.cpio" | tr -d ' ') bytes, Linux ran $(grep -c '' "$work/linux.txt" 2>/dev/null) commands" || bad "B0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx3-boreutils build (B0): PASS (no boot: --no-boot)" || say "mpx3-boreutils build: FAIL"
+        exit "$fail"
+    fi
+fi
+root=$images/root
+lx=$images/linux
+[ -f "$images/initramfs.cpio" ] && [ -f "$root/etc/pax-run" ] && [ -d "$lx" ] || die "no $images/initramfs.cpio, root/etc/pax-run or linux/ (build first)"
+ncmd=$(command grep -cv -e '^#' -e '^$' "$root/etc/pax-run")
+
+record() { # tier leg status
+    ran=$((ran + 1))
+    printf '%s kmain_boreutils %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" \
+        "$(sha256_of "$images/$1/kmain_boreutils.iso")" >> "$runs"
+}
+
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        id="$tier kmain_boreutils $leg"
+        log=$PAX_BUILD/mpx3-boreutils-$tier-$leg.serial.log
+        elf=$images/$tier/kmain_boreutils.elf iso=$images/$tier/kmain_boreutils.iso
+        rm -f "$log" "$log.verdict"
+        if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+            for s in B1 B2 B3 B4 B5; do bad "$s $id: no image"; done
+            continue
+        fi
+        hrc=0
+        "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 600 \
+            --elf "$elf" --marker 'halt' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+        record "$tier" "$leg" "$hrc"
+        norm=$log.norm; serial_norm "$log" > "$norm"
+
+        # B1
+        why=
+        n=$(sed -n 's/^\(dir \|file\) .*/x/p' "$images/initramfs.txt" | wc -l | tr -d ' ')
+        b=$(wc -c < "$images/initramfs.cpio" | tr -d ' ')
+        grep -Eqx "initramfs: module $HEX, $b bytes, $n entries" "$norm" || why+=" no 'initramfs: module …, $b bytes, $n entries' line ($(grep -m1 '^initramfs: ' "$norm"));"
+        while read -r kind _mode size name; do
+            case $kind in dir|file) ;; *) continue ;; esac
+            grep -qx "initramfs: $kind $size $name" "$norm" || why+=" no 'initramfs: $kind $size $name';"
+        done < "$images/initramfs.txt"
+        [ -z "$why" ] && say "PASS B1 $id: the module, $b bytes, $n entries, each listed with its size" || bad "B1 $id:$why"
+
+        # B2: each command against Linux.
+        why=
+        out=$PAX_BUILD/mpx3-boreutils-$tier-$leg.out
+        rm -rf "$out"; mkdir -p "$out"
+        k=0
+        while IFS= read -r line; do
+            case $line in ''|'#'*) continue ;; esac
+            k=$((k + 1))
+            # The block: from `run k: line` to the next `run ` line.
+            awk -v h="run $k: $line" '$0 == h { on = 1; next } on && /^run [0-9]+: |^run: [0-9]+ commands$/ { exit } on { print }' "$norm" > "$out/$k.block"
+            pid=$(sed -n -E 's/^user: exec pid ([0-9]+) cr3 .*/\1/p' "$out/$k.block" | head -n 1)
+            if [ -z "$pid" ]; then
+                why+=" $k ($line): no exec line ($(head -n 2 "$out/$k.block" | tr '\n' '|'));"
+                continue
+            fi
+            endl=$(grep -E "^user: [^ ]+ pid $pid (exit_group|exit) [0-9]+ after [0-9]+ runs$|^user: [^ ]+ pid $pid killed: " "$out/$k.block" | head -n 1)
+            case $endl in
+                *" killed: "*|'') why+=" $k ($line): '$endl';"; continue ;;
+            esac
+            s=$(printf '%s\n' "$endl" | sed -E 's/.* (exit_group|exit) ([0-9]+) after .*/\2/')
+            awk -v p="$pid" '$0 ~ "^user: exec pid " p " " { on = 1; next } on && $0 ~ "^user: [^ ]+ pid " p " (exit_group|exit) " { exit } on && $0 !~ "^user: " { print }' "$out/$k.block" > "$out/$k.out"
+            lrc=$(cat "$lx/$k.rc" 2>/dev/null)
+            if ! cmp -s "$lx/$k.out" "$out/$k.out"; then
+                why+=" $k ($line): output differs from Linux's: $(diff "$lx/$k.out" "$out/$k.out" | head -n 6 | tr '\n' '|');"
+            fi
+            [ "$s" = "$lrc" ] || why+=" $k ($line): exit $s on PAX, $lrc on Linux;"
+            printf '%s\t%s\t%s\t%s\n' "$k" "$s" "$(sha256_of "$out/$k.out")" "$line" >> "$out/summary.tsv"
+        done < "$root/etc/pax-run"
+        [ "$k" = "$ncmd" ] || why+=" $k commands read, the list has $ncmd;"
+        [ -z "$why" ] && say "PASS B2 $id: $k commands, each one's output and exit status byte-identical to Linux's ($(cut -f2 "$out/summary.tsv" | paste -sd, -))" || bad "B2 $id:$why"
+
+        # B3
+        why=
+        v=$(awk -v want="$ncmd" '
+            /^user: frames free [0-9]+ before, [0-9]+ with [0-9]+ processes, [0-9]+ after$/ {
+                n++; a = $4; b = $6; k = $8; c = $10
+                if (c != a) why = why " command " n ": " c " after, not " a ";"
+                if (k != 1 || b >= a) why = why " command " n ": " k " processes, " b " during;"
+                got = got " " a - b
+            }
+            END { if (n != want) why = why " " n " frames lines, not " want ";"; if (why != "") { print "no:" why; exit 1 } print "ok" got }' "$norm") || why=" ${v#no:}"
+        [ -z "$why" ] && say "PASS B3 $id: every command's frames back; frames each took:${v#ok}" || bad "B3 $id:$why"
+
+        # B4
+        why=
+        ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
+        [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
+        rf=$(grep -c ': refused: ' "$norm")
+        [ "$rf" = 0 ] || why+=" $rf refusal lines ($(grep -m1 ': refused: ' "$norm"));"
+        [ -z "$why" ] && say "PASS B4 $id: -ENOSYS only for set_robust_list (273) and rseq (334); nothing refused" || bad "B4 $id:$why"
+
+        # B5
+        why=
+        grep -qx "run: $ncmd commands" "$norm" || why+=" no 'run: $ncmd commands' ($(grep -m1 '^run: ' "$norm"));"
+        tk=$(sed -n -E 's/^user: ticks in ring 3 ([0-9]+)$/\1/p' "$norm" | tail -n 1)
+        [ -n "$tk" ] && [ "$tk" -gt 0 ] || why+=" ticks in ring 3 '$tk';"
+        [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+        "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'user: ticks in ring 3 [0-9]+' 'halt' >/dev/null \
+            || why+=" the log does not end with the ticks line and halt;"
+        [ -z "$why" ] && say "PASS B5 $id: $ncmd commands, $tk ticks in ring 3; $(tail -n 1 "$log.verdict")" || bad "B5 $id:$why"
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx3-boreutils: PASS" || say "mpx3-boreutils: FAIL"
+exit "$fail"
