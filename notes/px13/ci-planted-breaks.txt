@@ -1,0 +1,30 @@
+px13 planted breaks: each its own commit and push, its own CI run, reverted by the next
+commit (pushed once the plant's run had started). Only the mpx3-console job went red in
+each plant run; every other job green.
+
+A  9bd1e03  VERASE rubs out the echo but leaves the byte in the line
+   run 37723718019, job 113136981411: FAILURE.
+   T2 red on all 8 ask legs (ask-serial, ask-ps2 x native/release x bios/uefi):
+     native bios ask-serial: "ask: read 7 bytes: helxlo" where Linux has "hello";
+   then step 5 (junk^U) never returned: the kill loop erases a byte that never leaves, so
+   the interrupt handler writes "\b \b" forever (50 MB serial logs in the artifact), each
+   ask leg NOT HALTED: "prompt 6 ('> ') did not come within 120s (step 6: one two^Wthree)".
+   The 12 pelt legs' transcripts identical to Linux's, halted. (The job log stops after
+   the first leg's T5: the next lines carry the 50 MB line; the per-leg verdicts are in
+   the run's artifact pax-mpx3-console-linux.)
+   revert 79b93bf: run 37724351826 SUCCESS.
+
+B  f3d6628  the keyboard ignores Shift
+   run 37725033056, job 113141146271: FAILURE.
+   T2 red on exactly the 4 ask-ps2 legs ("hello, PAX" typed with shift-p shift-a shift-x
+   arrives lower-case); ask-serial, pelt-serial, pelt-eof-serial and pelt-eof-ps2 (no
+   shifted key) green on all 4 legs.
+   revert a1d3eeb: run 37725086579 SUCCESS.
+
+C  b9883aa  Ctrl-D at an empty line hands over nothing and is not end of file
+   run 37725229985, job 113141768227: FAILURE.
+   T2, T3 and T5 red on the 16 legs whose session ends with Ctrl-D at an empty prompt
+   (ask-serial, ask-ps2, pelt-eof-serial, pelt-eof-ps2): "no 'PAX: init /bin/pelt ended
+   with status 0'; not halted (no line matching /halt/ within 120s)". pelt-serial (ends
+   with `exit`) green on all 4 legs; T1 and T4 green everywhere.
+   revert 0b805dd: run 37725621311 SUCCESS.

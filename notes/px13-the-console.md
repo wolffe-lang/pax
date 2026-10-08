@@ -111,3 +111,72 @@ pelt; §4 and §5 fill in as the evidence lands.
 </invoke>
 <invoke name="Bash">
 <parameter name="command">cd ~/lanes/px13/pax && test "$(git branch --show-current)" = px13 && git add notes/px13-the-console.md && git commit -q -m "notes: px13 — the contract's first three sections, before any change" && git add user/pelt.pin && git commit -q -m "user/pelt.pin: pelt dd22a86 (sh02), the shell PAX runs as PID 1" && git add tools/mkpelt && git commit -q -m "tools/mkpelt: pelt from its own tree and pin, static, as mkboreutils builds boreutils" && git push -q -u origin px13 2>&1 | tail -2; git log --oneline -4
+### §3 against what was measured
+
+| predicted | measured |
+|---|---|
+| P1: COM1 is vector 36, the i8042 vector 33, the master's mask 0xfe → 0xec | **right**: every boot's `console:` line (`notes/px13/kasumi-mpx3-console-e31b962.out`, T1 on 20 boots; CI and hasu the same) |
+| P1: a receive trigger of 1 byte is needed | as built (FCR 0x07); not measured against the trigger of 14 |
+| P1: the i8042's configuration byte as handed over: SeaBIOS 0x61, OVMF 0x41 or 0x61 | **half right**: SeaBIOS **0x61** (kept: 0x61); OVMF **0x67** (bit 1, the second port's interrupt, and bit 2 set; PAX writes 0x65). Translation (bit 6) was on under both, as predicted |
+| P1: `sendkey` reaches the PS/2 keyboard of a `-nographic` q35 machine | **right**: 73 keys, 164 scancodes for ask's session; 9 keys, 18 scancodes for pelt's (T3) |
+| P1: a blocked `read(0)` re-runs its `syscall` when woken | as built; every session's reads that waited (`14 waited` for ask, `5` for pelt's session) came back with the line |
+| P2: no `ioctl` at all | **right** (`notes/px13/pelt-session.strace`, `pelt-eof.strace`) |
+| P2: interactivity decided by one `fstat(0)` or `statx(0, "", AT_EMPTY_PATH)` | **right**: `statx(0, "", AT_STATX_SYNC_AS_STAT\|AT_EMPTY_PATH, STATX_ALL, …)`, which PAX answered already (px12): character device, mode 020620 |
+| P2: input read one byte a `read(0, …, 1)`; falsified if pelt opens `/dev/stdin` | **wrong**: one byte a call, but on descriptor 4, **`openat(AT_FDCWD, "/dev/stdin", O_RDONLY\|O_CLOEXEC)`**, and output through `openat("/dev/stdout", O_WRONLY\|O_CREAT\|O_APPEND\|O_CLOEXEC)` (boreutils' shape, wolf-lang#405). px12's synthetic `/dev` already reopens descriptor 0 there, so it cost nothing |
+| P2: the prompt `$ ` written to descriptor 2 in one write | **right**: `write(2, "$ ", 2)` |
+| P2: 18 ± 3 distinct calls (15..21), no `getpid` | **right: 16**, no `getpid` (`notes/px13/pelt-session.calls`) |
+| P3: on px12's kernel pelt writes `$ ` and exits 0 at the first read | not re-run (px12's console answered end of file, which is `eof_at_once`'s session; the Linux strace of that session is `pelt-eof.strace`: `read` 0, `write(2, "\n")`, `exit_group(0)`) |
+| P3: with input, the first failure is a call outside px12's 35, `rt_sigaction` or `rt_sigprocmask` | **wrong**: there was no failure. pelt's first boot on PAX (kasumi, TCG, `notes/px13/kasumi-c1-first-boot.out`) ran the whole session byte-identical to Linux; the only `-ENOSYS` are glibc's `set_robust_list` and `rseq`, as for boreutils |
+| P3: the first typed session differs from Linux's in echo only; empty after the fix | **wrong (better)**: empty on the first attempt, for pelt and for ask (erase, kill, word erase, `^C`, Ctrl-D on a non-empty line, no-echo, non-canonical bytes) on every session of the first boot round. The first round's only red was the test's own T4 (it required glibc's two `-ENOSYS` of ask, which has no libc; `notes/px13/kasumi-c1-first-boot.out`, native BIOS, the tree before `d81d916`), fixed before the test's first commit (`d81d916`) |
+| P3: Ctrl-D at the prompt: pelt exits 0, the kernel says so and halts | **right**: `PAX: init /bin/pelt ended with status 0; nothing left to run`, `halt`, qemu-halt HALTED (T5) |
+
+## 4. Evidence index
+
+### The programs and the Linux side
+
+- pelt `dd22a86`, built by `tools/mkpelt` (`e384eac`) with pelt's own pin (wolf 0.2.24 `501d6d3f…`, wolf-std `2f389a7`), static: **`1e2535d7…`, 12,362,688 bytes, byte-identical in the kasumi container and on the CI runner** (run 37722794093's mpx3-console log, `program: bin/pelt`). ask (`user/elf/ask.S`, `tools/mkuser`): `e506d215…`, 11,488 bytes on CI.
+- What pelt asks on Linux: `notes/px13/pelt-session.strace`, `pelt-eof.strace` (16 distinct calls each, `*.calls`); the terminal's numbers: `notes/px13/termios.txt` (TCGETS's 36 bytes, TIOCGWINSZ 0×0), `termios-v.strace` (c_cc names), `bits.strace` (each flag bit's name).
+- The Linux reference for every session: `tools/linux-tty` on a pseudo-terminal with ISIG and IXON cleared, the same keys (`user/console/*.keys`), argv[0] `/bin/…`, environment `HOME=/ TERM=linux PAX=1` (kasumi: Ubuntu 24.04 container on kernel 7.2.8; CI: the runner).
+
+### The typed-session diff against Linux
+
+**Empty, for all five sessions on every leg**: ask (TCGETS, TIOCGWINSZ, a refused request, a line without echo, six bytes in non-canonical mode, then lines with erase, kill, word erase, `^C` as a byte, Ctrl-D on `abc`, Ctrl-D at the prompt) through COM1 and through the PS/2 keyboard; pelt (`echo hi`, `x=3; echo $((x*2))`, `f() { echo "f:$1:$#"; }`, `f one two`, `exit`) through COM1; pelt (`echo hi`, Ctrl-D) through COM1 and PS/2. Both sides kept: `notes/px13/session-*.pax.txt` and `session-*.linux.txt` (kasumi, native BIOS; `cmp` equal). A full pelt boot: `notes/px13/kasumi-native-bios-pelt-serial.serial.log`.
+
+- CI: run **37722794093** (`0126377`, job 113134084106: 101 PASS, 20 boots), **37722656397** (`e31b962`), 37723707466 (`2b53769`), and the final head's run (PR body). Every job green.
+- kasumi TCG: the gauntlet on a clone of `e31b962` (`notes/px13/kasumi-gauntlet-e31b962.summary`): every suite exit 0, 0 FAIL, 0 SKIP; mpx3-console 100 PASS on 20 boots (`kasumi-mpx3-console-e31b962.out`, runs `kasumi-mpx3-console-runs-e31b962.txt`). mpx3-boreutils' build in the container failed at `tools/linux-run` (its chroot needs a privileged container, which this lane did not use); mpx3-boreutils ran green on CI at every head, and its kernel never starts the console.
+- hasu KVM: **272 boots, all accel=kvm, all green** (`notes/px13/hasu-kvm-e31b962.log`): mpx3-console 8 rounds × 20 = 160 (100 PASS each), mpx3-loader 4, mpx3-user 12, mkw 12, mpx1 12, mpx2-frames 16, mpx2-paging 4, mpx2-interrupts 20, mpx2-sched 8, mpx2-heap 24; images from the kasumi gauntlet tree, the tree a `git archive` of `e31b962` (kernel code identical to the head: `git diff e31b962 HEAD -- kernel boot user tools` is `kernel/README.md` only).
+
+### The input path, measured
+
+- `console: com1 irq 4 vector 36, i8042 0x61 -> 0x61 irq 1 vector 33, 8259 master mask 0xec; iflag 0x100 oflag 0x05 cflag 0xbf lflag 0x8a3a` under SeaBIOS; `i8042 0x67 -> 0x65` under OVMF (every boot, T1).
+- T3: ask's session is 73 bytes on COM1 (`73 bytes from com1, 0 keys`) or 73 keys, 164 scancodes on the keyboard (`0 bytes from com1`); pelt's 66 bytes; pelt's Ctrl-D session 9 (9 keys, 18 scancodes).
+
+### Planted breaks (`notes/px13/ci-planted-breaks.txt`)
+
+- **A** `9bd1e03` (VERASE leaves the byte): run **37723718019**, job 113136981411, only mpx3-console red: the 8 ask legs (`helxlo` for `hello`, then the kill loop never ends), the 12 pelt legs green. Reverted `79b93bf` (run 37724351826 green).
+- **B** `f3d6628` (the keyboard ignores Shift): run **37725033056**, job 113141146271: T2 red on exactly the 4 ask-ps2 legs. Reverted `a1d3eeb` (run 37725086579 green).
+- **C** `b9883aa` (Ctrl-D at an empty line is not end of file): run **37725229985**, job 113141768227: T2/T3/T5 red on the 16 legs ending in Ctrl-D, pelt-serial green. Reverted `0b805dd` (run 37725621311 green).
+
+### The tour
+
+Every kernel links kernel/console now (kernel/interrupts routes 33 and 36), so the tour's ISOs changed though it never starts the console. Rebuilt by `tests/tour` on kasumi in a `git archive` of `e31b962` (44 PASS in the gauntlet; the archive build's R0): `pax-tour.iso` `3dae9ac4…`, `pax-tour-b.iso` `91c0e931…` (px12's `a7c3a6df…`, `3bae5d83…`). The image grew 252 → 280 KiB, frames −15 (65015 usable, 64966 free, 64948 at the join), ending b's `rip` `0xffffffff8001c41b`. `~/scratch/wolf/pax-demo/` refreshed: the ISOs, SHA256SUMS, `src/` (pax's `kernel/`, `boot/`, `user/` at `0b805dd`; nothing removed; px12's snapshot moved to `~/lanes/px13/pax-demo-src-px12`), the SHOTLIST's numbers (12951 lines of wolf, 1285 of assembly, the frame counts, the `rip`), the README's build lines; `preflight.sh` **GO** in a 146×40 pseudo-terminal (QEMU 11.1.1, the PANIC line in about 29 s, `logs/preflight.serial.log` `8fe2cae4…`).
+
+### Drift from the contract, reported
+
+1. **"pelt as PID 1"**: pelt is the first and only process the kernel starts, init in role; PAX's ids number its kernel threads first (0 main, 1 idle), so the log says `pid 2`, and `getpid` is still -ENOSYS (px09's hello requires it). pelt never asks for its pid. Real process ids come with px14's `clone`/`execve`/`wait4`.
+2. **"TIOCGWINSZ 80x25 or the serial default"**: the serial default, **0 rows, 0 columns**, which is what a Linux pseudo-terminal answers too (measured, `termios.txt`).
+3. **Ctrl-C delivered as a byte**: so the console's ISIG is clear, and so is IXON; TCGETS says so (iflag 0x100, lflag 0x8a3a, where a Linux pseudo-terminal says 0x500, 0x8a3b). The Linux reference clears the same two bits, so the comparison is like for like.
+4. The uapi termios header was not read (a tool-permission refusal, §2); its facts were measured black-box instead.
+5. Not in the contract: `tools/qemu-run --serial-input` (QEMU's file chardev with `input-path`), `tools/qemu-halt --type`, `tools/linux-tty`, and `ask`, the console's own test program.
+
+### Filed
+
+Nothing upstream: nothing in wolf, pelt or QEMU stood in the way.
+
+## 5. Done-when
+
+- Branch `px13` on origin; PR wolffe-lang/pax#16, open, unmerged; CI green at the head (run id in the PR body).
+- Typing reaches PAX: COM1 (IRQ4) and the i8042 (IRQ1) into one line discipline, `read(0)` blocking until a line is ready, echo through the console; TCGETS/TCSETS/TCSETSW/TCSETSF/TIOCGWINSZ/TIOCSWINSZ answered, everything else refused by name; typed sessions over serial and over PS/2 byte-identical to Linux on both tiers, BIOS and UEFI; pelt as PID 1 answers `echo`, arithmetic, a function, `exit`, and Ctrl-D ends it, the kernel says so and halts.
+- What pelt as PID 1 cannot do yet: run anything external (`clone`/`execve`/`wait4`, px14), `cd` (no `chdir`), pipes and redirections to files (pelt refuses them at its pin), job control and Ctrl-C as a signal (no signals, no process groups), line editing beyond the discipline's (no arrows).
+- Close nothing. To close: none (no pax issue names this work).
+- Worktrees: the local worktree `~/lanes/px13/pax` removed at the end; kasumi `~/lanes/px13/` and hasu `~/lanes/px13/` keep the trees and evidence with `build/` directories pruned; the container image `px13-ubuntu` on kasumi is the lane's (the same image id as px12's).
