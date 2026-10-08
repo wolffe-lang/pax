@@ -60,6 +60,35 @@
 //! - `exit_group` (231, px10): ends the process, all of its threads (it
 //!   has one): `user: <name> pid <id> exit_group <code> after <r> runs`.
 //!
+//! **The Linux calls** (px12, M-PX3: what static glibc programs and
+//! boreutils make, measured by strace on Linux, `notes/px12/`):
+//! - memory (kernel/vm): `brk` (12), `mmap` (9, anonymous private
+//!   only), `munmap` (11), `mprotect` (10);
+//! - TLS: `arch_prctl` (158) ARCH_SET_FS / ARCH_GET_FS, the FS base
+//!   kept per thread (kernel/sched, IA32_FS_BASE at every switch);
+//! - files (kernel/files): `read` (0), `pread64` (17), `open` (2),
+//!   `openat` (257), `close` (3), `lseek` (8), `fstat` (5), `stat` (4),
+//!   `lstat` (6), `newfstatat` (262), `statx` (332), `getdents64`
+//!   (217), `ioctl` (16, -ENOTTY), `getcwd` (79, "/"), `readlinkat`
+//!   (267, nothing is a link); `write` (1) goes to the console for the
+//!   console's descriptors, nowhere for `/dev/null`, -EBADF otherwise;
+//! - the rest: `getrandom` (318, RDRAND, else the TSC mix), `clock_
+//!   gettime` (228), `time` (201), `gettimeofday` (96) (the PIT's tick
+//!   count: PAX has no wall clock and no vDSO), `clock_nanosleep` (230)
+//!   and `nanosleep` (35) (the thread sleeps until the tick after the
+//!   deadline, kernel/sched's `sleep_current`), `uname` (63, "PAX"),
+//!   `prctl` (157) PR_GET_NAME, `prlimit64` (302, read-only: the stack
+//!   PAX gives, 32 descriptors, the rest unlimited), `set_tid_address`
+//!   (218) and `gettid` (186) the thread's id, `getuid`, `getgid`,
+//!   `geteuid`, `getegid` (0).
+//! Every other number is -ENOSYS, logged once per process (`unknown`),
+//! among them `set_robust_list` (273) and `rseq` (334), which glibc
+//! tolerates, and `getpid` (39), which px09's hello requires to be
+//! -ENOSYS. A refusal by name (a file-backed or shared mapping, a write
+//! to the read-only initramfs) is a line `user: <name> pid <id> syscall
+//! <n>: refused: <why>, -<errno>`. User memory is reached through
+//! kernel/uaccess (the process's own tables walked, then the HHDM).
+//!
 //! **ELF processes** (px10, `exec`): a static x86-64 executable read
 //! from the initramfs (kernel/initramfs) and loaded by kernel/elf into
 //! a fresh address space, with a stack of ELF_STACK_PAGES pages below
@@ -97,6 +126,7 @@
 //! here (wolf-lang#611). No Linux source; no other kernel's source.
 
 use elf
+use files
 use frames
 use initramfs
 use log
@@ -104,6 +134,9 @@ use paging
 use panic
 use sched
 use serial
+use timer
+use uaccess
+use vm
 
 extern "c" fn pax_rdmsr(msr: u64) -> u64
 extern "c" fn pax_wrmsr(msr: u64, v: u64)
@@ -119,6 +152,7 @@ extern "c" fn pax_rdrand() -> u64
 extern "c" let pax_syscall_entry: *u8
 extern "c" let pax_syscall_state: *u64
 extern "c" let pax_uprogs: *u64
+extern "c" let pax_execbuf: *u8
 
 // The MSRs (SDM vol. 4) and their values.
 const EFER: u64 = 0xc0000080
@@ -178,6 +212,8 @@ const U_SMAP: u64 = 3
 const U_SMEP: u64 = 4
 
 // boot/isr.S's frame, as word indices.
+const W_R10: u64 = 5
+const W_R8: u64 = 7
 const W_RDI: u64 = 9
 const W_RSI: u64 = 10
 const W_RDX: u64 = 11
@@ -496,9 +532,14 @@ fn readable(buf: u64, len: u64) -> bool {
     true
 }
 
-/// `write(fd, buf, len)`: the result for %rax.
+/// `write(fd, buf, len)`: the result for %rax. The console's descriptors
+/// (0-2 and any opened on `/dev/stdout`, `/dev/stderr`, `/dev/stdin`)
+/// send the bytes to the serial console; `/dev/null` swallows them;
+/// anything else (closed, read-only, a file of the read-only initramfs)
+/// is -EBADF.
 fn write(fd: u64, buf: u64, len: u64) -> u64 {
-    if fd != 1 && fd != 2 {
+    let t = files.write_target(area(), fd)
+    if t == 2 {
         who()
         log.put(" write fd ")
         num(fd)
@@ -506,8 +547,8 @@ fn write(fd: u64, buf: u64, len: u64) -> u64 {
         log.end()
         return NEG_EBADF
     }
-    if len == 0 {
-        return 0
+    if t == 0 || len == 0 {
+        return len
     }
     if !readable(buf, len) {
         who()
@@ -538,18 +579,334 @@ fn write(fd: u64, buf: u64, len: u64) -> u64 {
     len
 }
 
+// --- the Linux calls (px12) --------------------------------------------------
+
+// Linux's numbers (syscall_64.tbl), px12's.
+const SYS_READ: u64 = 0
+const SYS_OPEN: u64 = 2
+const SYS_CLOSE: u64 = 3
+const SYS_STAT: u64 = 4
+const SYS_FSTAT: u64 = 5
+const SYS_LSTAT: u64 = 6
+const SYS_LSEEK: u64 = 8
+const SYS_MMAP: u64 = 9
+const SYS_MPROTECT: u64 = 10
+const SYS_MUNMAP: u64 = 11
+const SYS_BRK: u64 = 12
+const SYS_IOCTL: u64 = 16
+const SYS_PREAD64: u64 = 17
+const SYS_NANOSLEEP: u64 = 35
+const SYS_UNAME: u64 = 63
+const SYS_GETCWD: u64 = 79
+const SYS_GETTIMEOFDAY: u64 = 96
+const SYS_GETUID: u64 = 102
+const SYS_GETGID: u64 = 104
+const SYS_GETEUID: u64 = 107
+const SYS_GETEGID: u64 = 108
+const SYS_PRCTL: u64 = 157
+const SYS_ARCH_PRCTL: u64 = 158
+const SYS_GETTID: u64 = 186
+const SYS_TIME: u64 = 201
+const SYS_GETDENTS64: u64 = 217
+const SYS_SET_TID_ADDRESS: u64 = 218
+const SYS_CLOCK_GETTIME: u64 = 228
+const SYS_CLOCK_NANOSLEEP: u64 = 230
+const SYS_OPENAT: u64 = 257
+const SYS_NEWFSTATAT: u64 = 262
+const SYS_READLINKAT: u64 = 267
+const SYS_PRLIMIT64: u64 = 302
+const SYS_GETRANDOM: u64 = 318
+const SYS_STATX: u64 = 332
+
+const NEG_EPERM: u64 = 0xffffffffffffffff // -1
+const NEG_ESRCH: u64 = 0xfffffffffffffffd // -3
+const NEG_EINVAL: u64 = 0xffffffffffffffea // -22
+const AT_FDCWD: u64 = 0xffffff9c // -100, as an int (`int32`)
+const AT_SYMLINK_NOFOLLOW: u64 = 0x100
+const ARCH_SET_FS: u64 = 0x1002 // uapi asm/prctl.h
+const ARCH_GET_FS: u64 = 0x1003
+const PR_GET_NAME: u64 = 16 // uapi linux/prctl.h
+const RLIMIT_STACK: u64 = 3 // uapi asm-generic/resource.h
+const RLIMIT_NOFILE: u64 = 7
+const RLIM_NLIMITS: u64 = 16
+const RLIM_INFINITY: u64 = 0xffffffffffffffff
+const TIMER_ABSTIME: u64 = 1
+const NS_PER_SEC: u64 = 1000000000
+// The PIT ticks at 1193182 / 11932 Hz (kernel/timer): 10000150.8 ns a
+// tick; CLOCK_* read the tick count, so they advance 10 ms at a time.
+const NS_PER_TICK: u64 = 10000151
+const GETRANDOM_MAX: u64 = 0x1ffffff // Linux's per-call cap, 33554431
+
+// The area's words kernel/user keeps: the calls already logged (one bit
+// each for 0-511), and the refusal word kernel/vm and kernel/files set.
+const A_REFUSAL: u64 = 3
+const A_LOGGED: u64 = 4 // 8 words
+
+/// The running process's area (kernel/sched's `proc_area`).
+fn area() -> u64 {
+    sched.proc_area(sched.self_slot())
+}
+
+fn aword(i: u64) -> u64 {
+    // # Safety: a process area's word i < 256 (sched.proc_area).
+    unsafe { ((area() + i * 8) as *u64).read_volatile() }
+}
+
+fn put_aword(i: u64, v: u64) {
+    // # Safety: as `aword`.
+    unsafe { ((area() + i * 8) as *u64).write_volatile(v) }
+}
+
+/// `user: <name> pid <id> syscall <n>: -ENOSYS`, once per process and
+/// number (numbers past 511 every time).
+fn unknown(nr: u64) {
+    if nr < 512 {
+        let w = A_LOGGED + nr / 64
+        let bit: u64 = 1 << (nr % 64)
+        if aword(w) & bit != 0 {
+            return
+        }
+        put_aword(w, aword(w) | bit)
+    }
+    who()
+    log.put(" syscall ")
+    num(nr)
+    log.put(": -ENOSYS")
+    log.end()
+}
+
+/// After call `nr` answered `r`: a refusal by name, when kernel/vm or
+/// kernel/files left one: `user: <name> pid <id> syscall <n>: refused:
+/// <why>, -<errno>`.
+fn refusal_line(nr: u64, r: u64) {
+    let c = aword(A_REFUSAL)
+    if c == 0 {
+        return
+    }
+    put_aword(A_REFUSAL, 0)
+    who()
+    log.put(" syscall ")
+    num(nr)
+    log.put(": refused: ")
+    log.put(if c < 16 { vm.why(c) } else { files.why(c) })
+    log.put(", -")
+    num(0xffffffffffffffff - r + 1)
+    log.end()
+}
+
+/// Write the str `s` at user `va` and a NUL (checked by the caller).
+fn put_str(va: u64, s: str) {
+    var k: u64 = 0
+    for b in s.bytes() {
+        uaccess.put(paging.live(), va + k, b as int as u64, 1)
+        k += 1
+    }
+    uaccess.put(paging.live(), va + k, 0, 1)
+}
+
+/// `uname(buf)`: struct new_utsname, six fields of 65 bytes.
+fn uname(buf: u64) -> u64 {
+    let pml4 = paging.live()
+    if !uaccess.writable(pml4, buf, 390) {
+        return NEG_EFAULT
+    }
+    uaccess.zero(pml4, buf, 390)
+    put_str(buf, "PAX")
+    put_str(buf + 65, "pax")
+    put_str(buf + 130, "0.0.1")
+    put_str(buf + 195, "#1 px12")
+    put_str(buf + 260, "x86_64")
+    put_str(buf + 325, "(none)")
+    0
+}
+
+/// `arch_prctl(code, addr)`: ARCH_SET_FS and ARCH_GET_FS (FS per
+/// thread, kernel/sched); anything else -EINVAL.
+fn arch_prctl(code: u64, addr: u64) -> u64 {
+    if code == ARCH_SET_FS {
+        if addr >= paging.user_top() {
+            return NEG_EPERM
+        }
+        sched.set_self_fs(addr)
+        return 0
+    }
+    if code == ARCH_GET_FS {
+        let pml4 = paging.live()
+        if !uaccess.writable(pml4, addr, 8) {
+            return NEG_EFAULT
+        }
+        uaccess.put(pml4, addr, sched.self_fs(), 8)
+        return 0
+    }
+    NEG_EINVAL
+}
+
+/// `prctl(option, arg2, …)`: PR_GET_NAME (the program's name, at most
+/// 15 bytes and a NUL, as Linux's 16-byte comm); anything else -EINVAL.
+fn prctl(option: u64, arg2: u64) -> u64 {
+    if option != PR_GET_NAME {
+        return NEG_EINVAL
+    }
+    let pml4 = paging.live()
+    if !uaccess.writable(pml4, arg2, 16) {
+        return NEG_EFAULT
+    }
+    uaccess.zero(pml4, arg2, 16)
+    if sched.self_prog() == sched.elf_prog() {
+        let a = sched.self_exec(2)
+        let l = sched.self_exec(3)
+        let n = if l < 15 { l } else { 15 }
+        let _ok = uaccess.copy_out(pml4, arg2, a, n)
+    }
+    0
+}
+
+/// `prlimit64(pid, resource, new, old)`: the stack's limit is the
+/// stack PAX gives (ELF_STACK_PAGES pages, fixed), the descriptors' the
+/// table's 32, every other unlimited; setting one is -EPERM.
+fn prlimit(pid: u64, res: u64, new: u64, old: u64) -> u64 {
+    if pid != 0 && pid != sched.self_id() {
+        return NEG_ESRCH
+    }
+    if res >= RLIM_NLIMITS {
+        return NEG_EINVAL
+    }
+    if new != 0 {
+        return NEG_EPERM
+    }
+    if old != 0 {
+        let pml4 = paging.live()
+        if !uaccess.writable(pml4, old, 16) {
+            return NEG_EFAULT
+        }
+        var v = RLIM_INFINITY
+        if res == RLIMIT_STACK {
+            v = ELF_STACK_PAGES * PAGE
+        } else if res == RLIMIT_NOFILE {
+            v = 32
+        }
+        uaccess.put(pml4, old, v, 8)
+        uaccess.put(pml4, old + 8, v, 8)
+    }
+    0
+}
+
+/// `getrandom(buf, len, flags)`: len bytes (at most Linux's cap) from
+/// RDRAND, or the TSC mix on a CPU without it (`random_word`).
+fn getrandom(buf: u64, len: u64) -> u64 {
+    let n = if len < GETRANDOM_MAX { len } else { GETRANDOM_MAX }
+    let pml4 = paging.live()
+    if !uaccess.writable(pml4, buf, n) {
+        return NEG_EFAULT
+    }
+    var i: u64 = 0
+    while i < n {
+        let w = random_word(i)
+        let k = if n - i < 8 { n - i } else { 8 }
+        uaccess.put(pml4, buf + i, w, k)
+        i += k
+    }
+    n
+}
+
+/// Nanoseconds since the timer started (CLOCK_MONOTONIC, and every
+/// clock: PAX has no wall clock yet, so CLOCK_REALTIME counts from the
+/// epoch at boot).
+fn now_ns() -> u64 {
+    timer.ticks() * NS_PER_TICK
+}
+
+/// `clock_gettime(clock, tp)`: clocks 0-9, the same tick count for each.
+fn clock_gettime(clk: u64, tp: u64) -> u64 {
+    if clk > 9 {
+        return NEG_EINVAL
+    }
+    let pml4 = paging.live()
+    if !uaccess.writable(pml4, tp, 16) {
+        return NEG_EFAULT
+    }
+    let ns = now_ns()
+    uaccess.put(pml4, tp, ns / NS_PER_SEC, 8)
+    uaccess.put(pml4, tp + 8, ns % NS_PER_SEC, 8)
+    0
+}
+
+/// `time(tloc)` and `gettimeofday(tv, tz)` (px12: PAX has no vDSO, so
+/// glibc makes the calls Linux answers in user space; busybox's `ls`
+/// asks for the time): seconds since boot, as every clock here.
+fn time(tloc: u64) -> u64 {
+    let sec = now_ns() / NS_PER_SEC
+    if tloc != 0 {
+        let pml4 = paging.live()
+        if !uaccess.writable(pml4, tloc, 8) {
+            return NEG_EFAULT
+        }
+        uaccess.put(pml4, tloc, sec, 8)
+    }
+    sec
+}
+
+fn gettimeofday(tv: u64, tz: u64) -> u64 {
+    let pml4 = paging.live()
+    if tv != 0 {
+        if !uaccess.writable(pml4, tv, 16) {
+            return NEG_EFAULT
+        }
+        let ns = now_ns()
+        uaccess.put(pml4, tv, ns / NS_PER_SEC, 8)
+        uaccess.put(pml4, tv + 8, ns % NS_PER_SEC / 1000, 8)
+    }
+    if tz != 0 {
+        if !uaccess.writable(pml4, tz, 8) {
+            return NEG_EFAULT
+        }
+        uaccess.zero(pml4, tz, 8)
+    }
+    0
+}
+
+/// The tick a sleep of `req` (a user timespec) ends at, absolute when
+/// `abs`; 0 for a bad request (-EINVAL or -EFAULT's case, in `bad`).
+/// Returns (wake tick, errno result or 0).
+fn sleep_until(req: u64, abs: bool) -> (u64, u64) {
+    let pml4 = paging.live()
+    if !uaccess.readable(pml4, req, 16) {
+        return (0, NEG_EFAULT)
+    }
+    let sec = uaccess.get64(pml4, req)
+    let nsec = uaccess.get64(pml4, req + 8)
+    if nsec >= NS_PER_SEC || sec >= 0x8000000000000000 {
+        return (0, NEG_EINVAL)
+    }
+    // Past about 58 years of ticks the sleep is forever; cap it there.
+    let cap: u64 = 0x10000000000
+    let s = if sec < cap { sec } else { cap }
+    var target = s * NS_PER_SEC + nsec
+    let now = now_ns()
+    if !abs {
+        target = target + now
+    }
+    if target <= now {
+        return (0, 0)
+    }
+    let t = (target + NS_PER_TICK - 1) / NS_PER_TICK
+    (t + 1, 0) // the tick after: a partial tick never shortens a sleep
+}
+
 /// A system call (kernel/interrupts, vector PAX_SYSCALL): the frame to
-/// resume — `f` with %rax set, or, after `exit`, the next thread's.
+/// resume — `f` with %rax set, or, after `exit`, `exit_group` or a
+/// sleep, the next thread's.
 pub fn syscall(f: u64) -> u64 {
     let nr = word(f, W_RAX)
-    if nr == SYS_WRITE {
-        put_word(f, W_RAX, write(word(f, W_RDI), word(f, W_RSI), word(f, W_RDX)))
-        return f
-    }
+    let a0 = word(f, W_RDI)
+    let a1 = word(f, W_RSI)
+    let a2 = word(f, W_RDX)
+    let a3 = word(f, W_R10)
+    let a4 = word(f, W_R8)
     if nr == SYS_EXIT {
         who()
         log.put(" exit ")
-        log.dec((word(f, W_RDI) & 0xff) as int)
+        log.dec((a0 & 0xff) as int)
         runs_tail()
         log.end()
         return sched.end_current(f)
@@ -557,18 +914,142 @@ pub fn syscall(f: u64) -> u64 {
     if nr == SYS_EXIT_GROUP {
         who()
         log.put(" exit_group ")
-        log.dec((word(f, W_RDI) & 0xff) as int)
+        log.dec((a0 & 0xff) as int)
         runs_tail()
         log.end()
         return sched.end_current(f) // one thread a process: the group
     }
-    who()
-    log.put(" syscall ")
-    num(nr)
-    log.put(": -ENOSYS")
-    log.end()
-    put_word(f, W_RAX, NEG_ENOSYS)
+    if nr == SYS_CLOCK_NANOSLEEP || nr == SYS_NANOSLEEP {
+        var req = a0
+        var abs = false
+        if nr == SYS_CLOCK_NANOSLEEP {
+            req = a2
+            abs = a1 & TIMER_ABSTIME != 0
+            if a0 > 9 {
+                put_word(f, W_RAX, NEG_EINVAL)
+                return f
+            }
+        }
+        let (wake, r) = sleep_until(req, abs)
+        put_word(f, W_RAX, r)
+        if wake == 0 {
+            return f
+        }
+        return sched.sleep_current(f, wake)
+    }
+    let r = dispatch(nr, a0, a1, a2, a3, a4)
+    put_word(f, W_RAX, r)
+    refusal_line(nr, r)
     f
+}
+
+/// The low 32 bits of a register: an `int` argument (a descriptor, a
+/// directory descriptor such as AT_FDCWD, flags, whence). The psABI
+/// leaves a 32-bit argument's upper half undefined, and glibc passes
+/// AT_FDCWD as 0x00000000ffffff9c (measured, px12): Linux reads the int.
+fn int32(x: u64) -> u64 {
+    x & 0xffffffff
+}
+
+/// Every call that answers in place: the result for %rax.
+fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    let a = area()
+    let pml4 = paging.live()
+    // The calls whose first argument is an int (a descriptor), read as
+    // one; the others take r0 whole.
+    let a0 = if nr == SYS_READ || nr == SYS_WRITE || nr == SYS_PREAD64 || nr == SYS_OPENAT || nr == SYS_CLOSE || nr == SYS_LSEEK || nr == SYS_FSTAT || nr == SYS_NEWFSTATAT || nr == SYS_STATX || nr == SYS_GETDENTS64 || nr == SYS_IOCTL || nr == SYS_READLINKAT { int32(r0) } else { r0 }
+    if nr == SYS_WRITE {
+        return write(a0, a1, a2)
+    }
+    if nr == SYS_READ {
+        return files.read(a, pml4, a0, a1, a2)
+    }
+    if nr == SYS_PREAD64 {
+        return files.pread(a, pml4, a0, a1, a2, a3)
+    }
+    if nr == SYS_OPENAT {
+        return files.openat(a, pml4, a0, a1, int32(a2))
+    }
+    if nr == SYS_OPEN {
+        return files.openat(a, pml4, AT_FDCWD, a0, int32(a1))
+    }
+    if nr == SYS_CLOSE {
+        return files.close(a, a0)
+    }
+    if nr == SYS_LSEEK {
+        return files.lseek(a, a0, a1, int32(a2))
+    }
+    if nr == SYS_FSTAT {
+        return files.fstat(a, pml4, a0, a1)
+    }
+    if nr == SYS_STAT {
+        return files.fstatat(a, pml4, AT_FDCWD, a0, a1, 0)
+    }
+    if nr == SYS_LSTAT {
+        return files.fstatat(a, pml4, AT_FDCWD, a0, a1, AT_SYMLINK_NOFOLLOW)
+    }
+    if nr == SYS_NEWFSTATAT {
+        return files.fstatat(a, pml4, a0, a1, a2, int32(a3))
+    }
+    if nr == SYS_STATX {
+        return files.statx(a, pml4, a0, a1, int32(a2), a4)
+    }
+    if nr == SYS_GETDENTS64 {
+        return files.getdents(a, pml4, a0, a1, a2)
+    }
+    if nr == SYS_IOCTL {
+        return files.ioctl(a, a0)
+    }
+    if nr == SYS_GETCWD {
+        return files.getcwd(pml4, a0, a1)
+    }
+    if nr == SYS_READLINKAT {
+        return files.readlinkat(a, pml4, a0, a1)
+    }
+    if nr == SYS_BRK {
+        return vm.brk(a, pml4, a0)
+    }
+    if nr == SYS_MMAP {
+        return vm.mmap(a, pml4, a0, a1, a2, a3)
+    }
+    if nr == SYS_MUNMAP {
+        return vm.munmap(pml4, a0, a1)
+    }
+    if nr == SYS_MPROTECT {
+        return vm.mprotect(pml4, a0, a1, a2)
+    }
+    if nr == SYS_ARCH_PRCTL {
+        return arch_prctl(a0, a1)
+    }
+    if nr == SYS_PRCTL {
+        return prctl(a0, a1)
+    }
+    if nr == SYS_PRLIMIT64 {
+        return prlimit(a0, a1, a2, a3)
+    }
+    if nr == SYS_GETRANDOM {
+        return getrandom(a0, a1)
+    }
+    if nr == SYS_CLOCK_GETTIME {
+        return clock_gettime(a0, a1)
+    }
+    if nr == SYS_TIME {
+        return time(a0)
+    }
+    if nr == SYS_GETTIMEOFDAY {
+        return gettimeofday(a0, a1)
+    }
+    if nr == SYS_UNAME {
+        return uname(a0)
+    }
+    if nr == SYS_SET_TID_ADDRESS || nr == SYS_GETTID {
+        return sched.self_id()
+    }
+    if nr == SYS_GETUID || nr == SYS_GETGID || nr == SYS_GETEUID || nr == SYS_GETEGID {
+        return 0
+    }
+    unknown(nr)
+    NEG_ENOSYS
 }
 
 /// An exception in ring 3 (kernel/interrupts; `what` its name): the
@@ -608,40 +1089,51 @@ fn put_bytes(a: u64, n: u64) {
     }
 }
 
-/// How many space-separated words `s` holds.
-fn words(s: str) -> u64 {
-    var n: u64 = 0
+/// Byte `i` of the kernel bytes at `a` (px12: a run-list line in the
+/// initramfs, or `pax_execbuf`).
+fn sb(a: u64, i: u64) -> u64 {
+    // # Safety: [a, a + n) is the caller's kernel memory and i < n.
+    unsafe { ((a + i) as *u8).read_volatile() as u64 }
+}
+
+/// How many space-separated words the `n` bytes at `a` hold.
+fn words(a: u64, n: u64) -> u64 {
+    var w: u64 = 0
     var inw = false
-    for b in s.bytes() {
-        if b as int as u64 == 32 {
+    var i: u64 = 0
+    while i < n {
+        if sb(a, i) == 32 {
             inw = false
         } else if !inw {
             inw = true
-            n += 1
+            w += 1
         }
+        i += 1
     }
-    n
+    w
 }
 
-/// The bytes `s`'s words take as C strings (each word and its NUL).
-fn words_bytes(s: str) -> u64 {
-    var n: u64 = 0
+/// The bytes those words take as C strings (each word and its NUL).
+fn words_bytes(a: u64, n: u64) -> u64 {
+    var w: u64 = 0
     var inw = false
-    for b in s.bytes() {
-        if b as int as u64 == 32 {
+    var i: u64 = 0
+    while i < n {
+        if sb(a, i) == 32 {
             if inw {
-                n += 1
+                w += 1
             }
             inw = false
         } else {
             inw = true
-            n += 1
+            w += 1
         }
+        i += 1
     }
     if inw {
-        n += 1
+        w += 1
     }
-    n
+    w
 }
 
 /// User address `va` of the space at `pml4` (not live), through the
@@ -664,12 +1156,15 @@ fn poke64(pml4: u64, va: u64, v: u64) {
     unsafe { (kva(pml4, va) as *u64).write_volatile(v) }
 }
 
-/// Write `s`'s words as C strings from `va` up; the address past them.
-fn put_words(pml4: u64, va: u64, s: str) -> u64 {
+/// Write the words of the `n` bytes at `a` as C strings from `va` up;
+/// the address past them.
+fn put_words(pml4: u64, va: u64, a: u64, n: u64) -> u64 {
     var p = va
     var inw = false
-    for b in s.bytes() {
-        if b as int as u64 == 32 {
+    var i: u64 = 0
+    while i < n {
+        let c = sb(a, i)
+        if c == 32 {
             if inw {
                 poke8(pml4, p, 0)
                 p += 1
@@ -677,9 +1172,10 @@ fn put_words(pml4: u64, va: u64, s: str) -> u64 {
             inw = false
         } else {
             inw = true
-            poke8(pml4, p, b as int as u64)
+            poke8(pml4, p, c)
             p += 1
         }
+        i += 1
     }
     if inw {
         poke8(pml4, p, 0)
@@ -688,14 +1184,15 @@ fn put_words(pml4: u64, va: u64, s: str) -> u64 {
     p
 }
 
-/// Write the pointers to `s`'s words (laid out from `strs` by
+/// Write the pointers to those words (laid out from `strs` by
 /// `put_words`) from `va` up, then a NULL; the address past it.
-fn put_ptrs(pml4: u64, va: u64, strs: u64, s: str) -> u64 {
+fn put_ptrs(pml4: u64, va: u64, strs: u64, a: u64, n: u64) -> u64 {
     var p = va
     var at = strs
     var inw = false
-    for b in s.bytes() {
-        if b as int as u64 == 32 {
+    var i: u64 = 0
+    while i < n {
+        if sb(a, i) == 32 {
             if inw {
                 at += 1 // the NUL
             }
@@ -708,6 +1205,7 @@ fn put_ptrs(pml4: u64, va: u64, strs: u64, s: str) -> u64 {
             inw = true
             at += 1
         }
+        i += 1
     }
     poke64(pml4, p, 0)
     p + 8
@@ -739,13 +1237,28 @@ fn random_word(k: u64) -> u64 {
     (t ^ (t >> 17) ^ (t >> 31)) + k
 }
 
-/// `user: exec <path>: refused: <why>`.
-fn refuse(path: str, why: str) {
+/// `user: exec <path>: refused: <why>` (the path the `n` bytes at `p`).
+fn refuse(p: u64, n: u64, why: str) {
     log.put("user: exec ")
-    log.put(path)
+    put_bytes(p, n)
     log.put(": refused: ")
     log.put(why)
     log.end()
+}
+
+/// Copy `s` into `pax_execbuf` at `off` (at most `cap` bytes); its
+/// length.
+fn stage(s: str, off: u64, cap: u64) -> u64 {
+    var k: u64 = 0
+    for b in s.bytes() {
+        if k >= cap {
+            panic.fail("user: exec: an argument string longer than", cap)
+        }
+        // # Safety: off + k < 4096, inside boot/user.S's pax_execbuf.
+        unsafe { ((pax_execbuf as u64 + off + k) as *u8).write_volatile((b as int as u64) as u8) }
+        k += 1
+    }
+    k
 }
 
 /// Load `path` from the initramfs as an ELF process with `argv` and
@@ -755,16 +1268,38 @@ fn refuse(path: str, why: str) {
 /// line says why; nothing of the space is kept). Thread context, IF
 /// clear (frames and paging are never entered with IF set).
 pub fn exec(body: u64, path: str, argv: str, envp: str) -> u64 {
-    let e = initramfs.lookup(path)
+    // # Safety: the address only.
+    let buf = unsafe { pax_execbuf as u64 }
+    let pl = stage(path, 0, 1024)
+    let al = stage(argv, 1024, 1024)
+    let el = stage(envp, 2048, 2048)
+    exec_span(body, buf, pl, buf + 1024, al, buf + 2048, el)
+}
+
+/// `exec_span` with the environment given as a string (px12,
+/// kmain_boreutils: a run-list line from the initramfs, ENV a const).
+pub fn exec_line(body: u64, pa: u64, pl: u64, aa: u64, al: u64, envp: str) -> u64 {
+    // # Safety: the address only.
+    let buf = unsafe { pax_execbuf as u64 }
+    let el = stage(envp, 2048, 2048)
+    exec_span(body, pa, pl, aa, al, buf + 2048, el)
+}
+
+/// `exec` for paths and words given as kernel bytes (px12): the path
+/// the `pl` bytes at `pa`, argv the words of the `al` bytes at `aa`,
+/// envp the words of the `el` bytes at `ea`. kmain_boreutils passes a
+/// run-list line of the initramfs itself.
+pub fn exec_span(body: u64, pa: u64, pl: u64, aa: u64, al: u64, ea: u64, el: u64) -> u64 {
+    let e = initramfs.lookup_span(pa, pl)
     if e == initramfs.end() {
-        refuse(path, initramfs.lookup_why(path))
+        refuse(pa, pl, initramfs.lookup_why_span(pa, pl))
         return 0
     }
     let file = initramfs.data(e)
     let size = initramfs.size(e)
     let r = elf.refusal(file, size)
     if r != 0 {
-        refuse(path, elf.why(r))
+        refuse(pa, pl, elf.why(r))
         return 0
     }
     let pml4 = paging.new_space(sched.pml4())
@@ -773,7 +1308,7 @@ pub fn exec(body: u64, path: str, argv: str, envp: str) -> u64 {
     }
     let entry = elf.load(file, size, pml4)
     if entry == 0 {
-        refuse(path, "out of frames")
+        refuse(pa, pl, "out of frames")
         let _freed = paging.free_user(pml4)
         return 0
     }
@@ -787,13 +1322,13 @@ pub fn exec(body: u64, path: str, argv: str, envp: str) -> u64 {
     }
     // The strings' block, under eight zero bytes at the top: argv's,
     // envp's, the path's.
-    let argc = words(argv)
-    let envc = words(envp)
-    let sbytes = words_bytes(argv) + words_bytes(envp) + words_bytes(path)
+    let argc = words(aa, al)
+    let envc = words(ea, el)
+    let sbytes = words_bytes(aa, al) + words_bytes(ea, el) + words_bytes(pa, pl)
     let strs = STACK_TOP - 8 - sbytes
-    let env_at = put_words(pml4, strs, argv)
-    let path_at = put_words(pml4, env_at, envp)
-    let path_end = put_words(pml4, path_at, path)
+    let env_at = put_words(pml4, strs, aa, al)
+    let path_at = put_words(pml4, env_at, ea, el)
+    let path_end = put_words(pml4, path_at, pa, pl)
     if path_end != STACK_TOP - 8 {
         panic.fail("user: exec: the strings' block ends at", path_end)
     }
@@ -806,8 +1341,8 @@ pub fn exec(body: u64, path: str, argv: str, envp: str) -> u64 {
     let nwords = 1 + (argc + 1) + (envc + 1) + 2 * AUX_PAIRS
     let sp = (rnd - nwords * 8) - (rnd - nwords * 8) % 16
     poke64(pml4, sp, argc)
-    let after_argv = put_ptrs(pml4, sp + 8, strs, argv)
-    var a = put_ptrs(pml4, after_argv, env_at, envp)
+    let after_argv = put_ptrs(pml4, sp + 8, strs, aa, al)
+    var a = put_ptrs(pml4, after_argv, env_at, ea, el)
     a = put_aux(pml4, a, AT_PHDR, elf.aux(file, 0))
     a = put_aux(pml4, a, AT_PHENT, elf.aux(file, 2))
     a = put_aux(pml4, a, AT_PHNUM, elf.aux(file, 1))
@@ -838,6 +1373,17 @@ pub fn exec(body: u64, path: str, argv: str, envp: str) -> u64 {
         i += 1
     }
     let id = sched.create_process(body, sched.elf_prog() - 1, pml4, entry, sp, initramfs.name_addr(e) + base, nl - base)
+    // px12: the break starts above the image's highest byte.
+    var top: u64 = 0
+    var s: u64 = 0
+    while s < elf.loads(file) {
+        let hi = elf.seg(file, s, 1)
+        if hi > top {
+            top = hi
+        }
+        s += 1
+    }
+    vm.start(sched.area_of(id), top)
     describe_elf(file, id, pml4, entry, sp, argc, envc)
     id
 }
