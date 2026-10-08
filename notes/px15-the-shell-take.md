@@ -97,3 +97,37 @@ The quiet image, BIOS, TCG, QEMU 11.1.1: **2.0 s ± 0.4** from the
 command to pelt's `$ ` (px14's image: 1.6 s), the initramfs about 20
 MB larger (`ls` 2.1 → ~11.9 MB, `tail` ~11.9 MB added) and loaded by
 Limine before the kernel starts. Falsified outside 1.6–2.4 s.
+
+### P5. The brief's session (added 2026-10-08, the orchestrator's brief, before any of it ran)
+
+The brief replaces item 3's command list. A new typed session,
+`shell-howl` (`user/console/shell-howl.keys`), types exactly:
+`cat /etc/motd`, `ls /bin`, `echo $((6 * 7))`, `howl() { echo
+"a${1}ooo!"; }`, `howl wwwww`, `wc /etc/motd`, `teleport`, `echo $?`,
+then Ctrl-D at the empty prompt. The shell image's `/etc/motd` becomes
+`PAX. Kernel: wolf. Shell: wolf. Tools: wolf. Nothing here existed last
+year.` and a newline (77 bytes, 12 words). Predicted, on Linux and on
+PAX alike (the session diff empty on every leg, quiet and narrating):
+
+- `cat /etc/motd`: that line;
+- `ls /bin`: `cat echo false head ls pelt sleep tail true wc`, one a
+  line;
+- `echo $((6 * 7))`: `42`;
+- the definition prints nothing; `howl wwwww`: `awwwwwooo!`;
+- `wc /etc/motd`: ` 1 12 77 /etc/motd` (the widths px14's ` 1 15 81`
+  had);
+- `teleport`: `pelt: line 7: teleport: not found` (the seventh line
+  pelt read), then `echo $?`: `127`;
+- Ctrl-D: pelt ends with status 0; `PAX: init /bin/pelt ended with
+  status 0; nothing left to run`, `halt`.
+
+Falsified by any line of it differing between PAX and Linux, or by
+pelt answering any of it otherwise (then reported, not changed).
+
+The Linux side run beside PAX: the same tree under `podman run -it
+--rootfs` (pelt pid 1, a pseudo-terminal, the same environment) on
+kasumi, reached from nomad-1 by `ssh -t`: nomad-1 has podman but no
+podman machine and 20 GiB free, and no lane installs on it. Its
+transcript, carriage returns removed, from the first prompt to the
+last, equals PAX's (a named guess: the two terminals differ in ISIG
+and IXON only, which nothing typed here reaches).
