@@ -255,3 +255,27 @@ licensed kernels: none consulted.
 | man-pages `brk(2)`, `mmap(2)`, `munmap(2)`, `mprotect(2)`, `arch_prctl(2)`, `open(2)`, `read(2)`, `pread(2)`, `lseek(2)`, `close(2)`, `stat(2)`, `statx(2)`, `getdents64(2)` (`struct linux_dirent64`), `getcwd(2)`, `readlink(2)`, `ioctl(2)`, `getrandom(2)`, `clock_gettime(2)`, `clock_nanosleep(2)`, `uname(2)`, `prctl(2)`, `getrlimit(2)`, `set_tid_address(2)`, `path_resolution(7)`, `makedev(3)` | 6.x | the man-pages project's licences | the author's own knowledge | the same |
 | Intel SDM vol. 4 (IA32_FS_BASE, MSR 0xC0000100), vol. 3A §2.5 (CR4.FSGSBASE left clear) | — | — | the author's own knowledge | `kernel/sched`'s FS base per thread |
 | black-box Linux: the boreutils binaries and busybox-static's `ls` under `strace` (Ubuntu 24.04, glibc 2.39, strace 6.8, kasumi's kernel 7.2.8 in a podman container; the CI runner's kernel), chrooted in the initramfs's tree (`tools/linux-run`) | — | — | measured | the call set (`notes/px12/linux-strace-*.txt`), every answer `tests/mpx3-boreutils` compares, and one fact the psABI leaves open: glibc passes `AT_FDCWD` with the register's upper half zero (`0x00000000ffffff9c`), so `int` arguments are read as 32 bits |
+
+## px13 — the console (2026-10-08)
+
+**Linux: nothing from the refs clone this time.** The uapi termios header
+(`include/uapi/asm-generic/termbits.h`) was the planned source for
+`struct termios` and its bits; its read was refused by this lane's tool
+permissions, so every number came black-box instead (below). No Linux
+source (`.c`, `.S`, non-uapi headers), no glibc, musl or other libc, no
+kernel's source and **no shell's source** (ruling #43) was read: pelt is
+built from its own tree at its pin and observed only from outside
+(`strace`, a pseudo-terminal). No disassembly. Permissively licensed
+kernels: none consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| PC16550D data sheet: IER bit 0 (received data available), FCR's receive trigger, LSR bit 0, RBR | — | — | the author's own knowledge | `kernel/serial`'s receiver |
+| the IBM PC AT keyboard controller (8042): ports 0x60/0x64, status bits 0, 1 and 5, commands 0x20, 0x60 and 0xae, the configuration byte's bits 0, 1, 4 and 6; scancode set 1 for the US layout (make codes, bit 7 on release, the 0xe0 prefix) | — | — | the author's own knowledge | `kernel/console`'s keyboard |
+| Intel 8259A data sheet (OCW1, OCW2's non-specific EOI) | — | — | the author's own knowledge | `kernel/timer`'s `unmask` and `eoi` |
+| POSIX.1-2024 XBD chapter 11 (General Terminal Interface: canonical and non-canonical input, the special characters, ECHO, ECHOE, ECHOK, ICRNL, VMIN) | 2024 | The Open Group | the author's own knowledge | `kernel/console`'s line discipline |
+| man-pages `termios(3)` (ECHOCTL, ECHOKE, IEXTEN, VWERASE), `ioctl_tty(2)` (TCGETS, TCSETS, TCSETSW, TCSETSF, TIOCGWINSZ, TIOCSWINSZ) | 6.x | the man-pages project's licences | the author's own knowledge | the same, and `kernel/console`'s ioctls |
+| black-box Linux: `TCGETS` and `TIOCGWINSZ` on a fresh pseudo-terminal (`notes/px13/termios.c`: the 36 bytes TCGETS writes, the 8 TIOCGWINSZ writes), `strace -X verbose` and `strace -v` of that program and of `notes/px13/bits.c` (one flag bit set a call, so strace names each), in the `px13-ubuntu` container on kasumi (Ubuntu 24.04, strace 6.8) | — | — | measured | `struct termios`'s layout (four 32-bit flags, `c_line`, 19 control characters, 36 bytes), every flag bit's value, every `c_cc` index, the pseudo-terminal's defaults, the request numbers (`notes/px13/termios.txt`, `bits.strace`, `termios-v.strace`) |
+| black-box Linux: pelt `dd22a86` (static, `tools/mkpelt`) under `strace -f` on a pseudo-terminal, a session typed (`notes/px13/ptysess.py`) | — | — | measured | what pelt asks of the terminal (nothing: no ioctl), how it reads (`/dev/stdin`, one byte a call) and writes its prompt (`write(2, "$ ", 2)`) (`notes/px13/pelt-session.strace`, `pelt-eof.strace`) |
+| black-box Linux: every session `tests/mpx3-console` types, typed into the same binaries on a Linux pseudo-terminal with ISIG and IXON cleared (`tools/linux-tty`) | — | — | measured | the reference every PAX transcript is compared with, byte for byte: the echo of erase (`\b \b`, twice for a `^X`), kill and word-erase, `^C` as a byte, VEOF on a non-empty line |
+| QEMU's monitor `sendkey` and the `file` character device's `input-path` | QEMU 8.2 (CI), 11.1 (kasumi, hasu) | — | the QEMU documentation | `tools/qemu-halt --type`, `tools/qemu-run --serial-input` |
