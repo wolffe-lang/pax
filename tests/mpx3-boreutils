@@ -24,13 +24,17 @@
 #   B1 initramfs: `initramfs: module 0x…, <b> bytes, <n> entries` with b
 #      the archive's size and n its entry count, each entry listed with
 #      its size.
-#   B2 the programs, differential: for each command k, `run k: <line>`,
-#      its exec line, and its end `user: <name> pid <p> exit_group <s>`
-#      (or `exit <s>`; never `killed`); the lines between the exec line
-#      and the end that are not the kernel's (`user: …`) are
-#      byte-identical to Linux's output for command k, and s is Linux's
-#      exit status. The milestone's five are commands 1-5.
-#   B3 frames: every command's `user: frames free <A> before, <B> with 1
+#   B2 the programs, differential: for each line k, `run k: <line>`,
+#      an exec line per command on it, and each one's end `user: <name>
+#      pid <p> exit_group <s>` (or `exit <s>`; never `killed`); the lines
+#      after the first exec line that are not the kernel's (`user: …`)
+#      are byte-identical to Linux's output for line k, and each s is
+#      Linux's exit status for that command. The milestone's five are
+#      lines 1-5. A line of commands separated by " & " runs them at
+#      once on PAX (one after another on Linux, outputs joined), so only
+#      one of them writes: the FS base per thread's witness, a sleeper
+#      woken after another program ran.
+#   B3 frames: every line's `user: frames free <A> before, <B> with <n>
 #      processes, <C> after` has C = A and B < A: everything a program
 #      mapped (its image, stack, break, mmap) came back.
 #   B4 what PAX lacks: the system calls answered -ENOSYS over the whole
@@ -210,17 +214,27 @@ for leg in $legs; do
             k=$((k + 1))
             # The block: from `run k: line` to the next `run ` line.
             awk -v h="run $k: $line" '$0 == h { on = 1; next } on && /^run [0-9]+: |^run: [0-9]+ commands$/ { exit } on { print }' "$norm" > "$out/$k.block"
-            pid=$(sed -n -E 's/^user: exec pid ([0-9]+) cr3 .*/\1/p' "$out/$k.block" | head -n 1)
-            if [ -z "$pid" ]; then
-                why+=" $k ($line): no exec line ($(head -n 2 "$out/$k.block" | tr '\n' '|'));"
+            m=$(printf '%s\n' "$line" | awk -F ' & ' '{ print NF }')
+            pids=$(sed -n -E 's/^user: exec pid ([0-9]+) cr3 .*/\1/p' "$out/$k.block" | paste -sd' ' -)
+            if [ "$(printf '%s\n' $pids | grep -c .)" != "$m" ]; then
+                why+=" $k ($line): $(printf '%s\n' $pids | grep -c .) exec lines, not $m ($(head -n 2 "$out/$k.block" | tr '\n' '|'));"
                 continue
             fi
-            endl=$(grep -E "^user: [^ ]+ pid $pid (exit_group|exit) [0-9]+ after [0-9]+ runs$|^user: [^ ]+ pid $pid killed: " "$out/$k.block" | head -n 1)
-            case $endl in
-                *" killed: "*|'') why+=" $k ($line): '$endl';"; continue ;;
-            esac
-            s=$(printf '%s\n' "$endl" | sed -E 's/.* (exit_group|exit) ([0-9]+) after .*/\2/')
-            awk -v p="$pid" '$0 ~ "^user: exec pid " p " " { on = 1; next } on && $0 ~ "^user: [^ ]+ pid " p " (exit_group|exit) " { exit } on && $0 !~ "^user: " { print }' "$out/$k.block" > "$out/$k.out"
+            s= bad_end=
+            for pid in $pids; do
+                endl=$(grep -E "^user: [^ ]+ pid $pid (exit_group|exit) [0-9]+ after [0-9]+ runs$|^user: [^ ]+ pid $pid killed: " "$out/$k.block" | head -n 1)
+                case $endl in
+                    *" killed: "*|'') bad_end+=" pid $pid '$endl'" ;;
+                    *) s+="${s:+ }$(printf '%s\n' "$endl" | sed -E 's/.* (exit_group|exit) ([0-9]+) after .*/\2/')" ;;
+                esac
+            done
+            if [ -n "$bad_end" ]; then
+                why+=" $k ($line):$bad_end;"
+                continue
+            fi
+            # The programs' lines: after the first exec line, the kernel's
+            # own (`user: …`) left out.
+            awk '/^user: exec pid / { on = 1; next } on && !/^user: / { print }' "$out/$k.block" > "$out/$k.out"
             lrc=$(cat "$lx/$k.rc" 2>/dev/null)
             if ! cmp -s "$lx/$k.out" "$out/$k.out"; then
                 why+=" $k ($line): output differs from Linux's: $(diff "$lx/$k.out" "$out/$k.out" | head -n 6 | tr '\n' '|');"
@@ -237,7 +251,7 @@ for leg in $legs; do
             /^user: frames free [0-9]+ before, [0-9]+ with [0-9]+ processes, [0-9]+ after$/ {
                 n++; a = $4; b = $6; k = $8; c = $10
                 if (c != a) why = why " command " n ": " c " after, not " a ";"
-                if (k != 1 || b >= a) why = why " command " n ": " k " processes, " b " during;"
+                if (k < 1 || b >= a) why = why " command " n ": " k " processes, " b " during;"
                 got = got " " a - b
             }
             END { if (n != want) why = why " " n " frames lines, not " want ";"; if (why != "") { print "no:" why; exit 1 } print "ok" got }' "$norm") || why=" ${v#no:}"
