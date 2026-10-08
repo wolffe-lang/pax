@@ -138,6 +138,7 @@
 //! (wolf-lang#598, not fixed in 0.2.24). No `region` is used anywhere
 //! here (wolf-lang#611). No Linux source; no other kernel's source.
 
+use boot_info
 use console
 use files
 use frames
@@ -280,8 +281,10 @@ fn code_pages(p: u64) -> u64 {
 }
 
 /// Turn on SYSCALL (EFER.SCE, STAR, LSTAR, FMASK) and, when the CPU has
-/// them, SMEP and SMAP.
+/// them, SMEP and SMAP; and take `quiet` from the kernel command line
+/// (px15, kernel/log).
 pub fn start() {
+    log.set_quiet(boot_info.cmdline_has("quiet"))
     // # Safety: cpu.S's RDMSR/WRMSR of architectural MSRs every x86-64
     // CPU has; LSTAR is boot/user.S's entry; CR4 gains only the bits
     // CPUID says exist, and nothing the kernel does touches a user page
@@ -337,6 +340,9 @@ pub fn report() {
     log.put(", smap ")
     log.dec(bit(cr4, CR4_SMAP))
     log.end()
+    if log.quiet() {
+        log.line("user: quiet (the kernel command line): no exec, exit, -ENOSYS or frames line for a program")
+    }
 }
 
 /// A frame, zeroed through the HHDM; a named panic when there is none.
@@ -673,7 +679,8 @@ fn put_aword(i: u64, v: u64) {
 }
 
 /// `user: <name> pid <id> syscall <n>: -ENOSYS`, once per process and
-/// number (numbers past 511 every time).
+/// number (numbers past 511 every time); nothing when the console is
+/// quiet (px15).
 fn unknown(nr: u64) {
     if nr < 512 {
         let w = A_LOGGED + nr / 64
@@ -682,6 +689,9 @@ fn unknown(nr: u64) {
             return
         }
         put_aword(w, aword(w) | bit)
+    }
+    if log.quiet() {
+        return
     }
     who()
     log.put(" syscall ")
@@ -919,11 +929,13 @@ pub fn syscall(f: u64) -> u64 {
     let a3 = word(f, W_R10)
     let a4 = word(f, W_R8)
     if nr == SYS_EXIT || nr == SYS_EXIT_GROUP {
-        who()
-        log.put(if nr == SYS_EXIT { " exit " } else { " exit_group " })
-        log.dec((a0 & 0xff) as int)
-        runs_tail()
-        log.end()
+        if !log.quiet() { // px15
+            who()
+            log.put(if nr == SYS_EXIT { " exit " } else { " exit_group " })
+            log.dec((a0 & 0xff) as int)
+            runs_tail()
+            log.end()
+        }
         if sched.self_ppid() == 0 {
             put_state(U_LAST_EXIT, (a0 & 0xff) + 1) // px14: a program the kernel started
         }
