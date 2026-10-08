@@ -829,6 +829,84 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px14: processes. pelt runs as pid 1 on kmain_console and runs the
+  # programs in the initramfs (boreutils' cat, echo, false, head, sleep,
+  # true and wc, built here by tools/mkboreutils; busybox-static's
+  # busybox as /bin/ls): clone3 (CLONE_VM|CLONE_VFORK), execve, wait4.
+  # Each session (user/console/shell*.keys) is typed into PAX by
+  # tools/qemu-halt --type and into the same binaries on this runner's
+  # Linux by tools/linux-tty, chrooted in the same tree, pelt pid 1 of a
+  # fresh pid namespace (sudo: chroot, mounts, unshare). procs
+  # (user/elf/procs.c, tools/mkuser), the process calls' witness, runs as
+  # pid 1 on both. tests/mpx3-shell: the build (S0), the processes and
+  # every frame back (S1), every transcript byte-identical to Linux's and
+  # the same exit status (S2), every typed byte arrived (S3), -ENOSYS and
+  # refusals as named (S4), init's end and the halt (S5); both tiers,
+  # BIOS and UEFI.
+  mpx3-shell:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, busybox-static (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev busybox-static
+          qemu-system-x86_64 --version
+          clang --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 busybox-static | grep -E '^(Package|Version):'
+          uname -sr
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx3-shell-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the shell runs programs, both tiers, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx3-shell
+
+      - name: keep the programs' sums, the Linux side, the transcripts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx3-shell-linux
+          path: |
+            build/mpx3-shell/peltbin/sums.txt
+            build/mpx3-shell/bore/sums.txt
+            build/mpx3-shell/pelt.txt
+            build/mpx3-shell/bore.txt
+            build/mpx3-shell/user.txt
+            build/mpx3-shell/linux/
+            build/mpx3-shell/*.initramfs.txt
+            build/mpx3-shell/*/kmain_console.elf
+            build/mpx3-shell/*/*.log
+            build/mpx3-shell-*.session
+            build/mpx3-shell-*.session.linux
+            build/mpx3-shell-*.log
+            build/mpx3-shell-*.norm
+            build/mpx3-shell-*.meta
+            build/mpx3-shell-*.halt
+            build/mpx3-shell-*.verdict
+            build/mpx3-shell-*.typed
+            build/mpx3-shell-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   # px08: the tour of the kernel. kmain_tour and kmain_tour_text
   # (kernel/pax_tour's stages over the test kernels' paths), two ISOs behind
   # Limine's menu (tools/tour build), both tiers, BIOS and UEFI.
