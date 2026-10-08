@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+# linux-tty — type a session into a program on a Linux pseudo-terminal
+# and record what the terminal shows: the Linux side of px13's typed
+# sessions (tests/mpx3-console), the reference PAX's console is held to.
+#
+#   tools/linux-tty --keys KEYS --prompt TEXT [--cwd DIR] [--argv0 NAME]
+#                   OUT -- PROG [ARG...]
+#
+# PROG runs on the slave side of a fresh pseudo-terminal (its
+# descriptors 0, 1 and 2, its controlling terminal), in DIR (default /),
+# with exactly the environment PAX's kmain_console gives a program:
+# HOME=/ TERM=linux PAX=1, and argv[0] NAME when given (the path PAX
+# runs it by, /bin/…). Before PROG starts, the terminal's settings
+# are made PAX's console's: ISIG and IXON cleared (PAX has no signals and
+# no output flow control yet, so Ctrl-C is the byte 0x03 on both; every
+# other setting is the pseudo-terminal's default, which is what PAX's
+# console starts with: kernel/console). Then the KEYS file is typed
+# exactly as tools/qemu-halt --type types it (the same format: before
+# step k, wait until TEXT has been shown k times; then the step's
+# bytes, `^C ^D ^U ^W ^? ^^` the control characters, DEL and `^`, and
+# Enter (CR) unless the step ends with `^D` or `^.`), 20 ms a byte.
+# OUT gets every byte the terminal showed (the program's output and the
+# line discipline's echo, CR LF as the terminal writes them); OUT.rc the
+# program's exit status. Exit 0 when the session ran (whatever the
+# program's status), 1 when a prompt did not come within 30 s or the
+# program did not end, 2 on a usage error.
+#
+# Black-box: this drives Linux's own line discipline; nothing of Linux
+# is read but what it shows.
+import os
+import pty
+import select
+import sys
+import termios
+import time
+
+ENV = {"HOME": "/", "TERM": "linux", "PAX": "1"}
+WAIT = 30.0
+
+
+def die(msg, code=2):
+    sys.stderr.write("linux-tty: %s\n" % msg)
+    sys.exit(code)
+
+
+def step_bytes(line):
+    out = bytearray()
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if c == "^" and i + 1 < len(line):
+            d = line[i + 1]
+            m = {"C": 3, "D": 4, "U": 21, "W": 23, "?": 127, "^": 94, ".": None}
+            if d in m:
+                if m[d] is not None:
+                    out.append(m[d])
+                i += 2
+                continue
+        out += c.encode()
+        i += 1
+    if not (line.endswith("^D") or line.endswith("^.")):
+        out.append(13)
+    return bytes(out)
+
+
+def main(argv):
+    keys = prompt = None
+    cwd = "/"
+    argv0 = None
+    args = argv[1:]
+    while args and args[0].startswith("--") and args[0] != "--":
+        if args[0] == "--keys":
+            keys = args[1]
+        elif args[0] == "--prompt":
+            prompt = args[1]
+        elif args[0] == "--cwd":
+            cwd = args[1]
+        elif args[0] == "--argv0":
+            argv0 = args[1]
+        else:
+            die("unknown option %s" % args[0])
+        args = args[2:]
+    if not keys or prompt is None or len(args) < 3 or args[1] != "--":
+        die("usage: linux-tty --keys KEYS --prompt TEXT [--cwd DIR] [--argv0 NAME] OUT -- PROG [ARG...]")
+    out, prog = args[0], args[2:]
+    steps = [l.rstrip("\n") for l in open(keys)]
+    pb = prompt.encode()
+
+    pid, fd = pty.fork()
+    if pid == 0:
+        try:
+            a = termios.tcgetattr(0)
+            a[0] &= ~termios.IXON
+            a[3] &= ~termios.ISIG
+            termios.tcsetattr(0, termios.TCSANOW, a)
+            os.chdir(cwd)
+            os.execve(prog[0], [argv0 or prog[0]] + prog[1:], ENV)
+        except Exception as e:  # noqa: BLE001
+            os.write(2, ("linux-tty: exec %s: %s\n" % (prog[0], e)).encode())
+        os._exit(127)
+
+    buf = bytearray()
+    alive = True
+
+    def pump(t):
+        nonlocal alive
+        end = time.time() + t
+        while alive and time.time() < end:
+            r, _, _ = select.select([fd], [], [], 0.02)
+            if r:
+                try:
+                    d = os.read(fd, 4096)
+                except OSError:
+                    alive = False
+                    return
+                if not d:
+                    alive = False
+                    return
+                buf.extend(d)
+
+    ok = True
+    for k, line in enumerate(steps, 1):
+        end = time.time() + WAIT
+        while buf.count(pb) < k:
+            if not alive or time.time() > end:
+                sys.stderr.write("linux-tty: prompt %d (%r) did not come for step %d: %s\n" % (k, prompt, k, line))
+                ok = False
+                break
+            pump(0.05)
+        if not ok:
+            break
+        pump(0.2)
+        for b in step_bytes(line):
+            os.write(fd, bytes([b]))
+            pump(0.02)
+    st = None
+    end = time.time() + WAIT
+    while time.time() < end:
+        pump(0.1)
+        p, w = os.waitpid(pid, os.WNOHANG)
+        if p == pid:
+            st = w
+            pump(0.2)
+            break
+    with open(out, "wb") as f:
+        f.write(bytes(buf))
+    if st is None:
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+        sys.stderr.write("linux-tty: %s did not end\n" % prog[0])
+        open(out + ".rc", "w").write("none\n")
+        return 1
+    open(out + ".rc", "w").write("%d\n" % os.waitstatus_to_exitcode(st))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
