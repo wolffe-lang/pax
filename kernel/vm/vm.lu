@@ -83,7 +83,7 @@ const R_SHARED: u64 = 2
 const R_NO_FRAMES: u64 = 3
 
 fn get(a: u64, i: u64) -> u64 {
-    // # Safety: `a` is a process area (sched.proc_area), 2048 bytes; i < 8.
+    // # Safety: `a` is a process area (sched.proc_area), 4096 bytes; i < 8.
     unsafe { ((a + i * 8) as *u64).read_volatile() }
 }
 
@@ -118,10 +118,12 @@ pub fn why(r: u64) -> str {
 }
 
 /// The break of a process whose ELF image ends at `top` (its highest
-/// PT_LOAD byte + 1): the page above it.
+/// PT_LOAD byte + 1): the page above it; the mmap cursor at its start
+/// (px14: `execve` calls this too, on an area the old program used).
 pub fn start(a: u64, top: u64) {
     put(a, A_BRK_START, page_up(top))
     put(a, A_BRK, page_up(top))
+    put(a, A_MMAP, 0) // px14: execve starts the cursor afresh
 }
 
 /// The current break (0 before `start`).
