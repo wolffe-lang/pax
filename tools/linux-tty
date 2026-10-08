@@ -16,7 +16,10 @@
 # --root DIR (px14): PROG runs chrooted in DIR, the tree PAX's initramfs
 # is made from, so `ls /bin` and `cat /etc/motd` name the same files on
 # both; DIR/dev is the host's /dev bound in (boreutils opens
-# /dev/stdout) and DIR/proc a proc mount, both removed at the end.
+# /dev/stdout), unmounted at the end and removed when this made it.
+# No /proc is mounted (px15): PAX has none, and `ls /` would list it on
+# Linux alone (bu18 measured `bin dev etc` on PAX, `bin dev etc proc`
+# here); nothing these sessions run reads /proc.
 # --pid1 (px14): PROG is the first process of a fresh pid namespace,
 # pid 1 as PAX's first program is, its children numbered 2, 3, … and
 # orphans reparented to it. Both need root (CI runs this under sudo). Before PROG starts, the terminal's settings
@@ -52,6 +55,16 @@ WAIT = 30.0
 def die(msg, code=2):
     sys.stderr.write("linux-tty: %s\n" % msg)
     sys.exit(code)
+
+
+def unmake(paths):
+    # The directories this run made in --root's tree, so the tree is as
+    # it was (it is the initramfs's source).
+    for p in reversed(paths):
+        try:
+            os.rmdir(p)
+        except OSError as e:
+            sys.stderr.write("linux-tty: rmdir %s: %s\n" % (p, e))
 
 
 def unmount(paths):
@@ -116,16 +129,15 @@ def main(argv):
     pb = prompt.encode()
 
     mounted = []
+    made = []
     if root:
-        for d in ("dev", "proc"):
-            os.makedirs(os.path.join(root, d), exist_ok=True)
-        if subprocess.call(["mount", "--bind", "/dev", os.path.join(root, "dev")]) != 0:
+        dev = os.path.join(root, "dev")
+        if not os.path.isdir(dev):
+            os.makedirs(dev)
+            made.append(dev)
+        if subprocess.call(["mount", "--bind", "/dev", dev]) != 0:
             die("cannot bind /dev into %s (root?)" % root)
-        mounted.append(os.path.join(root, "dev"))
-        if subprocess.call(["mount", "-t", "proc", "proc", os.path.join(root, "proc")]) != 0:
-            unmount(mounted)
-            die("cannot mount proc in %s" % root)
-        mounted.append(os.path.join(root, "proc"))
+        mounted.append(dev)
     if pid1:
         os.unshare(os.CLONE_NEWPID)  # the next child is pid 1 of a new namespace
 
@@ -193,11 +205,13 @@ def main(argv):
         os.kill(pid, 9)
         os.waitpid(pid, 0)
         unmount(mounted)
+        unmake(made)
         sys.stderr.write("linux-tty: %s did not end\n" % prog[0])
         open(out + ".rc", "w").write("none\n")
         return 1
     open(out + ".rc", "w").write("%d\n" % os.waitstatus_to_exitcode(st))
     unmount(mounted)
+    unmake(made)
     return 0 if ok else 1
 
 
