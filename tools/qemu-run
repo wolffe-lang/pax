@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 # qemu-run — boot a PAX image headless and return how it ended.
 #
-#   tools/qemu-run [--firmware bios|uefi] [--serial FILE] [--timeout SECS]
-#                  [--accel auto|kvm|tcg] [--gdb PORT] IMAGE.iso [-- QEMU-ARGS...]
+#   tools/qemu-run [--firmware bios|uefi] [--serial FILE] [--serial-input FIFO]
+#                  [--timeout SECS] [--accel auto|kvm|tcg] [--gdb PORT]
+#                  IMAGE.iso [-- QEMU-ARGS...]
 #
 # The machine: q35, 256 MiB, no NIC, `-nographic`, COM1 to FILE (default
 # build/serial.log), `-no-reboot` (a triple fault ends the run instead of
 # looping), no monitor, and isa-debug-exit at port 0xf4.
+#
+# --serial-input FIFO (px13) also gives COM1 an input: QEMU's file
+# character device with `input-path`, so what is written to FIFO is what
+# the guest's UART receives (tools/qemu-halt --type opens FIFO read-write
+# before QEMU starts, so QEMU's open never blocks and never sees EOF).
 #
 # Exit status is QEMU's, with one addition:
 #   (v << 1) | 1   the guest wrote v to port 0xf4 (the proof's success,
@@ -28,11 +34,12 @@
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
-firmware=bios serial=$PAX_BUILD/serial.log timeout=30 accel=auto gdb_port= image=
+firmware=bios serial=$PAX_BUILD/serial.log serial_in= timeout=30 accel=auto gdb_port= image=
 while [ $# -gt 0 ]; do
     case $1 in
         --firmware) firmware=$2; shift 2 ;;
         --serial)   serial=$2; shift 2 ;;
+        --serial-input) serial_in=$2; shift 2 ;;
         --timeout)  timeout=$2; shift 2 ;;
         --accel)    accel=$2; shift 2 ;;
         --gdb)      gdb_port=$2; shift 2 ;;
@@ -61,11 +68,17 @@ trap 'rm -rf "$work"' EXIT
 cmd=("$qemu"
      -machine q35 -cpu max -m 256M -accel "$accel"
      -nographic -monitor none -parallel none -nic none
-     -serial "file:$serial"
      -no-reboot
      -device isa-debug-exit,iobase=0xf4,iosize=0x04
      -drive "file=$image,format=raw,media=cdrom,readonly=on"
      -boot d)
+
+if [ -n "$serial_in" ]; then
+    [ -p "$serial_in" ] || die "--serial-input $serial_in is not a FIFO"
+    cmd+=(-chardev "file,id=com1,path=$serial,input-path=$serial_in" -serial chardev:com1)
+else
+    cmd+=(-serial "file:$serial")
+fi
 
 case $firmware in
     bios) ;;
