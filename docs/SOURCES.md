@@ -237,3 +237,21 @@ licensed kernels: none consulted.
 | AMD64 APM vol. 2 §11.5 (saving media and x87 state) | — | — | the author's own knowledge, as a cross-check | the same |
 | Limine `PROTOCOL.md` (the Module Feature, `struct limine_file`, the x86-64 machine state at entry: every CR0/CR4 bit not named cleared) and `CONFIG.md` (`module_path`) | limine-protocol `3a0526b7`; Limine v12.9.1 | BSD-2-Clause | read | `boot/start.S`'s module request, `kernel/boot_info`, `boot/limine-initramfs.conf`, `kernel/fpu` |
 | black-box Linux: `user/elf/hello.S` run natively on kasumi (CachyOS, kernel 7.2.8) and on the CI runner (Ubuntu); `strace` 7.2 of the static wolf program | — | — | measured | `fcw 0x037f mxcsr 0x1f80` at execve; the census's Linux half |
+
+## px12 — Linux programs, M-PX3 (2026-10-07)
+
+**Linux: only allowed paths, from the refs clone's sparse checkout, never
+widened.** No Linux source (`.c`, `.S`, non-uapi headers), no glibc,
+musl, busybox or other libc, kernel or program source was read. glibc's,
+boreutils' and busybox's behaviour was observed black-box only: `strace`
+of the binaries under test in an Ubuntu 24.04 container on kasumi and on
+the CI runner (`notes/px12/`). No disassembly was needed. Permissively
+licensed kernels: none consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| Linux `arch/x86/entry/syscalls/syscall_64.tbl` | the refs clone's sparse checkout | facts of the ABI | read: the numbers of every call `kernel/user` dispatches | `kernel/user` |
+| Linux `arch/x86/include/uapi/asm/stat.h` (`struct stat`, x86-64), `include/uapi/linux/stat.h` (`struct statx`, STATX_*), `include/uapi/asm-generic/fcntl.h` and `include/uapi/linux/fcntl.h` (O_*, AT_FDCWD, AT_SYMLINK_NOFOLLOW, AT_EMPTY_PATH), `include/uapi/asm-generic/mman-common.h` and `include/uapi/linux/mman.h` (PROT_*, MAP_*), `arch/x86/include/uapi/asm/prctl.h` (ARCH_SET_FS …), `include/uapi/linux/prctl.h` (PR_GET_NAME), `include/uapi/asm-generic/ioctls.h` (TCGETS, TIOCGWINSZ), `include/uapi/linux/time.h` (CLOCK_*), `include/uapi/linux/utsname.h` (`struct new_utsname`), `include/uapi/linux/random.h` (GRND_*), `include/uapi/asm-generic/errno-base.h`/`errno.h` | the same | GPL-2.0 WITH Linux-syscall-note | read: layouts and numbers | `kernel/files`, `kernel/vm`, `kernel/user` |
+| man-pages `brk(2)`, `mmap(2)`, `munmap(2)`, `mprotect(2)`, `arch_prctl(2)`, `open(2)`, `read(2)`, `pread(2)`, `lseek(2)`, `close(2)`, `stat(2)`, `statx(2)`, `getdents64(2)` (`struct linux_dirent64`), `getcwd(2)`, `readlink(2)`, `ioctl(2)`, `getrandom(2)`, `clock_gettime(2)`, `clock_nanosleep(2)`, `uname(2)`, `prctl(2)`, `getrlimit(2)`, `set_tid_address(2)`, `path_resolution(7)`, `makedev(3)` | 6.x | the man-pages project's licences | the author's own knowledge | the same |
+| Intel SDM vol. 4 (IA32_FS_BASE, MSR 0xC0000100), vol. 3A §2.5 (CR4.FSGSBASE left clear) | — | — | the author's own knowledge | `kernel/sched`'s FS base per thread |
+| black-box Linux: the boreutils binaries and busybox-static's `ls` under `strace` (Ubuntu 24.04, glibc 2.39, strace 6.8, kasumi's kernel 7.2.8 in a podman container; the CI runner's kernel), chrooted in the initramfs's tree (`tools/linux-run`) | — | — | measured | the call set (`notes/px12/linux-strace-*.txt`), every answer `tests/mpx3-boreutils` compares, and one fact the psABI leaves open: glibc passes `AT_FDCWD` with the register's upper half zero (`0x00000000ffffff9c`), so `int` arguments are read as 32 bits |

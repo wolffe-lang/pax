@@ -221,3 +221,30 @@ witnesses (`tests/mpx3-user`).
   lane's calls; PIE (a load bias); `PT_INTERP` (M-PX4); AVX-512 state
   (XCR0 bits 5–7: no PAX host offers it, and a glibc built for
   x86-64-v4 needs it before its first system call).
+
+## Linux programs (px12, M-PX3)
+
+| module or file | what |
+|---|---|
+| `vm/` | a process's memory past its image: `brk` (from the page above the image's highest byte, up to 64 MiB, zeroed frames; the old break answered on a refusal, as Linux does), `mmap` (anonymous private only, top-down from `0x7f0000000000`, frames zeroed at the call, `MAP_FIXED` replaces, `MAP_FIXED_NOREPLACE` -EEXIST; a file mapping -ENODEV and `MAP_SHARED` -EINVAL, each a `refused:` line), `munmap`, `mprotect` (leaves rewritten, INVLPG; `PROT_NONE` takes U/S away) |
+| `files/` | 32 descriptors a process in its area (zero is a fresh process: 0-2 the console); the read-only tree is the initramfs plus a synthetic `/dev` (`stdin`, `stdout`, `stderr` reopen descriptor 0, 1, 2 as Linux's links do; `null`); paths made canonical as strings, then looked up whole (-ENOENT, -ENOTDIR, -EISDIR, -EROFS for any write, `refused:` named); `openat`, `read`, `pread64`, `lseek`, `close`, `fstat`/`newfstatat` (`struct stat`, 144 bytes), `statx` (256 bytes), `getdents64` (`.` and `..` first, then the archive's order), `ioctl` (-ENOTTY), `getcwd` (`/`), `readlinkat` (nothing is a link) |
+| `uaccess/` | every user buffer of the new calls: the process's own tables walked first (`paging.user_ok`, `user_ok_write`), then the frame through the HHDM (SMAP never relaxed); checked whole, so all or nothing; `string_in` for paths |
+| `user/` (px12 additions) | the dispatch (`dispatch`): the calls above, `arch_prctl` SET_FS/GET_FS, `getrandom`, `clock_gettime`/`time`/`gettimeofday` (the PIT's ticks; no vDSO, no wall clock), `clock_nanosleep`/`nanosleep` (the thread sleeps to the tick after the deadline), `uname`, `prctl(PR_GET_NAME)`, `prlimit64` (read only), `set_tid_address`/`gettid`, the four ids (0); `int` arguments read as 32 bits; every other call -ENOSYS, logged once per process; `exec_span`/`exec_line` take a path and words as kernel bytes |
+| `sched/` (px12 additions) | the record grows to 128 bytes (`fs`, written to IA32_FS_BASE at every switch in); a 2048-byte process area per slot in `../boot/sched.S`'s `pax_procs`, zeroed with the slot; `sleep_current` for a system call that sleeps |
+| `paging/` (px12 additions) | `user_ok_write`; `protect_user` (a user leaf's flags rewritten, its frame kept) |
+| `initramfs/` (px12 additions) | `ino`, `nlink`, `is_dir`, `is_file`; `find_span`/`lookup_span` for a path given as kernel bytes |
+| `kmain_boreutils.lu` | runs the initramfs's `/etc/pax-run` (`../user/mpx3-boreutils.run`), one command at a time, each waited for, every frame checked back (`tests/mpx3-boreutils`) |
+
+- The programs are boreutils' own (`../user/boreutils.pin`, built by
+  `tools/mkboreutils` with the toolchain boreutils pins, `-static`
+  through a `cc` wrapper: wolf has no `--static`) and busybox-static's
+  busybox (boreutils has no `ls`), unmodified; `tools/linux-run` runs
+  the same list chrooted on Linux, the reference side.
+- No `region`, no heap: a process's state is words in its area and
+  frames; a path goes through `../boot/user.S`'s `pax_kbuf` (one CPU,
+  IF clear for the whole call).
+- Not yet: `fork`/`execve`/`wait4` (px14), console input (px13: `read`
+  on the console is end-of-file), signals, threads (`clone`, futexes,
+  `set_robust_list` and `rseq` -ENOSYS), a writable file system, a wall
+  clock, the vDSO, demand paging, PIE and `PT_INTERP`.
+
