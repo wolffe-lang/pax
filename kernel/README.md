@@ -238,8 +238,8 @@ witnesses (`tests/mpx3-user`).
 
 - The programs are boreutils' own (`../user/boreutils.pin`, built by
   `tools/mkboreutils` with the toolchain boreutils pins, `-static`
-  through a `cc` wrapper: wolf has no `--static`) and busybox-static's
-  busybox (boreutils has no `ls`), unmodified; `tools/linux-run` runs
+  through a `cc` wrapper: wolf has no `--static`), `ls` among them since
+  px15 (px12 ran busybox-static's), unmodified; `tools/linux-run` runs
   the same list chrooted on Linux, the reference side.
 - No `region`, no heap: a process's state is words in its area and
   frames; a path goes through `../boot/user.S`'s `pax_kbuf` (one CPU,
@@ -312,3 +312,20 @@ Linux pseudo-terminal (`tests/mpx3-shell`).
   name), process groups and sessions (wait4's 0 and -pgid mean any
   child), a shared file offset between a descriptor and its copy, rusage
   (zeroed), `execveat`, `#!` scripts (-ENOEXEC).
+
+## The command line, and `quiet` (px15)
+
+`../boot/start.S` asks Limine for the executable command line (the
+configuration's `cmdline`); `boot_info.cmdline_has(w)` says whether it
+holds `w` as a word. `user.start` reads `quiet` there once into
+`log`'s one word (`pax_log_quiet`, `../boot/console.S`), and with it on:
+
+| line | with `quiet` |
+|---|---|
+| `user: exec pid …` (`process/`), `user: <name> pid <n> exit_group <s> after <r> runs` and `… syscall <n>: -ENOSYS` (`user/`), `user: frames free …` (`kmain_console.lu`) | not printed |
+| `user: quiet (the kernel command line): …` (`user.report`) | printed once, at start-up |
+| refusals (`refused:`), `killed:`, `-EBADF`/`-EFAULT` on a write, the tty ioctl refusal, panics, every boot line | printed |
+
+Every test kernel boots without it; `tests/mpx3-shell` boots the shell's
+initramfs with `../boot/limine-initramfs-quiet.conf` beside the
+narrating legs and holds both to the same Linux transcript.
