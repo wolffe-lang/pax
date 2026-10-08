@@ -6,7 +6,8 @@
 // `/etc/pax-run`: one command a line, its words separated by single
 // spaces, the first word the program's path (a static x86-64 Linux
 // executable in the initramfs, run unmodified); empty lines and lines
-// starting `#` are skipped. Each command runs alone, with the
+// starting `#` are skipped; commands separated by " & " on one line run
+// at once. Each command runs with the
 // environment HOME=/ TERM=linux PAX=1, its descriptors 0-2 the serial
 // console, and is waited for; then the batch's frames line. Then
 // interrupts off, the timer stopped, `halt`:
@@ -56,8 +57,16 @@ fn byte_at(a: u64) -> u64 {
     unsafe { (a as *u8).read_volatile() as u64 }
 }
 
-/// Run the command the `n` bytes at `a` spell (its first word the path),
-/// as number `k`; wait for it; the frames line.
+/// Whether the bytes at `a` are " & " (a line's separator between
+/// commands that run at once), `a + 3` within the line's end `e`.
+fn amp_at(a: u64, e: u64) -> bool {
+    a + 3 <= e && byte_at(a) == 32 && byte_at(a + 1) == 38 && byte_at(a + 2) == 32
+}
+
+/// Run line number `k`, the `n` bytes at `a`: one command, or several
+/// separated by " & ", all started before any is waited for (px12: two
+/// processes at once, so each must find its own FS base after the
+/// other ran); wait for them all; the frames line.
 fn run(k: u64, a: u64, n: u64) {
     let s = sync.acquire(sync.console())
     log.put("run ")
@@ -70,13 +79,26 @@ fn run(k: u64, a: u64, n: u64) {
     }
     log.end()
     sync.release(sync.console(), s)
-    var pl: u64 = 0
-    while pl < n && byte_at(a + pl) != 32 {
-        pl += 1
-    }
+    let e = a + n
     let saved = sync.irq_save()
     let before = frames.free_count()
-    let id = user.exec_line(body(), a, pl, a, n, ENV)
+    var started: u64 = 0
+    var c = a
+    while c < e {
+        var ce = c
+        while ce < e && !amp_at(ce, e) {
+            ce += 1
+        }
+        var pl: u64 = 0
+        while c + pl < ce && byte_at(c + pl) != 32 {
+            pl += 1
+        }
+        let id = user.exec_line(body(), c, pl, c, ce - c, ENV)
+        if id != 0 {
+            started += 1
+        }
+        c = if ce < e { ce + 3 } else { e }
+    }
     let during = frames.free_count()
     sync.irq_restore(saved)
     sched.wait_all()
@@ -87,7 +109,7 @@ fn run(k: u64, a: u64, n: u64) {
     log.put(" before, ")
     log.dec(during as int)
     log.put(" with ")
-    log.dec(if id == 0 { 0 } else { 1 })
+    log.dec(started as int)
     log.put(" processes, ")
     log.dec(after as int)
     log.put(" after")
