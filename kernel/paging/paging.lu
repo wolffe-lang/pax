@@ -126,6 +126,7 @@ const US: u64 = 0x4 // user-accessible (px09)
 const USER_TABLE: u64 = P | RW | US // an upper-level entry in the user half
 const USER_TOP: u64 = 0x0000800000000000 // the first address past the user half (PML4 slots 0-255)
 const KERNEL_FIRST: u64 = 256 // the kernel half's first PML4 slot
+const KERNEL_HALF: u64 = 0xffff800000000000 // px14: the kernel half's first address
 
 const PAGE: u64 = 4096
 const LARGE: u64 = 2097152 // 2 MiB
@@ -415,7 +416,8 @@ pub fn translate(pml4: u64, va: u64) -> u64 ! MapError {
 }
 
 /// Unmap the 4 KiB page at `va`: clear its entry and, when `pml4` is
-/// the live structure, INVLPG it, so no stale translation survives.
+/// the live structure or `va` is in the kernel half (whose tables every
+/// space shares, px14), INVLPG it, so no stale translation survives.
 /// Returns the frame it mapped (the caller's to free). Rows:
 /// `misaligned`, `not_canonical`, `not_mapped`, `large_page` (a 2 MiB
 /// page covers va; PAX never splits one). Tables left empty stay.
@@ -451,7 +453,15 @@ pub fn unmap(pml4: u64, va: u64) -> u64 ! MapError {
         return not_mapped
     }
     set_entry(pt, i, 0)
-    if cr3() & ADDR == pml4 {
+    // px14: a kernel-half page's tables are shared by every address
+    // space (`new_space` copies the PML4's entries 256-511), so its
+    // translation may be cached whichever PML4 is live: a thread's stack
+    // freed by a reap in a system call (wait4's), with a process's space
+    // live, must still be invalidated, or the next owner of that stack
+    // slot writes through the stale entry into the freed frame (measured:
+    // the release tier's procs panicked at rip 0 after `execve`'s MOV to
+    // CR3 dropped the stale entry; notes/px14).
+    if cr3() & ADDR == pml4 || va >= KERNEL_HALF {
         // # Safety: cpu.S's INVLPG; it only drops TLB entries.
         unsafe { pax_invlpg(va) }
     }
