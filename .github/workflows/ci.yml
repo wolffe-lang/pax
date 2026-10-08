@@ -683,6 +683,76 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px12: M-PX3. Unmodified static x86-64 Linux programs on PAX:
+  # boreutils (user/boreutils.pin's tree, built here by tools/mkboreutils
+  # with the toolchain that tree pins, linked static against this
+  # runner's glibc) and busybox-static's busybox (boreutils has no `ls`),
+  # in the initramfs with a run list kmain_boreutils runs; the same
+  # binaries run on this runner's Linux, chrooted in the same tree (sudo,
+  # tools/linux-run), under strace too. tests/mpx3-boreutils: the build
+  # (B0), the initramfs (B1), every command's output and exit status
+  # byte-identical to Linux's (B2), every frame back (B3), -ENOSYS only
+  # for set_robust_list and rseq (B4), the halt (B5); both tiers, BIOS
+  # and UEFI.
+  mpx3-boreutils:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace, busybox-static (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace busybox-static
+          qemu-system-x86_64 --version
+          clang --version
+          gcc --version | head -n 1
+          dpkg -s libc6 busybox-static | grep -E '^(Package|Version):'
+          uname -sr
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx3-boreutils-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: M-PX3, both tiers, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx3-boreutils
+
+      - name: keep the programs, the Linux side, the transcripts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx3-boreutils-linux
+          path: |
+            build/mpx3-boreutils/bore/
+            build/mpx3-boreutils/bore.txt
+            build/mpx3-boreutils/linux/
+            build/mpx3-boreutils/linux.txt
+            build/mpx3-boreutils/initramfs.txt
+            build/mpx3-boreutils/*/kmain_boreutils.elf
+            build/mpx3-boreutils/*/*.log
+            build/mpx3-boreutils-*.out/
+            build/mpx3-boreutils-*.log
+            build/mpx3-boreutils-*.norm
+            build/mpx3-boreutils-*.meta
+            build/mpx3-boreutils-*.halt
+            build/mpx3-boreutils-*.verdict
+            build/mpx3-boreutils-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   # px08: the tour of the kernel. kmain_tour and kmain_tour_text
   # (kernel/pax_tour's stages over the test kernels' paths), two ISOs behind
   # Limine's menu (tools/tour build), both tiers, BIOS and UEFI.
