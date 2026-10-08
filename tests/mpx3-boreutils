@@ -41,7 +41,9 @@
 #      run are exactly set_robust_list (273) and rseq (334), which glibc
 #      tolerates; no `refused:` line.
 #   B5 the end: `run: <n> commands` (n the list's), `user: ticks in ring
-#      3 <t>` (t > 0), `halt`, and qemu-halt holds the machine halted.
+#      3 <t>`, `halt`, and qemu-halt holds the machine halted. t is
+#      reported, not asserted: under KVM these programs can finish
+#      between two ticks (hasu, px12: one boot of 32 counted 0).
 #
 # --images DIR boots ISOs and ELFs built earlier by this script (DIR holds
 # <tier>/kmain_boreutils.{iso,elf}, root/ and linux/): any host with
@@ -270,7 +272,7 @@ for leg in $legs; do
         why=
         grep -qx "run: $ncmd commands" "$norm" || why+=" no 'run: $ncmd commands' ($(grep -m1 '^run: ' "$norm"));"
         tk=$(sed -n -E 's/^user: ticks in ring 3 ([0-9]+)$/\1/p' "$norm" | tail -n 1)
-        [ -n "$tk" ] && [ "$tk" -gt 0 ] || why+=" ticks in ring 3 '$tk';"
+        [ -n "$tk" ] || why+=" no ticks line;"
         [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
         "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'user: ticks in ring 3 [0-9]+' 'halt' >/dev/null \
             || why+=" the log does not end with the ticks line and halt;"
