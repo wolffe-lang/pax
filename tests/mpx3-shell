@@ -22,8 +22,8 @@
 # in /bin, /etc/motd, /etc/pax-run `/bin/pelt`) and procs' (/bin/procs,
 # /etc/motd, /etc/script — a text file with execute bits — /etc/pax-run
 # `/bin/procs`); one kernel, kmain_console (its environment HOME=/
-# TERM=linux PAX=1 PATH=/bin), in three images: the shell's and procs'
-# (boot/limine-initramfs.conf) and the shell's with `quiet` on the
+# TERM=linux PAX=1 PATH=/bin), in four images: the shell's and procs'
+# (boot/limine-initramfs.conf), and each again with `quiet` on the
 # kernel command line (boot/limine-initramfs-quiet.conf, px15). The
 # sessions:
 #   shell-serial  user/console/shell.keys through COM1: ls /bin, cat
@@ -37,10 +37,12 @@
 #   shell-howl-quiet  the same keys on the quiet image; its Linux
 #                 reference is shell-howl's
 #   procs         nothing typed: procs runs to its end
+#   procs-quiet   procs on the quiet image (its refusals and the fault
+#                 it causes still print); its reference is procs'
 # Assertions, per tier (native, release), firmware (bios, uefi) and
 # session:
 #   S0 build: kmain_console built; every program static (ET_EXEC, no
-#      PT_INTERP); both initramfs and the ISOs built (digests printed);
+#      PT_INTERP); both initramfs and the four ISOs built (digests printed);
 #      the Linux side ran every session (tools/linux-tty --root --pid1).
 #   S1 processes: init is pid 1; every program it started has its own
 #      `user: exec pid <n>` line, n = 2, 3, … in order, and its own exit
@@ -48,14 +50,17 @@
 #      frames line after init's end shows every frame back (A before, A
 #      after); no `user: quiet` line. On the quiet image instead (Q):
 #      one `user: quiet` line, then no `user: exec pid`, exit, -ENOSYS
-#      or `user: frames free` line at all.
+#      or `user: frames free` line at all, and procs' fault still has
+#      its `killed:` line.
 #   S2 the session, differential: the serial log after init's exec
 #      line, the kernel's own lines (`user: …`) left out, up to init's
 #      end, is byte-identical (CRs removed on both sides) to the Linux
 #      transcript, and init's exit status is Linux's. On the quiet
-#      image: every line after `run 1: /bin/pelt` up to `run: 1
-#      commands`, nothing left out, is byte-identical to the Linux
-#      transcript (a narration line that leaked would differ).
+#      image: every line after `run 1: /bin/<init>` up to `run: 1
+#      commands`, nothing left out but a refusal or a `killed:` line, is
+#      byte-identical to the Linux transcript (a narration line that
+#      leaked would differ). S4 holds the refusals to the narrating
+#      image's, quiet or not.
 #   S3 what was typed arrived, all of it and by the path it was typed
 #      on (the console's summary), as px13's T3.
 #   S4 what PAX lacks or refuses: -ENOSYS only for set_robust_list (273)
@@ -103,10 +108,10 @@ case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier
 need readelf python3
 
 BORE="cat echo false head ls sleep tail true wc"
-SESSIONS="shell-serial shell-ps2 shell-howl shell-howl-quiet procs"
-LINUX_SESSIONS="shell-serial shell-ps2 shell-howl procs" # shell-howl-quiet's reference is shell-howl's
-image_of() { case $1 in procs) echo procs ;; *-quiet) echo shell-quiet ;; *) echo shell ;; esac; }
-init_of() { case $1 in procs) echo procs ;; *) echo pelt ;; esac; }
+SESSIONS="shell-serial shell-ps2 shell-howl shell-howl-quiet procs procs-quiet"
+LINUX_SESSIONS="shell-serial shell-ps2 shell-howl procs" # a -quiet session's reference is its namesake's
+image_of() { case $1 in procs) echo procs ;; procs-quiet) echo procs-quiet ;; *-quiet) echo shell-quiet ;; *) echo shell ;; esac; }
+init_of() { case $1 in procs*) echo procs ;; *) echo pelt ;; esac; }
 keys_of() { case $1 in shell-serial) echo "$PAX_ROOT/user/console/shell.keys" ;; shell-ps2) echo "$PAX_ROOT/user/console/shell-ps2.keys" ;; shell-howl*) echo "$PAX_ROOT/user/console/shell-howl.keys" ;; *) echo "$images/procs.keys" ;; esac; }
 kbd_of() { case $1 in *-ps2) echo ps2 ;; *) echo serial ;; esac; }
 linux_of() { case $1 in *-quiet) echo "${1%-quiet}" ;; *) echo "$1" ;; esac; }
@@ -189,9 +194,9 @@ if [ -z "$images" ]; then
         log=$work/$tier/kmain_console.build-kernel.log
         if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
             cat "$log" >&2
-            for p in shell procs shell-quiet; do
-                conf=$PAX_ROOT/boot/limine-initramfs.conf cpio=$work/$p.cpio
-                [ "$p" = shell-quiet ] && conf=$PAX_ROOT/boot/limine-initramfs-quiet.conf cpio=$work/shell.cpio
+            for p in shell procs shell-quiet procs-quiet; do
+                conf=$PAX_ROOT/boot/limine-initramfs.conf cpio=$work/${p%-quiet}.cpio
+                case $p in *-quiet) conf=$PAX_ROOT/boot/limine-initramfs-quiet.conf ;; esac
                 "$PAX_ROOT/tools/mkimage" --conf "$conf" \
                     --add "$cpio" initramfs.cpio "$elf" "$work/$tier/console-$p.iso" >/dev/null \
                     || why+=" $tier console-$p: mkimage;"
@@ -219,7 +224,7 @@ if [ -z "$images" ]; then
             fi
         done
     fi
-    [ -z "$why" ] && say "PASS S0: kmain_console built ($tiers), every program static, two initramfs, three images a tier, Linux ran $(echo $LINUX_SESSIONS | wc -w | tr -d ' ') sessions" || bad "S0:$why"
+    [ -z "$why" ] && say "PASS S0: kmain_console built ($tiers), every program static, two initramfs, four images a tier, Linux ran $(echo $LINUX_SESSIONS | wc -w | tr -d ' ') sessions" || bad "S0:$why"
     images=$work
     if [ "$noboot" = 1 ]; then
         [ "$fail" = 0 ] && say "mpx3-shell build (S0): PASS (no boot: --no-boot)" || say "mpx3-shell build: FAIL"
@@ -260,7 +265,7 @@ for leg in $legs; do
                 continue
             fi
             typing=()
-            [ "$s" = procs ] || typing=(--type "$(keys_of "$s")" --prompt "$PROMPT" --keyboard "$kb")
+            [ "$i" = procs ] || typing=(--type "$(keys_of "$s")" --prompt "$PROMPT" --keyboard "$kb")
             hrc=0
             "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 180 \
                 --elf "$elf" --marker 'halt' ${typing[@]+"${typing[@]}"} "$iso" >"$log.verdict" 2>&1 || hrc=$?
@@ -274,7 +279,10 @@ for leg in $legs; do
                 [ "$nq" = 1 ] || why+=" $nq 'user: quiet' lines, not 1;"
                 n=$(grep -Ec '^user: exec pid |^user: [^ ]+ pid [0-9]+ (exit_group|exit) [0-9]+ after |: -ENOSYS$|^user: frames free ' "$norm")
                 [ "$n" = 0 ] || why+=" $n narration lines on the quiet image ($(grep -Em2 '^user: exec pid |^user: [^ ]+ pid [0-9]+ (exit_group|exit) |: -ENOSYS$|^user: frames free ' "$norm" | cut -c1-60 | tr '\n' '|'));"
-                [ -z "$why" ] && say "PASS S1 $id: quiet: $(grep -m1 '^user: quiet' "$norm"); no exec, exit, -ENOSYS or frames line" || bad "S1 $id:$why"
+                if [ "$i" = procs ]; then # a fault still prints
+                    grep -Eq '^user: [^ ]+ pid [0-9]+ killed: ' "$norm" || why+=" no 'killed:' line on the quiet image;"
+                fi
+                [ -z "$why" ] && say "PASS S1 $id: quiet: $(grep -m1 '^user: quiet' "$norm"); no exec, exit, -ENOSYS or frames line$( [ "$i" = procs ] && echo "; $(grep -Ec '^user: [^ ]+ pid [0-9]+ killed: ' "$norm") killed: line(s)")" || bad "S1 $id:$why"
             else
             [ "$nq" = 0 ] || why+=" a 'user: quiet' line without quiet on the command line;"
             execs=$(sed -n -E 's/^user: exec pid ([0-9]+) cr3 .*/\1/p' "$norm" | paste -sd' ' -)
@@ -297,7 +305,8 @@ for leg in $legs; do
             why=
             out=$PAX_BUILD/mpx3-shell-$tier-$leg-$s.session
             if [ "$q" = 1 ]; then
-                awk -v init="$i" '$0 == ("run 1: /bin/" init) { on = 1; next } on && /^run: [0-9]+ commands$/ { exit } on { print }' "$norm" > "$out"
+                # Nothing left out but what quiet keeps: a refusal, a fault.
+                awk -v init="$i" '$0 == ("run 1: /bin/" init) { on = 1; next } on && /^run: [0-9]+ commands$/ { exit } on && !/^user: [^ ]+ pid [0-9]+ (syscall [0-9]+: refused: |killed: )/ && !/^user: exec .*: refused: / { print }' "$norm" > "$out"
             else
                 awk -v init="$i" '/^user: exec pid 1 / { on = 1; next } on && $0 ~ ("^user: " init " pid 1 (exit_group|exit) [0-9]+ after ") { exit } on && !/^user: / { print }' "$norm" > "$out"
             fi
@@ -322,7 +331,7 @@ for leg in $legs; do
             sl=$(grep -m1 '^console: [0-9]* bytes from com1' "$norm")
             c1=$(printf '%s\n' "$sl" | sed -n -E 's/^console: ([0-9]+) bytes from com1, ([0-9]+) keys .*/\1/p')
             ky=$(printf '%s\n' "$sl" | sed -n -E 's/^console: ([0-9]+) bytes from com1, ([0-9]+) keys .*/\2/p')
-            if [ "$s" = procs ]; then
+            if [ "$i" = procs ]; then
                 [ "$c1" = 0 ] && [ "$ky" = 0 ] || why+=" nothing typed, the console counted '$c1' and '$ky' ('$sl');"
             elif [ "$kb" = serial ]; then
                 [ "$c1" = "$typed" ] && [ "$ky" = 0 ] && [ "$typed" -gt 0 ] || why+=" typed $typed bytes on COM1, the console counted '$c1' from com1 and '$ky' keys ('$sl');"
@@ -334,10 +343,10 @@ for leg in $legs; do
             # S4
             why=
             ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
-            want="273 334"; [ "$s" = procs ] || [ "$q" = 1 ] && want=
+            want="273 334"; [ "$i" = procs ] || [ "$q" = 1 ] && want=
             [ "$ns" = "$want" ] || why+=" -ENOSYS for '$ns', not '$want';"
             rf=$(grep ': refused: ' "$norm" | sed -E 's/^user: [^ ]+ pid [0-9]+ //' | paste -sd'|' -)
-            if [ "$s" = procs ]; then
+            if [ "$i" = procs ]; then # quiet or not: refusals print
                 wr="user: exec /etc/script: refused: not an ELF file|syscall 59: refused: not a static x86-64 ELF executable PAX runs, -8|syscall 62: refused: signals are not delivered yet, -38"
                 [ "$rf" = "$wr" ] || why+=" refusals '$rf', not '$wr';"
             else
