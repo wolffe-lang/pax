@@ -27,6 +27,12 @@
 //!   `pax_switch` builds the frame by hand for a thread that yields,
 //!   sleeps, waits or exits, and kernel/sched's `switched` returns the
 //!   next thread's frame;
+//! - vectors 33 and 36 (px13), the i8042's keyboard and COM1's
+//!   receiver: kernel/console takes the bytes into its line discipline
+//!   and acknowledges the 8259; a thread waiting for input is made
+//!   ready when a read would answer, and run at once if the CPU was
+//!   idle (kernel/sched's `kick`). Before kernel/console's `start` both
+//!   lines stay masked, so neither arrives;
 //! - vectors 39 and 47, an 8259 line 7 or 15: a spurious request
 //!   (kernel/timer reads the in-service register) returns; a real one
 //!   is unexpected (every other line is masked) and panics;
@@ -55,6 +61,7 @@
 //!
 //! No Linux source; no other kernel's source.
 
+use console
 use gdt
 use idt
 use log
@@ -248,6 +255,14 @@ export fn pax_interrupt(f: *Frame) -> *Frame {
         // # Safety: as above; the frame user.syscall returns is this one
         // or a saved frame on a live thread's stack.
         return unsafe { user.syscall(f as u64) as *Frame }
+    }
+    if v == console.com1_vector() || v == console.kbd_vector() {
+        console.irq(v)
+        if console.readable() {
+            let _n = sched.wake_input()
+        }
+        // # Safety: as above.
+        return unsafe { sched.kick(f as u64) as *Frame }
     }
     if (v == 39 || v == 47) && timer.spurious(v) {
         return f
