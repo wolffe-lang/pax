@@ -1,0 +1,63 @@
+PAX: the console
+paging: limine cr3 0x000000000a1bf000, pax cr3 0x0000000000103000, 55 table frames
+initramfs: module 0xffff80000a1d0000, 97535640 bytes, 13 entries
+initramfs: dir 0 bin
+initramfs: file 11876488 bin/cat
+initramfs: file 11844496 bin/echo
+initramfs: file 11835232 bin/false
+initramfs: file 11888720 bin/head
+initramfs: file 2124608 bin/ls
+initramfs: file 12362688 bin/pelt
+initramfs: file 11855536 bin/sleep
+initramfs: file 11835232 bin/true
+initramfs: file 11910864 bin/wc
+initramfs: dir 0 etc
+initramfs: file 81 etc/motd
+initramfs: file 10 etc/pax-run
+fpu: xsave 1, xcr0 0x0000000000000007, area 832 bytes, cr0.em 0, cr0.ts 0, cr4.osfxsr 1, cr4.osxsave 1
+sched: main 0, idle 1, 16 slots, stacks 16 KiB above a 48 KiB guard from 0xffffd00000000000, quantum 2 ticks
+user: syscall star 0x0010000800000000 lstar 0xffffffff8000045c fmask 0x0000000000044700, efer.sce 1, smep 1, smap 1
+console: com1 irq 4 vector 36, i8042 0x61 -> 0x61 irq 1 vector 33, 8259 master mask 0xec; iflag 0x100 oflag 0x05 cflag 0xbf lflag 0x8a3a
+run 1: /bin/pelt
+user: exec pid 1 cr3 0x0000000000155000 entry 0x0000000000244d40 rsp 0x00007fffffffee70 argc 1 envc 4, 4 PT_LOAD: 0x0000000000200000-0x0000000000243d10 r-- 0x0000000000244d40-0x000000000036d7c0 r-x 0x000000000036e7c0-0x0000000000377000 rw- 0x00000000003774a0-0x000000000037feb8 rw-, stack 32 pages below 0x00007ffffffff000
+user: pelt pid 1 syscall 273: -ENOSYS
+user: pelt pid 1 syscall 334: -ENOSYS
+$ ls /bin
+user: exec pid 2 cr3 0x0000000000332000 entry 0x0000000000410870 rsp 0x00007fffffffee50 argc 2 envc 5, 4 PT_LOAD: 0x0000000000400000-0x00000000004006c8 r-- 0x0000000000401000-0x00000000005a8865 r-x 0x00000000005a9000-0x00000000005fb1e5 r-- 0x00000000005fc820-0x000000000060d108 rw-, stack 32 pages below 0x00007ffffffff000
+user: ls pid 2 syscall 273: -ENOSYS
+user: ls pid 2 syscall 334: -ENOSYS
+cat    echo   false  head   ls     pelt   sleep  true   wc
+user: ls pid 2 exit_group 0 after 2 runs
+$ cat /etc/motd
+user: exec pid 3 cr3 0x000000000058d000 entry 0x000000000023c180 rsp 0x00007fffffffee50 argc 2 envc 5, 4 PT_LOAD: 0x0000000000200000-0x000000000023b160 r-- 0x000000000023c180-0x000000000030a710 r-x 0x000000000030b710-0x0000000000313000 rw- 0x0000000000313560-0x000000000031b2d8 rw-, stack 32 pages below 0x00007ffffffff000
+user: cat pid 3 syscall 273: -ENOSYS
+user: cat pid 3 syscall 334: -ENOSYS
+PAX: this is /etc/motd, a text file in the initramfs, and not an ELF executable.
+user: cat pid 3 exit_group 0 after 2 runs
+$ wc /etc/motd
+user: exec pid 4 cr3 0x000000000074d000 entry 0x000000000023e180 rsp 0x00007fffffffee50 argc 2 envc 5, 4 PT_LOAD: 0x0000000000200000-0x000000000023d150 r-- 0x000000000023e180-0x0000000000311db0 r-x 0x0000000000312db0-0x000000000031a000 rw- 0x000000000031ad40-0x0000000000322ab8 rw-, stack 32 pages below 0x00007ffffffff000
+user: wc pid 4 syscall 273: -ENOSYS
+user: wc pid 4 syscall 334: -ENOSYS
+ 1 15 81 /etc/motd
+user: wc pid 4 exit_group 0 after 2 runs
+$ echo hi
+hi
+$ false; echo $?
+1
+$ sleep 1
+user: exec pid 5 cr3 0x0000000000a8d000 entry 0x000000000023b5c0 rsp 0x00007fffffffee50 argc 2 envc 5, 4 PT_LOAD: 0x0000000000200000-0x000000000023a584 r-- 0x000000000023b5c0-0x0000000000306c10 r-x 0x0000000000307c10-0x000000000030f000 rw- 0x000000000030fa00-0x0000000000317778 rw-, stack 32 pages below 0x00007ffffffff000
+user: sleep pid 5 syscall 273: -ENOSYS
+user: sleep pid 5 syscall 334: -ENOSYS
+user: sleep pid 5 exit_group 0 after 3 runs
+$ nosuch
+pelt: line 7: nosuch: not found
+$ echo $?
+127
+$ 
+user: pelt pid 1 exit_group 0 after 18 runs
+user: frames free 41044 before, 40617 with 1 processes, 41044 after
+run: 1 commands
+console: 82 bytes from com1, 0 keys (0 scancodes) from the keyboard, 82 reads, 9 waited, 0 dropped
+PAX: init /bin/pelt ended with status 0; nothing left to run
+halt
+qemu-system-x86_64: terminating on signal 2 from pid 1624 (<unknown process>)

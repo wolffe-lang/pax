@@ -1,0 +1,30 @@
+px14 planted breaks, each a commit and a CI run of its own on PR #17 (pull_request
+event), then reverted. Job = the mpx3-shell job of that run; every other job of
+each run was green.
+
+A  3cf167c  unmap invalidates only when the given PML4 is live (px14's fix to
+            kernel/paging undone)
+   run 37733956321, job 113169172750: mpx3-shell red on exactly the release
+   tier's procs legs (BIOS, UEFI): S1, S2, S3, S4, S5 (the kernel panics
+   `page fault … rip 0x0000000000000000` after the second child's execve);
+   the 10 other legs green (native procs, every shell session).
+   Reverted by 6f5c22e.
+
+B  662004d  execve closes nothing (files.exec_close skips every descriptor)
+   run 37734788175, job 113171760321: mpx3-shell red on S2 of the 4 procs legs
+   only: `fds: … fd3 PAX:` where Linux says `fd3 -9`, and `dup: … fd8 PAX:`
+   where Linux says `fd8 -9`; 57 PASS lines (the shell sessions do not
+   notice: pelt's close-on-exec descriptors are never read by a child).
+   Reverted by 24ab01b.
+
+C  c74550a  wait4 never blocks (answers 0 while the child runs)
+   run 37735420378, job 113173727371: mpx3-shell red on all 12 legs, 20 FAIL
+   lines: the shell sessions' S2 (the prompt comes back before the child's
+   output: `$ user: ls pid 2 …`) and S1 (a child left without its end line),
+   procs' S2 (from the orphan case on, the lines differ) and S5 (init
+   ends with status 7, not Linux's 0).
+   Reverted by e3d52b2 (the head).
+
+Before the plants: run 37731933253 (22c6fb2) red on the release tier's procs
+legs: the defect plant A re-plants, found by this test, fixed in 02aec6d;
+run 37733345942 (96e5962) green, every job.
