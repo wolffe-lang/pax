@@ -8,9 +8,9 @@
 #                        [--firmware bios|uefi|both] [--tier native|release|both]
 #
 # The programs: boreutils (user/boreutils.pin's tree, tools/mkboreutils:
-# echo cat head wc tail pwd sleep, linked static against this host's
-# glibc) and busybox-static's busybox (/bin/busybox: boreutils has no
-# `ls`), each unmodified. The tree ROOT holds them under bin/, two text
+# echo cat head wc tail pwd sleep ls, linked static against this host's
+# glibc; px15: `ls` is boreutils' own, bu18's, where px12 ran
+# busybox-static's), each unmodified. The tree ROOT holds them under bin/, two text
 # files under etc/ and the run list user/mpx3-boreutils.run as
 # etc/pax-run; the initramfs is ROOT (tools/mkinitramfs); the kernel is
 # kmain_boreutils, which runs etc/pax-run's commands one at a time.
@@ -19,7 +19,7 @@
 # (native, release) and firmware (bios, uefi):
 #   B0 build: tools/build-kernel's object assertions for kmain_boreutils;
 #      every program static (ET_EXEC, no PT_INTERP: mkboreutils checks
-#      boreutils', this script busybox's); the initramfs and ISO built
+#      them, this script again); the initramfs and ISO built
 #      (digests printed); the Linux side ran every command.
 #   B1 initramfs: `initramfs: module 0x…, <b> bytes, <n> entries` with b
 #      the archive's size and n its entry count, each entry listed with
@@ -74,7 +74,7 @@ case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes b
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
 need readelf python3
 
-UTILS="echo cat head wc tail pwd sleep"
+UTILS="echo cat head wc tail pwd sleep ls"
 work=$PAX_BUILD/mpx3-boreutils
 runs=$PAX_BUILD/mpx3-boreutils-runs.txt
 fail=0 ran=0
@@ -105,10 +105,8 @@ if [ -z "$images" ]; then
     else
         bad "B0: tools/mkboreutils"
     fi
-    bb=${PAX_BUSYBOX:-/bin/busybox}
-    cp "$bb" "$root/bin/busybox" || bad "B0: no busybox at $bb (busybox-static)"
     why=
-    for u in $UTILS busybox; do
+    for u in $UTILS; do
         [ -f "$root/bin/$u" ] || { why+=" no bin/$u;"; continue; }
         r=$(static_ok "$root/bin/$u") || why+=" $r;"
         say "  program: bin/$u $(sha256_of "$root/bin/$u") $(wc -c < "$root/bin/$u" | tr -d ' ') bytes"
