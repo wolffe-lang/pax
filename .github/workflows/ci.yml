@@ -686,8 +686,8 @@ jobs:
   # px12: M-PX3. Unmodified static x86-64 Linux programs on PAX:
   # boreutils (user/boreutils.pin's tree, built here by tools/mkboreutils
   # with the toolchain that tree pins, linked static against this
-  # runner's glibc) and busybox-static's busybox (boreutils has no `ls`),
-  # in the initramfs with a run list kmain_boreutils runs; the same
+  # runner's glibc; px15: boreutils' own `ls`, where px12 ran
+  # busybox-static's), in the initramfs with a run list kmain_boreutils runs; the same
   # binaries run on this runner's Linux, chrooted in the same tree (sudo,
   # tools/linux-run), under strace too. tests/mpx3-boreutils: the build
   # (B0), the initramfs (B1), every command's output and exit status
@@ -700,14 +700,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace, busybox-static (apt)
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace (apt)
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace busybox-static
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
-          dpkg -s libc6 busybox-static | grep -E '^(Package|Version):'
+          dpkg -s libc6 | grep -E '^(Package|Version):'
           uname -sr
 
       - uses: actions/cache@v4
@@ -830,9 +830,9 @@ jobs:
           if-no-files-found: warn
 
   # px14: processes. pelt runs as pid 1 on kmain_console and runs the
-  # programs in the initramfs (boreutils' cat, echo, false, head, sleep,
-  # true and wc, built here by tools/mkboreutils; busybox-static's
-  # busybox as /bin/ls): clone3 (CLONE_VM|CLONE_VFORK), execve, wait4.
+  # programs in the initramfs (boreutils' cat, echo, false, head, ls,
+  # sleep, tail, true and wc, built here by tools/mkboreutils; px15: no
+  # busybox): clone3 (CLONE_VM|CLONE_VFORK), execve, wait4.
   # Each session (user/console/shell*.keys) is typed into PAX by
   # tools/qemu-halt --type and into the same binaries on this runner's
   # Linux by tools/linux-tty, chrooted in the same tree, pelt pid 1 of a
@@ -849,15 +849,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, busybox-static (apt)
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev busybox-static
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
           python3 --version
-          dpkg -s libc6 busybox-static | grep -E '^(Package|Version):'
+          dpkg -s libc6 | grep -E '^(Package|Version):'
           uname -sr
 
       - uses: actions/cache@v4
