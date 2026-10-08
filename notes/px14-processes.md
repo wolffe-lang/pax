@@ -133,3 +133,79 @@ strace of a spawn; §4 and §5 fill in as the evidence lands.
   fix every session's diff is empty.
 - Boot counts: at least 100 KVM boots on hasu for this lane's suites,
   all green.
+
+### §3 against what was measured
+
+| predicted | measured |
+|---|---|
+| P1: `rt_sigprocmask(SIG_BLOCK, ~[], [], 8)`, `clone3({CLONE_VM\|CLONE_VFORK\|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack, stack_size}, 88)`, the child's `rt_sigprocmask(SIG_SETMASK, [], NULL, 8)` and `execve`, the parent's `SIG_SETMASK` and `wait4(pid, …, 0, NULL)`; no fork, no waitid, no pipe2 | **right** (`notes/px14/pelt-spawn-path.strace`, lines 75-86): exactly those flags, `stack_size=0x9000`; no fork, no waitid, no pipe2 |
+| P1: no `dup2`/`close` and no `rt_sigaction` in the child, no `getpid` | **wrong but for getpid**: pelt opens `/dev/null` (O_CLOEXEC, descriptor 5) and maps the child's stack (`mmap` 36 KiB, MAP_STACK) before the clone; the child asks its mask (`rt_sigprocmask(SIG_BLOCK, NULL, …)`), sets `rt_sigaction(SIGPIPE, SIG_DFL)` and `dup2(5, 0)` (a child's standard input is /dev/null, not the terminal); the parent `munmap`s the stack and `close(5)`s. No `getpid` |
+| P1: pelt finds the program by a stat call per PATH directory; with no PATH it searches a default path or finds nothing (a guess: PATH=/bin needed) | **right**: `statx(AT_FDCWD, "/bin/cat", …)`; with no PATH it searches the working directory (`statx("./cat")`, `pelt-spawn-nopath.strace`) and says `not found`, so kmain_console's environment gained `PATH=/bin` |
+| P1: an unknown name: `pelt: nosuch: not found`, status 127, no clone | **right** (the wording carries the line: `pelt: line 7: nosuch: not found`), 127, no clone |
+| P1: `echo` and `false` built-ins (no spawn) | **right** |
+| P1: the spawn adds 5 ± 2 distinct calls to px13's 16 (3..7) | **wrong: 8** — pelt's process adds `clone3`, `close`, `mmap`, `munmap`, `rt_sigprocmask`, `wait4` (22 distinct), the vfork child `rt_sigaction` and `dup2` |
+| P2: Linux pids from 1, ppid 0 for init, gettid = pid; a vfork child borrowing the space, the parent suspended until exec or exit; execve's copy-out first, close-on-exec, handlers reset, mask kept; zombies with Linux's status words; orphans to pid 1; wait4/waitid; signal calls recorded; kill refused | as built (kernel/process, kernel/sched), and every line of procs on PAX is Linux's (`notes/px14/session-procs.*.txt`): pids 1-9, `0x300`, `0xb`, the zombie kept through a 300 ms sleep, the orphan's `ppid 1` and its reaping by pid 1, waitid's siginfo, `-2 -13 -13 -8`, the mask kept and SIGUSR1 reset across execve, dup2/dup3. Not predicted: Linux sets the core-dump bit (`0x8b`) under a piped core_pattern whatever RLIMIT_CORE says, so procs masks bit 7 |
+| P3: on px13's kernel (PATH given): `rt_sigprocmask` -ENOSYS, `clone3` -ENOSYS, glibc's fallback `clone` -ENOSYS, pelt's own diagnostic and the prompt again, status 126 or 127 | **right** (`notes/px14/kasumi-p3-px13-kernel-shell-serial.serial.log`): `syscall 14`, `435`, `56: -ENOSYS`, `pelt: line 1: ls: cannot run`, the prompt; init ended with **126** after `exit` in the PS/2 session |
+| P3: the first diff against Linux is in `ls /bin` | **wrong (better)**: the first boot (kasumi, TCG, native BIOS, `c1`) ran all three sessions byte-identical, 15 PASS. **Not predicted: the release tier's procs panicked** in CI (run 37731933253): `PANIC page fault … rip 0x0000000000000000` after the second child's `execve`. The cause, found by an instrumented boot (`notes/px14/kasumi-release-procs-instrumented-panic.serial.log`) and the monitor's dump of the stack (`…-panic-stack.monitor.txt`): `paging.unmap` issued INVLPG only when the PML4 it was given was live; px14's `wait4` reaps a dead child's kernel stack inside a system call, with the parent's space live, so the stack page's stale translation survived; the next child in that slot ran on the old, freed frame until execve's MOV to CR3 dropped it, and its return addresses vanished. A latent defect since px09 (every reap before px14 ran in a kernel thread, the kernel PML4 live). Fixed in `02aec6d` (a kernel-half page is invalidated whichever space is live); plant A re-plants it |
+| P3: at least 100 KVM boots on hasu, all green | see §4 |
+
+## 4. Evidence index
+
+### The Linux side
+
+- The spawn, black-box: `notes/px14/pelt-spawn-path.strace` (`19e8a613…`), `pelt-spawn-nopath.strace` (`b80ce90a…`), the transcripts `pelt-spawn-*.tty`, the script `strace-spawn.sh`, the keys `shell.keys`; pelt `1e2535d7…` (px13's build of `dd22a86`), boreutils `2f15585` (`boreutils-sums-2f15585.txt`), busybox-static 1.36.1 `dbac288c…`, in a privileged rootless `px13-ubuntu` container on kasumi (Ubuntu 24.04, glibc 2.39, strace 6.8, kernel 7.2.8).
+- The reference for every PAX transcript: `tools/linux-tty --root ROOT --pid1` (the same binaries chrooted in the tree the initramfs is made from, init pid 1 of a fresh pid namespace, a pseudo-terminal), kept as `notes/px14/session-*.linux.txt`.
+
+### The typed-session diffs against Linux
+
+**Empty, every session, every leg**: shell-serial (`ls /bin`, `cat /etc/motd`, `wc /etc/motd`, `echo hi`, `false; echo $?`, `sleep 1`, `nosuch`, `echo $?`, `exit`; 16 lines, `8bfdba51…`), shell-ps2 (`ls /bin`, `cat /etc/motd`, `exit` through the PS/2 keyboard; 5 lines, `3c672724…`), procs (23 lines, `077845a5…`): `notes/px14/session-*.pax.txt` against `session-*.linux.txt`, `cmp` equal (kasumi, native BIOS, the gauntlet at `96e5962`). A whole boot: `kasumi-native-bios-shell-serial.serial.log`, `kasumi-release-uefi-procs.serial.log`.
+
+### Boot counts
+
+- kasumi TCG: the gauntlet on a fresh clone of `96e5962` (`notes/px14/kasumi-gauntlet-96e5962.summary`): every suite rc 0, 0 FAIL, 0 SKIP; **156 boots, all accel=tcg**; mpx3-shell 60 PASS on 12 boots (`kasumi-mpx3-shell-96e5962.out`, runs `kasumi-mpx3-shell-runs-96e5962.txt`); mpx3-console 100 PASS (px13's sessions unchanged by PATH and pid 1); tour 44 PASS.
+- hasu KVM: see `notes/px14/hasu-kvm-96e5962.log` (filled in below).
+- CI: every job of run 37733345942 (`96e5962`) green; the head's run in the PR body.
+- The code at the head is `96e5962`'s: `git diff 96e5962 HEAD -- kernel boot user tools tests .github` is empty (the plants and their reverts cancel).
+
+### Planted breaks (`notes/px14/ci-planted-breaks.txt`)
+
+- **A** `3cf167c` (unmap's INVLPG only for the live PML4, px14's fix undone): run **37733956321**, job 113169172750, red on exactly the release procs legs (BIOS, UEFI). Reverted `6f5c22e`.
+- **B** `662004d` (execve closes nothing): run **37734788175**, job 113171760321, red on S2 of the four procs legs only (`fd3 PAX:` for `fd3 -9`, `fd8 PAX:` for `fd8 -9`). Reverted `24ab01b`.
+- **C** `c74550a` (wait4 never blocks): run **37735420378**, job 113173727371, red on all 12 legs (20 FAIL lines). Reverted `e3d52b2`.
+
+### The tour
+
+Every kernel links kernel/process and the larger process table, so the tour's ISOs changed though it starts no process. Rebuilt by `tests/tour` on kasumi in a `git archive` of `96e5962` (`~/lanes/px14/tour-96e5962`; 44 PASS, `notes/px14/kasumi-tour-96e5962.out`): `pax-tour.iso` `dd2e76e6…`, `pax-tour-b.iso` `788471df…` (px13's `3dae9ac4…`, `91c0e931…`). The image grew 280 → 404 KiB, frames −39 (64976 usable, 64927 free, 64909 at the join), ending b's `rip` `0xffffffff80022952`. `~/scratch/wolf/pax-demo/` refreshed: the ISOs, SHA256SUMS, `src/` (pax's `kernel/`, `boot/`, `user/` at `96e5962`; px13's snapshot moved to `~/lanes/px14/pax-demo-src-px13` on nomad-1), the SHOTLIST's numbers (14172 lines of wolf, 1298 of assembly, the frame counts, the `rip`), the README's lines; `preflight.sh` **GO** in a 146×40 pseudo-terminal (QEMU 11.1.1, the PANIC line in about 29 s, `logs/preflight.serial.log` `6635b9cd…`).
+
+### Booting it on nomad-1 (the maintainer's note)
+
+`~/scratch/wolf/pax-shell/` on nomad-1: `pax-shell.iso` (`379b737d…`, the native `console-shell.iso` of the kasumi gauntlet at `96e5962`), `SHA256SUMS`, `README.md`, `logs/rehearsal.tty`. In fish:
+
+```
+qemu-system-x86_64 -machine q35 -cpu max -m 256M -display none -serial stdio -monitor none -nic none -no-reboot -cdrom ~/scratch/wolf/pax-shell/pax-shell.iso
+```
+
+At `$ ` type `ls /bin`, `cat /etc/motd`, `wc /etc/motd`, `echo hi`, `false; echo $?`, `sleep 1`, `nosuch`, `echo $?`, each with Enter, then Ctrl-D (or `exit`): `PAX: init /bin/pelt ended with status 0; nothing left to run`, `halt`. Ctrl-C quits QEMU. Rehearsed on nomad-1 (QEMU 11.1.1, TCG) in a pseudo-terminal: first prompt at 1.6 s, done at 10.7 s, Ctrl-C ended QEMU with 0 (`notes/px14/nomad-1-rehearsal-pax-shell.tty`).
+
+### Drift from the contract, reported
+
+1. **`false; echo $?` and `echo hi` start no process**: both are pelt built-ins (measured: no clone). The programs the typed sessions run are `ls`, `cat`, `wc` and `sleep`; procs covers the process calls pelt does not make (waitid, zombies, orphans, execve's errors, dup2/dup3, the signal records).
+2. **`ls` is busybox-static's** (`/bin/ls`, a copy of `/bin/busybox`): boreutils has no `ls` at `2f15585` (still trunk).
+3. **PATH**: kmain_console's environment gained `PATH=/bin` (pelt, given no PATH, searches the working directory); `tools/linux-tty` gives the Linux side the same, so px13's sessions' references moved with it (no transcript changed: mpx3-console 100 PASS).
+4. **pids in the log**: a `who` line's `pid` is the Linux pid now, so init is `pid 1` (px13's log said `pid 2`, the kernel thread's id); px09's `hello` asks `_sysctl` (156, which Linux answers -ENOSYS too) where it asked `getpid`, which now answers.
+5. **A child's standard input is /dev/null**, as on Linux (pelt's `dup2(5, 0)`): a program pelt starts cannot read the terminal; that is pelt's choice, measured, and PAX does the same.
+6. **Not Linux's, named**: a descriptor's copy (dup, or a child's inherited one) keeps its own file position (Linux shares the open file's offset); procs reads inherited descriptors with `pread` so the comparison is about what Linux and PAX agree on. Rusage is zeros. No process groups (wait4's 0 and -pgid mean any child).
+7. **A defect found and fixed outside the contract's list**: the stale kernel-half TLB entry in `paging.unmap` (§3), latent since px09.
+8. The Linux side needs root now (chroot, mounts, a pid namespace): CI runs `tools/linux-tty` under `sudo -n`; on kasumi the build runs in a privileged rootless container.
+
+### Filed
+
+Nothing upstream: nothing in wolf, pelt or QEMU stood in the way.
+
+## 5. Done-when
+
+- Branch `px14` on origin; PR wolffe-lang/pax#17, open, unmerged; CI green at the head (run id in the PR body).
+- The shell runs programs: pelt as pid 1 types through COM1 and the PS/2 keyboard, runs `ls /bin`, `cat /etc/motd`, `wc /etc/motd`, `sleep 1` as child processes (clone3 CLONE_VM|CLONE_VFORK, execve from the initramfs, wait4), answers `echo`, `false; echo $?`, an unknown name (`not found`, 127), and returns to its prompt; every session byte-identical to the same binaries on Linux, both tiers, BIOS and UEFI, KVM on hasu.
+- Close nothing. To close: none (no pax issue names this work).
+- Not yet (the next lanes'): `fork` without CLONE_VM, threads, signal delivery and Ctrl-C as a signal, process groups and job control, pipes and redirections (pelt refuses them at its pin), `cd` (no `chdir`), `#!` scripts.
+- Worktrees: the local worktree removed at the end; kasumi `~/lanes/px14/` and hasu `~/lanes/px14/` keep the trees and evidence with `build/` directories pruned.
