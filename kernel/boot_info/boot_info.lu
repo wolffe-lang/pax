@@ -28,6 +28,8 @@
 //!     (the HHDM) at base revision 6, 4 KiB aligned, and every 4 KiB
 //!     the file covers is its own. No response when no module was
 //!     loaded.
+//!   executable command line (px15): revision, cmdline (8): a C
+//!     string, the configuration's `cmdline` (empty without one).
 
 extern "c" let limine_base_revision: *u64
 extern "c" let limine_bootloader_info_request: *u64
@@ -36,12 +38,14 @@ extern "c" let limine_memmap_request: *u64
 extern "c" let limine_hhdm_request: *u64
 extern "c" let limine_executable_address_request: *u64
 extern "c" let limine_module_request: *u64
+extern "c" let limine_executable_cmdline_request: *u64
 extern "c" let __pax_image_start: *u8
 extern "c" let __pax_image_end: *u8
 
 /// The address of request `which` in boot/start.S: 0 the base revision
 /// tag, 1 bootloader info, 2 firmware type, 3 memory map, 4 HHDM, 5
-/// executable address, 6 modules (px10); 0 for any other `which`.
+/// executable address, 6 modules (px10), 7 the executable command line
+/// (px15); 0 for any other `which`.
 fn request(which: int) -> u64 {
     // # Safety: link-time addresses; nothing is read.
     unsafe {
@@ -65,6 +69,9 @@ fn request(which: int) -> u64 {
         }
         if which == 6 {
             return limine_module_request as u64
+        }
+        if which == 7 {
+            return limine_executable_cmdline_request as u64
         }
     }
     0
@@ -113,6 +120,57 @@ pub fn loader_byte(which: int, i: int) -> int {
         k = k + 1
     }
     -1
+}
+
+/// Byte `i` of the C string at `s`.
+fn cbyte(s: u64, i: u64) -> u64 {
+    // # Safety: a C string Limine wrote (the command line); callers stop
+    // at its NUL, so every byte read is inside it.
+    unsafe { ((s + i) as *u8).read_volatile() as u64 }
+}
+
+/// Whether the kernel's command line (the Limine configuration's
+/// `cmdline`, px15) holds `w` as a whole word, words separated by
+/// spaces; false without a response or a line. Read afresh on every
+/// call (bootloader-reclaimable memory, which the kernel keeps mapped
+/// and never hands out).
+pub fn cmdline_has(w: str) -> bool {
+    let r = response(7)
+    if r == 0 {
+        return false
+    }
+    let s = word(r + 8)
+    if s == 0 {
+        return false
+    }
+    var i: u64 = 0
+    while cbyte(s, i) != 0 {
+        if cbyte(s, i) == 32 {
+            i += 1
+            continue
+        }
+        // A word starts at i: compare it with `w`, never reading past a
+        // byte that differed (the NUL differs from every byte of `w`).
+        var k: u64 = 0
+        var same = true
+        for b in w.bytes() {
+            if same {
+                if cbyte(s, i + k) == (b as int) as u64 {
+                    k += 1
+                } else {
+                    same = false
+                }
+            }
+        }
+        let e = cbyte(s, i + k)
+        if same && k > 0 && (e == 0 || e == 32) {
+            return true
+        }
+        while cbyte(s, i) != 0 && cbyte(s, i) != 32 {
+            i += 1
+        }
+    }
+    false
 }
 
 /// Whether Limine honoured base revision 6 (boot/start.S refuses to

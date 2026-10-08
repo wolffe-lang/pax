@@ -31,7 +31,9 @@
    (wolf-lang kw09), which is why each is global.
    px10 adds a seventh, the module request (revision 0: the modules a
    Limine configuration names with `module_path`, px10's initramfs;
-   PROTOCOL.md's Module Feature).
+   PROTOCOL.md's Module Feature). px15 adds an eighth, the executable
+   command line request (revision 0: the configuration's `cmdline`;
+   PROTOCOL.md's Executable Command Line Feature), for `quiet`.
 
    Not listed in kernel/wolf.pkg: the boot code is the consumer's, and
    links wolf's object (K6(b)); tools/build-kernel assembles it.
@@ -86,6 +88,11 @@ limine_executable_address_request:      /* px02: the image's physical base */
         .globl limine_module_request
 limine_module_request:                  /* px10: the initramfs, a module */
         .quad LIMINE_MAGIC_0, LIMINE_MAGIC_1, 0x3e7e279702be32af, 0xca1c4f3bd1280cee
+        .quad 0, 0
+
+        .globl limine_executable_cmdline_request
+limine_executable_cmdline_request:      /* px15: the kernel command line */
+        .quad LIMINE_MAGIC_0, LIMINE_MAGIC_1, 0x4b161536e598651e, 0xb390ad4a2f1f303a
         .quad 0, 0
 
         .globl limine_base_revision
