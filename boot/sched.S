@@ -74,9 +74,17 @@
                          changes what the kernel does.
 
    Storage (.bss, zero until kernel/sched writes it):
-     pax_threads       16 thread records, 120 bytes each (kernel/sched's
+     pax_threads       16 thread records, 128 bytes each (kernel/sched's
                        #[repr(c)] Thread; 72 before px09's cr3 and prog,
-                       88 before px10's entry, usp, name and name_len)
+                       88 before px10's entry, usp, name and name_len,
+                       120 before px12's fs)
+     pax_procs         16 process areas, 2048 bytes each, one per slot
+                       (px12): the words kernel/vm, kernel/files and
+                       kernel/user keep for an ELF process (the break,
+                       the mmap cursor, the descriptor table, the
+                       system calls already logged); kernel/sched zeroes
+                       a slot's area whenever it clears the slot, and a
+                       zeroed area is a fresh process's
      pax_sched_locks   eight 8-byte lock words (kernel/sync; word 0 is
                        the console's)
      pax_sched_state   sixteen 8-byte words: the scheduler's scalars
@@ -159,7 +167,11 @@ pax_irq_restore:
         .p2align 6
         .globl pax_threads
 pax_threads:
-        .zero 16 * 120
+        .zero 16 * 128
+        .p2align 6
+        .globl pax_procs
+pax_procs:
+        .zero 16 * 2048
         .p2align 6
         .globl pax_sched_locks
 pax_sched_locks:

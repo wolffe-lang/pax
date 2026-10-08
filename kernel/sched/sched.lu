@@ -82,6 +82,19 @@
 //! (`fpu.switch` in `run_next`; a new thread's area starts as the
 //! template, `fpu.reset`), once kernel/fpu has started.
 //!
+//! **Linux processes** (px12): a thread also carries its FS base
+//! (`arch_prctl(ARCH_SET_FS)`, glibc's thread pointer), written to
+//! IA32_FS_BASE (MSR 0xC0000100) at every switch in (`enter_space`),
+//! so each thread finds its own; CR4.FSGSBASE stays clear, so ring 3
+//! cannot change FS behind the kernel (WRFSBASE is #UD). And each slot
+//! owns a process area in boot/sched.S's `pax_procs` (2048 bytes, the
+//! words kernel/vm, kernel/files and kernel/user keep for the process
+//! in it), zeroed whenever the slot is cleared: a zeroed area is a fresh
+//! process (no break yet, the console on descriptors 0-2). A system
+//! call may also put its thread to sleep (`sleep_current`, for
+//! `clock_nanosleep`): its frame is saved with the result already in
+//! %rax, and the timer wakes it as it wakes `sleep`.
+//!
 //! The record's fields are read and written as words at their
 //! `offset_of`: a store to a field of a raw element is refused
 //! (wolf-lang#577). Written from the Intel SDM vol. 3A §6.12.1, §6.14.2,
@@ -100,15 +113,18 @@ use sync
 use timer
 
 extern "c" fn pax_switch()
+extern "c" fn pax_wrmsr(msr: u64, v: u64)
 
 extern "c" let pax_threads: *u64
 extern "c" let pax_sched_state: *u64
 extern "c" let pax_thread_entry: *u8
 extern "c" let pax_idle: *u8
 extern "c" let pax_syscall_state: *u64
+extern "c" let pax_procs: *u64
 
-/// One thread's record (boot/sched.S: 16 of them, 120 bytes each; 72
-/// before px09 added `cr3` and `prog`, 88 before px10's four).
+/// One thread's record (boot/sched.S: 16 of them, 128 bytes each; 72
+/// before px09 added `cr3` and `prog`, 88 before px10's four, 120
+/// before px12's `fs`).
 #[repr(c)]
 struct Thread {
     frame: u64, // the saved frame's address; 0 while running
@@ -126,6 +142,7 @@ struct Thread {
     usp: u64, // px10: its initial user stack pointer
     name: u64, // px10: its name's first byte (in the initramfs)
     name_len: u64, // px10: its name's length
+    fs: u64, // px12: its FS base (IA32_FS_BASE while it runs)
 }
 
 const SLOTS: u64 = 16
@@ -146,6 +163,8 @@ const GUARD: u64 = 49152 // its low part, never mapped
 const STACK: u64 = 16384 // its high part, mapped
 const PAGE: u64 = 4096
 const PAGES: u64 = 4
+const PROC_AREA: u64 = 2048 // px12: each slot's bytes of boot/sched.S's pax_procs
+const FS_BASE: u64 = 0xc0000100 // px12: IA32_FS_BASE (Intel SDM vol. 4)
 
 const QUANTUM: u64 = 2 // ticks
 
@@ -270,6 +289,9 @@ fn enter_space(s: u64) {
     if paging.live() != want {
         paging.load(want)
     }
+    // # Safety: cpu.S's WRMSR of IA32_FS_BASE, an architectural MSR every
+    // x86-64 CPU has; the kernel never uses FS, so only ring 3 sees it.
+    unsafe { pax_wrmsr(FS_BASE, field(s, offset_of(Thread, fs))) }
     let hi = field(s, offset_of(Thread, stack_hi))
     if hi != 0 {
         gdt.set_rsp0(hi)
@@ -412,6 +434,61 @@ fn clear(s: u64) {
     put_field(s, offset_of(Thread, usp), 0)
     put_field(s, offset_of(Thread, name), 0)
     put_field(s, offset_of(Thread, name_len), 0)
+    put_field(s, offset_of(Thread, fs), 0)
+    let a = proc_area(s)
+    var i: u64 = 0
+    while i < PROC_AREA / 8 {
+        // # Safety: slot s's area, inside boot/sched.S's pax_procs (s < SLOTS).
+        unsafe { ((a + i * 8) as *u64).write_volatile(0) }
+        i += 1
+    }
+}
+
+/// Slot `s`'s process area (px12): PROC_AREA bytes of boot/sched.S's
+/// `pax_procs`, zero for a fresh process.
+pub fn proc_area(s: u64) -> u64 {
+    if s >= SLOTS {
+        panic.fail("sched: no process area for slot", s)
+    }
+    // # Safety: the address only; s < SLOTS keeps it inside pax_procs.
+    unsafe { pax_procs as u64 + s * PROC_AREA }
+}
+
+/// Thread `id`'s process area (px12; the id from `create_process`).
+pub fn area_of(id: u64) -> u64 {
+    proc_area(slot_of(id))
+}
+
+/// The running thread's slot (px12).
+pub fn self_slot() -> u64 {
+    cur()
+}
+
+/// The running thread's FS base (px12, `arch_prctl(ARCH_GET_FS)`).
+pub fn self_fs() -> u64 {
+    field(cur(), offset_of(Thread, fs))
+}
+
+/// Set the running thread's FS base (px12, `arch_prctl(ARCH_SET_FS)`):
+/// the record keeps it for every later switch in, and IA32_FS_BASE takes
+/// it now. IF clear (a system call).
+pub fn set_self_fs(v: u64) {
+    put_field(cur(), offset_of(Thread, fs), v)
+    // # Safety: as in `enter_space`.
+    unsafe { pax_wrmsr(FS_BASE, v) }
+}
+
+/// Put the running thread to sleep from a system call until tick `wake`
+/// (px12, `clock_nanosleep`): its frame `f` (the result already in its
+/// %rax) is saved, the thread sleeps as `sleep`'s do, and the frame
+/// returned is the next thread's, for the handler to resume. IF clear.
+pub fn sleep_current(f: u64, wake: u64) -> u64 {
+    let c = cur()
+    put_field(c, offset_of(Thread, frame), f)
+    put_field(c, offset_of(Thread, wake), wake)
+    put_field(c, offset_of(Thread, state), SLEEPING)
+    wake_sleepers()
+    run_next()
 }
 
 /// Start the scheduler on the paging structures at `pml4` (the PML4's
