@@ -27,9 +27,10 @@
 //! **The descriptors** (32 a process) are words in the process's area
 //! (kernel/sched's `proc_area`): per descriptor a kind, the node it
 //! names, a position and the open flags. A zeroed area is a fresh
-//! process: descriptors 0, 1 and 2 the serial console (read gives
-//! end-of-file until px13's input; write goes to the console through
-//! kernel/user's `write`), the rest free. `openat` takes the lowest free
+//! process: descriptors 0, 1 and 2 the serial console (read takes what
+//! was typed once kernel/console is started, px13, and gives end-of-file
+//! before; write goes to the console through kernel/user's `write`), the
+//! rest free. `openat` takes the lowest free
 //! number, as Linux does.
 //!
 //! **What stat answers**: a file's mode, size, inode (the archive's,
@@ -43,6 +44,7 @@
 //! `pax_kbuf` (one CPU, IF clear for the whole call). No region, no
 //! heap.
 
+use console
 use initramfs
 use uaccess
 
@@ -98,6 +100,7 @@ const O_CREAT: u64 = 0x40
 const O_EXCL: u64 = 0x80
 const O_TRUNC: u64 = 0x200
 const O_DIRECTORY: u64 = 0x10000
+const O_NONBLOCK: u64 = 0x800
 const AT_FDCWD: u64 = 0xffffff9c // -100 as the 32-bit int the caller passes (kernel/user masks)
 const AT_SYMLINK_NOFOLLOW: u64 = 0x100
 const AT_EMPTY_PATH: u64 = 0x1000
@@ -560,8 +563,13 @@ pub fn read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
     if k == K_DIR {
         return neg(EISDIR)
     }
-    if k == K_CONSOLE || k == K_NULL {
-        return 0 // end-of-file: no console input until px13
+    if k == K_NULL {
+        return 0 // end-of-file
+    }
+    if k == K_CONSOLE {
+        // px13: what was typed (kernel/console), or console.restart() for
+        // kernel/user to wait; end of file before the console is started.
+        return console.read(pml4, buf, n, get(a, fdw(fd, 3)) & O_NONBLOCK != 0)
     }
     let r = file_read(pml4, node_of(a, fd), pos(a, fd), buf, n)
     if r < 0x8000000000000000 {
@@ -627,12 +635,19 @@ pub fn lseek(a: u64, fd: u64, off: u64, whence: u64) -> u64 {
     p
 }
 
-/// `ioctl(fd, request, arg)`: -EBADF, else -ENOTTY for every request
-/// (TCGETS and TIOCGWINSZ included: the console is not a terminal to a
-/// program until px13).
-pub fn ioctl(a: u64, fd: u64) -> u64 {
-    if kind(a, fd) == K_CLOSED {
+/// `ioctl(fd, request, arg)`: -EBADF for a closed descriptor; on the
+/// console, kernel/console's answer (px13: the terminal ioctls once the
+/// console is started, `console.refused()` for a request it refuses by
+/// name, -ENOTTY for everything before); -ENOTTY on anything else
+/// (a file, a directory, /dev/null), as Linux answers for a descriptor
+/// that is not a terminal.
+pub fn ioctl(a: u64, pml4: u64, fd: u64, req: u64, arg: u64) -> u64 {
+    let k = kind(a, fd)
+    if k == K_CLOSED {
         return neg(EBADF)
+    }
+    if k == K_CONSOLE {
+        return console.ioctl(pml4, req, arg)
     }
     neg(ENOTTY)
 }
