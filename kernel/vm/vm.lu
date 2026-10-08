@@ -1,0 +1,340 @@
+//! vm — a process's memory beyond its ELF image: the break and anonymous
+//! mappings (px12, M-PX3).
+//!
+//! Written from man-pages `brk(2)`, `mmap(2)`, `munmap(2)`,
+//! `mprotect(2)`, the uapi `asm-generic/mman-common.h` and
+//! `linux/mman.h` (the PROT_* and MAP_* numbers), and black-box strace
+//! of glibc-static programs on Linux (what they ask for and what Linux
+//! answers). No Linux source; no other kernel's source.
+//!
+//! **The words** live in the process's area (kernel/sched's
+//! `proc_area`, zero for a fresh process): the break's start and its
+//! current value, and the mmap cursor.
+//!
+//! **The break** starts at the page above the highest byte of the ELF
+//! image (`start`; Linux places a static program's there too, plus a
+//! random offset PAX does not model). `brk(addr)` answers the current
+//! break when addr is 0, below the start, or past BRK_MAX (64 MiB) above
+//! it, or when a page it would need is already mapped (as Linux answers
+//! a refused `brk` with the old break); otherwise it maps zeroed frames
+//! (read-write, no-execute, user) for every page up to `addr`'s, or
+//! unmaps and frees those above, and answers `addr`.
+//!
+//! **mmap** maps anonymous private memory only: a fresh zeroed frame per
+//! page, allocated at the call (no demand paging), with the leaf flags
+//! PROT_* asks for (PROT_WRITE adds RW, no PROT_EXEC is NX, PROT_NONE
+//! takes U/S away so ring 3 cannot touch the page while its frame stays
+//! counted). Without MAP_FIXED the address is chosen top-down from
+//! MMAP_TOP (0x7f0000000000, below which kernel/elf loads nothing and
+//! above which the stack lives), the cursor only ever moving down, so no
+//! address is handed out twice in a process's life and a hint is
+//! ignored; MAP_FIXED replaces whatever is mapped there, and
+//! MAP_FIXED_NOREPLACE answers -EEXIST instead. Refused by name, nothing
+//! mapped: a mapping of a file (-ENODEV, mmap(2)'s "the underlying
+//! filesystem of the specified file does not support memory mapping":
+//! PAX's initramfs is read through `read`), MAP_SHARED (-EINVAL), a
+//! length of 0 or a fixed address off a page (-EINVAL), an address range
+//! outside the user half (-ENOMEM), no frames (-ENOMEM, what was mapped
+//! given back). `munmap` frees every mapped page of a range (holes are
+//! fine, as on Linux); `mprotect` rewrites the leaves of a range every
+//! page of which is mapped (-ENOMEM otherwise).
+//!
+//! Everything is in the user half, so the process's death gives it all
+//! back with its space (kernel/paging's `free_user`). A refusal's name
+//! is left in the area's REFUSAL word for kernel/user to log. No region,
+//! no heap.
+
+use frames
+use paging
+
+const PAGE: u64 = 4096
+const BRK_MAX: u64 = 0x4000000 // 64 MiB
+const MMAP_TOP: u64 = 0x00007f0000000000
+const LOW: u64 = 0x10000 // 64 KiB: Linux's default vm.mmap_min_addr
+
+// The area's words (kernel/files and kernel/user use others).
+const A_BRK_START: u64 = 0
+const A_BRK: u64 = 1
+const A_MMAP: u64 = 2
+const A_REFUSAL: u64 = 3
+
+const PROT_WRITE: u64 = 0x2
+const PROT_EXEC: u64 = 0x4
+const PROT_KNOWN: u64 = 0x7 // READ | WRITE | EXEC
+const PROT_GROWS: u64 = 0x03000000 // PROT_GROWSDOWN | PROT_GROWSUP: accepted, ignored
+const PROT_BAD: u64 = 0xfcfffff8 // every other bit of the 32-bit int (-EINVAL)
+const MAP_TYPE: u64 = 0x0f
+const MAP_SHARED: u64 = 0x01
+const MAP_PRIVATE: u64 = 0x02
+const MAP_SHARED_VALIDATE: u64 = 0x03
+const MAP_FIXED: u64 = 0x10
+const MAP_ANONYMOUS: u64 = 0x20
+const MAP_FIXED_NOREPLACE: u64 = 0x100000
+
+// -errno as %rax carries it (uapi asm-generic/errno-base.h).
+const NEG_ENOMEM: u64 = 0xfffffffffffffff4 // -12
+const NEG_EEXIST: u64 = 0xffffffffffffffef // -17
+const NEG_ENODEV: u64 = 0xffffffffffffffed // -19
+const NEG_EINVAL: u64 = 0xffffffffffffffea // -22
+
+// Refusal codes (the REFUSAL word), named by `why`.
+const R_FILE: u64 = 1
+const R_SHARED: u64 = 2
+const R_NO_FRAMES: u64 = 3
+
+fn get(a: u64, i: u64) -> u64 {
+    // # Safety: `a` is a process area (sched.proc_area), 2048 bytes; i < 8.
+    unsafe { ((a + i * 8) as *u64).read_volatile() }
+}
+
+fn put(a: u64, i: u64, v: u64) {
+    // # Safety: as `get`.
+    unsafe { ((a + i * 8) as *u64).write_volatile(v) }
+}
+
+fn page_up(x: u64) -> u64 {
+    (x + PAGE - 1) - (x + PAGE - 1) % PAGE
+}
+
+/// The refusal the last call left (0 none), cleared by reading it.
+pub fn take_refusal(a: u64) -> u64 {
+    let r = get(a, A_REFUSAL)
+    put(a, A_REFUSAL, 0)
+    r
+}
+
+/// A refusal code's name.
+pub fn why(r: u64) -> str {
+    if r == R_FILE {
+        return "a file-backed mapping (PAX maps anonymous memory only)"
+    }
+    if r == R_SHARED {
+        return "MAP_SHARED (PAX maps private memory only)"
+    }
+    if r == R_NO_FRAMES {
+        return "out of frames"
+    }
+    ""
+}
+
+/// The break of a process whose ELF image ends at `top` (its highest
+/// PT_LOAD byte + 1): the page above it.
+pub fn start(a: u64, top: u64) {
+    put(a, A_BRK_START, page_up(top))
+    put(a, A_BRK, page_up(top))
+}
+
+/// The current break (0 before `start`).
+pub fn current_break(a: u64) -> u64 {
+    get(a, A_BRK)
+}
+
+/// The frame mapped at user page `va`, or 0.
+fn mapped(pml4: u64, va: u64) -> u64 {
+    paging.translate(pml4, va) else 0
+}
+
+/// Map a zeroed frame at user page `va` with `flags` (RW, NX; U/S and P
+/// added). False when no frame or table is left (nothing mapped).
+fn map_zero(pml4: u64, va: u64, flags: u64) -> bool {
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        return false
+    }
+    let v = pa + frames.hhdm()
+    var i: u64 = 0
+    while i < PAGE / 8 {
+        // # Safety: the frame just taken, through the HHDM.
+        unsafe { ((v + i * 8) as *u64).write_volatile(0) }
+        i += 1
+    }
+    let r = paging.map_user(pml4, va, pa, flags) else 99
+    if r == 99 {
+        frames.free(pa)
+        return false
+    }
+    true
+}
+
+/// Unmap and free every mapped page of [lo, hi) (page-aligned).
+fn unmap_range(pml4: u64, lo: u64, hi: u64) {
+    var pg = lo
+    while pg < hi {
+        let pa = paging.unmap(pml4, pg) else 0
+        if pa != 0 {
+            frames.free(pa)
+        }
+        pg += PAGE
+    }
+}
+
+/// `brk(addr)`: the new break, or the old one when refused.
+pub fn brk(a: u64, pml4: u64, addr: u64) -> u64 {
+    let lo = get(a, A_BRK_START)
+    let cur = get(a, A_BRK)
+    if lo == 0 || addr < lo || addr - lo > BRK_MAX {
+        return cur
+    }
+    let have = page_up(cur)
+    let want = page_up(addr)
+    if want > have {
+        var pg = have
+        while pg < want {
+            if mapped(pml4, pg) != 0 {
+                return cur
+            }
+            pg += PAGE
+        }
+        pg = have
+        while pg < want {
+            if !map_zero(pml4, pg, paging.writable() | paging.no_exec()) {
+                unmap_range(pml4, have, pg)
+                return cur
+            }
+            pg += PAGE
+        }
+    } else if want < have {
+        unmap_range(pml4, want, have)
+    }
+    put(a, A_BRK, addr)
+    addr
+}
+
+/// The leaf flags for `prot` (P and U/S are map_user's): RW for
+/// PROT_WRITE, NX without PROT_EXEC.
+fn leaf(prot: u64) -> u64 {
+    var f: u64 = 0
+    if prot & PROT_WRITE != 0 {
+        f = f | paging.writable()
+    }
+    if prot & PROT_EXEC == 0 {
+        f = f | paging.no_exec()
+    }
+    f
+}
+
+/// The lowest address of a free run of `n` bytes (page multiple) at or
+/// below the cursor; 0 when none is left above LOW.
+fn pick(a: u64, pml4: u64, n: u64) -> u64 {
+    var top = get(a, A_MMAP)
+    if top == 0 {
+        top = MMAP_TOP
+    }
+    while top >= LOW + n {
+        let lo = top - n
+        var pg = top
+        var clash: u64 = 0
+        while pg > lo && clash == 0 {
+            pg -= PAGE
+            if mapped(pml4, pg) != 0 {
+                clash = pg + 1
+            }
+        }
+        if clash == 0 {
+            put(a, A_MMAP, lo)
+            return lo
+        }
+        top = clash - 1 // below the mapped page
+    }
+    0
+}
+
+/// `mmap(addr, len, prot, flags, fd, off)`: the address, or -errno.
+pub fn mmap(a: u64, pml4: u64, addr: u64, len: u64, prot: u64, flags: u64) -> u64 {
+    let kind = flags & MAP_TYPE
+    if kind == MAP_SHARED || kind == MAP_SHARED_VALIDATE {
+        put(a, A_REFUSAL, R_SHARED)
+        return NEG_EINVAL
+    }
+    if kind != MAP_PRIVATE || len == 0 || prot & PROT_BAD != 0 {
+        return NEG_EINVAL
+    }
+    if flags & MAP_ANONYMOUS == 0 {
+        put(a, A_REFUSAL, R_FILE)
+        return NEG_ENODEV
+    }
+    if len > paging.user_top() {
+        return NEG_ENOMEM
+    }
+    let n = page_up(len)
+    var va: u64 = 0
+    if flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0 {
+        if addr % PAGE != 0 {
+            return NEG_EINVAL
+        }
+        if addr < LOW || addr >= paging.user_top() || n > paging.user_top() - addr {
+            return NEG_ENOMEM
+        }
+        var pg = addr
+        while pg < addr + n {
+            if mapped(pml4, pg) != 0 && flags & MAP_FIXED_NOREPLACE != 0 && flags & MAP_FIXED == 0 {
+                return NEG_EEXIST
+            }
+            pg += PAGE
+        }
+        unmap_range(pml4, addr, addr + n)
+        va = addr
+    } else {
+        va = pick(a, pml4, n)
+        if va == 0 {
+            return NEG_ENOMEM
+        }
+    }
+    let fl = leaf(prot)
+    var pg = va
+    while pg < va + n {
+        if !map_zero(pml4, pg, fl) {
+            unmap_range(pml4, va, pg)
+            put(a, A_REFUSAL, R_NO_FRAMES)
+            return NEG_ENOMEM
+        }
+        if prot & PROT_KNOWN == 0 {
+            let _ok = paging.protect_user(pml4, pg, fl) // PROT_NONE: no U/S
+        }
+        pg += PAGE
+    }
+    va
+}
+
+/// `munmap(addr, len)`: 0 or -EINVAL.
+pub fn munmap(pml4: u64, addr: u64, len: u64) -> u64 {
+    if addr % PAGE != 0 || len == 0 || addr >= paging.user_top() || len > paging.user_top() - addr {
+        return NEG_EINVAL
+    }
+    let n = page_up(len)
+    let end = if n > paging.user_top() - addr { paging.user_top() } else { addr + n }
+    unmap_range(pml4, addr, end)
+    0
+}
+
+/// `mprotect(addr, len, prot)`: 0, -EINVAL, or -ENOMEM when a page of
+/// the range is not mapped (nothing changed then).
+pub fn mprotect(pml4: u64, addr: u64, len: u64, prot: u64) -> u64 {
+    if addr % PAGE != 0 || prot & PROT_BAD != 0 {
+        return NEG_EINVAL
+    }
+    if len == 0 {
+        return 0
+    }
+    if addr >= paging.user_top() || len > paging.user_top() - addr {
+        return NEG_ENOMEM
+    }
+    let end = page_up(addr + len)
+    var pg = addr
+    while pg < end {
+        if mapped(pml4, pg) == 0 {
+            return NEG_ENOMEM
+        }
+        pg += PAGE
+    }
+    var fl = leaf(prot)
+    if prot & PROT_KNOWN != 0 {
+        fl = fl | paging.user()
+    }
+    pg = addr
+    while pg < end {
+        let _ok = paging.protect_user(pml4, pg, fl)
+        pg += PAGE
+    }
+    0
+}
