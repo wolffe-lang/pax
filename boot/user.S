@@ -65,7 +65,7 @@
                          kernel stack top (SYSCALL's stack), 1 the user
                          RSP while the entry builds the frame, 2 the
                          timer ticks that landed in ring 3, 3 SMAP on,
-                         4 SMEP on.
+                         4 SMEP on, 5 the last exit's status + 1 (px13).
      pax_kbuf            8192 bytes of scratch for a system call (px12):
                          [0, 4096) a path copied in from the caller,
                          [4096, 8192) the path made canonical. One CPU and

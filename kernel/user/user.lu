@@ -69,7 +69,8 @@
 //! - files (kernel/files): `read` (0), `pread64` (17), `open` (2),
 //!   `openat` (257), `close` (3), `lseek` (8), `fstat` (5), `stat` (4),
 //!   `lstat` (6), `newfstatat` (262), `statx` (332), `getdents64`
-//!   (217), `ioctl` (16, -ENOTTY), `getcwd` (79, "/"), `readlinkat`
+//!   (217), `ioctl` (16; -ENOTTY but on the console, px13),
+//!   `getcwd` (79, "/"), `readlinkat`
 //!   (267, nothing is a link); `write` (1) goes to the console for the
 //!   console's descriptors, nowhere for `/dev/null`, -EBADF otherwise;
 //! - the rest: `getrandom` (318, RDRAND, else the TSC mix), `clock_
@@ -125,6 +126,7 @@
 //! (wolf-lang#598, not fixed in 0.2.24). No `region` is used anywhere
 //! here (wolf-lang#611). No Linux source; no other kernel's source.
 
+use console
 use elf
 use files
 use frames
@@ -210,6 +212,7 @@ const NEG_ENOSYS: u64 = 0xffffffffffffffda // -38
 const U_TICKS: u64 = 2
 const U_SMAP: u64 = 3
 const U_SMEP: u64 = 4
+const U_LAST_EXIT: u64 = 5 // px13: the last exit's status + 1 (0: none yet)
 
 // boot/isr.S's frame, as word indices.
 const W_R10: u64 = 5
@@ -470,6 +473,12 @@ pub fn from_user(f: u64) -> bool {
     word(f, W_CS) & 3 == 3
 }
 
+/// The status the last program to exit gave `exit` or `exit_group`
+/// plus one; 0 when none has (px13: kmain_console says how init ended).
+pub fn last_exit() -> u64 {
+    state(U_LAST_EXIT)
+}
+
 /// A timer tick that landed in ring 3 (kernel/interrupts).
 pub fn count_tick() {
     put_state(U_TICKS, state(U_TICKS) + 1)
@@ -570,7 +579,7 @@ fn write(fd: u64, buf: u64, len: u64) -> u64 {
         // is clear: one CPU, no switch); boot/user.S brackets the read
         // with STAC/CLAC under SMAP.
         let b = unsafe { pax_peek_user(buf + i, smap) }
-        if b == 10 {
+        if b == 10 && console.onlcr() {
             serial.put(13)
         }
         serial.put((b & 0xff) as u8)
@@ -909,6 +918,7 @@ pub fn syscall(f: u64) -> u64 {
         log.dec((a0 & 0xff) as int)
         runs_tail()
         log.end()
+        put_state(U_LAST_EXIT, (a0 & 0xff) + 1)
         return sched.end_current(f)
     }
     if nr == SYS_EXIT_GROUP {
@@ -917,6 +927,7 @@ pub fn syscall(f: u64) -> u64 {
         log.dec((a0 & 0xff) as int)
         runs_tail()
         log.end()
+        put_state(U_LAST_EXIT, (a0 & 0xff) + 1)
         return sched.end_current(f) // one thread a process: the group
     }
     if nr == SYS_CLOCK_NANOSLEEP || nr == SYS_NANOSLEEP {
@@ -938,6 +949,16 @@ pub fn syscall(f: u64) -> u64 {
         return sched.sleep_current(f, wake)
     }
     let r = dispatch(nr, a0, a1, a2, a3, a4)
+    if r == console.restart() {
+        // px13: a read of the console with nothing ready. The thread
+        // waits for input; the frame is rewound to the `syscall`
+        // instruction (0f 05, two bytes) with %rax the call's number
+        // again, so when the console's interrupt wakes it the read runs
+        // afresh in its own address space.
+        put_word(f, W_RIP, word(f, W_RIP) - 2)
+        put_word(f, W_RAX, nr)
+        return sched.block_input(f)
+    }
     put_word(f, W_RAX, r)
     refusal_line(nr, r)
     f
@@ -998,7 +1019,19 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
         return files.getdents(a, pml4, a0, a1, a2)
     }
     if nr == SYS_IOCTL {
-        return files.ioctl(a, a0)
+        // px13: the console answers the terminal ioctls; a request it
+        // refuses is named here and answered -ENOTTY.
+        let req = int32(a1)
+        let r = files.ioctl(a, pml4, a0, req, a2)
+        if r == console.refused() {
+            who()
+            log.put(" syscall 16: refused: tty ioctl ")
+            log.hex(req)
+            log.put(", -ENOTTY")
+            log.end()
+            return console.enotty()
+        }
+        return r
     }
     if nr == SYS_GETCWD {
         return files.getcwd(pml4, a0, a1)
