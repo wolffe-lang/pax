@@ -130,3 +130,61 @@ the same binary's listing of the same tree on Linux. Prediction for it:
 stdout (`TCGETS`/`TIOCGWINSZ` → `-ENOTTY`, so one name per line), and
 about 15 distinct calls. Whether that counts as M-PX3's fifth is the
 orchestrator's call; the report says exactly what ran.
+
+### §3 against what was measured
+
+| predicted | measured |
+|---|---|
+| P1: the six boreutils utilities' union is 20 ± 3 distinct calls (17..23) | **right: 21** (`notes/px12/linux-strace-*.txt`, Ubuntu 24.04 container on kasumi, and CI's own trace in run 37717393136's log): execve, brk, arch_prctl, set_tid_address, set_robust_list, rseq, prlimit64, readlinkat, getrandom, mprotect, openat, write, exit_group, close, mmap, munmap, read, statx, lseek, pread64, getcwd |
+| P1: every one inside px04's 26 | **wrong by one: `pread64`** (tail's `fs_read_at`, adopted by bu15 after px04's census tree `010f314`) |
+| P1: echo the smallest (~15), tail or cat the largest (~19) | **half right**: echo is the smallest at **13**; the largest is **head, 19** (it seeks and maps a buffer); cat 18, wc 18, tail 17, pwd 14 |
+| P1: no getdents64, clock_*, ioctl in any of the six | right (sleep, not one of the six, adds clock_nanosleep) |
+| P1: mmap/munmap for a buffer of 128 KiB or more | right: `mmap(NULL, 266240, …)` (cat, head, wc), and B3's frames show it: plant C lost exactly 65 frames per such call |
+| P2: today's kernel dies at `brk` with "Cannot allocate TLS block", exit 127 | right (px10's measurement, not re-run) |
+| P2: with memory and TLS in, the first failure is `openat("/dev/stdout")` | **not measured**: the three pieces landed together before the first boot, so no boot had memory without files |
+| P2: the first boot of the whole set fails on at least one reader for a reason not in this list | **wrong**: the first boot (eight commands: the five, tail, pwd, an ENOENT) ran byte-identical to Linux (`notes/px12/kasumi-tcg-first-boot-native-bios.serial.log` `c9ba0848…`). The first unforeseen failure came with the second list: a **relative** path (`cat etc/words`) answered "Input/output error", because glibc passes `AT_FDCWD` as `0x00000000ffffff9c` (the upper half zero) and PAX compared all 64 bits, so the descriptor was "closed", -EBADF, which wolf's runtime words as EIO (`kasumi-c1-relative-path-red.boot.log`); `int` arguments are now read as 32 bits |
+| — (not predicted) | busybox calls `time` (201) on PAX and not on Linux: Linux answers it in the vDSO, PAX has none (no AT_SYSINFO_EHDR), so glibc makes the system call; implemented |
+| P3: the memory model (brk above the image, anonymous mmap top-down from 0x7f0000000000, eager zeroed frames, everything back at exit) | held: B3 holds on every leg of every run (frames back per command); plant C reds it |
+| P3: peak frames per utility well under 1,000 (~760 for a 3 MiB image) | **right on the bound, wrong on the reason**: 321–334 frames per boreutils process, 570 for busybox, 893 for the two at once; a boreutils binary is 11.8 MB on disk but loads only ~1.1 MB (four PT_LOAD), the rest is debug info |
+| P3: FS by WRMSR of IA32_FS_BASE at every switch in, CR4.FSGSBASE clear | as built; plant A (no restore at the switch) kills the sleeper woken after busybox with a page fault at busybox's TLS address (`cr2 0x000000000060e3e8`) |
+| P4: busybox `ls`: getdents64, statx or newfstatat per entry, ioctl -ENOTTY, ~15 distinct | **calls right, count wrong: 20** (it also asks `fstat`, `getuid`, `prctl(PR_GET_NAME)`); newfstatat per entry, `ioctl(0, TIOCGWINSZ)` and `ioctl(1, TCGETS)` -ENOTTY |
+
+## 4. Evidence index
+
+### The programs and the Linux side
+
+- boreutils `2f15585` (its pin wolf 0.2.23 `6f505eb5…`, wolf-std `6a0df5e`), built by `tools/mkboreutils` (`2b3655d`) with `-static`; **byte-identical on CI and in the kasumi container**: echo `4ced726c…`, cat `f90b0bb0…`, head `d4e6c46d…`, wc `5afcc80c…`, tail `4f705483…`, pwd `3a636563…`, sleep `a26cb399…` (`notes/px12/boreutils-sums-2f15585.txt`; CI run 37717393136's log); busybox-static 1.36.1-6ubuntu3.1 `dbac288c…`. px10's census subject rebuilt in the container is `a3ada54b…`, px10's CI hash: the builds are reproducible across the runner and the container.
+- The strace sets: `notes/px12/linux-strace-{echo,cat,head,wc,tail,pwd,ls}.txt` (container, `-f`), and per command in every CI run (`tools/linux-run --strace`, the `linux:` lines; `notes/px12/ci-green-641ebef.txt`).
+- The Linux side of B2: `tools/linux-run`, chrooted in the initramfs's tree, stdin `/dev/null`, stdout and stderr one pipe, the same argv and environment; CI runner Ubuntu, glibc 2.39-0ubuntu8.9, kernel 6.17.0-1022-azure; kasumi container Ubuntu 24.04 on kasumi's 7.2.8.
+
+### The Linux-vs-PAX diff
+
+**Empty** for all 17 lines of `user/mpx3-boreutils.run` (the five: `echo hello from boreutils`, `cat /etc/motd`, `busybox ls /bin /etc`, `wc /etc/words`, `head -n 3 /etc/words`; then tail, pwd, wc of two files, a relative path, head, cat of standard input, sleep, sleep and busybox at once, `ls -a`, and ENOENT, EISDIR, ENOTDIR as each utility words them), statuses `0 ×13, 0 0, 1, 1, 1` identical, on every leg: CI run **37717393136** (head `641ebef`, job 113116914556, B2 on four legs) and **37718863327** (`769d1d6`), and the final head's run (PR body); kasumi TCG at `641ebef` (`notes/px12/kasumi-mpx3-boreutils-641ebef.txt`: 20 PASS, 0 FAIL); hasu KVM (below). The transcript: `notes/px12/kasumi-tcg-native-bios-kmain_boreutils.serial.log` (`5f49cb3a…`).
+
+### Planted breaks (each its own push and CI run, reverted by the next commit; `notes/px12/ci-planted-breaks.txt`)
+
+- **A** `787d2ad` (the FS base not restored at a switch): run **37717282743**, job 113116563341, only mpx3-boreutils red: B2 on all four legs, line 13 only: `user: sleep pid 14 killed: page fault … cr2 0x000000000060e3e8 after 2 runs`. Reverted `03e7f8b` (run 37717318677 green).
+- **B** `a170471` (getdents64 skips a directory's first child): run **37717328877**, job 113116713402: B2 red on lines 3, 13, 14 (busybox's listings lose `busybox` and `motd`), four legs. Reverted `1245ad1` (run 37717354882 green).
+- **C** `b0521e8` (munmap and brk's shrink keep the frames): run **37717367799**, job 113116834202: B2 green, **B3 red** (65 frames lost per command that maps its 266240-byte buffer: lines 2, 4, 5, 8, 9, 10, 11), four legs. Reverted `641ebef` (run 37717393136 green on all 14 jobs).
+- Two harness reds found on the way (not plants): `--images` on a fresh tree had no `build/` (hasu, `notes/px12/hasu-fresh-tree-no-build-dir-red.txt`; fixed `769d1d6`), and B5 required ticks in ring 3 > 0, which a KVM boot can miss (hasu round 8 of `769d1d6`, release uefi `ticks in ring 3 '0'`, `notes/px12/hasu-round8-B5-ticks-red.txt`; fixed `b039e76`: reported, not asserted).
+
+### Boot counts
+
+- **hasu, KVM** (i7-12700KF, QEMU 11.1.0 via nix-shell, OVMF from nixpkgs, strict `PAX_REQUIRE_UEFI=1`), kasumi-built images: at `769d1d6` **148 boots, all accel=kvm** (`notes/px12/hasu-kvm-769d1d6.log`): mpx3-boreutils 8 rounds × 4 = 32 (31 rounds' worth of assertions green; one release-uefi boot counted 0 ring-3 ticks, the harness defect above), mpx3-loader 2 × 4 = 8 (with wolf-hello, 32 PASS each), mpx3-user 12, mkw 12, mpx1 12, mpx2-frames 16, mpx2-paging 4, mpx2-interrupts 20, mpx2-sched 8, mpx2-heap 24; then at `b039e76` mpx3-boreutils 8 × 4 = 32 more (§5).
+- **kasumi, TCG** (QEMU 11.1.1): the gauntlet on `git archive` of `79df225` (`notes/px12/kasumi-gauntlet-79df225.summary`): proof 2, census 3, mkw 16, mpx1 26, mpx2-frames 44, mpx2-paging 26, mpx2-interrupts 34, mpx2-sched 32, mpx2-heap 56, mpx3-user 38, tour 44, mpx3-loader 34 (with wolf-hello: L8 now `exit_group 0` after printing, -ENOSYS only 273 and 334; `kasumi-mpx3-loader-79df225-L2-L8.txt`), 0 FAIL, 0 SKIP; no kernel code but kmain_boreutils's changed after it. mpx3-boreutils 4 boots at `79df225` and 4 at `641ebef`, all PASS; tour at `641ebef` 44 PASS.
+- **CI**: 4 boots of kmain_boreutils per run; every job green at `79df225` (37716659137), `641ebef` (37717393136), `769d1d6` (37718863327).
+
+### The tour
+
+The tour's kernels link the scheduler, so its ISOs changed: rebuilt by `tests/tour` on kasumi at `641ebef` (44 PASS; `notes/px12/kasumi-tour-641ebef.txt`): `pax-tour.iso` `a7c3a6df…`, `pax-tour-b.iso` `3bae5d83…` (px10's `2ade3864…`, `8e804bd4…`). The image grew 156 → 252 KiB (every kernel now carries `pax_procs`, `pax_kbuf`, `pax_execbuf`), frame counts −41 (65030 usable, 64981 free, 64963 at the join), ending b's `rip` `0xffffffff80018273`. `~/scratch/wolf/pax-demo/` refreshed: the ISOs, SHA256SUMS, `src/` (pax's `kernel/`, `boot/`, `user/` at `769d1d6`, identical to the tree; nothing removed), the SHOTLIST's numbers and the README's build lines; `preflight.sh` **GO** (QEMU 11.1.1, `a7c3a6dffe79 3bae5d830c59`, 11659 lines of wolf, the PANIC line in about 29 s; `logs/preflight.serial.log` `09ed1bd3…`).
+
+### Filed
+
+Nothing upstream. wolf's runtime words EBADF and ENOTDIR as "Input/output error" (seen on PAX and on Linux alike: `head -n 2 /etc/motd/x` says it on both), which is wolf-lang#407 (no strerror text behind a row), already filed. wolf has no `--static`; a `cc` wrapper is the documented way (px04, px10), so no issue.
+
+## 5. Done-when
+
+- Branch `px12` on origin; PR wolffe-lang/pax#15, open, unmerged; CI green at the head (run id in the PR body).
+- **M-PX3: met, with one substitution the orchestrator should rule on.** boreutils' `echo`, `cat` of an initramfs file, `wc` and `head` (and `tail`, `pwd`, `sleep`), unmodified static Linux binaries built from boreutils' own tree, run on PAX with output and exit status byte-identical to the same binaries on Linux, both tiers, BIOS and UEFI, KVM on hasu. **The fifth, `ls` of an initramfs directory, is busybox-static's `ls`, not boreutils'**: boreutils has no `ls` (§2). If M-PX3 requires boreutils' own `ls`, what is missing is boreutils' `ls` itself; PAX's side (`getdents64`, `newfstatat`, `fstat`, `ioctl` -ENOTTY) is proven by busybox.
+- Close nothing. To close: none (no pax issue names this work).
+- Worktrees: the local worktree `pax-px12` removed at the end; kasumi `~/lanes/px12/` and hasu `~/lanes/px12/` keep the trees and evidence with `build/` directories pruned; the container image `px12-ubuntu` on kasumi is the lane's (podman, not installed on the host).
