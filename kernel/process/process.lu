@@ -1,0 +1,1021 @@
+//! process — processes (px14): a new program's image and stack (moved here
+//! from kernel/user, px10/px12's), and the system calls that make,
+//! replace and wait for processes, with the signal calls a spawn makes
+//! answered minimally.
+//!
+//! Written from man-pages `clone(2)` (clone3's `struct clone_args`),
+//! `vfork(2)`, `execve(2)`, `wait4(2)`, `waitid(2)`, `wait(2)`,
+//! `getpid(2)`, `rt_sigprocmask(2)` (`sigprocmask(2)`), `sigaction(2)`,
+//! `kill(2)`, `signal(7)`, `credentials(7)`; the uapi headers
+//! `linux/sched.h` (CLONE_*, `struct clone_args`), `linux/wait.h`
+//! (WNOHANG, WEXITED, P_*), `asm-generic/siginfo.h` (the SIGCHLD
+//! siginfo's layout, CLD_*), `arch/x86/include/uapi/asm/signal.h`
+//! (signal numbers) and `asm-generic/errno-base.h`; the x86-64 psABI
+//! §3.4.1 (the initial stack); and black-box strace of pelt starting a
+//! child on Linux (`notes/px14/`). No Linux source; no other kernel's
+//! source; no libc's.
+//!
+//! **A program's image** (`exec_span` for a program the kernel starts,
+//! `execve` for one a process starts): the file from the initramfs,
+//! checked and loaded by kernel/elf into a fresh address space; a stack
+//! of ELF_STACK_PAGES pages below STACK_TOP (the page below them the
+//! guard) holding what the psABI puts on a process's initial stack,
+//! from the top down: eight zero bytes; the strings (argv's, envp's,
+//! then the path, AT_EXECFN's), each with its NUL; sixteen random bytes
+//! (AT_RANDOM); then, 16-aligned at the bottom, argc, the argv pointers
+//! and a NULL, the envp pointers and a NULL, and the auxiliary vector
+//! (px10's sixteen pairs). The strings are staged first in boot/user.S's
+//! `pax_argbuf`, NUL-terminated one after another: the kernel's
+//! space-separated words for `exec_span`, the caller's vectors (copied
+//! out of its memory before anything else changes) for `execve`.
+//!
+//! **clone, clone3, vfork** (56, 435, 58): PAX makes the child pelt's
+//! spawn makes (measured: `clone3({flags=CLONE_VM|CLONE_VFORK|
+//! CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack, stack_size})`): a
+//! new process sharing the caller's address space, which the caller
+//! keeps owning, on the stack the call names (or the caller's own when
+//! none), resuming after the `syscall` with %rax 0 (kernel/sched's
+//! `clone_current`); the caller is suspended until the child execs or
+//! ends and then resumes with the child's pid. CLONE_CLEAR_SIGHAND
+//! resets the child's handled signals to SIG_DFL. Refused by name: a
+//! clone without CLONE_VM (a fork: PAX copies no address space yet,
+//! -ENOSYS), CLONE_VM without CLONE_VFORK (a thread or a process
+//! sharing memory while both run, -ENOSYS), any other flag (-EINVAL),
+//! no free slot (-EAGAIN).
+//!
+//! **execve** (59): path, argv and envp read out of the caller's memory
+//! first; then the file (kernel/files' `exec_lookup`: -ENOENT, -EACCES
+//! for a directory, a device or a file with no execute bit), the image
+//! (-ENOEXEC for what kernel/elf refuses, logged by name), and only then
+//! the point of no return: descriptors with close-on-exec closed,
+//! handled signals reset (the mask kept), the break and mmap cursor
+//! fresh, the x87/SSE state the template, FS 0, the new space live and
+//! the old one given back (or handed back to a vfork parent, which
+//! resumes); the frame becomes the new program's first: RIP the entry,
+//! RSP the vector, every general register 0, RFLAGS IF, left by IRETQ.
+//!
+//! **wait4, waitid** (61, 247): a child that has ended (a zombie,
+//! kernel/sched) is reaped: its pid returned, its status word written
+//! (Linux's encoding: `code << 8` after an exit, the signal's number
+//! after a kill), rusage zeroed; with none ended, WNOHANG answers 0 and
+//! otherwise the caller blocks, its frame rewound to run the call
+//! again when a child ends; no child at all is -ECHILD. waitid fills
+//! the SIGCHLD siginfo (si_signo 17, si_code CLD_EXITED or CLD_KILLED,
+//! si_pid, si_status) and keeps the zombie under WNOWAIT. No process
+//! groups yet: wait4's 0 and -pgid, and waitid's P_PGID, mean any child.
+//!
+//! **Signals, answered minimally** (no delivery yet): `rt_sigprocmask`
+//! (14) keeps a mask per process (SIGKILL and SIGSTOP never blocked),
+//! `rt_sigaction` (13) records the four words of each signal's
+//! `struct sigaction` (handler, flags, restorer, mask) and answers the
+//! old ones; `kill` (62), `tkill` (200) and `tgkill` (234) are refused
+//! by name, -ENOSYS.
+//!
+//! **Ids** (kernel/sched): `getpid` (39) the process's pid, `getppid`
+//! (110) its parent's (0 for one the kernel started, as Linux gives
+//! init), `gettid` (186) and `set_tid_address` (218) the pid (one
+//! thread a process).
+//!
+//! State lives in kernel/sched's thread records and process areas,
+//! read and written volatile; no `region`, no heap (wolf-lang#611).
+
+use elf
+use files
+use fpu
+use frames
+use initramfs
+use log
+use paging
+use panic
+use sched
+use uaccess
+use vm
+
+extern "c" fn pax_cpuid(leaf: u64, sub: u64, reg: u64) -> u64
+extern "c" fn pax_rdtsc() -> u64
+extern "c" fn pax_rdrand() -> u64
+
+extern "c" let pax_execbuf: *u8
+extern "c" let pax_argbuf: *u8
+
+const PAGE: u64 = 4096
+const STACK_TOP: u64 = 0x00007ffffffff000
+const ELF_STACK_PAGES: u64 = 32 // px10: an ELF process's stack, 128 KiB
+const CPUID1_RDRAND: u64 = 0x40000000 // ECX bit 30
+
+// pax_argbuf: the strings at [0, ARG_BYTES), the path at [PATH_AT, +4096).
+const ARG_BYTES: u64 = 65536
+const PATH_AT: u64 = 65536
+const PATH_MAX: u64 = 4095
+const MAX_STRINGS: u64 = 4096 // argv's and envp's pointers, each
+
+// The auxiliary vector's types (include/uapi/linux/auxvec.h).
+const AT_NULL: u64 = 0
+const AT_PHDR: u64 = 3
+const AT_PHENT: u64 = 4
+const AT_PHNUM: u64 = 5
+const AT_PAGESZ: u64 = 6
+const AT_BASE: u64 = 7
+const AT_FLAGS: u64 = 8
+const AT_ENTRY: u64 = 9
+const AT_UID: u64 = 11
+const AT_EUID: u64 = 12
+const AT_GID: u64 = 13
+const AT_EGID: u64 = 14
+const AT_CLKTCK: u64 = 17
+const AT_SECURE: u64 = 23
+const AT_RANDOM: u64 = 25
+const AT_EXECFN: u64 = 31
+const AUX_PAIRS: u64 = 16 // AT_NULL's included
+
+// boot/isr.S's frame, as word indices.
+const FRAME_WORDS: u64 = 22
+const W_RAX: u64 = 14
+const W_VECTOR: u64 = 15
+const W_RIP: u64 = 17
+const W_CS: u64 = 18
+const W_RFLAGS: u64 = 19
+const W_RSP: u64 = 20
+const W_SS: u64 = 21
+const USER_CS: u64 = 0x23
+const USER_SS: u64 = 0x1b
+const RFLAGS_IF: u64 = 0x202
+// A vector no gate has and boot/isr.S does not take for SYSRETQ's: an
+// exec'd frame leaves by IRETQ, so %rcx and %r11 start 0 too.
+const EXEC_VECTOR: u64 = 0x102
+
+// Linux's numbers (syscall_64.tbl).
+const SYS_CLONE: u64 = 56
+const SYS_VFORK: u64 = 58
+const SYS_CLONE3: u64 = 435
+
+// clone flags (uapi linux/sched.h).
+const CSIGNAL: u64 = 0xff
+const CLONE_VM: u64 = 0x100
+const CLONE_VFORK: u64 = 0x4000
+const CLONE_CLEAR_SIGHAND: u64 = 0x100000000
+const CLONE_ARGS_VER0: u64 = 64
+
+// wait options and idtypes (uapi linux/wait.h).
+const WNOHANG: u64 = 0x1
+const WEXITED: u64 = 0x4
+const WNOWAIT: u64 = 0x01000000
+const WAIT4_KNOWN: u64 = 0xe000000b // WNOHANG WUNTRACED WCONTINUED __WNOTHREAD __WALL __WCLONE
+const WAITID_KNOWN: u64 = 0xe100000f // + WEXITED, WNOWAIT
+const P_ALL: u64 = 0
+const P_PID: u64 = 1
+const P_PGID: u64 = 2
+
+// signals (arch/x86/include/uapi/asm/signal.h, asm-generic/siginfo.h).
+const SIGKILL: u64 = 9
+const SIGSTOP: u64 = 19
+const SIGCHLD: u64 = 17
+const NSIG: u64 = 64
+const UNBLOCKABLE: u64 = 0x40100 // SIGKILL's bit (8) and SIGSTOP's (18)
+const SIG_BLOCK: u64 = 0
+const SIG_UNBLOCK: u64 = 1
+const SIG_SETMASK: u64 = 2
+const SIG_DFL: u64 = 0
+const SIG_IGN: u64 = 1
+const CLD_EXITED: u64 = 1
+const CLD_KILLED: u64 = 2
+
+// -errno as %rax carries it (uapi asm-generic/errno-base.h).
+const NEG_ENOENT: u64 = 0xfffffffffffffffe // -2
+const NEG_E2BIG: u64 = 0xfffffffffffffff9 // -7
+const NEG_ENOEXEC: u64 = 0xfffffffffffffff8 // -8
+const NEG_ECHILD: u64 = 0xfffffffffffffff6 // -10
+const NEG_EAGAIN: u64 = 0xfffffffffffffff5 // -11
+const NEG_ENOMEM: u64 = 0xfffffffffffffff4 // -12
+const NEG_EFAULT: u64 = 0xfffffffffffffff2 // -14
+const NEG_EINVAL: u64 = 0xffffffffffffffea // -22
+const NEG_ENOSYS: u64 = 0xffffffffffffffda // -38
+
+// The process area's words this module keeps (kernel/sched's
+// `proc_area`): the refusal word (kernel/vm's and kernel/files' too);
+// kernel/user's logged-calls bitmap, made fresh at execve; and the
+// signal records, four words a signal from SIG_WORDS.
+const A_REFUSAL: u64 = 3
+const A_LOGGED: u64 = 4 // 8 words, kernel/user's
+const SIG_WORDS: u64 = 256
+
+// Refusal codes (32 and up: kernel/vm uses 1-15, kernel/files 16-31).
+const R_FORK: u64 = 32
+const R_SHARED: u64 = 33
+const R_FLAGS: u64 = 34
+const R_SLOTS: u64 = 35
+const R_SIGNALS: u64 = 36
+const R_NOT_ELF: u64 = 37
+
+/// A refusal code's name ("" when not this module's).
+pub fn why(r: u64) -> str {
+    if r == R_FORK {
+        return "a fork without CLONE_VM (PAX copies no address space yet)"
+    }
+    if r == R_SHARED {
+        return "CLONE_VM without CLONE_VFORK (no threads or shared-memory processes yet)"
+    }
+    if r == R_FLAGS {
+        return "a clone flag PAX does not take"
+    }
+    if r == R_SLOTS {
+        return "no free process slot"
+    }
+    if r == R_SIGNALS {
+        return "signals are not delivered yet"
+    }
+    if r == R_NOT_ELF {
+        return "not a static x86-64 ELF executable PAX runs"
+    }
+    ""
+}
+
+fn word(f: u64, i: u64) -> u64 {
+    // # Safety: `f` is the trampoline's frame (22 words), live for the
+    // handler that passed it; i < 22.
+    unsafe { ((f + i * 8) as *u64).read_volatile() }
+}
+
+fn put_word(f: u64, i: u64, v: u64) {
+    // # Safety: as `word`.
+    unsafe { ((f + i * 8) as *u64).write_volatile(v) }
+}
+
+fn area() -> u64 {
+    sched.proc_area(sched.self_slot())
+}
+
+fn aget(a: u64, i: u64) -> u64 {
+    // # Safety: a process area (sched.proc_area), 512 words; i < 512.
+    unsafe { ((a + i * 8) as *u64).read_volatile() }
+}
+
+fn aput(a: u64, i: u64, v: u64) {
+    // # Safety: as `aget`.
+    unsafe { ((a + i * 8) as *u64).write_volatile(v) }
+}
+
+fn refuse_with(code: u64, r: u64) -> u64 {
+    aput(area(), A_REFUSAL, code)
+    r
+}
+
+// --- the image (px10, px12; moved from kernel/user) -----------------------------
+
+/// Write the `n` bytes at `a` (kernel memory: a name in the initramfs, a
+/// staged path) to the log.
+pub fn put_bytes(a: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        // # Safety: [a, a + n) is kernel memory the caller names (the
+        // initramfs, mapped read-only in the HHDM, or pax_argbuf).
+        let b = unsafe { ((a + i) as *u8).read_volatile() }
+        log.put_byte(b as int)
+        i += 1
+    }
+}
+
+/// Byte `i` of the kernel bytes at `a`.
+fn sb(a: u64, i: u64) -> u64 {
+    // # Safety: [a, a + n) is the caller's kernel memory and i < n.
+    unsafe { ((a + i) as *u8).read_volatile() as u64 }
+}
+
+fn put_sb(a: u64, i: u64, b: u64) {
+    // # Safety: as `sb`, a byte of pax_argbuf or pax_execbuf.
+    unsafe { ((a + i) as *u8).write_volatile((b & 0xff) as u8) }
+}
+
+fn argbuf() -> u64 {
+    // # Safety: the address only.
+    unsafe { pax_argbuf as u64 }
+}
+
+/// The space-separated words of the `n` bytes at `a`, staged at `dst`
+/// as NUL-terminated strings one after another: (how many, their bytes
+/// with the NULs).
+fn stage_words(dst: u64, a: u64, n: u64) -> (u64, u64) {
+    var w: u64 = 0
+    var k: u64 = 0
+    var inw = false
+    var i: u64 = 0
+    while i < n {
+        let c = sb(a, i)
+        if c == 32 {
+            if inw {
+                put_sb(dst, k, 0)
+                k += 1
+            }
+            inw = false
+        } else {
+            if !inw {
+                w += 1
+            }
+            inw = true
+            put_sb(dst, k, c)
+            k += 1
+        }
+        i += 1
+    }
+    if inw {
+        put_sb(dst, k, 0)
+        k += 1
+    }
+    (w, k)
+}
+
+/// User address `va` of the space at `pml4` (not live), through the
+/// HHDM: the frame the image builder mapped there.
+fn kva(pml4: u64, va: u64) -> u64 {
+    let pa = paging.translate(pml4, va) else 0
+    if pa == 0 {
+        panic.fail("user: exec: a stack byte is not mapped at", va)
+    }
+    pa + frames.hhdm()
+}
+
+fn poke8(pml4: u64, va: u64, b: u64) {
+    // # Safety: kva's frame, one the builder mapped in this space's stack.
+    unsafe { (kva(pml4, va) as *u8).write_volatile((b & 0xff) as u8) }
+}
+
+fn poke64(pml4: u64, va: u64, v: u64) {
+    // # Safety: as poke8; va is 8-aligned, so the word is in one page.
+    unsafe { (kva(pml4, va) as *u64).write_volatile(v) }
+}
+
+/// Copy the `n` staged bytes at `src` to user `va` of the space at
+/// `pml4`; the address past them.
+fn put_block(pml4: u64, va: u64, src: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while i < n {
+        poke8(pml4, va + i, sb(src, i))
+        i += 1
+    }
+    va + n
+}
+
+/// Write a pointer to each of the `count` NUL-terminated strings staged
+/// at `src` (laid out from user `strs` by `put_block`) from `va` up,
+/// then a NULL; the address past it.
+fn put_ptrs(pml4: u64, va: u64, strs: u64, src: u64, count: u64) -> u64 {
+    var p = va
+    var off: u64 = 0
+    var k: u64 = 0
+    while k < count {
+        poke64(pml4, p, strs + off)
+        p += 8
+        while sb(src, off) != 0 {
+            off += 1
+        }
+        off += 1
+        k += 1
+    }
+    poke64(pml4, p, 0)
+    p + 8
+}
+
+/// One auxiliary-vector pair at `a`; the address past it.
+fn put_aux(pml4: u64, a: u64, t: u64, v: u64) -> u64 {
+    poke64(pml4, a, t)
+    poke64(pml4, a + 8, v)
+    a + 16
+}
+
+/// Eight bytes for AT_RANDOM and getrandom: RDRAND when the CPU has it
+/// (every PAX host: QEMU's `-cpu max` and the KVM hosts), else the TSC
+/// folded on itself (named, not cryptographic: a CPU without RDRAND gets
+/// bytes that differ per boot and per word, nothing more).
+pub fn random_word(k: u64) -> u64 {
+    // # Safety: CPUID reads nothing and writes only its registers.
+    let has = unsafe { pax_cpuid(1, 0, 2) } & CPUID1_RDRAND != 0
+    if has {
+        // # Safety: RDRAND exists (CPUID.1:ECX bit 30).
+        let r = unsafe { pax_rdrand() }
+        if r != 0 {
+            return r
+        }
+    }
+    // # Safety: RDTSC reads the time-stamp counter, nothing else.
+    let t = unsafe { pax_rdtsc() }
+    (t ^ (t >> 17) ^ (t >> 31)) + k
+}
+
+/// A frame, zeroed through the HHDM; 0 when there is none.
+fn fresh() -> u64 {
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        return 0
+    }
+    let v = pa + frames.hhdm()
+    var i: u64 = 0
+    while i < PAGE / 8 {
+        // # Safety: the frame just taken, through the HHDM.
+        unsafe { ((v + i * 8) as *u64).write_volatile(0) }
+        i += 1
+    }
+    pa
+}
+
+/// The stack of the space at `pml4`: ELF_STACK_PAGES pages below
+/// STACK_TOP, read-write, no-execute; the page below them never mapped.
+/// False when frames ran out (what was mapped stays in the space, for
+/// `free_user`).
+fn map_stack(pml4: u64) -> bool {
+    var k: u64 = 0
+    while k < ELF_STACK_PAGES {
+        let pa = fresh()
+        if pa == 0 {
+            return false
+        }
+        let r = paging.map_user(pml4, STACK_TOP - (k + 1) * PAGE, pa, paging.writable() | paging.no_exec()) else 99
+        if r == 99 {
+            frames.free(pa)
+            return false
+        }
+        k += 1
+    }
+    true
+}
+
+/// The psABI's initial stack in the space at `pml4` for the file at
+/// `file` (loaded, entry `entry`): argc strings staged at `av` (`ab`
+/// bytes), envc at `ev` (`eb` bytes), the path's `pl` bytes at `pa`.
+/// Returns the stack pointer (argc's address).
+fn build_stack(pml4: u64, file: u64, entry: u64, av: u64, argc: u64, ab: u64, ev: u64, envc: u64, eb: u64, pa: u64, pl: u64) -> u64 {
+    // The strings' block, under eight zero bytes at the top: argv's,
+    // envp's, the path's.
+    let sbytes = ab + eb + pl + 1
+    let strs = STACK_TOP - 8 - sbytes
+    let env_at = put_block(pml4, strs, av, ab)
+    let path_at = put_block(pml4, env_at, ev, eb)
+    var i: u64 = 0
+    while i < pl {
+        poke8(pml4, path_at + i, sb(pa, i))
+        i += 1
+    }
+    poke8(pml4, path_at + pl, 0)
+    if path_at + pl + 1 != STACK_TOP - 8 {
+        panic.fail("user: exec: the strings' block ends at", path_at + pl + 1)
+    }
+    // AT_RANDOM's sixteen bytes, 16-aligned below the strings.
+    let rnd = (strs - 16) - (strs - 16) % 16
+    poke64(pml4, rnd, random_word(1))
+    poke64(pml4, rnd + 8, random_word(2))
+    // The vector: argc, argv + NULL, envp + NULL, the pairs; its first
+    // word (argc, where RSP points) 16-aligned.
+    let nwords = 1 + (argc + 1) + (envc + 1) + 2 * AUX_PAIRS
+    let sp = (rnd - nwords * 8) - (rnd - nwords * 8) % 16
+    poke64(pml4, sp, argc)
+    let after_argv = put_ptrs(pml4, sp + 8, strs, av, argc)
+    var a = put_ptrs(pml4, after_argv, env_at, ev, envc)
+    a = put_aux(pml4, a, AT_PHDR, elf.aux(file, 0))
+    a = put_aux(pml4, a, AT_PHENT, elf.aux(file, 2))
+    a = put_aux(pml4, a, AT_PHNUM, elf.aux(file, 1))
+    a = put_aux(pml4, a, AT_PAGESZ, PAGE)
+    a = put_aux(pml4, a, AT_BASE, 0)
+    a = put_aux(pml4, a, AT_FLAGS, 0)
+    a = put_aux(pml4, a, AT_ENTRY, entry)
+    a = put_aux(pml4, a, AT_UID, 0)
+    a = put_aux(pml4, a, AT_EUID, 0)
+    a = put_aux(pml4, a, AT_GID, 0)
+    a = put_aux(pml4, a, AT_EGID, 0)
+    a = put_aux(pml4, a, AT_CLKTCK, 100)
+    a = put_aux(pml4, a, AT_SECURE, 0)
+    a = put_aux(pml4, a, AT_RANDOM, rnd)
+    a = put_aux(pml4, a, AT_EXECFN, path_at)
+    a = put_aux(pml4, a, AT_NULL, 0)
+    if a > rnd {
+        panic.fail("user: exec: the vector runs into AT_RANDOM's bytes at", a)
+    }
+    sp
+}
+
+/// The highest byte + 1 of the file's PT_LOADs: where the break starts.
+fn image_top(file: u64) -> u64 {
+    var top: u64 = 0
+    var s: u64 = 0
+    while s < elf.loads(file) {
+        let hi = elf.seg(file, s, 1)
+        if hi > top {
+            top = hi
+        }
+        s += 1
+    }
+    top
+}
+
+/// Entry `e`'s name after its last `/`: (its first byte, its length).
+fn base_name(e: u64) -> (u64, u64) {
+    let nl = initramfs.name_length(e)
+    var base: u64 = 0
+    var i: u64 = 0
+    while i < nl {
+        if initramfs.name_byte(e, i) == 47 {
+            base = i + 1
+        }
+        i += 1
+    }
+    (initramfs.name_addr(e) + base, nl - base)
+}
+
+/// `user: exec <path>: refused: <why>` (the path the `n` bytes at `p`).
+fn refuse_line(p: u64, n: u64, why: str) {
+    log.put("user: exec ")
+    put_bytes(p, n)
+    log.put(": refused: ")
+    log.put(why)
+    log.end()
+}
+
+/// Copy `s` into `pax_execbuf` at `off` (at most `cap` bytes); its
+/// length.
+fn stage(s: str, off: u64, cap: u64) -> u64 {
+    var k: u64 = 0
+    for b in s.bytes() {
+        if k >= cap {
+            panic.fail("user: exec: an argument string longer than", cap)
+        }
+        // # Safety: off + k < 4096, inside boot/user.S's pax_execbuf.
+        unsafe { ((pax_execbuf as u64 + off + k) as *u8).write_volatile((b as int as u64) as u8) }
+        k += 1
+    }
+    k
+}
+
+/// Load `path` from the initramfs as an ELF process with `argv` and
+/// `envp` (space-separated words) and start its thread, whose body is
+/// `body` (kernel/user's `pax_user_thread`). Returns its id, or 0 when
+/// refused (a line says why; nothing of the space is kept). Thread
+/// context, IF clear.
+pub fn exec(body: u64, path: str, argv: str, envp: str) -> u64 {
+    // # Safety: the address only.
+    let buf = unsafe { pax_execbuf as u64 }
+    let pl = stage(path, 0, 1024)
+    let al = stage(argv, 1024, 1024)
+    let el = stage(envp, 2048, 2048)
+    exec_span(body, buf, pl, buf + 1024, al, buf + 2048, el)
+}
+
+/// `exec_span` with the environment given as a string (px12: a run-list
+/// line from the initramfs, the environment a const).
+pub fn exec_line(body: u64, pa: u64, pl: u64, aa: u64, al: u64, envp: str) -> u64 {
+    // # Safety: the address only.
+    let buf = unsafe { pax_execbuf as u64 }
+    let el = stage(envp, 2048, 2048)
+    exec_span(body, pa, pl, aa, al, buf + 2048, el)
+}
+
+/// A program the kernel starts (px12): the path the `pl` bytes at `pa`,
+/// argv the words of the `al` bytes at `aa`, envp the words of the `el`
+/// bytes at `ea`. Its parent is the kernel (ppid 0). Returns its thread
+/// id, or 0 when refused.
+pub fn exec_span(body: u64, pa: u64, pl: u64, aa: u64, al: u64, ea: u64, el: u64) -> u64 {
+    let e = initramfs.lookup_span(pa, pl)
+    if e == initramfs.end() {
+        refuse_line(pa, pl, initramfs.lookup_why_span(pa, pl))
+        return 0
+    }
+    let file = initramfs.data(e)
+    let size = initramfs.size(e)
+    let r = elf.refusal(file, size)
+    if r != 0 {
+        refuse_line(pa, pl, elf.why(r))
+        return 0
+    }
+    let pml4 = paging.new_space(sched.pml4())
+    if pml4 == 0 {
+        panic.fail("user: exec: no frame for a PML4", 0)
+    }
+    let entry = elf.load(file, size, pml4)
+    if entry == 0 || !map_stack(pml4) {
+        refuse_line(pa, pl, "out of frames")
+        let _freed = paging.free_user(pml4)
+        return 0
+    }
+    let av = argbuf()
+    let (argc, ab) = stage_words(av, aa, al)
+    let (envc, eb) = stage_words(av + ab, ea, el)
+    let sp = build_stack(pml4, file, entry, av, argc, ab, av + ab, envc, eb, pa, pl)
+    let (na, nl) = base_name(e)
+    let id = sched.create_process(body, sched.elf_prog() - 1, pml4, entry, sp, na, nl)
+    vm.start(sched.area_of(id), image_top(file))
+    describe_elf(file, sched.pid_of(id), pml4, entry, sp, argc, envc)
+    id
+}
+
+/// An ELF process's line:
+/// `user: exec pid <pid> cr3 0x<c> entry 0x<e> rsp 0x<s> argc <a> envc <n>, <k> PT_LOAD: 0x<lo>-0x<hi> <rwx> …, stack <pages> pages below 0x<TOP>`.
+fn describe_elf(file: u64, pid: u64, cr3: u64, entry: u64, sp: u64, argc: u64, envc: u64) {
+    log.put("user: exec pid ")
+    log.dec(pid as int)
+    log.put(" cr3 ")
+    log.hex(cr3)
+    log.put(" entry ")
+    log.hex(entry)
+    log.put(" rsp ")
+    log.hex(sp)
+    log.put(" argc ")
+    log.dec(argc as int)
+    log.put(" envc ")
+    log.dec(envc as int)
+    log.put(", ")
+    let n = elf.loads(file)
+    log.dec(n as int)
+    log.put(" PT_LOAD:")
+    var k: u64 = 0
+    while k < n {
+        log.put(" ")
+        log.hex(elf.seg(file, k, 0))
+        log.put("-")
+        log.hex(elf.seg(file, k, 1))
+        log.put(" ")
+        let pf = elf.seg(file, k, 2)
+        log.put(if pf & 4 != 0 { "r" } else { "-" })
+        log.put(if pf & 2 != 0 { "w" } else { "-" })
+        log.put(if pf & 1 != 0 { "x" } else { "-" })
+        k += 1
+    }
+    log.put(", stack ")
+    log.dec(ELF_STACK_PAGES as int)
+    log.put(" pages below ")
+    log.hex(STACK_TOP)
+    log.end()
+}
+
+// --- execve (px14) ------------------------------------------------------------
+
+/// Copy the NULL-terminated vector of string pointers at user `vec` into
+/// pax_argbuf from `off` (each string with its NUL): (how many, the
+/// offset past them, 0) or (0, 0, -errno): -EFAULT for an unreadable
+/// pointer or string, -E2BIG past MAX_STRINGS or ARG_BYTES.
+fn copy_vector(pml4: u64, vec: u64, off: u64) -> (u64, u64, u64) {
+    if vec == 0 {
+        return (0, off, 0) // Linux takes a NULL vector as an empty one
+    }
+    var n: u64 = 0
+    var at = off
+    while n <= MAX_STRINGS {
+        let pv = vec + n * 8
+        if !uaccess.readable(pml4, pv, 8) {
+            return (0, 0, NEG_EFAULT)
+        }
+        let p = uaccess.get64(pml4, pv)
+        if p == 0 {
+            return (n, at, 0)
+        }
+        if n == MAX_STRINGS || at >= ARG_BYTES - 1 {
+            return (0, 0, NEG_E2BIG)
+        }
+        let room = ARG_BYTES - 1 - at
+        let l = uaccess.string_in(pml4, p, argbuf() + at, room)
+        if l == room + 2 {
+            return (0, 0, NEG_EFAULT)
+        }
+        if l == room + 1 {
+            return (0, 0, NEG_E2BIG)
+        }
+        at += l + 1
+        n += 1
+    }
+    (0, 0, NEG_E2BIG)
+}
+
+/// Every handled signal (not SIG_DFL, not SIG_IGN) of the area `a` back
+/// to SIG_DFL (execve; clone's CLONE_CLEAR_SIGHAND).
+fn reset_handlers(a: u64) {
+    var k: u64 = 0
+    while k < NSIG {
+        let h = aget(a, SIG_WORDS + k * 4)
+        if h != SIG_DFL && h != SIG_IGN {
+            aput(a, SIG_WORDS + k * 4, 0)
+            aput(a, SIG_WORDS + k * 4 + 1, 0)
+            aput(a, SIG_WORDS + k * 4 + 2, 0)
+            aput(a, SIG_WORDS + k * 4 + 3, 0)
+        }
+        k += 1
+    }
+}
+
+/// `execve(path, argv, envp)` from the frame `f`: 0 when the program was
+/// replaced (the frame is the new one's), else -errno with nothing of
+/// the caller changed.
+pub fn execve(f: u64, path: u64, argv: u64, envp: u64) -> u64 {
+    let a = area()
+    let pml4 = paging.live()
+    let (e, err, rl) = files.exec_lookup(a, pml4, path)
+    if err != 0 {
+        return err
+    }
+    // The path, then the vectors, out of the caller's memory (which a
+    // vfork child shares with its parent) before anything changes.
+    let av = argbuf()
+    let pa = av + PATH_AT
+    let kb = files.kbuf()
+    var i: u64 = 0
+    while i < rl {
+        put_sb(pa, i, sb(kb, i))
+        i += 1
+    }
+    let (argc, ae, r1) = copy_vector(pml4, argv, 0)
+    if r1 != 0 {
+        return r1
+    }
+    let (envc, ee, r2) = copy_vector(pml4, envp, ae)
+    if r2 != 0 {
+        return r2
+    }
+    let file = initramfs.data(e)
+    let size = initramfs.size(e)
+    let rc = elf.refusal(file, size)
+    if rc != 0 {
+        refuse_line(pa, rl, elf.why(rc))
+        return refuse_with(R_NOT_ELF, NEG_ENOEXEC)
+    }
+    let space = paging.new_space(sched.pml4())
+    if space == 0 {
+        return NEG_ENOMEM
+    }
+    let entry = elf.load(file, size, space)
+    if entry == 0 || !map_stack(space) {
+        let _freed = paging.free_user(space)
+        return NEG_ENOMEM
+    }
+    let sp = build_stack(space, file, entry, av, argc, ae, av + ae, envc, ee - ae, pa, rl)
+    // The point of no return.
+    files.exec_close(a)
+    reset_handlers(a)
+    var k: u64 = 0
+    while k < 8 {
+        aput(a, A_LOGGED + k, 0)
+        k += 1
+    }
+    vm.start(a, image_top(file))
+    let (na, nl) = base_name(e)
+    sched.exec_current(space, entry, sp, na, nl)
+    fpu.exec(sched.self_slot())
+    k = 0
+    while k < FRAME_WORDS {
+        put_word(f, k, 0)
+        k += 1
+    }
+    put_word(f, W_VECTOR, EXEC_VECTOR)
+    put_word(f, W_RIP, entry)
+    put_word(f, W_CS, USER_CS)
+    put_word(f, W_RFLAGS, RFLAGS_IF)
+    put_word(f, W_RSP, sp)
+    put_word(f, W_SS, USER_SS)
+    describe_elf(file, sched.self_pid(), space, entry, sp, argc, envc)
+    0
+}
+
+// --- clone, clone3, vfork (px14) ------------------------------------------------
+
+/// `clone`, `clone3` or `vfork` (`nr`) from the frame `f`: the frame to
+/// resume — the next thread's while the caller waits for its child, or
+/// `f` with %rax -errno when refused.
+pub fn clone(f: u64, nr: u64, a0: u64, a1: u64) -> u64 {
+    var flags: u64 = CLONE_VM | CLONE_VFORK
+    var usp: u64 = 0
+    if nr == SYS_CLONE {
+        flags = a0 - (a0 & CSIGNAL) // the exit signal: no delivery yet
+        usp = a1
+    } else if nr == SYS_CLONE3 {
+        let pml4 = paging.live()
+        if a1 < CLONE_ARGS_VER0 || a1 > PAGE {
+            put_word(f, W_RAX, NEG_EINVAL)
+            return f
+        }
+        let n = if a1 < 88 { a1 } else { 88 }
+        if !uaccess.readable(pml4, a0, n) {
+            put_word(f, W_RAX, NEG_EFAULT)
+            return f
+        }
+        flags = uaccess.get64(pml4, a0)
+        let stack = uaccess.get64(pml4, a0 + 40)
+        let size = uaccess.get64(pml4, a0 + 48)
+        if stack != 0 {
+            usp = stack + size
+        }
+        if n >= 80 && (uaccess.get64(pml4, a0 + 64) != 0 || uaccess.get64(pml4, a0 + 72) != 0) {
+            put_word(f, W_RAX, refuse_with(R_FLAGS, NEG_EINVAL)) // set_tid
+            return f
+        }
+    }
+    if flags & CLONE_VM == 0 {
+        put_word(f, W_RAX, refuse_with(R_FORK, NEG_ENOSYS))
+        return f
+    }
+    if flags & CLONE_VFORK == 0 {
+        put_word(f, W_RAX, refuse_with(R_SHARED, NEG_ENOSYS))
+        return f
+    }
+    if flags & (0xffffffffffffffff ^ (CLONE_VM | CLONE_VFORK | CLONE_CLEAR_SIGHAND)) != 0 {
+        put_word(f, W_RAX, refuse_with(R_FLAGS, NEG_EINVAL))
+        return f
+    }
+    let s = sched.clone_current(f, usp)
+    if s == sched.slots() {
+        put_word(f, W_RAX, refuse_with(R_SLOTS, NEG_EAGAIN))
+        return f
+    }
+    if flags & CLONE_CLEAR_SIGHAND != 0 {
+        reset_handlers(sched.proc_area(s))
+    }
+    sched.vfork_wait(f, s)
+}
+
+// --- wait4, waitid (px14) -------------------------------------------------------
+
+/// A 32-bit pid argument read as an int: 0 any child (also for -1 and
+/// for a negative process group: PAX has one group), else that pid.
+fn pid_sel(x: u64) -> u64 {
+    let p = x & 0xffffffff
+    if p >= 0x80000000 {
+        return 0
+    }
+    p
+}
+
+/// Run the call in `f` again when a child ends (number `nr`).
+fn block(f: u64, nr: u64) -> u64 {
+    put_word(f, W_RIP, word(f, W_RIP) - 2)
+    put_word(f, W_RAX, nr)
+    sched.wait_child(f)
+}
+
+/// `wait4(pid, wstatus, options, rusage)` (`nr` 61) from `f`.
+pub fn wait4(f: u64, nr: u64, pid: u64, wstatus: u64, options: u64, rusage: u64) -> u64 {
+    let o = options & 0xffffffff
+    if o & (0xffffffff ^ WAIT4_KNOWN) != 0 {
+        put_word(f, W_RAX, NEG_EINVAL)
+        return f
+    }
+    let pml4 = paging.live()
+    let (any, s) = sched.child_ended(pid_sel(pid))
+    if !any {
+        put_word(f, W_RAX, NEG_ECHILD)
+        return f
+    }
+    if s == sched.slots() {
+        if o & WNOHANG != 0 {
+            put_word(f, W_RAX, 0)
+            return f
+        }
+        return block(f, nr)
+    }
+    if (wstatus != 0 && !uaccess.writable(pml4, wstatus, 4)) || (rusage != 0 && !uaccess.writable(pml4, rusage, 144)) {
+        put_word(f, W_RAX, NEG_EFAULT)
+        return f
+    }
+    let (cp, st) = sched.zombie(s, true)
+    if wstatus != 0 {
+        uaccess.put(pml4, wstatus, st, 4)
+    }
+    if rusage != 0 {
+        uaccess.zero(pml4, rusage, 144)
+    }
+    put_word(f, W_RAX, cp)
+    f
+}
+
+/// `waitid(idtype, id, infop, options, rusage)` (`nr` 247) from `f`.
+pub fn waitid(f: u64, nr: u64, idtype: u64, id: u64, infop: u64, options: u64, rusage: u64) -> u64 {
+    let o = options & 0xffffffff
+    let t = idtype & 0xffffffff
+    if o & (0xffffffff ^ WAITID_KNOWN) != 0 || o & WEXITED == 0 || (t != P_ALL && t != P_PID && t != P_PGID) {
+        put_word(f, W_RAX, NEG_EINVAL)
+        return f
+    }
+    let pml4 = paging.live()
+    let sel = if t == P_PID { id & 0xffffffff } else { 0 }
+    let (any, s) = sched.child_ended(sel)
+    if !any {
+        put_word(f, W_RAX, NEG_ECHILD)
+        return f
+    }
+    if (infop != 0 && !uaccess.writable(pml4, infop, 128)) || (rusage != 0 && !uaccess.writable(pml4, rusage, 144)) {
+        put_word(f, W_RAX, NEG_EFAULT)
+        return f
+    }
+    if s == sched.slots() {
+        if o & WNOHANG != 0 {
+            if infop != 0 {
+                uaccess.zero(pml4, infop, 128)
+            }
+            put_word(f, W_RAX, 0)
+            return f
+        }
+        return block(f, nr)
+    }
+    let (cp, st) = sched.zombie(s, o & WNOWAIT == 0)
+    if infop != 0 {
+        uaccess.zero(pml4, infop, 128)
+        uaccess.put(pml4, infop, SIGCHLD, 4)
+        let killed = st & 0x7f != 0
+        uaccess.put(pml4, infop + 8, if killed { CLD_KILLED } else { CLD_EXITED }, 4)
+        uaccess.put(pml4, infop + 16, cp, 4)
+        uaccess.put(pml4, infop + 24, if killed { st & 0x7f } else { (st >> 8) & 0xff }, 4)
+    }
+    if rusage != 0 {
+        uaccess.zero(pml4, rusage, 144)
+    }
+    put_word(f, W_RAX, 0)
+    f
+}
+
+// --- signals, answered minimally (px14) -----------------------------------------
+
+/// `rt_sigprocmask(how, set, oldset, sigsetsize)`.
+pub fn sigprocmask(how: u64, set: u64, oldset: u64, size: u64) -> u64 {
+    if size != 8 {
+        return NEG_EINVAL
+    }
+    let pml4 = paging.live()
+    let old = sched.self_sigmask()
+    var m = old
+    if set != 0 {
+        if !uaccess.readable(pml4, set, 8) {
+            return NEG_EFAULT
+        }
+        let v = uaccess.get64(pml4, set)
+        let h = how & 0xffffffff
+        if h == SIG_BLOCK {
+            m = m | v
+        } else if h == SIG_UNBLOCK {
+            m = m & (0xffffffffffffffff ^ v)
+        } else if h == SIG_SETMASK {
+            m = v
+        } else {
+            return NEG_EINVAL
+        }
+        m = m & (0xffffffffffffffff ^ UNBLOCKABLE)
+    }
+    if oldset != 0 {
+        if !uaccess.writable(pml4, oldset, 8) {
+            return NEG_EFAULT
+        }
+        uaccess.put(pml4, oldset, old, 8)
+    }
+    sched.set_self_sigmask(m)
+    0
+}
+
+/// `rt_sigaction(sig, act, oldact, sigsetsize)`: the kernel's `struct
+/// sigaction` on x86-64 is four words (handler, flags, restorer, mask).
+pub fn sigaction(sig: u64, act: u64, oldact: u64, size: u64) -> u64 {
+    let n = sig & 0xffffffff
+    if size != 8 || n < 1 || n > NSIG || (act != 0 && (n == SIGKILL || n == SIGSTOP)) {
+        return NEG_EINVAL
+    }
+    let pml4 = paging.live()
+    let a = area()
+    let w = SIG_WORDS + (n - 1) * 4
+    if act != 0 && !uaccess.readable(pml4, act, 32) {
+        return NEG_EFAULT
+    }
+    if oldact != 0 {
+        if !uaccess.writable(pml4, oldact, 32) {
+            return NEG_EFAULT
+        }
+        var i: u64 = 0
+        while i < 4 {
+            uaccess.put(pml4, oldact + i * 8, aget(a, w + i), 8)
+            i += 1
+        }
+    }
+    if act != 0 {
+        var i: u64 = 0
+        while i < 4 {
+            aput(a, w + i, uaccess.get64(pml4, act + i * 8))
+            i += 1
+        }
+        aput(a, w + 3, aget(a, w + 3) & (0xffffffffffffffff ^ UNBLOCKABLE))
+    }
+    0
+}
+
+/// `kill`, `tkill`, `tgkill`: refused by name (no delivery yet).
+pub fn kill() -> u64 {
+    refuse_with(R_SIGNALS, NEG_ENOSYS)
+}
+
+/// The signal a CPU exception in ring 3 stands for (signal(7)'s
+/// meanings): the wait status of a process it killed. #DE, #MF, #XM
+/// SIGFPE (8); #DB, #BP SIGTRAP (5); #UD SIGILL (4); #NP, #SS, #AC
+/// SIGBUS (7); the rest (#PF, #GP, …) SIGSEGV (11).
+pub fn fault_signal(v: u64) -> u64 {
+    if v == 0 || v == 16 || v == 19 {
+        return 8
+    }
+    if v == 1 || v == 3 {
+        return 5
+    }
+    if v == 6 {
+        return 4
+    }
+    if v == 11 || v == 12 || v == 17 {
+        return 7
+    }
+    11
+}

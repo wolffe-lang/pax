@@ -75,6 +75,12 @@
                          a path, argv and envp given as strings before
                          `exec_span` reads them (px12); kernel thread
                          context, IF clear.
+     pax_argbuf          69632 bytes where kernel/process stages a new
+                         program's strings (px14): [0, 65536) argv's and
+                         envp's, NUL-terminated one after another (the
+                         kernel's words, or an execve caller's vectors
+                         copied out of its memory), [65536, 69632) the
+                         path; IF clear for the whole call.
 
    Written from: the Intel SDM vol. 3A §5.8.8 (SYSCALL and SYSRET in
    64-bit mode), §6.14.2 and §6.14.3 (the 64-bit stack frame, IRET),
@@ -159,5 +165,9 @@ pax_kbuf:
         .globl pax_execbuf
 pax_execbuf:
         .zero 4096
+        .p2align 12
+        .globl pax_argbuf
+pax_argbuf:
+        .zero 69632
 
         .section .note.GNU-stack, "", @progbits
