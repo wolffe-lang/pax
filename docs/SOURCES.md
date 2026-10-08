@@ -305,3 +305,20 @@ outside. No disassembly. Permissively licensed kernels: none consulted.
 | man-pages `clone(2)` (CLONE_VM, CLONE_VFORK, CLONE_CLEAR_SIGHAND, the raw x86-64 argument order, clone3), `vfork(2)`, `execve(2)` (what is kept and reset: descriptors without close-on-exec, the signal mask, handled signals to SIG_DFL, ignored ones kept; EACCES, ENOEXEC, E2BIG, a NULL argv), `wait4(2)`, `wait(2)`/`waitid(2)` (the status word, WNOHANG, ECHILD, the siginfo it fills), `getpid(2)` (init's parent 0), `gettid(2)`, `sigprocmask(2)`/`rt_sigprocmask`, `sigaction(2)` (the kernel's `struct sigaction` on x86-64), `kill(2)`, `dup(2)` (dup3's EINVAL), `signal(7)`, `credentials(7)`, `pid_namespaces(7)` | 6.x | the man-pages project's licences | the author's own knowledge | `kernel/process`, `kernel/sched`'s process table, `kernel/files`' dup and close-on-exec, `user/elf/procs.c` |
 | black-box Linux: pelt `dd22a86` (static) under `strace -f -tt` on a pseudo-terminal, chrooted in the shell's tree, with and without PATH (`notes/px14/strace-spawn.sh`, in a privileged rootless `px13-ubuntu` container on kasumi: Ubuntu 24.04, glibc 2.39, strace 6.8, kernel 7.2.8) | — | — | measured | the spawn PAX answers (`notes/px14/pelt-spawn-path.strace`): `rt_sigprocmask(SIG_BLOCK, ~[])`, `clone3({CLONE_VM\|CLONE_VFORK\|CLONE_CLEAR_SIGHAND, SIGCHLD, stack, 0x9000})`, the child's mask query, `rt_sigaction(SIGPIPE, SIG_DFL)`, `dup2(5, 0)` (/dev/null as standard input), `execve`; the parent's `munmap`, `close(5)`, `wait4(pid, …, 0, NULL)`; and that with no PATH pelt searches the working directory (`statx("./cat")`) |
 | black-box Linux: `user/elf/procs.c` as pid 1 of a fresh pid namespace (`unshare --pid`), chrooted in procs' tree | — | — | measured | every line `tests/mpx3-shell` compares procs' with: pids from 1, the status words, orphans to pid 1, waitid's siginfo, execve's errnos, the mask and actions across execve; and that the core-dump bit (0x80) depends on the host's core_pattern, not RLIMIT_CORE (set under a piped pattern), so procs masks it |
+
+## px15 — boreutils' `ls`, and `quiet` on the kernel command line (2026-10-08)
+
+No Linux source, no glibc, musl or other libc, no kernel's source and
+no shell's source (rulings #22, #43); pelt and boreutils are built from
+their own trees at their pins and observed only from outside. No
+disassembly. Permissively licensed kernels: none consulted. Linux: no
+header or table read (nothing here needed a number or a layout of
+Linux's).
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| The Limine Boot Protocol, `PROTOCOL.md` | limine-protocol `3a0526b700e356f0eac1b71a77697b3fd1c707a3` (fetched from its repository, as px00–px10) | 0BSD | read: Executable Command Line Feature (id words `0x4b161536e598651e, 0xb390ad4a2f1f303a`, the response `{revision, cmdline}`, a NUL-terminated ASCII string, the same memory as the executable file's `string`) | `boot/start.S`'s eighth request, `kernel/boot_info`'s `cmdline_has` |
+| Limine `CONFIG.md` | Limine `v12.9.1` | BSD-2-Clause | read: the entry key `cmdline` (alias `kernel_cmdline`) | `boot/limine-initramfs-quiet.conf` |
+| boreutils' `notes/bu18-ls.md` and `notes/bu18/pax-mpx3-with-ls.patch` | boreutils `50d8907` | GPL-3.0 | read | `ls`'s options as built (one name a line without a terminal; `-l` refused by name), the twelve `ls` lines on `user/mpx3-boreutils.run` |
+| pelt's `README.md` | pelt `dd22a86` | GPL-3.0 | read for what it claims (functions, every expansion) | `user/console/shell-howl.keys` |
+| black-box Linux: `user/console/shell-howl.keys` typed into the same binaries on a Linux pseudo-terminal (`tools/linux-tty --root --pid1`, a privileged rootless `px13-ubuntu` container on kasumi: Ubuntu 24.04, kernel 7.2.8; the CI runner) | — | — | measured | `user/console/shell-howl.expect`, the reference the howl session is held to; and, under `strace -f` of the harness, that boreutils opens `/dev/stdout`, which Linux resolves through `/proc/self/fd`, so the chroot keeps its `/proc` (px15's `4c39733`, reverted) |
