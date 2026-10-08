@@ -30,7 +30,7 @@ The planning repo's refs clone (`wolf/refs/repos/linux`) is a sparse checkout of
 
 - Commits chunked, terse, imperative. Never `git add -A`. No commit or PR trailers of any kind.
 - Branch per lane, PR left unmerged; the orchestrator audits and fast-forwards.
-- Nothing is made public: the repository is private until the maintainer says otherwise.
+- The repository is public (since 2026-10-06, on the maintainer's word); no secret or credential goes in it.
 - The harness never installs packages; lanes never install on the pool.
 - A gap in wolf is filed upstream (wolf-lang) with a witness, and the track index names it as a blocker.
 
