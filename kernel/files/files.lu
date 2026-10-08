@@ -91,6 +91,7 @@ const ESPIPE: u64 = 29
 const EROFS: u64 = 30
 const ERANGE: u64 = 34
 const ENAMETOOLONG: u64 = 36
+const EACCES: u64 = 13 // px14: execve of what is not an executable file
 
 // open flags (uapi asm-generic/fcntl.h, linux/fcntl.h)
 const O_ACCMODE: u64 = 3
@@ -101,6 +102,8 @@ const O_EXCL: u64 = 0x80
 const O_TRUNC: u64 = 0x200
 const O_DIRECTORY: u64 = 0x10000
 const O_NONBLOCK: u64 = 0x800
+const O_CLOEXEC: u64 = 0x80000 // px14: closed by execve
+const O_RDWR: u64 = 2
 const AT_FDCWD: u64 = 0xffffff9c // -100 as the 32-bit int the caller passes (kernel/user masks)
 const AT_SYMLINK_NOFOLLOW: u64 = 0x100
 const AT_EMPTY_PATH: u64 = 0x1000
@@ -124,7 +127,7 @@ pub fn neg(e: u64) -> u64 {
 }
 
 fn get(a: u64, i: u64) -> u64 {
-    // # Safety: `a` is a process area (sched.proc_area), 256 words; i < 256.
+    // # Safety: `a` is a process area (sched.proc_area), 512 words; i < 512.
     unsafe { ((a + i * 8) as *u64).read_volatile() }
 }
 
@@ -241,6 +244,71 @@ pub fn close(a: u64, fd: u64) -> u64 {
     0
 }
 
+/// The open flags descriptor `fd` (open) carries: the console's
+/// default descriptors are O_RDWR, as Linux's terminal is opened.
+fn flags_of(a: u64, fd: u64) -> u64 {
+    if get(a, fdw(fd, 0)) == K_DEFAULT {
+        return O_RDWR
+    }
+    get(a, fdw(fd, 3))
+}
+
+/// px14: `dup(old)` (`new` FDS: the lowest free number), `dup2(old,
+/// new)` and `dup3(old, new, flags)` (`cloexec`: O_CLOEXEC on the copy).
+/// The copy names what `old` names, at its position, without
+/// close-on-exec unless asked; what `new` named is closed first. PAX
+/// keeps a position per descriptor, not per open file, so a copy's reads
+/// do not move the original's (a drift from Linux's shared offset,
+/// named; nothing PAX runs reads one file through two descriptors).
+pub fn dup(a: u64, old: u64, new: u64, cloexec: bool) -> u64 {
+    let k = kind(a, old)
+    if k == K_CLOSED {
+        return neg(EBADF)
+    }
+    var to = new
+    if new == FDS {
+        to = lowest_free(a)
+        if to == FDS {
+            return neg(EMFILE)
+        }
+    } else if new > FDS {
+        return neg(EBADF)
+    }
+    if to == old {
+        return to
+    }
+    var fl = flags_of(a, old)
+    if fl & O_CLOEXEC != 0 {
+        fl = fl - O_CLOEXEC
+    }
+    if cloexec {
+        fl = fl | O_CLOEXEC
+    }
+    let n = node_of(a, old)
+    let at = pos(a, old)
+    install(a, to, k, n, fl)
+    set_pos(a, to, at)
+    to
+}
+
+/// The number dup3 and dup2 take as "too large" (px14): FDS + 1, so
+/// FDS itself can mean "the lowest free" for `dup`.
+pub fn fds() -> u64 {
+    FDS
+}
+
+/// px14: `execve` closes every descriptor opened with O_CLOEXEC (or
+/// given it by dup3).
+pub fn exec_close(a: u64) {
+    var fd: u64 = 0
+    while fd < FDS {
+        if kind(a, fd) != K_CLOSED && flags_of(a, fd) & O_CLOEXEC != 0 {
+            let _c = close(a, fd)
+        }
+        fd += 1
+    }
+}
+
 // --- paths ------------------------------------------------------------------
 
 fn kb(i: u64) -> u64 {
@@ -256,6 +324,12 @@ fn put_kb(i: u64, b: u64) {
 fn raw() -> u64 {
     // # Safety: the address only.
     unsafe { pax_kbuf as u64 }
+}
+
+/// pax_kbuf's address (px14: `execve` reads the path `exec_lookup`
+/// copied there).
+pub fn kbuf() -> u64 {
+    raw()
 }
 
 const NORM: u64 = 4096 // the canonical path's first byte in pax_kbuf
@@ -650,6 +724,28 @@ pub fn ioctl(a: u64, pml4: u64, fd: u64, req: u64, arg: u64) -> u64 {
         return console.ioctl(pml4, req, arg)
     }
     neg(ENOTTY)
+}
+
+/// px14: what `execve(path)` would run: (the initramfs entry, 0, the
+/// path's length as copied into pax_kbuf[0..]) or (0, -errno, 0). A
+/// regular file with an execute bit; a directory, a device or a file
+/// with no execute bit is -EACCES (execve(2)); a missing one -ENOENT.
+pub fn exec_lookup(a: u64, pml4: u64, va: u64) -> (u64, u64, u64) {
+    let n = resolve(a, pml4, AT_FDCWD, va, false)
+    if is_err(n) {
+        return (0, neg(rf(n)), 0)
+    }
+    if ty(n) != T_ENTRY || !initramfs.is_file(rf(n)) {
+        return (0, neg(EACCES), 0)
+    }
+    if initramfs.mode(rf(n)) & 0x49 == 0 { // 0o111
+        return (0, neg(EACCES), 0)
+    }
+    var l: u64 = 0
+    while l < PATH_MAX && kb(l) != 0 {
+        l += 1
+    }
+    (rf(n), 0, l)
 }
 
 /// `getcwd(buf, size)`: "/" (no `chdir` yet), its length with the NUL.
