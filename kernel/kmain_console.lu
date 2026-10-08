@@ -7,19 +7,26 @@
 // runs the archive's `/etc/pax-run` as kmain_boreutils does — one
 // command a line, its words separated by single spaces, each waited
 // for — but with descriptors 0-2 a terminal: the program reads what is
-// typed. The first command is init, PID 1 in role (PAX's ids number its
-// kernel threads first, so the log says `pid 2`). When the list is
-// done, the kernel says how init ended and halts:
+// typed. The first command is init, pid 1 (px14: processes have Linux
+// pids of their own, numbered from 1; px13's log said `pid 2`, the
+// kernel thread's id), and since px14 it can start programs of its own
+// (clone, execve, wait4): the environment carries PATH=/bin, where a
+// shell finds them. When the list is done, the kernel says how init
+// ended and halts:
 //
 //     PAX: the console
 //     paging: …
 //     console: com1 irq 4 vector 36, i8042 0x.. -> 0x.. irq 1 vector 33, 8259 master mask 0xec; …
 //     run 1: /bin/pelt
-//     user: exec pid 2 cr3 0x… …
+//     user: exec pid 1 cr3 0x… …
 //     $ echo hi
 //     hi
+//     $ cat /etc/motd
+//     user: exec pid 2 cr3 0x… …          (pelt's child, px14)
+//     PAX: this is /etc/motd, …
+//     user: cat pid 2 exit_group 0 after <r> runs
 //     $ …
-//     user: pelt pid 2 exit_group 0 after <r> runs
+//     user: pelt pid 1 exit_group 0 after <r> runs
 //     user: frames free <A> before, <B> with 1 processes, <A> after
 //     run: <k> commands
 //     console: <n> bytes from com1, <k> keys (<s> scancodes) from the keyboard, …
@@ -42,7 +49,7 @@ use user
 
 extern "c" let pax_user_thread: *u8
 
-const ENV: str = "HOME=/ TERM=linux PAX=1"
+const ENV: str = "HOME=/ TERM=linux PAX=1 PATH=/bin" // px14: PATH, for a shell's commands
 const RUN_LIST: str = "/etc/pax-run"
 
 /// The body ELF processes run (kernel/user's export).
