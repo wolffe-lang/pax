@@ -1,0 +1,153 @@
+//! member: false
+// kmain_boreutils.lu — Linux programs from the initramfs (px12, tests/
+// mpx3-boreutils, M-PX3). The kernel starts as kmain_loader does (PAX's
+// paging with the initramfs mapped, the timer, the FPU state, the
+// scheduler, SYSCALL) and then runs the archive's run list,
+// `/etc/pax-run`: one command a line, its words separated by single
+// spaces, the first word the program's path (a static x86-64 Linux
+// executable in the initramfs, run unmodified); empty lines and lines
+// starting `#` are skipped. Each command runs alone, with the
+// environment HOME=/ TERM=linux PAX=1, its descriptors 0-2 the serial
+// console, and is waited for; then the batch's frames line. Then
+// interrupts off, the timer stopped, `halt`:
+//
+//     PAX: Linux programs from the initramfs
+//     paging: …
+//     initramfs: module 0x<m>, <b> bytes, <n> entries
+//     …
+//     run 1: /bin/echo hello from boreutils
+//     user: exec pid <p> cr3 0x… entry 0x… rsp 0x… argc 4 envc 3, 4 PT_LOAD: …
+//     hello from boreutils
+//     user: echo pid <p> exit_group 0 after <r> runs
+//     user: frames free <A> before, <B> with 1 processes, <A> after
+//     run 2: …
+//     …
+//     run: <k> commands
+//     user: ticks in ring 3 <n>
+//     halt
+use apic
+use fpu
+use frames
+use initramfs
+use interrupts
+use log
+use paging
+use panic
+use sched
+use serial
+use sync
+use timer
+use user
+
+extern "c" let pax_user_thread: *u8
+
+const ENV: str = "HOME=/ TERM=linux PAX=1"
+const RUN_LIST: str = "/etc/pax-run"
+
+/// The body ELF processes run (kernel/user's export).
+fn body() -> u64 {
+    // # Safety: the address of kernel/user's export; nothing is read.
+    unsafe { pax_user_thread as u64 }
+}
+
+fn byte_at(a: u64) -> u64 {
+    // # Safety: a byte of the run list, inside the initramfs's pages
+    // (mapped read-only in the HHDM for the kernel's life).
+    unsafe { (a as *u8).read_volatile() as u64 }
+}
+
+/// Run the command the `n` bytes at `a` spell (its first word the path),
+/// as number `k`; wait for it; the frames line.
+fn run(k: u64, a: u64, n: u64) {
+    let s = sync.acquire(sync.console())
+    log.put("run ")
+    log.dec(k as int)
+    log.put(": ")
+    var i: u64 = 0
+    while i < n {
+        log.put_byte(byte_at(a + i) as int)
+        i += 1
+    }
+    log.end()
+    sync.release(sync.console(), s)
+    var pl: u64 = 0
+    while pl < n && byte_at(a + pl) != 32 {
+        pl += 1
+    }
+    let saved = sync.irq_save()
+    let before = frames.free_count()
+    let id = user.exec_line(body(), a, pl, a, n, ENV)
+    let during = frames.free_count()
+    sync.irq_restore(saved)
+    sched.wait_all()
+    let after = frames.free_count()
+    let s2 = sync.acquire(sync.console())
+    log.put("user: frames free ")
+    log.dec(before as int)
+    log.put(" before, ")
+    log.dec(during as int)
+    log.put(" with ")
+    log.dec(if id == 0 { 0 } else { 1 })
+    log.put(" processes, ")
+    log.dec(after as int)
+    log.put(" after")
+    log.end()
+    sync.release(sync.console(), s2)
+}
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX: Linux programs from the initramfs")
+    frames.start()
+    let limine = paging.cr3()
+    let before = frames.free_count()
+    let pml4 = paging.start()
+    paging.report(limine, before)
+    initramfs.report()
+    initramfs.require()
+    interrupts.start()
+    apic.start(pml4)
+    timer.start()
+    fpu.start()
+    fpu.report()
+    sched.start(pml4)
+    sched.report()
+    user.start()
+    user.report()
+    sync.enable()
+
+    let e = initramfs.lookup(RUN_LIST)
+    if e == initramfs.end() {
+        panic.fail("boreutils: no /etc/pax-run in the initramfs, bytes", initramfs.bytes())
+    }
+    let d = initramfs.data(e)
+    let size = initramfs.size(e)
+    var k: u64 = 0
+    var i: u64 = 0
+    while i < size {
+        var j = i
+        while j < size && byte_at(d + j) != 10 {
+            j += 1
+        }
+        if j > i && byte_at(d + i) != 35 {
+            k += 1
+            run(k, d + i, j - i)
+        }
+        i = j + 1
+    }
+
+    let s = sync.acquire(sync.console())
+    log.put("run: ")
+    log.dec(k as int)
+    log.put(" commands")
+    log.end()
+    log.put("user: ticks in ring 3 ")
+    log.dec(user.ticks() as int)
+    log.end()
+    sync.release(sync.console(), s)
+
+    let _off = sync.irq_save()
+    timer.stop()
+    log.line("halt")
+    panic.halt()
+}
