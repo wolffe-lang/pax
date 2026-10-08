@@ -3,7 +3,8 @@
 #
 #   tools/qemu-halt [--firmware bios|uefi] [--serial FILE] [--timeout SECS]
 #                   [--accel auto|kvm|tcg] --elf KERNEL.elf [--symbol NAME]
-#                   [--cmd MONITOR-COMMAND]... --marker ERE IMAGE.iso
+#                   [--cmd MONITOR-COMMAND]... [--type KEYS --prompt TEXT
+#                   [--keyboard serial|ps2]] --marker ERE IMAGE.iso
 #
 # A kernel that ends in `cli; hlt` never exits QEMU, so its end cannot
 # be read from QEMU's status (tools/qemu-run's isa-debug-exit) and a
@@ -29,12 +30,29 @@
 # the monitor's `info registers` reads it just before (QEMU 8.2's
 # monitor has no `$cr3`). FILE.halt records both register dumps and the verdict.
 #
+# --type KEYS (px13) types a session into the machine before the wait
+# for the marker: before step k (the KEYS file's k-th line) it waits
+# until TEXT, the program's prompt, has appeared k times in the serial
+# log after its first `user: exec pid` line, then types the step: its
+# characters, then Enter (CR, what a terminal sends), unless the step
+# ends with `^D` (Ctrl-D, which hands over what is typed, or ends the
+# input at an empty prompt) or with `^.` (nothing more: `^.` is
+# dropped). In a step, `^C` `^D` `^U` `^W` are those control
+# characters, `^?` is DEL (the erase character, what Backspace sends)
+# and `^^` a `^`. --keyboard serial (the default) writes the bytes to
+# COM1's input (tools/qemu-run --serial-input), 20 ms apart; ps2 sends
+# each as a key through the monitor's `sendkey` (a-z, A-Z with shift,
+# digits, the US layout's punctuation, spc, ret, backspace, tab,
+# ctrl-<letter>), to the machine's PS/2 keyboard. FILE.typed records
+# what was typed, step by step. Each prompt is waited for at most the
+# timeout; a missing one is NOT HALTED (the reason names the step).
+#
 # Exit 0 halted; 1 not halted (the reason on stderr); 2 usage or tool
 # error. The timeout (default 60 s) bounds the wait for the marker.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
-firmware=bios serial=$PAX_BUILD/serial.log timeout=60 accel=auto elf= sym=pax_halt marker= image= cmds=()
+firmware=bios serial=$PAX_BUILD/serial.log timeout=60 accel=auto elf= sym=pax_halt marker= image= cmds=() keys= prompt= keyboard=serial
 while [ $# -gt 0 ]; do
     case $1 in
         --firmware) firmware=$2; shift 2 ;;
@@ -45,6 +63,9 @@ while [ $# -gt 0 ]; do
         --symbol)   sym=$2; shift 2 ;;
         --marker)   marker=$2; shift 2 ;;
         --cmd)      cmds+=("$2"); shift 2 ;;
+        --type)     keys=$2; shift 2 ;;
+        --prompt)   prompt=$2; shift 2 ;;
+        --keyboard) keyboard=$2; shift 2 ;;
         -h|--help)  sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
         -*)         die "unknown option: $1" ;;
         *)          [ -z "$image" ] || die "one image only"; image=$1; shift ;;
@@ -54,6 +75,11 @@ done
     || die "usage: qemu-halt [options] --elf KERNEL.elf --marker ERE IMAGE.iso"
 [ -f "$image" ] || die "no image: $image"
 [ -f "$elf" ] || die "no kernel: $elf"
+if [ -n "$keys" ]; then
+    [ -f "$keys" ] || die "no keys file: $keys"
+    [ -n "$prompt" ] || die "--type needs --prompt"
+fi
+case $keyboard in serial|ps2) ;; *) die "--keyboard takes serial or ps2" ;; esac
 case $timeout in ''|*[!0-9]*) die "--timeout takes whole seconds" ;; esac
 need nm mkfifo
 
@@ -68,24 +94,113 @@ mkdir -p "$(dirname "$serial")"
 # path must never satisfy the marker.
 : > "$serial"
 mon=$serial.mon
-rm -f "$mon.in" "$mon.out" "$serial".cmd[0-9]*
+rm -f "$mon.in" "$mon.out" "$serial".cmd[0-9]* "$serial.in" "$serial.typed"
 mkfifo "$mon.in" "$mon.out"
+sin=()
+if [ -n "$keys" ] && [ "$keyboard" = serial ]; then
+    mkfifo "$serial.in"
+    sin=(--serial-input "$serial.in")
+fi
 rec=$serial.halt
 : > "$rec"
 qpid=
 cleanup() {
     [ -z "$qpid" ] || kill "$qpid" 2>/dev/null || true
-    exec 3>&- 4<&- 2>/dev/null || true
-    rm -f "$mon.in" "$mon.out"
+    exec 3>&- 4<&- 5>&- 2>/dev/null || true
+    rm -f "$mon.in" "$mon.out" "$serial.in"
 }
 trap cleanup EXIT
 # Both ends open read-write: neither open blocks, and QEMU never sees EOF.
 exec 3<>"$mon.in" 4<>"$mon.out"
+[ "${#sin[@]}" = 0 ] || exec 5<>"$serial.in"
 "$PAX_ROOT/tools/qemu-run" --firmware "$firmware" --serial "$serial" --timeout $((timeout + 30)) \
-    --accel "$accel" "$image" -- -monitor "pipe:$mon" &
+    --accel "$accel" ${sin[@]+"${sin[@]}"} "$image" -- -monitor "pipe:$mon" &
 qpid=$!
 
 no() { printf 'qemu-halt: NOT HALTED: %s\n' "$*" | tee -a "$rec" >&2; exit 1; }
+
+# --type: the session (px13).
+prompts() { # how many times the prompt has appeared since the first exec line
+    serial_norm "$serial" | awk 'on { print } /^user: exec pid / { on = 1 }' \
+        | LC_ALL=C grep -aoF -- "$prompt" | wc -l | tr -d ' '
+}
+key_of() { # byte (decimal) -> a sendkey name
+    local b=$1 c
+    if [ "$b" -ge 97 ] && [ "$b" -le 122 ]; then printf "\\$(printf %o "$b")"; return; fi
+    if [ "$b" -ge 65 ] && [ "$b" -le 90 ]; then
+        printf 'shift-'; printf "\\$(printf %o $((b + 32)))"; return
+    fi
+    if [ "$b" -ge 48 ] && [ "$b" -le 57 ]; then printf '%s' $((b - 48)); return; fi
+    if [ "$b" -ge 1 ] && [ "$b" -le 26 ] && [ "$b" != 9 ] && [ "$b" != 13 ]; then
+        printf 'ctrl-'; printf "\\$(printf %o $((b + 96)))"; return
+    fi
+    c=$(printf "\\$(printf %o "$b")")
+    case $b in
+        32) printf spc ;; 13) printf ret ;; 9) printf tab ;; 127) printf backspace ;;
+        *) case $c in
+            -) printf minus ;; =) printf equal ;; '[') printf bracket_left ;; ']') printf bracket_right ;;
+            ';') printf semicolon ;; "'") printf apostrophe ;; '`') printf grave_accent ;;
+            '\') printf backslash ;; ,) printf comma ;; .) printf dot ;; /) printf slash ;;
+            '!') printf shift-1 ;; @) printf shift-2 ;; '#') printf shift-3 ;; '$') printf shift-4 ;;
+            %) printf shift-5 ;; '^') printf shift-6 ;; '&') printf shift-7 ;; '*') printf shift-8 ;;
+            '(') printf shift-9 ;; ')') printf shift-0 ;; _) printf shift-minus ;; +) printf shift-equal ;;
+            '{') printf shift-bracket_left ;; '}') printf shift-bracket_right ;; :) printf shift-semicolon ;;
+            '"') printf shift-apostrophe ;; '~') printf shift-grave_accent ;; '|') printf shift-backslash ;;
+            '<') printf shift-comma ;; '>') printf shift-dot ;; '?') printf shift-slash ;;
+            *) return 1 ;;
+           esac ;;
+    esac
+}
+step_bytes() { # a KEYS line -> the bytes it types, as decimal numbers
+    local l=$1 i=0 n c d enter=1 out=()
+    case $l in *'^D') enter=1 ;; esac
+    n=${#l}
+    while [ "$i" -lt "$n" ]; do
+        c=${l:$i:1}
+        if [ "$c" = '^' ] && [ $((i + 1)) -lt "$n" ]; then
+            d=${l:$((i + 1)):1}
+            case $d in
+                C) out+=(3) ;; D) out+=(4) ;; U) out+=(21) ;; W) out+=(23) ;;
+                '?') out+=(127) ;; '^') out+=(94) ;; .) ;;
+                *) out+=(94); i=$((i + 1)); continue ;;
+            esac
+            i=$((i + 2))
+            continue
+        fi
+        out+=("$(printf %d "'$c")")
+        i=$((i + 1))
+    done
+    case $l in *'^D'|*'^.') enter=0 ;; esac
+    [ "$enter" = 0 ] || out+=(13)
+    printf '%s\n' ${out[@]+"${out[@]}"}
+}
+if [ -n "$keys" ]; then
+    k=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        k=$((k + 1))
+        t0=$SECONDS
+        until [ "$(prompts)" -ge "$k" ]; do
+            kill -0 "$qpid" 2>/dev/null || no "QEMU ended before prompt $k ('$prompt') for step $k: $line"
+            [ $((SECONDS - t0)) -lt "$timeout" ] || no "prompt $k ('$prompt') did not come within ${timeout}s (step $k: $line; $(prompts) seen)"
+            sleep 0.1
+        done
+        sleep 0.2
+        printf 'step %s: %s\n' "$k" "$line" >> "$serial.typed"
+        nb=0
+        for b in $(step_bytes "$line"); do
+            nb=$((nb + 1))
+            if [ "$keyboard" = serial ]; then
+                printf "\\$(printf %o "$b")" >&5
+                sleep 0.02
+            else
+                kname=$(key_of "$b") || no "no key for byte $b (step $k)"
+                mon_cmd "sendkey $kname" "$serial.key" || no "the monitor did not answer 'sendkey $kname'"
+                printf '  key %s\n' "$kname" >> "$serial.typed"
+            fi
+        done
+        printf '  bytes %s\n' "$nb" >> "$serial.typed"
+    done < "$keys"
+fi
 
 # Wait for the marker (or QEMU's end, or the timeout).
 start=$SECONDS
