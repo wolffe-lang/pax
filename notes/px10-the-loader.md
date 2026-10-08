@@ -33,9 +33,11 @@ is unpacked; §4 and §5 are filled in as the evidence lands.
   initramfs is read in place and every process's pages are frames.
 - px08's and px11's files are not touched (px11, launched after this
   contract, renames px08's work and merges before this lane): this lane
-  edits none of `kernel/reel`, `kernel/kmain_reel*`,
-  `boot/limine-reel.conf`, `tools/reel`, `tests/reel`, `demo/`, and
-  uses px08's `tools/mkimage` options (`--conf`, `--add`) as written.
+  edits none of their kernel, Limine configuration, tool, test or
+  demo files (since px11: `kernel/pax_tour`, `kernel/kmain_tour*`,
+  `boot/limine-tour.conf`, `tools/tour`, `tests/tour`) but for the one
+  line the pin needs (drift 3), and uses px08's `tools/mkimage` options
+  (`--conf`, `--add`) as written.
   Shared files this lane must edit: `.github/workflows/ci.yml` (a new
   job), `docs/SOURCES.md`, `kernel/README.md`, `README.md` (appended
   sections).
@@ -85,8 +87,10 @@ is unpacked; §4 and §5 are filled in as the evidence lands.
    checks that its kernel prints the pinned wolf version, and its kernel
    spells the version as a literal (`wolf 0.2.24`): the pin bump reds
    it until that literal moves, which is px08's file and now px11's.
-   The move is made after px11 lands, in its renamed file, as the one
-   line the bump needs (§4).
+   The move is made after px11 landed, in its renamed file: `48dcdac`
+   (`kernel/pax_tour/pax_tour.lu`, `wolf 0.2.24` → `wolf 0.2.25`), the
+   one line the bump needs; the orchestrator also asked for `b3043e1`
+   (`CLAUDE.md`: pax is public since 2026-10-06).
 
 ## 3. Prediction (committed before either archive is unpacked)
 
@@ -243,11 +247,11 @@ first fatal one `arch_prctl`.
 ### Archives and the pin
 
 - wolf 0.2.25 `wolf-0.2.25-x86_64-unknown-linux-gnu.tar.gz` `9d91f533…` (release 406122367, wolf-lang `6710f9e0`); lupin 0.1.48 linux x86-64 `81cfd77a…` (release 405340127, wolf-interp `531bf058`): `kernel/wolf.pin`, the pin's commit (§5); fetch-wolf and fetch-lupin re-hash both on every run.
-- The prediction: `d323de2`, pushed before either archive was unpacked.
+- The prediction: `fa9703f` (authored 2026-10-07 before either archive was unpacked; first pushed as `d323de2`, its pre-rebase twin, which the PR's force-push history keeps).
 
 ### The move table (kasumi, QEMU 11.1.1 TCG, strict env)
 
-| suite | 0.2.24 (tree `d323de2`) | 0.2.25 (the pin's tree) |
+| suite | 0.2.24 (tree `fa9703f`, pre-rebase `d323de2`) | 0.2.25 (the pin's tree) |
 |---|---|---|
 | expect-serial-selftest | rc 0 | rc 0 |
 | proof | 2 PASS | 2 PASS |
@@ -262,21 +266,24 @@ first fatal one `arch_prctl`.
 | mpx3-user | 38 | 38 |
 | px08's suite | 44 | **36 / 8 FAIL** (R1, the version literal) → 44 with the literal at 0.2.25 |
 
-ELFs: 59 compared, 28 byte-identical, 31 moved in non-loaded sections only. 0 FAIL elsewhere; 0 SKIP lines in any suite's full output. Files: `notes/px10/kasumi-gauntlet-0.2.24-d323de2.summary`, `kasumi-gauntlet-0.2.25-pin.summary`, `kasumi-gauntlet-0.2.25-pin-mkw-row-and-version-literal.summary` (the pin's tree with mkw's row re-recorded and px08's literal moved to 0.2.25: every suite green, px08's 44), `kasumi-elf-sha256-0.2.24-0.2.25.txt` (path, sha at 0.2.24, sha at 0.2.25), `kasumi-elfdiff-0.2.24-0.2.25.txt` (which sections moved, which of them are loaded: none).
+ELFs: 59 compared, 28 byte-identical, 31 moved in non-loaded sections only. 0 FAIL elsewhere; 0 SKIP lines in any suite's full output. Files: `notes/px10/kasumi-gauntlet-0.2.24-d323de2.summary` (named for the pre-rebase twin), `kasumi-gauntlet-0.2.25-pin.summary`, `kasumi-gauntlet-0.2.25-pin-mkw-row-and-version-literal.summary` (the pin's tree with mkw's row re-recorded and px08's literal moved to 0.2.25: every suite green, px08's 44), `kasumi-elf-sha256-0.2.24-0.2.25.txt` (path, sha at 0.2.24, sha at 0.2.25), `kasumi-elfdiff-0.2.24-0.2.25.txt` (which sections moved, which of them are loaded: none).
 
 ### Red, then green (CI)
 
-- **Red** at `ae0212f` (the gate, its tools and its CI job; no kernel): run **37701781024**, job 113066677789 (log `473f302a…`): mpx3-loader 0 PASS, 30 FAIL, 0 SKIP lines (L0 both tiers `tools/build-kernel`, L1–L7 `no image` on all four legs).
-- **Green** at `5ca6572` (the kernel): run **37702508398**, job 113069056009 (log `919d12c5…`): mpx3-loader **34 PASS, 0 FAIL, 0 SKIP**; every other job green but px08's suite (job 113069055939, R1: drift 3).
+Shas are the branch's after the rebase onto px11 (trunk `6bd7796`). Runs before it tested the same commits' pre-rebase twins (the same content but for px11's files, which no px10 commit touches but `ci.yml`'s neighbouring job and `docs/SOURCES.md`'s neighbouring section); the run ids are the artifacts.
+
+
+- **Red** at `4814a89` (the gate, its tools and its CI job; no kernel): run **37701781024**, job 113066677789 (log `473f302a…`): mpx3-loader 0 PASS, 30 FAIL, 0 SKIP lines (L0 both tiers `tools/build-kernel`, L1–L7 `no image` on all four legs).
+- **Green** at `16b9c18` (the kernel): run **37702508398**, job 113069056009 (log `919d12c5…`): mpx3-loader **34 PASS, 0 FAIL, 0 SKIP**; every other job green but px08's suite (job 113069055939, R1: drift 3).
 
 ### The planted breaks (each its own push and CI run)
 
-- **A** `675619b`: `fpu.switch` moves no state. Run **37703267001**, job 113071518881 (log `29afe0db…`): 30 PASS, 4 FAIL, 0 SKIP lines: only L5, all four legs, `spin 1: xmm BAD xmm0` and its exit_group 1 (spin 2 ends with its own pattern loaded last); hello's L2 still passes (the live state at its start was already the init state). Reverted.
-- **B** `0fa333d`: the auxv carries `AT_IGNORE` where AT_PHNUM was. Run **37703912172**, job 113073631063 (log `8cb444bf…`): 30 PASS, 4 FAIL, 0 SKIP lines: only L2, all four legs (`AT_PHNUM 0 BAD` where the runner's Linux printed `AT_PHNUM 5 ok`; exit_group not 0). L8 still passes (wolf-hello fails on `brk` first). Reverted.
+- **A** `b7d88f0`: `fpu.switch` moves no state. Run **37703267001**, job 113071518881 (log `29afe0db…`): 30 PASS, 4 FAIL, 0 SKIP lines: only L5, all four legs, `spin 1: xmm BAD xmm0` and its exit_group 1 (spin 2 ends with its own pattern loaded last); hello's L2 still passes (the live state at its start was already the init state). Reverted.
+- **B** `ce6ac08`: the auxv carries `AT_IGNORE` where AT_PHNUM was. Run **37703912172**, job 113073631063 (log `8cb444bf…`): 30 PASS, 4 FAIL, 0 SKIP lines: only L2, all four legs (`AT_PHNUM 0 BAD` where the runner's Linux printed `AT_PHNUM 5 ok`; exit_group not 0). L8 still passes (wolf-hello fails on `brk` first). Reverted.
 
 ### Runs off CI
 
-- **kasumi** (QEMU 11.1.1 TCG, `PAX_REQUIRE_UEFI=1`, `WOLF_PAIRING_REQUIRE_SIBLING=1`, lupin 0.1.48 present), every suite on the `git archive` of `5e5f19f` (the code of the head before px11's rebase): proof 2, census 3, mkw 16, mpx1 26, mpx2-frames 44, mpx2-paging 26, mpx2-interrupts 34, mpx2-sched 32, mpx2-heap 56, mpx3-user 38, mpx3-loader with the census subject 34 PASS; px08's suite 36 / 8 FAIL (R1's literal, drift 3); 0 SKIP lines (`notes/px10/kasumi-gauntlet-5e5f19f.summary` `e8825536…`; the loader's transcript `kasumi-tcg-native-bios-kmain_loader.serial.log` `698e676b…`; images `32c383a9…`). hello's 20 lines on kasumi's Linux `e535b398…`, byte-identical on all four legs.
+- **kasumi** (QEMU 11.1.1 TCG, `PAX_REQUIRE_UEFI=1`, `WOLF_PAIRING_REQUIRE_SIBLING=1`, lupin 0.1.48 present), every suite on the `git archive` of `272fee2` (the code of the head before px11's rebase): proof 2, census 3, mkw 16, mpx1 26, mpx2-frames 44, mpx2-paging 26, mpx2-interrupts 34, mpx2-sched 32, mpx2-heap 56, mpx3-user 38, mpx3-loader with the census subject 34 PASS; px08's suite 36 / 8 FAIL (R1's literal, drift 3); 0 SKIP lines (`notes/px10/kasumi-gauntlet-5e5f19f.summary` `e8825536…`; the loader's transcript `kasumi-tcg-native-bios-kmain_loader.serial.log` `698e676b…`; images `32c383a9…`). hello's 20 lines on kasumi's Linux `e535b398…`, byte-identical on all four legs.
 - **hasu** (nix-shell QEMU 11.1.0, **KVM**, i7-12700KF), kasumi's images by `--images`: mpx3-loader 4 rounds × 4 boots (32 PASS each, L8 included), mpx3-user 12, mkw 12, mpx1 12, mpx2-frames 16, mpx2-paging 4, mpx2-interrupts 20, mpx2-sched 8, mpx2-heap 24: **124/124 boots, all accel=kvm**, 0 FAIL, 0 SKIP (`notes/px10/hasu-kvm-5e5f19f.log` `6f27468c…`; transcript `hasu-kvm-native-bios-kmain_loader.serial.log`). `fpu: xsave 1, xcr0 0x0000000000000007, area 832 bytes` under KVM too (L5's prediction held on all three hosts); the spinners 6 runs each under KVM. hello on hasu's own Linux (NixOS): the same 20 lines. hasu's Linux half of L8 did not run (`strace: exec: Permission denied`: the census subject lost its execute bit in the copy; not asserted, CI's and kasumi's Linux halves stand).
 
 ### The loader's transcript (kasumi TCG, native, BIOS, the first boot: `notes/px10/kasumi-tcg-first-boot-native-bios.serial.log`)
