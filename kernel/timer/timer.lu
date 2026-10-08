@@ -131,6 +131,30 @@ pub fn start() {
     out(MASTER_DATA, 0xfe) // OCW1: line 0 (the PIT) alone unmasked
 }
 
+/// Unmask master line `line` (px13: kernel/console's 1 and 4): a
+/// read-modify-write of OCW1, IF clear.
+pub fn unmask(line: u64) {
+    let m = inp(MASTER_DATA)
+    let bit: u64 = 1 << line
+    if m & bit != 0 {
+        out(MASTER_DATA, m - bit)
+    }
+}
+
+/// The master's mask register (OCW1) as it is.
+pub fn master_mask() -> u64 {
+    inp(MASTER_DATA)
+}
+
+/// Acknowledge vector `v` (px13): a non-specific EOI to the master, and
+/// to the slave first for one of its lines (40-47).
+pub fn eoi(v: u64) {
+    if v >= SLAVE_BASE {
+        out(SLAVE_CMD, 0x20)
+    }
+    out(MASTER_CMD, 0x20)
+}
+
 /// Mask every line on both controllers.
 pub fn stop() {
     out(MASTER_DATA, 0xff)
