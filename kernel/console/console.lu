@@ -1,0 +1,935 @@
+//! console — what a person types reaches a program (px13): COM1's
+//! receiver and the i8042's keyboard feed one input queue through one
+//! line discipline, and `read(0, …)` on the console takes from it.
+//!
+//! **The two sources.** COM1's receive interrupt (the 16550's IER bit
+//! 0, a receive trigger of one byte: kernel/serial's `receive_on`) is
+//! the 8259 master's line 4, vector 36; that is what QEMU's `-serial`
+//! delivers and what a serial terminal sends. The i8042's keyboard
+//! interrupt is the master's line 1, vector 33: `start` reads the
+//! controller's configuration byte (command 0x20), sets bit 0 (the
+//! first port's interrupt) and bit 6 (translation to scancode set 1),
+//! clears bit 4 (the first port's clock disable) and bit 1 (the second
+//! port's interrupt), writes it back (command 0x60) and enables the
+//! first port (0xae); each interrupt then drains port 0x60 while the
+//! status register's bit 0 says a byte is there (bit 5 set: a byte from
+//! the second port, dropped). Set 1 is decoded for a US layout: make
+//! codes below 0x80, the same with bit 7 set on release, 0xe0 before an
+//! extended key; both shifts, both controls and Caps Lock are tracked;
+//! Ctrl with a letter or one of `@[\]^_` gives the control character;
+//! Backspace gives DEL (0x7f, the erase character), Enter CR (0x0d),
+//! keypad Enter CR and keypad `/ * - +` their characters; arrows,
+//! function keys and the rest of the keypad give nothing. `irq` takes
+//! both vectors and acknowledges the 8259 (kernel/timer's `eoi`); both
+//! lines are unmasked by `start` (kernel/timer's `unmask`: the master's
+//! mask 0xfe becomes 0xec).
+//!
+//! **The line discipline** is POSIX's canonical and non-canonical
+//! input processing as termios(3) describes it, the flags and control
+//! characters a program reads with TCGETS and sets with TCSETS. The
+//! settings at `start` are a Linux pseudo-terminal's, measured
+//! (`notes/px13/`), with two differences named: ISIG and IXON are
+//! clear, because PAX has no signals and no output flow control yet,
+//! so Ctrl-C, Ctrl-\, Ctrl-Z, Ctrl-S and Ctrl-Q are characters like any
+//! other (Ctrl-C is delivered as the byte 0x03 until signals exist):
+//!
+//!     c_iflag 0x100 ICRNL           (Linux's pty: 0x500, ICRNL|IXON)
+//!     c_oflag 0x5   OPOST|ONLCR
+//!     c_cflag 0xbf  B38400|CS8|CREAD
+//!     c_lflag 0x8a3a ICANON|ECHO|ECHOE|ECHOK|ECHOCTL|ECHOKE|IEXTEN
+//!                                   (Linux's pty: 0x8a3b, ISIG too)
+//!     c_cc    ^C ^\ DEL ^U ^D 0 1 0 ^Q ^S ^Z 0 ^R ^O ^W ^V 0 0 0
+//!
+//! Honoured: ICRNL, INLCR and IGNCR on input; ICANON; ECHO, ECHOE,
+//! ECHOK, ECHOKE, ECHOCTL and ECHONL; VERASE, VKILL, VEOF, VEOL and
+//! (with IEXTEN) VWERASE; VMIN 0 against at least 1 in non-canonical
+//! mode; OPOST|ONLCR for the echo and for every `write` to the console
+//! (kernel/user). Stored and answered but not acted on: every other
+//! bit, VTIME, VREPRINT, VLNEXT, VDISCARD, the speed. In canonical mode
+//! a line is edited until NL (Enter, by ICRNL), VEOL or VEOF; VEOF on an
+//! empty line is end of file (the next `read` answers 0), on a
+//! non-empty one it hands the line over without a newline. A line
+//! holds at most 4095 bytes and its newline; past that, bytes are
+//! dropped (counted). Echo: a printable byte as itself, NL as CR NL, a
+//! control byte as `^X` (ECHOCTL; DEL as `^?`), VERASE as `\b \b` (twice
+//! for a byte echoed as two), VKILL as an erase of every byte (ECHOKE).
+//!
+//! **Reading**: `read` copies what is ready (in canonical mode up to and
+//! including the first newline, so one line a call) and answers its
+//! count; 0 at end of file; when nothing is ready it answers `restart()`
+//! and kernel/user puts the thread to sleep until `irq` makes something
+//! ready (kernel/sched's input wait), then re-runs its `syscall`; a
+//! descriptor opened O_NONBLOCK answers -EAGAIN instead.
+//!
+//! **Terminal ioctls** (`ioctl`), answered: TCGETS (0x5401), TCSETS,
+//! TCSETSW and TCSETSF (0x5402-0x5404; TCSETSF discards unread input),
+//! TIOCGWINSZ (0x5413; 0 rows and 0 columns, what a Linux serial line
+//! and pseudo-terminal answer until someone sets them) and TIOCSWINSZ
+//! (0x5414). Every other request is refused by name (kernel/user
+//! writes `refused: tty ioctl 0x<req>`, -ENOTTY). `struct termios` is
+//! 36 bytes: four 32-bit flag words, the line discipline byte, 19
+//! control characters (measured: what TCGETS writes on Linux, and the
+//! names strace gives each bit and index).
+//!
+//! Before `start` the console is px12's: `read` answers end of file and
+//! every ioctl -ENOTTY (kmain_boreutils and every earlier kernel never
+//! start it, so a batch program's descriptors are not a terminal there,
+//! as Linux's pipe is not).
+//!
+//! The state is boot/console.S's `pax_con_state` and `pax_con_ring`,
+//! read and written volatile: `irq` writes them behind every thread's
+//! back (wolf-lang#598's shape). Every entry runs with IF clear (a
+//! handler or a system call), so nothing else touches them meanwhile.
+//! No region, no heap (wolf-lang#611).
+//!
+//! Written from the PC16550D data sheet (IER, FCR, LSR, RBR), the IBM
+//! PC AT keyboard controller (8042) command set and status bits and the
+//! scancode set 1 table for the US layout as published in the PS/2
+//! hardware documentation, POSIX.1-2024's General Terminal Interface
+//! (XBD chapter 11), man-pages termios(3) and ioctl_tty(2), and
+//! black-box runs on Linux (`notes/px13/`). The uapi termios header was
+//! not read (§2 of the note). No Linux source; no other kernel's source.
+
+use log
+use serial
+use timer
+use uaccess
+
+extern "c" fn pax_outb(port: u16, v: u8)
+extern "c" fn pax_inb(port: u16) -> u8
+
+extern "c" let pax_con_state: *u64
+extern "c" let pax_con_ring: *u8
+
+// The state's words.
+const C_STARTED: u64 = 0
+const C_R: u64 = 1 // bytes read so far
+const C_C: u64 = 2 // bytes committed (readable below this)
+const C_E: u64 = 3 // bytes queued (the line being edited above C_C)
+const C_EOF: u64 = 4 // a pending end of file: its position + 1; 0 none
+const C_IFLAG: u64 = 5
+const C_OFLAG: u64 = 6
+const C_CFLAG: u64 = 7
+const C_LFLAG: u64 = 8
+const C_CC: u64 = 9 // three words, c_cc[0..19] little-endian
+const C_LINE: u64 = 12 // c_line
+const C_WINSZ: u64 = 13 // struct winsize, 8 bytes
+const C_KEYS: u64 = 14 // the keyboard's state (K_* bits)
+const C_RX_COM1: u64 = 15 // bytes from COM1
+const C_RX_KBD: u64 = 16 // characters from the keyboard
+const C_SCANCODES: u64 = 17 // bytes from the i8042, releases included
+const C_KBD_BEFORE: u64 = 18 // the i8042's configuration byte as found (+ 0x100 when absent)
+const C_KBD_AFTER: u64 = 19
+const C_DROPPED: u64 = 20 // bytes dropped on a full line
+const C_READS: u64 = 21 // reads answered
+const C_WAITS: u64 = 22 // reads that waited
+
+const RING: u64 = 4096
+const LINE_MAX: u64 = 4095 // bytes before the newline
+
+// termios bits (black-box: strace's names, notes/px13/bits.strace).
+const IGNCR: u64 = 0x80
+const ICRNL: u64 = 0x100
+const INLCR: u64 = 0x40
+const OPOST: u64 = 0x1
+const ONLCR: u64 = 0x4
+const ICANON: u64 = 0x2
+const ECHO: u64 = 0x8
+const ECHOE: u64 = 0x10
+const ECHOK: u64 = 0x20
+const ECHONL: u64 = 0x40
+const ECHOCTL: u64 = 0x200
+const ECHOKE: u64 = 0x800
+const IEXTEN: u64 = 0x8000
+// c_cc indices.
+const VEOF: u64 = 4
+const VERASE: u64 = 2
+const VKILL: u64 = 3
+const VMIN: u64 = 6
+const VEOL: u64 = 11
+const VWERASE: u64 = 14
+
+const TERMIOS_BYTES: u64 = 36
+
+// ioctl requests (black-box: strace's names, notes/px13/termios.strace).
+const TCGETS: u64 = 0x5401
+const TCSETS: u64 = 0x5402
+const TCSETSW: u64 = 0x5403
+const TCSETSF: u64 = 0x5404
+const TIOCGWINSZ: u64 = 0x5413
+const TIOCSWINSZ: u64 = 0x5414
+
+// What `read` and `ioctl` answer besides a count.
+const RESTART: u64 = 0xfffffffffffffe00 // -512: never seen by ring 3
+const REFUSED: u64 = 0xfffffffffffffdff // -513: an ioctl refused by name
+const NEG_EFAULT: u64 = 0xfffffffffffffff2 // -14
+const NEG_EAGAIN: u64 = 0xfffffffffffffff5 // -11
+const NEG_ENOTTY: u64 = 0xffffffffffffffe7 // -25
+
+// The UART's and the i8042's lines and vectors.
+const COM1_LINE: u64 = 4
+const KBD_LINE: u64 = 1
+const KBD_DATA: u16 = 0x60
+const KBD_CMD: u16 = 0x64
+const KBD_OBF: u64 = 0x1
+const KBD_IBF: u64 = 0x2
+const KBD_AUX: u64 = 0x20
+const POLLS: u64 = 100000
+
+// The keyboard's state bits (C_KEYS).
+const K_LSHIFT: u64 = 1
+const K_RSHIFT: u64 = 2
+const K_LCTRL: u64 = 4
+const K_RCTRL: u64 = 8
+const K_CAPS: u64 = 16
+const K_E0: u64 = 32
+
+fn sv(i: u64) -> u64 {
+    // # Safety: i < 64, inside boot/console.S's 512-byte pax_con_state.
+    unsafe { ((pax_con_state as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_sv(i: u64, v: u64) {
+    // # Safety: as `sv`.
+    unsafe { ((pax_con_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+fn bump(i: u64) {
+    put_sv(i, sv(i) + 1)
+}
+
+fn ring(p: u64) -> u64 {
+    // # Safety: p % RING < 4096, inside boot/console.S's pax_con_ring.
+    unsafe { ((pax_con_ring as u64 + p % RING) as *u8).read_volatile() as u64 }
+}
+
+fn put_ring(p: u64, b: u64) {
+    // # Safety: as `ring`.
+    unsafe { ((pax_con_ring as u64 + p % RING) as *u8).write_volatile((b & 0xff) as u8) }
+}
+
+/// c_cc[i].
+fn cc(i: u64) -> u64 {
+    (sv(C_CC + i / 8) >> ((i % 8) * 8)) & 0xff
+}
+
+fn lflag(bit: u64) -> bool {
+    sv(C_LFLAG) & bit != 0
+}
+
+fn out(port: u16, v: u64) {
+    // # Safety: io.S's OUT to an i8042 port; v < 256.
+    unsafe { pax_outb(port, (v & 0xff) as u8) }
+}
+
+fn inp(port: u16) -> u64 {
+    // # Safety: io.S's IN from an i8042 port.
+    let v = unsafe { pax_inb(port) }
+    v as u64
+}
+
+// --- output --------------------------------------------------------------
+
+/// Whether a `write` to the console turns NL into CR NL (OPOST and
+/// ONLCR; always before `start`, px09's behaviour).
+pub fn onlcr() -> bool {
+    if sv(C_STARTED) == 0 {
+        return true
+    }
+    let o = sv(C_OFLAG)
+    o & OPOST != 0 && o & ONLCR != 0
+}
+
+/// One byte of echo, with the output processing a `write` gets.
+fn emit(b: u64) {
+    if b == 10 && onlcr() {
+        serial.put(13)
+    }
+    serial.put((b & 0xff) as u8)
+}
+
+/// Whether byte `b` echoes as two columns (`^X`).
+fn wide(b: u64) -> bool {
+    lflag(ECHOCTL) && ((b < 32 && b != 9 && b != 10) || b == 127)
+}
+
+/// Echo input byte `b` (ECHO set).
+fn echo(b: u64) {
+    if wide(b) {
+        serial.put(94) // ^
+        serial.put((if b == 127 { 63 } else { b + 64 }) as u8)
+    } else {
+        emit(b)
+    }
+}
+
+/// Erase the last queued byte from the screen (ECHO and ECHOE set).
+fn rub(b: u64) {
+    var n: u64 = if wide(b) { 2 } else { 1 }
+    while n > 0 {
+        serial.put(8)
+        serial.put(32)
+        serial.put(8)
+        n -= 1
+    }
+}
+
+// --- input ---------------------------------------------------------------
+
+/// Hand everything queued to readers.
+fn commit() {
+    put_sv(C_C, sv(C_E))
+}
+
+/// Queue byte `b` if the line has room (`nl`: room for a line end).
+fn queue(b: u64, nl: bool) -> bool {
+    let e = sv(C_E)
+    let used = e - sv(C_R)
+    if used >= RING || (!nl && used >= LINE_MAX) {
+        bump(C_DROPPED)
+        return false
+    }
+    put_ring(e, b)
+    put_sv(C_E, e + 1)
+    true
+}
+
+/// Remove the last byte of the line being edited, erasing its echo.
+/// False when the line is empty.
+fn erase_one() -> bool {
+    let e = sv(C_E)
+    if e == sv(C_C) {
+        return false
+    }
+    let b = ring(e - 1)
+    put_sv(C_E, e - 1)
+    if lflag(ECHO) && lflag(ECHOE) {
+        rub(b)
+    }
+    true
+}
+
+fn is_blank(b: u64) -> bool {
+    b == 32 || b == 9
+}
+
+/// One input byte through the line discipline.
+fn input(b0: u64) {
+    var b = b0 & 0xff
+    let ifl = sv(C_IFLAG)
+    if b == 13 {
+        if ifl & IGNCR != 0 {
+            return
+        }
+        if ifl & ICRNL != 0 {
+            b = 10
+        }
+    } else if b == 10 && ifl & INLCR != 0 {
+        b = 13
+    }
+    if !lflag(ICANON) {
+        if queue(b, true) {
+            commit()
+            if lflag(ECHO) {
+                echo(b)
+            }
+        }
+        return
+    }
+    if b != 0 && b == cc(VERASE) {
+        let _e = erase_one()
+        if lflag(ECHO) && !lflag(ECHOE) {
+            echo(b)
+        }
+        return
+    }
+    if b != 0 && b == cc(VKILL) {
+        if lflag(ECHO) && lflag(ECHOKE) && lflag(ECHOE) {
+            while erase_one() {}
+            return
+        }
+        put_sv(C_E, sv(C_C))
+        if lflag(ECHO) {
+            echo(b)
+            if lflag(ECHOK) {
+                emit(10)
+            }
+        }
+        return
+    }
+    if b != 0 && b == cc(VWERASE) && lflag(IEXTEN) {
+        while sv(C_E) > sv(C_C) && is_blank(ring(sv(C_E) - 1)) {
+            let _e = erase_one()
+        }
+        while sv(C_E) > sv(C_C) && !is_blank(ring(sv(C_E) - 1)) {
+            let _e = erase_one()
+        }
+        return
+    }
+    if b != 0 && b == cc(VEOF) {
+        if sv(C_E) == sv(C_C) {
+            put_sv(C_EOF, sv(C_C) + 1)
+        }
+        commit()
+        return
+    }
+    if b == 10 || (b != 0 && b == cc(VEOL)) {
+        if queue(b, true) {
+            if lflag(ECHO) || (b == 10 && lflag(ECHONL)) {
+                echo(b)
+            }
+            commit()
+        }
+        return
+    }
+    if queue(b, false) && lflag(ECHO) {
+        echo(b)
+    }
+}
+
+/// Whether a `read` would answer now (data, or a pending end of file,
+/// or a non-blocking poll in non-canonical mode with VMIN 0).
+pub fn readable() -> bool {
+    if sv(C_STARTED) == 0 {
+        return true
+    }
+    let r = sv(C_R)
+    if sv(C_C) > r {
+        return true
+    }
+    if sv(C_EOF) == r + 1 {
+        return true
+    }
+    !lflag(ICANON) && cc(VMIN) == 0
+}
+
+/// What `read` answers when the thread must wait (kernel/user rewinds
+/// the system call and sleeps the thread on input).
+pub fn restart() -> u64 {
+    RESTART
+}
+
+/// What `ioctl` answers for a request refused by name (kernel/user
+/// logs it and answers -ENOTTY).
+pub fn refused() -> u64 {
+    REFUSED
+}
+
+/// -ENOTTY, what a refused request answers ring 3.
+pub fn enotty() -> u64 {
+    NEG_ENOTTY
+}
+
+/// `read(fd, buf, n)` on the console: the count, 0 at end of file,
+/// `restart()` to wait, -EAGAIN for a non-blocking descriptor with
+/// nothing ready, -EFAULT.
+pub fn read(pml4: u64, buf: u64, n: u64, nonblock: bool) -> u64 {
+    if sv(C_STARTED) == 0 {
+        return 0 // px12: end of file until the console is started
+    }
+    let r = sv(C_R)
+    let c = sv(C_C)
+    if c == r {
+        if sv(C_EOF) == r + 1 {
+            put_sv(C_EOF, 0)
+            bump(C_READS)
+            return 0
+        }
+        if !lflag(ICANON) && cc(VMIN) == 0 {
+            bump(C_READS)
+            return 0
+        }
+        if nonblock {
+            return NEG_EAGAIN
+        }
+        bump(C_WAITS)
+        return RESTART
+    }
+    if n == 0 {
+        return 0
+    }
+    var k = c - r
+    if lflag(ICANON) {
+        var i: u64 = 0
+        while i < k && ring(r + i) != 10 {
+            i += 1
+        }
+        if i < k {
+            k = i + 1
+        }
+    }
+    if k > n {
+        k = n
+    }
+    if !uaccess.writable(pml4, buf, k) {
+        return NEG_EFAULT
+    }
+    var j: u64 = 0
+    while j < k {
+        uaccess.put(pml4, buf + j, ring(r + j), 1)
+        j += 1
+    }
+    put_sv(C_R, r + k)
+    bump(C_READS)
+    k
+}
+
+// --- the terminal's ioctls ----------------------------------------------
+
+fn termios_out(pml4: u64, arg: u64) -> u64 {
+    if !uaccess.writable(pml4, arg, TERMIOS_BYTES) {
+        return NEG_EFAULT
+    }
+    uaccess.put(pml4, arg, sv(C_IFLAG), 4)
+    uaccess.put(pml4, arg + 4, sv(C_OFLAG), 4)
+    uaccess.put(pml4, arg + 8, sv(C_CFLAG), 4)
+    uaccess.put(pml4, arg + 12, sv(C_LFLAG), 4)
+    uaccess.put(pml4, arg + 16, sv(C_LINE), 1)
+    uaccess.put(pml4, arg + 17, sv(C_CC), 8)
+    uaccess.put(pml4, arg + 25, sv(C_CC + 1), 8)
+    uaccess.put(pml4, arg + 33, sv(C_CC + 2), 3)
+    0
+}
+
+fn termios_in(pml4: u64, arg: u64, flush: bool) -> u64 {
+    if !uaccess.readable(pml4, arg, TERMIOS_BYTES) {
+        return NEG_EFAULT
+    }
+    let was_canon = lflag(ICANON)
+    put_sv(C_IFLAG, uaccess.get(pml4, arg, 4))
+    put_sv(C_OFLAG, uaccess.get(pml4, arg + 4, 4))
+    put_sv(C_CFLAG, uaccess.get(pml4, arg + 8, 4))
+    put_sv(C_LFLAG, uaccess.get(pml4, arg + 12, 4))
+    put_sv(C_LINE, uaccess.get(pml4, arg + 16, 1))
+    put_sv(C_CC, uaccess.get(pml4, arg + 17, 8))
+    put_sv(C_CC + 1, uaccess.get(pml4, arg + 25, 8))
+    put_sv(C_CC + 2, uaccess.get(pml4, arg + 33, 3))
+    if flush {
+        put_sv(C_R, sv(C_E))
+        put_sv(C_C, sv(C_E))
+        put_sv(C_EOF, 0)
+    } else if was_canon && !lflag(ICANON) {
+        commit() // the line being edited becomes readable bytes
+    }
+    0
+}
+
+/// A terminal ioctl on the console: the result for %rax, or `refused()`
+/// for a request PAX does not answer. -ENOTTY for everything before
+/// `start` (px12's console).
+pub fn ioctl(pml4: u64, req: u64, arg: u64) -> u64 {
+    if sv(C_STARTED) == 0 {
+        return NEG_ENOTTY
+    }
+    if req == TCGETS {
+        return termios_out(pml4, arg)
+    }
+    if req == TCSETS || req == TCSETSW {
+        return termios_in(pml4, arg, false)
+    }
+    if req == TCSETSF {
+        return termios_in(pml4, arg, true)
+    }
+    if req == TIOCGWINSZ {
+        if !uaccess.writable(pml4, arg, 8) {
+            return NEG_EFAULT
+        }
+        uaccess.put(pml4, arg, sv(C_WINSZ), 8)
+        return 0
+    }
+    if req == TIOCSWINSZ {
+        if !uaccess.readable(pml4, arg, 8) {
+            return NEG_EFAULT
+        }
+        put_sv(C_WINSZ, uaccess.get(pml4, arg, 8))
+        return 0
+    }
+    REFUSED
+}
+
+// --- the keyboard --------------------------------------------------------
+
+/// Scancode set 1's make code `k` on a US layout, unshifted; 0 for a
+/// key that gives no character.
+fn key_base(k: u64) -> u64 {
+    match k {
+        0x01 => 27,
+        0x02 => 49,
+        0x03 => 50,
+        0x04 => 51,
+        0x05 => 52,
+        0x06 => 53,
+        0x07 => 54,
+        0x08 => 55,
+        0x09 => 56,
+        0x0a => 57,
+        0x0b => 48,
+        0x0c => 45,
+        0x0d => 61,
+        0x0e => 127,
+        0x0f => 9,
+        0x10 => 113,
+        0x11 => 119,
+        0x12 => 101,
+        0x13 => 114,
+        0x14 => 116,
+        0x15 => 121,
+        0x16 => 117,
+        0x17 => 105,
+        0x18 => 111,
+        0x19 => 112,
+        0x1a => 91,
+        0x1b => 93,
+        0x1c => 13,
+        0x1e => 97,
+        0x1f => 115,
+        0x20 => 100,
+        0x21 => 102,
+        0x22 => 103,
+        0x23 => 104,
+        0x24 => 106,
+        0x25 => 107,
+        0x26 => 108,
+        0x27 => 59,
+        0x28 => 39,
+        0x29 => 96,
+        0x2b => 92,
+        0x2c => 122,
+        0x2d => 120,
+        0x2e => 99,
+        0x2f => 118,
+        0x30 => 98,
+        0x31 => 110,
+        0x32 => 109,
+        0x33 => 44,
+        0x34 => 46,
+        0x35 => 47,
+        0x37 => 42,
+        0x39 => 32,
+        0x4a => 45,
+        0x4e => 43,
+        _ => 0,
+    }
+}
+
+/// What Shift makes of the unshifted character `c` (a letter is
+/// upper-cased by the caller).
+fn shifted(c: u64) -> u64 {
+    match c {
+        49 => 33, // 1 !
+        50 => 64, // 2 @
+        51 => 35, // 3 #
+        52 => 36, // 4 $
+        53 => 37, // 5 %
+        54 => 94, // 6 ^
+        55 => 38, // 7 &
+        56 => 42, // 8 *
+        57 => 40, // 9 (
+        48 => 41, // 0 )
+        45 => 95, // - _
+        61 => 43, // = +
+        91 => 123, // [ {
+        93 => 125, // ] }
+        59 => 58, // ; :
+        39 => 34, // ' "
+        96 => 126, // ` ~
+        92 => 124, // \ |
+        44 => 60, // , <
+        46 => 62, // . >
+        47 => 63, // / ?
+        _ => c,
+    }
+}
+
+fn is_lower(c: u64) -> bool {
+    c >= 97 && c <= 122
+}
+
+/// One byte from the i8042 (set 1).
+fn scancode(b: u64) {
+    bump(C_SCANCODES)
+    var keys = sv(C_KEYS)
+    if b == 0xe0 {
+        put_sv(C_KEYS, keys | K_E0)
+        return
+    }
+    let ext = keys & K_E0 != 0
+    if ext {
+        keys = keys - K_E0
+    }
+    let brk = b & 0x80 != 0
+    let k = b & 0x7f
+    var bit: u64 = 0
+    if k == 0x2a && !ext {
+        bit = K_LSHIFT
+    } else if k == 0x36 && !ext {
+        bit = K_RSHIFT
+    } else if k == 0x1d {
+        bit = if ext { K_RCTRL } else { K_LCTRL }
+    }
+    if bit != 0 {
+        if brk {
+            if keys & bit != 0 {
+                keys = keys - bit
+            }
+        } else {
+            keys = keys | bit
+        }
+        put_sv(C_KEYS, keys)
+        return
+    }
+    if k == 0x3a && !ext {
+        if !brk {
+            keys = if keys & K_CAPS != 0 { keys - K_CAPS } else { keys | K_CAPS }
+        }
+        put_sv(C_KEYS, keys)
+        return
+    }
+    put_sv(C_KEYS, keys)
+    if brk {
+        return
+    }
+    var c: u64 = 0
+    if ext {
+        if k == 0x1c {
+            c = 13 // keypad Enter
+        } else if k == 0x35 {
+            c = 47 // keypad /
+        }
+    } else {
+        c = key_base(k)
+    }
+    if c == 0 {
+        return
+    }
+    let shift = keys & (K_LSHIFT | K_RSHIFT) != 0
+    if is_lower(c) {
+        let caps = keys & K_CAPS != 0
+        if shift != caps {
+            c = c - 32
+        }
+    } else if shift {
+        c = shifted(c)
+    }
+    if keys & (K_LCTRL | K_RCTRL) != 0 {
+        if is_lower(c) {
+            c = c - 96
+        } else if c >= 64 && c <= 95 {
+            c = c - 64
+        } else if c == 63 {
+            c = 127
+        }
+    }
+    bump(C_RX_KBD)
+    input(c)
+}
+
+/// Wait for the i8042's input buffer to drain (status bit 1 clear).
+fn kbd_wait_in() -> bool {
+    var n: u64 = 0
+    while n < POLLS {
+        if inp(KBD_CMD) & KBD_IBF == 0 {
+            return true
+        }
+        n += 1
+    }
+    false
+}
+
+/// Wait for a byte from the i8042 (status bit 0 set).
+fn kbd_wait_out() -> bool {
+    var n: u64 = 0
+    while n < POLLS {
+        if inp(KBD_CMD) & KBD_OBF != 0 {
+            return true
+        }
+        n += 1
+    }
+    false
+}
+
+fn kbd_flush() {
+    var n: u64 = 0
+    while n < 64 && inp(KBD_CMD) & KBD_OBF != 0 {
+        let _b = inp(KBD_DATA)
+        n += 1
+    }
+}
+
+/// Set the i8042 up for set-1 interrupts on its first port. Records the
+/// configuration byte before and after; 0x100 + status when there is no
+/// controller (status 0xff) or it does not answer.
+fn kbd_start() {
+    let st = inp(KBD_CMD)
+    if st == 0xff {
+        put_sv(C_KBD_BEFORE, 0x100 + st)
+        put_sv(C_KBD_AFTER, 0x100 + st)
+        return
+    }
+    kbd_flush()
+    if !kbd_wait_in() {
+        put_sv(C_KBD_BEFORE, 0x200)
+        return
+    }
+    out(KBD_CMD, 0x20) // read the configuration byte
+    if !kbd_wait_out() {
+        put_sv(C_KBD_BEFORE, 0x300)
+        put_sv(C_KBD_AFTER, 0x300)
+        return
+    }
+    let cfg = inp(KBD_DATA)
+    put_sv(C_KBD_BEFORE, cfg)
+    // bit 0 on (port 1 interrupt), bit 1 off (port 2 interrupt), bit 4
+    // off (port 1 clock enabled), bit 6 on (translation to set 1).
+    var want = cfg | 0x41
+    if want & 0x02 != 0 {
+        want = want - 0x02
+    }
+    if want & 0x10 != 0 {
+        want = want - 0x10
+    }
+    let _w1 = kbd_wait_in()
+    out(KBD_CMD, 0x60) // write the configuration byte
+    let _w2 = kbd_wait_in()
+    out(KBD_DATA, want)
+    let _w3 = kbd_wait_in()
+    out(KBD_CMD, 0xae) // enable the first port
+    let _w4 = kbd_wait_in()
+    out(KBD_CMD, 0x20)
+    if kbd_wait_out() {
+        put_sv(C_KBD_AFTER, inp(KBD_DATA))
+    } else {
+        put_sv(C_KBD_AFTER, 0x300)
+    }
+    kbd_flush()
+}
+
+// --- start, the interrupt, the reports ------------------------------------
+
+/// Start the console's input: the terminal's settings (a Linux
+/// pseudo-terminal's, less ISIG and IXON), COM1's receiver, the i8042,
+/// and their two 8259 lines. After kernel/timer's `start` (the 8259s
+/// remapped) and before interrupts are enabled.
+pub fn start() {
+    var i: u64 = 0
+    while i < 64 {
+        put_sv(i, 0)
+        i += 1
+    }
+    put_sv(C_IFLAG, ICRNL)
+    put_sv(C_OFLAG, OPOST | ONLCR)
+    put_sv(C_CFLAG, 0xbf)
+    put_sv(C_LFLAG, ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE | IEXTEN)
+    // c_cc: VINTR ^C, VQUIT ^\, VERASE DEL, VKILL ^U, VEOF ^D, VTIME 0,
+    // VMIN 1, VSWTC 0 | VSTART ^Q, VSTOP ^S, VSUSP ^Z, VEOL 0, VREPRINT
+    // ^R, VDISCARD ^O, VWERASE ^W, VLNEXT ^V | VEOL2 0, two spare.
+    put_sv(C_CC, 0x00010004157f1c03)
+    put_sv(C_CC + 1, 0x16170f12001a1311)
+    put_sv(C_CC + 2, 0)
+    serial.receive_on()
+    kbd_start()
+    put_sv(C_STARTED, 1)
+    timer.unmask(COM1_LINE)
+    timer.unmask(KBD_LINE)
+}
+
+/// Whether `start` has run.
+pub fn started() -> bool {
+    sv(C_STARTED) != 0
+}
+
+/// COM1's receive vector, 36: the 8259 master's line 4 once kernel/timer
+/// has remapped it.
+pub fn com1_vector() -> u64 {
+    timer.master_base() + COM1_LINE
+}
+
+/// The i8042 keyboard's vector, 33: the master's line 1.
+pub fn kbd_vector() -> u64 {
+    timer.master_base() + KBD_LINE
+}
+
+/// Vector 36 or 33 (kernel/interrupts): drain the source into the line
+/// discipline, then acknowledge the 8259. kernel/interrupts wakes a
+/// waiting reader when `readable` says so.
+pub fn irq(v: u64) {
+    if v == com1_vector() {
+        var n: u64 = 0
+        while serial.ready() && n < 4096 {
+            let b = serial.receive()
+            bump(C_RX_COM1)
+            if sv(C_STARTED) != 0 {
+                input(b)
+            }
+            n += 1
+        }
+    } else {
+        var n: u64 = 0
+        while inp(KBD_CMD) & KBD_OBF != 0 && n < 64 {
+            let st = inp(KBD_CMD)
+            let b = inp(KBD_DATA)
+            if st & KBD_AUX == 0 && sv(C_STARTED) != 0 {
+                scancode(b)
+            }
+            n += 1
+        }
+    }
+    timer.eoi(v)
+}
+
+/// `console: com1 irq 4 vector 36, i8042 0x<cfg> -> 0x<cfg> irq 1 vector
+/// 33, 8259 master mask 0x<m>; ICANON ECHO, iflag … lflag …`.
+pub fn report() {
+    log.put("console: com1 irq 4 vector ")
+    log.dec((com1_vector()) as int)
+    log.put(", i8042 ")
+    put_hex8(sv(C_KBD_BEFORE))
+    log.put(" -> ")
+    put_hex8(sv(C_KBD_AFTER))
+    log.put(" irq 1 vector ")
+    log.dec((kbd_vector()) as int)
+    log.put(", 8259 master mask ")
+    put_hex8(timer.master_mask())
+    log.put("; iflag ")
+    put_hex8(sv(C_IFLAG))
+    log.put(" oflag ")
+    put_hex8(sv(C_OFLAG))
+    log.put(" cflag ")
+    put_hex8(sv(C_CFLAG))
+    log.put(" lflag ")
+    put_hex8(sv(C_LFLAG))
+    log.end()
+}
+
+/// `console: <n> bytes from com1, <k> keys (<s> scancodes) from the
+/// keyboard, <r> reads, <w> waited, <d> dropped`.
+pub fn summary() {
+    log.put("console: ")
+    log.dec((sv(C_RX_COM1)) as int)
+    log.put(" bytes from com1, ")
+    log.dec((sv(C_RX_KBD)) as int)
+    log.put(" keys (")
+    log.dec((sv(C_SCANCODES)) as int)
+    log.put(" scancodes) from the keyboard, ")
+    log.dec((sv(C_READS)) as int)
+    log.put(" reads, ")
+    log.dec((sv(C_WAITS)) as int)
+    log.put(" waited, ")
+    log.dec((sv(C_DROPPED)) as int)
+    log.put(" dropped")
+    log.end()
+}
+
+/// `0x` and the hex digits of `v`, at least two, no other leading zeros.
+fn put_hex8(v: u64) {
+    log.put("0x")
+    var n: u64 = 2
+    while n < 16 && (v >> (n * 4)) != 0 {
+        n += 1
+    }
+    while n > 0 {
+        n -= 1
+        let d = (v >> (n * 4)) & 0xf
+        serial.put((if d < 10 { d + 48 } else { d + 87 }) as u8)
+    }
+}
