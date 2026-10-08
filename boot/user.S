@@ -66,6 +66,15 @@
                          RSP while the entry builds the frame, 2 the
                          timer ticks that landed in ring 3, 3 SMAP on,
                          4 SMEP on.
+     pax_kbuf            8192 bytes of scratch for a system call (px12):
+                         [0, 4096) a path copied in from the caller,
+                         [4096, 8192) the path made canonical. One CPU and
+                         IF clear from SYSCALL to SYSRETQ, so one buffer
+                         serves every call (kernel/files).
+     pax_execbuf         4096 bytes where kernel/user's `exec` lays out
+                         a path, argv and envp given as strings before
+                         `exec_span` reads them (px12); kernel thread
+                         context, IF clear.
 
    Written from: the Intel SDM vol. 3A §5.8.8 (SYSCALL and SYSRET in
    64-bit mode), §6.14.2 and §6.14.3 (the 64-bit stack frame, IRET),
@@ -143,5 +152,12 @@ pax_jump:
         .globl pax_syscall_state
 pax_syscall_state:
         .zero 64
+        .p2align 12
+        .globl pax_kbuf
+pax_kbuf:
+        .zero 8192
+        .globl pax_execbuf
+pax_execbuf:
+        .zero 4096
 
         .section .note.GNU-stack, "", @progbits

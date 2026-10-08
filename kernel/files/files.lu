@@ -1,0 +1,995 @@
+//! files — a process's descriptors and the read-only file tree it sees
+//! (px12, M-PX3).
+//!
+//! Written from man-pages `open(2)`/`openat(2)`, `read(2)`, `pread(2)`,
+//! `lseek(2)`, `close(2)`, `stat(2)`, `statx(2)`, `getdents64(2)`,
+//! `getcwd(3)`'s system call, `readlinkat(2)`, `ioctl(2)` and
+//! `path_resolution(7)`; the uapi headers `asm-generic/fcntl.h` and
+//! `linux/fcntl.h` (O_*, AT_*), `arch/x86/include/uapi/asm/stat.h`
+//! (`struct stat`, 144 bytes), `linux/stat.h` (`struct statx`, 256
+//! bytes, STATX_*), `asm-generic/errno-base.h`/`errno.h`; and black-box
+//! strace of the binaries under test on Linux. No Linux source; no other
+//! kernel's source.
+//!
+//! **The tree** is the initramfs (kernel/initramfs), read-only, plus a
+//! synthetic `/dev`: `/dev/stdin`, `/dev/stdout` and `/dev/stderr` open
+//! whatever descriptor 0, 1 or 2 is (as Linux's links to
+//! `/proc/self/fd/N` do; -ENOENT when it is closed), and `/dev/null`
+//! reads end-of-file and swallows writes. The root lists the archive's
+//! top-level entries and `dev`. A path is made canonical as a string
+//! first (`//` and `.` dropped, `..` pops a component, never above the
+//! root) and then looked up whole; a path through a regular file is
+//! -ENOTDIR, a missing one -ENOENT. Relative paths start at the working
+//! directory, which is always `/` (no `chdir` yet), or at a directory
+//! descriptor. Nothing is a symbolic link. Writes are refused by name:
+//! opening a file for writing, truncating or creating one is -EROFS.
+//!
+//! **The descriptors** (32 a process) are words in the process's area
+//! (kernel/sched's `proc_area`): per descriptor a kind, the node it
+//! names, a position and the open flags. A zeroed area is a fresh
+//! process: descriptors 0, 1 and 2 the serial console (read gives
+//! end-of-file until px13's input; write goes to the console through
+//! kernel/user's `write`), the rest free. `openat` takes the lowest free
+//! number, as Linux does.
+//!
+//! **What stat answers**: a file's mode, size, inode (the archive's,
+//! plus 16) and link count from its newc header; directories 0755,
+//! the console a character device 4:64 (`/dev/ttyS0`'s numbers),
+//! `/dev/null` 1:3; uid, gid and every time 0; st_blksize 4096,
+//! st_blocks the size in 512-byte units rounded up; st_dev 0:1.
+//!
+//! Every user buffer goes through kernel/uaccess (checked whole, then
+//! copied through the HHDM). A path is copied into boot/user.S's
+//! `pax_kbuf` (one CPU, IF clear for the whole call). No region, no
+//! heap.
+
+use initramfs
+use uaccess
+
+extern "c" let pax_kbuf: *u8
+
+const PAGE: u64 = 4096
+const PATH_MAX: u64 = 4095 // bytes before the NUL
+const FDS: u64 = 32
+const A_REFUSAL: u64 = 3 // the area's refusal word (kernel/vm's too)
+const A_FD: u64 = 16 // the first descriptor's word
+const FD_WORDS: u64 = 4
+
+// Descriptor kinds. A zero word is "never opened": the console for 0-2,
+// free above.
+const K_DEFAULT: u64 = 0
+const K_CLOSED: u64 = 1
+const K_CONSOLE: u64 = 2
+const K_FILE: u64 = 3
+const K_DIR: u64 = 4
+const K_NULL: u64 = 5
+
+// Nodes: a type in the top byte, a reference below (an entry's offset).
+const T_SHIFT: u64 = 56
+const T_ROOT: u64 = 1
+const T_DEV: u64 = 2
+const T_ENTRY: u64 = 3
+const T_CONSOLE: u64 = 4
+const T_NULL: u64 = 5
+const T_STD: u64 = 6 // /dev/stdin, stdout, stderr: the reference is 0, 1, 2
+const T_ERR: u64 = 0xff // an errno below
+const REF_MASK: u64 = 0x00ffffffffffffff
+
+// errnos (uapi asm-generic/errno-base.h)
+const ENOENT: u64 = 2
+const EBADF: u64 = 9
+const EFAULT: u64 = 14
+const EEXIST: u64 = 17
+const ENOTDIR: u64 = 20
+const EISDIR: u64 = 21
+const EINVAL: u64 = 22
+const EMFILE: u64 = 24
+const ENOTTY: u64 = 25
+const ESPIPE: u64 = 29
+const EROFS: u64 = 30
+const ERANGE: u64 = 34
+const ENAMETOOLONG: u64 = 36
+
+// open flags (uapi asm-generic/fcntl.h, linux/fcntl.h)
+const O_ACCMODE: u64 = 3
+const O_RDONLY: u64 = 0
+const O_WRONLY: u64 = 1
+const O_CREAT: u64 = 0x40
+const O_EXCL: u64 = 0x80
+const O_TRUNC: u64 = 0x200
+const O_DIRECTORY: u64 = 0x10000
+const AT_FDCWD: u64 = 0xffffff9c // -100 as the 32-bit int the caller passes (kernel/user masks)
+const AT_SYMLINK_NOFOLLOW: u64 = 0x100
+const AT_EMPTY_PATH: u64 = 0x1000
+
+// mode bits
+const S_IFDIR: u64 = 0x4000
+const S_IFCHR: u64 = 0x2000
+const MODE_DIR: u64 = 0x41ed // 040755
+const MODE_CONSOLE: u64 = 0x2190 // 020620
+const MODE_NULL: u64 = 0x21b6 // 020666
+const DT_CHR: u64 = 2
+const DT_DIR: u64 = 4
+const DT_REG: u64 = 8
+
+// Refusal codes for the area's word (kernel/vm uses 1-15).
+const R_EROFS: u64 = 16
+
+/// -e as %rax carries it.
+pub fn neg(e: u64) -> u64 {
+    0xffffffffffffffff - e + 1
+}
+
+fn get(a: u64, i: u64) -> u64 {
+    // # Safety: `a` is a process area (sched.proc_area), 256 words; i < 256.
+    unsafe { ((a + i * 8) as *u64).read_volatile() }
+}
+
+fn put(a: u64, i: u64, v: u64) {
+    // # Safety: as `get`.
+    unsafe { ((a + i * 8) as *u64).write_volatile(v) }
+}
+
+/// A refusal code's name ("" when not this module's).
+pub fn why(r: u64) -> str {
+    if r == R_EROFS {
+        return "the initramfs is read-only"
+    }
+    ""
+}
+
+// --- descriptors -------------------------------------------------------------
+
+fn fdw(fd: u64, w: u64) -> u64 {
+    A_FD + fd * FD_WORDS + w
+}
+
+/// Descriptor `fd`'s kind (K_DEFAULT read as what it means).
+fn kind(a: u64, fd: u64) -> u64 {
+    if fd >= FDS {
+        return K_CLOSED
+    }
+    let k = get(a, fdw(fd, 0))
+    if k == K_DEFAULT {
+        if fd < 3 {
+            return K_CONSOLE
+        }
+        return K_CLOSED
+    }
+    k
+}
+
+fn node_of(a: u64, fd: u64) -> u64 {
+    let k = kind(a, fd)
+    if k == K_CONSOLE {
+        return T_CONSOLE << T_SHIFT
+    }
+    if k == K_NULL {
+        return T_NULL << T_SHIFT
+    }
+    get(a, fdw(fd, 1))
+}
+
+fn pos(a: u64, fd: u64) -> u64 {
+    get(a, fdw(fd, 2))
+}
+
+fn set_pos(a: u64, fd: u64, p: u64) {
+    put(a, fdw(fd, 2), p)
+}
+
+fn access(a: u64, fd: u64) -> u64 {
+    if get(a, fdw(fd, 0)) == K_DEFAULT {
+        return 2 // O_RDWR: the console as Linux's terminal is opened
+    }
+    get(a, fdw(fd, 3)) & O_ACCMODE
+}
+
+/// Whether descriptor `fd` is open.
+pub fn is_open(a: u64, fd: u64) -> bool {
+    kind(a, fd) != K_CLOSED
+}
+
+/// Whether descriptor `fd` writes to the console (kernel/user's `write`
+/// sends the bytes): 1 yes, 0 a sink that swallows them (/dev/null),
+/// 2 not writable (-EBADF).
+pub fn write_target(a: u64, fd: u64) -> u64 {
+    let k = kind(a, fd)
+    if k == K_CLOSED || access(a, fd) == O_RDONLY {
+        return 2
+    }
+    if k == K_CONSOLE {
+        return 1
+    }
+    if k == K_NULL {
+        return 0
+    }
+    2
+}
+
+fn install(a: u64, fd: u64, k: u64, node: u64, flags: u64) {
+    put(a, fdw(fd, 0), k)
+    put(a, fdw(fd, 1), node)
+    put(a, fdw(fd, 2), 0)
+    put(a, fdw(fd, 3), flags)
+}
+
+fn lowest_free(a: u64) -> u64 {
+    var fd: u64 = 0
+    while fd < FDS {
+        if kind(a, fd) == K_CLOSED {
+            return fd
+        }
+        fd += 1
+    }
+    FDS
+}
+
+/// `close(fd)`.
+pub fn close(a: u64, fd: u64) -> u64 {
+    if kind(a, fd) == K_CLOSED {
+        return neg(EBADF)
+    }
+    if fd < 3 {
+        install(a, fd, K_CLOSED, 0, 0)
+    } else {
+        install(a, fd, K_DEFAULT, 0, 0)
+    }
+    0
+}
+
+// --- paths ------------------------------------------------------------------
+
+fn kb(i: u64) -> u64 {
+    // # Safety: i < 8192, inside boot/user.S's pax_kbuf.
+    unsafe { ((pax_kbuf as u64 + i) as *u8).read_volatile() as u64 }
+}
+
+fn put_kb(i: u64, b: u64) {
+    // # Safety: as `kb`.
+    unsafe { ((pax_kbuf as u64 + i) as *u8).write_volatile((b & 0xff) as u8) }
+}
+
+fn raw() -> u64 {
+    // # Safety: the address only.
+    unsafe { pax_kbuf as u64 }
+}
+
+const NORM: u64 = 4096 // the canonical path's first byte in pax_kbuf
+
+fn err(e: u64) -> u64 {
+    (T_ERR << T_SHIFT) | e
+}
+
+fn is_err(n: u64) -> bool {
+    n >> T_SHIFT == T_ERR
+}
+
+fn ty(n: u64) -> u64 {
+    n >> T_SHIFT
+}
+
+fn rf(n: u64) -> u64 {
+    n & REF_MASK
+}
+
+fn entry_node(e: u64) -> u64 {
+    (T_ENTRY << T_SHIFT) | e
+}
+
+/// Copy the user path at `va` into pax_kbuf[0..]; its length, or an
+/// error node.
+fn path_in(pml4: u64, va: u64) -> u64 {
+    let n = uaccess.string_in(pml4, va, raw(), PATH_MAX)
+    if n == PATH_MAX + 2 {
+        return err(EFAULT)
+    }
+    if n == PATH_MAX + 1 {
+        return err(ENAMETOOLONG)
+    }
+    n
+}
+
+/// Whether the canonical path [NORM, NORM + l) is `s`.
+fn norm_is(l: u64, s: str) -> bool {
+    var k: u64 = 0
+    for b in s.bytes() {
+        if k >= l || kb(NORM + k) != b as int as u64 {
+            return false
+        }
+        k += 1
+    }
+    k == l
+}
+
+/// Write node `d`'s canonical name at NORM (a directory's: "" for the
+/// root, "dev", an entry's name); its length.
+fn put_prefix(d: u64) -> u64 {
+    if ty(d) == T_DEV {
+        put_kb(NORM, 100)
+        put_kb(NORM + 1, 101)
+        put_kb(NORM + 2, 118)
+        return 3
+    }
+    if ty(d) != T_ENTRY {
+        return 0
+    }
+    let e = rf(d)
+    let l = initramfs.name_length(e)
+    var i: u64 = 0
+    while i < l {
+        put_kb(NORM + i, initramfs.name_byte(e, i))
+        i += 1
+    }
+    l
+}
+
+/// Make the raw path [0, rl) canonical at NORM, starting from directory
+/// node `base`: its length, or an error node (ENAMETOOLONG).
+fn canon(rl: u64, base: u64) -> u64 {
+    var l: u64 = 0
+    if rl == 0 || kb(0) != 47 {
+        l = put_prefix(base)
+    }
+    var i: u64 = 0
+    while i < rl {
+        while i < rl && kb(i) == 47 {
+            i += 1
+        }
+        let s = i
+        while i < rl && kb(i) != 47 {
+            i += 1
+        }
+        let n = i - s
+        if n == 0 || (n == 1 && kb(s) == 46) {
+            continue
+        }
+        if n == 2 && kb(s) == 46 && kb(s + 1) == 46 {
+            while l > 0 && kb(NORM + l - 1) != 47 {
+                l -= 1
+            }
+            if l > 0 {
+                l -= 1 // the '/'
+            }
+            continue
+        }
+        if l + 1 + n > PATH_MAX {
+            return err(ENAMETOOLONG)
+        }
+        if l > 0 {
+            put_kb(NORM + l, 47)
+            l += 1
+        }
+        var j: u64 = 0
+        while j < n {
+            put_kb(NORM + l + j, kb(s + j))
+            j += 1
+        }
+        l += n
+    }
+    l
+}
+
+/// Whether entry `e`'s name is [NORM + off, NORM + off + l).
+fn entry_is(e: u64, off: u64, l: u64) -> bool {
+    if initramfs.name_length(e) != l {
+        return false
+    }
+    var i: u64 = 0
+    while i < l {
+        if initramfs.name_byte(e, i) != kb(NORM + off + i) {
+            return false
+        }
+        i += 1
+    }
+    true
+}
+
+/// The entry named [NORM, NORM + l), or initramfs.end().
+fn find_entry(l: u64) -> u64 {
+    var e = initramfs.first() else initramfs.end()
+    while e != initramfs.end() {
+        if entry_is(e, 0, l) {
+            return e
+        }
+        e = initramfs.next(e) else initramfs.end()
+    }
+    initramfs.end()
+}
+
+/// The node the canonical path [NORM, NORM + l) names, or an error node.
+fn lookup(l: u64) -> u64 {
+    if l == 0 {
+        return T_ROOT << T_SHIFT
+    }
+    if norm_is(l, "dev") {
+        return T_DEV << T_SHIFT
+    }
+    if norm_is(l, "dev/stdin") {
+        return T_STD << T_SHIFT
+    }
+    if norm_is(l, "dev/stdout") {
+        return (T_STD << T_SHIFT) | 1
+    }
+    if norm_is(l, "dev/stderr") {
+        return (T_STD << T_SHIFT) | 2
+    }
+    if norm_is(l, "dev/null") {
+        return T_NULL << T_SHIFT
+    }
+    let e = find_entry(l)
+    if e != initramfs.end() {
+        return entry_node(e)
+    }
+    // A prefix that is a regular file makes the path -ENOTDIR.
+    var k: u64 = 0
+    while k < l {
+        if kb(NORM + k) == 47 {
+            let p = find_entry(k)
+            if p != initramfs.end() && !initramfs.is_dir(p) {
+                return err(ENOTDIR)
+            }
+        }
+        k += 1
+    }
+    err(ENOENT)
+}
+
+fn is_dir_node(n: u64) -> bool {
+    let t = ty(n)
+    t == T_ROOT || t == T_DEV || (t == T_ENTRY && initramfs.is_dir(rf(n)))
+}
+
+/// Resolve (dirfd, path at va) to a node. `empty_ok`: AT_EMPTY_PATH, an
+/// empty path naming dirfd itself.
+fn resolve(a: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool) -> u64 {
+    let rl = path_in(pml4, va)
+    if is_err(rl) {
+        return rl
+    }
+    if rl == 0 {
+        if !empty_ok {
+            return err(ENOENT)
+        }
+        if dirfd == AT_FDCWD {
+            return T_ROOT << T_SHIFT
+        }
+        if kind(a, dirfd) == K_CLOSED {
+            return err(EBADF)
+        }
+        return node_of(a, dirfd)
+    }
+    var base = T_ROOT << T_SHIFT
+    if kb(0) != 47 && dirfd != AT_FDCWD {
+        if kind(a, dirfd) == K_CLOSED {
+            return err(EBADF)
+        }
+        base = node_of(a, dirfd)
+        if !is_dir_node(base) {
+            return err(ENOTDIR)
+        }
+    }
+    let l = canon(rl, base)
+    if is_err(l) {
+        return l
+    }
+    let n = lookup(l)
+    // A trailing '/' on something that is not a directory.
+    if !is_err(n) && kb(rl - 1) == 47 && !is_dir_node(n) && ty(n) != T_STD {
+        return err(ENOTDIR)
+    }
+    n
+}
+
+// --- open, read, seek ---------------------------------------------------------
+
+/// `openat(dirfd, path, flags, mode)`: the descriptor or -errno.
+pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64) -> u64 {
+    let acc = flags & O_ACCMODE
+    if acc == 3 {
+        return neg(EINVAL)
+    }
+    var n = resolve(a, pml4, dirfd, va, false)
+    if is_err(n) {
+        if rf(n) == ENOENT && flags & O_CREAT != 0 {
+            put(a, A_REFUSAL, R_EROFS)
+            return neg(EROFS)
+        }
+        return neg(rf(n))
+    }
+    if flags & O_CREAT != 0 && flags & O_EXCL != 0 {
+        return neg(EEXIST)
+    }
+    var k = K_FILE
+    if ty(n) == T_STD {
+        let src = rf(n)
+        if kind(a, src) == K_CLOSED {
+            return neg(ENOENT)
+        }
+        k = kind(a, src)
+        n = node_of(a, src)
+    } else if ty(n) == T_CONSOLE {
+        k = K_CONSOLE
+    } else if ty(n) == T_NULL {
+        k = K_NULL
+    } else if is_dir_node(n) {
+        if acc != O_RDONLY || flags & O_CREAT != 0 {
+            return neg(EISDIR)
+        }
+        k = K_DIR
+    }
+    if flags & O_DIRECTORY != 0 && k != K_DIR {
+        return neg(ENOTDIR)
+    }
+    if (k == K_FILE || k == K_DIR) && (acc != O_RDONLY || flags & O_TRUNC != 0) {
+        put(a, A_REFUSAL, R_EROFS)
+        return neg(EROFS)
+    }
+    let fd = lowest_free(a)
+    if fd == FDS {
+        return neg(EMFILE)
+    }
+    install(a, fd, k, n, flags)
+    fd
+}
+
+/// Copy up to `n` bytes of file node `node` from offset `off` to user
+/// `buf`: the count, or -EFAULT.
+fn file_read(pml4: u64, node: u64, off: u64, buf: u64, n: u64) -> u64 {
+    let e = rf(node)
+    let size = initramfs.size(e)
+    if off >= size || n == 0 {
+        if !uaccess.in_user(buf, 0) {
+            return neg(EFAULT)
+        }
+        return 0
+    }
+    let k = if n < size - off { n } else { size - off }
+    if !uaccess.copy_out(pml4, buf, initramfs.data(e) + off, k) {
+        return neg(EFAULT)
+    }
+    k
+}
+
+/// `read(fd, buf, n)`.
+pub fn read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
+    let k = kind(a, fd)
+    if k == K_CLOSED || access(a, fd) == O_WRONLY {
+        return neg(EBADF)
+    }
+    if k == K_DIR {
+        return neg(EISDIR)
+    }
+    if k == K_CONSOLE || k == K_NULL {
+        return 0 // end-of-file: no console input until px13
+    }
+    let r = file_read(pml4, node_of(a, fd), pos(a, fd), buf, n)
+    if r < 0x8000000000000000 {
+        set_pos(a, fd, pos(a, fd) + r)
+    }
+    r
+}
+
+/// `pread64(fd, buf, n, off)`.
+pub fn pread(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, off: u64) -> u64 {
+    let k = kind(a, fd)
+    if k == K_CLOSED || access(a, fd) == O_WRONLY {
+        return neg(EBADF)
+    }
+    if k == K_DIR {
+        return neg(EISDIR)
+    }
+    if k != K_FILE {
+        return neg(ESPIPE)
+    }
+    if off >= 0x8000000000000000 {
+        return neg(EINVAL)
+    }
+    file_read(pml4, node_of(a, fd), off, buf, n)
+}
+
+/// `lseek(fd, off, whence)`: SEEK_SET 0, SEEK_CUR 1, SEEK_END 2.
+pub fn lseek(a: u64, fd: u64, off: u64, whence: u64) -> u64 {
+    let k = kind(a, fd)
+    if k == K_CLOSED {
+        return neg(EBADF)
+    }
+    if k == K_CONSOLE {
+        return neg(ESPIPE)
+    }
+    if k == K_NULL {
+        return 0
+    }
+    var base: u64 = 0
+    if whence == 1 {
+        base = pos(a, fd)
+    } else if whence == 2 {
+        if k == K_FILE {
+            base = initramfs.size(rf(node_of(a, fd)))
+        }
+    } else if whence != 0 {
+        return neg(EINVAL)
+    }
+    var p: u64 = 0
+    if off < 0x8000000000000000 {
+        if off > 0x7fffffffffffffff - base {
+            return neg(EINVAL)
+        }
+        p = base + off
+    } else {
+        let back = 0xffffffffffffffff - off + 1
+        if back > base {
+            return neg(EINVAL)
+        }
+        p = base - back
+    }
+    set_pos(a, fd, p)
+    p
+}
+
+/// `ioctl(fd, request, arg)`: -EBADF, else -ENOTTY for every request
+/// (TCGETS and TIOCGWINSZ included: the console is not a terminal to a
+/// program until px13).
+pub fn ioctl(a: u64, fd: u64) -> u64 {
+    if kind(a, fd) == K_CLOSED {
+        return neg(EBADF)
+    }
+    neg(ENOTTY)
+}
+
+/// `getcwd(buf, size)`: "/" (no `chdir` yet), its length with the NUL.
+pub fn getcwd(pml4: u64, buf: u64, size: u64) -> u64 {
+    if size < 2 {
+        return neg(ERANGE)
+    }
+    if !uaccess.writable(pml4, buf, 2) {
+        return neg(EFAULT)
+    }
+    uaccess.put(pml4, buf, 47, 1)
+    uaccess.put(pml4, buf + 1, 0, 1)
+    2
+}
+
+/// `readlinkat(dirfd, path, buf, size)`: nothing in PAX's tree is a
+/// symbolic link, so -EINVAL for what exists and -ENOENT (or the path's
+/// own error) for what does not; `/proc/self/exe` is -ENOENT (no /proc).
+pub fn readlinkat(a: u64, pml4: u64, dirfd: u64, va: u64) -> u64 {
+    let n = resolve(a, pml4, dirfd, va, false)
+    if is_err(n) {
+        return neg(rf(n))
+    }
+    neg(EINVAL)
+}
+
+// --- stat -------------------------------------------------------------------
+
+fn n_mode(n: u64) -> u64 {
+    let t = ty(n)
+    if t == T_ENTRY {
+        return initramfs.mode(rf(n))
+    }
+    if t == T_CONSOLE || t == T_STD {
+        return MODE_CONSOLE
+    }
+    if t == T_NULL {
+        return MODE_NULL
+    }
+    MODE_DIR
+}
+
+fn n_size(n: u64) -> u64 {
+    if ty(n) == T_ENTRY && initramfs.is_file(rf(n)) {
+        return initramfs.size(rf(n))
+    }
+    0
+}
+
+fn n_ino(n: u64) -> u64 {
+    let t = ty(n)
+    if t == T_ENTRY {
+        return initramfs.ino(rf(n)) + 16
+    }
+    if t == T_ROOT {
+        return 1
+    }
+    if t == T_DEV {
+        return 2
+    }
+    if t == T_NULL {
+        return 4
+    }
+    3 // the console
+}
+
+fn n_nlink(n: u64) -> u64 {
+    let t = ty(n)
+    if t == T_ENTRY {
+        return initramfs.nlink(rf(n))
+    }
+    if t == T_ROOT || t == T_DEV {
+        return 2
+    }
+    1
+}
+
+/// The device a character node is (major, minor), 0 for others.
+fn n_rdev(n: u64, which: int) -> u64 {
+    let t = ty(n)
+    if t == T_CONSOLE || t == T_STD {
+        return if which == 0 { 4 } else { 64 }
+    }
+    if t == T_NULL {
+        return if which == 0 { 1 } else { 3 }
+    }
+    0
+}
+
+/// glibc's dev_t encoding of (major, minor): minor's low byte, major's
+/// twelve bits from bit 8, minor's rest from bit 20.
+fn dev_t(ma: u64, mi: u64) -> u64 {
+    (mi & 0xff) | ((ma & 0xfff) << 8) | ((mi & 0xffffff00) << 12)
+}
+
+fn blocks(size: u64) -> u64 {
+    (size + 511) / 512
+}
+
+/// Write `struct stat` (x86-64, 144 bytes) for node `n` at user `st`.
+fn put_stat(pml4: u64, st: u64, n: u64) -> u64 {
+    if !uaccess.writable(pml4, st, 144) {
+        return neg(EFAULT)
+    }
+    uaccess.zero(pml4, st, 144)
+    let size = n_size(n)
+    uaccess.put(pml4, st, dev_t(0, 1), 8) // st_dev
+    uaccess.put(pml4, st + 8, n_ino(n), 8) // st_ino
+    uaccess.put(pml4, st + 16, n_nlink(n), 8) // st_nlink
+    uaccess.put(pml4, st + 24, n_mode(n), 4) // st_mode
+    uaccess.put(pml4, st + 40, dev_t(n_rdev(n, 0), n_rdev(n, 1)), 8) // st_rdev
+    uaccess.put(pml4, st + 48, size, 8) // st_size
+    uaccess.put(pml4, st + 56, PAGE, 8) // st_blksize
+    uaccess.put(pml4, st + 64, blocks(size), 8) // st_blocks
+    0
+}
+
+/// Write `struct statx` (256 bytes) for node `n` at user `sx`.
+fn put_statx(pml4: u64, sx: u64, n: u64) -> u64 {
+    if !uaccess.writable(pml4, sx, 256) {
+        return neg(EFAULT)
+    }
+    uaccess.zero(pml4, sx, 256)
+    let size = n_size(n)
+    uaccess.put(pml4, sx, 0x7ff, 4) // stx_mask: STATX_BASIC_STATS
+    uaccess.put(pml4, sx + 4, PAGE, 4) // stx_blksize
+    uaccess.put(pml4, sx + 16, n_nlink(n), 4) // stx_nlink
+    uaccess.put(pml4, sx + 28, n_mode(n), 2) // stx_mode
+    uaccess.put(pml4, sx + 32, n_ino(n), 8) // stx_ino
+    uaccess.put(pml4, sx + 40, size, 8) // stx_size
+    uaccess.put(pml4, sx + 48, blocks(size), 8) // stx_blocks
+    uaccess.put(pml4, sx + 128, n_rdev(n, 0), 4) // stx_rdev_major
+    uaccess.put(pml4, sx + 132, n_rdev(n, 1), 4) // stx_rdev_minor
+    uaccess.put(pml4, sx + 140, 1, 4) // stx_dev_minor (0:1)
+    0
+}
+
+/// `fstat(fd, st)`.
+pub fn fstat(a: u64, pml4: u64, fd: u64, st: u64) -> u64 {
+    if kind(a, fd) == K_CLOSED {
+        return neg(EBADF)
+    }
+    put_stat(pml4, st, node_of(a, fd))
+}
+
+/// `newfstatat(dirfd, path, st, flags)` (and `stat`, `lstat` through it).
+pub fn fstatat(a: u64, pml4: u64, dirfd: u64, va: u64, st: u64, flags: u64) -> u64 {
+    if flags & (0xffffffff - AT_SYMLINK_NOFOLLOW - AT_EMPTY_PATH - 0x800) != 0 {
+        return neg(EINVAL)
+    }
+    let n = resolve(a, pml4, dirfd, va, flags & AT_EMPTY_PATH != 0)
+    if is_err(n) {
+        return neg(rf(n))
+    }
+    put_stat(pml4, st, n)
+}
+
+/// `statx(dirfd, path, flags, mask, sx)`: every basic field, whatever
+/// the mask asks (statx(2) allows more than asked).
+pub fn statx(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, sx: u64) -> u64 {
+    let n = resolve(a, pml4, dirfd, va, flags & AT_EMPTY_PATH != 0)
+    if is_err(n) {
+        return neg(rf(n))
+    }
+    put_statx(pml4, sx, n)
+}
+
+// --- directories --------------------------------------------------------------
+
+/// Whether entry `e` is a child of directory node `d`: its name is d's,
+/// a '/', and one more component (the root's children have no '/').
+fn child_of(e: u64, d: u64) -> bool {
+    let l = initramfs.name_length(e)
+    var start: u64 = 0
+    if ty(d) == T_ENTRY {
+        let p = rf(d)
+        let pl = initramfs.name_length(p)
+        if l <= pl + 1 || initramfs.name_byte(e, pl) != 47 {
+            return false
+        }
+        var i: u64 = 0
+        while i < pl {
+            if initramfs.name_byte(e, i) != initramfs.name_byte(p, i) {
+                return false
+            }
+            i += 1
+        }
+        start = pl + 1
+    } else if ty(d) != T_ROOT {
+        return false
+    }
+    var i = start
+    while i < l {
+        if initramfs.name_byte(e, i) == 47 {
+            return false
+        }
+        i += 1
+    }
+    l > start
+}
+
+/// Directory node `d`'s child number `k` (after "." and ".."): a node,
+/// or an error node past the last.
+fn child(d: u64, k: u64) -> u64 {
+    if ty(d) == T_DEV {
+        if k < 3 {
+            return (T_STD << T_SHIFT) | k
+        }
+        if k == 3 {
+            return T_NULL << T_SHIFT
+        }
+        return err(ENOENT)
+    }
+    var i: u64 = 0
+    var e = initramfs.first() else initramfs.end()
+    while e != initramfs.end() {
+        if child_of(e, d) {
+            if i == k {
+                return entry_node(e)
+            }
+            i += 1
+        }
+        e = initramfs.next(e) else initramfs.end()
+    }
+    if ty(d) == T_ROOT && k == i {
+        return T_DEV << T_SHIFT
+    }
+    err(ENOENT)
+}
+
+/// The length of child node `c`'s name within directory `d`.
+fn child_name_len(d: u64, c: u64) -> u64 {
+    let t = ty(c)
+    if t == T_DEV {
+        return 3
+    }
+    if t == T_NULL {
+        return 4
+    }
+    if t == T_STD {
+        return if rf(c) == 0 { 5 } else { 6 }
+    }
+    let skip = if ty(d) == T_ENTRY { initramfs.name_length(rf(d)) + 1 } else { 0 }
+    initramfs.name_length(rf(c)) - skip
+}
+
+fn std_name(k: u64) -> str {
+    if k == 0 {
+        return "stdin"
+    }
+    if k == 1 {
+        return "stdout"
+    }
+    "stderr"
+}
+
+/// Write child `c`'s name (no NUL) at user `va`.
+fn put_child_name(pml4: u64, va: u64, d: u64, c: u64) {
+    let t = ty(c)
+    var s = ""
+    if t == T_DEV {
+        s = "dev"
+    } else if t == T_NULL {
+        s = "null"
+    } else if t == T_STD {
+        s = std_name(rf(c))
+    } else {
+        let skip = if ty(d) == T_ENTRY { initramfs.name_length(rf(d)) + 1 } else { 0 }
+        let e = rf(c)
+        let l = initramfs.name_length(e)
+        var i = skip
+        while i < l {
+            uaccess.put(pml4, va + i - skip, initramfs.name_byte(e, i), 1)
+            i += 1
+        }
+        return
+    }
+    var k: u64 = 0
+    for b in s.bytes() {
+        uaccess.put(pml4, va + k, b as int as u64, 1)
+        k += 1
+    }
+}
+
+fn d_type(c: u64) -> u64 {
+    if is_dir_node(c) {
+        return DT_DIR
+    }
+    let t = ty(c)
+    if t == T_ENTRY {
+        return DT_REG
+    }
+    DT_CHR
+}
+
+/// `getdents64(fd, buf, count)`: as many `struct linux_dirent64` as fit
+/// (d_ino, d_off the next position, d_reclen a multiple of 8, d_type,
+/// the name and its NUL), "." and ".." first, then the children in the
+/// archive's order; 0 at the end; -EINVAL when not even one fits.
+pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
+    let k = kind(a, fd)
+    if k == K_CLOSED {
+        return neg(EBADF)
+    }
+    if k != K_DIR {
+        return neg(ENOTDIR)
+    }
+    if !uaccess.writable(pml4, buf, count) {
+        return neg(EFAULT)
+    }
+    let d = node_of(a, fd)
+    var p = pos(a, fd)
+    var used: u64 = 0
+    var more = true
+    while more {
+        var c = d
+        var nl: u64 = 1
+        if p == 1 {
+            c = T_ROOT << T_SHIFT
+            nl = 2
+        } else if p >= 2 {
+            c = child(d, p - 2)
+            if is_err(c) {
+                more = false
+            } else {
+                nl = child_name_len(d, c)
+            }
+        }
+        if more {
+            let rec = (19 + nl + 1 + 7) - (19 + nl + 1 + 7) % 8
+            if rec > count - used {
+                if used == 0 {
+                    return neg(EINVAL)
+                }
+                more = false
+            } else {
+                let r = buf + used
+                uaccess.zero(pml4, r, rec)
+                uaccess.put(pml4, r, n_ino(c), 8)
+                uaccess.put(pml4, r + 8, p + 1, 8)
+                uaccess.put(pml4, r + 16, rec, 2)
+                uaccess.put(pml4, r + 18, d_type(c), 1)
+                if p == 0 {
+                    uaccess.put(pml4, r + 19, 46, 1)
+                } else if p == 1 {
+                    uaccess.put(pml4, r + 19, 46, 1)
+                    uaccess.put(pml4, r + 20, 46, 1)
+                } else {
+                    put_child_name(pml4, r + 19, d, c)
+                }
+                used += rec
+                p += 1
+            }
+        }
+    }
+    set_pos(a, fd, p)
+    used
+}
