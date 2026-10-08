@@ -170,13 +170,22 @@ orchestrator's call; the report says exactly what ran.
 
 ### Boot counts
 
-- **hasu, KVM** (i7-12700KF, QEMU 11.1.0 via nix-shell, OVMF from nixpkgs, strict `PAX_REQUIRE_UEFI=1`), kasumi-built images: at `769d1d6` **148 boots, all accel=kvm** (`notes/px12/hasu-kvm-769d1d6.log`): mpx3-boreutils 8 rounds × 4 = 32 (31 rounds' worth of assertions green; one release-uefi boot counted 0 ring-3 ticks, the harness defect above), mpx3-loader 2 × 4 = 8 (with wolf-hello, 32 PASS each), mpx3-user 12, mkw 12, mpx1 12, mpx2-frames 16, mpx2-paging 4, mpx2-interrupts 20, mpx2-sched 8, mpx2-heap 24; then at `b039e76` mpx3-boreutils 8 × 4 = 32 more (§5).
+- **hasu, KVM** (i7-12700KF, QEMU 11.1.0 via nix-shell, OVMF from nixpkgs, strict `PAX_REQUIRE_UEFI=1`), kasumi-built images: at `769d1d6` **148 boots, all accel=kvm** (`notes/px12/hasu-kvm-769d1d6.log`): mpx3-boreutils 8 rounds × 4 = 32 (31 rounds' worth of assertions green; one release-uefi boot counted 0 ring-3 ticks, the harness defect above), mpx3-loader 2 × 4 = 8 (with wolf-hello, 32 PASS each), mpx3-user 12, mkw 12, mpx1 12, mpx2-frames 16, mpx2-paging 4, mpx2-interrupts 20, mpx2-sched 8, mpx2-heap 24; then at `b039e76` mpx3-boreutils 8 × 4 = **32 more, all 20 PASS each round, all accel=kvm** (`notes/px12/hasu-kvm-b039e76.log`; two of the 32 boots counted 0 ring-3 ticks, which is why B5 no longer asserts them): **180 KVM boots** in all.
 - **kasumi, TCG** (QEMU 11.1.1): the gauntlet on `git archive` of `79df225` (`notes/px12/kasumi-gauntlet-79df225.summary`): proof 2, census 3, mkw 16, mpx1 26, mpx2-frames 44, mpx2-paging 26, mpx2-interrupts 34, mpx2-sched 32, mpx2-heap 56, mpx3-user 38, tour 44, mpx3-loader 34 (with wolf-hello: L8 now `exit_group 0` after printing, -ENOSYS only 273 and 334; `kasumi-mpx3-loader-79df225-L2-L8.txt`), 0 FAIL, 0 SKIP; no kernel code but kmain_boreutils's changed after it. mpx3-boreutils 4 boots at `79df225` and 4 at `641ebef`, all PASS; tour at `641ebef` 44 PASS.
 - **CI**: 4 boots of kmain_boreutils per run; every job green at `79df225` (37716659137), `641ebef` (37717393136), `769d1d6` (37718863327).
 
 ### The tour
 
 The tour's kernels link the scheduler, so its ISOs changed: rebuilt by `tests/tour` on kasumi at `641ebef` (44 PASS; `notes/px12/kasumi-tour-641ebef.txt`): `pax-tour.iso` `a7c3a6df…`, `pax-tour-b.iso` `3bae5d83…` (px10's `2ade3864…`, `8e804bd4…`). The image grew 156 → 252 KiB (every kernel now carries `pax_procs`, `pax_kbuf`, `pax_execbuf`), frame counts −41 (65030 usable, 64981 free, 64963 at the join), ending b's `rip` `0xffffffff80018273`. `~/scratch/wolf/pax-demo/` refreshed: the ISOs, SHA256SUMS, `src/` (pax's `kernel/`, `boot/`, `user/` at `769d1d6`, identical to the tree; nothing removed), the SHOTLIST's numbers and the README's build lines; `preflight.sh` **GO** (QEMU 11.1.1, `a7c3a6dffe79 3bae5d830c59`, 11659 lines of wolf, the PANIC line in about 29 s; `logs/preflight.serial.log` `09ed1bd3…`).
+
+### Drift from the contract, reported
+
+1. boreutils has no `ls` (§2): the directory listing is busybox-static's (P4, §5).
+2. boreutils trunk is at 0.2.23, not 0.2.25 (bu17, boreutils#22, still open at the end): the binaries are trunk's, built with trunk's toolchain; `user/boreutils.pin` moves in its own commit when bu17 lands.
+3. A file-backed `mmap` answers **-ENODEV** (mmap(2)'s answer for a file that cannot be mapped), not the contract's -ENOMEM/-EINVAL; `MAP_SHARED` is -EINVAL as the contract says. Both are `refused:` lines by name.
+4. "`ioctl(TCGETS)` → -ENOTTY": PAX answers -ENOTTY to every ioctl on an open descriptor (TIOCGWINSZ too, which busybox asks), as Linux does for a descriptor that is not a terminal; the console becomes a terminal in px13.
+5. "Every unknown syscall logged once by number": once per process and number (a bitmap in the process area), so px10's census lines (`tests/mpx3-loader` L8) now list each missing call once.
+6. Not in the contract: `time` (201) and `gettimeofday` (96), because PAX has no vDSO (P4's row); `prctl(PR_GET_NAME)`, `getuid` and the other ids, `prlimit64`, `set_tid_address`/`gettid`, `uname`, `nanosleep`, `stat`/`lstat`/`open` (the old numbers), and the `int`-argument rule (§3).
 
 ### Filed
 
