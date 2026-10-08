@@ -461,7 +461,7 @@ pub fn unmap(pml4: u64, va: u64) -> u64 ! MapError {
     // slot writes through the stale entry into the freed frame (measured:
     // the release tier's procs panicked at rip 0 after `execve`'s MOV to
     // CR3 dropped the stale entry; notes/px14).
-    if cr3() & ADDR == pml4 {
+    if cr3() & ADDR == pml4 || va >= KERNEL_HALF {
         // # Safety: cpu.S's INVLPG; it only drops TLB entries.
         unsafe { pax_invlpg(va) }
     }
