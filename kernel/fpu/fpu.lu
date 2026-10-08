@@ -216,6 +216,39 @@ pub fn switch(from: u64, to: u64) {
     }
 }
 
+/// A new process's state is its parent's (px14, `clone`): the running
+/// slot `from`'s live state saved to its area, the area copied to
+/// `to`'s. IF clear. Nothing before `start`.
+pub fn fork(from: u64, to: u64) {
+    let mode = sw(S_MODE)
+    if mode == OFF || from >= SLOTS || to >= SLOTS {
+        return
+    }
+    let a = sw(S_AREAS + from)
+    let b = sw(S_AREAS + to)
+    // # Safety: `from`'s area, a page of its own (as in `switch`).
+    unsafe { pax_fpu_save(a, mode) }
+    var i: u64 = 0
+    while i < PAGE / 8 {
+        // # Safety: two of `start`'s frames, through the HHDM.
+        unsafe { ((b + i * 8) as *u64).write_volatile(((a + i * 8) as *u64).read_volatile()) }
+        i += 1
+    }
+}
+
+/// The running slot `s` starts a new program (px14, `execve`): its area
+/// is the template again and is loaded now, Linux's state at execve
+/// (FCW 0x037f, MXCSR 0x1f80, the rest zero). IF clear.
+pub fn exec(s: u64) {
+    let mode = sw(S_MODE)
+    if mode == OFF || s >= SLOTS {
+        return
+    }
+    reset(s)
+    // # Safety: as in `switch`: the area holds the template.
+    unsafe { pax_fpu_restore(sw(S_AREAS + s), mode) }
+}
+
 /// Whether `start` ran.
 pub fn on() -> bool {
     sw(S_MODE) != OFF
