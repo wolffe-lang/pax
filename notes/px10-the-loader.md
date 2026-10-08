@@ -276,8 +276,8 @@ ELFs: 59 compared, 28 byte-identical, 31 moved in non-loaded sections only. 0 FA
 
 ### Runs off CI
 
-- **kasumi** (QEMU 11.1.1 TCG, `PAX_REQUIRE_UEFI=1`, `WOLF_PAIRING_REQUIRE_SIBLING=1`, lupin 0.1.48 present): §5's head.
-- **hasu** (nix-shell QEMU, **KVM**, i7-12700KF): §5's head.
+- **kasumi** (QEMU 11.1.1 TCG, `PAX_REQUIRE_UEFI=1`, `WOLF_PAIRING_REQUIRE_SIBLING=1`, lupin 0.1.48 present), every suite on the `git archive` of `5e5f19f` (the code of the head before px11's rebase): proof 2, census 3, mkw 16, mpx1 26, mpx2-frames 44, mpx2-paging 26, mpx2-interrupts 34, mpx2-sched 32, mpx2-heap 56, mpx3-user 38, mpx3-loader with the census subject 34 PASS; px08's suite 36 / 8 FAIL (R1's literal, drift 3); 0 SKIP lines (`notes/px10/kasumi-gauntlet-5e5f19f.summary` `e8825536…`; the loader's transcript `kasumi-tcg-native-bios-kmain_loader.serial.log` `698e676b…`; images `32c383a9…`). hello's 20 lines on kasumi's Linux `e535b398…`, byte-identical on all four legs.
+- **hasu** (nix-shell QEMU 11.1.0, **KVM**, i7-12700KF), kasumi's images by `--images`: mpx3-loader 4 rounds × 4 boots (32 PASS each, L8 included), mpx3-user 12, mkw 12, mpx1 12, mpx2-frames 16, mpx2-paging 4, mpx2-interrupts 20, mpx2-sched 8, mpx2-heap 24: **124/124 boots, all accel=kvm**, 0 FAIL, 0 SKIP (`notes/px10/hasu-kvm-5e5f19f.log` `6f27468c…`; transcript `hasu-kvm-native-bios-kmain_loader.serial.log`). `fpu: xsave 1, xcr0 0x0000000000000007, area 832 bytes` under KVM too (L5's prediction held on all three hosts); the spinners 6 runs each under KVM. hello on hasu's own Linux (NixOS): the same 20 lines. hasu's Linux half of L8 did not run (`strace: exec: Permission denied`: the census subject lost its execute bit in the copy; not asserted, CI's and kasumi's Linux halves stand).
 
 ### The loader's transcript (kasumi TCG, native, BIOS, the first boot: `notes/px10/kasumi-tcg-first-boot-native-bios.serial.log`)
 
