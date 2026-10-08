@@ -19,13 +19,15 @@
    from arch/x86/entry/syscalls/syscall_64.tbl): %rax the number, %rdi,
    %rsi, %rdx the first three arguments, `syscall`, the result in %rax,
    -4095..-1 an errno (EFAULT 14, ENOSYS 38 from the uapi errno headers).
-   write is 1, getpid 39, exit 60; PAX implements write and exit only,
-   so 39 must come back -38 (ENOSYS), as must 500 (no such number).
+   write is 1, _sysctl 156, exit 60; 156 must come back -38 (ENOSYS:
+   the table names it sys_ni_syscall, so Linux answers ENOSYS too, and
+   PAX never implements it), as must 500 (no such number). px09 used
+   getpid (39) here; px14 implements getpid, so the witness moved.
 
      hello      write(1, "hello from ring 3: cpl ", 23); then the CPL,
                 computed here as CS & 3 and written as a digit and a
                 newline into two bytes of its own stack, write(1, sp, 2);
-                getpid and 500, each expected -38; exit(0), or 1-4 naming
+                _sysctl and 500, each expected -38; exit(0), or 1-4 naming
                 the first expectation that failed
      segv       reads address 0 (nothing is mapped there): #PF, a user
                 read of a page not present (error 0x4)
@@ -87,7 +89,7 @@ pax_uprog_hello:
         cmpq    $2, %rax
         movl    $2, %edi
         jne     .Lhello_exit
-        movl    $39, %eax               /* getpid: not implemented */
+        movl    $156, %eax              /* _sysctl: never implemented */
         syscall
         cmpq    $-38, %rax
         movl    $3, %edi

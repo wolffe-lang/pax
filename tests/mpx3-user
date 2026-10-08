@@ -31,7 +31,7 @@
 #      stacks' slot at least; cr3 differs from the kernel's), then the
 #      program's own line `hello from ring 3: cpl 3` (the 3 computed in
 #      ring 3 from CS and stored on the user stack), the kernel's
-#      `user: hello pid <p> syscall 39: -ENOSYS` and `… syscall 500:
+#      `user: hello pid <p> syscall 156: -ENOSYS` and `… syscall 500:
 #      -ENOSYS`, and `user: hello pid <p> exit 0 after <r> runs` (the
 #      program exits non-zero if either write returned short or either
 #      unknown number came back other than -38).
@@ -290,12 +290,12 @@ for leg in $legs; do
                 kcr3=$(sed -n -E 's/^paging: limine cr3 0x[0-9a-f]{16}, pax cr3 (0x[0-9a-f]{16}), .*/\1/p' "$norm" | head -n 1)
                 [ -n "$kcr3" ] && [ "$hcr3" != "$kcr3" ] || why+=" hello's cr3 $hcr3 is the kernel's ($kcr3);"
                 grep -qx 'hello from ring 3: cpl 3' "$norm" || why+=" no 'hello from ring 3: cpl 3' line;"
-                grep -qx "user: hello pid $hpid syscall 39: -ENOSYS" "$norm" || why+=" no -ENOSYS line for 39;"
+                grep -qx "user: hello pid $hpid syscall 156: -ENOSYS" "$norm" || why+=" no -ENOSYS line for 156;"
                 grep -qx "user: hello pid $hpid syscall 500: -ENOSYS" "$norm" || why+=" no -ENOSYS line for 500;"
                 [ "$(exited hello "$norm")" = 0 ] || why+=" hello exit '$(exited hello "$norm")', not 0;"
             fi
             if [ -z "$why" ]; then
-                say "PASS U2 $tier kmain_user $leg: hello (pid $hpid, cr3 $hcr3, kernel half $k1 of $k2 shared) wrote 'hello from ring 3: cpl 3', 39 and 500 -ENOSYS, exit 0"
+                say "PASS U2 $tier kmain_user $leg: hello (pid $hpid, cr3 $hcr3, kernel half $k1 of $k2 shared) wrote 'hello from ring 3: cpl 3', 156 and 500 -ENOSYS, exit 0"
             else
                 bad "U2 $tier kmain_user $leg:$why"; grep -E '^(user: hello|hello)' "$norm" | sed 's/^/  /' >&2
             fi
