@@ -159,6 +159,21 @@ pub fn get64(pml4: u64, va: u64) -> u64 {
     v
 }
 
+/// The `width` bytes (1-8) at user address `va`, little-endian (checked
+/// by the caller with `readable`; the bytes may cross a page). px13's
+/// TCSETS reads `struct termios` this way.
+pub fn get(pml4: u64, va: u64, width: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = width
+    while i > 0 {
+        i -= 1
+        // # Safety: a byte of a page the caller checked readable.
+        let b = unsafe { (kaddr(pml4, va + i) as *u8).read_volatile() }
+        v = (v << 8) | b as u64
+    }
+    v
+}
+
 /// Copy the NUL-terminated string at user address `va` to kernel address
 /// `dst` (at most `max` bytes before the NUL, the NUL copied too).
 /// Returns its length, `max + 1` when no NUL came within `max` bytes
