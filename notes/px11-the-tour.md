@@ -118,7 +118,7 @@ and `ending`, `reel` and `tour`, `pax_reel_worker` and
 | every address, count and `rip` unchanged; BIOS serial logs differ only in the countdown and the ending's first line (plus the menu) | at `bbaa22b`, kasumi TCG, BIOS and UEFI, both ISOs: exactly those lines (`notes/px11/serial-before-after.diff`); `rip 0xffffffff8000bd53`, `image … 104 KiB`, `65096 usable` as before | right (after the fix) |
 | ISO bytes change beyond the menu text | yes: the kernels' rodata, symbol and debug sections; the loaded segments' sizes are unchanged | right |
 | ISO size 4,610,048 bytes, shas change | 4,610,048; native `a1a888ff…`, `cc9ed5b0…`; release `fe60d16c…`, `2f89d1b3…` | right |
-| headings at 5.1/8.1/11.1/14.1/19.1 s, PANIC 28.5 s, within 0.1 s | kasumi BIOS a: 5.13/8.13/11.14/14.14/19.15, PANIC 28.47 (before: 5.14/8.14/11.16/14.15/19.15, 28.48); nomad-1 rehearsal: 5.14/8.14/11.15/14.15/19.15, 28.47 | right |
+| headings at 5.1/8.1/11.1/14.1/19.1 s, PANIC 28.5 s, within 0.1 s | kasumi BIOS a: 5.13/8.13/11.14/14.14/19.15, PANIC 28.47 (before: 5.14/8.14/11.16/14.15/19.15, 28.48); nomad-1 rehearsal: 5.13/8.14/11.15/14.15/19.15, 28.47 | right |
 | tests/tour 44 PASS, 0 FAIL, 0 SKIP on kasumi | 44 / 0 / 0 at `c4347f3` (`~/lanes/px11/tour1.out` on kasumi, `97ae071b…`) and at `bbaa22b` (`tour2.out`, `3939f10e…`) | right |
 | final grep: hits only in lane history, plus lobo's `demo/reel` path and `CLAUDE.md`'s "maintainer" | as predicted (§4) | right |
 
@@ -175,10 +175,11 @@ Every other line, of both ISOs, under BIOS and UEFI, is byte-identical
   must re-stage (`tools/census/census stage`), since the staging
   directory is now `lobo-site`.
 - **Rehearsal** (nomad-1, the folder's SHOTLIST typed into fish by
-  `~/lanes/px11/rehearse.py`, a copy of px08's): preflight GO, its boot
-  29.40 s; boot a: menu 0.21 s, headings 5.14, 8.14, 11.15, 14.15,
-  19.15 s, `join` 21.48 s, PANIC 28.47 s; boot b: Enter at 2.75 s,
-  PANIC 26.17 s (23.4 s after Enter), `rip …bd53`
+  `~/lanes/px11/rehearse.py`, a copy of px08's, run once more after the
+  folder's `src/` took the head's comment fix): preflight GO, its boot
+  29.39 s; boot a: menu 0.21 s, headings 5.13, 8.14, 11.15, 14.15,
+  19.15 s, `join` 21.47 s, PANIC 28.47 s; boot b: Enter at 2.72 s,
+  PANIC 26.11 s (23.4 s after Enter), `rip …bd53`
   (`notes/px11/nomad1-rehearsal-boot-{a,b}.times`).
 
 ## 5. Done-when
