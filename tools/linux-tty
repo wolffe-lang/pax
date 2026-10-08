@@ -4,13 +4,22 @@
 # sessions (tests/mpx3-console), the reference PAX's console is held to.
 #
 #   tools/linux-tty --keys KEYS --prompt TEXT [--cwd DIR] [--argv0 NAME]
-#                   OUT -- PROG [ARG...]
+#                   [--root DIR] [--pid1] OUT -- PROG [ARG...]
 #
 # PROG runs on the slave side of a fresh pseudo-terminal (its
 # descriptors 0, 1 and 2, its controlling terminal), in DIR (default /),
 # with exactly the environment PAX's kmain_console gives a program:
-# HOME=/ TERM=linux PAX=1, and argv[0] NAME when given (the path PAX
-# runs it by, /bin/…). Before PROG starts, the terminal's settings
+# HOME=/ TERM=linux PAX=1 PATH=/bin (px14 added PATH: pelt searches it
+# for a command, and with none it searches the working directory), and
+# argv[0] NAME when given (the path PAX runs it by, /bin/…).
+#
+# --root DIR (px14): PROG runs chrooted in DIR, the tree PAX's initramfs
+# is made from, so `ls /bin` and `cat /etc/motd` name the same files on
+# both; DIR/dev is the host's /dev bound in (boreutils opens
+# /dev/stdout) and DIR/proc a proc mount, both removed at the end.
+# --pid1 (px14): PROG is the first process of a fresh pid namespace,
+# pid 1 as PAX's first program is, its children numbered 2, 3, … and
+# orphans reparented to it. Both need root (CI runs this under sudo). Before PROG starts, the terminal's settings
 # are made PAX's console's: ISIG and IXON cleared (PAX has no signals and
 # no output flow control yet, so Ctrl-C is the byte 0x03 on both; every
 # other setting is the pseudo-terminal's default, which is what PAX's
@@ -27,20 +36,32 @@
 #
 # Black-box: this drives Linux's own line discipline; nothing of Linux
 # is read but what it shows.
+import ctypes
 import os
 import pty
 import select
+import subprocess
 import sys
 import termios
 import time
 
-ENV = {"HOME": "/", "TERM": "linux", "PAX": "1"}
+ENV = {"HOME": "/", "TERM": "linux", "PAX": "1", "PATH": "/bin"}
 WAIT = 30.0
 
 
 def die(msg, code=2):
     sys.stderr.write("linux-tty: %s\n" % msg)
     sys.exit(code)
+
+
+def unmount(paths):
+    # umount(2) itself, not umount(8): after --pid1's unshare every child
+    # this process forks lands in the new namespace, which is gone once
+    # its pid 1 has ended, so a fork would fail.
+    libc = ctypes.CDLL(None, use_errno=True)
+    for p in reversed(paths):
+        if libc.umount(p.encode()) != 0:
+            sys.stderr.write("linux-tty: umount %s: errno %d\n" % (p, ctypes.get_errno()))
 
 
 def step_bytes(line):
@@ -67,6 +88,8 @@ def main(argv):
     keys = prompt = None
     cwd = "/"
     argv0 = None
+    root = None
+    pid1 = False
     args = argv[1:]
     while args and args[0].startswith("--") and args[0] != "--":
         if args[0] == "--keys":
@@ -77,14 +100,34 @@ def main(argv):
             cwd = args[1]
         elif args[0] == "--argv0":
             argv0 = args[1]
+        elif args[0] == "--root":
+            root = args[1]
+        elif args[0] == "--pid1":
+            pid1 = True
+            args = args[1:]
+            continue
         else:
             die("unknown option %s" % args[0])
         args = args[2:]
     if not keys or prompt is None or len(args) < 3 or args[1] != "--":
-        die("usage: linux-tty --keys KEYS --prompt TEXT [--cwd DIR] [--argv0 NAME] OUT -- PROG [ARG...]")
+        die("usage: linux-tty --keys KEYS --prompt TEXT [--cwd DIR] [--argv0 NAME] [--root DIR] [--pid1] OUT -- PROG [ARG...]")
     out, prog = args[0], args[2:]
     steps = [l.rstrip("\n") for l in open(keys)]
     pb = prompt.encode()
+
+    mounted = []
+    if root:
+        for d in ("dev", "proc"):
+            os.makedirs(os.path.join(root, d), exist_ok=True)
+        if subprocess.call(["mount", "--bind", "/dev", os.path.join(root, "dev")]) != 0:
+            die("cannot bind /dev into %s (root?)" % root)
+        mounted.append(os.path.join(root, "dev"))
+        if subprocess.call(["mount", "-t", "proc", "proc", os.path.join(root, "proc")]) != 0:
+            unmount(mounted)
+            die("cannot mount proc in %s" % root)
+        mounted.append(os.path.join(root, "proc"))
+    if pid1:
+        os.unshare(os.CLONE_NEWPID)  # the next child is pid 1 of a new namespace
 
     pid, fd = pty.fork()
     if pid == 0:
@@ -93,6 +136,8 @@ def main(argv):
             a[0] &= ~termios.IXON
             a[3] &= ~termios.ISIG
             termios.tcsetattr(0, termios.TCSANOW, a)
+            if root:
+                os.chroot(root)
             os.chdir(cwd)
             os.execve(prog[0], [argv0 or prog[0]] + prog[1:], ENV)
         except Exception as e:  # noqa: BLE001
@@ -147,10 +192,12 @@ def main(argv):
     if st is None:
         os.kill(pid, 9)
         os.waitpid(pid, 0)
+        unmount(mounted)
         sys.stderr.write("linux-tty: %s did not end\n" % prog[0])
         open(out + ".rc", "w").write("none\n")
         return 1
     open(out + ".rc", "w").write("%d\n" % os.waitstatus_to_exitcode(st))
+    unmount(mounted)
     return 0 if ok else 1
 
 
