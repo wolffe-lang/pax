@@ -279,3 +279,29 @@ kernels: none consulted.
 | black-box Linux: pelt `dd22a86` (static, `tools/mkpelt`) under `strace -f` on a pseudo-terminal, a session typed (`notes/px13/ptysess.py`) | — | — | measured | what pelt asks of the terminal (nothing: no ioctl), how it reads (`/dev/stdin`, one byte a call) and writes its prompt (`write(2, "$ ", 2)`) (`notes/px13/pelt-session.strace`, `pelt-eof.strace`) |
 | black-box Linux: every session `tests/mpx3-console` types, typed into the same binaries on a Linux pseudo-terminal with ISIG and IXON cleared (`tools/linux-tty`) | — | — | measured | the reference every PAX transcript is compared with, byte for byte: the echo of erase (`\b \b`, twice for a `^X`), kill and word-erase, `^C` as a byte, VEOF on a non-empty line |
 | QEMU's monitor `sendkey` and the `file` character device's `input-path` | QEMU 8.2 (CI), 11.1 (kasumi, hasu) | — | the QEMU documentation | `tools/qemu-halt --type`, `tools/qemu-run --serial-input` |
+
+## px14 — processes (2026-10-08)
+
+**Linux: the uapi headers and the syscall table only**, from the refs
+clone's sparse checkout (never widened): `include/uapi/linux/sched.h`
+(CLONE_*, `struct clone_args` and its three published sizes),
+`include/uapi/linux/wait.h` (WNOHANG, WEXITED, WNOWAIT, the `__W*` bits,
+P_ALL/P_PID/P_PGID), `include/uapi/asm-generic/siginfo.h` (the SIGCHLD
+member of `__sifields`: `_pid`, `_uid`, `_status`; SI_MAX_SIZE 128;
+CLD_*), `arch/x86/include/uapi/asm/signal.h` (signal numbers,
+SA_RESTORER), `include/uapi/asm-generic/signal-defs.h` (SA_*), and
+`arch/x86/entry/syscalls/syscall_64.tbl` (rt_sigaction 13,
+rt_sigprocmask 14, dup 32, dup2 33, getpid 39, clone 56, fork 57, vfork
+58, execve 59, wait4 61, kill 62, getppid 110, _sysctl 156 =
+sys_ni_syscall, tkill 200, tgkill 234, waitid 247, dup3 292, clone3
+435). No Linux source (`.c`, `.S`, non-uapi headers), no glibc, musl or
+other libc, no kernel's source and **no shell's source** (ruling #43):
+pelt is built from its own tree at its pin and observed only from
+outside. No disassembly. Permissively licensed kernels: none consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| the uapi headers and `syscall_64.tbl` above | the refs clone | GPL-2.0 WITH Linux-syscall-note | read | `kernel/process`'s numbers, flags and layouts |
+| man-pages `clone(2)` (CLONE_VM, CLONE_VFORK, CLONE_CLEAR_SIGHAND, the raw x86-64 argument order, clone3), `vfork(2)`, `execve(2)` (what is kept and reset: descriptors without close-on-exec, the signal mask, handled signals to SIG_DFL, ignored ones kept; EACCES, ENOEXEC, E2BIG, a NULL argv), `wait4(2)`, `wait(2)`/`waitid(2)` (the status word, WNOHANG, ECHILD, the siginfo it fills), `getpid(2)` (init's parent 0), `gettid(2)`, `sigprocmask(2)`/`rt_sigprocmask`, `sigaction(2)` (the kernel's `struct sigaction` on x86-64), `kill(2)`, `dup(2)` (dup3's EINVAL), `signal(7)`, `credentials(7)`, `pid_namespaces(7)` | 6.x | the man-pages project's licences | the author's own knowledge | `kernel/process`, `kernel/sched`'s process table, `kernel/files`' dup and close-on-exec, `user/elf/procs.c` |
+| black-box Linux: pelt `dd22a86` (static) under `strace -f -tt` on a pseudo-terminal, chrooted in the shell's tree, with and without PATH (`notes/px14/strace-spawn.sh`, in a privileged rootless `px13-ubuntu` container on kasumi: Ubuntu 24.04, glibc 2.39, strace 6.8, kernel 7.2.8) | — | — | measured | the spawn PAX answers (`notes/px14/pelt-spawn-path.strace`): `rt_sigprocmask(SIG_BLOCK, ~[])`, `clone3({CLONE_VM\|CLONE_VFORK\|CLONE_CLEAR_SIGHAND, SIGCHLD, stack, 0x9000})`, the child's mask query, `rt_sigaction(SIGPIPE, SIG_DFL)`, `dup2(5, 0)` (/dev/null as standard input), `execve`; the parent's `munmap`, `close(5)`, `wait4(pid, …, 0, NULL)`; and that with no PATH pelt searches the working directory (`statx("./cat")`) |
+| black-box Linux: `user/elf/procs.c` as pid 1 of a fresh pid namespace (`unshare --pid`), chrooted in procs' tree | — | — | measured | every line `tests/mpx3-shell` compares procs' with: pids from 1, the status words, orphans to pid 1, waitid's siginfo, execve's errnos, the mask and actions across execve; and that the core-dump bit (0x80) depends on the host's core_pattern, not RLIMIT_CORE (set under a piped pattern), so procs masks it |

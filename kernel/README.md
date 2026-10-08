@@ -43,6 +43,7 @@ text (`tests/tour`, `tools/tour`).
 | `panic/` | `wolf_trap`, the freestanding trap hook, in wolf; `fail(what, v)`, a fault the kernel detects, by name; `halt` |
 | `sync/` | the spinlock (px07): a lock is an 8-byte word's address; `acquire` saves RFLAGS and clears IF, then test-and-test-and-set (`atomic_load` relaxed, `atomic_cas` acquire/relaxed, kw11), `release` is a release store and IF as saved; `irq_save`/`irq_restore`/`enable`, `relax` (PAUSE), `console()` (the lock threads write whole lines under) |
 | `sched/` | kernel threads on one CPU (px07): 16 records in `boot/sched.S`'s `.bss` (`#[repr(c)] Thread`, its words at `offset_of`), slot 0 the kernel's own context, slot 1 the idle thread (`pax_idle`, HLT with IF set); each stack four frames mapped RW NX at the top of its slot's 64 KiB in PML4 slot 416 (`0xffffd00000000000`), the 48 KiB below never mapped (the guard); a FIFO run queue; `preempt` (the tick: wake sleepers, rotate after a two-tick quantum, idle gives way at once), `switched` (after `pax_switch`), `create(body, arg)`, `yield`, `sleep(n) -> (from, woke)`, `wait_all`, `exit` (the stack reaped by the next `create` or `wait_all`), `guard_of` (for the overflow panic), `report` |
+| `process/` | processes (px14): a program's image and psABI stack (moved from `user/`), `clone`/`clone3`/`vfork` (CLONE_VM\|CLONE_VFORK: the child borrows the parent's space, the parent waits until it execs or ends), `execve` (path, argv, envp copied out first; close-on-exec, handled signals reset, the old space given back or handed back to the vfork parent), `wait4`/`waitid` (zombies reaped, Linux's status words, WNOHANG, a blocked wait re-runs when a child ends), `rt_sigprocmask`/`rt_sigaction` recorded, `kill` refused by name |
 | `schedtest/` | the thread bodies `tests/mpx2-sched` runs, as `export fn`s the kernels name with `extern "c" let` (px07) |
 | `pax_tour/` | the tour's stages (px08): each calls the subsystems above as their test kernels do and prints their reports under a heading; `leaf`, a read-only walk of the live page tables for the permissions stage 3 prints; `pax_tour_worker`, stage 5's named thread body; the pauses between stages (the PIT's count polled before the timer interrupt is live, `timer.wait`, then `sched.sleep`) |
 
@@ -284,3 +285,30 @@ halts (`tests/mpx3-console`).
   framebuffer console (the echo and every write go to COM1), process
   groups and a controlling terminal (TIOCGPGRP and friends are refused
   by name), process creation (`clone`/`execve`/`wait4`, px14).
+
+## Processes (px14)
+
+pelt, as pid 1 on kmain_console, runs the programs in the initramfs:
+it starts each child as it does on Linux (measured: `clone3` with
+CLONE_VM | CLONE_VFORK | CLONE_CLEAR_SIGHAND on a stack of its own, the
+child's `dup2` of /dev/null onto 0 and `execve`, the parent's `wait4`),
+and every typed session is byte-identical to the same binaries' on a
+Linux pseudo-terminal (`tests/mpx3-shell`).
+
+| module or file | what |
+|---|---|
+| `process/` | see the table above: the image builder and the process calls |
+| `sched/` (px14 additions) | the record grows to 184 bytes in a 256-byte slot (`pid`, `ppid`, `status`, `owns`, `vparent`, `zombie`, `sigmask`); the process area to 4096 bytes (the signal records); states ZOMBIE, VFORK, WAITING; `clone_current`, `vfork_wait`, `exec_current`, `child_ended`, `zombie`, `wait_child`, `end_with` (the status word), `self_pid`, `self_ppid`, `pid_of`; `finish` resumes a vfork parent, reparents to pid 1, keeps a zombie for a parent and wakes it; `reap` keeps a zombie's slot and never frees a borrowed space |
+| `files/` (px14 additions) | `dup` (dup, dup2, dup3: the copy without close-on-exec unless asked; a position per descriptor, not per open file, named), `exec_close` (O_CLOEXEC), `exec_lookup` (execve's file: -ENOENT, -EACCES for a directory, a device or no execute bit) |
+| `fpu/` (px14 additions) | `fork` (a child's x87/SSE state is its parent's), `exec` (the template, loaded at once) |
+| `user/` (px14 changes) | a `who` line's `pid` is the Linux pid; `exit`/`exit_group` leave `code << 8`, a fault the signal (`process.fault_signal`); `getpid`, `getppid`, `gettid`, `set_tid_address` the pid; the process calls routed to `process/`; `last_exit` only for a program the kernel started |
+| `kmain_console.lu` (px14 change) | init's environment gains `PATH=/bin` |
+| `../boot/user.S` (px14 addition) | `pax_argbuf`, 69632 bytes where a new program's strings are staged |
+| `../user/elf/procs.c` | the process calls' witness, C with no libc: run as pid 1 on PAX and as pid 1 of a fresh pid namespace on Linux, the same lines on both |
+
+- Not yet: `fork` without CLONE_VM (no address space is copied; refused
+  by name), threads (CLONE_VM without CLONE_VFORK, CLONE_THREAD),
+  signal delivery (masks and actions are recorded; `kill` is refused by
+  name), process groups and sessions (wait4's 0 and -pgid mean any
+  child), a shared file offset between a descriptor and its copy, rusage
+  (zeroed), `execveat`, `#!` scripts (-ENOEXEC).

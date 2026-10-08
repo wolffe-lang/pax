@@ -102,6 +102,22 @@
 //! (`wake_input`) when a read would answer; `kick` switches to it at
 //! once when the CPU was idle.
 //!
+//! **Processes** (px14): a user thread is a process with a Linux pid of
+//! its own (1 for the first, then 2, 3, … never reused in a boot; kernel
+//! threads have none) and its parent's (0 when the kernel started it).
+//! `clone_current` makes a child that borrows the caller's address space
+//! (`owns` 0: nothing frees a space a process only borrows) and
+//! `vfork_wait` suspends the caller (VFORK) until the child execs
+//! (`exec_current`, which makes the new space its own and gives the old
+//! one back or hands it back) or ends. An ending process (`finish`)
+//! resumes a vfork parent it holds, gives its children to pid 1 (or to
+//! nobody when it is pid 1 or pid 1 has ended), and, when it has a
+//! parent, is kept as a ZOMBIE once reaped (its stack and space given
+//! back, its pid and status word kept) and wakes the parent if it is in
+//! wait4 (WAITING); `child_ended` and `zombie` are the parent's side.
+//! Reaping may run in a system call too (wait4): never on the dead
+//! thread's own stack, always with IF clear.
+//!
 //! The record's fields are read and written as words at their
 //! `offset_of`: a store to a field of a raw element is refused
 //! (wolf-lang#577). Written from the Intel SDM vol. 3A §6.12.1, §6.14.2,
