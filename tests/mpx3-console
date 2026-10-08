@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+# tests/mpx3-console — px13: what a person types reaches a program on
+# PAX, through COM1 and through the PS/2 keyboard, and pelt, the POSIX
+# shell in wolf, runs as PID 1 and answers at its prompt. Every typed
+# session's transcript (the program's output and the line discipline's
+# echo) is byte-identical to the same session typed into the same
+# binary on a Linux pseudo-terminal.
+#
+#   tests/mpx3-console [--images DIR | --no-boot] [--pelt DIR]
+#                      [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# The programs: user/elf/ask.S (tools/mkuser: prompts, makes one read,
+# says what it read; `ask tty` first asks the terminal, reads a line
+# with echo off and bytes in non-canonical mode) and pelt
+# (user/pelt.pin's tree, tools/mkpelt, static), each unmodified. Two
+# initramfs: ask's (/bin/ask, /etc/pax-run `/bin/ask tty`) and pelt's
+# (/bin/pelt, /etc/pax-run `/bin/pelt`); one kernel, kmain_console,
+# which starts the console's input and runs etc/pax-run's command as
+# init with descriptors 0-2 the terminal, then says how init ended and
+# halts. The sessions (user/console/*.keys, typed by tools/qemu-halt
+# --type on PAX and by tools/linux-tty on Linux, the same format):
+#   ask-serial       ask.keys through COM1
+#   ask-ps2          ask.keys through the PS/2 keyboard (QEMU's sendkey)
+#   pelt-serial      pelt.keys (echo hi; x=3; echo $((x*2)); a function
+#                    defined and called; exit) through COM1
+#   pelt-eof-serial  pelt-eof.keys (echo hi; Ctrl-D at the prompt)
+#   pelt-eof-ps2     the same through the PS/2 keyboard
+# Assertions, per tier (native, release), firmware (bios, uefi) and
+# session:
+#   T0 build: tools/build-kernel's object assertions for kmain_console;
+#      ask and pelt static (ET_EXEC, no PT_INTERP); both initramfs and
+#      the ISOs built (digests printed); the Linux side ran every
+#      session (tools/linux-tty).
+#   T1 the input path: `console: com1 irq 4 vector 36, i8042 0x<a> ->
+#      0x<b> irq 1 vector 33, 8259 master mask 0xec; iflag 0x100 oflag
+#      0x05 cflag 0xbf lflag 0x8a3a`, with b's bits 0 (the keyboard's
+#      interrupt) and 6 (translation to set 1) set.
+#   T2 the session, differential: the serial log after the exec line,
+#      the kernel's own lines (`user: …`) left out, up to the program's
+#      end, is byte-identical (CRs removed on both sides) to the Linux
+#      transcript, and the program's exit status is Linux's.
+#   T3 what was typed arrived, all of it and by the path it was typed
+#      on: the console's summary counts exactly the bytes typed (COM1)
+#      or the characters typed (the keyboard), and none from the other.
+#   T4 what PAX lacks: -ENOSYS only for set_robust_list (273) and rseq
+#      (334) in a pelt session (glibc's start-up tolerates both), none
+#      in an ask session (no libc); refused by name exactly `tty ioctl 0x…5499` in an ask
+#      session (ask's request no terminal answers) and nothing in a pelt
+#      session.
+#   T5 the end: `PAX: init /bin/<prog> ended with status <s>; nothing
+#      left to run` with s Linux's status, `halt`, and qemu-halt holds
+#      the machine halted.
+#
+# --images DIR boots what this script built earlier (DIR holds
+# <tier>/kmain_console.elf, <tier>/console-{ask,pelt}.iso and linux/):
+# any host with QEMU and python3, no wolf. Without it the script builds
+# (linux x86-64); --no-boot stops after T0. --pelt DIR takes pelt from
+# DIR instead of building it.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 peltdir=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --pelt)     peltdir=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "usage: tests/mpx3-console [--images DIR | --no-boot] [--pelt DIR] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+need readelf python3
+
+SESSIONS="ask-serial ask-ps2 pelt-serial pelt-eof-serial pelt-eof-ps2"
+image_of() { case $1 in ask-*) echo ask ;; *) echo pelt ;; esac; }
+keys_of() { case $1 in ask-*) echo ask ;; pelt-eof-*) echo pelt-eof ;; *) echo pelt ;; esac; }
+kbd_of() { case $1 in *-ps2) echo ps2 ;; *) echo serial ;; esac; }
+prompt_of() { case $1 in ask-*) echo '> ' ;; *) echo '$ ' ;; esac; }
+argv_of() { case $1 in ask) echo "/bin/ask tty" ;; *) echo "/bin/pelt" ;; esac; }
+
+work=$PAX_BUILD/mpx3-console
+runs=$PAX_BUILD/mpx3-console-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+HEX='0x[0-9a-f]+'
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/ask/root/bin" "$work/ask/root/etc" "$work/pelt/root/bin" "$work/pelt/root/etc" "$work/linux"
+    why=
+    # The programs.
+    if "$PAX_ROOT/tools/mkuser" "$work/user" > "$work/user.txt"; then
+        cp "$work/user/ask" "$work/ask/root/bin/ask"
+    else
+        why+=" tools/mkuser;"
+    fi
+    if [ -n "$peltdir" ]; then
+        cp "$peltdir/pelt" "$work/pelt/root/bin/pelt" || why+=" no $peltdir/pelt;"
+        say "pelt from $peltdir"
+    elif "$PAX_ROOT/tools/mkpelt" "$work/peltbin" > "$work/pelt.txt"; then
+        cp "$work/peltbin/pelt" "$work/pelt/root/bin/pelt"
+    else
+        why+=" tools/mkpelt;"
+    fi
+    for p in ask pelt; do
+        f=$work/$p/root/bin/$p
+        [ -f "$f" ] || { why+=" no bin/$p;"; continue; }
+        r=$(static_ok "$f") || why+=" $r;"
+        say "  program: bin/$p $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+        argv_of "$p" > "$work/$p/root/etc/pax-run"
+        if "$PAX_ROOT/tools/mkinitramfs" "$work/$p.cpio" "/bin/$p=$f" "/etc/pax-run=$work/$p/root/etc/pax-run" > "$work/$p.initramfs.txt"; then
+            sed "s/^/  initramfs $p: /" "$work/$p.initramfs.txt" >&2
+        else
+            why+=" tools/mkinitramfs $p;"
+        fi
+    done
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            for p in ask pelt; do
+                "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                    --add "$work/$p.cpio" initramfs.cpio "$elf" "$work/$tier/console-$p.iso" >/dev/null \
+                    || why+=" $tier console-$p: mkimage;"
+                say "built $tier console-$p: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/console-$p.iso"), initramfs $(sha256_of "$work/$p.cpio")"
+            done
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    # The Linux side: the same binaries, the same keys, a pseudo-terminal.
+    if [ "$(uname -s)" != Linux ]; then
+        why+=" the Linux side needs Linux (this is $(uname -s)): build on Linux, boot here with --images;"
+    else
+        for s in $SESSIONS; do
+            p=$(image_of "$s")
+            # shellcheck disable=SC2046
+            if "$PAX_ROOT/tools/linux-tty" --keys "$PAX_ROOT/user/console/$(keys_of "$s").keys" --prompt "$(prompt_of "$s")" \
+                --argv0 "/bin/$p" "$work/linux/$s.tty" -- "$work/$p/root/bin/$p" $(argv_of "$p" | cut -s -d' ' -f2-); then
+                say "  linux $s: $(wc -c < "$work/linux/$s.tty" | tr -d ' ') bytes, status $(cat "$work/linux/$s.tty.rc")"
+            else
+                why+=" tools/linux-tty $s;"
+            fi
+        done
+    fi
+    [ -z "$why" ] && say "PASS T0: kmain_console built ($tiers), ask and pelt static, two initramfs, Linux typed $(echo $SESSIONS | wc -w | tr -d ' ') sessions" || bad "T0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx3-console build (T0): PASS (no boot: --no-boot)" || say "mpx3-console build: FAIL"
+        exit "$fail"
+    fi
+fi
+lx=$images/linux
+[ -d "$lx" ] || die "no $lx (build first)"
+
+record() { # tier leg session status
+    ran=$((ran + 1))
+    printf '%s kmain_console %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" \
+        "$(sha256_of "$iso")" >> "$runs"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        for s in $SESSIONS; do
+            p=$(image_of "$s") kb=$(kbd_of "$s") pr=$(prompt_of "$s")
+            id="$tier $leg $s"
+            log=$PAX_BUILD/mpx3-console-$tier-$leg-$s.serial.log
+            elf=$images/$tier/kmain_console.elf iso=$images/$tier/console-$p.iso
+            rm -f "$log" "$log.verdict" "$log.typed"
+            if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+                for t in T1 T2 T3 T4 T5; do bad "$t $id: no image"; done
+                continue
+            fi
+            hrc=0
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 300 \
+                --elf "$elf" --marker 'halt' --type "$PAX_ROOT/user/console/$(keys_of "$s").keys" \
+                --prompt "$pr" --keyboard "$kb" "$iso" >"$log.verdict" 2>&1 || hrc=$?
+            record "$tier" "$leg" "$s" "$hrc"
+            norm=$log.norm; serial_norm "$log" > "$norm"
+
+            # T1
+            why=
+            cl=$(grep -m1 '^console: com1 ' "$norm")
+            if printf '%s\n' "$cl" | command grep -Eqx "console: com1 irq 4 vector 36, i8042 ($HEX) -> ($HEX) irq 1 vector 33, 8259 master mask 0xec; iflag 0x100 oflag 0x05 cflag 0xbf lflag 0x8a3a"; then
+                after=$(printf '%s\n' "$cl" | sed -E 's/.* -> (0x[0-9a-f]+) irq 1 .*/\1/')
+                [ $(( after & 0x41 )) = $((0x41)) ] || why+=" the i8042's configuration $after lacks bit 0 or 6;"
+            else
+                why+=" no console line as expected ('$cl');"
+            fi
+            [ -z "$why" ] && say "PASS T1 $id: $cl" || bad "T1 $id:$why"
+
+            # T2: the session against Linux's.
+            why=
+            out=$PAX_BUILD/mpx3-console-$tier-$leg-$s.session
+            awk '/^user: exec pid / { on = 1; next } on && /^user: [^ ]+ pid [0-9]+ (exit_group|exit) [0-9]+ after / { exit } on && !/^user: / { print }' "$norm" > "$out"
+            tr -d '\r' < "$lx/$s.tty" > "$out.linux"
+            # A transcript that does not end in a newline gets one, as the
+            # serial log's line structure adds it (awk prints whole lines).
+            [ -z "$(tail -c 1 "$out.linux")" ] || printf '\n' >> "$out.linux"
+            if ! cmp -s "$out.linux" "$out"; then
+                why+=" the session differs from Linux's: $(diff "$out.linux" "$out" | head -n 8 | tr '\n' '|');"
+            fi
+            pst=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ (exit_group|exit) ([0-9]+) after .*/\2/p' "$norm" | head -n 1)
+            lst=$(cat "$lx/$s.tty.rc" 2>/dev/null)
+            [ "$pst" = "$lst" ] || why+=" exit '$pst' on PAX, '$lst' on Linux;"
+            [ "$(wc -c < "$out" | tr -d ' ')" -gt 0 ] || why+=" an empty session;"
+            [ -z "$why" ] && say "PASS T2 $id: the typed session byte-identical to Linux's ($(wc -l < "$out" | tr -d ' ') lines, $(sha256_of "$out" | cut -c1-12)…), exit $pst" || bad "T2 $id:$why"
+
+            # T3: what was typed arrived, by its path.
+            why=
+            typed=$(sed -n 's/^  bytes //p' "$log.typed" 2>/dev/null | awk '{ n += $1 } END { print n + 0 }')
+            sl=$(grep -m1 '^console: [0-9]* bytes from com1' "$norm")
+            c1=$(printf '%s\n' "$sl" | sed -n -E 's/^console: ([0-9]+) bytes from com1, ([0-9]+) keys .*/\1/p')
+            ky=$(printf '%s\n' "$sl" | sed -n -E 's/^console: ([0-9]+) bytes from com1, ([0-9]+) keys .*/\2/p')
+            if [ "$kb" = serial ]; then
+                [ "$c1" = "$typed" ] && [ "$ky" = 0 ] || why+=" typed $typed bytes on COM1, the console counted '$c1' from com1 and '$ky' keys ('$sl');"
+            else
+                [ "$ky" = "$typed" ] && [ "$c1" = 0 ] || why+=" typed $typed keys, the console counted '$ky' keys and '$c1' from com1 ('$sl');"
+            fi
+            [ "$typed" -gt 0 ] || why+=" nothing was typed;"
+            [ -z "$why" ] && say "PASS T3 $id: $typed typed through $kb, all counted there ($sl)" || bad "T3 $id:$why"
+
+            # T4
+            why=
+            ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
+            # ask has no libc, so it asks nothing PAX lacks; pelt's glibc
+            # start-up asks set_robust_list and rseq and tolerates -ENOSYS.
+            want=; [ "$p" = pelt ] && want="273 334"
+            [ "$ns" = "$want" ] || why+=" -ENOSYS for '$ns', not '$want';"
+            rf=$(grep ': refused: ' "$norm" | sed -E 's/^user: [^ ]+ pid [0-9]+ //' | paste -sd'|' -)
+            if [ "$p" = ask ]; then
+                [ "$rf" = "syscall 16: refused: tty ioctl 0x0000000000005499, -ENOTTY" ] || why+=" refusals '$rf', not ask's one tty ioctl;"
+            else
+                [ -z "$rf" ] || why+=" refusals '$rf';"
+            fi
+            [ -z "$why" ] && say "PASS T4 $id: -ENOSYS only for '${want:-nothing}'; refused: ${rf:-nothing}" || bad "T4 $id:$why"
+
+            # T5
+            why=
+            grep -qx "PAX: init /bin/$p ended with status $lst; nothing left to run" "$norm" \
+                || why+=" no 'PAX: init /bin/$p ended with status $lst' ($(grep -m1 '^PAX: init ' "$norm"));"
+            [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+            "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'PAX: init .*' 'halt' >/dev/null \
+                || why+=" the log does not end with the init line and halt;"
+            [ -z "$why" ] && say "PASS T5 $id: init ended, status $lst; $(tail -n 1 "$log.verdict")" || bad "T5 $id:$why"
+        done
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx3-console: PASS" || say "mpx3-console: FAIL"
+exit "$fail"
