@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# mkpelt — build pelt, the POSIX shell in wolf, as a fully static x86-64
+# Linux executable, unmodified, from pelt's own tree (px13).
+#
+#   tools/mkpelt OUTDIR
+#
+# The tree is user/pelt.pin's commit of wolffe-lang/pelt (public). The
+# toolchain is the one THAT tree pins in its wolf-toolchain.toml: the
+# wolf release archive for x86_64-unknown-linux-gnu by its sha256
+# (refused on a mismatch), and wolf-std at the commit it names
+# (`WOLF_STD`). pelt is built as its own tools/build builds the release
+# tier (`wolf build --release --deny-warnings src/pelt.lu`), with
+# tools/mkboreutils' one difference: wolf links through the `cc` first
+# on PATH (wolf has no `--static`), and a `cc` that adds `-static` is put
+# there, so the binary is a static glibc executable: ET_EXEC, no
+# PT_INTERP. It is checked to be exactly that (readelf), and
+# `OUTDIR/sums.txt` gets `pelt <sha256> <bytes>`.
+#
+# Build on a baseline x86-64 glibc (the CI runner's Ubuntu; an Ubuntu
+# container on kasumi), never on kasumi's CachyOS x86-64-v4 glibc (px10).
+# The release tier needs clang at run time (wolf's D33). Exit 0, or 2 on
+# a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkpelt OUTDIR"
+out=$1
+need git curl tar readelf cc clang
+. "$PAX_ROOT/user/pelt.pin"
+mkdir -p "$out" "$PAX_CACHE"
+out=$(cd "$out" && pwd)
+
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-pelt.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+
+tree() { # repo rev dir
+    mkdir -p "$3"
+    git -C "$3" init -q
+    git -C "$3" fetch -q --depth 1 "$1" "$2" || die "cannot fetch $1 at $2"
+    git -C "$3" checkout -q --detach FETCH_HEAD
+    [ "$(git -C "$3" rev-parse HEAD)" = "$2" ] || die "$1: HEAD is not $2"
+}
+
+# pelt at the pin, and what it pins.
+tree "$PELT_REPO" "$PELT_REV" "$w/pelt"
+toml=$w/pelt/wolf-toolchain.toml
+key() { # section key
+    awk -v s="[$1]" -v k="$2" '
+        /^\[/ { on = ($0 == s); next }
+        on && $1 == k { v = $0; sub(/^[^=]*= *"?/, "", v); sub(/"? *$/, "", v); print v; exit }' "$toml"
+}
+wv=$(key wolf version)
+wsha=$(key wolf x86_64-unknown-linux-gnu)
+wline=$(key wolf version_line)
+srepo=$(key std repo)
+srev=$(key std rev)
+[ -n "$wv" ] && [ -n "$wsha" ] && [ -n "$srepo" ] && [ -n "$srev" ] \
+    || die "cannot read wolf version/digest and std repo/rev from pelt's wolf-toolchain.toml"
+say "pelt $PELT_REV pins wolf $wv (${wsha:0:8}…), wolf-std $srev"
+
+# wolf, by the digest pelt names (cached by digest).
+arc=$PAX_CACHE/wolf-$wv-$wsha.tar.gz
+if [ ! -f "$arc" ] || [ "$(sha256_of "$arc")" != "$wsha" ]; then
+    curl -sSfL --retry 3 -o "$arc.part" \
+        "https://github.com/wolffe-lang/wolf-lang/releases/download/v$wv/wolf-$wv-x86_64-unknown-linux-gnu.tar.gz" \
+        || die "cannot download wolf $wv"
+    mv "$arc.part" "$arc"
+fi
+[ "$(sha256_of "$arc")" = "$wsha" ] || die "wolf $wv archive: sha256 $(sha256_of "$arc"), pelt pins $wsha"
+mkdir -p "$w/wolf"
+tar -xzf "$arc" -C "$w/wolf" --strip-components=1
+wolf=$w/wolf/wolf
+have=$("$wolf" --version | head -n 1)
+[ "$have" = "$wline" ] || die "wolf --version says '$have'; pelt pins '$wline'"
+say "$have"
+
+# wolf-std at the commit pelt names.
+tree "https://github.com/${srepo}" "$srev" "$w/stdrepo"
+std=$w/stdrepo/std
+[ -d "$std" ] || die "wolf-std $srev has no std/"
+
+# The static `cc`.
+mkdir -p "$w/bin"
+real=$(command -v cc)
+printf '#!/bin/sh\nexec %s -static "$@"\n' "$real" > "$w/bin/cc"
+chmod +x "$w/bin/cc"
+
+: > "$out/sums.txt"
+(cd "$w/pelt" && PATH="$w/bin:$PATH" WOLF_STD=$std \
+    "$wolf" build --release --no-cache --deny-warnings src/pelt.lu -o "$out/pelt") >&2 \
+    || die "wolf build of src/pelt.lu"
+readelf -hW "$out/pelt" | grep -Eq 'Type: +EXEC' || die "pelt is not ET_EXEC"
+! readelf -lW "$out/pelt" | grep -q INTERP || die "pelt has a PT_INTERP (not static)"
+printf '%s %s %s\n' pelt "$(sha256_of "$out/pelt")" "$(wc -c < "$out/pelt" | tr -d ' ')" | tee -a "$out/sums.txt"
+printf 'linked against: %s\n' "$("$real" -print-file-name=libc.a)"
