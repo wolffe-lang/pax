@@ -16,6 +16,9 @@
                     kernel/console reports
      pax_con_ring   4096 bytes: the input queue, a ring indexed by the
                     counters modulo 4096
+     pax_log_quiet  one eight-byte word (px15): 1 when the kernel command
+                    line says `quiet` (kernel/log's `quiet`, set once by
+                    kernel/user's `start`), 0 otherwise
 
    No Linux source; no other kernel's source. */
 
@@ -28,5 +31,9 @@ pax_con_state:
         .globl pax_con_ring
 pax_con_ring:
         .zero 4096
+        .p2align 3
+        .globl pax_log_quiet
+pax_log_quiet:
+        .zero 8
 
         .section .note.GNU-stack, "", @progbits

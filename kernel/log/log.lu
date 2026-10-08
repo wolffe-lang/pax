@@ -6,9 +6,32 @@
 //! interpolation allocates, and the freestanding target has no
 //! allocator (K8(b)). The module keeps no state (wolf has no
 //! module-level state on this target yet, KWC kw09), so a line is
-//! whatever its caller writes between two `end`s.
+//! whatever its caller writes between two `end`s — but one word,
+//! `quiet` (px15), in boot/console.S's storage: whether the kernel
+//! command line asked for no narration of a program's ordinary life.
+//! The callers that narrate ask it; this module writes every line it is
+//! given.
 
 use serial
+
+extern "c" let pax_log_quiet: *u64
+
+/// Whether the console is quiet (px15): the kernel command line said
+/// `quiet`. The narrating callers (kernel/process's exec line,
+/// kernel/user's exit and -ENOSYS lines, kmain_console's frames line)
+/// print nothing when it is; refusals, faults and bad buffers print
+/// whatever it says.
+pub fn quiet() -> bool {
+    // # Safety: boot/console.S's 8-byte word, written once at start-up
+    // (`set_quiet`) and read volatile.
+    unsafe { (pax_log_quiet as u64 as *u64).read_volatile() != 0 }
+}
+
+/// Set `quiet` (kernel/user's `start`, from the command line).
+pub fn set_quiet(on: bool) {
+    // # Safety: as `quiet`.
+    unsafe { (pax_log_quiet as u64 as *u64).write_volatile(if on { 1 } else { 0 }) }
+}
 
 /// Write the bytes of `s`, with no line end.
 pub fn put(s: str) {
