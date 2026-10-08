@@ -565,6 +565,54 @@ pub fn user_ok(pml4: u64, va: u64) -> bool {
     e1 & want == want
 }
 
+/// Whether a user-mode WRITE of `va` in the structures at `pml4` would
+/// succeed (px12): `user_ok`, and the leaf writable (every upper level
+/// in the user half is made writable, USER_TABLE).
+pub fn user_ok_write(pml4: u64, va: u64) -> bool {
+    if !user_ok(pml4, va) {
+        return false
+    }
+    let e4 = entry(pml4, index(va, 4))
+    let e3 = entry(e4 & ADDR, index(va, 3))
+    let e2 = entry(e3 & ADDR, index(va, 2))
+    let e1 = entry(e2 & ADDR, index(va, 1))
+    e1 & RW != 0
+}
+
+/// Rewrite the leaf of the 4 KiB user page at `va` in the structures at
+/// `pml4` (px12, `mprotect`): its frame kept, its flags `flags` (RW, NX
+/// and US are the caller's; P is added), INVLPG when `pml4` is live.
+/// False when no page is mapped there.
+pub fn protect_user(pml4: u64, va: u64, flags: u64) -> bool {
+    if va >= USER_TOP || va % PAGE != 0 {
+        return false
+    }
+    let e4 = entry(pml4, index(va, 4))
+    if e4 & P == 0 {
+        return false
+    }
+    let e3 = entry(e4 & ADDR, index(va, 3))
+    if e3 & P == 0 || e3 & PS != 0 {
+        return false
+    }
+    let e2 = entry(e3 & ADDR, index(va, 2))
+    if e2 & P == 0 || e2 & PS != 0 {
+        return false
+    }
+    let pt = e2 & ADDR
+    let i = index(va, 1)
+    let e1 = entry(pt, i)
+    if e1 & P == 0 {
+        return false
+    }
+    set_entry(pt, i, (e1 & ADDR) | flags | P)
+    if cr3() & ADDR == pml4 {
+        // # Safety: cpu.S's INVLPG; it only drops TLB entries.
+        unsafe { pax_invlpg(va) }
+    }
+    true
+}
+
 /// Give back everything in the user half of the structures at `pml4`
 /// (every page's frame, every table) and the PML4 itself. The kernel
 /// half is shared and left alone. `pml4` must not be live. Returns the
