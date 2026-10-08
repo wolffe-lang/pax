@@ -1,0 +1,194 @@
+//! uaccess — reading and writing a process's memory from a system call
+//! (px12, M-PX3).
+//!
+//! Every access walks the process's own tables first (kernel/paging's
+//! `user_ok` for a read, `user_ok_write` for a write: present and
+//! user-accessible at every level, and writable at the leaf for a
+//! write) and then touches the frame through the HHDM, never the user
+//! address: so SMAP stays on and is never relaxed here (px09's
+//! `pax_peek_user` is the one STAC in the kernel, for the console's
+//! `write`), and a page the process may not touch in ring 3 (a
+//! `PROT_NONE` page, RELRO after `mprotect`, the kernel half) is refused
+//! with -EFAULT before one byte moves, as Linux's calls refuse a buffer
+//! "outside your accessible address space". A range is checked whole
+//! before it is copied, so PAX copies all or nothing (Linux may copy a
+//! prefix). System calls run with IF clear on one CPU, so nothing unmaps
+//! a page between the check and the copy.
+//!
+//! Lengths come from ring 3 and may be anything: every sum is checked
+//! against the user half's top before it is formed (wolf's arithmetic
+//! traps on overflow). No region, no heap. No Linux source; no other
+//! kernel's source.
+
+use frames
+use paging
+
+const PAGE: u64 = 4096
+
+/// Whether [va, va + len) lies in the user half (len may be 0).
+pub fn in_user(va: u64, len: u64) -> bool {
+    let top = paging.user_top()
+    va < top && len <= top - va
+}
+
+/// Whether every page of [va, va + len) is readable from ring 3 in the
+/// structures at `pml4` (true for len 0 inside the user half).
+pub fn readable(pml4: u64, va: u64, len: u64) -> bool {
+    if !in_user(va, len) {
+        return false
+    }
+    if len == 0 {
+        return true
+    }
+    var pg = va - va % PAGE
+    while pg < va + len {
+        if !paging.user_ok(pml4, pg) {
+            return false
+        }
+        pg += PAGE
+    }
+    true
+}
+
+/// Whether every page of [va, va + len) is writable from ring 3.
+pub fn writable(pml4: u64, va: u64, len: u64) -> bool {
+    if !in_user(va, len) {
+        return false
+    }
+    if len == 0 {
+        return true
+    }
+    var pg = va - va % PAGE
+    while pg < va + len {
+        if !paging.user_ok_write(pml4, pg) {
+            return false
+        }
+        pg += PAGE
+    }
+    true
+}
+
+/// The kernel (HHDM) address of user byte `va`, whose page the caller
+/// has checked.
+fn kaddr(pml4: u64, va: u64) -> u64 {
+    let pa = paging.translate(pml4, va) else 0
+    pa + frames.hhdm()
+}
+
+/// Copy `n` bytes from kernel address `src` to user address `dst`.
+/// False (nothing copied) unless the whole range is writable.
+pub fn copy_out(pml4: u64, dst: u64, src: u64, n: u64) -> bool {
+    if !writable(pml4, dst, n) {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        let room = PAGE - (dst + i) % PAGE
+        let k = if n - i < room { n - i } else { room }
+        let d = kaddr(pml4, dst + i)
+        var j: u64 = 0
+        while j < k {
+            // # Safety: d is the frame behind a page `writable` checked,
+            // through the HHDM; [d, d + k) stays in that page; src + i + j
+            // is inside the caller's kernel buffer.
+            unsafe { ((d + j) as *u8).write_volatile(((src + i + j) as *u8).read_volatile()) }
+            j += 1
+        }
+        i += k
+    }
+    true
+}
+
+/// Copy `n` bytes from user address `src` to kernel address `dst`.
+/// False (nothing copied) unless the whole range is readable.
+pub fn copy_in(pml4: u64, dst: u64, src: u64, n: u64) -> bool {
+    if !readable(pml4, src, n) {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        let room = PAGE - (src + i) % PAGE
+        let k = if n - i < room { n - i } else { room }
+        let s = kaddr(pml4, src + i)
+        var j: u64 = 0
+        while j < k {
+            // # Safety: as copy_out, the other way.
+            unsafe { ((dst + i + j) as *u8).write_volatile(((s + j) as *u8).read_volatile()) }
+            j += 1
+        }
+        i += k
+    }
+    true
+}
+
+/// Write `n` zero bytes at user address `va` (checked by the caller with
+/// `writable`).
+pub fn zero(pml4: u64, va: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        // # Safety: a byte of a page the caller checked writable.
+        unsafe { (kaddr(pml4, va + i) as *u8).write_volatile(0) }
+        i += 1
+    }
+}
+
+/// Write the low `width` bytes of `v` little-endian at user address `va`
+/// (checked by the caller with `writable`; the bytes may cross a page).
+pub fn put(pml4: u64, va: u64, v: u64, width: u64) {
+    var i: u64 = 0
+    var x = v
+    while i < width {
+        // # Safety: as `zero`.
+        unsafe { (kaddr(pml4, va + i) as *u8).write_volatile((x & 0xff) as u8) }
+        x = x >> 8
+        i += 1
+    }
+}
+
+/// The 8-byte little-endian word at user address `va` (checked by the
+/// caller with `readable`).
+pub fn get64(pml4: u64, va: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 8
+    while i > 0 {
+        i -= 1
+        // # Safety: a byte of a page the caller checked readable.
+        let b = unsafe { (kaddr(pml4, va + i) as *u8).read_volatile() }
+        v = (v << 8) | b as u64
+    }
+    v
+}
+
+/// Copy the NUL-terminated string at user address `va` to kernel address
+/// `dst` (at most `max` bytes before the NUL, the NUL copied too).
+/// Returns its length, `max + 1` when no NUL came within `max` bytes
+/// (-ENAMETOOLONG's case), or `max + 2` when a byte was not readable
+/// (-EFAULT's).
+pub fn string_in(pml4: u64, va: u64, dst: u64, max: u64) -> u64 {
+    var i: u64 = 0
+    var page: u64 = 1 // no page checked yet (never page-aligned)
+    var base: u64 = 0
+    while i <= max {
+        if !in_user(va, i + 1) {
+            return max + 2
+        }
+        let a = va + i
+        let pg = a - a % PAGE
+        if pg != page {
+            if !paging.user_ok(pml4, pg) {
+                return max + 2
+            }
+            page = pg
+            base = kaddr(pml4, pg)
+        }
+        // # Safety: the byte's page was checked readable just above.
+        let b = unsafe { ((base + a % PAGE) as *u8).read_volatile() }
+        // # Safety: dst + i is inside the caller's buffer of max + 1 bytes.
+        unsafe { ((dst + i) as *u8).write_volatile(b) }
+        if b == 0 {
+            return i
+        }
+        i += 1
+    }
+    max + 1
+}
