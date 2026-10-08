@@ -753,6 +753,82 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px13: the console. kmain_console starts COM1's receiver and the
+  # i8042's keyboard into one line discipline and runs init from the
+  # initramfs with descriptors 0-2 a terminal: ask (user/elf/ask.S,
+  # tools/mkuser), and pelt, the POSIX shell in wolf (user/pelt.pin's
+  # tree, built here by tools/mkpelt with the toolchain that tree pins,
+  # linked static against this runner's glibc), as PID 1. Each session
+  # (user/console/*.keys) is typed into PAX by tools/qemu-halt --type
+  # through COM1 or the PS/2 keyboard (the monitor's sendkey) and into
+  # the same binary on this runner's Linux through a pseudo-terminal
+  # (tools/linux-tty). tests/mpx3-console: the build (T0), the input path
+  # (T1), every transcript byte-identical to Linux's and the same exit
+  # status (T2), every typed byte arrived by its path (T3), -ENOSYS and
+  # refusals as named (T4), init's end and the halt (T5); both tiers,
+  # BIOS and UEFI.
+  mpx3-console:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          qemu-system-x86_64 --version
+          clang --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx3-console-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the console, both tiers, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx3-console
+
+      - name: keep the programs, the Linux side, the transcripts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx3-console-linux
+          path: |
+            build/mpx3-console/peltbin/
+            build/mpx3-console/pelt.txt
+            build/mpx3-console/user.txt
+            build/mpx3-console/linux/
+            build/mpx3-console/*.initramfs.txt
+            build/mpx3-console/*/kmain_console.elf
+            build/mpx3-console/*/*.log
+            build/mpx3-console-*.session
+            build/mpx3-console-*.session.linux
+            build/mpx3-console-*.log
+            build/mpx3-console-*.norm
+            build/mpx3-console-*.meta
+            build/mpx3-console-*.halt
+            build/mpx3-console-*.verdict
+            build/mpx3-console-*.typed
+            build/mpx3-console-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   # px08: the tour of the kernel. kmain_tour and kmain_tour_text
   # (kernel/pax_tour's stages over the test kernels' paths), two ISOs behind
   # Limine's menu (tools/tour build), both tiers, BIOS and UEFI.
