@@ -275,6 +275,7 @@ Shas are the branch's after the rebase onto px11 (trunk `6bd7796`). Runs before 
 
 - **Red** at `4814a89` (the gate, its tools and its CI job; no kernel): run **37701781024**, job 113066677789 (log `473f302a…`): mpx3-loader 0 PASS, 30 FAIL, 0 SKIP lines (L0 both tiers `tools/build-kernel`, L1–L7 `no image` on all four legs).
 - **Green** at `16b9c18` (the kernel): run **37702508398**, job 113069056009 (log `919d12c5…`): mpx3-loader **34 PASS, 0 FAIL, 0 SKIP**; every other job green but px08's suite (job 113069055939, R1: drift 3).
+- **Green on every job** at `2e224d5` (rebased on px11, the tour's version line moved): run **37707033950**: all 13 jobs success; mpx3-loader job 113083737797 34 PASS 0 FAIL 0 SKIP (log `b352b5ca…`), tour job 113083737762 44/0/0 (`c11b74c1…`), mkw job 113083737697 16/0/0 (`e94a4d06…`), macos-run success. The tour rebuilt on kasumi at `2e224d5` (`tests/tour`: 44 PASS, 0 FAIL): native `pax-tour.iso` `2ade3864…`, `pax-tour-b.iso` `8e804bd4…` (px11's were `a1a888ff…`, `cc9ed5b0…`): the image grew 112 → 156 KiB, so its addresses, frame counts (−25) and ending b's `rip` (`0xffffffff8001266b`) moved; every assertion holds.
 
 ### The planted breaks (each its own push and CI run)
 
@@ -380,3 +381,18 @@ for x86-64-v4, on a CPU that has it.
 Nothing upstream: every wolf refusal met is a documented rule (E0008
 reserved words, E0805 `byte`'s cast set, E0401 with
 `[type.err.alias.transparent]`). No pax issue names this work.
+
+## 5. Done-when
+
+- Branch `px10` on origin, rebased on pax trunk `6bd7796` (px11 merged,
+  after px08 `7c42f5b`); PR wolffe-lang/pax#13, open, unmerged.
+- CI green at the head: the run id is in the PR body (the head is this
+  note's commit; the code is `2e224d5`'s, green in run 37707033950).
+- Close nothing. To close: none (no pax issue names this work).
+- Worktrees: the local worktree `pax-px10` is removed at the end;
+  kasumi `~/lanes/px10/` and hasu `~/lanes/px10/` hold the lane's trees
+  and evidence, their `build/` directories pruned at the end.
+- Disclosed: one stray outside the lane's directory on kasumi early on,
+  `/tmp/px10-dyn` (a link experiment for `hello-dyn`), written and
+  removed by this lane in the same command, before the rule was
+  re-read; nothing else was written outside `~/lanes/px10/`.
