@@ -15,10 +15,10 @@
 #                    [--firmware bios|uefi|both] [--tier native|release|both]
 #
 # The programs, each unmodified: pelt (user/pelt.pin, tools/mkpelt),
-# boreutils' cat, echo, false, head, sleep, true and wc (user/
-# boreutils.pin, tools/mkboreutils), busybox-static's busybox as
-# /bin/ls (boreutils has no ls yet; busybox picks the applet from
-# argv[0]'s base name), procs (tools/mkuser). Two initramfs: the shell's
+# boreutils' cat, echo, false, head, ls, sleep, tail, true and wc
+# (user/boreutils.pin, tools/mkboreutils; px15: `ls` is boreutils' own,
+# bu18's, and busybox is gone), procs (tools/mkuser). Every program in
+# the shell's /bin is built by wolf. Two initramfs: the shell's
 # (those in /bin, /etc/motd, /etc/pax-run `/bin/pelt`) and procs' (/bin/
 # procs, /etc/motd, /etc/script — a text file with execute bits —
 # /etc/pax-run `/bin/procs`); one kernel, kmain_console (its environment
@@ -59,7 +59,7 @@
 # (linux x86-64; the Linux side needs root for chroot and the pid
 # namespace: sudo -n when not root); --no-boot stops after S0. --pelt
 # DIR and --bore DIR take pelt and the boreutils from DIR instead of
-# building them; PAX_BUSYBOX names busybox (default /bin/busybox).
+# building them.
 #
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
@@ -85,7 +85,7 @@ case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes b
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
 need readelf python3
 
-BORE="cat echo false head sleep true wc"
+BORE="cat echo false head ls sleep tail true wc"
 SESSIONS="shell-serial shell-ps2 procs"
 image_of() { case $1 in procs) echo procs ;; *) echo shell ;; esac; }
 init_of() { case $1 in procs) echo procs ;; *) echo pelt ;; esac; }
@@ -136,8 +136,6 @@ if [ -z "$images" ]; then
     for u in $BORE; do
         cp "$boredir/$u" "$sh/bin/$u" || why+=" no $boredir/$u;"
     done
-    bb=${PAX_BUSYBOX:-/bin/busybox}
-    cp "$bb" "$sh/bin/ls" || why+=" no busybox at $bb (busybox-static);"
     for r in "$sh" "$pr"; do
         printf 'PAX: this is /etc/motd, a text file in the initramfs, and not an ELF executable.\n' > "$r/etc/motd"
     done
