@@ -95,6 +95,13 @@
 //! `clock_nanosleep`): its frame is saved with the result already in
 //! %rax, and the timer wakes it as it wakes `sleep`.
 //!
+//! **Console input** (px13): a system call may also wait for what a
+//! person types (`block_input`, for `read` on the console with nothing
+//! ready): its frame is saved, rewound by kernel/user to re-run the
+//! `syscall`, and the console's interrupt makes it ready
+//! (`wake_input`) when a read would answer; `kick` switches to it at
+//! once when the CPU was idle.
+//!
 //! The record's fields are read and written as words at their
 //! `offset_of`: a store to a field of a raw element is refused
 //! (wolf-lang#577). Written from the Intel SDM vol. 3A §6.12.1, §6.14.2,
@@ -156,6 +163,7 @@ const RUNNING: u64 = 2
 const SLEEPING: u64 = 3
 const BLOCKED: u64 = 4
 const DEAD: u64 = 5
+const INPUT: u64 = 6 // px13: waiting for console input (kernel/console)
 
 const STACKS: u64 = 0xffffd00000000000 // PML4 slot 416
 const SPAN: u64 = 65536 // each slot's virtual space
@@ -488,6 +496,47 @@ pub fn sleep_current(f: u64, wake: u64) -> u64 {
     put_field(c, offset_of(Thread, wake), wake)
     put_field(c, offset_of(Thread, state), SLEEPING)
     wake_sleepers()
+    run_next()
+}
+
+/// Put the running thread to wait for console input from a system call
+/// (px13, `read` on the console with nothing ready): its frame `f` is
+/// saved as the caller left it (kernel/user has rewound it to re-run
+/// the `syscall`), the thread waits until `wake_input`, and the frame
+/// returned is the next thread's, for the handler to resume. IF clear.
+pub fn block_input(f: u64) -> u64 {
+    let c = cur()
+    put_field(c, offset_of(Thread, frame), f)
+    put_field(c, offset_of(Thread, state), INPUT)
+    wake_sleepers()
+    run_next()
+}
+
+/// Make every thread waiting for console input ready (px13: from the
+/// console's interrupt, when a read would answer). Returns how many.
+/// IF clear.
+pub fn wake_input() -> u64 {
+    var n: u64 = 0
+    var s: u64 = FIRST
+    while s < SLOTS {
+        if field(s, offset_of(Thread, state)) == INPUT {
+            put_field(s, offset_of(Thread, state), READY)
+            enqueue(s)
+            n += 1
+        }
+        s += 1
+    }
+    n
+}
+
+/// After a device's interrupt (px13): when the idle thread was running
+/// and a thread is now ready, switch to it at once rather than at the
+/// next tick; otherwise resume `f`. IF clear.
+pub fn kick(f: u64) -> u64 {
+    if sv(S_STARTED) == 0 || cur() != IDLE || sv(S_HEAD) == 0 {
+        return f
+    }
+    put_field(IDLE, offset_of(Thread, frame), f)
     run_next()
 }
 
