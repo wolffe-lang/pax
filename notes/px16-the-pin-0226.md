@@ -34,10 +34,10 @@ with the suites green.
 - kasumi's disk is tight: `CARGO_INCREMENTAL=0` where cargo runs (it
   does not here), one cache and tree set under `~/lanes/px16/`, pruned
   as the lane goes.
-- No word implying filming anywhere in pax. If the tour or shell ISOs
-  change, `~/scratch/wolf/pax-demo/` and `~/scratch/wolf/pax-shell/`
-  are refreshed (images, SHA256SUMS, src/, every quoted number in their
-  SHOTLISTs) and both preflights run to GO.
+- Nothing in pax names any use of the two folders outside it. If the
+  tour or shell ISOs change, `~/scratch/wolf/pax-demo/` and
+  `~/scratch/wolf/pax-shell/` are refreshed (images, SHA256SUMS, src/,
+  every number their notes quote) and both preflights run to GO.
 - Strict evidence (wolf-lang#571): every suite run with
   `PAX_REQUIRE_UEFI=1` and `WOLF_PAIRING_REQUIRE_SIBLING=1`, full
   output kept, `SKIP` lines counted.
@@ -181,3 +181,110 @@ compared raw; user programs built in `px13-ubuntu`.
   address in `boot/user.S`), nothing in the session; boot to the
   prompt on nomad-1 2.0 s ± 0.4; the Linux pane's tree unchanged
   (`c6379482…`).
+
+## §2 corrected after it was committed
+
+- `user/pelt.pin` `dd22a86` pins **wolf 0.2.24** (`501d6d3f…`) and
+  wolf-std `2f389a7` in its own `wolf-toolchain.toml`, not 0.2.25 as
+  §2 says (`tools/mkpelt`'s first lines on kasumi). The image's pelt is
+  the same bytes either way: `1e2535d7…`, px15's.
+- §1's line about the two folders outside pax was reworded after the
+  prediction's commit (it named their purpose); no prediction moved.
+
+## §3 against what was measured
+
+Gauntlets on kasumi (QEMU 11.1.1 TCG, clang 23.1.1, strict env), one per
+stage, each a `git archive` of the stage's commit: `base` `f197e40`
+(0.2.25), `pin` `79a262a`, `lit` `3ca8b8f` (the tour's banner), `r579`
+`b288e14`, `r577` `7bfe65b`, `r575` `6c60e9f`, `r572` `f1a46f1`. Every
+stage after the pin: every suite exit 0, the same PASS counts as
+`base`, 0 FAIL, 0 SKIP lines (`notes/px16/kasumi-*.summary`; the
+suites with user programs build in `px13-ubuntu` and boot on kasumi, so
+each counts its build step there and its boots here: mpx3-loader
+32 + 2, mpx3-boreutils 20 + 1, mpx3-console 100 + 1, mpx3-shell
+128 + 1, as CI's 34, 21, 101, 129).
+
+| prediction | measured |
+|---|---|
+| Q1: the pin's stamps | **right**: `wolf 0.2.26 (wolfgang, pin 89dc139)`, `lupin 0.1.49 (wolf-interp, reference interpreter at pin 294d626)`; both archives re-hashed by `fetch-wolf`/`fetch-lupin` on every run, on kasumi and in CI |
+| Q1: every suite holds except tour R1 on its eight legs | **right**: kasumi at `79a262a`: tour 36 PASS, 8 FAIL, all R1 (`wolf 0\.2\.26 … not found`), every other suite as `base`. CI run **37977981916** at `79a262a`: the tour job (113980983744) 36 PASS / 8 FAIL, the same eight (`notes/px16/ci-37977981916-tour.txt`); every other job green with trunk's counts. After `3ca8b8f` moved the literal: tour 44 |
+| Q1: no loaded byte of any kernel moves; native ELFs differ in DWARF only; release byte-identical but for the heap kernels | **right**: 67 ELFs (`notes/px16/elfcmp-base-pin.txt`): 32 byte-identical (every release kernel but the heap's four, and the stub), 31 identical once stripped of debug and build-id (every native kernel), 4 differing only outside loaded sections (the heap kernels: `.debug_info`/`.debug_str` from `libwolf_rt_none.a`, `110f062a…` at 0.2.25, `11708550…` at 0.2.26). No `SHF_ALLOC` section moved anywhere |
+| Q1: lupin 0.1.49 answers mkw step 6 as 0.1.48 | **right**: mkw 16 PASS |
+| Q1: wolf-hello changes bytes; its census stays `273 334` | **right**: `a3ada54b…` (11,749,384 bytes) → `53cedb0f…` (12,069,704); L8 `2 system calls PAX lacks (273 334)` on all four legs at every stage |
+| Q1: serial logs as 0.2.25's but timing and the version line | **wrong in two places, neither the kernel's code**: 20 of 170 logs differ once CRs and terminal escapes are dropped (`notes/px16/logcmp-base-pin.txt`): timing (run counts, ticks, the lock counters), as predicted; **mpx3-loader's** initramfs and exec lines, because wolf-hello is a bigger file (the module's size and address, its `PT_LOAD` ranges); and **kmain_double_fault's** `limine cr3`, one page apart on both firmwares in a kernel whose loaded bytes did not move (the ELF file around them did: its DWARF; not chased further) |
+| Q2 (#579): behaviour identical, every PASS count as Q1's | **right** (`kasumi-r579.summary`) |
+| Q2: native `.text` moves; image-derived lines may move, nothing else | **right**: native `.text` −889 bytes on average (−824 to −1,064) in all 30 kernels that link a caller; serial lines that moved are image-derived (frame counts, image, section, gdt/idt and fault addresses, `limine cr3`, the initramfs module's address) or timing, plus one PS/2 session's scancode count (53 → 54, a key's release timing; the session itself byte-identical) (`logcmp-lit-r579.txt`) |
+| Q2: release `.text` shrinks by at most the 19 bodies | **wrong**: release `.text` moved by −8,123 to +25,795 bytes (mean +4,014; `elfcmp-lit-r579.txt`). LLVM sees one object per kernel and re-decides inlining when the call graph changes: in `kmain_timer` 281 functions became 273 and `.text` grew 19%, with functions both newly inlined (`boot_info.memmap_base`, `console.com1_vector`, `gdt.set_rsp0`, …) and newly outlined (`apic.start`, `files.statx`, …). A release-tier byte prediction from a source change is not one this lane can make |
+| Q3 (#577): behaviour identical; frames' and heap's counts unchanged | **right** (`kasumi-r577.summary`; `logcmp-r579-r577.txt`: frame and heap counts moved only with the image) |
+| Q3: native moves; release identical or within a few instructions | **native right, direction unpredicted** (+743 bytes in every kernel: the field accesses are emitted in place where `get`/`set` were calls); **release wrong**, −13,505 to +17,625 (Q2's mechanism) |
+| Q4 (#575): behaviour identical | **right** (`kasumi-r575.summary`) |
+| Q4: `0xffff… ^ x` and `!x` the same code; the `%` forms move on native only | **native right** (−1,736 bytes on average: a mask instead of a remainder and a subtraction); **release wrong** (−20,546 to +19,670; Q2's mechanism); the `^`-versus-`!` half was not isolated (it shares a commit with the `%` sites in `process`) |
+| Q5 (#572): behaviour identical, every refusal's PANIC line as before | **right** (`kasumi-r572.summary`: mpx2-frames' and mpx2-heap's fault kernels, the tour's endings) |
+| Q5: both tiers' `.text` shrink | **wrong**: native **grew** +1,121 bytes on average: a call to a `-> never` fn gets an unreachable edge after it (`ud2`: 775 → 819 in native `kmain_frames`), and the native tier deletes nothing behind it; release −23,224 to +22,987 (Q2's mechanism) |
+| Q6: the tour ISOs change; only the version line and image-derived lines move on screen; PANIC on nomad-1 within ±0.5 s of 28.47 s | **right**: `pax-tour.iso` `51772fe7…`, `pax-tour-b.iso` `850c4bc2…`; against px15's transcript the version line, the image's physical address (one page up, still 408 KiB), the frame counts (+1) and ending b's `rip` (`0xffffffff80022c05`) moved; section ranges and gdt/idt addresses did not. PANIC at 28.49 s headless (`notes/px16/nomad1-tour-a.times`) and 28.42 s in a pseudo-terminal (`nomad1-tour-a-pty.times`); ending b chosen with keys at 2.0/2.7 s: PANIC at 26.11 s, as px15's (`nomad1-tour-b-keys-pty.times`) |
+| Q6: the shell ISO changes, the initramfs does not; the paging line and `lstar` may move; prompt in 2.0 s ± 0.4 | **right, and more so**: `pax-shell.iso` `99b34dec…`; **every boot line is byte-identical to px15's image** (`nomad1-shell-boot.serial.log` against px15's preflight log: no difference, `lstar 0xffffffff8000045c` and `65 table frames` included); the prompt 2.06 s after Enter; both sessions cut as before hash to `1934ecd0…` (24 lines), as px15's; the Linux tree on kasumi unchanged (`c6379482…`) |
+
+### What the measurement says about the next pin
+
+On the native tier a source change moves `.text` by a predictable
+sign and size; on the release tier any change to the call graph
+re-decides LLVM's inlining across the kernel, so release bytes and
+sizes are not predicted from source and a release-tier compare across
+a source change is a behaviour compare, never a byte compare.
+
+## 4. Evidence index
+
+- **Archives** (from the release API, re-hashed by `tools/fetch-wolf`
+  and `tools/fetch-lupin` on every run): wolf 0.2.26 linux x86-64
+  `05acdc5e…` (release 408143286, wolf-lang `89dc1394`; the unpacked
+  `wolf` `272e0888…`), lupin 0.1.49 linux x86-64 `84911a35…` (release
+  408028965, wolf-interp `f516a5f4`; `lupin` `6d057eb1…`).
+  `kernel/wolf.pin` at `79a262a`.
+- **The prediction**: `4bac09a` (before either archive was fetched;
+  kasumi's first 0.2.26 fetch was the lane's first build check, after
+  it).
+- **The move table**: §3 above, from `notes/px16/kasumi-*.summary`,
+  `elfcmp-*.txt` (every kernel ELF, stage to stage) and `logcmp-*.txt`
+  (every serial log, stage to stage, with the shapes of the lines that
+  moved).
+- **Seen red**: (1) the pin alone, CI run **37977981916** at `79a262a`:
+  tour job 113980983744, R1 FAIL on its eight legs
+  (`notes/px16/ci-37977981916-tour.txt`), the gate this lane moved the
+  literal for; (2) a planted break in the #577 retirement, `30df0d4`
+  (`frames.free` stores its count in `hint`): CI run **37983337784**,
+  mpx2-frames job 113999058481 F2–F5 and F8 FAIL on kmain_frames, both
+  tiers and firmwares (`notes/px16/ci-37983337784-mpx2-frames.txt`);
+  mpx2-sched, mpx3-user, mpx3-loader, mpx3-boreutils, mpx3-shell and
+  tour red with it; reverted in `decf34d`.
+- **CI at the head**: in the PR body (the head is this note's last
+  commit).
+- **The two folders outside pax**: `~/scratch/wolf/pax-demo/` (ISOs
+  `51772fe7…`, `850c4bc2…`; `src/` at `f1a46f1`; its preflight GO,
+  29.42 s) and `~/scratch/wolf/pax-shell/` (`99b34dec…`; its preflight
+  GO, prompt 2.1 s, the Linux pane's tree matching); every number they
+  quote re-measured on nomad-1 on 2026-10-09.
+
+### Drift from the contract, reported
+
+1. s213's retire list is not by file in wolf-lang #628's body (nor
+   #605's); it was re-derived here by grep (§2).
+2. Two of s213's four shapes are only partly retired, by judgment:
+   **#577** only in `frames` (the header's 16 accesses); `heap`'s books
+   keep one unsafe site for forty-odd accesses, and every volatile
+   field word (`sched`'s records, `user`/`process` frame words, `gdt`'s
+   RSP0 halves) stays volatile, because `p[i].f = v` is an ordinary
+   access ([mem.unsafe.raw.5] vs [mem.unsafe.volatile]); their comments
+   now say so. **#575**: the 32-bit `0xffffffff ^ K` flag tests stay (a
+   64-bit `!` would also test the high half).
+3. `pax_tour`'s closing line still says "Next: Linux binaries,
+   unmodified." (true at px08, done since px12): the tour's text, not
+   this lane's; noted for a later tour change.
+
+## 5. Done-when
+
+- Branch `px16` in pax, PR #19 open and unmerged, the five sections in
+  its body, commit shas as bullets, a test checklist.
+- CI green at the head (the run is in the PR body).
+- Worktree and kasumi trees removed, `~/lanes/px16` build outputs pruned,
+  no orphans. Close nothing; to close: none (s213's issues were closed
+  at r31).
