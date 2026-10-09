@@ -135,8 +135,10 @@ pub fn start() {
 /// Set the TSS's RSP0, the stack an interrupt or exception from ring 3
 /// switches to (px09). RSP0 sits at byte 4 of the packed TSS, so it is
 /// written as two aligned 32-bit halves (bytes 4 and 8): an 8-byte
-/// store at offset 4 is misaligned, a UB row (ruling #36), and a store
-/// to a field of a raw element is refused (wolf-lang#577). Only the CPU
+/// store at offset 4 is misaligned, a UB row (ruling #36). (wolf 0.2.26
+/// stores a packed field in place, wolf-lang#577, but as one ordinary
+/// 8-byte access; the CPU reads this word behind the compiler's back,
+/// so the halves stay volatile.) Only the CPU
 /// reads RSP0, and only on an interrupt, which cannot land between the
 /// two writes: every caller runs with IF clear.
 pub fn set_rsp0(v: u64) {
