@@ -279,10 +279,7 @@ pub fn dup(a: u64, old: u64, new: u64, cloexec: bool) -> u64 {
     if to == old {
         return to
     }
-    var fl = flags_of(a, old)
-    if fl & O_CLOEXEC != 0 {
-        fl = fl - O_CLOEXEC
-    }
+    var fl = flags_of(a, old) & !O_CLOEXEC
     if cloexec {
         fl = fl | O_CLOEXEC
     }
@@ -1071,7 +1068,7 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
             }
         }
         if more {
-            let rec = (19 + nl + 1 + 7) - (19 + nl + 1 + 7) % 8
+            let rec = (19 + nl + 1 + 7) & !7
             if rec > count - used {
                 if used == 0 {
                     return neg(EINVAL)
