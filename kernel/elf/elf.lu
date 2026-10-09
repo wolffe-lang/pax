@@ -81,11 +81,11 @@ fn ph(f: u64, i: u64, off: u64, n: u64) -> u64 {
 }
 
 fn page_down(a: u64) -> u64 {
-    a - a % PAGE
+    a & !(PAGE - 1)
 }
 
 fn page_up(a: u64) -> u64 {
-    (a + PAGE - 1) - (a + PAGE - 1) % PAGE
+    (a + PAGE - 1) & !(PAGE - 1)
 }
 
 /// The flags `paging.map_user` takes for a segment's `p_flags`.
@@ -197,7 +197,7 @@ pub fn check(f: u64, size: u64) -> u64 ! ElfError {
 fn page_at(pml4: u64, va: u64, fl: u64) -> u64 {
     let have = paging.translate(pml4, va) else 0
     if have != 0 {
-        return have - have % PAGE
+        return have & !(PAGE - 1)
     }
     let pa = frames.alloc() else 0
     if pa == 0 {
