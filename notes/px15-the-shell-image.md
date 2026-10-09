@@ -159,7 +159,7 @@ and IXON only, which nothing typed here reaches).
 1. The orchestrator's brief (2026-10-08) replaced item 3's command list: `ls /`, `head`/`tail`, `false; echo $?`, `sleep 1` and `exit` are not in the session; the howl session is. `head`, `tail` and `false` stay in `/bin` and in mpx3-boreutils' and shell-serial's sessions.
 2. The session ends with Ctrl-D, not `exit` (the brief's beat 9).
 3. `ls /` is in no session: Linux's chroot needs `/proc` for boreutils' `/dev/stdout`, and PAX has no `/proc`, so `ls /` cannot agree under the harness (bu18 measured the same).
-4. The note was first committed as `notes/px15-the-shell-take.md` with words this repository does not use; renamed and reworded in `b54b93a`/`9766071` (history keeps the first wording).
+4. The note was first committed under its contract's name, with words this repository does not use; renamed and reworded in `b54b93a`/`9766071` (history keeps the first wording).
 
 ## 5. Done-when
 
