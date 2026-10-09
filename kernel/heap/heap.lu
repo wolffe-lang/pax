@@ -245,7 +245,6 @@ fn map_fresh(va: u64) -> bool {
     let n = paging.map(live_pml4(), va, pa, paging.NX | paging.RW) else 99
     if n == 99 {
         panic.fail("heap: paging refused a heap page at", va)
-        return false
     }
     set(offset_of(HeapState, table_n), get(offset_of(HeapState, table_n)) + n)
     set(offset_of(HeapState, frames_n), get(offset_of(HeapState, frames_n)) + 1 + n)
@@ -418,7 +417,6 @@ fn take_pages(n: u64, size: u64) -> u64 {
         h = first_fit(n)
         if h == NIL {
             panic.fail("heap: no run after growing, pages", n)
-            return 0
         }
     }
     let len = rd(desc(h) + D_LEN)
@@ -548,17 +546,14 @@ fn free_small(i: u64, p: u64, size: u64, align: u64) {
     let c = class_of(size, align)
     if c == CLASSES || class_bytes(c) != bs {
         panic.fail("heap: free with the wrong size, asked", size)
-        return
     }
     let off = p - page_va(i)
     if off % bs != 0 {
         panic.fail("heap: free of an address inside a block", p)
-        return
     }
     let k = off / bs
     if !map_bit(i, k) {
         panic.fail("heap: double free", p)
-        return
     }
     flip_map_bit(i, k)
     wr(desc(i) + D_LIVE, rd(desc(i) + D_LIVE) - 1)
@@ -573,12 +568,10 @@ fn pages_of(size: u64) -> u64 {
 fn free_large(i: u64, p: u64, size: u64) {
     if p % PAGE != 0 {
         panic.fail("heap: free of an address inside a block", p)
-        return
     }
     let n = rd(desc(i) + D_LEN)
     if pages_of(size) != n {
         panic.fail("heap: free with the wrong size, asked", size)
-        return
     }
     release_run(i, n)
 }
@@ -617,15 +610,12 @@ pub fn alloc(size: u64, align: u64) -> u64 {
 fn alloc_locked(size: u64, align: u64) -> u64 {
     if !is_up() {
         panic.fail("heap: alloc before heap.start, asked", size)
-        return 0
     }
     if size == 0 || size > 0x7fffffffffffffff {
         panic.fail("heap: alloc of a size that is not positive", size)
-        return 0
     }
     if align == 0 || align & (align - 1) != 0 || align > PAGE {
         panic.fail("heap: alloc with a bad alignment", align)
-        return 0
     }
     var a: u64 = 0
     let c = class_of(size, align)
@@ -659,7 +649,6 @@ pub fn free(p: u64, size: u64, align: u64) {
 fn free_locked(p: u64, size: u64, align: u64) {
     if !is_up() || !in_zones(p) {
         panic.fail("heap: free outside the heap", p)
-        return
     }
     let i = (p - BASE) / PAGE
     let k = kind(i)
@@ -669,10 +658,8 @@ fn free_locked(p: u64, size: u64, align: u64) {
         free_large(i, p, size)
     } else if is_free(k) && p % PAGE == 0 {
         panic.fail("heap: double free", p)
-        return
     } else {
         panic.fail("heap: free of an address no block starts at", p)
-        return
     }
     set(offset_of(HeapState, live_n), get(offset_of(HeapState, live_n)) - 1)
     set(offset_of(HeapState, live_b), get(offset_of(HeapState, live_b)) - size)
