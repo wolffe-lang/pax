@@ -78,8 +78,10 @@
 //! Flag values, masks and sizes are module `const`s (px05; px03 wrote
 //! them as literals, wolf-lang#560). The flags other modules use are
 //! `pub const`s, read as `paging.RW`, `paging.NX` and so on (wolf
-//! 0.2.26, wolf-lang#579; until px16 they were `pub fn`s). wolf has no
-//! bitwise complement (wolf-lang#575), so masks are spelled whole.
+//! 0.2.26, wolf-lang#579; until px16 they were `pub fn`s). Alignment
+//! is `x & !(PAGE - 1)` (`!` on an integer, wolf 0.2.26, wolf-lang#575;
+//! until px16 `x - x % PAGE`); the address masks stay spelled whole, the
+//! bit ranges the SDM names.
 //!
 //! Written from the Intel 64 and IA-32 SDM vol. 3A ch. 4 (§4.1.3, §4.5,
 //! §4.6, §4.10.4) and the AMD64 APM vol. 2 ch. 5 (§5.3, §5.4, §5.5, §5.6)
@@ -739,9 +741,9 @@ pub fn build() -> u64 {
     while i < n {
         if in_hhdm(boot_info.memmap_type(i)) {
             let b = boot_info.memmap_base(i)
-            let lo = b - b % PAGE
+            let lo = b & !(PAGE - 1)
             let e = b + boot_info.memmap_length(i)
-            let hi = (e + PAGE - 1) - (e + PAGE - 1) % PAGE
+            let hi = (e + PAGE - 1) & !(PAGE - 1)
             if have && lo <= rh {
                 if hi > rh {
                     rh = hi
@@ -815,7 +817,7 @@ pub fn switch_to(pml4: u64) {
     }
     // # Safety: cpu.S returns the caller's stack pointer; reads nothing.
     let sp = unsafe { pax_rsp() }
-    let probe = translate(pml4, sp - sp % PAGE) else 0
+    let probe = translate(pml4, sp & !(PAGE - 1)) else 0
     if probe == 0 {
         panic.fail("paging: the stack is not mapped in the new structures", sp)
         return
