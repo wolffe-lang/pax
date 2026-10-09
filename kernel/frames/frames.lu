@@ -32,9 +32,9 @@
 //! unsafe accessor, `st()` (px05; px02 returned it from `init` and
 //! threaded it through every call, because wolf had no module state
 //! until kw09, wolf-lang#529). Layout: a `#[repr(c)]` header,
-//! `FrameState`, its fields read and written as `u64`s at their
-//! `offset_of` (px05; px02 wrote the offsets as literals before kw08),
-//! then the bitmaps:
+//! `FrameState`, its fields read and written in place through a
+//! `*FrameState` (px16; px05 read and wrote them as `u64`s at their
+//! `offset_of`, px02 at literal offsets before kw08), then the bitmaps:
 //!
 //!     FrameState (64 bytes)
 //!       magic   0x50415846524d4553 ("PAXFRMES")
@@ -116,14 +116,12 @@ fn wr(a: u64, v: u64) {
     }
 }
 
-/// The header field at byte offset `off` (an `offset_of(FrameState, …)`).
-fn get(off: int) -> u64 {
-    rd(st() + off as u64)
-}
-
-/// Write the header field at byte offset `off`.
-fn set(off: int, v: u64) {
-    wr(st() + off as u64, v)
+/// The header, at the state's first byte. Its fields are read and
+/// written in place, `hdr()[0].free -= 1` (wolf 0.2.26's field store,
+/// wolf-lang#577; px05 to px15 went through `offset_of` and a `*u64`).
+fn hdr() -> *FrameState {
+    // # Safety: a cast only; `st()` is the state `init` placed.
+    unsafe { st() as *FrameState }
 }
 
 /// The words of one bitmap over `span` frames.
@@ -136,7 +134,8 @@ fn free_map() -> u64 {
 }
 
 fn usable_map() -> u64 {
-    free_map() + words_of(get(offset_of(FrameState, span))) * WORD_BYTES
+    // # Safety: the header `init` wrote (`hdr`), mapped by the HHDM.
+    free_map() + words_of(unsafe { hdr()[0].span }) * WORD_BYTES
 }
 
 /// Bit `f` of the bitmap at `map`.
@@ -216,7 +215,8 @@ pub fn init() -> u64 ! InitError {
     unsafe {
         state = hhdm + spa
     }
-    set(offset_of(FrameState, span), span)
+    // # Safety: the state's first frame, taken above, mapped by the HHDM.
+    unsafe { hdr()[0].span = span }
     var w: u64 = 0
     while w < words * 2 {
         wr(free_map() + w * WORD_BYTES, 0)
@@ -255,13 +255,17 @@ pub fn init() -> u64 ! InitError {
     if held != own {
         panic.fail("frames: the allocator's own frames are not all usable at", spa)
     }
-    set(offset_of(FrameState, magic), MAGIC)
-    set(offset_of(FrameState, hhdm), hhdm)
-    set(offset_of(FrameState, usable), usable)
-    set(offset_of(FrameState, low), low)
-    set(offset_of(FrameState, own), own)
-    set(offset_of(FrameState, free), free_n)
-    set(offset_of(FrameState, hint), 0)
+    // # Safety: as the `span` store above.
+    unsafe {
+        let h = hdr()
+        h[0].magic = MAGIC
+        h[0].hhdm = hhdm
+        h[0].usable = usable
+        h[0].low = low
+        h[0].own = own
+        h[0].free = free_n
+        h[0].hint = 0
+    }
     st()
 }
 
@@ -304,9 +308,12 @@ pub fn report() {
 /// at or above 1 MiB, inside a usable entry, never one already handed
 /// out and not freed since. Row `out_of_memory` when no frame is free.
 pub fn alloc() -> u64 ! {out_of_memory} {
-    let words = words_of(get(offset_of(FrameState, span)))
+    let h = hdr()
+    // # Safety: the header `init` wrote (`hdr`), mapped by the HHDM.
+    let words = words_of(unsafe { h[0].span })
     let fmap = free_map()
-    var w = get(offset_of(FrameState, hint))
+    // # Safety: as above.
+    var w = unsafe { h[0].hint }
     var k: u64 = 0
     while k < words {
         if w >= words {
@@ -320,8 +327,11 @@ pub fn alloc() -> u64 ! {out_of_memory} {
             }
             let f = w * WORD_BITS + b
             clear_bit(fmap, f)
-            set(offset_of(FrameState, free), get(offset_of(FrameState, free)) - 1)
-            set(offset_of(FrameState, hint), w)
+            // # Safety: as above.
+            unsafe {
+                h[0].free -= 1
+                h[0].hint = w
+            }
             return f * FRAME
         }
         w += 1
@@ -354,27 +364,32 @@ pub fn free(pa: u64) {
         return
     }
     set_bit(free_map(), f)
-    set(offset_of(FrameState, free), get(offset_of(FrameState, free)) + 1)
+    // # Safety: the header `init` wrote (`hdr`), mapped by the HHDM.
+    unsafe { hdr()[0].free += 1 }
 }
 
 /// Frames in the map's usable entries (T).
 pub fn usable() -> u64 {
-    get(offset_of(FrameState, usable))
+    // # Safety: the header `init` wrote (`hdr`), mapped by the HHDM.
+    unsafe { hdr()[0].usable }
 }
 
 /// Usable frames below 1 MiB, never handed out (L).
 pub fn low() -> u64 {
-    get(offset_of(FrameState, low))
+    // # Safety: the header `init` wrote (`hdr`), mapped by the HHDM.
+    unsafe { hdr()[0].low }
 }
 
 /// Frames holding the allocator's own state, never handed out (S).
 pub fn own() -> u64 {
-    get(offset_of(FrameState, own))
+    // # Safety: the header `init` wrote (`hdr`), mapped by the HHDM.
+    unsafe { hdr()[0].own }
 }
 
 /// Frames that may be handed out now.
 pub fn free_count() -> u64 {
-    get(offset_of(FrameState, free))
+    // # Safety: the header `init` wrote (`hdr`), mapped by the HHDM.
+    unsafe { hdr()[0].free }
 }
 
 /// The physical address of the allocator's state (its first frame).
@@ -385,10 +400,12 @@ pub fn state_phys() -> u64 {
 /// The HHDM offset the allocator reaches its state and frames through
 /// (px03: kernel/paging reaches page tables the same way).
 pub fn hhdm() -> u64 {
-    get(offset_of(FrameState, hhdm))
+    // # Safety: the header `init` wrote (`hdr`), mapped by the HHDM.
+    unsafe { hdr()[0].hhdm }
 }
 
 /// The span: frame numbers below it are covered by the bitmaps.
 pub fn span() -> u64 {
-    get(offset_of(FrameState, span))
+    // # Safety: the header `init` wrote (`hdr`), mapped by the HHDM.
+    unsafe { hdr()[0].span }
 }
