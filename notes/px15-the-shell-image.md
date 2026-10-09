@@ -147,8 +147,8 @@ and IXON only, which nothing typed here reaches).
 
 ## 4. Evidence index
 
-- **The quiet test red then green**: red, CI run **37778469142** (job 113315250529) at `172f470` (the test before the kernel change): 12 FAIL lines, all `shell-howl-quiet` S1/S2/S4 (`notes/px15/ci-37778469142-mpx3-shell-172f470.txt`); kasumi a1 the same. Green: kasumi a3 at `4053a40` (129 PASS, 0 FAIL, 24 boots, TCG), CI run 37948767105 at `4053a40` and **37950564695 at the head `bad40dc`**, every job green (mpx3-shell 129 PASS, mpx3-boreutils 21, mpx3-console 101, tour 44; no SKIP).
-- **Planted break**: `3a414ea` (quiet hides a system call's refusal too), predicted red on exactly procs-quiet S4, four legs: CI run **37949636654** (job 113884754004), red on exactly those four (`notes/px15/ci-37949636654-mpx3-shell-plant-3a414ea.txt`, 125 PASS, 4 FAIL); reverted `3244f79`. The code at the head is `4053a40`'s: `git diff 4053a40 bad40dc -- kernel boot user tools tests .github` is empty.
+- **The quiet test red then green**: red, CI run **37778469142** (job 113315250529) at `172f470` (the test before the kernel change): 12 FAIL lines, all `shell-howl-quiet` S1/S2/S4 (`notes/px15/ci-37778469142-mpx3-shell-172f470.txt`); kasumi a1 the same. Green: kasumi a3 at `4053a40` (129 PASS, 0 FAIL, 24 boots, TCG), CI run 37948767105 at `4053a40` and 37950564695 at `bad40dc`, every job green; the head's run is in the PR body (mpx3-shell 129 PASS, mpx3-boreutils 21, mpx3-console 101, tour 44; no SKIP).
+- **Planted break**: `3a414ea` (quiet hides a system call's refusal too), predicted red on exactly procs-quiet S4, four legs: CI run **37949636654** (job 113884754004), red on exactly those four (`notes/px15/ci-37949636654-mpx3-shell-plant-3a414ea.txt`, 125 PASS, 4 FAIL); reverted `3244f79`. The code at the head is `4053a40`'s but for one comment's word (`b920850`): `git diff 4053a40 HEAD -- kernel boot user tools tests .github` is that line alone.
 - **Session diffs** (empty): `notes/px15/session-{shell-serial,shell-ps2,shell-howl,procs}.{pax,linux}.txt`, `session-{shell-howl,procs}-quiet.pax.txt` (kasumi a3, native BIOS); every leg in CI's S2.
 - **The tour**: `tests/tour` on kasumi at `8dde82d` (kernel code as the head): 45 PASS, rc 0; the ISOs changed (`ad646ec1…`, `3ddf288b…`; px14's `dd2e76e6…`, `788471df…`): the image 404 → 408 KiB, frames −3, ending b's `rip` `0xffffffff80022eb2`. The tour's folder refreshed and its preflight GO (the PANIC line in 29 s).
 - **The shell image**: `console-shell-quiet.iso` (native) of kasumi a3 at `4053a40`, sha256 `6903ece11464543546217418fea252e78af6e084ded6700c683beb7add62fb55`; boots to pelt's prompt in 2.0 s on nomad-1 (QEMU 11.1.1, TCG).
@@ -163,7 +163,7 @@ and IXON only, which nothing typed here reaches).
 
 ## 5. Done-when
 
-- Branch `px15` on origin; PR wolffe-lang/pax#18, open, unmerged; CI green at the head (run 37950564695).
+- Branch `px15` on origin; PR wolffe-lang/pax#18, open, unmerged; CI green at the head (run id in the PR body).
 - `/bin` all wolf (boreutils' `ls`), busybox gone from the image, the tests and CI's apt lists; `user/boreutils.pin` at `50d8907` in its own commit (`7b4bf70`).
 - `quiet` on the kernel command line, off in every test kernel, on in the shell image; `tests/mpx3-shell` proves both (narrating legs: no `user: quiet`, every exec/exit line; quiet legs: one `user: quiet`, none of them, refusals and the fault still printed).
 - Close nothing. To close: none (no pax issue names this work).
