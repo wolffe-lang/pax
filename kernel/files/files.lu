@@ -52,7 +52,9 @@ extern "c" let pax_kbuf: *u8
 
 const PAGE: u64 = 4096
 const PATH_MAX: u64 = 4095 // bytes before the NUL
-const FDS: u64 = 32
+/// The number dup3 and dup2 take as "too large" (px14): FDS + 1, so
+/// FDS itself can mean "the lowest free" for `dup`.
+pub const FDS: u64 = 32
 const A_REFUSAL: u64 = 3 // the area's refusal word (kernel/vm's too)
 const A_FD: u64 = 16 // the first descriptor's word
 const FD_WORDS: u64 = 4
@@ -289,12 +291,6 @@ pub fn dup(a: u64, old: u64, new: u64, cloexec: bool) -> u64 {
     install(a, to, k, n, fl)
     set_pos(a, to, at)
     to
-}
-
-/// The number dup3 and dup2 take as "too large" (px14): FDS + 1, so
-/// FDS itself can mean "the lowest free" for `dup`.
-pub fn fds() -> u64 {
-    FDS
 }
 
 /// px14: `execve` closes every descriptor opened with O_CLOEXEC (or
