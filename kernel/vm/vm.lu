@@ -189,7 +189,7 @@ pub fn brk(a: u64, pml4: u64, addr: u64) -> u64 {
         }
         pg = have
         while pg < want {
-            if !map_zero(pml4, pg, paging.writable() | paging.no_exec()) {
+            if !map_zero(pml4, pg, paging.RW | paging.NX) {
                 unmap_range(pml4, have, pg)
                 return cur
             }
@@ -207,10 +207,10 @@ pub fn brk(a: u64, pml4: u64, addr: u64) -> u64 {
 fn leaf(prot: u64) -> u64 {
     var f: u64 = 0
     if prot & PROT_WRITE != 0 {
-        f = f | paging.writable()
+        f = f | paging.RW
     }
     if prot & PROT_EXEC == 0 {
-        f = f | paging.no_exec()
+        f = f | paging.NX
     }
     f
 }
@@ -255,7 +255,7 @@ pub fn mmap(a: u64, pml4: u64, addr: u64, len: u64, prot: u64, flags: u64) -> u6
         put(a, A_REFUSAL, R_FILE)
         return NEG_ENODEV
     }
-    if len > paging.user_top() {
+    if len > paging.USER_TOP {
         return NEG_ENOMEM
     }
     let n = page_up(len)
@@ -264,7 +264,7 @@ pub fn mmap(a: u64, pml4: u64, addr: u64, len: u64, prot: u64, flags: u64) -> u6
         if addr % PAGE != 0 {
             return NEG_EINVAL
         }
-        if addr < LOW || addr >= paging.user_top() || n > paging.user_top() - addr {
+        if addr < LOW || addr >= paging.USER_TOP || n > paging.USER_TOP - addr {
             return NEG_ENOMEM
         }
         var pg = addr
@@ -300,11 +300,11 @@ pub fn mmap(a: u64, pml4: u64, addr: u64, len: u64, prot: u64, flags: u64) -> u6
 
 /// `munmap(addr, len)`: 0 or -EINVAL.
 pub fn munmap(pml4: u64, addr: u64, len: u64) -> u64 {
-    if addr % PAGE != 0 || len == 0 || addr >= paging.user_top() || len > paging.user_top() - addr {
+    if addr % PAGE != 0 || len == 0 || addr >= paging.USER_TOP || len > paging.USER_TOP - addr {
         return NEG_EINVAL
     }
     let n = page_up(len)
-    let end = if n > paging.user_top() - addr { paging.user_top() } else { addr + n }
+    let end = if n > paging.USER_TOP - addr { paging.USER_TOP } else { addr + n }
     unmap_range(pml4, addr, end)
     0
 }
@@ -318,7 +318,7 @@ pub fn mprotect(pml4: u64, addr: u64, len: u64, prot: u64) -> u64 {
     if len == 0 {
         return 0
     }
-    if addr >= paging.user_top() || len > paging.user_top() - addr {
+    if addr >= paging.USER_TOP || len > paging.USER_TOP - addr {
         return NEG_ENOMEM
     }
     let end = page_up(addr + len)
@@ -331,7 +331,7 @@ pub fn mprotect(pml4: u64, addr: u64, len: u64, prot: u64) -> u64 {
     }
     var fl = leaf(prot)
     if prot & PROT_KNOWN != 0 {
-        fl = fl | paging.user()
+        fl = fl | paging.US
     }
     pg = addr
     while pg < end {

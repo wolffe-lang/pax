@@ -404,7 +404,7 @@ pub fn load(p: u64) -> u64 {
     k = 0
     while k < STACK_PAGES {
         let pa = fresh(p)
-        must_map(pml4, STACK_TOP - (k + 1) * PAGE, pa, paging.writable() | paging.no_exec())
+        must_map(pml4, STACK_TOP - (k + 1) * PAGE, pa, paging.RW | paging.NX)
         k += 1
     }
     pml4
@@ -519,7 +519,7 @@ fn runs_tail() {
 /// Whether every page of [buf, buf + len) (len > 0) is user-readable in
 /// the live tables, the whole range below 0x800000000000.
 fn readable(buf: u64, len: u64) -> bool {
-    let top = paging.user_top()
+    let top = paging.USER_TOP
     if buf >= top || len > top - buf {
         return false
     }
@@ -749,7 +749,7 @@ fn uname(buf: u64) -> u64 {
 /// thread, kernel/sched); anything else -EINVAL.
 fn arch_prctl(code: u64, addr: u64) -> u64 {
     if code == ARCH_SET_FS {
-        if addr >= paging.user_top() {
+        if addr >= paging.USER_TOP {
             return NEG_EPERM
         }
         sched.set_self_fs(addr)
