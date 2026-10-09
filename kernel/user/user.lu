@@ -442,7 +442,7 @@ pub fn describe(p: u64, id: u64, cr3: u64) {
 /// program's address space, already live): into ring 3 at CODE, the
 /// stack's top as RSP. Never returns.
 export fn pax_user_thread(p: u64) {
-    if sched.self_prog() == sched.elf_prog() {
+    if sched.self_prog() == sched.ELF_PROG {
         // # Safety: as below; an ELF process's entry and stack were
         // mapped user by `exec` (kernel/elf's segments, the stack).
         unsafe { pax_enter_user(sched.self_exec(0), sched.self_exec(1)) }
@@ -500,7 +500,7 @@ fn who() {
     log.put("user: ")
     if p == 0 {
         log.put("kernel")
-    } else if p == sched.elf_prog() {
+    } else if p == sched.ELF_PROG {
         process.put_bytes(sched.self_exec(2), sched.self_exec(3))
     } else {
         log.put(name(p - 1))
@@ -777,7 +777,7 @@ fn prctl(option: u64, arg2: u64) -> u64 {
         return NEG_EFAULT
     }
     uaccess.zero(pml4, arg2, 16)
-    if sched.self_prog() == sched.elf_prog() {
+    if sched.self_prog() == sched.ELF_PROG {
         let a = sched.self_exec(2)
         let l = sched.self_exec(3)
         let n = if l < 15 { l } else { 15 }

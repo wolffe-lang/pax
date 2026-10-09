@@ -598,7 +598,7 @@ pub fn exec_span(body: u64, pa: u64, pl: u64, aa: u64, al: u64, ea: u64, el: u64
     let (envc, eb) = stage_words(av + ab, ea, el)
     let sp = build_stack(pml4, file, entry, av, argc, ab, av + ab, envc, eb, pa, pl)
     let (na, nl) = base_name(e)
-    let id = sched.create_process(body, sched.elf_prog() - 1, pml4, entry, sp, na, nl)
+    let id = sched.create_process(body, sched.ELF_PROG - 1, pml4, entry, sp, na, nl)
     vm.start(sched.area_of(id), image_top(file))
     describe_elf(file, sched.pid_of(id), pml4, entry, sp, argc, envc)
     id
@@ -819,7 +819,7 @@ pub fn clone(f: u64, nr: u64, a0: u64, a1: u64) -> u64 {
         return f
     }
     let s = sched.clone_current(f, usp)
-    if s == sched.slots() {
+    if s == sched.SLOTS {
         put_word(f, W_RAX, refuse_with(R_SLOTS, NEG_EAGAIN))
         return f
     }
@@ -861,7 +861,7 @@ pub fn wait4(f: u64, nr: u64, pid: u64, wstatus: u64, options: u64, rusage: u64)
         put_word(f, W_RAX, NEG_ECHILD)
         return f
     }
-    if s == sched.slots() {
+    if s == sched.SLOTS {
         if o & WNOHANG != 0 {
             put_word(f, W_RAX, 0)
             return f
@@ -902,7 +902,7 @@ pub fn waitid(f: u64, nr: u64, idtype: u64, id: u64, infop: u64, options: u64, r
         put_word(f, W_RAX, NEG_EFAULT)
         return f
     }
-    if s == sched.slots() {
+    if s == sched.SLOTS {
         if o & WNOHANG != 0 {
             if infop != 0 {
                 uaccess.zero(pml4, infop, 128)

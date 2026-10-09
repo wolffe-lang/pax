@@ -175,7 +175,9 @@ struct Thread {
     sigmask: u64, // px14: its blocked signals (rt_sigprocmask)
 }
 
-const SLOTS: u64 = 16
+/// How many slots there are (px14: `clone_current` and `child_ended`
+/// answer SLOTS for none).
+pub const SLOTS: u64 = 16
 const MAIN: u64 = 0
 const IDLE: u64 = 1
 const FIRST: u64 = 2 // the first spawnable slot
@@ -202,7 +204,9 @@ const FS_BASE: u64 = 0xc0000100 // px12: IA32_FS_BASE (Intel SDM vol. 4)
 
 const QUANTUM: u64 = 2 // ticks
 
-const ELF_PROG: u64 = 0x100 // px10: an ELF process's `prog`
+/// The `prog` an ELF process carries (px10): past every kernel/user
+/// blob's number + 1.
+pub const ELF_PROG: u64 = 0x100
 
 // boot/isr.S's frame, as word indices (kernel/interrupts' Frame: r15 r14
 // r13 r12 … vector error rip cs rflags rsp ss).
@@ -655,7 +659,7 @@ pub fn create_user(body: u64, prog: u64, cr3: u64) -> u64 {
 /// Start an ELF process (px10): a user thread in the address space at
 /// `cr3`, whose body (kernel/user's `pax_user_thread`, given `arg`)
 /// enters ring 3 at `entry` with RSP `usp`, named by the `len` bytes at
-/// `name`. Its `prog` is `elf_prog()`. Returns its id.
+/// `name`. Its `prog` is `ELF_PROG`. Returns its id.
 pub fn create_process(body: u64, arg: u64, cr3: u64, entry: u64, usp: u64, name: u64, len: u64) -> u64 {
     let saved = sync.irq_save()
     let id = start_thread(body, arg, cr3, ELF_PROG)
@@ -666,12 +670,6 @@ pub fn create_process(body: u64, arg: u64, cr3: u64, entry: u64, usp: u64, name:
     put_field(s, offset_of(Thread, name_len), len)
     sync.irq_restore(saved)
     id
-}
-
-/// The `prog` an ELF process carries (px10): past every kernel/user
-/// blob's number + 1.
-pub fn elf_prog() -> u64 {
-    ELF_PROG
 }
 
 fn start_thread(body: u64, arg: u64, cr3: u64, prog: u64) -> u64 {
@@ -983,13 +981,6 @@ pub fn guard_of(a: u64) -> u64 {
         return 0
     }
     field(s, offset_of(Thread, id)) + 1
-}
-
-/// How many slots there are (px14: `clone_current` and `child_ended`
-/// answer SLOTS for none; a `pub const` read from another module is
-/// refused, wolf-lang#579).
-pub fn slots() -> u64 {
-    SLOTS
 }
 
 /// The PML4 the stacks are mapped in.
