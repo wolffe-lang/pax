@@ -40,7 +40,7 @@ pub fn readable(pml4: u64, va: u64, len: u64) -> bool {
     if len == 0 {
         return true
     }
-    var pg = va - va % PAGE
+    var pg = va & !(PAGE - 1)
     while pg < va + len {
         if !paging.user_ok(pml4, pg) {
             return false
@@ -58,7 +58,7 @@ pub fn writable(pml4: u64, va: u64, len: u64) -> bool {
     if len == 0 {
         return true
     }
-    var pg = va - va % PAGE
+    var pg = va & !(PAGE - 1)
     while pg < va + len {
         if !paging.user_ok_write(pml4, pg) {
             return false
@@ -188,7 +188,7 @@ pub fn string_in(pml4: u64, va: u64, dst: u64, max: u64) -> u64 {
             return max + 2
         }
         let a = va + i
-        let pg = a - a % PAGE
+        let pg = a & !(PAGE - 1)
         if pg != page {
             if !paging.user_ok(pml4, pg) {
                 return max + 2
