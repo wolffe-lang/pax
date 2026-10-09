@@ -56,7 +56,7 @@
 //!
 //! **Reading**: `read` copies what is ready (in canonical mode up to and
 //! including the first newline, so one line a call) and answers its
-//! count; 0 at end of file; when nothing is ready it answers `restart()`
+//! count; 0 at end of file; when nothing is ready it answers `RESTART`
 //! and kernel/user puts the thread to sleep until `irq` makes something
 //! ready (kernel/sched's input wait), then re-runs its `syscall`; a
 //! descriptor opened O_NONBLOCK answers -EAGAIN instead.
@@ -160,11 +160,16 @@ const TIOCGWINSZ: u64 = 0x5413
 const TIOCSWINSZ: u64 = 0x5414
 
 // What `read` and `ioctl` answer besides a count.
-const RESTART: u64 = 0xfffffffffffffe00 // -512: never seen by ring 3
-const REFUSED: u64 = 0xfffffffffffffdff // -513: an ioctl refused by name
+/// What `read` answers when the thread must wait (kernel/user rewinds
+/// the system call and sleeps the thread on input).
+pub const RESTART: u64 = 0xfffffffffffffe00 // -512: never seen by ring 3
+/// What `ioctl` answers for a request refused by name (kernel/user
+/// logs it and answers -ENOTTY).
+pub const REFUSED: u64 = 0xfffffffffffffdff // -513: an ioctl refused by name
 const NEG_EFAULT: u64 = 0xfffffffffffffff2 // -14
 const NEG_EAGAIN: u64 = 0xfffffffffffffff5 // -11
-const NEG_ENOTTY: u64 = 0xffffffffffffffe7 // -25
+/// -ENOTTY, what a refused request answers ring 3.
+pub const NEG_ENOTTY: u64 = 0xffffffffffffffe7 // -25
 
 // The UART's and the i8042's lines and vectors.
 const COM1_LINE: u64 = 4
@@ -403,25 +408,8 @@ pub fn readable() -> bool {
     !lflag(ICANON) && cc(VMIN) == 0
 }
 
-/// What `read` answers when the thread must wait (kernel/user rewinds
-/// the system call and sleeps the thread on input).
-pub fn restart() -> u64 {
-    RESTART
-}
-
-/// What `ioctl` answers for a request refused by name (kernel/user
-/// logs it and answers -ENOTTY).
-pub fn refused() -> u64 {
-    REFUSED
-}
-
-/// -ENOTTY, what a refused request answers ring 3.
-pub fn enotty() -> u64 {
-    NEG_ENOTTY
-}
-
 /// `read(fd, buf, n)` on the console: the count, 0 at end of file,
-/// `restart()` to wait, -EAGAIN for a non-blocking descriptor with
+/// `RESTART` to wait, -EAGAIN for a non-blocking descriptor with
 /// nothing ready, -EFAULT.
 pub fn read(pml4: u64, buf: u64, n: u64, nonblock: bool) -> u64 {
     if sv(C_STARTED) == 0 {
@@ -514,7 +502,7 @@ fn termios_in(pml4: u64, arg: u64, flush: bool) -> u64 {
     0
 }
 
-/// A terminal ioctl on the console: the result for %rax, or `refused()`
+/// A terminal ioctl on the console: the result for %rax, or `REFUSED`
 /// for a request PAX does not answer. -ENOTTY for everything before
 /// `start` (px12's console).
 pub fn ioctl(pml4: u64, req: u64, arg: u64) -> u64 {

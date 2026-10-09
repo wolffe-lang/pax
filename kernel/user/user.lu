@@ -984,7 +984,7 @@ pub fn syscall(f: u64) -> u64 {
         return sched.sleep_current(f, wake)
     }
     let r = dispatch(nr, a0, a1, a2, a3, a4)
-    if r == console.restart() {
+    if r == console.RESTART {
         // px13: a read of the console with nothing ready. The thread
         // waits for input; the frame is rewound to the `syscall`
         // instruction (0f 05, two bytes) with %rax the call's number
@@ -1058,13 +1058,13 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
         // refuses is named here and answered -ENOTTY.
         let req = int32(a1)
         let r = files.ioctl(a, pml4, a0, req, a2)
-        if r == console.refused() {
+        if r == console.REFUSED {
             who()
             log.put(" syscall 16: refused: tty ioctl ")
             log.hex(req)
             log.put(", -ENOTTY")
             log.end()
-            return console.enotty()
+            return console.NEG_ENOTTY
         }
         return r
     }
