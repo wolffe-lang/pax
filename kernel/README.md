@@ -1,6 +1,6 @@
 # kernel/
 
-The wolf kernel: first light (px01, M-PX1), physical frames (px02), paging (px03), interrupts (kw10), preemptive kernel threads (px07), the heap (px06) and user mode (px09, below), on the wolf 0.2.24 release archive (px05 moved pax to the archive at 0.2.23; px07 to 0.2.24 for kw11's atomics). `kmain.lu` brings up COM1,
+The wolf kernel: first light (px01, M-PX1), physical frames (px02), paging (px03), interrupts (kw10), preemptive kernel threads (px07), the heap (px06) and user mode (px09, below), on the wolf 0.2.26 release archive (px05 moved pax to the archive at 0.2.23; px07 to 0.2.24 for kw11's atomics; px10 to 0.2.25; px16 to 0.2.26). `kmain.lu` brings up COM1,
 reads what Limine handed it and prints one line each — the banner, the
 UART, the bootloader and base revision, the firmware, a memory-map
 summary, the HHDM offset, the frame allocator's totals — switches to its own
@@ -79,24 +79,30 @@ text (`tests/tour`, `tools/tour`).
   in a module `var`, read through one unsafe accessor (`st()`, px05;
   px02 and px03 threaded it through every call of `frames` and `paging`
   while wolf had no module state, wolf-lang#529). Its header is a
-  `#[repr(c)] struct FrameState` whose fields are read and written as
-  `u64`s at their `offset_of` (`[abi.layout.query]`), the bitmaps at
-  `size_of(FrameState)`. `paging` asks `frames` for table frames and the
+  `#[repr(c)] struct FrameState` whose fields are read and written in
+  place through a `*FrameState` (`hdr()[0].free -= 1`, wolf 0.2.26,
+  wolf-lang#577; px05 to px15 wrote them as `u64`s at their
+  `offset_of`), the bitmaps at `size_of(FrameState)`. `heap`'s books
+  keep the `offset_of` words through one unsafe site, `rd`/`wr`. `paging` asks `frames` for table frames and the
   HHDM offset and takes only the PML4's physical address.
-- wolf has no bitwise complement (wolf-lang#575): alignment is written
-  `x - x % PAGE`, masks spelled whole (`paging`'s `ADDR`, `ADDR_2M`).
+- Alignment is `x & !(PAGE - 1)` and a bit is cleared with `x & !BIT`
+  (`!` on an integer, wolf 0.2.26, wolf-lang#575; until px16 `x - x %
+  PAGE` and `0xffffffffffffffff ^ BIT`); the address masks stay spelled
+  whole (`paging`'s `ADDR`, `ADDR_2M`). A 32-bit flags test keeps
+  `0xffffffff ^ KNOWN` (a 64-bit `!` would test the high half too).
 - Constants are module `const`s in every module (px05 retired
   px01-px03's commented literals in `serial`, `frames` and `paging`;
   wolf 0.2.22 refused a module-level `const`, wolf-lang#560, closed by
-  kw09). A `pub const` read from another module is still refused
-  (wolf-lang#579), so `kernel/timer` exports its constants, and
-  `kernel/paging` its flags, as functions.
+  kw09). Another module reads a `pub const` as `timer.MASTER_BASE`,
+  `paging.RW` (wolf 0.2.26, wolf-lang#579; until px16 the constants
+  were exported as `pub fn`s).
 - Module state: kw10's modules keep scalars in module `var`s (the tick
   and breakpoint counters, kw09); tables live in `.bss` that
   `boot/isr.S` reserves, because module state holds scalars only
   (`[mem.static.3]`). A handler resuming past a fault would write the
-  frame's RIP through `f as *u64` at `offset_of(Frame, rip) / 8`: a
-  store to a field of a raw element is refused (wolf-lang#577).
+  frame's RIP as `f[0].rip = v` (wolf 0.2.26, wolf-lang#577). A kernel
+  that cannot go on calls `panic.fail` or `panic.halt`, both `-> never`
+  (wolf 0.2.26, wolf-lang#572): no value follows the call.
 - A context switch (px07) is the trampoline returning another
   thread's frame: `pax_interrupt` returns `*Frame`, the common path
   moves it into %rsp before the pops, and since a kernel thread is
@@ -108,12 +114,13 @@ text (`tests/tour`, `tools/tour`).
   function-pointer value (wolf-lang#520) and the `extern` in the
   export's own module is E0302. A lock word lives in assembly-reserved
   `.bss` because a module `var` has no address (wolf-lang#597).
-- `wolf.pin` names wolf: the 0.2.25 release archive by digest (px10;
-  0.2.24 from px07, 0.2.23 from px05;
+- `wolf.pin` names wolf: the 0.2.26 release archive by digest (px16;
+  0.2.25 from px10, 0.2.24 from px07, 0.2.23 from px05;
   `tools/fetch-wolf` stages it and never builds; px02 and kw10 built
   wolf-lang `eb955c3b` and `6a4e6151` from source while no release
   carried kw06-kw09), and lupin's release and digest
-  (`tools/fetch-lupin`; 0.1.48, 0.2.25's pairing, since px10: it had
+  (`tools/fetch-lupin`; 0.1.49, 0.2.26's pairing, since px16; 0.1.48
+  from px10: it had
   been held at 0.1.44 for `tests/mkw` step 6's recorded clap error,
   which 0.1.48 replaces with an `unsupported` verdict naming the
   target).
@@ -183,8 +190,9 @@ witnesses (`tests/mpx3-user`).
   (`sched.end_current`): `sched.exit` switches by `pax_switch`, which
   is for thread context. The address space is freed by `reap`, in
   thread context, as stacks are (px07).
-- Every word of a frame is read and written at its index (a store to a
-  field of a raw element is refused, wolf-lang#577); the state handlers
+- Every word of a frame is read and written at its index, volatile
+  (wolf 0.2.26's `f[0].rax = v`, wolf-lang#577, is an ordinary access the
+  compiler may merge or move); the state handlers
   write lives in `pax_syscall_state` and the thread records, read
   volatile, never in module `var`s (wolf-lang#598, not fixed in 0.2.24);
   no `region` anywhere near a return to ring 3 (wolf-lang#611).
