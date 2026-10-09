@@ -1,7 +1,7 @@
-# px15 — The shell take (all wolf, quiet, rehearsed)
+# px15 — The shell image (all wolf, quiet)
 
-Contract: `sprints/pax/15-the-shell-take/px15-the-shell-take.md` in
-wolffe-lang/wolf (planning trunk, read 2026-10-08). Branch `px15` in
+Contract: px15's, under `sprints/pax/` in wolffe-lang/wolf (planning
+trunk, read 2026-10-08). Branch `px15` in
 pax, cut from pax trunk `396c5fb` (px14 merged). §1–§3 are committed
 before the first change to the kernel, the tests or the image.
 
@@ -31,15 +31,15 @@ before the first change to the kernel, the tests or the image.
   command line); nothing in this repository names any use of it beyond
   that.
 - No `ls -l`, and no option boreutils' `ls` refuses (#625, #536,
-  #626), in the session the image is rehearsed with; every command in
-  it is in a typed session `tests/mpx3-shell` diffs against Linux.
+  #626), in the howl session; every command typed on the image is in a
+  session `tests/mpx3-shell` diffs against Linux.
 
 ## 2. Inputs, verified (2026-10-08, from origin)
 
 | input | found |
 |---|---|
 | pax trunk | `396c5fb` (px14 merged, PR #17), as the contract says; trunk CI green at `396c5fb` (run 37738756822, every job) |
-| the shell image | `~/scratch/wolf/pax-shell/pax-shell.iso` `379b737d…`, `shasum -c SHA256SUMS` OK; its `/bin`: `cat echo false head ls pelt sleep true wc`, `ls` busybox-static's (the rehearsal's `initramfs: file 2124608 bin/ls`) |
+| the shell image | `~/scratch/wolf/pax-shell/pax-shell.iso` `379b737d…`, `shasum -c SHA256SUMS` OK; its `/bin`: `cat echo false head ls pelt sleep true wc`, `ls` busybox-static's (px14's boot log on nomad-1: `initramfs: file 2124608 bin/ls`) |
 | `user/boreutils.pin` | `2f15585` (boreutils' own pin then: wolf 0.2.23 / lupin 0.1.46), as the contract says |
 | boreutils trunk | `50d8907` (bu18 merged: `src/ls.lu`; `wolf-toolchain.toml` at wolf 0.2.25 `6710f9e0`, lupin 0.1.48, wolf-std `0f74ec5`). bu18 ran its `ls` on PAX at `d90f90a` under px12's harness (`notes/bu18/pax-mpx3-with-ls.patch`: twelve `ls` lines, B1–B5 PASS on four legs) |
 | boreutils' `ls` without a terminal | one name a line by default (terminal detection waits for wolf 0.2.26's `os_isatty`, bu18 note); `-l`, `-i`, `-s`, `-U`, `-f` and the rest of bu18's deferred list refused by name, status 2 |
@@ -48,7 +48,6 @@ before the first change to the kernel, the tests or the image.
 | the `user:` narration | `kernel/process` `describe_elf` (`user: exec pid …`), `kernel/user` the exit line (`… exit_group <s> after <r> runs`), the once-per-call `-ENOSYS` line, refusals, `-EBADF`/`-EFAULT` on a bad write, the tty ioctl refusal, `killed:`; `kmain_console`'s `user: frames free …` after each run-list line. No setting turns any of them off |
 | a kernel command line | none: `boot/start.S` asks Limine for bootloader info, firmware type, memory map, HHDM, executable address and modules; `boot/limine-initramfs.conf` gives no `cmdline`. Limine's `PROTOCOL.md` (`3a0526b7`) has the Executable Command Line feature (id `0x4b161536e598651e, 0xb390ad4a2f1f303a`; response `{revision, cmdline}`); `CONFIG.md` (v12.9.1) the entry key `cmdline` |
 | pelt | trunk `dd22a86`, the pin; its README claims functions and every expansion (arithmetic included); pipelines, redirections, `cd` refused by name |
-| the style | `~/scratch/wolf/pax-demo/` and `~/scratch/wolf/lang-demo/`: SHOTLIST tables (# / action / command / hold), "Before you press record" with a preflight that ends GO / NO GO, a rehearsal through a pty with timings and logs |
 | kasumi | `px13-ubuntu` podman image (Ubuntu 24.04, glibc 2.39); `/home` 96% (47 GB free); QEMU 11.1.1, TCG |
 | nomad-1 | QEMU 11.1.1 (Homebrew) |
 
