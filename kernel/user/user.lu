@@ -177,15 +177,19 @@ const CPUID7_SMAP: u64 = 0x100000 // EBX bit 20
 const CR4_SMEP: u64 = 0x100000 // bit 20
 const CR4_SMAP: u64 = 0x200000 // bit 21
 
-/// PAX_SYSCALL: the vector boot/user.S's entry writes into its frame.
-const SYSCALL: u64 = 0x100
+/// PAX_SYSCALL: the vector boot/user.S's entry writes into its frame
+/// (kernel/interrupts reads it as `user.SYSCALL`).
+pub const SYSCALL: u64 = 0x100
 
 // A process's user half.
 const CODE: u64 = 0x400000
 const STACK_TOP: u64 = 0x00007ffffffff000
 const STACK_PAGES: u64 = 4
 const PAGE: u64 = 4096
-const PROGS: u64 = 10
+/// How many programs there are, numbered 0 .. PROGS - 1 (looking one
+/// up by name would compare `str`s, which needs the hosted runtime on
+/// this target).
+pub const PROGS: u64 = 10
 const ELF_STACK_PAGES: u64 = 32 // px10: an ELF process's stack, 128 KiB
 
 
@@ -251,14 +255,6 @@ pub fn name(p: u64) -> str {
     if p == 8 { return "spin2" }
     if p == 9 { return "after" }
     "?"
-}
-
-/// How many programs there are (numbered 0 .. programs() - 1; a `pub
-/// const` read from another module is refused, wolf-lang#579, and
-/// looking one up by name would compare `str`s, which needs the hosted
-/// runtime on this target).
-pub fn programs() -> u64 {
-    PROGS
 }
 
 /// Program `p`'s blob in user/programs.S's `pax_uprogs` table.
@@ -453,12 +449,6 @@ export fn pax_user_thread(p: u64) {
     // word are this thread's (sched's `enter_space`).
     unsafe { pax_enter_user(CODE, STACK_TOP) }
     panic.fail("user: pax_enter_user returned, program", p)
-}
-
-/// PAX_SYSCALL, for kernel/interrupts (a `pub const` read from another
-/// module is refused, wolf-lang#579).
-pub fn vector() -> u64 {
-    SYSCALL
 }
 
 /// Whether the frame at `f` was pushed by an interrupt, exception or
