@@ -74,8 +74,11 @@
 //! State: the books are a `#[repr(c)] struct HeapState` at the start of
 //! the heap's own state page, each field read and written as a `u64` at
 //! its `offset_of` through `rd`/`wr` (module state is read only inside
-//! `unsafe`, E1301, so one unsafe site serves them all, as in
-//! kernel/frames); the one module `var` is `up`.
+//! `unsafe`, E1301, so one unsafe site serves all of them); the one
+//! module `var` is `up`. wolf 0.2.26 stores a field of a raw element in
+//! place (`p[0].live_n += 1`, wolf-lang#577), which kernel/frames uses
+//! for its header since px16; here it would put an `unsafe` block at
+//! each of the books' forty-odd accesses, so the heap keeps the one.
 //!
 //! wolf-lang#598 (native and release forward a module `var`'s value
 //! across a call that writes it): audited 2026-10-06. The books are
@@ -134,8 +137,8 @@ const SMALL: u64 = 4
 const FREE_INNER: u64 = 5
 
 /// The heap's books, at the start of its state page (META), each field
-/// read and written as a `u64` at its `offset_of` (as kernel/frames'
-/// FrameState): module state is read only inside `unsafe`
+/// read and written as a `u64` at its `offset_of`: module state is read
+/// only inside `unsafe`
 /// ([mem.static], E1301), and a `#[repr(c)]` header in memory the heap
 /// owns keeps one unsafe site, `rd`/`wr`.
 #[repr(c)]
