@@ -459,13 +459,13 @@ fn build_stack(pml4: u64, file: u64, entry: u64, av: u64, argc: u64, ab: u64, ev
         panic.fail("user: exec: the strings' block ends at", path_at + pl + 1)
     }
     // AT_RANDOM's sixteen bytes, 16-aligned below the strings.
-    let rnd = (strs - 16) - (strs - 16) % 16
+    let rnd = (strs - 16) & !15
     poke64(pml4, rnd, random_word(1))
     poke64(pml4, rnd + 8, random_word(2))
     // The vector: argc, argv + NULL, envp + NULL, the pairs; its first
     // word (argc, where RSP points) 16-aligned.
     let nwords = 1 + (argc + 1) + (envc + 1) + 2 * AUX_PAIRS
-    let sp = (rnd - nwords * 8) - (rnd - nwords * 8) % 16
+    let sp = (rnd - nwords * 8) & !15
     poke64(pml4, sp, argc)
     let after_argv = put_ptrs(pml4, sp + 8, strs, av, argc)
     var a = put_ptrs(pml4, after_argv, env_at, ev, envc)
@@ -782,7 +782,7 @@ pub fn clone(f: u64, nr: u64, a0: u64, a1: u64) -> u64 {
     var flags: u64 = CLONE_VM | CLONE_VFORK
     var usp: u64 = 0
     if nr == SYS_CLONE {
-        flags = a0 - (a0 & CSIGNAL) // the exit signal: no delivery yet
+        flags = a0 & !CSIGNAL // the exit signal: no delivery yet
         usp = a1
     } else if nr == SYS_CLONE3 {
         let pml4 = paging.live()
@@ -814,7 +814,7 @@ pub fn clone(f: u64, nr: u64, a0: u64, a1: u64) -> u64 {
         put_word(f, W_RAX, refuse_with(R_SHARED, NEG_ENOSYS))
         return f
     }
-    if flags & (0xffffffffffffffff ^ (CLONE_VM | CLONE_VFORK | CLONE_CLEAR_SIGHAND)) != 0 {
+    if flags & !(CLONE_VM | CLONE_VFORK | CLONE_CLEAR_SIGHAND) != 0 {
         put_word(f, W_RAX, refuse_with(R_FLAGS, NEG_EINVAL))
         return f
     }
@@ -947,13 +947,13 @@ pub fn sigprocmask(how: u64, set: u64, oldset: u64, size: u64) -> u64 {
         if h == SIG_BLOCK {
             m = m | v
         } else if h == SIG_UNBLOCK {
-            m = m & (0xffffffffffffffff ^ v)
+            m = m & !v
         } else if h == SIG_SETMASK {
             m = v
         } else {
             return NEG_EINVAL
         }
-        m = m & (0xffffffffffffffff ^ UNBLOCKABLE)
+        m = m & !UNBLOCKABLE
     }
     if oldset != 0 {
         if !uaccess.writable(pml4, oldset, 8) {
@@ -994,7 +994,7 @@ pub fn sigaction(sig: u64, act: u64, oldact: u64, size: u64) -> u64 {
             aput(a, w + i, uaccess.get64(pml4, act + i * 8))
             i += 1
         }
-        aput(a, w + 3, aget(a, w + 3) & (0xffffffffffffffff ^ UNBLOCKABLE))
+        aput(a, w + 3, aget(a, w + 3) & !UNBLOCKABLE)
     }
     0
 }
