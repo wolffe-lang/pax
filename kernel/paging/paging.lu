@@ -720,11 +720,9 @@ pub fn build() -> u64 {
     let pml4 = table_frame()
     if pml4 == 0 {
         panic.fail("paging: no frame for the PML4", 0)
-        return 0
     }
     if boot_info.image_virt() != bound(0) || boot_info.image_phys() == 0 {
         panic.fail("paging: the image is not at its link address", boot_info.image_virt())
-        return 0
     }
     // The image, W^X (each bound a page boundary, boot/kernel.ld).
     map_section(pml4, bound(2), bound(3), 0) // text: R-X
@@ -802,25 +800,21 @@ pub fn switch_to(pml4: u64) {
         // # Safety: cpu.S's CPUID.
         if unsafe { pax_cpuid_nx() } == 0 {
             panic.fail("paging: the CPU has no execute-disable bit; EFER", e)
-            return
         }
         // # Safety: cpu.S's WRMSR of IA32_EFER, NXE added to its bits.
         unsafe { pax_set_efer(e | EFER_NXE) }
     }
     if cr0() & CR0_WP == 0 {
         panic.fail("paging: CR0.WP is clear; CR0", cr0())
-        return
     }
     if cr4() & CR4_PGE != 0 {
         panic.fail("paging: CR4.PGE is set; CR4", cr4())
-        return
     }
     // # Safety: cpu.S returns the caller's stack pointer; reads nothing.
     let sp = unsafe { pax_rsp() }
     let probe = translate(pml4, sp & !(PAGE - 1)) else 0
     if probe == 0 {
         panic.fail("paging: the stack is not mapped in the new structures", sp)
-        return
     }
     // # Safety: `pml4` maps the image (so this code), the HHDM (the
     // stack, the allocator, Limine's responses) and nothing the kernel
