@@ -17,7 +17,7 @@
 
 use log
 
-extern "c" fn pax_halt()
+extern "c" fn pax_halt() -> never
 
 /// The trap kind's name in `[conf.trap.set]`'s vocabulary.
 pub fn kind_name(kind: int) -> str {
@@ -37,16 +37,16 @@ pub fn kind_name(kind: int) -> str {
 }
 
 /// Halt the CPU for good: interrupts off, `hlt`, forever (io.S).
-pub fn halt() {
+pub fn halt() -> never {
     // # Safety: io.S's `cli; hlt` loop; it never returns.
     unsafe { pax_halt() }
 }
 
 /// A fault the kernel itself detects, by name (px02: the frame
 /// allocator's double free and its free of a frame never usable).
-/// Writes `PANIC <what> 0x<v>` (sixteen hex digits) and halts; it never
-/// returns.
-pub fn fail(what: str, v: u64) {
+/// Writes `PANIC <what> 0x<v>` (sixteen hex digits) and halts. `-> never`
+/// (wolf 0.2.26, wolf-lang#572): a call needs no value after it.
+pub fn fail(what: str, v: u64) -> never {
     log.put("PANIC ")
     log.put(what)
     log.put(" ")
