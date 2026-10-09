@@ -458,16 +458,16 @@ fn entry_is(e: u64, off: u64, l: u64) -> bool {
     true
 }
 
-/// The entry named [NORM, NORM + l), or initramfs.end().
+/// The entry named [NORM, NORM + l), or initramfs.END.
 fn find_entry(l: u64) -> u64 {
-    var e = initramfs.first() else initramfs.end()
-    while e != initramfs.end() {
+    var e = initramfs.first() else initramfs.END
+    while e != initramfs.END {
         if entry_is(e, 0, l) {
             return e
         }
-        e = initramfs.next(e) else initramfs.end()
+        e = initramfs.next(e) else initramfs.END
     }
-    initramfs.end()
+    initramfs.END
 }
 
 /// The node the canonical path [NORM, NORM + l) names, or an error node.
@@ -491,7 +491,7 @@ fn lookup(l: u64) -> u64 {
         return T_NULL << T_SHIFT
     }
     let e = find_entry(l)
-    if e != initramfs.end() {
+    if e != initramfs.END {
         return entry_node(e)
     }
     // A prefix that is a regular file makes the path -ENOTDIR.
@@ -499,7 +499,7 @@ fn lookup(l: u64) -> u64 {
     while k < l {
         if kb(NORM + k) == 47 {
             let p = find_entry(k)
-            if p != initramfs.end() && !initramfs.is_dir(p) {
+            if p != initramfs.END && !initramfs.is_dir(p) {
                 return err(ENOTDIR)
             }
         }
@@ -956,15 +956,15 @@ fn child(d: u64, k: u64) -> u64 {
         return err(ENOENT)
     }
     var i: u64 = 0
-    var e = initramfs.first() else initramfs.end()
-    while e != initramfs.end() {
+    var e = initramfs.first() else initramfs.END
+    while e != initramfs.END {
         if child_of(e, d) {
             if i == k {
                 return entry_node(e)
             }
             i += 1
         }
-        e = initramfs.next(e) else initramfs.end()
+        e = initramfs.next(e) else initramfs.END
     }
     if ty(d) == T_ROOT && k == i {
         return T_DEV << T_SHIFT
