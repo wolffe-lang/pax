@@ -33,7 +33,7 @@
 # --type KEYS (px13) types a session into the machine before the wait
 # for the marker: before step k (the KEYS file's k-th line) it waits
 # until TEXT, the program's prompt, has appeared k times in the serial
-# log after its first `user: exec pid` line, then types the step: its
+# log after its first `user: exec pid` line (or `run 1:`, px15), then types the step: its
 # characters, then Enter (CR, what a terminal sends), unless the step
 # ends with `^D` (Ctrl-D, which hands over what is typed, or ends the
 # input at an empty prompt) or with `^.` (nothing more: `^.` is
@@ -121,7 +121,8 @@ no() { printf 'qemu-halt: NOT HALTED: %s\n' "$*" | tee -a "$rec" >&2; exit 1; }
 
 # --type: the session (px13).
 prompts() { # how many times the prompt has appeared since the first exec line
-    serial_norm "$serial" | awk 'on { print } /^user: exec pid / { on = 1 }' \
+    # (or kmain_console's `run 1:` line, px15: a quiet kernel prints no exec line)
+    serial_norm "$serial" | awk 'on { print } /^user: exec pid |^run 1: / { on = 1 }' \
         | LC_ALL=C grep -aoF -- "$prompt" | wc -l | tr -d ' '
 }
 key_of() { # byte (decimal) -> a sendkey name
