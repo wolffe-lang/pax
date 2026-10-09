@@ -274,18 +274,9 @@ pub fn init() -> u64 ! InitError {
 /// other function finds the state through `st()`).
 pub fn start() -> u64 {
     init() else |e| match e {
-        no_hhdm => {
-            panic.fail("frames: no HHDM response", 0)
-            0
-        },
-        no_memory_map => {
-            panic.fail("frames: no memory map response", 0)
-            0
-        },
-        no_room => {
-            panic.fail("frames: no usable run above 1 MiB holds the state", 0)
-            0
-        },
+        no_hhdm => panic.fail("frames: no HHDM response", 0),
+        no_memory_map => panic.fail("frames: no memory map response", 0),
+        no_room => panic.fail("frames: no usable run above 1 MiB holds the state", 0),
     }
 }
 
@@ -347,21 +338,17 @@ pub fn alloc() -> u64 ! {out_of_memory} {
 pub fn free(pa: u64) {
     if pa % FRAME != 0 {
         panic.fail("frames: free of an unaligned address", pa)
-        return
     }
     let f = pa / FRAME
     if f >= span() || !bit(usable_map(), f) {
         panic.fail("frames: free of a frame never usable", pa)
-        return
     }
     let spa = state_phys()
     if pa < LOW_END || (pa >= spa && pa < spa + own() * FRAME) {
         panic.fail("frames: free of a withheld frame", pa)
-        return
     }
     if bit(free_map(), f) {
         panic.fail("frames: double free", pa)
-        return
     }
     set_bit(free_map(), f)
     // # Safety: the header `init` wrote (`hdr`), mapped by the HHDM.
