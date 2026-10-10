@@ -38,6 +38,23 @@
                ignored (execve's rule); SIGKILL's action -22
      dup       dup2 to 7, dup3 with O_CLOEXEC to 8, dup3 onto itself
                -22; a child finds 7 open and 8 closed
+   and px17's, the plumbing pelt's H2 uses (measured, notes/px17/):
+     fork      a clone with no CLONE_VM (SIGCHLD and the child-tid
+               flags, as glibc's fork makes it): the child changes a
+               global and exits 4; the parent's copy is unchanged
+     pipe      pipe2: a write, a read, the ends' modes (S_IFIFO|0600),
+               lseek -29; a child that sleeps 300 ms then writes: the
+               parent's read waits for it, then reads 0 once the child
+               is gone (writer EOF); a child writing to a pipe with no
+               reader dies of SIGPIPE (0xd), one ignoring it gets -32,
+               and pid 1 with SIGPIPE at SIG_DFL gets -32 (kill(2): init
+               receives only the signals it has a handler for)
+     offset    a dup and a child share one open file's offset
+     cwd       getcwd, chdir and its errors, getcwd's -34, a child
+               inheriting the directory, fchdir and its errors
+     socket    socketpair(AF_UNIX): send, receive, the peer's close
+               read as 0, the mode (S_IFSOCK|0777)
+     fcntl     F_DUPFD_CLOEXEC, F_GETFD, F_SETFD, F_GETFL of the ends
    and `kill(getpid(), 0)`, whose answer it does not print (PAX refuses
    it by name; Linux answers 0: the test reads PAX's log line).
 
@@ -66,6 +83,17 @@ typedef long i64;
 #define SYS_waitid 247
 #define SYS_dup3 292
 #define SYS_prlimit64 302
+#define SYS_close 3
+#define SYS_fstat 5
+#define SYS_lseek 8
+#define SYS_pipe2 293
+#define SYS_fcntl 72
+#define SYS_getcwd 79
+#define SYS_chdir 80
+#define SYS_fchdir 81
+#define SYS_socketpair 53
+#define SYS_sendto 44
+#define SYS_recvfrom 45
 
 #define CLONE_VM 0x100
 #define CLONE_VFORK 0x4000
@@ -79,6 +107,16 @@ typedef long i64;
 #define SIGUSR1 10
 #define SIG_BLOCK 0
 #define RLIMIT_CORE 4
+#define SIGPIPE 13
+#define CLONE_CHILD_SETTID 0x01000000
+#define CLONE_CHILD_CLEARTID 0x00200000
+#define O_DIRECTORY 0x10000
+#define F_DUPFD_CLOEXEC 1030
+#define F_GETFD 1
+#define F_SETFD 2
+#define F_GETFL 3
+#define AF_UNIX 1
+#define SOCK_STREAM 1
 
 static i64 sys6(i64 n, i64 a, i64 b, i64 c, i64 d, i64 e) {
     register i64 r10 __asm__("r10") = d;
@@ -272,7 +310,285 @@ static int child(char **argv) {
         end();
         return 0;
     }
+    if (same(role, "late")) { /* argv[2]: the read end, argv[3]: the write end */
+        sys(SYS_close, argv[2][0] - '0', 0, 0);
+        nap();
+        put("late: writes 4 bytes");
+        end();
+        sys(SYS_write, argv[3][0] - '0', "late", 4);
+        return 0;
+    }
+    if (same(role, "epipe")) { /* argv[2]: a write end with no reader */
+        /* 'd' SIG_DFL, 'i' SIG_IGN, set here whatever the harness
+           left (an ignored signal stays ignored across execve) */
+        u64 act[4] = { argv[3][0] == 'i' ? 1UL : 0UL, 0, 0, 0 };
+        sys6(SYS_rt_sigaction, SIGPIPE, (i64)act, 0, 8, 0);
+        i64 r = sys(SYS_write, argv[2][0] - '0', "x", 1);
+        put("epipe: survived, write ");
+        dec(r);
+        end();
+        return 0;
+    }
+    if (same(role, "off")) { /* argv[2]: an inherited descriptor */
+        char b[5] = { 0, 0, 0, 0, 0 };
+        i64 r = sys(SYS_read, argv[2][0] - '0', b, 4);
+        put("off: read ");
+        dec(r);
+        put(" '");
+        put(b);
+        put("'");
+        end();
+        return 0;
+    }
+    if (same(role, "cwd")) {
+        char b[64];
+        i64 r = sys(SYS_getcwd, b, sizeof b, 0);
+        put("cwd: child getcwd ");
+        dec(r);
+        put(" ");
+        if (r > 0) put(b);
+        end();
+        return 0;
+    }
     return 99;
+}
+
+int g_fork = 1;
+
+static void plumbing(i64 motd) {
+    /* fork: a clone with no CLONE_VM, glibc's fork's flags */
+    {
+        int tid = 0;
+        i64 c = sys6(SYS_clone, CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | SIGCHLD, 0, 0, (i64)&tid, 0);
+        if (c == 0) {
+            g_fork = 2;
+            ids("fork child");
+            put(" saw ");
+            dec(tid == (int)sys(SYS_getpid, 0, 0, 0));
+            put(", g ");
+            dec(g_fork);
+            end();
+            sys(SYS_exit_group, 4, 0, 0);
+        }
+        wait_line("wait4 fork", c, 0);
+        put("fork: parent g ");
+        dec(g_fork);
+        put(", tid word ");
+        dec(tid);
+        end();
+    }
+
+    /* pipe */
+    {
+        int fd[2] = { -1, -1 };
+        i64 r = sys(SYS_pipe2, fd, 0, 0);
+        char b[17];
+        memset(b, 0, sizeof b);
+        i64 w = sys(SYS_write, fd[1], "abc", 3);
+        i64 n = sys(SYS_read, fd[0], b, 16);
+        u64 st[18];
+        memset(st, 0, sizeof st);
+        i64 f0 = sys(SYS_fstat, fd[0], st, 0);
+        u64 m0 = (unsigned)st[3];
+        sys(SYS_fstat, fd[1], st, 0);
+        u64 m1 = (unsigned)st[3];
+        put("pipe: ");
+        dec(r);
+        put(" fds ");
+        dec(fd[0]);
+        put(" ");
+        dec(fd[1]);
+        put(", write ");
+        dec(w);
+        put(", read ");
+        dec(n);
+        put(" ");
+        put(b);
+        put(", fstat ");
+        dec(f0);
+        put(" modes ");
+        hex(m0);
+        put(" ");
+        hex(m1);
+        put(", lseek ");
+        dec(sys(SYS_lseek, fd[0], 0, 1));
+        end();
+        /* a reader waits for a late writer, then sees its end */
+        char rd[2] = { (char)('0' + fd[0]), 0 }, wr[2] = { (char)('0' + fd[1]), 0 };
+        char *lv[] = { "procs", "late", rd, wr, 0 };
+        i64 c = spawn(lv);
+        sys(SYS_close, fd[1], 0, 0);
+        memset(b, 0, sizeof b);
+        i64 n1 = sys(SYS_read, fd[0], b, 16);
+        i64 n2 = sys(SYS_read, fd[0], b + 8, 8);
+        put("pipe: waited read ");
+        dec(n1);
+        put(" ");
+        put(b);
+        put(", then ");
+        dec(n2);
+        end();
+        wait_line("wait4 late", c, 0);
+        sys(SYS_close, fd[0], 0, 0);
+        /* a writer with no reader */
+        r = sys(SYS_pipe2, fd, 0, 0);
+        sys(SYS_close, fd[0], 0, 0);
+        char ww[2] = { (char)('0' + fd[1]), 0 };
+        char *ev[] = { "procs", "epipe", ww, "d", 0 };
+        c = spawn(ev);
+        wait_line("wait4 epipe", c, 0);
+        char *iv[] = { "procs", "epipe", ww, "i", 0 };
+        c = spawn(iv);
+        wait_line("wait4 epipe ignored", c, 0);
+        { u64 dfl[4] = { 0, 0, 0, 0 }; sys6(SYS_rt_sigaction, SIGPIPE, (i64)dfl, 0, 8, 0); }
+        put("pipe: pid 1 writes to no reader: ");
+        dec(sys(SYS_write, fd[1], "x", 1));
+        end();
+        sys(SYS_close, fd[1], 0, 0);
+    }
+
+    /* offset: one open file, two descriptors, two processes */
+    {
+        char b[5] = { 0, 0, 0, 0, 0 };
+        i64 d = sys(SYS_fcntl, motd, F_DUPFD_CLOEXEC, 0);
+        i64 r = sys(SYS_read, motd, b, 4);
+        put("offset: dup ");
+        dec(d);
+        put(", read ");
+        dec(r);
+        put(" '");
+        put(b);
+        put("', the dup at ");
+        dec(sys(SYS_lseek, d, 0, 1));
+        end();
+        char m[2] = { (char)('0' + motd), 0 };
+        char *ov[] = { "procs", "off", m, 0 };
+        i64 c = spawn(ov);
+        wait_line("wait4 off", c, 0);
+        put("offset: after the child ");
+        dec(sys(SYS_lseek, motd, 0, 1));
+        put(", the dup ");
+        dec(sys(SYS_lseek, d, 0, 1));
+        end();
+        sys(SYS_close, d, 0, 0);
+    }
+
+    /* cwd */
+    {
+        char b[64];
+        i64 g = sys(SYS_getcwd, b, sizeof b, 0);
+        put("cwd: getcwd ");
+        dec(g);
+        put(" ");
+        if (g > 0) put(b);
+        i64 c1 = sys(SYS_chdir, "/etc", 0, 0);
+        g = sys(SYS_getcwd, b, sizeof b, 0);
+        put(", chdir /etc ");
+        dec(c1);
+        put(", getcwd ");
+        dec(g);
+        put(" ");
+        if (g > 0) put(b);
+        i64 f = sys(SYS_open, "motd", 0, 0);
+        put(", open motd ");
+        dec(f);
+        end();
+        put("cwd: chdir /nosuch ");
+        dec(sys(SYS_chdir, "/nosuch", 0, 0));
+        put(", chdir motd ");
+        dec(sys(SYS_chdir, "motd", 0, 0));
+        put(", getcwd in 4 bytes ");
+        dec(sys(SYS_getcwd, b, 4, 0));
+        put(", chdir .. then etc ");
+        dec(sys(SYS_chdir, "..", 0, 0));
+        put(" ");
+        dec(sys(SYS_chdir, "etc", 0, 0));
+        end();
+        char *cv[] = { "procs", "cwd", 0 };
+        i64 c = spawn(cv);
+        wait_line("wait4 cwd", c, 0);
+        i64 root = sys(SYS_open, "/", O_DIRECTORY, 0);
+        i64 r1 = sys(SYS_fchdir, root, 0, 0);
+        g = sys(SYS_getcwd, b, sizeof b, 0);
+        put("cwd: fchdir / ");
+        dec(r1);
+        put(", getcwd ");
+        dec(g);
+        put(" ");
+        if (g > 0) put(b);
+        put(", fchdir a file ");
+        dec(sys(SYS_fchdir, f, 0, 0));
+        put(", fchdir 30 ");
+        dec(sys(SYS_fchdir, 30, 0, 0));
+        end();
+        sys(SYS_close, root, 0, 0);
+        sys(SYS_close, f, 0, 0);
+    }
+
+    /* socket */
+    {
+        int sv[2] = { -1, -1 };
+        char b[9];
+        memset(b, 0, sizeof b);
+        i64 r = sys6(SYS_socketpair, AF_UNIX, SOCK_STREAM | O_CLOEXEC, 0, (i64)sv, 0);
+        i64 s1 = sys6(SYS_sendto, sv[0], (i64)"ping", 4, 0, 0);
+        i64 r1 = sys6(SYS_recvfrom, sv[1], (i64)b, 8, 0, 0);
+        i64 s2 = sys(SYS_write, sv[1], "pong", 4);
+        i64 r2 = sys(SYS_read, sv[0], b + 4, 4);
+        u64 st[18];
+        memset(st, 0, sizeof st);
+        sys(SYS_fstat, sv[0], st, 0);
+        sys(SYS_close, sv[0], 0, 0);
+        char e[2] = { 0, 0 };
+        i64 r3 = sys6(SYS_recvfrom, sv[1], (i64)e, 1, 0, 0);
+        put("socket: ");
+        dec(r);
+        put(" fds ");
+        dec(sv[0]);
+        put(" ");
+        dec(sv[1]);
+        put(", send ");
+        dec(s1);
+        put(" recv ");
+        dec(r1);
+        put(" write ");
+        dec(s2);
+        put(" read ");
+        dec(r2);
+        put(" ");
+        put(b);
+        put(", mode ");
+        hex((unsigned)st[3]);
+        put(", after the peer's close ");
+        dec(r3);
+        end();
+        sys(SYS_close, sv[1], 0, 0);
+    }
+
+    /* fcntl */
+    {
+        int fd[2] = { -1, -1 };
+        sys(SYS_pipe2, fd, O_CLOEXEC, 0);
+        i64 d = sys(SYS_fcntl, fd[0], F_DUPFD_CLOEXEC, 10);
+        put("fcntl: dupfd_cloexec ");
+        dec(d);
+        put(" getfd ");
+        dec(sys(SYS_fcntl, d, F_GETFD, 0));
+        put(" setfd ");
+        dec(sys(SYS_fcntl, d, F_SETFD, 0));
+        put(" getfd ");
+        dec(sys(SYS_fcntl, d, F_GETFD, 0));
+        put(", getfl ");
+        dec(sys(SYS_fcntl, fd[0], F_GETFL, 0));
+        put(" ");
+        dec(sys(SYS_fcntl, fd[1], F_GETFL, 0));
+        put(", closed ");
+        dec(sys(SYS_fcntl, 30, F_GETFD, 0));
+        end();
+        sys(SYS_close, d, 0, 0);
+        sys(SYS_close, fd[0], 0, 0);
+        sys(SYS_close, fd[1], 0, 0);
+    }
 }
 
 static int parent(void) {
@@ -395,6 +711,8 @@ static int parent(void) {
         c = spawn(dv);
         wait_line("wait4 dup", c, 0);
     }
+
+    plumbing(b);
 
     sys(SYS_kill, sys(SYS_getpid, 0, 0, 0), 0, 0);
     put("procs: done");
