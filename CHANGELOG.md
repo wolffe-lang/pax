@@ -23,7 +23,6 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   Named drift: no cursor movement or erase sequences (read and
   ignored), no back buffer (a scroll reads the framebuffer), no blink.
 
-
 - **The speaker (px18).** PAX plays music through the PC speaker: the
   8254's channel 2 in square-wave mode gated through port 0x61
   (`kernel/speaker`), answering Linux's console ioctls KIOCSOUND and
