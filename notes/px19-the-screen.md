@@ -185,3 +185,17 @@ machine's screen does; the PS/2 keyboard (px13) types into it.
   orphans of this lane's.
 - Close nothing. To close: none (no issue was filed or named for this
   lane).
+
+### Commits named above, before and after the rebase onto `df5de90`
+
+The evidence was gathered before px17 merged; the rebase changed every
+sha, not one byte of code. CI runs and kasumi trees name the old ones:
+
+| before | after | what |
+|---|---|---|
+| `55972d9` | `239217e` | §1–§3 |
+| `fb845d9` | `35aad18` | the CI job; kasumi g1 and CI run 38019990181 (V4/V6 red; tour R5 red on kasumi) |
+| `178ce3e` | `beafc07` | the screen drawn before the UART |
+| `f0affda` | `32fb331` | V4/V6 right; kasumi g2, hasu KVM, CI run 38021643279 (16 Linux jobs green; macos-run cancelled for the queue after the rebase) |
+| `f734ef8` | `9ab30ca` | the plant; CI run 38024480797 |
+| `1bc6708` | `73b36df` | (its CI run 38026096066 cancelled: superseded by the rebase) |
