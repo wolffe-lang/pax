@@ -1,0 +1,56 @@
+//! netd — the network thread's body (px20).
+//!
+//! `pax_netd` is the kernel thread the device's interrupt wakes
+//! (kernel/net's `wait`, kernel/sched's `block_net`/`wake_net`): it
+//! takes every frame the device has returned, one at a time, in thread
+//! context with interrupts on, hands it by its type — the two bytes at
+//! 12, big-endian (RFC 894) — to the protocol that speaks it, and gives
+//! the buffer back to the device:
+//!
+//!     0x0806  kernel/arp's `input`
+//!     others  counted and dropped (kernel/net's `drop_type`: IPv4 by
+//!             name, until px21)
+//!
+//! The body lives here and a kernel names it with `extern "c" let
+//! pax_netd: *u8` (wolf-lang#520; E0302 in the export's own module,
+//! as px07's schedtest); `turns` keeps this module imported.
+//!
+//! No Linux source; no other kernel's or network stack's source.
+
+use arp
+use net
+
+extern "c" let pax_net_stats: *u64
+
+/// Times the thread has gone round its loop (word 31 of kernel/net's
+/// counters).
+pub fn turns() -> u64 {
+    // # Safety: word 31 of boot/net.S's pax_net_stats.
+    unsafe { ((pax_net_stats as u64 + 31 * 8) as *u64).read_volatile() }
+}
+
+export fn pax_netd(_arg: u64) {
+    while true {
+        net.wait()
+        // # Safety: as `turns`; only this thread writes the word.
+        unsafe { ((pax_net_stats as u64 + 31 * 8) as *u64).write_volatile(turns() + 1) }
+        var more = true
+        while more {
+            let (frame, len, buffer) = net.rx_take()
+            if len == 0 {
+                more = false
+            } else {
+                // # Safety: bytes 12 and 13 of a received frame of at
+                // least 14 bytes, in its receive buffer.
+                let (hi, lo) = unsafe { (((frame + 12) as *u8).read_volatile(), ((frame + 13) as *u8).read_volatile()) }
+                let ethertype = (hi as u64) << 8 | lo as u64
+                if ethertype == 0x0806 {
+                    arp.input(frame, len)
+                } else {
+                    net.drop_type(ethertype)
+                }
+                net.rx_give(buffer)
+            }
+        }
+    }
+}
