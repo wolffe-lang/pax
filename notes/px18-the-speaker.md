@@ -177,13 +177,15 @@ excerpt 30-45 s; the scale 4.0 s.
 - **Boot counts**: kasumi TCG, mpx3-speaker: 5 a run in a1-a4 and the gauntlet (25), 2 in experiments A and B; hasu KVM: 15 (three rounds of 5); the gauntlet's other suites as their own counts; nomad-1: 4 preflight boots of the folder's image (2 runs of 2) and 1 boot of a private-tune copy on kasumi.
 - **The Linux beep's interface**: `notes/px18/beep.strace` (`ioctl(3, KIOCSOUND, 0)`, `0x4b2f`).
 - **QEMU's speaker binding**: `notes/px18/qemu-pcspk-qtree.txt`.
-- **CI green at the head**: in the PR body (run id at the head sha).
-- **The folder**: `~/scratch/wolf/pax-sound/` on nomad-1, its preflight `GO` (the WAV leg measured the scale at 261.6 293.9 329.5 349.2 392.1 439.7 494.0 523.4 Hz, worst 0.08%; the CoreAudio leg reported no audio error).
+- **Rebased onto px17's merge** (`df5de90`, pelt `3e7516c`): kasumi's gauntlet at `5707dfe`, every suite exit 0 but one mpx3-speaker leg, whose capture cut a note at 449.4 ms (and another at 524.3) against K2's then 30-ms bound (`kasumi-gauntlet-5707dfe.summary`, `kasumi-mpx3-speaker-5707dfe.out`); CI run 38026465296 at `5707dfe` red the same way (449.4 ms). The capture's per-note length was never the timing claim (the kernel's timeline is): it is now a 20% sanity bound (`dd91ab5`, `6f846a0`); three rounds of the rebased images at `6f846a0`, 24 PASS each (`kasumi-mpx3-speaker-6f846a0-rounds.txt`). P4's number is untouched by it.
+- **CI green at the head**: in the PR body (run id at the head sha); `6f846a0`'s run 38028246024, all 17 jobs success.
+- **The folder**: `~/scratch/wolf/pax-sound/` on nomad-1, its preflight `GO` on the rebased image `42ebd363…` (kernel `dcbc1fc6…`, the gauntlet's at `5707dfe`; pelt `3e7516c`): the WAV leg measured the scale at 261.6 293.7 328.7 349.2 392.1 439.9 494.0 523.4 Hz, worst 0.28%; the CoreAudio leg reported no audio error. `add-tune.sh` was run on kasumi with a two-note file and played (439.6 and 659.1 Hz).
+- **The other folders** (`pax-shell/`, `pax-demo/`): px18 moves their ISOs' bytes (`pax_halt`, the tick's call, `boot/speaker.S` in every kernel) but nothing they print; they hold px19+px17 images now, and px18 and px19 conflict in five files, so whichever of the two merges second refreshes both on the integrated head. Not refreshed here.
 
 ## 5. Done-when
 
 - [x] branch `px18` on origin; PR #22 open, unmerged, five sections, commit shas as bullets, a test checklist
-- [ ] CI green at the head sha (the PR body names the run)
+- [x] CI green at the head sha (the PR body names the run)
 - [x] the red before the fix and the plant, each by run id (above)
 - [x] nothing closed; what to close and correct is in the PR
 - [ ] worktree gone, kasumi and hasu outputs pruned, no orphans (at the lane's end)
