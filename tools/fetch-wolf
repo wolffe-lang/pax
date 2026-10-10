@@ -61,8 +61,18 @@ if [ "$WOLF_PIN_KIND" = source ]; then
     got=$(git -C "$src" rev-parse HEAD)
     [ "$got" = "$WOLF_LANG_COMMIT" ] || die "wolf-lang HEAD is $got, the pin says $WOLF_LANG_COMMIT"
     (cd "$src" && WOLF_COMMIT=${WOLF_LANG_COMMIT:0:8} cargo build --release -p wolf_driver --locked) >&2
+    # s223 probe: a source pin also builds the freestanding runtime
+    # archive (kw12) and stages it beside the binary, as a release
+    # archive carries it. CI runners add the target; a pool host must
+    # already have it (the harness never installs there).
+    if ! (cd "$src" && rustup target list --installed) | grep -qx x86_64-unknown-none; then
+        [ "${CI:-}" = true ] || die "no x86_64-unknown-none target for wolf-lang's toolchain on this host"
+        (cd "$src" && rustup target add x86_64-unknown-none) >&2
+    fi
+    (cd "$src" && WOLF_RT_NONE_REQUIRE=1 cargo xtask rt-none) >&2
     mkdir -p "$WOLF_DIR/bin"
     cp "$src/target/release/wolf" "$bin"
+    cp "$src/target/x86_64-unknown-none/release/libwolf_rt_none.a" "$WOLF_DIR/bin/"
     ver=$(check_version "$bin" "$WOLF_LANG_COMMIT")
     printf '%s\n' "$WOLF_LANG_COMMIT" > "$stamp"
     say "wolf at $WOLF_LANG_COMMIT built from source (sha256 $(sha256_of "$bin")): $ver"
