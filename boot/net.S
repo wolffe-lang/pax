@@ -18,7 +18,7 @@
                      kernel/net)
      pax_net_stats   32 eight-byte words: the counters (frames and
                      bytes each way, drops by cause, interrupts)
-     pax_arp_state   16 eight-byte words: kernel/arp's (the gateway's
+     pax_arp_state   32 eight-byte words: kernel/arp's (the gateway's
                      address once resolved, its counters)
 
    No Linux source; no other kernel's source. */
@@ -39,6 +39,6 @@ pax_net_stats:
         .zero 256
         .globl pax_arp_state
 pax_arp_state:
-        .zero 128
+        .zero 256
 
         .section .note.GNU-stack, "", @progbits
