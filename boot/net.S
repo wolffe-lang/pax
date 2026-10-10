@@ -1,6 +1,6 @@
-/* net.S — the network's storage (px20): no routines, only the .bss
-   kernel/pci, kernel/virtio, kernel/net and kernel/arp keep their state
-   in.
+/* net.S — the network's storage (px20, px21): no routines, only the
+   .bss kernel/pci, kernel/virtio, kernel/net, kernel/arp, kernel/ip and
+   kernel/icmp keep their state in.
 
    Listed under `asm` in kernel/wolf.pkg like every file here. Module
    state holds scalars only ([mem.static.3]), the device's interrupt
@@ -18,8 +18,16 @@
                      kernel/net)
      pax_net_stats   32 eight-byte words: the counters (frames and
                      bytes each way, drops by cause, interrupts)
-     pax_arp_state   32 eight-byte words: kernel/arp's (the gateway's
-                     address once resolved, its counters)
+     pax_arp_state   128 eight-byte words: kernel/arp's (its address,
+                     its counters, the cache's eight entries and where
+                     each keeps the frames that wait for it; px21)
+     pax_ip_state    64 eight-byte words: kernel/ip's (the address,
+                     netmask and gateway, the identification counter,
+                     the frame a datagram is composed in, the counters;
+                     px21)
+     pax_icmp_state  64 eight-byte words: kernel/icmp's (the echo the
+                     kernel waits for, the limiter's clock, the
+                     counters; px21)
 
    No Linux source; no other kernel's source. */
 
@@ -39,6 +47,12 @@ pax_net_stats:
         .zero 256
         .globl pax_arp_state
 pax_arp_state:
-        .zero 256
+        .zero 1024
+        .globl pax_ip_state
+pax_ip_state:
+        .zero 512
+        .globl pax_icmp_state
+pax_icmp_state:
+        .zero 512
 
         .section .note.GNU-stack, "", @progbits
