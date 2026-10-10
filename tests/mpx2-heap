@@ -274,8 +274,13 @@ for leg in $legs; do
             lb=$(printf '%s\n' "$hl" | sed -n 's/.*, \([0-9]*\) live blocks, \([0-9]*\) live bytes, \([0-9]*\) allocs, \([0-9]*\) frees, .*/\1 \2 \3 \4/p')
             read -r b y al fr <<< "$lb"
             where=$(grab "$log" 'ambient: the List landed in \(r[ab]\)')
-            if [ "$b" = 0 ] && [ "$y" = 0 ] && [ "$al" = "$fr" ] && [ "$al" -gt 0 ]; then
-                say "PASS H11 $tier kmain_heap_threads $leg: two threads, both exited, $al allocs = $fr frees under the heap lock, live 0; the List landed in $where (wolf-lang#611: reported, not asserted)"
+            ra=$(grab "$log" 'threads: A list 64, region ra \([0-9]*\) bytes')
+            rb=$(grab "$log" 'region rb \([0-9]*\) bytes')
+            # s223 probe: wolf-lang#611 ASSERTED — the List is A's, in ra.
+            if [ "$where" != ra ] || [ "${ra:-0}" -lt 512 ] || [ "$rb" != 0 ]; then
+                bad "H11 $tier kmain_heap_threads $leg: wolf-lang#611: the List landed in $where (ra $ra bytes, rb $rb bytes); want ra >= 512, rb 0"
+            elif [ "$b" = 0 ] && [ "$y" = 0 ] && [ "$al" = "$fr" ] && [ "$al" -gt 0 ]; then
+                say "PASS H11 $tier kmain_heap_threads $leg: two threads, both exited, $al allocs = $fr frees under the heap lock, live 0; the List landed in ra (ra $ra bytes, rb $rb bytes; wolf-lang#611 asserted)"
             else
                 bad "H11 $tier kmain_heap_threads $leg: the heap after the threads: live $b blocks $y bytes, $al allocs, $fr frees"
             fi
