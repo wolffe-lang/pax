@@ -160,6 +160,7 @@ use panic
 use process
 use sched
 use serial
+use speaker
 use timer
 use uaccess
 use vm
@@ -1092,6 +1093,9 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
         // refuses is named here and answered -ENOTTY.
         let req = int32(a1)
         let r = files.ioctl(a, pml4, a0, req, a2)
+        if r == 0 && speaker.request(req) {
+            speaker.own(sched.self_pid()) // px18: the tone stops when this process ends
+        }
         if r == console.REFUSED {
             who()
             log.put(" syscall 16: refused: tty ioctl ")
