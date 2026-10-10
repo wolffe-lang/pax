@@ -33,6 +33,11 @@
 //!   ready when a read would answer, and run at once if the CPU was
 //!   idle (kernel/sched's `kick`). Before kernel/console's `start` both
 //!   lines stay masked, so neither arrives;
+//! - the network device's vector (px20; 32 + the 8259 line the firmware
+//!   routed its pin to, none until kernel/net's `start`): kernel/net
+//!   reads the cause and acknowledges, the network thread is made
+//!   ready, and run at once if the CPU was idle. No frame is touched
+//!   here;
 //! - vectors 39 and 47, an 8259 line 7 or 15: a spurious request
 //!   (kernel/timer reads the in-service register) returns; a real one
 //!   is unexpected (every other line is masked) and panics;
@@ -64,6 +69,7 @@ use console
 use gdt
 use idt
 use log
+use net
 use panic
 use sched
 use speaker
@@ -267,6 +273,12 @@ export fn pax_interrupt(f: *Frame) -> *Frame {
     }
     if (v == 39 || v == 47) && timer.spurious(v) {
         return f
+    }
+    if net.vector() != 0 && v == net.vector() {
+        net.irq(v) // px20: the cause read and noted, the 8259 acknowledged
+        let _n = sched.wake_net()
+        // # Safety: as above.
+        return unsafe { sched.kick(f as u64) as *Frame }
     }
     // # Safety: the frame's address; nothing is read here.
     if v < 32 && v != 8 && v != 18 && user.from_user(unsafe { f as u64 }) {
