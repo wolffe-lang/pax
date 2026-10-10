@@ -1,15 +1,20 @@
-//! files — a process's descriptors and the read-only file tree it sees
-//! (px12, M-PX3).
+//! files — a process's descriptors, the open files they name, pipes,
+//! socketpairs, the working directory, and the read-only file tree a
+//! process sees (px12, M-PX3; px17, pelt's plumbing).
 //!
 //! Written from man-pages `open(2)`/`openat(2)`, `read(2)`, `pread(2)`,
 //! `lseek(2)`, `close(2)`, `stat(2)`, `statx(2)`, `getdents64(2)`,
 //! `getcwd(3)`'s system call, `readlinkat(2)`, `ioctl(2)` and
-//! `path_resolution(7)`; the uapi headers `asm-generic/fcntl.h` and
-//! `linux/fcntl.h` (O_*, AT_*), `arch/x86/include/uapi/asm/stat.h`
+//! `path_resolution(7)`; px17: `pipe(2)`, `pipe(7)`, `dup(2)`,
+//! `fcntl(2)`, `chdir(2)`, `getcwd(3)`, `socketpair(2)`, `unix(7)`,
+//! `recv(2)`, `send(2)`, `open(2)`'s open file descriptions; the uapi
+//! headers `asm-generic/fcntl.h` and
+//! `linux/fcntl.h` (O_*, AT_*, F_*), `arch/x86/include/uapi/asm/stat.h`
 //! (`struct stat`, 144 bytes), `linux/stat.h` (`struct statx`, 256
-//! bytes, STATX_*), `asm-generic/errno-base.h`/`errno.h`; and black-box
-//! strace of the binaries under test on Linux. No Linux source; no other
-//! kernel's source.
+//! bytes, STATX_*), `asm-generic/errno-base.h`/`errno.h`,
+//! `linux/socket.h` and `linux/net.h` (AF_UNIX, SOCK_*); and black-box
+//! strace of the binaries under test on Linux (`notes/px17/`). No Linux
+//! source; no other kernel's source.
 //!
 //! **The tree** is the initramfs (kernel/initramfs), read-only, plus a
 //! synthetic `/dev`: `/dev/stdin`, `/dev/stdout` and `/dev/stderr` open
@@ -20,18 +25,57 @@
 //! first (`//` and `.` dropped, `..` pops a component, never above the
 //! root) and then looked up whole; a path through a regular file is
 //! -ENOTDIR, a missing one -ENOENT. Relative paths start at the working
-//! directory, which is always `/` (no `chdir` yet), or at a directory
-//! descriptor. Nothing is a symbolic link. Writes are refused by name:
-//! opening a file for writing, truncating or creating one is -EROFS.
+//! directory (px17: the process's own, `chdir`/`fchdir`, inherited by a
+//! child and kept across `execve`; `/` for a fresh process), or at a
+//! directory descriptor. Nothing is a symbolic link. Writes are refused
+//! by name: opening a file for writing, truncating or creating one is
+//! -EROFS.
 //!
 //! **The descriptors** (32 a process) are words in the process's area
 //! (kernel/sched's `proc_area`): per descriptor a kind, the node it
-//! names, a position and the open flags. A zeroed area is a fresh
+//! names, the open file it shares (px17; 0 for the console and
+//! `/dev/null`, which keep no offset) and its flags (O_CLOEXEC is the
+//! descriptor's own). A zeroed area is a fresh
 //! process: descriptors 0, 1 and 2 the serial console (read takes what
 //! was typed once kernel/console is started, px13, and gives end-of-file
 //! before; write goes to the console through kernel/user's `write`), the
 //! rest free. `openat` takes the lowest free
 //! number, as Linux does.
+//!
+//! **Open files** (px17; Linux's "open file description", `open(2)`):
+//! 64 records in boot/user.S's `pax_ofiles`, each a reference count, the
+//! kind, the node, the offset and the open flags. `openat` (a file, a
+//! directory), `pipe2` and `socketpair` make one per descriptor they
+//! return; `dup`, `dup2`, `dup3`, `fcntl(F_DUPFD…)` and a child's copy
+//! of the table (`inherit`) share it, so reads and seeks through any of
+//! them move one offset; `close`, `execve`'s close-on-exec and the end
+//! of a process (`close_all`) drop a reference, and the last one frees
+//! the record. Reopening `/dev/stdin` (or stdout, stderr) makes a new
+//! open file at offset 0 on what that descriptor names, as Linux's
+//! `/proc/self/fd` links do.
+//!
+//! **Pipes** (px17, `pipe(7)`): 16 buffer records in `pax_pipes`. A
+//! pipe holds 65536 bytes (Linux's default capacity) in 16 frames taken
+//! at `pipe2` and given back when its last end closes. `read` of an empty
+//! pipe with a writer open waits (`WAIT`: kernel/user rewinds the call
+//! and kernel/sched's `block_pipe` parks the thread until the next
+//! change), with none answers 0; it returns what is there, up to what was
+//! asked. `write` writes everything it is given, waiting while the pipe
+//! is full (a write of at most PIPE_BUF, 4096 bytes, waits until it fits
+//! whole: atomic); what it has written across waits is the area's
+//! PIPE_DONE word. With no reader it is -EPIPE (`EPIPE`; kernel/user
+//! decides SIGPIPE). O_NONBLOCK answers -EAGAIN instead of waiting. An
+//! end's `fstat` is a FIFO (S_IFIFO|0600), `lseek` and `pread` -ESPIPE,
+//! `ioctl` -ENOTTY.
+//!
+//! **Socketpairs** (px17, `socketpair(2)`, AF_UNIX, SOCK_STREAM or
+//! SOCK_SEQPACKET: what wolf's spawn uses to hear an `execve` fail in
+//! its child): two one-frame buffers, one each way; each end reads one
+//! and writes the other, as a pipe's ends do, `recvfrom` and `sendto`
+//! with no address being `read` and `write`. Named drift: a
+//! SOCK_SEQPACKET's record boundaries are not kept (a read takes what is
+//! there, up to what was asked; wolf's spawn sends one 8-byte record).
+//! `fstat` S_IFSOCK|0777.
 //!
 //! **What stat answers**: a file's mode, size, inode (the archive's,
 //! plus 16) and link count from its newc header; directories 0755,
@@ -42,13 +86,18 @@
 //! Every user buffer goes through kernel/uaccess (checked whole, then
 //! copied through the HHDM). A path is copied into boot/user.S's
 //! `pax_kbuf` (one CPU, IF clear for the whole call). No region, no
-//! heap.
+//! heap: the records are `.bss` words read volatile, a pipe's bytes are
+//! frames reached through the HHDM (wolf-lang#611).
 
 use console
+use frames
 use initramfs
+use sched
 use uaccess
 
 extern "c" let pax_kbuf: *u8
+extern "c" let pax_ofiles: *u64
+extern "c" let pax_pipes: *u64
 
 const PAGE: u64 = 4096
 const PATH_MAX: u64 = 4095 // bytes before the NUL
@@ -56,8 +105,42 @@ const PATH_MAX: u64 = 4095 // bytes before the NUL
 /// FDS itself can mean "the lowest free" for `dup`.
 pub const FDS: u64 = 32
 const A_REFUSAL: u64 = 3 // the area's refusal word (kernel/vm's too)
+const A_CWD: u64 = 12 // px17: the working directory's node; 0 the root
+const A_PIPE_DONE: u64 = 13 // px17: bytes a waiting pipe write has written
 const A_FD: u64 = 16 // the first descriptor's word
 const FD_WORDS: u64 = 4
+// A descriptor's words: kind, node, open file + 1 (0 none), flags.
+const D_KIND: u64 = 0
+const D_NODE: u64 = 1
+const D_OF: u64 = 2
+const D_FLAGS: u64 = 3
+
+// px17: open files (boot/user.S's pax_ofiles, 8 words each) and pipe
+// buffers (pax_pipes, 32 words each).
+const OFILES: u64 = 64
+const OF_WORDS: u64 = 8
+const O_REFS: u64 = 0
+const O_KIND: u64 = 1
+const O_NODE: u64 = 2
+const O_POS: u64 = 3
+const O_FLAGS: u64 = 4
+const PIPES: u64 = 16
+const PP_WORDS: u64 = 32
+const P_PAGES: u64 = 0 // frames held; 0 a free record
+const P_READERS: u64 = 1
+const P_WRITERS: u64 = 2
+const P_RD: u64 = 3 // bytes read since it was made
+const P_WR: u64 = 4 // bytes written
+const P_FRAME: u64 = 8 // the frames' physical addresses, from here
+const PIPE_PAGES: u64 = 16 // 65536 bytes, Linux's default capacity
+const SOCK_PAGES: u64 = 1
+/// PIPE_BUF (`pipe(7)`): a write of at most this many bytes is atomic.
+const PIPE_BUF: u64 = 4096
+/// The answer that means "wait and run the call again" (px17): never seen
+/// by ring 3 (kernel/user rewinds the call and parks the thread).
+pub const WAIT: u64 = 0xfffffffffffffdfe // -514
+/// -EPIPE: kernel/user decides whether SIGPIPE ends the writer.
+pub const EPIPE_R: u64 = 0xffffffffffffffe0 // -32
 
 // Descriptor kinds. A zero word is "never opened": the console for 0-2,
 // free above.
@@ -67,6 +150,8 @@ const K_CONSOLE: u64 = 2
 const K_FILE: u64 = 3
 const K_DIR: u64 = 4
 const K_NULL: u64 = 5
+const K_PIPE: u64 = 6 // px17: an end of a pipe (O_RDONLY reads, O_WRONLY writes)
+const K_SOCK: u64 = 7 // px17: an end of a socketpair
 
 // Nodes: a type in the top byte, a reference below (an entry's offset).
 const T_SHIFT: u64 = 56
@@ -76,6 +161,8 @@ const T_ENTRY: u64 = 3
 const T_CONSOLE: u64 = 4
 const T_NULL: u64 = 5
 const T_STD: u64 = 6 // /dev/stdin, stdout, stderr: the reference is 0, 1, 2
+const T_PIPE: u64 = 7 // px17: a pipe; the reference its record
+const T_SOCK: u64 = 8 // px17: a socketpair's end; the reference rx << 8 | tx
 const T_ERR: u64 = 0xff // an errno below
 const REF_MASK: u64 = 0x00ffffffffffffff
 
@@ -88,6 +175,14 @@ const ENOTDIR: u64 = 20
 const EISDIR: u64 = 21
 const EINVAL: u64 = 22
 const EMFILE: u64 = 24
+const ENFILE: u64 = 23 // px17: the open-file table (or the pipes) full
+const EAGAIN: u64 = 11 // px17
+const ENXIO: u64 = 6 // px17: reopening a socket through /dev/std*
+const ENOTSOCK: u64 = 88 // px17
+const EAFNOSUPPORT: u64 = 97 // px17
+const EPROTONOSUPPORT: u64 = 93 // px17
+const ESOCKTNOSUPPORT: u64 = 94 // px17
+const EISCONN: u64 = 106 // px17
 const ENOTTY: u64 = 25
 const ESPIPE: u64 = 29
 const EROFS: u64 = 30
@@ -106,6 +201,8 @@ const O_DIRECTORY: u64 = 0x10000
 const O_NONBLOCK: u64 = 0x800
 const O_CLOEXEC: u64 = 0x80000 // px14: closed by execve
 const O_RDWR: u64 = 2
+const O_APPEND: u64 = 0x400 // px17: F_GETFL / F_SETFL
+const O_DIRECT: u64 = 0x4000 // px17: pipe2 refuses it by name (packet mode)
 const AT_FDCWD: u64 = 0xffffff9c // -100 as the 32-bit int the caller passes (kernel/user masks)
 const AT_SYMLINK_NOFOLLOW: u64 = 0x100
 const AT_EMPTY_PATH: u64 = 0x1000
@@ -116,12 +213,17 @@ const S_IFCHR: u64 = 0x2000
 const MODE_DIR: u64 = 0x41ed // 040755
 const MODE_CONSOLE: u64 = 0x2190 // 020620
 const MODE_NULL: u64 = 0x21b6 // 020666
+const MODE_FIFO: u64 = 0x1180 // 010600: a pipe's end (px17, measured)
+const MODE_SOCK: u64 = 0xc1ff // 0140777: a socketpair's end (px17, measured)
 const DT_CHR: u64 = 2
 const DT_DIR: u64 = 4
 const DT_REG: u64 = 8
 
 // Refusal codes for the area's word (kernel/vm uses 1-15).
 const R_EROFS: u64 = 16
+const R_DIRECT: u64 = 17 // px17
+const R_SOCKTYPE: u64 = 18 // px17
+const R_FCNTL: u64 = 19 // px17
 
 /// -e as %rax carries it.
 pub fn neg(e: u64) -> u64 {
@@ -143,7 +245,166 @@ pub fn why(r: u64) -> str {
     if r == R_EROFS {
         return "the initramfs is read-only"
     }
+    if r == R_DIRECT {
+        return "a packet-mode pipe (O_DIRECT)"
+    }
+    if r == R_SOCKTYPE {
+        return "a socketpair that is not AF_UNIX stream or seqpacket"
+    }
+    if r == R_FCNTL {
+        return "an fcntl command PAX does not take"
+    }
     ""
+}
+
+// --- open files and pipes (px17) ---------------------------------------------
+
+fn ofw(i: u64, w: u64) -> u64 {
+    // # Safety: i < OFILES, w < OF_WORDS: inside boot/user.S's pax_ofiles.
+    unsafe { ((pax_ofiles as u64 + (i * OF_WORDS + w) * 8) as *u64).read_volatile() }
+}
+
+fn put_ofw(i: u64, w: u64, v: u64) {
+    // # Safety: as `ofw`.
+    unsafe { ((pax_ofiles as u64 + (i * OF_WORDS + w) * 8) as *u64).write_volatile(v) }
+}
+
+fn ppw(p: u64, w: u64) -> u64 {
+    // # Safety: p < PIPES, w < PP_WORDS: inside boot/user.S's pax_pipes.
+    unsafe { ((pax_pipes as u64 + (p * PP_WORDS + w) * 8) as *u64).read_volatile() }
+}
+
+fn put_ppw(p: u64, w: u64, v: u64) {
+    // # Safety: as `ppw`.
+    unsafe { ((pax_pipes as u64 + (p * PP_WORDS + w) * 8) as *u64).write_volatile(v) }
+}
+
+/// A pipe buffer of `pages` frames: its record, or PIPES when no record
+/// or frame is free (nothing kept).
+fn pipe_new(pages: u64) -> u64 {
+    var p: u64 = 0
+    while p < PIPES && ppw(p, P_PAGES) != 0 {
+        p += 1
+    }
+    if p == PIPES {
+        return PIPES
+    }
+    var k: u64 = 0
+    while k < pages {
+        let pa = frames.alloc() else 0
+        if pa == 0 {
+            while k > 0 {
+                k -= 1
+                frames.free(ppw(p, P_FRAME + k))
+            }
+            return PIPES
+        }
+        put_ppw(p, P_FRAME + k, pa)
+        k += 1
+    }
+    put_ppw(p, P_READERS, 0)
+    put_ppw(p, P_WRITERS, 0)
+    put_ppw(p, P_RD, 0)
+    put_ppw(p, P_WR, 0)
+    put_ppw(p, P_PAGES, pages)
+    p
+}
+
+/// Pipe `p`'s frames given back once neither end is open.
+fn pipe_settle(p: u64) {
+    if ppw(p, P_READERS) != 0 || ppw(p, P_WRITERS) != 0 {
+        return
+    }
+    let n = ppw(p, P_PAGES)
+    var k: u64 = 0
+    while k < n {
+        frames.free(ppw(p, P_FRAME + k))
+        put_ppw(p, P_FRAME + k, 0)
+        k += 1
+    }
+    put_ppw(p, P_PAGES, 0)
+}
+
+/// What an open file of kind `k` on node `n` with access `acc` adds to
+/// (+1) or takes from (-1) its pipes' reader and writer counts.
+fn pipe_ends(k: u64, n: u64, acc: u64, up: bool) {
+    if k == K_PIPE {
+        let p = rf(n)
+        if acc != O_WRONLY {
+            put_ppw(p, P_READERS, if up { ppw(p, P_READERS) + 1 } else { ppw(p, P_READERS) - 1 })
+        }
+        if acc != O_RDONLY {
+            put_ppw(p, P_WRITERS, if up { ppw(p, P_WRITERS) + 1 } else { ppw(p, P_WRITERS) - 1 })
+        }
+        if !up {
+            pipe_settle(p)
+        }
+    } else if k == K_SOCK {
+        let rx = (rf(n) >> 8) & 0xff
+        let tx = rf(n) & 0xff
+        put_ppw(rx, P_READERS, if up { ppw(rx, P_READERS) + 1 } else { ppw(rx, P_READERS) - 1 })
+        put_ppw(tx, P_WRITERS, if up { ppw(tx, P_WRITERS) + 1 } else { ppw(tx, P_WRITERS) - 1 })
+        if !up {
+            pipe_settle(rx)
+            pipe_settle(tx)
+        }
+    } else {
+        return
+    }
+    sched.wake_pipes() // an end opened or closed: a waiter's answer may change
+}
+
+/// A new open file (one reference): its index + 1, or 0 when the table
+/// is full.
+fn of_new(k: u64, n: u64, flags: u64) -> u64 {
+    var i: u64 = 0
+    while i < OFILES && ofw(i, O_REFS) != 0 {
+        i += 1
+    }
+    if i == OFILES {
+        return 0
+    }
+    put_ofw(i, O_REFS, 1)
+    put_ofw(i, O_KIND, k)
+    put_ofw(i, O_NODE, n)
+    put_ofw(i, O_POS, 0)
+    put_ofw(i, O_FLAGS, flags & !O_CLOEXEC)
+    pipe_ends(k, n, flags & O_ACCMODE, true)
+    i + 1
+}
+
+fn of_ref(o: u64) {
+    if o != 0 {
+        put_ofw(o - 1, O_REFS, ofw(o - 1, O_REFS) + 1)
+    }
+}
+
+/// Drop a reference to open file `o` (index + 1; 0 nothing); the last
+/// one frees it and closes its pipe ends.
+fn of_drop(o: u64) {
+    if o == 0 {
+        return
+    }
+    let i = o - 1
+    let r = ofw(i, O_REFS)
+    if r > 1 {
+        put_ofw(i, O_REFS, r - 1)
+        return
+    }
+    let k = ofw(i, O_KIND)
+    let n = ofw(i, O_NODE)
+    let acc = ofw(i, O_FLAGS) & O_ACCMODE
+    put_ofw(i, O_REFS, 0)
+    put_ofw(i, O_KIND, 0)
+    put_ofw(i, O_NODE, 0)
+    put_ofw(i, O_POS, 0)
+    put_ofw(i, O_FLAGS, 0)
+    pipe_ends(k, n, acc, false)
+}
+
+/// Whether a kind keeps an open file (an offset, a pipe end).
+fn has_of(k: u64) -> bool {
+    k == K_FILE || k == K_DIR || k == K_PIPE || k == K_SOCK
 }
 
 // --- descriptors -------------------------------------------------------------
@@ -157,7 +418,7 @@ fn kind(a: u64, fd: u64) -> u64 {
     if fd >= FDS {
         return K_CLOSED
     }
-    let k = get(a, fdw(fd, 0))
+    let k = get(a, fdw(fd, D_KIND))
     if k == K_DEFAULT {
         if fd < 3 {
             return K_CONSOLE
@@ -175,22 +436,48 @@ fn node_of(a: u64, fd: u64) -> u64 {
     if k == K_NULL {
         return T_NULL << T_SHIFT
     }
-    get(a, fdw(fd, 1))
+    get(a, fdw(fd, D_NODE))
 }
 
+/// The open file descriptor `fd` shares (index + 1; 0 none).
+fn of_of(a: u64, fd: u64) -> u64 {
+    if kind(a, fd) == K_CLOSED {
+        return 0
+    }
+    get(a, fdw(fd, D_OF))
+}
+
+/// The offset (of the open file: shared by every duplicate, px17).
 fn pos(a: u64, fd: u64) -> u64 {
-    get(a, fdw(fd, 2))
+    let o = of_of(a, fd)
+    if o == 0 {
+        return 0
+    }
+    ofw(o - 1, O_POS)
 }
 
 fn set_pos(a: u64, fd: u64, p: u64) {
-    put(a, fdw(fd, 2), p)
+    let o = of_of(a, fd)
+    if o != 0 {
+        put_ofw(o - 1, O_POS, p)
+    }
 }
 
 fn access(a: u64, fd: u64) -> u64 {
-    if get(a, fdw(fd, 0)) == K_DEFAULT {
+    if get(a, fdw(fd, D_KIND)) == K_DEFAULT {
         return 2 // O_RDWR: the console as Linux's terminal is opened
     }
-    get(a, fdw(fd, 3)) & O_ACCMODE
+    get(a, fdw(fd, D_FLAGS)) & O_ACCMODE
+}
+
+/// The status flags (O_NONBLOCK, O_APPEND): the open file's when there is
+/// one (F_SETFL changes them for every duplicate), else the descriptor's.
+fn status(a: u64, fd: u64) -> u64 {
+    let o = of_of(a, fd)
+    if o != 0 {
+        return ofw(o - 1, O_FLAGS)
+    }
+    get(a, fdw(fd, D_FLAGS))
 }
 
 /// Whether descriptor `fd` is open.
@@ -198,9 +485,10 @@ pub fn is_open(a: u64, fd: u64) -> bool {
     kind(a, fd) != K_CLOSED
 }
 
-/// Whether descriptor `fd` writes to the console (kernel/user's `write`
-/// sends the bytes): 1 yes, 0 a sink that swallows them (/dev/null),
-/// 2 not writable (-EBADF).
+/// What a `write` to descriptor `fd` reaches (kernel/user's `write`):
+/// 1 the console (kernel/user sends the bytes), 0 a sink that swallows
+/// them (/dev/null), 2 nothing writable (-EBADF), 3 a pipe or a socket
+/// (px17: `pipe_write`).
 pub fn write_target(a: u64, fd: u64) -> u64 {
     let k = kind(a, fd)
     if k == K_CLOSED || access(a, fd) == O_RDONLY {
@@ -212,18 +500,42 @@ pub fn write_target(a: u64, fd: u64) -> u64 {
     if k == K_NULL {
         return 0
     }
+    if k == K_PIPE || k == K_SOCK {
+        return 3
+    }
     2
 }
 
-fn install(a: u64, fd: u64, k: u64, node: u64, flags: u64) {
-    put(a, fdw(fd, 0), k)
-    put(a, fdw(fd, 1), node)
-    put(a, fdw(fd, 2), 0)
-    put(a, fdw(fd, 3), flags)
+/// Descriptor `fd` made to name kind `k`, node `node`, open file `o`
+/// (index + 1, already counted; 0 none), with `flags`.
+fn install(a: u64, fd: u64, k: u64, node: u64, o: u64, flags: u64) {
+    put(a, fdw(fd, D_KIND), k)
+    put(a, fdw(fd, D_NODE), node)
+    put(a, fdw(fd, D_OF), o)
+    put(a, fdw(fd, D_FLAGS), flags)
 }
 
-fn lowest_free(a: u64) -> u64 {
-    var fd: u64 = 0
+/// A new descriptor, the lowest free at or above `min`, naming a fresh
+/// open file (when kind `k` keeps one) on `node` with `flags`: the
+/// number, or -EMFILE / -ENFILE.
+fn open_new(a: u64, min: u64, k: u64, node: u64, flags: u64) -> u64 {
+    let fd = lowest_free(a, min)
+    if fd == FDS {
+        return neg(EMFILE)
+    }
+    var o: u64 = 0
+    if has_of(k) {
+        o = of_new(k, node, flags)
+        if o == 0 {
+            return neg(ENFILE)
+        }
+    }
+    install(a, fd, k, node, o, flags)
+    fd
+}
+
+fn lowest_free(a: u64, min: u64) -> u64 {
+    var fd = min
     while fd < FDS {
         if kind(a, fd) == K_CLOSED {
             return fd
@@ -238,56 +550,77 @@ pub fn close(a: u64, fd: u64) -> u64 {
     if kind(a, fd) == K_CLOSED {
         return neg(EBADF)
     }
+    let o = get(a, fdw(fd, D_OF))
     if fd < 3 {
-        install(a, fd, K_CLOSED, 0, 0)
+        install(a, fd, K_CLOSED, 0, 0, 0)
     } else {
-        install(a, fd, K_DEFAULT, 0, 0)
+        install(a, fd, K_DEFAULT, 0, 0, 0)
     }
+    of_drop(o)
     0
 }
 
 /// The open flags descriptor `fd` (open) carries: the console's
 /// default descriptors are O_RDWR, as Linux's terminal is opened.
 fn flags_of(a: u64, fd: u64) -> u64 {
-    if get(a, fdw(fd, 0)) == K_DEFAULT {
+    if get(a, fdw(fd, D_KIND)) == K_DEFAULT {
         return O_RDWR
     }
-    get(a, fdw(fd, 3))
+    get(a, fdw(fd, D_FLAGS))
 }
 
 /// px14: `dup(old)` (`new` FDS: the lowest free number), `dup2(old,
 /// new)` and `dup3(old, new, flags)` (`cloexec`: O_CLOEXEC on the copy).
-/// The copy names what `old` names, at its position, without
-/// close-on-exec unless asked; what `new` named is closed first. PAX
-/// keeps a position per descriptor, not per open file, so a copy's reads
-/// do not move the original's (a drift from Linux's shared offset,
-/// named; nothing PAX runs reads one file through two descriptors).
+/// The copy names what `old` names, without close-on-exec unless asked;
+/// what `new` named is closed first. px17: the copy shares `old`'s open
+/// file, so its offset and status flags are one (Linux's rule; px14
+/// kept a position per descriptor).
 pub fn dup(a: u64, old: u64, new: u64, cloexec: bool) -> u64 {
+    if new == FDS {
+        return dup_from(a, old, 0, cloexec)
+    }
     let k = kind(a, old)
     if k == K_CLOSED {
         return neg(EBADF)
     }
-    var to = new
-    if new == FDS {
-        to = lowest_free(a)
-        if to == FDS {
-            return neg(EMFILE)
-        }
-    } else if new > FDS {
+    if new > FDS {
         return neg(EBADF)
     }
-    if to == old {
-        return to
+    if new == old {
+        return new
     }
+    if kind(a, new) != K_CLOSED {
+        let _c = close(a, new)
+    }
+    copy_fd(a, old, new, cloexec)
+    new
+}
+
+/// px17: `fcntl(old, F_DUPFD[_CLOEXEC], min)` (and `dup`): the lowest
+/// free descriptor at or above `min` made a copy of `old`.
+pub fn dup_from(a: u64, old: u64, min: u64, cloexec: bool) -> u64 {
+    if kind(a, old) == K_CLOSED {
+        return neg(EBADF)
+    }
+    if min >= FDS {
+        return neg(EINVAL)
+    }
+    let to = lowest_free(a, min)
+    if to == FDS {
+        return neg(EMFILE)
+    }
+    copy_fd(a, old, to, cloexec)
+    to
+}
+
+fn copy_fd(a: u64, old: u64, to: u64, cloexec: bool) {
     var fl = flags_of(a, old) & !O_CLOEXEC
     if cloexec {
         fl = fl | O_CLOEXEC
     }
-    let n = node_of(a, old)
-    let at = pos(a, old)
-    install(a, to, k, n, fl)
-    set_pos(a, to, at)
-    to
+    let o = of_of(a, old)
+    of_ref(o)
+    install(a, to, kind(a, old), node_of(a, old), o, fl)
 }
 
 /// px14: `execve` closes every descriptor opened with O_CLOEXEC (or
@@ -300,6 +633,324 @@ pub fn exec_close(a: u64) {
         }
         fd += 1
     }
+}
+
+/// px17: a child's descriptors (kernel/sched copied the parent's table
+/// into its area `a`) take their own references to the open files they
+/// share with the parent.
+pub fn inherit(a: u64) {
+    var fd: u64 = 0
+    while fd < FDS {
+        of_ref(of_of(a, fd))
+        fd += 1
+    }
+    put(a, A_PIPE_DONE, 0)
+}
+
+/// px17: a process's end closes every descriptor it holds, so a pipe's
+/// last writer gone reads as end-of-file at once.
+pub fn close_all(a: u64) {
+    var fd: u64 = 0
+    while fd < FDS {
+        if kind(a, fd) != K_CLOSED {
+            let _c = close(a, fd)
+        }
+        fd += 1
+    }
+}
+
+/// px17: `fcntl(fd, cmd, arg)`: F_DUPFD (0), F_DUPFD_CLOEXEC (1030),
+/// F_GETFD (1, FD_CLOEXEC), F_SETFD (2), F_GETFL (3: the access mode and
+/// O_APPEND/O_NONBLOCK), F_SETFL (4: O_APPEND and O_NONBLOCK, on the
+/// open file), F_GETPIPE_SZ (1032: 65536 on a pipe). Any other command
+/// is refused by name, -EINVAL.
+pub fn fcntl(a: u64, fd: u64, cmd: u64, arg: u64) -> u64 {
+    if kind(a, fd) == K_CLOSED {
+        return neg(EBADF)
+    }
+    if cmd == 0 || cmd == 1030 {
+        return dup_from(a, fd, arg & 0xffffffff, cmd == 1030)
+    }
+    if cmd == 1 {
+        return if flags_of(a, fd) & O_CLOEXEC != 0 { 1 } else { 0 }
+    }
+    if cmd == 2 {
+        var fl = flags_of(a, fd) & !O_CLOEXEC
+        if arg & 1 != 0 {
+            fl = fl | O_CLOEXEC
+        }
+        if get(a, fdw(fd, D_KIND)) == K_DEFAULT {
+            // The console's never-opened 0-2: made explicit to keep the bit.
+            install(a, fd, K_CONSOLE, T_CONSOLE << T_SHIFT, 0, fl)
+        } else {
+            put(a, fdw(fd, D_FLAGS), fl)
+        }
+        return 0
+    }
+    if cmd == 3 {
+        return access(a, fd) | (status(a, fd) & (O_APPEND | O_NONBLOCK))
+    }
+    if cmd == 4 {
+        let keep = O_APPEND | O_NONBLOCK
+        let o = of_of(a, fd)
+        if o != 0 {
+            put_ofw(o - 1, O_FLAGS, (ofw(o - 1, O_FLAGS) & !keep) | (arg & keep))
+        } else if get(a, fdw(fd, D_KIND)) != K_DEFAULT {
+            put(a, fdw(fd, D_FLAGS), (get(a, fdw(fd, D_FLAGS)) & !keep) | (arg & keep))
+        }
+        return 0
+    }
+    if cmd == 1032 {
+        if kind(a, fd) != K_PIPE {
+            return neg(EBADF)
+        }
+        return PIPE_PAGES * PAGE
+    }
+    put(a, A_REFUSAL, R_FCNTL)
+    neg(EINVAL)
+}
+
+/// px17: `pipe2(fds, flags)` (and `pipe`, flags 0): a pipe, its read end
+/// at the lowest free descriptor and its write end at the next, the two
+/// ints written at `va`. O_CLOEXEC and O_NONBLOCK are taken; O_DIRECT
+/// (packet mode) is refused by name; anything else -EINVAL.
+pub fn pipe2(a: u64, pml4: u64, va: u64, flags: u64) -> u64 {
+    if flags & !(O_CLOEXEC | O_NONBLOCK | O_DIRECT) != 0 {
+        return neg(EINVAL)
+    }
+    if flags & O_DIRECT != 0 {
+        put(a, A_REFUSAL, R_DIRECT)
+        return neg(EINVAL)
+    }
+    if !uaccess.writable(pml4, va, 8) {
+        return neg(EFAULT)
+    }
+    let r = lowest_free(a, 0)
+    if r == FDS || lowest_free(a, r + 1) == FDS {
+        return neg(EMFILE)
+    }
+    let p = pipe_new(PIPE_PAGES)
+    if p == PIPES {
+        return neg(ENFILE)
+    }
+    let n = (T_PIPE << T_SHIFT) | p
+    let fr = open_new(a, 0, K_PIPE, n, O_RDONLY | flags)
+    if fr >= 0x8000000000000000 {
+        pipe_settle(p)
+        return fr
+    }
+    let fw = open_new(a, 0, K_PIPE, n, O_WRONLY | flags)
+    if fw >= 0x8000000000000000 {
+        let _c = close(a, fr)
+        return fw
+    }
+    uaccess.put(pml4, va, fr, 4)
+    uaccess.put(pml4, va + 4, fw, 4)
+    0
+}
+
+/// px17: `socketpair(domain, type, protocol, sv)`: AF_UNIX (1) with
+/// SOCK_STREAM (1) or SOCK_SEQPACKET (5), SOCK_CLOEXEC and SOCK_NONBLOCK
+/// taken; two connected ends, the descriptors written at `sv`. Another
+/// domain -EAFNOSUPPORT, a protocol -EPROTONOSUPPORT; another type
+/// (SOCK_DGRAM) is refused by name, -ESOCKTNOSUPPORT.
+pub fn socketpair(a: u64, pml4: u64, domain: u64, ty: u64, proto: u64, sv: u64) -> u64 {
+    if domain != 1 {
+        return neg(EAFNOSUPPORT)
+    }
+    let base = ty & 0xf
+    if ty & !(0xf | O_CLOEXEC | O_NONBLOCK) != 0 {
+        return neg(EINVAL)
+    }
+    if base != 1 && base != 5 {
+        put(a, A_REFUSAL, R_SOCKTYPE)
+        return neg(ESOCKTNOSUPPORT)
+    }
+    if proto != 0 {
+        return neg(EPROTONOSUPPORT)
+    }
+    if !uaccess.writable(pml4, sv, 8) {
+        return neg(EFAULT)
+    }
+    let s0 = lowest_free(a, 0)
+    if s0 == FDS || lowest_free(a, s0 + 1) == FDS {
+        return neg(EMFILE)
+    }
+    let c1 = pipe_new(SOCK_PAGES)
+    if c1 == PIPES {
+        return neg(ENFILE)
+    }
+    let c2 = pipe_new(SOCK_PAGES)
+    if c2 == PIPES {
+        pipe_settle(c1)
+        return neg(ENFILE)
+    }
+    let fl = O_RDWR | (ty & (O_CLOEXEC | O_NONBLOCK))
+    let f0 = open_new(a, 0, K_SOCK, (T_SOCK << T_SHIFT) | (c2 << 8) | c1, fl)
+    if f0 >= 0x8000000000000000 {
+        pipe_settle(c1)
+        pipe_settle(c2)
+        return f0
+    }
+    let f1 = open_new(a, 0, K_SOCK, (T_SOCK << T_SHIFT) | (c1 << 8) | c2, fl)
+    if f1 >= 0x8000000000000000 {
+        let _c = close(a, f0)
+        return f1
+    }
+    uaccess.put(pml4, sv, f0, 4)
+    uaccess.put(pml4, sv + 4, f1, 4)
+    0
+}
+
+/// The buffer descriptor `fd` reads from (a pipe's, a socket's rx).
+fn rx_of(a: u64, fd: u64) -> u64 {
+    let n = node_of(a, fd)
+    if kind(a, fd) == K_SOCK {
+        return (rf(n) >> 8) & 0xff
+    }
+    rf(n)
+}
+
+fn tx_of(a: u64, fd: u64) -> u64 {
+    let n = node_of(a, fd)
+    if kind(a, fd) == K_SOCK {
+        return rf(n) & 0xff
+    }
+    rf(n)
+}
+
+/// The kernel address of byte `at` (a count since the pipe was made) of
+/// pipe `p`'s ring, and how many bytes follow it on its frame.
+fn ring_at(p: u64, at: u64) -> (u64, u64) {
+    let cap = ppw(p, P_PAGES) * PAGE
+    let o = at % cap
+    let pg = o / PAGE
+    let off = o % PAGE
+    (frames.hhdm() + ppw(p, P_FRAME + pg) + off, PAGE - off)
+}
+
+/// px17: a read of a pipe or socket: what is there (up to `n`), 0 when
+/// it is empty and no writer is open, WAIT (or -EAGAIN) when it is empty
+/// and a writer is.
+fn pipe_read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool) -> u64 {
+    let p = rx_of(a, fd)
+    let avail = ppw(p, P_WR) - ppw(p, P_RD)
+    if avail == 0 {
+        if ppw(p, P_WRITERS) == 0 {
+            return 0
+        }
+        if n == 0 {
+            return 0
+        }
+        if nonblock || status(a, fd) & O_NONBLOCK != 0 {
+            return neg(EAGAIN)
+        }
+        return WAIT
+    }
+    if n == 0 {
+        return 0
+    }
+    let k = if n < avail { n } else { avail }
+    if !uaccess.writable(pml4, buf, k) {
+        return neg(EFAULT)
+    }
+    var done: u64 = 0
+    while done < k {
+        let (src, room) = ring_at(p, ppw(p, P_RD) + done)
+        let c = if k - done < room { k - done } else { room }
+        let _ok = uaccess.copy_out(pml4, buf + done, src, c)
+        done += c
+    }
+    put_ppw(p, P_RD, ppw(p, P_RD) + k)
+    sched.wake_pipes()
+    k
+}
+
+/// px17: `write` to a pipe or socket (kernel/user's `write`): every byte
+/// of [buf, buf + n), waiting (WAIT) while it is full; -EPIPE with no
+/// reader (`EPIPE_R`; what was written across waits answered instead,
+/// if any); -EAGAIN for O_NONBLOCK with no room.
+pub fn pipe_write(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool) -> u64 {
+    let p = tx_of(a, fd)
+    let done = get(a, A_PIPE_DONE)
+    if ppw(p, P_READERS) == 0 {
+        put(a, A_PIPE_DONE, 0)
+        if done > 0 {
+            return done
+        }
+        return EPIPE_R
+    }
+    if n == 0 {
+        return 0
+    }
+    if done == 0 && !uaccess.readable(pml4, buf, n) {
+        return neg(EFAULT)
+    }
+    let nb = nonblock || status(a, fd) & O_NONBLOCK != 0
+    let cap = ppw(p, P_PAGES) * PAGE
+    let space = cap - (ppw(p, P_WR) - ppw(p, P_RD))
+    let rest = n - done
+    if (n <= PIPE_BUF && space < rest) || space == 0 {
+        if nb {
+            put(a, A_PIPE_DONE, 0)
+            return if done > 0 { done } else { neg(EAGAIN) }
+        }
+        put(a, A_PIPE_DONE, done)
+        return WAIT
+    }
+    let k = if rest < space { rest } else { space }
+    var c: u64 = 0
+    while c < k {
+        let (dst, room) = ring_at(p, ppw(p, P_WR) + c)
+        let m = if k - c < room { k - c } else { room }
+        let _ok = uaccess.copy_in(pml4, dst, buf + done + c, m)
+        c += m
+    }
+    put_ppw(p, P_WR, ppw(p, P_WR) + k)
+    sched.wake_pipes()
+    if done + k == n || nb {
+        put(a, A_PIPE_DONE, 0)
+        return done + k
+    }
+    put(a, A_PIPE_DONE, done + k)
+    WAIT
+}
+
+/// px17: `recvfrom(fd, buf, n, flags, addr, addrlen)` on a socketpair's
+/// end: a read (MSG_DONTWAIT, 0x40, as O_NONBLOCK); no address is
+/// reported (a connected pair's peer is unnamed: *addrlen 0).
+pub fn recvfrom(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64, addr: u64, alen: u64) -> u64 {
+    let k = kind(a, fd)
+    if k == K_CLOSED {
+        return neg(EBADF)
+    }
+    if k != K_SOCK {
+        return neg(ENOTSOCK)
+    }
+    if addr != 0 && alen != 0 {
+        if !uaccess.writable(pml4, alen, 4) {
+            return neg(EFAULT)
+        }
+        uaccess.put(pml4, alen, 0, 4)
+    }
+    pipe_read(a, pml4, fd, buf, n, flags & 0x40 != 0)
+}
+
+/// px17: `sendto(fd, buf, n, flags, addr, addrlen)` on a socketpair's
+/// end: a write; an address on a connected socket is -EISCONN.
+/// MSG_NOSIGNAL (0x4000) is kernel/user's to read.
+pub fn sendto(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64, addr: u64) -> u64 {
+    let k = kind(a, fd)
+    if k == K_CLOSED {
+        return neg(EBADF)
+    }
+    if k != K_SOCK {
+        return neg(ENOTSOCK)
+    }
+    if addr != 0 {
+        return neg(EISCONN)
+    }
+    pipe_write(a, pml4, fd, buf, n, flags & 0x40 != 0)
 }
 
 // --- paths ------------------------------------------------------------------
@@ -522,7 +1173,7 @@ fn resolve(a: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool) -> u64 {
             return err(ENOENT)
         }
         if dirfd == AT_FDCWD {
-            return T_ROOT << T_SHIFT
+            return cwd(a)
         }
         if kind(a, dirfd) == K_CLOSED {
             return err(EBADF)
@@ -530,6 +1181,9 @@ fn resolve(a: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool) -> u64 {
         return node_of(a, dirfd)
     }
     var base = T_ROOT << T_SHIFT
+    if kb(0) != 47 && dirfd == AT_FDCWD {
+        base = cwd(a) // px17
+    }
     if kb(0) != 47 && dirfd != AT_FDCWD {
         if kind(a, dirfd) == K_CLOSED {
             return err(EBADF)
@@ -578,6 +1232,9 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64) -> u64 {
         }
         k = kind(a, src)
         n = node_of(a, src)
+        if k == K_SOCK {
+            return neg(ENXIO) // px17: a socket is not reopened through a path
+        }
     } else if ty(n) == T_CONSOLE {
         k = K_CONSOLE
     } else if ty(n) == T_NULL {
@@ -595,12 +1252,9 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64) -> u64 {
         put(a, A_REFUSAL, R_EROFS)
         return neg(EROFS)
     }
-    let fd = lowest_free(a)
-    if fd == FDS {
-        return neg(EMFILE)
-    }
-    install(a, fd, k, n, flags)
-    fd
+    // px17: a new open file (offset 0), also when /dev/std* reopens a
+    // file or a pipe's end (as /proc/self/fd's links do on Linux).
+    open_new(a, 0, k, n, flags)
 }
 
 /// Copy up to `n` bytes of file node `node` from offset `off` to user
@@ -636,7 +1290,10 @@ pub fn read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
     if k == K_CONSOLE {
         // px13: what was typed (kernel/console), or console.RESTART for
         // kernel/user to wait; end of file before the console is started.
-        return console.read(pml4, buf, n, get(a, fdw(fd, 3)) & O_NONBLOCK != 0)
+        return console.read(pml4, buf, n, status(a, fd) & O_NONBLOCK != 0)
+    }
+    if k == K_PIPE || k == K_SOCK {
+        return pipe_read(a, pml4, fd, buf, n, false) // px17
     }
     let r = file_read(pml4, node_of(a, fd), pos(a, fd), buf, n)
     if r < 0x8000000000000000 {
@@ -669,7 +1326,7 @@ pub fn lseek(a: u64, fd: u64, off: u64, whence: u64) -> u64 {
     if k == K_CLOSED {
         return neg(EBADF)
     }
-    if k == K_CONSOLE {
+    if k == K_CONSOLE || k == K_PIPE || k == K_SOCK {
         return neg(ESPIPE)
     }
     if k == K_NULL {
@@ -741,17 +1398,62 @@ pub fn exec_lookup(a: u64, pml4: u64, va: u64) -> (u64, u64, u64) {
     (rf(n), 0, l)
 }
 
-/// `getcwd(buf, size)`: "/" (no `chdir` yet), its length with the NUL.
-pub fn getcwd(pml4: u64, buf: u64, size: u64) -> u64 {
-    if size < 2 {
+/// The working directory's node (px17): the area's word, 0 the root.
+fn cwd(a: u64) -> u64 {
+    let c = get(a, A_CWD)
+    if c == 0 {
+        return T_ROOT << T_SHIFT
+    }
+    c
+}
+
+/// `getcwd(buf, size)` (px17: the process's working directory; "/" until
+/// a `chdir`): the path and a NUL at `buf`, the length with the NUL;
+/// -ERANGE when `size` is smaller.
+pub fn getcwd(a: u64, pml4: u64, buf: u64, size: u64) -> u64 {
+    let l = put_prefix(cwd(a)) // the name without its leading '/', at NORM
+    if size < l + 2 {
         return neg(ERANGE)
     }
-    if !uaccess.writable(pml4, buf, 2) {
+    if !uaccess.writable(pml4, buf, l + 2) {
         return neg(EFAULT)
     }
     uaccess.put(pml4, buf, 47, 1)
-    uaccess.put(pml4, buf + 1, 0, 1)
-    2
+    var i: u64 = 0
+    while i < l {
+        uaccess.put(pml4, buf + 1 + i, kb(NORM + i), 1)
+        i += 1
+    }
+    uaccess.put(pml4, buf + 1 + l, 0, 1)
+    l + 2
+}
+
+/// px17: `chdir(path)`: the working directory becomes the directory the
+/// path names (-ENOENT, -ENOTDIR, the path's own errors).
+pub fn chdir(a: u64, pml4: u64, va: u64) -> u64 {
+    let n = resolve(a, pml4, AT_FDCWD, va, false)
+    if is_err(n) {
+        return neg(rf(n))
+    }
+    if !is_dir_node(n) {
+        return neg(ENOTDIR)
+    }
+    put(a, A_CWD, n)
+    0
+}
+
+/// px17: `fchdir(fd)`: the directory descriptor `fd` names (-EBADF,
+/// -ENOTDIR).
+pub fn fchdir(a: u64, fd: u64) -> u64 {
+    if kind(a, fd) == K_CLOSED {
+        return neg(EBADF)
+    }
+    let n = node_of(a, fd)
+    if !is_dir_node(n) {
+        return neg(ENOTDIR)
+    }
+    put(a, A_CWD, n)
+    0
 }
 
 /// `readlinkat(dirfd, path, buf, size)`: nothing in PAX's tree is a
@@ -778,6 +1480,12 @@ fn n_mode(n: u64) -> u64 {
     if t == T_NULL {
         return MODE_NULL
     }
+    if t == T_PIPE {
+        return MODE_FIFO
+    }
+    if t == T_SOCK {
+        return MODE_SOCK
+    }
     MODE_DIR
 }
 
@@ -801,6 +1509,9 @@ fn n_ino(n: u64) -> u64 {
     }
     if t == T_NULL {
         return 4
+    }
+    if t == T_PIPE || t == T_SOCK {
+        return 0x100 + (rf(n) & 0xff) // px17: one number per buffer
     }
     3 // the console
 }
