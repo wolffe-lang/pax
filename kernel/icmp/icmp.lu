@@ -1,0 +1,354 @@
+//! icmp — the Internet Control Message Protocol's echo, and one error
+//! (px21).
+//!
+//! An ICMP message is an IPv4 datagram's payload, protocol 1 (RFC 792):
+//!
+//!     0 type   1 code   2 checksum (RFC 1071, over the whole message)
+//!     echo request (type 8) and reply (type 0), code 0:
+//!     4 identifier   6 sequence number   8 data
+//!     destination unreachable (type 3; code 2, protocol unreachable):
+//!     4 unused, zero   8 the offending datagram's header and the
+//!                        first 8 bytes of its data
+//!
+//! **Received** (`input`, from kernel/netd, for a datagram kernel/ip
+//! passed), each cause a counter:
+//!
+//!     short       fewer than 8 bytes
+//!     checksum    the message does not sum to 0xffff
+//!     echo request, code 0: answered — the same message with type 0
+//!                 and the checksum recomputed, sent to the request's
+//!                 source from this station's address (RFC 792; RFC
+//!                 1122 §3.2.2.6: the data is returned entire). The
+//!                 reply is routed like any datagram, by kernel/ip: it
+//!                 is not sent back to the hardware address the request
+//!                 came from. IP options in the request are not
+//!                 carried into the reply.
+//!     broadcast   an echo request to a broadcast address: not
+//!                 answered (RFC 1122 §3.2.2.6: a host MAY discard it)
+//!     echo reply: matched to the echo this kernel is waiting for (its
+//!                 identifier, sequence number, source and data all the
+//!                 ones sent); one that matches nothing is `stray`
+//!     type        any other type, or an echo with a code that is not 0
+//!
+//! **Sent.** `ping(dst, seq, bytes)` sends one echo request, identifier
+//! `IDENT`, data byte k = 7k mod 256, and notes the time-stamp counter;
+//! `answer()` says whether its reply has come and how long it took. One
+//! echo is waited for at a time: a second `ping` forgets the first.
+//!
+//! `unreachable(frame, ihl, total)` answers a datagram of a protocol
+//! nothing here speaks with destination unreachable, code 2 (RFC 1122
+//! §3.2.2.1: a host SHOULD), unless RFC 1122 §3.2.2 forbids an error —
+//! a datagram for a broadcast address, or one that arrived in a frame
+//! for a group hardware address (`silent`); kernel/ip has already
+//! dropped fragments and sources that name no single host — and
+//! **rate-limited**: one error per `LIMIT` ticks (a second) to all
+//! destinations together, the rest counted `limited` and not sent
+//! (RFC 1812 §4.3.2.8's reasoning: an error is never worth a flood).
+//!
+//! State is words of boot/net.S's `pax_icmp_state` and one frame (its
+//! lower half the echo request's message, its upper the error's),
+//! under `sync.icmp()`, which is never held across a call into
+//! kernel/ip. Nothing here allocates from the heap.
+//!
+//! Written from RFC 792, RFC 1071 and RFC 1122 §3.2.2. No Linux
+//! source; no other kernel's or network stack's source.
+
+use frames
+use ip
+use log
+use sync
+use timer
+
+extern "c" fn pax_fb_copy(dst: u64, src: u64, bytes: u64)
+extern "c" fn pax_rdtsc() -> u64
+
+extern "c" let pax_icmp_state: *u64
+
+/// The identifier of every echo request this kernel sends ("PX").
+pub const IDENT: u64 = 0x5058
+/// Ticks between two errors.
+pub const LIMIT: u64 = 100
+/// The most data an echo request can carry: 1480 less the 8-byte header.
+pub const DATA_MAX: u64 = 1472
+const HALF: u64 = 2048
+
+// pax_icmp_state's words.
+const M_SEQ: u64 = 0 // the echo waited for: its sequence number,
+const M_DST: u64 = 1 // its destination,
+const M_LEN: u64 = 2 // its data bytes,
+const M_SENT: u64 = 3 // the time-stamp counter when it left;
+const M_WAITING: u64 = 4 // 1 while no reply has come
+const M_GOT: u64 = 5 // 1 once one has:
+const M_RTT: u64 = 6 // the time-stamp counts it took
+const M_TTL: u64 = 7 // and the reply's time to live
+const M_ERROR_AT: u64 = 8 // the tick of the last error sent, plus 1
+const M_FRAME: u64 = 9 // the module's frame (HHDM)
+
+/// The counters (`count`): echo requests received and answered.
+pub const C_ECHO_IN: u64 = 16
+/// Echo replies handed to kernel/ip.
+pub const C_ECHO_OUT: u64 = 17
+/// Echo requests sent.
+pub const C_REQUESTS_OUT: u64 = 18
+/// Echo replies that matched the echo waited for.
+pub const C_REPLIES_IN: u64 = 19
+/// Echo replies that matched nothing.
+pub const C_STRAY: u64 = 20
+/// Dropped: fewer than 8 bytes.
+pub const C_SHORT: u64 = 21
+/// Dropped: a wrong checksum.
+pub const C_CHECKSUM: u64 = 22
+/// Dropped: an echo request to a broadcast address.
+pub const C_BROADCAST: u64 = 23
+/// Dropped: a type nothing here handles.
+pub const C_TYPE: u64 = 24
+/// Destination-unreachable messages sent.
+pub const C_UNREACHABLE: u64 = 25
+/// Errors not sent: within `LIMIT` ticks of the last.
+pub const C_LIMITED: u64 = 26
+/// Errors not sent: RFC 1122 §3.2.2 forbids one.
+pub const C_SILENT: u64 = 27
+/// Messages kernel/ip did not take.
+pub const C_NOT_SENT: u64 = 28
+
+fn mw(i: u64) -> u64 {
+    // # Safety: i < 64, a word of boot/net.S's pax_icmp_state.
+    unsafe { ((pax_icmp_state as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_mw(i: u64, v: u64) {
+    // # Safety: as `mw`.
+    unsafe { ((pax_icmp_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+fn bump(i: u64) {
+    let saved = sync.acquire(sync.icmp())
+    put_mw(i, mw(i) + 1)
+    sync.release(sync.icmp(), saved)
+}
+
+/// Counter `i` (C_*).
+pub fn count(i: u64) -> u64 {
+    mw(i)
+}
+
+fn tsc() -> u64 {
+    // # Safety: boot/fpu.S's RDTSC; it touches no memory.
+    unsafe { pax_rdtsc() }
+}
+
+/// Take a frame for the messages this kernel composes. IF clear, after
+/// `ip.start`.
+pub fn start() {
+    var i: u64 = 0
+    while i < 64 {
+        put_mw(i, 0)
+        i += 1
+    }
+    let pa = frames.alloc() else 0
+    if pa != 0 {
+        put_mw(M_FRAME, pa + frames.hhdm())
+    }
+}
+
+/// Frames this module holds.
+pub fn frames_held() -> u64 {
+    if mw(M_FRAME) != 0 { 1 } else { 0 }
+}
+
+fn sent(r: u64) -> bool {
+    // kernel/arp's SENT (0) and QUEUED (1).
+    r < 2
+}
+
+/// The ICMP message of a datagram kernel/ip passed: the `len`-byte
+/// frame at `frame`, its IP header `ihl` bytes, its total length
+/// `total`. Thread context; the receive buffer is this call's to write
+/// in until it returns.
+pub fn input(frame: u64, ihl: u64, total: u64) {
+    let h = frame + ip.ETH
+    let m = h + ihl
+    let n = total - ihl
+    if n < 8 {
+        bump(C_SHORT)
+        return
+    }
+    if ip.sum(m, n) != 0 {
+        bump(C_CHECKSUM)
+        return
+    }
+    let kind = ip.octet(m)
+    let src = ip.be32(h + 12)
+    if kind == 8 && ip.octet(m + 1) == 0 {
+        if ip.is_broadcast(ip.be32(h + 16)) {
+            bump(C_BROADCAST)
+            return
+        }
+        bump(C_ECHO_IN)
+        // The reply is the request with one byte changed and the
+        // checksum made again, to the request's source.
+        ip.put_byte(m, 0)
+        ip.put_be16(m + 2, 0)
+        ip.put_be16(m + 2, ip.sum(m, n))
+        if sent(ip.send(src, ip.ICMP, m, n)) {
+            bump(C_ECHO_OUT)
+        } else {
+            bump(C_NOT_SENT)
+        }
+        return
+    }
+    if kind == 0 && ip.octet(m + 1) == 0 {
+        let saved = sync.acquire(sync.icmp())
+        var same = mw(M_WAITING) == 1 && ip.be16(m + 4) == IDENT && ip.be16(m + 6) == mw(M_SEQ) && src == mw(M_DST) && n == 8 + mw(M_LEN)
+        var k: u64 = 0
+        while same && k < n - 8 {
+            if ip.octet(m + 8 + k) != (k * 7) & 0xff {
+                same = false
+            }
+            k += 1
+        }
+        if same {
+            put_mw(M_RTT, tsc() - mw(M_SENT))
+            put_mw(M_TTL, ip.octet(h + 8))
+            put_mw(M_WAITING, 0)
+            put_mw(M_GOT, 1)
+            put_mw(C_REPLIES_IN, mw(C_REPLIES_IN) + 1)
+        } else {
+            put_mw(C_STRAY, mw(C_STRAY) + 1)
+        }
+        sync.release(sync.icmp(), saved)
+        return
+    }
+    bump(C_TYPE)
+}
+
+/// Tell the sender of a datagram kernel/ip passed but nothing speaks
+/// (the frame at `frame`, header `ihl` bytes, total length `total`)
+/// that its protocol is unreachable — unless an error is forbidden
+/// (`silent`) or one went out within `LIMIT` ticks (`limited`).
+pub fn unreachable(frame: u64, ihl: u64, total: u64) {
+    let h = frame + ip.ETH
+    // A group hardware address (the low bit of the first byte: every
+    // broadcast and multicast frame) or a broadcast destination.
+    if ip.octet(frame) & 1 == 1 || ip.is_broadcast(ip.be32(h + 16)) {
+        bump(C_SILENT)
+        return
+    }
+    let saved = sync.acquire(sync.icmp())
+    let now = timer.ticks()
+    let f = mw(M_FRAME)
+    if f == 0 || (mw(M_ERROR_AT) != 0 && now + 1 - mw(M_ERROR_AT) < LIMIT) {
+        put_mw(C_LIMITED, mw(C_LIMITED) + 1)
+        sync.release(sync.icmp(), saved)
+        return
+    }
+    put_mw(M_ERROR_AT, now + 1)
+    sync.release(sync.icmp(), saved)
+    let m = f + HALF
+    let data = if total - ihl < 8 { total - ihl } else { 8 }
+    ip.put_byte(m, 3)
+    ip.put_byte(m + 1, 2)
+    ip.put_be16(m + 2, 0)
+    ip.put_be32(m + 4, 0)
+    // # Safety: the upper half of this module's frame; at most 60 + 8
+    // bytes of the offending datagram, which the caller still holds.
+    unsafe { pax_fb_copy(m + 8, h, ihl + data) }
+    ip.put_be16(m + 2, ip.sum(m, 8 + ihl + data))
+    if sent(ip.send(ip.be32(h + 12), ip.ICMP, m, 8 + ihl + data)) {
+        bump(C_UNREACHABLE)
+    } else {
+        bump(C_NOT_SENT)
+    }
+}
+
+/// Send an echo request to `dst` with sequence number `seq` and `bytes`
+/// data bytes, and wait for its reply alone from now on. Returns
+/// kernel/ip's answer (`ip.SIZE` for more than 1472 bytes).
+pub fn ping(dst: u64, seq: u64, bytes: u64) -> u64 {
+    let m = mw(M_FRAME)
+    if m == 0 {
+        return ip.DOWN
+    }
+    if bytes <= DATA_MAX {
+        ip.put_byte(m, 8)
+        ip.put_byte(m + 1, 0)
+        ip.put_be16(m + 2, 0)
+        ip.put_be16(m + 4, IDENT)
+        ip.put_be16(m + 6, seq)
+        var k: u64 = 0
+        while k < bytes {
+            ip.put_byte(m + 8 + k, k * 7)
+            k += 1
+        }
+        ip.put_be16(m + 2, ip.sum(m, 8 + bytes))
+    }
+    let saved = sync.acquire(sync.icmp())
+    put_mw(M_SEQ, seq & 0xffff)
+    put_mw(M_DST, dst)
+    put_mw(M_LEN, bytes)
+    put_mw(M_GOT, 0)
+    put_mw(M_WAITING, 1)
+    put_mw(M_SENT, tsc())
+    sync.release(sync.icmp(), saved)
+    let r = ip.send(dst, ip.ICMP, m, 8 + bytes)
+    if sent(r) {
+        bump(C_REQUESTS_OUT)
+    } else {
+        let again = sync.acquire(sync.icmp())
+        put_mw(M_WAITING, 0)
+        sync.release(sync.icmp(), again)
+    }
+    r
+}
+
+/// Whether the reply to the last `ping` has come: `(true, counts, ttl)`
+/// with the time-stamp counts between the request and the reply and
+/// the reply's time to live, or `(false, 0, 0)`.
+pub fn answer() -> (bool, u64, u64) {
+    let saved = sync.acquire(sync.icmp())
+    let got = mw(M_GOT) == 1
+    let rtt = if got { mw(M_RTT) } else { 0 }
+    let ttl = if got { mw(M_TTL) } else { 0 }
+    sync.release(sync.icmp(), saved)
+    (got, rtt, ttl)
+}
+
+fn item(v: u64, name: str) {
+    log.put(" ")
+    log.dec(mw(v) as int)
+    log.put(" ")
+    log.put(name)
+}
+
+/// The counters' two lines:
+///
+///     icmp: echo <a> requests answered (<b> replies sent), <c> requests sent, <d> replies matched, <e> stray; dropped <…> short <…> checksum <…> broadcast <…> type
+///     icmp: unreachable <u> sent, <l> limited, <s> silent; <n> not sent
+pub fn counters() {
+    log.put("icmp: echo ")
+    log.dec(mw(C_ECHO_IN) as int)
+    log.put(" requests answered (")
+    log.dec(mw(C_ECHO_OUT) as int)
+    log.put(" replies sent), ")
+    log.dec(mw(C_REQUESTS_OUT) as int)
+    log.put(" requests sent, ")
+    log.dec(mw(C_REPLIES_IN) as int)
+    log.put(" replies matched, ")
+    log.dec(mw(C_STRAY) as int)
+    log.put(" stray; dropped")
+    item(C_SHORT, "short")
+    item(C_CHECKSUM, "checksum")
+    item(C_BROADCAST, "broadcast")
+    item(C_TYPE, "type")
+    log.end()
+    log.put("icmp: unreachable ")
+    log.dec(mw(C_UNREACHABLE) as int)
+    log.put(" sent, ")
+    log.dec(mw(C_LIMITED) as int)
+    log.put(" limited, ")
+    log.dec(mw(C_SILENT) as int)
+    log.put(" silent; ")
+    log.dec(mw(C_NOT_SENT) as int)
+    log.put(" not sent")
+    log.end()
+}
