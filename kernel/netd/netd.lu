@@ -1,4 +1,4 @@
-//! netd — the network thread's body (px20).
+//! netd — the network's two thread bodies (px20, px21).
 //!
 //! `pax_netd` is the kernel thread the device's interrupt wakes
 //! (kernel/net's `wait`, kernel/sched's `block_net`/`wake_net`): it
@@ -8,17 +8,31 @@
 //! the buffer back to the device:
 //!
 //!     0x0806  kernel/arp's `input`
-//!     others  counted and dropped (kernel/net's `drop_type`: IPv4 by
-//!             name, until px21)
+//!     0x0800  kernel/ip's `input`, which judges the header and says
+//!             whose the datagram is: kernel/icmp's `input` for
+//!             protocol 1; kernel/icmp's `unreachable` for a protocol
+//!             nothing speaks; nothing more for one it dropped (px21)
+//!     others  counted and dropped (kernel/net's `drop_type`)
 //!
-//! The body lives here and a kernel names it with `extern "c" let
+//! A protocol may write in the frame while it has it (an echo reply is
+//! made in place) and must copy what it keeps.
+//!
+//! `pax_net_clock` (px21) is the network's clock: a second thread that
+//! sleeps ten ticks and runs kernel/arp's `tick` — the retries, the
+//! giving up, the ageing — which nothing else would do while no frame
+//! arrives.
+//!
+//! The bodies live here and a kernel names them with `extern "c" let
 //! pax_netd: *u8` (wolf-lang#520; E0302 in the export's own module,
 //! as px07's schedtest); `turns` keeps this module imported.
 //!
 //! No Linux source; no other kernel's or network stack's source.
 
 use arp
+use icmp
+use ip
 use net
+use sched
 
 extern "c" let pax_net_stats: *u64
 
@@ -27,6 +41,12 @@ extern "c" let pax_net_stats: *u64
 pub fn turns() -> u64 {
     // # Safety: word 31 of boot/net.S's pax_net_stats.
     unsafe { ((pax_net_stats as u64 + 31 * 8) as *u64).read_volatile() }
+}
+
+/// Times the clock has run kernel/arp's `tick` (word 30).
+pub fn clock_turns() -> u64 {
+    // # Safety: word 30 of boot/net.S's pax_net_stats.
+    unsafe { ((pax_net_stats as u64 + 30 * 8) as *u64).read_volatile() }
 }
 
 export fn pax_netd(_arg: u64) {
@@ -46,11 +66,27 @@ export fn pax_netd(_arg: u64) {
                 let ethertype = (hi as u64) << 8 | lo as u64
                 if ethertype == 0x0806 {
                     arp.input(frame, len)
+                } else if ethertype == 0x0800 {
+                    let (what, ihl, total) = ip.input(frame, len)
+                    if what == ip.TO_ICMP {
+                        icmp.input(frame, ihl, total)
+                    } else if what == ip.NO_PROTOCOL {
+                        icmp.unreachable(frame, ihl, total)
+                    }
                 } else {
-                    net.drop_type(ethertype)
+                    net.drop_type()
                 }
                 net.rx_give(buffer)
             }
         }
+    }
+}
+
+export fn pax_net_clock(_arg: u64) {
+    while true {
+        let _s = sched.sleep(10)
+        arp.tick()
+        // # Safety: as `clock_turns`; only this thread writes the word.
+        unsafe { ((pax_net_stats as u64 + 30 * 8) as *u64).write_volatile(clock_turns() + 1) }
     }
 }

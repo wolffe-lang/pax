@@ -67,9 +67,9 @@
 //!
 //! Counters, in boot/net.S's `pax_net_stats`: frames and bytes each
 //! way; drops by cause — received: shorter than a header (`runt`),
-//! longer than 1514 (`long`), for another station (`other`), IPv4
-//! (`ipv4`, until px21), another type nothing here speaks
-//! (`type`); transmitted: `down`, `size`, `full` — and interrupts,
+//! longer than 1514 (`long`), for another station (`other`), a type
+//! nothing here speaks (`type`: anything but ARP and, since px21,
+//! IPv4); transmitted: `down`, `size`, `full` — and interrupts,
 //! buffers reclaimed and restocked. Everything is changed under
 //! `sync.net()` (IF clear), by whichever thread sends or receives.
 //!
@@ -159,8 +159,8 @@ pub const C_RX_RUNT: u64 = 6
 pub const C_RX_LONG: u64 = 7
 /// Received and dropped: for another station.
 pub const C_RX_OTHER: u64 = 8
-/// Received and dropped: IPv4 (until px21).
-pub const C_RX_IPV4: u64 = 9
+// Word 9 was px20's count of IPv4 frames dropped by name; px21's
+// kernel/ip takes them, and the word is unused.
 /// Received and dropped: a type nothing here speaks.
 pub const C_RX_TYPE: u64 = 10
 /// Not sent: the device is not up.
@@ -198,11 +198,10 @@ fn bump(i: u64, by: u64) {
     unsafe { ((pax_net_stats as u64 + i * 8) as *u64).write_volatile(count(i) + by) }
 }
 
-/// Count a received frame nothing here speaks: IPv4 (0x0800) by its
-/// own name, any other type as `type` (kernel/netd).
-pub fn drop_type(ethertype: u64) {
+/// Count a received frame of a type nothing here speaks (kernel/netd).
+pub fn drop_type() {
     let saved = sync.acquire(sync.net())
-    bump(if ethertype == 0x0800 { C_RX_IPV4 } else { C_RX_TYPE }, 1)
+    bump(C_RX_TYPE, 1)
     sync.release(sync.net(), saved)
 }
 
@@ -620,7 +619,7 @@ pub fn report() {
 
 /// The counters' two lines:
 ///
-///     net: rx <f> frames <b> bytes, dropped <r> runt <l> long <o> other <i> ipv4 <t> type
+///     net: rx <f> frames <b> bytes, dropped <r> runt <l> long <o> other <t> type
 ///     net: tx <f> frames <b> bytes, dropped <d> down <s> size <u> full; <q> interrupts (<e> idle), <w> wakes, <c> reclaimed, <k> restocked, <n> of 64 transmit buffers free
 pub fn counters() {
     let free = tx_free()
@@ -635,8 +634,6 @@ pub fn counters() {
     log.put(" long ")
     log.dec(count(C_RX_OTHER) as int)
     log.put(" other ")
-    log.dec(count(C_RX_IPV4) as int)
-    log.put(" ipv4 ")
     log.dec(count(C_RX_TYPE) as int)
     log.put(" type")
     log.end()
