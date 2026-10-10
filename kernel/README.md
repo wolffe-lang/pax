@@ -418,3 +418,48 @@ pcspk-audiodev=snd0`) and measures it.
 - Not yet: `/dev/tty0` and `/dev/console` (a Linux beep program opens
   one of them; PAX's console is descriptors 0-2 of a fresh process, so
   `play` asks 0, 1 and 2 in turn); the evdev speaker (`EVIOCGSND`).
+
+## The network (px20)
+
+`kmain_net.lu` finds QEMU's virtio network device, brings it up and
+speaks ARP with the user-mode gateway (`tests/mpx4-net`): the first
+step toward M-PX4. Nothing user-visible: the surface is the
+kernel-internal frame interface.
+
+| module or file | what |
+|---|---|
+| `pci/` | configuration mechanism #1 (ports 0xCF8/0xCFC, `../boot/io.S`'s `pax_outl`/`pax_inl`): `scan` (bus 0, every function, and the bus behind any bridge) into `pax_pci_table`; `find`, `bar` (I/O, 32-bit or 64-bit memory), `next_cap` (the capability list), `command`/`set_command`, `line`, `pin`; `report`, the census (one line a function, its BARs, its capabilities), printed by kmain_net when the kernel command line holds `pci` (`../boot/limine-net.conf`) |
+| `virtio/` | the virtio 1.x PCI transport: `attach` finds the vendor capabilities (common configuration, notification, ISR status, device configuration) and maps each in a window of the device slot (PML4 slot 352, above the local APIC's page), uncached; `reset`, `add_status`, `device_features`/`set_features` (64 bits through the select registers), `isr`, `device8`. The split virtqueue: `layout` (descriptors, avail, used in one frame), `aligned` (the specification's 16/2/4), `queue_setup`, `set_desc`, `offer`, `notify` (honouring the device's NO_NOTIFY), `returned`, `collect`, `quiet` (the driver's NO_INTERRUPT) |
+| `net/` | the network device and the frame interface: `start` (the device found, reset, VERSION_1 and MAC taken and required, two 64-entry queues with a 2048-byte buffer a descriptor, its 8259 line made level-triggered and unmasked; one `net:` line and no network when there is no device or it is refused by name), `irq` (the cause read, the 8259 acknowledged), `wait`, `rx_take`/`rx_give`, `send` (rows `down`, `size`, `full`; padded to 60 bytes), `tx_free`, `mac_byte`, `count` (frames and bytes each way; drops by cause: runt, long, other station, IPv4, other type, down, size, full), `report`, `counters` |
+| `arp/` | RFC 826 for IPv4 over Ethernet: `input` (the reception algorithm: validate, merge, add, answer a request for this station), `request`, `lookup`, a four-entry table, counters; the station's address is a constant its kernel passes (`10.0.2.15`) |
+| `netd/` | `pax_netd`, the network thread's body: waits for the device's interrupt, takes each frame, hands 0x0806 to `arp`, counts and drops anything else, gives the buffer back |
+| `sched/` (px20) | state NET, `block_net`, `wake_net` |
+| `timer/` (px20) | `unmask_line` (a slave line and the cascade), `elcr`, `level` |
+| `sync/` (px20) | lock words 2 (`net`) and 3 (`arp`, taken first) |
+| `interrupts/` (px20) | the device's vector: `net.irq`, `sched.wake_net`, `sched.kick` |
+| `log/` (px20) | `hex_n` |
+| `../boot/net.S` | `pax_pci_table`, `pax_pci_count`, `pax_net_state`, `pax_net_stats`, `pax_arp_state`: storage only |
+| `../boot/io.S` (px20) | `pax_outl`, `pax_inl` |
+
+- The interface is the 1.x one only: a transitional device's legacy
+  I/O BAR is never touched, and a legacy-only device is refused by
+  name. The interrupt is INTx on the 8259 line the firmware wrote in
+  Interrupt Line (11 on q35 under SeaBIOS and OVMF); OVMF leaves that
+  line edge-triggered in ELCR, so the driver sets it level itself.
+- No frame is touched with an interrupt in service, and nothing on
+  the frame path allocates: the rings and buffers are 66 frames taken
+  once, the state words in `.bss` read and written volatile under
+  `sync.net()` (no `region`, wolf-lang#611's rule).
+- A module `const` cannot be initialised from another module's on
+  wolf 0.2.26 (wolf-lang#653): `net`'s feature mask spells
+  `virtio.F_VERSION_1` out.
+- Every kernel links `net`, `virtio` and `pci` (kernel/interrupts
+  names the vector), as every kernel links the console and the
+  speaker; none but kmain_net starts them, and the vector is 0 until
+  then.
+- Not yet: IP, ICMP, sockets (px21 on); MSI-X; merged receive
+  buffers, checksum and segmentation offload, the control queue (so
+  the device's receive filter is whatever it starts as; `net` drops
+  frames for other stations itself); link status; more than one
+  device; a device removed; ARP ageing, retries and a pending queue;
+  an address from anywhere but a constant.
