@@ -179,8 +179,9 @@ excerpt 30-45 s; the scale 4.0 s.
 - **QEMU's speaker binding**: `notes/px18/qemu-pcspk-qtree.txt`.
 - **Rebased onto px17's merge** (`df5de90`, pelt `3e7516c`): kasumi's gauntlet at `5707dfe`, every suite exit 0 but one mpx3-speaker leg, whose capture cut a note at 449.4 ms (and another at 524.3) against K2's then 30-ms bound (`kasumi-gauntlet-5707dfe.summary`, `kasumi-mpx3-speaker-5707dfe.out`); CI run 38026465296 at `5707dfe` red the same way (449.4 ms). The capture's per-note length was never the timing claim (the kernel's timeline is): it is now a 20% sanity bound (`dd91ab5`, `6f846a0`); three rounds of the rebased images at `6f846a0`, 24 PASS each (`kasumi-mpx3-speaker-6f846a0-rounds.txt`). P4's number is untouched by it.
 - **CI green at the head**: in the PR body (run id at the head sha); `6f846a0`'s run 38028246024, all 17 jobs success.
-- **The folder**: `~/scratch/wolf/pax-sound/` on nomad-1, its preflight `GO` on the rebased image `42ebd363…` (kernel `dcbc1fc6…`, the gauntlet's at `5707dfe`; pelt `3e7516c`): the WAV leg measured the scale at 261.6 293.7 328.7 349.2 392.1 439.9 494.0 523.4 Hz, worst 0.28%; the CoreAudio leg reported no audio error. `add-tune.sh` was run on kasumi with a two-note file and played (439.6 and 659.1 Hz).
-- **The other folders** (`pax-shell/`, `pax-demo/`): px18 moves their ISOs' bytes (`pax_halt`, the tick's call, `boot/speaker.S` in every kernel) but nothing they print; they hold px19+px17 images now, and px18 and px19 conflict in five files, so whichever of the two merges second refreshes both on the integrated head. Not refreshed here.
+- **The folder**: `~/scratch/wolf/pax-sound/` on nomad-1, its preflight `GO` on the image at `e0825ac` (rebased on trunk `1e336af`, px17 and px19 merged): `d5057c8f…`, kernel `14dc4384…` (the gauntlet's), pelt `3e7516c`; the WAV leg measured the scale at 261.4 293.7 328.9 349.2 392.1 439.9 494.0 523.4 Hz, worst 0.23%; the CoreAudio leg reported no audio error. `add-tune.sh` was run on kasumi with a two-note file and played (439.6 and 659.1 Hz).
+- **The gauntlet at `e0825ac`** (rebased on `1e336af`): every suite exit 0, 0 SKIP, `mpx3-screen` included (`kasumi-gauntlet-e0825ac.summary`, `kasumi-mpx3-speaker-e0825ac.out`); CI at `e0825ac` green.
+- **The other folders**, refreshed at `e0825ac` because px18 moves their ISOs' bytes (`pax_halt`, the tick's call, `boot/speaker.S`): `pax-shell.iso` `8a28cef5…` (tests/mpx3-shell's quiet native image; initramfs unchanged, `611fe4a8…`; on screen only three boot-line addresses moved), `pax-tour.iso` `c9649815…`, `pax-tour-b.iso` `ab492505…` (the image 608 → 624 KiB, bounds and gdt/idt one page up, frames -6, ending b's rip `0xffffffff80028da4`), `src/` at `e0825ac`; both preflights GO; px19's images kept in `~/lanes/px18/old-demo/` on nomad-1.
 
 ## 5. Done-when
 
@@ -188,4 +189,4 @@ excerpt 30-45 s; the scale 4.0 s.
 - [x] CI green at the head sha (the PR body names the run)
 - [x] the red before the fix and the plant, each by run id (above)
 - [x] nothing closed; what to close and correct is in the PR
-- [ ] worktree gone, kasumi and hasu outputs pruned, no orphans (at the lane's end)
+- [x] worktree gone, kasumi and hasu outputs pruned, no orphans (at the lane's end)
