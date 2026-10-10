@@ -38,7 +38,9 @@
 //! IR7 request) and Intel's 8254 programmable interval timer data sheet
 //! (the control word, mode 2, the 1.193182 MHz input as the PC wires
 //! it), and the I/O ports the PC assigns them (master 0x20/0x21, slave
-//! 0xa0/0xa1, PIT 0x40-0x43); the local APIC timer's description is
+//! 0xa0/0xa1, PIT 0x40-0x43); the edge/level control registers are
+//! Intel's ICH9 data sheet's (ELCR1 and ELCR2, I/O ports 0x4d0 and
+//! 0x4d1; px20); the local APIC timer's description is
 //! the Intel SDM vol. 3A §11.5.4 ("APIC Timer") and §11.4.1. No Linux
 //! source; no other kernel's source.
 
@@ -54,6 +56,8 @@ const SLAVE_CMD: u16 = 0xa0
 const SLAVE_DATA: u16 = 0xa1
 const PIT_CH0: u16 = 0x40
 const PIT_CTRL: u16 = 0x43
+const ELCR_MASTER: u16 = 0x4d0 // px20
+const ELCR_SLAVE: u16 = 0x4d1
 
 // The master 8259's vector base after `start` (line 0, the PIT, is
 // 32), the slave's, and the PIT's divisor (1193182 / 11932 = 99.998
@@ -125,6 +129,38 @@ pub fn unmask(line: u64) {
     let bit: u64 = 1 << line
     if m & bit != 0 {
         out(MASTER_DATA, m - bit)
+    }
+}
+
+/// Unmask line `line` (0-15) on either controller (px20: a PCI
+/// function's line, kernel/net): a slave line also needs the master's
+/// line 2, the cascade, unmasked. IF clear.
+pub fn unmask_line(line: u64) {
+    if line < 8 {
+        unmask(line)
+        return
+    }
+    let m = inp(SLAVE_DATA)
+    let bit: u64 = 1 << (line - 8)
+    if m & bit != 0 {
+        out(SLAVE_DATA, m - bit)
+    }
+    unmask(2)
+}
+
+/// The edge/level control registers (ELCR, ports 0x4d0 and 0x4d1: bit
+/// n of the pair set makes line n level-triggered) as they are.
+pub fn elcr() -> u64 {
+    inp(ELCR_SLAVE) << 8 | inp(ELCR_MASTER)
+}
+
+/// Make line `line` (3-15, not 8 or 13) level-triggered (px20): a PCI
+/// interrupt is a level, held until the device's cause is read.
+pub fn level(line: u64) {
+    if line < 8 {
+        out(ELCR_MASTER, inp(ELCR_MASTER) | 1 << line)
+    } else {
+        out(ELCR_SLAVE, inp(ELCR_SLAVE) | 1 << (line - 8))
     }
 }
 
