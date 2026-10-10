@@ -183,3 +183,82 @@ motd`, `pwd`.
   sentence's place and length; implemented.
 - SIGPIPE's death is Linux's documented default (`signal(7)`), not a
   new spelling: no ruling.
+
+### §3 against what was measured
+
+| predicted | measured |
+|---|---|
+| P1: one `pipe2(…, O_CLOEXEC)` for `ls /bin \| wc -l`; `wc -l` prints `10` | **right** (`notes/px17/pelt-plumb.strace` line 71: `pipe2([3, 4], O_CLOEXEC)`; the transcript's `10`) |
+| P1: both stages started as px14 measured a spawn (`clone3(CLONE_VM\|CLONE_VFORK\|CLONE_CLEAR_SIGHAND)`); falsified by a fork or by `fcntl(F_DUPFD…)` | **wrong, both falsifiers hit**: wolf 0.2.26's spawn (s215's `os_spawn_fds`, which pelt `3e7516c` uses) **forks**: `clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID\|CLONE_CHILD_SETTID\|SIGCHLD)`; before it the parent makes `fcntl(0/4/2, F_DUPFD_CLOEXEC, 3)` (the child's 0-2 to be) and `socketpair(AF_UNIX, SOCK_SEQPACKET\|SOCK_CLOEXEC)`, closes its copy of the child's end and blocks in `recvfrom` until the child's `execve` closes that end (0 bytes: it ran); the child `close`s the parent's end, sets SIGPIPE to SIG_DFL, `fcntl(F_DUPFD_CLOEXEC, 3)` ×3, `dup2` onto 0, 1, 2, `close`s the copies, `execve`s (lines 71-218). The first stage's stdin is the terminal (px14's `dd22a86` gave a child /dev/null) |
+| P1: the redirection `openat(AT_FDCWD, "/dev/null", O_WRONLY\|O_CREAT\|O_TRUNC\|O_CLOEXEC, 0666)`, `dup2` in the child, `close` after | **right** (line 248 onward; the `dup2` reaches 1 through the fcntl copy) |
+| P1: `cd` is `chdir("/etc")` with no `getcwd`; `pwd` a built-in with no call | **half right**: `chdir("/etc")`, then **`getcwd`** (pelt sets PWD from it, line 329); `pwd` writes `/etc` with no other call. `cd ..` is `chdir("/")` (pelt makes the path itself); a failed `cd` is `chdir` -ENOENT / -ENOTDIR and `pelt: line N: cd: …: cannot change directory: cannot open` |
+| P1: 2 ± 1 distinct calls pelt's process makes that px14's did not (1..3) | **wrong: 7** — `chdir`, `clone`, `fcntl`, `ioctl` (TCGETS on 0 and 2 at start: sh03 asks whether it is interactive), `pipe2`, `recvfrom`, `socketpair`; and 4 gone (`clone3`, `rt_sigprocmask`, `mmap`, `munmap`: no vfork stack). The children add `fcntl` and `dup2`; boreutils reopens `/dev/stdin`/`/dev/stdout` and moves fd 0's offset with `lseek` (the shared-offset witness, lines 472-553) |
+| P2: pelt `3e7516c` on the old kernel runs px15's six sessions as `dd22a86` did (a new start-up call fails S4, not S2) | **wrong: every shell session red** (kasumi `red1`, kernel at `37a5402` = trunk's: `notes/px17/kasumi-red-37a5402-mpx3-shell.out`; CI run **38009076589**, job mpx3-shell 114084619386 the only red job): the first `fcntl` is -ENOSYS (72), so each command prints `pelt: line N: cat: cannot run: cannot open` and S1 (`fewer than two programs ran`), S2 and S4 (`-ENOSYS for '72 273 334'`) fail on shell-serial, -ps2, -howl, -howl-quiet; shell-ps2 ended 126 |
+| P2: `ls /bin \| wc -l`: `pipe2` -ENOSYS and pelt's own diagnostic | **right in kind**: `pelt: line 1: cannot make a pipe` (the S2 diff) |
+| P2: `cat /etc/motd > /dev/null` already byte-identical at trunk | **wrong**: at trunk every spawn fails at `fcntl` first, so this line printed `pelt: line 2: cat: cannot run: cannot open`. With the fork, the socket and `fcntl` in, it was right on the first boot (no redirection code was needed) |
+| P2: `cd /etc` -ENOSYS (80) and `cat motd` fails | **right** (-ENOSYS for 80 in S4) |
+| P2: `{ head -n 1; cat; } < words` prints the six words twice-overlapping at trunk | not reached at trunk (the spawn fails first); at the head it prints each word once, as Linux, which needs the shared offset (boreutils moves fd 0's offset with `lseek` and the next child starts there) |
+| P3: an open-file table, pipes of 65536 bytes in 16 frames, blocking by px13's rewind, SIGPIPE's default, a working directory per process; 4-5 call numbers | **right in shape, wrong in count: 8 numbers** (`pipe` 22, `pipe2` 293, `socketpair` 53, `sendto` 44, `recvfrom` 45, `fcntl` 72, `chdir` 80, `fchdir` 81) and a **fork**, which no prediction named: `clone` without CLONE_VM on a copy of the address space (`paging.copy_user`), because wolf's spawn forks. The socketpair is two one-frame buffers on the pipes' code. SIGPIPE spares pid 1 (`kill(2)`, measured: procs as pid 1 gets -32) |
+| P4: every ISO changes; the six old sessions' transcripts do not move; procs' moves only by its new lines | **right**: `notes/px17/kasumi-iso-eeb9565.sha256`; the six sessions' Linux and PAX transcripts unchanged (howl's `90c3e266…`, as px15/px16); procs' gains 22 lines, the 23 old ones unchanged |
+| P4: ≥ 100 KVM boots on hasu, all green | **right: 272**, all accel=kvm, all rc 0, FAIL 0, SKIP 0 (`notes/px17/hasu-kvm-eeb9565.log`) |
+| P4: boot to pelt's prompt on nomad-1 2.0 s ± 0.4 | **right: 1.7 s** in the rehearsal, 1.9 s in the preflight (the initramfs 390664 bytes larger: pelt 12753192 bytes, `etc/words`) |
+| P4: downstream repos untouched | **right**: pax consumes pelt `3e7516c` and boreutils `50d8907` at their pins and changes neither |
+| P5: the closing line, option (a), recommended and implemented | implemented (`fe6d867`); `tests/tour` R1 holds it (red first at `fb38197`, below) |
+
+## 4. Evidence index
+
+### The Linux side
+
+- pelt `3e7516c` static, `692007c3…` (12753192 bytes), built by `tools/mkpelt` in `px13-ubuntu` on kasumi (wolf 0.2.26 `05acdc5e…` archive, wolf-std `2f389a7`); boreutils `50d8907`'s nine as px15/px16 (`notes/px17/linux-side-inputs.txt`).
+- The plumbing, black-box: `notes/px17/pelt-plumb.strace` (`8a459809…`), its transcript `pelt-plumb.linux.tty`, the script `strace-plumb.sh`, the keys `plumb.keys` (= `user/console/shell-plumb.keys`).
+- Every PAX transcript's reference: `tools/linux-tty --root --pid1` (as px14/px15), kept in `user/console/shell-plumb.expect` (S6) and `notes/px17/session-*.linux.txt`.
+
+### Witnesses red at trunk, then green
+
+| witness | red | green |
+|---|---|---|
+| mpx3-shell: the six old sessions with pelt `3e7516c`, and `shell-plumb` | kernel at `37a5402` (trunk's code, the new pelt and tests): kasumi `notes/px17/kasumi-red-37a5402-mpx3-shell.out` (native BIOS: S1/S2/S4 FAIL on every shell session; procs S2/S4 FAIL); CI run **38009076589**, job mpx3-shell **114084619386**, the only failing job | kasumi gauntlet at `eeb9565`: mpx3-shell 152 PASS, 0 FAIL, 0 SKIP (`notes/px17/kasumi-gauntlet-eeb9565.summary`, `kasumi-mpx3-shell-eeb9565.out`); again under `taskset -c 0-3` (152 PASS, `kasumi-taskset-0-3-mpx3-shell-eeb9565.out`); hasu KVM 5 rounds × 152; CI at the head (PR body) |
+| procs' px17 lines (fork, pipes, SIGPIPE, offset, cwd, socket, fcntl) | the same runs: `wait4 fork: -10`, `pipe: -38 …`; S4 `-ENOSYS for '44 45 53 72 80 81 293'` and the fork refused by name | the same runs: `notes/px17/session-procs.{pax,linux}.txt` equal (`37483968…`, 45 lines) |
+| tour R1: the closing line | `fb38197` (the test before the kernel's text): CI run **38009711711** (pending at this writing; the PR body carries its verdict) | kasumi gauntlet at `eeb9565`: tour 44 PASS; the line on nomad-1 (`~/scratch/wolf/pax-demo/logs/preflight.serial.log`) |
+
+The tiers: native and release, BIOS and UEFI, every leg (mpx3-shell boots both tiers on both firmwares). The checked machine and lupin do not concern these witnesses: the kernel is freestanding (`--target x86_64-unknown-none`), which only the compiling tiers build; lupin is fetched and paired (`WOLF_PAIRING_REQUIRE_SIBLING=1`, `notes/px17/kasumi-gauntlet-eeb9565.versions`) and runs no suite here.
+
+### Session diffs (empty)
+
+`notes/px17/session-shell-plumb.{pax,linux}.txt` (`7dd31190…`, 30 lines: `10`, nothing, the motd, `/etc`, alpha…foxtrot once, `1`, `motd`/`pax-run`, `77`, the two `cd` refusals, `2`, `/`) and `session-procs.{pax,linux}.txt` (`37483968…`), `cmp` equal; every leg's S2 in the gauntlet and on hasu.
+
+### Boot counts
+
+- kasumi TCG: the gauntlet at `eeb9565` (`kasumi-gauntlet-eeb9565.summary`: every suite rc 0, 0 FAIL, 0 SKIP; mpx3-shell 28 boots), the `taskset -c 0-3` run (28 boots), `red1` and `k1` (14 boots each, native BIOS).
+- hasu KVM: **272 boots, all accel=kvm, all green** (`hasu-kvm-eeb9565.log`): mpx3-shell 5 rounds × 28 = 140, mpx3-console 20, mpx3-loader 4, mpx3-user 12, mkw 12, mpx1 12, mpx2-frames 16, mpx2-paging 4, mpx2-interrupts 20, mpx2-sched 8, mpx2-heap 24; images from the kasumi gauntlet tree at `eeb9565`, the tree a `git archive` of `eeb9565` (QEMU 11.1.0 through `nix-shell -p qemu`, i7-12700KF).
+
+### Planted break
+
+`1975de6` (an empty pipe with a writer open reads as end-of-file): predicted red on procs and procs-quiet S2 on all four legs each, shell-plumb wherever a reader outruns its writer, every other job green. The run id and its verdict are in the PR body; reverted after it.
+
+### Downstream census
+
+- Every kernel ELF and ISO pax builds moved (each links kernel/files, kernel/sched, kernel/paging): `notes/px17/kasumi-iso-eeb9565.sha256`. The tour image grew 408 → 436 KiB, its frame counts −14, ending b's `rip` `0xffffffff80027721`.
+- boreutils, lobo, wolf-std and pelt: untouched (pax pins pelt `3e7516c` and boreutils `50d8907` and builds them unmodified).
+
+### The two folders outside pax
+
+- `~/scratch/wolf/pax-demo/`: `pax-tour.iso` `1af03fb4…`, `pax-tour-b.iso` `d596ca45…` (native, the gauntlet's `tests/tour` at `eeb9565`), `src/` at `eeb9565` (15144 lines of wolf, 1327 of boot assembly), README and SHOTLIST numbers, the closing line; `preflight.sh` **GO** in a 146×40 pseudo-terminal (the PANIC line in 29.3 s); ending b headless 28.6 s.
+- `~/scratch/wolf/pax-shell/`: `pax-shell.iso` `1dfceb3a…` (the gauntlet's `native/console-shell-quiet.iso`), the Linux pane's tree on kasumi with pelt `3e7516c` and `etc/words` (`linux-root.sha256` `611fe4a8…`), README and SHOTLIST; `preflight.sh` **GO** (the prompt in 1.9 s); the whole take rehearsed (`rehearsal/rehearsal-2026-10-09-px17.times`): both panes' sessions `1934ecd0…`, 24 lines, the diff empty.
+
+### Drift from the contract, reported
+
+1. **pelt's spawn forks.** The contract's "descriptor duplication into a child as pelt's spawn path uses it" turned out to be a fork, a socketpair and `fcntl`, not px14's vfork: PAX gained `fork` (an address-space copy) and AF_UNIX socketpairs, neither named in the contract.
+2. **boreutils stays `50d8907`** (the contract moves pelt only; boreutils trunk is `5da892e`).
+3. **The shell image gains `/etc/words`**, six lines the plumb session's group reads; `ls /etc` would show it (no session lists `/etc` but plumb's `ls | head -n 2`, which shows `motd`, `pax-run`).
+4. **pax had no CHANGELOG**: `CHANGELOG.md` is new, with the Unreleased paragraph the contract asks for.
+5. **mpx3-shell's S1** now asks the exec pids to rise from 1, not to be 1..n: procs' fork child takes a pid and never execs.
+6. **The Linux harness gives pelt SIGPIPE ignored** (inherited from `linux-tty`'s Python; the strace shows the child's `rt_sigaction` finding SIG_IGN), where PAX's pelt starts with SIG_DFL. No session reaches it (pelt as pid 1 is spared SIGPIPE on both, and its children set SIG_DFL themselves); procs sets SIGPIPE explicitly in each case.
+
+## 5. Done-when
+
+- Branch `px17` on origin; PR wolffe-lang/pax#20, open, unmerged; CI green at the head (run id in the PR body).
+- pelt `3e7516c`'s pipelines, redirections and `cd` byte-identical to Linux on both tiers, BIOS and UEFI (`shell-plumb`), with the six earlier sessions and procs; KVM on hasu (272 boots).
+- The tour's closing line honest; both folders refreshed, both preflights GO.
+- Close nothing. To close: none in pax (no issue names this work).
+- Worktrees: none (a private clone in this session's scratchpad); kasumi `~/lanes/px17/` and hasu `~/lanes/px17/` keep the trees and evidence, `build/` directories pruned at the end.
