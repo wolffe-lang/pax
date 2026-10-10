@@ -8,9 +8,15 @@
 //! I/O goes through boot/io.S (`pax_outb`, `pax_inb`): wolf has no
 //! inline assembly yet (KWC kw13).
 //!
+//! px19: every byte `put` writes is handed to kernel/screen too, which
+//! draws it once the screen is attached (and keeps it for the replay
+//! before): the serial console and the screen show the same bytes.
+//!
 //! Written from the PC16550D register map (public datasheet facts:
 //! the register offsets, the DLAB bit, LCR/FCR/MCR/LSR bit meanings, the
 //! 1.8432 MHz clock's divisor 1 for 115200 baud). No Linux source.
+
+use screen
 
 extern "c" fn pax_outb(port: u16, v: u8)
 extern "c" fn pax_inb(port: u16) -> u8
@@ -94,9 +100,10 @@ pub fn init() -> int {
     status
 }
 
-/// Write one byte to COM1 once the transmit holding register is empty.
-/// A UART that stays busy for 1048576 polls loses the byte rather
-/// than hang the kernel. It never traps.
+/// Write one byte to COM1 once the transmit holding register is empty,
+/// then to the screen (px19, kernel/screen). A UART that stays busy for
+/// 1048576 polls loses the byte rather than hang the kernel (the screen
+/// still gets it). It never traps.
 pub fn put(b: u8) {
     var spins = 0
     while spins < POLLS {
@@ -104,10 +111,12 @@ pub fn put(b: u8) {
         if lsr & LSR_THR_EMPTY != 0 {
             // # Safety: io.S's `outb` on COM1's THR.
             unsafe { pax_outb((COM1 + THR) as u16, b) }
-            return
+            spins = POLLS
+        } else {
+            spins = spins + 1
         }
-        spins = spins + 1
     }
+    screen.put(b)
 }
 
 // --- receiving (px13) ----------------------------------------------------
