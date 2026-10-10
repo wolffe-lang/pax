@@ -1,0 +1,254 @@
+//! member: false
+// kmain_screen.lu — the screen (px19, tests/mpx3-screen). The kernel
+// switches to PAX's paging, maps the framebuffer Limine handed over and
+// attaches the screen (kernel/fb, kernel/screen), which replays what
+// was written before; then it starts the timer and measures what a
+// scrolled line costs: 400 lines each ended by CR alone (no scroll),
+// then 400 ended by CR LF (a scroll each once the grid is full), the
+// PIT's ticks around each; then it writes the terminal's test pattern
+// (every SGR it honours, TAB, BS, CR, the deferred wrap, UTF-8, the
+// sequences it ignores) and halts:
+//
+//     PAX: the screen
+//     paging: limine cr3 0x<A>, pax cr3 0x<B>, <P> table frames
+//     screen: <w>x<h> 32 bpp pitch <p> rgb 8:16 8:8 8:0 at 0x…, wc (pat 0x…), … cells; <r> bytes replayed, 0 lost
+//     scroll: 400 lines in <a> ticks without scrolling, 400 in <b> with <s> scrolls
+//     …the pattern…
+//     screen: <n> bytes, <s> scrolls
+//     halt
+//
+// tests/mpx3-screen boots it headless, takes the halted machine's
+// screen through QEMU's monitor and compares it, pixel for pixel, with
+// tools/screen-ref's image of the same serial bytes. Without a
+// framebuffer (a machine with no display device) the third line is
+// `screen: off, no framebuffer` and the rest is written to serial only.
+use apic
+use fb
+use frames
+use interrupts
+use log
+use paging
+use panic
+use screen
+use serial
+use sync
+use timer
+
+const LINES: u64 = 400
+
+fn esc(s: str) {
+    log.put_byte(27)
+    log.put("[")
+    log.put(s)
+}
+
+/// SGR `n` then `label`, then SGR 0.
+fn colour(n: int, label: str) {
+    log.put_byte(27)
+    log.put("[")
+    log.dec(n)
+    log.put("m")
+    log.put(label)
+    log.dec(n)
+    esc("0m")
+    log.put(" ")
+}
+
+/// `line NNN` (k zero-padded to three digits).
+fn numbered(k: u64) {
+    log.put("line ")
+    log.put_byte((k / 100 % 10 + 48) as int)
+    log.put_byte((k / 10 % 10 + 48) as int)
+    log.put_byte((k % 10 + 48) as int)
+}
+
+fn pattern() {
+    log.put("sgr fg: ")
+    var c = 30
+    while c <= 37 {
+        colour(c, "fg")
+        c += 1
+    }
+    log.end()
+    log.put("sgr bright: ")
+    c = 90
+    while c <= 97 {
+        colour(c, "fg")
+        c += 1
+    }
+    log.end()
+    log.put("sgr bg: ")
+    c = 40
+    while c <= 47 {
+        colour(c, "bg")
+        c += 1
+    }
+    log.end()
+    esc("1m")
+    log.put("bold")
+    esc("0m")
+    log.put(" ")
+    esc("1;31m")
+    log.put("bold red")
+    esc("0m")
+    log.put(" ")
+    esc("7m")
+    log.put("inverse")
+    esc("0m")
+    log.put(" ")
+    esc("7;32;44m")
+    log.put("inverse green on blue")
+    esc("39;49m")
+    log.put(" default inverse")
+    esc("m")
+    log.put(" ")
+    esc("1;91m")
+    log.put("bold bright red")
+    esc("22;0m")
+    log.put(" ")
+    esc("33;45m")
+    log.put("yellow on magenta")
+    esc("49m")
+    log.put(" yellow")
+    esc("0m")
+    log.end()
+    log.put("tab:")
+    log.put_byte(9)
+    log.put("a")
+    log.put_byte(9)
+    log.put("bb")
+    log.put_byte(9)
+    log.put("ccc")
+    log.put_byte(9)
+    log.put_byte(9)
+    log.put("end")
+    log.end()
+    log.put("backspace: abc")
+    log.put_byte(8)
+    log.put("X")
+    log.put_byte(8)
+    log.put_byte(8)
+    log.put("Y")
+    log.end()
+    log.put("carriage return: 0123456789")
+    log.put_byte(13)
+    log.put("CR")
+    log.end()
+    // The deferred wrap: 200 characters wrap onto a second row; exactly
+    // `cols` characters then CR LF leave no blank row; a character in the
+    // last column then BS and Z replaces it.
+    var i: u64 = 0
+    while i < 200 {
+        log.put_byte((48 + i % 10) as int)
+        i += 1
+    }
+    log.end()
+    let cols = screen.cols()
+    let full = if cols > 0 { cols } else { 80 }
+    i = 0
+    while i < full {
+        log.put_byte((if i == 0 { 91 } else if i + 1 == full { 93 } else { 61 }) as int)
+        i += 1
+    }
+    log.end()
+    i = 0
+    while i + 1 < full {
+        log.put("-")
+        i += 1
+    }
+    log.put("+")
+    log.put_byte(8)
+    log.put("Z")
+    log.end()
+    log.put("utf-8: caf")
+    log.put_byte(0xc3)
+    log.put_byte(0xa9)
+    log.put(" ")
+    log.put_byte(0xc2)
+    log.put_byte(0xb5)
+    log.put(" euro ")
+    log.put_byte(0xe2)
+    log.put_byte(0x82)
+    log.put_byte(0xac)
+    log.put(" stray ")
+    log.put_byte(0xff)
+    log.put(" cut ")
+    log.put_byte(0xc3)
+    log.put("x end")
+    log.end()
+    log.put("ignored:")
+    esc("2J")
+    log.put(" erase")
+    esc("?25l")
+    log.put(" private")
+    esc("5A")
+    log.put(" up")
+    log.put_byte(27)
+    log.put("(B paren")
+    log.put_byte(7)
+    log.put(" bell")
+    log.put_byte(127)
+    log.put(" del")
+    log.end()
+}
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX: the screen")
+    frames.start()
+    let limine = paging.cr3()
+    let before = frames.free_count()
+    let pml4 = paging.start()
+    paging.report(limine, before)
+    let _on = fb.start(pml4)
+    fb.report()
+    interrupts.start()
+    apic.start(pml4)
+    timer.start()
+    sync.enable()
+
+    // The scroll's cost: the same bytes, with and without a scroll.
+    let t0 = timer.ticks()
+    var k: u64 = 0
+    while k < LINES {
+        numbered(k)
+        log.put_byte(13)
+        k += 1
+    }
+    let t1 = timer.ticks()
+    log.end()
+    let s1 = screen.scrolls()
+    let t2 = timer.ticks()
+    k = 0
+    while k < LINES {
+        numbered(k)
+        log.end()
+        k += 1
+    }
+    let t3 = timer.ticks()
+    let s2 = screen.scrolls()
+    let _off = sync.irq_save()
+    timer.stop()
+    log.put("scroll: ")
+    log.dec(LINES as int)
+    log.put(" lines in ")
+    log.dec((t1 - t0) as int)
+    log.put(" ticks without scrolling, ")
+    log.dec(LINES as int)
+    log.put(" in ")
+    log.dec((t3 - t2) as int)
+    log.put(" with ")
+    log.dec((s2 - s1) as int)
+    log.put(" scrolls")
+    log.end()
+
+    pattern()
+    log.put("screen: ")
+    log.dec(screen.bytes() as int)
+    log.put(" bytes, ")
+    log.dec(screen.scrolls() as int)
+    log.put(" scrolls")
+    log.end()
+    log.line("halt")
+    panic.halt()
+}
