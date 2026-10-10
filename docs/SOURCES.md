@@ -322,3 +322,25 @@ Linux's).
 | boreutils' `notes/bu18-ls.md` and `notes/bu18/pax-mpx3-with-ls.patch` | boreutils `50d8907` | GPL-3.0 | read | `ls`'s options as built (one name a line without a terminal; `-l` refused by name), the twelve `ls` lines on `user/mpx3-boreutils.run` |
 | pelt's `README.md` | pelt `dd22a86` | GPL-3.0 | read for what it claims (functions, every expansion) | `user/console/shell-howl.keys` |
 | black-box Linux: `user/console/shell-howl.keys` typed into the same binaries on a Linux pseudo-terminal (`tools/linux-tty --root --pid1`, a privileged rootless `px13-ubuntu` container on kasumi: Ubuntu 24.04, kernel 7.2.8; the CI runner) | — | — | measured | `user/console/shell-howl.expect`, the reference the howl session is held to; and, under `strace -f` of the harness, that boreutils opens `/dev/stdout`, which Linux resolves through `/proc/self/fd`, so the chroot keeps its `/proc` (px15's `4c39733`, reverted) |
+
+## px17 — pipes, redirection and `cd` (2026-10-09)
+
+**Linux: the uapi headers and the syscall table only**, from the refs
+clone's sparse checkout (never widened): `include/uapi/asm-generic/errno.h`
+(ENOTSOCK 88, EPROTONOSUPPORT 93, ESOCKTNOSUPPORT 94, EAFNOSUPPORT 97,
+EISCONN 106), `include/uapi/asm-generic/fcntl.h` (F_DUPFD 0 to F_SETFL 4,
+F_LINUX_SPECIFIC_BASE 1024, O_APPEND, O_NONBLOCK, O_DIRECT),
+`include/uapi/linux/fcntl.h` (F_DUPFD_CLOEXEC = base + 6, F_GETPIPE_SZ =
+base + 8), and `arch/x86/entry/syscalls/syscall_64.tbl` (pipe 22, sendto
+44, recvfrom 45, socketpair 53, fcntl 72, getcwd 79, chdir 80, fchdir 81,
+pipe2 293). No Linux source, no glibc, musl or other libc, no kernel's
+source and no shell's source (rulings #22, #43): pelt and boreutils are
+built from their own trees at their pins and observed only from outside.
+No disassembly. Permissively licensed kernels: none consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| the uapi headers and `syscall_64.tbl` above | the refs clone | GPL-2.0 WITH Linux-syscall-note | read | `kernel/files`' and `kernel/user`'s numbers, flags and errnos |
+| man-pages `pipe(2)`, `pipe(7)` (capacity 65536, PIPE_BUF 4096 and atomic writes, a read of an empty pipe with and without writers, EPIPE and SIGPIPE, O_NONBLOCK's EAGAIN), `dup(2)` and `open(2)` (open file descriptions: duplicates and a fork's child share the offset and status flags; close-on-exec is the descriptor's), `fcntl(2)`, `chdir(2)`, `getcwd(3)` (ERANGE), `socketpair(2)`, `unix(7)`, `recv(2)`, `send(2)` (MSG_DONTWAIT, MSG_NOSIGNAL, EISCONN), `clone(2)` (a clone without CLONE_VM copies the address space; CLONE_CHILD_SETTID, CLONE_PARENT_SETTID, CLONE_CHILD_CLEARTID), `fork(2)`, `kill(2)` (init receives only the signals it has a handler for), `signal(7)` (SIGPIPE's default action) | 6.x | the man-pages project's licences | the author's own knowledge | `kernel/files`, `kernel/process`'s fork and `sigpipe_kills`, `kernel/user`, `user/elf/procs.c`; MSG_DONTWAIT (0x40) and MSG_NOSIGNAL (0x4000) are not in the uapi headers and are the author's own knowledge, unexercised by any test here |
+| black-box Linux: pelt `3e7516c` (static, built in `px13-ubuntu` by `tools/mkpelt`, `692007c3…`) under `strace -f -tt` on a pseudo-terminal, chrooted in the shell's tree with `/etc/words` (`notes/px17/strace-plumb.sh`; Ubuntu 24.04, glibc 2.39, strace 6.8, kernel 7.2.8 on kasumi) | — | — | measured | the plumbing PAX answers (`notes/px17/pelt-plumb.strace`): wolf 0.2.26's spawn forks (`clone(CLONE_CHILD_CLEARTID\|CLONE_CHILD_SETTID\|SIGCHLD)`), `socketpair(AF_UNIX, SOCK_SEQPACKET\|SOCK_CLOEXEC)` and the parent's `recvfrom` until `execve` closes the child's end, `fcntl(F_DUPFD_CLOEXEC, 3)` ×3 and `dup2` onto 0-2 in the child; `pipe2(O_CLOEXEC)`; `openat("/dev/null", O_WRONLY\|O_CREAT\|O_TRUNC\|O_CLOEXEC)`; `chdir` then `getcwd`; boreutils reopening `/dev/stdin` and `/dev/stdout` and moving fd 0's shared offset with `lseek`; a pipe end's `statx` S_IFIFO\|0600 |
+| black-box Linux: `user/elf/procs.c` as pid 1 of a fresh pid namespace (`tools/linux-tty --root --pid1`) | — | — | measured | every new line procs' transcript holds PAX to: the fork, the pipe modes (0x1180), a waiting read and writer EOF, SIGPIPE's status 0xd, -32 for a child ignoring SIGPIPE and for pid 1 with SIGPIPE at SIG_DFL, the shared offset, getcwd/chdir/fchdir and their errnos, the socket mode (0xc1ff), F_GETFL of a pipe's ends (0 and 1) |
