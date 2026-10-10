@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # mkuser — build px10's user programs (user/elf/hello.S), px13's
-# (user/elf/ask.S) and px14's (user/elf/procs.c) into OUTDIR.
+# (user/elf/ask.S), px14's (user/elf/procs.c) and px18's (user/elf/hold.S)
+# into OUTDIR.
 #
 #   tools/mkuser OUTDIR
 #
@@ -21,6 +22,8 @@
 #   procs      user/elf/procs.c (px14), C without a libc (-ffreestanding,
 #              no stack protector: nothing sets up its canary), -O1,
 #              -static -no-pie: the process calls' witness
+#   hold       user/elf/hold.S (px18), -static -no-pie: starts a tone on
+#              the console's speaker (KIOCSOUND) and exits with it on
 # and prints one line per file: `<name> <sha256> <bytes>`. Every link
 # passes --build-id=none, so two builds by one toolchain give one digest.
 # Exit 0, or 2 on a tool error.
@@ -50,6 +53,7 @@ PY
 "$cc" "${common[@]}" -static -no-pie -o "$out/ask" "$PAX_ROOT/user/elf/ask.S" || die "cc: ask"
 "$cc" "${common[@]}" -static -no-pie -O1 -ffreestanding -fno-builtin -fno-stack-protector \
     -fno-asynchronous-unwind-tables -o "$out/procs" "$PAX_ROOT/user/elf/procs.c" || die "cc: procs"
-for f in hello hello-pie hello-dyn hello32 hello-arm ask procs; do
+"$cc" "${common[@]}" -static -no-pie -o "$out/hold" "$PAX_ROOT/user/elf/hold.S" || die "cc: hold"
+for f in hello hello-pie hello-dyn hello32 hello-arm ask procs hold; do
     printf '%s %s %s\n' "$f" "$(sha256_of "$out/$f")" "$(wc -c < "$out/$f" | tr -d ' ')"
 done
