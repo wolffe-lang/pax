@@ -1,0 +1,452 @@
+#!/usr/bin/env bash
+# tests/mpx3-speaker — px18: the PC speaker. pelt, as pid 1 on PAX's
+# console, runs /bin/play (user/play, wolf), which reads a note file and
+# sounds it through Linux's console ioctl KIOCSOUND; the kernel drives
+# the 8254's channel 2 and port 0x61 (kernel/speaker). QEMU's speaker
+# goes to its `wav` audio backend (`-audiodev wav,id=snd0,path=…
+# -machine pcspk-audiodev=snd0`), and tools/wav-notes measures what it
+# wrote.
+#
+#   tests/mpx3-speaker [--images DIR | --no-boot] [--pelt DIR] [--play DIR]
+#                      [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# The image: kmain_console (both tiers), an initramfs of /bin/pelt
+# (user/pelt.pin, tools/mkpelt), /bin/play (tools/mkplay), /bin/hold
+# (user/elf/hold.S, tools/mkuser), /usr/share/tunes/{scale,mambo,
+# entertainer} (user/tunes), /etc/refused/{bad-note,bad-length,no-tempo}
+# (user/play/refused), /etc/pax-run `/bin/pelt`. The sessions, typed
+# through COM1:
+#   speaker  user/console/speaker.keys: `play` (the list), the three
+#            refused files and an unknown name, `hold`, `play scale`,
+#            `echo $?`, `exit` (every tier and firmware)
+#   tunes    user/console/speaker-tunes.keys: `play mambo`, `play
+#            entertainer`, `exit` (native, BIOS only: 95 s of music)
+# Assertions, per tier, firmware and session:
+#   K0 build: kmain_console built; every program static (ET_EXEC, no
+#      PT_INTERP); the initramfs and the image built (digests printed).
+#   K1 the session: the serial log after init's exec line, the kernel's
+#      own lines (`user: …`) left out, up to init's end, CRs removed, is
+#      user/console/<session>.expect byte for byte: the list (three
+#      tunes, their titles and lengths), each refusal by name with
+#      status 2, hold's line, `playing …`, status 0.
+#   K2 the scale (speaker): the capture's last eight tones are C4 D4
+#      E4 F4 G4 A4 B4 C5, each within 1% of the equal-tempered table
+#      (A4 = 440 Hz) and each sounding 480 ms within 30 ms; and in the
+#      kernel's own timeline (kernel/speaker's ring, read from the
+#      halted machine through the monitor) the last eight tones start 50
+#      ticks apart within 3, span 350 ticks within 3, and each is held
+#      48 ticks within 3. QEMU's `wav` backend writes only while the
+#      speaker sounds (tools/wav-notes), so the capture has no silences
+#      and the onsets are the kernel's to tell.
+#   K3 the speaker after exit (speaker): hold's tone is stopped by the
+#      kernel at hold's end: one `user: speaker off at the end of pid
+#      <n>, port 0x61 0x<v>` line, n hold's pid, bits 0 and 1 of v
+#      clear; and no 880 Hz tone in the capture lasts 100 ms or more
+#      (left sounding, it would last until the next `play` silences it,
+#      the typing of `play scale` and more).
+#   K4 the summary: `speaker: <t> tones, 1 stopped at their process's
+#      end, sounding 0, port 0x61 0x<v>`, bits 0 and 1 of v clear (the
+#      speaker silent at init's end); t = 9 for speaker (hold's one,
+#      the scale's eight).
+#   K5 the end: no `refused:` line, -ENOSYS only for 273 and 334
+#      (glibc's start-up), `PAX: init /bin/pelt ended with status 0;
+#      nothing left to run`, `halt`, and qemu-halt holds it halted.
+#   K6 the tunes (tunes): the kernel's timeline starts exactly one tone
+#      a note of the two files, every onset within 30 ms of its place in
+#      the file's schedule (the first note's onset plus the lengths
+#      before it, at the PIT's 10 ms tick); the kernel holds tones for
+#      the files' sounding time (each note's length less its gap) within
+#      2% (each hold is quantised to the 10 ms tick; measured +1.1%), and the capture sounds it within 5% (QEMU's `wav` backend
+#      under TCG renders about 3% less than the guest's ticks count,
+#      measured).
+#
+# --images DIR boots what this script built earlier (DIR holds
+# <tier>/kmain_console.elf, <tier>/speaker.iso): any host with QEMU and
+# python3. Without it the script builds (linux x86-64); --no-boot stops
+# after K0. --pelt DIR and --play DIR take pelt and play from DIR.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 peltdir= playdir=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --pelt)     peltdir=$2; shift 2 ;;
+        --play)     playdir=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "usage: tests/mpx3-speaker [--images DIR | --no-boot] [--pelt DIR] [--play DIR] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+need readelf python3
+
+PROMPT='$ '
+# The equal-tempered scale, C4 to C5, A4 = 440 Hz.
+SCALE_HZ="261.63 293.66 329.63 349.23 392.00 440.00 493.88 523.25"
+
+work=$PAX_BUILD/mpx3-speaker
+runs=$PAX_BUILD/mpx3-speaker-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    r=$work/root
+    mkdir -p "$r/bin" "$r/etc/refused" "$r/usr/share/tunes"
+    why=
+    if "$PAX_ROOT/tools/mkuser" "$work/user" > "$work/user.txt"; then
+        cp "$work/user/hold" "$r/bin/hold"
+    else
+        why+=" tools/mkuser;"
+    fi
+    if [ -n "$peltdir" ]; then
+        cp "$peltdir/pelt" "$r/bin/pelt" || why+=" no $peltdir/pelt;"
+        say "pelt from $peltdir"
+    elif "$PAX_ROOT/tools/mkpelt" "$work/peltbin" > "$work/pelt.txt"; then
+        cp "$work/peltbin/pelt" "$r/bin/pelt"
+    else
+        why+=" tools/mkpelt;"
+    fi
+    if [ -n "$playdir" ]; then
+        cp "$playdir/play" "$r/bin/play" || why+=" no $playdir/play;"
+        say "play from $playdir"
+    elif PAX_WOLF=$wolf "$PAX_ROOT/tools/mkplay" "$work/playbin" > "$work/play.txt"; then
+        cp "$work/playbin/play" "$r/bin/play"
+    else
+        why+=" tools/mkplay;"
+    fi
+    cp "$PAX_ROOT"/user/tunes/* "$r/usr/share/tunes/"
+    cp "$PAX_ROOT"/user/play/refused/* "$r/etc/refused/"
+    echo /bin/pelt > "$r/etc/pax-run"
+    for f in "$r"/bin/*; do
+        x=$(static_ok "$f") || why+=" $x;"
+        say "  program: ${f#"$work"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+    done
+    pairs=()
+    for f in $(cd "$r" && find . -type f | sort); do
+        f=${f#./}
+        mode=644; [ -x "$r/$f" ] && mode=755
+        pairs+=("/$f=$r/$f:$mode")
+    done
+    if "$PAX_ROOT/tools/mkinitramfs" "$work/speaker.cpio" "${pairs[@]}" > "$work/initramfs.txt"; then
+        sed "s/^/  initramfs: /" "$work/initramfs.txt" >&2
+    else
+        why+=" tools/mkinitramfs;"
+    fi
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                --add "$work/speaker.cpio" initramfs.cpio "$elf" "$work/$tier/speaker.iso" >/dev/null \
+                || why+=" $tier: mkimage;"
+            say "built $tier speaker: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/speaker.iso"), initramfs $(sha256_of "$work/speaker.cpio")"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    [ -z "$why" ] && say "PASS K0: kmain_console built ($tiers), every program static, the initramfs and the image built" || bad "K0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx3-speaker build (K0): PASS (no boot: --no-boot)" || say "mpx3-speaker build: FAIL"
+        exit "$fail"
+    fi
+fi
+
+# A note file's sounding notes and its length in ms (play's arithmetic:
+# 240000000 us / (bpm * n) a length, dotted x 3/2, ties summed).
+tune_facts() { # file -> "<notes> <ms>"
+    python3 - "$1" <<'PY'
+import sys
+bpm = 0; notes = 0; us = 0
+for line in open(sys.argv[1]):
+    w = line.split()
+    if w and w[0].startswith("#"):
+        continue
+    w = [x for x in w]
+    if "#" in w:
+        w = w[: w.index("#")]
+    if not w or w[0] == "title":
+        continue
+    if w[0] == "tempo":
+        bpm = int(w[1]); continue
+    if w[0] == "gap":
+        continue
+    t = 0
+    for part in w[1].split("+"):
+        dot = part.endswith(".")
+        n = int(part.rstrip("."))
+        v = 240000000 // (bpm * n)
+        if dot:
+            v = v * 3 // 2
+        t += v
+    us += t
+    if w[0] != "r":
+        notes += 1
+print(notes, us // 1000)
+PY
+}
+
+record() { # tier leg session status
+    ran=$((ran + 1))
+    printf '%s kmain_console %s %s halt-status=%s accel=%s serial=%s wav=%s iso=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" \
+        "$(sha256_of "$wav" 2>/dev/null)" "$(sha256_of "$iso")" >> "$runs"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        for s in speaker tunes; do
+            [ "$s" = tunes ] && { [ "$tier" = native ] && [ "$leg" = bios ] || continue; }
+            id="$tier $leg $s"
+            log=$PAX_BUILD/mpx3-speaker-$tier-$leg-$s.serial.log
+            wav=$PAX_BUILD/mpx3-speaker-$tier-$leg-$s.wav
+            elf=$images/$tier/kmain_console.elf iso=$images/$tier/speaker.iso
+            keys=$PAX_ROOT/user/console/$s.keys
+            [ "$s" = tunes ] && keys=$PAX_ROOT/user/console/speaker-tunes.keys
+            rm -f "$log" "$log.verdict" "$log.typed" "$wav"
+            if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+                bad "K1 $id: no image"
+                continue
+            fi
+            ring_at=$(nm "$elf" | awk '$3 == "pax_spk_ring" { print $1 }')
+            state_at=$(nm "$elf" | awk '$3 == "pax_spk_state" { print $1 }')
+            rm -f "$log.cmd1" "$log.cmd2"
+            hrc=0
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 240 \
+                --elf "$elf" --marker 'halt' --type "$keys" --prompt "$PROMPT" --keyboard serial \
+                --cmd "x /8gx 0x$state_at" --cmd "x /1024gx 0x$ring_at" \
+                --qemu -audiodev --qemu "wav,id=snd0,path=$wav" --qemu -machine --qemu pcspk-audiodev=snd0 \
+                "$iso" >"$log.verdict" 2>&1 || hrc=$?
+            # The kernel's timeline: kernel/speaker's ring, read from the halted machine.
+            timeline=$log.timeline
+            python3 - "$log.cmd1" "$log.cmd2" > "$timeline" 2>&1 <<'PY' || :
+import re, sys
+def words(path):
+    out = []
+    for line in open(path):
+        if ":" not in line:
+            continue
+        out += [int(w, 16) for w in re.findall(r"0x([0-9a-fA-F]+)", line.split(":", 1)[1])]
+    return out
+state, ring = words(sys.argv[1]), words(sys.argv[2])
+n = state[6]
+if n > 1024 or len(ring) < 1024:
+    print("unreadable: %d events, %d ring words" % (n, len(ring))); sys.exit()
+for k in range(n):
+    w = ring[k]
+    print("event %d tick %d %s %d" % (k, w >> 17, "on" if w & 0x10000 else "off", w & 0xffff))
+PY
+            record "$tier" "$leg" "$s" "$hrc"
+            norm=$log.norm; serial_norm "$log" > "$norm"
+            notes=$log.tones
+            if [ -s "$wav" ]; then
+                "$PAX_ROOT/tools/wav-notes" "$wav" > "$notes" 2>&1 || :
+            else
+                echo "no capture" > "$notes"
+            fi
+
+            # K1: the session against its expect file.
+            why=
+            out=$PAX_BUILD/mpx3-speaker-$tier-$leg-$s.session
+            awk '/^user: exec pid 1 / { on = 1; next } on && /^user: pelt pid 1 (exit_group|exit) [0-9]+ after / { exit } on && !/^user: / { print }' "$norm" > "$out"
+            want=$PAX_ROOT/user/console/$s.expect
+            [ "$s" = tunes ] && want=$PAX_ROOT/user/console/speaker-tunes.expect
+            if ! cmp -s "$want" "$out"; then
+                why+=" the session differs from ${want#"$PAX_ROOT"/}: $(diff "$want" "$out" | head -n 12 | tr '\n' '|');"
+            fi
+            [ -z "$why" ] && say "PASS K1 $id: the session is ${want#"$PAX_ROOT"/} ($(wc -l < "$out" | tr -d ' ') lines, $(sha256_of "$out" | cut -c1-12)…)" || bad "K1 $id:$why"
+
+            if [ "$s" = speaker ]; then
+                # K2: the scale: frequencies from the capture, time from the kernel.
+                why=
+                k2=$(python3 - "$notes" "$timeline" $SCALE_HZ <<'PY'
+import sys
+tones = [l.split() for l in open(sys.argv[1]) if l.startswith("tone ")]
+ev = [l.split() for l in open(sys.argv[2]) if l.startswith("event ")]
+want = [float(x) for x in sys.argv[3:]]
+bad = []
+if len(tones) < len(want):
+    print("FAIL only %d tones in the capture" % len(tones)); sys.exit()
+sc = tones[-len(want):]
+hz = [float(t[9]) for t in sc]
+ln = [float(t[7]) for t in sc]
+for i, (h, w) in enumerate(zip(hz, want)):
+    if abs(h - w) / w > 0.01:
+        bad.append("note %d %.2f Hz, table %.2f (%.2f%%)" % (i + 1, h, w, 100 * (h - w) / w))
+for i, l in enumerate(ln):
+    if abs(l - 480) > 30:
+        bad.append("note %d sounded %.1f ms in the capture" % (i + 1, l))
+# The kernel's timeline: the scale is the last eight tones started.
+ons = [(int(e[3]), int(e[5])) for e in ev if e[4] == "on"]
+# How long each tone was held: from its event to the next event (an off
+# or another tone), in the ring's order, not by tick (play's first
+# KIOCSOUND 0 and its first tone can share a tick).
+nxt = {}
+for a, b in zip(ev, ev[1:]):
+    if a[4] == "on":
+        nxt[int(a[1])] = int(b[3]) - int(a[3])
+on_ids = [int(e[1]) for e in ev if e[4] == "on"]
+if len(ons) < 8:
+    print("FAIL the kernel's timeline has %d tones: %s" % (len(ons), open(sys.argv[2]).read()[:200])); sys.exit()
+on8 = ons[-8:]
+starts = [t for t, _ in on8]
+gaps = [b - a for a, b in zip(starts, starts[1:])]
+for i, g in enumerate(gaps):
+    if abs(g - 50) > 3:
+        bad.append("onset %d is %d ticks after the one before" % (i + 2, g))
+span = starts[-1] - starts[0]
+if abs(span - 350) > 3:
+    bad.append("the onsets span %d ticks" % span)
+held = [nxt.get(i, -1) for i in on_ids[-8:]]
+for i, h in enumerate(held):
+    if abs(h - 48) > 3:
+        bad.append("note %d held %d ticks" % (i + 1, h))
+dev = max(abs(h - w) / w for h, w in zip(hz, want)) * 100
+summary = ("Hz " + " ".join("%.2f" % h for h in hz) + " (worst %.3f%%)" % dev
+           + "; sounded " + " ".join("%.0f" % l for l in ln) + " ms"
+           + "; kernel onsets every " + " ".join(str(g) for g in gaps) + " ticks, span %d, held " % span
+           + " ".join(str(h) for h in held) + " ticks; counts " + " ".join(str(c) for _, c in on8))
+print(("FAIL " + "; ".join(bad) + " | " if bad else "PASS ") + summary)
+PY
+)
+                case $k2 in PASS*) say "PASS K2 $id: ${k2#PASS }" ;; *) bad "K2 $id: ${k2#FAIL }" ;; esac
+
+                # K3: hold's tone, stopped at its end.
+                why=
+                hp=$(sed -n -E 's/^user: hold pid ([0-9]+) exit_group 0 after .*/\1/p' "$norm" | head -n 1)
+                [ -n "$hp" ] || why+=" no exit line for hold;"
+                ol=$(grep -E '^user: speaker off at the end of pid [0-9]+, port 0x61 0x[0-9a-f]{2}$' "$norm")
+                n=$(printf '%s' "$ol" | grep -c . )
+                [ "$n" = 1 ] || why+=" $n 'speaker off' lines, not 1;"
+                op=$(printf '%s\n' "$ol" | sed -n -E 's/^user: speaker off at the end of pid ([0-9]+), .*/\1/p' | head -n 1)
+                ov=$(printf '%s\n' "$ol" | sed -n -E 's/.*port 0x61 0x([0-9a-f]{2})$/\1/p' | head -n 1)
+                [ -n "$hp" ] && [ "$op" = "$hp" ] || why+=" stopped at pid '$op', hold was '$hp';"
+                [ -n "$ov" ] && [ $((0x$ov & 3)) = 0 ] || why+=" port 0x61 '0x$ov' has a gate bit set;"
+                long=$(awk '/^tone / && $10 > 862 && $10 < 898 && $8 >= 100 { print $8 " ms at " $10 " Hz" }' "$notes" | paste -sd, -)
+                [ -z "$long" ] || why+=" hold's tone sounded on: $long;"
+                short=$(awk '/^tone / && $10 > 862 && $10 < 898 { print $8 }' "$notes" | paste -sd, -)
+                [ -z "$why" ] && say "PASS K3 $id: $ol (hold was pid $hp); 880 Hz in the capture: ${short:-none} ms" || bad "K3 $id:$why"
+            else
+                # K6: the tunes: every note started, each tune its length.
+                why=
+                k6=$(python3 - "$notes" "$timeline" "$PAX_ROOT/user/tunes/mambo" "$PAX_ROOT/user/tunes/entertainer" <<'PY'
+import sys
+def facts(path):
+    bpm = 0; gap = 20000; at = 0; onsets = []; sound = 0
+    for line in open(path):
+        w = line.split()
+        if "#" in w:
+            w = w[:w.index("#")]
+        if not w or w[0].startswith("#") or w[0] == "title":
+            continue
+        if w[0] == "tempo":
+            bpm = int(w[1]); continue
+        if w[0] == "gap":
+            gap = int(w[1]) * 1000; continue
+        us = 0
+        for part in w[1].split("+"):
+            v = 240000000 // (bpm * int(part.rstrip(".")))
+            us += v * 3 // 2 if part.endswith(".") else v
+        if w[0] != "r":
+            onsets.append(at)
+            sound += max(us - gap, us // 2)
+        at += us
+    return onsets, sound, at
+tones = [l.split() for l in open(sys.argv[1]) if l.startswith("tone ")]
+ev = [l.split() for l in open(sys.argv[2]) if l.startswith("event ")]
+ons = [int(e[3]) for e in ev if e[4] == "on"]
+held = sum(int(b[3]) - int(a[3]) for a, b in zip(ev, ev[1:]) if a[4] == "on") * 10
+bad = []; parts = []
+k = 0; sound_all = 0
+for path in sys.argv[3:]:
+    o, sound, total = facts(path)
+    sound_all += sound
+    mine = ons[k:k + len(o)]
+    k += len(o)
+    if len(mine) != len(o):
+        bad.append("%s: %d tones in the kernel's timeline, %d notes in the file" % (path.split("/")[-1], len(mine), len(o)))
+        continue
+    worst = max(abs((t - mine[0]) * 10.0 - (u - o[0]) / 1000.0) for t, u in zip(mine, o))
+    span = (mine[-1] - mine[0]) * 10
+    want = (o[-1] - o[0]) / 1000.0
+    if worst > 30:
+        bad.append("%s: an onset %.0f ms from its schedule" % (path.split("/")[-1], worst))
+    parts.append("%s %d notes, onsets span %d ms against %.0f, worst onset %.0f ms off" % (path.split("/")[-1], len(o), span, want, worst))
+if k != len(ons):
+    bad.append("%d tones in the timeline, %d notes in the files" % (len(ons), k))
+heard = sum(float(t[7]) for t in tones)
+want = sound_all / 1000.0
+if abs(held - want) > 0.02 * want:
+    bad.append("the kernel held tones %d ms, the files sound %.0f ms" % (held, want))
+if abs(heard - want) > 0.05 * want:
+    bad.append("the capture sounds %.0f ms, the files %.0f ms" % (heard, want))
+parts.append("the kernel held tones %d ms and the capture sounds %.0f ms (%.1f%%) against the files' %.0f ms" % (held, heard, 100.0 * (heard - want) / want, want))
+print(("FAIL " + "; ".join(bad) + " | " if bad else "PASS ") + "; ".join(parts))
+PY
+)
+                case $k6 in PASS*) say "PASS K6 $id: ${k6#PASS }" ;; *) bad "K6 $id: ${k6#FAIL }" ;; esac
+                set -- $(tune_facts "$PAX_ROOT/user/tunes/mambo"); mn=$1
+                set -- $(tune_facts "$PAX_ROOT/user/tunes/entertainer"); en=$1
+            fi
+
+            # K4: the summary.
+            why=
+            sl=$(grep -E '^speaker: [0-9]+ tones, ' "$norm" | head -n 1)
+            sv=$(printf '%s\n' "$sl" | sed -n -E 's/.*port 0x61 0x([0-9a-f]{2})$/\1/p')
+            st=$(printf '%s\n' "$sl" | sed -n -E 's/^speaker: ([0-9]+) tones, ([0-9]+) stopped at their process.s end, sounding ([0-9]+), .*/\1 \2 \3/p')
+            if [ "$s" = speaker ]; then wt="9 1 0"; else wt="$((mn + en)) 0 0"; fi
+            [ "$st" = "$wt" ] || why+=" '$sl': not '$wt' (tones, stopped at an end, sounding);"
+            [ -n "$sv" ] && [ $((0x$sv & 3)) = 0 ] || why+=" port 0x61 '0x$sv' has a gate bit set;"
+            [ -z "$why" ] && say "PASS K4 $id: $sl" || bad "K4 $id:$why"
+
+            # K5: the end.
+            why=
+            ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
+            [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
+            rf=$(grep ': refused: ' "$norm" | paste -sd'|' -)
+            [ -z "$rf" ] || why+=" refusals '$rf';"
+            grep -qx "PAX: init /bin/pelt ended with status 0; nothing left to run" "$norm" \
+                || why+=" no 'PAX: init /bin/pelt ended with status 0' ($(grep -m1 '^PAX: init ' "$norm"));"
+            [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+            "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'PAX: init .*' 'halt' >/dev/null \
+                || why+=" the log does not end with the init line and halt;"
+            [ -z "$why" ] && say "PASS K5 $id: -ENOSYS only for 273 334, nothing refused; init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "K5 $id:$why"
+        done
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx3-speaker: PASS" || say "mpx3-speaker: FAIL"
+exit "$fail"
