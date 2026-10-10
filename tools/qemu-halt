@@ -4,7 +4,7 @@
 #   tools/qemu-halt [--firmware bios|uefi] [--serial FILE] [--timeout SECS]
 #                   [--accel auto|kvm|tcg] --elf KERNEL.elf [--symbol NAME]
 #                   [--cmd MONITOR-COMMAND]... [--type KEYS --prompt TEXT
-#                   [--keyboard serial|ps2]] --marker ERE IMAGE.iso
+#                   [--keyboard serial|ps2]] [--no-screen] --marker ERE IMAGE.iso
 #
 # A kernel that ends in `cli; hlt` never exits QEMU, so its end cannot
 # be read from QEMU's status (tools/qemu-run's isa-debug-exit) and a
@@ -47,12 +47,16 @@
 # what was typed, step by step. Each prompt is waited for at most the
 # timeout; a missing one is NOT HALTED (the reason names the step).
 #
+# --no-screen (px19) passes tools/qemu-run's --no-screen: no display
+# device, so no framebuffer and a serial-only console. A --cmd of
+# `screendump FILE` (px19) saves the halted machine's screen.
+#
 # Exit 0 halted; 1 not halted (the reason on stderr); 2 usage or tool
 # error. The timeout (default 60 s) bounds the wait for the marker.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
-firmware=bios serial=$PAX_BUILD/serial.log timeout=60 accel=auto elf= sym=pax_halt marker= image= cmds=() keys= prompt= keyboard=serial
+firmware=bios serial=$PAX_BUILD/serial.log timeout=60 accel=auto elf= sym=pax_halt marker= image= cmds=() keys= prompt= keyboard=serial noscreen=()
 while [ $# -gt 0 ]; do
     case $1 in
         --firmware) firmware=$2; shift 2 ;;
@@ -66,6 +70,7 @@ while [ $# -gt 0 ]; do
         --type)     keys=$2; shift 2 ;;
         --prompt)   prompt=$2; shift 2 ;;
         --keyboard) keyboard=$2; shift 2 ;;
+        --no-screen) noscreen=(--no-screen); shift ;;
         -h|--help)  sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
         -*)         die "unknown option: $1" ;;
         *)          [ -z "$image" ] || die "one image only"; image=$1; shift ;;
@@ -114,7 +119,7 @@ trap cleanup EXIT
 exec 3<>"$mon.in" 4<>"$mon.out"
 [ "${#sin[@]}" = 0 ] || exec 5<>"$serial.in"
 "$PAX_ROOT/tools/qemu-run" --firmware "$firmware" --serial "$serial" --timeout $((timeout + 30)) \
-    --accel "$accel" ${sin[@]+"${sin[@]}"} "$image" -- -monitor "pipe:$mon" &
+    --accel "$accel" ${sin[@]+"${sin[@]}"} ${noscreen[@]+"${noscreen[@]}"} "$image" -- -monitor "pipe:$mon" &
 qpid=$!
 
 no() { printf 'qemu-halt: NOT HALTED: %s\n' "$*" | tee -a "$rec" >&2; exit 1; }

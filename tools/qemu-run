@@ -3,11 +3,18 @@
 #
 #   tools/qemu-run [--firmware bios|uefi] [--serial FILE] [--serial-input FIFO]
 #                  [--timeout SECS] [--accel auto|kvm|tcg] [--gdb PORT]
-#                  IMAGE.iso [-- QEMU-ARGS...]
+#                  [--no-screen] IMAGE.iso [-- QEMU-ARGS...]
 #
 # The machine: q35, 256 MiB, no NIC, `-nographic`, COM1 to FILE (default
 # build/serial.log), `-no-reboot` (a triple fault ends the run instead of
-# looping), no monitor, and isa-debug-exit at port 0xf4.
+# looping), no monitor, and isa-debug-exit at port 0xf4. q35's default
+# VGA device is there, its output shown nowhere (`-nographic`): the
+# firmware and Limine find a display, and the kernel's screen (px19)
+# draws on it; QEMU's monitor `screendump` reads it back.
+#
+# --no-screen (px19) boots the machine with no display device at all
+# (`-vga none`): Limine hands the kernel no framebuffer, so the console
+# is serial only, as on a machine with no screen.
 #
 # --serial-input FIFO (px13) also gives COM1 an input: QEMU's file
 # character device with `input-path`, so what is written to FIFO is what
@@ -34,7 +41,7 @@
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
-firmware=bios serial=$PAX_BUILD/serial.log serial_in= timeout=30 accel=auto gdb_port= image=
+firmware=bios serial=$PAX_BUILD/serial.log serial_in= timeout=30 accel=auto gdb_port= image= noscreen=0
 while [ $# -gt 0 ]; do
     case $1 in
         --firmware) firmware=$2; shift 2 ;;
@@ -43,6 +50,7 @@ while [ $# -gt 0 ]; do
         --timeout)  timeout=$2; shift 2 ;;
         --accel)    accel=$2; shift 2 ;;
         --gdb)      gdb_port=$2; shift 2 ;;
+        --no-screen) noscreen=1; shift ;;
         --)         shift; break ;;
         -h|--help)  sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
         -*)         die "unknown option: $1" ;;
@@ -72,6 +80,7 @@ cmd=("$qemu"
      -device isa-debug-exit,iobase=0xf4,iosize=0x04
      -drive "file=$image,format=raw,media=cdrom,readonly=on"
      -boot d)
+[ "$noscreen" = 0 ] || cmd+=(-vga none)
 
 if [ -n "$serial_in" ]; then
     [ -p "$serial_in" ] || die "--serial-input $serial_in is not a FIFO"
