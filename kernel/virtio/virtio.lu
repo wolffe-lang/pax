@@ -1,0 +1,494 @@
+//! virtio — the virtio 1.x PCI transport and the split virtqueue (px20).
+//!
+//! **The transport.** A virtio PCI device (vendor 0x1af4) describes its
+//! registers with vendor-specific capabilities (id 0x09) in its
+//! capability list: each names a kind (`cfg_type`: 1 the common
+//! configuration, 2 the notification area, 3 the ISR status, 4 the
+//! device-specific configuration), a BAR, and an offset and length
+//! inside it. `attach` walks the list, takes the first capability of
+//! each kind whose BAR is memory, and maps each one's pages uncached in
+//! a window of its own in the device slot (PML4 slot 352, 1 MiB a
+//! window from `WINDOWS`, kernel/apic's page below them). A device
+//! with no common-configuration capability is a legacy-only one and is
+//! refused by name: this driver speaks only the 1.x interface (the
+//! legacy I/O BAR of a transitional device is never touched).
+//!
+//! The common configuration, little-endian, every field read and
+//! written at its own width:
+//!
+//!     0x00 le32 device_feature_select    0x04 le32 device_feature
+//!     0x08 le32 driver_feature_select    0x0c le32 driver_feature
+//!     0x10 le16 msix_config              0x12 le16 num_queues
+//!     0x14 u8   device_status            0x15 u8   config_generation
+//!     0x16 le16 queue_select             0x18 le16 queue_size
+//!     0x1a le16 queue_msix_vector        0x1c le16 queue_enable
+//!     0x1e le16 queue_notify_off         0x20 le64 queue_desc
+//!     0x28 le64 queue_driver             0x30 le64 queue_device
+//!
+//! The handshake (`reset`, `add_status`, `device_features`,
+//! `set_features`): status 0 resets and is read back as 0;
+//! ACKNOWLEDGE (1), DRIVER (2); the 64 feature bits read and written 32
+//! at a time through the select registers; FEATURES_OK (8), read back
+//! to see the device kept it; the queues; DRIVER_OK (4). FAILED is 128.
+//! MSI-X is left alone, so the device raises INTx, and a read of the
+//! ISR status register (one byte: bit 0 a queue, bit 1 a configuration
+//! change) returns the cause and withdraws the request.
+//!
+//! **A queue** (`queue_setup`): select it, read the size the device
+//! offers (a power of two; 0 no such queue), write the smaller size the
+//! driver wants, the three parts' physical addresses, then enable it.
+//! Its notification address is the notification capability's offset
+//! plus `queue_notify_off` times the capability's multiplier; `notify`
+//! writes the queue's number there as 16 bits.
+//!
+//! **The split virtqueue.** Three parts in guest memory:
+//!
+//!     descriptors  size * 16 bytes   { le64 addr; le32 len; le16 flags; le16 next }
+//!     avail        6 + 2 * size      { le16 flags; le16 idx; le16 ring[size]; le16 used_event }
+//!     used         6 + 8 * size      { le16 flags; le16 idx; { le32 id; le32 len } ring[size]; le16 avail_event }
+//!
+//! whose first bytes must be multiples of 16, 2 and 4. `layout` places
+//! all three in one 4 KiB frame (descriptors at 0, then avail, then
+//! used rounded up to `USED_ALIGN`), which holds a queue of up to 128;
+//! `aligned` is the specification's table, checked on its own before a
+//! queue is handed to the device. The driver adds a buffer by writing
+//! its descriptor's index into `ring[idx % size]` of avail and then
+//! adding one to avail's `idx`; the device returns it by writing `{id,
+//! len}` into `ring[idx % size]` of used and adding one to used's
+//! `idx`. Both indices run free over 16 bits. Flag bit 0 of avail asks
+//! the device for no interrupt (NO_INTERRUPT); bit 0 of used asks the
+//! driver for no notification (NO_NOTIFY). Descriptor flags: 1 NEXT, 2
+//! WRITE (the device writes the buffer), 4 INDIRECT.
+//!
+//! A queue's record is eight words (boot/net.S's `pax_net_state`,
+//! kernel/net says which): its size, its frame, the three parts'
+//! addresses in the HHDM, the last used index seen, its notification
+//! address. Ring memory is shared with the device, so every access is
+//! volatile; one CPU, and the device looks only when notified or when
+//! it has something to deliver, so the order of the stores (the ring
+//! entry, then `idx`) is the whole protocol.
+//!
+//! Written from the OASIS Virtual I/O Device (VIRTIO) specification,
+//! versions 1.1 and 1.2: §2.1 (device status), §2.2 (feature bits),
+//! §2.6/§2.7 (split virtqueues, the alignment table), §3.1.1 (device
+//! initialization), §4.1.4 (the PCI capabilities and the common
+//! configuration), §4.1.5 (PCI-specific initialization, notification,
+//! the ISR status). No Linux source; no other kernel's, firmware's or
+//! virtual machine monitor's source; no driver.
+
+use frames
+use paging
+use pci
+
+extern "c" let pax_net_state: *u64
+
+/// virtio's PCI vendor id.
+pub const VENDOR: u64 = 0x1af4
+
+/// Status bit: the guest has seen the device.
+pub const ACKNOWLEDGE: u64 = 1
+/// Status bit: the guest has a driver for it.
+pub const DRIVER: u64 = 2
+/// Status bit: the driver is ready; the device is live.
+pub const DRIVER_OK: u64 = 4
+/// Status bit: the features are settled.
+pub const FEATURES_OK: u64 = 8
+/// Status bit, the device's: it has failed and wants a reset.
+pub const NEEDS_RESET: u64 = 64
+/// Status bit: the driver has given up on the device.
+pub const FAILED: u64 = 128
+
+/// VIRTIO_F_VERSION_1: the device speaks the 1.x interface.
+pub const F_VERSION_1: u64 = 0x100000000
+
+/// Descriptor flag: the buffer continues in `next`.
+pub const DESC_NEXT: u64 = 1
+/// Descriptor flag: the device writes this buffer.
+pub const DESC_WRITE: u64 = 2
+
+/// `attach`'s answers: every part found and mapped.
+pub const OK: u64 = 0
+/// No common-configuration capability: a legacy-only device.
+pub const NO_COMMON: u64 = 1
+/// No notification capability.
+pub const NO_NOTIFY: u64 = 2
+/// No ISR status capability.
+pub const NO_ISR: u64 = 3
+/// No device-specific configuration capability.
+pub const NO_DEVICE: u64 = 4
+/// A window could not be mapped.
+pub const NO_MAP: u64 = 5
+
+// The capability kinds (cfg_type).
+const CAP_VENDOR: u64 = 0x09
+const CFG_COMMON: u64 = 1
+const CFG_NOTIFY: u64 = 2
+const CFG_ISR: u64 = 3
+const CFG_DEVICE: u64 = 4
+
+// Where the windows go: PML4 slot 352, above kernel/apic's page.
+const WINDOWS: u64 = 0xffffb00000100000
+const WINDOW: u64 = 0x100000
+const PAGE: u64 = 4096
+const UNCACHED: u64 = 24 // PWT (bit 3), PCD (bit 4)
+
+// The transport's words in pax_net_state.
+const T_BDF: u64 = 0
+const T_COMMON: u64 = 1 // the common configuration's address
+const T_NOTIFY: u64 = 2 // the notification area's
+const T_NOTIFY_MUL: u64 = 3 // notify_off_multiplier
+const T_ISR: u64 = 4
+const T_DEVICE: u64 = 5
+const T_BAR: u64 = 6 // the BAR the common configuration is in
+const T_BAR_PA: u64 = 7 // its physical address
+
+// A queue record's words.
+/// A queue record's words: its size.
+pub const Q_SIZE: u64 = 0
+/// The ring frame's physical address.
+pub const Q_FRAME: u64 = 1
+/// The descriptor table's address (HHDM).
+pub const Q_DESC: u64 = 2
+/// The avail ring's.
+pub const Q_AVAIL: u64 = 3
+/// The used ring's.
+pub const Q_USED: u64 = 4
+/// The used index up to which the driver has looked.
+pub const Q_SEEN: u64 = 5
+/// Where `notify` writes.
+pub const Q_NOTIFY: u64 = 6
+/// The queue's number.
+pub const Q_NUMBER: u64 = 7
+
+/// The alignment `layout` gives the used ring. The specification's is 4.
+const USED_ALIGN: u64 = 4
+
+fn tw(i: u64) -> u64 {
+    // # Safety: i < 64, a word of boot/net.S's pax_net_state.
+    unsafe { ((pax_net_state as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_tw(i: u64, v: u64) {
+    // # Safety: as `tw`.
+    unsafe { ((pax_net_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+/// The address of word `i` of pax_net_state (a queue record's base).
+pub fn state(i: u64) -> u64 {
+    // # Safety: the address only.
+    unsafe { pax_net_state as u64 + i * 8 }
+}
+
+fn r8(a: u64) -> u64 {
+    // # Safety: `a` is a byte of a mapped device window or of ring memory.
+    let v = unsafe { (a as *u8).read_volatile() }
+    v as u64
+}
+
+fn r16(a: u64) -> u64 {
+    // # Safety: as `r8`; `a` is 2-aligned.
+    let v = unsafe { (a as *u16).read_volatile() }
+    v as u64
+}
+
+fn r32(a: u64) -> u64 {
+    // # Safety: as `r8`; `a` is 4-aligned.
+    let v = unsafe { (a as *u32).read_volatile() }
+    v as u64
+}
+
+fn w8(a: u64, v: u64) {
+    // # Safety: as `r8`; `v` is masked.
+    unsafe { (a as *u8).write_volatile((v & 0xff) as u8) }
+}
+
+fn w16(a: u64, v: u64) {
+    // # Safety: as `r16`; `v` is masked.
+    unsafe { (a as *u16).write_volatile((v & 0xffff) as u16) }
+}
+
+fn w32(a: u64, v: u64) {
+    // # Safety: as `r32`; `v` is masked.
+    unsafe { (a as *u32).write_volatile((v & 0xffffffff) as u32) }
+}
+
+fn w64(a: u64, v: u64) {
+    // # Safety: as `r8`; `a` is 8-aligned.
+    unsafe { (a as *u64).write_volatile(v) }
+}
+
+/// Map the pages holding `len` bytes at `pa` in window `k`; the
+/// address of the first byte, 0 when it cannot be mapped.
+fn window(pml4: u64, k: u64, pa: u64, len: u64) -> u64 {
+    let first = pa & !(PAGE - 1)
+    let last = (pa + len + PAGE - 1) & !(PAGE - 1)
+    if len == 0 || last - first > WINDOW {
+        return 0
+    }
+    let base = WINDOWS + k * WINDOW
+    var p = first
+    while p < last {
+        let n = paging.map(pml4, base + (p - first), p, paging.NX | paging.RW | UNCACHED) else 9
+        if n == 9 {
+            return 0
+        }
+        p += PAGE
+    }
+    base + (pa - first)
+}
+
+/// Find the 1.x registers of PCI function `i` (kernel/pci's index) and
+/// map them in the structures at `pml4`. OK, or which part is missing.
+pub fn attach(pml4: u64, i: u64) -> u64 {
+    let b = pci.bdf(i)
+    put_tw(T_BDF, b)
+    put_tw(T_COMMON, 0)
+    put_tw(T_NOTIFY, 0)
+    put_tw(T_ISR, 0)
+    put_tw(T_DEVICE, 0)
+    var cap = pci.next_cap(b, 0)
+    var guard: u64 = 0
+    var failed = false
+    while cap != 0 && guard < 48 {
+        if pci.read8(b, cap) == CAP_VENDOR {
+            let kind = pci.read8(b, cap + 3)
+            let (bk, bpa) = pci.bar(b, pci.read8(b, cap + 4))
+            let off = pci.read32(b, cap + 8)
+            let len = pci.read32(b, cap + 12)
+            let slot = if kind == CFG_COMMON { T_COMMON } else { if kind == CFG_NOTIFY { T_NOTIFY } else { if kind == CFG_ISR { T_ISR } else { if kind == CFG_DEVICE { T_DEVICE } else { 0 } } } }
+            if slot != 0 && tw(slot) == 0 && (bk == pci.BAR_MEM32 || bk == pci.BAR_MEM64) {
+                let va = window(pml4, kind - 1, bpa + off, len)
+                if va == 0 {
+                    failed = true
+                }
+                put_tw(slot, va)
+                if kind == CFG_NOTIFY {
+                    put_tw(T_NOTIFY_MUL, pci.read32(b, cap + 16))
+                }
+                if kind == CFG_COMMON {
+                    put_tw(T_BAR, pci.read8(b, cap + 4))
+                    put_tw(T_BAR_PA, bpa)
+                }
+            }
+        }
+        cap = pci.next_cap(b, cap)
+        guard += 1
+    }
+    if failed {
+        return NO_MAP
+    }
+    if tw(T_COMMON) == 0 {
+        return NO_COMMON
+    }
+    if tw(T_NOTIFY) == 0 {
+        return NO_NOTIFY
+    }
+    if tw(T_ISR) == 0 {
+        return NO_ISR
+    }
+    if tw(T_DEVICE) == 0 {
+        return NO_DEVICE
+    }
+    OK
+}
+
+/// The BAR the registers are in, and its physical address.
+pub fn bar() -> (u64, u64) {
+    (tw(T_BAR), tw(T_BAR_PA))
+}
+
+/// The device status register.
+pub fn status() -> u64 {
+    r8(tw(T_COMMON) + 0x14)
+}
+
+/// Reset the device: status 0, read back until it is 0. False when it
+/// never reads 0.
+pub fn reset() -> bool {
+    w8(tw(T_COMMON) + 0x14, 0)
+    var k: u64 = 0
+    while k < 100000 {
+        if status() == 0 {
+            return true
+        }
+        k += 1
+    }
+    false
+}
+
+/// Set status bits `bits` beside the ones already set.
+pub fn add_status(bits: u64) {
+    w8(tw(T_COMMON) + 0x14, status() | bits)
+}
+
+/// The 64 feature bits the device offers.
+pub fn device_features() -> u64 {
+    let c = tw(T_COMMON)
+    w32(c + 0x00, 0)
+    let lo = r32(c + 0x04)
+    w32(c + 0x00, 1)
+    let hi = r32(c + 0x04)
+    hi << 32 | lo
+}
+
+/// Write the feature bits the driver takes.
+pub fn set_features(f: u64) {
+    let c = tw(T_COMMON)
+    w32(c + 0x08, 0)
+    w32(c + 0x0c, f & 0xffffffff)
+    w32(c + 0x08, 1)
+    w32(c + 0x0c, f >> 32)
+}
+
+/// How many queues the device has.
+pub fn queues() -> u64 {
+    r16(tw(T_COMMON) + 0x12)
+}
+
+/// The ISR status byte; reading it withdraws the device's INTx request.
+pub fn isr() -> u64 {
+    r8(tw(T_ISR))
+}
+
+/// Byte `off` of the device-specific configuration.
+pub fn device8(off: u64) -> u64 {
+    r8(tw(T_DEVICE) + off)
+}
+
+/// Where a queue of `size` keeps its parts in one frame: the avail
+/// ring's offset, the used ring's, and the bytes used in all.
+pub fn layout(size: u64) -> (u64, u64, u64) {
+    let avail = size * 16
+    let used = (avail + 6 + 2 * size + USED_ALIGN - 1) / USED_ALIGN * USED_ALIGN
+    (avail, used, used + 6 + 8 * size)
+}
+
+/// The specification's alignment table: descriptors 16, avail 2, used 4.
+pub fn aligned(desc: u64, avail: u64, used: u64) -> bool {
+    desc % 16 == 0 && avail % 2 == 0 && used % 4 == 0
+}
+
+fn qw(q: u64, i: u64) -> u64 {
+    // # Safety: `q` is a queue record's base in pax_net_state, i < 8.
+    unsafe { ((q + i * 8) as *u64).read_volatile() }
+}
+
+fn put_qw(q: u64, i: u64, v: u64) {
+    // # Safety: as `qw`.
+    unsafe { ((q + i * 8) as *u64).write_volatile(v) }
+}
+
+/// Word `i` (Q_*) of the queue record at `q`.
+pub fn queue_word(q: u64, i: u64) -> u64 {
+    qw(q, i)
+}
+
+/// The size the device offers for queue `number` (0: no such queue).
+pub fn queue_max(number: u64) -> u64 {
+    let c = tw(T_COMMON)
+    w16(c + 0x16, number)
+    r16(c + 0x18)
+}
+
+/// Give the device queue `number` with `size` entries in the zeroed
+/// frame at physical `frame`, and fill the record at `q`. False when
+/// the layout does not fit the frame or breaks the alignment table
+/// (nothing is written to the device then).
+pub fn queue_setup(q: u64, number: u64, size: u64, frame: u64) -> bool {
+    let (avail, used, bytes) = layout(size)
+    put_qw(q, Q_SIZE, size)
+    put_qw(q, Q_FRAME, frame)
+    put_qw(q, Q_DESC, frame + frames.hhdm())
+    put_qw(q, Q_AVAIL, frame + avail + frames.hhdm())
+    put_qw(q, Q_USED, frame + used + frames.hhdm())
+    put_qw(q, Q_SEEN, 0)
+    put_qw(q, Q_NUMBER, number)
+    if bytes > PAGE || !aligned(frame, frame + avail, frame + used) {
+        return false
+    }
+    let c = tw(T_COMMON)
+    w16(c + 0x16, number)
+    w16(c + 0x18, size)
+    w64(c + 0x20, frame)
+    w64(c + 0x28, frame + avail)
+    w64(c + 0x30, frame + used)
+    put_qw(q, Q_NOTIFY, tw(T_NOTIFY) + r16(c + 0x1e) * tw(T_NOTIFY_MUL))
+    w16(c + 0x1c, 1)
+    true
+}
+
+/// Write descriptor `i` of the queue at `q`.
+pub fn set_desc(q: u64, i: u64, addr: u64, len: u64, flags: u64, next: u64) {
+    let d = qw(q, Q_DESC) + i * 16
+    w64(d, addr)
+    w32(d + 8, len)
+    w16(d + 12, flags)
+    w16(d + 14, next)
+}
+
+/// Descriptor `i`'s buffer address.
+pub fn desc_addr(q: u64, i: u64) -> u64 {
+    // # Safety: descriptor i of the queue's own frame, 8-aligned.
+    unsafe { ((qw(q, Q_DESC) + i * 16) as *u64).read_volatile() }
+}
+
+/// Descriptor `i`'s `next` field.
+pub fn desc_next(q: u64, i: u64) -> u64 {
+    r16(qw(q, Q_DESC) + i * 16 + 14)
+}
+
+/// Set descriptor `i`'s length (a transmit buffer's, each send).
+pub fn set_desc_len(q: u64, i: u64, len: u64) {
+    w32(qw(q, Q_DESC) + i * 16 + 8, len)
+}
+
+/// Set descriptor `i`'s `next` field (a free list's link: with no NEXT
+/// flag the device never reads it).
+pub fn set_desc_next(q: u64, i: u64, next: u64) {
+    w16(qw(q, Q_DESC) + i * 16 + 14, next)
+}
+
+/// Ask the device for no interrupt when it uses a buffer of this queue
+/// (the avail ring's flag bit 0), or for one again.
+pub fn quiet(q: u64, on: bool) {
+    w16(qw(q, Q_AVAIL), if on { 1 } else { 0 })
+}
+
+/// Offer the buffer whose head descriptor is `id` to the device.
+pub fn offer(q: u64, id: u64) {
+    let a = qw(q, Q_AVAIL)
+    let idx = r16(a + 2)
+    w16(a + 4 + (idx % qw(q, Q_SIZE)) * 2, id)
+    w16(a + 2, (idx + 1) & 0xffff)
+}
+
+/// Tell the device the queue has new buffers, unless it asked not to
+/// be told (the used ring's flag bit 0). Whether it was told.
+pub fn notify(q: u64) -> bool {
+    if r16(qw(q, Q_USED)) & 1 != 0 {
+        return false
+    }
+    w16(qw(q, Q_NOTIFY), qw(q, Q_NUMBER))
+    true
+}
+
+/// Whether the device has returned a buffer the driver has not taken.
+pub fn returned(q: u64) -> bool {
+    r16(qw(q, Q_USED) + 2) != qw(q, Q_SEEN)
+}
+
+/// Take the next returned buffer: its head descriptor and the bytes
+/// the device wrote. Call only when `returned` says so.
+pub fn collect(q: u64) -> (u64, u64) {
+    let seen = qw(q, Q_SEEN)
+    let e = qw(q, Q_USED) + 4 + (seen % qw(q, Q_SIZE)) * 8
+    let id = r32(e)
+    let len = r32(e + 4)
+    put_qw(q, Q_SEEN, (seen + 1) & 0xffff)
+    (id, len)
+}
+
+/// The avail and used indices as they are (a report's).
+pub fn indices(q: u64) -> (u64, u64) {
+    (r16(qw(q, Q_AVAIL) + 2), r16(qw(q, Q_USED) + 2))
+}
