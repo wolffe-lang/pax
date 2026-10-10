@@ -22,6 +22,12 @@
 #   3. --small frames of 60 bytes, then --large of 1514, from PAX to
 #      the gateway, type 0x88b5, bytes 14-17 the frame's number
 #      (big-endian) and every byte k after them (k * 7) & 0xff;
+#   0. before any of it, whatever the firmware sent while it had the
+#      device (OVMF's own driver announces an IPv6 address on some
+#      boots): every frame before the gateway's request is counted and
+#      printed as the firmware's, and none may be an ARP frame or a
+#      burst frame. The caller holds PAX's own count of frames sent to
+#      the count from 1 on, so a frame here is not one PAX sent;
 #   and, anywhere after 1's request, IPv4 frames from the gateway to
 #   PAX (the test's UDP datagrams to port 7, which made the gateway
 #   ask): each must be a UDP datagram to port 7 for PAX's address.
@@ -169,6 +175,15 @@ def main(argv):
         if n >= len(fs):
             fail(n, "the capture ends before %s" % what)
 
+    # 0. the firmware's frames, before the kernel had the device.
+    early = 0
+    while n < len(fs) and not (len(fs[n]) >= 42 and fs[n][:42] == gw_request):
+        if fs[n][12:14] in (b"\x08\x06", b"\x88\xb5"):
+            fail(n, "an ARP or burst frame before the gateway's request for %s" % opt["pax-ip"], gw_request)
+        print("before the kernel: frame %d: %d bytes, type %s, from %s: %s"
+              % (n, len(fs[n]), fs[n][12:14].hex(), fs[n][6:12].hex(":"), fs[n][:96].hex()))
+        early += 1
+        n += 1
     # 1. the gateway asks, PAX answers.
     need("the gateway's request")
     from_gateway(n, fs[n], gw_request, "request for %s" % opt["pax-ip"])
@@ -202,13 +217,15 @@ def main(argv):
     skip_pokes()
     if n != len(fs):
         fail(n, "a frame after the conversation's end")
+    if early:
+        print("pcap-net: %d frames before the gateway's request (the firmware's, above)" % early)
     from_pax = 1 + (1 + soak) + small + large
     from_gw = 1 + (1 + soak) + pokes
-    print("pcap-net: %d frames: %d from PAX (1 reply, %d requests, %d + %d burst frames), %d from the gateway "
+    print("pcap-net: %d frames from the gateway's request on: %d from PAX (1 reply, %d requests, %d + %d burst frames), %d from the gateway "
           "(1 request of %d bytes, %d replies of %d bytes, %d IPv4 datagrams to port 7)"
-          % (len(fs), from_pax, 1 + soak, small, large, from_gw, lengths["request"], 1 + soak,
+          % (len(fs) - early, from_pax, 1 + soak, small, large, from_gw, lengths["request"], 1 + soak,
              lengths["reply"], pokes))
-    print("pcap-net: PASS from-pax=%d from-gateway=%d ipv4=%d" % (from_pax, from_gw, pokes))
+    print("pcap-net: PASS from-pax=%d from-gateway=%d ipv4=%d before=%d" % (from_pax, from_gw, pokes, early))
     return 0
 
 
