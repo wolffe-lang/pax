@@ -37,11 +37,22 @@
 //! none), resuming after the `syscall` with %rax 0 (kernel/sched's
 //! `clone_current`); the caller is suspended until the child execs or
 //! ends and then resumes with the child's pid. CLONE_CLEAR_SIGHAND
-//! resets the child's handled signals to SIG_DFL. Refused by name: a
-//! clone without CLONE_VM (a fork: PAX copies no address space yet,
-//! -ENOSYS), CLONE_VM without CLONE_VFORK (a thread or a process
-//! sharing memory while both run, -ENOSYS), any other flag (-EINVAL),
-//! no free slot (-EAGAIN).
+//! resets the child's handled signals to SIG_DFL.
+//! px17: **a fork** — a clone without CLONE_VM, as glibc's `fork` makes
+//! it (`clone(CLONE_CHILD_SETTID|CLONE_CHILD_CLEARTID|SIGCHLD)`, measured:
+//! wolf 0.2.26's spawn, which pelt `3e7516c` uses, forks) — gives the
+//! child a copy of the caller's address space (kernel/paging's
+//! `copy_user`: every user page copied, nothing shared), its own; the
+//! child resumes after the `syscall` with %rax 0 on the stack the call
+//! names (or the copy of the caller's), the caller at once with the
+//! child's pid. CLONE_CHILD_SETTID writes the child's pid into the
+//! child's copy, CLONE_PARENT_SETTID into the caller's; CLONE_CHILD_
+//! CLEARTID is taken and not kept (nothing in PAX waits on that word:
+//! no futex, no threads). Both kinds of child take their own references
+//! to the open files they inherit (kernel/files' `inherit`). Refused by
+//! name: CLONE_VM without CLONE_VFORK (a thread or a process sharing
+//! memory while both run, -ENOSYS), any other flag (-EINVAL), no free
+//! slot (-EAGAIN), no frames for the copy (-ENOMEM).
 //!
 //! **execve** (59): path, argv and envp read out of the caller's memory
 //! first; then the file (kernel/files' `exec_lookup`: -ENOENT, -EACCES
@@ -154,6 +165,9 @@ const CSIGNAL: u64 = 0xff
 const CLONE_VM: u64 = 0x100
 const CLONE_VFORK: u64 = 0x4000
 const CLONE_CLEAR_SIGHAND: u64 = 0x100000000
+const CLONE_PARENT_SETTID: u64 = 0x00100000 // px17
+const CLONE_CHILD_CLEARTID: u64 = 0x00200000 // px17
+const CLONE_CHILD_SETTID: u64 = 0x01000000 // px17
 const CLONE_ARGS_VER0: u64 = 64
 
 // wait options and idtypes (uapi linux/wait.h).
@@ -170,6 +184,7 @@ const P_PGID: u64 = 2
 const SIGKILL: u64 = 9
 const SIGSTOP: u64 = 19
 const SIGCHLD: u64 = 17
+const SIGPIPE: u64 = 13 // px17
 const NSIG: u64 = 64
 const UNBLOCKABLE: u64 = 0x40100 // SIGKILL's bit (8) and SIGSTOP's (18)
 const SIG_BLOCK: u64 = 0
@@ -206,6 +221,7 @@ const R_FLAGS: u64 = 34
 const R_SLOTS: u64 = 35
 const R_SIGNALS: u64 = 36
 const R_NOT_ELF: u64 = 37
+const R_NOMEM: u64 = 38 // px17
 
 /// A refusal code's name ("" when not this module's).
 pub fn why(r: u64) -> str {
@@ -226,6 +242,9 @@ pub fn why(r: u64) -> str {
     }
     if r == R_NOT_ELF {
         return "not a static x86-64 ELF executable PAX runs"
+    }
+    if r == R_NOMEM {
+        return "no frames for a copy of the address space"
     }
     ""
 }
@@ -776,11 +795,15 @@ pub fn execve(f: u64, path: u64, argv: u64, envp: u64) -> u64 {
 // --- clone, clone3, vfork (px14) ------------------------------------------------
 
 /// `clone`, `clone3` or `vfork` (`nr`) from the frame `f`: the frame to
-/// resume — the next thread's while the caller waits for its child, or
-/// `f` with %rax -errno when refused.
-pub fn clone(f: u64, nr: u64, a0: u64, a1: u64) -> u64 {
+/// resume — the next thread's while the caller waits for its vfork
+/// child, `f` with %rax the child's pid after a fork (px17), or `f` with
+/// %rax -errno when refused. `a0`, `a1`, `a2`, `a3`: clone's flags,
+/// stack, parent_tid and child_tid (clone3's come from its struct).
+pub fn clone(f: u64, nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
     var flags: u64 = CLONE_VM | CLONE_VFORK
     var usp: u64 = 0
+    var ptid: u64 = a2
+    var ctid: u64 = a3
     if nr == SYS_CLONE {
         flags = a0 & !CSIGNAL // the exit signal: no delivery yet
         usp = a1
@@ -796,6 +819,8 @@ pub fn clone(f: u64, nr: u64, a0: u64, a1: u64) -> u64 {
             return f
         }
         flags = uaccess.get64(pml4, a0)
+        ctid = uaccess.get64(pml4, a0 + 16)
+        ptid = uaccess.get64(pml4, a0 + 24)
         let stack = uaccess.get64(pml4, a0 + 40)
         let size = uaccess.get64(pml4, a0 + 48)
         if stack != 0 {
@@ -805,10 +830,12 @@ pub fn clone(f: u64, nr: u64, a0: u64, a1: u64) -> u64 {
             put_word(f, W_RAX, refuse_with(R_FLAGS, NEG_EINVAL)) // set_tid
             return f
         }
+    } else {
+        ptid = 0
+        ctid = 0
     }
     if flags & CLONE_VM == 0 {
-        put_word(f, W_RAX, refuse_with(R_FORK, NEG_ENOSYS))
-        return f
+        return fork(f, flags, usp, ptid, ctid)
     }
     if flags & CLONE_VFORK == 0 {
         put_word(f, W_RAX, refuse_with(R_SHARED, NEG_ENOSYS))
@@ -818,15 +845,57 @@ pub fn clone(f: u64, nr: u64, a0: u64, a1: u64) -> u64 {
         put_word(f, W_RAX, refuse_with(R_FLAGS, NEG_EINVAL))
         return f
     }
-    let s = sched.clone_current(f, usp)
+    let s = sched.clone_current(f, usp, 0)
     if s == sched.SLOTS {
         put_word(f, W_RAX, refuse_with(R_SLOTS, NEG_EAGAIN))
         return f
     }
+    files.inherit(sched.proc_area(s)) // px17: shared open files
     if flags & CLONE_CLEAR_SIGHAND != 0 {
         reset_handlers(sched.proc_area(s))
     }
     sched.vfork_wait(f, s)
+}
+
+/// px17: a fork (a clone without CLONE_VM) from the frame `f`: the child
+/// on a copy of the caller's space, both running; `f` with %rax the
+/// child's pid, or -errno.
+fn fork(f: u64, flags: u64, usp: u64, ptid: u64, ctid: u64) -> u64 {
+    let known = CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | CLONE_PARENT_SETTID | CLONE_CLEAR_SIGHAND
+    if flags & !known != 0 {
+        put_word(f, W_RAX, refuse_with(R_FLAGS, NEG_EINVAL))
+        return f
+    }
+    let pml4 = paging.live()
+    if flags & CLONE_PARENT_SETTID != 0 && !uaccess.writable(pml4, ptid, 4) {
+        put_word(f, W_RAX, NEG_EFAULT)
+        return f
+    }
+    let space = paging.copy_user(pml4, sched.pml4())
+    if space == 0 {
+        put_word(f, W_RAX, refuse_with(R_NOMEM, NEG_ENOMEM))
+        return f
+    }
+    let s = sched.clone_current(f, usp, space)
+    if s == sched.SLOTS {
+        let _freed = paging.free_user(space)
+        put_word(f, W_RAX, refuse_with(R_SLOTS, NEG_EAGAIN))
+        return f
+    }
+    let a = sched.proc_area(s)
+    files.inherit(a)
+    if flags & CLONE_CLEAR_SIGHAND != 0 {
+        reset_handlers(a)
+    }
+    let pid = sched.slot_pid(s)
+    if flags & CLONE_CHILD_SETTID != 0 && uaccess.writable(space, ctid, 4) {
+        uaccess.put(space, ctid, pid, 4)
+    }
+    if flags & CLONE_PARENT_SETTID != 0 {
+        uaccess.put(pml4, ptid, pid, 4)
+    }
+    put_word(f, W_RAX, pid)
+    f
 }
 
 // --- wait4, waitid (px14) -------------------------------------------------------
@@ -997,6 +1066,18 @@ pub fn sigaction(sig: u64, act: u64, oldact: u64, size: u64) -> u64 {
         aput(a, w + 3, aget(a, w + 3) & !UNBLOCKABLE)
     }
     0
+}
+
+/// px17: whether a write that met a pipe with no reader ends the writer
+/// with SIGPIPE (13), Linux's default action (`pipe(7)`, `signal(7)`):
+/// yes when SIGPIPE's action is SIG_DFL and it is not blocked — except
+/// for pid 1, which (`kill(2)`) receives only the signals it has a
+/// handler for. Otherwise the write answers -EPIPE; a handler is not
+/// run (PAX delivers no signal to a handler yet: named drift).
+pub fn sigpipe_kills() -> bool {
+    let h = aget(area(), SIG_WORDS + (SIGPIPE - 1) * 4)
+    let blocked = sched.self_sigmask() & (1 << (SIGPIPE - 1)) != 0
+    h == SIG_DFL && !blocked && sched.self_pid() != 1
 }
 
 /// `kill`, `tkill`, `tgkill`: refused by name (no delivery yet).
