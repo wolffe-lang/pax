@@ -25,6 +25,12 @@
 #                    defined and called; exit) through COM1
 #   pelt-eof-serial  pelt-eof.keys (echo hi; Ctrl-D at the prompt)
 #   pelt-eof-ps2     the same through the PS/2 keyboard
+# The ask sessions boot with no display device (tools/qemu-halt
+# --no-screen, px19): `ask tty` prints the terminal's window size, and on
+# a serial-only console that stays px13's (and a Linux serial line's)
+# 0 rows 0 cols; with a screen it is the screen's grid
+# (tests/mpx3-screen). The pelt sessions keep QEMU's display device, so
+# the screen is drawn and the serial transcript must not move.
 # Assertions, per tier (native, release), firmware (bios, uefi) and
 # session:
 #   T0 build: tools/build-kernel's object assertions for kmain_console;
@@ -204,9 +210,10 @@ for leg in $legs; do
                 continue
             fi
             hrc=0
+            screen=(); [ "$p" = ask ] && screen=(--no-screen) # px19: serial only, winsize 0 0
             "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 120 \
                 --elf "$elf" --marker 'halt' --type "$PAX_ROOT/user/console/$(keys_of "$s").keys" \
-                --prompt "$pr" --keyboard "$kb" "$iso" >"$log.verdict" 2>&1 || hrc=$?
+                --prompt "$pr" --keyboard "$kb" ${screen[@]+"${screen[@]}"} "$iso" >"$log.verdict" 2>&1 || hrc=$?
             record "$tier" "$leg" "$s" "$hrc"
             norm=$log.norm; serial_norm "$log" > "$norm"
 
