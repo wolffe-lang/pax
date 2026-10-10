@@ -1,0 +1,329 @@
+#!/usr/bin/env bash
+# tests/mpx3-screen — px19: PAX draws its console on the framebuffer
+# Limine hands it, the same bytes as the serial console, and what is on
+# the screen is what a reference renderer draws from those bytes, pixel
+# for pixel.
+#
+#   tests/mpx3-screen [--images DIR | --no-boot] [--pelt DIR]
+#                     [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# The kernels: kmain_screen (the screen's own test: the scroll's cost by
+# the PIT, then the terminal's pattern — every SGR the screen honours,
+# TAB, BS, CR, the deferred wrap, UTF-8, the sequences it ignores — and
+# halt) and kmain_console (px13's: init from the initramfs on the
+# console, here with the screen attached after paging). The programs, as
+# tests/mpx3-console's: ask (user/elf/ask.S, tools/mkuser; `ask tty`
+# prints the terminal's window size) and pelt (user/pelt.pin,
+# tools/mkpelt), each unmodified. The boots, each headless (QEMU's
+# display device there, shown nowhere; `-vga none` for the serial-only
+# ones), each ending halted, the screen taken from the halted machine
+# with the monitor's `screendump`:
+#   screen         kmain_screen
+#   screen-serial  kmain_screen with no display device
+#   pelt-ps2       kmain_console, pelt as init, user/console/pelt.keys
+#                  typed through the PS/2 keyboard (QEMU's sendkey)
+#   ask-ps2        kmain_console, `ask tty` as init, ask.keys through PS/2
+#   ask-serial     the same with no display device
+# Assertions, per tier (native, release) and firmware (bios, uefi):
+#   V0 build: boot/font.S is what tools/mkfont makes of the vendored BDF
+#      (`tools/mkfont --check`); kmain_screen and kmain_console built;
+#      ask and pelt static; the initramfs and the ISOs built (digests
+#      printed).
+#   V1 the mode: `screen: <W>x<H> 32 bpp pitch <P> rgb 8:16 8:8 8:0 at
+#      0x…, wc (pat 0x…), <n> pages <t> tables; font spleen 8x16,
+#      <C>x<R> cells; <r> bytes replayed, 0 lost` with C = W/8 and R =
+#      H/16 (at most 256 and 128), n = P*H/4096 rounded up, `wc` exactly
+#      when IA32_PAT's entry 5 (bits 47:40 of the value printed) is 0x01;
+#      the screendump is W x H.
+#   V2 the picture: kmain_screen's screendump equals tools/screen-ref's
+#      image of the serial log from `PAX: the screen` on, pixel for pixel
+#      (the font read from font/spleen-8x16.bdf, not boot/font.S).
+#   V3 the scroll's cost: `scroll: 400 lines in <a> ticks without
+#      scrolling, 400 in <b> with <s> scrolls`, 0 < s <= 400 (fewer than
+#      400 when rows were still free as they began), b >= a; the cost of
+#      one scroll, (b - a) * 10 ms / s (the PIT ticks at 99.998 Hz), is
+#      printed: a measurement, no bound.
+#   V4 serial unchanged by the screen: with no display device the third
+#      line is `screen: off, no framebuffer`, and every line of the serial
+#      log from `PAX: the screen` on, the `screen:` and `scroll:` lines
+#      and the pattern's own `screen: <n> bytes` line left out, is
+#      byte-identical (CRs removed) to the screen run's.
+#   V5 a shell on the screen: pelt-ps2 halts after `PAX: init /bin/pelt
+#      ended with status 0`, and its screendump equals tools/screen-ref's
+#      image of its serial log from `PAX: the console` on, pixel for
+#      pixel (what was typed, echoed by the line discipline, and pelt's
+#      prompt and answers, on the screen).
+#   V6 the window size: ask-ps2's screendump equals tools/screen-ref's
+#      image likewise; its `ask: winsize` line is `ask: winsize <R> rows
+#      <C> cols 0` with R and C the screen's grid (the dump's height / 16
+#      and width / 8); ask-serial's is `ask: winsize 0 rows 0 cols 0`
+#      (px13's answer, a serial line's); and the two sessions are
+#      byte-identical otherwise (tests/mpx3-console holds the serial-only
+#      session to Linux's).
+#
+# --images DIR boots what this script built earlier (DIR holds
+# <tier>/kmain_screen.{elf,iso}, <tier>/kmain_console.elf,
+# <tier>/console-{ask,pelt}.iso): any host with QEMU and python3, no
+# wolf. Without it the script builds (linux x86-64); --no-boot stops
+# after V0. --pelt DIR takes pelt from DIR instead of building it.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 peltdir=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --pelt)     peltdir=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "usage: tests/mpx3-screen [--images DIR | --no-boot] [--pelt DIR] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+need readelf python3
+
+work=$PAX_BUILD/mpx3-screen
+runs=$PAX_BUILD/mpx3-screen-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+HEX='0x[0-9a-f]+'
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/ask/root/bin" "$work/ask/root/etc" "$work/pelt/root/bin" "$work/pelt/root/etc"
+    why=
+    if fc=$("$PAX_ROOT/tools/mkfont" --check 2>&1); then
+        say "  font: $fc"
+    else
+        why+=" boot/font.S is not what tools/mkfont makes of the BDF ($fc);"
+    fi
+    if "$PAX_ROOT/tools/mkuser" "$work/user" > "$work/user.txt"; then
+        cp "$work/user/ask" "$work/ask/root/bin/ask"
+    else
+        why+=" tools/mkuser;"
+    fi
+    if [ -n "$peltdir" ]; then
+        cp "$peltdir/pelt" "$work/pelt/root/bin/pelt" || why+=" no $peltdir/pelt;"
+        say "pelt from $peltdir"
+    elif "$PAX_ROOT/tools/mkpelt" "$work/peltbin" > "$work/pelt.txt"; then
+        cp "$work/peltbin/pelt" "$work/pelt/root/bin/pelt"
+    else
+        why+=" tools/mkpelt;"
+    fi
+    for p in ask pelt; do
+        f=$work/$p/root/bin/$p
+        [ -f "$f" ] || { why+=" no bin/$p;"; continue; }
+        r=$(static_ok "$f") || why+=" $r;"
+        say "  program: bin/$p $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+        case $p in ask) echo "/bin/ask tty" ;; *) echo "/bin/pelt" ;; esac > "$work/$p/root/etc/pax-run"
+        if "$PAX_ROOT/tools/mkinitramfs" "$work/$p.cpio" "/bin/$p=$f" "/etc/pax-run=$work/$p/root/etc/pax-run" > "$work/$p.initramfs.txt"; then
+            sed "s/^/  initramfs $p: /" "$work/$p.initramfs.txt" >&2
+        else
+            why+=" tools/mkinitramfs $p;"
+        fi
+    done
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        for k in kmain_screen kmain_console; do
+            log=$work/$tier/$k.build-kernel.log
+            if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/$k.lu" "$work/$tier" 2>"$log"); then
+                cat "$log" >&2
+                if [ "$k" = kmain_screen ]; then
+                    "$PAX_ROOT/tools/mkimage" "$elf" "$work/$tier/kmain_screen.iso" >/dev/null || why+=" $tier kmain_screen: mkimage;"
+                    say "built $tier kmain_screen: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/kmain_screen.iso")"
+                else
+                    for p in ask pelt; do
+                        "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                            --add "$work/$p.cpio" initramfs.cpio "$elf" "$work/$tier/console-$p.iso" >/dev/null \
+                            || why+=" $tier console-$p: mkimage;"
+                        say "built $tier console-$p: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/console-$p.iso")"
+                    done
+                fi
+            else
+                cat "$log" >&2
+                why+=" $tier $k: tools/build-kernel;"
+            fi
+        done
+    done
+    [ -z "$why" ] && say "PASS V0: font table checked; kmain_screen and kmain_console built ($tiers); ask and pelt static; the ISOs built" || bad "V0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx3-screen build (V0): PASS (no boot: --no-boot)" || say "mpx3-screen build: FAIL"
+        exit "$fail"
+    fi
+fi
+
+record() { # tier leg run status
+    ran=$((ran + 1))
+    printf '%s %s %s halt-status=%s accel=%s serial=%s dump=%s iso=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" \
+        "$( [ -f "$dump" ] && sha256_of "$dump" || echo none)" "$(sha256_of "$iso")" >> "$runs"
+}
+
+# boot RUN ELF ISO [qemu-halt options...]: boots into $log, the screen into $dump.
+boot() {
+    local r=$1 e=$2 i=$3; shift 3
+    log=$PAX_BUILD/mpx3-screen-$tier-$leg-$r.serial.log
+    dump=$PAX_BUILD/mpx3-screen-$tier-$leg-$r.ppm
+    iso=$i
+    rm -f "$log" "$log.verdict" "$dump"
+    hrc=0
+    "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 180 \
+        --elf "$e" --marker 'halt' --cmd "screendump $dump" "$@" "$i" >"$log.verdict" 2>&1 || hrc=$?
+    record "$tier" "$leg" "$r" "$hrc"
+    norm=$log.norm; serial_norm "$log" > "$norm"
+}
+
+dump_size() { # PPM -> WxH (the header's second and third fields)
+    python3 -c 'import sys; d=open(sys.argv[1],"rb").read(64).split(); print("%sx%s" % (d[1].decode(), d[2].decode()))' "$1" 2>/dev/null
+}
+
+# compare ID FROM: the screen against tools/screen-ref; reason on failure.
+compare() {
+    local id=$1 from=$2 size out
+    [ -f "$dump" ] || { echo " no screendump ($id);"; return 1; }
+    size=$(dump_size "$dump")
+    [ -n "$size" ] || { echo " the screendump is not a PPM;"; return 1; }
+    if out=$(python3 "$PAX_ROOT/tools/screen-ref" --from "$from" --size "$size" \
+        --out "${dump%.ppm}.ref.ppm" --grid "${dump%.ppm}.grid.txt" --compare "$dump" "$log" 2>&1); then
+        printf '%s\n' "$out" | sed -n 's/^screen-ref: IDENTICAL: //p' | sed 's/^.*equals/equals/'
+        return 0
+    fi
+    echo " $(printf '%s' "$out" | tr '\n' ' ');"
+    return 1
+}
+
+session() { # serial norm -> the session's lines (as tests/mpx3-console's T2)
+    awk '/^user: exec pid / { on = 1; next } on && /^user: [^ ]+ pid [0-9]+ (exit_group|exit) [0-9]+ after / { exit } on && !/^user: / { print }' "$1"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        selft=$images/$tier/kmain_screen.elf conelf=$images/$tier/kmain_console.elf
+        if [ ! -f "$selft" ] || [ ! -f "$conelf" ]; then
+            for t in V1 V2 V3 V4 V5 V6; do bad "$t $tier $leg: no image"; done
+            continue
+        fi
+
+        # --- screen: V1, V2, V3 -------------------------------------------
+        id="$tier $leg screen"
+        boot screen "$selft" "$images/$tier/kmain_screen.iso"
+        sn=$norm slog=$log sdump=$dump shrc=$hrc
+        why=
+        sl=$(grep -m1 '^screen: [0-9]' "$sn")
+        re="^screen: ([0-9]+)x([0-9]+) 32 bpp pitch ([0-9]+) rgb 8:16 8:8 8:0 at $HEX, (wc|uc) \\(pat ($HEX)\\), ([0-9]+) pages ([0-9]+) tables; font spleen 8x16, ([0-9]+)x([0-9]+) cells; ([0-9]+) bytes replayed, 0 lost\$"
+        if [[ $sl =~ $re ]]; then
+            W=${BASH_REMATCH[1]} H=${BASH_REMATCH[2]} P=${BASH_REMATCH[3]} cm=${BASH_REMATCH[4]} pat=${BASH_REMATCH[5]}
+            pg=${BASH_REMATCH[6]} C=${BASH_REMATCH[8]} R=${BASH_REMATCH[9]}
+            ec=$((W / 8)); [ "$ec" -gt 256 ] && ec=256
+            er=$((H / 16)); [ "$er" -gt 128 ] && er=128
+            [ "$C" = "$ec" ] && [ "$R" = "$er" ] || why+=" ${C}x$R cells, not ${ec}x$er;"
+            [ "$pg" = $(( (P * H + 4095) / 4096 )) ] || why+=" $pg pages for $P x $H bytes;"
+            wcwant=uc; [ $(( (pat >> 40) & 0xff )) = 1 ] && wcwant=wc
+            [ "$cm" = "$wcwant" ] || why+=" mapped $cm with IA32_PAT $pat (entry 5 says $wcwant);"
+            [ "$(dump_size "$sdump")" = "${W}x$H" ] || why+=" the screendump is '$(dump_size "$sdump")', not ${W}x$H;"
+        else
+            why+=" no screen line as expected ('$sl');"
+            W=0 H=0
+        fi
+        [ "$shrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$slog.verdict"));"
+        [ -z "$why" ] && say "PASS V1 $id: $sl" || bad "V1 $id:$why"
+
+        why=
+        if [ "$W" != 0 ]; then
+            r=$(compare "$id" 'PAX: the screen') || why+="$r"
+        else
+            why+=" no mode to draw;"
+        fi
+        [ -z "$why" ] && say "PASS V2 $id: the screendump $r ($(sha256_of "$sdump" | cut -c1-12)…)" || bad "V2 $id:$why"
+
+        why=
+        cl=$(grep -m1 '^scroll: ' "$sn")
+        if [[ $cl =~ ^scroll:\ 400\ lines\ in\ ([0-9]+)\ ticks\ without\ scrolling,\ 400\ in\ ([0-9]+)\ with\ ([0-9]+)\ scrolls$ ]]; then
+            a=${BASH_REMATCH[1]} b=${BASH_REMATCH[2]} s=${BASH_REMATCH[3]}
+            [ "$b" -ge "$a" ] || why+=" fewer ticks with scrolling ($b) than without ($a);"
+            [ "$s" -gt 0 ] && [ "$s" -le 400 ] || why+=" $s scrolls;"
+            cost=$(awk -v a="$a" -v b="$b" -v s="$s" 'BEGIN { if (s > 0) printf "%.2f", (b - a) * 10 / s; else print "n/a" }')
+        else
+            why+=" no scroll line ('$cl');"
+        fi
+        [ -z "$why" ] && say "PASS V3 $id: $cl: $cost ms a scrolled line ($(sed -n 's/^accel: //p' "$slog.meta"))" || bad "V3 $id:$why"
+
+        # --- screen-serial: V4 ----------------------------------------------
+        id="$tier $leg screen-serial"
+        boot screen-serial "$selft" "$images/$tier/kmain_screen.iso" --no-screen
+        why=
+        grep -qx 'screen: off, no framebuffer' "$norm" || why+=" no 'screen: off, no framebuffer' ($(grep -m1 '^screen: ' "$norm"));"
+        strip() { awk '/^PAX: the screen$/ { on = 1 } on && !/^screen: / && !/^scroll: / { print }' "$1"; }
+        strip "$sn" > "$log.cut"; strip "$norm" > "$log.cut.other"
+        cmp -s "$log.cut" "$log.cut.other" || why+=" the serial differs: $(diff "$log.cut" "$log.cut.other" | head -n 6 | tr '\n' '|');"
+        [ "$(wc -l < "$log.cut" | tr -d ' ')" -gt 400 ] || why+=" a short log;"
+        [ "$hrc" = 0 ] || why+=" not halted;"
+        [ -z "$why" ] && say "PASS V4 $id: no framebuffer; $(wc -l < "$log.cut" | tr -d ' ') serial lines byte-identical to the screen run's ($(sha256_of "$log.cut" | cut -c1-12)…)" || bad "V4 $id:$why"
+
+        # --- pelt-ps2: V5 ---------------------------------------------------
+        id="$tier $leg pelt-ps2"
+        boot pelt-ps2 "$conelf" "$images/$tier/console-pelt.iso" --type "$PAX_ROOT/user/console/pelt.keys" --prompt '$ ' --keyboard ps2
+        why=
+        grep -qx 'PAX: init /bin/pelt ended with status 0; nothing left to run' "$norm" || why+=" pelt did not end with status 0 ($(grep -m1 '^PAX: init ' "$norm"));"
+        [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+        r=$(compare "$id" 'PAX: the console') || why+="$r"
+        [ -z "$why" ] && say "PASS V5 $id: pelt typed through PS/2; the screendump $r ($(sha256_of "$dump" | cut -c1-12)…)" || bad "V5 $id:$why"
+
+        # --- ask-ps2 and ask-serial: V6 -------------------------------------
+        id="$tier $leg ask"
+        boot ask-ps2 "$conelf" "$images/$tier/console-ask.iso" --type "$PAX_ROOT/user/console/ask.keys" --prompt '> ' --keyboard ps2
+        an=$norm ahrc=$hrc
+        why=
+        r=$(compare "$id ps2" 'PAX: the console') || why+="$r"
+        sz=$(dump_size "$dump"); dw=${sz%x*} dh=${sz#*x}
+        want="ask: winsize $(( ${dh:-0} / 16 )) rows $(( ${dw:-0} / 8 )) cols 0"
+        got=$(grep -m1 '^ask: winsize ' "$an")
+        [ "$got" = "$want" ] || why+=" with the screen '$got', not '$want';"
+        [ "$ahrc" = 0 ] || why+=" ask-ps2 not halted;"
+        session "$an" > "$log.session"
+        aslog=$log
+        boot ask-serial "$conelf" "$images/$tier/console-ask.iso" --type "$PAX_ROOT/user/console/ask.keys" --prompt '> ' --keyboard ps2 --no-screen
+        got0=$(grep -m1 '^ask: winsize ' "$norm")
+        [ "$got0" = "ask: winsize 0 rows 0 cols 0" ] || why+=" serial-only '$got0', not 'ask: winsize 0 rows 0 cols 0';"
+        [ "$hrc" = 0 ] || why+=" ask-serial not halted;"
+        session "$norm" > "$log.session"
+        if ! diff <(grep -v '^ask: winsize ' "$aslog.session") <(grep -v '^ask: winsize ' "$log.session") >/dev/null; then
+            why+=" the sessions differ beyond the winsize line: $(diff "$aslog.session" "$log.session" | head -n 6 | tr '\n' '|');"
+        fi
+        [ "$(wc -l < "$log.session" | tr -d ' ')" -gt 5 ] || why+=" a short session;"
+        [ -z "$why" ] && say "PASS V6 $id: '$got' on the screen, '$got0' serial-only, the rest byte-identical ($(wc -l < "$log.session" | tr -d ' ') lines); the screendump $r" || bad "V6 $id:$why"
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx3-screen: PASS" || say "mpx3-screen: FAIL"
+exit "$fail"
