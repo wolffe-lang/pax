@@ -36,6 +36,12 @@
 #                 called, wc /etc/motd, an unknown name, echo $?, Ctrl-D
 #   shell-howl-quiet  the same keys on the quiet image; its Linux
 #                 reference is shell-howl's
+#   shell-plumb   user/console/shell-plumb.keys through COM1 (px17):
+#                 pelt's H2 — a pipeline, a redirection to /dev/null,
+#                 cd and a relative open, pwd, a group redirected from a
+#                 file whose two children share its offset, a redirected
+#                 stdin, a pipeline in the working directory, cd's
+#                 errors, cd .., Ctrl-D
 #   procs         nothing typed: procs runs to its end
 #   procs-quiet   procs on the quiet image (its refusals and the fault
 #                 it causes still print); its reference is procs'
@@ -45,7 +51,8 @@
 #      PT_INTERP); both initramfs and the four ISOs built (digests printed);
 #      the Linux side ran every session (tools/linux-tty --root --pid1).
 #   S1 processes: init is pid 1; every program it started has its own
-#      `user: exec pid <n>` line, n = 2, 3, … in order, and its own exit
+#      `user: exec pid <n>` line, n rising from 1 (px17: a fork child
+#      that never execs takes a pid too, so a gap is allowed), and its own exit
 #      line (`user: <name> pid <n> exit_group <s>` or `killed:`); the
 #      frames line after init's end shows every frame back (A before, A
 #      after); no `user: quiet` line. On the quiet image instead (Q):
@@ -74,6 +81,9 @@
 #      user/console/shell-howl.expect, byte for byte (CRs removed): the
 #      motd, ten names in /bin, 42, awwwwwooo!, ` 1 12 77 /etc/motd`,
 #      `pelt: line 7: teleport: not found`, 127. S2 holds PAX to it.
+#      shell-plumb (px17) likewise: user/console/shell-plumb.expect (10,
+#      the motd, /etc, the six words once each, 1, motd and pax-run, 77,
+#      cd's two refusals, 2, /).
 #
 # --images DIR boots what this script built earlier (DIR holds
 # <tier>/kmain_console.elf, <tier>/console-{shell,procs}.iso and
@@ -108,11 +118,11 @@ case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier
 need readelf python3
 
 BORE="cat echo false head ls sleep tail true wc"
-SESSIONS="shell-serial shell-ps2 shell-howl shell-howl-quiet procs procs-quiet"
-LINUX_SESSIONS="shell-serial shell-ps2 shell-howl procs" # a -quiet session's reference is its namesake's
+SESSIONS="shell-serial shell-ps2 shell-howl shell-howl-quiet shell-plumb procs procs-quiet"
+LINUX_SESSIONS="shell-serial shell-ps2 shell-howl shell-plumb procs" # a -quiet session's reference is its namesake's
 image_of() { case $1 in procs) echo procs ;; procs-quiet) echo procs-quiet ;; *-quiet) echo shell-quiet ;; *) echo shell ;; esac; }
 init_of() { case $1 in procs*) echo procs ;; *) echo pelt ;; esac; }
-keys_of() { case $1 in shell-serial) echo "$PAX_ROOT/user/console/shell.keys" ;; shell-ps2) echo "$PAX_ROOT/user/console/shell-ps2.keys" ;; shell-howl*) echo "$PAX_ROOT/user/console/shell-howl.keys" ;; *) echo "$images/procs.keys" ;; esac; }
+keys_of() { case $1 in shell-serial) echo "$PAX_ROOT/user/console/shell.keys" ;; shell-ps2) echo "$PAX_ROOT/user/console/shell-ps2.keys" ;; shell-howl*) echo "$PAX_ROOT/user/console/shell-howl.keys" ;; shell-plumb) echo "$PAX_ROOT/user/console/shell-plumb.keys" ;; *) echo "$images/procs.keys" ;; esac; }
 kbd_of() { case $1 in *-ps2) echo ps2 ;; *) echo serial ;; esac; }
 linux_of() { case $1 in *-quiet) echo "${1%-quiet}" ;; *) echo "$1" ;; esac; }
 quiet_of() { case $1 in *-quiet) echo 1 ;; *) echo 0 ;; esac; }
@@ -164,6 +174,7 @@ if [ -z "$images" ]; then
         cp "$boredir/$u" "$sh/bin/$u" || why+=" no $boredir/$u;"
     done
     printf '%s\n' "$SHELL_MOTD" > "$sh/etc/motd"
+    printf 'alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\n' > "$sh/etc/words" # px17: shell-plumb's group
     printf '%s\n' "$MOTD" > "$pr/etc/motd"
     printf 'echo this file is text with execute bits, not a program PAX or Linux can run\n' > "$pr/etc/script"
     chmod 755 "$pr/etc/script"
@@ -287,9 +298,10 @@ for leg in $legs; do
             [ "$nq" = 0 ] || why+=" a 'user: quiet' line without quiet on the command line;"
             execs=$(sed -n -E 's/^user: exec pid ([0-9]+) cr3 .*/\1/p' "$norm" | paste -sd' ' -)
             n=$(printf '%s\n' $execs | wc -l | tr -d ' ')
-            want=$(seq 1 "$n" | paste -sd' ' -)
             [ "$n" -ge 2 ] || why+=" fewer than two programs ran ('$execs');"
-            [ "$execs" = "$want" ] || why+=" exec pids '$execs', not '$want';"
+            # px17: rising from 1 (a fork child that never execs takes a pid).
+            printf '%s\n' $execs | awk 'NR == 1 && $1 != 1 { bad = 1 } NR > 1 && $1 <= last { bad = 1 } { last = $1 } END { exit bad }' \
+                || why+=" exec pids '$execs' do not rise from 1;"
             for k in $execs; do
                 grep -Eq "^user: [^ ]+ pid $k (exit_group [0-9]+|exit [0-9]+|killed: .*) after [0-9]+ runs$" "$norm" || why+=" no end line for pid $k;"
             done
@@ -364,11 +376,12 @@ for leg in $legs; do
             [ -z "$why" ] && say "PASS S5 $id: init ended, status $lst; $(tail -n 1 "$log.verdict")" || bad "S5 $id:$why"
 
             # S6: what the brief's session says, on Linux (S2 holds PAX to it).
-            case $s in shell-howl*)
-                if cmp -s "$PAX_ROOT/user/console/shell-howl.expect" "$out.linux"; then
-                    say "PASS S6 $id: Linux's transcript is user/console/shell-howl.expect ($(sha256_of "$out.linux" | cut -c1-12)…)"
+            case $s in shell-howl*|shell-plumb)
+                ex=$PAX_ROOT/user/console/${ls}.expect
+                if cmp -s "$ex" "$out.linux"; then
+                    say "PASS S6 $id: Linux's transcript is user/console/${ls}.expect ($(sha256_of "$out.linux" | cut -c1-12)…)"
                 else
-                    bad "S6 $id: Linux's transcript is not user/console/shell-howl.expect: $(diff "$PAX_ROOT/user/console/shell-howl.expect" "$out.linux" | head -n 12 | tr '\n' '|')"
+                    bad "S6 $id: Linux's transcript is not user/console/${ls}.expect: $(diff "$ex" "$out.linux" | head -n 12 | tr '\n' '|')"
                 fi ;;
             esac
         done
