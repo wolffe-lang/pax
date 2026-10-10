@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # pcap-net — hold a capture of the network test kernel's exchange to the
-# frames it must contain, byte by byte (px20, tests/mpx4-net).
+# frames it must contain, byte by byte (px20, px21; tests/mpx4-net).
 #
-#   tools/pcap-net [--pax MAC] [--gw MAC] [--pax-ip A.B.C.D] [--gw-ip A.B.C.D]
-#                  [--soak N] [--small N] [--large N] [--list K] FILE.pcap
+#   tools/pcap-net [--small N] [--large N] [--list K] FILE.pcap
 #
 # FILE.pcap is what QEMU's `-object filter-dump,netdev=…,file=…` wrote:
 # the classic pcap format (a 24-byte header, magic 0xa1b2c3d4 in the
@@ -11,58 +10,62 @@
 # record header and the frame, without a checksum), every frame that
 # crossed the netdev, in order, both ways.
 #
-# kernel/kmain_net.lu's run must be exactly this conversation, and
-# nothing else:
+# The checker knows no script. It reads the capture once, in order, with
+# a model of what PAX must do (tools/paxnet.py, written from the RFCs):
+# every frame that reaches PAX is judged by the model — which recomputes
+# every IP header checksum and every ICMP checksum — and either obliges
+# PAX to a frame or to silence; every frame PAX sends must be one the
+# model obliges or allows, and is rebuilt from its meaning and compared
+# with the capture **byte for byte**:
 #
-#   1. the gateway asks for PAX's address (an ARP request, broadcast,
-#      the first frame), and PAX's very next frame is the reply;
-#   2. PAX asks for the gateway's address and the gateway replies:
-#      once to resolve it, then --soak times, request and reply
-#      strictly alternating;
-#   3. --small frames of 60 bytes, then --large of 1514, from PAX to
-#      the gateway, type 0x88b5, bytes 14-17 the frame's number
-#      (big-endian) and every byte k after them (k * 7) & 0xff;
-#   0. before any of it, whatever the firmware sent while it had the
-#      device (OVMF's own driver announces an IPv6 address on some
-#      boots): every frame before the gateway's request is counted and
-#      printed as the firmware's, and none may be an ARP frame or a
-#      burst frame. The caller holds PAX's own count of frames sent to
-#      the count from 1 on, so a frame here is not one PAX sent;
-#   and, anywhere after 1's request, IPv4 frames from the gateway to
-#   PAX (the test's UDP datagrams to port 7, which made the gateway
-#   ask): each must be a UDP datagram to port 7 for PAX's address.
+#   an ARP request     60 bytes: RFC 826's 42, PAX's addresses as the
+#                      sender, the target hardware address zero, padded
+#                      with zeros
+#   an ARP reply       60 bytes, to the oldest request for PAX's address
+#                      still unanswered, and to nobody else
+#   an echo request    identifier 0x5058, a sequence number above the
+#                      last, data byte k = 7k mod 256
+#   an echo reply      to the oldest echo request still unanswered: the
+#                      request's ICMP message with type 0 and the
+#                      checksum recomputed
+#   a destination      (type 3, code 2) for a datagram of an unknown
+#   unreachable        protocol not yet answered, quoting its header and
+#                      up to 8 data bytes; the ones passed over were
+#                      held back by the limit and are counted so
+#   every datagram     version 4, IHL 5, DF, time to live 64, protocol
+#                      1, from 10.0.2.15, its header checksum right, its
+#                      identification above the last one (the gaps are
+#                      datagrams that never reached the wire: counted),
+#                      in a frame for the hardware address its next hop
+#                      (the destination on 10.0.2.0/24, else 10.0.2.2)
+#                      last announced in an ARP packet
+#   type 0x88b5        the kernel's ready frame, or burst frames: --small
+#                      of 60 bytes then --large of 1514, bytes 14-17 the
+#                      frame's number and byte k after them 7k mod 256
 #
-# PAX's frames are held to their exact bytes and length (60 for ARP:
-# RFC 826's 42 bytes, zero-padded by kernel/net). The gateway's ARP
-# frames are held to their first 42 bytes exactly and to zeros after
-# them, whatever their length: the padding is QEMU's (a request of 60
-# bytes and replies of 64 on QEMU 11.1; a request of 42, unpadded, on
-# 8.2.2), and the lengths seen are printed.
+# and nothing else — but, before the kernel's first frame, whatever the
+# firmware sent while it had the device (OVMF's own driver announces an
+# IPv6 address on some boots; counted and printed). At the capture's end
+# no echo request and no ARP request for PAX may be left unanswered.
 #
-# Prints what it found and, last, `pcap-net: PASS …` or `pcap-net: FAIL
-# <the first frame that is wrong, with the expected and found bytes>`.
-# --list K also prints the first K frames in hex. Exit 0 on PASS, 1 on
-# FAIL, 2 on a usage or format error.
+# What the model made of the frames that reached PAX is printed as
+# counts under the kernel's own counter names (`ip.checksum=1`), for the
+# caller to hold against the kernel's counters.
+#
+# Prints what it found and, last, `pcap-net: PASS <counts>` or `pcap-net:
+# FAIL <the first frame that is wrong, with the expected and found
+# bytes>`. --list K also prints the first K frames in hex. Exit 0 on
+# PASS, 1 on FAIL, 2 on a usage or format error.
 #
 # Written from the pcap file format as the libpcap documentation
-# (pcap-savefile(5)) gives it, RFC 826, RFC 894, RFC 791 and RFC 768
-# (the IPv4 and UDP headers' fixed fields). No network stack's source.
+# (pcap-savefile(5)) gives it and the RFCs tools/paxnet.py names. No
+# network stack's source.
+import os
 import struct
 import sys
 
-
-def mac(text):
-    b = bytes(int(x, 16) for x in text.split(":"))
-    if len(b) != 6:
-        raise ValueError(text)
-    return b
-
-
-def ip(text):
-    b = bytes(int(x) for x in text.split("."))
-    if len(b) != 4:
-        raise ValueError(text)
-    return b
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import paxnet as px  # noqa: E402
 
 
 def die(msg):
@@ -97,13 +100,17 @@ def frames_of(path):
     return out
 
 
-def arp(dst, src, op, sha, spa, tha, tpa):
-    return dst + src + b"\x08\x06" + b"\x00\x01\x08\x00\x06\x04" + bytes([0, op]) + sha + spa + tha + tpa
+CAUSES = ["ip.short", "ip.version", "ip.ihl", "ip.checksum", "ip.length", "ip.ttl", "ip.fragment", "ip.source",
+          "ip.option", "ip.source-route", "ip.other", "icmp.short", "icmp.checksum", "icmp.broadcast", "icmp.type"]
+KEYS = (["from-pax", "to-pax", "before", "net.type", "net.other", "arp.requests-out", "arp.replies-out", "arp.request",
+         "arp.reply", "arp.bad", "arp.conflict", "arp.other", "ip.delivered", "ip.with-options", "ip.broadcast",
+         "ip.protocol", "ip.out", "ident-gaps"] + CAUSES +
+        ["icmp.echo", "icmp.replies-out", "icmp.requests-out", "icmp.matched", "icmp.stray", "unreachable.sent",
+         "unreachable.limited", "unreachable.silent", "markers", "burst.small", "burst.large", "checksums"])
 
 
 def main(argv):
-    opt = {"pax": "52:54:00:12:34:56", "gw": "52:55:0a:00:02:02", "pax-ip": "10.0.2.15",
-           "gw-ip": "10.0.2.2", "soak": "10000", "small": "20000", "large": "5000", "list": "0"}
+    opt = {"small": "0", "large": "0", "list": "0"}
     path = None
     i = 0
     while i < len(argv):
@@ -112,16 +119,14 @@ def main(argv):
             opt[a[2:]] = argv[i + 1]
             i += 2
         elif a.startswith("--") or path is not None:
-            die("usage: pcap-net [--pax MAC] [--gw MAC] [--pax-ip IP] [--gw-ip IP] [--soak N] [--small N] [--large N] [--list K] FILE.pcap")
+            die("usage: pcap-net [--small N] [--large N] [--list K] FILE.pcap")
         else:
             path = a
             i += 1
     if path is None:
         die("no capture file")
     try:
-        pax, gw = mac(opt["pax"]), mac(opt["gw"])
-        pax_ip, gw_ip = ip(opt["pax-ip"]), ip(opt["gw-ip"])
-        soak, small, large, show = int(opt["soak"]), int(opt["small"]), int(opt["large"]), int(opt["list"])
+        small, large, show = int(opt["small"]), int(opt["large"]), int(opt["list"])
     except ValueError as x:
         die("bad argument: %s" % x)
 
@@ -129,103 +134,192 @@ def main(argv):
     for n, f in enumerate(fs[:show]):
         print("frame %d: %d bytes %s" % (n, len(f), f.hex()))
 
-    bcast = b"\xff" * 6
-    zero = b"\x00" * 6
-    gw_request = arp(bcast, gw, 1, gw, gw_ip, zero, pax_ip)
-    pax_reply = arp(gw, pax, 2, pax, pax_ip, gw, gw_ip).ljust(60, b"\x00")
-    pax_request = arp(bcast, pax, 1, pax, pax_ip, zero, gw_ip).ljust(60, b"\x00")
-    gw_reply = arp(pax, gw, 2, gw, gw_ip, pax, pax_ip)
-    pattern = bytes((k * 7) & 0xff for k in range(1514))
-
-    def burst_frame(seq, length):
-        f = bytearray(gw + pax + b"\x88\xb5" + pattern[14:length])
-        f[14:18] = struct.pack(">I", seq)
-        return bytes(f)
+    c = dict((k, 0) for k in KEYS)
+    lengths = {}
 
     def fail(n, what, want=None):
         print("pcap-net: FAIL frame %d of %d: %s" % (n, len(fs), what))
         if n < len(fs):
-            print("  found    %d bytes %s" % (len(fs[n]), fs[n][:96].hex()))
+            print("  found    %d bytes %s" % (len(fs[n]), fs[n][:120].hex()))
         if want is not None:
-            print("  expected %d bytes %s" % (len(want), want[:96].hex()))
+            print("  expected %d bytes %s" % (len(want), want[:120].hex()))
         sys.exit(1)
 
-    def from_gateway(n, f, want, name):
-        # The gateway's ARP frame: 42 exact bytes, then zeros if anything.
-        if f[:42] != want or any(f[42:]):
-            fail(n, "not the gateway's %s (42 bytes exact, zeros after them)" % name, want)
+    pattern = px.pattern(1514)
 
-    def is_poke(f):
-        # An IPv4 UDP datagram from the gateway to PAX's port 7.
-        return (len(f) >= 42 and f[:6] == pax and f[6:12] == gw and f[12:14] == b"\x08\x00"
-                and f[14] == 0x45 and f[23] == 17 and f[26:30] == gw_ip and f[30:34] == pax_ip
-                and f[36:38] == b"\x00\x07")
+    def burst_frame(to, seq, length):
+        f = bytearray(to + px.PAX_MAC + px.EXPERIMENTAL + pattern[14:length])
+        f[14:18] = struct.pack(">I", seq)
+        return bytes(f)
 
-    n = 0
-    pokes = 0
-    lengths = {}
+    claims = {}       # protocol address -> the hardware address it last announced
+    askers = []       # (hardware, protocol) of each request for PAX's address not yet answered
+    echoes = []       # (frame, ihl, total) of each echo request to PAX not yet answered
+    errors = []       # (frame, ihl, total) of each unknown-protocol datagram not yet answered
+    awaited = None    # [dst, seq, data bytes, answered] of PAX's last echo request on the wire
+    last_ident = None
+    last_seq = 0
+    started = False   # PAX's kernel has sent a frame
 
-    def skip_pokes():
-        nonlocal n, pokes
-        while n < len(fs) and is_poke(fs[n]):
-            pokes += 1
-            n += 1
+    for n, f in enumerate(fs):
+        if len(f) < 14:
+            fail(n, "a frame shorter than its header")
+        kind = f[12:14]
+        if f[6:12] == px.PAX_MAC:
+            # ---- a frame PAX's station sent -------------------------------
+            if kind not in (b"\x08\x06", b"\x08\x00", px.EXPERIMENTAL):
+                if started:
+                    fail(n, "a frame of type %s from PAX's address after the kernel's first" % kind.hex())
+                print("before the kernel: frame %d: %d bytes, type %s: %s" % (n, len(f), kind.hex(), f[:96].hex()))
+                c["before"] += 1
+                continue
+            started = True
+            c["from-pax"] += 1
+            if kind == b"\x08\x06":
+                if len(f) >= 42 and px.be16(f, 20) == 1:
+                    want = px.pax_arp_request(f[38:42])
+                    if f != want:
+                        fail(n, "not PAX's ARP request for %s, byte for byte" % px.dotted(f[38:42]), want)
+                    c["arp.requests-out"] += 1
+                else:
+                    if not askers:
+                        fail(n, "an ARP reply from PAX with no request for its address unanswered")
+                    hw, pa = askers.pop(0)
+                    want = px.pax_arp_reply(hw, pa)
+                    if f != want:
+                        fail(n, "not PAX's ARP reply to %s (%s), byte for byte" % (px.dotted(pa), hw.hex(":")), want)
+                    c["arp.replies-out"] += 1
+                continue
+            if kind == px.EXPERIMENTAL:
+                if f == px.MARKER:
+                    c["markers"] += 1
+                    continue
+                which = "burst.small" if len(f) == 60 else "burst.large"
+                want = burst_frame(f[:6], c[which], 60 if which == "burst.small" else 1514)
+                if f != want or (which == "burst.small" and c["burst.large"]):
+                    fail(n, "not the ready frame, nor burst frame %d of its size, byte for byte" % c[which], want)
+                if claims.get(px.GW_IP) != f[:6]:
+                    fail(n, "a burst frame for a hardware address the gateway did not announce")
+                c[which] += 1
+                continue
+            # A datagram.
+            if len(f) < 42 or f[14] != 0x45:
+                fail(n, "a datagram from PAX that is not version 4 with a 20-byte header")
+            h = f[14:]
+            total = px.be16(h, 2)
+            ident = px.be16(h, 4)
+            dst = h[16:20]
+            if 14 + total > len(f) or total < 28:
+                fail(n, "a datagram from PAX whose total length (%d) is not its frame's" % total)
+            if last_ident is not None and ident <= last_ident:
+                fail(n, "PAX's identification went from %d to %d" % (last_ident, ident))
+            c["ident-gaps"] += ident - (last_ident + 1 if last_ident is not None else 0)
+            last_ident = ident
+            c["ip.out"] += 1
+            c["checksums"] += 2
+            if px.is_broadcast(dst):
+                to = px.BCAST
+            else:
+                to = claims.get(px.next_hop(dst))
+                if to is None:
+                    fail(n, "a datagram for %s, whose next hop %s announced no hardware address" % (px.dotted(dst), px.dotted(px.next_hop(dst))))
+            m = h[20:total]
+            if m[0] == 8:
+                seq = px.be16(m, 6)
+                want = px.echo_request_from_pax(dst, seq, total - 28, ident, to)
+                if f != want or seq <= last_seq:
+                    fail(n, "not an echo request from PAX (sequence %d after %d, %d data bytes) for %s by way of %s, byte for byte"
+                         % (seq, last_seq, total - 28, px.dotted(dst), to.hex(":")), want)
+                last_seq = seq
+                awaited = [dst, seq, total - 28, False]
+                c["icmp.requests-out"] += 1
+            elif m[0] == 0:
+                if not echoes:
+                    fail(n, "an echo reply from PAX with no echo request unanswered")
+                rf, rihl, rtotal = echoes.pop(0)
+                want = px.echo_reply_to(rf, rihl, rtotal, ident, to)
+                if f != want:
+                    fail(n, "not PAX's reply to the oldest unanswered echo request (from %s), byte for byte" % px.dotted(rf[26:30]), want)
+                c["icmp.replies-out"] += 1
+            elif m[0] == 3:
+                hit = None
+                for k, (ef, eihl, etotal) in enumerate(errors):
+                    want = px.unreachable_for(ef, eihl, etotal, ident, to)
+                    if f == want:
+                        hit = k
+                        break
+                if hit is None:
+                    fail(n, "a destination unreachable from PAX that quotes no unanswered datagram of an unknown protocol, byte for byte",
+                         px.unreachable_for(errors[0][0], errors[0][1], errors[0][2], ident, to) if errors else None)
+                c["unreachable.limited"] += hit
+                del errors[:hit + 1]
+                c["unreachable.sent"] += 1
+            else:
+                fail(n, "an ICMP message of type %d from PAX" % m[0])
+            continue
 
-    def need(what):
-        if n >= len(fs):
-            fail(n, "the capture ends before %s" % what)
+        # ---- a frame somebody else sent ----------------------------------
+        if f[:6] != px.PAX_MAC and not f[0] & 1:
+            c["net.other"] += 1  # for another station
+            continue
+        c["to-pax"] += 1
+        lengths[len(f)] = lengths.get(len(f), 0) + 1
+        if kind == b"\x08\x06":
+            verdict, teaches = px.judge_arp(f)
+            c["arp." + verdict] += 1
+            if teaches:
+                claims[f[28:32]] = f[22:28]
+            if verdict == "request":
+                askers.append((f[22:28], f[28:32]))
+            continue
+        if kind != b"\x08\x00":
+            c["net.type"] += 1
+            continue
+        verdict, ihl, total = px.judge_ip(f)
+        c["checksums"] += 1
+        if verdict in CAUSES:
+            c[verdict] += 1
+        if not verdict.startswith("ip."):
+            # The header passed.
+            if ihl > 20:
+                c["ip.with-options"] += 1
+            if px.is_broadcast(f[30:34]):
+                c["ip.broadcast"] += 1
+            if verdict in ("unreachable", "silent"):
+                c["ip.protocol"] += 1
+            else:
+                c["ip.delivered"] += 1
+                c["checksums"] += 1
+        if verdict == "echo":
+            echoes.append((f, ihl, total))
+            c["icmp.echo"] += 1
+        elif verdict == "reply":
+            m = f[14 + ihl:14 + total]
+            if (awaited is not None and not awaited[3] and f[26:30] == awaited[0] and px.be16(m, 4) == px.ECHO_IDENT
+                    and px.be16(m, 6) == awaited[1] and m[8:] == px.pattern(awaited[2])):
+                awaited[3] = True
+                c["icmp.matched"] += 1
+            else:
+                c["icmp.stray"] += 1
+        elif verdict == "unreachable":
+            errors.append((f, ihl, total))
+        elif verdict == "silent":
+            c["unreachable.silent"] += 1
 
-    # 0. the firmware's frames, before the kernel had the device.
-    early = 0
-    while n < len(fs) and not (len(fs[n]) >= 42 and fs[n][:42] == gw_request):
-        if fs[n][12:14] in (b"\x08\x06", b"\x88\xb5"):
-            fail(n, "an ARP or burst frame before the gateway's request for %s" % opt["pax-ip"], gw_request)
-        print("before the kernel: frame %d: %d bytes, type %s, from %s: %s"
-              % (n, len(fs[n]), fs[n][12:14].hex(), fs[n][6:12].hex(":"), fs[n][:96].hex()))
-        early += 1
-        n += 1
-    # 1. the gateway asks, PAX answers.
-    need("the gateway's request")
-    from_gateway(n, fs[n], gw_request, "request for %s" % opt["pax-ip"])
-    lengths["request"] = len(fs[n])
-    n += 1
-    need("PAX's reply")
-    if fs[n] != pax_reply:
-        fail(n, "not PAX's reply to the gateway's request, byte for byte", pax_reply)
-    n += 1
-    # 2. PAX asks, the gateway answers: once, then the soak.
-    for k in range(1 + soak):
-        skip_pokes()
-        need("PAX's request %d" % k)
-        if fs[n] != pax_request:
-            fail(n, "not PAX's request %d for %s, byte for byte" % (k, opt["gw-ip"]), pax_request)
-        n += 1
-        skip_pokes()
-        need("the gateway's reply %d" % k)
-        from_gateway(n, fs[n], gw_reply, "reply %d" % k)
-        lengths["reply"] = len(fs[n])
-        n += 1
-    # 3. the bursts.
-    for count, length in ((small, 60), (large, 1514)):
-        for seq in range(count):
-            skip_pokes()
-            need("burst frame %d of %d bytes" % (seq, length))
-            want = burst_frame(seq, length)
-            if fs[n] != want:
-                fail(n, "not burst frame %d of %d bytes, byte for byte" % (seq, length), want)
-            n += 1
-    skip_pokes()
-    if n != len(fs):
-        fail(n, "a frame after the conversation's end")
-    if early:
-        print("pcap-net: %d frames before the gateway's request (the firmware's, above)" % early)
-    from_pax = 1 + (1 + soak) + small + large
-    from_gw = 1 + (1 + soak) + pokes
-    print("pcap-net: %d frames from the gateway's request on: %d from PAX (1 reply, %d requests, %d + %d burst frames), %d from the gateway "
-          "(1 request of %d bytes, %d replies of %d bytes, %d IPv4 datagrams to port 7)"
-          % (len(fs) - early, from_pax, 1 + soak, small, large, from_gw, lengths["request"], 1 + soak,
-             lengths["reply"], pokes))
-    print("pcap-net: PASS from-pax=%d from-gateway=%d ipv4=%d before=%d" % (from_pax, from_gw, pokes, early))
+    n = len(fs)
+    if echoes:
+        fail(n, "the capture ends with %d echo requests to PAX unanswered; the oldest is from %s" % (len(echoes), px.dotted(echoes[0][0][26:30])))
+    if askers:
+        fail(n, "the capture ends with %d ARP requests for PAX's address unanswered" % len(askers))
+    c["unreachable.limited"] += len(errors)
+    if c["burst.small"] != small or c["burst.large"] != large:
+        fail(n, "%d burst frames of 60 bytes and %d of 1514; %d and %d were due" % (c["burst.small"], c["burst.large"], small, large))
+    print("pcap-net: %d frames: %d before the kernel's first; %d from PAX, each rebuilt and equal byte for byte; %d to PAX or to everyone "
+          "(lengths %s), each judged; %d for another station; %d checksums recomputed"
+          % (len(fs), c["before"], c["from-pax"], c["to-pax"],
+             " ".join("%d:%d" % kv for kv in sorted(lengths.items())[:12]) + (" …" if len(lengths) > 12 else ""),
+             c["net.other"], c["checksums"]))
+    print("pcap-net: PASS " + " ".join("%s=%d" % (k, c[k]) for k in KEYS))
     return 0
 
 
