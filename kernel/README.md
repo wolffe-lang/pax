@@ -392,3 +392,29 @@ narrating legs and holds both to the same Linux transcript.
   movement and erase sequences (read and ignored), a back buffer (a
   scroll reads the framebuffer, which is slow through WC on real
   hardware), the cursor's blink, more than one framebuffer.
+
+## The speaker (px18)
+
+`kmain_console`'s programs can sound the PC speaker: Linux's console
+ioctls on a console descriptor, which a Linux beep program asks
+(`notes/px18/beep.strace`). `/bin/play` (`../user/play`, wolf) sounds
+note files with them; `tests/mpx3-speaker` captures QEMU's speaker to
+a WAV file (`-audiodev wav,id=snd0,path=… -machine
+pcspk-audiodev=snd0`) and measures it.
+
+| module or file | what |
+|---|---|
+| `speaker/` | the 8254's channel 2 in mode 3 (control word 0xB6 to 0x43, the count to 0x42) gated to the speaker by port 0x61 bits 0 and 1 (read-modify-write, bits 2-3 kept); KIOCSOUND (0x4B2F: the count, 0 silence) and KDMKTONE (0x4B30: the count and a duration in ms, ended by the tick); `own` (the process that started the tone), `ended` (that process's end stops it: `user: speaker off at the end of pid <n>, port 0x61 0x<v>`, unless quiet), `tick`, `summary` (`speaker: <t> tones, <e> stopped at their process's end, sounding <c>, port 0x61 0x<v>`, when a tone was started); every change logged with its tick in a 1024-word ring a test reads through QEMU's monitor |
+| `console/` (px18) | KIOCSOUND and KDMKTONE answered (kernel/speaker) once the console is started |
+| `interrupts/` (px18) | vector 32 also calls `speaker.tick` |
+| `sched/` (px18) | `end_with` calls `speaker.ended` with the ending process's pid: exit, `exit_group`, a fault's kill |
+| `user/` (px18) | a speaker request answered 0 makes the caller the tone's owner (`speaker.own`) |
+| `../boot/speaker.S` | `pax_spk_state` (8 words) and `pax_spk_ring` (1024 words), storage only |
+| `../boot/io.S` (px18) | `pax_halt` clears port 0x61 bits 0 and 1 before its `hlt` loop: no halt, a panic's included, leaves a tone sounding |
+
+- Where PAX differs from Linux, on purpose: a tone stops when the
+  process that started it ends (Linux leaves it sounding), and a halt
+  silences it.
+- Not yet: `/dev/tty0` and `/dev/console` (a Linux beep program opens
+  one of them; PAX's console is descriptors 0-2 of a fresh process, so
+  `play` asks 0, 1 and 2 in turn); the evdev speaker (`EVIOCGSND`).
