@@ -1,0 +1,669 @@
+//! net — the virtio network device and the kernel's frame interface
+//! (px20).
+//!
+//! **The device.** `start` looks in kernel/pci's table for a virtio
+//! network device (vendor 0x1af4; device 0x1000, the transitional id,
+//! or 0x1041, the 1.x one), attaches kernel/virtio's transport to it,
+//! and brings it up as the specification orders: reset; ACKNOWLEDGE;
+//! DRIVER; the features; FEATURES_OK, read back; the queues; DRIVER_OK.
+//! The driver takes two feature bits and needs both, refusing a device
+//! without either by name:
+//!
+//!     VIRTIO_F_VERSION_1  (32)  the 1.x interface and header
+//!     VIRTIO_NET_F_MAC     (5)  the device's address in its configuration
+//!
+//! and declines everything else it is offered (checksum and
+//! segmentation offload, merged receive buffers, the control queue,
+//! link status, indirect descriptors, event indices): each is a
+//! promise this driver would have to keep. With no device, or a
+//! refusal, the kernel prints one `net:` line saying which and goes on
+//! without a network; nothing here panics on what a machine lacks.
+//!
+//! **The queues.** Queue 0 receives and queue 1 transmits; each is
+//! made `QUEUE` (64) entries (the device offers 256), its three parts
+//! in one frame (kernel/virtio's `layout`). Each descriptor owns one
+//! 2048-byte buffer for good (two to a frame): a frame of at most 1514
+//! bytes after the 12-byte `virtio_net_hdr`
+//!
+//!     u8 flags; u8 gso_type; le16 hdr_len; le16 gso_size;
+//!     le16 csum_start; le16 csum_offset; le16 num_buffers
+//!
+//! (all zero on transmit: no checksum to finish, no segmentation; on
+//! receive the device's is skipped) fits one buffer, as the device
+//! requires of a receive buffer when merged buffers are not
+//! negotiated (1526 bytes at least). Every receive buffer is offered
+//! at once, device-writable; a received frame's buffer is offered
+//! again the moment the frame has been handled (`rx_give`), so the
+//! queue stays stocked. Transmit buffers wait on a free list linked
+//! through their descriptors' `next` fields; `send` first takes back
+//! every buffer the device has returned (`reclaim`), then copies the
+//! frame into a free one, pads it to 60 bytes (the least an Ethernet
+//! frame may be, before its checksum), offers it and notifies. The
+//! transmit queue asks for no interrupt: its buffers come back at the
+//! next send, or at `tx_free`.
+//!
+//! **The interrupt.** The device raises INTx on the 8259 line the
+//! firmware left in its Interrupt Line register (kernel/pci); `start`
+//! makes that line level-triggered and unmasks it. The handler
+//! (`irq`, from kernel/interrupts) reads the ISR status register,
+//! which withdraws the request, sets one pending word, acknowledges
+//! the 8259 and returns: kernel/sched then wakes the network thread
+//! (kernel/netd), which takes frames off the queue in thread context.
+//! No frame is looked at with an interrupt in service.
+//!
+//! **The frame interface.** A frame is the bytes from the destination
+//! address to the end of the payload, without a checksum (RFC 894).
+//!
+//!     send(src, len)      copy and queue one frame; rows `down`,
+//!                         `size` (under 14 or over 1514 bytes) and
+//!                         `full` (no buffer free), each counted
+//!     rx_take()           the next received frame for this station
+//!                         or for everyone: its address, length and
+//!                         buffer; length 0 when there is none
+//!     rx_give(buffer)     hand its buffer back to the device
+//!     wait()              block until the device has interrupted
+//!     mac(), mac_byte(i)  this station's address
+//!     count(i)            a counter (the C_* constants)
+//!
+//! Counters, in boot/net.S's `pax_net_stats`: frames and bytes each
+//! way; drops by cause — received: shorter than a header (`runt`),
+//! longer than 1514 (`long`), for another station (`other`), IPv4
+//! (`ipv4`, until px21), another type nothing here speaks
+//! (`type`); transmitted: `down`, `size`, `full` — and interrupts,
+//! buffers reclaimed and restocked. Everything is changed under
+//! `sync.net()` (IF clear), by whichever thread sends or receives.
+//!
+//! Written from the OASIS VIRTIO specification 1.1/1.2 §5.1 (the
+//! network device: its queues, feature bits, configuration layout,
+//! `virtio_net_hdr`, the receive buffer's least size), RFC 894 (the
+//! frame: two 48-bit addresses, a 16-bit type, the payload), IEEE
+//! 802.3's 60-byte minimum as RFC 894 cites it, and Intel's ICH9 data
+//! sheet (the interrupt line, ELCR). No Linux source; no other
+//! kernel's or network stack's source; no driver.
+
+use frames
+use log
+use pci
+use sched
+use sync
+use timer
+use virtio
+
+extern "c" fn pax_fb_copy(dst: u64, src: u64, bytes: u64)
+extern "c" fn pax_fb_fill(dst: u64, v: u64, qwords: u64)
+
+extern "c" let pax_net_stats: *u64
+
+/// Why `send` did not send.
+pub error SendError = {down, size, full}
+
+/// The feature bits the driver takes: VIRTIO_NET_F_MAC (bit 5) and
+/// VIRTIO_F_VERSION_1 (bit 32, kernel/virtio's F_VERSION_1, spelled out
+/// here: a module `const` cannot be initialised from another module's
+/// on wolf 0.2.26, "an unresolved name at comptime").
+const F_MAC: u64 = 0x20
+const WANT: u64 = 0x100000020
+
+/// Entries in each queue, and what a buffer holds.
+pub const QUEUE: u64 = 64
+const BUFFER: u64 = 2048
+const HEADER: u64 = 12 // virtio_net_hdr with VERSION_1
+/// A frame's least length, without the checksum.
+pub const FRAME_MIN: u64 = 60
+/// A frame's greatest length, without the checksum.
+pub const FRAME_MAX: u64 = 1514
+const ETH_HEADER: u64 = 14
+const PAGE: u64 = 4096
+
+const RX: u64 = 0
+const TX: u64 = 1
+
+// The driver's words in pax_net_state (0-7 are kernel/virtio's).
+const N_UP: u64 = 8
+const N_LINE: u64 = 9
+const N_VECTOR: u64 = 10
+const N_PENDING: u64 = 11 // set by the interrupt, cleared by `wait`
+const N_MAC: u64 = 12 // byte i of the address in bits 8i..8i+7
+const N_OFFERED: u64 = 13 // the device's feature bits
+const N_FRAMES: u64 = 14 // frames taken from kernel/frames
+const N_PCI: u64 = 15 // kernel/pci's index of the device
+const N_RXQ: u64 = 16 // the receive queue's record (8 words)
+const N_TXQ: u64 = 24 // the transmit queue's
+const N_TX_HEAD: u64 = 32 // the free list: a descriptor index + 1, 0 empty
+const N_TX_FREE: u64 = 33 // how many are on it
+const N_ELCR: u64 = 34 // ELCR as the firmware left it
+const N_STATE: u64 = 35 // what `start` answered
+
+/// `start`'s answers (and `state`): the device is up.
+pub const UP: u64 = 0
+/// No virtio network device on the bus.
+pub const ABSENT: u64 = 1
+/// A device was found and refused by name.
+pub const REFUSED: u64 = 2
+
+/// The counters: frames received and handed on.
+pub const C_RX_FRAMES: u64 = 0
+/// Their bytes.
+pub const C_RX_BYTES: u64 = 1
+/// Frames queued for transmission.
+pub const C_TX_FRAMES: u64 = 2
+/// Their bytes, padding included.
+pub const C_TX_BYTES: u64 = 3
+/// Interrupts taken on the device's vector.
+pub const C_IRQ: u64 = 4
+/// Of them, with no cause in the ISR status.
+pub const C_IRQ_IDLE: u64 = 5
+/// Received and dropped: shorter than a frame header.
+pub const C_RX_RUNT: u64 = 6
+/// Received and dropped: longer than 1514 bytes.
+pub const C_RX_LONG: u64 = 7
+/// Received and dropped: for another station.
+pub const C_RX_OTHER: u64 = 8
+/// Received and dropped: IPv4 (until px21).
+pub const C_RX_IPV4: u64 = 9
+/// Received and dropped: a type nothing here speaks.
+pub const C_RX_TYPE: u64 = 10
+/// Not sent: the device is not up.
+pub const C_TX_DOWN: u64 = 11
+/// Not sent: under 14 or over 1514 bytes.
+pub const C_TX_SIZE: u64 = 12
+/// Not sent: no transmit buffer free.
+pub const C_TX_FULL: u64 = 13
+/// Transmit buffers taken back from the device.
+pub const C_RECLAIMED: u64 = 14
+/// Receive buffers offered to the device again.
+pub const C_RESTOCKED: u64 = 15
+/// Times `wait` returned.
+pub const C_WAKES: u64 = 16
+
+fn nw(i: u64) -> u64 {
+    // # Safety: a word of boot/net.S's pax_net_state; the address is
+    // kernel/virtio's `state`.
+    unsafe { (virtio.state(i) as *u64).read_volatile() }
+}
+
+fn put_nw(i: u64, v: u64) {
+    // # Safety: as `nw`.
+    unsafe { (virtio.state(i) as *u64).write_volatile(v) }
+}
+
+/// Counter `i` (C_*).
+pub fn count(i: u64) -> u64 {
+    // # Safety: i < 32, a word of boot/net.S's pax_net_stats.
+    unsafe { ((pax_net_stats as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn bump(i: u64, by: u64) {
+    // # Safety: as `count`; IF clear.
+    unsafe { ((pax_net_stats as u64 + i * 8) as *u64).write_volatile(count(i) + by) }
+}
+
+/// Count a received frame nothing here speaks: IPv4 (0x0800) by its
+/// own name, any other type as `type` (kernel/netd).
+pub fn drop_type(ethertype: u64) {
+    let saved = sync.acquire(sync.net())
+    bump(if ethertype == 0x0800 { C_RX_IPV4 } else { C_RX_TYPE }, 1)
+    sync.release(sync.net(), saved)
+}
+
+/// Whether the device is up.
+pub fn up() -> bool {
+    nw(N_UP) == 1
+}
+
+/// What `start` answered: UP, ABSENT or REFUSED.
+pub fn state() -> u64 {
+    nw(N_STATE)
+}
+
+/// The device's interrupt vector; 0 while there is none.
+pub fn vector() -> u64 {
+    nw(N_VECTOR)
+}
+
+/// Byte `i` (0-5) of this station's address.
+pub fn mac_byte(i: u64) -> u64 {
+    (nw(N_MAC) >> (i * 8)) & 0xff
+}
+
+/// Frames this driver holds (the rings and the buffers).
+pub fn frames_held() -> u64 {
+    nw(N_FRAMES)
+}
+
+fn zeroed_frame() -> u64 {
+    let pa = frames.alloc() else 0
+    if pa != 0 {
+        // # Safety: the frame just taken, through the HHDM; 512 words.
+        unsafe { pax_fb_fill(pa + frames.hhdm(), 0, PAGE / 8) }
+        put_nw(N_FRAMES, nw(N_FRAMES) + 1)
+    }
+    pa
+}
+
+fn refuse(what: str, v: u64) -> u64 {
+    virtio.add_status(virtio.FAILED)
+    log.put("net: refused: ")
+    log.put(what)
+    log.put(" ")
+    log.hex(v)
+    log.put("; the network is off")
+    log.end()
+    put_nw(N_STATE, REFUSED)
+    REFUSED
+}
+
+/// Make queue `number`: a ring frame, and `QUEUE` buffers, one to a
+/// descriptor. False when a frame is missing or the layout is refused.
+fn make_queue(q: u64, number: u64, flags: u64) -> bool {
+    let ring = zeroed_frame()
+    if ring == 0 || !virtio.queue_setup(q, number, QUEUE, ring) {
+        return false
+    }
+    var i: u64 = 0
+    while i < QUEUE {
+        let f = zeroed_frame()
+        if f == 0 {
+            return false
+        }
+        virtio.set_desc(q, i, f, BUFFER, flags, 0)
+        if i + 1 < QUEUE {
+            virtio.set_desc(q, i + 1, f + BUFFER, BUFFER, flags, 0)
+        }
+        i += 2
+    }
+    true
+}
+
+/// Find the device, bring it up on the paging structures at `pml4`,
+/// and unmask its interrupt. Call after `pci.scan`, IF clear. Answers
+/// UP, ABSENT (one line says so) or REFUSED (one line says why).
+pub fn start(pml4: u64) -> u64 {
+    put_nw(N_UP, 0)
+    put_nw(N_VECTOR, 0)
+    put_nw(N_PENDING, 0)
+    put_nw(N_FRAMES, 0)
+    var i = pci.find(virtio.VENDOR, 0x1000, 0x1000, 0)
+    if i == pci.MAX {
+        i = pci.find(virtio.VENDOR, 0x1041, 0x1041, 0)
+    }
+    if i == pci.MAX {
+        log.put("net: no virtio network device among ")
+        log.dec(pci.count() as int)
+        log.put(" PCI functions; the network is off")
+        log.end()
+        put_nw(N_STATE, ABSENT)
+        return ABSENT
+    }
+    put_nw(N_PCI, i)
+    let b = pci.bdf(i)
+    // Memory decoding and bus mastering on, INTx not disabled.
+    pci.set_command(b, (pci.command(b) | pci.CMD_MEMORY | pci.CMD_MASTER) & !pci.CMD_INTX_OFF)
+    let a = virtio.attach(pml4, i)
+    if a != virtio.OK {
+        log.put("net: refused: ")
+        log.put(if a == virtio.NO_COMMON { "the device has no virtio 1.x common configuration capability (a legacy-only device)" } else { if a == virtio.NO_MAP { "the device's registers could not be mapped" } else { "the device lacks a virtio 1.x notification, ISR or device capability" } })
+        log.put("; the network is off")
+        log.end()
+        put_nw(N_STATE, REFUSED)
+        return REFUSED
+    }
+    if !virtio.reset() {
+        return refuse("the device did not reset, status", virtio.status())
+    }
+    virtio.add_status(virtio.ACKNOWLEDGE)
+    virtio.add_status(virtio.DRIVER)
+    let offered = virtio.device_features()
+    put_nw(N_OFFERED, offered)
+    if offered & virtio.F_VERSION_1 == 0 {
+        return refuse("the device lacks VIRTIO_F_VERSION_1 (bit 32), features", offered)
+    }
+    if offered & F_MAC == 0 {
+        return refuse("the device lacks VIRTIO_NET_F_MAC (bit 5), features", offered)
+    }
+    virtio.set_features(WANT)
+    virtio.add_status(virtio.FEATURES_OK)
+    if virtio.status() & virtio.FEATURES_OK == 0 {
+        return refuse("the device did not keep FEATURES_OK for features", WANT)
+    }
+    if virtio.queue_max(RX) < QUEUE || virtio.queue_max(TX) < QUEUE {
+        return refuse("a queue is smaller than 64 entries, receive", virtio.queue_max(RX))
+    }
+    let rxq = virtio.state(N_RXQ)
+    let txq = virtio.state(N_TXQ)
+    if !make_queue(rxq, RX, virtio.DESC_WRITE) {
+        return refuse("the receive queue could not be laid out, used ring at", virtio.queue_word(rxq, virtio.Q_USED))
+    }
+    if !make_queue(txq, TX, 0) {
+        return refuse("the transmit queue could not be laid out, used ring at", virtio.queue_word(txq, virtio.Q_USED))
+    }
+    // Every receive buffer to the device; every transmit buffer free.
+    var k: u64 = 0
+    while k < QUEUE {
+        virtio.offer(rxq, k)
+        virtio.set_desc_next(txq, k, if k + 1 < QUEUE { k + 2 } else { 0 })
+        k += 1
+    }
+    put_nw(N_TX_HEAD, 1)
+    put_nw(N_TX_FREE, QUEUE)
+    virtio.quiet(txq, true)
+    var m: u64 = 0
+    var j: u64 = 0
+    while j < 6 {
+        m = m | virtio.device8(j) << (j * 8)
+        j += 1
+    }
+    put_nw(N_MAC, m)
+    // The interrupt: the line the firmware routed the pin to.
+    let line = pci.line(i)
+    put_nw(N_LINE, line)
+    put_nw(N_ELCR, timer.elcr())
+    if pci.pin(i) == 0 || line < 3 || line > 15 || line == 4 || line == 8 || line == 13 {
+        return refuse("the device's interrupt line is not one this kernel can take, line", line)
+    }
+    timer.level(line)
+    put_nw(N_VECTOR, timer.MASTER_BASE + line)
+    timer.unmask_line(line)
+    virtio.add_status(virtio.DRIVER_OK)
+    let _told = virtio.notify(rxq)
+    put_nw(N_UP, 1)
+    put_nw(N_STATE, UP)
+    UP
+}
+
+/// The device's interrupt (kernel/interrupts, IF clear): read the
+/// cause, which withdraws the request; note it; acknowledge the 8259.
+pub fn irq(v: u64) {
+    let cause = virtio.isr()
+    bump(C_IRQ, 1)
+    if cause == 0 {
+        bump(C_IRQ_IDLE, 1)
+    } else {
+        put_nw(N_PENDING, 1)
+    }
+    timer.eoi(v)
+}
+
+/// Block until the device has interrupted since the last `wait`
+/// returned (kernel/netd's loop). Thread context.
+pub fn wait() {
+    let saved = sync.irq_save()
+    while nw(N_PENDING) == 0 {
+        sched.block_net()
+    }
+    put_nw(N_PENDING, 0)
+    bump(C_WAKES, 1)
+    sync.irq_restore(saved)
+}
+
+fn for_us(frame: u64) -> bool {
+    var all: u64 = 0xff
+    var same = true
+    var i: u64 = 0
+    while i < 6 {
+        // # Safety: the first six bytes of a received frame of at least
+        // 14, in a receive buffer through the HHDM.
+        let raw = unsafe { ((frame + i) as *u8).read_volatile() }
+        let b = raw as u64
+        all = all & b
+        if b != mac_byte(i) {
+            same = false
+        }
+        i += 1
+    }
+    same || all == 0xff
+}
+
+/// The next received frame addressed to this station or to everyone:
+/// `(address, length, buffer)`, length 0 when the device has returned
+/// nothing more. A frame that is too short, too long or for another
+/// station is counted, its buffer handed straight back, and the next
+/// one looked at. The caller hands `buffer` back with `rx_give`.
+pub fn rx_take() -> (u64, u64, u64) {
+    let rxq = virtio.state(N_RXQ)
+    let saved = sync.acquire(sync.net())
+    while nw(N_UP) == 1 && virtio.returned(rxq) {
+        let (head, wrote) = virtio.collect(rxq)
+        let id = head % QUEUE
+        let frame = virtio.desc_addr(rxq, id) + frames.hhdm() + HEADER
+        var cause: u64 = 0
+        if wrote < HEADER + ETH_HEADER {
+            cause = C_RX_RUNT
+        } else {
+            if wrote > HEADER + FRAME_MAX {
+                cause = C_RX_LONG
+            } else {
+                if !for_us(frame) {
+                    cause = C_RX_OTHER
+                }
+            }
+        }
+        if cause == 0 {
+            bump(C_RX_FRAMES, 1)
+            bump(C_RX_BYTES, wrote - HEADER)
+            sync.release(sync.net(), saved)
+            return (frame, wrote - HEADER, id)
+        }
+        bump(cause, 1)
+        virtio.offer(rxq, id)
+        bump(C_RESTOCKED, 1)
+        let _told = virtio.notify(rxq)
+    }
+    sync.release(sync.net(), saved)
+    (0, 0, 0)
+}
+
+/// Offer receive buffer `buffer` (from `rx_take`) to the device again.
+pub fn rx_give(buffer: u64) {
+    let rxq = virtio.state(N_RXQ)
+    let saved = sync.acquire(sync.net())
+    virtio.offer(rxq, buffer % QUEUE)
+    bump(C_RESTOCKED, 1)
+    let _told = virtio.notify(rxq)
+    sync.release(sync.net(), saved)
+}
+
+/// Take back every transmit buffer the device has returned. The net
+/// lock held.
+fn reclaim() {
+    let txq = virtio.state(N_TXQ)
+    while virtio.returned(txq) {
+        let (head, _wrote) = virtio.collect(txq)
+        let id = head % QUEUE
+        virtio.set_desc_next(txq, id, nw(N_TX_HEAD))
+        put_nw(N_TX_HEAD, id + 1)
+        put_nw(N_TX_FREE, nw(N_TX_FREE) + 1)
+        bump(C_RECLAIMED, 1)
+    }
+}
+
+/// How many transmit buffers are free, after taking back what the
+/// device has returned.
+pub fn tx_free() -> u64 {
+    if !up() {
+        return 0
+    }
+    let saved = sync.acquire(sync.net())
+    reclaim()
+    let n = nw(N_TX_FREE)
+    sync.release(sync.net(), saved)
+    n
+}
+
+/// Send the `len` bytes at `src` as one frame (14 to 1514 bytes: the
+/// two addresses, the type, the payload; shorter than 60 is padded
+/// with zeros). Returns the bytes queued. Rows, each counted: `down`,
+/// `size`, `full` (every buffer is still with the device).
+pub fn send(src: u64, len: u64) -> u64 ! SendError {
+    let txq = virtio.state(N_TXQ)
+    let saved = sync.acquire(sync.net())
+    if nw(N_UP) != 1 {
+        bump(C_TX_DOWN, 1)
+        sync.release(sync.net(), saved)
+        return down
+    }
+    if len < ETH_HEADER || len > FRAME_MAX {
+        bump(C_TX_SIZE, 1)
+        sync.release(sync.net(), saved)
+        return size
+    }
+    reclaim()
+    let head = nw(N_TX_HEAD)
+    if head == 0 {
+        bump(C_TX_FULL, 1)
+        sync.release(sync.net(), saved)
+        return full
+    }
+    let id = head - 1
+    put_nw(N_TX_HEAD, virtio.desc_next(txq, id))
+    put_nw(N_TX_FREE, nw(N_TX_FREE) - 1)
+    let buf = virtio.desc_addr(txq, id) + frames.hhdm()
+    let wire = if len < FRAME_MIN { FRAME_MIN } else { len }
+    // # Safety: a transmit buffer of 2048 bytes this driver owns and the
+    // device does not hold (it was on the free list): 72 zeroed bytes
+    // cover the header and a padded least frame, then `len` <= 1514
+    // bytes of the caller's frame after the 12-byte header.
+    unsafe {
+        pax_fb_fill(buf, 0, 9)
+        pax_fb_copy(buf + HEADER, src, len)
+    }
+    virtio.set_desc_len(txq, id, HEADER + wire)
+    virtio.offer(txq, id)
+    let _told = virtio.notify(txq)
+    bump(C_TX_FRAMES, 1)
+    bump(C_TX_BYTES, wire)
+    sync.release(sync.net(), saved)
+    wire
+}
+
+fn put_mac() {
+    var i: u64 = 0
+    while i < 6 {
+        if i > 0 {
+            log.put(":")
+        }
+        log.hex_n(mac_byte(i), 2)
+        i += 1
+    }
+}
+
+fn put_queue(name: str, q: u64) {
+    let hhdm = frames.hhdm()
+    log.put("net: ")
+    log.put(name)
+    log.put(" queue ")
+    log.dec(virtio.queue_word(q, virtio.Q_NUMBER) as int)
+    log.put(": ")
+    log.dec(virtio.queue_word(q, virtio.Q_SIZE) as int)
+    log.put(" entries, descriptors ")
+    log.hex(virtio.queue_word(q, virtio.Q_DESC) - hhdm)
+    log.put(" avail ")
+    log.hex(virtio.queue_word(q, virtio.Q_AVAIL) - hhdm)
+    log.put(" used ")
+    log.hex(virtio.queue_word(q, virtio.Q_USED) - hhdm)
+    log.end()
+}
+
+/// The device's lines, once it is up:
+///
+///     net: virtio-net <vvvv>:<dddd> at <bb>:<dd>.<f>, bar<n> 0x<pa>, 1.x interface
+///     net: features offered 0x<f>, taken 0x0000000100000020 (VERSION_1, MAC)
+///     net: receive queue 0: 64 entries, descriptors 0x<pa> avail 0x<pa> used 0x<pa>
+///     net: transmit queue 1: 64 entries, descriptors 0x<pa> avail 0x<pa> used 0x<pa>
+///     net: <aa:bb:cc:dd:ee:ff>, line <l> (vector <v>, level; elcr 0x<before> -> 0x<after>), <n> frames held
+pub fn report() {
+    if !up() {
+        return
+    }
+    let i = nw(N_PCI)
+    let b = pci.bdf(i)
+    let (bar, pa) = virtio.bar()
+    log.put("net: virtio-net ")
+    log.hex_n(pci.vendor(i), 4)
+    log.put(":")
+    log.hex_n(pci.device(i), 4)
+    log.put(" at ")
+    log.hex_n(b >> 16, 2)
+    log.put(":")
+    log.hex_n((b >> 8) & 0x1f, 2)
+    log.put(".")
+    log.hex_n(b & 7, 1)
+    log.put(", bar")
+    log.dec(bar as int)
+    log.put(" ")
+    log.hex(pa)
+    log.put(", 1.x interface")
+    log.end()
+    log.put("net: features offered ")
+    log.hex(nw(N_OFFERED))
+    log.put(", taken ")
+    log.hex(WANT)
+    log.put(" (VERSION_1, MAC)")
+    log.end()
+    put_queue("receive", virtio.state(N_RXQ))
+    put_queue("transmit", virtio.state(N_TXQ))
+    log.put("net: ")
+    put_mac()
+    log.put(", line ")
+    log.dec(nw(N_LINE) as int)
+    log.put(" (vector ")
+    log.dec(nw(N_VECTOR) as int)
+    log.put(", level; elcr ")
+    log.hex_n(nw(N_ELCR), 4)
+    log.put(" -> ")
+    log.hex_n(timer.elcr(), 4)
+    log.put("), ")
+    log.dec(nw(N_FRAMES) as int)
+    log.put(" frames held")
+    log.end()
+}
+
+/// The counters' two lines:
+///
+///     net: rx <f> frames <b> bytes, dropped <r> runt <l> long <o> other <i> ipv4 <t> type
+///     net: tx <f> frames <b> bytes, dropped <d> down <s> size <u> full; <q> interrupts (<e> idle), <w> wakes, <c> reclaimed, <k> restocked, <n> of 64 transmit buffers free
+pub fn counters() {
+    let free = tx_free()
+    log.put("net: rx ")
+    log.dec(count(C_RX_FRAMES) as int)
+    log.put(" frames ")
+    log.dec(count(C_RX_BYTES) as int)
+    log.put(" bytes, dropped ")
+    log.dec(count(C_RX_RUNT) as int)
+    log.put(" runt ")
+    log.dec(count(C_RX_LONG) as int)
+    log.put(" long ")
+    log.dec(count(C_RX_OTHER) as int)
+    log.put(" other ")
+    log.dec(count(C_RX_IPV4) as int)
+    log.put(" ipv4 ")
+    log.dec(count(C_RX_TYPE) as int)
+    log.put(" type")
+    log.end()
+    log.put("net: tx ")
+    log.dec(count(C_TX_FRAMES) as int)
+    log.put(" frames ")
+    log.dec(count(C_TX_BYTES) as int)
+    log.put(" bytes, dropped ")
+    log.dec(count(C_TX_DOWN) as int)
+    log.put(" down ")
+    log.dec(count(C_TX_SIZE) as int)
+    log.put(" size ")
+    log.dec(count(C_TX_FULL) as int)
+    log.put(" full; ")
+    log.dec(count(C_IRQ) as int)
+    log.put(" interrupts (")
+    log.dec(count(C_IRQ_IDLE) as int)
+    log.put(" idle), ")
+    log.dec(count(C_WAKES) as int)
+    log.put(" wakes, ")
+    log.dec(count(C_RECLAIMED) as int)
+    log.put(" reclaimed, ")
+    log.dec(count(C_RESTOCKED) as int)
+    log.put(" restocked, ")
+    log.dec(free as int)
+    log.put(" of ")
+    log.dec(QUEUE as int)
+    log.put(" transmit buffers free")
+    log.end()
+}
