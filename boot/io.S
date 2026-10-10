@@ -15,7 +15,11 @@
                                   normal end and the panic path's
                                   (px01). Never returns. Sized, so
                                   tools/qemu-halt can find it in the
-                                  ELF's symbol table.
+                                  ELF's symbol table. px18: first it
+                                  silences the PC speaker (port 0x61
+                                  bits 0 and 1 cleared, bits 2-3 kept),
+                                  so no halt, a panic's included,
+                                  leaves a tone sounding.
      pax_exit(code: u8)           `outb` of code to isa-debug-exit
                                   (iobase 0xf4, tools/qemu-run); QEMU
                                   ends with status (code << 1) | 1.
@@ -27,7 +31,8 @@
    kernels in tests/mkw.d/boot/io.S.
 
    Written from: the x86-64 psABI (argument registers), the Intel SDM
-   (IN, OUT, CLI, HLT) and QEMU's isa-debug-exit device. No Linux
+   (IN, OUT, CLI, HLT), QEMU's isa-debug-exit device and the PC's port
+   0x61 (px18, kernel/speaker). No Linux
    source. */
 
         .set EXIT_PORT,     0xf4
@@ -55,8 +60,11 @@ pax_inb:
         .type pax_halt, @function
 pax_halt:
         cli
-        hlt
-        jmp     pax_halt
+        inb     $0x61, %al
+        andb    $0x0c, %al
+        outb    %al, $0x61
+1:      hlt
+        jmp     1b
         .size pax_halt, . - pax_halt
 
         .globl pax_exit
