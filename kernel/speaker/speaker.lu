@@ -1,0 +1,244 @@
+//! speaker — the PC speaker (px18): the 8254's channel 2 as a tone
+//! generator, gated to the speaker through port 0x61, behind Linux's
+//! console ioctls.
+//!
+//! **The hardware.** The PC wires the 8254's channel 2 to the speaker:
+//! its GATE input is port 0x61 bit 0, and its OUT pin reaches the
+//! speaker through an AND with port 0x61 bit 1 (the speaker data
+//! enable). A tone is channel 2 in mode 3 (square wave) at a count N:
+//! the control word 0xB6 to port 0x43 (channel 2, low byte then high
+//! byte, mode 3, binary), N's low then high byte to port 0x42, then bits
+//! 0 and 1 of port 0x61 set; its pitch is 1193182 / N Hz (the PC's
+//! 8254 input clock). Silence clears bits 0 and 1. Every write to 0x61
+//! is a read-modify-write that keeps bits 2 and 3 (the parity and
+//! channel check enables) as found; bits 4-7 read back status.
+//!
+//! **The interface** is Linux's console ioctls (`ioctl_kd(2)`; the
+//! request numbers from the uapi `linux/kd.h`), answered on a console
+//! descriptor by kernel/console:
+//! - KIOCSOUND (0x4B2F): the argument's low 16 bits are the count; 0 is
+//!   silence. The tone sounds until the next request.
+//! - KDMKTONE (0x4B30): the low 16 bits the count, the high 16 the
+//!   duration in milliseconds; a count or a duration of 0 is silence.
+//!   It returns at once; the tick (`tick`, from kernel/interrupts'
+//!   vector 32) ends the tone at the first tick at or past its
+//!   duration, rounded up to whole ticks (10.0002 ms each).
+//! A Linux beep program asks exactly KIOCSOUND of a console descriptor
+//! (strace of Ubuntu's `beep`, `notes/px18/beep.strace`).
+//!
+//! **Where PAX differs from Linux, on purpose.** A tone stops when the
+//! process that started it ends (`ended`, from kernel/sched's
+//! `end_with`: exit, `exit_group` or a fault), with a narration line
+//! `user: speaker off at the end of pid <n>, port 0x61 0x<v>` (unless
+//! `quiet`); Linux leaves it sounding. And every halt silences it:
+//! boot/io.S's `pax_halt` clears the two bits before its `hlt` loop, so
+//! a panic never leaves a note hanging.
+//!
+//! Every change (a tone started, the speaker silenced) is logged with
+//! the tick it happened at in boot/speaker.S's `pax_spk_ring`, which a
+//! test reads from the halted machine through QEMU's monitor: the
+//! kernel's own timeline of a tune.
+//!
+//! The state is boot/speaker.S's `pax_spk_state`, read and written
+//! volatile: the tick writes it behind every system call's back. Every
+//! entry runs with IF clear (a system call, the tick, a process's end).
+//! No region, no heap (wolf-lang#611).
+//!
+//! Written from Intel's 8254 programmable interval timer data sheet
+//! (the control word, mode 3, the counter's load), the PC's port 0x61
+//! as the IBM PC/AT technical reference describes it (bits 0 and 1),
+//! man-pages `ioctl_kd(2)` and the uapi `linux/kd.h`, and black-box
+//! runs (`notes/px18/`). No Linux source; no other kernel's source.
+
+use log
+
+extern "c" fn pax_outb(port: u16, v: u8)
+extern "c" fn pax_inb(port: u16) -> u8
+
+extern "c" let pax_spk_state: *u64
+extern "c" let pax_spk_ring: *u64
+
+/// KIOCSOUND: start (a count) or stop (0) a tone.
+pub const KIOCSOUND: u64 = 0x4b2f
+/// KDMKTONE: a tone of a duration (count | ms << 16).
+pub const KDMKTONE: u64 = 0x4b30
+
+const PIT_CH2: u16 = 0x42
+const PIT_CTRL: u16 = 0x43
+const PORT_B: u16 = 0x61
+const GATE_AND_DATA: u64 = 3
+const MS_PER_TICK_X100: u64 = 1000 // 10.00 ms a tick, in hundredths of a ms
+
+// The state's words.
+const S_COUNT: u64 = 0 // the count sounding; 0 silent
+const S_UNTIL: u64 = 1 // the tick a KDMKTONE tone ends at; 0 none
+const S_OWNER: u64 = 2 // the pid that started the tone; 0 none
+const S_TONES: u64 = 3 // tones started
+const S_ENDED: u64 = 4 // tones stopped at their process's end
+const S_PORT: u64 = 5 // the last value written to port 0x61
+const S_EVENTS: u64 = 6 // changes logged in pax_spk_ring
+const S_NOW: u64 = 7 // the tick count, as `tick` last saw it
+
+const RING: u64 = 1024
+
+fn sv(i: u64) -> u64 {
+    // # Safety: i < 8, inside boot/speaker.S's 64-byte pax_spk_state.
+    unsafe { ((pax_spk_state as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_sv(i: u64, v: u64) {
+    // # Safety: as `sv`.
+    unsafe { ((pax_spk_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+fn out(port: u16, v: u64) {
+    // # Safety: io.S's OUT to the 8254 or port 0x61; v < 256.
+    unsafe { pax_outb(port, v as u8) }
+}
+
+fn inp(port: u16) -> u64 {
+    // # Safety: io.S's IN from port 0x61.
+    let v = unsafe { pax_inb(port) }
+    v as u64
+}
+
+/// Log a change: sounding count `n` (0 silence) at the latest tick.
+fn event(n: u64) {
+    let k = sv(S_EVENTS)
+    let w = (sv(S_NOW) << 17) | (if n != 0 { 0x10000 } else { 0 }) | (n & 0xffff)
+    // # Safety: k % RING < 1024, inside boot/speaker.S's 8 KiB pax_spk_ring.
+    unsafe { ((pax_spk_ring as u64 + (k % RING) * 8) as *u64).write_volatile(w) }
+    put_sv(S_EVENTS, k + 1)
+}
+
+/// Port 0x61 as it reads now.
+pub fn port_b() -> u64 {
+    inp(PORT_B)
+}
+
+/// Sound count `n` (1-65535) until told otherwise.
+fn on(n: u64) {
+    out(PIT_CTRL, 0xb6) // channel 2, low then high byte, mode 3, binary
+    out(PIT_CH2, n & 0xff)
+    out(PIT_CH2, n >> 8)
+    let b = (inp(PORT_B) & 0x0f) | GATE_AND_DATA
+    out(PORT_B, b)
+    put_sv(S_PORT, b)
+    put_sv(S_COUNT, n)
+    put_sv(S_TONES, sv(S_TONES) + 1)
+    event(n)
+}
+
+/// Silence: port 0x61's bits 0 and 1 cleared, the state cleared.
+pub fn off() {
+    let b = inp(PORT_B) & 0x0c
+    out(PORT_B, b)
+    put_sv(S_PORT, b)
+    if sv(S_COUNT) != 0 {
+        event(0)
+    }
+    put_sv(S_COUNT, 0)
+    put_sv(S_UNTIL, 0)
+    put_sv(S_OWNER, 0)
+}
+
+/// Whether `req` is one of the speaker's requests.
+pub fn request(req: u64) -> bool {
+    req == KIOCSOUND || req == KDMKTONE
+}
+
+/// KIOCSOUND or KDMKTONE with `arg` at tick `now`: 0 (both always
+/// succeed, as on Linux; the argument's bits above those named are
+/// ignored).
+pub fn ioctl(req: u64, arg: u64, now: u64) -> u64 {
+    put_sv(S_NOW, now)
+    let n = arg & 0xffff
+    if req == KIOCSOUND {
+        if n == 0 {
+            off()
+        } else {
+            on(n)
+            put_sv(S_UNTIL, 0)
+        }
+        return 0
+    }
+    let ms = (arg >> 16) & 0xffff
+    if n == 0 || ms == 0 {
+        off()
+        return 0
+    }
+    on(n)
+    // The first tick at or past `ms`: a partial tick never shortens it.
+    let t = (ms * 100 + MS_PER_TICK_X100 - 1) / MS_PER_TICK_X100
+    put_sv(S_UNTIL, now + t)
+    0
+}
+
+/// The running process `pid` asked for the tone now sounding (kernel/
+/// user, after a request answered 0): it is the tone's owner, silenced
+/// when it ends. A silencing request leaves no owner.
+pub fn own(pid: u64) {
+    if sv(S_COUNT) != 0 {
+        put_sv(S_OWNER, pid)
+    }
+}
+
+/// Vector 32 (kernel/interrupts), at tick `now`: a KDMKTONE tone whose
+/// time is up stops.
+pub fn tick(now: u64) {
+    put_sv(S_NOW, now)
+    let u = sv(S_UNTIL)
+    if u != 0 && now >= u {
+        off()
+    }
+}
+
+/// Process `pid` ended (kernel/sched's `end_with`): the tone it started
+/// stops, and (unless quiet) one line says so with port 0x61 read back.
+pub fn ended(pid: u64) {
+    if pid == 0 || sv(S_COUNT) == 0 || sv(S_OWNER) != pid {
+        return
+    }
+    off()
+    put_sv(S_ENDED, sv(S_ENDED) + 1)
+    if log.quiet() {
+        return
+    }
+    log.put("user: speaker off at the end of pid ")
+    log.dec(pid as int)
+    log.put(", port 0x61 ")
+    byte_hex(inp(PORT_B))
+    log.end()
+}
+
+/// `0x` and two hex digits.
+fn byte_hex(v: u64) {
+    log.put("0x")
+    let hi = (v >> 4) & 0xf
+    let lo = v & 0xf
+    log.put_byte((if hi < 10 { 48 + hi } else { 87 + hi }) as int)
+    log.put_byte((if lo < 10 { 48 + lo } else { 87 + lo }) as int)
+}
+
+/// Tones started since boot.
+pub fn tones() -> u64 {
+    sv(S_TONES)
+}
+
+/// `speaker: <t> tones, <e> stopped at their process's end, sounding
+/// <count>, port 0x61 0x<v>` — one line, when any tone was started
+/// (kmain_console's end, beside the console's summary).
+pub fn summary() {
+    if sv(S_TONES) == 0 {
+        return
+    }
+    log.put("speaker: ")
+    log.dec(sv(S_TONES) as int)
+    log.put(" tones, ")
+    log.dec(sv(S_ENDED) as int)
+    log.put(" stopped at their process's end, sounding ")
+    log.dec(sv(S_COUNT) as int)
+    log.put(", port 0x61 ")
+    byte_hex(inp(PORT_B))
+    log.end()
+}
