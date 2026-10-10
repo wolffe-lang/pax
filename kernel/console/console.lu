@@ -67,7 +67,8 @@
 //! and pseudo-terminal answer until someone sets them — or, px19, when
 //! the screen is the console (kernel/screen attached before `start`),
 //! the screen's rows and columns, its pixel fields 0) and TIOCSWINSZ
-//! (0x5414). Every other request is refused by name (kernel/user
+//! (0x5414); and (px18) the speaker's KIOCSOUND (0x4B2F) and KDMKTONE
+//! (0x4B30), kernel/speaker's. Every other request is refused by name (kernel/user
 //! writes `refused: tty ioctl 0x<req>`, -ENOTTY). `struct termios` is
 //! 36 bytes: four 32-bit flag words, the line discipline byte, 19
 //! control characters (measured: what TCGETS writes on Linux, and the
@@ -95,6 +96,7 @@
 use log
 use screen
 use serial
+use speaker
 use timer
 use uaccess
 
@@ -534,6 +536,10 @@ pub fn ioctl(pml4: u64, req: u64, arg: u64) -> u64 {
         }
         put_sv(C_WINSZ, uaccess.get(pml4, arg, 8))
         return 0
+    }
+    if speaker.request(req) {
+        // px18: KIOCSOUND and KDMKTONE, the console's speaker (kernel/speaker).
+        return speaker.ioctl(req, arg, timer.ticks())
     }
     REFUSED
 }
