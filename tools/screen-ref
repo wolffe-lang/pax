@@ -1,0 +1,328 @@
+#!/usr/bin/env python3
+# screen-ref — the host-side reference renderer for PAX's screen (px19):
+# draw, from a serial log, the picture kernel/screen should be showing,
+# and compare it with a screendump.
+#
+#   tools/screen-ref --from TEXT --size WxH [--font BDF] [--out REF.ppm]
+#                    [--compare DUMP.ppm] [--grid GRID.txt] SERIAL.log
+#
+# The serial console and the screen are fed the same bytes (kernel/serial
+# hands every byte to kernel/screen), so the screen's picture is a
+# function of the serial log: this script reads the log from the first
+# occurrence of TEXT (the kernel's first line; what the firmware wrote
+# before it never reached the screen) to its end, runs the bytes through
+# a terminal written here from kernel/screen's rules — not from its
+# code — and draws the grid with the font read straight from the BDF
+# (font/spleen-8x16.bdf by default; not boot/font.S). The rules, as
+# kernel/screen's header states them:
+#
+#   - a W x H framebuffer, black; a grid of min(W/8, 256) columns by
+#     min(H/16, 128) rows of 8x16 cells, top left;
+#   - printable ASCII and UTF-8 code points one cell each; below 256 the
+#     font's glyph, or `?`'s when the font has none; at or above 256, a
+#     malformed sequence's byte, a stray continuation byte and 0xf8-0xff
+#     as `?`; a sequence cut short by a C0 byte or another lead byte
+#     writes `?` first;
+#   - deferred wrap; LF down (scrolling, the new row blank in colour 0),
+#     CR to column 0, BS left or only clears a pending wrap, TAB to the
+#     next multiple of 8 (at most the last column); other C0 and DEL
+#     nothing; CR, LF, BS and TAB clear a pending wrap;
+#   - ESC [ … final: SGR for final `m` without private/intermediate bytes
+#     and at most 8 parameters (0 reset, 1 bold = bright foreground for
+#     0-7, 7 inverse, 30-37, 90-97, 40-47, 39, 49; others ignored; each
+#     parameter at most 9999); any other sequence ignored; ESC then not
+#     `[` drops both; a C0 byte inside a sequence ends it and acts; a
+#     byte >= 0x80 inside one ends it and is dropped;
+#   - the cell's colours are fixed when it is written (bold and inverse
+#     applied then); the cursor is the cell under it with its colours
+#     swapped;
+#   - the PC text palette, 0 000000 … 15 ffffff.
+#
+# --out writes the reference as a binary PPM (P6, 255); --grid writes the
+# final grid as text (one row a line, trailing blanks kept, the cursor's
+# row and column on a last line). --compare reads QEMU's `screendump`
+# (P6) and compares it pixel for pixel: exit 0 identical, 1 different
+# (the count of differing pixels and the first differing cell, its
+# expected and actual character rows, on stderr), 2 on a usage error or
+# an unreadable input.
+import sys
+
+PALETTE = [
+    0x000000, 0xAA0000, 0x00AA00, 0xAA5500, 0x0000AA, 0xAA00AA, 0x00AAAA, 0xAAAAAA,
+    0x555555, 0xFF5555, 0x55FF55, 0xFFFF55, 0x5555FF, 0xFF55FF, 0x55FFFF, 0xFFFFFF,
+]
+
+
+def die(msg):
+    sys.stderr.write("screen-ref: %s\n" % msg)
+    sys.exit(2)
+
+
+def read_bdf(path):
+    glyphs = {}
+    enc = rows = None
+    with open(path, "rb") as f:
+        for raw in f:
+            line = raw.decode("ascii").strip()
+            if line.startswith("ENCODING "):
+                enc = int(line.split()[1])
+            elif line == "BITMAP":
+                rows = []
+            elif line == "ENDCHAR":
+                if enc is not None and rows is not None:
+                    glyphs[enc] = rows
+                enc = rows = None
+            elif rows is not None:
+                rows.append(int(line, 16))
+    return glyphs
+
+
+class Term:
+    def __init__(self, cols, rows):
+        self.cols, self.rows = cols, rows
+        self.cells = [[(32, 7, 0)] * cols for _ in range(rows)]
+        self.cx = self.cy = 0
+        self.wrap = False
+        self.fg, self.bg, self.bold, self.inv = 7, 0, False, False
+        self.esc = 0
+        self.params = [0] * 8
+        self.pi = 0
+        self.priv = False
+        self.un = 0
+        self.ucp = 0
+        self.scrolls = 0
+
+    def newline(self):
+        if self.cy + 1 < self.rows:
+            self.cy += 1
+        else:
+            self.cells.pop(0)
+            self.cells.append([(32, 7, 0)] * self.cols)
+            self.scrolls += 1
+
+    def glyph(self, cp):
+        if self.wrap:
+            self.wrap = False
+            self.cx = 0
+            self.newline()
+        f = self.fg + 8 if self.bold and self.fg < 8 else self.fg
+        b = self.bg
+        if self.inv:
+            f, b = b, f
+        row = list(self.cells[self.cy])
+        row[self.cx] = (cp, f, b)
+        self.cells[self.cy] = row
+        if self.cx + 1 == self.cols:
+            self.wrap = True
+        else:
+            self.cx += 1
+
+    def control(self, b):
+        if b == 10:
+            self.wrap = False
+            self.newline()
+        elif b == 13:
+            self.wrap = False
+            self.cx = 0
+        elif b == 8:
+            if self.wrap:
+                self.wrap = False
+            elif self.cx > 0:
+                self.cx -= 1
+        elif b == 9:
+            self.wrap = False
+            self.cx = min((self.cx // 8 + 1) * 8, self.cols - 1)
+
+    def sgr(self, ps):
+        for p in ps:
+            if p == 0:
+                self.fg, self.bg, self.bold, self.inv = 7, 0, False, False
+            elif p == 1:
+                self.bold = True
+            elif p == 7:
+                self.inv = True
+            elif 30 <= p <= 37:
+                self.fg = p - 30
+            elif p == 39:
+                self.fg = 7
+            elif 40 <= p <= 47:
+                self.bg = p - 40
+            elif p == 49:
+                self.bg = 0
+            elif 90 <= p <= 97:
+                self.fg = p - 90 + 8
+
+    def feed(self, b):
+        if b < 32 or b == 127:
+            if self.un:
+                self.un = 0
+                self.glyph(63)
+            if b == 27:
+                self.esc = 1
+                return
+            self.esc = 0
+            self.control(b)
+            return
+        if self.esc == 1:
+            if b == 0x5B:
+                self.esc = 2
+                self.params = [0] * 8
+                self.pi = 0
+                self.priv = False
+            else:
+                self.esc = 0
+            return
+        if self.esc == 2:
+            if 0x30 <= b <= 0x39:
+                self.params[self.pi] = min(self.params[self.pi] * 10 + b - 0x30, 9999)
+            elif b == 0x3B:
+                if self.pi < 7:
+                    self.pi += 1
+                else:
+                    self.priv = True
+            elif 0x3C <= b <= 0x3F or 0x20 <= b <= 0x2F or b == 0x3A:
+                self.priv = True
+            elif 0x40 <= b <= 0x7E:
+                self.esc = 0
+                if not self.priv and b == 0x6D:
+                    self.sgr(self.params[: self.pi + 1])
+            else:
+                self.esc = 0
+            return
+        if self.un:
+            if b & 0xC0 == 0x80:
+                self.ucp = (self.ucp << 6) | (b & 0x3F)
+                self.un -= 1
+                if self.un == 0:
+                    self.glyph(self.ucp if self.ucp < 256 else 63)
+                return
+            self.un = 0
+            self.glyph(63)
+        if b < 0x80:
+            self.glyph(b)
+        elif b & 0xE0 == 0xC0:
+            self.un, self.ucp = 1, b & 0x1F
+        elif b & 0xF0 == 0xE0:
+            self.un, self.ucp = 2, b & 0x0F
+        elif b & 0xF8 == 0xF0:
+            self.un, self.ucp = 3, b & 0x07
+        else:
+            self.glyph(63)
+
+
+def render(term, glyphs, w, h):
+    px = bytearray(w * h * 3)  # black
+    q = glyphs[63]
+    for y in range(term.rows):
+        for x in range(term.cols):
+            cp, f, b = term.cells[y][x]
+            if y == term.cy and x == term.cx:
+                f, b = b, f
+            bits = glyphs.get(cp, q) if cp < 256 else q
+            fr = PALETTE[f].to_bytes(3, "big")
+            br = PALETTE[b].to_bytes(3, "big")
+            for r in range(16):
+                o = ((y * 16 + r) * w + x * 8) * 3
+                row = bits[r]
+                for k in range(8):
+                    px[o + k * 3: o + k * 3 + 3] = fr if row & (0x80 >> k) else br
+    return px
+
+
+def read_ppm(path):
+    with open(path, "rb") as f:
+        data = f.read()
+    fields = []
+    i = 0
+    while len(fields) < 4:
+        while data[i:i + 1].isspace():
+            i += 1
+        if data[i:i + 1] == b"#":
+            while data[i:i + 1] != b"\n":
+                i += 1
+            continue
+        j = i
+        while not data[j:j + 1].isspace():
+            j += 1
+        fields.append(data[i:j])
+        i = j
+    i += 1
+    if fields[0] != b"P6" or fields[3] != b"255":
+        die("%s is not a P6 PPM with maxval 255" % path)
+    w, h = int(fields[1]), int(fields[2])
+    return w, h, data[i:i + w * h * 3]
+
+
+def main():
+    args = sys.argv[1:]
+    opts = {"--font": None, "--from": None, "--size": None, "--out": None, "--compare": None, "--grid": None}
+    log = None
+    while args:
+        a = args.pop(0)
+        if a in opts:
+            if not args:
+                die("%s takes a value" % a)
+            opts[a] = args.pop(0)
+        elif a.startswith("-"):
+            die("unknown option %s" % a)
+        elif log is None:
+            log = a
+        else:
+            die("one serial log only")
+    if log is None or opts["--from"] is None or opts["--size"] is None:
+        die("usage: screen-ref --from TEXT --size WxH [--font BDF] [--out REF.ppm] [--compare DUMP.ppm] [--grid GRID.txt] SERIAL.log")
+    try:
+        w, h = (int(v) for v in opts["--size"].split("x"))
+    except ValueError:
+        die("--size takes WxH")
+    font = opts["--font"]
+    if font is None:
+        import os
+        font = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "font", "spleen-8x16.bdf")
+    glyphs = read_bdf(font)
+    try:
+        with open(log, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        die(str(e))
+    at = data.find(opts["--from"].encode())
+    if at < 0:
+        die("%r is not in %s" % (opts["--from"], log))
+    term = Term(min(w // 8, 256), min(h // 16, 128))
+    for b in data[at:]:
+        term.feed(b)
+    px = render(term, glyphs, w, h)
+    if opts["--out"]:
+        with open(opts["--out"], "wb") as f:
+            f.write(b"P6\n%d %d\n255\n" % (w, h))
+            f.write(px)
+    if opts["--grid"]:
+        with open(opts["--grid"], "w", encoding="utf-8") as f:
+            for row in term.cells:
+                f.write("".join(chr(c[0]) if c[0] >= 32 else "?" for c in row) + "\n")
+            f.write("cursor %d %d, %d scrolls, %d bytes\n" % (term.cy, term.cx, term.scrolls, len(data) - at))
+    print("screen-ref: %s from byte %d: %d bytes, %dx%d cells, %d scrolls, cursor row %d column %d"
+          % (log, at, len(data) - at, term.cols, term.rows, term.scrolls, term.cy, term.cx))
+    if opts["--compare"]:
+        dw, dh, dump = read_ppm(opts["--compare"])
+        if (dw, dh) != (w, h):
+            sys.stderr.write("screen-ref: DIFFERENT: the dump is %dx%d, the reference %dx%d\n" % (dw, dh, w, h))
+            sys.exit(1)
+        if dump == bytes(px):
+            print("screen-ref: IDENTICAL: %s equals the reference, %d pixels" % (opts["--compare"], w * h))
+            sys.exit(0)
+        n = 0
+        first = None
+        for i in range(0, len(px), 3):
+            if px[i:i + 3] != dump[i:i + 3]:
+                n += 1
+                if first is None:
+                    first = i // 3
+        fy, fx = divmod(first, w)
+        cy, cx = fy // 16, fx // 8
+        sys.stderr.write("screen-ref: DIFFERENT: %d of %d pixels differ; the first at (%d, %d), cell row %d column %d (%r)\n"
+                         % (n, w * h, fx, fy, cy, cx, chr(term.cells[cy][cx][0]) if cy < term.rows and cx < term.cols else "outside the grid"))
+        sys.exit(1)
+
+
+main()
