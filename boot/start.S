@@ -33,7 +33,9 @@
    Limine configuration names with `module_path`, px10's initramfs;
    PROTOCOL.md's Module Feature). px15 adds an eighth, the executable
    command line request (revision 0: the configuration's `cmdline`;
-   PROTOCOL.md's Executable Command Line Feature), for `quiet`.
+   PROTOCOL.md's Executable Command Line Feature), for `quiet`. px19
+   adds a ninth, the framebuffer request (revision 0; PROTOCOL.md's
+   Framebuffer Feature), for the screen.
 
    Not listed in kernel/wolf.pkg: the boot code is the consumer's, and
    links wolf's object (K6(b)); tools/build-kernel assembles it.
@@ -93,6 +95,11 @@ limine_module_request:                  /* px10: the initramfs, a module */
         .globl limine_executable_cmdline_request
 limine_executable_cmdline_request:      /* px15: the kernel command line */
         .quad LIMINE_MAGIC_0, LIMINE_MAGIC_1, 0x4b161536e598651e, 0xb390ad4a2f1f303a
+        .quad 0, 0
+
+        .globl limine_framebuffer_request
+limine_framebuffer_request:             /* px19: the screen */
+        .quad LIMINE_MAGIC_0, LIMINE_MAGIC_1, 0x9d5827dcd881dd75, 0xa3148604f6fab11b
         .quad 0, 0
 
         .globl limine_base_revision

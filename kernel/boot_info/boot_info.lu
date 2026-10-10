@@ -30,6 +30,14 @@
 //!     loaded.
 //!   executable command line (px15): revision, cmdline (8): a C
 //!     string, the configuration's `cmdline` (empty without one).
+//!   framebuffer (px19): revision, framebuffer_count (8), framebuffers
+//!     (16): an array of pointers to `struct limine_framebuffer`
+//!     {address (0, virtual: the HHDM), width (8), height (16), pitch
+//!     (24), bpp (32, 16 bits), memory_model (34, 8 bits; 1 RGB),
+//!     red_mask_size (35), red_mask_shift (36), green_mask_size (37),
+//!     green_mask_shift (38), blue_mask_size (39), blue_mask_shift (40),
+//!     unused[7], edid_size (48), edid (56), …}. No response when there
+//!     is no framebuffer (a machine with no display device).
 
 extern "c" let limine_base_revision: *u64
 extern "c" let limine_bootloader_info_request: *u64
@@ -39,13 +47,14 @@ extern "c" let limine_hhdm_request: *u64
 extern "c" let limine_executable_address_request: *u64
 extern "c" let limine_module_request: *u64
 extern "c" let limine_executable_cmdline_request: *u64
+extern "c" let limine_framebuffer_request: *u64
 extern "c" let __pax_image_start: *u8
 extern "c" let __pax_image_end: *u8
 
 /// The address of request `which` in boot/start.S: 0 the base revision
 /// tag, 1 bootloader info, 2 firmware type, 3 memory map, 4 HHDM, 5
 /// executable address, 6 modules (px10), 7 the executable command line
-/// (px15); 0 for any other `which`.
+/// (px15), 8 the framebuffer (px19); 0 for any other `which`.
 fn request(which: int) -> u64 {
     // # Safety: link-time addresses; nothing is read.
     unsafe {
@@ -72,6 +81,9 @@ fn request(which: int) -> u64 {
         }
         if which == 7 {
             return limine_executable_cmdline_request as u64
+        }
+        if which == 8 {
+            return limine_framebuffer_request as u64
         }
     }
     0
@@ -360,3 +372,77 @@ pub fn module_path_byte(i: u64, k: u64) -> int {
     }
     -1
 }
+
+/// How many framebuffers Limine handed over (px19): 0 without a
+/// response (no display device).
+pub fn fb_count() -> u64 {
+    let r = response(8)
+    if r == 0 {
+        return 0
+    }
+    word(r + 8)
+}
+
+/// The first framebuffer's `struct limine_framebuffer`, 0 without one.
+fn fb0() -> u64 {
+    let r = response(8)
+    if r == 0 || word(r + 8) == 0 {
+        return 0
+    }
+    let a = word(r + 16)
+    if a == 0 {
+        return 0
+    }
+    word(a)
+}
+
+/// The first framebuffer's word at byte `off` (0, 8, …, 40), 0 without
+/// a framebuffer.
+fn fb_word(off: u64) -> u64 {
+    let f = fb0()
+    if f == 0 {
+        return 0
+    }
+    word(f + off)
+}
+
+/// The first framebuffer's address (virtual, in the HHDM), 0 without one.
+pub fn fb_address() -> u64 {
+    fb_word(0)
+}
+
+/// Its width in pixels.
+pub fn fb_width() -> u64 {
+    fb_word(8)
+}
+
+/// Its height in pixels.
+pub fn fb_height() -> u64 {
+    fb_word(16)
+}
+
+/// Its pitch: bytes from one pixel row to the next.
+pub fn fb_pitch() -> u64 {
+    fb_word(24)
+}
+
+/// Its bits per pixel.
+pub fn fb_bpp() -> u64 {
+    fb_word(32) & 0xffff
+}
+
+/// Its memory model (1: RGB).
+pub fn fb_model() -> u64 {
+    (fb_word(32) >> 16) & 0xff
+}
+
+/// Its mask `which` (0 red, 1 green, 2 blue): the size in bits (`shift`
+/// false) or the shift (`shift` true).
+pub fn fb_mask(which: u64, shift: bool) -> u64 {
+    let k = which * 2 + (if shift { 1 } else { 0 }) // 0..5: byte 35 + k
+    if k == 5 {
+        return fb_word(40) & 0xff
+    }
+    (fb_word(32) >> (24 + k * 8)) & 0xff
+}
+
