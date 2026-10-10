@@ -150,9 +150,9 @@ machine's screen does; the PS/2 keyboard (px13) types into it.
 | Q5's one miss: the screen still scrolling after the last serial line | kasumi gauntlet at `fb845d9`: tour R5 native UEFI NOT HALTED, RIP in `pax_fb_copy` (`notes/px19/kasumi-red-fb845d9-tour-R5.out`, `…fb845d9.summary`); fixed by `178ce3e` (the screen drawn before the UART); green at `f0affda` |
 | V4 and V6 seen red before they were right (the test's expectations, not the kernel) | CI run **38019990181** at `fb845d9`, job 114118643024 (mpx3-screen; every other job green): V4 ×4 (Limine's CR3 and the full-width rows differ with the display device), V6 ×4 (ask prints `winsize <result> rows <r> cols <c>`) — `notes/px19/ci-38019990181-mpx3-screen-fb845d9.txt`; kasumi the same (`notes/px19/kasumi-red-fb845d9-mpx3-screen.out`); fixed by `f0affda` |
 | Q6: no display device, no framebuffer, serial only | V4 lines (`screen: off, no framebuffer`, 413 serial lines byte-identical to the screen run's but the display-dependent ones), every leg, every host |
-| the planted break: colour 3 drawn `aaaa00` | CI run PLANT_RUN at `f734ef8` (see §5) |
+| the planted break: colour 3 drawn `aaaa00` instead of brown `aa5500` (one palette entry; no serial byte changes) | CI run **38024480797** at `f734ef8` (the plant before the rebase; `9ab30ca` after it), mpx3-screen job 114132277455: **V2 FAIL on all four legs**, 1132 of 1024000 pixels, the first in the pattern's `fg33`; 20 PASS (V5 and V6 hold: no colour 3 on those screens); every other job green — `notes/px19/ci-38024480797-mpx3-screen-plant-f734ef8.txt`; kasumi the same (`notes/px19/kasumi-red-f734ef8-plant.out`); reverted |
 | the window on nomad-1 | `-display cocoa` boots of `kmain_screen.iso` and of the shell and tour images (Homebrew QEMU 11.1.1, TCG): each window's monitor `screendump` identical to `tools/screen-ref`'s picture (kept outside pax with the images) |
-| the shell and tour images with px17's work merged | a local merge `22bc18d` (px19 `f0affda` + px17 `df5de90`, prose conflicts only): mpx3-console 100, mpx3-shell 152, mpx3-screen 24, tour 44, 0 FAIL (`notes/px19/kasumi-integration-22bc18d.summary`) |
+| the shell and tour images with px17's work merged | a local merge `22bc18d` (px19 `f0affda` + px17 `df5de90`, prose conflicts only): mpx3-console 100, mpx3-shell 152, mpx3-screen 24, tour 44, 0 FAIL (`notes/px19/kasumi-integration-22bc18d.summary`). px17 then merged as trunk `df5de90` and px19 was rebased onto it: every file outside the prose (README, kernel/README, docs/SOURCES.md, CHANGELOG.md, notes) is byte-identical to `22bc18d`'s (`git diff --stat 22bc18d HEAD` on the code: empty), so these runs and the images built there are the rebased head's |
 | boot counts | serial logs left by the boots (`find build -name '*.serial.log'`): kasumi `f0affda` 186 (mpx3-screen's 20), the integration tree 76, hasu KVM 20 (mpx3-screen); mpx3-screen boots 20 per run (5 boots × 2 tiers × 2 firmwares) in every CI run |
 
 ## The prediction against the measurement
@@ -166,3 +166,22 @@ machine's screen does; the PS/2 keyboard (px13) types into it.
 | Q5: every existing suite's count unchanged with the screen drawn; only ask's winsize moves, so its sessions boot serial-only | **right at `f0affda`**, but **wrong at `fb845d9`** on one leg: tour R5 native UEFI on kasumi caught the kernel inside `pax_fb_copy` after the PANIC line had reached the serial port — `serial.put` wrote the UART first and drew second, so the last line's scroll ran after the harness saw the line. `178ce3e` draws first. CI at `fb845d9` did not catch it (tour green there): a race that kasumi's load exposed |
 | Q6: `-vga none` boots, no framebuffer response | **right**, every leg |
 | Q7: at least one real disagreement between the kernel's terminal and the reference renderer | **wrong**: none. Every screendump equalled the reference from the first boot (nomad-1, before the test existed). The two reds `mpx3-screen` showed were in the test's expectations (V4's display-dependent lines, V6's reading of ask's line), not in either terminal |
+
+## 5. Done-when
+
+- [x] Branch `px19` on origin, rebased onto trunk `df5de90` (px17
+  merged); PR #21 open, unmerged.
+- [x] §1–§3 committed before the first change (`55972d9`, rebased to the
+  same content).
+- [x] The screen, the font with its licence (`font/LICENSE.spleen`,
+  `docs/SOURCES.md`), `TIOCGWINSZ`, the tests (`tests/mpx3-screen`, CI
+  job `mpx3-screen`), the shell's and the tour's kernels drawing it.
+- [x] Planted break red in CI (run 38024480797), reverted.
+- [x] Both folders outside pax refreshed from this code (the tour's and
+  the shell's images, the source snapshot, a window command in each
+  README; their terminal steps unchanged), both preflights GO.
+- [ ] CI green at the head (the PR body names the run).
+- [x] Worktrees gone; kasumi, hasu and nomad-1 outputs pruned; no
+  orphans of this lane's.
+- Close nothing. To close: none (no issue was filed or named for this
+  lane).
