@@ -101,6 +101,29 @@ use paging
 use panic
 use sync
 
+// s223 probe (wolf-lang#611): the runtime's ambient pair. kernel/heap
+// already supplies the runtime's hooks (wolf_alloc, wolf_free), so it
+// owns the runtime's interface; the scheduler saves and restores the
+// slot through `ambient` / `set_ambient` at every switch, and every
+// kernel with a scheduler links the hooks the runtime archive imports.
+extern "c" fn wolf_rt_ambient_get() -> *u8
+extern "c" fn wolf_rt_ambient_set(p: *u8)
+
+/// The running thread's ambient region (wolf's
+/// `[abi.target.none.ambient]`); 0 is the root.
+pub fn ambient() -> u64 {
+    // # Safety: wolf's freestanding runtime's documented getter.
+    unsafe { wolf_rt_ambient_get() as u64 }
+}
+
+/// Make `p` the running thread's ambient region: a value `ambient`
+/// returned on the thread being resumed, or 0 for a fresh thread.
+pub fn set_ambient(p: u64) {
+    // # Safety: wolf's documented setter; the caller passes a value this
+    // thread's own switch saved, or 0 (the root).
+    unsafe { wolf_rt_ambient_set(p as *u8) }
+}
+
 /// The heap's PML4 slot.
 pub const SLOT: u64 = 384
 const META: u64 = 0xffffc00000000000 // the state page, and the slot's first address

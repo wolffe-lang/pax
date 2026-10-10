@@ -131,6 +131,7 @@
 use fpu
 use frames
 use gdt
+use heap // s223 probe: the runtime's ambient pair, through kernel/heap
 use log
 use paging
 use panic
@@ -139,10 +140,6 @@ use timer
 
 extern "c" fn pax_switch()
 extern "c" fn pax_wrmsr(msr: u64, v: u64)
-// s223 probe (wolf-lang#611, [abi.target.none.ambient]): the runtime's
-// ambient pair, saved and restored per thread at every switch.
-extern "c" fn wolf_rt_ambient_get() -> *u8
-extern "c" fn wolf_rt_ambient_set(p: *u8)
 
 extern "c" let pax_threads: *u64
 extern "c" let pax_sched_state: *u64
@@ -358,12 +355,8 @@ fn run_next() -> u64 {
         // s223 probe: the outgoing thread's ambient region into its
         // record, the incoming one's out of its own (null for a thread
         // that has not run: the root). IF is clear here.
-        // # Safety: wolf's freestanding runtime's documented pair; the
-        // value set is the one this slot's own switch saved, or null.
-        unsafe {
-            put_field(from, offset_of(Thread, amb), wolf_rt_ambient_get() as u64)
-            wolf_rt_ambient_set(field(s, offset_of(Thread, amb)) as *u8)
-        }
+        put_field(from, offset_of(Thread, amb), heap.ambient())
+        heap.set_ambient(field(s, offset_of(Thread, amb)))
     }
     put_field(s, offset_of(Thread, state), RUNNING)
     put_field(s, offset_of(Thread, runs), field(s, offset_of(Thread, runs)) + 1)
