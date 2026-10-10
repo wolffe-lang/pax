@@ -1,0 +1,502 @@
+//! play — play a note file through the console's speaker (px18).
+//!
+//!     play                 list the tunes in /usr/share/tunes
+//!     play NAME|PATH ...   play each, in order (a NAME without a `/`
+//!                          is /usr/share/tunes/NAME)
+//!
+//! **The note file** is plain text, one item a line; `#` starts a
+//! comment that runs to the end of its line; blank lines are skipped:
+//!
+//!     title <words>     optional, before the tempo
+//!     tempo <bpm>       quarter notes a minute, 20-400; before any note
+//!     gap <ms>          optional, 0-100 (default 20): silence cut from
+//!                       the end of every note, so repeated notes part
+//!     <note> <length>   C D E F G A B, then `#` or `b` or nothing, then
+//!                       the octave 2-7 (A4 = 440 Hz, equal temperament)
+//!     r <length>        a rest
+//!
+//! A length is 1 2 4 8 16 or 32 (whole to thirty-second), a trailing `.`
+//! dots it, and `+` ties lengths together (`4+16`, `2.+8`).
+//!
+//! Every file is read and checked whole before a sound: a bad line is
+//! `play: <path>: line <n>: <what>` on standard error, status 2, and
+//! nothing plays. A file that cannot be read is `play: <path>: no such
+//! tune` or `cannot read`, status 2.
+//!
+//! **The sound** is Linux's console ioctl KIOCSOUND (0x4B2F,
+//! `ioctl_kd(2)`): its argument is the 8254's count, 1193182 / Hz, and 0
+//! is silence. play asks it of the first of descriptors 0, 1 and 2 that
+//! accepts a silencing KIOCSOUND (a console answers 0; a pipe, a file or
+//! a pseudo-terminal answers -ENOTTY), so it runs unmodified on a Linux
+//! virtual console and on PAX's console; with none it says `play: no
+//! console speaker on descriptors 0-2` and exits 1. The call is kd.S's
+//! `play_kd`, the one routine wolf has no builtin for.
+//!
+//! **The time** is an absolute schedule: every note's start is the
+//! first note's start plus the lengths before it, read from the
+//! monotonic clock, and play sleeps only the difference, so no error
+//! accumulates. The speaker is silenced at the end of every note and
+//! before every exit.
+
+/// The tunes' directory.
+const TUNES: str = "/usr/share/tunes"
+/// KIOCSOUND (uapi linux/kd.h).
+const KIOCSOUND: int = 0x4b2f
+/// The PC's 8254 input clock, in hundredths of a hertz.
+const PIT_CENTI_HZ: int = 119318200
+
+extern "c" fn play_kd(fd: int, req: int, arg: int) -> int
+
+/// A checked note file: its notes' counts (0 a rest) and lengths, or
+/// the reason it is refused.
+struct Tune {
+    title: str,
+    err: str,
+    counts: List[int],
+    lengths: List[int], // microseconds
+    gap: int, // microseconds
+    total: int, // microseconds
+}
+
+fn main() -> int {
+    let args = env_args()
+    if args.len == 0 {
+        return list()
+    }
+    var tunes = List[Tune]()
+    var paths = List[str]()
+    for a in args {
+        let p = path_of(a)
+        let t = load(p)
+        if t.err != "" {
+            eprint("play: {p}: {t.err}")
+            return 2
+        }
+        (mut paths).push(p)
+        (mut tunes).push(t)
+    }
+    let fd = console()
+    if fd < 0 {
+        eprint("play: no console speaker on descriptors 0-2")
+        return 1
+    }
+    var i = 0
+    while i < tunes.len {
+        print("playing {tunes[i].title} ({secs(tunes[i].total)} s)")
+        perform(fd, tunes[i])
+        i += 1
+    }
+    0
+}
+
+/// A NAME without a `/` is a tune in TUNES; anything else a path.
+fn path_of(a: str) -> str {
+    for b in a.bytes() {
+        if b as int == 47 {
+            return a
+        }
+    }
+    "{TUNES}/{a}"
+}
+
+/// `play` alone: each tune (a file) in TUNES, sorted, with its title
+/// and length.
+fn list() -> int {
+    let names = fs_read_dir(TUNES) else |_| {
+        eprint("play: {TUNES}: cannot read")
+        return 2
+    }
+    let sorted = sort(names)
+    var width = 0
+    for n in sorted {
+        if fs_is_file("{TUNES}/{n}") && n.len > width {
+            width = n.len
+        }
+    }
+    for n in sorted {
+        if !fs_is_file("{TUNES}/{n}") {
+            continue
+        }
+        let t = load("{TUNES}/{n}")
+        var line = n
+        var k = n.len
+        while k < width + 2 {
+            line = "{line} "
+            k += 1
+        }
+        if t.err != "" {
+            print("{line}(refused: {t.err})")
+        } else {
+            print("{line}{t.title}, {secs(t.total)} s")
+        }
+    }
+    0
+}
+
+/// `names` in byte order (an insertion sort: a directory of tunes is short).
+fn sort(names: List[str]) -> List[str] {
+    var out = List[str]()
+    for n in names {
+        var at = out.len
+        var j = 0
+        while j < out.len {
+            if before(n, out[j]) {
+                at = j
+                break
+            }
+            j += 1
+        }
+        var next = List[str]()
+        var k = 0
+        while k < out.len {
+            if k == at {
+                (mut next).push(copy n)
+            }
+            (mut next).push(copy out[k])
+            k += 1
+        }
+        if at == out.len {
+            (mut next).push(copy n)
+        }
+        out = next
+    }
+    out
+}
+
+/// Whether `a` sorts before `b`, byte by byte.
+fn before(a: str, b: str) -> bool {
+    let x = a.bytes()
+    let y = b.bytes()
+    var i = 0
+    while i < x.len && i < y.len {
+        if x[i] as int != y[i] as int {
+            return (x[i] as int) < (y[i] as int)
+        }
+        i += 1
+    }
+    x.len < y.len
+}
+
+/// Seconds to one decimal, from microseconds.
+fn secs(us: int) -> str {
+    let tenths = (us + 50000) / 100000
+    "{tenths / 10}.{tenths % 10}"
+}
+
+/// The first of descriptors 0, 1, 2 that answers a silencing KIOCSOUND
+/// with 0; -1 when none does.
+fn console() -> int {
+    var fd = 0
+    while fd < 3 {
+        if kd(fd, 0) == 0 {
+            return fd
+        }
+        fd += 1
+    }
+    -1
+}
+
+/// KIOCSOUND on `fd` with count `n`: the raw call's answer.
+fn kd(fd: int, n: int) -> int {
+    // # Safety: kd.S's ioctl(2) with an integer argument; no memory is
+    // passed.
+    unsafe { play_kd(fd, KIOCSOUND, n) }
+}
+
+/// KIOCSOUND with count `n` (0 silence) on a descriptor that accepted it.
+fn tone(fd: int, n: int) {
+    let _ = kd(fd, n)
+}
+
+/// Sleep until `t` milliseconds on the monotonic clock.
+fn until(t: int) {
+    let now = time_now_ms()
+    if t > now {
+        time_sleep_ms(t - now)
+    }
+}
+
+/// Play `t` on `fd`'s speaker, on an absolute schedule.
+fn perform(fd: int, t: Tune) {
+    let t0 = time_now_ms()
+    var at = 0 // microseconds since t0
+    var i = 0
+    while i < t.counts.len {
+        let len = t.lengths[i]
+        if t.counts[i] > 0 {
+            var sound = len - t.gap
+            if sound < len / 2 {
+                sound = len / 2
+            }
+            tone(fd, t.counts[i])
+            until(t0 + (at + sound) / 1000)
+            tone(fd, 0)
+        }
+        at += len
+        until(t0 + at / 1000)
+        i += 1
+    }
+    tone(fd, 0)
+}
+
+/// Read and check the note file at `path`.
+fn load(path: str) -> Tune {
+    let text = fs_read_text(path) else |_| {
+        if !fs_is_file(path) && !fs_is_dir(path) {
+            return refused("no such tune")
+        }
+        return refused("cannot read")
+    }
+    parse(text)
+}
+
+fn refused(why: str) -> Tune {
+    Tune { title: "", err: why, counts: List[int](), lengths: List[int](), gap: 0, total: 0 }
+}
+
+/// The words of one line, its comment dropped (a `#` that starts a
+/// word starts the comment; inside a word, `F#4`, it is the sharp).
+fn words(line: str) -> List[str] {
+    var out = List[str]()
+    let b = line.bytes()
+    var i = 0
+    while i < b.len {
+        let c = b[i] as int
+        if c == 35 {
+            break
+        }
+        if c == 32 || c == 9 || c == 13 {
+            i += 1
+            continue
+        }
+        var j = i
+        while j < b.len && b[j] as int != 32 && b[j] as int != 9 && b[j] as int != 13 {
+            j += 1
+        }
+        (mut out).push(line[i..j])
+        i = j
+    }
+    out
+}
+
+/// A decimal integer of at most six digits, or -1.
+fn number(w: str) -> int {
+    let b = w.bytes()
+    if b.len == 0 || b.len > 6 {
+        return -1
+    }
+    var v = 0
+    for c in b {
+        let d = c as int - 48
+        if d < 0 || d > 9 {
+            return -1
+        }
+        v = v * 10 + d
+    }
+    v
+}
+
+/// The note's frequency at octave 4, in hundredths of a hertz (equal
+/// temperament, A4 = 440 Hz), by semitone above C; -1 out of range.
+fn centi_hz4(semi: int) -> int {
+    match semi {
+        0 => 26163,
+        1 => 27718,
+        2 => 29366,
+        3 => 31113,
+        4 => 32963,
+        5 => 34923,
+        6 => 36999,
+        7 => 39200,
+        8 => 41530,
+        9 => 44000,
+        10 => 46616,
+        11 => 49388,
+        _ => -1,
+    }
+}
+
+/// The 8254 count for a note word (`C4`, `F#5`, `Bb3`), or -1.
+fn count_of(w: str) -> int {
+    let b = w.bytes()
+    if b.len < 2 || b.len > 3 {
+        return -1
+    }
+    var semi = match b[0] as int {
+        67 => 0,
+        68 => 2,
+        69 => 4,
+        70 => 5,
+        71 => 7,
+        65 => 9,
+        66 => 11,
+        _ => -1,
+    }
+    if semi < 0 {
+        return -1
+    }
+    var i = 1
+    if b.len == 3 {
+        let acc = b[1] as int
+        if acc == 35 {
+            semi += 1
+        } else if acc == 98 {
+            semi -= 1
+        } else {
+            return -1
+        }
+        i = 2
+    }
+    let oct = b[i] as int - 48
+    if oct < 2 || oct > 7 {
+        return -1
+    }
+    var o = oct
+    if semi < 0 {
+        semi += 12
+        o -= 1
+    }
+    if semi > 11 {
+        semi -= 12
+        o += 1
+    }
+    var num = PIT_CENTI_HZ
+    var den = centi_hz4(semi)
+    if o >= 4 {
+        den = den * pow2(o - 4)
+    } else {
+        num = num * pow2(4 - o)
+    }
+    (num + den / 2) / den
+}
+
+fn pow2(k: int) -> int {
+    var v = 1
+    var i = 0
+    while i < k {
+        v = v * 2
+        i += 1
+    }
+    v
+}
+
+/// A length word's duration in microseconds at `bpm`, or -1.
+fn length_of(w: str, bpm: int) -> int {
+    let b = w.bytes()
+    var total = 0
+    var i = 0
+    if b.len == 0 {
+        return -1
+    }
+    while i < b.len {
+        var j = i
+        while j < b.len && b[j] as int >= 48 && b[j] as int <= 57 {
+            j += 1
+        }
+        let n = number(w[i..j])
+        if n != 1 && n != 2 && n != 4 && n != 8 && n != 16 && n != 32 {
+            return -1
+        }
+        // A whole note is four quarters: 240 000 000 us / (bpm * n).
+        var us = 240000000 / (bpm * n)
+        if j < b.len && b[j] as int == 46 {
+            us = us * 3 / 2
+            j += 1
+        }
+        total += us
+        if j < b.len {
+            if b[j] as int != 43 || j + 1 == b.len {
+                return -1
+            }
+            j += 1
+        }
+        i = j
+    }
+    total
+}
+
+/// Check a note file's text whole; the first bad line refuses it.
+fn parse(text: str) -> Tune {
+    var title = ""
+    var bpm = 0
+    var gap = 20000
+    var counts = List[int]()
+    var lengths = List[int]()
+    var total = 0
+    var line_no = 0
+    let b = text.bytes()
+    var start = 0
+    while start < b.len {
+        var end = start
+        while end < b.len && b[end] as int != 10 {
+            end += 1
+        }
+        line_no += 1
+        let line = text[start..end]
+        start = end + 1
+        let ws = words(line)
+        if ws.len == 0 {
+            continue
+        }
+        let w = ws[0]
+        if w == "title" {
+            if bpm != 0 || counts.len > 0 {
+                return refused("line {line_no}: the title comes before the tempo")
+            }
+            if ws.len < 2 {
+                return refused("line {line_no}: a title needs words")
+            }
+            var t = copy ws[1]
+            var k = 2
+            while k < ws.len {
+                t = "{t} {ws[k]}"
+                k += 1
+            }
+            title = t
+            continue
+        }
+        if ws.len != 2 {
+            return refused("line {line_no}: '{line}' is not two words")
+        }
+        if w == "tempo" {
+            let v = number(ws[1])
+            if v < 20 || v > 400 {
+                return refused("line {line_no}: tempo '{ws[1]}' is not 20-400")
+            }
+            bpm = v
+            continue
+        }
+        if w == "gap" {
+            let v = number(ws[1])
+            if v < 0 || v > 100 {
+                return refused("line {line_no}: gap '{ws[1]}' is not 0-100")
+            }
+            gap = v * 1000
+            continue
+        }
+        var c = 0
+        if w != "r" {
+            c = count_of(w)
+            if c < 0 {
+                return refused("line {line_no}: '{w}' is not a note (C D E F G A B, # or b, an octave 2-7)")
+            }
+        }
+        if bpm == 0 {
+            return refused("line {line_no}: a note before the tempo")
+        }
+        let us = length_of(ws[1], bpm)
+        if us < 0 {
+            return refused("line {line_no}: '{ws[1]}' is not a length (1 2 4 8 16 32, a dot, + to tie)")
+        }
+        (mut counts).push(c)
+        (mut lengths).push(us)
+        total += us
+    }
+    if counts.len == 0 {
+        return refused("no notes")
+    }
+    if title == "" {
+        title = "untitled"
+    }
+    Tune { title: title, err: "", counts: counts, lengths: lengths, gap: gap, total: total }
+}
