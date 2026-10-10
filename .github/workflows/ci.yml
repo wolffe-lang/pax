@@ -1105,3 +1105,70 @@ jobs:
             build/tour-runs.txt
           retention-days: 14
           if-no-files-found: warn
+
+  # px20: the network's first step toward M-PX4. kernel/kmain_net finds
+  # QEMU's virtio network device on the PCI bus (kernel/pci), drives it
+  # through the virtio 1.x interface (kernel/virtio, kernel/net) and
+  # speaks ARP with QEMU's user-mode gateway (kernel/arp, kernel/netd).
+  # tests/mpx4-net, both tiers, BIOS and UEFI, a transitional and a
+  # 1.x-only device: the census (N1), the device up with its features
+  # and ring layout (N2), a request answered (N3), the gateway resolved
+  # (N4), QEMU's filter-dump capture held byte by byte (N5), 10000
+  # exchanges with the books flat (N6), 25000 frames in two bursts
+  # (N7), the counters against the capture (N8), the halt (N9); no
+  # device (N10) and a legacy-only device (N11), each one named line
+  # and no panic.
+  mpx4-net:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils
+          qemu-system-x86_64 --version
+          clang --version
+          ld.lld --version
+          python3 --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx4-net-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the network, both tiers, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx4-net
+
+      - name: keep the kernels, the transcripts, the captures and the halt probes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx4-net-linux
+          path: |
+            build/mpx4-net/*/*.elf
+            build/mpx4-net/*/*.iso
+            build/mpx4-net/*/*.log
+            build/mpx4-net-*.log
+            build/mpx4-net-*.meta
+            build/mpx4-net-*.halt
+            build/mpx4-net-*.verdict
+            build/mpx4-net-*.expect
+            build/mpx4-net-*.pcap
+            build/mpx4-net-*.check
+            build/mpx4-net-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
