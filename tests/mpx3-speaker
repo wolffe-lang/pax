@@ -31,7 +31,9 @@
 #      status 2, hold's line, `playing …`, status 0.
 #   K2 the scale (speaker): the capture's last eight tones are C4 D4
 #      E4 F4 G4 A4 B4 C5, each within 1% of the equal-tempered table
-#      (A4 = 440 Hz) and each sounding 480 ms within 30 ms; and in the
+#      (A4 = 440 Hz) and each sounding 480 ms within 10% (QEMU's `wav`
+#      backend renders about 3% short and its buffers jitter by about
+#      10 ms: 449-500 ms measured on CI, kasumi and hasu); and in the
 #      kernel's own timeline (kernel/speaker's ring, read from the
 #      halted machine through the monitor) the last eight tones start 50
 #      ticks apart within 3, span 350 ticks within 3, and each is held
@@ -307,7 +309,7 @@ for i, (h, w) in enumerate(zip(hz, want)):
     if abs(h - w) / w > 0.01:
         bad.append("note %d %.2f Hz, table %.2f (%.2f%%)" % (i + 1, h, w, 100 * (h - w) / w))
 for i, l in enumerate(ln):
-    if abs(l - 480) > 30:
+    if abs(l - 480) > 48:
         bad.append("note %d sounded %.1f ms in the capture" % (i + 1, l))
 # The kernel's timeline: the scale is the last eight tones started.
 ons = [(int(e[3]), int(e[5])) for e in ev if e[4] == "on"]
