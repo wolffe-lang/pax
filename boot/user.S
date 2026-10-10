@@ -81,6 +81,14 @@
                          kernel's words, or an execve caller's vectors
                          copied out of its memory), [65536, 69632) the
                          path; IF clear for the whole call.
+     pax_ofiles          64 open files, 64 bytes each (px17): what a
+                         descriptor names and every descriptor duplicated
+                         from it shares (kernel/files): a reference count,
+                         the kind, the node, the offset, the open flags.
+     pax_pipes           16 pipe buffers' records, 256 bytes each (px17):
+                         the frames holding the bytes (kernel/files), the
+                         readers and writers open, the bytes read and
+                         written so far. A socketpair is two of them.
 
    Written from: the Intel SDM vol. 3A §5.8.8 (SYSCALL and SYSRET in
    64-bit mode), §6.14.2 and §6.14.3 (the 64-bit stack frame, IRET),
@@ -169,5 +177,12 @@ pax_execbuf:
         .globl pax_argbuf
 pax_argbuf:
         .zero 69632
+        .p2align 6
+        .globl pax_ofiles
+pax_ofiles:
+        .zero 64 * 64
+        .globl pax_pipes
+pax_pipes:
+        .zero 16 * 256
 
         .section .note.GNU-stack, "", @progbits
