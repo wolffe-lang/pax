@@ -657,6 +657,72 @@ pub fn free_user(pml4: u64) -> u64 {
     n + 1
 }
 
+/// A copy of the user half of the structures at `src` (px17, a fork's
+/// child): a new PML4 (`new_space(kernel)`) and, for every present user
+/// page, a fresh frame holding the same 4096 bytes, mapped at the same
+/// address with the same leaf permissions (RW, U/S, NX). Returns the new
+/// PML4's physical address; 0 when the frames ran out, everything built
+/// so far given back. `src` may be live: it is only read, through the
+/// HHDM.
+pub fn copy_user(src: u64, kernel: u64) -> u64 {
+    let dst = new_space(kernel)
+    if dst == 0 {
+        return 0
+    }
+    let h = frames.hhdm()
+    var i4: u64 = 0
+    while i4 < KERNEL_FIRST {
+        let e4 = entry(src, i4)
+        if e4 & P != 0 {
+            var i3: u64 = 0
+            while i3 < ENTRIES {
+                let e3 = entry(e4 & ADDR, i3)
+                if e3 & P != 0 {
+                    var i2: u64 = 0
+                    while i2 < ENTRIES {
+                        let e2 = entry(e3 & ADDR, i2)
+                        if e2 & P != 0 {
+                            var i1: u64 = 0
+                            while i1 < ENTRIES {
+                                let e1 = entry(e2 & ADDR, i1)
+                                if e1 & P != 0 {
+                                    let va = (i4 << 39) | (i3 << 30) | (i2 << 21) | (i1 << PAGE_SHIFT)
+                                    let pa = frames.alloc() else 0
+                                    if pa == 0 {
+                                        let _f = free_user(dst)
+                                        return 0
+                                    }
+                                    let from = h + (e1 & ADDR)
+                                    let to = h + pa
+                                    var k: u64 = 0
+                                    while k < PAGE {
+                                        // # Safety: two usable frames through the HHDM: the
+                                        // source page's (present in `src`) and the one just taken.
+                                        unsafe { ((to + k) as *u64).write_volatile(((from + k) as *u64).read_volatile()) }
+                                        k += 8
+                                    }
+                                    let r = map_user(dst, va, pa, 0) else 0xffff
+                                    if r == 0xffff {
+                                        frames.free(pa)
+                                        let _f = free_user(dst)
+                                        return 0
+                                    }
+                                    let _p = protect_user(dst, va, e1 & (RW | US | NX))
+                                }
+                                i1 += 1
+                            }
+                        }
+                        i2 += 1
+                    }
+                }
+                i3 += 1
+            }
+        }
+        i4 += 1
+    }
+    dst
+}
+
 // --- the kernel's structures -----------------------------------------------
 
 /// `map` or a named panic (the kernel's own structures cannot be half
