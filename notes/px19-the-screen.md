@@ -102,3 +102,67 @@ machine's screen does; the PS/2 keyboard (px13) types into it.
   implementations agree. Predicted: **at least one real disagreement**
   between the kernel's terminal and the reference renderer found during
   the lane (named in §4 when it happens).
+
+## What was built
+
+- **`kernel/screen`** (and `boot/screen.S`): the console drawn on the
+  framebuffer. Every byte `serial.put` writes is handed to `screen.put`
+  first (`kernel/serial`), so the screen and the serial console carry the
+  same bytes; before the screen is attached they go to a 16 KiB early
+  buffer and are replayed at attach, so the screen shows the boot from
+  the kernel's first line. The terminal: ASCII and UTF-8 in Spleen 8×16
+  (`?` for what the font lacks), deferred wrap, LF/CR/BS/TAB, CSI read
+  whole with SGR 0 1 7 30–37 39 40–47 49 90–97 honoured, the PC's
+  16-colour palette, a steady inverse cursor, scrolling with REP
+  MOVSQ/STOSQ. IF clear while drawing; a re-entered `put` does nothing.
+- **`kernel/fb`**: Limine's framebuffer (a ninth request in
+  `boot/start.S`, its fields in `kernel/boot_info`) mapped at its HHDM
+  address in PAX's tables, 4 KiB pages RW NX, **write-combining through
+  PAT entry 5** when CPUID has the PAT and IA32_PAT's entry 5 is WC (it is
+  on every leg measured: IA32_PAT `0x0000010500070406`), else uncached
+  (PCD|PWT, entry 3). `kernel/paging` is untouched (its `map` takes the
+  leaf's bits as given).
+- **The font**: Spleen 2.2.0's 8×16 BDF, BSD-2-Clause, vendored
+  unmodified with its licence (`font/`); `tools/mkfont` makes
+  `boot/font.S` from it and `--check`s it.
+- **`TIOCGWINSZ`** answers the screen's rows and columns (`50` and `160`
+  at 1280×800) when the screen is attached; a boot with no display device
+  (`-vga none`) gets no framebuffer and keeps px13's 0 by 0.
+- **The kernels**: `kmain_console` (the shell's image) and the tour's two
+  attach the screen after paging and print nothing new; `kmain_screen` is
+  the screen's own test kernel.
+- **The harness**: `tools/qemu-run --no-screen` / `tools/qemu-halt
+  --no-screen` (`-vga none`); `tools/screen-ref`, the host-side reference
+  renderer (the picture from the serial log, the glyphs read from the BDF,
+  the terminal written again from the rules, not from the kernel's code);
+  `tests/mpx3-screen` (V0–V6) and its CI job; `tests/mpx3-console`'s ask
+  sessions boot with `--no-screen`, where the window size stays 0 by 0.
+
+## 4. Evidence index
+
+| claim | artifact |
+|---|---|
+| Q1/Q2: 1280×800, 32 bpp, pitch 5120, RGB 8:16 8:8 8:0, 160×50 cells, on BIOS and UEFI, both tiers | V1 lines: `notes/px19/kasumi-mpx3-screen-f0affda.out` (kasumi TCG), `notes/px19/hasu-kvm-mpx3-screen-f0affda.out` (hasu KVM), `notes/px19/ci-38019990181-mpx3-screen-fb845d9.txt` (CI, QEMU 8.2.2) |
+| Q4: WC through PAT 5, IA32_PAT `0x0000010500070406` | the same V1 lines, every leg |
+| the screendumps equal the reference, pixel for pixel: kmain_screen's pattern (V2), pelt typed through PS/2 (V5), ask (V6); 24 of 24 per host | `notes/px19/kasumi-mpx3-screen-f0affda.out`, `notes/px19/hasu-kvm-mpx3-screen-f0affda.out`; three of them as pictures with their grids: `notes/px19/kasumi-f0affda-native-bios-screen.png`, `…-native-uefi-pelt-ps2.png`, `…-native-bios-ask-ps2.png` (`.grid.txt` beside each) |
+| Q3: a scrolled line costs 0.11–0.17 ms under KVM (hasu), 1.0–1.3 ms under TCG (kasumi), 1.2–1.35 ms on CI's TCG; 4,014,080 bytes moved a scroll | V3 lines in the three files above; the byte count in the halt record of the tour's red (`notes/px19/kasumi-red-fb845d9-tour-R5.out`: RDX `0x3d4000` = 49×16×5120 inside `pax_fb_copy`) |
+| Q5: every suite's count as trunk's, the screen drawn | kasumi gauntlet at `f0affda`: `notes/px19/kasumi-gauntlet-f0affda.summary` (versions `…f0affda.versions`) — proof 2, census 3, mkw 16, mpx1 26, mpx2-frames 44, mpx2-paging 26, mpx2-interrupts 34, mpx2-sched 32, mpx2-heap 56, mpx3-user 38, tour 44, mpx3-boreutils 20, mpx3-console 100, mpx3-shell 128 (the `--images` legs: CI's counts less the build's PASS line), mpx3-screen 24; 0 FAIL, 0 SKIP |
+| Q5's one miss: the screen still scrolling after the last serial line | kasumi gauntlet at `fb845d9`: tour R5 native UEFI NOT HALTED, RIP in `pax_fb_copy` (`notes/px19/kasumi-red-fb845d9-tour-R5.out`, `…fb845d9.summary`); fixed by `178ce3e` (the screen drawn before the UART); green at `f0affda` |
+| V4 and V6 seen red before they were right (the test's expectations, not the kernel) | CI run **38019990181** at `fb845d9`, job 114118643024 (mpx3-screen; every other job green): V4 ×4 (Limine's CR3 and the full-width rows differ with the display device), V6 ×4 (ask prints `winsize <result> rows <r> cols <c>`) — `notes/px19/ci-38019990181-mpx3-screen-fb845d9.txt`; kasumi the same (`notes/px19/kasumi-red-fb845d9-mpx3-screen.out`); fixed by `f0affda` |
+| Q6: no display device, no framebuffer, serial only | V4 lines (`screen: off, no framebuffer`, 413 serial lines byte-identical to the screen run's but the display-dependent ones), every leg, every host |
+| the planted break: colour 3 drawn `aaaa00` | CI run PLANT_RUN at `f734ef8` (see §5) |
+| the window on nomad-1 | `-display cocoa` boots of `kmain_screen.iso` and of the shell and tour images (Homebrew QEMU 11.1.1, TCG): each window's monitor `screendump` identical to `tools/screen-ref`'s picture (kept outside pax with the images) |
+| the shell and tour images with px17's work merged | a local merge `22bc18d` (px19 `f0affda` + px17 `df5de90`, prose conflicts only): mpx3-console 100, mpx3-shell 152, mpx3-screen 24, tour 44, 0 FAIL (`notes/px19/kasumi-integration-22bc18d.summary`) |
+| boot counts | serial logs left by the boots (`find build -name '*.serial.log'`): kasumi `f0affda` 186 (mpx3-screen's 20), the integration tree 76, hasu KVM 20 (mpx3-screen); mpx3-screen boots 20 per run (5 boots × 2 tiers × 2 firmwares) in every CI run |
+
+## The prediction against the measurement
+
+| prediction | result |
+|---|---|
+| Q1: 1280×800, 32 bpp, pitch 5120, RGB 8@16 8@8 8@0, BIOS and UEFI alike | **right**, on kasumi (QEMU 11.1.1 TCG), hasu (KVM) and CI (QEMU 8.2.2): every V1 line. The framebuffer sits at `0xffff8000fd000000` under SeaBIOS and `0xffff800080000000` under OVMF |
+| Q2: 160 × 50 cells, no margin | **right** |
+| Q3: 4,014,080 bytes a scroll; ≤ 2 ms a line under KVM; 5–40 ms under TCG | bytes **right** (RDX in the halt record of the tour's red); KVM **right** (0.11–0.17 ms); TCG **wrong**: 1.0–1.3 ms on kasumi, 1.2–1.35 ms on CI — REP MOVSQ is one helper loop in TCG, not an instruction at a time, which I did not count on |
+| Q4: WC through PAT entry 5, IA32_PAT entry 5 = 0x01 | **right**, every leg: `0x0000010500070406` |
+| Q5: every existing suite's count unchanged with the screen drawn; only ask's winsize moves, so its sessions boot serial-only | **right at `f0affda`**, but **wrong at `fb845d9`** on one leg: tour R5 native UEFI on kasumi caught the kernel inside `pax_fb_copy` after the PANIC line had reached the serial port — `serial.put` wrote the UART first and drew second, so the last line's scroll ran after the harness saw the line. `178ce3e` draws first. CI at `fb845d9` did not catch it (tour green there): a race that kasumi's load exposed |
+| Q6: `-vga none` boots, no framebuffer response | **right**, every leg |
+| Q7: at least one real disagreement between the kernel's terminal and the reference renderer | **wrong**: none. Every screendump equalled the reference from the first boot (nomad-1, before the test existed). The two reds `mpx3-screen` showed were in the test's expectations (V4's display-dependent lines, V6's reading of ask's line), not in either terminal |
