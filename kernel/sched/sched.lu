@@ -118,6 +118,16 @@
 //! Reaping may run in a system call too (wait4): never on the dead
 //! thread's own stack, always with IF clear.
 //!
+//! **Pipes** (px17): a system call may also wait for a pipe or a socket
+//! (`block_pipe`, for a read of an empty one or a write to a full one):
+//! its frame is saved, rewound by kernel/user to re-run the `syscall`,
+//! and every change to any pipe (bytes in or out, an end closed) makes
+//! every such thread ready (`wake_pipes`), each to run its call again
+//! and wait again if its pipe still cannot answer. And `clone_current`
+//! also makes a fork's child (px17): a copy of the caller's address
+//! space (kernel/paging's `copy_user`), its own, which it frees when it
+//! execs or ends.
+//!
 //! The record's fields are read and written as words at their
 //! `offset_of`, volatile (`field`/`put_field`): wolf 0.2.26 stores a
 //! field of a raw element in place (wolf-lang#577), but as an ordinary
@@ -194,6 +204,7 @@ const INPUT: u64 = 6 // px13: waiting for console input (kernel/console)
 const ZOMBIE: u64 = 7 // px14: ended, its stack and space given back, its status kept for its parent
 const VFORK: u64 = 8 // px14: a parent suspended until its vfork child execs or ends
 const WAITING: u64 = 9 // px14: in wait4/waitid until a child ends
+const PIPE: u64 = 10 // px17: in a read or write of a pipe or socket that must wait
 
 const STACKS: u64 = 0xffffd00000000000 // PML4 slot 416
 const SPAN: u64 = 65536 // each slot's virtual space
@@ -1021,16 +1032,17 @@ pub fn set_self_sigmask(v: u64) {
     put_field(cur(), offset_of(Thread, sigmask), v)
 }
 
-/// A child of the running process, sharing its address space, made from
-/// its system call frame `f` (`clone`/`clone3`/`vfork`, CLONE_VM): a new
-/// slot and kernel stack, a new pid, the caller its parent; its first
-/// frame is `f`'s 22 words with %rax 0 and, when `usp` is not 0, %rsp
-/// `usp`, so it resumes in ring 3 after the `syscall` as the caller
-/// would; the caller's FS base, signal mask, x87/SSE state and process
-/// area (descriptors, break, signal records) copied; the space borrowed,
-/// not owned. Queued ready. Returns its slot; SLOTS when no slot is
-/// free (nothing made). IF clear (a system call).
-pub fn clone_current(f: u64, usp: u64) -> u64 {
+/// A child of the running process made from its system call frame `f`
+/// (`clone`/`clone3`/`vfork`): a new slot and kernel stack, a new pid,
+/// the caller its parent; its first frame is `f`'s 22 words with %rax 0
+/// and, when `usp` is not 0, %rsp `usp`, so it resumes in ring 3 after
+/// the `syscall` as the caller would; the caller's FS base, signal mask,
+/// x87/SSE state and process area (descriptors, break, signal records)
+/// copied. Its space: `cr3` 0, the caller's, borrowed and not owned
+/// (CLONE_VM, px14); otherwise `cr3`, a copy made for it (a fork, px17),
+/// its own. Queued ready. Returns its slot; SLOTS when no slot is free
+/// (nothing made, `cr3` not taken). IF clear (a system call).
+pub fn clone_current(f: u64, usp: u64, cr3: u64) -> u64 {
     let p = cur()
     reap()
     var s: u64 = FIRST
@@ -1063,8 +1075,8 @@ pub fn clone_current(f: u64, usp: u64) -> u64 {
     put_sv(S_NEXT_ID, id + 1)
     put_sv(S_LIVE, sv(S_LIVE) + 1)
     put_field(s, offset_of(Thread, id), id)
-    put_field(s, offset_of(Thread, cr3), field(p, offset_of(Thread, cr3)))
-    put_field(s, offset_of(Thread, owns), 0)
+    put_field(s, offset_of(Thread, cr3), if cr3 == 0 { field(p, offset_of(Thread, cr3)) } else { cr3 })
+    put_field(s, offset_of(Thread, owns), if cr3 == 0 { 0 } else { 1 })
     put_field(s, offset_of(Thread, prog), field(p, offset_of(Thread, prog)))
     put_field(s, offset_of(Thread, entry), field(p, offset_of(Thread, entry)))
     put_field(s, offset_of(Thread, usp), field(p, offset_of(Thread, usp)))
@@ -1161,6 +1173,31 @@ pub fn zombie(s: u64, reap_it: bool) -> (u64, u64) {
         clear(s)
     }
     r
+}
+
+/// Block the running process in a read or write of a pipe or socket
+/// (px17): its frame `f`, rewound by kernel/user to run the call again,
+/// saved; the thread waits until `wake_pipes`; the next thread's frame.
+/// IF clear.
+pub fn block_pipe(f: u64) -> u64 {
+    let c = cur()
+    put_field(c, offset_of(Thread, frame), f)
+    put_field(c, offset_of(Thread, state), PIPE)
+    wake_sleepers()
+    run_next()
+}
+
+/// Make every thread waiting on a pipe or socket ready (px17: some pipe
+/// changed; each runs its call again). IF clear.
+pub fn wake_pipes() {
+    var s: u64 = FIRST
+    while s < SLOTS {
+        if field(s, offset_of(Thread, state)) == PIPE {
+            put_field(s, offset_of(Thread, state), READY)
+            enqueue(s)
+        }
+        s += 1
+    }
 }
 
 /// Block the running process in wait4/waitid until a child ends (its
