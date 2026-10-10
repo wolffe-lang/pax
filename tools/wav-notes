@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+# wav-notes — the tones in a WAV file the PC speaker wrote through QEMU's
+# `wav` audio backend (px18), each with its span and its frequency.
+#
+#   tools/wav-notes FILE.wav
+#
+# Prints one line a tone:
+#
+#   tone <k> start <ms> end <ms> len <ms> hz <frequency> edges <n>
+#
+# then `tones <n> rate <hz> channels <c> bits <b> seconds <s>`.
+#
+# QEMU's `wav` backend writes samples only while the speaker sounds
+# (measured: 3.79 s of samples for a session whose scale sounds
+# 8 x 0.48 s, with tens of seconds between the boot and the halt), so the
+# file's time is sounding time: silences are not in it, and back-to-back
+# notes are cut where their pitch changes (the mean of four periods
+# after a crossing against the four before, a change over 3%: a
+# semitone is 5.9%). A repeated note with no change of pitch between is
+# one tone here; the kernel's own timeline (kernel/speaker's ring) says
+# when each note started.
+#
+# The method, stated so a reader can check it: the first channel's
+# samples are cut into 1 ms windows; a window whose samples differ by
+# more than a quarter of the file's whole peak-to-peak swing is
+# sounding, a sounding run with no more than 4 silent windows inside it
+# is one tone (the speaker's square wave never rests that long inside a
+# note: its slowest period here is 15 ms at C2 and play's notes are far
+# above it), and a tone shorter than 20 ms is dropped: a click, or the
+# few periods QEMU renders while one count gives way to the next
+# (measured: 7-11 ms, five crossings, at every whole-tone step). A
+# tone's frequency is its rising crossings of the midpoint between its
+# own lowest and highest sample: (crossings - 1) periods between the
+# first crossing and the last, each crossing's time interpolated
+# linearly between the two samples it falls between. On a 0.48 s note at
+# 44100 Hz that is an error of well under 0.01 Hz from the timing.
+# Exit 0, or 2 on a usage or format error.
+import struct
+import sys
+
+
+def die(msg):
+    sys.stderr.write("wav-notes: %s\n" % msg)
+    sys.exit(2)
+
+
+def samples(path):
+    # The RIFF chunks read by hand: QEMU's `wav` backend writes its sizes
+    # at exit, and a machine ended any other way leaves them 0 (measured:
+    # `RIFF 0 … data 0`), so a zero or overlong `data` size means "the
+    # rest of the file".
+    try:
+        raw = open(path, "rb").read()
+    except OSError as e:
+        die("%s: %s" % (path, e))
+    if raw[:4] != b"RIFF" or raw[8:12] != b"WAVE":
+        die("%s: not a RIFF WAVE file" % path)
+    i, fmt, data = 12, None, None
+    while i + 8 <= len(raw):
+        cid, size = raw[i:i + 4], struct.unpack("<I", raw[i + 4:i + 8])[0]
+        body = i + 8
+        if cid == b"data":
+            if size == 0 or body + size > len(raw):
+                size = len(raw) - body
+            data = raw[body:body + size]
+            break
+        if cid == b"fmt ":
+            fmt = struct.unpack("<HHIIHH", raw[body:body + 16])
+        i = body + size + (size & 1)
+    if fmt is None or data is None:
+        die("%s: no fmt or data chunk" % path)
+    tag, ch, rate, _, _, bits = fmt
+    if tag not in (1, 0xfffe):
+        die("%s: format tag %d is not PCM" % (path, tag))
+    width = bits // 8
+    n = len(data) // (ch * width)
+    if width == 1:
+        vals = [data[i * ch] - 128 for i in range(n)]
+    elif width == 2:
+        vals = list(struct.unpack("<%dh" % (n * ch), data[: n * ch * 2]))[::ch]
+    elif width == 4:
+        vals = list(struct.unpack("<%di" % (n * ch), data[: n * ch * 4]))[::ch]
+    else:
+        die("%s: %d-bit samples" % (path, bits))
+    return vals, rate, ch, bits
+
+
+def crossings(seg):
+    """Rising crossings of the segment's own midpoint, at fractional sample times."""
+    mid = (min(seg) + max(seg)) / 2.0
+    out = []
+    for i in range(1, len(seg)):
+        x0, x1 = seg[i - 1], seg[i]
+        if x0 <= mid < x1:
+            out.append(i - 1 + (mid - x0) / float(x1 - x0))
+    return out
+
+
+def split_by_pitch(cross, k=4, jump=0.03):
+    """Indices into `cross` where the pitch changes: the mean of the k
+    periods after a crossing differs from the mean of the k before by
+    more than `jump`, taken at the largest such difference nearby."""
+    p = [b - a for a, b in zip(cross, cross[1:])]
+    d = [0.0] * len(p)
+    for i in range(k, len(p) - k + 1):
+        a = sum(p[i - k:i]) / k
+        b = sum(p[i:i + k]) / k
+        d[i] = abs(b - a) / a
+    cuts = []
+    i = 0
+    while i < len(d):
+        if d[i] > jump:
+            j = i
+            best = i
+            while j < len(d) and d[j] > jump:
+                if d[j] > d[best]:
+                    best = j
+                j += 1
+            cuts.append(best)
+            i = j
+        else:
+            i += 1
+    return cuts
+
+
+def tones(vals, rate):
+    if not vals:
+        return []
+    swing = max(vals) - min(vals)
+    if swing == 0:
+        return []
+    win = max(1, rate // 1000)
+    nwin = len(vals) // win
+    sounding = []
+    for k in range(nwin):
+        seg = vals[k * win:(k + 1) * win]
+        sounding.append(max(seg) - min(seg) > swing / 4)
+    runs = []
+    k = 0
+    while k < nwin:
+        if not sounding[k]:
+            k += 1
+            continue
+        start = k
+        last = k
+        j = k + 1
+        while j < nwin:
+            if sounding[j]:
+                last = j
+            elif j - last > 4:
+                break
+            j += 1
+        runs.append((start, last + 1))
+        k = last + 1
+    out = []
+    for a, b in runs:
+        if b - a < 3:
+            continue
+        s, e = a * win, b * win
+        cross = [s + c for c in crossings(vals[s:e])]
+        # QEMU's `wav` backend writes only while the speaker sounds, so
+        # one run of sound can hold several notes back to back: cut it
+        # where the pitch changes.
+        bounds = [0] + split_by_pitch(cross) + [len(cross) - 1]
+        for i in range(len(bounds) - 1):
+            c = cross[bounds[i]:bounds[i + 1] + 1]
+            ts = s if i == 0 else c[0]
+            te = e if i == len(bounds) - 2 else c[-1]
+            hz = 0.0
+            if len(c) >= 2 and c[-1] > c[0]:
+                hz = (len(c) - 1) * rate / (c[-1] - c[0])
+            if te - ts >= 20 * win:
+                out.append((ts * 1000.0 / rate, te * 1000.0 / rate, hz, len(c)))
+    return out
+
+
+def main(argv):
+    if len(argv) != 2:
+        die("usage: wav-notes FILE.wav")
+    vals, rate, ch, bits = samples(argv[1])
+    ts = tones(vals, rate)
+    for k, (s, e, hz, n) in enumerate(ts, 1):
+        print("tone %d start %.1f end %.1f len %.1f hz %.2f edges %d" % (k, s, e, e - s, hz, n))
+    print("tones %d rate %d channels %d bits %d seconds %.3f" % (len(ts), rate, ch, bits, len(vals) / float(rate)))
+
+
+if __name__ == "__main__":
+    main(sys.argv)
