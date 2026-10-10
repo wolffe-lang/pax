@@ -1,0 +1,584 @@
+//! screen — the console drawn on the framebuffer (px19): a text grid in
+//! a bitmap font, colours, a cursor and scrolling, fed the same bytes as
+//! the serial console.
+//!
+//! **One hook.** Every byte the kernel or a program writes to the
+//! console reaches the wire through `serial.put` (kernel/log's lines,
+//! kernel/console's echo, kernel/user's `write`), and `serial.put` hands
+//! it to `put` here. Before the screen is attached (kernel/fb, after
+//! PAX's paging is up), `put` keeps the bytes in boot/screen.S's 16 KiB
+//! early buffer; `attach` clears the screen and replays them, so the
+//! screen shows the boot from its first line. A kernel that never
+//! attaches only fills the buffer (counted when it overflows).
+//!
+//! **The terminal** is a small subset of what a VT100-style terminal
+//! does, chosen for what PAX's programs write:
+//!
+//! - printable bytes: ASCII, and UTF-8 decoded to one cell a code
+//!   point; a code point below 256 is drawn from the font's table
+//!   (boot/font.S, Spleen 8x16; one the font lacks is drawn as `?`), one
+//!   at or above 256 and a malformed sequence's byte as `?`;
+//! - wrapping is deferred: a character written in the last column
+//!   leaves the cursor there with a wrap pending, and the next printable
+//!   character first moves to the start of the next line (CR, LF, BS and
+//!   TAB clear a pending wrap);
+//! - LF (0x0a) moves down one row, scrolling the whole grid up when on
+//!   the last row (the new row blank, in the default background); CR
+//!   (0x0d) to column 0; BS (0x08) one column left, or, with a wrap
+//!   pending, only clears it (so the line discipline's `\b \b` erases the
+//!   character in the last column); TAB (0x09) to the next multiple of
+//!   8, at most the last column; every other C0 byte and DEL do nothing.
+//!   The serial console's CR LF (ONLCR) is what a line end looks like
+//!   here too;
+//! - ESC `[` parameters final: a CSI sequence; with final `m` it is SGR,
+//!   of which 0 (reset), 1 (bold, drawn as the bright colour), 7
+//!   (inverse), 30-37 and 90-97 (foreground), 40-47 (background), 39 and
+//!   49 (default foreground, background) are honoured, every other
+//!   parameter ignored; an empty parameter is 0; at most 8 parameters,
+//!   each at most 9999. A sequence with a private or intermediate byte,
+//!   or another final, is read and ignored. ESC followed by anything but
+//!   `[` is two bytes ignored. A C0 byte inside a sequence ends it and
+//!   is acted on; a byte at or above 0x80 ends it and is dropped.
+//! - the cursor is the cell under it drawn inverse (its colours
+//!   swapped), steady (no blink: a picture of the screen is the same
+//!   whenever it is taken).
+//!
+//! The 16 colours are the PC's text-mode palette: 0 black 000000, 1 red
+//! aa0000, 2 green 00aa00, 3 brown aa5500, 4 blue 0000aa, 5 magenta
+//! aa00aa, 6 cyan 00aaaa, 7 light grey aaaaaa, 8-15 the bright ones
+//! 555555 ff5555 55ff55 ffff55 5555ff ff55ff 55ffff ffffff; the default
+//! foreground is 7 and background 0.
+//!
+//! **Drawing.** A cell is 8x16 pixels; a glyph row is four 64-bit
+//! stores of two pixels each. A scroll moves the grid's pixel rows up by
+//! 16 lines with boot/screen.S's `pax_fb_copy` (REP MOVSQ) and clears
+//! the last 16 with `pax_fb_fill` (REP STOSQ); the cell grid moves the
+//! same way. The framebuffer is mapped by kernel/fb (write-combining
+//! where the PAT allows). The grid is at most 256 columns by 128 rows;
+//! pixels right of and below it stay background.
+//!
+//! **Interrupts.** `put` runs with IF clear (sched.S's `pax_irq_save`
+//! and `pax_irq_restore`), so a timer switch cannot interleave two
+//! threads' bytes inside the parser, and it does nothing when re-entered
+//! (a fault while drawing reaches the panic path, which prints through
+//! `serial.put`, which must not draw again). The state is boot/screen.S's
+//! storage, read and written volatile. No heap, no region.
+//!
+//! Written from the ECMA-48 standard (C0 controls, CSI's syntax, SGR's
+//! parameters), the VT100 user guide's description of the last-column
+//! wrap, the Intel SDM vol. 2 (MOVS, STOS), and the PC's 16-colour text
+//! palette as the VGA documentation gives it. No Linux source; no other
+//! kernel's source.
+
+extern "c" fn pax_irq_save() -> u64
+extern "c" fn pax_irq_restore(flags: u64)
+extern "c" fn pax_fb_copy(dst: u64, src: u64, bytes: u64)
+extern "c" fn pax_fb_fill(dst: u64, v: u64, qwords: u64)
+
+extern "c" let pax_screen_state: *u64
+extern "c" let pax_screen_cells: *u32
+extern "c" let pax_screen_early: *u8
+extern "c" let pax_font: *u8
+
+// The state's words.
+const S_ON: u64 = 0 // 1 once attached
+const S_VA: u64 = 1 // the framebuffer's virtual address
+const S_W: u64 = 2 // pixels
+const S_H: u64 = 3
+const S_PITCH: u64 = 4 // bytes a pixel row
+const S_COLS: u64 = 5
+const S_ROWS: u64 = 6
+const S_CX: u64 = 7
+const S_CY: u64 = 8
+const S_WRAP: u64 = 9 // a wrap pending
+const S_FG: u64 = 10 // 0-15, before bold
+const S_BG: u64 = 11
+const S_BOLD: u64 = 12
+const S_INV: u64 = 13
+const S_ESC: u64 = 14 // 0 ground, 1 after ESC, 2 in a CSI sequence
+const S_PI: u64 = 15 // the CSI parameter being read (0-7)
+const S_P: u64 = 16 // eight parameters, words 16-23
+const S_PRIV: u64 = 24 // the sequence has a private or intermediate byte
+const S_UN: u64 = 25 // UTF-8 continuation bytes still wanted
+const S_UCP: u64 = 26 // the code point so far
+const S_BUSY: u64 = 27
+const S_EARLY: u64 = 28 // bytes in the early buffer
+const S_LOST: u64 = 29 // bytes the early buffer had no room for
+const S_SCROLLS: u64 = 30
+const S_BYTES: u64 = 31 // bytes drawn (fed to the terminal)
+const S_PAL: u64 = 32 // sixteen pixel values, words 32-47
+const S_CUR: u64 = 48 // 1 while the cursor is drawn
+const S_CURX: u64 = 49
+const S_CURY: u64 = 50
+const S_REPLAYED: u64 = 51 // bytes replayed at attach
+
+const MAX_COLS: u64 = 256
+const MAX_ROWS: u64 = 128
+const EARLY: u64 = 16384
+const GW: u64 = 8 // a cell's width in pixels
+const GH: u64 = 16 // and height
+const BLANK: u64 = 0x0720 // a space, foreground 7, background 0
+const QUESTION: u64 = 63
+
+fn sv(i: u64) -> u64 {
+    // # Safety: i < 64, inside boot/screen.S's 512-byte pax_screen_state.
+    unsafe { ((pax_screen_state as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_sv(i: u64, v: u64) {
+    // # Safety: as `sv`.
+    unsafe { ((pax_screen_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+fn bump(i: u64) {
+    put_sv(i, sv(i) + 1)
+}
+
+/// Cell `i` (row-major, `cols` a row).
+fn cell(i: u64) -> u64 {
+    // # Safety: i < cols * rows <= 256 * 128, inside pax_screen_cells.
+    unsafe { ((pax_screen_cells as u64 + i * 4) as *u32).read_volatile() as u64 }
+}
+
+fn put_cell(i: u64, v: u64) {
+    // # Safety: as `cell`; v < 2^16.
+    unsafe { ((pax_screen_cells as u64 + i * 4) as *u32).write_volatile((v & 0xffff) as u32) }
+}
+
+/// Row `r` of glyph `g` (g < 256, r < 16).
+fn font_row(g: u64, r: u64) -> u64 {
+    // # Safety: g * 16 + r < 4096, inside boot/font.S's pax_font.
+    unsafe { ((pax_font as u64 + g * GH + r) as *u8).read_volatile() as u64 }
+}
+
+/// Store the 64-bit `v` at framebuffer address `a` (8-aligned).
+fn store(a: u64, v: u64) {
+    // # Safety: `a` lies inside the framebuffer kernel/fb mapped (a
+    // cell's row, x * 32 bytes from an 8-aligned base, within the grid).
+    unsafe { (a as *u64).write_volatile(v) }
+}
+
+/// The 0xRRGGBB of palette colour `i`.
+fn rgb(i: u64) -> u64 {
+    match i {
+        0 => 0x000000,
+        1 => 0xaa0000,
+        2 => 0x00aa00,
+        3 => 0xaa5500,
+        4 => 0x0000aa,
+        5 => 0xaa00aa,
+        6 => 0x00aaaa,
+        7 => 0xaaaaaa,
+        8 => 0x555555,
+        9 => 0xff5555,
+        10 => 0x55ff55,
+        11 => 0xffff55,
+        12 => 0x5555ff,
+        13 => 0xff55ff,
+        14 => 0x55ffff,
+        _ => 0xffffff,
+    }
+}
+
+fn pal(i: u64) -> u64 {
+    sv(S_PAL + (i & 15))
+}
+
+// --- drawing ---------------------------------------------------------------
+
+/// Draw cell (x, y) from the grid; `cursor` swaps its colours.
+fn draw(x: u64, y: u64, cursor: bool) {
+    let c = cell(y * sv(S_COLS) + x)
+    let g = c & 0xff
+    var f = (c >> 8) & 15
+    var b = (c >> 12) & 15
+    if cursor {
+        let t = f
+        f = b
+        b = t
+    }
+    let pf = pal(f)
+    let pb = pal(b)
+    let pitch = sv(S_PITCH)
+    let base = sv(S_VA) + y * GH * pitch + x * GW * 4
+    var r: u64 = 0
+    while r < GH {
+        let bits = font_row(g, r)
+        let row = base + r * pitch
+        var k: u64 = 0
+        while k < 4 {
+            let lo = if bits & (0x80 >> (2 * k)) != 0 { pf } else { pb }
+            let hi = if bits & (0x40 >> (2 * k)) != 0 { pf } else { pb }
+            store(row + k * 8, lo | (hi << 32))
+            k += 1
+        }
+        r += 1
+    }
+}
+
+/// Take the cursor off the screen (redraw its cell plainly).
+fn hide() {
+    if sv(S_CUR) != 0 {
+        draw(sv(S_CURX), sv(S_CURY), false)
+        put_sv(S_CUR, 0)
+    }
+}
+
+/// Put the cursor on the screen at (cx, cy).
+fn show() {
+    if sv(S_CUR) == 0 {
+        let x = sv(S_CX)
+        let y = sv(S_CY)
+        draw(x, y, true)
+        put_sv(S_CURX, x)
+        put_sv(S_CURY, y)
+        put_sv(S_CUR, 1)
+    }
+}
+
+/// The grid up one row: pixels, then cells; the last row blank.
+fn scroll() {
+    let cols = sv(S_COLS)
+    let rows = sv(S_ROWS)
+    let pitch = sv(S_PITCH)
+    let va = sv(S_VA)
+    let band = GH * pitch // bytes a text row
+    let p0 = pal(0)
+    // # Safety: boot/screen.S's REP MOVSQ/STOSQ inside the framebuffer
+    // kernel/fb mapped: rows * band bytes from va, upwards; and inside
+    // pax_screen_cells (rows * cols four-byte cells).
+    unsafe {
+        pax_fb_copy(va, va + band, (rows - 1) * band)
+        pax_fb_fill(va + (rows - 1) * band, p0 | (p0 << 32), band / 8)
+        pax_fb_copy(pax_screen_cells as u64, pax_screen_cells as u64 + cols * 4, (rows - 1) * cols * 4)
+    }
+    var i: u64 = 0
+    while i < cols {
+        put_cell((rows - 1) * cols + i, BLANK)
+        i += 1
+    }
+    bump(S_SCROLLS)
+}
+
+/// LF: down a row, scrolling on the last.
+fn newline() {
+    let y = sv(S_CY)
+    if y + 1 < sv(S_ROWS) {
+        put_sv(S_CY, y + 1)
+    } else {
+        scroll()
+    }
+}
+
+/// Write code point `cp` at the cursor and move on.
+fn glyph(cp: u64) {
+    let g = if cp < 256 { cp } else { QUESTION }
+    if sv(S_WRAP) != 0 {
+        hide()
+        put_sv(S_WRAP, 0)
+        put_sv(S_CX, 0)
+        newline()
+    }
+    let x = sv(S_CX)
+    let y = sv(S_CY)
+    if sv(S_CUR) != 0 && sv(S_CURX) == x && sv(S_CURY) == y {
+        put_sv(S_CUR, 0) // the character covers it
+    } else {
+        hide()
+    }
+    var f = sv(S_FG)
+    if sv(S_BOLD) != 0 && f < 8 {
+        f += 8
+    }
+    var b = sv(S_BG)
+    if sv(S_INV) != 0 {
+        let t = f
+        f = b
+        b = t
+    }
+    put_cell(y * sv(S_COLS) + x, g | (f << 8) | (b << 12))
+    draw(x, y, false)
+    if x + 1 == sv(S_COLS) {
+        put_sv(S_WRAP, 1)
+    } else {
+        put_sv(S_CX, x + 1)
+    }
+}
+
+/// A C0 control byte (ESC excepted) or DEL.
+fn control(b: u64) {
+    if b == 10 {
+        hide()
+        put_sv(S_WRAP, 0)
+        newline()
+    } else if b == 13 {
+        hide()
+        put_sv(S_WRAP, 0)
+        put_sv(S_CX, 0)
+    } else if b == 8 {
+        hide()
+        if sv(S_WRAP) != 0 {
+            put_sv(S_WRAP, 0)
+        } else if sv(S_CX) > 0 {
+            put_sv(S_CX, sv(S_CX) - 1)
+        }
+    } else if b == 9 {
+        hide()
+        put_sv(S_WRAP, 0)
+        var x = (sv(S_CX) / 8 + 1) * 8
+        if x >= sv(S_COLS) {
+            x = sv(S_COLS) - 1
+        }
+        put_sv(S_CX, x)
+    }
+}
+
+/// SGR with the `n` parameters read.
+fn sgr(n: u64) {
+    var k: u64 = 0
+    while k < n {
+        let p = sv(S_P + k)
+        if p == 0 {
+            put_sv(S_FG, 7)
+            put_sv(S_BG, 0)
+            put_sv(S_BOLD, 0)
+            put_sv(S_INV, 0)
+        } else if p == 1 {
+            put_sv(S_BOLD, 1)
+        } else if p == 7 {
+            put_sv(S_INV, 1)
+        } else if p >= 30 && p <= 37 {
+            put_sv(S_FG, p - 30)
+        } else if p == 39 {
+            put_sv(S_FG, 7)
+        } else if p >= 40 && p <= 47 {
+            put_sv(S_BG, p - 40)
+        } else if p == 49 {
+            put_sv(S_BG, 0)
+        } else if p >= 90 && p <= 97 {
+            put_sv(S_FG, p - 90 + 8)
+        }
+        k += 1
+    }
+}
+
+/// One byte inside a CSI sequence.
+fn csi(b: u64) {
+    if b >= 48 && b <= 57 {
+        let i = S_P + sv(S_PI)
+        let v = sv(i) * 10 + (b - 48)
+        put_sv(i, if v > 9999 { 9999 } else { v })
+    } else if b == 59 {
+        if sv(S_PI) < 7 {
+            put_sv(S_PI, sv(S_PI) + 1)
+        } else {
+            put_sv(S_PRIV, 1) // a ninth parameter: the sequence is ignored
+        }
+    } else if (b >= 0x3c && b <= 0x3f) || (b >= 0x20 && b <= 0x2f) || b == 0x3a {
+        put_sv(S_PRIV, 1)
+    } else if b >= 0x40 && b <= 0x7e {
+        put_sv(S_ESC, 0)
+        if sv(S_PRIV) == 0 && b == 109 {
+            sgr(sv(S_PI) + 1)
+        }
+    } else {
+        put_sv(S_ESC, 0) // 0x80 and above: the sequence ends, the byte is dropped
+    }
+}
+
+/// One byte through the terminal.
+fn feed(b: u64) {
+    bump(S_BYTES)
+    if b < 32 || b == 127 {
+        if sv(S_UN) != 0 {
+            put_sv(S_UN, 0)
+            glyph(QUESTION) // a sequence cut short
+        }
+        if b == 27 {
+            put_sv(S_ESC, 1)
+            return
+        }
+        put_sv(S_ESC, 0)
+        control(b)
+        return
+    }
+    let esc = sv(S_ESC)
+    if esc == 1 {
+        if b == 91 {
+            put_sv(S_ESC, 2)
+            put_sv(S_PI, 0)
+            put_sv(S_PRIV, 0)
+            var i: u64 = 0
+            while i < 8 {
+                put_sv(S_P + i, 0)
+                i += 1
+            }
+        } else {
+            put_sv(S_ESC, 0)
+        }
+        return
+    }
+    if esc == 2 {
+        csi(b)
+        return
+    }
+    if sv(S_UN) != 0 {
+        if b & 0xc0 == 0x80 {
+            let cp = (sv(S_UCP) << 6) | (b & 0x3f)
+            put_sv(S_UCP, cp)
+            put_sv(S_UN, sv(S_UN) - 1)
+            if sv(S_UN) == 0 {
+                glyph(cp)
+            }
+            return
+        }
+        put_sv(S_UN, 0)
+        glyph(QUESTION) // a sequence cut short; b is read afresh
+    }
+    if b < 0x80 {
+        glyph(b)
+    } else if b & 0xe0 == 0xc0 {
+        put_sv(S_UN, 1)
+        put_sv(S_UCP, b & 0x1f)
+    } else if b & 0xf0 == 0xe0 {
+        put_sv(S_UN, 2)
+        put_sv(S_UCP, b & 0x0f)
+    } else if b & 0xf8 == 0xf0 {
+        put_sv(S_UN, 3)
+        put_sv(S_UCP, b & 0x07)
+    } else {
+        glyph(QUESTION) // a stray continuation byte, or 0xf8 and above
+    }
+}
+
+// --- the interface ---------------------------------------------------------
+
+/// One byte the console wrote (kernel/serial's `put`): drawn when the
+/// screen is attached, kept for the replay before.
+pub fn put(b: u8) {
+    if sv(S_ON) == 0 {
+        let n = sv(S_EARLY)
+        if n < EARLY {
+            // # Safety: n < 16384, inside boot/screen.S's pax_screen_early.
+            unsafe { ((pax_screen_early as u64 + n) as *u8).write_volatile(b) }
+            put_sv(S_EARLY, n + 1)
+        } else {
+            bump(S_LOST)
+        }
+        return
+    }
+    // # Safety: sched.S's PUSHFQ/POP/CLI; restored below.
+    let flags = unsafe { pax_irq_save() }
+    if sv(S_BUSY) == 0 {
+        put_sv(S_BUSY, 1)
+        feed(b as u64)
+        show()
+        put_sv(S_BUSY, 0)
+    }
+    // # Safety: sched.S's STI when `flags` had IF.
+    unsafe { pax_irq_restore(flags) }
+}
+
+/// Attach the screen to a framebuffer kernel/fb has mapped at `va`:
+/// `w` x `h` pixels of 32 bits, `pitch` bytes a row, red, green and
+/// blue 8 bits each at bit `rs`, `gs`, `bs`. Clears it to the default
+/// background, replays the early buffer, draws the cursor. False (and
+/// nothing drawn) when not even one cell fits.
+pub fn attach(va: u64, w: u64, h: u64, pitch: u64, rs: u64, gs: u64, bs: u64) -> bool {
+    var cols = w / GW
+    var rows = h / GH
+    if cols == 0 || rows == 0 || va % 8 != 0 || pitch % 8 != 0 {
+        return false
+    }
+    if cols > MAX_COLS {
+        cols = MAX_COLS
+    }
+    if rows > MAX_ROWS {
+        rows = MAX_ROWS
+    }
+    // # Safety: as `put`.
+    let flags = unsafe { pax_irq_save() }
+    put_sv(S_BUSY, 1)
+    put_sv(S_VA, va)
+    put_sv(S_W, w)
+    put_sv(S_H, h)
+    put_sv(S_PITCH, pitch)
+    put_sv(S_COLS, cols)
+    put_sv(S_ROWS, rows)
+    var i: u64 = 0
+    while i < 16 {
+        let c = rgb(i)
+        put_sv(S_PAL + i, (((c >> 16) & 0xff) << rs) | (((c >> 8) & 0xff) << gs) | ((c & 0xff) << bs))
+        i += 1
+    }
+    put_sv(S_CX, 0)
+    put_sv(S_CY, 0)
+    put_sv(S_WRAP, 0)
+    put_sv(S_FG, 7)
+    put_sv(S_BG, 0)
+    put_sv(S_BOLD, 0)
+    put_sv(S_INV, 0)
+    put_sv(S_ESC, 0)
+    put_sv(S_UN, 0)
+    put_sv(S_CUR, 0)
+    let p0 = pal(0)
+    // # Safety: boot/screen.S's REP STOSQ over the whole framebuffer
+    // (pitch * h bytes from va, a multiple of 8: pitch % 8 == 0),
+    // mapped by kernel/fb.
+    unsafe { pax_fb_fill(va, p0 | (p0 << 32), pitch * h / 8) }
+    i = 0
+    while i < cols * rows {
+        put_cell(i, BLANK)
+        i += 1
+    }
+    put_sv(S_ON, 1)
+    let n = sv(S_EARLY)
+    var k: u64 = 0
+    while k < n {
+        // # Safety: k < n <= 16384, inside pax_screen_early.
+        let b = unsafe { ((pax_screen_early as u64 + k) as *u8).read_volatile() }
+        feed(b as u64)
+        k += 1
+    }
+    put_sv(S_REPLAYED, n)
+    show()
+    put_sv(S_BUSY, 0)
+    // # Safety: as `put`.
+    unsafe { pax_irq_restore(flags) }
+    true
+}
+
+/// Whether the screen is attached (the console is drawn).
+pub fn on() -> bool {
+    sv(S_ON) != 0
+}
+
+/// The grid's columns (0 before `attach`).
+pub fn cols() -> u64 {
+    sv(S_COLS)
+}
+
+/// The grid's rows (0 before `attach`).
+pub fn rows() -> u64 {
+    sv(S_ROWS)
+}
+
+/// Scrolls so far.
+pub fn scrolls() -> u64 {
+    sv(S_SCROLLS)
+}
+
+/// Bytes the early buffer kept before `attach` (the replay).
+pub fn replayed() -> u64 {
+    sv(S_REPLAYED)
+}
+
+/// Bytes written before `attach` that the early buffer had no room for.
+pub fn lost() -> u64 {
+    sv(S_LOST)
+}
+
+/// Bytes fed to the terminal (the replay included).
+pub fn bytes() -> u64 {
+    sv(S_BYTES)
+}
