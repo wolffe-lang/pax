@@ -7,6 +7,34 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **IP and ICMP (px21).** PAX answers ping. `kernel/ip` judges every
+  received IPv4 header in one place — length, version, header length,
+  the RFC 1071 checksum, total length against the frame, a time to
+  live of 0, fragments, sources that name no single host, the option
+  list, the destination — and counts each drop under its own name; it
+  sends one datagram a frame, DF set, on-link or by way of the gateway
+  from an address, netmask and gateway given at boot. `kernel/arp` is
+  now a cache: eight entries that age out after a minute, a request
+  repeated a second apart and given up after the third, two frames
+  kept for each address still unresolved. `kernel/icmp` answers echo
+  requests with the data intact, sends the kernel's own (`ping` on the
+  kernel command line: six to the gateway, each round trip printed)
+  and answers a protocol nothing speaks with destination unreachable,
+  at most once a second. QEMU's user-mode gateway cannot send an echo
+  request to a guest, so `tests/mpx4-net` gained a way to boot with a
+  socket netdev whose other end is a script, `tools/net-peer`: it
+  plays an on-link host, the gateway and a host behind it, sends echo
+  requests that must be answered byte for byte, dozens of malformed
+  and unwanted frames that must not be answered at all, and then
+  10,000 more echoes.
+  `tools/pcap-net` no longer knows a script: it judges every captured
+  frame by a model written from the RFCs, recomputes every checksum,
+  rebuilds every frame PAX sent and holds the kernel's counters to the
+  capture's, one by one. Named limits: no fragmentation or reassembly
+  (a 1500-byte MTU; a payload over 1480 bytes is refused), no UDP, TCP
+  or sockets, one echo waited for at a time, IP options never sent, a
+  source-routed datagram refused, the address a kernel's constant.
+
 - **virtio-net (px20).** PAX sends and receives Ethernet frames. The
   kernel walks the PCI bus through configuration mechanism #1
   (`kernel/pci`; the census is printed with `pci` on the kernel

@@ -419,26 +419,30 @@ pcspk-audiodev=snd0`) and measures it.
   one of them; PAX's console is descriptors 0-2 of a fresh process, so
   `play` asks 0, 1 and 2 in turn); the evdev speaker (`EVIOCGSND`).
 
-## The network (px20)
+## The network (px20, px21)
 
 `kmain_net.lu` finds QEMU's virtio network device, brings it up and
-speaks ARP with the user-mode gateway (`tests/mpx4-net`): the first
-step toward M-PX4. Nothing user-visible: the surface is the
-kernel-internal frame interface.
+speaks ARP, IPv4 and ICMP echo with the user-mode gateway or, with
+`peer` on the command line, with `tools/net-peer` at the other end of
+a socket netdev (`tests/mpx4-net`): two steps toward M-PX4. Nothing
+user-visible: the surface is kernel-internal (`net.send`, `ip.send`,
+`icmp.ping`).
 
 | module or file | what |
 |---|---|
 | `pci/` | configuration mechanism #1 (ports 0xCF8/0xCFC, `../boot/io.S`'s `pax_outl`/`pax_inl`): `scan` (bus 0, every function, and the bus behind any bridge) into `pax_pci_table`; `find`, `bar` (I/O, 32-bit or 64-bit memory), `next_cap` (the capability list), `command`/`set_command`, `line`, `pin`; `report`, the census (one line a function, its BARs, its capabilities), printed by kmain_net when the kernel command line holds `pci` (`../boot/limine-net.conf`) |
 | `virtio/` | the virtio 1.x PCI transport: `attach` finds the vendor capabilities (common configuration, notification, ISR status, device configuration) and maps each in a window of the device slot (PML4 slot 352, above the local APIC's page), uncached; `reset`, `add_status`, `device_features`/`set_features` (64 bits through the select registers), `isr`, `device8`. The split virtqueue: `layout` (descriptors, avail, used in one frame), `aligned` (the specification's 16/2/4), `queue_setup`, `set_desc`, `offer`, `notify` (honouring the device's NO_NOTIFY), `returned`, `collect`, `quiet` (the driver's NO_INTERRUPT) |
-| `net/` | the network device and the frame interface: `start` (the device found, reset, VERSION_1 and MAC taken and required, two 64-entry queues with a 2048-byte buffer a descriptor, its 8259 line made level-triggered and unmasked; one `net:` line and no network when there is no device or it is refused by name), `irq` (the cause read, the 8259 acknowledged), `wait`, `rx_take`/`rx_give`, `send` (rows `down`, `size`, `full`; padded to 60 bytes), `tx_free`, `mac_byte`, `count` (frames and bytes each way; drops by cause: runt, long, other station, IPv4, other type, down, size, full), `report`, `counters` |
-| `arp/` | RFC 826 for IPv4 over Ethernet: `input` (the reception algorithm: validate, merge, add, answer a request for this station), `request`, `lookup`, a four-entry table, counters; the station's address is a constant its kernel passes (`10.0.2.15`) |
-| `netd/` | `pax_netd`, the network thread's body: waits for the device's interrupt, takes each frame, hands 0x0806 to `arp`, counts and drops anything else, gives the buffer back |
+| `net/` | the network device and the frame interface: `start` (the device found, reset, VERSION_1 and MAC taken and required, two 64-entry queues with a 2048-byte buffer a descriptor, its 8259 line made level-triggered and unmasked; one `net:` line and no network when there is no device or it is refused by name), `irq` (the cause read, the 8259 acknowledged), `wait`, `rx_take`/`rx_give`, `send` (rows `down`, `size`, `full`; padded to 60 bytes), `tx_free`, `mac_byte`, `count` (frames and bytes each way; drops by cause: runt, long, other station, a type nothing speaks, down, size, full), `report`, `counters` |
+| `arp/` | RFC 826 for IPv4 over Ethernet and the cache `ip` sends through (px21): `input` (the reception algorithm: validate, merge, add, answer a request for this station; a sender of 0.0.0.0 or the broadcast teaches nothing, one claiming this station's address is a `conflict`), `send` (the next hop's hardware address written into the frame, or the frame queued and a request sent), `query`, `lookup`, `tick`; eight entries, each free, incomplete or resolved; a resolved one is good for a minute from the last ARP packet from its address (`start`'s `age`), an incomplete one is asked for three times a second apart and then given up (`unresolved`), two frames wait per address and a third pushes out the oldest (`pushed out`), a new address evicts the resolved entry confirmed longest ago and never an incomplete one (`table full`); `report`, counters |
+| `ip/` (px21) | IPv4: `start` (address, netmask, gateway, given once at boot), `input` (the one place a header is judged, in order: `short`, `version`, `ihl`, `checksum`, `length`, `ttl`, `fragment`, `source`, `option`, `source-route`, `other`, `protocol`, each a counter; it answers what the datagram is and `netd` makes the call), `send` (version 4, IHL 5, DF, TTL 64, an identification counted from boot; on-link or by way of the gateway; the broadcasts to ff:ff:ff:ff:ff:ff; a payload over 1480 bytes refused, `size`), `sum` (RFC 1071), `next_hop`, `is_broadcast`; the MTU is 1500 and nothing is fragmented or reassembled |
+| `icmp/` (px21) | `input` (an echo request answered in place: type 0, the checksum made again, to the request's source; an echo reply matched to the one echo the kernel waits for, else `stray`; `short`, `checksum`, `broadcast`, `type`), `ping` and `answer` (the kernel's own echo request, identifier 0x5058, and its round trip by the time-stamp counter), `unreachable` (type 3 code 2 for a protocol nothing speaks, quoting the header and 8 bytes; one a second, the rest `limited`; none for a broadcast, `silent`) |
+| `netd/` | `pax_netd`, the network thread's body: waits for the device's interrupt, takes each frame, hands 0x0806 to `arp` and 0x0800 to `ip` and then `icmp` (px21), counts and drops anything else, gives the buffer back; `pax_net_clock` (px21), a second thread: `arp.tick` every ten ticks |
 | `sched/` (px20) | state NET, `block_net`, `wake_net` |
 | `timer/` (px20) | `unmask_line` (a slave line and the cascade), `elcr`, `level` |
-| `sync/` (px20) | lock words 2 (`net`) and 3 (`arp`, taken first) |
+| `sync/` (px20, px21) | lock words 2 (`net`), 3 (`arp`, taken before it), 4 (`ip`, taken before both) and 5 (`icmp`, never held across a call into `ip`) |
 | `interrupts/` (px20) | the device's vector: `net.irq`, `sched.wake_net`, `sched.kick` |
 | `log/` (px20) | `hex_n` |
-| `../boot/net.S` | `pax_pci_table`, `pax_pci_count`, `pax_net_state`, `pax_net_stats`, `pax_arp_state`: storage only |
+| `../boot/net.S` | `pax_pci_table`, `pax_pci_count`, `pax_net_state`, `pax_net_stats`, `pax_arp_state`, `pax_ip_state`, `pax_icmp_state`: storage only |
 | `../boot/io.S` (px20) | `pax_outl`, `pax_inl` |
 
 - The interface is the 1.x one only: a transitional device's legacy
@@ -457,9 +461,19 @@ kernel-internal frame interface.
   names the vector), as every kernel links the console and the
   speaker; none but kmain_net starts them, and the vector is 0 until
   then.
-- Not yet: IP, ICMP, sockets (px21 on); MSI-X; merged receive
-  buffers, checksum and segmentation offload, the control queue (so
-  the device's receive filter is whatever it starts as; `net` drops
-  frames for other stations itself); link status; more than one
-  device; a device removed; ARP ageing, retries and a pending queue;
-  an address from anywhere but a constant.
+- The protocols allocate nothing either (px21): `arp`, `ip` and `icmp`
+  take eleven frames once (one to compose in each, eight for the
+  cache's queues) and keep words in `.bss`; an echo reply is made in
+  the receive buffer and copied once into `ip`'s frame.
+- What PAX sends is one datagram a frame, at most 1500 bytes, DF set;
+  a fragment that arrives is dropped by name (`fragment`), and IP
+  options are skipped on the way in (a source route is refused,
+  `source-route`) and never sent.
+- Not yet: UDP, TCP, sockets (px22 on); fragmentation and reassembly;
+  ICMP errors other than protocol unreachable, and any use of the
+  ones received; an address from anywhere but a kernel's constants
+  (no DHCP); more than one echo waited for at a time; MSI-X; merged
+  receive buffers, checksum and segmentation offload, the control
+  queue (so the device's receive filter is whatever it starts as;
+  `net` drops frames for other stations itself); link status; more
+  than one device; a device removed.
