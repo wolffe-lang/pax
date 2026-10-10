@@ -1,0 +1,255 @@
+//! fb — the framebuffer Limine hands over, mapped and given to the
+//! screen (px19).
+//!
+//! Limine's framebuffer response (kernel/boot_info, request 8) gives the
+//! first framebuffer's address in the HHDM, its size, pitch and pixel
+//! format. PAX's own paging (px03) leaves the memory map's framebuffer
+//! regions out of its HHDM, for the caching choice made here: `start`
+//! maps the framebuffer's pages, 4 KiB each, at the same HHDM addresses
+//! (read-write, no-execute, supervisor), so the address Limine gave is
+//! the address the screen draws at.
+//!
+//! **Caching.** Write-combining when the CPU has the PAT (CPUID.01H:EDX
+//! bit 16) and IA32_PAT (MSR 0x277) holds WC (0x01) in entry 5, as
+//! Limine's protocol lays it out (PROTOCOL.md, "Caching", x86-64: PA0 WB,
+//! PA1 WT, PA2 UC-, PA3 UC, PA4 WP, PA5 WC): a 4 KiB leaf selects entry
+//! PAT*4 + PCD*2 + PWT, so entry 5 is PAT (bit 7) and PWT (bit 3).
+//! Otherwise uncached: PCD and PWT, entry 3, which is UC in Limine's
+//! layout and in the power-on default alike (Intel SDM vol. 3A §11.12.2
+//! and §11.12.4: the default PAT holds UC in entry 3; Table 11-11, the
+//! entry selection).
+//!
+//! Refused by name, the console staying serial only: no response (no
+//! display device), a pixel that is not 32 bits of 8-bit red, green and
+//! blue (memory model 1), an address outside the HHDM, a page already
+//! mapped. Nothing else is drawn until `start` succeeds; kernel/screen
+//! keeps what the kernel wrote meanwhile and replays it.
+//!
+//! Written from Limine's PROTOCOL.md (limine-protocol 3a0526b7: the
+//! Framebuffer Feature, the HHDM and its caching on x86-64), the Intel
+//! SDM vol. 3A §4.5 (the 4 KiB leaf's bits 3, 4 and 7) and §11.12 (the
+//! PAT, IA32_PAT's layout and memory-type encodings), vol. 2 (CPUID
+//! leaf 01H, RDMSR). No Linux source; no other kernel's source.
+
+use boot_info
+use frames
+use log
+use paging
+use screen
+
+extern "c" fn pax_cpuid(leaf: u64, sub: u64, reg: u64) -> u64
+extern "c" fn pax_rdmsr(msr: u64) -> u64
+
+const PAGE: u64 = 4096
+const PWT: u64 = 0x8
+const PCD: u64 = 0x10
+const PAT_4K: u64 = 0x80 // a 4 KiB leaf's PAT bit (bit 7)
+const IA32_PAT: u64 = 0x277
+const PAT_WC: u64 = 0x01
+const CPUID_PAT: u64 = 0x10000 // CPUID.01H:EDX bit 16
+
+// Why `start` declined (`why`), 0 when it attached.
+const W_OK: u64 = 0
+const W_NONE: u64 = 1
+const W_FORMAT: u64 = 2
+const W_HHDM: u64 = 3
+const W_MAP: u64 = 4
+const W_GRID: u64 = 5
+const W_NOT_RUN: u64 = 6
+
+// Module state (scalars, [mem.static.3]), written by `start` once at
+// boot with interrupts off and read by `report`: each read and write is
+// in one of the five pairs below.
+var why: u64 = 6
+var wc: u64 = 0 // 1 write-combining (PAT entry 5), 0 uncached (entry 3)
+var pat: u64 = 0 // IA32_PAT as read (0 without the PAT)
+var pages: u64 = 0 // 4 KiB pages mapped
+var tables: u64 = 0 // table frames those took
+
+fn get_why() -> u64 {
+    // # Safety: module state, touched only at boot (see above).
+    unsafe { why }
+}
+
+fn set_why(v: u64) {
+    // # Safety: as `get_why`.
+    unsafe { why = v }
+}
+
+fn get_wc() -> u64 {
+    // # Safety: as `get_why`.
+    unsafe { wc }
+}
+
+fn set_wc(v: u64) {
+    // # Safety: as `get_why`.
+    unsafe { wc = v }
+}
+
+fn get_pat() -> u64 {
+    // # Safety: as `get_why`.
+    unsafe { pat }
+}
+
+fn set_pat(v: u64) {
+    // # Safety: as `get_why`.
+    unsafe { pat = v }
+}
+
+fn get_pages() -> u64 {
+    // # Safety: as `get_why`.
+    unsafe { pages }
+}
+
+fn set_pages(v: u64) {
+    // # Safety: as `get_why`.
+    unsafe { pages = v }
+}
+
+fn get_tables() -> u64 {
+    // # Safety: as `get_why`.
+    unsafe { tables }
+}
+
+fn set_tables(v: u64) {
+    // # Safety: as `get_why`.
+    unsafe { tables = v }
+}
+
+/// Whether the CPU has the PAT and IA32_PAT's entry 5 is WC; reads the
+/// MSR into `pat`.
+fn pat_wc() -> bool {
+    // # Safety: fpu.S's CPUID, leaf 1, EDX.
+    let edx = unsafe { pax_cpuid(1, 0, 3) }
+    if edx & CPUID_PAT == 0 {
+        set_pat(0)
+        return false
+    }
+    // # Safety: cpu.S's RDMSR of IA32_PAT, present when CPUID says PAT.
+    let p = unsafe { pax_rdmsr(IA32_PAT) }
+    set_pat(p)
+    (p >> 40) & 0xff == PAT_WC
+}
+
+/// Map the framebuffer in the kernel's structures at `pml4` and attach
+/// the screen to it. After paging's switch (the kernel's half is shared
+/// by every address space made later), before any process. False, and
+/// `why` set, when there is no framebuffer PAX can draw on.
+pub fn start(pml4: u64) -> bool {
+    if boot_info.fb_count() == 0 || boot_info.fb_address() == 0 {
+        set_why(W_NONE)
+        return false
+    }
+    let va = boot_info.fb_address()
+    let w = boot_info.fb_width()
+    let h = boot_info.fb_height()
+    let pitch = boot_info.fb_pitch()
+    if boot_info.fb_bpp() != 32 || boot_info.fb_model() != 1 || boot_info.fb_mask(0, false) != 8 || boot_info.fb_mask(1, false) != 8 || boot_info.fb_mask(2, false) != 8 {
+        set_why(W_FORMAT)
+        return false
+    }
+    let hhdm = frames.hhdm()
+    if va < hhdm || va % PAGE != 0 {
+        set_why(W_HHDM)
+        return false
+    }
+    let cache = if pat_wc() { PAT_4K | PWT } else { PCD | PWT }
+    set_wc(if cache == PAT_4K | PWT { 1 } else { 0 })
+    let bytes = pitch * h
+    var off: u64 = 0
+    while off < bytes {
+        let r = paging.map(pml4, va + off, va - hhdm + off, paging.RW | paging.NX | cache) else 9
+        if r == 9 {
+            set_why(W_MAP)
+            return false
+        }
+        set_tables(get_tables() + r)
+        set_pages(get_pages() + 1)
+        off += PAGE
+    }
+    if !screen.attach(va, w, h, pitch, boot_info.fb_mask(0, true), boot_info.fb_mask(1, true), boot_info.fb_mask(2, true)) {
+        set_why(W_GRID)
+        return false
+    }
+    set_why(W_OK)
+    true
+}
+
+/// The reason `start` gave, as a word.
+fn why_name() -> str {
+    let w = get_why()
+    if w == W_OK {
+        return "on"
+    }
+    if w == W_NONE {
+        return "no framebuffer"
+    }
+    if w == W_FORMAT {
+        return "not 32-bit RGB 8:8:8"
+    }
+    if w == W_HHDM {
+        return "not a page in the HHDM"
+    }
+    if w == W_MAP {
+        return "a page would not map"
+    }
+    if w == W_GRID {
+        return "no cell fits"
+    }
+    "not started"
+}
+
+/// `screen: <w>x<h> <bpp> bpp pitch <p> rgb <rs>:<rsh> <gs>:<gsh>
+/// <bs>:<bsh> at 0x<va>, <wc|uc> (pat 0x<msr>), <n> pages <t> tables;
+/// font spleen 8x16, <cols>x<rows> cells; <r> bytes replayed, <l> lost`,
+/// or `screen: off, <why>`.
+pub fn report() {
+    if get_why() != W_OK {
+        log.put("screen: off, ")
+        log.put(why_name())
+        log.end()
+        return
+    }
+    log.put("screen: ")
+    log.dec(boot_info.fb_width() as int)
+    log.put("x")
+    log.dec(boot_info.fb_height() as int)
+    log.put(" ")
+    log.dec(boot_info.fb_bpp() as int)
+    log.put(" bpp pitch ")
+    log.dec(boot_info.fb_pitch() as int)
+    log.put(" rgb ")
+    var m: u64 = 0
+    while m < 3 {
+        if m > 0 {
+            log.put(" ")
+        }
+        log.dec(boot_info.fb_mask(m, false) as int)
+        log.put(":")
+        log.dec(boot_info.fb_mask(m, true) as int)
+        m += 1
+    }
+    log.put(" at ")
+    log.hex(boot_info.fb_address())
+    log.put(if get_wc() == 1 { ", wc (pat " } else { ", uc (pat " })
+    log.hex(get_pat())
+    log.put("), ")
+    log.dec(get_pages() as int)
+    log.put(" pages ")
+    log.dec(get_tables() as int)
+    log.put(" tables; font spleen 8x16, ")
+    log.dec(screen.cols() as int)
+    log.put("x")
+    log.dec(screen.rows() as int)
+    log.put(" cells; ")
+    log.dec(screen.replayed() as int)
+    log.put(" bytes replayed, ")
+    log.dec(screen.lost() as int)
+    log.put(" lost")
+    log.end()
+}
+
+/// Whether the framebuffer is mapped write-combining.
+pub fn write_combining() -> bool {
+    get_wc() == 1
+}
