@@ -2,7 +2,7 @@
 # pcap-net — hold a capture of the network test kernel's exchange to the
 # frames it must contain, byte by byte (px20, px21; tests/mpx4-net).
 #
-#   tools/pcap-net [--small N] [--large N] [--list K] FILE.pcap
+#   tools/pcap-net [--small N] [--large N] [--list K] [--serial LOG] FILE.pcap
 #
 # FILE.pcap is what QEMU's `-object filter-dump,netdev=…,file=…` wrote:
 # the classic pcap format (a 24-byte header, magic 0xa1b2c3d4 in the
@@ -49,8 +49,18 @@
 # no echo request and no ARP request for PAX may be left unanswered.
 #
 # What the model made of the frames that reached PAX is printed as
-# counts under the kernel's own counter names (`ip.checksum=1`), for the
-# caller to hold against the kernel's counters.
+# counts under the kernel's own counter names (`ip.checksum=1`). With
+# --serial LOG (the kernel's serial log of the same boot) they are held
+# against the counters the kernel printed before it halted, one by one:
+# the frames each way; ARP's requests and replies each way, its bad
+# packets and conflicts; every one of kernel/ip's drop causes, what it
+# delivered and what it sent; kernel/icmp's echoes each way, its
+# matched and stray replies, its drops, and the destination
+# unreachables sent, held back and never due. A datagram PAX counted as
+# sent that is not in the capture must be one kernel/arp says it
+# dropped from a queue (the identifications' gaps). The kernel's own
+# books are closed too: every transmit buffer reclaimed, every received
+# one restocked, every queued frame sent, pushed out or given up.
 #
 # Prints what it found and, last, `pcap-net: PASS <counts>` or `pcap-net:
 # FAIL <the first frame that is wrong, with the expected and found
@@ -64,6 +74,7 @@ import os
 import struct
 import sys
 
+sys.dont_write_bytecode = True  # no tools/__pycache__ in the tree
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import paxnet as px  # noqa: E402
 
@@ -109,8 +120,92 @@ KEYS = (["from-pax", "to-pax", "before", "net.type", "net.other", "arp.requests-
          "unreachable.limited", "unreachable.silent", "markers", "burst.small", "burst.large", "checksums"])
 
 
+LINES = [
+    (r"net: rx (\d+) frames (\d+) bytes, dropped (\d+) runt (\d+) long (\d+) other (\d+) type",
+     ["rx", "rx-bytes", "runt", "long", "other", "type"]),
+    (r"net: tx (\d+) frames (\d+) bytes, dropped (\d+) down (\d+) size (\d+) full; (\d+) interrupts \((\d+) idle\), (\d+) wakes, "
+     r"(\d+) reclaimed, (\d+) restocked, (\d+) of 64 transmit buffers free",
+     ["tx", "tx-bytes", "down", "size", "full", "irq", "idle", "wakes", "reclaimed", "restocked", "free"]),
+    (r"arp: (\d+) requests sent, (\d+) replies received, (\d+) requests answered \((\d+) replies sent\), (\d+) bad, (\d+) conflict",
+     ["a-req-out", "a-rep-in", "a-req-in", "a-rep-out", "a-bad", "a-conflict"]),
+    (r"arp: cache (\d+) learned, (\d+) updated, (\d+) aged; pending (\d+) queued, (\d+) sent, (\d+) pushed out, (\d+) unresolved "
+     r"\((\d+) addresses given up\), (\d+) table full",
+     ["learned", "updated", "aged", "queued", "flushed", "pushed", "unresolved", "gave-up", "table-full"]),
+    (r"ip: rx (\d+) datagrams delivered \((\d+) with options, (\d+) broadcast\), dropped (\d+) short (\d+) version (\d+) ihl "
+     r"(\d+) checksum (\d+) length (\d+) ttl (\d+) fragment (\d+) source (\d+) option (\d+) source-route (\d+) other (\d+) protocol",
+     ["ip.delivered", "ip.with-options", "ip.broadcast", "ip.short", "ip.version", "ip.ihl", "ip.checksum", "ip.length", "ip.ttl",
+      "ip.fragment", "ip.source", "ip.option", "ip.source-route", "ip.other", "ip.protocol"]),
+    (r"ip: tx (\d+) datagrams, not sent (\d+) size (\d+) dropped", ["ip-tx", "ip-size", "ip-dropped"]),
+    (r"icmp: echo (\d+) requests answered \((\d+) replies sent\), (\d+) requests sent, (\d+) replies matched, (\d+) stray; "
+     r"dropped (\d+) short (\d+) checksum (\d+) broadcast (\d+) type",
+     ["icmp.echo", "icmp.replies-out", "m-req-out", "icmp.matched", "icmp.stray", "icmp.short", "icmp.checksum", "icmp.broadcast",
+      "icmp.type"]),
+    (r"icmp: unreachable (\d+) sent, (\d+) limited, (\d+) silent; (\d+) not sent",
+     ["unreachable.sent", "unreachable.limited", "unreachable.silent", "not-sent"]),
+]
+
+
+def against(path, c):
+    """Hold the capture's counts `c` against the counter lines the
+    kernel printed in the serial log at `path`: the mismatches, and how
+    many values were held."""
+    import re
+    text = open(path, "rb").read().decode("latin-1").replace("\r", "")
+    k = {}
+    wrong = []
+    for pat, names in LINES:
+        found = None
+        for line in text.split("\n"):
+            m = re.fullmatch(pat, line.strip())
+            if m:
+                found = m
+        if found is None:
+            wrong.append("no line `%s…`" % pat[:28].replace("(\\d+)", "<n>"))
+            continue
+        for name, v in zip(names, found.groups()):
+            k[name] = int(v)
+    if wrong:
+        return wrong, 0
+    held = 0
+
+    def hold(what, kernel, capture):
+        nonlocal held
+        held += 1
+        if kernel != capture:
+            wrong.append("%s: the kernel says %d, the capture %d" % (what, kernel, capture))
+
+    # The model's counts under the kernel's names.
+    for name in LINES[4][1] + ["icmp.echo", "icmp.replies-out", "icmp.matched", "icmp.stray", "icmp.short", "icmp.checksum",
+                               "icmp.broadcast", "icmp.type", "unreachable.sent", "unreachable.limited", "unreachable.silent"]:
+        hold(name, k[name], c[name])
+    hold("frames received", k["rx"], c["to-pax"])
+    hold("frames sent", k["tx"], c["from-pax"])
+    hold("frames of a type nothing speaks", k["type"], c["net.type"])
+    hold("ARP requests sent", k["a-req-out"], c["arp.requests-out"])
+    hold("ARP replies received", k["a-rep-in"], c["arp.reply"])
+    hold("ARP requests answered", k["a-req-in"], c["arp.request"])
+    hold("ARP replies sent", k["a-rep-out"], c["arp.replies-out"])
+    hold("ARP bad", k["a-bad"], c["arp.bad"])
+    hold("ARP conflict", k["a-conflict"], c["arp.conflict"])
+    # What was counted as sent and is not in the capture was dropped
+    # from a queue, by name.
+    lost = k["pushed"] + k["unresolved"]
+    hold("datagrams that never reached the wire (pushed out + unresolved)", lost, c["ident-gaps"])
+    hold("datagrams sent", k["ip-tx"], c["ip.out"] + c["ident-gaps"])
+    hold("echo requests sent", k["m-req-out"], c["icmp.requests-out"] + c["ident-gaps"])
+    # The kernel's own books.
+    hold("transmit buffers reclaimed", k["reclaimed"], k["tx"])
+    hold("receive buffers restocked", k["restocked"], k["rx"] + k["runt"] + k["long"] + k["other"])
+    hold("transmit buffers free of 64", k["free"], 64)
+    hold("queued frames accounted for (sent + pushed out + unresolved)", k["queued"], k["flushed"] + k["pushed"] + k["unresolved"])
+    for name in ("runt", "long", "down", "size", "full", "idle", "not-sent", "ip-dropped", "table-full"):
+        hold(name, k[name], 0)
+    hold("frames for another station", k["other"], c["net.other"])
+    return wrong, held
+
+
 def main(argv):
-    opt = {"small": "0", "large": "0", "list": "0"}
+    opt = {"small": "0", "large": "0", "list": "0", "serial": ""}
     path = None
     i = 0
     while i < len(argv):
@@ -119,7 +214,7 @@ def main(argv):
             opt[a[2:]] = argv[i + 1]
             i += 2
         elif a.startswith("--") or path is not None:
-            die("usage: pcap-net [--small N] [--large N] [--list K] FILE.pcap")
+            die("usage: pcap-net [--small N] [--large N] [--list K] [--serial LOG] FILE.pcap")
         else:
             path = a
             i += 1
@@ -319,6 +414,12 @@ def main(argv):
           % (len(fs), c["before"], c["from-pax"], c["to-pax"],
              " ".join("%d:%d" % kv for kv in sorted(lengths.items())[:12]) + (" …" if len(lengths) > 12 else ""),
              c["net.other"], c["checksums"]))
+    if opt["serial"]:
+        wrong, held = against(opt["serial"], c)
+        if wrong:
+            print("pcap-net: FAIL the kernel's counters are not the capture's: " + "; ".join(wrong))
+            return 1
+        print("pcap-net: the kernel's counters are the capture's (%d held)" % held)
     print("pcap-net: PASS " + " ".join("%s=%d" % (k, c[k]) for k in KEYS))
     return 0
 
