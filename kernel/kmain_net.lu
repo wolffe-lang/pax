@@ -1,0 +1,320 @@
+//! member: false
+// kmain_net.lu — the network's test kernel (px20, tests/mpx4-net). It
+// brings up frames, paging, the interrupts, the timer, the scheduler
+// and the heap, scans the PCI bus (the census is printed when the
+// kernel command line holds `pci`, boot/limine-net.conf), starts
+// kernel/net and, when a device came up, the network thread
+// (kernel/netd) and kernel/arp as 10.0.2.15, then:
+//
+//   answer   waits (10 s at most) for a request for 10.0.2.15 and
+//            says who was answered;
+//   resolve  asks for the gateway's address, 10.0.2.2, and waits for
+//            the reply;
+//   soak     SOAK requests one after another, each waited for, with
+//            the frame allocator's, the heap's and the driver's books
+//            read before and after;
+//   burst    BURST_SMALL frames of 60 bytes and BURST_LARGE of 1514,
+//            type 0x88b5 (IEEE 802's local experimental type, which
+//            nothing answers), to the gateway's address, timed by the
+//            time-stamp counter calibrated against 20 of the PIT's
+//            ticks, then every transmit buffer waited back;
+//
+// and prints the counters and halts:
+//
+//     PAX net test
+//     pci: … (the census, with `pci`)
+//     net: virtio-net 1af4:1000 at 00:02.0, bar4 0x<pa>, 1.x interface
+//     net: features offered 0x<f>, taken 0x0000000100000020 (VERSION_1, MAC)
+//     net: receive queue 0: 64 entries, descriptors 0x<pa> avail 0x<pa> used 0x<pa>
+//     net: transmit queue 1: 64 entries, descriptors 0x<pa> avail 0x<pa> used 0x<pa>
+//     net: 52:54:00:12:34:56, line <l> (vector <v>, level; elcr 0x<b> -> 0x<a>), 66 frames held
+//     arp: 10.0.2.15, waiting for a request
+//     arp: answered 10.0.2.2 (52:55:0a:00:02:02) after <t> ticks
+//     arp: 10.0.2.2 is at 52:55:0a:00:02:02 (<r> requests, <t> ticks)
+//     soak: 10000 requests, 10000 replies in <t> ticks (<n> exchanges/s by the time-stamp counter); frames free <a> -> <b>, heap pages <c> -> <d>, live blocks <e> -> <f>, net frames <g> -> <h>
+//     burst: 20000 frames of 60 bytes in <t> ticks (<n> frames/s by the time-stamp counter), 64 of 64 buffers back
+//     burst: 5000 frames of 1514 bytes in <t> ticks (<n> frames/s by the time-stamp counter), 64 of 64 buffers back
+//     net: rx … / net: tx … / arp: … (the counters)
+//     halt
+//
+// With no device: `net: no virtio network device among <n> PCI
+// functions; the network is off`, then `halt`. Nothing here allocates
+// from the heap; it is started so its books can be read.
+use apic
+use arp
+use boot_info
+use frames
+use heap
+use interrupts
+use log
+use net
+use netd
+use paging
+use panic
+use pci
+use sched
+use serial
+use sync
+use timer
+
+extern "c" let pax_netd: *u8
+
+extern "c" fn pax_rdtsc() -> u64
+
+const OWN_IP: u64 = 0x0a00020f // 10.0.2.15
+const GATEWAY: u64 = 0x0a000202 // 10.0.2.2
+const SOAK: u64 = 10000
+const BURST_SMALL: u64 = 20000
+const BURST_LARGE: u64 = 5000
+const EXPERIMENTAL: u64 = 0x88b5
+
+fn put_byte_at(a: u64, v: u64) {
+    // # Safety: a byte of the burst's own frame, through the HHDM.
+    unsafe { (a as *u8).write_volatile((v & 0xff) as u8) }
+}
+
+fn tsc() -> u64 {
+    // # Safety: boot's RDTSC; it touches no memory.
+    unsafe { pax_rdtsc() }
+}
+
+/// Time-stamp counts in 20 ticks of the PIT (0.2 s), measured from one
+/// tick's edge to another: the burst's clock, since a burst is over in
+/// a few ticks.
+fn calibrate() -> u64 {
+    let t0 = edge()
+    let c0 = tsc()
+    while timer.ticks() < t0 + 20 {
+        sync.relax()
+    }
+    tsc() - c0
+}
+
+/// Wait for the next tick's edge; the tick it began.
+fn edge() -> u64 {
+    let t = timer.ticks()
+    while timer.ticks() == t {
+        sync.relax()
+    }
+    timer.ticks()
+}
+
+/// Send `n` frames of `len` bytes from the frame at `f` (its header
+/// and pattern written by the caller; bytes 14-17 take the sequence
+/// number) and print the burst's line.
+fn burst(f: u64, n: u64, len: u64, per20: u64) {
+    let t0 = edge()
+    let c0 = tsc()
+    var sent: u64 = 0
+    var stuck = false
+    while sent < n && !stuck {
+        let w0 = timer.ticks()
+        while net.tx_free() == 0 && !stuck {
+            sync.relax()
+            if timer.ticks() - w0 > 300 {
+                stuck = true
+            }
+        }
+        if !stuck {
+            put_byte_at(f + 14, sent >> 24)
+            put_byte_at(f + 15, sent >> 16)
+            put_byte_at(f + 16, sent >> 8)
+            put_byte_at(f + 17, sent)
+            let q = net.send(f, len) else 0
+            if q != 0 {
+                sent += 1
+            }
+        }
+    }
+    let c1 = tsc()
+    let t1 = timer.ticks()
+    let w1 = timer.ticks()
+    while net.tx_free() < net.QUEUE && timer.ticks() - w1 < 300 {
+        sync.relax()
+    }
+    // frames/s = sent / seconds, seconds = (c1 - c0) / (5 * per20).
+    let span = if c1 > c0 { c1 - c0 } else { 1 }
+    let rate = sent * 5 * per20 / span
+    log.put("burst: ")
+    log.dec(sent as int)
+    log.put(" frames of ")
+    log.dec(len as int)
+    log.put(" bytes in ")
+    log.dec((t1 - t0) as int)
+    log.put(" ticks (")
+    log.dec(rate as int)
+    log.put(" frames/s by the time-stamp counter), ")
+    log.dec(net.tx_free() as int)
+    log.put(" of ")
+    log.dec(net.QUEUE as int)
+    log.put(" buffers back")
+    log.end()
+}
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX net test")
+    frames.start()
+    let pml4 = paging.start()
+    interrupts.start()
+    apic.start(pml4)
+    timer.start()
+    sched.start(pml4)
+    heap.start()
+    let _n = pci.scan()
+    if boot_info.cmdline_has("pci") {
+        pci.report()
+    }
+    if net.start(pml4) != net.UP {
+        timer.stop()
+        log.line("halt")
+        panic.halt()
+    }
+    net.report()
+    arp.start(OWN_IP)
+    let scratch = frames.alloc() else 0
+    if scratch == 0 {
+        panic.fail("net test: no frame for the burst", 0)
+    }
+    // # Safety: the address of kernel/netd's export; nothing is read.
+    let body = unsafe { pax_netd as u64 }
+    sched.create(body, 0)
+    sync.enable()
+
+    // answer
+    log.put("arp: ")
+    arp.put_ip(arp.ip())
+    log.put(", waiting for a request")
+    log.end()
+    let a0 = timer.ticks()
+    while arp.count(arp.C_REQUESTS_IN) == 0 && timer.ticks() - a0 < 1000 {
+        let _s = sched.sleep(1)
+    }
+    if arp.count(arp.C_REQUESTS_IN) == 0 {
+        log.line("arp: no request came in 1000 ticks")
+    } else {
+        let (who, hw) = arp.asker()
+        log.put("arp: answered ")
+        arp.put_ip(who)
+        log.put(" (")
+        arp.put_hw_text(hw)
+        log.put(") after ")
+        log.dec((timer.ticks() - a0) as int)
+        log.put(" ticks")
+        log.end()
+    }
+
+    // resolve
+    let r0 = timer.ticks()
+    let seen = arp.count(arp.C_REPLIES_IN)
+    var asked: u64 = 0
+    while arp.count(arp.C_REPLIES_IN) == seen && asked < 3 {
+        arp.request(GATEWAY)
+        asked += 1
+        let w = timer.ticks()
+        while arp.count(arp.C_REPLIES_IN) == seen && timer.ticks() - w < 100 {
+            let _s = sched.sleep(1)
+        }
+    }
+    let (known, gw) = arp.lookup(GATEWAY)
+    if arp.count(arp.C_REPLIES_IN) == seen || !known {
+        log.put("arp: no reply from ")
+        arp.put_ip(GATEWAY)
+        log.put(" to ")
+        log.dec(asked as int)
+        log.put(" requests")
+        log.end()
+    } else {
+        log.put("arp: ")
+        arp.put_ip(GATEWAY)
+        log.put(" is at ")
+        arp.put_hw_text(gw)
+        log.put(" (")
+        log.dec(asked as int)
+        log.put(" requests, ")
+        log.dec((timer.ticks() - r0) as int)
+        log.put(" ticks)")
+        log.end()
+    }
+
+    // soak
+    let f0 = frames.free_count()
+    let p0 = heap.pages()
+    let b0 = heap.live_blocks()
+    let h0 = net.frames_held()
+    let base = arp.count(arp.C_REPLIES_IN)
+    let per20s = calibrate()
+    let s0 = timer.ticks()
+    let sc0 = tsc()
+    var i: u64 = 0
+    var lost = false
+    while i < SOAK && !lost {
+        arp.request(GATEWAY)
+        let w = timer.ticks()
+        while arp.count(arp.C_REPLIES_IN) < base + i + 1 && !lost {
+            sched.yield()
+            if timer.ticks() - w > 300 {
+                lost = true
+            }
+        }
+        i += 1
+    }
+    let sc1 = tsc()
+    let s1 = timer.ticks()
+    log.put("soak: ")
+    log.dec(i as int)
+    log.put(" requests, ")
+    log.dec((arp.count(arp.C_REPLIES_IN) - base) as int)
+    log.put(" replies in ")
+    log.dec((s1 - s0) as int)
+    log.put(" ticks (")
+    log.dec((i * 5 * per20s / (if sc1 > sc0 { sc1 - sc0 } else { 1 })) as int)
+    log.put(" exchanges/s by the time-stamp counter); frames free ")
+    log.dec(f0 as int)
+    log.put(" -> ")
+    log.dec(frames.free_count() as int)
+    log.put(", heap pages ")
+    log.dec(p0 as int)
+    log.put(" -> ")
+    log.dec(heap.pages() as int)
+    log.put(", live blocks ")
+    log.dec(b0 as int)
+    log.put(" -> ")
+    log.dec(heap.live_blocks() as int)
+    log.put(", net frames ")
+    log.dec(h0 as int)
+    log.put(" -> ")
+    log.dec(net.frames_held() as int)
+    log.end()
+
+    // burst
+    let f = scratch + frames.hhdm()
+    var k: u64 = 0
+    while k < 6 {
+        put_byte_at(f + k, gw >> (k * 8))
+        put_byte_at(f + 6 + k, net.mac_byte(k))
+        k += 1
+    }
+    put_byte_at(f + 12, EXPERIMENTAL >> 8)
+    put_byte_at(f + 13, EXPERIMENTAL)
+    k = 14
+    while k < net.FRAME_MAX {
+        put_byte_at(f + k, k * 7)
+        k += 1
+    }
+    let per20 = calibrate()
+    burst(f, BURST_SMALL, net.FRAME_MIN, per20)
+    burst(f, BURST_LARGE, net.FRAME_MAX, per20)
+
+    let saved = sync.irq_save()
+    net.counters()
+    arp.counters()
+    log.put("netd: ")
+    log.dec(netd.turns() as int)
+    log.put(" turns")
+    log.end()
+    sync.irq_restore(saved)
+    timer.stop()
+    log.line("halt")
+    panic.halt()
+}
