@@ -22,8 +22,9 @@ machine's screen does; the PS/2 keyboard (px13) types into it.
   (wolf-lang#611). Nothing here allocates.
 - Test binaries for PAX are built in the `px13-ubuntu` container on
   kasumi or on the CI runner, never with kasumi's CachyOS glibc.
-- No word implying filming, recording, viewers or a demo anywhere in
-  pax; nothing in pax names any use of the folders outside it.
+- Nothing in pax names any use of the folders outside it, and no word
+  in pax implies one (the contract's list of such words is not repeated
+  here).
 - px17 (pipes) is open on pax and merges first: this lane touches none
   of its files where avoidable (`kernel/files`, `kernel/paging`,
   `kernel/process`, `kernel/sched`, `kernel/user`, `boot/user.S`,
