@@ -11,6 +11,11 @@
      pax_inb(port: u16) -> u8     one `inb` from port (px01: the UART
                                   driver's LSR polling and loopback
                                   read, kernel/serial).
+     pax_outl(port: u16, v: u32)  one `outl` of v to port (px20: PCI
+                                  configuration mechanism #1's address
+                                  port 0xCF8, kernel/pci).
+     pax_inl(port: u16) -> u32    one `inl` from port (px20: its data
+                                  port 0xCFC).
      pax_halt()                   `cli; hlt`, forever: the kernel's
                                   normal end and the panic path's
                                   (px01). Never returns. Sized, so
@@ -33,7 +38,7 @@
    Written from: the x86-64 psABI (argument registers), the Intel SDM
    (IN, OUT, CLI, HLT), QEMU's isa-debug-exit device and the PC's port
    0x61 (px18, kernel/speaker). No Linux
-   source. */
+   source; no other kernel's source. */
 
         .set EXIT_PORT,     0xf4
 
@@ -55,6 +60,23 @@ pax_inb:
         inb     %dx, %al
         ret
         .size pax_inb, . - pax_inb
+
+        .globl pax_outl
+        .type pax_outl, @function
+pax_outl:
+        movl    %edi, %edx
+        movl    %esi, %eax
+        outl    %eax, %dx
+        ret
+        .size pax_outl, . - pax_outl
+
+        .globl pax_inl
+        .type pax_inl, @function
+pax_inl:
+        movl    %edi, %edx
+        inl     %dx, %eax
+        ret
+        .size pax_inl, . - pax_inl
 
         .globl pax_halt
         .type pax_halt, @function
