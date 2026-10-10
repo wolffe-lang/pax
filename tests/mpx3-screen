@@ -45,17 +45,22 @@
 #      printed: a measurement, no bound.
 #   V4 serial unchanged by the screen: with no display device the third
 #      line is `screen: off, no framebuffer`, and every line of the serial
-#      log from `PAX: the screen` on, the `screen:` and `scroll:` lines
-#      and the pattern's own `screen: <n> bytes` line left out, is
-#      byte-identical (CRs removed) to the screen run's.
+#      log from `PAX: the screen` on is byte-identical (CRs removed) to
+#      the screen run's, but for the lines that say what the display
+#      device changed: `screen:` and `scroll:` (the screen's own
+#      report), `paging:` (Limine's own page tables sit elsewhere when it
+#      sets a display mode, so its CR3 differs) and the pattern's two
+#      full-width rows (`[===…]` and `---…+`, as wide as the grid: 80
+#      without one).
 #   V5 a shell on the screen: pelt-ps2 halts after `PAX: init /bin/pelt
 #      ended with status 0`, and its screendump equals tools/screen-ref's
 #      image of its serial log from `PAX: the console` on, pixel for
 #      pixel (what was typed, echoed by the line discipline, and pelt's
 #      prompt and answers, on the screen).
 #   V6 the window size: ask-ps2's screendump equals tools/screen-ref's
-#      image likewise; its `ask: winsize` line is `ask: winsize <R> rows
-#      <C> cols 0` with R and C the screen's grid (the dump's height / 16
+#      image likewise; its `ask: winsize` line (`ask: winsize <ioctl's
+#      result> rows <ws_row> cols <ws_col>`) is `ask: winsize 0 rows <R>
+#      cols <C>` with R and C the screen's grid (the dump's height / 16
 #      and width / 8); ask-serial's is `ask: winsize 0 rows 0 cols 0`
 #      (px13's answer, a serial line's); and the two sessions are
 #      byte-identical otherwise (tests/mpx3-console holds the serial-only
@@ -282,7 +287,7 @@ for leg in $legs; do
         boot screen-serial "$selft" "$images/$tier/kmain_screen.iso" --no-screen
         why=
         grep -qx 'screen: off, no framebuffer' "$norm" || why+=" no 'screen: off, no framebuffer' ($(grep -m1 '^screen: ' "$norm"));"
-        strip() { awk '/^PAX: the screen$/ { on = 1 } on && !/^screen: / && !/^scroll: / { print }' "$1"; }
+        strip() { awk '/^PAX: the screen$/ { on = 1 } on && !/^screen: / && !/^scroll: / && !/^paging: / && !/^\[=+\]$/ && !/^-+\+.?Z$/ { print }' "$1"; }
         strip "$sn" > "$log.cut"; strip "$norm" > "$log.cut.other"
         cmp -s "$log.cut" "$log.cut.other" || why+=" the serial differs: $(diff "$log.cut" "$log.cut.other" | head -n 6 | tr '\n' '|');"
         [ "$(wc -l < "$log.cut" | tr -d ' ')" -gt 400 ] || why+=" a short log;"
@@ -305,7 +310,7 @@ for leg in $legs; do
         why=
         r=$(compare "$id ps2" 'PAX: the console') || why+="$r"
         sz=$(dump_size "$dump"); dw=${sz%x*} dh=${sz#*x}
-        want="ask: winsize $(( ${dh:-0} / 16 )) rows $(( ${dw:-0} / 8 )) cols 0"
+        want="ask: winsize 0 rows $(( ${dh:-0} / 16 )) cols $(( ${dw:-0} / 8 ))"
         got=$(grep -m1 '^ask: winsize ' "$an")
         [ "$got" = "$want" ] || why+=" with the screen '$got', not '$want';"
         [ "$ahrc" = 0 ] || why+=" ask-ps2 not halted;"
