@@ -1,5 +1,5 @@
-//! arp — the Address Resolution Protocol for IPv4 over Ethernet, as
-//! the frame interface's witness (px20).
+//! arp — the Address Resolution Protocol for IPv4 over Ethernet, and
+//! the cache kernel/ip sends through (px20; the cache is px21's).
 //!
 //! An ARP packet rides in an Ethernet frame of type 0x0806 (RFC 826;
 //! RFC 894 for the frame), every field big-endian:
@@ -14,50 +14,109 @@
 //! 42 bytes; kernel/net pads a sent one to 60 with zeros, and a
 //! received one may carry padding, which is not read.
 //!
-//! `input` is RFC 826's reception algorithm: a packet whose hardware
-//! type, protocol type or lengths are not the ones above is discarded
-//! (`bad`); if the sender's protocol address is already in the table
-//! its hardware address is replaced (the merge); if the target
-//! protocol address is this station's, the sender is added to the
-//! table unless it was merged, and a request is answered — the same
-//! packet with the two address pairs swapped, this station's hardware
-//! address in the sender's place and opcode 2, sent to the asker's
-//! hardware address. A packet for another protocol address is counted
-//! (`other`) and, as the RFC orders, still merged.
+//! **The cache.** `ENTRIES` (8) entries, each free, incomplete (asked
+//! for, not yet answered) or resolved.
 //!
-//! `request(ip)` broadcasts a request (destination ff:ff:ff:ff:ff:ff,
-//! target hardware address zero). `lookup(ip)` reads the table.
+//! - *Ageing.* A resolved entry is good for `age` ticks (`start`'s
+//!   argument; 6000, a minute, unless a test shortens it: RFC 1122
+//!   §2.3.2.1 asks for a timeout "on the order of a minute") from the
+//!   last ARP packet that named its sender. Past that it is not used:
+//!   `send` makes it incomplete and asks again, and `tick` frees one
+//!   nobody has used.
+//! - *Retry.* An incomplete entry is asked for at once and then once
+//!   every `RETRY` ticks (a second: the rate RFC 1122 §2.3.2.1
+//!   recommends as the most a host should ask), `TRIES` (3) requests
+//!   in all; a second after the third the entry is freed and the
+//!   frames that waited are dropped, counted `unresolved`.
+//! - *The pending queue.* `PENDING` (2) frames per unresolved address
+//!   (RFC 1122 §2.3.2.2 asks that at least the latest be kept); one
+//!   more pushes out the oldest, counted `pushed out`. The reply sends
+//!   what waits, oldest first.
+//! - *Eviction.* A new address takes a free entry, else the resolved
+//!   entry confirmed longest ago, never an incomplete one: with eight
+//!   addresses all being asked for, a frame for a ninth is dropped,
+//!   counted `table full`.
+//! - *Learning* is RFC 826's reception algorithm: a packet whose
+//!   hardware type, protocol type, lengths or opcode are not the ones
+//!   above is discarded (`bad`); if the sender's protocol address has
+//!   an entry, its hardware address is replaced and the entry is
+//!   confirmed (the merge); if the target protocol address is this
+//!   station's, the sender gets an entry unless it was merged, and a
+//!   request is answered. So a gratuitous announcement (target not
+//!   this station's address) changes an entry that exists and creates
+//!   none. Three senders teach nothing: 0.0.0.0 (an address probe; a
+//!   request from one is still answered), the limited broadcast, and
+//!   this station's own address (`conflict`: someone else claims it;
+//!   counted and not answered). A sender hardware address that is zero
+//!   or a group address is `bad`. Nothing is learned from an IP
+//!   datagram.
 //!
-//! This station's protocol address is a boot-time constant its kernel
-//! passes to `start` (10.0.2.15, the first address QEMU's user-mode
-//! network gives a guest; px21 owns addresses). The table is four
-//! entries, replaced round-robin when full, with no ageing: enough to
-//! witness frames in both directions, and px21's to replace.
+//! `send(hop, frame, len)` is kernel/ip's way out: the frame is whole
+//! but for its destination address, which the cache fills in; with no
+//! usable entry the frame is copied onto the entry's queue and a
+//! request goes out. `query(ip)` starts a resolution with no frame;
+//! `lookup(ip)` reads the cache; `tick()` is the cache's clock, called
+//! every ten ticks by kernel/netd's second thread.
 //!
-//! State is words of boot/net.S's `pax_arp_state` and one frame the
-//! packets are composed in, both under `sync.arp()`.
+//! State is words of boot/net.S's `pax_arp_state`, one frame the
+//! packets are composed in and eight frames for the queues (two
+//! 2048-byte halves each), all taken once at `start` and all under
+//! `sync.arp()`, which is taken before `sync.net()`. Nothing here
+//! allocates from the heap.
 //!
-//! Written from RFC 826 (the packet, the reception algorithm) and RFC
-//! 894. No Linux source; no other kernel's or network stack's source.
+//! Written from RFC 826 (the packet, the reception algorithm), RFC 894
+//! and RFC 1122 §2.3.2 (the cache: its timeout, the request rate, the
+//! saved packet). No Linux source; no other kernel's or network
+//! stack's source.
 
 use frames
 use log
 use net
 use sync
+use timer
+
+extern "c" fn pax_fb_copy(dst: u64, src: u64, bytes: u64)
 
 extern "c" let pax_arp_state: *u64
 
 const ETHERTYPE: u64 = 0x0806
 const PACKET: u64 = 42
 
+/// Entries in the cache.
+pub const ENTRIES: u64 = 8
+/// Frames that may wait on one unresolved address.
+pub const PENDING: u64 = 2
+/// Ticks between two requests for one address.
+pub const RETRY: u64 = 100
+/// Requests sent for one address before it is given up.
+pub const TRIES: u64 = 3
+/// The default age, in ticks, past which a resolved entry is not used.
+pub const AGE: u64 = 6000
+const HALF: u64 = 2048
+
 // pax_arp_state's words.
 const A_IP: u64 = 0 // this station's protocol address
 const A_FRAME: u64 = 1 // where a packet is composed (HHDM)
-const A_NEXT: u64 = 2 // the table entry the next new address takes
-const A_TABLE: u64 = 8 // four entries of two words: 1 << 32 | ip, the hardware address
-const ENTRIES: u64 = 4
+const A_AGE: u64 = 2 // ticks a resolved entry is good for
 const A_ASKER_IP: u64 = 16 // the last station whose request was answered
 const A_ASKER_HW: u64 = 17
+const A_GAVE_IP: u64 = 18 // the last address given up on
+const A_GAVE_FRAMES: u64 = 19 // and how many frames waited for it
+const A_SLOTS: u64 = 24 // eight words: each entry's queue frame (HHDM)
+const A_TABLE: u64 = 32 // eight entries of eight words
+
+// An entry's words.
+const E_STATE: u64 = 0
+const E_IP: u64 = 1
+const E_HW: u64 = 2
+const E_STAMP: u64 = 3 // resolved: the tick it was confirmed; incomplete: the last request's
+const E_TRIES: u64 = 4 // requests sent while incomplete
+const E_PENDING: u64 = 5 // frames waiting
+const E_LEN: u64 = 6 // two words: their lengths
+
+const FREE: u64 = 0
+const INCOMPLETE: u64 = 1
+const RESOLVED: u64 = 2
 
 /// The counters (`count`): requests sent.
 pub const C_REQUESTS_OUT: u64 = 3
@@ -67,17 +126,58 @@ pub const C_REPLIES_IN: u64 = 4
 pub const C_REQUESTS_IN: u64 = 5
 /// Replies sent.
 pub const C_REPLIES_OUT: u64 = 6
-/// Packets that are not Ethernet/IPv4 ARP, too short, or of an opcode that is neither.
+/// Packets that are not Ethernet/IPv4 ARP, too short, of an opcode that is neither, or from no single station.
 pub const C_BAD: u64 = 7
+/// Packets whose sender claims this station's protocol address.
+pub const C_CONFLICT: u64 = 8
+/// Frames put on an unresolved address's queue.
+pub const C_QUEUED: u64 = 9
+/// Queued frames sent when the reply came.
+pub const C_FLUSHED: u64 = 10
+/// Queued frames pushed out by a later one.
+pub const C_PUSHED: u64 = 11
+/// Queued frames dropped when their address was given up.
+pub const C_UNRESOLVED: u64 = 12
+/// Addresses given up after `TRIES` requests.
+pub const C_GAVE_UP: u64 = 13
+/// Frames dropped for want of an entry.
+pub const C_TABLE_FULL: u64 = 14
+/// Resolved entries that aged out.
+pub const C_AGED: u64 = 15
+/// Entries created by a packet for this station.
+pub const C_LEARNED: u64 = 20
+/// Entries confirmed or changed by a packet from their address.
+pub const C_UPDATED: u64 = 21
+
+/// `send`'s answers: the frame went to the device.
+pub const SENT: u64 = 0
+/// It waits for its address.
+pub const QUEUED: u64 = 1
+/// It was dropped: no entry could be had.
+pub const DROPPED: u64 = 2
+/// kernel/net refused it.
+pub const FAILED: u64 = 3
 
 fn aw(i: u64) -> u64 {
-    // # Safety: i < 32, a word of boot/net.S's pax_arp_state.
+    // # Safety: i < 128, a word of boot/net.S's pax_arp_state.
     unsafe { ((pax_arp_state as u64 + i * 8) as *u64).read_volatile() }
 }
 
 fn put_aw(i: u64, v: u64) {
     // # Safety: as `aw`.
     unsafe { ((pax_arp_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+fn bump(i: u64, by: u64) {
+    put_aw(i, aw(i) + by)
+}
+
+fn ew(e: u64, f: u64) -> u64 {
+    aw(A_TABLE + e * 8 + f)
+}
+
+fn put_ew(e: u64, f: u64, v: u64) {
+    put_aw(A_TABLE + e * 8 + f, v)
 }
 
 /// Counter `i` (C_*).
@@ -93,7 +193,7 @@ fn octet(a: u64) -> u64 {
 }
 
 fn put_byte(a: u64, v: u64) {
-    // # Safety: a byte of this module's own frame.
+    // # Safety: a byte of a frame this module or its caller owns.
     unsafe { (a as *u8).write_volatile((v & 0xff) as u8) }
 }
 
@@ -146,17 +246,27 @@ fn own_hw() -> u64 {
 }
 
 /// Take `ip` (a.b.c.d as a << 24 | b << 16 | c << 8 | d) as this
-/// station's protocol address and a frame to compose in. IF clear.
-pub fn start(ip: u64) {
+/// station's protocol address and `age` ticks as a resolved entry's
+/// life; take the frames the packets and the queues live in. IF clear.
+pub fn start(ip: u64, age: u64) {
     var i: u64 = 0
-    while i < 32 {
+    while i < 128 {
         put_aw(i, 0)
         i += 1
     }
     put_aw(A_IP, ip)
+    put_aw(A_AGE, age)
     let pa = frames.alloc() else 0
     if pa != 0 {
         put_aw(A_FRAME, pa + frames.hhdm())
+    }
+    var e: u64 = 0
+    while e < ENTRIES {
+        let q = frames.alloc() else 0
+        if q != 0 {
+            put_aw(A_SLOTS + e, q + frames.hhdm())
+        }
+        e += 1
     }
 }
 
@@ -165,11 +275,24 @@ pub fn ip() -> u64 {
     aw(A_IP)
 }
 
-/// The table entry holding `ip`; ENTRIES when none does.
+/// Frames this module holds (one to compose in, one per entry).
+pub fn frames_held() -> u64 {
+    var n: u64 = if aw(A_FRAME) != 0 { 1 } else { 0 }
+    var e: u64 = 0
+    while e < ENTRIES {
+        if aw(A_SLOTS + e) != 0 {
+            n += 1
+        }
+        e += 1
+    }
+    n
+}
+
+/// The entry holding `ip`, in any state but free; ENTRIES when none.
 fn find(ip: u64) -> u64 {
     var i: u64 = 0
     while i < ENTRIES {
-        if aw(A_TABLE + i * 2) == (1 << 32 | ip) {
+        if ew(i, E_STATE) != FREE && ew(i, E_IP) == ip {
             return i
         }
         i += 1
@@ -177,14 +300,29 @@ fn find(ip: u64) -> u64 {
     ENTRIES
 }
 
-/// The hardware address the table holds for `ip`: `(true, address)`,
-/// or `(false, 0)`.
-pub fn lookup(ip: u64) -> (bool, u64) {
-    let saved = sync.acquire(sync.arp())
-    let i = find(ip)
-    let m = if i < ENTRIES { aw(A_TABLE + i * 2 + 1) } else { 0 }
-    sync.release(sync.arp(), saved)
-    (i < ENTRIES, m)
+/// An entry for a new address: a free one, else the resolved one
+/// confirmed longest ago; ENTRIES when every entry is incomplete.
+fn claim() -> u64 {
+    var best: u64 = ENTRIES
+    var i: u64 = 0
+    while i < ENTRIES {
+        if ew(i, E_STATE) == FREE {
+            return i
+        }
+        if ew(i, E_STATE) == RESOLVED && (best == ENTRIES || ew(i, E_STAMP) < ew(best, E_STAMP)) {
+            best = i
+        }
+        i += 1
+    }
+    best
+}
+
+fn clear(e: u64) {
+    var f: u64 = 0
+    while f < 8 {
+        put_ew(e, f, 0)
+        f += 1
+    }
 }
 
 /// Compose one packet in the module's frame and send it. The ARP lock
@@ -208,15 +346,160 @@ fn emit(to: u64, op: u64, tha: u64, tpa: u64) {
     put_be32(f + 38, tpa)
     let sent = net.send(f, PACKET) else 0
     if sent != 0 {
-        let c = if op == 1 { C_REQUESTS_OUT } else { C_REPLIES_OUT }
-        put_aw(c, aw(c) + 1)
+        bump(if op == 1 { C_REQUESTS_OUT } else { C_REPLIES_OUT }, 1)
     }
 }
 
-/// Broadcast a request for `ip`'s hardware address.
-pub fn request(ip: u64) {
+/// Broadcast a request for entry `e`'s address and note when. The ARP
+/// lock held.
+fn ask(e: u64, now: u64) {
+    emit(0xffffffffffff, 1, 0, ew(e, E_IP))
+    put_ew(e, E_TRIES, ew(e, E_TRIES) + 1)
+    put_ew(e, E_STAMP, now)
+}
+
+/// Make entry `e` an incomplete one for `ip`, with nothing waiting,
+/// and ask. The ARP lock held.
+fn begin(e: u64, ip: u64, now: u64) {
+    clear(e)
+    put_ew(e, E_STATE, INCOMPLETE)
+    put_ew(e, E_IP, ip)
+    ask(e, now)
+}
+
+/// Send what waits on entry `e`, oldest first, to its hardware
+/// address. The ARP lock held.
+fn flush(e: u64) {
+    let base = aw(A_SLOTS + e)
+    var s: u64 = 0
+    while s < ew(e, E_PENDING) {
+        let f = base + s * HALF
+        put_hw(f, ew(e, E_HW))
+        let _sent = net.send(f, ew(e, E_LEN + s)) else 0
+        bump(C_FLUSHED, 1)
+        s += 1
+    }
+    put_ew(e, E_PENDING, 0)
+}
+
+/// Send the `len`-byte frame at `frame` to the station whose protocol
+/// address is `hop`: bytes 0-5, the destination address, are written
+/// here; the rest is the caller's. With a resolved entry of an age to
+/// be used the frame goes out now (SENT, or FAILED when kernel/net
+/// refuses it); otherwise it is copied onto the address's queue and a
+/// request is out or goes out (QUEUED), or there is no entry to be had
+/// (DROPPED). `len` is at most 1514.
+pub fn send(hop: u64, frame: u64, len: u64) -> u64 {
     let saved = sync.acquire(sync.arp())
-    emit(0xffffffffffff, 1, 0, ip)
+    let now = timer.ticks()
+    var e = find(hop)
+    if e < ENTRIES && ew(e, E_STATE) == RESOLVED {
+        if now - ew(e, E_STAMP) <= aw(A_AGE) {
+            put_hw(frame, ew(e, E_HW))
+            let q = net.send(frame, len) else 0
+            sync.release(sync.arp(), saved)
+            return if q != 0 { SENT } else { FAILED }
+        }
+        bump(C_AGED, 1)
+        begin(e, hop, now)
+    }
+    if e == ENTRIES {
+        e = claim()
+        if e == ENTRIES || aw(A_SLOTS + e) == 0 {
+            bump(C_TABLE_FULL, 1)
+            sync.release(sync.arp(), saved)
+            return DROPPED
+        }
+        begin(e, hop, now)
+    }
+    let base = aw(A_SLOTS + e)
+    if base == 0 || len > HALF {
+        bump(C_TABLE_FULL, 1)
+        sync.release(sync.arp(), saved)
+        return DROPPED
+    }
+    if ew(e, E_PENDING) == PENDING {
+        // The oldest gives way: the later frame moves down.
+        // # Safety: both halves of this entry's queue frame, which the
+        // module owns; the length is at most 1514.
+        unsafe { pax_fb_copy(base, base + HALF, ew(e, E_LEN + 1)) }
+        put_ew(e, E_LEN, ew(e, E_LEN + 1))
+        put_ew(e, E_PENDING, PENDING - 1)
+        bump(C_PUSHED, 1)
+    }
+    let s = ew(e, E_PENDING)
+    // # Safety: a half of this entry's queue frame; `len` <= 2048 bytes
+    // of the caller's frame.
+    unsafe { pax_fb_copy(base + s * HALF, frame, len) }
+    put_ew(e, E_LEN + s, len)
+    put_ew(e, E_PENDING, s + 1)
+    bump(C_QUEUED, 1)
+    sync.release(sync.arp(), saved)
+    QUEUED
+}
+
+/// Start resolving `ip` with no frame waiting, unless an entry of an
+/// age to be used, or a request, is already there.
+pub fn query(ip: u64) {
+    let saved = sync.acquire(sync.arp())
+    let now = timer.ticks()
+    var e = find(ip)
+    if e < ENTRIES && ew(e, E_STATE) == RESOLVED && now - ew(e, E_STAMP) > aw(A_AGE) {
+        bump(C_AGED, 1)
+        begin(e, ip, now)
+    }
+    if e == ENTRIES {
+        e = claim()
+        if e < ENTRIES {
+            begin(e, ip, now)
+        } else {
+            bump(C_TABLE_FULL, 1)
+        }
+    }
+    sync.release(sync.arp(), saved)
+}
+
+/// The hardware address the cache holds for `ip`, if it is resolved
+/// and of an age to be used: `(true, address)`, or `(false, 0)`.
+pub fn lookup(ip: u64) -> (bool, u64) {
+    let saved = sync.acquire(sync.arp())
+    let e = find(ip)
+    var m: u64 = 0
+    var known = false
+    if e < ENTRIES && ew(e, E_STATE) == RESOLVED && timer.ticks() - ew(e, E_STAMP) <= aw(A_AGE) {
+        m = ew(e, E_HW)
+        known = true
+    }
+    sync.release(sync.arp(), saved)
+    (known, m)
+}
+
+/// The cache's clock (kernel/netd's second thread, every ten ticks):
+/// ask again for what is still unanswered after `RETRY` ticks, give an
+/// address up after `TRIES` requests, free a resolved entry past its
+/// age.
+pub fn tick() {
+    let saved = sync.acquire(sync.arp())
+    let now = timer.ticks()
+    var e: u64 = 0
+    while e < ENTRIES {
+        let st = ew(e, E_STATE)
+        if st == INCOMPLETE && now - ew(e, E_STAMP) >= RETRY {
+            if ew(e, E_TRIES) >= TRIES {
+                bump(C_UNRESOLVED, ew(e, E_PENDING))
+                bump(C_GAVE_UP, 1)
+                put_aw(A_GAVE_IP, ew(e, E_IP))
+                put_aw(A_GAVE_FRAMES, ew(e, E_PENDING))
+                clear(e)
+            } else {
+                ask(e, now)
+            }
+        } else if st == RESOLVED && now - ew(e, E_STAMP) > aw(A_AGE) {
+            bump(C_AGED, 1)
+            clear(e)
+        }
+        e += 1
+    }
     sync.release(sync.arp(), saved)
 }
 
@@ -225,7 +508,7 @@ pub fn request(ip: u64) {
 pub fn input(frame: u64, len: u64) {
     let saved = sync.acquire(sync.arp())
     if len < PACKET || be16(frame + 14) != 1 || be16(frame + 16) != 0x0800 || octet(frame + 18) != 6 || octet(frame + 19) != 4 {
-        put_aw(C_BAD, aw(C_BAD) + 1)
+        bump(C_BAD, 1)
         sync.release(sync.arp(), saved)
         return
     }
@@ -233,30 +516,52 @@ pub fn input(frame: u64, len: u64) {
     let sha = hw(frame + 22)
     let spa = be32(frame + 28)
     let tpa = be32(frame + 38)
+    // A sender is one station: not zero, not a group address (the low
+    // bit of the first byte).
+    if (op != 1 && op != 2) || sha == 0 || sha & 1 == 1 {
+        bump(C_BAD, 1)
+        sync.release(sync.arp(), saved)
+        return
+    }
+    if spa == aw(A_IP) {
+        bump(C_CONFLICT, 1)
+        sync.release(sync.arp(), saved)
+        return
+    }
+    let now = timer.ticks()
+    let teaches = spa != 0 && spa != 0xffffffff
     var merged = false
-    let i = find(spa)
-    if i < ENTRIES {
-        put_aw(A_TABLE + i * 2 + 1, sha)
-        merged = true
+    if teaches {
+        let e = find(spa)
+        if e < ENTRIES {
+            put_ew(e, E_HW, sha)
+            put_ew(e, E_STATE, RESOLVED)
+            put_ew(e, E_STAMP, now)
+            put_ew(e, E_TRIES, 0)
+            bump(C_UPDATED, 1)
+            merged = true
+            flush(e)
+        }
     }
     if tpa == aw(A_IP) {
-        if !merged {
-            let n = aw(A_NEXT) % ENTRIES
-            put_aw(A_TABLE + n * 2, 1 << 32 | spa)
-            put_aw(A_TABLE + n * 2 + 1, sha)
-            put_aw(A_NEXT, n + 1)
+        if teaches && !merged {
+            let n = claim()
+            if n < ENTRIES {
+                clear(n)
+                put_ew(n, E_STATE, RESOLVED)
+                put_ew(n, E_IP, spa)
+                put_ew(n, E_HW, sha)
+                put_ew(n, E_STAMP, now)
+                bump(C_LEARNED, 1)
+            }
         }
         if op == 1 {
-            put_aw(C_REQUESTS_IN, aw(C_REQUESTS_IN) + 1)
+            bump(C_REQUESTS_IN, 1)
             put_aw(A_ASKER_IP, spa)
             put_aw(A_ASKER_HW, sha)
             emit(sha, 2, sha, spa)
         } else {
-            if op == 2 {
-                put_aw(C_REPLIES_IN, aw(C_REPLIES_IN) + 1)
-            } else {
-                put_aw(C_BAD, aw(C_BAD) + 1)
-            }
+            bump(C_REPLIES_IN, 1)
         }
     }
     sync.release(sync.arp(), saved)
@@ -266,6 +571,12 @@ pub fn input(frame: u64, len: u64) {
 /// answered: its protocol and hardware addresses (0, 0 before any).
 pub fn asker() -> (u64, u64) {
     (aw(A_ASKER_IP), aw(A_ASKER_HW))
+}
+
+/// The last address given up on and how many frames had waited for it
+/// (0, 0 before any).
+pub fn gave_up() -> (u64, u64) {
+    (aw(A_GAVE_IP), aw(A_GAVE_FRAMES))
 }
 
 /// Write `ip` as a.b.c.d.
@@ -291,8 +602,45 @@ pub fn put_hw_text(m: u64) {
     }
 }
 
-/// The counters' line:
-/// `arp: <a> requests sent, <b> replies received, <c> requests answered (<d> replies sent), <e> bad`.
+/// The cache, one line per entry in use:
+///
+///     arp: entry <i>: <a.b.c.d> at <aa:bb:cc:dd:ee:ff>, confirmed <t> ticks ago
+///     arp: entry <i>: <a.b.c.d> incomplete, <n> requests, <p> frames waiting
+pub fn report() {
+    let saved = sync.acquire(sync.arp())
+    let now = timer.ticks()
+    var e: u64 = 0
+    while e < ENTRIES {
+        let st = ew(e, E_STATE)
+        if st != FREE {
+            log.put("arp: entry ")
+            log.dec(e as int)
+            log.put(": ")
+            put_ip(ew(e, E_IP))
+            if st == RESOLVED {
+                log.put(" at ")
+                put_hw_text(ew(e, E_HW))
+                log.put(", confirmed ")
+                log.dec((now - ew(e, E_STAMP)) as int)
+                log.put(" ticks ago")
+            } else {
+                log.put(" incomplete, ")
+                log.dec(ew(e, E_TRIES) as int)
+                log.put(" requests, ")
+                log.dec(ew(e, E_PENDING) as int)
+                log.put(" frames waiting")
+            }
+            log.end()
+        }
+        e += 1
+    }
+    sync.release(sync.arp(), saved)
+}
+
+/// The counters' two lines:
+///
+///     arp: <a> requests sent, <b> replies received, <c> requests answered (<d> replies sent), <e> bad, <f> conflict
+///     arp: cache <l> learned, <u> updated, <g> aged; pending <q> queued, <s> sent, <p> pushed out, <x> unresolved (<y> addresses given up), <t> table full
 pub fn counters() {
     log.put("arp: ")
     log.dec(aw(C_REQUESTS_OUT) as int)
@@ -304,6 +652,28 @@ pub fn counters() {
     log.dec(aw(C_REPLIES_OUT) as int)
     log.put(" replies sent), ")
     log.dec(aw(C_BAD) as int)
-    log.put(" bad")
+    log.put(" bad, ")
+    log.dec(aw(C_CONFLICT) as int)
+    log.put(" conflict")
+    log.end()
+    log.put("arp: cache ")
+    log.dec(aw(C_LEARNED) as int)
+    log.put(" learned, ")
+    log.dec(aw(C_UPDATED) as int)
+    log.put(" updated, ")
+    log.dec(aw(C_AGED) as int)
+    log.put(" aged; pending ")
+    log.dec(aw(C_QUEUED) as int)
+    log.put(" queued, ")
+    log.dec(aw(C_FLUSHED) as int)
+    log.put(" sent, ")
+    log.dec(aw(C_PUSHED) as int)
+    log.put(" pushed out, ")
+    log.dec(aw(C_UNRESOLVED) as int)
+    log.put(" unresolved (")
+    log.dec(aw(C_GAVE_UP) as int)
+    log.put(" addresses given up), ")
+    log.dec(aw(C_TABLE_FULL) as int)
+    log.put(" table full")
     log.end()
 }
