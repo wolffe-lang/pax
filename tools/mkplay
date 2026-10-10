@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# mkplay — build /bin/play (user/play, px18) as a fully static x86-64
+# Linux executable, with kernel/wolf.pin's wolf.
+#
+#   tools/mkplay OUTDIR
+#
+# play is pax's own program, so it is built by pax's own wolf (the
+# release archive kernel/wolf.pin names, tools/fetch-wolf; $PAX_WOLF
+# when set), not by a toolchain another repository pins. It uses no
+# wolf-std: builtins only, and one routine of assembly (user/play/kd.S,
+# the ioctl), which user/play/wolf.pkg lists so the link's `cc`
+# assembles it. As tools/mkpelt: the release tier (`wolf build --release
+# --deny-warnings`), linked through a `cc` that adds `-static`, so the
+# binary is a static glibc executable (ET_EXEC, no PT_INTERP), checked
+# with readelf; `OUTDIR/sums.txt` gets `play <sha256> <bytes>`.
+#
+# Build on a baseline x86-64 glibc (the CI runner's Ubuntu; an Ubuntu
+# container on kasumi), never on kasumi's CachyOS x86-64-v4 glibc (px10).
+# The release tier needs clang at run time (wolf's D33). Exit 0, or 2 on
+# a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkplay OUTDIR"
+out=$1
+need readelf cc clang
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+wolf=${PAX_WOLF:-}
+[ -n "$wolf" ] || wolf=$("$PAX_ROOT/tools/fetch-wolf") || die "tools/fetch-wolf"
+say "$("$wolf" --version | head -n 1)"
+
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-play.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+cp -R "$PAX_ROOT/user/play" "$w/play"
+mkdir -p "$w/bin"
+real=$(command -v cc)
+printf '#!/bin/sh\nexec %s -static "$@"\n' "$real" > "$w/bin/cc"
+chmod +x "$w/bin/cc"
+
+(cd "$w/play" && PATH="$w/bin:$PATH" \
+    "$wolf" build --release --no-cache --deny-warnings play.lu -o "$out/play") >&2 \
+    || die "wolf build of user/play/play.lu"
+readelf -hW "$out/play" | grep -Eq 'Type: +EXEC' || die "play is not ET_EXEC"
+! readelf -lW "$out/play" | grep -q INTERP || die "play has a PT_INTERP (not static)"
+printf '%s %s %s\n' play "$(sha256_of "$out/play")" "$(wc -c < "$out/play" | tr -d ' ')" | tee "$out/sums.txt"
