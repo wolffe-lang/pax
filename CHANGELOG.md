@@ -7,6 +7,31 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **virtio-net (px20).** PAX sends and receives Ethernet frames. The
+  kernel walks the PCI bus through configuration mechanism #1
+  (`kernel/pci`; the census is printed with `pci` on the kernel
+  command line), finds QEMU's virtio network device, transitional or
+  1.x-only, and drives it through the virtio 1.x interface: the PCI
+  capabilities' registers mapped in the device slot, the status
+  handshake, two feature bits taken (VERSION_1 and MAC) and every
+  other declined, two 64-entry split virtqueues with their parts
+  aligned as the specification orders (`kernel/virtio`,
+  `kernel/net`). The device interrupts on the 8259 line the firmware
+  routed it to, level-triggered; the handler only reads the cause and
+  wakes a kernel thread (`kernel/netd`), which hands each frame to its
+  protocol. The kernel-internal frame interface is `net.send`,
+  `net.rx_take`/`rx_give` and counters by cause; ARP (RFC 826,
+  `kernel/arp`) is its witness: PAX, as 10.0.2.15, answers the
+  gateway's request and resolves 10.0.2.2. `tests/mpx4-net` holds
+  QEMU's capture of the whole exchange to the expected frames byte by
+  byte (`tools/pcap-net`), runs 10,000 request-and-reply exchanges
+  with the frame allocator's and the heap's books flat, sends 25,000
+  frames in two bursts, and boots with no device and with a
+  legacy-only one: each a named line and no panic. No IP, no sockets,
+  nothing user-visible yet. Named limits: INTx only (no MSI-X), one
+  buffer a frame (no merged buffers, no offloads), a four-entry ARP
+  table with no ageing, the address a boot-time constant.
+
 - **The screen (px19).** PAX draws its console on the framebuffer
   Limine hands it as well as on the serial port: the same bytes, a
   160×50 grid of Spleen 8×16 glyphs (BSD-2-Clause, vendored in `font/`)
