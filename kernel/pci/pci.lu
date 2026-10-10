@@ -67,6 +67,7 @@ const R_HEADER: u64 = 4 // the header type byte
 const R_IRQ: u64 = 5 // pin << 8 | line
 
 // Configuration offsets (the common header).
+/// The command register's offset.
 pub const COMMAND: u64 = 0x04
 const CLASS: u64 = 0x08
 const HEADER: u64 = 0x0c
@@ -76,15 +77,20 @@ const SUBSYS: u64 = 0x2c // type 0
 const CAP_PTR: u64 = 0x34
 const IRQ: u64 = 0x3c
 
-/// Command register bits: memory decoding, bus mastering, INTx off.
+/// Command bit 1: the function answers its memory BARs.
 pub const CMD_MEMORY: u64 = 0x2
+/// Command bit 2: the function may master the bus (a virtio device reads and writes the rings).
 pub const CMD_MASTER: u64 = 0x4
+/// Command bit 10: INTx disabled.
 pub const CMD_INTX_OFF: u64 = 0x400
 
-/// A BAR's kind, as `bar` answers it.
+/// `bar`'s kinds: no BAR.
 pub const BAR_NONE: u64 = 0
+/// An I/O range.
 pub const BAR_IO: u64 = 1
+/// Memory at a 32-bit address.
 pub const BAR_MEM32: u64 = 2
+/// Memory at a 64-bit address (two BARs).
 pub const BAR_MEM64: u64 = 3
 
 fn rec(i: u64, w: u64) -> u64 {
@@ -221,12 +227,13 @@ pub fn device(i: u64) -> u64 {
     (rec(i, R_IDS) >> 16) & 0xffff
 }
 
-/// Function `i`'s interrupt line (what the firmware wrote: the 8259
-/// line its pin is routed to; 0xff none) and pin (1 is A; 0 none).
+/// Function `i`'s interrupt line: what the firmware wrote, the 8259
+/// line its pin is routed to (0xff none).
 pub fn line(i: u64) -> u64 {
     rec(i, R_IRQ) & 0xff
 }
 
+/// Function `i`'s interrupt pin: 1 is A, 0 none.
 pub fn pin(i: u64) -> u64 {
     (rec(i, R_IRQ) >> 8) & 0xff
 }
