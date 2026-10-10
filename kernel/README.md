@@ -314,12 +314,39 @@ Linux pseudo-terminal (`tests/mpx3-shell`).
 | `../boot/user.S` (px14 addition) | `pax_argbuf`, 69632 bytes where a new program's strings are staged |
 | `../user/elf/procs.c` | the process calls' witness, C with no libc: run as pid 1 on PAX and as pid 1 of a fresh pid namespace on Linux, the same lines on both |
 
-- Not yet: `fork` without CLONE_VM (no address space is copied; refused
-  by name), threads (CLONE_VM without CLONE_VFORK, CLONE_THREAD),
+- Not yet: threads (CLONE_VM without CLONE_VFORK, CLONE_THREAD),
   signal delivery (masks and actions are recorded; `kill` is refused by
-  name), process groups and sessions (wait4's 0 and -pgid mean any
-  child), a shared file offset between a descriptor and its copy, rusage
-  (zeroed), `execveat`, `#!` scripts (-ENOEXEC).
+  name; px17 adds SIGPIPE's default only), process groups and sessions
+  (wait4's 0 and -pgid mean any child), rusage (zeroed), `execveat`,
+  `#!` scripts (-ENOEXEC). px17 did `fork` and the shared offset.
+
+## Pipes, redirection and `cd` (px17)
+
+pelt `3e7516c` (H2) runs pipelines, redirections and `cd` on PAX as on
+Linux. Its spawn (wolf 0.2.26's, measured: `notes/px17/pelt-plumb.strace`)
+is not px14's: a **fork** (`clone(CLONE_CHILD_SETTID|CLONE_CHILD_CLEARTID|
+SIGCHLD)`), a `socketpair(AF_UNIX, SOCK_SEQPACKET|SOCK_CLOEXEC)` whose
+close at `execve` tells the parent's `recvfrom` the child ran, three
+`fcntl(F_DUPFD_CLOEXEC, 3)` and `dup2`s onto 0-2 in the child; pipelines
+`pipe2(O_CLOEXEC)`; `cd` `chdir` then `getcwd`. Every typed session,
+`shell-plumb` among them, is byte-identical to Linux's
+(`tests/mpx3-shell`).
+
+| module or file | what |
+|---|---|
+| `files/` (px17) | **open files** (`pax_ofiles`, 64): what a descriptor and its duplicates (dup, dup2, dup3, F_DUPFD, a child's copy of the table) share, an offset among them; freed with the last reference. **pipes** (`pax_pipes`, 16 records; 65536 bytes in 16 frames, freed with the last end): a read waits while empty with a writer open (`WAIT`), 0 with none; a write waits while full, a write of at most 4096 bytes whole; -EPIPE with no reader. **socketpairs** (AF_UNIX stream and seqpacket): two one-frame buffers. `fcntl` (F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD, F_SETFD, F_GETFL, F_SETFL, F_GETPIPE_SZ), `pipe2`, `socketpair`, `recvfrom`, `sendto`, `chdir`, `fchdir`, `getcwd` the real directory; relative paths from the process's working directory (area word 12, inherited, kept across `execve`); `inherit` (a child's references), `close_all` (a process's end) |
+| `process/` (px17) | `fork`: a clone without CLONE_VM on a copy of the caller's space (`paging.copy_user`), both running; CLONE_CHILD_SETTID, CLONE_PARENT_SETTID; `sigpipe_kills` (SIG_DFL, not blocked, not pid 1) |
+| `paging/` (px17) | `copy_user`: every present user page copied into a fresh frame, mapped with the same permissions |
+| `sched/` (px17) | state PIPE, `block_pipe`, `wake_pipes`; `clone_current` takes a fork's own space |
+| `user/` (px17) | the eight numbers routed; a `WAIT` rewinds the call and parks the thread; `killed: SIGPIPE …` and status 13; every end of a process closes its descriptors |
+| `pax_tour/` (px17) | the closing line: "All in wolf. Linux programs run on it unmodified: a shell, its pipes, its tools." |
+| `../boot/user.S` (px17) | `pax_ofiles`, `pax_pipes` |
+| `../user/elf/procs.c` (px17) | fork, pipes (a waiting reader, writer EOF, SIGPIPE, -EPIPE), a shared offset, the working directory, a socketpair, fcntl |
+
+- Named drift: a SOCK_SEQPACKET's record boundaries are not kept; O_NONBLOCK
+  on the console's never-opened 0-2 is the descriptor's; a SIGPIPE handler
+  is not run (the write answers -EPIPE); CLONE_CHILD_CLEARTID is not kept
+  (no futex, no threads); a fork copies every page (no copy-on-write).
 
 ## The command line, and `quiet` (px15)
 
