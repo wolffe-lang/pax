@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# tests/mpx4-net — PAX sends and receives Ethernet frames (px20, the
-# first step toward M-PX4): the kernel finds QEMU's virtio network
-# device on the PCI bus (kernel/pci), drives it through the virtio 1.x
-# interface (kernel/virtio, kernel/net), and speaks ARP with QEMU's
-# user-mode gateway through the kernel's frame interface (kernel/arp,
-# kernel/netd).
+# tests/mpx4-net — PAX on the network (px20, px21; toward M-PX4): the
+# kernel finds QEMU's virtio network device on the PCI bus (kernel/pci),
+# drives it through the virtio 1.x interface (kernel/virtio,
+# kernel/net), resolves addresses through an ARP cache (kernel/arp),
+# speaks IPv4 (kernel/ip) and answers and sends ICMP echo
+# (kernel/icmp).
 #
 #   tests/mpx4-net [--images DIR | --no-boot] [--firmware bios|uefi|both]
 #                  [--tier native|release|both] [--accel auto|kvm|tcg]
 #
-# One kernel, kernel/kmain_net.lu, booted four ways per tier (native,
+# One kernel, kernel/kmain_net.lu, booted five ways per tier (native,
 # release) and firmware (bios, uefi):
 #
 #   net      `-netdev user,ipv6=off,hostfwd=udp:127.0.0.1:<port>-:7`, a
@@ -17,19 +17,31 @@
 #            52:54:00:12:34:56, and `-object filter-dump` writing every
 #            frame that crosses the netdev to a pcap file; while the
 #            kernel waits, this script sends UDP datagrams to <port>,
-#            which makes the gateway ask for the guest's address
+#            which makes the gateway ask for the guest's address. The
+#            command line is `pci ping` (boot/limine-net.conf)
 #   modern   the same with `disable-legacy=on`: a 1.x-only device
+#   peer     `-netdev socket,udp=…,localaddr=…`: every frame is a UDP
+#            datagram on this host's loopback, and tools/net-peer is the
+#            whole network at the other end (an on-link host, the
+#            gateway, a host behind it), with the same capture. The
+#            command line is `peer` (boot/limine-net-peer.conf). This is
+#            how an echo request gets INTO PAX: QEMU's user-mode gateway
+#            forwards only TCP and UDP to a guest and originates no ICMP
 #   absent   no network device at all
 #   legacy   `disable-modern=on`: a device with no 1.x interface
 #
 # Assertions:
+#   G0 the host (once): tools/gateway-probe — QEMU's gateway answers ARP
+#      and ICMP echo for 10.0.2.2 itself on this host, which N6 and N12
+#      stand on; whether it proxies an echo to an outside address is
+#      printed, not held.
 #   N0 build: tools/build-kernel's object assertions for kmain_net.
-#   N1 census (net, modern; the command line's `pci`): `pci: <n>
-#      functions (configuration mechanism #1)`, n >= 4, one line per
-#      function, and the network device's — vendor 1af4, device 1000
-#      (transitional) or 1041 (modern), class 02.00.00, pin A and a
-#      line — with its BARs and a capability list holding at least four
-#      vendor capabilities (09).
+#   N1 census (net, modern, peer; `pci` on the command line for the
+#      first two): `pci: <n> functions (configuration mechanism #1)`, n
+#      >= 4, one line per function, and the network device's — vendor
+#      1af4, device 1000 (transitional) or 1041 (modern), class
+#      02.00.00, pin A and a line — with its BARs and a capability list
+#      holding at least four vendor capabilities (09).
 #   N2 the device up: the driver names the device it took and its BAR;
 #      the features offered hold bits 32 and 5 and the features taken
 #      are exactly 0x0000000100000020; both queues have 64 entries and
@@ -37,41 +49,73 @@
 #      (descriptors 16, avail 2, used 4), in one frame, in the order
 #      descriptors, avail, used, without overlap; the address is the
 #      one QEMU was given; the vector is 32 + the line the census
-#      printed; 66 frames held.
-#   N3 answer: `arp: answered 10.0.2.2 (52:55:0a:00:02:02) after <t>
-#      ticks` — the gateway's request for 10.0.2.15 was answered.
-#   N4 resolve: `arp: 10.0.2.2 is at 52:55:0a:00:02:02 (1 requests, <t>
-#      ticks)`.
-#   N5 the capture, byte by byte (tools/pcap-net): the gateway's
-#      request first and PAX's reply next, exact; then 10001 requests
-#      from PAX, each exact and each followed by the gateway's reply;
-#      then 20000 frames of 60 bytes and 5000 of 1514, each exact, in
-#      order; nothing else but the script's own datagrams, and
-#      whatever the firmware sent before the gateway's request
-#      (counted and printed; N8 holds the kernel's own count of
-#      frames sent to the capture's from that request on).
-#   N6 soak: `soak: 10000 requests, 10000 replies …` and the books
-#      flat across it: the frame allocator's free count, the heap's
-#      pages and live blocks, the driver's frames.
-#   N7 bursts: 20000 frames of 60 bytes and 5000 of 1514 sent, `64 of
-#      64 buffers back` after each (the rate is reported, not held).
-#   N8 counters: received = 1 + 10001 + the datagrams, all of them
-#      IPv4 drops (>= 1) and no other drop; sent = 1 + 10001 + 25000,
-#      none refused; every sent buffer reclaimed and every received
-#      one restocked; no interrupt without a cause; ARP's line exact;
-#      and the capture's counts are the kernel's.
-#   N9 halted: the log ends `halt` and tools/qemu-halt holds the
-#      machine to RIP in pax_halt, IF clear, HLT=1.
+#      printed; 66 frames held; and kernel/ip's line: 10.0.2.15 netmask
+#      255.255.255.0 gateway 10.0.2.2, MTU 1500.
+#   N3 answer (net, modern): `arp: answered 10.0.2.2
+#      (52:55:0a:00:02:02) after <t> ticks` — the gateway's request for
+#      10.0.2.15 was answered.
+#   N4 resolve (net, modern): `arp: 10.0.2.2 is at 52:55:0a:00:02:02 (0
+#      requests, <t> ticks)` — the cache learned the gateway from its
+#      own request (RFC 826: the target was this station), so none of
+#      PAX's is needed.
+#   N5 the capture (net, modern, peer), byte by byte (tools/pcap-net):
+#      every frame PAX sent rebuilt from its meaning and equal to the
+#      capture's; every frame that reached PAX judged by the model,
+#      every IP and ICMP checksum recomputed; no echo request and no
+#      ARP request for PAX left unanswered; and the 20000 + 5000 burst
+#      frames (net, modern).
+#   N6 soak (net, modern): `soak: 10000 echo requests, 10000 replies …`
+#      to the gateway, and the books the same before and after it: the
+#      frame allocator's free count, the heap's pages and live blocks,
+#      the driver's 66 frames, the protocols' 11.
+#   N7 bursts (net, modern): 20000 frames of 60 bytes and 5000 of 1514
+#      sent, `64 of 64 buffers back` after each.
+#   N8 counters (net, modern, peer): the kernel's counters are the
+#      capture's, one by one (tools/pcap-net --serial: 52 values), and
+#      for net and modern: one ARP request answered, 6 + 10000 echo
+#      requests sent and as many replies matched, nothing dropped but
+#      this script's own datagrams (protocol 17, which nothing speaks:
+#      at least one, and a destination unreachable for the first).
+#   N9 halted (net, modern, peer): the log ends `halt`, no PANIC, and
+#      tools/qemu-halt holds the machine to RIP in pax_halt, IF clear,
+#      HLT=1.
 #   N10 absent: `net: no virtio network device among <n> PCI
 #      functions; the network is off`, then `halt`; no PANIC; halted.
 #   N11 legacy: `net: refused: the device has no virtio 1.x common
 #      configuration capability (a legacy-only device); the network is
 #      off`, then `halt`; no PANIC; halted.
+#   N12 ping (net, modern; `ping` on the command line): six echo
+#      requests to the gateway, 56, 0 and 1472 data bytes, each `icmp:
+#      <n> bytes from 10.0.2.2: seq=<s> ttl=255 time=<t> us`.
+#   P1 (peer) tools/net-peer's verdict: every step of parts A and B (its
+#      header lists them) ok — the pending queue, the route by way of
+#      the gateway, the retry and the giving up, the ageing; echo
+#      requests into PAX answered byte for byte; 31 malformed or
+#      unwanted datagrams and 9 ARP packets not answered; destination
+#      unreachable, limited; gratuitous ARP; more hosts than the cache
+#      holds; 10000 echoes.
+#   P2 (peer) the kernel's own account of part A: 4 queued and 2 pushed
+#      out; echo 4 answered and one stray reply (echo 3's); echoes 5-8
+#      from 10.0.2.100 and 9-10 from 192.0.2.1 with ttl=63; `arp:
+#      10.0.2.99 unresolved after 3 requests in <t> ticks, 1 frames
+#      dropped`, t in 290..400; 10.0.2.100 aged out and asked for
+#      again; 8 and 1480 bytes answered; 1473 data bytes refused.
+#   P3 (peer) the soak and the books: `serve: told to stop after <t>
+#      ticks, <n> echo requests answered`, n = 28 + 10000, and the books
+#      the same before and after.
+#   P4 (peer) every drop by its name, exactly: kernel/ip's 2 short, 1
+#      version, 1 ihl, 1 checksum, 2 length, 1 ttl, 2 fragment, 7
+#      source, 3 option, 2 source-route, 2 other, 9 protocol;
+#      kernel/icmp's 1 short, 1 checksum, 2 broadcast, 2 type, 2 stray;
+#      2 destination unreachables sent, 5 limited, 2 silent; ARP's 6
+#      bad, 1 conflict, 2 pushed out, 1 unresolved; 1 datagram refused
+#      for its size; no entry beyond the cache's eight, and none for
+#      10.0.2.123, whose gratuitous announcement must teach nothing.
 #
 # --images DIR boots ISOs and ELFs built earlier by this script (DIR
-# holds <tier>/kmain_net.{iso,elf}): any host with QEMU, nm and
-# python3, no wolf needed. Without it the script builds with $PAX_WOLF
-# (linux); --no-boot stops after the build (N0).
+# holds <tier>/kmain_net.{iso,elf} and <tier>/kmain_net-peer.iso): any
+# host with QEMU, nm and python3, no wolf needed. Without it the script
+# builds with $PAX_WOLF (linux); --no-boot stops after the build (N0).
 #
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
@@ -117,7 +161,8 @@ if [ -z "$images" ]; then
             cat "$log" >&2
             say "PASS N0 $tier $k: build-kernel's assertions"
             "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-net.conf" "$elf" "$work/$tier/$k.iso" >/dev/null || bad "$tier $k: mkimage"
-            say "built $tier $k: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/$k.iso")"
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-net-peer.conf" "$elf" "$work/$tier/$k-peer.iso" >/dev/null || bad "$tier $k: mkimage (peer)"
+            say "built $tier $k: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/$k.iso"), peer iso $(sha256_of "$work/$tier/$k-peer.iso")"
         else
             cat "$log" >&2
             bad "N0 $tier $k: tools/build-kernel"
@@ -130,21 +175,24 @@ if [ -z "$images" ]; then
     fi
 fi
 
-# A UDP port on this host for the netdev's forward: tried until one is
-# free to bind (two runs on one host must not share one).
-pick_port() {
+# Two UDP ports on this host, free to bind (two runs on one host must
+# not share one): the netdev's forward, or the socket netdev's two ends.
+pick_ports() {
     python3 -c '
 import os, socket, sys
-p = 20000 + (os.getpid() * 7919 + int(sys.argv[1])) % 20000
-for k in range(200):
+p = 20000 + (os.getpid() * 7919 + int(sys.argv[1]) * 16) % 20000
+got = []
+for k in range(400):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.bind(("127.0.0.1", p + k))
     except OSError:
         continue
     s.close()
-    print(p + k)
-    break
+    got.append(p + k)
+    if len(got) == 2:
+        break
+print(*got)
 ' "$1"
 }
 
@@ -166,27 +214,34 @@ poke() { # serial-log port
     done
 }
 
-# Boot the kernel one way to its halt; leaves the log in $log and the
-# capture (net, modern) in $pcap. Status: qemu-halt's.
+# Boot the kernel one way to its halt; leaves the log in $log, the
+# capture (net, modern, peer) in $pcap and tools/net-peer's account
+# (peer) in $log.peer. Status: qemu-halt's.
 boot() { # tier leg way
-    local tier=$1 leg=$2 way=$3 rc=0 port pid=
+    local tier=$1 leg=$2 way=$3 rc=0 ports port port2 pid=
     log=$PAX_BUILD/mpx4-net-$tier-$leg-$way.serial.log
     pcap=$PAX_BUILD/mpx4-net-$tier-$leg-$way.pcap
     local iso=$images/$tier/$k.iso elf=$images/$tier/$k.elf
-    rm -f "$log" "$log.verdict" "$pcap"
+    [ "$way" = peer ] && iso=$images/$tier/$k-peer.iso
+    rm -f "$log" "$log.verdict" "$log.peer" "$pcap"
     [ -f "$iso" ] && [ -f "$elf" ] || { say "no image or ELF for $tier $k ($iso)"; : > "$log"; return 2; }
     local q=()
     case $way in
-        net|modern)
-            port=$(pick_port "$ran")
-            [ -n "$port" ] || { say "no free UDP port on this host"; : > "$log"; return 2; }
+        net|modern|peer)
+            ports=$(pick_ports "$ran")
+            port=${ports% *} port2=${ports#* }
+            [ -n "$port" ] && [ "$port" != "$port2" ] || { say "no free UDP ports on this host"; : > "$log"; return 2; }
             local dev="virtio-net-pci,netdev=n0,mac=$MAC"
             [ "$way" = modern ] && dev+=",disable-legacy=on"
-            q=(--qemu -netdev --qemu "user,id=n0,ipv6=off,hostfwd=udp:127.0.0.1:$port-:7"
-               --qemu -device --qemu "$dev"
-               --qemu -object --qemu "filter-dump,id=f0,netdev=n0,file=$pcap")
-            poke "$log" "$port" &
+            if [ "$way" = peer ]; then
+                q=(--qemu -netdev --qemu "socket,id=n0,udp=127.0.0.1:$port,localaddr=127.0.0.1:$port2")
+                "$PAX_ROOT/tools/net-peer" --listen "$port" --qemu "$port2" --soak "$SOAK" --boot 170 >"$log.peer" 2>&1 &
+            else
+                q=(--qemu -netdev --qemu "user,id=n0,ipv6=off,hostfwd=udp:127.0.0.1:$port-:7")
+                poke "$log" "$port" &
+            fi
             pid=$!
+            q+=(--qemu -device --qemu "$dev" --qemu -object --qemu "filter-dump,id=f0,netdev=n0,file=$pcap")
             ;;
         legacy)
             q=(--qemu -netdev --qemu "user,id=n0,ipv6=off"
@@ -196,7 +251,12 @@ boot() { # tier leg way
     esac
     "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 180 --accel "$accel" \
         --elf "$elf" --marker halt ${q[@]+"${q[@]}"} "$iso" >"$log.verdict" 2>&1 || rc=$?
-    [ -z "$pid" ] || wait "$pid" 2>/dev/null
+    if [ -n "$pid" ]; then
+        # The script at the other end has said its last word by now, or
+        # never will: QEMU is gone.
+        [ "$way" = peer ] && { sleep 0.5; kill "$pid" 2>/dev/null; }
+        wait "$pid" 2>/dev/null
+    fi
     ran=$((ran + 1))
     printf '%s %s %s halt-status=%s accel=%s qemu="%s" serial=%s iso=%s%s\n' "$tier" "$leg" "$way" "$rc" \
         "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sed -n 's/^qemu: //p' "$log.meta" 2>/dev/null)" \
@@ -210,8 +270,10 @@ boot() { # tier leg way
 # with one group.
 grab() { serial_norm "$1" | sed -n "s/^$2\$/\\1/p" | tail -n 1; }
 has() { serial_norm "$1" | grep -Eqx -- "$2"; }
+line_of() { serial_norm "$1" | grep -E -m1 -- "$2"; }
 
 halted() { # assertion label status
+    if serial_norm "$log" | grep -q '^PANIC'; then bad "$1 $2: $(serial_norm "$log" | grep -m1 '^PANIC')"; fi
     if [ "$3" = 0 ]; then
         say "PASS $1 $2: halted: $(tail -n 1 "$log.verdict")"
     else
@@ -220,35 +282,39 @@ halted() { # assertion label status
 }
 
 HEX='0x[0-9a-f]{16}'
+BOOKS='frames free ([0-9]+), heap pages ([0-9]+), live blocks ([0-9]+), net frames 66, stack frames 11'
 
-# N1-N9 for one boot with a device.
-with_device() { # tier leg way device-id
-    local tier=$1 leg=$2 way=$3 id=$4 L="$1 $2 $3" hrc=0
-    boot "$tier" "$leg" "$way" || hrc=$?
-    local n dev line caps
-    # --- N1: the census -----------------------------------------------
-    n=$(grab "$log" 'pci: \([0-9]*\) functions (configuration mechanism #1)')
-    dev=$(serial_norm "$log" | grep -E "^pci [0-9a-f]{2}:[0-9a-f]{2}\.[0-7] 1af4:$id class 02\.00\.00 rev [0-9a-f]{2} subsystem [0-9a-f]{4}:[0-9a-f]{4} header 00 pin A line [0-9]+\$" | head -n 1)
-    line=${dev##* line }
-    local at=${dev#pci }; at=${at%% *}
-    caps=$(serial_norm "$log" | sed -n "s/^pci $at caps \(.*\)\$/\1/p" | head -n 1)
-    local nfun nvend
-    nfun=$(serial_norm "$log" | grep -Ec '^pci [0-9a-f]{2}:[0-9a-f]{2}\.[0-7] [0-9a-f]{4}:[0-9a-f]{4} class ')
-    nvend=$(printf '%s\n' $caps | grep -c '^09@')
-    if [ -n "$n" ] && [ "$n" -ge 4 ] && [ "$nfun" = "$n" ] && [ -n "$dev" ] && [ "$nvend" -ge 4 ] \
-        && serial_norm "$log" | grep -Eq "^pci $at bar[0-5] mem(32|64) (prefetchable )?$HEX\$"; then
-        say "PASS N1 $L: $n functions; $dev; caps $caps; $(serial_norm "$log" | grep -E "^pci $at bar" | sed "s/^pci $at //" | paste -sd, -)"
+# N1, N2 for the boot whose log is $log: the census (when the command
+# line asked for it) and the device up.
+device_up() { # label device-id census?
+    local L=$1 id=$2 census=$3
+    local n dev line caps at
+    if [ "$census" = 1 ]; then
+        n=$(grab "$log" 'pci: \([0-9]*\) functions (configuration mechanism #1)')
+        dev=$(serial_norm "$log" | grep -E "^pci [0-9a-f]{2}:[0-9a-f]{2}\.[0-7] 1af4:$id class 02\.00\.00 rev [0-9a-f]{2} subsystem [0-9a-f]{4}:[0-9a-f]{4} header 00 pin A line [0-9]+\$" | head -n 1)
+        line=${dev##* line }
+        at=${dev#pci }; at=${at%% *}
+        caps=$(serial_norm "$log" | sed -n "s/^pci $at caps \(.*\)\$/\1/p" | head -n 1)
+        local nfun nvend
+        nfun=$(serial_norm "$log" | grep -Ec '^pci [0-9a-f]{2}:[0-9a-f]{2}\.[0-7] [0-9a-f]{4}:[0-9a-f]{4} class ')
+        nvend=$(printf '%s\n' $caps | grep -c '^09@')
+        if [ -n "$n" ] && [ "$n" -ge 4 ] && [ "$nfun" = "$n" ] && [ -n "$dev" ] && [ "$nvend" -ge 4 ] \
+            && serial_norm "$log" | grep -Eq "^pci $at bar[0-5] mem(32|64) (prefetchable )?$HEX\$"; then
+            say "PASS N1 $L: $n functions; $dev; caps $caps; $(serial_norm "$log" | grep -E "^pci $at bar" | sed "s/^pci $at //" | paste -sd, -)"
+        else
+            bad "N1 $L: the census: n='$n' lines=$nfun device='$dev' caps='$caps'"
+        fi
     else
-        bad "N1 $L: the census: n='$n' lines=$nfun device='$dev' caps='$caps'"
+        at='[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]' line=
+        if serial_norm "$log" | grep -q '^pci '; then bad "N1 $L: a census nobody asked for"; else say "PASS N1 $L: no \`pci\` on the command line, no census"; fi
     fi
-    # --- N2: the device up --------------------------------------------
     local offered taken ok2=1 vec mac held bar
     bar=$(serial_norm "$log" | sed -n "s/^net: virtio-net 1af4:$id at $at, \(bar[0-5] 0x[0-9a-f]*\), 1\.x interface\$/\1/p" | tail -n 1)
     offered=$(grab "$log" 'net: features offered \(0x[0-9a-f]*\), taken 0x[0-9a-f]* (VERSION_1, MAC)')
     taken=$(grab "$log" 'net: features offered 0x[0-9a-f]*, taken \(0x[0-9a-f]*\) (VERSION_1, MAC)')
     [ -n "$bar" ] && [ -n "$offered" ] && [ "$taken" = 0x0000000100000020 ] \
         && [ $(( (offered >> 32) & 1 )) = 1 ] && [ $(( (offered >> 5) & 1 )) = 1 ] || ok2=0
-    local qn name d a u
+    local qn name d a u q0= q1=
     for qn in 0 1; do
         name=receive; [ "$qn" = 1 ] && name=transmit
         read -r d a u <<< "$(serial_norm "$log" | sed -n "s/^net: $name queue $qn: 64 entries, descriptors \(0x[0-9a-f]*\) avail \(0x[0-9a-f]*\) used \(0x[0-9a-f]*\)\$/\1 \2 \3/p" | tail -n 1)"
@@ -264,45 +330,79 @@ with_device() { # tier leg way device-id
     vec=$(serial_norm "$log" | sed -n 's/^net: [0-9a-f:]*, line \([0-9]*\) (vector \([0-9]*\), level; elcr \([0-9a-f]*\) -> \([0-9a-f]*\)), \([0-9]*\) frames held$/\1 \2 \3 \4 \5/p' | tail -n 1)
     local vl vv e0 e1
     read -r vl vv e0 e1 held <<< "$vec"
-    [ "$mac" = "$MAC" ] && [ -n "${held:-}" ] && [ "$vl" = "$line" ] && [ "$vv" = $((32 + vl)) ] && [ "$held" = 66 ] \
+    [ "$mac" = "$MAC" ] && [ -n "${held:-}" ] && { [ -z "$line" ] || [ "$vl" = "$line" ]; } && [ "$vv" = $((32 + vl)) ] && [ "$held" = 66 ] \
         && [ $(( (0x$e1 >> vl) & 1 )) = 1 ] || ok2=0
+    has "$log" 'ip: 10\.0\.2\.15 netmask 255\.255\.255\.0 gateway 10\.0\.2\.2, MTU 1500, TTL 64, DF set, no fragments either way' || ok2=0
     if [ "$ok2" = 1 ]; then
-        say "PASS N2 $L: 1af4:$id at $at, $bar; offered $offered, taken $taken; $q0; $q1 (16/2/4-aligned, one frame each); $mac; line $vl vector $vv level (elcr $e0 -> $e1); 66 frames"
+        say "PASS N2 $L: 1af4:$id, $bar; offered $offered, taken $taken; $q0; $q1 (16/2/4-aligned, one frame each); $mac; line $vl vector $vv level (elcr $e0 -> $e1); 66 frames; $(line_of "$log" '^ip: 10')"
     else
-        bad "N2 $L: bar='$bar' offered='$offered' taken='$taken' q0='${q0:-}' q1='${q1:-}' mac='$mac' irq='$vec' (census line '$line') $(serial_norm "$log" | grep -m1 '^net: refused')"
+        bad "N2 $L: bar='$bar' offered='$offered' taken='$taken' q0='${q0:-}' q1='${q1:-}' mac='$mac' irq='$vec' (census line '$line') ip='$(line_of "$log" '^ip: 10')' $(serial_norm "$log" | grep -m1 '^net: refused')"
     fi
+}
+
+# N5 and N8's first half: the capture, and the kernel's counters
+# against it.
+capture() { # label pcap-net-args…
+    local L=$1; shift
+    if [ -s "$pcap" ] && "$PAX_ROOT/tools/pcap-net" "$@" --list 4 "$pcap" >"$pcap.check" 2>&1; then
+        say "PASS N5 $L: $(grep '^pcap-net: [0-9]' "$pcap.check") [pcap $(sha256_of "$pcap" | cut -c1-12)…]"
+    else
+        tail -n 4 "$pcap.check" >&2 2>/dev/null
+        bad "N5 $L: the capture ($pcap)"
+    fi
+    agree=0
+    if [ -s "$pcap" ] && "$PAX_ROOT/tools/pcap-net" "$@" --serial "$log" "$pcap" >"$pcap.counters" 2>&1; then
+        agree=1
+    else
+        grep '^pcap-net: FAIL' "$pcap.counters" >&2 2>/dev/null
+    fi
+}
+
+# Whether the two `<phase>: before:` and `<phase>: after:` lines hold
+# the same books; prints them.
+books_flat() { # phase
+    local b a
+    b=$(serial_norm "$log" | sed -n -E "s/^$1: before: ($BOOKS)\$/\1/p" | tail -n 1)
+    a=$(serial_norm "$log" | sed -n -E "s/^$1: after: ($BOOKS)\$/\1/p" | tail -n 1)
+    printf '%s' "$b"
+    [ -n "$b" ] && [ "$b" = "$a" ]
+}
+
+# N1-N9, N12 for one boot against QEMU's gateway.
+with_gateway() { # tier leg way device-id
+    local tier=$1 leg=$2 way=$3 id=$4 L="$1 $2 $3" hrc=0
+    boot "$tier" "$leg" "$way" || hrc=$?
+    device_up "$L" "$id" 1
     # --- N3, N4: answer and resolve -------------------------------------
     if has "$log" "arp: 10\.0\.2\.15, waiting for a request" && has "$log" "arp: answered 10\.0\.2\.2 \($GW_MAC\) after [0-9]+ ticks"; then
         say "PASS N3 $L: $(serial_norm "$log" | grep '^arp: answered')"
     else
         bad "N3 $L: no answer: $(serial_norm "$log" | grep -m1 '^arp: no request\|^arp: answered')"
     fi
-    if has "$log" "arp: 10\.0\.2\.2 is at $GW_MAC \(1 requests, [0-9]+ ticks\)"; then
-        say "PASS N4 $L: $(serial_norm "$log" | grep '^arp: 10.0.2.2 is at')"
+    if has "$log" "arp: 10\.0\.2\.2 is at $GW_MAC \(0 requests, [0-9]+ ticks\)"; then
+        say "PASS N4 $L: $(serial_norm "$log" | grep '^arp: 10.0.2.2 is at') (learned from the gateway's own request)"
     else
-        bad "N4 $L: not resolved in one request: $(serial_norm "$log" | grep -m1 '^arp: 10.0.2.2 is at\|^arp: no reply')"
+        bad "N4 $L: the gateway is not in the cache: $(serial_norm "$log" | grep -m1 '^arp: 10.0.2.2 ')"
+    fi
+    # --- N12: ping --------------------------------------------------------
+    local pings
+    pings=$(serial_norm "$log" | grep -Ec '^icmp: (64|8|1480) bytes from 10\.0\.2\.2: seq=[1-6] ttl=255 time=[0-9]+ us$')
+    if [ "$pings" = 6 ] && has "$log" 'icmp: 8 bytes from 10\.0\.2\.2: seq=5 ttl=255 time=[0-9]+ us' \
+        && has "$log" 'icmp: 1480 bytes from 10\.0\.2\.2: seq=6 ttl=255 time=[0-9]+ us' && has "$log" 'ping: 6 echo requests to 10\.0\.2\.2, 6 replies'; then
+        say "PASS N12 $L: 6 of 6 echo requests to 10.0.2.2 answered (56, 0 and 1472 data bytes); round trips $(serial_norm "$log" | sed -n 's/^icmp: .* seq=[1-6] ttl=255 time=\([0-9]*\) us$/\1/p' | paste -sd' ' -) us"
+    else
+        bad "N12 $L: $pings of 6 ping lines; $(serial_norm "$log" | grep -m1 '^icmp: no reply\|^ping:')"
     fi
     # --- N5: the capture ------------------------------------------------
-    local pv pax_n=x gw_n=x ip_n=x
-    if [ -s "$pcap" ] && "$PAX_ROOT/tools/pcap-net" --pax "$MAC" --gw "$GW_MAC" --soak "$SOAK" --small "$SMALL" --large "$LARGE" --list 4 "$pcap" >"$pcap.check" 2>&1; then
-        pv=$(tail -n 1 "$pcap.check")
-        pax_n=$(printf '%s\n' "$pv" | sed -n 's/.*from-pax=\([0-9]*\).*/\1/p')
-        gw_n=$(printf '%s\n' "$pv" | sed -n 's/.*from-gateway=\([0-9]*\).*/\1/p')
-        ip_n=$(printf '%s\n' "$pv" | sed -n 's/.*ipv4=\([0-9]*\).*/\1/p')
-        say "PASS N5 $L: $(grep '^pcap-net: [0-9]' "$pcap.check" | paste -sd';' -) [pcap $(sha256_of "$pcap" | cut -c1-12)…]"
-    else
-        tail -n 4 "$pcap.check" >&2 2>/dev/null
-        bad "N5 $L: the capture ($pcap)"
-    fi
+    capture "$L" --small "$SMALL" --large "$LARGE"
     # --- N6: the soak ---------------------------------------------------
-    local s
-    s=$(serial_norm "$log" | sed -n "s/^soak: $SOAK requests, $SOAK replies in \([0-9]*\) ticks (\([0-9]*\) exchanges\/s by the time-stamp counter); frames free \([0-9]*\) -> \([0-9]*\), heap pages \([0-9]*\) -> \([0-9]*\), live blocks \([0-9]*\) -> \([0-9]*\), net frames \([0-9]*\) -> \([0-9]*\)\$/\1 \2 \3 \4 \5 \6 \7 \8 \9/p" | tail -n 1)
-    local st sr fa fb pa pb la lb na
-    read -r st sr fa fb pa pb la lb na <<< "$s"
-    if [ -n "${na:-}" ] && [ "$fa" = "$fb" ] && [ "$pa" = "$pb" ] && [ "$la" = "$lb" ] && has "$log" "soak: .*, net frames 66 -> 66"; then
-        say "PASS N6 $L: $SOAK requests, $SOAK replies in $st ticks ($sr exchanges/s); frames free $fa -> $fb, heap pages $pa -> $pb, live blocks $la -> $lb, net frames 66 -> 66"
+    local s st sr bk
+    s=$(serial_norm "$log" | sed -n "s/^soak: $SOAK echo requests, $SOAK replies in \([0-9]*\) ticks (\([0-9]*\) echoes\/s by the time-stamp counter)\$/\1 \2/p" | tail -n 1)
+    read -r st sr <<< "$s"
+    if [ -n "${sr:-}" ] && bk=$(books_flat soak); then
+        say "PASS N6 $L: $SOAK echo requests, $SOAK replies in $st ticks ($sr echoes/s); before and after: $bk"
     else
-        bad "N6 $L: $(serial_norm "$log" | grep -m1 '^soak:')"
+        bad "N6 $L: $(serial_norm "$log" | grep '^soak:' | paste -sd'|' -)"
     fi
     # --- N7: the bursts -------------------------------------------------
     local b1 b2
@@ -314,24 +414,83 @@ with_device() { # tier leg way device-id
         bad "N7 $L: $(serial_norm "$log" | grep '^burst:' | paste -sd'|' -)"
     fi
     # --- N8: the counters -----------------------------------------------
-    local rx tx c
-    rx=$(serial_norm "$log" | sed -n 's/^net: rx \([0-9]*\) frames \([0-9]*\) bytes, dropped \([0-9]*\) runt \([0-9]*\) long \([0-9]*\) other \([0-9]*\) ipv4 \([0-9]*\) type$/\1 \2 \3 \4 \5 \6 \7/p' | tail -n 1)
-    tx=$(serial_norm "$log" | sed -n 's/^net: tx \([0-9]*\) frames \([0-9]*\) bytes, dropped \([0-9]*\) down \([0-9]*\) size \([0-9]*\) full; \([0-9]*\) interrupts (\([0-9]*\) idle), [0-9]* wakes, \([0-9]*\) reclaimed, \([0-9]*\) restocked, 64 of 64 transmit buffers free$/\1 \2 \3 \4 \5 \6 \7 \8 \9/p' | tail -n 1)
-    local rf rb r1 r2 r3 r4 r5 tf tb t1 t2 t3 iq ii rc rs
-    read -r rf rb r1 r2 r3 r4 r5 <<< "$rx"
-    read -r tf tb t1 t2 t3 iq ii rc rs <<< "$tx"
-    c=0
-    [ -n "${r5:-}" ] && [ -n "${rs:-}" ] && [ "$r4" -ge 1 ] && [ "$rf" = $((1 + 1 + SOAK + r4)) ] && [ "$r1$r2$r3$r5" = 0000 ] \
-        && [ "$tf" = $((1 + 1 + SOAK + SMALL + LARGE)) ] && [ "$tb" = $(( (2 + SOAK + SMALL) * 60 + LARGE * 1514 )) ] \
-        && [ "$t1$t2$t3" = 000 ] && [ "$ii" = 0 ] && [ "$iq" -ge 1 ] && [ "$rc" = "$tf" ] && [ "$rs" = "$rf" ] \
-        && has "$log" "arp: $((SOAK + 1)) requests sent, $((SOAK + 1)) replies received, 1 requests answered \(1 replies sent\), 0 bad" \
-        && [ "$tf" = "$pax_n" ] && [ "$rf" = "$gw_n" ] && [ "$r4" = "$ip_n" ] && c=1
-    if [ "$c" = 1 ]; then
-        say "PASS N8 $L: rx $rf frames ($r4 IPv4 dropped by name, no other drop), tx $tf frames $tb bytes (none refused), $iq interrupts (0 idle), $rc reclaimed, $rs restocked, 64 of 64 free; the capture agrees ($pax_n from PAX, $gw_n from the gateway)"
+    local proto unr
+    proto=$(grab "$log" 'ip: rx [0-9]* datagrams delivered (0 with options, 0 broadcast), dropped 0 short 0 version 0 ihl 0 checksum 0 length 0 ttl 0 fragment 0 source 0 option 0 source-route 0 other \([0-9]*\) protocol')
+    unr=$(grab "$log" 'icmp: unreachable \([0-9]*\) sent, [0-9]* limited, 0 silent; 0 not sent')
+    if [ "$agree" = 1 ] && [ -n "$proto" ] && [ "$proto" -ge 1 ] && [ -n "$unr" ] && [ "$unr" -ge 1 ] \
+        && has "$log" "arp: 0 requests sent, 0 replies received, 1 requests answered \(1 replies sent\), 0 bad, 0 conflict" \
+        && has "$log" "icmp: echo 0 requests answered \(0 replies sent\), $((SOAK + 6)) requests sent, $((SOAK + 6)) replies matched, 0 stray; dropped 0 short 0 checksum 0 broadcast 0 type" \
+        && has "$log" "net: rx [0-9]+ frames [0-9]+ bytes, dropped 0 runt 0 long 0 other 0 type"; then
+        say "PASS N8 $L: $(grep '^pcap-net: the kernel' "$pcap.counters"); 1 ARP request answered; $((SOAK + 6)) echo requests sent and matched; dropped: $proto datagrams of protocol 17 (this script's), $unr destination unreachable sent; $(line_of "$log" '^net: tx')"
     else
-        bad "N8 $L: rx='$rx' tx='$tx' capture pax=$pax_n gw=$gw_n ipv4=$ip_n; $(serial_norm "$log" | grep -m1 '^arp: [0-9]* requests sent')"
+        bad "N8 $L: agree=$agree protocol='$proto' unreachable='$unr'; $(grep -m1 '^pcap-net: FAIL' "$pcap.counters" 2>/dev/null); $(serial_norm "$log" | grep -m1 '^icmp: echo')"
     fi
-    if serial_norm "$log" | grep -q '^PANIC'; then bad "N9 $L: $(serial_norm "$log" | grep -m1 '^PANIC')"; fi
+    halted N9 "$L" "$hrc"
+}
+
+# N1, N2, N5, N8, N9 and P1-P4 for the boot against tools/net-peer.
+with_peer() { # tier leg
+    local tier=$1 leg=$2 L="$1 $2 peer" hrc=0
+    boot "$tier" "$leg" peer || hrc=$?
+    device_up "$L" 1000 0
+    # --- P1: the script's verdict -----------------------------------------
+    if grep -q '^net-peer: PASS ' "$log.peer" && [ "$(grep -c '^net-peer: ok ' "$log.peer")" = 13 ]; then
+        say "PASS P1 $L: 13 steps ok; $(grep '^net-peer: ok A2' "$log.peer" | sed 's/^net-peer: ok //'); $(grep '^net-peer: ok B6' "$log.peer" | sed 's/^net-peer: ok //'); $(grep '^net-peer: ok B10' "$log.peer" | sed 's/^net-peer: ok //')"
+    else
+        grep -A3 '^net-peer: FAIL' "$log.peer" >&2
+        bad "P1 $L: tools/net-peer: $(grep -c '^net-peer: ok ' "$log.peer") of 13 steps; $(grep -m1 '^net-peer: FAIL\|^Traceback\|Error' "$log.peer")"
+    fi
+    # --- P2: part A in the kernel's words -----------------------------------
+    local ok=1 t pinged far
+    has "$log" 'queue: 4 echo requests to 10\.0\.2\.100 before its address is known: 4 queued, 2 pushed out' || ok=0
+    has "$log" 'queue: seq=4 answered, ttl=64 time=[0-9]+ us; 1 stray replies' || ok=0
+    pinged=$(serial_norm "$log" | grep -Ec '^icmp: 64 bytes from 10\.0\.2\.100: seq=([5-8]|12) ttl=64 time=[0-9]+ us$')
+    far=$(serial_norm "$log" | grep -Ec '^icmp: 64 bytes from 192\.0\.2\.1: seq=(9|10) ttl=63 time=[0-9]+ us$')
+    [ "$pinged" = 5 ] && [ "$far" = 2 ] || ok=0
+    t=$(grab "$log" 'arp: 10\.0\.2\.99 unresolved after 3 requests in \([0-9]*\) ticks, 1 frames dropped')
+    [ -n "$t" ] && [ "$t" -ge 290 ] && [ "$t" -le 400 ] || ok=0
+    has "$log" 'arp: 10\.0\.2\.100 had aged out \([0-9]+ aged so far, [0-9]+ at this use\), asked for again with 1 requests' || ok=0
+    has "$log" 'icmp: 8 bytes from 10\.0\.2\.100: seq=13 ttl=64 time=[0-9]+ us' || ok=0
+    has "$log" 'icmp: 1480 bytes from 10\.0\.2\.100: seq=14 ttl=64 time=[0-9]+ us' || ok=0
+    has "$log" 'icmp: 1473 data bytes to 10\.0\.2\.100 refused: 1481 bytes is over the 1480 a datagram carries' || ok=0
+    if [ "$ok" = 1 ]; then
+        say "PASS P2 $L: 4 queued, 2 pushed out, echo 4 answered, 1 stray; 5 echoes from 10.0.2.100 and 2 from 192.0.2.1 (ttl 63, by way of the gateway); 10.0.2.99 given up after 3 requests in $t ticks, 1 frame dropped; 10.0.2.100 aged out and asked for again; 0 and 1472 data bytes answered, 1473 refused"
+    else
+        bad "P2 $L: pinged=$pinged far=$far unresolved-ticks='$t'; $(serial_norm "$log" | grep '^queue:\|^icmp: no reply\|^arp: 10.0.2.99\|^arp: 10.0.2.100 \|NOT refused' | paste -sd'|' -)"
+    fi
+    # --- N5: the capture --------------------------------------------------
+    capture "$L"
+    # --- P3: the soak and the books ---------------------------------------
+    local n bk
+    n=$(grab "$log" 'serve: told to stop after [0-9]* ticks, \([0-9]*\) echo requests answered')
+    if [ "$n" = $((SOAK + 28)) ] && bk=$(books_flat serve); then
+        say "PASS P3 $L: $(line_of "$log" '^serve: told'); before and after: $bk"
+    else
+        bad "P3 $L: answered='$n' (wanted $((SOAK + 28))); $(serial_norm "$log" | grep '^serve:' | paste -sd'|' -)"
+    fi
+    # --- N8, P4: the counters ---------------------------------------------
+    if [ "$agree" = 1 ]; then
+        say "PASS N8 $L: $(grep '^pcap-net: the kernel' "$pcap.counters"); $(line_of "$log" '^net: rx'); $(line_of "$log" '^ip: tx')"
+    else
+        bad "N8 $L: $(grep -m1 '^pcap-net: FAIL' "$pcap.counters" 2>/dev/null)"
+    fi
+    ok=1
+    has "$log" 'ip: rx [0-9]+ datagrams delivered \(3 with options, 3 broadcast\), dropped 2 short 1 version 1 ihl 1 checksum 2 length 1 ttl 2 fragment 7 source 3 option 2 source-route 2 other 9 protocol' || ok=0
+    has "$log" 'ip: tx [0-9]+ datagrams, not sent 1 size 0 dropped' || ok=0
+    has "$log" "icmp: echo $((SOAK + 28)) requests answered \($((SOAK + 28)) replies sent\), 14 requests sent, 10 replies matched, 2 stray; dropped 1 short 1 checksum 2 broadcast 2 type" || ok=0
+    has "$log" 'icmp: unreachable 2 sent, 5 limited, 2 silent; 0 not sent' || ok=0
+    has "$log" 'arp: [0-9]+ requests sent, [0-9]+ replies received, 11 requests answered \(11 replies sent\), 6 bad, 1 conflict' || ok=0
+    has "$log" 'arp: cache [0-9]+ learned, [0-9]+ updated, [1-9][0-9]* aged; pending [0-9]+ queued, [0-9]+ sent, 2 pushed out, 1 unresolved \(1 addresses given up\), 0 table full' || ok=0
+    has "$log" 'net: rx [0-9]+ frames [0-9]+ bytes, dropped 0 runt 0 long 0 other 1 type' || ok=0
+    local entries
+    entries=$(serial_norm "$log" | sed -n '/^serve: after:/,$p' | grep -c '^arp: entry ')
+    [ "$entries" -ge 1 ] && [ "$entries" -le 8 ] || ok=0
+    serial_norm "$log" | grep -q '^arp: entry [0-9]: 10\.0\.2\.123 ' && ok=0
+    if [ "$ok" = 1 ]; then
+        say "PASS P4 $L: $(line_of "$log" '^ip: rx' | sed 's/^.*dropped/ip dropped/'); $(line_of "$log" '^icmp: echo' | sed 's/^.*matched, //'); $(line_of "$log" '^icmp: unreachable'); ARP 6 bad, 1 conflict, 2 pushed out, 1 unresolved; $entries cache entries at the end, none for 10.0.2.123"
+    else
+        bad "P4 $L: entries=$entries; $(serial_norm "$log" | grep '^ip: \(rx\|tx\)\|^icmp: \|^arp: [0-9]\|^arp: cache\|^net: rx' | paste -sd'|' -)"
+    fi
     halted N9 "$L" "$hrc"
 }
 
@@ -340,7 +499,7 @@ without() { # label tier leg way line-ERE
     local hrc=0
     boot "$2" "$3" "$4" || hrc=$?
     if "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" "$5" 'halt' >"$log.expect" 2>&1 \
-        && ! serial_norm "$log" | grep -q '^PANIC\|^arp:\|^net: virtio-net' && [ "$hrc" = 0 ]; then
+        && ! serial_norm "$log" | grep -q '^PANIC\|^arp:\|^ip:\|^net: virtio-net' && [ "$hrc" = 0 ]; then
         say "PASS $1 $2 $3 $4: $(serial_norm "$log" | grep -m1 '^net: ') then halt, no panic; $(tail -n 1 "$log.verdict")"
     else
         cat "$log.expect" >&2
@@ -350,6 +509,24 @@ without() { # label tier leg way line-ERE
 
 mkdir -p "$PAX_BUILD"
 : > "$PAX_BUILD/mpx4-net-runs.txt"
+
+# --- G0: what this host's QEMU answers ----------------------------------
+own=$(python3 -c '
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    s.connect(("192.0.2.1", 9))  # no datagram is sent: the route alone picks the address
+    print(s.getsockname()[0])
+except OSError:
+    pass
+' 2>/dev/null)
+if "$PAX_ROOT/tools/gateway-probe" 127.0.0.1 ${own:+"$own"} >"$PAX_BUILD/mpx4-net-gateway-probe.txt" 2>&1; then
+    say "PASS G0 $(sed -n '1s/^gateway-probe: //p' "$PAX_BUILD/mpx4-net-gateway-probe.txt"): the gateway answers ARP and three echo requests for 10.0.2.2 itself; $(tail -n 1 "$PAX_BUILD/mpx4-net-gateway-probe.txt" | sed 's/^gateway-probe: PASS //') (asked: 127.0.0.1${own:+ and $own, the address this host routes from})"
+else
+    cat "$PAX_BUILD/mpx4-net-gateway-probe.txt" >&2
+    bad "G0: tools/gateway-probe: $(tail -n 1 "$PAX_BUILD/mpx4-net-gateway-probe.txt")"
+fi
+
 for leg in $legs; do
     if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
         if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
@@ -360,8 +537,9 @@ for leg in $legs; do
         continue
     fi
     for tier in $tiers; do
-        with_device "$tier" "$leg" net 1000
-        with_device "$tier" "$leg" modern 1041
+        with_gateway "$tier" "$leg" net 1000
+        with_gateway "$tier" "$leg" modern 1041
+        with_peer "$tier" "$leg"
         without N10 "$tier" "$leg" absent 'net: no virtio network device among [0-9]+ PCI functions; the network is off'
         without N11 "$tier" "$leg" legacy 'net: refused: the device has no virtio 1\.x common configuration capability \(a legacy-only device\); the network is off'
     done
