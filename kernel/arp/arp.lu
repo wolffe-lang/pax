@@ -1,0 +1,309 @@
+//! arp — the Address Resolution Protocol for IPv4 over Ethernet, as
+//! the frame interface's witness (px20).
+//!
+//! An ARP packet rides in an Ethernet frame of type 0x0806 (RFC 826;
+//! RFC 894 for the frame), every field big-endian:
+//!
+//!     0  destination address (6)      6  source address (6)     12  type 0x0806
+//!     14 hardware type 1 (Ethernet)   16 protocol type 0x0800 (IPv4)
+//!     18 hardware length 6            19 protocol length 4
+//!     20 opcode: 1 request, 2 reply
+//!     22 sender hardware address (6)  28 sender protocol address (4)
+//!     32 target hardware address (6)  38 target protocol address (4)
+//!
+//! 42 bytes; kernel/net pads a sent one to 60 with zeros, and a
+//! received one may carry padding, which is not read.
+//!
+//! `input` is RFC 826's reception algorithm: a packet whose hardware
+//! type, protocol type or lengths are not the ones above is discarded
+//! (`bad`); if the sender's protocol address is already in the table
+//! its hardware address is replaced (the merge); if the target
+//! protocol address is this station's, the sender is added to the
+//! table unless it was merged, and a request is answered — the same
+//! packet with the two address pairs swapped, this station's hardware
+//! address in the sender's place and opcode 2, sent to the asker's
+//! hardware address. A packet for another protocol address is counted
+//! (`other`) and, as the RFC orders, still merged.
+//!
+//! `request(ip)` broadcasts a request (destination ff:ff:ff:ff:ff:ff,
+//! target hardware address zero). `lookup(ip)` reads the table.
+//!
+//! This station's protocol address is a boot-time constant its kernel
+//! passes to `start` (10.0.2.15, the first address QEMU's user-mode
+//! network gives a guest; px21 owns addresses). The table is four
+//! entries, replaced round-robin when full, with no ageing: enough to
+//! witness frames in both directions, and px21's to replace.
+//!
+//! State is words of boot/net.S's `pax_arp_state` and one frame the
+//! packets are composed in, both under `sync.arp()`.
+//!
+//! Written from RFC 826 (the packet, the reception algorithm) and RFC
+//! 894. No Linux source; no other kernel's or network stack's source.
+
+use frames
+use log
+use net
+use sync
+
+extern "c" let pax_arp_state: *u64
+
+const ETHERTYPE: u64 = 0x0806
+const PACKET: u64 = 42
+
+// pax_arp_state's words.
+const A_IP: u64 = 0 // this station's protocol address
+const A_FRAME: u64 = 1 // where a packet is composed (HHDM)
+const A_NEXT: u64 = 2 // the table entry the next new address takes
+const A_TABLE: u64 = 8 // four entries of two words: 1 << 32 | ip, the hardware address
+const ENTRIES: u64 = 4
+const A_ASKER_IP: u64 = 16 // the last station whose request was answered
+const A_ASKER_HW: u64 = 17
+
+/// The counters (`count`): requests sent.
+pub const C_REQUESTS_OUT: u64 = 3
+/// Replies addressed to this station.
+pub const C_REPLIES_IN: u64 = 4
+/// Requests for this station's address.
+pub const C_REQUESTS_IN: u64 = 5
+/// Replies sent.
+pub const C_REPLIES_OUT: u64 = 6
+/// Packets that are not Ethernet/IPv4 ARP, too short, or of an opcode that is neither.
+pub const C_BAD: u64 = 7
+
+fn aw(i: u64) -> u64 {
+    // # Safety: i < 32, a word of boot/net.S's pax_arp_state.
+    unsafe { ((pax_arp_state as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_aw(i: u64, v: u64) {
+    // # Safety: as `aw`.
+    unsafe { ((pax_arp_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+/// Counter `i` (C_*).
+pub fn count(i: u64) -> u64 {
+    aw(i)
+}
+
+fn octet(a: u64) -> u64 {
+    // # Safety: a byte of a frame the caller owns (a receive buffer, or
+    // this module's own frame), through the HHDM.
+    let v = unsafe { (a as *u8).read_volatile() }
+    v as u64
+}
+
+fn put_byte(a: u64, v: u64) {
+    // # Safety: a byte of this module's own frame.
+    unsafe { (a as *u8).write_volatile((v & 0xff) as u8) }
+}
+
+fn be16(a: u64) -> u64 {
+    octet(a) << 8 | octet(a + 1)
+}
+
+fn be32(a: u64) -> u64 {
+    be16(a) << 16 | be16(a + 2)
+}
+
+fn put_be16(a: u64, v: u64) {
+    put_byte(a, v >> 8)
+    put_byte(a + 1, v)
+}
+
+fn put_be32(a: u64, v: u64) {
+    put_be16(a, v >> 16)
+    put_be16(a + 2, v)
+}
+
+/// The six bytes at `a` as one word, byte i in bits 8i..8i+7
+/// (kernel/net's form).
+fn hw(a: u64) -> u64 {
+    var m: u64 = 0
+    var i: u64 = 0
+    while i < 6 {
+        m = m | octet(a + i) << (i * 8)
+        i += 1
+    }
+    m
+}
+
+fn put_hw(a: u64, m: u64) {
+    var i: u64 = 0
+    while i < 6 {
+        put_byte(a + i, m >> (i * 8))
+        i += 1
+    }
+}
+
+fn own_hw() -> u64 {
+    var m: u64 = 0
+    var i: u64 = 0
+    while i < 6 {
+        m = m | net.mac_byte(i) << (i * 8)
+        i += 1
+    }
+    m
+}
+
+/// Take `ip` (a.b.c.d as a << 24 | b << 16 | c << 8 | d) as this
+/// station's protocol address and a frame to compose in. IF clear.
+pub fn start(ip: u64) {
+    var i: u64 = 0
+    while i < 32 {
+        put_aw(i, 0)
+        i += 1
+    }
+    put_aw(A_IP, ip)
+    let pa = frames.alloc() else 0
+    if pa != 0 {
+        put_aw(A_FRAME, pa + frames.hhdm())
+    }
+}
+
+/// This station's protocol address.
+pub fn ip() -> u64 {
+    aw(A_IP)
+}
+
+/// The table entry holding `ip`; ENTRIES when none does.
+fn find(ip: u64) -> u64 {
+    var i: u64 = 0
+    while i < ENTRIES {
+        if aw(A_TABLE + i * 2) == (1 << 32 | ip) {
+            return i
+        }
+        i += 1
+    }
+    ENTRIES
+}
+
+/// The hardware address the table holds for `ip`: `(true, address)`,
+/// or `(false, 0)`.
+pub fn lookup(ip: u64) -> (bool, u64) {
+    let saved = sync.acquire(sync.arp())
+    let i = find(ip)
+    let m = if i < ENTRIES { aw(A_TABLE + i * 2 + 1) } else { 0 }
+    sync.release(sync.arp(), saved)
+    (i < ENTRIES, m)
+}
+
+/// Compose one packet in the module's frame and send it. The ARP lock
+/// held.
+fn emit(to: u64, op: u64, tha: u64, tpa: u64) {
+    let f = aw(A_FRAME)
+    if f == 0 {
+        return
+    }
+    put_hw(f, to)
+    put_hw(f + 6, own_hw())
+    put_be16(f + 12, ETHERTYPE)
+    put_be16(f + 14, 1)
+    put_be16(f + 16, 0x0800)
+    put_byte(f + 18, 6)
+    put_byte(f + 19, 4)
+    put_be16(f + 20, op)
+    put_hw(f + 22, own_hw())
+    put_be32(f + 28, aw(A_IP))
+    put_hw(f + 32, tha)
+    put_be32(f + 38, tpa)
+    let sent = net.send(f, PACKET) else 0
+    if sent != 0 {
+        let c = if op == 1 { C_REQUESTS_OUT } else { C_REPLIES_OUT }
+        put_aw(c, aw(c) + 1)
+    }
+}
+
+/// Broadcast a request for `ip`'s hardware address.
+pub fn request(ip: u64) {
+    let saved = sync.acquire(sync.arp())
+    emit(0xffffffffffff, 1, 0, ip)
+    sync.release(sync.arp(), saved)
+}
+
+/// A received frame of type 0x0806, `len` bytes at `frame` (RFC 826's
+/// reception algorithm; kernel/netd calls this in thread context).
+pub fn input(frame: u64, len: u64) {
+    let saved = sync.acquire(sync.arp())
+    if len < PACKET || be16(frame + 14) != 1 || be16(frame + 16) != 0x0800 || octet(frame + 18) != 6 || octet(frame + 19) != 4 {
+        put_aw(C_BAD, aw(C_BAD) + 1)
+        sync.release(sync.arp(), saved)
+        return
+    }
+    let op = be16(frame + 20)
+    let sha = hw(frame + 22)
+    let spa = be32(frame + 28)
+    let tpa = be32(frame + 38)
+    var merged = false
+    let i = find(spa)
+    if i < ENTRIES {
+        put_aw(A_TABLE + i * 2 + 1, sha)
+        merged = true
+    }
+    if tpa == aw(A_IP) {
+        if !merged {
+            let n = aw(A_NEXT) % ENTRIES
+            put_aw(A_TABLE + n * 2, 1 << 32 | spa)
+            put_aw(A_TABLE + n * 2 + 1, sha)
+            put_aw(A_NEXT, n + 1)
+        }
+        if op == 1 {
+            put_aw(C_REQUESTS_IN, aw(C_REQUESTS_IN) + 1)
+            put_aw(A_ASKER_IP, spa)
+            put_aw(A_ASKER_HW, sha)
+            emit(sha, 2, sha, spa)
+        } else {
+            if op == 2 {
+                put_aw(C_REPLIES_IN, aw(C_REPLIES_IN) + 1)
+            } else {
+                put_aw(C_BAD, aw(C_BAD) + 1)
+            }
+        }
+    }
+    sync.release(sync.arp(), saved)
+}
+
+/// The last station whose request for this station's address was
+/// answered: its protocol and hardware addresses (0, 0 before any).
+pub fn asker() -> (u64, u64) {
+    (aw(A_ASKER_IP), aw(A_ASKER_HW))
+}
+
+/// Write `ip` as a.b.c.d.
+pub fn put_ip(ip: u64) {
+    log.dec(((ip >> 24) & 0xff) as int)
+    log.put(".")
+    log.dec(((ip >> 16) & 0xff) as int)
+    log.put(".")
+    log.dec(((ip >> 8) & 0xff) as int)
+    log.put(".")
+    log.dec((ip & 0xff) as int)
+}
+
+/// Write a hardware address (kernel/net's form) as aa:bb:cc:dd:ee:ff.
+pub fn put_hw_text(m: u64) {
+    var i: u64 = 0
+    while i < 6 {
+        if i > 0 {
+            log.put(":")
+        }
+        log.hex_n(m >> (i * 8), 2)
+        i += 1
+    }
+}
+
+/// The counters' line:
+/// `arp: <a> requests sent, <b> replies received, <c> requests answered (<d> replies sent), <e> bad`.
+pub fn counters() {
+    log.put("arp: ")
+    log.dec(aw(C_REQUESTS_OUT) as int)
+    log.put(" requests sent, ")
+    log.dec(aw(C_REPLIES_IN) as int)
+    log.put(" replies received, ")
+    log.dec(aw(C_REQUESTS_IN) as int)
+    log.put(" requests answered (")
+    log.dec(aw(C_REPLIES_OUT) as int)
+    log.put(" replies sent), ")
+    log.dec(aw(C_BAD) as int)
+    log.put(" bad")
+    log.end()
+}
