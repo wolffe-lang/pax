@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+# gateway-probe — what QEMU's user-mode network answers to ARP and ICMP
+# echo on this host, asked in frames, with no guest (px21).
+#
+#   tools/gateway-probe [ADDRESS…]
+#
+# Starts $PAX_QEMU (default qemu-system-x86_64) with `-machine none`, a
+# `user` netdev and a `socket,udp=` netdev joined by a hub, and plays a
+# guest at 10.0.2.15 from the UDP end: an ARP request for 10.0.2.2,
+# then echo requests of 56, 0 and 1472 data bytes to 10.0.2.2, one to
+# 10.0.2.3, and one to each ADDRESS (an address outside the virtual
+# network: QEMU can answer for it only where the host lets an
+# unprivileged process send an ICMP echo). Every answer is held to its
+# checksums and its data.
+#
+# Prints one `gateway-probe:` line per question and, last, `gateway-probe:
+# PASS gateway-echo=yes outside=<answered>/<asked>` when the gateway
+# itself answered ARP and every echo to 10.0.2.2 exactly (what
+# tests/mpx4-net's echo soak stands on), else `gateway-probe: FAIL …`.
+# Whether an outside address answers is reported, never held: it is the
+# host's policy. Exit 0 on PASS, 1 on FAIL, 2 when QEMU does not start.
+#
+# Written from QEMU's documentation of `-netdev user`, `-netdev socket`
+# and `-netdev hubport`, and the RFCs tools/paxnet.py names. No network
+# stack's source.
+import os
+import socket
+import subprocess
+import sys
+import time
+
+sys.dont_write_bytecode = True  # no tools/__pycache__ in the tree
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import paxnet as px  # noqa: E402
+
+qemu = os.environ.get("PAX_QEMU", "qemu-system-x86_64")
+
+
+def main(outside):
+    peer = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    peer.bind(("127.0.0.1", 0))
+    spare = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    spare.bind(("127.0.0.1", 0))
+    qport = spare.getsockname()[1]
+    spare.close()
+    version = subprocess.run([qemu, "--version"], capture_output=True, text=True).stdout.splitlines()[0]
+    print("gateway-probe: %s" % version)
+    q = subprocess.Popen([qemu, "-machine", "none", "-nodefaults", "-display", "none", "-monitor", "none", "-serial", "none",
+                          "-netdev", "user,id=u0,ipv6=off",
+                          "-netdev", "socket,id=s0,udp=127.0.0.1:%d,localaddr=127.0.0.1:%d" % (peer.getsockname()[1], qport),
+                          "-netdev", "hubport,id=h0,hubid=0,netdev=u0",
+                          "-netdev", "hubport,id=h1,hubid=0,netdev=s0"], stderr=subprocess.PIPE)
+    try:
+        time.sleep(1.0)
+        if q.poll() is not None:
+            print("gateway-probe: QEMU did not stay up: %s" % q.stderr.read().decode().strip())
+            return 2
+        return probe(peer, qport, outside)
+    finally:
+        q.kill()
+        q.wait()
+
+
+def probe(peer, qport, outside):
+    def tx(f):
+        peer.sendto(px.pad60(f), ("127.0.0.1", qport))
+
+    def rx(wait):
+        out = []
+        end = time.time() + wait
+        while time.time() < end and not out:
+            peer.settimeout(max(end - time.time(), 0.01))
+            try:
+                out.append(peer.recvfrom(4096)[0])
+            except socket.timeout:
+                pass
+        return out
+
+    tx(px.arp(px.BCAST, px.PAX_MAC, 1, px.PAX_MAC, px.PAX_IP, px.ZERO6, px.GW_IP))
+    got = rx(2.0)
+    want = px.arp(px.PAX_MAC, px.GW_MAC, 2, px.GW_MAC, px.GW_IP, px.PAX_MAC, px.PAX_IP)
+    if not got or got[0][:42] != want or any(got[0][42:]):
+        print("gateway-probe: FAIL no ARP reply for 10.0.2.2 from %s: %s" % (px.GW_MAC.hex(":"), got[0].hex() if got else "nothing in 2 s"))
+        return 1
+    print("gateway-probe: 10.0.2.2 is at %s (an ARP reply of %d bytes)" % (px.GW_MAC.hex(":"), len(got[0])))
+
+    def ping(dst, seq, n):
+        data = px.pattern(n)
+        tx(px.frame(px.GW_MAC, px.PAX_MAC, px.ipv4(px.PAX_IP, dst, 1, px.echo(8, px.ECHO_IDENT, seq, data), ident=seq)))
+        got = rx(3.0)
+        what = "an echo request of %d data bytes to %s" % (n, px.dotted(dst))
+        if not got:
+            print("gateway-probe: %s: no answer in 3 s" % what)
+            return False
+        g = got[0]
+        # Held here and not by the model: a reply from 127.0.0.1 is one
+        # PAX would drop for its source, and is still QEMU's answer.
+        ihl = (g[14] & 15) * 4 if len(g) > 34 else 20
+        total = px.be16(g, 16) if len(g) > 34 else 0
+        m = g[14 + ihl:14 + total]
+        ok = (g[12:14] == b"\x08\x00" and len(m) >= 8 and px.csum(g[14:14 + ihl]) == 0 and px.csum(m) == 0 and g[23] == 1
+              and m[0] == 0 and g[26:30] == dst and g[30:34] == px.PAX_IP and px.be16(m, 4) == px.ECHO_IDENT
+              and px.be16(m, 6) == seq and m[8:] == data)
+        print("gateway-probe: %s: %s (a %d-byte frame, time to live %d, identification %d, flags 0x%04x)"
+              % (what, "answered, checksums right, data intact" if ok else "NOT an exact echo reply: " + g[:64].hex(),
+                 len(g), g[22], px.be16(g, 18), px.be16(g, 20)))
+        return ok
+
+    own = all([ping(px.GW_IP, 1, 56), ping(px.GW_IP, 2, 0), ping(px.GW_IP, 3, 1472)])
+    ping(px.ip("10.0.2.3"), 4, 56)
+    answered = 0
+    for k, a in enumerate(outside):
+        if ping(px.ip(a), 5 + k, 56):
+            answered += 1
+    if not own:
+        print("gateway-probe: FAIL the gateway did not answer every echo request to 10.0.2.2 exactly")
+        return 1
+    print("gateway-probe: PASS gateway-echo=yes outside=%d/%d" % (answered, len(outside)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
