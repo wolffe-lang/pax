@@ -64,7 +64,9 @@
 //! **Terminal ioctls** (`ioctl`), answered: TCGETS (0x5401), TCSETS,
 //! TCSETSW and TCSETSF (0x5402-0x5404; TCSETSF discards unread input),
 //! TIOCGWINSZ (0x5413; 0 rows and 0 columns, what a Linux serial line
-//! and pseudo-terminal answer until someone sets them) and TIOCSWINSZ
+//! and pseudo-terminal answer until someone sets them — or, px19, when
+//! the screen is the console (kernel/screen attached before `start`),
+//! the screen's rows and columns, its pixel fields 0) and TIOCSWINSZ
 //! (0x5414). Every other request is refused by name (kernel/user
 //! writes `refused: tty ioctl 0x<req>`, -ENOTTY). `struct termios` is
 //! 36 bytes: four 32-bit flag words, the line discipline byte, 19
@@ -91,6 +93,7 @@
 //! not read (§2 of the note). No Linux source; no other kernel's source.
 
 use log
+use screen
 use serial
 use timer
 use uaccess
@@ -795,7 +798,8 @@ fn kbd_start() {
 // --- start, the interrupt, the reports ------------------------------------
 
 /// Start the console's input: the terminal's settings (a Linux
-/// pseudo-terminal's, less ISIG and IXON), COM1's receiver, the i8042,
+/// pseudo-terminal's, less ISIG and IXON; the window size the screen's
+/// grid when the screen is attached, px19), COM1's receiver, the i8042,
 /// and their two 8259 lines. After kernel/timer's `start` (the 8259s
 /// remapped) and before interrupts are enabled.
 pub fn start() {
@@ -814,6 +818,11 @@ pub fn start() {
     put_sv(C_CC, 0x00010004157f1c03)
     put_sv(C_CC + 1, 0x16170f12001a1311)
     put_sv(C_CC + 2, 0)
+    if screen.on() {
+        // px19: struct winsize {ws_row, ws_col, ws_xpixel, ws_ypixel},
+        // four little-endian 16-bit words.
+        put_sv(C_WINSZ, screen.rows() | (screen.cols() << 16))
+    }
     serial.receive_on()
     kbd_start()
     put_sv(C_STARTED, 1)
