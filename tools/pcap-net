@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+# pcap-net — hold a capture of the network test kernel's exchange to the
+# frames it must contain, byte by byte (px20, tests/mpx4-net).
+#
+#   tools/pcap-net [--pax MAC] [--gw MAC] [--pax-ip A.B.C.D] [--gw-ip A.B.C.D]
+#                  [--soak N] [--small N] [--large N] [--list K] FILE.pcap
+#
+# FILE.pcap is what QEMU's `-object filter-dump,netdev=…,file=…` wrote:
+# the classic pcap format (a 24-byte header, magic 0xa1b2c3d4 in the
+# writer's byte order, link type 1, Ethernet; then per frame a 16-byte
+# record header and the frame, without a checksum), every frame that
+# crossed the netdev, in order, both ways.
+#
+# kernel/kmain_net.lu's run must be exactly this conversation, and
+# nothing else:
+#
+#   1. the gateway asks for PAX's address (an ARP request, broadcast,
+#      the first frame), and PAX's very next frame is the reply;
+#   2. PAX asks for the gateway's address and the gateway replies:
+#      once to resolve it, then --soak times, request and reply
+#      strictly alternating;
+#   3. --small frames of 60 bytes, then --large of 1514, from PAX to
+#      the gateway, type 0x88b5, bytes 14-17 the frame's number
+#      (big-endian) and every byte k after them (k * 7) & 0xff;
+#   and, anywhere after 1's request, IPv4 frames from the gateway to
+#   PAX (the test's UDP datagrams to port 7, which made the gateway
+#   ask): each must be a UDP datagram to port 7 for PAX's address.
+#
+# PAX's frames are held to their exact bytes and length (60 for ARP:
+# RFC 826's 42 bytes, zero-padded by kernel/net). The gateway's ARP
+# frames are held to their first 42 bytes exactly, to zeros after them,
+# and to a length of at least 60 (its padding is QEMU's: 60 for a
+# request and 64 for a reply on QEMU 11.1; the lengths seen are
+# printed).
+#
+# Prints what it found and, last, `pcap-net: PASS …` or `pcap-net: FAIL
+# <the first frame that is wrong, with the expected and found bytes>`.
+# --list K also prints the first K frames in hex. Exit 0 on PASS, 1 on
+# FAIL, 2 on a usage or format error.
+#
+# Written from the pcap file format as the libpcap documentation
+# (pcap-savefile(5)) gives it, RFC 826, RFC 894, RFC 791 and RFC 768
+# (the IPv4 and UDP headers' fixed fields). No network stack's source.
+import struct
+import sys
+
+
+def mac(text):
+    b = bytes(int(x, 16) for x in text.split(":"))
+    if len(b) != 6:
+        raise ValueError(text)
+    return b
+
+
+def ip(text):
+    b = bytes(int(x) for x in text.split("."))
+    if len(b) != 4:
+        raise ValueError(text)
+    return b
+
+
+def die(msg):
+    print("pcap-net: " + msg, file=sys.stderr)
+    sys.exit(2)
+
+
+def frames_of(path):
+    d = open(path, "rb").read()
+    if len(d) < 24:
+        die("%s: shorter than a pcap header" % path)
+    magic = d[:4]
+    if magic == b"\xd4\xc3\xb2\xa1":
+        e = "<"
+    elif magic == b"\xa1\xb2\xc3\xd4":
+        e = ">"
+    else:
+        die("%s: not a classic pcap file (magic %s)" % (path, magic.hex()))
+    link = struct.unpack(e + "I", d[20:24])[0]
+    if link != 1:
+        die("%s: link type %d, not Ethernet" % (path, link))
+    out = []
+    o = 24
+    while o < len(d):
+        if o + 16 > len(d):
+            die("%s: a record header runs past the end at byte %d" % (path, o))
+        _s, _us, cap, orig = struct.unpack(e + "IIII", d[o:o + 16])
+        if cap != orig or o + 16 + cap > len(d):
+            die("%s: frame %d is cut short (%d of %d bytes)" % (path, len(out), cap, orig))
+        out.append(d[o + 16:o + 16 + cap])
+        o += 16 + cap
+    return out
+
+
+def arp(dst, src, op, sha, spa, tha, tpa):
+    return dst + src + b"\x08\x06" + b"\x00\x01\x08\x00\x06\x04" + bytes([0, op]) + sha + spa + tha + tpa
+
+
+def main(argv):
+    opt = {"pax": "52:54:00:12:34:56", "gw": "52:55:0a:00:02:02", "pax-ip": "10.0.2.15",
+           "gw-ip": "10.0.2.2", "soak": "10000", "small": "20000", "large": "5000", "list": "0"}
+    path = None
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith("--") and a[2:] in opt and i + 1 < len(argv):
+            opt[a[2:]] = argv[i + 1]
+            i += 2
+        elif a.startswith("--") or path is not None:
+            die("usage: pcap-net [--pax MAC] [--gw MAC] [--pax-ip IP] [--gw-ip IP] [--soak N] [--small N] [--large N] [--list K] FILE.pcap")
+        else:
+            path = a
+            i += 1
+    if path is None:
+        die("no capture file")
+    try:
+        pax, gw = mac(opt["pax"]), mac(opt["gw"])
+        pax_ip, gw_ip = ip(opt["pax-ip"]), ip(opt["gw-ip"])
+        soak, small, large, show = int(opt["soak"]), int(opt["small"]), int(opt["large"]), int(opt["list"])
+    except ValueError as x:
+        die("bad argument: %s" % x)
+
+    fs = frames_of(path)
+    for n, f in enumerate(fs[:show]):
+        print("frame %d: %d bytes %s" % (n, len(f), f.hex()))
+
+    bcast = b"\xff" * 6
+    zero = b"\x00" * 6
+    gw_request = arp(bcast, gw, 1, gw, gw_ip, zero, pax_ip)
+    pax_reply = arp(gw, pax, 2, pax, pax_ip, gw, gw_ip).ljust(60, b"\x00")
+    pax_request = arp(bcast, pax, 1, pax, pax_ip, zero, gw_ip).ljust(60, b"\x00")
+    gw_reply = arp(pax, gw, 2, gw, gw_ip, pax, pax_ip)
+    pattern = bytes((k * 7) & 0xff for k in range(1514))
+
+    def burst_frame(seq, length):
+        f = bytearray(gw + pax + b"\x88\xb5" + pattern[14:length])
+        f[14:18] = struct.pack(">I", seq)
+        return bytes(f)
+
+    def fail(n, what, want=None):
+        print("pcap-net: FAIL frame %d of %d: %s" % (n, len(fs), what))
+        if n < len(fs):
+            print("  found    %d bytes %s" % (len(fs[n]), fs[n][:96].hex()))
+        if want is not None:
+            print("  expected %d bytes %s" % (len(want), want[:96].hex()))
+        sys.exit(1)
+
+    def from_gateway(n, f, want, name):
+        # The gateway's ARP frame: 42 exact bytes, zero padding, >= 60.
+        if len(f) < 60 or f[:42] != want or any(f[42:]):
+            fail(n, "not the gateway's %s (42 bytes exact, zero padding, at least 60 bytes)" % name, want)
+
+    def is_poke(f):
+        # An IPv4 UDP datagram from the gateway to PAX's port 7.
+        return (len(f) >= 42 and f[:6] == pax and f[6:12] == gw and f[12:14] == b"\x08\x00"
+                and f[14] == 0x45 and f[23] == 17 and f[26:30] == gw_ip and f[30:34] == pax_ip
+                and f[36:38] == b"\x00\x07")
+
+    n = 0
+    pokes = 0
+    lengths = {}
+
+    def skip_pokes():
+        nonlocal n, pokes
+        while n < len(fs) and is_poke(fs[n]):
+            pokes += 1
+            n += 1
+
+    def need(what):
+        if n >= len(fs):
+            fail(n, "the capture ends before %s" % what)
+
+    # 1. the gateway asks, PAX answers.
+    need("the gateway's request")
+    from_gateway(n, fs[n], gw_request, "request for %s" % opt["pax-ip"])
+    lengths["request"] = len(fs[n])
+    n += 1
+    need("PAX's reply")
+    if fs[n] != pax_reply:
+        fail(n, "not PAX's reply to the gateway's request, byte for byte", pax_reply)
+    n += 1
+    # 2. PAX asks, the gateway answers: once, then the soak.
+    for k in range(1 + soak):
+        skip_pokes()
+        need("PAX's request %d" % k)
+        if fs[n] != pax_request:
+            fail(n, "not PAX's request %d for %s, byte for byte" % (k, opt["gw-ip"]), pax_request)
+        n += 1
+        skip_pokes()
+        need("the gateway's reply %d" % k)
+        from_gateway(n, fs[n], gw_reply, "reply %d" % k)
+        lengths["reply"] = len(fs[n])
+        n += 1
+    # 3. the bursts.
+    for count, length in ((small, 60), (large, 1514)):
+        for seq in range(count):
+            skip_pokes()
+            need("burst frame %d of %d bytes" % (seq, length))
+            want = burst_frame(seq, length)
+            if fs[n] != want:
+                fail(n, "not burst frame %d of %d bytes, byte for byte" % (seq, length), want)
+            n += 1
+    skip_pokes()
+    if n != len(fs):
+        fail(n, "a frame after the conversation's end")
+    from_pax = 1 + (1 + soak) + small + large
+    from_gw = 1 + (1 + soak) + pokes
+    print("pcap-net: %d frames: %d from PAX (1 reply, %d requests, %d + %d burst frames), %d from the gateway "
+          "(1 request of %d bytes, %d replies of %d bytes, %d IPv4 datagrams to port 7)"
+          % (len(fs), from_pax, 1 + soak, small, large, from_gw, lengths["request"], 1 + soak,
+             lengths["reply"], pokes))
+    print("pcap-net: PASS from-pax=%d from-gateway=%d ipv4=%d" % (from_pax, from_gw, pokes))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
