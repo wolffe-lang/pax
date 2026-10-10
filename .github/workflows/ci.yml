@@ -974,6 +974,78 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px18: the speaker. pelt as pid 1 runs /bin/play (user/play, wolf),
+  # which sounds note files through the console's KIOCSOUND; the kernel
+  # drives the 8254's channel 2 and port 0x61 (kernel/speaker). QEMU's
+  # speaker goes to its `wav` backend. tests/mpx3-speaker: the build
+  # (K0), the session against its expect file (K1), the scale's eight
+  # frequencies within 1% and the kernel's timeline at the tick (K2),
+  # hold's tone stopped at its end (K3), the summary (K4), the end (K5),
+  # the two tunes against their files (K6, native BIOS).
+  mpx3-speaker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          qemu-system-x86_64 --version
+          qemu-system-x86_64 -audiodev help
+          clang --version
+          gcc --version | head -n 1
+          python3 --version
+          uname -sr
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx3-speaker-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the speaker plays, both tiers, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx3-speaker
+
+      - name: keep the programs' sums, the captures' tones, the timelines, the transcripts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx3-speaker-linux
+          path: |
+            build/mpx3-speaker/peltbin/sums.txt
+            build/mpx3-speaker/playbin/sums.txt
+            build/mpx3-speaker/user.txt
+            build/mpx3-speaker/initramfs.txt
+            build/mpx3-speaker/*/kmain_console.elf
+            build/mpx3-speaker/*/*.log
+            build/mpx3-speaker-*.session
+            build/mpx3-speaker-*.log
+            build/mpx3-speaker-*.norm
+            build/mpx3-speaker-*.tones
+            build/mpx3-speaker-*.timeline
+            build/mpx3-speaker-*.cmd*
+            build/mpx3-speaker-*.meta
+            build/mpx3-speaker-*.halt
+            build/mpx3-speaker-*.verdict
+            build/mpx3-speaker-*.typed
+            build/mpx3-speaker-*.wav
+            build/mpx3-speaker-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   # px08: the tour of the kernel. kmain_tour and kmain_tour_text
   # (kernel/pax_tour's stages over the test kernels' paths), two ISOs behind
   # Limine's menu (tools/tour build), both tiers, BIOS and UEFI.
