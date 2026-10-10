@@ -91,6 +91,17 @@
 //!   `exit_group` leave `code << 8` for the parent, a fault the
 //!   signal's number (kernel/process's `fault_signal`). A `who` line's
 //!   `pid` is the Linux pid: 1 for the first process, then 2, 3, …
+//! - plumbing (px17, kernel/files, what pelt `3e7516c`'s pipelines,
+//!   redirections and `cd` make on Linux, `notes/px17/`): `pipe` (22),
+//!   `pipe2` (293), `socketpair` (53), `sendto` (44), `recvfrom` (45),
+//!   `fcntl` (72), `chdir` (80), `fchdir` (81); `getcwd` (79) answers
+//!   the working directory; `clone` without CLONE_VM is a fork
+//!   (kernel/process). A read or write of a pipe that must wait parks
+//!   the thread and runs the call again when a pipe changes; a write to
+//!   a pipe with no reader ends the writer with SIGPIPE (status 13, a
+//!   `killed: SIGPIPE` line) when its action is the default and it is
+//!   not blocked and the writer is not pid 1, else answers -EPIPE. A
+//!   process's end closes its descriptors.
 //! Every other number is -ENOSYS, logged once per program (`unknown`),
 //! among them `set_robust_list` (273) and `rseq` (334), which glibc
 //! tolerates (px09's hello asks `_sysctl` (156), which Linux answers
@@ -210,6 +221,7 @@ const U_LAST_EXIT: u64 = 5 // px13: the last exit's status + 1 (0: none yet)
 
 // boot/isr.S's frame, as word indices.
 const W_R10: u64 = 5
+const W_R9: u64 = 6 // px17: recvfrom's and sendto's sixth argument
 const W_R8: u64 = 7
 const W_RDI: u64 = 9
 const W_RSI: u64 = 10
@@ -541,6 +553,9 @@ fn write(fd: u64, buf: u64, len: u64) -> u64 {
         log.end()
         return NEG_EBADF
     }
+    if t == 3 {
+        return files.pipe_write(area(), paging.live(), fd, buf, len, false) // px17
+    }
     if t == 0 || len == 0 {
         return len
     }
@@ -629,6 +644,17 @@ const SYS_WAITID: u64 = 247
 const SYS_DUP3: u64 = 292
 const SYS_CLONE3: u64 = 435
 const O_CLOEXEC: u64 = 0x80000
+// px17: plumbing.
+const SYS_PIPE: u64 = 22
+const SYS_SENDTO: u64 = 44
+const SYS_RECVFROM: u64 = 45
+const SYS_SOCKETPAIR: u64 = 53
+const SYS_FCNTL: u64 = 72
+const SYS_CHDIR: u64 = 80
+const SYS_FCHDIR: u64 = 81
+const SYS_PIPE2: u64 = 293
+const MSG_NOSIGNAL: u64 = 0x4000
+const SIGPIPE_STATUS: u64 = 13
 
 const NEG_EPERM: u64 = 0xffffffffffffffff // -1
 const NEG_ESRCH: u64 = 0xfffffffffffffffd // -3
@@ -930,13 +956,14 @@ pub fn syscall(f: u64) -> u64 {
         if sched.self_ppid() == 0 {
             put_state(U_LAST_EXIT, (a0 & 0xff) + 1) // px14: a program the kernel started
         }
+        files.close_all(area()) // px17: its pipes' ends close now
         // One thread a process, so `exit` ends the group too; the parent
         // reads `code << 8` (px14).
         return sched.end_with(f, (a0 & 0xff) << 8)
     }
     // px14: the calls that make, replace and wait for processes.
     if nr == SYS_CLONE || nr == SYS_CLONE3 || nr == SYS_VFORK {
-        let g = process.clone(f, nr, a0, a1)
+        let g = process.clone(f, nr, a0, a1, a2, a3)
         if g == f {
             refusal_line(nr, word(f, W_RAX))
         }
@@ -974,7 +1001,23 @@ pub fn syscall(f: u64) -> u64 {
         }
         return sched.sleep_current(f, wake)
     }
-    let r = dispatch(nr, a0, a1, a2, a3, a4)
+    let r = dispatch(nr, a0, a1, a2, a3, a4, word(f, W_R9))
+    if r == files.WAIT {
+        // px17: a pipe or socket that cannot answer yet. As the console's
+        // wait: the call runs again, in its own space, when a pipe changes.
+        put_word(f, W_RIP, word(f, W_RIP) - 2)
+        put_word(f, W_RAX, nr)
+        return sched.block_pipe(f)
+    }
+    if r == files.EPIPE_R && (nr == SYS_WRITE || (nr == SYS_SENDTO && a3 & MSG_NOSIGNAL == 0)) && process.sigpipe_kills() {
+        // px17: SIGPIPE's default action ends the writer.
+        who()
+        log.put(" killed: SIGPIPE, a write to a pipe with no reader")
+        runs_tail()
+        log.end()
+        files.close_all(area())
+        return sched.end_with(f, SIGPIPE_STATUS)
+    }
     if r == console.RESTART {
         // px13: a read of the console with nothing ready. The thread
         // waits for input; the frame is rewound to the `syscall`
@@ -999,12 +1042,12 @@ fn int32(x: u64) -> u64 {
 }
 
 /// Every call that answers in place: the result for %rax.
-fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
     let a = area()
     let pml4 = paging.live()
     // The calls whose first argument is an int (a descriptor), read as
     // one; the others take r0 whole.
-    let a0 = if nr == SYS_READ || nr == SYS_WRITE || nr == SYS_PREAD64 || nr == SYS_OPENAT || nr == SYS_CLOSE || nr == SYS_LSEEK || nr == SYS_FSTAT || nr == SYS_NEWFSTATAT || nr == SYS_STATX || nr == SYS_GETDENTS64 || nr == SYS_IOCTL || nr == SYS_READLINKAT || nr == SYS_DUP || nr == SYS_DUP2 || nr == SYS_DUP3 { int32(r0) } else { r0 }
+    let a0 = if nr == SYS_READ || nr == SYS_WRITE || nr == SYS_PREAD64 || nr == SYS_OPENAT || nr == SYS_CLOSE || nr == SYS_LSEEK || nr == SYS_FSTAT || nr == SYS_NEWFSTATAT || nr == SYS_STATX || nr == SYS_GETDENTS64 || nr == SYS_IOCTL || nr == SYS_READLINKAT || nr == SYS_DUP || nr == SYS_DUP2 || nr == SYS_DUP3 || nr == SYS_FCNTL || nr == SYS_FCHDIR || nr == SYS_SENDTO || nr == SYS_RECVFROM { int32(r0) } else { r0 }
     if nr == SYS_WRITE {
         return write(a0, a1, a2)
     }
@@ -1060,7 +1103,32 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
         return r
     }
     if nr == SYS_GETCWD {
-        return files.getcwd(pml4, a0, a1)
+        return files.getcwd(a, pml4, a0, a1)
+    }
+    // px17: plumbing.
+    if nr == SYS_PIPE {
+        return files.pipe2(a, pml4, a0, 0)
+    }
+    if nr == SYS_PIPE2 {
+        return files.pipe2(a, pml4, a0, int32(a1))
+    }
+    if nr == SYS_SOCKETPAIR {
+        return files.socketpair(a, pml4, int32(a0), int32(a1), int32(a2), a3)
+    }
+    if nr == SYS_SENDTO {
+        return files.sendto(a, pml4, a0, a1, a2, int32(a3), a4)
+    }
+    if nr == SYS_RECVFROM {
+        return files.recvfrom(a, pml4, a0, a1, a2, int32(a3), a4, a5)
+    }
+    if nr == SYS_FCNTL {
+        return files.fcntl(a, a0, int32(a1), a2)
+    }
+    if nr == SYS_CHDIR {
+        return files.chdir(a, pml4, a0)
+    }
+    if nr == SYS_FCHDIR {
+        return files.fchdir(a, a0)
     }
     if nr == SYS_READLINKAT {
         return files.readlinkat(a, pml4, a0, a1)
@@ -1158,6 +1226,7 @@ pub fn kill(f: u64, what: str) -> u64 {
     }
     runs_tail()
     log.end()
+    files.close_all(area()) // px17
     sched.end_with(f, process.fault_signal(v)) // px14: the parent reads the signal
 }
 
