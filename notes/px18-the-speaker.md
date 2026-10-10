@@ -156,3 +156,34 @@ test lands before the kernel's end hook and fails exactly there.
 as boreutils' (about 10-12 MB, the runtime linked whole). The original
 tune runs **40-50 s** (34 bars at 184 bpm is 44.3 s); the Joplin
 excerpt 30-45 s; the scale 4.0 s.
+
+### §3 against what was measured
+
+| predicted | measured |
+|---|---|
+| P1: KIOCSOUND and KDMKTONE on a console descriptor; PIT channel 2 mode 3 and port 0x61; the tone stops at its process's end and at every halt | **right** as built (`kernel/speaker`, `boot/io.S`'s `pax_halt`). One input was wrong in a way P1 did not name: **pelt gives a child `/dev/null` as standard input** (px14's spawn), so `hold`'s KIOCSOUND on descriptor 0 answered -25 (kasumi a1, `hold: KIOCSOUND 1356 answered -25`); `hold` asks descriptor 1, and `play`'s probe of 0, 1, 2 is what made it work there unmodified |
+| P2: the note file's format | **right**, one detail wrong: a `#` starts a comment only at the start of a word, because a sharp (`F#5`) is a `#` inside one (the first build read `D#5` as `D` and a comment: `'D#5 16' is not two words`, kasumi, the list before `b00ffa8`) |
+| P3: onsets late by 0-20 ms, never accumulating; a piece's length within ±20 ms | **right**: in the kernel's own timeline (the ring read through the monitor) the scale's onsets are 51 50 50 50 50 50 50 ticks apart (the first note sounds at once, the rest on the tick after their time), each held 48-49 ticks; the mambo's 160 onsets and the Joplin's 154 are each within **19 ms** of the file's schedule (worst), their spans 43710 ms against 43696 and 48570 ms against 48553 (+14 ms, +17 ms). Every leg, kasumi TCG and hasu KVM alike |
+| P4: every scale note within 1% of the table, both tiers, BIOS and UEFI; QEMU writes silence between notes, so zero crossings over each note's span | **right on the number, wrong on the capture**: worst **0.25%** (C5 524.34 Hz on one leg; most notes within 0.1%; `notes/px18/kasumi-mpx3-speaker-4cd8554.out`, `hasu-kvm-4cd8554.log`). **Not predicted: QEMU 11.1's `wav` backend writes samples only while the speaker sounds** (the speaker session's WAV holds 3.79 s for a 4-s scale and a 40-s session; keeping either port 0x61 bit set through a rest did not change it: experiments A and B on kasumi, `x1`, `x2`), so a capture has no silences and notes are cut where the pitch changes (`tools/wav-notes`); the onsets are the kernel's to tell (K2's timeline). Also not predicted: it leaves the RIFF sizes 0, and it sounds **about 3% less** time than the guest's ticks count (68.3-68.6 s against 71.0 s held, TCG and KVM alike) |
+| P5: `hold`'s tone ends at hold's end; the kernel's line; port 0x61 bits 0-1 clear; test red first | **right**: `user: speaker off at the end of pid 7, port 0x61 0x10` on every leg; the summary's port reads 0x00-0x30 (bits 4-5 are status); before the end hook the same test was red on exactly K3 and K4 (`kasumi-red-before-end-hook.out`: hold's 880 Hz sounded 457-476 ms, until `play scale`'s first KIOCSOUND; CI run 38020945121 at `7cbd62e`). Not predicted: with the hook, QEMU renders **none** of hold's tone (it lives microseconds), so the capture shows no 880 Hz at all |
+| P6: play 10-12 MB; the mambo 40-50 s; the Joplin 30-45 s; the scale 4.0 s | play **12.2 MB** (`9dd6430c…`, 12208424 bytes: just over); the mambo **44.3 s**, the scale **4.0 s**, right; the Joplin **50.1 s, wrong** (the strain twice at 76 bpm; the excerpt was not cut to fit the guess) |
+
+## 4. Evidence index
+
+- **The captures and the frequencies**: `notes/px18/kasumi-mpx3-speaker-4cd8554.out` (the gauntlet's run of `tests/mpx3-speaker` at `4cd8554`, 24 PASS, 0 FAIL, 0 SKIP), `kasumi-mpx3-speaker-4cd8554.captures.txt` (every leg's `tools/wav-notes` tones and the kernel's timeline), `hasu-kvm-4cd8554.log` (the same images under KVM, three rounds, 72 PASS). The scale, per leg (Hz, C4 … C5): native BIOS 261.53 293.84 329.52 349.95 392.26 440.09 493.98 524.34; release BIOS 261.54 293.87 328.81 349.22 392.04 439.83 493.98 523.39; native UEFI 261.54 293.74 329.53 349.22 392.04 439.89 493.99 523.62; release UEFI 261.54 293.70 329.54 349.22 392.04 439.97 493.98 523.55. The table: 261.63 293.66 329.63 349.23 392.00 440.00 493.88 523.25; the counts 4561 4063 3620 3417 3044 2712 2416 2280 give 261.60 … 523.33 Hz exactly.
+- **The red before the end hook**: CI run **38020945121** at `7cbd62e` (the test before `2380124`/`e226ff1`); kasumi the same tree's red on K3 and K4 only, every leg (`notes/px18/kasumi-red-before-end-hook.out`).
+- **The planted break**: `df35f77` loads every count 2% high (every tone 2% flat), CI run **38021555504**; reverted by `bd3d100`.
+- **The gauntlet** at `4cd8554` on kasumi (strict env, QEMU 11.1.1 TCG, wolf 0.2.26, clang 23.1.1): every pax suite exit 0, 0 SKIP (`kasumi-gauntlet-4cd8554.summary`, `.versions`).
+- **Boot counts**: kasumi TCG, mpx3-speaker: 5 a run in a1-a4 and the gauntlet (25), 2 in experiments A and B; hasu KVM: 15 (three rounds of 5); the gauntlet's other suites as their own counts; nomad-1: 4 preflight boots of the folder's image (2 runs of 2) and 1 boot of a private-tune copy on kasumi.
+- **The Linux beep's interface**: `notes/px18/beep.strace` (`ioctl(3, KIOCSOUND, 0)`, `0x4b2f`).
+- **QEMU's speaker binding**: `notes/px18/qemu-pcspk-qtree.txt`.
+- **CI green at the head**: in the PR body (run id at the head sha).
+- **The folder**: `~/scratch/wolf/pax-sound/` on nomad-1, its preflight `GO` (the WAV leg measured the scale at 261.6 293.9 329.5 349.2 392.1 439.7 494.0 523.4 Hz, worst 0.08%; the CoreAudio leg reported no audio error).
+
+## 5. Done-when
+
+- [x] branch `px18` on origin; PR #22 open, unmerged, five sections, commit shas as bullets, a test checklist
+- [ ] CI green at the head sha (the PR body names the run)
+- [x] the red before the fix and the plant, each by run id (above)
+- [x] nothing closed; what to close and correct is in the PR
+- [ ] worktree gone, kasumi and hasu outputs pruned, no orphans (at the lane's end)
