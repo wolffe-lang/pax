@@ -34,10 +34,10 @@
 #
 # PAX's frames are held to their exact bytes and length (60 for ARP:
 # RFC 826's 42 bytes, zero-padded by kernel/net). The gateway's ARP
-# frames are held to their first 42 bytes exactly, to zeros after them,
-# and to a length of at least 60 (its padding is QEMU's: 60 for a
-# request and 64 for a reply on QEMU 11.1; the lengths seen are
-# printed).
+# frames are held to their first 42 bytes exactly and to zeros after
+# them, whatever their length: the padding is QEMU's (a request of 60
+# bytes and replies of 64 on QEMU 11.1; a request of 42, unpadded, on
+# 8.2.2), and the lengths seen are printed.
 #
 # Prints what it found and, last, `pcap-net: PASS …` or `pcap-net: FAIL
 # <the first frame that is wrong, with the expected and found bytes>`.
@@ -151,9 +151,9 @@ def main(argv):
         sys.exit(1)
 
     def from_gateway(n, f, want, name):
-        # The gateway's ARP frame: 42 exact bytes, zero padding, >= 60.
-        if len(f) < 60 or f[:42] != want or any(f[42:]):
-            fail(n, "not the gateway's %s (42 bytes exact, zero padding, at least 60 bytes)" % name, want)
+        # The gateway's ARP frame: 42 exact bytes, then zeros if anything.
+        if f[:42] != want or any(f[42:]):
+            fail(n, "not the gateway's %s (42 bytes exact, zeros after them)" % name, want)
 
     def is_poke(f):
         # An IPv4 UDP datagram from the gateway to PAX's port 7.
