@@ -139,6 +139,10 @@ use timer
 
 extern "c" fn pax_switch()
 extern "c" fn pax_wrmsr(msr: u64, v: u64)
+// s223 probe (wolf-lang#611, [abi.target.none.ambient]): the runtime's
+// ambient pair, saved and restored per thread at every switch.
+extern "c" fn wolf_rt_ambient_get() -> *u8
+extern "c" fn wolf_rt_ambient_set(p: *u8)
 
 extern "c" let pax_threads: *u64
 extern "c" let pax_sched_state: *u64
@@ -175,6 +179,7 @@ struct Thread {
     vparent: u64, // px14: slot + 1 of the vfork parent it holds suspended; 0 none
     zombie: u64, // px14: 1 when a parent will wait for it (the slot outlives the reap)
     sigmask: u64, // px14: its blocked signals (rt_sigprocmask)
+    amb: u64, // s223 probe: its ambient region (wolf_rt_ambient_get), null while it has none
 }
 
 /// How many slots there are (px14: `clone_current` and `child_ended`
@@ -350,6 +355,15 @@ fn run_next() -> u64 {
     let s = if n == 0 { IDLE } else { n - 1 }
     if s != from {
         fpu.switch(from, s) // px10: a no-op before fpu.start
+        // s223 probe: the outgoing thread's ambient region into its
+        // record, the incoming one's out of its own (null for a thread
+        // that has not run: the root). IF is clear here.
+        // # Safety: wolf's freestanding runtime's documented pair; the
+        // value set is the one this slot's own switch saved, or null.
+        unsafe {
+            put_field(from, offset_of(Thread, amb), wolf_rt_ambient_get() as u64)
+            wolf_rt_ambient_set(field(s, offset_of(Thread, amb)) as *u8)
+        }
     }
     put_field(s, offset_of(Thread, state), RUNNING)
     put_field(s, offset_of(Thread, runs), field(s, offset_of(Thread, runs)) + 1)
@@ -484,6 +498,7 @@ fn clear(s: u64) {
     put_field(s, offset_of(Thread, vparent), 0)
     put_field(s, offset_of(Thread, zombie), 0)
     put_field(s, offset_of(Thread, sigmask), 0)
+    put_field(s, offset_of(Thread, amb), 0)
     let a = proc_area(s)
     var i: u64 = 0
     while i < PROC_AREA / 8 {
