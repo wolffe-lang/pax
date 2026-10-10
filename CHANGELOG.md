@@ -23,6 +23,25 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   Named drift: no cursor movement or erase sequences (read and
   ignored), no back buffer (a scroll reads the framebuffer), no blink.
 
+
+- **The speaker (px18).** PAX plays music through the PC speaker: the
+  8254's channel 2 in square-wave mode gated through port 0x61
+  (`kernel/speaker`), answering Linux's console ioctls KIOCSOUND and
+  KDMKTONE (the interface a Linux beep program asks, measured by
+  strace). `/bin/play` (`user/play`, wolf, one routine of assembly for
+  the ioctl) plays plain-text note files (`title`, `tempo`, `gap`, a
+  note and octave with a length, rests, dots and ties), checks a whole
+  file before a sound and refuses a bad line by name, keeps an absolute
+  schedule so no error accumulates, and lists `/usr/share/tunes` when
+  called alone: `mambo` (Paxito, an original mambo-flavoured tune),
+  `entertainer` (Joplin, 1902, public domain) and `scale`.
+  `tests/mpx3-speaker` captures QEMU's speaker to a WAV file and holds
+  every note of the scale within 1% of its pitch (measured: 0.25% at
+  worst) and every onset of both tunes within 30 ms of its score
+  (measured: 19 ms), from the kernel's own timeline read through the
+  monitor. Named drift from Linux, on purpose: a tone stops when the
+  process that started it ends, and every halt silences the speaker.
+  Not yet: `/dev/tty0`, `/dev/console`, the evdev speaker.
 - **Pipes, redirection and `cd` (px17).** pelt `3e7516c` (H2, wolf
   0.2.26) is the shell PAX boots, and its plumbing runs as on Linux:
   `ls /bin | wc -l`, `cat /etc/motd > /dev/null`, `cd /etc; cat motd`,
