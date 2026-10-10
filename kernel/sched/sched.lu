@@ -128,6 +128,11 @@
 //! space (kernel/paging's `copy_user`), its own, which it frees when it
 //! execs or ends.
 //!
+//! **The network thread** (px20): a kernel thread may also wait for the
+//! network device (`block_net`, in thread context like `sleep`); the
+//! device's interrupt makes it ready (`wake_net`) and `kick` runs it
+//! at once when the CPU was idle.
+//!
 //! The record's fields are read and written as words at their
 //! `offset_of`, volatile (`field`/`put_field`): wolf 0.2.26 stores a
 //! field of a raw element in place (wolf-lang#577), but as an ordinary
@@ -206,6 +211,7 @@ const ZOMBIE: u64 = 7 // px14: ended, its stack and space given back, its status
 const VFORK: u64 = 8 // px14: a parent suspended until its vfork child execs or ends
 const WAITING: u64 = 9 // px14: in wait4/waitid until a child ends
 const PIPE: u64 = 10 // px17: in a read or write of a pipe or socket that must wait
+const NET: u64 = 11 // px20: the network thread, until the device's interrupt
 
 const STACKS: u64 = 0xffffd00000000000 // PML4 slot 416
 const SPAN: u64 = 65536 // each slot's virtual space
@@ -1200,6 +1206,34 @@ pub fn wake_pipes() {
         }
         s += 1
     }
+}
+
+/// Block the running kernel thread until `wake_net` (px20: the network
+/// thread, when the device has nothing for it). The caller has IF
+/// clear and has just seen nothing pending, so the device's interrupt
+/// cannot fall between its look and this wait. Returns when woken.
+pub fn block_net() {
+    let saved = sync.irq_save()
+    put_field(cur(), offset_of(Thread, state), NET)
+    // # Safety: as `yield`.
+    unsafe { pax_switch() }
+    sync.irq_restore(saved)
+}
+
+/// Make every thread waiting for the network device ready (px20: from
+/// its interrupt). Returns how many. IF clear.
+pub fn wake_net() -> u64 {
+    var n: u64 = 0
+    var s: u64 = FIRST
+    while s < SLOTS {
+        if field(s, offset_of(Thread, state)) == NET {
+            put_field(s, offset_of(Thread, state), READY)
+            enqueue(s)
+            n += 1
+        }
+        s += 1
+    }
+    n
 }
 
 /// Block the running process in wait4/waitid until a child ends (its
