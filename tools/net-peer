@@ -1,0 +1,495 @@
+#!/usr/bin/env python3
+# net-peer — the other end of PAX's network cable (px21, tests/mpx4-net's
+# `peer` way).
+#
+#   tools/net-peer --listen PORT --qemu PORT [--soak N] [--boot SECONDS]
+#
+# QEMU is started with `-netdev socket,id=…,udp=127.0.0.1:<listen>,
+# localaddr=127.0.0.1:<qemu>`: every Ethernet frame the guest sends is
+# one UDP datagram to <listen>, and every datagram this script sends to
+# <qemu> is a frame the guest receives. Nothing else is on the wire, so
+# this script is the whole network: an on-link host 10.0.2.100
+# (52:54:00:00:00:aa), the gateway 10.0.2.2 (52:55:0a:00:02:02), a host
+# behind the gateway, 192.0.2.1, and nobody at 10.0.2.99. No privilege,
+# no tap device and no ICMP socket is needed: it runs wherever QEMU and
+# python3 do.
+#
+# kernel/kmain_net.lu, booted with `peer` on its command line, goes
+# first (part A), and this script answers and holds every frame to its
+# exact bytes:
+#
+#   A1 queue       an ARP request for 10.0.2.100, answered after 0.3 s;
+#                  nothing else may come before the answer, and then the
+#                  echo requests 3 and 4 come (1 and 2 were pushed out of
+#                  the two-frame queue), identifications 2 and 3
+#   A2 ping        echo requests 5-8 to 10.0.2.100, each answered
+#   A3 route       an ARP request for 10.0.2.2, then echo requests 9 and
+#                  10 for 192.0.2.1 sent to the gateway's hardware address
+#   A4 unresolved  three ARP requests for 10.0.2.99, about a second
+#                  apart, never answered; echo request 11 never appears
+#                  (identification 10 is skipped)
+#   A5 aged        another ARP request for 10.0.2.100 (the entry aged
+#                  out in 2 s), then echo request 12
+#   A6 sizes       echo requests 13 (no data) and 14 (1472 data bytes)
+#   A7             the kernel's frame of type 0x88b5: it is serving
+#
+# then this script asks (part B) and the kernel answers; every answer
+# is held to its exact bytes, and where the right answer is none, the
+# next echo's answer must be the very next datagram PAX sends (its
+# identification says nothing was sent between):
+#
+#   B1  ARP: a request for 10.0.2.15 is answered; an address probe
+#       (sender 0.0.0.0) is answered; a sender claiming 10.0.2.15, a
+#       request for another address, and packets with a wrong hardware
+#       type, protocol type, length or opcode, or a group sender
+#       address, are not
+#   B2  echo requests of 0, 1, 56, 57 and 1472 data bytes
+#   B3  an echo request from 192.0.2.1 by way of the gateway: the reply
+#       goes to the gateway's hardware address
+#   B4  an echo request with IP options (padding; a record-route) is
+#       answered, without options
+#   B5  time to live 1; a frame sent to ff:ff:ff:ff:ff:ff; bytes after
+#       the datagram's end; an unusual type of service and DF clear:
+#       all answered
+#   B6  the malformed and the unwanted, none answered: a wrong header
+#       checksum; IHL 4; a header longer than the frame; version 6; a
+#       total length over the frame's and under the header's; time to
+#       live 0; a first and a later fragment; seven sources that name
+#       no single host; three broken option lists; a loose and a strict
+#       source route; two destinations that are not PAX; a wrong ICMP
+#       checksum; a 4-byte ICMP message; a timestamp request and an
+#       echo with code 1; echo requests to both broadcast addresses; an
+#       echo reply nobody asked for; a 26-byte frame
+#   B7  an unknown protocol: of five datagrams at once the first alone
+#       draws a destination unreachable (code 2) quoting its header and
+#       8 bytes; a second later one with options and 3 data bytes draws
+#       one quoting 24 + 3 bytes and the next, at once, none; one to the
+#       subnet's broadcast and one in a broadcast frame draw none
+#   B8  a gratuitous announcement for an address PAX holds no entry for
+#       teaches it nothing; one for 10.0.2.100 moves its replies to the
+#       new hardware address, and an unsolicited reply moves them back
+#   B9  nine more hosts ask for PAX's address (the cache holds eight)
+#       and each then gets an echo answered
+#   B10 --soak N echo requests (10000), each answered before the next
+#   B11 a frame of type 0x88b5: the kernel stops serving
+#
+# Prints one `net-peer: ok <step> …` line per step and, last, `net-peer:
+# PASS …` or `net-peer: FAIL <what>, with the expected and found bytes`.
+# Exit 0 on PASS, 1 on FAIL, 2 on a usage error.
+#
+# Written from RFC 791, RFC 792, RFC 826, RFC 894, RFC 1071, RFC 1122
+# and QEMU's documentation of `-netdev socket`. No network stack's
+# source.
+import os
+import socket
+import struct
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import paxnet as px  # noqa: E402
+
+
+def die(msg):
+    print("net-peer: " + msg, file=sys.stderr)
+    sys.exit(2)
+
+
+class Fail(Exception):
+    pass
+
+
+class Peer:
+    def __init__(self, listen, qemu, boot):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
+        self.sock.bind(("127.0.0.1", listen))
+        self.to = ("127.0.0.1", qemu)
+        self.boot = boot
+        self.macs = {px.PEER_IP: px.PEER_MAC, px.GW_IP: px.GW_MAC}
+        self.silent_for = {px.NOBODY_IP}
+        self.asked = {}  # target -> [times]
+        self.last_ident = None
+        self.gaps = 0
+        self.next_ident = 0
+        self.my_ident = 0
+        self.before = 0
+        self.sent = {}
+        self.arp_out = 0
+        self.quieted = 0
+
+    # --- the wire ---------------------------------------------------------
+    def send(self, f, pad=True):
+        self.sock.sendto(px.pad60(f) if pad else f, self.to)
+
+    def recv(self, timeout):
+        self.sock.settimeout(max(timeout, 0.001))
+        try:
+            return self.sock.recvfrom(4096)[0]
+        except socket.timeout:
+            return None
+
+    def fail(self, what, found=None, want=None):
+        msg = what
+        if found is not None:
+            msg += "\n  found    %d bytes %s" % (len(found), found[:120].hex())
+        if want is not None:
+            msg += "\n  expected %d bytes %s" % (len(want), want[:120].hex())
+        raise Fail(msg)
+
+    def tally(self, what):
+        self.sent[what] = self.sent.get(what, 0) + 1
+
+    # --- PAX's frames -------------------------------------------------------
+    def arp_from_pax(self, f, answer=True):
+        """An ARP frame from PAX that is not a reply this script waits
+        for: it must be a request, exact; answer it for whom we play."""
+        target = f[38:42]
+        if f != px.pax_arp_request(target):
+            self.fail("an ARP frame from PAX that is not its request for %s, byte for byte" % px.dotted(target), f, px.pax_arp_request(target))
+        self.asked.setdefault(target, []).append(time.time())
+        self.arp_out += 1
+        if target in self.silent_for:
+            return
+        if target not in self.macs:
+            self.fail("PAX asked for %s, which this script does not play" % px.dotted(target), f)
+        if answer:
+            m = self.macs[target]
+            self.send(px.arp(px.PAX_MAC, m, 2, m, target, px.PAX_MAC, px.PAX_IP))
+
+    def note_ident(self, f):
+        ident = px.be16(f, 18)
+        if self.last_ident is not None:
+            if ident <= self.last_ident:
+                self.fail("PAX's identification went from %d to %d" % (self.last_ident, ident), f)
+            self.gaps += ident - self.last_ident - 1
+        else:
+            self.gaps += ident
+        self.last_ident = ident
+        self.next_ident = ident + 1
+
+    def next_from_pax(self, timeout=5.0, arp_reply=None):
+        """The next frame from PAX that is not an ARP request (those are
+        answered on the way). With `arp_reply`, an ARP frame equal to it
+        is returned too."""
+        end = time.time() + timeout
+        while True:
+            f = self.recv(end - time.time())
+            if f is None:
+                return None
+            if f[6:12] != px.PAX_MAC:
+                self.fail("a frame that is not from PAX's address", f)
+            if f[12:14] == b"\x08\x06":
+                if arp_reply is not None and f == arp_reply:
+                    return f
+                self.arp_from_pax(f)
+                continue
+            return f
+
+    def expect(self, want, what, timeout=5.0):
+        f = self.next_from_pax(timeout, arp_reply=want if want[12:14] == b"\x08\x06" else None)
+        if f is None:
+            self.fail("nothing came for %s in %.0f s" % (what, timeout), None, want)
+        if f != want:
+            self.fail("not %s, byte for byte" % what, f, want)
+        if f[12:14] == b"\x08\x00":
+            self.note_ident(f)
+        return f
+
+    def hop_mac(self, dst_ip):
+        return self.macs[px.next_hop(dst_ip)]
+
+    # --- what this script sends ---------------------------------------------
+    def datagram(self, src_ip, payload, src_mac=None, dst_mac=px.PAX_MAC, dst_ip=px.PAX_IP, proto=1, **kw):
+        """A frame carrying one datagram to PAX, from `src_ip` by way of
+        whoever is its next hop back."""
+        if src_mac is None:
+            src_mac = self.macs.get(px.next_hop(src_ip), px.PEER_MAC)
+        self.my_ident = (self.my_ident + 1) & 0xffff
+        kw.setdefault("ident", self.my_ident)
+        return px.frame(dst_mac, src_mac, px.ipv4(src_ip, dst_ip, proto, payload, **kw))
+
+    def ask(self, f, what, pad=True):
+        """Send the echo request frame `f` and hold PAX's reply to its
+        exact bytes."""
+        verdict, ihl, total = px.judge_ip(px.pad60(f) if pad else f)
+        if verdict != "echo":
+            self.fail("%s: the model does not call this an echo request to answer (%s)" % (what, verdict), f)
+        self.tally("echo")
+        self.send(f, pad)
+        want = px.echo_reply_to(f, ihl, total, self.next_ident, self.hop_mac(f[26:30]))
+        self.expect(want, "PAX's reply to %s" % what)
+
+    def quiet(self, f, cause, what, pad=True):
+        """Send a frame PAX must drop for `cause` and not answer."""
+        wire = px.pad60(f) if pad else f
+        if f[12:14] == b"\x08\x06":
+            verdict = "arp." + px.judge_arp(wire)[0]
+        else:
+            verdict = px.judge_ip(wire)[0]
+        if verdict != cause:
+            self.fail("%s: the model calls this %s, the test meant %s" % (what, verdict, cause), f)
+        self.tally(cause)
+        self.quieted += 1
+        self.send(f, pad)
+
+    def fence(self, seq):
+        """An echo whose reply must be PAX's very next datagram."""
+        self.ask(self.datagram(px.PEER_IP, px.echo(8, 0xfe00, seq, b"fence")), "the echo after them (nothing may have been sent before it)")
+
+    # --- part A: the kernel goes first --------------------------------------
+    def part_a(self):
+        plan = [(px.PEER_IP, 3, 56, 2), (px.PEER_IP, 4, 56, 3), (px.PEER_IP, 5, 56, 4), (px.PEER_IP, 6, 56, 5),
+                (px.PEER_IP, 7, 56, 6), (px.PEER_IP, 8, 56, 7), (px.FAR_IP, 9, 56, 8), (px.FAR_IP, 10, 56, 9),
+                (px.PEER_IP, 12, 56, 11), (px.PEER_IP, 13, 0, 12), (px.PEER_IP, 14, 1472, 13)]
+        step = 0
+        first = True
+        end = time.time() + self.boot
+        while True:
+            f = self.recv(end - time.time())
+            if f is None:
+                self.fail("part A: no frame for %.0f s (step %d of %d)" % (self.boot, step, len(plan)))
+            end = time.time() + 30
+            if f[6:12] != px.PAX_MAC:
+                self.fail("part A: a frame that is not from PAX's address", f)
+            kind = f[12:14]
+            if kind not in (b"\x08\x06", b"\x08\x00", px.EXPERIMENTAL):
+                if step or not first:
+                    self.fail("part A: a frame of type %s after the kernel's first" % kind.hex(), f)
+                self.before += 1  # the firmware's, before the kernel
+                continue
+            if kind == b"\x08\x06":
+                if first:
+                    # A1: the first request is for 10.0.2.100; the answer
+                    # waits 0.3 s and nothing may be sent meanwhile.
+                    if f != px.pax_arp_request(px.PEER_IP):
+                        self.fail("A1: the kernel's first frame is not its ARP request for 10.0.2.100", f, px.pax_arp_request(px.PEER_IP))
+                    self.arp_from_pax(f, answer=False)
+                    early = self.recv(0.3)
+                    if early is not None:
+                        self.fail("A1: a frame was sent before 10.0.2.100's address was known", early)
+                    self.send(px.arp(px.PAX_MAC, px.PEER_MAC, 2, px.PEER_MAC, px.PEER_IP, px.PAX_MAC, px.PAX_IP))
+                    first = False
+                    print("net-peer: ok A1 the request for 10.0.2.100 came first and nothing followed it for 0.3 s")
+                else:
+                    self.arp_from_pax(f)
+                continue
+            if kind == px.EXPERIMENTAL:
+                if f != px.MARKER:
+                    self.fail("A7: not the kernel's ready frame, byte for byte", f, px.MARKER)
+                if step != len(plan):
+                    self.fail("A7: the kernel is ready after %d of %d echo requests" % (step, len(plan)), f)
+                break
+            if first:
+                self.fail("A1: a datagram before any ARP request", f)
+            if step >= len(plan):
+                self.fail("part A: a datagram after the last one expected", f)
+            dst, seq, n, ident = plan[step]
+            want = px.echo_request_from_pax(dst, seq, n, ident, self.hop_mac(dst))
+            if f != want:
+                self.fail("part A: not echo request %d (%d data bytes, identification %d) for %s by way of %s, byte for byte"
+                          % (seq, n, ident, px.dotted(dst), self.hop_mac(dst).hex(":")), f, want)
+            self.note_ident(f)
+            step += 1
+            src_mac = self.hop_mac(dst)
+            self.my_ident += 1
+            self.send(px.frame(px.PAX_MAC, src_mac, px.ipv4(dst, px.PAX_IP, 1, px.echo(0, px.ECHO_IDENT, seq, px.pattern(n)),
+                                                             ttl=64 if px.on_link(dst) else 63, ident=self.my_ident)))
+            self.tally("reply")
+        # What part A must have shown.
+        nobody = self.asked.get(px.NOBODY_IP, [])
+        gaps = [b - a for a, b in zip(nobody, nobody[1:])]
+        if len(nobody) != 3 or any(g < 0.8 or g > 3.0 for g in gaps):
+            self.fail("A4: %d requests for 10.0.2.99, %s s apart; three, about a second apart, were due" % (len(nobody), ["%.2f" % g for g in gaps]))
+        if len(self.asked.get(px.PEER_IP, [])) < 2:
+            self.fail("A5: 10.0.2.100 was asked for %d times; its entry should have aged out and been asked for again" % len(self.asked.get(px.PEER_IP, [])))
+        if len(self.asked.get(px.GW_IP, [])) < 1:
+            self.fail("A3: the gateway was never asked for")
+        if self.gaps != 3:
+            self.fail("part A: %d identifications never reached the wire; 3 were due (0 and 1 pushed out, 10 unresolved)" % self.gaps)
+        print("net-peer: ok A2-A7 echo requests 3-10 and 12-14 exact (identifications 2-9, 11-13); 9 and 10 by way of the gateway; "
+              "10.0.2.99 asked for 3 times, %s s apart, and given up; 10.0.2.100 asked for %d times; the ready frame"
+              % (" and ".join("%.2f" % g for g in gaps), len(self.asked[px.PEER_IP])))
+
+    # --- part B: this script asks -------------------------------------------
+    def part_b(self, soak):
+        P, G = px.PEER_IP, px.GW_IP
+        e = px.echo
+
+        # B1 ARP
+        self.send(px.arp(px.BCAST, px.PEER_MAC, 1, px.PEER_MAC, P, px.ZERO6, px.PAX_IP))
+        self.tally("arp.request")
+        self.expect(px.pax_arp_reply(px.PEER_MAC, P), "PAX's ARP reply to 10.0.2.100")
+        probe_mac = px.mac("52:54:00:00:00:bb")
+        self.send(px.arp(px.BCAST, probe_mac, 1, probe_mac, b"\0\0\0\0", px.ZERO6, px.PAX_IP))
+        self.tally("arp.request")
+        self.expect(px.pax_arp_reply(probe_mac, b"\0\0\0\0"), "PAX's ARP reply to an address probe")
+        thief = px.mac("52:54:00:00:00:cc")
+        self.quiet(px.arp(px.BCAST, thief, 1, thief, px.PAX_IP, px.ZERO6, px.PAX_IP), "arp.conflict", "a sender claiming PAX's address")
+        self.quiet(px.arp(px.BCAST, px.PEER_MAC, 1, px.PEER_MAC, P, px.ZERO6, px.ip("10.0.2.77")), "arp.other", "a request for another address")
+        for name, kw in (("hardware type 6", {"hrd": 6}), ("protocol type 0x86dd", {"pro": 0x86dd}), ("hardware length 8", {"hln": 8}), ("protocol length 16", {"pln": 16})):
+            self.quiet(px.arp(px.BCAST, px.PEER_MAC, 1, px.PEER_MAC, P, px.ZERO6, px.PAX_IP, **kw), "arp.bad", "an ARP packet with " + name)
+        self.quiet(px.arp(px.BCAST, px.PEER_MAC, 3, px.PEER_MAC, P, px.ZERO6, px.PAX_IP), "arp.bad", "an ARP packet with opcode 3")
+        self.quiet(px.arp(px.BCAST, px.PEER_MAC, 1, px.BCAST, P, px.ZERO6, px.PAX_IP), "arp.bad", "an ARP packet from a group hardware address")
+        self.fence(1)
+        print("net-peer: ok B1 ARP: a request and an address probe answered; a conflict, another target and six bad packets not")
+
+        # B2 sizes
+        for n in (0, 1, 56, 57, 1472):
+            self.ask(self.datagram(P, e(8, 0x1234, n, bytes((k * 13 + 5) & 0xff for k in range(n)))), "an echo request of %d data bytes" % n)
+        print("net-peer: ok B2 echo requests of 0, 1, 56, 57 and 1472 data bytes answered, each reply exact")
+
+        # B3 off-link
+        self.ask(self.datagram(px.FAR_IP, e(8, 0x4321, 7, b"from behind the gateway"), ttl=63), "an echo request from 192.0.2.1")
+        print("net-peer: ok B3 an echo request from 192.0.2.1 answered by way of the gateway's hardware address")
+
+        # B4 options
+        self.ask(self.datagram(P, e(8, 1, 1, b"padded options"), options=b"\x01\x01\x01\x00"), "an echo request with three no-operation options")
+        self.ask(self.datagram(P, e(8, 1, 2, b"record route"), options=b"\x07\x07\x04\x00\x00\x00\x00\x00"), "an echo request with a record-route option")
+        print("net-peer: ok B4 echo requests with IP options answered, the replies without options")
+
+        # B5 odd but right
+        self.ask(self.datagram(P, e(8, 2, 1, b"ttl 1"), ttl=1), "an echo request with time to live 1")
+        self.ask(self.datagram(P, e(8, 2, 2, b"broadcast frame"), dst_mac=px.BCAST), "an echo request in a broadcast frame")
+        self.ask(self.datagram(P, e(8, 2, 3, b"trailer")) + b"\xde\xad\xbe\xef" * 9, "an echo request with 36 bytes after the datagram")
+        self.ask(self.datagram(P, e(8, 2, 4, b"tos"), tos=0xb8, flags=0), "an echo request with a type of service and DF clear")
+        print("net-peer: ok B5 time to live 1, a broadcast frame, trailing bytes and a type of service answered")
+
+        # B6 the malformed and the unwanted
+        self.quieted = 0
+        ping = e(8, 3, 1, b"must not be answered")
+        good = self.datagram(P, ping)
+        bad_sum = bytearray(good)
+        bad_sum[24] ^= 0x01
+        self.quiet(bytes(bad_sum), "ip.checksum", "a wrong header checksum")
+        self.quiet(self.datagram(P, ping, ihl=4), "ip.ihl", "IHL 4")
+        self.quiet(self.datagram(P, b"", ihl=15, total=60)[:60], "ip.short", "a header longer than the frame")
+        self.quiet(self.datagram(P, ping, version=6), "ip.version", "version 6")
+        self.quiet(self.datagram(P, ping, total=200), "ip.length", "a total length over the frame's")
+        self.quiet(self.datagram(P, ping, total=16), "ip.length", "a total length under the header's")
+        self.quiet(self.datagram(P, ping, ttl=0), "ip.ttl", "time to live 0")
+        self.quiet(self.datagram(P, ping, flags=0x2000), "ip.fragment", "a first fragment")
+        self.quiet(self.datagram(P, ping, flags=185), "ip.fragment", "a later fragment")
+        for s in ("255.255.255.255", "10.0.2.255", "224.0.0.1", "240.0.0.1", "127.0.0.1", "0.0.0.0", "10.0.2.15"):
+            self.quiet(self.datagram(px.ip(s), ping, src_mac=px.PEER_MAC), "ip.source", "the source " + s)
+        self.quiet(self.datagram(P, ping, options=b"\x07\x01\x00\x00"), "ip.option", "an option of length 1")
+        self.quiet(self.datagram(P, ping, options=b"\x07\x28\x04\x00"), "ip.option", "an option longer than the header")
+        self.quiet(self.datagram(P, ping, options=b"\x01\x01\x01\x07"), "ip.option", "an option with no length byte")
+        self.quiet(self.datagram(P, ping, options=b"\x83\x07\x04\x0a\x00\x02\x64\x00"), "ip.source-route", "a loose source route")
+        self.quiet(self.datagram(P, ping, options=b"\x89\x07\x04\x0a\x00\x02\x64\x00"), "ip.source-route", "a strict source route")
+        self.quiet(self.datagram(P, ping, dst_ip=px.ip("10.0.2.77")), "ip.other", "a datagram for 10.0.2.77")
+        self.quiet(self.datagram(P, ping, dst_ip=px.ip("192.0.2.9")), "ip.other", "a datagram for 192.0.2.9")
+        self.quiet(self.datagram(P, e(8, 3, 2, b"bad sum", check=0x1234)), "icmp.checksum", "a wrong ICMP checksum")
+        self.quiet(self.datagram(P, b"\x08\x00\xf7\xff"), "icmp.short", "a 4-byte ICMP message")
+        self.quiet(self.datagram(P, px.icmp(13, 0, b"\x00\x01\x00\x01", b"\x00" * 12)), "icmp.type", "a timestamp request")
+        self.quiet(self.datagram(P, e(8, 3, 3, b"code 1", code=1)), "icmp.type", "an echo request with code 1")
+        self.quiet(self.datagram(P, ping, dst_mac=px.BCAST, dst_ip=px.SUBNET_BCAST), "icmp.broadcast", "an echo request to 10.0.2.255")
+        self.quiet(self.datagram(P, ping, dst_mac=px.BCAST, dst_ip=px.LIMITED_BCAST), "icmp.broadcast", "an echo request to 255.255.255.255")
+        self.quiet(self.datagram(P, e(0, px.ECHO_IDENT, 999, px.pattern(56))), "reply", "an echo reply nobody asked for")
+        self.fence(2)
+        # A frame of 26 bytes, sent as it is: 12 bytes of a header.
+        self.quiet(good[:26], "ip.short", "a 26-byte frame", pad=False)
+        self.fence(3)
+        print("net-peer: ok B6 %d malformed or unwanted datagrams, none answered" % self.quieted)
+
+        # B7 an unknown protocol
+        time.sleep(1.3)
+        first = self.datagram(P, struct.pack(">HHHH", 4444, 7, 13, 0) + b"hello", proto=17)
+        verdict, ihl, total = px.judge_ip(first)
+        self.tally("unreachable")
+        self.send(first)
+        for k in range(4):
+            self.send(self.datagram(P, struct.pack(">HHHH", 4445 + k, 7, 8, 0), proto=17))
+            self.tally("unreachable")
+        self.expect(px.unreachable_for(first, ihl, total, self.next_ident, px.PEER_MAC), "PAX's protocol unreachable for the first of five datagrams")
+        self.fence(4)
+        time.sleep(1.3)
+        second = px.pad60(self.datagram(P, b"abc", proto=253, options=b"\x01\x01\x01\x00"))
+        verdict, ihl, total = px.judge_ip(second)
+        self.tally("unreachable")
+        self.send(second)
+        self.send(self.datagram(P, b"\x00" * 20, proto=6))
+        self.tally("unreachable")
+        self.expect(px.unreachable_for(second, ihl, total, self.next_ident, px.PEER_MAC), "PAX's protocol unreachable for a datagram with options and 3 data bytes")
+        time.sleep(1.3)
+        udp = struct.pack(">HHHH", 4444, 7, 8, 0)
+        self.quiet(self.datagram(P, udp, proto=17, dst_mac=px.BCAST, dst_ip=px.SUBNET_BCAST), "silent", "an unknown protocol to the subnet's broadcast")
+        self.quiet(self.datagram(P, udp, proto=17, dst_mac=px.BCAST), "silent", "an unknown protocol in a broadcast frame")
+        self.fence(5)
+        print("net-peer: ok B7 an unknown protocol: 2 destination unreachables, each exact; 5 held back by the limit; 2 never due")
+
+        # B8 gratuitous announcements
+        stranger_ip, stranger = px.ip("10.0.2.123"), px.mac("52:54:00:00:00:dd")
+        self.quiet(px.arp(px.BCAST, stranger, 1, stranger, stranger_ip, px.ZERO6, stranger_ip), "arp.other", "a gratuitous announcement from 10.0.2.123")
+        moved = px.mac("52:54:00:aa:bb:cc")
+        self.macs[P] = moved
+        self.quiet(px.arp(px.BCAST, moved, 1, moved, P, px.ZERO6, P), "arp.other", "a gratuitous announcement moving 10.0.2.100")
+        self.ask(self.datagram(P, e(8, 4, 1, b"moved")), "an echo request from 10.0.2.100 at its new hardware address")
+        self.macs[P] = px.PEER_MAC
+        self.send(px.arp(px.PAX_MAC, px.PEER_MAC, 2, px.PEER_MAC, P, px.PAX_MAC, px.PAX_IP))
+        self.tally("arp.reply")
+        self.ask(self.datagram(P, e(8, 4, 2, b"moved back")), "an echo request from 10.0.2.100 back at its first hardware address")
+        print("net-peer: ok B8 a gratuitous announcement moved 10.0.2.100's replies to 52:54:00:aa:bb:cc and an unsolicited reply moved them back")
+
+        # B9 more hosts than the cache holds
+        for k in range(1, 10):
+            hip, hmac = px.ip("10.0.2.%d" % (100 + k)), px.mac("52:54:00:00:01:%02x" % k)
+            self.macs[hip] = hmac
+            self.send(px.arp(px.BCAST, hmac, 1, hmac, hip, px.ZERO6, px.PAX_IP))
+            self.tally("arp.request")
+            self.expect(px.pax_arp_reply(hmac, hip), "PAX's ARP reply to 10.0.2.%d" % (100 + k))
+        for k in range(1, 10):
+            hip = px.ip("10.0.2.%d" % (100 + k))
+            self.ask(self.datagram(hip, e(8, 5, k, b"one of nine")), "an echo request from 10.0.2.%d" % (100 + k))
+        print("net-peer: ok B9 nine more hosts asked for PAX's address and each had an echo answered")
+
+        # B10 the soak
+        t0 = time.time()
+        data = px.pattern(56)
+        for i in range(soak):
+            f = px.frame(px.PAX_MAC, px.PEER_MAC, px.ipv4(P, px.PAX_IP, 1, e(8, 0x50aa, i & 0xffff, data), ident=i & 0xffff))
+            self.sock.sendto(f, self.to)
+            want = px.echo_reply_to(f, 20, 84, self.next_ident & 0xffff, self.macs[P])
+            got = self.next_from_pax(5.0)
+            if got != want:
+                self.fail("B10: not PAX's reply to echo request %d of the soak, byte for byte" % i, got, want)
+            self.last_ident = px.be16(got, 18)
+            self.next_ident = (self.last_ident + 1) & 0xffff
+        span = time.time() - t0
+        self.sent["echo"] = self.sent.get("echo", 0) + soak
+        print("net-peer: ok B10 %d echo requests answered, each reply exact, in %.2f s (%d echoes/s by this script's clock)"
+              % (soak, span, soak / span if span > 0 else 0))
+
+        # B11 stop
+        self.send(px.BCAST + px.PEER_MAC + px.EXPERIMENTAL + b"stop")
+        print("net-peer: ok B11 told the kernel to stop serving")
+
+
+def main(argv):
+    opt = {"listen": None, "qemu": None, "soak": "10000", "boot": "150"}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith("--") and a[2:] in opt and i + 1 < len(argv):
+            opt[a[2:]] = argv[i + 1]
+            i += 2
+        else:
+            die("usage: net-peer --listen PORT --qemu PORT [--soak N] [--boot SECONDS]")
+    if opt["listen"] is None or opt["qemu"] is None:
+        die("usage: net-peer --listen PORT --qemu PORT [--soak N] [--boot SECONDS]")
+    peer = Peer(int(opt["listen"]), int(opt["qemu"]), float(opt["boot"]))
+    sys.stdout.reconfigure(line_buffering=True)
+    try:
+        peer.part_a()
+        peer.part_b(int(opt["soak"]))
+    except Fail as x:
+        print("net-peer: FAIL " + str(x))
+        return 1
+    sent = " ".join("%s=%d" % kv for kv in sorted(peer.sent.items()))
+    print("net-peer: sent %s" % sent)
+    print("net-peer: PASS before=%d arp-requests-from-pax=%d last-identification=%d" % (peer.before, peer.arp_out, peer.last_ident))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
