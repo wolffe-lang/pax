@@ -1,4 +1,4 @@
-# lobo 0.1.1 (the release archive) serving its demo site, as the
+# lobo 0.1.1 (the release archive) serving its live site, as the
 # site's own scripts drive it: lobo -t, serve, pages, the 1.3 MB file, a
 # range, a 404, /metrics, the control socket, then a reload
 # with a slow download held across it, the old generation retired, and

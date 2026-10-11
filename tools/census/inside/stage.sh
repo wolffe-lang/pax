@@ -60,7 +60,7 @@ done
 cd "$S"
 file bore/dyn/echo bore/static/echo
 
-# lobo's demo site (index.html, files/big.bin), written by the site's own
+# lobo's live site (index.html, files/big.bin), written by the site's own
 # wolf program. lobo serves it in the lobo workload.
 cd lobo-site
 WOLF_STD=$S/std "$S/wolf/wolf" run build/main.lu
