@@ -63,6 +63,7 @@
 //! of the witnesses on Linux. No Linux source; no other kernel's or
 //! libc's source.
 
+use arp
 use files
 use ip
 use log
@@ -174,6 +175,10 @@ pub fn why(r: u64) -> str {
 /// after `why`): ` <a>` or ` <a> <b>`.
 pub fn detail(a: u64, r: u64) {
     log.put(" ")
+    if r == R_BROADCAST {
+        arp.put_ip(get(a, A_DETAIL))
+        return
+    }
     log.dec((get(a, A_DETAIL) & 0x7fffffff) as int)
     if r == R_OPTION {
         log.put(" ")
@@ -379,7 +384,7 @@ pub fn sendto(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, addr: u64, len: u64)
         return neg(EINVAL)
     }
     if ip.is_broadcast(ip4) {
-        return refuse(a, R_BROADCAST, EACCES, ip4 & 0xff, 0)
+        return refuse(a, R_BROADCAST, EACCES, ip4, 0)
     }
     if n > udp.DATA_MAX {
         return refuse(a, R_FRAGMENT, EMSGSIZE, n, 0)

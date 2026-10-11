@@ -73,7 +73,9 @@
 //! the same call — the same taker, the same queue — with its source the
 //! sender's bound address or, when it has none, the address it was sent
 //! to reach (127.0.0.1 for 127/8, else this station's). One nobody
-//! takes is counted and dropped; nothing is sent about it.
+//! takes is counted and dropped; nothing is sent about it. A
+//! destination of 0.0.0.0 is 127.0.0.1, and a socket bound in 127/8
+//! cannot send off the station (-EINVAL): both as Linux answered.
 //!
 //! State is words in boot/net.S (`pax_udp_state`, `pax_udp_socks`), one
 //! frame for composing and 16 a socket, all under `sync.udp()`, which
@@ -203,8 +205,6 @@ pub const EADDRINUSE: u64 = 98
 pub const EADDRNOTAVAIL: u64 = 99
 /// Network is down.
 pub const ENETDOWN: u64 = 100
-/// Network is unreachable.
-pub const ENETUNREACH: u64 = 101
 /// No buffer space available.
 pub const ENOBUFS: u64 = 105
 
@@ -487,10 +487,13 @@ pub fn connect(s: u64, addr: u64, port: u64) -> u64 {
         }
     }
     if r == 0 {
+        // 0.0.0.0 as a destination is this machine (measured on Linux:
+        // the peer reads back as 127.0.0.1).
+        let to = if addr == 0 { LOOPBACK } else { addr }
         if sw(s, S_NAMED) == 0 {
-            put_sw(s, S_LADDR, source_for(addr))
+            put_sw(s, S_LADDR, source_for(to))
         }
-        put_sw(s, S_PADDR, addr)
+        put_sw(s, S_PADDR, to)
         put_sw(s, S_PPORT, port)
         put_sw(s, S_CONNECTED, 1)
     }
@@ -710,9 +713,9 @@ fn frame() -> u64 {
 /// when it left (or waits for its next hop's address, or looped back),
 /// else the errno: EDESTADDRREQ (no destination and no peer), EINVAL
 /// (port 0; a socket bound in 127/8 sending off this station),
-/// EMSGSIZE (over `DATA_MAX`), ENETUNREACH (address 0), EADDRINUSE (no
-/// port left), EFAULT, ENETDOWN (no device), ENOBUFS (no cache entry or
-/// transmit buffer to be had).
+/// EMSGSIZE (over `DATA_MAX`), EADDRINUSE (no port left), EFAULT,
+/// ENETDOWN (no device), ENOBUFS (no cache entry or transmit buffer to
+/// be had). A destination of 0.0.0.0 is 127.0.0.1.
 pub fn send(s: u64, pml4: u64, buf: u64, len: u64, named: bool, daddr: u64, dport: u64) -> u64 {
     let saved = sync.acquire(sync.udp())
     let r = send_locked(s, pml4, buf, len, named, daddr, dport)
@@ -737,7 +740,7 @@ fn send_locked(s: u64, pml4: u64, buf: u64, len: u64, named: bool, daddr: u64, d
         return EMSGSIZE
     }
     if dst == 0 {
-        return ENETUNREACH
+        dst = LOOPBACK // as `connect`: 0.0.0.0 is this machine
     }
     let f = frame()
     if f == 0 {
