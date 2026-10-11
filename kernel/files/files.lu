@@ -42,7 +42,7 @@
 //! change the tree (px27, below); a hard link, a change of mode, owner
 //! or times are refused by name.
 //!
-//! **The descriptors** (32 a process) are words in the process's area
+//! **The descriptors** (128 a process since px24; 32 before) are words in the process's area
 //! (kernel/sched's `proc_area`): per descriptor a kind, the node it
 //! names, the open file it shares (px17; 0 for the console and
 //! `/dev/null`, which keep no offset) and its flags (O_CLOEXEC is the
@@ -54,7 +54,7 @@
 //! number, as Linux does.
 //!
 //! **Open files** (px17; Linux's "open file description", `open(2)`):
-//! 64 records in boot/user.S's `pax_ofiles`, each a reference count, the
+//! 512 records (px24; 64 before) in boot/user.S's `pax_ofiles`, each a reference count, the
 //! kind, the node, the offset and the open flags. `openat` (a file, a
 //! directory), `pipe2` and `socketpair` make one per descriptor they
 //! return; `dup`, `dup2`, `dup3`, `fcntl(F_DUPFD…)` and a child's copy
@@ -65,7 +65,7 @@
 //! open file at offset 0 on what that descriptor names, as Linux's
 //! `/proc/self/fd` links do.
 //!
-//! **Pipes** (px17, `pipe(7)`): 16 buffer records in `pax_pipes`. A
+//! **Pipes** (px17, `pipe(7)`): 64 buffer records (px24; 16 before) in `pax_pipes`. A
 //! pipe holds 65536 bytes (Linux's default capacity) in 16 frames taken
 //! at `pipe2` and given back when its last end closes. `read` of an empty
 //! pipe with a writer open waits (`WAIT`: kernel/user rewinds the call
@@ -123,6 +123,7 @@
 //! kernel stack: kernel/sched, "Regions").
 
 use console
+use event
 use frames
 use initramfs
 use sched
@@ -140,15 +141,16 @@ const PATH_MAX: u64 = 4095 // bytes before the NUL
 const FIONBIO: u64 = 0x5421 // uapi asm-generic/ioctls.h (px23)
 /// The number dup3 and dup2 take as "too large" (px14): FDS + 1, so
 /// FDS itself can mean "the lowest free" for `dup`.
-pub const FDS: u64 = 32
+pub const FDS: u64 = 128 // px24: 32 before
 const A_REFUSAL: u64 = 3 // the area's refusal word (kernel/vm's too)
 const A_CWD: u64 = 12 // px17: the working directory's node; 0 the root
 // word 13 was px17's count of bytes a waiting pipe write has written; px26
 // keeps it per thread (kernel/sched's `self_done`): two threads of one
 // process may each wait in a write.
 const A_UMASK: u64 = 254 // px27: the file mode creation mask, with bit 16 set once `umask` has set it (0: 022)
+const A_CONFL: u64 = 146 // px24: the status flags (O_NONBLOCK, O_APPEND) of the console as descriptors 0-2 name it from the start: one open file on Linux, so one word here
 const A_EXE: u64 = 255 // px26: the initramfs entry the program was loaded from, + 1 (0: none); words 14, 15, 144 and 145 are kernel/socket's
-const A_FD: u64 = 16 // the first descriptor's word
+const A_FD: u64 = 512 // the first descriptor's word (px24: the area's second half, FDS * FD_WORDS words; 16 before, for 32)
 const FD_WORDS: u64 = 4
 // A descriptor's words: kind, node, open file + 1 (0 none), flags.
 const D_KIND: u64 = 0
@@ -158,20 +160,21 @@ const D_FLAGS: u64 = 3
 
 // px17: open files (boot/user.S's pax_ofiles, 8 words each) and pipe
 // buffers (pax_pipes, 32 words each).
-const OFILES: u64 = 64
+const OFILES: u64 = 512 // px24: 64 before
 const OF_WORDS: u64 = 8
 const O_REFS: u64 = 0
 const O_KIND: u64 = 1
 const O_NODE: u64 = 2
 const O_POS: u64 = 3
 const O_FLAGS: u64 = 4
-const PIPES: u64 = 16
+const PIPES: u64 = 64 // px24: 16 before
 const PP_WORDS: u64 = 32
 const P_PAGES: u64 = 0 // frames held; 0 a free record
 const P_READERS: u64 = 1
 const P_WRITERS: u64 = 2
 const P_RD: u64 = 3 // bytes read since it was made
 const P_WR: u64 = 4 // bytes written
+const P_OGEN: u64 = 5 // px24: times a read gave a writer room it did not have (an edge-triggered registration's count)
 const P_FRAME: u64 = 8 // the frames' physical addresses, from here
 const PIPE_PAGES: u64 = 16 // 65536 bytes, Linux's default capacity
 const SOCK_PAGES: u64 = 1
@@ -195,6 +198,8 @@ const K_PIPE: u64 = 6 // px17: an end of a pipe (O_RDONLY reads, O_WRONLY writes
 const K_SOCK: u64 = 7 // px17: an end of a socketpair
 const K_INET: u64 = 8 // px22: an AF_INET datagram socket (kernel/udp's)
 const K_TCP: u64 = 9 // px23: an AF_INET stream socket (kernel/tcp's)
+const K_EVENT: u64 = 10 // px24: an eventfd (kernel/event's counter)
+const K_EPOLL: u64 = 11 // px24: an epoll object (kernel/event's)
 
 // Nodes: a type in the top byte, a reference below (an entry's offset).
 const T_SHIFT: u64 = 56
@@ -209,6 +214,8 @@ const T_SOCK: u64 = 8 // px17: a socketpair's end; the reference rx << 8 | tx
 const T_INET: u64 = 9 // px22: an AF_INET socket; the reference kernel/udp's number
 const T_TCP: u64 = 10 // px23: a stream socket; the reference kernel/tcp's block
 const T_INO: u64 = 11 // px27: a file or a directory of the tree; the reference kernel/tree's inode
+const T_EVENT: u64 = 12 // px24: an eventfd; the reference kernel/event's counter
+const T_EPOLL: u64 = 13 // px24: an epoll object; the reference kernel/event's
 const T_ERR: u64 = 0xff // an errno below
 const REF_MASK: u64 = 0x00ffffffffffffff
 
@@ -275,6 +282,7 @@ const MODE_CONSOLE: u64 = 0x2190 // 020620
 const MODE_NULL: u64 = 0x21b6 // 020666
 const MODE_FIFO: u64 = 0x1180 // 010600: a pipe's end (px17, measured)
 const MODE_SOCK: u64 = 0xc1ff // 0140777: a socketpair's end (px17, measured)
+const MODE_ANON: u64 = 0x180 // 0600 and no type: an eventfd, an epoll object (px24, measured)
 const DT_CHR: u64 = 2
 const DT_DIR: u64 = 4
 const DT_REG: u64 = 8
@@ -299,7 +307,7 @@ pub fn neg(e: u64) -> u64 {
 }
 
 fn get(a: u64, i: u64) -> u64 {
-    // # Safety: `a` is a process area (sched.proc_area), 512 words; i < 512.
+    // # Safety: `a` is a process area (sched.proc_area), 1024 words; i < 1024.
     unsafe { ((a + i * 8) as *u64).read_volatile() }
 }
 
@@ -441,6 +449,12 @@ fn pipe_ends(k: u64, n: u64, acc: u64, up: bool) {
         if k == K_TCP && !up {
             tcp.close(rf(n)) // px23: the connection closes with its last descriptor
         }
+        if k == K_EVENT && !up {
+            event.ev_free(rf(n)) // px24
+        }
+        if k == K_EPOLL && !up {
+            event.ep_free(rf(n)) // px24: its registrations go with it
+        }
         return
     }
     sched.wake_pipes() // an end opened or closed: a waiter's answer may change
@@ -489,6 +503,10 @@ fn of_drop(o: u64) {
     let k = ofw(i, O_KIND)
     let n = ofw(i, O_NODE)
     let acc = ofw(i, O_FLAGS) & O_ACCMODE
+    // px24: a registration lasts as long as its open file (epoll(7)).
+    if event.forget(o) != 0 {
+        sched.wake_pipes()
+    }
     put_ofw(i, O_REFS, 0)
     put_ofw(i, O_KIND, 0)
     put_ofw(i, O_NODE, 0)
@@ -502,7 +520,7 @@ fn of_drop(o: u64) {
 
 /// Whether a kind keeps an open file (an offset, a pipe end).
 fn has_of(k: u64) -> bool {
-    k == K_FILE || k == K_DIR || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP
+    k == K_FILE || k == K_DIR || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_EVENT || k == K_EPOLL
 }
 
 // --- descriptors -------------------------------------------------------------
@@ -578,6 +596,9 @@ fn status(a: u64, fd: u64) -> u64 {
     if o != 0 {
         return ofw(o - 1, O_FLAGS)
     }
+    if get(a, fdw(fd, D_KIND)) == K_DEFAULT {
+        return get(a, A_CONFL) // px24: the console as a process starts with it
+    }
     get(a, fdw(fd, D_FLAGS))
 }
 
@@ -589,7 +610,8 @@ pub fn is_open(a: u64, fd: u64) -> bool {
 /// What a `write` to descriptor `fd` reaches (kernel/user's `write`):
 /// 1 the console (kernel/user sends the bytes), 0 a sink that swallows
 /// them (/dev/null), 2 nothing writable (-EBADF), 3 a pipe or a socket
-/// (px17: `pipe_write`), 4 a file of the tree (px27: `file_write`).
+/// (px17: `pipe_write`), 4 a file of the tree (px27: `file_write`),
+/// 5 an eventfd (px24: `event_write`), 6 an epoll object (px24: -EINVAL).
 pub fn write_target(a: u64, fd: u64) -> u64 {
     let k = kind(a, fd)
     if k == K_CLOSED || access(a, fd) == O_RDONLY {
@@ -606,6 +628,12 @@ pub fn write_target(a: u64, fd: u64) -> u64 {
     }
     if k == K_FILE {
         return 4
+    }
+    if k == K_EVENT {
+        return 5
+    }
+    if k == K_EPOLL {
+        return 6
     }
     2
 }
@@ -809,6 +837,10 @@ pub fn fcntl(a: u64, fd: u64, cmd: u64, arg: u64) -> u64 {
             put_ofw(o - 1, O_FLAGS, (ofw(o - 1, O_FLAGS) & !keep) | (arg & keep))
         } else if get(a, fdw(fd, D_KIND)) != K_DEFAULT {
             put(a, fdw(fd, D_FLAGS), (get(a, fdw(fd, D_FLAGS)) & !keep) | (arg & keep))
+        } else {
+            // px24: descriptors 0-2 as a process starts with them are
+            // one open file on Linux: one word holds their flags.
+            put(a, A_CONFL, (get(a, A_CONFL) & !keep) | (arg & keep))
         }
         return 0
     }
@@ -914,6 +946,25 @@ pub fn socketpair(a: u64, pml4: u64, domain: u64, ty: u64, proto: u64, sv: u64) 
     0
 }
 
+/// px24: the least room a writer of buffer `p` must find for `poll` to
+/// call it writable: PIPE_BUF for a pipe (measured on Linux: a full
+/// pipe is writable again when 4096 bytes have been read, not 4095), a
+/// byte for a socketpair's one-frame buffer.
+fn room_wanted(p: u64) -> u64 {
+    if ppw(p, P_PAGES) == SOCK_PAGES { 1 } else { PIPE_BUF }
+}
+
+/// `k` bytes of buffer `p` were read: its read count moves, and when
+/// that gave a writer room it did not have, so does P_OGEN.
+fn took(p: u64, k: u64) {
+    let cap = ppw(p, P_PAGES) * PAGE
+    let before = cap - (ppw(p, P_WR) - ppw(p, P_RD))
+    put_ppw(p, P_RD, ppw(p, P_RD) + k)
+    if before < room_wanted(p) && before + k >= room_wanted(p) {
+        put_ppw(p, P_OGEN, ppw(p, P_OGEN) + 1)
+    }
+}
+
 /// The buffer descriptor `fd` reads from (a pipe's, a socket's rx).
 fn rx_of(a: u64, fd: u64) -> u64 {
     let n = node_of(a, fd)
@@ -973,7 +1024,7 @@ fn pipe_read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool) -> u6
         let _ok = uaccess.copy_out(pml4, buf + done, src, c)
         done += c
     }
-    put_ppw(p, P_RD, ppw(p, P_RD) + k)
+    took(p, k)
     sched.wake_pipes()
     k
 }
@@ -1249,7 +1300,7 @@ pub fn splice(a: u64, pml4: u64, inf: u64, offin: u64, out: u64, offout: u64, le
         }
         done += c
     }
-    put_ppw(p, P_RD, ppw(p, P_RD) + done)
+    took(p, done)
     sched.wake_pipes()
     done
 }
@@ -1458,6 +1509,204 @@ pub fn pipes_held() -> u64 {
         p += 1
     }
     n
+}
+
+// --- eventfd, epoll and readiness (px24; the calls are kernel/ready's) --------
+
+/// px24: a new descriptor, the lowest free, on a new open file naming
+/// kernel/event's counter `v`, with `flags` (O_RDWR, O_CLOEXEC,
+/// O_NONBLOCK): the number, or -EMFILE / -ENFILE (the counter is then
+/// the caller's to free).
+pub fn event_open(a: u64, v: u64, flags: u64) -> u64 {
+    open_new(a, 0, K_EVENT, (T_EVENT << T_SHIFT) | v, flags)
+}
+
+/// px24: the same for kernel/event's epoll object `e`.
+pub fn epoll_open(a: u64, e: u64, flags: u64) -> u64 {
+    open_new(a, 0, K_EPOLL, (T_EPOLL << T_SHIFT) | e, flags)
+}
+
+/// px24: `read` of an eventfd (`eventfd(2)`): the counter's eight bytes,
+/// and the counter is zero after. A buffer under eight bytes is
+/// -EINVAL; a counter that is zero waits (WAIT) or, under O_NONBLOCK,
+/// answers -EAGAIN.
+fn event_read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
+    if n < 8 {
+        return neg(EINVAL)
+    }
+    let v = rf(node_of(a, fd))
+    if event.ev_value(v) == 0 {
+        if status(a, fd) & O_NONBLOCK != 0 {
+            return neg(EAGAIN)
+        }
+        return WAIT
+    }
+    if !uaccess.writable(pml4, buf, 8) {
+        return neg(EFAULT)
+    }
+    uaccess.put(pml4, buf, event.ev_take(v), 8)
+    sched.wake_pipes()
+    8
+}
+
+/// px24: `write` to an eventfd (kernel/user's `write`): eight bytes
+/// added to the counter. Fewer than eight bytes, or the value
+/// 0xffffffffffffffff, is -EINVAL; a sum past 0xfffffffffffffffe waits
+/// (WAIT) or, under O_NONBLOCK, answers -EAGAIN.
+pub fn event_write(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
+    if n < 8 {
+        return neg(EINVAL)
+    }
+    if !uaccess.readable(pml4, buf, 8) {
+        return neg(EFAULT)
+    }
+    let x = uaccess.get64(pml4, buf)
+    if x == 0xffffffffffffffff {
+        return neg(EINVAL)
+    }
+    if !event.ev_add(rf(node_of(a, fd)), x) {
+        if status(a, fd) & O_NONBLOCK != 0 {
+            return neg(EAGAIN)
+        }
+        return WAIT
+    }
+    sched.wake_pipes()
+    8
+}
+
+// `poll`'s bits (uapi asm-generic/poll.h); kernel/tcp's are the same
+// numbers.
+const POLLIN: u64 = 0x1
+const POLLOUT: u64 = 0x4
+const POLLERR: u64 = 0x8
+const POLLHUP: u64 = 0x10
+const POLLRDHUP: u64 = 0x2000
+const GONE: u64 = 0x4000000000000000 // in a count: the other end has closed
+
+/// What `poll` says of a pipe's end or a socketpair's end, as Linux
+/// answered user/net/pollprobe.c, and its two counts (below).
+fn pipe_poll(k: u64, n: u64, acc: u64) -> (u64, u64, u64) {
+    var m: u64 = 0
+    var gin: u64 = 0
+    var gout: u64 = 0
+    if k == K_SOCK {
+        let rx = (rf(n) >> 8) & 0xff
+        let tx = rf(n) & 0xff
+        let peer_gone = ppw(rx, P_WRITERS) == 0
+        if ppw(rx, P_WR) > ppw(rx, P_RD) {
+            m = POLLIN
+        }
+        if peer_gone {
+            m = m | POLLIN | POLLOUT | POLLRDHUP | POLLHUP
+        } else if ppw(tx, P_PAGES) * PAGE > ppw(tx, P_WR) - ppw(tx, P_RD) {
+            m = m | POLLOUT
+        }
+        gin = ppw(rx, P_WR) + (if peer_gone { GONE } else { 0 })
+        gout = ppw(tx, P_OGEN) + (if peer_gone { GONE } else { 0 })
+        return (m, gin, gout)
+    }
+    let p = rf(n)
+    if acc != O_WRONLY {
+        let no_writer = ppw(p, P_WRITERS) == 0
+        if ppw(p, P_WR) > ppw(p, P_RD) {
+            m = POLLIN
+        }
+        if no_writer {
+            m = m | POLLHUP
+        }
+        gin = ppw(p, P_WR) + (if no_writer { GONE } else { 0 })
+    }
+    if acc != O_RDONLY {
+        let no_reader = ppw(p, P_READERS) == 0
+        if no_reader {
+            m = m | POLLOUT | POLLERR
+        } else if ppw(p, P_PAGES) * PAGE - (ppw(p, P_WR) - ppw(p, P_RD)) >= room_wanted(p) {
+            m = m | POLLOUT
+        }
+        gout = ppw(p, P_OGEN) + (if no_reader { GONE } else { 0 })
+    }
+    (m, gin, gout)
+}
+
+/// What `poll` says now of the thing of kind `k` at node `n`, opened
+/// with access `acc`: its bits — POLLIN, POLLOUT, POLLERR, POLLHUP,
+/// POLLRDHUP, whether or not the caller asks for each — and two counts
+/// an edge-triggered registration compares: the first moves whenever
+/// something new came to read, the second whenever room to write came
+/// back. A file, a directory and `/dev/null` can always be read and
+/// written; the console can be read when a `read` would answer.
+fn node_poll(k: u64, n: u64, acc: u64) -> (u64, u64, u64) {
+    if k == K_PIPE || k == K_SOCK {
+        return pipe_poll(k, n, acc)
+    }
+    if k == K_TCP {
+        return tcp.poll(rf(n))
+    }
+    if k == K_INET {
+        let (ready, got) = udp.poll(rf(n))
+        return (if ready { POLLIN | POLLOUT } else { POLLOUT }, got, 0)
+    }
+    if k == K_EVENT {
+        let v = rf(n)
+        let x = event.ev_value(v)
+        let (adds, takes) = event.ev_counts(v)
+        var m: u64 = 0
+        if x > 0 {
+            m = POLLIN
+        }
+        if x < event.EV_MAX {
+            m = m | POLLOUT
+        }
+        return (m, adds, takes)
+    }
+    if k == K_CONSOLE {
+        return (if console.readable() { POLLIN | POLLOUT } else { POLLOUT }, 0, 0)
+    }
+    (POLLIN | POLLOUT, 0, 0)
+}
+
+/// px24: `poll`'s answer for descriptor `fd` (open): `node_poll`'s.
+pub fn poll(a: u64, fd: u64) -> (u64, u64, u64) {
+    node_poll(kind(a, fd), node_of(a, fd), access(a, fd))
+}
+
+/// px24: the same for open file `o` (index + 1, in use): what an epoll
+/// registration watches.
+pub fn poll_of(o: u64) -> (u64, u64, u64) {
+    node_poll(ofw(o - 1, O_KIND), ofw(o - 1, O_NODE), ofw(o - 1, O_FLAGS) & O_ACCMODE)
+}
+
+/// `watch`'s answers: the descriptor is closed.
+pub const W_CLOSED: u64 = 0
+/// It is an epoll object (the value: kernel/event's number).
+pub const W_EPOLL: u64 = 1
+/// It is open and cannot be watched by an epoll object: a regular file
+/// or a directory (-EPERM on Linux too).
+pub const W_PLAIN: u64 = 2
+/// It can be watched (the value: its open file, index + 1).
+pub const W_OPEN: u64 = 3
+/// It is the console or `/dev/null`, which keep no open file here: an
+/// epoll object cannot hold it (kernel/ready refuses by name).
+pub const W_NO_FILE: u64 = 4
+
+/// px24: what descriptor `fd` is to `epoll_ctl` and `epoll_wait`:
+/// `(W_*, value)`.
+pub fn watch(a: u64, fd: u64) -> (u64, u64) {
+    let k = kind(a, fd)
+    if k == K_CLOSED {
+        return (W_CLOSED, 0)
+    }
+    if k == K_EPOLL {
+        return (W_EPOLL, rf(node_of(a, fd)))
+    }
+    let o = of_of(a, fd)
+    if k == K_FILE || k == K_DIR {
+        return (W_PLAIN, 0)
+    }
+    if o == 0 {
+        return (W_NO_FILE, 0)
+    }
+    (W_OPEN, o)
 }
 
 // --- paths ------------------------------------------------------------------
@@ -1924,6 +2173,12 @@ pub fn read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
     if k == K_INET || k == K_TCP {
         return neg(EINVAL) // px22: kernel/user sends a socket's read to kernel/socket
     }
+    if k == K_EVENT {
+        return event_read(a, pml4, fd, buf, n) // px24
+    }
+    if k == K_EPOLL {
+        return neg(EINVAL) // px24: epoll(7): an epoll descriptor is not read
+    }
     let r = file_read(pml4, node_of(a, fd), pos(a, fd), buf, n)
     if r < 0x8000000000000000 {
         set_pos(a, fd, pos(a, fd) + r)
@@ -2013,11 +2268,11 @@ pub fn lseek(a: u64, fd: u64, off: u64, whence: u64) -> u64 {
     if k == K_CLOSED {
         return neg(EBADF)
     }
-    if k == K_CONSOLE || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP {
+    if k == K_CONSOLE || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_EVENT {
         return neg(ESPIPE)
     }
-    if k == K_NULL {
-        return 0
+    if k == K_NULL || k == K_EPOLL {
+        return 0 // px24: Linux answers 0 on an epoll descriptor (user/net/epollprobe.c)
     }
     var base: u64 = 0
     if whence == 1 {
@@ -2470,6 +2725,9 @@ fn n_mode(n: u64) -> u64 {
     }
     if t == T_SOCK || t == T_INET || t == T_TCP {
         return MODE_SOCK
+    }
+    if t == T_EVENT || t == T_EPOLL {
+        return MODE_ANON // px24
     }
     MODE_DIR
 }
