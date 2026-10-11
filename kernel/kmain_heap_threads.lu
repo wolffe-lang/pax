@@ -1,20 +1,23 @@
 //! member: false
-// kmain_heap_threads.lu — the heap under px07's scheduler (px06,
-// tests/mpx2-heap H11). Brings up frames, paging, the interrupts, the
-// timer, the scheduler and the heap, runs kernel/heapthreads' two
-// bodies (A and B, each in its own `region`, switching by yield with
-// the timer preempting too), and prints
+// kmain_heap_threads.lu — the heap under px07's scheduler (px06, px21a;
+// tests/mpx2-heap H11 to H13). Brings up frames, paging, the
+// interrupts, the timer, the scheduler and the heap, runs
+// kernel/heapthreads' bodies — each holds a `region` open across a
+// yield, a preemption or a wait — and prints
 //
 //     PAX heap: threads
 //     threads: A list 64, region ra <x> bytes, region rb <y> bytes, both exited
 //     ambient: the List landed in ra | rb
+//     preempted: C <c> bytes seen <n>, D <d> bytes seen <m>, control <k> bytes, both exited | NOT both exited
+//     blocked: main <m> bytes, E <e> bytes, control <k> bytes, E exited | E NOT exited
+//     bench: <n> yields, <t> tsc, two reads <r> tsc
 //     heap: … 0 live blocks, 0 live bytes, …
 //     halt
 //
 // Every allocation goes through kernel/heap's lock (sync.heap()). The
-// `ambient` line is the runtime's one ambient-region slot across a
-// thread switch (wolf-lang's ambient-slot issue): reported, not
-// asserted.
+// scheduler carries each thread's ambient region across its switches
+// (px21a), so every region holds exactly what a single thread with no
+// switch puts in one (`control`).
 use apic
 use frames
 use heap
@@ -30,6 +33,10 @@ use timer
 
 extern "c" let pax_h_a: *u8
 extern "c" let pax_h_b: *u8
+extern "c" let pax_h_c: *u8
+extern "c" let pax_h_d: *u8
+extern "c" let pax_h_e: *u8
+extern "c" let pax_h_f: *u8
 
 export fn kmain() {
     serial.init()
@@ -60,6 +67,19 @@ export fn kmain() {
     sched.create(b, page)
     sync.irq_restore(saved)
     sched.wait_all()
+    // H12: a region held across preemptions.
+    // # Safety: the addresses of kernel/heapthreads' exports; nothing is read.
+    let (c, d, e, f) = unsafe { (pax_h_c as u64, pax_h_d as u64, pax_h_e as u64, pax_h_f as u64) }
+    let saved2 = sync.irq_save()
+    sched.create(c, page)
+    sched.create(d, page)
+    sync.irq_restore(saved2)
+    sched.wait_all()
+    // H13: a region held across a wait, on this thread and on E.
+    heapthreads.blocked(page, e)
+    let (tsc, two) = heapthreads.bench(page, f)
+    let k4 = heapthreads.control(heapthreads.ROUNDS)
+    let k2 = heapthreads.control(2)
     let s = sync.irq_save()
     log.put("threads: A list ")
     log.dec(heapthreads.get(page, 2) as int)
@@ -72,6 +92,36 @@ export fn kmain() {
     log.end()
     log.put("ambient: the List landed in ")
     log.put(if heapthreads.get(page, 0) > 0 { "ra" } else { "rb" })
+    log.end()
+    log.put("preempted: C ")
+    log.dec(heapthreads.get(page, 10) as int)
+    log.put(" bytes seen ")
+    log.dec(heapthreads.get(page, 12) as int)
+    log.put(", D ")
+    log.dec(heapthreads.get(page, 11) as int)
+    log.put(" bytes seen ")
+    log.dec(heapthreads.get(page, 13) as int)
+    log.put(", control ")
+    log.dec(k4 as int)
+    log.put(" bytes, ")
+    log.put(if heapthreads.get(page, 14) == 1 && heapthreads.get(page, 15) == 1 { "both exited" } else { "NOT both exited" })
+    log.end()
+    log.put("blocked: main ")
+    log.dec(heapthreads.get(page, 19) as int)
+    log.put(" bytes, E ")
+    log.dec(heapthreads.get(page, 17) as int)
+    log.put(" bytes, control ")
+    log.dec(k2 as int)
+    log.put(" bytes, ")
+    log.put(if heapthreads.get(page, 18) == 1 { "E exited" } else { "E NOT exited" })
+    log.end()
+    log.put("bench: ")
+    log.dec((heapthreads.BENCH * 2) as int)
+    log.put(" yields, ")
+    log.dec(tsc as int)
+    log.put(" tsc, two reads ")
+    log.dec(two as int)
+    log.put(" tsc")
     log.end()
     heap.report()
     log.line("halt")

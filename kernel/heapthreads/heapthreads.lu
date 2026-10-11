@@ -1,25 +1,39 @@
-//! heapthreads — the thread bodies tests/mpx2-heap H11 runs (px06): two
-//! kernel threads allocating through wolf's runtime and kernel/heap
-//! under px07's scheduler.
+//! heapthreads — the thread bodies tests/mpx2-heap H11 to H13 run
+//! (px06, px21a): kernel threads allocating through wolf's runtime and
+//! kernel/heap under px07's scheduler, each inside a `region` it holds
+//! open across a switch.
 //!
-//! wolf's freestanding runtime keeps ONE ambient-region slot (wolf-lang
-//! kw12, `[abi.target.none.alloc]`: "one CPU at a time"); `region`
-//! entry swaps it in and exit swaps the previous one back. A thread
-//! switch inside a region does not save it. So:
+//! wolf's freestanding runtime keeps ONE ambient-region slot
+//! (`[abi.target.none.alloc]`); `region` entry swaps it in and exit
+//! swaps the previous one back. kernel/sched moves the slot with the
+//! thread at every switch (px21a; `[abi.target.none.ambient]`), so what
+//! a thread allocates inside its region lands there whatever ran in
+//! between. Three ways to be switched out inside a region:
 //!
-//! - `pax_h_a(page)`: enters region `ra` and yields;
-//! - `pax_h_b(page)`: enters region `rb` and yields;
-//! - A, back: builds a `List[int]` of 64 (inside `ra`, as written),
-//!   stores `region_bytes(ra)` at `page + 0`, and yields;
-//! - B, back: stores `region_bytes(rb)` at `page + 8`, leaves `rb`
-//!   (freeing it) and exits; A leaves `ra` and exits.
+//! **A yield** (H11, `pax_h_a` and `pax_h_b`): A enters `ra` and
+//! yields; B enters `rb` and yields; A, back, builds a `List[int]` of
+//! 64, stores `region_bytes(ra)` at word 0 and yields; B, back, stores
+//! `region_bytes(rb)` at word 1 and leaves. The List is in `ra` and
+//! `rb` is empty. (Until px21a the slot stayed B's: `ra 0, rb 1008`,
+//! wolf-lang#611.)
 //!
-//! Where the List landed is the answer: `ra` holds it if the slot
-//! followed the thread, `rb` if the runtime's slot was B's when A
-//! allocated (B then frees A's List with its region). The kernel prints
-//! both; tests/mpx2-heap H11 asserts the heap's books balance (every
-//! block back, whatever region took it) and reports where the List
-//! landed, it does not assert it.
+//! **A preemption** (H12, `pax_h_c` and `pax_h_d`): two threads that
+//! never yield. Each, inside its own region, builds a List, counts the
+//! round in its progress word and then spins until the other's
+//! progress word moves, which only the timer taking the CPU from it
+//! can bring about; ROUNDS times. Each stores its region's bytes and
+//! how many times it saw the other advance.
+//!
+//! **A wait** (H13, `blocked` on the main thread and `pax_h_e`): E
+//! enters `re`, builds a List and sleeps; the main thread, which ran
+//! `blocked`, then enters `rm`, builds a List and blocks in
+//! `sched.wait_all` with `rm` open; the idle thread runs; E wakes
+//! inside `re`, builds a second List and leaves; the main thread wakes
+//! inside `rm` and builds its second.
+//!
+//! `control(n)` is the same n Lists in one region with no switch: the
+//! byte count every region above must equal. `pax_h_f` is the bench's
+//! body (`bench`): BENCH yields, nothing else.
 //!
 //! The bodies live here and the kernel names them with `extern "c" let`
 //! (wolf-lang#520, E0302; px07's schedtest does the same).
@@ -27,6 +41,15 @@
 //! No Linux source; no other kernel's source.
 
 use sched
+use sync
+use timer
+
+extern "c" fn pax_rdtsc() -> u64
+
+/// How many Lists each of H12's threads builds.
+pub const ROUNDS: u64 = 4
+/// How many times each of the bench's two threads yields.
+pub const BENCH: u64 = 2000
 
 fn put(page: u64, i: u64, v: u64) {
     // # Safety: a word of the test's page, a frame mapped by the HHDM.
@@ -61,4 +84,123 @@ export fn pax_h_b(page: u64) {
         put(page, 1, region_bytes(rb) as u64)
     }
     put(page, 4, 1)
+}
+
+/// A `List[int]` of 64 in the ambient region; its length.
+fn build() -> u64 {
+    var xs = List[int]()
+    for i in 0..64 {
+        (mut xs).push(i)
+    }
+    xs.len as u64
+}
+
+/// `n` Lists in one region on one thread with no switch: the region's
+/// bytes.
+pub fn control(n: u64) -> u64 {
+    var bytes: u64 = 0
+    region rc {
+        var k: u64 = 0
+        while k < n {
+            let _l = build()
+            k += 1
+        }
+        bytes = region_bytes(rc) as u64
+    }
+    bytes
+}
+
+/// H12's body: progress at word `me`, the other's at word `other`, the
+/// region's bytes at word `me + 2`, how often the other was seen to
+/// advance at `me + 4`, 1 at `me + 6` on the way out. Never yields.
+fn preempted(page: u64, me: u64, other: u64) {
+    region rp {
+        var seen_moves: u64 = 0
+        var round: u64 = 0
+        while round < ROUNDS {
+            let _l = build()
+            put(page, me, round + 1)
+            if round + 1 < ROUNDS {
+                let was = get(page, other)
+                let t0 = timer.ticks()
+                // Only the timer ends this: the other thread runs when
+                // this one's quantum is taken. 200 ticks bounds a break.
+                while get(page, other) == was && timer.ticks() - t0 < 200 {
+                }
+                if get(page, other) != was {
+                    seen_moves += 1
+                }
+            }
+            round += 1
+        }
+        put(page, me + 2, region_bytes(rp) as u64)
+        put(page, me + 4, seen_moves)
+    }
+    put(page, me + 6, 1)
+}
+
+export fn pax_h_c(page: u64) {
+    preempted(page, 8, 9)
+}
+
+export fn pax_h_d(page: u64) {
+    preempted(page, 9, 8)
+}
+
+export fn pax_h_e(page: u64) {
+    region re {
+        let _l = build()
+        put(page, 16, 1) // inside `re`, about to sleep
+        let _t = sched.sleep(6)
+        let _m = build()
+        put(page, 17, region_bytes(re) as u64)
+    }
+    put(page, 18, 1)
+}
+
+/// H13, on the calling (main) thread, interrupts on: start E, let it
+/// get inside its region and asleep, then block in `wait_all` with a
+/// region of this thread's own open. The main thread's bytes at word
+/// 19. `e` is `pax_h_e`'s address (the kernel names it: E0302 here).
+pub fn blocked(page: u64, e: u64) {
+    let saved = sync.irq_save()
+    let _id = sched.create(e, page)
+    sync.irq_restore(saved)
+    while get(page, 16) == 0 {
+        sched.yield()
+    }
+    region rm {
+        let _l = build()
+        sched.wait_all() // blocked, `rm` open; E wakes and finishes inside `re`
+        let _m = build()
+        put(page, 19, region_bytes(rm) as u64)
+    }
+}
+
+export fn pax_h_f(_page: u64) {
+    var i: u64 = 0
+    while i < BENCH {
+        sched.yield()
+        i += 1
+    }
+}
+
+/// The bench: two threads of BENCH yields each, from their creation to
+/// the main thread's wake; (TSC ticks for it all, TSC ticks between two
+/// reads in a row). Under QEMU's `-icount shift=0` a tick is one
+/// instruction; otherwise it is time and says little. `f` is
+/// `pax_h_f`'s address.
+pub fn bench(page: u64, f: u64) -> (u64, u64) {
+    // # Safety: fpu.S's RDTSC, unprivileged.
+    let (c0, c1) = unsafe { (pax_rdtsc(), pax_rdtsc()) }
+    // # Safety: as above.
+    let t0 = unsafe { pax_rdtsc() }
+    let saved = sync.irq_save()
+    let _a = sched.create(f, page)
+    let _b = sched.create(f, page)
+    sync.irq_restore(saved)
+    sched.wait_all()
+    // # Safety: as above.
+    let t1 = unsafe { pax_rdtsc() }
+    (t1 - t0, c1 - c0)
 }

@@ -60,17 +60,37 @@
 #      and its books read before and after a 64 KiB alloc and its free:
 #      a compiled tier that forwards a read across a call that writes
 #      the state (wolf-lang#598) prints a stale value here.
-#   H11 threads (px07's scheduler): kmain_heap_threads runs two kernel
-#      threads that allocate inside their own regions across yields,
-#      every allocation under the heap's lock (sync.heap()); its log ends
+#   H11 a region across a yield (px07's scheduler, px21a's ambient
+#      slot): kmain_heap_threads runs two kernel threads that each hold
+#      a `region` open across yields, every allocation under the heap's
+#      lock (sync.heap()); its log ends
 #        threads: A list 64, region ra <x> bytes, region rb <y> bytes, both exited
-#        ambient: the List landed in ra|rb
+#        ambient: the List landed in ra
+#        preempted: …
+#        blocked: …
+#        bench: …
 #        heap: … 0 live blocks, 0 live bytes, A allocs, A frees, …
 #        halt
-#      — both threads ran to their exit and every block came back. Where
-#      the List landed is wolf-lang#611 (the runtime's one ambient-region
-#      slot does not follow a thread across a switch; on 0.2.24 it lands
-#      in rb): REPORTED, not asserted, until #611 is fixed.
+#      — A's List is in A's region (x >= 512, y = 0: kernel/sched moves
+#      the runtime's ambient slot with the thread at every switch; until
+#      px21a it stayed where the last thread left it and the List landed
+#      in rb, wolf-lang#611), both threads ran to their exit, and the
+#      heap's ledger is exact: 0 live blocks, 0 live bytes, allocs =
+#      frees.
+#   H12 a region across a preemption: two threads that never yield, each
+#      building ROUNDS Lists inside its own region and spinning between
+#      them until the other's progress moves (only the timer brings that
+#      about):
+#        preempted: C <c> bytes seen <n>, D <d> bytes seen <m>, control <k> bytes, both exited
+#      — c = d = k (the same Lists in one region with no switch), n and
+#      m at least 1 (each saw the other run while it held its region).
+#   H13 a region across a wait: the main thread blocks in wait_all with
+#      a region open while thread E sleeps inside its own:
+#        blocked: main <m> bytes, E <e> bytes, control <k> bytes, E exited
+#      — m = e = k.
+#      (`bench: <n> yields, <t> tsc, two reads <r> tsc` is the cost of
+#      the yields, an instruction count under QEMU's `-icount shift=0`
+#      and otherwise time: printed, its shape held, its numbers not.)
 #   H9 heap fault: kmain_heap_fault's log ends
 #        block 0x<p>, read past the heap: 0x<a>
 #        PANIC page fault vector 14 error 0x0000000000000000 rip … cr2 0x<a> (heap)
@@ -265,23 +285,45 @@ for leg in $legs; do
         fi
         halted H5 "$tier kmain_heap $leg" "$hrc"
 
-        # --- kmain_heap_threads: H11 -----------------------------------
+        # --- kmain_heap_threads: H11, H12, H13 --------------------------
         hrc=0; halt_boot "$tier" kmain_heap_threads "$leg" halt || hrc=$?
         if "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
             'threads: A list 64, region ra [0-9]+ bytes, region rb [0-9]+ bytes, both exited' \
-            'ambient: the List landed in (ra|rb)' "$HEAPN_RE" 'halt' >"$log.expect" 2>&1 && [ "$hrc" = 0 ]; then
+            'ambient: the List landed in (ra|rb)' \
+            'preempted: C [0-9]+ bytes seen [0-9]+, D [0-9]+ bytes seen [0-9]+, control [0-9]+ bytes, both exited' \
+            'blocked: main [0-9]+ bytes, E [0-9]+ bytes, control [0-9]+ bytes, E exited' \
+            'bench: [0-9]+ yields, [0-9]+ tsc, two reads [0-9]+ tsc' \
+            "$HEAPN_RE" 'halt' >"$log.expect" 2>&1 && [ "$hrc" = 0 ]; then
             hl=$(serial_norm "$log" | grep -E "^$HEAPN_RE\$" | tail -n 1)
             lb=$(printf '%s\n' "$hl" | sed -n 's/.*, \([0-9]*\) live blocks, \([0-9]*\) live bytes, \([0-9]*\) allocs, \([0-9]*\) frees, .*/\1 \2 \3 \4/p')
             read -r b y al fr <<< "$lb"
             where=$(grab "$log" 'ambient: the List landed in \(r[ab]\)')
-            if [ "$b" = 0 ] && [ "$y" = 0 ] && [ "$al" = "$fr" ] && [ "$al" -gt 0 ]; then
-                say "PASS H11 $tier kmain_heap_threads $leg: two threads, both exited, $al allocs = $fr frees under the heap lock, live 0; the List landed in $where (wolf-lang#611: reported, not asserted)"
+            ra=$(grab "$log" 'threads: A list 64, region ra \([0-9]*\) bytes, region rb [0-9]* bytes, both exited')
+            rb=$(grab "$log" 'threads: A list 64, region ra [0-9]* bytes, region rb \([0-9]*\) bytes, both exited')
+            if [ "$where" != ra ] || [ "${ra:-0}" -lt 512 ] || [ "$rb" != 0 ]; then
+                bad "H11 $tier kmain_heap_threads $leg: the List landed in $where (ra $ra bytes, rb $rb bytes); want ra >= 512 and rb 0 (the ambient slot did not follow the thread across a yield)"
+            elif [ "$b" = 0 ] && [ "$y" = 0 ] && [ "$al" = "$fr" ] && [ "$al" -gt 0 ]; then
+                say "PASS H11 $tier kmain_heap_threads $leg: a region across a yield: the List landed in ra (ra $ra bytes, rb $rb); both exited; $al allocs = $fr frees under the heap lock, live 0"
             else
                 bad "H11 $tier kmain_heap_threads $leg: the heap after the threads: live $b blocks $y bytes, $al allocs, $fr frees"
             fi
+            pl=$(serial_norm "$log" | sed -n 's/^preempted: C \([0-9]*\) bytes seen \([0-9]*\), D \([0-9]*\) bytes seen \([0-9]*\), control \([0-9]*\) bytes, both exited$/\1 \2 \3 \4 \5/p' | tail -n 1)
+            read -r pc pn pd pm pk <<< "$pl"
+            if [ -n "$pk" ] && [ "$pk" -gt 0 ] && [ "$pc" = "$pk" ] && [ "$pd" = "$pk" ] && [ "$pn" -ge 1 ] && [ "$pm" -ge 1 ]; then
+                say "PASS H12 $tier kmain_heap_threads $leg: a region across a preemption: C $pc bytes and D $pd bytes, the control's $pk; each saw the other run inside its region ($pn, $pm times)"
+            else
+                bad "H12 $tier kmain_heap_threads $leg: C $pc bytes (saw D move $pn times), D $pd bytes (saw C move $pm times), control $pk: want C = D = control and both seen >= 1"
+            fi
+            wl=$(serial_norm "$log" | sed -n 's/^blocked: main \([0-9]*\) bytes, E \([0-9]*\) bytes, control \([0-9]*\) bytes, E exited$/\1 \2 \3/p' | tail -n 1)
+            read -r wm we wk <<< "$wl"
+            if [ -n "$wk" ] && [ "$wk" -gt 0 ] && [ "$wm" = "$wk" ] && [ "$we" = "$wk" ]; then
+                say "PASS H13 $tier kmain_heap_threads $leg: a region across a wait: main (blocked in wait_all) $wm bytes and E (asleep) $we bytes, the control's $wk; $(serial_norm "$log" | grep -E '^bench: ' | tail -n 1)"
+            else
+                bad "H13 $tier kmain_heap_threads $leg: main $wm bytes, E $we bytes, control $wk: want all three equal"
+            fi
         else
             cat "$log.expect" >&2
-            bad "H11 $tier kmain_heap_threads $leg: the transcript or the halt (qemu-halt $hrc)"
+            bad "H11-H13 $tier kmain_heap_threads $leg: the transcript or the halt (qemu-halt $hrc)"
         fi
 
         # --- kmain_heap_double_free: H6 --------------------------------
