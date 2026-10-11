@@ -15,4 +15,12 @@ rising 466.16 2250 5750 14
 present 466.16 2100 5900
 absent 466.16 6300 9900
 falling 659.26 6250 9750 14
+# bar 6: the tam-tam blooms after its stroke; bar 7 a timpani roll;
+# bar 8 a bell (its tierce, 1.2 x C5); bar 9 the cymbal's crash
+present 331 10500 11750 -25 250
+rising 331 10000 10750 2
+modulated 12100 12900 1.5
+present 196.8 12100 12900 -30 250
+present 627.9 14100 15500 -30 250
+rms 16050 17000 -40 -3
 noclip
