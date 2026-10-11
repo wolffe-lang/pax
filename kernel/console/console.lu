@@ -28,17 +28,27 @@
 //! input processing as termios(3) describes it, the flags and control
 //! characters a program reads with TCGETS and sets with TCSETS. The
 //! settings at `start` are a Linux pseudo-terminal's, measured
-//! (`notes/px13/`), with two differences named: ISIG and IXON are
-//! clear, because PAX has no signals and no output flow control yet,
-//! so Ctrl-C, Ctrl-\, Ctrl-Z, Ctrl-S and Ctrl-Q are characters like any
-//! other (Ctrl-C is delivered as the byte 0x03 until signals exist):
+//! (`notes/px13/`), with one difference named: IXON is clear, because
+//! PAX has no output flow control, so Ctrl-S and Ctrl-Q are characters
+//! like any other. ISIG is set since px26 (px13 left it clear and
+//! delivered Ctrl-C as the byte 0x03):
 //!
 //!     c_iflag 0x100 ICRNL           (Linux's pty: 0x500, ICRNL|IXON)
 //!     c_oflag 0x5   OPOST|ONLCR
 //!     c_cflag 0xbf  B38400|CS8|CREAD
-//!     c_lflag 0x8a3a ICANON|ECHO|ECHOE|ECHOK|ECHOCTL|ECHOKE|IEXTEN
-//!                                   (Linux's pty: 0x8a3b, ISIG too)
+//!     c_lflag 0x8a3b ISIG|ICANON|ECHO|ECHOE|ECHOK|ECHOCTL|ECHOKE|IEXTEN
 //!     c_cc    ^C ^\ DEL ^U ^D 0 1 0 ^Q ^S ^Z 0 ^R ^O ^W ^V 0 0 0
+//!
+//! **The terminal's signals** (px26, ISIG): VINTR (Ctrl-C) is SIGINT,
+//! VQUIT (Ctrl-\) SIGQUIT and VSUSP (Ctrl-Z) SIGTSTP. Such a byte is
+//! not queued: it is echoed (`^C`, by ECHO and ECHOCTL, with no newline:
+//! measured on Linux), the line being edited and every byte not yet
+//! read are discarded (NOFLSH clear), and the signal is noted for
+//! kernel/interrupts to raise (`take_signals`) for every process —
+//! PAX has one session and one process group, the console their
+//! controlling terminal (kernel/signal's `tty`). Linux raises it for
+//! the terminal's foreground process group only; a shell that makes no
+//! process groups, as pelt makes none, sees the same on both.
 //!
 //! Honoured: ICRNL, INLCR and IGNCR on input; ICANON; ECHO, ECHOE,
 //! ECHOK, ECHOKE, ECHOCTL and ECHONL; VERASE, VKILL, VEOF, VEOL and
@@ -129,6 +139,7 @@ const C_KBD_AFTER: u64 = 19
 const C_DROPPED: u64 = 20 // bytes dropped on a full line
 const C_READS: u64 = 21 // reads answered
 const C_WAITS: u64 = 22 // reads that waited
+const C_SIGNALS: u64 = 23 // px26: the signals keys have raised and nobody has taken (bit n - 1)
 
 const RING: u64 = 4096
 const LINE_MAX: u64 = 4095 // bytes before the newline
@@ -147,6 +158,14 @@ const ECHONL: u64 = 0x40
 const ECHOCTL: u64 = 0x200
 const ECHOKE: u64 = 0x800
 const IEXTEN: u64 = 0x8000
+const ISIG: u64 = 0x1 // px26
+const NOFLSH: u64 = 0x80
+const VINTR: u64 = 0
+const VQUIT: u64 = 1
+const VSUSP: u64 = 10
+const SIGINT: u64 = 2
+const SIGQUIT: u64 = 3
+const SIGTSTP: u64 = 20
 // c_cc indices.
 const VEOF: u64 = 4
 const VERASE: u64 = 2
@@ -355,6 +374,29 @@ fn input(b0: u64) {
     } else if b == 10 && ifl & INLCR != 0 {
         b = 13
     }
+    if lflag(ISIG) && b != 0 {
+        // px26: the terminal's signals, in either mode.
+        var sig: u64 = 0
+        if b == cc(VINTR) {
+            sig = SIGINT
+        } else if b == cc(VQUIT) {
+            sig = SIGQUIT
+        } else if b == cc(VSUSP) {
+            sig = SIGTSTP
+        }
+        if sig != 0 {
+            if !lflag(NOFLSH) {
+                put_sv(C_R, sv(C_E))
+                put_sv(C_C, sv(C_E))
+                put_sv(C_EOF, 0)
+            }
+            if lflag(ECHO) {
+                echo(b)
+            }
+            put_sv(C_SIGNALS, sv(C_SIGNALS) | (1 << (sig - 1)))
+            return
+        }
+    }
     if !lflag(ICANON) {
         if queue(b, true) {
             commit()
@@ -413,6 +455,16 @@ fn input(b0: u64) {
     if queue(b, false) && lflag(ECHO) {
         echo(b)
     }
+}
+
+/// px26: the signals keys have raised since this was last asked (bit
+/// n - 1 for signal n), for kernel/interrupts to hand to kernel/signal.
+pub fn take_signals() -> u64 {
+    let m = sv(C_SIGNALS)
+    if m != 0 {
+        put_sv(C_SIGNALS, 0)
+    }
+    m
 }
 
 /// Whether a `read` would answer now (data, or a pending end of file,
@@ -829,7 +881,7 @@ fn kbd_start() {
 // --- start, the interrupt, the reports ------------------------------------
 
 /// Start the console's input: the terminal's settings (a Linux
-/// pseudo-terminal's, less ISIG and IXON; the window size the screen's
+/// pseudo-terminal's, less IXON; the window size the screen's
 /// grid when the screen is attached, px19), COM1's receiver, the i8042,
 /// and their two 8259 lines. After kernel/timer's `start` (the 8259s
 /// remapped) and before interrupts are enabled.
@@ -842,7 +894,7 @@ pub fn start() {
     put_sv(C_IFLAG, ICRNL)
     put_sv(C_OFLAG, OPOST | ONLCR)
     put_sv(C_CFLAG, 0xbf)
-    put_sv(C_LFLAG, ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE | IEXTEN)
+    put_sv(C_LFLAG, ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE | IEXTEN)
     // c_cc: VINTR ^C, VQUIT ^\, VERASE DEL, VKILL ^U, VEOF ^D, VTIME 0,
     // VMIN 1, VSWTC 0 | VSTART ^Q, VSTOP ^S, VSUSP ^Z, VEOL 0, VREPRINT
     // ^R, VDISCARD ^O, VWERASE ^W, VLNEXT ^V | VEOL2 0, two spare.
