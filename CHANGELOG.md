@@ -7,6 +7,29 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The sound card (px30).** PAX plays sampled sound. `kernel/sound`
+  drives QEMU's virtio sound device (`1af4:1059`, VIRTIO 1.2 §5.14) over
+  px20's transport (which now keeps one transport record per device),
+  INTx on the 8259: the control queue for `PCM_INFO`, `SET_PARAMS`,
+  `PREPARE`, `START`, `STOP` and `RELEASE`, eight periods of 4096 bytes
+  handed to the transmit queue and taken back as the device plays them.
+  Programs see Linux's OSS interface, `/dev/dsp` (14:3, present only with
+  the device): one opener (`EBUSY`), `write` that waits while every
+  period is at the device (`EAGAIN` under `O_NONBLOCK`), SETFMT (U8,
+  S16_LE; anything else answered S16_LE), CHANNELS 1-2, SPEED (the
+  device's nearest rate), SYNC, RESET, GETOSPACE, GETODELAY, GETOPTR,
+  GETBLKSIZE, GETFMTS, GETCAPS, OSS_GETVERSION; a close that plays out
+  what is queued, as Linux's; a process that ends with the device open
+  is silenced at once, its periods dropped and counted. Capture,
+  `mmap`, `poll` and the mixer are refused or absent. Unmodified static
+  Linux programs (`user/sound`: `dsptone`, `dspprobe`) play a tone in
+  both channels and a ramp that comes back from QEMU's capture frame for
+  frame; `/bin/play` gains a mixed mode (`-m`, the default when
+  `/dev/dsp` opens): a tune's slots synthesised in integers at 48 kHz,
+  square and triangle voices, an envelope, no clipping by construction,
+  so a chord's pitches sound together (`tests/mpx3-sound`;
+  `tools/wav-notes --pcm`, `--ramp`, `--gaps`, `--expect`;
+  `tools/linux-sound` for the Linux side).
 - **The writable tree (px27).** PAX's file tree is writable, in memory:
   `kernel/tree` keeps inodes (files whose bytes are frames under an
   index that grows with the file, with holes; directories of records)

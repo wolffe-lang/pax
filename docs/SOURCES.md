@@ -545,3 +545,18 @@ consulted.
 | black-box Linux: `user/elf/tree.c`, a static glibc program written for this lane, pid 1 with its root a tmpfs in a throwaway container (`tools/linux-tree`), on Linux 7.2.8 and on the CI runner's kernel | — | pax's own | measured | every answer the man pages leave open or this lane had predicted: a directory's size (40 and 20 an entry) and link count; `O_RDONLY\|O_TRUNC` truncates; `pwrite` on an O_APPEND descriptor appends; a hole's blocks; what `rmdir` and `rename` answer for `.`, `..`, `/` and a mount point; a removed working directory (`getcwd` -ENOENT, 0 links, a reading of it -ENOENT, nothing made in it); `copy_file_range`, `sendfile` and `splice` between files and onto O_APPEND; which times a write, a read, a rename, a truncation and an unlink move |
 | black-box Linux: `user/console/shell-tree.keys` typed into the same binaries (`tools/linux-tree`: `tools/linux-tty` inside the container) | — | — | measured | the session's reference transcript, taken afresh at every run |
 
+
+## px30: the sound card
+
+No kernel's, libc's, sound server's, sound library's or driver's source
+was read or searched for (not Linux's sound core, its OSS emulation or
+virtio-snd driver, ALSA's library, OSS, SDL, PulseAudio, PipeWire), and
+no QEMU device or audio source. Linux and QEMU were run, never read.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| OASIS Virtual I/O Device (VIRTIO) specification §5.14 (the sound device: configuration, queues, request codes and structures, the PCM format and rate enumerations, the stream's states) and §4.1 (the PCI transport) | 1.2, 1.3 | OASIS (a specification) | the author's own knowledge of it, then measured against QEMU's answers (the PCM_INFO response, the device's features, each request's status) | `kernel/sound`, `kernel/virtio` |
+| uapi `linux/soundcard.h` (request numbers, AFMT_*, DSP_CAP_*, `audio_buf_info`, `count_info`, SOUND_VERSION) and `sound/asound.h` (only to size ALSA's PCM interface for the prediction) | the sparse checkout | GPL-2.0 WITH Linux-syscall-note | read | `kernel/sound`, `user/sound`, `user/play/kd.S` |
+| the OSS programmer's guide (the order SETFMT, CHANNELS, SPEED; that a request answers what was set) and man-pages `open(2)`, `ioctl(2)`, `close(2)`, `poll(2)` | — | their own | read | `kernel/sound`'s answers |
+| black-box Linux 7.2.8 (kasumi's own kernel image and modules, run under QEMU 11.1.1 by `tools/linux-sound` with each candidate device; busybox-static and strace 6.8 from `px13-ubuntu`) | 7.2.8-1-cachyos | GPL-2.0 (programs we run) | measured | the device survey, the witnesses' straces, what Linux answers at the edges (`notes/px30/linux-*.serial.log`), its close's drain, its version answer 0x030810 |
+| QEMU's documentation (`-audiodev` and its `out.frequency`, `wav`, `coreaudio`, `none`; `-device virtio-sound-pci`) and black-box runs of 11.1.1 (kasumi, nomad-1), 11.1.0 (hasu) and the CI runner's | — | GPL-2.0 (a program we run) | measured: `info pci`/`info qtree` of the device; the `wav` backend writes only while the stream has data (an underrun's gap is not in the file, Linux's alike) | `tests/mpx3-sound`, `tools/wav-notes` |
