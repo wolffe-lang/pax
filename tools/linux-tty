@@ -47,6 +47,7 @@ import time
 
 ENV = {"HOME": "/", "TERM": "linux", "PAX": "1", "PATH": "/bin"}
 WAIT = 30.0
+PAUSE = 1.5  # px26: before a `^~` step
 
 
 def die(msg, code=2):
@@ -84,12 +85,22 @@ def step_bytes(line):
     return bytes(out)
 
 
+def timed(line):
+    """px26: a step that starts with `^~` is typed PAUSE seconds after the
+    step before it, with no prompt waited for (a key typed at a running
+    program: Ctrl-C on `sleep 30`). Returns (is timed, the step's text)."""
+    if line.startswith("^~"):
+        return True, line[2:]
+    return False, line
+
+
 def main(argv):
     keys = prompt = None
     cwd = "/"
     argv0 = None
     root = None
     pid1 = False
+    isig = False
     args = argv[1:]
     while args and args[0].startswith("--") and args[0] != "--":
         if args[0] == "--keys":
@@ -106,11 +117,15 @@ def main(argv):
             pid1 = True
             args = args[1:]
             continue
+        elif args[0] == "--isig":
+            isig = True
+            args = args[1:]
+            continue
         else:
             die("unknown option %s" % args[0])
         args = args[2:]
     if not keys or prompt is None or len(args) < 3 or args[1] != "--":
-        die("usage: linux-tty --keys KEYS --prompt TEXT [--cwd DIR] [--argv0 NAME] [--root DIR] [--pid1] OUT -- PROG [ARG...]")
+        die("usage: linux-tty --keys KEYS --prompt TEXT [--cwd DIR] [--argv0 NAME] [--root DIR] [--pid1] [--isig] OUT -- PROG [ARG...]")
     out, prog = args[0], args[2:]
     steps = [l.rstrip("\n") for l in open(keys)]
     pb = prompt.encode()
@@ -134,7 +149,8 @@ def main(argv):
         try:
             a = termios.tcgetattr(0)
             a[0] &= ~termios.IXON
-            a[3] &= ~termios.ISIG
+            if not isig:
+                a[3] &= ~termios.ISIG
             termios.tcsetattr(0, termios.TCSANOW, a)
             if root:
                 os.chroot(root)
@@ -164,17 +180,23 @@ def main(argv):
                 buf.extend(d)
 
     ok = True
+    want = 0
     for k, line in enumerate(steps, 1):
-        end = time.time() + WAIT
-        while buf.count(pb) < k:
-            if not alive or time.time() > end:
-                sys.stderr.write("linux-tty: prompt %d (%r) did not come for step %d: %s\n" % (k, prompt, k, line))
-                ok = False
+        late, line = timed(line)
+        if late:
+            pump(PAUSE)
+        else:
+            want += 1
+            end = time.time() + WAIT
+            while buf.count(pb) < want:
+                if not alive or time.time() > end:
+                    sys.stderr.write("linux-tty: prompt %d (%r) did not come for step %d: %s\n" % (want, prompt, k, line))
+                    ok = False
+                    break
+                pump(0.05)
+            if not ok:
                 break
-            pump(0.05)
-        if not ok:
-            break
-        pump(0.2)
+            pump(0.2)
         for b in step_bytes(line):
             os.write(fd, bytes([b]))
             pump(0.02)
