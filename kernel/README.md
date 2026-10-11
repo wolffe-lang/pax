@@ -458,7 +458,7 @@ user-visible: the surface is kernel-internal (`net.send`, `ip.send`,
   once, the state words in `.bss` read and written volatile under
   `sync.net()` (no `region`: the device's interrupt allocates nothing).
 - A module `const` cannot be initialised from another module's on
-  wolf 0.2.26 (wolf-lang#653): `net`'s feature mask spells
+  wolf 0.2.26 or 0.2.27 (wolf-lang#653, re-tested at px21a's pin): `net`'s feature mask spells
   `virtio.F_VERSION_1` out.
 - Every kernel links `net`, `virtio` and `pci` (kernel/interrupts
   names the vector), as every kernel links the console and the
