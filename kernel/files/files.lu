@@ -675,15 +675,16 @@ pub fn close(a: u64, fd: u64) -> u64 {
     0
 }
 
-/// px30: whether closing `fd` is the last close of /dev/dsp that
-/// waits for the device to play what is queued (a blocking open file,
-/// its last reference): kernel/user drains it (`sound.drain`) first.
+/// px30: whether closing `fd` is the last close of /dev/dsp, which
+/// waits for the device to play what is queued (its last reference,
+/// O_NONBLOCK or not: Linux's close drains either way, measured):
+/// kernel/user drains it (`sound.drain`) first.
 pub fn closes_dsp(a: u64, fd: u64) -> bool {
     if kind(a, fd) != K_DSP {
         return false
     }
     let o = get(a, fdw(fd, D_OF))
-    o != 0 && ofw(o - 1, O_REFS) == 1 && status(a, fd) & O_NONBLOCK == 0
+    o != 0 && ofw(o - 1, O_REFS) == 1
 }
 
 /// The open flags descriptor `fd` (open) carries: the console's
