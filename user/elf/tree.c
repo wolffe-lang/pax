@@ -604,8 +604,9 @@ static void errnos(void) {
     d = r(access("/t/none", F_OK));
     e = r(access("/t/a", 8));
     f = r(faccessat(AT_FDCWD, "/t/a", R_OK, 0));
-    say("access: a 0644 file to read and write %ld, to execute %ld (root); a directory to execute %ld; a missing name %ld; a bad mode %ld; faccessat %ld\n",
-        a, b, c, d, e, f);
+    g = r(syscall(SYS_faccessat, AT_FDCWD, "/t/a", X_OK));
+    say("access: a 0644 file to read and write %ld, to execute %ld (root); a directory to execute %ld; a missing name %ld; a bad mode %ld; faccessat (glibc's, and the call itself) %ld %ld\n",
+        a, b, c, d, e, f, g);
     pid_t k = fork();
     if (k == 0) {
         char *argv[] = { "/t/a", 0 };
@@ -791,7 +792,13 @@ static void times(void) {
     ms(30);
     get("/t/tm");
     stat("/t/tm", &a);
-    say("times: a read leaves mtime %d and ctime %d\n", ns_of(a.st_mtim) == ns_of(b.st_mtim), ns_of(a.st_ctim) == ns_of(b.st_ctim));
+    ms(30);
+    get("/t/tm");
+    struct stat a2;
+    stat("/t/tm", &a2);
+    say("times: a read leaves mtime %d and ctime %d; it moves an atime that was not after them %d, and a second read does not move it again %d\n",
+        ns_of(a.st_mtim) == ns_of(b.st_mtim), ns_of(a.st_ctim) == ns_of(b.st_ctim), ns_of(a.st_atim) > ns_of(b.st_atim),
+        ns_of(a2.st_atim) == ns_of(a.st_atim));
     ms(30);
     rename("/t/tm", "/t/tn");
     stat("/t/tn", &b);
@@ -873,7 +880,20 @@ static void refused(void) {
     long h = r(syscall(SYS_renameat2, AT_FDCWD, "/t/a", AT_FDCWD, "/t/b", 1));
     say("~refused: link %ld, symlink %ld, chmod %ld, chown %ld, utimensat %ld, O_SYNC %ld, O_TMPFILE %ld, RENAME_NOREPLACE %ld\n", a, b,
         c, d, e, f, g, h);
-    unlink("/t/l"); unlink("/t/s"); unlink("/t/b"); unlink("/t/a");
+    unlink("/t/l"); unlink("/t/s"); unlink("/t/b");
+    /* PAX's /dev is fixed; its largest file is 1 GiB */
+    int dv = open("/dev/px27-probe", O_WRONLY | O_CREAT | O_EXCL, 0600);
+    long mk = dv < 0 ? -errno : 0;
+    if (dv >= 0) { close(dv); unlink("/dev/px27-probe"); }
+    long md = r(mkdir("/dev/px27-probe.d", 0700));
+    if (md == 0) rmdir("/dev/px27-probe.d");
+    put("/t/a", "a");
+    int big = open("/t/a", O_WRONLY);
+    long far = r(pwrite(big, "x", 1, (off_t)1 << 30));
+    long grow = r(ftruncate(big, (off_t)1 << 31));
+    close(big);
+    say("~limits: a file made in /dev %ld, a directory %ld; a byte written at 1 GiB %ld, a file grown to 2 GiB %ld\n", mk, md, far, grow);
+    unlink("/t/a");
     mkdir("/t/d", 0777);
     a = r(link("/t/d", "/t/dl"));
     rmdir("/t/d");

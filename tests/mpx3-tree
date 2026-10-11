@@ -53,9 +53,12 @@
 #   T2 probes: what PAX refuses by name is exactly its `~refused` line
 #      (link and symlink -EPERM; chmod, chown, utimensat -EOPNOTSUPP;
 #      O_SYNC -EINVAL; O_TMPFILE -EOPNOTSUPP; RENAME_NOREPLACE -EINVAL),
-#      a hard link to a directory (-EPERM on Linux too) and the `execve`
-#      of a program copied since boot (`~exec`: -EACCES), each with its
-#      `refused:` line, and the kernel counted them: ten.
+#      a hard link to a directory (-EPERM on Linux too), the `execve`
+#      of a program copied since boot (`~exec`: -EACCES), a file and a
+#      directory made in `/dev` (`~limits`: -EROFS), each with its
+#      `refused:` line, and the kernel counted them: twelve. And PAX's
+#      largest file: a byte at 1 GiB and a file grown to 2 GiB are
+#      -EFBIG (`~limits`; tmpfs takes both).
 #   T3 -ENOSYS only for set_robust_list (273) and rseq (334); no
 #      `refused:` line but T2's; nobody killed.
 #   T4 everything given back: the frames line shows as many frames free
@@ -127,8 +130,9 @@ KEYS=$PAX_ROOT/user/console/shell-tree.keys
 SHELL_MOTD='PAX. Kernel: wolf. Shell: wolf. Tools: wolf. Nothing here existed last year.'
 PROMPT='$ '
 REFUSED='~refused: link -1, symlink -1, chmod -95, chown -95, utimensat -95, O_SYNC -22, O_TMPFILE -95, RENAME_NOREPLACE -22'
+LIMITS='~limits: a file made in /dev -30, a directory -30; a byte written at 1 GiB -27, a file grown to 2 GiB -27'
 EXEC_LINE='~exec: a program copied since boot, run: status 113 (7: it ran; 113: -EACCES)'
-REFUSALS='syscall 257: refused: an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE), -22|syscall 257: refused: an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE), -95|syscall 280: refused: a change of mode, owner or times (the tree keeps what a file was made with), -95|syscall 316: refused: a renameat2 flag (RENAME_NOREPLACE, RENAME_EXCHANGE, RENAME_WHITEOUT), -22|syscall 59: refused: a program written since boot (the loader reads the archive'"'"'s own bytes), -13|syscall 86: refused: a hard link, a symbolic link or a device node (the tree makes none), -1|syscall 86: refused: a hard link, a symbolic link or a device node (the tree makes none), -1|syscall 88: refused: a hard link, a symbolic link or a device node (the tree makes none), -1|syscall 90: refused: a change of mode, owner or times (the tree keeps what a file was made with), -95|syscall 92: refused: a change of mode, owner or times (the tree keeps what a file was made with), -95'
+REFUSALS='syscall 257: refused: an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE), -22|syscall 257: refused: an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE), -95|syscall 257: refused: making or removing a name in /dev (PAX'"'"'s /dev is fixed), -30|syscall 280: refused: a change of mode, owner or times (the tree keeps what a file was made with), -95|syscall 316: refused: a renameat2 flag (RENAME_NOREPLACE, RENAME_EXCHANGE, RENAME_WHITEOUT), -22|syscall 59: refused: a program written since boot (the loader reads the archive'"'"'s own bytes), -13|syscall 83: refused: making or removing a name in /dev (PAX'"'"'s /dev is fixed), -30|syscall 86: refused: a hard link, a symbolic link or a device node (the tree makes none), -1|syscall 86: refused: a hard link, a symbolic link or a device node (the tree makes none), -1|syscall 88: refused: a hard link, a symbolic link or a device node (the tree makes none), -1|syscall 90: refused: a change of mode, owner or times (the tree keeps what a file was made with), -95|syscall 92: refused: a change of mode, owner or times (the tree keeps what a file was made with), -95'
 
 work=$PAX_BUILD/mpx3-tree
 runs=$PAX_BUILD/mpx3-tree-runs.txt
@@ -335,9 +339,11 @@ for leg in $legs; do
                 [ "$rf" = "$REFUSALS" ] || why+=" refusal lines '$rf';"
                 x=$(grep -m1 '^~exec' "$out")
                 [ "$x" = "$EXEC_LINE" ] || why+=" '$x';"
+                lm=$(grep -m1 '^~limits' "$out")
+                [ "$lm" = "$LIMITS" ] || why+=" '$lm';"
                 rn=$(printf '%s\n' "$tl" | sed -n -E 's/.*, refusals ([0-9]+)$/\1/p')
-                [ "$rn" = 10 ] || why+=" the kernel counted '$rn' refusals, not 10 ('$tl');"
-                [ -z "$why" ] && say "PASS T2 $id: $g; $x; 10 refusal lines, 10 counted (Linux here: $(grep -m1 '^~refused' "$out.linux"); $(grep -m1 '^~exec' "$out.linux"))" || bad "T2 $id:$why"
+                [ "$rn" = 12 ] || why+=" the kernel counted '$rn' refusals, not 12 ('$tl');"
+                [ -z "$why" ] && say "PASS T2 $id: $g; $x; $lm; 12 refusal lines, 12 counted (Linux here: $(grep -m1 '^~refused' "$out.linux"); $(grep -m1 '^~exec' "$out.linux"); $(grep -m1 '^~limits' "$out.linux"))" || bad "T2 $id:$why"
             fi
 
             # T3: what PAX lacks; nobody killed.
