@@ -331,7 +331,9 @@ boot() { # tier leg way
         now=$(wc -c < "$log" 2>/dev/null | tr -d ' ')
         if [ "$now" != "$size" ]; then
             size=$now quiet=0
-            serial_norm "$log" > "$norm.live" 2>/dev/null
+            # Without its last line: the log is read while it is written,
+            # and half a `run N:` line is not yet the next command's.
+            serial_norm "$log" 2>/dev/null | awk 'NR > 1 { print prev } { prev = $0 }' > "$norm.live"
             seen=$(grep -c '^user: books: ' "$norm.live")
             while [ "$checked" -lt "$seen" ] && [ "$stopped" = 0 ]; do
                 checked=$((checked + 1))
