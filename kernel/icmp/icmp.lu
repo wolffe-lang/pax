@@ -1,5 +1,5 @@
 //! icmp — the Internet Control Message Protocol's echo, and one error
-//! (px21).
+//! each way (px21, px23).
 //!
 //! An ICMP message is an IPv4 datagram's payload, protocol 1 (RFC 792):
 //!
@@ -29,7 +29,17 @@
 //!     echo reply: matched to the echo this kernel is waiting for (its
 //!                 identifier, sequence number, source and data all the
 //!                 ones sent); one that matches nothing is `stray`
-//!     type        any other type, or an echo with a code that is not 0
+//!     destination unreachable (px23): one that quotes a whole
+//!                 20-byte header and 8 bytes after it is handed back
+//!                 to kernel/netd (`input` answers ERROR) for the
+//!                 protocol it quotes; counted `errors received`
+//!     type        any other type, an echo with a code that is not 0,
+//!                 or a destination unreachable that quotes less
+//!
+//! A message that came off kernel/ip's loopback queue (`looped`, px23)
+//! is answered the same way and counted apart (the `loopback` line):
+//! the counters above stay what the wire carried, which the tests hold
+//! to a capture.
 //!
 //! **Sent.** `ping(dst, seq, bytes)` sends one echo request, identifier
 //! `IDENT`, data byte k = 7k mod 256, and notes the time-stamp counter;
@@ -46,6 +56,8 @@
 //! **rate-limited**: one error per `LIMIT` ticks (a second) to all
 //! destinations together, the rest counted `limited` and not sent
 //! (RFC 1812 §4.3.2.8's reasoning: an error is never worth a flood).
+//! An error for a datagram that looped back goes to this machine and
+//! floods nothing: it is not limited and does not start the second.
 //!
 //! State is words of boot/net.S's `pax_icmp_state` and one frame (its
 //! lower half the echo request's message, its upper the error's),
@@ -112,6 +124,26 @@ pub const C_LIMITED: u64 = 26
 pub const C_SILENT: u64 = 27
 /// Messages kernel/ip did not take.
 pub const C_NOT_SENT: u64 = 28
+/// Over loopback (px23): echo requests answered.
+pub const C_L_ECHO_IN: u64 = 32
+/// Their replies sent.
+pub const C_L_ECHO_OUT: u64 = 33
+/// Echo requests this kernel sent to itself.
+pub const C_L_REQUESTS_OUT: u64 = 34
+/// Their replies matched.
+pub const C_L_REPLIES_IN: u64 = 35
+/// Destination unreachables sent to itself.
+pub const C_L_UNREACHABLE: u64 = 36
+/// Destination unreachables received from the wire, whole.
+pub const C_ERRORS_IN: u64 = 37
+/// And over loopback.
+pub const C_L_ERRORS_IN: u64 = 38
+
+/// `input`'s answers: nothing more to do.
+pub const DONE: u64 = 0
+/// The message is a destination unreachable that quotes a header and 8
+/// bytes: the protocol it quotes may want it (`quoted`).
+pub const ERROR: u64 = 1
 
 fn mw(i: u64) -> u64 {
     // # Safety: i < 64, a word of boot/net.S's pax_icmp_state.
@@ -165,39 +197,47 @@ fn sent(r: u64) -> bool {
 
 /// The ICMP message of a datagram kernel/ip passed: the `len`-byte
 /// frame at `frame`, its IP header `ihl` bytes, its total length
-/// `total`. Thread context; the receive buffer is this call's to write
-/// in until it returns.
-pub fn input(frame: u64, ihl: u64, total: u64) {
+/// `total`; `looped` when it came off the loopback queue. The frame is
+/// this call's to write in until it returns. Answers DONE or ERROR.
+pub fn input(frame: u64, ihl: u64, total: u64, looped: bool) -> u64 {
     let h = frame + ip.ETH
     let m = h + ihl
     let n = total - ihl
     if n < 8 {
         bump(C_SHORT)
-        return
+        return DONE
     }
     if ip.sum(m, n) != 0 {
         bump(C_CHECKSUM)
-        return
+        return DONE
     }
     let kind = ip.octet(m)
     let src = ip.be32(h + 12)
     if kind == 8 && ip.octet(m + 1) == 0 {
         if ip.is_broadcast(ip.be32(h + 16)) {
             bump(C_BROADCAST)
-            return
+            return DONE
         }
-        bump(C_ECHO_IN)
+        bump(if looped { C_L_ECHO_IN } else { C_ECHO_IN })
         // The reply is the request with one byte changed and the
-        // checksum made again, to the request's source.
+        // checksum made again, to the request's source, from the
+        // address it was sent to reach.
         ip.put_byte(m, 0)
         ip.put_be16(m + 2, 0)
         ip.put_be16(m + 2, ip.sum(m, n))
-        if sent(ip.send(src, ip.ICMP, m, n)) {
-            bump(C_ECHO_OUT)
+        let from = if looped { ip.be32(h + 16) } else { ip.address() }
+        if sent(ip.send_from(from, src, ip.ICMP, m, n)) {
+            bump(if looped { C_L_ECHO_OUT } else { C_ECHO_OUT })
         } else {
             bump(C_NOT_SENT)
         }
-        return
+        return DONE
+    }
+    if kind == 3 && n >= 36 && ip.octet(m + 8) == 0x45 {
+        // px23: a destination unreachable that quotes a 20-byte header
+        // and 8 bytes of what it carried.
+        bump(if looped { C_L_ERRORS_IN } else { C_ERRORS_IN })
+        return ERROR
     }
     if kind == 0 && ip.octet(m + 1) == 0 {
         let saved = sync.acquire(sync.icmp())
@@ -214,14 +254,31 @@ pub fn input(frame: u64, ihl: u64, total: u64) {
             put_mw(M_TTL, ip.octet(h + 8))
             put_mw(M_WAITING, 0)
             put_mw(M_GOT, 1)
-            put_mw(C_REPLIES_IN, mw(C_REPLIES_IN) + 1)
+            if looped {
+                put_mw(C_L_REPLIES_IN, mw(C_L_REPLIES_IN) + 1)
+            } else {
+                put_mw(C_REPLIES_IN, mw(C_REPLIES_IN) + 1)
+            }
         } else {
             put_mw(C_STRAY, mw(C_STRAY) + 1)
         }
         sync.release(sync.icmp(), saved)
-        return
+        return DONE
     }
     bump(C_TYPE)
+    DONE
+}
+
+/// What the destination unreachable `input` answered ERROR for says
+/// (the same frame, header `ihl` bytes): `(code, protocol, source,
+/// destination, a, b)` — the error's code, then of the datagram it
+/// quotes the protocol, the two addresses and the first two 32-bit
+/// words after its header (for TCP and UDP the two ports, then for TCP
+/// the sequence number).
+pub fn quoted(frame: u64, ihl: u64) -> (u64, u64, u64, u64, u64, u64) {
+    let m = frame + ip.ETH + ihl
+    let q = m + 8
+    (ip.octet(m + 1), ip.octet(q + 9), ip.be32(q + 12), ip.be32(q + 16), ip.be32(q + 20), ip.be32(q + 24))
 }
 
 /// `unreachable`'s answers: the error was sent.
@@ -242,8 +299,9 @@ pub const CODE_PORT: u64 = 3
 /// that its protocol (`code` 2) or its port (`code` 3) is unreachable —
 /// unless an error is forbidden (`silent`) or one went out within
 /// `LIMIT` ticks (`limited`). Answers which: SENT, LIMITED, SILENT or
-/// NOT_SENT (each counted here too).
-pub fn unreachable(frame: u64, ihl: u64, total: u64, code: u64) -> u64 {
+/// NOT_SENT (each counted here too). `looped`: the datagram came off
+/// the loopback queue; its error goes back there, unlimited.
+pub fn unreachable(frame: u64, ihl: u64, total: u64, code: u64, looped: bool) -> u64 {
     let h = frame + ip.ETH
     // A group hardware address (the low bit of the first byte: every
     // broadcast and multicast frame) or a broadcast destination.
@@ -254,12 +312,14 @@ pub fn unreachable(frame: u64, ihl: u64, total: u64, code: u64) -> u64 {
     let saved = sync.acquire(sync.icmp())
     let now = timer.ticks()
     let f = mw(M_FRAME)
-    if f == 0 || (mw(M_ERROR_AT) != 0 && now + 1 - mw(M_ERROR_AT) < LIMIT) {
+    if f == 0 || (!looped && mw(M_ERROR_AT) != 0 && now + 1 - mw(M_ERROR_AT) < LIMIT) {
         put_mw(C_LIMITED, mw(C_LIMITED) + 1)
         sync.release(sync.icmp(), saved)
         return LIMITED
     }
-    put_mw(M_ERROR_AT, now + 1)
+    if !looped {
+        put_mw(M_ERROR_AT, now + 1)
+    }
     sync.release(sync.icmp(), saved)
     let m = f + HALF
     let data = if total - ihl < 8 { total - ihl } else { 8 }
@@ -271,8 +331,9 @@ pub fn unreachable(frame: u64, ihl: u64, total: u64, code: u64) -> u64 {
     // bytes of the offending datagram, which the caller still holds.
     unsafe { pax_fb_copy(m + 8, h, ihl + data) }
     ip.put_be16(m + 2, ip.sum(m, 8 + ihl + data))
-    if sent(ip.send(ip.be32(h + 12), ip.ICMP, m, 8 + ihl + data)) {
-        bump(C_UNREACHABLE)
+    let from = if looped { ip.be32(h + 16) } else { ip.address() }
+    if sent(ip.send_from(from, ip.be32(h + 12), ip.ICMP, m, 8 + ihl + data)) {
+        bump(if looped { C_L_UNREACHABLE } else { C_UNREACHABLE })
         return SENT
     }
     bump(C_NOT_SENT)
@@ -310,7 +371,7 @@ pub fn ping(dst: u64, seq: u64, bytes: u64) -> u64 {
     sync.release(sync.icmp(), saved)
     let r = ip.send(dst, ip.ICMP, m, 8 + bytes)
     if sent(r) {
-        bump(C_REQUESTS_OUT)
+        bump(if ip.local(dst) { C_L_REQUESTS_OUT } else { C_REQUESTS_OUT })
     } else {
         let again = sync.acquire(sync.icmp())
         put_mw(M_WAITING, 0)
@@ -338,10 +399,11 @@ fn item(v: u64, name: str) {
     log.put(name)
 }
 
-/// The counters' two lines:
+/// The counters' three lines:
 ///
 ///     icmp: echo <a> requests answered (<b> replies sent), <c> requests sent, <d> replies matched, <e> stray; dropped <…> short <…> checksum <…> broadcast <…> type
 ///     icmp: unreachable <u> sent, <l> limited, <s> silent; <n> not sent
+///     icmp: loopback <a> requests answered (<b> replies sent), <c> requests sent, <d> replies matched, <u> unreachable sent; errors received <w> from the wire, <o> over loopback
 pub fn counters() {
     log.put("icmp: echo ")
     log.dec(mw(C_ECHO_IN) as int)
@@ -368,5 +430,21 @@ pub fn counters() {
     log.put(" silent; ")
     log.dec(mw(C_NOT_SENT) as int)
     log.put(" not sent")
+    log.end()
+    log.put("icmp: loopback ")
+    log.dec(mw(C_L_ECHO_IN) as int)
+    log.put(" requests answered (")
+    log.dec(mw(C_L_ECHO_OUT) as int)
+    log.put(" replies sent), ")
+    log.dec(mw(C_L_REQUESTS_OUT) as int)
+    log.put(" requests sent, ")
+    log.dec(mw(C_L_REPLIES_IN) as int)
+    log.put(" replies matched, ")
+    log.dec(mw(C_L_UNREACHABLE) as int)
+    log.put(" unreachable sent; errors received ")
+    log.dec(mw(C_ERRORS_IN) as int)
+    log.put(" from the wire, ")
+    log.dec(mw(C_L_ERRORS_IN) as int)
+    log.put(" over loopback")
     log.end()
 }
