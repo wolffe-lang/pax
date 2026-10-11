@@ -30,14 +30,22 @@
 //!   gain is already down when a loud block arrives, and nothing clips.
 
 const TLEN: int = 2048
+
 const BLK: int = 64
+
 const MAXV: int = 48
+
 const NP: int = 8
+
 const MASK32: int = 4294967295
+
 const BANDS: int = 8
+
 const NTIMBRES: int = 17
+
 /// The limiter's ceiling and the mix's master gain (/65536).
 const CEIL: int = 30000
+
 const MASTER: int = 30000
 
 /// What a part-format performance did.
@@ -96,7 +104,11 @@ fn roll(h: int, hc10: int, n: int) -> int {
 fn formant(f: int, bright: int) -> int {
     let a3 = if bright == 1 { 450 } else { 220 }
     let a4 = if bright == 1 { 250 } else { 80 }
-    30 + peak(f, 750, 90, 1000) + peak(f, 1150, 110, 700) + peak(f, 2800, 170, a3) + peak(f, 3500, 250, a4)
+    30 +
+        peak(f, 750, 90, 1000) +
+        peak(f, 1150, 110, 700) +
+        peak(f, 2800, 170, a3) +
+        peak(f, 3500, 250, a4)
 }
 
 fn peak(f: int, c: int, bw: int, a: int) -> int {
@@ -128,7 +140,7 @@ fn harmonic(t: int, bright: int, h: int, fc: int) -> int {
     }
     if t == 5 {
         // oboe: a weak fundamental, strong second to fifth
-        let o = if h == 1 { 450 } else { if h <= 5 { 900 - h * 60 } else { 2400 / h } }
+        let o = if h == 1 { 450 } else if h <= 5 { 900 - h * 60 } else { 2400 / h }
         return o * roll(h, if bright == 1 { 140 } else { 70 }, 2) / 1000
     }
     if t == 6 {
@@ -219,7 +231,7 @@ fn build_table(mut pool: List[i32], sine: List[i32], t: int, b: int, br: int) ->
         while k < hmax {
             let a = amps[k]
             if a != 0 {
-                s += a * (sine[(i * (k + 1)) % TLEN] as int)
+                s += a * sine[i * (k + 1) % TLEN] as int
             }
             k += 1
         }
@@ -336,7 +348,23 @@ fn lcg(s: int) -> int {
 /// `tb` (bright) mixed by `bw` (/1024), one oscillator or two (`inc2`
 /// > 0), gain ramped `g0` to `g1` (/65536), from frame `skip`. The
 /// phases after the block.
-fn blk_table(pool: List[i32], ta: int, tb: int, bw: int, ph0: int, inc: int, ph20: int, inc2: int, g0: int, g1: int, skip: int, pl: int, pr: int, mut ml: List[int], mut mr: List[int]) -> (int, int) {
+fn blk_table(
+    pool: List[i32],
+    ta: int,
+    tb: int,
+    bw: int,
+    ph0: int,
+    inc: int,
+    ph20: int,
+    inc2: int,
+    g0: int,
+    g1: int,
+    skip: int,
+    pl: int,
+    pr: int,
+    mut ml: List[int],
+    mut mr: List[int],
+) -> (int, int) {
     var ph = ph0
     var ph2 = ph20
     var i = skip
@@ -346,13 +374,13 @@ fn blk_table(pool: List[i32], ta: int, tb: int, bw: int, ph0: int, inc: int, ph2
     while i < BLK {
         let k = ph >> 21
         let a = pool[ta + k] as int
-        var s = a + ((pool[tb + k] as int) - a) * bw / 1024
-        ph = (ph + inc) & MASK32
+        var s = a + (pool[tb + k] as int - a) * bw / 1024
+        ph = ph + inc & MASK32
         if two {
             let k2 = ph2 >> 21
             let a2 = pool[ta + k2] as int
-            s = (s * 3 + (a2 + ((pool[tb + k2] as int) - a2) * bw / 1024) * 2) / 5
-            ph2 = (ph2 + inc2) & MASK32
+            s = (s * 3 + (a2 + (pool[tb + k2] as int - a2) * bw / 1024) * 2) / 5
+            ph2 = ph2 + inc2 & MASK32
         }
         let v = s * g / 65536
         ml[i] = ml[i] + v * pl / 32768
@@ -367,7 +395,26 @@ fn blk_table(pool: List[i32], ta: int, tb: int, bw: int, ph0: int, inc: int, ph2
 /// own amplitudes (/65536, stepped per block) plus filtered noise at
 /// `namp` (filter 1 low-pass, 2 high-pass), gain ramped `g0`..`g1`.
 /// (seed, low-pass state) after it; the partials' phases are updated.
-fn blk_struck(sine: List[i32], mut pph: List[int], pinc: List[int], pamp: List[int], base: int, np: int, namp: int, filt: int, fa: int, seed0: int, lp0: int, g0: int, g1: int, skip: int, pl: int, pr: int, mut ml: List[int], mut mr: List[int]) -> (int, int) {
+fn blk_struck(
+    sine: List[i32],
+    mut pph: List[int],
+    pinc: List[int],
+    pamp: List[int],
+    base: int,
+    np: int,
+    namp: int,
+    filt: int,
+    fa: int,
+    seed0: int,
+    lp0: int,
+    g0: int,
+    g1: int,
+    skip: int,
+    pl: int,
+    pr: int,
+    mut ml: List[int],
+    mut mr: List[int],
+) -> (int, int) {
     var seed = seed0
     var lp = lp0
     var i = skip
@@ -379,13 +426,13 @@ fn blk_struck(sine: List[i32], mut pph: List[int], pinc: List[int], pamp: List[i
         while k < np {
             let at = base + k
             let ph = pph[at]
-            s += (sine[ph >> 21] as int) * pamp[at] / 131072
-            pph[at] = (ph + pinc[at]) & MASK32
+            s += sine[ph >> 21] as int * pamp[at] / 131072
+            pph[at] = ph + pinc[at] & MASK32
             k += 1
         }
         if namp > 0 {
             seed = lcg(seed)
-            let x = (seed / 32768) - 32768
+            let x = seed / 32768 - 32768
             lp = lp + (x - lp) * fa / 65536
             let nz = if filt == 2 { x - lp } else { lp }
             s += nz * namp / 65536
@@ -431,7 +478,11 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
             while b < BANDS {
                 let off0 = build_table(mut pool, sine, t, b, 0)
                 tab[(t * BANDS + b) * 2] = off0
-                tab[(t * BANDS + b) * 2 + 1] = if tparams(t)[5] > 0 { build_table(mut pool, sine, t, b, 1) } else { off0 }
+                tab[(t * BANDS + b) * 2 + 1] = if tparams(t)[5] > 0 {
+                    build_table(mut pool, sine, t, b, 1)
+                } else {
+                    off0
+                }
                 b += 1
             }
         }
@@ -444,8 +495,8 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
     p = 0
     while p < np {
         let idx = (sc.pans[p] + 100) * (TLEN / 4) / 200
-        (mut pan_l).push((sine[TLEN / 4 - idx] as int) * 46341 / 32768)
-        (mut pan_r).push((sine[idx] as int) * 46341 / 32768)
+        (mut pan_l).push(sine[TLEN / 4 - idx] as int * 46341 / 32768)
+        (mut pan_r).push(sine[idx] as int * 46341 / 32768)
         for x in tparams(sc.timbres[p]) {
             (mut prm).push(x)
         }
@@ -598,7 +649,8 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
                         v = j
                         break
                     }
-                    let sv = v_env[j] + (if v_stage[j] == 2 || struck(sc.timbres[v_part[j]]) { 0 } else { 1 << 20 })
+                    let sv = v_env[j] +
+                        (if v_stage[j] == 2 || struck(sc.timbres[v_part[j]]) { 0 } else { 1 << 20 })
                     if sv < best {
                         best = sv
                         v = j
@@ -628,7 +680,7 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
                 v_t[v] = 0 - (start - bf) // negative: frames before it sounds
                 v_end[v] = frame_of(sc.n_end[n], rate) - start
                 v_fast[v] = false
-                v_lfo[v] = (v_seed[v] % 1000) * 4294967
+                v_lfo[v] = v_seed[v] % 1000 * 4294967
                 var hz = sc.n_hz[n]
                 if t == 8 {
                     hz = hz / 2
@@ -636,8 +688,12 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
                 let inc = hz * (TWO32 / 100) / rate
                 v_inc[v] = inc
                 v_ph[v] = 0
-                v_ph2[v] = (v_seed[v] % 4096) * 1048576
-                v_inc2[v] = if prm[pb + 6] > 0 { inc + inc / 10000 * prm[pb + 6] * 578 / 100 } else { 0 }
+                v_ph2[v] = v_seed[v] % 4096 * 1048576
+                v_inc2[v] = if prm[pb + 6] > 0 {
+                    inc + inc / 10000 * prm[pb + 6] * 578 / 100
+                } else {
+                    0
+                }
                 if prm[pb + 0] == 0 {
                     let bnd = band_of(hz)
                     v_ta[v] = tab[(t * BANDS + bnd) * 2]
@@ -652,9 +708,30 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
                     if again >= 0 {
                         restrike(mut ptop, p0amp, v * NP, NP, 4096 * 45)
                     } else {
-                        strike(mut pph, mut pinc, mut pamp, mut pdec, mut ptop, mut p0amp, v * NP, t, inc, rate)
+                        strike(
+                            mut pph,
+                            mut pinc,
+                            mut pamp,
+                            mut pdec,
+                            mut ptop,
+                            mut p0amp,
+                            v * NP,
+                            t,
+                            inc,
+                            rate,
+                        )
                     }
-                    v_np[v] = if t == 15 { 0 } else { if t == 16 { 2 } else { if t == 14 { 8 } else { if t == 12 { 6 } else { 7 } } } }
+                    v_np[v] = if t == 15 {
+                        0
+                    } else if t == 16 {
+                        2
+                    } else if t == 14 {
+                        8
+                    } else if t == 12 {
+                        6
+                    } else {
+                        7
+                    }
                     let (na, nd) = noise_of(t, rate)
                     v_namp[v] = na
                     v_ndec[v] = nd
@@ -729,7 +806,7 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
                 if left <= 0 {
                     // the next stroke, a little early or late
                     v_seed[v] = lcg(v_seed[v])
-                    let jit = v_stroke[v] * ((v_seed[v] / 65536) % 30 - 15) / 100
+                    let jit = v_stroke[v] * (v_seed[v] / 65536 % 30 - 15) / 100
                     left = v_stroke[v] + jit
                     if prm[pb + 0] == 1 || t == 11 {
                         restrike(mut ptop, p0amp, v * NP, v_np[v], v_seed[v])
@@ -761,8 +838,8 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
             var inc = v_inc[v]
             var inc2 = v_inc2[v]
             if prm[pb + 7] > 0 && tt > rate / 4 {
-                v_lfo[v] = (v_lfo[v] + 5500 * (TWO32 / 100) / rate * run / 10) & MASK32
-                let w = (sine[v_lfo[v] >> 21] as int) * prm[pb + 7] / 32767
+                v_lfo[v] = v_lfo[v] + 5500 * (TWO32 / 100) / rate * run / 10 & MASK32
+                let w = sine[v_lfo[v] >> 21] as int * prm[pb + 7] / 32767
                 inc = inc + inc / 10000 * w
                 if inc2 > 0 {
                     inc2 = inc2 - inc2 / 10000 * w / 2
@@ -784,12 +861,47 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
                 if bw > 1024 {
                     bw = 1024
                 }
-                let (a, b) = blk_table(pool, v_ta[v], v_tb[v], bw, v_ph[v], inc, v_ph2[v], inc2, g0, g1, skip, pan_l[p2], pan_r[p2], mut ml, mut mr)
+                let (a, b) = blk_table(
+                    pool,
+                    v_ta[v],
+                    v_tb[v],
+                    bw,
+                    v_ph[v],
+                    inc,
+                    v_ph2[v],
+                    inc2,
+                    g0,
+                    g1,
+                    skip,
+                    pan_l[p2],
+                    pan_r[p2],
+                    mut ml,
+                    mut mr,
+                )
                 v_ph[v] = a
                 v_ph2[v] = b
             } else {
-                let fa = if t == 15 { 30000 } else { if t == 14 { 9000 } else { 2600 } }
-                let (s2, l2) = blk_struck(sine, mut pph, pinc, pamp, v * NP, v_np[v], v_namp[v], if t == 15 { 2 } else { 1 }, fa, v_seed[v], v_lp[v], g0, g1, skip, pan_l[p2], pan_r[p2], mut ml, mut mr)
+                let fa = if t == 15 { 30000 } else if t == 14 { 9000 } else { 2600 }
+                let (s2, l2) = blk_struck(
+                    sine,
+                    mut pph,
+                    pinc,
+                    pamp,
+                    v * NP,
+                    v_np[v],
+                    v_namp[v],
+                    if t == 15 { 2 } else { 1 },
+                    fa,
+                    v_seed[v],
+                    v_lp[v],
+                    g0,
+                    g1,
+                    skip,
+                    pan_l[p2],
+                    pan_r[p2],
+                    mut ml,
+                    mut mr,
+                )
                 v_seed[v] = s2
                 v_lp[v] = l2
                 // the partials decay (the tam-tam's bloom first), the noise too
@@ -854,7 +966,15 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
             }
             let (perr, pcl) = put_block(hl, hr, lim_g, g_end, sink, channels, mut obuf, ofd)
             if perr < 0 {
-                return OrchDone { frames: frames, clamped: clamped, stolen: stolen, most: most, limited: limited, setup_ms: setup_ms, err: perr }
+                return OrchDone {
+                    frames: frames,
+                    clamped: clamped,
+                    stolen: stolen,
+                    most: most,
+                    limited: limited,
+                    setup_ms: setup_ms,
+                    err: perr,
+                }
             }
             clamped += pcl
             frames += BLK
@@ -890,15 +1010,40 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
     frames += BLK
     if sink == 1 && obuf.len > 0 {
         fs_write_chunk(ofd, obuf) else |_| {
-            return OrchDone { frames: frames, clamped: clamped, stolen: stolen, most: most, limited: limited, setup_ms: setup_ms, err: -5 }
+            return OrchDone {
+                frames: frames,
+                clamped: clamped,
+                stolen: stolen,
+                most: most,
+                limited: limited,
+                setup_ms: setup_ms,
+                err: -5,
+            }
         }
     }
-    OrchDone { frames: frames, clamped: clamped, stolen: stolen, most: most, limited: limited, setup_ms: setup_ms, err: if ferr < 0 { ferr } else { 0 } }
+    OrchDone {
+        frames: frames,
+        clamped: clamped,
+        stolen: stolen,
+        most: most,
+        limited: limited,
+        setup_ms: setup_ms,
+        err: if ferr < 0 { ferr } else { 0 },
+    }
 }
 
 /// Write one mixed block, its gain ramped `g0`..`g1` (/65536) after the
 /// master gain: (0 or -errno, samples clamped).
-fn put_block(l: List[int], r: List[int], g0: int, g1: int, sink: int, channels: int, mut obuf: List[byte], ofd: int) -> (int, int) {
+fn put_block(
+    l: List[int],
+    r: List[int],
+    g0: int,
+    g1: int,
+    sink: int,
+    channels: int,
+    mut obuf: List[byte],
+    ofd: int,
+) -> (int, int) {
     var clamped = 0
     var i = 0
     while i < BLK {
@@ -943,15 +1088,95 @@ fn put_block(l: List[int], r: List[int], g0: int, g1: int, sink: int, channels: 
 
 /// A struck voice's partials at their strike: ratios to the note (or
 /// fixed hertz for the tam-tam and the drum), amplitudes, decays.
-fn strike(mut pph: List[int], mut pinc: List[int], mut pamp: List[int], mut pdec: List[int], mut ptop: List[int], mut p0amp: List[int], base: int, t: int, inc: int, rate: int) {
+fn strike(
+    mut pph: List[int],
+    mut pinc: List[int],
+    mut pamp: List[int],
+    mut pdec: List[int],
+    mut ptop: List[int],
+    mut p0amp: List[int],
+    base: int,
+    t: int,
+    inc: int,
+    rate: int,
+) {
     // ratio (/1000) or hertz, amplitude (/1000), decay to 1/e in ms
     let spec: List[int] = match t {
         // timpani: the membrane's modes, a strong principal
-        12 => [1000, 1000, 1700, 1504, 500, 1200, 1742, 350, 1000, 2000, 250, 800, 2245, 150, 600, 2494, 100, 500],
+        12 =>
+            [
+                1000,
+                1000,
+                1700,
+                1504,
+                500,
+                1200,
+                1742,
+                350,
+                1000,
+                2000,
+                250,
+                800,
+                2245,
+                150,
+                600,
+                2494,
+                100,
+                500,
+            ],
         // bells: hum, prime, tierce, quint, nominal, upper partials
-        13 => [500, 600, 9000, 1000, 700, 6000, 1200, 500, 5000, 1500, 300, 4000, 2000, 1000, 4000, 3000, 300, 2500, 4000, 200, 1800],
+        13 =>
+            [
+                500,
+                600,
+                9000,
+                1000,
+                700,
+                6000,
+                1200,
+                500,
+                5000,
+                1500,
+                300,
+                4000,
+                2000,
+                1000,
+                4000,
+                3000,
+                300,
+                2500,
+                4000,
+                200,
+                1800,
+            ],
         // tam-tam: low inharmonic modes, in hertz
-        14 => [73, 700, 6000, 97, 900, 5500, 131, 800, 5000, 167, 600, 4500, 211, 500, 4000, 263, 400, 3500, 331, 300, 3000, 419, 250, 2500],
+        14 =>
+            [
+                73,
+                700,
+                6000,
+                97,
+                900,
+                5500,
+                131,
+                800,
+                5000,
+                167,
+                600,
+                4500,
+                211,
+                500,
+                4000,
+                263,
+                400,
+                3500,
+                331,
+                300,
+                3000,
+                419,
+                250,
+                2500,
+            ],
         // bass drum: two low modes, in hertz
         16 => [52, 1000, 700, 81, 500, 350],
         _ => [],

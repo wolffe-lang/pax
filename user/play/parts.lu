@@ -16,18 +16,27 @@
 /// Units in a whole note: 64 x 9 x 5 x 7 x 4, so 64ths, dots, double
 /// dots, triplets and 5-, 6-, 7- and 9-tuplets are whole numbers.
 const WHOLE: int = 80640
+
 /// The time grid's step: a sixty-fourth note.
 const STEP: int = 1260
+
 const MAX_PARTS: int = 24
+
 const MAX_CHORD: int = 6
 
 /// A note's marks (bits of `n_marks`).
 const M_STAC: int = 1
+
 const M_MARC: int = 2
+
 const M_ACC: int = 4
+
 const M_TEN: int = 8
+
 const M_SLUR: int = 16
+
 const M_TREM: int = 32
+
 /// Slurred into from the part's previous note: no new attack.
 const M_LEGIN: int = 64
 
@@ -394,11 +403,15 @@ fn parse_parts(text: str) -> Score {
         }
         if w == "tempo" {
             if in_bars {
-                return score_refused("line {line_no}: after the first bar, a tempo goes on a bar line (`bar N tempo BPM`)")
+                return score_refused(
+                    "line {line_no}: after the first bar, a tempo goes on a bar line (`bar N tempo BPM`)",
+                )
             }
             let (u, k) = tempo_at(ws, 1)
             if u < 0 || 1 + k != ws.len {
-                return score_refused("line {line_no}: tempo is BPM (20-400) and an optional beat length")
+                return score_refused(
+                    "line {line_no}: tempo is BPM (20-400) and an optional beat length",
+                )
             }
             upm0 = u
             continue
@@ -406,7 +419,9 @@ fn parse_parts(text: str) -> Score {
         if w == "meter" {
             let m = if ws.len == 2 { meter_of(ws[1]) } else { -1 }
             if in_bars || m < 0 {
-                return score_refused("line {line_no}: meter is n/d (n 1-32, d 1 2 4 8 16 32), before the first bar")
+                return score_refused(
+                    "line {line_no}: meter is n/d (n 1-32, d 1 2 4 8 16 32), before the first bar",
+                )
             }
             meter = m
             continue
@@ -420,7 +435,9 @@ fn parse_parts(text: str) -> Score {
             }
             let name = ws[1]
             if !good_name(name) || reserved(name) {
-                return score_refused("line {line_no}: '{name}' cannot name a part (1-16 letters, digits or -, a letter first, not a word of the format)")
+                return score_refused(
+                    "line {line_no}: '{name}' cannot name a part (1-16 letters, digits or -, a letter first, not a word of the format)",
+                )
             }
             for n in names {
                 if n == name {
@@ -429,11 +446,15 @@ fn parse_parts(text: str) -> Score {
             }
             let tb = timbre_of(ws[2])
             if tb < 0 {
-                return score_refused("line {line_no}: '{ws[2]}' is not a timbre (notes/px32-format.md §5)")
+                return score_refused(
+                    "line {line_no}: '{ws[2]}' is not a timbre (notes/px32-format.md §5)",
+                )
             }
             let lv = dyn_step(ws[3])
             if lv < 0 {
-                return score_refused("line {line_no}: '{ws[3]}' is not a level (ppp pp p mp mf f ff fff)")
+                return score_refused(
+                    "line {line_no}: '{ws[3]}' is not a level (ppp pp p mp mf f ff fff)",
+                )
             }
             var pan = 0
             if ws.len == 6 {
@@ -465,7 +486,9 @@ fn parse_parts(text: str) -> Score {
                 return score_refused("line {line_no}: bar takes its number")
             }
             if in_bars && n != b_no[b_no.len - 1] + 1 {
-                return score_refused("line {line_no}: bar {n} follows bar {b_no[b_no.len - 1]} (bars are numbered one by one)")
+                return score_refused(
+                    "line {line_no}: bar {n} follows bar {b_no[b_no.len - 1]} (bars are numbered one by one)",
+                )
             }
             var upm = 0
             var rit = 0
@@ -476,21 +499,29 @@ fn parse_parts(text: str) -> Score {
                 if kw == "meter" {
                     let m = if k + 1 < ws.len { meter_of(ws[k + 1]) } else { -1 }
                     if m < 0 {
-                        return score_refused("line {line_no}: meter is n/d (n 1-32, d 1 2 4 8 16 32)")
+                        return score_refused(
+                            "line {line_no}: meter is n/d (n 1-32, d 1 2 4 8 16 32)",
+                        )
                     }
                     meter = m
                     k += 2
                 } else if kw == "tempo" {
                     let (u, used) = tempo_at(ws, k + 1)
                     if u < 0 {
-                        return score_refused("line {line_no}: tempo is BPM (20-400) and an optional beat length")
+                        return score_refused(
+                            "line {line_no}: tempo is BPM (20-400) and an optional beat length",
+                        )
                     }
                     upm = u
                     k += 1 + used
                 } else if kw == "rit" || kw == "accel" {
                     let (u, used) = tempo_at(ws, k + 1)
                     let o = k + 1 + used
-                    let bars = if o + 1 < ws.len && ws[o] == "over" { number(ws[o + 1]) } else { -1 }
+                    let bars = if o + 1 < ws.len && ws[o] == "over" {
+                        number(ws[o + 1])
+                    } else {
+                        -1
+                    }
                     if u < 0 || bars < 1 {
                         return score_refused("line {line_no}: {kw} BPM [UNIT] over BARS")
                     }
@@ -507,7 +538,9 @@ fn parse_parts(text: str) -> Score {
                     if k + 1 < ws.len && ws[k] == "at" {
                         fat = units_of(ws[k + 1])
                         if fat < 0 || fat > meter {
-                            return score_refused("line {line_no}: a fermata's `at` is a length inside the bar")
+                            return score_refused(
+                                "line {line_no}: a fermata's `at` is a length inside the bar",
+                            )
                         }
                         k += 2
                     }
@@ -515,11 +548,15 @@ fn parse_parts(text: str) -> Score {
                     (mut f_at).push(fat)
                     (mut f_len).push(fl)
                 } else {
-                    return score_refused("line {line_no}: '{kw}' is not meter, tempo, rit, accel or fermata")
+                    return score_refused(
+                        "line {line_no}: '{kw}' is not meter, tempo, rit, accel or fermata",
+                    )
                 }
             }
             if meter % STEP != 0 {
-                return score_refused("line {line_no}: the meter is not a whole number of sixty-fourths")
+                return score_refused(
+                    "line {line_no}: the meter is not a whole number of sixty-fourths",
+                )
             }
             (mut b_no).push(n)
             (mut b_len).push(meter)
@@ -706,13 +743,15 @@ fn parse_parts(text: str) -> Score {
                 if w == "<" || w == ">" || w == "cresc" || w == "dim" || w == "!" {
                     if hair != 0 {
                         var to = hair_from + hair * 256
-                        to = if to < 0 { 0 } else { if to > 896 { 896 } else { to } }
+                        to = if to < 0 { 0 } else if to > 896 { 896 } else { to }
                         (mut l_pos).push(g)
                         (mut l_lv).push(to)
                         lv = to
                         hair = 0
                     } else if w == "!" {
-                        return score_refused("line {ln}: '!' ends a hairpin, and none is open in part '{names[p]}'")
+                        return score_refused(
+                            "line {ln}: '!' ends a hairpin, and none is open in part '{names[p]}'",
+                        )
                     }
                     if w != "!" {
                         hair = if w == "<" || w == "cresc" { 1 } else { -1 }
@@ -749,7 +788,9 @@ fn parse_parts(text: str) -> Score {
                 }
                 let len = units_of(w[slash + 1..me])
                 if len <= 0 {
-                    return score_refused("line {ln}: '{w}': '{w[slash + 1..me]}' is not a length (1 2 4 8 16 32 64, dots, t or xN, + to join)")
+                    return score_refused(
+                        "line {ln}: '{w}': '{w[slash + 1..me]}' is not a length (1 2 4 8 16 32 64, dots, t or xN, + to join)",
+                    )
                 }
                 var marks = 0
                 var tie = false
@@ -774,7 +815,9 @@ fn parse_parts(text: str) -> Score {
                     mi += 1
                 }
                 if here + len > b_len[bi] {
-                    return score_refused("line {ln}: part '{names[p]}' overfills bar {b_no[bi]} by {here + len - b_len[bi]} units ({WHOLE} a whole note)")
+                    return score_refused(
+                        "line {ln}: part '{names[p]}' overfills bar {b_no[bi]} by {here + len - b_len[bi]} units ({WHOLE} a whole note)",
+                    )
                 }
                 let ps = w[0..slash]
                 var semis = List[int]()
@@ -782,7 +825,9 @@ fn parse_parts(text: str) -> Score {
                     for pw in ps.split(",") {
                         let sm = semi_of(pw)
                         if sm < 0 {
-                            return score_refused("line {ln}: '{pw}' is not a note (C D E F G A B, # b ## bb, octave 0-8, A0 to C8)")
+                            return score_refused(
+                                "line {ln}: '{pw}' is not a note (C D E F G A B, # b ## bb, octave 0-8, A0 to C8)",
+                            )
                         }
                         (mut semis).push(sm)
                     }
@@ -803,12 +848,14 @@ fn parse_parts(text: str) -> Score {
                         qq += 1
                     }
                     if !same {
-                        return score_refused("line {tie_line}: a tie in part '{names[p]}' to '{w}' (line {ln}), which is not the same notes")
+                        return score_refused(
+                            "line {tie_line}: a tie in part '{names[p]}' to '{w}' (line {ln}), which is not the same notes",
+                        )
                     }
                     qq = tie_from
                     while qq <= tie_to {
                         n_e[qq] = g + len
-                        n_marks[qq] = (n_marks[qq] & (M_LEGIN | M_TREM)) | marks
+                        n_marks[qq] = n_marks[qq] & (M_LEGIN | M_TREM) | marks
                         qq += 1
                     }
                     if !tie {
@@ -863,13 +910,17 @@ fn parse_parts(text: str) -> Score {
             }
             if !any {
                 if tie_from >= 0 {
-                    return score_refused("line {tie_line}: part '{names[p]}' ties into bar {b_no[bi]}, where it has no notes")
+                    return score_refused(
+                        "line {tie_line}: part '{names[p]}' ties into bar {b_no[bi]}, where it has no notes",
+                    )
                 }
                 here = b_len[bi]
                 slur_end = -1
             }
             if here != b_len[bi] {
-                return score_refused("line {last_line}: part '{names[p]}' fills bar {b_no[bi]} short by {b_len[bi] - here} units ({WHOLE} a whole note)")
+                return score_refused(
+                    "line {last_line}: part '{names[p]}' fills bar {b_no[bi]} short by {b_len[bi] - here} units ({WHOLE} a whole note)",
+                )
             }
             ti = tj
             bi += 1
@@ -878,7 +929,9 @@ fn parse_parts(text: str) -> Score {
             return score_refused("line {tie_line}: part '{names[p]}' ties past the last bar")
         }
         if hair != 0 {
-            return score_refused("line {hair_line}: part '{names[p]}' opens a hairpin that never ends (a dynamic or ! ends it)")
+            return score_refused(
+                "line {hair_line}: part '{names[p]}' opens a hairpin that never ends (a dynamic or ! ends it)",
+            )
         }
         (mut p_count).push(n_s.len - p_first[p])
         (mut l_count).push(l_pos.len - l_first[p])
