@@ -17,8 +17,8 @@
                       back, twice: the second time with 120 MiB of the
                       program's own memory held
      tree noop        (a role the probe starts: exit 7)
-     tree speed       16 MiB written and read back, then eight more
-                      passes over it, timed
+     tree speed       16 MiB written and read back, then 64 more
+                      passes over it (1 GiB each way), timed
 
    Built with the host's cc: `cc -static -O1` (tools/mkprobes). Lines
    that depend on the host and not on the ABI (how many megabytes fit, a
@@ -1085,19 +1085,20 @@ static int speed(void) {
     lseek(fd, 0, SEEK_SET);
     for (int i = 0; i < 16; i++) g += read(fd, mb, sizeof mb);
     long t2 = mono_ms();
-    /* eight more passes over the same 16 MiB (its frames are there now) */
-    for (int p = 0; p < 8; p++) {
+    /* 64 more passes over the same 16 MiB (its frames are there now):
+       1 GiB each way, long enough for a clock that steps 10 ms */
+    for (int p = 0; p < 64; p++) {
         lseek(fd, 0, SEEK_SET);
         for (int i = 0; i < 16; i++) w8 += write(fd, mb, sizeof mb);
     }
     long t3 = mono_ms();
-    for (int p = 0; p < 8; p++) {
+    for (int p = 0; p < 64; p++) {
         lseek(fd, 0, SEEK_SET);
         for (int i = 0; i < 16; i++) g8 += read(fd, mb, sizeof mb);
     }
     long t4 = mono_ms();
-    say("speed: 16 MiB written %ld, read back %ld, %s; eight more passes: written %ld, read %ld\n", w, g, fst(fd) + 20, w8, g8);
-    say("~speed: 16 MiB first written in %ld ms, read in %ld ms; 128 MiB rewritten in %ld ms, read in %ld ms\n", t1 - t0, t2 - t1,
+    say("speed: 16 MiB written %ld, read back %ld, %s; 64 more passes: written %ld, read %ld\n", w, g, fst(fd) + 20, w8, g8);
+    say("~speed: 16 MiB first written in %ld ms, read in %ld ms; 1 GiB rewritten in %ld ms, read in %ld ms\n", t1 - t0, t2 - t1,
         t3 - t2, t4 - t3);
     close(fd);
     long u = r(unlink("/t/big")), d = r(rmdir("/t"));

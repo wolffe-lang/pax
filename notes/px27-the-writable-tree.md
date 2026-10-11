@@ -351,3 +351,95 @@ file"). The first strace run filled 264 MB before it was stopped.
   flat-frames assertion and the probe's frame line, nothing else; a
   `rename` that leaves both names reddens the probe and the session
   that moves a file, nothing else; each within one boot's deadline.
+
+### §3 against what was measured
+
+| predicted | measured |
+|---|---|
+| P1: a module of its own, `kernel/tree`: inodes of 128 bytes in a table that grows a frame at a time; a file's bytes frames under an index of depth 0, 1 or 2; a hole holds no frame | as built. A hole's blocks are tmpfs's (the probe's `hole:` lines, on both: a byte written at 1 MiB costs 8 blocks, a file cut inside a hole 0, a cut tail reads zero when the file grows again). Not predicted: the inode table's frames are never given back (they hold the most inodes there were at once), so the kernel's line counts them apart |
+| P1: a directory is a file of records; a position is a record's offset; an entry there for the whole of a reading is returned exactly once | **right** (`dir: read while it changes: every name that stayed was returned exactly once 1, a name returned twice 0, a removed name returned after its removal 0`, on both); a record's header is 8 bytes, not the 16 the cost line said |
+| P1: the cap is half the frames free when the tree is made, and never below 2,048 free in the machine: -ENOSPC | **right, both measured** in the soak: `tree: full: frames held 32038 of 32038, frames free 31491` (the cap, 125 files of 1 MiB), and with 120 MiB of the program's own memory held `frames held 30699 of 32038, frames free 2048, reserve 2048` (the reserve, 120 files), after which the program could still have 64 KiB of memory of its own |
+| P2: the initramfs a read-only layer per file, a page copied at its first write; 5 frames ± 2 at boot | **right: 6** in the shell's image (the table's root, the page of zeros, one frame of inodes, a frame of records each for `/`, `/bin` and `/etc`), and 6 in the probe's. `/etc/pax-run` written in the middle, cut to 3 bytes, grown, renamed, removed and made again: the probe's `initramfs:` lines, on both; the session's `echo more >> /etc/motd` leaves exactly one frame |
+| P2: `execve` of a file written since boot refused by name, -EACCES; a renamed program still runs | **right** (`~exec: … status 113` and its refusal line; `initramfs: the program renamed 0, run by its new name: status 7`, on both) |
+| P2: `/dev` a second file system: -EXDEV across it, -EROFS for a name made in it, `mkdir /dev` -EEXIST, `rmdir /dev` and `rename` of it -EBUSY | **right** (`rename: … of /dev -16, onto /dev -16, into /dev -18, out of /dev -18`, `remove: … of /dev -16`, `make: … of /dev -17`, on both; `~limits: a file made in /dev -30, a directory -30` on PAX, where Linux makes them: named drift) |
+| P3: a file's link count 1, a directory's 2 and one a subdirectory, its size 40 and 20 an entry | **right** on both (`dir:` and `rename:` lines: 40, 140, 120, 100, 760) |
+| P3: an unlinked file lives while a descriptor holds it, `st_nlink` 0, and its frames return at the last close | **right** (`unlinked:` lines on both; the kernel's line after the probe: every frame back but the two named in T4) |
+| P3: a working directory removed: it stays, empty; `getdents64` and a create -ENOENT; `stat(".")` 0 links (predicted); `getcwd` -ENOENT (predicted); `..` still leads up | **right, all of it**, on both (`cwd:` lines) |
+| P3: `rmdir` of `.` -EINVAL, of `..` -ENOTEMPTY, of `/` -EBUSY | **right** on both |
+| P4: `rename` all or nothing; over a file; the same inode; -EISDIR, -ENOTDIR, -ENOTEMPTY, -EINVAL into itself and below; `.` and `..` -EBUSY ("-EINVAL possible"); a moved directory takes its subtree and a process working in it | **right** on both, -EBUSY included; and 500 renames over a name while another process opens it: the reader never found the name missing or empty (`atomic:`), on both |
+| P5: mtime and ctime real, 10 ms steps; atime by relatime's rule; uid, gid 0; an initramfs entry's times its header's | **right** as far as the probe goes (`times:` lines on both: which of the three a write, a read, a rename, a truncation and an unlink move, and a second read leaving atime alone). A directory's atime on a reading of it is not moved on PAX and not probed |
+| P5, P7: refused by name: links, device nodes -EPERM; mode, owner, times -EOPNOTSUPP; the open flags; a `renameat2` flag; counted | **right**: twelve refusal lines in the probe, twelve counted (`tree: … refusals 12`), T2 |
+| P6: umask 022 at start, inherited, kept | **right** (`make: umask 022`, `mode:` lines on both) |
+| P7: 16 new numbers ± 2 | **17**: 18, 21, 74, 75, 76, 77, 82, 83, 84, 87, 95, 258, 263, 264, 269, 316, 439 (glibc 2.39's `faccessat` asks `faccessat2` first; the probe asks 269 itself). Each is in a strace: 82, 83, 84, 87 in bu21's and lobo's, the rest in the probe's (`notes/px27/straces/tree-probe.calls.txt`) |
+| P7: `O_RDONLY\|O_TRUNC`, `pwrite` on an O_APPEND descriptor, `copy_file_range` onto O_APPEND and onto itself, `sendfile` and `splice` between files | all as Linux, measured where the prediction was silent: `O_RDONLY\|O_TRUNC` truncates; `pwrite` at 0 on an O_APPEND descriptor appends; `copy_file_range` onto O_APPEND -EBADF, overlapping itself -EINVAL, apart 10; `sendfile` onto O_APPEND -EINVAL; `splice` file to file -EINVAL |
+| P7: -EFBIG past 1 GiB | **PAX only** (`~limits: a byte written at 1 GiB -27, a file grown to 2 GiB -27`; tmpfs takes both): named drift |
+| P8: frames at the prompt 5 ± 2 fewer than trunk's with the same programs | **the tree's own: 6. The kernel's: 36** (trunk `88544 before, 88046 with 1 processes`; this kernel `88508`, `88010`, the same thirteen programs and 512 MiB): the other 30 are the kernel's own image, which grew by that many pages, and were not predicted. With bu21's five in the image: @@SHELL_FRAMES@@ |
+| P8: 16 MiB under TCG write 30 MiB/s, read 40 MiB/s; under KVM 400 and 500, each within a factor of three | **wrong by more than that, the right way**: the tree copies with REP MOVSQ, not a byte at a time. kasumi, TCG: native 128 MiB rewritten in 130 ms and read in 130 ms (about 985 MiB/s), the first 16 MiB (frames taken and zeroed) in 30 ms; release 50 ms and 40 ms (2,560 and 3,200 MiB/s). hasu, KVM: @@KVM_SPEED@@. The guest's clock steps 10 ms |
+| P8: the soak flat, the fill to ENOSPC and back, under 180 s a boot | **right**: four census lines, all `frames held 7, inodes 7, frames free 63522` (native BIOS); every frame and inode back after the two fills; the program's break moved 0 bytes; a soak boot takes about @@SOAK_SECS@@ s on kasumi |
+| P8: at least 100 KVM boots on hasu | @@KVM_BOOTS@@ |
+| P9: every kernel's bytes move; `tests/mpx3-shell`'s three transcripts that list `/bin` | **right**: `user/console/shell-howl.expect`, `shell-plumb.expect`, `shell-long.expect` (S6); S2 held on the first boot. The shell's image already booted with 512 MiB on both firmwares (px26), so nothing changed there |
+| P9: the other suites' verdicts do not move | @@GAUNTLET@@ |
+| P10: bu21's five on trunk's kernel: `mkdir: cannot create directory …: Function not implemented`, `syscall 83: -ENOSYS`; `echo one > f`: pelt's own refusal and `refused: the initramfs is read-only, -30` | **right** (`notes/px27/kasumi-red-shell-tree-on-trunk-kernel.txt`: `mkdir: cannot create directory '/t': Function not implemented`; `pelt: line 5: cannot create a/f1: Read-only file system`); the probe on trunk's kernel: -ENOSYS for 18, 83, 84, 87, 95 and exit status 9 (`kasumi-red-tests-on-trunk-kernel.mpx3-tree.out`) |
+| P10: plant A reddens the probe's frame line; plant B the probe | **right**, and in how: plant A at T4 (`792 frames not back`), plant B at T1 (`rename: a to c 0: a mode 100644 …`: both names) and then a kernel panic (the directory's entry count goes below zero when the second name is removed), which is why a boot now ends at a `PANIC` line too: the first run of plant B on kasumi waited out the boot's 300 s |
+
+## 4. Evidence index
+
+### The Linux side
+
+- The straces (strace 6.8, Linux 7.2.8, kasumi, each run in a throwaway `px13-ubuntu` container, the programs on a tmpfs): `notes/px27/straces/bu21-NN-*.strace` and `.out` (50 runs of the file changers, `ls`, `stat` and pelt's redirections; `strace-changers.sh`), `lobo-b256d2e-files.txt` (lobo's file-side lines; `strace-lobo.sh`), `tree-probe.calls.txt` (every distinct call the probe makes, counted; the whole strace `@@PROBE_STRACE@@` stays on kasumi). The marked list is §2's.
+- Every transcript's reference is taken afresh by the suite: `tools/linux-tree` (a throwaway container, no network, nothing of the host mounted but a staging directory; inside it the root a tmpfs, `tools/linux-tty --root --pid1`). On kasumi the container is `px13-ubuntu` on Linux 7.2.8 (podman); in CI `python:3.12-slim` by digest on the runner's Linux 6.17.0-1022-azure (docker 28.0.4): the probe prints the same on both, and PAX the same as each.
+
+### The probe (`user/elf/tree.c`, one static file on both)
+
+- Linux and PAX, `cmp` equal: `notes/px27/session-probes.{linux,pax}.txt` (kasumi, native BIOS, the gauntlet at `ef994df`); the `~` lines differ by design and T2 holds PAX's to their text. In CI the same comparison runs against the runner's kernel on both tiers, BIOS and UEFI (job `mpx3-tree`).
+
+### The sessions
+
+- `shell-tree`, PAX against Linux, `cmp` equal with seven dates compared by rule: `notes/px27/session-shell-tree.{pax,linux}.txt`; the same keys through the PS/2 keyboard (`shell-tree-ps2`); both tiers, BIOS and UEFI (T1). `rm -rf /` is refused with Linux's two lines and status 1, and afterwards Linux's root holds the 25 names it started with (T6) and PAX's tree the inodes it was made with (T4).
+
+### The soak and the fill
+
+- `notes/px27/kasumi-native-bios-soak.serial.log`: the four census lines, the two `tree: full:` lines, the frames and tree lines after init's end; the program's own lines in `session-soak.{pax,linux}.txt`.
+
+### Frames at the prompt
+
+- Before: `notes/px27/kasumi-base-5afb903.mpx3-shell.out` (trunk's kernel, pelt and the twelve programs: `frames free 88544 before, 88046 with 1 processes`). After, the same programs: `88508`, `88010` (kasumi, this lane's first boot of the suite on the new kernel); with the eighteen: the gauntlet's `mpx3-shell` output.
+
+### Red first
+
+- On trunk's kernel (`5afb903`'s `kernel/` and `boot/` under this lane's tests, kasumi, native BIOS): `notes/px27/kasumi-red-tests-on-trunk-kernel.mpx3-tree.out` (the probe: T1 to T4 and T8 FAIL, `stopped early`) and `kasumi-red-shell-tree-on-trunk-kernel.txt` (the typed session's first lines).
+- Planted break A (a file's frames are kept when it goes), commit dc80c20: CI run **38150572440**, job mpx3-tree **114502991094** the only failing job of 23, red 3 min 26 s after it started (`FAIL T4 native bios probes: 792 frames not back`, then `stopped early`). Reverted in 12a28ba. On kasumi first: `notes/px27/kasumi-plant-a.mpx3-tree.out`.
+- Planted break B (a rename leaves the old name in place), commit c2364f9: CI run **38151451539**, job mpx3-tree **114505596525**, red 4 min 38 s after it started (`FAIL T1 native bios probes: … rename: a to c 0: a mode 100644 links 1 size 3 blocks 8`, `FAIL T8 … the kernel panicked: PANIC overflow ./tree/tree.lu:1050`, then `stopped early`); @@PLANT_B_JOBS@@. Reverted in ef994df. On kasumi first: `notes/px27/kasumi-plant-b.mpx3-tree.out`.
+
+### Boot counts
+
+@@BOOTS@@
+
+### CI
+
+- Run 38150572440 (plant A's head): 22 jobs green, mpx3-tree red as planted. @@CI@@ The head's own run is in the PR body.
+
+### Drift from the contract, reported
+
+1. **How the item list and the "no call on a guess" rule were read**: §2, under the marked list. The calls item 2 names outright are in and each is in the probe's strace on Linux; `link`, `linkat`, `symlink`, `symlinkat`, `chmod`, `fchmod`, `fchmodat`, `chown`, `fchown`, `utimensat` are in no strace of a program in an image or of lobo and are refused by name.
+2. **`writev` to a file is not here**: px24 had not landed it when this lane was cut. When it does, a file is `files.write_target`'s 4 and takes `files.file_write`.
+3. **No hard link**, so "inodes with link counts" are 1 for a file and 2 and up for a directory; the count is kept and `drop_file` already waits for it to reach 0.
+4. **`execve` runs only the archive's own bytes**: a program copied or written since boot is refused by name, -EACCES.
+5. **PAX's `/dev` is fixed** (-EROFS for a name made or removed there; Linux's is writable), and **the largest file is 1 GiB** (-EFBIG; tmpfs's limit is far higher).
+6. **A directory lists oldest first** but for reused records, where tmpfs on 7.2.8 lists newest first; no test depends on the order.
+7. **The inode table's frames are never given back** (at most 512 frames, for 16,384 inodes); T4 counts them apart.
+8. **Dates in `ls -l` are compared by rule**, not held by a fixed clock: the date of a file made in the session is masked on both sides, a date from 1970 is compared as it stands.
+9. **The Linux side of `tests/mpx3-tree` needs a container engine** (docker in CI, podman on kasumi) and its container is `--privileged` (mount, chroot, a pid namespace, all inside it); nothing of the host is mounted but a staging directory under `build/`.
+10. **Not done, by name**: links of either kind, `chmod`, `chown`, times set by a call, `mmap` of a file, `fallocate`, `statfs`, file locks, `O_SYNC` and its kin, a directory's atime, `/proc` and `/sys` beyond `/proc/self/exe`, AF_UNIX path sockets, SMP.
+
+### What lobo on PAX still lacks from the file side
+
+From this lane's strace of lobo `b256d2e` (`lobo-b256d2e-files.txt`): every call it makes on its logs and its pid file is answered (`mkdir`, `openat` with O_CREAT\|O_TRUNC and O_CREAT\|O_APPEND, `write`, `rename`, `unlink`, `statx` by path and by descriptor, `lseek`). What it opens besides and PAX does not have: `/proc/self/status`, `/proc/self/cgroup`, `/sys/fs/cgroup/cgroup.controllers`, `/sys/fs/cgroup/cpu.max`, `/sys/devices/system/cpu/online` (each -ENOENT on PAX; whether lobo goes on without them was not run), and its control socket, an AF_UNIX path socket in `logs/` (`bind`, and `unlink` of the name), which no lane owns yet. lobo itself was not run on PAX.
+
+### Filed
+
+@@FILED@@
+
+## 5. Done-when
+
+@@DONE@@

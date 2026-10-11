@@ -12,7 +12,7 @@
 #     names, the errnos, which times move, the copies in the kernel;
 #     then, as `tree soak`, 10,000 rounds of create, write, rename,
 #     unlink and a fill to ENOSPC and back; and `tree speed`, 16 MiB
-#     written and read back;
+#     written and read back, then 1 GiB each way over the same file;
 #   - a typed session (user/console/shell-tree.keys) in pelt with
 #     boreutils' `mkdir`, `rmdir`, `rm`, `mv`, `cp`, `cat >`, `>>`, `ls
 #     -l` and `stat` at user/boreutils.pin (bu21): a tree made, files
@@ -82,8 +82,9 @@
 #      exactly the names it started with (the session removed what it
 #      made; `rm -rf /` removed nothing). T1 holds PAX to the same
 #      transcript, and T4 to the same inodes.
-#   T7 speed: 16 MiB written and read back and eight more passes over
-#      it (T1), and the times the program measured (10 ms steps on PAX).
+#   T7 speed: 16 MiB written and read back and 64 more passes over it,
+#      1 GiB each way (T1), and the times the program measured (10 ms
+#      steps on PAX).
 #   T8 the end: `PAX: init … ended with status <s>; nothing left to
 #      run`, `halt`, and qemu-halt holds the machine halted.
 # The probes session of the first leg runs first, and the suite stops
@@ -416,7 +417,7 @@ for leg in $legs; do
             # T7: the speed.
             if [ "$s" = speed ]; then
                 sp=$(grep -m1 '^~speed' "$out")
-                printf '%s\n' "$sp" | grep -Eq '^~speed: 16 MiB first written in [0-9]+ ms, read in [0-9]+ ms; 128 MiB rewritten in [0-9]+ ms, read in [0-9]+ ms$' \
+                printf '%s\n' "$sp" | grep -Eq '^~speed: 16 MiB first written in [0-9]+ ms, read in [0-9]+ ms; 1 GiB rewritten in [0-9]+ ms, read in [0-9]+ ms$' \
                     && say "PASS T7 $id: 16 MiB: $sp (accel $(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null); Linux here: $(grep -m1 '^~speed' "$out.linux"))" \
                     || bad "T7 $id: no speed line ('$sp')"
             fi
