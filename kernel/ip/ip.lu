@@ -1,5 +1,5 @@
 //! ip — IPv4 over Ethernet: one place a received header is judged, one
-//! way a datagram leaves (px21).
+//! way a datagram leaves (px21), and the loopback (px23).
 //!
 //! A datagram rides in an Ethernet frame of type 0x0800 (RFC 894), its
 //! header at byte 14 (RFC 791), every field big-endian:
@@ -46,7 +46,8 @@
 //!     other         a destination that is not this station's address,
 //!                   the limited broadcast or this subnet's broadcast
 //!     protocol      a protocol nothing here speaks (anything but
-//!                   ICMP and, since px22, UDP). Counted here;
+//!                   ICMP, UDP since px22, and TCP once kernel/tcp has
+//!                   said it is there, px23). Counted here;
 //!                   kernel/netd asks kernel/icmp
 //!                   to say so to the sender
 //!
@@ -69,9 +70,25 @@
 //! router may fragment what it sends either. An echo reply is as long
 //! as its request, which came in one frame, so it always fits.
 //!
+//! **Loopback** (px23). A datagram for this station's own address or
+//! for anything in 127/8 never reaches kernel/arp or the device, and
+//! needs none: `send_from` composes it as any other — the same header,
+//! an identification from a counter of its own (the wire's must not
+//! skip), a frame header of zeros — in the next of `LOOP` (64) frames
+//! and leaves it there; a 65th while 64 wait is the named drop
+//! `loop-full`. kernel/netd's `drain` takes them in order (`loop_peek`,
+//! `loop_done`) and gives each to `input` with `looped` set: its source
+//! may then be this station's address or in 127/8 and its destination
+//! in 127/8, which from the wire stay `source` and `other`. Everything
+//! else is judged as a frame from the wire is, the checksum included.
+//! The source of a datagram that loops back is the one its sender
+//! names; `send` names 127.0.0.1 for a destination in 127/8 and this
+//! station's address otherwise.
+//!
 //! The address, netmask and gateway are `start`'s arguments, given
-//! once at boot. State is words of boot/net.S's `pax_ip_state` and one
-//! frame, under `sync.ip()`, which is taken before `sync.arp()` and
+//! once at boot. State is words of boot/net.S's `pax_ip_state` and
+//! `pax_ip_loop`, one frame to compose in and the loopback's 64, under
+//! `sync.ip()`, which is taken before `sync.arp()` and
 //! `sync.net()`. Nothing here allocates from the heap.
 //!
 //! Written from RFC 791 (the header, the options' encoding), RFC 894,
@@ -88,6 +105,7 @@ use sync
 extern "c" fn pax_fb_copy(dst: u64, src: u64, bytes: u64)
 
 extern "c" let pax_ip_state: *u64
+extern "c" let pax_ip_loop: *u64
 
 /// The frame header's length: where a datagram starts.
 pub const ETH: u64 = 14
@@ -101,6 +119,12 @@ pub const TTL: u64 = 64
 pub const ICMP: u64 = 1
 /// UDP's (px22).
 pub const UDP: u64 = 17
+/// TCP's (px23).
+pub const TCP: u64 = 6
+/// The loopback queue's frames.
+pub const LOOP: u64 = 64
+/// 127.0.0.1.
+pub const LOOPBACK: u64 = 0x7f000001
 
 // pax_ip_state's words.
 const I_ADDR: u64 = 0
@@ -108,6 +132,10 @@ const I_MASK: u64 = 1
 const I_GATEWAY: u64 = 2
 const I_IDENT: u64 = 3 // the next datagram's identification
 const I_FRAME: u64 = 4 // where a datagram is composed (HHDM)
+const I_LOOP_HEAD: u64 = 5 // looped datagrams taken since `start`
+const I_LOOP_TAIL: u64 = 6 // looped datagrams put
+const I_LOOP_IDENT: u64 = 7 // the next looped datagram's identification
+const I_TCP: u64 = 30 // 1 once kernel/tcp is started: protocol 6 is spoken
 
 /// The counters (`count`): datagrams that passed every rule and were
 /// delivered to their protocol.
@@ -149,6 +177,13 @@ pub const C_WITH_OPTIONS: u64 = 24
 /// address.
 pub const C_BROADCAST: u64 = 25
 
+/// Datagrams put on the loopback queue (px23).
+pub const C_LOOP_TX: u64 = 26
+/// Datagrams from the loopback queue delivered to their protocol.
+pub const C_LOOP_RX: u64 = 27
+/// Not put: the loopback queue held `LOOP` already.
+pub const C_LOOP_FULL: u64 = 28
+
 /// `input`'s answers: the datagram was dropped (and counted).
 pub const DROP: u64 = 0
 /// It is ICMP's.
@@ -157,6 +192,8 @@ pub const TO_ICMP: u64 = 1
 pub const NO_PROTOCOL: u64 = 2
 /// It is UDP's (px22).
 pub const TO_UDP: u64 = 3
+/// It is TCP's (px23).
+pub const TO_TCP: u64 = 4
 
 /// `send`'s answers beyond kernel/arp's SENT, QUEUED, DROPPED and
 /// FAILED: the payload is over 1480 bytes.
@@ -172,6 +209,17 @@ fn iw(i: u64) -> u64 {
 fn put_iw(i: u64, v: u64) {
     // # Safety: as `iw`.
     unsafe { ((pax_ip_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+// pax_ip_loop: 64 frames' addresses (HHDM), then 64 lengths.
+fn lw(i: u64) -> u64 {
+    // # Safety: i < 128, a word of boot/net.S's pax_ip_loop.
+    unsafe { ((pax_ip_loop as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_lw(i: u64, v: u64) {
+    // # Safety: as `lw`.
+    unsafe { ((pax_ip_loop as u64 + i * 8) as *u64).write_volatile(v) }
 }
 
 fn bump(i: u64) {
@@ -258,6 +306,18 @@ pub fn start(address: u64, netmask: u64, gateway: u64) {
     if pa != 0 {
         put_iw(I_FRAME, pa + frames.hhdm())
     }
+    i = 0
+    while i < LOOP {
+        let lp = frames.alloc() else 0
+        put_lw(i, if lp != 0 { lp + frames.hhdm() } else { 0 })
+        put_lw(LOOP + i, 0)
+        i += 1
+    }
+}
+
+/// kernel/tcp is there (px23): protocol 6 is its, not `protocol`.
+pub fn speak_tcp() {
+    put_iw(I_TCP, 1)
 }
 
 /// This station's address.
@@ -275,9 +335,30 @@ pub fn gateway() -> u64 {
     iw(I_GATEWAY)
 }
 
-/// Frames this module holds.
+/// Frames this module holds: the one it composes in and the loopback
+/// queue's.
 pub fn frames_held() -> u64 {
-    if iw(I_FRAME) != 0 { 1 } else { 0 }
+    var n: u64 = if iw(I_FRAME) != 0 { 1 } else { 0 }
+    var i: u64 = 0
+    while i < LOOP {
+        if lw(i) != 0 {
+            n += 1
+        }
+        i += 1
+    }
+    n
+}
+
+/// Whether `a` is an address of this machine: this station's, or
+/// anything in 127/8 (px23). A datagram for one loops back.
+pub fn local(a: u64) -> bool {
+    a == iw(I_ADDR) || a >> 24 == 127
+}
+
+/// The source a datagram for `dst` leaves with when its sender names
+/// none: 127.0.0.1 for 127/8, else this station's address.
+pub fn source_for(dst: u64) -> u64 {
+    if dst >> 24 == 127 { LOOPBACK } else { iw(I_ADDR) }
 }
 
 /// This subnet's broadcast address.
@@ -300,10 +381,13 @@ pub fn next_hop(dst: u64) -> u64 {
     if on_link(dst) { dst } else { iw(I_GATEWAY) }
 }
 
-/// Whether `src` can be a datagram's source: one host, and not this
-/// one.
-fn source_ok(src: u64) -> bool {
+/// Whether `src` can be a datagram's source: one host, and — from the
+/// wire — not this one.
+fn source_ok(src: u64, looped: bool) -> bool {
     let top = src >> 24
+    if looped {
+        return local(src)
+    }
     src != 0 && top != 127 && top < 224 && !is_broadcast(src) && src != iw(I_ADDR)
 }
 
@@ -341,10 +425,11 @@ fn options(a: u64, n: u64) -> u64 {
 }
 
 /// Judge the datagram in the `len`-byte frame at `frame` (type 0x0800;
-/// kernel/netd, thread context). Returns `(what, ihl, total)`: DROP
-/// (the cause counted), TO_ICMP, TO_UDP or NO_PROTOCOL, the header's length in
-/// bytes and the datagram's total length.
-pub fn input(frame: u64, len: u64) -> (u64, u64, u64) {
+/// kernel/netd), `looped` when it came off the loopback queue and not
+/// the wire. Returns `(what, ihl, total)`: DROP (the cause counted),
+/// TO_ICMP, TO_UDP, TO_TCP or NO_PROTOCOL, the header's length in bytes
+/// and the datagram's total length.
+pub fn input(frame: u64, len: u64, looped: bool) -> (u64, u64, u64) {
     let h = frame + ETH
     var cause: u64 = 0
     var ihl: u64 = 0
@@ -368,12 +453,12 @@ pub fn input(frame: u64, len: u64) -> (u64, u64, u64) {
             cause = C_TTL
         } else if be16(h + 6) & 0x3fff != 0 {
             cause = C_FRAGMENT
-        } else if !source_ok(be32(h + 12)) {
+        } else if !source_ok(be32(h + 12), looped) {
             cause = C_SOURCE
         } else {
             cause = options(h + 20, ihl - 20)
             let dst = be32(h + 16)
-            if cause == 0 && dst != iw(I_ADDR) && !is_broadcast(dst) {
+            if cause == 0 && dst != iw(I_ADDR) && !is_broadcast(dst) && !(looped && dst >> 24 == 127) {
                 cause = C_OTHER
             }
         }
@@ -388,33 +473,81 @@ pub fn input(frame: u64, len: u64) -> (u64, u64, u64) {
     if is_broadcast(be32(h + 16)) {
         bump(C_BROADCAST)
     }
-    if octet(h + 9) == ICMP {
-        bump(C_RX)
-        return (TO_ICMP, ihl, total)
-    }
-    if octet(h + 9) == UDP {
-        bump(C_RX)
-        return (TO_UDP, ihl, total)
+    let proto = octet(h + 9)
+    let known = if proto == ICMP { TO_ICMP } else if proto == UDP { TO_UDP } else if proto == TCP && iw(I_TCP) == 1 { TO_TCP } else { DROP }
+    if known != DROP {
+        bump(if looped { C_LOOP_RX } else { C_RX })
+        return (known, ihl, total)
     }
     bump(C_PROTOCOL)
     (NO_PROTOCOL, ihl, total)
 }
 
 /// Send the `len` bytes at `payload` to `dst` as one datagram of
-/// protocol `protocol`. Returns kernel/arp's SENT or QUEUED, or why
-/// not: SIZE, DOWN, DROPPED, FAILED (each counted).
+/// protocol `protocol`, from 127.0.0.1 when `dst` is in 127/8 and from
+/// this station's address otherwise. Returns kernel/arp's SENT or
+/// QUEUED, or why not: SIZE, DOWN, DROPPED, FAILED (each counted).
 pub fn send(dst: u64, protocol: u64, payload: u64, len: u64) -> u64 {
+    send_from(source_for(dst), dst, protocol, payload, len)
+}
+
+/// Write the 20-byte header of a datagram of `len` payload bytes at
+/// `h`, its checksum made.
+fn header(h: u64, src: u64, dst: u64, protocol: u64, len: u64, ident: u64) {
+    put_byte(h, 0x45)
+    put_byte(h + 1, 0)
+    put_be16(h + 2, 20 + len)
+    put_be16(h + 4, ident)
+    put_be16(h + 6, 0x4000) // DF, offset 0
+    put_byte(h + 8, TTL)
+    put_byte(h + 9, protocol)
+    put_be16(h + 10, 0)
+    put_be32(h + 12, src)
+    put_be32(h + 16, dst)
+    put_be16(h + 10, sum(h, 20))
+}
+
+/// `send` with the source named (px23): `src` is the datagram's source
+/// when `dst` is an address of this machine (the datagram then loops
+/// back: SENT, or DROPPED when the loopback queue is full); a datagram
+/// for the wire leaves from this station's address whatever `src` says.
+pub fn send_from(src: u64, dst: u64, protocol: u64, payload: u64, len: u64) -> u64 {
     let saved = sync.acquire(sync.ip())
+    if len > PAYLOAD_MAX {
+        put_iw(C_TX_SIZE, iw(C_TX_SIZE) + 1)
+        sync.release(sync.ip(), saved)
+        return SIZE
+    }
+    if local(dst) {
+        let tail = iw(I_LOOP_TAIL)
+        let lf = lw(tail % LOOP)
+        if lf == 0 || tail - iw(I_LOOP_HEAD) >= LOOP {
+            put_iw(C_LOOP_FULL, iw(C_LOOP_FULL) + 1)
+            sync.release(sync.ip(), saved)
+            return arp.DROPPED
+        }
+        var k: u64 = 0
+        while k < 12 {
+            put_byte(lf + k, 0)
+            k += 1
+        }
+        put_be16(lf + 12, 0x0800)
+        header(lf + ETH, src, dst, protocol, len, iw(I_LOOP_IDENT))
+        put_iw(I_LOOP_IDENT, (iw(I_LOOP_IDENT) + 1) & 0xffff)
+        // # Safety: a loopback frame, 4096 bytes; 34 + len <= 1514 of
+        // them are written; `payload` is the caller's, `len` bytes.
+        unsafe { pax_fb_copy(lf + ETH + 20, payload, len) }
+        put_lw(LOOP + tail % LOOP, ETH + 20 + len)
+        put_iw(I_LOOP_TAIL, tail + 1)
+        put_iw(C_LOOP_TX, iw(C_LOOP_TX) + 1)
+        sync.release(sync.ip(), saved)
+        return arp.SENT
+    }
     let f = iw(I_FRAME)
     if f == 0 || !net.up() {
         put_iw(C_TX_DROPPED, iw(C_TX_DROPPED) + 1)
         sync.release(sync.ip(), saved)
         return DOWN
-    }
-    if len > PAYLOAD_MAX {
-        put_iw(C_TX_SIZE, iw(C_TX_SIZE) + 1)
-        sync.release(sync.ip(), saved)
-        return SIZE
     }
     var i: u64 = 0
     while i < 6 {
@@ -424,18 +557,8 @@ pub fn send(dst: u64, protocol: u64, payload: u64, len: u64) -> u64 {
     }
     put_be16(f + 12, 0x0800)
     let h = f + ETH
-    put_byte(h, 0x45)
-    put_byte(h + 1, 0)
-    put_be16(h + 2, 20 + len)
-    put_be16(h + 4, iw(I_IDENT))
+    header(h, iw(I_ADDR), dst, protocol, len, iw(I_IDENT))
     put_iw(I_IDENT, (iw(I_IDENT) + 1) & 0xffff)
-    put_be16(h + 6, 0x4000) // DF, offset 0
-    put_byte(h + 8, TTL)
-    put_byte(h + 9, protocol)
-    put_be16(h + 10, 0)
-    put_be32(h + 12, iw(I_ADDR))
-    put_be32(h + 16, dst)
-    put_be16(h + 10, sum(h, 20))
     // # Safety: this module's frame, 4096 bytes; 34 + len <= 1514 of
     // them are written; `payload` is the caller's, `len` bytes.
     unsafe { pax_fb_copy(h + 20, payload, len) }
@@ -454,6 +577,36 @@ pub fn send(dst: u64, protocol: u64, payload: u64, len: u64) -> u64 {
     }
     sync.release(sync.ip(), saved)
     r
+}
+
+/// The oldest datagram on the loopback queue: its frame and length,
+/// `(0, 0)` when none waits. It stays on the queue (its frame cannot be
+/// written over) until `loop_done`. IF clear from here to there.
+pub fn loop_peek() -> (u64, u64) {
+    let saved = sync.acquire(sync.ip())
+    let head = iw(I_LOOP_HEAD)
+    var f: u64 = 0
+    var n: u64 = 0
+    if head != iw(I_LOOP_TAIL) {
+        f = lw(head % LOOP)
+        n = lw(LOOP + head % LOOP)
+    }
+    sync.release(sync.ip(), saved)
+    (f, n)
+}
+
+/// The datagram `loop_peek` answered has been delivered.
+pub fn loop_done() {
+    let saved = sync.acquire(sync.ip())
+    if iw(I_LOOP_HEAD) != iw(I_LOOP_TAIL) {
+        put_iw(I_LOOP_HEAD, iw(I_LOOP_HEAD) + 1)
+    }
+    sync.release(sync.ip(), saved)
+}
+
+/// Datagrams waiting on the loopback queue.
+pub fn loop_waiting() -> u64 {
+    iw(I_LOOP_TAIL) - iw(I_LOOP_HEAD)
 }
 
 /// The module's first line:
@@ -476,10 +629,11 @@ fn item(v: u64, name: str) {
     log.put(name)
 }
 
-/// The counters' two lines:
+/// The counters' three lines:
 ///
 ///     ip: rx <n> datagrams delivered (<o> with options, <b> broadcast), dropped <…> short <…> version <…> ihl <…> checksum <…> length <…> ttl <…> fragment <…> source <…> option <…> source-route <…> other <…> protocol
 ///     ip: tx <n> datagrams, not sent <s> size <d> dropped
+///     ip: loopback <t> datagrams sent, <r> delivered, <f> not sent for a full queue, <w> waiting
 pub fn counters() {
     log.put("ip: rx ")
     log.dec(iw(C_RX) as int)
@@ -506,5 +660,15 @@ pub fn counters() {
     log.put(" datagrams, not sent")
     item(C_TX_SIZE, "size")
     item(C_TX_DROPPED, "dropped")
+    log.end()
+    log.put("ip: loopback ")
+    log.dec(iw(C_LOOP_TX) as int)
+    log.put(" datagrams sent, ")
+    log.dec(iw(C_LOOP_RX) as int)
+    log.put(" delivered, ")
+    log.dec(iw(C_LOOP_FULL) as int)
+    log.put(" not sent for a full queue, ")
+    log.dec(loop_waiting() as int)
+    log.put(" waiting")
     log.end()
 }

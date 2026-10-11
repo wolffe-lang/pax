@@ -1,4 +1,4 @@
-/* net.S — the network's storage (px20, px21, px22): no routines, only
+/* net.S — the network's storage (px20, px21, px22, px23): no routines, only
    the .bss kernel/pci, kernel/virtio, kernel/net, kernel/arp,
    kernel/ip, kernel/icmp and kernel/udp keep their state in.
 
@@ -25,6 +25,9 @@
                      netmask and gateway, the identification counter,
                      the frame a datagram is composed in, the counters;
                      px21)
+     pax_ip_loop     128 eight-byte words: the loopback queue's 64
+                     frames and the length of the datagram in each
+                     (px23)
      pax_icmp_state  64 eight-byte words: kernel/icmp's (the echo the
                      kernel waits for, the limiter's clock, the
                      counters; px21)
@@ -57,6 +60,9 @@ pax_arp_state:
         .globl pax_ip_state
 pax_ip_state:
         .zero 512
+        .globl pax_ip_loop
+pax_ip_loop:
+        .zero 1024
         .globl pax_icmp_state
 pax_icmp_state:
         .zero 512
