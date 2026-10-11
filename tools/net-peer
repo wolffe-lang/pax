@@ -179,8 +179,9 @@
 #       9130 and `tcpbulk recv` on 7101, 7105, 7120 and 7130 — each
 #       frame either way dropped with probability 1%, 5% and 20% (the
 #       last two digits), and for …30 1% dropped, 5% duplicated, 5%
-#       reordered and 2% corrupted — --lossy BYTES (1 MiB; a quarter of
-#       it at 20%), every transfer exact; one `net-peer: loss …` line
+#       reordered and 2% corrupted — --lossy BYTES (1 MiB; a sixteenth
+#       of it at 20%, where RFC 6298's backoff makes seconds of every
+#       few losses), every transfer exact; one `net-peer: loss …` line
 #       each with the time, the rate and PAX's retransmissions
 #   T12 `tcpwolfd`, a wolf program: it says "ready" on a connection of
 #       its own to port 9070, its request is sent to port 7070, and
@@ -1200,7 +1201,7 @@ class Peer:
         for port in (9101, 9105, 9120, 9130):
             st.listen(port, serve("sink", lossy_for))
         for port in (9101, 9105, 9120, 9130):
-            n = lossy // 4 if port == 9120 else lossy
+            n = lossy // 16 if port == 9120 else lossy
             c = one(port)
             if c.reset or c.gave_up or c.count != n or not c.right:
                 self.fail("T11: port %d: %d bytes came (%d were due)%s%s" % (port, c.count, n, "" if c.right else ", not the pattern", ", reset" if c.reset else ""))
@@ -1208,7 +1209,7 @@ class Peer:
             print("net-peer: loss out %s: %d bytes out of PAX exact in %.2f s (%d KB/s); PAX retransmitted %d of %d segments; %s"
                   % (self.tcp_name(port % 100), n, span, n / 1000 / span if span else 0, c.pax_rexmt, c.pax_segments, c.faults.text()))
         for port in (7101, 7105, 7120, 7130):
-            n = lossy // 4 if port == 7120 else lossy
+            n = lossy // 16 if port == 7120 else lossy
             self.tcp_ready(st, px.TCP_READY_BULK, 300.0, "tcpbulk recv on port %d" % port)
             self.tcp_bulk_in(st, G, sport(), port, n, "loss in " + self.tcp_name(port % 100), paxtcp.Faults(seed=port, **self.tcp_profile(port % 100)))
         print("net-peer: ok T11 the loss matrix: four transfers out of PAX and four into it, every one exact")
