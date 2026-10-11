@@ -1,4 +1,4 @@
-# paxnet.py — what the network tools share (px21, px22): the Internet checksum,
+# paxnet.py — what the network tools share (px21, px22, px23): the Internet checksum,
 # frame builders, and a model of what PAX must do with a frame, written
 # from the RFCs and not from the kernel, for tools/net-peer (the other
 # end of a socket netdev), tools/pcap-net (the capture's checker) and
@@ -20,9 +20,19 @@
 # play their other end agree on: the ports, the echo battery, the
 # client's datagrams, the soak's, the DNS answer.
 #
+# px23 adds TCP: the segment's builder and parser, and — when the
+# kernel under test speaks it (`TCP_SPOKEN`, which the TCP tools set;
+# kernel/kmain_net does not start kernel/tcp, and a datagram of
+# protocol 6 is to it one of an unknown protocol) — `judge_ip` names a
+# segment's drop cause (`tcp.short`, `tcp.header`, `tcp.checksum`,
+# `tcp.broadcast`, `tcp.port-zero`, `tcp.option`) or calls it `tcp`: a
+# segment for a connection, a listener or nobody, which is the
+# connections' state and tools/paxtcp.py's and tools/pcap-net's to say.
+# And the stream the TCP witnesses carry (user/net/say.h's pattern).
+#
 # Written from RFC 768, RFC 791, RFC 792, RFC 826, RFC 862, RFC 894,
-# RFC 1035, RFC 1071 and RFC 1122 §3.2 and §4.1. No network stack's
-# source.
+# RFC 1035, RFC 1071, RFC 1122 §3.2, §4.1 and §4.2 and RFC 9293 §3.1.
+# No network stack's source.
 import struct
 
 PAX_MAC = bytes.fromhex("525400123456")
@@ -185,6 +195,8 @@ def judge_ip(f):
         return "ip.other", ihl, total
     if h[9] == 17:
         return judge_udp(h, ihl, total), ihl, total
+    if h[9] == 6 and TCP_SPOKEN:
+        return judge_tcp(f, h, ihl, total), ihl, total
     if h[9] != 1:
         if f[0] & 1 or is_broadcast(dst):
             return "silent", ihl, total
@@ -387,3 +399,162 @@ def dns_answer(q):
         rr = b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, DNS_TTL, 4) + DNS_ANSWER
         return q[:2] + struct.pack(">HHHHH", 0x8180, 1, 1, 0, 0) + q[12:] + rr
     return q[:2] + struct.pack(">HHHHH", 0x8183, 1, 0, 0, 0) + q[12:]
+
+
+# --- TCP (px23) ----------------------------------------------------------------
+
+TCP_SPOKEN = False     # set by the tools whose kernel starts kernel/tcp
+FIN, SYN, RST, PSH, ACK, URG = 0x01, 0x02, 0x04, 0x08, 0x10, 0x20
+MSS = 1460             # what PAX announces: the MTU less the two headers
+M32 = 0xffffffff
+
+
+def flag_names(flags):
+    return "".join(n for b, n in ((SYN, "S"), (FIN, "F"), (RST, "R"), (PSH, "P"), (ACK, "."), (URG, "U")) if flags & b) or "-"
+
+
+def tcp_sum(src, dst, segment):
+    """The TCP checksum of `segment` (its checksum field zero, or its
+    own for a check: the result is then 0) from `src` to `dst`."""
+    return csum(src + dst + struct.pack(">BBH", 0, 6, len(segment)) + segment)
+
+
+def mss_option(mss=MSS):
+    return struct.pack(">BBH", 2, 4, mss)
+
+
+def tcp(sport, dport, seq, ack, flags, window, data, src, dst, options=b"", check=None, doff=None, urgent=0):
+    """A TCP segment (an IPv4 payload). `options` is padded to a
+    multiple of four with zeros; `check` and `doff` override what would
+    be right, for the malformed ones."""
+    options = options + b"\x00" * (-len(options) % 4)
+    words = (20 + len(options)) // 4 if doff is None else doff
+    seg = struct.pack(">HHIIBBHHH", sport, dport, seq & M32, ack & M32, words << 4, flags, window, 0, urgent) + options + data
+    c = tcp_sum(src, dst, seg) if check is None else check
+    return seg[:16] + struct.pack(">H", c) + seg[18:]
+
+
+def tcp_options(o):
+    """The options in the bytes `o`: a list of (kind, value bytes), or
+    None when they do not parse (a length under 2, or past the end; an
+    MSS option that is not 4 bytes)."""
+    out, i = [], 0
+    while i < len(o):
+        k = o[i]
+        if k == 0:
+            break
+        if k == 1:
+            i += 1
+            continue
+        if i + 1 >= len(o):
+            return None
+        n = o[i + 1]
+        if n < 2 or i + n > len(o) or (k == 2 and n != 4):
+            return None
+        out.append((k, o[i + 2:i + n]))
+        i += n
+    return out
+
+
+def judge_tcp(f, h, ihl, total):
+    """What PAX must do with the TCP segment of the IPv4 datagram `h`
+    in frame `f`, which passed the IP rules: a drop cause, or `tcp`."""
+    t = h[ihl:total]
+    if len(t) < 20:
+        return "tcp.short"
+    doff = (t[12] >> 4) * 4
+    if doff < 20 or doff > len(t):
+        return "tcp.header"
+    if tcp_sum(h[12:16], h[16:20], t) != 0:
+        return "tcp.checksum"
+    if is_broadcast(h[16:20]) or f[0] & 1:
+        return "tcp.broadcast"
+    if be16(t, 0) == 0 or be16(t, 2) == 0:
+        return "tcp.port-zero"
+    if tcp_options(t[20:doff]) is None:
+        return "tcp.option"
+    return "tcp"
+
+
+class Segment:
+    """The fields of the valid TCP frame `f`."""
+
+    def __init__(self, f):
+        ihl = (f[14] & 15) * 4
+        total = be16(f, 16)
+        t = f[14 + ihl:14 + total]
+        self.src, self.dst = f[26:30], f[30:34]
+        self.sport, self.dport = be16(t, 0), be16(t, 2)
+        self.seq, self.ack = struct.unpack(">II", t[4:12])
+        self.doff = (t[12] >> 4) * 4
+        self.flags = t[13]
+        self.window = be16(t, 14)
+        self.urgent = be16(t, 18)
+        self.raw_options = t[20:self.doff]
+        self.options = tcp_options(self.raw_options) or []
+        self.data = t[self.doff:]
+        self.ident = be16(f, 18)
+        # What it takes of the sequence space.
+        self.space = len(self.data) + (1 if self.flags & SYN else 0) + (1 if self.flags & FIN else 0)
+
+    def mss(self):
+        for k, v in self.options:
+            if k == 2:
+                return be16(v, 0)
+        return None
+
+    def __str__(self):
+        return "%s:%d > %s:%d [%s] seq %d ack %d win %d len %d" % (
+            dotted(self.src), self.sport, dotted(self.dst), self.dport, flag_names(self.flags), self.seq, self.ack, self.window, len(self.data))
+
+
+def tcp_from_pax(dst_ip, sport, dport, seq, ack, flags, window, data, ident, to_mac):
+    """The whole frame of a TCP segment PAX sends: 20-byte IP header,
+    DF, time to live 64; a SYN carries the MSS option and nothing else
+    carries any."""
+    opts = mss_option() if flags & SYN else b""
+    return pad60(frame(to_mac, PAX_MAC, ipv4(PAX_IP, dst_ip, 6, tcp(sport, dport, seq, ack, flags, window, data, PAX_IP, dst_ip, options=opts), ident=ident)))
+
+
+def seq_lt(a, b):
+    """Whether sequence number `a` comes before `b` (modulo 2^32)."""
+    return a != b and ((b - a) & M32) < 0x80000000
+
+
+def seq_leq(a, b):
+    return ((b - a) & M32) < 0x80000000
+
+
+def stream_pattern(off, n):
+    """`n` bytes of the stream the bulk transfers carry, from offset
+    `off` (user/net/say.h's pattern_fill): 1024-byte records, record r
+    its number in 8 bytes, least significant first, then byte j = r * 31
+    + j * 7 (mod 256)."""
+    out = bytearray()
+    while n > 0:
+        r, j = off >> 10, off & 1023
+        rec = bytearray((r * 31 + k * 7) & 0xff for k in range(1024))
+        rec[0:8] = struct.pack("<Q", r)
+        take = min(n, 1024 - j)
+        out += rec[j:j + take]
+        off += take
+        n -= take
+    return bytes(out)
+
+
+# The ports the TCP witnesses and the scripts that play their other end
+# agree on (user/mpx4-tcp.run).
+TCP_ECHO = 7             # user/net/tcpecho's
+TCP_SERVICE = 9099       # the peer's echo server; where tcpecho says "ready" (UDP)
+TCP_READY_FORK = 9098    # where the forking tcpecho says "ready"
+TCP_READY_FAULTS = 9096  # where the tcpecho of the fault battery says "ready"
+TCP_BULK = 9100          # the peer's bulk receiver
+TCP_BULK_IN = 7100       # user/net/tcpbulk recv's
+TCP_READY_BULK = 9097    # where it says "ready"
+TCP_CLOSED = 9           # a port nobody listens on
+TCP_SILENT = 9001        # a port whose SYNs go unanswered
+TCP_RESET = 9301         # a server that resets after the first bytes
+TCP_MUTE = 9302          # a server that says nothing after the handshake
+TCP_WOLF = 7070          # user/net/tcpwolfd's
+TCP_WOLF_READY = 9070    # where it says "ready" (a connection, one line)
+TCP_WOLF_GATE = 9071     # answered only once its request waits in its queue
