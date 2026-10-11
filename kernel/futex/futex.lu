@@ -1,0 +1,184 @@
+//! futex — the `futex` system call (px26): wait and wake, with and
+//! without a bitset, private or not, with a timeout.
+//!
+//! Written from man-pages `futex(2)` and `futex(7)`, the uapi
+//! `linux/futex.h` (the operations' numbers, FUTEX_PRIVATE_FLAG,
+//! FUTEX_CLOCK_REALTIME, FUTEX_BITSET_MATCH_ANY), and black-box runs on
+//! Linux of user/elf/threads.c and of pelt (`notes/px26/`). No Linux
+//! source; no other kernel's source; no threading library's.
+//!
+//! **The key** of a futex is the physical address of its 32-bit word
+//! (the caller's tables walked), with one bit for FUTEX_PRIVATE_FLAG:
+//! threads of a process meet on the same word, and a private wait is
+//! not reached by a wake without the flag, nor the reverse (measured on
+//! Linux: such a wake answers 0). Two processes never share a frame on
+//! PAX (no shared mapping, a fork copies), so a futex without the flag
+//! is still one process's.
+//!
+//! **Waiters** are threads (kernel/sched's FUTEX state: the key, the
+//! bitset and the place in line are in the thread's slot); there is no
+//! table and no bound but the sixteen slots. A system call runs with
+//! IF clear on PAX's one CPU from its entry to the switch, so the read
+//! of the word here and the wait in kernel/sched are one step no waker
+//! can come between.
+//!
+//! - FUTEX_WAIT (0): when the word is `val`, wait; else -EAGAIN. A
+//!   timeout is relative (CLOCK_MONOTONIC). FUTEX_WAIT_BITSET (9): the
+//!   same with a bitset (`val3`; 0 is -EINVAL) and an ABSOLUTE timeout,
+//!   on CLOCK_MONOTONIC or, with FUTEX_CLOCK_REALTIME, the wall clock.
+//!   The wait answers 0 when woken, -ETIMEDOUT at its deadline (also
+//!   when the deadline has passed already), -EINTR for a handler that
+//!   ran (or runs again: kernel/signal).
+//! - FUTEX_WAKE (1): wake at most `val` waiters, the longest-waiting
+//!   first; FUTEX_WAKE_BITSET (10): those whose bitset shares a bit
+//!   with `val3`. The count woken.
+//! - -EINVAL for a word off a 4-byte boundary, a zero bitset or a
+//!   timespec with nanoseconds out of range; -EFAULT for an unreadable
+//!   word or timespec.
+//! - every other operation is -ENOSYS: FUTEX_FD, FUTEX_REQUEUE,
+//!   FUTEX_CMP_REQUEUE, FUTEX_WAKE_OP, the priority-inheritance family
+//!   (LOCK_PI, UNLOCK_PI, TRYLOCK_PI, WAIT_REQUEUE_PI, CMP_REQUEUE_PI,
+//!   LOCK_PI2) refused by name with a line; a number Linux has no
+//!   operation for plainly, as Linux answers it.
+//!
+//! The clear-child-tid wake (`set_tid_address(2)`; kernel/user at a
+//! thread's `exit`) is a wake of one waiter on the word without the
+//! private flag, which is how a `pthread_join` waits (measured).
+//! No region, no heap: a wait gives up its kernel stack.
+
+use paging
+use sched
+use timer
+use uaccess
+
+const FUTEX_WAIT: u64 = 0
+const FUTEX_WAKE: u64 = 1
+const FUTEX_WAIT_BITSET: u64 = 9
+const FUTEX_WAKE_BITSET: u64 = 10
+const FUTEX_LAST: u64 = 13 // FUTEX_LOCK_PI2: the highest operation Linux has
+const FUTEX_PRIVATE_FLAG: u64 = 128
+const FUTEX_CLOCK_REALTIME: u64 = 256
+const MATCH_ANY: u64 = 0xffffffff
+
+const W_RAX: u64 = 14
+const NS_PER_SEC: u64 = 1000000000
+const NS_PER_TICK: u64 = 10000151 // kernel/user's: the PIT's tick
+
+const NEG_EAGAIN: u64 = 0xfffffffffffffff5 // -11
+const NEG_EFAULT: u64 = 0xfffffffffffffff2 // -14
+const NEG_EINVAL: u64 = 0xffffffffffffffea // -22
+const NEG_ENOSYS: u64 = 0xffffffffffffffda // -38
+const NEG_ETIMEDOUT: u64 = 0xffffffffffffff92 // -110
+
+const A_REFUSAL: u64 = 3 // the area's refusal word
+/// The refusal code kernel/process names (its range, 32 and up).
+pub const R_OPERATION: u64 = 39
+
+fn answer(f: u64, v: u64) -> u64 {
+    // # Safety: the caller's live frame (22 words).
+    unsafe { ((f + W_RAX * 8) as *u64).write_volatile(v) }
+    f
+}
+
+/// The key of the word at user `uaddr` in the space at `pml4`; 0 when
+/// nothing is mapped there.
+fn key(pml4: u64, uaddr: u64, private: bool) -> u64 {
+    let pa = paging.translate(pml4, uaddr) else 0
+    if pa == 0 {
+        return 0
+    }
+    pa | (if private { 1 } else { 0 })
+}
+
+/// Wake the thread waiting at a clear-child-tid word (kernel/user, at a
+/// thread's end): at most one waiter of the word at `uaddr`, without
+/// the private flag.
+pub fn wake_tid(pml4: u64, uaddr: u64) {
+    let k = key(pml4, uaddr, false)
+    if k != 0 {
+        let _n = sched.futex_wake(k, MATCH_ANY, 1)
+    }
+}
+
+/// `futex(uaddr, op, val, timeout, uaddr2, val3)` from the frame `f`:
+/// the frame to resume (the next thread's when the caller waits).
+/// `wall_ns`: the wall clock now, for FUTEX_CLOCK_REALTIME.
+pub fn call(f: u64, uaddr: u64, op: u64, val: u64, utime: u64, val3: u64, wall_ns: u64) -> u64 {
+    let o = op & 0xffffffff
+    let cmd = o & 0x7f
+    let private = o & FUTEX_PRIVATE_FLAG != 0
+    let realtime = o & FUTEX_CLOCK_REALTIME != 0
+    if o & !(0x7f | FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME) != 0 || cmd > FUTEX_LAST {
+        return answer(f, NEG_ENOSYS)
+    }
+    if cmd != FUTEX_WAIT && cmd != FUTEX_WAKE && cmd != FUTEX_WAIT_BITSET && cmd != FUTEX_WAKE_BITSET {
+        let a = sched.proc_area(sched.self_slot())
+        // # Safety: the area's refusal word.
+        unsafe { ((a + A_REFUSAL * 8) as *u64).write_volatile(R_OPERATION) }
+        return answer(f, NEG_ENOSYS)
+    }
+    let wait = cmd == FUTEX_WAIT || cmd == FUTEX_WAIT_BITSET
+    if realtime && !wait {
+        return answer(f, NEG_ENOSYS)
+    }
+    if uaddr % 4 != 0 {
+        return answer(f, NEG_EINVAL)
+    }
+    let pml4 = paging.live()
+    let bits = if cmd == FUTEX_WAIT || cmd == FUTEX_WAKE { MATCH_ANY } else { val3 & 0xffffffff }
+    if !wait {
+        if bits == 0 {
+            return answer(f, NEG_EINVAL)
+        }
+        if !uaccess.readable(pml4, uaddr, 4) {
+            // A private wake of an address nothing maps finds nobody.
+            return answer(f, if private { 0 } else { NEG_EFAULT })
+        }
+        let n = val & 0xffffffff
+        let count = if n >= 0x80000000 { 0 } else { n }
+        return answer(f, sched.futex_wake(key(pml4, uaddr, private), bits, count))
+    }
+    // A wait: the timeout first (its errors come before the word's).
+    var until: u64 = 0 // the tick the wait ends at; 0 none
+    var passed = false
+    if utime != 0 {
+        if !uaccess.readable(pml4, utime, 16) {
+            return answer(f, NEG_EFAULT)
+        }
+        let sec = uaccess.get64(pml4, utime)
+        let nsec = uaccess.get64(pml4, utime + 8)
+        if nsec >= NS_PER_SEC || sec >= 0x8000000000000000 {
+            return answer(f, NEG_EINVAL)
+        }
+        let cap: u64 = 0x10000000000
+        let t = (if sec < cap { sec } else { cap }) * NS_PER_SEC + nsec
+        let now = timer.ticks() * NS_PER_TICK
+        var rel = t
+        if cmd == FUTEX_WAIT_BITSET {
+            let base = if realtime { wall_ns } else { now }
+            if t <= base {
+                passed = true
+                rel = 0
+            } else {
+                rel = t - base
+            }
+        }
+        if rel == 0 {
+            passed = true
+        }
+        until = (now + rel + NS_PER_TICK - 1) / NS_PER_TICK + 1
+    }
+    if bits == 0 {
+        return answer(f, NEG_EINVAL)
+    }
+    if !uaccess.readable(pml4, uaddr, 4) {
+        return answer(f, NEG_EFAULT)
+    }
+    if uaccess.get(pml4, uaddr, 4) != val & 0xffffffff {
+        return answer(f, NEG_EAGAIN)
+    }
+    if passed {
+        return answer(f, NEG_ETIMEDOUT)
+    }
+    sched.futex_wait(f, key(pml4, uaddr, private), bits, until)
+}
