@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+# px32: a 230 s, 16-part tune in the part format, to measure the render
+# budget at the Mahler span's size (notes/px32-the-orchestra.md, P3).
+# Not music: every part moves through a fixed cycle of chords.
+#   notes/px32/stress.py > stress-230s
+parts = [("fl", "flute"), ("ob", "oboe"), ("cl", "clarinet"), ("hn", "horn"),
+         ("tp", "trumpet"), ("tb", "trombone"), ("ch", "choir"), ("so", "voice"),
+         ("org", "organ"), ("ped", "pedal"), ("vn", "strings"), ("va", "strings"),
+         ("vc", "strings"), ("tim", "timpani"), ("bel", "bells"), ("tt", "tamtam")]
+chords = [["Eb", "G", "Bb"], ["C", "Eb", "G"], ["Ab", "C", "Eb"], ["Bb", "D", "F"]]
+octs = {"fl": 5, "ob": 5, "cl": 4, "hn": 4, "tp": 5, "tb": 3, "ch": 4, "so": 5,
+        "org": 4, "ped": 2, "vn": 5, "va": 4, "vc": 3, "tim": 2, "bel": 5, "tt": 3}
+print("title stress, 16 parts for 230 s")
+print("tempo 84")
+for i, (n, t) in enumerate(parts):
+    print("part %s %s mf pan %d" % (n, t, -80 + i * 10))
+for b in range(1, 81):
+    c = chords[b % 4]
+    o = None
+    print("bar %d" % b)
+    for n, t in parts:
+        o = octs[n]
+        if n in ("ch", "org"):
+            ev = "%s/2 %s/2" % (",".join("%s%d" % (x, o) for x in c), ",".join("%s%d" % (x, o) for x in c[::-1]))
+        elif n == "tim":
+            ev = "%s%d/4> r/4 %s%d/2*" % (c[0], o, c[0], o)
+        elif n in ("bel", "tt"):
+            ev = ("%s%d/1" % (c[0], o)) if b % 4 == 1 else "r/1"
+        elif n in ("vn", "va"):
+            ev = " ".join("%s%d/8*" % (c[k % 3], o) for k in range(8))
+        else:
+            ev = "%s%d/4 %s%d/4 %s%d/4' %s%d/4" % (c[0], o, c[1], o, c[2], o, c[1], o)
+        dyn = "< " if b % 8 == 1 else ("> " if b % 8 == 5 else "")
+        end = " ff" if b % 8 == 4 else (" p" if b % 8 == 0 else "")
+        print("%-4s %s%s%s" % (n, dyn, ev, end))
