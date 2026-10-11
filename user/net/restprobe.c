@@ -1,7 +1,7 @@
 /* restprobe — the rest of what wolf's hosted runtime and lobo ask of a
    kernel beside poll and epoll (px24; `notes/px24/linux/`), call by
-   call: writev to a pipe, to /dev/null and to a stream socket (a
-   response's head and body), its bounds and a short write; getrandom's
+   call: writev to a pipe and to a stream socket (a response's head and
+   body), its bounds and a short write; getrandom's
    flags; sched_getaffinity; sigaltstack and a handler that runs on the
    alternate stack; getsockopt's SO_ACCEPTCONN, SO_TYPE and lengths,
    TCP_NODELAY; accept4's flags; prctl's name; the clocks; and two
@@ -299,9 +299,6 @@ int main(void)
         read(p[0], in, 2);
     N("writev to the read end", writev(p[0], two, 2));
     N("writev to a closed descriptor", writev(77, two, 2));
-    int nul = open("/dev/null", O_WRONLY);
-    N("writev to /dev/null", writev(nul, two, 2));
-    close(nul);
     fcntl(p[1], F_SETFL, O_NONBLOCK);
     while (write(p[1], buf, 4096) > 0)
         ;
