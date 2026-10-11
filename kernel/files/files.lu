@@ -68,8 +68,8 @@
 //! change), with none answers 0; it returns what is there, up to what was
 //! asked. `write` writes everything it is given, waiting while the pipe
 //! is full (a write of at most PIPE_BUF, 4096 bytes, waits until it fits
-//! whole: atomic); what it has written across waits is the area's
-//! PIPE_DONE word. With no reader it is -EPIPE (`EPIPE`; kernel/user
+//! whole: atomic); what it has written across waits is its thread's
+//! `done` word (kernel/sched, px26). With no reader it is -EPIPE (`EPIPE`; kernel/user
 //! decides SIGPIPE). O_NONBLOCK answers -EAGAIN instead of waiting. An
 //! end's `fstat` is a FIFO (S_IFIFO|0600), `lseek` and `pread` -ESPIPE,
 //! `ioctl` -ENOTTY.
@@ -135,7 +135,9 @@ const FIONBIO: u64 = 0x5421 // uapi asm-generic/ioctls.h (px23)
 pub const FDS: u64 = 32
 const A_REFUSAL: u64 = 3 // the area's refusal word (kernel/vm's too)
 const A_CWD: u64 = 12 // px17: the working directory's node; 0 the root
-const A_PIPE_DONE: u64 = 13 // px17: bytes a waiting pipe write has written
+// word 13 was px17's count of bytes a waiting pipe write has written; px26
+// keeps it per thread (kernel/sched's `self_done`): two threads of one
+// process may each wait in a write.
 const A_EXE: u64 = 255 // px26: the initramfs entry the program was loaded from, + 1 (0: none); words 14, 15, 144 and 145 are kernel/socket's
 const A_FD: u64 = 16 // the first descriptor's word
 const FD_WORDS: u64 = 4
@@ -689,7 +691,6 @@ pub fn inherit(a: u64) {
         of_ref(of_of(a, fd))
         fd += 1
     }
-    put(a, A_PIPE_DONE, 0)
 }
 
 /// px17: a process's end closes every descriptor it holds, so a pipe's
@@ -917,9 +918,9 @@ fn pipe_read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool) -> u6
 /// if any); -EAGAIN for O_NONBLOCK with no room.
 pub fn pipe_write(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool) -> u64 {
     let p = tx_of(a, fd)
-    let done = get(a, A_PIPE_DONE)
+    let done = sched.self_done()
     if ppw(p, P_READERS) == 0 {
-        put(a, A_PIPE_DONE, 0)
+        sched.set_self_done(0)
         if done > 0 {
             return done
         }
@@ -937,10 +938,10 @@ pub fn pipe_write(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool) 
     let rest = n - done
     if (n <= PIPE_BUF && space < rest) || space == 0 {
         if nb {
-            put(a, A_PIPE_DONE, 0)
+            sched.set_self_done(0)
             return if done > 0 { done } else { neg(EAGAIN) }
         }
-        put(a, A_PIPE_DONE, done)
+        sched.set_self_done(done)
         return WAIT
     }
     let k = if rest < space { rest } else { space }
@@ -954,10 +955,10 @@ pub fn pipe_write(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool) 
     put_ppw(p, P_WR, ppw(p, P_WR) + k)
     sched.wake_pipes()
     if done + k == n || nb {
-        put(a, A_PIPE_DONE, 0)
+        sched.set_self_done(0)
         return done + k
     }
-    put(a, A_PIPE_DONE, done + k)
+    sched.set_self_done(done + k)
     WAIT
 }
 
