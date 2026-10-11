@@ -1285,3 +1285,104 @@ jobs:
             build/mpx4-udp-runs.txt
           retention-days: 14
           if-no-files-found: warn
+
+  # px23: TCP. Ten static Linux programs (user/net: eight C files built
+  # here by tools/mknet against this runner's glibc, and two wolf
+  # programs built by the pinned wolf) run unmodified on
+  # kernel/kmain_sockets from the initramfs: what AF_INET stream
+  # sockets answer with nothing on the wire, a forking server and its
+  # client over loopback, a wolf program serving itself, an echo
+  # server (plain and a child a connection), a client, a 16 MiB
+  # transfer each way and over loopback, 10,000 connections each way
+  # and over loopback, a listen queue nobody empties, how a connection
+  # ends, the scripted single faults each way, the malformed and the
+  # stray, the loss matrix, a wolf program serving another machine.
+  # tests/mpx4-tcp, both tiers, BIOS and UEFI, three ways: against
+  # tools/net-peer --tcp on a socket netdev (the whole network, with a
+  # TCP of its own and the faults; every frame held to its bytes),
+  # against QEMU's user-mode network and its TCP with tools/tcp-host at
+  # this runner's end, and with no device at all. The reference side is
+  # the same binaries on this runner's Linux in a network namespace
+  # addressed as PAX is, the same net-peer script on a tap device (sudo,
+  # tools/linux-net --tcp), under strace. The build and the Linux side
+  # (T0); the stack up and the kernel's own echo over loopback (T1);
+  # every program's output and exit status byte-identical to Linux's
+  # (T2); every frame, descriptor and control block back after each
+  # command (T3); -ENOSYS, refusals and the one SIGPIPE as named (T4);
+  # the other end's verdict (T5); the capture rebuilt byte by byte,
+  # every segment held to its connection, and the kernel's counters
+  # against it (T6); the counters (T7); the transfers, the soaks and
+  # the loss matrix (T8); the halt (T9). A boot whose other end says
+  # FAIL is stopped 20 s later, and the suite starts no boot past its
+  # deadline (7200 s here): a broken kernel is red here in minutes.
+  mpx4-tcp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace
+          qemu-system-x86_64 --version
+          clang --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx4-tcp-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      # The reference side makes a tap device in a network namespace of
+      # its own: the tun driver must be there (no package: the kernel's).
+      - name: the runner's tap device
+        run: |
+          sudo modprobe tun
+          ls -l /dev/net/tun
+
+      - name: TCP, both tiers, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx4-tcp --deadline 7200
+
+      - name: keep the programs' sums, the Linux side, the transcripts, the captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx4-tcp-linux
+          path: |
+            build/mpx4-tcp/net/sums.txt
+            build/mpx4-tcp/net.txt
+            build/mpx4-tcp/linux/
+            build/mpx4-tcp/linux.txt
+            build/mpx4-tcp/*.run
+            build/mpx4-tcp/*.initramfs.txt
+            build/mpx4-tcp/*/kmain_sockets.elf
+            build/mpx4-tcp/*/*.log
+            build/mpx4-tcp-*.out/
+            build/mpx4-tcp-*.log
+            build/mpx4-tcp-*.norm
+            build/mpx4-tcp-*.meta
+            build/mpx4-tcp-*.halt
+            build/mpx4-tcp-*.verdict
+            build/mpx4-tcp-*.end
+            build/mpx4-tcp-*.pcap
+            build/mpx4-tcp-*.check
+            build/mpx4-tcp-loss.txt
+            build/mpx4-tcp-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
