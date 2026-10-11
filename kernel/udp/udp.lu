@@ -1,0 +1,877 @@
+//! udp — the User Datagram Protocol, the sockets that speak it and the
+//! ports they hold (px22).
+//!
+//! A UDP datagram is an IPv4 datagram's payload, protocol 17 (RFC 768),
+//! every field big-endian:
+//!
+//!     0 source port   2 destination port   4 length (header and data)
+//!     6 checksum      8 data
+//!
+//! The checksum is RFC 1071's over a pseudo-header — the source
+//! address, the destination address, a zero byte, the protocol (17) and
+//! the UDP length again — then the header and the data. A sender that
+//! computes none sends zero; one whose sum comes out zero sends 0xffff.
+//!
+//! **Received** (`input`, from kernel/netd, for a datagram kernel/ip
+//! passed), in this order, each cause a counter:
+//!
+//!     short       fewer than 8 bytes
+//!     length      the header's length under 8, or over what the IP
+//!                 datagram carries (less than that is taken at its
+//!                 word: the bytes after are not the datagram's)
+//!     checksum    a checksum that is not zero and is wrong (RFC 1122
+//!                 §4.1.3.4: verified, and a failure is silent); zero
+//!                 means the sender made none: taken, and counted
+//!                 `without a checksum`
+//!     port-zero   a destination port of 0, which no socket can hold:
+//!                 dropped, nothing sent
+//!     no-port     no socket takes it. `input` says so and kernel/netd
+//!                 asks kernel/icmp for a destination unreachable,
+//!                 code 3 (RFC 1122 §4.1.3.1: a host SHOULD), which
+//!                 goes through px21's limiter and its silence for a
+//!                 broadcast; what became of it comes back to
+//!                 `unreached` and is counted here
+//!     full        the socket's queue has no room: dropped whole,
+//!                 nothing sent
+//!
+//! **A socket** (`SOCKS`, 16 of them, in boot/net.S's `pax_udp_socks`)
+//! holds a local address (0: every address) and port (0: none yet), a
+//! peer when it is connected, a receive timeout, and a receive queue.
+//! A datagram is a socket's when its destination port is the socket's,
+//! its destination address is the socket's or the socket holds every
+//! address, and — for a connected socket — it comes from the peer's
+//! address and port. One connected to somebody else is no taker: the
+//! datagram is `no-port`.
+//!
+//! **The queue** is a ring of `QUEUE` (65,536) bytes in 16 frames taken
+//! when the socket is made and given back when it goes. A datagram
+//! takes 8 bytes (its length, its source port, its source address) and
+//! its data rounded up to 8, copied out of kernel/netd's receive
+//! buffer (or the sender's own bytes, over loopback). `recv` copies the
+//! oldest to the reader and frees its room; a reader's buffer shorter
+//! than the datagram gets its start and the rest is gone (udp(7)).
+//!
+//! **Ports.** The sockets are the port table: `bind` refuses a port
+//! another socket holds on the same address, or that either holds on
+//! every address (`EADDRINUSE`). A socket may bind 0.0.0.0, this
+//! station's address or anything in 127/8. A socket with no port takes
+//! an ephemeral one at its first send or `connect`, or from `bind` to
+//! port 0: `EPHEMERAL_LO` to `EPHEMERAL_HI` (32768 to 60999, the range
+//! ip(7) gives as Linux's default), the first the time-stamp counter at
+//! `start` modulo the range's size, each next the number after,
+//! wrapping, any in use passed over.
+//!
+//! **Sent** (`send`): the caller's bytes are copied into this module's
+//! frame behind a header with the socket's port, the checksum is made,
+//! and kernel/ip sends the datagram (which may wait for its next hop's
+//! hardware address in kernel/arp's queue: the send has then succeeded,
+//! as it has on Linux). The most a datagram carries is `DATA_MAX`
+//! (1472) bytes: 1500 less the two headers; nothing is fragmented.
+//!
+//! **Loopback.** A datagram for this station's own address or for 127/8
+//! never reaches kernel/ip: `send` hands it to the receiving side in
+//! the same call — the same taker, the same queue — with its source the
+//! sender's bound address or, when it has none, the address it was sent
+//! to reach (127.0.0.1 for 127/8, else this station's). One nobody
+//! takes is counted and dropped; nothing is sent about it.
+//!
+//! State is words in boot/net.S (`pax_udp_state`, `pax_udp_socks`), one
+//! frame for composing and 16 a socket, all under `sync.udp()`, which
+//! is taken before `sync.ip()`. Nothing here allocates from the heap
+//! and nothing opens a region.
+//!
+//! Written from RFC 768, RFC 1071, RFC 1122 §4.1 and the man pages
+//! udp(7), ip(7), bind(2), connect(2). No Linux source; no other
+//! kernel's or network stack's source.
+
+use arp
+use frames
+use ip
+use log
+use sched
+use sync
+use uaccess
+
+extern "c" fn pax_fb_copy(dst: u64, src: u64, bytes: u64)
+extern "c" fn pax_rdtsc() -> u64
+
+extern "c" let pax_udp_state: *u64
+extern "c" let pax_udp_socks: *u64
+
+/// UDP's protocol number.
+pub const PROTOCOL: u64 = 17
+/// How many sockets there are; also `open`'s answer when none is free.
+pub const SOCKS: u64 = 16
+/// A receive queue's bytes.
+pub const QUEUE: u64 = 65536
+/// The most data one datagram carries: 1500 less 20 and 8.
+pub const DATA_MAX: u64 = 1472
+/// The first ephemeral port.
+pub const EPHEMERAL_LO: u64 = 32768
+/// The last.
+pub const EPHEMERAL_HI: u64 = 60999
+const PAGE: u64 = 4096
+const QUEUE_PAGES: u64 = 16
+const LOOPBACK: u64 = 0x7f000001 // 127.0.0.1
+
+// pax_udp_state's words.
+const U_FRAME: u64 = 0 // where a datagram is composed (HHDM)
+const U_NEXT_PORT: u64 = 1 // the next ephemeral port to try
+
+/// The counters (`count`): datagrams from the wire put on a socket's
+/// queue.
+pub const C_RX: u64 = 8
+/// Of the datagrams whose length passed, how many carried no checksum.
+pub const C_UNCHECKED: u64 = 9
+/// Dropped: fewer than 8 bytes.
+pub const C_SHORT: u64 = 10
+/// Dropped: a length under 8 or over the IP datagram's.
+pub const C_LENGTH: u64 = 11
+/// Dropped: a wrong checksum.
+pub const C_CHECKSUM: u64 = 12
+/// Dropped: destination port 0.
+pub const C_PORT_ZERO: u64 = 13
+/// Dropped: no socket takes it.
+pub const C_NO_PORT: u64 = 14
+/// Dropped: the socket's queue is full.
+pub const C_FULL: u64 = 15
+/// Datagrams handed to kernel/ip.
+pub const C_TX: u64 = 16
+/// Datagrams kernel/ip did not take.
+pub const C_TX_FAILED: u64 = 17
+/// Datagrams sent over loopback.
+pub const C_LOOP: u64 = 18
+/// Of them, put on a socket's queue.
+pub const C_LOOP_RX: u64 = 19
+/// Of them, dropped: no socket takes it.
+pub const C_LOOP_NO_PORT: u64 = 20
+/// Of them, dropped: the socket's queue is full.
+pub const C_LOOP_FULL: u64 = 21
+/// Port unreachables kernel/icmp sent for a `no-port` datagram.
+pub const C_UNREACH_SENT: u64 = 22
+/// Not sent: within the limiter's second.
+pub const C_UNREACH_LIMITED: u64 = 23
+/// Not sent: RFC 1122 §3.2.2 forbids one (a broadcast).
+pub const C_UNREACH_SILENT: u64 = 24
+/// Not sent: kernel/ip did not take it.
+pub const C_UNREACH_FAILED: u64 = 25
+/// Queued datagrams a reader took.
+pub const C_READ: u64 = 26
+/// Queued datagrams dropped when their socket went.
+pub const C_CLOSED: u64 = 27
+/// Sockets made.
+pub const C_MADE: u64 = 28
+/// Sockets freed.
+pub const C_FREED: u64 = 29
+
+// A socket's words (32 a socket).
+const SOCK_WORDS: u64 = 32
+const S_OPEN: u64 = 0
+const S_LADDR: u64 = 1 // 0: every address
+const S_LPORT: u64 = 2 // 0: none yet
+const S_NAMED: u64 = 3 // 1: `bind` gave the address (a disconnect keeps it)
+const S_PADDR: u64 = 4
+const S_PPORT: u64 = 5
+const S_CONNECTED: u64 = 6
+const S_TIMEOUT: u64 = 7 // ticks a receive waits; 0 for good
+const S_RD: u64 = 8 // bytes taken from the ring since it was made
+const S_WR: u64 = 9 // bytes put
+const S_COUNT: u64 = 10 // datagrams waiting
+const S_TIMEVAL: u64 = 11 // two words: the timeout as it was set
+const S_FRAMES: u64 = 16 // sixteen: the ring's frames (physical)
+
+/// `recv`'s answer when nothing is queued.
+pub const EMPTY: u64 = 0xfffffffffffffdfd
+/// `input`'s answers: nothing more to do.
+pub const DONE: u64 = 0
+/// No socket takes the datagram: its sender may be told.
+pub const NO_PORT: u64 = 1
+
+// errnos (uapi asm-generic/errno-base.h, errno.h), as `send`, `bind`
+// and `connect` answer them: 0, or the number.
+/// Bad address.
+pub const EFAULT: u64 = 14
+/// Invalid argument.
+pub const EINVAL: u64 = 22
+/// Destination address required.
+pub const EDESTADDRREQ: u64 = 89
+/// Message too long.
+pub const EMSGSIZE: u64 = 90
+/// Address already in use.
+pub const EADDRINUSE: u64 = 98
+/// Cannot assign requested address.
+pub const EADDRNOTAVAIL: u64 = 99
+/// Network is down.
+pub const ENETDOWN: u64 = 100
+/// Network is unreachable.
+pub const ENETUNREACH: u64 = 101
+/// No buffer space available.
+pub const ENOBUFS: u64 = 105
+
+fn uw(i: u64) -> u64 {
+    // # Safety: i < 64, a word of boot/net.S's pax_udp_state.
+    unsafe { ((pax_udp_state as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_uw(i: u64, v: u64) {
+    // # Safety: as `uw`.
+    unsafe { ((pax_udp_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+fn sw(s: u64, i: u64) -> u64 {
+    // # Safety: s < SOCKS, i < SOCK_WORDS: inside boot/net.S's pax_udp_socks.
+    unsafe { ((pax_udp_socks as u64 + (s * SOCK_WORDS + i) * 8) as *u64).read_volatile() }
+}
+
+fn put_sw(s: u64, i: u64, v: u64) {
+    // # Safety: as `sw`.
+    unsafe { ((pax_udp_socks as u64 + (s * SOCK_WORDS + i) * 8) as *u64).write_volatile(v) }
+}
+
+fn bump(i: u64) {
+    put_uw(i, uw(i) + 1)
+}
+
+/// Counter `i` (C_*).
+pub fn count(i: u64) -> u64 {
+    uw(i)
+}
+
+/// Take a frame to compose in and choose the first ephemeral port. IF
+/// clear, after `ip.start`.
+pub fn start() {
+    var i: u64 = 0
+    while i < 64 {
+        put_uw(i, 0)
+        i += 1
+    }
+    i = 0
+    while i < SOCKS * SOCK_WORDS {
+        put_sw(0, i, 0)
+        i += 1
+    }
+    let pa = frames.alloc() else 0
+    if pa != 0 {
+        put_uw(U_FRAME, pa + frames.hhdm())
+    }
+    // # Safety: boot/fpu.S's RDTSC; it touches no memory.
+    let t = unsafe { pax_rdtsc() }
+    put_uw(U_NEXT_PORT, EPHEMERAL_LO + t % (EPHEMERAL_HI - EPHEMERAL_LO + 1))
+}
+
+/// Frames this module holds: the one it composes in and 16 a socket.
+pub fn frames_held() -> u64 {
+    var n: u64 = if uw(U_FRAME) != 0 { 1 } else { 0 }
+    var s: u64 = 0
+    while s < SOCKS {
+        if sw(s, S_OPEN) == 1 {
+            n += QUEUE_PAGES
+        }
+        s += 1
+    }
+    n
+}
+
+/// Sockets open now.
+pub fn open_count() -> u64 {
+    var n: u64 = 0
+    var s: u64 = 0
+    while s < SOCKS {
+        n += sw(s, S_OPEN)
+        s += 1
+    }
+    n
+}
+
+/// Datagrams waiting on every socket's queue together.
+pub fn waiting() -> u64 {
+    var n: u64 = 0
+    var s: u64 = 0
+    while s < SOCKS {
+        if sw(s, S_OPEN) == 1 {
+            n += sw(s, S_COUNT)
+        }
+        s += 1
+    }
+    n
+}
+
+// --- the checksum -------------------------------------------------------------
+
+/// The one's-complement sum of the 16-bit big-endian words of the `len`
+/// bytes at `a` added to `s`, an odd last byte a word's high byte; not
+/// folded.
+fn add_words(a: u64, len: u64, s0: u64) -> u64 {
+    var s = s0
+    var i: u64 = 0
+    while i + 1 < len {
+        s += ip.be16(a + i)
+        i += 2
+    }
+    if i < len {
+        s += ip.octet(a + i) << 8
+    }
+    s
+}
+
+/// What goes in the checksum field (zero while this is computed) of the
+/// `len`-byte UDP datagram at `a` from `src` to `dst`: the complement
+/// of the folded sum over the pseudo-header and the datagram. Over a
+/// datagram that holds a right checksum it is 0.
+fn checksum(src: u64, dst: u64, a: u64, len: u64) -> u64 {
+    // The pseudo-header: both addresses, zero and the protocol, the UDP
+    // length.
+    var s = (src >> 16) + (src & 0xffff) + (dst >> 16) + (dst & 0xffff) + PROTOCOL + len
+    s = add_words(a, len, s)
+    while s >> 16 != 0 {
+        s = (s & 0xffff) + (s >> 16)
+    }
+    (!s) & 0xffff
+}
+
+// --- sockets and ports ----------------------------------------------------------
+
+/// A new socket, bound to nothing: its number, or SOCKS when no socket
+/// or not 16 frames are free (nothing kept).
+pub fn open() -> u64 {
+    let saved = sync.acquire(sync.udp())
+    var s: u64 = 0
+    while s < SOCKS && sw(s, S_OPEN) != 0 {
+        s += 1
+    }
+    if s < SOCKS {
+        var k: u64 = 0
+        var short = false
+        while k < QUEUE_PAGES && !short {
+            let pa = frames.alloc() else 0
+            if pa == 0 {
+                short = true
+            } else {
+                put_sw(s, S_FRAMES + k, pa)
+                k += 1
+            }
+        }
+        if short {
+            while k > 0 {
+                k -= 1
+                frames.free(sw(s, S_FRAMES + k))
+                put_sw(s, S_FRAMES + k, 0)
+            }
+            s = SOCKS
+        } else {
+            k = 1
+            while k < S_FRAMES {
+                put_sw(s, k, 0)
+                k += 1
+            }
+            put_sw(s, S_OPEN, 1)
+            bump(C_MADE)
+        }
+    }
+    sync.release(sync.udp(), saved)
+    s
+}
+
+/// Socket `s` goes: its port is free, what waited on its queue is
+/// dropped (`closed`), its frames go back.
+pub fn close(s: u64) {
+    if s >= SOCKS {
+        return
+    }
+    let saved = sync.acquire(sync.udp())
+    if sw(s, S_OPEN) == 1 {
+        put_uw(C_CLOSED, uw(C_CLOSED) + sw(s, S_COUNT))
+        var k: u64 = 0
+        while k < QUEUE_PAGES {
+            frames.free(sw(s, S_FRAMES + k))
+            k += 1
+        }
+        k = 0
+        while k < SOCK_WORDS {
+            put_sw(s, k, 0)
+            k += 1
+        }
+        bump(C_FREED)
+    }
+    sync.release(sync.udp(), saved)
+}
+
+/// Whether some socket holds port `p` on an address that conflicts with
+/// `addr` (the same, or either of the two every address). The UDP lock
+/// held.
+fn taken(p: u64, addr: u64, but: u64) -> bool {
+    var s: u64 = 0
+    while s < SOCKS {
+        if s != but && sw(s, S_OPEN) == 1 && sw(s, S_LPORT) == p {
+            let a = sw(s, S_LADDR)
+            if a == 0 || addr == 0 || a == addr {
+                return true
+            }
+        }
+        s += 1
+    }
+    false
+}
+
+/// An ephemeral port no socket holds on any address; 0 when every one
+/// is held. The UDP lock held.
+fn ephemeral() -> u64 {
+    let span = EPHEMERAL_HI - EPHEMERAL_LO + 1
+    var p = uw(U_NEXT_PORT)
+    if p < EPHEMERAL_LO || p > EPHEMERAL_HI {
+        p = EPHEMERAL_LO // a kernel that never called `start`
+    }
+    var tried: u64 = 0
+    while tried < span {
+        let next = if p == EPHEMERAL_HI { EPHEMERAL_LO } else { p + 1 }
+        if !taken(p, 0, SOCKS) {
+            put_uw(U_NEXT_PORT, next)
+            return p
+        }
+        p = next
+        tried += 1
+    }
+    0
+}
+
+/// Whether `a` is an address a socket may bind or a datagram loops back
+/// to: this station's, or anything in 127/8.
+fn local(a: u64) -> bool {
+    a == ip.address() || a >> 24 == 127
+}
+
+/// `bind`: socket `s` takes `port` (0: an ephemeral one) on `addr` (0:
+/// every address). 0, or EINVAL (it has a port already), EADDRNOTAVAIL
+/// (not an address of this station), EADDRINUSE.
+pub fn bind(s: u64, addr: u64, port: u64) -> u64 {
+    let saved = sync.acquire(sync.udp())
+    var r: u64 = 0
+    if sw(s, S_LPORT) != 0 {
+        r = EINVAL
+    } else if addr != 0 && !local(addr) {
+        r = EADDRNOTAVAIL
+    } else {
+        let p = if port == 0 { ephemeral() } else { port }
+        if p == 0 || taken(p, addr, s) {
+            r = EADDRINUSE
+        } else {
+            put_sw(s, S_LADDR, addr)
+            put_sw(s, S_LPORT, p)
+            put_sw(s, S_NAMED, if addr != 0 { 1 } else { 0 })
+        }
+    }
+    sync.release(sync.udp(), saved)
+    r
+}
+
+/// The address a datagram from a socket that holds every address
+/// leaves with when it goes to `dst`: 127.0.0.1 for 127/8, else this
+/// station's.
+fn source_for(dst: u64) -> u64 {
+    if dst >> 24 == 127 { LOOPBACK } else { ip.address() }
+}
+
+/// `connect`: socket `s` gets the default peer `addr`:`port`, hears
+/// nobody else from now on, and — when it had none — a port and the
+/// local address its datagrams to the peer leave with. 0, or
+/// EADDRINUSE when no port is left.
+pub fn connect(s: u64, addr: u64, port: u64) -> u64 {
+    let saved = sync.acquire(sync.udp())
+    var r: u64 = 0
+    if sw(s, S_LPORT) == 0 {
+        let p = ephemeral()
+        if p == 0 {
+            r = EADDRINUSE
+        } else {
+            put_sw(s, S_LPORT, p)
+        }
+    }
+    if r == 0 {
+        if sw(s, S_NAMED) == 0 {
+            put_sw(s, S_LADDR, source_for(addr))
+        }
+        put_sw(s, S_PADDR, addr)
+        put_sw(s, S_PPORT, port)
+        put_sw(s, S_CONNECTED, 1)
+    }
+    sync.release(sync.udp(), saved)
+    r
+}
+
+/// `connect` to AF_UNSPEC: socket `s` has no peer; a local address
+/// `connect` chose is forgotten, one `bind` named is kept; the port
+/// stays.
+pub fn disconnect(s: u64) {
+    let saved = sync.acquire(sync.udp())
+    put_sw(s, S_CONNECTED, 0)
+    put_sw(s, S_PADDR, 0)
+    put_sw(s, S_PPORT, 0)
+    if sw(s, S_NAMED) == 0 {
+        put_sw(s, S_LADDR, 0)
+    }
+    sync.release(sync.udp(), saved)
+}
+
+/// Socket `s`'s local address and port (0 and 0 before it has any).
+pub fn name(s: u64) -> (u64, u64) {
+    (sw(s, S_LADDR), sw(s, S_LPORT))
+}
+
+/// Socket `s`'s peer: whether it has one, its address and its port.
+pub fn peer(s: u64) -> (bool, u64, u64) {
+    (sw(s, S_CONNECTED) == 1, sw(s, S_PADDR), sw(s, S_PPORT))
+}
+
+/// Ticks a receive on socket `s` waits (0: for good).
+pub fn timeout(s: u64) -> u64 {
+    sw(s, S_TIMEOUT)
+}
+
+/// Set socket `s`'s receive timeout: `ticks` to wait, and the seconds
+/// and microseconds it was asked in (`timeval` reads them back).
+pub fn set_timeout(s: u64, ticks: u64, sec: u64, usec: u64) {
+    put_sw(s, S_TIMEOUT, ticks)
+    put_sw(s, S_TIMEVAL, sec)
+    put_sw(s, S_TIMEVAL + 1, usec)
+}
+
+/// Socket `s`'s receive timeout as it was set: seconds, microseconds.
+pub fn timeval(s: u64) -> (u64, u64) {
+    (sw(s, S_TIMEVAL), sw(s, S_TIMEVAL + 1))
+}
+
+// --- the queue ---------------------------------------------------------------------
+
+/// The kernel address of byte `at` (a count since the socket was made)
+/// of socket `s`'s ring, and how many bytes follow it on its frame.
+fn ring_at(s: u64, at: u64) -> (u64, u64) {
+    let o = at % QUEUE
+    let off = o % PAGE
+    (frames.hhdm() + sw(s, S_FRAMES + o / PAGE) + off, PAGE - off)
+}
+
+/// The socket a datagram from `src`:`sport` to `dst`:`dport` belongs
+/// to; SOCKS when none takes it. The UDP lock held.
+fn taker(src: u64, sport: u64, dst: u64, dport: u64) -> u64 {
+    var s: u64 = 0
+    while s < SOCKS {
+        if sw(s, S_OPEN) == 1 && sw(s, S_LPORT) == dport {
+            let a = sw(s, S_LADDR)
+            if (a == 0 || a == dst) && (sw(s, S_CONNECTED) == 0 || (sw(s, S_PADDR) == src && sw(s, S_PPORT) == sport)) {
+                return s
+            }
+        }
+        s += 1
+    }
+    SOCKS
+}
+
+/// Put the `len` data bytes at kernel address `data`, from
+/// `src`:`sport`, on socket `s`'s queue and wake whoever waits. False
+/// when they do not fit. The UDP lock held (IF clear).
+fn push(s: u64, src: u64, sport: u64, data: u64, len: u64) -> bool {
+    let need = 8 + ((len + 7) & !7)
+    let used = sw(s, S_WR) - sw(s, S_RD)
+    if used + need > QUEUE {
+        return false
+    }
+    let at = sw(s, S_WR)
+    let (h, _room) = ring_at(s, at)
+    // # Safety: a ring frame this socket owns, through the HHDM; `at`
+    // is a multiple of 8, so the 8-byte head lies in one frame.
+    unsafe { (h as *u64).write_volatile(len | sport << 16 | src << 32) }
+    var done: u64 = 0
+    while done < len {
+        let (d, room) = ring_at(s, at + 8 + done)
+        let k = if len - done < room { len - done } else { room }
+        // # Safety: `k` bytes of a ring frame from `d`, and of the
+        // caller's `len` bytes from `data + done`.
+        unsafe { pax_fb_copy(d, data + done, k) }
+        done += k
+    }
+    put_sw(s, S_WR, at + need)
+    put_sw(s, S_COUNT, sw(s, S_COUNT) + 1)
+    sched.wake_pipes()
+    true
+}
+
+/// `recv`: the oldest datagram on socket `s`'s queue copied to user
+/// `buf`, at most `cap` bytes of it (the rest is gone with it), and
+/// taken off the queue unless `peek`. Answers `(n, src, sport, len)`:
+/// the bytes copied, who sent it, and its whole length; `n` is EMPTY
+/// when nothing waits, and -EFAULT's value when `buf` is not the
+/// caller's to write (the datagram stays).
+pub fn recv(s: u64, pml4: u64, buf: u64, cap: u64, peek: bool) -> (u64, u64, u64, u64) {
+    let saved = sync.acquire(sync.udp())
+    if sw(s, S_COUNT) == 0 {
+        sync.release(sync.udp(), saved)
+        return (EMPTY, 0, 0, 0)
+    }
+    let at = sw(s, S_RD)
+    let (h, _room) = ring_at(s, at)
+    // # Safety: the head `push` wrote, in a ring frame this socket owns.
+    let head = unsafe { (h as *u64).read_volatile() }
+    let len = head & 0xffff
+    let sport = (head >> 16) & 0xffff
+    let src = head >> 32
+    let n = if len < cap { len } else { cap }
+    if !uaccess.writable(pml4, buf, n) {
+        sync.release(sync.udp(), saved)
+        return (0xffffffffffffffff - EFAULT + 1, 0, 0, 0)
+    }
+    var done: u64 = 0
+    while done < n {
+        let (d, room) = ring_at(s, at + 8 + done)
+        let k = if n - done < room { n - done } else { room }
+        let _ok = uaccess.copy_out(pml4, buf + done, d, k)
+        done += k
+    }
+    if !peek {
+        put_sw(s, S_RD, at + 8 + ((len + 7) & !7))
+        put_sw(s, S_COUNT, sw(s, S_COUNT) - 1)
+        bump(C_READ)
+    }
+    sync.release(sync.udp(), saved)
+    (n, src, sport, len)
+}
+
+// --- receiving ----------------------------------------------------------------------
+
+/// The UDP datagram of a frame kernel/ip passed: the `len`-byte frame
+/// at `frame`, its IP header `ihl` bytes, its total length `total`.
+/// Thread context (kernel/netd). Answers DONE, or NO_PORT when no
+/// socket takes it and its sender may be told.
+pub fn input(frame: u64, ihl: u64, total: u64) -> u64 {
+    let h = frame + ip.ETH
+    let u = h + ihl
+    let n = total - ihl
+    let saved = sync.acquire(sync.udp())
+    var r = DONE
+    if n < 8 {
+        bump(C_SHORT)
+    } else {
+        let ulen = ip.be16(u + 4)
+        let src = ip.be32(h + 12)
+        let dst = ip.be32(h + 16)
+        if ulen < 8 || ulen > n {
+            bump(C_LENGTH)
+        } else if ip.be16(u + 6) != 0 && checksum(src, dst, u, ulen) != 0 {
+            bump(C_CHECKSUM)
+        } else {
+            if ip.be16(u + 6) == 0 {
+                bump(C_UNCHECKED)
+            }
+            let dport = ip.be16(u + 2)
+            let sport = ip.be16(u)
+            if dport == 0 {
+                bump(C_PORT_ZERO)
+            } else {
+                let s = taker(src, sport, dst, dport)
+                if s == SOCKS {
+                    bump(C_NO_PORT)
+                    r = NO_PORT
+                } else if push(s, src, sport, u + 8, ulen - 8) {
+                    bump(C_RX)
+                } else {
+                    bump(C_FULL)
+                }
+            }
+        }
+    }
+    sync.release(sync.udp(), saved)
+    r
+}
+
+/// What kernel/icmp did with the port unreachable for a `no-port`
+/// datagram (kernel/icmp's `unreachable` answers): counted.
+pub fn unreached(result: u64) {
+    let saved = sync.acquire(sync.udp())
+    bump(C_UNREACH_SENT + (if result < 4 { result } else { 3 }))
+    sync.release(sync.udp(), saved)
+}
+
+// --- sending ------------------------------------------------------------------------
+
+/// The frame a datagram is composed in; taken now in a kernel that
+/// never called `start` (loopback needs no network). 0 when there is
+/// none to be had. The UDP lock held.
+fn frame() -> u64 {
+    if uw(U_FRAME) == 0 {
+        let pa = frames.alloc() else 0
+        if pa != 0 {
+            put_uw(U_FRAME, pa + frames.hhdm())
+        }
+    }
+    uw(U_FRAME)
+}
+
+/// `send`: the `len` bytes at user `buf` as one datagram from socket
+/// `s` — to `daddr`:`dport` when `named`, else to its peer. Answers 0
+/// when it left (or waits for its next hop's address, or looped back),
+/// else the errno: EDESTADDRREQ (no destination and no peer), EINVAL
+/// (port 0; a socket bound in 127/8 sending off this station),
+/// EMSGSIZE (over `DATA_MAX`), ENETUNREACH (address 0), EADDRINUSE (no
+/// port left), EFAULT, ENETDOWN (no device), ENOBUFS (no cache entry or
+/// transmit buffer to be had).
+pub fn send(s: u64, pml4: u64, buf: u64, len: u64, named: bool, daddr: u64, dport: u64) -> u64 {
+    let saved = sync.acquire(sync.udp())
+    let r = send_locked(s, pml4, buf, len, named, daddr, dport)
+    sync.release(sync.udp(), saved)
+    r
+}
+
+fn send_locked(s: u64, pml4: u64, buf: u64, len: u64, named: bool, daddr: u64, dport: u64) -> u64 {
+    var dst = daddr
+    var port = dport
+    if !named {
+        if sw(s, S_CONNECTED) == 0 {
+            return EDESTADDRREQ
+        }
+        dst = sw(s, S_PADDR)
+        port = sw(s, S_PPORT)
+    }
+    if port == 0 {
+        return EINVAL
+    }
+    if len > DATA_MAX {
+        return EMSGSIZE
+    }
+    if dst == 0 {
+        return ENETUNREACH
+    }
+    let f = frame()
+    if f == 0 {
+        return ENOBUFS
+    }
+    let near = local(dst)
+    let bound = sw(s, S_LADDR)
+    if bound >> 24 == 127 && !near {
+        return EINVAL
+    }
+    if sw(s, S_LPORT) == 0 {
+        let p = ephemeral()
+        if p == 0 {
+            return EADDRINUSE
+        }
+        put_sw(s, S_LPORT, p)
+    }
+    if !uaccess.copy_in(pml4, f + 8, buf, len) {
+        return EFAULT
+    }
+    let sport = sw(s, S_LPORT)
+    if near {
+        // Never below this module: the receiving side, now.
+        let src = if bound != 0 { bound } else { source_for(dst) }
+        bump(C_LOOP)
+        let t = taker(src, sport, dst, port)
+        if t == SOCKS {
+            bump(C_LOOP_NO_PORT)
+        } else if push(t, src, sport, f + 8, len) {
+            bump(C_LOOP_RX)
+        } else {
+            bump(C_LOOP_FULL)
+        }
+        return 0
+    }
+    ip.put_be16(f, sport)
+    ip.put_be16(f + 2, port)
+    ip.put_be16(f + 4, 8 + len)
+    ip.put_be16(f + 6, 0)
+    let c = checksum(ip.address(), dst, f, 8 + len)
+    // A sum of zero is sent as all ones: zero would say "none made".
+    ip.put_be16(f + 6, if c == 0 { 0xffff } else { c })
+    let sent = ip.send(dst, PROTOCOL, f, 8 + len)
+    if sent == arp.SENT || sent == arp.QUEUED {
+        bump(C_TX)
+        return 0
+    }
+    bump(C_TX_FAILED)
+    if sent == ip.DOWN { ENETDOWN } else { ENOBUFS }
+}
+
+// --- lines ----------------------------------------------------------------------------
+
+fn item(v: u64, name: str) {
+    log.put(" ")
+    log.dec(uw(v) as int)
+    log.put(" ")
+    log.put(name)
+}
+
+/// The module's first line:
+/// `udp: 16 sockets, a 65536-byte queue each, ports 32768-60999 from <p>, 1472 bytes a datagram, loopback here`.
+pub fn report() {
+    log.put("udp: ")
+    log.dec(SOCKS as int)
+    log.put(" sockets, a ")
+    log.dec(QUEUE as int)
+    log.put("-byte queue each, ports ")
+    log.dec(EPHEMERAL_LO as int)
+    log.put("-")
+    log.dec(EPHEMERAL_HI as int)
+    log.put(" from ")
+    log.dec(uw(U_NEXT_PORT) as int)
+    log.put(", ")
+    log.dec(DATA_MAX as int)
+    log.put(" bytes a datagram, loopback here")
+    log.end()
+}
+
+/// The counters' four lines:
+///
+///     udp: rx <n> datagrams queued (<u> without a checksum), dropped <…> short <…> length <…> checksum <…> port-zero <…> no-port <…> full
+///     udp: unreachable <s> sent, <l> limited, <q> silent; <x> not sent
+///     udp: tx <t> datagrams, <e> not sent; loopback <o> sent, <r> queued, <p> no-port, <g> full
+///     udp: sockets <m> made, <k> freed, <j> open; datagrams <a> read, <c> dropped at close, <w> waiting
+pub fn counters() {
+    log.put("udp: rx ")
+    log.dec(uw(C_RX) as int)
+    log.put(" datagrams queued (")
+    log.dec(uw(C_UNCHECKED) as int)
+    log.put(" without a checksum), dropped")
+    item(C_SHORT, "short")
+    item(C_LENGTH, "length")
+    item(C_CHECKSUM, "checksum")
+    item(C_PORT_ZERO, "port-zero")
+    item(C_NO_PORT, "no-port")
+    item(C_FULL, "full")
+    log.end()
+    log.put("udp: unreachable ")
+    log.dec(uw(C_UNREACH_SENT) as int)
+    log.put(" sent, ")
+    log.dec(uw(C_UNREACH_LIMITED) as int)
+    log.put(" limited, ")
+    log.dec(uw(C_UNREACH_SILENT) as int)
+    log.put(" silent; ")
+    log.dec(uw(C_UNREACH_FAILED) as int)
+    log.put(" not sent")
+    log.end()
+    log.put("udp: tx ")
+    log.dec(uw(C_TX) as int)
+    log.put(" datagrams, ")
+    log.dec(uw(C_TX_FAILED) as int)
+    log.put(" not sent; loopback ")
+    log.dec(uw(C_LOOP) as int)
+    log.put(" sent, ")
+    log.dec(uw(C_LOOP_RX) as int)
+    log.put(" queued, ")
+    log.dec(uw(C_LOOP_NO_PORT) as int)
+    log.put(" no-port, ")
+    log.dec(uw(C_LOOP_FULL) as int)
+    log.put(" full")
+    log.end()
+    log.put("udp: sockets ")
+    log.dec(uw(C_MADE) as int)
+    log.put(" made, ")
+    log.dec(uw(C_FREED) as int)
+    log.put(" freed, ")
+    log.dec(open_count() as int)
+    log.put(" open; datagrams ")
+    log.dec(uw(C_READ) as int)
+    log.put(" read, ")
+    log.dec(uw(C_CLOSED) as int)
+    log.put(" dropped at close, ")
+    log.dec(waiting() as int)
+    log.put(" waiting")
+    log.end()
+}
