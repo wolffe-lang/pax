@@ -11,7 +11,7 @@
 #                  [--firmware bios|uefi|both] [--tier native|release|both]
 #                  [--accel auto|kvm|tcg]
 #
-# The programs: user/net's seven (tools/mknet: C, linked static against
+# The programs: user/net's eight (tools/mknet: C, linked static against
 # this host's glibc), unmodified, in the initramfs under /bin with a run
 # list as /etc/pax-run; the kernel is kmain_sockets, which runs the
 # list's commands one at a time. One kernel, three run lists, booted
@@ -42,10 +42,12 @@
 # device, each command under strace. So the Linux output is Linux's
 # answer to the very datagrams PAX is sent. The `user` way's lines are
 # lines of that list too (the host script sends the same datagrams), so
-# they are held to the same output. Two lines are held elsewhere:
-# `udpfill`, whose answer is the receiving kernel's queue bound, to
-# user/net/udpfill.expect (PAX keeps 65 of 200; Linux's own count is
-# printed); and the `user` way's `resolve 10.0.2.3 dns.google`, to what
+# they are held to the same output. Three lines are held elsewhere:
+# `udpfill` and `udphold`, whose answers are the receiving kernel's
+# bounds (a queue filled over loopback and from the wire; a datagram of
+# 1473 bytes), to user/net/udpfill.expect and udphold.expect (PAX keeps
+# 65 of 200 and 44 of 60; Linux's own counts are printed); and the
+# `user` way's `resolve 10.0.2.3 dns.google`, to what
 # tools/gateway-probe --dns got from QEMU's DNS server on this host
 # moments before (G1) — an outside name, so this host's resolver
 # decides the answer, and PAX must print that same answer (the same
@@ -78,7 +80,7 @@
 #      (334); the refusals by name are exactly sockerr's five (a family,
 #      a type, a protocol, an option, a broadcast destination) and
 #      udpfill's one (a datagram over 1472 bytes), each once.
-#   U5 the other end's verdict: net-peer's eight steps ok (peer);
+#   U5 the other end's verdict: net-peer's nine steps ok (peer);
 #      udp-host's four (user).
 #   (U5, U6 and U8 are the ways with a wire.)
 #   U6 the capture, byte by byte (tools/pcap-net): every frame PAX sent
@@ -86,12 +88,12 @@
 #      checksum recomputed; every datagram from port 7 the echo of one
 #      that reached it; nothing looped back on the wire; and the
 #      kernel's counters the capture's, one by one.
-#   U7 the counters, exactly (N the soak): peer — 2N + 22 datagrams
+#   U7 the counters, exactly (N the soak): peer — 2N + 67 datagrams
 #      queued (1 without a checksum), dropped 1 short 2 length 1
-#      checksum 1 port-zero 7 no-port 0 full; 1 port unreachable sent, 4
-#      limited, 2 silent; 2N + 24 sent; over loopback 219 sent, 83
-#      queued, 1 no-port, 135 full; 18 sockets made and freed; 2N + 105
-#      datagrams read, none left. user — the same without the second
+#      checksum 1 port-zero 7 no-port 16 full (udphold's queue, from the
+#      wire); 1 port unreachable sent, 4 limited, 2 silent; 2N + 26
+#      sent; over loopback 219 sent, 83 queued, 1 no-port, 135 full; 19
+#      sockets made and freed; 2N + 150 datagrams read, none left. user — the same without the second
 #      echo server and the script's own tests. none — nothing received
 #      or sent but over loopback: 219, 83, 1, 135.
 #   U8 the soaks: N datagrams into PAX and N out, one at a time, each
@@ -133,7 +135,7 @@ case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes b
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
 
 k=kmain_sockets
-PROGS="sockerr udploop udpecho udpclient udpsoak udpfill resolve"
+PROGS="sockerr udploop udpecho udpclient udpsoak udpfill udphold resolve"
 OUTSIDE=dns.google
 work=$PAX_BUILD/mpx4-udp
 runs=$PAX_BUILD/mpx4-udp-runs.txt
@@ -210,7 +212,7 @@ if [ -z "$images" ]; then
         fi
         [ "${#sudo[@]}" = 0 ] || "${sudo[@]}" chown -R "$(id -u):$(id -g)" "$work/linux"
     fi
-    [ -z "$why" ] && say "PASS U0: $k built ($tiers), 7 programs static, three initramfs ($(wc -c < "$work/peer.cpio" | tr -d ' '), $(wc -c < "$work/user.cpio" | tr -d ' ') and $(wc -c < "$work/none.cpio" | tr -d ' ') bytes), Linux ran $(grep -c ' -> ' "$work/linux.txt") commands; $(grep '^peer: ' "$work/linux.txt")" || bad "U0:$why"
+    [ -z "$why" ] && say "PASS U0: $k built ($tiers), 8 programs static, three initramfs ($(wc -c < "$work/peer.cpio" | tr -d ' '), $(wc -c < "$work/user.cpio" | tr -d ' ') and $(wc -c < "$work/none.cpio" | tr -d ' ') bytes), Linux ran $(grep -c ' -> ' "$work/linux.txt") commands; $(grep '^peer: ' "$work/linux.txt")" || bad "U0:$why"
     images=$work
     if [ "$noboot" = 1 ]; then
         [ "$fail" = 0 ] && say "mpx4-udp build (U0): PASS (no boot: --no-boot)" || say "mpx4-udp build: FAIL"
@@ -336,6 +338,8 @@ one() { # tier leg way
         case $line in
             /bin/udpfill)
                 want=$PAX_ROOT/user/net/udpfill.expect wrc=0 ;;
+            /bin/udphold\ *)
+                want=$PAX_ROOT/user/net/udphold.expect wrc=0 ;;
             "/bin/resolve 10.0.2.3 $OUTSIDE")
                 # Held to G1: what QEMU's DNS server answered this host.
                 got=$(awk -v name="$OUTSIDE" '
@@ -367,7 +371,7 @@ one() { # tier leg way
     done < "$list"
     [ "$n" = "$ncmd" ] || why+=" $n commands read, the list has $ncmd;"
     if [ -z "$why" ]; then
-        say "PASS U2 $L: $n commands, each one's output and exit status byte-identical to Linux's ($(cut -f2 "$out/summary.tsv" | paste -sd, -)); udpfill to its file (65 of 200 kept; Linux kept $(sed -n 's/.* \([0-9]*\) kept .*/\1/p' "$lx/$(linux_line /bin/udpfill).out"))$([ "$way" = user ] && printf '; %s as this host'"'"'s probe: %s' "$OUTSIDE" "$dns")"
+        say "PASS U2 $L: $n commands, each one's output and exit status byte-identical to Linux's ($(cut -f2 "$out/summary.tsv" | paste -sd, -)); udpfill to its file (65 of 200 kept; Linux kept $(sed -n 's/.* \([0-9]*\) kept .*/\1/p' "$lx/$(linux_line /bin/udpfill).out"))$([ "$way" = peer ] && printf ', udphold to its (44 of 60 waited; on Linux %s)' "$(sed -n 's/^udphold: \([0-9]*\) datagrams.*/\1/p' "$lx/$(linux_line '/bin/udphold 4030 10.0.2.2 9097').out")")$([ "$way" = user ] && printf '; %s as this host'"'"'s probe: %s' "$OUTSIDE" "$dns")"
     else
         bad "U2 $L:$why"
     fi
@@ -407,11 +411,11 @@ udpfill syscall 44: refused: a datagram over 1472 bytes (PAX does not fragment):
     if [ "$way" = none ]; then
         :
     elif [ "$way" = peer ]; then
-        if grep -q '^net-peer: PASS ' "$log.end" && [ "$(grep -c '^net-peer: ok U' "$log.end")" = 8 ]; then
-            say "PASS U5 $L: tools/net-peer: 8 steps ok; $(grep '^net-peer: sent' "$log.end" | sed 's/^net-peer: //'); $(grep '^net-peer: PASS' "$log.end" | sed 's/^net-peer: PASS //')"
+        if grep -q '^net-peer: PASS ' "$log.end" && [ "$(grep -c '^net-peer: ok U' "$log.end")" = 9 ]; then
+            say "PASS U5 $L: tools/net-peer: 9 steps ok; $(grep '^net-peer: sent' "$log.end" | sed 's/^net-peer: //'); $(grep '^net-peer: PASS' "$log.end" | sed 's/^net-peer: PASS //')"
         else
             grep -A3 '^net-peer: FAIL' "$log.end" >&2
-            bad "U5 $L: tools/net-peer: $(grep -c '^net-peer: ok U' "$log.end") of 8 steps; $(grep -m1 '^net-peer: FAIL\|^Traceback\|Error' "$log.end")"
+            bad "U5 $L: tools/net-peer: $(grep -c '^net-peer: ok U' "$log.end") of 9 steps; $(grep -m1 '^net-peer: FAIL\|^Traceback\|Error' "$log.end")"
         fi
     else
         if grep -q '^udp-host: PASS' "$log.end" && [ "$(grep -c '^udp-host: ok H' "$log.end")" = 4 ]; then
@@ -434,10 +438,10 @@ udpfill syscall 44: refused: a datagram over 1472 bytes (PAX does not fragment):
     # --- U7: the counters, exactly -----------------------------------------------------
     why=
     if [ "$way" = peer ]; then
-        has "$norm" "udp: rx $((2 * soak + 22)) datagrams queued \(1 without a checksum\), dropped 1 short 2 length 1 checksum 1 port-zero 7 no-port 0 full" || why+=" rx;"
+        has "$norm" "udp: rx $((2 * soak + 67)) datagrams queued \(1 without a checksum\), dropped 1 short 2 length 1 checksum 1 port-zero 7 no-port 16 full" || why+=" rx;"
         has "$norm" 'udp: unreachable 1 sent, 4 limited, 2 silent; 0 not sent' || why+=" unreachable;"
-        has "$norm" "udp: tx $((2 * soak + 24)) datagrams, 0 not sent; loopback 219 sent, 83 queued, 1 no-port, 135 full" || why+=" tx;"
-        has "$norm" "udp: sockets 18 made, 18 freed, 0 open; datagrams $((2 * soak + 105)) read, 0 dropped at close, 0 waiting" || why+=" sockets;"
+        has "$norm" "udp: tx $((2 * soak + 26)) datagrams, 0 not sent; loopback 219 sent, 83 queued, 1 no-port, 135 full" || why+=" tx;"
+        has "$norm" "udp: sockets 19 made, 19 freed, 0 open; datagrams $((2 * soak + 150)) read, 0 dropped at close, 0 waiting" || why+=" sockets;"
         has "$norm" 'icmp: unreachable 1 sent, 4 limited, 2 silent; 0 not sent' || why+=" icmp;"
         has "$norm" 'ip: rx [0-9]+ datagrams delivered \(0 with options, 2 broadcast\), dropped 0 short 0 version 0 ihl 0 checksum 0 length 0 ttl 0 fragment 0 source 0 option 0 source-route 0 other 0 protocol' || why+=" ip;"
     elif [ "$way" = none ]; then

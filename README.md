@@ -23,7 +23,7 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
               tree M-PX3 runs and the commands it runs); pelt.pin and
               console/ (px13: the shell PAX runs as PID 1, the typed
               sessions); play/ (px18: the note-file player, wolf) and
-              tunes/ (its note files); net/ (px22: the seven UDP
+              tunes/ (its note files); net/ (px22: the eight UDP
               witnesses, C) and mpx4-udp.run, mpx4-udp-user.run (the
               commands tests/mpx4-udp runs)
     tools/    the harness: fetch-limine, fetch-wolf, fetch-lupin,
@@ -78,7 +78,7 @@ PAX_WOLF=$(tools/fetch-wolf) tests/mpx3-speaker   # px18: play's scale through Q
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx4-net   # px20, px21: virtio-net, ARP, IPv4 and ICMP echo; QEMU's gateway and tools/net-peer; the captures byte by byte
 tools/gateway-probe 127.0.0.1                # px21: what this host's QEMU gateway answers to ARP and ICMP echo, with no guest
 tests/mpx4-net --images build/mpx4-net --accel kvm   # boot them elsewhere (hasu under KVM)
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx4-udp   # px22: UDP and sockets; seven witnesses against tools/net-peer and QEMU's user network, each held to Linux (needs root for the Linux side: tools/linux-net)
+PAX_WOLF=$(tools/fetch-wolf) tests/mpx4-udp   # px22: UDP and sockets; eight witnesses against tools/net-peer and QEMU's user network, each held to Linux (needs root for the Linux side: tools/linux-net)
 tests/mpx4-udp --images build/mpx4-udp --accel kvm   # boot them elsewhere (hasu under KVM)
 tools/gateway-probe --dns dns.google         # px22: what this host's QEMU DNS server answers, with no guest
 tools/qemu-halt --elf K.elf --marker halt --cmd 'info tlb' K.iso   # monitor answers on the halted machine (K.log.cmd1)

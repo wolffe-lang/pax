@@ -24,7 +24,7 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   `dup`, `fork` and close-on-exec treat it as they treat a pipe's end,
   and the last close frees it. A receive with nothing queued parks the
   thread until a datagram or the socket's `SO_RCVTIMEO`.
-  `tests/mpx4-udp` runs seven witnesses (`user/net/`) from the
+  `tests/mpx4-udp` runs eight witnesses (`user/net/`) from the
   initramfs on a new kernel, `kmain_sockets`, two ways — against
   `tools/net-peer --udp`, which is the whole network and holds every
   frame to its bytes, and against QEMU's user-mode network with
