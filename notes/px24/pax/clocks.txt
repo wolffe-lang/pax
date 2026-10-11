@@ -1,0 +1,26 @@
+Which clocks the witnesses read on PAX (px24).
+
+A static glibc program reads the clocks through the vDSO on Linux, so no
+strace shows the call; PAX has no vDSO, so each read is a clock_gettime
+(228) the kernel sees. One boot of a scratch kernel (kasumi, TCG; the
+head's kernel/user with five lines added to clock_gettime that log each
+clock id once a process; never committed) ran:
+
+    /bin/waitwolf loop 7082 6
+    /bin/pair /bin/waitwolf serve 7081 12 1 -- /bin/waitwolf call 127.0.0.1 7081 12 1 1
+    /bin/pair /bin/waitwolf push 7090 4 400000 -- /bin/waitwolf pull 127.0.0.1 7090 4 400000 300
+    /bin/epollecho loop 7200 8 16
+
+and logged, by program:
+
+      5 user: waitwolf pid N clock_gettime clock 1
+      1 user: epollecho pid N syscall 273: -ENOSYS
+      1 user: epollecho pid N syscall 334: -ENOSYS
+      2 user: pair pid N syscall 273: -ENOSYS
+      2 user: pair pid N syscall 334: -ENOSYS
+      5 user: waitwolf pid N syscall 273: -ENOSYS
+      5 user: waitwolf pid N syscall 334: -ENOSYS
+
+So wolf's hosted runtime asks CLOCK_MONOTONIC (1) and no other clock in
+these runs; epollecho and pair ask none. lobo was not run on PAX (px25):
+which clocks lobo itself reads is not measured.

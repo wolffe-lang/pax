@@ -1,0 +1,87 @@
+pipe: ok
+pipe read end: F_GETFL O_RDONLY, F_GETFD 0
+pipe write end: F_GETFL O_WRONLY, F_GETFD 0
+pipe read end F_SETFL O_NONBLOCK: ok
+pipe read end: F_GETFL O_RDONLY|O_NONBLOCK, F_GETFD 0
+pipe write end (its own open file): F_GETFL O_WRONLY, F_GETFD 0
+read of the empty pipe: -EAGAIN
+write 5: 5
+read of 5: 5
+read again: -EAGAIN
+write end F_SETFL O_NONBLOCK: ok
+writes until the pipe is full: 65536 bytes, then -EAGAIN
+a write of 1 to the full pipe: -EAGAIN
+read 4096: 4096
+a write of 4097 then (room for 4096): 4096
+a write of 100: -EAGAIN
+F_SETFL 0 on the read end: ok
+pipe read end: F_GETFL O_RDONLY, F_GETFD 0
+F_SETFL O_APPEND|O_NONBLOCK|O_RDWR on the read end (the access mode stays): ok
+pipe read end: F_GETFL O_RDONLY|O_NONBLOCK|O_APPEND, F_GETFD 0
+pipe2 O_NONBLOCK|O_CLOEXEC: ok
+its read end: F_GETFL O_RDONLY|O_NONBLOCK, F_GETFD 1
+its write end: F_GETFL O_WRONLY|O_NONBLOCK, F_GETFD 1
+F_SETFD 0: 0
+F_GETFD: 0
+F_SETFD FD_CLOEXEC: 0
+F_GETFD: 1
+F_DUPFD_CLOEXEC from 40: 40
+the copy (one open file, a flag of its own): F_GETFL O_RDONLY|O_NONBLOCK, F_GETFD 1
+F_DUPFD from 41: 41
+that copy: F_GETFL O_RDONLY|O_NONBLOCK, F_GETFD 0
+F_SETFL 0 through the copy: ok
+the first, after: F_GETFL O_RDONLY, F_GETFD 1
+F_DUPFD from 2147483647: -EINVAL
+F_GETFL on a closed descriptor: -EBADF
+F_GETFD on a closed descriptor: -EBADF
+F_SETFL on a closed descriptor: -EBADF
+a regular file: F_GETFL O_RDONLY, F_GETFD 0
+F_SETFL O_NONBLOCK on it: ok
+a regular file: F_GETFL O_RDONLY|O_NONBLOCK, F_GETFD 0
+read 4 of it (a file never waits): 4
+a directory: F_GETFL O_RDONLY, F_GETFD 1
+socketpair: ok
+a socketpair's end: F_GETFL O_RDWR, F_GETFD 0
+F_SETFL O_NONBLOCK: ok
+recv of nothing: -EAGAIN
+send 3: 3
+the other end, blocking, reads: 3
+MSG_DONTWAIT on the blocking end: -EAGAIN
+socketpair SOCK_NONBLOCK|SOCK_CLOEXEC: ok
+its end: F_GETFL O_RDWR|O_NONBLOCK, F_GETFD 1
+a datagram socket: F_GETFL O_RDWR, F_GETFD 0
+F_SETFL O_NONBLOCK: ok
+a datagram socket: F_GETFL O_RDWR|O_NONBLOCK, F_GETFD 0
+bind: ok
+recv of nothing: -EAGAIN
+ioctl FIONBIO 0: ok
+a datagram socket: F_GETFL O_RDWR, F_GETFD 0
+recv of nothing, MSG_DONTWAIT: -EAGAIN
+socket SOCK_DGRAM|SOCK_NONBLOCK|SOCK_CLOEXEC: F_GETFL O_RDWR|O_NONBLOCK, F_GETFD 1
+a stream socket: F_GETFL O_RDWR, F_GETFD 0
+bind: ok
+listen: ok
+ioctl FIONBIO 1 on the listener: ok
+the listener: F_GETFL O_RDWR|O_NONBLOCK, F_GETFD 0
+accept with nobody waiting: -EAGAIN
+accept4 with nobody waiting: -EAGAIN
+socket SOCK_STREAM|SOCK_NONBLOCK: F_GETFL O_RDWR|O_NONBLOCK, F_GETFD 0
+SO_ERROR before the connect: 0
+connect: -EINPROGRESS
+then writable: POLLOUT, SO_ERROR 0
+connect again: 0
+recv of nothing: -EAGAIN
+accept4 SOCK_NONBLOCK|SOCK_CLOEXEC: F_GETFL O_RDWR|O_NONBLOCK, F_GETFD 1
+a blocking connect: ok
+accept on a non-blocking listener (the flag is not handed down): F_GETFL O_RDWR, F_GETFD 0
+recv of nothing, MSG_DONTWAIT: -EAGAIN
+F_SETFL O_NONBLOCK on the accepted end: ok
+recv of nothing: -EAGAIN
+read of nothing: -EAGAIN
+sends until both buffers are full: 65536 bytes or more, then -EAGAIN
+a write of 1 then: -EAGAIN
+a blocking socket's send with MSG_DONTWAIT, its buffer not full: 1
+connect to a port nobody listens on: -EINPROGRESS
+then: POLLOUT|POLLERR|POLLHUP
+SO_ERROR: ECONNREFUSED, and again: 0
+nbprobe: done

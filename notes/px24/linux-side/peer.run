@@ -1,0 +1,31 @@
+# tests/mpx4-ready's run list (px24). kmain_sockets runs it from the
+# initramfs as /etc/pax-run with tools/net-peer's readiness script at
+# the other end of a socket netdev; tools/linux-net runs it on Linux
+# with the same script at the other end of a tap device; the two
+# outputs and exit statuses are compared byte for byte (but for the
+# lines a probe starts with `~`). One command a line, words separated
+# by single spaces, the first the program's path. In order: the five
+# probes (descriptors that do not block; poll; epoll; eventfd; the rest
+# of what wolf's runtime and lobo ask); the echo server on epoll and
+# its driver over loopback: 64 connections held at once, two storms,
+# 10,000 connections more; the wolf witness over loopback: a server
+# and its client in one process, six connections at once; in two
+# processes, twelve at once; ten rounds of twelve with twenty requests
+# on each; four connections whose reader naps, so the writer waits to
+# write; then over the wire: the echo server driven by the other end;
+# the wolf server asked by twelve connections at once; the wolf client
+# calling twelve at once. wolf-lang#713 bounds the wolf witness: twelve
+# between two processes, six inside one.
+/bin/nbprobe
+/bin/pollprobe
+/bin/epollprobe
+/bin/evprobe
+/bin/restprobe
+/bin/epollecho loop 7200 64 10000
+/bin/waitwolf loop 7082 6
+/bin/pair /bin/waitwolf serve 7081 12 1 -- /bin/waitwolf call 127.0.0.1 7081 12 1 1
+/bin/pair /bin/waitwolf serve 7083 12 10 -- /bin/waitwolf call 127.0.0.1 7083 12 10 20
+/bin/pair /bin/waitwolf push 7090 4 400000 -- /bin/waitwolf pull 127.0.0.1 7090 4 400000 300
+/bin/epollecho 7 10.0.2.2 9711
+/bin/waitwolf serve 7101 12 1 10.0.2.2 9712
+/bin/waitwolf call 10.0.2.2 9713 12 1 3
