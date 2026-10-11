@@ -7,7 +7,9 @@
    one-shot (reported once, then silent until re-armed), EPOLLRDHUP,
    and the hang-up and error reports nobody has to ask for; a
    registration that goes with the last close of what it names and
-   stays while a copy is open; an epoll descriptor shared across fork.
+   stays while a copy is open; an epoll descriptor shared across fork;
+   a registration added, or modified, while another process is already
+   waiting.
    Everything stays on this machine. Its output on PAX must be its
    output on Linux, but for the lines that start with `~`: what PAX
    refuses by name and Linux takes. */
@@ -292,6 +294,35 @@ int main(void)
     N("the parent deletes what the child deleted", ctl(ep, EPOLL_CTL_DEL, p[0], 0, 0));
     R("the parent deletes what the child added", ctl(ep, EPOLL_CTL_DEL, q[0], 0, 0));
     close(p[0]); close(p[1]); close(q[0]); close(q[1]);
+
+    /* --- a registration added while another process waits ---------------------------------- */
+    /* What a runtime does: one thread sits in epoll_wait while another,
+       whose read has just answered -EAGAIN, adds its descriptor. If the
+       bytes came between that read and the add, nothing more will
+       arrive to stir the waiter: the add itself must. */
+    R("pipe", pipe(p));
+    write(p[1], "l", 1);
+    k = fork();
+    if (k == 0) {
+        struct timespec nap = { 0, 200 * 1000000L };
+        nanosleep(&nap, 0);
+        _exit(ctl(ep, EPOLL_CTL_ADD, p[0], EPOLLIN | EPOLLRDHUP | EPOLLONESHOT, 60) == 0 ? 0 : 1);
+    }
+    t0 = ms_now();
+    wait_line("waiting with nothing registered; a child adds a readable pipe in 200 ms", ep, 5000);
+    say("that took at least 150 ms: %s; under 2000: %s\n", ms_now() - t0 >= 150 ? "yes" : "no", ms_now() - t0 < 2000 ? "yes" : "no");
+    waitpid(k, &st, 0);
+    R("delete it", ctl(ep, EPOLL_CTL_DEL, p[0], 0, 0));
+    R("add it back asking nothing", ctl(ep, EPOLL_CTL_ADD, p[0], 0, 61));
+    k = fork();
+    if (k == 0) {
+        struct timespec nap = { 0, 200 * 1000000L };
+        nanosleep(&nap, 0);
+        _exit(ctl(ep, EPOLL_CTL_MOD, p[0], EPOLLIN, 62) == 0 ? 0 : 1);
+    }
+    wait_line("waiting; a child modifies the registration to EPOLLIN in 200 ms", ep, 5000);
+    waitpid(k, &st, 0);
+    close(p[0]); close(p[1]);
 
     /* --- many, and the end ------------------------------------------------------------------- */
     {
