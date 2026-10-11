@@ -493,38 +493,35 @@ def expect_report(spec, path):
                 extra.append("%.1f" % p[0])
         if extra:
             ok = False
-        # onset and end of this event: the energy at its pitches over
-        # 5 ms windows, the first and last window above half its middle
-        tones = hzs
-        win = rate // 200
+        # onset and end of this event: the run of sound (1 ms steps whose
+        # peak over the 12 ms around them is louder than a tenth of the
+        # event's middle: a chord's low pitches beat within shorter
+        # windows) that holds the
+        # event's middle, searched 60 ms either side of it. play's notes
+        # are parted by their gap, so a run is one slot.
+        w1 = max(1, rate // 1000)
         lo = max(0, t0 + int((start - 60) * rate / 1000))
         hi = min(len(mono), t0 + int((start + length + 60) * rate / 1000))
-        def energy(s0):
-            seg = mono[s0:s0 + win * 4]
-            if len(seg) < win * 4:
-                return 0.0
-            tot = 0.0
-            for hz in tones:
-                re = im = 0.0
-                for i2, v in enumerate(seg):
-                    ang = 2 * math.pi * hz * i2 / rate
-                    re += v * math.cos(ang)
-                    im += v * math.sin(ang)
-                tot += math.hypot(re, im)
-            return tot
-        mid = energy(t0 + int((start + length / 2) * rate / 1000) - win * 2)
+        def level(s0):
+            seg = mono[max(0, s0 - 6 * w1):s0 + 6 * w1]
+            return max(abs(v) for v in seg) if seg else 0
+        midw = t0 + int((start + length / 2) * rate / 1000)
+        ref = max(level(midw + d * w1) for d in range(-5, 5))
         on = off = None
-        s0 = lo
-        while s0 < hi:
-            e = energy(s0)
-            if e > mid * 0.5:
-                if on is None:
-                    on = s0 + win * 2
-                off = s0 + win * 2
-            s0 += win
+        if ref > 0:
+            m = (midw - lo) // w1
+            loud = [level(lo + i * w1) > ref * 0.1 for i in range((hi - lo) // w1)]
+            if 0 <= m < len(loud) and loud[m]:
+                i = m
+                while i > 0 and loud[i - 1]:
+                    i -= 1
+                j = m
+                while j + 1 < len(loud) and loud[j + 1]:
+                    j += 1
+                on, off = lo + i * w1, lo + (j + 1) * w1
         on_ms = (on - t0) * 1000.0 / rate if on is not None else -1
         off_ms = (off - t0) * 1000.0 / rate if off is not None else -1
-        if on is None or abs(on_ms - start) > 30 or abs((off_ms - on_ms) - length) > max(40, length * 0.1):
+        if on is None or abs(on_ms - start) > 30 or abs((off_ms - on_ms) - length) > max(20, length * 0.1):
             ok = False
         passed += ok
         print("event %d start %.0f len %.0f found %s onset %.1f len %.1f%s %s" % (
