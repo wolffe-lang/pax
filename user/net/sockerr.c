@@ -106,6 +106,10 @@ int main(void)
     N("sendto(t, a 4-byte address)", sendto(t, "x", 1, 0, (struct sockaddr *)&a1, 4));
     N("sendto(t, an AF_UNIX address)", sendto(t, "x", 1, 0, (struct sockaddr *)&unx, sizeof unx));
     N("sendto(1)", sendto(1, "", 0, 0, (struct sockaddr *)&a1, sizeof a1));
+    struct sockaddr_in bc = sin_of("10.0.2.255", 9), all = sin_of("255.255.255.255", 9), off = sin_of("10.0.2.2", 9);
+    N("sendto(t, 10.0.2.255) with no SO_BROADCAST", sendto(t, "x", 1, 0, (struct sockaddr *)&bc, sizeof bc));
+    N("sendto(t, 255.255.255.255)", sendto(t, "x", 1, 0, (struct sockaddr *)&all, sizeof all));
+    N("sendto(a, 10.0.2.2): a is bound to 127.0.0.1", sendto(a, "x", 1, 0, (struct sockaddr *)&off, sizeof off));
     R("close(t)", close(t));
     int s = socket(AF_INET, SOCK_DGRAM, 0);
 
@@ -116,6 +120,9 @@ int main(void)
     recv_line("a, MSG_DONTWAIT", a, 64, MSG_DONTWAIT);
     recv_line("b", b, 64, 0);
     recv_line("b, MSG_DONTWAIT", b, 64, MSG_DONTWAIT);
+    struct sockaddr_in zero = sin_of("0.0.0.0", 4002);
+    N("sendto(s, \"zero\", 0.0.0.0:4002)", sendto(s, "zero", 4, 0, (struct sockaddr *)&zero, sizeof zero));
+    recv_line("b", b, 64, 0);
 
     /* the default peer, and filtering by it */
     R("connect(b, 127.0.0.1:4001)", connect(b, (struct sockaddr *)&a1, sizeof a1));

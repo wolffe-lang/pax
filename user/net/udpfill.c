@@ -1,9 +1,12 @@
-/* udpfill — a receive queue filled past its bound (px22): 200 datagrams
-   of 1000 bytes sent over loopback to a socket nobody reads, then the
-   socket read until it is empty. How many were kept is the receiving
-   kernel's bound (PAX: 65536 bytes a socket, each datagram taking its
-   length rounded up to 8 and 8 more; Linux: SO_RCVBUF's accounting), so
-   this program's output is held to a file per kernel, not to Linux's. */
+/* udpfill — two of the kernel's bounds (px22). A receive queue filled
+   past its bound: 200 datagrams of 1000 bytes sent over loopback to a
+   socket nobody reads, then the socket read until it is empty; how
+   many were kept is the receiving kernel's (PAX: 65536 bytes a socket,
+   each datagram taking its length rounded up to 8 and 8 more; Linux:
+   SO_RCVBUF's accounting). And a datagram of 1473 bytes, one more than
+   an Ethernet frame carries: Linux sends it (in fragments where it
+   must), PAX answers EMSGSIZE. So this program's output is held to a
+   file of PAX's own (udpfill.expect), not to Linux's. */
 #include "say.h"
 
 int main(void)
@@ -34,5 +37,13 @@ int main(void)
     }
     say("udpfill: %d sent, %d kept (the first %d, %s), the last numbered %d; then -%s\n", sent, kept, kept,
         in_order ? "in order" : "NOT in order", last, ename(errno));
+    /* One byte more than a frame carries: Linux fragments, PAX refuses. */
+    char big[1473];
+    memset(big, 'x', sizeof big);
+    ssize_t r = sendto(tx, big, sizeof big, 0, (struct sockaddr *)&at, sizeof at);
+    if (r < 0)
+        say("udpfill: 1473 bytes in one datagram: -%s\n", ename(errno));
+    else
+        say("udpfill: 1473 bytes in one datagram: %ld sent\n", (long)r);
     return 0;
 }
