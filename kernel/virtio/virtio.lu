@@ -163,14 +163,42 @@ pub const Q_NUMBER: u64 = 7
 /// The alignment `layout` gives the used ring. The specification's is 4.
 const USED_ALIGN: u64 = 4
 
+/// px30: which device's transport words the calls below use: 0 is the
+/// network device's (`pax_net_state`, px20's, the default), anything
+/// else the address of another device's eight words (kernel/sound's,
+/// in boot/sound.S). One CPU, and a caller that selects another
+/// device's words puts the old selection back before it returns
+/// (`use_words` answers it), interrupt handlers included, so a thread
+/// interrupted inside a transport call finds its own selection again.
+var selected: u64 = 0
+
+/// Use the transport words at `base` (0: the network device's) from
+/// now on; the selection that was in force.
+pub fn use_words(base: u64) -> u64 {
+    // # Safety: a word of module state, read and written with IF clear
+    // or by the one thread that owns the selection meanwhile.
+    unsafe {
+        let old = selected
+        selected = base
+        old
+    }
+}
+
+fn words() -> u64 {
+    // # Safety: as `use_words`; the addresses only.
+    unsafe { if selected == 0 { pax_net_state as u64 } else { selected } }
+}
+
 fn tw(i: u64) -> u64 {
-    // # Safety: i < 64, a word of boot/net.S's pax_net_state.
-    unsafe { ((pax_net_state as u64 + i * 8) as *u64).read_volatile() }
+    // # Safety: i < 8 (the transport's words) or a driver's word below
+    // 64, a word of boot/net.S's pax_net_state or of the selected
+    // device's storage.
+    unsafe { ((words() + i * 8) as *u64).read_volatile() }
 }
 
 fn put_tw(i: u64, v: u64) {
     // # Safety: as `tw`.
-    unsafe { ((pax_net_state as u64 + i * 8) as *u64).write_volatile(v) }
+    unsafe { ((words() + i * 8) as *u64).write_volatile(v) }
 }
 
 /// The address of word `i` of pax_net_state (a queue record's base).
@@ -240,6 +268,13 @@ fn window(pml4: u64, k: u64, pa: u64, len: u64) -> u64 {
 /// Find the 1.x registers of PCI function `i` (kernel/pci's index) and
 /// map them in the structures at `pml4`. OK, or which part is missing.
 pub fn attach(pml4: u64, i: u64) -> u64 {
+    attach_at(pml4, i, 0)
+}
+
+/// `attach`, with the four windows from window `first` of the device
+/// slot on (px30: the network device takes windows 0-3, the sound
+/// device 4-7), into the selected transport words.
+pub fn attach_at(pml4: u64, i: u64, first: u64) -> u64 {
     let b = pci.bdf(i)
     put_tw(T_BDF, b)
     put_tw(T_COMMON, 0)
@@ -257,7 +292,7 @@ pub fn attach(pml4: u64, i: u64) -> u64 {
             let len = pci.read32(b, cap + 12)
             let slot = if kind == CFG_COMMON { T_COMMON } else { if kind == CFG_NOTIFY { T_NOTIFY } else { if kind == CFG_ISR { T_ISR } else { if kind == CFG_DEVICE { T_DEVICE } else { 0 } } } }
             if slot != 0 && tw(slot) == 0 && (bk == pci.BAR_MEM32 || bk == pci.BAR_MEM64) {
-                let va = window(pml4, kind - 1, bpa + off, len)
+                let va = window(pml4, first + kind - 1, bpa + off, len)
                 if va == 0 {
                     failed = true
                 }
