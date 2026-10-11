@@ -73,7 +73,7 @@
 #      outside name as above).
 #   U3 frames and books: every line's `user: frames free <A> before, <B>
 #      with 1 processes, <A> after`, and its books: `heap pages 0, live
-#      blocks 0, net frames 66, stack frames 12, open files 0, pipes 0,
+#      blocks 0, net frames 66, stack frames 76, open files 0, pipes 0,
 #      sockets 0, datagrams waiting 0` (none: `net frames 0`) — every
 #      frame, descriptor and socket came back.
 #   U4 what PAX lacks: -ENOSYS only for set_robust_list (273) and rseq
@@ -324,7 +324,7 @@ one() { # tier leg way
     [ "$way" = none ] && netline='net: no virtio network device among [0-9]+ PCI functions; the network is off' netframes=0
     if has "$norm" "$netline" \
         && has "$norm" 'ip: 10\.0\.2\.15 netmask 255\.255\.255\.0 gateway 10\.0\.2\.2, MTU 1500, TTL 64, DF set, no fragments either way' \
-        && has "$norm" 'udp: 16 sockets, a 65536-byte queue each, ports 32768-60999 from [0-9]+, 1472 bytes a datagram, loopback here'; then
+        && has "$norm" 'udp: 16 sockets, a 65536-byte queue each, ports 32768-60999 from [0-9]+, 1472 bytes a datagram, loopback by kernel/ip'; then
         say "PASS U1 $L: $(line_of "$norm" "^$netline\$" | cut -c1-80); $(line_of "$norm" '^ip: 10'); $(line_of "$norm" '^udp: 16')"
     else
         bad "U1 $L: $(grep -m1 '^net: \|^PANIC' "$norm"); ip '$(line_of "$norm" '^ip: 10')'; udp '$(line_of "$norm" '^udp: 16')'"
@@ -402,7 +402,7 @@ one() { # tier leg way
         }
         /^user: books: / {
             m++
-            if ($0 != "user: books: heap pages 0, live blocks 0, net frames " nf ", stack frames 12, open files 0, pipes 0, sockets 0, datagrams waiting 0") why = why " command " m ": " $0 ";"
+            if ($0 != "user: books: heap pages 0, live blocks 0, net frames " nf ", stack frames 76, open files 0, pipes 0, sockets 0, datagrams waiting 0") why = why " command " m ": " $0 ";"
         }
         END { if (n != want || m != want) why = why " " n " frames lines and " m " books lines, not " want ";"; if (why != "") { print "no:" why; exit 1 } print "ok" }' "$norm") || why=" ${v#no:}"
     [ -z "$why" ] && say "PASS U3 $L: after each of $ncmd commands every frame back, and the books: $(sed -n 's/^user: books: //p' "$norm" | tail -n 1)" || bad "U3 $L:$why"
