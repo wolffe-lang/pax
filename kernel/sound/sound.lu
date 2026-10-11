@@ -1,0 +1,1238 @@
+//! sound — the virtio sound device and Linux's OSS PCM interface,
+//! `/dev/dsp` (px30).
+//!
+//! **The device** (VIRTIO 1.2 §5.14, device id 25, PCI `1af4:1059`):
+//! `start` finds it in kernel/pci's table, attaches kernel/virtio's
+//! transport to it in transport words of its own (boot/sound.S's
+//! `pax_snd_state`, chosen with `virtio.use_words`; the network device
+//! keeps px20's) and windows 4-7 of the device slot, and brings it up
+//! in the specification's order. It takes VIRTIO_F_VERSION_1 (bit 32)
+//! alone, refusing a device without it by name, and declines the rest.
+//! Queues: 0 control, 1 event, 2 transmit; the receive queue (3, for
+//! capture) is left disabled. The control queue is synchronous: one
+//! request and its response at a time in this driver's control frame,
+//! notified, and its used entry awaited (bounded; a device that never
+//! answers is a refusal by name). At start, `PCM_INFO` for every
+//! stream; the first OUTPUT stream is the one `/dev/dsp` drives, and
+//! one line names it with its formats, rates and channels.
+//!
+//! **Periods.** Eight periods of `PERIOD` (4096) bytes, a frame of
+//! `kernel/frames` each, taken once at `start` and never given back:
+//! the buffer is bounded and the heap is not touched. A transmit
+//! message is three descriptors — `virtio_snd_pcm_xfer` (the stream id,
+//! read by the device), the period's bytes, `virtio_snd_pcm_status`
+//! (written by the device) — so period k is descriptors 3k to 3k+2.
+//! `write` fills the current period from the caller's memory; a full
+//! one is handed to the device and the next taken; with every period
+//! at the device a blocking write waits (`files.WAIT`, as a full pipe
+//! does) and an O_NONBLOCK one answers what it took, or -EAGAIN. The
+//! device hands a period back when it has played it: the interrupt
+//! (`irq`) collects it, counts it, and kernel/interrupts wakes every
+//! waiting writer (`sched.wake_pipes`).
+//!
+//! **The stream** follows §5.14.6.6's state machine: `SET_PARAMS`
+//! (the buffer and period sizes, channels, format, rate) and `PREPARE`
+//! before the first period is handed over; `START` once two are at the
+//! device (or at a drain with fewer); `STOP` after a drain; `RELEASE`
+//! at the last close, at RESET and when the process that owns the
+//! stream ends. An **underrun** — the device hands back the last period
+//! while the stream runs and the writer has not drained — is counted;
+//! the stream stays started, and what the device plays meanwhile is
+//! its own (QEMU's: silence, measured in tests/mpx3-sound).
+//!
+//! **The interface** is Linux's OSS, as `soundcard.h` numbers it and the
+//! OSS programmer's guide describes it; what PAX answers differently
+//! from Linux is named and counted (C_*). See `ioctl` for each request.
+//! A stream whose process ends — exit, a fault, a signal — is stopped
+//! at once and its queued periods dropped (`release`, from the close of
+//! every descriptor kernel/user makes at a process's end: the speaker's
+//! rule), where a blocking `close` drains first.
+//!
+//! Every entry runs with IF clear: a system call, the device's
+//! interrupt, a process's end. No region, no heap.
+//!
+//! Written from the OASIS VIRTIO specification 1.2/1.3 §5.14 (the
+//! sound device: its configuration, queues, request codes and
+//! structures, the PCM format and rate enumerations, the stream state
+//! machine), §4.1 (the PCI transport, via kernel/virtio), the uapi
+//! `linux/soundcard.h` (the request numbers, AFMT_*, DSP_CAP_*,
+//! `audio_buf_info`, `count_info`), the OSS programmer's guide, and
+//! black-box runs of Linux 7.2.8 with this device under QEMU
+//! (`notes/px30/`). No Linux source; no other kernel's, driver's,
+//! sound library's or QEMU's source.
+
+use frames
+use log
+use pci
+use sched
+use timer
+use uaccess
+use virtio
+
+extern "c" fn pax_fb_fill(dst: u64, v: u64, qwords: u64)
+
+extern "c" let pax_snd_state: *u64
+extern "c" let pax_snd_stats: *u64
+
+/// The answer that means "wait and run the call again" (kernel/files'
+/// WAIT, -514; never seen by ring 3).
+pub const WAIT: u64 = 0xfffffffffffffdfe
+
+/// `start`'s answers: the device is up.
+pub const UP: u64 = 0
+/// No virtio sound device on the bus.
+pub const ABSENT: u64 = 1
+/// A device that was refused (one line says why).
+pub const REFUSED: u64 = 2
+
+/// The period: one frame of bytes.
+pub const PERIOD: u64 = 4096
+/// How many periods.
+pub const PERIODS: u64 = 8
+const PAGE: u64 = 4096
+const CTLQ_SIZE: u64 = 8
+const EVTQ_SIZE: u64 = 8
+const TXQ_SIZE: u64 = 32
+const EVENTS: u64 = 8
+const SPIN: u64 = 50000000 // the control queue's bound, in looks
+
+// The queues' numbers.
+const CTLQ: u64 = 0
+const EVTQ: u64 = 1
+const TXQ: u64 = 2
+
+// Request codes and statuses (§5.14.6).
+const R_PCM_INFO: u64 = 0x0100
+const R_PCM_SET_PARAMS: u64 = 0x0101
+const R_PCM_PREPARE: u64 = 0x0102
+const R_PCM_RELEASE: u64 = 0x0103
+const R_PCM_START: u64 = 0x0104
+const R_PCM_STOP: u64 = 0x0105
+const S_OK: u64 = 0x8000
+const EVT_PCM_PERIOD: u64 = 0x1100
+const EVT_PCM_XRUN: u64 = 0x1101
+const DIR_OUTPUT: u64 = 0
+
+// virtio's PCM formats (§5.14.6.6.3) this driver writes.
+const VF_U8: u64 = 4
+const VF_S16: u64 = 5
+
+// OSS formats (soundcard.h).
+const AFMT_QUERY: u64 = 0
+const AFMT_U8: u64 = 0x08
+const AFMT_S16_LE: u64 = 0x10
+
+// OSS requests: _SIO, _SIOR, _SIOW, _SIOWR of ('P', n) (soundcard.h).
+const DSP_RESET: u64 = 0x5000
+const DSP_SYNC: u64 = 0x5001
+const DSP_SPEED: u64 = 0xc0045002
+const DSP_STEREO: u64 = 0xc0045003
+const DSP_GETBLKSIZE: u64 = 0xc0045004
+const DSP_SETFMT: u64 = 0xc0045005
+const DSP_CHANNELS: u64 = 0xc0045006
+const DSP_FILTER: u64 = 0xc0045007
+const DSP_POST: u64 = 0x5008
+const DSP_SUBDIVIDE: u64 = 0xc0045009
+const DSP_SETFRAGMENT: u64 = 0xc004500a
+const DSP_GETFMTS: u64 = 0x8004500b
+const DSP_GETOSPACE: u64 = 0x8010500c
+const DSP_NONBLOCK: u64 = 0x500e
+const DSP_GETCAPS: u64 = 0x8004500f
+const DSP_GETOPTR: u64 = 0x800c5012
+const DSP_GETODELAY: u64 = 0x80045017
+const PCM_READ_RATE: u64 = 0x80045002
+const PCM_READ_BITS: u64 = 0x80045005
+const PCM_READ_CHANNELS: u64 = 0x80045006
+const OSS_GETVERSION: u64 = 0x80044d76
+const SOUND_VERSION: u64 = 0x030802
+const DSP_CAP_REALTIME: u64 = 0x200
+
+// errnos (uapi asm-generic/errno-base.h).
+const ENOENT: u64 = 2
+const ENXIO: u64 = 6
+const EBADF: u64 = 9
+const EAGAIN: u64 = 11
+const EFAULT: u64 = 14
+const EBUSY: u64 = 16
+const EINVAL: u64 = 22
+const EIO: u64 = 5
+
+// The driver's words in pax_snd_state (0-7 are kernel/virtio's).
+const W_UP: u64 = 8
+const W_LINE: u64 = 9
+const W_VECTOR: u64 = 10
+const W_STATE: u64 = 11
+const W_PCI: u64 = 12
+const W_FRAMES: u64 = 13
+const W_OFFERED: u64 = 14
+const W_CTL: u64 = 15 // the control frame's physical address
+const W_PERIOD0: u64 = 16 // 16-23: the periods' frames
+const W_CTLQ: u64 = 24 // 24-31: the control queue's record
+const W_EVTQ: u64 = 32 // 32-39: the event queue's
+const W_TXQ: u64 = 40 // 40-47: the transmit queue's
+const W_STREAM: u64 = 48 // the output stream's id
+const W_FORMATS: u64 = 49 // its format bits
+const W_RATES: u64 = 50 // its rate bits
+const W_CHMIN: u64 = 51
+const W_CHMAX: u64 = 52
+const W_OWNER: u64 = 53 // the pid that holds /dev/dsp open; 0 none
+const W_FMT: u64 = 54 // the OSS format
+const W_CHANNELS: u64 = 55
+const W_RATE: u64 = 56 // the rate's index in the enumeration
+const W_PHASE: u64 = 57 // P_*
+const W_FILL: u64 = 58 // bytes in the period being filled
+const W_CUR: u64 = 59 // the period being filled
+const W_INFLIGHT: u64 = 60 // periods at the device
+const W_HEAD: u64 = 61 // the oldest period at the device
+const W_WRITTEN: u64 = 62 // bytes taken since the open
+const W_PLAYED: u64 = 63 // bytes the device has handed back
+const W_STREAMS: u64 = 64
+const W_DRAINING: u64 = 65 // a drain is waiting
+const W_LATENCY: u64 = 66 // the last status's latency_bytes
+const W_LEN0: u64 = 67 // 67-74: the bytes in each period at the device
+const W_BLOCKS: u64 = 75 // periods played since the last GETOPTR
+const W_START_TICK: u64 = 76 // the tick START was sent at
+const W_DIRTY: u64 = 77 // parameters changed since the last SET_PARAMS
+const W_STARTS: u64 = 78
+
+// The stream's phases.
+const P_CLOSED: u64 = 0
+const P_OPEN: u64 = 1 // open, not prepared
+const P_PREPARED: u64 = 2 // SET_PARAMS and PREPARE done, not started (or stopped)
+const P_RUNNING: u64 = 3
+
+// The counters, in pax_snd_stats.
+/// Interrupts taken.
+pub const C_IRQ: u64 = 0
+/// Interrupts with no cause in the ISR status.
+pub const C_IRQ_IDLE: u64 = 1
+/// Periods handed to the device.
+pub const C_HANDED: u64 = 2
+/// Periods the device handed back.
+pub const C_RETURNED: u64 = 3
+/// Underruns: the last period back while the stream ran.
+pub const C_UNDERRUN: u64 = 4
+/// Periods the device handed back with a status other than OK.
+pub const C_STATUS_BAD: u64 = 5
+/// Events the device sent (any kind).
+pub const C_EVENTS: u64 = 6
+/// Of them, XRUN events.
+pub const C_EVT_XRUN: u64 = 7
+/// Opens of /dev/dsp that succeeded.
+pub const C_OPENS: u64 = 8
+/// Opens refused: the device is held (-EBUSY).
+pub const C_BUSY: u64 = 9
+/// Opens refused: for reading (-ENXIO; PAX has no capture).
+pub const C_NO_CAPTURE: u64 = 10
+/// SETFMT requests answered with S16_LE for another format.
+pub const C_FMT_SUBST: u64 = 11
+/// CHANNELS requests clamped.
+pub const C_CH_CLAMP: u64 = 12
+/// SPEED requests answered with another rate.
+pub const C_RATE_NEAR: u64 = 13
+/// Requests refused (-EINVAL).
+pub const C_REFUSED: u64 = 14
+/// Requests answered 0 and ignored (SETFRAGMENT, SUBDIVIDE, POST).
+pub const C_IGNORED: u64 = 15
+/// Writes that answered -EAGAIN or short (O_NONBLOCK).
+pub const C_EAGAIN: u64 = 16
+/// Times a write, SYNC or close waited.
+pub const C_WAITS: u64 = 17
+/// Drains completed (SYNC, close).
+pub const C_DRAINS: u64 = 18
+/// Streams stopped undrained at their last close (a process's end,
+/// an O_NONBLOCK close).
+pub const C_ENDED: u64 = 19
+/// Periods dropped (RESET, a process's end).
+pub const C_DROPPED: u64 = 20
+/// Control requests sent.
+pub const C_CTL: u64 = 21
+/// Control requests the device refused or never answered.
+pub const C_CTL_BAD: u64 = 22
+/// Bytes written.
+pub const C_BYTES: u64 = 23
+/// START requests.
+pub const C_STARTS: u64 = 24
+/// Of the events, PERIOD_ELAPSED.
+pub const C_EVT_PERIOD: u64 = 25
+
+// The control frame: the request at 0, the response at 64, the
+// transmit headers and statuses at 1024 (16 bytes a period), the event
+// buffers at 2048 (8 bytes each).
+const CTL_REQ: u64 = 0
+const CTL_RESP: u64 = 64
+const CTL_TX: u64 = 1024
+const CTL_EVT: u64 = 2048
+
+// --- words --------------------------------------------------------------
+
+fn sw(i: u64) -> u64 {
+    // # Safety: i < 128, a word of boot/sound.S's pax_snd_state.
+    unsafe { ((pax_snd_state as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_sw(i: u64, v: u64) {
+    // # Safety: as `sw`.
+    unsafe { ((pax_snd_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+fn addr(i: u64) -> u64 {
+    // # Safety: the address only.
+    unsafe { pax_snd_state as u64 + i * 8 }
+}
+
+/// Counter `i` (C_*).
+pub fn count(i: u64) -> u64 {
+    // # Safety: i < 64, a word of boot/sound.S's pax_snd_stats.
+    unsafe { ((pax_snd_stats as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn bump(i: u64, by: u64) {
+    // # Safety: as `count`; IF clear.
+    unsafe { ((pax_snd_stats as u64 + i * 8) as *u64).write_volatile(count(i) + by) }
+}
+
+fn r16(a: u64) -> u64 {
+    // # Safety: `a` is 2-aligned in the control frame or a device window.
+    let v = unsafe { (a as *u16).read_volatile() }
+    v as u64
+}
+
+fn r32(a: u64) -> u64 {
+    // # Safety: as `r16`, 4-aligned.
+    let v = unsafe { (a as *u32).read_volatile() }
+    v as u64
+}
+
+fn r64(a: u64) -> u64 {
+    // # Safety: as `r16`, 8-aligned.
+    unsafe { (a as *u64).read_volatile() }
+}
+
+fn w8(a: u64, v: u64) {
+    // # Safety: as `r16`; `v` masked.
+    unsafe { (a as *u8).write_volatile((v & 0xff) as u8) }
+}
+
+fn w32(a: u64, v: u64) {
+    // # Safety: as `r32`; `v` masked.
+    unsafe { (a as *u32).write_volatile((v & 0xffffffff) as u32) }
+}
+
+fn ctl_va() -> u64 {
+    sw(W_CTL) + frames.hhdm()
+}
+
+/// Whether the device is up.
+pub fn up() -> bool {
+    sw(W_UP) == 1
+}
+
+/// The device's interrupt vector; 0 while there is none.
+pub fn vector() -> u64 {
+    sw(W_VECTOR)
+}
+
+/// Frames this driver holds.
+pub fn frames_held() -> u64 {
+    sw(W_FRAMES)
+}
+
+/// Periods at the device now.
+pub fn inflight() -> u64 {
+    sw(W_INFLIGHT)
+}
+
+/// The pid that holds /dev/dsp; 0 none.
+pub fn owner() -> u64 {
+    sw(W_OWNER)
+}
+
+// --- the rate enumeration (§5.14.6.6.3) ----------------------------------
+
+fn rate_hz(i: u64) -> u64 {
+    match i {
+        0 => 5512,
+        1 => 8000,
+        2 => 11025,
+        3 => 16000,
+        4 => 22050,
+        5 => 32000,
+        6 => 44100,
+        7 => 48000,
+        8 => 64000,
+        9 => 88200,
+        10 => 96000,
+        11 => 176400,
+        12 => 192000,
+        13 => 384000,
+        _ => 0,
+    }
+}
+
+/// The device's rate nearest `hz` (ties to the lower): its index.
+fn nearest_rate(hz: u64) -> u64 {
+    var best: u64 = 99
+    var gap: u64 = 0
+    var i: u64 = 0
+    while i < 14 {
+        if sw(W_RATES) & (1 << i) != 0 {
+            let r = rate_hz(i)
+            let d = if r > hz { r - hz } else { hz - r }
+            if best == 99 || d < gap {
+                best = i
+                gap = d
+            }
+        }
+        i += 1
+    }
+    best
+}
+
+fn frame_bytes() -> u64 {
+    sw(W_CHANNELS) * (if sw(W_FMT) == AFMT_U8 { 1 } else { 2 })
+}
+
+// --- start ----------------------------------------------------------------
+
+fn zeroed_frame() -> u64 {
+    let pa = frames.alloc() else 0
+    if pa != 0 {
+        // # Safety: the frame just taken, through the HHDM; 512 words.
+        unsafe { pax_fb_fill(pa + frames.hhdm(), 0, PAGE / 8) }
+        put_sw(W_FRAMES, sw(W_FRAMES) + 1)
+    }
+    pa
+}
+
+fn refuse(what: str, v: u64) -> u64 {
+    virtio.add_status(virtio.FAILED)
+    log.put("sound: refused: ")
+    log.put(what)
+    log.put(" ")
+    log.hex(v)
+    log.put("; /dev/dsp is absent")
+    log.end()
+    put_sw(W_STATE, REFUSED)
+    REFUSED
+}
+
+/// Send the control request of `len` bytes at the control frame's
+/// start, its response of `resp` bytes after it, and wait for the
+/// device to hand it back: the response's status, or 0 when it never
+/// answered. The transport words must be selected.
+fn ctl(len: u64, resp: u64) -> u64 {
+    let q = addr(W_CTLQ)
+    let pa = sw(W_CTL)
+    virtio.set_desc(q, 0, pa + CTL_REQ, len, virtio.DESC_NEXT, 1)
+    virtio.set_desc(q, 1, pa + CTL_RESP, resp, virtio.DESC_WRITE, 0)
+    w32(ctl_va() + CTL_RESP, 0)
+    virtio.offer(q, 0)
+    let _told = virtio.notify(q)
+    bump(C_CTL, 1)
+    var k: u64 = 0
+    while k < SPIN && !virtio.returned(q) {
+        k += 1
+    }
+    if !virtio.returned(q) {
+        bump(C_CTL_BAD, 1)
+        return 0
+    }
+    let (_id, _len) = virtio.collect(q)
+    let st = r32(ctl_va() + CTL_RESP)
+    if st != S_OK {
+        bump(C_CTL_BAD, 1)
+    }
+    st
+}
+
+/// A request that names only the stream (PREPARE, RELEASE, START,
+/// STOP): its status.
+fn stream_req(code: u64) -> u64 {
+    let r = ctl_va() + CTL_REQ
+    w32(r, code)
+    w32(r + 4, sw(W_STREAM))
+    ctl(8, 4)
+}
+
+/// Find the device, bring it up on the paging structures at `pml4`,
+/// and unmask its interrupt. Call after `pci.scan`, IF clear. Answers
+/// UP (one line names the stream), ABSENT (silent: every kernel looks,
+/// and most machines have no sound device) or REFUSED (one line says
+/// why).
+pub fn start(pml4: u64) -> u64 {
+    put_sw(W_UP, 0)
+    put_sw(W_VECTOR, 0)
+    put_sw(W_FRAMES, 0)
+    put_sw(W_OWNER, 0)
+    put_sw(W_PHASE, P_CLOSED)
+    let i = pci.find(virtio.VENDOR, 0x1059, 0x1059, 0)
+    if i == pci.MAX {
+        put_sw(W_STATE, ABSENT)
+        return ABSENT
+    }
+    let prev = virtio.use_words(addr(0))
+    let r = bring_up(pml4, i)
+    let _p = virtio.use_words(prev)
+    r
+}
+
+fn bring_up(pml4: u64, i: u64) -> u64 {
+    put_sw(W_PCI, i)
+    let b = pci.bdf(i)
+    pci.set_command(b, (pci.command(b) | pci.CMD_MEMORY | pci.CMD_MASTER) & !pci.CMD_INTX_OFF)
+    let a = virtio.attach_at(pml4, i, 4)
+    if a != virtio.OK {
+        log.put("sound: refused: ")
+        log.put(if a == virtio.NO_COMMON { "the device has no virtio 1.x common configuration capability" } else { if a == virtio.NO_MAP { "the device's registers could not be mapped" } else { "the device lacks a virtio 1.x notification, ISR or device capability" } })
+        log.put("; /dev/dsp is absent")
+        log.end()
+        put_sw(W_STATE, REFUSED)
+        return REFUSED
+    }
+    if !virtio.reset() {
+        return refuse("the device did not reset, status", virtio.status())
+    }
+    virtio.add_status(virtio.ACKNOWLEDGE)
+    virtio.add_status(virtio.DRIVER)
+    let offered = virtio.device_features()
+    put_sw(W_OFFERED, offered)
+    if offered & virtio.F_VERSION_1 == 0 {
+        return refuse("the device lacks VIRTIO_F_VERSION_1 (bit 32), features", offered)
+    }
+    virtio.set_features(0x100000000)
+    virtio.add_status(virtio.FEATURES_OK)
+    if virtio.status() & virtio.FEATURES_OK == 0 {
+        return refuse("the device did not keep FEATURES_OK for features", 0x100000000)
+    }
+    if virtio.queues() < 3 {
+        return refuse("the device has fewer than three queues:", virtio.queues())
+    }
+    if virtio.queue_max(CTLQ) < CTLQ_SIZE || virtio.queue_max(EVTQ) < EVTQ_SIZE || virtio.queue_max(TXQ) < TXQ_SIZE {
+        return refuse("a queue is smaller than this driver's, transmit", virtio.queue_max(TXQ))
+    }
+    let ctlf = zeroed_frame()
+    if ctlf == 0 {
+        return refuse("no frame for the control requests, frames free", frames.free_count())
+    }
+    put_sw(W_CTL, ctlf)
+    if !make_ring(addr(W_CTLQ), CTLQ, CTLQ_SIZE) || !make_ring(addr(W_EVTQ), EVTQ, EVTQ_SIZE) || !make_ring(addr(W_TXQ), TXQ, TXQ_SIZE) {
+        return refuse("a queue could not be laid out, frames free", frames.free_count())
+    }
+    var k: u64 = 0
+    while k < PERIODS {
+        let f = zeroed_frame()
+        if f == 0 {
+            return refuse("no frame for a period, frames free", frames.free_count())
+        }
+        put_sw(W_PERIOD0 + k, f)
+        let t = ctlf + CTL_TX + k * 16
+        let q = addr(W_TXQ)
+        virtio.set_desc(q, 3 * k, t, 4, virtio.DESC_NEXT, 3 * k + 1)
+        virtio.set_desc(q, 3 * k + 1, f, PERIOD, virtio.DESC_NEXT, 3 * k + 2)
+        virtio.set_desc(q, 3 * k + 2, t + 8, 8, virtio.DESC_WRITE, 0)
+        k += 1
+    }
+    // The control queue is waited on, never interrupted for.
+    virtio.quiet(addr(W_CTLQ), true)
+    // Every event buffer to the device.
+    var e: u64 = 0
+    while e < EVENTS {
+        virtio.set_desc(addr(W_EVTQ), e, ctlf + CTL_EVT + e * 8, 8, virtio.DESC_WRITE, 0)
+        virtio.offer(addr(W_EVTQ), e)
+        e += 1
+    }
+    let line = pci.line(i)
+    put_sw(W_LINE, line)
+    if pci.pin(i) == 0 || line < 3 || line > 15 || line == 4 || line == 8 || line == 13 {
+        return refuse("the device's interrupt line is not one this kernel can take, line", line)
+    }
+    virtio.add_status(virtio.DRIVER_OK)
+    let _told = virtio.notify(addr(W_EVTQ))
+    // The configuration: jacks, streams, chmaps (three le32).
+    let streams = virtio.device8(4) | virtio.device8(5) << 8
+    put_sw(W_STREAMS, streams)
+    if streams == 0 || streams > 8 {
+        return refuse("the device has no stream this driver can list, streams", streams)
+    }
+    // PCM_INFO for every stream: 32 bytes each after the status.
+    let rq = ctl_va() + CTL_REQ
+    w32(rq, R_PCM_INFO)
+    w32(rq + 4, 0)
+    w32(rq + 8, streams)
+    w32(rq + 12, 32)
+    let st = ctl(16, 4 + 32 * streams)
+    if st != S_OK {
+        return refuse("PCM_INFO was not answered OK, status", st)
+    }
+    var s: u64 = 0
+    var found = false
+    while s < streams && !found {
+        let info = ctl_va() + CTL_RESP + 4 + s * 32
+        // # Safety: byte 24 of the stream's info, the direction.
+        let dir = unsafe { (((info + 24) as *u8).read_volatile()) as u64 }
+        if dir == DIR_OUTPUT {
+            put_sw(W_STREAM, s)
+            put_sw(W_FORMATS, r64(info + 8))
+            put_sw(W_RATES, r64(info + 16))
+            // # Safety: bytes 25 and 26: channels_min, channels_max.
+            let (lo, hi) = unsafe { ((((info + 25) as *u8).read_volatile()) as u64, (((info + 26) as *u8).read_volatile()) as u64) }
+            put_sw(W_CHMIN, lo)
+            put_sw(W_CHMAX, hi)
+            found = true
+        }
+        s += 1
+    }
+    if !found {
+        return refuse("no output stream among", streams)
+    }
+    if sw(W_FORMATS) & (1 << VF_S16) == 0 || nearest_rate(48000) == 99 || sw(W_CHMIN) > 2 || sw(W_CHMAX) < 1 {
+        return refuse("the output stream takes no S16 or no rate this driver can ask, formats", sw(W_FORMATS))
+    }
+    timer.level(line)
+    put_sw(W_VECTOR, timer.MASTER_BASE + line)
+    timer.unmask_line(line)
+    put_sw(W_UP, 1)
+    put_sw(W_STATE, UP)
+    log.put("sound: virtio sound at PCI function ")
+    log.dec(i as int)
+    log.put(", line ")
+    log.dec(line as int)
+    log.put(", stream ")
+    log.dec(sw(W_STREAM) as int)
+    log.put(" of ")
+    log.dec(streams as int)
+    log.put(" out, formats ")
+    log.hex(sw(W_FORMATS))
+    log.put(", rates ")
+    log.hex(sw(W_RATES))
+    log.put(", channels ")
+    log.dec(sw(W_CHMIN) as int)
+    log.put("-")
+    log.dec(sw(W_CHMAX) as int)
+    log.put(", features ")
+    log.hex(offered)
+    log.put(", ")
+    log.dec(PERIODS as int)
+    log.put(" periods of ")
+    log.dec(PERIOD as int)
+    log.put(" bytes: /dev/dsp")
+    log.end()
+    UP
+}
+
+fn make_ring(q: u64, number: u64, size: u64) -> bool {
+    let ring = zeroed_frame()
+    ring != 0 && virtio.queue_setup(q, number, size, ring)
+}
+
+// --- the interrupt ----------------------------------------------------------
+
+/// The device's interrupt (kernel/interrupts, IF clear): read the cause,
+/// which withdraws the request; take back every period the device has
+/// played and every event it sent. The caller acknowledges the 8259
+/// (the line may be shared with the network device) and wakes waiting
+/// writers. Whether anything came back.
+pub fn irq() -> bool {
+    let prev = virtio.use_words(addr(0))
+    let cause = virtio.isr()
+    bump(C_IRQ, 1)
+    if cause == 0 {
+        bump(C_IRQ_IDLE, 1)
+    }
+    let n = reclaim()
+    events()
+    let _p = virtio.use_words(prev)
+    n > 0
+}
+
+/// Take back the periods the device has handed back: how many.
+fn reclaim() -> u64 {
+    let q = addr(W_TXQ)
+    var n: u64 = 0
+    while virtio.returned(q) {
+        let (id, _len) = virtio.collect(q)
+        let k = id / 3
+        let t = ctl_va() + CTL_TX + k * 16
+        if r32(t + 8) != S_OK {
+            bump(C_STATUS_BAD, 1)
+        }
+        put_sw(W_LATENCY, r32(t + 12))
+        if sw(W_INFLIGHT) > 0 {
+            put_sw(W_INFLIGHT, sw(W_INFLIGHT) - 1)
+        }
+        put_sw(W_PLAYED, sw(W_PLAYED) + sw(W_LEN0 + k))
+        put_sw(W_LEN0 + k, 0)
+        put_sw(W_HEAD, (k + 1) % PERIODS)
+        put_sw(W_BLOCKS, sw(W_BLOCKS) + 1)
+        bump(C_RETURNED, 1)
+        n += 1
+    }
+    if n > 0 && sw(W_INFLIGHT) == 0 && sw(W_PHASE) == P_RUNNING && sw(W_DRAINING) == 0 {
+        bump(C_UNDERRUN, 1)
+    }
+    n
+}
+
+fn events() {
+    let q = addr(W_EVTQ)
+    var again = false
+    while virtio.returned(q) {
+        let (id, _len) = virtio.collect(q)
+        let code = r32(ctl_va() + CTL_EVT + id * 8)
+        bump(C_EVENTS, 1)
+        if code == EVT_PCM_XRUN {
+            bump(C_EVT_XRUN, 1)
+        }
+        if code == EVT_PCM_PERIOD {
+            bump(C_EVT_PERIOD, 1)
+        }
+        virtio.offer(q, id)
+        again = true
+    }
+    if again {
+        let _told = virtio.notify(q)
+    }
+}
+
+// --- the stream ------------------------------------------------------------
+
+/// Settle the parameters with the device if they changed (SET_PARAMS,
+/// PREPARE). False when the device refused them.
+fn prepare() -> bool {
+    if (sw(W_PHASE) == P_PREPARED || sw(W_PHASE) == P_RUNNING) && sw(W_DIRTY) == 0 {
+        return true
+    }
+    if sw(W_PHASE) == P_RUNNING {
+        let _s = stream_req(R_PCM_STOP)
+    }
+    if sw(W_PHASE) == P_PREPARED || sw(W_PHASE) == P_RUNNING {
+        let _r = stream_req(R_PCM_RELEASE)
+        let _n = reclaim()
+    }
+    let r = ctl_va() + CTL_REQ
+    w32(r, R_PCM_SET_PARAMS)
+    w32(r + 4, sw(W_STREAM))
+    w32(r + 8, PERIOD * PERIODS)
+    w32(r + 12, PERIOD)
+    w32(r + 16, 0)
+    w8(r + 20, sw(W_CHANNELS))
+    w8(r + 21, if sw(W_FMT) == AFMT_U8 { VF_U8 } else { VF_S16 })
+    w8(r + 22, sw(W_RATE))
+    w8(r + 23, 0)
+    if ctl(24, 4) != S_OK {
+        put_sw(W_PHASE, P_OPEN)
+        return false
+    }
+    if stream_req(R_PCM_PREPARE) != S_OK {
+        put_sw(W_PHASE, P_OPEN)
+        return false
+    }
+    put_sw(W_DIRTY, 0)
+    put_sw(W_PHASE, P_PREPARED)
+    true
+}
+
+/// Hand the period being filled to the device (its `W_FILL` bytes, made
+/// a whole number of frames with zeros), and start the stream when two
+/// are there or `now`.
+fn hand(now: bool) {
+    let k = sw(W_CUR)
+    var len = sw(W_FILL)
+    let fb = frame_bytes()
+    while len % fb != 0 {
+        // # Safety: a byte of period k's frame (len < PERIOD).
+        unsafe { ((sw(W_PERIOD0 + k) + frames.hhdm() + len) as *u8).write_volatile(0) }
+        len += 1
+    }
+    if len > 0 {
+        let q = addr(W_TXQ)
+        let t = ctl_va() + CTL_TX + k * 16
+        w32(t, sw(W_STREAM))
+        w32(t + 8, 0)
+        w32(t + 12, 0)
+        virtio.set_desc_len(q, 3 * k + 1, len)
+        put_sw(W_LEN0 + k, len)
+        virtio.offer(q, 3 * k)
+        let _told = virtio.notify(q)
+        put_sw(W_INFLIGHT, sw(W_INFLIGHT) + 1)
+        put_sw(W_CUR, (k + 1) % PERIODS)
+        put_sw(W_FILL, 0)
+        bump(C_HANDED, 1)
+    }
+    if sw(W_PHASE) == P_PREPARED && sw(W_INFLIGHT) > 0 && (now || sw(W_INFLIGHT) >= 2) {
+        if stream_req(R_PCM_START) == S_OK {
+            put_sw(W_PHASE, P_RUNNING)
+            put_sw(W_START_TICK, timer.ticks())
+            bump(C_STARTS, 1)
+        }
+    }
+}
+
+/// Stop the stream at once and drop what is queued (RESET, a process's
+/// end, the last close of an undrained stream). The transport words
+/// must be selected.
+fn halt() {
+    let held = sw(W_INFLIGHT)
+    if sw(W_PHASE) == P_RUNNING {
+        let _s = stream_req(R_PCM_STOP)
+    }
+    if sw(W_PHASE) == P_RUNNING || sw(W_PHASE) == P_PREPARED {
+        // RELEASE: the device completes every message it holds for the
+        // stream (§5.14.6.6.5), so the periods come back.
+        let _r = stream_req(R_PCM_RELEASE)
+    }
+    var k: u64 = 0
+    while k < SPIN && sw(W_INFLIGHT) > 0 {
+        let _n = reclaim()
+        k += 1
+    }
+    bump(C_DROPPED, held + (if sw(W_FILL) > 0 { 1 } else { 0 }))
+    put_sw(W_INFLIGHT, 0)
+    put_sw(W_FILL, 0)
+    put_sw(W_DRAINING, 0)
+    put_sw(W_PHASE, P_OPEN)
+    put_sw(W_DIRTY, 1)
+    var j: u64 = 0
+    while j < PERIODS {
+        put_sw(W_LEN0 + j, 0)
+        j += 1
+    }
+    put_sw(W_CUR, 0)
+    put_sw(W_HEAD, 0)
+}
+
+// --- the OSS interface -----------------------------------------------------
+
+/// `open("/dev/dsp", flags)` by process `pid`: 0, or -errno. Only
+/// O_WRONLY opens (no capture: -ENXIO, counted); one opener at a time
+/// (-EBUSY, as Linux).
+pub fn open(pid: u64, acc: u64) -> u64 {
+    if !up() {
+        return neg(ENOENT)
+    }
+    if acc != 1 {
+        bump(C_NO_CAPTURE, 1)
+        return neg(ENXIO)
+    }
+    if sw(W_OWNER) != 0 {
+        bump(C_BUSY, 1)
+        return neg(EBUSY)
+    }
+    put_sw(W_OWNER, pid)
+    // OSS's defaults: 8 kHz, unsigned 8-bit, one channel.
+    put_sw(W_FMT, if sw(W_FORMATS) & (1 << VF_U8) != 0 { AFMT_U8 } else { AFMT_S16_LE })
+    put_sw(W_CHANNELS, if sw(W_CHMIN) <= 1 { 1 } else { sw(W_CHMIN) })
+    put_sw(W_RATE, nearest_rate(8000))
+    put_sw(W_PHASE, P_OPEN)
+    put_sw(W_DIRTY, 1)
+    put_sw(W_FILL, 0)
+    put_sw(W_CUR, 0)
+    put_sw(W_HEAD, 0)
+    put_sw(W_INFLIGHT, 0)
+    put_sw(W_WRITTEN, 0)
+    put_sw(W_PLAYED, 0)
+    put_sw(W_BLOCKS, 0)
+    put_sw(W_DRAINING, 0)
+    bump(C_OPENS, 1)
+    0
+}
+
+/// The last close of /dev/dsp (kernel/files' `of_drop`): after a
+/// drain (kernel/user drains a blocking close first) the stream is
+/// stopped and released; with periods still queued — an O_NONBLOCK
+/// close, or the process's end (exit, a fault, a signal: kernel/user
+/// closes every descriptor then, and nothing drains) — it is stopped at
+/// once and the periods dropped, counted, and (unless quiet) one line
+/// names it: the speaker's rule, where Linux would play them out. The
+/// device is free again either way.
+pub fn release() {
+    if sw(W_OWNER) == 0 {
+        return
+    }
+    let pid = sw(W_OWNER)
+    let held = sw(W_INFLIGHT) + (if sw(W_FILL) > 0 { 1 } else { 0 })
+    let prev = virtio.use_words(addr(0))
+    if held > 0 {
+        halt()
+    } else {
+        if sw(W_PHASE) == P_RUNNING {
+            let _s = stream_req(R_PCM_STOP)
+        }
+        if sw(W_PHASE) == P_RUNNING || sw(W_PHASE) == P_PREPARED {
+            let _r = stream_req(R_PCM_RELEASE)
+        }
+    }
+    let _p = virtio.use_words(prev)
+    put_sw(W_PHASE, P_CLOSED)
+    put_sw(W_OWNER, 0)
+    if held == 0 {
+        return
+    }
+    bump(C_ENDED, 1)
+    if log.quiet() {
+        return
+    }
+    log.put("sound: stream of pid ")
+    log.dec(pid as int)
+    log.put(" stopped undrained at its last close, ")
+    log.dec(held as int)
+    log.put(" periods dropped")
+    log.end()
+}
+
+/// Drain: everything written handed over and played (SYNC, and close
+/// before kernel/files releases). 0 when done, WAIT while the device
+/// still holds periods (the caller waits like a full pipe's writer and
+/// runs the call again).
+pub fn drain() -> u64 {
+    if sw(W_OWNER) == 0 {
+        return 0
+    }
+    let prev = virtio.use_words(addr(0))
+    let r = drain_selected()
+    let _p = virtio.use_words(prev)
+    r
+}
+
+fn drain_selected() -> u64 {
+    if sw(W_FILL) > 0 {
+        if !prepare() {
+            return 0
+        }
+        hand(true)
+    } else {
+        hand(true) // starts a prepared stream with fewer than two periods
+    }
+    let _n = reclaim()
+    if sw(W_INFLIGHT) > 0 {
+        if sw(W_DRAINING) == 0 {
+            bump(C_WAITS, 1)
+        }
+        put_sw(W_DRAINING, 1)
+        return WAIT
+    }
+    if sw(W_DRAINING) != 0 || sw(W_PHASE) == P_RUNNING {
+        bump(C_DRAINS, 1)
+    }
+    put_sw(W_DRAINING, 0)
+    if sw(W_PHASE) == P_RUNNING {
+        let _s = stream_req(R_PCM_STOP)
+        put_sw(W_PHASE, P_PREPARED)
+    }
+    0
+}
+
+/// `write(fd, buf, n)` on /dev/dsp: bytes taken (all of them, for a
+/// blocking write, across as many waits as it needs: `done` is what an
+/// earlier run of the same call took), WAIT, or -errno.
+pub fn write(pml4: u64, buf: u64, n: u64, nonblock: bool) -> u64 {
+    if sw(W_OWNER) == 0 {
+        return neg(EBADF)
+    }
+    let done = sched.self_done()
+    if n == 0 {
+        return 0
+    }
+    if done == 0 && !uaccess.readable(pml4, buf, n) {
+        return neg(EFAULT)
+    }
+    let prev = virtio.use_words(addr(0))
+    let r = write_selected(pml4, buf, n, done, nonblock)
+    let _p = virtio.use_words(prev)
+    r
+}
+
+fn write_selected(pml4: u64, buf: u64, n: u64, done0: u64, nonblock: bool) -> u64 {
+    if !prepare() {
+        sched.set_self_done(0)
+        return neg(EIO)
+    }
+    let _r = reclaim()
+    var done = done0
+    while done < n {
+        if sw(W_INFLIGHT) == PERIODS {
+            if nonblock {
+                sched.set_self_done(0)
+                bump(C_EAGAIN, 1)
+                return if done > 0 { done } else { neg(EAGAIN) }
+            }
+            sched.set_self_done(done)
+            bump(C_WAITS, 1)
+            return WAIT
+        }
+        let k = sw(W_CUR)
+        let fill = sw(W_FILL)
+        let room = PERIOD - fill
+        let m = if n - done < room { n - done } else { room }
+        let dst = sw(W_PERIOD0 + k) + frames.hhdm() + fill
+        let _ok = uaccess.copy_in(pml4, dst, buf + done, m)
+        put_sw(W_FILL, fill + m)
+        put_sw(W_WRITTEN, sw(W_WRITTEN) + m)
+        bump(C_BYTES, m)
+        done += m
+        if sw(W_FILL) == PERIOD {
+            hand(false)
+        }
+    }
+    sched.set_self_done(0)
+    done
+}
+
+fn put_int(pml4: u64, va: u64, v: u64) -> bool {
+    if !uaccess.writable(pml4, va, 4) {
+        return false
+    }
+    uaccess.put(pml4, va, v, 4)
+    true
+}
+
+fn get_int(pml4: u64, va: u64) -> u64 ! {fault} {
+    if !uaccess.readable(pml4, va, 4) {
+        return fault
+    }
+    uaccess.get(pml4, va, 4)
+}
+
+/// A changed parameter: the next write settles it with the device. A
+/// stream with periods at the device is drained first by OSS's rules;
+/// here it is stopped and its periods dropped (counted), as RESET.
+fn changed() {
+    if sw(W_INFLIGHT) > 0 || sw(W_FILL) > 0 || sw(W_PHASE) == P_RUNNING {
+        halt()
+    }
+    put_sw(W_DIRTY, 1)
+}
+
+/// `ioctl(fd, req, arg)` on /dev/dsp: 0 (the answer written at `arg`),
+/// WAIT (SYNC with periods at the device), or -errno. Requests:
+///
+/// - SETFMT: U8 and S16_LE (as the device offers them) are taken; any
+///   other answers S16_LE (C_FMT_SUBST; Linux converts instead);
+///   AFMT_QUERY answers the current.
+/// - CHANNELS, STEREO: 1 or 2 (the device's range); more answers the
+///   most, 0 the least (C_CH_CLAMP).
+/// - SPEED: the device's rate nearest the request (C_RATE_NEAR when it
+///   is not the request; Linux resamples to any rate).
+/// - GETFMTS, GETBLKSIZE (the period), GETOSPACE, GETODELAY, GETOPTR,
+///   GETCAPS (revision 1, REALTIME), OSS_GETVERSION, the READ_RATE,
+///   READ_BITS, READ_CHANNELS queries.
+/// - SYNC: drain (may wait). RESET: stop now, drop, keep the format.
+/// - SETFRAGMENT, SUBDIVIDE, POST, FILTER: answered 0, ignored
+///   (C_IGNORED). NONBLOCK: answered 0 (kernel/files sets O_NONBLOCK).
+/// - Anything else: -EINVAL (C_REFUSED), as Linux answers TCGETS here.
+pub fn ioctl(pml4: u64, req: u64, arg: u64) -> u64 {
+    if sw(W_OWNER) == 0 {
+        return neg(EBADF)
+    }
+    let prev = virtio.use_words(addr(0))
+    let r = ioctl_selected(pml4, req, arg)
+    let _p = virtio.use_words(prev)
+    r
+}
+
+fn ioctl_selected(pml4: u64, req: u64, arg: u64) -> u64 {
+    if req == DSP_SYNC {
+        return drain_selected()
+    }
+    if req == DSP_RESET {
+        halt()
+        return 0
+    }
+    if req == DSP_POST || req == DSP_SUBDIVIDE || req == DSP_SETFRAGMENT || req == DSP_FILTER {
+        bump(C_IGNORED, 1)
+        if req == DSP_POST {
+            hand(true)
+        }
+        return 0
+    }
+    if req == DSP_NONBLOCK {
+        return 0
+    }
+    if req == DSP_SETFMT {
+        let want = get_int(pml4, arg) else |_| { return neg(EFAULT) }
+        if want != AFMT_QUERY {
+            var f = AFMT_S16_LE
+            if want == AFMT_U8 && sw(W_FORMATS) & (1 << VF_U8) != 0 {
+                f = AFMT_U8
+            }
+            if f != want {
+                bump(C_FMT_SUBST, 1)
+            }
+            if f != sw(W_FMT) {
+                changed()
+                put_sw(W_FMT, f)
+            }
+        }
+        return if put_int(pml4, arg, sw(W_FMT)) { 0 } else { neg(EFAULT) }
+    }
+    if req == DSP_CHANNELS || req == DSP_STEREO {
+        let want0 = get_int(pml4, arg) else |_| { return neg(EFAULT) }
+        let want = if req == DSP_STEREO { want0 + 1 } else { want0 }
+        var c = want
+        let lo = if sw(W_CHMIN) < 1 { 1 } else { sw(W_CHMIN) }
+        let hi = if sw(W_CHMAX) > 2 { 2 } else { sw(W_CHMAX) }
+        if c < lo {
+            c = lo
+        }
+        if c > hi {
+            c = hi
+        }
+        if c != want {
+            bump(C_CH_CLAMP, 1)
+        }
+        if c != sw(W_CHANNELS) {
+            changed()
+            put_sw(W_CHANNELS, c)
+        }
+        let back = if req == DSP_STEREO { c - 1 } else { c }
+        return if put_int(pml4, arg, back) { 0 } else { neg(EFAULT) }
+    }
+    if req == DSP_SPEED {
+        let want = get_int(pml4, arg) else |_| { return neg(EFAULT) }
+        let i = nearest_rate(want)
+        if rate_hz(i) != want {
+            bump(C_RATE_NEAR, 1)
+        }
+        if i != sw(W_RATE) {
+            changed()
+            put_sw(W_RATE, i)
+        }
+        return if put_int(pml4, arg, rate_hz(i)) { 0 } else { neg(EFAULT) }
+    }
+    if req == PCM_READ_RATE {
+        return if put_int(pml4, arg, rate_hz(sw(W_RATE))) { 0 } else { neg(EFAULT) }
+    }
+    if req == PCM_READ_CHANNELS {
+        return if put_int(pml4, arg, sw(W_CHANNELS)) { 0 } else { neg(EFAULT) }
+    }
+    if req == PCM_READ_BITS {
+        return if put_int(pml4, arg, sw(W_FMT)) { 0 } else { neg(EFAULT) }
+    }
+    if req == DSP_GETFMTS {
+        let m = AFMT_S16_LE | (if sw(W_FORMATS) & (1 << VF_U8) != 0 { AFMT_U8 } else { 0 })
+        return if put_int(pml4, arg, m) { 0 } else { neg(EFAULT) }
+    }
+    if req == DSP_GETBLKSIZE {
+        return if put_int(pml4, arg, PERIOD) { 0 } else { neg(EFAULT) }
+    }
+    if req == DSP_GETCAPS {
+        return if put_int(pml4, arg, 1 | DSP_CAP_REALTIME) { 0 } else { neg(EFAULT) }
+    }
+    if req == OSS_GETVERSION {
+        return if put_int(pml4, arg, SOUND_VERSION) { 0 } else { neg(EFAULT) }
+    }
+    if req == DSP_GETODELAY {
+        let _n = reclaim()
+        return if put_int(pml4, arg, queued()) { 0 } else { neg(EFAULT) }
+    }
+    if req == DSP_GETOSPACE {
+        let _n = reclaim()
+        if !uaccess.writable(pml4, arg, 16) {
+            return neg(EFAULT)
+        }
+        let free = PERIODS - sw(W_INFLIGHT) - (if sw(W_FILL) > 0 { 1 } else { 0 })
+        uaccess.put(pml4, arg, free, 4)
+        uaccess.put(pml4, arg + 4, PERIODS, 4)
+        uaccess.put(pml4, arg + 8, PERIOD, 4)
+        uaccess.put(pml4, arg + 12, (PERIODS - sw(W_INFLIGHT)) * PERIOD - sw(W_FILL), 4)
+        return 0
+    }
+    if req == DSP_GETOPTR {
+        let _n = reclaim()
+        if !uaccess.writable(pml4, arg, 12) {
+            return neg(EFAULT)
+        }
+        uaccess.put(pml4, arg, sw(W_PLAYED) & 0x7fffffff, 4)
+        uaccess.put(pml4, arg + 4, sw(W_BLOCKS), 4)
+        uaccess.put(pml4, arg + 8, sw(W_HEAD) * PERIOD, 4)
+        put_sw(W_BLOCKS, 0)
+        return 0
+    }
+    bump(C_REFUSED, 1)
+    neg(EINVAL)
+}
+
+/// Bytes written and not yet handed back by the device.
+fn queued() -> u64 {
+    var b = sw(W_FILL)
+    var j: u64 = 0
+    while j < PERIODS {
+        b += sw(W_LEN0 + j)
+        j += 1
+    }
+    b
+}
+
+/// Whether a write would take bytes now (px24's readiness may ask).
+pub fn writable() -> bool {
+    sw(W_INFLIGHT) < PERIODS
+}
+
+fn neg(e: u64) -> u64 {
+    0xffffffffffffffff - e + 1
+}
+
+/// `sound: <counters>` — one line, when /dev/dsp was opened at all
+/// (kmain_console's end, beside the speaker's summary; the test kernel's
+/// report).
+pub fn summary() {
+    if count(C_OPENS) == 0 && count(C_BUSY) == 0 && count(C_NO_CAPTURE) == 0 {
+        return
+    }
+    log.put("sound: ")
+    log.dec(count(C_OPENS) as int)
+    log.put(" opens, ")
+    log.dec(count(C_HANDED) as int)
+    log.put(" periods handed, ")
+    log.dec(count(C_RETURNED) as int)
+    log.put(" returned, ")
+    log.dec(count(C_BYTES) as int)
+    log.put(" bytes, ")
+    log.dec(count(C_STARTS) as int)
+    log.put(" starts, ")
+    log.dec(count(C_DRAINS) as int)
+    log.put(" drains, ")
+    log.dec(count(C_UNDERRUN) as int)
+    log.put(" underruns, ")
+    log.dec(count(C_DROPPED) as int)
+    log.put(" dropped, ")
+    log.dec(count(C_ENDED) as int)
+    log.put(" stopped undrained, ")
+    log.dec(count(C_WAITS) as int)
+    log.put(" waits, ")
+    log.dec(count(C_EAGAIN) as int)
+    log.put(" eagain, ")
+    log.dec(count(C_BUSY) as int)
+    log.put(" busy, ")
+    log.dec(count(C_NO_CAPTURE) as int)
+    log.put(" no-capture, ")
+    log.dec(count(C_FMT_SUBST) as int)
+    log.put(" format substituted, ")
+    log.dec(count(C_CH_CLAMP) as int)
+    log.put(" channels clamped, ")
+    log.dec(count(C_RATE_NEAR) as int)
+    log.put(" rate nearest, ")
+    log.dec(count(C_IGNORED) as int)
+    log.put(" ignored, ")
+    log.dec(count(C_REFUSED) as int)
+    log.put(" refused, ")
+    log.dec(count(C_STATUS_BAD) as int)
+    log.put(" bad status, ")
+    log.dec(count(C_CTL) as int)
+    log.put(" control requests (")
+    log.dec(count(C_CTL_BAD) as int)
+    log.put(" bad), ")
+    log.dec(count(C_IRQ) as int)
+    log.put(" interrupts (")
+    log.dec(count(C_IRQ_IDLE) as int)
+    log.put(" idle), ")
+    log.dec(count(C_EVENTS) as int)
+    log.put(" events (")
+    log.dec(count(C_EVT_XRUN) as int)
+    log.put(" xrun), latency ")
+    log.dec(sw(W_LATENCY) as int)
+    log.put(" bytes, frames held ")
+    log.dec(sw(W_FRAMES) as int)
+    log.end()
+}
