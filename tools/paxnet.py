@@ -1,4 +1,4 @@
-# paxnet.py — what the network tools share (px21): the Internet checksum,
+# paxnet.py — what the network tools share (px21, px22): the Internet checksum,
 # frame builders, and a model of what PAX must do with a frame, written
 # from the RFCs and not from the kernel, for tools/net-peer (the other
 # end of a socket netdev), tools/pcap-net (the capture's checker) and
@@ -12,8 +12,17 @@
 # (one whose sender may not). The order of the checks is RFC 791's
 # header order as kernel/ip's header states it.
 #
-# Written from RFC 791, RFC 792, RFC 826, RFC 894, RFC 1071 and RFC
-# 1122 §3.2. No network stack's source.
+# px22 adds UDP: `judge_ip` names a UDP datagram's drop cause
+# (`udp.short`, `udp.length`, `udp.checksum`, `udp.port-zero`) or calls
+# it `udp` — a datagram a socket may take; whether one does is the
+# sockets' state, which the model does not hold and the tools give or
+# infer. And what the UDP witnesses (user/net/) and the scripts that
+# play their other end agree on: the ports, the echo battery, the
+# client's datagrams, the soak's, the DNS answer.
+#
+# Written from RFC 768, RFC 791, RFC 792, RFC 826, RFC 862, RFC 894,
+# RFC 1035, RFC 1071 and RFC 1122 §3.2 and §4.1. No network stack's
+# source.
 import struct
 
 PAX_MAC = bytes.fromhex("525400123456")
@@ -29,6 +38,9 @@ FAR_IP = bytes([192, 0, 2, 1])
 NETMASK = bytes([255, 255, 255, 0])
 SUBNET_BCAST = bytes([10, 0, 2, 255])
 LIMITED_BCAST = b"\xff" * 4
+DNS_IP = bytes([10, 0, 2, 3])
+DNS_MAC = bytes.fromhex("52550a000203")
+LOOPBACK = bytes([127, 0, 0, 1])
 ECHO_IDENT = 0x5058
 EXPERIMENTAL = b"\x88\xb5"
 MARKER = (BCAST + PAX_MAC + EXPERIMENTAL + b"PAX").ljust(60, b"\x00")
@@ -171,6 +183,8 @@ def judge_ip(f):
     dst = h[16:20]
     if dst != PAX_IP and not is_broadcast(dst):
         return "ip.other", ihl, total
+    if h[9] == 17:
+        return judge_udp(h, ihl, total), ihl, total
     if h[9] != 1:
         if f[0] & 1 or is_broadcast(dst):
             return "silent", ihl, total
@@ -232,3 +246,125 @@ def pax_arp_request(target_ip):
 
 def pax_arp_reply(to_mac, to_ip):
     return pad60(arp(to_mac, PAX_MAC, 2, PAX_MAC, PAX_IP, to_mac, to_ip))
+
+
+# --- UDP (px22) ----------------------------------------------------------------
+
+ECHO_PORT = 7          # RFC 862: user/net/udpecho's
+SERVICE_PORT = 9099    # where udpecho says "ready", and the reversing server
+EXTRA_PORT = 9098      # where a second udpecho says "ready" for the wider battery
+ASKER_PORT = 40000     # the port the echo battery comes from
+DISCARD_PORT = 9       # a port no witness binds
+DNS_PORT = 53
+EPHEMERAL = range(32768, 61000)  # ip(7)'s default local range, PAX's too
+DATA_MAX = 1472
+DNS_NAME = "pax.test"
+DNS_ANSWER = bytes([192, 0, 2, 53])
+DNS_TTL = 60
+
+
+def udp_sum(src, dst, segment):
+    """The UDP checksum of `segment` (its checksum field zero, or its
+    own for a check: the result is then 0) from `src` to `dst`."""
+    return csum(src + dst + struct.pack(">BBH", 0, 17, len(segment)) + segment)
+
+
+def udp(sport, dport, data, src, dst, check=None, length=None):
+    """A UDP datagram (an IPv4 payload). `check` and `length` override
+    what would be right, for the malformed ones; `check=0` is "the
+    sender made none"."""
+    n = 8 + len(data) if length is None else length
+    seg = struct.pack(">HHHH", sport, dport, n, 0) + data
+    if check is None:
+        check = udp_sum(src, dst, seg[:n] if n <= len(seg) else seg) or 0xffff
+    return seg[:6] + struct.pack(">H", check) + seg[8:]
+
+
+def judge_udp(h, ihl, total):
+    """What PAX must do with the UDP datagram of the IPv4 datagram `h`
+    (header `ihl` bytes, total length `total`), which passed the IP
+    rules: a drop cause, or `udp` (for a socket, if one takes it)."""
+    u = h[ihl:total]
+    if len(u) < 8:
+        return "udp.short"
+    n = be16(u, 4)
+    if n < 8 or n > len(u):
+        return "udp.length"
+    if be16(u, 6) != 0 and udp_sum(h[12:16], h[16:20], u[:n]) != 0:
+        return "udp.checksum"
+    if be16(u, 2) == 0:
+        return "udp.port-zero"
+    return "udp"
+
+
+def udp_fields(f):
+    """(source port, destination port, data, whether a checksum was made)
+    of the valid UDP frame `f`."""
+    ihl = (f[14] & 15) * 4
+    u = f[14 + ihl:14 + be16(f, 16)]
+    return be16(u, 0), be16(u, 2), u[8:be16(u, 4)], be16(u, 6) != 0
+
+
+def udp_from_pax(dst_ip, sport, dport, data, ident, to_mac):
+    """The whole frame of a UDP datagram PAX sends: 20-byte header, DF,
+    time to live 64, a checksum made."""
+    return pad60(frame(to_mac, PAX_MAC, ipv4(PAX_IP, dst_ip, 17, udp(sport, dport, data, PAX_IP, dst_ip), ident=ident)))
+
+
+def port_unreachable_for(f, ihl, total, ident, to_mac):
+    """PAX's whole port-unreachable frame (type 3, code 3) for the
+    datagram in `f`."""
+    h = f[14:]
+    quote = h[:ihl + min(8, total - ihl)]
+    m = icmp(3, 3, b"\x00" * 4, quote)
+    return pad60(frame(to_mac, PAX_MAC, ipv4(PAX_IP, h[12:16], 1, m, ident=ident)))
+
+
+def echo_battery():
+    """What every script sends udpecho first: 1, 2, 64, 512 and 1472
+    bytes."""
+    return [b"a", b"bc"] + [bytes((k * 11 + n) & 0xff for k in range(n)) for n in (64, 512, DATA_MAX)]
+
+
+def soak_datagram(i):
+    """Datagram `i` of the soak into PAX: 56 bytes, the first four `i`."""
+    return struct.pack(">I", i) + bytes((i * 7 + k * 13) & 0xff for k in range(52))
+
+
+def soak_request(i):
+    """Datagram `i` of user/net/udpsoak: 64 bytes, the first four `i`."""
+    return struct.pack(">I", i) + bytes((i * 7 + k * 13) & 0xff for k in range(4, 64))
+
+
+def client_script():
+    """user/net/udpclient's datagrams, in order: four on its connected
+    socket, one on a socket with no peer."""
+    return [b"hello from PAX", b"x", b"the third datagram, on a connected socket",
+            bytes(ord("a") + i % 23 for i in range(DATA_MAX)), b"sendto, no connect"]
+
+
+def dns_question(q):
+    """The (name, type, class) of the one question of the DNS query `q`
+    (RFC 1035 §4.1), or None when it is not a query with one question."""
+    if len(q) < 17 or q[2] & 0x80 or be16(q, 4) != 1 or be16(q, 6) or be16(q, 8) or be16(q, 10):
+        return None
+    o, labels = 12, []
+    while o < len(q) and q[o]:
+        n = q[o]
+        if n > 63 or o + 1 + n > len(q):
+            return None
+        labels.append(q[o + 1:o + 1 + n].decode("ascii", "replace"))
+        o += 1 + n
+    if o + 5 != len(q):
+        return None
+    return ".".join(labels), be16(q, o + 1), be16(q, o + 3)
+
+
+def dns_answer(q):
+    """The DNS server's answer to query `q`: one A record for DNS_NAME
+    (the name a pointer to the question's), NXDOMAIN for any other."""
+    name, qtype, qclass = dns_question(q)
+    if name == DNS_NAME and qtype == 1 and qclass == 1:
+        rr = b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, DNS_TTL, 4) + DNS_ANSWER
+        return q[:2] + struct.pack(">HHHHH", 0x8180, 1, 1, 0, 0) + q[12:] + rr
+    return q[:2] + struct.pack(">HHHHH", 0x8183, 1, 0, 0, 0) + q[12:]
