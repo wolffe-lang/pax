@@ -352,7 +352,7 @@ on `none`. Each plant's run is over in under 25 minutes.
    with no frame on the wire. Looped traffic is counted apart in
    `ip`, `icmp`, `udp` and `tcp`, so the counters a capture is held to
    stay the wire's.
-2. **TCP** (`kernel/tcp`, 2,900 lines): what §3 predicted, with the
+2. **TCP** (`kernel/tcp`, 2,876 lines): what §3 predicted, with the
    differences the table below names.
 3. **The calls** (`kernel/socket`, `kernel/files`, `kernel/user`):
    the stream forms of `socket`, `bind`, `connect`, `sendto`,
@@ -409,6 +409,35 @@ on `none`. Each plant's run is over in under 25 minutes.
   retransmitting its FIN when `kmain_sockets` printed its books three
   seconds later (`tcp blocks 1`): the wait is thirty seconds now.
 
+- A boot of `tests/mpx4-tcp` on kasumi lost one UDP datagram between
+  QEMU's socket and `tools/net-peer` (the host's loss, not the
+  cable's), and the script called PAX's next frame wrong because its
+  IP identification had skipped one. The tools now rebuild a frame
+  with the identification it carries and count the gap; the capture's
+  check (`ident-gaps=0` in every capture kept) still holds PAX to
+  consecutive numbers.
+- **wolf's release tier took eight minutes over one kernel** (0.2.27
+  measured; 0.2.26 was as slow, below).
+  CI's `mpx2-heap` (twelve kernels) ran into its 60-minute limit twice
+  (runs 38116208986 and 38120289555, cancelled there). Two functions
+  of `kernel/tcp` did it, and nothing in their output was wrong: the
+  keyed function behind the sequence numbers (two nested loops over
+  six words, called from several places: `kmain_frames` 516 s where
+  trunk takes 23 s) and `counters` (about 150 calls of `log.put` and
+  `log.dec`, a loop each, inlined into one function: `kmain_sockets`
+  503 s where trunk takes 66 s). Rewritten, the first without loops
+  (`7158f92`) and the second as one function a line (`fae970d`):
+  32 s and 18 s, the kernel's lines byte for byte the same. `perf`
+  puts the time in the range pass (`wolf_wir::midend::rangeopt`). No
+  standalone file reproduced it; wolf-lang#711 carries the two pax
+  commits as its witness.
+- `tests/mpx4-tcp`'s own check of a running boot read the serial log
+  while QEMU was writing it and once took half a line, `ru` of
+  `run 13:`, for output of command 12: a green boot stopped as red (on
+  kasumi, once in some sixty boots). Replayed over every prefix of
+  that log: 7 prefixes of 945 are read wrong. The check now leaves the
+  last line out (`2cbab51`); the same replay finds none.
+
 ## 3. The prediction against the measurement
 
 | predicted | measured |
@@ -430,9 +459,248 @@ on `none`. Each plant's run is over in under 25 minutes.
 | `stack frames` 12 becomes 205 | **333** (76 after loopback alone: 64 queue frames; then TCP's composing frame and 256 for the larger time-wait table) |
 | `tests/mpx4-udp` moves: U1, U3, U4, U7 (the `loopback` counters go; a looped no-port draws a port unreachable) | U1, U3 and U4 moved. **U7 did not**: the `loopback` counters stayed, fed by `ip`'s queue instead of `udp`'s own push, and its numbers are the same. The looped port unreachable is sent (and counted by `kernel/icmp`'s loopback line), unlimited |
 | `tests/mpx4-net`: the books' frames; a ping of itself in `kmain_net` | the frames (12 to 76). The self-ping went into `kmain_sockets` instead, where every way of two suites holds it |
-| 16 MiB out of PAX / into PAX / over loopback, kasumi TCG native: 3 / 3 / 2 MB/s | see the table below: every one **higher** than predicted by more than the 2× bar |
-| under loss: 1% 0.3–1.5 MB/s, 5% 60–300 KB/s, 20% 3–15 KB/s; retransmissions 8–40, 40–150 a MiB, 80–250 for 256 KiB | see the loss table below. The 20% transfer is 65,536 bytes, not 262,144: RFC 6298 keeps the backed-off RTO until a segment gets through at its first sending, which at 20% each way fails more often than not, so RTO climbs to seconds and a quarter-megabyte took four minutes |
-| plant 1 (ACK + 1) red on every leg; plant 2 (no retransmission timer) red on `peer` legs, green on `none`; under 25 minutes each | see §4 |
+| 16 MiB out of PAX / into PAX / over loopback: kasumi TCG native 3 / 3 / 2 MB/s, release 5 / 5 / 4; CI 1.2 / 1.2 / 0.8 and 2 / 2 / 1.5; hasu KVM `peer` 8 / 8 / 30, `user` 20 / 20 | **wrong, too low, by more than the 2× bar almost everywhere** (table below): kasumi native 7.0 / 10.6 / 15.4, release 6.9 / 11.2 / 33; CI native 5.0 / 7.4 / 12.9, release 4.7 / 8.0 / 26; hasu `peer` 7.0 / 11 / 117 (native) and 164 (release). Inside the bar: hasu `peer` out and in, hasu `user` (10–16 each way), kasumi release out |
+| under loss: 1% 0.3–1.5 MB/s, 5% 60–300 KB/s, 20% 3–15 KB/s; PAX's retransmissions 8–40 a MiB, 40–150 a MiB, 80–250 for 256 KiB | out of PAX: 1% **2.6 MB/s** (above the range) with **7** retransmissions (just under it); 5% **0.34 MB/s** (just above) with 49 (inside); 20% 7 KB/s (inside) with 8 for 65,536 bytes, which is 32 for 256 KiB (**under** the range). The 20% transfer is 65,536 bytes, not 262,144: RFC 6298 keeps the backed-off RTO until a segment gets through at its first sending, which at 20% each way fails more often than not, so RTO climbs to seconds and a quarter-megabyte took four minutes. Every transfer exact; none ended in `ETIMEDOUT` |
+| plant 1 (ACK + 1) red on every leg with a wire and on the loopback lines; plant 2 (no retransmission timer) red on `peer` legs, green on `none`; under 25 minutes each | both red in CI, the job over in **8 min 10 s** and **8 min 53 s** (§4). Each run shows the first boot only: once a boot fails no other is started, so "every leg" and "green on `none`" are **not shown** by CI. Plant 1 stalled `tcperr`, the first command, over loopback (no frame on the wire is needed to see it); plant 2 passed commands 1–5 (loopback, where nothing is lost) and stalled at `tcpfull`, the first that needs a retransmitted SYN |
 
-Throughput, loss and the plants' rows are filled from the runs named
-in §4.
+### Measured: 16,777,216 bytes, and 10,000 connections
+
+Bytes a second by the kernel's time-stamp counter around each program
+(MB = 10^6 bytes), the range over the BIOS and UEFI boots; connections
+a second likewise. `peer` is `tools/net-peer`'s Python TCP at the other
+end, `user` the host's sockets behind QEMU's network.
+
+| host, QEMU | tier | `peer` out / in | `user` out / in | loopback | connections `peer` out / in | loopback |
+|---|---|---|---|---|---|---|
+| kasumi, 11.1.1 TCG | native | 7.0–7.1 / 10.6 | 7.8 / 7.1–7.2 | 15.1–15.8 | 1,458–1,479 / 1,539–1,543 | 1,618–1,640 |
+| | release | 6.8–7.0 / 11.1–11.2 | 15.2–15.8 / 10.3–10.8 | 32.6–35.1 | 3,199–3,225 / 3,111–3,195 | 8,343–8,467 |
+| CI, 8.2.2 TCG | native | 5.0 / 7.3–7.6 | 6.5 / 7.5–7.6 | 12.7–13.2 | 973–1,006 / 1,051–1,102 | 1,588–1,613 |
+| | release | 4.6–4.7 / 8.0 | 9.2–9.6 / 10.1–10.4 | 25.4–26.4 | 1,892–1,910 / 1,866–1,888 | 8,590–8,735 |
+| hasu, 11.1.0 KVM | native | 4.7–7.0 / 7.4–11.1 | 13.4–16.3 / 10.4–16.2 | 74–117 | 992–4,360 / 612–4,578 | 29,898–39,158 |
+| | release | 6.7–7.1 / 10.5–10.8 | 10.1–16.3 / 10.0–16.3 | 159–165 | 3,855–4,566 / 3,906–4,547 | 116,563–139,727 |
+| nomad-1, 11.1.1 TCG | native | 12.9–13.2 / 14.9–15.2 | (host limit, above) | 12.5–13.3 | 1,603–1,636 / 1,713–1,743 | 2,012–2,105 |
+| | release | 12.3–12.9 / 18.8–19.6 | | 26.3–27.7 | 3,348–3,442 / 3,338–3,397 | 10,999–11,624 |
+
+kasumi: the gauntlet at `2cbab51`. CI: run 38127729228. hasu: `k5`'s
+two rounds (the host was serving other work during the first, whose
+native UEFI boots are the low ends). Against the peer the script's end is the
+slower on every host (hasu's KVM gains nothing there); over loopback
+both ends are PAX and KVM is 7 to 15 times TCG. A soak leaves 10,010
+to 10,032 time-wait entries behind and evicts none.
+
+### Measured: under loss
+
+`tools/net-peer` drops (duplicates, delays, corrupts) each frame either
+way by a function of the frame, so every boot meets the same faults in
+a transfer out of PAX; into PAX the script's own retransmissions move
+with its timing. kasumi, TCG, the gauntlet at `2cbab51`, four boots:
+
+| | bytes | out of PAX | PAX retransmitted | into PAX | the script retransmitted |
+|---|---|---|---|---|---|
+| 1% dropped | 1,048,576 | 2,563–2,578 KB/s | 7 of 730 segments | 907–2,792 KB/s | 10–15 |
+| 5% dropped | 1,048,576 | 337–338 KB/s | 49 of 772 | 224–396 KB/s | 58–69 |
+| 20% dropped | 65,536 | 7 KB/s | 8 of 60 | 62–64 KB/s | 14–15 |
+| 1% dropped, 5% duplicated, 5% reordered, 2% corrupted | 1,048,576 | 6,395–6,683 KB/s | 8 of 731 | 353–754 KB/s | 26–54 |
+
+Every transfer is held to its length and CRC-32 at both ends. With
+duplicates on the wire PAX is faster than with loss alone: a
+duplicated segment's two acknowledgements feed fast retransmit.
+
+## What moved at the rebase (trunk `0cc43be`: wolf 0.2.27, lupin 0.1.50)
+
+- **The merge.** One conflict, `docs/SOURCES.md` (px21a's section and
+  this lane's: both kept). `ci.yml`, `CHANGELOG.md`, `README.md`,
+  `boot/net.S`, `kernel/README.md`, `kernel/files/files.lu` (px21a's
+  `/dev/tty0` and `/dev/console` beside the stream socket's kind) and
+  `kernel/user/user.lu` merged by themselves.
+- **No line of the kernel had to change for 0.2.27's language.** No
+  region is opened anywhere in this lane's code, so the new region
+  rule changes nothing here; no package of this lane declares C.
+- **The compiler's time did not move with the toolchain**; it was
+  found after the rebase, in CI, and cost two rewrites (above,
+  wolf-lang#711). The gauntlet before the rebase, under 0.2.26, was
+  already as slow and this lane had not asked why: `mpx1` 2,049 s and
+  `tests/mpx4-tcp`'s build 652 s at `a299fbe`, 316 s and 105 s at
+  `2cbab51`. No CI run of this branch finished before the rebase.
+- **The wolf-built witnesses** are built by 0.2.27's hosted runtime
+  now. Re-taken on Linux at the head (`linux/3.strace`,
+  `linux/43.strace`): `tcpwolf` makes the same 23 calls it made built
+  by 0.2.26, none of `poll`, `epoll`, `eventfd`, `futex` or `clone3`,
+  because neither program ever waits. On PAX the -ENOSYS census of all 43 commands is
+  what it was: 273 (`set_robust_list`) and 334 (`rseq`), once a
+  process, nothing else. Neither witness has the shapes of
+  wolf-lang#660 or #665 in it as far as this lane can tell from their
+  titles (**not verified** against the issues' own witnesses).
+- **Sizes and pins.** Every kernel is bigger (the heap and the
+  freestanding runtime are linked into each); the pins this lane
+  holds did not move for it: `stack frames 333` in `kmain_sockets`
+  and 76 in `kmain_net` before and after. The initramfs sizes are
+  measured per build, not pinned.
+- **Throughput against the toolchain**, kasumi TCG, the same suite at
+  `a299fbe` (0.2.26) and at `2cbab51` (0.2.27): native out 6.7–6.9
+  then 7.0–7.1 MB/s, in 10.6–10.9 then 10.6, loopback 15–16 then
+  15.1–15.8; release loopback 31–35 then 32.6–35.1: inside the
+  boot-to-boot spread, no movement to report.
+- **Found after the rebase, not caused by it:** the books' patience
+  (three seconds to thirty), the host's lost datagram, the live
+  check's half line (all above).
+
+## 4. Evidence index
+
+Files are under `notes/px23/`. Verified means this lane ran it and
+read the result; a digest cut short carries `…`.
+
+- **The straces of the witnesses on Linux.** Before the design:
+  `first-strace/` (`quick.py` at the other end, `outputs.txt`). At the
+  head, by `tools/linux-net --tcp` against the real script on a tap
+  device, in `px13-ubuntu` on kasumi: `linux/<k>.strace`, `.out` and
+  `.rc` for the 43 commands of `user/mpx4-tcp.run` (what
+  `tests/mpx4-tcp` holds PAX to; long straces cut by the tool),
+  `linux/linux.txt` (each command's set of calls), `linux/peer.txt`
+  (the script's account of Linux), `linux/net.txt` (the programs'
+  digests). The tap's capture is not kept (`linux/tap.txt` has its
+  frame count and digest). What wolf's runtime
+  asks of Linux once a call must wait: `probes/wolfnet.strace`.
+- **The captures and the checker's verdicts.** A run of
+  `tests/mpx4-tcp` is 8 captures (2 tiers × 2 firmwares × `peer`,
+  `user`). Against the peer about 302,000 frames (151,280 from PAX in
+  the one kept in part), against QEMU's network about 297,000; every
+  frame PAX sent is rebuilt from its meaning and equal byte for byte,
+  every IP and TCP checksum recomputed (906,102 in one capture), every
+  segment held to its connection (sequence and acknowledgement
+  arithmetic, the window's right edge, what may follow a FIN or a
+  reset), and the kernel's 77 counters held to the capture's:
+  `kasumi-g3-mpx4-tcp.checks.txt`; the digests in
+  `kasumi-g3-mpx4-tcp-runs.txt`. A capture is 57–66 MB, so the
+  repository carries one head, `kasumi-g3-native-bios-peer.head.pcap`
+  (the first 4,000 frames of `314759a79e08…`; `tools/pcap-net --tcp`
+  passes it as it is: run on nomad-1). CI's are in each run's
+  artifact.
+- **Counters.** Every boot's eight `tcp:` lines, held to the capture
+  (T6) and to exact numbers where the script fixes them (T7):
+  `kasumi-g3-mpx4-tcp.out`. Whole transcripts:
+  `kasumi-g3-native-bios-peer.transcript.txt` (with the script's
+  account, `…peer.net-peer.txt`), `…user.transcript.txt` (and
+  `…user.tcp-host.txt`), `…none.transcript.txt`.
+- **The soaks.** 10,000 connections into PAX and 10,000 out on every
+  `peer` and `user` boot, 10,000 over loopback on every boot (T8);
+  after every run-list line the frames free equal to before and the
+  books `heap pages 0, live blocks 0, net frames 66, stack frames
+  333, open files 0, pipes 0, sockets 0, datagrams waiting 0, tcp
+  blocks 0` (T3): every block, port, buffer and frame came back. The
+  time-wait entries a soak leaves are counted in the books and are
+  gone 60 s later.
+- **Under loss.** `kasumi-g3-mpx4-tcp-loss.txt` (32 lines: 8 transfers
+  × 4 boots), hasu's `hasu-kvm-k5-mpx4-tcp-*.loss.txt`. The scripted
+  single faults (a dropped SYN, SYN-ACK, final ACK, data segment, FIN;
+  a duplicate; a reset out of window and one in it; SYNs that cross)
+  are steps T9 and T10 of the script's account, the malformed and
+  stray segments among T10's, how a connection ends its T8 and the
+  loss matrix its T11, in `…peer.net-peer.txt`.
+- **Planted breaks, red in CI, failing fast.**
+  - an acknowledgement off by one (`8f5b150`): run **38128347823** —
+    `mpx4-tcp` alone red, every other job green; the job took 8 min
+    10 s, 305 s of it the boot (`qemu-halt: NOT HALTED: stopped by
+    tests/mpx4-tcp: the serial log had not grown for 300 s (after
+    command 0 of the list)`): `ci-38128347823-mpx4-tcp-plant-8f5b150.txt`.
+    Reverted in `2cb2034`.
+  - a retransmission timer that never fires (`a7eeeb3`): run
+    **38128979822** — `mpx4-tcp` red in 8 min 53 s (`… not grown for
+    300 s (after command 5 of the list)`):
+    `ci-38128979822-mpx4-tcp-plant-a7eeeb3.txt`. Reverted in `9523d7f`.
+  - Both were rehearsed on kasumi first (native, BIOS, small sizes):
+    red after 304 s of boots each. The rehearsals' logs are not kept.
+- **Boots.** `tests/mpx4-tcp` is 12 (2 tiers × 2 firmwares × `peer`,
+  `user`, `none`):
+  - kasumi, QEMU 11.1.1, TCG: 12 in the gauntlet at `2cbab51` (100
+    PASS), 12 in the gauntlet at `a299fbe` before the rebase (100
+    PASS), and some sixty more in partial runs while the test was
+    written;
+  - hasu, QEMU 11.1.0, **KVM**: 24 at `2cbab51`'s images in two rounds
+    (`hasu-kvm-k5.log`, 100 PASS and 0 FAIL each; the images' digests
+    in its `runs.txt` are the gauntlet's — the log's own `sha:` line
+    names that clone's stale checkout, the head before the rebase, and
+    is to be ignored); before that 36 on the
+    rebased kernel (`hasu-kvm-k3.log`) and 36 before the rebase, with
+    36 of `mpx4-udp` and 60 of `mpx4-net` (`k2`), and 24 and 40 of
+    those two after it (`hasu-kvm-k4.log`: 97 and 125 PASS a round);
+  - nomad-1, QEMU 11.1.1, TCG on macOS arm64: 12 at `2cbab51`'s
+    images: the 4 `peer` and 4 `none` boots pass whole (80 PASS); the
+    4 `user` boots fail at the host's limit named above
+    (`nomad-1-tcg-mpx4-tcp.out`);
+  - CI, QEMU 8.2.2, TCG: 12 a run.
+- **The gauntlet** on kasumi at `2cbab51` (strict env, QEMU 11.1.1
+  TCG, wolf 0.2.27, clang 23.1.1; user programs built in
+  `px13-ubuntu`): `kasumi-g3.summary`, `kasumi-g3.versions`. The head
+  differs from `2cbab51` by the two plants, their reverts and these
+  notes.
+- **CI green**: run 38121599881 at `5fb1724` and run 38127729228 at
+  `2cbab51` (21 jobs each; `mpx4-tcp` 102 PASS in 11 min 36 s,
+  `ci-38127729228-mpx4-tcp-2cbab51.txt`); at the head, the PR names
+  the run.
+
+**Not verified, plainly.**
+
+- The keyed function behind the initial sequence numbers is written
+  from memory in HalfSipHash-2-4's shape and was never held to a test
+  vector. It is keyed and takes all four addresses and ports; that it is
+  HalfSipHash is not claimed, and how well it mixes was not measured.
+- Not exercised by any test: a fifth out-of-order interval
+  (`out-of-order-dropped`), giving up a SYN after the default 6
+  retransmissions or data after 15, RTO's 60 s ceiling, a time-wait
+  eviction, a time-wait entry's own expiry seen from outside (the
+  books count the entries; no test waits the minute and looks),
+  `ENETUNREACH` from an ICMP code 0, the keep-going path of a block
+  that cannot have its frames (`no-frames`).
+- Each plant is shown red on the first boot only (native, BIOS,
+  `peer`). The prediction's "green on `none`" for plant 2 was not run.
+- The `user` way never passed on nomad-1 (macOS): the host runs out of
+  local ports under QEMU's network. It passes on kasumi, hasu and CI.
+- Congestion control is held to its counters and to transfers that
+  end exact; no test checks cwnd's value step by step against
+  RFC 5681.
+- hasu's rounds ran images built on kasumi; nothing was built on hasu
+  or nomad-1.
+- wolf-lang#711 has no reduced witness.
+
+**What the next lane inherits (px24: `poll` and the rest).**
+
+- What wolf's hosted runtime asks for as soon as a call must wait
+  (`probes/wolfnet.strace`), all refused here with -ENOSYS:
+  `epoll_create1`, `epoll_ctl`, `epoll_wait`, `eventfd2`, `poll`,
+  `clone3` (a thread), `futex`; it also calls `prctl` and `getrandom`
+  with `GRND_INSECURE` (what PAX answers those two was not run). Until they exist a wolf program
+  on PAX speaks TCP only if it never waits, which is how `tcpwolf`
+  and `tcpwolfd` are written; lobo's runtime will wait.
+- Also asked by that runtime and not here: `SO_REUSEPORT` (any option
+  this lane does not name answers `ENOPROTOOPT`, by name, once a
+  process) and `writev` (no dispatch for it in `kernel/user`: -ENOSYS
+  for any descriptor). `sendmsg` and `recvmsg` are still -ENOSYS.
+- Here already, beyond the contract's letter, because the wolf
+  witnesses' strace shows them: `ioctl(FIONBIO)`, `accept4` with
+  `SOCK_NONBLOCK` and `SOCK_CLOEXEC`, `MSG_DONTWAIT`: a non-blocking
+  call answers `EAGAIN`. Nothing waits on readiness.
+- TCP's debts, named in §3: NewReno's partial acknowledgements, SACK,
+  window scaling (so 65,535 bytes of window and the throughput
+  above), timestamps and PAWS, keep-alives, a delayed ACK, path MTU
+  discovery, SYN cookies; one thread a process, so a descriptor is
+  never closed under a blocked call.
+- UDP's sockets still see no ICMP error (px22's debt, not paid here).
+- 64 connections at once, 65,536 bytes each way: a server with more
+  clients than that refuses the 65th (`no-block`).
+
+**To close or correct when this merges.** No issue in pax names this
+work. wolf-lang#711 (opened by this lane) stays open: it is the
+compiler's. To correct: this note's §3 said `tests/mpx4-udp`'s U7
+would move (it did not), ICMP code 1 would be ignored (Linux ends the
+connect), the time-wait table would hold 16,384 (it holds 32,768) and
+every throughput figure (too low).
+
+## 5. Done-when
+
+Branch `px23`; PR pax#27 open, unmerged, five sections by name, commit
+shas as bullets, a test checklist. CI green at the head (the PR names
+the run). `wolf/tools/lane-audit.sh pax px23 27` run by this lane, its
+exit status in the PR. The lane's clones, images and scratch on
+kasumi, hasu and nomad-1 are removed and no process of the lane is
+left. Nothing is merged and nothing is closed.
