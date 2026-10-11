@@ -1,0 +1,628 @@
+#!/usr/bin/env bash
+# tests/mpx4-ready — readiness (px24; toward M-PX4): unmodified static
+# x86-64 Linux programs — five probes, an echo server on epoll, and a
+# server and a client built by wolf that wait through its hosted
+# runtime — run on PAX (kernel/ready, kernel/event: `poll`, `epoll`,
+# `eventfd`, and the rest of what wolf's runtime and lobo ask), over
+# loopback and over the wire, their output and exit status
+# byte-identical to the same binaries on Linux.
+#
+#   tests/mpx4-ready [--images DIR | --no-boot] [--progs DIR] [--soak N]
+#                    [--deadline SECONDS] [--stall SECONDS] [--keep-going]
+#                    [--firmware bios|uefi|both] [--tier native|release|both]
+#                    [--accel auto|kvm|tcg] [--ways "none peer user"]
+#
+# The programs: user/net's eight for px24 (tools/mknet: seven C files
+# linked static against this host's glibc, one wolf program built by
+# the pinned wolf), unmodified, in the initramfs under /bin with a run
+# list as /etc/pax-run; the kernel is kmain_sockets, which runs the
+# list's commands one at a time, here with 1 GiB (a wolf task's stack is
+# 8 MiB that `mmap` backs at the call). One kernel, three run lists,
+# booted three ways per tier (native, release) and firmware (bios,
+# uefi):
+#
+#   peer   `-netdev socket,udp=…,localaddr=…`: tools/net-peer --ready is
+#          the whole network, with a TCP of its own (tools/paxtcp.py):
+#          every line of user/mpx4-ready.run, the last three over the
+#          wire — the echo server driven, the wolf server asked by
+#          twelve connections at once, the wolf client answered
+#   user   `-netdev user,ipv6=off,hostfwd=tcp:…-:7,hostfwd=tcp:…-:7101`:
+#          QEMU's user-mode network and its own TCP, with
+#          tools/ready-host at this host's end (ordinary sockets): the
+#          same three lines. user/mpx4-ready-user.run
+#   none   no network device at all: the probes, the echo server and its
+#          driver, and the wolf witness, over loopback
+#          (user/mpx4-ready-none.run)
+#
+# the first two with `-object filter-dump` writing every frame to a pcap
+# file.
+#
+# The reference side: tools/linux-net --ready runs user/mpx4-ready.run on
+# this host's Linux (root: sudo -n), chrooted in the same tree, in a
+# network namespace addressed as PAX is, with the same net-peer script
+# on a tap device, each command under strace. The other two ways' lines
+# are lines of that list too and are held to the same output.
+#
+# A probe's lines that start with `~` are what PAX answers by design
+# where Linux answers otherwise (a refusal by name; one CPU; a clock
+# that steps by a tick): they are left out of the comparison and held
+# to PAX's own answer (T2).
+#
+# Assertions:
+#   T0 build: tools/build-kernel's object assertions for kmain_sockets;
+#      every program static (ET_EXEC, no PT_INTERP); the initramfs and
+#      ISOs built; the Linux side ran every command and its script
+#      ended PASS.
+#   T1 the stack up: the device's address (none: the network is off),
+#      kernel/ip's and kernel/tcp's lines (256 blocks).
+#   T2 the programs, differential: for each line k, `run k: <line>`, its
+#      end `user: <name> pid <p> exit_group <s>` (never `killed`), and
+#      the lines that are not the kernel's (`user: …`) byte-identical
+#      to Linux's output for that command, s Linux's exit status; and
+#      the `~` lines: epollprobe's two refusals -EINVAL, evprobe's
+#      EFD_SEMAPHORE -EINVAL, restprobe's one CPU.
+#   T3 frames and books: every line's `user: frames free <A> before, <B>
+#      with 1 processes, <A> after`, its books — nothing on the heap,
+#      no open file, pipe, socket or datagram, **0 tcp blocks** — and
+#      its `user: ready:` line: **0 epoll objects, 0 registrations, 0
+#      eventfds** left: after 10,000 connections through the epoll
+#      server as after a probe, every control block, descriptor,
+#      registration, buffer and frame came back.
+#   T4 what PAX lacks and what it refuses: -ENOSYS only for
+#      set_robust_list (273) and rseq (334); refused by name exactly the
+#      three things the probes ask that Linux takes and PAX does not (an
+#      epoll object in another, EPOLLEXCLUSIVE, EFD_SEMAPHORE), counted
+#      on the `user: ready:` line; nobody killed.
+#   T5 the other end's verdict: net-peer's steps R1 to R3 ok and PASS
+#      (peer); ready-host's H1 to H3 (user).
+#   T6 the capture, byte by byte (tools/pcap-net --tcp): every frame PAX
+#      sent rebuilt from its fields and equal to the capture's, every
+#      checksum recomputed; every segment held to its connection; and
+#      the kernel's counters the capture's.
+#   T7 the counters: every block made freed; nothing unsent, no
+#      connection without its frames; loopback's datagrams all
+#      delivered.
+#   T8 the storm, the soak and the waits: the echo server's two storms
+#      (64 events, 64 distinct, 0 repeated, with room for all and with
+#      room for 16) and its soak, over loopback (peer, none) and over
+#      the wire (peer, user), with connections a second by the kernel's
+#      stamp; the wolf witness's requests and connections a second; and
+#      what waking every waiter cost: of the times `poll` or
+#      `epoll_wait` ran again after a wake, how many found nothing.
+#   T9 the end: `run: <n> commands`, `halt`, no PANIC, and qemu-halt
+#      holds the machine halted.
+#
+# **Failing fast.** A boot is stopped, and is a failure by name: 20 s
+# after its other end has said FAIL; the moment a command it has
+# finished is seen to have printed other than Linux did (the log is read
+# as it grows); when its serial log has not grown for --stall seconds
+# (240: a command that waits for something that will never come). After
+# a boot that failed no further boot is started (--keep-going boots them
+# all), and none is started once --deadline seconds (2400) have passed
+# since the first.
+#
+# --images DIR boots what this script built earlier (DIR holds
+# <tier>/kmain_sockets.elf, <tier>/kmain_sockets-{peer,user,none}.iso,
+# peer.run, user.run, none.run, linux/ and sizes): any host with QEMU,
+# nm and python3, no wolf, no compiler, no root. Without it the script
+# builds (linux x86-64); --no-boot stops after T0, leaving everything in
+# build/mpx4-ready. --progs DIR takes the programs from DIR instead of
+# building them. --soak N (10000) is the soak's size. --ways names the
+# ways to boot (all three).
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 accel=auto progs= soak=10000 deadline=2400 stall=240 keep=0 ways="none peer user"
+usage="usage: tests/mpx4-ready [--images DIR | --no-boot] [--progs DIR] [--soak N] [--deadline SECONDS] [--stall SECONDS] [--keep-going] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg] [--ways \"none peer user\"]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --progs)    progs=$2; shift 2 ;;
+        --soak)     soak=$2; shift 2 ;;
+        --deadline) deadline=$2; shift 2 ;;
+        --stall)    stall=$2; shift 2 ;;
+        --keep-going) keep=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        --accel)    accel=$2; shift 2 ;;
+        --ways)     ways=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+
+k=kmain_sockets
+PROGS="nbprobe pollprobe epollprobe evprobe restprobe epollecho pair waitwolf"
+MEM=1024M
+work=$PAX_BUILD/mpx4-ready
+runs=$PAX_BUILD/mpx4-ready-runs.txt
+MAC=52:54:00:12:34:56
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+need nm python3
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+# A run list with this run's soak.
+sized() { # file
+    sed -e "s/ loop 7200 64 10000\$/ loop 7200 64 $soak/" "$1"
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf" readelf
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/root/bin" "$work/root/etc"
+    root=$work/root
+    why=
+    if [ -n "$progs" ]; then
+        say "the programs from $progs"
+    elif PAX_WOLF=$wolf "$PAX_ROOT/tools/mknet" "$work/net" > "$work/net.txt"; then
+        progs=$work/net
+    else
+        why+=" tools/mknet;"
+    fi
+    for p in $PROGS; do
+        cp "$progs/$p" "$root/bin/$p" 2>/dev/null || { why+=" no $progs/$p;"; continue; }
+        r=$(static_ok "$root/bin/$p") || why+=" $r;"
+        say "  program: bin/$p $(sha256_of "$root/bin/$p") $(wc -c < "$root/bin/$p" | tr -d ' ') bytes"
+    done
+    printf '%s\n' "$soak" > "$work/sizes"
+    sized "$PAX_ROOT/user/mpx4-ready.run" > "$work/peer.run"
+    sized "$PAX_ROOT/user/mpx4-ready-user.run" > "$work/user.run"
+    sized "$PAX_ROOT/user/mpx4-ready-none.run" > "$work/none.run"
+    for way in peer user none; do
+        pairs=()
+        for p in $PROGS; do pairs+=("/bin/$p=$root/bin/$p"); done
+        pairs+=("/etc/pax-run=$work/$way.run")
+        "$PAX_ROOT/tools/mkinitramfs" "$work/$way.cpio" "${pairs[@]}" > "$work/$way.initramfs.txt" || why+=" tools/mkinitramfs ($way);"
+    done
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/$k.build-kernel.log
+        t0=$SECONDS
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/$k.lu" "$work/$tier" 2>"$log"); then
+            tail -n 1 "$log" >&2
+            for way in peer user none; do
+                "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                    --add "$work/$way.cpio" initramfs.cpio "$elf" "$work/$tier/$k-$way.iso" >/dev/null \
+                    || why+=" $tier $k: mkimage ($way);"
+            done
+            say "built $tier $k in $((SECONDS - t0)) s: elf $(sha256_of "$elf"), peer iso $(sha256_of "$work/$tier/$k-peer.iso"), user iso $(sha256_of "$work/$tier/$k-user.iso")"
+        else
+            cat "$log" >&2
+            why+=" $tier $k: tools/build-kernel;"
+        fi
+    done
+    # The Linux side: the same binaries, the same tree, the peer's list,
+    # the same script at the other end.
+    if [ "$(uname -s)" != Linux ]; then
+        why+=" the Linux side needs Linux (this is $(uname -s)): build on Linux, boot here with --images;"
+    else
+        sudo=(); [ "$(id -u)" = 0 ] || sudo=(sudo -n)
+        st=(); command -v strace >/dev/null 2>&1 && st=(--strace)
+        if "${sudo[@]}" "$PAX_ROOT/tools/linux-net" "${st[@]}" --ready --soak "$soak" "$root" "$work/peer.run" "$work/linux" > "$work/linux.txt" 2>&1; then
+            sed 's/^/  linux: /' "$work/linux.txt" | cut -c1-220 >&2
+        else
+            sed 's/^/  linux: /' "$work/linux.txt" | cut -c1-220 >&2
+            tail -n 5 "$work/linux/peer.txt" 2>/dev/null | cut -c1-600 >&2
+            why+=" tools/linux-net (needs root and /dev/net/tun): $(tail -n 1 "$work/linux.txt");"
+        fi
+        [ "${#sudo[@]}" = 0 ] || "${sudo[@]}" chown -R "$(id -u):$(id -g)" "$work/linux"
+        # A strace of a soak is megabytes of the same lines: its first
+        # 400 and last 60 are kept.
+        for s in "$work"/linux/*.strace; do
+            [ -f "$s" ] || continue
+            if [ "$(wc -l < "$s")" -gt 1200 ]; then
+                { head -n 400 "$s"; printf '… %s lines not kept …\n' "$(( $(wc -l < "$s") - 460 ))"; tail -n 60 "$s"; } > "$s.cut" && mv "$s.cut" "$s"
+            fi
+        done
+        # What a comparison reads: Linux's output without its `~` lines.
+        for o in "$work"/linux/*.out; do
+            [ -f "$o" ] && { grep -v '^~' "$o" > "$o.cmp" || true; }
+        done
+    fi
+    [ -z "$why" ] && say "PASS T0: $k built ($tiers), 8 programs static (one of them wolf's), three initramfs ($(wc -c < "$work/peer.cpio" | tr -d ' '), $(wc -c < "$work/user.cpio" | tr -d ' ') and $(wc -c < "$work/none.cpio" | tr -d ' ') bytes), Linux ran $(grep -c ' -> ' "$work/linux.txt") commands; $(grep '^peer: ' "$work/linux.txt"); the tap: $(cut -d'(' -f1 "$work/linux/tap.txt" 2>/dev/null)" || bad "T0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx4-ready build (T0): PASS (no boot: --no-boot)" || say "mpx4-ready build: FAIL"
+        exit "$fail"
+    fi
+fi
+lx=$images/linux
+[ -f "$images/peer.run" ] && [ -f "$images/user.run" ] && [ -f "$images/none.run" ] && [ -d "$lx" ] && [ -f "$images/sizes" ] || die "no $images/peer.run, user.run, none.run, sizes or linux/ (build first)"
+read -r soak < "$images/sizes"
+
+# Two ports on this host, free to bind (UDP for the socket netdev, TCP
+# for the forwards).
+pick_ports() {
+    python3 -c '
+import os, socket, sys
+p = 21000 + (os.getpid() * 7919 + int(sys.argv[1]) * 16) % 18000
+got = []
+for k in range(400):
+    ok = True
+    for kind in (socket.SOCK_DGRAM, socket.SOCK_STREAM):
+        s = socket.socket(socket.AF_INET, kind)
+        try:
+            s.bind(("127.0.0.1", p + k))
+        except OSError:
+            ok = False
+        s.close()
+    if ok:
+        got.append(p + k)
+    if len(got) == 2:
+        break
+print(*got)
+' "$1"
+}
+
+has() { grep -Eqx -- "$2" "$1"; }
+line_of() { grep -E -m1 -- "$2" "$1"; }
+
+# The Linux side's line number for a command (its place in the peer's
+# list); nothing when the command is not one of its lines.
+linux_line() { # command
+    awk -v c="$1" '/^#/ || /^$/ { next } { n++ } $0 == c { print n; exit }' "$images/peer.run"
+}
+
+started=$SECONDS
+
+# Boot the kernel one way to its halt; leaves the log in $log, its
+# normalised text in $norm, the capture in $pcap and the other end's
+# account in $log.end. Status: qemu-halt's.
+boot() { # tier leg way
+    local tier=$1 leg=$2 way=$3 rc=0 ports port port2 pid=
+    log=$PAX_BUILD/mpx4-ready-$tier-$leg-$way.serial.log
+    pcap=$PAX_BUILD/mpx4-ready-$tier-$leg-$way.pcap
+    norm=$log.norm
+    iso=$images/$tier/$k-$way.iso elf=$images/$tier/$k.elf
+    rm -f "$log" "$log.verdict" "$log.end" "$pcap" "$norm"
+    : > "$log"; : > "$norm"; : > "$log.end"
+    [ -f "$iso" ] && [ -f "$elf" ] || { say "no image or ELF for $tier $k ($iso)"; return 2; }
+    if [ $((SECONDS - started)) -gt "$deadline" ]; then
+        printf 'qemu-halt: NOT HALTED: not booted: tests/mpx4-ready is past its deadline of %s s\n' "$deadline" > "$log.verdict"
+        return 3
+    fi
+    ports=$(pick_ports "$ran")
+    port=${ports% *} port2=${ports#* }
+    [ -n "$port" ] && [ "$port" != "$port2" ] || { say "no free ports on this host"; return 2; }
+    local q=(--qemu -m --qemu "$MEM")
+    if [ "$way" = peer ]; then
+        q+=(--qemu -netdev --qemu "socket,id=n0,udp=127.0.0.1:$port,localaddr=127.0.0.1:$port2")
+        "$PAX_ROOT/tools/net-peer" --ready --listen "$port" --qemu "$port2" --soak "$soak" --boot 900 >"$log.end" 2>&1 &
+        pid=$!
+    elif [ "$way" = user ]; then
+        q+=(--qemu -netdev --qemu "user,id=n0,ipv6=off,hostfwd=tcp:127.0.0.1:$port-:7,hostfwd=tcp:127.0.0.1:$port2-:7101")
+        "$PAX_ROOT/tools/ready-host" --echo-to "$port" --wolf-to "$port2" --soak "$soak" --boot 900 --wait 1800 >"$log.end" 2>&1 &
+        pid=$!
+        # The host's ports 9711 to 9713 are one run's at a time: the script says when it has them.
+        local w=0
+        while [ "$w" -lt 18000 ] && ! grep -q '^ready-host: 127.0.0.1 ports\|^ready-host: FAIL' "$log.end" 2>/dev/null; do sleep 0.1; w=$((w + 1)); done
+    fi
+    [ "$way" = none ] || q+=(--qemu -device --qemu "virtio-net-pci,netdev=n0,mac=$MAC" --qemu -object --qemu "filter-dump,id=f0,netdev=n0,file=$pcap")
+    "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 900 --accel "$accel" \
+        --elf "$elf" --marker halt "${q[@]}" "$iso" >"$log.verdict" 2>&1 &
+    local hpid=$! said=0 checked=0 seen=0 quiet=0 size=0 now line lk stopped=0
+    while kill -0 "$hpid" 2>/dev/null; do
+        sleep 1
+        [ "$stopped" = 0 ] || continue
+        # 20 s after the other end has said FAIL the boot is stopped,
+        # not waited out.
+        if grep -q '^[a-z-]*: FAIL' "$log.end" 2>/dev/null; then
+            said=$((said + 1))
+            if [ "$said" = 20 ]; then
+                kill "$hpid" 2>/dev/null; stopped=1
+                printf 'qemu-halt: NOT HALTED: stopped by tests/mpx4-ready 20 s after the other end said FAIL\n' >> "$log.verdict"
+            fi
+        fi
+        now=$(wc -c < "$log" 2>/dev/null | tr -d ' ')
+        if [ "$now" != "$size" ]; then
+            size=$now quiet=0
+            # Without its last line: the log is read while it is written.
+            serial_norm "$log" 2>/dev/null | awk 'NR > 1 { print prev } { prev = $0 }' > "$norm.live"
+            seen=$(grep -c '^user: books: ' "$norm.live")
+            while [ "$checked" -lt "$seen" ] && [ "$stopped" = 0 ]; do
+                checked=$((checked + 1))
+                line=$(awk -v k="$checked" '/^#/ || /^$/ { next } { n++ } n == k { print; exit }' "$images/$way.run")
+                lk=$(linux_line "$line")
+                awk -v h="run $checked: $line" '$0 == h { on = 1; next } on && /^run [0-9]+: |^run: [0-9]+ commands$/ { exit } on { print }' "$norm.live" \
+                    | awk '/^user: exec pid / { on = 1; next } on && !/^user: / && !/^~/ { print }' > "$norm.live.out"
+                if [ -n "$lk" ] && ! cmp -s "$lx/$lk.out.cmp" "$norm.live.out"; then
+                    kill "$hpid" 2>/dev/null; stopped=1
+                    printf 'qemu-halt: NOT HALTED: stopped by tests/mpx4-ready: command %s (%s) had printed other than Linux did\n' "$checked" "$line" >> "$log.verdict"
+                fi
+            done
+        else
+            # A log that has not grown for $stall seconds: a command is
+            # waiting for what will not come.
+            quiet=$((quiet + 1))
+            if [ "$quiet" -ge "$stall" ]; then
+                kill "$hpid" 2>/dev/null; stopped=1
+                printf 'qemu-halt: NOT HALTED: stopped by tests/mpx4-ready: the serial log had not grown for %s s (after command %s of the list)\n' "$stall" "$seen" >> "$log.verdict"
+            fi
+        fi
+    done
+    rm -f "$norm.live" "$norm.live.out"
+    wait "$hpid" || rc=$?
+    # The other end has said its last word by now, or never will.
+    [ -z "$pid" ] || { sleep 0.5; kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; }
+    ran=$((ran + 1))
+    serial_norm "$log" > "$norm"
+    printf '%s %s %s halt-status=%s accel=%s qemu="%s" serial=%s iso=%s%s\n' "$tier" "$leg" "$way" "$rc" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sed -n 's/^qemu: //p' "$log.meta" 2>/dev/null)" \
+        "$(sha256_of "$log")" "$(sha256_of "$iso")" \
+        "$([ -f "$pcap" ] && printf ' pcap=%s (%s bytes)' "$(sha256_of "$pcap")" "$(wc -c < "$pcap" | tr -d ' ')")" \
+        >> "$runs"
+    return "$rc"
+}
+
+# The microseconds the kernel stamped around the run-list line that
+# matches a pattern.
+stamp() { # list norm pattern
+    local n
+    n=$(awk -v p="$3" '/^#/ || /^$/ { next } { n++ } $0 ~ p { print n; exit }' "$1")
+    [ -n "$n" ] || return 1
+    sed -n -E "s/^user: run $n took [0-9]+ ticks, ([0-9]+) us by the time-stamp counter\$/\1/p" "$2"
+}
+rate() { # count us
+    [ -n "$2" ] && [ "$2" -gt 0 ] && echo $(( $1 * 1000000 / $2 )) || echo '?'
+}
+
+# T1-T9 for one boot.
+one() { # tier leg way
+    local tier=$1 leg=$2 way=$3 L="$1 $2 $3" hrc=0 why
+    if [ "$fail" != 0 ] && [ "$ran" -gt 0 ] && [ "$keep" = 0 ]; then
+        bad "T9 $L: not booted: an earlier boot failed (--keep-going boots them all)"
+        return
+    fi
+    boot "$tier" "$leg" "$way" || hrc=$?
+    local list=$images/$way.run
+    local ncmd; ncmd=$(command grep -cv -e '^#' -e '^$' "$list")
+    if [ "$hrc" = 3 ]; then
+        bad "T9 $L: not booted: past the suite's deadline of $deadline s"
+        return
+    fi
+
+    # --- T1: the stack up ---------------------------------------------------
+    local netline="net: $MAC, line [0-9]+ \(vector [0-9]+, level; elcr [0-9a-f]+ -> [0-9a-f]+\), 66 frames held" netframes=66
+    [ "$way" = none ] && netline='net: no virtio network device among [0-9]+ PCI functions; the network is off' netframes=0
+    if has "$norm" "$netline" \
+        && has "$norm" 'ip: 10\.0\.2\.15 netmask 255\.255\.255\.0 gateway 10\.0\.2\.2, MTU 1500, TTL 64, DF set, no fragments either way' \
+        && has "$norm" 'tcp: 256 blocks, 65536 bytes each way a connection, MSS 1460, ports 32768-60999 from [0-9]+, RTO 200 ms to 60 s, time-wait 60 s in 32768 entries'; then
+        say "PASS T1 $L: $(line_of "$norm" "^$netline\$" | cut -c1-60); $(line_of "$norm" '^tcp: 256')"
+    else
+        bad "T1 $L: $(grep -m1 '^net: \|^PANIC' "$norm"); tcp '$(line_of "$norm" '^tcp: [0-9]+ blocks')'"
+    fi
+
+    # --- T2: each command against Linux -------------------------------------
+    why=
+    local out=$PAX_BUILD/mpx4-ready-$tier-$leg-$way.out n=0 line s endl lk want wrc
+    rm -rf "$out"; mkdir -p "$out"
+    : > "$out/tilde.txt"
+    while IFS= read -r line; do
+        case $line in ''|'#'*) continue ;; esac
+        n=$((n + 1))
+        awk -v h="run $n: $line" '$0 == h { on = 1; next } on && /^run [0-9]+: |^run: [0-9]+ commands$/ { exit } on { print }' "$norm" > "$out/$n.block"
+        # The command's own process is the first one made after its line;
+        # the others are its children.
+        local first; first=$(sed -n -E 's/^user: exec pid ([0-9]+) cr3 .*/\1/p' "$out/$n.block" | head -n 1)
+        if [ -z "$first" ]; then
+            why+=" $n ($line): no exec line ($(head -n 2 "$out/$n.block" | tr '\n' '|'));"
+            continue
+        fi
+        endl=$(grep -E "^user: [^ ]+ pid $first (exit_group|exit) [0-9]+ after [0-9]+ runs$|^user: [^ ]+ pid $first killed: " "$out/$n.block" | head -n 1)
+        case $endl in
+            *" killed: "*|'') why+=" $n ($line): '$endl';"; continue ;;
+        esac
+        s=$(printf '%s\n' "$endl" | sed -E 's/.* (exit_group|exit) ([0-9]+) after .*/\2/')
+        awk '/^user: exec pid / { on = 1; next } on && !/^user: / { print }' "$out/$n.block" > "$out/$n.all"
+        grep -v '^~' "$out/$n.all" > "$out/$n.out" || true
+        grep '^~' "$out/$n.all" >> "$out/tilde.txt" || true
+        lk=$(linux_line "$line")
+        [ -n "$lk" ] || { why+=" $n ($line): not a line of the Linux side's list;"; continue; }
+        want=$lx/$lk.out.cmp wrc=$(cat "$lx/$lk.rc" 2>/dev/null)
+        if ! cmp -s "$want" "$out/$n.out"; then
+            why+=" $n ($line): output differs from ${want##*/}: $(diff "$want" "$out/$n.out" | head -n 6 | cut -c1-300 | tr '\n' '|');"
+        fi
+        [ "$s" = "$wrc" ] || why+=" $n ($line): exit $s on PAX, $wrc due;"
+        printf '%s\t%s\t%s\t%s\n' "$n" "$s" "$(sha256_of "$out/$n.out")" "$line" >> "$out/summary.tsv"
+    done < "$list"
+    [ "$n" = "$ncmd" ] || why+=" $n commands read, the list has $ncmd;"
+    # The `~` lines, PAX's own answers (the probes run on peer and none).
+    if [ "$way" != user ]; then
+        local t
+        for t in '~nested: an epoll object added to another: EINVAL' \
+                 '~exclusive: a registration with EPOLLEXCLUSIVE: EINVAL' \
+                 '~semaphore: eventfd(2, EFD_SEMAPHORE|EFD_NONBLOCK) -EINVAL' \
+                 '~cpus: 1'; do
+            grep -qxF -- "$t" "$out/tilde.txt" || why+=" no line '$t';"
+        done
+        grep -Eqx '~clock: [0-9]+ distinct readings of 2000' "$out/tilde.txt" || why+=" no ~clock line;"
+        [ "$(wc -l < "$out/tilde.txt" | tr -d ' ')" = 5 ] || why+=" $(wc -l < "$out/tilde.txt" | tr -d ' ') lines start with ~, not 5;"
+    fi
+    if [ -z "$why" ]; then
+        say "PASS T2 $L: $n commands, each one's output and exit status byte-identical to Linux's ($(cut -f2 "$out/summary.tsv" | paste -sd, -))$([ "$way" != user ] && printf '; PAX'"'"'s own five lines: %s' "$(paste -sd'|' "$out/tilde.txt")")"
+    else
+        bad "T2 $L:$why"
+    fi
+
+    # --- T3: frames, books, and nothing left of epoll or eventfd ---------------
+    why=
+    local v
+    v=$(awk -v want="$ncmd" -v nf="$netframes" '
+        /^user: frames free [0-9]+ before, [0-9]+ with [0-9]+ processes, [0-9]+ after$/ {
+            n++; a = $4; b = $6; p = $8; c = $10
+            if (c != a) why = why " command " n ": " c " after, not " a ";"
+            if (p != 1 || b >= a) why = why " command " n ": " p " processes, " b " during;"
+        }
+        /^user: books: / {
+            m++
+            t = $0; sub(/, time-wait [0-9]+$/, "", t)
+            if (t != "user: books: heap pages 0, live blocks 0, net frames " nf ", stack frames 333, open files 0, pipes 0, sockets 0, datagrams waiting 0, tcp blocks 0") why = why " command " m ": " $0 ";"
+        }
+        /^user: ready: / {
+            r++
+            if ($0 !~ /^user: ready: epolls 0, registrations 0, eventfds 0; /) why = why " command " r ": " $0 ";"
+        }
+        END { if (n != want || m != want || r != want) why = why " " n " frames lines, " m " books lines and " r " ready lines, not " want ";"; if (why != "") { print "no:" why; exit 1 } print "ok" }' "$norm") || why=" ${v#no:}"
+    [ -z "$why" ] && say "PASS T3 $L: after each of $ncmd commands every frame back; the books: $(sed -n 's/^user: books: //p' "$norm" | tail -n 1); $(sed -n 's/^user: //p' "$norm" | grep '^ready: ' | tail -n 1)" || bad "T3 $L:$why"
+
+    # --- T4: what PAX lacks, what it refuses ----------------------------------------
+    why=
+    local ns rf kl rc wr=
+    ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
+    [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
+    rf=$(sed -n -E 's/^user: ([a-z]+) pid [0-9]+ (syscall [0-9]+: refused: .*)$/\1 \2/p' "$norm")
+    rc=$(sed -n -E 's/^user: ready: .* refused ([0-9]+)$/\1/p' "$norm" | tail -n 1)
+    if [ "$way" != user ]; then
+        wr="epollprobe syscall 233: refused: an epoll object registered in another, -22
+epollprobe syscall 233: refused: EPOLLEXCLUSIVE, -22
+evprobe syscall 290: refused: an eventfd with EFD_SEMAPHORE, -22"
+        [ "$rc" = 3 ] || why+=" $rc refusals counted, not 3;"
+    else
+        [ "$rc" = 0 ] || why+=" $rc refusals counted, not 0;"
+    fi
+    [ "$rf" = "$wr" ] || why+=" the refusals are not the ones due: $(printf '%s' "$rf" | tr '\n' '|');"
+    kl=$(grep -c ' killed: ' "$norm")
+    [ "$kl" = 0 ] || why+=" $kl processes killed: $(grep -m2 ' killed: ' "$norm" | paste -sd'|' -);"
+    [ -z "$why" ] && say "PASS T4 $L: -ENOSYS only for set_robust_list (273) and rseq (334); refused by name: $([ -n "$rf" ] && printf '%s' "$rf" | sed -E 's/^[a-z]+ syscall [0-9]+: refused: //' | paste -sd';' - || echo nothing) ($rc counted); nobody killed" || bad "T4 $L:$why"
+
+    # --- T5: the other end ----------------------------------------------------------
+    if [ "$way" = none ]; then
+        :
+    elif [ "$way" = peer ]; then
+        local steps; steps=$(sed -n -E 's/^net-peer: ok (R[0-9]+) .*/\1/p' "$log.end" | sort -u | paste -sd' ' -)
+        if grep -q '^net-peer: PASS ' "$log.end" && [ "$steps" = "R1 R2 R3" ]; then
+            say "PASS T5 $L: tools/net-peer: $(grep '^net-peer: ok R1' "$log.end" | sed 's/^net-peer: ok //' | cut -c1-420); R2 and R3 ok; $(grep '^net-peer: PASS' "$log.end" | sed 's/^net-peer: PASS //')"
+        else
+            grep -A3 '^net-peer: FAIL' "$log.end" | cut -c1-900 >&2
+            bad "T5 $L: tools/net-peer: steps '$steps'; $(grep -m1 '^net-peer: FAIL\|^Traceback\|Error' "$log.end" | cut -c1-600)"
+        fi
+    else
+        if grep -q '^ready-host: PASS' "$log.end" && [ "$(grep -c '^ready-host: ok H' "$log.end")" = 3 ]; then
+            say "PASS T5 $L: tools/ready-host: $(grep '^ready-host: ok H1' "$log.end" | sed 's/^ready-host: ok //' | cut -c1-420); H2 and H3 ok"
+        else
+            bad "T5 $L: tools/ready-host: $(grep -c '^ready-host: ok H' "$log.end") of 3 steps; $(grep -m1 '^ready-host: FAIL\|^Traceback\|Error' "$log.end" | cut -c1-600)"
+        fi
+    fi
+
+    # --- T6: the capture ---------------------------------------------------------------
+    if [ "$way" = none ]; then
+        :
+    elif [ -s "$pcap" ] && "$PAX_ROOT/tools/pcap-net" --tcp --serial "$log" "$pcap" >"$pcap.check" 2>&1; then
+        say "PASS T6 $L: $(grep '^pcap-net: [0-9]' "$pcap.check" | cut -c1-330); $(grep '^pcap-net: the kernel' "$pcap.check"); $(grep -o 'tcp\.in=[0-9]* tcp\.out=[0-9]* tcp\.retransmitted=[0-9]* tcp\.resets-out=[0-9]* tcp\.probes=[0-9]* tcp\.connections=[0-9]* tcp\.bytes-out=[0-9]*' "$pcap.check") [pcap $(sha256_of "$pcap" | cut -c1-12)…]"
+    else
+        tail -n 4 "$pcap.check" 2>/dev/null | cut -c1-900 >&2
+        bad "T6 $L: the capture ($pcap): $(grep -m1 '^pcap-net: FAIL' "$pcap.check" 2>/dev/null | cut -c1-600)"
+    fi
+    # Judged whole above and its digest written with the boot's line, a
+    # capture is kept as its first 4000 frames (PAX_KEEP_PCAP=1 keeps it
+    # whole, which a failed check does too).
+    if [ "$way" != none ] && [ -s "$pcap" ] && [ "${PAX_KEEP_PCAP:-0}" != 1 ] && grep -q '^pcap-net: PASS' "$pcap.check" 2>/dev/null; then
+        python3 - "$pcap" "$PAX_BUILD/mpx4-ready-$tier-$leg-$way.head.pcap" <<'PY'
+import struct, sys
+d = open(sys.argv[1], "rb").read()
+e = "<" if d[:4] == b"\xd4\xc3\xb2\xa1" else ">"
+o, n = 24, 0
+while o + 16 <= len(d) and n < 4000:
+    o += 16 + struct.unpack(e + "I", d[o + 8:o + 12])[0]
+    n += 1
+open(sys.argv[2], "wb").write(d[:o])
+PY
+        rm -f "$pcap"
+    fi
+
+    # --- T7: the counters ----------------------------------------------------------------
+    why=
+    local made freed lsent ldone
+    made=$(sed -n -E 's/^tcp: blocks ([0-9]+) made, ([0-9]+) freed, 0 in use; time-wait [0-9]+ made, [0-9]+ evicted, [0-9]+ reopened, [0-9]+ segments answered, [0-9]+ resets ignored, [0-9]+ waiting$/\1/p' "$norm")
+    freed=$(sed -n -E 's/^tcp: blocks ([0-9]+) made, ([0-9]+) freed, 0 in use; .*/\2/p' "$norm")
+    [ -n "$made" ] && [ "$made" = "$freed" ] || why+=" blocks ($made made, $freed freed);"
+    has "$norm" 'tcp: tx [0-9]+ segments \([0-9]+ with data, [0-9]+ bytes; [0-9]+ acks, [0-9]+ resets, [0-9]+ probes\), 0 not sent; .*' || why+=" tx;"
+    has "$norm" 'tcp: connections .* 0 no-frames; icmp 0 ended a connect, 0 ignored' || why+=" connections;"
+    has "$norm" 'tcp: rx [0-9]+ segments, dropped 0 short 0 header 0 checksum 0 broadcast 0 port-zero 0 option' || why+=" rx;"
+    has "$norm" 'tcp: rx for nobody [0-9]+ reset, [0-9]+ resets dropped; listeners 0 listen-full 0 no-block [0-9]+ other; .*' || why+=" listeners (a listen queue filled, or no block was free);"
+    lsent=$(sed -n -E 's/^ip: loopback ([0-9]+) datagrams sent, ([0-9]+) delivered, 0 not sent for a full queue, 0 waiting$/\1/p' "$norm")
+    ldone=$(sed -n -E 's/^ip: loopback ([0-9]+) datagrams sent, ([0-9]+) delivered, .*/\2/p' "$norm")
+    [ -n "$lsent" ] && [ "$lsent" = "$ldone" ] || why+=" loopback ($lsent sent, $ldone delivered);"
+    [ -z "$why" ] && say "PASS T7 $L: $(line_of "$norm" '^tcp: rx for nobody' | cut -c1-120); $(line_of "$norm" '^tcp: tx' | cut -c1-230); $(line_of "$norm" '^tcp: connections'); $(line_of "$norm" '^tcp: blocks'); $(line_of "$norm" '^ip: loopback')" \
+        || bad "T7 $L:$why $(grep '^tcp: ' "$norm" | tail -n 8 | paste -sd'|' - | cut -c1-1500)"
+
+    # --- T8: the storm, the soak, the waits ---------------------------------------------------
+    why=
+    local t8= us ans emp wai
+    local storm1='epollecho storm: room for all: storm 2 waits, 64 events, 64 distinct, 0 repeated'
+    local storm2='epollecho storm: room for 16: storm 5 waits, 64 events, 64 distinct, 0 repeated'
+    if [ "$way" != user ]; then
+        grep -qxF "$storm1" "$norm" || why+=" the storm with room for all;"
+        grep -qxF "$storm2" "$norm" || why+=" the storm with room for 16;"
+        grep -qxF "epollecho storm: $soak connections more, eight at a time, $soak echoed exact and closed" "$norm" || why+=" the soak over loopback;"
+        grep -qxF "epollecho: $((soak + 64)) connections, 64 at once at most, $((48 * (128 + soak))) bytes echoed, 2 storms held" "$norm" || why+=" the server's totals over loopback;"
+        us=$(stamp "$list" "$norm" '^/bin/epollecho loop ')
+        t8+="over loopback two storms of 64 (64 events, 64 distinct, 0 repeated, in one wait and in fours of 16) and $((soak + 64)) connections through the epoll server in $us us ($(rate $((soak + 64)) "$us") a second); "
+        us=$(stamp "$list" "$norm" '^/bin/pair /bin/waitwolf serve 7083 ')
+        grep -qxF 'waitwolf serve: 10 rounds of 12 connections held at once, 2400 requests answered, each closed' "$norm" || why+=" the wolf witness's ten rounds;"
+        t8+="the wolf witness, both ends PAX's: 120 connections and 2400 requests in $us us ($(rate 2400 "$us") requests and $(rate 120 "$us") connections a second); "
+    fi
+    if [ "$way" != none ]; then
+        us=$(stamp "$list" "$norm" '^/bin/epollecho 7 ')
+        grep -qxF "epollecho: $((soak + 64)) connections, 64 at once at most, $((48 * (128 + soak))) bytes echoed, 2 storms held" "$norm" || why+=" the server's totals over the wire;"
+        t8+="over the wire the same through the epoll server in $us us ($(rate $((soak + 64)) "$us") connections a second); "
+        grep -qxF 'waitwolf serve: 1 rounds of 12 connections held at once, 12 requests answered, each closed' "$norm" || why+=" the wolf server over the wire;"
+        grep -qxF 'waitwolf call: 1 rounds of 12 connections at once, 3 requests on each, 12 answered right, 12 ended as they should' "$norm" || why+=" the wolf client over the wire;"
+    fi
+    ans=$(sed -n -E 's/^user: ready: .*; answers ([0-9]+), waits ([0-9]+), empty ([0-9]+), .*/\1/p' "$norm" | tail -n 1)
+    wai=$(sed -n -E 's/^user: ready: .*; answers ([0-9]+), waits ([0-9]+), empty ([0-9]+), .*/\2/p' "$norm" | tail -n 1)
+    emp=$(sed -n -E 's/^user: ready: .*; answers ([0-9]+), waits ([0-9]+), empty ([0-9]+), .*/\3/p' "$norm" | tail -n 1)
+    [ -n "$ans" ] && [ "$ans" -gt 0 ] || why+=" no answers counted;"
+    t8+="waits: $ans calls of poll or epoll_wait answered, $wai of them after parking, and $emp times a call run again after a wake found nothing ($([ -n "$wai" ] && [ "${wai:-0}" -gt 0 ] && echo $(( emp * 100 / wai )) || echo '?') for each hundred waits)"
+    [ -z "$why" ] && say "PASS T8 $L: $t8" || bad "T8 $L:$why $t8"
+
+    # --- T9: the end ----------------------------------------------------------------------
+    why=
+    has "$norm" "run: $ncmd commands" || why+=" no 'run: $ncmd commands' ($(grep -m1 '^run: ' "$norm"));"
+    grep -q '^PANIC' "$norm" && why+=" $(grep -m1 '^PANIC' "$norm");"
+    [ "$hrc" = 0 ] || why+=" not halted (qemu-halt $hrc): $(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict");"
+    "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'netd: [0-9]+ turns, [0-9]+ clock turns' 'halt' >/dev/null \
+        || why+=" the log does not end with netd's line and halt;"
+    [ -z "$why" ] && say "PASS T9 $L: $ncmd commands, then halt; $(tail -n 1 "$log.verdict")" || bad "T9 $L:$why"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        for way in $ways; do
+            one "$tier" "$leg" "$way"
+        done
+    done
+done
+cat "$runs"
+say "elapsed: $((SECONDS - started)) s of a deadline of $deadline"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx4-ready: PASS" || say "mpx4-ready: FAIL"
+exit "$fail"
