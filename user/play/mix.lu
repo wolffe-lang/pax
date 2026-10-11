@@ -1,0 +1,218 @@
+//! mix — play's mixed mode (px30): a tune's slots synthesised as sampled
+//! sound and written to Linux's OSS device, `/dev/dsp`, so a chord's
+//! pitches sound together instead of one after another.
+//!
+//! **The output**: 48000 frames a second, two channels of signed 16-bit
+//! samples (SNDCTL_DSP_SETFMT AFMT_S16_LE, CHANNELS 2, SPEED 48000; the
+//! device's answers are used as given: one channel, or another rate,
+//! works too). kd.S's `play_dsp_*` routines open, ask and write it.
+//!
+//! **The voices**: every pitch of a slot is a voice for the slot's
+//! sounding time (its length less the tune's `gap`), its frequency the
+//! speaker's own (1193182 / the 8254 count, so both modes play the same
+//! pitches), from a 32-bit phase accumulator advanced by f * 2^32 /
+//! rate every frame, all in integers. Two waveforms: **square** (the
+//! speaker's timbre: odd harmonics falling as 1/n) and **triangle**
+//! (softer: odd harmonics falling as 1/n^2). By default (`-w mix`) a
+//! slot's highest pitch, the melody, is square at half the level and
+//! the others triangle; `-w square` and `-w triangle` make every voice
+//! one of them.
+//!
+//! **No clicks**: each note rises over 5 ms and falls over the last
+//! 30 ms of its sounding time (linear; shorter notes split the time),
+//! starting at phase 0.
+//!
+//! **No clipping, by construction**: a voice's peak is 0.75 x 32767 / N,
+//! N the most pitches any slot of the tune sounds at once, so the sum of
+//! every voice never passes 75% of full scale; a sample past full scale
+//! would be clamped and counted (`clamped` in -v's line), and none is.
+//!
+//! **The time** is the sample count: a slot is exactly its length in
+//! frames (rounded per slot to the nearest frame from the slot's start
+//! in microseconds, so no error accumulates), and the device's pace
+//! makes the clock: no sleep anywhere.
+//!
+//! Written from the OSS programmer's guide and the uapi
+//! linux/soundcard.h (the requests), and arithmetic. No sound library's
+//! or synthesizer's source.
+
+/// SNDCTL_DSP_SETFMT, CHANNELS, SPEED (soundcard.h, _SIOWR('P', n)).
+const DSP_SETFMT: int = 0xc0045005
+const DSP_CHANNELS: int = 0xc0045006
+const DSP_SPEED: int = 0xc0045002
+const AFMT_S16_LE: int = 0x10
+const RATE: int = 48000
+const TWO32: int = 4294967296
+const HALF32: int = 2147483648
+
+extern "c" fn play_dsp_open() -> int
+extern "c" fn play_dsp_ask(req: int, value: int) -> int
+extern "c" fn play_dsp_channels(n: int) -> int
+extern "c" fn play_dsp_frame(l: int, r: int) -> int
+extern "c" fn play_dsp_close() -> int
+
+/// The device's answers: its descriptor (or -errno), channels, rate.
+struct Dsp {
+    fd: int,
+    channels: int,
+    rate: int,
+}
+
+/// Open /dev/dsp and ask for S16_LE, two channels, 48 kHz. `fd` < 0 is
+/// the -errno of the first call that failed.
+fn dsp_open() -> Dsp {
+    // # Safety: kd.S's openat of the fixed path "/dev/dsp".
+    let fd = unsafe { play_dsp_open() }
+    if fd < 0 {
+        return Dsp { fd: fd, channels: 0, rate: 0 }
+    }
+    // # Safety: kd.S's ioctl on the descriptor it opened, an int in
+    // and out through its own stack slot.
+    let f = unsafe { play_dsp_ask(DSP_SETFMT, AFMT_S16_LE) }
+    if f != AFMT_S16_LE {
+        return Dsp { fd: if f < 0 { f } else { -22 }, channels: 0, rate: 0 }
+    }
+    // # Safety: as above.
+    let ch = unsafe { play_dsp_ask(DSP_CHANNELS, 2) }
+    if ch != 1 && ch != 2 {
+        return Dsp { fd: if ch < 0 { ch } else { -22 }, channels: 0, rate: 0 }
+    }
+    // # Safety: as above.
+    let r = unsafe { play_dsp_ask(DSP_SPEED, RATE) }
+    if r < 4000 {
+        return Dsp { fd: if r < 0 { r } else { -22 }, channels: 0, rate: 0 }
+    }
+    // # Safety: kd.S's frame width, set once.
+    let _n = unsafe { play_dsp_channels(ch) }
+    Dsp { fd: fd, channels: ch, rate: r }
+}
+
+/// What a performance did: frames written, samples clamped, the first
+/// write error (0 none).
+struct Done {
+    frames: int,
+    clamped: int,
+    err: int,
+}
+
+/// The waveform of voice `v` of `n` in a slot (0 square, 1 triangle).
+fn wave(style: int, v: int, n: int) -> int {
+    if style == 1 {
+        return 0
+    }
+    if style == 2 {
+        return 1
+    }
+    if v == n - 1 && n > 1 {
+        0
+    } else {
+        if n == 1 { 0 } else { 1 }
+    }
+}
+
+/// One sample of waveform `w` at phase `p` (0 .. 2^32), peak `amp`.
+fn sample(w: int, p: int, amp: int) -> int {
+    if w == 0 {
+        return if p < HALF32 { amp } else { -amp }
+    }
+    let t = p / 65536 // 0 .. 65535
+    let tri = if t < 32768 { t * 2 - 32767 } else { (65535 - t) * 2 - 32767 }
+    amp * tri / 32767
+}
+
+/// The envelope's gain (0-1024) at frame `i` of a note that sounds `len`
+/// frames: up over `atk`, down over `rel`.
+fn gain(i: int, len: int, atk: int, rel: int) -> int {
+    var a = atk
+    var r = rel
+    if a + r > len {
+        a = len / 6
+        r = len - a
+    }
+    if a > 0 && i < a {
+        return i * 1024 / a
+    }
+    if r > 0 && i >= len - r {
+        return (len - i) * 1024 / r
+    }
+    1024
+}
+
+/// Synthesise and (when `out`) write the slots: `pitches[s]` the
+/// centi-hertz of slot s's pitches (empty: a rest), `lengths[s]` its
+/// length and `sounds[s]` its sounding time, in microseconds. `n_max`
+/// is the most pitches any slot has; `style` 0 mix, 1 square, 2
+/// triangle; `rate` and `channels` the device's.
+fn perform_mixed(pitches: List[List[int]], lengths: List[int], sounds: List[int], n_max: int, style: int, rate: int, channels: int, out: bool) -> Done {
+    let n = if n_max < 1 { 1 } else { n_max }
+    let amp_full = 32767 * 3 / 4 / n
+    let atk = rate * 5 / 1000
+    let rel = rate * 30 / 1000
+    var at_us: int = 0
+    var done_frames: int = 0
+    var clamped: int = 0
+    var s = 0
+    while s < lengths.len {
+        let start = (at_us * rate + 500000) / 1000000
+        at_us += lengths[s]
+        let end = (at_us * rate + 500000) / 1000000
+        let frames = end - start
+        var sound = (sounds[s] * rate + 500000) / 1000000
+        if sound > frames {
+            sound = frames
+        }
+        let k = pitches[s].len
+        var incs = List[int]()
+        var phases = List[int]()
+        var waves = List[int]()
+        var amps = List[int]()
+        var v = 0
+        while v < k {
+            (mut incs).push(pitches[s][v] * (TWO32 / 100) / rate)
+            (mut phases).push(0)
+            let w = wave(style, v, k)
+            (mut waves).push(w)
+            (mut amps).push(if style == 0 && w == 0 && k > 1 { amp_full / 2 } else { amp_full })
+            v += 1
+        }
+        var i = 0
+        while i < frames {
+            var acc = 0
+            if i < sound && k > 0 {
+                let g = gain(i, sound, atk, rel)
+                var j = 0
+                while j < k {
+                    acc += sample(waves[j], phases[j], amps[j]) * g / 1024
+                    phases[j] = (phases[j] + incs[j]) % TWO32
+                    j += 1
+                }
+            }
+            if acc > 32767 {
+                acc = 32767
+                clamped += 1
+            }
+            if acc < -32768 {
+                acc = -32768
+                clamped += 1
+            }
+            if out {
+                // # Safety: kd.S's buffer, one frame of 16-bit samples.
+                let e = unsafe { play_dsp_frame(acc, acc) }
+                if e < 0 {
+                    return Done { frames: done_frames, clamped: clamped, err: e }
+                }
+            }
+            done_frames += 1
+            i += 1
+        }
+        s += 1
+    }
+    let _c = channels
+    Done { frames: done_frames, clamped: clamped, err: 0 }
+}
+
+/// Close the device: what is queued plays out first. 0 or -errno.
+fn dsp_close() -> int {
+    // # Safety: kd.S's flush and close of its own descriptor.
+    unsafe { play_dsp_close() }
+}
