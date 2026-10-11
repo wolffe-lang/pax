@@ -15,11 +15,14 @@
 #                    [--firmware bios|uefi|both] [--tier native|release|both]
 #
 # The programs, each unmodified: pelt (user/pelt.pin, tools/mkpelt),
-# boreutils' cat, echo, false, head, ls, sleep, tail, true and wc
-# (user/boreutils.pin, tools/mkboreutils; px15: `ls` is boreutils' own,
-# bu18's, and busybox is gone), procs (tools/mkuser). Every program in
+# boreutils' cat, echo, env, false, head, ls, readlink, sleep, stat,
+# tail, true and wc (user/boreutils.pin, tools/mkboreutils; px15: `ls`
+# is boreutils' own, and busybox is gone; px26: bu20's, with `ls -l`,
+# `stat`, `readlink` and `env`), procs (tools/mkuser). Every program in
 # the shell's /bin is built by wolf. Two initramfs: the shell's (those
-# in /bin, /etc/motd, /etc/pax-run `/bin/pelt`) and procs' (/bin/procs,
+# in /bin, /etc/motd, /etc/words, /etc/pax-run `/bin/pelt`, and px26's
+# /etc/passwd, /etc/group and /etc/localtime — the UTC zone,
+# tools/mkzone — which `ls -l` and `stat` read) and procs' (/bin/procs,
 # /etc/motd, /etc/script — a text file with execute bits — /etc/pax-run
 # `/bin/procs`); one kernel, kmain_console (its environment HOME=/
 # TERM=linux PAX=1 PATH=/bin), in four images: the shell's and procs'
@@ -42,6 +45,11 @@
 #                 file whose two children share its offset, a redirected
 #                 stdin, a pipeline in the working directory, cd's
 #                 errors, cd .., Ctrl-D
+#   shell-long    user/console/shell-long.keys through COM1 (px26):
+#                 bu20's boreutils — `ls -l /bin`, `ls -l /etc`, `stat
+#                 -c` of a file and a program, `readlink
+#                 /proc/self/exe`, `readlink -v` of what is no link and
+#                 its status, `env`, exit
 #   procs         nothing typed: procs runs to its end
 #   procs-quiet   procs on the quiet image (its refusals and the fault
 #                 it causes still print); its reference is procs'
@@ -83,7 +91,11 @@
 #      `pelt: line 7: teleport: not found`, 127. S2 holds PAX to it.
 #      shell-plumb (px17) likewise: user/console/shell-plumb.expect (10,
 #      the motd, /etc, the six words once each, 1, motd and pax-run, 77,
-#      cd's two refusals, 2, /).
+#      cd's two refusals, 2, /). shell-long (px26) likewise:
+#      user/console/shell-long.expect (the two long listings with their
+#      `total` lines, owners `root root` and `Jan  1  1970`; the `stat`
+#      lines; `/bin/readlink`; `readlink: /etc/motd: Invalid argument`
+#      and 1; the environment).
 #
 # --images DIR boots what this script built earlier (DIR holds
 # <tier>/kmain_console.elf, <tier>/console-{shell,procs}.iso and
@@ -117,12 +129,12 @@ case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes b
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
 need readelf python3
 
-BORE="cat echo false head ls sleep tail true wc"
-SESSIONS="shell-serial shell-ps2 shell-howl shell-howl-quiet shell-plumb procs procs-quiet"
-LINUX_SESSIONS="shell-serial shell-ps2 shell-howl shell-plumb procs" # a -quiet session's reference is its namesake's
+BORE="cat echo env false head ls readlink sleep stat tail true wc"
+SESSIONS="shell-serial shell-ps2 shell-howl shell-howl-quiet shell-plumb shell-long procs procs-quiet"
+LINUX_SESSIONS="shell-serial shell-ps2 shell-howl shell-plumb shell-long procs" # a -quiet session's reference is its namesake's
 image_of() { case $1 in procs) echo procs ;; procs-quiet) echo procs-quiet ;; *-quiet) echo shell-quiet ;; *) echo shell ;; esac; }
 init_of() { case $1 in procs*) echo procs ;; *) echo pelt ;; esac; }
-keys_of() { case $1 in shell-serial) echo "$PAX_ROOT/user/console/shell.keys" ;; shell-ps2) echo "$PAX_ROOT/user/console/shell-ps2.keys" ;; shell-howl*) echo "$PAX_ROOT/user/console/shell-howl.keys" ;; shell-plumb) echo "$PAX_ROOT/user/console/shell-plumb.keys" ;; *) echo "$images/procs.keys" ;; esac; }
+keys_of() { case $1 in shell-serial) echo "$PAX_ROOT/user/console/shell.keys" ;; shell-ps2) echo "$PAX_ROOT/user/console/shell-ps2.keys" ;; shell-howl*) echo "$PAX_ROOT/user/console/shell-howl.keys" ;; shell-plumb) echo "$PAX_ROOT/user/console/shell-plumb.keys" ;; shell-long) echo "$PAX_ROOT/user/console/shell-long.keys" ;; *) echo "$images/procs.keys" ;; esac; }
 kbd_of() { case $1 in *-ps2) echo ps2 ;; *) echo serial ;; esac; }
 linux_of() { case $1 in *-quiet) echo "${1%-quiet}" ;; *) echo "$1" ;; esac; }
 quiet_of() { case $1 in *-quiet) echo 1 ;; *) echo 0 ;; esac; }
@@ -134,6 +146,11 @@ work=$PAX_BUILD/mpx3-shell
 runs=$PAX_BUILD/mpx3-shell-runs.txt
 fail=0 ran=0
 bad() { say "FAIL $*"; fail=1; }
+
+mask() { # a transcript with every program's size, blocks and /bin's total as words
+    sed -E -e 's/^(-rwxr-xr-x 1 root root) +[0-9]+ /\1 SIZE /' -e '/^\$ ls -l \/bin$/{n;s/^total [0-9]+$/total BLOCKS/;}' \
+        -e 's/^(\/bin\/[a-z]+) [0-9]+ (755 .*) [0-9]+ (regular file)/\1 SIZE \2 BLOCKS \3/' "$1"
+}
 
 static_ok() { # file -> reason on failure
     readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
@@ -175,6 +192,10 @@ if [ -z "$images" ]; then
     done
     printf '%s\n' "$SHELL_MOTD" > "$sh/etc/motd"
     printf 'alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\n' > "$sh/etc/words" # px17: shell-plumb's group
+    # px26: what `ls -l` and `stat` name an owner and print a date from.
+    printf 'root:x:0:0:root:/:/bin/pelt\n' > "$sh/etc/passwd"
+    printf 'root:x:0:\n' > "$sh/etc/group"
+    "$PAX_ROOT/tools/mkzone" "$sh/etc/localtime" > "$work/zone.txt" || why+=" tools/mkzone;"
     printf '%s\n' "$MOTD" > "$pr/etc/motd"
     printf 'echo this file is text with execute bits, not a program PAX or Linux can run\n' > "$pr/etc/script"
     chmod 755 "$pr/etc/script"
@@ -225,6 +246,12 @@ if [ -z "$images" ]; then
     else
         asroot=(); [ "$(id -u)" = 0 ] || asroot=(sudo -n)
         images=$work
+        # px26: the tree as the initramfs describes it (tools/mkinitramfs:
+        # owner and group 0, every time 0), so `ls -l` and `stat` print
+        # the same owner and date on both sides; given back afterwards.
+        me=$(id -u):$(id -g)
+        ${asroot[@]+"${asroot[@]}"} chown -R 0:0 "$work/shell/root" "$work/procs/root" || why+=" chown 0:0;"
+        find "$work/shell/root" "$work/procs/root" -exec ${asroot[@]+"${asroot[@]}"} touch -h -d @0 {} + || why+=" touch;"
         for s in $LINUX_SESSIONS; do
             p=$(image_of "$s") i=$(init_of "$s")
             if ${asroot[@]+"${asroot[@]}"} python3 "$PAX_ROOT/tools/linux-tty" --root "$work/$p/root" --pid1 \
@@ -234,6 +261,7 @@ if [ -z "$images" ]; then
                 why+=" tools/linux-tty $s;"
             fi
         done
+        ${asroot[@]+"${asroot[@]}"} chown -R "$me" "$work/shell/root" "$work/procs/root" || why+=" chown back;"
     fi
     [ -z "$why" ] && say "PASS S0: kmain_console built ($tiers), every program static, two initramfs, four images a tier, Linux ran $(echo $LINUX_SESSIONS | wc -w | tr -d ' ') sessions" || bad "S0:$why"
     images=$work
@@ -376,12 +404,16 @@ for leg in $legs; do
             [ -z "$why" ] && say "PASS S5 $id: init ended, status $lst; $(tail -n 1 "$log.verdict")" || bad "S5 $id:$why"
 
             # S6: what the brief's session says, on Linux (S2 holds PAX to it).
-            case $s in shell-howl*|shell-plumb)
+            case $s in shell-howl*|shell-plumb|shell-long)
                 ex=$PAX_ROOT/user/console/${ls}.expect
-                if cmp -s "$ex" "$out.linux"; then
+                # px26: a program's size (and so /bin's `total` and a
+                # program's blocks) is the build host's libc's: masked
+                # here, held exactly by S2.
+                mask "$out.linux" > "$out.linux.masked"
+                if cmp -s "$ex" "$out.linux.masked"; then
                     say "PASS S6 $id: Linux's transcript is user/console/${ls}.expect ($(sha256_of "$out.linux" | cut -c1-12)…)"
                 else
-                    bad "S6 $id: Linux's transcript is not user/console/${ls}.expect: $(diff "$ex" "$out.linux" | head -n 12 | tr '\n' '|')"
+                    bad "S6 $id: Linux's transcript is not user/console/${ls}.expect: $(diff "$ex" "$out.linux.masked" | head -n 12 | tr '\n' '|')"
                 fi ;;
             esac
         done
