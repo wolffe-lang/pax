@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+# udp-host — the host's end of QEMU's user-mode network for the UDP
+# witnesses (px22, tests/mpx4-udp's `user` way).
+#
+#   tools/udp-host --echo-to PORT [--port 9099] [--soak N] [--wait SECONDS]
+#
+# With `-netdev user,hostfwd=udp:127.0.0.1:<PORT>-:7` a datagram this
+# host sends to 127.0.0.1 port PORT reaches the guest's port 7 from
+# 10.0.2.2, and a datagram the guest sends to 10.0.2.2 port 9099
+# reaches this host's 127.0.0.1 port 9099. This script is both ends'
+# other end, with ordinary sockets — the same datagrams
+# tools/net-peer's UDP script sends frame by frame (tools/paxnet.py
+# holds them), as far as a socket can send them:
+#
+#   H1  waits for user/net/udpecho's "ready" at port 9099; then
+#       datagrams of 1, 2, 64, 512 and 1472 bytes to the forwarded
+#       port, each of which must come back byte for byte
+#   H2  --soak N (10000) more, 56 bytes each, one at a time; then "quit"
+#   H3  user/net/udpclient's five datagrams at port 9099, each held to
+#       its bytes and answered reversed
+#   H4  user/net/udpsoak's N datagrams, each held to its bytes and
+#       answered reversed
+#
+# Port 9099 is this host's for the length of a run: the script waits up
+# to --wait seconds (120) for it to be free, so two runs on one host go
+# one after the other. Prints one `udp-host: ok <step> …` line per step
+# and, last, `udp-host: PASS …` or `udp-host: FAIL <what>`. Exit 0 on
+# PASS, 1 on FAIL, 2 on a usage error.
+#
+# Written from QEMU's documentation of `-netdev user` (`hostfwd`, the
+# gateway's address) and RFC 862. No network stack's source.
+import os
+import socket
+import sys
+import time
+
+sys.dont_write_bytecode = True  # no tools/__pycache__ in the tree
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import paxnet as px  # noqa: E402
+
+
+class Fail(Exception):
+    pass
+
+
+def main(argv):
+    opt = {"echo-to": None, "port": str(px.SERVICE_PORT), "soak": "10000", "wait": "120", "boot": "170"}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith("--") and a[2:] in opt and i + 1 < len(argv):
+            opt[a[2:]] = argv[i + 1]
+            i += 2
+        else:
+            print("udp-host: usage: udp-host --echo-to PORT [--port 9099] [--soak N] [--wait SECONDS] [--boot SECONDS]", file=sys.stderr)
+            return 2
+    if opt["echo-to"] is None:
+        print("udp-host: usage: udp-host --echo-to PORT [--port 9099] [--soak N] [--wait SECONDS] [--boot SECONDS]", file=sys.stderr)
+        return 2
+    sys.stdout.reconfigure(line_buffering=True)
+    soak, port = int(opt["soak"]), int(opt["port"])
+    guest = ("127.0.0.1", int(opt["echo-to"]))
+    srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    end = time.time() + float(opt["wait"])
+    while True:
+        try:
+            srv.bind(("127.0.0.1", port))
+            break
+        except OSError as e:
+            if time.time() > end:
+                print("udp-host: FAIL 127.0.0.1 port %d is not free after %s s: %s" % (port, opt["wait"], e))
+                return 1
+            time.sleep(0.5)
+    print("udp-host: 127.0.0.1 port %d bound; the guest's port 7 is 127.0.0.1 port %d" % (port, guest[1]))
+    ask = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    ask.bind(("127.0.0.1", 0))
+
+    def serve(timeout, what):
+        srv.settimeout(timeout)
+        try:
+            return srv.recvfrom(4096)
+        except socket.timeout:
+            raise Fail("nothing came for %s in %.0f s" % (what, timeout))
+
+    def echoed(d, what):
+        ask.sendto(d, guest)
+        ask.settimeout(10.0)
+        try:
+            got, _ = ask.recvfrom(4096)
+        except socket.timeout:
+            raise Fail("%s: no echo in 10 s" % what)
+        if got != d:
+            raise Fail("%s: %d bytes came back, not the %d sent" % (what, len(got), len(d)))
+
+    try:
+        d, who = serve(float(opt["boot"]), "udpecho's \"ready\"")
+        if d != b"ready":
+            raise Fail("H1: not \"ready\": %r" % d[:40])
+        for d in px.echo_battery():
+            echoed(d, "%d bytes" % len(d))
+        print("udp-host: ok H1 \"ready\" (from %s port %d); 1, 2, 64, 512 and 1472 bytes echoed through the forwarded port" % who)
+        t0 = time.time()
+        for i in range(soak):
+            echoed(px.soak_datagram(i), "datagram %d of the soak" % i)
+        span = time.time() - t0
+        echoed(b"quit", "\"quit\"")
+        print("udp-host: ok H2 %d datagrams echoed in %.2f s (%d a second by this script's clock); \"quit\"" % (soak, span, soak / span if span > 0 else 0))
+        for k, want in enumerate(px.client_script()):
+            d, who = serve(60.0, "udpclient's datagram %d" % (k + 1))
+            if d != want:
+                raise Fail("H3: datagram %d: %d bytes (%r…), not the %d due" % (k + 1, len(d), d[:24], len(want)))
+            srv.sendto(d[::-1], who)
+        print("udp-host: ok H3 udpclient's five datagrams exact, each answered reversed")
+        t0 = time.time()
+        for i in range(soak):
+            d, who = serve(60.0 if i == 0 else 10.0, "udpsoak's datagram %d" % i)
+            if d != px.soak_request(i):
+                raise Fail("H4: datagram %d: %d bytes, not the soak's" % (i, len(d)))
+            srv.sendto(d[::-1], who)
+        span = time.time() - t0
+        print("udp-host: ok H4 udpsoak's %d datagrams exact, each answered reversed, in %.2f s (%d a second by this script's clock)" % (soak, span, soak / span if span > 0 else 0))
+    except Fail as x:
+        print("udp-host: FAIL " + str(x))
+        return 1
+    print("udp-host: PASS")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
