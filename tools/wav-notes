@@ -213,7 +213,9 @@ def tones(vals, rate):
 #   wav-notes --pcm FILE.wav
 #       `pcm rate <hz> channels <c> seconds <s>`, then per channel:
 #       `channel <c> peak <dBFS> rms <dBFS> sounding <ms> from <ms> to <ms>
-#        clipped <n>` and the pitches in its sounding span, strongest
+#        clipped <n> loud <ms>` (loud: the 1 ms windows louder than 5% of
+#       the peak, so silence QEMU writes between streams, as 8.2 does and
+#       11.1 does not, is not counted) and the pitches in its sounding span, strongest
 #       first: `pitch <c> <hz> <dBFS>` (the spectrum's peaks, below).
 #   wav-notes --ramp FRAMES FILE.wav
 #       dsptone's ramp (left 7*i, right its complement, mod 65536): of
@@ -366,8 +368,10 @@ def pcm_report(path):
         peak = max(abs(v) for v in seg)
         rms = math.sqrt(sum(v * v for v in seg) / len(seg))
         clipped = sum(1 for v in seg if v >= 32767 or v <= -32768)
-        print("channel %d peak %.1f rms %.1f sounding %.1f from %.1f to %.1f clipped %d" % (
-            c, dbfs(peak), dbfs(rms), (b - a + 1) * 1000.0 / rate, a * 1000.0 / rate, b * 1000.0 / rate, clipped))
+        w1 = max(1, rate // 1000)
+        loud = sum(1 for k in range(len(x) // w1) if max(abs(v) for v in x[k * w1:(k + 1) * w1]) > peak * 0.05)
+        print("channel %d peak %.1f rms %.1f sounding %.1f from %.1f to %.1f clipped %d loud %d" % (
+            c, dbfs(peak), dbfs(rms), (b - a + 1) * 1000.0 / rate, a * 1000.0 / rate, b * 1000.0 / rate, clipped, loud))
         m, w = segment_spectrum(seg, rate)
         for hz, db, mark in peaks(m, rate, w)[:12]:
             print("pitch %d %.2f %.1f%s" % (c, hz, db, " " + mark if mark else ""))

@@ -32,8 +32,9 @@
 #      run ends `halt`; no `refused:` line; the summary line's counters
 #      (`bad status` 0, `control requests (0 bad)`).
 #   S2 tone: dspprobe's answers are user/sound/dspprobe.expect byte for
-#      byte; dsptone's lines are user/sound/dsptone-tone.expect; the
-#      capture holds 1500 ms of sound within 40 ms, channel 0's
+#      byte; dsptone's lines are user/sound/dsptone-tone.expect (Linux's
+#      own lines for the same runs); the capture is loud for 1500 ms
+#      within 40 ms (QEMU 8.2 writes silence between streams, 11.1 not), channel 0's
 #      strongest pitch 440 Hz and channel 1's 660 Hz within 0.2%, and
 #      1000 Hz on both; nothing clipped.
 #   S3 ramp: the first 96000 frames after the leading silence are the
@@ -221,6 +222,7 @@ for leg in $legs; do
             else
                 echo "no capture" > "$base.pcm.txt"
             fi
+            u=
             case $s in
             tone)
                 why=
@@ -237,7 +239,7 @@ out = []
 ch = {}
 for w in lines:
     if w[:1] == ["channel"] and len(w) > 6:
-        ch[int(w[1])] = {"sounding": float(w[7]), "clipped": int(w[13]), "pitches": []}
+        ch[int(w[1])] = {"sounding": float(w[15]), "clipped": int(w[13]), "pitches": []}
     if w[:1] == ["pitch"]:
         ch[int(w[1])]["pitches"].append(float(w[2]))
 for c, want in ((0, 440.0), (1, 660.0)):
@@ -249,7 +251,7 @@ for c, want in ((0, 440.0), (1, 660.0)):
     if not any(abs(p - 1000) < 2 for p in ch[c]["pitches"]):
         out.append("channel %d has no 1000 Hz" % c)
     if abs(ch[c]["sounding"] - 1500) > 40:
-        out.append("channel %d sounds %.1f ms, not 1500" % (c, ch[c]["sounding"]))
+        out.append("channel %d loud %.1f ms, not 1500" % (c, ch[c]["sounding"]))
     if ch[c]["clipped"]:
         out.append("channel %d clipped %d" % (c, ch[c]["clipped"]))
 print("; ".join(out))
@@ -315,7 +317,7 @@ PY
             nonblock)
                 why=
                 grep -q 'dsptone: EAGAIN answered while the queue was full' "$norm" || why+=" no EAGAIN;"
-                ms=$(awk '/^channel 0 /{print $8}' "$base.pcm.txt")
+                ms=$(awk '/^channel 0 /{print $16}' "$base.pcm.txt")
                 python3 -c "import sys; sys.exit(0 if abs(float('${ms:-0}') - 1000) <= 40 else 1)" || why+=" sounds ${ms:-0} ms, not 1000;"
                 [ -z "$why" ] && say "PASS S6 $id: EAGAIN while full, ${ms} ms played" || bad "S6 $id:$why"
                 ;;
