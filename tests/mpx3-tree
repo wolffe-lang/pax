@@ -1,0 +1,418 @@
+#!/usr/bin/env bash
+# tests/mpx3-tree — px27: the writable file tree. Two things run on PAX
+# and on Linux and are compared byte for byte:
+#
+#   - tree (user/elf/tree.c, tools/mkprobes), one static glibc program,
+#     the first program on PAX and pid 1 on Linux with its root a tmpfs:
+#     what `open` makes and refuses, O_APPEND from two descriptors and
+#     two processes, holes and truncation, a file unlinked while open, a
+#     working directory removed, `rename` (what it replaces, what it
+#     refuses, a directory moved with a process inside), a directory's
+#     size and link count and a reading of it while it changes, long
+#     names, the errnos, which times move, the copies in the kernel;
+#     then, as `tree soak`, 10,000 rounds of create, write, rename,
+#     unlink and a fill to ENOSPC and back; and `tree speed`, 16 MiB
+#     written and read back;
+#   - a typed session (user/console/shell-tree.keys) in pelt with
+#     boreutils' `mkdir`, `rmdir`, `rm`, `mv`, `cp`, `cat >`, `>>`, `ls
+#     -l` and `stat` at user/boreutils.pin (bu21): a tree made, files
+#     written from the keyboard, copied, moved, listed, a file of the
+#     initramfs appended to, the tree removed, and `rm -rf /` refused.
+#
+#   tests/mpx3-tree [--images DIR | --no-boot | --only build | --only linux --images DIR]
+#                   [--pelt DIR] [--bore DIR]
+#                   [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# **Nothing under test runs on a host.** The Linux side of every session
+# is tools/linux-tree: a throwaway container with no network and
+# nothing of the host mounted but a staging directory under the build
+# directory, the programs' root a tmpfs inside it. `--only build` makes
+# the programs and the images and stops (on a host whose libc the
+# programs must not be built with, that step runs in a container, and
+# `--only linux --images DIR` then runs the Linux side from the host).
+#
+# Images, per tier: tree-probes, tree-soak, tree-speed (/bin/tree and
+# /etc/pax-run) and tree-shell (pelt, boreutils' seventeen, /etc as
+# tests/mpx3-shell's), one kernel, kmain_console. Sessions: probes,
+# soak, speed, shell-tree (COM1), shell-tree-ps2 (the PS/2 keyboard;
+# its reference is shell-tree's). Assertions, per tier, firmware and
+# session:
+#   T0 build: kmain_console built; every program static; the images
+#      built (digests printed); the Linux side ran every session in its
+#      container.
+#   T1 the output, differential: every line the session wrote on PAX
+#      (the kernel's own `user: …` lines left out) is byte-identical to
+#      what it wrote on Linux, and the exit status is Linux's. Two
+#      things are compared by rule, not by value: a line that starts
+#      with `~` (what depends on the host: megabytes that fit, a time
+#      in milliseconds, what PAX refuses by name) is left out; and in
+#      `ls -l`, the date of a file made in the session (`Mon DD HH:MM`,
+#      the form `ls` gives a recent file) is masked on both sides —
+#      a date from 1970, the initramfs's, is compared as it stands, so
+#      a clock that is wrong on PAX shows.
+#   T2 probes: what PAX refuses by name is exactly its `~refused` line
+#      (link and symlink -EPERM; chmod, chown, utimensat -EOPNOTSUPP;
+#      O_SYNC -EINVAL; O_TMPFILE -EOPNOTSUPP; RENAME_NOREPLACE -EINVAL),
+#      each with its `refused:` line, and the kernel counted them.
+#   T3 -ENOSYS only for set_robust_list (273) and rseq (334); no
+#      `refused:` line but T2's; nobody killed.
+#   T4 everything given back: the frames line shows as many frames free
+#      after init's end as before the first program, and the tree's line
+#      as many frames and inodes held as when it was made — but for the
+#      frames the inode table grew by (they hold the most inodes there
+#      were at once and are never given back; the line counts them),
+#      and for the shell session, which leaves one frame: the page of
+#      /etc/motd it appended to.
+#   T5 soak: the kernel's census lines, one for every 2500th file
+#      removed (`user: tree pid 1 tree: <n> files removed since boot;
+#      frames held <h>, inodes <i>, frames free <f>`), four of them
+#      and flat; at least one `tree: full:` line, and on each the tree
+#      was at its cap or the machine at the reserve; the program's
+#      break did not move (T1's line).
+#   T6 the shell session, on Linux: when it was over the root held
+#      exactly the names it started with (the session removed what it
+#      made; `rm -rf /` removed nothing). T1 holds PAX to the same
+#      transcript, and T4 to the same inodes.
+#   T7 speed: 16 MiB written and read back and eight more passes over
+#      it (T1), and the times the program measured (10 ms steps on PAX).
+#   T8 the end: `PAX: init … ended with status <s>; nothing left to
+#      run`, `halt`, and qemu-halt holds the machine halted.
+# The probes session of the first leg runs first, and the suite stops
+# at its first failure: `stopped early` (a planted break fails fast).
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 only= peltdir= boredir=
+usage="usage: tests/mpx3-tree [--images DIR | --no-boot | --only build | --only linux --images DIR] [--pelt DIR] [--bore DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --pelt)     peltdir=$2; shift 2 ;;
+        --bore)     boredir=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+[ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
+need readelf python3
+
+BORE="cat echo env false head ls readlink sleep stat tail true wc mkdir rmdir rm mv cp"
+SESSIONS="probes soak speed shell-tree shell-tree-ps2"
+LINUX_SESSIONS="probes soak speed shell-tree"
+image_of() { case $1 in shell-tree*) echo shell ;; *) echo "$1" ;; esac; }
+init_of() { case $1 in shell-tree*) echo pelt ;; *) echo tree ;; esac; }
+args_of() { case $1 in soak|speed) echo "$1" ;; *) echo ;; esac; }
+kbd_of() { case $1 in *-ps2) echo ps2 ;; *) echo serial ;; esac; }
+linux_of() { case $1 in shell-tree-ps2) echo shell-tree ;; *) echo "$1" ;; esac; }
+mem_of() { case $1 in shell-tree*) echo 512M ;; *) echo 256M ;; esac; }
+KEYS=$PAX_ROOT/user/console/shell-tree.keys
+SHELL_MOTD='PAX. Kernel: wolf. Shell: wolf. Tools: wolf. Nothing here existed last year.'
+PROMPT='$ '
+REFUSED='~refused: link -1, symlink -1, chmod -95, chown -95, utimensat -95, O_SYNC -22, O_TMPFILE -95, RENAME_NOREPLACE -22'
+REFUSALS='syscall 257: refused: an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE), -22|syscall 257: refused: an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE), -95|syscall 280: refused: a change of mode, owner or times (the tree keeps what a file was made with), -95|syscall 316: refused: a renameat2 flag (RENAME_NOREPLACE, RENAME_EXCHANGE, RENAME_WHITEOUT), -22|syscall 86: refused: a hard link, a symbolic link or a device node (the tree makes none), -1|syscall 88: refused: a hard link, a symbolic link or a device node (the tree makes none), -1|syscall 90: refused: a change of mode, owner or times (the tree keeps what a file was made with), -95|syscall 92: refused: a change of mode, owner or times (the tree keeps what a file was made with), -95'
+
+work=$PAX_BUILD/mpx3-tree
+runs=$PAX_BUILD/mpx3-tree-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+# A transcript with the date of every file made in the session masked
+# (`ls -l`'s `Mon DD HH:MM`; a date with a year is left as it is).
+mask() {
+    sed -E 's/^([-d][-rwxsStT]{9} +[0-9]+ root root +[0-9]+) [A-Z][a-z]{2} +[0-9]+ +[0-9]{2}:[0-9]{2} /\1 DATE /' "$1"
+}
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+# The Linux side of every session, each in its own throwaway container.
+linux_side() { # dir -> reasons on stdout
+    local s p i a size
+    mkdir -p "$1/linux"
+    for s in $LINUX_SESSIONS; do
+        p=$(image_of "$s") i=$(init_of "$s") a=$(args_of "$s")
+        keys=$1/none.keys; [ "$i" = pelt ] && keys=$KEYS
+        size=64m; [ "$i" = pelt ] && size=512m
+        # shellcheck disable=SC2086
+        if "$PAX_ROOT/tools/linux-tree" --root "$1/$p/root" --keys "$keys" --prompt "$PROMPT" --argv0 "/bin/$i" --size "$size" \
+            "$1/linux/$s.tty" -- "/bin/$i" $a; then
+            say "  linux $s: $(wc -c < "$1/linux/$s.tty" | tr -d ' ') bytes, status $(cat "$1/linux/$s.tty.rc"), $(wc -l < "$1/linux/$s.tty.after" | tr -d ' ') names left"
+        else
+            printf ' tools/linux-tree %s;' "$s"
+        fi
+    done
+}
+
+if [ "$only" = linux ]; then
+    why=$(linux_side "$images")
+    [ -z "$why" ] && say "PASS T0 (linux): the Linux side ran every session, each in a throwaway container" || bad "T0 (linux):$why"
+    exit "$fail"
+fi
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/bin" "$work/shell/root/bin" "$work/shell/root/etc"
+    why=
+    sh=$work/shell/root
+    "$PAX_ROOT/tools/mkprobes" "$work/bin" > "$work/probes.txt" || why+=" tools/mkprobes;"
+    sed 's/^/  program: /' "$work/probes.txt" >&2
+    if [ -n "$peltdir" ]; then
+        cp "$peltdir/pelt" "$sh/bin/pelt" || why+=" no $peltdir/pelt;"
+        say "pelt from $peltdir"
+    elif "$PAX_ROOT/tools/mkpelt" "$work/peltbin" > "$work/pelt.txt"; then
+        cp "$work/peltbin/pelt" "$sh/bin/pelt"
+    else
+        why+=" tools/mkpelt;"
+    fi
+    if [ -z "$boredir" ]; then
+        # shellcheck disable=SC2086
+        "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
+        boredir=$work/bore
+    else
+        say "boreutils from $boredir"
+    fi
+    for u in $BORE; do
+        cp "$boredir/$u" "$sh/bin/$u" || why+=" no $boredir/$u;"
+    done
+    printf '%s\n' "$SHELL_MOTD" > "$sh/etc/motd"
+    printf 'root:x:0:0:root:/:/bin/pelt\n' > "$sh/etc/passwd"
+    printf 'root:x:0:\n' > "$sh/etc/group"
+    "$PAX_ROOT/tools/mkzone" "$sh/etc/localtime" > "$work/zone.txt" || why+=" tools/mkzone;"
+    echo /bin/pelt > "$sh/etc/pax-run"
+    : > "$work/none.keys"
+    for s in probes soak speed; do
+        r=$work/$s/root
+        mkdir -p "$r/bin" "$r/etc"
+        cp "$work/bin/tree" "$r/bin/tree" || why+=" no tree;"
+        a=$(args_of "$s")
+        echo "/bin/tree${a:+ $a}" > "$r/etc/pax-run"
+    done
+    for f in "$sh"/bin/* "$work/bin/tree"; do
+        r=$(static_ok "$f") || why+=" $r;"
+        say "  program: ${f#"$work"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+    done
+    for p in probes soak speed shell; do
+        pairs=()
+        r=$work/$p/root
+        for f in $(cd "$r" && find . -type f | sort); do
+            f=${f#./}
+            mode=644; [ -x "$r/$f" ] && mode=755
+            pairs+=("/$f=$r/$f:$mode")
+        done
+        if "$PAX_ROOT/tools/mkinitramfs" "$work/$p.cpio" "${pairs[@]}" > "$work/$p.initramfs.txt"; then
+            sed "s/^/  initramfs $p: /" "$work/$p.initramfs.txt" >&2
+        else
+            why+=" tools/mkinitramfs $p;"
+        fi
+    done
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            for p in probes soak speed shell; do
+                "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                    --add "$work/$p.cpio" initramfs.cpio "$elf" "$work/$tier/tree-$p.iso" >/dev/null \
+                    || why+=" $tier tree-$p: mkimage;"
+                say "built $tier tree-$p: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/tree-$p.iso"), initramfs $(sha256_of "$work/$p.cpio")"
+            done
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    if [ "$only" = build ]; then
+        [ -z "$why" ] && say "PASS T0 (build): kmain_console built ($tiers), every program static, four images a tier" || bad "T0 (build):$why"
+        exit "$fail"
+    fi
+    if [ "$(uname -s)" != Linux ]; then
+        why+=" the Linux side needs Linux (this is $(uname -s)): build on Linux, boot here with --images;"
+    else
+        why+=$(linux_side "$work")
+    fi
+    [ -z "$why" ] && say "PASS T0: kmain_console built ($tiers), every program static, four images a tier, Linux ran $(echo $LINUX_SESSIONS | wc -w | tr -d ' ') sessions, each in a throwaway container" || bad "T0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx3-tree build (T0): PASS (no boot: --no-boot)" || say "mpx3-tree build: FAIL"
+        exit "$fail"
+    fi
+fi
+lx=$images/linux
+[ -d "$lx" ] || die "no $lx (build first, and run the Linux side)"
+
+record() { # tier leg session status
+    ran=$((ran + 1))
+    printf '%s kmain_console %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" \
+        "$(sha256_of "$iso")" >> "$runs"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+stopped=
+for leg in $legs; do
+    [ -z "$stopped" ] || break
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        [ -z "$stopped" ] || break
+        for s in $SESSIONS; do
+            p=$(image_of "$s") i=$(init_of "$s") kb=$(kbd_of "$s") ls=$(linux_of "$s")
+            id="$tier $leg $s"
+            before=$fail
+            log=$PAX_BUILD/mpx3-tree-$tier-$leg-$s.serial.log
+            elf=$images/$tier/kmain_console.elf iso=$images/$tier/tree-$p.iso
+            rm -f "$log" "$log.verdict" "$log.typed"
+            if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+                for t in T1 T3 T4 T8; do bad "$t $id: no image"; done
+                continue
+            fi
+            typing=()
+            [ "$i" != pelt ] || typing=(--type "$KEYS" --prompt "$PROMPT" --keyboard "$kb")
+            hrc=0
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 300 --qemu -m --qemu "$(mem_of "$s")" \
+                --elf "$elf" --marker 'halt' ${typing[@]+"${typing[@]}"} "$iso" >"$log.verdict" 2>&1 || hrc=$?
+            record "$tier" "$leg" "$s" "$hrc"
+            norm=$log.norm; serial_norm "$log" > "$norm"
+
+            # T1: the session against Linux's.
+            why=
+            out=$PAX_BUILD/mpx3-tree-$tier-$leg-$s.session
+            awk '/^user: exec pid 1 / { if (!on) { on = 1; next } } on && /^user: [^ ]+ pid 1 (exit_group|exit) [0-9]+ after / { exit }
+                 on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$norm" > "$out"
+            tr -d '\r' < "$lx/$ls.tty" > "$out.linux"
+            [ -z "$(tail -c 1 "$out.linux")" ] || printf '\n' >> "$out.linux"
+            grep -v '^~' "$out" | mask /dev/stdin > "$out.cmp"
+            grep -v '^~' "$out.linux" | mask /dev/stdin > "$out.linux.cmp"
+            if ! cmp -s "$out.linux.cmp" "$out.cmp"; then
+                why+=" the session differs from Linux's: $(diff "$out.linux.cmp" "$out.cmp" | head -n 14 | cut -c1-600 | tr '\n' '|');"
+            fi
+            pst=$(sed -n -E "s/^user: [^ ]+ pid 1 (exit_group|exit) ([0-9]+) after .*/\\2/p" "$norm" | head -n 1)
+            lst=$(cat "$lx/$ls.tty.rc" 2>/dev/null)
+            [ "$pst" = "$lst" ] || why+=" exit '$pst' on PAX, '$lst' on Linux;"
+            [ "$(wc -l < "$out.cmp" | tr -d ' ')" -gt 1 ] || why+=" fewer than two lines;"
+            [ -z "$why" ] && say "PASS T1 $id: $(wc -l < "$out.cmp" | tr -d ' ') lines byte-identical to Linux's ($(sha256_of "$out.cmp" | cut -c1-12)…; $(grep -c ' DATE ' "$out.cmp") dates compared by rule), exit $pst" || bad "T1 $id:$why"
+
+            # T2: what PAX refuses by name, counted.
+            rf=$(grep ': refused: ' "$norm" | sed -E 's/^.*user: [^ ]+ pid [0-9]+ //' | LC_ALL=C sort | paste -sd'|' -)
+            tl=$(grep -m1 '^tree: frames ' "$norm")
+            if [ "$s" = probes ]; then
+                why=
+                g=$(grep -m1 '^~refused' "$out")
+                [ "$g" = "$REFUSED" ] || why+=" '$g';"
+                [ "$rf" = "$REFUSALS" ] || why+=" refusal lines '$rf';"
+                rn=$(printf '%s\n' "$tl" | sed -n -E 's/.*, refusals ([0-9]+)$/\1/p')
+                [ "$rn" = 8 ] || why+=" the kernel counted '$rn' refusals, not 8 ('$tl');"
+                [ -z "$why" ] && say "PASS T2 $id: $g; 8 refusal lines, 8 counted (Linux here: $(grep -m1 '^~refused' "$out.linux"))" || bad "T2 $id:$why"
+            fi
+
+            # T3: what PAX lacks; nobody killed.
+            why=
+            ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
+            [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
+            if [ "$s" != probes ]; then
+                [ -z "$rf" ] || why+=" refusals '$rf';"
+            fi
+            kl=$(grep -c 'user: [^ ]* pid [0-9]* killed: ' "$norm")
+            [ "$kl" = 0 ] || why+=" $kl killed: lines ($(grep -m1 ' killed: ' "$norm" | cut -c1-120));"
+            [ -z "$why" ] && say "PASS T3 $id: -ENOSYS only for 273 and 334; nobody killed" || bad "T3 $id:$why"
+
+            # T4: every frame and inode back.
+            why=
+            fl=$(grep -m1 '^user: frames free ' "$norm")
+            set -- $(printf '%s\n' "$fl" | sed -n -E 's/^user: frames free ([0-9]+) before, [0-9]+ with 1 processes, ([0-9]+) after$/\1 \2/p')
+            fb=${1:-} fa=${2:-}
+            set -- $(printf '%s\n' "$tl" | sed -n -E "s/^tree: frames ([0-9]+) \\(([0-9]+) when made\\), ([0-9]+) \\(([0-9]+)\\) of them the inode table's, inodes ([0-9]+) \\(([0-9]+)\\), cap ([0-9]+), refusals [0-9]+\$/\\1 \\2 \\3 \\4 \\5 \\6/p")
+            th=${1:-} tb=${2:-} tt=${3:-} ttb=${4:-} ti=${5:-} tib=${6:-}
+            left=0; [ "$i" != pelt ] || left=1 # the page of /etc/motd the session appended to
+            if [ -z "$fb" ] || [ -z "$th" ]; then
+                why+=" no frames line or no tree line ('$fl' / '$tl');"
+            else
+                grew=$((tt - ttb)) # the inode table's frames are never given back
+                [ $((fb - fa)) = $((left + grew)) ] || why+=" $((fb - fa)) frames not back, not $left and the inode table's $grew ('$fl');"
+                [ $((th - tb)) = $((left + grew)) ] || why+=" the tree holds $((th - tb)) frames more than when made, not $left and the inode table's $grew ('$tl');"
+                [ "$ti" = "$tib" ] || why+=" the tree has $ti inodes, $tib when made;"
+            fi
+            [ -z "$why" ] && say "PASS T4 $id: $fl; $tl" || bad "T4 $id:$why"
+
+            # T5: the soak's census and the fill.
+            if [ "$s" = soak ]; then
+                why=
+                cl=$(grep -c '^user: tree pid 1 tree: [0-9]* files removed since boot' "$norm")
+                [ "$cl" = 4 ] || why+=" $cl census lines, not 4;"
+                cu=$(sed -n -E 's/^user: tree pid 1 tree: [0-9]+ files removed since boot; (frames held [0-9]+, inodes [0-9]+, frames free [0-9]+)$/\1/p' "$norm" | sort -u)
+                [ "$(printf '%s\n' "$cu" | grep -c .)" = 1 ] || why+=" the census is not flat: $(printf '%s' "$cu" | tr '\n' '|');"
+                nf=0 okf=1
+                while read -r h c f rsv; do
+                    nf=$((nf + 1))
+                    [ "$h" -ge "$c" ] || [ "$f" -le "$rsv" ] || okf=0
+                done < <(sed -n -E 's/^user: tree pid 1 tree: full: frames held ([0-9]+) of ([0-9]+), frames free ([0-9]+), reserve ([0-9]+)$/\1 \2 \3 \4/p' "$norm")
+                [ "$nf" -ge 1 ] || why+=" no 'tree: full:' line;"
+                [ "$okf" = 1 ] || why+=" a 'tree: full:' line with the tree below its cap and the machine above the reserve;"
+                [ -z "$why" ] && say "PASS T5 $id: $cl census lines, all '$cu'; $nf full lines ($(grep -m1 'tree: full:' "$norm" | sed 's/^.*tree: full: //')); $(grep -m1 '^~fill' "$out")" || bad "T5 $id:$why"
+            fi
+
+            # T6: the tree intact, on Linux.
+            if [ "$s" = shell-tree ]; then
+                want=$( (cd "$images/shell/root" 2>/dev/null && find . -mindepth 1 | LC_ALL=C sort) )
+                if [ -z "$want" ]; then
+                    say "PASS T6 $id: (the shell's tree is not on this host; the build host compared it)"
+                elif [ "$(cat "$lx/shell-tree.tty.after")" = "$want" ]; then
+                    say "PASS T6 $id: after the session Linux's root holds the $(printf '%s\n' "$want" | wc -l | tr -d ' ') names it started with: rm -rf / removed nothing, the session removed what it made"
+                else
+                    bad "T6 $id: the root on Linux after the session: $(diff <(printf '%s\n' "$want") "$lx/shell-tree.tty.after" | head -n 8 | tr '\n' '|')"
+                fi
+            fi
+
+            # T7: the speed.
+            if [ "$s" = speed ]; then
+                sp=$(grep -m1 '^~speed' "$out")
+                printf '%s\n' "$sp" | grep -Eq '^~speed: 16 MiB first written in [0-9]+ ms, read in [0-9]+ ms; 128 MiB rewritten in [0-9]+ ms, read in [0-9]+ ms$' \
+                    && say "PASS T7 $id: 16 MiB: $sp (accel $(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null); Linux here: $(grep -m1 '^~speed' "$out.linux"))" \
+                    || bad "T7 $id: no speed line ('$sp')"
+            fi
+
+            # T8
+            why=
+            grep -qx "PAX: init /bin/$i ended with status $lst; nothing left to run" "$norm" \
+                || why+=" no 'PAX: init /bin/$i ended with status $lst' ($(grep -m1 '^PAX: init ' "$norm"));"
+            [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+            [ -z "$why" ] && say "PASS T8 $id: init ended, status $lst; $(tail -n 1 "$log.verdict")" || bad "T8 $id:$why"
+
+            if [ "$s" = probes ] && [ "$before" = 0 ] && [ "$fail" != 0 ]; then
+                stopped="$id"
+                say "FAIL stopped early: the probes failed on $id; the later boots are not run"
+                break
+            fi
+        done
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx3-tree: PASS" || say "mpx3-tree: FAIL"
+exit "$fail"
