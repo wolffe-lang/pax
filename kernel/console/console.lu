@@ -49,6 +49,8 @@
 //! controlling terminal (kernel/signal's `tty`). Linux raises it for
 //! the terminal's foreground process group only; a shell that makes no
 //! process groups, as pelt makes none, sees the same on both.
+//! Every such key is also counted (px28, `signal_keys`), for
+//! kmain_session's closing lines.
 //!
 //! Honoured: ICRNL, INLCR and IGNCR on input; ICANON; ECHO, ECHOE,
 //! ECHOK, ECHOKE, ECHOCTL and ECHONL; VERASE, VKILL, VEOF, VEOL and
@@ -140,6 +142,7 @@ const C_DROPPED: u64 = 20 // bytes dropped on a full line
 const C_READS: u64 = 21 // reads answered
 const C_WAITS: u64 = 22 // reads that waited
 const C_SIGNALS: u64 = 23 // px26: the signals keys have raised and nobody has taken (bit n - 1)
+const C_SIG_KEYS: u64 = 24 // px28: keys that raised a signal, since boot
 
 const RING: u64 = 4096
 const LINE_MAX: u64 = 4095 // bytes before the newline
@@ -394,6 +397,7 @@ fn input(b0: u64) {
                 echo(b)
             }
             put_sv(C_SIGNALS, sv(C_SIGNALS) | (1 << (sig - 1)))
+            put_sv(C_SIG_KEYS, sv(C_SIG_KEYS) + 1)
             return
         }
     }
@@ -465,6 +469,13 @@ pub fn take_signals() -> u64 {
         put_sv(C_SIGNALS, 0)
     }
     m
+}
+
+/// px28: how many keys have raised a signal since boot (Ctrl-C,
+/// Ctrl-\ and Ctrl-Z, through COM1 or the keyboard), whether or not
+/// a process was there to receive it.
+pub fn signal_keys() -> u64 {
+    sv(C_SIG_KEYS)
 }
 
 /// Whether a `read` would answer now (data, or a pending end of file,
