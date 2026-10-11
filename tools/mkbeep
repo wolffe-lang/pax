@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# mkbeep — build Ubuntu's `beep` from its own source package as a fully
+# static x86-64 Linux executable (px21a), for tests/mpx3-speaker.
+#
+#   tools/mkbeep OUTDIR
+#
+# The program is Ubuntu 24.04's beep 1.4.9-1.1ubuntu2: the upstream
+# tarball and Ubuntu's `debian/` tarball, the two files of its source
+# package, fetched from Launchpad's archive of it BY DIGEST (as
+# tools/fetch-limine fetches; refused on a mismatch), the package's one
+# patch applied, its own GNUmakefile run with gcc and one change to the
+# link: `-static`. Nothing in the source is edited, nothing is
+# installed.
+#
+# Why a build and not the package's binary: /usr/bin/beep is a PIE with
+# a PT_INTERP (it loads libc.so.6 through ld.so), and PAX loads static
+# ET_EXEC programs only (kernel/elf refuses the other two by name). So
+# what runs on PAX is the same program, linked statically, not the same
+# file. It is GPL-2+ (its COPYING); nothing of it is committed here.
+#
+# `OUTDIR/sums.txt` gets `beep <sha256> <bytes>`. Build on a baseline
+# x86-64 glibc (the CI runner's Ubuntu; an Ubuntu container on kasumi).
+# Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkbeep OUTDIR"
+out=$1
+VERSION=1.4.9-1.1ubuntu2
+ORIG=beep_1.4.9.orig.tar.gz
+ORIG_SHA256=3b6b03c29a8a9a9f84ace8aa68cd703d8e8a322cd27b04c0dfa62b9f32aba258
+DEBIAN=beep_1.4.9-1.1ubuntu2.debian.tar.xz
+DEBIAN_SHA256=6fe840cbe980417c7ae0b0f710ffcd467b735fbef1bab7eb7d96b4dfa4317172
+SOURCE=https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/beep/$VERSION
+need curl tar python3 git make gcc readelf
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-beep.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+for pair in "$ORIG:$ORIG_SHA256" "$DEBIAN:$DEBIAN_SHA256"; do
+    f=${pair%%:*}; want=${pair#*:}
+    curl -fsSL --retry 3 -o "$w/$f" "$SOURCE/$f" || die "cannot fetch $SOURCE/$f"
+    got=$(sha256_of "$w/$f")
+    [ "$got" = "$want" ] || die "digest mismatch for $f: pinned $want, got $got"
+done
+tar -xzf "$w/$ORIG" -C "$w"
+src=$w/beep-1.4.9
+[ -d "$src" ] || die "the tarball holds no beep-1.4.9/"
+# The debian/ tarball is xz: python3's tarfile reads it where no xz is installed.
+python3 -c 'import sys, tarfile; tarfile.open(sys.argv[1]).extractall(sys.argv[2])' "$w/$DEBIAN" "$src"
+while read -r p; do
+    case $p in ''|'#'*) continue ;; esac
+    (cd "$src" && git apply -p1 "debian/patches/$p") || die "debian/patches/$p does not apply"
+    say "applied debian/patches/$p"
+done < "$src/debian/patches/series"
+# The package's own build (debian/rules: COMPILER_gcc, LINKER_gcc), gcc
+# only, linked -static.
+(cd "$src" && make COMPILER_gcc=gcc LINKER_gcc=gcc COMPILER_clang=no LDFLAGS=-static beep >&2) \
+    || die "make beep"
+cp "$src/beep" "$out/beep"
+readelf -hW "$out/beep" | grep -Eq 'Type: +EXEC' || die "beep is not ET_EXEC"
+! readelf -lW "$out/beep" | grep -q INTERP || die "beep has a PT_INTERP (not static)"
+printf '%s %s %s\n' beep "$(sha256_of "$out/beep")" "$(wc -c < "$out/beep" | tr -d ' ')" | tee "$out/sums.txt"
