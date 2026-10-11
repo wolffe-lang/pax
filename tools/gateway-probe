@@ -3,6 +3,7 @@
 # echo on this host, asked in frames, with no guest (px21).
 #
 #   tools/gateway-probe [ADDRESS…]
+#   tools/gateway-probe --dns NAME
 #
 # Starts $PAX_QEMU (default qemu-system-x86_64) with `-machine none`, a
 # `user` netdev and a `socket,udp=` netdev joined by a hub, and plays a
@@ -20,11 +21,21 @@
 # Whether an outside address answers is reported, never held: it is the
 # host's policy. Exit 0 on PASS, 1 on FAIL, 2 when QEMU does not start.
 #
+# --dns NAME (px22) asks QEMU's DNS server instead: an ARP request for
+# 10.0.2.3, then one RFC 1035 query (NAME's A records, class IN,
+# recursion desired) over UDP from 10.0.2.15 port 40053 to 10.0.2.3
+# port 53, as user/net/resolve asks it. QEMU hands the query to this
+# host's own resolver, so the answer is the host's. Last line:
+# `gateway-probe: dns NAME rcode=<r> addresses=<a,b,…>` (sorted; `-`
+# for none) or `gateway-probe: dns NAME none` when nothing came in 6 s
+# — what tests/mpx4-udp holds PAX's own answer to. Exit 0 either way.
+#
 # Written from QEMU's documentation of `-netdev user`, `-netdev socket`
 # and `-netdev hubport`, and the RFCs tools/paxnet.py names. No network
 # stack's source.
 import os
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -55,10 +66,71 @@ def main(outside):
         if q.poll() is not None:
             print("gateway-probe: QEMU did not stay up: %s" % q.stderr.read().decode().strip())
             return 2
+        if outside[:1] == ["--dns"] and len(outside) == 2:
+            return dns(peer, qport, outside[1])
         return probe(peer, qport, outside)
     finally:
         q.kill()
         q.wait()
+
+
+def dns(peer, qport, name):
+    def tx(f):
+        peer.sendto(px.pad60(f), ("127.0.0.1", qport))
+
+    def rx(wait, want):
+        end = time.time() + wait
+        while time.time() < end:
+            peer.settimeout(max(end - time.time(), 0.01))
+            try:
+                f = peer.recvfrom(4096)[0]
+            except socket.timeout:
+                break
+            if want(f):
+                return f
+        return None
+
+    tx(px.arp(px.BCAST, px.PAX_MAC, 1, px.PAX_MAC, px.PAX_IP, px.ZERO6, px.DNS_IP))
+    a = rx(2.0, lambda f: f[12:14] == b"\x08\x06" and f[28:32] == px.DNS_IP)
+    if a is None:
+        print("gateway-probe: no ARP reply for 10.0.2.3 in 2 s")
+        print("gateway-probe: dns %s none" % name)
+        return 0
+    mac = a[22:28]
+    print("gateway-probe: 10.0.2.3 is at %s" % mac.hex(":"))
+    q = struct.pack(">HHHHHH", 0x5058, 0x0100, 1, 0, 0, 0)
+    for label in name.split("."):
+        q += bytes([len(label)]) + label.encode("ascii")
+    q += b"\x00\x00\x01\x00\x01"
+    got = None
+    for attempt in range(2):
+        tx(px.frame(mac, px.PAX_MAC, px.ipv4(px.PAX_IP, px.DNS_IP, 17, px.udp(40053, 53, q, px.PAX_IP, px.DNS_IP), ident=attempt)))
+        got = rx(3.0, lambda f: f[12:14] == b"\x08\x00" and len(f) > 42 and f[23] == 17 and px.judge_ip(f)[0] == "udp"
+                 and px.udp_fields(f)[:2] == (53, 40053))
+        if got is not None:
+            break
+    if got is None:
+        print("gateway-probe: dns %s none" % name)
+        return 0
+    m = px.udp_fields(got)[2]
+    if len(m) < len(q) or m[:2] != q[:2] or not m[2] & 0x80 or m[12:len(q)] != q[12:]:
+        print("gateway-probe: %d bytes from 10.0.2.3 that do not answer the question: %s" % (len(m), m[:48].hex()))
+        print("gateway-probe: dns %s none" % name)
+        return 0
+    found, o = [], len(q)
+    for _ in range(px.be16(m, 6)):
+        while o < len(m) and m[o] and m[o] & 0xc0 != 0xc0:
+            o += 1 + m[o]
+        o += 2 if o < len(m) and m[o] else 1
+        if o + 10 > len(m):
+            break
+        kind, klass, rd = px.be16(m, o), px.be16(m, o + 2), px.be16(m, o + 8)
+        o += 10
+        if kind == 1 and klass == 1 and rd == 4:
+            found.append(m[o:o + 4])
+        o += rd
+    print("gateway-probe: dns %s rcode=%d addresses=%s" % (name, m[3] & 15, ",".join(px.dotted(a) for a in sorted(found)) or "-"))
+    return 0
 
 
 def probe(peer, qport, outside):
