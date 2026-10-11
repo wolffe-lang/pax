@@ -1,4 +1,4 @@
-# auferstehung-end: the reduction (px29)
+# auferstehung and auferstehung-end: the reduction (px29)
 
 Work: Gustav Mahler, Symphony No. 2 in C minor, fifth movement (finale).
 Source: the full score's first edition, Leipzig: Friedrich Hofmeister,
@@ -45,3 +45,43 @@ cut.
 - Everything outside 48 bars 1-8 and 51-end is not in the tune and was
   not verified to this standard (pp. 196-203 were read for the sung
   lines during the lane, pp. 203 bar 1 to 208 not at all).
+
+## auferstehung (the span), added after the cut
+
+Read the same way from printed pp. 196-201 (images 0198-0203), then
+48 bars 1-8 and 51 to the end as in the cut. One slot a beat (or the
+written note when a voice holds), the voices sounding in it as a chord
+of at most four pitches, duplicates dropped. 179 slots, 58 of them
+chords, 4580 tones at 20 ms, 228.0 s, 5981 bytes.
+
+| span | page | carried | dropped |
+|---|---|---|---|
+| 43 bars 6-7, "Be-rei-te" (5 flats) | 196 | chorus tenors and basses: Db3 Ab3 Db4 F4 | orchestra |
+| "dich! Bereite dich zu leben!" (Langsamer) | 197 | chorus S/A, T, B as chords; the last chord Eb3 Db4 Eb4 G4 | the alto solo doubling the S/A, the fermata as a half rest |
+| 44 (Mit Aufschwung, 2/2, 4 flats) | 197 | alto solo "O Schmerz! ... Dir bin ich ent-" | three opening bars of orchestra (rests), all accompaniment |
+| 45 | 198 | soprano solo "O Tod! ... -rungen"; the alto's last two notes under its first bar | the alto solo's answering line from bar 5 |
+| Vorwarts. Drangend | 199 | soprano solo "in heissem Liebesstreben ... gedrungen", the chorus basses' "Mit" | the alto solo's line, the orchestra |
+| 46 (Langsam, 3 flats) | 200 | the soloists' "-drungen!" (S, A over the basses), the chorus's canon: basses, then altos, then tenors, overlaps as chords | strings (doubling), the second tenors' rests |
+| Etwas drangend | 201 | S, A, T1, T2, B where read | T1 after beat 1 of bar 2 (doubtful pitches), T1's last quarter of bar 6 |
+| p. 202 to 48 | 202-203 | **cut** (not read to this standard) | all |
+| 48 bars 1-8 | 204 | sopranos | as the cut |
+| 48 bar 9 to 50 | 204-208 | **cut** | all |
+| 51 to the end | 209 | as the cut | as the cut |
+
+Tempi (the arranger's reading of the words): Langsamer quarter 50;
+44 and 45 half 50 (`tempo 100`), as the score's "half = the quarter
+before"; 46 half 40; "Etwas drangend" half 46; 48 quarter 60; 51
+half 40.
+
+Doubts in the span (read, but not certain; carried as read):
+
+- p. 197 bar 1 "dich!": one tenor head seen (F4); the second head, if
+  any, not read. "rei-" the tenor's F4 not seen (Db4 alone carried).
+- p. 197 "le-ben!": one natural sign before the S/A stack, read as on
+  the G (G natural) with the E flat kept; the basses' Eb3 (no sign).
+- p. 198 "er-" read Db5 by eye; the locating script said Bb4. "-rungen,"
+  F5 then E natural 5 (the signs read as naturals at 12x).
+- p. 200 alto "Flu-" Eb4 by eye at 7x; the script said F4.
+- p. 201 alto "-geln," B natural 3 (the head not found by the script;
+  by eye and by the tenors' same figure); alto "run-" C5 (script);
+  the sopranos' "Mit" C4 (script; the head was below the crop at 7x).
