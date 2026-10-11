@@ -1,0 +1,986 @@
+//! orch — px32: the part format's synthesiser (`notes/px32-format.md`).
+//!
+//! A `Score` (parts.lu) sounds through px30's `/dev/dsp` at the device's
+//! rate, every timbre computed here from arithmetic: no sample, no sound
+//! font, no floating point. The methods, each from the textbook
+//! descriptions, none from any synthesiser's source:
+//!
+//! - **a sine table** (2048 entries) by rotating a fixed-point vector
+//!   through a quarter turn and mirroring it;
+//! - **additive wavetables**: one cycle of 2048 samples summed from sine
+//!   partials with a timbre's harmonic amplitudes, per timbre, per octave
+//!   band (no partial above 19 kHz: band-limited), in a soft and a bright
+//!   spectrum; a voice reads both at a 32-bit phase accumulator and mixes
+//!   them by its level (an ff horn is brassier, not only louder). The
+//!   sung timbres' spectra come from fixed vowel formants ("ah");
+//! - **inharmonic partials** for struck instruments (timpani modes, the
+//!   bell's hum, prime, tierce, quint and nominal), each with its own
+//!   exponential decay;
+//! - **noise** from a linear-congruential generator through one-pole
+//!   filters (cymbal, tam-tam's crash, the drums' thump);
+//! - **envelopes**: attack, decay to sustain, release, per timbre,
+//!   evaluated once a block of 64 frames and ramped frame by frame;
+//!   the part's level (dynamics, hairpins: parts.lu's level curve) and
+//!   accents the same way, so a held note swells smoothly;
+//! - **vibrato** (a slow wobble of the phase increment), **two detuned
+//!   oscillators** for sections (strings, choir), **tremolo** as bow
+//!   strokes re-articulating the level, **rolls** as re-strikes;
+//! - **constant-power panning** per part, and **a look-ahead limiter**:
+//!   a block is mixed before the one ahead of it is written, so the
+//!   gain is already down when a loud block arrives, and nothing clips.
+
+const TLEN: int = 2048
+const BLK: int = 64
+const MAXV: int = 32
+const NP: int = 8
+const MASK32: int = 4294967295
+const BANDS: int = 8
+const NTIMBRES: int = 17
+/// The limiter's ceiling and the mix's master gain (/65536).
+const CEIL: int = 30000
+const MASTER: int = 36000
+
+/// What a part-format performance did.
+struct OrchDone {
+    frames: int,
+    clamped: int,
+    stolen: int,
+    most: int,
+    limited: int, // blocks the limiter turned down
+    setup_ms: int,
+    err: int,
+}
+
+/// The sine table: TLEN entries, peak 32767.
+fn sine_table() -> List[i32] {
+    let q = TLEN / 4
+    var quarter = List[int]()
+    var x: int = 1073741824
+    var y: int = 0
+    var i = 0
+    while i <= q {
+        (mut quarter).push((y * 32767 + 536870912) / 1073741824)
+        let nx = (x * 1073736771 - y * 3294193) / 1073741824
+        let ny = (x * 3294193 + y * 1073736771) / 1073741824
+        x = nx
+        y = ny
+        i += 1
+    }
+    quarter[q] = 32767
+    var out = List[i32]()
+    i = 0
+    while i < TLEN {
+        let k = i % (TLEN / 2)
+        let v = if k <= q { quarter[k] } else { quarter[TLEN / 2 - k] }
+        (mut out).push((if i < TLEN / 2 { v } else { 0 - v }) as i32)
+        i += 1
+    }
+    out
+}
+
+/// A soft low-pass on harmonic `h`: 1000 at the bottom, half at `hc10`
+/// tenths of a harmonic, falling as the `n`th power past it.
+fn roll(h: int, hc10: int, n: int) -> int {
+    var a: int = 1
+    var b: int = 1
+    var i = 0
+    while i < n {
+        a = a * hc10
+        b = b * h * 10
+        i += 1
+    }
+    1000 * a / (a + b)
+}
+
+/// The vowel "ah"'s formants at `f` hertz (soft or bright), 0-1000-ish.
+fn formant(f: int, bright: int) -> int {
+    let a3 = if bright == 1 { 450 } else { 220 }
+    let a4 = if bright == 1 { 250 } else { 80 }
+    30 + peak(f, 750, 90, 1000) + peak(f, 1150, 110, 700) + peak(f, 2800, 170, a3) + peak(f, 3500, 250, a4)
+}
+
+fn peak(f: int, c: int, bw: int, a: int) -> int {
+    let d = f - c
+    a * bw * bw / (bw * bw + d * d)
+}
+
+/// Harmonic `h`'s amplitude (0-1000ish) in timbre `t`'s spectrum,
+/// `bright` 0 or 1, for a band whose notes sit near `fc` hertz.
+fn harmonic(t: int, bright: int, h: int, fc: int) -> int {
+    let saw = 1000 / h
+    if t == 0 {
+        // strings: a bowed string's sawtooth, darker when soft
+        return saw * roll(h, if bright == 1 { 140 } else { 45 }, 2) / 1000
+    }
+    if t == 1 {
+        return saw * roll(h, if bright == 1 { 70 } else { 25 }, 4) / 1000
+    }
+    if t == 2 {
+        return saw * roll(h, if bright == 1 { 150 } else { 45 }, 4) / 1000
+    }
+    if t == 3 {
+        return saw * roll(h, if bright == 1 { 110 } else { 32 }, 4) / 1000
+    }
+    if t == 4 {
+        // clarinet: the odd harmonics
+        let odd = if h % 2 == 1 { saw } else { saw / 12 }
+        return odd * roll(h, if bright == 1 { 110 } else { 55 }, 2) / 1000
+    }
+    if t == 5 {
+        // oboe: a weak fundamental, strong second to fifth
+        let o = if h == 1 { 450 } else { if h <= 5 { 900 - h * 60 } else { 2400 / h } }
+        return o * roll(h, if bright == 1 { 140 } else { 70 }, 2) / 1000
+    }
+    if t == 6 {
+        // flute: nearly a sine
+        return match h {
+            1 => 1000,
+            2 => if bright == 1 { 300 } else { 180 },
+            3 => 90,
+            4 => 35,
+            _ => 8 / h,
+        }
+    }
+    if t == 7 {
+        // organ manuals: principals at 8', 4', 2-2/3' and 2'
+        var a = pipe(h)
+        if h % 2 == 0 {
+            a += pipe(h / 2) * 7 / 10
+        }
+        if h % 3 == 0 {
+            a += pipe(h / 3) * 4 / 10
+        }
+        if h % 4 == 0 {
+            a += pipe(h / 4) * 5 / 10
+        }
+        return a
+    }
+    if t == 8 {
+        // pedal: the voice sounds an octave down: 16' plus 8' and 4'
+        var a = pipe(h)
+        if h % 2 == 0 {
+            a += pipe(h / 2) * 9 / 10
+        }
+        if h % 4 == 0 {
+            a += pipe(h / 4) * 4 / 10
+        }
+        return a
+    }
+    if t == 9 || t == 10 {
+        // sung "ah": a glottal source falling as 1/h, through the formants
+        return saw * formant(h * fc, bright) / 1000
+    }
+    // harp: plucked
+    saw * roll(h, if bright == 1 { 60 } else { 30 }, 2) / 1000
+}
+
+/// An open organ pipe's harmonic `k`: a principal, mostly the first few.
+fn pipe(k: int) -> int {
+    1000 / k * roll(k, 40, 2) / 1000
+}
+
+/// The top of octave band `b` in hertz (b 0 ends at C2's neighbourhood).
+fn band_top(b: int) -> int {
+    65 * pow2(b + 1)
+}
+
+/// Which band a frequency (centi-hertz) reads.
+fn band_of(chz: int) -> int {
+    var b = 0
+    while b < BANDS - 1 && chz >= band_top(b) * 100 {
+        b += 1
+    }
+    b
+}
+
+/// Build timbre `t`'s band `b`, brightness `br` into `pool`; its offset.
+fn build_table(mut pool: List[i32], sine: List[i32], t: int, b: int, br: int) -> int {
+    let top = band_top(b)
+    var hmax = 19000 / top
+    if hmax > 64 {
+        hmax = 64
+    }
+    if hmax < 1 {
+        hmax = 1
+    }
+    let fc = top * 3 / 4
+    var amps = List[int]()
+    var h = 1
+    while h <= hmax {
+        (mut amps).push(harmonic(t, br, h, fc))
+        h += 1
+    }
+    var raw = List[int]()
+    var sq: int = 0
+    var i = 0
+    while i < TLEN {
+        var s: int = 0
+        var k = 0
+        while k < hmax {
+            let a = amps[k]
+            if a != 0 {
+                s += a * (sine[(i * (k + 1)) % TLEN] as int)
+            }
+            k += 1
+        }
+        (mut raw).push(s)
+        sq += s / 1000 * (s / 1000)
+        i += 1
+    }
+    // the same loudness (RMS 6000) whatever the spectrum, so a voice's
+    // brightness changes its colour, not its level
+    var rms = isqrt(sq / TLEN) * 1000
+    if rms < 1 {
+        rms = 1
+    }
+    let at = pool.len
+    for s in raw {
+        var v = s / 1000 * 6000 / (rms / 1000)
+        if v > 32767 {
+            v = 32767
+        }
+        if v < -32767 {
+            v = -32767
+        }
+        (mut pool).push(v as i32)
+    }
+    at
+}
+
+/// The integer square root (Newton's method).
+fn isqrt(n: int) -> int {
+    if n < 2 {
+        return n
+    }
+    var x = n
+    var y = (x + 1) / 2
+    while y < x {
+        x = y
+        y = (x + n / x) / 2
+    }
+    x
+}
+
+/// A timbre's numbers: kind (0 table, 1 struck partials), attack,
+/// decay and release in ms, sustain (/1000), brightness (0 none, 1 some,
+/// 2 strong), detune of the second oscillator in cents (0 none), vibrato
+/// depth (/10000 of the frequency), gain (/1000).
+fn tparams(t: int) -> List[int] {
+    match t {
+        0 => [0, 70, 300, 850, 180, 1, 7, 30, 900],
+        1 => [0, 45, 200, 800, 130, 2, 0, 0, 1000],
+        2 => [0, 18, 150, 780, 90, 2, 0, 6, 800],
+        3 => [0, 32, 200, 800, 110, 2, 0, 0, 950],
+        4 => [0, 30, 150, 850, 80, 1, 0, 0, 800],
+        5 => [0, 25, 150, 850, 80, 1, 0, 20, 700],
+        6 => [0, 40, 150, 850, 90, 0, 0, 30, 800],
+        7 => [0, 25, 50, 1000, 60, 0, 0, 0, 650],
+        8 => [0, 35, 50, 1000, 80, 0, 0, 0, 900],
+        9 => [0, 100, 300, 850, 250, 1, 9, 40, 900],
+        10 => [0, 60, 250, 850, 180, 1, 0, 70, 1000],
+        11 => [0, 3, 1400, 0, 300, 1, 0, 0, 900],
+        _ => [1, 2, 0, 0, 120, 0, 0, 0, 1000],
+    }
+}
+
+/// Whether a timbre rings on after its note's length (struck, plucked).
+fn struck(t: int) -> bool {
+    t >= 11
+}
+
+/// The level step (x128, 0 ppp .. 896 fff, past it an accent) as an
+/// amplitude /4096: about 4 dB a step.
+fn amp_of(lv: int) -> int {
+    let amps: List[int] = [163, 258, 410, 649, 1029, 1630, 2584, 4096, 6492, 6492]
+    var l = lv
+    if l < 0 {
+        l = 0
+    }
+    if l > 1151 {
+        l = 1151
+    }
+    let k = l / 128
+    let f = l % 128
+    amps[k] + (amps[k + 1] - amps[k]) * f / 128
+}
+
+/// Part `p`'s level at `us` from cursor `c`: (level, the new cursor).
+fn level_at(sc: Score, p: int, c: int, us: int) -> (int, int) {
+    let first = sc.l_first[p]
+    let n = sc.l_count[p]
+    var k = c
+    while k + 1 < n && sc.l_us[first + k + 1] <= us {
+        k += 1
+    }
+    let a = first + k
+    if k + 1 < n {
+        let t0 = sc.l_us[a]
+        let t1 = sc.l_us[a + 1]
+        if t1 > t0 && us > t0 {
+            return (sc.l_lv[a] + (sc.l_lv[a + 1] - sc.l_lv[a]) * (us - t0) / (t1 - t0), k)
+        }
+    }
+    (sc.l_lv[a], k)
+}
+
+/// The next value of the noise generator (a 31-bit LCG).
+fn lcg(s: int) -> int {
+    (s * 1103515245 + 12345) % 2147483648
+}
+
+/// One block of a wavetable voice into the mix: tables `ta` (soft) and
+/// `tb` (bright) mixed by `bw` (/1024), one oscillator or two (`inc2`
+/// > 0), gain ramped `g0` to `g1` (/65536), from frame `skip`. The
+/// phases after the block.
+fn blk_table(pool: List[i32], ta: int, tb: int, bw: int, ph0: int, inc: int, ph20: int, inc2: int, g0: int, g1: int, skip: int, pl: int, pr: int, mut ml: List[int], mut mr: List[int]) -> (int, int) {
+    var ph = ph0
+    var ph2 = ph20
+    var i = skip
+    let dg = (g1 - g0) / BLK
+    var g = g0 + dg * skip
+    let two = inc2 > 0
+    while i < BLK {
+        let k = ph >> 21
+        let a = pool[ta + k] as int
+        var s = a + ((pool[tb + k] as int) - a) * bw / 1024
+        ph = (ph + inc) & MASK32
+        if two {
+            let k2 = ph2 >> 21
+            let a2 = pool[ta + k2] as int
+            s = (s * 3 + (a2 + ((pool[tb + k2] as int) - a2) * bw / 1024) * 2) / 5
+            ph2 = (ph2 + inc2) & MASK32
+        }
+        let v = s * g / 65536
+        ml[i] = ml[i] + v * pl / 32768
+        mr[i] = mr[i] + v * pr / 32768
+        g += dg
+        i += 1
+    }
+    (ph, ph2)
+}
+
+/// One block of a struck voice: `np` sine partials from `base` at their
+/// own amplitudes (/65536, stepped per block) plus filtered noise at
+/// `namp` (filter 1 low-pass, 2 high-pass), gain ramped `g0`..`g1`.
+/// (seed, low-pass state) after it; the partials' phases are updated.
+fn blk_struck(sine: List[i32], mut pph: List[int], pinc: List[int], pamp: List[int], base: int, np: int, namp: int, filt: int, fa: int, seed0: int, lp0: int, g0: int, g1: int, skip: int, pl: int, pr: int, mut ml: List[int], mut mr: List[int]) -> (int, int) {
+    var seed = seed0
+    var lp = lp0
+    var i = skip
+    let dg = (g1 - g0) / BLK
+    var g = g0 + dg * skip
+    while i < BLK {
+        var s: int = 0
+        var k = 0
+        while k < np {
+            let at = base + k
+            let ph = pph[at]
+            s += (sine[ph >> 21] as int) * pamp[at] / 131072
+            pph[at] = (ph + pinc[at]) & MASK32
+            k += 1
+        }
+        if namp > 0 {
+            seed = lcg(seed)
+            let x = (seed / 32768) - 32768
+            lp = lp + (x - lp) * fa / 65536
+            let nz = if filt == 2 { x - lp } else { lp }
+            s += nz * namp / 65536
+        }
+        let v = s * g / 65536
+        ml[i] = ml[i] + v * pl / 32768
+        mr[i] = mr[i] + v * pr / 32768
+        g += dg
+        i += 1
+    }
+    (seed, lp)
+}
+
+/// Frames to microseconds and back at `rate`.
+fn us_of(f: int, rate: int) -> int {
+    f * 1000000 / rate
+}
+
+fn frame_of(us: int, rate: int) -> int {
+    (us * rate + 500000) / 1000000
+}
+
+/// Play score `sc`: `sink` 0 the device (kd.S), 1 standard output (raw
+/// S16_LE frames, two channels), 2 nowhere (the cost); `rate` and
+/// `channels` the device's.
+fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
+    let t_setup = time_now_ms()
+    let sine = sine_table()
+    let np = sc.names.len
+    // the tables of every timbre the score uses
+    var pool = List[i32]()
+    var tab = List[int]() // [timbre][band][bright] -> offset, or -1
+    var i = 0
+    while i < NTIMBRES * BANDS * 2 {
+        (mut tab).push(-1)
+        i += 1
+    }
+    var p = 0
+    while p < np {
+        let t = sc.timbres[p]
+        if tparams(t)[0] == 0 && tab[t * BANDS * 2] < 0 {
+            var b = 0
+            while b < BANDS {
+                let off0 = build_table(mut pool, sine, t, b, 0)
+                tab[(t * BANDS + b) * 2] = off0
+                tab[(t * BANDS + b) * 2 + 1] = if tparams(t)[5] > 0 { build_table(mut pool, sine, t, b, 1) } else { off0 }
+                b += 1
+            }
+        }
+        p += 1
+    }
+    // the parts' pans (constant power) and per-timbre numbers
+    var pan_l = List[int]()
+    var pan_r = List[int]()
+    var prm = List[int]() // each part's timbre numbers, 9 a part
+    p = 0
+    while p < np {
+        let idx = (sc.pans[p] + 100) * (TLEN / 4) / 200
+        (mut pan_l).push((sine[TLEN / 4 - idx] as int) * 46341 / 32768)
+        (mut pan_r).push((sine[idx] as int) * 46341 / 32768)
+        for x in tparams(sc.timbres[p]) {
+            (mut prm).push(x)
+        }
+        p += 1
+    }
+    let setup_ms = time_now_ms() - t_setup
+
+    // the voices
+    var v_on = List[bool]()
+    var v_part = List[int]()
+    var v_note = List[int]()
+    var v_t = List[int]() // frames since its start
+    var v_end = List[int]() // frame (since its start) the release begins
+    var v_stage = List[int]() // 0 attack, 1 decay/sustain, 2 release
+    var v_env = List[int]() // /65536
+    var v_g = List[int]() // the gain at the last block's end
+    var v_ta = List[int]()
+    var v_tb = List[int]()
+    var v_inc = List[int]()
+    var v_ph = List[int]()
+    var v_inc2 = List[int]()
+    var v_ph2 = List[int]()
+    var v_lfo = List[int]()
+    var v_trem = List[int]() // frames to the next stroke, or -1
+    var v_stroke = List[int]() // the stroke's length in frames
+    var v_seed = List[int]()
+    var v_lp = List[int]()
+    var v_namp = List[int]()
+    var v_ndec = List[int]()
+    var v_np = List[int]()
+    var v_fast = List[bool]()
+    var pph = List[int]()
+    var pinc = List[int]()
+    var pamp = List[int]()
+    var pdec = List[int]()
+    var ptop = List[int]() // a partial's ceiling as it blooms (tam-tam)
+    var p0amp = List[int]() // a partial's strike amplitude (for rolls)
+    i = 0
+    while i < MAXV {
+        (mut v_on).push(false)
+        (mut v_part).push(0)
+        (mut v_note).push(0)
+        (mut v_t).push(0)
+        (mut v_end).push(0)
+        (mut v_stage).push(0)
+        (mut v_env).push(0)
+        (mut v_g).push(0)
+        (mut v_ta).push(0)
+        (mut v_tb).push(0)
+        (mut v_inc).push(0)
+        (mut v_ph).push(0)
+        (mut v_inc2).push(0)
+        (mut v_ph2).push(0)
+        (mut v_lfo).push(0)
+        (mut v_trem).push(-1)
+        (mut v_stroke).push(0)
+        (mut v_seed).push(12345 + i * 7919)
+        (mut v_lp).push(0)
+        (mut v_namp).push(0)
+        (mut v_ndec).push(0)
+        (mut v_np).push(0)
+        (mut v_fast).push(false)
+        var k = 0
+        while k < NP {
+            (mut pph).push(0)
+            (mut pinc).push(0)
+            (mut pamp).push(0)
+            (mut pdec).push(65536)
+            (mut ptop).push(0)
+            (mut p0amp).push(0)
+            k += 1
+        }
+        i += 1
+    }
+    var pc = List[int]() // each part's next note
+    var lc = List[int]() // each part's level cursor
+    var plv = List[int]() // each part's level at the block's end
+    p = 0
+    while p < np {
+        (mut pc).push(0)
+        (mut lc).push(0)
+        (mut plv).push(sc.l_lv[sc.l_first[p]])
+        p += 1
+    }
+    var ml = List[int]()
+    var mr = List[int]()
+    var hl = List[int]() // the block held back for the limiter
+    var hr = List[int]()
+    i = 0
+    while i < BLK {
+        (mut ml).push(0)
+        (mut mr).push(0)
+        (mut hl).push(0)
+        (mut hr).push(0)
+        i += 1
+    }
+    var held = false
+    var held_req: int = 65536
+    var lim_g: int = 65536
+    var frames: int = 0
+    var clamped: int = 0
+    var stolen: int = 0
+    var most: int = 0
+    var limited: int = 0
+    var obuf = List[byte]()
+    var ofd = -1
+    if sink == 1 {
+        ofd = fs_open_mode("/dev/stdout", 2) else -1
+    }
+    let end_f = frame_of(sc.total, rate)
+    let tail_f = end_f + rate * 8
+    var bf: int = 0 // the block's first frame
+    var running = true
+    while running {
+        let bend = bf + BLK
+        let t_us = us_of(bend, rate)
+        // the parts' levels at the block's end
+        p = 0
+        while p < np {
+            let (lv, c) = level_at(sc, p, lc[p], t_us)
+            plv[p] = lv
+            lc[p] = c
+            p += 1
+        }
+        // notes that start in this block
+        p = 0
+        while p < np {
+            let first = sc.p_first[p]
+            while pc[p] < sc.p_count[p] && frame_of(sc.n_start[first + pc[p]], rate) < bend {
+                let n = first + pc[p]
+                pc[p] += 1
+                // a free voice, else the quietest releasing or struck one
+                var v = -1
+                var best: int = 1 << 40
+                var j = 0
+                while j < MAXV {
+                    if !v_on[j] {
+                        v = j
+                        break
+                    }
+                    let sv = v_env[j] + (if v_stage[j] == 2 || struck(sc.timbres[v_part[j]]) { 0 } else { 1 << 20 })
+                    if sv < best {
+                        best = sv
+                        v = j
+                    }
+                    j += 1
+                }
+                if v_on[v] {
+                    stolen += 1
+                }
+                let t = sc.timbres[p]
+                let pb = p * 9
+                let start = frame_of(sc.n_start[n], rate)
+                let legin = sc.n_marks[n] & M_LEGIN != 0
+                if legin {
+                    // the slurred-from note of this part gives way quickly
+                    j = 0
+                    while j < MAXV {
+                        if v_on[j] && j != v && v_part[j] == p && v_stage[j] == 2 {
+                            v_fast[j] = true
+                        }
+                        j += 1
+                    }
+                }
+                v_on[v] = true
+                v_part[v] = p
+                v_note[v] = n
+                v_t[v] = 0 - (start - bf) // negative: frames before it sounds
+                v_end[v] = frame_of(sc.n_end[n], rate) - start
+                v_fast[v] = false
+                v_lfo[v] = (v_seed[v] % 1000) * 4294967
+                var hz = sc.n_hz[n]
+                if t == 8 {
+                    hz = hz / 2
+                }
+                let inc = hz * (TWO32 / 100) / rate
+                v_inc[v] = inc
+                v_ph[v] = 0
+                v_ph2[v] = (v_seed[v] % 4096) * 1048576
+                v_inc2[v] = if prm[pb + 6] > 0 { inc + inc / 10000 * prm[pb + 6] * 578 / 100 } else { 0 }
+                if prm[pb + 0] == 0 {
+                    let bnd = band_of(hz)
+                    v_ta[v] = tab[(t * BANDS + bnd) * 2]
+                    v_tb[v] = tab[(t * BANDS + bnd) * 2 + 1]
+                    v_stage[v] = if legin { 1 } else { 0 }
+                    v_env[v] = if legin { prm[pb + 3] * 65536 / 1000 } else { 0 }
+                    v_np[v] = 0
+                    v_namp[v] = 0
+                } else {
+                    v_stage[v] = 1
+                    v_env[v] = 65536
+                    strike(mut pph, mut pinc, mut pamp, mut pdec, mut ptop, mut p0amp, v * NP, t, inc, rate)
+                    v_np[v] = if t == 15 { 0 } else { if t == 16 { 2 } else { if t == 14 { 8 } else { if t == 12 { 6 } else { 7 } } } }
+                    let (na, nd) = noise_of(t, rate)
+                    v_namp[v] = na
+                    v_ndec[v] = nd
+                    v_lp[v] = 0
+                }
+                v_g[v] = 0
+                let trem = sc.n_marks[n] & M_TREM != 0
+                v_stroke[v] = if struck(t) { rate / 16 } else { rate * 10 / 128 }
+                v_trem[v] = if trem { v_stroke[v] } else { -1 }
+            }
+            p += 1
+        }
+        // each voice's block
+        i = 0
+        while i < BLK {
+            ml[i] = 0
+            mr[i] = 0
+            i += 1
+        }
+        var active = 0
+        var v = 0
+        while v < MAXV {
+            if !v_on[v] {
+                v += 1
+                continue
+            }
+            active += 1
+            let p2 = v_part[v]
+            let t = sc.timbres[p2]
+            let pb = p2 * 9
+            let n = v_note[v]
+            var skip = 0
+            if v_t[v] < 0 {
+                skip = 0 - v_t[v]
+                v_t[v] = 0
+            }
+            let run = BLK - skip
+            let tt = v_t[v] + run // frames since its start at the block's end
+            // the envelope at the block's end
+            var env = v_env[v]
+            var st = v_stage[v]
+            if !struck(t) && st < 2 && tt >= v_end[v] {
+                st = 2
+            }
+            if v_fast[v] && st < 2 {
+                st = 2
+            }
+            if st == 0 {
+                let a = prm[pb + 1] * rate / 1000 + 1
+                env += 65536 * run / a
+                if env >= 65536 {
+                    env = 65536
+                    st = 1
+                }
+            } else if st == 1 {
+                let sus = prm[pb + 3] * 65536 / 1000
+                if prm[pb + 0] == 0 {
+                    let d = prm[pb + 2] * rate / 1000 + 1
+                    env = sus + (env - sus) * (d - run) / d
+                }
+            } else {
+                let r = (if v_fast[v] { 15 } else { prm[pb + 4] }) * rate / 1000 + 1
+                env = env * (r - run) / r
+            }
+            // a tremolo's stroke, a roll's strike
+            var trem = 65536
+            if v_trem[v] >= 0 && tt < v_end[v] {
+                var left = v_trem[v] - run
+                if left <= 0 {
+                    // the next stroke, a little early or late
+                    v_seed[v] = lcg(v_seed[v])
+                    let jit = v_stroke[v] * ((v_seed[v] / 65536) % 30 - 15) / 100
+                    left = v_stroke[v] + jit
+                    if prm[pb + 0] == 1 || t == 11 {
+                        restrike(mut ptop, p0amp, v * NP, v_np[v], v_seed[v])
+                        let (na0, _nd0) = noise_of(t, rate)
+                        v_namp[v] = na0 * 6 / 10
+                        if t == 11 {
+                            env = 65536 * 7 / 10
+                        }
+                    }
+                }
+                v_trem[v] = left
+                if prm[pb + 0] == 0 && t != 11 {
+                    // a bow stroke: strong at its start, easing off
+                    let x = left * 1024 / v_stroke[v]
+                    trem = 65536 * 45 / 100 + 65536 * 55 / 100 * x / 1024 * x / 1024
+                }
+            }
+            // the level: the part's, an accent's boost falling away
+            var lv = plv[p2]
+            let bus = sc.n_boost_us[n]
+            if bus > 0 {
+                let since = us_of(tt, rate)
+                if since < bus {
+                    lv += sc.n_boost[n] * (bus - since) / bus
+                }
+            }
+            let amp = amp_of(lv)
+            // vibrato, after the first quarter second
+            var inc = v_inc[v]
+            var inc2 = v_inc2[v]
+            if prm[pb + 7] > 0 && tt > rate / 4 {
+                v_lfo[v] = (v_lfo[v] + 5500 * (TWO32 / 100) / rate * run / 10) & MASK32
+                let w = (sine[v_lfo[v] >> 21] as int) * prm[pb + 7] / 32767
+                inc = inc + inc / 10000 * w
+                if inc2 > 0 {
+                    inc2 = inc2 - inc2 / 10000 * w / 2
+                }
+            }
+            var g1 = env / 16 * amp / 4096 * prm[pb + 8] / 1000 * 16
+            g1 = g1 / 256 * (trem / 256)
+            let g0 = v_g[v]
+            if prm[pb + 0] == 0 {
+                var bw = 0
+                if prm[pb + 5] == 2 {
+                    bw = lv * 1024 / 896
+                } else if prm[pb + 5] == 1 {
+                    bw = 200 + lv * 700 / 896
+                }
+                if prm[pb + 5] == 2 && st == 0 {
+                    bw = bw * (env / 64) / 1024
+                }
+                if bw > 1024 {
+                    bw = 1024
+                }
+                let (a, b) = blk_table(pool, v_ta[v], v_tb[v], bw, v_ph[v], inc, v_ph2[v], inc2, g0, g1, skip, pan_l[p2], pan_r[p2], mut ml, mut mr)
+                v_ph[v] = a
+                v_ph2[v] = b
+            } else {
+                let fa = if t == 15 { 30000 } else { if t == 14 { 9000 } else { 2600 } }
+                let (s2, l2) = blk_struck(sine, mut pph, pinc, pamp, v * NP, v_np[v], v_namp[v], if t == 15 { 2 } else { 1 }, fa, v_seed[v], v_lp[v], g0, g1, skip, pan_l[p2], pan_r[p2], mut ml, mut mr)
+                v_seed[v] = s2
+                v_lp[v] = l2
+                // the partials decay (the tam-tam's bloom first), the noise too
+                var k = 0
+                var loud = v_namp[v]
+                while k < v_np[v] {
+                    let at = v * NP + k
+                    ptop[at] = ptop[at] / 65536 * pdec[at] + ptop[at] % 65536 * pdec[at] / 65536
+                    if t == 14 {
+                        pamp[at] = pamp[at] + (ptop[at] - pamp[at]) * run / (rate * 2 / 5)
+                    } else {
+                        pamp[at] = ptop[at]
+                    }
+                    if pamp[at] > loud {
+                        loud = pamp[at]
+                    }
+                    k += 1
+                }
+                v_namp[v] = v_namp[v] / 65536 * v_ndec[v] + v_namp[v] % 65536 * v_ndec[v] / 65536
+                if loud < 40 && t != 14 || loud < 40 && tt > rate {
+                    env = 0
+                }
+            }
+            v_env[v] = env
+            v_stage[v] = st
+            v_g[v] = g1
+            v_t[v] = tt
+            if env < 24 && st != 0 && (st == 2 || prm[pb + 0] == 1 || prm[pb + 3] == 0) {
+                v_on[v] = false
+            }
+            v += 1
+        }
+        if active > most {
+            most = active
+        }
+        // the limiter: this block's need, then the held block written
+        var pk: int = 1
+        i = 0
+        while i < BLK {
+            let a = if ml[i] < 0 { 0 - ml[i] } else { ml[i] }
+            let b = if mr[i] < 0 { 0 - mr[i] } else { mr[i] }
+            if a > pk {
+                pk = a
+            }
+            if b > pk {
+                pk = b
+            }
+            i += 1
+        }
+        let loud = pk * MASTER / 65536
+        let req = if loud > CEIL { CEIL * 65536 / loud } else { 65536 }
+        if held {
+            var g_end = lim_g + 120
+            if g_end > held_req {
+                g_end = held_req
+            }
+            if g_end > req {
+                g_end = req
+            }
+            if g_end < 65536 || lim_g < 65536 {
+                limited += 1
+            }
+            let (perr, pcl) = put_block(hl, hr, lim_g, g_end, sink, channels, mut obuf, ofd)
+            if perr < 0 {
+                return OrchDone { frames: frames, clamped: clamped, stolen: stolen, most: most, limited: limited, setup_ms: setup_ms, err: perr }
+            }
+            clamped += pcl
+            frames += BLK
+            lim_g = g_end
+        }
+        i = 0
+        while i < BLK {
+            hl[i] = ml[i]
+            hr[i] = mr[i]
+            i += 1
+        }
+        held = true
+        held_req = req
+        bf = bend
+        if bf >= end_f {
+            var any = false
+            for o in v_on {
+                if o {
+                    any = true
+                }
+            }
+            if !any || bf >= tail_f {
+                running = false
+            }
+        }
+    }
+    var g_end = lim_g + 120
+    if g_end > held_req {
+        g_end = held_req
+    }
+    let (ferr, fcl) = put_block(hl, hr, lim_g, g_end, sink, channels, mut obuf, ofd)
+    clamped += fcl
+    frames += BLK
+    if sink == 1 && obuf.len > 0 {
+        fs_write_chunk(ofd, obuf) else |_| {
+            return OrchDone { frames: frames, clamped: clamped, stolen: stolen, most: most, limited: limited, setup_ms: setup_ms, err: -5 }
+        }
+    }
+    OrchDone { frames: frames, clamped: clamped, stolen: stolen, most: most, limited: limited, setup_ms: setup_ms, err: if ferr < 0 { ferr } else { 0 } }
+}
+
+/// Write one mixed block, its gain ramped `g0`..`g1` (/65536) after the
+/// master gain: (0 or -errno, samples clamped).
+fn put_block(l: List[int], r: List[int], g0: int, g1: int, sink: int, channels: int, mut obuf: List[byte], ofd: int) -> (int, int) {
+    var clamped = 0
+    var i = 0
+    while i < BLK {
+        let g = (g0 + (g1 - g0) * i / BLK) / 16 * (MASTER / 16)
+        var a = l[i] * (g / 65536) / 256
+        var b = r[i] * (g / 65536) / 256
+        if a > 32767 || a < -32768 {
+            a = if a > 0 { 32767 } else { -32768 }
+            clamped += 1
+        }
+        if b > 32767 || b < -32768 {
+            b = if b > 0 { 32767 } else { -32768 }
+            clamped += 1
+        }
+        if channels == 1 {
+            a = (a + b) / 2
+        }
+        if sink == 0 {
+            // # Safety: kd.S's buffer, one frame of 16-bit samples.
+            let e = unsafe { play_dsp_frame(a, b) }
+            if e < 0 {
+                return (e, clamped)
+            }
+        } else if sink == 1 {
+            let ua = if a < 0 { a + 65536 } else { a }
+            let ub = if b < 0 { b + 65536 } else { b }
+            (mut obuf).push((ua % 256) as byte)
+            (mut obuf).push((ua / 256) as byte)
+            (mut obuf).push((ub % 256) as byte)
+            (mut obuf).push((ub / 256) as byte)
+            if obuf.len >= 65536 {
+                fs_write_chunk(ofd, obuf) else |_| {
+                    return (-5, clamped)
+                }
+                obuf = List[byte]()
+            }
+        }
+        i += 1
+    }
+    (0, clamped)
+}
+
+/// A struck voice's partials at their strike: ratios to the note (or
+/// fixed hertz for the tam-tam and the drum), amplitudes, decays.
+fn strike(mut pph: List[int], mut pinc: List[int], mut pamp: List[int], mut pdec: List[int], mut ptop: List[int], mut p0amp: List[int], base: int, t: int, inc: int, rate: int) {
+    // ratio (/1000) or hertz, amplitude (/1000), decay to 1/e in ms
+    let spec: List[int] = match t {
+        // timpani: the membrane's modes, a strong principal
+        12 => [1000, 1000, 1700, 1504, 500, 1200, 1742, 350, 1000, 2000, 250, 800, 2245, 150, 600, 2494, 100, 500],
+        // bells: hum, prime, tierce, quint, nominal, upper partials
+        13 => [500, 600, 9000, 1000, 700, 6000, 1200, 500, 5000, 1500, 300, 4000, 2000, 1000, 4000, 3000, 300, 2500, 4000, 200, 1800],
+        // tam-tam: low inharmonic modes, in hertz
+        14 => [73, 700, 6000, 97, 900, 5500, 131, 800, 5000, 167, 600, 4500, 211, 500, 4000, 263, 400, 3500, 331, 300, 3000, 419, 250, 2500],
+        // bass drum: two low modes, in hertz
+        16 => [52, 1000, 700, 81, 500, 350],
+        _ => [],
+    }
+    let hertz = t == 14 || t == 16
+    var total: int = 1
+    var k = 0
+    while k * 3 < spec.len {
+        total += spec[k * 3 + 1]
+        k += 1
+    }
+    k = 0
+    while k * 3 < spec.len {
+        let at = base + k
+        let f = spec[k * 3]
+        pinc[at] = if hertz { f * (TWO32 / rate) } else { inc / 1000 * f }
+        pph[at] = 0
+        let a = spec[k * 3 + 1] * 98304 / total
+        p0amp[at] = a
+        ptop[at] = a
+        pamp[at] = if t == 14 { a / 8 } else { a }
+        let blocks = spec[k * 3 + 2] * rate / 1000 / BLK + 1
+        pdec[at] = 65536 - 65536 / blocks
+        k += 1
+    }
+}
+
+/// A roll's next strike: each partial back up to about two thirds of
+/// its first strike, varied by `seed`.
+fn restrike(mut ptop: List[int], p0amp: List[int], base: int, np: int, seed: int) {
+    var k = 0
+    while k < np {
+        let at = base + k
+        let a = p0amp[at] * (55 + seed / 4096 % 25) / 100
+        if ptop[at] < a {
+            ptop[at] = a
+        }
+        k += 1
+    }
+}
+
+/// A struck timbre's noise: (its amplitude at the strike /65536 of the
+/// generator's range, its per-block decay /65536).
+fn noise_of(t: int, rate: int) -> (int, int) {
+    let (a, ms) = match t {
+        12 => (9000, 35),
+        13 => (0, 1),
+        14 => (14000, 900),
+        15 => (52000, 1300),
+        16 => (30000, 120),
+        _ => (0, 1),
+    }
+    let blocks = ms * rate / 1000 / BLK + 1
+    (a, 65536 - 65536 / blocks)
+}
