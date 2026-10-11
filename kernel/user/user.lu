@@ -112,6 +112,11 @@
 //!   wait parks the thread as a pipe's read does, until a datagram or
 //!   the socket's receive timeout. `sendmsg` (46), `recvmsg` (47) and
 //!   `shutdown` (48) are not here.
+//! - bu20's boreutils (px26): `readlink` (89) and `readlinkat` answer
+//!   `/proc/self/exe`; `sendfile` (40), `splice` (275) and
+//!   `copy_file_range` (326) (kernel/files); CLOCK_REALTIME, `time` and
+//!   `gettimeofday` answer the date (kernel/rtc's reading at `start`
+//!   plus the ticks since), the other clocks the ticks.
 //! Every other number is -ENOSYS, logged once per program (`unknown`),
 //! among them `set_robust_list` (273) and `rseq` (334), which glibc
 //! tolerates (px09's hello asks `_sysctl` (156), which Linux answers
@@ -171,6 +176,7 @@ use netd
 use paging
 use panic
 use process
+use rtc
 use sched
 use serial
 use socket
@@ -233,6 +239,7 @@ const U_TICKS: u64 = 2
 const U_SMAP: u64 = 3
 const U_SMEP: u64 = 4
 const U_LAST_EXIT: u64 = 5 // px13: the last exit's status + 1 (0: none yet)
+const U_EPOCH: u64 = 6 // px26: CLOCK_REALTIME at tick 0, in seconds (kernel/rtc)
 
 // boot/isr.S's frame, as word indices.
 const W_R10: u64 = 5
@@ -336,6 +343,10 @@ pub fn start() {
         put_state(U_SMAP, smap)
         put_state(U_TICKS, 0)
     }
+    // px26: the wall clock, read once: the date now less the ticks so far.
+    let wall = rtc.read()
+    let up = timer.ticks() * NS_PER_TICK / NS_PER_SEC
+    put_state(U_EPOCH, if wall > up { wall - up } else { 0 })
 }
 
 fn bit(v: u64, b: u64) -> int {
@@ -685,6 +696,11 @@ const SYS_SETSOCKOPT: u64 = 54
 const SYS_GETSOCKOPT: u64 = 55
 const SYS_ACCEPT4: u64 = 288
 const SIGPIPE_STATUS: u64 = 13
+// px26: what bu20's boreutils ask.
+const SYS_SENDFILE: u64 = 40
+const SYS_READLINK: u64 = 89
+const SYS_SPLICE: u64 = 275
+const SYS_COPY_FILE_RANGE: u64 = 326
 
 const NEG_EPERM: u64 = 0xffffffffffffffff // -1
 const NEG_ESRCH: u64 = 0xfffffffffffffffd // -3
@@ -886,23 +902,37 @@ fn getrandom(buf: u64, len: u64) -> u64 {
     n
 }
 
-/// Nanoseconds since the timer started (CLOCK_MONOTONIC, and every
-/// clock: PAX has no wall clock yet, so CLOCK_REALTIME counts from the
-/// epoch at boot).
+/// Nanoseconds since the timer started (CLOCK_MONOTONIC and its
+/// kin: the tick count).
 fn now_ns() -> u64 {
     timer.ticks() * NS_PER_TICK
 }
 
-/// `clock_gettime(clock, tp)`: clocks 0-9, the same tick count for each.
+/// px26: nanoseconds since the epoch (CLOCK_REALTIME): the real-time
+/// clock's reading at boot (kernel/rtc, `start`) plus the ticks since.
+/// On a machine whose clock cannot be read it counts from the epoch.
+fn wall_ns() -> u64 {
+    state(U_EPOCH) * NS_PER_SEC + now_ns()
+}
+
+/// Whether clock `clk` is a wall clock: CLOCK_REALTIME (0),
+/// CLOCK_REALTIME_COARSE (5), CLOCK_REALTIME_ALARM (8) and CLOCK_TAI
+/// (11, answered as UTC: PAX keeps no leap-second offset).
+fn is_wall(clk: u64) -> bool {
+    clk == 0 || clk == 5 || clk == 8 || clk == 11
+}
+
+/// `clock_gettime(clock, tp)`: clocks 0-11; the wall clocks answer the
+/// date (px26), the others the tick count.
 fn clock_gettime(clk: u64, tp: u64) -> u64 {
-    if clk > 9 {
+    if clk > 11 {
         return NEG_EINVAL
     }
     let pml4 = paging.live()
     if !uaccess.writable(pml4, tp, 16) {
         return NEG_EFAULT
     }
-    let ns = now_ns()
+    let ns = if is_wall(clk) { wall_ns() } else { now_ns() }
     uaccess.put(pml4, tp, ns / NS_PER_SEC, 8)
     uaccess.put(pml4, tp + 8, ns % NS_PER_SEC, 8)
     0
@@ -910,9 +940,9 @@ fn clock_gettime(clk: u64, tp: u64) -> u64 {
 
 /// `time(tloc)` and `gettimeofday(tv, tz)` (px12: PAX has no vDSO, so
 /// glibc makes the calls Linux answers in user space; busybox's `ls`
-/// asks for the time): seconds since boot, as every clock here.
+/// asks for the time): the wall clock's seconds (px26).
 fn time(tloc: u64) -> u64 {
-    let sec = now_ns() / NS_PER_SEC
+    let sec = wall_ns() / NS_PER_SEC
     if tloc != 0 {
         let pml4 = paging.live()
         if !uaccess.writable(pml4, tloc, 8) {
@@ -929,7 +959,7 @@ fn gettimeofday(tv: u64, tz: u64) -> u64 {
         if !uaccess.writable(pml4, tv, 16) {
             return NEG_EFAULT
         }
-        let ns = now_ns()
+        let ns = wall_ns()
         uaccess.put(pml4, tv, ns / NS_PER_SEC, 8)
         uaccess.put(pml4, tv + 8, ns % NS_PER_SEC / 1000, 8)
     }
@@ -943,9 +973,10 @@ fn gettimeofday(tv: u64, tz: u64) -> u64 {
 }
 
 /// The tick a sleep of `req` (a user timespec) ends at, absolute when
-/// `abs`; 0 for a bad request (-EINVAL or -EFAULT's case, in `bad`).
+/// `abs` (px26: on the wall clock when `wall`); 0 for a bad request
+/// (-EINVAL or -EFAULT's case, in `bad`).
 /// Returns (wake tick, errno result or 0).
-fn sleep_until(req: u64, abs: bool) -> (u64, u64) {
+fn sleep_until(req: u64, abs: bool, wall: bool) -> (u64, u64) {
     let pml4 = paging.live()
     if !uaccess.readable(pml4, req, 16) {
         return (0, NEG_EFAULT)
@@ -962,6 +993,10 @@ fn sleep_until(req: u64, abs: bool) -> (u64, u64) {
     let now = now_ns()
     if !abs {
         target = target + now
+    } else if wall {
+        // px26: a date on the wall clock, as a count of ticks' worth.
+        let w = wall_ns()
+        target = if target > w { target - w + now } else { 0 }
     }
     if target <= now {
         return (0, 0)
@@ -1026,12 +1061,12 @@ pub fn syscall(f: u64) -> u64 {
         if nr == SYS_CLOCK_NANOSLEEP {
             req = a2
             abs = a1 & TIMER_ABSTIME != 0
-            if a0 > 9 {
+            if a0 > 11 {
                 put_word(f, W_RAX, NEG_EINVAL)
                 return f
             }
         }
-        let (wake, r) = sleep_until(req, abs)
+        let (wake, r) = sleep_until(req, abs, nr == SYS_CLOCK_NANOSLEEP && is_wall(a0))
         put_word(f, W_RAX, r)
         if wake == 0 {
             return f
@@ -1062,7 +1097,7 @@ pub fn syscall(f: u64) -> u64 {
         }
         return sched.block_pipe(f)
     }
-    if r == files.EPIPE_R && (nr == SYS_WRITE || (nr == SYS_SENDTO && a3 & MSG_NOSIGNAL == 0)) && process.sigpipe_kills() {
+    if r == files.EPIPE_R && (nr == SYS_WRITE || nr == SYS_SENDFILE || nr == SYS_SPLICE || (nr == SYS_SENDTO && a3 & MSG_NOSIGNAL == 0)) && process.sigpipe_kills() {
         // px17: SIGPIPE's default action ends the writer.
         who()
         // px23: a stream socket whose connection is over is the other
@@ -1103,7 +1138,7 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     let pml4 = paging.live()
     // The calls whose first argument is an int (a descriptor), read as
     // one; the others take r0 whole.
-    let a0 = if nr == SYS_READ || nr == SYS_WRITE || nr == SYS_PREAD64 || nr == SYS_OPENAT || nr == SYS_CLOSE || nr == SYS_LSEEK || nr == SYS_FSTAT || nr == SYS_NEWFSTATAT || nr == SYS_STATX || nr == SYS_GETDENTS64 || nr == SYS_IOCTL || nr == SYS_READLINKAT || nr == SYS_DUP || nr == SYS_DUP2 || nr == SYS_DUP3 || nr == SYS_FCNTL || nr == SYS_FCHDIR || nr == SYS_SENDTO || nr == SYS_RECVFROM || nr == SYS_SOCKET || nr == SYS_CONNECT || nr == SYS_ACCEPT || nr == SYS_BIND || nr == SYS_LISTEN || nr == SYS_GETSOCKNAME || nr == SYS_GETPEERNAME || nr == SYS_SETSOCKOPT || nr == SYS_GETSOCKOPT || nr == SYS_ACCEPT4 { int32(r0) } else { r0 }
+    let a0 = if nr == SYS_READ || nr == SYS_WRITE || nr == SYS_PREAD64 || nr == SYS_OPENAT || nr == SYS_CLOSE || nr == SYS_LSEEK || nr == SYS_FSTAT || nr == SYS_NEWFSTATAT || nr == SYS_STATX || nr == SYS_GETDENTS64 || nr == SYS_IOCTL || nr == SYS_READLINKAT || nr == SYS_DUP || nr == SYS_DUP2 || nr == SYS_DUP3 || nr == SYS_FCNTL || nr == SYS_FCHDIR || nr == SYS_SENDFILE || nr == SYS_SPLICE || nr == SYS_COPY_FILE_RANGE || nr == SYS_SENDTO || nr == SYS_RECVFROM || nr == SYS_SOCKET || nr == SYS_CONNECT || nr == SYS_ACCEPT || nr == SYS_BIND || nr == SYS_LISTEN || nr == SYS_GETSOCKNAME || nr == SYS_GETPEERNAME || nr == SYS_SETSOCKOPT || nr == SYS_GETSOCKOPT || nr == SYS_ACCEPT4 { int32(r0) } else { r0 }
     if nr == SYS_WRITE {
         return write(a0, a1, a2)
     }
@@ -1230,7 +1265,19 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
         return files.fchdir(a, a0)
     }
     if nr == SYS_READLINKAT {
-        return files.readlinkat(a, pml4, a0, a1)
+        return files.readlinkat(a, pml4, a0, a1, a2, a3)
+    }
+    if nr == SYS_READLINK {
+        return files.readlinkat(a, pml4, AT_FDCWD, a0, a1, a2) // px26
+    }
+    if nr == SYS_SENDFILE {
+        return files.sendfile(a, pml4, a0, int32(a1), a2, a3) // px26
+    }
+    if nr == SYS_SPLICE {
+        return files.splice(a, pml4, a0, a1, int32(a2), a3, a4, int32(a5)) // px26
+    }
+    if nr == SYS_COPY_FILE_RANGE {
+        return files.copy_file_range(a, a0, int32(a2)) // px26
     }
     if nr == SYS_BRK {
         return vm.brk(a, pml4, a0)
