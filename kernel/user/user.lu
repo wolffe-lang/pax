@@ -212,6 +212,7 @@ use sched
 use serial
 use signal
 use socket
+use sound
 use speaker
 use timer
 use tree
@@ -612,6 +613,11 @@ fn write(fd: u64, buf: u64, len: u64) -> u64 {
     }
     if t == 4 {
         return files.file_write(area(), paging.live(), fd, buf, len) // px27
+    }
+    if t == 5 {
+        // px30: /dev/dsp; a full queue answers WAIT (the call waits like
+        // a full pipe's writer and runs again) or -EAGAIN.
+        return sound.write(paging.live(), buf, len, files.nonblocking(area(), fd))
     }
     if t == 0 || len == 0 {
         return len
@@ -1362,6 +1368,11 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
         return files.openat(a, pml4, AT_FDCWD, a0, int32(a1), int32(a2))
     }
     if nr == SYS_CLOSE {
+        // px30: the last blocking close of /dev/dsp plays out what is
+        // queued first, as Linux's does: WAIT until the device is done.
+        if files.closes_dsp(a, a0) && sound.drain() == sound.WAIT {
+            return files.WAIT
+        }
         return files.close(a, a0)
     }
     if nr == SYS_LSEEK {
