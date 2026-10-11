@@ -1,0 +1,1296 @@
+//! tree — the writable file tree, in memory (px27).
+//!
+//! Written from man-pages `open(2)`, `write(2)`, `truncate(2)`,
+//! `mkdir(2)`, `rmdir(2)`, `unlink(2)`, `rename(2)`, `stat(2)`,
+//! `getdents64(2)`, `inode(7)`, `path_resolution(7)` and `tmpfs(5)`,
+//! POSIX.1-2024, and black-box runs on Linux's tmpfs: strace of
+//! boreutils' file changers, pelt and lobo (`notes/px27/straces/`) and a
+//! static C probe that prints what Linux answers (user/elf/tree.c). No
+//! Linux source; no other kernel's or file system's source.
+//!
+//! **Inodes.** A file or a directory is an inode: 16 words (128 bytes)
+//! in a table that grows a frame at a time, 32 to a frame, at most
+//! 16,384 (the table's one root frame holds 512 pointers). An inode is
+//! named by its index; kernel/files keeps the descriptors and the
+//! paths and asks here. Its words: the mode (0: a free record), the
+//! link count, the size, the holders (open files, working
+//! directories, and a removed directory's hold on its parent), the
+//! three times and the time it was made (nanoseconds since the epoch),
+//! where its bytes are, and for a directory its parent and how many
+//! entries it has. A freed inode goes on a list and is the next one
+//! made; the table's frames are never given back (at most 512).
+//!
+//! **A file's bytes** are 4096-byte frames under an index whose depth
+//! grows with the file: depth 0, the one frame alone (up to 4096
+//! bytes); depth 1, a frame of 512 pointers (2 MiB); depth 2, a frame
+//! of pointers to those (1 GiB, the largest file: a write past it is
+//! -EFBIG). A page never written has no frame and reads as zeros (the
+//! page of zeros made with the tree), as tmpfs keeps a hole.
+//! `cut` gives back every frame past a new size, an index frame with
+//! its last pointer, and zeroes the tail of the page that stays.
+//!
+//! **The initramfs under it.** `start` makes an inode for every
+//! archive entry: a directory a directory, a file an inode whose bytes
+//! are the archive's own, in place (`I_BACK`, `I_BACKLEN`), with no
+//! frame. A read comes from the archive where no frame has been
+//! written; the first write to a page copies that page into a frame; a
+//! truncation cuts how much of the archive the file still reads. The
+//! archive's pages are Limine's module and are never given back.
+//!
+//! **A directory** is a file of records, none across a page: the
+//! inode's index + 1 (0: a free record) in 4 bytes, the record's
+//! length and the name's in 2 each, the name. A new page is one free
+//! record; a name takes the first free record it fits and leaves the
+//! rest free; a removed name's record is free again and joins the free
+//! records after it. Records never move, so a position in a directory
+//! (a record's offset) stays good while the directory changes:
+//! `entry_at` answers the first live record at or after it, found from
+//! the page's start. A directory with no entry holds no frame.
+//!
+//! **The cap.** The tree holds at most half of the frames that were
+//! free when it was made (tmpfs's default is half of memory), and
+//! takes none when fewer than RESERVE would be left free: `grab`
+//! answers 0 and the caller answers -ENOSPC. Every frame it holds is
+//! counted (`held`), every inode (`live`).
+//!
+//! **Times** come from the wall clock kernel/user set at boot
+//! (boot/user.S's word 6) plus the ticks since: 10 ms steps.
+//!
+//! One CPU, and a system call runs with interrupts off from entry to
+//! return, so nothing here locks: a `rename` is every check, then the
+//! room for the new name, then the change, with no call between. No
+//! region, no heap.
+
+use frames
+use initramfs
+use paging
+use panic
+use timer
+
+extern "c" fn pax_tree_copy(dst: u64, src: u64, n: u64)
+extern "c" fn pax_tree_zero(dst: u64, n: u64)
+extern "c" let pax_tree_state: *u64
+extern "c" let pax_syscall_state: *u64
+
+const PAGE: u64 = 4096
+const PTRS: u64 = 512
+const IWORDS: u64 = 16
+const IPF: u64 = 32 // inodes a frame
+/// The most inodes there can be.
+pub const MAX_INODES: u64 = 16384
+/// Frames the tree never takes the machine below.
+pub const RESERVE: u64 = 2048
+/// The longest name (`NAME_MAX`).
+pub const NAME_MAX: u64 = 255
+/// The largest file: what two levels of index hold.
+pub const MAX_SIZE: u64 = 0x40000000
+/// No inode.
+pub const NONE: u64 = 0xffffffff
+const NS_PER_SEC: u64 = 1000000000
+const NS_PER_TICK: u64 = 10000151 // kernel/user's
+
+// pax_tree_state's words.
+const S_READY: u64 = 0
+const S_TABLE: u64 = 1 // the inode table's root frame
+const S_LIVE: u64 = 2 // inodes in use
+const S_HELD: u64 = 3 // frames held
+const S_CAP: u64 = 4 // the most it may hold
+const S_FREE: u64 = 5 // the free inodes' list: an index + 1, 0 none
+const S_NEXT: u64 = 6 // the first index never used
+const S_REFUSED: u64 = 7 // refusals by name, counted
+const S_ZERO: u64 = 8 // the page of zeros
+const S_STAMP: u64 = 9 // while the tree is made: the time every change is stamped with, + 1
+const S_BASE: u64 = 10 // frames held once the archive is in
+const S_BASE_LIVE: u64 = 11 // and inodes
+const S_UNLINKS: u64 = 12 // names of files removed since boot
+const S_CENSUS: u64 = 13 // the count the last census line was for
+const S_FULL: u64 = 14 // 0: there is room; 1: a frame was refused, not yet said; 2: said
+const S_ITABLE: u64 = 15 // frames of inodes (never given back)
+const S_BASE_ITABLE: u64 = 16 // and when the archive was in
+
+// An inode's words.
+const I_MODE: u64 = 0
+const I_NLINK: u64 = 1
+const I_SIZE: u64 = 2
+const I_REFS: u64 = 3
+const I_ATIME: u64 = 4
+const I_MTIME: u64 = 5
+const I_CTIME: u64 = 6
+const I_ROOT: u64 = 7 // the index's root frame (depth 0: the data frame); 0 none
+const I_DEPTH: u64 = 8
+const I_BLOCKS: u64 = 9 // data frames held
+const I_BACK: u64 = 10 // the archive's bytes (a kernel address); 0 none
+const I_BACKLEN: u64 = 11 // how many of them the file still reads
+const I_PARENT: u64 = 12 // a directory's parent
+const I_ENTRIES: u64 = 13 // a directory's entries; a file: its archive entry + 1
+const I_BTIME: u64 = 14
+const I_NEXT: u64 = 15 // the free list
+
+const S_IFMT: u64 = 0xf000
+const S_IFDIR: u64 = 0x4000
+const S_IFREG: u64 = 0x8000
+
+// errnos (uapi asm-generic/errno-base.h, errno.h)
+const ENOENT: u64 = 2
+const ENOTDIR: u64 = 20
+const EISDIR: u64 = 21
+const EINVAL: u64 = 22
+const EFBIG: u64 = 27
+const ENOSPC: u64 = 28
+const ENOTEMPTY: u64 = 39
+
+fn neg(e: u64) -> u64 {
+    0xffffffffffffffff - e + 1
+}
+
+/// Whether `r` is an -errno.
+pub fn failed(r: u64) -> bool {
+    r >= 0xfffffffffffff001
+}
+
+fn rd(a: u64) -> u64 {
+    // # Safety: `a` is a word of the tree's state or of a frame the tree
+    // holds, through the HHDM, 8-aligned.
+    unsafe { (a as *u64).read_volatile() }
+}
+
+fn wr(a: u64, v: u64) {
+    // # Safety: as `rd`.
+    unsafe { (a as *u64).write_volatile(v) }
+}
+
+fn rd8(a: u64) -> u64 {
+    // # Safety: a byte of a frame the tree holds, of the archive, or of
+    // the caller's kernel buffer.
+    let v = unsafe { (a as *u8).read_volatile() }
+    v as u64
+}
+
+fn rd16(a: u64) -> u64 {
+    // # Safety: a directory record's field, 2-aligned, in a frame the
+    // tree holds.
+    let v = unsafe { (a as *u16).read_volatile() }
+    v as u64
+}
+
+fn wr16(a: u64, v: u64) {
+    // # Safety: as `rd16`.
+    unsafe { (a as *u16).write_volatile((v & 0xffff) as u16) }
+}
+
+fn rd32(a: u64) -> u64 {
+    // # Safety: as `rd16`, 4-aligned.
+    let v = unsafe { (a as *u32).read_volatile() }
+    v as u64
+}
+
+fn wr32(a: u64, v: u64) {
+    // # Safety: as `rd32`.
+    unsafe { (a as *u32).write_volatile((v & 0xffffffff) as u32) }
+}
+
+fn st(i: u64) -> u64 {
+    // # Safety: i < 32, inside boot/tree.S's pax_tree_state.
+    unsafe { ((pax_tree_state as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_st(i: u64, v: u64) {
+    // # Safety: as `st`.
+    unsafe { ((pax_tree_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+fn hh() -> u64 {
+    frames.hhdm()
+}
+
+fn bcopy(dst: u64, src: u64, n: u64) {
+    // # Safety: [dst, dst + n) is inside one frame (the tree's, or a
+    // user page the caller checked, through the HHDM) and [src, src + n)
+    // inside a frame, the archive or the caller's kernel buffer; the
+    // two do not overlap.
+    unsafe { pax_tree_copy(dst, src, n) }
+}
+
+fn zero(dst: u64, n: u64) {
+    // # Safety: [dst, dst + n) is inside one frame, through the HHDM.
+    unsafe { pax_tree_zero(dst, n) }
+}
+
+/// Nanoseconds since the epoch (kernel/user's wall clock: the CMOS
+/// clock's reading at boot plus the ticks since); while the tree is
+/// made, the archive entry's own time.
+fn now() -> u64 {
+    let s = st(S_STAMP)
+    if s != 0 {
+        return s - 1
+    }
+    // # Safety: word 6 of the 64-byte pax_syscall_state (kernel/user's
+    // U_EPOCH).
+    let epoch = unsafe { ((pax_syscall_state as u64 + 48) as *u64).read_volatile() }
+    epoch * NS_PER_SEC + timer.ticks() * NS_PER_TICK
+}
+
+// --- frames --------------------------------------------------------------------
+
+/// One more frame for the tree, zeroed: its physical address, or 0 at
+/// the cap or when the machine would be left with fewer than RESERVE.
+fn grab() -> u64 {
+    if st(S_HELD) >= st(S_CAP) || frames.free_count() <= RESERVE {
+        if st(S_FULL) == 0 {
+            put_st(S_FULL, 1)
+        }
+        return 0
+    }
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        return 0
+    }
+    zero(pa + hh(), PAGE)
+    put_st(S_HELD, st(S_HELD) + 1)
+    pa
+}
+
+fn give(pa: u64) {
+    frames.free(pa)
+    put_st(S_HELD, st(S_HELD) - 1)
+    put_st(S_FULL, 0)
+}
+
+/// Whether the tree has just refused a frame for the first time since
+/// it last gave one back (kernel/user says so once, by name).
+pub fn full_news() -> bool {
+    if st(S_FULL) != 1 {
+        return false
+    }
+    put_st(S_FULL, 2)
+    true
+}
+
+/// The count of files' names removed since boot when it has just
+/// reached a multiple of 2500 (kernel/user's census line), else 0.
+pub fn census_due() -> u64 {
+    let n = st(S_UNLINKS)
+    if n == 0 || n % 2500 != 0 || st(S_CENSUS) == n {
+        return 0
+    }
+    put_st(S_CENSUS, n)
+    n
+}
+
+/// Frames the tree holds.
+pub fn held() -> u64 {
+    st(S_HELD)
+}
+
+/// The most it may hold.
+pub fn cap() -> u64 {
+    st(S_CAP)
+}
+
+/// Inodes in use.
+pub fn live() -> u64 {
+    st(S_LIVE)
+}
+
+/// Frames (0) and inodes (1) it held once the archive was in (`start`),
+/// and how many of those frames were the inode table's (2).
+pub fn base(which: int) -> u64 {
+    if which == 0 {
+        return st(S_BASE)
+    }
+    if which == 2 {
+        return st(S_BASE_ITABLE)
+    }
+    st(S_BASE_LIVE)
+}
+
+/// Frames of the inode table: they grow with the most inodes there
+/// have been at once and are never given back (at most 512).
+pub fn table_frames() -> u64 {
+    st(S_ITABLE)
+}
+
+/// A call or a flag refused by name: counted.
+pub fn refuse() {
+    put_st(S_REFUSED, st(S_REFUSED) + 1)
+}
+
+/// How many were.
+pub fn refusals() -> u64 {
+    st(S_REFUSED)
+}
+
+// --- inodes --------------------------------------------------------------------
+
+fn iaddr(i: u64) -> u64 {
+    let f = rd(st(S_TABLE) + hh() + (i / IPF) * 8)
+    f + hh() + (i % IPF) * IWORDS * 8
+}
+
+fn ig(i: u64, w: u64) -> u64 {
+    rd(iaddr(i) + w * 8)
+}
+
+fn ip(i: u64, w: u64, v: u64) {
+    wr(iaddr(i) + w * 8, v)
+}
+
+/// A new inode with `mode`, no link yet, every time now: its index, or
+/// NONE (the table full, or no frame for it).
+fn inode_new(mode: u64) -> u64 {
+    var i = NONE
+    let head = st(S_FREE)
+    if head != 0 {
+        i = head - 1
+        put_st(S_FREE, ig(i, I_NEXT))
+    } else {
+        i = st(S_NEXT)
+        if i >= MAX_INODES {
+            return NONE
+        }
+        if i % IPF == 0 {
+            let pa = grab()
+            if pa == 0 {
+                return NONE
+            }
+            wr(st(S_TABLE) + hh() + (i / IPF) * 8, pa)
+            put_st(S_ITABLE, st(S_ITABLE) + 1)
+        }
+        put_st(S_NEXT, i + 1)
+    }
+    var w: u64 = 0
+    while w < IWORDS {
+        ip(i, w, 0)
+        w += 1
+    }
+    let t = now()
+    ip(i, I_MODE, mode)
+    ip(i, I_ATIME, t)
+    ip(i, I_MTIME, t)
+    ip(i, I_CTIME, t)
+    ip(i, I_BTIME, t)
+    put_st(S_LIVE, st(S_LIVE) + 1)
+    i
+}
+
+/// Inode `i` is gone for good: its bytes given back, its record free.
+fn inode_free(i: u64) {
+    cut(i, 0)
+    let dir = ig(i, I_MODE) & S_IFMT == S_IFDIR
+    let p = ig(i, I_PARENT)
+    ip(i, I_MODE, 0)
+    ip(i, I_NEXT, st(S_FREE))
+    put_st(S_FREE, i + 1)
+    put_st(S_LIVE, st(S_LIVE) - 1)
+    if dir && p != i {
+        release(p) // a removed directory held its parent (`..` still led there)
+    }
+}
+
+/// One more holder of inode `i` (an open file, a working directory).
+pub fn hold(i: u64) {
+    ip(i, I_REFS, ig(i, I_REFS) + 1)
+}
+
+/// One holder fewer; the last one of an inode with no name left frees
+/// it, and its frames go back.
+pub fn release(i: u64) {
+    let r = ig(i, I_REFS)
+    if r > 0 {
+        ip(i, I_REFS, r - 1)
+    }
+    if r <= 1 && ig(i, I_NLINK) == 0 {
+        inode_free(i)
+    }
+}
+
+/// Inode `i`'s mode (type and permission bits).
+pub fn mode(i: u64) -> u64 {
+    ig(i, I_MODE)
+}
+
+/// Whether inode `i` is a directory.
+pub fn is_dir(i: u64) -> bool {
+    ig(i, I_MODE) & S_IFMT == S_IFDIR
+}
+
+/// Its link count: 0 once its last name is gone.
+pub fn nlink(i: u64) -> u64 {
+    ig(i, I_NLINK)
+}
+
+/// Its size as `stat` answers it: a file's bytes; a directory's 40 and
+/// 20 an entry, tmpfs's numbers (measured), which `ls -l` prints.
+pub fn size(i: u64) -> u64 {
+    if is_dir(i) {
+        if ig(i, I_NLINK) == 0 {
+            return 40
+        }
+        return 40 + 20 * ig(i, I_ENTRIES)
+    }
+    ig(i, I_SIZE)
+}
+
+/// A directory's parent (the root's is the root).
+pub fn parent(i: u64) -> u64 {
+    ig(i, I_PARENT)
+}
+
+/// Inode `i`'s time `which`: 0 atime, 1 mtime, 2 ctime, 3 when it was
+/// made; nanoseconds since the epoch.
+pub fn time(i: u64, which: int) -> u64 {
+    if which == 0 {
+        return ig(i, I_ATIME)
+    }
+    if which == 1 {
+        return ig(i, I_MTIME)
+    }
+    if which == 2 {
+        return ig(i, I_CTIME)
+    }
+    ig(i, I_BTIME)
+}
+
+/// The archive entry a file still is, whole and unwritten (what
+/// `execve` can load: one contiguous image), or initramfs.END.
+pub fn archive_entry(i: u64) -> u64 {
+    if is_dir(i) || ig(i, I_ENTRIES) == 0 || ig(i, I_BLOCKS) != 0 || ig(i, I_BACKLEN) != ig(i, I_SIZE) {
+        return initramfs.END
+    }
+    let e = ig(i, I_ENTRIES) - 1
+    if initramfs.size(e) != ig(i, I_SIZE) {
+        return initramfs.END
+    }
+    e
+}
+
+/// A file's 512-byte blocks: eight for every page that holds bytes, a
+/// frame of the tree's or a page of the archive not yet written over.
+pub fn blocks(i: u64) -> u64 {
+    if is_dir(i) {
+        return 0
+    }
+    let bl = ig(i, I_BACKLEN)
+    var n = ig(i, I_BLOCKS)
+    if bl != 0 {
+        let pages = (bl + PAGE - 1) / PAGE
+        if n == 0 {
+            return pages * 8
+        }
+        var pg: u64 = 0
+        while pg < pages {
+            if frame_of(i, pg) == 0 {
+                n += 1
+            }
+            pg += 1
+        }
+    }
+    n * 8
+}
+
+/// The read of a file sets its access time when that is not after its
+/// last change (relatime's rule).
+pub fn touch_read(i: u64) {
+    if ig(i, I_ATIME) <= ig(i, I_MTIME) || ig(i, I_ATIME) <= ig(i, I_CTIME) {
+        ip(i, I_ATIME, now())
+    }
+}
+
+fn touch_change(i: u64) {
+    let t = now()
+    ip(i, I_MTIME, t)
+    ip(i, I_CTIME, t)
+}
+
+// --- a file's bytes --------------------------------------------------------------
+
+fn cap_pages(d: u64) -> u64 {
+    if d == 0 {
+        return 1
+    }
+    if d == 1 {
+        return PTRS
+    }
+    PTRS * PTRS
+}
+
+/// The frame holding page `pg` of inode `i`, or 0 (a hole, or a page
+/// still the archive's).
+fn frame_of(i: u64, pg: u64) -> u64 {
+    let d = ig(i, I_DEPTH)
+    let root = ig(i, I_ROOT)
+    if root == 0 || pg >= cap_pages(d) {
+        return 0
+    }
+    if d == 0 {
+        return root
+    }
+    if d == 1 {
+        return rd(root + hh() + pg * 8)
+    }
+    let mid = rd(root + hh() + (pg / PTRS) * 8)
+    if mid == 0 {
+        return 0
+    }
+    rd(mid + hh() + (pg % PTRS) * 8)
+}
+
+/// A new data frame for page `pg` of inode `i`: zeros, or the archive's
+/// bytes for that page. 0 at the cap.
+fn data_frame(i: u64, pg: u64) -> u64 {
+    let pa = grab()
+    if pa == 0 {
+        return 0
+    }
+    let bl = ig(i, I_BACKLEN)
+    if pg * PAGE < bl {
+        let n = if bl - pg * PAGE < PAGE { bl - pg * PAGE } else { PAGE }
+        bcopy(pa + hh(), ig(i, I_BACK) + pg * PAGE, n)
+    }
+    ip(i, I_BLOCKS, ig(i, I_BLOCKS) + 1)
+    pa
+}
+
+/// The frame holding page `pg` of inode `i`, made when there is none
+/// (the index grown as far as it must be). 0 at the cap; the caller has
+/// refused a page past the largest file.
+fn frame_for(i: u64, pg: u64) -> u64 {
+    while pg >= cap_pages(ig(i, I_DEPTH)) {
+        let d = ig(i, I_DEPTH)
+        if d >= 2 {
+            return 0
+        }
+        let root = ig(i, I_ROOT)
+        if root != 0 {
+            let n = grab()
+            if n == 0 {
+                return 0
+            }
+            wr(n + hh(), root)
+            ip(i, I_ROOT, n)
+        }
+        ip(i, I_DEPTH, d + 1)
+    }
+    let d = ig(i, I_DEPTH)
+    if d == 0 {
+        if ig(i, I_ROOT) != 0 {
+            return ig(i, I_ROOT)
+        }
+        let pa = data_frame(i, pg)
+        ip(i, I_ROOT, pa)
+        return pa
+    }
+    if ig(i, I_ROOT) == 0 {
+        let n = grab()
+        if n == 0 {
+            return 0
+        }
+        ip(i, I_ROOT, n)
+    }
+    var tbl = ig(i, I_ROOT)
+    var idx = pg
+    if d == 2 {
+        let at = tbl + hh() + (pg / PTRS) * 8
+        let m = rd(at)
+        if m == 0 {
+            let n = grab()
+            if n == 0 {
+                return 0
+            }
+            wr(at, n)
+            tbl = n
+        } else {
+            tbl = m
+        }
+        idx = pg % PTRS
+    }
+    let cur = rd(tbl + hh() + idx * 8)
+    if cur != 0 {
+        return cur
+    }
+    let pa = data_frame(i, pg)
+    if pa != 0 {
+        wr(tbl + hh() + idx * 8, pa)
+    }
+    pa
+}
+
+/// Give back the data frames a leaf table at `tbl` points to from slot
+/// `lo` on.
+fn free_leaves(i: u64, tbl: u64, lo: u64) {
+    var k = lo
+    while k < PTRS {
+        let at = tbl + hh() + k * 8
+        let pa = rd(at)
+        if pa != 0 {
+            give(pa)
+            wr(at, 0)
+            ip(i, I_BLOCKS, ig(i, I_BLOCKS) - 1)
+        }
+        k += 1
+    }
+}
+
+/// Inode `i` keeps only its first `size` bytes: every frame past them
+/// goes back (an index frame with its last pointer), the page that
+/// stays is zeroed past them, and the archive is read no further.
+fn cut(i: u64, size: u64) {
+    let keep = (size + PAGE - 1) / PAGE
+    let d = ig(i, I_DEPTH)
+    let root = ig(i, I_ROOT)
+    if root != 0 {
+        if d == 0 {
+            if keep == 0 {
+                give(root)
+                ip(i, I_BLOCKS, ig(i, I_BLOCKS) - 1)
+                ip(i, I_ROOT, 0)
+            }
+        } else if d == 1 {
+            if keep < PTRS {
+                free_leaves(i, root, keep)
+            }
+            if keep == 0 {
+                give(root)
+                ip(i, I_ROOT, 0)
+            }
+        } else {
+            var m = keep / PTRS
+            while m < PTRS {
+                let at = root + hh() + m * 8
+                let mid = rd(at)
+                if mid != 0 {
+                    let lo = if m == keep / PTRS { keep % PTRS } else { 0 }
+                    free_leaves(i, mid, lo)
+                    if lo == 0 {
+                        give(mid)
+                        wr(at, 0)
+                    }
+                }
+                m += 1
+            }
+            if keep == 0 {
+                give(root)
+                ip(i, I_ROOT, 0)
+            }
+        }
+    }
+    if keep == 0 {
+        ip(i, I_DEPTH, 0)
+    }
+    if size % PAGE != 0 {
+        let pa = frame_of(i, size / PAGE)
+        if pa != 0 {
+            zero(pa + hh() + size % PAGE, PAGE - size % PAGE)
+        }
+    }
+    if ig(i, I_BACKLEN) > size {
+        ip(i, I_BACKLEN, size)
+    }
+}
+
+/// Where up to `want` bytes of file `i` at offset `off` are, in kernel
+/// memory: (the address, how many): a frame's, the archive's, or the
+/// page of zeros for a hole. Never past a page; the caller keeps
+/// `off + want` within the file's size.
+pub fn span(i: u64, off: u64, want: u64) -> (u64, u64) {
+    let po = off % PAGE
+    var n = PAGE - po
+    if want < n {
+        n = want
+    }
+    let pa = frame_of(i, off / PAGE)
+    if pa != 0 {
+        return (pa + hh() + po, n)
+    }
+    let bl = ig(i, I_BACKLEN)
+    if off < bl {
+        if bl - off < n {
+            n = bl - off
+        }
+        return (ig(i, I_BACK) + off, n)
+    }
+    (st(S_ZERO) + hh() + po, n)
+}
+
+/// A file's size in bytes (a directory's record bytes).
+pub fn bytes(i: u64) -> u64 {
+    ig(i, I_SIZE)
+}
+
+/// Copy `n` kernel bytes at `src` into the user range at `dst`, which
+/// the caller has checked writable in `pml4`.
+fn to_user(pml4: u64, dst: u64, src: u64, n: u64) {
+    var k: u64 = 0
+    while k < n {
+        let room = PAGE - (dst + k) % PAGE
+        let c = if n - k < room { n - k } else { room }
+        let pa = paging.translate(pml4, dst + k) else 0
+        bcopy(pa + hh(), src + k, c)
+        k += c
+    }
+}
+
+/// Copy `n` user bytes at `src` (checked readable) to kernel `dst`.
+fn from_user(pml4: u64, dst: u64, src: u64, n: u64) {
+    var k: u64 = 0
+    while k < n {
+        let room = PAGE - (src + k) % PAGE
+        let c = if n - k < room { n - k } else { room }
+        let pa = paging.translate(pml4, src + k) else 0
+        bcopy(dst + k, pa + hh(), c)
+        k += c
+    }
+}
+
+/// Read up to `n` bytes of file `i` from `off` into the user buffer
+/// `buf`, which the caller has checked writable for the bytes there
+/// are: the count (0 at or past the end).
+pub fn read(pml4: u64, i: u64, off: u64, buf: u64, n: u64) -> u64 {
+    let size = ig(i, I_SIZE)
+    if off >= size || n == 0 {
+        return 0
+    }
+    let k = if n < size - off { n } else { size - off }
+    var done: u64 = 0
+    while done < k {
+        let (src, c) = span(i, off + done, k - done)
+        to_user(pml4, buf + done, src, c)
+        done += c
+    }
+    touch_read(i)
+    k
+}
+
+/// Write `n` bytes into file `i` at `off`, from the user buffer `buf`
+/// (checked readable by the caller) when `pml4` is not 0, else from
+/// kernel memory at `buf`: the count written, which is less than `n`
+/// when the tree's frames ran out part-way (`write(2)`); -ENOSPC when
+/// none could be written; -EFBIG at the largest file.
+pub fn write(pml4: u64, i: u64, off: u64, buf: u64, n: u64) -> u64 {
+    if n == 0 {
+        return 0
+    }
+    if off >= MAX_SIZE {
+        return neg(EFBIG)
+    }
+    let k = if n < MAX_SIZE - off { n } else { MAX_SIZE - off }
+    var done: u64 = 0
+    while done < k {
+        let po = (off + done) % PAGE
+        let c = if k - done < PAGE - po { k - done } else { PAGE - po }
+        let pa = frame_for(i, (off + done) / PAGE)
+        if pa == 0 {
+            break
+        }
+        if pml4 != 0 {
+            from_user(pml4, pa + hh() + po, buf + done, c)
+        } else {
+            bcopy(pa + hh() + po, buf + done, c)
+        }
+        done += c
+    }
+    if done == 0 {
+        return neg(ENOSPC)
+    }
+    if off + done > ig(i, I_SIZE) {
+        ip(i, I_SIZE, off + done)
+    }
+    touch_change(i)
+    done
+}
+
+/// `ftruncate`: file `i` is `size` bytes long: cut (its frames past
+/// that given back), or longer by a hole. -EFBIG past the largest file.
+pub fn truncate(i: u64, size: u64) -> u64 {
+    if size > MAX_SIZE {
+        return neg(EFBIG)
+    }
+    let old = ig(i, I_SIZE)
+    if size < old {
+        cut(i, size)
+    }
+    ip(i, I_SIZE, size)
+    touch_change(i)
+    0
+}
+
+// --- directories -----------------------------------------------------------------
+
+fn need(len: u64) -> u64 {
+    (8 + len + 7) & !7
+}
+
+fn same(a: u64, b: u64, n: u64) -> bool {
+    var k: u64 = 0
+    while k < n {
+        if rd8(a + k) != rd8(b + k) {
+            return false
+        }
+        k += 1
+    }
+    true
+}
+
+/// The record of the name [name, name + len) in directory `d`: its
+/// kernel address, or 0.
+fn find(d: u64, name: u64, len: u64) -> u64 {
+    let size = ig(d, I_SIZE)
+    var pg: u64 = 0
+    while pg * PAGE < size {
+        let pa = frame_of(d, pg)
+        if pa != 0 {
+            let b = pa + hh()
+            var o: u64 = 0
+            while o < PAGE {
+                let rl = rd16(b + o + 4)
+                if rl == 0 {
+                    break
+                }
+                if rd32(b + o) != 0 && rd16(b + o + 6) == len && same(b + o + 8, name, len) {
+                    return b + o
+                }
+                o += rl
+            }
+        }
+        pg += 1
+    }
+    0
+}
+
+/// The inode the name [name, name + len) leads to in directory `d`, or
+/// NONE (also in a directory that has been removed).
+pub fn lookup(d: u64, name: u64, len: u64) -> u64 {
+    let r = find(d, name, len)
+    if r == 0 {
+        return NONE
+    }
+    rd32(r) - 1
+}
+
+/// Fill the free record at `r` (of `rl` bytes) with the name and inode,
+/// leaving what it does not need free.
+fn fill(r: u64, rl: u64, name: u64, len: u64, ino: u64) {
+    let nd = need(len)
+    if rl - nd >= 16 {
+        wr32(r + nd, 0)
+        wr16(r + nd + 4, rl - nd)
+        wr16(r + nd + 6, 0)
+        wr16(r + 4, nd)
+    }
+    wr16(r + 6, len)
+    bcopy(r + 8, name, len)
+    wr32(r, ino + 1)
+}
+
+/// A record for the name in directory `d`, leading to `ino`: false
+/// when a new page was needed and the tree is at its cap.
+fn insert(d: u64, name: u64, len: u64, ino: u64) -> bool {
+    let nd = need(len)
+    let size = ig(d, I_SIZE)
+    var pg: u64 = 0
+    while pg * PAGE < size {
+        let pa = frame_of(d, pg)
+        if pa != 0 {
+            let b = pa + hh()
+            var o: u64 = 0
+            while o < PAGE {
+                let rl = rd16(b + o + 4)
+                if rl == 0 {
+                    break
+                }
+                if rd32(b + o) == 0 && rl >= nd {
+                    fill(b + o, rl, name, len, ino)
+                    return true
+                }
+                o += rl
+            }
+        }
+        pg += 1
+    }
+    let pa = frame_for(d, size / PAGE)
+    if pa == 0 {
+        return false
+    }
+    let b = pa + hh()
+    wr32(b, 0)
+    wr16(b + 4, PAGE)
+    wr16(b + 6, 0)
+    fill(b, PAGE, name, len, ino)
+    ip(d, I_SIZE, size + PAGE)
+    true
+}
+
+/// The record at `r` is free again, and joins the free records after
+/// it on its page; a directory left with no entry gives its pages back.
+fn remove(d: u64, r: u64) {
+    wr32(r, 0)
+    let b = r & !(PAGE - 1)
+    var o: u64 = 0
+    while o < PAGE {
+        var rl = rd16(b + o + 4)
+        if rl == 0 {
+            break
+        }
+        if rd32(b + o) == 0 {
+            while o + rl < PAGE && rd32(b + o + rl) == 0 && rd16(b + o + rl + 4) != 0 {
+                rl += rd16(b + o + rl + 4)
+                wr16(b + o + 4, rl)
+            }
+        }
+        o += rl
+    }
+    ip(d, I_ENTRIES, ig(d, I_ENTRIES) - 1)
+    if ig(d, I_ENTRIES) == 0 {
+        cut(d, 0)
+        ip(d, I_SIZE, 0)
+    }
+}
+
+/// The first entry of directory `d` at or after position `pos` (a
+/// record's offset, found from its page's start, so a position stays
+/// good while the directory changes): (the inode or NONE at the end,
+/// the name's kernel address, its length, the position after it).
+pub fn entry_at(d: u64, pos: u64) -> (u64, u64, u64, u64) {
+    let size = ig(d, I_SIZE)
+    var pg = pos / PAGE
+    var want = pos % PAGE
+    while pg * PAGE < size {
+        let pa = frame_of(d, pg)
+        if pa != 0 {
+            let b = pa + hh()
+            var o: u64 = 0
+            while o < PAGE {
+                let rl = rd16(b + o + 4)
+                if rl == 0 {
+                    break
+                }
+                if o >= want && rd32(b + o) != 0 {
+                    return (rd32(b + o) - 1, b + o + 8, rd16(b + o + 6), pg * PAGE + o + rl)
+                }
+                o += rl
+            }
+        }
+        pg += 1
+        want = 0
+    }
+    (NONE, 0, 0, size)
+}
+
+/// The name directory `d` gives its child `c`: (its kernel address,
+/// its length), or (0, 0) when `c` has no name there (a removed
+/// directory).
+pub fn name_of(d: u64, c: u64) -> (u64, u64) {
+    var pos: u64 = 0
+    var ra: u64 = 0
+    var rl: u64 = 0
+    var more = true
+    while more {
+        let (i, a, l, next) = entry_at(d, pos)
+        if i == NONE {
+            more = false
+        } else if i == c {
+            ra = a
+            rl = l
+            more = false
+        } else {
+            pos = next
+        }
+    }
+    (ra, rl)
+}
+
+/// A new file named [name, name + len) in directory `d`, with the
+/// permission bits `perm`: its inode, or -ENOENT (the directory has
+/// been removed), -ENOSPC.
+pub fn create(d: u64, name: u64, len: u64, perm: u64) -> u64 {
+    if ig(d, I_NLINK) == 0 {
+        return neg(ENOENT)
+    }
+    let i = inode_new(S_IFREG | (perm & 0xfff))
+    if i == NONE {
+        return neg(ENOSPC)
+    }
+    if !insert(d, name, len, i) {
+        ip(i, I_NLINK, 0)
+        inode_free(i)
+        return neg(ENOSPC)
+    }
+    ip(i, I_NLINK, 1)
+    ip(d, I_ENTRIES, ig(d, I_ENTRIES) + 1)
+    touch_change(d)
+    i
+}
+
+/// A new directory named [name, name + len) in directory `d`: its
+/// inode, or -ENOENT, -ENOSPC.
+pub fn mkdir(d: u64, name: u64, len: u64, perm: u64) -> u64 {
+    if ig(d, I_NLINK) == 0 {
+        return neg(ENOENT)
+    }
+    let i = inode_new(S_IFDIR | (perm & 0xfff))
+    if i == NONE {
+        return neg(ENOSPC)
+    }
+    ip(i, I_PARENT, i) // until it has one: inode_free releases no parent
+    if !insert(d, name, len, i) {
+        inode_free(i)
+        return neg(ENOSPC)
+    }
+    ip(i, I_PARENT, d)
+    ip(i, I_NLINK, 2)
+    ip(d, I_NLINK, ig(d, I_NLINK) + 1)
+    ip(d, I_ENTRIES, ig(d, I_ENTRIES) + 1)
+    touch_change(d)
+    i
+}
+
+/// File inode `i` loses a name: its count drops, and with no name and
+/// no holder left it is freed.
+fn drop_file(i: u64) {
+    ip(i, I_NLINK, ig(i, I_NLINK) - 1)
+    ip(i, I_CTIME, now())
+    if ig(i, I_NLINK) == 0 && ig(i, I_REFS) == 0 {
+        inode_free(i)
+    }
+}
+
+/// Directory inode `i` (empty) loses its name in `d`: no link left; it
+/// lives on, empty, while a process works in it or has it open, holding
+/// its parent so `..` still leads there.
+fn drop_dir(d: u64, i: u64) {
+    ip(d, I_NLINK, ig(d, I_NLINK) - 1)
+    ip(i, I_NLINK, 0)
+    ip(i, I_CTIME, now())
+    if ig(i, I_REFS) == 0 {
+        ip(i, I_PARENT, i)
+        inode_free(i)
+    } else {
+        hold(d)
+    }
+}
+
+/// `unlink`: the name in directory `d` is removed: 0, -ENOENT, -EISDIR.
+pub fn unlink(d: u64, name: u64, len: u64) -> u64 {
+    let r = find(d, name, len)
+    if r == 0 {
+        return neg(ENOENT)
+    }
+    let i = rd32(r) - 1
+    if is_dir(i) {
+        return neg(EISDIR)
+    }
+    remove(d, r)
+    touch_change(d)
+    drop_file(i)
+    put_st(S_UNLINKS, st(S_UNLINKS) + 1)
+    0
+}
+
+/// `rmdir`: the empty directory named in `d` is removed: 0, -ENOENT,
+/// -ENOTDIR, -ENOTEMPTY.
+pub fn rmdir(d: u64, name: u64, len: u64) -> u64 {
+    let r = find(d, name, len)
+    if r == 0 {
+        return neg(ENOENT)
+    }
+    let i = rd32(r) - 1
+    if !is_dir(i) {
+        return neg(ENOTDIR)
+    }
+    if ig(i, I_ENTRIES) != 0 {
+        return neg(ENOTEMPTY)
+    }
+    remove(d, r)
+    touch_change(d)
+    drop_dir(d, i)
+    0
+}
+
+/// Whether directory `d` is `a` or lies below it.
+fn below(d: u64, a: u64) -> bool {
+    var c = d
+    var found = c == a
+    while !found && ig(c, I_PARENT) != c {
+        c = ig(c, I_PARENT)
+        found = c == a
+    }
+    found
+}
+
+/// `rename`: the name [on, on + ol) in directory `od` becomes [nn, nn +
+/// nl) in directory `nd`, replacing what is there. Every refusal is
+/// decided and the room for the new name found before anything
+/// changes: 0, -ENOENT, -EINVAL (a directory into itself or below
+/// itself), -EISDIR, -ENOTDIR, -ENOTEMPTY, -ENOSPC.
+pub fn rename(od: u64, on: u64, ol: u64, nd: u64, nn: u64, nl: u64) -> u64 {
+    let r = find(od, on, ol)
+    if r == 0 || ig(nd, I_NLINK) == 0 {
+        return neg(ENOENT)
+    }
+    let i = rd32(r) - 1
+    let dir = is_dir(i)
+    if dir && below(nd, i) {
+        return neg(EINVAL)
+    }
+    let t = find(nd, nn, nl)
+    if t != 0 {
+        let j = rd32(t) - 1
+        if j == i {
+            return 0
+        }
+        if dir && !is_dir(j) {
+            return neg(ENOTDIR)
+        }
+        if !dir && is_dir(j) {
+            return neg(EISDIR)
+        }
+        if dir && ig(j, I_ENTRIES) != 0 {
+            return neg(ENOTEMPTY)
+        }
+        // The change: the new name leads to the moved inode, the old
+        // name goes, what was there loses its name.
+        // (`remove` counts the old directory's entries one down; the
+        // new one's are as many as before.)
+        wr32(t, i + 1)
+        remove(od, r)
+        if dir {
+            drop_dir(nd, j)
+        } else {
+            drop_file(j)
+        }
+    } else {
+        if !insert(nd, nn, nl, i) {
+            return neg(ENOSPC)
+        }
+        ip(nd, I_ENTRIES, ig(nd, I_ENTRIES) + 1)
+        // `insert` may have filled a record on the old name's page, never
+        // the old record itself (it was not free).
+        remove(od, find(od, on, ol))
+    }
+    if dir && od != nd {
+        ip(od, I_NLINK, ig(od, I_NLINK) - 1)
+        ip(nd, I_NLINK, ig(nd, I_NLINK) + 1)
+        ip(i, I_PARENT, nd)
+    }
+    touch_change(od)
+    touch_change(nd)
+    ip(i, I_CTIME, now())
+    0
+}
+
+// --- the tree made ------------------------------------------------------------------
+
+/// The root directory's inode.
+pub const ROOT: u64 = 0
+
+fn make_dir(d: u64, name: u64, len: u64, perm: u64) -> u64 {
+    let i = mkdir(d, name, len, perm)
+    if failed(i) {
+        panic.fail("tree: no room for a directory of the initramfs, frames held", st(S_HELD))
+    }
+    i
+}
+
+/// Archive entry `e` becomes an inode under the root: every directory
+/// on its path made when missing (0755), then the entry itself — a
+/// directory with its mode, or a file whose bytes are the archive's own.
+/// Anything else (a link, a device) is left out.
+fn adopt(e: u64) {
+    let a = initramfs.name_addr(e)
+    let l = initramfs.name_length(e)
+    let m = initramfs.mode(e)
+    let t = initramfs.mtime(e) * NS_PER_SEC
+    put_st(S_STAMP, t + 1)
+    var d = ROOT
+    var s: u64 = 0
+    while s < l {
+        var k = s
+        while k < l && rd8(a + k) != 47 {
+            k += 1
+        }
+        let n = k - s
+        var last = true
+        var j = k
+        while j < l {
+            if rd8(a + j) != 47 {
+                last = false
+            }
+            j += 1
+        }
+        if n == 0 || n > NAME_MAX || (n == 1 && rd8(a + s) == 46) {
+            s = k + 1
+            continue
+        }
+        let c = lookup(d, a + s, n)
+        if !last {
+            if c == NONE {
+                d = make_dir(d, a + s, n, 0x1ed)
+            } else if is_dir(c) {
+                d = c
+            } else {
+                return
+            }
+        } else if m & S_IFMT == S_IFDIR {
+            let i = if c == NONE { make_dir(d, a + s, n, m & 0xfff) } else { c }
+            if is_dir(i) {
+                ip(i, I_MODE, S_IFDIR | (m & 0xfff))
+                ip(i, I_ATIME, t)
+                ip(i, I_MTIME, t)
+                ip(i, I_CTIME, t)
+                ip(i, I_BTIME, t)
+            }
+        } else if m & S_IFMT == S_IFREG && c == NONE {
+            let i = create(d, a + s, n, m & 0xfff)
+            if failed(i) {
+                panic.fail("tree: no room for a file of the initramfs, frames held", st(S_HELD))
+            }
+            let size = initramfs.size(e)
+            ip(i, I_SIZE, size)
+            ip(i, I_BACK, initramfs.data(e))
+            ip(i, I_BACKLEN, size)
+            ip(i, I_ENTRIES, e + 1)
+        }
+        s = k + 1
+    }
+}
+
+/// Make the tree (once, at boot, before the first program: kernel/user's
+/// `start`): the cap, the inode table, the page of zeros, the root, and
+/// an inode for every entry of the initramfs when there is one.
+pub fn start() {
+    if st(S_READY) != 0 {
+        return
+    }
+    put_st(S_CAP, frames.free_count() / 2)
+    let t = grab()
+    let z = grab()
+    if t == 0 || z == 0 {
+        panic.fail("tree: no frame for the inode table, frames free", frames.free_count())
+    }
+    put_st(S_TABLE, t)
+    put_st(S_ZERO, z)
+    put_st(S_STAMP, 1)
+    let r = inode_new(S_IFDIR | 0x1ed)
+    if r != ROOT {
+        panic.fail("tree: the root is not inode 0 but", r)
+    }
+    ip(r, I_PARENT, r)
+    ip(r, I_NLINK, 2)
+    put_st(S_READY, 1)
+    if initramfs.bytes() != 0 && initramfs.problem() == 0 {
+        var e = initramfs.first() else initramfs.END
+        while e != initramfs.END {
+            adopt(e)
+            e = initramfs.next(e) else initramfs.END
+        }
+    }
+    put_st(S_STAMP, 0)
+    put_st(S_BASE, st(S_HELD))
+    put_st(S_BASE_LIVE, st(S_LIVE))
+    put_st(S_BASE_ITABLE, st(S_ITABLE))
+}
+
+/// Whether `start` has run.
+pub fn ready() -> bool {
+    st(S_READY) != 0
+}
