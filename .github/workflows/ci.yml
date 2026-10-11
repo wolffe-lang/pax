@@ -897,9 +897,11 @@ jobs:
           if-no-files-found: warn
 
   # px14: processes. pelt runs as pid 1 on kmain_console and runs the
-  # programs in the initramfs (boreutils' cat, echo, false, head, ls,
-  # sleep, tail, true and wc, built here by tools/mkboreutils; px15: no
-  # busybox): clone3 (CLONE_VM|CLONE_VFORK), execve, wait4.
+  # programs in the initramfs (boreutils' cat, echo, env, false, head,
+  # ls, readlink, sleep, stat, tail, true and wc, built here by
+  # tools/mkboreutils; px15: no busybox; px26: bu20's, and sh05's pelt
+  # with its second thread): a fork, execve, wait4, and px26's sessions:
+  # the long listing, a `trap`, Ctrl-C at the prompt and on a child.
   # Each session (user/console/shell*.keys) is typed into PAX by
   # tools/qemu-halt --type and into the same binaries on this runner's
   # Linux by tools/linux-tty, chrooted in the same tree, pelt pid 1 of a
@@ -971,6 +973,79 @@ jobs:
             build/mpx3-shell-*.verdict
             build/mpx3-shell-*.typed
             build/mpx3-shell-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
+  # px26: threads, futexes and signals. user/elf/threads.c
+  # (tools/mkprobes: this runner's cc and static glibc with pthreads) is
+  # the first program on kmain_console and, the same file, pid 1 of a
+  # fresh pid namespace on this runner's Linux; it prints what a kernel
+  # decides about threads, `futex`, signal delivery, the signal frame,
+  # the registers and x87/SSE/AVX state a handler's return puts back,
+  # restarted and interrupted system calls, wait statuses, a thread's
+  # exit, memory reserved with PROT_NONE. tests/mpx3-threads: the build
+  # (T0), the two outputs byte-identical (T1), the guard page (T2),
+  # -ENOSYS, refusals and deaths as named (T3), every frame back (T4),
+  # the soak — 10,000 threads made and joined, 12,000 signals delivered
+  # — with the kernel's counters flat (T5), the end (T6); both tiers,
+  # BIOS and UEFI. The suite stops at the first failing probes boot, and
+  # the job at 45 minutes: a kernel that hangs here fails fast.
+  mpx3-threads:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          qemu-system-x86_64 --version
+          clang --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx3-threads-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: threads, futexes and signals against Linux, and the soak; both tiers, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx3-threads
+
+      - name: keep the program's sum, the Linux side, the outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx3-threads-linux
+          path: |
+            build/mpx3-threads/probes.txt
+            build/mpx3-threads/linux/
+            build/mpx3-threads/*.initramfs.txt
+            build/mpx3-threads/*/kmain_console.elf
+            build/mpx3-threads/*/*.log
+            build/mpx3-threads-*.session
+            build/mpx3-threads-*.session.linux
+            build/mpx3-threads-*.log
+            build/mpx3-threads-*.norm
+            build/mpx3-threads-*.meta
+            build/mpx3-threads-*.halt
+            build/mpx3-threads-*.verdict
+            build/mpx3-threads-runs.txt
           retention-days: 14
           if-no-files-found: warn
 
