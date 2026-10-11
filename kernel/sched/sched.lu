@@ -250,11 +250,14 @@ struct Thread {
     done: u64, // px26: bytes a waiting pipe write has written (the area's word before threads)
     name0: u64, // px26: PR_SET_NAME's sixteen bytes
     name1: u64,
+    until: u64, // px24: the tick its waiting call gives up at (poll, epoll_wait, a receive with a timeout); 0 none
+    ss_sp: u64, // px24: sigaltstack: the alternate signal stack's lowest byte
+    ss_size: u64, // px24: its size; 0 none (SS_DISABLE)
 }
 
 /// How many slots there are (px14: `clone_current` and `child_ended`
 /// answer SLOTS for none).
-pub const SLOTS: u64 = 16
+pub const SLOTS: u64 = 64 // px24: sixteen before; wolf's hosted runtime runs a thread a parked task
 const MAIN: u64 = 0
 const IDLE: u64 = 1
 const FIRST: u64 = 2 // the first spawnable slot
@@ -296,7 +299,7 @@ const GUARD: u64 = 49152 // its low part, never mapped
 const STACK: u64 = 16384 // its high part, mapped
 const PAGE: u64 = 4096
 const PAGES: u64 = 4
-const PROC_AREA: u64 = 4096 // px12: each slot's bytes of boot/sched.S's pax_procs (2048 before px14)
+const PROC_AREA: u64 = 8192 // px12: each slot's bytes of boot/sched.S's pax_procs (2048 before px14, 4096 before px24)
 const FS_BASE: u64 = 0xc0000100 // px12: IA32_FS_BASE (Intel SDM vol. 4)
 
 const QUANTUM: u64 = 2 // ticks
@@ -626,6 +629,9 @@ fn clear(s: u64) {
     put_field(s, offset_of(Thread, done), 0)
     put_field(s, offset_of(Thread, name0), 0)
     put_field(s, offset_of(Thread, name1), 0)
+    put_field(s, offset_of(Thread, until), 0)
+    put_field(s, offset_of(Thread, ss_sp), 0)
+    put_field(s, offset_of(Thread, ss_size), 0)
     let a = own_area(s)
     var i: u64 = 0
     while i < PROC_AREA / 8 {
@@ -723,7 +729,10 @@ pub fn wake_input() -> u64 {
     var n: u64 = 0
     var s: u64 = FIRST
     while s < SLOTS {
-        if field(s, offset_of(Thread, state)) == INPUT {
+        // px24: a thread in `poll` or `epoll_wait` may be watching the
+        // console too; it waits as a pipe's reader does (PIPE).
+        let st = field(s, offset_of(Thread, state))
+        if st == INPUT || st == PIPE {
             put_field(s, offset_of(Thread, state), READY)
             enqueue(s)
             n += 1
@@ -1407,6 +1416,9 @@ pub fn clone_current(f: u64, usp: u64, cr3: u64) -> u64 {
     put_field(s, offset_of(Thread, name_len), field(p, offset_of(Thread, name_len)))
     put_field(s, offset_of(Thread, fs), field(p, offset_of(Thread, fs)))
     put_field(s, offset_of(Thread, sigmask), field(p, offset_of(Thread, sigmask)))
+    // px24: a fork's child keeps the caller's alternate signal stack (sigaltstack(2)).
+    put_field(s, offset_of(Thread, ss_sp), field(p, offset_of(Thread, ss_sp)))
+    put_field(s, offset_of(Thread, ss_size), field(p, offset_of(Thread, ss_size)))
     let pid = take_pid()
     put_field(s, offset_of(Thread, pid), pid)
     put_field(s, offset_of(Thread, tgid), pid) // px26: a new process, a group of one
@@ -1604,6 +1616,8 @@ pub fn exec_current(cr3: u64, entry: u64, usp: u64, name: u64, len: u64) {
     // px26: the new program starts with no clear-child-tid word and
     // the program's own name; pending signals stay.
     put_field(c, offset_of(Thread, ctid), 0)
+    put_field(c, offset_of(Thread, ss_sp), 0) // px24: execve drops the alternate signal stack
+    put_field(c, offset_of(Thread, ss_size), 0)
     put_field(c, offset_of(Thread, name0), 0)
     put_field(c, offset_of(Thread, name1), 0)
     paging.load(cr3)
@@ -1666,6 +1680,44 @@ pub fn block_pipe_until(f: u64, wake: u64) -> u64 {
     put_field(c, offset_of(Thread, rst), if wake == 0 { W_REWOUND } else { W_TIMED_REWOUND }) // px26
     wake_sleepers()
     run_next()
+}
+
+/// px24: `block_pipe_until` for a call a signal never restarts (`poll`,
+/// `epoll_wait`: `signal(7)`): with or without a deadline, a handled
+/// signal ends it with -EINTR. IF clear.
+pub fn block_pipe_eintr(f: u64, wake: u64) -> u64 {
+    let c = cur()
+    put_field(c, offset_of(Thread, frame), f)
+    put_field(c, offset_of(Thread, wake), wake)
+    put_field(c, offset_of(Thread, state), PIPE)
+    put_field(c, offset_of(Thread, rst), W_TIMED_REWOUND)
+    wake_sleepers()
+    run_next()
+}
+
+/// px24: the tick the running thread's waiting call gives up at; 0
+/// when it has no deadline. The thread's own word: two threads of one
+/// process may each wait with a timeout (px22 kept a receive's in the
+/// process's area).
+pub fn self_until() -> u64 {
+    field(cur(), offset_of(Thread, until))
+}
+
+pub fn set_self_until(v: u64) {
+    put_field(cur(), offset_of(Thread, until), v)
+}
+
+/// px24: the running thread's alternate signal stack (`sigaltstack`):
+/// its lowest byte and its size; (0, 0) when it has none.
+pub fn self_altstack() -> (u64, u64) {
+    let c = cur()
+    (field(c, offset_of(Thread, ss_sp)), field(c, offset_of(Thread, ss_size)))
+}
+
+pub fn set_self_altstack(sp: u64, size: u64) {
+    let c = cur()
+    put_field(c, offset_of(Thread, ss_sp), sp)
+    put_field(c, offset_of(Thread, ss_size), size)
 }
 
 /// Make every thread waiting on a pipe or socket ready (px17: some pipe
@@ -1769,6 +1821,9 @@ pub fn syscall_begins() {
 pub fn self_wait() -> (u64, u64) {
     let c = cur()
     let r = (field(c, offset_of(Thread, rst)), field(c, offset_of(Thread, rarg)))
+    if field(c, offset_of(Thread, rst)) == W_TIMED_REWOUND {
+        put_field(c, offset_of(Thread, until), 0) // px24: the call will not run again: its deadline goes with it
+    }
     put_field(c, offset_of(Thread, rst), W_NONE)
     put_field(c, offset_of(Thread, rarg), 0)
     r
