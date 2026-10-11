@@ -51,8 +51,8 @@
 //! no futex, no threads). Both kinds of child take their own references
 //! to the open files they inherit (kernel/files' `inherit`). Refused by
 //! name: CLONE_VM without CLONE_VFORK (a thread or a process sharing
-//! memory while both run, -ENOSYS), any other flag (-EINVAL), no free
-//! slot (-EAGAIN), no frames for the copy (-ENOMEM).
+//! memory while both run and is not a thread, -ENOSYS), any other flag
+//! (-EINVAL), no free slot (-EAGAIN), no frames for the copy (-ENOMEM).
 //!
 //! **execve** (59): path, argv and envp read out of the caller's memory
 //! first; then the file (kernel/files' `exec_lookup`: -ENOENT, -EACCES
@@ -75,17 +75,42 @@
 //! si_pid, si_status) and keeps the zombie under WNOWAIT. No process
 //! groups yet: wait4's 0 and -pgid, and waitid's P_PGID, mean any child.
 //!
-//! **Signals, answered minimally** (no delivery yet): `rt_sigprocmask`
-//! (14) keeps a mask per process (SIGKILL and SIGSTOP never blocked),
-//! `rt_sigaction` (13) records the four words of each signal's
-//! `struct sigaction` (handler, flags, restorer, mask) and answers the
-//! old ones; `kill` (62), `tkill` (200) and `tgkill` (234) are refused
-//! by name, -ENOSYS.
+//! **Signals** are kernel/signal's since px26 (the calls, the frame,
+//! delivery); this module keeps what `execve` and `clone` do to the
+//! actions (`reset_handlers`: a handled signal goes back to the
+//! default, an ignored one stays ignored) and which signal a CPU
+//! exception stands for (`fault_signal`). The actions are four words a
+//! signal in the process area (handler, flags, restorer, mask).
+//!
+//! **Threads** (px26): `clone`/`clone3` with CLONE_THREAD makes a
+//! thread of the caller's process, as glibc's `pthread_create` asks
+//! (measured on pelt's second thread: `CLONE_VM|CLONE_FS|CLONE_FILES|
+//! CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|
+//! CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID`, a stack and a TLS
+//! pointer): a slot of its own in the caller's group (kernel/sched's
+//! `clone_thread`), sharing the address space, the descriptors, the
+//! working directory and the signal actions, with its own tid, stack,
+//! FS base, signal mask and x87/SSE state, resuming after the `syscall`
+//! with %rax 0. CLONE_PARENT_SETTID and CLONE_CHILD_SETTID write the
+//! tid; CLONE_CHILD_CLEARTID names the word that is zeroed and whose
+//! futex is woken when the thread ends (kernel/user's `exit`), which is
+//! how `pthread_join` learns of it. Refused: CLONE_THREAD without
+//! CLONE_SIGHAND, or CLONE_SIGHAND without CLONE_VM (-EINVAL,
+//! `clone(2)`); a thread that would not share descriptors and working
+//! directory, or one with no stack of its own (by name, -EINVAL); a
+//! flag PAX does not take (-EINVAL); no free slot (-EAGAIN). Every
+//! 2500th thread made since boot writes a census line (`user: <name>
+//! pid <n> threads: <k> made since boot; slots busy <b>, frames free
+//! <f>`), which tests/mpx3-threads' soak holds flat. `execve` from a
+//! process with threads ends the others first (`sched.exec_alone`).
+//! `set_robust_list` (273) and `rseq` (334) stay -ENOSYS, which glibc
+//! tolerates for a thread as for a process (a robust mutex's owner
+//! dying is then not told to its waiters: named).
 //!
 //! **Ids** (kernel/sched): `getpid` (39) the process's pid, `getppid`
 //! (110) its parent's (0 for one the kernel started, as Linux gives
-//! init), `gettid` (186) and `set_tid_address` (218) the pid (one
-//! thread a process).
+//! init), `gettid` (186) and `set_tid_address` (218) the thread's tid
+//! (the first thread's is the pid).
 //!
 //! State lives in kernel/sched's thread records and process areas,
 //! read and written volatile; no `region`, no heap (these calls give up
@@ -170,6 +195,14 @@ const CLONE_PARENT_SETTID: u64 = 0x00100000 // px17
 const CLONE_CHILD_CLEARTID: u64 = 0x00200000 // px17
 const CLONE_CHILD_SETTID: u64 = 0x01000000 // px17
 const CLONE_ARGS_VER0: u64 = 64
+// px26: a thread's flags.
+const CLONE_FS: u64 = 0x200
+const CLONE_FILES: u64 = 0x400
+const CLONE_SIGHAND: u64 = 0x800
+const CLONE_THREAD: u64 = 0x10000
+const CLONE_SYSVSEM: u64 = 0x40000
+const CLONE_SETTLS: u64 = 0x80000
+const CLONE_DETACHED: u64 = 0x400000 // ignored, as Linux ignores it
 
 // wait options and idtypes (uapi linux/wait.h).
 const WNOHANG: u64 = 0x1
@@ -182,15 +215,8 @@ const P_PID: u64 = 1
 const P_PGID: u64 = 2
 
 // signals (arch/x86/include/uapi/asm/signal.h, asm-generic/siginfo.h).
-const SIGKILL: u64 = 9
-const SIGSTOP: u64 = 19
 const SIGCHLD: u64 = 17
-const SIGPIPE: u64 = 13 // px17
 const NSIG: u64 = 64
-const UNBLOCKABLE: u64 = 0x40100 // SIGKILL's bit (8) and SIGSTOP's (18)
-const SIG_BLOCK: u64 = 0
-const SIG_UNBLOCK: u64 = 1
-const SIG_SETMASK: u64 = 2
 const SIG_DFL: u64 = 0
 const SIG_IGN: u64 = 1
 const CLD_EXITED: u64 = 1
@@ -220,9 +246,10 @@ const R_FORK: u64 = 32
 const R_SHARED: u64 = 33
 const R_FLAGS: u64 = 34
 const R_SLOTS: u64 = 35
-const R_SIGNALS: u64 = 36
 const R_NOT_ELF: u64 = 37
 const R_NOMEM: u64 = 38 // px17
+const R_FUTEX: u64 = 39 // px26 (kernel/futex's R_OPERATION)
+const R_THREAD: u64 = 40 // px26
 
 /// A refusal code's name ("" when not this module's).
 pub fn why(r: u64) -> str {
@@ -230,16 +257,19 @@ pub fn why(r: u64) -> str {
         return "a fork without CLONE_VM (PAX copies no address space yet)"
     }
     if r == R_SHARED {
-        return "CLONE_VM without CLONE_VFORK (no threads or shared-memory processes yet)"
+        return "CLONE_VM without CLONE_VFORK or CLONE_THREAD (no process sharing memory with another)"
+    }
+    if r == R_FUTEX {
+        return "a futex operation PAX does not have (wait and wake only)"
+    }
+    if r == R_THREAD {
+        return "a thread that does not share descriptors and working directory, or has no stack of its own"
     }
     if r == R_FLAGS {
         return "a clone flag PAX does not take"
     }
     if r == R_SLOTS {
         return "no free process slot"
-    }
-    if r == R_SIGNALS {
-        return "signals are not delivered yet"
     }
     if r == R_NOT_ELF {
         return "not a static x86-64 ELF executable PAX runs"
@@ -273,6 +303,37 @@ fn aget(a: u64, i: u64) -> u64 {
 fn aput(a: u64, i: u64, v: u64) {
     // # Safety: as `aget`.
     unsafe { ((a + i * 8) as *u64).write_volatile(v) }
+}
+
+/// `user: <name> pid <pid>` for the running thread (kernel/user's and
+/// kernel/signal's lines; moved here in px26 so both can write it).
+pub fn who() {
+    let p = sched.self_prog()
+    log.put("user: ")
+    if p == 0 {
+        log.put("kernel")
+    } else if p == sched.ELF_PROG {
+        put_bytes(sched.self_exec(2), sched.self_exec(3))
+    } else {
+        log.put(blob_name(p - 1))
+    }
+    log.put(" pid ")
+    log.dec(sched.self_pid() as int) // px14: the Linux pid
+}
+
+/// A px09 program's name by number (kernel/user's `name`).
+pub fn blob_name(p: u64) -> str {
+    if p == 0 { return "hello" }
+    if p == 1 { return "segv" }
+    if p == 2 { return "kread" }
+    if p == 3 { return "textwrite" }
+    if p == 4 { return "guard" }
+    if p == 5 { return "priv" }
+    if p == 6 { return "badptr" }
+    if p == 7 { return "spin1" }
+    if p == 8 { return "spin2" }
+    if p == 9 { return "after" }
+    "?"
 }
 
 fn refuse_with(code: u64, r: u64) -> u64 {
@@ -767,16 +828,28 @@ pub fn execve(f: u64, path: u64, argv: u64, envp: u64) -> u64 {
         return NEG_ENOMEM
     }
     let sp = build_stack(space, file, entry, av, argc, ae, av + ae, envc, ee - ae, pa, rl)
-    // The point of no return.
-    files.exec_close(a)
-    reset_handlers(a)
+    // The point of no return. px26: every other thread of the process
+    // ends first, and the caller is its leader from here (the area is
+    // then its own slot's: `a` is read again).
+    let others = sched.self_threads() - 1
+    if others > 0 && !log.quiet() {
+        who()
+        log.put(" execve: ")
+        log.dec(others as int)
+        log.put(" other thread(s) ended")
+        log.end()
+    }
+    sched.exec_alone()
+    let na = area()
+    files.exec_close(na)
+    reset_handlers(na)
     var k: u64 = 0
     while k < 8 {
-        aput(a, A_LOGGED + k, 0)
+        aput(na, A_LOGGED + k, 0)
         k += 1
     }
-    vm.start(a, image_top(file))
-    files.set_exe(a, e) // px26: /proc/self/exe
+    vm.start(na, image_top(file))
+    files.set_exe(na, e) // px26: /proc/self/exe
     let (na, nl) = base_name(e)
     sched.exec_current(space, entry, sp, na, nl)
     fpu.exec(sched.self_slot())
@@ -802,13 +875,14 @@ pub fn execve(f: u64, path: u64, argv: u64, envp: u64) -> u64 {
 /// child, `f` with %rax the child's pid after a fork (px17), or `f` with
 /// %rax -errno when refused. `a0`, `a1`, `a2`, `a3`: clone's flags,
 /// stack, parent_tid and child_tid (clone3's come from its struct).
-pub fn clone(f: u64, nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
+pub fn clone(f: u64, nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     var flags: u64 = CLONE_VM | CLONE_VFORK
     var usp: u64 = 0
     var ptid: u64 = a2
     var ctid: u64 = a3
+    var tls: u64 = a4 // px26: clone's fifth argument on x86-64
     if nr == SYS_CLONE {
-        flags = a0 & !CSIGNAL // the exit signal: no delivery yet
+        flags = a0 & !CSIGNAL // the exit signal: SIGCHLD is what a parent is sent
         usp = a1
     } else if nr == SYS_CLONE3 {
         let pml4 = paging.live()
@@ -829,6 +903,7 @@ pub fn clone(f: u64, nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
         if stack != 0 {
             usp = stack + size
         }
+        tls = uaccess.get64(pml4, a0 + 56)
         if n >= 80 && (uaccess.get64(pml4, a0 + 64) != 0 || uaccess.get64(pml4, a0 + 72) != 0) {
             put_word(f, W_RAX, refuse_with(R_FLAGS, NEG_EINVAL)) // set_tid
             return f
@@ -836,6 +911,9 @@ pub fn clone(f: u64, nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
     } else {
         ptid = 0
         ctid = 0
+    }
+    if flags & CLONE_THREAD != 0 || (flags & CLONE_SIGHAND != 0 && flags & CLONE_VM == 0) {
+        return thread(f, flags, usp, ptid, ctid, tls) // px26
     }
     if flags & CLONE_VM == 0 {
         return fork(f, flags, usp, ptid, ctid)
@@ -898,6 +976,69 @@ fn fork(f: u64, flags: u64, usp: u64, ptid: u64, ctid: u64) -> u64 {
         uaccess.put(pml4, ptid, pid, 4)
     }
     put_word(f, W_RAX, pid)
+    f
+}
+
+/// px26: a thread (a clone with CLONE_THREAD) from the frame `f`: `f`
+/// with %rax the new thread's tid, or -errno.
+fn thread(f: u64, flags: u64, usp: u64, ptid: u64, ctid: u64, tls: u64) -> u64 {
+    if flags & CLONE_THREAD != 0 && flags & CLONE_SIGHAND == 0 || flags & CLONE_SIGHAND != 0 && flags & CLONE_VM == 0 {
+        put_word(f, W_RAX, NEG_EINVAL) // clone(2)
+        return f
+    }
+    let shape = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD
+    let extra = CLONE_SYSVSEM | CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | CLONE_DETACHED
+    if flags & !(shape | extra) != 0 {
+        put_word(f, W_RAX, refuse_with(R_FLAGS, NEG_EINVAL))
+        return f
+    }
+    if flags & shape != shape || usp == 0 {
+        put_word(f, W_RAX, refuse_with(R_THREAD, NEG_EINVAL))
+        return f
+    }
+    let pml4 = paging.live()
+    if flags & CLONE_SETTLS != 0 && tls >= paging.USER_TOP {
+        put_word(f, W_RAX, 0xffffffffffffffff) // -EPERM, as arch_prctl answers such a base
+        return f
+    }
+    if (flags & CLONE_PARENT_SETTID != 0 && !uaccess.writable(pml4, ptid, 4)) || (flags & CLONE_CHILD_SETTID != 0 && !uaccess.writable(pml4, ctid, 4)) {
+        put_word(f, W_RAX, NEG_EFAULT)
+        return f
+    }
+    let s = sched.clone_thread(f, usp, flags & CLONE_SETTLS != 0, tls, if flags & CLONE_CHILD_CLEARTID != 0 { ctid } else { 0 })
+    if s == sched.SLOTS {
+        put_word(f, W_RAX, refuse_with(R_SLOTS, NEG_EAGAIN))
+        return f
+    }
+    let t = sched.slot_pid(s)
+    if flags & CLONE_PARENT_SETTID != 0 {
+        uaccess.put(pml4, ptid, t, 4)
+    }
+    if flags & CLONE_CHILD_SETTID != 0 {
+        uaccess.put(pml4, ctid, t, 4)
+    }
+    let n = sched.threads_made()
+    if !log.quiet() && (n <= 4 || n % 2500 == 0) {
+        who()
+        if n % 2500 == 0 {
+            // The census line (tests/mpx3-threads' soak reads four of them).
+            log.put(" threads: ")
+            log.dec(n as int)
+            log.put(" made since boot; slots busy ")
+            log.dec(sched.slots_busy() as int)
+            log.put(", frames free ")
+            log.dec(frames.free_count() as int)
+        } else {
+            log.put(" thread ")
+            log.dec(t as int)
+            log.put(" started: stack below ")
+            log.hex(usp)
+            log.put(", tls ")
+            log.hex(tls)
+        }
+        log.end()
+    }
+    put_word(f, W_RAX, t)
     f
 }
 
@@ -1000,93 +1141,7 @@ pub fn waitid(f: u64, nr: u64, idtype: u64, id: u64, infop: u64, options: u64, r
     f
 }
 
-// --- signals, answered minimally (px14) -----------------------------------------
-
-/// `rt_sigprocmask(how, set, oldset, sigsetsize)`.
-pub fn sigprocmask(how: u64, set: u64, oldset: u64, size: u64) -> u64 {
-    if size != 8 {
-        return NEG_EINVAL
-    }
-    let pml4 = paging.live()
-    let old = sched.self_sigmask()
-    var m = old
-    if set != 0 {
-        if !uaccess.readable(pml4, set, 8) {
-            return NEG_EFAULT
-        }
-        let v = uaccess.get64(pml4, set)
-        let h = how & 0xffffffff
-        if h == SIG_BLOCK {
-            m = m | v
-        } else if h == SIG_UNBLOCK {
-            m = m & !v
-        } else if h == SIG_SETMASK {
-            m = v
-        } else {
-            return NEG_EINVAL
-        }
-        m = m & !UNBLOCKABLE
-    }
-    if oldset != 0 {
-        if !uaccess.writable(pml4, oldset, 8) {
-            return NEG_EFAULT
-        }
-        uaccess.put(pml4, oldset, old, 8)
-    }
-    sched.set_self_sigmask(m)
-    0
-}
-
-/// `rt_sigaction(sig, act, oldact, sigsetsize)`: the kernel's `struct
-/// sigaction` on x86-64 is four words (handler, flags, restorer, mask).
-pub fn sigaction(sig: u64, act: u64, oldact: u64, size: u64) -> u64 {
-    let n = sig & 0xffffffff
-    if size != 8 || n < 1 || n > NSIG || (act != 0 && (n == SIGKILL || n == SIGSTOP)) {
-        return NEG_EINVAL
-    }
-    let pml4 = paging.live()
-    let a = area()
-    let w = SIG_WORDS + (n - 1) * 4
-    if act != 0 && !uaccess.readable(pml4, act, 32) {
-        return NEG_EFAULT
-    }
-    if oldact != 0 {
-        if !uaccess.writable(pml4, oldact, 32) {
-            return NEG_EFAULT
-        }
-        var i: u64 = 0
-        while i < 4 {
-            uaccess.put(pml4, oldact + i * 8, aget(a, w + i), 8)
-            i += 1
-        }
-    }
-    if act != 0 {
-        var i: u64 = 0
-        while i < 4 {
-            aput(a, w + i, uaccess.get64(pml4, act + i * 8))
-            i += 1
-        }
-        aput(a, w + 3, aget(a, w + 3) & !UNBLOCKABLE)
-    }
-    0
-}
-
-/// px17: whether a write that met a pipe with no reader ends the writer
-/// with SIGPIPE (13), Linux's default action (`pipe(7)`, `signal(7)`):
-/// yes when SIGPIPE's action is SIG_DFL and it is not blocked — except
-/// for pid 1, which (`kill(2)`) receives only the signals it has a
-/// handler for. Otherwise the write answers -EPIPE; a handler is not
-/// run (PAX delivers no signal to a handler yet: named drift).
-pub fn sigpipe_kills() -> bool {
-    let h = aget(area(), SIG_WORDS + (SIGPIPE - 1) * 4)
-    let blocked = sched.self_sigmask() & (1 << (SIGPIPE - 1)) != 0
-    h == SIG_DFL && !blocked && sched.self_pid() != 1
-}
-
-/// `kill`, `tkill`, `tgkill`: refused by name (no delivery yet).
-pub fn kill() -> u64 {
-    refuse_with(R_SIGNALS, NEG_ENOSYS)
-}
+// --- signals: what an exception stands for (px14; the rest is kernel/signal's) ---
 
 /// The signal a CPU exception in ring 3 stands for (signal(7)'s
 /// meanings): the wait status of a process it killed. #DE, #MF, #XM
