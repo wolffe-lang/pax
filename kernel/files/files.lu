@@ -31,7 +31,9 @@
 //! -ENOTDIR, a missing one -ENOENT. Relative paths start at the working
 //! directory (px17: the process's own, `chdir`/`fchdir`, inherited by a
 //! child and kept across `execve`; `/` for a fresh process), or at a
-//! directory descriptor. Nothing is a symbolic link. Writes are refused
+//! directory descriptor. Nothing is a symbolic link but
+//! `/proc/self/exe` (px26: `readlink` answers the path the program was
+//! loaded from; there is no `/proc` beside it). Writes are refused
 //! by name: opening a file for writing, truncating or creating one is
 //! -EROFS.
 //!
@@ -81,12 +83,20 @@
 //! there, up to what was asked; wolf's spawn sends one 8-byte record).
 //! `fstat` S_IFSOCK|0777.
 //!
+//! **Copies in the kernel** (px26, what bu20's `cat` asks): `sendfile`
+//! writes a file of the initramfs to the console, `/dev/null`, a pipe
+//! or a socketpair; `splice` moves what a pipe holds to any of those,
+//! or a file into a pipe; `copy_file_range` is -EINVAL, as Linux
+//! answers a destination that is no regular file (PAX has none a
+//! process can write).
+//!
 //! **What stat answers**: a file's mode, size, inode (the archive's,
 //! plus 16) and link count from its newc header; directories 0755,
 //! the console a character device 4:64 (`/dev/ttyS0`'s numbers),
 //! `/dev/tty0` 4:0 and `/dev/console` 5:1 (Linux's, `stat` on a Linux
 //! host; mode 0620 as the console's), `/dev/null` 1:3; uid, gid and every time 0; st_blksize 4096,
-//! st_blocks the size in 512-byte units rounded up; st_dev 0:1.
+//! st_blocks eight for every 4096 bytes or part of them (px26: whole
+//! pages, as Linux's file systems count a file; px12 counted 512s); st_dev 0:1.
 //!
 //! **AF_INET sockets** (px22): a descriptor may name one of kernel/udp's
 //! sockets (kind K_INET, an open file whose node is the socket's
@@ -126,6 +136,7 @@ pub const FDS: u64 = 32
 const A_REFUSAL: u64 = 3 // the area's refusal word (kernel/vm's too)
 const A_CWD: u64 = 12 // px17: the working directory's node; 0 the root
 const A_PIPE_DONE: u64 = 13 // px17: bytes a waiting pipe write has written
+const A_EXE: u64 = 255 // px26: the initramfs entry the program was loaded from, + 1 (0: none); words 14, 15, 144 and 145 are kernel/socket's
 const A_FD: u64 = 16 // the first descriptor's word
 const FD_WORDS: u64 = 4
 // A descriptor's words: kind, node, open file + 1 (0 none), flags.
@@ -950,6 +961,180 @@ pub fn pipe_write(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool) 
     WAIT
 }
 
+/// px26: `sendfile(out, in, offset, count)`: up to `count` bytes of
+/// the file `in` (a regular file of the initramfs: anything else is
+/// -EINVAL, `sendfile(2)`), from its own offset or the one at `offset`
+/// (which is then moved instead), written to `out`: the console,
+/// `/dev/null`, a pipe or a socketpair. boreutils' `cat` copies a file
+/// to its output this way (after `copy_file_range`, which Linux and PAX
+/// refuse for a destination that is not a regular file). The count
+/// written, which may be less than asked: a pipe takes what it has room
+/// for, and a full one waits (WAIT) or answers -EAGAIN (O_NONBLOCK);
+/// -EPIPE with no reader (`EPIPE_R`; kernel/user raises SIGPIPE). One
+/// call sends at most 0x7ffff000 bytes, as Linux.
+pub fn sendfile(a: u64, pml4: u64, out: u64, inf: u64, offp: u64, count: u64) -> u64 {
+    if kind(a, inf) == K_CLOSED || access(a, inf) == O_WRONLY {
+        return neg(EBADF)
+    }
+    let t = write_target(a, out)
+    if t == 2 {
+        return neg(EBADF)
+    }
+    if kind(a, inf) != K_FILE {
+        return neg(EINVAL)
+    }
+    var off = pos(a, inf)
+    if offp != 0 {
+        if !uaccess.readable(pml4, offp, 8) || !uaccess.writable(pml4, offp, 8) {
+            return neg(EFAULT)
+        }
+        off = uaccess.get64(pml4, offp)
+    }
+    let e = rf(node_of(a, inf))
+    let size = initramfs.size(e)
+    if off >= size || count == 0 {
+        return 0
+    }
+    var k = if count < size - off { count } else { size - off }
+    if k > 0x7ffff000 {
+        k = 0x7ffff000
+    }
+    let src = initramfs.data(e) + off
+    if t == 1 {
+        console.put_kernel(src, k)
+    } else if t == 3 {
+        let p = tx_of(a, out)
+        if ppw(p, P_READERS) == 0 {
+            return EPIPE_R
+        }
+        let space = ppw(p, P_PAGES) * PAGE - (ppw(p, P_WR) - ppw(p, P_RD))
+        if space == 0 {
+            if status(a, out) & O_NONBLOCK != 0 {
+                return neg(EAGAIN)
+            }
+            return WAIT
+        }
+        if k > space {
+            k = space
+        }
+        ring_put(p, src, k) // the file's bytes in the initramfs: k <= size - off
+        sched.wake_pipes()
+    }
+    if offp != 0 {
+        uaccess.put(pml4, offp, off + k, 8)
+    } else {
+        set_pos(a, inf, off + k)
+    }
+    k
+}
+
+/// The frame-by-frame copy of `k` kernel bytes at `src` into pipe `p`'s
+/// ring at its write end (the caller has found room for them).
+fn ring_put(p: u64, src: u64, k: u64) {
+    var c: u64 = 0
+    while c < k {
+        let (dst, room) = ring_at(p, ppw(p, P_WR) + c)
+        let m = if k - c < room { k - c } else { room }
+        var j: u64 = 0
+        while j < m {
+            // # Safety: [dst, dst + m) is inside one of the pipe's frames
+            // (ring_at); [src + c, src + c + m) is the caller's kernel
+            // memory.
+            unsafe { ((dst + j) as *u8).write_volatile(((src + c + j) as *u8).read_volatile()) }
+            j += 1
+        }
+        c += m
+    }
+    put_ppw(p, P_WR, ppw(p, P_WR) + k)
+}
+
+/// px26: `splice(in, off_in, out, off_out, len, flags)`: bytes moved
+/// between two descriptors of which at least one is a pipe
+/// (`splice(2)`; -EINVAL when neither is, or when an offset is given
+/// for a pipe). boreutils' `cat` asks it when its input is no regular
+/// file (after `copy_file_range` and `sendfile` have said so). From a
+/// pipe: what it holds, up to `len`, to the console, `/dev/null` or
+/// another pipe; 0 at end of file; an empty pipe with a writer waits
+/// (WAIT), or answers -EAGAIN under SPLICE_F_NONBLOCK (2) or
+/// O_NONBLOCK. Into a pipe from a file of the initramfs: `sendfile`'s
+/// way. The count moved; -EPIPE (`EPIPE_R`) into a pipe with no reader.
+pub fn splice(a: u64, pml4: u64, inf: u64, offin: u64, out: u64, offout: u64, len: u64, flags: u64) -> u64 {
+    if kind(a, inf) == K_CLOSED || access(a, inf) == O_WRONLY {
+        return neg(EBADF)
+    }
+    let t = write_target(a, out)
+    if t == 2 {
+        return neg(EBADF)
+    }
+    let ki = kind(a, inf)
+    let from_pipe = ki == K_PIPE || ki == K_SOCK
+    if !from_pipe && t != 3 {
+        return neg(EINVAL)
+    }
+    if (from_pipe && offin != 0) || (t == 3 && offout != 0) || offout != 0 {
+        return neg(ESPIPE)
+    }
+    if !from_pipe {
+        return sendfile(a, pml4, out, inf, offin, len)
+    }
+    let p = rx_of(a, inf)
+    let avail = ppw(p, P_WR) - ppw(p, P_RD)
+    if avail == 0 {
+        if ppw(p, P_WRITERS) == 0 || len == 0 {
+            return 0
+        }
+        if flags & 2 != 0 || status(a, inf) & O_NONBLOCK != 0 {
+            return neg(EAGAIN)
+        }
+        return WAIT
+    }
+    var k = if len < avail { len } else { avail }
+    if t == 3 {
+        let q = tx_of(a, out)
+        if ppw(q, P_READERS) == 0 {
+            return EPIPE_R
+        }
+        let space = ppw(q, P_PAGES) * PAGE - (ppw(q, P_WR) - ppw(q, P_RD))
+        if space == 0 {
+            if flags & 2 != 0 || status(a, out) & O_NONBLOCK != 0 {
+                return neg(EAGAIN)
+            }
+            return WAIT
+        }
+        if k > space {
+            k = space
+        }
+    }
+    var done: u64 = 0
+    while done < k {
+        let (src, room) = ring_at(p, ppw(p, P_RD) + done)
+        let c = if k - done < room { k - done } else { room }
+        if t == 1 {
+            console.put_kernel(src, c)
+        } else if t == 3 {
+            ring_put(tx_of(a, out), src, c)
+        }
+        done += c
+    }
+    put_ppw(p, P_RD, ppw(p, P_RD) + k)
+    sched.wake_pipes()
+    k
+}
+
+/// px26: `copy_file_range(in, …, out, …, len, flags)`: -EBADF for a
+/// descriptor that is not open (or not open the right way), else
+/// -EINVAL: the call copies between regular files (`copy_file_range(2)`:
+/// "EINVAL … either fd_in or fd_out is not a regular file"), and PAX has
+/// no regular file a process can write (the initramfs is read-only).
+/// boreutils' `cat` asks it first and goes on to `sendfile`, as on Linux
+/// when its output is a pipe or a terminal.
+pub fn copy_file_range(a: u64, inf: u64, out: u64) -> u64 {
+    if kind(a, inf) == K_CLOSED || access(a, inf) == O_WRONLY || write_target(a, out) == 2 {
+        return neg(EBADF)
+    }
+    neg(EINVAL)
+}
+
 /// px17: `recvfrom(fd, buf, n, flags, addr, addrlen)` on a socketpair's
 /// end: a read (MSG_DONTWAIT, 0x40, as O_NONBLOCK); no address is
 /// reported (a connected pair's peer is unnamed: *addrlen 0).
@@ -1601,10 +1786,51 @@ pub fn fchdir(a: u64, fd: u64) -> u64 {
     0
 }
 
-/// `readlinkat(dirfd, path, buf, size)`: nothing in PAX's tree is a
-/// symbolic link, so -EINVAL for what exists and -ENOENT (or the path's
-/// own error) for what does not; `/proc/self/exe` is -ENOENT (no /proc).
-pub fn readlinkat(a: u64, pml4: u64, dirfd: u64, va: u64) -> u64 {
+/// px26: the running program is the initramfs entry `e` (kernel/process,
+/// at `exec` and `execve`): what `/proc/self/exe` answers. A fork's child
+/// inherits it with the area.
+pub fn set_exe(a: u64, e: u64) {
+    put(a, A_EXE, e + 1)
+}
+
+/// `readlinkat(dirfd, path, buf, size)` (and `readlink`, with
+/// AT_FDCWD): PAX's tree has one symbolic link, `/proc/self/exe`
+/// (px26), whose text is the absolute path of the file the process was
+/// loaded from (`proc(5)`; wolf's runtime reads it before `main`, and
+/// boreutils' `readlink` prints it): at most `size` bytes, no NUL, the
+/// count answered, a longer path cut silently (`readlink(2)`). There is
+/// no `/proc` directory beside it: every other path under it is
+/// -ENOENT. Anything else that exists is not a link: -EINVAL.
+pub fn readlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, buf: u64, size: u64) -> u64 {
+    let rl = path_in(pml4, va)
+    if is_err(rl) {
+        return neg(rf(rl))
+    }
+    if rl != 0 && kb(0) == 47 {
+        let l = canon(rl, T_ROOT << T_SHIFT)
+        if !is_err(l) && norm_is(l, "proc/self/exe") {
+            let x = get(a, A_EXE)
+            if x == 0 {
+                return neg(ENOENT)
+            }
+            if size == 0 || size >= 0x80000000 {
+                return neg(EINVAL)
+            }
+            let e = x - 1
+            let nl = initramfs.name_length(e) + 1
+            let k = if nl < size { nl } else { size }
+            if !uaccess.writable(pml4, buf, k) {
+                return neg(EFAULT)
+            }
+            uaccess.put(pml4, buf, 47, 1)
+            var i: u64 = 1
+            while i < k {
+                uaccess.put(pml4, buf + i, initramfs.name_byte(e, i - 1), 1)
+                i += 1
+            }
+            return k
+        }
+    }
     let n = resolve(a, pml4, dirfd, va, false)
     if is_err(n) {
         return neg(rf(n))
@@ -1705,8 +1931,12 @@ fn dev_t(ma: u64, mi: u64) -> u64 {
     (mi & 0xff) | ((ma & 0xfff) << 8) | ((mi & 0xffffff00) << 12)
 }
 
+/// A file's 512-byte blocks: whole 4096-byte pages (px26), what
+/// Linux's file systems answer for a file kept in pages (measured on
+/// tmpfs, ext4 and btrfs: 8 for a 77-byte file), and what `ls -l`'s
+/// `total` line adds up. px12 answered the size in 512s, rounded up.
 fn blocks(size: u64) -> u64 {
-    (size + 511) / 512
+    (size + PAGE - 1) / PAGE * 8
 }
 
 /// Write `struct stat` (x86-64, 144 bytes) for node `n` at user `st`.
