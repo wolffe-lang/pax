@@ -42,6 +42,7 @@ import select
 import shutil
 import socket
 import struct
+import subprocess
 import sys
 import time
 
@@ -128,9 +129,11 @@ def commands(path):
     return out
 
 
-def run(root, argv, trace):
+def run(root, argv, trace, peer_pid):
     """Run argv chrooted in root (under strace when `trace` names a
-    file); its output and exit status."""
+    file); its output and exit status. A program still running 20 s
+    after the script at the other end has ended is killed: nothing more
+    will come for it."""
     r, w = os.pipe()
     pid = os.fork()
     if pid == 0:
@@ -154,16 +157,39 @@ def run(root, argv, trace):
         os._exit(127)
     os.close(w)
     data = b""
+    gone = None
     while True:
-        chunk = os.read(r, 65536)
-        if not chunk:
+        ready, _, _ = select.select([r], [], [], 1.0)
+        if ready:
+            chunk = os.read(r, 65536)
+            if not chunk:
+                break
+            data += chunk
+            continue
+        if gone is None and peer_ended(peer_pid):
+            gone = time.time()
+        if gone is not None and time.time() - gone > 20:
+            data += b"linux-net: killed: the script at the other end ended 20 s ago\n"
+            subprocess.run([tool("pkill"), "-9", "-P", str(pid)], check=False)
+            os.kill(pid, 9)
             break
-        data += chunk
     os.close(r)
     _, st = os.waitpid(pid, 0)
     if os.WIFSIGNALED(st):
         return data, "signal %d" % os.WTERMSIG(st)
     return data, str(os.WEXITSTATUS(st))
+
+
+PEER_STATUS = []
+
+
+def peer_ended(peer_pid):
+    """Whether the script's process has ended (its status kept)."""
+    if not PEER_STATUS:
+        pid, st = os.waitpid(peer_pid, os.WNOHANG)
+        if pid:
+            PEER_STATUS.append(st)
+    return bool(PEER_STATUS)
 
 
 def play(tap, soak, peer_out):
@@ -187,6 +213,9 @@ def play(tap, soak, peer_out):
             code = 0
         except mod.Fail as x:
             print("net-peer: FAIL " + str(x))
+    except BaseException:
+        import traceback
+        traceback.print_exc(file=sys.stdout)
     finally:
         sys.stdout.flush()
         os._exit(code)
@@ -220,7 +249,7 @@ def main(argv):
 
     for k, cmd in enumerate(cmds, 1):
         trace = os.path.join(outdir, "%d.strace.raw" % k) if strace else None
-        data, rc = run(root, cmd, trace)
+        data, rc = run(root, cmd, trace, peer_pid)
         open(os.path.join(outdir, "%d.out" % k), "wb").write(data)
         open(os.path.join(outdir, "%d.rc" % k), "w").write(rc + "\n")
         line = "%d: %s -> %s, %d bytes" % (k, " ".join(cmd), rc, len(data))
@@ -244,13 +273,9 @@ def main(argv):
     # The script has said its last word by now, or is still waiting for
     # a program that will not come.
     deadline = time.time() + 10
-    status = None
-    while time.time() < deadline:
-        pid, st = os.waitpid(peer_pid, os.WNOHANG)
-        if pid:
-            status = st
-            break
+    while time.time() < deadline and not peer_ended(peer_pid):
         time.sleep(0.1)
+    status = PEER_STATUS[0] if PEER_STATUS else None
     if status is None:
         os.kill(peer_pid, 9)
         os.waitpid(peer_pid, 0)
