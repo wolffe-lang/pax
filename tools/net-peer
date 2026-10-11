@@ -2,7 +2,7 @@
 # net-peer — the other end of PAX's network cable (px21, tests/mpx4-net's
 # `peer` way).
 #
-#   tools/net-peer --listen PORT --qemu PORT [--soak N] [--boot SECONDS]
+#   tools/net-peer --listen PORT --qemu PORT [--soak N] [--boot SECONDS] [--udp]
 #
 # QEMU is started with `-netdev socket,id=…,udp=127.0.0.1:<listen>,
 # localaddr=127.0.0.1:<qemu>`: every Ethernet frame the guest sends is
@@ -73,13 +73,50 @@
 #   B10 --soak N echo requests (10000), each answered before the next
 #   B11 a frame of type 0x88b5: the kernel stops serving
 #
+# **--udp** (px22, tests/mpx4-udp) plays the other end of the UDP
+# witnesses instead (user/net/, run by kernel/kmain_sockets.lu from its
+# run list), as the gateway 10.0.2.2, the DNS server 10.0.2.3
+# (52:55:0a:00:02:03), the on-link host and the host behind the gateway.
+# Every frame PAX sends is rebuilt from its meaning — the ports, the
+# data, the next identification — and held to its exact bytes, both
+# checksums recomputed:
+#
+#   U1  `udpecho 7 10.0.2.2 9099` says "ready" from port 7 to 10.0.2.2
+#       port 9099; then datagrams of 1, 2, 64, 512 and 1472 bytes from
+#       10.0.2.2 port 40000 each come back byte for byte (RFC 862)
+#   U2  --soak N (10000) more, 56 bytes each, one at a time; then "quit"
+#   U3  `udpclient 10.0.2.2 9099`: four datagrams from one ephemeral
+#       port (32768-60999), each answered with its bytes reversed, the
+#       fourth 1472 bytes; a fifth from another ephemeral port
+#   U4  `udpsoak 10.0.2.2 9099 N`: N datagrams of 64 bytes, each
+#       answered reversed
+#   U5  a second udpecho says "ready" to port 9098, and is asked from
+#       10.0.2.100 and from 192.0.2.1 by way of the gateway; with a
+#       datagram that carries no checksum (the answer carries one); with
+#       no data; with bytes after the datagram's end; to the subnet's
+#       broadcast address in a broadcast frame
+#   U6  the malformed, none answered and none delivered: 4 bytes where
+#       8 are the least; a length of 7; a length over the datagram's; a
+#       wrong checksum; destination port 0
+#   U7  nobody listening (port 9): of five datagrams at once the first
+#       alone draws a destination unreachable, code 3, quoting its
+#       header and 8 bytes; one to the subnet's broadcast and one in a
+#       broadcast frame draw none; then "quit"
+#   U8  `resolve 10.0.2.3 pax.test`: an RFC 1035 query with one A
+#       question from an ephemeral port to 10.0.2.3 port 53, answered
+#       with one A record, 192.0.2.53
+#
+# tools/linux-net runs this same script against Linux on a tap device
+# (the reference side): there it only plays — what Linux puts in its
+# own headers is Linux's — and checks each datagram's ports and data.
+#
 # Prints one `net-peer: ok <step> …` line per step and, last, `net-peer:
 # PASS …` or `net-peer: FAIL <what>, with the expected and found bytes`.
 # Exit 0 on PASS, 1 on FAIL, 2 on a usage error.
 #
-# Written from RFC 791, RFC 792, RFC 826, RFC 894, RFC 1071, RFC 1122
-# and QEMU's documentation of `-netdev socket`. No network stack's
-# source.
+# Written from RFC 768, RFC 791, RFC 792, RFC 826, RFC 862, RFC 894,
+# RFC 1035, RFC 1071, RFC 1122 and QEMU's documentation of `-netdev
+# socket`. No network stack's source.
 import os
 import socket
 import struct
@@ -100,14 +137,34 @@ class Fail(Exception):
     pass
 
 
-class Peer:
-    def __init__(self, listen, qemu, boot):
+class SocketWire:
+    """QEMU's `-netdev socket,udp=…`: a frame is a UDP datagram on this
+    host's loopback."""
+
+    def __init__(self, listen, qemu):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
         self.sock.bind(("127.0.0.1", listen))
         self.to = ("127.0.0.1", qemu)
+
+    def send(self, f):
+        self.sock.sendto(f, self.to)
+
+    def recv(self, timeout):
+        self.sock.settimeout(max(timeout, 0.001))
+        try:
+            return self.sock.recvfrom(4096)[0]
+        except socket.timeout:
+            return None
+
+
+class Peer:
+    def __init__(self, wire, boot, strict=True):
+        self.wire = wire
+        self.strict = strict  # hold PAX's frames to their bytes (False: the other end is Linux)
+        self.started = False
         self.boot = boot
-        self.macs = {px.PEER_IP: px.PEER_MAC, px.GW_IP: px.GW_MAC}
+        self.macs = {px.PEER_IP: px.PEER_MAC, px.GW_IP: px.GW_MAC, px.DNS_IP: px.DNS_MAC}
         self.silent_for = {px.NOBODY_IP}
         self.asked = {}  # target -> [times]
         self.last_ident = None
@@ -121,14 +178,10 @@ class Peer:
 
     # --- the wire ---------------------------------------------------------
     def send(self, f, pad=True):
-        self.sock.sendto(px.pad60(f) if pad else f, self.to)
+        self.wire.send(px.pad60(f) if pad else f)
 
     def recv(self, timeout):
-        self.sock.settimeout(max(timeout, 0.001))
-        try:
-            return self.sock.recvfrom(4096)[0]
-        except socket.timeout:
-            return None
+        return self.wire.recv(timeout)
 
     def fail(self, what, found=None, want=None):
         msg = what
@@ -146,6 +199,12 @@ class Peer:
         """An ARP frame from PAX that is not a reply this script waits
         for: it must be a request, exact; answer it for whom we play."""
         target = f[38:42]
+        if not self.strict:
+            # Linux's own request: answered when it is one, for whom we play.
+            if len(f) >= 42 and px.be16(f, 20) == 1 and target in self.macs and target not in self.silent_for:
+                m = self.macs[target]
+                self.send(px.arp(f[6:12], m, 2, m, target, f[22:28], f[28:32]))
+            return
         if f != px.pax_arp_request(target):
             self.fail("an ARP frame from PAX that is not its request for %s, byte for byte" % px.dotted(target), f, px.pax_arp_request(target))
         self.asked.setdefault(target, []).append(time.time())
@@ -449,7 +508,7 @@ class Peer:
         data = px.pattern(56)
         for i in range(soak):
             f = px.frame(px.PAX_MAC, px.PEER_MAC, px.ipv4(P, px.PAX_IP, 1, e(8, 0x50aa, i & 0xffff, data), ident=i & 0xffff))
-            self.sock.sendto(f, self.to)
+            self.wire.send(f)
             want = px.echo_reply_to(f, 20, 84, self.next_ident & 0xffff, self.macs[P])
             got = self.next_from_pax(5.0)
             if got != want:
@@ -466,23 +525,204 @@ class Peer:
         print("net-peer: ok B11 told the kernel to stop serving")
 
 
+
+    # --- UDP (px22): the other end of user/net's witnesses -------------------
+    def udp_in(self, timeout, what):
+        """The next UDP datagram from PAX: (source port, destination
+        address, destination port, data). ARP requests are answered on
+        the way. Strict: the frame is rebuilt and held to its bytes, and
+        nothing else may come. Not strict (Linux): whatever else the
+        station sends is passed over."""
+        end = time.time() + timeout
+        while True:
+            f = self.recv(end - time.time())
+            if f is None:
+                self.fail("nothing came for %s in %.0f s" % (what, timeout))
+            if f[6:12] != px.PAX_MAC:
+                if self.strict:
+                    self.fail("a frame that is not from PAX's address", f)
+                continue
+            kind = f[12:14]
+            if kind == b"\x08\x06":
+                self.arp_from_pax(f)
+                self.started = True
+                continue
+            if kind != b"\x08\x00" or len(f) < 42 or f[23] != 17 or f[26:30] != px.PAX_IP:
+                if not self.strict:
+                    continue
+                if not self.started and kind not in (b"\x08\x00", px.EXPERIMENTAL):
+                    self.before += 1  # the firmware's, before the kernel
+                    continue
+                self.fail("%s: a frame from PAX that is not a UDP datagram" % what, f)
+            self.started = True
+            ihl, total = (f[14] & 15) * 4, px.be16(f, 16)
+            h = f[14:14 + total]
+            u = h[ihl:]
+            if px.csum(h[:ihl]) != 0 or len(u) < 8 or px.be16(u, 4) != len(u) or px.udp_sum(h[12:16], h[16:20], u) != 0 or px.be16(u, 6) == 0:
+                self.fail("%s: a UDP datagram from PAX with a wrong length or checksum, or none" % what, f)
+            sport, dport, data = px.be16(u, 0), px.be16(u, 2), u[8:]
+            dst = h[16:20]
+            if self.strict:
+                hop = px.next_hop(dst)
+                if hop not in self.macs:
+                    self.fail("%s: a datagram for %s, which this script does not play" % (what, px.dotted(dst)), f)
+                want = px.udp_from_pax(dst, sport, dport, data, self.next_ident, self.macs[hop])
+                if f != want:
+                    self.fail("%s: not PAX's datagram (port %d to %s port %d, %d bytes, identification %d), byte for byte"
+                              % (what, sport, px.dotted(dst), dport, len(data), self.next_ident), f, want)
+                self.note_ident(f)
+            return sport, dst, dport, data
+
+    def udp_out(self, src_ip, sport, dport, data, dst_ip=px.PAX_IP, check=None, length=None, trailer=b"", **kw):
+        """Send PAX one UDP datagram from `src_ip` (by way of whoever is
+        its next hop back). Returns the frame."""
+        f = self.datagram(src_ip, px.udp(sport, dport, data, src_ip, dst_ip, check=check, length=length) + trailer,
+                          dst_ip=dst_ip, proto=17, **kw)
+        self.send(f)
+        return f
+
+    def echoed(self, src_ip, sport, data, what, back=None, **kw):
+        """Ask PAX's echo server from `src_ip` port `sport` and hold the
+        answer: `back` (default: the data) from port 7 to the asker."""
+        self.udp_out(src_ip, sport, px.ECHO_PORT, data, **kw)
+        p, dst, dport, got = self.udp_in(10.0, "the echo of " + what)
+        want = data if back is None else back
+        if (p, dst, dport, got) != (px.ECHO_PORT, src_ip, sport, want):
+            self.fail("%s: port %d to %s port %d with %d bytes came back, not port 7 to %s port %d with the %d sent"
+                      % (what, p, px.dotted(dst), dport, len(got), px.dotted(src_ip), sport, len(want)))
+        self.tally("udp")
+
+    def dropped(self, cause, what, f):
+        """`f` was sent and PAX must drop it for `cause`, silently."""
+        verdict = px.judge_ip(px.pad60(f))[0]
+        if verdict != cause:
+            self.fail("%s: the model calls this %s, the test meant %s" % (what, verdict, cause), f)
+        self.tally(cause)
+
+    def ready(self, port, timeout):
+        p, dst, dport, data = self.udp_in(timeout, "udpecho's \"ready\" to port %d" % port)
+        if (p, dst, dport, data) != (px.ECHO_PORT, px.GW_IP, port, b"ready"):
+            self.fail("not \"ready\" from port 7 to 10.0.2.2 port %d: port %d to %s port %d, %r" % (port, p, px.dotted(dst), dport, data[:40]))
+
+    def udp_script(self, soak):
+        G, P, A = px.GW_IP, px.PEER_IP, px.ASKER_PORT
+        # U1: the echo server, asked from the gateway's address.
+        self.ready(px.SERVICE_PORT, self.boot)
+        for d in px.echo_battery():
+            self.echoed(G, A, d, "%d bytes" % len(d))
+        print("net-peer: ok U1 \"ready\" from port 7; 1, 2, 64, 512 and 1472 bytes echoed, each datagram exact")
+        # U2: the soak in.
+        t0 = time.time()
+        for i in range(soak):
+            self.echoed(G, A, px.soak_datagram(i), "datagram %d of the soak" % i)
+        span = time.time() - t0
+        self.echoed(G, A, b"quit", "\"quit\"")
+        print("net-peer: ok U2 %d datagrams echoed, each exact, in %.2f s (%d a second by this script's clock); \"quit\""
+              % (soak, span, soak / span if span > 0 else 0))
+        # U3: the client. Its server answers each datagram reversed.
+        script = px.client_script()
+        first = None
+        for k, want in enumerate(script):
+            p, dst, dport, data = self.udp_in(60.0, "udpclient's datagram %d" % (k + 1))
+            if (dst, dport, data) != (G, px.SERVICE_PORT, want) or p not in px.EPHEMERAL:
+                self.fail("U3: datagram %d: port %d to %s port %d, %d bytes (%r…); %d bytes from an ephemeral port to 10.0.2.2 port %d were due"
+                          % (k + 1, p, px.dotted(dst), dport, len(data), data[:24], len(want), px.SERVICE_PORT))
+            if k == 0:
+                first = p
+            elif (k < 4) != (p == first):
+                self.fail("U3: datagram %d came from port %d; the connected socket's was %d and the last datagram's socket is another" % (k + 1, p, first))
+            self.udp_out(G, px.SERVICE_PORT, p, data[::-1])
+            self.tally("udp")
+        print("net-peer: ok U3 udpclient's five datagrams exact (four from one ephemeral port, 1472 bytes the fourth; the fifth from another), each answered reversed")
+        # U4: the soak out.
+        t0 = time.time()
+        for i in range(soak):
+            p, dst, dport, data = self.udp_in(60.0 if i == 0 else 10.0, "udpsoak's datagram %d" % i)
+            if (dst, dport, data) != (G, px.SERVICE_PORT, px.soak_request(i)) or p not in px.EPHEMERAL:
+                self.fail("U4: datagram %d: port %d to %s port %d, %d bytes: not the soak's" % (i, p, px.dotted(dst), dport, len(data)))
+            self.udp_out(G, px.SERVICE_PORT, p, data[::-1])
+        span = time.time() - t0
+        self.sent["udp"] = self.sent.get("udp", 0) + soak
+        print("net-peer: ok U4 udpsoak's %d datagrams exact, each answered reversed, in %.2f s (%d a second by this script's clock)"
+              % (soak, span, soak / span if span > 0 else 0))
+        # U5: the second echo server, asked more widely.
+        self.ready(px.EXTRA_PORT, 60.0)
+        self.echoed(P, 40001, b"from the on-link host", "a datagram from 10.0.2.100")
+        self.echoed(px.FAR_IP, 40002, b"from behind the gateway", "a datagram from 192.0.2.1", ttl=63)
+        self.echoed(G, A, b"no checksum made", "a datagram with no checksum", check=0)
+        self.echoed(G, A, b"", "a datagram with no data")
+        self.echoed(G, A, b"the datagram", "a datagram with 9 bytes after its end", trailer=b"not in it")
+        self.echoed(G, A, b"to everyone on the subnet", "a datagram to 10.0.2.255 in a broadcast frame", dst_ip=px.SUBNET_BCAST, dst_mac=px.BCAST)
+        print("net-peer: ok U5 echoed: from 10.0.2.100; from 192.0.2.1 by way of the gateway; with no checksum (the answer carries one); "
+              "with no data; with bytes after its end; to 10.0.2.255 in a broadcast frame")
+        # U6: the malformed. None is answered; the echo after them must
+        # be PAX's very next datagram.
+        self.dropped("udp.short", "a 4-byte UDP datagram", self.send_raw(G, b"\x9c\x40\x00\x07"))
+        self.dropped("udp.length", "a length of 7", self.udp_out(G, A, px.ECHO_PORT, b"length 7", length=7, check=0))
+        self.dropped("udp.length", "a length over the datagram's", self.udp_out(G, A, px.ECHO_PORT, b"length 200", length=200, check=0))
+        self.dropped("udp.checksum", "a wrong checksum", self.udp_out(G, A, px.ECHO_PORT, b"wrong sum", check=0x1234))
+        self.dropped("udp.port-zero", "destination port 0", self.udp_out(G, A, 0, b"port 0"))
+        self.echoed(P, 40001, b"fence 1", "the datagram after the malformed (nothing may have been sent before it)")
+        print("net-peer: ok U6 five malformed datagrams (4 bytes; a length of 7; a length over the datagram's; a wrong checksum; port 0), none answered")
+        # U7: nobody listening.
+        time.sleep(1.3)
+        first = self.udp_out(P, 40001, px.DISCARD_PORT, b"is anybody there")
+        for k in range(4):
+            self.udp_out(P, 40001, px.DISCARD_PORT + 1 + k, b"or there")
+        self.tally("no-port")
+        self.sent["no-port"] += 4
+        if self.strict:
+            self.expect(px.port_unreachable_for(first, 20, len(first) - 14, self.next_ident, px.PEER_MAC),
+                        "PAX's port unreachable for the first of five datagrams to ports nobody holds")
+        self.echoed(P, 40001, b"fence 2", "the datagram after them")
+        time.sleep(1.3)
+        self.udp_out(P, 40001, px.DISCARD_PORT, b"everyone, port 9", dst_ip=px.SUBNET_BCAST, dst_mac=px.BCAST)
+        self.udp_out(P, 40001, px.DISCARD_PORT, b"a broadcast frame, port 9", dst_mac=px.BCAST)
+        self.sent["no-port"] += 2
+        self.echoed(P, 40001, b"fence 3", "the datagram after two that may draw no error")
+        self.echoed(G, A, b"quit", "\"quit\"")
+        print("net-peer: ok U7 nobody at port 9: 1 destination unreachable (code 3), exact; 4 held back by the limit; 2 to a broadcast address or frame drew none")
+        # U8: the resolver.
+        p, dst, dport, q = self.udp_in(60.0, "resolve's query")
+        asked = px.dns_question(q)
+        if (dst, dport) != (px.DNS_IP, px.DNS_PORT) or p not in px.EPHEMERAL or asked != (px.DNS_NAME, 1, 1) or not q[2] & 1:
+            self.fail("U8: not one A question for %s, recursion desired, from an ephemeral port to 10.0.2.3 port 53: port %d to %s port %d, %r"
+                      % (px.DNS_NAME, p, px.dotted(dst), dport, asked), q)
+        self.udp_out(px.DNS_IP, px.DNS_PORT, p, px.dns_answer(q), src_mac=px.DNS_MAC)
+        self.tally("udp")
+        print("net-peer: ok U8 a %d-byte query for %s (A, IN) from port %d to 10.0.2.3, answered %s" % (len(q), px.DNS_NAME, p, px.dotted(px.DNS_ANSWER)))
+
+    def send_raw(self, src_ip, payload):
+        """One datagram of protocol 17 with `payload` as it is."""
+        f = self.datagram(src_ip, payload, proto=17)
+        self.send(f)
+        return f
+
+
 def main(argv):
     opt = {"listen": None, "qemu": None, "soak": "10000", "boot": "150"}
+    udp = False
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a.startswith("--") and a[2:] in opt and i + 1 < len(argv):
+        if a == "--udp":
+            udp = True
+            i += 1
+        elif a.startswith("--") and a[2:] in opt and i + 1 < len(argv):
             opt[a[2:]] = argv[i + 1]
             i += 2
         else:
-            die("usage: net-peer --listen PORT --qemu PORT [--soak N] [--boot SECONDS]")
+            die("usage: net-peer --listen PORT --qemu PORT [--soak N] [--boot SECONDS] [--udp]")
     if opt["listen"] is None or opt["qemu"] is None:
-        die("usage: net-peer --listen PORT --qemu PORT [--soak N] [--boot SECONDS]")
-    peer = Peer(int(opt["listen"]), int(opt["qemu"]), float(opt["boot"]))
+        die("usage: net-peer --listen PORT --qemu PORT [--soak N] [--boot SECONDS] [--udp]")
+    peer = Peer(SocketWire(int(opt["listen"]), int(opt["qemu"])), float(opt["boot"]))
     sys.stdout.reconfigure(line_buffering=True)
     try:
-        peer.part_a()
-        peer.part_b(int(opt["soak"]))
+        if udp:
+            peer.udp_script(int(opt["soak"]))
+        else:
+            peer.part_a()
+            peer.part_b(int(opt["soak"]))
     except Fail as x:
         print("net-peer: FAIL " + str(x))
         return 1
