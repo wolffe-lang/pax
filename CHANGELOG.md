@@ -7,6 +7,50 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Readiness (px24).** A program may wait for more than one
+  descriptor. `kernel/ready` answers `poll` and `epoll_create1`,
+  `epoll_ctl` and `epoll_wait`: level-triggered, edge-triggered
+  (`EPOLLET`) and one-shot registrations, `EPOLLRDHUP`, the errnos
+  Linux gives for a duplicate, a missing entry, an object in itself
+  and a regular file, a registration that lasts as long as its open
+  file and is shared across `fork`; 16 epoll objects of 256
+  registrations each, held in frames given back at the last close
+  (`kernel/event`). `eventfd2` makes a counter a descriptor names.
+  Readiness is computed at the wait: every kind of descriptor says
+  which of POLLIN, POLLOUT, POLLERR, POLLHUP and POLLRDHUP hold (each
+  rule the one Linux answered a probe), a call that finds nothing
+  parks, and every change wakes every waiter to look again; a timeout
+  is a deadline in the thread's own word, and a handled signal ends
+  `poll` and `epoll_wait` with -EINTR. With them, the rest of what
+  wolf's hosted runtime and lobo ask of Linux (both straced,
+  `notes/px24/linux/`): `writev`, `sigaltstack` (a handler installed
+  with SA_ONSTACK runs on the alternate stack), `sched_getaffinity`
+  (one CPU), `getrandom`'s flags, `getsockopt(SO_ACCEPTCONN)`,
+  -EALREADY for a second `connect` while one is under way, `F_SETFL`
+  on the console's descriptors; a waiting stream send's progress and
+  a wait's deadline are a thread's own, so two threads of a process
+  may each wait. Bounds raised: 128 descriptors a process, 512 open
+  files, 64 pipe buffers, 64 thread slots, 256 TCP control blocks, a
+  listen queue of 128. A reset connection keeps the bytes it had
+  received for its reader (measured on Linux; px23 threw them away).
+  Refused by name: `EPOLLEXCLUSIVE`, `EPOLLWAKEUP`, an epoll object
+  inside another, `EFD_SEMAPHORE`, `SS_AUTODISARM`. Not there, no
+  strace having shown them: `ppoll`, `select`, `epoll_pwait`, `readv`,
+  `sendmsg`, `recvmsg`, `timerfd`, `signalfd`. `tests/mpx4-ready`
+  runs eight static Linux programs unmodified, byte-identical to
+  Linux: five probes (`user/net/nbprobe.c`, `pollprobe.c`,
+  `epollprobe.c`, `evprobe.c`, `restprobe.c`); `epollecho`, a server
+  on `epoll` that holds 64 connections at once, is stormed twice —
+  every connection made ready together, each answered once and none
+  again without new bytes — and then serves 10,000 more with no
+  registration, descriptor, control block or frame left behind; and
+  `waitwolf`, a wolf server that serves twelve connections at once and
+  a wolf client that waits, through wolf's hosted runtime (twelve, and
+  six in one process, because wolf-lang#713 stalls a wolf program
+  past about sixteen parked tasks on one CPU); over loopback, against
+  `tools/net-peer --ready` and through QEMU's user-mode network with
+  `tools/ready-host`, both tiers, BIOS and UEFI.
+
 - **The writable tree (px27).** PAX's file tree is writable, in memory:
   `kernel/tree` keeps inodes (files whose bytes are frames under an
   index that grows with the file, with holes; directories of records)

@@ -574,15 +574,14 @@ programs that open AF_INET stream sockets (`tests/mpx4-tcp`,
   `sched.wake_pipes` on every change, and the call runs again. A
   `connect` in flight is marked on its block (`F_CONNECTING`) so the
   call run again finds its handshake and not a second one.
-- Not yet: `poll`, `select`, `epoll`, `eventfd`, threads and `futex`
-  (wolf's runtime waits with all five: a wolf program runs today only
-  when every accept and read finds what it asks for); `sendmsg`,
+- Not yet (px23; `poll`, `epoll` and `eventfd` are px24's, below, and
+  threads and `futex` px26's): `select`; `sendmsg`,
   `recvmsg`; `SO_LINGER`, `SO_KEEPALIVE`, `SO_RCVBUF`/`SO_SNDBUF`,
   `SO_RCVTIMEO` on a stream, `TCP_CORK`, `MSG_WAITALL`, `MSG_OOB`;
   window scaling, SACK, timestamps and PAWS, NewReno's partial-ACK
   rule, a delayed ACK, path MTU discovery, keep-alives; an ICMP error
-  delivered to a UDP socket; more than 64 control blocks or a listen
-  queue past 33; a closed connection whose peer acknowledges and never
+  delivered to a UDP socket; more than 256 control blocks or a listen
+  queue past 129 (64 and 33 before px24); a closed connection whose peer acknowledges and never
   opens its window stays until the peer goes.
 ## The writable tree (px27)
 
@@ -609,3 +608,54 @@ programs. `tests/mpx3-tree` holds it to Linux's tmpfs.
   `fallocate`, `statfs`. `execve` runs a file only while it is still
   the archive's own bytes.
 
+## Readiness (px24)
+
+`poll`, `epoll` and `eventfd`: what wolf's hosted runtime and lobo ask
+of Linux the moment a call must wait (`notes/px24-readiness.md`).
+
+| module | what |
+|---|---|
+| `event/` | new: 64 eventfd counters and 16 epoll objects (256 registrations each, in four frames an object holds while it lives); a registration is the open file and descriptor number it was added by, its events, its data, the two counts it last answered at; `forget` drops an open file's registrations at its last close |
+| `ready/` | new: `poll`, `epoll_create1`, `epoll_ctl`, `epoll_wait`, `eventfd2`, `sched_getaffinity`; the refusals by name; the books' line |
+| `files/` | kinds `K_EVENT` and `K_EPOLL`; `poll` and `poll_of`: what each kind of descriptor says (a pipe's two ends, a socketpair, a datagram socket, a stream socket through `tcp.poll`, an eventfd, the console, a file); `watch`; an eventfd's `read` and `write`; 128 descriptors in the area's second half, 512 open files, 64 pipes; the console's status flags |
+| `tcp/` | `poll`: a block's bits by its state, and two counts (arrivals; room come back after a send found none); 256 blocks, a listen queue of 128; a reset keeps what was received |
+| `udp/` | `poll` |
+| `sched/` | 64 slots; a thread's deadline word (`self_until`), alternate signal stack, `block_pipe_eintr`; console input wakes the threads in `poll` too |
+| `signal/` | `sigaltstack`; a handler with SA_ONSTACK starts at the alternate stack's top |
+| `socket/` | a waiting send's progress and a receive's deadline are the thread's; `SO_ACCEPTCONN`; -EALREADY |
+| `user/` | 7, 20, 131, 204, 232, 233, 290, 291; `writev`; `getrandom`'s flags; a wait in `poll` or `epoll_wait` is never restarted |
+
+- Layering: `user` → `ready` → `files` → `event`, and `files` → `tcp`,
+  `udp`, `console` as before. `event` imports nothing but `frames`: it
+  is storage and bookkeeping, so `files` can free an eventfd or an
+  epoll object at a last close without a cycle.
+- **Readiness is computed at the wait.** Nothing keeps a queue of
+  waiters and there is no ready list. A call that finds nothing
+  answers `files.WAIT`; the thread parks as a pipe's reader does, and
+  every change anywhere (`sched.wake_pipes`, sixteen call sites, and
+  `epoll_ctl`) makes every waiter ready to run its call again. No lock
+  is needed for it (a system call runs with IF clear on one CPU; the
+  eight lock words are all taken), and the one wake that could fall
+  between a look and a wait — the call's own traffic still on the
+  loopback queue — is px23's drain, after which the call runs again.
+  The cost is a call run for nothing: the books count them (`user:
+  ready: … waits <w>, empty <m> …`).
+- Level-triggered: an event is answered while it holds. Edge-triggered:
+  when it holds and a count has moved since the registration last
+  answered. The counts are each kind's own: a pipe's bytes written and
+  the times a read gave a writer room; a stream socket's RCV.NXT with
+  its state, and the times an acknowledgement made room after a send
+  had found none; a listener's connections become ready to accept; an
+  eventfd's adds and takes.
+- A registration is keyed by (open file, descriptor number), as
+  Linux's: a duplicate descriptor keeps it alive after the first is
+  closed, and it goes with the open file's last descriptor.
+- Not yet: `ppoll`, `select`, `pselect6`, `epoll_pwait`,
+  `epoll_pwait2`, `readv`, `sendmsg`, `recvmsg`, `timerfd`, `signalfd`
+  (no strace of lobo or of a wolf program shows one);
+  `EPOLLEXCLUSIVE`, `EPOLLWAKEUP`, nested epoll objects,
+  `EFD_SEMAPHORE`, `SS_AUTODISARM` (refused by name); the console or
+  `/dev/null` in an epoll object; wait queues an object (past about a
+  hundred waiting threads the wake-everyone rule would cost); memory
+  taken when a page is first touched (a wolf task's 8 MiB stack costs
+  2,072 frames at its `mmap`); AF_UNIX path sockets.
