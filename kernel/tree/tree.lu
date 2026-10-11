@@ -375,8 +375,10 @@ fn inode_new(mode: u64) -> u64 {
 
 /// Inode `i` is gone for good: its bytes given back, its record free.
 fn inode_free(i: u64) {
-    cut(i, 0)
     let dir = ig(i, I_MODE) & S_IFMT == S_IFDIR
+    if dir {
+        cut(i, 0) // PLANTED BREAK A (px27): a file's frames are kept when it goes
+    }
     let p = ig(i, I_PARENT)
     ip(i, I_MODE, 0)
     ip(i, I_NEXT, st(S_FREE))
