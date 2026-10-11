@@ -47,7 +47,7 @@
 #              (linked with -pthread)
 #   epollecho  an echo server on epoll, its driver, the storm, the soak
 #   pair       a server and its client as one line of a run list
-# and two wolf programs (user/net/*.lu), built `--release` by the pinned
+# and the wolf programs (user/net/*.lu), built `--release` by the pinned
 # wolf ($PAX_WOLF, else `wolf`) through a `cc` that adds -static, as
 # tools/mkwolf-hello does:
 #   tcpwolf    a listener, a client and one request served in one
@@ -55,6 +55,8 @@
 #   tcpwolfd   one request served to another machine
 #   waitwolf   px24: a server that serves every connection at once and a
 #              client that waits, through wolf's hosted runtime
+#   wolfecho   px28: a server that waits for one connection and answers
+#              each read with `the wolf heard: …`
 # and prints one line per file: `<name> <sha256> <bytes>`, also written
 # to OUTDIR/sums.txt.
 #
@@ -88,7 +90,7 @@ trap 'rm -rf "$w"' EXIT
 mkdir -p "$w/bin"
 printf '#!/bin/sh\nexec %s -static "$@"\n' "$(command -v "$cc")" > "$w/bin/cc"
 chmod +x "$w/bin/cc"
-for p in tcpwolf tcpwolfd waitwolf; do
+for p in tcpwolf tcpwolfd waitwolf wolfecho; do
     mkdir -p "$w/$p"
     cp "$PAX_ROOT/user/net/$p.lu" "$w/$p/$p.lu"
     (cd "$w/$p" && PATH="$w/bin:$PATH" "$wolf" build --release --no-cache "$p.lu" -o "$out/$p") >&2 || die "wolf build: $p"

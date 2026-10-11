@@ -1,0 +1,36 @@
+// wolfecho — a wolf program that waits for a connection and answers it
+// (px28): built for Linux by the pinned wolf (tools/mknet), linked
+// static, run unmodified. It listens on PORT (default 7070) on every
+// address, waits for one connection — in wolf's runtime, which parks
+// on epoll (px24) — and answers every read with `the wolf heard: …`
+// until the other end closes its half; then it closes and says how many
+// it answered. One connection, one task: well inside wolf-lang#713.
+//
+//   wolfecho [PORT]
+fn main() -> !int {
+    let args = env_args()
+    var port = "7070"
+    if args.len >= 1 {
+        port = args[0]
+    }
+    let srv = net_listen("0.0.0.0:{port}")?
+    let p = net_port(srv)?
+    print("wolfecho: listening on port {p}")
+    let conn = net_accept(srv)?
+    print("wolfecho: a connection")
+    var answered = 0
+    var open = true
+    while open {
+        let msg = net_read(conn, 256) else ""
+        if msg.len == 0 {
+            open = false
+        } else {
+            net_write(conn, "the wolf heard: {msg.trim()}\n")?
+            answered += 1
+        }
+    }
+    net_close(conn)?
+    net_close(srv)?
+    print("wolfecho: answered {answered}; the other end closed its half, so this end closed too")
+    0
+}
