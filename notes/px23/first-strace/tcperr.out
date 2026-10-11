@@ -1,0 +1,101 @@
+socket(AF_INET, SOCK_STREAM, IPPROTO_UDP): -EPROTONOSUPPORT
+socket(AF_INET, SOCK_STREAM, 9999): -EINVAL
+socket(AF_INET, SOCK_STREAM, 0) and (…, IPPROTO_TCP): ok ok
+a, SO_TYPE: 1 len 4
+a, SO_ERROR: 0 len 4
+fstat(a): ok
+a is a socket: yes, mode 140777
+lseek(a): -ESPIPE
+a, getsockname before bind: 0.0.0.0:0 len 16 family 2
+a, getpeername: -ENOTCONN
+a, recv: -ENOTCONN
+a, send MSG_NOSIGNAL: -EPIPE
+a, accept: -EINVAL
+shutdown(SHUT_WR), not connected: -ENOTCONN
+shutdown(7): -EINVAL
+bind(a, 127.0.0.1:4101): ok
+bind(a) again: -EINVAL
+bind(b, 127.0.0.1:4101), held: -EADDRINUSE
+setsockopt(b, SO_REUSEADDR, 1): ok
+b, SO_REUSEADDR: 1 len 4
+bind(b, 127.0.0.1:4101), held by one without SO_REUSEADDR: -EADDRINUSE
+bind(b, 10.9.9.9:4103), not ours: -EADDRNOTAVAIL
+bind(a datagram socket, 127.0.0.1:4101): ok
+bind(b, 127.0.0.1:0): ok
+b, getsockname: 127.0.0.1:ephemeral len 16 family 2
+listen(a, 4): ok
+listen(a, 8) again: ok
+connect(a listening socket): -EISCONN
+a listening socket, recv: -ENOTCONN
+a listening socket, send MSG_NOSIGNAL: -EPIPE
+listen(a socket with no port, 1): ok
+its getsockname: 0.0.0.0:ephemeral len 16 family 2
+connect(c, 127.0.0.1:4199), nobody listening: -ECONNREFUSED
+c, SO_ERROR: 0 len 4
+c, getpeername: -ENOTCONN
+connect(c, 127.0.0.1:4101), after the refusal: ok
+connect(c) again: -EISCONN
+listen(c, 1), connected: -EINVAL
+bind(c), connected: -EINVAL
+accept(a): ok from 127.0.0.1:ephemeral len 16
+s, getsockname: 127.0.0.1:4101 len 16 family 2
+s, getpeername: 127.0.0.1:ephemeral len 16 family 2
+c, getsockname: 127.0.0.1:ephemeral len 16 family 2
+c, getpeername: 127.0.0.1:4101 len 16 family 2
+s, SO_TYPE: 1 len 4
+accept(s), connected: -EINVAL
+send(c, 5): 5
+send(c, 7): 7
+s, MSG_PEEK: 12 bytes "hello, world"
+s, 3 bytes: 3 bytes "hel"
+s, the rest: 9 bytes "lo, world"
+s, MSG_DONTWAIT: -EAGAIN
+send(c, 0 bytes): 0
+write(s, 4): 4
+read(c): 4 bytes "back"
+send(a duplicate of c, 3): 3
+s: 3 bytes "dup"
+shutdown(c, SHUT_WR): ok
+send(c) after it: -EPIPE
+s, the end of the stream: 0 bytes ""
+s, again: 0 bytes ""
+send(s, 4), the other way still open: 4
+c: 4 bytes "late"
+shutdown(c, SHUT_WR) again: ok
+shutdown(c, SHUT_RD): ok
+c, after SHUT_RD: 0 bytes ""
+shutdown(s, SHUT_RDWR): ok
+s, after SHUT_RDWR: 0 bytes ""
+send(s) after it: -EPIPE
+c2, the peer closed: 0 bytes ""
+send(c2), to a closed peer: 1
+send(c2), after the reset: -EPIPE
+c2, SO_ERROR: 0 len 4
+c2, recv: 0 bytes ""
+send(c3, 6): 6
+c3, the peer closed with 6 bytes unread: -ECONNRESET
+c3, SO_ERROR: 0 len 4
+c3, again: 0 bytes ""
+send(c4), to a closed peer: 1
+a child's write(c4) after the reset: killed by signal 13
+write(c4), SIGPIPE ignored: -EPIPE
+o, SO_REUSEADDR: 0 len 4
+o, TCP_NODELAY: 0 len 4
+setsockopt(o, TCP_NODELAY, 1): ok
+o, TCP_NODELAY: 1 len 4
+setsockopt(o, TCP_NODELAY, 0): ok
+setsockopt(o, TCP_SYNCNT, 3): ok
+o, TCP_SYNCNT: 3 len 4
+setsockopt(o, TCP_SYNCNT, 256): -EINVAL
+setsockopt(o, TCP_USER_TIMEOUT, 5000): ok
+o, TCP_USER_TIMEOUT: 5000 len 4
+setsockopt(o, SOL_SOCKET, 9999): -ENOPROTOOPT
+setsockopt(o, IPPROTO_TCP, 9999): -ENOPROTOOPT
+getsockopt(o, IPPROTO_TCP, 9999): -ENOPROTOOPT
+setsockopt(o, SO_REUSEADDR, 2 bytes): -EINVAL
+c5, the peer closed: 0 bytes ""
+bind(127.0.0.1:4105) while a closed connection waits: -EADDRINUSE
+the same with SO_REUSEADDR: ok
+listen: ok
+bind(127.0.0.1:4105) with SO_REUSEADDR while another listens: -EADDRINUSE
+tcperr: done
