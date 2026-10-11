@@ -1,0 +1,409 @@
+//! event — eventfd counters and epoll objects (px24): the storage and
+//! the bookkeeping, below kernel/files. The system calls that use them
+//! are kernel/ready's; a descriptor that names one is kernel/files'.
+//!
+//! **An eventfd** (`eventfd(2)`) is one of 64 counters in boot/event.S's
+//! `pax_eventfds`: a 64-bit value a `write` adds to and a `read` takes
+//! whole and leaves zero. It can be read while it is not zero and
+//! written while 1 can still be added (the value never passes
+//! 0xfffffffffffffffe). Each counter also counts how often it was added
+//! to and how often it was taken: what an edge-triggered registration
+//! compares (below). No semaphore mode: nothing asks for it.
+//!
+//! **An epoll object** (`epoll(7)`) is one of 16 records in
+//! `pax_epolls`, each with four frames from kernel/frames, taken when
+//! it is made and given back when its last descriptor closes: room for
+//! 256 registrations of eight words. A registration names the OPEN FILE
+//! it watches (kernel/files' index + 1) and the descriptor number it
+//! was added by — the pair Linux keys a registration by — and holds the
+//! events asked, the caller's 64 data bits, the two counts the watched
+//! thing had when the registration last answered (for EPOLLET), and
+//! whether EPOLLONESHOT has spent it. A registration lasts as long as
+//! its open file: kernel/files calls `forget` when an open file's last
+//! descriptor closes, and it is dropped from every object.
+//!
+//! **Nothing here waits and nothing here is a queue.** Readiness is
+//! computed by kernel/ready when `poll` or `epoll_wait` asks; a thread
+//! that finds nothing parks as any waiting call does and runs again at
+//! the next change anywhere (kernel/sched's `wake_pipes`). So these
+//! tables are touched only inside system calls, with IF clear, on one
+//! CPU, and take no lock.
+//!
+//! The counts (`count`) are what kernel/ready's books line prints. No
+//! region, no heap. Written from eventfd(2), epoll(7), epoll_ctl(2).
+//! No Linux source; no other kernel's source.
+
+use frames
+
+extern "c" let pax_event_state: *u64
+extern "c" let pax_eventfds: *u64
+extern "c" let pax_epolls: *u64
+
+/// How many eventfd counters there are; also `ev_new`'s answer when
+/// none is free.
+pub const EVENTFDS: u64 = 64
+/// How many epoll objects there are; also `ep_new`'s answer when none
+/// is free or no frame is.
+pub const EPOLLS: u64 = 16
+/// Registrations an epoll object holds; also `ep_find`'s and `ep_add`'s
+/// answer for none.
+pub const REGS: u64 = 256
+/// The greatest value an eventfd holds.
+pub const EV_MAX: u64 = 0xfffffffffffffffe
+
+const PAGE: u64 = 4096
+const EP_PAGES: u64 = 4
+const REG_WORDS: u64 = 8
+
+// An eventfd's words.
+const V_USE: u64 = 0
+const V_VALUE: u64 = 1
+const V_ADDS: u64 = 2
+const V_TAKES: u64 = 3
+const EV_WORDS: u64 = 4
+
+// An epoll object's words.
+const E_USE: u64 = 0
+const E_FRAME: u64 = 1 // four: the frames' physical addresses
+const E_COUNT: u64 = 5 // registrations held
+const E_HIGH: u64 = 6 // the first slot never used
+const E_NEXT: u64 = 7 // the slot the next answer starts at
+const EP_WORDS: u64 = 8
+
+/// A registration's words (`reg`, `put_reg`): the open file watched
+/// (index + 1; 0 a free slot).
+pub const R_OF: u64 = 0
+/// The descriptor number it was added by.
+pub const R_FD: u64 = 1
+/// The events asked, EPOLLET and EPOLLONESHOT among them.
+pub const R_EVENTS: u64 = 2
+/// The caller's data.
+pub const R_DATA: u64 = 3
+/// The watched thing's count of arrivals when this last answered.
+pub const R_SEEN_IN: u64 = 4
+/// Its count of room come back when this last answered.
+pub const R_SEEN_OUT: u64 = 5
+/// 0 armed and never answered, 1 armed and answered, 2 spent (one-shot).
+pub const R_STATE: u64 = 6
+
+/// `R_STATE`: armed, and it has not answered since it was armed.
+pub const FRESH: u64 = 0
+/// Armed, and it has answered.
+pub const ANSWERED: u64 = 1
+/// EPOLLONESHOT has answered once: silent until modified.
+pub const SPENT: u64 = 2
+
+/// The counts (`count`): eventfd counters live.
+pub const C_EVENTFDS: u64 = 0
+/// Epoll objects live.
+pub const C_EPOLLS: u64 = 1
+/// Registrations live, in every object together.
+pub const C_REGS: u64 = 2
+/// Eventfd counters made since boot.
+pub const C_EV_MADE: u64 = 3
+/// Epoll objects made since boot.
+pub const C_EP_MADE: u64 = 4
+/// Registrations added since boot.
+pub const C_ADDED: u64 = 5
+/// Registrations dropped because their open file closed.
+pub const C_FORGOTTEN: u64 = 6
+/// `poll` and `epoll_wait` calls that answered at once or after a wait.
+pub const C_ANSWERS: u64 = 7
+/// Times such a call parked its thread.
+pub const C_WAITS: u64 = 8
+/// Times such a call, run again after a wake, found nothing and parked
+/// again.
+pub const C_EMPTY: u64 = 9
+/// Events `epoll_wait` handed out.
+pub const C_EVENTS: u64 = 10
+/// Refusals by name (a flag or an operation PAX does not take).
+pub const C_REFUSED: u64 = 11
+/// Timeouts: calls that answered 0 because their deadline came.
+pub const C_TIMEOUTS: u64 = 12
+
+fn sw(i: u64) -> u64 {
+    // # Safety: i < 32, inside boot/event.S's pax_event_state.
+    unsafe { ((pax_event_state as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_sw(i: u64, v: u64) {
+    // # Safety: as `sw`.
+    unsafe { ((pax_event_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+/// Count `i` (C_*).
+pub fn count(i: u64) -> u64 {
+    sw(i)
+}
+
+/// Count `i` and one more.
+pub fn bump(i: u64) {
+    put_sw(i, sw(i) + 1)
+}
+
+fn less(i: u64) {
+    put_sw(i, sw(i) - 1)
+}
+
+// --- eventfd ------------------------------------------------------------------
+
+fn vw(v: u64, w: u64) -> u64 {
+    // # Safety: v < EVENTFDS, w < EV_WORDS: inside pax_eventfds.
+    unsafe { ((pax_eventfds as u64 + (v * EV_WORDS + w) * 8) as *u64).read_volatile() }
+}
+
+fn put_vw(v: u64, w: u64, x: u64) {
+    // # Safety: as `vw`.
+    unsafe { ((pax_eventfds as u64 + (v * EV_WORDS + w) * 8) as *u64).write_volatile(x) }
+}
+
+/// A new counter holding `init`: its number, or EVENTFDS when none is
+/// free.
+pub fn ev_new(init: u64) -> u64 {
+    var v: u64 = 0
+    while v < EVENTFDS && vw(v, V_USE) != 0 {
+        v += 1
+    }
+    if v == EVENTFDS {
+        return EVENTFDS
+    }
+    put_vw(v, V_USE, 1)
+    put_vw(v, V_VALUE, init)
+    put_vw(v, V_ADDS, 0)
+    put_vw(v, V_TAKES, 0)
+    bump(C_EVENTFDS)
+    bump(C_EV_MADE)
+    v
+}
+
+/// Counter `v` freed (its last descriptor closed).
+pub fn ev_free(v: u64) {
+    if v < EVENTFDS && vw(v, V_USE) != 0 {
+        put_vw(v, V_USE, 0)
+        put_vw(v, V_VALUE, 0)
+        less(C_EVENTFDS)
+    }
+}
+
+/// Counter `v`'s value.
+pub fn ev_value(v: u64) -> u64 {
+    vw(v, V_VALUE)
+}
+
+/// Take counter `v`'s value: what it held; it holds zero after.
+pub fn ev_take(v: u64) -> u64 {
+    let x = vw(v, V_VALUE)
+    put_vw(v, V_VALUE, 0)
+    put_vw(v, V_TAKES, vw(v, V_TAKES) + 1)
+    x
+}
+
+/// Add `x` to counter `v`: false when the sum would pass EV_MAX
+/// (nothing added).
+pub fn ev_add(v: u64, x: u64) -> bool {
+    let have = vw(v, V_VALUE)
+    if x > EV_MAX - have {
+        return false
+    }
+    put_vw(v, V_VALUE, have + x)
+    put_vw(v, V_ADDS, vw(v, V_ADDS) + 1)
+    true
+}
+
+/// Counter `v`'s two counts: how often it was added to, how often
+/// taken.
+pub fn ev_counts(v: u64) -> (u64, u64) {
+    (vw(v, V_ADDS), vw(v, V_TAKES))
+}
+
+// --- epoll --------------------------------------------------------------------
+
+fn ew(e: u64, w: u64) -> u64 {
+    // # Safety: e < EPOLLS, w < EP_WORDS: inside pax_epolls.
+    unsafe { ((pax_epolls as u64 + (e * EP_WORDS + w) * 8) as *u64).read_volatile() }
+}
+
+fn put_ew(e: u64, w: u64, x: u64) {
+    // # Safety: as `ew`.
+    unsafe { ((pax_epolls as u64 + (e * EP_WORDS + w) * 8) as *u64).write_volatile(x) }
+}
+
+/// The address of word `w` of registration `r` of object `e`.
+fn reg_at(e: u64, r: u64, w: u64) -> u64 {
+    let i = r * REG_WORDS + w
+    frames.hhdm() + ew(e, E_FRAME + i / 512) + (i % 512) * 8
+}
+
+/// Word `w` (R_*) of registration `r` of epoll object `e`.
+pub fn reg(e: u64, r: u64, w: u64) -> u64 {
+    // # Safety: e is in use (its four frames are its own), r < REGS,
+    // w < REG_WORDS: inside one of the frames, through the HHDM.
+    unsafe { (reg_at(e, r, w) as *u64).read_volatile() }
+}
+
+pub fn put_reg(e: u64, r: u64, w: u64, x: u64) {
+    // # Safety: as `reg`.
+    unsafe { (reg_at(e, r, w) as *u64).write_volatile(x) }
+}
+
+/// A new epoll object, empty: its number, or EPOLLS when none is free
+/// or its four frames are not to be had.
+pub fn ep_new() -> u64 {
+    var e: u64 = 0
+    while e < EPOLLS && ew(e, E_USE) != 0 {
+        e += 1
+    }
+    if e == EPOLLS {
+        return EPOLLS
+    }
+    var k: u64 = 0
+    while k < EP_PAGES {
+        let pa = frames.alloc() else 0
+        if pa == 0 {
+            while k > 0 {
+                k -= 1
+                frames.free(ew(e, E_FRAME + k))
+                put_ew(e, E_FRAME + k, 0)
+            }
+            return EPOLLS
+        }
+        put_ew(e, E_FRAME + k, pa)
+        k += 1
+    }
+    put_ew(e, E_COUNT, 0)
+    put_ew(e, E_HIGH, 0)
+    put_ew(e, E_NEXT, 0)
+    put_ew(e, E_USE, 1)
+    bump(C_EPOLLS)
+    bump(C_EP_MADE)
+    e
+}
+
+/// Epoll object `e` freed with every registration it holds (its last
+/// descriptor closed).
+pub fn ep_free(e: u64) {
+    if e >= EPOLLS || ew(e, E_USE) == 0 {
+        return
+    }
+    put_sw(C_REGS, sw(C_REGS) - ew(e, E_COUNT))
+    var k: u64 = 0
+    while k < EP_PAGES {
+        frames.free(ew(e, E_FRAME + k))
+        put_ew(e, E_FRAME + k, 0)
+        k += 1
+    }
+    put_ew(e, E_COUNT, 0)
+    put_ew(e, E_HIGH, 0)
+    put_ew(e, E_USE, 0)
+    less(C_EPOLLS)
+}
+
+/// Registrations epoll object `e` holds.
+pub fn ep_count(e: u64) -> u64 {
+    ew(e, E_COUNT)
+}
+
+/// The first slot of object `e` that was never used: every registration
+/// lies below it.
+pub fn ep_high(e: u64) -> u64 {
+    ew(e, E_HIGH)
+}
+
+/// The slot `epoll_wait`'s next answer starts looking at, so that with
+/// more ready than a caller has room for each has its turn.
+pub fn ep_next(e: u64) -> u64 {
+    ew(e, E_NEXT)
+}
+
+pub fn set_ep_next(e: u64, r: u64) {
+    put_ew(e, E_NEXT, r)
+}
+
+/// The registration of open file `of` (index + 1) by descriptor `fd` in
+/// object `e`: its slot, or REGS when there is none.
+pub fn ep_find(e: u64, of: u64, fd: u64) -> u64 {
+    let high = ew(e, E_HIGH)
+    var r: u64 = 0
+    while r < high {
+        if reg(e, r, R_OF) == of && reg(e, r, R_FD) == fd {
+            return r
+        }
+        r += 1
+    }
+    REGS
+}
+
+/// A new registration in object `e`: its slot, armed and never
+/// answered; REGS when the object is full.
+pub fn ep_add(e: u64, of: u64, fd: u64, events: u64, data: u64) -> u64 {
+    let high = ew(e, E_HIGH)
+    var r: u64 = 0
+    while r < high && reg(e, r, R_OF) != 0 {
+        r += 1
+    }
+    if r == REGS {
+        return REGS
+    }
+    if r == high {
+        put_ew(e, E_HIGH, high + 1)
+    }
+    put_reg(e, r, R_OF, of)
+    put_reg(e, r, R_FD, fd)
+    put_reg(e, r, R_EVENTS, events)
+    put_reg(e, r, R_DATA, data)
+    put_reg(e, r, R_SEEN_IN, 0)
+    put_reg(e, r, R_SEEN_OUT, 0)
+    put_reg(e, r, R_STATE, FRESH)
+    put_ew(e, E_COUNT, ew(e, E_COUNT) + 1)
+    bump(C_REGS)
+    bump(C_ADDED)
+    r
+}
+
+/// Registration `r` of object `e` dropped.
+pub fn ep_del(e: u64, r: u64) {
+    if reg(e, r, R_OF) == 0 {
+        return
+    }
+    put_reg(e, r, R_OF, 0)
+    put_ew(e, E_COUNT, ew(e, E_COUNT) - 1)
+    less(C_REGS)
+    // The top of the used slots falls back over free ones.
+    var high = ew(e, E_HIGH)
+    while high > 0 && reg(e, high - 1, R_OF) == 0 {
+        high -= 1
+    }
+    put_ew(e, E_HIGH, high)
+}
+
+/// Open file `of` (index + 1) is closing for good: every registration
+/// that watches it goes, in every object (epoll(7): a registration
+/// lasts as long as the open file description). Returns how many went.
+pub fn forget(of: u64) -> u64 {
+    if sw(C_REGS) == 0 {
+        return 0
+    }
+    var n: u64 = 0
+    var e: u64 = 0
+    while e < EPOLLS {
+        if ew(e, E_USE) != 0 && ew(e, E_COUNT) != 0 {
+            n += forget_in(e, of)
+        }
+        e += 1
+    }
+    n
+}
+
+fn forget_in(e: u64, of: u64) -> u64 {
+    var n: u64 = 0
+    var r = ew(e, E_HIGH)
+    while r > 0 {
+        r -= 1
+        if reg(e, r, R_OF) == of {
+            ep_del(e, r)
+            bump(C_FORGOTTEN)
+            n += 1
+        }
+    }
+    n
+}
