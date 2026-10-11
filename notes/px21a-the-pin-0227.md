@@ -171,3 +171,128 @@ release tier a source change is compared by behaviour, never bytes
 - Three lines in `docs/` and four comments in `tools/census/` say
   "lobo's live site" where they named the site otherwise; no test reads
   them.
+
+## §2 and §3 corrected after they were committed
+
+- Three manifests declare C, not four: `kernel/wolf.pkg`,
+  `tests/mkw.d/kernel/wolf.pkg` and `user/play/wolf.pkg`. The third is
+  the one wolf's CHANGELOG does not name ("nothing hosted downstream
+  declares C this way"): `user/play` is hosted and declares `play_kd`.
+- Q4 says the beep source comes through `apt-get source`. It comes
+  from Launchpad's archive of the source package, the two files by
+  digest (`tools/mkbeep`), so no host's apt configuration is involved.
+- §2's "29 of 30 kernels link the scheduler" counted imports. wolf
+  compiles every module of the package into each kernel, so all 30
+  link `kernel/sched` (and now `kernel/heap` and the archive).
+
+## §3 against what was measured
+
+Gauntlets on kasumi (QEMU 11.1.1 TCG, clang 23.1.1, strict env), each a
+`git archive` of its commit: `base` `638ecaa` (wolf 0.2.26), `pin`
+`88cb343` (the pin, the `ffi` lines and the banner), `head` `76c4d28`
+(everything but the two test commits after it, which change no kernel:
+`notes/px21a/kasumi-*.summary`). Every suite exit 0 at each stage, 0
+FAIL, 0 SKIP lines; `base` and `pin` have the same PASS count in every
+suite; `head` differs in two: mpx2-heap 56 → 64 (H12 and H13, four
+legs each) and mpx3-speaker 24 → 40 (the beep session's four rows on
+four legs).
+
+| prediction | measured |
+|---|---|
+| Q1: without the `ffi` lines nothing builds; `user/play` needs one too | **right**: E1504, `wolf build` exit 2, for `kernel/kmain.lu`, `kernel/kmain_sched.lu`, `tests/mkw.d/kernel/kmain.lu` and `user/play` with the lines taken out (`notes/px21a/e1504.txt`) |
+| Q1: only the kernels that link the runtime archive move at the pin, by the pair (under 64 bytes) | **right**: 77 ELFs (`elfcmp-base-pin.txt`): 35 byte-identical, 34 identical once stripped of debug and build-id (the native ones), 8 with loaded bytes moved. Four are `kmain_heap` and `kmain_heap_threads` on both tiers, `.text` +16 bytes each (the archive `11708550…` → `46544be6…`); the heap's fault kernels, `kmain_net` and `kmain_sockets` link no archive and do not move. The other four are the tour's two kernels on both tiers: one loaded byte each, the banner's `6` → `7` (`cmp -l` on the loaded images) |
+| Q1: every verdict unchanged; tour R1 red at the pin alone | **verdicts right** (same PASS count in all 22 rows of the two summaries). **R1's red was not taken**: the banner moved in the next commit and the two were pushed and run together |
+| Q1: mkw step 6 as before | **right**: 16 PASS, `lupin 0.1.50 (wolf-interp, reference interpreter at pin 294d626)` |
+| Q1: wolf-hello changes bytes; its census stays `273 334` | **right**: `53cedb0f…` (12,069,704 bytes) → `fc861bf0…` (12,753,360); L8 `2 system calls PAX lacks (273 334)` on all four legs |
+| Q1: wolf-lang#653 not fixed | **right**: `const WANT: u64 = virtio.F_VERSION_1 \| F_MAC` is still "an unresolved name at comptime", exit 4, both tiers (`wolf-lang-653-at-0.2.27.txt`). The literal stays |
+| Q2: 29 kernels' loaded bytes move; native `.text` +16 to +96 KiB | **wrong twice**: all 30 move (70 of 77 ELFs; the seven that do not are M-KW's frozen kernels and the stub), and native `.text` grows by 158,782 bytes on average (+1,456 in the two kernels that already linked the archive, up to +171,107): the freestanding runtime is about 165 KiB of code and every kernel now carries it, used or not. Release: −21,264 to +179,611 (`elfcmp-pin-head.txt`) |
+| Q2: image-derived lines move, no verdict | **right**: 190 of 231 logs differ; the shapes that moved are frame counts, table-frame counts, the image's and the initramfs module's addresses, section ranges, `gdt`/`idt` addresses, fault addresses, and timing (`logcmp-pin-head.txt`) |
+| Q2: H11 reads `ra 1008, rb 0` | **right**, all four legs, kasumi TCG, CI and hasu KVM |
+| Q2: 40 to 100 instructions a switch on native, 6 to 30 on release | **right**: under `-icount shift=0` (two RDTSC reads in a row are 9 ticks apart on native, 7 on release; two runs of each build give one number) 4,000 yields cost 10,436,976 instructions with the save and restore and 10,080,709 without on native, **89.1 a switch**; 2,861,978 and 2,769,901 on release, **23.0 a switch** (`bench-at-head.txt`, `bench-without-the-save-and-restore.txt`). The release figure is one tree's: the tree at the witness's commit measured 2,809,936 with them (`bench-at-the-witness-commit.txt`; its run without them was not kept), so LLVM's inlining around the two lines moves the figure by ten instructions or more |
+| Q2: the witness holds on both tiers; the plant is red within minutes | **right**: H12 `C 4032 bytes, D 4032, control 4032`, each seeing the other run three times; H13 `main 2016, E 2016, control 2016`; the ledger `24 allocs = 24 frees, live 0`. With the restore removed (`241a849`): CI run **38113305491**, job 114393153763 (mpx2-heap) red in 5 min 53 s, H11, H12 and H13 FAIL on all four legs (`ra 0, rb 1008`; `C 1008, D 6048`; `E 1008`), and the other 19 jobs green (`ci-38113305491-mpx2-heap-plant-241a849.txt`) |
+| Q3: both nodes open, answer the console's ioctls and take writes; 4:0 and 5:1 | **right as far as tested**: `beep` opens each write-only and its KIOCSOUND is answered; pelt's `echo … > /dev/tty0` and `> /dev/console` reach the console (K1). 4:0 and 5:1 are Linux's (`stat` on kasumi). **Not predicted**: beep also asks `EVIOCGSND` of the device, which PAX reported as a refused terminal ioctl (K5 red on kasumi's first run); a Linux terminal answers that plain `ENOTTY` (measured on a pty), and so does `kernel/console` now |
+| Q4: the static beep runs; pitch within 0.5% | **right**: 440 Hz and 880 Hz, kernel counts 2711 and 1355, each held 31 ticks (310 ms for the 300 asked: beep's own sleep, rounded up to the tick); worst pitch error 0.214% on kasumi, 0.252% on the CI runner, 0.248% under KVM on hasu. No system call PAX lacks beyond glibc's two (273, 334) |
+| Q5 | **done**; `tests/census` C2 still regenerates `docs/CENSUS.md` byte for byte |
+
+### What was not verified
+
+- `fstat` of the two nodes (4:0, 5:1, mode 0620, inodes 5 and 6) and
+  their names in `getdents64` of `/dev` are written and run by no
+  test: beep's `newfstatat` proves only that the call succeeds.
+- The packaged `beep` binary itself never ran on PAX (it cannot: no
+  dynamic loader). What ran is its source, unmodified, linked static.
+- No Linux reference run of `beep` reaching a real console was taken
+  (a container has no `/dev/tty0`); its calls are known from the
+  strace of its refusals and from what it did on PAX.
+- The rule's second half (no region left open where a system call
+  gives up its stack) is stated, not checked by the kernel.
+- The two folders of prebuilt images outside this repository were not
+  refreshed; every kernel's bytes moved, so they are older builds.
+- kasumi's `head` gauntlet is at `76c4d28`; the two commits after it
+  (`tests/mpx2-heap` making `build/`, the beep session's two writes)
+  ran on kasumi as `tests/mpx3-speaker --images` only
+  (`kasumi-72a746b-mpx3-speaker-beep.txt`) and in CI.
+
+## 4. Evidence index
+
+- **Archives** (release API; re-hashed by `tools/fetch-wolf` and
+  `tools/fetch-lupin` on every run): wolf 0.2.27 linux x86-64
+  `5e17eebe…` (release 409367590, wolf-lang `0ddda6b7`; the unpacked
+  `wolf` `6f5713a2…`, `libwolf_rt_none.a` `46544be6…`, `std/STD-REV`
+  `87ba1620`), lupin 0.1.50 `e2867a35…` (release 409303515,
+  wolf-interp `32b970da`).
+- **The prediction**: `8797483`, pushed before the first fetch of
+  either archive (kasumi's first 0.2.27 fetch followed it).
+- **The comparison table**: §3, from `notes/px21a/kasumi-base.summary`,
+  `kasumi-pin.summary`, `kasumi-head-76c4d28.summary`,
+  `elfcmp-base-pin.txt`, `elfcmp-pin-head.txt`, `logcmp-base-pin.txt`,
+  `logcmp-pin-head.txt`.
+- **The region across a switch**: `kernel/heapthreads`,
+  `tests/mpx2-heap` H11 to H13;
+  `notes/px21a/kasumi-head-mpx2-heap-H11-H13.txt` (12 rows, TCG),
+  `hasu-kvm-k1-76c4d28.log` (three rounds under KVM).
+- **The cost**: `bench-at-head.txt` against
+  `bench-without-the-save-and-restore.txt` (the same tree with
+  `run_next`'s two lines and the import taken out).
+- **beep's pitch**: `kasumi-72a746b-mpx3-speaker-beep.txt` (K1, K7,
+  K4, K5 on four legs), the hasu log's K7 rows, CI job 114393153800
+  (in run 38113305491) and the run at the head. Its source's digests
+  are in `tools/mkbeep`; the packaged binary's facts in
+  `beep-default.strace`, `beep-console.strace` and `docs/SOURCES.md`.
+- **Boots**: kasumi TCG 229 at `base`, 229 at `pin`, 233 at `head`
+  (the suites' own run lists; mpx2-frames and the proof keep none);
+  hasu KVM (QEMU 11.1.0, the combined OVMF.fd, i7-12700KF): three
+  rounds of mpx2-heap (24), mpx2-sched (8) and mpx3-speaker (9), 123
+  boots, every round rc 0, every boot `accel=kvm`; one more round of
+  mpx3-speaker (9), mpx3-user (12), mpx3-console (20) and mpx3-shell
+  (28) at `72a746b`, 69 boots, rc 0 (`hasu-kvm-k2-72a746b.log`; the
+  last two first exited 2 for want of their `linux/` reference trees,
+  which had not been sent, and passed with them). 192 KVM boots in
+  all. CI: the PR body names the run.
+- **Seen red**: the planted break `241a849` (the restore removed), CI
+  run **38113305491**, job 114393153763, red in 5 min 53 s; reverted in
+  `dd2d1fd`. And on kasumi before CI, the same numbers
+  (`kasumi-plant-rows.txt`).
+- **CI at the head**: in the PR body (the head is this note's commit).
+
+### Drift from the contract, reported
+
+1. Ubuntu's packaged `beep` is a PIE with a `PT_INTERP`; PAX loads
+   static `ET_EXEC` only. The witness is its source package, built
+   static by `tools/mkbeep` in CI and never committed.
+2. `user/play/wolf.pkg` needed `ffi` too; wolf's CHANGELOG names two
+   pax manifests.
+3. Four comments under `tools/census/` carried the same two words as
+   the three lines named; they are reworded with them.
+4. Adopting the pair costs every kernel about 165 KiB of runtime code
+   (the archive is one member and the pair lives in it): the price of
+   ruling #58's option A that s223's PR named, now with its size.
+
+## 5. Done-when
+
+- Branch `px21a` in pax, PR #26 open and unmerged, the five sections
+  in its body, commit shas as bullets, a test checklist.
+- CI green at the head (the run is in the PR body).
+- kasumi's and hasu's trees under `~/lanes/px21a/` removed, build
+  outputs pruned, no process left. Close nothing; what to close is in
+  the PR body.
