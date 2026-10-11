@@ -1034,6 +1034,30 @@ fn pipe_read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool) -> u6
 /// reader (`EPIPE_R`; what was written across waits answered instead,
 /// if any); -EAGAIN for O_NONBLOCK with no room.
 pub fn pipe_write(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool) -> u64 {
+    pipe_put(a, pml4, fd, buf, n, nonblock, true)
+}
+
+/// px24: one part of a `writev` to a pipe or socket: `pipe_write`
+/// without the rule that a write of at most PIPE_BUF bytes goes in
+/// whole or not at all. The rule is the whole call's, and kernel/user
+/// has applied it to the sum (`pipe_room`).
+pub fn pipe_write_part(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
+    pipe_put(a, pml4, fd, buf, n, false, false)
+}
+
+/// px24: the room in the buffer descriptor `fd` writes to (a pipe's, a
+/// socketpair's); all of it when no reader is left (the write answers
+/// -EPIPE, not "wait").
+pub fn pipe_room(a: u64, fd: u64) -> u64 {
+    let p = tx_of(a, fd)
+    let cap = ppw(p, P_PAGES) * PAGE
+    if ppw(p, P_READERS) == 0 {
+        return cap
+    }
+    cap - (ppw(p, P_WR) - ppw(p, P_RD))
+}
+
+fn pipe_put(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool, atomic: bool) -> u64 {
     let p = tx_of(a, fd)
     let done = sched.self_done()
     if ppw(p, P_READERS) == 0 {
@@ -1053,7 +1077,7 @@ pub fn pipe_write(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool) 
     let cap = ppw(p, P_PAGES) * PAGE
     let space = cap - (ppw(p, P_WR) - ppw(p, P_RD))
     let rest = n - done
-    if (n <= PIPE_BUF && space < rest) || space == 0 {
+    if (atomic && n <= PIPE_BUF && space < rest) || space == 0 {
         if nb {
             sched.set_self_done(0)
             return if done > 0 { done } else { neg(EAGAIN) }
@@ -2268,11 +2292,11 @@ pub fn lseek(a: u64, fd: u64, off: u64, whence: u64) -> u64 {
     if k == K_CLOSED {
         return neg(EBADF)
     }
-    if k == K_CONSOLE || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_EVENT {
+    if k == K_CONSOLE || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP {
         return neg(ESPIPE)
     }
-    if k == K_NULL || k == K_EPOLL {
-        return 0 // px24: Linux answers 0 on an epoll descriptor (user/net/epollprobe.c)
+    if k == K_NULL || k == K_EPOLL || k == K_EVENT {
+        return 0 // px24: Linux answers 0 on an epoll descriptor and on an eventfd (user/net/epollprobe.c, evprobe.c)
     }
     var base: u64 = 0
     if whence == 1 {

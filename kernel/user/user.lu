@@ -675,15 +675,27 @@ fn writev(fd: u64, iov: u64, cnt: u64) -> u64 {
         if l >= 0x8000000000000000 || sum + l >= 0x8000000000000000 {
             return NEG_EINVAL
         }
+        // Every part is the caller's to read before one byte is taken
+        // (Linux answered -EFAULT for a bad second part and wrote nothing).
+        if l > 0 && !uaccess.readable(pml4, uaccess.get64(pml4, iov + i * 16), l) {
+            return NEG_EFAULT
+        }
         sum += l
         i += 1
+    }
+    // A pipe takes a write of at most PIPE_BUF bytes whole or not at
+    // all (pipe(7)), and to a pipe the parts are one write: the sum is
+    // what the rule reads.
+    let piped = files.write_target(area(), fd) == 3
+    if piped && sum > 0 && sum <= PIPE_BUF && sched.self_done() == 0 && files.pipe_room(area(), fd) < sum {
+        return if files.nonblocking(area(), fd) { NEG_EAGAIN } else { files.WAIT }
     }
     var total: u64 = 0
     i = 0
     while i < cnt {
         let base = uaccess.get64(pml4, iov + i * 16)
         let l = uaccess.get64(pml4, iov + i * 16 + 8)
-        let r = if l == 0 && total > 0 { 0 } else { write(fd, base, l) }
+        let r = if l == 0 && total > 0 { 0 } else if piped { files.pipe_write_part(area(), pml4, fd, base, l) } else { write(fd, base, l) }
         if r == files.WAIT {
             if total == 0 {
                 return r // nothing taken: wait, and run the whole call again
@@ -842,6 +854,8 @@ const SYS_EPOLL_CTL: u64 = 233
 const SYS_EVENTFD2: u64 = 290
 const SYS_EPOLL_CREATE1: u64 = 291
 const IOV_MAX: u64 = 1024 // uapi linux/uio.h's UIO_MAXIOV
+const PIPE_BUF: u64 = 4096 // pipe(7)
+const NEG_EAGAIN: u64 = 0xfffffffffffffff5 // -11
 const GRND_NONBLOCK: u64 = 1 // uapi linux/random.h
 const GRND_RANDOM: u64 = 2
 const GRND_INSECURE: u64 = 4
