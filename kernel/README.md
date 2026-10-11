@@ -436,6 +436,30 @@ pcspk-audiodev=snd0`) and measures it.
 - Not yet: the evdev speaker; a dynamic loader (so the packaged
   `beep` itself).
 
+## Sampled sound (px30)
+
+`kmain_console` starts QEMU's virtio sound device when the machine has
+one (silently when it has none) and programs reach it through Linux's
+OSS interface, `/dev/dsp` (`notes/px30-the-sound-card.md`).
+
+| module or file | what |
+|---|---|
+| `sound/` | the device (`1af4:1059`): VERSION_1 only; queues 0 control (synchronous), 1 event, 2 transmit; `PCM_INFO`, the first output stream; eight periods of 4096 bytes (frames taken once), a transmit message being the stream id, the period, the status; `SET_PARAMS`/`PREPARE` before the first period, `START` at two, `STOP` after a drain, `RELEASE` at the last close; an underrun counted; OSS's open, write (WAIT when full), ioctl, drain and release; `summary` (`sound: <counters>`, when /dev/dsp was opened) |
+| `virtio/` (px30) | `use_words`: a transport record per device (net keeps px20's in `pax_net_state`); `attach_at`: the device slot's windows from a given one (sound 4-7) |
+| `files/` (px30) | `/dev/dsp` (14:3, mode 020666, listed in `/dev` only while the device is up): a descriptor kind whose writes, ioctls and last close go to `sound/`; `lseek` ESPIPE, `read` EBADF |
+| `user/` (px30) | `write` to /dev/dsp, and its last `close`, which drains first (WAIT until the device is done) |
+| `interrupts/` (px30) | the sound vector: `sound.irq`, net's handler too when the line is shared, one EOI, every pipe-waiter woken |
+| `kmain_console.lu` (px30) | `pci.scan` and `sound.start` after the console |
+| `../boot/sound.S` | `pax_snd_state` (128 words) and `pax_snd_stats` (64), storage only |
+
+- Where PAX differs from Linux, on purpose or for now: no capture
+  (`O_RDONLY` is ENXIO); formats other than U8 and S16_LE are answered
+  S16_LE, more than two channels two, an unlisted rate the nearest
+  listed (Linux converts and resamples); a process that ends with the
+  device open is silenced at once (Linux plays the queue out); the
+  period stays 4096 bytes whatever SETFRAGMENT asks; no `mmap`, no
+  TRIGGER; `poll` waits for px24.
+
 ## The network (px20, px21)
 
 `kmain_net.lu` finds QEMU's virtio network device, brings it up and
