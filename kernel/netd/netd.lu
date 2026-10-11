@@ -1,4 +1,5 @@
-//! netd — the network's two thread bodies (px20, px21, px22).
+//! netd — the network's two thread bodies and the one place a datagram
+//! goes to its protocol (px20, px21, px22, px23).
 //!
 //! `pax_netd` is the kernel thread the device's interrupt wakes
 //! (kernel/net's `wait`, kernel/sched's `block_net`/`wake_net`): it
@@ -20,10 +21,23 @@
 //! A protocol may write in the frame while it has it (an echo reply is
 //! made in place) and must copy what it keeps.
 //!
+//! **`deliver`** (px23) is that table's 0x0800 row as a function, for a
+//! frame from the wire or one off kernel/ip's loopback queue.
+//! **`drain`** empties that queue: each datagram a protocol sent to
+//! this machine is delivered, with IF clear from the moment it is
+//! looked at until it is done, so two drains (a system call's and the
+//! clock's) never deliver out of order; what a delivery sends in turn
+//! (an echo's reply, a port unreachable) joins the queue and is
+//! delivered by the same loop. kernel/user runs it at the end of every
+//! system call, so what a call sent to this machine has arrived when
+//! the call returns; the clock runs it every tick, for what nothing
+//! else would deliver. No device is needed for any of it.
+//!
 //! `pax_net_clock` (px21) is the network's clock: a second thread that
-//! sleeps ten ticks and runs kernel/arp's `tick` — the retries, the
-//! giving up, the ageing — which nothing else would do while no frame
-//! arrives.
+//! turns every tick (px23; every ten before) and runs kernel/arp's
+//! `tick` on every tenth turn — the retries, the giving up, the ageing
+//! — which nothing else would do while no frame arrives; then `drain`.
+//! A kernel with no network device runs it alone.
 //!
 //! The bodies live here and a kernel names them with `extern "c" let
 //! pax_netd: *u8` (wolf-lang#520; E0302 in the export's own module,
@@ -36,6 +50,7 @@ use icmp
 use ip
 use net
 use sched
+use sync
 use udp
 
 extern "c" let pax_net_stats: *u64
@@ -51,6 +66,48 @@ pub fn turns() -> u64 {
 pub fn clock_turns() -> u64 {
     // # Safety: word 30 of boot/net.S's pax_net_stats.
     unsafe { ((pax_net_stats as u64 + 30 * 8) as *u64).read_volatile() }
+}
+
+/// A datagram's frame (type 0x0800) to the protocol it is for:
+/// kernel/ip judges the header, and the protocol it names — or
+/// kernel/icmp, for one nothing takes — gets the frame. `looped`: it
+/// came off the loopback queue, not the wire.
+pub fn deliver(frame: u64, len: u64, looped: bool) {
+    let (what, ihl, total) = ip.input(frame, len, looped)
+    if what == ip.TO_ICMP {
+        let _e = icmp.input(frame, ihl, total, looped)
+    } else if what == ip.TO_UDP {
+        // px22: a datagram no socket takes draws a port unreachable,
+        // and kernel/udp counts what became of the wire's.
+        if udp.input(frame, ihl, total, looped) == udp.NO_PORT {
+            let r = icmp.unreachable(frame, ihl, total, icmp.CODE_PORT, looped)
+            if !looped {
+                udp.unreached(r)
+            }
+        }
+    } else if what == ip.NO_PROTOCOL {
+        let _r = icmp.unreachable(frame, ihl, total, icmp.CODE_PROTOCOL, looped)
+    }
+}
+
+/// Deliver every datagram on kernel/ip's loopback queue, and what
+/// those deliveries send there in turn. Returns how many. Any context.
+pub fn drain() -> u64 {
+    var n: u64 = 0
+    var more = true
+    while more {
+        let saved = sync.irq_save()
+        let (frame, len) = ip.loop_peek()
+        if len == 0 {
+            more = false
+        } else {
+            deliver(frame, len, true)
+            ip.loop_done()
+            n += 1
+        }
+        sync.irq_restore(saved)
+    }
+    n
 }
 
 export fn pax_netd(_arg: u64) {
@@ -71,33 +128,28 @@ export fn pax_netd(_arg: u64) {
                 if ethertype == 0x0806 {
                     arp.input(frame, len)
                 } else if ethertype == 0x0800 {
-                    let (what, ihl, total) = ip.input(frame, len)
-                    if what == ip.TO_ICMP {
-                        icmp.input(frame, ihl, total)
-                    } else if what == ip.TO_UDP {
-                        // px22: a datagram no socket takes draws a port
-                        // unreachable, and kernel/udp counts what became
-                        // of it.
-                        if udp.input(frame, ihl, total) == udp.NO_PORT {
-                            udp.unreached(icmp.unreachable(frame, ihl, total, icmp.CODE_PORT))
-                        }
-                    } else if what == ip.NO_PROTOCOL {
-                        let _r = icmp.unreachable(frame, ihl, total, icmp.CODE_PROTOCOL)
-                    }
+                    deliver(frame, len, false)
                 } else {
                     net.drop_type()
                 }
                 net.rx_give(buffer)
             }
         }
+        // What the wire's frames made this machine send to itself.
+        let _n = drain()
     }
 }
 
 export fn pax_net_clock(_arg: u64) {
+    var turn: u64 = 0
     while true {
-        let _s = sched.sleep(10)
-        arp.tick()
-        // # Safety: as `clock_turns`; only this thread writes the word.
-        unsafe { ((pax_net_stats as u64 + 30 * 8) as *u64).write_volatile(clock_turns() + 1) }
+        let _s = sched.sleep(1)
+        turn += 1
+        if turn % 10 == 0 {
+            arp.tick()
+            // # Safety: as `clock_turns`; only this thread writes the word.
+            unsafe { ((pax_net_stats as u64 + 30 * 8) as *u64).write_volatile(clock_turns() + 1) }
+        }
+        let _n = drain()
     }
 }

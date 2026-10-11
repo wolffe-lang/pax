@@ -207,17 +207,19 @@ export fn kmain() {
     udp.start()
     ip.report()
     udp.report()
-    if stack_frames() != 12 {
+    if stack_frames() != 76 {
         panic.fail("sockets: no frame for the stack, frames", stack_frames())
     }
-    var floor: u64 = 0
+    // # Safety: the addresses of kernel/netd's exports; nothing is read.
+    let (nd, clock) = unsafe { (pax_netd as u64, pax_net_clock as u64) }
+    // px23: the clock runs with or without a device (loopback's
+    // backstop, TCP's timers); the receiving thread only with one.
+    var floor: u64 = 1
     if up {
-        // # Safety: the addresses of kernel/netd's exports; nothing is read.
-        let (nd, clock) = unsafe { (pax_netd as u64, pax_net_clock as u64) }
         sched.create(nd, 0)
-        sched.create(clock, 0)
         floor = 2
     }
+    sched.create(clock, 0)
     sync.enable()
     let per20 = calibrate()
 

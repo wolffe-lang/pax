@@ -167,6 +167,7 @@ use console
 use files
 use frames
 use log
+use netd
 use paging
 use panic
 use process
@@ -990,6 +991,7 @@ pub fn syscall(f: u64) -> u64 {
             put_state(U_LAST_EXIT, (a0 & 0xff) + 1) // px14: a program the kernel started
         }
         files.close_all(area()) // px17: its pipes' ends close now
+        let _n = netd.drain() // px23: what its sockets' ends sent to this machine
         // One thread a process, so `exit` ends the group too; the parent
         // reads `code << 8` (px14).
         return sched.end_with(f, (a0 & 0xff) << 8)
@@ -1008,6 +1010,7 @@ pub fn syscall(f: u64) -> u64 {
             put_word(f, W_RAX, r)
             refusal_line(nr, r)
         }
+        let _n = netd.drain() // px23: a close-on-exec socket's last words
         return f
     }
     if nr == SYS_WAIT4 {
@@ -1034,7 +1037,18 @@ pub fn syscall(f: u64) -> u64 {
         }
         return sched.sleep_current(f, wake)
     }
-    let r = dispatch(nr, a0, a1, a2, a3, a4, word(f, W_R9))
+    let a5 = word(f, W_R9)
+    var r = dispatch(nr, a0, a1, a2, a3, a4, a5)
+    // px23: what the call sent to this machine (kernel/ip's loopback
+    // queue) is delivered before it returns, as a datagram over px22's
+    // loopback was. A call that said "wait" while its answer was still
+    // on that queue runs again now: the delivery's wake-up came before
+    // the thread was parked.
+    var looped = netd.drain()
+    while r == files.WAIT && looped != 0 {
+        r = dispatch(nr, a0, a1, a2, a3, a4, a5)
+        looped = netd.drain()
+    }
     if r == files.WAIT {
         // px17: a pipe or socket that cannot answer yet. As the console's
         // wait: the call runs again, in its own space, when a pipe changes.
@@ -1054,6 +1068,7 @@ pub fn syscall(f: u64) -> u64 {
         runs_tail()
         log.end()
         files.close_all(area())
+        let _n = netd.drain()
         return sched.end_with(f, SIGPIPE_STATUS)
     }
     if r == console.RESTART {
@@ -1302,6 +1317,7 @@ pub fn kill(f: u64, what: str) -> u64 {
     runs_tail()
     log.end()
     files.close_all(area()) // px17
+    let _n = netd.drain() // px23
     sched.end_with(f, process.fault_signal(v)) // px14: the parent reads the signal
 }
 
