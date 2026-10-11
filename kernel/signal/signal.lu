@@ -112,6 +112,7 @@ use files
 use fpu
 use frames
 use log
+use netd
 use paging
 use process
 use sched
@@ -425,11 +426,12 @@ pub fn tgkill(tgid: u64, tid: u64, sig: u64, any_group: bool) -> u64 {
     NEG_ESRCH
 }
 
-/// A write met a pipe with no reader (kernel/user, before it answers
-/// -EPIPE): SIGPIPE for the writing thread, from itself (`pipe(7)`;
-/// siginfo's SI_USER with its own pid, measured).
-pub fn pipe() {
-    sched.raise_thread(sched.self_slot(), SIGPIPE, sched.sig_info(sched.I_PIPE, sched.self_pid(), 0))
+/// A write met a pipe with no reader, or (`conn`, px23) a stream socket
+/// whose connection is over (kernel/user, before it answers -EPIPE):
+/// SIGPIPE for the writing thread, from itself (`pipe(7)`; siginfo's
+/// SI_USER with its own pid, measured).
+pub fn pipe(conn: bool) {
+    sched.raise_thread(sched.self_slot(), SIGPIPE, sched.sig_info(if conn { sched.I_CONN } else { sched.I_PIPE }, sched.self_pid(), 0))
 }
 
 /// The terminal's signals (kernel/console's ISIG; `mask` has bit n - 1
@@ -466,6 +468,7 @@ fn die(f: u64, sig: u64, why: str) -> u64 {
     log.put(" runs")
     log.end()
     files.close_all(area())
+    let _n = netd.drain() // px23: what its sockets' ends sent to this machine
     sched.end_with(f, sig)
 }
 
@@ -702,7 +705,8 @@ fn act(f: u64, sig: u64, info: u64) -> u64 {
             log.end()
             return f
         }
-        return die(f, sig, if info & 0xff == sched.I_PIPE { ", a write to a pipe with no reader" } else { "" })
+        let k = info & 0xff
+        return die(f, sig, if k == sched.I_PIPE { ", a write to a pipe with no reader" } else if k == sched.I_CONN { ", a write to a connection that is over" } else { "" })
     }
     settle_wait(f, aget(a, w + 1) & SA_RESTART != 0)
     let (code, pid, status) = origin(info)
