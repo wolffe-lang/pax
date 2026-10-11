@@ -18,7 +18,9 @@
 # boreutils' cat, echo, env, false, head, ls, readlink, sleep, stat,
 # tail, true and wc (user/boreutils.pin, tools/mkboreutils; px15: `ls`
 # is boreutils' own, and busybox is gone; px26: bu20's, with `ls -l`,
-# `stat`, `readlink` and `env`), procs (tools/mkuser). Every program in
+# `stat`, `readlink` and `env`; px27: bu21's `mkdir`, `rmdir`, `rm`,
+# `mv` and `cp` are in /bin too, and tests/mpx3-tree types them), procs
+# (tools/mkuser). Every program in
 # the shell's /bin is built by wolf. Two initramfs: the shell's (those
 # in /bin, /etc/motd, /etc/words, /etc/pax-run `/bin/pelt`, and px26's
 # /etc/passwd, /etc/group and /etc/localtime — the UTC zone,
@@ -100,9 +102,9 @@
 #      machine halted.
 #   S6 shell-howl (both images): the Linux transcript is
 #      user/console/shell-howl.expect, byte for byte (CRs removed): the
-#      motd, ten names in /bin, 42, awwwwwooo!, ` 1 12 77 /etc/motd`,
+#      motd, the names in /bin (eighteen since px27), 42, awwwwwooo!, ` 1 12 77 /etc/motd`,
 #      `pelt: line 7: teleport: not found`, 127. S2 holds PAX to it.
-#      shell-plumb (px17) likewise: user/console/shell-plumb.expect (10,
+#      shell-plumb (px17) likewise: user/console/shell-plumb.expect (18,
 #      the motd, /etc, the six words once each, 1, motd and pax-run, 77,
 #      cd's two refusals, 2, /). shell-long (px26) likewise:
 #      user/console/shell-long.expect (the two long listings with their
@@ -142,7 +144,7 @@ case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes b
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
 need readelf python3
 
-BORE="cat echo env false head ls readlink sleep stat tail true wc"
+BORE="cat echo env false head ls readlink sleep stat tail true wc mkdir rmdir rm mv cp" # px27: bu21's five join /bin
 SESSIONS="shell-serial shell-ps2 shell-howl shell-howl-quiet shell-plumb shell-long shell-sigs shell-sigs-ps2 procs procs-quiet"
 LINUX_SESSIONS="shell-serial shell-ps2 shell-howl shell-plumb shell-long shell-sigs procs" # a -quiet session's reference is its namesake's
 image_of() { case $1 in procs) echo procs ;; procs-quiet) echo procs-quiet ;; *-quiet) echo shell-quiet ;; *) echo shell ;; esac; }
@@ -319,10 +321,11 @@ for leg in $legs; do
             typing=()
             [ "$i" = procs ] || typing=(--type "$(keys_of "$s")" --prompt "$PROMPT" --keyboard "$kb")
             hrc=0
-            # px26: 512 MiB. The shell's initramfs is 170 MiB with bu20's
+            # px26: 512 MiB. The shell's initramfs was 170 MiB with bu20's
             # thirteen programs, and under OVMF Limine cannot place it in
-            # 256 (`High memory allocator: Out of memory`, measured); SeaBIOS
-            # still can, and both legs boot the same machine.
+            # 256 (`High memory allocator: Out of memory`, measured); both
+            # legs boot the same machine. px27: 235 MiB with bu21's five,
+            # more than SeaBIOS can place in 256 either.
             "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 180 --qemu -m --qemu 512M \
                 --elf "$elf" --marker 'halt' ${typing[@]+"${typing[@]}"} "$iso" >"$log.verdict" 2>&1 || hrc=$?
             record "$tier" "$leg" "$s" "$hrc"
