@@ -112,6 +112,21 @@
 //!   wait parks the thread as a pipe's read does, until a datagram or
 //!   the socket's receive timeout. `sendmsg` (46), `recvmsg` (47) and
 //!   `shutdown` (48) are not here.
+//! - threads, futexes and signals (px26, what pelt `b32bebc` and a
+//!   static glibc with pthreads make, `notes/px26/`): `clone`/`clone3`
+//!   with CLONE_THREAD (kernel/process); `exit` (60) ends the calling
+//!   thread alone while its process has others — its clear-child-tid
+//!   word zeroed and that futex woken — and `exit_group` every thread;
+//!   `gettid` (186) and `set_tid_address` (218) answer the thread's own
+//!   id; `futex` (202, kernel/futex); `sched_yield` (24); `rt_sigaction`
+//!   (13), `rt_sigprocmask` (14), `rt_sigpending` (127), `rt_sigreturn`
+//!   (15), `kill` (62), `tkill` (200), `tgkill` (234) (kernel/signal,
+//!   which also takes a thread's pending signals at every return to
+//!   ring 3: kernel/interrupts); `madvise` (28, kernel/vm); `prctl`
+//!   takes PR_SET_NAME; a sleep a signal ends writes the time left. A
+//!   write to a pipe with no reader raises SIGPIPE for the writer and
+//!   answers -EPIPE; an exception in ring 3 goes to a handler for its
+//!   signal when the thread has one.
 //! - bu20's boreutils (px26): `readlink` (89) and `readlinkat` answer
 //!   `/proc/self/exe`; `sendfile` (40), `splice` (275) and
 //!   `copy_file_range` (326) (kernel/files); CLOCK_REALTIME, `time` and
@@ -171,6 +186,7 @@ use boot_info
 use console
 use files
 use frames
+use futex
 use log
 use netd
 use paging
@@ -179,6 +195,7 @@ use process
 use rtc
 use sched
 use serial
+use signal
 use socket
 use speaker
 use timer
@@ -523,19 +540,10 @@ fn num(n: u64) {
     }
 }
 
-/// `user: <name> pid <id>`, for the running thread.
+/// `user: <name> pid <id>`, for the running thread (kernel/process's,
+/// since px26: kernel/signal writes it too).
 fn who() {
-    let p = sched.self_prog()
-    log.put("user: ")
-    if p == 0 {
-        log.put("kernel")
-    } else if p == sched.ELF_PROG {
-        process.put_bytes(sched.self_exec(2), sched.self_exec(3))
-    } else {
-        log.put(name(p - 1))
-    }
-    log.put(" pid ")
-    log.dec(sched.self_pid() as int) // px14: the Linux pid
+    process.who()
 }
 
 /// ` after <r> runs`, for the running thread.
@@ -695,7 +703,13 @@ const SYS_GETPEERNAME: u64 = 52
 const SYS_SETSOCKOPT: u64 = 54
 const SYS_GETSOCKOPT: u64 = 55
 const SYS_ACCEPT4: u64 = 288
-const SIGPIPE_STATUS: u64 = 13
+// px26: threads, futexes and signals.
+const SYS_RT_SIGRETURN: u64 = 15
+const SYS_SCHED_YIELD: u64 = 24
+const SYS_MADVISE: u64 = 28
+const SYS_RT_SIGPENDING: u64 = 127
+const SYS_FUTEX: u64 = 202
+const PR_SET_NAME: u64 = 15
 // px26: what bu20's boreutils ask.
 const SYS_SENDFILE: u64 = 40
 const SYS_READLINK: u64 = 89
@@ -834,17 +848,51 @@ fn arch_prctl(code: u64, addr: u64) -> u64 {
     NEG_EINVAL
 }
 
-/// `prctl(option, arg2, …)`: PR_GET_NAME (the program's name, at most
-/// 15 bytes and a NUL, as Linux's 16-byte comm); anything else -EINVAL.
+/// `prctl(option, arg2, …)`: PR_GET_NAME (the thread's name, at most 15
+/// bytes and a NUL, as Linux's 16-byte comm: the program's name until
+/// the thread sets one) and, px26, PR_SET_NAME (the thread's own, cut
+/// at 15 bytes); anything else -EINVAL.
 fn prctl(option: u64, arg2: u64) -> u64 {
+    let pml4 = paging.live()
+    if option == PR_SET_NAME {
+        var w0: u64 = 0
+        var w1: u64 = 0
+        var i: u64 = 0
+        while i < 15 {
+            if !uaccess.readable(pml4, arg2 + i, 1) {
+                return NEG_EFAULT
+            }
+            let b = uaccess.get(pml4, arg2 + i, 1)
+            if b == 0 {
+                break
+            }
+            if i < 8 {
+                w0 = w0 | (b << (i * 8))
+            } else {
+                w1 = w1 | (b << ((i - 8) * 8))
+            }
+            i += 1
+        }
+        if w0 == 0 {
+            w1 = 0x8000000000000000 // an empty name is still a name set (byte 15 is never the name's)
+        }
+        sched.set_self_name(w0, w1)
+        return 0
+    }
     if option != PR_GET_NAME {
         return NEG_EINVAL
     }
-    let pml4 = paging.live()
     if !uaccess.writable(pml4, arg2, 16) {
         return NEG_EFAULT
     }
     uaccess.zero(pml4, arg2, 16)
+    let n0 = sched.self_name(0)
+    let n1 = sched.self_name(1)
+    if n0 != 0 || n1 != 0 {
+        uaccess.put(pml4, arg2, n0, 8)
+        uaccess.put(pml4, arg2 + 8, n1 & 0x00ffffffffffffff, 7)
+        return 0
+    }
     if sched.self_prog() == sched.ELF_PROG {
         let a = sched.self_exec(2)
         let l = sched.self_exec(3)
@@ -1015,6 +1063,28 @@ pub fn syscall(f: u64) -> u64 {
     let a2 = word(f, W_RDX)
     let a3 = word(f, W_R10)
     let a4 = word(f, W_R8)
+    sched.syscall_begins() // px26: whatever wait the last call was in is over
+    if nr == SYS_EXIT && sched.self_threads() > 1 {
+        // px26: `exit` ends the calling thread alone while its process
+        // has others: the clear-child-tid word zeroed and its futex
+        // woken (`set_tid_address(2)`), which is what a join waits for.
+        if !log.quiet() && sched.threads_made() <= 4 {
+            who()
+            log.put(" thread ")
+            log.dec(sched.self_tid() as int)
+            log.put(" exit ")
+            log.dec((a0 & 0xff) as int)
+            runs_tail()
+            log.end()
+        }
+        let ct = sched.self_ctid()
+        let pml4 = paging.live()
+        if ct != 0 && uaccess.writable(pml4, ct, 4) {
+            uaccess.put(pml4, ct, 0, 4)
+            futex.wake_tid(pml4, ct)
+        }
+        return sched.end_thread(f)
+    }
     if nr == SYS_EXIT || nr == SYS_EXIT_GROUP {
         if !log.quiet() { // px15
             who()
@@ -1028,13 +1098,28 @@ pub fn syscall(f: u64) -> u64 {
         }
         files.close_all(area()) // px17: its pipes' ends close now
         let _n = netd.drain() // px23: what its sockets' ends sent to this machine
-        // One thread a process, so `exit` ends the group too; the parent
-        // reads `code << 8` (px14).
+        // The process ends (`exit` from its last thread ends it too);
+        // the parent reads `code << 8` (px14).
         return sched.end_with(f, (a0 & 0xff) << 8)
+    }
+    // px26: the calls that hand back another frame.
+    if nr == SYS_RT_SIGRETURN {
+        return signal.sigreturn(f)
+    }
+    if nr == SYS_FUTEX {
+        let g = futex.call(f, a0, a1, a2, a3, word(f, W_R9), wall_ns())
+        if g == f {
+            refusal_line(nr, word(f, W_RAX))
+        }
+        return g
+    }
+    if nr == SYS_SCHED_YIELD {
+        put_word(f, W_RAX, 0)
+        return sched.yield_current(f)
     }
     // px14: the calls that make, replace and wait for processes.
     if nr == SYS_CLONE || nr == SYS_CLONE3 || nr == SYS_VFORK {
-        let g = process.clone(f, nr, a0, a1, a2, a3)
+        let g = process.clone(f, nr, a0, a1, a2, a3, a4)
         if g == f {
             refusal_line(nr, word(f, W_RAX))
         }
@@ -1058,9 +1143,11 @@ pub fn syscall(f: u64) -> u64 {
     if nr == SYS_CLOCK_NANOSLEEP || nr == SYS_NANOSLEEP {
         var req = a0
         var abs = false
+        var rem = a1 // px26: where the time left goes when a signal ends the sleep
         if nr == SYS_CLOCK_NANOSLEEP {
             req = a2
             abs = a1 & TIMER_ABSTIME != 0
+            rem = if abs { 0 } else { a3 }
             if a0 > 11 {
                 put_word(f, W_RAX, NEG_EINVAL)
                 return f
@@ -1071,7 +1158,7 @@ pub fn syscall(f: u64) -> u64 {
         if wake == 0 {
             return f
         }
-        return sched.sleep_current(f, wake)
+        return sched.sleep_current_rem(f, wake, rem)
     }
     let a5 = word(f, W_R9)
     var r = dispatch(nr, a0, a1, a2, a3, a4, a5)
@@ -1097,17 +1184,13 @@ pub fn syscall(f: u64) -> u64 {
         }
         return sched.block_pipe(f)
     }
-    if r == files.EPIPE_R && (nr == SYS_WRITE || nr == SYS_SENDFILE || nr == SYS_SPLICE || (nr == SYS_SENDTO && a3 & MSG_NOSIGNAL == 0)) && process.sigpipe_kills() {
-        // px17: SIGPIPE's default action ends the writer.
-        who()
+    if r == files.EPIPE_R && (nr == SYS_WRITE || nr == SYS_SENDFILE || nr == SYS_SPLICE || (nr == SYS_SENDTO && a3 & MSG_NOSIGNAL == 0)) {
+        // px17, px26: SIGPIPE for the writer, taken as this call returns:
+        // the default ends the process (kernel/signal's line), a handler
+        // runs and the write answers -EPIPE, an ignored one just answers.
         // px23: a stream socket whose connection is over is the other
-        // thing a write can find broken.
-        log.put(if socket.is_inet(area(), int32(a0)) { " killed: SIGPIPE, a write to a connection that is over" } else { " killed: SIGPIPE, a write to a pipe with no reader" })
-        runs_tail()
-        log.end()
-        files.close_all(area())
-        let _n = netd.drain()
-        return sched.end_with(f, SIGPIPE_STATUS)
+        // thing a write can find broken; the line says which.
+        signal.pipe(socket.is_inet(area(), int32(a0)))
     }
     if r == console.RESTART {
         // px13: a read of the console with nothing ready. The thread
@@ -1286,10 +1369,13 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
         return vm.mmap(a, pml4, a0, a1, a2, a3)
     }
     if nr == SYS_MUNMAP {
-        return vm.munmap(pml4, a0, a1)
+        return vm.munmap(a, pml4, a0, a1)
     }
     if nr == SYS_MPROTECT {
-        return vm.mprotect(pml4, a0, a1, a2)
+        return vm.mprotect(a, pml4, a0, a1, a2)
+    }
+    if nr == SYS_MADVISE {
+        return vm.madvise(a, pml4, a0, a1, a2) // px26
     }
     if nr == SYS_ARCH_PRCTL {
         return arch_prctl(a0, a1)
@@ -1315,8 +1401,15 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     if nr == SYS_UNAME {
         return uname(a0)
     }
-    if nr == SYS_SET_TID_ADDRESS || nr == SYS_GETTID || nr == SYS_GETPID {
-        return sched.self_pid() // px14: one thread a process, its id the pid
+    if nr == SYS_GETPID {
+        return sched.self_pid()
+    }
+    if nr == SYS_GETTID {
+        return sched.self_tid() // px26: the thread's own
+    }
+    if nr == SYS_SET_TID_ADDRESS {
+        sched.set_self_ctid(a0) // px26: zeroed, and its futex woken, when the thread ends
+        return sched.self_tid()
     }
     if nr == SYS_GETPPID {
         return sched.self_ppid()
@@ -1337,13 +1430,22 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
         return files.dup(a, a0, if n >= files.FDS { files.FDS + 1 } else { n }, fl == O_CLOEXEC)
     }
     if nr == SYS_RT_SIGPROCMASK {
-        return process.sigprocmask(a0, a1, a2, a3)
+        return signal.sigprocmask(a0, a1, a2, a3)
     }
     if nr == SYS_RT_SIGACTION {
-        return process.sigaction(a0, a1, a2, a3)
+        return signal.sigaction(a0, a1, a2, a3)
     }
-    if nr == SYS_KILL || nr == SYS_TKILL || nr == SYS_TGKILL {
-        return process.kill()
+    if nr == SYS_RT_SIGPENDING {
+        return signal.sigpending(a0, a1)
+    }
+    if nr == SYS_KILL {
+        return signal.kill(a0, a1)
+    }
+    if nr == SYS_TGKILL {
+        return signal.tgkill(a0, a1, a2, false)
+    }
+    if nr == SYS_TKILL {
+        return signal.tgkill(0, a0, a1, true)
     }
     if nr == SYS_GETUID || nr == SYS_GETGID || nr == SYS_GETEUID || nr == SYS_GETEGID {
         return 0
@@ -1356,6 +1458,11 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
 /// program is killed by name and the next thread's frame returned.
 pub fn kill(f: u64, what: str) -> u64 {
     let v = word(f, W_VECTOR)
+    // px26: a handler for the fault's signal runs instead (kernel/signal).
+    let g = signal.fault(f, v)
+    if g != 0 {
+        return g
+    }
     who()
     log.put(" killed: ")
     log.put(what)
