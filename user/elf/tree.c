@@ -308,6 +308,33 @@ static void holes(void) {
     say("sync: fsync %ld, fdatasync %ld, of a directory %ld, of a closed descriptor %ld\n", a, b, c, d);
     close(fd);
     unlink("/t/h");
+    /* a larger file (two levels of index on PAX): cut in the middle,
+       cut again, written past the cut, a byte far out */
+    static char mbuf[1 << 20];
+    memset(mbuf, 'M', sizeof mbuf);
+    fd = open("/t/h5", O_RDWR | O_CREAT, 0666);
+    long wr = 0;
+    for (int i = 0; i < 5; i++) wr += write(fd, mbuf, sizeof mbuf);
+    s1 = fst(fd) + 20;
+    a = r(ftruncate(fd, 3 * 1048576 + 100));
+    const char *s2 = fst(fd) + 20;
+    b = r(ftruncate(fd, 1048576));
+    const char *s3 = fst(fd) + 20;
+    say("hole: 5 MiB written %ld, %s; cut to 3 MiB and 100 bytes %ld, %s; to 1 MiB %ld, %s\n", wr, s1, a, s2, b, s3);
+    ftruncate(fd, 5 * 1048576);
+    char probe[8];
+    n = r(pread(fd, probe, 8, 2 * 1048576));
+    zero = 1;
+    for (int i = 0; i < 8; i++) if (probe[i] != 0) zero = 0;
+    a = r(pread(fd, probe, 8, 1048576 - 8));
+    int kept = probe[0] == 'M' && probe[7] == 'M';
+    b = r(pwrite(fd, "far", 3, 4 * 1048576 + 5));
+    s1 = fst(fd) + 20;
+    long c2 = r(pwrite(fd, "x", 1, 700 * 1048576L));
+    say("hole: grown back to 5 MiB: what was cut reads zero %d (%ld), what was kept is there %d (%ld); 3 bytes written at 4 MiB %ld, %s; one byte at 700 MiB %ld, %s\n",
+        zero, n, kept, a, b, s1, c2, fst(fd) + 20);
+    close(fd);
+    unlink("/t/h5");
 }
 
 /* ---- a file whose name is gone while it is open -------------------------------- */
@@ -471,8 +498,8 @@ static int names(const char *dir, char out[][64], int max, size_t bufsize) {
         }
     }
     close(fd);
-    char *p[512];
-    static char tmp[512][64];
+    static char *p[1024];
+    static char tmp[1024][64];
     for (int i = 0; i < n; i++) { memcpy(tmp[i], out[i], 64); p[i] = tmp[i]; }
     qsort(p, n, sizeof p[0], cmp);
     for (int i = 0; i < n; i++) memcpy(out[i], p[i], 64);
@@ -560,6 +587,57 @@ static void directories(void) {
     for (int i = 0; i < 10; i++) { snprintf(p, sizeof p, "/t/d/new%02d", i); unlink(p); }
     s1 = st("/t/d");
     say("dir: emptied %s, removed %ld\n", s1, r(rmdir("/t/d")));
+    /* a directory of many names (more than one page of them on PAX),
+       and of long ones */
+    static char many[1024][64];
+    mkdir("/t/big", 0777);
+    int made = 0;
+    for (int i = 0; i < 600; i++) {
+        snprintf(p, sizeof p, "/t/big/a-name-of-some-length-%04d", i);
+        if (put(p, "m") == 1) made++;
+    }
+    n = names("/t/big", many, 1024, 4096);
+    s1 = st("/t/big");
+    int gone3 = 0;
+    for (int i = 0; i < 600; i += 3) {
+        snprintf(p, sizeof p, "/t/big/a-name-of-some-length-%04d", i);
+        if (unlink(p) == 0) gone3++;
+    }
+    for (int i = 0; i < 100; i++) { snprintf(p, sizeof p, "/t/big/later-%03d", i); put(p, "l"); }
+    int n2 = names("/t/big", many, 1024, 512);
+    int dup = 0;
+    for (int i = 1; i < n2; i++) if (!strcmp(many[i], many[i - 1])) dup++;
+    say("dir: 600 names made %d, listed with . and .. %d, %s; a third removed %d and 100 more made: listed %d, the same name twice %d, %s\n",
+        made, n, s1, gone3, n2, dup, st("/t/big"));
+    snprintf(p, sizeof p, "/t/big/a-name-of-some-length-%04d", 599);
+    const char *g599 = get(p);
+    long miss = r(access("/t/big/a-name-of-some-length-0000", F_OK));
+    static char longname[300];
+    int longs = 0;
+    for (int i = 0; i < 40; i++) {
+        int o = snprintf(longname, sizeof longname, "/t/big/%02d-", i);
+        memset(longname + o, 'L', 240);
+        longname[o + 240] = 0;
+        if (put(longname, "x") == 1) longs++;
+    }
+    int n3 = names("/t/big", many, 1024, 4096);
+    say("dir: the last of the 600 still reads '%s', the first is gone %ld; 40 names of 250 bytes made %d: listed %d, %s\n", g599, miss,
+        longs, n3, st("/t/big"));
+    int fdb = open("/t/big", O_RDONLY | O_DIRECTORY);
+    static char eb[4096];
+    int removed = 0;
+    for (;;) {
+        got = syscall(SYS_getdents64, fdb, eb, sizeof eb);
+        if (got <= 0) break;
+        for (long o = 0; o < got;) {
+            struct ent *e = (struct ent *)(eb + o);
+            if (strcmp(e->name, ".") && strcmp(e->name, "..") && unlinkat(fdb, e->name, 0) == 0) removed++;
+            o += e->len;
+        }
+    }
+    close(fdb);
+    s1 = st("/t/big");
+    say("dir: every name removed while the directory is read: %d; %s; rmdir %ld\n", removed, s1, r(rmdir("/t/big")));
 }
 
 /* ---- names and the errnos -------------------------------------------------------- */
