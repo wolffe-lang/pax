@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+# tests/mpx3-sound — px30: sampled sound. kmain_console with QEMU's
+# virtio sound device (`-device virtio-sound-pci`, its output to QEMU's
+# `wav` backend at 48 kHz) runs unmodified static Linux programs
+# (user/sound: dsptone, dspprobe; tools/mksound) and /bin/play (wolf,
+# its mixed mode) from /etc/pax-run, no shell: each scenario is one
+# boot, its capture judged by tools/wav-notes.
+#
+#   tests/mpx3-sound [--images DIR | --no-boot] [--bin DIR] [--play DIR]
+#                    [--firmware bios|uefi|both] [--tier native|release|both]
+#                    [--scenario NAME]...
+#
+# Scenarios (every tier and firmware: tone, ramp; native BIOS and
+# release UEFI: the rest):
+#   tone      dspprobe (the edges: user/sound/dspprobe.expect), dsptone -q
+#             (440 Hz left, 660 Hz right, S16 stereo 48 kHz, 1 s) and
+#             dsptone at 44.1 kHz mono U8 (1000 Hz, 0.5 s)
+#   ramp      dsptone -p ramp, 2 s: every frame of the capture as written
+#   underrun  the same ramp with a 400 ms pause half way (the queue runs
+#             dry for about 230 ms)
+#   end       dsptone ends mid-sound twice (_exit with the device open,
+#             then a fault), then a 0.5 s tone: the device is free again
+#   nonblock  dsptone -N (O_NONBLOCK): EAGAIN while the queue is full,
+#             every frame still played
+#   play      play -c (the mixed mode's cost: scale, mambo, entertainer)
+#             and play -m scale (mixed)
+#
+# Assertions:
+#   S0 build: kmain_console on each tier, the programs static, the
+#      initramfs and image built.
+#   S1 the device: one `sound: virtio sound at …: /dev/dsp` line; the
+#      run ends `halt`; no `refused:` line; the summary line's counters
+#      (`bad status` 0, `control requests (0 bad)`).
+#   S2 tone: dspprobe's answers are user/sound/dspprobe.expect byte for
+#      byte; dsptone's lines are user/sound/dsptone-tone.expect; the
+#      capture holds 1500 ms of sound within 40 ms, channel 0's
+#      strongest pitch 440 Hz and channel 1's 660 Hz within 0.2%, and
+#      1000 Hz on both; nothing clipped.
+#   S3 ramp: the first 96000 frames after the leading silence are the
+#      ramp exactly (tools/wav-notes --ramp): no frame lost, repeated or
+#      out of place, the channels not swapped.
+#   S4 underrun: the ramp exact across the pause; the summary counts at
+#      least one underrun; dsptone says it played in step.
+#   S5 end: two `sound: stream of pid <n> stopped undrained at its last
+#      close` lines; 523 Hz and 659 Hz each sound at most 1500 ms in the
+#      capture (what was written before the end, less what was dropped),
+#      the 784 Hz tone after them 500 ms within 40 ms: the device opened
+#      again and played.
+#   S6 nonblock: dsptone saw EAGAIN while the queue was full and played
+#      1000 ms within 40 ms.
+#   S7 play: `cost` lines with 0 clamped; the mixed scale is the eight
+#      notes of the scale, each onset within 30 ms of its place and each
+#      sounding its length within 10% (tools/wav-notes --expect), no
+#      clipping.
+#
+# Exit 0 when every assertion held, 1 otherwise, 2 on a usage or tool
+# error. The UEFI leg needs OVMF (PAX_REQUIRE_UEFI=1 makes its absence a
+# failure).
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 bindir= playdir= only=()
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --bin)      bindir=$2; shift 2 ;;
+        --play)     playdir=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        --scenario) only+=("$2"); shift 2 ;;
+        *)          die "usage: tests/mpx3-sound [--images DIR | --no-boot] [--bin DIR] [--play DIR] [--firmware bios|uefi|both] [--tier native|release|both] [--scenario NAME]..." ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+need readelf python3
+
+work=$PAX_BUILD/mpx3-sound
+runs=$PAX_BUILD/mpx3-sound-runs.txt
+fail=0
+bad() { say "FAIL $*"; fail=1; }
+notes=$PAX_ROOT/tools/wav-notes
+
+static_ok() {
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+# The scenarios' run lists (kmain_console runs each line in turn).
+runlist() {
+    case $1 in
+        tone) printf '%s\n' /bin/dspprobe "/bin/dsptone -q -t 1000 -l 440 -R 660" "/bin/dsptone -r 44100 -c 1 -f u8 -t 500 -l 1000" ;;
+        ramp) printf '%s\n' "/bin/dsptone -p ramp -t 2000" ;;
+        underrun) printf '%s\n' "/bin/dsptone -p ramp -t 2000 -g 400" ;;
+        end) printf '%s\n' "/bin/dsptone -t 3000 -l 523 -R 523 -X exit" "/bin/dsptone -t 3000 -l 659 -R 659 -X fault" "/bin/dsptone -t 500 -l 784 -R 784" ;;
+        nonblock) printf '%s\n' "/bin/dsptone -N -t 1000 -l 880 -R 880" ;;
+        play) printf '%s\n' "/bin/play -c scale mambo entertainer" "/bin/play -m scale" ;;
+    esac
+}
+SCENARIOS="tone ramp underrun end nonblock play"
+wanted() { # scenario
+    [ ${#only[@]} -eq 0 ] && return 0
+    local o
+    for o in "${only[@]}"; do [ "$o" = "$1" ] && return 0; done
+    return 1
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work"
+    why=
+    if [ -n "$bindir" ]; then
+        mkdir -p "$work/bin" && cp "$bindir/dsptone" "$bindir/dspprobe" "$work/bin/" || why+=" no witnesses in $bindir;"
+    elif ! "$PAX_ROOT/tools/mksound" "$work/bin" > "$work/sound.txt"; then
+        why+=" tools/mksound;"
+    fi
+    if [ -n "$playdir" ]; then
+        cp "$playdir/play" "$work/bin/play" || why+=" no $playdir/play;"
+    elif ! PAX_WOLF=$wolf "$PAX_ROOT/tools/mkplay" "$work/playbin" > "$work/play.txt"; then
+        why+=" tools/mkplay;"
+    else
+        cp "$work/playbin/play" "$work/bin/play"
+    fi
+    for s in $SCENARIOS; do
+        r=$work/root-$s
+        mkdir -p "$r/bin" "$r/etc" "$r/usr/share/tunes"
+        cp "$work"/bin/* "$r/bin/" 2>/dev/null
+        cp "$PAX_ROOT"/user/tunes/* "$r/usr/share/tunes/"
+        runlist "$s" > "$r/etc/pax-run"
+        pairs=()
+        for f in $(cd "$r" && find . -type f | sort); do
+            f=${f#./}
+            mode=644; [ -x "$r/$f" ] && mode=755
+            pairs+=("/$f=$r/$f:$mode")
+        done
+        "$PAX_ROOT/tools/mkinitramfs" "$work/$s.cpio" "${pairs[@]}" > "$work/$s.initramfs.txt" || why+=" $s: mkinitramfs;"
+    done
+    for f in "$work"/bin/*; do
+        x=$(static_ok "$f") || why+=" $x;"
+        say "  program: ${f##*/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+    done
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            for s in $SCENARIOS; do
+                "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                    --add "$work/$s.cpio" initramfs.cpio "$elf" "$work/$tier/$s.iso" >/dev/null || why+=" $tier $s: mkimage;"
+            done
+            say "built $tier: elf $(sha256_of "$elf")"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    [ -z "$why" ] && say "PASS S0: kmain_console built ($tiers), the witnesses and play static, $(echo $SCENARIOS | wc -w | tr -d ' ') images each" || bad "S0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        exit "$fail"
+    fi
+fi
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        for s in $SCENARIOS; do
+            wanted "$s" || continue
+            case $s in
+                tone|ramp) ;;
+                *) [ "$tier-$leg" = native-bios ] || [ "$tier-$leg" = release-uefi ] || continue ;;
+            esac
+            id="$tier $leg $s"
+            base=$PAX_BUILD/mpx3-sound-$tier-$leg-$s
+            log=$base.serial.log wav=$base.wav
+            elf=$images/$tier/kmain_console.elf iso=$images/$tier/$s.iso
+            rm -f "$log" "$wav" "$base".*.txt
+            if [ ! -f "$iso" ]; then
+                bad "S1 $id: no image"
+                continue
+            fi
+            hrc=0
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 300 \
+                --elf "$elf" --marker 'halt' \
+                --qemu -audiodev --qemu "wav,id=snd0,path=$wav,out.frequency=48000" \
+                --qemu -device --qemu virtio-sound-pci,audiodev=snd0 \
+                "$iso" > "$base.verdict" 2>&1 || hrc=$?
+            printf '%s %s %s halt-status=%s serial=%s wav=%s iso=%s\n' "$tier" "$leg" "$s" "$hrc" \
+                "$(sha256_of "$log" 2>/dev/null)" "$(sha256_of "$wav" 2>/dev/null)" "$(sha256_of "$iso")" >> "$runs"
+            norm=$base.norm; serial_norm "$log" > "$norm" 2>/dev/null || cp "$log" "$norm"
+
+            # S1: the device, the run's end, the summary.
+            why=
+            grep -Eq '^sound: virtio sound at .*: /dev/dsp$' "$norm" || why+=" no sound device line;"
+            grep -Eq '^halt' "$norm" || why+=" no halt (qemu-halt $hrc);"
+            grep -q 'refused:' "$norm" && why+=" a refused: line: $(grep -m1 'refused:' "$norm");"
+            sum=$(grep -m1 -E '^sound: [0-9]+ opens' "$norm")
+            [ -n "$sum" ] || why+=" no summary line;"
+            case $sum in *" 0 bad status"*"control requests (0 bad)"*) ;; *) why+=" summary: $sum;" ;; esac
+            [ -z "$why" ] && say "PASS S1 $id: the device up, the run to its end, ${sum#sound: }" || bad "S1 $id:$why"
+
+            if [ -s "$wav" ]; then
+                "$notes" --pcm "$wav" > "$base.pcm.txt" 2>&1
+                "$notes" --gaps "$wav" > "$base.gaps.txt" 2>&1
+            else
+                echo "no capture" > "$base.pcm.txt"
+            fi
+            case $s in
+            tone)
+                why=
+                sed -n '/^open \/dev\/dsp O_WRONLY/,/^end$/p' "$norm" | grep -v '^user: ' > "$base.probe.txt"
+                cmp -s "$PAX_ROOT/user/sound/dspprobe.expect" "$base.probe.txt" \
+                    || why+=" dspprobe differs: $(diff "$PAX_ROOT/user/sound/dspprobe.expect" "$base.probe.txt" | head -n 8 | tr '\n' '|');"
+                grep -E '^dsptone: ' "$norm" | grep -v 'timing:' > "$base.tone.txt"
+                cmp -s "$PAX_ROOT/user/sound/dsptone-tone.expect" "$base.tone.txt" \
+                    || why+=" dsptone differs: $(diff "$PAX_ROOT/user/sound/dsptone-tone.expect" "$base.tone.txt" | head -n 8 | tr '\n' '|');"
+                v=$(python3 - "$base.pcm.txt" <<'PY'
+import sys
+lines = [l.split() for l in open(sys.argv[1])]
+out = []
+ch = {}
+for w in lines:
+    if w[:1] == ["channel"] and len(w) > 6:
+        ch[int(w[1])] = {"sounding": float(w[7]), "clipped": int(w[13]), "pitches": []}
+    if w[:1] == ["pitch"]:
+        ch[int(w[1])]["pitches"].append(float(w[2]))
+for c, want in ((0, 440.0), (1, 660.0)):
+    if c not in ch or not ch[c]["pitches"]:
+        out.append("channel %d silent" % c); continue
+    top = ch[c]["pitches"][0]
+    if abs(top - want) / want > 0.002:
+        out.append("channel %d strongest %.2f Hz, not %.0f" % (c, top, want))
+    if not any(abs(p - 1000) < 2 for p in ch[c]["pitches"]):
+        out.append("channel %d has no 1000 Hz" % c)
+    if abs(ch[c]["sounding"] - 1500) > 40:
+        out.append("channel %d sounds %.1f ms, not 1500" % (c, ch[c]["sounding"]))
+    if ch[c]["clipped"]:
+        out.append("channel %d clipped %d" % (c, ch[c]["clipped"]))
+print("; ".join(out))
+PY
+)
+                [ -n "$v" ] && why+=" $v;"
+                [ -z "$why" ] && say "PASS S2 $id: dspprobe and dsptone as expected; 440 Hz left, 660 Hz right, 1000 Hz both, 1500 ms ($(grep -m2 '^pitch [01] ' "$base.pcm.txt" | awk '{print $3}' | tr '\n' ' '))" || bad "S2 $id:$why"
+                ;;
+            ramp|underrun)
+                why=
+                "$notes" --ramp 96000 "$wav" > "$base.ramp.txt" 2>&1 || why+=" $(head -n 3 "$base.ramp.txt" | tr '\n' '|');"
+                tag=S3
+                if [ "$s" = underrun ]; then
+                    tag=S4
+                    u=$(echo "$sum" | sed -n 's/.* \([0-9][0-9]*\) underruns.*/\1/p')
+                    [ "${u:-0}" -ge 1 ] || why+=" no underrun counted;"
+                    grep -q 'dsptone: closed; played out in step' "$norm" || why+=" dsptone did not play in step;"
+                fi
+                [ -z "$why" ] && say "PASS $tag $id: $(head -n 1 "$base.ramp.txt")${u:+, $u underruns}" || bad "$tag $id:$why"
+                ;;
+            end)
+                why=
+                n=$(grep -c -E '^sound: stream of pid [0-9]+ stopped undrained at its last close' "$norm")
+                [ "$n" = 2 ] || why+=" $n stopped-undrained lines, not 2;"
+                grep -q 'dsptone: closed; played out in step' "$norm" || why+=" the third dsptone did not play;"
+                v=$(python3 - "$wav" "$notes" <<'PY'
+import subprocess, sys, math
+sys.path.insert(0, "")
+import importlib.machinery, importlib.util
+loader = importlib.machinery.SourceFileLoader("wn", sys.argv[2])
+spec = importlib.util.spec_from_loader("wn", loader)
+wn = importlib.util.module_from_spec(spec); loader.exec_module(wn)
+chans, rate, ch, _ = wn.frames(sys.argv[1])
+x = chans[0]
+# the length each pitch sounds: 10 ms windows whose strongest of the
+# three pitches is that one and loud
+win = rate // 100
+cnt = {523: 0, 659: 0, 784: 0}
+for k in range(len(x) // win):
+    seg = x[k * win:(k + 1) * win]
+    if max(abs(v) for v in seg) < 1000:
+        continue
+    best, bv = None, 0
+    for hz in cnt:
+        re = sum(v * math.cos(2 * math.pi * hz * i / rate) for i, v in enumerate(seg))
+        im = sum(v * math.sin(2 * math.pi * hz * i / rate) for i, v in enumerate(seg))
+        m = math.hypot(re, im)
+        if m > bv:
+            best, bv = hz, m
+    cnt[best] += 10
+out = []
+for hz in (523, 659):
+    if cnt[hz] > 1500 or cnt[hz] < 500:
+        out.append("%d Hz sounds %d ms (expected 500-1500)" % (hz, cnt[hz]))
+if abs(cnt[784] - 500) > 40:
+    out.append("784 Hz sounds %d ms, not 500" % cnt[784])
+print("; ".join(out) if out else "OK 523 Hz %d ms, 659 Hz %d ms, 784 Hz %d ms" % (cnt[523], cnt[659], cnt[784]))
+PY
+)
+                case $v in OK*) ;; *) why+=" $v;" ;; esac
+                [ -z "$why" ] && say "PASS S5 $id: two streams stopped undrained, the device free again; ${v#OK }" || bad "S5 $id:$why"
+                ;;
+            nonblock)
+                why=
+                grep -q 'dsptone: EAGAIN answered while the queue was full' "$norm" || why+=" no EAGAIN;"
+                ms=$(awk '/^channel 0 /{print $7}' "$base.pcm.txt")
+                python3 -c "import sys; sys.exit(0 if abs(float('${ms:-0}') - 1000) <= 40 else 1)" || why+=" sounds ${ms:-0} ms, not 1000;"
+                [ -z "$why" ] && say "PASS S6 $id: EAGAIN while full, ${ms} ms played" || bad "S6 $id:$why"
+                ;;
+            play)
+                why=
+                grep -E '^cost ' "$norm" > "$base.cost.txt"
+                [ -s "$base.cost.txt" ] || why+=" no cost line;"
+                grep -E '^cost ' "$base.cost.txt" | grep -qv ' 0 clamped$' && why+=" clamping in a cost line;"
+                grep -q '^playing C major scale, C4 to C5 (4.0 s), mixed' "$norm" || why+=" no mixed playing line;"
+                # the scale's eight quarters at 120: 500 ms each, 480 sounding
+                : > "$base.spec"
+                k=0
+                for hz in 261.60 293.67 329.61 349.19 391.98 439.96 493.86 523.33; do
+                    echo "$((k * 500)) 480 $hz" >> "$base.spec"
+                    k=$((k + 1))
+                done
+                "$notes" --expect "$base.spec" "$wav" > "$base.expect.txt" 2>&1 || why+=" $(grep -v PASS "$base.expect.txt" | head -n 3 | tr '\n' '|');"
+                awk '/^channel 0 /{ if ($13 != 0) exit 1 }' "$base.pcm.txt" || why+=" clipped;"
+                [ -z "$why" ] && say "PASS S7 $id: $(tail -n 1 "$base.expect.txt"); $(tr '\n' ' ' < "$base.cost.txt")" || bad "S7 $id:$why"
+                ;;
+            esac
+        done
+    done
+done
+[ "$fail" = 0 ] && say "mpx3-sound: PASS" || say "mpx3-sound: FAIL"
+exit "$fail"
