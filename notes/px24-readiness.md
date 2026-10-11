@@ -444,6 +444,16 @@ and no later boot is started.
   empty pipe) and another printed two waits in the order the compiler
   chose to evaluate a call's arguments: both were the probes' faults,
   found by running them on Linux before PAX.
+- **`tests/mpx4-tcp`'s count of malformed headers was exact where
+  corruption can add one.** The loss matrix corrupts 2% of segments into
+  PAX, and `kernel/tcp` reads a segment's data offset before its
+  checksum, so a flipped bit there is a `header` drop, not a `checksum`
+  one: run 38161130626 (this branch at `99201e5`), job 114534092292,
+  `3 header` where T7 asked exactly 2, with T6's capture agreeing with
+  the kernel. T7 now asks two or more. px23's test, changed because this
+  lane's CI met it; the timing that made the corruption land there may
+  be `kernel/net`'s wait (above), which changes when the script
+  retransmits.
 - `eventfd`'s `write` of nine bytes is -EINVAL on kasumi's Linux 7.2.8,
   where eventfd(2) says only "less than 8"; the line is not in the
   probe (the CI runner's kernel is another), and PAX follows the man

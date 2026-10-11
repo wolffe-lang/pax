@@ -77,8 +77,9 @@
 #      kernel's counters the capture's, retransmissions among them.
 #   T7 the counters: every block made freed; nothing unsent, no
 #      connection without its frames; peer — the malformed counted
-#      exactly (1 short, 2 header, 1 broadcast, 2 port-zero, 3 option,
-#      one flipped bit or more), the intruders answered and not obeyed
+#      exactly (1 short, 2 header or more — a corrupted segment's data
+#      offset is read before its checksum — 1 broadcast, 2 port-zero, 3
+#      option, one flipped bit or more), the intruders answered and not obeyed
 #      (1 reset-challenged, 1 syn-challenged, 1 ack-ahead, 1 no-ack),
 #      every skipped option kind seen, 1 SYN with data, 1 urgent
 #      segment, 6 SYNs dropped by a full listen queue, a retransmission
@@ -534,7 +535,12 @@ PY
     ldone=$(sed -n -E 's/^ip: loopback ([0-9]+) datagrams sent, ([0-9]+) delivered, .*/\2/p' "$norm")
     [ -n "$lsent" ] && [ "$lsent" = "$ldone" ] || why+=" loopback ($lsent sent, $ldone delivered);"
     if [ "$way" = peer ]; then
-        has "$norm" 'tcp: rx [0-9]+ segments, dropped 1 short 2 header [1-9][0-9]* checksum 1 broadcast 2 port-zero 3 option' || why+=" the malformed;"
+        # Two malformed headers are the script's; a segment of the loss
+        # matrix's 2% corrupted whose flipped bit lands in the data
+        # offset is a third, counted before its checksum is (px24: run
+        # 38161130626, job 114534092292, `3 header` with T6's capture
+        # agreeing). The other causes come after the checksum.
+        has "$norm" 'tcp: rx [0-9]+ segments, dropped 1 short ([2-9]|[1-9][0-9]+) header [1-9][0-9]* checksum 1 broadcast 2 port-zero 3 option' || why+=" the malformed;"
         has "$norm" 'tcp: rx for nobody [0-9]+ reset, [0-9]+ resets dropped; listeners 6 listen-full 0 no-block 1 other; [0-9]+ unacceptable 1 reset-challenged 1 syn-challenged 1 ack-ahead 1 no-ack' || why+=" the intruders;"
         has "$norm" 'tcp: rx data [0-9]+ bytes in order, [1-9][0-9]* out-of-order queued, [0-9]+ out-of-order-dropped, [0-9]+ trimmed, [0-9]+ after-close, 1 syn-data, 1 urgent; [0-9]+ resets taken, [0-9]+ duplicate acks' || why+=" rx data;"
         has "$norm" 'tcp: options [0-9]+ mss, skipped [1-9][0-9]* window-scale [1-9][0-9]* sack-permitted 0 sack [1-9][0-9]* timestamps [1-9][0-9]* fast-open [1-9][0-9]* other' || why+=" options;"
