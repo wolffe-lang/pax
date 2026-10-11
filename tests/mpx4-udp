@@ -1,0 +1,490 @@
+#!/usr/bin/env bash
+# tests/mpx4-udp — UDP and the socket system calls (px22; toward M-PX4):
+# unmodified static x86-64 Linux programs send and receive UDP
+# datagrams on PAX through socket, bind, connect, sendto, recvfrom,
+# getsockname, getpeername, setsockopt, getsockopt, read and write
+# (kernel/socket, kernel/udp), and resolve a name through a DNS server,
+# their output and exit status byte-identical to the same binaries on
+# Linux.
+#
+#   tests/mpx4-udp [--images DIR | --no-boot] [--progs DIR] [--soak N]
+#                  [--firmware bios|uefi|both] [--tier native|release|both]
+#                  [--accel auto|kvm|tcg]
+#
+# The programs: user/net's seven (tools/mknet: C, linked static against
+# this host's glibc), unmodified, in the initramfs under /bin with a run
+# list as /etc/pax-run; the kernel is kmain_sockets, which runs the
+# list's commands one at a time. One kernel, two run lists, booted two
+# ways per tier (native, release) and firmware (bios, uefi):
+#
+#   peer   `-netdev socket,udp=…,localaddr=…`: tools/net-peer --udp is
+#          the whole network (the gateway 10.0.2.2, the DNS server
+#          10.0.2.3, an on-link host, a host behind the gateway) and
+#          holds every frame PAX sends to its exact bytes. The run list
+#          is user/mpx4-udp.run
+#   user   `-netdev user,ipv6=off,hostfwd=udp:127.0.0.1:<port>-:7`:
+#          QEMU's user-mode network, with tools/udp-host at this host's
+#          end — a client to the forwarded port (the echo server on PAX
+#          answers the host), a server at 127.0.0.1 port 9099 (PAX's
+#          client talks to a host server at 10.0.2.2) — and QEMU's own
+#          DNS server at 10.0.2.3. The run list is
+#          user/mpx4-udp-user.run
+#
+# both with `-object filter-dump` writing every frame to a pcap file.
+#
+# The reference side: tools/linux-net runs user/mpx4-udp.run on this
+# host's Linux (root: sudo -n), chrooted in the same tree, in a network
+# namespace addressed as PAX is, with the same net-peer script on a tap
+# device, each command under strace. So the Linux output is Linux's
+# answer to the very datagrams PAX is sent. The `user` way's lines are
+# lines of that list too (the host script sends the same datagrams), so
+# they are held to the same output. Two lines are held elsewhere:
+# `udpfill`, whose answer is the receiving kernel's queue bound, to
+# user/net/udpfill.expect (PAX keeps 65 of 200; Linux's own count is
+# printed); and the `user` way's `resolve 10.0.2.3 dns.google`, to what
+# tools/gateway-probe --dns got from QEMU's DNS server on this host
+# moments before (G1) — an outside name, so this host's resolver
+# decides the answer, and PAX must print that same answer (the same
+# rcode, the same addresses) or, where the host resolves nothing, the
+# same silence. The name every host answers the same way, pax.test, is
+# the `peer` way's: net-peer plays the DNS server there.
+#
+# Assertions:
+#   G1 the host (once): tools/gateway-probe --dns dns.google.
+#   U0 build: tools/build-kernel's object assertions for kmain_sockets;
+#      every program static (ET_EXEC, no PT_INTERP); the initramfs and
+#      ISOs built; the Linux side ran every command and its script
+#      ended PASS.
+#   U1 the stack up: the device's address, kernel/ip's line and
+#      kernel/udp's (16 sockets, a 65536-byte queue each, ports
+#      32768-60999, 1472 bytes a datagram).
+#   U2 the programs, differential: for each line k, `run k: <line>`, one
+#      exec line, its end `user: <name> pid <p> exit_group <s>` (never
+#      `killed`); the lines after the exec line that are not the
+#      kernel's (`user: …`) are byte-identical to Linux's output for
+#      that command and s is Linux's exit status (udpfill and the
+#      outside name as above).
+#   U3 frames and books: every line's `user: frames free <A> before, <B>
+#      with 1 processes, <A> after`, and its books: `heap pages 0, live
+#      blocks 0, net frames 66, stack frames 12, open files 0, pipes 0,
+#      sockets 0, datagrams waiting 0` — every frame, descriptor and
+#      socket came back.
+#   U4 what PAX lacks: -ENOSYS only for set_robust_list (273) and rseq
+#      (334); the refusals by name are exactly sockerr's four (a family,
+#      a type, a protocol, an option), each once.
+#   U5 the other end's verdict: net-peer's eight steps ok (peer);
+#      udp-host's four (user).
+#   U6 the capture, byte by byte (tools/pcap-net): every frame PAX sent
+#      rebuilt from its meaning and equal to the capture's, every
+#      checksum recomputed; every datagram from port 7 the echo of one
+#      that reached it; nothing looped back on the wire; and the
+#      kernel's counters the capture's, one by one.
+#   U7 the counters, exactly (N the soak): peer — 2N + 22 datagrams
+#      queued (1 without a checksum), dropped 1 short 2 length 1
+#      checksum 1 port-zero 7 no-port 0 full; 1 port unreachable sent, 4
+#      limited, 2 silent; 2N + 24 sent; over loopback 218 sent, 82
+#      queued, 1 no-port, 135 full; 18 sockets made and freed; 2N + 104
+#      datagrams read, none left. user — the same without the second
+#      echo server and the script's own tests.
+#   U8 the soaks: N datagrams into PAX and N out, one at a time, each
+#      answered (the programs' own lines, held by U2), and the rates
+#      from the kernel's stamp around each line.
+#   U9 the end: `run: <n> commands`, `halt`, no PANIC, and qemu-halt
+#      holds the machine halted.
+#
+# --images DIR boots what this script built earlier (DIR holds
+# <tier>/kmain_sockets.elf, <tier>/kmain_sockets-{peer,user}.iso,
+# peer.run, user.run, linux/ and soak): any host with QEMU, nm and
+# python3, no wolf, no compiler, no root. Without it the script builds
+# (linux x86-64); --no-boot stops after U0, leaving everything in
+# build/mpx4-udp. --progs DIR takes the programs from DIR instead of
+# building them. --soak N (default 10000) is the soak's length.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 accel=auto progs= soak=10000
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --progs)    progs=$2; shift 2 ;;
+        --soak)     soak=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        --accel)    accel=$2; shift 2 ;;
+        *)          die "usage: tests/mpx4-udp [--images DIR | --no-boot] [--progs DIR] [--soak N] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+
+k=kmain_sockets
+PROGS="sockerr udploop udpecho udpclient udpsoak udpfill resolve"
+OUTSIDE=dns.google
+work=$PAX_BUILD/mpx4-udp
+runs=$PAX_BUILD/mpx4-udp-runs.txt
+MAC=52:54:00:12:34:56
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+need nm python3
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf" readelf
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/root/bin" "$work/root/etc"
+    root=$work/root
+    why=
+    if [ -n "$progs" ]; then
+        say "the programs from $progs"
+    elif "$PAX_ROOT/tools/mknet" "$work/net" > "$work/net.txt"; then
+        progs=$work/net
+    else
+        why+=" tools/mknet;"
+    fi
+    for p in $PROGS; do
+        cp "$progs/$p" "$root/bin/$p" 2>/dev/null || { why+=" no $progs/$p;"; continue; }
+        r=$(static_ok "$root/bin/$p") || why+=" $r;"
+        say "  program: bin/$p $(sha256_of "$root/bin/$p") $(wc -c < "$root/bin/$p" | tr -d ' ') bytes"
+    done
+    printf '%s\n' "$soak" > "$work/soak"
+    sed "s/ 10000\$/ $soak/" "$PAX_ROOT/user/mpx4-udp.run" > "$work/peer.run"
+    sed "s/ 10000\$/ $soak/" "$PAX_ROOT/user/mpx4-udp-user.run" > "$work/user.run"
+    for way in peer user; do
+        pairs=()
+        for p in $PROGS; do pairs+=("/bin/$p=$root/bin/$p"); done
+        pairs+=("/etc/pax-run=$work/$way.run")
+        "$PAX_ROOT/tools/mkinitramfs" "$work/$way.cpio" "${pairs[@]}" > "$work/$way.initramfs.txt" || why+=" tools/mkinitramfs ($way);"
+    done
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/$k.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/$k.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            for way in peer user; do
+                "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                    --add "$work/$way.cpio" initramfs.cpio "$elf" "$work/$tier/$k-$way.iso" >/dev/null \
+                    || why+=" $tier $k: mkimage ($way);"
+            done
+            say "built $tier $k: elf $(sha256_of "$elf"), peer iso $(sha256_of "$work/$tier/$k-peer.iso"), user iso $(sha256_of "$work/$tier/$k-user.iso")"
+        else
+            cat "$log" >&2
+            why+=" $tier $k: tools/build-kernel;"
+        fi
+    done
+    # The Linux side: the same binaries, the same tree, the peer's list,
+    # the same script at the other end.
+    if [ "$(uname -s)" != Linux ]; then
+        why+=" the Linux side needs Linux (this is $(uname -s)): build on Linux, boot here with --images;"
+    else
+        sudo=(); [ "$(id -u)" = 0 ] || sudo=(sudo -n)
+        st=(); command -v strace >/dev/null 2>&1 && st=(--strace)
+        if "${sudo[@]}" "$PAX_ROOT/tools/linux-net" "${st[@]}" --soak "$soak" "$root" "$work/peer.run" "$work/linux" > "$work/linux.txt" 2>&1; then
+            sed 's/^/  linux: /' "$work/linux.txt" >&2
+        else
+            sed 's/^/  linux: /' "$work/linux.txt" >&2
+            why+=" tools/linux-net (needs root and /dev/net/tun): $(tail -n 1 "$work/linux.txt");"
+        fi
+        [ "${#sudo[@]}" = 0 ] || "${sudo[@]}" chown -R "$(id -u):$(id -g)" "$work/linux"
+    fi
+    [ -z "$why" ] && say "PASS U0: $k built ($tiers), 7 programs static, two initramfs ($(wc -c < "$work/peer.cpio" | tr -d ' ') and $(wc -c < "$work/user.cpio" | tr -d ' ') bytes), Linux ran $(grep -c ' -> ' "$work/linux.txt") commands; $(grep '^peer: ' "$work/linux.txt")" || bad "U0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx4-udp build (U0): PASS (no boot: --no-boot)" || say "mpx4-udp build: FAIL"
+        exit "$fail"
+    fi
+fi
+lx=$images/linux
+[ -f "$images/peer.run" ] && [ -f "$images/user.run" ] && [ -d "$lx" ] && [ -f "$images/soak" ] || die "no $images/peer.run, user.run, soak or linux/ (build first)"
+soak=$(cat "$images/soak")
+
+# Two UDP ports on this host, free to bind.
+pick_ports() {
+    python3 -c '
+import os, socket, sys
+p = 20000 + (os.getpid() * 7919 + int(sys.argv[1]) * 16) % 20000
+got = []
+for k in range(400):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.bind(("127.0.0.1", p + k))
+    except OSError:
+        continue
+    s.close()
+    got.append(p + k)
+    if len(got) == 2:
+        break
+print(*got)
+' "$1"
+}
+
+has() { grep -Eqx -- "$2" "$1"; }
+line_of() { grep -E -m1 -- "$2" "$1"; }
+
+# The Linux side's line number for a command (its place in the peer's
+# list); nothing when the command is not one of its lines.
+linux_line() { # command
+    awk -v c="$1" '/^#/ || /^$/ { next } { n++ } $0 == c { print n; exit }' "$images/peer.run"
+}
+
+# Boot the kernel one way to its halt; leaves the log in $log, its
+# normalised text in $norm, the capture in $pcap and the other end's
+# account in $log.end. Status: qemu-halt's.
+boot() { # tier leg way
+    local tier=$1 leg=$2 way=$3 rc=0 ports port port2 pid
+    log=$PAX_BUILD/mpx4-udp-$tier-$leg-$way.serial.log
+    pcap=$PAX_BUILD/mpx4-udp-$tier-$leg-$way.pcap
+    norm=$log.norm
+    iso=$images/$tier/$k-$way.iso elf=$images/$tier/$k.elf
+    rm -f "$log" "$log.verdict" "$log.end" "$pcap" "$norm"
+    [ -f "$iso" ] && [ -f "$elf" ] || { say "no image or ELF for $tier $k ($iso)"; : > "$log"; : > "$norm"; : > "$log.end"; return 2; }
+    ports=$(pick_ports "$ran")
+    port=${ports% *} port2=${ports#* }
+    [ -n "$port" ] && [ "$port" != "$port2" ] || { say "no free UDP ports on this host"; : > "$log"; : > "$norm"; : > "$log.end"; return 2; }
+    local q=()
+    if [ "$way" = peer ]; then
+        q=(--qemu -netdev --qemu "socket,id=n0,udp=127.0.0.1:$port,localaddr=127.0.0.1:$port2")
+        "$PAX_ROOT/tools/net-peer" --udp --listen "$port" --qemu "$port2" --soak "$soak" --boot 170 >"$log.end" 2>&1 &
+    else
+        q=(--qemu -netdev --qemu "user,id=n0,ipv6=off,hostfwd=udp:127.0.0.1:$port-:7")
+        "$PAX_ROOT/tools/udp-host" --echo-to "$port" --soak "$soak" --boot 170 --wait 900 >"$log.end" 2>&1 &
+    fi
+    pid=$!
+    if [ "$way" = user ]; then
+        # The host's port 9099 is one run's at a time: the script says when it has it.
+        local w=0
+        while [ "$w" -lt 9000 ] && ! grep -q '^udp-host: 127.0.0.1 port\|^udp-host: FAIL' "$log.end" 2>/dev/null; do sleep 0.1; w=$((w + 1)); done
+    fi
+    q+=(--qemu -device --qemu "virtio-net-pci,netdev=n0,mac=$MAC" --qemu -object --qemu "filter-dump,id=f0,netdev=n0,file=$pcap")
+    "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 420 --accel "$accel" \
+        --elf "$elf" --marker halt "${q[@]}" "$iso" >"$log.verdict" 2>&1 || rc=$?
+    # The other end has said its last word by now, or never will.
+    sleep 0.5; kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    ran=$((ran + 1))
+    serial_norm "$log" > "$norm"
+    printf '%s %s %s halt-status=%s accel=%s qemu="%s" serial=%s iso=%s%s\n' "$tier" "$leg" "$way" "$rc" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sed -n 's/^qemu: //p' "$log.meta" 2>/dev/null)" \
+        "$(sha256_of "$log")" "$(sha256_of "$iso")" \
+        "$([ -f "$pcap" ] && printf ' pcap=%s (%s bytes)' "$(sha256_of "$pcap")" "$(wc -c < "$pcap" | tr -d ' ')")" \
+        >> "$runs"
+    return "$rc"
+}
+
+# U1-U9 for one boot.
+one() { # tier leg way
+    local tier=$1 leg=$2 way=$3 L="$1 $2 $3" hrc=0 why
+    boot "$tier" "$leg" "$way" || hrc=$?
+    local list=$images/$way.run
+    local ncmd; ncmd=$(command grep -cv -e '^#' -e '^$' "$list")
+
+    # --- U1: the stack up ---------------------------------------------------
+    if has "$norm" "net: $MAC, line [0-9]+ \(vector [0-9]+, level; elcr [0-9a-f]+ -> [0-9a-f]+\), 66 frames held" \
+        && has "$norm" 'ip: 10\.0\.2\.15 netmask 255\.255\.255\.0 gateway 10\.0\.2\.2, MTU 1500, TTL 64, DF set, no fragments either way' \
+        && has "$norm" 'udp: 16 sockets, a 65536-byte queue each, ports 32768-60999 from [0-9]+, 1472 bytes a datagram, loopback here'; then
+        say "PASS U1 $L: $(line_of "$norm" '^ip: 10'); $(line_of "$norm" '^udp: 16')"
+    else
+        bad "U1 $L: $(grep -m1 '^net: \|^PANIC' "$norm"); ip '$(line_of "$norm" '^ip: 10')'; udp '$(line_of "$norm" '^udp: 16')'"
+    fi
+
+    # --- U2: each command against Linux -------------------------------------
+    why=
+    local out=$PAX_BUILD/mpx4-udp-$tier-$leg-$way.out n=0 line m s pids pid endl lk want wrc got
+    rm -rf "$out"; mkdir -p "$out"
+    while IFS= read -r line; do
+        case $line in ''|'#'*) continue ;; esac
+        n=$((n + 1))
+        awk -v h="run $n: $line" '$0 == h { on = 1; next } on && /^run [0-9]+: |^run: [0-9]+ commands$/ { exit } on { print }' "$norm" > "$out/$n.block"
+        pids=$(sed -n -E 's/^user: exec pid ([0-9]+) cr3 .*/\1/p' "$out/$n.block" | paste -sd' ' -)
+        if [ "$(printf '%s\n' $pids | grep -c .)" != 1 ]; then
+            why+=" $n ($line): $(printf '%s\n' $pids | grep -c .) exec lines, not 1 ($(head -n 2 "$out/$n.block" | tr '\n' '|'));"
+            continue
+        fi
+        pid=$pids
+        endl=$(grep -E "^user: [^ ]+ pid $pid (exit_group|exit) [0-9]+ after [0-9]+ runs$|^user: [^ ]+ pid [0-9]+ killed: " "$out/$n.block" | head -n 1)
+        case $endl in
+            *" killed: "*|'') why+=" $n ($line): '$endl';"; continue ;;
+        esac
+        s=$(printf '%s\n' "$endl" | sed -E 's/.* (exit_group|exit) ([0-9]+) after .*/\2/')
+        awk '/^user: exec pid / { on = 1; next } on && !/^user: / { print }' "$out/$n.block" > "$out/$n.out"
+        case $line in
+            /bin/udpfill)
+                want=$PAX_ROOT/user/net/udpfill.expect wrc=0 ;;
+            "/bin/resolve 10.0.2.3 $OUTSIDE")
+                # Held to G1: what QEMU's DNS server answered this host.
+                got=$(awk -v name="$OUTSIDE" '
+                    /^resolve: answer from 10\.0\.2\.3:53: rcode [0-9]+, [0-9]+ answers$/ { r = $6; sub(/,/, "", r) }
+                    $0 ~ "^resolve: " name " is " { a[++k] = $4 }
+                    /^resolve: no answer from 10\.0\.2\.3 in 6 s$/ { none = 1 }
+                    END {
+                        if (none) { print "none"; exit }
+                        m = k; for (i = 1; i <= m; i++) for (j = i + 1; j <= m; j++) if (a[j] < a[i]) { t = a[i]; a[i] = a[j]; a[j] = t }
+                        s = ""; for (i = 1; i <= m; i++) s = s (i > 1 ? "," : "") a[i]
+                        print "rcode=" r " addresses=" (s == "" ? "-" : s)
+                    }' "$out/$n.out")
+                if [ "$got" = "$dns" ]; then
+                    printf '%s\t%s\t%s\t%s (QEMU'"'"'s DNS on this host: %s)\n' "$n" "$s" "$(sha256_of "$out/$n.out")" "$line" "$dns" >> "$out/summary.tsv"
+                else
+                    why+=" $n ($line): PAX got '$got', this host's probe '$dns' ($(tr '\n' '|' < "$out/$n.out"));"
+                fi
+                continue ;;
+            *)
+                lk=$(linux_line "$line")
+                [ -n "$lk" ] || { why+=" $n ($line): not a line of the Linux side's list;"; continue; }
+                want=$lx/$lk.out wrc=$(cat "$lx/$lk.rc" 2>/dev/null) ;;
+        esac
+        if ! cmp -s "$want" "$out/$n.out"; then
+            why+=" $n ($line): output differs from ${want##*/}: $(diff "$want" "$out/$n.out" | head -n 6 | tr '\n' '|');"
+        fi
+        [ "$s" = "$wrc" ] || why+=" $n ($line): exit $s on PAX, $wrc due;"
+        printf '%s\t%s\t%s\t%s\n' "$n" "$s" "$(sha256_of "$out/$n.out")" "$line" >> "$out/summary.tsv"
+    done < "$list"
+    [ "$n" = "$ncmd" ] || why+=" $n commands read, the list has $ncmd;"
+    if [ -z "$why" ]; then
+        say "PASS U2 $L: $n commands, each one's output and exit status byte-identical to Linux's ($(cut -f2 "$out/summary.tsv" | paste -sd, -)); udpfill to its file (65 of 200 kept; Linux kept $(sed -n 's/.* \([0-9]*\) kept .*/\1/p' "$lx/$(linux_line /bin/udpfill).out"))$([ "$way" = user ] && printf '; %s as this host'"'"'s probe: %s' "$OUTSIDE" "$dns")"
+    else
+        bad "U2 $L:$why"
+    fi
+
+    # --- U3: frames and books ---------------------------------------------------
+    why=
+    local v
+    v=$(awk -v want="$ncmd" '
+        /^user: frames free [0-9]+ before, [0-9]+ with [0-9]+ processes, [0-9]+ after$/ {
+            n++; a = $4; b = $6; p = $8; c = $10
+            if (c != a) why = why " command " n ": " c " after, not " a ";"
+            if (p != 1 || b >= a) why = why " command " n ": " p " processes, " b " during;"
+        }
+        /^user: books: / {
+            m++
+            if ($0 != "user: books: heap pages 0, live blocks 0, net frames 66, stack frames 12, open files 0, pipes 0, sockets 0, datagrams waiting 0") why = why " command " m ": " $0 ";"
+        }
+        END { if (n != want || m != want) why = why " " n " frames lines and " m " books lines, not " want ";"; if (why != "") { print "no:" why; exit 1 } print "ok" }' "$norm") || why=" ${v#no:}"
+    [ -z "$why" ] && say "PASS U3 $L: after each of $ncmd commands every frame back, and the books: $(sed -n 's/^user: books: //p' "$norm" | tail -n 1)" || bad "U3 $L:$why"
+
+    # --- U4: what PAX lacks -------------------------------------------------------
+    why=
+    local ns rf
+    ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
+    [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
+    rf=$(sed -n -E 's/^user: sockerr pid [0-9]+ (syscall [0-9]+: refused: .*)$/\1/p' "$norm")
+    [ "$rf" = "syscall 41: refused: a socket of a family PAX has none of: family 9999, -97
+syscall 41: refused: an AF_INET socket that is not a datagram socket: type 4, -94
+syscall 41: refused: a datagram socket of a protocol that is not UDP: protocol 6, -93
+syscall 54: refused: a socket option PAX does not have: level and option 1 9999, -92" ] || why+=" sockerr's refusals are not the four due: $(printf '%s' "$rf" | tr '\n' '|');"
+    [ "$(grep -c ': refused: ' "$norm")" = 4 ] || why+=" $(grep -c ': refused: ' "$norm") refusal lines, not 4 ($(grep ': refused: ' "$norm" | grep -v ' sockerr ' | head -n 2 | tr '\n' '|'));"
+    [ -z "$why" ] && say "PASS U4 $L: -ENOSYS only for set_robust_list (273) and rseq (334); four refusals by name, each once: a family (9999), a type (4), a protocol (6), an option (1, 9999)" || bad "U4 $L:$why"
+
+    # --- U5: the other end ----------------------------------------------------------
+    if [ "$way" = peer ]; then
+        if grep -q '^net-peer: PASS ' "$log.end" && [ "$(grep -c '^net-peer: ok U' "$log.end")" = 8 ]; then
+            say "PASS U5 $L: tools/net-peer: 8 steps ok; $(grep '^net-peer: sent' "$log.end" | sed 's/^net-peer: //'); $(grep '^net-peer: PASS' "$log.end" | sed 's/^net-peer: PASS //')"
+        else
+            grep -A3 '^net-peer: FAIL' "$log.end" >&2
+            bad "U5 $L: tools/net-peer: $(grep -c '^net-peer: ok U' "$log.end") of 8 steps; $(grep -m1 '^net-peer: FAIL\|^Traceback\|Error' "$log.end")"
+        fi
+    else
+        if grep -q '^udp-host: PASS' "$log.end" && [ "$(grep -c '^udp-host: ok H' "$log.end")" = 4 ]; then
+            say "PASS U5 $L: tools/udp-host: 4 steps ok (the echo server on PAX answered this host through the forwarded port; PAX's client and soak were answered by this host's server at 10.0.2.2)"
+        else
+            bad "U5 $L: tools/udp-host: $(grep -c '^udp-host: ok H' "$log.end") of 4 steps; $(grep -m1 '^udp-host: FAIL\|^Traceback\|Error' "$log.end")"
+        fi
+    fi
+
+    # --- U6: the capture ---------------------------------------------------------------
+    if [ -s "$pcap" ] && "$PAX_ROOT/tools/pcap-net" --serial "$log" "$pcap" >"$pcap.check" 2>&1; then
+        say "PASS U6 $L: $(grep '^pcap-net: [0-9]' "$pcap.check"); $(grep '^pcap-net: the kernel' "$pcap.check") [pcap $(sha256_of "$pcap" | cut -c1-12)…]"
+    else
+        tail -n 4 "$pcap.check" >&2 2>/dev/null
+        bad "U6 $L: the capture ($pcap): $(grep -m1 '^pcap-net: FAIL' "$pcap.check" 2>/dev/null)"
+    fi
+
+    # --- U7: the counters, exactly -----------------------------------------------------
+    why=
+    if [ "$way" = peer ]; then
+        has "$norm" "udp: rx $((2 * soak + 22)) datagrams queued \(1 without a checksum\), dropped 1 short 2 length 1 checksum 1 port-zero 7 no-port 0 full" || why+=" rx;"
+        has "$norm" 'udp: unreachable 1 sent, 4 limited, 2 silent; 0 not sent' || why+=" unreachable;"
+        has "$norm" "udp: tx $((2 * soak + 24)) datagrams, 0 not sent; loopback 218 sent, 82 queued, 1 no-port, 135 full" || why+=" tx;"
+        has "$norm" "udp: sockets 18 made, 18 freed, 0 open; datagrams $((2 * soak + 104)) read, 0 dropped at close, 0 waiting" || why+=" sockets;"
+        has "$norm" 'icmp: unreachable 1 sent, 4 limited, 2 silent; 0 not sent' || why+=" icmp;"
+        has "$norm" 'ip: rx [0-9]+ datagrams delivered \(0 with options, 2 broadcast\), dropped 0 short 0 version 0 ihl 0 checksum 0 length 0 ttl 0 fragment 0 source 0 option 0 source-route 0 other 0 protocol' || why+=" ip;"
+    else
+        # The outside name: one query and its answer, or two queries and none.
+        local qs=1 as=1
+        [ "$dns" = none ] && qs=2 as=0
+        has "$norm" "udp: rx $((2 * soak + 11 + as)) datagrams queued \(0 without a checksum\), dropped 0 short 0 length 0 checksum 0 port-zero 0 no-port 0 full" || why+=" rx;"
+        has "$norm" 'udp: unreachable 0 sent, 0 limited, 0 silent; 0 not sent' || why+=" unreachable;"
+        has "$norm" "udp: tx $((2 * soak + 12 + qs)) datagrams, 0 not sent; loopback 218 sent, 82 queued, 1 no-port, 135 full" || why+=" tx;"
+        has "$norm" "udp: sockets 17 made, 17 freed, 0 open; datagrams $((2 * soak + 93 + as)) read, 0 dropped at close, 0 waiting" || why+=" sockets;"
+    fi
+    [ -z "$why" ] && say "PASS U7 $L: $(line_of "$norm" '^udp: rx'); $(line_of "$norm" '^udp: unreachable'); $(line_of "$norm" '^udp: tx'); $(line_of "$norm" '^udp: sockets')" \
+        || bad "U7 $L:$why $(grep '^udp: ' "$norm" | tail -n 4 | paste -sd'|' -)"
+
+    # --- U8: the soaks' rates -----------------------------------------------------------
+    local ki ko ui uo
+    ki=$(awk '/^#/ || /^$/ { next } { n++ } /udpecho 7 10\.0\.2\.2 9099$/ { print n; exit }' "$list")
+    ko=$(awk '/^#/ || /^$/ { next } { n++ } /udpsoak / { print n; exit }' "$list")
+    ui=$(sed -n -E "s/^user: run $ki took [0-9]+ ticks, ([0-9]+) us by the time-stamp counter\$/\1/p" "$norm")
+    uo=$(sed -n -E "s/^user: run $ko took [0-9]+ ticks, ([0-9]+) us by the time-stamp counter\$/\1/p" "$norm")
+    if [ -n "$ui" ] && [ -n "$uo" ] && [ "$ui" -gt 0 ] && [ "$uo" -gt 0 ] \
+        && has "$norm" "udpecho: $((soak + 6)) datagrams, [0-9]+ bytes echoed, sum [0-9a-f]{8}" \
+        && has "$norm" "udpsoak: $soak datagrams sent, $soak answers, $soak right"; then
+        say "PASS U8 $L: $((soak + 6)) datagrams into PAX and echoed in $ui us ($(( (soak + 6) * 1000000 / ui )) a second); $soak out and answered in $uo us ($(( soak * 1000000 / uo )) a second), by the kernel's stamp around each program"
+    else
+        bad "U8 $L: in '$ui' us, out '$uo' us; $(grep -m2 '^udpecho: [0-9]* datagrams\|^udpsoak: ' "$norm" | paste -sd'|' -)"
+    fi
+
+    # --- U9: the end ----------------------------------------------------------------------
+    why=
+    has "$norm" "run: $ncmd commands" || why+=" no 'run: $ncmd commands' ($(grep -m1 '^run: ' "$norm"));"
+    grep -q '^PANIC' "$norm" && why+=" $(grep -m1 '^PANIC' "$norm");"
+    [ "$hrc" = 0 ] || why+=" not halted (qemu-halt $hrc): $(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict");"
+    "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'netd: [0-9]+ turns, [0-9]+ clock turns' 'halt' >/dev/null \
+        || why+=" the log does not end with netd's line and halt;"
+    [ -z "$why" ] && say "PASS U9 $L: $ncmd commands, then halt; $(tail -n 1 "$log.verdict")" || bad "U9 $L:$why"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+
+# --- G1: what QEMU's DNS server answers on this host ---------------------------
+if "$PAX_ROOT/tools/gateway-probe" --dns "$OUTSIDE" >"$PAX_BUILD/mpx4-udp-gateway-probe.txt" 2>&1 \
+    && dns=$(sed -n "s/^gateway-probe: dns $OUTSIDE //p" "$PAX_BUILD/mpx4-udp-gateway-probe.txt" | tail -n 1) && [ -n "$dns" ]; then
+    say "PASS G1 $(sed -n '1s/^gateway-probe: //p' "$PAX_BUILD/mpx4-udp-gateway-probe.txt"): QEMU's DNS server (10.0.2.3) asked for $OUTSIDE on this host: $dns"
+else
+    cat "$PAX_BUILD/mpx4-udp-gateway-probe.txt" >&2
+    dns=unknown
+    bad "G1: tools/gateway-probe --dns $OUTSIDE"
+fi
+
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        one "$tier" "$leg" peer
+        one "$tier" "$leg" user
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx4-udp: PASS" || say "mpx4-udp: FAIL"
+exit "$fail"
