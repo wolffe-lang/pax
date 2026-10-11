@@ -20,7 +20,11 @@
 //! synthetic `/dev`: `/dev/stdin`, `/dev/stdout` and `/dev/stderr` open
 //! whatever descriptor 0, 1 or 2 is (as Linux's links to
 //! `/proc/self/fd/N` do; -ENOENT when it is closed), and `/dev/null`
-//! reads end-of-file and swallows writes. The root lists the archive's
+//! reads end-of-file and swallows writes; `/dev/tty0` and
+//! `/dev/console` (px21a) open the console itself, whatever descriptors
+//! 0-2 have become: reads, writes and the console's ioctls (the
+//! terminal's, and kernel/speaker's KIOCSOUND and KDMKTONE, which a
+//! Linux beep program asks of `/dev/tty0`). The root lists the archive's
 //! top-level entries and `dev`. A path is made canonical as a string
 //! first (`//` and `.` dropped, `..` pops a component, never above the
 //! root) and then looked up whole; a path through a regular file is
@@ -80,7 +84,8 @@
 //! **What stat answers**: a file's mode, size, inode (the archive's,
 //! plus 16) and link count from its newc header; directories 0755,
 //! the console a character device 4:64 (`/dev/ttyS0`'s numbers),
-//! `/dev/null` 1:3; uid, gid and every time 0; st_blksize 4096,
+//! `/dev/tty0` 4:0 and `/dev/console` 5:1 (Linux's, `stat` on a Linux
+//! host; mode 0620 as the console's), `/dev/null` 1:3; uid, gid and every time 0; st_blksize 4096,
 //! st_blocks the size in 512-byte units rounded up; st_dev 0:1.
 //!
 //! **AF_INET sockets** (px22): a descriptor may name one of kernel/udp's
@@ -94,7 +99,8 @@
 //! copied through the HHDM). A path is copied into boot/user.S's
 //! `pax_kbuf` (one CPU, IF clear for the whole call). No region, no
 //! heap: the records are `.bss` words read volatile, a pipe's bytes are
-//! frames reached through the HHDM (wolf-lang#611).
+//! frames reached through the HHDM (a call that waits gives up its
+//! kernel stack: kernel/sched, "Regions").
 
 use console
 use frames
@@ -164,10 +170,12 @@ const K_INET: u64 = 8 // px22: an AF_INET datagram socket (kernel/udp's)
 
 // Nodes: a type in the top byte, a reference below (an entry's offset).
 const T_SHIFT: u64 = 56
+const TTY0: u64 = 1 // px21a: T_CONSOLE's reference for /dev/tty0
+const CONSOLE: u64 = 2 // px21a: and for /dev/console
 const T_ROOT: u64 = 1
 const T_DEV: u64 = 2
 const T_ENTRY: u64 = 3
-const T_CONSOLE: u64 = 4
+const T_CONSOLE: u64 = 4 // the reference: 0 the console as 0-2 name it, TTY0, CONSOLE
 const T_NULL: u64 = 5
 const T_STD: u64 = 6 // /dev/stdin, stdout, stderr: the reference is 0, 1, 2
 const T_PIPE: u64 = 7 // px17: a pipe; the reference its record
@@ -444,7 +452,10 @@ fn kind(a: u64, fd: u64) -> u64 {
 fn node_of(a: u64, fd: u64) -> u64 {
     let k = kind(a, fd)
     if k == K_CONSOLE {
-        return T_CONSOLE << T_SHIFT
+        // px21a: a descriptor opened through /dev/tty0 or /dev/console
+        // keeps which (for fstat); 0-2 as a process starts have no node.
+        let n = get(a, fdw(fd, D_NODE))
+        return if ty(n) == T_CONSOLE { n } else { T_CONSOLE << T_SHIFT }
     }
     if k == K_NULL {
         return T_NULL << T_SHIFT
@@ -1221,6 +1232,12 @@ fn lookup(l: u64) -> u64 {
     if norm_is(l, "dev/null") {
         return T_NULL << T_SHIFT
     }
+    if norm_is(l, "dev/tty0") {
+        return (T_CONSOLE << T_SHIFT) | TTY0
+    }
+    if norm_is(l, "dev/console") {
+        return (T_CONSOLE << T_SHIFT) | CONSOLE
+    }
     let e = find_entry(l)
     if e != initramfs.END {
         return entry_node(e)
@@ -1596,6 +1613,9 @@ fn n_ino(n: u64) -> u64 {
     if t == T_NULL {
         return 4
     }
+    if t == T_CONSOLE && rf(n) != 0 {
+        return 4 + rf(n) // px21a: /dev/tty0 5, /dev/console 6
+    }
     if t == T_PIPE || t == T_SOCK {
         return 0x100 + (rf(n) & 0xff) // px17: one number per buffer
     }
@@ -1619,6 +1639,12 @@ fn n_nlink(n: u64) -> u64 {
 /// The device a character node is (major, minor), 0 for others.
 fn n_rdev(n: u64, which: int) -> u64 {
     let t = ty(n)
+    if t == T_CONSOLE && rf(n) == TTY0 {
+        return if which == 0 { 4 } else { 0 }
+    }
+    if t == T_CONSOLE && rf(n) == CONSOLE {
+        return if which == 0 { 5 } else { 1 }
+    }
     if t == T_CONSOLE || t == T_STD {
         return if which == 0 { 4 } else { 64 }
     }
@@ -1750,6 +1776,9 @@ fn child(d: u64, k: u64) -> u64 {
         if k == 3 {
             return T_NULL << T_SHIFT
         }
+        if k == 4 || k == 5 {
+            return (T_CONSOLE << T_SHIFT) | (k - 3) // px21a: tty0, console
+        }
         return err(ENOENT)
     }
     var i: u64 = 0
@@ -1778,6 +1807,9 @@ fn child_name_len(d: u64, c: u64) -> u64 {
     if t == T_NULL {
         return 4
     }
+    if t == T_CONSOLE {
+        return if rf(c) == TTY0 { 4 } else { 7 }
+    }
     if t == T_STD {
         return if rf(c) == 0 { 5 } else { 6 }
     }
@@ -1803,6 +1835,8 @@ fn put_child_name(pml4: u64, va: u64, d: u64, c: u64) {
         s = "dev"
     } else if t == T_NULL {
         s = "null"
+    } else if t == T_CONSOLE {
+        s = if rf(c) == TTY0 { "tty0" } else { "console" }
     } else if t == T_STD {
         s = std_name(rf(c))
     } else {

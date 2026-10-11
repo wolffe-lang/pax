@@ -542,6 +542,13 @@ pub fn ioctl(pml4: u64, req: u64, arg: u64) -> u64 {
         // px18: KIOCSOUND and KDMKTONE, the console's speaker (kernel/speaker).
         return speaker.ioctl(req, arg, timer.ticks())
     }
+    if (req >> 8) & 0xff == 0x45 {
+        // px21a: an input-device request (the uapi's EVIOC*, type 'E';
+        // a Linux beep program asks EVIOCGSND of the device it was
+        // given) is not a terminal's: plain -ENOTTY, as a Linux tty
+        // answers (measured on a pty), with nothing to report.
+        return NEG_ENOTTY
+    }
     REFUSED
 }
 
