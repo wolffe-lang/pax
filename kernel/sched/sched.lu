@@ -133,6 +133,20 @@
 //! device's interrupt makes it ready (`wake_net`) and `kick` runs it
 //! at once when the CPU was idle.
 //!
+//! **Regions** (px21a): wolf's freestanding runtime keeps one
+//! ambient-region slot, and every switch moves it with the thread:
+//! `run_next` stores `heap.ambient()` in the outgoing thread's record
+//! and hands the incoming thread's saved value (0, the root, for a
+//! thread that has not run) to `heap.set_ambient`. So a thread may hold
+//! a `region` open across a yield, a preemption or a wait and its
+//! allocations land in its own region. A return to ring 3 switches no
+//! thread and needs nothing saved. What is still refused by rule: a
+//! system call's handler leaves no region open where it gives up its
+//! kernel stack for good (`sleep_current`, `block_input`,
+//! `block_pipe`, `vfork_wait`, `wait_child`, `end_with`, `execve`: the
+//! code after such a wait never runs, so the region would never be
+//! left), and no interrupt handler allocates.
+//!
 //! The record's fields are read and written as words at their
 //! `offset_of`, volatile (`field`/`put_field`): wolf 0.2.26 stores a
 //! field of a raw element in place (wolf-lang#577), but as an ordinary
@@ -146,6 +160,7 @@
 use fpu
 use frames
 use gdt
+use heap
 use log
 use paging
 use panic
@@ -165,7 +180,8 @@ extern "c" let pax_procs: *u64
 
 /// One thread's record (boot/sched.S: 16 of them, 256 bytes each; 72
 /// before px09 added `cr3` and `prog`, 88 before px10's four, 120
-/// before px12's `fs`, 128 bytes a slot before px14's seven).
+/// before px12's `fs`, 128 bytes a slot before px14's seven; px21a's
+/// `amb` is the 24th word).
 #[repr(c)]
 struct Thread {
     frame: u64, // the saved frame's address; 0 while running
@@ -191,6 +207,7 @@ struct Thread {
     vparent: u64, // px14: slot + 1 of the vfork parent it holds suspended; 0 none
     zombie: u64, // px14: 1 when a parent will wait for it (the slot outlives the reap)
     sigmask: u64, // px14: its blocked signals (rt_sigprocmask)
+    amb: u64, // px21a: its ambient region while it is switched out; 0 the root
 }
 
 /// How many slots there are (px14: `clone_current` and `child_ended`
@@ -373,6 +390,9 @@ fn run_next() -> u64 {
     let s = if n == 0 { IDLE } else { n - 1 }
     if s != from {
         fpu.switch(from, s) // px10: a no-op before fpu.start
+        // px21a: the ambient region goes with its thread. IF is clear.
+        put_field(from, offset_of(Thread, amb), heap.ambient())
+        heap.set_ambient(field(s, offset_of(Thread, amb)))
     }
     put_field(s, offset_of(Thread, state), RUNNING)
     put_field(s, offset_of(Thread, runs), field(s, offset_of(Thread, runs)) + 1)
@@ -507,6 +527,7 @@ fn clear(s: u64) {
     put_field(s, offset_of(Thread, vparent), 0)
     put_field(s, offset_of(Thread, zombie), 0)
     put_field(s, offset_of(Thread, sigmask), 0)
+    put_field(s, offset_of(Thread, amb), 0)
     let a = proc_area(s)
     var i: u64 = 0
     while i < PROC_AREA / 8 {
