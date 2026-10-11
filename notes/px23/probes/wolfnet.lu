@@ -1,0 +1,19 @@
+// px23 probe: what wolf's net builtins ask of Linux beyond what tcpwolf uses (for px24's list).
+fn main() -> !int {
+    let srv = net_listen_with("127.0.0.1:7072", true, 16)?
+    let cli = net_connect("127.0.0.1:7072")?
+    net_nodelay(cli, true)?
+    net_writev(cli, [[104 as byte, 105 as byte], [10 as byte]])?
+    let ready = net_wait([srv], 1000)?
+    print("ready: {ready.len}")
+    let conn = net_accept(srv)?
+    let got = net_read(conn, 16)?
+    print("got {got.len}")
+    net_deadline(conn, 200)?
+    let again = net_read(conn, 16) else |e| "timeout-or-closed"
+    print("then: {again}")
+    net_close(cli)?
+    net_close(conn)?
+    net_close(srv)?
+    0
+}
