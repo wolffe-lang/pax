@@ -3,6 +3,8 @@
 # `peer` way).
 #
 #   tools/net-peer --listen PORT --qemu PORT [--soak N] [--boot SECONDS] [--udp]
+#   tools/net-peer --listen PORT --qemu PORT --tcp [--soak N] [--bulk BYTES]
+#                  [--lossy BYTES] [--boot SECONDS]
 #
 # QEMU is started with `-netdev socket,id=…,udp=127.0.0.1:<listen>,
 # localaddr=127.0.0.1:<qemu>`: every Ethernet frame the guest sends is
@@ -118,22 +120,83 @@
 # (the reference side): there it only plays — what Linux puts in its
 # own headers is Linux's — and checks each datagram's ports and data.
 #
+# **--tcp** (px23, tests/mpx4-tcp) plays the other end of the TCP
+# witnesses (user/net/tcp*, run from user/mpx4-tcp.run) with a TCP of
+# its own (tools/paxtcp.py), as the gateway 10.0.2.2, the on-link host
+# and the host behind the gateway. Every frame PAX sends is rebuilt from
+# its fields and held to its exact bytes; every stream is held to its
+# bytes and its CRC-32. The faults are this script's to inject:
+#
+#   T1  `tcpecho 7 10.0.2.2 9099` says "ready" (UDP); connections from
+#       10.0.2.2 of 1, 2, 1460, 1461, 4000 and 70000 bytes each come
+#       back byte for byte, then the line the server says after this
+#       end's FIN ("eof after N bytes, crc X"), then its FIN
+#   T2  --soak N (10000) connections, 16 bytes each, one at a time; then
+#       "quit"
+#   T3  `tcpecho 7 10.0.2.2 9098 fork`: connections from 10.0.2.2,
+#       from 10.0.2.100 and from 192.0.2.1 by way of the gateway, each
+#       served by a child; "quit"
+#   T4  `tcpclient 10.0.2.2 9099`: this script's echo server, PAX the
+#       one that connects, a half-close at the end
+#   T5  `tcpbulk send 10.0.2.2 9100 BYTES` (--bulk, 16 MiB): the stream
+#       pattern out of PAX, held to its length and CRC-32
+#   T6  `tcpbulk recv 7100 10.0.2.2 9097`: the same into PAX
+#   T7  `tcpsoak to 10.0.2.2 9099 N`: N connections from PAX, each
+#       opened, answered and closed
+#   T8  how a connection ends: `tcpend` to port 9 (nobody: a reset, the
+#       connect refused), to port 9001 (no answer at all: the connect
+#       gives up after its one retransmission), to port 9301 (a reset
+#       after the first bytes), to port 9302 (silence after the
+#       handshake: TCP_USER_TIMEOUT gives up)
+#   T9  scripted faults with PAX the client (`tcpclient` to ports 9201
+#       to 9212, 9220): the first SYN lost; the SYN-ACK lost; PAX's
+#       handshake ACK lost; a data segment lost each way; a FIN lost
+#       each way; every segment to PAX twice; a reset far outside the
+#       window, a reset and a SYN inside it but not at RCV.NXT, an
+#       acknowledgement of bytes never sent and a segment with no ACK,
+#       all of which the connection survives; segments to PAX out of
+#       order; a SYN-ACK with every option and then a window closed for
+#       a second and a half; segments to PAX with a bit flipped; and
+#       SYNs that cross (a simultaneous open)
+#   T10 the same faults with PAX the server (`tcpecho 7 10.0.2.2 9096`),
+#       a peer that announces MSS 536, a reset at RCV.NXT (the server's
+#       read answers -ECONNRESET), a SYN then a reset; and the
+#       malformed and the stray, none of which may disturb anything:
+#       12 bytes of a segment, a data offset of 4 and one past the
+#       segment, a wrong checksum, a port of 0 each side, a broadcast
+#       destination, three broken option lists, a SYN, an ACK, a FIN
+#       with PSH and URG and a reset for a port nobody listens on (the
+#       first three draw a reset, each held to RFC 9293's form), an ACK
+#       and a bare FIN for the listener, a SYN with data
+#   T11 the loss matrix: `tcpbulk send` to ports 9101, 9105, 9120 and
+#       9130 and `tcpbulk recv` on 7101, 7105, 7120 and 7130 — each
+#       frame either way dropped with probability 1%, 5% and 20% (the
+#       last two digits), and for …30 1% dropped, 5% duplicated, 5%
+#       reordered and 2% corrupted — --lossy BYTES (1 MiB; a quarter of
+#       it at 20%), every transfer exact; one `net-peer: loss …` line
+#       each with the time, the rate and PAX's retransmissions
+#   T12 `tcpwolfd`, a wolf program: it says "ready" on a connection of
+#       its own to port 9070, its request is sent to port 7070, and
+#       only then is its connect to port 9071 answered; its reply
+#
 # Prints one `net-peer: ok <step> …` line per step and, last, `net-peer:
 # PASS …` or `net-peer: FAIL <what>, with the expected and found bytes`.
 # Exit 0 on PASS, 1 on FAIL, 2 on a usage error.
 #
 # Written from RFC 768, RFC 791, RFC 792, RFC 826, RFC 862, RFC 894,
-# RFC 1035, RFC 1071, RFC 1122 and QEMU's documentation of `-netdev
-# socket`. No network stack's source.
+# RFC 1035, RFC 1071, RFC 1122, RFC 9293 and QEMU's documentation of
+# `-netdev socket`. No network stack's source.
 import os
 import socket
 import struct
 import sys
 import time
+import zlib
 
 sys.dont_write_bytecode = True  # no tools/__pycache__ in the tree
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import paxnet as px  # noqa: E402
+import paxtcp  # noqa: E402
 
 
 def die(msg):
@@ -228,13 +291,16 @@ class Peer:
     def note_ident(self, f):
         ident = px.be16(f, 18)
         if self.last_ident is not None:
-            if ident <= self.last_ident:
+            # A counter of 16 bits: after 65535 comes 0 (px23: a TCP
+            # transfer sends more datagrams than that).
+            ahead = (ident - self.last_ident) & 0xffff
+            if ahead == 0 or ahead > 0x4000:
                 self.fail("PAX's identification went from %d to %d" % (self.last_ident, ident), f)
-            self.gaps += ident - self.last_ident - 1
+            self.gaps += ahead - 1
         else:
             self.gaps += ident
         self.last_ident = ident
-        self.next_ident = ident + 1
+        self.next_ident = (ident + 1) & 0xffff
 
     def next_from_pax(self, timeout=5.0, arp_reply=None):
         """The next frame from PAX that is not an ARP request (those are
@@ -563,23 +629,29 @@ class Peer:
                     continue
                 self.fail("%s: a frame from PAX that is not a UDP datagram" % what, f)
             self.started = True
-            ihl, total = (f[14] & 15) * 4, px.be16(f, 16)
-            h = f[14:14 + total]
-            u = h[ihl:]
-            if px.csum(h[:ihl]) != 0 or len(u) < 8 or px.be16(u, 4) != len(u) or px.udp_sum(h[12:16], h[16:20], u) != 0 or px.be16(u, 6) == 0:
-                self.fail("%s: a UDP datagram from PAX with a wrong length or checksum, or none" % what, f)
-            sport, dport, data = px.be16(u, 0), px.be16(u, 2), u[8:]
-            dst = h[16:20]
-            if self.strict:
-                hop = px.next_hop(dst)
-                if hop not in self.macs:
-                    self.fail("%s: a datagram for %s, which this script does not play" % (what, px.dotted(dst)), f)
-                want = px.udp_from_pax(dst, sport, dport, data, self.next_ident, self.macs[hop])
-                if f != want:
-                    self.fail("%s: not PAX's datagram (port %d to %s port %d, %d bytes, identification %d), byte for byte"
-                              % (what, sport, px.dotted(dst), dport, len(data), self.next_ident), f, want)
-                self.note_ident(f)
-            return sport, dst, dport, data
+            return self.udp_parse(f, what)
+
+    def udp_parse(self, f, what):
+        """The UDP frame `f` from PAX, checked (strict: rebuilt and held
+        to its bytes): (source port, destination address, destination
+        port, data)."""
+        ihl, total = (f[14] & 15) * 4, px.be16(f, 16)
+        h = f[14:14 + total]
+        u = h[ihl:]
+        if px.csum(h[:ihl]) != 0 or len(u) < 8 or px.be16(u, 4) != len(u) or px.udp_sum(h[12:16], h[16:20], u) != 0 or px.be16(u, 6) == 0:
+            self.fail("%s: a UDP datagram from PAX with a wrong length or checksum, or none" % what, f)
+        sport, dport, data = px.be16(u, 0), px.be16(u, 2), u[8:]
+        dst = h[16:20]
+        if self.strict:
+            hop = px.next_hop(dst)
+            if hop not in self.macs:
+                self.fail("%s: a datagram for %s, which this script does not play" % (what, px.dotted(dst)), f)
+            want = px.udp_from_pax(dst, sport, dport, data, self.next_ident, self.macs[hop])
+            if f != want:
+                self.fail("%s: not PAX's datagram (port %d to %s port %d, %d bytes, identification %d), byte for byte"
+                          % (what, sport, px.dotted(dst), dport, len(data), self.next_ident), f, want)
+            self.note_ident(f)
+        return sport, dst, dport, data
 
     def udp_out(self, src_ip, sport, dport, data, dst_ip=px.PAX_IP, check=None, length=None, trailer=b"", **kw):
         """Send PAX one UDP datagram from `src_ip` (by way of whoever is
@@ -709,6 +781,475 @@ class Peer:
         self.tally("udp")
         print("net-peer: ok U8 a %d-byte query for %s (A, IN) from port %d to 10.0.2.3, answered %s" % (len(q), px.DNS_NAME, p, px.dotted(px.DNS_ANSWER)))
 
+    # --- TCP (px23): the other end of user/net's stream witnesses --------------
+    def tcp_ready(self, st, port, timeout, what):
+        """Wait for a witness's "ready" datagram to 10.0.2.2 port `port`."""
+        d = st.udp_from(timeout, "%s's \"ready\" to port %d" % (what, port))
+        sport, dst, dport, data = d
+        if (dst, dport, data) != (px.GW_IP, port, b"ready") or (self.strict and sport not in px.EPHEMERAL):
+            self.fail("%s: not \"ready\" from an ephemeral port to 10.0.2.2 port %d: port %d to %s port %d, %r"
+                      % (what, port, sport, px.dotted(dst), dport, data[:40]))
+
+    def tcp_ask(self, st, ip, sport, payload, what, faults=None, timeout=60.0, setup=None, check=None, port=px.TCP_ECHO, **kw):
+        """A connection from `ip`:`sport` to PAX's echo server: `payload`
+        sent, this end's half closed, and the whole answer held to its
+        bytes: the payload, then "eof after N bytes, crc X", then PAX's
+        FIN. Returns the Conn."""
+        c = st.connect(ip, sport, port, faults=faults, **kw)
+        if setup:
+            setup(c)
+        st.established(c, what, timeout)
+        c.send(payload)
+        c.close()
+        st.until(lambda: c.closed(), timeout, what + ": the echo, the last line and PAX's FIN")
+        want = payload + b"eof after %d bytes, crc %08x\n" % (len(payload), zlib.crc32(payload))
+        got = c.take()
+        if c.reset or c.gave_up or got != want:
+            at = next((i for i in range(min(len(got), len(want))) if got[i] != want[i]), min(len(got), len(want)))
+            self.fail("%s: %s; %d bytes came back, %d were due, the same up to byte %d"
+                      % (what, "PAX reset the connection" if c.reset else "this end gave up" if c.gave_up else "not the bytes sent and the line after them",
+                         len(got), len(want), at))
+        if check:
+            check(c)
+        return c
+
+    def tcp_profile(self, n):
+        """The faults a port's last two digits name (the loss matrix)."""
+        if n == 30:
+            return dict(loss=0.01, dup=0.05, reorder=0.05, corrupt=0.02)
+        return dict(loss=n / 100.0)
+
+    def tcp_script(self, soak, bulk, lossy):
+        px.TCP_SPOKEN = True
+        st = paxtcp.Stack(self)
+        self.tcp = st
+        G, P, F = px.GW_IP, px.PEER_IP, px.FAR_IP
+        E = px.TCP_ECHO
+        strict = self.strict
+        state = {"sport": 40000}
+
+        def sport():
+            state["sport"] += 1
+            if state["sport"] > 64000:
+                state["sport"] = 40001
+            return state["sport"]
+
+        # This script's servers. An echo server: what comes goes back;
+        # after PAX's FIN, one line, then this end's FIN.
+        def echo(c, faults=None):
+            c.crc, c.count = 0, 0
+
+            def data(c):
+                d = c.take()
+                c.crc = zlib.crc32(d, c.crc)
+                c.count += len(d)
+                c.send(d)
+
+            def eof(c):
+                if not c.reset:
+                    c.send(b"eof after %d bytes, crc %08x\n" % (c.count, c.crc))
+                    c.close()
+            c.on_data, c.on_eof = data, eof
+
+        # A receiver of the stream pattern: its length and CRC-32 said
+        # back after PAX's FIN.
+        def sink(c):
+            c.keep = True
+            c.crc, c.count, c.right = 0, 0, True
+
+            def data(c):
+                d = c.take()
+                if d != px.stream_pattern(c.count, len(d)):
+                    c.right = False
+                c.crc = zlib.crc32(d, c.crc)
+                c.count += len(d)
+
+            def eof(c):
+                if not c.reset:
+                    c.send(b"got %d bytes, crc %08x\n" % (c.count, c.crc))
+                    c.close()
+            c.on_data, c.on_eof = data, eof
+
+        served = []
+
+        def serve(kind, faults_for=None):
+            def accept(c):
+                (echo if kind == "echo" else sink)(c)
+                if faults_for:
+                    faults_for(c)
+                served.append(c)
+            return accept
+
+        def live(port):
+            return [c for c in served if c.port == port and c.state != "lost"]
+
+        def one(port):
+            """The connection PAX made to this script's `port`, once it is over."""
+            st.until(lambda: live(port), 300.0, "PAX's connection to port %d" % port)
+            c = live(port)[-1]
+            st.until(lambda: c.closed(), 900.0, "PAX's connection to port %d to end" % port)
+            return c
+
+        # Every port this script answers on, from the start: a SYN that
+        # came before its listener would be refused.
+        st.listen(px.TCP_SERVICE, serve("echo"))
+        st.listen(px.TCP_BULK, serve("sink"))
+        st.silent.add(px.TCP_SILENT)
+        st.silent.add(px.TCP_WOLF_GATE)
+
+        def resetting(c):
+            def data(c):
+                c.take()
+                c.abort()
+            c.on_data = data
+            served.append(c)
+
+        def mute(c):
+            def opened(c):
+                c.mute = True
+            c.on_open = opened
+            served.append(c)
+        st.listen(px.TCP_RESET, resetting)
+        st.listen(px.TCP_MUTE, mute)
+
+        # T1: PAX's echo server, asked from the gateway's address.
+        self.tcp_ready(st, px.TCP_SERVICE, self.boot, "tcpecho")
+        sizes = (1, 2, 1460, 1461, 4000, 70000)
+        for k, n in enumerate(sizes):
+            self.tcp_ask(st, G, sport(), px.stream_pattern(k * 1000, n), "a connection of %d bytes" % n)
+        print("net-peer: ok T1 \"ready\"; connections of %s bytes echoed, each stream exact, each ended by the server's line and FIN"
+              % ", ".join(str(n) for n in sizes))
+        # T2: the soak in.
+        t0 = time.time()
+        for i in range(soak):
+            self.tcp_ask(st, G, sport(), px.soak_request(i)[:16], "connection %d of the soak" % i)
+            if i % 500 == 499:
+                st.forget()
+        span = time.time() - t0
+        self.tcp_ask(st, G, sport(), b"quit", "\"quit\"")
+        print("net-peer: ok T2 %d connections opened, echoed and closed, each exact, in %.2f s (%d a second by this script's clock); \"quit\""
+              % (soak, span, soak / span if span > 0 else 0))
+        # T3: the forking server, asked from three hosts.
+        self.tcp_ready(st, px.TCP_READY_FORK, 120.0, "the forking tcpecho")
+        self.tcp_ask(st, G, sport(), b"to a child, from the gateway's address", "a connection from 10.0.2.2")
+        self.tcp_ask(st, P, sport(), px.stream_pattern(7, 5000), "a connection from 10.0.2.100")
+        self.tcp_ask(st, F, sport(), px.stream_pattern(9, 3000), "a connection from 192.0.2.1 by way of the gateway")
+        self.tcp_ask(st, G, sport(), b"quit", "\"quit\"")
+        print("net-peer: ok T3 a child a connection: from 10.0.2.2, from 10.0.2.100 and from 192.0.2.1 by way of the gateway, each exact; \"quit\"")
+        # T4: PAX's client and this script's echo server.
+        c = one(px.TCP_SERVICE)
+        if c.reset or c.count != 39799 or c.pax_port not in px.EPHEMERAL:
+            self.fail("T4: tcpclient's connection: %d bytes echoed (39799 were due) from port %d%s" % (c.count, c.pax_port, ", reset" if c.reset else ""))
+        print("net-peer: ok T4 tcpclient's connection from an ephemeral port: 39799 bytes echoed, its FIN, this end's line and FIN")
+        # T5: the bulk out of PAX.
+        c = one(px.TCP_BULK)
+        if c.reset or c.count != bulk or not c.right:
+            self.fail("T5: %d bytes came (%d were due)%s%s" % (c.count, bulk, "" if c.right else ", not the pattern", ", reset" if c.reset else ""))
+        span = (c.last_at - c.first_at) if c.first_at and c.last_at and c.last_at > c.first_at else 0
+        print("net-peer: ok T5 %d bytes out of PAX, every byte the pattern's, crc %08x, in %.2f s (%d KB/s by this script's clock); PAX retransmitted %d of %d segments"
+              % (c.count, c.crc, span, c.count / 1000 / span if span else 0, c.pax_rexmt, c.pax_segments))
+        # T6: the bulk into PAX.
+        self.tcp_ready(st, px.TCP_READY_BULK, 300.0, "tcpbulk recv")
+        self.tcp_bulk_in(st, G, sport(), px.TCP_BULK_IN, bulk, "T6", None)
+        # T7: the soak out.
+        t0 = time.time()
+        base = len(served)
+        st.until(lambda: len(served) >= base + soak and all(c.closed() for c in served[-8:]), 60.0 + soak * 0.2, "tcpsoak's %d connections" % soak)
+        # tcpsoak closes without reading this server's last line, so
+        # that line draws a reset: PAX's FIN is what must have come.
+        bad = [c for c in served[base:] if c.count != 16 or not c.eof]
+        if bad:
+            self.fail("T7: %d of tcpsoak's %d connections did not carry 16 bytes and then PAX's FIN" % (len(bad), soak))
+        span = time.time() - t0
+        st.forget(0.0)
+        del served[:]
+        print("net-peer: ok T7 tcpsoak's %d connections, each opened by PAX, echoed and closed, in %.2f s (%d a second by this script's clock)"
+              % (soak, span, soak / span if span > 0 else 0))
+
+        # T8: how a connection ends.
+        n0 = st.n["strays"]
+        st.until(lambda: st.n["strays"] > n0, 60.0, "tcpend's SYN to port 9, where nobody listens")
+        st.until(lambda: px.TCP_SILENT in st.held, 60.0, "tcpend's SYN to port 9001, which never answers")
+        st.until(lambda: any(c.port == px.TCP_RESET and c.closed() for c in served), 60.0, "tcpend's connection to port 9301, reset after its first bytes")
+        st.until(lambda: any(c.port == px.TCP_MUTE and c.pax_rexmt >= 2 for c in served), 60.0, "tcpend's retransmissions to port 9302, which says nothing after the handshake")
+        print("net-peer: ok T8 a SYN to port 9 reset; a SYN to port 9001 never answered; a connection to port 9301 reset after its first bytes; "
+              "one to port 9302 left unanswered after the handshake (PAX retransmitted)")
+
+        # T9: scripted faults, PAX the client. Each port's fault is for
+        # the first connection made to it (a SYN lost makes two).
+        fired = set()
+
+        def faulty(port):
+            k = port - 9200
+
+            def setup(c):
+                if port in fired:
+                    return
+                fired.add(port)
+                fl = c.faults
+                if k == 1:
+                    fl.drop_in.append(lambda seg: seg.flags & px.SYN)
+                elif k == 2:
+                    fl.drop_out.append(lambda flags, seq, data: flags & px.SYN)
+                elif k == 3:
+                    fl.drop_in.append(lambda seg: seg.flags == px.ACK and not seg.data)
+                elif k == 4:
+                    fl.drop_in.append(lambda seg: len(seg.data) >= 1000)
+                elif k == 5:
+                    fl.drop_out.append(lambda flags, seq, data: len(data) >= 1000)
+                elif k == 6:
+                    fl.drop_in.append(lambda seg: seg.flags & px.FIN)
+                elif k == 7:
+                    fl.drop_out.append(lambda flags, seq, data: flags & px.FIN)
+                elif k == 8:
+                    fl.dup = 1.0
+                elif k == 9:
+                    c.intruded = False
+                    inner = c.on_data
+
+                    def data(c):
+                        inner(c)
+                        if c.count >= 5000 and not c.intruded:
+                            c.intruded = True
+                            # None of these may end or disturb the connection.
+                            c.tx(px.RST, paxtcp.sadd(c.snd_max, 200000))                    # a reset far outside the window
+                            c.tx(px.RST, paxtcp.sadd(c.snd_max, 10))                        # in the window, not at RCV.NXT
+                            c.tx(px.SYN, paxtcp.sadd(c.snd_max, 5))                         # a SYN in the window
+                            c.tx(px.ACK, c.snd_max, ack=paxtcp.sadd(c.pax_max or 0, 5000))  # an acknowledgement of bytes never sent
+                            c.tx(0, c.snd_max, b"no ACK flag")                              # data with no ACK
+                    c.on_data = data
+                elif k == 10:
+                    fl.reorder = 0.3
+                elif k == 11:
+                    if strict:
+                        # Every option kernel/tcp skips, around the one it reads.
+                        c.syn_options = (px.mss_option() + b"\x01\x03\x03\x07" + b"\x04\x02" + b"\x08\x0a" + struct.pack(">II", 12345, 0)
+                                         + b"\x22\x02" + b"\xfd\x04\x12\x34" + b"\x01\x00")
+                    c.closed_at = None
+                    inner = c.on_data
+
+                    def data(c):
+                        inner(c)
+                        if c.count >= 8000 and c.closed_at is None:
+                            c.closed_at = time.time()
+                            c.window = 0
+                            c.tx(px.ACK, c.snd_max)
+                    c.on_data = data
+                elif k == 12:
+                    fl.corrupt = 0.2
+                elif k == 20:
+                    c.crossed = True
+            return setup
+
+        plan = [(9201, "PAX's first SYN lost"), (9202, "this end's SYN-ACK lost"), (9203, "PAX's handshake ACK lost"),
+                (9204, "a data segment from PAX lost"), (9205, "a data segment to PAX lost"), (9206, "PAX's FIN lost"),
+                (9207, "this end's FIN lost"), (9208, "every segment to PAX sent twice"),
+                (9209, "a reset outside the window, a reset and a SYN inside it, an ACK of bytes never sent, data with no ACK"),
+                (9210, "segments to PAX out of order"), (9211, "a SYN-ACK with every option; a window closed for 1.5 s"),
+                (9212, "one segment in five to PAX with a bit flipped"), (9220, "SYNs that cross")]
+        for port, what in plan:
+            st.listen(port, serve("echo", faulty(port)))
+        for port, what in plan:
+            if port == 9211:
+                st.until(lambda: any(c.port == 9211 and getattr(c, "closed_at", None) for c in served), 300.0, "tcpclient to port 9211 to fill this end's window")
+                c = live(9211)[-1]
+                before = c.pax_segments
+                st.idle(1.5)
+                probes = c.pax_segments - before
+                c.window = 65535
+                c.tx(px.ACK, c.snd_max)
+                if strict and probes < 1:
+                    self.fail("T9: PAX sent nothing in 1.5 s to a window of zero: no probe")
+            c = one(port)
+            if c.reset or c.gave_up or c.count != 39799:
+                self.fail("T9: %s (port %d): %d bytes echoed, 39799 were due%s" % (what, port, c.count, ", reset" if c.reset else ""))
+            print("net-peer: ok T9 port %d: %s: 39799 bytes echoed exact; %s; PAX retransmitted %d of %d segments"
+                  % (port, what, c.faults.text(), c.pax_rexmt, c.pax_segments))
+
+        # T10: the same with PAX the server; the malformed and the stray.
+        self.tcp_ready(st, px.TCP_READY_FAULTS, 120.0, "the tcpecho of the fault battery")
+        body = px.stream_pattern(3, 6000)
+
+        def with_faults(what, setup=None, check=None, payload=body, **fk):
+            fl = paxtcp.Faults(seed=len(what), **fk)
+            c = self.tcp_ask(st, G, sport(), payload, what, faults=fl, setup=setup, check=check)
+            print("net-peer: ok T10 %s: %d bytes echoed exact; %s; PAX retransmitted %d of %d segments"
+                  % (what, len(payload), fl.text(), c.pax_rexmt, c.pax_segments))
+            return c
+
+        def small(c):
+            c.mss = 536
+            c.syn_options = px.mss_option(536)
+
+        def small_check(c):
+            pass
+        with_faults("a peer that announces MSS 536", setup=small)
+        with_faults("PAX's SYN-ACK lost", setup=lambda c: (c.faults.drop_in.append(lambda seg: seg.flags & px.SYN), setattr(c, "rto", 3.0)))
+        with_faults("this end's handshake ACK lost", setup=lambda c: c.faults.drop_out.append(lambda flags, seq, data: flags == px.ACK and not data))
+        with_faults("a data segment to PAX lost", setup=lambda c: c.faults.drop_out.append(lambda flags, seq, data: len(data) >= 1000))
+        with_faults("a data segment from PAX lost", setup=lambda c: c.faults.drop_in.append(lambda seg: len(seg.data) >= 1000))
+        with_faults("this end's FIN lost", setup=lambda c: c.faults.drop_out.append(lambda flags, seq, data: flags & px.FIN))
+        with_faults("PAX's FIN lost", setup=lambda c: c.faults.drop_in.append(lambda seg: seg.flags & px.FIN))
+        with_faults("every segment to PAX sent twice", dup=1.0)
+        with_faults("segments to PAX out of order", reorder=0.3)
+        with_faults("one segment in five to PAX with a bit flipped", corrupt=0.2)
+        # A reset at RCV.NXT ends the connection: the server's read says so.
+        c = st.connect(G, sport(), E)
+        st.established(c, "a connection to be reset")
+        c.send(b"then a reset")
+        st.until(lambda: len(c.inbox) >= 12, 30.0, "the echo before the reset")
+        c.abort()
+        # A SYN whose SYN-ACK is answered with a reset (this script's
+        # answer to a segment for no connection of its own): the
+        # half-open connection goes, and no `accept` ever sees it.
+        n0 = st.n["strays"]
+        st.raw(G, px.tcp(40920, E, 9000, 0, px.SYN, 65535, b"", G, px.PAX_IP, options=px.mss_option()))
+        st.until(lambda: st.n["strays"] > n0, 10.0, "PAX's SYN-ACK to a SYN this script then disowns")
+        st.idle(0.3)
+        # The malformed and the stray. A port nobody holds: 9.
+        def seg(sp, dp, seq, ack, flags, data=b"", **kw):
+            return px.tcp(sp, dp, seq, ack, flags, 65535, data, G, px.PAX_IP, **kw)
+        strays = 0
+        for what, cause, s_ in (
+                ("12 bytes of a segment", "tcp.short", seg(40900, E, 1, 0, px.SYN)[:12]),
+                ("a data offset of 4", "tcp.header", seg(40901, E, 1, 0, px.SYN, doff=4)),
+                ("a data offset past the segment", "tcp.header", seg(40902, E, 1, 0, px.SYN, doff=15)),
+                ("a wrong checksum", "tcp.checksum", seg(40903, E, 1, 0, px.SYN, check=0x1234)),
+                ("a source port of 0", "tcp.port-zero", seg(0, E, 1, 0, px.SYN)),
+                ("a destination port of 0", "tcp.port-zero", seg(40904, 0, 1, 0, px.SYN)),
+                ("an option of length 0", "tcp.option", seg(40905, E, 1, 0, px.SYN, options=b"\x03\x00\x00\x00")),
+                ("an option past the header", "tcp.option", seg(40906, E, 1, 0, px.SYN, options=b"\x08\x0a\x00\x00")),
+                ("an MSS option of 3 bytes", "tcp.option", seg(40907, E, 1, 0, px.SYN, options=b"\x02\x03\x05\xb4"))):
+            f = st.raw(G, s_)
+            self.dropped(cause, what, f)
+        f = self.datagram(G, px.tcp(40908, E, 1, 0, px.SYN, 65535, b"", G, px.SUBNET_BCAST), proto=6, dst_ip=px.SUBNET_BCAST, dst_mac=px.BCAST)
+        self.send(f)
+        self.dropped("tcp.broadcast", "a SYN for 10.0.2.255 in a broadcast frame", f)
+        # For nobody: each of the first three draws a reset in RFC 9293 §3.10.7.1's form.
+        del st.resets[:]
+        st.raw(G, seg(40910, px.TCP_CLOSED, 1000, 0, px.SYN))
+        st.raw(G, seg(40911, px.TCP_CLOSED, 2000, 7777, px.ACK, b"abc"))
+        st.raw(G, seg(40912, px.TCP_CLOSED, 3000, 0, px.FIN | px.PSH | px.URG, b"xy", urgent=1))
+        st.raw(G, seg(40913, px.TCP_CLOSED, 4000, 0, px.RST))
+        st.raw(G, seg(40914, E, 5000, 4242, px.ACK))           # an ACK for the listener: a reset
+        st.raw(G, seg(40915, E, 6000, 0, px.FIN))               # a bare FIN for the listener: dropped
+        if strict:
+            st.until(lambda: len(st.resets) >= 4, 10.0, "PAX's four resets for segments nobody takes")
+        st.idle(0.5)
+        got = sorted((r.dport, r.seq, r.ack, r.flags) for r in st.resets)
+        want = sorted([(40910, 0, 1001, px.RST | px.ACK), (40911, 7777, 0, px.RST), (40912, 0, 3003, px.RST | px.ACK), (40914, 4242, 0, px.RST)])
+        if strict and got != want:
+            self.fail("T10: PAX's resets for segments nobody takes are not RFC 9293 §3.10.7.1's: %r, due %r" % (got, want))
+        # A SYN with data: the SYN is taken, its bytes are not.
+        c = st.connect(G, sport(), E)
+        c.state = "syn-sent"
+        c.snd_nxt = c.snd_max = paxtcp.sadd(c.iss, 1)
+        c.tx(px.SYN, c.iss, b"early", options=px.mss_option())
+        c.timer = time.time() + c.rto
+        st.until(lambda: c.state == "established", 30.0, "the handshake of a SYN that carried data")
+        if strict and c.rcv_nxt and c.snd_una != paxtcp.sadd(c.iss, 1):
+            self.fail("T10: PAX acknowledged the data a SYN carried")
+        c.send(b"after a SYN with data")
+        c.close()
+        st.until(lambda: c.closed(), 30.0, "the connection whose SYN carried data")
+        if not c.take().startswith(b"after a SYN with data"):
+            self.fail("T10: the connection whose SYN carried data did not echo what followed")
+        # Nothing was disturbed: one more, clean; then the last.
+        self.tcp_ask(st, P, sport(), px.stream_pattern(11, 2000), "a connection after the malformed and the stray")
+        self.tcp_ask(st, G, sport(), b"quit", "\"quit\"")
+        print("net-peer: ok T10 a reset at RCV.NXT; a SYN disowned; 10 malformed segments dropped; "
+              "resets for a SYN, an ACK, a FIN with PSH and URG and an ACK for the listener, each in RFC 9293's form; "
+              "none for a reset or a bare FIN; a SYN with data; then two clean connections")
+
+        # T11: the loss matrix. One generator a port: a SYN lost makes a
+        # second connection, and its luck must not be the first's again.
+        luck = {}
+
+        def lossy_for(c):
+            if c.port not in luck:
+                luck[c.port] = paxtcp.Faults(seed=c.port, **self.tcp_profile(c.port % 100))
+            c.faults = luck[c.port]
+        for port in (9101, 9105, 9120, 9130):
+            st.listen(port, serve("sink", lossy_for))
+        for port in (9101, 9105, 9120, 9130):
+            n = lossy // 4 if port == 9120 else lossy
+            c = one(port)
+            if c.reset or c.gave_up or c.count != n or not c.right:
+                self.fail("T11: port %d: %d bytes came (%d were due)%s%s" % (port, c.count, n, "" if c.right else ", not the pattern", ", reset" if c.reset else ""))
+            span = (c.last_at - c.first_at) if c.first_at and c.last_at and c.last_at > c.first_at else 0
+            print("net-peer: loss out %s: %d bytes out of PAX exact in %.2f s (%d KB/s); PAX retransmitted %d of %d segments; %s"
+                  % (self.tcp_name(port % 100), n, span, n / 1000 / span if span else 0, c.pax_rexmt, c.pax_segments, c.faults.text()))
+        for port in (7101, 7105, 7120, 7130):
+            n = lossy // 4 if port == 7120 else lossy
+            self.tcp_ready(st, px.TCP_READY_BULK, 300.0, "tcpbulk recv on port %d" % port)
+            self.tcp_bulk_in(st, G, sport(), port, n, "loss in " + self.tcp_name(port % 100), paxtcp.Faults(seed=port, **self.tcp_profile(port % 100)))
+        print("net-peer: ok T11 the loss matrix: four transfers out of PAX and four into it, every one exact")
+
+        # T12: the wolf program.
+        said = []
+
+        def wolf_ready(c):
+            def data(c):
+                said.append(c.take())
+            c.on_data = data
+            c.on_eof = lambda c: c.close()
+        st.listen(px.TCP_WOLF_READY, wolf_ready)
+        st.until(lambda: b"".join(said) == b"ready\n", 180.0, "tcpwolfd's \"ready\" on a connection to port 9070")
+        c = st.connect(G, sport(), px.TCP_WOLF)
+        st.established(c, "a connection to tcpwolfd")
+        c.send(b"hello wolf\n")
+        st.until(lambda: c.snd_una == c.snd_max, 30.0, "tcpwolfd's listen queue to take the request")
+        # Only now is its second connect answered: its accept and its
+        # read will find what they ask for.
+        st.until(lambda: px.TCP_WOLF_GATE in st.held, 30.0, "tcpwolfd's SYN to port 9071")
+        st.open_gate(px.TCP_WOLF_GATE, lambda c: setattr(c, "on_eof", lambda c: c.close()))
+        st.until(lambda: c.eof or c.closed(), 60.0, "tcpwolfd's reply and FIN")
+        got = c.take()
+        c.close()
+        st.until(lambda: c.closed(), 30.0, "the end of the connection to tcpwolfd")
+        if got != b"the wolf heard: hello wolf\n":
+            self.fail("T12: tcpwolfd said %r" % got[:80])
+        st.idle(0.5)
+        print("net-peer: ok T12 tcpwolfd: \"ready\" on its own connection; its request waited in its listen queue before its second connect was answered; "
+              "it said \"the wolf heard: hello wolf\"")
+        self.sent["tcp"] = st.n["out"]
+        self.sent["tcp.in"] = st.n["in"]
+
+    def tcp_name(self, n):
+        return "1% dropped, 5% duplicated, 5% reordered, 2% corrupted" if n == 30 else "%d%%" % n
+
+    def tcp_bulk_in(self, st, ip, sport, port, n, tag, faults):
+        """`n` bytes of the stream pattern into PAX's `tcpbulk recv` on
+        `port`, its one line back held to the length and the CRC-32."""
+        c = st.connect(ip, sport, port, faults=faults)
+        st.established(c, "%s: a connection to tcpbulk recv on port %d" % (tag, port), 60.0)
+        t0 = time.time()
+        off = 0
+        while off < n:
+            # No more queued than a few windows: this script makes the
+            # pattern as it goes.
+            if len(c.out) < 200000:
+                k = min(n - off, 65536)
+                c.send(px.stream_pattern(off, k))
+                off += k
+            else:
+                st.step(0.05)
+            if c.closed():
+                self.fail("%s: the connection ended after %d of %d bytes (%s)" % (tag, off, n, "reset" if c.reset else "this end gave up"))
+        c.close()
+        st.until(lambda: c.closed(), 900.0, "%s: the transfer of %d bytes into PAX and its line back" % (tag, n))
+        span = time.time() - t0
+        want = b"got %d bytes, crc %08x\n" % (n, zlib.crc32(px.stream_pattern(0, n)))
+        got = c.take()
+        if c.reset or c.gave_up or got != want:
+            self.fail("%s: the receiver said %r, %r was due%s" % (tag, got[:80], want, ", reset" if c.reset else ""))
+        if faults is None:
+            print("net-peer: ok %s %d bytes into PAX, its line back \"%s\", in %.2f s (%d KB/s by this script's clock); this end retransmitted %d segments"
+                  % (tag, n, want.decode().strip(), span, n / 1000 / span if span else 0, c.rexmt))
+        else:
+            print("net-peer: %s: %d bytes into PAX exact in %.2f s (%d KB/s); this end retransmitted %d segments; %s"
+                  % (tag, n, span, n / 1000 / span if span else 0, c.rexmt, faults.text()))
+
     def send_raw(self, src_ip, payload):
         """One datagram of protocol 17 with `payload` as it is."""
         f = self.datagram(src_ip, payload, proto=17)
@@ -717,13 +1258,17 @@ class Peer:
 
 
 def main(argv):
-    opt = {"listen": None, "qemu": None, "soak": "10000", "boot": "150"}
+    opt = {"listen": None, "qemu": None, "soak": "10000", "boot": "150", "bulk": "16777216", "lossy": "1048576"}
     udp = False
+    tcp = False
     i = 0
     while i < len(argv):
         a = argv[i]
         if a == "--udp":
             udp = True
+            i += 1
+        elif a == "--tcp":
+            tcp = True
             i += 1
         elif a.startswith("--") and a[2:] in opt and i + 1 < len(argv):
             opt[a[2:]] = argv[i + 1]
@@ -735,7 +1280,9 @@ def main(argv):
     peer = Peer(SocketWire(int(opt["listen"]), int(opt["qemu"])), float(opt["boot"]))
     sys.stdout.reconfigure(line_buffering=True)
     try:
-        if udp:
+        if tcp:
+            peer.tcp_script(int(opt["soak"]), int(opt["bulk"]), int(opt["lossy"]))
+        elif udp:
             peer.udp_script(int(opt["soak"]))
         else:
             peer.part_a()
