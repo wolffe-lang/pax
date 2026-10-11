@@ -16,7 +16,7 @@
 //! segment. It is made on every segment sent and verified on every one
 //! received, over the wire and over loopback alike.
 //!
-//! **A control block** (`CONNS`, 64 of them, 128 words each, in
+//! **A control block** (`CONNS`, 256 of them since px24, 128 words each, in
 //! boot/net.S's `pax_tcp_conns`) is everything that has TCP state: a
 //! socket a descriptor names (not yet connected, bound, listening,
 //! connecting, connected), a connection a listener has not handed to
@@ -159,7 +159,7 @@ extern "c" let pax_tcp_tw: *u64
 pub const PROTOCOL: u64 = 6
 /// How many control blocks there are; also `open`'s answer when none
 /// is free.
-pub const CONNS: u64 = 64
+pub const CONNS: u64 = 256 // px24: 64 before
 /// A connection's send buffer, and its receive buffer, in bytes.
 pub const BUF: u64 = 65536
 /// The MSS announced: 1500 less 20 and 20.
@@ -185,7 +185,7 @@ pub const SYNACK_RETRIES: u64 = 5
 /// Retransmissions of data before the connection gives up (tcp(7)).
 pub const DATA_RETRIES: u64 = 15
 /// The most a listen queue holds is this, or the backlog, plus one.
-pub const BACKLOG_MAX: u64 = 32
+pub const BACKLOG_MAX: u64 = 128 // px24: 32 before
 /// Out-of-order intervals kept a connection.
 pub const OOO: u64 = 4
 /// Time-wait entries.
@@ -428,6 +428,9 @@ const K_DEAD_AT: u64 = 53 // the tick a closed block is freed or its wait ends; 
 const K_QSEQ: u64 = 54 // its place in the listener's queue
 const K_UTO_MS: u64 = 55 // TCP_USER_TIMEOUT as it was set
 const K_PROBE: u64 = 56 // 1 while a zero-window probe's byte is out, past SND.MAX
+const K_EV_IN: u64 = 57 // px24: a listener's count of connections that became ready to accept
+const K_EV_OUT: u64 = 58 // px24: times room came back after a send had found none
+const K_READY: u64 = 59 // px24: a listener's established connections not yet accepted
 const K_TXF: u64 = 64 // sixteen: the send ring's frames (physical)
 const K_RXF: u64 = 80 // sixteen: the receive ring's
 
@@ -444,6 +447,7 @@ const F_BUFS: u64 = 0x100 // it holds its 32 frames
 const F_NAMED: u64 = 0x200 // `bind` gave the address
 const F_QUEUED: u64 = 0x400 // established, waiting for `accept`
 const F_WAS: u64 = 0x800 // it was connected once (what -ENOTCONN and 0 turn on)
+const F_NOSPACE: u64 = 0x1000 // px24: a send found the ring full; the next room is an event
 
 /// `recv`'s and `accept`'s answer when nothing is there yet.
 pub const EMPTY: u64 = 0xfffffffffffffdfd
@@ -950,6 +954,9 @@ fn free_block(c: u64) {
     if p != 0 && cw(p - 1, K_USE) == 1 && cw(p - 1, K_PENDING) > 0 {
         put_cw(p - 1, K_PENDING, cw(p - 1, K_PENDING) - 1)
     }
+    if p != 0 && flag(c, F_QUEUED) && cw(p - 1, K_USE) == 1 && cw(p - 1, K_READY) > 0 {
+        put_cw(p - 1, K_READY, cw(p - 1, K_READY) - 1) // px24: it ended before anyone accepted it
+    }
     var k: u64 = 0
     while k < CONN_WORDS {
         put_cw(c, k, 0)
@@ -1262,11 +1269,10 @@ fn output(c: u64, force: bool) -> u64 {
 /// buffers' contents; any other is freed. Whoever waits is woken.
 fn finish(c: u64, error: u64) {
     if flag(c, F_ATTACHED) {
-        // What was received in order stays readable only when the end
-        // was clean; a reset or a timeout discards it.
-        if error != 0 {
-            put_cw(c, K_RX_LEN, 0)
-        }
+        // What was received in order stays readable, after a reset or
+        // a timeout too (px24: Linux hands a reader those bytes first
+        // and the error after them; user/net/pollprobe.c. px23 threw
+        // them away).
         put_cw(c, K_OOO_N, 0)
         put_cw(c, K_TX_LEN, 0)
         put_cw(c, K_STATE, CLOSED)
@@ -1613,6 +1619,12 @@ fn ack_in(c: u64, seq: u64, ack: u64, wnd: u64, len: u64, flags: u64) -> bool {
         }
         put_cw(c, K_DUPACKS, 0)
         put_cw(c, K_REXMT_AT, if ack == cw(c, K_SND_MAX) { 0 } else { now + cw(c, K_RTO) })
+        if flag(c, F_NOSPACE) {
+            // px24: room again after a send found none: an event for
+            // whoever waits to write.
+            clear_flag(c, F_NOSPACE)
+            put_cw(c, K_EV_OUT, cw(c, K_EV_OUT) + 1)
+        }
         sched.wake_pipes() // room in the send ring; a FIN acknowledged
     } else if ack == una && len == 0 && flags & (SYN | FIN) == 0 && wnd == cw(c, K_SND_WND) && una != cw(c, K_SND_MAX) {
         // A duplicate (RFC 5681 §2): nothing new, nothing carried, the
@@ -1844,6 +1856,10 @@ fn input_locked(frame: u64, ihl: u64, total: u64, looped: bool) {
         if cw(c, K_PARENT) != 0 {
             set_flag(c, F_QUEUED)
             bump(C_PASSIVE)
+            // px24: the listener has one more to accept, and an arrival.
+            let par = cw(c, K_PARENT) - 1
+            put_cw(par, K_READY, cw(par, K_READY) + 1)
+            put_cw(par, K_EV_IN, cw(par, K_EV_IN) + 1)
         } else {
             bump(C_ACTIVE)
         }
@@ -2304,6 +2320,9 @@ pub fn accept(l: u64) -> u64 {
         clear_flag(best, F_QUEUED)
         set_flag(best, F_ATTACHED)
         put_cw(best, K_PARENT, 0)
+        if cw(l, K_READY) > 0 {
+            put_cw(l, K_READY, cw(l, K_READY) - 1) // px24
+        }
         if cw(l, K_PENDING) > 0 {
             put_cw(l, K_PENDING, cw(l, K_PENDING) - 1)
         }
@@ -2433,6 +2452,9 @@ pub fn send(c: u64, pml4: u64, buf: u64, n: u64) -> (u64, u64) {
     } else {
         let room = BUF - cw(c, K_TX_LEN)
         taken = lo(n, room)
+        if taken < n {
+            set_flag(c, F_NOSPACE) // px24
+        }
         if taken > 0 {
             let at = cw(c, K_TX_BASE) + cw(c, K_TX_LEN)
             var done: u64 = 0
@@ -2632,6 +2654,95 @@ pub fn take_error(c: u64) -> u64 {
     put_cw(c, K_ERROR, 0)
     sync.release(sync.tcp(), saved)
     e
+}
+
+/// px24: `poll`'s and `epoll`'s bits (uapi asm-generic/poll.h), as
+/// `poll` answers them: there is something to read (or to accept, or
+/// the end of the stream).
+pub const POLLIN: u64 = 0x1
+/// A write would not wait.
+pub const POLLOUT: u64 = 0x4
+/// An error is owed.
+pub const POLLERR: u64 = 0x8
+/// Both directions are over, or there never was a connection.
+pub const POLLHUP: u64 = 0x10
+/// The peer will send no more.
+pub const POLLRDHUP: u64 = 0x2000
+
+/// px24: whether a `connect` on block `c` is still under way (a second
+/// call meanwhile is -EALREADY).
+pub fn connecting(c: u64) -> bool {
+    let s = cw(c, K_STATE)
+    flag(c, F_CONNECTING) && (s == SYN_SENT || s == SYN_RCVD)
+}
+
+/// px24: what `poll` says of block `c` now, each line as Linux answered
+/// user/net/pollprobe.c, and two counts an edge-triggered registration
+/// compares: one that moves whenever something new came to read (a
+/// byte in order, the peer's FIN, a connection to accept, the
+/// connection's end) and one that moves whenever room to write came
+/// back after a send had found none (and at the connection's
+/// beginning and end).
+/// - a socket never connected: POLLOUT|POLLHUP;
+/// - a listener: POLLIN while a connection waits to be accepted;
+/// - a handshake under way: nothing;
+/// - connected: POLLOUT while the send buffer has room, POLLIN with
+///   bytes to read; the peer's FIN (or this end's SHUT_RD) adds
+///   POLLIN|POLLRDHUP; this end's SHUT_WR leaves POLLOUT set (a write
+///   answers at once, -EPIPE); both directions over adds POLLHUP;
+/// - ended by a reset, a refusal or a timeout: all of POLLIN, POLLOUT,
+///   POLLRDHUP and POLLHUP, and POLLERR until the error is taken.
+pub fn poll(c: u64) -> (u64, u64, u64) {
+    let saved = sync.acquire(sync.tcp())
+    let s = cw(c, K_STATE)
+    let fl = cw(c, K_FLAGS)
+    let err = cw(c, K_ERROR)
+    var m: u64 = 0
+    var gin = cw(c, K_EV_IN)
+    var gout = cw(c, K_EV_OUT) + (s << 40) + (err << 48)
+    if s == LISTEN {
+        if cw(c, K_READY) > 0 {
+            m = POLLIN
+        }
+    } else {
+        gin = cw(c, K_RCV_NXT) + (s << 40) + (err << 48) + ((fl & (F_FIN_RCVD | F_RD_SHUT)) << 52)
+        if s == CLOSED {
+            m = poll_closed(fl, err)
+        } else if s != SYN_SENT && s != SYN_RCVD {
+            m = poll_open(c, fl)
+        }
+    }
+    sync.release(sync.tcp(), saved)
+    (m, gin, gout)
+}
+
+fn poll_closed(fl: u64, err: u64) -> u64 {
+    if err != 0 {
+        return POLLIN | POLLOUT | POLLRDHUP | POLLERR | POLLHUP
+    }
+    if fl & (F_WAS | F_CONNECTING) != 0 {
+        return POLLIN | POLLOUT | POLLRDHUP | POLLHUP
+    }
+    POLLOUT | POLLHUP
+}
+
+fn poll_open(c: u64, fl: u64) -> u64 {
+    var m: u64 = 0
+    let rd_over = fl & (F_FIN_RCVD | F_RD_SHUT) != 0
+    if rd_over {
+        m = POLLIN | POLLRDHUP
+    } else if fl & F_BUFS != 0 && cw(c, K_RX_LEN) > 0 {
+        m = POLLIN
+    }
+    if fl & F_WR_SHUT != 0 {
+        m = m | POLLOUT
+        if rd_over {
+            m = m | POLLHUP
+        }
+    } else if cw(c, K_TX_LEN) < BUF {
+        m = m | POLLOUT
+    }
+    m
 }
 
 /// The options `option`'s answers: SO_REUSEADDR.
