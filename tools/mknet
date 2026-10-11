@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # mknet — build the network witnesses (user/net/) into OUTDIR: px22's
-# eight for UDP and px23's ten for TCP.
+# eight for UDP, px23's ten for TCP and px24's eight for readiness.
 #
 #   tools/mknet OUTDIR
 #
@@ -36,12 +36,25 @@
 #   tcpend     how a connection that cannot go on ends: refused, timed
 #              out, reset
 #   tcpfull    a listen queue nobody empties
+#   nbprobe    px24: descriptors that do not block: fcntl's flags on every
+#              kind, -EAGAIN from each call that would wait, -EINPROGRESS
+#   pollprobe  poll(2), state by state, and its timeouts
+#   epollprobe epoll(7), call by call: the errnos, level, edge, one-shot,
+#              the last close, fork
+#   evprobe    eventfd(2), alone and in an epoll object
+#   restprobe  writev, getrandom's flags, sched_getaffinity, sigaltstack,
+#              socket options, the clocks, two threads each waiting
+#              (linked with -pthread)
+#   epollecho  an echo server on epoll, its driver, the storm, the soak
+#   pair       a server and its client as one line of a run list
 # and two wolf programs (user/net/*.lu), built `--release` by the pinned
 # wolf ($PAX_WOLF, else `wolf`) through a `cc` that adds -static, as
 # tools/mkwolf-hello does:
 #   tcpwolf    a listener, a client and one request served in one
 #              process over 127.0.0.1
 #   tcpwolfd   one request served to another machine
+#   waitwolf   px24: a server that serves every connection at once and a
+#              client that waits, through wolf's hosted runtime
 # and prints one line per file: `<name> <sha256> <bytes>`, also written
 # to OUTDIR/sums.txt.
 #
@@ -59,8 +72,10 @@ cc=${CC:-cc}
 need "$cc" readelf
 : > "$out/sums.txt"
 for p in sockerr udploop udpecho udpclient udpsoak udpfill udphold resolve \
-         tcperr tcpecho tcpclient tcploop tcpbulk tcpsoak tcpend tcpfull; do
-    "$cc" -O1 -Wall -Wextra -static -no-pie -Wl,--build-id=none -Wl,-z,noexecstack \
+         tcperr tcpecho tcpclient tcploop tcpbulk tcpsoak tcpend tcpfull \
+         nbprobe pollprobe epollprobe evprobe restprobe epollecho pair; do
+    threads=(); [ "$p" = restprobe ] && threads=(-pthread)
+    "$cc" -O1 -Wall -Wextra -static -no-pie ${threads[@]+"${threads[@]}"} -Wl,--build-id=none -Wl,-z,noexecstack \
         -o "$out/$p" "$PAX_ROOT/user/net/$p.c" || die "cc: $p"
     readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
     ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP"
@@ -73,7 +88,7 @@ trap 'rm -rf "$w"' EXIT
 mkdir -p "$w/bin"
 printf '#!/bin/sh\nexec %s -static "$@"\n' "$(command -v "$cc")" > "$w/bin/cc"
 chmod +x "$w/bin/cc"
-for p in tcpwolf tcpwolfd; do
+for p in tcpwolf tcpwolfd waitwolf; do
     mkdir -p "$w/$p"
     cp "$PAX_ROOT/user/net/$p.lu" "$w/$p/$p.lu"
     (cd "$w/$p" && PATH="$w/bin:$PATH" "$wolf" build --release --no-cache "$p.lu" -o "$out/$p") >&2 || die "wolf build: $p"

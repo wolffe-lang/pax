@@ -1,0 +1,277 @@
+// waitwolf — a wolf program that waits (px24): built for Linux by the
+// pinned wolf (tools/mknet), linked static, run unmodified. Five ways:
+//
+//   waitwolf serve PORT N ROUNDS [HOST PORT]
+//                                        ROUNDS times: accept N
+//                                        connections and serve them all
+//                                        at once, a task each; with HOST
+//                                        PORT, say `ready` there first (a
+//                                        connection of its own)
+//   waitwolf call HOST PORT N ROUNDS REQS
+//                                        ROUNDS times: N connections at
+//                                        once, a task each, REQS requests
+//                                        on each, to a server of the kind
+//                                        above
+//   waitwolf loop PORT N                both in one process, over
+//                                        127.0.0.1
+//   waitwolf push PORT N BYTES          accept N connections and write
+//                                        BYTES bytes to each, all at
+//                                        once, then close each
+//   waitwolf pull HOST PORT N BYTES MS  N connections at once to a
+//                                        server of that kind; each naps
+//                                        MS milliseconds before it reads,
+//                                        so the writer's buffer fills and
+//                                        the writer must wait to write
+//
+// The exchange on a connection: the client writes `hello <k>.<r>\n` and
+// reads `the wolf heard: hello <k>.<r>\n`, REQS times; when every one of
+// the N has had its answers, and not before, each client writes `bye\n`, reads
+// `farewell\n` and then the end of the stream. A server that took its
+// connections one after another would never answer the second hello:
+// the exchange ends only if all N are held open and served together,
+// each task parked in the runtime's wait (epoll, an eventfd, a thread)
+// between its lines. Every line printed is a total, so the output is
+// the same whatever order the tasks ran in.
+//
+// wolf-lang#713: a wolf program that parks a task a connection stalls
+// past about max(16, 8 x cpus) parked tasks. On one CPU, measured on
+// Linux, `serve` and `call` hold 16 connections and `loop` 7: the run
+// lists ask 12 and 6.
+
+fn serve_one(conn: int) -> int {
+    var asked = 0
+    var open = true
+    while open {
+        let msg = net_read(conn, 256) else ""
+        if msg.len == 0 {
+            open = false
+        } else if msg.trim() == "bye" {
+            net_write(conn, "farewell\n") else |_| {}
+            open = false
+        } else {
+            net_write(conn, "the wolf heard: {msg.trim()}\n") else |_| {}
+            asked += 1
+        }
+    }
+    net_close(conn) else |_| {}
+    asked
+}
+
+fn serve(srv: int, n: int) -> int {
+    let asked = channel[int](n)
+    scope s {
+        for _ in 0..n {
+            let conn = net_accept(srv) else -1
+            if conn >= 0 {
+                s.spawn(fn() {
+                    asked.send(serve_one(conn)) else |_| {}
+                })
+            } else {
+                asked.send(0) else |_| {}
+            }
+        }
+    }
+    var total = 0
+    for _ in 0..n {
+        total += asked.recv() else 0
+    }
+    total
+}
+
+fn call(addr: str, n: int, reqs: int) -> (int, int) {
+    let ready = channel[int](n)
+    let go = channel[int](n)
+    let done = channel[int](n)
+    var answered = 0
+    scope s {
+        for k in 0..n {
+            s.spawn(fn() {
+                let conn = net_connect(addr) else -1
+                if conn < 0 {
+                    ready.send(0) else |_| {}
+                    done.send(0) else |_| {}
+                } else {
+                    var right = true
+                    for r in 0..reqs {
+                        net_write(conn, "hello {k}.{r}\n") else |_| {}
+                        let reply = net_read(conn, 256) else ""
+                        if reply != "the wolf heard: hello {k}.{r}\n" {
+                            right = false
+                        }
+                    }
+                    ready.send(if right then 1 else 0) else |_| {}
+                    let _g = go.recv() else 0
+                    net_write(conn, "bye\n") else |_| {}
+                    let last = net_read(conn, 256) else ""
+                    let end = net_read(conn, 256) else ""
+                    net_close(conn) else |_| {}
+                    done.send(if right && last == "farewell\n" && end.len == 0 then 1 else 0) else |_| {}
+                }
+            })
+        }
+        for _ in 0..n {
+            answered += ready.recv() else 0
+        }
+        for _ in 0..n {
+            go.send(1) else |_| {}
+        }
+    }
+    var whole = 0
+    for _ in 0..n {
+        whole += done.recv() else 0
+    }
+    (answered, whole)
+}
+
+fn push_one(conn: int, bytes: int) -> int {
+    let block = "wolf wrote this line and will write it again and again.\n".repeat(128)
+    var sent = 0
+    var open = true
+    while open && sent < bytes {
+        let want = if bytes - sent < block.len then bytes - sent else block.len
+        var ok = true
+        net_write(conn, block[0..want]) else |_| { ok = false }
+        if ok {
+            sent += want
+        } else {
+            open = false
+        }
+    }
+    net_close(conn) else |_| {}
+    sent
+}
+
+fn push(srv: int, n: int, bytes: int) -> int {
+    let sent = channel[int](n)
+    scope s {
+        for _ in 0..n {
+            let conn = net_accept(srv) else -1
+            if conn >= 0 {
+                s.spawn(fn() {
+                    sent.send(push_one(conn, bytes)) else |_| {}
+                })
+            } else {
+                sent.send(0) else |_| {}
+            }
+        }
+    }
+    var total = 0
+    for _ in 0..n {
+        total += sent.recv() else 0
+    }
+    total
+}
+
+fn pull(addr: str, n: int, ms: int) -> int {
+    let got = channel[int](n)
+    scope s {
+        for _ in 0..n {
+            s.spawn(fn() {
+                let conn = net_connect(addr) else -1
+                var mine = 0
+                if conn >= 0 {
+                    time_sleep_ms(ms)
+                    var open = true
+                    while open {
+                        let part = net_read(conn, 65536) else ""
+                        if part.len == 0 {
+                            open = false
+                        } else {
+                            mine += part.len
+                        }
+                    }
+                    net_close(conn) else |_| {}
+                }
+                got.send(mine) else |_| {}
+            })
+        }
+    }
+    var total = 0
+    for _ in 0..n {
+        total += got.recv() else 0
+    }
+    total
+}
+
+fn main() -> !int {
+    let args = env_args()
+    if args.len < 3 {
+        print("usage: waitwolf serve PORT N ROUNDS [HOST PORT] | call HOST PORT N ROUNDS REQS | loop PORT N | push PORT N BYTES | pull HOST PORT N BYTES MS")
+        return 2
+    }
+    if args[0] == "serve" && args.len >= 4 {
+        let n = args[2].to_int()?
+        let rounds = args[3].to_int()?
+        let srv = net_listen("0.0.0.0:{args[1]}")?
+        let port = net_port(srv)?
+        print("waitwolf serve: listening on port {port} for {rounds} rounds of {n} connections")
+        if args.len >= 6 {
+            let up = net_connect("{args[4]}:{args[5]}")?
+            net_write(up, "ready\n")?
+            net_close(up)?
+        }
+        var asked = 0
+        for _ in 0..rounds {
+            asked += serve(srv, n)
+        }
+        net_close(srv)?
+        print("waitwolf serve: {rounds} rounds of {n} connections held at once, {asked} requests answered, each closed")
+        return if asked >= n * rounds then 0 else 1
+    }
+    if args[0] == "call" && args.len >= 6 {
+        let n = args[3].to_int()?
+        let rounds = args[4].to_int()?
+        let reqs = args[5].to_int()?
+        var answered = 0
+        var whole = 0
+        for _ in 0..rounds {
+            let (a, w) = call("{args[1]}:{args[2]}", n, reqs)
+            answered += a
+            whole += w
+        }
+        print("waitwolf call: {rounds} rounds of {n} connections at once, {reqs} requests on each, {answered} answered right, {whole} ended as they should")
+        return if answered == n * rounds && whole == n * rounds then 0 else 1
+    }
+    if args[0] == "loop" {
+        let n = args[2].to_int()?
+        let srv = net_listen("127.0.0.1:{args[1]}")?
+        let port = net_port(srv)?
+        print("waitwolf loop: listening on 127.0.0.1 port {port}")
+        let result = channel[int](2)
+        var asked = 0
+        scope s {
+            s.spawn(fn() {
+                let (answered, whole) = call("127.0.0.1:{port}", n, 1)
+                result.send(answered) else |_| {}
+                result.send(whole) else |_| {}
+            })
+            asked = serve(srv, n)
+        }
+        let answered = result.recv() else 0
+        let whole = result.recv() else 0
+        net_close(srv)?
+        print("waitwolf loop: {n} connections at once, {asked} requests answered, {answered} answered right, {whole} ended as they should")
+        return if asked == n && answered == n && whole == n then 0 else 1
+    }
+    if args[0] == "push" && args.len >= 4 {
+        let n = args[2].to_int()?
+        let bytes = args[3].to_int()?
+        let srv = net_listen("0.0.0.0:{args[1]}")?
+        let port = net_port(srv)?
+        print("waitwolf push: listening on port {port} for {n} connections")
+        let total = push(srv, n, bytes)
+        net_close(srv)?
+        print("waitwolf push: {total} bytes written to {n} connections at once")
+        return if total == n * bytes then 0 else 1
+    }
+    if args[0] == "pull" && args.len >= 6 {
+        let n = args[3].to_int()?
+        let bytes = args[4].to_int()?
+        let ms = args[5].to_int()?
+        let total = pull("{args[1]}:{args[2]}", n, ms)
+        print("waitwolf pull: {total} bytes read from {n} connections at once")
+        return if total == n * bytes then 0 else 1
+    }
+    print("waitwolf: no such way: {args[0]}")
+    2
+}
