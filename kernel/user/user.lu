@@ -132,11 +132,26 @@
 //!   `copy_file_range` (326) (kernel/files); CLOCK_REALTIME, `time` and
 //!   `gettimeofday` answer the date (kernel/rtc's reading at `start`
 //!   plus the ticks since), the other clocks the ticks.
+//! - the writable tree (px27, kernel/tree and kernel/files: what
+//!   boreutils' `mkdir`, `rmdir`, `rm`, `mv` and `cp`, pelt's
+//!   redirections and lobo's logs and pid file make, and a probe of the
+//!   rest, `notes/px27/`): `mkdir` (83), `mkdirat` (258), `rmdir` (84),
+//!   `unlink` (87), `unlinkat` (263), `rename` (82), `renameat` (264),
+//!   `renameat2` (316, no flag), `pwrite64` (18), `truncate` (76),
+//!   `ftruncate` (77), `fsync` (74), `fdatasync` (75), `umask` (95),
+//!   `access` (21), `faccessat` (269), `faccessat2` (439); `open` and
+//!   `openat` create, truncate and open for writing; `write` writes a
+//!   file; `copy_file_range` and `sendfile` copy between files. Refused
+//!   by name: `link`, `linkat`, `symlink`, `symlinkat`, `mknod`,
+//!   `mknodat` (-EPERM) and `chmod`, `fchmod`, `fchmodat`, `fchmodat2`,
+//!   `chown`, `fchown`, `lchown`, `fchownat`, `utimensat`, `utimes`,
+//!   `utime` (-EOPNOTSUPP). After a call, kernel/tree's lines: the
+//!   books at every 2500th file removed, and the tree at its cap.
 //! Every other number is -ENOSYS, logged once per program (`unknown`),
 //! among them `set_robust_list` (273) and `rseq` (334), which glibc
 //! tolerates (px09's hello asks `_sysctl` (156), which Linux answers
 //! -ENOSYS too). A refusal by name (a file-backed or shared mapping, a
-//! write to the read-only initramfs, a fork, a signal sent) is a line
+//! hard link, a fork, a signal sent) is a line
 //! `user: <name> pid <pid> syscall <n>: refused: <why>, -<errno>`. User memory is reached through
 //! kernel/uaccess (the process's own tables walked, then the HHDM).
 //!
@@ -576,9 +591,9 @@ fn readable(buf: u64, len: u64) -> bool {
 
 /// `write(fd, buf, len)`: the result for %rax. The console's descriptors
 /// (0-2 and any opened on `/dev/stdout`, `/dev/stderr`, `/dev/stdin`)
-/// send the bytes to the serial console; `/dev/null` swallows them;
-/// anything else (closed, read-only, a file of the read-only initramfs)
-/// is -EBADF.
+/// send the bytes to the serial console; `/dev/null` swallows them; a
+/// pipe, a socket and (px27) a file of the tree take them; anything
+/// else (closed, opened to read) is -EBADF.
 fn write(fd: u64, buf: u64, len: u64) -> u64 {
     if socket.is_inet(area(), fd) {
         return socket.sendto(area(), paging.live(), fd, buf, len, 0, 0, 0) // px22
