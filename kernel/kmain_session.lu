@@ -1,0 +1,291 @@
+//! member: false
+// kmain_session.lu — the session image's kernel (px28, tests/mpx4-session):
+// a shell at a terminal on a machine with a network. It starts as
+// kmain_console does (PAX's paging with the initramfs mapped, the
+// screen when there is one, the timer, the FPU state, the scheduler,
+// SYSCALL), brings the network up as kmain_sockets does (the PCI scan,
+// kernel/net and over it kernel/arp, kernel/ip, kernel/icmp,
+// kernel/udp and kernel/tcp as 10.0.2.15 netmask 255.255.255.0 gateway
+// 10.0.2.2, the network thread and its clock; with no device, loopback
+// only), then starts the console's input and runs the archive's
+// `/etc/pax-run` as kmain_console does: one command a line, each
+// waited for (with every process it made), descriptors 0-2 the
+// terminal, the environment HOME=/ TERM=linux PAX=1 PATH=/bin. The
+// first command is init, pid 1. With `quiet` on the kernel command
+// line (boot/limine-initramfs-quiet.conf) no line is printed for a
+// program's ordinary life, as on the shell image (px15). When the list
+// is done the kernel says what the session did and halts:
+//
+//     PAX: the session
+//     …
+//     loopback: 127.0.0.1 answers the kernel's echo, 10.0.2.15 answers, 0 frames on the wire
+//     console: com1 irq 4 vector 36, …
+//     run 1: /bin/pelt
+//     $ …
+//     run: 1 commands
+//     console: <n> bytes from com1, <k> keys (<s> scancodes) from the keyboard, …
+//     signals: <c> raised from the terminal
+//     speaker: <t> tones, …                     (only when a tone was started)
+//     network: frames <a> in, <b> out; udp datagrams <c> in, <d> out
+//     network: tcp connections <e> accepted, <f> made, <g> open
+//     PAX: init /bin/pelt ended with status 0; nothing left to run
+//     halt
+use apic
+use arp
+use console
+use fb
+use fpu
+use frames
+use heap
+use icmp
+use initramfs
+use interrupts
+use ip
+use log
+use net
+use netd
+use paging
+use panic
+use pci
+use process
+use sched
+use serial
+use speaker
+use sync
+use tcp
+use timer
+use udp
+use user
+
+extern "c" let pax_user_thread: *u8
+extern "c" let pax_netd: *u8
+extern "c" let pax_net_clock: *u8
+
+const OWN_IP: u64 = 0x0a00020f // 10.0.2.15
+const NETMASK: u64 = 0xffffff00 // 255.255.255.0
+const GATEWAY: u64 = 0x0a000202 // 10.0.2.2
+const ENV: str = "HOME=/ TERM=linux PAX=1 PATH=/bin"
+const RUN_LIST: str = "/etc/pax-run"
+
+/// The body ELF processes run (kernel/user's export).
+fn body() -> u64 {
+    // # Safety: the address of kernel/user's export; nothing is read.
+    unsafe { pax_user_thread as u64 }
+}
+
+fn byte_at(a: u64) -> u64 {
+    // # Safety: a byte of the run list, inside the initramfs's pages
+    // (mapped read-only in the HHDM for the kernel's life).
+    unsafe { (a as *u8).read_volatile() as u64 }
+}
+
+/// Frames the protocols above the driver hold.
+fn stack_frames() -> u64 {
+    arp.frames_held() + ip.frames_held() + icmp.frames_held() + udp.frames_held() + tcp.frames_held()
+}
+
+/// Ping `dst`, an address of this machine, and say whether the reply
+/// came back over kernel/ip's loopback queue (as kmain_sockets does).
+fn ping_self(dst: u64, seq: u64) -> bool {
+    let _r = icmp.ping(dst, seq, 56)
+    let _n = netd.drain()
+    let (got, _rtt, _ttl) = icmp.answer()
+    got
+}
+
+/// Run line number `k`, the `n` bytes at `a`: one command, waited for
+/// with every process it makes (`floor`: the threads live before it,
+/// the network's own); then, unless quiet, the frames line.
+fn run(k: u64, a: u64, n: u64, floor: u64) {
+    let s = sync.acquire(sync.console())
+    log.put("run ")
+    log.dec(k as int)
+    log.put(": ")
+    var i: u64 = 0
+    while i < n {
+        log.put_byte(byte_at(a + i) as int)
+        i += 1
+    }
+    log.end()
+    sync.release(sync.console(), s)
+    let saved = sync.irq_save()
+    let before = frames.free_count()
+    var pl: u64 = 0
+    while pl < n && byte_at(a + pl) != 32 {
+        pl += 1
+    }
+    let id = user.exec_line(body(), a, pl, a, n, ENV)
+    let during = frames.free_count()
+    sync.irq_restore(saved)
+    sched.wait_down_to(floor)
+    // A connection its process closed may still be saying goodbye (a
+    // FIN to be acknowledged): up to thirty seconds for that, so the
+    // lines below are the session's and not the middle of it.
+    let patience = timer.ticks() + 3000
+    while tcp.finishing() != 0 && timer.ticks() < patience {
+        let _s = sched.sleep(1)
+    }
+    let after = frames.free_count()
+    if log.quiet() {
+        return
+    }
+    let s2 = sync.acquire(sync.console())
+    log.put("user: frames free ")
+    log.dec(before as int)
+    log.put(" before, ")
+    log.dec(during as int)
+    log.put(" with ")
+    log.dec(if id != 0 { 1 } else { 0 })
+    log.put(" processes, ")
+    log.dec(after as int)
+    log.put(" after")
+    log.end()
+    sync.release(sync.console(), s2)
+}
+
+/// The session's closing lines about the network, from the counters
+/// kernel/net, kernel/udp and kernel/tcp keep.
+fn network_lines() {
+    log.put("network: frames ")
+    log.dec(net.count(net.C_RX_FRAMES) as int)
+    log.put(" in, ")
+    log.dec(net.count(net.C_TX_FRAMES) as int)
+    log.put(" out; udp datagrams ")
+    log.dec(udp.count(udp.C_RX) as int)
+    log.put(" in, ")
+    log.dec(udp.count(udp.C_TX) as int)
+    log.put(" out")
+    log.end()
+    log.put("network: tcp connections ")
+    log.dec(tcp.count(tcp.C_ACCEPTED) as int)
+    log.put(" accepted, ")
+    log.dec(tcp.count(tcp.C_ACTIVE) as int)
+    log.put(" made, ")
+    log.dec(tcp.blocks() as int)
+    log.put(" open")
+    log.end()
+}
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX: the session")
+    frames.start()
+    let limine = paging.cr3()
+    let before = frames.free_count()
+    let pml4 = paging.start()
+    paging.report(limine, before)
+    let _screen = fb.start(pml4) // the screen, when there is one (no line: serial unchanged)
+    initramfs.report()
+    initramfs.require()
+    interrupts.start()
+    apic.start(pml4)
+    timer.start()
+    fpu.start()
+    fpu.report()
+    sched.start(pml4)
+    sched.report()
+    heap.start()
+    user.start()
+    user.report()
+    let _n = pci.scan()
+    let up = net.start(pml4) == net.UP
+    net.report()
+    arp.start(OWN_IP, arp.AGE)
+    ip.start(OWN_IP, NETMASK, GATEWAY)
+    icmp.start()
+    udp.start()
+    tcp.start(process.random_word(0))
+    ip.report()
+    udp.report()
+    tcp.report()
+    if stack_frames() != 333 {
+        panic.fail("session: no frame for the stack, frames", stack_frames())
+    }
+    // # Safety: the addresses of kernel/netd's exports; nothing is read.
+    let (nd, clock) = unsafe { (pax_netd as u64, pax_net_clock as u64) }
+    // The clock runs with or without a device (loopback's backstop,
+    // TCP's timers); the receiving thread only with one.
+    var floor: u64 = 1
+    if up {
+        sched.create(nd, 0)
+        floor = 2
+    }
+    sched.create(clock, 0)
+    console.start()
+    console.report()
+    sync.enable()
+    let l1 = ping_self(ip.LOOPBACK, 1)
+    let l2 = ping_self(OWN_IP, 2)
+    let sl = sync.acquire(sync.console())
+    log.put("loopback: 127.0.0.1 ")
+    log.put(if l1 { "answers" } else { "does NOT answer" })
+    log.put(" the kernel's echo, 10.0.2.15 ")
+    log.put(if l2 { "answers" } else { "does NOT answer" })
+    log.put(", ")
+    log.dec(net.count(net.C_TX_FRAMES) as int)
+    log.put(" frames on the wire")
+    log.end()
+    sync.release(sync.console(), sl)
+
+    let e = initramfs.lookup(RUN_LIST)
+    if e == initramfs.END {
+        panic.fail("session: no /etc/pax-run in the initramfs, bytes", initramfs.bytes())
+    }
+    let d = initramfs.data(e)
+    let size = initramfs.size(e)
+    var k: u64 = 0
+    var i: u64 = 0
+    var init_at: u64 = 0
+    var init_len: u64 = 0
+    var init_status: u64 = 0
+    while i < size {
+        var j = i
+        while j < size && byte_at(d + j) != 10 {
+            j += 1
+        }
+        if j > i && byte_at(d + i) != 35 {
+            k += 1
+            run(k, d + i, j - i, floor)
+            if k == 1 {
+                init_at = d + i
+                init_len = j - i
+                init_status = user.last_exit()
+            }
+        }
+        i = j + 1
+    }
+
+    let s = sync.acquire(sync.console())
+    log.put("run: ")
+    log.dec(k as int)
+    log.put(" commands")
+    log.end()
+    console.summary()
+    log.put("signals: ")
+    log.dec(console.signal_keys() as int)
+    log.put(" raised from the terminal")
+    log.end()
+    speaker.summary() // only when a tone was started
+    network_lines()
+    log.put("PAX: init ")
+    var p: u64 = 0
+    while p < init_len && byte_at(init_at + p) != 32 {
+        log.put_byte(byte_at(init_at + p) as int)
+        p += 1
+    }
+    let st = init_status
+    if st == 0 {
+        log.put(" ended without an exit status")
+    } else {
+        log.put(" ended with status ")
+        log.dec((st - 1) as int)
+    }
+    log.put("; nothing left to run")
+    log.end()
+    sync.release(sync.console(), s)
+
+    let _off = sync.irq_save()
+    timer.stop()
+    log.line("halt")
+    panic.halt()
+}
