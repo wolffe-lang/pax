@@ -74,7 +74,7 @@
                          changes what the kernel does.
 
    Storage (.bss, zero until kernel/sched writes it):
-     pax_threads       16 thread slots, 512 bytes each (kernel/sched's
+     pax_threads       64 thread slots (16 before px24), 512 bytes each (kernel/sched's
                        #[repr(c)] Thread, 312 bytes of it; 72 before
                        px09's cr3 and prog, 88 before px10's entry, usp,
                        name and name_len, 120 before px12's fs; 128-byte
@@ -82,8 +82,9 @@
                        vparent, zombie and sigmask; 256-byte slots
                        before px26's fifteen words for threads, futexes
                        and signals)
-     pax_procs         16 process areas, 4096 bytes each (2048 before
-                       px14), one per slot (px12): the words kernel/vm,
+     pax_procs         64 process areas, 8192 bytes each (2048 before
+                       px14, 4096 before px24's 128 descriptors), one
+                       per slot (px12): the words kernel/vm,
                        kernel/files, kernel/user and kernel/process keep
                        for an ELF process (the break, the mmap cursor,
                        the descriptor table, the system calls already
@@ -176,15 +177,15 @@ pax_irq_restore:
         .p2align 6
         .globl pax_threads
 pax_threads:
-        .zero 16 * 512
+        .zero 64 * 512
         .p2align 6
         .globl pax_procs
 pax_procs:
-        .zero 16 * 4096
+        .zero 64 * 8192
         .p2align 6
         .globl pax_siginfo
 pax_siginfo:
-        .zero 16 * 2 * 64 * 8
+        .zero 64 * 2 * 64 * 8
         .p2align 6
         .globl pax_sched_locks
 pax_sched_locks:
