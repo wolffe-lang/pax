@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# mknet — build px22's network witnesses (user/net/*.c) into OUTDIR.
+#
+#   tools/mknet OUTDIR
+#
+# Each is one C file and user/net/say.h, built with the host's cc and
+# linked static against the host's glibc (-static -no-pie: an ET_EXEC
+# with no PT_INTERP, the shape PAX runs), -O1, --build-id=none so two
+# builds by one toolchain give one digest:
+#   sockerr    what AF_INET datagram sockets answer with nothing on the
+#              wire: the refusals by errno, the port table, the default
+#              peer's filter, truncation, duplicates, the receive timeout
+#   udploop    a server and its forked client over 127.0.0.1 and the
+#              machine's own address
+#   udpecho    a UDP echo server (RFC 862) that says when it listens
+#   udpclient  a client: a connected socket's write and read, then
+#              sendto and recvfrom
+#   udpsoak    N datagrams out and N back, one at a time
+#   udpfill    a receive queue filled past its bound
+#   resolve    a stub resolver (RFC 1035): one A question to a server
+# and prints one line per file: `<name> <sha256> <bytes>`, also written
+# to OUTDIR/sums.txt.
+#
+# The host's glibc decides what the static start-up does: build on a
+# baseline x86-64 glibc (the CI runner's Ubuntu; an Ubuntu container on
+# kasumi), never on kasumi's CachyOS x86-64-v4 glibc (px10). Exit 0, or
+# 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mknet OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${CC:-cc}
+need "$cc" readelf
+: > "$out/sums.txt"
+for p in sockerr udploop udpecho udpclient udpsoak udpfill resolve; do
+    "$cc" -O1 -Wall -Wextra -static -no-pie -Wl,--build-id=none -Wl,-z,noexecstack \
+        -o "$out/$p" "$PAX_ROOT/user/net/$p.c" || die "cc: $p"
+    readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
+    ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP"
+    printf '%s %s %s\n' "$p" "$(sha256_of "$out/$p")" "$(wc -c < "$out/$p" | tr -d ' ')" | tee -a "$out/sums.txt"
+done
