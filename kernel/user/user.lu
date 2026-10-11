@@ -79,7 +79,7 @@
 //!   and `nanosleep` (35) (the thread sleeps until the tick after the
 //!   deadline, kernel/sched's `sleep_current`), `uname` (63, "PAX"),
 //!   `prctl` (157) PR_GET_NAME, `prlimit64` (302, read-only: the stack
-//!   PAX gives, 32 descriptors, the rest unlimited), `getuid`, `getgid`,
+//!   PAX gives, kernel/files' descriptors, the rest unlimited), `getuid`, `getgid`,
 //!   `geteuid`, `getegid` (0).
 //! - processes (px14, kernel/process and kernel/sched): `clone` (56),
 //!   `clone3` (435) and `vfork` (58) with CLONE_VM|CLONE_VFORK, `execve`
@@ -207,6 +207,7 @@ use netd
 use paging
 use panic
 use process
+use ready
 use rtc
 use sched
 use serial
@@ -613,6 +614,12 @@ fn write(fd: u64, buf: u64, len: u64) -> u64 {
     if t == 4 {
         return files.file_write(area(), paging.live(), fd, buf, len) // px27
     }
+    if t == 5 {
+        return files.event_write(area(), paging.live(), fd, buf, len) // px24: an eventfd
+    }
+    if t == 6 {
+        return NEG_EINVAL // px24: an epoll descriptor is not written
+    }
     if t == 0 || len == 0 {
         return len
     }
@@ -643,6 +650,60 @@ fn write(fd: u64, buf: u64, len: u64) -> u64 {
         i += 1
     }
     len
+}
+
+/// px24: `writev(fd, iov, iovcnt)` (`readv(2)`): the parts written one
+/// after another as `write` writes each, and the bytes taken in all.
+/// lobo sends a response's head and its body this way. A part that
+/// must wait ends the call with what the earlier parts and that part
+/// have taken so far (a short write, which a caller of `writev` reads
+/// as one); with nothing taken yet the call waits, or answers the
+/// first part's -errno. More than 1024 parts, or lengths whose sum
+/// passes what a signed count holds, is -EINVAL.
+fn writev(fd: u64, iov: u64, cnt: u64) -> u64 {
+    if cnt > IOV_MAX {
+        return NEG_EINVAL
+    }
+    let pml4 = paging.live()
+    if cnt > 0 && !uaccess.readable(pml4, iov, cnt * 16) {
+        return NEG_EFAULT
+    }
+    var sum: u64 = 0
+    var i: u64 = 0
+    while i < cnt {
+        let l = uaccess.get64(pml4, iov + i * 16 + 8)
+        if l >= 0x8000000000000000 || sum + l >= 0x8000000000000000 {
+            return NEG_EINVAL
+        }
+        sum += l
+        i += 1
+    }
+    var total: u64 = 0
+    i = 0
+    while i < cnt {
+        let base = uaccess.get64(pml4, iov + i * 16)
+        let l = uaccess.get64(pml4, iov + i * 16 + 8)
+        let r = if l == 0 && total > 0 { 0 } else { write(fd, base, l) }
+        if r == files.WAIT {
+            if total == 0 {
+                return r // nothing taken: wait, and run the whole call again
+            }
+            // A later part must wait: what it took before it found no
+            // room is the thread's count; answer the sum.
+            let part = sched.self_done()
+            sched.set_self_done(0)
+            return total + part
+        }
+        if r >= 0x8000000000000000 {
+            return if total > 0 { total } else { r }
+        }
+        total += r
+        if r < l {
+            return total
+        }
+        i += 1
+    }
+    total
 }
 
 // --- the Linux calls (px12) --------------------------------------------------
@@ -771,6 +832,19 @@ const SYS_RENAMEAT2: u64 = 316
 const SYS_FACCESSAT2: u64 = 439
 const SYS_FCHMODAT2: u64 = 452
 const AT_REMOVEDIR: u64 = 0x200
+// px24: readiness, and the rest wolf's hosted runtime and lobo ask.
+const SYS_POLL: u64 = 7
+const SYS_WRITEV: u64 = 20
+const SYS_SIGALTSTACK: u64 = 131
+const SYS_SCHED_GETAFFINITY: u64 = 204
+const SYS_EPOLL_WAIT: u64 = 232
+const SYS_EPOLL_CTL: u64 = 233
+const SYS_EVENTFD2: u64 = 290
+const SYS_EPOLL_CREATE1: u64 = 291
+const IOV_MAX: u64 = 1024 // uapi linux/uio.h's UIO_MAXIOV
+const GRND_NONBLOCK: u64 = 1 // uapi linux/random.h
+const GRND_RANDOM: u64 = 2
+const GRND_INSECURE: u64 = 4
 
 const NEG_EPERM: u64 = 0xffffffffffffffff // -1
 const NEG_ESRCH: u64 = 0xfffffffffffffffd // -3
@@ -846,7 +920,9 @@ fn refusal_line(nr: u64, r: u64) {
     log.put(" syscall ")
     num(nr)
     log.put(": refused: ")
-    if c >= socket.REFUSALS {
+    if c >= ready.REFUSALS {
+        log.put(ready.why(c)) // px24
+    } else if c >= socket.REFUSALS {
         log.put(socket.why(c)) // px22
         socket.detail(area(), c)
     } else {
@@ -960,7 +1036,7 @@ fn prctl(option: u64, arg2: u64) -> u64 {
 
 /// `prlimit64(pid, resource, new, old)`: the stack's limit is the
 /// stack PAX gives (ELF_STACK_PAGES pages, fixed), the descriptors' the
-/// table's 32, every other unlimited; setting one is -EPERM.
+/// table's (`files.FDS`), every other unlimited; setting one is -EPERM.
 fn prlimit(pid: u64, res: u64, new: u64, old: u64) -> u64 {
     if pid != 0 && pid != sched.self_pid() {
         return NEG_ESRCH
@@ -980,7 +1056,7 @@ fn prlimit(pid: u64, res: u64, new: u64, old: u64) -> u64 {
         if res == RLIMIT_STACK {
             v = ELF_STACK_PAGES * PAGE
         } else if res == RLIMIT_NOFILE {
-            v = 32
+            v = files.FDS // px24: 128
         }
         uaccess.put(pml4, old, v, 8)
         uaccess.put(pml4, old + 8, v, 8)
@@ -990,7 +1066,13 @@ fn prlimit(pid: u64, res: u64, new: u64, old: u64) -> u64 {
 
 /// `getrandom(buf, len, flags)`: len bytes (at most Linux's cap) from
 /// RDRAND, or the TSC mix on a CPU without it (`random_word`).
-fn getrandom(buf: u64, len: u64) -> u64 {
+fn getrandom(buf: u64, len: u64, flags: u64) -> u64 {
+    // px24: the flags are read (getrandom(2)): an unknown bit, or
+    // GRND_RANDOM with GRND_INSECURE, is -EINVAL. PAX's source never
+    // waits, so GRND_NONBLOCK changes nothing.
+    if flags & !(GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE) != 0 || flags & (GRND_RANDOM | GRND_INSECURE) == (GRND_RANDOM | GRND_INSECURE) {
+        return NEG_EINVAL
+    }
     let n = if len < GETRANDOM_MAX { len } else { GETRANDOM_MAX }
     let pml4 = paging.live()
     if !uaccess.writable(pml4, buf, n) {
@@ -1173,6 +1255,13 @@ pub fn syscall(f: u64) -> u64 {
         put_word(f, W_RAX, 0)
         return sched.yield_current(f)
     }
+    if nr == SYS_SIGALTSTACK {
+        // px24: it reads the caller's stack pointer from the frame.
+        let r = signal.sigaltstack(f, a0, a1)
+        put_word(f, W_RAX, r)
+        refusal_line(nr, r)
+        return f
+    }
     // px14: the calls that make, replace and wait for processes.
     if nr == SYS_CLONE || nr == SYS_CLONE3 || nr == SYS_VFORK {
         let g = process.clone(f, nr, a0, a1, a2, a3, a4)
@@ -1235,12 +1324,17 @@ pub fn syscall(f: u64) -> u64 {
         put_word(f, W_RAX, nr)
         // px22: a receive with a timeout waits until its deadline at most.
         let until = socket.deadline(area())
+        if nr == SYS_POLL || nr == SYS_EPOLL_WAIT {
+            // px24: a handled signal ends these with -EINTR, SA_RESTART
+            // or not; a wait for good keeps `ready.FOREVER` as its mark.
+            return sched.block_pipe_eintr(f, if until == ready.FOREVER { 0 } else { until })
+        }
         if until != 0 {
             return sched.block_pipe_until(f, until)
         }
         return sched.block_pipe(f)
     }
-    if r == files.EPIPE_R && (nr == SYS_WRITE || nr == SYS_SENDFILE || nr == SYS_SPLICE || (nr == SYS_SENDTO && a3 & MSG_NOSIGNAL == 0)) {
+    if r == files.EPIPE_R && (nr == SYS_WRITE || nr == SYS_WRITEV || nr == SYS_SENDFILE || nr == SYS_SPLICE || (nr == SYS_SENDTO && a3 & MSG_NOSIGNAL == 0)) {
         // px17, px26: SIGPIPE for the writer, taken as this call returns:
         // the default ends the process (kernel/signal's line), a handler
         // runs and the write answers -EPIPE, an ignored one just answers.
@@ -1342,7 +1436,7 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     let pml4 = paging.live()
     // The calls whose first argument is an int (a descriptor), read as
     // one; the others take r0 whole.
-    let a0 = if nr == SYS_READ || nr == SYS_WRITE || nr == SYS_PREAD64 || nr == SYS_OPENAT || nr == SYS_CLOSE || nr == SYS_LSEEK || nr == SYS_FSTAT || nr == SYS_NEWFSTATAT || nr == SYS_STATX || nr == SYS_GETDENTS64 || nr == SYS_IOCTL || nr == SYS_READLINKAT || nr == SYS_DUP || nr == SYS_DUP2 || nr == SYS_DUP3 || nr == SYS_FCNTL || nr == SYS_FCHDIR || nr == SYS_SENDFILE || nr == SYS_SPLICE || nr == SYS_COPY_FILE_RANGE || nr == SYS_SENDTO || nr == SYS_RECVFROM || nr == SYS_SOCKET || nr == SYS_CONNECT || nr == SYS_ACCEPT || nr == SYS_BIND || nr == SYS_LISTEN || nr == SYS_GETSOCKNAME || nr == SYS_GETPEERNAME || nr == SYS_SETSOCKOPT || nr == SYS_GETSOCKOPT || nr == SYS_ACCEPT4 { int32(r0) } else { r0 }
+    let a0 = if nr == SYS_READ || nr == SYS_WRITE || nr == SYS_PREAD64 || nr == SYS_OPENAT || nr == SYS_CLOSE || nr == SYS_LSEEK || nr == SYS_FSTAT || nr == SYS_NEWFSTATAT || nr == SYS_STATX || nr == SYS_GETDENTS64 || nr == SYS_IOCTL || nr == SYS_READLINKAT || nr == SYS_DUP || nr == SYS_DUP2 || nr == SYS_DUP3 || nr == SYS_FCNTL || nr == SYS_FCHDIR || nr == SYS_SENDFILE || nr == SYS_SPLICE || nr == SYS_COPY_FILE_RANGE || nr == SYS_SENDTO || nr == SYS_RECVFROM || nr == SYS_SOCKET || nr == SYS_CONNECT || nr == SYS_ACCEPT || nr == SYS_BIND || nr == SYS_LISTEN || nr == SYS_GETSOCKNAME || nr == SYS_GETPEERNAME || nr == SYS_SETSOCKOPT || nr == SYS_GETSOCKOPT || nr == SYS_ACCEPT4 || nr == SYS_WRITEV || nr == SYS_EPOLL_WAIT || nr == SYS_EPOLL_CTL || nr == SYS_EPOLL_CREATE1 { int32(r0) } else { r0 }
     if nr == SYS_WRITE {
         return write(a0, a1, a2)
     }
@@ -1508,7 +1602,7 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
         return prlimit(a0, a1, a2, a3)
     }
     if nr == SYS_GETRANDOM {
-        return getrandom(a0, a1)
+        return getrandom(a0, a1, int32(a2))
     }
     if nr == SYS_CLOCK_GETTIME {
         return clock_gettime(a0, a1)
@@ -1625,6 +1719,28 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     }
     if nr == SYS_CHMOD || nr == SYS_FCHMOD || nr == SYS_FCHMODAT || nr == SYS_FCHMODAT2 || nr == SYS_CHOWN || nr == SYS_FCHOWN || nr == SYS_LCHOWN || nr == SYS_FCHOWNAT || nr == SYS_UTIMENSAT || nr == SYS_UTIMES || nr == SYS_UTIME {
         return files.refused(a, 1)
+    }
+    // px24: readiness (kernel/ready) and the gathered write.
+    if nr == SYS_POLL {
+        return ready.poll(a, pml4, a0, a1, int32(a2))
+    }
+    if nr == SYS_EPOLL_WAIT {
+        return ready.epoll_wait(a, pml4, a0, a1, int32(a2), int32(a3))
+    }
+    if nr == SYS_EPOLL_CTL {
+        return ready.epoll_ctl(a, pml4, a0, int32(a1), int32(a2), a3)
+    }
+    if nr == SYS_EPOLL_CREATE1 {
+        return ready.epoll_create1(a, a0)
+    }
+    if nr == SYS_EVENTFD2 {
+        return ready.eventfd2(a, int32(a0), int32(a1))
+    }
+    if nr == SYS_SCHED_GETAFFINITY {
+        return ready.sched_getaffinity(pml4, a0, a1, a2)
+    }
+    if nr == SYS_WRITEV {
+        return writev(a0, a1, int32(a2))
     }
     unknown(nr)
     NEG_ENOSYS

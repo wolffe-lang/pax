@@ -1,0 +1,547 @@
+//! ready — waiting for more than one descriptor (px24): `poll` (7),
+//! `epoll_create1` (291), `epoll_ctl` (233), `epoll_wait` (232),
+//! `eventfd2` (290) and `sched_getaffinity` (204): what wolf's hosted
+//! runtime and lobo ask of Linux the moment a call must wait
+//! (`notes/px24/linux/`, straces of both on Linux).
+//!
+//! **Readiness is computed at the wait.** kernel/files answers, for a
+//! descriptor or an open file, which of POLLIN, POLLOUT, POLLERR,
+//! POLLHUP and POLLRDHUP hold now (`files.poll`, `files.poll_of`; each
+//! kind's rule is the one Linux answered user/net/pollprobe.c), and two
+//! counts that move when something new came to read and when room to
+//! write came back. `poll` asks it of each descriptor it was handed;
+//! `epoll_wait` of each registration of its object. A call that finds
+//! nothing and may wait answers `files.WAIT`: kernel/user rewinds it and
+//! parks the thread, and every change anywhere — a byte, a segment, a
+//! close, a registration added — makes every waiter ready to run its
+//! call again (kernel/sched's `wake_pipes`). No object keeps a queue of
+//! waiters and there is no ready list, so there is nothing to lock (a
+//! system call runs with IF clear on one CPU) and no wake can fall
+//! between a call's look and its wait, but the call's own traffic still
+//! on the loopback queue, which kernel/user delivers before it parks
+//! the thread and then runs the call again (px23).
+//!
+//! **Timeouts.** A wait with a timeout keeps its deadline in the
+//! thread's own word (`sched.self_until`: now plus the timeout's ticks,
+//! rounded up and one more, so a wait never ends early); the call run
+//! again past it answers 0. A wait for good keeps `FOREVER` there, so a
+//! call can tell its first run from a later one (the counts below). A
+//! handled signal ends either with -EINTR, SA_RESTART or not
+//! (`signal(7)`; kernel/sched's `block_pipe_eintr`).
+//!
+//! **`poll(fds, nfds, timeout)`**: per entry, a negative descriptor is
+//! skipped (revents 0), a closed one answers POLLNVAL, an open one its
+//! bits masked by what was asked, POLLERR and POLLHUP always. More
+//! entries than a process has descriptors is -EINVAL, an array that is
+//! not the caller's -EFAULT.
+//!
+//! **epoll** (`epoll(7)`): `epoll_create1(flags)` (EPOLL_CLOEXEC; any
+//! other bit -EINVAL) makes an object (kernel/event: 16 at once, 256
+//! registrations each, four frames held while it lives).
+//! `epoll_ctl(ep, op, fd, event)`: EPOLL_CTL_ADD (1), EPOLL_CTL_DEL (2),
+//! EPOLL_CTL_MOD (3), with Linux's errnos: -EFAULT for an event that
+//! cannot be read (not for a delete), -EBADF for either descriptor
+//! closed, -EPERM for a regular file or a directory, -EINVAL for `ep`
+//! that is no epoll object, for the object itself as `fd` and for an
+//! operation that is none, -EEXIST for a second add, -ENOENT for a
+//! change or a delete of what was never added. A registration is keyed
+//! by the open file and the descriptor number, as Linux's, and lasts as
+//! long as the open file: the last close drops it (kernel/files calls
+//! `event.forget`), a duplicate descriptor keeps it alive, and a child
+//! of `fork` shares the object. `epoll_wait(ep, events, max, timeout)`
+//! hands out at most `max` events, each registration's ready bits
+//! masked by what it asked (EPOLLERR and EPOLLHUP always) with its
+//! data, starting each time after the last one answered so that every
+//! ready registration has its turn. **Level-triggered** by default: an
+//! event is answered for as long as it holds. **EPOLLET**: answered
+//! when it holds and one of the watched thing's two counts has moved
+//! since this registration last answered (or it was just added or
+//! modified): once for each arrival, never again for bytes left unread.
+//! **EPOLLONESHOT**: answered once, then silent until EPOLL_CTL_MOD
+//! arms it again.
+//!
+//! **Refused by name** (a line once a process, counted every time):
+//! `EPOLLEXCLUSIVE`, `EPOLLWAKEUP` and any event bit beyond EPOLLIN,
+//! EPOLLPRI, EPOLLOUT, EPOLLERR, EPOLLHUP, EPOLLRDHUP, EPOLLET and
+//! EPOLLONESHOT (-EINVAL); an epoll object registered in another
+//! (-EINVAL: Linux nests them, nothing asked for it); the console or
+//! `/dev/null` in an epoll object (-EPERM: they keep no open file
+//! here); a 17th epoll object (-ENFILE) and a 257th registration
+//! (-ENOSPC); `eventfd2` with EFD_SEMAPHORE (-EINVAL). No strace this
+//! lane took shows any of them.
+//!
+//! **`eventfd2(initval, flags)`** (EFD_CLOEXEC, EFD_NONBLOCK; an unknown
+//! bit -EINVAL): a descriptor on one of kernel/event's counters; its
+//! `read` and `write` are kernel/files'.
+//!
+//! **`sched_getaffinity(pid, len, mask)`**: PAX runs on one CPU: 8, and
+//! the mask's first eight bytes with bit 0 set; -EINVAL for a mask
+//! under eight bytes, -ESRCH for a thread that is none.
+//!
+//! No region, no heap: a call that waits gives up its kernel stack.
+//! Written from poll(2), epoll(7), epoll_create1(2), epoll_ctl(2),
+//! epoll_wait(2), eventfd(2), sched_setaffinity(2), signal(7); the uapi
+//! headers `asm-generic/poll.h`, `linux/eventpoll.h`, `linux/eventfd.h`;
+//! and black-box runs of user/net/pollprobe.c, epollprobe.c and
+//! evprobe.c on Linux. No Linux source; no other kernel's, libc's or
+//! event library's source.
+
+use event
+use files
+use log
+use sched
+use signal
+use timer
+use uaccess
+
+const POLLIN: u64 = 0x1
+const POLLPRI: u64 = 0x2
+const POLLOUT: u64 = 0x4
+const POLLERR: u64 = 0x8
+const POLLHUP: u64 = 0x10
+const POLLNVAL: u64 = 0x20
+const POLLRDHUP: u64 = 0x2000
+const EPOLLONESHOT: u64 = 0x40000000
+const EPOLLET: u64 = 0x80000000
+const EPOLLEXCLUSIVE: u64 = 0x10000000
+const EPOLLWAKEUP: u64 = 0x20000000
+// What a registration may ask for.
+const ASKABLE: u64 = POLLIN | POLLPRI | POLLOUT | POLLERR | POLLHUP | POLLRDHUP | EPOLLET | EPOLLONESHOT
+// The bits that count as "something came" and as "room came back" for
+// an edge-triggered registration; an end or an error is both.
+const IN_SIDE: u64 = POLLIN | POLLRDHUP | POLLERR | POLLHUP
+const OUT_SIDE: u64 = POLLOUT | POLLERR | POLLHUP
+
+const EPOLL_CTL_ADD: u64 = 1
+const EPOLL_CTL_DEL: u64 = 2
+const EPOLL_CTL_MOD: u64 = 3
+const EVENT_BYTES: u64 = 12 // struct epoll_event on x86-64: packed, events then data
+const O_RDWR: u64 = 2
+const O_NONBLOCK: u64 = 0x800
+const O_CLOEXEC: u64 = 0x80000
+const EFD_SEMAPHORE: u64 = 1
+
+const EPERM: u64 = 1
+const ENOENT: u64 = 2
+const ESRCH: u64 = 3
+const EBADF: u64 = 9
+const EFAULT: u64 = 14
+const EEXIST: u64 = 17
+const EINVAL: u64 = 22
+const ENFILE: u64 = 23
+const ENOSPC: u64 = 28
+
+/// `sched.self_until`'s value for a wait with no deadline that has
+/// begun (kernel/user parks such a thread for good).
+pub const FOREVER: u64 = 0xffffffffffffffff
+
+const NS_PER_TICK: u64 = 10000151 // kernel/user's: the PIT's tick
+
+// The process area's words this module keeps (kernel/sched's
+// `proc_area`; 3 is the refusal word).
+const A_REFUSAL: u64 = 3
+const A_NAMED: u64 = 147 // the refusals already logged, a bit each
+
+/// The first refusal code that is this module's (kernel/vm has 1-15,
+/// kernel/files 16-31, kernel/process 32-63, kernel/socket 64-95).
+pub const REFUSALS: u64 = 96
+const R_EVENT_BIT: u64 = 96
+const R_EXCLUSIVE: u64 = 97
+const R_WAKEUP: u64 = 98
+const R_NESTED: u64 = 99
+const R_NO_FILE: u64 = 100
+const R_EPOLLS: u64 = 101
+const R_REGS: u64 = 102
+const R_SEMAPHORE: u64 = 103
+// 104 is kernel/signal's R_ALTSTACK.
+
+fn neg(e: u64) -> u64 {
+    0xffffffffffffffff - e + 1
+}
+
+fn get(a: u64, i: u64) -> u64 {
+    // # Safety: `a` is a process area (sched.proc_area), 1024 words; i < 1024.
+    unsafe { ((a + i * 8) as *u64).read_volatile() }
+}
+
+fn put(a: u64, i: u64, v: u64) {
+    // # Safety: as `get`.
+    unsafe { ((a + i * 8) as *u64).write_volatile(v) }
+}
+
+/// A refusal code's name ("" when not this module's).
+pub fn why(r: u64) -> str {
+    if r == R_EVENT_BIT {
+        return "an epoll event bit PAX never raises (it takes EPOLLIN, EPOLLPRI, EPOLLOUT, EPOLLERR, EPOLLHUP, EPOLLRDHUP, EPOLLET, EPOLLONESHOT)"
+    }
+    if r == R_EXCLUSIVE {
+        return "EPOLLEXCLUSIVE"
+    }
+    if r == R_WAKEUP {
+        return "EPOLLWAKEUP"
+    }
+    if r == R_NESTED {
+        return "an epoll object registered in another"
+    }
+    if r == R_NO_FILE {
+        return "the console or /dev/null in an epoll object"
+    }
+    if r == R_EPOLLS {
+        return "more epoll objects than PAX has (16)"
+    }
+    if r == R_REGS {
+        return "more registrations than an epoll object holds (256)"
+    }
+    if r == R_SEMAPHORE {
+        return "an eventfd with EFD_SEMAPHORE"
+    }
+    if r == signal.R_ALTSTACK {
+        return "sigaltstack with SS_AUTODISARM"
+    }
+    ""
+}
+
+/// Answer -`e` for a refusal PAX names: counted, and the first of its
+/// kind in this process leaves its code for kernel/user's line.
+fn refuse(a: u64, code: u64, e: u64) -> u64 {
+    event.bump(event.C_REFUSED)
+    let bit: u64 = 1 << (code - REFUSALS)
+    if get(a, A_NAMED) & bit == 0 {
+        put(a, A_NAMED, get(a, A_NAMED) | bit)
+        put(a, A_REFUSAL, code)
+    }
+    neg(e)
+}
+
+/// A call found nothing. `ms`: its timeout as the caller's int (0 never
+/// reaches here; negative: for good). `files.WAIT`, with the thread's
+/// deadline word set on the first run; or 0 when the deadline has come.
+fn pause(ms: u64) -> u64 {
+    let d = sched.self_until()
+    if d == 0 {
+        event.bump(event.C_WAITS)
+        if ms >= 0x80000000 {
+            sched.set_self_until(FOREVER)
+        } else {
+            // The tick after: a partial tick never shortens a wait.
+            sched.set_self_until(timer.ticks() + (ms * 1000000 + NS_PER_TICK - 1) / NS_PER_TICK + 1)
+        }
+        return files.WAIT
+    }
+    if d != FOREVER && timer.ticks() >= d {
+        sched.set_self_until(0)
+        event.bump(event.C_TIMEOUTS)
+        return 0
+    }
+    event.bump(event.C_EMPTY)
+    files.WAIT
+}
+
+/// A call answers `n` (not a wait): its deadline word is cleared.
+fn answer(n: u64) -> u64 {
+    sched.set_self_until(0)
+    event.bump(event.C_ANSWERS)
+    n
+}
+
+/// Whether registration `r` of object `e` would be answered now, and
+/// with what: `(bits, in-count, out-count)`; bits 0 when not.
+fn due(e: u64, r: u64) -> (u64, u64, u64) {
+    let of = event.reg(e, r, event.R_OF)
+    let st = event.reg(e, r, event.R_STATE)
+    if of == 0 || st == event.SPENT {
+        return (0, 0, 0)
+    }
+    let ev = event.reg(e, r, event.R_EVENTS)
+    let (m, gin, gout) = files.poll_of(of)
+    let got = m & ((ev & (POLLIN | POLLPRI | POLLOUT | POLLRDHUP)) | POLLERR | POLLHUP)
+    if got == 0 {
+        return (0, gin, gout)
+    }
+    if ev & EPOLLET != 0 && st != event.FRESH {
+        let came = got & IN_SIDE != 0 && gin != event.reg(e, r, event.R_SEEN_IN)
+        let room = got & OUT_SIDE != 0 && gout != event.reg(e, r, event.R_SEEN_OUT)
+        if !came && !room {
+            return (0, gin, gout)
+        }
+    }
+    (got, gin, gout)
+}
+
+/// Whether epoll object `e` has an event to hand out (`poll` on an
+/// epoll descriptor: POLLIN).
+fn any_due(e: u64) -> bool {
+    let high = event.ep_high(e)
+    var r: u64 = 0
+    while r < high {
+        let (got, _i, _o) = due(e, r)
+        if got != 0 {
+            return true
+        }
+        r += 1
+    }
+    false
+}
+
+/// One `pollfd` entry at user `at`: its revents written; 1 when it is
+/// not zero.
+fn poll_one(a: u64, pml4: u64, at: u64) -> u64 {
+    let fd = uaccess.get(pml4, at, 4)
+    let asked = uaccess.get(pml4, at + 4, 2)
+    var rev: u64 = 0
+    if fd < 0x80000000 {
+        let (w, v) = files.watch(a, fd)
+        if w == files.W_CLOSED {
+            rev = POLLNVAL
+        } else if w == files.W_EPOLL {
+            rev = if any_due(v) { POLLIN & asked } else { 0 }
+        } else {
+            let (m, _i, _o) = files.poll(a, fd)
+            rev = m & (asked | POLLERR | POLLHUP)
+        }
+    }
+    uaccess.put(pml4, at + 6, rev, 2)
+    if rev != 0 { 1 } else { 0 }
+}
+
+/// `poll(fds, nfds, timeout)`: how many entries have something, 0 at
+/// the timeout, -errno, or `files.WAIT`.
+pub fn poll(a: u64, pml4: u64, fds: u64, nfds: u64, timeout: u64) -> u64 {
+    if nfds > files.FDS {
+        sched.set_self_until(0)
+        return neg(EINVAL)
+    }
+    if nfds > 0 && (!uaccess.readable(pml4, fds, nfds * 8) || !uaccess.writable(pml4, fds, nfds * 8)) {
+        sched.set_self_until(0)
+        return neg(EFAULT)
+    }
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < nfds {
+        n += poll_one(a, pml4, fds + i * 8)
+        i += 1
+    }
+    if n > 0 || timeout == 0 {
+        return answer(n)
+    }
+    pause(timeout)
+}
+
+/// `epoll_create1(flags)`: the descriptor, or -errno.
+pub fn epoll_create1(a: u64, flags: u64) -> u64 {
+    if flags & !O_CLOEXEC != 0 {
+        return neg(EINVAL)
+    }
+    let e = event.ep_new()
+    if e == event.EPOLLS {
+        return refuse(a, R_EPOLLS, ENFILE)
+    }
+    let fd = files.epoll_open(a, e, O_RDWR | flags)
+    if fd >= 0x8000000000000000 {
+        event.ep_free(e)
+    }
+    fd
+}
+
+/// The epoll object descriptor `ep` names: `(0, object)`, or
+/// `(-errno, 0)`: -EBADF closed, -EINVAL not an epoll object.
+fn object(a: u64, ep: u64) -> (u64, u64) {
+    let (w, e) = files.watch(a, ep)
+    if w == files.W_CLOSED {
+        return (neg(EBADF), 0)
+    }
+    if w != files.W_EPOLL {
+        return (neg(EINVAL), 0)
+    }
+    (0, e)
+}
+
+/// `epoll_ctl(ep, op, fd, event)`: 0 or -errno.
+pub fn epoll_ctl(a: u64, pml4: u64, ep: u64, op: u64, fd: u64, evp: u64) -> u64 {
+    var ev: u64 = 0
+    var data: u64 = 0
+    if op != EPOLL_CTL_DEL {
+        if !uaccess.readable(pml4, evp, EVENT_BYTES) {
+            return neg(EFAULT)
+        }
+        ev = uaccess.get(pml4, evp, 4)
+        data = uaccess.get64(pml4, evp + 4)
+    }
+    let (we, _ve) = files.watch(a, ep)
+    let (wf, of) = files.watch(a, fd)
+    if we == files.W_CLOSED || wf == files.W_CLOSED {
+        return neg(EBADF)
+    }
+    if wf == files.W_PLAIN {
+        return neg(EPERM)
+    }
+    let (oe, e) = object(a, ep)
+    if oe != 0 || ep == fd {
+        return neg(EINVAL)
+    }
+    if op != EPOLL_CTL_ADD && op != EPOLL_CTL_DEL && op != EPOLL_CTL_MOD {
+        return neg(EINVAL)
+    }
+    if wf == files.W_EPOLL {
+        return refuse(a, R_NESTED, EINVAL)
+    }
+    if wf == files.W_NO_FILE {
+        return refuse(a, R_NO_FILE, EPERM)
+    }
+    if op != EPOLL_CTL_DEL && ev & !ASKABLE != 0 {
+        if ev & EPOLLEXCLUSIVE != 0 {
+            return refuse(a, R_EXCLUSIVE, EINVAL)
+        }
+        if ev & EPOLLWAKEUP != 0 {
+            return refuse(a, R_WAKEUP, EINVAL)
+        }
+        return refuse(a, R_EVENT_BIT, EINVAL)
+    }
+    let r = event.ep_find(e, of, fd)
+    if op == EPOLL_CTL_ADD {
+        if r != event.REGS {
+            return neg(EEXIST)
+        }
+        if event.ep_add(e, of, fd, ev, data) == event.REGS {
+            return refuse(a, R_REGS, ENOSPC)
+        }
+        // Whoever is inside epoll_wait on this object looks again: the
+        // runtime adds a descriptor while its reactor thread waits.
+        sched.wake_pipes()
+        return 0
+    }
+    if r == event.REGS {
+        return neg(ENOENT)
+    }
+    if op == EPOLL_CTL_DEL {
+        event.ep_del(e, r)
+        return 0
+    }
+    event.put_reg(e, r, event.R_EVENTS, ev)
+    event.put_reg(e, r, event.R_DATA, data)
+    event.put_reg(e, r, event.R_STATE, event.FRESH)
+    sched.wake_pipes()
+    0
+}
+
+/// Hand out registration `r`'s event `got` at user `at`, and mark the
+/// registration answered (spent, for a one-shot).
+fn hand(e: u64, r: u64, pml4: u64, at: u64, got: u64, gin: u64, gout: u64) {
+    uaccess.put(pml4, at, got, 4)
+    uaccess.put(pml4, at + 4, event.reg(e, r, event.R_DATA), 8)
+    event.put_reg(e, r, event.R_SEEN_IN, gin)
+    event.put_reg(e, r, event.R_SEEN_OUT, gout)
+    event.put_reg(e, r, event.R_STATE, if event.reg(e, r, event.R_EVENTS) & EPOLLONESHOT != 0 { event.SPENT } else { event.ANSWERED })
+    event.bump(event.C_EVENTS)
+}
+
+/// `epoll_wait(ep, events, max, timeout)`: how many events were handed
+/// out, 0 at the timeout, -errno, or `files.WAIT`.
+pub fn epoll_wait(a: u64, pml4: u64, ep: u64, evs: u64, max: u64, timeout: u64) -> u64 {
+    let (oe, e) = object(a, ep)
+    if oe != 0 || max == 0 || max >= 0x80000000 {
+        sched.set_self_until(0)
+        // -EBADF for a closed descriptor comes before the bound's -EINVAL.
+        return if oe == neg(EBADF) { oe } else { neg(EINVAL) }
+    }
+    let high = event.ep_high(e)
+    let start = if high == 0 { 0 } else { event.ep_next(e) % high }
+    var n: u64 = 0
+    var i: u64 = 0
+    var bad = false
+    while i < high && n < max && !bad {
+        let r = (start + i) % high
+        let (got, gin, gout) = due(e, r)
+        if got != 0 {
+            let at = evs + n * EVENT_BYTES
+            if !uaccess.writable(pml4, at, EVENT_BYTES) {
+                bad = true
+            } else {
+                hand(e, r, pml4, at, got, gin, gout)
+                n += 1
+                event.set_ep_next(e, r + 1)
+            }
+        }
+        i += 1
+    }
+    if bad && n == 0 {
+        sched.set_self_until(0)
+        return neg(EFAULT)
+    }
+    if n > 0 || timeout == 0 {
+        return answer(n)
+    }
+    pause(timeout)
+}
+
+/// `eventfd2(initval, flags)`: the descriptor, or -errno.
+pub fn eventfd2(a: u64, init: u64, flags: u64) -> u64 {
+    if flags & !(O_CLOEXEC | O_NONBLOCK | EFD_SEMAPHORE) != 0 {
+        return neg(EINVAL)
+    }
+    if flags & EFD_SEMAPHORE != 0 {
+        return refuse(a, R_SEMAPHORE, EINVAL)
+    }
+    let v = event.ev_new(init & 0xffffffff)
+    if v == event.EVENTFDS {
+        return neg(ENFILE)
+    }
+    let fd = files.event_open(a, v, O_RDWR | flags)
+    if fd >= 0x8000000000000000 {
+        event.ev_free(v)
+    }
+    fd
+}
+
+/// `sched_getaffinity(pid, len, mask)`: 8, with CPU 0 in the mask.
+pub fn sched_getaffinity(pml4: u64, pid: u64, len: u64, mask: u64) -> u64 {
+    if len < 8 {
+        return neg(EINVAL)
+    }
+    let p = pid & 0xffffffff
+    if p != 0 && !sched.raise_tid(0, p, 0, 0) {
+        return neg(ESRCH)
+    }
+    if !uaccess.writable(pml4, mask, 8) {
+        return neg(EFAULT)
+    }
+    uaccess.put(pml4, mask, 1, 8)
+    8
+}
+
+/// The books: kernel/event's counts on one line,
+/// `user: ready: epolls <e>, registrations <r>, eventfds <v>; made <E> and <V>, added <A>, forgotten <F>; answers <a>, waits <w>, empty <m>, timeouts <t>, events <n>, refused <x>`
+/// (a kernel line, so `user: `: what a program writes never starts so).
+pub fn report() {
+    log.put("user: ready: epolls ")
+    log.dec(event.count(event.C_EPOLLS) as int)
+    log.put(", registrations ")
+    log.dec(event.count(event.C_REGS) as int)
+    log.put(", eventfds ")
+    log.dec(event.count(event.C_EVENTFDS) as int)
+    log.put("; made ")
+    log.dec(event.count(event.C_EP_MADE) as int)
+    log.put(" and ")
+    log.dec(event.count(event.C_EV_MADE) as int)
+    log.put(", added ")
+    log.dec(event.count(event.C_ADDED) as int)
+    log.put(", forgotten ")
+    log.dec(event.count(event.C_FORGOTTEN) as int)
+    tail()
+}
+
+fn tail() {
+    log.put("; answers ")
+    log.dec(event.count(event.C_ANSWERS) as int)
+    log.put(", waits ")
+    log.dec(event.count(event.C_WAITS) as int)
+    log.put(", empty ")
+    log.dec(event.count(event.C_EMPTY) as int)
+    log.put(", timeouts ")
+    log.dec(event.count(event.C_TIMEOUTS) as int)
+    log.put(", events ")
+    log.dec(event.count(event.C_EVENTS) as int)
+    log.put(", refused ")
+    log.dec(event.count(event.C_REFUSED) as int)
+    log.end()
+}
