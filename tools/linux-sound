@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# linux-sound — boot this host's Linux kernel under QEMU with a sound
+# device and run programs against it: the reference side of
+# tests/mpx3-sound (px30), and the survey of which devices sound.
+#
+#   tools/linux-sound [--device NAME] [--kernel VMLINUZ] [--modules DIR]
+#                     [--busybox FILE] [--accel tcg|kvm] [--strace] [--] OUTDIR PROG... -- CMD...
+#
+# Builds an initramfs in OUTDIR from a static busybox (the px13-ubuntu
+# container's, by default copied out of it), the kernel's own sound
+# modules for NAME (decompressed, in modules.dep's order) and the
+# static programs PROG (each to /bin/<basename>), boots VMLINUZ on q35
+# with `-device NAME` (virtio-sound-pci, AC97, intel-hda, es1370) and
+# `-audiodev wav,id=snd0,path=OUTDIR/capture.wav`, and runs each CMD (a
+# shell line, quoted) in the guest after `modprobe`-by-hand of the
+# chain, with /dev populated by devtmpfs; the OSS emulation module
+# (snd-pcm-oss) is loaded too, so /dev/dsp exists when a card does.
+# The guest's serial console is OUTDIR/serial.log; it powers off at the
+# end. Exit 0 when the guest ran to its end line, 1 when not, 2 on a
+# usage or tool error. --strace adds the container's strace (and its
+# shared objects) to the guest.
+#
+# Black-box only: the kernel and its modules are run, never read.
+set -euo pipefail
+die() { echo "linux-sound: $*" >&2; exit 2; }
+device=virtio-sound-pci
+kernel=/usr/lib/modules/$(uname -r)/vmlinuz
+modules=/usr/lib/modules/$(uname -r)
+busybox=
+accel=tcg
+strace=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --device) device=$2; shift 2 ;;
+        --kernel) kernel=$2; shift 2 ;;
+        --modules) modules=$2; shift 2 ;;
+        --busybox) busybox=$2; shift 2 ;;
+        --accel) accel=$2; shift 2 ;;
+        --strace) strace=1; shift ;;
+        --) shift; break ;;
+        -*) die "unknown option $1" ;;
+        *) break ;;
+    esac
+done
+[ $# -ge 1 ] || die "usage: linux-sound [opts] OUTDIR PROG... -- CMD..."
+out=$1; shift
+progs=()
+while [ $# -gt 0 ] && [ "$1" != "--" ]; do progs+=("$1"); shift; done
+[ "${1:-}" = "--" ] && shift
+cmds=("$@")
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+root=$out/root
+rm -rf "$root"
+mkdir -p "$root"/{bin,dev,proc,sys,lib/modules,tmp}
+
+if [ -z "$busybox" ]; then
+    podman run --rm -v "$root/bin:/o" px13-ubuntu cp /usr/bin/busybox /o/busybox >/dev/null \
+        || die "busybox from px13-ubuntu"
+else
+    cp "$busybox" "$root/bin/busybox"
+fi
+for p in "${progs[@]}"; do cp "$p" "$root/bin/$(basename "$p")"; done
+# --strace: the container's strace and the shared objects it loads, at
+# their own paths, so a CMD can be `strace -f -o /dev/ttyS0 PROG ...`
+if [ "$strace" = 1 ]; then
+    podman run --rm -v "$root:/o" px13-ubuntu bash -c '
+        for f in /usr/bin/strace $(ldd /usr/bin/strace | grep -o "/[^ ]*"); do
+            mkdir -p /o$(dirname $f); cp -L $f /o$f; done' >/dev/null || die "strace from px13-ubuntu"
+fi
+
+case $device in
+    virtio-sound-pci) want="virtio_snd" ;;
+    AC97) want="snd-intel8x0" ;;
+    intel-hda|ich9-intel-hda) want="snd-hda-intel snd-hda-codec-generic" ;;
+    ES1370) want="snd-ens1370" ;;
+    none) want="" ;;
+    *) die "no module list for $device" ;;
+esac
+want="$want snd-pcm-oss"
+# modules.dep: "path: dep dep ...", deps listed nearest first; load the
+# chain deepest first, each once.
+order=()
+seen=" "
+add() {
+    local m=$1 line deps d
+    line=$(grep -E "/${m//-/[-_]}\.ko(\.zst|\.xz|\.gz)?:" "$modules/modules.dep" | head -n 1)
+    [ -n "$line" ] || die "module $m not in modules.dep"
+    deps=${line#*:}
+    for d in $(echo $deps | tr ' ' '\n' | tac); do
+        local n=${d##*/}; n=${n%%.ko*}
+        add "$n"
+    done
+    local path=${line%%:*}
+    case $seen in *" $path "*) return ;; esac
+    seen="$seen$path "
+    order+=("$path")
+}
+for m in $want; do add "$m"; done
+: > "$root/lib/modules/order"
+for path in "${order[@]}"; do
+    n=${path##*/}; n=${n%%.ko*}
+    case $path in
+        *.zst) zstd -q -d -c "$modules/$path" > "$root/lib/modules/$n.ko" ;;
+        *.xz) xz -d -c "$modules/$path" > "$root/lib/modules/$n.ko" ;;
+        *.gz) gzip -d -c "$modules/$path" > "$root/lib/modules/$n.ko" ;;
+        *) cp "$modules/$path" "$root/lib/modules/$n.ko" ;;
+    esac
+    echo "$n" >> "$root/lib/modules/order"
+done
+
+{
+    echo '#!/bin/busybox sh'
+    echo '/bin/busybox --install -s /bin'
+    echo 'export PATH=/bin:/usr/bin'
+    echo 'mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev'
+    echo 'for m in $(cat /lib/modules/order); do insmod /lib/modules/$m.ko || echo "linux-sound: insmod $m failed"; done'
+    echo 'sleep 1'
+    echo 'echo "linux-sound: uname $(uname -r)"'
+    echo 'echo "linux-sound: cards"; cat /proc/asound/cards 2>&1'
+    echo 'echo "linux-sound: devices $(ls /dev/dsp* /dev/snd 2>&1 | tr "\n" " ")"'
+    k=0
+    for c in "${cmds[@]}"; do
+        k=$((k + 1))
+        printf 'echo "linux-sound: run %d: %s"\n' "$k" "${c//\"/\\\"}"
+        printf '%s\n' "$c"
+        printf 'echo "linux-sound: run %d status $?"\n' "$k"
+    done
+    echo 'echo "linux-sound: end"'
+    echo 'sync; poweroff -f'
+} > "$root/init"
+chmod +x "$root/init"
+(cd "$root" && find . | cpio -o -H newc --quiet) > "$out/initramfs.cpio"
+
+qdev=(-device "$device")
+case $device in
+    intel-hda|ich9-intel-hda) qdev=(-device "$device" -device hda-output,audiodev=snd0) ;;
+    none) qdev=() ;;
+    *) qdev=(-device "$device,audiodev=snd0") ;;
+esac
+rm -f "$out/capture.wav"
+acc=(-accel tcg -cpu max)
+[ "$accel" = kvm ] && acc=(-accel kvm -cpu host)
+set +e
+timeout 600 qemu-system-x86_64 -machine q35 "${acc[@]}" -m 512M -nographic -no-reboot \
+    -kernel "$kernel" -initrd "$out/initramfs.cpio" \
+    -append "console=ttyS0 quiet loglevel=3 panic=-1" \
+    -audiodev "wav,id=snd0,path=$out/capture.wav" "${qdev[@]}" \
+    -nic none > "$out/serial.log" 2>&1 < /dev/null
+rc=$?
+set -e
+echo "linux-sound: qemu exit $rc" >> "$out/serial.log"
+grep -q '^linux-sound: end' "$out/serial.log" || exit 1
+exit 0
