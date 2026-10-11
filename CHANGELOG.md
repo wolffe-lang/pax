@@ -7,6 +7,37 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **UDP and the socket system calls (px22).** An unmodified static
+  Linux program sends and receives UDP datagrams on PAX. `kernel/udp`
+  judges a datagram's length and its pseudo-header checksum (zero
+  means the sender made none; a wrong one is counted and dropped),
+  hands it to the socket bound to its port, and answers one nobody
+  takes with destination unreachable, code 3, through px21's limiter;
+  it holds 16 sockets, each with a 65,536-byte receive queue in frames
+  of its own, a port table with Linux's ephemeral range, and loopback:
+  a datagram for the station's own address or 127/8 is handed to the
+  receiving side in the sender's call and never touches the wire.
+  `kernel/socket` is the calls — `socket`, `bind`, `connect`, `sendto`,
+  `recvfrom`, `getsockname`, `getpeername`, `setsockopt`, `getsockopt`,
+  and `read` and `write` on a socket — with each refusal's errno the
+  one Linux gave the same program. A socket is an open file's node, so
+  `dup`, `fork` and close-on-exec treat it as they treat a pipe's end,
+  and the last close frees it. A receive with nothing queued parks the
+  thread until a datagram or the socket's `SO_RCVTIMEO`.
+  `tests/mpx4-udp` runs seven witnesses (`user/net/`) from the
+  initramfs on a new kernel, `kmain_sockets`, two ways — against
+  `tools/net-peer --udp`, which is the whole network and holds every
+  frame to its bytes, and against QEMU's user-mode network with
+  `tools/udp-host` at the host's end and QEMU's own DNS server — and
+  holds each program's output and exit status to the same binary's on
+  Linux, run by `tools/linux-net` in a network namespace addressed as
+  PAX is with the same `net-peer` script on a tap device. Named
+  limits: no TCP; no `poll`, `select` or `epoll`; no `sendmsg`,
+  `recvmsg` or `shutdown`; one option set (`SO_RCVTIMEO`), two more
+  read; no fragmentation (a datagram over 1472 bytes is `EMSGSIZE`)
+  and no broadcast sends (`EACCES`); ICMP errors that arrive reach no
+  socket; no loopback below UDP; no DHCP.
+
 - **IP and ICMP (px21).** PAX answers ping. `kernel/ip` judges every
   received IPv4 header in one place — length, version, header length,
   the RFC 1071 checksum, total length against the frame, a time to

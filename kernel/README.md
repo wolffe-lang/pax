@@ -469,11 +469,53 @@ user-visible: the surface is kernel-internal (`net.send`, `ip.send`,
   a fragment that arrives is dropped by name (`fragment`), and IP
   options are skipped on the way in (a source route is refused,
   `source-route`) and never sent.
-- Not yet: UDP, TCP, sockets (px22 on); fragmentation and reassembly;
-  ICMP errors other than protocol unreachable, and any use of the
-  ones received; an address from anywhere but a kernel's constants
+- Not yet: TCP (px23); fragmentation and reassembly; ICMP errors
+  other than protocol and port unreachable, and any use of the ones
+  received; an address from anywhere but a kernel's constants
   (no DHCP); more than one echo waited for at a time; MSI-X; merged
   receive buffers, checksum and segmentation offload, the control
   queue (so the device's receive filter is whatever it starts as;
   `net` drops frames for other stations itself); link status; more
   than one device; a device removed.
+
+## UDP and sockets (px22)
+
+`kmain_sockets.lu` starts what `kmain_boreutils` and `kmain_net` start
+between them and runs a run list of static Linux programs that open
+AF_INET datagram sockets (`tests/mpx4-udp`, `user/net/`): the third
+step toward M-PX4.
+
+| module or file | what |
+|---|---|
+| `udp/` | RFC 768: `input` (from `netd`, for protocol 17: `short`, `length`, `checksum` — zero is "none made" — `port-zero`, then the socket that takes the datagram or `no-port`, or `full` when its queue has no room), the pseudo-header checksum, `send` (the caller's bytes behind a header in the module's frame, then `ip.send`), loopback (a datagram for the station's own address or 127/8 goes to the receiving side in the same call), 16 sockets in `boot/net.S`'s `pax_udp_socks` — local address and port, peer, receive timeout, a 65,536-byte ring in 16 frames taken at `open` and freed at `close` — which are the port table too (`bind`: `EADDRINUSE` for the same port on the same address or on every address; ephemeral ports 32768-60999, sequential from a start the time-stamp counter picks), counters by cause |
+| `socket/` | the calls: `socket`, `bind`, `connect` (and AF_UNSPEC), `sendto`, `recvfrom` (`MSG_DONTWAIT`, `MSG_PEEK`, `MSG_TRUNC`), `getname` (both), `setsockopt` and `getsockopt` (`SO_RCVTIMEO_OLD`; `SO_TYPE`, `SO_ERROR`), `no_connections` (`listen`, `accept`, `accept4`: -EOPNOTSUPP); `struct sockaddr_in` read and written through `uaccess`; each refusal's errno as Linux gave the witness, and the ones PAX names logged once a process (`why`, `detail`) |
+| `files/` | kind `K_INET`: a descriptor on an open file whose node is `udp`'s socket number; the last close calls `udp.close`; `sock_kind`, `inet_open`, `inet_sock`, `nonblocking`; `open_files`, `pipes_held` for the books |
+| `user/` | the dispatch (41-45, 49-52, 54, 55, 288); `read` and `write` on a socket; a waiting receive parks through `sched.block_pipe_until` when the socket has a timeout |
+| `sched/` | `block_pipe_until(f, tick)`: a pipe wait the timer ends too; `wait_down_to(n)`: `wait_all` for a kernel whose own threads never exit |
+| `icmp/`, `ip/`, `netd/` | `unreachable` takes the code and says what it did; `TO_UDP`; protocol 17 to `udp.input`, and a port unreachable when it answers `NO_PORT` |
+| `kmain_sockets.lu` | the run list, each command waited for with the processes it made, then its frames, its time by the time-stamp counter and the books (heap, frames, open files, pipes, sockets, datagrams waiting); the counters; halt |
+
+- The layering is one-way because wolf refuses an import cycle (E0303,
+  tested by px22): `socket` → `files` → `udp` → `ip` → `arp` → `net`,
+  and `netd` above them all makes the calls between siblings (`udp`'s
+  answer, then `icmp`).
+- Locks: `sync.udp()` before `sync.ip()` before `sync.arp()` before
+  `sync.net()`. A system call runs with IF clear and calls `udp.send`,
+  which reaches `net.send`, on its own kernel stack; nothing on that
+  path switches.
+- A socket's queue is the only place a received datagram is kept: it
+  is copied out of `netd`'s receive buffer (or the sender's bytes, over
+  loopback) into the ring, 8 bytes of head and the data rounded up to
+  8; one that does not fit is dropped whole (`full`). Nothing here
+  allocates from the heap or opens a region.
+- A receive with nothing queued answers `files.WAIT` and is run again
+  when any pipe or socket changes (`sched.wake_pipes`, from `udp`'s
+  `push`) or its deadline comes. No close can reach a socket a receive
+  is parked on: a process has one thread, and its own reference keeps
+  the socket.
+- Not yet: `sendmsg`, `recvmsg`, `shutdown`; `poll`, `select`, `epoll`;
+  any option but the three; a datagram over 1472 bytes (nothing
+  fragments) or to a broadcast address; an ICMP error delivered to a
+  socket (a connected socket never sees ECONNREFUSED); loopback below
+  UDP (`icmp.ping` to the station's own address, and TCP's); a socket
+  of any other family or type.
