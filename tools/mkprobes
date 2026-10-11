@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # mkprobes — build px26's probe of threads, futexes and signals
-# (user/elf/threads.c) as a static x86-64 Linux executable.
+# (user/elf/threads.c) and px27's probe of the writable file tree
+# (user/elf/tree.c), each a static x86-64 Linux executable.
 #
 #   tools/mkprobes OUTDIR
 #
@@ -9,7 +10,8 @@
 # the same file run on Linux and on PAX (tests/mpx3-threads). Build on a
 # baseline x86-64 glibc (the CI runner's Ubuntu; an Ubuntu container on
 # kasumi), never on kasumi's own, whose start-up uses AVX-512 (px10).
-# Prints `threads <sha256> <bytes>`. Exit 0, or 2 on a tool error.
+# Prints `threads <sha256> <bytes>` and `tree <sha256> <bytes>`. Exit 0,
+# or 2 on a tool error.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 [ $# -eq 1 ] || die "usage: mkprobes OUTDIR"
@@ -23,3 +25,9 @@ need "$cc" readelf
 readelf -hW "$out/threads" | grep -Eq 'Type: +EXEC' || die "threads is not ET_EXEC"
 ! readelf -lW "$out/threads" | grep -q INTERP || die "threads has a PT_INTERP (not static)"
 printf '%s %s %s\n' threads "$(sha256_of "$out/threads")" "$(wc -c < "$out/threads" | tr -d ' ')"
+# px27: the probe of the writable file tree (user/elf/tree.c), the same way.
+"$cc" -static -no-pie -O1 -Wall -Wextra -Wl,--build-id=none -Wl,-z,noexecstack \
+    -o "$out/tree" "$PAX_ROOT/user/elf/tree.c" || die "cc: tree"
+readelf -hW "$out/tree" | grep -Eq 'Type: +EXEC' || die "tree is not ET_EXEC"
+! readelf -lW "$out/tree" | grep -q INTERP || die "tree has a PT_INTERP (not static)"
+printf '%s %s %s\n' tree "$(sha256_of "$out/tree")" "$(wc -c < "$out/tree" | tr -d ' ')"
