@@ -27,6 +27,10 @@
 //!   `pax_switch` builds the frame by hand for a thread that yields,
 //!   sleeps, waits or exits, and kernel/sched's `switched` returns the
 //!   next thread's frame;
+//! - whichever frame is to be resumed, when it returns to ring 3
+//!   (px26): kernel/signal's `on_return` takes the thread's pending
+//!   signals first — a handler's frame laid on its stack, or its
+//!   process ended and the next thread's frame resumed instead;
 //! - vectors 33 and 36 (px13), the i8042's keyboard and COM1's
 //!   receiver: kernel/console takes the bytes into its line discipline
 //!   and acknowledges the 8259; a thread waiting for input is made
@@ -72,6 +76,7 @@ use log
 use net
 use panic
 use sched
+use signal
 use speaker
 use timer
 use user
@@ -227,8 +232,19 @@ fn fatal(f: *Frame) {
 
 /// boot/isr.S's common path calls this for every routed vector (and
 /// boot/sched.S's `pax_switch` for PAX_SWITCH), and resumes the frame it
-/// returns.
+/// returns. px26: whatever frame `route` picks is first shown to
+/// kernel/signal, which, when it returns to ring 3 and its thread has a
+/// signal to take, points it at a handler or ends the process and hands
+/// back the next thread's.
 export fn pax_interrupt(f: *Frame) -> *Frame {
+    let g = route(f)
+    // # Safety: the frame `route` returned is this one or a saved frame
+    // on a live thread's stack; what kernel/signal returns is one too.
+    unsafe { signal.on_return(g as u64) as *Frame }
+}
+
+/// The vector's own work: the frame to resume.
+fn route(f: *Frame) -> *Frame {
     // # Safety: `f` is the trampoline's frame, live for this call.
     let v = unsafe { f[0].vector }
     if v == 3 {
@@ -265,6 +281,12 @@ export fn pax_interrupt(f: *Frame) -> *Frame {
     }
     if v == console.com1_vector() || v == console.kbd_vector() {
         console.irq(v)
+        // px26: Ctrl-C, Ctrl-\ and Ctrl-Z are signals for every process
+        // (kernel/console's ISIG, kernel/signal's `tty`).
+        let sg = console.take_signals()
+        if sg != 0 {
+            signal.tty(sg)
+        }
         if console.readable() {
             let _n = sched.wake_input()
         }
