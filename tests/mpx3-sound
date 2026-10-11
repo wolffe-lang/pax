@@ -315,7 +315,7 @@ PY
             nonblock)
                 why=
                 grep -q 'dsptone: EAGAIN answered while the queue was full' "$norm" || why+=" no EAGAIN;"
-                ms=$(awk '/^channel 0 /{print $7}' "$base.pcm.txt")
+                ms=$(awk '/^channel 0 /{print $8}' "$base.pcm.txt")
                 python3 -c "import sys; sys.exit(0 if abs(float('${ms:-0}') - 1000) <= 40 else 1)" || why+=" sounds ${ms:-0} ms, not 1000;"
                 [ -z "$why" ] && say "PASS S6 $id: EAGAIN while full, ${ms} ms played" || bad "S6 $id:$why"
                 ;;
@@ -333,7 +333,7 @@ PY
                     k=$((k + 1))
                 done
                 "$notes" --expect "$base.spec" "$wav" > "$base.expect.txt" 2>&1 || why+=" $(grep -v PASS "$base.expect.txt" | head -n 3 | tr '\n' '|');"
-                awk '/^channel 0 /{ if ($13 != 0) exit 1 }' "$base.pcm.txt" || why+=" clipped;"
+                awk '/^channel 0 /{ if ($14 != 0) exit 1 }' "$base.pcm.txt" || why+=" clipped;"
                 [ -z "$why" ] && say "PASS S7 $id: $(tail -n 1 "$base.expect.txt"); $(tr '\n' ' ' < "$base.cost.txt")" || bad "S7 $id:$why"
                 ;;
             esac
