@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # pcap-net — hold a capture of the network test kernel's exchange to the
-# frames it must contain, byte by byte (px20, px21; tests/mpx4-net).
+# frames it must contain, byte by byte (px20, px21, px22; tests/mpx4-net,
+# tests/mpx4-udp).
 #
 #   tools/pcap-net [--small N] [--large N] [--list K] [--serial LOG] FILE.pcap
 #
@@ -32,8 +33,20 @@
 #   unreachable        protocol not yet answered, quoting its header and
 #                      up to 8 data bytes; the ones passed over were
 #                      held back by the limit and are counted so
+#   a port             (type 3, code 3; px22) for a UDP datagram that
+#   unreachable        reached PAX whole and has not drawn one, quoting
+#                      its header and 8 bytes
+#   a UDP datagram     (px22) rebuilt from its ports and data, its
+#                      checksum made (never zero) and right; from port 7
+#                      (RFC 862's echo, user/net/udpecho) it carries the
+#                      data of a datagram that reached port 7 from where
+#                      it now goes and has not been echoed — or "ready",
+#                      the server's first word; from any other port, the
+#                      port is an ephemeral one (32768-60999); and never
+#                      for 10.0.2.15 itself or 127/8: what loops back
+#                      does not touch the wire
 #   every datagram     version 4, IHL 5, DF, time to live 64, protocol
-#                      1, from 10.0.2.15, its header checksum right, its
+#                      1 or 17, from 10.0.2.15, its header checksum right, its
 #                      identification above the last one (the gaps are
 #                      datagrams that never reached the wire: counted),
 #                      in a frame for the hardware address its next hop
@@ -56,7 +69,15 @@
 # packets and conflicts; every one of kernel/ip's drop causes, what it
 # delivered and what it sent; kernel/icmp's echoes each way, its
 # matched and stray replies, its drops, and the destination
-# unreachables sent, held back and never due. A datagram PAX counted as
+# unreachables sent, held back and never due; and (px22) kernel/udp's:
+# its drop causes; every whole UDP datagram that reached PAX either
+# queued for a socket, dropped for a full queue or found no socket;
+# every one with no socket either answered with a port unreachable (as
+# many as the capture holds), held back, or never due; as many sent as
+# the capture holds; and its own books: every queued datagram read,
+# dropped at its socket's close or still waiting, every looped one
+# queued or dropped by name, every socket made freed or still open. A
+# datagram PAX counted as
 # sent that is not in the capture must be one kernel/arp says it
 # dropped from a queue (the identifications' gaps). The kernel's own
 # books are closed too: every transmit buffer reclaimed, every received
@@ -112,12 +133,14 @@ def frames_of(path):
 
 
 CAUSES = ["ip.short", "ip.version", "ip.ihl", "ip.checksum", "ip.length", "ip.ttl", "ip.fragment", "ip.source",
-          "ip.option", "ip.source-route", "ip.other", "icmp.short", "icmp.checksum", "icmp.broadcast", "icmp.type"]
+          "ip.option", "ip.source-route", "ip.other", "icmp.short", "icmp.checksum", "icmp.broadcast", "icmp.type",
+          "udp.short", "udp.length", "udp.checksum", "udp.port-zero"]
 KEYS = (["from-pax", "to-pax", "before", "net.type", "net.other", "arp.requests-out", "arp.replies-out", "arp.request",
          "arp.reply", "arp.bad", "arp.conflict", "arp.other", "ip.delivered", "ip.with-options", "ip.broadcast",
          "ip.protocol", "ip.out", "ident-gaps"] + CAUSES +
         ["icmp.echo", "icmp.replies-out", "icmp.requests-out", "icmp.matched", "icmp.stray", "unreachable.sent",
-         "unreachable.limited", "unreachable.silent", "markers", "burst.small", "burst.large", "checksums"])
+         "unreachable.limited", "unreachable.silent", "udp.in", "udp.unchecked", "udp.out", "udp.echoed", "udp.ready",
+         "port-unreachable.sent", "markers", "burst.small", "burst.large", "checksums"])
 
 
 LINES = [
@@ -142,6 +165,14 @@ LINES = [
       "icmp.type"]),
     (r"icmp: unreachable (\d+) sent, (\d+) limited, (\d+) silent; (\d+) not sent",
      ["unreachable.sent", "unreachable.limited", "unreachable.silent", "not-sent"]),
+    (r"udp: rx (\d+) datagrams queued \((\d+) without a checksum\), dropped (\d+) short (\d+) length (\d+) checksum (\d+) port-zero "
+     r"(\d+) no-port (\d+) full",
+     ["u-rx", "udp.unchecked", "udp.short", "udp.length", "udp.checksum", "udp.port-zero", "u-no-port", "u-full"]),
+    (r"udp: unreachable (\d+) sent, (\d+) limited, (\d+) silent; (\d+) not sent", ["u-sent", "u-limited", "u-silent", "u-not-sent"]),
+    (r"udp: tx (\d+) datagrams, (\d+) not sent; loopback (\d+) sent, (\d+) queued, (\d+) no-port, (\d+) full",
+     ["u-tx", "u-tx-failed", "l-sent", "l-queued", "l-no-port", "l-full"]),
+    (r"udp: sockets (\d+) made, (\d+) freed, (\d+) open; datagrams (\d+) read, (\d+) dropped at close, (\d+) waiting",
+     ["s-made", "s-freed", "s-open", "d-read", "d-closed", "d-waiting"]),
 ]
 
 
@@ -176,8 +207,26 @@ def against(path, c):
 
     # The model's counts under the kernel's names.
     for name in LINES[4][1] + ["icmp.echo", "icmp.replies-out", "icmp.matched", "icmp.stray", "icmp.short", "icmp.checksum",
-                               "icmp.broadcast", "icmp.type", "unreachable.sent", "unreachable.limited", "unreachable.silent"]:
+                               "icmp.broadcast", "icmp.type", "udp.unchecked", "udp.short", "udp.length", "udp.checksum",
+                               "udp.port-zero"]:
         hold(name, k[name], c[name])
+    # kernel/icmp's errors are the protocol's (the capture's) and the
+    # port's (kernel/udp's own account of them).
+    hold("destination unreachables sent (protocol + port)", k["unreachable.sent"], c["unreachable.sent"] + c["port-unreachable.sent"])
+    hold("destination unreachables held back (protocol + port)", k["unreachable.limited"], c["unreachable.limited"] + k["u-limited"])
+    hold("destination unreachables never due (protocol + port)", k["unreachable.silent"], c["unreachable.silent"] + k["u-silent"])
+    # kernel/udp (px22).
+    hold("UDP datagrams that reached PAX whole (queued + no-port + full)", k["u-rx"] + k["u-no-port"] + k["u-full"], c["udp.in"])
+    hold("port unreachables sent", k["u-sent"], c["port-unreachable.sent"])
+    hold("no-port datagrams accounted for (sent + limited + silent + not sent)", k["u-no-port"],
+         k["u-sent"] + k["u-limited"] + k["u-silent"] + k["u-not-sent"])
+    hold("UDP datagrams sent", k["u-tx"], c["udp.out"])
+    hold("queued datagrams accounted for (read + dropped at close + waiting)", k["u-rx"] + k["l-queued"],
+         k["d-read"] + k["d-closed"] + k["d-waiting"])
+    hold("looped datagrams accounted for (queued + no-port + full)", k["l-sent"], k["l-queued"] + k["l-no-port"] + k["l-full"])
+    hold("sockets accounted for (freed + open)", k["s-made"], k["s-freed"] + k["s-open"])
+    for name in ("u-not-sent", "u-tx-failed"):
+        hold(name, k[name], 0)
     hold("frames received", k["rx"], c["to-pax"])
     hold("frames sent", k["tx"], c["from-pax"])
     hold("frames of a type nothing speaks", k["type"], c["net.type"])
@@ -251,6 +300,8 @@ def main(argv):
     askers = []       # (hardware, protocol) of each request for PAX's address not yet answered
     echoes = []       # (frame, ihl, total) of each echo request to PAX not yet answered
     errors = []       # (frame, ihl, total) of each unknown-protocol datagram not yet answered
+    udp_seen = []     # (frame, ihl, total) of each whole UDP datagram to PAX that has drawn no error
+    to_echo = {}      # (address, port) -> the data of each datagram it sent PAX's port 7, not yet echoed
     awaited = None    # [dst, seq, data bytes, answered] of PAX's last echo request on the wire
     last_ident = None
     last_seq = 0
@@ -300,6 +351,8 @@ def main(argv):
             # A datagram.
             if len(f) < 42 or f[14] != 0x45:
                 fail(n, "a datagram from PAX that is not version 4 with a 20-byte header")
+            if f[23] not in (1, 17):
+                fail(n, "a datagram of protocol %d from PAX" % f[23])
             h = f[14:]
             total = px.be16(h, 2)
             ident = px.be16(h, 4)
@@ -319,6 +372,31 @@ def main(argv):
                 if to is None:
                     fail(n, "a datagram for %s, whose next hop %s announced no hardware address" % (px.dotted(dst), px.dotted(px.next_hop(dst))))
             m = h[20:total]
+            if h[9] == 17:
+                # px22: a UDP datagram, rebuilt from its ports and data.
+                sport, dport, data = px.be16(m, 0), px.be16(m, 2), m[8:]
+                if dst == px.PAX_IP or dst[0] == 127:
+                    fail(n, "a UDP datagram for %s on the wire: what loops back must not touch it" % px.dotted(dst))
+                want = px.udp_from_pax(dst, sport, dport, data, ident, to)
+                if f != want:
+                    fail(n, "not a UDP datagram from PAX (port %d to %s port %d, %d bytes) by way of %s, byte for byte"
+                         % (sport, px.dotted(dst), dport, len(data), to.hex(":")), want)
+                if sport == px.ECHO_PORT:
+                    asked = to_echo.get((dst, dport), [])
+                    if data in asked:
+                        del asked[:asked.index(data) + 1]
+                        c["udp.echoed"] += 1
+                    elif data == b"ready":
+                        c["udp.ready"] += 1
+                    else:
+                        fail(n, "a datagram from PAX's port 7 to %s port %d that echoes nothing that address and port sent port 7"
+                             % (px.dotted(dst), dport))
+                elif sport not in px.EPHEMERAL:
+                    fail(n, "a UDP datagram from PAX's port %d, which is neither 7 nor an ephemeral port" % sport)
+                c["udp.out"] += 1
+                continue
+            if h[9] != 1:
+                fail(n, "a datagram of protocol %d from PAX" % h[9])
             if m[0] == 8:
                 seq = px.be16(m, 6)
                 want = px.echo_request_from_pax(dst, seq, total - 28, ident, to)
@@ -336,6 +414,18 @@ def main(argv):
                 if f != want:
                     fail(n, "not PAX's reply to the oldest unanswered echo request (from %s), byte for byte" % px.dotted(rf[26:30]), want)
                 c["icmp.replies-out"] += 1
+            elif m[0] == 3 and m[1] == 3:
+                # px22: a port unreachable quotes a whole UDP datagram
+                # that reached PAX's own address in a frame for it alone.
+                hit = None
+                for k, (ef, eihl, etotal) in enumerate(udp_seen):
+                    if f == px.port_unreachable_for(ef, eihl, etotal, ident, to):
+                        hit = k
+                        break
+                if hit is None or udp_seen[hit][0][0] & 1 or px.is_broadcast(udp_seen[hit][0][30:34]):
+                    fail(n, "a port unreachable from PAX that quotes no UDP datagram sent to its address alone, byte for byte")
+                del udp_seen[hit]
+                c["port-unreachable.sent"] += 1
             elif m[0] == 3:
                 hit = None
                 for k, (ef, eihl, etotal) in enumerate(errors):
@@ -396,6 +486,16 @@ def main(argv):
                 c["icmp.matched"] += 1
             else:
                 c["icmp.stray"] += 1
+        elif verdict in ("udp", "udp.port-zero"):
+            sport, dport, data, summed = px.udp_fields(f)
+            if not summed:
+                c["udp.unchecked"] += 1
+            if verdict == "udp":
+                c["udp.in"] += 1
+                udp_seen.append((f, ihl, total))
+                del udp_seen[:-64]
+                if dport == px.ECHO_PORT:
+                    to_echo.setdefault((f[26:30], sport), []).append(data)
         elif verdict == "unreachable":
             errors.append((f, ihl, total))
         elif verdict == "silent":
