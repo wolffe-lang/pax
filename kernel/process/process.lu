@@ -620,6 +620,7 @@ pub fn exec_span(body: u64, pa: u64, pl: u64, aa: u64, al: u64, ea: u64, el: u64
     let (na, nl) = base_name(e)
     let id = sched.create_process(body, sched.ELF_PROG - 1, pml4, entry, sp, na, nl)
     vm.start(sched.area_of(id), image_top(file))
+    files.set_exe(sched.area_of(id), e) // px26: /proc/self/exe
     describe_elf(file, sched.pid_of(id), pml4, entry, sp, argc, envc)
     id
 }
@@ -775,6 +776,7 @@ pub fn execve(f: u64, path: u64, argv: u64, envp: u64) -> u64 {
         k += 1
     }
     vm.start(a, image_top(file))
+    files.set_exe(a, e) // px26: /proc/self/exe
     let (na, nl) = base_name(e)
     sched.exec_current(space, entry, sp, na, nl)
     fpu.exec(sched.self_slot())
