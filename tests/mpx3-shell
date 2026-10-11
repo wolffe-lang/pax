@@ -306,7 +306,11 @@ for leg in $legs; do
             typing=()
             [ "$i" = procs ] || typing=(--type "$(keys_of "$s")" --prompt "$PROMPT" --keyboard "$kb")
             hrc=0
-            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 180 \
+            # px26: 512 MiB. The shell's initramfs is 170 MiB with bu20's
+            # thirteen programs, and under OVMF Limine cannot place it in
+            # 256 (`High memory allocator: Out of memory`, measured); SeaBIOS
+            # still can, and both legs boot the same machine.
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 180 --qemu -m --qemu 512M \
                 --elf "$elf" --marker 'halt' ${typing[@]+"${typing[@]}"} "$iso" >"$log.verdict" 2>&1 || hrc=$?
             record "$tier" "$leg" "$s" "$hrc"
             norm=$log.norm; serial_norm "$log" > "$norm"
