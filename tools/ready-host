@@ -90,6 +90,26 @@ def exactly(c, n, what):
     return bytes(out)
 
 
+REFUSED = [0]
+
+
+def dial(port, what):
+    """A connection to the forwarded port. QEMU's listener there has a
+    short queue of its own: when this host fills it faster than QEMU
+    empties it, a connect is refused before the guest has heard of it
+    (seen on a host held to four CPUs). Such a connect is made again,
+    and counted."""
+    for tries in range(200):
+        try:
+            return socket.create_connection(("127.0.0.1", port), timeout=120)
+        except ConnectionRefusedError:
+            REFUSED[0] += 1
+            time.sleep(0.05)
+        except OSError as x:
+            raise Fail("%s: %s" % (what, x))
+    raise Fail("%s: the forwarded port refused 200 connects in a row" % what)
+
+
 def many(port, n, what):
     """`n` connections to 127.0.0.1:port, made one after another and
     all held. Not begun at once: QEMU's forwarded port listens with a
@@ -100,17 +120,13 @@ def many(port, n, what):
     tools/net-peer's script begins all 64 together."""
     socks = []
     for i in range(n):
-        try:
-            s = socket.create_connection(("127.0.0.1", port), timeout=120)
-        except OSError as x:
-            raise Fail("%s: connection %d: %s" % (what, i, x))
-        socks.append(s)
+        socks.append(dial(port, "%s: connection %d" % (what, i)))
     return socks
 
 
 def epollecho(fwd, soak):
     N = px.READY_N
-    ctl = socket.create_connection(("127.0.0.1", fwd), timeout=120)
+    ctl = dial(fwd, "H1: the control connection")
 
     def ask(line, what):
         ctl.sendall(line)
@@ -162,7 +178,7 @@ def epollecho(fwd, soak):
     t0 = time.time()
     done = 0
     while done < soak:
-        batch = [socket.create_connection(("127.0.0.1", fwd), timeout=120) for _ in range(min(8, soak - done))]
+        batch = [dial(fwd, "H1: the soak's connection %d" % (done + i)) for i in range(min(8, soak - done))]
         for i, c in enumerate(batch):
             c.sendall(px.storm_message(3, done + i))
         for i, c in enumerate(batch):
@@ -294,7 +310,7 @@ def main(argv):
     except OSError as x:
         print("ready-host: FAIL %s: %s" % (type(x).__name__, x))
         return 1
-    print("ready-host: PASS (QEMU's user-mode network: its TCP between this host's sockets and PAX)")
+    print("ready-host: PASS (QEMU's user-mode network: its TCP between this host's sockets and PAX; %d connects refused by the forward's own queue and made again)" % REFUSED[0])
     return 0
 
 
