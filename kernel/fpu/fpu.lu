@@ -88,9 +88,10 @@ const S_SIZE: u64 = 1
 const S_XCR0: u64 = 2
 const S_TEMPLATE: u64 = 3
 const S_AREAS: u64 = 4
+const S_MXMASK: u64 = 20 // px26: MXCSR_MASK as FXSAVE reports it (0xffbf when it reports 0)
 
 fn sw(i: u64) -> u64 {
-    // # Safety: i < 20, inside boot/fpu.S's 160-byte pax_fpu_state.
+    // # Safety: i < 24, inside boot/fpu.S's 192-byte pax_fpu_state.
     unsafe { ((pax_fpu_state as u64 + i * 8) as *u64).read_volatile() }
 }
 
@@ -175,6 +176,15 @@ pub fn start() {
         s += 1
     }
     put_sw(S_MODE, mode)
+    // px26: MXCSR's writable bits, from a save of the state as it is
+    // (FXSAVE's bytes 28-31; 0 there means the default mask, SDM vol. 1
+    // §11.6.6), before the areas are reset.
+    // # Safety: slot 0's page, as in `switch`.
+    let mk = unsafe {
+        pax_fpu_save(sw(S_AREAS), mode)
+        ((sw(S_AREAS) + 24) as *u64).read_volatile() >> 32
+    }
+    put_sw(S_MXMASK, if mk == 0 { 0xffbf } else { mk })
     s = 0
     while s < SLOTS {
         reset(s)
@@ -247,6 +257,88 @@ pub fn exec(s: u64) {
     reset(s)
     // # Safety: as in `switch`: the area holds the template.
     unsafe { pax_fpu_restore(sw(S_AREAS + s), mode) }
+}
+
+// --- a signal frame's copy of the state (px26) ------------------------------
+
+/// How many bytes a signal frame keeps of the state: XSAVE's area for
+/// the enabled features, or FXSAVE's 512; 0 before `start`.
+pub fn frame_bytes() -> u64 {
+    if sw(S_MODE) == OFF {
+        return 0
+    }
+    sw(S_SIZE)
+}
+
+/// Whether the state is XSAVE's (a signal frame then carries the
+/// software bytes and the closing magic) and which features XCR0 has.
+pub fn xsave() -> bool {
+    sw(S_MODE) == XSAVE
+}
+
+pub fn features() -> u64 {
+    sw(S_XCR0)
+}
+
+/// The running slot `s`'s live state saved into its area, whose address
+/// (kernel memory, `frame_bytes()` long) is returned for the caller to
+/// copy into a signal frame; 0 before `start`. IF clear.
+pub fn capture(s: u64) -> u64 {
+    let mode = sw(S_MODE)
+    if mode == OFF || s >= SLOTS {
+        return 0
+    }
+    let a = sw(S_AREAS + s)
+    // # Safety: the slot's own page, as in `switch`.
+    unsafe { pax_fpu_save(a, mode) }
+    a
+}
+
+/// The running slot `s`'s area, for the caller to fill from a signal
+/// frame before `adopt`; 0 before `start`.
+pub fn area(s: u64) -> u64 {
+    if sw(S_MODE) == OFF || s >= SLOTS {
+        return 0
+    }
+    sw(S_AREAS + s)
+}
+
+/// Load slot `s`'s area, which the caller has just filled from a signal
+/// frame a program could have rewritten, as the live state. XRSTOR
+/// faults in ring 0 on what a program may have put there, so it is made
+/// loadable first: MXCSR's reserved bits cleared (the image's
+/// MXCSR_MASK is the CPU's own, read at `start`); and for XSAVE,
+/// XSTATE_BV held to the features XCR0 enables, the header's reserved
+/// bytes zeroed, and a compacted image (XCOMP_BV not 0, which PAX never
+/// writes) refused: false, nothing loaded. IF clear.
+pub fn adopt(s: u64) -> bool {
+    let mode = sw(S_MODE)
+    if mode == OFF || s >= SLOTS {
+        return true
+    }
+    let a = sw(S_AREAS + s)
+    // # Safety: the slot's own page through the HHDM: MXCSR at byte 24
+    // (its high half the mask's word, rewritten whole), the XSAVE
+    // header at bytes 512-575 (SDM vol. 1 §13.4.2).
+    unsafe {
+        let w = ((a + 24) as *u64).read_volatile()
+        let mx = w & 0xffffffff & sw(S_MXMASK)
+        ((a + 24) as *u64).write_volatile(mx | (sw(S_MXMASK) << 32))
+        if mode == XSAVE {
+            if ((a + 520) as *u64).read_volatile() != 0 {
+                return false
+            }
+            let bv = ((a + 512) as *u64).read_volatile()
+            ((a + 512) as *u64).write_volatile(bv & sw(S_XCR0))
+            var i: u64 = 528
+            while i < 576 {
+                ((a + i) as *u64).write_volatile(0)
+                i += 8
+            }
+        }
+        pax_fpu_restore(a, mode)
+    }
+    true
 }
 
 /// Whether `start` ran.
