@@ -1556,3 +1556,93 @@ jobs:
             build/mpx4-tcp-runs.txt
           retention-days: 14
           if-no-files-found: warn
+
+  # px24: readiness. Eight static Linux programs (user/net: seven C
+  # files built here by tools/mknet against this runner's glibc, and one
+  # wolf program built by the pinned wolf) run unmodified on
+  # kernel/kmain_sockets from the initramfs: five probes held line for
+  # line to this runner's Linux (descriptors that do not block, poll,
+  # epoll, eventfd, and the rest of what wolf's hosted runtime and lobo
+  # ask: writev, getrandom's flags, sched_getaffinity, sigaltstack,
+  # socket options, two threads each waiting); an echo server on epoll
+  # that holds 64 connections at once, is stormed twice (every one made
+  # ready together: each answered once, none again) and then serves
+  # 10,000 more; and a wolf server and client that wait through wolf's
+  # runtime. tests/mpx4-ready, both tiers, BIOS and UEFI, three ways:
+  # with no network device (loopback), against tools/net-peer --ready on
+  # a socket netdev, and against QEMU's user-mode network with
+  # tools/ready-host at this runner's end; the reference side is
+  # tools/linux-net --ready on a tap device. After every command the
+  # kernel's books: no epoll object, registration, eventfd, descriptor,
+  # control block or frame left. A boot that stalls is stopped after 240
+  # seconds, and none starts 40 minutes after the first.
+  mpx4-ready:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace
+          qemu-system-x86_64 --version
+          clang --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx4-ready-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      # The reference side makes a tap device in a network namespace of
+      # its own: the tun driver must be there (no package: the kernel's).
+      - name: the runner's tap device
+        run: |
+          sudo modprobe tun
+          ls -l /dev/net/tun
+
+      - name: readiness, both tiers, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx4-ready
+
+      - name: keep the programs' sums, the Linux side, the transcripts, the captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx4-ready-linux
+          path: |
+            build/mpx4-ready/net/sums.txt
+            build/mpx4-ready/net.txt
+            build/mpx4-ready/linux/
+            build/mpx4-ready/linux.txt
+            build/mpx4-ready/*.run
+            build/mpx4-ready/*.initramfs.txt
+            build/mpx4-ready/*/kmain_sockets.elf
+            build/mpx4-ready/*/*.log
+            build/mpx4-ready-*.out/
+            build/mpx4-ready-*.log
+            build/mpx4-ready-*.norm
+            build/mpx4-ready-*.meta
+            build/mpx4-ready-*.halt
+            build/mpx4-ready-*.verdict
+            build/mpx4-ready-*.end
+            build/mpx4-ready-*.pcap
+            build/mpx4-ready-*.check
+            build/mpx4-ready-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
