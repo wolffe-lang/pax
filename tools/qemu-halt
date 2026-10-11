@@ -217,7 +217,11 @@ fi
 # Wait for the marker (or QEMU's end, or the timeout).
 start=$SECONDS
 while :; do
-    if [ -f "$serial" ] && serial_norm "$serial" | LC_ALL=C grep -Eqx -- "$marker"; then break; fi
+    # The marker's line must be whole: a log that ends `halt` + CR, its LF
+    # still to come, would be measured one byte short and then seen to
+    # "grow" (px22: once in a gauntlet's 240 boots, mpx3-shell S5).
+    if [ -f "$serial" ] && serial_norm "$serial" | LC_ALL=C grep -Eqx -- "$marker" \
+        && [ "$(tail -c 1 "$serial" | od -An -tx1 | tr -d ' \n')" = 0a ]; then break; fi
     if ! kill -0 "$qpid" 2>/dev/null; then
         rc=0; wait "$qpid" || rc=$?; qpid=
         no "QEMU ended (qemu-run status $rc) before a line matching /$marker/"
