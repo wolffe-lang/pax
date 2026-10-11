@@ -63,6 +63,11 @@ def read(path):
             if cid == b"fmt ":
                 _, ch, rate, _, _, bits = struct.unpack("<HHIIHH", body[:16])
             elif cid == b"data":
+                # QEMU's wav backend leaves the sizes 0 when it is ended
+                # (as tools/wav-notes found): 0 or too long is the rest
+                if size == 0 or i + 8 + size > len(data):
+                    pcm = data[i + 8:]
+                    break
                 pcm = body
             i += 8 + size + (size & 1)
         if pcm is None or bits != 16:
