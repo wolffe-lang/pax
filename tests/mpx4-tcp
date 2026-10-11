@@ -485,7 +485,8 @@ PY
     freed=$(sed -n -E 's/^tcp: blocks ([0-9]+) made, ([0-9]+) freed, 0 in use; .*/\2/p' "$norm")
     [ -n "$made" ] && [ "$made" = "$freed" ] || why+=" blocks ($made made, $freed freed);"
     has "$norm" 'tcp: tx [0-9]+ segments \([0-9]+ with data, [0-9]+ bytes; [0-9]+ acks, [0-9]+ resets, [0-9]+ probes\), 0 not sent; .*' || why+=" tx;"
-    has "$norm" 'tcp: connections .* 0 no-frames; icmp 0 hard 0 soft' || why+=" connections;"
+    local icmps=0; [ "$way" = peer ] && icmps=2
+    has "$norm" "tcp: connections .* 0 no-frames; icmp $icmps ended a connect, 0 ignored" || why+=" connections;"
     lsent=$(sed -n -E 's/^ip: loopback ([0-9]+) datagrams sent, ([0-9]+) delivered, 0 not sent for a full queue, 0 waiting$/\1/p' "$norm")
     ldone=$(sed -n -E 's/^ip: loopback ([0-9]+) datagrams sent, ([0-9]+) delivered, .*/\2/p' "$norm")
     [ -n "$lsent" ] && [ "$lsent" = "$ldone" ] || why+=" loopback ($lsent sent, $ldone delivered);"

@@ -147,7 +147,9 @@
 #       connect refused), to port 9001 (no answer at all: the connect
 #       gives up after its one retransmission), to port 9301 (a reset
 #       after the first bytes), to port 9302 (silence after the
-#       handshake: TCP_USER_TIMEOUT gives up)
+#       handshake: TCP_USER_TIMEOUT gives up), to port 9003 (an ICMP
+#       destination unreachable, code 3, for its SYN) and to port 9004
+#       (code 1 for its SYN)
 #   T9  scripted faults with PAX the client (`tcpclient` to ports 9201
 #       to 9212, 9220): the first SYN lost; the SYN-ACK lost; PAX's
 #       handshake ACK lost; a data segment lost each way; a FIN lost
@@ -911,6 +913,8 @@ class Peer:
             served.append(c)
         st.listen(px.TCP_RESET, resetting)
         st.listen(px.TCP_MUTE, mute)
+        st.unreachable[px.TCP_UNREACHABLE] = 3
+        st.unreachable[px.TCP_NO_HOST] = 1
 
         # T1: PAX's echo server, asked from the gateway's address.
         self.tcp_ready(st, px.TCP_SERVICE, self.boot, "tcpecho")
@@ -972,8 +976,11 @@ class Peer:
         st.until(lambda: px.TCP_SILENT in st.held, 60.0, "tcpend's SYN to port 9001, which never answers")
         st.until(lambda: any(c.port == px.TCP_RESET and c.closed() for c in served), 60.0, "tcpend's connection to port 9301, reset after its first bytes")
         st.until(lambda: any(c.port == px.TCP_MUTE and c.pax_rexmt >= 2 for c in served), 60.0, "tcpend's retransmissions to port 9302, which says nothing after the handshake")
+        st.until(lambda: st.n.get("icmp-out", 0) >= 1, 60.0, "tcpend's SYN to port 9003, answered with an ICMP port unreachable")
+        st.until(lambda: st.n.get("icmp-out", 0) >= 2, 60.0, "tcpend's SYN to port 9004, answered with an ICMP host unreachable")
         print("net-peer: ok T8 a SYN to port 9 reset; a SYN to port 9001 never answered; a connection to port 9301 reset after its first bytes; "
-              "one to port 9302 left unanswered after the handshake (PAX retransmitted)")
+              "one to port 9302 left unanswered after the handshake (PAX retransmitted); a SYN to port 9003 answered with an ICMP port unreachable; "
+              "one to port 9004 with an ICMP host unreachable")
 
         # T9: scripted faults, PAX the client. Each port's fault is for
         # the first connection made to it (a SYN lost makes two).

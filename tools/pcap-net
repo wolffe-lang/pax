@@ -166,7 +166,7 @@ KEYS = (["from-pax", "to-pax", "before", "net.type", "net.other", "arp.requests-
          "ip.protocol", "ip.out", "ident-gaps"] + CAUSES +
         ["icmp.echo", "icmp.replies-out", "icmp.requests-out", "icmp.matched", "icmp.stray", "unreachable.sent",
          "unreachable.limited", "unreachable.silent", "udp.in", "udp.unchecked", "udp.out", "udp.echoed", "udp.ready",
-         "port-unreachable.sent", "tcp.in", "tcp.out", "tcp.retransmitted", "tcp.resets-out", "tcp.probes", "tcp.connections",
+         "port-unreachable.sent", "icmp.error", "tcp.in", "tcp.out", "tcp.retransmitted", "tcp.resets-out", "tcp.probes", "tcp.connections",
          "tcp.bytes-out", "markers", "burst.small", "burst.large", "checksums"])
 
 
@@ -192,6 +192,9 @@ LINES = [
       "icmp.type"]),
     (r"icmp: unreachable (\d+) sent, (\d+) limited, (\d+) silent; (\d+) not sent",
      ["unreachable.sent", "unreachable.limited", "unreachable.silent", "not-sent"]),
+    (r"icmp: loopback (\d+) requests answered \((\d+) replies sent\), (\d+) requests sent, (\d+) replies matched, (\d+) unreachable sent; "
+     r"errors received (\d+) from the wire, (\d+) over loopback",
+     ["il-echo", "il-replies", "il-requests", "il-matched", "il-unreachable", "icmp.error", "il-errors"]),
     (r"udp: rx (\d+) datagrams queued \((\d+) without a checksum\), dropped (\d+) short (\d+) length (\d+) checksum (\d+) port-zero "
      r"(\d+) no-port (\d+) full",
      ["u-rx", "udp.unchecked", "udp.short", "udp.length", "udp.checksum", "udp.port-zero", "u-no-port", "u-full"]),
@@ -286,6 +289,8 @@ def against(path, c, tcp=False):
     for name in ("runt", "long", "down", "size", "full", "idle", "not-sent", "ip-dropped", "table-full"):
         hold(name, k[name], 0)
     hold("frames for another station", k["other"], c["net.other"])
+    # px23: destination unreachables that reached PAX whole.
+    hold("ICMP errors received from the wire", k["icmp.error"], c["icmp.error"])
     if tcp:
         # kernel/tcp (px23): the wire's share of what it counts.
         for name in ("tcp.short", "tcp.header", "tcp.checksum", "tcp.broadcast", "tcp.port-zero", "tcp.option"):
@@ -730,6 +735,8 @@ def main(argv):
                 c["icmp.matched"] += 1
             else:
                 c["icmp.stray"] += 1
+        elif verdict == "icmp.error":
+            c["icmp.error"] += 1
         elif verdict == "tcp":
             seg = px.Segment(f)
             c["tcp.in"] += 1

@@ -476,6 +476,10 @@ pub const ENOTCONN: u64 = 107
 pub const ETIMEDOUT: u64 = 110
 /// Connection refused.
 pub const ECONNREFUSED: u64 = 111
+/// Network is unreachable.
+pub const ENETUNREACH: u64 = 101
+/// No route to host.
+pub const EHOSTUNREACH: u64 = 113
 
 fn tw(i: u64) -> u64 {
     // # Safety: i < 128, a word of boot/net.S's pax_tcp_state.
@@ -2020,16 +2024,23 @@ fn syn_sent_in(c: u64, flags: u64, seq: u64, ack: u64, wnd: u64, mss: u64, len: 
 
 /// A destination unreachable of `code` came (kernel/icmp, by way of
 /// kernel/netd) quoting a segment this station sent from `la`:`lp` to
-/// `ra`:`rp` with sequence number `seq`. RFC 1122 §4.2.3.9: codes 2 to
-/// 4 end a connection that is not yet synchronized; the others, and
-/// any for a synchronized one, are counted.
+/// `ra`:`rp` with sequence number `seq`. One that quotes the SYN of a
+/// connection in SYN-SENT ends the connect: the protocol or the port
+/// unreachable (codes 2 and 3, RFC 1122 §4.2.3.9's hard errors)
+/// -ECONNREFUSED; the net or the host unreachable (codes 0 and 1)
+/// -ENETUNREACH and -EHOSTUNREACH — RFC 1122 would have those two
+/// only noted, and Linux was seen to end the connect at once with
+/// -EHOSTUNREACH for code 1 (RFC 5461 §4 describes the practice for
+/// connections not yet synchronized), which is what the witness is
+/// held to. Any other code, and any error for a synchronized
+/// connection, is counted and changes nothing.
 pub fn unreached(code: u64, la: u64, lp: u64, ra: u64, rp: u64, seq: u64) {
     let saved = sync.acquire(sync.tcp())
     let c = find(la, lp, ra, rp)
-    if c != CONNS && cw(c, K_STATE) == SYN_SENT && code >= 2 && code <= 4 && seq == cw(c, K_ISS) {
+    if c != CONNS && cw(c, K_STATE) == SYN_SENT && code <= 3 && seq == cw(c, K_ISS) {
         bump(C_ICMP_HARD)
         bump(C_REFUSED)
-        finish(c, ECONNREFUSED)
+        finish(c, if code == 0 { ENETUNREACH } else if code == 1 { EHOSTUNREACH } else { ECONNREFUSED })
     } else {
         bump(C_ICMP_SOFT)
     }
@@ -2720,7 +2731,7 @@ pub fn report() {
 ///     tcp: rx data <b> bytes in order, <q> out-of-order queued, <d> out-of-order-dropped, <t> trimmed, <a> after-close, <s> syn-data, <u> urgent; <r> resets taken, <k> duplicate acks
 ///     tcp: options <m> mss, skipped <…> window-scale <…> sack-permitted <…> sack <…> timestamps <…> fast-open <…> other
 ///     tcp: tx <n> segments (<d> with data, <b> bytes; <a> acks, <r> resets, <p> probes), <f> not sent; <x> retransmitted, <t> timeouts, <q> fast retransmits, <s> round trips measured, <w> window updates, <o> persist
-///     tcp: connections <a> active, <p> passive, <c> accepted, <r> refused, <g> gave-up, <h> half-open gone, <k> reset at close, <s> simultaneous, <n> no-frames; icmp <x> hard <y> soft
+///     tcp: connections <a> active, <p> passive, <c> accepted, <r> refused, <g> gave-up, <h> half-open gone, <k> reset at close, <s> simultaneous, <n> no-frames; icmp <x> ended a connect, <y> ignored
 ///     tcp: blocks <m> made, <f> freed, <u> in use; time-wait <w> made, <e> evicted, <o> reopened, <s> segments answered, <r> resets ignored, <l> waiting
 ///     tcp: loopback <o> segments sent, <i> received, <x> retransmitted
 pub fn counters() {
@@ -2802,8 +2813,8 @@ pub fn counters() {
     item(C_CLOSE_RESET, "reset at close,")
     item(C_SIMULTANEOUS, "simultaneous,")
     item(C_NO_FRAMES, "no-frames; icmp")
-    item(C_ICMP_HARD, "hard")
-    item(C_ICMP_SOFT, "soft")
+    item(C_ICMP_HARD, "ended a connect,")
+    item(C_ICMP_SOFT, "ignored")
     log.end()
     log.put("tcp: blocks ")
     log.dec(tw(C_MADE) as int)

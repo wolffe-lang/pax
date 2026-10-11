@@ -464,6 +464,7 @@ class Stack:
         self.listeners = {}   # port -> Listener
         self.silent = set()   # ports whose segments are never answered
         self.held = {}        # port -> the last SYN a silent port left unanswered
+        self.unreachable = {}  # port -> the code of the ICMP destination unreachable its SYNs draw
         self.resets = []      # resets from PAX for no connection of this script's
         self.udp = []         # (source port, destination address, destination port, data) of each datagram from PAX
         self.icmp = []        # ICMP frames from PAX
@@ -534,6 +535,15 @@ class Stack:
             c = None  # the four values again: a new connection
         if c is not None:
             c.on_segment(seg)
+            return
+        if seg.dport in self.unreachable:
+            # No TCP answers: an ICMP error that quotes the segment's
+            # header and its first 8 bytes (RFC 792).
+            if seg.flags & SYN:
+                quote = f[14:14 + 20 + 8]
+                m = px.icmp(3, self.unreachable[seg.dport], b"\x00" * 4, quote)
+                self.peer.send(self.peer.datagram(seg.dst, m, proto=1))
+                self.n["icmp-out"] = self.n.get("icmp-out", 0) + 1
             return
         if seg.dport in self.silent:
             if seg.flags & SYN and not seg.flags & (ACK | RST):

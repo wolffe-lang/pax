@@ -1065,7 +1065,9 @@ pub fn syscall(f: u64) -> u64 {
     if r == files.EPIPE_R && (nr == SYS_WRITE || (nr == SYS_SENDTO && a3 & MSG_NOSIGNAL == 0)) && process.sigpipe_kills() {
         // px17: SIGPIPE's default action ends the writer.
         who()
-        log.put(" killed: SIGPIPE, a write to a pipe with no reader")
+        // px23: a stream socket whose connection is over is the other
+        // thing a write can find broken.
+        log.put(if socket.is_inet(area(), int32(a0)) { " killed: SIGPIPE, a write to a connection that is over" } else { " killed: SIGPIPE, a write to a pipe with no reader" })
         runs_tail()
         log.end()
         files.close_all(area())

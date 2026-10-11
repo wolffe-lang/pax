@@ -210,6 +210,10 @@ def judge_ip(f):
         return ("icmp.broadcast" if is_broadcast(dst) else "echo"), ihl, total
     if m[0] == 0 and m[1] == 0:
         return "reply", ihl, total
+    if m[0] == 3 and len(m) >= 36 and m[8] == 0x45:
+        # px23: a destination unreachable that quotes a whole header and
+        # 8 bytes: counted `errors received`, and its protocol's to use.
+        return "icmp.error", ihl, total
     return "icmp.type", ihl, total
 
 
@@ -555,6 +559,8 @@ TCP_CLOSED = 9           # a port nobody listens on
 TCP_SILENT = 9001        # a port whose SYNs go unanswered
 TCP_RESET = 9301         # a server that resets after the first bytes
 TCP_MUTE = 9302          # a server that says nothing after the handshake
+TCP_UNREACHABLE = 9003   # a port whose SYN draws an ICMP port unreachable (code 3)
+TCP_NO_HOST = 9004       # one whose SYN draws an ICMP host unreachable (code 1)
 TCP_WOLF = 7070          # user/net/tcpwolfd's
 TCP_WOLF_READY = 9070    # where it says "ready" (a connection, one line)
 TCP_WOLF_GATE = 9071     # answered only once its request waits in its queue
