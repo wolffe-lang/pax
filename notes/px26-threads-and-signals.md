@@ -297,7 +297,7 @@ and Ctrl-C at the prompt and on a running child.
 |---|---|
 | P1: a thread is a slot in its leader's group, sharing the space, the area and the pid; its own tid, stack, frame, FS base, x87/SSE state, mask, pending set, clear-child-tid word, name | as built (`kernel/sched`, `kernel/process`), and every line of the probe's `ids:` and `exit:` cases is Linux's (`notes/px26/session-probes.{pax,linux}.txt`) |
 | P1: `exit` ends one thread, zeroes the clear-child-tid word and wakes its futex; the last thread's `exit` ends the process with that status; `exit_group` ends all | **right**: `pthread_join` returns on PAX only because of that wake (plant B, below, hangs it); "main's exit(4) with a thread still running, which exits 6 later: status 0x600" on both |
-| P1: `PROT_NONE` reserves and takes no frame; the 128 MiB costs none, the 2 MiB stack 512 | **right** as far as measured: the probe reserves 256 MiB with `PROT_NONE` and makes threads with 8 MiB stacks, and the soak's census has the whole process at 332 frames (64153 free before it, 63821 during); trunk's `mmap` would have taken 65536 frames for that reservation alone. pelt's own frame count at its prompt was not measured |
+| P1: `PROT_NONE` reserves and takes no frame; the 128 MiB costs none, the 2 MiB stack 512 | **right** as far as measured: the probe reserves 256 MiB with `PROT_NONE` and makes threads with 8 MiB stacks, and the soak's census has the whole process at 332 frames (64080 free before it, 63748 during); trunk's `mmap` would have taken 65536 frames for that reservation alone. pelt's own frame count at its prompt was not measured |
 | P1: `madvise` unused by this pelt | **right** (no call 28 in either strace); the probe exercises MADV_DONTNEED and the guard pair |
 | P2: no table; the key the word's physical address; **`FUTEX_PRIVATE_FLAG` changes nothing** | **wrong on the flag**: on Linux a wake without it does not reach a private waiter (the probe's "a wake without the private flag reaches a private waiter 0"), so the flag is a bit of the key (`kernel/futex`). The rest as predicted: waiters woken longest-waiting first ("in the order 0 1 2" on both) |
 | P2: the errnos | **right**, each on both: -11, -110 (a timeout, and a deadline already past), -22 (a zero bitset, a word off a 4-byte boundary, a bad timespec), -14, -38 for an operation that does not exist |
@@ -317,7 +317,7 @@ and Ctrl-C at the prompt and on a running child.
 | P7: boot to pelt's prompt on nomad-1 2.1 s ± 0.5 | **2.45 s** (five boots of the quiet image, 2.44 to 2.47; 2.82 with narration), inside the band at its edge; the image is 175 MB where px17's was smaller, and this lane did not re-time trunk's image with the same script |
 | P7: the soak under 120 s under TCG | **right**: about 30 s a boot on kasumi (the suite's eight boots in 235 s) |
 | P7: plant A reddens the probes on every leg and nothing else | **right in what, wrong in how much**: the suite stops at the first failing probes boot, so one leg ran: "registers not put back 1 r12" |
-| P7: plant B reddens the probes and `shell-sigs` | **half wrong**: the probes hang at their first `pthread_join` and fail at the boot's 300 s deadline; **pelt does not need the wake** — every futex wait it makes carries a deadline or is re-armed by its own state, and all ten shell sessions stayed byte-identical with the plant in (kasumi, `notes/px26/kasumi-plant-b-rehearsal.mpx3-shell.out`) |
+| P7: plant B reddens the probes and `shell-sigs` | **half wrong**: the probes hang at their first `pthread_join` and fail at the boot's 300 s deadline; **pelt does not need the wake** — every futex wait it makes carries a deadline or is re-armed by its own state, and all ten shell sessions stayed byte-identical with the plant in (kasumi, `notes/px26/kasumi-plant-b.mpx3-shell.out`) |
 | P8: the new pelt on trunk's kernel: `clone3` refused, no prompt | **right**: `syscall 435: refused: CLONE_VM without CLONE_VFORK`, glibc's fallback `clone` (56) refused the same, `futex` (202) and `writev` (20) -ENOSYS, `tgkill` refused twice, and init ended without an exit status; no prompt (`notes/px26/kasumi-red-new-pelt-on-trunk-kernel.mpx3-shell.out`) |
 | P8: the new boreutils on trunk's kernel: `ls -l` differs in its `total` and its dates; `readlink /proc/self/exe` fails | **right** (`notes/px26/kasumi-red-item1-tests-on-trunk-kernel.mpx3-shell.out`: S2 differs from the `total` line on; -ENOSYS for 89, and for 40, 275 and 326 in every session that runs `cat`) |
 
@@ -330,7 +330,7 @@ and Ctrl-C at the prompt and on a running child.
 
 ### The probe (`user/elf/threads.c`, one static file on both)
 
-- Linux and PAX, 48 compared lines, `cmp` equal: `notes/px26/session-probes.{linux,pax}.txt` (kasumi, native BIOS; the two `~` lines differ by design: FUTEX_REQUEUE and a stop, which PAX refuses by name and T3 holds to those two refusals).
+- Linux and PAX, 48 compared lines, `cmp` equal: `notes/px26/session-probes.{linux,pax}.txt` (kasumi, native BIOS, the gauntlet at `7aa17f6`; the two `~` lines differ by design: FUTEX_REQUEUE and a stop, which PAX refuses by name and T3 holds to those two refusals).
 - In CI the same comparison runs against the runner's own Linux (Ubuntu 24.04, its glibc and kernel), on both tiers, BIOS and UEFI: job `mpx3-threads` of the run at the head.
 
 ### The sessions
@@ -339,26 +339,36 @@ and Ctrl-C at the prompt and on a running child.
 
 ### The soak
 
-- `notes/px26/kasumi-native-bios-soak.serial.log`: four thread census lines (2500 to 10000 made), each `slots busy 4, frames free 63821`; signal census lines from 2500 to 10000 (and 12000 after the round trip), the first four each `slots busy 4, frames free 63821, this frame at 0x00007fffffffe538`; the program's own lines (`session-soak.{pax,linux}.txt`): 10000 threads joined, results sum 49995000, the break moved 0 bytes, 10000 signals handled, the handler's stack moved 0 times, 2000 more into a spinning thread with 0 registers not put back; and the frames line after it: every frame back.
+- `notes/px26/kasumi-native-bios-soak.serial.log`: four thread census lines (2500 to 10000 made), each `slots busy 4, frames free 63748`; signal census lines from 2500 to 10000 (and 12000 after the round trip), the first four each `slots busy 4, frames free 63748, this frame at 0x00007fffffffe538`; the program's own lines (`session-soak.{pax,linux}.txt`): 10000 threads joined, results sum 49995000, the break moved 0 bytes, 10000 signals handled, the handler's stack moved 0 times, 2000 more into a spinning thread with 0 registers not put back; and the frames line after it: every frame back.
 
 ### Red first
 
-- At trunk's kernel (`0cc43be`), on kasumi: the head's tests with the new pelt — no prompt, `clone3` refused (`kasumi-red-new-pelt-on-trunk-kernel.mpx3-shell.out`); item 1's tests with bu20's boreutils — `shell-long` S2 and S4 (`kasumi-red-item1-tests-on-trunk-kernel.mpx3-shell.out`).
-- Planted break A (`rt_sigreturn` does not put %r12 back), commit 3617a09: CI run **38131582865**, job mpx3-threads **114446842823** the only failing job of 21, red 1 min 38 s after it started (`T1 native bios probes … registers not put back 1 r12`, then `stopped early`). Reverted in ce2f444. Rehearsed on kasumi first: `notes/px26/kasumi-plant-a-rehearsal.mpx3-threads.out`.
-- Planted break B (a futex wake wakes nobody), commit 186947c: CI run **38131619277**, job mpx3-threads **114446948287** the only failing job of 21, red 6 min 55 s after it started (`no line matching /halt/ within 300s`, then `stopped early`). Reverted in acb7b7e. Rehearsed on kasumi first: `notes/px26/kasumi-plant-b-rehearsal.mpx3-threads.out`.
+- At the kernel of the trunk this lane was cut from (`0cc43be`), on kasumi: the pre-rebase head's tests with the new pelt — no prompt, `clone3` refused (`kasumi-red-new-pelt-on-trunk-kernel.mpx3-shell.out`); item 1's tests with bu20's boreutils — `shell-long` S2 and S4 (`kasumi-red-item1-tests-on-trunk-kernel.mpx3-shell.out`).
+- Planted break A (`rt_sigreturn` does not put %r12 back), commit 3617a09: CI run **38131582865**, job mpx3-threads **114446842823** the only failing job of 21, red 1 min 38 s after it started (`T1 native bios probes … registers not put back 1 r12`, then `stopped early`). Reverted in the next commit. Run on kasumi first: `notes/px26/kasumi-plant-a.mpx3-threads.out`.
+- Planted break B (a futex wake wakes nobody), commit 186947c: CI run **38131619277**, job mpx3-threads **114446948287** the only failing job of 21, red 6 min 55 s after it started (`no line matching /halt/ within 300s`, then `stopped early`). Reverted in the next commit. Run on kasumi first: `notes/px26/kasumi-plant-b.mpx3-threads.out`.
 - The fail-fast in `tools/qemu-halt` (a typed boot whose first prompt never came stops the run's later typed boots) is seen in `kasumi-red-new-pelt-on-trunk-kernel.mpx3-shell.out`: the first session waits out 180 s, the next nine are `not booted`.
 
 ### Boot counts
 
-BOOTS
+- kasumi, TCG (QEMU 11.1.1), the gauntlet on a `git archive` of the rebased head `7aa17f6`, strict environment: every suite rc 0, 0 FAIL, 0 SKIP (`notes/px26/kasumi-gauntlet-7aa17f6.summary`, versions beside it): mpx3-threads 40 PASS on 8 boots, mpx3-shell 224 PASS on 40 boots (`kasumi-mpx3-{threads,shell}-7aa17f6.out`, the runs files beside them), mpx3-console 100, mpx3-boreutils 20, mpx3-loader 32, mpx3-speaker 40, mpx3-screen 24, mpx3-user 38, tour 44, mpx4-net 127, mpx4-udp 97, mpx4-tcp 100, and the mpx1 and mpx2 suites.
+- kasumi under `taskset -c 0-3` at the same head: mpx3-threads 40, mpx3-console 100, mpx3-shell 224 PASS, 0 FAIL (`kasumi-taskset-0-3-7aa17f6.summary`).
+- hasu, KVM (QEMU through `nix-shell -p qemu`, i7-12700KF), the kasumi gauntlet's images: at the rebased head `7aa17f6` three rounds of mpx3-threads (8 boots), mpx3-shell (40) and mpx3-console (20): **204 boots, all accel=kvm, all green** (`hasu-kvm-7aa17f6.log`); before the rebase, at the head that was then acb7b7e, three rounds of mpx3-threads and mpx3-shell: 144 boots, all kvm, all green (`hasu-kvm-acb7b7e.log`; its mpx3-console lines are red because those images' Linux transcripts predate the `--pid1` fix, and its boreutils and loader lines are this lane's own copying slip, images left behind).
+- nomad-1, TCG (QEMU 11.1.1): the quiet shell image's first prompt 2.44 to 2.47 s after QEMU starts, five boots; 2.82 s with narration, three boots (the pre-rebase head's image).
+- CI: 16 boots of mpx3-threads and 40 of mpx3-shell in each green run.
 
 ### Item 1 alone
 
-PIN
+Branch `px26-pin` on origin: the item-1 commits and the 512 MiB one, on trunk. Before the rebase the same patches on the old trunk (then 4beb319) ran the suites they touch on kasumi with the old pelt and bu20's boreutils: mpx3-shell 176 PASS (8 sessions on 4 legs, `shell-long` among them), mpx3-boreutils 20, mpx3-console 100, mpx3-loader 32, mpx3-speaker 40, mpx3-screen 24, mpx3-user 38, tour 44, 0 FAIL (`notes/px26/kasumi-gauntlet-item1-4beb319.summary`). The branch as rebased onto px23's trunk was not run again.
 
 ### CI
 
-CIHEAD
+- Before the rebase: run 38130824406 green, 21 jobs (the first run with every suite green; the one before it, 38129775491, was red in mpx3-console alone, which is how the `--pid1` drift was found).
+- One red that is not explained: run 38133240315 (the reverts' head before the rebase, the same code as the green 38130824406), job mpx4-net 114451736924: `N8 native bios peer: icmp.matched: the kernel says 10, the capture 11; icmp.stray: the kernel says 2, the capture 1`. One echo reply counted as a stray, once in six runs of that suite on this branch; not reproduced on kasumi (127 PASS, twice). The run was cancelled by this lane after that job, being superseded by the rebase. It may be px21's timing under a loaded runner or something this lane's return path changed; not settled.
+- After the rebase onto px23's trunk (`641e18d`): run 38134920027 at `7aa17f6`, green, 22 jobs (mpx4-tcp among them). The head's own run is in the PR body.
+
+### The rebase onto px23
+
+px23 (TCP) merged while this lane's plants ran. Conflicts: `kernel/user` (px23's `netd.drain()` at a process's end and its line for SIGPIPE on a connection that is over: both kept, the second through `kernel/signal`, which now takes which kind of write broke), `CHANGELOG.md`, `README.md`, `docs/SOURCES.md` (both sides kept). px23's pins held on top: `stack frames 333` (mpx4-udp, mpx4-tcp) and 76 (mpx4-net) are green unchanged. The plants' CI runs name the commits as they were before the rebase (3617a09, 186947c); in the branch they are `24b3b56` and `d0454a6`, reverted in `0c70b8e` and `9ca288b`. px23's area word 13 (a waiting stream send's progress) is per process where this lane made a pipe write's per thread: two threads of one process each waiting in a `send` on a stream socket would share it (not reached by any test; px24's or the next lane's to move).
 
 ### Drift from the contract, reported
 
@@ -367,7 +377,7 @@ CIHEAD
 3. **The shell image needs 512 MiB under UEFI** (170 MiB of programs). BIOS still boots it in 256.
 4. **`tools/linux-tty` keeps ISIG**, and `tests/mpx3-console`'s Linux side runs its program as pid 1 under `sudo -n`, as mpx3-shell's did already.
 5. **A kernel line can land in the middle of a program's line** (`^Cuser: sleep pid 3 killed: SIGINT …`): the terminal echoes a control key with no newline. The suites cut such a line out with its newline; a quiet boot prints none.
-6. **Item 1 is not one commit** but eleven (`0f8b57e` to `8696139`) and a twelfth it turned out to need (`3c75386`, the 512 MiB); branch `px26-pin` on origin is those alone on trunk, for whoever wants item 1 first.
+6. **Item 1 is not one commit** but eleven (`74b9d99` to `a22197a`) and a twelfth it turned out to need (`b5225b3`, the 512 MiB); branch `px26-pin` on origin is those alone on trunk, for whoever wants item 1 first.
 7. **Not done, by name**: job control (process groups, sessions, `tcsetpgrp`, stopped processes: a stop's default action is refused); `sigaltstack`, `rt_sigsuspend`, `rt_sigtimedwait`, `signalfd`, timers; `rseq`; queued real-time signals; SIGCHLD's auto-reap under SIG_IGN or SA_NOCLDWAIT; a `PROT_NONE` page that once had a frame faults with the present bit set where Linux's does not; SMP.
 
 ### Filed
@@ -376,5 +386,10 @@ Nothing upstream: nothing in wolf, pelt, boreutils or QEMU stood in the way.
 
 ## 5. Done-when
 
-DONE
+- Branch `px26` on origin, rebased onto px23's trunk; PR wolffe-lang/pax#28, open, unmerged; CI green at the head (run id in the PR body).
+- The shell image runs pelt `b32bebc` and boreutils `870815c` unmodified: `ls -l /bin`, `stat`, `readlink`, `env`, `exec`, a `trap`, Ctrl-C at the prompt and on a running child, Ctrl-\, a pipeline whose reader ends first, `unset`: byte-identical to Linux on both tiers, BIOS and UEFI, serial and PS/2, TCG and KVM.
+- Close nothing. To close: none (no pax issue names this work).
+- Not verified: the item-1 branch after the rebase; pelt's frame count at its prompt; trunk's boot-to-prompt time by this lane's script; the one mpx4-net red above; `MADV_GUARD_INSTALL` as a newer glibc would ask it (only the probe asks); real hardware; any Linux but 7.2.8 on kasumi and the CI runner's.
+- A slip to name: on kasumi this lane once ended its own stuck probe by a process name (`pkill -f probe/threads`) where the rule is the pid written down at the start. It matched only this lane's processes (listed before and after); every later stop went by pid.
+- Trees: kasumi `~/lanes/px26/` and hasu `~/lanes/px26/` keep the evidence with `build/` directories pruned; no worktree anywhere.
 
