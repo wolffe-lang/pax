@@ -29,9 +29,20 @@
 #   falling HZ FROM TO DB    the same, falling
 #   flat HZ FROM TO DB       ... and stays within DB of its first window
 #                            (HZ 0: the whole sound's loudness, dBFS)
-#   modulated FROM TO DB     the loudness in 5 ms steps wavers about its
+#   modulated FROM TO DB [MAX]  the loudness in 5 ms steps wavers about its
 #                            200 ms mean by at least DB (standard
 #                            deviation): a tremolo, a roll
+#   louder HZ F1 T1 F2 T2 DB HZ's level over F1..T1 at least DB over
+#                            F2..T2 (an accent, sfz, fp; HZ 0 loudness)
+#   ratio HZ HZ2 FROM TO LO HI   HZ2's level less HZ's within LO..HI dB
+#   brighter HZ HZ2 F1 T1 F2 T2 DB  that ratio over F2..T2 at least DB
+#                            above it over F1..T1 (brightness)
+#   pan HZ FROM TO LO HI     HZ's left channel less its right, dB
+#   dip HZ AT LO HI          HZ's lowest 20 ms level within 40 ms of AT,
+#                            below its loudest 60-200 ms before, by
+#                            LO..HI dB (a gap, a re-attack, a tie's none)
+#   vibrato HZ FROM TO LO HI the pitch near HZ in 60 ms windows (every
+#                            20 ms) spans LO..HI percent
 #   rms FROM TO LO HI        the loudness (both channels, dBFS) in
 #                            FROM..TO between LO and HI
 #   noclip                   no sample at full scale
@@ -78,9 +89,9 @@ def read(path):
     s = struct.unpack("<%dh" % (n * ch), pcm[:n * ch * 2])
     if ch == 1:
         mono = list(s)
-    else:
-        mono = [(s[2 * k] + s[2 * k + 1]) / 2 for k in range(n)]
-    return rate, mono, s
+        return rate, mono, s, mono, mono
+    mono = [(s[2 * k] + s[2 * k + 1]) / 2 for k in range(n)]
+    return rate, mono, s, list(s[0::2]), list(s[1::2])
 
 
 def start_of(mono):
@@ -93,24 +104,25 @@ def start_of(mono):
 
 class Sound:
     def __init__(self, path):
-        self.rate, self.mono, self.raw = read(path)
+        self.rate, self.mono, self.raw, self.left, self.right = read(path)
         self.t0 = start_of(self.mono)
         self.floors = {}
 
     def frame(self, ms):
         return self.t0 + int(ms * self.rate / 1000)
 
-    def level(self, hz, a, b):
-        """HZ's power in frames a..b, dB (Goertzel, Hann window)."""
+    def level(self, hz, a, b, x=None):
+        """HZ's power in frames a..b of X (both channels), dB (Goertzel, Hann window)."""
+        if x is None:
+            x = self.mono
         a = max(a, 0)
-        b = min(b, len(self.mono))
+        b = min(b, len(x))
         n = b - a
         if n < 16:
             return -200.0
         w = 2 * math.pi * hz / self.rate
         c = 2 * math.cos(w)
         s1 = s2 = 0.0
-        x = self.mono
         for k in range(n):
             h = 0.5 - 0.5 * math.cos(2 * math.pi * k / (n - 1))
             s0 = x[a + k] * h + c * s1 - s2
@@ -142,6 +154,24 @@ class Sound:
             lv = [v for _, v in self.series(hz, 0, total, 50, 50)]
             self.floors[hz] = min(lv) if lv else -200.0
         return self.floors[hz]
+
+    def lv(self, hz, f, t, x=None):
+        """HZ's level over F..T ms (HZ 0: the loudness), dB."""
+        if hz == 0:
+            return self.rms(f, t)
+        return self.level(hz, self.frame(f), self.frame(t), x)
+
+    def pitch(self, hz, f, t):
+        """The strongest frequency within 2% of HZ over F..T ms (0.02% steps)."""
+        best, at = -1e9, hz
+        k = -100
+        while k <= 100:
+            g = hz * (1 + k / 5000.0)
+            v = self.level(g, self.frame(f), self.frame(t))
+            if v > best:
+                best, at = v, g
+            k += 1
+        return at
 
     def rms(self, f, t):
         a, b = self.frame(f), self.frame(t)
@@ -221,7 +251,41 @@ def judge(snd, w):
         if not dev:
             return False, "too short"
         sd = math.sqrt(sum(d * d for d in dev) / len(dev))
-        return sd >= db, "%.0f-%.0f ms: the loudness wavers %.2f dB (standard deviation in 5 ms steps about its 200 ms mean; want >= %.1f)" % (f, t, sd, db)
+        top = float(w[4]) if len(w) > 4 else 1e9
+        return db <= sd <= top, "%.0f-%.0f ms: the loudness wavers %.2f dB (standard deviation in 5 ms steps about its 200 ms mean; want %.1f..%s)" % (f, t, sd, db, w[4] if len(w) > 4 else "")
+    if op == "louder":
+        f1, t1, f2, t2, db = map(float, w[2:7])
+        d = snd.lv(hz, f1, t1) - snd.lv(hz, f2, t2)
+        return d >= db, "%.0f Hz: %.0f-%.0f ms is %.1f dB over %.0f-%.0f ms (want >= %.0f)" % (hz, f1, t1, d, f2, t2, db)
+    if op == "ratio":
+        h2, f, t, lo, hi = float(w[2]), float(w[3]), float(w[4]), float(w[5]), float(w[6])
+        d = snd.lv(h2, f, t) - snd.lv(hz, f, t)
+        return lo <= d <= hi, "%.0f Hz against %.0f Hz over %.0f-%.0f ms: %.1f dB (want %.0f..%.0f)" % (h2, hz, f, t, d, lo, hi)
+    if op == "brighter":
+        h2 = float(w[2])
+        f1, t1, f2, t2, db = map(float, w[3:8])
+        r1 = snd.lv(h2, f1, t1) - snd.lv(hz, f1, t1)
+        r2 = snd.lv(h2, f2, t2) - snd.lv(hz, f2, t2)
+        return r2 - r1 >= db, "%.0f Hz against %.0f Hz: %.1f dB over %.0f-%.0f ms, %.1f dB over %.0f-%.0f ms: %.1f dB brighter (want >= %.0f)" % (h2, hz, r1, f1, t1, r2, f2, t2, r2 - r1, db)
+    if op == "pan":
+        f, t, lo, hi = map(float, w[2:6])
+        d = snd.lv(hz, f, t, snd.left) - snd.lv(hz, f, t, snd.right)
+        return lo <= d <= hi, "%.0f Hz %.0f-%.0f ms: left %.1f dB over right (want %.0f..%.0f)" % (hz, f, t, d, lo, hi)
+    if op == "dip":
+        at, lo, hi = map(float, w[2:5])
+        ref = max(v for _, v in snd.series(hz, at - 200, at - 60, 20, 5))
+        low = min(v for _, v in snd.series(hz, at - 40, at + 40, 20, 2.5))
+        d = ref - low
+        return lo <= d <= hi, "%.0f Hz at %.0f ms dips %.1f dB (want %.0f..%.0f)" % (hz, at, d, lo, hi)
+    if op == "vibrato":
+        f, t, lo, hi = map(float, w[2:6])
+        ps = []
+        ms = f
+        while ms + 60 <= t:
+            ps.append(snd.pitch(hz, ms, ms + 60))
+            ms += 20
+        sp = (max(ps) - min(ps)) / hz * 100
+        return lo <= sp <= hi, "%.0f Hz %.0f-%.0f ms: the pitch spans %.2f%% (%.1f to %.1f Hz; want %.2f..%.2f%%)" % (hz, f, t, sp, min(ps), max(ps), lo, hi)
     if op == "rms":
         f, t, lo, hi = hz, float(w[2]), float(w[3]), float(w[4])
         r = snd.rms(f, t)
