@@ -46,7 +46,8 @@
 //!     other         a destination that is not this station's address,
 //!                   the limited broadcast or this subnet's broadcast
 //!     protocol      a protocol nothing here speaks (anything but
-//!                   ICMP). Counted here; kernel/netd asks kernel/icmp
+//!                   ICMP and, since px22, UDP). Counted here;
+//!                   kernel/netd asks kernel/icmp
 //!                   to say so to the sender
 //!
 //! What passes is delivered by its protocol number. `input` returns
@@ -98,6 +99,8 @@ pub const PAYLOAD_MAX: u64 = 1480
 pub const TTL: u64 = 64
 /// ICMP's protocol number.
 pub const ICMP: u64 = 1
+/// UDP's (px22).
+pub const UDP: u64 = 17
 
 // pax_ip_state's words.
 const I_ADDR: u64 = 0
@@ -152,6 +155,8 @@ pub const DROP: u64 = 0
 pub const TO_ICMP: u64 = 1
 /// Its protocol is unknown; the sender may be told.
 pub const NO_PROTOCOL: u64 = 2
+/// It is UDP's (px22).
+pub const TO_UDP: u64 = 3
 
 /// `send`'s answers beyond kernel/arp's SENT, QUEUED, DROPPED and
 /// FAILED: the payload is over 1480 bytes.
@@ -337,7 +342,7 @@ fn options(a: u64, n: u64) -> u64 {
 
 /// Judge the datagram in the `len`-byte frame at `frame` (type 0x0800;
 /// kernel/netd, thread context). Returns `(what, ihl, total)`: DROP
-/// (the cause counted), TO_ICMP or NO_PROTOCOL, the header's length in
+/// (the cause counted), TO_ICMP, TO_UDP or NO_PROTOCOL, the header's length in
 /// bytes and the datagram's total length.
 pub fn input(frame: u64, len: u64) -> (u64, u64, u64) {
     let h = frame + ETH
@@ -386,6 +391,10 @@ pub fn input(frame: u64, len: u64) -> (u64, u64, u64) {
     if octet(h + 9) == ICMP {
         bump(C_RX)
         return (TO_ICMP, ihl, total)
+    }
+    if octet(h + 9) == UDP {
+        bump(C_RX)
+        return (TO_UDP, ihl, total)
     }
     bump(C_PROTOCOL)
     (NO_PROTOCOL, ihl, total)
