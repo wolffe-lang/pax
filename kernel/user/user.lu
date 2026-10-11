@@ -102,6 +102,16 @@
 //!   `killed: SIGPIPE` line) when its action is the default and it is
 //!   not blocked and the writer is not pid 1, else answers -EPIPE. A
 //!   process's end closes its descriptors.
+//! - sockets (px22, kernel/socket and kernel/udp: what the UDP witnesses
+//!   make on Linux, `notes/px22/`): `socket` (41), `bind` (49), `connect`
+//!   (42), `sendto` (44), `recvfrom` (45), `getsockname` (51),
+//!   `getpeername` (52), `setsockopt` (54), `getsockopt` (55) for
+//!   AF_INET datagram sockets, `listen` (50), `accept` (43) and `accept4`
+//!   (288) answered -EOPNOTSUPP on one; `read` and `write` on a socket
+//!   are `recvfrom` and `sendto` with no address. A receive that must
+//!   wait parks the thread as a pipe's read does, until a datagram or
+//!   the socket's receive timeout. `sendmsg` (46), `recvmsg` (47) and
+//!   `shutdown` (48) are not here.
 //! Every other number is -ENOSYS, logged once per program (`unknown`),
 //! among them `set_robust_list` (273) and `rseq` (334), which glibc
 //! tolerates (px09's hello asks `_sysctl` (156), which Linux answers
@@ -160,6 +170,7 @@ use panic
 use process
 use sched
 use serial
+use socket
 use speaker
 use timer
 use uaccess
@@ -545,6 +556,9 @@ fn readable(buf: u64, len: u64) -> bool {
 /// anything else (closed, read-only, a file of the read-only initramfs)
 /// is -EBADF.
 fn write(fd: u64, buf: u64, len: u64) -> u64 {
+    if socket.is_inet(area(), fd) {
+        return socket.sendto(area(), paging.live(), fd, buf, len, 0, 0) // px22
+    }
     let t = files.write_target(area(), fd)
     if t == 2 {
         who()
@@ -655,6 +669,17 @@ const SYS_CHDIR: u64 = 80
 const SYS_FCHDIR: u64 = 81
 const SYS_PIPE2: u64 = 293
 const MSG_NOSIGNAL: u64 = 0x4000
+// px22: AF_INET datagram sockets (kernel/socket).
+const SYS_SOCKET: u64 = 41
+const SYS_CONNECT: u64 = 42
+const SYS_ACCEPT: u64 = 43
+const SYS_BIND: u64 = 49
+const SYS_LISTEN: u64 = 50
+const SYS_GETSOCKNAME: u64 = 51
+const SYS_GETPEERNAME: u64 = 52
+const SYS_SETSOCKOPT: u64 = 54
+const SYS_GETSOCKOPT: u64 = 55
+const SYS_ACCEPT4: u64 = 288
 const SIGPIPE_STATUS: u64 = 13
 
 const NEG_EPERM: u64 = 0xffffffffffffffff // -1
@@ -731,7 +756,12 @@ fn refusal_line(nr: u64, r: u64) {
     log.put(" syscall ")
     num(nr)
     log.put(": refused: ")
-    log.put(if c < 16 { vm.why(c) } else if c < 32 { files.why(c) } else { process.why(c) })
+    if c >= socket.REFUSALS {
+        log.put(socket.why(c)) // px22
+        socket.detail(area(), c)
+    } else {
+        log.put(if c < 16 { vm.why(c) } else if c < 32 { files.why(c) } else { process.why(c) })
+    }
     log.put(", -")
     num(0xffffffffffffffff - r + 1)
     log.end()
@@ -1008,6 +1038,11 @@ pub fn syscall(f: u64) -> u64 {
         // wait: the call runs again, in its own space, when a pipe changes.
         put_word(f, W_RIP, word(f, W_RIP) - 2)
         put_word(f, W_RAX, nr)
+        // px22: a receive with a timeout waits until its deadline at most.
+        let until = socket.deadline(area())
+        if until != 0 {
+            return sched.block_pipe_until(f, until)
+        }
         return sched.block_pipe(f)
     }
     if r == files.EPIPE_R && (nr == SYS_WRITE || (nr == SYS_SENDTO && a3 & MSG_NOSIGNAL == 0)) && process.sigpipe_kills() {
@@ -1048,11 +1083,14 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     let pml4 = paging.live()
     // The calls whose first argument is an int (a descriptor), read as
     // one; the others take r0 whole.
-    let a0 = if nr == SYS_READ || nr == SYS_WRITE || nr == SYS_PREAD64 || nr == SYS_OPENAT || nr == SYS_CLOSE || nr == SYS_LSEEK || nr == SYS_FSTAT || nr == SYS_NEWFSTATAT || nr == SYS_STATX || nr == SYS_GETDENTS64 || nr == SYS_IOCTL || nr == SYS_READLINKAT || nr == SYS_DUP || nr == SYS_DUP2 || nr == SYS_DUP3 || nr == SYS_FCNTL || nr == SYS_FCHDIR || nr == SYS_SENDTO || nr == SYS_RECVFROM { int32(r0) } else { r0 }
+    let a0 = if nr == SYS_READ || nr == SYS_WRITE || nr == SYS_PREAD64 || nr == SYS_OPENAT || nr == SYS_CLOSE || nr == SYS_LSEEK || nr == SYS_FSTAT || nr == SYS_NEWFSTATAT || nr == SYS_STATX || nr == SYS_GETDENTS64 || nr == SYS_IOCTL || nr == SYS_READLINKAT || nr == SYS_DUP || nr == SYS_DUP2 || nr == SYS_DUP3 || nr == SYS_FCNTL || nr == SYS_FCHDIR || nr == SYS_SENDTO || nr == SYS_RECVFROM || nr == SYS_SOCKET || nr == SYS_CONNECT || nr == SYS_ACCEPT || nr == SYS_BIND || nr == SYS_LISTEN || nr == SYS_GETSOCKNAME || nr == SYS_GETPEERNAME || nr == SYS_SETSOCKOPT || nr == SYS_GETSOCKOPT || nr == SYS_ACCEPT4 { int32(r0) } else { r0 }
     if nr == SYS_WRITE {
         return write(a0, a1, a2)
     }
     if nr == SYS_READ {
+        if socket.is_inet(a, a0) {
+            return socket.recvfrom(a, pml4, a0, a1, a2, 0, 0, 0) // px22
+        }
         return files.read(a, pml4, a0, a1, a2)
     }
     if nr == SYS_PREAD64 {
@@ -1120,10 +1158,41 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
         return files.socketpair(a, pml4, int32(a0), int32(a1), int32(a2), a3)
     }
     if nr == SYS_SENDTO {
+        if socket.is_inet(a, a0) {
+            return socket.sendto(a, pml4, a0, a1, a2, a4, int32(a5)) // px22
+        }
         return files.sendto(a, pml4, a0, a1, a2, int32(a3), a4)
     }
     if nr == SYS_RECVFROM {
+        if socket.is_inet(a, a0) {
+            return socket.recvfrom(a, pml4, a0, a1, a2, int32(a3), a4, a5) // px22
+        }
         return files.recvfrom(a, pml4, a0, a1, a2, int32(a3), a4, a5)
+    }
+    // px22: AF_INET datagram sockets.
+    if nr == SYS_SOCKET {
+        return socket.socket(a, a0, int32(a1), int32(a2))
+    }
+    if nr == SYS_BIND {
+        return socket.bind(a, pml4, a0, a1, int32(a2))
+    }
+    if nr == SYS_CONNECT {
+        return socket.connect(a, pml4, a0, a1, int32(a2))
+    }
+    if nr == SYS_GETSOCKNAME {
+        return socket.getname(a, pml4, a0, a1, a2, false)
+    }
+    if nr == SYS_GETPEERNAME {
+        return socket.getname(a, pml4, a0, a1, a2, true)
+    }
+    if nr == SYS_SETSOCKOPT {
+        return socket.setsockopt(a, pml4, a0, int32(a1), int32(a2), a3, int32(a4))
+    }
+    if nr == SYS_GETSOCKOPT {
+        return socket.getsockopt(a, pml4, a0, int32(a1), int32(a2), a3, a4)
+    }
+    if nr == SYS_LISTEN || nr == SYS_ACCEPT || nr == SYS_ACCEPT4 {
+        return socket.no_connections(a, a0, nr)
     }
     if nr == SYS_FCNTL {
         return files.fcntl(a, a0, int32(a1), a2)
