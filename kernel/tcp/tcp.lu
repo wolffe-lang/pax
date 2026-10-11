@@ -560,46 +560,43 @@ fn rotl(x: u64, k: u64) -> u64 {
     ((x << k) | (x >> (32 - k))) & M32
 }
 
+/// One ARX round of HalfSipHash's on four 32-bit words.
+fn mix(a: u64, b: u64, c: u64, d: u64) -> (u64, u64, u64, u64) {
+    let a1 = (a + b) & M32
+    let b1 = rotl(b, 5) ^ a1
+    let a2 = rotl(a1, 16)
+    let c1 = (c + d) & M32
+    let d1 = rotl(d, 8) ^ c1
+    let a3 = (a2 + d1) & M32
+    let d2 = rotl(d1, 7) ^ a3
+    let c2 = (c1 + b1) & M32
+    let b2 = rotl(b1, 13) ^ c2
+    (a3, b2, rotl(c2, 16), d2)
+}
+
+/// A word taken in: two rounds around it.
+fn absorb(a: u64, b: u64, c: u64, d: u64, m: u64) -> (u64, u64, u64, u64) {
+    let (a1, b1, c1, d1) = mix(a, b, c, d ^ m)
+    let (a2, b2, c2, d2) = mix(a1, b1, c1, d1)
+    (a2 ^ m, b2, c2, d2)
+}
+
 /// The keyed function of RFC 6528's F: 32 bits from the four addresses
-/// and ports under this boot's key, four ARX rounds a word in the
-/// shape of HalfSipHash-2-4.
+/// and ports under this boot's key, in the shape of HalfSipHash-2-4:
+/// two rounds for each of three words taken in and a fourth that says
+/// how many, then four rounds.
 fn keyed(la: u64, lp: u64, ra: u64, rp: u64) -> u64 {
     let k0 = tw(T_KEY) & M32
     let k1 = tw(T_KEY) >> 32
-    var v0: u64 = k0
-    var v1: u64 = k1
-    var v2: u64 = 0x6c796765 ^ k0
-    var v3: u64 = 0x74656462 ^ k1
-    var i: u64 = 0
-    while i < 4 {
-        let m: u64 = if i == 0 { la } else if i == 1 { ra } else if i == 2 { (lp << 16 | rp) & M32 } else { 0x0c0000ff }
-        if i < 3 {
-            v3 = v3 ^ (m & M32)
-        } else {
-            v3 = v3 ^ m
-            v2 = v2 ^ 0xff
-        }
-        var r: u64 = 0
-        let rounds: u64 = if i < 3 { 2 } else { 4 }
-        while r < rounds {
-            v0 = (v0 + v1) & M32
-            v1 = rotl(v1, 5) ^ v0
-            v0 = rotl(v0, 16)
-            v2 = (v2 + v3) & M32
-            v3 = rotl(v3, 8) ^ v2
-            v0 = (v0 + v3) & M32
-            v3 = rotl(v3, 7) ^ v0
-            v2 = (v2 + v1) & M32
-            v1 = rotl(v1, 13) ^ v2
-            v2 = rotl(v2, 16)
-            r += 1
-        }
-        if i < 3 {
-            v0 = v0 ^ (m & M32)
-        }
-        i += 1
-    }
-    v1 ^ v3
+    let (a1, b1, c1, d1) = absorb(k0, k1, 0x6c796765 ^ k0, 0x74656462 ^ k1, la & M32)
+    let (a2, b2, c2, d2) = absorb(a1, b1, c1, d1, ra & M32)
+    let (a3, b3, c3, d3) = absorb(a2, b2, c2, d2, (lp << 16 | rp) & M32)
+    let (a4, b4, c4, d4) = absorb(a3, b3, c3, d3, 0x0c000000)
+    let (e1, f1, g1, h1) = mix(a4, b4, c4 ^ 0xff, d4)
+    let (e2, f2, g2, h2) = mix(e1, f1, g1, h1)
+    let (e3, f3, g3, h3) = mix(e2, f2, g2, h2)
+    let (_e4, f4, _g4, h4) = mix(e3, f3, g3, h3)
+    f4 ^ h4
 }
 
 /// An initial sequence number for a connection (RFC 6528).
