@@ -2719,19 +2719,11 @@ pub fn report() {
     log.end()
 }
 
-/// The counters' eight lines (the first seven count the wire's and
-/// loopback's segments together; the last says how many were
-/// loopback's, so a capture of the wire can be held to the difference):
-///
-///     tcp: rx <n> segments, dropped <…> short <…> header <…> checksum <…> broadcast <…> port-zero <…> option
-///     tcp: rx for nobody <a> reset, <b> resets dropped; listeners <c> listen-full <d> no-block <e> other; <f> unacceptable <g> reset-challenged <h> syn-challenged <i> ack-ahead <j> no-ack
-///     tcp: rx data <b> bytes in order, <q> out-of-order queued, <d> out-of-order-dropped, <t> trimmed, <a> after-close, <s> syn-data, <u> urgent; <r> resets taken, <k> duplicate acks
-///     tcp: options <m> mss, skipped <…> window-scale <…> sack-permitted <…> sack <…> timestamps <…> fast-open <…> other
-///     tcp: tx <n> segments (<d> with data, <b> bytes; <a> acks, <r> resets, <p> probes), <f> not sent; <x> retransmitted, <t> timeouts, <q> fast retransmits, <s> round trips measured, <w> window updates, <o> persist
-///     tcp: connections <a> active, <p> passive, <c> accepted, <r> refused, <g> gave-up, <h> half-open gone, <k> reset at close, <s> simultaneous, <n> no-frames; icmp <x> ended a connect, <y> ignored
-///     tcp: blocks <m> made, <f> freed, <u> in use; time-wait <w> made, <e> evicted, <o> reopened, <s> segments answered, <r> resets ignored, <l> waiting
-///     tcp: loopback <o> segments sent, <i> received, <x> retransmitted
-pub fn counters() {
+// One function a line: wolf 0.2.27's release tier inlines `log.put` and
+// `log.dec` (a loop each) at every call, and its range pass took seven
+// minutes over the eight lines as one function.
+
+fn line_dropped() {
     log.put("tcp: rx ")
     log.dec(tw(C_IN) as int)
     log.put(" segments, dropped")
@@ -2742,6 +2734,9 @@ pub fn counters() {
     item(C_PORT_ZERO, "port-zero")
     item(C_OPTION, "option")
     log.end()
+}
+
+fn line_refused() {
     log.put("tcp: rx for nobody ")
     log.dec(tw(C_NO_CONN) as int)
     log.put(" reset, ")
@@ -2756,6 +2751,9 @@ pub fn counters() {
     item(C_ACK_AHEAD, "ack-ahead")
     item(C_NO_ACK, "no-ack")
     log.end()
+}
+
+fn line_data() {
     log.put("tcp: rx data ")
     log.dec(tw(C_BYTES_IN) as int)
     log.put(" bytes in order,")
@@ -2768,6 +2766,9 @@ pub fn counters() {
     item(C_RST_IN, "resets taken,")
     item(C_DUP_ACKS, "duplicate acks")
     log.end()
+}
+
+fn line_options() {
     log.put("tcp: options ")
     log.dec(tw(C_OPT_MSS) as int)
     log.put(" mss, skipped")
@@ -2778,6 +2779,9 @@ pub fn counters() {
     item(C_OPT_TFO, "fast-open")
     item(C_OPT_OTHER, "other")
     log.end()
+}
+
+fn line_sent() {
     log.put("tcp: tx ")
     log.dec(tw(C_OUT) as int)
     log.put(" segments (")
@@ -2800,6 +2804,9 @@ pub fn counters() {
     item(C_WINDOW_UPDATES, "window updates,")
     item(C_PERSIST, "persist")
     log.end()
+}
+
+fn line_connections() {
     log.put("tcp: connections")
     item(C_ACTIVE, "active,")
     item(C_PASSIVE, "passive,")
@@ -2813,6 +2820,9 @@ pub fn counters() {
     item(C_ICMP_HARD, "ended a connect,")
     item(C_ICMP_SOFT, "ignored")
     log.end()
+}
+
+fn line_blocks() {
     log.put("tcp: blocks ")
     log.dec(tw(C_MADE) as int)
     log.put(" made, ")
@@ -2829,6 +2839,9 @@ pub fn counters() {
     log.dec(waiting() as int)
     log.put(" waiting")
     log.end()
+}
+
+fn line_loopback() {
     log.put("tcp: loopback ")
     log.dec(tw(C_LOOP_OUT) as int)
     log.put(" segments sent, ")
@@ -2837,4 +2850,27 @@ pub fn counters() {
     log.dec(tw(C_LOOP_REXMT) as int)
     log.put(" retransmitted")
     log.end()
+}
+
+/// The counters' eight lines (the first seven count the wire's and
+/// loopback's segments together; the last says how many were
+/// loopback's, so a capture of the wire can be held to the difference):
+///
+///     tcp: rx <n> segments, dropped <…> short <…> header <…> checksum <…> broadcast <…> port-zero <…> option
+///     tcp: rx for nobody <a> reset, <b> resets dropped; listeners <c> listen-full <d> no-block <e> other; <f> unacceptable <g> reset-challenged <h> syn-challenged <i> ack-ahead <j> no-ack
+///     tcp: rx data <b> bytes in order, <q> out-of-order queued, <d> out-of-order-dropped, <t> trimmed, <a> after-close, <s> syn-data, <u> urgent; <r> resets taken, <k> duplicate acks
+///     tcp: options <m> mss, skipped <…> window-scale <…> sack-permitted <…> sack <…> timestamps <…> fast-open <…> other
+///     tcp: tx <n> segments (<d> with data, <b> bytes; <a> acks, <r> resets, <p> probes), <f> not sent; <x> retransmitted, <t> timeouts, <q> fast retransmits, <s> round trips measured, <w> window updates, <o> persist
+///     tcp: connections <a> active, <p> passive, <c> accepted, <r> refused, <g> gave-up, <h> half-open gone, <k> reset at close, <s> simultaneous, <n> no-frames; icmp <x> ended a connect, <y> ignored
+///     tcp: blocks <m> made, <f> freed, <u> in use; time-wait <w> made, <e> evicted, <o> reopened, <s> segments answered, <r> resets ignored, <l> waiting
+///     tcp: loopback <o> segments sent, <i> received, <x> retransmitted
+pub fn counters() {
+    line_dropped()
+    line_refused()
+    line_data()
+    line_options()
+    line_sent()
+    line_connections()
+    line_blocks()
+    line_loopback()
 }
