@@ -355,3 +355,277 @@ queue's drain: the first loopback exchange that waits in `epoll_wait`
 or `poll` for its own process's traffic never returns; the suite's
 stall check (the serial log not growing) stops the boot in about 300 s
 and no later boot is started.
+
+## What was built
+
+1. **Readiness** (`kernel/ready`, `kernel/event`, `kernel/files`):
+   `poll` (7); `epoll_create1` (291), `epoll_ctl` (233), `epoll_wait`
+   (232) with level-triggered, edge-triggered and one-shot
+   registrations; `eventfd2` (290). Every kind of descriptor answers
+   which of POLLIN, POLLOUT, POLLERR, POLLHUP and POLLRDHUP hold now
+   and two counts (something new came; room came back); a call that
+   finds nothing parks and looks again at the next change anywhere.
+   16 epoll objects of 256 registrations (four frames an object, given
+   back at its last close), 64 eventfd counters.
+2. **The rest of the two lists** (`kernel/user`, `kernel/signal`,
+   `kernel/socket`, `kernel/sched`): `writev` (20), `sigaltstack` (131)
+   with SA_ONSTACK honoured, `sched_getaffinity` (204), `getrandom`'s
+   flags, `getsockopt(SO_ACCEPTCONN)`, -EALREADY, `F_SETFL` on the
+   console's three descriptors; a waiting send's progress and a wait's
+   deadline in the thread's own words.
+3. **Bounds**: 64 thread slots, 128 descriptors a process (the process
+   area is 8,192 bytes), 512 open files, 64 pipe buffers, 256 TCP
+   blocks, a listen queue of at most 129.
+4. **Three things in others' modules, each because a witness was wrong
+   without it.** `kernel/tcp`: a connection that is reset keeps the
+   bytes it had received in order for its reader (Linux hands them over
+   and then the error: `pollprobe`'s "its read: the 6 bytes"; px23 threw
+   them away). `kernel/net`: `send` looks again, up to 200,000 times
+   with a PAUSE between, for a transmit buffer the device has returned
+   before it answers `full` (under KVM 64 connections answered together
+   filled the 64 buffers once: `net: tx … 1 full`, hasu, the first
+   round). `kernel/sched`: the page table for the upper thread slots'
+   stacks is taken at start (the first process with more than thirty
+   threads left the count of free frames one short for good).
+5. **Witnesses** (`user/net/`, built by `tools/mknet`): the probes
+   `nbprobe`, `pollprobe`, `epollprobe`, `evprobe`, `restprobe`;
+   `epollecho` (a server on epoll, its driver, the storm, the soak);
+   `pair` (a server and a client as one line of a run list);
+   `waitwolf.lu`.
+6. **The other ends**: `tools/net-peer --ready` (the script's own TCP:
+   64 handshakes begun at once, the storms, the soak, the wolf witness
+   asked and answered), `tools/ready-host` (ordinary sockets behind
+   QEMU's user-mode network), `tools/linux-net --ready` (the same
+   script against Linux on a tap device: the reference every output is
+   held to).
+7. **Tests**: `tests/mpx4-ready` (T0–T9; three ways, two tiers, two
+   firmwares: 12 boots) and its CI job.
+
+**Found on the way.**
+
+- **A wolf task's stack is 8 MiB that PAX backs at its `mmap`.** With
+  the 19 MiB initramfs in a 256 MiB machine the two-process witness
+  ran out: `syscall 9: refused: out of frames, -12`, then a thread
+  could not be made (`failed to spawn thread … WouldBlock`) and the
+  runtime gave up. The suite boots with 1 GiB. Memory taken when a page
+  is first touched is the fix, and it is not here.
+- **QEMU's forwarded port has a short queue of its own.** Of 64
+  connections this host began at once to a `hostfwd=tcp` port, some
+  never reached the guest (one capture: 52 SYNs of 65, every one
+  answered by PAX); held to four CPUs the forward refused a connect
+  outright. `tools/ready-host` makes its connections one after another
+  and makes a refused one again (counted: 0 in every run kept).
+  Through the forward the soak runs at about 60 connections a second
+  on every host, KVM too: the pace is QEMU's.
+- **`kernel/arp` drops the kernel's own frames when an entry ages
+  under load.** An entry is good for 60 s; the next send after that
+  asks again and keeps two frames for the address, pushing out the
+  rest. With one connection at a time that costs nothing; with 64
+  sending, or a window of a bulk transfer going out, it costs the
+  frames (CI run 38151712372: `pending 9 queued, 3 sent, 6 pushed out`
+  in `mpx4-ready`'s user boot and `14 pushed out` in `mpx4-tcp`'s
+  native UEFI peer boot, each red in `tools/pcap-net`: the kernel had
+  counted as sent what never reached the wire). TCP retransmits and
+  every transfer stays exact. `tools/pcap-net` now holds such segments
+  to the gaps in the IP identifications and to the kernel's own count
+  of what it pushed out, and reads a gap in a connection's bytes at
+  such a place as bytes not yet seen. The cache itself is not changed:
+  pax#32.
+- **`writev` to a pipe is one write.** Written a part at a time it
+  answered 3000 where Linux answers 4096 (3000 and 3000 into room for
+  4096), and wrote the first part of a call whose second was a bad
+  pointer. The sum now decides PIPE_BUF's all-or-nothing rule and every
+  part is checked before a byte is taken.
+- **The release tier's time over `kmain_sockets` grew threefold**
+  (below, wolf-lang#711's shape again). One call, `ready.report()` from
+  the function that prints the books, is 20 s of it; writing it a
+  function a count did not help.
+- A probe's first form hung on Linux itself (a blocking read of an
+  empty pipe) and another printed two waits in the order the compiler
+  chose to evaluate a call's arguments: both were the probes' faults,
+  found by running them on Linux before PAX.
+- `eventfd`'s `write` of nine bytes is -EINVAL on kasumi's Linux 7.2.8,
+  where eventfd(2) says only "less than 8"; the line is not in the
+  probe (the CI runner's kernel is another), and PAX follows the man
+  page.
+
+## 3. The prediction against the measurement
+
+| predicted | measured |
+|---|---|
+| P1: the runtime `epoll`, level-triggered, one-shot, `EPOLLRDHUP`, an `eventfd`; lobo's loop `poll(POLLIN)`; `EPOLLET` and `EPOLL_CTL_MOD` only for the C witnesses | so. Not predicted: a write that must wait registers `EPOLLOUT\|EPOLLRDHUP\|EPOLLONESHOT` (found by making the witness's reader nap, before the design) |
+| P2: computed at the wait; every waiter woken at every change; no queue, no lock; `epoll_ctl` wakes; two counts for edge triggering | so (`kernel/ready`'s header). Console input wakes the waiters too (`sched.wake_input`), which the prediction did not say |
+| P2: fewer than 4 runs of `epoll_wait` for each that answers in the soak, fewer than 3 in the storm | **right on kasumi's native kernel and in every `none` and `user` boot** (8 to 24 calls that found nothing for each hundred waits). **Wrong on the release kernel against the script** (`peer`): 176 to 197 for each hundred waits — a call run again finds nothing about twice for each time a thread parks (8,423 answers, 5,949 waits, 10,588 empty: 2.3 runs an answer, still under 4). Over the wire each arriving segment wakes every waiter and the echo's own answer is another change. The storm alone was not counted apart |
+| P3: 16 objects of 254 registrations | 16 of **256** (four frames hold 256 eight-word registrations; 254 was a slip of arithmetic) |
+| P3: the errnos; a registration lasts as long as its open file; shared across `fork`; nesting refused -EINVAL | each as Linux answered `epollprobe` (112 lines identical); nesting and `EPOLLEXCLUSIVE` refused -EINVAL by name (the probe's two `~` lines). Not predicted: the console or `/dev/null` in an epoll object is refused by name, -EPERM (they keep no open file); `lseek` on an epoll descriptor answers 0 on Linux, and on an eventfd too |
+| P4: an eventfd is a descriptor kind on an open file over one of 64 counters; no semaphore mode | so; its mode is 0600 with no type (measured) |
+| P5: eight numbers: 7, 20, 131, 204, 232, 233, 290, 291 | **those eight** |
+| P5: the refusals and their errnos | as built. **Not exercised by any probe:** -EALREADY (the probe's second `connect` comes after the handshake, where Linux and PAX answer 0), `SS_AUTODISARM`, `EPOLLWAKEUP`, an event bit PAX never raises, a 17th epoll object, a 257th registration, `sigaltstack`'s -EPERM from the stack itself is exercised |
+| P5: the clocks: `CLOCK_MONOTONIC` and `CLOCK_REALTIME`, a tick's resolution | the wolf witness asks **`CLOCK_MONOTONIC` alone** (`notes/px24/pax/clocks.txt`: a scratch kernel that logged each clock id once a process); 4 or 5 distinct readings in 2,000 reads (`~clock`); `clock_getres` was asked by nothing and stays -ENOSYS |
+| P6: the lines left to others | as listed below ("What px25 inherits") |
+| P7: 256 blocks, a listen queue of 129, 128 descriptors, 512 open files, 64 pipes, 64 slots | so |
+| P7: `.bss` grows by about 1.1 MiB, every free-frame count falls by about 280 | **752 KiB**: `kmain_sockets` 462,904 to 1,232,952 bytes of `.bss` (188 frames), and 48 more for the FPU areas of 48 more slots |
+| P7: the wolf witness's boots take 1 GiB | so, and measured to be needed (above) |
+| P8: the wolf witness on kasumi's TCG, native / release: 300 / 500 requests and 120 / 200 connections a second | **553 to 939 / 3,936 to 4,882 requests; 27 to 46 / 196 to 244 connections** (two gauntlets, 8 boots each; the low ends are boots that shared the host with a copy to hasu). Native requests inside the 3× bar, release requests eight times the prediction: wrong. Connections: native a third of the prediction (the run is 120 connections in 2.6 s, of which two process starts are most), release right |
+| P8: CI: 200 / 350 requests | native 430 (run 38151712372, the one boot read); the head's run is in the PR |
+| P8: KVM, hasu: 5,000 requests and 2,000 connections a second | KVMWOLF |
+| P8: the echo server's soak 800 connections a second on TCG, 30,000 requests a second under KVM | kasumi native **753 to 1,598** connections a second over loopback and 1,205 to 1,971 against the script; release 9,070 to 10,172 and 4,031 to 4,846; KVMECHO. Through QEMU's forward 57 to 71 on every host |
+| P8: each kernel's build within 20% of trunk's | **wrong for `kmain_sockets`**: `wolf build --release --no-cache`, trunk and head by turns on a quiet kasumi: 18.5 and 20.1 s at trunk, 58.1 to 66.5 s at head; `kmain_console` 55.1 and 55.2 s at trunk, **33.5 and 36.3 s at head** (faster, unexplained). Without the call of `ready.report()` the head's `kmain_sockets` takes 41 s. `tools/build-kernel` (cached, with its IR pass) took 70 to 240 s for the same kernel at the head across this lane's runs and 126 and 135 s in CI. No timeout was raised |
+| P9: every kernel's bytes; pinned frame counts; `stack frames` 333 unchanged; `mpx4-tcp` and `mpx4-udp` books unchanged; -ENOSYS sets `273 334` | bytes: so; 333: so; -ENOSYS sets: so. **Not predicted, and moved:** `tests/tour`'s `sched: … 16 slots` line (64) and `tests/mpx4-tcp` T1's `tcp: 64 blocks` (256): both found red, the first in CI run 38151712372 (job tour), the second before the first push; `tools/pcap-net`'s two rules (above). No frame count was pinned anywhere |
+| P10: `waitwolf` on trunk's kernel stops at `epoll_create1` with a message of the runtime's and a status that is not 0 | **right**: -ENOSYS for 204, 131 and 291, the runtime's `epoll_create1 failed`, then `killed: general protection` (`notes/px24/red/trunk-kernel.wolf-and-probes.serial.txt`); every `poll` and `epoll` line of the probes -ENOSYS, and `pollprobe` never ends (its wait for a child's write is a `poll` that answers at once) |
+| P11 (a): an edge-triggered registration that answers again: the probe's edge lines differ on the first boot | **right**: `edge: asked again, nothing new: 1; [1] EPOLLIN` where Linux says 0; the boot is stopped the moment command 3 has printed it. The storm was never reached, so "the storm counts more than 64" is **not shown** |
+| P11 (b): the call that said "wait" is not run again after the loopback queue's drain | **planted otherwise.** `poll` and `epoll_wait` send nothing, so the drain after them delivers nothing and that rerun never applies to them: the plant as predicted would have been green. The wake a waiter can lose here is `epoll_ctl`'s: a descriptor that became ready between its owner's failed read and its registration, with the waiter already inside `epoll_wait`. That wake was removed, and a probe case added for it first (a child adds a readable pipe while the parent waits): red in the first boot, in seconds, not at a 300 s stall |
+
+## 4. Evidence index
+
+Files are under `notes/px24/`. A digest cut short carries `…`.
+Measured means this lane ran it and read the result.
+
+- **The lists on Linux**: `linux/` — lobo's and the wolf witness's
+  straces, `lobo.shapes.tsv` (99 lines) and `wolf.shapes.tsv`, the
+  scripts, `713.txt` (wolf-lang#713's bound, re-measured), `threads.txt`.
+  The marked list is §2's table.
+- **The probes' verdicts on both.** The same eight binaries
+  (`programs.sums.txt`) on Linux (`linux-side/<k>.linux.out`, by
+  `tools/linux-net --ready` on a tap device with the script at the
+  other end; `linux-side/linux.txt` is each command's set of calls,
+  `peer.txt` the script's account of Linux) and on PAX
+  (`pax/<k>.pax.out`, kasumi, native, BIOS, `peer`): the 13 commands'
+  outputs equal but for five `~` lines. `tests/mpx4-ready` T2 holds
+  every boot to it.
+- **The captures and the checker's verdicts**: `kasumi/kasumi-native-bios-peer.head.pcap`
+  and `…-user.head.pcap` (the first 4,000 frames of each), with
+  `…pcap.check.txt` for the whole captures: 111,485 frames against the
+  script (50,711 from PAX, each rebuilt and equal byte for byte;
+  334,448 checksums recomputed; the kernel's 77 counters the
+  capture's). CI's are in each run's artifact.
+- **Counters, the soak and the storm**: `kasumi/kasumi-tcg-mpx4-ready.out`
+  (the head's kernel, 100 PASS, 0 FAIL, 0 SKIP; 12 boots,
+  `…runs.txt`): after each command every frame back and `epolls 0,
+  registrations 0, eventfds 0`, `open files 0`, `tcp blocks 0`, `heap
+  pages 0` (T3); the storm twice in every boot that runs the server:
+  `storm 2 waits, 64 events, 64 distinct, 0 repeated` with room for
+  all and `storm 5 waits, …` with room for 16 (T8, and the script's
+  own check, T5); 10,064 connections through the server over loopback
+  and again over the wire. A whole transcript:
+  `kasumi/native-bios-peer.transcript.txt`, with the script's account
+  (`native-bios-peer.net-peer.txt`) and the host tool's
+  (`native-bios-user.ready-host.txt`).
+- **Under `taskset -c 0-3`**: `kasumi/kasumi-taskset-0-3-mpx4-ready.out`,
+  the whole suite, rc 0 (the kernel of `6108a51`, before `kernel/net`'s
+  change). Its first try was red in one boot, on the host's side: the
+  forward refused a connect (above); `tools/ready-host` was changed and
+  the suite run again.
+- **Planted breaks, red in CI, failing fast.**
+  - (a) an edge-triggered registration answers again without a count
+    having moved (`e76a483`): run **38154755767**, job 114515323479
+    (mpx4-ready) the only failing job of 23: `ci/ci-38154755767-mpx4-ready-plant-a.txt`.
+    Reverted in `cd7ab48`. On kasumi first: `red/kasumi-plant-a.mpx4-ready.out`.
+  - (b) a registration added or modified wakes nobody (`b286189`):
+    run **38154873744**, job 114515671715 (mpx4-ready) the only
+    failing job of 23: `ci/ci-38154873744-mpx4-ready-plant-b.txt`.
+    Reverted in `6108a51`. On kasumi first: `red/kasumi-plant-b.mpx4-ready.out`.
+  - Each job was red at its first boot (native, BIOS, no device),
+    stopped when command 3 had printed other than Linux did; no later
+    boot was started, so neither plant is shown on any other leg.
+- **Red first, on the trunk's kernel** (`5afb903`, kasumi):
+  `red/trunk-kernel.wolf-and-probes.serial.txt` and
+  `red/trunk-kernel.none.serial.head.txt`.
+- **Kernel build times**: `kasumi/kernel-build-times.raw.txt` (the
+  cached `tools/build-kernel` figures; the first block was taken with
+  the host loaded) and the table's uncached figures
+  (`kasumi/kernel-build-times.no-cache.txt`).
+- **Boot counts.**
+  - kasumi, QEMU 11.1.1, TCG: `tests/mpx4-ready` whole (12 boots)
+    four times green — at `86c8a60` (its output was overwritten by a
+    later run; the PASS lines were read), under `taskset -c 0-3` and
+    plain at `6108a51`'s kernel, and at the head's kernel
+    (`kasumi-tcg-mpx4-ready.out`); some thirty single boots more while
+    the suite was written.
+  - hasu, QEMU 11.1.0, **KVM**: KVMBOOTS
+  - CI, QEMU 8.2.2, TCG: 12 a green run of the job; every other suite
+    in the same runs (23 jobs).
+- **CI**: run 38153375026 at `86c8a60`, green, 23 jobs. Run
+  38151712372 before it was red in three jobs, each explained above
+  (tour's line; `pcap-net` twice). The head's run is in the PR.
+
+**Not verified, plainly.**
+
+- **The console.** `fcntl(F_SETFL, O_NONBLOCK)` on descriptors 0–2 now
+  keeps the flag and `poll` answers POLLIN for the console when a
+  `read` would answer; no probe runs with a terminal on both sides
+  (`tests/mpx4-ready`'s Linux side gives every program `/dev/null`), so
+  neither was run against Linux, and the second was not run at all.
+- The refusals no probe asks (above, P5), and -EALREADY.
+- `poll` on an epoll descriptor (POLLIN while it has an event to hand
+  out): written, never called.
+- Edge-triggered `EPOLLOUT` after a full send buffer drains (the count
+  that moves when an acknowledgement makes room): `epollecho` asks for
+  it when a send answers -EAGAIN, which no run made it do; the wolf
+  witness's writer waits with a level-triggered one-shot registration,
+  which is exercised (`push` and `pull`).
+- More than 64 connections at once; a 65th to 256th TCP block; a
+  listen queue past 64 waiting.
+- The storm's count in the planted run; either plant on any leg but
+  the first.
+- lobo on PAX: nothing of it ran here (px25). Which clocks lobo reads.
+- wolf-lang#713 on PAX: the witness is sized under the bound measured
+  on Linux; whether PAX's one CPU stalls at the same count was not
+  tried.
+- Nothing was built on hasu or nomad-1; hasu ran kasumi's images.
+- Real hardware; any Linux but kasumi's 7.2.8 and the CI runner's.
+
+**Filed.** pax#32 (`kernel/arp` pushes the kernel's own frames out
+when an entry ages under load). Nothing upstream: wolf-lang#713 and
+#711 were open already; #711's shape is seen again and measured above.
+
+**To close when this merges.** Nothing in pax names this work.
+
+**What px25 inherits** (every line of lobo's list still unanswered or
+answered otherwise than Linux, by call and flag):
+
+- `socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0)` with `bind`, `listen`,
+  `accept4`, `connect` on a path (and `ENOENT` for a path nobody
+  listens on) and `unlink` of the path: -EAFNOSUPPORT by name today.
+  lobo's control socket and its workers' sockets.
+- `openat(…, O_WRONLY|O_CREAT|O_APPEND|O_CLOEXEC)` and
+  `O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC`, `write` to those files,
+  `rename`, `unlink`, `mkdir` (`EEXIST`): px27's.
+- `set_robust_list` (273) and `rseq` (334): -ENOSYS, once a thread;
+  glibc goes on.
+- `socketpair(AF_UNIX, SOCK_SEQPACKET|SOCK_CLOEXEC)`: there, a
+  one-frame buffer each way, record boundaries not kept (px17).
+- `openat` of `/proc/self/cgroup`, `/sys/fs/cgroup/cpu.max`,
+  `/sys/devices/system/cpu/online`: -ENOENT; `statx` of
+  `/sys/fs/cgroup/cgroup.controllers`: -ENOENT. The runtime went on
+  with `sched_getaffinity`'s one CPU.
+- `mmap(…, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE)`
+  of 8,486,912 bytes a task: backed at the call, 2,072 frames; and
+  `madvise(MADV_FREE)` gives none back. lobo with one worker ran 25
+  threads on sixteen CPUs. A thread that cannot have its kernel stack
+  is a kernel panic (`sched: no frame for a stack`), not -EAGAIN.
+- `worker_connections 1024` against 128 descriptors a process and 256
+  TCP blocks in the machine.
+- Not in lobo's request set here and not on PAX: `sendmsg`, `recvmsg`,
+  `readv`, `sendfile` to a socket, `SO_REUSEPORT`, `SO_KEEPALIVE`,
+  `SO_LINGER`, `SO_SNDBUF`, `SO_RCVBUF`, `ppoll`, `epoll_pwait`,
+  `timerfd`, `signalfd`, `clock_getres`. A larger request set (TLS, a
+  resolver, access-log rotation) may ask them.
+- `kill(pid, SIGUSR2)`, `SIGKILL`, handlers for HUP, QUIT, TERM, USR2,
+  `clone` (fork) with `execve` of itself, `dup2`, `wait4`: px14's and
+  px26's, not run with lobo.
+- `kernel/arp`'s two-frame queue (pax#32) and the virtio driver's 64
+  transmit buffers under 64 connections; one wake for every waiter
+  (`kernel/ready`'s cost above) past about a hundred waiting threads.
+
+## 5. Done-when
+
+- Branch `px24` on origin; PR wolffe-lang/pax#31, open, unmerged, the
+  five sections by name, commit shas as bullets, a test checklist.
+- CI green at the head (the PR names the run).
+- `wolf/tools/lane-audit.sh pax px24 31` run by this lane from the org
+  directory, its exit status read directly (in the PR).
+- Trees: kasumi `~/lanes/px24/` and hasu `~/lanes/px24/` keep the
+  evidence with build directories pruned; no worktree anywhere; no
+  process of the lane left.
+- Nothing merged, nothing tagged, nothing closed.
