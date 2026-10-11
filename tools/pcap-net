@@ -280,7 +280,8 @@ def against(path, c, tcp=False):
     lost = k["pushed"] + k["unresolved"]
     hold("datagrams that never reached the wire (pushed out + unresolved)", lost, c["ident-gaps"])
     hold("datagrams sent", k["ip-tx"], c["ip.out"] + c["ident-gaps"])
-    hold("echo requests sent", k["m-req-out"], c["icmp.requests-out"] + c["ident-gaps"])
+    if not tcp:
+        hold("echo requests sent", k["m-req-out"], c["icmp.requests-out"] + c["ident-gaps"])
     # The kernel's own books.
     hold("transmit buffers reclaimed", k["reclaimed"], k["tx"])
     hold("receive buffers restocked", k["restocked"], k["rx"] + k["runt"] + k["long"] + k["other"])
@@ -296,8 +297,20 @@ def against(path, c, tcp=False):
         for name in ("tcp.short", "tcp.header", "tcp.checksum", "tcp.broadcast", "tcp.port-zero", "tcp.option"):
             hold(name, k[name], c[name])
         hold("TCP segments taken (all less loopback's)", k["t-rx"] - k["tl-rx"], c["tcp.in"])
-        hold("TCP segments sent (all less loopback's)", k["t-tx"] - k["tl-tx"], c["tcp.out"])
-        hold("TCP segments retransmitted (all less loopback's)", k["t-rexmt"] - k["tl-rexmt"], c["tcp.retransmitted"])
+        # px24: a datagram pushed out of kernel/arp's queue (an entry
+        # that aged while several connections were sending) was counted
+        # as sent and never reached the wire. Each is an echo request
+        # or a segment, the two together are the gaps in the
+        # identifications, and a segment retransmitted because its
+        # first sending was pushed out is, to the capture, a first
+        # sending.
+        lost_echo = k["m-req-out"] - c["icmp.requests-out"]
+        lost_tcp = k["t-tx"] - k["tl-tx"] - c["tcp.out"]
+        hold("echo requests and TCP segments that never reached the wire (none fewer than none)", min(lost_echo, lost_tcp, 0), 0)
+        hold("echo requests and TCP segments sent (all less loopback's and what never reached the wire)", lost_echo + lost_tcp, c["ident-gaps"])
+        rex = k["t-rexmt"] - k["tl-rexmt"]
+        hold("TCP segments retransmitted (all less loopback's; at most as many fewer in the capture as segments never reached the wire)",
+             rex if c["tcp.retransmitted"] <= rex <= c["tcp.retransmitted"] + max(lost_tcp, 0) else -1, rex)
         hold("t-not-sent", k["t-not-sent"], 0)
     return wrong, held
 
