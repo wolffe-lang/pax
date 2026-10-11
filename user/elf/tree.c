@@ -14,7 +14,8 @@
                       makes and removes)
      tree soak        10,000 rounds of create, write, rename, unlink
                       (and mkdir, rmdir), then a fill to ENOSPC and
-                      back
+                      back, twice: the second time with 120 MiB of the
+                      program's own memory held
      tree noop        (a role the probe starts: exit 7)
      tree speed       16 MiB written and read back, then eight more
                       passes over it, timed
@@ -36,6 +37,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/sendfile.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -879,6 +881,31 @@ static void refused(void) {
 }
 
 /* ---- the soak and the fill --------------------------------------------------------- */
+static char mb[1 << 20];
+/* 1 MiB files /t/s/fillN until one cannot be written whole: how many
+   were made, how many bytes the last one took, and the errno that
+   stopped it */
+static long fill(int *files, long *last) {
+    char a[64];
+    long err = 0;
+    int n = 0;
+    memset(mb, 'm', sizeof mb);
+    for (; n < 4096 && err == 0; n++) {
+        snprintf(a, sizeof a, "/t/s/fill%d", n);
+        int fd = open(a, O_WRONLY | O_CREAT, 0666);
+        if (fd < 0) { err = -errno; break; }
+        long w = write(fd, mb, sizeof mb);
+        if (w < 0) err = -errno;
+        else if (w < (long)sizeof mb) { *last = w; err = r(write(fd, mb, sizeof mb)); }
+        close(fd);
+    }
+    *files = n;
+    return err;
+}
+static void empty(int files) {
+    char a[64];
+    for (int i = 0; i < files; i++) { snprintf(a, sizeof a, "/t/s/fill%d", i); unlink(a); }
+}
 static int soak(void) {
     static char block[8192], back[8192];
     char a[64], b[64];
@@ -906,19 +933,9 @@ static int soak(void) {
     say("soak: 10000 rounds of create, write 8192 bytes, rename, mkdir, rmdir, unlink: %d errors; /t/s: %s; the program's break moved %ld bytes\n",
         bad, st("/t/s"), (long)((char *)sbrk(0) - brk0));
     /* the fill: 1 MiB files until ENOSPC, then back */
-    static char mb[1 << 20];
-    memset(mb, 'm', sizeof mb);
     int files = 0;
-    long last = 0, err = 0;
-    for (; files < 4096 && err == 0; files++) {
-        snprintf(a, sizeof a, "/t/s/fill%d", files);
-        int fd = open(a, O_WRONLY | O_CREAT, 0666);
-        if (fd < 0) { err = -errno; break; }
-        long w = write(fd, mb, sizeof mb);
-        if (w < 0) err = -errno;
-        else if (w < (long)sizeof mb) { last = w; err = r(write(fd, mb, sizeof mb)); }
-        close(fd);
-    }
+    long last = 0;
+    long err = fill(&files, &last);
     say("~fill: %d files of 1 MiB, the last one took %ld bytes\n", files, last);
     int fd = open("/t/s/after", O_WRONLY | O_CREAT, 0666);
     long full = fd >= 0 ? r(write(fd, mb, 8192)) : -errno;
@@ -928,18 +945,38 @@ static int soak(void) {
     long room = r(write(fd, mb, 8192));
     close(fd);
     say("fill: stopped by %ld; 8192 more bytes then %ld; after one file is removed %ld\n", err, full, room);
-    for (int i = 0; i < files; i++) { snprintf(a, sizeof a, "/t/s/fill%d", i); unlink(a); }
+    empty(files);
     unlink("/t/s/after");
     fd = open("/t/s/again", O_WRONLY | O_CREAT, 0666);
     long again = r(write(fd, mb, sizeof mb));
     close(fd);
-    long u = r(unlink("/t/s/again")), d1 = r(rmdir("/t/s")), d2 = r(rmdir("/t"));
-    say("fill: everything removed; a megabyte written again %ld; removed %ld %ld %ld\n", again, u, d1, d2);
+    long u = r(unlink("/t/s/again"));
+    say("fill: everything removed; a megabyte written again %ld, removed %ld\n", again, u);
+    /* again with 120 MiB of the program's own memory held: on PAX the
+       machine reaches the frames the tree never takes before the tree
+       reaches its cap */
+    size_t big = (size_t)120 << 20;
+    char *held = mmap(0, big, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    int got = held != MAP_FAILED;
+    for (size_t o = 0; got && o < big; o += 4096) held[o] = 1;
+    files = 0;
+    last = 0;
+    err = fill(&files, &last);
+    say("~fill: with 120 MiB held: %d files of 1 MiB, the last one took %ld bytes\n", files, last);
+    char *one = mmap(0, 65536, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    int own = one != MAP_FAILED;
+    for (size_t o = 0; own && o < 65536; o += 4096) one[o] = 1;
+    say("fill: with 120 MiB of the program's own memory held %d: stopped by %ld; 64 KiB more of its own memory after that %d\n", got, err,
+        own);
+    if (own) munmap(one, 65536);
+    if (got) munmap(held, big);
+    empty(files);
+    long d1 = r(rmdir("/t/s")), d2 = r(rmdir("/t"));
+    say("fill: everything removed again: %ld %ld\n", d1, d2);
     return bad != 0;
 }
 
 static int speed(void) {
-    static char mb[1 << 20];
     memset(mb, 's', sizeof mb);
     mkdir("/t", 0777);
     int fd = open("/t/big", O_RDWR | O_CREAT, 0666);

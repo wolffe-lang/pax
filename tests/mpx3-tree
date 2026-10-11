@@ -69,9 +69,12 @@
 #   T5 soak: the kernel's census lines, one for every 2500th file
 #      removed (`user: tree pid 1 tree: <n> files removed since boot;
 #      frames held <h>, inodes <i>, frames free <f>`), four of them
-#      and flat; at least one `tree: full:` line, and on each the tree
-#      was at its cap or the machine at the reserve; the program's
-#      break did not move (T1's line).
+#      and flat; the fill, twice: a `tree: full:` line with the tree at
+#      its cap, and — the second time, with 120 MiB of the program's
+#      own memory held — one with the tree below its cap and the
+#      machine at the reserve, the frames a write never takes (and the
+#      program could still have memory of its own then: T1's line); the
+#      program's break did not move (T1's line).
 #   T6 the shell session, on Linux: when it was over the root held
 #      exactly the names it started with (the session removed what it
 #      made; `rm -rf /` removed nothing). T1 holds PAX to the same
@@ -375,14 +378,18 @@ for leg in $legs; do
                 [ "$cl" = 4 ] || why+=" $cl census lines, not 4;"
                 cu=$(sed -n -E 's/^user: tree pid 1 tree: [0-9]+ files removed since boot; (frames held [0-9]+, inodes [0-9]+, frames free [0-9]+)$/\1/p' "$norm" | sort -u)
                 [ "$(printf '%s\n' "$cu" | grep -c .)" = 1 ] || why+=" the census is not flat: $(printf '%s' "$cu" | tr '\n' '|');"
-                nf=0 okf=1
+                nf=0 okf=1 atcap=0 atres=0
                 while read -r h c f rsv; do
                     nf=$((nf + 1))
-                    [ "$h" -ge "$c" ] || [ "$f" -le "$rsv" ] || okf=0
+                    if [ "$h" -ge "$c" ]; then atcap=$((atcap + 1))
+                    elif [ "$f" -le "$rsv" ]; then atres=$((atres + 1))
+                    else okf=0
+                    fi
                 done < <(sed -n -E 's/^user: tree pid 1 tree: full: frames held ([0-9]+) of ([0-9]+), frames free ([0-9]+), reserve ([0-9]+)$/\1 \2 \3 \4/p' "$norm")
-                [ "$nf" -ge 1 ] || why+=" no 'tree: full:' line;"
+                [ "$atcap" -ge 1 ] || why+=" no 'tree: full:' line with the tree at its cap;"
+                [ "$atres" -ge 1 ] || why+=" no 'tree: full:' line with the tree below its cap and the machine at the reserve;"
                 [ "$okf" = 1 ] || why+=" a 'tree: full:' line with the tree below its cap and the machine above the reserve;"
-                [ -z "$why" ] && say "PASS T5 $id: $cl census lines, all '$cu'; $nf full lines ($(grep -m1 'tree: full:' "$norm" | sed 's/^.*tree: full: //')); $(grep -m1 '^~fill' "$out")" || bad "T5 $id:$why"
+                [ -z "$why" ] && say "PASS T5 $id: $cl census lines, all '$cu'; $nf full lines, $atcap at the cap ($(grep -m1 'tree: full:' "$norm" | sed 's/^.*tree: full: //')), $atres at the reserve ($(grep 'tree: full:' "$norm" | sed 's/^.*tree: full: //' | awk -F'[ ,]+' '$3 + 0 < $5 + 0' | head -n 1)); $(grep '^~fill' "$out" | paste -sd' ' -)" || bad "T5 $id:$why"
             fi
 
             # T6: the tree intact, on Linux.
