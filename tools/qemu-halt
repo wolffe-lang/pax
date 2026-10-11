@@ -39,7 +39,10 @@
 # input at an empty prompt) or with `^.` (nothing more: `^.` is
 # dropped). In a step, `^C` `^D` `^U` `^W` are those control
 # characters, `^?` is DEL (the erase character, what Backspace sends)
-# and `^^` a `^`. --keyboard serial (the default) writes the bytes to
+# and `^^` a `^`. A step that starts with `^~` (px26) waits for no
+# prompt: it is typed PAX_TYPE_PAUSE seconds (default 2) after the
+# step before it, at whatever program is running (Ctrl-C on a `sleep`);
+# prompts are counted over the other steps only. --keyboard serial (the default) writes the bytes to
 # COM1's input (tools/qemu-run --serial-input), 20 ms apart; ps2 sends
 # each as a key through the monitor's `sendkey` (a-z, A-Z with shift,
 # digits, the US layout's punctuation, spc, ret, backspace, tab,
@@ -61,6 +64,7 @@
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
+pause=${PAX_TYPE_PAUSE:-2}
 firmware=bios serial=$PAX_BUILD/serial.log timeout=60 accel=auto elf= sym=pax_halt marker= image= cmds=() keys= prompt= keyboard=serial noscreen=() qargs=()
 while [ $# -gt 0 ]; do
     case $1 in
@@ -187,16 +191,24 @@ step_bytes() { # a KEYS line -> the bytes it types, as decimal numbers
     printf '%s\n' ${out[@]+"${out[@]}"}
 }
 if [ -n "$keys" ]; then
-    k=0
+    k=0 want=0
     while IFS= read -r line || [ -n "$line" ]; do
         k=$((k + 1))
-        t0=$SECONDS
-        until [ "$(prompts)" -ge "$k" ]; do
-            kill -0 "$qpid" 2>/dev/null || no "QEMU ended before prompt $k ('$prompt') for step $k: $line"
-            [ $((SECONDS - t0)) -lt "$timeout" ] || no "prompt $k ('$prompt') did not come within ${timeout}s (step $k: $line; $(prompts) seen)"
-            sleep 0.1
-        done
-        sleep 0.2
+        case $line in
+            '^~'*)  # px26: typed at a running program, a pause after the step before
+                line=${line#'^~'}
+                kill -0 "$qpid" 2>/dev/null || no "QEMU ended before step $k: $line"
+                sleep "$pause" ;;
+            *)
+                want=$((want + 1))
+                t0=$SECONDS
+                until [ "$(prompts)" -ge "$want" ]; do
+                    kill -0 "$qpid" 2>/dev/null || no "QEMU ended before prompt $want ('$prompt') for step $k: $line"
+                    [ $((SECONDS - t0)) -lt "$timeout" ] || no "prompt $want ('$prompt') did not come within ${timeout}s (step $k: $line; $(prompts) seen)"
+                    sleep 0.1
+                done
+                sleep 0.2 ;;
+        esac
         printf 'step %s: %s\n' "$k" "$line" >> "$serial.typed"
         nb=0
         for b in $(step_bytes "$line"); do
