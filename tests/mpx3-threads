@@ -1,0 +1,281 @@
+#!/usr/bin/env bash
+# tests/mpx3-threads — px26: threads, futexes and signals. One static
+# glibc program, user/elf/threads.c (tools/mkprobes), runs as the first
+# program on PAX and, the same file, as pid 1 of a fresh pid namespace
+# on Linux; it prints what a kernel decides — a thread's ids and
+# thread-local storage, every answer `futex` gives, which handler runs
+# and with what siginfo, how the signal frame lies on the stack, that a
+# handler's return puts back every register and the x87/SSE/AVX state,
+# which system calls a handler interrupts and which run again, what a
+# signal leaves in a wait status, a thread's `exit` against the
+# process's, a fork and an `execve` from a second thread, memory
+# reserved with PROT_NONE — and the two outputs are compared byte for
+# byte. Then the soak: 10,000 threads made and joined and 12,000 signals
+# delivered to a handler, with the kernel's own counters flat.
+#
+#   tests/mpx3-threads [--images DIR | --no-boot] [--firmware bios|uefi|both]
+#                      [--tier native|release|both]
+#
+# Two initramfs (/bin/threads; /etc/pax-run `/bin/threads` and
+# `/bin/threads soak`), one kernel, kmain_console, in two images a tier.
+# Assertions, per tier (native, release), firmware (bios, uefi) and
+# session (probes, soak):
+#   T0 build: kmain_console built; threads static (ET_EXEC, no
+#      PT_INTERP); both initramfs and ISOs built (digests printed); the
+#      Linux side ran both sessions (tools/linux-tty --root --pid1).
+#   T1 the output, differential: every line the program wrote on PAX
+#      (the serial log between init's exec line and its exit line, the
+#      kernel's own `user: …` lines left out, also where one lands in
+#      the middle of a line the program writes in pieces) is
+#      byte-identical to what
+#      it wrote on Linux, but for the lines that start with `~` (what
+#      depends on the host's kernel version, not on the ABI); and its
+#      exit status is Linux's.
+#   T2 probes: the `~guard` line on PAX: MADV_GUARD_INSTALL answers 0, a
+#      touch of the page raises signal 11, MADV_GUARD_REMOVE answers 0
+#      and a write then raises nothing.
+#   T3 what PAX lacks or refuses: -ENOSYS only for set_robust_list
+#      (273) and rseq (334), which glibc tolerates; refused
+#      by name nothing; `killed:` lines only for the processes the
+#      program has killed (probes: by SIGTERM, SIGKILL, SIGUSR1,
+#      SIGPIPE, and a thread's page fault; soak: none).
+#   T4 everything given back: the frames line after init's end shows
+#      every frame back (A before, A after), with threads made and
+#      ended, their stacks mapped and unmapped, and children forked.
+#   T5 soak: the kernel's census lines — every 2500th thread made
+#      (`threads: <n> made since boot; slots busy <b>, frames free <f>`)
+#      and every 2500th signal delivered (`signals: <n> delivered since
+#      boot; slots busy <b>, frames free <f>, this frame at 0x<a>`) —
+#      are there, four of the first and at least four of the second,
+#      and flat: the same slots busy and the same frames free on every
+#      thread line, and on the signal lines the same slots, the same
+#      frames and, for the 10,000 a thread sends itself, the same frame
+#      address. The program's own lines (its break and its handler's
+#      stack did not move) are T1's.
+#   T6 the end: `PAX: init /bin/threads ended with status 0; nothing
+#      left to run`, `halt`, and qemu-halt holds the machine halted.
+# The probes session of the first leg runs first, and the suite stops
+# at its first failure (a kernel that cannot wake a futex would
+# otherwise hold every later boot to its deadline): `stopped early`.
+#
+# --images DIR boots what this script built earlier: any host with QEMU
+# and python3. Without it the script builds (linux x86-64; the Linux
+# side needs root for chroot and the pid namespace: sudo -n when not
+# root); --no-boot stops after T0.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "usage: tests/mpx3-threads [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+need readelf python3
+
+SESSIONS="probes soak"
+args_of() { case $1 in soak) echo soak ;; *) echo ;; esac; }
+GUARD='~guard: MADV_GUARD_INSTALL 0: a touch of the page raises signal 11; MADV_GUARD_REMOVE 0 and a write then raises 0'
+
+work=$PAX_BUILD/mpx3-threads
+runs=$PAX_BUILD/mpx3-threads-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/linux" "$work/bin"
+    why=
+    "$PAX_ROOT/tools/mkprobes" "$work/bin" > "$work/probes.txt" || why+=" tools/mkprobes;"
+    sed 's/^/  program: /' "$work/probes.txt" >&2
+    : > "$work/none.keys"
+    for s in $SESSIONS; do
+        r=$work/$s/root
+        mkdir -p "$r/bin" "$r/etc"
+        cp "$work/bin/threads" "$r/bin/threads" || why+=" no threads;"
+        a=$(args_of "$s")
+        echo "/bin/threads${a:+ $a}" > "$r/etc/pax-run"
+        if "$PAX_ROOT/tools/mkinitramfs" "$work/$s.cpio" "/bin/threads=$r/bin/threads:755" "/etc/pax-run=$r/etc/pax-run:644" > "$work/$s.initramfs.txt"; then
+            sed "s/^/  initramfs $s: /" "$work/$s.initramfs.txt" >&2
+        else
+            why+=" tools/mkinitramfs $s;"
+        fi
+    done
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            for s in $SESSIONS; do
+                "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                    --add "$work/$s.cpio" initramfs.cpio "$elf" "$work/$tier/threads-$s.iso" >/dev/null \
+                    || why+=" $tier threads-$s: mkimage;"
+                say "built $tier threads-$s: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/threads-$s.iso"), initramfs $(sha256_of "$work/$s.cpio")"
+            done
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    if [ "$(uname -s)" != Linux ]; then
+        why+=" the Linux side needs Linux (this is $(uname -s)): build on Linux, boot here with --images;"
+    else
+        asroot=(); [ "$(id -u)" = 0 ] || asroot=(sudo -n)
+        for s in $SESSIONS; do
+            a=$(args_of "$s")
+            # shellcheck disable=SC2086
+            if ${asroot[@]+"${asroot[@]}"} python3 "$PAX_ROOT/tools/linux-tty" --isig --root "$work/$s/root" --pid1 \
+                --keys "$work/none.keys" --prompt '$ ' --argv0 /bin/threads "$work/linux/$s.tty" -- /bin/threads $a; then
+                say "  linux $s: $(wc -c < "$work/linux/$s.tty" | tr -d ' ') bytes, status $(cat "$work/linux/$s.tty.rc")"
+            else
+                why+=" tools/linux-tty $s;"
+            fi
+        done
+    fi
+    [ -z "$why" ] && say "PASS T0: kmain_console built ($tiers), threads static, two initramfs, two images a tier, Linux ran both sessions" || bad "T0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx3-threads build (T0): PASS (no boot: --no-boot)" || say "mpx3-threads build: FAIL"
+        exit "$fail"
+    fi
+fi
+lx=$images/linux
+[ -d "$lx" ] || die "no $lx (build first)"
+
+record() { # tier leg session status
+    ran=$((ran + 1))
+    printf '%s kmain_console %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" \
+        "$(sha256_of "$iso")" >> "$runs"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+stopped=
+for leg in $legs; do
+    [ -z "$stopped" ] || break
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        [ -z "$stopped" ] || break
+        for s in $SESSIONS; do
+            id="$tier $leg $s"
+            before=$fail
+            log=$PAX_BUILD/mpx3-threads-$tier-$leg-$s.serial.log
+            elf=$images/$tier/kmain_console.elf iso=$images/$tier/threads-$s.iso
+            rm -f "$log" "$log.verdict"
+            if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+                for t in T1 T3 T4 T6; do bad "$t $id: no image"; done
+                continue
+            fi
+            hrc=0
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 300 \
+                --elf "$elf" --marker 'halt' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+            record "$tier" "$leg" "$s" "$hrc"
+            norm=$log.norm; serial_norm "$log" > "$norm"
+
+            # T1: the program's lines against Linux's.
+            why=
+            out=$PAX_BUILD/mpx3-threads-$tier-$leg-$s.session
+            # A kernel line that lands in the middle of a line the program
+            # has not finished (it writes a line in pieces around a child's
+            # death) is cut out with its newline, and the line goes on.
+            awk '/^user: exec pid 1 / { on = 1; next } on && /^user: threads pid 1 (exit_group|exit) [0-9]+ after / { exit }
+                 on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$norm" > "$out"
+            tr -d '\r' < "$lx/$s.tty" > "$out.linux"
+            grep -v '^~' "$out" > "$out.cmp"
+            grep -v '^~' "$out.linux" > "$out.linux.cmp"
+            if ! cmp -s "$out.linux.cmp" "$out.cmp"; then
+                why+=" the output differs from Linux's: $(diff "$out.linux.cmp" "$out.cmp" | head -n 8 | cut -c1-400 | tr '\n' '|');"
+            fi
+            pst=$(sed -n -E 's/^user: threads pid 1 (exit_group|exit) ([0-9]+) after .*/\2/p' "$norm" | head -n 1)
+            lst=$(cat "$lx/$s.tty.rc" 2>/dev/null)
+            [ "$pst" = "$lst" ] || why+=" exit '$pst' on PAX, '$lst' on Linux;"
+            [ "$(wc -l < "$out.cmp" | tr -d ' ')" -gt 3 ] || why+=" fewer than four lines;"
+            [ -z "$why" ] && say "PASS T1 $id: $(wc -l < "$out.cmp" | tr -d ' ') lines byte-identical to Linux's ($(sha256_of "$out.cmp" | cut -c1-12)…), exit $pst" || bad "T1 $id:$why"
+
+            # T2: the guard, on PAX.
+            if [ "$s" = probes ]; then
+                g=$(grep -m1 '^~guard' "$out")
+                [ "$g" = "$GUARD" ] && say "PASS T2 $id: $g (Linux here: $(grep -m1 '^~guard' "$out.linux"))" || bad "T2 $id: '$g'"
+            fi
+
+            # T3: what PAX lacks or refuses.
+            why=
+            ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
+            [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
+            rf=$(grep ': refused: ' "$norm" | sed -E 's/^user: [^ ]+ pid [0-9]+ //' | sort -u | paste -sd'|' -)
+            [ -z "$rf" ] || why+=" refusals '$rf';"
+            kl=$(sed -n -E 's/.*user: [^ ]+ pid [0-9]+ killed: ([A-Za-z0-9 ]+).*/\1/p' "$norm" | sed -E 's/ vector.*//; s/ after [0-9]+ runs$//; s/ +$//' | LC_ALL=C sort | uniq -c | awk '{ n = $1; $1 = ""; sub(/^ /, ""); printf "%s%s x%d", sep, $0, n; sep = ", " }')
+            if [ "$s" = probes ]; then
+                wk="SIGKILL x3, SIGPIPE x1, SIGTERM x2, SIGUSR1 x1, page fault x3"
+            else
+                wk=
+            fi
+            [ "$kl" = "$wk" ] || why+=" killed: '$kl', not '$wk';"
+            [ -z "$why" ] && say "PASS T3 $id: -ENOSYS only for 273 and 334; refused: nothing; killed: ${kl:-nobody}" || bad "T3 $id:$why"
+
+            # T4: every frame back.
+            fl=$(grep -m1 '^user: frames free ' "$norm")
+            fa=$(printf '%s\n' "$fl" | sed -n -E 's/^user: frames free ([0-9]+) before, [0-9]+ with 1 processes, ([0-9]+) after$/\1 \2/p')
+            set -- $fa
+            [ -n "$fa" ] && [ "$1" = "$2" ] && say "PASS T4 $id: $fl" || bad "T4 $id: frames not all back ('$fl')"
+
+            # T5: the soak's census.
+            if [ "$s" = soak ]; then
+                why=
+                tl=$(grep -c '^user: threads pid 1 threads: [0-9]* made since boot' "$norm")
+                [ "$tl" = 4 ] || why+=" $tl thread census lines, not 4;"
+                tu=$(sed -n -E 's/^user: threads pid 1 threads: [0-9]+ made since boot; (slots busy [0-9]+, frames free [0-9]+)$/\1/p' "$norm" | sort -u)
+                [ "$(printf '%s\n' "$tu" | grep -c .)" = 1 ] || why+=" the thread lines are not flat: $(printf '%s' "$tu" | tr '\n' '|');"
+                sl=$(grep -c '^user: threads pid 1 signals: [0-9]* delivered since boot' "$norm")
+                [ "$sl" -ge 4 ] || why+=" $sl signal census lines, fewer than 4;"
+                su=$(sed -n -E 's/^user: threads pid 1 signals: [0-9]+ delivered since boot; (slots busy [0-9]+, frames free [0-9]+), this frame at .*/\1/p' "$norm" | head -n 4 | sort -u)
+                [ "$(printf '%s\n' "$su" | grep -c .)" = 1 ] || why+=" the signal lines are not flat: $(printf '%s' "$su" | tr '\n' '|');"
+                sa=$(sed -n -E 's/^user: threads pid 1 signals: [0-9]+ delivered since boot; .* this frame at (0x[0-9a-f]+)$/\1/p' "$norm" | head -n 4 | sort -u)
+                [ "$(printf '%s\n' "$sa" | grep -c .)" = 1 ] || why+=" a self-sent signal's frame moved: $(printf '%s' "$sa" | tr '\n' '|');"
+                [ -z "$why" ] && say "PASS T5 $id: $tl thread lines, all '$tu'; $sl signal lines, the first four all '$su' at $sa" || bad "T5 $id:$why"
+            fi
+
+            # T6
+            why=
+            grep -qx "PAX: init /bin/threads ended with status $lst; nothing left to run" "$norm" \
+                || why+=" no 'PAX: init /bin/threads ended with status $lst' ($(grep -m1 '^PAX: init ' "$norm"));"
+            [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+            [ -z "$why" ] && say "PASS T6 $id: init ended, status $lst; $(tail -n 1 "$log.verdict")" || bad "T6 $id:$why"
+
+            if [ "$s" = probes ] && [ "$before" = 0 ] && [ "$fail" != 0 ]; then
+                stopped="$id"
+                say "FAIL stopped early: the probes failed on $id; the later boots would fail the same way and are not run"
+                break
+            fi
+        done
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx3-threads: PASS" || say "mpx3-threads: FAIL"
+exit "$fail"
