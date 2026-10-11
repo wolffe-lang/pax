@@ -38,6 +38,16 @@
                      address, port, peer, timeout, its queue's counts
                      and the 16 frames the queue lives in (px22)
 
+     pax_tcp_state   128 eight-byte words: kernel/tcp's (the frame a
+                     segment is composed in, the next ephemeral port,
+                     the key of the initial sequence numbers, the
+                     counters; px23)
+     pax_tcp_conns   64 control blocks of 128 eight-byte words: each
+                     one's addresses, ports, state, sequence numbers,
+                     timers and the 32 frames of its two buffers (px23)
+     pax_tcp_tw      128 eight-byte words: the frames of the time-wait
+                     table (px23)
+
    No Linux source; no other kernel's source. */
 
         .section .bss
@@ -72,5 +82,15 @@ pax_udp_state:
         .globl pax_udp_socks
 pax_udp_socks:
         .zero 4096
+
+        .globl pax_tcp_state
+pax_tcp_state:
+        .zero 1024
+        .globl pax_tcp_tw
+pax_tcp_tw:
+        .zero 1024
+        .globl pax_tcp_conns
+pax_tcp_conns:
+        .zero 65536
 
         .section .note.GNU-stack, "", @progbits

@@ -1,0 +1,2794 @@
+//! tcp — the Transmission Control Protocol: the connections, their
+//! segments each way, their timers and the ports they hold (px23).
+//!
+//! A TCP segment is an IPv4 datagram's payload, protocol 6 (RFC 9293
+//! §3.1), every field big-endian:
+//!
+//!     0  source port        2  destination port
+//!     4  sequence number    8  acknowledgement number
+//!     12 data offset (4 bits: the header's 32-bit words), then the
+//!        flags: 13 is CWR ECE URG ACK PSH RST SYN FIN
+//!     14 window             16 checksum       18 urgent pointer
+//!     20 options, when the data offset is over 5
+//!
+//! The checksum is RFC 1071's over a pseudo-header — the two addresses,
+//! a zero byte, the protocol and the segment's length — then the
+//! segment. It is made on every segment sent and verified on every one
+//! received, over the wire and over loopback alike.
+//!
+//! **A control block** (`CONNS`, 64 of them, 128 words each, in
+//! boot/net.S's `pax_tcp_conns`) is everything that has TCP state: a
+//! socket a descriptor names (not yet connected, bound, listening,
+//! connecting, connected), a connection a listener has not handed to
+//! `accept` yet, and a connection its process has closed that is still
+//! finishing. The states are RFC 9293 §3.3.2's. A block's two buffers —
+//! `BUF` (65,536) bytes to send and as many received, 16 frames each —
+//! are taken when the connection is established (or begun, by the end
+//! that connects) and given back when the block is freed; a block that
+//! is bound, listening or half-open holds none.
+//!
+//! **Received** (`input`, from kernel/netd, for a datagram kernel/ip
+//! passed), in this order, each cause a counter:
+//!
+//!     short        fewer than 20 bytes
+//!     header       a data offset under 5 or past the segment's end
+//!     checksum     the pseudo-header and segment do not sum to 0xffff
+//!     broadcast    a segment for a broadcast address (RFC 1122
+//!                  §4.2.3.10: silently discarded)
+//!     port-zero    a port of 0 either side
+//!     option       an option list that does not parse (a length under
+//!                  2 or past the header: RFC 9293 §3.1 has a host
+//!                  survive it; the segment is dropped)
+//!
+//! then the block whose four addresses and ports it names, else a
+//! time-wait entry, else a listener on its port, else nobody: a segment
+//! for nobody that is not itself a reset is answered with one (RFC 9293
+//! §3.10.7.1). A listener takes a SYN (a new half-open block, the
+//! SYN-ACK sent) unless its queue is full, when the SYN is dropped and
+//! nothing is sent (`listen-full`), or no block is free (`no-block`); it
+//! resets an ACK and drops the rest. A connection holds a segment to
+//! RFC 9293 §3.10.7.4: the sequence number against the window (what is
+//! outside draws an ACK and is dropped, `unacceptable`); a reset at
+//! exactly RCV.NXT ends the connection, one elsewhere in the window
+//! draws an ACK (`reset-challenged`), as does a SYN (`syn-challenged`,
+//! RFC 5961 as RFC 9293 takes it in); the acknowledgement (one for
+//! bytes never sent draws an ACK and is dropped, `ack-ahead`); the data
+//! (in order: to the receive buffer; ahead of RCV.NXT and inside the
+//! window: to the buffer where it belongs, its range kept in a list of
+//! at most `OOO` (4) intervals, a fifth dropped, `out-of-order-dropped`;
+//! past the window's edge: cut, `trimmed`); the FIN. Every segment that
+//! carries data, a SYN or a FIN, and every one out of order or out of
+//! the window, is acknowledged at once: there is no delayed ACK.
+//!
+//! **Options.** MSS (kind 2) is read on a SYN and sent on every SYN
+//! (`MSS`, 1460: the MTU less the two headers); a peer that sends none
+//! is taken at 536 (RFC 9293 §3.7.1). End-of-list and no-operation are
+//! walked. Window scale (3), SACK-permitted (4), SACK (5), timestamps
+//! (8), fast open (34) and every other kind are skipped, each counted
+//! by name, and never sent: so the window is 65,535 bytes at most and
+//! nothing is selectively acknowledged. The urgent pointer is not read
+//! (a segment with URG is counted and its bytes stay in line).
+//!
+//! **Sent** (`output`). A segment carries at most the peer's MSS, never
+//! goes past the smaller of the peer's window and the congestion window,
+//! and follows RFC 1122 §4.2.3.4: a full segment goes; less goes when
+//! it is everything queued and either nothing is unacknowledged or
+//! `TCP_NODELAY` is set (Nagle's algorithm), or when it is half the
+//! greatest window the peer ever offered. The FIN follows the last
+//! byte. The window advertised is the receive buffer's room, 65,535 at
+//! most, never taken back, and moved only by a segment or half the
+//! buffer (RFC 1122 §4.2.3.3); a read that opens it by two segments or
+//! half the buffer sends an update.
+//!
+//! **Retransmission** (RFC 6298). One timer a connection, in ticks (10
+//! ms, G). RTO is 1 s until a round trip is measured; then SRTT and
+//! RTTVAR as §2.2–2.3 give them and RTO = SRTT + hi(G, 4 RTTVAR), not
+//! under `RTO_MIN` (200 ms: a departure from §2.4's 1 s, a SHOULD) nor
+//! over `RTO_MAX` (60 s). One segment is timed at a time, never one that
+//! was retransmitted (Karn's rule). A timeout sends the earliest
+//! unacknowledged segment again, doubles RTO and goes back to it: what
+//! was sent after is sent again as the window allows. A SYN is given up
+//! after `SYN_RETRIES` (6) retransmissions or `TCP_SYNCNT`'s, a SYN-ACK
+//! after 5, data after `DATA_RETRIES` (15) or once `TCP_USER_TIMEOUT`
+//! has passed with data unacknowledged: the connection is reset and its
+//! calls answer -ETIMEDOUT. A window of zero is probed with one byte
+//! from the persist timer, which also sends what the silly-window rule
+//! held back, at RTO and doubling to 60 s, for as long as it takes.
+//!
+//! **Congestion control** is RFC 5681's: slow start from 3 segments,
+//! congestion avoidance above ssthresh, fast retransmit on the third
+//! duplicate ACK and fast recovery, one segment after a timeout.
+//!
+//! **Time-wait.** The end that closes first waits 2 x MSL (`TIME_WAIT`,
+//! 60 s) — not in a block but in a table of 16,384 entries (4,096 rows
+//! of four, 128 frames taken at `start`): the addresses and ports,
+//! SND.NXT, RCV.NXT and the tick it ends at. A segment for an entry is
+//! acknowledged (a FIN starts the wait again), a reset is ignored (RFC
+//! 1337), and a SYN above RCV.NXT with a listener there ends the entry
+//! and is taken (RFC 1122 §4.2.2.13). A full row gives up its oldest
+//! entry (`time-wait-evicted`). A block whose descriptor is still open
+//! when it gets there (its process shut its half and the peer's FIN
+//! came) stays a block until the descriptor closes.
+//!
+//! **Ports.** The blocks are the port table. `bind` refuses a port
+//! another block or a time-wait entry holds on a conflicting address
+//! (the same, or either of them every address) — unless the binder set
+//! `SO_REUSEADDR`, which is refused only by a holder that listens or
+//! that never set the option itself (each as Linux answered:
+//! `notes/px23-tcp.md`). Ephemeral ports are 32768 to 60999 from a
+//! cursor of TCP's own.
+//!
+//! **Sequence numbers** (RFC 6528): ISS = M + F(the four addresses and
+//! ports, a key), M the tick counter in 4-microsecond units, F a keyed
+//! function in the shape of HalfSipHash-2-4 (the ARX rounds of
+//! Aumasson and Bernstein's SipHash on 32-bit words) under a 64-bit key
+//! the kernel gives `start`.
+//!
+//! State is words in boot/net.S (`pax_tcp_state`, `pax_tcp_conns`,
+//! `pax_tcp_tw`), one frame for composing, 128 for the time-wait table
+//! and 32 a connection, all under `sync.tcp()`, the last of the eight
+//! lock words, taken before `sync.ip()`, `sync.arp()` and `sync.net()`
+//! and never with `sync.udp()`. Nothing here allocates from the heap
+//! and nothing opens a region.
+//!
+//! Written from RFC 9293, RFC 1122 §4.2, RFC 6298, RFC 5681, RFC 6528,
+//! RFC 5961 as RFC 9293 cites it, RFC 1337, RFC 1071, the man pages
+//! tcp(7), ip(7), socket(7), listen(2), accept(2), connect(2),
+//! shutdown(2), send(2), recv(2), and black-box runs of the witnesses
+//! on Linux. No Linux source; no other kernel's or network stack's
+//! source.
+
+use arp
+use frames
+use ip
+use log
+use sched
+use sync
+use timer
+use uaccess
+
+extern "c" fn pax_fb_copy(dst: u64, src: u64, bytes: u64)
+extern "c" fn pax_rdtsc() -> u64
+
+extern "c" let pax_tcp_state: *u64
+extern "c" let pax_tcp_conns: *u64
+extern "c" let pax_tcp_tw: *u64
+
+/// TCP's protocol number.
+pub const PROTOCOL: u64 = 6
+/// How many control blocks there are; also `open`'s answer when none
+/// is free.
+pub const CONNS: u64 = 64
+/// A connection's send buffer, and its receive buffer, in bytes.
+pub const BUF: u64 = 65536
+/// The MSS announced: 1500 less 20 and 20.
+pub const MSS: u64 = 1460
+/// The MSS of a peer that announces none (RFC 9293 §3.7.1).
+pub const MSS_DEFAULT: u64 = 536
+/// The first ephemeral port.
+pub const EPHEMERAL_LO: u64 = 32768
+/// The last.
+pub const EPHEMERAL_HI: u64 = 60999
+/// 2 x MSL, in ticks.
+pub const TIME_WAIT: u64 = 6000
+/// The least RTO once a round trip is measured, in ticks (200 ms).
+pub const RTO_MIN: u64 = 20
+/// RTO before any measurement (RFC 6298 §2.1), in ticks.
+pub const RTO_INITIAL: u64 = 100
+/// The greatest RTO (RFC 6298 §2.5), in ticks.
+pub const RTO_MAX: u64 = 6000
+/// Retransmissions of a SYN before the connect gives up (tcp(7)).
+pub const SYN_RETRIES: u64 = 6
+/// Retransmissions of a SYN-ACK before a half-open connection goes.
+pub const SYNACK_RETRIES: u64 = 5
+/// Retransmissions of data before the connection gives up (tcp(7)).
+pub const DATA_RETRIES: u64 = 15
+/// The most a listen queue holds is this, or the backlog, plus one.
+pub const BACKLOG_MAX: u64 = 32
+/// Out-of-order intervals kept a connection.
+pub const OOO: u64 = 4
+/// Time-wait entries.
+pub const TW_ENTRIES: u64 = 16384
+const TW_ROWS: u64 = 4096
+const TW_FRAMES: u64 = 128
+const PAGE: u64 = 4096
+const BUF_PAGES: u64 = 16
+const M32: u64 = 0xffffffff
+const HALF32: u64 = 0x80000000
+const WND_MAX: u64 = 65535
+
+// The flags byte.
+const FIN: u64 = 0x01
+const SYN: u64 = 0x02
+const RST: u64 = 0x04
+const PSH: u64 = 0x08
+const ACK: u64 = 0x10
+const URG: u64 = 0x20
+
+/// The states (RFC 9293 §3.3.2). CLOSED: a block not connected (a
+/// socket before `connect` or `listen`, or after its connection ended).
+pub const CLOSED: u64 = 0
+/// Waiting for a SYN.
+pub const LISTEN: u64 = 1
+/// A SYN sent.
+pub const SYN_SENT: u64 = 2
+/// A SYN received and answered.
+pub const SYN_RCVD: u64 = 3
+/// Open both ways.
+pub const ESTABLISHED: u64 = 4
+/// This end's FIN sent, not yet acknowledged.
+pub const FIN_WAIT_1: u64 = 5
+/// This end's FIN acknowledged; the peer's not yet come.
+pub const FIN_WAIT_2: u64 = 6
+/// The peer's FIN come; this end still open.
+pub const CLOSE_WAIT: u64 = 7
+/// Both FINs sent, this end's not yet acknowledged.
+pub const CLOSING: u64 = 8
+/// The peer's FIN come, this end's sent, not yet acknowledged.
+pub const LAST_ACK: u64 = 9
+/// Both closed; waiting out 2 x MSL (a block only while a descriptor
+/// still names it).
+pub const TIME_WAITING: u64 = 10
+
+// pax_tcp_state's words.
+const T_FRAME: u64 = 0 // where a segment is composed (HHDM)
+const T_NEXT_PORT: u64 = 1 // the next ephemeral port to try
+const T_KEY: u64 = 2 // the key of the initial sequence numbers
+const T_STARTED: u64 = 3
+const T_QSEQ: u64 = 4 // the order connections were established in
+
+/// The counters (`count`): segments that passed the header's checks.
+pub const C_IN: u64 = 16
+/// Dropped: fewer than 20 bytes.
+pub const C_SHORT: u64 = 17
+/// Dropped: a data offset under 5 or past the segment.
+pub const C_HEADER: u64 = 18
+/// Dropped: a wrong checksum.
+pub const C_CHECKSUM: u64 = 19
+/// Dropped: for a broadcast address.
+pub const C_BROADCAST: u64 = 20
+/// Dropped: a port of 0.
+pub const C_PORT_ZERO: u64 = 21
+/// Dropped: an option list that does not parse.
+pub const C_OPTION: u64 = 22
+/// For no connection, time-wait entry or listener: answered with a reset.
+pub const C_NO_CONN: u64 = 23
+/// A reset for no connection: dropped.
+pub const C_NO_CONN_RST: u64 = 24
+/// A SYN dropped: the listener's queue is full.
+pub const C_LISTEN_FULL: u64 = 25
+/// A SYN dropped: no block is free.
+pub const C_NO_BLOCK: u64 = 26
+/// A segment for a listener that is neither a SYN nor an ACK: dropped.
+pub const C_LISTEN_OTHER: u64 = 27
+/// Outside the window (a duplicate, or past its edge): acknowledged
+/// and dropped.
+pub const C_UNACCEPTABLE: u64 = 28
+/// Resets that ended a connection.
+pub const C_RST_IN: u64 = 30
+/// Resets in the window but not at RCV.NXT: acknowledged, not obeyed.
+pub const C_RST_CHALLENGED: u64 = 31
+/// SYNs on a synchronized connection: acknowledged, not obeyed.
+pub const C_SYN_CHALLENGED: u64 = 32
+/// Acknowledgements of bytes never sent: acknowledged and dropped.
+pub const C_ACK_AHEAD: u64 = 33
+/// Segments with no ACK on a synchronized connection: dropped.
+pub const C_NO_ACK: u64 = 34
+/// Segments ahead of RCV.NXT kept for later.
+pub const C_OOO_QUEUED: u64 = 35
+/// Segments ahead of RCV.NXT dropped: a fifth interval.
+pub const C_OOO_DROPPED: u64 = 36
+/// Segments cut at the window's edge.
+pub const C_TRIMMED: u64 = 37
+/// Data for a connection whose process closed it: reset.
+pub const C_DATA_AFTER_CLOSE: u64 = 38
+/// SYNs that carried data (the data not taken).
+pub const C_SYN_DATA: u64 = 39
+/// Segments with URG set (the pointer not read).
+pub const C_URGENT: u64 = 40
+/// Options seen, by kind: MSS.
+pub const C_OPT_MSS: u64 = 41
+/// Window scale (skipped).
+pub const C_OPT_WSCALE: u64 = 42
+/// SACK-permitted (skipped).
+pub const C_OPT_SACK_OK: u64 = 43
+/// SACK (skipped).
+pub const C_OPT_SACK: u64 = 44
+/// Timestamps (skipped).
+pub const C_OPT_TS: u64 = 45
+/// Fast open (skipped).
+pub const C_OPT_TFO: u64 = 46
+/// Any other kind (skipped).
+pub const C_OPT_OTHER: u64 = 47
+/// Segments handed to kernel/ip.
+pub const C_OUT: u64 = 48
+/// Segments kernel/ip did not take.
+pub const C_OUT_FAILED: u64 = 49
+/// Of the segments sent, those that carried a sequence number sent
+/// before: retransmissions.
+pub const C_RETRANSMITS: u64 = 50
+/// Times the retransmission timer fired.
+pub const C_TIMEOUTS: u64 = 51
+/// Fast retransmits (a third duplicate ACK).
+pub const C_FAST: u64 = 52
+/// Resets sent.
+pub const C_RST_OUT: u64 = 53
+/// Segments sent with no data, SYN, FIN or RST: acknowledgements.
+pub const C_ACK_OUT: u64 = 54
+/// Zero-window probes sent.
+pub const C_PROBES: u64 = 55
+/// Segments sent with data.
+pub const C_DATA_OUT: u64 = 56
+/// Data bytes sent (retransmitted ones each time).
+pub const C_BYTES_OUT: u64 = 57
+/// Data bytes received in order and given to a receive buffer.
+pub const C_BYTES_IN: u64 = 58
+/// Connections this end began that were established.
+pub const C_ACTIVE: u64 = 59
+/// Connections a listener's SYN began that were established.
+pub const C_PASSIVE: u64 = 60
+/// Connections handed to `accept`.
+pub const C_ACCEPTED: u64 = 61
+/// Connects refused by a reset.
+pub const C_REFUSED: u64 = 62
+/// Connections given up for want of an answer (-ETIMEDOUT).
+pub const C_GAVE_UP: u64 = 63
+/// Blocks made.
+pub const C_MADE: u64 = 65
+/// Blocks freed.
+pub const C_FREED: u64 = 66
+/// Time-wait entries made.
+pub const C_TW_MADE: u64 = 67
+/// Time-wait entries pushed out of a full row.
+pub const C_TW_EVICTED: u64 = 68
+/// Time-wait entries ended by a new SYN.
+pub const C_TW_REOPENED: u64 = 69
+/// Segments answered from a time-wait entry.
+pub const C_TW_SEGMENTS: u64 = 70
+/// Half-open connections that went unanswered.
+pub const C_HALF_OPEN_GONE: u64 = 71
+/// Connections reset by `close` with bytes unread.
+pub const C_CLOSE_RESET: u64 = 72
+/// Round trips measured.
+pub const C_RTT_SAMPLES: u64 = 73
+/// ICMP destination unreachables that ended a connect.
+pub const C_ICMP_HARD: u64 = 74
+/// ICMP destination unreachables counted and not acted on.
+pub const C_ICMP_SOFT: u64 = 75
+/// SYNs that crossed (a simultaneous open).
+pub const C_SIMULTANEOUS: u64 = 76
+/// Window updates sent after a read.
+pub const C_WINDOW_UPDATES: u64 = 77
+/// Times the persist timer sent what the window or the silly-window
+/// rule held back.
+pub const C_PERSIST: u64 = 78
+/// Duplicate ACKs counted.
+pub const C_DUP_ACKS: u64 = 79
+/// Connections that could not have their buffers.
+pub const C_NO_FRAMES: u64 = 80
+/// Resets ignored in time-wait.
+pub const C_TW_RST: u64 = 81
+
+// A block's words (CONN_WORDS a block).
+const CONN_WORDS: u64 = 128
+const K_USE: u64 = 0
+const K_STATE: u64 = 1
+const K_LADDR: u64 = 2 // 0: every address (bound or listening)
+const K_LPORT: u64 = 3 // 0: none yet
+const K_RADDR: u64 = 4
+const K_RPORT: u64 = 5
+const K_FLAGS: u64 = 6
+const K_ERROR: u64 = 7 // the errno the next call is owed; 0 none
+const K_PARENT: u64 = 8 // the listener's block + 1 until accepted
+const K_BACKLOG: u64 = 9 // a listener's bound
+const K_PENDING: u64 = 10 // a listener's half-open and unaccepted
+const K_ISS: u64 = 11
+const K_SND_UNA: u64 = 12
+const K_SND_NXT: u64 = 13
+const K_SND_MAX: u64 = 14 // the highest SND.NXT ever
+const K_SND_WND: u64 = 15
+const K_SND_WL1: u64 = 16
+const K_SND_WL2: u64 = 17
+const K_MAX_WND: u64 = 18 // the greatest window the peer offered
+const K_IRS: u64 = 19
+const K_RCV_NXT: u64 = 20
+const K_RCV_ADV: u64 = 21 // the window's right edge as last advertised
+const K_MSS: u64 = 22 // the most a segment to the peer carries
+const K_SRTT: u64 = 23 // ticks x 8; 0 with K_RTTVAR 0: no sample yet
+const K_RTTVAR: u64 = 24 // ticks x 4
+const K_RTO: u64 = 25 // ticks
+const K_RTT_SEQ: u64 = 26 // the sequence number being timed
+const K_RTT_AT: u64 = 27 // the tick it left, plus 1; 0 none
+const K_REXMT_AT: u64 = 28 // the tick the retransmission timer fires; 0 off
+const K_REXMITS: u64 = 29 // retransmissions since the last progress
+const K_CWND: u64 = 30
+const K_SSTHRESH: u64 = 31
+const K_DUPACKS: u64 = 32
+const K_RECOVERY: u64 = 33 // 1 in fast recovery
+const K_PERSIST_AT: u64 = 34 // the tick the persist timer fires; 0 off
+const K_PERSIST_N: u64 = 35 // its backoff
+const K_SYNCNT: u64 = 36 // TCP_SYNCNT + 1; 0 the default
+const K_UTO: u64 = 37 // TCP_USER_TIMEOUT in ticks; 0 none
+const K_UNACK_AT: u64 = 38 // the tick data last became or stayed unacknowledged from
+const K_TX_SEQ: u64 = 39 // the sequence number of the send ring's first byte
+const K_TX_BASE: u64 = 40 // where in the ring that byte is
+const K_TX_LEN: u64 = 41 // bytes in the ring: unacknowledged and unsent
+const K_RX_BASE: u64 = 42 // where in the receive ring the first unread byte is
+const K_RX_LEN: u64 = 43 // bytes in order, unread
+const K_OOO_N: u64 = 44
+const K_OOO: u64 = 45 // OOO pairs: start, end (sequence numbers)
+const K_DEAD_AT: u64 = 53 // the tick a closed block is freed or its wait ends; 0 none
+const K_QSEQ: u64 = 54 // its place in the listener's queue
+const K_UTO_MS: u64 = 55 // TCP_USER_TIMEOUT as it was set
+const K_PROBE: u64 = 56 // 1 while a zero-window probe's byte is out, past SND.MAX
+const K_TXF: u64 = 64 // sixteen: the send ring's frames (physical)
+const K_RXF: u64 = 80 // sixteen: the receive ring's
+
+// A block's flags.
+const F_ATTACHED: u64 = 0x001 // a descriptor names it
+const F_REUSE: u64 = 0x002 // SO_REUSEADDR
+const F_NODELAY: u64 = 0x004 // TCP_NODELAY
+const F_CONNECTING: u64 = 0x008 // a connect call waits on it
+const F_RD_SHUT: u64 = 0x010 // shutdown(SHUT_RD)
+const F_WR_SHUT: u64 = 0x020 // no more bytes will be queued: a FIN follows the last
+const F_FIN_RCVD: u64 = 0x040 // the peer's FIN came, in order
+const F_FIN_SENT: u64 = 0x080 // this end's FIN has left at least once
+const F_BUFS: u64 = 0x100 // it holds its 32 frames
+const F_NAMED: u64 = 0x200 // `bind` gave the address
+const F_QUEUED: u64 = 0x400 // established, waiting for `accept`
+const F_WAS: u64 = 0x800 // it was connected once (what -ENOTCONN and 0 turn on)
+
+/// `recv`'s and `accept`'s answer when nothing is there yet.
+pub const EMPTY: u64 = 0xfffffffffffffdfd
+/// `connect`'s answer while the handshake is out; `send`'s when no
+/// byte fits.
+pub const PENDING: u64 = 0xfffffffffffffdfc
+
+// errnos (uapi asm-generic/errno-base.h, errno.h): 0, or the number.
+/// Try again.
+pub const EAGAIN: u64 = 11
+/// Bad address.
+pub const EFAULT: u64 = 14
+/// Invalid argument.
+pub const EINVAL: u64 = 22
+/// Broken pipe.
+pub const EPIPE: u64 = 32
+/// Address already in use.
+pub const EADDRINUSE: u64 = 98
+/// Cannot assign requested address.
+pub const EADDRNOTAVAIL: u64 = 99
+/// Connection reset by peer.
+pub const ECONNRESET: u64 = 104
+/// No buffer space available.
+pub const ENOBUFS: u64 = 105
+/// Transport endpoint is already connected.
+pub const EISCONN: u64 = 106
+/// Transport endpoint is not connected.
+pub const ENOTCONN: u64 = 107
+/// Connection timed out.
+pub const ETIMEDOUT: u64 = 110
+/// Connection refused.
+pub const ECONNREFUSED: u64 = 111
+
+fn tw(i: u64) -> u64 {
+    // # Safety: i < 128, a word of boot/net.S's pax_tcp_state.
+    unsafe { ((pax_tcp_state as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_tw(i: u64, v: u64) {
+    // # Safety: as `tw`.
+    unsafe { ((pax_tcp_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+fn cw(c: u64, i: u64) -> u64 {
+    // # Safety: c < CONNS, i < CONN_WORDS: inside boot/net.S's pax_tcp_conns.
+    unsafe { ((pax_tcp_conns as u64 + (c * CONN_WORDS + i) * 8) as *u64).read_volatile() }
+}
+
+fn put_cw(c: u64, i: u64, v: u64) {
+    // # Safety: as `cw`.
+    unsafe { ((pax_tcp_conns as u64 + (c * CONN_WORDS + i) * 8) as *u64).write_volatile(v) }
+}
+
+fn bump(i: u64) {
+    put_tw(i, tw(i) + 1)
+}
+
+fn bump_by(i: u64, n: u64) {
+    put_tw(i, tw(i) + n)
+}
+
+/// Counter `i` (C_*).
+pub fn count(i: u64) -> u64 {
+    tw(i)
+}
+
+fn flag(c: u64, f: u64) -> bool {
+    cw(c, K_FLAGS) & f != 0
+}
+
+fn set_flag(c: u64, f: u64) {
+    put_cw(c, K_FLAGS, cw(c, K_FLAGS) | f)
+}
+
+fn clear_flag(c: u64, f: u64) {
+    put_cw(c, K_FLAGS, cw(c, K_FLAGS) & !f)
+}
+
+/// The lesser of two.
+fn lo(a: u64, b: u64) -> u64 {
+    if a < b { a } else { b }
+}
+
+/// The greater of two.
+fn hi(a: u64, b: u64) -> u64 {
+    if a > b { a } else { b }
+}
+
+// --- sequence numbers: arithmetic modulo 2^32 ------------------------------------
+
+fn seq_add(a: u64, b: u64) -> u64 {
+    (a + b) & M32
+}
+
+/// a - b, modulo 2^32: how far `a` is past `b`.
+fn seq_sub(a: u64, b: u64) -> u64 {
+    (a + 0x100000000 - b) & M32
+}
+
+/// Whether `a` comes before `b`.
+fn seq_lt(a: u64, b: u64) -> bool {
+    a != b && seq_sub(b, a) < HALF32
+}
+
+fn seq_leq(a: u64, b: u64) -> bool {
+    seq_sub(b, a) < HALF32
+}
+
+fn rotl(x: u64, k: u64) -> u64 {
+    ((x << k) | (x >> (32 - k))) & M32
+}
+
+/// The keyed function of RFC 6528's F: 32 bits from the four addresses
+/// and ports under this boot's key, four ARX rounds a word in the
+/// shape of HalfSipHash-2-4.
+fn keyed(la: u64, lp: u64, ra: u64, rp: u64) -> u64 {
+    let k0 = tw(T_KEY) & M32
+    let k1 = tw(T_KEY) >> 32
+    var v0: u64 = k0
+    var v1: u64 = k1
+    var v2: u64 = 0x6c796765 ^ k0
+    var v3: u64 = 0x74656462 ^ k1
+    var i: u64 = 0
+    while i < 4 {
+        let m: u64 = if i == 0 { la } else if i == 1 { ra } else if i == 2 { (lp << 16 | rp) & M32 } else { 0x0c0000ff }
+        if i < 3 {
+            v3 = v3 ^ (m & M32)
+        } else {
+            v3 = v3 ^ m
+            v2 = v2 ^ 0xff
+        }
+        var r: u64 = 0
+        let rounds: u64 = if i < 3 { 2 } else { 4 }
+        while r < rounds {
+            v0 = (v0 + v1) & M32
+            v1 = rotl(v1, 5) ^ v0
+            v0 = rotl(v0, 16)
+            v2 = (v2 + v3) & M32
+            v3 = rotl(v3, 8) ^ v2
+            v0 = (v0 + v3) & M32
+            v3 = rotl(v3, 7) ^ v0
+            v2 = (v2 + v1) & M32
+            v1 = rotl(v1, 13) ^ v2
+            v2 = rotl(v2, 16)
+            r += 1
+        }
+        if i < 3 {
+            v0 = v0 ^ (m & M32)
+        }
+        i += 1
+    }
+    v1 ^ v3
+}
+
+/// An initial sequence number for a connection (RFC 6528).
+fn isn(la: u64, lp: u64, ra: u64, rp: u64) -> u64 {
+    (timer.ticks() * 2500 + keyed(la, lp, ra, rp)) & M32
+}
+
+// --- the checksum -------------------------------------------------------------------
+
+/// The one's-complement sum of the 16-bit big-endian words of the `len`
+/// bytes at `a` added to `s0`, an odd last byte a word's high byte; not
+/// folded. From an even address the middle is summed eight bytes at a
+/// time, least significant first, and the folded sum's two bytes
+/// swapped at the end (RFC 1071 §2(B): the sum does not depend on the
+/// byte order it is taken in).
+fn add_words(a: u64, len: u64, s0: u64) -> u64 {
+    var s = s0
+    var i: u64 = 0
+    if a & 1 == 0 && len >= 32 {
+        while (a + i) & 7 != 0 {
+            s += ip.be16(a + i)
+            i += 2
+        }
+        var acc: u64 = 0
+        while i + 8 <= len {
+            // # Safety: eight bytes of the caller's `len` at an address
+            // that is a multiple of 8.
+            let w = unsafe { ((a + i) as *u64).read_volatile() }
+            acc += (w & M32) + (w >> 32)
+            i += 8
+        }
+        while acc >> 16 != 0 {
+            acc = (acc & 0xffff) + (acc >> 16)
+        }
+        s += (acc & 0xff) << 8 | acc >> 8
+    }
+    while i + 1 < len {
+        s += ip.be16(a + i)
+        i += 2
+    }
+    if i < len {
+        s += ip.octet(a + i) << 8
+    }
+    s
+}
+
+/// What goes in the checksum field (zero while this is computed) of the
+/// `len`-byte segment at `a` from `src` to `dst`. Over a segment that
+/// holds a right checksum it is 0.
+fn checksum(src: u64, dst: u64, a: u64, len: u64) -> u64 {
+    var s = (src >> 16) + (src & 0xffff) + (dst >> 16) + (dst & 0xffff) + PROTOCOL + len
+    s = add_words(a, len, s)
+    while s >> 16 != 0 {
+        s = (s & 0xffff) + (s >> 16)
+    }
+    (!s) & 0xffff
+}
+
+// --- the time-wait table ------------------------------------------------------------
+
+// An entry is four words: local address << 32 | remote address; 1 <<
+// 32 | local port << 16 | remote port (0: free); SND.NXT << 32 |
+// RCV.NXT; the tick it ends at.
+fn tw_frame(k: u64) -> u64 {
+    // # Safety: k < TW_FRAMES, a word of boot/net.S's pax_tcp_tw.
+    unsafe { ((pax_tcp_tw as u64 + k * 8) as *u64).read_volatile() }
+}
+
+/// The address of entry `slot` of row `row`; 0 when the table has no
+/// frames.
+fn tw_at(row: u64, slot: u64) -> u64 {
+    let f = tw_frame(row / 32)
+    if f == 0 {
+        return 0
+    }
+    f + (row % 32) * 128 + slot * 32
+}
+
+fn tw_word(e: u64, i: u64) -> u64 {
+    // # Safety: a word of a time-wait entry in a frame this module owns.
+    unsafe { ((e + i * 8) as *u64).read_volatile() }
+}
+
+fn put_tw_word(e: u64, i: u64, v: u64) {
+    // # Safety: as `tw_word`.
+    unsafe { ((e + i * 8) as *u64).write_volatile(v) }
+}
+
+fn tw_row(la: u64, lp: u64, ra: u64, rp: u64) -> u64 {
+    (ra ^ (la << 1) ^ (lp << 7) ^ (rp << 13) ^ (rp >> 3) ^ (ra >> 17)) % TW_ROWS
+}
+
+/// The live entry for the four values; 0 when there is none.
+fn tw_find(la: u64, lp: u64, ra: u64, rp: u64) -> u64 {
+    let row = tw_row(la, lp, ra, rp)
+    let now = timer.ticks()
+    var slot: u64 = 0
+    while slot < 4 {
+        let e = tw_at(row, slot)
+        if e != 0 && tw_word(e, 1) == (1 << 32 | lp << 16 | rp) && tw_word(e, 0) == (la << 32 | ra) {
+            if tw_word(e, 3) > now {
+                return e
+            }
+            put_tw_word(e, 1, 0) // its wait is over
+        }
+        slot += 1
+    }
+    0
+}
+
+/// Start (or start again) the wait for the four values.
+fn tw_put(la: u64, lp: u64, ra: u64, rp: u64, snd_nxt: u64, rcv_nxt: u64, until: u64) {
+    let row = tw_row(la, lp, ra, rp)
+    let now = timer.ticks()
+    var e = tw_find(la, lp, ra, rp)
+    if e == 0 {
+        // A free or ended slot, else the one that ends soonest.
+        var slot: u64 = 0
+        var oldest: u64 = 0
+        while slot < 4 && e == 0 {
+            let x = tw_at(row, slot)
+            if x == 0 {
+                return // no table
+            }
+            if tw_word(x, 1) == 0 || tw_word(x, 3) <= now {
+                e = x
+            } else if oldest == 0 || tw_word(x, 3) < tw_word(oldest, 3) {
+                oldest = x
+            }
+            slot += 1
+        }
+        if e == 0 {
+            e = oldest
+            bump(C_TW_EVICTED)
+        }
+        bump(C_TW_MADE)
+    }
+    put_tw_word(e, 0, la << 32 | ra)
+    put_tw_word(e, 1, 1 << 32 | lp << 16 | rp)
+    put_tw_word(e, 2, snd_nxt << 32 | rcv_nxt)
+    put_tw_word(e, 3, until)
+}
+
+/// Whether a live time-wait entry holds local port `p` on an address
+/// that conflicts with `addr`.
+fn tw_holds(p: u64, addr: u64) -> bool {
+    let now = timer.ticks()
+    var row: u64 = 0
+    while row < TW_ROWS {
+        var slot: u64 = 0
+        while slot < 4 {
+            let e = tw_at(row, slot)
+            if e != 0 {
+                let w = tw_word(e, 1)
+                if w != 0 && (w >> 16) & 0xffff == p && tw_word(e, 3) > now {
+                    let a = tw_word(e, 0) >> 32
+                    if addr == 0 || a == addr {
+                        return true
+                    }
+                }
+            }
+            slot += 1
+        }
+        row += 1
+    }
+    false
+}
+
+/// Live time-wait entries (the books).
+pub fn waiting() -> u64 {
+    let saved = sync.acquire(sync.tcp())
+    let now = timer.ticks()
+    var n: u64 = 0
+    var row: u64 = 0
+    while row < TW_ROWS {
+        var slot: u64 = 0
+        while slot < 4 {
+            let e = tw_at(row, slot)
+            if e != 0 && tw_word(e, 1) != 0 && tw_word(e, 3) > now {
+                n += 1
+            }
+            slot += 1
+        }
+        row += 1
+    }
+    sync.release(sync.tcp(), saved)
+    n
+}
+
+// --- start-up and the books ---------------------------------------------------------
+
+/// Take the composing frame and the time-wait table's frames, choose
+/// the first ephemeral port, keep `key` for the initial sequence
+/// numbers, and tell kernel/ip protocol 6 is spoken. IF clear, after
+/// `ip.start`.
+pub fn start(key: u64) {
+    var i: u64 = 0
+    while i < 128 {
+        put_tw(i, 0)
+        i += 1
+    }
+    i = 0
+    while i < CONNS * CONN_WORDS {
+        put_cw(0, i, 0)
+        i += 1
+    }
+    let pa = frames.alloc() else 0
+    if pa != 0 {
+        put_tw(T_FRAME, pa + frames.hhdm())
+    }
+    i = 0
+    while i < TW_FRAMES {
+        let f = frames.alloc() else 0
+        var a: u64 = 0
+        if f != 0 {
+            a = f + frames.hhdm()
+            var k: u64 = 0
+            while k < PAGE {
+                // # Safety: a frame just taken, through the HHDM.
+                unsafe { ((a + k) as *u64).write_volatile(0) }
+                k += 8
+            }
+        }
+        // # Safety: i < TW_FRAMES, a word of boot/net.S's pax_tcp_tw.
+        unsafe { ((pax_tcp_tw as u64 + i * 8) as *u64).write_volatile(a) }
+        i += 1
+    }
+    // # Safety: boot/fpu.S's RDTSC; it touches no memory.
+    let t = unsafe { pax_rdtsc() }
+    put_tw(T_NEXT_PORT, EPHEMERAL_LO + (t >> 4) % (EPHEMERAL_HI - EPHEMERAL_LO + 1))
+    put_tw(T_KEY, key ^ t)
+    put_tw(T_STARTED, 1)
+    ip.speak_tcp()
+}
+
+/// Frames this module holds: the one it composes in, the time-wait
+/// table's, and 32 a connection with buffers.
+pub fn frames_held() -> u64 {
+    var n: u64 = if tw(T_FRAME) != 0 { 1 } else { 0 }
+    var i: u64 = 0
+    while i < TW_FRAMES {
+        if tw_frame(i) != 0 {
+            n += 1
+        }
+        i += 1
+    }
+    var c: u64 = 0
+    while c < CONNS {
+        if cw(c, K_USE) == 1 && flag(c, F_BUFS) {
+            n += 2 * BUF_PAGES
+        }
+        c += 1
+    }
+    n
+}
+
+/// Blocks in use.
+pub fn blocks() -> u64 {
+    var n: u64 = 0
+    var c: u64 = 0
+    while c < CONNS {
+        n += cw(c, K_USE)
+        c += 1
+    }
+    n
+}
+
+/// Blocks in use that no descriptor names and no listener holds:
+/// connections closed by their process and still finishing.
+pub fn finishing() -> u64 {
+    var n: u64 = 0
+    var c: u64 = 0
+    while c < CONNS {
+        if cw(c, K_USE) == 1 && !flag(c, F_ATTACHED) && cw(c, K_PARENT) == 0 {
+            n += 1
+        }
+        c += 1
+    }
+    n
+}
+
+// --- blocks and buffers ------------------------------------------------------------------
+
+/// A free block, zeroed and marked in use; CONNS when none is free. The
+/// TCP lock held.
+fn take_block() -> u64 {
+    var c: u64 = 0
+    while c < CONNS && cw(c, K_USE) != 0 {
+        c += 1
+    }
+    if c == CONNS {
+        return CONNS
+    }
+    var k: u64 = 0
+    while k < CONN_WORDS {
+        put_cw(c, k, 0)
+        k += 1
+    }
+    put_cw(c, K_USE, 1)
+    put_cw(c, K_RTO, RTO_INITIAL)
+    put_cw(c, K_MSS, MSS_DEFAULT)
+    bump(C_MADE)
+    c
+}
+
+/// Give block `c` its 32 frames. False (nothing kept) when they are
+/// not to be had.
+fn take_buffers(c: u64) -> bool {
+    if flag(c, F_BUFS) {
+        return true
+    }
+    var k: u64 = 0
+    var short = false
+    while k < 2 * BUF_PAGES && !short {
+        let pa = frames.alloc() else 0
+        if pa == 0 {
+            short = true
+        } else {
+            put_cw(c, K_TXF + k, pa)
+            k += 1
+        }
+    }
+    if short {
+        while k > 0 {
+            k -= 1
+            frames.free(cw(c, K_TXF + k))
+            put_cw(c, K_TXF + k, 0)
+        }
+        bump(C_NO_FRAMES)
+        return false
+    }
+    set_flag(c, F_BUFS)
+    true
+}
+
+fn drop_buffers(c: u64) {
+    if !flag(c, F_BUFS) {
+        return
+    }
+    var k: u64 = 0
+    while k < 2 * BUF_PAGES {
+        frames.free(cw(c, K_TXF + k))
+        put_cw(c, K_TXF + k, 0)
+        k += 1
+    }
+    clear_flag(c, F_BUFS)
+    put_cw(c, K_TX_LEN, 0)
+    put_cw(c, K_RX_LEN, 0)
+    put_cw(c, K_OOO_N, 0)
+}
+
+/// Block `c` is free again: its frames back, its listener's count down.
+fn free_block(c: u64) {
+    drop_buffers(c)
+    let p = cw(c, K_PARENT)
+    if p != 0 && cw(p - 1, K_USE) == 1 && cw(p - 1, K_PENDING) > 0 {
+        put_cw(p - 1, K_PENDING, cw(p - 1, K_PENDING) - 1)
+    }
+    var k: u64 = 0
+    while k < CONN_WORDS {
+        put_cw(c, k, 0)
+        k += 1
+    }
+    bump(C_FREED)
+}
+
+/// The kernel address of byte `o` (modulo BUF) of the ring whose frames
+/// start at word `fw` of block `c`, and how many bytes follow it on
+/// its frame.
+fn ring_at(c: u64, fw: u64, o: u64) -> (u64, u64) {
+    let at = o % BUF
+    let off = at % PAGE
+    (frames.hhdm() + cw(c, fw + at / PAGE) + off, PAGE - off)
+}
+
+/// Copy `n` bytes from kernel address `src` into block `c`'s ring `fw`
+/// at ring offset `o`.
+fn ring_put(c: u64, fw: u64, o: u64, src: u64, n: u64) {
+    var done: u64 = 0
+    while done < n {
+        let (d, room) = ring_at(c, fw, o + done)
+        let k = lo(n - done, room)
+        // # Safety: `k` bytes of a ring frame this block owns, and of
+        // the caller's `n` bytes from `src + done`.
+        unsafe { pax_fb_copy(d, src + done, k) }
+        done += k
+    }
+}
+
+/// Copy `n` bytes out of block `c`'s ring `fw` from ring offset `o` to
+/// kernel address `dst`.
+fn ring_get(c: u64, fw: u64, o: u64, dst: u64, n: u64) {
+    var done: u64 = 0
+    while done < n {
+        let (s, room) = ring_at(c, fw, o + done)
+        let k = lo(n - done, room)
+        // # Safety: as `ring_put`, the other way.
+        unsafe { pax_fb_copy(dst + done, s, k) }
+        done += k
+    }
+}
+
+// --- sending segments -----------------------------------------------------------------
+
+/// The window to advertise for block `c` now, and its right edge kept:
+/// the receive ring's room, 65,535 at most, never less than what was
+/// promised, and not moved by less than a segment or half the ring.
+fn window(c: u64) -> u64 {
+    let nxt = cw(c, K_RCV_NXT)
+    let promised = seq_sub(cw(c, K_RCV_ADV), nxt)
+    let was = if promised < HALF32 { promised } else { 0 }
+    if !flag(c, F_BUFS) {
+        return was
+    }
+    let room = lo(BUF - cw(c, K_RX_LEN), WND_MAX)
+    var w = was
+    if room > was && (room - was >= lo(BUF / 2, cw(c, K_MSS)) || was == 0) {
+        w = room
+    }
+    put_cw(c, K_RCV_ADV, seq_add(nxt, w))
+    w
+}
+
+/// Compose and send one segment of block `c`: `flags`, sequence number
+/// `seq`, `n` data bytes from the send ring at ring offset `o`. A SYN
+/// carries the MSS option. Returns whether kernel/ip took it.
+fn emit(c: u64, seq: u64, flags: u64, o: u64, n: u64) -> bool {
+    let f = tw(T_FRAME)
+    if f == 0 {
+        return false
+    }
+    let syn = flags & SYN != 0
+    let hl: u64 = if syn { 24 } else { 20 }
+    ip.put_be16(f, cw(c, K_LPORT))
+    ip.put_be16(f + 2, cw(c, K_RPORT))
+    ip.put_be32(f + 4, seq)
+    ip.put_be32(f + 8, if flags & ACK != 0 { cw(c, K_RCV_NXT) } else { 0 })
+    ip.put_byte(f + 12, (hl / 4) << 4)
+    ip.put_byte(f + 13, flags)
+    // A SYN's window is not scaled and none here ever is; a half-open
+    // block has no ring yet and promises a whole one.
+    let w = if cw(c, K_STATE) == SYN_SENT || cw(c, K_STATE) == SYN_RCVD { promise(c) } else { window(c) }
+    ip.put_be16(f + 14, w)
+    ip.put_be16(f + 16, 0)
+    ip.put_be16(f + 18, 0)
+    if syn {
+        ip.put_byte(f + 20, 2)
+        ip.put_byte(f + 21, 4)
+        ip.put_be16(f + 22, MSS)
+    }
+    if n > 0 {
+        ring_get(c, K_TXF, o, f + hl, n)
+    }
+    let la = cw(c, K_LADDR)
+    let ra = cw(c, K_RADDR)
+    ip.put_be16(f + 16, checksum(la, ra, f, hl + n))
+    let r = ip.send_from(la, ra, PROTOCOL, f, hl + n)
+    if r == arp.SENT || r == arp.QUEUED {
+        bump(C_OUT)
+        if n > 0 {
+            bump(C_DATA_OUT)
+            bump_by(C_BYTES_OUT, n)
+        } else if flags & (SYN | FIN | RST) == 0 {
+            bump(C_ACK_OUT)
+        }
+        if flags & RST != 0 {
+            bump(C_RST_OUT)
+        }
+        return true
+    }
+    bump(C_OUT_FAILED)
+    false
+}
+
+/// The window a block with no ring yet promises: a whole one, its edge
+/// kept.
+fn promise(c: u64) -> u64 {
+    put_cw(c, K_RCV_ADV, seq_add(cw(c, K_RCV_NXT), WND_MAX))
+    WND_MAX
+}
+
+/// An acknowledgement of block `c`'s, nothing else. Its sequence
+/// number is SND.MAX: after a timeout SND.NXT is back at SND.UNA, which
+/// the peer may be past, and RFC 9293's test would have it drop a
+/// segment that starts before its RCV.NXT.
+fn ack_now(c: u64) {
+    let _ok = emit(c, cw(c, K_SND_MAX), ACK, 0, 0)
+}
+
+/// A reset from block `c` (RFC 9293 §3.10.7: its own sequence number).
+fn reset_now(c: u64) {
+    let _ok = emit(c, cw(c, K_SND_MAX), RST | ACK, 0, 0)
+}
+
+/// A reset for a segment that named no connection (RFC 9293
+/// §3.10.7.1), from `la`:`lp` to `ra`:`rp`: with the sequence number
+/// the segment acknowledged when it had ACK, else sequence number 0
+/// and an acknowledgement of everything it carried.
+fn reset_for(la: u64, lp: u64, ra: u64, rp: u64, flags: u64, seq: u64, ack: u64, seglen: u64) {
+    let f = tw(T_FRAME)
+    if f == 0 {
+        return
+    }
+    ip.put_be16(f, lp)
+    ip.put_be16(f + 2, rp)
+    if flags & ACK != 0 {
+        ip.put_be32(f + 4, ack)
+        ip.put_be32(f + 8, 0)
+        ip.put_byte(f + 13, RST)
+    } else {
+        ip.put_be32(f + 4, 0)
+        ip.put_be32(f + 8, seq_add(seq, seglen))
+        ip.put_byte(f + 13, RST | ACK)
+    }
+    ip.put_byte(f + 12, 0x50)
+    ip.put_be16(f + 14, 0)
+    ip.put_be16(f + 16, 0)
+    ip.put_be16(f + 18, 0)
+    ip.put_be16(f + 16, checksum(la, ra, f, 20))
+    let r = ip.send_from(la, ra, PROTOCOL, f, 20)
+    if r == arp.SENT || r == arp.QUEUED {
+        bump(C_OUT)
+        bump(C_RST_OUT)
+    } else {
+        bump(C_OUT_FAILED)
+    }
+}
+
+/// The sequence number of block `c`'s FIN: the one after its last byte.
+fn fin_seq(c: u64) -> u64 {
+    seq_add(cw(c, K_TX_SEQ), cw(c, K_TX_LEN))
+}
+
+/// Whether block `c` is in a state that sends data or a FIN.
+fn sending(c: u64) -> bool {
+    let s = cw(c, K_STATE)
+    s == ESTABLISHED || s == CLOSE_WAIT || s == FIN_WAIT_1 || s == CLOSING || s == LAST_ACK
+}
+
+/// Start the retransmission timer of block `c` if it is off.
+fn arm(c: u64) {
+    if cw(c, K_REXMT_AT) == 0 {
+        put_cw(c, K_REXMT_AT, timer.ticks() + cw(c, K_RTO))
+    }
+}
+
+/// Send what block `c` may send now (RFC 1122 §4.2.3.4, RFC 5681):
+/// data from SND.NXT while the peer's window and the congestion window
+/// have room, then the FIN. `force`: the persist timer's turn — what
+/// the silly-window rule holds back goes, and a closed window gets one
+/// byte. Returns how many segments left.
+fn output(c: u64, force: bool) -> u64 {
+    if !sending(c) {
+        return 0
+    }
+    let now = timer.ticks()
+    var sent: u64 = 0
+    var more = true
+    var forced = force
+    while more {
+        let nxt = cw(c, K_SND_NXT)
+        let una = cw(c, K_SND_UNA)
+        let off = seq_sub(nxt, cw(c, K_TX_SEQ))
+        let len = cw(c, K_TX_LEN)
+        // Past the last byte: the FIN is out.
+        let unsent = if off < len { len - off } else { 0 }
+        let fin_due = flag(c, F_WR_SHUT) && off <= len
+        let flight = seq_sub(nxt, una)
+        let wnd = lo(cw(c, K_SND_WND), cw(c, K_CWND))
+        let room = if wnd > flight { wnd - flight } else { 0 }
+        var n = lo(lo(unsent, room), cw(c, K_MSS))
+        var probe = false
+        if forced && n == 0 && unsent > 0 && flight == 0 {
+            n = 1 // a closed window: one byte past it
+            probe = true
+        }
+        let fin = fin_due && n == unsent
+        if n == 0 && !fin {
+            more = false
+        } else if n > 0 && n < cw(c, K_MSS) && !fin && !forced && ((n < unsent && n * 2 < cw(c, K_MAX_WND)) || (n == unsent && !flag(c, F_NODELAY) && flight > 0)) {
+            // Less than a segment: not all that is queued and not half
+            // the peer's greatest window (the silly-window rule), or
+            // all of it with bytes still unacknowledged (Nagle).
+            more = false
+        } else {
+            var flags = ACK
+            if n > 0 && n == unsent {
+                flags = flags | PSH
+            }
+            if fin {
+                flags = flags | FIN
+            }
+            let again = seq_lt(nxt, cw(c, K_SND_MAX))
+            if !emit(c, nxt, flags, cw(c, K_TX_BASE) + off, n) {
+                more = false
+            } else {
+                sent += 1
+                if again {
+                    bump(C_RETRANSMITS)
+                }
+                if probe {
+                    bump(C_PROBES)
+                    // The byte is not counted as sent: SND.NXT and
+                    // SND.MAX stay, and only K_PROBE knows an ACK may
+                    // name it.
+                    put_cw(c, K_PROBE, 1)
+                    more = false
+                } else {
+                    if una == cw(c, K_SND_MAX) {
+                        put_cw(c, K_UNACK_AT, now)
+                    }
+                    let end = seq_add(nxt, n + (if fin { 1 } else { 0 }))
+                    put_cw(c, K_SND_NXT, end)
+                    if fin {
+                        set_flag(c, F_FIN_SENT)
+                    }
+                    if seq_lt(cw(c, K_SND_MAX), end) {
+                        put_cw(c, K_SND_MAX, end)
+                        if cw(c, K_RTT_AT) == 0 {
+                            // New bytes: time them (Karn: never a retransmission).
+                            put_cw(c, K_RTT_SEQ, nxt)
+                            put_cw(c, K_RTT_AT, now + 1)
+                        }
+                    }
+                    arm(c)
+                    put_cw(c, K_PERSIST_AT, 0)
+                    put_cw(c, K_PERSIST_N, 0)
+                    forced = false
+                    if fin {
+                        more = false
+                    }
+                }
+            }
+        }
+    }
+    // Bytes wait, nothing is in flight to bring an ACK, and nothing
+    // could be sent: the persist timer will.
+    let off2 = seq_sub(cw(c, K_SND_NXT), cw(c, K_TX_SEQ))
+    if off2 < cw(c, K_TX_LEN) && cw(c, K_SND_NXT) == cw(c, K_SND_UNA) && cw(c, K_PERSIST_AT) == 0 {
+        let back = lo(cw(c, K_PERSIST_N), 9)
+        put_cw(c, K_PERSIST_AT, now + lo(cw(c, K_RTO) << back, RTO_MAX))
+    }
+    sent
+}
+
+// --- how a connection ends ------------------------------------------------------------
+
+/// Block `c`'s connection is over, with `error` owed to its next call
+/// (0: none). A block a descriptor names stays, CLOSED and without its
+/// buffers' contents; any other is freed. Whoever waits is woken.
+fn finish(c: u64, error: u64) {
+    if flag(c, F_ATTACHED) {
+        // What was received in order stays readable only when the end
+        // was clean; a reset or a timeout discards it.
+        if error != 0 {
+            put_cw(c, K_RX_LEN, 0)
+        }
+        put_cw(c, K_OOO_N, 0)
+        put_cw(c, K_TX_LEN, 0)
+        put_cw(c, K_STATE, CLOSED)
+        put_cw(c, K_ERROR, error)
+        put_cw(c, K_REXMT_AT, 0)
+        put_cw(c, K_PERSIST_AT, 0)
+        put_cw(c, K_DEAD_AT, 0)
+        put_cw(c, K_RTT_AT, 0)
+        if cw(c, K_RX_LEN) == 0 {
+            drop_buffers(c)
+        }
+    } else {
+        free_block(c)
+    }
+    sched.wake_pipes()
+}
+
+/// Block `c` has both FINs acknowledged or seen: the 2 x MSL wait. A
+/// block no descriptor names becomes a time-wait entry and is freed;
+/// one a descriptor names waits as a block until it is closed.
+fn to_time_wait(c: u64) {
+    let until = timer.ticks() + TIME_WAIT
+    put_cw(c, K_REXMT_AT, 0)
+    put_cw(c, K_PERSIST_AT, 0)
+    if flag(c, F_ATTACHED) {
+        put_cw(c, K_STATE, TIME_WAITING)
+        put_cw(c, K_DEAD_AT, until)
+        sched.wake_pipes()
+        return
+    }
+    tw_put(cw(c, K_LADDR), cw(c, K_LPORT), cw(c, K_RADDR), cw(c, K_RPORT), cw(c, K_SND_NXT), cw(c, K_RCV_NXT), until)
+    free_block(c)
+    sched.wake_pipes()
+}
+
+// --- finding whose a segment is ---------------------------------------------------------
+
+/// The block of the connection `la`:`lp` – `ra`:`rp`; CONNS when none.
+fn find(la: u64, lp: u64, ra: u64, rp: u64) -> u64 {
+    var c: u64 = 0
+    while c < CONNS {
+        if cw(c, K_USE) == 1 && cw(c, K_LPORT) == lp && cw(c, K_RPORT) == rp && cw(c, K_RADDR) == ra && cw(c, K_LADDR) == la {
+            let s = cw(c, K_STATE)
+            if s != CLOSED && s != LISTEN {
+                return c
+            }
+        }
+        c += 1
+    }
+    CONNS
+}
+
+/// The listener a SYN for `la`:`lp` reaches; CONNS when none.
+fn listener(la: u64, lp: u64) -> u64 {
+    var c: u64 = 0
+    while c < CONNS {
+        if cw(c, K_USE) == 1 && cw(c, K_STATE) == LISTEN && cw(c, K_LPORT) == lp && (cw(c, K_LADDR) == 0 || cw(c, K_LADDR) == la) {
+            return c
+        }
+        c += 1
+    }
+    CONNS
+}
+
+// --- receiving ------------------------------------------------------------------------
+
+/// Walk the options at `a`, `n` bytes: `(ok, mss)` — false when the
+/// list does not parse; the MSS option's value, or 0 when there is
+/// none. Each kind seen is counted.
+fn options(a: u64, n: u64) -> (bool, u64) {
+    var i: u64 = 0
+    var mss: u64 = 0
+    while i < n {
+        let kind = ip.octet(a + i)
+        if kind == 0 {
+            return (true, mss)
+        }
+        if kind == 1 {
+            i += 1
+            continue
+        }
+        if i + 1 >= n {
+            return (false, 0)
+        }
+        let l = ip.octet(a + i + 1)
+        if l < 2 || i + l > n {
+            return (false, 0)
+        }
+        if kind == 2 {
+            if l != 4 {
+                return (false, 0)
+            }
+            mss = ip.be16(a + i + 2)
+            bump(C_OPT_MSS)
+        } else if kind == 3 {
+            bump(C_OPT_WSCALE)
+        } else if kind == 4 {
+            bump(C_OPT_SACK_OK)
+        } else if kind == 5 {
+            bump(C_OPT_SACK)
+        } else if kind == 8 {
+            bump(C_OPT_TS)
+        } else if kind == 34 {
+            bump(C_OPT_TFO)
+        } else {
+            bump(C_OPT_OTHER)
+        }
+        i += l
+    }
+    (true, mss)
+}
+
+/// The most a segment to a peer that announced `mss` (0: none) carries.
+fn peer_mss(mss: u64) -> u64 {
+    if mss == 0 {
+        return MSS_DEFAULT
+    }
+    // A peer may not announce less than a segment can usefully be.
+    hi(lo(mss, MSS), 64)
+}
+
+/// A round trip of `r` ticks measured on block `c` (RFC 6298 §2.2–2.3).
+fn rtt_sample(c: u64, r: u64) {
+    bump(C_RTT_SAMPLES)
+    if cw(c, K_SRTT) == 0 && cw(c, K_RTTVAR) == 0 {
+        put_cw(c, K_SRTT, r * 8)
+        put_cw(c, K_RTTVAR, r * 2) // R/2, scaled by 4
+    } else {
+        let srtt = cw(c, K_SRTT)
+        let diff = if srtt / 8 > r { srtt / 8 - r } else { r - srtt / 8 }
+        // RTTVAR <- 3/4 RTTVAR + 1/4 |SRTT - R|; SRTT <- 7/8 SRTT + 1/8 R
+        put_cw(c, K_RTTVAR, cw(c, K_RTTVAR) - cw(c, K_RTTVAR) / 4 + diff)
+        put_cw(c, K_SRTT, srtt - srtt / 8 + r)
+    }
+    let rto = cw(c, K_SRTT) / 8 + hi(1, cw(c, K_RTTVAR))
+    put_cw(c, K_RTO, lo(hi(rto, RTO_MIN), RTO_MAX))
+}
+
+/// The handshake of block `c` is done: buffers, the congestion window,
+/// the peer's window. False when the buffers are not to be had.
+fn establish(c: u64, seq: u64, ack: u64, wnd: u64) -> bool {
+    if !take_buffers(c) {
+        return false
+    }
+    put_cw(c, K_STATE, ESTABLISHED)
+    set_flag(c, F_WAS)
+    put_cw(c, K_SND_WND, wnd)
+    put_cw(c, K_MAX_WND, wnd)
+    put_cw(c, K_SND_WL1, seq)
+    put_cw(c, K_SND_WL2, ack)
+    put_cw(c, K_TX_SEQ, seq_add(cw(c, K_ISS), 1))
+    put_cw(c, K_TX_BASE, 0)
+    put_cw(c, K_TX_LEN, 0)
+    put_cw(c, K_RX_BASE, 0)
+    put_cw(c, K_RX_LEN, 0)
+    // RFC 5681 §3.1's initial window: 3 segments over 1095 bytes, 4 under.
+    put_cw(c, K_CWND, if cw(c, K_MSS) > 1095 { 3 * cw(c, K_MSS) } else { 4 * cw(c, K_MSS) })
+    put_cw(c, K_SSTHRESH, BUF)
+    put_cw(c, K_DUPACKS, 0)
+    put_cw(c, K_RECOVERY, 0)
+    put_cw(c, K_REXMT_AT, 0)
+    put_cw(c, K_REXMITS, 0)
+    put_tw(T_QSEQ, tw(T_QSEQ) + 1)
+    put_cw(c, K_QSEQ, tw(T_QSEQ))
+    // The ring exists now: promise what it holds, not more than before.
+    let _w = window(c)
+    true
+}
+
+/// A SYN for listener `l` from `ra`:`rp` to `la`: a half-open block and
+/// its SYN-ACK, or a named drop.
+fn listen_syn(l: u64, la: u64, ra: u64, rp: u64, seq: u64, wnd: u64, mss: u64) {
+    if cw(l, K_PENDING) > lo(cw(l, K_BACKLOG), BACKLOG_MAX) {
+        bump(C_LISTEN_FULL)
+        return
+    }
+    let c = take_block()
+    if c == CONNS {
+        bump(C_NO_BLOCK)
+        return
+    }
+    let lp = cw(l, K_LPORT)
+    put_cw(c, K_LADDR, la)
+    put_cw(c, K_LPORT, lp)
+    put_cw(c, K_RADDR, ra)
+    put_cw(c, K_RPORT, rp)
+    put_cw(c, K_FLAGS, cw(l, K_FLAGS) & (F_REUSE | F_NODELAY))
+    put_cw(c, K_PARENT, l + 1)
+    put_cw(l, K_PENDING, cw(l, K_PENDING) + 1)
+    put_cw(c, K_IRS, seq)
+    put_cw(c, K_RCV_NXT, seq_add(seq, 1))
+    let iss = isn(la, lp, ra, rp)
+    put_cw(c, K_ISS, iss)
+    put_cw(c, K_SND_UNA, iss)
+    put_cw(c, K_SND_NXT, seq_add(iss, 1))
+    put_cw(c, K_SND_MAX, seq_add(iss, 1))
+    put_cw(c, K_SND_WND, wnd)
+    put_cw(c, K_MSS, peer_mss(mss))
+    put_cw(c, K_STATE, SYN_RCVD)
+    let _ok = emit(c, iss, SYN | ACK, 0, 0)
+    put_cw(c, K_REXMT_AT, timer.ticks() + cw(c, K_RTO))
+}
+
+/// Add [`s`, `e`) to block `c`'s out-of-order list, merged with what
+/// it touches. False when it would be a fifth interval.
+fn ooo_add(c: u64, s0: u64, e0: u64) -> bool {
+    var s = s0
+    var e = e0
+    let n = cw(c, K_OOO_N)
+    // Fold every interval that touches the new one into it.
+    var keep: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let a = cw(c, K_OOO + i * 2)
+        let b = cw(c, K_OOO + i * 2 + 1)
+        if seq_lt(e, a) || seq_lt(b, s) {
+            put_cw(c, K_OOO + keep * 2, a)
+            put_cw(c, K_OOO + keep * 2 + 1, b)
+            keep += 1
+        } else {
+            if seq_lt(a, s) {
+                s = a
+            }
+            if seq_lt(e, b) {
+                e = b
+            }
+        }
+        i += 1
+    }
+    if keep == OOO {
+        // The list was full and nothing merged: it is as it was.
+        return false
+    }
+    put_cw(c, K_OOO + keep * 2, s)
+    put_cw(c, K_OOO + keep * 2 + 1, e)
+    put_cw(c, K_OOO_N, keep + 1)
+    true
+}
+
+/// RCV.NXT of block `c` moved: take what the out-of-order list holds
+/// from there on.
+fn ooo_drain(c: u64) {
+    var again = true
+    while again {
+        again = false
+        let n = cw(c, K_OOO_N)
+        let nxt = cw(c, K_RCV_NXT)
+        var i: u64 = 0
+        while i < n && !again {
+            let a = cw(c, K_OOO + i * 2)
+            let b = cw(c, K_OOO + i * 2 + 1)
+            if seq_leq(a, nxt) {
+                if seq_lt(nxt, b) {
+                    let adv = seq_sub(b, nxt)
+                    put_cw(c, K_RX_LEN, cw(c, K_RX_LEN) + adv)
+                    put_cw(c, K_RCV_NXT, b)
+                    bump_by(C_BYTES_IN, adv)
+                }
+                // Remove interval i.
+                var k = i
+                while k + 1 < n {
+                    put_cw(c, K_OOO + k * 2, cw(c, K_OOO + (k + 1) * 2))
+                    put_cw(c, K_OOO + k * 2 + 1, cw(c, K_OOO + (k + 1) * 2 + 1))
+                    k += 1
+                }
+                put_cw(c, K_OOO_N, n - 1)
+                again = true
+            }
+            i += 1
+        }
+    }
+}
+
+/// The retransmission of the earliest unacknowledged segment alone,
+/// at the third duplicate ACK (RFC 5681 §3.2).
+fn fast_retransmit(c: u64) {
+    let una = cw(c, K_SND_UNA)
+    let off = seq_sub(una, cw(c, K_TX_SEQ))
+    let len = cw(c, K_TX_LEN)
+    let flight = seq_sub(cw(c, K_SND_MAX), una)
+    put_cw(c, K_SSTHRESH, hi(flight / 2, 2 * cw(c, K_MSS)))
+    put_cw(c, K_CWND, cw(c, K_SSTHRESH) + 3 * cw(c, K_MSS))
+    put_cw(c, K_RECOVERY, 1)
+    put_cw(c, K_RTT_AT, 0)
+    bump(C_FAST)
+    let n = if off < len { lo(len - off, cw(c, K_MSS)) } else { 0 }
+    let fin = flag(c, F_FIN_SENT) && off + n == len
+    if n > 0 || fin {
+        if emit(c, una, ACK | (if fin { FIN } else { 0 }), cw(c, K_TX_BASE) + off, n) {
+            bump(C_RETRANSMITS)
+        }
+    }
+}
+
+/// The acknowledgement `ack` and window `wnd` of a segment (sequence
+/// number `seq`, `len` data bytes, `flags`) for synchronized block `c`.
+/// False when the segment is to be dropped (an ACK was sent).
+fn ack_in(c: u64, seq: u64, ack: u64, wnd: u64, len: u64, flags: u64) -> bool {
+    let una = cw(c, K_SND_UNA)
+    // The most an acknowledgement may name: everything sent, and a
+    // probe's byte when one is out.
+    let top = seq_add(cw(c, K_SND_MAX), cw(c, K_PROBE))
+    if seq_lt(top, ack) {
+        bump(C_ACK_AHEAD)
+        ack_now(c)
+        return false
+    }
+    let now = timer.ticks()
+    if seq_lt(una, ack) {
+        put_cw(c, K_PROBE, 0)
+        if seq_lt(cw(c, K_SND_MAX), ack) {
+            put_cw(c, K_SND_MAX, ack) // the probe's byte was taken
+        }
+        let acked = seq_sub(ack, una)
+        // Bytes of the ring this acknowledges (a SYN and a FIN take a
+        // sequence number and no ring).
+        let txs = cw(c, K_TX_SEQ)
+        if seq_lt(txs, ack) {
+            let gone = lo(seq_sub(ack, txs), cw(c, K_TX_LEN))
+            put_cw(c, K_TX_BASE, (cw(c, K_TX_BASE) + gone) % BUF)
+            put_cw(c, K_TX_LEN, cw(c, K_TX_LEN) - gone)
+            put_cw(c, K_TX_SEQ, seq_add(txs, gone))
+        }
+        put_cw(c, K_SND_UNA, ack)
+        if seq_lt(cw(c, K_SND_NXT), ack) {
+            put_cw(c, K_SND_NXT, ack)
+        }
+        if cw(c, K_RTT_AT) != 0 && seq_lt(cw(c, K_RTT_SEQ), ack) {
+            rtt_sample(c, now + 1 - cw(c, K_RTT_AT))
+            put_cw(c, K_RTT_AT, 0)
+        }
+        put_cw(c, K_REXMITS, 0)
+        put_cw(c, K_UNACK_AT, now)
+        if cw(c, K_RECOVERY) == 1 {
+            put_cw(c, K_CWND, cw(c, K_SSTHRESH))
+            put_cw(c, K_RECOVERY, 0)
+        } else if cw(c, K_CWND) < cw(c, K_SSTHRESH) {
+            put_cw(c, K_CWND, cw(c, K_CWND) + lo(acked, cw(c, K_MSS)))
+        } else {
+            put_cw(c, K_CWND, cw(c, K_CWND) + hi(1, cw(c, K_MSS) * cw(c, K_MSS) / cw(c, K_CWND)))
+        }
+        if cw(c, K_CWND) > 4 * BUF {
+            put_cw(c, K_CWND, 4 * BUF)
+        }
+        put_cw(c, K_DUPACKS, 0)
+        put_cw(c, K_REXMT_AT, if ack == cw(c, K_SND_MAX) { 0 } else { now + cw(c, K_RTO) })
+        sched.wake_pipes() // room in the send ring; a FIN acknowledged
+    } else if ack == una && len == 0 && flags & (SYN | FIN) == 0 && wnd == cw(c, K_SND_WND) && una != cw(c, K_SND_MAX) {
+        // A duplicate (RFC 5681 §2): nothing new, nothing carried, the
+        // window as it was, and bytes outstanding.
+        bump(C_DUP_ACKS)
+        put_cw(c, K_DUPACKS, cw(c, K_DUPACKS) + 1)
+        if cw(c, K_DUPACKS) == 3 && cw(c, K_RECOVERY) == 0 {
+            fast_retransmit(c)
+        } else if cw(c, K_DUPACKS) > 3 && cw(c, K_RECOVERY) == 1 {
+            put_cw(c, K_CWND, cw(c, K_CWND) + cw(c, K_MSS))
+        }
+    }
+    // The window (RFC 9293 §3.10.7.4): from a segment newer than the
+    // last that set it.
+    if seq_lt(cw(c, K_SND_WL1), seq) || (cw(c, K_SND_WL1) == seq && seq_leq(cw(c, K_SND_WL2), ack)) {
+        put_cw(c, K_SND_WND, wnd)
+        put_cw(c, K_SND_WL1, seq)
+        put_cw(c, K_SND_WL2, ack)
+        if wnd > cw(c, K_MAX_WND) {
+            put_cw(c, K_MAX_WND, wnd)
+        }
+    }
+    true
+}
+
+/// A segment for the time-wait entry `e` (RFC 9293 §3.10.7.4's
+/// TIME-WAIT; RFC 1337; RFC 1122 §4.2.2.13). Returns true when the
+/// entry ended and the segment, a SYN, is to be taken as new.
+fn time_wait_in(e: u64, la: u64, lp: u64, ra: u64, rp: u64, flags: u64, seq: u64) -> bool {
+    let snd_nxt = tw_word(e, 2) >> 32
+    let rcv_nxt = tw_word(e, 2) & M32
+    if flags & RST != 0 {
+        bump(C_TW_RST)
+        return false
+    }
+    if flags & SYN != 0 && flags & ACK == 0 && seq_lt(rcv_nxt, seq) && listener(la, lp) != CONNS {
+        put_tw_word(e, 1, 0)
+        bump(C_TW_REOPENED)
+        return true
+    }
+    bump(C_TW_SEGMENTS)
+    if flags & FIN != 0 {
+        put_tw_word(e, 3, timer.ticks() + TIME_WAIT)
+    }
+    // The acknowledgement the entry owes: its own sequence number,
+    // everything received.
+    let f = tw(T_FRAME)
+    if f != 0 {
+        ip.put_be16(f, lp)
+        ip.put_be16(f + 2, rp)
+        ip.put_be32(f + 4, snd_nxt)
+        ip.put_be32(f + 8, rcv_nxt)
+        ip.put_byte(f + 12, 0x50)
+        ip.put_byte(f + 13, ACK)
+        ip.put_be16(f + 14, 0)
+        ip.put_be16(f + 16, 0)
+        ip.put_be16(f + 18, 0)
+        ip.put_be16(f + 16, checksum(la, ra, f, 20))
+        let r = ip.send_from(la, ra, PROTOCOL, f, 20)
+        if r == arp.SENT || r == arp.QUEUED {
+            bump(C_OUT)
+            bump(C_ACK_OUT)
+        } else {
+            bump(C_OUT_FAILED)
+        }
+    }
+    false
+}
+
+/// The TCP segment of a frame kernel/ip passed: the frame at `frame`,
+/// its IP header `ihl` bytes, its total length `total` (kernel/netd;
+/// the frame is this call's until it returns).
+pub fn input(frame: u64, ihl: u64, total: u64) {
+    let saved = sync.acquire(sync.tcp())
+    input_locked(frame, ihl, total)
+    sync.release(sync.tcp(), saved)
+}
+
+fn input_locked(frame: u64, ihl: u64, total: u64) {
+    let h = frame + ip.ETH
+    let t = h + ihl
+    let n = total - ihl
+    if n < 20 {
+        bump(C_SHORT)
+        return
+    }
+    let doff = (ip.octet(t + 12) >> 4) * 4
+    if doff < 20 || doff > n {
+        bump(C_HEADER)
+        return
+    }
+    let ra = ip.be32(h + 12)
+    let la = ip.be32(h + 16)
+    if checksum(ra, la, t, n) != 0 {
+        bump(C_CHECKSUM)
+        return
+    }
+    if ip.is_broadcast(la) || ip.octet(frame) & 1 == 1 {
+        bump(C_BROADCAST)
+        return
+    }
+    let rp = ip.be16(t)
+    let lp = ip.be16(t + 2)
+    if rp == 0 || lp == 0 {
+        bump(C_PORT_ZERO)
+        return
+    }
+    let (parsed, mss) = options(t + 20, doff - 20)
+    if !parsed {
+        bump(C_OPTION)
+        return
+    }
+    bump(C_IN)
+    let seq = ip.be32(t + 4)
+    let ack = ip.be32(t + 8)
+    let flags = ip.octet(t + 13)
+    let wnd = ip.be16(t + 14)
+    let data = t + doff
+    let len = n - doff
+    if flags & URG != 0 {
+        bump(C_URGENT)
+    }
+    let c = find(la, lp, ra, rp)
+    if c == CONNS {
+        let e = tw_find(la, lp, ra, rp)
+        if e != 0 && !time_wait_in(e, la, lp, ra, rp, flags, seq) {
+            return
+        }
+        let l = listener(la, lp)
+        if l != CONNS {
+            if flags & RST != 0 {
+                bump(C_LISTEN_OTHER)
+            } else if flags & ACK != 0 {
+                bump(C_NO_CONN)
+                reset_for(la, lp, ra, rp, flags, seq, ack, 0)
+            } else if flags & SYN != 0 {
+                if len > 0 {
+                    bump(C_SYN_DATA)
+                }
+                listen_syn(l, la, ra, rp, seq, wnd, mss)
+            } else {
+                bump(C_LISTEN_OTHER)
+            }
+            return
+        }
+        if flags & RST != 0 {
+            bump(C_NO_CONN_RST)
+            return
+        }
+        bump(C_NO_CONN)
+        reset_for(la, lp, ra, rp, flags, seq, ack, len + (if flags & SYN != 0 { 1 } else { 0 }) + (if flags & FIN != 0 { 1 } else { 0 }))
+        return
+    }
+    let st = cw(c, K_STATE)
+    if st == SYN_SENT {
+        syn_sent_in(c, flags, seq, ack, wnd, mss, len)
+        return
+    }
+    // --- a synchronized connection, or SYN-RECEIVED (RFC 9293 §3.10.7.4) ---
+    let nxt = cw(c, K_RCV_NXT)
+    let rwnd = seq_sub(cw(c, K_RCV_ADV), nxt)
+    let seglen = len + (if flags & SYN != 0 { 1 } else { 0 }) + (if flags & FIN != 0 { 1 } else { 0 })
+    var fits = false
+    if seglen == 0 {
+        fits = if rwnd == 0 { seq == nxt } else { seq_leq(nxt, seq) && seq_lt(seq, seq_add(nxt, rwnd)) }
+    } else if rwnd != 0 {
+        let last = seq_add(seq, seglen - 1)
+        fits = (seq_leq(nxt, seq) && seq_lt(seq, seq_add(nxt, rwnd))) || (seq_leq(nxt, last) && seq_lt(last, seq_add(nxt, rwnd)))
+    }
+    if !fits {
+        if st == SYN_RCVD && flags & SYN != 0 && flags & ACK == 0 && seq == cw(c, K_IRS) {
+            // The peer's SYN again: its SYN-ACK was lost.
+            if emit(c, cw(c, K_ISS), SYN | ACK, 0, 0) {
+                bump(C_RETRANSMITS)
+            }
+            return
+        }
+        bump(C_UNACCEPTABLE)
+        if flags & RST == 0 {
+            ack_now(c)
+        }
+        return
+    }
+    if flags & RST != 0 {
+        if seq != nxt {
+            bump(C_RST_CHALLENGED)
+            ack_now(c)
+            return
+        }
+        bump(C_RST_IN)
+        if st == SYN_RCVD && cw(c, K_PARENT) != 0 {
+            free_block(c)
+            return
+        }
+        // After the peer's FIN a reset leaves -EPIPE for the writer and
+        // the end of the stream for the reader; before it, -ECONNRESET
+        // (both as Linux answered).
+        finish(c, if st == SYN_RCVD { ECONNREFUSED } else if flag(c, F_FIN_RCVD) { EPIPE } else { ECONNRESET })
+        return
+    }
+    if flags & SYN != 0 {
+        bump(C_SYN_CHALLENGED)
+        ack_now(c)
+        return
+    }
+    if flags & ACK == 0 {
+        bump(C_NO_ACK)
+        return
+    }
+    if st == SYN_RCVD {
+        if !(seq_lt(cw(c, K_SND_UNA), ack) && seq_leq(ack, cw(c, K_SND_MAX))) {
+            bump(C_NO_CONN)
+            reset_for(la, lp, ra, rp, flags, seq, ack, 0)
+            return
+        }
+        if !establish(c, seq, ack, wnd) {
+            // No frames for its buffers: the peer is told, the block goes.
+            reset_for(la, lp, ra, rp, flags, seq, ack, 0)
+            finish(c, ENOBUFS)
+            return
+        }
+        if cw(c, K_PARENT) != 0 {
+            set_flag(c, F_QUEUED)
+            bump(C_PASSIVE)
+        } else {
+            bump(C_ACTIVE)
+        }
+        sched.wake_pipes()
+    }
+    if !ack_in(c, seq, ack, wnd, len, flags) {
+        return
+    }
+    // This end's FIN acknowledged: FIN-WAIT-1 to FIN-WAIT-2, CLOSING to
+    // the wait, LAST-ACK to nothing.
+    if flag(c, F_FIN_SENT) && cw(c, K_SND_UNA) == seq_add(fin_seq(c), 1) {
+        let s = cw(c, K_STATE)
+        if s == FIN_WAIT_1 {
+            put_cw(c, K_STATE, FIN_WAIT_2)
+            if !flag(c, F_ATTACHED) {
+                put_cw(c, K_DEAD_AT, timer.ticks() + TIME_WAIT)
+            }
+        } else if s == CLOSING {
+            to_time_wait(c)
+            return
+        } else if s == LAST_ACK {
+            finish(c, 0)
+            return
+        }
+    }
+    var owe = false
+    var s2 = cw(c, K_STATE)
+    var dlen = len
+    var at = data
+    var from = seq
+    var fin = flags & FIN != 0
+    if dlen > 0 && (s2 == ESTABLISHED || s2 == FIN_WAIT_1 || s2 == FIN_WAIT_2) {
+        if !flag(c, F_ATTACHED) && cw(c, K_PARENT) == 0 {
+            // Its process closed it: nobody will read this (RFC 1122
+            // §4.2.2.13).
+            bump(C_DATA_AFTER_CLOSE)
+            reset_now(c)
+            finish(c, ECONNRESET)
+            return
+        }
+        owe = true
+        // What lies before RCV.NXT was taken already.
+        if seq_lt(from, nxt) {
+            let skip = seq_sub(nxt, from)
+            if skip >= dlen {
+                dlen = 0
+            } else {
+                at += skip
+                dlen -= skip
+                from = nxt
+            }
+        }
+        // What lies past the window's edge is cut, and a FIN with it.
+        let edge = seq_add(nxt, rwnd)
+        if dlen > 0 && seq_lt(edge, seq_add(from, dlen)) {
+            dlen = seq_sub(edge, from)
+            fin = false
+            bump(C_TRIMMED)
+        }
+        if dlen > 0 && flag(c, F_RD_SHUT) {
+            // shutdown(SHUT_RD): taken and thrown away.
+            if from == nxt {
+                put_cw(c, K_RCV_NXT, seq_add(nxt, dlen))
+            }
+            dlen = 0
+        }
+        if dlen > 0 {
+            let ring = cw(c, K_RX_BASE) + cw(c, K_RX_LEN) + seq_sub(from, nxt)
+            if from == nxt {
+                ring_put(c, K_RXF, ring, at, dlen)
+                put_cw(c, K_RX_LEN, cw(c, K_RX_LEN) + dlen)
+                put_cw(c, K_RCV_NXT, seq_add(nxt, dlen))
+                bump_by(C_BYTES_IN, dlen)
+                if cw(c, K_OOO_N) != 0 {
+                    ooo_drain(c)
+                }
+                sched.wake_pipes()
+            } else if ooo_add(c, from, seq_add(from, dlen)) {
+                ring_put(c, K_RXF, ring, at, dlen)
+                bump(C_OOO_QUEUED)
+                fin = false
+            } else {
+                bump(C_OOO_DROPPED)
+                fin = false
+            }
+        }
+    } else if dlen > 0 {
+        owe = true // data after the peer's FIN: acknowledged, not taken
+        fin = false
+    }
+    // The FIN, when everything before it has come.
+    if fin && seq_add(seq, len) == cw(c, K_RCV_NXT) && !flag(c, F_FIN_RCVD) {
+        put_cw(c, K_RCV_NXT, seq_add(cw(c, K_RCV_NXT), 1))
+        set_flag(c, F_FIN_RCVD)
+        owe = true
+        s2 = cw(c, K_STATE)
+        if s2 == ESTABLISHED {
+            put_cw(c, K_STATE, CLOSE_WAIT)
+        } else if s2 == FIN_WAIT_1 {
+            put_cw(c, K_STATE, CLOSING)
+        } else if s2 == FIN_WAIT_2 {
+            ack_now(c)
+            to_time_wait(c)
+            return
+        }
+        sched.wake_pipes()
+    } else if fin {
+        owe = true
+        if cw(c, K_STATE) == TIME_WAITING {
+            put_cw(c, K_DEAD_AT, timer.ticks() + TIME_WAIT)
+        }
+    }
+    // What this made sendable goes, carrying the acknowledgement; an
+    // acknowledgement alone when nothing did.
+    let sent = output(c, false)
+    if owe && sent == 0 {
+        ack_now(c)
+    }
+}
+
+/// A segment for block `c` in SYN-SENT (RFC 9293 §3.10.7.3).
+fn syn_sent_in(c: u64, flags: u64, seq: u64, ack: u64, wnd: u64, mss: u64, len: u64) {
+    let iss = cw(c, K_ISS)
+    if flags & ACK != 0 && (seq_leq(ack, iss) || seq_lt(cw(c, K_SND_MAX), ack)) {
+        if flags & RST == 0 {
+            bump(C_NO_CONN)
+            reset_for(cw(c, K_LADDR), cw(c, K_LPORT), cw(c, K_RADDR), cw(c, K_RPORT), flags, seq, ack, 0)
+        }
+        return
+    }
+    if flags & RST != 0 {
+        if flags & ACK != 0 {
+            bump(C_RST_IN)
+            bump(C_REFUSED)
+            finish(c, ECONNREFUSED)
+        }
+        return
+    }
+    if flags & SYN == 0 {
+        return
+    }
+    if len > 0 {
+        bump(C_SYN_DATA)
+    }
+    put_cw(c, K_IRS, seq)
+    put_cw(c, K_RCV_NXT, seq_add(seq, 1))
+    put_cw(c, K_RCV_ADV, seq_add(seq, 1 + WND_MAX)) // what this end's SYN promised
+    put_cw(c, K_MSS, peer_mss(mss))
+    if flags & ACK != 0 {
+        put_cw(c, K_SND_UNA, ack)
+        if cw(c, K_RTT_AT) != 0 && cw(c, K_REXMITS) == 0 {
+            rtt_sample(c, timer.ticks() + 1 - cw(c, K_RTT_AT))
+        }
+        put_cw(c, K_RTT_AT, 0)
+        if !establish(c, seq, ack, wnd) {
+            reset_for(cw(c, K_LADDR), cw(c, K_LPORT), cw(c, K_RADDR), cw(c, K_RPORT), flags, seq, ack, 0)
+            finish(c, ENOBUFS)
+            return
+        }
+        bump(C_ACTIVE)
+        ack_now(c)
+        sched.wake_pipes()
+        return
+    }
+    // A SYN with no ACK: the two SYNs crossed. Answer it and wait for
+    // the acknowledgement of this end's.
+    bump(C_SIMULTANEOUS)
+    put_cw(c, K_STATE, SYN_RCVD)
+    put_cw(c, K_SND_WND, wnd)
+    if emit(c, iss, SYN | ACK, 0, 0) {
+        bump(C_RETRANSMITS)
+    }
+    put_cw(c, K_REXMT_AT, timer.ticks() + cw(c, K_RTO))
+}
+
+/// A destination unreachable of `code` came (kernel/icmp, by way of
+/// kernel/netd) quoting a segment this station sent from `la`:`lp` to
+/// `ra`:`rp` with sequence number `seq`. RFC 1122 §4.2.3.9: codes 2 to
+/// 4 end a connection that is not yet synchronized; the others, and
+/// any for a synchronized one, are counted.
+pub fn unreached(code: u64, la: u64, lp: u64, ra: u64, rp: u64, seq: u64) {
+    let saved = sync.acquire(sync.tcp())
+    let c = find(la, lp, ra, rp)
+    if c != CONNS && cw(c, K_STATE) == SYN_SENT && code >= 2 && code <= 4 && seq == cw(c, K_ISS) {
+        bump(C_ICMP_HARD)
+        bump(C_REFUSED)
+        finish(c, ECONNREFUSED)
+    } else {
+        bump(C_ICMP_SOFT)
+    }
+    sync.release(sync.tcp(), saved)
+}
+
+// --- the timers -------------------------------------------------------------------------
+
+/// The retransmission timer of block `c` fired.
+fn timeout(c: u64, now: u64) {
+    bump(C_TIMEOUTS)
+    let s = cw(c, K_STATE)
+    let tries = cw(c, K_REXMITS)
+    if s == SYN_SENT {
+        let limit = if cw(c, K_SYNCNT) != 0 { cw(c, K_SYNCNT) - 1 } else { SYN_RETRIES }
+        if tries >= limit {
+            bump(C_GAVE_UP)
+            finish(c, ETIMEDOUT)
+            return
+        }
+        put_cw(c, K_REXMITS, tries + 1)
+        put_cw(c, K_RTO, lo(cw(c, K_RTO) * 2, RTO_MAX))
+        if emit(c, cw(c, K_ISS), SYN, 0, 0) {
+            bump(C_RETRANSMITS)
+        }
+        put_cw(c, K_REXMT_AT, now + cw(c, K_RTO))
+        return
+    }
+    if s == SYN_RCVD {
+        if tries >= SYNACK_RETRIES {
+            bump(C_HALF_OPEN_GONE)
+            if cw(c, K_PARENT) != 0 {
+                free_block(c)
+            } else {
+                bump(C_GAVE_UP)
+                finish(c, ETIMEDOUT)
+            }
+            return
+        }
+        put_cw(c, K_REXMITS, tries + 1)
+        put_cw(c, K_RTO, lo(cw(c, K_RTO) * 2, RTO_MAX))
+        if emit(c, cw(c, K_ISS), SYN | ACK, 0, 0) {
+            bump(C_RETRANSMITS)
+        }
+        put_cw(c, K_REXMT_AT, now + cw(c, K_RTO))
+        return
+    }
+    if cw(c, K_SND_UNA) == cw(c, K_SND_MAX) {
+        // Nothing is out: the timer was armed for something kernel/ip
+        // would not take (a FIN, at close). Try it again.
+        put_cw(c, K_REXMT_AT, 0)
+        let n = output(c, true)
+        let waits = seq_sub(cw(c, K_SND_NXT), cw(c, K_TX_SEQ)) < cw(c, K_TX_LEN) || (flag(c, F_WR_SHUT) && !flag(c, F_FIN_SENT))
+        if n == 0 && waits {
+            put_cw(c, K_REXMT_AT, now + cw(c, K_RTO))
+        }
+        return
+    }
+    if tries >= DATA_RETRIES {
+        bump(C_GAVE_UP)
+        finish(c, ETIMEDOUT)
+        return
+    }
+    // RFC 6298 §5.4–5.6, RFC 5681 §3.1: the earliest segment again, RTO
+    // doubled, one segment's congestion window; and back to SND.UNA,
+    // so what followed is sent again as acknowledgements allow.
+    let flight = seq_sub(cw(c, K_SND_MAX), cw(c, K_SND_UNA))
+    put_cw(c, K_SSTHRESH, hi(flight / 2, 2 * cw(c, K_MSS)))
+    put_cw(c, K_CWND, cw(c, K_MSS))
+    put_cw(c, K_RECOVERY, 0)
+    put_cw(c, K_DUPACKS, 0)
+    put_cw(c, K_RTT_AT, 0)
+    put_cw(c, K_REXMITS, tries + 1)
+    put_cw(c, K_RTO, lo(cw(c, K_RTO) * 2, RTO_MAX))
+    put_cw(c, K_SND_NXT, cw(c, K_SND_UNA))
+    put_cw(c, K_REXMT_AT, 0)
+    let sent = output(c, true)
+    if sent == 0 {
+        // Nothing left (kernel/ip refused it): try again at the next RTO.
+        put_cw(c, K_SND_NXT, cw(c, K_SND_UNA))
+    }
+    put_cw(c, K_REXMT_AT, now + cw(c, K_RTO))
+}
+
+/// The clock's turn (kernel/netd, every tick): every timer that is due.
+pub fn tick() {
+    let saved = sync.acquire(sync.tcp())
+    if tw(T_STARTED) == 1 {
+        let now = timer.ticks()
+        var c: u64 = 0
+        while c < CONNS {
+            if cw(c, K_USE) == 1 {
+                let s = cw(c, K_STATE)
+                if cw(c, K_UTO) != 0 && s >= ESTABLISHED && cw(c, K_SND_UNA) != cw(c, K_SND_MAX) && now >= cw(c, K_UNACK_AT) + cw(c, K_UTO) {
+                    bump(C_GAVE_UP)
+                    finish(c, ETIMEDOUT)
+                } else if cw(c, K_REXMT_AT) != 0 && now >= cw(c, K_REXMT_AT) {
+                    timeout(c, now)
+                } else if cw(c, K_PERSIST_AT) != 0 && now >= cw(c, K_PERSIST_AT) {
+                    put_cw(c, K_PERSIST_AT, 0)
+                    put_cw(c, K_PERSIST_N, cw(c, K_PERSIST_N) + 1)
+                    bump(C_PERSIST)
+                    let _n = output(c, true)
+                } else if cw(c, K_DEAD_AT) != 0 && now >= cw(c, K_DEAD_AT) {
+                    put_cw(c, K_DEAD_AT, 0)
+                    if s == TIME_WAITING {
+                        finish(c, 0)
+                    } else if !flag(c, F_ATTACHED) {
+                        free_block(c)
+                    }
+                }
+            }
+            c += 1
+        }
+    }
+    sync.release(sync.tcp(), saved)
+}
+
+// --- the calls (kernel/socket; IF clear) ------------------------------------------------
+
+/// A new stream socket, not connected: its block, or CONNS when none
+/// is free.
+pub fn open() -> u64 {
+    let saved = sync.acquire(sync.tcp())
+    let c = take_block()
+    if c != CONNS {
+        put_cw(c, K_FLAGS, F_ATTACHED)
+    }
+    sync.release(sync.tcp(), saved)
+    c
+}
+
+/// The block's state (kernel/socket's errnos turn on it).
+pub fn state(c: u64) -> u64 {
+    cw(c, K_STATE)
+}
+
+/// Whether block `c` is or was a connection.
+pub fn was_connected(c: u64) -> bool {
+    flag(c, F_WAS)
+}
+
+/// Whether some block holds port `p` on an address that conflicts with
+/// `addr`, in a way a binder that set SO_REUSEADDR (`reuse`) or did not
+/// cannot share. The TCP lock held.
+fn held(p: u64, addr: u64, but: u64, reuse: bool) -> bool {
+    var c: u64 = 0
+    while c < CONNS {
+        if c != but && cw(c, K_USE) == 1 && cw(c, K_LPORT) == p {
+            let a = cw(c, K_LADDR)
+            if a == 0 || addr == 0 || a == addr {
+                if !reuse || cw(c, K_STATE) == LISTEN || !flag(c, F_REUSE) {
+                    return true
+                }
+            }
+        }
+        c += 1
+    }
+    if !reuse && tw_holds(p, addr) {
+        return true
+    }
+    false
+}
+
+/// An ephemeral port no block holds on any address; 0 when every one
+/// is held. The TCP lock held.
+fn ephemeral() -> u64 {
+    let span = EPHEMERAL_HI - EPHEMERAL_LO + 1
+    var p = tw(T_NEXT_PORT)
+    if p < EPHEMERAL_LO || p > EPHEMERAL_HI {
+        p = EPHEMERAL_LO
+    }
+    var tried: u64 = 0
+    while tried < span {
+        let next = if p == EPHEMERAL_HI { EPHEMERAL_LO } else { p + 1 }
+        var taken = false
+        var c: u64 = 0
+        while c < CONNS && !taken {
+            if cw(c, K_USE) == 1 && cw(c, K_LPORT) == p {
+                taken = true
+            }
+            c += 1
+        }
+        if !taken {
+            put_tw(T_NEXT_PORT, next)
+            return p
+        }
+        p = next
+        tried += 1
+    }
+    0
+}
+
+/// `bind`: block `c` takes `port` (0: an ephemeral one) on `addr` (0:
+/// every address). 0, or EINVAL (it has a port, or is connected),
+/// EADDRNOTAVAIL, EADDRINUSE.
+pub fn bind(c: u64, addr: u64, port: u64) -> u64 {
+    let saved = sync.acquire(sync.tcp())
+    var r: u64 = 0
+    if cw(c, K_LPORT) != 0 || cw(c, K_STATE) != CLOSED || flag(c, F_WAS) {
+        r = EINVAL
+    } else if addr != 0 && !ip.local(addr) {
+        r = EADDRNOTAVAIL
+    } else {
+        let p = if port == 0 { ephemeral() } else { port }
+        if p == 0 || held(p, addr, c, flag(c, F_REUSE)) {
+            r = EADDRINUSE
+        } else {
+            put_cw(c, K_LADDR, addr)
+            put_cw(c, K_LPORT, p)
+            if addr != 0 {
+                set_flag(c, F_NAMED)
+            }
+        }
+    }
+    sync.release(sync.tcp(), saved)
+    r
+}
+
+/// `listen`: block `c` takes SYNs, `backlog` connections waiting at
+/// most (and one). A socket with no port takes an ephemeral one. 0, or
+/// EINVAL (connected or connecting), EADDRINUSE.
+pub fn listen(c: u64, backlog: u64) -> u64 {
+    let saved = sync.acquire(sync.tcp())
+    var r: u64 = 0
+    let s = cw(c, K_STATE)
+    if (s != CLOSED && s != LISTEN) || flag(c, F_WAS) {
+        r = EINVAL
+    } else {
+        if cw(c, K_LPORT) == 0 {
+            let p = ephemeral()
+            if p == 0 {
+                r = EADDRINUSE
+            } else {
+                put_cw(c, K_LPORT, p)
+            }
+        }
+        if r == 0 {
+            put_cw(c, K_STATE, LISTEN)
+            put_cw(c, K_BACKLOG, lo(backlog, 0x7fffffff))
+        }
+    }
+    sync.release(sync.tcp(), saved)
+    r
+}
+
+/// `accept`: the connection that has waited longest in listener `l`'s
+/// queue, a socket of its own from now on: its block; EMPTY when none
+/// is established yet.
+pub fn accept(l: u64) -> u64 {
+    let saved = sync.acquire(sync.tcp())
+    var best = CONNS
+    var c: u64 = 0
+    while c < CONNS {
+        if cw(c, K_USE) == 1 && cw(c, K_PARENT) == l + 1 && flag(c, F_QUEUED) {
+            if best == CONNS || cw(c, K_QSEQ) < cw(best, K_QSEQ) {
+                best = c
+            }
+        }
+        c += 1
+    }
+    var r = EMPTY
+    if best != CONNS {
+        clear_flag(best, F_QUEUED)
+        set_flag(best, F_ATTACHED)
+        put_cw(best, K_PARENT, 0)
+        if cw(l, K_PENDING) > 0 {
+            put_cw(l, K_PENDING, cw(l, K_PENDING) - 1)
+        }
+        bump(C_ACCEPTED)
+        r = best
+    }
+    sync.release(sync.tcp(), saved)
+    r
+}
+
+/// `connect`: begin (the first call: a SYN to `addr`:`port`, PENDING)
+/// or follow (the call run again: PENDING while the handshake is out,
+/// 0 once it is done, the errno when it failed) block `c`'s active
+/// open. EISCONN for a socket that is connected or listening, ENOBUFS,
+/// EADDRINUSE (no port left), EINVAL (a socket bound in 127/8
+/// connecting off this station).
+pub fn connect(c: u64, addr: u64, port: u64) -> u64 {
+    let saved = sync.acquire(sync.tcp())
+    let r = connect_locked(c, addr, port)
+    sync.release(sync.tcp(), saved)
+    r
+}
+
+fn connect_locked(c: u64, addr: u64, port: u64) -> u64 {
+    let s = cw(c, K_STATE)
+    if flag(c, F_CONNECTING) {
+        // The call run again.
+        if s == SYN_SENT || s == SYN_RCVD {
+            return PENDING
+        }
+        clear_flag(c, F_CONNECTING)
+        if s == CLOSED {
+            let e = cw(c, K_ERROR)
+            put_cw(c, K_ERROR, 0)
+            // The socket is as it was before the call: it may connect again.
+            put_cw(c, K_RADDR, 0)
+            put_cw(c, K_RPORT, 0)
+            if !flag(c, F_NAMED) {
+                put_cw(c, K_LADDR, 0)
+            }
+            return if e != 0 { e } else { ECONNREFUSED }
+        }
+        return 0
+    }
+    if s != CLOSED || flag(c, F_WAS) {
+        return EISCONN
+    }
+    var dst = addr
+    if dst == 0 {
+        dst = ip.LOOPBACK // as kernel/udp: 0.0.0.0 is this machine
+    }
+    let near = ip.local(dst)
+    let bound = cw(c, K_LADDR)
+    if bound >> 24 == 127 && !near {
+        return EINVAL
+    }
+    if port == 0 {
+        return ECONNREFUSED
+    }
+    if cw(c, K_LPORT) == 0 {
+        let p = ephemeral()
+        if p == 0 {
+            return EADDRINUSE
+        }
+        put_cw(c, K_LPORT, p)
+    }
+    let la = if !near { ip.address() } else if bound != 0 { bound } else { ip.source_for(dst) }
+    let lp = cw(c, K_LPORT)
+    if find(la, lp, dst, port) != CONNS {
+        return EADDRINUSE
+    }
+    // This end's own wait for the same four values is over: the new
+    // connection's sequence numbers start above the old one's.
+    let e = tw_find(la, lp, dst, port)
+    var floor: u64 = 0
+    var have_floor = false
+    if e != 0 {
+        floor = tw_word(e, 2) >> 32
+        have_floor = true
+        put_tw_word(e, 1, 0)
+    }
+    if !take_buffers(c) {
+        return ENOBUFS
+    }
+    put_cw(c, K_LADDR, la)
+    put_cw(c, K_RADDR, dst)
+    put_cw(c, K_RPORT, port)
+    var iss = isn(la, lp, dst, port)
+    if have_floor && seq_leq(iss, floor) {
+        iss = seq_add(floor, 1)
+    }
+    put_cw(c, K_ISS, iss)
+    put_cw(c, K_SND_UNA, iss)
+    put_cw(c, K_SND_NXT, seq_add(iss, 1))
+    put_cw(c, K_SND_MAX, seq_add(iss, 1))
+    put_cw(c, K_RCV_NXT, 0)
+    put_cw(c, K_RTO, RTO_INITIAL)
+    put_cw(c, K_SRTT, 0)
+    put_cw(c, K_RTTVAR, 0)
+    put_cw(c, K_REXMITS, 0)
+    put_cw(c, K_ERROR, 0)
+    put_cw(c, K_STATE, SYN_SENT)
+    set_flag(c, F_CONNECTING)
+    let now = timer.ticks()
+    put_cw(c, K_RTT_SEQ, iss)
+    put_cw(c, K_RTT_AT, now + 1)
+    let _ok = emit(c, iss, SYN, 0, 0)
+    put_cw(c, K_REXMT_AT, now + cw(c, K_RTO))
+    PENDING
+}
+
+/// `send`: up to `n` bytes at user `buf` into block `c`'s send ring,
+/// and what may leave leaves. Answers `(taken, errno)`: the bytes
+/// taken (0 with errno 0 when the ring is full: wait), or the errno:
+/// EPIPE (not connected, shut for writing, or over), the error the
+/// connection ended with, EFAULT.
+pub fn send(c: u64, pml4: u64, buf: u64, n: u64) -> (u64, u64) {
+    let saved = sync.acquire(sync.tcp())
+    var taken: u64 = 0
+    var e: u64 = 0
+    let s = cw(c, K_STATE)
+    if cw(c, K_ERROR) != 0 {
+        e = cw(c, K_ERROR)
+        put_cw(c, K_ERROR, 0)
+    } else if flag(c, F_WR_SHUT) || !(s == ESTABLISHED || s == CLOSE_WAIT) {
+        e = if s == SYN_SENT || s == SYN_RCVD { ENOTCONN } else { EPIPE }
+    } else {
+        let room = BUF - cw(c, K_TX_LEN)
+        taken = lo(n, room)
+        if taken > 0 {
+            let at = cw(c, K_TX_BASE) + cw(c, K_TX_LEN)
+            var done: u64 = 0
+            var bad = false
+            while done < taken && !bad {
+                let (d, space) = ring_at(c, K_TXF, at + done)
+                let k = lo(taken - done, space)
+                if !uaccess.copy_in(pml4, d, buf + done, k) {
+                    bad = true
+                } else {
+                    done += k
+                }
+            }
+            if bad {
+                taken = 0
+                e = EFAULT
+            } else {
+                put_cw(c, K_TX_LEN, cw(c, K_TX_LEN) + taken)
+                let _n = output(c, false)
+            }
+        }
+    }
+    sync.release(sync.tcp(), saved)
+    (taken, e)
+}
+
+/// `recv`: up to `cap` bytes of block `c`'s stream to user `buf`, taken
+/// off it unless `peek`. Answers `(n, errno)`: the bytes copied; `(0,
+/// 0)` at the end of the stream; `(EMPTY, 0)` when nothing is there
+/// yet; or the errno: ENOTCONN (never connected), the error the
+/// connection ended with, EFAULT.
+pub fn recv(c: u64, pml4: u64, buf: u64, cap: u64, peek: bool) -> (u64, u64) {
+    let saved = sync.acquire(sync.tcp())
+    var n: u64 = 0
+    var e: u64 = 0
+    let s = cw(c, K_STATE)
+    let have = if flag(c, F_BUFS) { cw(c, K_RX_LEN) } else { 0 }
+    if have > 0 && !flag(c, F_RD_SHUT) {
+        n = lo(cap, have)
+        if !uaccess.writable(pml4, buf, n) {
+            n = 0
+            e = EFAULT
+        } else {
+            var done: u64 = 0
+            while done < n {
+                let (src, room) = ring_at(c, K_RXF, cw(c, K_RX_BASE) + done)
+                let k = lo(n - done, room)
+                let _ok = uaccess.copy_out(pml4, buf + done, src, k)
+                done += k
+            }
+            if !peek {
+                put_cw(c, K_RX_BASE, (cw(c, K_RX_BASE) + n) % BUF)
+                put_cw(c, K_RX_LEN, have - n)
+                // The window opened: say so once it is worth a segment.
+                if s == ESTABLISHED || s == FIN_WAIT_1 || s == FIN_WAIT_2 {
+                    let promised = seq_sub(cw(c, K_RCV_ADV), cw(c, K_RCV_NXT))
+                    let room2 = lo(BUF - cw(c, K_RX_LEN), WND_MAX)
+                    if room2 > promised && (room2 - promised >= 2 * cw(c, K_MSS) || room2 - promised >= BUF / 2) {
+                        bump(C_WINDOW_UPDATES)
+                        ack_now(c)
+                    }
+                }
+            }
+        }
+    } else if cw(c, K_ERROR) != 0 {
+        e = cw(c, K_ERROR)
+        put_cw(c, K_ERROR, 0)
+    } else if !flag(c, F_WAS) {
+        e = ENOTCONN
+    } else if flag(c, F_FIN_RCVD) || flag(c, F_RD_SHUT) || s == CLOSED || s == TIME_WAITING {
+        n = 0
+    } else {
+        n = EMPTY
+    }
+    sync.release(sync.tcp(), saved)
+    (n, e)
+}
+
+/// `shutdown`: `how` 0 (no more reads: what comes is thrown away), 1
+/// (no more writes: a FIN follows what is queued) or 2 (both). 0, or
+/// ENOTCONN.
+pub fn shutdown(c: u64, how: u64) -> u64 {
+    let saved = sync.acquire(sync.tcp())
+    var r: u64 = 0
+    let s = cw(c, K_STATE)
+    if !flag(c, F_WAS) || s == LISTEN {
+        r = ENOTCONN
+    } else {
+        if how == 0 || how == 2 {
+            set_flag(c, F_RD_SHUT)
+        }
+        if (how == 1 || how == 2) && !flag(c, F_WR_SHUT) {
+            if s == ESTABLISHED {
+                set_flag(c, F_WR_SHUT)
+                put_cw(c, K_STATE, FIN_WAIT_1)
+                let _n = output(c, false)
+            } else if s == CLOSE_WAIT {
+                set_flag(c, F_WR_SHUT)
+                put_cw(c, K_STATE, LAST_ACK)
+                let _n = output(c, false)
+            } else {
+                set_flag(c, F_WR_SHUT)
+            }
+        }
+        sched.wake_pipes()
+    }
+    sync.release(sync.tcp(), saved)
+    r
+}
+
+/// The last descriptor of block `c` is closed.
+pub fn close(c: u64) {
+    if c >= CONNS {
+        return
+    }
+    let saved = sync.acquire(sync.tcp())
+    if cw(c, K_USE) == 1 {
+        close_locked(c)
+    }
+    sync.release(sync.tcp(), saved)
+}
+
+fn close_locked(c: u64) {
+    let s = cw(c, K_STATE)
+    clear_flag(c, F_ATTACHED | F_CONNECTING)
+    if s == LISTEN {
+        // What waited for an `accept` that will not come: the
+        // established are reset, the half-open forgotten.
+        var k: u64 = 0
+        while k < CONNS {
+            if cw(k, K_USE) == 1 && cw(k, K_PARENT) == c + 1 {
+                put_cw(k, K_PARENT, 0)
+                if cw(k, K_STATE) != SYN_RCVD {
+                    reset_now(k)
+                }
+                free_block(k)
+            }
+            k += 1
+        }
+        free_block(c)
+        return
+    }
+    if s == CLOSED {
+        free_block(c)
+        return
+    }
+    if s == SYN_SENT {
+        free_block(c)
+        return
+    }
+    if s == TIME_WAITING {
+        tw_put(cw(c, K_LADDR), cw(c, K_LPORT), cw(c, K_RADDR), cw(c, K_RPORT), cw(c, K_SND_NXT), cw(c, K_RCV_NXT), hi(cw(c, K_DEAD_AT), timer.ticks() + 1))
+        free_block(c)
+        return
+    }
+    if s == SYN_RCVD || (flag(c, F_BUFS) && cw(c, K_RX_LEN) > 0 && !flag(c, F_RD_SHUT)) {
+        // Bytes nobody read (RFC 1122 §4.2.2.13), or a handshake
+        // abandoned: a reset, not a FIN.
+        bump(C_CLOSE_RESET)
+        reset_now(c)
+        free_block(c)
+        return
+    }
+    put_cw(c, K_RX_LEN, 0)
+    put_cw(c, K_OOO_N, 0)
+    if s == ESTABLISHED {
+        set_flag(c, F_WR_SHUT)
+        put_cw(c, K_STATE, FIN_WAIT_1)
+    } else if s == CLOSE_WAIT {
+        set_flag(c, F_WR_SHUT)
+        put_cw(c, K_STATE, LAST_ACK)
+    } else if s == FIN_WAIT_2 {
+        put_cw(c, K_DEAD_AT, timer.ticks() + TIME_WAIT)
+    }
+    let _n = output(c, false)
+    // A FIN kernel/ip would not take now, the timer sends.
+    if cw(c, K_STATE) == FIN_WAIT_1 || cw(c, K_STATE) == LAST_ACK {
+        arm(c)
+    }
+}
+
+/// Block `c`'s local address and port.
+pub fn name(c: u64) -> (u64, u64) {
+    (cw(c, K_LADDR), cw(c, K_LPORT))
+}
+
+/// Block `c`'s peer: whether it has one now, its address and its port.
+pub fn peer(c: u64) -> (bool, u64, u64) {
+    let s = cw(c, K_STATE)
+    (s >= ESTABLISHED && s != TIME_WAITING, cw(c, K_RADDR), cw(c, K_RPORT))
+}
+
+/// The error block `c` owes its next call, taken (SO_ERROR).
+pub fn take_error(c: u64) -> u64 {
+    let saved = sync.acquire(sync.tcp())
+    let e = cw(c, K_ERROR)
+    put_cw(c, K_ERROR, 0)
+    sync.release(sync.tcp(), saved)
+    e
+}
+
+/// The options `option`'s answers: SO_REUSEADDR.
+pub const O_REUSE: u64 = 0
+/// TCP_NODELAY.
+pub const O_NODELAY: u64 = 1
+/// TCP_SYNCNT.
+pub const O_SYNCNT: u64 = 2
+/// TCP_USER_TIMEOUT, in milliseconds.
+pub const O_USER_TIMEOUT: u64 = 3
+
+/// Block `c`'s option `o` (O_*).
+pub fn option(c: u64, o: u64) -> u64 {
+    if o == O_REUSE {
+        return if flag(c, F_REUSE) { 1 } else { 0 }
+    }
+    if o == O_NODELAY {
+        return if flag(c, F_NODELAY) { 1 } else { 0 }
+    }
+    if o == O_SYNCNT {
+        return if cw(c, K_SYNCNT) != 0 { cw(c, K_SYNCNT) - 1 } else { SYN_RETRIES }
+    }
+    cw(c, K_UTO_MS)
+}
+
+/// Set block `c`'s option `o` to `v` (checked by kernel/socket).
+pub fn set_option(c: u64, o: u64, v: u64) {
+    let saved = sync.acquire(sync.tcp())
+    if o == O_REUSE {
+        if v != 0 {
+            set_flag(c, F_REUSE)
+        } else {
+            clear_flag(c, F_REUSE)
+        }
+    } else if o == O_NODELAY {
+        if v != 0 {
+            set_flag(c, F_NODELAY)
+            let _n = output(c, false)
+        } else {
+            clear_flag(c, F_NODELAY)
+        }
+    } else if o == O_SYNCNT {
+        put_cw(c, K_SYNCNT, v + 1)
+    } else {
+        put_cw(c, K_UTO_MS, v)
+        // The tick after: a partial tick never shortens the wait.
+        put_cw(c, K_UTO, if v == 0 { 0 } else { (v + 9) / 10 + 1 })
+    }
+    sync.release(sync.tcp(), saved)
+}
+
+// --- lines ------------------------------------------------------------------------------
+
+fn item(v: u64, name: str) {
+    log.put(" ")
+    log.dec(tw(v) as int)
+    log.put(" ")
+    log.put(name)
+}
+
+/// The module's first line:
+/// `tcp: 64 blocks, 65536 bytes each way a connection, MSS 1460, ports 32768-60999 from <p>, RTO 200 ms to 60 s, time-wait 60 s in 16384 entries`.
+pub fn report() {
+    log.put("tcp: ")
+    log.dec(CONNS as int)
+    log.put(" blocks, ")
+    log.dec(BUF as int)
+    log.put(" bytes each way a connection, MSS ")
+    log.dec(MSS as int)
+    log.put(", ports ")
+    log.dec(EPHEMERAL_LO as int)
+    log.put("-")
+    log.dec(EPHEMERAL_HI as int)
+    log.put(" from ")
+    log.dec(tw(T_NEXT_PORT) as int)
+    log.put(", RTO ")
+    log.dec((RTO_MIN * 10) as int)
+    log.put(" ms to ")
+    log.dec((RTO_MAX / 100) as int)
+    log.put(" s, time-wait ")
+    log.dec((TIME_WAIT / 100) as int)
+    log.put(" s in ")
+    log.dec(TW_ENTRIES as int)
+    log.put(" entries")
+    log.end()
+}
+
+/// The counters' seven lines:
+///
+///     tcp: rx <n> segments, dropped <…> short <…> header <…> checksum <…> broadcast <…> port-zero <…> option
+///     tcp: rx for nobody <a> reset, <b> resets dropped; listeners <c> listen-full <d> no-block <e> other; <f> unacceptable <g> reset-challenged <h> syn-challenged <i> ack-ahead <j> no-ack
+///     tcp: rx data <b> bytes in order, <q> out-of-order queued, <d> out-of-order-dropped, <t> trimmed, <a> after-close, <s> syn-data, <u> urgent; <r> resets taken, <k> duplicate acks
+///     tcp: options <m> mss, skipped <…> window-scale <…> sack-permitted <…> sack <…> timestamps <…> fast-open <…> other
+///     tcp: tx <n> segments (<d> with data, <b> bytes; <a> acks, <r> resets, <p> probes), <f> not sent; <x> retransmitted, <t> timeouts, <q> fast retransmits, <s> round trips measured, <w> window updates, <o> persist
+///     tcp: connections <a> active, <p> passive, <c> accepted, <r> refused, <g> gave-up, <h> half-open gone, <k> reset at close, <s> simultaneous, <n> no-frames; icmp <x> hard <y> soft
+///     tcp: blocks <m> made, <f> freed, <u> in use; time-wait <w> made, <e> evicted, <o> reopened, <s> segments answered, <r> resets ignored, <l> waiting
+pub fn counters() {
+    log.put("tcp: rx ")
+    log.dec(tw(C_IN) as int)
+    log.put(" segments, dropped")
+    item(C_SHORT, "short")
+    item(C_HEADER, "header")
+    item(C_CHECKSUM, "checksum")
+    item(C_BROADCAST, "broadcast")
+    item(C_PORT_ZERO, "port-zero")
+    item(C_OPTION, "option")
+    log.end()
+    log.put("tcp: rx for nobody ")
+    log.dec(tw(C_NO_CONN) as int)
+    log.put(" reset, ")
+    log.dec(tw(C_NO_CONN_RST) as int)
+    log.put(" resets dropped; listeners")
+    item(C_LISTEN_FULL, "listen-full")
+    item(C_NO_BLOCK, "no-block")
+    item(C_LISTEN_OTHER, "other;")
+    item(C_UNACCEPTABLE, "unacceptable")
+    item(C_RST_CHALLENGED, "reset-challenged")
+    item(C_SYN_CHALLENGED, "syn-challenged")
+    item(C_ACK_AHEAD, "ack-ahead")
+    item(C_NO_ACK, "no-ack")
+    log.end()
+    log.put("tcp: rx data ")
+    log.dec(tw(C_BYTES_IN) as int)
+    log.put(" bytes in order,")
+    item(C_OOO_QUEUED, "out-of-order queued,")
+    item(C_OOO_DROPPED, "out-of-order-dropped,")
+    item(C_TRIMMED, "trimmed,")
+    item(C_DATA_AFTER_CLOSE, "after-close,")
+    item(C_SYN_DATA, "syn-data,")
+    item(C_URGENT, "urgent;")
+    item(C_RST_IN, "resets taken,")
+    item(C_DUP_ACKS, "duplicate acks")
+    log.end()
+    log.put("tcp: options ")
+    log.dec(tw(C_OPT_MSS) as int)
+    log.put(" mss, skipped")
+    item(C_OPT_WSCALE, "window-scale")
+    item(C_OPT_SACK_OK, "sack-permitted")
+    item(C_OPT_SACK, "sack")
+    item(C_OPT_TS, "timestamps")
+    item(C_OPT_TFO, "fast-open")
+    item(C_OPT_OTHER, "other")
+    log.end()
+    log.put("tcp: tx ")
+    log.dec(tw(C_OUT) as int)
+    log.put(" segments (")
+    log.dec(tw(C_DATA_OUT) as int)
+    log.put(" with data, ")
+    log.dec(tw(C_BYTES_OUT) as int)
+    log.put(" bytes; ")
+    log.dec(tw(C_ACK_OUT) as int)
+    log.put(" acks, ")
+    log.dec(tw(C_RST_OUT) as int)
+    log.put(" resets, ")
+    log.dec(tw(C_PROBES) as int)
+    log.put(" probes), ")
+    log.dec(tw(C_OUT_FAILED) as int)
+    log.put(" not sent;")
+    item(C_RETRANSMITS, "retransmitted,")
+    item(C_TIMEOUTS, "timeouts,")
+    item(C_FAST, "fast retransmits,")
+    item(C_RTT_SAMPLES, "round trips measured,")
+    item(C_WINDOW_UPDATES, "window updates,")
+    item(C_PERSIST, "persist")
+    log.end()
+    log.put("tcp: connections")
+    item(C_ACTIVE, "active,")
+    item(C_PASSIVE, "passive,")
+    item(C_ACCEPTED, "accepted,")
+    item(C_REFUSED, "refused,")
+    item(C_GAVE_UP, "gave-up,")
+    item(C_HALF_OPEN_GONE, "half-open gone,")
+    item(C_CLOSE_RESET, "reset at close,")
+    item(C_SIMULTANEOUS, "simultaneous,")
+    item(C_NO_FRAMES, "no-frames; icmp")
+    item(C_ICMP_HARD, "hard")
+    item(C_ICMP_SOFT, "soft")
+    log.end()
+    log.put("tcp: blocks ")
+    log.dec(tw(C_MADE) as int)
+    log.put(" made, ")
+    log.dec(tw(C_FREED) as int)
+    log.put(" freed, ")
+    log.dec(blocks() as int)
+    log.put(" in use; time-wait")
+    item(C_TW_MADE, "made,")
+    item(C_TW_EVICTED, "evicted,")
+    item(C_TW_REOPENED, "reopened,")
+    item(C_TW_SEGMENTS, "segments answered,")
+    item(C_TW_RST, "resets ignored,")
+    log.put(" ")
+    log.dec(waiting() as int)
+    log.put(" waiting")
+    log.end()
+}

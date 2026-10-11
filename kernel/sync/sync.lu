@@ -2,7 +2,7 @@
 //!
 //! A lock is the address of one 8-byte word, 0 free and 1 held, in any
 //! memory the kernel owns (boot/sched.S reserves eight in .bss,
-//! `pax_sched_locks`; word 0 is the console's, word 1 the heap's, px06; words 2 and 3 the network's and ARP's, px20; words 4 and 5 IP's and ICMP's, px21; word 6 UDP's, px22). wolf's module state
+//! `pax_sched_locks`; word 0 is the console's, word 1 the heap's, px06; words 2 and 3 the network's and ARP's, px20; words 4 and 5 IP's and ICMP's, px21; word 6 UDP's, px22; word 7 TCP's, px23). wolf's module state
 //! holds scalars only ([mem.static.3]) and wolf names no module `var`'s
 //! address, so a lock is a word in storage, reached as a `*u64`.
 //!
@@ -129,6 +129,14 @@ pub fn icmp() -> u64 {
 /// never after any of them.
 pub fn udp() -> u64 {
     word(6)
+}
+
+/// kernel/tcp's lock (px23), the last of the eight words: every
+/// control block, the listen queues, the time-wait table and the frame
+/// a segment is composed in. Taken before `ip()`, `arp()` and `net()`,
+/// never after any of them and never with `udp()`.
+pub fn tcp() -> u64 {
+    word(7)
 }
 
 /// Take the lock at `lock` (an 8-aligned word, 0 free) with interrupts
