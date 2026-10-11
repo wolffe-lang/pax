@@ -15,6 +15,7 @@
      tree soak        10,000 rounds of create, write, rename, unlink
                       (and mkdir, rmdir), then a fill to ENOSPC and
                       back
+     tree noop        (a role the probe starts: exit 7)
      tree speed       16 MiB written and read back, then eight more
                       passes over it, timed
 
@@ -28,6 +29,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sched.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -615,6 +617,154 @@ static void errnos(void) {
     unlink("/t/d/x"); rmdir("/t/d"); unlink("/t/a");
 }
 
+/* ---- paths: .., descriptors as directories, devices ------------------------------- */
+static void paths(void) {
+    struct stat a, b, c;
+    mkdir("/t/p", 0777);
+    put("/t/p/f", "pf");
+    stat("/", &a);
+    stat("/..", &b);
+    stat("/t/p/../..", &c);
+    long m = r(access("/t/none/../p/f", F_OK));
+    long n = r(access("/t/p/f/..", F_OK));
+    say("paths: /.. is / %d, /t/p/../.. is / %d; through a missing directory and back %ld; .. of a file %ld; a directory with a trailing slash %ld, with /. %ld\n",
+        a.st_ino == b.st_ino && a.st_dev == b.st_dev, a.st_ino == c.st_ino, m, n, r(access("/t/p/", F_OK)), r(access("/t/p/.", F_OK)));
+    stat("/t", &b);
+    stat("/dev", &c);
+    struct stat d;
+    stat("/dev/null", &d);
+    say("paths: / and /t are one file system %d and two files %d; /dev is another %d, /dev/null is on it %d\n", a.st_dev == b.st_dev,
+        a.st_ino != b.st_ino, c.st_dev != a.st_dev, d.st_dev == c.st_dev);
+    int dfd = open("/t/p", O_RDONLY | O_DIRECTORY);
+    int fd = openat(dfd, "g", O_WRONLY | O_CREAT | O_EXCL, 0666);
+    long w = r(write(fd, "pg", 2));
+    close(fd);
+    long mk = r(mkdirat(dfd, "sub", 0777));
+    long ac = r(faccessat(dfd, "sub", F_OK, 0));
+    long nd = r(openat(dfd, "f/x", O_RDONLY));
+    fd = open("/t/p/f", O_RDONLY);
+    long bad = r(openat(fd, "x", O_RDONLY));
+    close(fd);
+    const char *g = get("/t/p/g");
+    say("paths: openat in a directory descriptor writes %ld ('%s'), mkdirat %ld, faccessat %ld; under a file %ld; with a file as the directory %ld\n",
+        w, g, mk, ac, nd, bad);
+    long fc = r(fchdir(dfd));
+    char p[64];
+    char *cw = getcwd(p, sizeof p);
+    long un = r(unlinkat(dfd, "g", 0)), rm = r(unlinkat(dfd, "sub", AT_REMOVEDIR));
+    say("paths: fchdir %ld, getcwd '%s'; unlinkat there %ld, with AT_REMOVEDIR %ld; an empty path %ld\n", fc, cw ? p : "?", un, rm,
+        r(access("", F_OK)));
+    chdir("/");
+    close(dfd);
+    /* one file, two descriptors: a truncation under a reader */
+    put("/t/p/f", "0123456789");
+    int rd = open("/t/p/f", O_RDONLY);
+    char two[2];
+    read(rd, two, 2);
+    truncate("/t/p/f", 1);
+    long after = r(read(rd, two, 2));
+    long back = r(lseek(rd, -1, SEEK_END));
+    say("paths: a reader at offset 2 of a file cut to 1 byte reads %ld; SEEK_END - 1 is %ld; lseek before the start %ld, whence 9 %ld\n",
+        after, back, r(lseek(rd, -5, SEEK_SET)), r(lseek(rd, 0, 9)));
+    close(rd);
+    unlink("/t/p/f");
+    rmdir("/t/p");
+}
+
+/* ---- a file of the initramfs: written, cut, renamed, removed; a program run ------ */
+static void initram(const char *self) {
+    char keep[64] = "";
+    int fd = open("/etc/pax-run", O_RDWR);
+    long n = r(read(fd, keep, sizeof keep - 1));
+    const char *s0 = fst(fd);
+    long w = r(pwrite(fd, "X", 1, 1));
+    char now[64] = "";
+    pread(fd, now, sizeof now - 1, 0);
+    int same = n > 2 && now[0] == keep[0] && now[1] == 'X' && !strcmp(now + 2, keep + 2);
+    say("initramfs: /etc/pax-run read %d, %s; one byte written in it %ld: the rest unchanged %d\n", n > 0, s0 + 12, w, same);
+    long t = r(ftruncate(fd, 3));
+    long g = r(ftruncate(fd, 9));
+    memset(now, '?', sizeof now);
+    long m = r(pread(fd, now, sizeof now, 0));
+    int cutok = m == 9 && now[0] == keep[0] && now[1] == 'X' && now[2] == keep[2] && now[3] == 0 && now[8] == 0;
+    say("initramfs: cut to 3 %ld and grown to 9 %ld: three bytes kept and six zeros %d\n", t, g, cutok);
+    close(fd);
+    long mv = r(rename("/etc/pax-run", "/etc/run2"));
+    long un = r(unlink("/etc/run2"));
+    fd = open("/etc/pax-run", O_WRONLY | O_CREAT | O_EXCL, 0644);
+    write(fd, keep, strlen(keep));
+    close(fd);
+    say("initramfs: renamed %ld, removed %ld, made again with what it held '%.9s'\n", mv, un, get("/etc/pax-run"));
+    /* the running program, renamed, still starts (its bytes are where
+       they were); a copy of it is a new file */
+    long r1 = r(rename(self, "/bin/renamed"));
+    pid_t k = fork();
+    if (k == 0) {
+        char *argv[] = { "/bin/renamed", "noop", 0 };
+        execve("/bin/renamed", argv, argv + 2);
+        _exit(100 + errno);
+    }
+    int ws = 0;
+    waitpid(k, &ws, 0);
+    long r2 = r(rename("/bin/renamed", self));
+    say("initramfs: the program renamed %ld, run by its new name: status %d; renamed back %ld\n", r1, WEXITSTATUS(ws), r2);
+    int in = open(self, O_RDONLY);
+    int out = open("/t/copy", O_WRONLY | O_CREAT, 0755);
+    long total = 0, c;
+    while ((c = copy_file_range(in, 0, out, 0, 1 << 30, 0)) > 0) total += c;
+    struct stat a, b;
+    fstat(in, &a);
+    fstat(out, &b);
+    close(in); close(out);
+    say("initramfs: the program copied: every byte %d, %s\n", total == a.st_size && b.st_size == a.st_size, st("/t/copy") + 12 - 12);
+    k = fork();
+    if (k == 0) {
+        char *argv[] = { "/t/copy", "noop", 0 };
+        execve("/t/copy", argv, argv + 2);
+        _exit(100 + errno);
+    }
+    ws = 0;
+    waitpid(k, &ws, 0);
+    say("~exec: a program copied since boot, run: status %d (7: it ran; 113: -EACCES)\n", WEXITSTATUS(ws));
+    unlink("/t/copy");
+}
+
+/* ---- rename replaces at once: a reader never finds the name missing ------------- */
+static void atomic(void) {
+    put("/t/x", "0");
+    int pp[2];
+    pipe(pp);
+    pid_t k = fork();
+    if (k == 0) {
+        struct stat s;
+        int missing = 0, n = 0;
+        char c;
+        close(pp[1]);
+        fcntl(pp[0], F_SETFL, O_NONBLOCK);
+        while (read(pp[0], &c, 1) != 0) {
+            if (stat("/t/x", &s) != 0) missing++;
+            int fd = open("/t/x", O_RDONLY);
+            if (fd < 0) missing++; else { if (read(fd, &c, 1) != 1) missing++; close(fd); }
+            n++;
+            if (n % 8 == 0) sched_yield();
+        }
+        _exit(missing ? 1 : n > 0 ? 0 : 2);
+    }
+    close(pp[0]);
+    int bad = 0;
+    for (int i = 0; i < 500; i++) {
+        if (put("/t/x.new", "1") != 1) bad++;
+        if (rename("/t/x.new", "/t/x") != 0) bad++;
+        sched_yield();
+    }
+    close(pp[1]);
+    int ws = 0;
+    waitpid(k, &ws, 0);
+    say("atomic: 500 renames over a name while another process opens it: the renames failed %d times, the reader's status %d (0: it never found the name missing or empty)\n",
+        bad, WEXITSTATUS(ws));
+    unlink("/t/x");
+}
+
 /* ---- times -------------------------------------------------------------------------- */
 static void times(void) {
     struct stat a, b, d0, d1;
@@ -722,6 +872,10 @@ static void refused(void) {
     say("~refused: link %ld, symlink %ld, chmod %ld, chown %ld, utimensat %ld, O_SYNC %ld, O_TMPFILE %ld, RENAME_NOREPLACE %ld\n", a, b,
         c, d, e, f, g, h);
     unlink("/t/l"); unlink("/t/s"); unlink("/t/b"); unlink("/t/a");
+    mkdir("/t/d", 0777);
+    a = r(link("/t/d", "/t/dl"));
+    rmdir("/t/d");
+    say("errno: EPERM: a hard link to a directory %ld\n", a);
 }
 
 /* ---- the soak and the fill --------------------------------------------------------- */
@@ -819,6 +973,7 @@ static int speed(void) {
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "soak")) return soak();
     if (argc > 1 && !strcmp(argv[1], "speed")) return speed();
+    if (argc > 1 && !strcmp(argv[1], "noop")) return 7;
     making();
     appending();
     holes();
@@ -827,6 +982,9 @@ int main(int argc, char **argv) {
     renaming();
     directories();
     errnos();
+    paths();
+    initram("/bin/tree");
+    atomic();
     times();
     copies();
     refused();

@@ -53,7 +53,9 @@
 #   T2 probes: what PAX refuses by name is exactly its `~refused` line
 #      (link and symlink -EPERM; chmod, chown, utimensat -EOPNOTSUPP;
 #      O_SYNC -EINVAL; O_TMPFILE -EOPNOTSUPP; RENAME_NOREPLACE -EINVAL),
-#      each with its `refused:` line, and the kernel counted them.
+#      a hard link to a directory (-EPERM on Linux too) and the `execve`
+#      of a program copied since boot (`~exec`: -EACCES), each with its
+#      `refused:` line, and the kernel counted them: ten.
 #   T3 -ENOSYS only for set_robust_list (273) and rseq (334); no
 #      `refused:` line but T2's; nobody killed.
 #   T4 everything given back: the frames line shows as many frames free
@@ -61,8 +63,9 @@
 #      as many frames and inodes held as when it was made — but for the
 #      frames the inode table grew by (they hold the most inodes there
 #      were at once and are never given back; the line counts them),
-#      and for the shell session, which leaves one frame: the page of
-#      /etc/motd it appended to.
+#      and for one frame in two sessions: the shell's leaves the page
+#      of /etc/motd it appended to, the probe's the page of
+#      /etc/pax-run, which it removed and made again.
 #   T5 soak: the kernel's census lines, one for every 2500th file
 #      removed (`user: tree pid 1 tree: <n> files removed since boot;
 #      frames held <h>, inodes <i>, frames free <f>`), four of them
@@ -121,7 +124,8 @@ KEYS=$PAX_ROOT/user/console/shell-tree.keys
 SHELL_MOTD='PAX. Kernel: wolf. Shell: wolf. Tools: wolf. Nothing here existed last year.'
 PROMPT='$ '
 REFUSED='~refused: link -1, symlink -1, chmod -95, chown -95, utimensat -95, O_SYNC -22, O_TMPFILE -95, RENAME_NOREPLACE -22'
-REFUSALS='syscall 257: refused: an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE), -22|syscall 257: refused: an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE), -95|syscall 280: refused: a change of mode, owner or times (the tree keeps what a file was made with), -95|syscall 316: refused: a renameat2 flag (RENAME_NOREPLACE, RENAME_EXCHANGE, RENAME_WHITEOUT), -22|syscall 86: refused: a hard link, a symbolic link or a device node (the tree makes none), -1|syscall 88: refused: a hard link, a symbolic link or a device node (the tree makes none), -1|syscall 90: refused: a change of mode, owner or times (the tree keeps what a file was made with), -95|syscall 92: refused: a change of mode, owner or times (the tree keeps what a file was made with), -95'
+EXEC_LINE='~exec: a program copied since boot, run: status 113 (7: it ran; 113: -EACCES)'
+REFUSALS='syscall 257: refused: an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE), -22|syscall 257: refused: an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE), -95|syscall 280: refused: a change of mode, owner or times (the tree keeps what a file was made with), -95|syscall 316: refused: a renameat2 flag (RENAME_NOREPLACE, RENAME_EXCHANGE, RENAME_WHITEOUT), -22|syscall 59: refused: a program written since boot (the loader reads the archive'"'"'s own bytes), -13|syscall 86: refused: a hard link, a symbolic link or a device node (the tree makes none), -1|syscall 86: refused: a hard link, a symbolic link or a device node (the tree makes none), -1|syscall 88: refused: a hard link, a symbolic link or a device node (the tree makes none), -1|syscall 90: refused: a change of mode, owner or times (the tree keeps what a file was made with), -95|syscall 92: refused: a change of mode, owner or times (the tree keeps what a file was made with), -95'
 
 work=$PAX_BUILD/mpx3-tree
 runs=$PAX_BUILD/mpx3-tree-runs.txt
@@ -326,9 +330,11 @@ for leg in $legs; do
                 g=$(grep -m1 '^~refused' "$out")
                 [ "$g" = "$REFUSED" ] || why+=" '$g';"
                 [ "$rf" = "$REFUSALS" ] || why+=" refusal lines '$rf';"
+                x=$(grep -m1 '^~exec' "$out")
+                [ "$x" = "$EXEC_LINE" ] || why+=" '$x';"
                 rn=$(printf '%s\n' "$tl" | sed -n -E 's/.*, refusals ([0-9]+)$/\1/p')
-                [ "$rn" = 8 ] || why+=" the kernel counted '$rn' refusals, not 8 ('$tl');"
-                [ -z "$why" ] && say "PASS T2 $id: $g; 8 refusal lines, 8 counted (Linux here: $(grep -m1 '^~refused' "$out.linux"))" || bad "T2 $id:$why"
+                [ "$rn" = 10 ] || why+=" the kernel counted '$rn' refusals, not 10 ('$tl');"
+                [ -z "$why" ] && say "PASS T2 $id: $g; $x; 10 refusal lines, 10 counted (Linux here: $(grep -m1 '^~refused' "$out.linux"); $(grep -m1 '^~exec' "$out.linux"))" || bad "T2 $id:$why"
             fi
 
             # T3: what PAX lacks; nobody killed.
@@ -349,7 +355,9 @@ for leg in $legs; do
             fb=${1:-} fa=${2:-}
             set -- $(printf '%s\n' "$tl" | sed -n -E "s/^tree: frames ([0-9]+) \\(([0-9]+) when made\\), ([0-9]+) \\(([0-9]+)\\) of them the inode table's, inodes ([0-9]+) \\(([0-9]+)\\), cap ([0-9]+), refusals [0-9]+\$/\\1 \\2 \\3 \\4 \\5 \\6/p")
             th=${1:-} tb=${2:-} tt=${3:-} ttb=${4:-} ti=${5:-} tib=${6:-}
-            left=0; [ "$i" != pelt ] || left=1 # the page of /etc/motd the session appended to
+            left=0
+            [ "$i" != pelt ] || left=1 # the page of /etc/motd the session appended to
+            [ "$s" != probes ] || left=1 # the page of /etc/pax-run, which the probe removed and made again
             if [ -z "$fb" ] || [ -z "$th" ]; then
                 why+=" no frames line or no tree line ('$fl' / '$tl');"
             else
