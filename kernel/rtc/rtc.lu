@@ -1,0 +1,121 @@
+//! rtc — the wall clock at boot (px26): the PC's battery-backed
+//! real-time clock, read once, so CLOCK_REALTIME, `time` and
+//! `gettimeofday` answer the date and not the seconds since boot.
+//! boreutils' `ls -l` prints a file's year or its hour by how far its
+//! time lies from now, so a listing matches Linux's only with a clock
+//! that knows the year.
+//!
+//! **The device** is the MC146818's register set as the PC/AT wires
+//! it: an index written to port 0x70 (bit 7, the NMI mask, kept set as
+//! PAX runs with no NMI source), the register read at port 0x71.
+//! Registers 0, 2, 4 are seconds, minutes, hours; 7, 8, 9 the day of
+//! the month, the month and the year's last two digits; register A's
+//! bit 7 says an update is in progress (the six are not to be trusted
+//! then); register B's bit 2 says the six are binary (clear: BCD) and
+//! its bit 1 says the hours run 0-23 (clear: 1-12 with bit 7 for PM).
+//! `read` waits for no update in progress and takes the six twice
+//! until two readings agree. The year is 2000 + the two digits (the
+//! century register is not standard, and no host PAX boots on is from
+//! before 2000). The time is taken as UTC, which is what QEMU's clock
+//! keeps by default (`-rtc base=utc`).
+//!
+//! `read` answers seconds since 1970-01-01T00:00:00Z, the days counted
+//! by the civil calendar's rule (a leap year every fourth, but for a
+//! century not a multiple of 400), or 0 when the device never settles
+//! (10000 tries): the clocks then count from the epoch, as before px26.
+//!
+//! Written from Motorola's MC146818 data sheet (the registers, UIP, DM
+//! and 24/12), the IBM PC/AT technical reference (ports 0x70 and
+//! 0x71), and QEMU's documentation of `-rtc`. No Linux source; no
+//! other kernel's source. No state, no region, no heap.
+
+extern "c" fn pax_outb(port: u16, v: u8)
+extern "c" fn pax_inb(port: u16) -> u8
+
+const INDEX: u16 = 0x70
+const DATA: u16 = 0x71
+const NMI_OFF: u64 = 0x80
+const REG_A: u64 = 0x0a
+const REG_B: u64 = 0x0b
+const UIP: u64 = 0x80
+const B_BINARY: u64 = 0x04
+const B_24H: u64 = 0x02
+const TRIES: u64 = 10000
+
+fn reg(i: u64) -> u64 {
+    // # Safety: io.S's OUT and IN on the real-time clock's two ports.
+    unsafe {
+        pax_outb(INDEX, ((i | NMI_OFF) & 0xff) as u8)
+        pax_inb(DATA) as u64
+    }
+}
+
+fn bcd(v: u64) -> u64 {
+    (v >> 4) * 10 + (v & 0x0f)
+}
+
+/// The six registers as one word (seconds lowest), when no update is
+/// in progress; 0xffffffffffffffff when one is.
+fn six() -> u64 {
+    if reg(REG_A) & UIP != 0 {
+        return 0xffffffffffffffff
+    }
+    reg(0) | (reg(2) << 8) | (reg(4) << 16) | (reg(7) << 24) | (reg(8) << 32) | (reg(9) << 40)
+}
+
+/// Days from 1970-01-01 to the civil date (y, m, d), m 1-12.
+fn days(y: u64, m: u64, d: u64) -> u64 {
+    // March-based years: the leap day falls at the end.
+    let yy = if m <= 2 { y - 1 } else { y }
+    let mm = if m <= 2 { m + 9 } else { m - 3 }
+    let era = yy / 400
+    let yoe = yy - era * 400
+    let doy = (153 * mm + 2) / 5 + d - 1
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    era * 146097 + doe - 719468
+}
+
+/// Seconds since the epoch by the real-time clock; 0 when it cannot be
+/// read. IF clear or set: nothing here is shared.
+pub fn read() -> u64 {
+    var a: u64 = 0xffffffffffffffff
+    var n: u64 = 0
+    while n < TRIES {
+        let x = six()
+        if x != 0xffffffffffffffff && x == a {
+            break
+        }
+        a = x
+        n += 1
+    }
+    if n == TRIES {
+        return 0
+    }
+    let b = reg(REG_B)
+    var s = a & 0xff
+    var mi = (a >> 8) & 0xff
+    var h = (a >> 16) & 0xff
+    var d = (a >> 24) & 0xff
+    var mo = (a >> 32) & 0xff
+    var y = (a >> 40) & 0xff
+    let pm = h & 0x80 != 0
+    h = h & 0x7f
+    if b & B_BINARY == 0 {
+        s = bcd(s)
+        mi = bcd(mi)
+        h = bcd(h)
+        d = bcd(d)
+        mo = bcd(mo)
+        y = bcd(y)
+    }
+    if b & B_24H == 0 {
+        h = h % 12
+        if pm {
+            h += 12
+        }
+    }
+    if mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || s > 60 {
+        return 0
+    }
+    days(2000 + y, mo, d) * 86400 + h * 3600 + mi * 60 + s
+}
