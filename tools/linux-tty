@@ -20,10 +20,13 @@
 # --pid1 (px14): PROG is the first process of a fresh pid namespace,
 # pid 1 as PAX's first program is, its children numbered 2, 3, … and
 # orphans reparented to it. Both need root (CI runs this under sudo). Before PROG starts, the terminal's settings
-# are made PAX's console's: ISIG and IXON cleared (PAX has no signals and
-# no output flow control yet, so Ctrl-C is the byte 0x03 on both; every
-# other setting is the pseudo-terminal's default, which is what PAX's
-# console starts with: kernel/console). Then the KEYS file is typed
+# are made PAX's console's: IXON cleared (PAX has no output flow
+# control; every other setting is the pseudo-terminal's default, which
+# is what PAX's console starts with: kernel/console). ISIG stays set
+# since px26, as PAX's console has it: Ctrl-C is SIGINT on both, for
+# the terminal's foreground process group here and for every process on
+# PAX, which is the same set when PROG makes no process group (--isig,
+# from the days it was an option, is accepted and means nothing). Then the KEYS file is typed
 # exactly as tools/qemu-halt --type types it (the same format: before
 # step k, wait until TEXT has been shown k times; then the step's
 # bytes, `^C ^D ^U ^W ^? ^^` the control characters, DEL and `^`, and
@@ -100,7 +103,6 @@ def main(argv):
     argv0 = None
     root = None
     pid1 = False
-    isig = False
     args = argv[1:]
     while args and args[0].startswith("--") and args[0] != "--":
         if args[0] == "--keys":
@@ -118,7 +120,6 @@ def main(argv):
             args = args[1:]
             continue
         elif args[0] == "--isig":
-            isig = True
             args = args[1:]
             continue
         else:
@@ -149,8 +150,6 @@ def main(argv):
         try:
             a = termios.tcgetattr(0)
             a[0] &= ~termios.IXON
-            if not isig:
-                a[3] &= ~termios.ISIG
             termios.tcsetattr(0, termios.TCSANOW, a)
             if root:
                 os.chroot(root)
