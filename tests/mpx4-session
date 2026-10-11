@@ -13,8 +13,9 @@
 # boreutils' cat, echo, ls, mkdir, rm and sleep (user/boreutils.pin,
 # tools/mkboreutils: bu21's, px27's pin); play
 # (tools/mkplay) and the three tunes (user/tunes); and from user/net
-# (tools/mknet) the wolf program tcpwolf and two C witnesses, resolve
-# and tcpecho. One initramfs: those in /bin, /usr/share/tunes, and
+# (tools/mknet) the wolf programs tcpwolf and wolfecho (px28: a server
+# that waits, in wolf's runtime, on px24's epoll) and one C witness,
+# resolve. One initramfs: those in /bin, /usr/share/tunes, and
 # /etc/motd, /etc/passwd, /etc/group, /etc/localtime (tools/mkzone),
 # /etc/pax-run `/bin/pelt`. Three sessions, typed on COM1:
 #   session-shell  user/console/session-shell.keys: cat /etc/motd,
@@ -27,12 +28,13 @@
 #   session-net    user/console/session-net.keys, with QEMU's user-mode
 #                  network and `hostfwd` from a free port of this host's
 #                  127.0.0.1 to the guest's port 7070: resolve
-#                  10.0.2.3 dns.google, tcpecho 7070 10.0.2.2 9099 —
-#                  while it listens this script connects to it through
-#                  the forwarded port, sends a line, closes its half and
-#                  reads to the end — and Ctrl-C twenty seconds after
-#                  it was started, echo $?, play scale (the speaker to a
-#                  WAV file), exit
+#                  10.0.2.3 dns.google, wolfecho 7070 — while it
+#                  listens this script connects to it through the
+#                  forwarded port, sends a line, closes its half and
+#                  reads to the end, and wolfecho ends — echo $?, play
+#                  scale (the speaker to a WAV file), exit. wolfecho is
+#                  also run on this host's Linux with the same client
+#                  at 127.0.0.1:7070
 #   session-files  user/console/session-files.keys (px27's writable
 #                  tree; every line one of user/console/shell-tree.keys):
 #                  mkdir /t, cd /t, mkdir -p a/b/c, echo one > a/f1,
@@ -60,20 +62,20 @@
 #   E3 session-net: the session's lines are user/console/session-net.expect
 #      but for resolve's, whose addresses are held to what
 #      tools/gateway-probe --dns got from QEMU's DNS server on this host
-#      (mpx4-udp's G1), and the `killed:` line, which must name tcpecho
-#      and SIGINT; this host's end of the connection read back exactly
-#      the line it sent and tcpecho's `eof after 24 bytes, crc
-#      9d337024`; the WAV holds eight tones (tools/wav-notes).
+#      (mpx4-udp's G1); wolfecho's lines byte-identical to what it
+#      printed on Linux; this host's end of the connection read back
+#      exactly `the wolf heard: <the line>` on PAX as on Linux; nothing
+#      killed; the WAV holds eight tones (tools/wav-notes).
 #   E4 what was typed arrived (the console's summary: every byte from
 #      com1) and the session's closing lines: `signals: <k> raised from
 #      the terminal` with k the Ctrl-C's typed (session-shell 2,
-#      session-net 1, session-files 0); the speaker's line (session-net: 8 tones,
+#      session-net 0, session-files 0); the speaker's line (session-net: 8 tones,
 #      sounding 0; session-shell: none); `network: frames <a> in, <b>
 #      out; udp datagrams <c> in, <d> out` and `network: tcp connections
 #      <e> accepted, <f> made, 0 open` (session-shell: no frame, no
 #      datagram, 1 and 1 — tcpwolf's loopback; session-net: frames both
-#      ways, 1 datagram in and 2 out — resolve's question and answer,
-#      tcpecho's "ready" — 1 and 0; session-files: nothing).
+#      ways, 1 datagram in and 1 out — resolve's question and answer —
+#      1 and 0; session-files: nothing).
 #   E5 the end: `PAX: init /bin/pelt ended with status <s>; nothing left
 #      to run` (s 0; session-files: Linux's, 1, its last `cat` failing), `halt`, and qemu-halt holds the machine halted.
 #
@@ -113,13 +115,12 @@ case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier
 need readelf python3
 
 BORE="cat echo ls mkdir rm sleep"
-NET="resolve tcpecho tcpwolf"
+NET="resolve tcpwolf wolfecho"
 MOTD='PAX. Kernel: wolf. Shell: wolf. Tools: wolf. Network: wolf.'
 PROMPT='$ '
 OUTSIDE=dns.google
 LINE='what does the wolf say?'
 GUEST_PORT=7070
-NET_PAUSE=20 # seconds from typing tcpecho to the Ctrl-C that ends it
 
 work=$PAX_BUILD/mpx4-session
 runs=$PAX_BUILD/mpx4-session-runs.txt
@@ -151,6 +152,49 @@ if [ -n "$filesonly" ]; then
     linux_files "$filesonly" && exit 0
     say "FAIL: tools/linux-tree session-files"; exit 1
 fi
+
+free_port() { # a TCP port free on 127.0.0.1 now
+    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
+}
+
+# This host's end of wolfecho's connection: wait for `listening` in
+# LOG (PAX's serial log, or Linux's output), connect through the forwarded port, send the line, close
+# this half, read to the end; what came back goes to OUT.
+client() { # log port out
+    python3 - "$1" "$2" "$3" "$LINE" <<'PY'
+import socket, sys, time
+log, port, out, line = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+end = time.time() + 120
+while time.time() < end:
+    try:
+        if b"wolfecho: listening on port 7070" in open(log, "rb").read():
+            break
+    except OSError:
+        pass
+    time.sleep(0.2)
+else:
+    open(out, "w").write("client: wolfecho never listened\n"); sys.exit(1)
+try:
+    s = socket.create_connection(("127.0.0.1", port), timeout=30)
+    s.sendall((line + "\n").encode())
+    got = b""
+    while not got.endswith(b"\n"):
+        d = s.recv(4096)
+        if not d:
+            break
+        got += d
+    s.shutdown(socket.SHUT_WR)
+    while True:
+        d = s.recv(4096)
+        if not d:
+            break
+        got += d
+    s.close()
+    open(out, "wb").write(got)
+except Exception as e:
+    open(out, "w").write("client: %s\n" % e); sys.exit(1)
+PY
+}
 
 if [ -z "$images" ]; then
     wolf=${PAX_WOLF:-wolf}
@@ -241,9 +285,16 @@ if [ -z "$images" ]; then
             why+=" tools/linux-tty session-shell;"
         fi
         ${asroot[@]+"${asroot[@]}"} chown -R "$me" "$r" || why+=" chown back;"
+        # wolfecho on this host's Linux: the same binary, the same client.
+        ( "$r/bin/wolfecho" 7070 > "$work/linux/wolfecho.out" 2>&1; echo $? > "$work/linux/wolfecho.rc" ) &
+        wpid=$!
+        client "$work/linux/wolfecho.out" 7070 "$work/linux/wolfecho.client" || why+=" the client of wolfecho on Linux;"
+        wait "$wpid"
+        [ "$(cat "$work/linux/wolfecho.rc" 2>/dev/null)" = 0 ] || why+=" wolfecho on Linux: status $(cat "$work/linux/wolfecho.rc" 2>/dev/null);"
+        say "  linux wolfecho: $(tr '\n' '|' < "$work/linux/wolfecho.out"); the client read $(tr '\n' '|' < "$work/linux/wolfecho.client")"
         linux_files "$work" || why+=" tools/linux-tree session-files;"
     fi
-    [ -z "$why" ] && say "PASS E0: kmain_session built ($tiers), every program static, the initramfs and the session image a tier, Linux ran session-shell and session-files" || bad "E0:$why"
+    [ -z "$why" ] && say "PASS E0: kmain_session built ($tiers), every program static, the initramfs and the session image a tier, Linux ran session-shell, session-files and wolfecho" || bad "E0:$why"
     images=$work
     if [ "$noboot" = 1 ]; then
         [ "$fail" = 0 ] && say "mpx4-session build (E0): PASS (no boot: --no-boot)" || say "mpx4-session build: FAIL"
@@ -285,48 +336,6 @@ else
     bad "G1: tools/gateway-probe --dns $OUTSIDE"
 fi
 
-free_port() { # a TCP port free on 127.0.0.1 now
-    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
-}
-
-# This host's end of tcpecho's connection: wait for `listening` in the
-# serial log, connect through the forwarded port, send the line, close
-# this half, read to the end; what came back goes to OUT.
-client() { # log port out
-    python3 - "$1" "$2" "$3" "$LINE" <<'PY'
-import socket, sys, time
-log, port, out, line = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
-end = time.time() + 120
-while time.time() < end:
-    try:
-        if b"tcpecho: listening on 0.0.0.0:7070" in open(log, "rb").read():
-            break
-    except OSError:
-        pass
-    time.sleep(0.2)
-else:
-    open(out, "w").write("client: tcpecho never listened\n"); sys.exit(1)
-try:
-    s = socket.create_connection(("127.0.0.1", port), timeout=30)
-    s.sendall((line + "\n").encode())
-    got = b""
-    while not got.endswith(b"\n"):
-        d = s.recv(4096)
-        if not d:
-            break
-        got += d
-    s.shutdown(socket.SHUT_WR)
-    while True:
-        d = s.recv(4096)
-        if not d:
-            break
-        got += d
-    s.close()
-    open(out, "wb").write(got)
-except Exception as e:
-    open(out, "w").write("client: %s\n" % e); sys.exit(1)
-PY
-}
 
 note_run() { # tier leg session status
     ran=$((ran + 1))
@@ -362,7 +371,6 @@ for leg in $legs; do
                 q+=(--qemu -netdev --qemu "user,id=n0,ipv6=off,hostfwd=tcp:127.0.0.1:$port-:$GUEST_PORT"
                     --qemu -device --qemu "virtio-net-pci,netdev=n0"
                     --qemu -audiodev --qemu "wav,id=snd0,path=$log.wav" --qemu -machine --qemu "q35,pcspk-audiodev=snd0")
-                pause=$NET_PAUSE
                 client "$log" "$port" "$log.client" &
                 cpid=$!
             fi
@@ -407,7 +415,9 @@ for leg in $legs; do
                 fi
                 [ -z "$why" ] && say "PASS E2 $id: the session byte-identical to Linux's, dates of new files masked ($(wc -l < "$out" | tr -d ' ') lines); rm -rf / refused on both" || bad "E2 $id:$why"
             else
-                [ "$kills" = "user: tcpecho killed: SIGINT" ] || why+=" kills '$kills', not tcpecho's by SIGINT;"
+                [ -z "$kills" ] || why+=" kills '$kills';"
+                grep '^wolfecho: ' "$out" > "$out.wolfecho"
+                cmp -s "$lx/wolfecho.out" "$out.wolfecho" || why+=" wolfecho printed other than on Linux: $(diff "$lx/wolfecho.out" "$out.wolfecho" | head -n 6 | tr '\n' '|');"
                 got=$(awk -v name="$OUTSIDE" '
                     /^resolve: answer from 10\.0\.2\.3:53: rcode [0-9]+, [0-9]+ answers$/ { r = $6; sub(/,/, "", r) }
                     $0 ~ "^resolve: " name " is " { a[++k] = $4 }
@@ -425,11 +435,12 @@ for leg in $legs; do
                 if ! cmp -s "$PAX_ROOT/user/console/session-net.expect" "$out.masked"; then
                     why+=" the session is not user/console/session-net.expect: $(diff "$PAX_ROOT/user/console/session-net.expect" "$out.masked" | head -n 12 | tr '\n' '|');"
                 fi
-                want=$(printf '%s\neof after 24 bytes, crc 9d337024\n' "$LINE")
-                [ "$(cat "$log.client" 2>/dev/null)" = "$want" ] || why+=" this host's end read '$(tr '\n' '|' < "$log.client" 2>/dev/null)';"
+                want="the wolf heard: $LINE"
+                [ "$(cat "$log.client" 2>/dev/null)" = "$want" ] && cmp -s "$lx/wolfecho.client" "$log.client" \
+                    || why+=" this host's end read '$(tr '\n' '|' < "$log.client" 2>/dev/null)', on Linux '$(tr '\n' '|' < "$lx/wolfecho.client" 2>/dev/null)';"
                 tones=$(python3 "$PAX_ROOT/tools/wav-notes" "$log.wav" 2>/dev/null | sed -n -E 's/^tones ([0-9]+) .*/\1/p')
                 [ "$tones" = 8 ] || why+=" the WAV holds '$tones' tones, not 8;"
-                [ -z "$why" ] && say "PASS E3 $id: resolve $got; tcpecho echoed '$LINE' to this host and said eof after 24 bytes; killed by SIGINT; the scale's 8 tones in the WAV" || bad "E3 $id:$why"
+                [ -z "$why" ] && say "PASS E3 $id: resolve $got; wolfecho answered this host 'the wolf heard: $LINE' and printed what it printed on Linux; the scale's 8 tones in the WAV" || bad "E3 $id:$why"
             fi
 
             # E4: what was typed, and the closing lines.
@@ -444,9 +455,9 @@ for leg in $legs; do
                 ws="signals: 2 raised from the terminal" wn1="network: frames 0 in, 0 out; udp datagrams 0 in, 0 out" wn2="network: tcp connections 1 accepted, 1 made, 0 open"
                 ! grep -q '^speaker: ' "$norm" || why+=" a speaker line with no tone played;"
             else
-                ws="signals: 1 raised from the terminal" wn1= wn2="network: tcp connections 1 accepted, 0 made, 0 open"
+                ws="signals: 0 raised from the terminal" wn1= wn2="network: tcp connections 1 accepted, 0 made, 0 open"
                 grep -Eqx 'speaker: 8 tones, 0 stopped at their process.s end, sounding 0, port 0x61 0x[0-9a-f]+' "$norm" || why+=" speaker '$(grep -m1 '^speaker: ' "$norm")';"
-                grep -Eqx 'network: frames [1-9][0-9]* in, [1-9][0-9]* out; udp datagrams 1 in, 2 out' "$norm" || why+=" '$(grep -m1 '^network: frames' "$norm")';"
+                grep -Eqx 'network: frames [1-9][0-9]* in, [1-9][0-9]* out; udp datagrams 1 in, 1 out' "$norm" || why+=" '$(grep -m1 '^network: frames' "$norm")';"
             fi
             grep -qx "$ws" "$norm" || why+=" '$(grep -m1 '^signals: ' "$norm")', not '$ws';"
             [ -z "$wn1" ] || grep -qx "$wn1" "$norm" || why+=" '$(grep -m1 '^network: frames' "$norm")', not '$wn1';"
