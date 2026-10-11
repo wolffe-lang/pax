@@ -44,6 +44,36 @@ def die(msg):
     sys.exit(2)
 
 
+def frames(path):
+    """Every channel's samples, as a list of lists, and the format."""
+    try:
+        raw = open(path, "rb").read()
+    except OSError as e:
+        die("%s: %s" % (path, e))
+    if raw[:4] != b"RIFF" or raw[8:12] != b"WAVE":
+        die("%s: not a RIFF WAVE file" % path)
+    i, fmt, data = 12, None, None
+    while i + 8 <= len(raw):
+        cid, size = raw[i:i + 4], struct.unpack("<I", raw[i + 4:i + 8])[0]
+        body = i + 8
+        if cid == b"data":
+            if size == 0 or body + size > len(raw):
+                size = len(raw) - body
+            data = raw[body:body + size]
+            break
+        if cid == b"fmt ":
+            fmt = struct.unpack("<HHIIHH", raw[body:body + 16])
+        i = body + size + (size & 1)
+    if fmt is None or data is None:
+        die("%s: no fmt or data chunk" % path)
+    tag, ch, rate, _, _, bits = fmt
+    if tag not in (1, 0xfffe) or bits != 16:
+        die("%s: not 16-bit PCM (tag %d, %d bits)" % (path, tag, bits))
+    n = len(data) // (ch * 2)
+    allv = struct.unpack("<%dh" % (n * ch), data[: n * ch * 2])
+    return [list(allv[c::ch]) for c in range(ch)], rate, ch, bits
+
+
 def samples(path):
     # The RIFF chunks read by hand: QEMU 11.1.1's `wav` backend left the
     # RIFF and `data` sizes 0 in every capture measured here (QEMU ended
@@ -175,9 +205,305 @@ def tones(vals, rate):
     return out
 
 
+# ---- px30: sampled sound (PCM through a sound device) ----------------
+#
+# A PCM capture holds any number of simultaneous pitches, so the speaker's
+# zero-crossing count does not apply. These modes read every channel.
+#
+#   wav-notes --pcm FILE.wav
+#       `pcm rate <hz> channels <c> seconds <s>`, then per channel:
+#       `channel <c> peak <dBFS> rms <dBFS> sounding <ms> from <ms> to <ms>
+#        clipped <n>` and the pitches in its sounding span, strongest
+#       first: `pitch <c> <hz> <dBFS>` (the spectrum's peaks, below).
+#   wav-notes --ramp FILE.wav
+#       dsptone's ramp (left 7*i, right its complement, mod 65536): the
+#       frames that follow the rule, the breaks (a frame lost, repeated or
+#       out of place), and whether the channels are swapped.
+#   wav-notes --expect SPEC FILE.wav
+#       judges the capture against SPEC, one event a line:
+#       `<start ms> <length ms> <hz> [<hz>...]` (times from the first
+#       sounding sample); per event `event <k> ...` with the pitches found
+#       in its middle, its onset and its end as the capture shows them,
+#       and PASS or FAIL; then `expect <pass>/<n>`. Exit 1 when any fails.
+#
+# The spectrum: a Hann window of 8192 samples (5.9 Hz a bin at 48000),
+# a radix-2 FFT, peaks above -30 dB of the strongest and above -60 dBFS,
+# each peak's frequency refined by a parabola through the log magnitudes
+# of its bin and its two neighbours (better than a tenth of a bin for a
+# steady sine). A level is the peak's amplitude in dBFS (a full-scale
+# sine is 0). A peak that is a whole multiple (2-9) of a stronger one,
+# within 0.5%, is marked `harmonic` (a square wave's odd harmonics sit at
+# 1/3, 1/5 ...; an octave in a chord is also a multiple, so a judge
+# names the pitches it expects rather than trusting the mark).
+
+import cmath
+import math
+
+FFT_N = 8192
+
+
+def fft(a):
+    n = len(a)
+    j = 0
+    a = list(a)
+    for i in range(1, n):
+        bit = n >> 1
+        while j & bit:
+            j ^= bit
+            bit >>= 1
+        j |= bit
+        if i < j:
+            a[i], a[j] = a[j], a[i]
+    size = 2
+    while size <= n:
+        w = cmath.exp(-2j * math.pi / size)
+        half = size // 2
+        tw = [w ** k for k in range(half)]
+        for start in range(0, n, size):
+            for k in range(half):
+                u = a[start + k]
+                v = a[start + k + half] * tw[k]
+                a[start + k] = u + v
+                a[start + k + half] = u - v
+        size *= 2
+    return a
+
+
+_HANN = {}
+
+
+def mags(x):
+    n = len(x)
+    if n not in _HANN:
+        _HANN[n] = [0.5 - 0.5 * math.cos(2 * math.pi * i / (n - 1)) for i in range(n)]
+    h = _HANN[n]
+    f = fft([x[i] * h[i] for i in range(n)])
+    norm = sum(h) / 2.0
+    return [abs(f[k]) / norm for k in range(n // 2)]
+
+
+def peaks(m, rate, n, floor_db=-60.0, rel_db=-30.0):
+    if not m:
+        return []
+    top = max(m)
+    if top <= 0:
+        return []
+    out = []
+    for k in range(2, len(m) - 1):
+        v = m[k]
+        if v <= m[k - 1] or v < m[k + 1]:
+            continue
+        db = 20 * math.log10(v / 32768.0) if v > 0 else -200
+        if db < floor_db or v < top * 10 ** (rel_db / 20.0):
+            continue
+        a, b, c = (math.log(max(m[k - 1], 1e-9)), math.log(v), math.log(max(m[k + 1], 1e-9)))
+        d = a - 2 * b + c
+        off = 0.5 * (a - c) / d if d != 0 else 0.0
+        hz = (k + off) * rate / float(n)
+        if 30.0 <= hz <= rate / 2.2:
+            out.append([hz, db, ""])
+    out.sort(key=lambda p: -p[1])
+    for i, p in enumerate(out):
+        for q in out[:i]:
+            r = p[0] / q[0]
+            if 1.5 < r < 9.5 and abs(r - round(r)) / round(r) < 0.005:
+                p[2] = "harmonic"
+                break
+    return out
+
+
+def segment_spectrum(x, rate):
+    """Average magnitude spectrum over the segment, FFT_N windows hopped by half."""
+    n = FFT_N
+    while n > 512 and n > len(x):
+        n //= 2
+    if len(x) < n:
+        return [], n
+    acc = None
+    count = 0
+    hop = n // 2
+    i = 0
+    while i + n <= len(x) and count < 64:
+        m = mags(x[i:i + n])
+        acc = m if acc is None else [p + q for p, q in zip(acc, m)]
+        count += 1
+        i += hop
+    return [v / count for v in acc], n
+
+
+def sounding_span(x, rate, frac=0.02):
+    """First and last sample whose magnitude is over `frac` of the peak."""
+    top = max(abs(v) for v in x) if x else 0
+    if top == 0:
+        return None
+    t = top * frac
+    first = next(i for i, v in enumerate(x) if abs(v) > t)
+    last = len(x) - 1 - next(i for i, v in enumerate(reversed(x)) if abs(v) > t)
+    return first, last
+
+
+def dbfs(v):
+    return 20 * math.log10(v / 32768.0) if v > 0 else -200.0
+
+
+def pcm_report(path):
+    chans, rate, ch, _ = frames(path)
+    n = len(chans[0])
+    print("pcm rate %d channels %d seconds %.3f" % (rate, ch, n / float(rate)))
+    for c, x in enumerate(chans):
+        span = sounding_span(x, rate)
+        if span is None:
+            print("channel %d silent" % c)
+            continue
+        a, b = span
+        seg = x[a:b + 1]
+        peak = max(abs(v) for v in seg)
+        rms = math.sqrt(sum(v * v for v in seg) / len(seg))
+        clipped = sum(1 for v in seg if v >= 32767 or v <= -32768)
+        print("channel %d peak %.1f rms %.1f sounding %.1f from %.1f to %.1f clipped %d" % (
+            c, dbfs(peak), dbfs(rms), (b - a + 1) * 1000.0 / rate, a * 1000.0 / rate, b * 1000.0 / rate, clipped))
+        m, w = segment_spectrum(seg, rate)
+        for hz, db, mark in peaks(m, rate, w)[:12]:
+            print("pitch %d %.2f %.1f%s" % (c, hz, db, " " + mark if mark else ""))
+    return 0
+
+
+def ramp_report(path):
+    chans, rate, ch, _ = frames(path)
+    if ch != 2:
+        die("--ramp needs two channels")
+    left, right = chans
+    n = len(left)
+    # skip leading silence
+    i = 0
+    while i < n and left[i] == 0 and right[i] == 0:
+        i += 1
+    good = 0
+    breaks = []
+    swapped = 0
+    prev = None
+    for k in range(i, n):
+        l, r = left[k] & 0xffff, right[k] & 0xffff
+        if l == r == 0:
+            continue
+        if (l ^ r) != 0xffff:
+            # maybe swapped? complement relation is symmetric; check step instead
+            breaks.append((k, "not complements"))
+            prev = None
+            continue
+        if prev is not None:
+            step = (l - prev) & 0xffff
+            if step == 7:
+                good += 1
+            elif ((r - (~prev & 0xffff)) & 0xffff) == 7 and step != 7:
+                swapped += 1
+            else:
+                breaks.append((k, "step %d" % step))
+        prev = l
+        # a swapped pair: the left carries the falling series
+    # Which channel rises: left must rise by 7.
+    rising_left = 0
+    for k in range(i + 1, min(n, i + 2000)):
+        if ((left[k] - left[k - 1]) & 0xffff) == 7:
+            rising_left += 1
+    print("ramp frames %d in-step %d breaks %d left-rises %s" % (n - i, good, len(breaks), "yes" if rising_left > 1000 else "NO (swapped)"))
+    for k, why in breaks[:20]:
+        print("break at frame %d (%.3f s): %s" % (k, k / float(rate), why))
+    return 0 if not breaks and rising_left > 1000 else 1
+
+
+def expect_report(spec, path):
+    chans, rate, ch, _ = frames(path)
+    mono = [sum(c[i] for c in chans) / float(len(chans)) for i in range(len(chans[0]))]
+    span = sounding_span(mono, rate)
+    if span is None:
+        print("expect 0/0 capture silent")
+        return 1
+    t0 = span[0]
+    events = []
+    for line in open(spec):
+        line = line.split("#")[0].split()
+        if not line:
+            continue
+        events.append((float(line[0]), float(line[1]), [float(h) for h in line[2:]]))
+    passed = 0
+    for k, (start, length, hzs) in enumerate(events, 1):
+        a = t0 + int((start + length * 0.25) * rate / 1000)
+        b = t0 + int((start + length * 0.75) * rate / 1000)
+        seg = mono[a:b]
+        m, w = segment_spectrum(seg, rate)
+        ps = peaks(m, rate, w, rel_db=-24.0) if m else []
+        found = []
+        ok = True
+        for hz in hzs:
+            near = [p for p in ps if abs(p[0] - hz) / hz < 0.01]
+            if near:
+                best = max(near, key=lambda p: p[1])
+                found.append("%.1f(%.1f dB)" % (best[0], best[1]))
+            else:
+                found.append("%.1f MISSING" % hz)
+                ok = False
+        # nothing strong that is not expected (or a whole multiple of one)
+        extra = []
+        for p in ps:
+            if any(abs(p[0] - hz) / hz < 0.01 for hz in hzs):
+                continue
+            if any(abs(p[0] / hz - round(p[0] / hz)) / round(p[0] / hz) < 0.01 for hz in hzs if p[0] > hz * 1.5):
+                continue
+            if p[1] > max(q[1] for q in ps) - 12:
+                extra.append("%.1f" % p[0])
+        if extra:
+            ok = False
+        # onset and end of this event: the energy at its pitches over
+        # 5 ms windows, the first and last window above half its middle
+        tones = hzs
+        win = rate // 200
+        lo = max(0, t0 + int((start - 60) * rate / 1000))
+        hi = min(len(mono), t0 + int((start + length + 60) * rate / 1000))
+        def energy(s0):
+            seg = mono[s0:s0 + win * 4]
+            if len(seg) < win * 4:
+                return 0.0
+            tot = 0.0
+            for hz in tones:
+                re = im = 0.0
+                for i2, v in enumerate(seg):
+                    ang = 2 * math.pi * hz * i2 / rate
+                    re += v * math.cos(ang)
+                    im += v * math.sin(ang)
+                tot += math.hypot(re, im)
+            return tot
+        mid = energy(t0 + int((start + length / 2) * rate / 1000) - win * 2)
+        on = off = None
+        s0 = lo
+        while s0 < hi:
+            e = energy(s0)
+            if e > mid * 0.5:
+                if on is None:
+                    on = s0 + win * 2
+                off = s0 + win * 2
+            s0 += win
+        on_ms = (on - t0) * 1000.0 / rate if on is not None else -1
+        off_ms = (off - t0) * 1000.0 / rate if off is not None else -1
+        if on is None or abs(on_ms - start) > 30 or abs((off_ms - on_ms) - length) > max(40, length * 0.1):
+            ok = False
+        passed += ok
+        print("event %d start %.0f len %.0f found %s onset %.1f len %.1f%s %s" % (
+            k, start, length, " ".join(found), on_ms, off_ms - on_ms,
+            (" extra " + ",".join(extra)) if extra else "", "PASS" if ok else "FAIL"))
+    print("expect %d/%d" % (passed, len(events)))
+    return 0 if passed == len(events) else 1
+
+
 def main(argv):
+    if len(argv) == 3 and argv[1] == "--pcm":
+        sys.exit(pcm_report(argv[2]))
+    if len(argv) == 3 and argv[1] == "--ramp":
+        sys.exit(ramp_report(argv[2]))
+    if len(argv) == 4 and argv[1] == "--expect":
+        sys.exit(expect_report(argv[2], argv[3]))
     if len(argv) != 2:
-        die("usage: wav-notes FILE.wav")
+        die("usage: wav-notes [--pcm | --ramp | --expect SPEC] FILE.wav")
     vals, rate, ch, bits = samples(argv[1])
     ts = tones(vals, rate)
     for k, (s, e, hz, n) in enumerate(ts, 1):
