@@ -1,0 +1,19 @@
+# tests/mpx4-udp's run list (px22). kmain_sockets runs it from the
+# initramfs as /etc/pax-run with tools/net-peer's UDP script at the
+# other end of a socket netdev; tools/linux-net runs it on Linux with
+# the same script at the other end of a tap device; the two outputs and
+# exit statuses are compared byte for byte (but udpfill's, whose answer
+# is the receiving kernel's queue bound: user/net/udpfill.expect). One
+# command a line, words separated by single spaces, the first the
+# program's path. In order: what sockets answer with nothing on the
+# wire; a client and a server over loopback; the echo server, asked by
+# the script and then soaked; the client; the soak out; the echo server
+# again for the wider battery; the resolver; the queue's bound.
+/bin/sockerr
+/bin/udploop
+/bin/udpecho 7 10.0.2.2 9099
+/bin/udpclient 10.0.2.2 9099
+/bin/udpsoak 10.0.2.2 9099 10000
+/bin/udpecho 7 10.0.2.2 9098
+/bin/resolve 10.0.2.3 pax.test
+/bin/udpfill
