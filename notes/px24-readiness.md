@@ -170,7 +170,7 @@ run on the trunk kernel are the measurement (§4, red first).
 | present and wrong | `getrandom`: flags are not read, so a flag Linux refuses is taken (the two the lists ask are answered). `fcntl(F_SETFL)` on descriptors 0–2 as a process starts with them: the flag is dropped. `accept4`, `recvfrom`, `sendto`, `connect`: right alone, but **nothing waits on readiness**, so the caller that got `EAGAIN` has nowhere to wait. A waiting stream `send` and a receive's deadline are per process |
 | absent and this lane's | `poll`, `epoll_create1`, `epoll_ctl`, `epoll_wait`, `eventfd2`, `writev`, `getsockopt(SO_ACCEPTCONN)`, `sched_getaffinity`, `sigaltstack` (px26 left it -ENOSYS and has merged; the list asks it on every thread) |
 | absent, and left so by name | `set_robust_list` (273) and `rseq` (334): -ENOSYS, which glibc tolerates (px09–px26) and which eight suites' assertions pin as the whole -ENOSYS set; px27's branch holds `tests/mpx3-shell` |
-| absent and px27's (the writable tree) | `openat` with `O_CREAT`, `O_APPEND`, `O_TRUNC`; `write` to a file; `rename`, `unlink`, `mkdir` |
+| absent at `5afb903` and px27's (the writable tree; on trunk since `1af462d`) | `openat` with `O_CREAT`, `O_APPEND`, `O_TRUNC`; `write` to a file; `rename`, `unlink`, `mkdir` |
 | absent and a later lane's (AF_UNIX path sockets) | `socket(AF_UNIX, SOCK_STREAM)`, `bind`, `listen`, `connect`, `accept4` on a path |
 | absent and px26's | none: px26 merged threads, futex and signal delivery |
 
@@ -449,6 +449,32 @@ and no later boot is started.
   probe (the CI runner's kernel is another), and PAX follows the man
   page.
 
+## What moved at the rebase (trunk `1af462d`: px27, the writable tree)
+
+- **Conflicts**, each kept from both sides: `kernel/wolf.pkg` (px27's
+  `tree.S` and this lane's `event.S`, both in the roster);
+  `kernel/files` (px27's area word 254 for `umask` beside this lane's
+  146 and 147; px27's node type 11 for an inode, so the eventfd and
+  epoll types are 12 and 13; `write_target` answers 4 for px27's file,
+  5 for an eventfd, 6 for an epoll object, and `kernel/user`'s `write`
+  follows; `splice` counts room given back on px27's `done`);
+  `kernel/user` (px27's seventeen calls and this lane's eight, the
+  latter in `ready_calls`); the CHANGELOG, the README's status, the
+  kernel README and SOURCES (both sections).
+- **The process area**: px27 takes word 254; the descriptors are in
+  words 512 to 1023 and the signal actions in 256 to 511, as before.
+  No other word of px27's lies in 16 to 143, where the descriptors were.
+- **Not re-derived and not needed**: no frame count is pinned by this
+  lane's suite (T3 compares each command's frames with themselves, and
+  `stack frames 333` did not move). px27's `+30 frames` reaches
+  `kmain_sockets` too; the free count at a process's start at the head
+  is in the transcript.
+- `writev` to a file: px27 added no `writev`; this lane's goes part by
+  part through `write`, which reaches px27's `file_write`. No probe
+  writes a file.
+- At the rebased head: `tests/mpx4-ready` green on kasumi (plain and
+  under taskset) and on hasu under KVM; CI's run is in the PR.
+
 ## 3. The prediction against the measurement
 
 | predicted | measured |
@@ -466,10 +492,10 @@ and no later boot is started.
 | P7: 256 blocks, a listen queue of 129, 128 descriptors, 512 open files, 64 pipes, 64 slots | so |
 | P7: `.bss` grows by about 1.1 MiB, every free-frame count falls by about 280 | **752 KiB**: `kmain_sockets` 462,904 to 1,232,952 bytes of `.bss` (188 frames), and 48 more for the FPU areas of 48 more slots |
 | P7: the wolf witness's boots take 1 GiB | so, and measured to be needed (above) |
-| P8: the wolf witness on kasumi's TCG, native / release: 300 / 500 requests and 120 / 200 connections a second | **553 to 939 / 3,936 to 4,882 requests; 27 to 46 / 196 to 244 connections** (two gauntlets, 8 boots each; the low ends are boots that shared the host with a copy to hasu). Native requests inside the 3× bar, release requests eight times the prediction: wrong. Connections: native a third of the prediction (the run is 120 connections in 2.6 s, of which two process starts are most), release right |
+| P8: the wolf witness on kasumi's TCG, native / release: 300 / 500 requests and 120 / 200 connections a second | at the head (`kasumi/kasumi-tcg-mpx4-ready.out`, 8 boots that run it): **919 to 965 / 2,158 to 4,633 requests; 45 to 48 / 107 to 231 connections**; earlier gauntlets of this branch 553 to 939 / 3,936 to 4,882. Native requests inside the 3× bar, release requests up to nine times the prediction: wrong. Connections: native under half the prediction (the run is 120 connections, and two process starts are most of its 2.6 s), release right |
 | P8: CI: 200 / 350 requests | native 430 (run 38151712372, the one boot read); the head's run is in the PR |
-| P8: KVM, hasu: 5,000 requests and 2,000 connections a second | KVMWOLF |
-| P8: the echo server's soak 800 connections a second on TCG, 30,000 requests a second under KVM | kasumi native **753 to 1,598** connections a second over loopback and 1,205 to 1,971 against the script; release 9,070 to 10,172 and 4,031 to 4,846; KVMECHO. Through QEMU's forward 57 to 71 on every host |
+| P8: KVM, hasu: 5,000 requests and 2,000 connections a second | **15,773 to 15,975 (native) and 48,189 to 48,578 (release) requests; 788 to 798 and 2,409 to 2,428 connections** (`hasu/hasu-kvm-round-1.out`, the head's images): requests three to ten times the prediction, wrong; connections native 2.5 times under, release right |
+| P8: the echo server's soak 800 connections a second on TCG, 30,000 requests a second under KVM | kasumi at the head: native **1,416 to 1,494** connections a second over loopback and 1,217 to 1,254 by the kernel's stamp against the script (1,815 to 1,877 its wire run), release 9,154 to 9,369 and 4,681 to 4,940; earlier runs of the branch 753 to 1,598 native. hasu KVM: **23,862 to 24,255** native and 52,588 to 55,964 release over loopback, 5,592 to 5,709 against the script (the script is the slower end). Native TCG inside the bar, release TCG eleven times it: wrong. Through QEMU's forward 57 to 81 connections a second on kasumi and 17 to 37 on hasu: the forward's pace |
 | P8: each kernel's build within 20% of trunk's | **wrong for `kmain_sockets`**: `wolf build --release --no-cache`, trunk and head by turns on a quiet kasumi: 18.5 and 20.1 s at trunk, 58.1 to 66.5 s at head; `kmain_console` 55.1 and 55.2 s at trunk, **33.5 and 36.3 s at head** (faster, unexplained). Without the call of `ready.report()` the head's `kmain_sockets` takes 41 s. `tools/build-kernel` (cached, with its IR pass) took 70 to 240 s for the same kernel at the head across this lane's runs and 126 and 135 s in CI. No timeout was raised |
 | P9: every kernel's bytes; pinned frame counts; `stack frames` 333 unchanged; `mpx4-tcp` and `mpx4-udp` books unchanged; -ENOSYS sets `273 334` | bytes: so; 333: so; -ENOSYS sets: so. **Not predicted, and moved:** `tests/tour`'s `sched: … 16 slots` line (64) and `tests/mpx4-tcp` T1's `tcp: 64 blocks` (256): both found red, the first in CI run 38151712372 (job tour), the second before the first push; `tools/pcap-net`'s two rules (above). No frame count was pinned anywhere |
 | P10: `waitwolf` on trunk's kernel stops at `epoll_create1` with a message of the runtime's and a status that is not 0 | **right**: -ENOSYS for 204, 131 and 291, the runtime's `epoll_create1 failed`, then `killed: general protection` (`notes/px24/red/trunk-kernel.wolf-and-probes.serial.txt`); every `poll` and `epoll` line of the probes -ENOSYS, and `pollprobe` never ends (its wait for a child's write is a `poll` that answers at once) |
@@ -500,7 +526,7 @@ Measured means this lane ran it and read the result.
   334,448 checksums recomputed; the kernel's 77 counters the
   capture's). CI's are in each run's artifact.
 - **Counters, the soak and the storm**: `kasumi/kasumi-tcg-mpx4-ready.out`
-  (the head's kernel, 100 PASS, 0 FAIL, 0 SKIP; 12 boots,
+  (the rebased head's kernel, 100 PASS, 0 FAIL, 0 SKIP; 12 boots,
   `…runs.txt`): after each command every frame back and `epolls 0,
   registrations 0, eventfds 0`, `open files 0`, `tcp blocks 0`, `heap
   pages 0` (T3); the storm twice in every boot that runs the server:
@@ -512,8 +538,7 @@ Measured means this lane ran it and read the result.
   (`native-bios-peer.net-peer.txt`) and the host tool's
   (`native-bios-user.ready-host.txt`).
 - **Under `taskset -c 0-3`**: `kasumi/kasumi-taskset-0-3-mpx4-ready.out`,
-  the whole suite, rc 0 (the kernel of `6108a51`, before `kernel/net`'s
-  change). Its first try was red in one boot, on the host's side: the
+  the whole suite at the head, rc 0. A first try at `6108a51` was red in one boot, on the host's side: the
   forward refused a connect (above); `tools/ready-host` was changed and
   the suite run again.
 - **Planted breaks, red in CI, failing fast.**
@@ -536,13 +561,26 @@ Measured means this lane ran it and read the result.
   the host loaded) and the table's uncached figures
   (`kasumi/kernel-build-times.no-cache.txt`).
 - **Boot counts.**
-  - kasumi, QEMU 11.1.1, TCG: `tests/mpx4-ready` whole (12 boots)
-    four times green — at `86c8a60` (its output was overwritten by a
-    later run; the PASS lines were read), under `taskset -c 0-3` and
-    plain at `6108a51`'s kernel, and at the head's kernel
-    (`kasumi-tcg-mpx4-ready.out`); some thirty single boots more while
-    the suite was written.
-  - hasu, QEMU 11.1.0, **KVM**: KVMBOOTS
+  - kasumi, QEMU 11.1.1, TCG: `tests/mpx4-ready` whole (12 boots) at
+    the rebased head, plain and under `taskset -c 0-3`, each 100 PASS, 0
+    FAIL, 0 SKIP (`kasumi/kasumi-tcg-mpx4-ready.out`,
+    `kasumi/kasumi-taskset-0-3-mpx4-ready.out`, the runs files beside
+    them); before the rebase five more whole runs green (at `86c8a60`,
+    at `6108a51` plain and under taskset, at `908050d`; their outputs
+    were overwritten by the next, the PASS lines read); some forty
+    single boots more while the suite was written. The other suites
+    were not run on kasumi by this lane: CI runs them all.
+  - hasu, QEMU 11.1.0, **KVM** (images built on kasumi; the combined
+    `OVMF.fd`, since the split pair hangs under KVM there, px00): at the
+    rebased head's images 12 boots in one round, all `accel=kvm`, 100
+    PASS, 0 FAIL, 0 SKIP (`hasu/hasu-kvm-round-1.out`, `…runs.txt`), and
+    a second round HASU2; before the rebase, at `908050d`'s images, 12
+    more, all kvm, 100 PASS (`hasu/hasu-round-1-908050d.runs.txt`; its
+    output file was overwritten by a later round, the PASS count was read
+    from the round's log line before that). The first rounds, with
+    QEMU's split firmware files and before `kernel/net`'s change, were
+    red: the UEFI boots never reached Limine, and one boot's `net: tx … 1
+    full` (above).
   - CI, QEMU 8.2.2, TCG: 12 a green run of the job; every other suite
     in the same runs (23 jobs).
 - **CI**: run 38153375026 at `86c8a60`, green, 23 jobs. Run
@@ -590,7 +628,11 @@ answered otherwise than Linux, by call and flag):
   lobo's control socket and its workers' sockets.
 - `openat(…, O_WRONLY|O_CREAT|O_APPEND|O_CLOEXEC)` and
   `O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC`, `write` to those files,
-  `rename`, `unlink`, `mkdir` (`EEXIST`): px27's.
+  `rename`, `unlink`, `mkdir` (`EEXIST`): px27 answers them on trunk
+  now (merged while this lane ran); not run with lobo's paths (`logs/`
+  under its prefix). `writev` to a file goes through `write`'s path
+  (each part a `write`), which px27's `file_write` serves: written, not
+  run against Linux.
 - `set_robust_list` (273) and `rseq` (334): -ENOSYS, once a thread;
   glibc goes on.
 - `socketpair(AF_UNIX, SOCK_SEQPACKET|SOCK_CLOEXEC)`: there, a
