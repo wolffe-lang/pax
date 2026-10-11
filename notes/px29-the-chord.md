@@ -120,3 +120,14 @@ that check.
 
 **P6. Sizes.** `play` grows by under 1% (12.2 MB, the runtime
 dominates).
+
+### §3 against what was measured
+
+| predicted | measured |
+|---|---|
+| P1: 20 ms a step reads as one chord; each step held exactly 2 ticks; 10 ms usable in the kernel but lossy in the capture | **right for 20 ms**: the chord study's 192 steps are held exactly 2 ticks in 191 (the slot's first step 3: play's first KIOCSOUND lands mid-tick), on both tiers, BIOS and UEFI, kasumi TCG (`tests/mpx3-speaker` K8, run c1) and nomad-1 TCG (the Mahler cut: 1015 of the last 1016 steps 2 ticks, `notes/px29/nomad1-m1.timeline`); the capture hears every pitch, 45-48 of 47 changes in order per chord. **10 ms is unusable, worse than predicted**: the capture of a 10 ms arpeggio (`notes/px29/probe-t2-kasumi.arp-check`) has 44 of 274 changes in order and steps of 17-30 ms median: a sleep ends on the tick after its target and the clock steps 10 ms, so a 10 ms step lands 0, 1 or 2 ticks late. A 10 ms step would need a clock and a sleep resolved to about 1 ms (a 1 kHz tick, or a one-shot timer for user sleeps): a kernel change, px30's or a ruling, not made here. `play` refuses nothing at 10 ms (it is still a multiple of the tick) but the default stays 20. 30 and 40 ms were held exactly 3 and 4 ticks (probe t1) |
+| P2: at most four pitches | implemented as predicted (a fifth is refused by name, `/etc/refused/big-chord`, K1). Not measured by ear: no listener. The four-note chord of the study (12.5 Hz cycle) is judged by the capture as for three |
+| P3: order up by default, settable; gap at the slot's end | right as built (`order up/down/written`); K8 judges the order from both the timeline (count for count) and the capture |
+| P4: about 150 bars, 6 minutes, ~700 lines, 9-12 KB; a one-minute cut | **not met**: only the cut is delivered (`auferstehung-end`: 21 bars, 71.0 s, 37 slots, 1786 tones, 2149 bytes). The whole span was read from p. 196 to p. 202 for its sung lines but not checked bar by bar to the standard of §1, and pp. 203-208 (47, 49, 50) were not read; the maintainer's priority moved to the cut and its WAV. See the reduction note |
+| P5: old tunes unchanged | **right**: K2 and K6 pass unchanged on the rebased head (the mambo's 160 and the Joplin's 154 onsets each within 19 ms, as px18 measured); the `play` listing's column widens to `auferstehung-end`'s name, so the three old lines' padding moves (titles and lengths unchanged) |
+| P6: `play` grows under 1% | **wrong**: 12,208,424 → 12,911,592 bytes (+5.8%; px29's `play` `a668c286…` before rebase). Not investigated |
