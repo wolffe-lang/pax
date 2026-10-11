@@ -1099,15 +1099,22 @@ jobs:
       - name: fetch limine (by digest)
         run: tools/fetch-limine
 
-      - name: the image the Linux side's containers are made from
+      # The image only carries python3, mount and the coreutils that
+      # tools/linux-tty and tools/linux-tree's script need inside the
+      # container; it is taken by digest (python 3.12-slim as of
+      # 2026-10-11), so the Linux side does not move under the suite.
+      - name: the image the Linux side's containers are made from (by digest)
         run: |
-          docker pull docker.io/library/python:3.12-slim
-          docker image inspect --format '{{.Id}} {{.RepoDigests}}' docker.io/library/python:3.12-slim
+          docker pull "$PAX_TREE_IMAGE"
+          docker image inspect --format '{{.Id}} {{.RepoDigests}}' "$PAX_TREE_IMAGE"
+        env:
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 
       - name: the writable tree against Linux's tmpfs, the typed session, the soak and the fill; both tiers, BIOS and UEFI
         env:
           PAX_REQUIRE_UEFI: "1"
           PAX_ENGINE: docker
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
         run: tests/mpx3-tree
 
       - name: keep the programs' sums, the Linux side, the outputs
