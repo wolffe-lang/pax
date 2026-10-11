@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+# orch-check — judge what play's part format (px32) sounded: a capture
+# (QEMU's `wav` backend, any rate, 16-bit) or play -o's raw frames
+# (S16_LE, two channels, 48000 Hz), by the power at given pitches in
+# given windows (the Goertzel algorithm: one DFT bin per pitch), so
+# several simultaneous parts are seen apart.
+#
+#   tools/orch-check --env FILE [--win MS]      loudness per window, dB
+#   tools/orch-check --expect SPEC FILE         each line of SPEC judged
+#
+# Time 0 is the first frame louder than -50 dBFS (the capture's leading
+# silence and the device's start are not the tune's). SPEC lines
+# (milliseconds from time 0, hertz; `#` comments):
+#
+#   present HZ FROM TO [DB]  HZ's share of every 50 ms window of FROM..TO
+#                            at least DB (default -30): the bin's power
+#                            over the window's, in dB, 0 for a lone sine
+#   absent HZ FROM TO [DB]   HZ's share at most DB (default -45) in every
+#                            window (silence counts as absent)
+#   onset HZ AT TOL          HZ rises by 12 dB within TOL ms of AT
+#                            (20 ms windows, 5 ms apart)
+#   rising HZ FROM TO DB     HZ's level over FROM..TO in 250 ms windows:
+#                            never falls by more than 1.5 dB from one to
+#                            the next, and the last is at least DB above
+#                            the first
+#   flat HZ FROM TO DB       ... and stays within DB of its first window
+#                            (HZ 0: the whole sound's loudness, dBFS)
+#   rms FROM TO LO HI        the loudness (both channels, dBFS) in
+#                            FROM..TO between LO and HI
+#   noclip                   no sample at full scale
+#
+# Prints one PASS or FAIL line per check and `orch-check: N of M`; exit
+# 0 when all pass, 1 when one fails, 2 on a usage or file error.
+# Written from the DFT's definition and Goertzel's recurrence (any
+# signal-processing text); no audio library.
+import math
+import struct
+import sys
+
+
+def die(msg):
+    print("orch-check: " + msg, file=sys.stderr)
+    sys.exit(2)
+
+
+def read(path):
+    data = open(path, "rb").read()
+    if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        i = 12
+        rate = ch = bits = None
+        pcm = None
+        while i + 8 <= len(data):
+            cid = data[i:i + 4]
+            size = struct.unpack("<I", data[i + 4:i + 8])[0]
+            body = data[i + 8:i + 8 + size]
+            if cid == b"fmt ":
+                _, ch, rate, _, _, bits = struct.unpack("<HHIIHH", body[:16])
+            elif cid == b"data":
+                pcm = body
+            i += 8 + size + (size & 1)
+        if pcm is None or bits != 16:
+            die(path + ": not a 16-bit PCM WAV")
+    else:
+        rate, ch, pcm = 48000, 2, data
+    n = len(pcm) // (2 * ch)
+    s = struct.unpack("<%dh" % (n * ch), pcm[:n * ch * 2])
+    if ch == 1:
+        mono = list(s)
+    else:
+        mono = [(s[2 * k] + s[2 * k + 1]) / 2 for k in range(n)]
+    return rate, mono, s
+
+
+def start_of(mono):
+    th = 32768 * 10 ** (-50 / 20)
+    for k, x in enumerate(mono):
+        if abs(x) > th:
+            return k
+    return 0
+
+
+class Sound:
+    def __init__(self, path):
+        self.rate, self.mono, self.raw = read(path)
+        self.t0 = start_of(self.mono)
+        self.floors = {}
+
+    def frame(self, ms):
+        return self.t0 + int(ms * self.rate / 1000)
+
+    def level(self, hz, a, b):
+        """HZ's power in frames a..b, dB (Goertzel, Hann window)."""
+        a = max(a, 0)
+        b = min(b, len(self.mono))
+        n = b - a
+        if n < 16:
+            return -200.0
+        w = 2 * math.pi * hz / self.rate
+        c = 2 * math.cos(w)
+        s1 = s2 = 0.0
+        x = self.mono
+        for k in range(n):
+            h = 0.5 - 0.5 * math.cos(2 * math.pi * k / (n - 1))
+            s0 = x[a + k] * h + c * s1 - s2
+            s2 = s1
+            s1 = s0
+        p = s1 * s1 + s2 * s2 - c * s1 * s2
+        return 10 * math.log10(p / (n * n) + 1e-9)
+
+    def series(self, hz, f, t, win, hop):
+        out = []
+        ms = f
+        while ms + win <= t + 0.001:
+            out.append((ms, self.level(hz, self.frame(ms), self.frame(ms + win))))
+            ms += hop
+        return out
+
+    def share(self, hz, ms):
+        """HZ's power over the 50 ms window at MS's, dB; 0 for a lone sine."""
+        a, b = self.frame(ms), self.frame(ms + 50)
+        seg = self.mono[a:b]
+        ms2 = sum(v * v for v in seg) / max(len(seg), 1)
+        if ms2 < 1.0:
+            return -200.0
+        return self.level(hz, a, b) - 10 * math.log10(ms2) + 10 * math.log10(8)
+
+    def floor(self, hz):
+        if hz not in self.floors:
+            total = (len(self.mono) - self.t0) * 1000 // self.rate
+            lv = [v for _, v in self.series(hz, 0, total, 50, 50)]
+            self.floors[hz] = min(lv) if lv else -200.0
+        return self.floors[hz]
+
+    def rms(self, f, t):
+        a, b = self.frame(f), self.frame(t)
+        seg = self.mono[a:b]
+        if not seg:
+            return -200.0
+        return 10 * math.log10(sum(v * v for v in seg) / len(seg) / (32768.0 ** 2) + 1e-12)
+
+
+def judge(snd, w):
+    op = w[0]
+    if op == "noclip":
+        n = sum(1 for v in snd.raw if v >= 32767 or v <= -32768)
+        return n == 0, "%d samples at full scale" % n
+    hz = float(w[1])
+    if op in ("present", "absent"):
+        f, t = float(w[2]), float(w[3])
+        db = float(w[4]) if len(w) > 4 else (-30.0 if op == "present" else -45.0)
+        lv = [snd.share(hz, ms) for ms, _ in snd.series(hz, f, t, 50, 50)]
+        if not lv:
+            return False, "no window"
+        if op == "present":
+            return min(lv) >= db, "%.0f Hz %.0f-%.0f ms: lowest share %.1f dB (want >= %.0f)" % (hz, f, t, min(lv), db)
+        return max(lv) <= db, "%.0f Hz %.0f-%.0f ms: highest share %.1f dB (want <= %.0f)" % (hz, f, t, max(lv), db)
+    if op == "onset":
+        at, tol = float(w[2]), float(w[3])
+        ser = snd.series(hz, at - tol - 60, at + tol + 40, 20, 5)
+        found = None
+        for i in range(4, len(ser)):
+            if ser[i][1] - ser[i - 4][1] >= 12:
+                found = ser[i][0] + 20 - 10  # the window's end, less half a window
+                break
+        if found is None:
+            return False, "%.0f Hz: no onset near %.0f ms" % (hz, at)
+        return abs(found - at) <= tol, "%.0f Hz: onset at %.0f ms (want %.0f +- %.0f)" % (hz, found, at, tol)
+    if op in ("rising", "flat"):
+        f, t, db = float(w[2]), float(w[3]), float(w[4])
+        if hz == 0:
+            lv = []
+            ms = f
+            while ms + 250 <= t + 0.001:
+                lv.append(snd.rms(ms, ms + 250))
+                ms += 250
+        else:
+            lv = [v for _, v in snd.series(hz, f, t, 250, 250)]
+        if len(lv) < 2:
+            return False, "too short"
+        txt = " ".join("%.1f" % v for v in lv)
+        if op == "rising":
+            drops = [lv[i] - lv[i + 1] for i in range(len(lv) - 1)]
+            ok = max(drops) <= 1.5 and lv[-1] - lv[0] >= db
+            return ok, "%.0f Hz %.0f-%.0f ms rises %.1f dB (want >= %.0f), worst step down %.1f: %s" % (hz, f, t, lv[-1] - lv[0], db, max(drops), txt)
+        spread = max(abs(v - lv[0]) for v in lv)
+        return spread <= db, "%.0f Hz %.0f-%.0f ms within %.1f dB (want <= %.0f): %s" % (hz, f, t, spread, db, txt)
+    if op == "rms":
+        f, t, lo, hi = hz, float(w[2]), float(w[3]), float(w[4])
+        r = snd.rms(f, t)
+        return lo <= r <= hi, "%.0f-%.0f ms: %.1f dBFS (want %.0f..%.0f)" % (f, t, r, lo, hi)
+    die("unknown check '%s'" % op)
+
+
+def main(a):
+    if len(a) >= 2 and a[0] == "--env":
+        win = float(a[3]) if len(a) > 3 and a[2] == "--win" else 250.0
+        snd = Sound(a[1])
+        total = (len(snd.mono) - snd.t0) * 1000 / snd.rate
+        print("start %d frames, %.0f ms, rate %d" % (snd.t0, total, snd.rate))
+        ms = 0.0
+        while ms < total:
+            print("%8.0f %6.1f" % (ms, snd.rms(ms, ms + win)))
+            ms += win
+        return 0
+    if len(a) == 3 and a[0] == "--expect":
+        snd = Sound(a[2])
+        good = n = 0
+        for line in open(a[1]):
+            w = line.split("#")[0].split()
+            if not w:
+                continue
+            n += 1
+            ok, why = judge(snd, w)
+            good += ok
+            print(("PASS " if ok else "FAIL ") + " ".join(w) + ": " + why)
+        print("orch-check: %d of %d" % (good, n))
+        return 0 if good == n else 1
+    die("usage: orch-check --env FILE [--win MS] | --expect SPEC FILE")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
