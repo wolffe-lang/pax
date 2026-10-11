@@ -74,12 +74,14 @@
                          changes what the kernel does.
 
    Storage (.bss, zero until kernel/sched writes it):
-     pax_threads       16 thread records, 256 bytes each (kernel/sched's
-                       #[repr(c)] Thread; 72 before px09's cr3 and prog,
-                       88 before px10's entry, usp, name and name_len,
-                       120 before px12's fs; 128-byte slots before
-                       px14's pid, ppid, status, owns, vparent, zombie
-                       and sigmask)
+     pax_threads       16 thread slots, 512 bytes each (kernel/sched's
+                       #[repr(c)] Thread, 312 bytes of it; 72 before
+                       px09's cr3 and prog, 88 before px10's entry, usp,
+                       name and name_len, 120 before px12's fs; 128-byte
+                       slots before px14's pid, ppid, status, owns,
+                       vparent, zombie and sigmask; 256-byte slots
+                       before px26's fifteen words for threads, futexes
+                       and signals)
      pax_procs         16 process areas, 4096 bytes each (2048 before
                        px14), one per slot (px12): the words kernel/vm,
                        kernel/files, kernel/user and kernel/process keep
@@ -88,6 +90,10 @@
                        logged, px14's signal records); kernel/sched zeroes
                        a slot's area whenever it clears the slot, and a
                        zeroed area is a fresh process's
+     pax_siginfo       per slot, two sets of 64 words (px26): where each
+                       signal pending for the thread, and for the
+                       process it leads, came from (kernel/sched's
+                       `sig_info`), for the siginfo a handler is given
      pax_sched_locks   eight 8-byte lock words (kernel/sync; word 0 is
                        the console's)
      pax_sched_state   sixteen 8-byte words: the scheduler's scalars
@@ -170,11 +176,15 @@ pax_irq_restore:
         .p2align 6
         .globl pax_threads
 pax_threads:
-        .zero 16 * 256
+        .zero 16 * 512
         .p2align 6
         .globl pax_procs
 pax_procs:
         .zero 16 * 4096
+        .p2align 6
+        .globl pax_siginfo
+pax_siginfo:
+        .zero 16 * 2 * 64 * 8
         .p2align 6
         .globl pax_sched_locks
 pax_sched_locks:

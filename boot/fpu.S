@@ -155,11 +155,12 @@ pax_rdrand:
 /* kernel/fpu's words, read and written volatile (#598's rule: state a
    switch reads lives in storage words): 0 the mode (0 off, 1 XSAVE, 2
    FXSAVE), 1 the area's size, 2 XCR0, 3 the template's address, 4–19
-   each thread slot's area (an HHDM address of a frame of its own). */
+   each thread slot's area (an HHDM address of a frame of its own), 20
+   MXCSR's writable bits (px26: for a state a signal frame hands back). */
         .section .bss
         .p2align 6
         .globl pax_fpu_state
 pax_fpu_state:
-        .zero 20 * 8
+        .zero 24 * 8
 
         .section .note.GNU-stack, "", @progbits
