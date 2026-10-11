@@ -22,7 +22,8 @@ tests.
   black-box runs (QEMU's monitor, the capture file, the kernel's own
   log). Each is recorded in `docs/SOURCES.md` with how it was used.
 - No `region` is held open across a yield, a switch or a return to user
-  mode (wolf-lang#611; pax has not adopted s223). The frame path
+  mode (wolf-lang#611; pax has not adopted s223 — it has since px21a:
+  a region may span a yield, a preemption or a wait, `CLAUDE.md`). The frame path
   allocates nothing from the heap: its memory is frames from
   `kernel/frames` and words in `.bss`.
 - Nothing in pax names any use of the image beyond running it (the

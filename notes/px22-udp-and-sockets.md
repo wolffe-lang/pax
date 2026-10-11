@@ -453,6 +453,12 @@ than one CPU; KVM anywhere but hasu.
 - `kernel/udp`'s port table is its own 16 sockets: TCP needs its own
   or a shared one, and the ephemeral range's cursor is in
   `pax_udp_state`;
+- regions (updated by px21a): `kernel/sched` now carries each thread's
+  ambient region across its switches, so a kernel thread (the network
+  thread among them) may hold a `region` open across a yield, a
+  preemption or a wait. Still refused: an allocation in an interrupt
+  handler, and a `region` left open where a system call gives up its
+  kernel stack (`files.WAIT`'s rerun, `block_pipe_until`, an exit);
 - **no loopback below UDP.** `ip.send` to the station's own address
   or 127/8 still goes to the cache and the wire, and `ip.input` drops
   a source of 127/8 or its own. lobo binds a loopback TCP socket to

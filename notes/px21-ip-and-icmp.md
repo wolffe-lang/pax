@@ -357,7 +357,9 @@ closed. To close at merge: nothing.
 - a frame's bytes are the protocol's only until `netd` gives the
   buffer back: a socket's receive queue must copy. Nothing on the
   path allocates from the heap today, and no `region` may span a
-  switch until pax adopts s223;
+  switch until pax adopts s223 (adopted by px21a: a region may span a
+  yield, a preemption or a wait; an interrupt handler still allocates
+  nothing, and a system call holds none where it gives up its stack);
 - **no loopback**: a datagram for PAX's own address is routed like any
   other and waits on an ARP request nobody answers (seen in the
   second plant); 127/8 is refused as a source and has no interface.
