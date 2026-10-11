@@ -279,3 +279,105 @@ first (21 ms at 48 kHz stereo).
   `play` (`16700669…`) is this branch stacked on px29 at `96279d9`
   with `slot_pitches` reading px29's chords (below); this branch alone
   sounds each slot's one pitch until px29 lands.
+- **The soak**: an hour of sound under KVM on hasu, both tiers at once,
+  QEMU's `none` backend (`notes/px30/hasu-kvm-soak-{native,release}.serial.log`):
+  691,200,000 bytes, 168,751 periods handed and 168,751 returned, 0
+  underruns, 0 bad statuses, GETOPTR rising 11,520,000 bytes a minute
+  to the end (`soak 3600 s written, GETOPTR bytes 691167232`), the
+  writes 3,599,824 ms for 3,600 s of sound, the driver's frames 12 from
+  start to end, the machine's free frames the same before and after
+  (native 64033 → 64033, release 64143 → 64143). The driver takes no
+  heap, so the heap's books cannot move; frames and periods are what
+  could leak, and do not.
+- **Planted breaks, red in CI** (each on its own run, then reverted):
+  - the channels of every stereo frame swapped (`ea371df`): run
+    **38167238290**, `mpx3-sound` red on S2 (440 Hz on the right) and
+    S3/S4 (`swapped 96000`) on every leg
+    (`notes/px30/ci-38167238290-plant-channels-swapped.txt`), about a
+    minute into the job's boots; reverted in `6759f47`.
+  - every sixteenth period never handed to the device (`558279d`, kept
+    on branch `px30-plants`; `b154b31` after the rebase): run
+    **38168844343**, red on S2, S3 (`break at frame 15360`), S4, S6 and
+    S7 (`notes/px30/ci-38168844343-plant-period-dropped.txt`); reverted
+    in `76a6f6b`.
+  - not planted, seen: run **38164251904** red on S2 only: QEMU 8.2.2
+    writes silence between streams (and U8 silence as ±255), so the
+    tone's span was 1605 ms; S2 now measures loud time (5% of the peak),
+    1502 ms on that capture (`notes/px30/ci-38164251904-tone.pcm.txt`).
+- **The gauntlet** on kasumi (strict env, QEMU 11.1.1 TCG, wolf 0.2.27,
+  the programs from `px13-ubuntu`) at `23d7df0`, before px24's rebase:
+  `kasumi:~/lanes/px30/ev/g1/summary.txt`, every suite rc 0, 0 FAIL,
+  0 SKIP as far as it had run at the report (named in the PR); the
+  rebased head's `mpx3-sound` on kasumi native BIOS, S0-S7 PASS.
+- **Boot counts**: kasumi TCG — the survey's 4 Linux boots and 9 more
+  for straces and edges, about 30 single PAX boots while the driver was
+  written, the test's 16 boots a full run (four full runs and three
+  partial), the plants' 2; hasu KVM — 48 (three rounds of 16) and the 2
+  hour-long soaks; nomad-1 TCG — 3 (two WAV renders, one through
+  CoreAudio); CI — 16 a run.
+
+## How the driver locks (px24's question)
+
+It takes no lock word. Every entry runs with IF clear on the one CPU:
+a system call from entry to its switch, the device's interrupt, the
+close of every descriptor at a process's end. Nothing in it can be
+preempted between a look and its change, and the interrupt cannot run
+inside a system call's use of the rings. The one shared thing between
+devices, `kernel/virtio`'s selected transport words, is set and put
+back by each caller before it returns (`use_words`), interrupt
+handlers included. On SMP this would need a lock word and is not
+claimed.
+
+## poll and non-blocking writes (px24 landed)
+
+`dspprobe` asks `poll(POLLOUT)` before its first write (its strace on
+Linux; `notes/px30/linux-strace-virtio.serial.log` is dsptone's, which
+does not), so after the rebase onto px24 `/dev/dsp` answers it through
+`kernel/files`' `node_poll`: POLLOUT while a period is free, the room
+count moving with every period the device hands back, whose interrupt
+wakes every waiter. `dspprobe.expect` now holds Linux's line for it.
+O_NONBLOCK writes were already in (S6).
+
+## Not verified
+
+- aplay and ALSA's PCM device: not straced (no aplay in px13-ubuntu,
+  none installed); the interface argument rests on `sound/asound.h`.
+- Linux with intel-hda: no card within the script's second; not
+  pursued, so the survey's "every device" has one hole.
+- The absolute latency from a write to the Mac's speakers (CoreAudio's
+  own buffer): only the queue's 170.7 ms and the WAV are measured.
+- Silence during an underrun in what a listener hears: the WAV cannot
+  show it (QEMU writes nothing then); the counter, the exact ramp across
+  it and the program's timing are what is measured.
+- `play`'s chords on this branch alone: they need px29's `Tune`; the
+  chord captures and both WAVs were made from this branch stacked on
+  px29 at `96279d9` with one function changed (`slot_pitches`,
+  below). Not committed here; the rebase after px29 merges carries it.
+- epoll on `/dev/dsp`: `node_poll` answers it as for poll, never run
+  by a test here.
+- The gauntlet at the final head: CI's run is the final head's evidence;
+  kasumi's full gauntlet ran at `23d7df0` (before px24).
+
+## 5. Done-when
+
+Branch `px30`, PR #35 open, unmerged, five sections, commit shas as
+bullets, a test checklist; CI at the head named in the PR;
+`wolf/tools/lane-audit.sh pax px30 35` run from the org directory;
+worktrees gone; kasumi, hasu and nomad-1 outputs pruned to the evidence
+named above; no QEMU of this lane left running. Nothing closed.
+
+**What the next sound lane inherits**
+
+- The px29 seam: once px29 merges, `user/play/play.lu`'s
+  `slot_pitches` reads a chord slot's pitches (`t.chord_n[i]`,
+  `t.chords[t.chord_at[i] + k]`), the seven lines tested on the
+  stacked branch; px29's four-pitch cap is px29's, the mixer takes any
+  number (the organ's E-flat 2 and B-flat 5 of bar 51 could sound).
+- Capture (the device's stream 1, INPUT, and queue 3; `O_RDONLY` is
+  ENXIO today), a second stream (one opener today), a mixer device
+  (`/dev/mixer`, volume: none; the device has no controls without
+  VIRTIO_SND_F_CTLS, which QEMU 11.1 does not offer here), SETFRAGMENT
+  honoured, `mmap` and SETTRIGGER, format conversion (S16_BE, S8, μ-law
+  and rates by resampling, as Linux), the drain at a process's end if
+  Linux's behaviour is wanted, the event queue's PERIOD_ELAPSED and
+  XRUN (none sent by QEMU in any run here), MSI-X, SMP locking.
