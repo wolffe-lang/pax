@@ -45,7 +45,7 @@
      pax_tcp_conns   64 control blocks of 128 eight-byte words: each
                      one's addresses, ports, state, sequence numbers,
                      timers and the 32 frames of its two buffers (px23)
-     pax_tcp_tw      128 eight-byte words: the frames of the time-wait
+     pax_tcp_tw      256 eight-byte words: the frames of the time-wait
                      table (px23)
 
    No Linux source; no other kernel's source. */
@@ -88,7 +88,7 @@ pax_tcp_state:
         .zero 1024
         .globl pax_tcp_tw
 pax_tcp_tw:
-        .zero 1024
+        .zero 2048
         .globl pax_tcp_conns
 pax_tcp_conns:
         .zero 65536

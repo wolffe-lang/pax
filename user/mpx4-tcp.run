@@ -1,0 +1,54 @@
+# tests/mpx4-tcp's run list (px23). kmain_sockets runs it from the
+# initramfs as /etc/pax-run with tools/net-peer's TCP script at the
+# other end of a socket netdev; tools/linux-net runs it on Linux with
+# the same script at the other end of a tap device; the two outputs and
+# exit statuses are compared byte for byte. One command a line, words separated by single spaces, the first the
+# program's path. In order: what stream sockets answer with nothing on
+# the wire; a forking server and its client over loopback; a wolf
+# program serving itself; a transfer over loopback; connections opened
+# and closed over loopback; a listen queue nobody empties; the echo
+# server, asked by the script and then soaked; the forking echo server;
+# the client; a transfer out and one in; connections out; how a
+# connection ends (refused, unanswered, reset, timed out); the scripted
+# faults with PAX the client (the port names the fault) and with PAX
+# the server; the loss matrix out and in (the port's last two digits
+# name the rates); a wolf program serving another machine.
+/bin/tcperr
+/bin/tcploop
+/bin/tcpwolf
+/bin/tcpbulk loop 16777216
+/bin/tcpsoak loop 10000
+/bin/tcpfull
+/bin/tcpecho 7 10.0.2.2 9099
+/bin/tcpecho 7 10.0.2.2 9098 fork
+/bin/tcpclient 10.0.2.2 9099
+/bin/tcpbulk send 10.0.2.2 9100 16777216
+/bin/tcpbulk recv 7100 10.0.2.2 9097
+/bin/tcpsoak to 10.0.2.2 9099 10000
+/bin/tcpend 10.0.2.2 9
+/bin/tcpend 10.0.2.2 9001 syncnt 1
+/bin/tcpend 10.0.2.2 9301
+/bin/tcpend 10.0.2.2 9302 timeout 3000
+/bin/tcpclient 10.0.2.2 9201
+/bin/tcpclient 10.0.2.2 9202
+/bin/tcpclient 10.0.2.2 9203
+/bin/tcpclient 10.0.2.2 9204
+/bin/tcpclient 10.0.2.2 9205
+/bin/tcpclient 10.0.2.2 9206
+/bin/tcpclient 10.0.2.2 9207
+/bin/tcpclient 10.0.2.2 9208
+/bin/tcpclient 10.0.2.2 9209
+/bin/tcpclient 10.0.2.2 9210
+/bin/tcpclient 10.0.2.2 9211
+/bin/tcpclient 10.0.2.2 9212
+/bin/tcpclient 10.0.2.2 9220
+/bin/tcpecho 7 10.0.2.2 9096
+/bin/tcpbulk send 10.0.2.2 9101 1048576
+/bin/tcpbulk send 10.0.2.2 9105 1048576
+/bin/tcpbulk send 10.0.2.2 9120 262144
+/bin/tcpbulk send 10.0.2.2 9130 1048576
+/bin/tcpbulk recv 7101 10.0.2.2 9097
+/bin/tcpbulk recv 7105 10.0.2.2 9097
+/bin/tcpbulk recv 7120 10.0.2.2 9097
+/bin/tcpbulk recv 7130 10.0.2.2 9097
+/bin/tcpwolfd

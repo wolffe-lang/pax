@@ -100,13 +100,14 @@
 //! duplicate ACK and fast recovery, one segment after a timeout.
 //!
 //! **Time-wait.** The end that closes first waits 2 x MSL (`TIME_WAIT`,
-//! 60 s) — not in a block but in a table of 16,384 entries (4,096 rows
-//! of four, 128 frames taken at `start`): the addresses and ports,
-//! SND.NXT, RCV.NXT and the tick it ends at. A segment for an entry is
+//! 60 s) — not in a block but in a table of 32,768 entries (256 frames
+//! taken at `start`; an entry is looked for in the 16 that follow where
+//! its four values hash to): the addresses and ports, SND.NXT, RCV.NXT
+//! and the tick it ends at. A segment for an entry is
 //! acknowledged (a FIN starts the wait again), a reset is ignored (RFC
 //! 1337), and a SYN above RCV.NXT with a listener there ends the entry
-//! and is taken (RFC 1122 §4.2.2.13). A full row gives up its oldest
-//! entry (`time-wait-evicted`). A block whose descriptor is still open
+//! and is taken (RFC 1122 §4.2.2.13). Sixteen live entries where a new
+//! one belongs give up the one that ends soonest (`time-wait-evicted`). A block whose descriptor is still open
 //! when it gets there (its process shut its half and the peer's FIN
 //! came) stays a block until the descriptor closes.
 //!
@@ -125,7 +126,7 @@
 //! the kernel gives `start`.
 //!
 //! State is words in boot/net.S (`pax_tcp_state`, `pax_tcp_conns`,
-//! `pax_tcp_tw`), one frame for composing, 128 for the time-wait table
+//! `pax_tcp_tw`), one frame for composing, 256 for the time-wait table
 //! and 32 a connection, all under `sync.tcp()`, the last of the eight
 //! lock words, taken before `sync.ip()`, `sync.arp()` and `sync.net()`
 //! and never with `sync.udp()`. Nothing here allocates from the heap
@@ -188,9 +189,9 @@ pub const BACKLOG_MAX: u64 = 32
 /// Out-of-order intervals kept a connection.
 pub const OOO: u64 = 4
 /// Time-wait entries.
-pub const TW_ENTRIES: u64 = 16384
-const TW_ROWS: u64 = 4096
-const TW_FRAMES: u64 = 128
+pub const TW_ENTRIES: u64 = 32768
+const TW_PROBE: u64 = 16 // entries looked at from where four values hash to
+const TW_FRAMES: u64 = 256
 const PAGE: u64 = 4096
 const BUF_PAGES: u64 = 16
 const M32: u64 = 0xffffffff
@@ -368,6 +369,12 @@ pub const C_DUP_ACKS: u64 = 79
 pub const C_NO_FRAMES: u64 = 80
 /// Resets ignored in time-wait.
 pub const C_TW_RST: u64 = 81
+/// Of the segments received, those that came over loopback.
+pub const C_LOOP_IN: u64 = 82
+/// Of the segments sent, those for this machine itself.
+pub const C_LOOP_OUT: u64 = 83
+/// Of the retransmissions, those for this machine itself.
+pub const C_LOOP_REXMT: u64 = 84
 
 // A block's words (CONN_WORDS a block).
 const CONN_WORDS: u64 = 128
@@ -657,14 +664,15 @@ fn tw_frame(k: u64) -> u64 {
     unsafe { ((pax_tcp_tw as u64 + k * 8) as *u64).read_volatile() }
 }
 
-/// The address of entry `slot` of row `row`; 0 when the table has no
-/// frames.
-fn tw_at(row: u64, slot: u64) -> u64 {
-    let f = tw_frame(row / 32)
+/// The address of entry `i` (modulo the table); 0 when the table has
+/// no frames.
+fn tw_at(i: u64) -> u64 {
+    let k = i % TW_ENTRIES
+    let f = tw_frame(k / 128)
     if f == 0 {
         return 0
     }
-    f + (row % 32) * 128 + slot * 32
+    f + (k % 128) * 32
 }
 
 fn tw_word(e: u64, i: u64) -> u64 {
@@ -677,39 +685,41 @@ fn put_tw_word(e: u64, i: u64, v: u64) {
     unsafe { ((e + i * 8) as *u64).write_volatile(v) }
 }
 
-fn tw_row(la: u64, lp: u64, ra: u64, rp: u64) -> u64 {
-    (ra ^ (la << 1) ^ (lp << 7) ^ (rp << 13) ^ (rp >> 3) ^ (ra >> 17)) % TW_ROWS
+/// Where the entries for the four values start.
+fn tw_hash(la: u64, lp: u64, ra: u64, rp: u64) -> u64 {
+    let x = ra ^ (la << 3) ^ (lp << 11) ^ (rp << 17) ^ (ra >> 13) ^ (rp << 5) ^ lp
+    (x ^ (x >> 15) ^ (x >> 29)) % TW_ENTRIES
 }
 
 /// The live entry for the four values; 0 when there is none.
 fn tw_find(la: u64, lp: u64, ra: u64, rp: u64) -> u64 {
-    let row = tw_row(la, lp, ra, rp)
+    let h = tw_hash(la, lp, ra, rp)
     let now = timer.ticks()
-    var slot: u64 = 0
-    while slot < 4 {
-        let e = tw_at(row, slot)
+    var k: u64 = 0
+    while k < TW_PROBE {
+        let e = tw_at(h + k)
         if e != 0 && tw_word(e, 1) == (1 << 32 | lp << 16 | rp) && tw_word(e, 0) == (la << 32 | ra) {
             if tw_word(e, 3) > now {
                 return e
             }
             put_tw_word(e, 1, 0) // its wait is over
         }
-        slot += 1
+        k += 1
     }
     0
 }
 
 /// Start (or start again) the wait for the four values.
 fn tw_put(la: u64, lp: u64, ra: u64, rp: u64, snd_nxt: u64, rcv_nxt: u64, until: u64) {
-    let row = tw_row(la, lp, ra, rp)
+    let h = tw_hash(la, lp, ra, rp)
     let now = timer.ticks()
     var e = tw_find(la, lp, ra, rp)
     if e == 0 {
-        // A free or ended slot, else the one that ends soonest.
-        var slot: u64 = 0
+        // A free or ended entry, else the one that ends soonest.
+        var k: u64 = 0
         var oldest: u64 = 0
-        while slot < 4 && e == 0 {
-            let x = tw_at(row, slot)
+        while k < TW_PROBE && e == 0 {
+            let x = tw_at(h + k)
             if x == 0 {
                 return // no table
             }
@@ -718,7 +728,7 @@ fn tw_put(la: u64, lp: u64, ra: u64, rp: u64, snd_nxt: u64, rcv_nxt: u64, until:
             } else if oldest == 0 || tw_word(x, 3) < tw_word(oldest, 3) {
                 oldest = x
             }
-            slot += 1
+            k += 1
         }
         if e == 0 {
             e = oldest
@@ -736,23 +746,19 @@ fn tw_put(la: u64, lp: u64, ra: u64, rp: u64, snd_nxt: u64, rcv_nxt: u64, until:
 /// that conflicts with `addr`.
 fn tw_holds(p: u64, addr: u64) -> bool {
     let now = timer.ticks()
-    var row: u64 = 0
-    while row < TW_ROWS {
-        var slot: u64 = 0
-        while slot < 4 {
-            let e = tw_at(row, slot)
-            if e != 0 {
-                let w = tw_word(e, 1)
-                if w != 0 && (w >> 16) & 0xffff == p && tw_word(e, 3) > now {
-                    let a = tw_word(e, 0) >> 32
-                    if addr == 0 || a == addr {
-                        return true
-                    }
+    var i: u64 = 0
+    while i < TW_ENTRIES {
+        let e = tw_at(i)
+        if e != 0 {
+            let w = tw_word(e, 1)
+            if w != 0 && (w >> 16) & 0xffff == p && tw_word(e, 3) > now {
+                let a = tw_word(e, 0) >> 32
+                if addr == 0 || a == addr {
+                    return true
                 }
             }
-            slot += 1
         }
-        row += 1
+        i += 1
     }
     false
 }
@@ -762,17 +768,13 @@ pub fn waiting() -> u64 {
     let saved = sync.acquire(sync.tcp())
     let now = timer.ticks()
     var n: u64 = 0
-    var row: u64 = 0
-    while row < TW_ROWS {
-        var slot: u64 = 0
-        while slot < 4 {
-            let e = tw_at(row, slot)
-            if e != 0 && tw_word(e, 1) != 0 && tw_word(e, 3) > now {
-                n += 1
-            }
-            slot += 1
+    var i: u64 = 0
+    while i < TW_ENTRIES {
+        let e = tw_at(i)
+        if e != 0 && tw_word(e, 1) != 0 && tw_word(e, 3) > now {
+            n += 1
         }
-        row += 1
+        i += 1
     }
     sync.release(sync.tcp(), saved)
     n
@@ -1048,6 +1050,9 @@ fn emit(c: u64, seq: u64, flags: u64, o: u64, n: u64) -> bool {
     let r = ip.send_from(la, ra, PROTOCOL, f, hl + n)
     if r == arp.SENT || r == arp.QUEUED {
         bump(C_OUT)
+        if ip.local(ra) {
+            bump(C_LOOP_OUT)
+        }
         if n > 0 {
             bump(C_DATA_OUT)
             bump_by(C_BYTES_OUT, n)
@@ -1112,8 +1117,20 @@ fn reset_for(la: u64, lp: u64, ra: u64, rp: u64, flags: u64, seq: u64, ack: u64,
     if r == arp.SENT || r == arp.QUEUED {
         bump(C_OUT)
         bump(C_RST_OUT)
+        if ip.local(ra) {
+            bump(C_LOOP_OUT)
+        }
     } else {
         bump(C_OUT_FAILED)
+    }
+}
+
+/// A segment of block `c`'s left again: counted, and apart when it was
+/// for this machine itself.
+fn count_resent(c: u64) {
+    bump(C_RETRANSMITS)
+    if ip.local(cw(c, K_RADDR)) {
+        bump(C_LOOP_REXMT)
     }
 }
 
@@ -1181,13 +1198,13 @@ fn output(c: u64, force: bool) -> u64 {
             if fin {
                 flags = flags | FIN
             }
-            let again = seq_lt(nxt, cw(c, K_SND_MAX))
+            let resent = seq_lt(nxt, cw(c, K_SND_MAX)) || (probe && cw(c, K_PROBE) == 1)
             if !emit(c, nxt, flags, cw(c, K_TX_BASE) + off, n) {
                 more = false
             } else {
                 sent += 1
-                if again {
-                    bump(C_RETRANSMITS)
+                if resent {
+                    count_resent(c)
                 }
                 if probe {
                     bump(C_PROBES)
@@ -1535,7 +1552,7 @@ fn fast_retransmit(c: u64) {
     let fin = flag(c, F_FIN_SENT) && off + n == len
     if n > 0 || fin {
         if emit(c, una, ACK | (if fin { FIN } else { 0 }), cw(c, K_TX_BASE) + off, n) {
-            bump(C_RETRANSMITS)
+            count_resent(c)
         }
     }
 }
@@ -1654,6 +1671,9 @@ fn time_wait_in(e: u64, la: u64, lp: u64, ra: u64, rp: u64, flags: u64, seq: u64
         if r == arp.SENT || r == arp.QUEUED {
             bump(C_OUT)
             bump(C_ACK_OUT)
+            if ip.local(ra) {
+                bump(C_LOOP_OUT)
+            }
         } else {
             bump(C_OUT_FAILED)
         }
@@ -1662,15 +1682,16 @@ fn time_wait_in(e: u64, la: u64, lp: u64, ra: u64, rp: u64, flags: u64, seq: u64
 }
 
 /// The TCP segment of a frame kernel/ip passed: the frame at `frame`,
-/// its IP header `ihl` bytes, its total length `total` (kernel/netd;
-/// the frame is this call's until it returns).
-pub fn input(frame: u64, ihl: u64, total: u64) {
+/// its IP header `ihl` bytes, its total length `total`; `looped` when
+/// it came off kernel/ip's loopback queue (kernel/netd; the frame is
+/// this call's until it returns).
+pub fn input(frame: u64, ihl: u64, total: u64, looped: bool) {
     let saved = sync.acquire(sync.tcp())
-    input_locked(frame, ihl, total)
+    input_locked(frame, ihl, total, looped)
     sync.release(sync.tcp(), saved)
 }
 
-fn input_locked(frame: u64, ihl: u64, total: u64) {
+fn input_locked(frame: u64, ihl: u64, total: u64, looped: bool) {
     let h = frame + ip.ETH
     let t = h + ihl
     let n = total - ihl
@@ -1705,6 +1726,9 @@ fn input_locked(frame: u64, ihl: u64, total: u64) {
         return
     }
     bump(C_IN)
+    if looped {
+        bump(C_LOOP_IN)
+    }
     let seq = ip.be32(t + 4)
     let ack = ip.be32(t + 8)
     let flags = ip.octet(t + 13)
@@ -1765,7 +1789,7 @@ fn input_locked(frame: u64, ihl: u64, total: u64) {
         if st == SYN_RCVD && flags & SYN != 0 && flags & ACK == 0 && seq == cw(c, K_IRS) {
             // The peer's SYN again: its SYN-ACK was lost.
             if emit(c, cw(c, K_ISS), SYN | ACK, 0, 0) {
-                bump(C_RETRANSMITS)
+                count_resent(c)
             }
             return
         }
@@ -1986,7 +2010,7 @@ fn syn_sent_in(c: u64, flags: u64, seq: u64, ack: u64, wnd: u64, mss: u64, len: 
     put_cw(c, K_STATE, SYN_RCVD)
     put_cw(c, K_SND_WND, wnd)
     if emit(c, iss, SYN | ACK, 0, 0) {
-        bump(C_RETRANSMITS)
+        count_resent(c)
     }
     put_cw(c, K_REXMT_AT, timer.ticks() + cw(c, K_RTO))
 }
@@ -2026,7 +2050,7 @@ fn timeout(c: u64, now: u64) {
         put_cw(c, K_REXMITS, tries + 1)
         put_cw(c, K_RTO, lo(cw(c, K_RTO) * 2, RTO_MAX))
         if emit(c, cw(c, K_ISS), SYN, 0, 0) {
-            bump(C_RETRANSMITS)
+            count_resent(c)
         }
         put_cw(c, K_REXMT_AT, now + cw(c, K_RTO))
         return
@@ -2045,7 +2069,7 @@ fn timeout(c: u64, now: u64) {
         put_cw(c, K_REXMITS, tries + 1)
         put_cw(c, K_RTO, lo(cw(c, K_RTO) * 2, RTO_MAX))
         if emit(c, cw(c, K_ISS), SYN | ACK, 0, 0) {
-            bump(C_RETRANSMITS)
+            count_resent(c)
         }
         put_cw(c, K_REXMT_AT, now + cw(c, K_RTO))
         return
@@ -2658,7 +2682,7 @@ fn item(v: u64, name: str) {
 }
 
 /// The module's first line:
-/// `tcp: 64 blocks, 65536 bytes each way a connection, MSS 1460, ports 32768-60999 from <p>, RTO 200 ms to 60 s, time-wait 60 s in 16384 entries`.
+/// `tcp: 64 blocks, 65536 bytes each way a connection, MSS 1460, ports 32768-60999 from <p>, RTO 200 ms to 60 s, time-wait 60 s in 32768 entries`.
 pub fn report() {
     log.put("tcp: ")
     log.dec(CONNS as int)
@@ -2684,7 +2708,9 @@ pub fn report() {
     log.end()
 }
 
-/// The counters' seven lines:
+/// The counters' eight lines (the first seven count the wire's and
+/// loopback's segments together; the last says how many were
+/// loopback's, so a capture of the wire can be held to the difference):
 ///
 ///     tcp: rx <n> segments, dropped <…> short <…> header <…> checksum <…> broadcast <…> port-zero <…> option
 ///     tcp: rx for nobody <a> reset, <b> resets dropped; listeners <c> listen-full <d> no-block <e> other; <f> unacceptable <g> reset-challenged <h> syn-challenged <i> ack-ahead <j> no-ack
@@ -2693,6 +2719,7 @@ pub fn report() {
 ///     tcp: tx <n> segments (<d> with data, <b> bytes; <a> acks, <r> resets, <p> probes), <f> not sent; <x> retransmitted, <t> timeouts, <q> fast retransmits, <s> round trips measured, <w> window updates, <o> persist
 ///     tcp: connections <a> active, <p> passive, <c> accepted, <r> refused, <g> gave-up, <h> half-open gone, <k> reset at close, <s> simultaneous, <n> no-frames; icmp <x> hard <y> soft
 ///     tcp: blocks <m> made, <f> freed, <u> in use; time-wait <w> made, <e> evicted, <o> reopened, <s> segments answered, <r> resets ignored, <l> waiting
+///     tcp: loopback <o> segments sent, <i> received, <x> retransmitted
 pub fn counters() {
     log.put("tcp: rx ")
     log.dec(tw(C_IN) as int)
@@ -2790,5 +2817,13 @@ pub fn counters() {
     log.put(" ")
     log.dec(waiting() as int)
     log.put(" waiting")
+    log.end()
+    log.put("tcp: loopback ")
+    log.dec(tw(C_LOOP_OUT) as int)
+    log.put(" segments sent, ")
+    log.dec(tw(C_LOOP_IN) as int)
+    log.put(" received, ")
+    log.dec(tw(C_LOOP_REXMT) as int)
+    log.put(" retransmitted")
     log.end()
 }

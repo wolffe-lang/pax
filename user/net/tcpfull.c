@@ -1,9 +1,9 @@
 /* tcpfull — a listen queue that nobody empties (px23): a listener with
    a backlog of 2 on 127.0.0.1 port 4060 and six clients, one after
    another, each giving up after one retransmitted SYN (TCP_SYNCNT 1).
-   How many get in is the kernel's bound: the line is held to a file of
-   PAX's own where Linux's differs. Then the queue is emptied and every
-   connection that got in is there. */
+   How many get in is the kernel's bound (Linux: three; PAX takes the
+   same). Then the queue is emptied and every connection that got in is
+   there. */
 #include "say.h"
 #include <netinet/tcp.h>
 
