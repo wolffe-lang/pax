@@ -142,12 +142,18 @@ if [ -z "$images" ]; then
     else
         sudo=(); [ "$(id -u)" = 0 ] || sudo=(sudo -n)
         st=(); command -v strace >/dev/null 2>&1 && st=(--strace)
+        # px26: the tree as the initramfs describes it (tools/mkinitramfs:
+        # owner and group 0, every time 0), so bu20's `ls -l` prints the
+        # same owner and date on both sides; given back afterwards.
+        "${sudo[@]}" chown -R 0:0 "$root" || why+=" chown 0:0;"
+        find "$root" -exec "${sudo[@]}" touch -h -d @0 {} + || why+=" touch;"
         if "${sudo[@]}" "$PAX_ROOT/tools/linux-run" "${st[@]}" "$root" "$root/etc/pax-run" "$work/linux" > "$work/linux.txt"; then
             sed 's/^/  linux: /' "$work/linux.txt" >&2
             [ "${#sudo[@]}" = 0 ] || "${sudo[@]}" chown -R "$(id -u):$(id -g)" "$work/linux"
         else
             why+=" tools/linux-run (needs root);"
         fi
+        "${sudo[@]}" chown -R "$(id -u):$(id -g)" "$root" || why+=" chown back;"
     fi
     [ -z "$why" ] && say "PASS B0: kmain_boreutils built ($tiers), every program static, initramfs $(wc -c < "$work/initramfs.cpio" | tr -d ' ') bytes, Linux ran $(grep -c '' "$work/linux.txt" 2>/dev/null) commands" || bad "B0:$why"
     images=$work
