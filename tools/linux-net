@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # linux-net — run a PAX run list of network programs on this host's
-# Linux, the reference side of tests/mpx4-udp (px22).
+# Linux, the reference side of tests/mpx4-udp (px22) and tests/mpx4-tcp
+# (px23).
 #
-#   sudo tools/linux-net [--strace] [--soak N] ROOT RUNLIST OUTDIR
+#   sudo tools/linux-net [--strace] [--soak N] [--tcp [--bulk BYTES] [--lossy BYTES]]
+#                        ROOT RUNLIST OUTDIR
 #
 # The commands of RUNLIST (kmain_sockets's format: one a line, words
 # separated by single spaces, the first the program's path; empty lines
@@ -25,6 +27,12 @@
 # `ip` program is needed, and nothing outside the namespace changes; it
 # goes when this process ends.
 #
+# --tcp (px23) puts tools/net-peer's TCP script at the tap's other end
+# instead (its own TCP, tools/paxtcp.py, faults and all), and keeps what
+# crossed the tap: OUTDIR/tap.pcap holds the first 4000 frames, both
+# ways (the classic pcap format, as QEMU's filter-dump writes it), and
+# OUTDIR/tap.txt the count and the SHA-256 of every frame in order.
+#
 # OUTDIR/<k>.out gets command k's bytes, OUTDIR/<k>.rc its exit status
 # (or `signal N`), OUTDIR/peer.txt the script's account. --strace runs
 # each command under `strace -f` and keeps OUTDIR/<k>.strace from the
@@ -35,11 +43,13 @@
 # a usage or tool error.
 import ctypes
 import fcntl
+import hashlib
 import importlib.machinery
 import importlib.util
 import os
 import select
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -105,19 +115,48 @@ def namespace():
 
 
 class TapWire:
-    """The tap device: a frame is one read or write."""
+    """The tap device: a frame is one read or write. With `keep`, what
+    crosses it is kept: the first KEPT frames as a pcap file, every
+    frame in a running SHA-256."""
 
-    def __init__(self, fd):
+    KEPT = 4000
+
+    def __init__(self, fd, keep=None):
         self.fd = fd
+        self.count = 0
+        self.sha = hashlib.sha256()
+        self.pcap = None
+        if keep:
+            self.pcap = open(keep, "wb")
+            # pcap-savefile(5): magic, version 2.4, zone, accuracy, snap length, Ethernet.
+            self.pcap.write(struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1))
+
+    def note(self, f):
+        self.count += 1
+        self.sha.update(struct.pack("<I", len(f)) + f)
+        if self.pcap is not None and self.count <= self.KEPT:
+            t = time.time()
+            self.pcap.write(struct.pack("<IIII", int(t), int((t % 1) * 1000000), len(f), len(f)) + f)
+            if self.count == self.KEPT:
+                self.pcap.flush()
+
+    def close(self, path):
+        if self.pcap is not None:
+            self.pcap.close()
+            open(path, "w").write("frames %d sha256 %s (each frame as its length in 4 bytes, least significant first, then its bytes); the first %d are in tap.pcap\n"
+                                  % (self.count, self.sha.hexdigest(), min(self.count, self.KEPT)))
 
     def send(self, f):
+        self.note(f)
         os.write(self.fd, f)
 
     def recv(self, timeout):
         r, _, _ = select.select([self.fd], [], [], max(timeout, 0.001))
         if not r:
             return None
-        return os.read(self.fd, 4096)
+        f = os.read(self.fd, 4096)
+        self.note(f)
+        return f
 
 
 def commands(path):
@@ -146,6 +185,10 @@ def run(root, argv, trace, peer_pid):
             for fd in (n, w):
                 if fd > 2:
                     os.close(fd)
+            # A process PAX starts has every signal at its default; Python
+            # ignores SIGPIPE and an exec would hand that on (px23: a
+            # write to a reset connection must be able to end its writer).
+            signal.signal(signal.SIGPIPE, signal.SIG_DFL)
             if trace:
                 cmd = [tool("strace"), "-f", "-qq", "-s", "64", "-o", trace, tool("chroot"), root] + argv
                 os.execve(cmd[0], cmd, ENV)
@@ -192,9 +235,10 @@ def peer_ended(peer_pid):
     return bool(PEER_STATUS)
 
 
-def play(tap, soak, peer_out):
+def play(tap, soak, peer_out, tcp=None):
     """The other end of the tap, in this (child) process: tools/net-peer's
-    UDP script, not strict. Never returns."""
+    UDP script — or, with `tcp` (the bulk and lossy sizes), its TCP
+    script — not strict. Never returns."""
     code = 1
     try:
         out = os.open(peer_out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
@@ -205,14 +249,20 @@ def play(tap, soak, peer_out):
         spec = importlib.util.spec_from_loader("net_peer", loader)
         mod = importlib.util.module_from_spec(spec)
         loader.exec_module(mod)
-        peer = mod.Peer(TapWire(tap), 120.0, strict=False)
+        outdir = os.path.dirname(peer_out)
+        wire = TapWire(tap, os.path.join(outdir, "tap.pcap") if tcp else None)
+        peer = mod.Peer(wire, 900.0 if tcp else 120.0, strict=False)
         try:
-            peer.udp_script(soak)
+            if tcp:
+                peer.tcp_script(soak, tcp[0], tcp[1])
+            else:
+                peer.udp_script(soak)
             print("net-peer: sent %s" % " ".join("%s=%d" % kv for kv in sorted(peer.sent.items())))
             print("net-peer: PASS (the reference side: Linux on a tap device)")
             code = 0
         except mod.Fail as x:
             print("net-peer: FAIL " + str(x))
+        wire.close(os.path.join(outdir, "tap.txt"))
     except BaseException:
         import traceback
         traceback.print_exc(file=sys.stdout)
@@ -222,19 +272,28 @@ def play(tap, soak, peer_out):
 
 
 def main(argv):
-    strace, soak = False, 10000
+    strace, soak, tcp, bulk, lossy = False, 10000, False, 16777216, 1048576
+    usage = "usage: linux-net [--strace] [--soak N] [--tcp [--bulk BYTES] [--lossy BYTES]] ROOT RUNLIST OUTDIR"
     args = argv[1:]
     while args and args[0].startswith("--"):
         if args[0] == "--strace":
             strace = True
             args = args[1:]
-        elif args[0] == "--soak" and len(args) > 1:
-            soak = int(args[1])
+        elif args[0] == "--tcp":
+            tcp = True
+            args = args[1:]
+        elif args[0] in ("--soak", "--bulk", "--lossy") and len(args) > 1:
+            if args[0] == "--soak":
+                soak = int(args[1])
+            elif args[0] == "--bulk":
+                bulk = int(args[1])
+            else:
+                lossy = int(args[1])
             args = args[2:]
         else:
-            die("usage: linux-net [--strace] [--soak N] ROOT RUNLIST OUTDIR")
+            die(usage)
     if len(args) != 3:
-        die("usage: linux-net [--strace] [--soak N] ROOT RUNLIST OUTDIR")
+        die(usage)
     root, runlist, outdir = os.path.abspath(args[0]), args[1], os.path.abspath(args[2])
     if os.geteuid() != 0:
         die("needs root (unshare, chroot)")
@@ -245,7 +304,7 @@ def main(argv):
     peer_out = os.path.join(outdir, "peer.txt")
     peer_pid = os.fork()
     if peer_pid == 0:
-        play(tap, soak, peer_out)
+        play(tap, soak, peer_out, (bulk, lossy) if tcp else None)
 
     for k, cmd in enumerate(cmds, 1):
         trace = os.path.join(outdir, "%d.strace.raw" % k) if strace else None
