@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# mknet — build px22's network witnesses (user/net/*.c) into OUTDIR.
+# mknet — build px22's eight network witnesses (user/net/*.c) into OUTDIR.
 #
 #   tools/mknet OUTDIR
 #
@@ -16,7 +16,8 @@
 #   udpclient  a client: a connected socket's write and read, then
 #              sendto and recvfrom
 #   udpsoak    N datagrams out and N back, one at a time
-#   udpfill    a receive queue filled past its bound
+#   udpfill    a receive queue filled past its bound, over loopback
+#   udphold    a receive queue filled past its bound, from the wire
 #   resolve    a stub resolver (RFC 1035): one A question to a server
 # and prints one line per file: `<name> <sha256> <bytes>`, also written
 # to OUTDIR/sums.txt.
@@ -34,7 +35,7 @@ out=$(cd "$out" && pwd)
 cc=${CC:-cc}
 need "$cc" readelf
 : > "$out/sums.txt"
-for p in sockerr udploop udpecho udpclient udpsoak udpfill resolve; do
+for p in sockerr udploop udpecho udpclient udpsoak udpfill udphold resolve; do
     "$cc" -O1 -Wall -Wextra -static -no-pie -Wl,--build-id=none -Wl,-z,noexecstack \
         -o "$out/$p" "$PAX_ROOT/user/net/$p.c" || die "cc: $p"
     readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
