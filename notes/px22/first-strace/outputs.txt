@@ -1,0 +1,123 @@
+== sockerr  -> 0
+socket(9999, SOCK_DGRAM, 0): -EAFNOSUPPORT
+socket(AF_UNSPEC, SOCK_DGRAM, 0): -EAFNOSUPPORT
+socket(AF_INET, SOCK_RDM, 0): -ESOCKTNOSUPPORT
+socket(AF_INET, 77, 0): -EINVAL
+socket(AF_INET, SOCK_DGRAM, IPPROTO_TCP): -EPROTONOSUPPORT
+three sockets: 3 4 5
+c: FD_CLOEXEC 1, O_NONBLOCK 1; a: FD_CLOEXEC 0, O_NONBLOCK 0
+fstat(a): ok
+a is a socket: 1
+lseek(a, 0, SEEK_CUR): -ESPIPE
+getsockopt(a, SOL_SOCKET, SO_TYPE): ok
+SO_TYPE 2 len 4
+setsockopt(a, SOL_SOCKET, 9999): -ENOPROTOOPT
+getsockopt(a, SOL_SOCKET, 9999): -ENOPROTOOPT
+setsockopt(a, 9999, 1): -ENOPROTOOPT
+listen(a, 1): -EOPNOTSUPP
+accept(a): -EOPNOTSUPP
+getsockname(a) unbound: 0.0.0.0:0 len 16 family 2
+getpeername(a) unconnected: -ENOTCONN
+bind(a, 127.0.0.1:4001, 8 bytes): -EINVAL
+bind(a, an AF_UNIX address): -EAFNOSUPPORT
+bind(a, 10.9.9.9:4003): -EADDRNOTAVAIL
+bind(a, 127.0.0.1:4001): ok
+bind(a) again: -EINVAL
+bind(b, 127.0.0.1:4001): -EADDRINUSE
+bind(b, 0.0.0.0:4001): -EADDRINUSE
+bind(b, 127.0.0.1:4002): ok
+bind(c, 10.0.2.15:4001): ok
+getsockname(a): 127.0.0.1:4001 len 16 family 2
+getsockname(c): 10.0.2.15:4001 len 16 family 2
+bind(1, 127.0.0.1:4001): -ENOTSOCK
+bind(99, 127.0.0.1:4001): -EBADF
+close(c): ok
+send(t) with no peer: -EDESTADDRREQ
+write(t) with no peer: -EDESTADDRREQ
+sendto(t, 65508 bytes): -EMSGSIZE
+sendto(t, port 0): -EINVAL
+sendto(t, a 4-byte address): -EINVAL
+sendto(t, an AF_UNIX address): -EAFNOSUPPORT
+sendto(1): -ENOTSOCK
+close(t): ok
+getsockname(s) before it sends: 0.0.0.0:0 len 16 family 2
+sendto(s, "to-b", 127.0.0.1:4002): 4
+getsockname(s) after: 0.0.0.0:ephemeral len 16 family 2
+a, MSG_DONTWAIT: -EAGAIN
+b: 4 bytes "to-b" from 127.0.0.1:ephemeral
+b, MSG_DONTWAIT: -EAGAIN
+connect(b, 127.0.0.1:4001): ok
+getpeername(b): 127.0.0.1:4001 len 16 family 2
+sendto(s, "stranger", b): 8
+b, MSG_DONTWAIT (a stranger wrote): -EAGAIN
+sendto(a, "peer", b): 4
+b: 4 bytes "peer" from 127.0.0.1:4001
+write(b, "hi a"): 4
+a: 4 bytes "hi a" from 127.0.0.1:4002
+send(b, "again"): 5
+read(a): 5 bytes "again"
+connect(b, AF_UNSPEC): ok
+getpeername(b): -ENOTCONN
+getsockname(b): 127.0.0.1:4002 len 16 family 2
+sendto(s, "stranger2", b): 9
+b: 9 bytes "stranger2" from 127.0.0.1:ephemeral
+sendto(s, 100 bytes, b): 100
+b, a 10-byte buffer: 10 bytes "TTTTTTTTTT" from 127.0.0.1:ephemeral
+b, MSG_DONTWAIT: -EAGAIN
+sendto(s, 100 bytes, b): 100
+b, a 10-byte buffer, MSG_TRUNC: 100 bytes "TTTTTTTTTT" from 127.0.0.1:ephemeral
+sendto(s, "peek", b): 4
+b, MSG_PEEK: 4 bytes "peek" from 127.0.0.1:ephemeral
+b: 4 bytes "peek" from 127.0.0.1:ephemeral
+sendto(s, 0 bytes, b): 0
+b: 0 bytes "" from 127.0.0.1:ephemeral
+sendto(s, "dup", b): 3
+d = dup(b): 3 bytes "dup" from 127.0.0.1:ephemeral
+close(b): ok
+sendto(s, "kept", b's port): 4
+d: 4 bytes "kept" from 127.0.0.1:ephemeral
+bind(e, 127.0.0.1:4002) while d is open: -EADDRINUSE
+close(d): ok
+bind(e, 127.0.0.1:4002) after: ok
+setsockopt(e, SO_RCVTIMEO, 0.2 s): ok
+e, nothing sent: -EAGAIN
+fcntl(e, F_SETFL, O_NONBLOCK): ok
+read(e): -EAGAIN
+close(a): ok
+close(e): ok
+close(s): ok
+getsockname(s) closed: -EBADF
+== udploop  -> 0
+server: bound 0.0.0.0:4010
+server: "through 127.0.0.1" from 127.0.0.1:ephemeral
+client: "re: through 127.0.0.1" from 127.0.0.1:4010; this end is 0.0.0.0:ephemeral
+server: "through this machine's own address" from 10.0.2.15:ephemeral
+client: "re: through this machine's own address" from 10.0.2.15:4010; this end is 0.0.0.0:ephemeral
+server: "bye" from 127.0.0.1:ephemeral
+client: "re: bye" from 127.0.0.1:4010; this end is 0.0.0.0:ephemeral
+server: the client ended with status 0
+== udpecho 7 10.0.2.2 9099 -> 0
+udpecho: listening on 0.0.0.0:7
+udpecho: 1: 1 bytes from 10.0.2.2
+udpecho: 2: 2 bytes from 10.0.2.2
+udpecho: 3: 64 bytes from 10.0.2.2
+udpecho: 4: 4 bytes from 10.0.2.2
+udpecho: 4 datagrams, 71 bytes echoed, sum f14169b1
+== udpclient 10.0.2.2 9099 -> 0
+udpclient: local 10.0.2.2:ephemeral
+udpclient: peer 10.0.2.2:9099
+udpclient: wrote "hello from PAX", read "XAP morf olleh"
+udpclient: wrote "x", read "x"
+udpclient: wrote "the third datagram, on a connected socket", read "tekcos detcennoc a no ,margatad driht eht"
+udpclient: 1472 bytes (the most one frame carries): 1472 bytes back, the datagram reversed
+udpclient: local 0.0.0.0:ephemeral
+udpclient: sent "sendto, no connect", received "tcennoc on ,otdnes" from 10.0.2.2:9099
+udpclient: done
+== udpsoak 10.0.2.2 9099 20 -> 0
+udpsoak: 20 datagrams sent, 20 answers, 20 right
+== udpfill  -> 0
+udpfill: 200 sent, 92 kept (the first 92, in order), the last numbered 91; then -EAGAIN
+== resolve 10.0.2.3 pax.test -> 0
+resolve: asking 10.0.2.3 for pax.test (A, IN), 26 bytes
+resolve: answer from 10.0.2.3:53: rcode 0, 1 answers
+resolve: pax.test is 192.0.2.53 (ttl 60)
