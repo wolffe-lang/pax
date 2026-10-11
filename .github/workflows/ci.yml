@@ -1281,6 +1281,63 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px32: play's part format, the orchestra. tests/mpx3-orchestra: the
+  # refusals (O1), the old formats unchanged (O2), the written lengths
+  # (O3), the frames judged on the runner itself (O4: each part's onsets,
+  # presence, pp < ff, tremolo, the struck instruments; the study, 16+
+  # voices), then QEMU's virtio sound under kmain_console: the captures
+  # judged by the same specs (O5) and the cost in the guest (O6).
+  mpx3-orchestra:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev make
+          qemu-system-x86_64 --version
+          python3 --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx3-orchestra-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the orchestra, on the runner and under QEMU, both tiers, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx3-orchestra
+
+      - name: keep the verdicts, the transcripts and the captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx3-orchestra-linux
+          path: |
+            build/mpx3-orchestra/play.txt
+            build/mpx3-orchestra/*.verdict
+            build/mpx3-orchestra/*.played
+            build/mpx3-orchestra/old-cost.txt
+            build/mpx3-orchestra-*.log
+            build/mpx3-orchestra-*.norm
+            build/mpx3-orchestra-*.txt
+            build/mpx3-orchestra-*.verdict
+            build/mpx3-orchestra-*.wav
+          retention-days: 14
+          if-no-files-found: warn
+
   # px08: the tour of the kernel. kmain_tour and kmain_tour_text
   # (kernel/pax_tour's stages over the test kernels' paths), two ISOs behind
   # Limine's menu (tools/tour build), both tiers, BIOS and UEFI.
