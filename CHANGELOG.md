@@ -7,6 +7,23 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The orchestra (px32).** `/bin/play`'s tune file gains a part
+  format (`notes/px32-format.md`): parts declared with a name, a timbre,
+  a starting level and a pan; bars numbered one by one, each part's
+  events filling each bar exactly (rests, ties across bars, chords in a
+  part, tuplets); tempo, `rit`/`accel` and fermatas on the bar line;
+  `ppp`-`fff`, `sfz`, `fp`, hairpins (`<`, `>`, `!`); staccato,
+  marcato, accent, tenuto, slur and tremolo marks. It sounds through
+  px30's `/dev/dsp` only (`-s` refuses it), synthesised in integers by
+  `user/play/orch.lu`: band-limited additive wavetables in a soft and a
+  bright spectrum mixed by the level, inharmonic struck partials, noise
+  through filters, envelopes, vibrato, bowed tremolo and rolls, 17
+  timbre names, up to 48 voices, constant-power pan and a look-ahead
+  limiter (0 samples clamped). `play -o` writes the frames to standard
+  output. A 230 s, 16-part tune of 42 voices costs 9-10% of real time
+  under TCG; the study `orchestra` (17 parts, 45 voices) 6-9%. Old tune
+  files read and sound as before. `tests/mpx3-orchestra`,
+  `tools/orch-check` (Goertzel power per pitch per window).
 - **The sound card (px30).** PAX plays sampled sound. `kernel/sound`
   drives QEMU's virtio sound device (`1af4:1059`, VIRTIO 1.2 §5.14) over
   px20's transport (which now keeps one transport record per device),

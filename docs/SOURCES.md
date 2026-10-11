@@ -577,3 +577,17 @@ no QEMU device or audio source. Linux and QEMU were run, never read.
 | the OSS programmer's guide (the order SETFMT, CHANNELS, SPEED; that a request answers what was set) and man-pages `open(2)`, `ioctl(2)`, `close(2)`, `poll(2)` | — | their own | read | `kernel/sound`'s answers |
 | black-box Linux 7.2.8 (kasumi's own kernel image and modules, run under QEMU 11.1.1 by `tools/linux-sound` with each candidate device; busybox-static and strace 6.8 from `px13-ubuntu`) | 7.2.8-1-cachyos | GPL-2.0 (programs we run) | measured | the device survey, the witnesses' straces, what Linux answers at the edges (`notes/px30/linux-*.serial.log`), its close's drain, its version answer 0x030810 |
 | QEMU's documentation (`-audiodev` and its `out.frequency`, `wav`, `coreaudio`, `none`; `-device virtio-sound-pci`) and black-box runs of 11.1.1 (kasumi, nomad-1), 11.1.0 (hasu) and the CI runner's | — | GPL-2.0 (a program we run) | measured: `info pci`/`info qtree` of the device; the `wav` backend writes only while the stream has data (an underrun's gap is not in the file, Linux's alike) | `tests/mpx3-sound`, `tools/wav-notes` |
+
+## px32: the orchestra (the part format, synthesised timbres)
+
+No synthesiser's, tracker's, sound library's or music engine's source
+was read or searched for (no SoundFont player, MIDI synthesiser,
+tracker or audio DSP library). No recorded sample, sound font or sample
+set is used: every timbre is computed in wolf from arithmetic at
+start-up.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| the textbook methods: additive synthesis (a periodic wave as a sum of sine partials), wavetable lookup by a phase accumulator, ADSR envelopes, the linear-congruential generator, one-pole low-pass filters, vowel formants as a fixed spectral envelope, constant-power panning, a look-ahead peak limiter, the Goertzel algorithm (one DFT bin) | — | general knowledge | the author's own knowledge, no text copied | `user/play/orch.lu`, `tools/orch-check` |
+| the published partial series of church and tubular bells (hum 0.5, prime 1, tierce 1.2, quint 1.5, nominal 2) and of a kettledrum's membrane modes (about 1 : 1.50 : 1.74 : 2.00 : 2.24 : 2.49); the vowel "ah"'s first formants (about 750, 1150, 2800 Hz) | — | general knowledge (acoustics) | the author's own knowledge | `orch.lu`'s bells, timpani and choir |
+| QEMU 11.1.1's `wav` backend (kasumi, nomad-1) and the CI runner's | — | GPL-2.0 (a program we run) | measured: its data size is left 0 when QEMU ends (as px30's `wav-notes` found) | `tools/orch-check` |
