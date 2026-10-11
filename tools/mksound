@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# mksound — build px30's PCM witnesses (user/sound/dsptone.c, the
+# known-signal writer; user/sound/dspprobe.c, the edge probe) as static
+# x86-64 Linux executables.
+#
+#   tools/mksound OUTDIR
+#
+# The host's cc and its static glibc, `cc -static -no-pie -O1`, ET_EXEC
+# with no PT_INTERP (checked): the same files run on Linux (under QEMU,
+# tools/linux-sound) and on PAX (tests/mpx3-sound). Build on a baseline
+# x86-64 glibc (the CI runner's Ubuntu; the px13-ubuntu container on
+# kasumi), never on kasumi's own (px10). Prints `<name> <sha256>
+# <bytes>` a line. Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mksound OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${CC:-cc}
+need "$cc" readelf
+for p in dsptone dspprobe; do
+    "$cc" -static -no-pie -O1 -Wall -Wextra -Werror -Wl,--build-id=none -Wl,-z,noexecstack \
+        -o "$out/$p" "$PAX_ROOT/user/sound/$p.c" -lm || die "cc: $p"
+    readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
+    ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP (not static)"
+    printf '%s %s %s\n' "$p" "$(sha256_of "$out/$p")" "$(wc -c < "$out/$p" | tr -d ' ')"
+done
