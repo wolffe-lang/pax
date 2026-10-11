@@ -36,7 +36,9 @@
 #   T0 build: tools/build-kernel's object assertions for kmain_console;
 #      ask and pelt static (ET_EXEC, no PT_INTERP); both initramfs and
 #      the ISOs built (digests printed); the Linux side ran every
-#      session (tools/linux-tty).
+#      session (tools/linux-tty --pid1: the program pid 1 of a fresh pid
+#      namespace, px26, since Ctrl-C is a signal now and init is spared
+#      it on both sides; needs root: sudo -n when not root).
 #   T1 the input path: `console: com1 irq 4 vector 36, i8042 0x<a> ->
 #      0x<b> irq 1 vector 33, 8259 master mask 0xec; iflag 0x100 oflag
 #      0x05 cflag 0xbf lflag 0x8a3b`, with b's bits 0 (the keyboard's
@@ -159,10 +161,16 @@ if [ -z "$images" ]; then
     if [ "$(uname -s)" != Linux ]; then
         why+=" the Linux side needs Linux (this is $(uname -s)): build on Linux, boot here with --images;"
     else
+        # px26: as pid 1 of a fresh pid namespace, which PAX's first program
+        # is: with ISIG set on both sides, the Ctrl-C the ask session types
+        # is SIGINT, and init takes only the signals it has a handler for
+        # (`kill(2)`), so on both the key is discarded and ask goes on.
+        # The namespace needs root (sudo -n when not root, as mpx3-shell).
+        asroot=(); [ "$(id -u)" = 0 ] || asroot=(sudo -n)
         for s in $SESSIONS; do
             p=$(image_of "$s")
             # shellcheck disable=SC2046
-            if "$PAX_ROOT/tools/linux-tty" --keys "$PAX_ROOT/user/console/$(keys_of "$s").keys" --prompt "$(prompt_of "$s")" \
+            if ${asroot[@]+"${asroot[@]}"} python3 "$PAX_ROOT/tools/linux-tty" --pid1 --keys "$PAX_ROOT/user/console/$(keys_of "$s").keys" --prompt "$(prompt_of "$s")" \
                 --argv0 "/bin/$p" "$work/linux/$s.tty" -- "$work/$p/root/bin/$p" $(argv_of "$p" | cut -s -d' ' -f2-); then
                 say "  linux $s: $(wc -c < "$work/linux/$s.tty" | tr -d ' ') bytes, status $(cat "$work/linux/$s.tty.rc")"
             else
