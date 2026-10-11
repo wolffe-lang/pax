@@ -59,6 +59,14 @@
 # and `-machine pcspk-audiodev=snd0`; QEMU merges a second `-machine`
 # into the first).
 #
+# Fail fast (px26): when the FIRST prompt of a typed session never
+# comes, the program that reads the keys never started, and every later
+# typed boot of the same run would wait out its deadline too. That boot
+# leaves a note in the build directory named for the calling script's
+# process; a later `--type` boot from the same process is refused at
+# once (`NOT HALTED: not booted: …`), so a suite whose shell cannot
+# start is red within one deadline, not one a boot.
+#
 # Exit 0 halted; 1 not halted (the reason on stderr); 2 usage or tool
 # error. The timeout (default 60 s) bounds the wait for the marker.
 set -euo pipefail
@@ -97,6 +105,21 @@ fi
 case $keyboard in serial|ps2) ;; *) die "--keyboard takes serial or ps2" ;; esac
 case $timeout in ''|*[!0-9]*) die "--timeout takes whole seconds" ;; esac
 need nm mkfifo
+
+# px26: fail fast. When a typed session's first prompt never comes (the
+# shell never started: a kernel that cannot wake a futex leaves pelt
+# waiting forever), every later typed boot of the same run would wait
+# out its whole deadline the same way. The first such boot leaves a
+# note named for the calling script's process (its pid and start time),
+# and a later typed boot from that same process is not started.
+missed=$PAX_BUILD/first-prompt-missed.$PPID
+caller=$(ps -o lstart= -p "$PPID" 2>/dev/null | tr -s ' ' || true)
+if [ -n "$keys" ] && [ -f "$missed" ] && [ "$(sed -n 1p "$missed")" = "$caller" ]; then
+    mkdir -p "$(dirname "$serial")"
+    : > "$serial"
+    printf 'qemu-halt: NOT HALTED: not booted: an earlier boot of this run never reached its first prompt (%s)\n' "$(sed -n 2p "$missed")" >&2
+    exit 1
+fi
 
 # The halt routine's [start, end) from the symbol table. A kernel
 # without it still boots (its log is evidence), and is not halted.
@@ -204,7 +227,10 @@ if [ -n "$keys" ]; then
                 t0=$SECONDS
                 until [ "$(prompts)" -ge "$want" ]; do
                     kill -0 "$qpid" 2>/dev/null || no "QEMU ended before prompt $want ('$prompt') for step $k: $line"
-                    [ $((SECONDS - t0)) -lt "$timeout" ] || no "prompt $want ('$prompt') did not come within ${timeout}s (step $k: $line; $(prompts) seen)"
+                    if [ $((SECONDS - t0)) -ge "$timeout" ]; then
+                        [ "$want" != 1 ] || { mkdir -p "$PAX_BUILD"; printf '%s\n%s\n' "$caller" "$image" > "$missed"; }
+                        no "prompt $want ('$prompt') did not come within ${timeout}s (step $k: $line; $(prompts) seen)"
+                    fi
                     sleep 0.1
                 done
                 sleep 0.2 ;;
