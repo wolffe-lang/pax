@@ -87,7 +87,10 @@
 #   T8 the end: `PAX: init … ended with status <s>; nothing left to
 #      run`, `halt`, and qemu-halt holds the machine halted.
 # The probes session of the first leg runs first, and the suite stops
-# at its first failure: `stopped early` (a planted break fails fast).
+# at its first failure: `stopped early`. A boot ends at the kernel's
+# `halt` or at a `PANIC` line, whichever comes (a kernel that panics is
+# not waited on to the deadline; T8 fails it): a planted break fails
+# fast.
 #
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
@@ -307,7 +310,7 @@ for leg in $legs; do
             [ "$i" != pelt ] || typing=(--type "$KEYS" --prompt "$PROMPT" --keyboard "$kb")
             hrc=0
             "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 300 --qemu -m --qemu "$(mem_of "$s")" \
-                --elf "$elf" --marker 'halt' ${typing[@]+"${typing[@]}"} "$iso" >"$log.verdict" 2>&1 || hrc=$?
+                --elf "$elf" --marker 'halt|PANIC .*' ${typing[@]+"${typing[@]}"} "$iso" >"$log.verdict" 2>&1 || hrc=$?
             record "$tier" "$leg" "$s" "$hrc"
             norm=$log.norm; serial_norm "$log" > "$norm"
 
@@ -422,6 +425,8 @@ for leg in $legs; do
             why=
             grep -qx "PAX: init /bin/$i ended with status $lst; nothing left to run" "$norm" \
                 || why+=" no 'PAX: init /bin/$i ended with status $lst' ($(grep -m1 '^PAX: init ' "$norm"));"
+            pn=$(grep -m1 '^PANIC ' "$norm")
+            [ -z "$pn" ] || why+=" the kernel panicked: $pn;"
             [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
             [ -z "$why" ] && say "PASS T8 $id: init ended, status $lst; $(tail -n 1 "$log.verdict")" || bad "T8 $id:$why"
 
