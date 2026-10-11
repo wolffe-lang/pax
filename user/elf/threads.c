@@ -177,6 +177,8 @@ static void futexes(void) {
     long k3 = r(fut(&fw, FUTEX_WAKE | FUTEX_PRIVATE_FLAG, INT_MAX, 0, 0, 0));
     for (int i = 0; i < 3; i++) pthread_join(t[i], 0);
     say("futex: three waiters: wakes answered %ld %ld %ld, woken in the order %d %d %d\n", k1, k2, k3, forder[0], forder[1], forder[2]);
+    /* an operation Linux has and PAX refuses by name: not compared */
+    say("~futex: FUTEX_REQUEUE with nobody waiting answers %ld here\n", r(fut(&fw, FUTEX_REQUEUE | FUTEX_PRIVATE_FLAG, 1, 0, &fw, 0)));
 }
 
 /* ---- signals: the basics ------------------------------------------------- */
@@ -599,14 +601,14 @@ static void interrupts(void) {
 }
 
 /* ---- what a signal does to a process ---------------------------------------- */
-static volatile int chld_code, chld_status, chld_pid_ok, chld_hits;
-static pid_t chld_want;
+static volatile int chld_code, chld_status, chld_hits;
+static volatile pid_t chld_pid;
 static void h_chld(int sig, siginfo_t *si, void *uc) {
     (void)sig; (void)uc;
     chld_hits++;
     chld_code = si->si_code;
     chld_status = si->si_status;
-    chld_pid_ok = si->si_pid == chld_want;
+    chld_pid = si->si_pid; /* compared by the caller: the child may end before fork returns here */
 }
 static int child_killed_by(int prep, int sig) {
     int st = -1;
@@ -616,7 +618,6 @@ static int child_killed_by(int prep, int sig) {
         if (prep == 2) { sigset_t s; sigemptyset(&s); sigaddset(&s, SIGTERM); sigprocmask(SIG_BLOCK, &s, 0); }
         for (;;) ms(1000);
     }
-    chld_want = c;
     ms(50);
     if (prep == 1) { kill(c, SIGINT); ms(50); }
     if (prep == 2) { kill(c, SIGTERM); ms(50); }
@@ -640,14 +641,12 @@ static void deaths(void) {
     chld_hits = 0;
     pid_t c = fork();
     if (c == 0) _exit(5);
-    chld_want = c;
     while (!chld_hits) ms(5);
     waitpid(c, &st, 0);
-    say("death: SIGCHLD for a child that exits 5: si_code %d si_status %d si_pid is the child %d", chld_code, chld_status, chld_pid_ok);
+    say("death: SIGCHLD for a child that exits 5: si_code %d si_status %d si_pid is the child %d", chld_code, chld_status, chld_pid == c);
     chld_hits = 0;
     c = fork();
     if (c == 0) for (;;) ms(1000);
-    chld_want = c;
     ms(30);
     kill(c, SIGKILL);
     while (!chld_hits) ms(5);
@@ -678,6 +677,12 @@ static void deaths(void) {
     waitpid(c, &st, 0);
     say("; default, in a child: its status 0x%x\n", st);
     signal(SIGPIPE, SIG_DFL);
+    /* a stop: Linux stops the child; PAX has no stopped state and says so: not compared */
+    c = fork();
+    if (c == 0) { kill(getpid(), SIGTSTP); _exit(3); }
+    waitpid(c, &st, WUNTRACED);
+    if (WIFSTOPPED(st)) { kill(c, SIGKILL); waitpid(c, 0, 0); }
+    say("~stop: a child that sends itself SIGTSTP with the default action: its parent's wait sees 0x%x here\n", st);
 }
 
 /* ---- a thread's exit against the process's --------------------------------- */

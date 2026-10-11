@@ -35,10 +35,13 @@
 #      touch of the page raises signal 11, MADV_GUARD_REMOVE answers 0
 #      and a write then raises nothing.
 #   T3 what PAX lacks or refuses: -ENOSYS only for set_robust_list
-#      (273) and rseq (334), which glibc tolerates; refused
-#      by name nothing; `killed:` lines only for the processes the
+#      (273) and rseq (334), which glibc tolerates; refused by name in
+#      probes exactly the two things the program asks that Linux does
+#      and PAX does not (its `~futex` and `~stop` lines): FUTEX_REQUEUE
+#      (202, -38) and a stop (SIGTSTP's default action, dropped), and
+#      in soak nothing; `killed:` lines only for the processes the
 #      program has killed (probes: by SIGTERM, SIGKILL, SIGUSR1,
-#      SIGPIPE, and a thread's page fault; soak: none).
+#      SIGPIPE, and page faults; soak: none).
 #   T4 everything given back: the frames line after init's end shows
 #      every frame back (A before, A after), with threads made and
 #      ended, their stacks mapped and unmapped, and children forked.
@@ -227,8 +230,10 @@ for leg in $legs; do
             why=
             ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
             [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
-            rf=$(grep ': refused: ' "$norm" | sed -E 's/^user: [^ ]+ pid [0-9]+ //' | sort -u | paste -sd'|' -)
-            [ -z "$rf" ] || why+=" refusals '$rf';"
+            rf=$(grep ': refused: ' "$norm" | sed -E 's/^.*user: [^ ]+ pid [0-9]+ //' | LC_ALL=C sort -u | paste -sd'|' -)
+            wr=
+            [ "$s" != probes ] || wr="signal 20 (SIGTSTP): refused: stopping a process (no job control), the signal is dropped|syscall 202: refused: a futex operation PAX does not have (wait and wake only), -38"
+            [ "$rf" = "$wr" ] || why+=" refusals '$rf', not '$wr';"
             kl=$(sed -n -E 's/.*user: [^ ]+ pid [0-9]+ killed: ([A-Za-z0-9 ]+).*/\1/p' "$norm" | sed -E 's/ vector.*//; s/ after [0-9]+ runs$//; s/ +$//' | LC_ALL=C sort | uniq -c | awk '{ n = $1; $1 = ""; sub(/^ /, ""); printf "%s%s x%d", sep, $0, n; sep = ", " }')
             if [ "$s" = probes ]; then
                 wk="SIGKILL x3, SIGPIPE x1, SIGTERM x2, SIGUSR1 x1, page fault x3"
@@ -236,7 +241,7 @@ for leg in $legs; do
                 wk=
             fi
             [ "$kl" = "$wk" ] || why+=" killed: '$kl', not '$wk';"
-            [ -z "$why" ] && say "PASS T3 $id: -ENOSYS only for 273 and 334; refused: nothing; killed: ${kl:-nobody}" || bad "T3 $id:$why"
+            [ -z "$why" ] && say "PASS T3 $id: -ENOSYS only for 273 and 334; refused: ${rf:-nothing}; killed: ${kl:-nobody}" || bad "T3 $id:$why"
 
             # T4: every frame back.
             fl=$(grep -m1 '^user: frames free ' "$norm")

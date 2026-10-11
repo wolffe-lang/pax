@@ -37,8 +37,8 @@
 # characters, then Enter (CR, what a terminal sends), unless the step
 # ends with `^D` (Ctrl-D, which hands over what is typed, or ends the
 # input at an empty prompt) or with `^.` (nothing more: `^.` is
-# dropped). In a step, `^C` `^D` `^U` `^W` are those control
-# characters, `^?` is DEL (the erase character, what Backspace sends)
+# dropped). In a step, `^C` `^D` `^U` `^W` and (px26) `^\` are those
+# control characters, `^?` is DEL (the erase character, what Backspace sends)
 # and `^^` a `^`. A step that starts with `^~` (px26) waits for no
 # prompt: it is typed PAX_TYPE_PAUSE seconds (default 2) after the
 # step before it, at whatever program is running (Ctrl-C on a `sleep`);
@@ -173,6 +173,7 @@ key_of() { # byte (decimal) -> a sendkey name
     if [ "$b" -ge 1 ] && [ "$b" -le 26 ] && [ "$b" != 9 ] && [ "$b" != 13 ]; then
         printf 'ctrl-'; printf "\\$(printf %o $((b + 96)))"; return
     fi
+    if [ "$b" = 28 ]; then printf 'ctrl-backslash'; return; fi # px26: Ctrl-\, VQUIT
     c=$(printf "\\$(printf %o "$b")")
     case $b in
         32) printf spc ;; 13) printf ret ;; 9) printf tab ;; 127) printf backspace ;;
@@ -199,7 +200,7 @@ step_bytes() { # a KEYS line -> the bytes it types, as decimal numbers
         if [ "$c" = '^' ] && [ $((i + 1)) -lt "$n" ]; then
             d=${l:$((i + 1)):1}
             case $d in
-                C) out+=(3) ;; D) out+=(4) ;; U) out+=(21) ;; W) out+=(23) ;;
+                C) out+=(3) ;; D) out+=(4) ;; U) out+=(21) ;; W) out+=(23) ;; '\') out+=(28) ;;
                 '?') out+=(127) ;; '^') out+=(94) ;; .) ;;
                 *) out+=(94); i=$((i + 1)); continue ;;
             esac
