@@ -7,6 +7,35 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The writable tree (px27).** PAX's file tree is writable, in memory:
+  `kernel/tree` keeps inodes (files whose bytes are frames under an
+  index that grows with the file, with holes; directories of records)
+  and the initramfs is its first contents, each file read in place from
+  the archive until something writes to it. `openat` takes `O_CREAT`,
+  `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_WRONLY`, `O_RDWR` and
+  `O_NOFOLLOW`, with the mode and the process's `umask`; `write`,
+  `pwrite64`, `ftruncate`, `truncate`, `mkdir`, `mkdirat`, `rmdir`,
+  `unlink`, `unlinkat`, `rename`, `renameat`, `renameat2` (no flag),
+  `fsync`, `fdatasync`, `access`, `faccessat`, `faccessat2` and `umask`
+  answer; `copy_file_range` and `sendfile` copy between files, `splice`
+  from a pipe into one; `statx`, `fstat` and `getdents64` answer from
+  the inodes, with tmpfs's sizes and link counts for a directory and
+  real times from the wall clock. A file unlinked while open lives
+  until its last close; a directory removed under a process stays,
+  empty, until the process leaves; `rename` is every check, then the
+  change. Paths are resolved a directory at a time. The tree holds at
+  most half the frames that were free at boot and never takes the
+  machine's last 2,048: `ENOSPC`. Refused by name, each counted: hard
+  and symbolic links, device nodes, changes of mode, owner and times,
+  `O_DIRECT`, `O_SYNC`, `O_DSYNC`, `O_NOATIME`, `O_PATH`, `O_TMPFILE`,
+  a `renameat2` flag, anything made or removed under `/dev`, and the
+  `execve` of a program written since boot. The shell's image carries
+  boreutils at bu21 (`abc59f5`), with `mkdir`, `rmdir`, `rm`, `mv` and
+  `cp`; `tests/mpx3-tree` holds a static probe and a typed session to
+  Linux's tmpfs byte for byte, the Linux side in a throwaway container.
+  No disk: the tree is gone at halt. No link of either kind, no `chmod`,
+  no `touch`, no `mmap` of a file, no AF_UNIX path socket, no `/proc`
+  or `/sys` beyond `/proc/self/exe`.
 - **Threads, futexes and signals (px26).** PAX's shell image runs the
   current pelt (sh05, `b32bebc`) and the current boreutils (bu20,
   `870815c`) unmodified. A process may have threads: `clone`/`clone3`

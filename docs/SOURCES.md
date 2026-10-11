@@ -525,3 +525,23 @@ Permissively licensed kernels: none consulted.
 | black-box Linux 7.2.8 (kasumi, the `px13-ubuntu` container, glibc 2.39, strace 6.8): `strace -f` of pax's own builds of pelt `b32bebc` and boreutils `870815c` on a pseudo-terminal (`notes/px26/*.strace`, the keys and the script beside them) | — | — | measured | which calls the two make and with what arguments; which thread takes the terminal's SIGINT; what `ls -l` reads |
 | black-box Linux: `user/elf/threads.c`, a static glibc program written for this lane, run on Linux 7.2.8 and on the CI runner's kernel | — | pax's own | measured | every answer `kernel/futex` and `kernel/signal` give that the man pages leave open: a private wait is not reached by a wake without the flag; pending signals run highest-numbered first; the handler starts with a fresh x87/SSE state; `uc_flags` 7 and a zero stack triple; the ucontext 8 bytes and the siginfo 312 above the handler's RSP; which calls run again under SA_RESTART; the exit status of a process whose leader exits first; a fault with its signal blocked or ignored still ends the process |
 
+## px27: the writable tree
+
+No kernel's, libc's or file system's source was read or searched for
+(not Linux's, a BSD's, any tmpfs or ramfs). boreutils, pelt and lobo
+are used as built from their own repositories at their pins; their
+source was not read for how they work (bu21's `tools/roottest` was
+read as a tool, for how a root guard is tested in a container). No GNU,
+busybox, uutils or toybox source. Permissively licensed kernels: none
+consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| man-pages `open(2)`/`openat(2)` (the flags, O_CREAT's mode and umask, the errors), `write(2)`, `pwrite(2)` (and its BUGS: O_APPEND), `lseek(2)`, `truncate(2)`, `mkdir(2)`, `rmdir(2)`, `unlink(2)`, `rename(2)`, `link(2)`, `symlink(2)`, `mknod(2)` (EPERM for a file system that makes none), `chmod(2)`, `chown(2)`, `utimensat(2)`, `stat(2)`, `statx(2)`, `getdents(2)`, `fsync(2)`, `umask(2)`, `access(2)`, `copy_file_range(2)`, `sendfile(2)`, `splice(2)`, `getcwd(3)`, `path_resolution(7)`, `inode(7)`, `tmpfs(5)` | man-pages 6.x | their own | read | every call's arguments and errors; what is refused and with which errno |
+| POSIX.1-2024 (`rename`, `unlink`, `rmdir`, `readdir`: what a reading of a directory may return while it changes) | 2024 | IEEE/The Open Group | read | `kernel/tree`'s `rename` and `entry_at` |
+| uapi headers in the sparse checkout: `asm-generic/fcntl.h` and `linux/fcntl.h` (O_*, AT_REMOVEDIR, AT_EACCESS, RENAME_*), `linux/stat.h` (`struct statx`, STATX_BTIME), `arch/x86/include/uapi/asm/stat.h`, `asm-generic/errno-base.h`, `asm-generic/errno.h`, `arch/x86/entry/syscalls/syscall_64.tbl` (the numbers) | the sparse checkout's | GPL-2.0 WITH Linux-syscall-note | read | the constants and the layouts |
+| the Intel SDM vol. 2 (MOVS, STOS, REP) and the x86-64 psABI | — | their own | read | `boot/tree.S` |
+| black-box Linux 7.2.8 (kasumi, a throwaway `px13-ubuntu` container, strace 6.8, every program on a tmpfs): `strace -f` of pax's own builds of boreutils `abc59f5` (`mkdir`, `rmdir`, `rm`, `mv`, `cp`, `ls`, `stat`, `cat`) and pelt `b32bebc` (`>`, `>>`, `<>`, a here-document), and of lobo `b256d2e` serving, reloading, reopening its logs and stopping (`notes/px27/straces/`) | — | — | measured | which calls and flags a program in an image, and lobo, make on files: the list this lane implements, and what it leaves refused |
+| black-box Linux: `user/elf/tree.c`, a static glibc program written for this lane, pid 1 with its root a tmpfs in a throwaway container (`tools/linux-tree`), on Linux 7.2.8 and on the CI runner's kernel | — | pax's own | measured | every answer the man pages leave open or this lane had predicted: a directory's size (40 and 20 an entry) and link count; `O_RDONLY\|O_TRUNC` truncates; `pwrite` on an O_APPEND descriptor appends; a hole's blocks; what `rmdir` and `rename` answer for `.`, `..`, `/` and a mount point; a removed working directory (`getcwd` -ENOENT, 0 links, a reading of it -ENOENT, nothing made in it); `copy_file_range`, `sendfile` and `splice` between files and onto O_APPEND; which times a write, a read, a rename, a truncation and an unlink move |
+| black-box Linux: `user/console/shell-tree.keys` typed into the same binaries (`tools/linux-tree`: `tools/linux-tty` inside the container) | — | — | measured | the session's reference transcript, taken afresh at every run |
+

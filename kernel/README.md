@@ -47,6 +47,7 @@ text (`tests/tour`, `tools/tour`).
 | `signal/` | signals delivered (px26): `rt_sigaction`, `rt_sigprocmask` (a mask a thread), `rt_sigpending`, `kill`, `tgkill`, `tkill`; `on_return`, which every frame about to resume in ring 3 passes through (`interrupts`) and which takes the thread's pending signals — ignore, terminate (the process ends, its wait status the signal), stop refused by name, or a handler on a frame laid on the thread's stack: the extended state as XSAVE wrote it with its two magics, siginfo, ucontext with every register, the restorer's address; `rt_sigreturn` puts it all back and leaves by IRETQ; a waiting system call is run again or answers -EINTR by what it was (`sched`'s `W_*`) and SA_RESTART; `fault` gives an exception in ring 3 to a handler; `tty` raises the console's signals for every process |
 | `futex/` | the `futex` call (px26): wait, wake, their bitset forms, FUTEX_PRIVATE_FLAG (a key bit: a private wait is not reached by a wake without it), relative and absolute timeouts; the key is the word's physical address; waiters are threads in `sched`'s FUTEX state, woken longest-waiting first; other operations refused by name |
 | `rtc/` | the CMOS real-time clock read once at `user.start` (px26): seconds since the epoch for CLOCK_REALTIME, `time` and `gettimeofday` |
+| `tree/` | the writable file tree, in memory (px27): inodes, files in frames, directories of records, the initramfs as its first contents, a cap and `ENOSPC` (below, "The writable tree") |
 | `schedtest/` | the thread bodies `tests/mpx2-sched` runs, as `export fn`s the kernels name with `extern "c" let` (px07) |
 | `pax_tour/` | the tour's stages (px08): each calls the subsystems above as their test kernels do and prints their reports under a heading; `leaf`, a read-only walk of the live page tables for the permissions stage 3 prints; `pax_tour_worker`, stage 5's named thread body; the pauses between stages (the PIT's count polled before the timer interrupt is live, `timer.wait`, then `sched.sleep`) |
 
@@ -583,3 +584,28 @@ programs that open AF_INET stream sockets (`tests/mpx4-tcp`,
   delivered to a UDP socket; more than 64 control blocks or a listen
   queue past 33; a closed connection whose peer acknowledges and never
   opens its window stays until the peer goes.
+## The writable tree (px27)
+
+Every kernel that links `kernel/user` makes the file tree at
+`user.start` (`tree.start`): the initramfs's entries are its first
+inodes, and from then on it is written, grown and emptied by the
+programs. `tests/mpx3-tree` holds it to Linux's tmpfs.
+
+| module or file | what |
+|---|---|
+| `tree/` | **inodes** (16 words; a table that grows a frame at a time, 32 a frame, at most 16,384; a freed inode is the next one made): mode, link count, size, holders (`hold`, `release`: open files, working directories, a removed directory's hold on its parent), four times, where the bytes are. **a file's bytes**: frames under an index of depth 0 (the frame alone), 1 (512 pointers) or 2 (1 GiB, the largest file); a page never written has no frame (`span` answers the page of zeros); `cut` gives back every frame past a size. **the initramfs under it** (`start`, `adopt`): an archive file's inode reads the archive in place (`I_BACK`, `I_BACKLEN`) until a page is written, which copies that page; `archive_entry` says whether a file is still the archive's whole (what `execve` can load). **directories**: records (inode + 1, lengths, name), none across a page, a removed one free again and joined to the free ones after it; `lookup`, `entry_at` (the first live record at or after a position, found from its page's start), `name_of`; a directory with no entry holds no frame. **the changes**: `create`, `mkdir`, `unlink`, `rmdir`, `rename` (every refusal and the room for the new name before the first change), `truncate`, `read`, `write` (from a user buffer or kernel bytes). **the cap**: half the frames free at `start`, and never below `RESERVE` (2,048) free in the machine (`grab`); `held`, `live`, `table_frames`, `base` for the books; `census_due`, `full_news` for kernel/user's lines; `refuse` counts a refusal by name |
+| `../boot/tree.S` | `pax_tree_state` (32 words), `pax_tree_copy` and `pax_tree_zero` (REP MOVS, REP STOS on kernel addresses) |
+| `files/` | a node may be an inode (`T_INO`); `walk` resolves a path a directory at a time (`.`, `..`, -ENOTDIR, -ENOENT, -ENAMETOOLONG for a component past 255 bytes; the directory and name of the last component for the calls that make or remove one); `openat` with `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_WRONLY`/`O_RDWR`, `O_NOFOLLOW`, the mode and `umask`; `file_write`, `pwrite`, `ftruncate`, `truncate`, `fsync`, `mkdirat`, `unlinkat`, `renameat`, `faccessat`, `umask`, `refused`; `copy_file_range` and `sendfile` between files, `splice` from a pipe into one; an open file and a working directory hold their inode (`of_new`, `of_drop`, `set_cwd`, `inherit`, `close_all`); `getcwd` walks up; `put_stat`/`put_statx` with times, blocks and two device numbers (the tree 0:1, `/dev` 0:5); `getdents` from the records, `dev` last in the root; `exec_lookup` asks `tree.archive_entry` |
+| `initramfs/` | `mtime` |
+| `user/` | `tree.start` in `start`; the dispatch (18, 21, 74-77, 82-84, 87, 95, 258, 263, 264, 269, 316, 439; refused by name 86, 88, 90-94, 132, 133, 235, 259, 260, 265, 266, 268, 280, 452); `write` to a file; `tree_lines` (every 2500th file removed: the books; the tree at its cap) and `tree_report` (after a kernel's frames line) |
+| `kmain_console.lu` | `user.tree_report()` after the frames line |
+
+- Layering: `user` → `files` → `tree` → `frames`, `initramfs`, `paging`.
+  `tree` knows no descriptor, path or process; `files` keeps those and
+  holds inodes by number.
+- What is not there: links of either kind, `chmod`, `chown`, times set
+  by a call, `mmap` of a file, a second writable file system (`/dev` is
+  fixed), `/proc` and `/sys` beyond `/proc/self/exe`, file locks,
+  `fallocate`, `statfs`. `execve` runs a file only while it is still
+  the archive's own bytes.
+
