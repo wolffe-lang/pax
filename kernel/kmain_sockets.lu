@@ -1,0 +1,265 @@
+//! member: false
+// kmain_sockets.lu — Linux programs that speak UDP (px22,
+// tests/mpx4-udp). The kernel starts as kmain_boreutils does (PAX's
+// paging with the initramfs mapped, the timer, the FPU state, the
+// scheduler, SYSCALL) and as kmain_net does (the PCI scan, kernel/net
+// and, over it, kernel/arp, kernel/ip, kernel/icmp and kernel/udp as
+// 10.0.2.15 netmask 255.255.255.0 gateway 10.0.2.2, the network thread
+// and its clock), then runs the archive's run list, `/etc/pax-run`:
+// one command a line, its words separated by single spaces, the first
+// the program's path (a static x86-64 Linux executable, unmodified);
+// empty lines and lines starting `#` are skipped. Each command runs
+// with the environment HOME=/ TERM=linux PAX=1, its descriptors 0-2
+// the serial console, and is waited for (with every process it made);
+// then the line's frames, its time and the books:
+//
+//     PAX: sockets
+//     …
+//     ip: 10.0.2.15 netmask 255.255.255.0 gateway 10.0.2.2, MTU 1500, …
+//     udp: 16 sockets, a 65536-byte queue each, ports 32768-60999 from <p>, …
+//     run 1: /bin/sockerr
+//     user: exec pid <p> cr3 0x… …
+//     <the program's lines>
+//     user: sockerr pid <p> exit_group 0 after <r> runs
+//     user: frames free <A> before, <B> with 1 processes, <A> after
+//     user: run 1 took <t> ticks, <u> us by the time-stamp counter
+//     user: books: heap pages <h>, live blocks <b>, net frames <n>, stack frames <s>, open files <o>, pipes <q>, sockets <k>, datagrams waiting <w>
+//     …
+//     run: <k> commands
+//     net: … arp: … ip: … icmp: … udp: … (the counters)
+//     netd: <t> turns, <c> clock turns
+//     halt
+//
+// With no network device the run list still runs: loopback needs none
+// (`net: no virtio network device …; the network is off`).
+use apic
+use arp
+use files
+use fpu
+use frames
+use heap
+use icmp
+use initramfs
+use interrupts
+use ip
+use log
+use net
+use netd
+use paging
+use panic
+use pci
+use sched
+use serial
+use sync
+use timer
+use udp
+use user
+
+extern "c" let pax_user_thread: *u8
+extern "c" let pax_netd: *u8
+extern "c" let pax_net_clock: *u8
+
+extern "c" fn pax_rdtsc() -> u64
+
+const OWN_IP: u64 = 0x0a00020f // 10.0.2.15
+const NETMASK: u64 = 0xffffff00 // 255.255.255.0
+const GATEWAY: u64 = 0x0a000202 // 10.0.2.2
+const ENV: str = "HOME=/ TERM=linux PAX=1"
+const RUN_LIST: str = "/etc/pax-run"
+
+/// The body ELF processes run (kernel/user's export).
+fn body() -> u64 {
+    // # Safety: the address of kernel/user's export; nothing is read.
+    unsafe { pax_user_thread as u64 }
+}
+
+fn byte_at(a: u64) -> u64 {
+    // # Safety: a byte of the run list, inside the initramfs's pages
+    // (mapped read-only in the HHDM for the kernel's life).
+    unsafe { (a as *u8).read_volatile() as u64 }
+}
+
+fn tsc() -> u64 {
+    // # Safety: boot's RDTSC; it touches no memory.
+    unsafe { pax_rdtsc() }
+}
+
+/// Wait for the next tick's edge; the tick it began.
+fn edge() -> u64 {
+    let t = timer.ticks()
+    while timer.ticks() == t {
+        sync.relax()
+    }
+    timer.ticks()
+}
+
+/// Time-stamp counts in 20 ticks of the PIT (0.2 s), from one tick's
+/// edge to another.
+fn calibrate() -> u64 {
+    let t0 = edge()
+    let c0 = tsc()
+    while timer.ticks() < t0 + 20 {
+        sync.relax()
+    }
+    tsc() - c0
+}
+
+/// Frames the protocols above the driver hold.
+fn stack_frames() -> u64 {
+    arp.frames_held() + ip.frames_held() + icmp.frames_held() + udp.frames_held()
+}
+
+/// Run line number `k`, the `n` bytes at `a`: one command, waited for
+/// with every process it makes (`floor`: the threads live before it,
+/// the network's own); then its frames, its time and the books.
+fn run(k: u64, a: u64, n: u64, floor: u64, per20: u64) {
+    let s = sync.acquire(sync.console())
+    log.put("run ")
+    log.dec(k as int)
+    log.put(": ")
+    var i: u64 = 0
+    while i < n {
+        log.put_byte(byte_at(a + i) as int)
+        i += 1
+    }
+    log.end()
+    sync.release(sync.console(), s)
+    let saved = sync.irq_save()
+    let before = frames.free_count()
+    var pl: u64 = 0
+    while pl < n && byte_at(a + pl) != 32 {
+        pl += 1
+    }
+    let id = user.exec_line(body(), a, pl, a, n, ENV)
+    let during = frames.free_count()
+    let t0 = timer.ticks()
+    let c0 = tsc()
+    sync.irq_restore(saved)
+    sched.wait_down_to(floor)
+    let c1 = tsc()
+    let t1 = timer.ticks()
+    let after = frames.free_count()
+    let s2 = sync.acquire(sync.console())
+    log.put("user: frames free ")
+    log.dec(before as int)
+    log.put(" before, ")
+    log.dec(during as int)
+    log.put(" with ")
+    log.dec(if id != 0 { 1 } else { 0 })
+    log.put(" processes, ")
+    log.dec(after as int)
+    log.put(" after")
+    log.end()
+    log.put("user: run ")
+    log.dec(k as int)
+    log.put(" took ")
+    log.dec((t1 - t0) as int)
+    log.put(" ticks, ")
+    log.dec(((if c1 > c0 { c1 - c0 } else { 0 }) * 200000 / per20) as int)
+    log.put(" us by the time-stamp counter")
+    log.end()
+    log.put("user: books: heap pages ")
+    log.dec(heap.pages() as int)
+    log.put(", live blocks ")
+    log.dec(heap.live_blocks() as int)
+    log.put(", net frames ")
+    log.dec(net.frames_held() as int)
+    log.put(", stack frames ")
+    log.dec(stack_frames() as int)
+    log.put(", open files ")
+    log.dec(files.open_files() as int)
+    log.put(", pipes ")
+    log.dec(files.pipes_held() as int)
+    log.put(", sockets ")
+    log.dec(udp.open_count() as int)
+    log.put(", datagrams waiting ")
+    log.dec(udp.waiting() as int)
+    log.end()
+    sync.release(sync.console(), s2)
+}
+
+export fn kmain() {
+    serial.init()
+    log.line("PAX: sockets")
+    frames.start()
+    let limine = paging.cr3()
+    let before = frames.free_count()
+    let pml4 = paging.start()
+    paging.report(limine, before)
+    initramfs.report()
+    initramfs.require()
+    interrupts.start()
+    apic.start(pml4)
+    timer.start()
+    fpu.start()
+    fpu.report()
+    sched.start(pml4)
+    sched.report()
+    heap.start()
+    user.start()
+    user.report()
+    let _n = pci.scan()
+    let up = net.start(pml4) == net.UP
+    net.report()
+    arp.start(OWN_IP, arp.AGE)
+    ip.start(OWN_IP, NETMASK, GATEWAY)
+    icmp.start()
+    udp.start()
+    ip.report()
+    udp.report()
+    if stack_frames() != 12 {
+        panic.fail("sockets: no frame for the stack, frames", stack_frames())
+    }
+    var floor: u64 = 0
+    if up {
+        // # Safety: the addresses of kernel/netd's exports; nothing is read.
+        let (nd, clock) = unsafe { (pax_netd as u64, pax_net_clock as u64) }
+        sched.create(nd, 0)
+        sched.create(clock, 0)
+        floor = 2
+    }
+    sync.enable()
+    let per20 = calibrate()
+
+    let e = initramfs.lookup(RUN_LIST)
+    if e == initramfs.END {
+        panic.fail("sockets: no /etc/pax-run in the initramfs, bytes", initramfs.bytes())
+    }
+    let d = initramfs.data(e)
+    let size = initramfs.size(e)
+    var k: u64 = 0
+    var i: u64 = 0
+    while i < size {
+        var j = i
+        while j < size && byte_at(d + j) != 10 {
+            j += 1
+        }
+        if j > i && byte_at(d + i) != 35 {
+            k += 1
+            run(k, d + i, j - i, floor, per20)
+        }
+        i = j + 1
+    }
+
+    let saved = sync.irq_save()
+    log.put("run: ")
+    log.dec(k as int)
+    log.put(" commands")
+    log.end()
+    net.counters()
+    arp.counters()
+    ip.counters()
+    icmp.counters()
+    udp.counters()
+    log.put("netd: ")
+    log.dec(netd.turns() as int)
+    log.put(" turns, ")
+    log.dec(netd.clock_turns() as int)
+    log.put(" clock turns")
+    log.end()
+    sync.irq_restore(saved)
+    let _off = sync.irq_save()
+    timer.stop()
+    log.line("halt")
+    panic.halt()
+}
