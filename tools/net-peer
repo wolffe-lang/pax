@@ -96,7 +96,9 @@
 #       10.0.2.100 and from 192.0.2.1 by way of the gateway; with a
 #       datagram that carries no checksum (the answer carries one); with
 #       no data; with bytes after the datagram's end; to the subnet's
-#       broadcast address in a broadcast frame
+#       broadcast address in a broadcast frame; with a checksum that
+#       comes out zero and is sent as 0xffff (RFC 768), as the answer's
+#       must be
 #   U6  the malformed, none answered and none delivered: 4 bytes where
 #       8 are the least; a length of 7; a length over the datagram's; a
 #       wrong checksum; destination port 0
@@ -104,6 +106,10 @@
 #       alone draws a destination unreachable, code 3, quoting its
 #       header and 8 bytes; one to the subnet's broadcast and one in a
 #       broadcast frame draw none; then "quit"
+#   U9  (before U8 on the wire) `udphold 4030 10.0.2.2 9097` says
+#       "ready" from port 4030 and reads nothing for a second and a
+#       half: 60 datagrams of 1472 bytes are sent to it at once, more
+#       than its queue holds (PAX: 44; the rest are counted `full`)
 #   U8  `resolve 10.0.2.3 pax.test`: an RFC 1035 query with one A
 #       question from an ephemeral port to 10.0.2.3 port 53, answered
 #       with one A record, 192.0.2.53
@@ -655,8 +661,9 @@ class Peer:
         self.echoed(G, A, b"", "a datagram with no data")
         self.echoed(G, A, b"the datagram", "a datagram with 9 bytes after its end", trailer=b"not in it")
         self.echoed(G, A, b"to everyone on the subnet", "a datagram to 10.0.2.255 in a broadcast frame", dst_ip=px.SUBNET_BCAST, dst_mac=px.BCAST)
+        self.echoed(G, A, px.sum_zero(A, px.ECHO_PORT, b"a sum of zero.", G, px.PAX_IP), "a datagram whose checksum comes out zero")
         print("net-peer: ok U5 echoed: from 10.0.2.100; from 192.0.2.1 by way of the gateway; with no checksum (the answer carries one); "
-              "with no data; with bytes after its end; to 10.0.2.255 in a broadcast frame")
+              "with no data; with bytes after its end; to 10.0.2.255 in a broadcast frame; with a checksum that comes out zero (0xffff both ways)")
         # U6: the malformed. None is answered; the echo after them must
         # be PAX's very next datagram.
         self.dropped("udp.short", "a 4-byte UDP datagram", self.send_raw(G, b"\x9c\x40\x00\x07"))
@@ -684,6 +691,14 @@ class Peer:
         self.echoed(P, 40001, b"fence 3", "the datagram after two that may draw no error")
         self.echoed(G, A, b"quit", "\"quit\"")
         print("net-peer: ok U7 nobody at port 9: 1 destination unreachable (code 3), exact; 4 held back by the limit; 2 to a broadcast address or frame drew none")
+        # U9 (after U7 on the wire): a socket nobody reads for a while.
+        p, dst, dport, data = self.udp_in(60.0, "udphold's \"ready\"")
+        if (p, dst, dport, data) != (px.HOLD_PORT, G, px.HOLD_READY, b"ready"):
+            self.fail("U9: not \"ready\" from port %d to 10.0.2.2 port %d: port %d to %s port %d, %r" % (px.HOLD_PORT, px.HOLD_READY, p, px.dotted(dst), dport, data[:40]))
+        for i in range(px.HOLD_BURST):
+            self.udp_out(G, A, px.HOLD_PORT, px.hold_datagram(i))
+        self.sent["udp"] = self.sent.get("udp", 0) + px.HOLD_BURST
+        print("net-peer: ok U9 udphold's \"ready\"; %d datagrams of %d bytes sent at once to a socket nobody reads for a second and a half" % (px.HOLD_BURST, px.DATA_MAX))
         # U8: the resolver.
         p, dst, dport, q = self.udp_in(60.0, "resolve's query")
         asked = px.dns_question(q)

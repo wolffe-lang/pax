@@ -41,8 +41,9 @@
 #                      (RFC 862's echo, user/net/udpecho) it carries the
 #                      data of a datagram that reached port 7 from where
 #                      it now goes and has not been echoed — or "ready",
-#                      the server's first word; from any other port, the
-#                      port is an ephemeral one (32768-60999); and never
+#                      the server's first word (user/net/udphold's too,
+#                      from port 4030); from any other port, the port is
+#                      an ephemeral one (32768-60999); and never
 #                      for 10.0.2.15 itself or 127/8: what loops back
 #                      does not touch the wire
 #   every datagram     version 4, IHL 5, DF, time to live 64, protocol
@@ -391,8 +392,10 @@ def main(argv):
                     else:
                         fail(n, "a datagram from PAX's port 7 to %s port %d that echoes nothing that address and port sent port 7"
                              % (px.dotted(dst), dport))
+                elif sport == px.HOLD_PORT and data == b"ready":
+                    c["udp.ready"] += 1
                 elif sport not in px.EPHEMERAL:
-                    fail(n, "a UDP datagram from PAX's port %d, which is neither 7 nor an ephemeral port" % sport)
+                    fail(n, "a UDP datagram from PAX's port %d, which is neither a witness's nor an ephemeral port" % sport)
                 c["udp.out"] += 1
                 continue
             if h[9] != 1:

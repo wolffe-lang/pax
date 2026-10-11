@@ -253,6 +253,9 @@ def pax_arp_reply(to_mac, to_ip):
 ECHO_PORT = 7          # RFC 862: user/net/udpecho's
 SERVICE_PORT = 9099    # where udpecho says "ready", and the reversing server
 EXTRA_PORT = 9098      # where a second udpecho says "ready" for the wider battery
+HOLD_PORT = 4030       # user/net/udphold's
+HOLD_READY = 9097      # where udphold says "ready"
+HOLD_BURST = 60        # datagrams of DATA_MAX bytes it is then sent
 ASKER_PORT = 40000     # the port the echo battery comes from
 DISCARD_PORT = 9       # a port no witness binds
 DNS_PORT = 53
@@ -318,6 +321,22 @@ def port_unreachable_for(f, ihl, total, ident, to_mac):
     quote = h[:ihl + min(8, total - ihl)]
     m = icmp(3, 3, b"\x00" * 4, quote)
     return pad60(frame(to_mac, PAX_MAC, ipv4(PAX_IP, h[12:16], 1, m, ident=ident)))
+
+
+def sum_zero(sport, dport, text, src, dst):
+    """`text` (an even number of bytes) and two more bytes that make the
+    UDP checksum of the datagram come out zero, which RFC 768 has sent
+    as 0xffff."""
+    assert len(text) % 2 == 0
+    seg = struct.pack(">HHHH", sport, dport, 8 + len(text) + 2, 0) + text + b"\x00\x00"
+    data = text + struct.pack(">H", udp_sum(src, dst, seg))
+    assert udp(sport, dport, data, src, dst)[6:8] == b"\xff\xff"
+    return data
+
+
+def hold_datagram(i):
+    """Datagram `i` of the burst udphold sleeps through."""
+    return bytes([i]) + bytes((i * 3 + k) & 0xff for k in range(1, DATA_MAX))
 
 
 def echo_battery():
