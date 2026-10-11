@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# mkprobes — build px26's probe of threads, futexes and signals
+# (user/elf/threads.c) as a static x86-64 Linux executable.
+#
+#   tools/mkprobes OUTDIR
+#
+# One program, the host's cc and its static glibc with pthreads:
+# `cc -static -no-pie -O1 -pthread`, ET_EXEC with no PT_INTERP (checked),
+# the same file run on Linux and on PAX (tests/mpx3-threads). Build on a
+# baseline x86-64 glibc (the CI runner's Ubuntu; an Ubuntu container on
+# kasumi), never on kasumi's own, whose start-up uses AVX-512 (px10).
+# Prints `threads <sha256> <bytes>`. Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkprobes OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${CC:-cc}
+need "$cc" readelf
+"$cc" -static -no-pie -O1 -pthread -Wall -Wextra -Wl,--build-id=none -Wl,-z,noexecstack \
+    -o "$out/threads" "$PAX_ROOT/user/elf/threads.c" || die "cc: threads"
+readelf -hW "$out/threads" | grep -Eq 'Type: +EXEC' || die "threads is not ET_EXEC"
+! readelf -lW "$out/threads" | grep -q INTERP || die "threads has a PT_INTERP (not static)"
+printf '%s %s %s\n' threads "$(sha256_of "$out/threads")" "$(wc -c < "$out/threads" | tr -d ' ')"
