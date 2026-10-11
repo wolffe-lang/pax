@@ -68,14 +68,19 @@
 //! as it has on Linux). The most a datagram carries is `DATA_MAX`
 //! (1472) bytes: 1500 less the two headers; nothing is fragmented.
 //!
-//! **Loopback.** A datagram for this station's own address or for 127/8
-//! never reaches kernel/ip: `send` hands it to the receiving side in
-//! the same call — the same taker, the same queue — with its source the
-//! sender's bound address or, when it has none, the address it was sent
-//! to reach (127.0.0.1 for 127/8, else this station's). One nobody
-//! takes is counted and dropped; nothing is sent about it. A
-//! destination of 0.0.0.0 is 127.0.0.1, and a socket bound in 127/8
-//! cannot send off the station (-EINVAL): both as Linux answered.
+//! **Loopback** is kernel/ip's (px23; px22 kept one of its own here). A
+//! datagram for this station's own address or for 127/8 is sent like
+//! any other, with its source the sender's bound address or, when it
+//! has none, the address it was sent to reach (127.0.0.1 for 127/8,
+//! else this station's); kernel/ip puts it on its loopback queue and
+//! kernel/netd's `drain`, which runs before the sender's system call
+//! returns, brings it to `input` with `looped` set: the same checks,
+//! the same taker, the same queue. What comes that way is counted
+//! apart (`loopback … sent, queued, no-port, full`), so the counters
+//! above stay what the wire carried. One nobody takes draws a port
+//! unreachable like any other, to this machine (kernel/icmp counts
+//! it). A destination of 0.0.0.0 is 127.0.0.1, and a socket bound in
+//! 127/8 cannot send off the station (-EINVAL): both as Linux answered.
 //!
 //! State is words in boot/net.S (`pax_udp_state`, `pax_udp_socks`), one
 //! frame for composing and 16 a socket, all under `sync.udp()`, which
@@ -114,7 +119,6 @@ pub const EPHEMERAL_LO: u64 = 32768
 pub const EPHEMERAL_HI: u64 = 60999
 const PAGE: u64 = 4096
 const QUEUE_PAGES: u64 = 16
-const LOOPBACK: u64 = 0x7f000001 // 127.0.0.1
 
 // pax_udp_state's words.
 const U_FRAME: u64 = 0 // where a datagram is composed (HHDM)
@@ -437,7 +441,7 @@ fn ephemeral() -> u64 {
 /// Whether `a` is an address a socket may bind or a datagram loops back
 /// to: this station's, or anything in 127/8.
 fn local(a: u64) -> bool {
-    a == ip.address() || a >> 24 == 127
+    ip.local(a)
 }
 
 /// `bind`: socket `s` takes `port` (0: an ephemeral one) on `addr` (0:
@@ -468,7 +472,7 @@ pub fn bind(s: u64, addr: u64, port: u64) -> u64 {
 /// leaves with when it goes to `dst`: 127.0.0.1 for 127/8, else this
 /// station's.
 fn source_for(dst: u64) -> u64 {
-    if dst >> 24 == 127 { LOOPBACK } else { ip.address() }
+    ip.source_for(dst)
 }
 
 /// `connect`: socket `s` gets the default peer `addr`:`port`, hears
@@ -489,7 +493,7 @@ pub fn connect(s: u64, addr: u64, port: u64) -> u64 {
     if r == 0 {
         // 0.0.0.0 as a destination is this machine (measured on Linux:
         // the peer reads back as 127.0.0.1).
-        let to = if addr == 0 { LOOPBACK } else { addr }
+        let to = if addr == 0 { ip.LOOPBACK } else { addr }
         if sw(s, S_NAMED) == 0 {
             put_sw(s, S_LADDR, source_for(to))
         }
@@ -641,10 +645,11 @@ pub fn recv(s: u64, pml4: u64, buf: u64, cap: u64, peek: bool) -> (u64, u64, u64
 // --- receiving ----------------------------------------------------------------------
 
 /// The UDP datagram of a frame kernel/ip passed: the `len`-byte frame
-/// at `frame`, its IP header `ihl` bytes, its total length `total`.
-/// Thread context (kernel/netd). Answers DONE, or NO_PORT when no
-/// socket takes it and its sender may be told.
-pub fn input(frame: u64, ihl: u64, total: u64) -> u64 {
+/// at `frame`, its IP header `ihl` bytes, its total length `total`;
+/// `looped` when it came off kernel/ip's loopback queue (kernel/netd).
+/// Answers DONE, or NO_PORT when no socket takes it and its sender may
+/// be told.
+pub fn input(frame: u64, ihl: u64, total: u64, looped: bool) -> u64 {
     let h = frame + ip.ETH
     let u = h + ihl
     let n = total - ihl
@@ -661,7 +666,7 @@ pub fn input(frame: u64, ihl: u64, total: u64) -> u64 {
         } else if ip.be16(u + 6) != 0 && checksum(src, dst, u, ulen) != 0 {
             bump(C_CHECKSUM)
         } else {
-            if ip.be16(u + 6) == 0 {
+            if ip.be16(u + 6) == 0 && !looped {
                 bump(C_UNCHECKED)
             }
             let dport = ip.be16(u + 2)
@@ -671,12 +676,12 @@ pub fn input(frame: u64, ihl: u64, total: u64) -> u64 {
             } else {
                 let s = taker(src, sport, dst, dport)
                 if s == SOCKS {
-                    bump(C_NO_PORT)
+                    bump(if looped { C_LOOP_NO_PORT } else { C_NO_PORT })
                     r = NO_PORT
                 } else if push(s, src, sport, u + 8, ulen - 8) {
-                    bump(C_RX)
+                    bump(if looped { C_LOOP_RX } else { C_RX })
                 } else {
-                    bump(C_FULL)
+                    bump(if looped { C_LOOP_FULL } else { C_FULL })
                 }
             }
         }
@@ -740,7 +745,7 @@ fn send_locked(s: u64, pml4: u64, buf: u64, len: u64, named: bool, daddr: u64, d
         return EMSGSIZE
     }
     if dst == 0 {
-        dst = LOOPBACK // as `connect`: 0.0.0.0 is this machine
+        dst = ip.LOOPBACK // as `connect`: 0.0.0.0 is this machine
     }
     let f = frame()
     if f == 0 {
@@ -762,30 +767,19 @@ fn send_locked(s: u64, pml4: u64, buf: u64, len: u64, named: bool, daddr: u64, d
         return EFAULT
     }
     let sport = sw(s, S_LPORT)
-    if near {
-        // Never below this module: the receiving side, now.
-        let src = if bound != 0 { bound } else { source_for(dst) }
-        bump(C_LOOP)
-        let t = taker(src, sport, dst, port)
-        if t == SOCKS {
-            bump(C_LOOP_NO_PORT)
-        } else if push(t, src, sport, f + 8, len) {
-            bump(C_LOOP_RX)
-        } else {
-            bump(C_LOOP_FULL)
-        }
-        return 0
-    }
+    // What loops back keeps the address the socket holds; what leaves
+    // is this station's.
+    let src = if !near { ip.address() } else if bound != 0 { bound } else { source_for(dst) }
     ip.put_be16(f, sport)
     ip.put_be16(f + 2, port)
     ip.put_be16(f + 4, 8 + len)
     ip.put_be16(f + 6, 0)
-    let c = checksum(ip.address(), dst, f, 8 + len)
+    let c = checksum(src, dst, f, 8 + len)
     // A sum of zero is sent as all ones: zero would say "none made".
     ip.put_be16(f + 6, if c == 0 { 0xffff } else { c })
-    let sent = ip.send(dst, PROTOCOL, f, 8 + len)
+    let sent = ip.send_from(src, dst, PROTOCOL, f, 8 + len)
     if sent == arp.SENT || sent == arp.QUEUED {
-        bump(C_TX)
+        bump(if near { C_LOOP } else { C_TX })
         return 0
     }
     bump(C_TX_FAILED)
@@ -802,7 +796,7 @@ fn item(v: u64, name: str) {
 }
 
 /// The module's first line:
-/// `udp: 16 sockets, a 65536-byte queue each, ports 32768-60999 from <p>, 1472 bytes a datagram, loopback here`.
+/// `udp: 16 sockets, a 65536-byte queue each, ports 32768-60999 from <p>, 1472 bytes a datagram, loopback by kernel/ip`.
 pub fn report() {
     log.put("udp: ")
     log.dec(SOCKS as int)
@@ -816,7 +810,7 @@ pub fn report() {
     log.dec(uw(U_NEXT_PORT) as int)
     log.put(", ")
     log.dec(DATA_MAX as int)
-    log.put(" bytes a datagram, loopback here")
+    log.put(" bytes a datagram, loopback by kernel/ip")
     log.end()
 }
 
