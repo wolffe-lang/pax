@@ -1,4 +1,4 @@
-/* say.h — what the network witnesses share (px22, px23): one line to
+/* say.h — what the network witnesses share (px22, px23, px24): one line to
    descriptor 1 with write(2) and no stdio buffer (a fork must not copy
    unwritten text), errno by its name, sockaddr_in helpers, and (px23)
    the stream witnesses' byte pattern and its CRC-32. */
@@ -71,6 +71,15 @@ static const char *ename(int e)
     case EALREADY: return "EALREADY";
     case ENETRESET: return "ENETRESET";
     case ESHUTDOWN: return "ESHUTDOWN";
+    case ENOENT: return "ENOENT";
+    case EEXIST: return "EEXIST";
+    case ELOOP: return "ELOOP";
+    case ENOTDIR: return "ENOTDIR";
+    case EISDIR: return "EISDIR";
+    case ENOTTY: return "ENOTTY";
+    case EROFS: return "EROFS";
+    case EOVERFLOW: return "EOVERFLOW";
+    case ENXIO: return "ENXIO";
     }
     return "E?";
 }
