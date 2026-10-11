@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# linux-tree — the Linux side of a session that changes files (px27):
+# tools/linux-tty's session, typed into the same binaries, with their
+# whole root a tmpfs inside a THROWAWAY CONTAINER.
+#
+#   tools/linux-tree --root DIR --keys KEYS --prompt TEXT [--argv0 NAME]
+#                    [--size SIZE] OUT -- PROG [ARG...]
+#
+# The programs under test remove and overwrite files (`rm`, `rmdir`,
+# `mv`, `cp`, a shell's `>`), and one session types `rm -rf /` to see it
+# refused. None of that may reach a host. So nothing here runs on the
+# host but the container engine: a container is made from an image that
+# has python3 (PAX_TREE_IMAGE; default docker.io/library/python:3.12-slim),
+# with no network and one thing mounted from the host, a staging
+# directory made beside OUT that holds a copy of DIR, tools/linux-tty,
+# the keys and a script. Inside, as the container's root (the engine's
+# --privileged: the script mounts, chroots and makes a pid namespace,
+# and all of it stays inside the container):
+#   - a tmpfs of SIZE (default 64m) is mounted at /r and DIR's tree
+#     copied into it, owned by root, every time 0 (as tools/mkinitramfs
+#     writes an archive), umask 022;
+#   - tools/linux-tty types the session: PROG chrooted in /r, pid 1 of a
+#     fresh pid namespace, on a pseudo-terminal, with PAX's environment;
+#   - afterwards the names left in /r are listed.
+# OUT gets what the terminal showed, OUT.rc the program's exit status,
+# OUT.after the names in the root when the session was over (sorted,
+# `/dev` and `/proc` left out). The staging directory is removed.
+#
+# The engine: PAX_ENGINE, else docker when there is one, else podman.
+# Exit 0 when the session ran (whatever the program's status), 1 when
+# it did not, 2 on a usage or tool error.
+set -uo pipefail
+. "$(dirname "$0")/lib.sh"
+
+root= keys= prompt= argv0= size=64m
+while [ $# -gt 0 ]; do
+    case $1 in
+        --root)   root=$2; shift 2 ;;
+        --keys)   keys=$2; shift 2 ;;
+        --prompt) prompt=$2; shift 2 ;;
+        --argv0)  argv0=$2; shift 2 ;;
+        --size)   size=$2; shift 2 ;;
+        --)       break ;;
+        -*)       die "unknown option $1" ;;
+        *)        break ;;
+    esac
+done
+[ -n "$root" ] && [ -n "$keys" ] && [ $# -ge 3 ] && [ "$2" = -- ] \
+    || die "usage: linux-tree --root DIR --keys KEYS --prompt TEXT [--argv0 NAME] [--size SIZE] OUT -- PROG [ARG...]"
+out=$1; shift 2
+[ -d "$root" ] || die "no directory $root"
+[ -f "$keys" ] || die "no keys file $keys"
+
+engine=${PAX_ENGINE:-}
+if [ -z "$engine" ]; then
+    if command -v docker >/dev/null 2>&1; then engine=docker
+    elif command -v podman >/dev/null 2>&1; then engine=podman
+    else die "no container engine (docker or podman): this tool runs nothing under test on a host"
+    fi
+fi
+image=${PAX_TREE_IMAGE:-docker.io/library/python:3.12-slim}
+
+mkdir -p "$(dirname "$out")"
+stage=$(mktemp -d "$(cd "$(dirname "$out")" && pwd)/linux-tree.XXXXXX") || die "cannot make a staging directory beside $out"
+trap 'rm -rf "$stage"' EXIT
+mkdir -p "$stage/root"
+cp -R "$root/." "$stage/root/" || die "cannot copy $root"
+cp "$PAX_ROOT/tools/linux-tty" "$stage/linux-tty"
+cp "$keys" "$stage/keys"
+printf '%s' "$prompt" > "$stage/prompt"
+printf '%s' "$argv0" > "$stage/argv0"
+: > "$stage/argv"
+for a in "$@"; do printf '%s\n' "$a" >> "$stage/argv"; done
+cat > "$stage/run.sh" <<'EOF'
+#!/bin/sh
+# Inside the container. /x is the staging directory, the one thing of
+# the host's that is mounted.
+umask 022
+mkdir /r || exit 2
+mount -t tmpfs -o "size=$1,mode=755" none /r || { echo "linux-tree: cannot mount a tmpfs (is the container privileged?)" >&2; exit 2; }
+cp -R /x/root/. /r/ || exit 2
+chown -R 0:0 /r
+find /r -exec touch -h -d @0 {} +
+set --
+while IFS= read -r a; do set -- "$@" "$a"; done < /x/argv
+a0=$(cat /x/argv0)
+if [ -n "$a0" ]; then
+    python3 /x/linux-tty --root /r --pid1 --keys /x/keys --prompt "$(cat /x/prompt)" --argv0 "$a0" /x/out -- "$@"
+else
+    python3 /x/linux-tty --root /r --pid1 --keys /x/keys --prompt "$(cat /x/prompt)" /x/out -- "$@"
+fi
+rc=$?
+(cd /r && find . -mindepth 1 \( -path ./dev -o -path ./proc \) -prune -o -print | LC_ALL=C sort) > /x/after
+chmod -R a+rwX /x
+exit $rc
+EOF
+rc=0
+"$engine" run --rm --network none --privileged -v "$stage:/x" "$image" sh /x/run.sh "$size" >&2 || rc=$?
+[ -f "$stage/out" ] || { say "the container wrote no transcript (engine $engine, image $image, exit $rc)"; exit 1; }
+cp "$stage/out" "$out"
+cp "$stage/out.rc" "$out.rc" 2>/dev/null || echo none > "$out.rc"
+cp "$stage/after" "$out.after" 2>/dev/null || : > "$out.after"
+[ "$rc" = 0 ] || { say "the session did not run to its end (exit $rc)"; exit 1; }
+exit 0
