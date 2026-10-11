@@ -779,6 +779,14 @@ pub fn start(pml4: u64) {
     put_field(MAIN, offset_of(Thread, id), 0)
     put_field(MAIN, offset_of(Thread, runs), 1)
     make_stack(IDLE)
+    // px24: sixty-four slots' stacks span two page tables (2 MiB each);
+    // the second is taken now, by mapping and unmapping the last slot's
+    // stack, so the first process to run more than thirty threads does
+    // not leave the count of free frames one short for good.
+    make_stack(SLOTS - 1)
+    free_stack(SLOTS - 1)
+    put_field(SLOTS - 1, offset_of(Thread, stack_lo), 0)
+    put_field(SLOTS - 1, offset_of(Thread, stack_hi), 0)
     fpu.reset(IDLE)
     // # Safety: the address of boot/sched.S's idle loop; nothing is read.
     first_frame(IDLE, unsafe { pax_idle as u64 }, 0, 0)
