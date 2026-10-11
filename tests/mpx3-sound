@@ -23,7 +23,8 @@
 #   nonblock  dsptone -N (O_NONBLOCK): EAGAIN while the queue is full,
 #             every frame still played
 #   play      play -c (the mixed mode's cost: scale, mambo, entertainer)
-#             and play -m scale (mixed)
+#             and play -m scale chords (mixed; px29's chord study, its
+#             chords' pitches sounding together)
 #
 # Assertions:
 #   S0 build: kmain_console on each tier, the programs static, the
@@ -99,7 +100,7 @@ runlist() {
         underrun) printf '%s\n' "/bin/dsptone -p ramp -t 2000 -g 400" ;;
         end) printf '%s\n' "/bin/dsptone -t 3000 -l 523 -R 523 -X exit" "/bin/dsptone -t 3000 -l 659 -R 659 -X fault" "/bin/dsptone -t 500 -l 784 -R 784" ;;
         nonblock) printf '%s\n' "/bin/dsptone -N -t 1000 -l 880 -R 880" ;;
-        play) printf '%s\n' "/bin/play -c scale mambo entertainer" "/bin/play -m scale" ;;
+        play) printf '%s\n' "/bin/play -c scale mambo entertainer chords" "/bin/play -m scale chords" ;;
     esac
 }
 SCENARIOS="tone ramp underrun end nonblock play"
@@ -335,6 +336,10 @@ PY
                     echo "$((k * 500)) 480 $hz" >> "$base.spec"
                     k=$((k + 1))
                 done
+                # px29's chord study after it (play's one stream, one close):
+                # four chords and a note, each pitch of a chord at once
+                printf '%s\n' "4000 980 261.6 329.6 392.0" "5000 980 349.2 440.0 523.3" \
+                    "6000 980 196.0 246.9 293.7" "7000 980 261.6 329.6 392.0 523.3" "8000 480 659.3" >> "$base.spec"
                 "$notes" --expect "$base.spec" "$wav" > "$base.expect.txt" 2>&1 || why+=" $(grep -v PASS "$base.expect.txt" | head -n 3 | tr '\n' '|');"
                 awk '/^channel 0 /{ if ($14 != 0) exit 1 }' "$base.pcm.txt" || why+=" clipped;"
                 [ -z "$why" ] && say "PASS S7 $id: $(tail -n 1 "$base.expect.txt"); $(tr '\n' ' ' < "$base.cost.txt")" || bad "S7 $id:$why"
