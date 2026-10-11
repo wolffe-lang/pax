@@ -8,11 +8,14 @@
 # wrote.
 #
 #   tests/mpx3-speaker [--images DIR | --no-boot] [--pelt DIR] [--play DIR]
+#                      [--beep DIR]
 #                      [--firmware bios|uefi|both] [--tier native|release|both]
 #
 # The image: kmain_console (both tiers), an initramfs of /bin/pelt
 # (user/pelt.pin, tools/mkpelt), /bin/play (tools/mkplay), /bin/hold
-# (user/elf/hold.S, tools/mkuser), /usr/share/tunes/{scale,mambo,
+# (user/elf/hold.S, tools/mkuser), /bin/beep (px21a: Ubuntu's beep
+# 1.4.9 from its source package, linked static, tools/mkbeep; not
+# committed), /usr/share/tunes/{scale,mambo,
 # entertainer} (user/tunes), /etc/refused/{bad-note,bad-length,no-tempo}
 # (user/play/refused), /etc/pax-run `/bin/pelt`. The sessions, typed
 # through COM1:
@@ -21,6 +24,10 @@
 #            `echo $?`, `exit` (every tier and firmware)
 #   tunes    user/console/speaker-tunes.keys: `play mambo`, `play
 #            entertainer`, `exit` (native, BIOS only: 95 s of music)
+#   beep     user/console/speaker-beep.keys (px21a): `beep -f 440 -l
+#            300` (its default device, `/dev/tty0`), `echo $?`, `beep -e
+#            /dev/console -f 880 -l 300`, `echo $?`, `exit` (every tier
+#            and firmware)
 # Assertions, per tier, firmware and session:
 #   K0 build: kmain_console built; every program static (ET_EXEC, no
 #      PT_INTERP); the initramfs and the image built (digests printed).
@@ -51,7 +58,7 @@
 #   K4 the summary: `speaker: <t> tones, 1 stopped at their process's
 #      end, sounding 0, port 0x61 0x<v>`, bits 0 and 1 of v clear (the
 #      speaker silent at init's end); t = 9 for speaker (hold's one,
-#      the scale's eight).
+#      the scale's eight), 2 for beep.
 #   K5 the end: no `refused:` line, -ENOSYS only for 273 and 334
 #      (glibc's start-up), `PAX: init /bin/pelt ended with status 0;
 #      nothing left to run`, `halt`, and qemu-halt holds it halted.
@@ -64,11 +71,19 @@
 #      and the capture sounds it within 5% (QEMU 11.1's `wav` backend
 #      renders about 3% less than the guest's ticks count, measured
 #      under TCG on kasumi and under KVM on hasu alike).
+#   K7 beep (beep; px21a): Ubuntu's beep, unmodified source, opens
+#      `/dev/tty0` and then `/dev/console` write-only and asks
+#      KIOCSOUND: the kernel's timeline holds exactly two tones, counts
+#      2711 and 1355 (beep's 1193180 / 440 and / 880, truncated), each
+#      held 30 ticks within 3; and the capture's two tones are 440 Hz
+#      and 880 Hz within 1% (as K2), each sounding 300 ms within 20%.
 #
 # --images DIR boots what this script built earlier (DIR holds
 # <tier>/kmain_console.elf, <tier>/speaker.iso): any host with QEMU and
 # python3. Without it the script builds (linux x86-64); --no-boot stops
-# after K0. --pelt DIR and --play DIR take pelt and play from DIR.
+# after K0. --pelt DIR, --play DIR and --beep DIR take pelt, play and
+# beep from DIR (beep's build needs the host's apt to list a deb-src,
+# tools/mkbeep).
 #
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
@@ -78,16 +93,17 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 grep() { command grep -a "$@"; }
 
-images= legs=both tiers=both noboot=0 peltdir= playdir=
+images= legs=both tiers=both noboot=0 peltdir= playdir= beepdir=
 while [ $# -gt 0 ]; do
     case $1 in
         --images)   images=$2; shift 2 ;;
         --no-boot)  noboot=1; shift ;;
         --pelt)     peltdir=$2; shift 2 ;;
         --play)     playdir=$2; shift 2 ;;
+        --beep)     beepdir=$2; shift 2 ;;
         --firmware) legs=$2; shift 2 ;;
         --tier)     tiers=$2; shift 2 ;;
-        *)          die "usage: tests/mpx3-speaker [--images DIR | --no-boot] [--pelt DIR] [--play DIR] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+        *)          die "usage: tests/mpx3-speaker [--images DIR | --no-boot] [--pelt DIR] [--play DIR] [--beep DIR] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
     esac
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
@@ -137,6 +153,14 @@ if [ -z "$images" ]; then
         cp "$work/playbin/play" "$r/bin/play"
     else
         why+=" tools/mkplay;"
+    fi
+    if [ -n "$beepdir" ]; then
+        cp "$beepdir/beep" "$r/bin/beep" || why+=" no $beepdir/beep;"
+        say "beep from $beepdir"
+    elif "$PAX_ROOT/tools/mkbeep" "$work/beepbin" > "$work/beep.txt"; then
+        cp "$work/beepbin/beep" "$r/bin/beep"
+    else
+        why+=" tools/mkbeep;"
     fi
     cp "$PAX_ROOT"/user/tunes/* "$r/usr/share/tunes/"
     cp "$PAX_ROOT"/user/play/refused/* "$r/etc/refused/"
@@ -232,7 +256,7 @@ for leg in $legs; do
         continue
     fi
     for tier in $tiers; do
-        for s in speaker tunes; do
+        for s in speaker tunes beep; do
             [ "$s" = tunes ] && { [ "$tier" = native ] && [ "$leg" = bios ] || continue; }
             id="$tier $leg $s"
             log=$PAX_BUILD/mpx3-speaker-$tier-$leg-$s.serial.log
@@ -240,6 +264,7 @@ for leg in $legs; do
             elf=$images/$tier/kmain_console.elf iso=$images/$tier/speaker.iso
             keys=$PAX_ROOT/user/console/$s.keys
             [ "$s" = tunes ] && keys=$PAX_ROOT/user/console/speaker-tunes.keys
+            [ "$s" = beep ] && keys=$PAX_ROOT/user/console/speaker-beep.keys
             rm -f "$log" "$log.verdict" "$log.typed" "$wav"
             if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
                 bad "K1 $id: no image"
@@ -288,6 +313,7 @@ PY
             awk '/^user: exec pid 1 / { on = 1; next } on && /^user: pelt pid 1 (exit_group|exit) [0-9]+ after / { exit } on && !/^user: / { print }' "$norm" > "$out"
             want=$PAX_ROOT/user/console/$s.expect
             [ "$s" = tunes ] && want=$PAX_ROOT/user/console/speaker-tunes.expect
+            [ "$s" = beep ] && want=$PAX_ROOT/user/console/speaker-beep.expect
             if ! cmp -s "$want" "$out"; then
                 why+=" the session differs from ${want#"$PAX_ROOT"/}: $(diff "$want" "$out" | head -n 12 | tr '\n' '|');"
             fi
@@ -363,6 +389,45 @@ PY
                 [ -z "$long" ] || why+=" hold's tone sounded on: $long;"
                 short=$(awk '/^tone / && $10 > 862 && $10 < 898 { print $8 }' "$notes" | paste -sd, -)
                 [ -z "$why" ] && say "PASS K3 $id: $ol (hold was pid $hp); 880 Hz in the capture: ${short:-none} ms" || bad "K3 $id:$why"
+            elif [ "$s" = beep ]; then
+                # K7: Ubuntu's beep through /dev/tty0 and /dev/console.
+                k7=$(python3 - "$notes" "$timeline" <<'PY'
+import sys
+tones = [l.split() for l in open(sys.argv[1]) if l.startswith("tone ")]
+ev = [l.split() for l in open(sys.argv[2]) if l.startswith("event ")]
+bad = []
+ons = [(int(e[1]), int(e[3]), int(e[5])) for e in ev if e[4] == "on"]
+nxt = {}
+for a, b in zip(ev, ev[1:]):
+    if a[4] == "on":
+        nxt[int(a[1])] = int(b[3]) - int(a[3])
+counts = [c for _, _, c in ons]
+if counts != [2711, 1355]:
+    bad.append("the kernel's timeline has tones with counts %s, not [2711, 1355]" % counts)
+held = [nxt.get(i, -1) for i, _, _ in ons]
+for i, h in enumerate(held):
+    if abs(h - 30) > 3:
+        bad.append("tone %d held %d ticks, asked 300 ms" % (i + 1, h))
+hz = [float(t[9]) for t in tones]
+ln = [float(t[7]) for t in tones]
+want = [440.0, 880.0]
+if len(hz) != 2:
+    bad.append("%d tones in the capture, not 2" % len(hz))
+else:
+    for i, (h, w) in enumerate(zip(hz, want)):
+        if abs(h - w) / w > 0.01:
+            bad.append("tone %d %.2f Hz, asked %.0f (%.2f%%)" % (i + 1, h, w, 100 * (h - w) / w))
+    for i, l in enumerate(ln):
+        if abs(l - 300) > 60:
+            bad.append("tone %d sounded %.1f ms in the capture" % (i + 1, l))
+dev = max([abs(h - w) / w * 100 for h, w in zip(hz, want)] or [0.0])
+summary = ("Hz " + " ".join("%.2f" % h for h in hz) + " against 440 880 (worst %.3f%%)" % dev
+           + "; sounded " + " ".join("%.0f" % l for l in ln) + " ms; kernel counts "
+           + " ".join(str(c) for c in counts) + ", held " + " ".join(str(h) for h in held) + " ticks")
+print(("FAIL " + "; ".join(bad) + " | " if bad else "PASS ") + summary)
+PY
+)
+                case $k7 in PASS*) say "PASS K7 $id: ${k7#PASS }" ;; *) bad "K7 $id: ${k7#FAIL }" ;; esac
             else
                 # K6: the tunes: every note started, each tune its length.
                 why=
@@ -431,7 +496,7 @@ PY
             sl=$(grep -E '^speaker: [0-9]+ tones, ' "$norm" | head -n 1)
             sv=$(printf '%s\n' "$sl" | sed -n -E 's/.*port 0x61 0x([0-9a-f]{2})$/\1/p')
             st=$(printf '%s\n' "$sl" | sed -n -E 's/^speaker: ([0-9]+) tones, ([0-9]+) stopped at their process.s end, sounding ([0-9]+), .*/\1 \2 \3/p')
-            if [ "$s" = speaker ]; then wt="9 1 0"; else wt="$((mn + en)) 0 0"; fi
+            if [ "$s" = speaker ]; then wt="9 1 0"; elif [ "$s" = beep ]; then wt="2 0 0"; else wt="$((mn + en)) 0 0"; fi
             [ "$st" = "$wt" ] || why+=" '$sl': not '$wt' (tones, stopped at an end, sounding);"
             [ -n "$sv" ] && [ $((0x$sv & 3)) = 0 ] || why+=" port 0x61 '0x$sv' has a gate bit set;"
             [ -z "$why" ] && say "PASS K4 $id: $sl" || bad "K4 $id:$why"
