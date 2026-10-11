@@ -336,3 +336,103 @@ handshakes and the clean transfers pass, the scripted faults (a
 dropped SYN, a dropped segment) and the loss matrix stall, and the
 other end's deadline stops each boot: red on the `peer` legs, green
 on `none`. Each plant's run is over in under 25 minutes.
+
+## What was built
+
+1. **Loopback below IP** (`kernel/ip`, `kernel/netd`). A datagram of
+   any protocol for the station's own address or for 127/8 is composed
+   as any other and put on a queue of 64 frames; `netd.drain` delivers
+   what waits there through the one path a frame from the wire takes
+   (`netd.deliver`), each datagram with IF clear, and what a delivery
+   sends in turn joins the queue. `kernel/user` drains after every
+   system call (and runs a call again that had answered "wait" while
+   its answer was on the queue), the clock every tick. No device is
+   needed. `kernel/udp`'s own loopback retired onto it; the kernel
+   pings 127.0.0.1 and its own address at start-up and both answer
+   with no frame on the wire. Looped traffic is counted apart in
+   `ip`, `icmp`, `udp` and `tcp`, so the counters a capture is held to
+   stay the wire's.
+2. **TCP** (`kernel/tcp`, 2,900 lines): what §3 predicted, with the
+   differences the table below names.
+3. **The calls** (`kernel/socket`, `kernel/files`, `kernel/user`):
+   the stream forms of `socket`, `bind`, `connect`, `sendto`,
+   `recvfrom`, `read`, `write`, `getsockname`, `getpeername`,
+   `setsockopt`, `getsockopt`; `listen`, `accept`, `accept4`,
+   `shutdown`; `ioctl(FIONBIO)`.
+4. **Witnesses** (`user/net/`): `tcperr` (101 lines of errnos and
+   behaviour over loopback), `tcploop`, `tcpecho` (and `fork`),
+   `tcpclient`, `tcpbulk` (`send`, `recv`, `recv … nap`, `leave`,
+   `loop`), `tcpsoak` (`to`, `loop`), `tcpend`, `tcpfull`, and in wolf
+   `tcpwolf` (a listener, a client and one request in one process) and
+   `tcpwolfd` (one request served to another machine): **the first
+   wolf programs to speak TCP on PAX**. wolf's runtime waits with
+   `epoll`, `eventfd`, a thread and `futex`, none of which PAX has, so
+   both are written never to wait: `tcpwolfd` makes a second connect
+   that the other end answers only once the request is in its listen
+   queue.
+5. **The other ends.** `tools/paxtcp.py`, a TCP of the tools' own
+   (written from the RFCs), with faults that are a function of the
+   frame — which way, where its bytes lie from the connection's first
+   sequence numbers, which time through — so a run meets the same
+   faults every time; `tools/net-peer --tcp`, its script (T1–T12);
+   `tools/tcp-host`, ordinary sockets behind QEMU's user-mode network,
+   whose TCP is a third implementation; `tools/linux-net --tcp`, the
+   same script against Linux on a tap device, the reference every
+   output is held to; `tools/pcap-net --tcp`, which rebuilds every
+   segment PAX sent and holds it to its connection.
+6. **Tests**: `tests/mpx4-tcp` (T0–T9; three ways, two tiers, two
+   firmwares: 12 boots) and its CI job.
+
+**Found on the way.**
+
+- `tools/linux-net` started each program with SIGPIPE ignored (Python
+  ignores it and `execve` hands that on), so on the reference side a
+  write to a reset connection answered `EPIPE` where a program started
+  by PAX, or by a shell, is killed. Fixed: the default is restored
+  before the exec. px22's witnesses never wrote to a broken pipe.
+- `tools/pcap-net`, first run over a TCP capture, said PAX "moves the
+  window's right edge back": a time-wait entry's acknowledgement
+  advertises a window of zero. Nothing can be sent to a connection
+  whose FIN has been acknowledged, so the rule now stops there; the
+  zero stays.
+- The first `tcpbulk loop` printed its two lines in either order on
+  Linux itself (the receiver said its line after sending the sender's):
+  the witness was racing, not the kernel. The receiver now prints
+  first.
+- On nomad-1 (macOS) the `user` way's second soak ended at connection
+  6,343 with `ENETUNREACH`: QEMU's network there answers a SYN with an
+  ICMP net unreachable once the host has no local port left for its
+  own connect (20,000 connections inside the host's time-wait), and
+  PAX reported it as that. The limit is the host's; the `peer` way on
+  the same host passed whole.
+- A connection closed after a transfer at 20% loss was still
+  retransmitting its FIN when `kmain_sockets` printed its books three
+  seconds later (`tcp blocks 1`): the wait is thirty seconds now.
+
+## 3. The prediction against the measurement
+
+| predicted | measured |
+|---|---|
+| modules: `ip` (loopback), `netd` (`deliver`, `drain`), `udp` (its loopback retired), `tcp` new, `socket`, `files`, `user`, `icmp`, `sync`, `boot/net.S`, `kmain_sockets`; `sched` unchanged | so. `kernel/sched` is unchanged. Not predicted: `kernel/kmain_net` changed (its frame count); `kernel/icmp` and `kernel/udp` keep loopback counters of their own so the wire's stay exact; `tools/paxtcp.py` as a module of its own |
+| 64 control blocks of 64 words | 64 blocks of **128** words (the 32 frame addresses of the two rings did not fit beside the rest) |
+| buffers 65,536 each way, taken at establishment, given back at the end | so; every command's books end at `tcp blocks 0` and the frames it started with |
+| the states; simultaneous open accepted; data on a SYN not taken; RFC 5961's reset and SYN rules | so, each exercised: `SYNs that cross` (port 9220: `1 simultaneous`), `1 syn-data`, `1 reset-challenged 1 syn-challenged 1 ack-ahead 1 no-ack` in every `peer` boot |
+| out-of-order segments queued in at most four intervals | so (`out-of-order queued` in every `peer` boot; `out-of-order-dropped` 0: no test makes a fifth interval — **not exercised**) |
+| listen queue min(n, 32) + 1; a full queue drops the SYN | so: `tcpfull` lets 3 of 6 in with a backlog of 2, as Linux does (`6 listen-full`) |
+| ISS per RFC 6528 with SipHash-2-4 | per RFC 6528, with a keyed function **in HalfSipHash-2-4's shape** (32-bit words fit wolf's checked 64-bit arithmetic), written from memory and not checked against a test vector |
+| RTO 1 s, then RFC 6298's with a 200 ms floor and a 60 s ceiling; Karn; SYN given up after 6, data after 15 or `TCP_USER_TIMEOUT` | so. Exercised: a SYN given up after `TCP_SYNCNT` 1 (`ETIMEDOUT` in 3 s), `TCP_USER_TIMEOUT` 3000 (`ETIMEDOUT`). **Not exercised:** the defaults 6 and 15 (minutes each), the 60 s ceiling |
+| RFC 5681 whole | so (`fast retransmits` counted in every `peer` boot) |
+| no delayed ACK; Nagle on, `TCP_NODELAY` off | so |
+| time-wait 60 s in a table of 16,384 (4,096 rows of four) | 60 s in a table of **32,768**, an entry looked for in 16 consecutive slots: two soaks of 10,000 inside a minute would have filled the smaller one. `0 evicted` in every boot so far |
+| `bind` in time-wait `EADDRINUSE`, allowed with `SO_REUSEADDR` unless a socket listens | so (`tcperr`) |
+| ICMP: codes 2 and 3 for a SYN end the connect `ECONNREFUSED`; codes 0, 1, 5 counted and ignored | codes 2 and 3 so. **Code 1 wrong**: Linux ends the connect at once with `EHOSTUNREACH` (measured: `tcpend 10.0.2.2 9004`), and PAX now does the same (code 0: `ENETUNREACH`, by analogy, not measured against Linux) |
+| one lock, word 7 | so |
+| `stack frames` 12 becomes 205 | **333** (76 after loopback alone: 64 queue frames; then TCP's composing frame and 256 for the larger time-wait table) |
+| `tests/mpx4-udp` moves: U1, U3, U4, U7 (the `loopback` counters go; a looped no-port draws a port unreachable) | U1, U3 and U4 moved. **U7 did not**: the `loopback` counters stayed, fed by `ip`'s queue instead of `udp`'s own push, and its numbers are the same. The looped port unreachable is sent (and counted by `kernel/icmp`'s loopback line), unlimited |
+| `tests/mpx4-net`: the books' frames; a ping of itself in `kmain_net` | the frames (12 to 76). The self-ping went into `kmain_sockets` instead, where every way of two suites holds it |
+| 16 MiB out of PAX / into PAX / over loopback, kasumi TCG native: 3 / 3 / 2 MB/s | see the table below: every one **higher** than predicted by more than the 2× bar |
+| under loss: 1% 0.3–1.5 MB/s, 5% 60–300 KB/s, 20% 3–15 KB/s; retransmissions 8–40, 40–150 a MiB, 80–250 for 256 KiB | see the loss table below. The 20% transfer is 65,536 bytes, not 262,144: RFC 6298 keeps the backed-off RTO until a segment gets through at its first sending, which at 20% each way fails more often than not, so RTO climbs to seconds and a quarter-megabyte took four minutes |
+| plant 1 (ACK + 1) red on every leg; plant 2 (no retransmission timer) red on `peer` legs, green on `none`; under 25 minutes each | see §4 |
+
+Throughput, loss and the plants' rows are filled from the runs named
+in §4.
