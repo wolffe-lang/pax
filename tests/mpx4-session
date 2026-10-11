@@ -1,0 +1,417 @@
+#!/usr/bin/env bash
+# tests/mpx4-session — px28: the session image. One kernel,
+# kmain_session, starts the console, the speaker and the network stack
+# together and runs pelt as pid 1, quiet (boot/limine-initramfs-quiet.conf),
+# so a shell at a terminal can use the network: the image built here,
+# build/mpx4-session/<tier>/session.iso, is the one a person boots, and
+# every command it is meant for is typed into it here.
+#
+#   tests/mpx4-session [--images DIR | --no-boot] [--pelt DIR] [--bore DIR]
+#                      [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# The programs, each unmodified: pelt (user/pelt.pin, tools/mkpelt);
+# boreutils' cat, echo, env, false, head, ls, readlink, sleep, stat,
+# tail, true and wc (user/boreutils.pin, tools/mkboreutils); play
+# (tools/mkplay) and the three tunes (user/tunes); and from user/net
+# (tools/mknet) the wolf program tcpwolf and two C witnesses, resolve
+# and tcpecho. One initramfs: those in /bin, /usr/share/tunes, and
+# /etc/motd, /etc/passwd, /etc/group, /etc/localtime (tools/mkzone),
+# /etc/pax-run `/bin/pelt`. Two sessions, typed on COM1:
+#   session-shell  user/console/session-shell.keys: cat /etc/motd,
+#                  ls -l /bin, sleep 30 and Ctrl-C two seconds later,
+#                  echo $?, tcpwolf (wolf's TCP over loopback),
+#                  trap 'echo not today' INT, Ctrl-C at the prompt and
+#                  Enter, exit. Also typed into the same binaries on
+#                  this host's Linux (tools/linux-tty, the same tree,
+#                  pelt pid 1 of a fresh pid namespace)
+#   session-net    user/console/session-net.keys, with QEMU's user-mode
+#                  network and `hostfwd` from a free port of this host's
+#                  127.0.0.1 to the guest's port 7070: resolve
+#                  10.0.2.3 dns.google, tcpecho 7070 10.0.2.2 9099 —
+#                  while it listens this script connects to it through
+#                  the forwarded port, sends a line, closes its half and
+#                  reads to the end — and Ctrl-C twenty seconds after
+#                  it was started, echo $?, play scale (the speaker to a
+#                  WAV file), exit
+# Assertions, per tier (native, release) and firmware (bios at 256 MiB,
+# the size the image is meant for; uefi at 512 MiB, where OVMF needs it):
+#   E0 build: kmain_session built; every program static (ET_EXEC, no
+#      PT_INTERP); the initramfs and the ISO built (digests printed);
+#      Linux ran session-shell.
+#   E1 quiet: one `user: quiet` line and no `user: exec pid`, exit,
+#      -ENOSYS or frames line; no refusal by name; no PANIC.
+#   E2 session-shell, differential: every line after `run 1: /bin/pelt`
+#      up to `run: 1 commands`, the kernel's own `user: … killed:` lines
+#      cut out (a kill is not quiet: it follows the terminal's `^C` on
+#      the same line), byte-identical (CRs removed) to Linux's
+#      transcript; and Linux's transcript is
+#      user/console/session-shell.expect, sizes masked as
+#      tests/mpx3-shell masks them.
+#   E3 session-net: the session's lines are user/console/session-net.expect
+#      but for resolve's, whose addresses are held to what
+#      tools/gateway-probe --dns got from QEMU's DNS server on this host
+#      (mpx4-udp's G1), and the `killed:` line, which must name tcpecho
+#      and SIGINT; this host's end of the connection read back exactly
+#      the line it sent and tcpecho's `eof after 24 bytes, crc
+#      9d337024`; the WAV holds eight tones (tools/wav-notes).
+#   E4 what was typed arrived (the console's summary: every byte from
+#      com1) and the session's closing lines: `signals: <k> raised from
+#      the terminal` with k the Ctrl-C's typed (session-shell 2,
+#      session-net 1); the speaker's line (session-net: 8 tones,
+#      sounding 0; session-shell: none); `network: frames <a> in, <b>
+#      out; udp datagrams <c> in, <d> out` and `network: tcp connections
+#      <e> accepted, <f> made, 0 open` (session-shell: no frame, no
+#      datagram, 1 and 1 — tcpwolf's loopback; session-net: frames both
+#      ways, 1 datagram in and 2 out — resolve's question and answer,
+#      tcpecho's "ready" — 1 and 0).
+#   E5 the end: `PAX: init /bin/pelt ended with status 0; nothing left
+#      to run`, `halt`, and qemu-halt holds the machine halted.
+#
+# --images DIR boots what this script built earlier (DIR holds
+# <tier>/kmain_session.elf, <tier>/session.iso and linux/). Without it
+# the script builds (linux x86-64; the Linux side needs root: sudo -n
+# when not root); --no-boot stops after E0. --pelt DIR and --bore DIR
+# take pelt and the boreutils from DIR instead of building them.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 peltdir= boredir=
+usage="usage: tests/mpx4-session [--images DIR | --no-boot] [--pelt DIR] [--bore DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --pelt)     peltdir=$2; shift 2 ;;
+        --bore)     boredir=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+need readelf python3
+
+BORE="cat echo env false head ls readlink sleep stat tail true wc"
+NET="resolve tcpecho tcpwolf"
+MOTD='PAX. Kernel: wolf. Shell: wolf. Tools: wolf. Network: wolf.'
+PROMPT='$ '
+OUTSIDE=dns.google
+LINE='what does the wolf say?'
+GUEST_PORT=7070
+NET_PAUSE=20 # seconds from typing tcpecho to the Ctrl-C that ends it
+
+work=$PAX_BUILD/mpx4-session
+runs=$PAX_BUILD/mpx4-session-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+mask() { # a transcript with every program's size and /bin's total as words (tests/mpx3-shell's)
+    sed -E -e 's/^(-rwxr-xr-x 1 root root) +[0-9]+ /\1 SIZE /' -e '/^\$ ls -l \/bin$/{n;s/^total [0-9]+$/total BLOCKS/;}' "$1"
+}
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    r=$work/root
+    mkdir -p "$r/bin" "$r/etc" "$r/usr/share/tunes" "$work/linux"
+    why=
+    if [ -n "$peltdir" ]; then
+        cp "$peltdir/pelt" "$r/bin/pelt" || why+=" no $peltdir/pelt;"
+        say "pelt from $peltdir"
+    elif "$PAX_ROOT/tools/mkpelt" "$work/peltbin" > "$work/pelt.txt"; then
+        cp "$work/peltbin/pelt" "$r/bin/pelt"
+    else
+        why+=" tools/mkpelt;"
+    fi
+    if [ -z "$boredir" ]; then
+        # shellcheck disable=SC2086
+        "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
+        boredir=$work/bore
+    else
+        say "boreutils from $boredir"
+    fi
+    for u in $BORE; do
+        cp "$boredir/$u" "$r/bin/$u" || why+=" no $boredir/$u;"
+    done
+    if PAX_WOLF=$wolf "$PAX_ROOT/tools/mkplay" "$work/playbin" > "$work/play.txt"; then
+        cp "$work/playbin/play" "$r/bin/play"
+    else
+        why+=" tools/mkplay;"
+    fi
+    if PAX_WOLF=$wolf "$PAX_ROOT/tools/mknet" "$work/net" > "$work/net.txt"; then
+        for u in $NET; do cp "$work/net/$u" "$r/bin/$u" || why+=" no $u;"; done
+    else
+        why+=" tools/mknet;"
+    fi
+    cp "$PAX_ROOT"/user/tunes/* "$r/usr/share/tunes/" || why+=" user/tunes;"
+    printf '%s\n' "$MOTD" > "$r/etc/motd"
+    printf 'root:x:0:0:root:/:/bin/pelt\n' > "$r/etc/passwd"
+    printf 'root:x:0:\n' > "$r/etc/group"
+    "$PAX_ROOT/tools/mkzone" "$r/etc/localtime" > "$work/zone.txt" || why+=" tools/mkzone;"
+    echo /bin/pelt > "$r/etc/pax-run"
+    for f in "$r"/bin/*; do
+        x=$(static_ok "$f") || why+=" $x;"
+        say "  program: ${f#"$work"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+    done
+    pairs=()
+    for f in $(cd "$r" && find . -type f | sort); do
+        f=${f#./}
+        mode=644; [ -x "$r/$f" ] && mode=755
+        pairs+=("/$f=$r/$f:$mode")
+    done
+    if "$PAX_ROOT/tools/mkinitramfs" "$work/session.cpio" "${pairs[@]}" > "$work/session.initramfs.txt"; then
+        sed 's/^/  initramfs: /' "$work/session.initramfs.txt" >&2
+    else
+        why+=" tools/mkinitramfs;"
+    fi
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_session.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_session.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs-quiet.conf" \
+                --add "$work/session.cpio" initramfs.cpio "$elf" "$work/$tier/session.iso" >/dev/null \
+                || why+=" $tier session: mkimage;"
+            say "built $tier session: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/session.iso") ($(wc -c < "$work/$tier/session.iso" | tr -d ' ') bytes), initramfs $(sha256_of "$work/session.cpio") ($(wc -c < "$work/session.cpio" | tr -d ' ') bytes)"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_session: tools/build-kernel;"
+        fi
+    done
+    # The Linux side: the same binaries in the same tree, the same keys.
+    if [ "$(uname -s)" != Linux ]; then
+        why+=" the Linux side needs Linux (this is $(uname -s));"
+    else
+        asroot=(); [ "$(id -u)" = 0 ] || asroot=(sudo -n)
+        me=$(id -u):$(id -g)
+        ${asroot[@]+"${asroot[@]}"} chown -R 0:0 "$r" || why+=" chown 0:0;"
+        find "$r" -exec ${asroot[@]+"${asroot[@]}"} touch -h -d @0 {} + || why+=" touch;"
+        if ${asroot[@]+"${asroot[@]}"} python3 "$PAX_ROOT/tools/linux-tty" --root "$r" --pid1 \
+            --keys "$PAX_ROOT/user/console/session-shell.keys" --prompt "$PROMPT" --argv0 /bin/pelt \
+            "$work/linux/session-shell.tty" -- /bin/pelt; then
+            say "  linux session-shell: $(wc -c < "$work/linux/session-shell.tty" | tr -d ' ') bytes, status $(cat "$work/linux/session-shell.tty.rc")"
+        else
+            why+=" tools/linux-tty session-shell;"
+        fi
+        ${asroot[@]+"${asroot[@]}"} chown -R "$me" "$r" || why+=" chown back;"
+    fi
+    [ -z "$why" ] && say "PASS E0: kmain_session built ($tiers), every program static, the initramfs and the session image a tier, Linux ran session-shell" || bad "E0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx4-session build (E0): PASS (no boot: --no-boot)" || say "mpx4-session build: FAIL"
+        exit "$fail"
+    fi
+fi
+lx=$images/linux
+[ -f "$lx/session-shell.tty" ] || die "no $lx/session-shell.tty (build first)"
+need "$PAX_ROOT/tools/wav-notes"
+
+# Linux's transcript is the expect file (sizes masked).
+tr -d '\r' < "$lx/session-shell.tty" > "$PAX_BUILD/mpx4-session-linux.txt"
+[ -z "$(tail -c 1 "$PAX_BUILD/mpx4-session-linux.txt")" ] || printf '\n' >> "$PAX_BUILD/mpx4-session-linux.txt"
+mask "$PAX_BUILD/mpx4-session-linux.txt" > "$PAX_BUILD/mpx4-session-linux.masked"
+if cmp -s "$PAX_ROOT/user/console/session-shell.expect" "$PAX_BUILD/mpx4-session-linux.masked"; then
+    say "PASS E2 linux: Linux's transcript is user/console/session-shell.expect ($(sha256_of "$PAX_BUILD/mpx4-session-linux.txt" | cut -c1-12)…), status $(cat "$lx/session-shell.tty.rc")"
+else
+    bad "E2 linux: Linux's transcript is not user/console/session-shell.expect: $(diff "$PAX_ROOT/user/console/session-shell.expect" "$PAX_BUILD/mpx4-session-linux.masked" | head -n 12 | tr '\n' '|')"
+fi
+
+# What QEMU's DNS server answers this host (mpx4-udp's G1).
+mkdir -p "$PAX_BUILD"
+if "$PAX_ROOT/tools/gateway-probe" --dns "$OUTSIDE" >"$PAX_BUILD/mpx4-session-gateway-probe.txt" 2>&1 \
+    && dns=$(sed -n "s/^gateway-probe: dns $OUTSIDE //p" "$PAX_BUILD/mpx4-session-gateway-probe.txt" | tail -n 1) && [ -n "$dns" ]; then
+    say "PASS G1: QEMU's DNS server (10.0.2.3) asked for $OUTSIDE on this host: $dns"
+else
+    cat "$PAX_BUILD/mpx4-session-gateway-probe.txt" >&2
+    dns=unknown
+    bad "G1: tools/gateway-probe --dns $OUTSIDE"
+fi
+
+free_port() { # a TCP port free on 127.0.0.1 now
+    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
+}
+
+# This host's end of tcpecho's connection: wait for `listening` in the
+# serial log, connect through the forwarded port, send the line, close
+# this half, read to the end; what came back goes to OUT.
+client() { # log port out
+    python3 - "$1" "$2" "$3" "$LINE" <<'PY'
+import socket, sys, time
+log, port, out, line = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+end = time.time() + 120
+while time.time() < end:
+    try:
+        if b"tcpecho: listening on 0.0.0.0:7070" in open(log, "rb").read():
+            break
+    except OSError:
+        pass
+    time.sleep(0.2)
+else:
+    open(out, "w").write("client: tcpecho never listened\n"); sys.exit(1)
+try:
+    s = socket.create_connection(("127.0.0.1", port), timeout=30)
+    s.sendall((line + "\n").encode())
+    got = b""
+    while not got.endswith(b"\n"):
+        d = s.recv(4096)
+        if not d:
+            break
+        got += d
+    s.shutdown(socket.SHUT_WR)
+    while True:
+        d = s.recv(4096)
+        if not d:
+            break
+        got += d
+    s.close()
+    open(out, "wb").write(got)
+except Exception as e:
+    open(out, "w").write("client: %s\n" % e); sys.exit(1)
+PY
+}
+
+record() { # tier leg session status
+    ran=$((ran + 1))
+    printf '%s kmain_session %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
+}
+
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    mem=256M; [ "$leg" = uefi ] && mem=512M
+    for tier in $tiers; do
+        for s in session-shell session-net; do
+            id="$tier $leg $s"
+            log=$PAX_BUILD/mpx4-session-$tier-$leg-$s.serial.log
+            elf=$images/$tier/kmain_session.elf iso=$images/$tier/session.iso
+            rm -f "$log" "$log.verdict" "$log.typed" "$log.wav" "$log.client"
+            if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+                for t in E1 E2 E3 E4 E5; do bad "$t $id: no image"; done
+                continue
+            fi
+            q=(--qemu -m --qemu "$mem")
+            pause=2 cpid=
+            if [ "$s" = session-net ]; then
+                port=$(free_port)
+                q+=(--qemu -netdev --qemu "user,id=n0,ipv6=off,hostfwd=tcp:127.0.0.1:$port-:$GUEST_PORT"
+                    --qemu -device --qemu "virtio-net-pci,netdev=n0"
+                    --qemu -audiodev --qemu "wav,id=snd0,path=$log.wav" --qemu -machine --qemu "q35,pcspk-audiodev=snd0")
+                pause=$NET_PAUSE
+                client "$log" "$port" "$log.client" &
+                cpid=$!
+            fi
+            hrc=0
+            PAX_TYPE_PAUSE=$pause "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 240 \
+                --elf "$elf" --marker 'halt' --type "$PAX_ROOT/user/console/$s.keys" --prompt "$PROMPT" \
+                ${q[@]+"${q[@]}"} "$iso" >"$log.verdict" 2>&1 || hrc=$?
+            [ -n "$cpid" ] && { kill "$cpid" 2>/dev/null; wait "$cpid" 2>/dev/null; }
+            record "$tier" "$leg" "$s" "$hrc"
+            norm=$log.norm; serial_norm "$log" > "$norm"
+            out=$PAX_BUILD/mpx4-session-$tier-$leg-$s.session
+            # The session: after `run 1: /bin/pelt`, up to `run: 1 commands`;
+            # a kernel line that lands after an echoed `^C` is cut out with
+            # its newline, and the line goes on (tests/mpx3-shell's rule).
+            awk '$0 == "run 1: /bin/pelt" { on = 1; next } on && /^run: [0-9]+ commands$/ { exit }
+                 on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$norm" > "$out"
+
+            # E1: quiet.
+            why=
+            [ "$(grep -c '^user: quiet' "$norm")" = 1 ] || why+=" not one 'user: quiet' line;"
+            n=$(grep -Ec '^user: exec pid |^user: [^ ]+ pid [0-9]+ (exit_group|exit) [0-9]+ after |: -ENOSYS$|^user: frames free ' "$norm")
+            [ "$n" = 0 ] || why+=" $n narration lines;"
+            rf=$(grep -c ': refused: ' "$norm")
+            [ "$rf" = 0 ] || why+=" $rf refusals ($(grep -m2 ': refused: ' "$norm" | tr '\n' '|'));"
+            ! grep -q 'PANIC' "$norm" || why+=" a PANIC;"
+            [ -z "$why" ] && say "PASS E1 $id: quiet, no narration, no refusal" || bad "E1 $id:$why"
+
+            # E2 / E3: the session.
+            why=
+            kills=$(grep -Eo 'user: [^ ]+ pid [0-9]+ killed: [A-Z]+' "$norm" | sed -E 's/ pid [0-9]+//' | paste -sd'|' -)
+            if [ "$s" = session-shell ]; then
+                [ "$kills" = "user: sleep killed: SIGINT" ] || why+=" kills '$kills', not sleep's by SIGINT;"
+                if ! cmp -s "$PAX_BUILD/mpx4-session-linux.txt" "$out"; then
+                    why+=" the session differs from Linux's: $(diff "$PAX_BUILD/mpx4-session-linux.txt" "$out" | head -n 12 | tr '\n' '|');"
+                fi
+                [ -z "$why" ] && say "PASS E2 $id: the session byte-identical to Linux's ($(wc -l < "$out" | tr -d ' ') lines, $(sha256_of "$out" | cut -c1-12)…); the kernel killed sleep by SIGINT" || bad "E2 $id:$why"
+            else
+                [ "$kills" = "user: tcpecho killed: SIGINT" ] || why+=" kills '$kills', not tcpecho's by SIGINT;"
+                got=$(awk -v name="$OUTSIDE" '
+                    /^resolve: answer from 10\.0\.2\.3:53: rcode [0-9]+, [0-9]+ answers$/ { r = $6; sub(/,/, "", r) }
+                    $0 ~ "^resolve: " name " is " { a[++k] = $4 }
+                    /^resolve: no answer from 10\.0\.2\.3 in 6 s$/ { none = 1 }
+                    END {
+                        if (none) { print "none"; exit }
+                        m = k; for (i = 1; i <= m; i++) for (j = i + 1; j <= m; j++) if (a[j] < a[i]) { t = a[i]; a[i] = a[j]; a[j] = t }
+                        s = ""; for (i = 1; i <= m; i++) s = s (i > 1 ? "," : "") a[i]
+                        print "rcode=" r " addresses=" (s == "" ? "-" : s)
+                    }' "$out")
+                [ "$got" = "$dns" ] || why+=" resolve got '$got', this host's probe '$dns';"
+                # The rest of the session: resolve's answer lines left out
+                # (held above).
+                sed -E -e '/^resolve: answer from/d' -e '/^resolve: '"$OUTSIDE"' is /d' "$out" > "$out.masked"
+                if ! cmp -s "$PAX_ROOT/user/console/session-net.expect" "$out.masked"; then
+                    why+=" the session is not user/console/session-net.expect: $(diff "$PAX_ROOT/user/console/session-net.expect" "$out.masked" | head -n 12 | tr '\n' '|');"
+                fi
+                want=$(printf '%s\neof after 24 bytes, crc 9d337024\n' "$LINE")
+                [ "$(cat "$log.client" 2>/dev/null)" = "$want" ] || why+=" this host's end read '$(tr '\n' '|' < "$log.client" 2>/dev/null)';"
+                tones=$(python3 "$PAX_ROOT/tools/wav-notes" "$log.wav" 2>/dev/null | sed -n -E 's/^tones ([0-9]+) .*/\1/p')
+                [ "$tones" = 8 ] || why+=" the WAV holds '$tones' tones, not 8;"
+                [ -z "$why" ] && say "PASS E3 $id: resolve $got; tcpecho echoed '$LINE' to this host and said eof after 24 bytes; killed by SIGINT; the scale's 8 tones in the WAV" || bad "E3 $id:$why"
+            fi
+
+            # E4: what was typed, and the closing lines.
+            why=
+            typed=$(sed -n 's/^  bytes //p' "$log.typed" 2>/dev/null | awk '{ n += $1 } END { print n + 0 }')
+            c1=$(sed -n -E 's/^console: ([0-9]+) bytes from com1, 0 keys .*/\1/p' "$norm" | head -n 1)
+            [ "$c1" = "$typed" ] && [ "$typed" -gt 0 ] || why+=" typed $typed bytes, the console counted '$c1';"
+            if [ "$s" = session-shell ]; then
+                ws="signals: 2 raised from the terminal" wn1="network: frames 0 in, 0 out; udp datagrams 0 in, 0 out" wn2="network: tcp connections 1 accepted, 1 made, 0 open"
+                ! grep -q '^speaker: ' "$norm" || why+=" a speaker line with no tone played;"
+            else
+                ws="signals: 1 raised from the terminal" wn1= wn2="network: tcp connections 1 accepted, 0 made, 0 open"
+                grep -Eqx 'speaker: 8 tones, 0 stopped at their process.s end, sounding 0, port 0x61 0x[0-9a-f]+' "$norm" || why+=" speaker '$(grep -m1 '^speaker: ' "$norm")';"
+                grep -Eqx 'network: frames [1-9][0-9]* in, [1-9][0-9]* out; udp datagrams 1 in, 2 out' "$norm" || why+=" '$(grep -m1 '^network: frames' "$norm")';"
+            fi
+            grep -qx "$ws" "$norm" || why+=" '$(grep -m1 '^signals: ' "$norm")', not '$ws';"
+            [ -z "$wn1" ] || grep -qx "$wn1" "$norm" || why+=" '$(grep -m1 '^network: frames' "$norm")', not '$wn1';"
+            grep -qx "$wn2" "$norm" || why+=" '$(grep -m1 '^network: tcp' "$norm")', not '$wn2';"
+            [ -z "$why" ] && say "PASS E4 $id: $typed bytes typed, all counted; $ws; $(grep -m1 '^network: tcp' "$norm")" || bad "E4 $id:$why"
+
+            # E5: the end.
+            why=
+            grep -qx "PAX: init /bin/pelt ended with status 0; nothing left to run" "$norm" || why+=" '$(grep -m1 '^PAX: init ' "$norm")';"
+            [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+            "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'PAX: init .*' 'halt' >/dev/null \
+                || why+=" the log does not end with the init line and halt;"
+            [ -z "$why" ] && say "PASS E5 $id: init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "E5 $id:$why"
+        done
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx4-session: PASS" || say "mpx4-session: FAIL"
+exit "$fail"
