@@ -1198,7 +1198,9 @@ fn output(c: u64, force: bool) -> u64 {
             if fin {
                 flags = flags | FIN
             }
-            let resent = seq_lt(nxt, cw(c, K_SND_MAX)) || (probe && cw(c, K_PROBE) == 1)
+            // A sequence number that has been on the wire before: below
+            // SND.MAX, or where a probe's byte went.
+            let resent = seq_lt(nxt, cw(c, K_SND_MAX)) || cw(c, K_PROBE) == 1
             if !emit(c, nxt, flags, cw(c, K_TX_BASE) + off, n) {
                 more = false
             } else {
@@ -1217,6 +1219,7 @@ fn output(c: u64, force: bool) -> u64 {
                     if una == cw(c, K_SND_MAX) {
                         put_cw(c, K_UNACK_AT, now)
                     }
+                    put_cw(c, K_PROBE, 0) // SND.MAX covers the probe's byte now
                     let end = seq_add(nxt, n + (if fin { 1 } else { 0 }))
                     put_cw(c, K_SND_NXT, end)
                     if fin {

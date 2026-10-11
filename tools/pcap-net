@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # pcap-net — hold a capture of the network test kernel's exchange to the
-# frames it must contain, byte by byte (px20, px21, px22; tests/mpx4-net,
-# tests/mpx4-udp).
+# frames it must contain, byte by byte (px20, px21, px22, px23;
+# tests/mpx4-net, tests/mpx4-udp, tests/mpx4-tcp).
 #
-#   tools/pcap-net [--small N] [--large N] [--list K] [--serial LOG] FILE.pcap
+#   tools/pcap-net [--small N] [--large N] [--list K] [--serial LOG] [--tcp] FILE.pcap
 #
 # FILE.pcap is what QEMU's `-object filter-dump,netdev=…,file=…` wrote:
 # the classic pcap format (a 24-byte header, magic 0xa1b2c3d4 in the
@@ -46,9 +46,29 @@
 #                      an ephemeral one (32768-60999); and never
 #                      for 10.0.2.15 itself or 127/8: what loops back
 #                      does not touch the wire
+#   a TCP segment      (px23, with --tcp: the kernel speaks TCP) rebuilt
+#                      from its fields — a 20-byte header, the MSS
+#                      option (1460) on a SYN and no option on anything
+#                      else, the checksum made — and held to its
+#                      connection as the capture shows it so far: a
+#                      SYN-ACK answers a SYN that reached PAX and a
+#                      segment belongs to a connection whose SYNs were
+#                      seen, or is a reset in RFC 9293 §3.10.7.1's form
+#                      for the last segment sent to PAX from there;
+#                      **its acknowledgement never names a byte that
+#                      has not been sent to PAX** and never goes back;
+#                      its data ends inside the window the other end
+#                      last opened (one byte past it is a probe), is no
+#                      longer than the MSS the other end announced, and
+#                      is the same bytes whenever a sequence number is
+#                      sent again; the window's right edge it
+#                      advertises never moves back; nothing follows its
+#                      FIN but that FIN again. A segment that carries a
+#                      sequence number PAX sent before is counted a
+#                      retransmission
 #   every datagram     version 4, IHL 5, DF, time to live 64, protocol
-#                      1 or 17, from 10.0.2.15, its header checksum right, its
-#                      identification above the last one (the gaps are
+#                      1, 6 or 17, from 10.0.2.15, its header checksum right, its
+#                      identification above the last one, modulo 65536 (the gaps are
 #                      datagrams that never reached the wire: counted),
 #                      in a frame for the hardware address its next hop
 #                      (the destination on 10.0.2.0/24, else 10.0.2.2)
@@ -78,7 +98,11 @@
 # the capture holds; and its own books: every queued datagram read,
 # dropped at its socket's close or still waiting, every looped one
 # queued or dropped by name, every socket made freed or still open. A
-# datagram PAX counted as
+# And (px23) kernel/tcp's: its six drop causes; the segments it took
+# and the segments it sent, less those it says went over loopback, are
+# the capture's; and **its retransmissions, less loopback's, are the
+# capture's count of segments that carried a sequence number again**.
+# A datagram PAX counted as
 # sent that is not in the capture must be one kernel/arp says it
 # dropped from a queue (the identifications' gaps). The kernel's own
 # books are closed too: every transmit buffer reclaimed, every received
@@ -135,13 +159,15 @@ def frames_of(path):
 
 CAUSES = ["ip.short", "ip.version", "ip.ihl", "ip.checksum", "ip.length", "ip.ttl", "ip.fragment", "ip.source",
           "ip.option", "ip.source-route", "ip.other", "icmp.short", "icmp.checksum", "icmp.broadcast", "icmp.type",
-          "udp.short", "udp.length", "udp.checksum", "udp.port-zero"]
+          "udp.short", "udp.length", "udp.checksum", "udp.port-zero",
+          "tcp.short", "tcp.header", "tcp.checksum", "tcp.broadcast", "tcp.port-zero", "tcp.option"]
 KEYS = (["from-pax", "to-pax", "before", "net.type", "net.other", "arp.requests-out", "arp.replies-out", "arp.request",
          "arp.reply", "arp.bad", "arp.conflict", "arp.other", "ip.delivered", "ip.with-options", "ip.broadcast",
          "ip.protocol", "ip.out", "ident-gaps"] + CAUSES +
         ["icmp.echo", "icmp.replies-out", "icmp.requests-out", "icmp.matched", "icmp.stray", "unreachable.sent",
          "unreachable.limited", "unreachable.silent", "udp.in", "udp.unchecked", "udp.out", "udp.echoed", "udp.ready",
-         "port-unreachable.sent", "markers", "burst.small", "burst.large", "checksums"])
+         "port-unreachable.sent", "tcp.in", "tcp.out", "tcp.retransmitted", "tcp.resets-out", "tcp.probes", "tcp.connections",
+         "tcp.bytes-out", "markers", "burst.small", "burst.large", "checksums"])
 
 
 LINES = [
@@ -177,7 +203,16 @@ LINES = [
 ]
 
 
-def against(path, c):
+TCP_LINES = [
+    (r"tcp: rx (\d+) segments, dropped (\d+) short (\d+) header (\d+) checksum (\d+) broadcast (\d+) port-zero (\d+) option",
+     ["t-rx", "tcp.short", "tcp.header", "tcp.checksum", "tcp.broadcast", "tcp.port-zero", "tcp.option"]),
+    (r"tcp: tx (\d+) segments \((\d+) with data, (\d+) bytes; (\d+) acks, (\d+) resets, (\d+) probes\), (\d+) not sent; (\d+) retransmitted, .*",
+     ["t-tx", "t-data", "t-bytes", "t-acks", "t-resets", "t-probes", "t-not-sent", "t-rexmt"]),
+    (r"tcp: loopback (\d+) segments sent, (\d+) received, (\d+) retransmitted", ["tl-tx", "tl-rx", "tl-rexmt"]),
+]
+
+
+def against(path, c, tcp=False):
     """Hold the capture's counts `c` against the counter lines the
     kernel printed in the serial log at `path`: the mismatches, and how
     many values were held."""
@@ -185,7 +220,7 @@ def against(path, c):
     text = open(path, "rb").read().decode("latin-1").replace("\r", "")
     k = {}
     wrong = []
-    for pat, names in LINES:
+    for pat, names in LINES + (TCP_LINES if tcp else []):
         found = None
         for line in text.split("\n"):
             m = re.fullmatch(pat, line.strip())
@@ -251,20 +286,203 @@ def against(path, c):
     for name in ("runt", "long", "down", "size", "full", "idle", "not-sent", "ip-dropped", "table-full"):
         hold(name, k[name], 0)
     hold("frames for another station", k["other"], c["net.other"])
+    if tcp:
+        # kernel/tcp (px23): the wire's share of what it counts.
+        for name in ("tcp.short", "tcp.header", "tcp.checksum", "tcp.broadcast", "tcp.port-zero", "tcp.option"):
+            hold(name, k[name], c[name])
+        hold("TCP segments taken (all less loopback's)", k["t-rx"] - k["tl-rx"], c["tcp.in"])
+        hold("TCP segments sent (all less loopback's)", k["t-tx"] - k["tl-tx"], c["tcp.out"])
+        hold("TCP segments retransmitted (all less loopback's)", k["t-rexmt"] - k["tl-rexmt"], c["tcp.retransmitted"])
+        hold("t-not-sent", k["t-not-sent"], 0)
     return wrong, held
+
+
+class TcpConn:
+    """One connection as the capture shows it so far."""
+
+    def __init__(self):
+        self.pax_iss = None    # PAX's SYN's sequence number
+        self.pax_max = None    # the end of the highest sequence number PAX has sent
+        self.pax_ack = None    # the last acknowledgement PAX sent
+        self.pax_edge = None   # the right edge of the window PAX last advertised
+        self.pax_fin = None    # the sequence number of PAX's FIN
+        self.peer_iss = None
+        self.peer_max = None   # the end of the highest sequence number sent to PAX
+        self.peer_edge = None  # the furthest right edge the other end has opened
+        self.peer_mss = 536
+        self.peer_fin = None   # the sequence number of the FIN sent to PAX
+        self.base = None       # the sequence number of buf[0]
+        self.buf = bytearray()  # what PAX sent from `base` on (pruned as it is acknowledged)
+
+
+def tcp_in(conns, last_in, key, seg, c):
+    """A valid segment that reached PAX: what the capture now knows. A
+    bare SYN makes no connection by itself (PAX may take it, drop it or
+    answer it with an ACK): it waits in `last_in[("syn",) + key]` for
+    PAX's SYN-ACK to say it was taken."""
+    last_in[key] = seg
+    k = conns.get(key)
+    fl = seg.flags
+    if fl & px.SYN and not fl & (px.ACK | px.RST):
+        last_in[("syn",) + key] = seg
+        if k is None or k.peer_iss is not None:
+            return
+        # PAX's own SYN is out and this one crossed it: taken when PAX
+        # answers it (tcp_out).
+        return
+    if k is None:
+        return
+    if fl & px.SYN and fl & px.ACK and not fl & px.RST and k.pax_iss is not None and k.peer_iss is None and seg.ack == (k.pax_iss + 1) & px.M32:
+        k.peer_iss = seg.seq
+        if seg.mss() is not None:
+            k.peer_mss = min(seg.mss(), px.MSS)
+    if k.peer_iss is None:
+        return
+    end = (seg.seq + seg.space) & px.M32
+    if k.peer_max is None or px.seq_lt(k.peer_max, end):
+        k.peer_max = end
+    if fl & px.FIN and not fl & px.RST and k.peer_fin is None:
+        k.peer_fin = (seg.seq + len(seg.data)) & px.M32
+    if fl & px.ACK and not fl & px.RST:
+        edge = (seg.ack + seg.window) & px.M32
+        if k.peer_edge is None or px.seq_lt(k.peer_edge, edge):
+            k.peer_edge = edge
+        # What it acknowledges need not be kept.
+        if k.base is not None and px.seq_lt(k.base, seg.ack):
+            gone = min((seg.ack - k.base) & px.M32, len(k.buf))
+            del k.buf[:gone]
+            k.base = (k.base + gone) & px.M32
+
+
+def reset_form(seg, trigger):
+    """Whether `seg`, a reset from PAX, is RFC 9293 §3.10.7.1's answer
+    to `trigger`, a segment that reached PAX and named no connection."""
+    if trigger is None:
+        return False
+    if trigger.flags & px.ACK:
+        return seg.flags == px.RST and seg.seq == trigger.ack
+    return seg.flags == px.RST | px.ACK and seg.seq == 0 and seg.ack == (trigger.seq + trigger.space) & px.M32
+
+
+def tcp_out(conns, last_in, key, seg, c):
+    """A segment PAX sent, against its connection as the capture shows
+    it: None, or what is wrong with it."""
+    k = conns.get(key)
+    fl = seg.flags
+    if fl & px.RST:
+        c["tcp.resets-out"] += 1
+        if reset_form(seg, last_in.get(key)):
+            return None
+        if k is not None and k.pax_max is not None and seg.seq == k.pax_max:
+            return None  # a connection PAX ends itself: its own next sequence number
+        return "is a reset neither at PAX's own next sequence number nor in RFC 9293's form for the last segment sent to it"
+    if fl & px.SYN:
+        if seg.data:
+            return "is a SYN with data"
+        p = last_in.get(("syn",) + key)
+        if not fl & px.ACK:
+            # PAX opens a connection (or sends its SYN again).
+            if k is None or k.pax_iss != seg.seq:
+                k = conns[key] = TcpConn()
+                c["tcp.connections"] += 1
+                k.pax_iss = seg.seq
+                k.base = (seg.seq + 1) & px.M32
+            if seg.sport not in px.EPHEMERAL:
+                return "is a SYN from port %d, which is not an ephemeral port" % seg.sport
+        else:
+            if p is None or seg.ack != (p.seq + 1) & px.M32:
+                return "is a SYN-ACK that acknowledges no SYN sent to PAX from there"
+            if k is None or k.pax_iss != seg.seq:
+                # PAX took the SYN: a connection.
+                k = conns[key] = TcpConn()
+                c["tcp.connections"] += 1
+                k.pax_iss = seg.seq
+                k.base = (seg.seq + 1) & px.M32
+            if k.peer_iss is None:
+                # (Also where the SYNs crossed: PAX's own was out first.)
+                k.peer_iss = p.seq
+                k.peer_max = (p.seq + p.space) & px.M32
+                if p.mss() is not None:
+                    k.peer_mss = min(p.mss(), px.MSS)
+            elif k.peer_iss != p.seq:
+                return "is a SYN-ACK with the sequence number of another connection's"
+    elif k is None or k.pax_iss is None or k.peer_iss is None:
+        return "belongs to no connection whose SYNs the capture holds"
+    elif not fl & px.ACK:
+        return "has neither SYN, RST nor ACK"
+    if fl & px.ACK:
+        if k.peer_max is None or px.seq_lt(k.peer_max, seg.ack):
+            return "acknowledges %d, a byte never sent to PAX (the last was before %s)" % (seg.ack, k.peer_max)
+        if k.pax_ack is not None and px.seq_lt(seg.ack, k.pax_ack):
+            return "takes an acknowledgement back (from %d to %d)" % (k.pax_ack, seg.ack)
+        k.pax_ack = seg.ack
+        edge = (seg.ack + seg.window) & px.M32
+        # Once PAX has acknowledged the other end's FIN nothing more can
+        # be sent to it: its window says nothing (a time-wait entry's
+        # acknowledgement advertises none).
+        over = k.peer_fin is not None and seg.ack == (k.peer_fin + 1) & px.M32
+        if not over:
+            if k.pax_edge is not None and px.seq_lt(edge, k.pax_edge):
+                return "moves the window's right edge back (from %d to %d)" % (k.pax_edge, edge)
+            k.pax_edge = edge
+    if seg.space:
+        if k.pax_max is not None and px.seq_lt(seg.seq, k.pax_max):
+            c["tcp.retransmitted"] += 1
+        if not fl & px.SYN and px.seq_lt(seg.seq, (k.pax_iss + 1) & px.M32):
+            return "starts before the connection's first byte"
+    if seg.data:
+        if len(seg.data) > k.peer_mss:
+            return "carries %d bytes, more than the %d the other end's MSS allows" % (len(seg.data), k.peer_mss)
+        end = (seg.seq + len(seg.data)) & px.M32
+        if k.peer_edge is not None and px.seq_lt(k.peer_edge, end):
+            if len(seg.data) == 1 and seg.seq == k.peer_edge:
+                c["tcp.probes"] += 1
+            else:
+                return "ends at %d, past the window's edge %d" % (end, k.peer_edge)
+        if k.pax_fin is not None and px.seq_lt(k.pax_fin, end):
+            return "carries data past its own FIN"
+        # The same bytes whenever a sequence number is sent again.
+        if px.seq_lt(seg.seq, k.base):
+            skip = (k.base - seg.seq) & px.M32
+            data, at = seg.data[skip:], 0
+        else:
+            data, at = seg.data, (seg.seq - k.base) & px.M32
+        if at > len(k.buf):
+            return "leaves a gap in what PAX has sent (from %d)" % ((k.base + len(k.buf)) & px.M32)
+        old = bytes(k.buf[at:at + len(data)])
+        if old != data[:len(old)]:
+            return "carries other bytes than the first time for the same sequence numbers"
+        k.buf[at:at + len(data)] = data
+        c["tcp.bytes-out"] += len(data) - len(old)
+    if fl & px.FIN:
+        at = (seg.seq + len(seg.data)) & px.M32
+        if k.pax_fin is not None and k.pax_fin != at:
+            return "is a FIN at another sequence number than the first"
+        k.pax_fin = at
+    end = (seg.seq + seg.space) & px.M32
+    if seg.space and (k.pax_max is None or px.seq_lt(k.pax_max, end)):
+        k.pax_max = end
+    if k.pax_max is None:
+        k.pax_max = seg.seq
+    return None
 
 
 def main(argv):
     opt = {"small": "0", "large": "0", "list": "0", "serial": ""}
     path = None
+    tcp = False
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a.startswith("--") and a[2:] in opt and i + 1 < len(argv):
+        if a == "--tcp":
+            tcp = True
+            px.TCP_SPOKEN = True
+            i += 1
+        elif a.startswith("--") and a[2:] in opt and i + 1 < len(argv):
             opt[a[2:]] = argv[i + 1]
             i += 2
         elif a.startswith("--") or path is not None:
-            die("usage: pcap-net [--small N] [--large N] [--list K] [--serial LOG] FILE.pcap")
+            die("usage: pcap-net [--small N] [--large N] [--list K] [--serial LOG] [--tcp] FILE.pcap")
         else:
             path = a
             i += 1
@@ -304,6 +522,8 @@ def main(argv):
     udp_seen = []     # (frame, ihl, total) of each whole UDP datagram to PAX that has drawn no error
     to_echo = {}      # (address, port) -> the data of each datagram it sent PAX's port 7, not yet echoed
     awaited = None    # [dst, seq, data bytes, answered] of PAX's last echo request on the wire
+    conns = {}        # (PAX's port, the other address, its port) -> TcpConn
+    last_in = {}      # the same key -> the last valid segment sent to PAX from there
     last_ident = None
     last_seq = 0
     started = False   # PAX's kernel has sent a frame
@@ -352,7 +572,7 @@ def main(argv):
             # A datagram.
             if len(f) < 42 or f[14] != 0x45:
                 fail(n, "a datagram from PAX that is not version 4 with a 20-byte header")
-            if f[23] not in (1, 17):
+            if f[23] not in (1, 17) and not (f[23] == 6 and tcp):
                 fail(n, "a datagram of protocol %d from PAX" % f[23])
             h = f[14:]
             total = px.be16(h, 2)
@@ -360,9 +580,11 @@ def main(argv):
             dst = h[16:20]
             if 14 + total > len(f) or total < 28:
                 fail(n, "a datagram from PAX whose total length (%d) is not its frame's" % total)
-            if last_ident is not None and ident <= last_ident:
+            # A 16-bit counter: after 65535 comes 0 (px23).
+            ahead = ident + 1 if last_ident is None else (ident - last_ident) & 0xffff
+            if ahead == 0 or ahead > 0x4000:
                 fail(n, "PAX's identification went from %d to %d" % (last_ident, ident))
-            c["ident-gaps"] += ident - (last_ident + 1 if last_ident is not None else 0)
+            c["ident-gaps"] += ahead - 1
             last_ident = ident
             c["ip.out"] += 1
             c["checksums"] += 2
@@ -373,6 +595,25 @@ def main(argv):
                 if to is None:
                     fail(n, "a datagram for %s, whose next hop %s announced no hardware address" % (px.dotted(dst), px.dotted(px.next_hop(dst))))
             m = h[20:total]
+            if h[9] == 6:
+                # px23: a TCP segment, rebuilt from its fields and held to
+                # its connection.
+                if dst == px.PAX_IP or dst[0] == 127:
+                    fail(n, "a TCP segment for %s on the wire: what loops back must not touch it" % px.dotted(dst))
+                if len(m) < 20 or (m[12] >> 4) * 4 < 20 or (m[12] >> 4) * 4 > len(m):
+                    fail(n, "a TCP segment from PAX whose header does not fit it")
+                seg = px.Segment(f)
+                want = px.tcp_from_pax(dst, seg.sport, seg.dport, seg.seq, seg.ack, seg.flags, seg.window, seg.data, ident, to)
+                if f != want:
+                    fail(n, "not a TCP segment as PAX builds one (%s) by way of %s, byte for byte: a 20-byte header, the MSS option on a SYN alone"
+                         % (seg, to.hex(":")), want)
+                key = (seg.sport, dst, seg.dport)
+                why = tcp_out(conns, last_in, key, seg, c)
+                if why:
+                    fail(n, "a TCP segment from PAX (%s) that %s" % (seg, why))
+                c["tcp.out"] += 1
+                c["checksums"] += 1
+                continue
             if h[9] == 17:
                 # px22: a UDP datagram, rebuilt from its ports and data.
                 sport, dport, data = px.be16(m, 0), px.be16(m, 2), m[8:]
@@ -489,6 +730,11 @@ def main(argv):
                 c["icmp.matched"] += 1
             else:
                 c["icmp.stray"] += 1
+        elif verdict == "tcp":
+            seg = px.Segment(f)
+            c["tcp.in"] += 1
+            c["checksums"] += 1
+            tcp_in(conns, last_in, (seg.dport, f[26:30], seg.sport), seg, c)
         elif verdict in ("udp", "udp.port-zero"):
             sport, dport, data, summed = px.udp_fields(f)
             if not summed:
@@ -518,7 +764,7 @@ def main(argv):
              " ".join("%d:%d" % kv for kv in sorted(lengths.items())[:12]) + (" …" if len(lengths) > 12 else ""),
              c["net.other"], c["checksums"]))
     if opt["serial"]:
-        wrong, held = against(opt["serial"], c)
+        wrong, held = against(opt["serial"], c, tcp)
         if wrong:
             print("pcap-net: FAIL the kernel's counters are not the capture's: " + "; ".join(wrong))
             return 1

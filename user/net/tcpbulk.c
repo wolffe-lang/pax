@@ -82,6 +82,9 @@ static int do_recv(int lfd, const char *who)
         crc = crc32_of(crc, buf, n);
         off += n;
     }
+    /* Said before the line goes back: the sender prints only once it
+       has read that line, so over loopback the two come in one order. */
+    say("%s: received %llu bytes, crc %08lx, %s\n", who, off, crc, right ? "every byte the pattern's" : "NOT the pattern");
     char line[96];
     int m = snprintf(line, sizeof line, "got %llu bytes, crc %08lx\n", off, crc);
     if (send_all(c, line, m) != m) {
@@ -89,7 +92,6 @@ static int do_recv(int lfd, const char *who)
         return 1;
     }
     close(c);
-    say("%s: received %llu bytes, crc %08lx, %s\n", who, off, crc, right ? "every byte the pattern's" : "NOT the pattern");
     return right ? 0 : 1;
 }
 
