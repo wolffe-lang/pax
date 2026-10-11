@@ -259,6 +259,23 @@ fn emit(b: u64) {
     serial.put((b & 0xff) as u8)
 }
 
+/// px26: the `n` bytes of kernel memory at `src` written to the console
+/// with a `write`'s output processing (kernel/files' `sendfile`).
+pub fn put_kernel(src: u64, n: u64) {
+    let nl = onlcr()
+    var i: u64 = 0
+    while i < n {
+        // # Safety: [src, src + n) is the caller's kernel memory (a
+        // file's bytes in the initramfs, mapped read-only in the HHDM).
+        let b = unsafe { ((src + i) as *u8).read_volatile() }
+        if b as u64 == 10 && nl {
+            serial.put(13)
+        }
+        serial.put(b)
+        i += 1
+    }
+}
+
 /// Whether byte `b` echoes as two columns (`^X`).
 fn wide(b: u64) -> bool {
     lflag(ECHOCTL) && ((b < 32 && b != 9 && b != 10) || b == 127)
