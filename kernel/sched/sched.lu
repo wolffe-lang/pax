@@ -262,6 +262,7 @@ const S_LIVE: u64 = 6 // created threads not yet exited
 const S_WAITER: u64 = 7 // slot + 1 of the thread in wait_all; 0 none
 const S_PML4: u64 = 8
 const S_NEXT_PID: u64 = 9 // px14: the next Linux pid (1 first)
+const S_FLOOR: u64 = 10 // px22: the live count the waiter waits for (0: `wait_all`'s)
 
 /// Field `off` of slot `s`'s record. Volatile: threads poll their own
 /// record while the timer rewrites it.
@@ -327,7 +328,11 @@ fn wake_sleepers() {
     let now = timer.ticks()
     var s: u64 = FIRST
     while s < SLOTS {
-        if field(s, offset_of(Thread, state)) == SLEEPING && field(s, offset_of(Thread, wake)) <= now {
+        let st = field(s, offset_of(Thread, state))
+        let at = field(s, offset_of(Thread, wake))
+        // px22: a pipe or socket wait with a deadline (`at` not 0) ends
+        // at its tick too.
+        if (st == SLEEPING || (st == PIPE && at != 0)) && at <= now {
             put_field(s, offset_of(Thread, state), READY)
             enqueue(s)
         }
@@ -619,6 +624,7 @@ pub fn start(pml4: u64) {
     put_sv(S_NEXT_PID, 1)
     put_sv(S_LIVE, 0)
     put_sv(S_WAITER, 0)
+    put_sv(S_FLOOR, 0)
     put_sv(S_SLICE, timer.ticks())
     put_field(MAIN, offset_of(Thread, state), RUNNING)
     put_field(MAIN, offset_of(Thread, id), 0)
@@ -759,9 +765,17 @@ pub fn sleep(n: u64) -> (u64, u64) {
 
 /// Block until every spawned thread has exited, then reap them.
 pub fn wait_all() {
+    wait_down_to(0)
+}
+
+/// Block until at most `n` spawned threads are live, then reap the dead
+/// (px22: a kernel whose own threads never exit — the network's two —
+/// waits for the processes it started with `n` the count before them).
+pub fn wait_down_to(n: u64) {
     let saved = sync.irq_save()
-    if live_count() > 0 {
+    if live_count() > n {
         let c = cur()
+        put_sv(S_FLOOR, n)
         put_sv(S_WAITER, c + 1)
         put_field(c, offset_of(Thread, state), BLOCKED)
         // # Safety: as `yield`.
@@ -791,7 +805,7 @@ fn finish(c: u64) {
     let n = sv(S_LIVE) - 1
     put_sv(S_LIVE, n)
     let w = sv(S_WAITER)
-    if n == 0 && w != 0 {
+    if n <= sv(S_FLOOR) && w != 0 {
         put_field(w - 1, offset_of(Thread, state), READY)
         enqueue(w - 1)
         put_sv(S_WAITER, 0)
@@ -1188,8 +1202,17 @@ pub fn zombie(s: u64, reap_it: bool) -> (u64, u64) {
 /// saved; the thread waits until `wake_pipes`; the next thread's frame.
 /// IF clear.
 pub fn block_pipe(f: u64) -> u64 {
+    block_pipe_until(f, 0)
+}
+
+/// `block_pipe` with a deadline (px22: a socket's receive timeout): the
+/// thread is made ready by `wake_pipes` or at tick `wake`, whichever
+/// comes first, and runs its call again either way; `wake` 0 is no
+/// deadline. IF clear.
+pub fn block_pipe_until(f: u64, wake: u64) -> u64 {
     let c = cur()
     put_field(c, offset_of(Thread, frame), f)
+    put_field(c, offset_of(Thread, wake), wake)
     put_field(c, offset_of(Thread, state), PIPE)
     wake_sleepers()
     run_next()
