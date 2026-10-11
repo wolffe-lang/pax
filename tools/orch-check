@@ -12,10 +12,11 @@
 # silence and the device's start are not the tune's). SPEC lines
 # (milliseconds from time 0, hertz; `#` comments):
 #
-#   present HZ FROM TO [DB]  HZ's share of every 50 ms window of FROM..TO
+#   present HZ FROM TO [DB [WIN]]  HZ's share of every WIN ms (default
+#                            50) window of FROM..TO
 #                            at least DB (default -30): the bin's power
 #                            over the window's, in dB, 0 for a lone sine
-#   absent HZ FROM TO [DB]   HZ's share at most DB (default -45) in every
+#   absent HZ FROM TO [DB [WIN]]  HZ's share at most DB (default -45) in every
 #                            window (silence counts as absent)
 #   onset HZ AT TOL [WIN]    HZ's onset within TOL ms of AT: the centre
 #                            of the first window (WIN ms, default 40,
@@ -28,6 +29,9 @@
 #   falling HZ FROM TO DB    the same, falling
 #   flat HZ FROM TO DB       ... and stays within DB of its first window
 #                            (HZ 0: the whole sound's loudness, dBFS)
+#   modulated FROM TO DB     the loudness in 5 ms steps wavers about its
+#                            200 ms mean by at least DB (standard
+#                            deviation): a tremolo, a roll
 #   rms FROM TO LO HI        the loudness (both channels, dBFS) in
 #                            FROM..TO between LO and HI
 #   noclip                   no sample at full scale
@@ -118,9 +122,9 @@ class Sound:
             ms += hop
         return out
 
-    def share(self, hz, ms):
-        """HZ's power over the 50 ms window at MS's, dB; 0 for a lone sine."""
-        a, b = self.frame(ms), self.frame(ms + 50)
+    def share(self, hz, ms, win):
+        """HZ's power over the WIN ms window at MS's, dB; 0 for a lone sine."""
+        a, b = self.frame(ms), self.frame(ms + win)
         seg = self.mono[a:b]
         ms2 = sum(v * v for v in seg) / max(len(seg), 1)
         if ms2 < 1.0:
@@ -151,7 +155,12 @@ def judge(snd, w):
     if op in ("present", "absent"):
         f, t = float(w[2]), float(w[3])
         db = float(w[4]) if len(w) > 4 else (-30.0 if op == "present" else -45.0)
-        lv = [snd.share(hz, ms) for ms, _ in snd.series(hz, f, t, 50, 50)]
+        win = float(w[5]) if len(w) > 5 else 50.0
+        lv = []
+        ms = f
+        while ms + win <= t + 0.001:
+            lv.append(snd.share(hz, ms, win))
+            ms += win
         if not lv:
             return False, "no window"
         if op == "present":
@@ -193,6 +202,21 @@ def judge(snd, w):
             return ok, "%.0f Hz %.0f-%.0f ms %s %.1f dB (want >= %.0f), worst step against it %.1f: %s" % (hz, f, t, word, lv[-1] - lv[0], db, max(drops), txt)
         spread = max(abs(v - lv[0]) for v in lv)
         return spread <= db, "%.0f Hz %.0f-%.0f ms within %.1f dB (want <= %.0f): %s" % (hz, f, t, spread, db, txt)
+    if op == "modulated":
+        f, t, db = hz, float(w[2]), float(w[3])
+        env = []
+        ms = f
+        while ms + 5 <= t:
+            env.append(snd.rms(ms, ms + 5))
+            ms += 5
+        dev = []
+        for i in range(20, len(env) - 20):
+            avg = sum(env[i - 20:i + 20]) / 40
+            dev.append(env[i] - avg)
+        if not dev:
+            return False, "too short"
+        sd = math.sqrt(sum(d * d for d in dev) / len(dev))
+        return sd >= db, "%.0f-%.0f ms: the loudness wavers %.2f dB (standard deviation in 5 ms steps about its 200 ms mean; want >= %.1f)" % (f, t, sd, db)
     if op == "rms":
         f, t, lo, hi = hz, float(w[2]), float(w[3]), float(w[4])
         r = snd.rms(f, t)
