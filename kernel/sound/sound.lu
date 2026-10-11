@@ -985,20 +985,6 @@ fn write_selected(pml4: u64, buf: u64, n: u64, done0: u64, nonblock: bool) -> u6
         let m = if n - done < room { n - done } else { room }
         let dst = sw(W_PERIOD0 + k) + frames.hhdm() + fill
         let _ok = uaccess.copy_in(pml4, dst, buf + done, m)
-        // PLANT (px30, to be seen red in mpx3-sound S3, then reverted):
-        // the two channels of every stereo S16 frame swapped.
-        if frame_bytes() == 4 {
-            var q: u64 = 0
-            while q + 4 <= m {
-                // # Safety: two 16-bit samples of the period just filled.
-                unsafe {
-                    let l = ((dst + q) as *u16).read_volatile()
-                    ((dst + q) as *u16).write_volatile(((dst + q + 2) as *u16).read_volatile())
-                    ((dst + q + 2) as *u16).write_volatile(l)
-                }
-                q += 4
-            }
-        }
         put_sw(W_FILL, fill + m)
         put_sw(W_WRITTEN, sw(W_WRITTEN) + m)
         bump(C_BYTES, m)
