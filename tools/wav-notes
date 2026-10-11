@@ -215,10 +215,16 @@ def tones(vals, rate):
 #       `channel <c> peak <dBFS> rms <dBFS> sounding <ms> from <ms> to <ms>
 #        clipped <n>` and the pitches in its sounding span, strongest
 #       first: `pitch <c> <hz> <dBFS>` (the spectrum's peaks, below).
-#   wav-notes --ramp FILE.wav
-#       dsptone's ramp (left 7*i, right its complement, mod 65536): the
-#       frames that follow the rule, the breaks (a frame lost, repeated or
-#       out of place), and whether the channels are swapped.
+#   wav-notes --ramp FRAMES FILE.wav
+#       dsptone's ramp (left 7*i, right its complement, mod 65536): of
+#       the first FRAMES frames after the leading silence, how many follow
+#       the rule, the breaks (a frame lost, repeated or out of place) and
+#       the frames whose channels are swapped. Exit 1 unless all FRAMES
+#       follow it exactly.
+#   wav-notes --gaps FILE.wav
+#       the span from the first sample that is not silence to the last,
+#       and every run of exact silence (all channels zero) of 5 ms or
+#       more inside it: an underrun the device filled with silence.
 #   wav-notes --expect SPEC FILE.wav
 #       judges the capture against SPEC, one event a line:
 #       `<start ms> <length ms> <hz> [<hz>...]` (times from the first
@@ -368,48 +374,81 @@ def pcm_report(path):
     return 0
 
 
-def ramp_report(path):
+def ramp_report(path, want):
+    """dsptone's ramp: the first `want` frames that are not both zero
+    (the capture's leading silence) must follow the rule exactly."""
     chans, rate, ch, _ = frames(path)
     if ch != 2:
         die("--ramp needs two channels")
     left, right = chans
     n = len(left)
-    # skip leading silence
     i = 0
     while i < n and left[i] == 0 and right[i] == 0:
         i += 1
-    good = 0
+    lead = i
+    got = 0
     breaks = []
     swapped = 0
-    prev = None
-    for k in range(i, n):
-        l, r = left[k] & 0xffff, right[k] & 0xffff
-        if l == r == 0:
-            continue
-        if (l ^ r) != 0xffff:
-            # maybe swapped? complement relation is symmetric; check step instead
-            breaks.append((k, "not complements"))
-            prev = None
-            continue
-        if prev is not None:
-            step = (l - prev) & 0xffff
-            if step == 7:
-                good += 1
-            elif ((r - (~prev & 0xffff)) & 0xffff) == 7 and step != 7:
-                swapped += 1
-            else:
-                breaks.append((k, "step %d" % step))
-        prev = l
-        # a swapped pair: the left carries the falling series
-    # Which channel rises: left must rise by 7.
-    rising_left = 0
-    for k in range(i + 1, min(n, i + 2000)):
-        if ((left[k] - left[k - 1]) & 0xffff) == 7:
-            rising_left += 1
-    print("ramp frames %d in-step %d breaks %d left-rises %s" % (n - i, good, len(breaks), "yes" if rising_left > 1000 else "NO (swapped)"))
-    for k, why in breaks[:20]:
-        print("break at frame %d (%.3f s): %s" % (k, k / float(rate), why))
-    return 0 if not breaks and rising_left > 1000 else 1
+    k = 0
+    while i < n and got < want:
+        l, r = left[i] & 0xffff, right[i] & 0xffff
+        el = (7 * k) & 0xffff
+        er = ~el & 0xffff
+        if l == el and r == er:
+            got += 1
+            k += 1
+        elif l == er and r == el:
+            swapped += 1
+            got += 1
+            k += 1
+        else:
+            breaks.append((i, k, l, r))
+            # resynchronise: find the k this frame belongs to
+            k2 = None
+            for j in range(k - 64, k + 4096):
+                if j >= 0 and ((7 * j) & 0xffff) == l:
+                    k2 = j
+                    break
+            if k2 is not None:
+                k = k2 + 1
+                got += 1
+            if len(breaks) > 1000:
+                break
+        i += 1
+    print("ramp lead %.1f ms frames %d of %d in-step %d swapped %d breaks %d" % (
+        lead * 1000.0 / rate, got, want, got - swapped - len(breaks), swapped, len(breaks)))
+    for at, kk, l, r in breaks[:20]:
+        print("break at frame %d (%.3f s): expected ramp step %d, got left %d right %d" % (at, at / float(rate), kk, l, r))
+    return 0 if got == want and not breaks and not swapped else 1
+
+
+def gaps_report(path, min_ms=5.0):
+    """Silent runs (every channel exactly zero) of at least `min_ms`
+    inside the capture's sounding span, and the span itself."""
+    chans, rate, ch, _ = frames(path)
+    n = len(chans[0])
+    loud = [any(c[i] != 0 for c in chans) for i in range(n)]
+    try:
+        first = loud.index(True)
+    except ValueError:
+        print("gaps capture silent")
+        return 0
+    last = n - 1 - loud[::-1].index(True)
+    print("span from %.1f to %.1f ms (%.1f ms) of %.1f" % (first * 1000.0 / rate, last * 1000.0 / rate,
+                                                     (last - first + 1) * 1000.0 / rate, n * 1000.0 / rate))
+    i = first
+    while i <= last:
+        if not loud[i]:
+            j = i
+            while j <= last and not loud[j]:
+                j += 1
+            ms = (j - i) * 1000.0 / rate
+            if ms >= min_ms:
+                print("gap at %.1f ms for %.1f ms" % ((i - first) * 1000.0 / rate, ms))
+            i = j
+        else:
+            i += 1
+    return 0
 
 
 def expect_report(spec, path):
@@ -498,12 +537,14 @@ def expect_report(spec, path):
 def main(argv):
     if len(argv) == 3 and argv[1] == "--pcm":
         sys.exit(pcm_report(argv[2]))
-    if len(argv) == 3 and argv[1] == "--ramp":
-        sys.exit(ramp_report(argv[2]))
+    if len(argv) == 4 and argv[1] == "--ramp":
+        sys.exit(ramp_report(argv[3], int(argv[2])))
+    if len(argv) == 3 and argv[1] == "--gaps":
+        sys.exit(gaps_report(argv[2]))
     if len(argv) == 4 and argv[1] == "--expect":
         sys.exit(expect_report(argv[2], argv[3]))
     if len(argv) != 2:
-        die("usage: wav-notes [--pcm | --ramp | --expect SPEC] FILE.wav")
+        die("usage: wav-notes [--pcm | --gaps | --ramp FRAMES | --expect SPEC] FILE.wav")
     vals, rate, ch, bits = samples(argv[1])
     ts = tones(vals, rate)
     for k, (s, e, hz, n) in enumerate(ts, 1):

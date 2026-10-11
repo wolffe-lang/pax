@@ -22,6 +22,12 @@
  *            GETBLKSIZE, GETOSPACE, GETODELAY
  *   -n       no SNDCTL_DSP_* request at all: the device's defaults
  *            (8000 Hz, one channel, unsigned 8-bit)
+ *   -X exit  half way, end the process with _exit(3) and the device
+ *            still open: nothing drains it (what the kernel does with
+ *            the queued sound is the test)
+ *   -X fault half way, write through a null pointer (SIGSEGV)
+ *   -N       open with O_NONBLOCK: a full queue answers EAGAIN, which
+ *            this program waits out with a 5 ms sleep and counts
  *
  * Exit 0, 1 when a call failed (named), 2 on usage.
  *
@@ -102,9 +108,10 @@ int main(int argc, char **argv)
 {
     const char *dev = "/dev/dsp", *pat = "tone", *fmtname = "s16";
     int rate = 48000, ch = 2, ms = 1000, lhz = 440, rhz = 660;
-    int chunk = 4096, gap = 0, queries = 0, defaults = 0;
+    int chunk = 4096, gap = 0, queries = 0, defaults = 0, nonblock = 0;
+    const char *end = NULL;
     int o;
-    while ((o = getopt(argc, argv, "d:r:c:f:t:l:R:p:k:g:qn")) != -1) {
+    while ((o = getopt(argc, argv, "d:r:c:f:t:l:R:p:k:g:qnX:N")) != -1) {
         switch (o) {
         case 'd': dev = optarg; break;
         case 'r': rate = atoi(optarg); break;
@@ -118,6 +125,8 @@ int main(int argc, char **argv)
         case 'g': gap = atoi(optarg); break;
         case 'q': queries = 1; break;
         case 'n': defaults = 1; break;
+        case 'X': end = optarg; break;
+        case 'N': nonblock = 1; break;
         default:
             say("usage: dsptone [-d DEV] [-r RATE] [-c CH] [-f s16|u8] [-t MS] [-l HZ] [-R HZ] [-p tone|ramp] [-k BYTES] [-g MS] [-q] [-n]\n");
             return 2;
@@ -135,7 +144,7 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    int fd = open(dev, O_WRONLY);
+    int fd = open(dev, O_WRONLY | (nonblock ? O_NONBLOCK : 0));
     if (fd < 0) {
         say("dsptone: open %s: %s\n", dev, ename(errno));
         return 1;
@@ -230,7 +239,7 @@ int main(int argc, char **argv)
     }
 
     long t0 = now_ms();
-    long off = 0, writes = 0, half = total / 2 / frame * frame;
+    long off = 0, writes = 0, eagain = 0, half = total / 2 / frame * frame;
     int gapped = gap == 0;
     while (off < total) {
         long n = total - off;
@@ -243,6 +252,12 @@ int main(int argc, char **argv)
             if (w < 0) {
                 if (errno == EINTR)
                     continue;
+                if (errno == EAGAIN && nonblock) {
+                    struct timespec ts = { 0, 5000000L };
+                    nanosleep(&ts, NULL);
+                    eagain++;
+                    continue;
+                }
                 say("dsptone: write at %ld: %s\n", off, ename(errno));
                 return 1;
             }
@@ -253,6 +268,12 @@ int main(int argc, char **argv)
             off += w;
             writes++;
         }
+        if (end && off >= half) {
+            say("dsptone: ending (%s) at byte %ld with the device open\n", end, off);
+            if (strcmp(end, "fault") == 0)
+                *(volatile int *)0 = 1;
+            _exit(3);
+        }
         if (!gapped && off >= half) {
             struct timespec ts = { gap / 1000, (gap % 1000) * 1000000L };
             nanosleep(&ts, NULL);
@@ -262,6 +283,8 @@ int main(int argc, char **argv)
     }
     long t1 = now_ms();
     say("dsptone: wrote %ld bytes, %ld frames of %d bytes at %d Hz\n", off, frames, frame, rate);
+    if (nonblock)
+        say("dsptone: EAGAIN answered %s\n", eagain > 0 ? "while the queue was full" : "never");
     if (queries) {
         int v = 0;
         if (ioctl(fd, SNDCTL_DSP_GETODELAY, &v) < 0)
