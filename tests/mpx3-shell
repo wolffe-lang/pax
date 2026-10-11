@@ -50,6 +50,19 @@
 #                 -c` of a file and a program, `readlink
 #                 /proc/self/exe`, `readlink -v` of what is no link and
 #                 its status, `env`, exit
+#   shell-sigs    user/console/shell-sigs.keys through COM1 (px26):
+#                 sh05's pelt — `trap 'echo caught' INT`, Ctrl-C at
+#                 the prompt and Enter (the trap runs), `trap - INT`,
+#                 Ctrl-C at an empty prompt and a command typed after
+#                 it, `sleep 30` and Ctrl-C a moment later (`$?` is
+#                 130), a pipeline whose reader ends first (`cat
+#                 /bin/pelt | true`: the writer dies of SIGPIPE),
+#                 `export`, `env`, `unset`, `env`, and `exec echo
+#                 replaced`, which ends the session as pid 1. A step
+#                 that starts with `^~` is typed at the running program,
+#                 two seconds after the step before (tools/qemu-halt)
+#   shell-sigs-ps2  the same keys through the PS/2 keyboard (Ctrl-C a
+#                 key chord there); its reference is shell-sigs'
 #   procs         nothing typed: procs runs to its end
 #   procs-quiet   procs on the quiet image (its refusals and the fault
 #                 it causes still print); its reference is procs'
@@ -81,7 +94,7 @@
 #   S4 what PAX lacks or refuses: -ENOSYS only for set_robust_list (273)
 #      and rseq (334) (glibc's start-up; none for procs, which has no
 #      libc); refused by name nothing in a shell session, and in procs'
-#      exactly the not-ELF execve (59, -8) and the kill (62, -38).
+#      exactly the not-ELF execve (59, -8) (px26: `kill` answers).
 #   S5 the end: `PAX: init /bin/<prog> ended with status <s>; nothing
 #      left to run` with s Linux's status, `halt`, and qemu-halt holds the
 #      machine halted.
@@ -130,13 +143,13 @@ case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier
 need readelf python3
 
 BORE="cat echo env false head ls readlink sleep stat tail true wc"
-SESSIONS="shell-serial shell-ps2 shell-howl shell-howl-quiet shell-plumb shell-long procs procs-quiet"
-LINUX_SESSIONS="shell-serial shell-ps2 shell-howl shell-plumb shell-long procs" # a -quiet session's reference is its namesake's
+SESSIONS="shell-serial shell-ps2 shell-howl shell-howl-quiet shell-plumb shell-long shell-sigs shell-sigs-ps2 procs procs-quiet"
+LINUX_SESSIONS="shell-serial shell-ps2 shell-howl shell-plumb shell-long shell-sigs procs" # a -quiet session's reference is its namesake's
 image_of() { case $1 in procs) echo procs ;; procs-quiet) echo procs-quiet ;; *-quiet) echo shell-quiet ;; *) echo shell ;; esac; }
 init_of() { case $1 in procs*) echo procs ;; *) echo pelt ;; esac; }
-keys_of() { case $1 in shell-serial) echo "$PAX_ROOT/user/console/shell.keys" ;; shell-ps2) echo "$PAX_ROOT/user/console/shell-ps2.keys" ;; shell-howl*) echo "$PAX_ROOT/user/console/shell-howl.keys" ;; shell-plumb) echo "$PAX_ROOT/user/console/shell-plumb.keys" ;; shell-long) echo "$PAX_ROOT/user/console/shell-long.keys" ;; *) echo "$images/procs.keys" ;; esac; }
+keys_of() { case $1 in shell-serial) echo "$PAX_ROOT/user/console/shell.keys" ;; shell-ps2) echo "$PAX_ROOT/user/console/shell-ps2.keys" ;; shell-howl*) echo "$PAX_ROOT/user/console/shell-howl.keys" ;; shell-plumb) echo "$PAX_ROOT/user/console/shell-plumb.keys" ;; shell-long) echo "$PAX_ROOT/user/console/shell-long.keys" ;; shell-sigs*) echo "$PAX_ROOT/user/console/shell-sigs.keys" ;; *) echo "$images/procs.keys" ;; esac; }
 kbd_of() { case $1 in *-ps2) echo ps2 ;; *) echo serial ;; esac; }
-linux_of() { case $1 in *-quiet) echo "${1%-quiet}" ;; *) echo "$1" ;; esac; }
+linux_of() { case $1 in *-quiet) echo "${1%-quiet}" ;; shell-sigs-ps2) echo shell-sigs ;; *) echo "$1" ;; esac; }
 quiet_of() { case $1 in *-quiet) echo 1 ;; *) echo 0 ;; esac; }
 MOTD='PAX: this is /etc/motd, a text file in the initramfs, and not an ELF executable.'
 SHELL_MOTD='PAX. Kernel: wolf. Shell: wolf. Tools: wolf. Nothing here existed last year.'
@@ -254,7 +267,7 @@ if [ -z "$images" ]; then
         find "$work/shell/root" "$work/procs/root" -exec ${asroot[@]+"${asroot[@]}"} touch -h -d @0 {} + || why+=" touch;"
         for s in $LINUX_SESSIONS; do
             p=$(image_of "$s") i=$(init_of "$s")
-            if ${asroot[@]+"${asroot[@]}"} python3 "$PAX_ROOT/tools/linux-tty" --root "$work/$p/root" --pid1 \
+            if ${asroot[@]+"${asroot[@]}"} python3 "$PAX_ROOT/tools/linux-tty" --isig --root "$work/$p/root" --pid1 \
                 --keys "$(keys_of "$s")" --prompt "$PROMPT" --argv0 "/bin/$i" "$work/linux/$s.tty" -- "/bin/$i"; then
                 say "  linux $s: $(wc -c < "$work/linux/$s.tty" | tr -d ' ') bytes, status $(cat "$work/linux/$s.tty.rc")"
             else
@@ -328,12 +341,17 @@ for leg in $legs; do
             n=$(printf '%s\n' $execs | wc -l | tr -d ' ')
             [ "$n" -ge 2 ] || why+=" fewer than two programs ran ('$execs');"
             # px17: rising from 1 (a fork child that never execs takes a pid).
-            printf '%s\n' $execs | awk 'NR == 1 && $1 != 1 { bad = 1 } NR > 1 && $1 <= last { bad = 1 } { last = $1 } END { exit bad }' \
+            # px26: pid 1 again is init's own `exec`.
+            printf '%s\n' $execs | awk 'NR == 1 && $1 != 1 { bad = 1 } NR > 1 && $1 == 1 { next } NR > 1 && $1 <= last { bad = 1 } { last = $1 } END { exit bad }' \
                 || why+=" exec pids '$execs' do not rise from 1;"
             for k in $execs; do
-                grep -Eq "^user: [^ ]+ pid $k (exit_group [0-9]+|exit [0-9]+|killed: .*) after [0-9]+ runs$" "$norm" || why+=" no end line for pid $k;"
+                # px26: a `killed:` line may follow the terminal's own echo
+                # of the key that killed (`^C`), which ends in no newline.
+                grep -Eq "(^|[^ ])user: [^ ]+ pid $k (exit_group [0-9]+|exit [0-9]+|killed: .*) after [0-9]+ runs$" "$norm" || why+=" no end line for pid $k;"
             done
-            grep -Eq "^user: $i pid 1 (exit_group|exit) [0-9]+ after " "$norm" || why+=" init is not '$i pid 1';"
+            # px26: after `exec` pid 1 is another program (shell-sigs ends as `echo`).
+            ie=$i; case $s in shell-sigs*) ie='[^ ]+' ;; esac
+            grep -Eq "^user: $ie pid 1 (exit_group|exit) [0-9]+ after " "$norm" || why+=" init is not '$i pid 1';"
             fl=$(grep -m1 '^user: frames free ' "$norm")
             fa=$(printf '%s\n' "$fl" | sed -n -E 's/^user: frames free ([0-9]+) before, [0-9]+ with 1 processes, ([0-9]+) after$/\1 \2/p')
             set -- $fa
@@ -348,7 +366,11 @@ for leg in $legs; do
                 # Nothing left out but what quiet keeps: a refusal, a fault.
                 awk -v init="$i" '$0 == ("run 1: /bin/" init) { on = 1; next } on && /^run: [0-9]+ commands$/ { exit } on && !/^user: [^ ]+ pid [0-9]+ (syscall [0-9]+: refused: |killed: )/ && !/^user: exec .*: refused: / { print }' "$norm" > "$out"
             else
-                awk -v init="$i" '/^user: exec pid 1 / { on = 1; next } on && $0 ~ ("^user: " init " pid 1 (exit_group|exit) [0-9]+ after ") { exit } on && !/^user: / { print }' "$norm" > "$out"
+                # px26: a kernel line that lands after a `^C` the terminal
+                # echoed (no newline follows an echoed control key) is cut
+                # out with its newline, and the line goes on.
+                awk '/^user: exec pid 1 / { if (!on) { on = 1; next } } on && /^user: [^ ]+ pid 1 (exit_group|exit) [0-9]+ after / { exit }
+                     on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$norm" > "$out"
             fi
             tr -d '\r' < "$lx/$ls.tty" > "$out.linux"
             [ -z "$(tail -c 1 "$out.linux")" ] || printf '\n' >> "$out.linux"
@@ -358,7 +380,7 @@ for leg in $legs; do
             if [ "$q" = 1 ]; then
                 pst=$(sed -n -E "s/^PAX: init \/bin\/$i ended with status ([0-9]+); .*/\\1/p" "$norm" | head -n 1)
             else
-                pst=$(sed -n -E "s/^user: $i pid 1 (exit_group|exit) ([0-9]+) after .*/\\2/p" "$norm" | head -n 1)
+                pst=$(sed -n -E "s/^user: [^ ]+ pid 1 (exit_group|exit) ([0-9]+) after .*/\\2/p" "$norm" | head -n 1)
             fi
             lst=$(cat "$lx/$ls.tty.rc" 2>/dev/null)
             [ "$pst" = "$lst" ] || why+=" exit '$pst' on PAX, '$lst' on Linux;"
@@ -387,7 +409,7 @@ for leg in $legs; do
             [ "$ns" = "$want" ] || why+=" -ENOSYS for '$ns', not '$want';"
             rf=$(grep ': refused: ' "$norm" | sed -E 's/^user: [^ ]+ pid [0-9]+ //' | paste -sd'|' -)
             if [ "$i" = procs ]; then # quiet or not: refusals print
-                wr="user: exec /etc/script: refused: not an ELF file|syscall 59: refused: not a static x86-64 ELF executable PAX runs, -8|syscall 62: refused: signals are not delivered yet, -38"
+                wr="user: exec /etc/script: refused: not an ELF file|syscall 59: refused: not a static x86-64 ELF executable PAX runs, -8"
                 [ "$rf" = "$wr" ] || why+=" refusals '$rf', not '$wr';"
             else
                 [ -z "$rf" ] || why+=" refusals '$rf';"
@@ -404,7 +426,7 @@ for leg in $legs; do
             [ -z "$why" ] && say "PASS S5 $id: init ended, status $lst; $(tail -n 1 "$log.verdict")" || bad "S5 $id:$why"
 
             # S6: what the brief's session says, on Linux (S2 holds PAX to it).
-            case $s in shell-howl*|shell-plumb|shell-long)
+            case $s in shell-howl*|shell-plumb|shell-long|shell-sigs*)
                 ex=$PAX_ROOT/user/console/${ls}.expect
                 # px26: a program's size (and so /bin's `total` and a
                 # program's blocks) is the build host's libc's: masked
