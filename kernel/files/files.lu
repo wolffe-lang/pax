@@ -1709,6 +1709,12 @@ fn node_poll(k: u64, n: u64, acc: u64) -> (u64, u64, u64) {
     if k == K_CONSOLE {
         return (if console.readable() { POLLIN | POLLOUT } else { POLLOUT }, 0, 0)
     }
+    if k == K_DSP {
+        // px30: room to write while a period is free; the room count
+        // moves as the device hands periods back (its interrupt wakes
+        // every waiter, kernel/interrupts).
+        return (if sound.writable() { POLLOUT } else { 0 }, 0, sound.count(sound.C_RETURNED))
+    }
     (POLLIN | POLLOUT, 0, 0)
 }
 
