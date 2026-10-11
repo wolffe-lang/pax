@@ -270,11 +270,11 @@ boot() { # tier leg way
     : > "$log.end"
     if [ "$way" = peer ]; then
         q=(--qemu -netdev --qemu "socket,id=n0,udp=127.0.0.1:$port,localaddr=127.0.0.1:$port2")
-        "$PAX_ROOT/tools/net-peer" --udp --listen "$port" --qemu "$port2" --soak "$soak" --boot 170 >"$log.end" 2>&1 &
+        "$PAX_ROOT/tools/net-peer" --udp --listen "$port" --qemu "$port2" --soak "$soak" --boot 120 >"$log.end" 2>&1 &
         pid=$!
     elif [ "$way" = user ]; then
         q=(--qemu -netdev --qemu "user,id=n0,ipv6=off,hostfwd=udp:127.0.0.1:$port-:7")
-        "$PAX_ROOT/tools/udp-host" --echo-to "$port" --soak "$soak" --boot 170 --wait 900 >"$log.end" 2>&1 &
+        "$PAX_ROOT/tools/udp-host" --echo-to "$port" --soak "$soak" --boot 120 --wait 900 >"$log.end" 2>&1 &
         pid=$!
     fi
     if [ "$way" = user ]; then
@@ -283,8 +283,23 @@ boot() { # tier leg way
         while [ "$w" -lt 9000 ] && ! grep -q '^udp-host: 127.0.0.1 port\|^udp-host: FAIL' "$log.end" 2>/dev/null; do sleep 0.1; w=$((w + 1)); done
     fi
     [ "$way" = none ] || q+=(--qemu -device --qemu "virtio-net-pci,netdev=n0,mac=$MAC" --qemu -object --qemu "filter-dump,id=f0,netdev=n0,file=$pcap")
-    "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 420 --accel "$accel" \
-        --elf "$elf" --marker halt ${q[@]+"${q[@]}"} "$iso" >"$log.verdict" 2>&1 || rc=$?
+    "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 300 --accel "$accel" \
+        --elf "$elf" --marker halt ${q[@]+"${q[@]}"} "$iso" >"$log.verdict" 2>&1 &
+    local hpid=$! said=0
+    # A program whose other end has said FAIL waits for datagrams that
+    # will not come: 20 s after that word the boot is stopped, not
+    # waited out.
+    while kill -0 "$hpid" 2>/dev/null; do
+        sleep 1
+        if grep -q '^[a-z-]*: FAIL' "$log.end" 2>/dev/null; then
+            said=$((said + 1))
+            if [ "$said" = 20 ]; then
+                kill "$hpid" 2>/dev/null
+                printf 'qemu-halt: NOT HALTED: stopped by tests/mpx4-udp 20 s after the other end said FAIL\n' >> "$log.verdict"
+            fi
+        fi
+    done
+    wait "$hpid" || rc=$?
     # The other end has said its last word by now, or never will.
     [ -z "$pid" ] || { sleep 0.5; kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; }
     ran=$((ran + 1))
