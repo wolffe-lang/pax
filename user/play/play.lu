@@ -9,6 +9,15 @@
 //!     play -w square|triangle|mix ...   the mixed mode's voices
 //!     play -c ...          the mixed mode's cost: synthesise without
 //!                          a sound and say how long it took
+//!     play -o ...          px32: a part-format tune's frames to
+//!                          standard output (raw S16_LE, two channels,
+//!                          48000 Hz) instead of the device
+//!
+//! **The part format** (px32): a file with a `part` line is a score of
+//! independent parts with dynamics, hairpins, articulation and
+//! instrument timbres, read by parts.lu and synthesised by orch.lu; it
+//! sounds only through the device. Its spec is
+//! `notes/px32-format.md`. Everything below is the note file's.
 //!
 //! **The note file** is plain text, one item a line; `#` starts a
 //! comment that runs to the end of its line; blank lines are skipped:
@@ -92,6 +101,7 @@ struct Tune {
     chord_n: List[int],
     chords: List[int],
     arp: int, // microseconds a chord's pitch sounds
+    parts: bool, // px32: a part-format score (parts.lu), read again to play
 }
 
 fn main() -> int {
@@ -103,6 +113,7 @@ fn main() -> int {
     var mode = 0 // 0: the device when /dev/dsp opens, else the speaker
     var style = 0
     var cost = false
+    var raw = false
     var first = 0
     while first < all.len && all[first].starts_with("-") {
         let o = all[first]
@@ -112,6 +123,8 @@ fn main() -> int {
             mode = 2
         } else if o == "-c" {
             cost = true
+        } else if o == "-o" {
+            raw = true
         } else if o == "-w" && first + 1 < all.len {
             first += 1
             let w = all[first]
@@ -121,7 +134,7 @@ fn main() -> int {
                 return 2
             }
         } else {
-            eprint("play: unknown option '{o}' (-m, -s, -w square|triangle|mix, -c)")
+            eprint("play: unknown option '{o}' (-m, -s, -w square|triangle|mix, -c, -o)")
             return 2
         }
         first += 1
@@ -148,17 +161,28 @@ fn main() -> int {
         (mut tunes).push(t)
     }
     if cost {
-        return mixed_cost(tunes, style)
+        return mixed_cost(tunes, paths, style)
+    }
+    if raw {
+        return parts_out(tunes, paths)
     }
     if mode != 2 {
         let d = dsp_open()
         if d.fd >= 0 {
-            return mixed(d, tunes, style)
+            return mixed(d, tunes, paths, style)
         }
         if mode == 1 {
             eprint("play: /dev/dsp: cannot open or set it up (-{0 - d.fd})")
             return 1
         }
+    }
+    var pi = 0
+    while pi < tunes.len {
+        if tunes[pi].parts {
+            eprint("play: {paths[pi]}: a part-format tune sounds only through /dev/dsp (play -m)")
+            return 1
+        }
+        pi += 1
     }
     let fd = console()
     if fd < 0 {
@@ -221,9 +245,22 @@ fn slots(t: Tune) -> (List[List[int]], List[int], List[int], int) {
 }
 
 /// px30: play every tune through /dev/dsp, mixed.
-fn mixed(d: Dsp, tunes: List[Tune], style: int) -> int {
+fn mixed(d: Dsp, tunes: List[Tune], paths: List[str], style: int) -> int {
     var i = 0
     while i < tunes.len {
+        if tunes[i].parts {
+            let sc = load_score(paths[i])
+            print("playing {sc.title} ({secs(sc.total)} s), {sc.names.len} parts, {d.rate} Hz")
+            let r = perform_parts(sc, 0, d.rate, d.channels)
+            print("played {sc.title}: {r.most} voices at most, {r.stolen} stolen, {r.clamped} clamped, {r.limited} blocks limited, set up in {r.setup_ms} ms")
+            if r.err != 0 {
+                eprint("play: /dev/dsp: write failed (-{0 - r.err})")
+                let _c = dsp_close()
+                return 1
+            }
+            i += 1
+            continue
+        }
         let (ps, ls, ss, most) = slots(tunes[i])
         print("playing {tunes[i].title} ({secs(tunes[i].total)} s), mixed: {most} voices at most, {d.rate} Hz")
         let r = perform_mixed(ps, ls, ss, most, style, d.rate, d.channels, true)
@@ -244,9 +281,21 @@ fn mixed(d: Dsp, tunes: List[Tune], style: int) -> int {
 
 /// px30: `play -c`: each tune synthesised at 48 kHz without a sound,
 /// and the time it took against the time it would sound.
-fn mixed_cost(tunes: List[Tune], style: int) -> int {
+fn mixed_cost(tunes: List[Tune], paths: List[str], style: int) -> int {
     var i = 0
     while i < tunes.len {
+        if tunes[i].parts {
+            let t0 = time_now_ms()
+            let sc = load_score(paths[i])
+            let t1 = time_now_ms()
+            let r = perform_parts(sc, 2, 48000, 2)
+            let ms = time_now_ms() - t1
+            let sound_ms = r.frames / 48
+            let pct10 = if sound_ms > 0 { ms * 1000 / sound_ms } else { 0 }
+            print("cost {sc.title}: {r.frames} frames ({sound_ms} ms of sound, {sc.names.len} parts, {r.most} voices at most) synthesised in {ms} ms, {pct10 / 10}.{pct10 % 10}% of real time, {r.clamped} clamped, {r.stolen} stolen, {r.limited} blocks limited; read in {t1 - t0} ms, set up in {r.setup_ms} ms")
+            i += 1
+            continue
+        }
         let (ps, ls, ss, most) = slots(tunes[i])
         let t0 = time_now_ms()
         let r = perform_mixed(ps, ls, ss, most, style, 48000, 2, false)
@@ -440,7 +489,45 @@ fn load(path: str) -> Tune {
         }
         return refused("cannot read")
     }
+    if is_parts(text) {
+        let sc = parse_parts(text)
+        if sc.err != "" {
+            return refused(sc.err)
+        }
+        var t = refused("")
+        t.title = sc.title
+        t.total = sc.total
+        t.parts = true
+        return t
+    }
     parse(text)
+}
+
+/// px32: the part-format score at `path` (load has checked it).
+fn load_score(path: str) -> Score {
+    let text = fs_read_text(path) else |_| {
+        return score_refused("cannot read")
+    }
+    parse_parts(text)
+}
+
+/// px32: `play -o`: each part-format tune's frames to standard output.
+fn parts_out(tunes: List[Tune], paths: List[str]) -> int {
+    var i = 0
+    while i < tunes.len {
+        if !tunes[i].parts {
+            eprint("play: {paths[i]}: -o is for the part format")
+            return 2
+        }
+        let r = perform_parts(load_score(paths[i]), 1, 48000, 2)
+        if r.err != 0 {
+            eprint("play: standard output: write failed")
+            return 1
+        }
+        eprint("played {tunes[i].title}: {r.frames} frames, {r.most} voices at most, {r.stolen} stolen, {r.clamped} clamped, {r.limited} blocks limited")
+        i += 1
+    }
+    0
 }
 
 fn refused(why: str) -> Tune {
@@ -455,6 +542,7 @@ fn refused(why: str) -> Tune {
         chord_n: List[int](),
         chords: List[int](),
         arp: 0,
+        parts: false,
     }
 }
 
@@ -837,5 +925,6 @@ fn parse(text: str) -> Tune {
         chord_n: chord_n,
         chords: chords,
         arp: arp,
+        parts: false,
     }
 }
