@@ -548,10 +548,17 @@ class Stack:
             hop = px.next_hop(seg.dst)
             if hop not in p.macs:
                 p.fail("a segment for %s, which this script does not play" % px.dotted(seg.dst), f)
-            want = px.tcp_from_pax(seg.dst, seg.sport, seg.dport, seg.seq, seg.ack, seg.flags, seg.window, seg.data, p.next_ident, p.macs[hop])
+            # Rebuilt with the identification it carries: a frame of PAX's
+            # that this host dropped between QEMU's socket and this
+            # script's (a full receive buffer on a busy host) is a loss
+            # like any other to TCP, and a gap in the numbers here;
+            # `note_ident` holds them to going forward and counts the
+            # gaps, and tools/pcap-net holds the capture, which loses
+            # nothing, to no gap at all.
+            want = px.tcp_from_pax(seg.dst, seg.sport, seg.dport, seg.seq, seg.ack, seg.flags, seg.window, seg.data, seg.ident, p.macs[hop])
             if f != want:
                 p.fail("not a TCP segment as PAX builds one (%s, identification %d): 20-byte headers, DF, time to live 64, "
-                       "the MSS option on a SYN alone, byte for byte" % (seg, p.next_ident), f, want)
+                       "the MSS option on a SYN alone, byte for byte" % (seg, seg.ident), f, want)
             p.note_ident(f)
         if seg.flags & RST:
             self.n["resets-in"] += 1

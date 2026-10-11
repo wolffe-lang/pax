@@ -222,7 +222,7 @@ class SocketWire:
 
     def __init__(self, listen, qemu):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 23)
         self.sock.bind(("127.0.0.1", listen))
         self.to = ("127.0.0.1", qemu)
 
@@ -654,7 +654,10 @@ class Peer:
             hop = px.next_hop(dst)
             if hop not in self.macs:
                 self.fail("%s: a datagram for %s, which this script does not play" % (what, px.dotted(dst)), f)
-            want = px.udp_from_pax(dst, sport, dport, data, self.next_ident, self.macs[hop])
+            # (While the TCP script runs a frame this host lost before
+            # this script read it leaves a gap: see tools/paxtcp.py.)
+            ident = px.be16(f, 18) if getattr(self, "tcp", None) is not None else self.next_ident
+            want = px.udp_from_pax(dst, sport, dport, data, ident, self.macs[hop])
             if f != want:
                 self.fail("%s: not PAX's datagram (port %d to %s port %d, %d bytes, identification %d), byte for byte"
                           % (what, sport, px.dotted(dst), dport, len(data), self.next_ident), f, want)
@@ -1324,7 +1327,8 @@ def main(argv):
         return 1
     sent = " ".join("%s=%d" % kv for kv in sorted(peer.sent.items()))
     print("net-peer: sent %s" % sent)
-    print("net-peer: PASS before=%d arp-requests-from-pax=%d last-identification=%d" % (peer.before, peer.arp_out, peer.last_ident))
+    print("net-peer: PASS before=%d arp-requests-from-pax=%d last-identification=%d%s"
+          % (peer.before, peer.arp_out, peer.last_ident, " frames-this-host-lost-before-the-script=%d" % peer.gaps if tcp else ""))
     return 0
 
 
