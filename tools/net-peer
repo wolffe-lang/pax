@@ -60,10 +60,12 @@
 #       checksum; a 4-byte ICMP message; a timestamp request and an
 #       echo with code 1; echo requests to both broadcast addresses; an
 #       echo reply nobody asked for; a 26-byte frame
-#   B7  an unknown protocol: of five datagrams at once the first alone
-#       draws a destination unreachable (code 2) quoting its header and
-#       8 bytes; a second later one with options and 3 data bytes draws
-#       one quoting 24 + 3 bytes and the next, at once, none; one to the
+#   B7  nobody to take it: of five UDP datagrams at once for a port no
+#       socket holds (px22; this kernel makes no socket) the first alone
+#       draws a destination unreachable, code 3, quoting its header and
+#       8 bytes; a second later a datagram of protocol 253 with options
+#       and 3 data bytes draws one of code 2 quoting 24 + 3 bytes and
+#       the next, of protocol 6, at once, none; a UDP datagram to the
 #       subnet's broadcast and one in a broadcast frame draw none
 #   B8  a gratuitous announcement for an address PAX holds no entry for
 #       teaches it nothing; one for 10.0.2.100 moves its replies to the
@@ -456,12 +458,12 @@ class Peer:
         time.sleep(1.3)
         first = self.datagram(P, struct.pack(">HHHH", 4444, 7, 13, 0) + b"hello", proto=17)
         verdict, ihl, total = px.judge_ip(first)
-        self.tally("unreachable")
+        self.tally("udp")
         self.send(first)
         for k in range(4):
             self.send(self.datagram(P, struct.pack(">HHHH", 4445 + k, 7, 8, 0), proto=17))
-            self.tally("unreachable")
-        self.expect(px.unreachable_for(first, ihl, total, self.next_ident, px.PEER_MAC), "PAX's protocol unreachable for the first of five datagrams")
+            self.tally("udp")
+        self.expect(px.port_unreachable_for(first, ihl, total, self.next_ident, px.PEER_MAC), "PAX's port unreachable for the first of five UDP datagrams")
         self.fence(4)
         time.sleep(1.3)
         second = px.pad60(self.datagram(P, b"abc", proto=253, options=b"\x01\x01\x01\x00"))
@@ -473,10 +475,10 @@ class Peer:
         self.expect(px.unreachable_for(second, ihl, total, self.next_ident, px.PEER_MAC), "PAX's protocol unreachable for a datagram with options and 3 data bytes")
         time.sleep(1.3)
         udp = struct.pack(">HHHH", 4444, 7, 8, 0)
-        self.quiet(self.datagram(P, udp, proto=17, dst_mac=px.BCAST, dst_ip=px.SUBNET_BCAST), "silent", "an unknown protocol to the subnet's broadcast")
-        self.quiet(self.datagram(P, udp, proto=17, dst_mac=px.BCAST), "silent", "an unknown protocol in a broadcast frame")
+        self.quiet(self.datagram(P, udp, proto=17, dst_mac=px.BCAST, dst_ip=px.SUBNET_BCAST), "udp", "a UDP datagram for a port nobody holds, to the subnet's broadcast")
+        self.quiet(self.datagram(P, udp, proto=17, dst_mac=px.BCAST), "udp", "a UDP datagram for a port nobody holds, in a broadcast frame")
         self.fence(5)
-        print("net-peer: ok B7 an unknown protocol: 2 destination unreachables, each exact; 5 held back by the limit; 2 never due")
+        print("net-peer: ok B7 nobody to take it: a port unreachable (code 3) and a protocol unreachable (code 2), each exact; 5 held back by the limit; 2 never due")
 
         # B8 gratuitous announcements
         stranger_ip, stranger = px.ip("10.0.2.123"), px.mac("52:54:00:00:00:dd")
