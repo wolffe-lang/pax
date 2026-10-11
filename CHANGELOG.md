@@ -7,6 +7,56 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Threads, futexes and signals (px26).** PAX's shell image runs the
+  current pelt (sh05, `b32bebc`) and the current boreutils (bu20,
+  `870815c`) unmodified. A process may have threads: `clone`/`clone3`
+  with `CLONE_THREAD` makes one in the caller's group — the same
+  address space, descriptors, working directory and signal actions; its
+  own tid, stack, FS base, signal mask and x87/SSE/AVX state — `exit`
+  ends a thread and `exit_group` the process, a thread's end zeroes its
+  clear-child-tid word and wakes the futex there, and `execve` from a
+  process with threads ends the others first. `kernel/futex` is wait
+  and wake, with and without a bitset, private or not, with a timeout;
+  every other operation is refused by name. `kernel/signal` delivers:
+  `rt_sigaction` with handlers, `rt_sigprocmask` per thread,
+  `rt_sigpending`, `kill`, `tgkill`, `tkill`, the frame a glibc
+  handler expects on the thread's stack (siginfo, ucontext, the
+  extended state as XSAVE wrote it) and `rt_sigreturn`, which puts
+  back every register and that state; SA_RESTART, SA_SIGINFO,
+  SA_NODEFER, SA_RESETHAND; the default actions terminate and ignore,
+  with stop and continue refused by name; a signal ends a waiting
+  `read`, `wait4`, `futex` or sleep with the call run again or -EINTR
+  as Linux does each; SIGPIPE, SIGCHLD and a fault's signal reach
+  handlers. The console's line discipline has ISIG: Ctrl-C, Ctrl-\
+  and Ctrl-Z raise SIGINT, SIGQUIT and SIGTSTP for every process (PAX
+  has one process group). Memory: a `PROT_NONE` mapping reserves
+  addresses and takes no frame until `mprotect` gives it access (a
+  thread's 128 MiB heap reservation costs 33 frames), and `madvise`
+  honours MADV_DONTNEED and MADV_GUARD_INSTALL. For bu20's long
+  listing: `readlink` and `readlinkat` answer `/proc/self/exe`,
+  `sendfile` and `splice` copy to a pipe or the console,
+  `copy_file_range` answers as Linux does where no file can be
+  written, a file's blocks are whole pages, and CLOCK_REALTIME reads
+  the CMOS clock (`kernel/rtc`), so a file from 1970 prints its year.
+  `tests/mpx3-threads` runs one static glibc program
+  (`user/elf/threads.c`) on Linux and on PAX and holds its 48 lines
+  byte-identical — ids, every `futex` answer, handler order and
+  siginfo, the frame's layout, 200 signals into a spinning thread
+  whose handler overwrites every register, restarts and -EINTR, wait
+  statuses, a fork and an `execve` from a second thread — and soaks
+  10,000 threads and 12,000 signals with the kernel's counters flat.
+  `tests/mpx3-shell` gains `shell-long` (`ls -l /bin`, `stat`,
+  `readlink`, `env`) and `shell-sigs` over serial and the PS/2
+  keyboard (`trap … INT` and Ctrl-C, Ctrl-C at an empty prompt, Ctrl-C
+  on `sleep 30`, a pipeline whose reader ends first, `unset`, `exec`).
+  Named limits: one CPU; no job control (no process groups, sessions
+  or stopped processes); no `sigaltstack`, `rt_sigsuspend`,
+  `rt_sigtimedwait`, timers, `rseq` or `set_robust_list` (glibc
+  tolerates both last); real-time signals do not queue; the
+  sigcontext's selectors
+  are PAX's (0x23, 0x1b); sixteen slots hold every thread of every
+  process.
+
 - **TCP (px23).** An unmodified static Linux program listens,
   accepts, connects, reads, writes, shuts down and closes TCP
   connections on PAX, and so do two programs built by wolf.
