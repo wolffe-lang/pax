@@ -407,9 +407,7 @@ pub fn epoll_ctl(a: u64, pml4: u64, ep: u64, op: u64, fd: u64, evp: u64) -> u64 
         }
         // Whoever is inside epoll_wait on this object looks again: the
         // runtime adds a descriptor while its reactor thread waits.
-        // PLANT (px24, to be seen red in tests/mpx4-ready and reverted):
-        // the wake is lost: a descriptor that became ready between its
-        // owner's look and this registration stirs nobody.
+        sched.wake_pipes()
         return 0
     }
     if r == event.REGS {
@@ -422,6 +420,7 @@ pub fn epoll_ctl(a: u64, pml4: u64, ep: u64, op: u64, fd: u64, evp: u64) -> u64 
     event.put_reg(e, r, event.R_EVENTS, ev)
     event.put_reg(e, r, event.R_DATA, data)
     event.put_reg(e, r, event.R_STATE, event.FRESH)
+    sched.wake_pipes()
     0
 }
 
