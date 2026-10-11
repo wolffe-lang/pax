@@ -1,0 +1,51 @@
+ids: main tid is pid 1; 4 threads joined, results sum 10; each saw the process's pid 1, a tid of its own 1, its own thread-local 1; main's thread-local kept 1
+ids: tgkill of an ended thread's tid -3, of another process's group -3, signal 0 to self 0
+futex: wait on a changed word -11, a 30 ms timeout -110 after at least 30 ms 1, an absolute deadline in the past -110, a zero bitset -22, a wake with nobody waiting 0
+futex: a word off a 4-byte boundary -22, an unreadable word -14, a bad timespec -22, an operation that does not exist -38
+futex: one waiter: wake answered 1, the wait 0; a wake without the private flag reaches a private waiter 0
+futex: a waiter with bitset 2: a wake with bitset 1 woke 0, with bitset 6 woke 1, the wait 0
+futex: three waiters: wakes answered 1 1 1, woken in the order 0 1 2
+~futex: FUTEX_REQUEUE with nobody waiting answers 0 here
+signal: kill to self 0, the handler had run when it returned 1, signal 10 si_code 0 si_pid is ours 1, on the main thread 1
+signal: tgkill to self 0, handler runs 2, signal 12 si_code -6; the mask inside the handler 0x800
+signal: the mask after the handlers 0x0
+signal: three blocked and raised (one twice): handler runs while blocked 0, pending 0x4a00, runs after the unblock 3 in the order 15 12 10
+signal: pending afterwards 0x0
+signal: ignored: handler runs 0, pending while blocked 0x200
+signal: SA_RESETHAND: handler runs 1, the action afterwards is the default 1, its flags 0x80000004
+signal: a handler raising its own signal nests to depth 3 with SA_NODEFER, 1 without
+signal: sa_mask TERM KILL STOP: the mask inside the handler 0x4200, sigaction answers the mask 0x4000
+signal: sigaction on SIGKILL -22, on SIGSTOP -22, on signal 65 -22, reading SIGKILL's 0; kill of a pid nobody has -3, of signal 65 -22, of signal 0 to self 0
+takers: ten for the process, both threads open: main took 10, the other 0; main blocking: main 0, the other 10; both blocking: delivered while blocked 0, then main 1, the other 0
+frame: with MXCSR 0x3fa0 and the x87 control word 0x027f when the signal came, the handler starts with 0x1f80 and 0x37f, and they are 0x3fa0 and 0x27f again after it
+frame: at the handler's first instruction (rsp + 8) % 16 is 0, the word at rsp is the restorer 1; the ucontext is 8 bytes above rsp and the siginfo 304 above it; the extended state lies above both 1, on a 64-byte boundary 1
+frame: uc_flags 0x7 uc_link 0, the stack's flags 0 size and base 0; cs's ring 3 ss's ring 3 err 0 trapno 0 oldmask 0x800 cr2 0; uc_sigmask 0x800; si_signo is the signal 1 si_errno 0
+frame: the extended state's software bytes: magic 0x46505853, its sizes agree 1, the closing magic is there 1; the saved rsp is past the red zone 1
+roundtrip: 200 signals into a spinning thread whose handler overwrites every register: handler runs 200, registers not put back 0
+roundtrip: a signal a thread sends itself, taken on the way out of the call: handler runs 1, registers not put back 0
+eintr: a read of an empty pipe  without: -4 (handler runs 1, at the signal)  with SA_RESTART: 1 (handler runs 1, at the event)
+eintr: nanosleep of 2 s  without: -4 (handler runs 1, at the signal)  with SA_RESTART: -4 (handler runs 1, at the signal)
+eintr: clock_nanosleep of 2 s  without: -4 (handler runs 1, at the signal)  with SA_RESTART: -4 (handler runs 1, at the signal)
+eintr: a futex wait with no timeout  without: -4 (handler runs 1, at the signal)  with SA_RESTART: 0 (handler runs 1, at the event)
+eintr: a futex wait with a 1 s timeout  without: -4 (handler runs 1, at the signal)  with SA_RESTART: -4 (handler runs 1, at the signal)
+eintr: wait4 without: -4 (handler runs 1, at the signal), the child's status 0x300
+eintr: wait4 with SA_RESTART: the child (handler runs 1, at the child's end), the child's status 0x300
+death: a child killed by SIGTERM leaves 0xf, by SIGKILL 0x9, by SIGUSR1 0xa; ignoring SIGINT it outlives one and SIGTERM leaves 0xf; blocking SIGTERM it outlives one and SIGKILL leaves 0x9
+death: SIGCHLD for a child that exits 5: si_code 1 si_status 5 si_pid is the child 1; for one killed by SIGKILL: si_code 2 si_status 9
+death: a write to a pipe with no reader, SIGPIPE handled: the write -32, handler runs 1, si_code 0 si_pid is ours 1; ignored: the write -32; default, in a child: its status 0xd
+~stop: a child that sends itself SIGTSTP with the default action: its parent's wait sees 0x300 here
+exit: after a thread's exit(3) the process runs on
+exit: then another thread's exit_group(5) while main sleeps: status 0x500
+exit: main's exit(4) with a thread still running, which exits 6 later: status 0x600, known only after the thread ended 1
+exit: a thread's fault ends the whole process: status 0xb
+exit: exit_group(8) from main with a thread asleep: status 0x800
+exit: a fork from a second thread; its child exits 7 and that thread waits for it: status 0x700
+exec: the new program's pid is the old process's 1, its tid is its pid 1
+exit: an execve from a second thread: the new program's status 0x0
+memory: 256 MiB reserved with PROT_NONE 1, two pages of it made writable 0 and written, MADV_DONTNEED 0 and they read zero 1, the ends unmapped 0 0
+fault: a write to a reserved page: signal 11 si_code 2 si_addr is the address 1 trapno 14 the error's low bits 0x6 cr2 is the address 1; to an address nothing maps: signal 11 si_code 1 si_addr 16 error 0x6
+fault: a division by zero: signal 8 si_code 1 trapno 0 si_addr is in the program 1; an undefined instruction: signal 4 si_code 2 trapno 6; each handler left by siglongjmp, and the program runs on
+fault: with SIGSEGV ignored a fault still ends the process: status 0xb; with it blocked and handled: status 0xb
+~guard: MADV_GUARD_INSTALL 0: a touch of the page raises signal 11; MADV_GUARD_REMOVE 0 and a write then raises 0
+name: PR_SET_NAME 0, PR_GET_NAME "px26-a-name-lon"
+done

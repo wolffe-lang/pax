@@ -290,3 +290,91 @@ and Ctrl-C at the prompt and on a running child.
 - The new boreutils on trunk's kernel: `ls -l /bin` prints, and
   differs from Linux in its `total` line and its dates; `readlink
   /proc/self/exe` prints nothing and fails.
+
+### §3 against what was measured
+
+| predicted | measured |
+|---|---|
+| P1: a thread is a slot in its leader's group, sharing the space, the area and the pid; its own tid, stack, frame, FS base, x87/SSE state, mask, pending set, clear-child-tid word, name | as built (`kernel/sched`, `kernel/process`), and every line of the probe's `ids:` and `exit:` cases is Linux's (`notes/px26/session-probes.{pax,linux}.txt`) |
+| P1: `exit` ends one thread, zeroes the clear-child-tid word and wakes its futex; the last thread's `exit` ends the process with that status; `exit_group` ends all | **right**: `pthread_join` returns on PAX only because of that wake (plant B, below, hangs it); "main's exit(4) with a thread still running, which exits 6 later: status 0x600" on both |
+| P1: `PROT_NONE` reserves and takes no frame; the 128 MiB costs none, the 2 MiB stack 512 | **right** as far as measured: the probe reserves 256 MiB with `PROT_NONE` and makes threads with 8 MiB stacks, and the soak's census has the whole process at 332 frames (64153 free before it, 63821 during); trunk's `mmap` would have taken 65536 frames for that reservation alone. pelt's own frame count at its prompt was not measured |
+| P1: `madvise` unused by this pelt | **right** (no call 28 in either strace); the probe exercises MADV_DONTNEED and the guard pair |
+| P2: no table; the key the word's physical address; **`FUTEX_PRIVATE_FLAG` changes nothing** | **wrong on the flag**: on Linux a wake without it does not reach a private waiter (the probe's "a wake without the private flag reaches a private waiter 0"), so the flag is a bit of the key (`kernel/futex`). The rest as predicted: waiters woken longest-waiting first ("in the order 0 1 2" on both) |
+| P2: the errnos | **right**, each on both: -11, -110 (a timeout, and a deadline already past), -22 (a zero bitset, a word off a 4-byte boundary, a bad timespec), -14, -38 for an operation that does not exist |
+| P3: taken at the return to ring 3; a self-sent signal delivered before `kill` returns | **right** ("the handler had run when it returned 1") |
+| P3: the leader takes a process's signal when it has it unblocked, else the lowest-numbered thread; all blocking: it waits | **right** ("main took 10, the other 0; main blocking: main 0, the other 10; both blocking: delivered while blocked 0, then main 1") |
+| P3: the lowest-numbered first, so the highest-numbered handler runs first | **right** ("in the order 15 12 10") |
+| P3: the frame's layout | **right**, and measured where the prediction was silent: the ucontext 8 bytes above the handler's RSP and the siginfo 304 above that, the extended state above both on a 64-byte boundary, `uc_flags` 7, a zero stack triple (flags 0, not SS_DISABLE), the old mask in both `oldmask` and `uc_sigmask`; **not predicted**: the handler starts with a fresh x87/SSE state (MXCSR 0x1f80, FCW 0x037f) and the interrupted one comes back at its return. The selectors differ by name (PAX 0x23/0x1b, Linux 0x33/0x2b): the probe prints their ring |
+| P3: SA_RESTART restarts a pipe or console read, a pipe write, wait4, waitid and **a futex wait "its deadline kept"** | **half wrong on futex**: a futex wait with NO timeout runs again; one with a timeout answers -EINTR even under SA_RESTART (measured), so no deadline is kept anywhere. The others right |
+| P3: sleeps answer -EINTR always, the time left written | **right** (`nanosleep` and `clock_nanosleep`, both ways) |
+| P3: default actions; pid 1 spared; stop refused by name | **right**: 0xf, 0x9, 0xa wait statuses; the refusal line for SIGTSTP is tests/mpx3-threads' T3. Not predicted and measured: an ignored signal that is also blocked stays pending ("pending while blocked 0x200"); SA_RESETHAND resets the handler and keeps the flags |
+| P3: SIGPIPE to the writing thread, SI_USER from itself; SIGCHLD with CLD_*; faults to handlers with `si_addr` | **right**; not predicted: a fault whose signal is ignored, or blocked and handled, still ends the process (0xb on both) |
+| P4: ISIG; every process is the foreground; pelt handles, a child dies with status 2 | **right** (`$?` 130, `user: sleep pid 3 killed: SIGINT`); Ctrl-\ added to the session (SIGQUIT, which pelt ignores at its prompt) |
+| P5: 11 new numbers ± 3 | **9**: 15, 24, 28, 40, 89, 127, 202, 275 (`splice`, not predicted: `cat` asks it when its input is no file), 326 (`copy_file_range`; the prediction wrote 285, which is `fallocate`). **`set_robust_list` stays -ENOSYS**, against the prediction: `tests/mpx4-udp`'s U4 (px23's file) holds the -ENOSYS set to `273 334`, and glibc tolerates it for threads as for a process |
+| P6: every kernel's bytes move; mpx3-shell's -ENOSYS set becomes `334` | the set **stays `273 334`** (above); procs' `kill` refusal is gone |
+| P6: mpx3-console's Ctrl-C sessions move; mpx3-boreutils' verdicts do not | console **right, and more**: its Linux side had to run the program as pid 1 (`--pid1`), since Ctrl-C now kills a program that is not init; boreutils **wrong**: `ls -l /etc` is a long listing with bu20 where bu18 refused `-l`, so its Linux side needed the tree owned and dated as the initramfs says |
+| P6: nothing else | **not predicted**: the shell's initramfs is 170 MiB with thirteen programs, and under OVMF Limine cannot place it in a 256 MiB machine (`PANIC: High memory allocator: Out of memory`); `tests/mpx3-shell` boots with 512 MiB |
+| P7: boot to pelt's prompt on nomad-1 2.1 s ± 0.5 | **2.45 s** (five boots of the quiet image, 2.44 to 2.47; 2.82 with narration), inside the band at its edge; the image is 175 MB where px17's was smaller, and this lane did not re-time trunk's image with the same script |
+| P7: the soak under 120 s under TCG | **right**: about 30 s a boot on kasumi (the suite's eight boots in 235 s) |
+| P7: plant A reddens the probes on every leg and nothing else | **right in what, wrong in how much**: the suite stops at the first failing probes boot, so one leg ran: "registers not put back 1 r12" |
+| P7: plant B reddens the probes and `shell-sigs` | **half wrong**: the probes hang at their first `pthread_join` and fail at the boot's 300 s deadline; **pelt does not need the wake** — every futex wait it makes carries a deadline or is re-armed by its own state, and all ten shell sessions stayed byte-identical with the plant in (kasumi, `notes/px26/kasumi-plant-b-rehearsal.mpx3-shell.out`) |
+| P8: the new pelt on trunk's kernel: `clone3` refused, no prompt | **right**: `syscall 435: refused: CLONE_VM without CLONE_VFORK`, glibc's fallback `clone` (56) refused the same, `futex` (202) and `writev` (20) -ENOSYS, `tgkill` refused twice, and init ended without an exit status; no prompt (`notes/px26/kasumi-red-new-pelt-on-trunk-kernel.mpx3-shell.out`) |
+| P8: the new boreutils on trunk's kernel: `ls -l` differs in its `total` and its dates; `readlink /proc/self/exe` fails | **right** (`notes/px26/kasumi-red-item1-tests-on-trunk-kernel.mpx3-shell.out`: S2 differs from the `total` line on; -ENOSYS for 89, and for 40, 275 and 326 in every session that runs `cat`) |
+
+## 4. Evidence index
+
+### The Linux side
+
+- The straces of pax's own builds: `notes/px26/pelt-b32bebc-sigs.strace` (`b4169a2e…`), `pelt-b32bebc-long.strace` (`ed4893d9…`), `bore-870815c-{ls,stat,readlink,env}.strace`, the keys and `strace-sigs.sh` beside them (kasumi, `px13-ubuntu`, glibc 2.39, strace 6.8, Linux 7.2.8).
+- Every PAX transcript's reference is taken live by the suite: `tools/linux-tty --root --pid1` (the same binaries chrooted in the tree the initramfs is made from, a pseudo-terminal with ISIG set, the program pid 1 of a fresh pid namespace).
+
+### The probe (`user/elf/threads.c`, one static file on both)
+
+- Linux and PAX, 48 compared lines, `cmp` equal: `notes/px26/session-probes.{linux,pax}.txt` (kasumi, native BIOS; the two `~` lines differ by design: FUTEX_REQUEUE and a stop, which PAX refuses by name and T3 holds to those two refusals).
+- In CI the same comparison runs against the runner's own Linux (Ubuntu 24.04, its glibc and kernel), on both tiers, BIOS and UEFI: job `mpx3-threads` of the run at the head.
+
+### The sessions
+
+- `shell-long` (item 1) and `shell-sigs` (item 5), PAX against Linux, `cmp` equal: `notes/px26/session-shell-{long,sigs}.{pax,linux}.txt`; the PS/2 leg's whole boot under UEFI: `kasumi-native-uefi-shell-sigs-ps2.serial.log`. `tests/mpx3-shell` S2 holds every leg to it: 10 sessions on 2 tiers and 2 firmwares.
+
+### The soak
+
+- `notes/px26/kasumi-native-bios-soak.serial.log`: four thread census lines (2500 to 10000 made), each `slots busy 4, frames free 63821`; signal census lines from 2500 to 10000 (and 12000 after the round trip), the first four each `slots busy 4, frames free 63821, this frame at 0x00007fffffffe538`; the program's own lines (`session-soak.{pax,linux}.txt`): 10000 threads joined, results sum 49995000, the break moved 0 bytes, 10000 signals handled, the handler's stack moved 0 times, 2000 more into a spinning thread with 0 registers not put back; and the frames line after it: every frame back.
+
+### Red first
+
+- At trunk's kernel (`0cc43be`), on kasumi: the head's tests with the new pelt — no prompt, `clone3` refused (`kasumi-red-new-pelt-on-trunk-kernel.mpx3-shell.out`); item 1's tests with bu20's boreutils — `shell-long` S2 and S4 (`kasumi-red-item1-tests-on-trunk-kernel.mpx3-shell.out`).
+- Planted break A (`rt_sigreturn` does not put %r12 back), commit 3617a09: CI run **38131582865**, job mpx3-threads **114446842823** the only failing job of 21, red 1 min 38 s after it started (`T1 native bios probes … registers not put back 1 r12`, then `stopped early`). Reverted in ce2f444. Rehearsed on kasumi first: `notes/px26/kasumi-plant-a-rehearsal.mpx3-threads.out`.
+- Planted break B (a futex wake wakes nobody), commit 186947c: CI run **38131619277**, job mpx3-threads **114446948287** the only failing job of 21, red 6 min 55 s after it started (`no line matching /halt/ within 300s`, then `stopped early`). Reverted in acb7b7e. Rehearsed on kasumi first: `notes/px26/kasumi-plant-b-rehearsal.mpx3-threads.out`.
+- The fail-fast in `tools/qemu-halt` (a typed boot whose first prompt never came stops the run's later typed boots) is seen in `kasumi-red-new-pelt-on-trunk-kernel.mpx3-shell.out`: the first session waits out 180 s, the next nine are `not booted`.
+
+### Boot counts
+
+BOOTS
+
+### Item 1 alone
+
+PIN
+
+### CI
+
+CIHEAD
+
+### Drift from the contract, reported
+
+1. **`set_robust_list` is not answered** (it stays -ENOSYS, logged once): px23's `tests/mpx4-udp` asserts the -ENOSYS set, and that file is not this lane's. One line there and one in `kernel/user` would answer it.
+2. **`MADV_GUARD_INSTALL` is honoured, and no program in the image asks it**: the container's and the runner's glibc is 2.39, which guards a thread's stack with `mprotect`. The probe asks it directly (`~guard`, T2, on PAX; the line is not compared, since a Linux before 6.13 answers -EINVAL).
+3. **The shell image needs 512 MiB under UEFI** (170 MiB of programs). BIOS still boots it in 256.
+4. **`tools/linux-tty` keeps ISIG**, and `tests/mpx3-console`'s Linux side runs its program as pid 1 under `sudo -n`, as mpx3-shell's did already.
+5. **A kernel line can land in the middle of a program's line** (`^Cuser: sleep pid 3 killed: SIGINT …`): the terminal echoes a control key with no newline. The suites cut such a line out with its newline; a quiet boot prints none.
+6. **Item 1 is not one commit** but eleven (`0f8b57e` to `8696139`) and a twelfth it turned out to need (`3c75386`, the 512 MiB); branch `px26-pin` on origin is those alone on trunk, for whoever wants item 1 first.
+7. **Not done, by name**: job control (process groups, sessions, `tcsetpgrp`, stopped processes: a stop's default action is refused); `sigaltstack`, `rt_sigsuspend`, `rt_sigtimedwait`, `signalfd`, timers; `rseq`; queued real-time signals; SIGCHLD's auto-reap under SIG_IGN or SA_NOCLDWAIT; a `PROT_NONE` page that once had a frame faults with the present bit set where Linux's does not; SMP.
+
+### Filed
+
+Nothing upstream: nothing in wolf, pelt, boreutils or QEMU stood in the way.
+
+## 5. Done-when
+
+DONE
+
