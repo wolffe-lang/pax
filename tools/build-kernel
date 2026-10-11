@@ -30,8 +30,10 @@
 # wolf's freestanding runtime, which wolf writes beside the object as
 # OUTDIR/NAME.rt-none.a. Then also:
 #   - the wolf objects may import the archive's `__wolf_rt_*` symbols
-#     (each one the archive defines), and must define `wolf_alloc` and
-#     `wolf_free` (the hook pair, kernel/heap);
+#     and its ambient pair, `wolf_rt_ambient_get` and
+#     `wolf_rt_ambient_set` (px21a: the scheduler's, through
+#     kernel/heap; each one the archive defines), and must define
+#     `wolf_alloc` and `wolf_free` (the hook pair, kernel/heap);
 #   - the archive, taken whole, imports nothing but wolf_alloc,
 #     wolf_free and wolf_trap (it defines the C memory functions
 #     itself, weak, and its members' other imports among themselves);
@@ -143,7 +145,7 @@ imports=$(nm -u "${wobjs[@]}" | awk 'NF >= 2 && $1 == "U" { print $2 }' | sort -
 ext=
 for s in $imports; do
     case $defined in *" $s "*) continue ;; esac
-    case $s in __wolf_rt_*) case $rtsyms in *" $s "*) rtn=$((rtn + 1)); continue ;; esac ;; esac
+    case $s in __wolf_rt_*|wolf_rt_ambient_get|wolf_rt_ambient_set) case $rtsyms in *" $s "*) rtn=$((rtn + 1)); continue ;; esac ;; esac
     case "$hooks$roster$linksyms" in *" $s "*) ext+="$s," ;; *) fail "imports $s, outside the hooks, the asm roster{$roster}, the link's symbols{$linksyms} and the runtime archive" ;; esac
 done
 nm "${wobjs[@]}" | awk '$2 == "T" && $3 == "kmain" { f = 1 } END { exit !f }' \

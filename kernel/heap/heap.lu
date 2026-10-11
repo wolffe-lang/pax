@@ -101,6 +101,28 @@ use paging
 use panic
 use sync
 
+// The runtime's ambient-region slot (px21a; wolf 0.2.27,
+// [abi.target.none.ambient]). A call to either links the runtime
+// archive, which imports the hooks this module supplies, so the pair is
+// declared here and kernel/sched reaches it through `ambient` and
+// `set_ambient` at every switch.
+extern "c" fn wolf_rt_ambient_get() -> *u8
+extern "c" fn wolf_rt_ambient_set(p: *u8)
+
+/// The running thread's ambient region; 0 is the root.
+pub fn ambient() -> u64 {
+    // # Safety: the freestanding runtime's getter; it reads one word.
+    unsafe { wolf_rt_ambient_get() as u64 }
+}
+
+/// Make `p` the ambient region: a value `ambient` returned on the
+/// thread being switched in, or 0 for one that has not run.
+pub fn set_ambient(p: u64) {
+    // # Safety: the runtime's setter; `p` is what this thread's last
+    // switch out saved, or 0 (the root).
+    unsafe { wolf_rt_ambient_set(p as *u8) }
+}
+
 /// The heap's PML4 slot.
 pub const SLOT: u64 = 384
 const META: u64 = 0xffffc00000000000 // the state page, and the slot's first address
