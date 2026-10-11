@@ -1,0 +1,25 @@
+// tcpwolf — the first wolf program to speak TCP on PAX (px23): built
+// for Linux by the pinned wolf (tools/mknet), linked static, run
+// unmodified. A listener, a client and one request served, all in this
+// one process over 127.0.0.1: the connect completes in the listen
+// queue before the accept runs, and each read finds its bytes already
+// there, so no call ever has to wait (wolf's runtime waits with epoll
+// and a thread of its own, which PAX does not have yet: px24).
+fn main() -> !int {
+    let srv = net_listen("127.0.0.1:7071")?
+    let port = net_port(srv)?
+    print("tcpwolf: listening on 127.0.0.1 port {port}")
+    let cli = net_connect("127.0.0.1:{port}")?
+    net_write(cli, "what does the wolf say?\n")?
+    let conn = net_accept(srv)?
+    let msg = net_read(conn, 256)?
+    print("tcpwolf: the server read {msg.len} bytes: {msg.trim()}")
+    net_write(conn, "the wolf heard: {msg.trim()}\n")?
+    net_close(conn)?
+    let reply = net_read(cli, 256)?
+    print("tcpwolf: the client read {reply.len} bytes: {reply.trim()}")
+    net_close(cli)?
+    net_close(srv)?
+    print("tcpwolf: one request served")
+    0
+}

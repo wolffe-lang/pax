@@ -1,0 +1,26 @@
+// tcpwolfd — a wolf program serves one request from another machine
+// (px23): built for Linux by the pinned wolf, linked static, run
+// unmodified. It listens on port 7070, tells 10.0.2.2 port 9070 it is
+// ready (a connection of its own, one line), and then connects to
+// 10.0.2.2 port 9071, which answers only once the request is waiting
+// in this program's listen queue: the accept and the read that follow
+// find what they ask for and never wait (wolf's runtime waits with
+// epoll and a thread of its own, which PAX does not have yet: px24).
+fn main() -> !int {
+    let srv = net_listen("0.0.0.0:7070")?
+    let port = net_port(srv)?
+    print("tcpwolfd: listening on port {port}")
+    let up = net_connect("10.0.2.2:9070")?
+    net_write(up, "ready\n")?
+    net_close(up)?
+    let gate = net_connect("10.0.2.2:9071")?
+    net_close(gate)?
+    let conn = net_accept(srv)?
+    let msg = net_read(conn, 256)?
+    print("tcpwolfd: a request of {msg.len} bytes: {msg.trim()}")
+    net_write(conn, "the wolf heard: {msg.trim()}\n")?
+    net_close(conn)?
+    net_close(srv)?
+    print("tcpwolfd: one request served")
+    0
+}

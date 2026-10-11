@@ -1,6 +1,7 @@
-/* say.h — what the network witnesses share (px22): one line to
+/* say.h — what the network witnesses share (px22, px23): one line to
    descriptor 1 with write(2) and no stdio buffer (a fork must not copy
-   unwritten text), errno by its name, and sockaddr_in helpers. */
+   unwritten text), errno by its name, sockaddr_in helpers, and (px23)
+   the stream witnesses' byte pattern and its CRC-32. */
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -63,6 +64,13 @@ static const char *ename(int e)
     case EMFILE: return "EMFILE";
     case ENFILE: return "ENFILE";
     case EINTR: return "EINTR";
+    case ECONNRESET: return "ECONNRESET";
+    case ECONNABORTED: return "ECONNABORTED";
+    case ETIMEDOUT: return "ETIMEDOUT";
+    case EINPROGRESS: return "EINPROGRESS";
+    case EALREADY: return "EALREADY";
+    case ENETRESET: return "ENETRESET";
+    case ESHUTDOWN: return "ESHUTDOWN";
     }
     return "E?";
 }
@@ -102,4 +110,67 @@ __attribute__((unused)) static const char *aname(const struct sockaddr_in *a, ch
     else
         snprintf(buf, cap, "%s:%d", ip, p);
     return buf;
+}
+
+/* px23: the CRC-32 of ISO 3309 (the reflected polynomial 0xedb88320, as
+   zlib's crc32 computes it), a byte at a time: `crc` is the running
+   value, 0 to begin. */
+__attribute__((unused)) static unsigned long crc32_of(unsigned long crc, const unsigned char *p, size_t n)
+{
+    static unsigned long table[256];
+    if (!table[1])
+        for (unsigned long i = 0; i < 256; i++) {
+            unsigned long c = i;
+            for (int k = 0; k < 8; k++)
+                c = c & 1 ? 0xedb88320UL ^ (c >> 1) : c >> 1;
+            table[i] = c;
+        }
+    crc ^= 0xffffffffUL;
+    while (n--)
+        crc = table[(crc ^ *p++) & 0xff] ^ (crc >> 8);
+    return (crc ^ 0xffffffffUL) & 0xffffffffUL;
+}
+
+/* px23: the stream every bulk transfer carries, so both ends can make
+   it and neither needs a file: 1024-byte records, record r its number
+   in 8 bytes (least significant first) and then byte j = r * 31 + j * 7
+   (mod 256) for j from 8. Fills `buf` with the `n` bytes from offset
+   `off`. */
+__attribute__((unused)) static void pattern_fill(unsigned char *buf, unsigned long long off, size_t n)
+{
+    for (size_t i = 0; i < n; i++, off++) {
+        unsigned long long r = off >> 10;
+        unsigned j = off & 1023;
+        buf[i] = j < 8 ? (unsigned char)(r >> (8 * j)) : (unsigned char)(r * 31 + j * 7);
+    }
+}
+
+/* px23: send all `n` bytes (a blocking socket takes them all or fails);
+   MSG_NOSIGNAL, so a reset is an errno and not a signal. */
+__attribute__((unused)) static ssize_t send_all(int fd, const void *p, size_t n)
+{
+    size_t off = 0;
+    while (off < n) {
+        ssize_t w = send(fd, (const char *)p + off, n - off, MSG_NOSIGNAL);
+        if (w < 0)
+            return -1;
+        off += w;
+    }
+    return (ssize_t)off;
+}
+
+/* px23: read exactly `n` bytes unless the stream ends first: the bytes
+   read, or -1. */
+__attribute__((unused)) static ssize_t recv_all(int fd, void *p, size_t n)
+{
+    size_t off = 0;
+    while (off < n) {
+        ssize_t r = recv(fd, (char *)p + off, n - off, 0);
+        if (r < 0)
+            return -1;
+        if (r == 0)
+            break;
+        off += r;
+    }
+    return (ssize_t)off;
 }
