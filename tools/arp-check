@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+# arp-check - judge a played tune with chords (px29) against its file:
+# the kernel's timeline (kernel/speaker's ring, as tests/mpx3-speaker
+# prints it) and QEMU's `wav` capture of the speaker.
+#
+#   tools/arp-check TUNE TIMELINE WAV
+#   tools/arp-check --tones TUNE     how many tones the file starts
+#
+# From the file (play's own arithmetic, user/play/play.lu): every slot's
+# length and sounding time (the length less the gap, at least half of
+# it), and for a chord its pitches as 8254 counts in the tune's order
+# (`up` low to high, `down`, `written`) and its steps: one pitch for the
+# `arp` time each, round and round, ceil(sounding / arp) of them.
+#
+# The timeline: the tones started (`on` events) are exactly the file's,
+# step by step, count for count (so every pitch, the order and the
+# number of steps); every step but each slot's last is held arp/10 ms
+# ticks within one, and at least 90% of them exactly; each slot sounds
+# (its first `on` to its `off`) its sounding time within one tick.
+#
+# The capture: QEMU 11.1's `wav` backend writes only while the speaker
+# sounds and renders in steps of about 1.9 ms, so a 20 ms step comes out
+# 16-22 ms long and a few are merged into a neighbour (measured,
+# notes/px29). Every rising crossing's period is named for the nearest
+# pitch the tune asks for (within 3%), and runs of one name of three
+# periods or more are the steps heard (shorter runs are the seams where
+# QEMU changes count, and are dropped). Per chord, in play order: every pitch of the chord is heard;
+# at least 85% of the changes from one heard step to the next go to the
+# pitch the order says comes next; the median heard step of each pitch
+# is within 30% of the arp time; and the slot's heard time is its
+# sounding time within 10% (QEMU renders about 3% short).
+#
+# Prints `PASS <summary>` or `FAIL <reasons> | <summary>`; exit 0 either
+# way (the caller reads the word), 2 on a usage or format error.
+import os
+import statistics
+import sys
+from importlib.machinery import SourceFileLoader
+
+here = os.path.dirname(os.path.abspath(__file__))
+wn = SourceFileLoader("wav_notes", os.path.join(here, "wav-notes")).load_module()
+
+PIT_CENTI_HZ = 119318200
+CENTI_HZ4 = [26163, 27718, 29366, 31113, 32963, 34923, 36999, 39200, 41530, 44000, 46616, 49388]
+
+
+def die(msg):
+    sys.stderr.write("arp-check: %s\n" % msg)
+    sys.exit(2)
+
+
+def count_of(w):
+    semi = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}[w[0]]
+    i = 1
+    if len(w) == 3:
+        semi += 1 if w[1] == "#" else -1
+        i = 2
+    o = int(w[i])
+    if semi < 0:
+        semi += 12
+        o -= 1
+    if semi > 11:
+        semi -= 12
+        o += 1
+    num, den = PIT_CENTI_HZ, CENTI_HZ4[semi]
+    if o >= 4:
+        den *= 2 ** (o - 4)
+    else:
+        num *= 2 ** (4 - o)
+    return (num + den // 2) // den
+
+
+def length_of(w, bpm):
+    total = 0
+    for part in w.split("+"):
+        if part.endswith("t"):
+            total += 160000000 // (bpm * int(part[:-1]))
+        elif part.endswith("."):
+            total += 240000000 // (bpm * int(part[:-1])) * 3 // 2
+        else:
+            total += 240000000 // (bpm * int(part))
+    return total
+
+
+def slots(path):
+    bpm, gap, arp, order = 0, 20000, 20000, "up"
+    out = []
+    for line in open(path):
+        w = []
+        for x in line.split():
+            if x.startswith("#"):
+                break
+            w.append(x)
+        if not w or w[0] == "title":
+            continue
+        if w[0] == "tempo":
+            bpm = int(w[1]); continue
+        if w[0] == "gap":
+            gap = int(w[1]) * 1000; continue
+        if w[0] == "arp":
+            arp = int(w[1]) * 1000; continue
+        if w[0] == "order":
+            order = w[1]; continue
+        us = length_of(w[1], bpm)
+        sound = max(us - gap, us // 2)
+        if w[0] == "r":
+            out.append(("rest", [], us, sound, arp)); continue
+        cs = [count_of(n) for n in w[0].split(",")]
+        if len(cs) > 1:
+            if order == "up":
+                cs = sorted(cs, reverse=True)
+            elif order == "down":
+                cs = sorted(cs)
+            out.append(("chord", cs, us, sound, arp))
+        else:
+            out.append(("note", cs, us, sound, arp))
+    return out
+
+
+def tones(sl):
+    out = []
+    for kind, cs, us, sound, arp in sl:
+        if kind == "chord":
+            out += [cs[k % len(cs)] for k in range(-(-sound // arp))]
+        elif kind == "note":
+            out += cs
+    return out
+
+
+def main(argv):
+    if len(argv) == 3 and argv[1] == "--tones":
+        print(len(tones(slots(argv[2]))))
+        return
+    if len(argv) != 4:
+        die("usage: arp-check TUNE TIMELINE WAV")
+    sl = slots(argv[1])
+    ev = [l.split() for l in open(argv[2]) if l.startswith("event ")]
+    bad = []
+    parts = []
+    # The timeline.
+    want = tones(sl)
+    ons = [(i, int(e[3]), int(e[5])) for i, e in enumerate(ev) if e[4] == "on"]
+    got = [c for _, _, c in ons]
+    if got != want:
+        k = next((i for i, (a, b) in enumerate(zip(got, want)) if a != b), min(len(got), len(want)))
+        bad.append("the timeline's tones differ from the file's at tone %d of %d (heard %s, the file %s)"
+                   % (k + 1, len(want), got[k:k + 6], want[k:k + 6]))
+    else:
+        held = []      # (ticks, step ticks) for every step but a slot's last
+        spans = []     # (slot ticks, wanted ms)
+        j = 0
+        for kind, cs, us, sound, arp in sl:
+            if kind == "rest":
+                continue
+            n = -(-sound // arp) if kind == "chord" else 1
+            mine = ons[j:j + n]
+            j += n
+            first_ev, last_ev = mine[0][0], mine[-1][0]
+            off = next((int(e[3]) for e in ev[last_ev + 1:] if e[4] == "off"), None)
+            if off is None:
+                bad.append("no off event after tone %d" % j)
+                continue
+            spans.append((off - mine[0][1], sound / 1000.0))
+            if kind == "chord":
+                for (a, b) in zip(mine, mine[1:]):
+                    held.append((b[1] - a[1], arp // 10000))
+        if held:
+            exact = sum(1 for h, w in held if h == w)
+            far = [h for h, w in held if abs(h - w) > 1]
+            if far:
+                bad.append("%d steps held %s ticks" % (len(far), sorted(set(far))))
+            if exact < 0.9 * len(held):
+                bad.append("only %d of %d steps held exactly" % (exact, len(held)))
+            parts.append("timeline: %d tones as the file, %d of %d steps held exactly %d ticks"
+                         % (len(got), exact, len(held), held[0][1]))
+        for k, (ticks, ms) in enumerate(spans):
+            if abs(ticks * 10.0 - ms) > 10.5:
+                bad.append("slot %d sounded %d ticks, the file %.0f ms" % (k + 1, ticks, ms))
+        parts.append("slots sound " + " ".join("%d" % (t * 10) for t, _ in spans) + " ms against "
+                     + " ".join("%.0f" % m for _, m in spans))
+    # The capture.
+    vals, rate, _, _ = wn.samples(argv[3])
+    pitches = sorted({c for _, cs, _, _, _ in sl for c in cs})
+    hz_of = {c: 1193182.0 / c for c in pitches}
+    runs = []
+    if vals and max(vals) > min(vals):
+        mid = (max(vals) + min(vals)) / 2.0
+        cr = []
+        for i in range(1, len(vals)):
+            a, b = vals[i - 1], vals[i]
+            if a <= mid < b:
+                cr.append(i - 1 + (mid - a) / float(b - a))
+        for a, b in zip(cr, cr[1:]):
+            hz = rate / (b - a)
+            name = None
+            for c in pitches:
+                if abs(hz - hz_of[c]) / hz_of[c] < 0.03:
+                    name = c
+            if runs and runs[-1][0] == name and a - runs[-1][2] < 2:
+                runs[-1][2] = b
+                runs[-1][3] += 1
+            else:
+                runs.append([name, a, b, 1])
+    # A run of fewer than three periods is a seam (QEMU changing count
+    # inside a period), not a step: it is dropped, and the runs either
+    # side of it of one name are one step.
+    heard = []
+    for c, a, b, n in runs:
+        if c is None or n < 3:
+            continue
+        ta, tb = a * 1000.0 / rate, b * 1000.0 / rate
+        if heard and heard[-1][0] == c:
+            heard[-1] = (c, heard[-1][1], tb)
+        else:
+            heard.append((c, ta, tb))
+    # A step lasts from its first crossing to the next step's (the seam
+    # belongs to the step it ends); the last step of all to its own end.
+    heard = [(c, a, (heard[i + 1][1] if i + 1 < len(heard) else b)) for i, (c, a, b) in enumerate(heard)]
+    # Walk the heard steps through the slots: a step belongs to the slot
+    # whose pitches hold it, and the slots are taken in play order.
+    k = 0
+    rates = []
+    for s, (kind, cs, us, sound, arp) in enumerate(sl):
+        if kind == "rest":
+            continue
+        mine = []
+        while k < len(heard) and heard[k][0] in cs:
+            mine.append(heard[k])
+            k += 1
+        if not mine:
+            bad.append("slot %d (%s) not heard in the capture" % (s + 1, kind))
+            continue
+        total = mine[-1][2] - mine[0][1]
+        if abs(total - sound / 1000.0) > 0.10 * sound / 1000.0:
+            bad.append("slot %d heard %.0f ms, the file %.0f ms" % (s + 1, total, sound / 1000.0))
+        if kind != "chord":
+            continue
+        names = [c for c, _, _ in mine]
+        missing = [c for c in cs if c not in names]
+        if missing:
+            bad.append("chord %d: counts %s never heard" % (s + 1, missing))
+        moves = list(zip(names, names[1:]))
+        right = sum(1 for a, b in moves if cs[(cs.index(a) + 1) % len(cs)] == b)
+        if moves and right < 0.85 * len(moves):
+            bad.append("chord %d: %d of %d changes in order" % (s + 1, right, len(moves)))
+        for c in cs:
+            lens = [b - a for x, a, b in mine[:-1] if x == c]
+            if lens and abs(statistics.median(lens) - arp / 1000.0) > 0.3 * arp / 1000.0:
+                bad.append("chord %d: count %d's median step %.1f ms, arp %d ms" % (s + 1, c, statistics.median(lens), arp // 1000))
+        rates.append("%d steps in %.0f ms (%d of %d changes in order)" % (len(mine), total, right, len(moves)))
+    if k != len(heard):
+        bad.append("%d heard steps left after the last slot" % (len(heard) - k))
+    parts.append("capture: " + "; ".join(rates))
+    print(("FAIL " + "; ".join(bad) + " | " if bad else "PASS ") + "; ".join(parts))
+
+
+if __name__ == "__main__":
+    main(sys.argv)
