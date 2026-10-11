@@ -2,7 +2,8 @@
 
 Contract: px29's, `sprints/pax/29-the-chord/px29-the-chord.md` in
 wolffe-lang/wolf (planning trunk, read 2026-10-11). Branch `px29` in
-pax, cut from pax trunk `5afb903` (px26 merged). §1–§3 are committed
+pax, cut from pax trunk `5afb903` (px26 merged), rebased onto `1af462d`
+(px27) and `2a0da26` (px24). §1–§3 are committed
 before the first change to `play`, the tunes or the tests.
 
 One deliverable: `play` takes chords (several pitches in one time
@@ -135,9 +136,9 @@ dominates).
 ## 4. Evidence index
 
 - **The shortest tone**: probe t1 (trunk's `play`, 18.75-40 ms single notes), kasumi TCG and hasu KVM, identical kernel timelines (`notes/px29/probe-t1-*`); probe t2 (px29's `play`, arp 10/20/30/40 ms), kasumi TCG (`notes/px29/probe-t2-kasumi.*`): 10 ms unusable in the capture, 20 ms exact.
-- **The chord case (K8)**: kasumi, `tests/mpx3-speaker` at `96279d9` (rebased on `1af462d`), both tiers, BIOS and UEFI, 56 PASS, 0 FAIL, 0 SKIP (`notes/px29/kasumi-mpx3-speaker-96279d9.out`): every K8 leg "197 tones as the file, 191 of 192 steps held exactly 2 ticks", the capture 45-48 of 47 changes in order per chord; K1-K7 unchanged and green.
-- **The planted break** `3d819bd` (an arpeggio repeats its first pitch): CI run **38164096552**, job mpx3-speaker red on exactly K8 on all four legs ("the timeline's tones differ from the file's at tone 2 of 197 (heard [4561, 4561, …]"), every other assertion green (`notes/px29/ci-38164096552-mpx3-speaker-3d819bd.txt`); reverted by `839f35a`.
-- **kasumi at `693115a`** (the span in the listing): 56 PASS, 0 FAIL, 0 SKIP (`notes/px29/kasumi-mpx3-speaker-693115a.out`).
+- **The chord case (K8)**: kasumi, `tests/mpx3-speaker` at the pre-rebase head 96279d9 (on `1af462d`; the same tree as `89d5518` but for trunk's px24 files), both tiers, BIOS and UEFI, 56 PASS, 0 FAIL, 0 SKIP (`notes/px29/kasumi-mpx3-speaker-96279d9.out`): every K8 leg "197 tones as the file, 191 of 192 steps held exactly 2 ticks", the capture 45-48 of 47 changes in order per chord; K1-K7 unchanged and green.
+- **The planted break** 3d819bd (pre-rebase; the same change is `f3c6020` on this branch) (an arpeggio repeats its first pitch): CI run **38164096552**, job mpx3-speaker red on exactly K8 on all four legs ("the timeline's tones differ from the file's at tone 2 of 197 (heard [4561, 4561, …]"), every other assertion green (`notes/px29/ci-38164096552-mpx3-speaker-3d819bd.txt`); reverted by `3074ac2`.
+- **kasumi at 693115a** (pre-rebase; `995a9c4` here) (the span in the listing): 56 PASS, 0 FAIL, 0 SKIP (`notes/px29/kasumi-mpx3-speaker-693115a.out`).
 - **The source**: Hofmeister 1897 first edition, Internet Archive `symphonieno200mahl` (PDF sha256 `cab6fa78…`), printed pp. 196-201, 204, 209 (images 0198-0203, 0206, 0211); the bar list and doubts in `notes/px29/reduction.md`.
 - **The maintainer's WAVs** (outside the repository): `~/scratch/wolf/pax-sound/mahler/` on nomad-1: `auferstehung-end.wav` (`4b175594…`, 64.4 s of sound), `auferstehung.wav` (`11ae8ab7…`, 195.4 s of sound), `pax-mahler.iso` (`bd8d1ab3…`), README with the live command. Made under TCG with QEMU's `wav` backend only; in both, the kernel's timeline (last 1016 tones) matches the file tone for tone (`notes/px29/nomad1-m1.timeline`).
 - **CI green at the head**: in the PR body.
@@ -146,5 +147,6 @@ dominates).
 
 - [x] branch `px29`; PR #33 open, unmerged, five sections, commit shas, a test checklist
 - [ ] CI green at the head (the PR body names the run)
+- [x] rebased onto pax trunk `2a0da26` (px24); px24 touches none of the speaker's files
 - [x] the plant red in CI by run id (38164096552)
 - [x] worktrees: none (a private clone under `~/lanes/px29/`); no QEMU left running
