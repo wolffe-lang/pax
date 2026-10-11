@@ -12,7 +12,13 @@
 # 65,535 and sends no other option unless a test asks it to.
 #
 # **Faults** (`Faults`) are this tool's to inject, per connection, at
-# stated rates from a generator seeded per connection: `loss` (a frame
+# stated rates. What happens to a frame is decided by what the frame is
+# — which way it goes, where its bytes and its acknowledgement lie from
+# the connection's first sequence numbers, and how many times that same
+# frame has gone before — and the connection's seed, not by the order
+# frames happen to come in: the same transfer meets the same faults in
+# every run, so a run's time is the faults' and not the luck of the
+# draw. `loss` (a frame
 # either way is dropped: one PAX sent is not looked at, one this end
 # would send is not sent), `dup` (a frame to PAX goes twice), `reorder`
 # (a frame to PAX is held back until after the next), `corrupt` (a frame
@@ -52,7 +58,9 @@ class Faults:
     """What goes wrong on one connection, by rate and by script."""
 
     def __init__(self, seed=1, loss=0.0, dup=0.0, reorder=0.0, corrupt=0.0):
+        self.seed = seed
         self.rng = random.Random(seed)
+        self.seen = {}       # what a frame is -> how many times it has gone
         self.loss, self.dup, self.reorder, self.corrupt = loss, dup, reorder, corrupt
         self.drop_in = []    # predicates on a Segment from PAX: the first match is lost
         self.drop_out = []   # predicates on (flags, seq, data) of a segment to PAX
@@ -60,37 +68,47 @@ class Faults:
         self.held_at = 0.0
         self.n = {"lost-in": 0, "lost-out": 0, "duplicated": 0, "reordered": 0, "corrupted": 0, "in": 0, "out": 0}
 
-    def lose_in(self, seg):
+    def roll(self, what):
+        """A number in [0, 1) that is the same for the same frame (`what`
+        says which) on its same time through, in every run."""
+        k = self.seen.get(what, 0)
+        self.seen[what] = k + 1
+        return random.Random("%s/%r/%d" % (self.seed, what, k)).random()
+
+    def lose_in(self, seg, what=None):
         self.n["in"] += 1
         for p in self.drop_in:
             if p(seg):
                 self.drop_in.remove(p)
                 self.n["lost-in"] += 1
                 return True
-        if self.loss and self.rng.random() < self.loss:
+        if self.loss and self.roll(("in",) + (what or ())) < self.loss:
             self.n["lost-in"] += 1
             return True
         return False
 
-    def out(self, frame, flags, seq, data, send):
+    def out(self, frame, flags, seq, data, send, what=None):
         self.n["out"] += 1
         for p in self.drop_out:
             if p(flags, seq, data):
                 self.drop_out.remove(p)
                 self.n["lost-out"] += 1
                 return
-        r = self.rng.random
-        if self.loss and r() < self.loss:
+        if not (self.loss or self.corrupt or self.reorder or self.dup):
+            send(frame)
+            return
+        u = self.roll(("out",) + (what or ()))
+        if u < self.loss:
             self.n["lost-out"] += 1
             return
-        if self.corrupt and r() < self.corrupt:
+        if u < self.loss + self.corrupt:
             b = bytearray(frame)
-            at = 34 + self.rng.randrange(len(b) - 34)  # a byte of the segment
-            b[at] ^= 1 << self.rng.randrange(8)
+            at = 34 + int(u * 1e6) % (len(b) - 34)  # a byte of the segment
+            b[at] ^= 1 << (int(u * 1e9) % 8)
             self.n["corrupted"] += 1
             send(bytes(b))
             return
-        if self.reorder and self.held is None and r() < self.reorder:
+        if self.held is None and u < self.loss + self.corrupt + self.reorder:
             self.held, self.held_at = frame, time.time()
             self.n["reordered"] += 1
             return
@@ -98,7 +116,7 @@ class Faults:
         if self.held is not None:
             send(self.held)
             self.held = None
-        if self.dup and r() < self.dup:
+        if u >= 1.0 - self.dup:
             self.n["duplicated"] += 1
             send(frame)
 
@@ -174,7 +192,9 @@ class Conn:
         a = (self.rcv_nxt if ack is None else ack) if flags & ACK else 0
         seg = px.tcp(self.port, self.pax_port, seq, a, flags, w, bytes(data), self.ip, px.PAX_IP, options=options, **kw)
         f = p.datagram(self.ip, seg, proto=6, ttl=64 if px.on_link(self.ip) else 63)
-        self.faults.out(px.pad60(f), flags, seq, data, self.stack.wire_send)
+        # What this frame is, from the connection's own first numbers.
+        what = (flags, ssub(seq, self.iss), len(data), ssub(a, self.irs) if flags & ACK and self.irs is not None else 0)
+        self.faults.out(px.pad60(f), flags, seq, data, self.stack.wire_send, what)
         self.stack.n["out"] += 1
 
     def ack_now(self):
@@ -300,7 +320,8 @@ class Conn:
             end = sadd(seg.seq, seg.space)
             if self.pax_max is None or px.seq_lt(self.pax_max, end):
                 self.pax_max = end
-        if self.mute or self.faults.lose_in(seg):
+        what = (seg.flags, ssub(seg.seq, self.irs) if self.irs is not None else 0, len(seg.data), ssub(seg.ack, self.iss) if seg.flags & ACK else 0)
+        if self.mute or self.faults.lose_in(seg, what):
             return
         if seg.flags & RST:
             self.reset = True
@@ -577,7 +598,7 @@ class Stack:
         self.made += 1
         l.accept(c)
         c.pax_segments, c.pax_max = 1, sadd(seg.seq, seg.space)
-        if c.faults.lose_in(seg):
+        if c.faults.lose_in(seg, (seg.flags, 0, 0, 0)):
             # Lost on the way: there was no SYN, and there is no connection.
             del self.conns[key]
             self.active.discard(c)

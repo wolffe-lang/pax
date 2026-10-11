@@ -8,6 +8,7 @@
 #
 #   tests/mpx4-tcp [--images DIR | --no-boot] [--progs DIR] [--soak N]
 #                  [--bulk BYTES] [--lossy BYTES] [--deadline SECONDS]
+#                  [--stall SECONDS] [--keep-going]
 #                  [--firmware bios|uefi|both] [--tier native|release|both]
 #                  [--accel auto|kvm|tcg]
 #
@@ -88,10 +89,15 @@
 #   T9 the end: `run: <n> commands`, `halt`, no PANIC, and qemu-halt
 #      holds the machine halted.
 #
-# **The deadline.** A boot whose other end has said FAIL is stopped 20 s
-# later, not waited out; and once --deadline seconds (2700) have passed
-# since the first boot, no further boot starts: each is a failure by
-# name. A broken kernel fails this suite in minutes.
+# **Failing fast.** A broken kernel must be red here in minutes, not
+# after every boot has waited out its timeout. So a boot is stopped, and
+# is a failure by name: 20 s after its other end has said FAIL; the
+# moment a command it has finished is seen to have printed other than
+# Linux did (the log is read as it grows); when its serial log has not
+# grown for --stall seconds (300: a command that waits for something
+# that will never come). After a boot that failed no further boot is
+# started (--keep-going boots them all), and none is started once
+# --deadline seconds (2700) have passed since the first.
 #
 # --images DIR boots what this script built earlier (DIR holds
 # <tier>/kmain_sockets.elf, <tier>/kmain_sockets-{peer,user,none}.iso,
@@ -110,8 +116,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 grep() { command grep -a "$@"; }
 
-images= legs=both tiers=both noboot=0 accel=auto progs= soak=10000 bulk=16777216 lossy=1048576 deadline=2700
-usage="usage: tests/mpx4-tcp [--images DIR | --no-boot] [--progs DIR] [--soak N] [--bulk BYTES] [--lossy BYTES] [--deadline SECONDS] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg]"
+images= legs=both tiers=both noboot=0 accel=auto progs= soak=10000 bulk=16777216 lossy=1048576 deadline=2700 stall=300 keep=0
+usage="usage: tests/mpx4-tcp [--images DIR | --no-boot] [--progs DIR] [--soak N] [--bulk BYTES] [--lossy BYTES] [--deadline SECONDS] [--stall SECONDS] [--keep-going] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg]"
 while [ $# -gt 0 ]; do
     case $1 in
         --images)   images=$2; shift 2 ;;
@@ -121,6 +127,8 @@ while [ $# -gt 0 ]; do
         --bulk)     bulk=$2; shift 2 ;;
         --lossy)    lossy=$2; shift 2 ;;
         --deadline) deadline=$2; shift 2 ;;
+        --stall)    stall=$2; shift 2 ;;
+        --keep-going) keep=1; shift ;;
         --firmware) legs=$2; shift 2 ;;
         --tier)     tiers=$2; shift 2 ;;
         --accel)    accel=$2; shift 2 ;;
@@ -304,20 +312,49 @@ boot() { # tier leg way
     [ "$way" = none ] || q+=(--qemu -device --qemu "virtio-net-pci,netdev=n0,mac=$MAC" --qemu -object --qemu "filter-dump,id=f0,netdev=n0,file=$pcap")
     "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 1200 --accel "$accel" \
         --elf "$elf" --marker halt ${q[@]+"${q[@]}"} "$iso" >"$log.verdict" 2>&1 &
-    local hpid=$! said=0
-    # A program whose other end has said FAIL waits for segments that
-    # will not come: 20 s after that word the boot is stopped, not
-    # waited out.
+    local hpid=$! said=0 checked=0 seen=0 quiet=0 size=0 now line lk stopped=0
     while kill -0 "$hpid" 2>/dev/null; do
         sleep 1
+        [ "$stopped" = 0 ] || continue
+        # A program whose other end has said FAIL waits for segments that
+        # will not come: 20 s after that word the boot is stopped, not
+        # waited out.
         if grep -q '^[a-z-]*: FAIL' "$log.end" 2>/dev/null; then
             said=$((said + 1))
             if [ "$said" = 20 ]; then
-                kill "$hpid" 2>/dev/null
+                kill "$hpid" 2>/dev/null; stopped=1
                 printf 'qemu-halt: NOT HALTED: stopped by tests/mpx4-tcp 20 s after the other end said FAIL\n' >> "$log.verdict"
             fi
         fi
+        # A command that has finished and printed other than Linux did:
+        # the boot is red already.
+        now=$(wc -c < "$log" 2>/dev/null | tr -d ' ')
+        if [ "$now" != "$size" ]; then
+            size=$now quiet=0
+            serial_norm "$log" > "$norm.live" 2>/dev/null
+            seen=$(grep -c '^user: books: ' "$norm.live")
+            while [ "$checked" -lt "$seen" ] && [ "$stopped" = 0 ]; do
+                checked=$((checked + 1))
+                line=$(awk -v k="$checked" '/^#/ || /^$/ { next } { n++ } n == k { print; exit }' "$images/$way.run")
+                lk=$(linux_line "$line")
+                awk -v h="run $checked: $line" '$0 == h { on = 1; next } on && /^run [0-9]+: |^run: [0-9]+ commands$/ { exit } on { print }' "$norm.live" \
+                    | awk '/^user: exec pid / { on = 1; next } on && !/^user: / { print }' > "$norm.live.out"
+                if [ -n "$lk" ] && ! cmp -s "$lx/$lk.out" "$norm.live.out"; then
+                    kill "$hpid" 2>/dev/null; stopped=1
+                    printf 'qemu-halt: NOT HALTED: stopped by tests/mpx4-tcp: command %s (%s) had printed other than Linux did\n' "$checked" "$line" >> "$log.verdict"
+                fi
+            done
+        else
+            # A log that has not grown for $stall seconds: a command is
+            # waiting for what will not come.
+            quiet=$((quiet + 1))
+            if [ "$quiet" -ge "$stall" ]; then
+                kill "$hpid" 2>/dev/null; stopped=1
+                printf 'qemu-halt: NOT HALTED: stopped by tests/mpx4-tcp: the serial log had not grown for %s s (after command %s of the list)\n' "$stall" "$seen" >> "$log.verdict"
+            fi
+        fi
     done
+    rm -f "$norm.live" "$norm.live.out"
     wait "$hpid" || rc=$?
     # The other end has said its last word by now, or never will.
     [ -z "$pid" ] || { sleep 0.5; kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; }
@@ -346,6 +383,10 @@ rate() { # count us
 # T1-T9 for one boot.
 one() { # tier leg way
     local tier=$1 leg=$2 way=$3 L="$1 $2 $3" hrc=0 why
+    if [ "$fail" != 0 ] && [ "$ran" -gt 0 ] && [ "$keep" = 0 ]; then
+        bad "T9 $L: not booted: an earlier boot failed (--keep-going boots them all)"
+        return
+    fi
     boot "$tier" "$leg" "$way" || hrc=$?
     local list=$images/$way.run
     local ncmd; ncmd=$(command grep -cv -e '^#' -e '^$' "$list")
