@@ -42,6 +42,11 @@
 //!   reads the cause and acknowledges, the network thread is made
 //!   ready, and run at once if the CPU was idle. No frame is touched
 //!   here;
+//! - the sound device's vector (px30; kernel/sound's `start` routed it
+//!   as net's is): kernel/sound takes back the periods the device has
+//!   played and its events, net's handler runs too when the two share
+//!   the line, the 8259 is acknowledged once, and every thread waiting
+//!   on a pipe, a socket or the sound device is made ready;
 //! - vectors 39 and 47, an 8259 line 7 or 15: a spurious request
 //!   (kernel/timer reads the in-service register) returns; a real one
 //!   is unexpected (every other line is masked) and panics;
@@ -77,6 +82,7 @@ use net
 use panic
 use sched
 use signal
+use sound
 use speaker
 use timer
 use user
@@ -295,6 +301,21 @@ fn route(f: *Frame) -> *Frame {
     }
     if (v == 39 || v == 47) && timer.spurious(v) {
         return f
+    }
+    if sound.vector() != 0 && v == sound.vector() {
+        // px30: the sound device's periods back and its events taken;
+        // its line may be the network device's too (INTx is shared), so
+        // net's handler runs as well when it is, and acknowledges.
+        let _back = sound.irq()
+        if net.vector() != 0 && v == net.vector() {
+            net.irq(v)
+            let _m = sched.wake_net()
+        } else {
+            timer.eoi(v)
+        }
+        sched.wake_pipes() // writers, SYNC and close waiting on the device
+        // # Safety: as above.
+        return unsafe { sched.kick(f as u64) as *Frame }
     }
     if net.vector() != 0 && v == net.vector() {
         net.irq(v) // px20: the cause read and noted, the 8259 acknowledged
