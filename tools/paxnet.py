@@ -408,6 +408,23 @@ def dns_answer(q):
 # --- TCP (px23) ----------------------------------------------------------------
 
 TCP_SPOKEN = False     # set by the tools whose kernel starts kernel/tcp
+
+# px24 (tests/mpx4-ready): the echo server on epoll and the wolf witness.
+READY_ECHO = 7             # user/net/epollecho's port
+READY_UDP = 9711           # where epollecho says "ready" (a UDP datagram)
+READY_WOLF = 7101          # user/net/waitwolf's `serve`
+READY_WOLF_SAYS = 9712     # where it says "ready" (a connection, one line)
+READY_WOLF_CALL = 9713     # where `waitwolf call` connects
+READY_N = 64               # connections the echo server holds at once
+READY_WOLF_N = 12          # connections the wolf witness holds at once (wolf-lang#713)
+READY_WOLF_REQS = 3        # requests on each of `waitwolf call`'s
+
+
+def storm_message(rnd, i):
+    """The 48 bytes user/net/epollecho's driver sends on connection `i`
+    in round `rnd`: its text, dots, a newline."""
+    b = b"storm %d connection %d " % (rnd, i)
+    return b + b"." * (47 - len(b)) + b"\n"
 FIN, SYN, RST, PSH, ACK, URG = 0x01, 0x02, 0x04, 0x08, 0x10, 0x20
 MSS = 1460             # what PAX announces: the MTU less the two headers
 M32 = 0xffffffff

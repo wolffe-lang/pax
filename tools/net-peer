@@ -3,6 +3,7 @@
 # `peer` way).
 #
 #   tools/net-peer --listen PORT --qemu PORT [--soak N] [--boot SECONDS] [--udp]
+#   tools/net-peer --listen PORT --qemu PORT --ready [--soak N] [--boot SECONDS]
 #   tools/net-peer --listen PORT --qemu PORT --tcp [--soak N] [--bulk BYTES]
 #                  [--lossy BYTES] [--boot SECONDS]
 #
@@ -119,6 +120,23 @@
 # tools/linux-net runs this same script against Linux on a tap device
 # (the reference side): there it only plays — what Linux puts in its
 # own headers is Linux's — and checks each datagram's ports and data.
+#
+# **--ready** (px24, tests/mpx4-ready) plays the other end of the
+# readiness witnesses, with the same TCP of its own:
+#   R1  waits for user/net/epollecho's "ready" (a UDP datagram at port
+#       9711), then drives it as its own driver does: a control
+#       connection; 64 connections made at once and held; twice, a
+#       message on each while the server holds still, the server's
+#       word that all 64 have bytes waiting, and its storm — every
+#       event taken in one epoll_wait with room for all, then with room
+#       for 16 at a time — held to "64 events, 64 distinct, 0 repeated";
+#       every echo exact; the 64 closed; --soak N more, eight at a
+#       time; the server's own count
+#   R2  user/net/waitwolf's `serve`: its "ready" (a connection to port
+#       9712, one line), then 12 connections at once, each answered
+#       while all 12 are open, then each its farewell and PAX's FIN
+#   R3  user/net/waitwolf's `call`: its 12 connections at once to port
+#       9713, three requests on each answered, each its farewell
 #
 # **--tcp** (px23, tests/mpx4-tcp) plays the other end of the TCP
 # witnesses (user/net/tcp*, run from user/mpx4-tcp.run) with a TCP of
@@ -1285,6 +1303,186 @@ class Peer:
                   % (tag, n, span, n / 1000 / span if span else 0, c.rexmt, faults.text()))
         return c
 
+    def ready_script(self, soak):
+        """tests/mpx4-ready's (px24): user/net/epollecho driven as its
+        own driver drives it — a control connection, 64 held at once,
+        two storms, a soak — then user/net/waitwolf's server asked by
+        twelve connections at once, then its client answered."""
+        px.TCP_SPOKEN = True
+        st = paxtcp.Stack(self)
+        self.tcp = st
+        G = px.GW_IP
+        N, W = px.READY_N, px.READY_WOLF_N
+        state = {"sport": 41000}
+
+        def sport():
+            state["sport"] += 1
+            return state["sport"]
+
+        # This script's listeners, from the start: where the wolf server
+        # says "ready", and the server the wolf client calls.
+        said = []
+        calls = []
+
+        def says(c):
+            def data(c):
+                said.append(c.take())
+
+            def eof(c):
+                c.close()
+            c.on_data, c.on_eof = data, eof
+
+        def call(c):
+            c.lines, c.asked, c.farewell = bytearray(), 0, False
+            calls.append(c)
+
+            def data(c):
+                c.lines += c.take()
+                while b"\n" in c.lines:
+                    line, _, rest = bytes(c.lines).partition(b"\n")
+                    c.lines = bytearray(rest)
+                    if line == b"bye":
+                        c.farewell = True
+                        c.send(b"farewell\n")
+                        c.close()
+                    else:
+                        c.asked += 1
+                        c.send(b"the wolf heard: " + line + b"\n")
+
+            def eof(c):
+                c.close()
+            c.on_data, c.on_eof = data, eof
+        st.listen(px.READY_WOLF_SAYS, says)
+        st.listen(px.READY_WOLF_CALL, call)
+
+        # R1: the echo server on epoll.
+        self.tcp_ready(st, px.READY_UDP, self.boot, "epollecho")
+        ctl = st.connect(G, sport(), px.READY_ECHO)
+        st.established(ctl, "R1: the control connection", 60.0)
+
+        def ask(line, what):
+            ctl.send(line)
+            st.until(lambda: b"\n" in ctl.inbox or ctl.closed(), 120.0, "R1: the answer to %s" % what)
+            if b"\n" not in ctl.inbox:
+                self.fail("R1: the control connection ended at %s" % what)
+            return ctl.take().decode().strip()
+
+        def stat():
+            a = ask(b"stat\n", "stat").split()
+            if len(a) != 5 or a[0] != "stat":
+                self.fail("R1: stat answered %r" % (a,))
+            return [int(x) for x in a[1:]]
+
+        def holds(want, what):
+            end = time.time() + 120.0
+            while stat()[1] != want:
+                if time.time() > end:
+                    self.fail("R1: the server never held %d connections (%s)" % (want, what))
+                st.idle(0.01)
+
+        ctl.send(b"ctl\n")
+        stat()
+        conns = [st.connect(G, sport(), px.READY_ECHO) for _ in range(N)]
+        for c in conns:
+            c.open()
+        st.until(lambda: all(c.state not in ("syn-sent", "syn-received") for c in conns), 120.0, "R1: %d handshakes at once" % N)
+        if any(c.state == "done" for c in conns):
+            self.fail("R1: %d of %d connections made at once were reset or given up" % (sum(c.state == "done" for c in conns), N))
+        holds(N, "after %d handshakes" % N)
+        storms = []
+        for rnd, room, waits in ((1, 1024, 2), (2, 16, N // 16 + 1)):
+            held = ask(b"hold\n", "hold")
+            if held != "held %d" % N:
+                self.fail("R1: hold answered %r" % held)
+            for i, c in enumerate(conns):
+                c.send(px.storm_message(rnd, i))
+            # Every message acknowledged by PAX, and the server says each
+            # connection has bytes waiting, before the word is given.
+            st.until(lambda: all(not c.out for c in conns), 120.0, "R1: round %d's %d messages acknowledged" % (rnd, N))
+            end = time.time() + 60.0
+            while ask(b"peek\n", "peek") != "peek %d" % N:
+                if time.time() > end:
+                    self.fail("R1: round %d: not every connection had bytes waiting" % rnd)
+                st.idle(0.01)
+            got = ask(b"go %d\n" % room, "go")
+            want = "storm %d waits, %d events, %d distinct, 0 repeated" % (waits, N, N)
+            if got != want:
+                self.fail("R1: round %d, room for %d: the server said %r, %r was due" % (rnd, room, got, want))
+            storms.append(got)
+            st.until(lambda: all(len(c.inbox) >= 48 for c in conns) or any(c.closed() for c in conns), 120.0, "R1: round %d's echoes" % rnd)
+            for i, c in enumerate(conns):
+                if c.take() != px.storm_message(rnd, i):
+                    self.fail("R1: round %d: connection %d's echo is not what was sent" % (rnd, i))
+        for c in conns:
+            c.close()
+        st.until(lambda: all(c.closed() for c in conns), 120.0, "R1: the %d connections closed" % N)
+        holds(0, "after closing")
+        t0 = time.time()
+        done = 0
+        while done < soak:
+            batch = [st.connect(G, sport(), px.READY_ECHO) for _ in range(min(8, soak - done))]
+            for c in batch:
+                c.open()
+            st.until(lambda: all(c.state not in ("syn-sent", "syn-received") for c in batch), 60.0, "R1: the soak's handshakes at %d" % done)
+            for i, c in enumerate(batch):
+                c.send(px.storm_message(3, done + i))
+            st.until(lambda: all(len(c.inbox) >= 48 or c.closed() for c in batch), 60.0, "R1: the soak's echoes at %d" % done)
+            for i, c in enumerate(batch):
+                if c.take() != px.storm_message(3, done + i):
+                    self.fail("R1: the soak's connection %d: not its echo" % (done + i))
+                c.close()
+            st.until(lambda: all(c.closed() for c in batch), 60.0, "R1: the soak's connections closed at %d" % done)
+            done += len(batch)
+            if done % 496 == 0:
+                st.forget()
+        span = time.time() - t0
+        holds(0, "after the soak")
+        acc, opn, most, by = stat()
+        if (acc, opn, most, by) != (N + soak, 0, N, 48 * (2 * N + soak)):
+            self.fail("R1: the server counted %d connections, %d open, %d at once at most, %d bytes" % (acc, opn, most, by))
+        if ask(b"quit\n", "quit") != "bye":
+            self.fail("R1: quit was not answered bye")
+        ctl.close()
+        st.until(lambda: ctl.closed(), 60.0, "R1: the control connection closed")
+        st.forget(0.0)
+        print("net-peer: ok R1 epollecho: %d connections held at once; %s; %s; %d more, eight at a time, each echoed and closed, in %.2f s (%d a second by this script's clock); the server counted %d connections, %d at once at most, %d bytes"
+              % (N, storms[0], storms[1], soak, span, soak / span if span > 0 else 0, acc, most, by))
+
+        # R2: the wolf server, twelve connections at once.
+        st.until(lambda: said, 600.0, "waitwolf serve's \"ready\"")
+        if said[0] != b"ready\n":
+            self.fail("R2: waitwolf serve said %r, not \"ready\"" % said[0][:40])
+        ws = [st.connect(G, sport(), px.READY_WOLF) for _ in range(W)]
+        for c in ws:
+            c.open()
+        st.until(lambda: all(c.state not in ("syn-sent", "syn-received") for c in ws), 120.0, "R2: %d handshakes at once" % W)
+        for k, c in enumerate(ws):
+            c.send(b"hello %d.0\n" % k)
+        st.until(lambda: all(b"\n" in c.inbox or c.closed() for c in ws), 120.0, "R2: %d answers" % W)
+        for k, c in enumerate(ws):
+            got = c.take()
+            if got != b"the wolf heard: hello %d.0\n" % k:
+                self.fail("R2: connection %d was answered %r" % (k, got[:60]))
+        # Only now, every one answered while all were open, the farewells.
+        for c in ws:
+            c.send(b"bye\n")
+        st.until(lambda: all(c.eof or c.closed() for c in ws), 120.0, "R2: %d farewells and PAX's FINs" % W)
+        for k, c in enumerate(ws):
+            got = c.take()
+            if got != b"farewell\n" or c.reset:
+                self.fail("R2: connection %d ended with %r%s" % (k, got[:40], ", reset" if c.reset else ""))
+            c.close()
+        st.until(lambda: all(c.closed() for c in ws), 60.0, "R2: the %d connections closed" % W)
+        print("net-peer: ok R2 waitwolf serve: \"ready\"; %d connections held at once, each answered while all were open, then each its farewell and PAX's FIN" % W)
+
+        # R3: the wolf client, answered.
+        st.until(lambda: len(calls) >= W and all(c.closed() for c in calls), 600.0, "waitwolf call's %d connections" % W)
+        bad = [c for c in calls if c.asked != px.READY_WOLF_REQS or not c.farewell or c.reset]
+        if len(calls) != W or bad:
+            self.fail("R3: %d connections came, %d of them not %d requests and a bye" % (len(calls), len(bad), px.READY_WOLF_REQS))
+        print("net-peer: ok R3 waitwolf call: %d connections at once from PAX, %d requests on each answered, each its farewell"
+              % (W, px.READY_WOLF_REQS))
+
     def send_raw(self, src_ip, payload):
         """One datagram of protocol 17 with `payload` as it is."""
         f = self.datagram(src_ip, payload, proto=17)
@@ -1296,6 +1494,7 @@ def main(argv):
     opt = {"listen": None, "qemu": None, "soak": "10000", "boot": "150", "bulk": "16777216", "lossy": "1048576"}
     udp = False
     tcp = False
+    ready = False
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -1304,6 +1503,9 @@ def main(argv):
             i += 1
         elif a == "--tcp":
             tcp = True
+            i += 1
+        elif a == "--ready":
+            ready = True
             i += 1
         elif a.startswith("--") and a[2:] in opt and i + 1 < len(argv):
             opt[a[2:]] = argv[i + 1]
@@ -1315,7 +1517,9 @@ def main(argv):
     peer = Peer(SocketWire(int(opt["listen"]), int(opt["qemu"])), float(opt["boot"]))
     sys.stdout.reconfigure(line_buffering=True)
     try:
-        if tcp:
+        if ready:
+            peer.ready_script(int(opt["soak"]))
+        elif tcp:
             peer.tcp_script(int(opt["soak"]), int(opt["bulk"]), int(opt["lossy"]))
         elif udp:
             peer.udp_script(int(opt["soak"]))
@@ -1328,7 +1532,7 @@ def main(argv):
     sent = " ".join("%s=%d" % kv for kv in sorted(peer.sent.items()))
     print("net-peer: sent %s" % sent)
     print("net-peer: PASS before=%d arp-requests-from-pax=%d last-identification=%d%s"
-          % (peer.before, peer.arp_out, peer.last_ident, " frames-this-host-lost-before-the-script=%d" % peer.gaps if tcp else ""))
+          % (peer.before, peer.arp_out, peer.last_ident, " frames-this-host-lost-before-the-script=%d" % peer.gaps if tcp or ready else ""))
     return 0
 
 

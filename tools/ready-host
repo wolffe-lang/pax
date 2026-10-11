@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+# ready-host — the host's end of QEMU's user-mode network for the
+# readiness witnesses (px24, tests/mpx4-ready's `user` way).
+#
+#   tools/ready-host --echo-to PORT --wolf-to PORT [--soak N]
+#                    [--wait SECONDS] [--boot SECONDS]
+#
+# With `-netdev user,hostfwd=tcp:127.0.0.1:<A>-:7,hostfwd=tcp:127.0.0.1:<B>-:7101`
+# a connection this host makes to 127.0.0.1 port A reaches the guest's
+# port 7 (B: its port 7101), and what the guest sends to 10.0.2.2 port
+# 9711 (UDP), 9712 or 9713 (TCP) reaches this host's 127.0.0.1 at that
+# port. Ordinary sockets, the same exchanges tools/net-peer's --ready
+# script makes segment by segment:
+#
+#   H1  waits for user/net/epollecho's "ready" (UDP, port 9711), then
+#       drives it as its own driver does: a control connection; 64
+#       connections made one after another and held at once; twice, a message on each
+#       while the server holds still, its word that all 64 have bytes
+#       waiting, and its storm, held to "64 events, 64 distinct, 0
+#       repeated"; every echo exact; the 64 closed; --soak N (10000)
+#       more, eight at a time; the server's own count
+#   H2  user/net/waitwolf's `serve`: its "ready" (a connection to port
+#       9712, one line), then 12 connections held at once through the
+#       second forwarded port, each answered while all are open, then each its
+#       farewell and the end of the stream
+#   H3  user/net/waitwolf's `call`: its 12 connections at once to port
+#       9713, three requests on each answered, each its farewell
+#
+# Ports 9711, 9712 and 9713 are this host's for the length of a run: the
+# script waits up to --wait seconds for them. Prints `ready-host:
+# 127.0.0.1 ports …` once it holds them, one `ready-host: ok <step> …`
+# line per step and, last, `ready-host: PASS …` or `ready-host: FAIL
+# <what>`. Exit 0 on PASS, 1 on FAIL, 2 on a usage error.
+#
+# Written from QEMU's documentation of `-netdev user` (`hostfwd`, the
+# gateway's address). No network stack's source.
+import os
+import socket
+import sys
+import threading
+import time
+
+sys.dont_write_bytecode = True  # no tools/__pycache__ in the tree
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import paxnet as px  # noqa: E402
+
+USAGE = "ready-host: usage: ready-host --echo-to PORT --wolf-to PORT [--soak N] [--wait SECONDS] [--boot SECONDS]"
+
+
+class Fail(Exception):
+    pass
+
+
+def bind(kind, port, wait):
+    end = time.time() + wait
+    while True:
+        s = socket.socket(socket.AF_INET, kind)
+        if kind == socket.SOCK_STREAM:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("127.0.0.1", port))
+            if kind == socket.SOCK_STREAM:
+                s.listen(64)
+            return s
+        except OSError as x:
+            s.close()
+            if time.time() > end:
+                raise Fail("127.0.0.1 port %d is not free after %.0f s: %s" % (port, wait, x))
+            time.sleep(0.5)
+
+
+def line_of(c, what):
+    """One line from a blocking socket, without its newline."""
+    out = bytearray()
+    while not out.endswith(b"\n"):
+        d = c.recv(1)
+        if not d:
+            raise Fail("%s: the connection ended after %r" % (what, bytes(out)[:60]))
+        out += d
+    return bytes(out[:-1]).decode()
+
+
+def exactly(c, n, what):
+    out = bytearray()
+    while len(out) < n:
+        d = c.recv(n - len(out))
+        if not d:
+            raise Fail("%s: the connection ended after %d of %d bytes" % (what, len(out), n))
+        out += d
+    return bytes(out)
+
+
+def many(port, n, what):
+    """`n` connections to 127.0.0.1:port, made one after another and
+    all held. Not begun at once: QEMU's forwarded port listens with a
+    short queue, and of 64 connections begun together some never reach
+    the guest (measured: 52 of 65 SYNs in one capture, each of them
+    answered by PAX; the rest were never sent). What is at once here is
+    what the server holds and what becomes ready, not the handshakes;
+    tools/net-peer's script begins all 64 together."""
+    socks = []
+    for i in range(n):
+        try:
+            s = socket.create_connection(("127.0.0.1", port), timeout=120)
+        except OSError as x:
+            raise Fail("%s: connection %d: %s" % (what, i, x))
+        socks.append(s)
+    return socks
+
+
+def epollecho(fwd, soak):
+    N = px.READY_N
+    ctl = socket.create_connection(("127.0.0.1", fwd), timeout=120)
+
+    def ask(line, what):
+        ctl.sendall(line)
+        return line_of(ctl, "H1: the answer to " + what)
+
+    def stat():
+        a = ask(b"stat\n", "stat").split()
+        if len(a) != 5 or a[0] != "stat":
+            raise Fail("H1: stat answered %r" % (a,))
+        return [int(x) for x in a[1:]]
+
+    def holds(want, what):
+        end = time.time() + 120
+        while True:
+            got = stat()
+            if got[1] == want:
+                return
+            if time.time() > end:
+                raise Fail("H1: the server never held %d connections (%s): it counts %d accepted, %d open" % (want, what, got[0], got[1]))
+            time.sleep(0.01)
+
+    ctl.sendall(b"ctl\n")
+    stat()
+    conns = many(fwd, N, "H1")
+    holds(N, "after %d handshakes" % N)
+    storms = []
+    for rnd, room, waits in ((1, 1024, 2), (2, 16, N // 16 + 1)):
+        held = ask(b"hold\n", "hold")
+        if held != "held %d" % N:
+            raise Fail("H1: hold answered %r" % held)
+        for i, c in enumerate(conns):
+            c.sendall(px.storm_message(rnd, i))
+        end = time.time() + 120
+        while ask(b"peek\n", "peek") != "peek %d" % N:
+            if time.time() > end:
+                raise Fail("H1: round %d: not every connection had bytes waiting" % rnd)
+            time.sleep(0.01)
+        got = ask(b"go %d\n" % room, "go")
+        want = "storm %d waits, %d events, %d distinct, 0 repeated" % (waits, N, N)
+        if got != want:
+            raise Fail("H1: round %d, room for %d: the server said %r, %r was due" % (rnd, room, got, want))
+        storms.append(got)
+        for i, c in enumerate(conns):
+            if exactly(c, 48, "H1: round %d: connection %d's echo" % (rnd, i)) != px.storm_message(rnd, i):
+                raise Fail("H1: round %d: connection %d's echo is not what was sent" % (rnd, i))
+    for c in conns:
+        c.close()
+    holds(0, "after closing")
+    t0 = time.time()
+    done = 0
+    while done < soak:
+        batch = [socket.create_connection(("127.0.0.1", fwd), timeout=120) for _ in range(min(8, soak - done))]
+        for i, c in enumerate(batch):
+            c.sendall(px.storm_message(3, done + i))
+        for i, c in enumerate(batch):
+            if exactly(c, 48, "H1: the soak's connection %d" % (done + i)) != px.storm_message(3, done + i):
+                raise Fail("H1: the soak's connection %d: not its echo" % (done + i))
+            c.close()
+        done += len(batch)
+    span = time.time() - t0
+    holds(0, "after the soak")
+    acc, opn, most, by = stat()
+    if (acc, opn, most, by) != (N + soak, 0, N, 48 * (2 * N + soak)):
+        raise Fail("H1: the server counted %d connections, %d open, %d at once at most, %d bytes" % (acc, opn, most, by))
+    if ask(b"quit\n", "quit") != "bye":
+        raise Fail("H1: quit was not answered bye")
+    ctl.close()
+    print("ready-host: ok H1 epollecho: %d connections held at once; %s; %s; %d more, eight at a time, each echoed and closed, in %.2f s (%d a second); the server counted %d connections, %d at once at most, %d bytes"
+          % (N, storms[0], storms[1], soak, span, soak / span if span > 0 else 0, acc, most, by))
+
+
+def wolf_serve(says, fwd2, boot):
+    W = px.READY_WOLF_N
+    says.settimeout(boot)
+    try:
+        c, _ = says.accept()
+    except socket.timeout:
+        raise Fail("H2: no \"ready\" from waitwolf serve in %.0f s" % boot)
+    c.settimeout(60)
+    if line_of(c, "H2: waitwolf serve's word") != "ready":
+        raise Fail("H2: waitwolf serve did not say \"ready\"")
+    c.close()
+    ws = many(fwd2, W, "H2")
+    for k, s in enumerate(ws):
+        s.sendall(b"hello %d.0\n" % k)
+    for k, s in enumerate(ws):
+        got = line_of(s, "H2: connection %d's answer" % k)
+        if got != "the wolf heard: hello %d.0" % k:
+            raise Fail("H2: connection %d was answered %r" % (k, got))
+    # Only now, every one answered while all were open, the farewells.
+    for s in ws:
+        s.sendall(b"bye\n")
+    for k, s in enumerate(ws):
+        if line_of(s, "H2: connection %d's farewell" % k) != "farewell" or s.recv(16) != b"":
+            raise Fail("H2: connection %d did not end with its farewell and the end of the stream" % k)
+        s.close()
+    print("ready-host: ok H2 waitwolf serve: \"ready\"; %d connections held at once through the second forwarded port, each answered while all were open, then each its farewell and the end of the stream" % W)
+
+
+def wolf_call(listener):
+    W, R = px.READY_WOLF_N, px.READY_WOLF_REQS
+    results = []
+
+    def serve(c):
+        asked, farewell = 0, False
+        try:
+            c.settimeout(300)
+            buf = bytearray()
+            while not farewell:
+                d = c.recv(4096)
+                if not d:
+                    break
+                buf += d
+                while b"\n" in buf:
+                    line, _, rest = bytes(buf).partition(b"\n")
+                    buf = bytearray(rest)
+                    if line == b"bye":
+                        farewell = True
+                        c.sendall(b"farewell\n")
+                    else:
+                        asked += 1
+                        c.sendall(b"the wolf heard: " + line + b"\n")
+        except OSError:
+            pass
+        finally:
+            c.close()
+            results.append((asked, farewell))
+
+    listener.settimeout(600)
+    threads = []
+    for _ in range(W):
+        try:
+            c, _ = listener.accept()
+        except socket.timeout:
+            raise Fail("H3: %d of waitwolf call's %d connections came" % (len(threads), W))
+        t = threading.Thread(target=serve, args=(c,), daemon=True)
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join(300)
+    bad = [r for r in results if r != (R, True)]
+    if len(results) != W or bad:
+        raise Fail("H3: %d connections served, %d of them not %d requests and a bye" % (len(results), len(bad), R))
+    print("ready-host: ok H3 waitwolf call: %d connections at once from PAX, %d requests on each answered, each its farewell" % (W, R))
+
+
+def main(argv):
+    opt = {"echo-to": None, "wolf-to": None, "soak": "10000", "wait": "120", "boot": "600"}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith("--") and a[2:] in opt and i + 1 < len(argv):
+            opt[a[2:]] = argv[i + 1]
+            i += 2
+        else:
+            print(USAGE, file=sys.stderr)
+            return 2
+    if opt["echo-to"] is None or opt["wolf-to"] is None:
+        print(USAGE, file=sys.stderr)
+        return 2
+    sys.stdout.reconfigure(line_buffering=True)
+    try:
+        wait, boot = float(opt["wait"]), float(opt["boot"])
+        u = bind(socket.SOCK_DGRAM, px.READY_UDP, wait)
+        says = bind(socket.SOCK_STREAM, px.READY_WOLF_SAYS, wait)
+        calls = bind(socket.SOCK_STREAM, px.READY_WOLF_CALL, wait)
+        print("ready-host: 127.0.0.1 ports %d (UDP), %d and %d (TCP) are this run's" % (px.READY_UDP, px.READY_WOLF_SAYS, px.READY_WOLF_CALL))
+        u.settimeout(boot)
+        try:
+            d, _ = u.recvfrom(64)
+        except socket.timeout:
+            raise Fail("no \"ready\" from epollecho in %.0f s" % boot)
+        if d != b"ready":
+            raise Fail("epollecho said %r, not \"ready\"" % d[:40])
+        epollecho(int(opt["echo-to"]), int(opt["soak"]))
+        wolf_serve(says, int(opt["wolf-to"]), boot)
+        wolf_call(calls)
+    except Fail as x:
+        print("ready-host: FAIL " + str(x))
+        return 1
+    except OSError as x:
+        print("ready-host: FAIL %s: %s" % (type(x).__name__, x))
+        return 1
+    print("ready-host: PASS (QEMU's user-mode network: its TCP between this host's sockets and PAX)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
