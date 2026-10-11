@@ -56,7 +56,7 @@
 //!
 //!     send(src, len)      copy and queue one frame; rows `down`,
 //!                         `size` (under 14 or over 1514 bytes) and
-//!                         `full` (no buffer free), each counted
+//!                         `full` (no buffer free after a short wait: px24), each counted
 //!     rx_take()           the next received frame for this station
 //!                         or for everyone: its address, length and
 //!                         buffer; length 0 when there is none
@@ -96,6 +96,10 @@ extern "c" let pax_net_stats: *u64
 
 /// Why `send` did not send.
 pub error SendError = {down, size, full}
+
+/// px24: how many times `send` looks again (a PAUSE between looks) for
+/// a transmit buffer the device has returned before it answers `full`.
+const TX_SPINS: u64 = 200000
 
 /// The feature bits the driver takes: VIRTIO_NET_F_MAC (bit 5) and
 /// VIRTIO_F_VERSION_1 (bit 32, kernel/virtio's F_VERSION_1, spelled out
@@ -508,7 +512,18 @@ pub fn send(src: u64, len: u64) -> u64 ! SendError {
         return size
     }
     reclaim()
-    let head = nw(N_TX_HEAD)
+    var head = nw(N_TX_HEAD)
+    // px24: every buffer with the device is a matter of microseconds (it
+    // returns them as it sends), and 64 connections answered together
+    // fill the queue faster than a fast host empties it: wait a little
+    // for one to come back before calling the queue full.
+    var spins: u64 = 0
+    while head == 0 && spins < TX_SPINS {
+        sync.relax()
+        reclaim()
+        head = nw(N_TX_HEAD)
+        spins += 1
+    }
     if head == 0 {
         bump(C_TX_FULL, 1)
         sync.release(sync.net(), saved)
