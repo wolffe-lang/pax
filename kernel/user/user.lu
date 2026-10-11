@@ -199,6 +199,7 @@ use signal
 use socket
 use speaker
 use timer
+use tree
 use uaccess
 use vm
 
@@ -364,6 +365,7 @@ pub fn start() {
     let wall = rtc.read()
     let up = timer.ticks() * NS_PER_TICK / NS_PER_SEC
     put_state(U_EPOCH, if wall > up { wall - up } else { 0 })
+    tree.start() // px27: the file tree, before the first program and the first frame count
 }
 
 fn bit(v: u64, b: u64) -> int {
@@ -593,6 +595,9 @@ fn write(fd: u64, buf: u64, len: u64) -> u64 {
     if t == 3 {
         return files.pipe_write(area(), paging.live(), fd, buf, len, false) // px17
     }
+    if t == 4 {
+        return files.file_write(area(), paging.live(), fd, buf, len) // px27
+    }
     if t == 0 || len == 0 {
         return len
     }
@@ -715,6 +720,42 @@ const SYS_SENDFILE: u64 = 40
 const SYS_READLINK: u64 = 89
 const SYS_SPLICE: u64 = 275
 const SYS_COPY_FILE_RANGE: u64 = 326
+// px27: the writable tree.
+const SYS_PWRITE64: u64 = 18
+const SYS_ACCESS: u64 = 21
+const SYS_FSYNC: u64 = 74
+const SYS_FDATASYNC: u64 = 75
+const SYS_TRUNCATE: u64 = 76
+const SYS_FTRUNCATE: u64 = 77
+const SYS_RENAME: u64 = 82
+const SYS_MKDIR: u64 = 83
+const SYS_RMDIR: u64 = 84
+const SYS_LINK: u64 = 86
+const SYS_UNLINK: u64 = 87
+const SYS_SYMLINK: u64 = 88
+const SYS_CHMOD: u64 = 90
+const SYS_FCHMOD: u64 = 91
+const SYS_CHOWN: u64 = 92
+const SYS_FCHOWN: u64 = 93
+const SYS_LCHOWN: u64 = 94
+const SYS_UMASK: u64 = 95
+const SYS_UTIME: u64 = 132
+const SYS_MKNOD: u64 = 133
+const SYS_UTIMES: u64 = 235
+const SYS_MKDIRAT: u64 = 258
+const SYS_MKNODAT: u64 = 259
+const SYS_FCHOWNAT: u64 = 260
+const SYS_UNLINKAT: u64 = 263
+const SYS_RENAMEAT: u64 = 264
+const SYS_LINKAT: u64 = 265
+const SYS_SYMLINKAT: u64 = 266
+const SYS_FCHMODAT: u64 = 268
+const SYS_FACCESSAT: u64 = 269
+const SYS_UTIMENSAT: u64 = 280
+const SYS_RENAMEAT2: u64 = 316
+const SYS_FACCESSAT2: u64 = 439
+const SYS_FCHMODAT2: u64 = 452
+const AT_REMOVEDIR: u64 = 0x200
 
 const NEG_EPERM: u64 = 0xffffffffffffffff // -1
 const NEG_ESRCH: u64 = 0xfffffffffffffffd // -3
@@ -1204,7 +1245,72 @@ pub fn syscall(f: u64) -> u64 {
     }
     put_word(f, W_RAX, r)
     refusal_line(nr, r)
+    tree_lines()
     f
+}
+
+/// px27: what kernel/tree has to say after a call, in the caller's
+/// name: every 2500th file removed, the books (`user: <name> pid <pid>
+/// tree: <n> files removed since boot; frames held <h>, inodes <i>,
+/// frames free <f>`), which a soak holds flat; and, once each time it
+/// happens, that the tree refused a frame (`… tree: full: frames held
+/// <h> of <cap>, frames free <f>, reserve <r>`): the cap, or the
+/// machine's last frames, which a write never takes. Nothing when the
+/// console is quiet.
+fn tree_lines() {
+    let n = tree.census_due()
+    let full = tree.full_news()
+    if log.quiet() || (n == 0 && !full) {
+        return
+    }
+    who()
+    if n != 0 {
+        log.put(" tree: ")
+        log.dec(n as int)
+        log.put(" files removed since boot; frames held ")
+        log.dec(tree.held() as int)
+        log.put(", inodes ")
+        log.dec(tree.live() as int)
+        log.put(", frames free ")
+        log.dec(frames.free_count() as int)
+    } else {
+        log.put(" tree: full: frames held ")
+        log.dec(tree.held() as int)
+        log.put(" of ")
+        log.dec(tree.cap() as int)
+        log.put(", frames free ")
+        log.dec(frames.free_count() as int)
+        log.put(", reserve ")
+        log.dec(tree.RESERVE as int)
+    }
+    log.end()
+}
+
+/// px27: the tree's line after a kernel's frames line: `tree: frames
+/// <h> (<b> when made), <t> (<b>) of them the inode table's, inodes <i>
+/// (<b>), cap <c>, refusals <n>`: what it holds now and held when the
+/// initramfs was in. The inode table's frames grow with the most
+/// inodes there have been and are never given back; every other frame
+/// is, so a session that removed what it made shows the same count of
+/// those, and the same inodes.
+pub fn tree_report() {
+    log.put("tree: frames ")
+    log.dec(tree.held() as int)
+    log.put(" (")
+    log.dec(tree.base(0) as int)
+    log.put(" when made), ")
+    log.dec(tree.table_frames() as int)
+    log.put(" (")
+    log.dec(tree.base(2) as int)
+    log.put(") of them the inode table's, inodes ")
+    log.dec(tree.live() as int)
+    log.put(" (")
+    log.dec(tree.base(1) as int)
+    log.put("), cap ")
+    log.dec(tree.cap() as int)
+    log.put(", refusals ")
+    log.dec(tree.refusals() as int)
+    log.end()
 }
 
 /// The low 32 bits of a register: an `int` argument (a descriptor, a
@@ -1235,10 +1341,10 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
         return files.pread(a, pml4, a0, a1, a2, a3)
     }
     if nr == SYS_OPENAT {
-        return files.openat(a, pml4, a0, a1, int32(a2))
+        return files.openat(a, pml4, a0, a1, int32(a2), int32(a3)) // px27: the mode
     }
     if nr == SYS_OPEN {
-        return files.openat(a, pml4, AT_FDCWD, a0, int32(a1))
+        return files.openat(a, pml4, AT_FDCWD, a0, int32(a1), int32(a2))
     }
     if nr == SYS_CLOSE {
         return files.close(a, a0)
@@ -1360,7 +1466,7 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
         return files.splice(a, pml4, a0, a1, int32(a2), a3, a4, int32(a5)) // px26
     }
     if nr == SYS_COPY_FILE_RANGE {
-        return files.copy_file_range(a, a0, int32(a2)) // px26
+        return files.copy_file_range(a, pml4, a0, a1, int32(a2), a3, a4, int32(a5)) // px26, px27
     }
     if nr == SYS_BRK {
         return vm.brk(a, pml4, a0)
@@ -1449,6 +1555,61 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     }
     if nr == SYS_GETUID || nr == SYS_GETGID || nr == SYS_GETEUID || nr == SYS_GETEGID {
         return 0
+    }
+    // px27: the writable tree (kernel/files, kernel/tree).
+    if nr == SYS_MKDIR {
+        return files.mkdirat(a, pml4, AT_FDCWD, r0, int32(a1))
+    }
+    if nr == SYS_MKDIRAT {
+        return files.mkdirat(a, pml4, int32(r0), a1, int32(a2))
+    }
+    if nr == SYS_RMDIR {
+        return files.unlinkat(a, pml4, AT_FDCWD, r0, AT_REMOVEDIR)
+    }
+    if nr == SYS_UNLINK {
+        return files.unlinkat(a, pml4, AT_FDCWD, r0, 0)
+    }
+    if nr == SYS_UNLINKAT {
+        return files.unlinkat(a, pml4, int32(r0), a1, int32(a2))
+    }
+    if nr == SYS_RENAME {
+        return files.renameat(a, pml4, AT_FDCWD, r0, AT_FDCWD, a1, 0)
+    }
+    if nr == SYS_RENAMEAT {
+        return files.renameat(a, pml4, int32(r0), a1, int32(a2), a3, 0)
+    }
+    if nr == SYS_RENAMEAT2 {
+        return files.renameat(a, pml4, int32(r0), a1, int32(a2), a3, int32(a4))
+    }
+    if nr == SYS_PWRITE64 {
+        return files.pwrite(a, pml4, int32(r0), a1, a2, a3)
+    }
+    if nr == SYS_FTRUNCATE {
+        return files.ftruncate(a, int32(r0), a1)
+    }
+    if nr == SYS_TRUNCATE {
+        return files.truncate(a, pml4, r0, a1)
+    }
+    if nr == SYS_FSYNC || nr == SYS_FDATASYNC {
+        return files.fsync(a, int32(r0))
+    }
+    if nr == SYS_UMASK {
+        return files.umask(a, int32(r0))
+    }
+    if nr == SYS_ACCESS {
+        return files.faccessat(a, pml4, AT_FDCWD, r0, int32(a1), 0)
+    }
+    if nr == SYS_FACCESSAT {
+        return files.faccessat(a, pml4, int32(r0), a1, int32(a2), 0)
+    }
+    if nr == SYS_FACCESSAT2 {
+        return files.faccessat(a, pml4, int32(r0), a1, int32(a2), int32(a3))
+    }
+    if nr == SYS_LINK || nr == SYS_SYMLINK || nr == SYS_LINKAT || nr == SYS_SYMLINKAT || nr == SYS_MKNOD || nr == SYS_MKNODAT {
+        return files.refused(a, 0)
+    }
+    if nr == SYS_CHMOD || nr == SYS_FCHMOD || nr == SYS_FCHMODAT || nr == SYS_FCHMODAT2 || nr == SYS_CHOWN || nr == SYS_FCHOWN || nr == SYS_LCHOWN || nr == SYS_FCHOWNAT || nr == SYS_UTIMENSAT || nr == SYS_UTIMES || nr == SYS_UTIME {
+        return files.refused(a, 1)
     }
     unknown(nr)
     NEG_ENOSYS

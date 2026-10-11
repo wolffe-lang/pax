@@ -16,26 +16,31 @@
 //! strace of the binaries under test on Linux (`notes/px17/`). No Linux
 //! source; no other kernel's source.
 //!
-//! **The tree** is the initramfs (kernel/initramfs), read-only, plus a
-//! synthetic `/dev`: `/dev/stdin`, `/dev/stdout` and `/dev/stderr` open
+//! **The tree** (px27) is kernel/tree's: inodes in memory, every file
+//! and directory writable, the initramfs's entries its first inodes
+//! (their bytes read in place until written). A path is resolved a
+//! directory at a time (`walk`): `.` stays, `..` goes to the parent and
+//! never above the root, a component that is not a directory is
+//! -ENOTDIR, a missing one -ENOENT, one longer than 255 bytes
+//! -ENAMETOOLONG. Relative paths start at the working directory (px17:
+//! the process's own, `chdir`/`fchdir`, inherited by a child and kept
+//! across `execve`; `/` for a fresh process), or at a directory
+//! descriptor. Beside the tree, a synthetic `/dev`, a second file
+//! system (its own device number; nothing is made, removed or renamed
+//! in it): `/dev/stdin`, `/dev/stdout` and `/dev/stderr` open
 //! whatever descriptor 0, 1 or 2 is (as Linux's links to
 //! `/proc/self/fd/N` do; -ENOENT when it is closed), and `/dev/null`
 //! reads end-of-file and swallows writes; `/dev/tty0` and
 //! `/dev/console` (px21a) open the console itself, whatever descriptors
 //! 0-2 have become: reads, writes and the console's ioctls (the
 //! terminal's, and kernel/speaker's KIOCSOUND and KDMKTONE, which a
-//! Linux beep program asks of `/dev/tty0`). The root lists the archive's
-//! top-level entries and `dev`. A path is made canonical as a string
-//! first (`//` and `.` dropped, `..` pops a component, never above the
-//! root) and then looked up whole; a path through a regular file is
-//! -ENOTDIR, a missing one -ENOENT. Relative paths start at the working
-//! directory (px17: the process's own, `chdir`/`fchdir`, inherited by a
-//! child and kept across `execve`; `/` for a fresh process), or at a
-//! directory descriptor. Nothing is a symbolic link but
-//! `/proc/self/exe` (px26: `readlink` answers the path the program was
-//! loaded from; there is no `/proc` beside it). Writes are refused
-//! by name: opening a file for writing, truncating or creating one is
-//! -EROFS.
+//! Linux beep program asks of `/dev/tty0`). Nothing is a symbolic link
+//! but `/proc/self/exe` (px26: `readlink` answers the path the program
+//! was loaded from; there is no `/proc` beside it), and none can be
+//! made. `openat` creates, truncates and opens for writing; `write`,
+//! `pwrite64`, `ftruncate`, `mkdir`, `rmdir`, `unlink` and `rename`
+//! change the tree (px27, below); a hard link, a change of mode, owner
+//! or times are refused by name.
 //!
 //! **The descriptors** (32 a process) are words in the process's area
 //! (kernel/sched's `proc_area`): per descriptor a kind, the node it
@@ -83,20 +88,22 @@
 //! there, up to what was asked; wolf's spawn sends one 8-byte record).
 //! `fstat` S_IFSOCK|0777.
 //!
-//! **Copies in the kernel** (px26, what bu20's `cat` asks): `sendfile`
-//! writes a file of the initramfs to the console, `/dev/null`, a pipe
-//! or a socketpair; `splice` moves what a pipe holds to any of those,
-//! or a file into a pipe; `copy_file_range` is -EINVAL, as Linux
-//! answers a destination that is no regular file (PAX has none a
-//! process can write).
+//! **Copies in the kernel** (px26, what bu20's `cat` asks; px27, what
+//! bu21's `cp` does): `sendfile` writes a file to the console,
+//! `/dev/null`, a pipe, a socketpair or another file; `splice` moves
+//! what a pipe holds to any of those, or a file into a pipe;
+//! `copy_file_range` copies between two files, and is -EINVAL when
+//! either end is no regular file.
 //!
-//! **What stat answers**: a file's mode, size, inode (the archive's,
-//! plus 16) and link count from its newc header; directories 0755,
+//! **What stat answers**: an inode's mode, size, link count, blocks
+//! and times (kernel/tree; px27: a directory's size is 40 and 20 an
+//! entry and its link count 2 and one a subdirectory, tmpfs's numbers);
 //! the console a character device 4:64 (`/dev/ttyS0`'s numbers),
 //! `/dev/tty0` 4:0 and `/dev/console` 5:1 (Linux's, `stat` on a Linux
-//! host; mode 0620 as the console's), `/dev/null` 1:3; uid, gid and every time 0; st_blksize 4096,
-//! st_blocks eight for every 4096 bytes or part of them (px26: whole
-//! pages, as Linux's file systems count a file; px12 counted 512s); st_dev 0:1.
+//! host; mode 0620 as the console's), `/dev/null` 1:3; uid and gid 0; st_blksize 4096,
+//! st_blocks eight for every page of a file that holds bytes (px26:
+//! whole pages, as Linux's file systems count a file); st_dev 0:1 for
+//! the tree, 0:5 for `/dev` and what is in it.
 //!
 //! **AF_INET sockets** (px22): a descriptor may name one of kernel/udp's
 //! sockets (kind K_INET, an open file whose node is the socket's
@@ -120,6 +127,7 @@ use frames
 use initramfs
 use sched
 use tcp
+use tree
 use uaccess
 use udp
 
@@ -138,6 +146,7 @@ const A_CWD: u64 = 12 // px17: the working directory's node; 0 the root
 // word 13 was px17's count of bytes a waiting pipe write has written; px26
 // keeps it per thread (kernel/sched's `self_done`): two threads of one
 // process may each wait in a write.
+const A_UMASK: u64 = 254 // px27: the file mode creation mask, with bit 16 set once `umask` has set it (0: 022)
 const A_EXE: u64 = 255 // px26: the initramfs entry the program was loaded from, + 1 (0: none); words 14, 15, 144 and 145 are kernel/socket's
 const A_FD: u64 = 16 // the first descriptor's word
 const FD_WORDS: u64 = 4
@@ -191,9 +200,7 @@ const K_TCP: u64 = 9 // px23: an AF_INET stream socket (kernel/tcp's)
 const T_SHIFT: u64 = 56
 const TTY0: u64 = 1 // px21a: T_CONSOLE's reference for /dev/tty0
 const CONSOLE: u64 = 2 // px21a: and for /dev/console
-const T_ROOT: u64 = 1
 const T_DEV: u64 = 2
-const T_ENTRY: u64 = 3
 const T_CONSOLE: u64 = 4 // the reference: 0 the console as 0-2 name it, TTY0, CONSOLE
 const T_NULL: u64 = 5
 const T_STD: u64 = 6 // /dev/stdin, stdout, stderr: the reference is 0, 1, 2
@@ -201,6 +208,7 @@ const T_PIPE: u64 = 7 // px17: a pipe; the reference its record
 const T_SOCK: u64 = 8 // px17: a socketpair's end; the reference rx << 8 | tx
 const T_INET: u64 = 9 // px22: an AF_INET socket; the reference kernel/udp's number
 const T_TCP: u64 = 10 // px23: a stream socket; the reference kernel/tcp's block
+const T_INO: u64 = 11 // px27: a file or a directory of the tree; the reference kernel/tree's inode
 const T_ERR: u64 = 0xff // an errno below
 const REF_MASK: u64 = 0x00ffffffffffffff
 
@@ -227,6 +235,12 @@ const EROFS: u64 = 30
 const ERANGE: u64 = 34
 const ENAMETOOLONG: u64 = 36
 const EACCES: u64 = 13 // px14: execve of what is not an executable file
+const EPERM: u64 = 1 // px27
+const EBUSY: u64 = 16
+const EXDEV: u64 = 18
+const ELOOP: u64 = 40
+const ENOTEMPTY: u64 = 39
+const EOPNOTSUPP: u64 = 95
 
 // open flags (uapi asm-generic/fcntl.h, linux/fcntl.h)
 const O_ACCMODE: u64 = 3
@@ -241,6 +255,14 @@ const O_CLOEXEC: u64 = 0x80000 // px14: closed by execve
 const O_RDWR: u64 = 2
 const O_APPEND: u64 = 0x400 // px17: F_GETFL / F_SETFL
 const O_DIRECT: u64 = 0x4000 // px17: pipe2 refuses it by name (packet mode)
+const O_NOFOLLOW: u64 = 0x20000 // px27
+const O_DSYNC: u64 = 0x1000 // px27: refused by name, with the next five
+const O_SYNC_BIT: u64 = 0x100000 // O_SYNC is this and O_DSYNC
+const O_NOATIME: u64 = 0x40000
+const O_PATH: u64 = 0x200000
+const O_TMPFILE_BIT: u64 = 0x400000 // O_TMPFILE is this and O_DIRECTORY
+const AT_REMOVEDIR: u64 = 0x200 // px27: unlinkat
+const AT_EACCESS: u64 = 0x200 // px27: faccessat2
 const AT_FDCWD: u64 = 0xffffff9c // -100 as the 32-bit int the caller passes (kernel/user masks)
 const AT_SYMLINK_NOFOLLOW: u64 = 0x100
 const AT_EMPTY_PATH: u64 = 0x1000
@@ -258,10 +280,18 @@ const DT_DIR: u64 = 4
 const DT_REG: u64 = 8
 
 // Refusal codes for the area's word (kernel/vm uses 1-15).
-const R_EROFS: u64 = 16
+// 16 was px12's refusal of every write (the initramfs was read-only).
 const R_DIRECT: u64 = 17 // px17
 const R_SOCKTYPE: u64 = 18 // px17
 const R_FCNTL: u64 = 19 // px17
+// px27 (from 31 down):
+const R_OFLAG: u64 = 31
+const R_DEVRO: u64 = 30
+const R_LINK: u64 = 29
+const R_META: u64 = 28
+const R_RENFLAG: u64 = 27
+const R_ATFLAG: u64 = 26
+const R_EXEC: u64 = 25
 
 /// -e as %rax carries it.
 pub fn neg(e: u64) -> u64 {
@@ -280,8 +310,26 @@ fn put(a: u64, i: u64, v: u64) {
 
 /// A refusal code's name ("" when not this module's).
 pub fn why(r: u64) -> str {
-    if r == R_EROFS {
-        return "the initramfs is read-only"
+    if r == R_OFLAG {
+        return "an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE)"
+    }
+    if r == R_DEVRO {
+        return "making or removing a name in /dev (PAX's /dev is fixed)"
+    }
+    if r == R_LINK {
+        return "a hard link, a symbolic link or a device node (the tree makes none)"
+    }
+    if r == R_META {
+        return "a change of mode, owner or times (the tree keeps what a file was made with)"
+    }
+    if r == R_RENFLAG {
+        return "a renameat2 flag (RENAME_NOREPLACE, RENAME_EXCHANGE, RENAME_WHITEOUT)"
+    }
+    if r == R_ATFLAG {
+        return "an unlinkat flag that is not AT_REMOVEDIR"
+    }
+    if r == R_EXEC {
+        return "a program written since boot (the loader reads the archive's own bytes)"
     }
     if r == R_DIRECT {
         return "a packet-mode pipe (O_DIRECT)"
@@ -414,6 +462,9 @@ fn of_new(k: u64, n: u64, flags: u64) -> u64 {
     put_ofw(i, O_POS, 0)
     put_ofw(i, O_FLAGS, flags & !O_CLOEXEC)
     pipe_ends(k, n, flags & O_ACCMODE, true)
+    if ty(n) == T_INO {
+        tree.hold(rf(n)) // px27: an open file keeps its inode, named or not
+    }
     i + 1
 }
 
@@ -444,6 +495,9 @@ fn of_drop(o: u64) {
     put_ofw(i, O_POS, 0)
     put_ofw(i, O_FLAGS, 0)
     pipe_ends(k, n, acc, false)
+    if ty(n) == T_INO {
+        tree.release(rf(n)) // px27: the last close of a file with no name gives its frames back
+    }
 }
 
 /// Whether a kind keeps an open file (an offset, a pipe end).
@@ -535,7 +589,7 @@ pub fn is_open(a: u64, fd: u64) -> bool {
 /// What a `write` to descriptor `fd` reaches (kernel/user's `write`):
 /// 1 the console (kernel/user sends the bytes), 0 a sink that swallows
 /// them (/dev/null), 2 nothing writable (-EBADF), 3 a pipe or a socket
-/// (px17: `pipe_write`).
+/// (px17: `pipe_write`), 4 a file of the tree (px27: `file_write`).
 pub fn write_target(a: u64, fd: u64) -> u64 {
     let k = kind(a, fd)
     if k == K_CLOSED || access(a, fd) == O_RDONLY {
@@ -549,6 +603,9 @@ pub fn write_target(a: u64, fd: u64) -> u64 {
     }
     if k == K_PIPE || k == K_SOCK {
         return 3
+    }
+    if k == K_FILE {
+        return 4
     }
     2
 }
@@ -691,6 +748,10 @@ pub fn inherit(a: u64) {
         of_ref(of_of(a, fd))
         fd += 1
     }
+    let c = get(a, A_CWD)
+    if ty(c) == T_INO {
+        tree.hold(rf(c)) // px27: the child works in the directory too
+    }
 }
 
 /// px17: a process's end closes every descriptor it holds, so a pipe's
@@ -702,6 +763,11 @@ pub fn close_all(a: u64) {
             let _c = close(a, fd)
         }
         fd += 1
+    }
+    let c = get(a, A_CWD)
+    put(a, A_CWD, 0)
+    if ty(c) == T_INO {
+        tree.release(rf(c)) // px27: and leaves its working directory
     }
 }
 
@@ -963,16 +1029,17 @@ pub fn pipe_write(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool) 
 }
 
 /// px26: `sendfile(out, in, offset, count)`: up to `count` bytes of
-/// the file `in` (a regular file of the initramfs: anything else is
-/// -EINVAL, `sendfile(2)`), from its own offset or the one at `offset`
-/// (which is then moved instead), written to `out`: the console,
-/// `/dev/null`, a pipe or a socketpair. boreutils' `cat` copies a file
-/// to its output this way (after `copy_file_range`, which Linux and PAX
-/// refuse for a destination that is not a regular file). The count
-/// written, which may be less than asked: a pipe takes what it has room
-/// for, and a full one waits (WAIT) or answers -EAGAIN (O_NONBLOCK);
-/// -EPIPE with no reader (`EPIPE_R`; kernel/user raises SIGPIPE). One
-/// call sends at most 0x7ffff000 bytes, as Linux.
+/// the file `in` (a regular file: anything else is -EINVAL,
+/// `sendfile(2)`), from its own offset or the one at `offset` (which
+/// is then moved instead), written to `out`: the console, `/dev/null`,
+/// a pipe, a socketpair, or (px27) another file at its offset, which
+/// moves (-EINVAL when that file was opened with O_APPEND: measured,
+/// `cat f >> g`). boreutils' `cat` copies a file to its output this
+/// way (after `copy_file_range`). The count written, which may be less
+/// than asked: a pipe takes what it has room for, and a full one waits
+/// (WAIT) or answers -EAGAIN (O_NONBLOCK); -EPIPE with no reader
+/// (`EPIPE_R`; kernel/user raises SIGPIPE). One call sends at most
+/// 0x7ffff000 bytes, as Linux.
 pub fn sendfile(a: u64, pml4: u64, out: u64, inf: u64, offp: u64, count: u64) -> u64 {
     if kind(a, inf) == K_CLOSED || access(a, inf) == O_WRONLY {
         return neg(EBADF)
@@ -984,6 +1051,9 @@ pub fn sendfile(a: u64, pml4: u64, out: u64, inf: u64, offp: u64, count: u64) ->
     if kind(a, inf) != K_FILE {
         return neg(EINVAL)
     }
+    if t == 4 && status(a, out) & O_APPEND != 0 {
+        return neg(EINVAL)
+    }
     var off = pos(a, inf)
     if offp != 0 {
         if !uaccess.readable(pml4, offp, 8) || !uaccess.writable(pml4, offp, 8) {
@@ -991,8 +1061,8 @@ pub fn sendfile(a: u64, pml4: u64, out: u64, inf: u64, offp: u64, count: u64) ->
         }
         off = uaccess.get64(pml4, offp)
     }
-    let e = rf(node_of(a, inf))
-    let size = initramfs.size(e)
+    let i = rf(node_of(a, inf))
+    let size = tree.bytes(i)
     if off >= size || count == 0 {
         return 0
     }
@@ -1000,33 +1070,76 @@ pub fn sendfile(a: u64, pml4: u64, out: u64, inf: u64, offp: u64, count: u64) ->
     if k > 0x7ffff000 {
         k = 0x7ffff000
     }
-    let src = initramfs.data(e) + off
-    if t == 1 {
-        console.put_kernel(src, k)
-    } else if t == 3 {
-        let p = tx_of(a, out)
-        if ppw(p, P_READERS) == 0 {
-            return EPIPE_R
+    var done: u64 = 0
+    if t == 4 {
+        let q = pos(a, out)
+        let r = file_put(rf(node_of(a, out)), q, i, off, k)
+        if tree.failed(r) {
+            return r
         }
-        let space = ppw(p, P_PAGES) * PAGE - (ppw(p, P_WR) - ppw(p, P_RD))
-        if space == 0 {
-            if status(a, out) & O_NONBLOCK != 0 {
-                return neg(EAGAIN)
-            }
-            return WAIT
-        }
-        if k > space {
-            k = space
-        }
-        ring_put(p, src, k) // the file's bytes in the initramfs: k <= size - off
-        sched.wake_pipes()
-    }
-    if offp != 0 {
-        uaccess.put(pml4, offp, off + k, 8)
+        set_pos(a, out, q + r)
+        done = r
     } else {
-        set_pos(a, inf, off + k)
+        if t == 3 {
+            let p = tx_of(a, out)
+            if ppw(p, P_READERS) == 0 {
+                return EPIPE_R
+            }
+            let space = ppw(p, P_PAGES) * PAGE - (ppw(p, P_WR) - ppw(p, P_RD))
+            if space == 0 {
+                if status(a, out) & O_NONBLOCK != 0 {
+                    return neg(EAGAIN)
+                }
+                return WAIT
+            }
+            if k > space {
+                k = space
+            }
+        }
+        while done < k {
+            let (src, c) = tree.span(i, off + done, k - done)
+            if t == 1 {
+                console.put_kernel(src, c)
+            } else if t == 3 {
+                ring_put(tx_of(a, out), src, c)
+            }
+            done += c
+        }
+        if t == 3 {
+            sched.wake_pipes()
+        }
     }
-    k
+    tree.touch_read(i)
+    if offp != 0 {
+        uaccess.put(pml4, offp, off + done, 8)
+    } else {
+        set_pos(a, inf, off + done)
+    }
+    done
+}
+
+/// px27: `k` bytes of file `i` from offset `off` written into file `j`
+/// at offset `q`: the count, less than `k` when the tree's frames ran
+/// out part-way, or -errno when none could be written.
+fn file_put(j: u64, q: u64, i: u64, off: u64, k: u64) -> u64 {
+    var done: u64 = 0
+    var e: u64 = 0
+    while done < k && e == 0 {
+        let (src, c) = tree.span(i, off + done, k - done)
+        let r = tree.write(0, j, q + done, src, c)
+        if tree.failed(r) {
+            e = r
+        } else {
+            done += r
+            if r < c {
+                e = 1
+            }
+        }
+    }
+    if done == 0 && e > 1 {
+        return e
+    }
+    done
 }
 
 /// The frame-by-frame copy of `k` kernel bytes at `src` into pipe `p`'s
@@ -1090,6 +1203,9 @@ pub fn splice(a: u64, pml4: u64, inf: u64, offin: u64, out: u64, offout: u64, le
         return WAIT
     }
     var k = if len < avail { len } else { avail }
+    if t == 4 && status(a, out) & O_APPEND != 0 {
+        return neg(EINVAL) // px27: measured (`cat >> f <<E`)
+    }
     if t == 3 {
         let q = tx_of(a, out)
         if ppw(q, P_READERS) == 0 {
@@ -1107,33 +1223,110 @@ pub fn splice(a: u64, pml4: u64, inf: u64, offin: u64, out: u64, offout: u64, le
         }
     }
     var done: u64 = 0
-    while done < k {
+    var full = false
+    while done < k && !full {
         let (src, room) = ring_at(p, ppw(p, P_RD) + done)
-        let c = if k - done < room { k - done } else { room }
+        var c = if k - done < room { k - done } else { room }
         if t == 1 {
             console.put_kernel(src, c)
         } else if t == 3 {
             ring_put(tx_of(a, out), src, c)
+        } else if t == 4 {
+            // px27: into a file, at its offset (pelt's `cat > f <<E`).
+            let q = pos(a, out)
+            let r = tree.write(0, rf(node_of(a, out)), q, src, c)
+            if tree.failed(r) {
+                if done == 0 {
+                    return r
+                }
+                c = 0
+                full = true
+            } else {
+                set_pos(a, out, q + r)
+                full = r < c
+                c = r
+            }
         }
         done += c
     }
-    put_ppw(p, P_RD, ppw(p, P_RD) + k)
+    put_ppw(p, P_RD, ppw(p, P_RD) + done)
     sched.wake_pipes()
-    k
+    done
 }
 
-/// px26: `copy_file_range(in, …, out, …, len, flags)`: -EBADF for a
-/// descriptor that is not open (or not open the right way), else
-/// -EINVAL: the call copies between regular files (`copy_file_range(2)`:
-/// "EINVAL … either fd_in or fd_out is not a regular file"), and PAX has
-/// no regular file a process can write (the initramfs is read-only).
-/// boreutils' `cat` asks it first and goes on to `sendfile`, as on Linux
-/// when its output is a pipe or a terminal.
-pub fn copy_file_range(a: u64, inf: u64, out: u64) -> u64 {
+/// px26, px27: `copy_file_range(in, off_in, out, off_out, len, flags)`:
+/// up to `len` bytes copied from one regular file to another, each at
+/// its own offset (which moves) or at the one its pointer names (which
+/// is moved instead): the count, 0 at the end of `in`. As measured on
+/// Linux (`notes/px27/straces/`): -EBADF for a descriptor that is not
+/// open the right way, and for an `out` opened with O_APPEND; -EISDIR
+/// for a directory; -EINVAL when either is no regular file (a pipe, the
+/// console: boreutils' `cat` and `cp` ask this first and go on to
+/// `sendfile`), for a flag, and for one file onto itself where the two
+/// ranges overlap. Never -EXDEV: one file system holds every regular
+/// file there is. One call copies at most 0x7ffff000 bytes.
+pub fn copy_file_range(a: u64, pml4: u64, inf: u64, offin: u64, out: u64, offout: u64, len: u64, flags: u64) -> u64 {
     if kind(a, inf) == K_CLOSED || access(a, inf) == O_WRONLY || write_target(a, out) == 2 {
         return neg(EBADF)
     }
-    neg(EINVAL)
+    if kind(a, inf) == K_DIR {
+        return neg(EISDIR)
+    }
+    if kind(a, inf) != K_FILE || kind(a, out) != K_FILE {
+        return neg(EINVAL)
+    }
+    if status(a, out) & O_APPEND != 0 {
+        return neg(EBADF)
+    }
+    if flags != 0 {
+        return neg(EINVAL)
+    }
+    var off = pos(a, inf)
+    var q = pos(a, out)
+    if offin != 0 {
+        if !uaccess.readable(pml4, offin, 8) || !uaccess.writable(pml4, offin, 8) {
+            return neg(EFAULT)
+        }
+        off = uaccess.get64(pml4, offin)
+    }
+    if offout != 0 {
+        if !uaccess.readable(pml4, offout, 8) || !uaccess.writable(pml4, offout, 8) {
+            return neg(EFAULT)
+        }
+        q = uaccess.get64(pml4, offout)
+    }
+    if off >= 0x8000000000000000 || q >= 0x8000000000000000 {
+        return neg(EINVAL)
+    }
+    let i = rf(node_of(a, inf))
+    let j = rf(node_of(a, out))
+    let size = tree.bytes(i)
+    if off >= size || len == 0 {
+        return 0
+    }
+    var k = if len < size - off { len } else { size - off }
+    if k > 0x7ffff000 {
+        k = 0x7ffff000
+    }
+    if i == j && off < q + k && q < off + k {
+        return neg(EINVAL)
+    }
+    let r = file_put(j, q, i, off, k)
+    if tree.failed(r) {
+        return r
+    }
+    tree.touch_read(i)
+    if offin != 0 {
+        uaccess.put(pml4, offin, off + r, 8)
+    } else {
+        set_pos(a, inf, off + r)
+    }
+    if offout != 0 {
+        uaccess.put(pml4, offout, q + r, 8)
+    } else {
+        set_pos(a, out, q + r)
+    }
+    r
 }
 
 /// px17: `recvfrom(fd, buf, n, flags, addr, addrlen)` on a socketpair's
@@ -1290,7 +1483,8 @@ pub fn kbuf() -> u64 {
     raw()
 }
 
-const NORM: u64 = 4096 // the canonical path's first byte in pax_kbuf
+const NORM: u64 = 4096 // pax_kbuf's second half: a canonical path, a saved name
+const KBUF_END: u64 = 8192
 
 fn err(e: u64) -> u64 {
     (T_ERR << T_SHIFT) | e
@@ -1308,8 +1502,20 @@ fn rf(n: u64) -> u64 {
     n & REF_MASK
 }
 
-fn entry_node(e: u64) -> u64 {
-    (T_ENTRY << T_SHIFT) | e
+/// The node of the tree's inode `i` (px27).
+fn ino_node(i: u64) -> u64 {
+    (T_INO << T_SHIFT) | i
+}
+
+fn root_node() -> u64 {
+    ino_node(tree.ROOT)
+}
+
+/// A refusal by name: the area's word for kernel/user's line, and
+/// kernel/tree's count.
+fn refuse(a: u64, code: u64) {
+    put(a, A_REFUSAL, code)
+    tree.refuse()
 }
 
 /// Copy the user path at `va` into pax_kbuf[0..]; its length, or an
@@ -1337,35 +1543,24 @@ fn norm_is(l: u64, s: str) -> bool {
     k == l
 }
 
-/// Write node `d`'s canonical name at NORM (a directory's: "" for the
-/// root, "dev", an entry's name); its length.
-fn put_prefix(d: u64) -> u64 {
-    if ty(d) == T_DEV {
-        put_kb(NORM, 100)
-        put_kb(NORM + 1, 101)
-        put_kb(NORM + 2, 118)
-        return 3
+/// Whether the path component [s, s + n) of pax_kbuf is `name`.
+fn comp_is(s: u64, n: u64, name: str) -> bool {
+    var k: u64 = 0
+    for b in name.bytes() {
+        if k >= n || kb(s + k) != b as int as u64 {
+            return false
+        }
+        k += 1
     }
-    if ty(d) != T_ENTRY {
-        return 0
-    }
-    let e = rf(d)
-    let l = initramfs.name_length(e)
-    var i: u64 = 0
-    while i < l {
-        put_kb(NORM + i, initramfs.name_byte(e, i))
-        i += 1
-    }
-    l
+    k == n
 }
 
-/// Make the raw path [0, rl) canonical at NORM, starting from directory
-/// node `base`: its length, or an error node (ENAMETOOLONG).
-fn canon(rl: u64, base: u64) -> u64 {
+/// Make the absolute raw path [0, rl) canonical as text at NORM (`//`
+/// and `.` dropped, `..` popping a component): its length, or an error
+/// node (ENAMETOOLONG). Only `/proc/self/exe` is still found this way
+/// (px26): every other path is walked a directory at a time (`walk`).
+fn canon(rl: u64) -> u64 {
     var l: u64 = 0
-    if rl == 0 || kb(0) != 47 {
-        l = put_prefix(base)
-    }
     var i: u64 = 0
     while i < rl {
         while i < rl && kb(i) == 47 {
@@ -1405,143 +1600,254 @@ fn canon(rl: u64, base: u64) -> u64 {
     l
 }
 
-/// Whether entry `e`'s name is [NORM + off, NORM + off + l).
-fn entry_is(e: u64, off: u64, l: u64) -> bool {
-    if initramfs.name_length(e) != l {
+/// Whether the user path at `va` is `/proc/self/exe`, however spelled
+/// (px26: the one symbolic link there is).
+fn is_proc_exe(pml4: u64, va: u64) -> bool {
+    let rl = path_in(pml4, va)
+    if is_err(rl) || rl == 0 || kb(0) != 47 {
         return false
     }
-    var i: u64 = 0
-    while i < l {
-        if initramfs.name_byte(e, i) != kb(NORM + off + i) {
-            return false
-        }
-        i += 1
-    }
-    true
-}
-
-/// The entry named [NORM, NORM + l), or initramfs.END.
-fn find_entry(l: u64) -> u64 {
-    var e = initramfs.first() else initramfs.END
-    while e != initramfs.END {
-        if entry_is(e, 0, l) {
-            return e
-        }
-        e = initramfs.next(e) else initramfs.END
-    }
-    initramfs.END
-}
-
-/// The node the canonical path [NORM, NORM + l) names, or an error node.
-fn lookup(l: u64) -> u64 {
-    if l == 0 {
-        return T_ROOT << T_SHIFT
-    }
-    if norm_is(l, "dev") {
-        return T_DEV << T_SHIFT
-    }
-    if norm_is(l, "dev/stdin") {
-        return T_STD << T_SHIFT
-    }
-    if norm_is(l, "dev/stdout") {
-        return (T_STD << T_SHIFT) | 1
-    }
-    if norm_is(l, "dev/stderr") {
-        return (T_STD << T_SHIFT) | 2
-    }
-    if norm_is(l, "dev/null") {
-        return T_NULL << T_SHIFT
-    }
-    if norm_is(l, "dev/tty0") {
-        return (T_CONSOLE << T_SHIFT) | TTY0
-    }
-    if norm_is(l, "dev/console") {
-        return (T_CONSOLE << T_SHIFT) | CONSOLE
-    }
-    let e = find_entry(l)
-    if e != initramfs.END {
-        return entry_node(e)
-    }
-    // A prefix that is a regular file makes the path -ENOTDIR.
-    var k: u64 = 0
-    while k < l {
-        if kb(NORM + k) == 47 {
-            let p = find_entry(k)
-            if p != initramfs.END && !initramfs.is_dir(p) {
-                return err(ENOTDIR)
-            }
-        }
-        k += 1
-    }
-    err(ENOENT)
+    let l = canon(rl)
+    !is_err(l) && norm_is(l, "proc/self/exe")
 }
 
 fn is_dir_node(n: u64) -> bool {
     let t = ty(n)
-    t == T_ROOT || t == T_DEV || (t == T_ENTRY && initramfs.is_dir(rf(n)))
+    t == T_DEV || (t == T_INO && tree.is_dir(rf(n)))
 }
 
-/// Resolve (dirfd, path at va) to a node. `empty_ok`: AT_EMPTY_PATH, an
-/// empty path naming dirfd itself.
-fn resolve(a: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool) -> u64 {
+/// What the name [s, s + n) of pax_kbuf leads to in directory node `d`:
+/// a node, or an error node (ENOENT). `/dev` is the root's `dev`, with
+/// its six fixed names; everything else is the tree's.
+fn child_named(d: u64, s: u64, n: u64) -> u64 {
+    if ty(d) == T_DEV {
+        if comp_is(s, n, "stdin") {
+            return T_STD << T_SHIFT
+        }
+        if comp_is(s, n, "stdout") {
+            return (T_STD << T_SHIFT) | 1
+        }
+        if comp_is(s, n, "stderr") {
+            return (T_STD << T_SHIFT) | 2
+        }
+        if comp_is(s, n, "null") {
+            return T_NULL << T_SHIFT
+        }
+        if comp_is(s, n, "tty0") {
+            return (T_CONSOLE << T_SHIFT) | TTY0
+        }
+        if comp_is(s, n, "console") {
+            return (T_CONSOLE << T_SHIFT) | CONSOLE
+        }
+        return err(ENOENT)
+    }
+    if rf(d) == tree.ROOT && comp_is(s, n, "dev") {
+        return T_DEV << T_SHIFT
+    }
+    let i = tree.lookup(rf(d), raw() + s, n)
+    if i == tree.NONE {
+        return err(ENOENT)
+    }
+    ino_node(i)
+}
+
+/// Directory node `d`'s parent (`..`): the root's is the root.
+fn up(d: u64) -> u64 {
+    if ty(d) == T_DEV {
+        return root_node()
+    }
+    ino_node(tree.parent(rf(d)))
+}
+
+// What `walk` says of a path's last component when it has no name of
+// its own (its length is 0): which of these it was.
+const LAST_ROOT: u64 = 0 // the path was `/` (or the directory it started in)
+const LAST_DOT: u64 = 1 // `.`
+const LAST_DOTDOT: u64 = 2 // `..`
+
+/// px27: resolve (dirfd, path at va) a directory at a time
+/// (`path_resolution(7)`): every component but the last must be a
+/// directory that has it (-ENOENT, -ENOTDIR; `.` stays, `..` goes up,
+/// and no further than the root), a component longer than 255 bytes is
+/// -ENAMETOOLONG. Returns (the node the path names, or an error node —
+/// ENOENT when only the last component is missing; the directory node
+/// the last component is in; the component's offset in pax_kbuf; its
+/// length, 0 when it has no name of its own, the offset then one of
+/// LAST_*; whether a `/` follows it). A trailing `/` on what is not a
+/// directory is -ENOTDIR. `empty_ok`: AT_EMPTY_PATH, an empty path
+/// naming dirfd itself.
+fn walk(a: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool) -> (u64, u64, u64, u64, bool) {
     let rl = path_in(pml4, va)
     if is_err(rl) {
-        return rl
+        return (rl, rl, 0, 0, false)
     }
     if rl == 0 {
         if !empty_ok {
-            return err(ENOENT)
+            return (err(ENOENT), err(ENOENT), 0, 0, false)
         }
         if dirfd == AT_FDCWD {
-            return cwd(a)
+            return (cwd(a), err(EBUSY), LAST_ROOT, 0, false)
         }
         if kind(a, dirfd) == K_CLOSED {
-            return err(EBADF)
+            return (err(EBADF), err(EBADF), 0, 0, false)
         }
-        return node_of(a, dirfd)
+        return (node_of(a, dirfd), err(EBUSY), LAST_ROOT, 0, false)
     }
-    var base = T_ROOT << T_SHIFT
+    var cur = root_node()
     if kb(0) != 47 && dirfd == AT_FDCWD {
-        base = cwd(a) // px17
+        cur = cwd(a) // px17
     }
     if kb(0) != 47 && dirfd != AT_FDCWD {
         if kind(a, dirfd) == K_CLOSED {
-            return err(EBADF)
+            return (err(EBADF), err(EBADF), 0, 0, false)
         }
-        base = node_of(a, dirfd)
-        if !is_dir_node(base) {
-            return err(ENOTDIR)
+        cur = node_of(a, dirfd)
+        if !is_dir_node(cur) {
+            return (err(ENOTDIR), err(ENOTDIR), 0, 0, false)
         }
     }
-    let l = canon(rl, base)
-    if is_err(l) {
-        return l
+    var i: u64 = 0
+    while i < rl {
+        while i < rl && kb(i) == 47 {
+            i += 1
+        }
+        if i >= rl {
+            break
+        }
+        let s = i
+        while i < rl && kb(i) != 47 {
+            i += 1
+        }
+        let n = i - s
+        var j = i
+        while j < rl && kb(j) == 47 {
+            j += 1
+        }
+        let last = j >= rl
+        if !is_dir_node(cur) {
+            return (err(ENOTDIR), err(ENOTDIR), 0, 0, false)
+        }
+        if n > tree.NAME_MAX {
+            return (err(ENAMETOOLONG), err(ENAMETOOLONG), 0, 0, false)
+        }
+        var c = cur
+        var dots: u64 = 0
+        if n == 1 && kb(s) == 46 {
+            dots = LAST_DOT
+        } else if n == 2 && kb(s) == 46 && kb(s + 1) == 46 {
+            dots = LAST_DOTDOT
+            c = up(cur)
+        } else {
+            c = child_named(cur, s, n)
+        }
+        if last {
+            let trail = i < rl
+            if trail && !is_err(c) && !is_dir_node(c) && ty(c) != T_STD {
+                c = err(ENOTDIR)
+            }
+            if dots != 0 {
+                return (c, err(EBUSY), dots, 0, trail)
+            }
+            return (c, cur, s, n, trail)
+        }
+        if is_err(c) {
+            return (c, c, 0, 0, false)
+        }
+        cur = c
     }
-    let n = lookup(l)
-    // A trailing '/' on something that is not a directory.
-    if !is_err(n) && kb(rl - 1) == 47 && !is_dir_node(n) && ty(n) != T_STD {
-        return err(ENOTDIR)
-    }
+    (cur, err(EBUSY), LAST_ROOT, 0, false)
+}
+
+/// Resolve (dirfd, path at va) to a node (`walk`'s first answer).
+fn resolve(a: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool) -> u64 {
+    let (n, _p, _s, _l, _t) = walk(a, pml4, dirfd, va, empty_ok)
     n
 }
 
-// --- open, read, seek ---------------------------------------------------------
+/// px27: the process's file mode creation mask (`umask(2)`): 022 until
+/// it sets one.
+fn mask_of(a: u64) -> u64 {
+    let w = get(a, A_UMASK)
+    if w == 0 {
+        return 0x12 // 022
+    }
+    w & 0x1ff
+}
 
-/// `openat(dirfd, path, flags, mode)`: the descriptor or -errno.
-pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64) -> u64 {
+/// px27: `umask(mask)`: the mask becomes `mask & 0777`; the old one is
+/// answered. A child inherits it with the area; `execve` keeps it.
+pub fn umask(a: u64, m: u64) -> u64 {
+    let old = mask_of(a)
+    put(a, A_UMASK, (m & 0x1ff) | 0x10000)
+    old
+}
+
+// --- open, read, write, seek ---------------------------------------------------
+
+/// Whether a new open file could be made now (the table has a record).
+fn of_room() -> bool {
+    var i: u64 = 0
+    while i < OFILES && ofw(i, O_REFS) != 0 {
+        i += 1
+    }
+    i < OFILES
+}
+
+/// `openat(dirfd, path, flags, mode)`: the descriptor or -errno. px27:
+/// O_CREAT makes the file when its name is missing (its permission bits
+/// `mode & ~umask`; -EISDIR for a name with a trailing `/`; -ENOENT in
+/// a directory that has been removed), O_EXCL with it is -EEXIST for a
+/// name that exists, O_TRUNC cuts a file to nothing, O_WRONLY and
+/// O_RDWR open it for `write`, O_APPEND makes every write go to its
+/// end, O_NOFOLLOW is -ELOOP for the one link there is
+/// (`/proc/self/exe`). A directory opens only to be read (-EISDIR
+/// otherwise). O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME and O_PATH are
+/// refused by name, -EINVAL, and O_TMPFILE -EOPNOTSUPP: no strace asks
+/// them and PAX would not honour them. Nothing can be made in `/dev`
+/// (refused by name, -EROFS).
+pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> u64 {
     let acc = flags & O_ACCMODE
     if acc == 3 {
         return neg(EINVAL)
     }
-    var n = resolve(a, pml4, dirfd, va, false)
+    if flags & O_TMPFILE_BIT != 0 {
+        refuse(a, R_OFLAG)
+        return neg(EOPNOTSUPP)
+    }
+    if flags & (O_DIRECT | O_DSYNC | O_SYNC_BIT | O_NOATIME | O_PATH) != 0 {
+        refuse(a, R_OFLAG)
+        return neg(EINVAL)
+    }
+    if flags & O_NOFOLLOW != 0 && is_proc_exe(pml4, va) {
+        return neg(ELOOP)
+    }
+    let (n0, par, ns, nl, trail) = walk(a, pml4, dirfd, va, false)
+    var n = n0
+    var made = false
     if is_err(n) {
-        if rf(n) == ENOENT && flags & O_CREAT != 0 {
-            put(a, A_REFUSAL, R_EROFS)
+        if rf(n) != ENOENT || flags & O_CREAT == 0 || is_err(par) {
+            return neg(rf(n))
+        }
+        if trail {
+            return neg(EISDIR)
+        }
+        if ty(par) != T_INO {
+            refuse(a, R_DEVRO)
             return neg(EROFS)
         }
-        return neg(rf(n))
-    }
-    if flags & O_CREAT != 0 && flags & O_EXCL != 0 {
+        if lowest_free(a, 0) == FDS {
+            return neg(EMFILE)
+        }
+        if !of_room() {
+            return neg(ENFILE)
+        }
+        let i = tree.create(rf(par), raw() + ns, nl, mode & !mask_of(a) & 0xfff)
+        if tree.failed(i) {
+            return i
+        }
+        n = ino_node(i)
+        made = true
+    } else if flags & O_CREAT != 0 && flags & O_EXCL != 0 {
         return neg(EEXIST)
     }
     var k = K_FILE
@@ -1568,20 +1874,20 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64) -> u64 {
     if flags & O_DIRECTORY != 0 && k != K_DIR {
         return neg(ENOTDIR)
     }
-    if (k == K_FILE || k == K_DIR) && (acc != O_RDONLY || flags & O_TRUNC != 0) {
-        put(a, A_REFUSAL, R_EROFS)
-        return neg(EROFS)
-    }
     // px17: a new open file (offset 0), also when /dev/std* reopens a
     // file or a pipe's end (as /proc/self/fd's links do on Linux).
-    open_new(a, 0, k, n, flags)
+    let fd = open_new(a, 0, k, n, flags)
+    if fd < 0x8000000000000000 && k == K_FILE && !made && flags & O_TRUNC != 0 && ty(n) == T_INO && tree.bytes(rf(n)) != 0 {
+        let _t = tree.truncate(rf(n), 0)
+    }
+    fd
 }
 
 /// Copy up to `n` bytes of file node `node` from offset `off` to user
 /// `buf`: the count, or -EFAULT.
 fn file_read(pml4: u64, node: u64, off: u64, buf: u64, n: u64) -> u64 {
-    let e = rf(node)
-    let size = initramfs.size(e)
+    let i = rf(node)
+    let size = tree.bytes(i)
     if off >= size || n == 0 {
         if !uaccess.in_user(buf, 0) {
             return neg(EFAULT)
@@ -1589,10 +1895,10 @@ fn file_read(pml4: u64, node: u64, off: u64, buf: u64, n: u64) -> u64 {
         return 0
     }
     let k = if n < size - off { n } else { size - off }
-    if !uaccess.copy_out(pml4, buf, initramfs.data(e) + off, k) {
+    if !uaccess.writable(pml4, buf, k) {
         return neg(EFAULT)
     }
-    k
+    tree.read(pml4, i, off, buf, k)
 }
 
 /// `read(fd, buf, n)`.
@@ -1643,7 +1949,65 @@ pub fn pread(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, off: u64) -> u64 {
     file_read(pml4, node_of(a, fd), off, buf, n)
 }
 
-/// `lseek(fd, off, whence)`: SEEK_SET 0, SEEK_CUR 1, SEEK_END 2.
+/// px27: `write(fd, buf, n)` to a file of the tree (kernel/user's
+/// `write`, for `write_target`'s 4): the bytes go in at the open file's
+/// offset, or at the file's end when it was opened with O_APPEND (the
+/// end as it is now: two descriptors appending never overwrite each
+/// other), and the offset moves past them. The count written — less
+/// than `n` when the tree's frames ran out part-way — or -EFAULT (the
+/// whole buffer is checked first: nothing is written), -ENOSPC, -EFBIG.
+/// One call writes at most 0x7ffff000 bytes, as Linux.
+pub fn file_write(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
+    if n == 0 {
+        return 0
+    }
+    let k = if n < 0x7ffff000 { n } else { 0x7ffff000 }
+    if !uaccess.readable(pml4, buf, k) {
+        return neg(EFAULT)
+    }
+    let i = rf(node_of(a, fd))
+    var p = pos(a, fd)
+    if status(a, fd) & O_APPEND != 0 {
+        p = tree.bytes(i)
+    }
+    let r = tree.write(pml4, i, p, buf, k)
+    if !tree.failed(r) {
+        set_pos(a, fd, p + r)
+    }
+    r
+}
+
+/// px27: `pwrite64(fd, buf, n, off)`: as `write` at `off`, the open
+/// file's offset left alone; a file opened with O_APPEND takes the
+/// bytes at its end whatever `off` says (`pwrite(2)`, BUGS: Linux's
+/// answer, measured). -EBADF for a descriptor not open for writing,
+/// -ESPIPE for what has no offset, -EINVAL for a negative one.
+pub fn pwrite(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, off: u64) -> u64 {
+    let k = kind(a, fd)
+    if k == K_CLOSED || access(a, fd) == O_RDONLY || k == K_DIR {
+        return neg(EBADF)
+    }
+    if k != K_FILE {
+        return neg(ESPIPE)
+    }
+    if off >= 0x8000000000000000 {
+        return neg(EINVAL)
+    }
+    if n == 0 {
+        return 0
+    }
+    let c = if n < 0x7ffff000 { n } else { 0x7ffff000 }
+    if !uaccess.readable(pml4, buf, c) {
+        return neg(EFAULT)
+    }
+    let i = rf(node_of(a, fd))
+    let p = if status(a, fd) & O_APPEND != 0 { tree.bytes(i) } else { off }
+    tree.write(pml4, i, p, buf, c)
+}
+
+/// `lseek(fd, off, whence)`: SEEK_SET 0, SEEK_CUR 1, SEEK_END 2. px27:
+/// an offset past a file's end is allowed, and a write there leaves a
+/// hole that reads as zeros.
 pub fn lseek(a: u64, fd: u64, off: u64, whence: u64) -> u64 {
     let k = kind(a, fd)
     if k == K_CLOSED {
@@ -1660,7 +2024,7 @@ pub fn lseek(a: u64, fd: u64, off: u64, whence: u64) -> u64 {
         base = pos(a, fd)
     } else if whence == 2 {
         if k == K_FILE {
-            base = initramfs.size(rf(node_of(a, fd)))
+            base = tree.bytes(rf(node_of(a, fd)))
         }
     } else if whence != 0 {
         return neg(EINVAL)
@@ -1680,6 +2044,52 @@ pub fn lseek(a: u64, fd: u64, off: u64, whence: u64) -> u64 {
     }
     set_pos(a, fd, p)
     p
+}
+
+/// px27: `ftruncate(fd, len)`: the file is `len` bytes long: cut (every
+/// frame past that given back at once) or longer by a hole. -EBADF for
+/// a closed descriptor; -EINVAL for one that is not a file open for
+/// writing (`ftruncate(2)`), and for a negative length; -EFBIG.
+pub fn ftruncate(a: u64, fd: u64, len: u64) -> u64 {
+    let k = kind(a, fd)
+    if k == K_CLOSED {
+        return neg(EBADF)
+    }
+    if k != K_FILE || access(a, fd) == O_RDONLY || len >= 0x8000000000000000 {
+        return neg(EINVAL)
+    }
+    tree.truncate(rf(node_of(a, fd)), len)
+}
+
+/// px27: `truncate(path, len)`: as `ftruncate` for the file the path
+/// names: -EISDIR for a directory, -EINVAL for what is no file.
+pub fn truncate(a: u64, pml4: u64, va: u64, len: u64) -> u64 {
+    let n = resolve(a, pml4, AT_FDCWD, va, false)
+    if is_err(n) {
+        return neg(rf(n))
+    }
+    if is_dir_node(n) {
+        return neg(EISDIR)
+    }
+    if ty(n) != T_INO || len >= 0x8000000000000000 {
+        return neg(EINVAL)
+    }
+    tree.truncate(rf(n), len)
+}
+
+/// px27: `fsync(fd)` and `fdatasync(fd)`: 0 for a file or a directory
+/// (the tree is memory: what was written is as kept as it will ever
+/// be), -EBADF for a closed descriptor, -EINVAL for what cannot be
+/// synchronised (a pipe, a socket, the console: `fsync(2)`).
+pub fn fsync(a: u64, fd: u64) -> u64 {
+    let k = kind(a, fd)
+    if k == K_CLOSED {
+        return neg(EBADF)
+    }
+    if k == K_FILE || k == K_DIR {
+        return 0
+    }
+    neg(EINVAL)
 }
 
 /// `ioctl(fd, request, arg)`: -EBADF for a closed descriptor; on the
@@ -1711,52 +2121,109 @@ pub fn ioctl(a: u64, pml4: u64, fd: u64, req: u64, arg: u64) -> u64 {
 /// path's length as copied into pax_kbuf[0..]) or (0, -errno, 0). A
 /// regular file with an execute bit; a directory, a device or a file
 /// with no execute bit is -EACCES (execve(2)); a missing one -ENOENT.
+/// px27: the file must still be the archive's own bytes, whole (the
+/// loader reads one contiguous image): a program written or copied
+/// since boot is refused by name, -EACCES.
 pub fn exec_lookup(a: u64, pml4: u64, va: u64) -> (u64, u64, u64) {
     let n = resolve(a, pml4, AT_FDCWD, va, false)
     if is_err(n) {
         return (0, neg(rf(n)), 0)
     }
-    if ty(n) != T_ENTRY || !initramfs.is_file(rf(n)) {
+    if ty(n) != T_INO || tree.is_dir(rf(n)) {
         return (0, neg(EACCES), 0)
     }
-    if initramfs.mode(rf(n)) & 0x49 == 0 { // 0o111
+    if tree.mode(rf(n)) & 0x49 == 0 { // 0o111
+        return (0, neg(EACCES), 0)
+    }
+    let e = tree.archive_entry(rf(n))
+    if e == initramfs.END {
+        refuse(a, R_EXEC)
         return (0, neg(EACCES), 0)
     }
     var l: u64 = 0
     while l < PATH_MAX && kb(l) != 0 {
         l += 1
     }
-    (rf(n), 0, l)
+    (e, 0, l)
 }
 
 /// The working directory's node (px17): the area's word, 0 the root.
 fn cwd(a: u64) -> u64 {
     let c = get(a, A_CWD)
     if c == 0 {
-        return T_ROOT << T_SHIFT
+        return root_node()
     }
     c
 }
 
+/// The working directory becomes node `n`; px27: the process holds the
+/// inode (a directory removed under it lives on, empty, until it
+/// leaves) and lets go of the one it had.
+fn set_cwd(a: u64, n: u64) {
+    if ty(n) == T_INO {
+        tree.hold(rf(n))
+    }
+    let old = get(a, A_CWD)
+    put(a, A_CWD, n)
+    if ty(old) == T_INO {
+        tree.release(rf(old))
+    }
+}
+
 /// `getcwd(buf, size)` (px17: the process's working directory; "/" until
 /// a `chdir`): the path and a NUL at `buf`, the length with the NUL;
-/// -ERANGE when `size` is smaller.
+/// -ERANGE when `size` is smaller. px27: the path is found by walking up
+/// (each directory knows its parent, and the parent the name it gives
+/// it), so a directory that was moved answers where it is now; one
+/// that was removed is -ENOENT (`getcwd(3)`).
 pub fn getcwd(a: u64, pml4: u64, buf: u64, size: u64) -> u64 {
-    let l = put_prefix(cwd(a)) // the name without its leading '/', at NORM
-    if size < l + 2 {
+    let c = cwd(a)
+    var at = KBUF_END // the path is built backwards in pax_kbuf's second half
+    if ty(c) == T_DEV {
+        at -= 4
+        put_kb(at, 47)
+        put_kb(at + 1, 100)
+        put_kb(at + 2, 101)
+        put_kb(at + 3, 118)
+    } else {
+        var d = rf(c)
+        if tree.nlink(d) == 0 {
+            return neg(ENOENT)
+        }
+        while d != tree.ROOT {
+            let p = tree.parent(d)
+            let (na, nl) = tree.name_of(p, d)
+            if na == 0 || at < NORM + nl + 1 {
+                return neg(ENOENT)
+            }
+            at -= nl
+            var k: u64 = 0
+            while k < nl {
+                // # Safety: a byte of a directory record's name (kernel/tree's `name_of`).
+                put_kb(at + k, unsafe { ((na + k) as *u8).read_volatile() as u64 })
+                k += 1
+            }
+            at -= 1
+            put_kb(at, 47)
+            d = p
+        }
+        if at == KBUF_END {
+            at -= 1
+            put_kb(at, 47)
+        }
+    }
+    let l = KBUF_END - at
+    if size < l + 1 {
         return neg(ERANGE)
     }
-    if !uaccess.writable(pml4, buf, l + 2) {
+    if !uaccess.copy_out(pml4, buf, raw() + at, l) {
         return neg(EFAULT)
     }
-    uaccess.put(pml4, buf, 47, 1)
-    var i: u64 = 0
-    while i < l {
-        uaccess.put(pml4, buf + 1 + i, kb(NORM + i), 1)
-        i += 1
+    if !uaccess.writable(pml4, buf + l, 1) {
+        return neg(EFAULT)
     }
-    uaccess.put(pml4, buf + 1 + l, 0, 1)
-    l + 2
+    uaccess.put(pml4, buf + l, 0, 1)
+    l + 1
 }
 
 /// px17: `chdir(path)`: the working directory becomes the directory the
@@ -1769,7 +2236,7 @@ pub fn chdir(a: u64, pml4: u64, va: u64) -> u64 {
     if !is_dir_node(n) {
         return neg(ENOTDIR)
     }
-    put(a, A_CWD, n)
+    set_cwd(a, n)
     0
 }
 
@@ -1783,7 +2250,7 @@ pub fn fchdir(a: u64, fd: u64) -> u64 {
     if !is_dir_node(n) {
         return neg(ENOTDIR)
     }
-    put(a, A_CWD, n)
+    set_cwd(a, n)
     0
 }
 
@@ -1801,36 +2268,31 @@ pub fn set_exe(a: u64, e: u64) {
 /// boreutils' `readlink` prints it): at most `size` bytes, no NUL, the
 /// count answered, a longer path cut silently (`readlink(2)`). There is
 /// no `/proc` directory beside it: every other path under it is
-/// -ENOENT. Anything else that exists is not a link: -EINVAL.
+/// -ENOENT. Anything else that exists is not a link: -EINVAL. (px27:
+/// the text is the path the program was loaded by; a program renamed
+/// since still answers that.)
 pub fn readlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, buf: u64, size: u64) -> u64 {
-    let rl = path_in(pml4, va)
-    if is_err(rl) {
-        return neg(rf(rl))
-    }
-    if rl != 0 && kb(0) == 47 {
-        let l = canon(rl, T_ROOT << T_SHIFT)
-        if !is_err(l) && norm_is(l, "proc/self/exe") {
-            let x = get(a, A_EXE)
-            if x == 0 {
-                return neg(ENOENT)
-            }
-            if size == 0 || size >= 0x80000000 {
-                return neg(EINVAL)
-            }
-            let e = x - 1
-            let nl = initramfs.name_length(e) + 1
-            let k = if nl < size { nl } else { size }
-            if !uaccess.writable(pml4, buf, k) {
-                return neg(EFAULT)
-            }
-            uaccess.put(pml4, buf, 47, 1)
-            var i: u64 = 1
-            while i < k {
-                uaccess.put(pml4, buf + i, initramfs.name_byte(e, i - 1), 1)
-                i += 1
-            }
-            return k
+    if is_proc_exe(pml4, va) {
+        let x = get(a, A_EXE)
+        if x == 0 {
+            return neg(ENOENT)
         }
+        if size == 0 || size >= 0x80000000 {
+            return neg(EINVAL)
+        }
+        let e = x - 1
+        let nl = initramfs.name_length(e) + 1
+        let k = if nl < size { nl } else { size }
+        if !uaccess.writable(pml4, buf, k) {
+            return neg(EFAULT)
+        }
+        uaccess.put(pml4, buf, 47, 1)
+        var i: u64 = 1
+        while i < k {
+            uaccess.put(pml4, buf + i, initramfs.name_byte(e, i - 1), 1)
+            i += 1
+        }
+        return k
     }
     let n = resolve(a, pml4, dirfd, va, false)
     if is_err(n) {
@@ -1839,12 +2301,163 @@ pub fn readlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, buf: u64, size: u64) -
     neg(EINVAL)
 }
 
+// --- making, removing and renaming (px27) ----------------------------------------
+
+/// `mkdirat(dirfd, path, mode)` (and `mkdir`, with AT_FDCWD): a new,
+/// empty directory, its permission bits `mode & ~umask & 0777`. -EEXIST
+/// for a name that leads anywhere (a file, a directory, `.`, `/`,
+/// `/dev`), -ENOENT for a missing directory on the way or one that has
+/// been removed, -ENOTDIR for a file on the way, -ENOSPC; in `/dev`
+/// refused by name, -EROFS.
+pub fn mkdirat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64) -> u64 {
+    let (n, par, ns, nl, _trail) = walk(a, pml4, dirfd, va, false)
+    if !is_err(n) {
+        return neg(EEXIST)
+    }
+    if rf(n) != ENOENT || is_err(par) {
+        return neg(rf(n))
+    }
+    if ty(par) != T_INO {
+        refuse(a, R_DEVRO)
+        return neg(EROFS)
+    }
+    let i = tree.mkdir(rf(par), raw() + ns, nl, mode & !mask_of(a) & 0x1ff)
+    if tree.failed(i) {
+        return i
+    }
+    0
+}
+
+/// `unlinkat(dirfd, path, flags)` (and `unlink`, `rmdir`): flags 0
+/// removes a file's name — the file lives on while a descriptor holds
+/// it, and its frames go back at the last close — and is -EISDIR for a
+/// directory (Linux's answer; POSIX says EPERM); AT_REMOVEDIR removes
+/// an empty directory: -ENOTDIR for a file, -ENOTEMPTY for one with an
+/// entry (and for `..`), -EINVAL for `.`, -EBUSY for `/` and for `/dev`.
+/// A directory that is some process's working directory is removed
+/// like any other. Any other flag is refused by name, -EINVAL; a name
+/// in `/dev` -EROFS.
+pub fn unlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64) -> u64 {
+    if flags & !AT_REMOVEDIR != 0 {
+        refuse(a, R_ATFLAG)
+        return neg(EINVAL)
+    }
+    let (n, par, ns, nl, _trail) = walk(a, pml4, dirfd, va, false)
+    if is_err(n) {
+        return neg(rf(n))
+    }
+    if flags & AT_REMOVEDIR != 0 {
+        if !is_dir_node(n) {
+            return neg(ENOTDIR)
+        }
+        if nl == 0 {
+            if ns == LAST_DOT {
+                return neg(EINVAL)
+            }
+            if ns == LAST_DOTDOT {
+                return neg(ENOTEMPTY)
+            }
+            return neg(EBUSY)
+        }
+        if ty(n) == T_DEV {
+            return neg(EBUSY)
+        }
+        return tree.rmdir(rf(par), raw() + ns, nl)
+    }
+    if is_dir_node(n) {
+        return neg(EISDIR)
+    }
+    if ty(n) != T_INO || ty(par) != T_INO {
+        refuse(a, R_DEVRO)
+        return neg(EROFS)
+    }
+    tree.unlink(rf(par), raw() + ns, nl)
+}
+
+/// `renameat2(olddirfd, old, newdirfd, new, flags)` (and `rename`,
+/// `renameat`): the old name becomes the new one, replacing what the
+/// new one led to, all or nothing (kernel/tree's `rename`). -ENOENT for
+/// a missing old name or a missing directory on the new one's way;
+/// -EBUSY when either is `.`, `..`, `/` or `/dev`; -EXDEV when one is in
+/// `/dev` and the other is not; -ENOTDIR for a trailing `/` on what is
+/// no directory, and for a file moved to a missing name with one
+/// (measured: `mv f nodir/`); -EISDIR, -ENOTEMPTY, -EINVAL (a directory
+/// into itself) as `rename(2)`. A flag is refused by name, -EINVAL.
+pub fn renameat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, flags: u64) -> u64 {
+    if flags != 0 {
+        refuse(a, R_RENFLAG)
+        return neg(EINVAL)
+    }
+    let (on, op, os, ol, _ot) = walk(a, pml4, odfd, ova, false)
+    if is_err(on) {
+        return neg(rf(on))
+    }
+    if ol == 0 || ty(on) == T_DEV {
+        return neg(EBUSY)
+    }
+    // The old name is kept in pax_kbuf's second half while the new
+    // path is walked in its first.
+    var k: u64 = 0
+    while k < ol {
+        put_kb(NORM + k, kb(os + k))
+        k += 1
+    }
+    let (nn, np, ns, nl, nt) = walk(a, pml4, ndfd, nva, false)
+    if is_err(nn) && (rf(nn) != ENOENT || is_err(np)) {
+        return neg(rf(nn))
+    }
+    if nl == 0 || ty(nn) == T_DEV {
+        return neg(EBUSY)
+    }
+    if ty(on) != T_INO || ty(op) != T_INO || ty(np) != T_INO {
+        return neg(EXDEV)
+    }
+    if is_err(nn) && nt && !tree.is_dir(rf(on)) {
+        return neg(ENOTDIR)
+    }
+    tree.rename(rf(op), raw() + NORM, ol, rf(np), raw() + ns, nl)
+}
+
+/// px27: `faccessat(dirfd, path, mode)` (and `access`; `faccessat2`
+/// with flags 0 or AT_EACCESS): every process is root, so what exists
+/// may be read and written (0), and may be executed unless it is a
+/// file with no execute bit at all (-EACCES, as root is answered on
+/// Linux); -EINVAL for a mode outside R_OK|W_OK|X_OK or another flag;
+/// the path's own errors.
+pub fn faccessat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64, flags: u64) -> u64 {
+    if mode & !7 != 0 || flags & !AT_EACCESS != 0 {
+        return neg(EINVAL)
+    }
+    let n = resolve(a, pml4, dirfd, va, false)
+    if is_err(n) {
+        return neg(rf(n))
+    }
+    if mode & 1 != 0 && ty(n) == T_INO && !tree.is_dir(rf(n)) && tree.mode(rf(n)) & 0x49 == 0 {
+        return neg(EACCES)
+    }
+    0
+}
+
+/// px27: the calls the tree refuses by name, each with the errno Linux
+/// gives a file system that cannot do it: `which` 0 a hard link, a
+/// symbolic link or a device node (-EPERM: `link(2)`, `symlink(2)`,
+/// `mknod(2)`), 1 a change of mode, owner or times (-EOPNOTSUPP). No
+/// strace of a program in an image asks any of them.
+pub fn refused(a: u64, which: u64) -> u64 {
+    if which == 0 {
+        refuse(a, R_LINK)
+        return neg(EPERM)
+    }
+    refuse(a, R_META)
+    neg(EOPNOTSUPP)
+}
+
 // --- stat -------------------------------------------------------------------
 
 fn n_mode(n: u64) -> u64 {
     let t = ty(n)
-    if t == T_ENTRY {
-        return initramfs.mode(rf(n))
+    if t == T_INO {
+        return tree.mode(rf(n))
     }
     if t == T_CONSOLE || t == T_STD {
         return MODE_CONSOLE
@@ -1862,22 +2475,19 @@ fn n_mode(n: u64) -> u64 {
 }
 
 fn n_size(n: u64) -> u64 {
-    if ty(n) == T_ENTRY && initramfs.is_file(rf(n)) {
-        return initramfs.size(rf(n))
+    if ty(n) == T_INO {
+        return tree.size(rf(n))
     }
     0
 }
 
 fn n_ino(n: u64) -> u64 {
     let t = ty(n)
-    if t == T_ENTRY {
-        return initramfs.ino(rf(n)) + 16
-    }
-    if t == T_ROOT {
-        return 1
+    if t == T_INO {
+        return rf(n) + 2 // px27: the root is 2; never 0
     }
     if t == T_DEV {
-        return 2
+        return 1
     }
     if t == T_NULL {
         return 4
@@ -1899,10 +2509,10 @@ fn n_ino(n: u64) -> u64 {
 
 fn n_nlink(n: u64) -> u64 {
     let t = ty(n)
-    if t == T_ENTRY {
-        return initramfs.nlink(rf(n))
+    if t == T_INO {
+        return tree.nlink(rf(n))
     }
-    if t == T_ROOT || t == T_DEV {
+    if t == T_DEV {
         return 2
     }
     1
@@ -1926,19 +2536,47 @@ fn n_rdev(n: u64, which: int) -> u64 {
     0
 }
 
+/// The minor number of the device a node's file system is (the major
+/// is 0): 1 for the tree and what has no place in it (a pipe, a
+/// socket), 5 for `/dev` and what is in it (px27: a second file
+/// system, so a `rename` across is -EXDEV and `/` and `/dev` never
+/// look alike).
+fn n_dev(n: u64) -> u64 {
+    let t = ty(n)
+    if t == T_DEV || t == T_NULL || t == T_STD || t == T_CONSOLE {
+        return 5
+    }
+    1
+}
+
 /// glibc's dev_t encoding of (major, minor): minor's low byte, major's
 /// twelve bits from bit 8, minor's rest from bit 20.
 fn dev_t(ma: u64, mi: u64) -> u64 {
     (mi & 0xff) | ((ma & 0xfff) << 8) | ((mi & 0xffffff00) << 12)
 }
 
-/// A file's 512-byte blocks: whole 4096-byte pages (px26), what
-/// Linux's file systems answer for a file kept in pages (measured on
-/// tmpfs, ext4 and btrfs: 8 for a 77-byte file), and what `ls -l`'s
-/// `total` line adds up. px12 answered the size in 512s, rounded up.
-fn blocks(size: u64) -> u64 {
-    (size + PAGE - 1) / PAGE * 8
+/// A node's 512-byte blocks (px26: whole 4096-byte pages, what Linux's
+/// file systems answer; px27: eight for each page of a file that holds
+/// bytes, kernel/tree's `blocks`, so a hole counts nothing, as on
+/// tmpfs).
+fn n_blocks(n: u64) -> u64 {
+    if ty(n) == T_INO {
+        return tree.blocks(rf(n))
+    }
+    0
 }
+
+/// A node's time `which` (0 access, 1 modification, 2 change, 3 birth)
+/// in nanoseconds since the epoch: the inode's (px27), 0 for what is
+/// no inode.
+fn n_time(n: u64, which: int) -> u64 {
+    if ty(n) == T_INO {
+        return tree.time(rf(n), which)
+    }
+    0
+}
+
+const NS: u64 = 1000000000
 
 /// Write `struct stat` (x86-64, 144 bytes) for node `n` at user `st`.
 fn put_stat(pml4: u64, st: u64, n: u64) -> u64 {
@@ -1946,15 +2584,20 @@ fn put_stat(pml4: u64, st: u64, n: u64) -> u64 {
         return neg(EFAULT)
     }
     uaccess.zero(pml4, st, 144)
-    let size = n_size(n)
-    uaccess.put(pml4, st, dev_t(0, 1), 8) // st_dev
+    uaccess.put(pml4, st, dev_t(0, n_dev(n)), 8) // st_dev
     uaccess.put(pml4, st + 8, n_ino(n), 8) // st_ino
     uaccess.put(pml4, st + 16, n_nlink(n), 8) // st_nlink
     uaccess.put(pml4, st + 24, n_mode(n), 4) // st_mode
     uaccess.put(pml4, st + 40, dev_t(n_rdev(n, 0), n_rdev(n, 1)), 8) // st_rdev
-    uaccess.put(pml4, st + 48, size, 8) // st_size
+    uaccess.put(pml4, st + 48, n_size(n), 8) // st_size
     uaccess.put(pml4, st + 56, PAGE, 8) // st_blksize
-    uaccess.put(pml4, st + 64, blocks(size), 8) // st_blocks
+    uaccess.put(pml4, st + 64, n_blocks(n), 8) // st_blocks
+    uaccess.put(pml4, st + 72, n_time(n, 0) / NS, 8) // st_atim
+    uaccess.put(pml4, st + 80, n_time(n, 0) % NS, 8)
+    uaccess.put(pml4, st + 88, n_time(n, 1) / NS, 8) // st_mtim
+    uaccess.put(pml4, st + 96, n_time(n, 1) % NS, 8)
+    uaccess.put(pml4, st + 104, n_time(n, 2) / NS, 8) // st_ctim
+    uaccess.put(pml4, st + 112, n_time(n, 2) % NS, 8)
     0
 }
 
@@ -1964,17 +2607,25 @@ fn put_statx(pml4: u64, sx: u64, n: u64) -> u64 {
         return neg(EFAULT)
     }
     uaccess.zero(pml4, sx, 256)
-    let size = n_size(n)
-    uaccess.put(pml4, sx, 0x7ff, 4) // stx_mask: STATX_BASIC_STATS
+    // stx_mask: STATX_BASIC_STATS, and STATX_BTIME for an inode (px27).
+    uaccess.put(pml4, sx, if ty(n) == T_INO { 0xfff } else { 0x7ff }, 4)
     uaccess.put(pml4, sx + 4, PAGE, 4) // stx_blksize
     uaccess.put(pml4, sx + 16, n_nlink(n), 4) // stx_nlink
     uaccess.put(pml4, sx + 28, n_mode(n), 2) // stx_mode
     uaccess.put(pml4, sx + 32, n_ino(n), 8) // stx_ino
-    uaccess.put(pml4, sx + 40, size, 8) // stx_size
-    uaccess.put(pml4, sx + 48, blocks(size), 8) // stx_blocks
+    uaccess.put(pml4, sx + 40, n_size(n), 8) // stx_size
+    uaccess.put(pml4, sx + 48, n_blocks(n), 8) // stx_blocks
+    uaccess.put(pml4, sx + 64, n_time(n, 0) / NS, 8) // stx_atime
+    uaccess.put(pml4, sx + 72, n_time(n, 0) % NS, 4)
+    uaccess.put(pml4, sx + 80, n_time(n, 3) / NS, 8) // stx_btime
+    uaccess.put(pml4, sx + 88, n_time(n, 3) % NS, 4)
+    uaccess.put(pml4, sx + 96, n_time(n, 2) / NS, 8) // stx_ctime
+    uaccess.put(pml4, sx + 104, n_time(n, 2) % NS, 4)
+    uaccess.put(pml4, sx + 112, n_time(n, 1) / NS, 8) // stx_mtime
+    uaccess.put(pml4, sx + 120, n_time(n, 1) % NS, 4)
     uaccess.put(pml4, sx + 128, n_rdev(n, 0), 4) // stx_rdev_major
     uaccess.put(pml4, sx + 132, n_rdev(n, 1), 4) // stx_rdev_minor
-    uaccess.put(pml4, sx + 140, 1, 4) // stx_dev_minor (0:1)
+    uaccess.put(pml4, sx + 140, n_dev(n), 4) // stx_dev_minor (0:1, /dev 0:5)
     0
 }
 
@@ -2010,72 +2661,45 @@ pub fn statx(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, sx: u64) -> u64
 
 // --- directories --------------------------------------------------------------
 
-/// Whether entry `e` is a child of directory node `d`: its name is d's,
-/// a '/', and one more component (the root's children have no '/').
-fn child_of(e: u64, d: u64) -> bool {
-    let l = initramfs.name_length(e)
-    var start: u64 = 0
-    if ty(d) == T_ENTRY {
-        let p = rf(d)
-        let pl = initramfs.name_length(p)
-        if l <= pl + 1 || initramfs.name_byte(e, pl) != 47 {
-            return false
-        }
-        var i: u64 = 0
-        while i < pl {
-            if initramfs.name_byte(e, i) != initramfs.name_byte(p, i) {
-                return false
-            }
-            i += 1
-        }
-        start = pl + 1
-    } else if ty(d) != T_ROOT {
-        return false
+/// `/dev`'s child number `k` (after "." and ".."): a node, or an error
+/// node past the last.
+fn dev_child(k: u64) -> u64 {
+    if k < 3 {
+        return (T_STD << T_SHIFT) | k
     }
-    var i = start
-    while i < l {
-        if initramfs.name_byte(e, i) == 47 {
-            return false
-        }
-        i += 1
+    if k == 3 {
+        return T_NULL << T_SHIFT
     }
-    l > start
-}
-
-/// Directory node `d`'s child number `k` (after "." and ".."): a node,
-/// or an error node past the last.
-fn child(d: u64, k: u64) -> u64 {
-    if ty(d) == T_DEV {
-        if k < 3 {
-            return (T_STD << T_SHIFT) | k
-        }
-        if k == 3 {
-            return T_NULL << T_SHIFT
-        }
-        if k == 4 || k == 5 {
-            return (T_CONSOLE << T_SHIFT) | (k - 3) // px21a: tty0, console
-        }
-        return err(ENOENT)
-    }
-    var i: u64 = 0
-    var e = initramfs.first() else initramfs.END
-    while e != initramfs.END {
-        if child_of(e, d) {
-            if i == k {
-                return entry_node(e)
-            }
-            i += 1
-        }
-        e = initramfs.next(e) else initramfs.END
-    }
-    if ty(d) == T_ROOT && k == i {
-        return T_DEV << T_SHIFT
+    if k == 4 || k == 5 {
+        return (T_CONSOLE << T_SHIFT) | (k - 3) // px21a: tty0, console
     }
     err(ENOENT)
 }
 
-/// The length of child node `c`'s name within directory `d`.
-fn child_name_len(d: u64, c: u64) -> u64 {
+/// The name of a node that is not an inode: `/dev` itself and what is
+/// in it.
+fn fixed_name(c: u64) -> str {
+    let t = ty(c)
+    if t == T_DEV {
+        return "dev"
+    }
+    if t == T_NULL {
+        return "null"
+    }
+    if t == T_CONSOLE {
+        return if rf(c) == TTY0 { "tty0" } else { "console" }
+    }
+    if rf(c) == 0 {
+        return "stdin"
+    }
+    if rf(c) == 1 {
+        return "stdout"
+    }
+    "stderr"
+}
+
+/// The length of `fixed_name(c)`.
+fn fixed_len(c: u64) -> u64 {
     let t = ty(c)
     if t == T_DEV {
         return 3
@@ -2086,68 +2710,34 @@ fn child_name_len(d: u64, c: u64) -> u64 {
     if t == T_CONSOLE {
         return if rf(c) == TTY0 { 4 } else { 7 }
     }
-    if t == T_STD {
-        return if rf(c) == 0 { 5 } else { 6 }
+    if rf(c) == 0 {
+        return 5
     }
-    let skip = if ty(d) == T_ENTRY { initramfs.name_length(rf(d)) + 1 } else { 0 }
-    initramfs.name_length(rf(c)) - skip
-}
-
-fn std_name(k: u64) -> str {
-    if k == 0 {
-        return "stdin"
-    }
-    if k == 1 {
-        return "stdout"
-    }
-    "stderr"
-}
-
-/// Write child `c`'s name (no NUL) at user `va`.
-fn put_child_name(pml4: u64, va: u64, d: u64, c: u64) {
-    let t = ty(c)
-    var s = ""
-    if t == T_DEV {
-        s = "dev"
-    } else if t == T_NULL {
-        s = "null"
-    } else if t == T_CONSOLE {
-        s = if rf(c) == TTY0 { "tty0" } else { "console" }
-    } else if t == T_STD {
-        s = std_name(rf(c))
-    } else {
-        let skip = if ty(d) == T_ENTRY { initramfs.name_length(rf(d)) + 1 } else { 0 }
-        let e = rf(c)
-        let l = initramfs.name_length(e)
-        var i = skip
-        while i < l {
-            uaccess.put(pml4, va + i - skip, initramfs.name_byte(e, i), 1)
-            i += 1
-        }
-        return
-    }
-    var k: u64 = 0
-    for b in s.bytes() {
-        uaccess.put(pml4, va + k, b as int as u64, 1)
-        k += 1
-    }
+    6
 }
 
 fn d_type(c: u64) -> u64 {
     if is_dir_node(c) {
         return DT_DIR
     }
-    let t = ty(c)
-    if t == T_ENTRY {
+    if ty(c) == T_INO {
         return DT_REG
     }
     DT_CHR
 }
 
+/// The position in the root past its last entry and past `dev`.
+const DEV_DONE: u64 = 0x4000000000000000
+
 /// `getdents64(fd, buf, count)`: as many `struct linux_dirent64` as fit
 /// (d_ino, d_off the next position, d_reclen a multiple of 8, d_type,
-/// the name and its NUL), "." and ".." first, then the children in the
-/// archive's order; 0 at the end; -EINVAL when not even one fits.
+/// the name and its NUL), "." and ".." first; 0 at the end; -EINVAL
+/// when not even one fits. px27: a directory of the tree lists its
+/// records in their order (a position is 2 plus a record's offset, so
+/// an entry that is there for the whole of a reading is returned
+/// exactly once whatever is made or removed meanwhile), and the root
+/// lists `dev` after them; a directory that has been removed is
+/// -ENOENT (measured).
 pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
     let k = kind(a, fd)
     if k == K_CLOSED {
@@ -2160,21 +2750,42 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
         return neg(EFAULT)
     }
     let d = node_of(a, fd)
+    if ty(d) == T_INO && tree.nlink(rf(d)) == 0 {
+        return neg(ENOENT)
+    }
     var p = pos(a, fd)
     var used: u64 = 0
     var more = true
     while more {
         var c = d
         var nl: u64 = 1
+        var na: u64 = 0 // an inode's name, in a directory record
+        var next = p + 1
         if p == 1 {
-            c = T_ROOT << T_SHIFT
+            c = up(d)
             nl = 2
-        } else if p >= 2 {
-            c = child(d, p - 2)
+        } else if p >= 2 && ty(d) == T_DEV {
+            c = dev_child(p - 2)
             if is_err(c) {
                 more = false
             } else {
-                nl = child_name_len(d, c)
+                nl = fixed_len(c)
+            }
+        } else if p >= DEV_DONE {
+            more = false
+        } else if p >= 2 {
+            let (i, addr, l, nx) = tree.entry_at(rf(d), p - 2)
+            if i != tree.NONE {
+                c = ino_node(i)
+                na = addr
+                nl = l
+                next = nx + 2
+            } else if rf(d) == tree.ROOT {
+                c = T_DEV << T_SHIFT
+                nl = 3
+                next = DEV_DONE
+            } else {
+                more = false
             }
         }
         if more {
@@ -2188,7 +2799,7 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
                 let r = buf + used
                 uaccess.zero(pml4, r, rec)
                 uaccess.put(pml4, r, n_ino(c), 8)
-                uaccess.put(pml4, r + 8, p + 1, 8)
+                uaccess.put(pml4, r + 8, next, 8)
                 uaccess.put(pml4, r + 16, rec, 2)
                 uaccess.put(pml4, r + 18, d_type(c), 1)
                 if p == 0 {
@@ -2196,11 +2807,17 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
                 } else if p == 1 {
                     uaccess.put(pml4, r + 19, 46, 1)
                     uaccess.put(pml4, r + 20, 46, 1)
+                } else if na != 0 {
+                    let _ok = uaccess.copy_out(pml4, r + 19, na, nl)
                 } else {
-                    put_child_name(pml4, r + 19, d, c)
+                    var j: u64 = 0
+                    for b in fixed_name(c).bytes() {
+                        uaccess.put(pml4, r + 19 + j, b as int as u64, 1)
+                        j += 1
+                    }
                 }
                 used += rec
-                p += 1
+                p = next
             }
         }
     }
