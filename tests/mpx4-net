@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# tests/mpx4-net — PAX on the network (px20, px21; toward M-PX4): the
+# tests/mpx4-net — PAX on the network (px20, px21; toward M-PX4; px22's
+# UDP and sockets are tests/mpx4-udp's): the
 # kernel finds QEMU's virtio network device on the PCI bus (kernel/pci),
 # drives it through the virtio 1.x interface (kernel/virtio,
 # kernel/net), resolves addresses through an ARP cache (kernel/arp),
@@ -67,15 +68,18 @@
 #   N6 soak (net, modern): `soak: 10000 echo requests, 10000 replies …`
 #      to the gateway, and the books the same before and after it: the
 #      frame allocator's free count, the heap's pages and live blocks,
-#      the driver's 66 frames, the protocols' 11.
+#      the driver's 66 frames, the protocols' 12 (px22: kernel/udp's
+#      one more).
 #   N7 bursts (net, modern): 20000 frames of 60 bytes and 5000 of 1514
 #      sent, `64 of 64 buffers back` after each.
 #   N8 counters (net, modern, peer): the kernel's counters are the
-#      capture's, one by one (tools/pcap-net --serial: 52 values), and
-#      for net and modern: one ARP request answered, 6 + 10000 echo
-#      requests sent and as many replies matched, nothing dropped but
-#      this script's own datagrams (protocol 17, which nothing speaks:
-#      at least one, and a destination unreachable for the first).
+#      capture's, one by one (tools/pcap-net --serial: 66 values since
+#      px22's), and for net and modern: one ARP request answered, 6 +
+#      10000 echo requests sent and as many replies matched, nothing
+#      dropped but this script's own datagrams (px22: UDP for port 7,
+#      which no socket holds in this kernel: kernel/udp's `no-port`, at
+#      least one, and a port unreachable for the first; no datagram of
+#      a protocol nothing speaks).
 #   N9 halted (net, modern, peer): the log ends `halt`, no PANIC, and
 #      tools/qemu-halt holds the machine to RIP in pax_halt, IF clear,
 #      HLT=1.
@@ -105,7 +109,10 @@
 #      the same before and after.
 #   P4 (peer) every drop by its name, exactly: kernel/ip's 2 short, 1
 #      version, 1 ihl, 1 checksum, 2 length, 1 ttl, 2 fragment, 7
-#      source, 3 option, 2 source-route, 2 other, 9 protocol;
+#      source, 3 option, 2 source-route, 2 other, 2 protocol (253 and
+#      6; px22: B7's seven UDP datagrams are kernel/udp's now, 7
+#      `no-port`, of which 1 drew a port unreachable, 4 were held back
+#      and 2 were never due);
 #      kernel/icmp's 1 short, 1 checksum, 2 broadcast, 2 type, 2 stray;
 #      2 destination unreachables sent, 5 limited, 2 silent; ARP's 6
 #      bad, 1 conflict, 2 pushed out, 1 unresolved; 1 datagram refused
@@ -282,7 +289,7 @@ halted() { # assertion label status
 }
 
 HEX='0x[0-9a-f]{16}'
-BOOKS='frames free ([0-9]+), heap pages ([0-9]+), live blocks ([0-9]+), net frames 66, stack frames 11'
+BOOKS='frames free ([0-9]+), heap pages ([0-9]+), live blocks ([0-9]+), net frames 66, stack frames 12'
 
 # N1, N2 for the boot whose log is $log: the census (when the command
 # line asked for it) and the device up.
@@ -415,13 +422,16 @@ with_gateway() { # tier leg way device-id
     fi
     # --- N8: the counters -----------------------------------------------
     local proto unr
-    proto=$(grab "$log" 'ip: rx [0-9]* datagrams delivered (0 with options, 0 broadcast), dropped 0 short 0 version 0 ihl 0 checksum 0 length 0 ttl 0 fragment 0 source 0 option 0 source-route 0 other \([0-9]*\) protocol')
-    unr=$(grab "$log" 'icmp: unreachable \([0-9]*\) sent, [0-9]* limited, 0 silent; 0 not sent')
+    # px22: this script's datagrams are UDP for a port no socket holds.
+    proto=$(grab "$log" 'udp: rx 0 datagrams queued (0 without a checksum), dropped 0 short 0 length 0 checksum 0 port-zero \([0-9]*\) no-port 0 full')
+    unr=$(grab "$log" 'udp: unreachable \([0-9]*\) sent, [0-9]* limited, 0 silent; 0 not sent')
     if [ "$agree" = 1 ] && [ -n "$proto" ] && [ "$proto" -ge 1 ] && [ -n "$unr" ] && [ "$unr" -ge 1 ] \
+        && has "$log" 'ip: rx [0-9]+ datagrams delivered \(0 with options, 0 broadcast\), dropped 0 short 0 version 0 ihl 0 checksum 0 length 0 ttl 0 fragment 0 source 0 option 0 source-route 0 other 0 protocol' \
+        && has "$log" "icmp: unreachable $unr sent, [0-9]+ limited, 0 silent; 0 not sent" \
         && has "$log" "arp: 0 requests sent, 0 replies received, 1 requests answered \(1 replies sent\), 0 bad, 0 conflict" \
         && has "$log" "icmp: echo 0 requests answered \(0 replies sent\), $((SOAK + 6)) requests sent, $((SOAK + 6)) replies matched, 0 stray; dropped 0 short 0 checksum 0 broadcast 0 type" \
         && has "$log" "net: rx [0-9]+ frames [0-9]+ bytes, dropped 0 runt 0 long 0 other 0 type"; then
-        say "PASS N8 $L: $(grep '^pcap-net: the kernel' "$pcap.counters"); 1 ARP request answered; $((SOAK + 6)) echo requests sent and matched; dropped: $proto datagrams of protocol 17 (this script's), $unr destination unreachable sent; $(line_of "$log" '^net: tx')"
+        say "PASS N8 $L: $(grep '^pcap-net: the kernel' "$pcap.counters"); 1 ARP request answered; $((SOAK + 6)) echo requests sent and matched; dropped: $proto UDP datagrams for a port no socket holds (this script's), $unr port unreachable sent; $(line_of "$log" '^net: tx')"
     else
         bad "N8 $L: agree=$agree protocol='$proto' unreachable='$unr'; $(grep -m1 '^pcap-net: FAIL' "$pcap.counters" 2>/dev/null); $(serial_norm "$log" | grep -m1 '^icmp: echo')"
     fi
@@ -475,7 +485,9 @@ with_peer() { # tier leg
         bad "N8 $L: $(grep -m1 '^pcap-net: FAIL' "$pcap.counters" 2>/dev/null)"
     fi
     ok=1
-    has "$log" 'ip: rx [0-9]+ datagrams delivered \(3 with options, 3 broadcast\), dropped 2 short 1 version 1 ihl 1 checksum 2 length 1 ttl 2 fragment 7 source 3 option 2 source-route 2 other 9 protocol' || ok=0
+    has "$log" 'ip: rx [0-9]+ datagrams delivered \(3 with options, 3 broadcast\), dropped 2 short 1 version 1 ihl 1 checksum 2 length 1 ttl 2 fragment 7 source 3 option 2 source-route 2 other 2 protocol' || ok=0
+    has "$log" 'udp: rx 0 datagrams queued \(7 without a checksum\), dropped 0 short 0 length 0 checksum 0 port-zero 7 no-port 0 full' || ok=0
+    has "$log" 'udp: unreachable 1 sent, 4 limited, 2 silent; 0 not sent' || ok=0
     has "$log" 'ip: tx [0-9]+ datagrams, not sent 1 size 0 dropped' || ok=0
     has "$log" "icmp: echo $((SOAK + 28)) requests answered \($((SOAK + 28)) replies sent\), 14 requests sent, 10 replies matched, 2 stray; dropped 1 short 1 checksum 2 broadcast 2 type" || ok=0
     has "$log" 'icmp: unreachable 2 sent, 5 limited, 2 silent; 0 not sent' || ok=0
@@ -487,9 +499,9 @@ with_peer() { # tier leg
     [ "$entries" -ge 1 ] && [ "$entries" -le 8 ] || ok=0
     serial_norm "$log" | grep -q '^arp: entry [0-9]: 10\.0\.2\.123 ' && ok=0
     if [ "$ok" = 1 ]; then
-        say "PASS P4 $L: $(line_of "$log" '^ip: rx' | sed 's/^.*dropped/ip dropped/'); $(line_of "$log" '^icmp: echo' | sed 's/^.*matched, //'); $(line_of "$log" '^icmp: unreachable'); ARP 6 bad, 1 conflict, 2 pushed out, 1 unresolved; $entries cache entries at the end, none for 10.0.2.123"
+        say "PASS P4 $L: $(line_of "$log" '^ip: rx' | sed 's/^.*dropped/ip dropped/'); $(line_of "$log" '^icmp: echo' | sed 's/^.*matched, //'); $(line_of "$log" '^icmp: unreachable'); $(line_of "$log" '^udp: rx' | sed 's/^.*dropped/udp dropped/'); $(line_of "$log" '^udp: unreachable'); ARP 6 bad, 1 conflict, 2 pushed out, 1 unresolved; $entries cache entries at the end, none for 10.0.2.123"
     else
-        bad "P4 $L: entries=$entries; $(serial_norm "$log" | grep '^ip: \(rx\|tx\)\|^icmp: \|^arp: [0-9]\|^arp: cache\|^net: rx' | paste -sd'|' -)"
+        bad "P4 $L: entries=$entries; $(serial_norm "$log" | grep '^ip: \(rx\|tx\)\|^icmp: \|^udp: \(rx\|unr\)\|^arp: [0-9]\|^arp: cache\|^net: rx' | paste -sd'|' -)"
     fi
     halted N9 "$L" "$hrc"
 }
