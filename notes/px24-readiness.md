@@ -583,8 +583,8 @@ Measured means this lane ran it and read the result.
   - hasu, QEMU 11.1.0, **KVM** (images built on kasumi; the combined
     `OVMF.fd`, since the split pair hangs under KVM there, px00): at the
     rebased head's images 12 boots in one round, all `accel=kvm`, 100
-    PASS, 0 FAIL, 0 SKIP (`hasu/hasu-kvm-round-1.out`, `…runs.txt`), and
-    a second round HASU2; before the rebase, at `908050d`'s images, 12
+    PASS, 0 FAIL, 0 SKIP (`hasu/hasu-kvm-round-1.out`, `hasu/hasu-kvm-round-1.runs.txt`, `hasu/hasu-kvm.log`), and
+    a second round whose count is in the PR (it ran past this note); before the rebase, at `908050d`'s images, 12
     more, all kvm, 100 PASS (`hasu/hasu-round-1-908050d.runs.txt`; its
     output file was overwritten by a later round, the PASS count was read
     from the round's log line before that). The first rounds, with
