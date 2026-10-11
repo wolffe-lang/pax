@@ -1,0 +1,543 @@
+//! socket — the socket system calls for AF_INET datagram sockets (px22).
+//!
+//! What a static Linux program's UDP calls reach: `socket` (41),
+//! `connect` (42), `accept` (43), `sendto` (44), `recvfrom` (45),
+//! `bind` (49), `listen` (50), `getsockname` (51), `getpeername` (52),
+//! `setsockopt` (54), `getsockopt` (55), `accept4` (288), and `read`
+//! and `write` on a socket. glibc 2.39's `send` and `recv` are `sendto`
+//! and `recvfrom` with no address; nothing the witnesses link calls
+//! `sendmsg`, `recvmsg` or `shutdown`, which stay -ENOSYS.
+//!
+//! **A socket descriptor** is a descriptor of kernel/files whose open
+//! file names one of kernel/udp's sockets: `dup` and a child's copy of
+//! the table share the open file and so the socket, its port and its
+//! queue; `O_NONBLOCK` is the open file's and `FD_CLOEXEC` the
+//! descriptor's; the last close of the open file frees the socket
+//! (kernel/files calls `udp.close`). `fstat` answers S_IFSOCK|0777,
+//! `lseek` -ESPIPE, `ioctl` -ENOTTY.
+//!
+//! **An address** is a `struct sockaddr_in` (uapi `linux/in.h`), 16
+//! bytes: the family (2, AF_INET) as the host's 16 bits, the port and
+//! the address big-endian, eight bytes of zero.
+//!
+//! **What is refused, and with what** (each as Linux answered the
+//! witness user/net/sockerr.c, `notes/px22/`): a family that is not
+//! AF_INET -EAFNOSUPPORT; a type AF_INET has no sockets of here
+//! (`SOCK_STREAM`, `SOCK_RAW`, `SOCK_RDM`, `SOCK_SEQPACKET`,
+//! `SOCK_DCCP`, `SOCK_PACKET`) -ESOCKTNOSUPPORT, any other type
+//! -EINVAL; a protocol that is not 0 or 17 -EPROTONOSUPPORT; `bind`
+//! with under 16 bytes -EINVAL, a family in the address that is not
+//! AF_INET -EAFNOSUPPORT, a socket that has a port -EINVAL, an address
+//! that is not this station's -EADDRNOTAVAIL, a port held
+//! -EADDRINUSE; `sendto` with no destination and no peer
+//! -EDESTADDRREQ, over 65507 bytes -EMSGSIZE, to port 0 -EINVAL;
+//! `getpeername` with no peer -ENOTCONN; `listen` and `accept`
+//! -EOPNOTSUPP; an option or level PAX does not have -ENOPROTOOPT.
+//! PAX's own, where Linux would go on: a datagram over 1472 bytes is
+//! -EMSGSIZE (nothing here fragments), and one for a broadcast address
+//! -EACCES (Linux's answer without `SO_BROADCAST`, an option PAX does
+//! not have). A refusal PAX names is logged once a process
+//! (`user: <name> pid <p> syscall <n>: refused: <why>, -<errno>`).
+//!
+//! **Options** (level 1, SOL_SOCKET; uapi `asm-generic/socket.h`):
+//! `SO_RCVTIMEO_OLD` (20) set and read, a 16-byte `timeval`; `SO_TYPE`
+//! (3) and `SO_ERROR` (4) read (2 and 0). Nothing else: no witness asks.
+//!
+//! **Waiting.** `recvfrom` with nothing queued answers -EAGAIN under
+//! `MSG_DONTWAIT` or `O_NONBLOCK`; otherwise it answers `files.WAIT`:
+//! kernel/user rewinds the call and parks the thread, and a datagram's
+//! arrival runs the call again (kernel/sched's `wake_pipes`). With a
+//! receive timeout the first wait writes its deadline — now plus the
+//! timeout's ticks — in the process's area, the thread is parked until
+//! a datagram or that tick (`sched.block_pipe_until`), and the call
+//! that finds the deadline passed answers -EAGAIN. PAX delivers no
+//! signal, and no close can reach a socket a receive is parked on (a
+//! process has one thread, and its own reference keeps the socket), so
+//! these are the only ends a receive has.
+//!
+//! Written from the man pages socket(2), bind(2), connect(2),
+//! sendto(2), recvfrom(2), getsockname(2), getpeername(2),
+//! getsockopt(2), listen(2), accept(2), udp(7), ip(7), socket(7); the
+//! uapi headers `linux/in.h`, `linux/socket.h`, `linux/net.h`,
+//! `asm-generic/socket.h`, `asm-generic/errno.h`; and black-box strace
+//! of the witnesses on Linux. No Linux source; no other kernel's or
+//! libc's source.
+
+use files
+use ip
+use log
+use timer
+use uaccess
+use udp
+
+const AF_UNSPEC: u64 = 0
+const AF_INET: u64 = 2
+const SOCK_DGRAM: u64 = 2
+const SOCK_TYPE_MASK: u64 = 0xf
+const SOCK_CLOEXEC: u64 = 0x80000 // O_CLOEXEC
+const SOCK_NONBLOCK: u64 = 0x800 // O_NONBLOCK
+const O_RDWR: u64 = 2
+const ADDR: u64 = 16 // sizeof(struct sockaddr_in)
+const DATAGRAM_MAX: u64 = 65507 // 65535 less the two headers
+
+const MSG_PEEK: u64 = 0x2
+const MSG_TRUNC: u64 = 0x20
+const MSG_DONTWAIT: u64 = 0x40
+
+const SOL_SOCKET: u64 = 1
+const SO_TYPE: u64 = 3
+const SO_ERROR: u64 = 4
+const SO_RCVTIMEO_OLD: u64 = 20
+
+// errnos (uapi asm-generic/errno-base.h, errno.h)
+const EBADF: u64 = 9
+const EAGAIN: u64 = 11
+const EACCES: u64 = 13
+const EFAULT: u64 = 14
+const EINVAL: u64 = 22
+const EDOM: u64 = 33
+const ENOTSOCK: u64 = 88
+const EMSGSIZE: u64 = 90
+const ENOPROTOOPT: u64 = 92
+const EPROTONOSUPPORT: u64 = 93
+const ESOCKTNOSUPPORT: u64 = 94
+const EOPNOTSUPP: u64 = 95
+const EAFNOSUPPORT: u64 = 97
+const ENOBUFS: u64 = 105
+const ENOTCONN: u64 = 107
+
+// The process area's words this module keeps (kernel/sched's
+// `proc_area`; 3 is the refusal word kernel/vm, kernel/files and
+// kernel/process share).
+const A_REFUSAL: u64 = 3
+const A_DEADLINE: u64 = 14 // the tick a waiting receive gives up at; 0 none
+const A_NAMED: u64 = 15 // the refusals already logged, a bit each
+const A_DETAIL: u64 = 144 // two words: the numbers a refusal's line names
+
+// Refusal codes (64 and up: kernel/vm has 1-15, kernel/files 16-31,
+// kernel/process 32-63).
+const R_FAMILY: u64 = 64
+const R_TYPE: u64 = 65
+const R_PROTOCOL: u64 = 66
+const R_OPTION: u64 = 67
+const R_FRAGMENT: u64 = 68
+const R_BROADCAST: u64 = 69
+const R_UNIX: u64 = 70
+
+/// The first refusal code that is this module's.
+pub const REFUSALS: u64 = 64
+
+// The PIT's tick in nanoseconds (kernel/timer: 1193182 / 11932 Hz).
+const NS_PER_TICK: u64 = 10000151
+
+fn neg(e: u64) -> u64 {
+    0xffffffffffffffff - e + 1
+}
+
+fn get(a: u64, i: u64) -> u64 {
+    // # Safety: `a` is a process area (sched.proc_area), 512 words; i < 512.
+    unsafe { ((a + i * 8) as *u64).read_volatile() }
+}
+
+fn put(a: u64, i: u64, v: u64) {
+    // # Safety: as `get`.
+    unsafe { ((a + i * 8) as *u64).write_volatile(v) }
+}
+
+/// A refusal code's name ("" when not this module's).
+pub fn why(r: u64) -> str {
+    if r == R_FAMILY {
+        return "a socket of a family PAX has none of: family"
+    }
+    if r == R_TYPE {
+        return "an AF_INET socket that is not a datagram socket: type"
+    }
+    if r == R_PROTOCOL {
+        return "a datagram socket of a protocol that is not UDP: protocol"
+    }
+    if r == R_OPTION {
+        return "a socket option PAX does not have: level and option"
+    }
+    if r == R_FRAGMENT {
+        return "a datagram over 1472 bytes (PAX does not fragment): bytes"
+    }
+    if r == R_BROADCAST {
+        return "a datagram for a broadcast address (no SO_BROADCAST): address"
+    }
+    if r == R_UNIX {
+        return "an AF_UNIX socketpair's end, which has no name or options: call"
+    }
+    ""
+}
+
+/// The numbers a refusal's line ends with (kernel/user prints them
+/// after `why`): ` <a>` or ` <a> <b>`.
+pub fn detail(a: u64, r: u64) {
+    log.put(" ")
+    log.dec((get(a, A_DETAIL) & 0x7fffffff) as int)
+    if r == R_OPTION {
+        log.put(" ")
+        log.dec((get(a, A_DETAIL + 1) & 0x7fffffff) as int)
+    }
+}
+
+/// Answer -`e` for a refusal PAX names; the first of its kind in this
+/// process leaves its code and numbers for kernel/user's line.
+fn refuse(a: u64, code: u64, e: u64, d0: u64, d1: u64) -> u64 {
+    let bit: u64 = 1 << (code - REFUSALS)
+    if get(a, A_NAMED) & bit == 0 {
+        put(a, A_NAMED, get(a, A_NAMED) | bit)
+        put(a, A_REFUSAL, code)
+        put(a, A_DETAIL, d0)
+        put(a, A_DETAIL + 1, d1)
+    }
+    neg(e)
+}
+
+/// Whether descriptor `fd` is an AF_INET socket.
+pub fn is_inet(a: u64, fd: u64) -> bool {
+    files.sock_kind(a, fd) == files.INET
+}
+
+/// The tick the running receive gives up at; 0 when it has no deadline
+/// (kernel/user chooses `block_pipe_until` by it).
+pub fn deadline(a: u64) -> u64 {
+    get(a, A_DEADLINE)
+}
+
+/// Descriptor `fd`'s socket: `(0, s)`, or `(-errno, 0)`: -EBADF, or
+/// -ENOTSOCK for what is no socket; an AF_UNIX pair's end is refused by
+/// name (`nr`, the call's number, for the line), -EOPNOTSUPP.
+fn sock(a: u64, fd: u64, nr: u64) -> (u64, u64) {
+    let k = files.sock_kind(a, fd)
+    if k == files.INET {
+        return (0, files.inet_sock(a, fd))
+    }
+    if k == files.NOT_OPEN {
+        return (neg(EBADF), 0)
+    }
+    if k == files.UNIX {
+        return (refuse(a, R_UNIX, EOPNOTSUPP, nr, 0), 0)
+    }
+    (neg(ENOTSOCK), 0)
+}
+
+/// `socket(domain, type, protocol)`: the descriptor or -errno.
+pub fn socket(a: u64, domain: u64, ty: u64, proto: u64) -> u64 {
+    if domain != AF_INET {
+        return refuse(a, R_FAMILY, EAFNOSUPPORT, domain, 0)
+    }
+    let base = ty & SOCK_TYPE_MASK
+    if ty & !(SOCK_TYPE_MASK | SOCK_CLOEXEC | SOCK_NONBLOCK) != 0 || base == 0 || base == 7 || base == 8 || base == 9 || base > 10 {
+        // No such type (uapi linux/net.h: 1-6 and 10).
+        return refuse(a, R_TYPE, EINVAL, ty, 0)
+    }
+    if base != SOCK_DGRAM {
+        return refuse(a, R_TYPE, ESOCKTNOSUPPORT, base, 0)
+    }
+    if proto != 0 && proto != udp.PROTOCOL {
+        return refuse(a, R_PROTOCOL, EPROTONOSUPPORT, proto, 0)
+    }
+    let s = udp.open()
+    if s == udp.SOCKS {
+        return neg(ENOBUFS)
+    }
+    let fd = files.inet_open(a, s, O_RDWR | (ty & (SOCK_CLOEXEC | SOCK_NONBLOCK)))
+    if fd >= 0x8000000000000000 {
+        udp.close(s)
+    }
+    fd
+}
+
+/// The `struct sockaddr_in` of `len` bytes at user `addr`: `(0,
+/// address, port)`, or `(-errno, 0, 0)`: -EINVAL under 16 bytes,
+/// -EFAULT, -EAFNOSUPPORT for a family that is not AF_INET.
+fn addr_in(pml4: u64, addr: u64, len: u64) -> (u64, u64, u64) {
+    if len < ADDR {
+        return (neg(EINVAL), 0, 0)
+    }
+    if !uaccess.readable(pml4, addr, ADDR) {
+        return (neg(EFAULT), 0, 0)
+    }
+    if uaccess.get(pml4, addr, 2) != AF_INET {
+        return (neg(EAFNOSUPPORT), 0, 0)
+    }
+    let port = uaccess.get(pml4, addr + 2, 1) << 8 | uaccess.get(pml4, addr + 3, 1)
+    let ip4 = uaccess.get(pml4, addr + 4, 1) << 24 | uaccess.get(pml4, addr + 5, 1) << 16 | uaccess.get(pml4, addr + 6, 1) << 8 | uaccess.get(pml4, addr + 7, 1)
+    (0, ip4, port)
+}
+
+/// Whether a `struct sockaddr_in` can be written at user `addr` with its
+/// length at `lenp` (getsockname(2)'s value-result pair): 0, or -errno.
+fn addr_room(pml4: u64, addr: u64, lenp: u64) -> u64 {
+    if !uaccess.readable(pml4, lenp, 4) || !uaccess.writable(pml4, lenp, 4) {
+        return neg(EFAULT)
+    }
+    let cap = uaccess.get(pml4, lenp, 4)
+    if cap >= 0x80000000 {
+        return neg(EINVAL)
+    }
+    let n = if cap < ADDR { cap } else { ADDR }
+    if !uaccess.writable(pml4, addr, n) {
+        return neg(EFAULT)
+    }
+    0
+}
+
+/// Write `ip4`:`port` as a `struct sockaddr_in` at user `addr`, cut to
+/// the length at `lenp`, and the whole length (16) there (checked by
+/// `addr_room`).
+fn addr_out(pml4: u64, addr: u64, lenp: u64, ip4: u64, port: u64) {
+    let cap = uaccess.get(pml4, lenp, 4)
+    var i: u64 = 0
+    while i < ADDR && i < cap {
+        var b: u64 = 0
+        if i == 0 {
+            b = AF_INET
+        } else if i == 2 {
+            b = port >> 8
+        } else if i == 3 {
+            b = port & 0xff
+        } else if i >= 4 && i < 8 {
+            b = (ip4 >> ((7 - i) * 8)) & 0xff
+        }
+        uaccess.put(pml4, addr + i, b, 1)
+        i += 1
+    }
+    uaccess.put(pml4, lenp, ADDR, 4)
+}
+
+fn errno_of(e: u64) -> u64 {
+    if e == 0 { 0 } else { neg(e) }
+}
+
+/// `bind(fd, addr, len)`.
+pub fn bind(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
+    let (e, s) = sock(a, fd, 49)
+    if e != 0 {
+        return e
+    }
+    let (ae, ip4, port) = addr_in(pml4, addr, len)
+    if ae != 0 {
+        return ae
+    }
+    errno_of(udp.bind(s, ip4, port))
+}
+
+/// `connect(fd, addr, len)`: the default peer; AF_UNSPEC forgets it.
+pub fn connect(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
+    let (e, s) = sock(a, fd, 42)
+    if e != 0 {
+        return e
+    }
+    if len < 2 {
+        return neg(EINVAL)
+    }
+    if !uaccess.readable(pml4, addr, 2) {
+        return neg(EFAULT)
+    }
+    if uaccess.get(pml4, addr, 2) == AF_UNSPEC {
+        udp.disconnect(s)
+        return 0
+    }
+    let (ae, ip4, port) = addr_in(pml4, addr, len)
+    if ae != 0 {
+        return ae
+    }
+    errno_of(udp.connect(s, ip4, port))
+}
+
+/// `sendto(fd, buf, n, flags, addr, len)` on an AF_INET socket, and
+/// `write` (no flags, no address): `n`, or -errno.
+pub fn sendto(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, addr: u64, len: u64) -> u64 {
+    let (e, s) = sock(a, fd, 44)
+    if e != 0 {
+        return e
+    }
+    var ip4: u64 = 0
+    var port: u64 = 0
+    let named = addr != 0
+    if named {
+        let (ae, i4, p) = addr_in(pml4, addr, len)
+        if ae != 0 {
+            return ae
+        }
+        ip4 = i4
+        port = p
+    } else {
+        let (connected, pa, pp) = udp.peer(s)
+        if !connected {
+            return neg(udp.EDESTADDRREQ)
+        }
+        ip4 = pa
+        port = pp
+    }
+    if n > DATAGRAM_MAX {
+        return neg(EMSGSIZE)
+    }
+    if port == 0 {
+        return neg(EINVAL)
+    }
+    if ip.is_broadcast(ip4) {
+        return refuse(a, R_BROADCAST, EACCES, ip4 & 0xff, 0)
+    }
+    if n > udp.DATA_MAX {
+        return refuse(a, R_FRAGMENT, EMSGSIZE, n, 0)
+    }
+    let r = udp.send(s, pml4, buf, n, true, ip4, port)
+    if r != 0 {
+        return neg(r)
+    }
+    n
+}
+
+/// `recvfrom(fd, buf, n, flags, addr, lenp)` on an AF_INET socket, and
+/// `read` (no flags, no address): the bytes copied (the datagram's
+/// whole length under MSG_TRUNC), -errno, or `files.WAIT`.
+pub fn recvfrom(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64, addr: u64, lenp: u64) -> u64 {
+    let (e, s) = sock(a, fd, 45)
+    if e != 0 {
+        return e
+    }
+    let wants = addr != 0 && lenp != 0
+    if wants {
+        let ar = addr_room(pml4, addr, lenp)
+        if ar != 0 {
+            put(a, A_DEADLINE, 0)
+            return ar
+        }
+    }
+    let (got, src, sport, whole) = udp.recv(s, pml4, buf, n, flags & MSG_PEEK != 0)
+    if got == udp.EMPTY {
+        if flags & MSG_DONTWAIT != 0 || files.nonblocking(a, fd) {
+            put(a, A_DEADLINE, 0)
+            return neg(EAGAIN)
+        }
+        let t = udp.timeout(s)
+        if t != 0 {
+            let d = get(a, A_DEADLINE)
+            let now = timer.ticks()
+            if d == 0 {
+                put(a, A_DEADLINE, now + t)
+            } else if now >= d {
+                put(a, A_DEADLINE, 0)
+                return neg(EAGAIN)
+            }
+        }
+        return files.WAIT
+    }
+    put(a, A_DEADLINE, 0)
+    if got >= 0x8000000000000000 {
+        return got
+    }
+    if wants {
+        addr_out(pml4, addr, lenp, src, sport)
+    }
+    if flags & MSG_TRUNC != 0 { whole } else { got }
+}
+
+/// `getsockname(fd, addr, lenp)` (`peer` false) and `getpeername`.
+pub fn getname(a: u64, pml4: u64, fd: u64, addr: u64, lenp: u64, peer: bool) -> u64 {
+    let (e, s) = sock(a, fd, if peer { 52 } else { 51 })
+    if e != 0 {
+        return e
+    }
+    var ip4: u64 = 0
+    var port: u64 = 0
+    if peer {
+        let (connected, pa, pp) = udp.peer(s)
+        if !connected {
+            return neg(ENOTCONN)
+        }
+        ip4 = pa
+        port = pp
+    } else {
+        let (la, lp) = udp.name(s)
+        ip4 = la
+        port = lp
+    }
+    let ar = addr_room(pml4, addr, lenp)
+    if ar != 0 {
+        return ar
+    }
+    addr_out(pml4, addr, lenp, ip4, port)
+    0
+}
+
+/// `setsockopt(fd, level, option, value, len)`: SO_RCVTIMEO_OLD.
+pub fn setsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u64, len: u64) -> u64 {
+    let (e, s) = sock(a, fd, 54)
+    if e != 0 {
+        return e
+    }
+    if level != SOL_SOCKET || option != SO_RCVTIMEO_OLD {
+        return refuse(a, R_OPTION, ENOPROTOOPT, level, option)
+    }
+    if len < 16 {
+        return neg(EINVAL)
+    }
+    if !uaccess.readable(pml4, value, 16) {
+        return neg(EFAULT)
+    }
+    let sec = uaccess.get64(pml4, value)
+    let usec = uaccess.get64(pml4, value + 8)
+    if usec >= 1000000 || sec >= 0x8000000000000000 {
+        return neg(EDOM)
+    }
+    // Past about 49 days the wait is for good in all but name.
+    let capped = if sec < 0x400000 { sec } else { 0x400000 }
+    let ns = capped * 1000000000 + usec * 1000
+    // The tick after: a partial tick never shortens a wait.
+    let ticks = if ns == 0 { 0 } else { (ns + NS_PER_TICK - 1) / NS_PER_TICK + 1 }
+    udp.set_timeout(s, ticks, sec, usec)
+    0
+}
+
+/// `getsockopt(fd, level, option, value, lenp)`: SO_TYPE, SO_ERROR,
+/// SO_RCVTIMEO_OLD.
+pub fn getsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u64, lenp: u64) -> u64 {
+    let (e, s) = sock(a, fd, 55)
+    if e != 0 {
+        return e
+    }
+    if level != SOL_SOCKET || (option != SO_TYPE && option != SO_ERROR && option != SO_RCVTIMEO_OLD) {
+        return refuse(a, R_OPTION, ENOPROTOOPT, level, option)
+    }
+    if !uaccess.readable(pml4, lenp, 4) || !uaccess.writable(pml4, lenp, 4) {
+        return neg(EFAULT)
+    }
+    let cap = uaccess.get(pml4, lenp, 4)
+    if cap >= 0x80000000 {
+        return neg(EINVAL)
+    }
+    if option == SO_RCVTIMEO_OLD {
+        if cap < 16 {
+            return neg(EINVAL)
+        }
+        if !uaccess.writable(pml4, value, 16) {
+            return neg(EFAULT)
+        }
+        let (sec, usec) = udp.timeval(s)
+        uaccess.put(pml4, value, sec, 8)
+        uaccess.put(pml4, value + 8, usec, 8)
+        uaccess.put(pml4, lenp, 16, 4)
+        return 0
+    }
+    let n = if cap < 4 { cap } else { 4 }
+    if !uaccess.writable(pml4, value, n) {
+        return neg(EFAULT)
+    }
+    uaccess.put(pml4, value, if option == SO_TYPE { SOCK_DGRAM } else { 0 }, n)
+    uaccess.put(pml4, lenp, n, 4)
+    0
+}
+
+/// `listen(fd, backlog)`, `accept(fd, …)` and `accept4` (`nr` the
+/// call's number): a datagram socket has no connections to take.
+pub fn no_connections(a: u64, fd: u64, nr: u64) -> u64 {
+    let (e, _s) = sock(a, fd, nr)
+    if e != 0 {
+        return e
+    }
+    neg(EOPNOTSUPP)
+}
