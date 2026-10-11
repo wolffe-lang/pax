@@ -80,6 +80,9 @@ static const char *ename(int e)
     case EROFS: return "EROFS";
     case EOVERFLOW: return "EOVERFLOW";
     case ENXIO: return "ENXIO";
+    case ESRCH: return "ESRCH";
+    case ENOSPC: return "ENOSPC";
+    case EBUSY: return "EBUSY";
     }
     return "E?";
 }

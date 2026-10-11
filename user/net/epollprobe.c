@@ -9,7 +9,8 @@
    registration that goes with the last close of what it names and
    stays while a copy is open; an epoll descriptor shared across fork.
    Everything stays on this machine. Its output on PAX must be its
-   output on Linux. */
+   output on Linux, but for the lines that start with `~`: what PAX
+   refuses by name and Linux takes. */
 #define _GNU_SOURCE
 #include "say.h"
 #pragma GCC diagnostic ignored "-Wunused-result"
@@ -311,6 +312,17 @@ int main(void)
             close(pp[i][0]);
             close(pp[i][1]);
         }
+    }
+    /* What PAX refuses by name and Linux takes: lines tests/mpx4-ready
+       holds to PAX's answer and does not compare. */
+    {
+        int inner = epoll_create1(0), r1, r2;
+        pipe(p);
+        r1 = ctl(ep, EPOLL_CTL_ADD, inner, EPOLLIN, 50);
+        say("~nested: an epoll object added to another: %s\n", r1 < 0 ? ename(errno) : "0");
+        r2 = ctl(ep, EPOLL_CTL_ADD, p[0], EPOLLIN | EPOLLEXCLUSIVE, 51);
+        say("~exclusive: a registration with EPOLLEXCLUSIVE: %s\n", r2 < 0 ? ename(errno) : "0");
+        close(inner); close(p[0]); close(p[1]);
     }
     R("close the epoll", close(ep));
     N("epoll_wait on it then", epoll_wait(ep, ev, 4, 0));
