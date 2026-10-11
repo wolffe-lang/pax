@@ -532,3 +532,51 @@ step toward M-PX4.
   socket (a connected socket never sees ECONNREFUSED); loopback below
   UDP (`icmp.ping` to the station's own address, and TCP's); a socket
   of any other family or type.
+
+## TCP (px23)
+
+`kmain_sockets.lu` also starts `kernel/tcp` and runs static Linux
+programs that open AF_INET stream sockets (`tests/mpx4-tcp`,
+`user/net/tcp*`): the fourth step toward M-PX4.
+
+| module or file | what |
+|---|---|
+| `tcp/` | RFC 9293. 64 control blocks of 128 words (`pax_tcp_conns`): a socket, a connection a listener holds, a connection its process closed that is still finishing. `input` (from `netd`, protocol 6): `short`, `header`, `checksum`, `broadcast`, `port-zero`, `option`, then the block, the time-wait entry or the listener the segment names, else a reset; §3.10.7.4's order for a connection (the window, a reset, a SYN, the acknowledgement, the data, the FIN). `output`: what the peer's window, the congestion window, Nagle and the silly-window rule allow. `tick` (from the clock, every 10 ms): the retransmission, persist and user timers, a closed block's end. The calls: `open`, `bind`, `listen`, `accept`, `connect`, `send`, `recv`, `shutdown`, `close`, the options. A time-wait table of 32,768 entries in 256 frames; the counters, eight lines |
+| `ip/` | **loopback** (`send_from`, `loop_peek`, `loop_done`): a datagram for this station or 127/8 waits on 64 frames; `input` takes `looped`; `speak_tcp` (protocol 6 is `protocol` until `tcp.start`) |
+| `netd/` | `deliver` (one datagram to its protocol) and `drain` (the loopback queue, IF clear a datagram); the clock turns every tick: `tcp.tick`, `arp.tick` every tenth, `drain` |
+| `icmp/` | looped messages counted apart; a destination unreachable handed back (`ERROR`, `quoted`) for `tcp.unreached` |
+| `udp/` | its own loopback gone: `send` always goes through `ip.send_from`; `input` takes `looped` |
+| `socket/` | the stream forms of every call, `listen`, `accept` (and `accept4`'s two flags), `shutdown`, `stream_send` (a write waits until every byte is queued); `SO_REUSEADDR`, `TCP_NODELAY`, `TCP_SYNCNT`, `TCP_USER_TIMEOUT` |
+| `files/` | kind `K_TCP`: a descriptor on an open file whose node is `tcp`'s block; the last close calls `tcp.close`; `tcp_open`; `ioctl(FIONBIO)` on a socket |
+| `user/` | 43, 48, 50, 288; `netd.drain` after every call (and the call run again when it had answered "wait" and the drain delivered something); `EPIPE` on a stream socket to SIGPIPE |
+| `sync/` | word 7, `tcp()`: the last of the eight |
+| `kmain_sockets.lu` | `tcp.start` with a key from `process.random_word`; the kernel's echo to 127.0.0.1 and to its own address; after each command up to 3 s for closed connections to finish; `tcp blocks` and `time-wait` in the books |
+
+- Layering: `socket` → `files` → `tcp` → `ip` → `arp` → `net`, beside
+  `udp`; `netd` above them makes the calls between `ip`, `icmp`, `udp`
+  and `tcp`. A module that sends to this machine never calls the
+  receiving side: it returns, and whoever called it (`kernel/user`
+  after a system call, the clock, `netd` after a frame) drains the
+  loopback queue.
+- Locks: `sync.tcp()` before `sync.ip()` before `sync.arp()` before
+  `sync.net()`; never with `sync.udp()`. One lock for all of TCP. The
+  eight lock words are all taken now.
+- A connection's two rings are its only buffers: 16 frames each, taken
+  at `establish` (or at `connect`) and given back by `free_block` (or
+  when a block a descriptor still names has nothing left to read).
+  Out-of-order bytes go straight into the receive ring where they
+  belong; four intervals say which are there.
+- Waiting is px17's: a call answers `files.WAIT`, `kernel/tcp` calls
+  `sched.wake_pipes` on every change, and the call runs again. A
+  `connect` in flight is marked on its block (`F_CONNECTING`) so the
+  call run again finds its handshake and not a second one.
+- Not yet: `poll`, `select`, `epoll`, `eventfd`, threads and `futex`
+  (wolf's runtime waits with all five: a wolf program runs today only
+  when every accept and read finds what it asks for); `sendmsg`,
+  `recvmsg`; `SO_LINGER`, `SO_KEEPALIVE`, `SO_RCVBUF`/`SO_SNDBUF`,
+  `SO_RCVTIMEO` on a stream, `TCP_CORK`, `MSG_WAITALL`, `MSG_OOB`;
+  window scaling, SACK, timestamps and PAWS, NewReno's partial-ACK
+  rule, a delayed ACK, path MTU discovery, keep-alives; an ICMP error
+  delivered to a UDP socket; more than 64 control blocks or a listen
+  queue past 33; a closed connection whose peer acknowledges and never
+  opens its window stays until the peer goes.

@@ -7,6 +7,40 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **TCP (px23).** An unmodified static Linux program listens,
+  accepts, connects, reads, writes, shuts down and closes TCP
+  connections on PAX, and so do two programs built by wolf.
+  `kernel/tcp` is RFC 9293's state machine in 64 control blocks:
+  active and passive open (and SYNs that cross), in-order delivery with
+  up to four out-of-order intervals kept in the receive buffer,
+  cumulative acknowledgements, a window that is never taken back and a
+  zero window probed, the MSS option sent and honoured and every other
+  option skipped by name, FIN each way and half-close, resets accepted
+  only at RCV.NXT (elsewhere in the window they draw an ACK), RFC
+  6298's retransmission timer with Karn's rule (floor 200 ms, not the
+  RFC's 1 s), RFC 5681's slow start, congestion avoidance, fast
+  retransmit and fast recovery, a bounded listen queue, 2 x MSL of 60 s
+  in a table of 32,768 entries, initial sequence numbers per RFC 6528.
+  A connection's buffers are 65,536 bytes each way in frames taken when
+  it is established and given back when it ends. `kernel/socket` gains
+  the stream forms of the socket calls and `listen`, `accept`,
+  `accept4` and `shutdown`, each refusal's errno the one Linux gave the
+  same program; a write to a connection that is over is `EPIPE` and
+  SIGPIPE, as a pipe's. **Loopback is below IP now** (`kernel/ip`): a
+  datagram of any protocol for the station's own address or 127/8
+  waits on a queue of 64 frames and is delivered before the sending
+  call returns, with no device needed; `kernel/udp`'s own loopback
+  retired onto it, and the kernel pings itself at start-up.
+  `tests/mpx4-tcp` runs ten witnesses three ways — against
+  `tools/net-peer --tcp`, a TCP of the tools' own that injects loss,
+  duplication, reordering, corruption and scripted single faults;
+  against QEMU's user-mode network and its TCP; and with no device —
+  each held byte for byte to the same binaries on Linux under the same
+  script, with 16 MiB transfers each way, 10,000 connections each way
+  and over loopback, and every captured segment judged by
+  `tools/pcap-net`. Not here: `poll`, `epoll`, a thread for wolf's
+  runtime to wait with, window scaling, SACK, timestamps, a delayed
+  ACK, path MTU discovery, keep-alives.
 - **UDP and the socket system calls (px22).** An unmodified static
   Linux program sends and receives UDP datagrams on PAX. `kernel/udp`
   judges a datagram's length and its pseudo-header checksum (zero
