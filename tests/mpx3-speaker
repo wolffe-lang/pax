@@ -30,6 +30,10 @@
 #            `echo … > /dev/tty0` and `> /dev/console` (a write through
 #            each node reaches the console: K1), `exit` (every tier and
 #            firmware)
+#   chord    user/console/speaker-chord.keys (px29): two refused files
+#            (a dynamic, a chord of five pitches), `play chords` (the
+#            chord study, user/tunes/chords), `echo $?`, `exit` (every
+#            tier and firmware)
 # Assertions, per tier, firmware and session:
 #   K0 build: kmain_console built; every program static (ET_EXEC, no
 #      PT_INTERP); the initramfs and the image built (digests printed).
@@ -79,6 +83,15 @@
 #      2711 and 1355 (beep's 1193180 / 440 and / 880, truncated), each
 #      held 30 ticks within 3; and the capture's two tones are 440 Hz
 #      and 880 Hz within 1% (as K2), each sounding 300 ms within 20%.
+#   K8 the chord study (chord; px29), by tools/arp-check: in the
+#      kernel's timeline the tones started are the file's, step by step
+#      (every pitch of each chord, low to high, ceil(sounding / 20 ms)
+#      steps), 90% of the steps held exactly 2 ticks and none off by
+#      more than one, each slot sounding its time within a tick; in the
+#      capture, read period by period, every pitch of each chord heard,
+#      85% of the changes in order, each pitch's median step within 30%
+#      of 20 ms, each slot heard for its time within 10%. K4's tones are
+#      tools/arp-check --tones of the file (197).
 #
 # --images DIR boots what this script built earlier (DIR holds
 # <tier>/kmain_console.elf, <tier>/speaker.iso): any host with QEMU and
@@ -258,7 +271,7 @@ for leg in $legs; do
         continue
     fi
     for tier in $tiers; do
-        for s in speaker tunes beep; do
+        for s in speaker tunes beep chord; do
             [ "$s" = tunes ] && { [ "$tier" = native ] && [ "$leg" = bios ] || continue; }
             id="$tier $leg $s"
             log=$PAX_BUILD/mpx3-speaker-$tier-$leg-$s.serial.log
@@ -267,6 +280,7 @@ for leg in $legs; do
             keys=$PAX_ROOT/user/console/$s.keys
             [ "$s" = tunes ] && keys=$PAX_ROOT/user/console/speaker-tunes.keys
             [ "$s" = beep ] && keys=$PAX_ROOT/user/console/speaker-beep.keys
+            [ "$s" = chord ] && keys=$PAX_ROOT/user/console/speaker-chord.keys
             rm -f "$log" "$log.verdict" "$log.typed" "$wav"
             if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
                 bad "K1 $id: no image"
@@ -316,6 +330,7 @@ PY
             want=$PAX_ROOT/user/console/$s.expect
             [ "$s" = tunes ] && want=$PAX_ROOT/user/console/speaker-tunes.expect
             [ "$s" = beep ] && want=$PAX_ROOT/user/console/speaker-beep.expect
+            [ "$s" = chord ] && want=$PAX_ROOT/user/console/speaker-chord.expect
             if ! cmp -s "$want" "$out"; then
                 why+=" the session differs from ${want#"$PAX_ROOT"/}: $(diff "$want" "$out" | head -n 12 | tr '\n' '|');"
             fi
@@ -391,6 +406,14 @@ PY
                 [ -z "$long" ] || why+=" hold's tone sounded on: $long;"
                 short=$(awk '/^tone / && $10 > 862 && $10 < 898 { print $8 }' "$notes" | paste -sd, -)
                 [ -z "$why" ] && say "PASS K3 $id: $ol (hold was pid $hp); 880 Hz in the capture: ${short:-none} ms" || bad "K3 $id:$why"
+            elif [ "$s" = chord ]; then
+                # K8: the chord study, from the timeline and the capture.
+                if [ -s "$wav" ]; then
+                    k8=$(python3 "$PAX_ROOT/tools/arp-check" "$PAX_ROOT/user/tunes/chords" "$timeline" "$wav" 2>&1)
+                else
+                    k8="FAIL no capture"
+                fi
+                case $k8 in PASS*) say "PASS K8 $id: ${k8#PASS }" ;; *) bad "K8 $id: ${k8#FAIL }" ;; esac
             elif [ "$s" = beep ]; then
                 # K7: Ubuntu's beep through /dev/tty0 and /dev/console.
                 k7=$(python3 - "$notes" "$timeline" <<'PY'
@@ -498,7 +521,9 @@ PY
             sl=$(grep -E '^speaker: [0-9]+ tones, ' "$norm" | head -n 1)
             sv=$(printf '%s\n' "$sl" | sed -n -E 's/.*port 0x61 0x([0-9a-f]{2})$/\1/p')
             st=$(printf '%s\n' "$sl" | sed -n -E 's/^speaker: ([0-9]+) tones, ([0-9]+) stopped at their process.s end, sounding ([0-9]+), .*/\1 \2 \3/p')
-            if [ "$s" = speaker ]; then wt="9 1 0"; elif [ "$s" = beep ]; then wt="2 0 0"; else wt="$((mn + en)) 0 0"; fi
+            if [ "$s" = speaker ]; then wt="9 1 0"; elif [ "$s" = beep ]; then wt="2 0 0"
+            elif [ "$s" = chord ]; then wt="$(python3 "$PAX_ROOT/tools/arp-check" --tones "$PAX_ROOT/user/tunes/chords") 0 0"
+            else wt="$((mn + en)) 0 0"; fi
             [ "$st" = "$wt" ] || why+=" '$sl': not '$wt' (tones, stopped at an end, sounding);"
             [ -n "$sv" ] && [ $((0x$sv & 3)) = 0 ] || why+=" port 0x61 '0x$sv' has a gate bit set;"
             [ -z "$why" ] && say "PASS K4 $id: $sl" || bad "K4 $id:$why"
