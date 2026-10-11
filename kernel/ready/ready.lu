@@ -512,36 +512,27 @@ pub fn sched_getaffinity(pml4: u64, pid: u64, len: u64, mask: u64) -> u64 {
 /// The books: kernel/event's counts on one line,
 /// `user: ready: epolls <e>, registrations <r>, eventfds <v>; made <E> and <V>, added <A>, forgotten <F>; answers <a>, waits <w>, empty <m>, timeouts <t>, events <n>, refused <x>`
 /// (a kernel line, so `user: `: what a program writes never starts so).
+/// A function a count: wolf's release tier takes minutes over one
+/// function with many `log.dec` calls in a row (wolf-lang#711).
 pub fn report() {
-    log.put("user: ready: epolls ")
-    log.dec(event.count(event.C_EPOLLS) as int)
-    log.put(", registrations ")
-    log.dec(event.count(event.C_REGS) as int)
-    log.put(", eventfds ")
-    log.dec(event.count(event.C_EVENTFDS) as int)
-    log.put("; made ")
-    log.dec(event.count(event.C_EP_MADE) as int)
-    log.put(" and ")
-    log.dec(event.count(event.C_EV_MADE) as int)
-    log.put(", added ")
-    log.dec(event.count(event.C_ADDED) as int)
-    log.put(", forgotten ")
-    log.dec(event.count(event.C_FORGOTTEN) as int)
-    tail()
+    said("user: ready: epolls ", event.C_EPOLLS)
+    said(", registrations ", event.C_REGS)
+    said(", eventfds ", event.C_EVENTFDS)
+    said("; made ", event.C_EP_MADE)
+    said(" and ", event.C_EV_MADE)
+    said(", added ", event.C_ADDED)
+    said(", forgotten ", event.C_FORGOTTEN)
+    said("; answers ", event.C_ANSWERS)
+    said(", waits ", event.C_WAITS)
+    said(", empty ", event.C_EMPTY)
+    said(", timeouts ", event.C_TIMEOUTS)
+    said(", events ", event.C_EVENTS)
+    said(", refused ", event.C_REFUSED)
+    log.end()
 }
 
-fn tail() {
-    log.put("; answers ")
-    log.dec(event.count(event.C_ANSWERS) as int)
-    log.put(", waits ")
-    log.dec(event.count(event.C_WAITS) as int)
-    log.put(", empty ")
-    log.dec(event.count(event.C_EMPTY) as int)
-    log.put(", timeouts ")
-    log.dec(event.count(event.C_TIMEOUTS) as int)
-    log.put(", events ")
-    log.dec(event.count(event.C_EVENTS) as int)
-    log.put(", refused ")
-    log.dec(event.count(event.C_REFUSED) as int)
-    log.end()
+/// `label`, then count `i` in decimal.
+fn said(label: str, i: u64) {
+    log.put(label)
+    log.dec(event.count(i) as int)
 }

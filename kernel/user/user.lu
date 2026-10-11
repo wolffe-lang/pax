@@ -1734,7 +1734,15 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     if nr == SYS_CHMOD || nr == SYS_FCHMOD || nr == SYS_FCHMODAT || nr == SYS_FCHMODAT2 || nr == SYS_CHOWN || nr == SYS_FCHOWN || nr == SYS_LCHOWN || nr == SYS_FCHOWNAT || nr == SYS_UTIMENSAT || nr == SYS_UTIMES || nr == SYS_UTIME {
         return files.refused(a, 1)
     }
-    // px24: readiness (kernel/ready) and the gathered write.
+    // px24: readiness (kernel/ready) and the gathered write, in a
+    // function of their own (this one is long enough: wolf-lang#711).
+    ready_calls(nr, a, pml4, a0, a1, a2, a3)
+}
+
+/// px24's calls that answer in place: `poll`, the three epoll calls,
+/// `eventfd2`, `sched_getaffinity`, `writev`; anything else is
+/// -ENOSYS, logged once a process.
+fn ready_calls(nr: u64, a: u64, pml4: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
     if nr == SYS_POLL {
         return ready.poll(a, pml4, a0, a1, int32(a2))
     }
