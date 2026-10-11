@@ -473,8 +473,12 @@ fn parse_parts(text: str) -> Score {
             var k = 2
             while k < ws.len {
                 let kw = ws[k]
-                if kw == "meter" && k + 1 < ws.len && meter_of(ws[k + 1]) > 0 {
-                    meter = meter_of(ws[k + 1])
+                if kw == "meter" {
+                    let m = if k + 1 < ws.len { meter_of(ws[k + 1]) } else { -1 }
+                    if m < 0 {
+                        return score_refused("line {line_no}: meter is n/d (n 1-32, d 1 2 4 8 16 32)")
+                    }
+                    meter = m
                     k += 2
                 } else if kw == "tempo" {
                     let (u, used) = tempo_at(ws, k + 1)
