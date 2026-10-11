@@ -1,6 +1,8 @@
 //! member: false
 // kmain_net.lu — the network's test kernel (px20, px21;
-// tests/mpx4-net). It brings up frames, paging, the interrupts, the
+// tests/mpx4-net; px22: kernel/udp is under it too, so a datagram for
+// a port no socket holds draws a port unreachable, and this kernel
+// makes no socket). It brings up frames, paging, the interrupts, the
 // timer, the scheduler and the heap, scans the PCI bus (the census is
 // printed when the kernel command line holds `pci`), starts kernel/net
 // and, when a device came up, kernel/arp, kernel/ip and kernel/icmp as
@@ -66,6 +68,7 @@ use sched
 use serial
 use sync
 use timer
+use udp
 
 extern "c" let pax_netd: *u8
 extern "c" let pax_net_clock: *u8
@@ -117,7 +120,7 @@ fn edge() -> u64 {
 
 /// Frames the protocols above the driver hold.
 fn stack_frames() -> u64 {
-    arp.frames_held() + ip.frames_held() + icmp.frames_held()
+    arp.frames_held() + ip.frames_held() + icmp.frames_held() + udp.frames_held()
 }
 
 /// Send `n` frames of `len` bytes from the frame at `f` (its header
@@ -538,9 +541,10 @@ export fn kmain() {
     arp.start(OWN_IP, if peer { PEER_AGE } else { arp.AGE })
     ip.start(OWN_IP, NETMASK, GATEWAY)
     icmp.start()
+    udp.start()
     ip.report()
     let scratch = frames.alloc() else 0
-    if scratch == 0 || stack_frames() != 11 {
+    if scratch == 0 || stack_frames() != 12 {
         panic.fail("net test: no frame for the stack or the burst", stack_frames())
     }
     // # Safety: the addresses of kernel/netd's exports; nothing is read.
@@ -561,6 +565,7 @@ export fn kmain() {
     arp.counters()
     ip.counters()
     icmp.counters()
+    udp.counters()
     log.put("netd: ")
     log.dec(netd.turns() as int)
     log.put(" turns, ")

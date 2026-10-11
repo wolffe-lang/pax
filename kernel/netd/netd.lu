@@ -1,4 +1,4 @@
-//! netd — the network's two thread bodies (px20, px21).
+//! netd — the network's two thread bodies (px20, px21, px22).
 //!
 //! `pax_netd` is the kernel thread the device's interrupt wakes
 //! (kernel/net's `wait`, kernel/sched's `block_net`/`wake_net`): it
@@ -10,8 +10,11 @@
 //!     0x0806  kernel/arp's `input`
 //!     0x0800  kernel/ip's `input`, which judges the header and says
 //!             whose the datagram is: kernel/icmp's `input` for
-//!             protocol 1; kernel/icmp's `unreachable` for a protocol
-//!             nothing speaks; nothing more for one it dropped (px21)
+//!             protocol 1; kernel/udp's `input` for protocol 17, and
+//!             kernel/icmp's `unreachable` (code 3) when it says no
+//!             socket takes the datagram (px22); kernel/icmp's
+//!             `unreachable` (code 2) for a protocol nothing speaks;
+//!             nothing more for one it dropped (px21)
 //!     others  counted and dropped (kernel/net's `drop_type`)
 //!
 //! A protocol may write in the frame while it has it (an echo reply is
@@ -33,6 +36,7 @@ use icmp
 use ip
 use net
 use sched
+use udp
 
 extern "c" let pax_net_stats: *u64
 
@@ -70,8 +74,15 @@ export fn pax_netd(_arg: u64) {
                     let (what, ihl, total) = ip.input(frame, len)
                     if what == ip.TO_ICMP {
                         icmp.input(frame, ihl, total)
+                    } else if what == ip.TO_UDP {
+                        // px22: a datagram no socket takes draws a port
+                        // unreachable, and kernel/udp counts what became
+                        // of it.
+                        if udp.input(frame, ihl, total) == udp.NO_PORT {
+                            udp.unreached(icmp.unreachable(frame, ihl, total, icmp.CODE_PORT))
+                        }
                     } else if what == ip.NO_PROTOCOL {
-                        icmp.unreachable(frame, ihl, total)
+                        let _r = icmp.unreachable(frame, ihl, total, icmp.CODE_PROTOCOL)
                     }
                 } else {
                     net.drop_type()

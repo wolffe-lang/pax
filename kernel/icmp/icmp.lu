@@ -6,7 +6,8 @@
 //!     0 type   1 code   2 checksum (RFC 1071, over the whole message)
 //!     echo request (type 8) and reply (type 0), code 0:
 //!     4 identifier   6 sequence number   8 data
-//!     destination unreachable (type 3; code 2, protocol unreachable):
+//!     destination unreachable (type 3; code 2, protocol unreachable;
+//!     code 3, port unreachable):
 //!     4 unused, zero   8 the offending datagram's header and the
 //!                        first 8 bytes of its data
 //!
@@ -35,8 +36,9 @@
 //! `answer()` says whether its reply has come and how long it took. One
 //! echo is waited for at a time: a second `ping` forgets the first.
 //!
-//! `unreachable(frame, ihl, total)` answers a datagram of a protocol
-//! nothing here speaks with destination unreachable, code 2 (RFC 1122
+//! `unreachable(frame, ihl, total, code)` answers a datagram of a
+//! protocol nothing here speaks with destination unreachable, code 2,
+//! and (px22) a UDP datagram no socket takes with code 3 (RFC 1122
 //! §3.2.2.1: a host SHOULD), unless RFC 1122 §3.2.2 forbids an error —
 //! a datagram for a broadcast address, or one that arrived in a frame
 //! for a group hardware address (`silent`); kernel/ip has already
@@ -222,17 +224,32 @@ pub fn input(frame: u64, ihl: u64, total: u64) {
     bump(C_TYPE)
 }
 
-/// Tell the sender of a datagram kernel/ip passed but nothing speaks
+/// `unreachable`'s answers: the error was sent.
+pub const SENT: u64 = 0
+/// It was held back: one went out within `LIMIT` ticks.
+pub const LIMITED: u64 = 1
+/// RFC 1122 §3.2.2 forbids one.
+pub const SILENT: u64 = 2
+/// kernel/ip did not take it.
+pub const NOT_SENT: u64 = 3
+/// Destination unreachable's codes (RFC 792): the protocol.
+pub const CODE_PROTOCOL: u64 = 2
+/// The port (px22: a UDP datagram no socket takes).
+pub const CODE_PORT: u64 = 3
+
+/// Tell the sender of a datagram kernel/ip passed but nothing takes
 /// (the frame at `frame`, header `ihl` bytes, total length `total`)
-/// that its protocol is unreachable — unless an error is forbidden
-/// (`silent`) or one went out within `LIMIT` ticks (`limited`).
-pub fn unreachable(frame: u64, ihl: u64, total: u64) {
+/// that its protocol (`code` 2) or its port (`code` 3) is unreachable —
+/// unless an error is forbidden (`silent`) or one went out within
+/// `LIMIT` ticks (`limited`). Answers which: SENT, LIMITED, SILENT or
+/// NOT_SENT (each counted here too).
+pub fn unreachable(frame: u64, ihl: u64, total: u64, code: u64) -> u64 {
     let h = frame + ip.ETH
     // A group hardware address (the low bit of the first byte: every
     // broadcast and multicast frame) or a broadcast destination.
     if ip.octet(frame) & 1 == 1 || ip.is_broadcast(ip.be32(h + 16)) {
         bump(C_SILENT)
-        return
+        return SILENT
     }
     let saved = sync.acquire(sync.icmp())
     let now = timer.ticks()
@@ -240,14 +257,14 @@ pub fn unreachable(frame: u64, ihl: u64, total: u64) {
     if f == 0 || (mw(M_ERROR_AT) != 0 && now + 1 - mw(M_ERROR_AT) < LIMIT) {
         put_mw(C_LIMITED, mw(C_LIMITED) + 1)
         sync.release(sync.icmp(), saved)
-        return
+        return LIMITED
     }
     put_mw(M_ERROR_AT, now + 1)
     sync.release(sync.icmp(), saved)
     let m = f + HALF
     let data = if total - ihl < 8 { total - ihl } else { 8 }
     ip.put_byte(m, 3)
-    ip.put_byte(m + 1, 2)
+    ip.put_byte(m + 1, code)
     ip.put_be16(m + 2, 0)
     ip.put_be32(m + 4, 0)
     // # Safety: the upper half of this module's frame; at most 60 + 8
@@ -256,9 +273,10 @@ pub fn unreachable(frame: u64, ihl: u64, total: u64) {
     ip.put_be16(m + 2, ip.sum(m, 8 + ihl + data))
     if sent(ip.send(ip.be32(h + 12), ip.ICMP, m, 8 + ihl + data)) {
         bump(C_UNREACHABLE)
-    } else {
-        bump(C_NOT_SENT)
+        return SENT
     }
+    bump(C_NOT_SENT)
+    NOT_SENT
 }
 
 /// Send an echo request to `dst` with sequence number `seq` and `bytes`
