@@ -42,7 +42,9 @@
 //!
 //! **Options** (level 1, SOL_SOCKET; uapi `asm-generic/socket.h`):
 //! `SO_RCVTIMEO_OLD` (20) set and read, a 16-byte `timeval`; `SO_TYPE`
-//! (3) and `SO_ERROR` (4) read (2 and 0). Nothing else: no witness asks.
+//! (3) and `SO_ERROR` (4) read (2 and 0); `SO_ACCEPTCONN` (30, px24)
+//! read: 1 for a stream socket that listens, else 0. Nothing else: no
+//! witness asks.
 //!
 //! **Waiting.** `recvfrom` with nothing queued answers -EAGAIN under
 //! `MSG_DONTWAIT` or `O_NONBLOCK`; otherwise it answers `files.WAIT`:
@@ -102,6 +104,7 @@ use arp
 use files
 use ip
 use log
+use sched
 use tcp
 use timer
 use uaccess
@@ -131,6 +134,7 @@ const TCP_USER_TIMEOUT: u64 = 18
 const SO_TYPE: u64 = 3
 const SO_ERROR: u64 = 4
 const SO_RCVTIMEO_OLD: u64 = 20
+const SO_ACCEPTCONN: u64 = 30 // px24: whether the socket listens (lobo asks its inherited listeners)
 
 // errnos (uapi asm-generic/errno-base.h, errno.h)
 const EBADF: u64 = 9
@@ -149,14 +153,17 @@ const EOPNOTSUPP: u64 = 95
 const EAFNOSUPPORT: u64 = 97
 const ENOBUFS: u64 = 105
 const ENOTCONN: u64 = 107
+const EALREADY: u64 = 114
 const EINPROGRESS: u64 = 115
 
 // The process area's words this module keeps (kernel/sched's
 // `proc_area`; 3 is the refusal word kernel/vm, kernel/files and
 // kernel/process share).
 const A_REFUSAL: u64 = 3
-const A_DONE: u64 = 13 // bytes a waiting stream send has queued (a pipe write's word)
-const A_DEADLINE: u64 = 14 // the tick a waiting receive gives up at; 0 none
+// words 13 and 14 were px23's count of bytes a waiting stream send has
+// queued and px22's tick a waiting receive gives up at: px24 keeps both
+// per thread (kernel/sched's `self_done` and `self_until`), since two
+// threads of one process may each wait.
 const A_NAMED: u64 = 15 // the refusals already logged, a bit each
 const A_DETAIL: u64 = 144 // two words: the numbers a refusal's line names
 
@@ -268,8 +275,8 @@ fn is_stream(a: u64, fd: u64) -> bool {
 
 /// The tick the running receive gives up at; 0 when it has no deadline
 /// (kernel/user chooses `block_pipe_until` by it).
-pub fn deadline(a: u64) -> u64 {
-    get(a, A_DEADLINE)
+pub fn deadline(_a: u64) -> u64 {
+    sched.self_until()
 }
 
 /// Descriptor `fd`'s socket: `(0, s)`, or `(-errno, 0)`: -EBADF, or
@@ -424,6 +431,9 @@ pub fn connect(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
         if se != 0 {
             return se
         }
+        if files.nonblocking(a, fd) && tcp.connecting(files.inet_sock(a, fd)) {
+            return neg(EALREADY) // px24: connect(2), a non-blocking socket whose connect is under way
+        }
         let r = tcp.connect(files.inet_sock(a, fd), sip, sport)
         if r == tcp.PENDING {
             if files.nonblocking(a, fd) {
@@ -533,30 +543,30 @@ pub fn recvfrom(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64, addr: 
     if wants {
         let ar = addr_room(pml4, addr, lenp)
         if ar != 0 {
-            put(a, A_DEADLINE, 0)
+            sched.set_self_until(0)
             return ar
         }
     }
     let (got, src, sport, whole) = udp.recv(s, pml4, buf, n, flags & MSG_PEEK != 0)
     if got == udp.EMPTY {
         if flags & MSG_DONTWAIT != 0 || files.nonblocking(a, fd) {
-            put(a, A_DEADLINE, 0)
+            sched.set_self_until(0)
             return neg(EAGAIN)
         }
         let t = udp.timeout(s)
         if t != 0 {
-            let d = get(a, A_DEADLINE)
+            let d = sched.self_until()
             let now = timer.ticks()
             if d == 0 {
-                put(a, A_DEADLINE, now + t)
+                sched.set_self_until(now + t)
             } else if now >= d {
-                put(a, A_DEADLINE, 0)
+                sched.set_self_until(0)
                 return neg(EAGAIN)
             }
         }
         return files.WAIT
     }
-    put(a, A_DEADLINE, 0)
+    sched.set_self_until(0)
     if got >= 0x8000000000000000 {
         return got
     }
@@ -673,7 +683,7 @@ pub fn getsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u6
     if is_stream(a, fd) {
         let c = files.inet_sock(a, fd)
         let o = stream_option(level, option)
-        let plain = level == SOL_SOCKET && (option == SO_TYPE || option == SO_ERROR)
+        let plain = level == SOL_SOCKET && (option == SO_TYPE || option == SO_ERROR || option == SO_ACCEPTCONN)
         if o == NO_OPTION && !plain {
             return refuse(a, R_OPTION, ENOPROTOOPT, level, option)
         }
@@ -693,6 +703,8 @@ pub fn getsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u6
             sv = tcp.option(c, o)
         } else if option == SO_TYPE {
             sv = SOCK_STREAM
+        } else if option == SO_ACCEPTCONN {
+            sv = if tcp.state(c) == tcp.LISTEN { 1 } else { 0 }
         } else {
             sv = tcp.take_error(c)
         }
@@ -704,7 +716,7 @@ pub fn getsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u6
     if e != 0 {
         return e
     }
-    if level != SOL_SOCKET || (option != SO_TYPE && option != SO_ERROR && option != SO_RCVTIMEO_OLD) {
+    if level != SOL_SOCKET || (option != SO_TYPE && option != SO_ERROR && option != SO_RCVTIMEO_OLD && option != SO_ACCEPTCONN) {
         return refuse(a, R_OPTION, ENOPROTOOPT, level, option)
     }
     if !uaccess.readable(pml4, lenp, 4) || !uaccess.writable(pml4, lenp, 4) {
@@ -843,7 +855,7 @@ pub fn stream_send(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64) -> 
         return refuse(a, R_OOB, EOPNOTSUPP, flags, 0)
     }
     let c = files.inet_sock(a, fd)
-    var done = get(a, A_DONE)
+    var done = sched.self_done()
     if done > n {
         done = 0
     }
@@ -852,7 +864,7 @@ pub fn stream_send(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64) -> 
     }
     let (taken, e) = tcp.send(c, pml4, buf + done, n - done)
     if e != 0 {
-        put(a, A_DONE, 0)
+        sched.set_self_done(0)
         if done > 0 {
             return done
         }
@@ -860,13 +872,13 @@ pub fn stream_send(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64) -> 
     }
     done += taken
     if done == n {
-        put(a, A_DONE, 0)
+        sched.set_self_done(0)
         return n
     }
     if flags & MSG_DONTWAIT != 0 || files.nonblocking(a, fd) {
-        put(a, A_DONE, 0)
+        sched.set_self_done(0)
         return if done > 0 { done } else { neg(EAGAIN) }
     }
-    put(a, A_DONE, done)
+    sched.set_self_done(done)
     files.WAIT
 }
