@@ -1,0 +1,826 @@
+//! signal — signals delivered (px26): the calls that set actions and
+//! masks and send signals, the frame a handler runs on, `rt_sigreturn`,
+//! the default actions, and what a signal does to a system call that
+//! was waiting.
+//!
+//! Written from man-pages `signal(7)`, `sigaction(2)`, `sigprocmask(2)`,
+//! `sigreturn(2)`, `sigpending(2)`, `kill(2)`, `tgkill(2)`,
+//! `sigaltstack(2)`, `pipe(7)`; the uapi headers
+//! `arch/x86/include/uapi/asm/signal.h` (the numbers, SA_*),
+//! `asm/sigcontext.h` (`struct sigcontext_64`, the extended state's
+//! software bytes and the two magics), `asm/ucontext.h` (UC_FP_XSTATE,
+//! UC_SIGCONTEXT_SS, UC_STRICT_RESTORE_SS), `asm-generic/ucontext.h`
+//! and `asm-generic/siginfo.h` (siginfo's layout, SI_*, CLD_*, SEGV_*,
+//! ILL_*, FPE_*); the x86-64 psABI (the red zone, the stack's alignment
+//! at a function's entry); the Intel SDM vol. 1 §13 (XSAVE's area); and
+//! black-box runs on Linux of user/elf/threads.c, which prints what a
+//! handler is given (`notes/px26/`). No Linux source; no other
+//! kernel's source; no libc's.
+//!
+//! **When a signal is taken**: at a thread's return to ring 3, and only
+//! there. boot/isr.S's common path calls kernel/interrupts, which hands
+//! the frame it is about to resume to `on_return`: while the running
+//! thread has a pending signal it does not block (kernel/sched keeps
+//! the sets and picks the thread: a process's signal goes to its leader
+//! when the leader has it unblocked, else to its lowest-numbered thread
+//! that has), the lowest-numbered is taken and acted on. So a signal a
+//! thread sends itself is delivered before `kill` returns to it, and
+//! all that are pending are taken before one instruction of the
+//! program runs: each handler's frame is laid on top of the last, so
+//! the highest-numbered runs first (measured on Linux: 15, 12, 10).
+//! A thread waiting in a system call is made ready by kernel/sched when
+//! a signal arrives that will run a handler or end its process.
+//!
+//! **What a taken signal does** (`act`):
+//! - SIG_IGN, or the default for SIGCHLD, SIGURG, SIGWINCH and SIGCONT:
+//!   nothing.
+//! - the default for SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU: PAX stops no
+//!   process. The signal is dropped and a line says so:
+//!   `user: <name> pid <n> signal <s>: refused: stopping a process (no
+//!   job control), the signal is dropped`.
+//! - any default for pid 1: nothing (`kill(2)`: init gets only the
+//!   signals it has a handler for).
+//! - any other default: the process ends, every thread of it, its wait
+//!   status the signal's number (no core is written, so bit 7 is
+//!   clear): `user: <name> pid <n> killed: SIG<NAME>[, a write to a
+//!   pipe with no reader] after <r> runs`.
+//! - a handler: the frame below, and the thread resumes in the handler.
+//!
+//! **The frame**, on the thread's own stack (there is no alternate
+//! stack: `sigaltstack` is not a call PAX has, and SA_ONSTACK means
+//! nothing), below the 128-byte red zone, from the top down:
+//! - the extended state, 64-aligned: what XSAVE writes for the features
+//!   XCR0 enables (the FXSAVE image, the header, AVX's part), with the
+//!   software bytes at 464 (magic 0x46505853, the size with its closing
+//!   word, XCR0's features, the size) and the word 0x46505845 after it;
+//!   on a CPU without XSAVE, FXSAVE's 512 bytes and no magic;
+//! - the siginfo, 128 bytes: si_signo, si_errno 0, si_code, then by
+//!   kind the sender's pid and uid 0 (`kill`, `tgkill`, a pipe), the
+//!   child's pid, uid 0 and status (SIGCHLD), or the address (a fault);
+//! - the ucontext, 304 bytes: uc_flags (7 with XSAVE: the three UC_*
+//!   bits; 6 without), uc_link 0, a zero stack triple, the sigcontext
+//!   (r8-r15, rdi, rsi, rbp, rbx, rdx, rax, rcx, rsp, rip, eflags, cs
+//!   and ss, err, trapno, the old mask, cr2, the extended state's
+//!   address), then the old mask again;
+//! - the restorer's address (SA_RESTORER's, which every libc gives),
+//!   where the handler's `ret` finds it, placed so RSP + 8 is a
+//!   multiple of 16.
+//! The handler starts with RDI the number, RSI the siginfo, RDX the
+//! ucontext, RAX 0, DF and TF clear, and the x87/SSE state fresh (FCW
+//! 0x037f, MXCSR 0x1f80: measured on Linux); its mask is the old one
+//! with `sa_mask` and, without SA_NODEFER, the signal itself; under
+//! SA_RESETHAND the action's handler is the default again (its flags
+//! stay: measured). `rt_sigreturn` (15) finds the ucontext at RSP,
+//! puts back every general register, RIP, RSP, the flags a program may
+//! set, the mask and the extended state (made loadable first:
+//! kernel/fpu's `adopt`), and leaves by IRETQ so RCX and R11 come back
+//! too. A frame the stack has no room for, a ucontext that cannot be
+//! read, a RIP outside the user half or an extended state XRSTOR would
+//! refuse ends the process with SIGSEGV.
+//!
+//! **Where PAX's frame differs from Linux's, by name**: the selectors
+//! in the sigcontext are PAX's (cs 0x23, ss 0x1b; Linux's are 0x33 and
+//! 0x2b), ring 3 both; `rt_sigreturn` ignores what a handler wrote
+//! there.
+//!
+//! **A system call that was waiting** (kernel/sched's W_*): when a
+//! handler is about to run and the thread was made ready out of a
+//! wait, the saved context is that of the call, to be run again or to
+//! answer -EINTR (`signal(7)`, measured with user/elf/threads.c):
+//! - a read of the console, a pipe or a socketpair, a pipe write,
+//!   `wait4`, `waitid`: run again under SA_RESTART, else -EINTR;
+//! - a futex wait with no timeout: the same;
+//! - `nanosleep`, `clock_nanosleep`: -EINTR always, the time left
+//!   written for a relative sleep;
+//! - a futex wait with a timeout, a receive with one: -EINTR always.
+//! A signal that does nothing wakes nobody; one that ends the process
+//! needs no answer.
+//!
+//! **Sending**: `kill` (62) — a pid is that process; 0 and a negative
+//! group are every process (PAX has one process group); -1 is every
+//! process but pid 1 and the caller; signal 0 only asks; -ESRCH,
+//! -EINVAL. `tgkill` (234) and `tkill` (200): that thread, -ESRCH when
+//! it has ended. The terminal's signals (`tty`): every process.
+//! Real-time signals (32-64) are signals like the rest: one instance
+//! pending, not a queue (named).
+//!
+//! The actions are kernel/process's words in the process area; masks
+//! and pending sets are kernel/sched's. No region, no heap: `act` may
+//! end the thread.
+
+use files
+use fpu
+use frames
+use log
+use paging
+use process
+use sched
+use timer
+use uaccess
+use vm
+
+extern "c" fn pax_cr2() -> u64
+
+const USER_CS: u64 = 0x23
+const USER_SS: u64 = 0x1b
+
+// boot/isr.S's frame, as word indices.
+const W_R15: u64 = 0
+const W_R14: u64 = 1
+const W_R13: u64 = 2
+const W_R12: u64 = 3
+const W_R11: u64 = 4
+const W_R10: u64 = 5
+const W_R9: u64 = 6
+const W_R8: u64 = 7
+const W_RBP: u64 = 8
+const W_RDI: u64 = 9
+const W_RSI: u64 = 10
+const W_RDX: u64 = 11
+const W_RCX: u64 = 12
+const W_RBX: u64 = 13
+const W_RAX: u64 = 14
+const W_VECTOR: u64 = 15
+const W_ERROR: u64 = 16
+const W_RIP: u64 = 17
+const W_CS: u64 = 18
+const W_RFLAGS: u64 = 19
+const W_RSP: u64 = 20
+const W_SS: u64 = 21
+// A vector no gate has and boot/isr.S does not take for SYSRETQ's: a
+// frame a signal rewrote leaves by IRETQ, which restores RCX and R11.
+const SIGNAL_VECTOR: u64 = 0x103
+
+// The area's signal actions (kernel/process): four words a signal.
+const SIG_WORDS: u64 = 256
+const SIG_DFL: u64 = 0
+const SIG_IGN: u64 = 1
+const NSIG: u64 = 64
+const UNBLOCKABLE: u64 = 0x40100 // SIGKILL's bit (8) and SIGSTOP's (18)
+
+// uapi asm/signal.h.
+const SA_SIGINFO: u64 = 0x4
+const SA_RESTORER: u64 = 0x04000000
+const SA_NODEFER: u64 = 0x40000000
+const SA_RESETHAND: u64 = 0x80000000
+const SA_RESTART: u64 = 0x10000000
+const SIG_BLOCK: u64 = 0
+const SIG_UNBLOCK: u64 = 1
+const SIG_SETMASK: u64 = 2
+const SIGILL: u64 = 4
+const SIGTRAP: u64 = 5
+const SIGBUS: u64 = 7
+const SIGFPE: u64 = 8
+const SIGKILL: u64 = 9
+const SIGSEGV: u64 = 11
+const SIGPIPE: u64 = 13
+const SIGCHLD: u64 = 17
+const SIGCONT: u64 = 18
+const SIGSTOP: u64 = 19
+const SIGTSTP: u64 = 20
+const SIGTTIN: u64 = 21
+const SIGTTOU: u64 = 22
+const SIGURG: u64 = 23
+const SIGWINCH: u64 = 28
+
+// siginfo's codes (uapi asm-generic/siginfo.h).
+const SI_USER: u64 = 0
+const SI_KERNEL: u64 = 0x80
+const SI_TKILL: u64 = 0xfffffffa // -6 as an int
+const CLD_EXITED: u64 = 1
+const CLD_KILLED: u64 = 2
+const SEGV_MAPERR: u64 = 1
+const SEGV_ACCERR: u64 = 2
+const ILL_ILLOPN: u64 = 2
+const FPE_INTDIV: u64 = 1
+const FPE_FLTINV: u64 = 7
+
+// The frame's pieces.
+const RED_ZONE: u64 = 128
+const SIGINFO_BYTES: u64 = 128
+const UC_BYTES: u64 = 304
+const UC_FLAGS_XSTATE: u64 = 0x7 // UC_FP_XSTATE | UC_SIGCONTEXT_SS | UC_STRICT_RESTORE_SS
+const UC_FLAGS_PLAIN: u64 = 0x6
+const UC_MCONTEXT: u64 = 40
+const UC_SIGMASK: u64 = 296
+const MAGIC1: u64 = 0x46505853
+const MAGIC2: u64 = 0x46505845
+// RFLAGS bits a program may set through a saved context: CF PF AF ZF
+// SF TF DF OF, RF, AC, ID. IF stays set, IOPL 0.
+const FLAGS_USER: u64 = 0x250dd5
+const FLAGS_FIXED: u64 = 0x202
+const FLAG_TF: u64 = 0x100
+const FLAG_DF: u64 = 0x400
+
+// -errno as %rax carries it.
+const NEG_EPERM: u64 = 0xffffffffffffffff // -1
+const NEG_ESRCH: u64 = 0xfffffffffffffffd // -3
+const NEG_EINTR: u64 = 0xfffffffffffffffc // -4
+const NEG_EFAULT: u64 = 0xfffffffffffffff2 // -14
+const NEG_EINVAL: u64 = 0xffffffffffffffea // -22
+
+const NS_PER_SEC: u64 = 1000000000
+const NS_PER_TICK: u64 = 10000151 // kernel/user's
+
+fn word(f: u64, i: u64) -> u64 {
+    // # Safety: `f` is the trampoline's frame (22 words), live for the
+    // handler that passed it; i < 22.
+    unsafe { ((f + i * 8) as *u64).read_volatile() }
+}
+
+fn put_word(f: u64, i: u64, v: u64) {
+    // # Safety: as `word`.
+    unsafe { ((f + i * 8) as *u64).write_volatile(v) }
+}
+
+fn area() -> u64 {
+    sched.proc_area(sched.self_slot())
+}
+
+fn aget(a: u64, i: u64) -> u64 {
+    // # Safety: a process area (sched.proc_area), 512 words; i < 512.
+    unsafe { ((a + i * 8) as *u64).read_volatile() }
+}
+
+fn aput(a: u64, i: u64, v: u64) {
+    // # Safety: as `aget`.
+    unsafe { ((a + i * 8) as *u64).write_volatile(v) }
+}
+
+fn bit(sig: u64) -> u64 {
+    1 << (sig - 1)
+}
+
+/// A signal's name, for the lines.
+fn name(sig: u64) -> str {
+    match sig {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        4 => "SIGILL",
+        5 => "SIGTRAP",
+        6 => "SIGABRT",
+        7 => "SIGBUS",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        10 => "SIGUSR1",
+        11 => "SIGSEGV",
+        12 => "SIGUSR2",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        16 => "SIGSTKFLT",
+        17 => "SIGCHLD",
+        18 => "SIGCONT",
+        19 => "SIGSTOP",
+        20 => "SIGTSTP",
+        21 => "SIGTTIN",
+        22 => "SIGTTOU",
+        23 => "SIGURG",
+        24 => "SIGXCPU",
+        25 => "SIGXFSZ",
+        26 => "SIGVTALRM",
+        27 => "SIGPROF",
+        28 => "SIGWINCH",
+        29 => "SIGIO",
+        30 => "SIGPWR",
+        31 => "SIGSYS",
+        _ => "a real-time signal",
+    }
+}
+
+// --- the calls ------------------------------------------------------------------
+
+/// `rt_sigprocmask(how, set, oldset, sigsetsize)`: the running thread's
+/// mask (px14 kept one a process; a thread has its own).
+pub fn sigprocmask(how: u64, set: u64, oldset: u64, size: u64) -> u64 {
+    if size != 8 {
+        return NEG_EINVAL
+    }
+    let pml4 = paging.live()
+    let old = sched.self_sigmask()
+    var m = old
+    if set != 0 {
+        if !uaccess.readable(pml4, set, 8) {
+            return NEG_EFAULT
+        }
+        let v = uaccess.get64(pml4, set)
+        let h = how & 0xffffffff
+        if h == SIG_BLOCK {
+            m = m | v
+        } else if h == SIG_UNBLOCK {
+            m = m & !v
+        } else if h == SIG_SETMASK {
+            m = v
+        } else {
+            return NEG_EINVAL
+        }
+        m = m & !UNBLOCKABLE
+    }
+    if oldset != 0 {
+        if !uaccess.writable(pml4, oldset, 8) {
+            return NEG_EFAULT
+        }
+        uaccess.put(pml4, oldset, old, 8)
+    }
+    if m != old {
+        sched.set_self_sigmask(m)
+        sched.masks_changed()
+    }
+    0
+}
+
+/// `rt_sigaction(sig, act, oldact, sigsetsize)`: the kernel's `struct
+/// sigaction` on x86-64 is four words (handler, flags, restorer, mask).
+/// SIGKILL's and SIGSTOP's cannot be set (-EINVAL) and can be read.
+pub fn sigaction(sig: u64, act: u64, oldact: u64, size: u64) -> u64 {
+    let n = sig & 0xffffffff
+    if size != 8 || n < 1 || n > NSIG || (act != 0 && (n == SIGKILL || n == SIGSTOP)) {
+        return NEG_EINVAL
+    }
+    let pml4 = paging.live()
+    let a = area()
+    let w = SIG_WORDS + (n - 1) * 4
+    if act != 0 && !uaccess.readable(pml4, act, 32) {
+        return NEG_EFAULT
+    }
+    if oldact != 0 {
+        if !uaccess.writable(pml4, oldact, 32) {
+            return NEG_EFAULT
+        }
+        var i: u64 = 0
+        while i < 4 {
+            uaccess.put(pml4, oldact + i * 8, aget(a, w + i), 8)
+            i += 1
+        }
+    }
+    if act != 0 {
+        var i: u64 = 0
+        while i < 4 {
+            aput(a, w + i, uaccess.get64(pml4, act + i * 8))
+            i += 1
+        }
+        aput(a, w + 3, aget(a, w + 3) & !UNBLOCKABLE)
+        sched.masks_changed() // a pending signal's action may now wake a thread
+    }
+    0
+}
+
+/// `rt_sigpending(set, sigsetsize)`: what is pending for the thread and
+/// for its process and blocked by the thread.
+pub fn sigpending(set: u64, size: u64) -> u64 {
+    if size != 8 {
+        return NEG_EINVAL
+    }
+    let pml4 = paging.live()
+    if !uaccess.writable(pml4, set, 8) {
+        return NEG_EFAULT
+    }
+    uaccess.put(pml4, set, sched.self_pending() & sched.self_sigmask(), 8)
+    0
+}
+
+/// A 32-bit argument read as an int, sign and magnitude.
+fn int_of(x: u64) -> (bool, u64) {
+    let v = x & 0xffffffff
+    if v >= 0x80000000 {
+        return (true, 0x100000000 - v)
+    }
+    (false, v)
+}
+
+/// `kill(pid, sig)`.
+pub fn kill(pid: u64, sig: u64) -> u64 {
+    let s = sig & 0xffffffff
+    if s > NSIG {
+        return NEG_EINVAL
+    }
+    let me = sched.self_pid()
+    let info = sched.sig_info(sched.I_USER, me, 0)
+    let (neg, p) = int_of(pid)
+    if !neg && p != 0 {
+        return if sched.raise_pid(p, s, info) { 0 } else { NEG_ESRCH }
+    }
+    if neg && p == 1 {
+        // Every process but pid 1 and the caller (`kill(2)`).
+        return if sched.raise_all(s, info, me, true) > 0 { 0 } else { NEG_ESRCH }
+    }
+    // 0, or a group: PAX has one process group, every process's.
+    let _n = sched.raise_all(s, info, 0, false)
+    0
+}
+
+/// `tgkill(tgid, tid, sig)` and `tkill(tid, sig)` (`tgid` 0).
+pub fn tgkill(tgid: u64, tid: u64, sig: u64, any_group: bool) -> u64 {
+    let s = sig & 0xffffffff
+    let (gneg, g) = int_of(tgid)
+    let (tneg, t) = int_of(tid)
+    if s > NSIG || tneg || t == 0 || (!any_group && (gneg || g == 0)) {
+        return NEG_EINVAL
+    }
+    let info = sched.sig_info(sched.I_TKILL, sched.self_pid(), 0)
+    if sched.raise_tid(if any_group { 0 } else { g }, t, s, info) {
+        return 0
+    }
+    NEG_ESRCH
+}
+
+/// A write met a pipe with no reader (kernel/user, before it answers
+/// -EPIPE): SIGPIPE for the writing thread, from itself (`pipe(7)`;
+/// siginfo's SI_USER with its own pid, measured).
+pub fn pipe() {
+    sched.raise_thread(sched.self_slot(), SIGPIPE, sched.sig_info(sched.I_PIPE, sched.self_pid(), 0))
+}
+
+/// The terminal's signals (kernel/console's ISIG; `mask` has bit n - 1
+/// for each signal a key raised): for every process — PAX has one
+/// session and one process group with the console its controlling
+/// terminal, so the "foreground process group" Linux signals is all of
+/// them. Called from the console's interrupt, IF clear.
+pub fn tty(mask: u64) {
+    var sig: u64 = 1
+    while sig <= 32 {
+        if mask & bit(sig) != 0 {
+            let _n = sched.raise_all(sig, sched.sig_info(sched.I_KERNEL, 0, 0), 0, false)
+        }
+        sig += 1
+    }
+}
+
+// --- delivery ---------------------------------------------------------------------
+
+/// `user: <name> pid <n>` for the running thread (kernel/process's).
+fn who() {
+    process.who()
+}
+
+/// The running thread's process ends by signal `sig`: the line, its
+/// descriptors closed, every thread ended; the next thread's frame.
+fn die(f: u64, sig: u64, why: str) -> u64 {
+    who()
+    log.put(" killed: ")
+    log.put(name(sig))
+    log.put(why)
+    log.put(" after ")
+    log.dec(sched.self_runs() as int)
+    log.put(" runs")
+    log.end()
+    files.close_all(area())
+    sched.end_with(f, sig)
+}
+
+/// The siginfo at user `si` for signal `sig` with origin word `info`
+/// (kernel/sched's `sig_info`); `addr` is a fault's address.
+fn put_siginfo(pml4: u64, si: u64, sig: u64, code: u64, pid: u64, status: u64, addr: u64, fault: bool) {
+    uaccess.zero(pml4, si, SIGINFO_BYTES)
+    uaccess.put(pml4, si, sig, 4)
+    uaccess.put(pml4, si + 8, code, 4)
+    if fault {
+        uaccess.put(pml4, si + 16, addr, 8)
+    } else {
+        uaccess.put(pml4, si + 16, pid, 4)
+        uaccess.put(pml4, si + 24, status, 4)
+    }
+}
+
+/// When the thread came out of a waiting system call (kernel/sched's
+/// `self_wait`), make the frame `f` the context a handler returns to:
+/// the call again, or its -EINTR. `restart`: the action has SA_RESTART.
+fn settle_wait(f: u64, restart: bool) {
+    let (w, arg) = sched.self_wait()
+    if w == sched.W_NONE {
+        return
+    }
+    if w == sched.W_REWOUND {
+        // The frame is rewound to the `syscall` (two bytes), %rax its number.
+        if !restart {
+            put_word(f, W_RIP, word(f, W_RIP) + 2)
+            put_word(f, W_RAX, NEG_EINTR)
+        }
+        return
+    }
+    if w == sched.W_TIMED_REWOUND {
+        put_word(f, W_RIP, word(f, W_RIP) + 2)
+        put_word(f, W_RAX, NEG_EINTR)
+        return
+    }
+    if w == sched.W_TIMED {
+        put_word(f, W_RAX, NEG_EINTR) // over the -ETIMEDOUT the wait left
+        return
+    }
+    if w == sched.W_FUTEX {
+        if restart {
+            put_word(f, W_RIP, word(f, W_RIP) - 2)
+            put_word(f, W_RAX, 202)
+        } else {
+            put_word(f, W_RAX, NEG_EINTR)
+        }
+        return
+    }
+    if w == sched.W_SLEEP {
+        put_word(f, W_RAX, NEG_EINTR)
+        // `arg`: where a relative sleep's time left goes, and the tick it
+        // would have ended at, in kernel/sched's wake word (still there).
+        if arg != 0 {
+            let pml4 = paging.live()
+            if uaccess.writable(pml4, arg, 16) {
+                let end = sched.self_wake()
+                let now = timer.ticks()
+                let left = if end > now { (end - now) * NS_PER_TICK } else { 0 }
+                uaccess.put(pml4, arg, left / NS_PER_SEC, 8)
+                uaccess.put(pml4, arg + 8, left % NS_PER_SEC, 8)
+            }
+        }
+    }
+}
+
+/// Lay signal `sig`'s frame on the user stack and point `f` at the
+/// handler. False when the stack has no room (nothing changed).
+/// `fault`: siginfo carries `addr`, and the sigcontext `trapno`, `err`
+/// and `cr2`.
+fn enter(f: u64, sig: u64, code: u64, pid: u64, status: u64, fault: bool, addr: u64, trapno: u64, err: u64) -> bool {
+    let a = area()
+    let pml4 = paging.live()
+    let w = SIG_WORDS + (sig - 1) * 4
+    let handler = aget(a, w)
+    let flags = aget(a, w + 1)
+    let restorer = aget(a, w + 2)
+    let amask = aget(a, w + 3)
+    let s = sched.self_slot()
+    let fb = fpu.frame_bytes()
+    let xs = fpu.xsave()
+    // Top down: the extended state (and its closing word), 64-aligned;
+    // then siginfo, ucontext and the return address, with (rsp + 8) % 16
+    // == 0 at the handler's first instruction.
+    var sp = word(f, W_RSP) - RED_ZONE
+    var fp: u64 = 0
+    if fb != 0 {
+        if sp < fb + 8 + 64 {
+            return false
+        }
+        fp = (sp - fb - 8) & !63
+        sp = fp
+    }
+    if sp < SIGINFO_BYTES + UC_BYTES + 64 {
+        return false
+    }
+    let fr = ((sp - SIGINFO_BYTES - UC_BYTES - 8) & !15) - 8
+    let uc = fr + 8
+    let si = uc + UC_BYTES
+    let top = if fb != 0 { fp + fb + 8 } else { si + SIGINFO_BYTES }
+    if !uaccess.writable(pml4, fr, top - fr) {
+        return false
+    }
+    // The extended state: the live registers, as XSAVE writes them.
+    if fb != 0 {
+        let src = fpu.capture(s)
+        let _ok = uaccess.copy_out(pml4, fp, src, fb)
+        if xs {
+            uaccess.zero(pml4, fp + 464, 48)
+            uaccess.put(pml4, fp + 464, MAGIC1, 4)
+            uaccess.put(pml4, fp + 468, fb + 4, 4)
+            uaccess.put(pml4, fp + 472, fpu.features(), 8)
+            uaccess.put(pml4, fp + 480, fb, 4)
+            uaccess.put(pml4, fp + fb, MAGIC2, 4)
+        }
+    }
+    put_siginfo(pml4, si, sig, code, pid, status, addr, fault)
+    let old = sched.self_sigmask()
+    uaccess.zero(pml4, uc, UC_BYTES)
+    uaccess.put(pml4, uc, if xs { UC_FLAGS_XSTATE } else { UC_FLAGS_PLAIN }, 8)
+    let m = uc + UC_MCONTEXT
+    uaccess.put(pml4, m, word(f, W_R8), 8)
+    uaccess.put(pml4, m + 8, word(f, W_R9), 8)
+    uaccess.put(pml4, m + 16, word(f, W_R10), 8)
+    uaccess.put(pml4, m + 24, word(f, W_R11), 8)
+    uaccess.put(pml4, m + 32, word(f, W_R12), 8)
+    uaccess.put(pml4, m + 40, word(f, W_R13), 8)
+    uaccess.put(pml4, m + 48, word(f, W_R14), 8)
+    uaccess.put(pml4, m + 56, word(f, W_R15), 8)
+    uaccess.put(pml4, m + 64, word(f, W_RDI), 8)
+    uaccess.put(pml4, m + 72, word(f, W_RSI), 8)
+    uaccess.put(pml4, m + 80, word(f, W_RBP), 8)
+    uaccess.put(pml4, m + 88, word(f, W_RBX), 8)
+    uaccess.put(pml4, m + 96, word(f, W_RDX), 8)
+    uaccess.put(pml4, m + 104, word(f, W_RAX), 8)
+    uaccess.put(pml4, m + 112, word(f, W_RCX), 8)
+    uaccess.put(pml4, m + 120, word(f, W_RSP), 8)
+    uaccess.put(pml4, m + 128, word(f, W_RIP), 8)
+    uaccess.put(pml4, m + 136, word(f, W_RFLAGS), 8)
+    uaccess.put(pml4, m + 144, USER_CS | (USER_SS << 48), 8) // cs, gs, fs, ss
+    uaccess.put(pml4, m + 152, err, 8)
+    uaccess.put(pml4, m + 160, trapno, 8)
+    uaccess.put(pml4, m + 168, old, 8) // oldmask
+    uaccess.put(pml4, m + 176, if fault { addr } else { 0 }, 8) // cr2
+    uaccess.put(pml4, m + 184, fp, 8) // fpstate
+    uaccess.put(pml4, uc + UC_SIGMASK, old, 8)
+    uaccess.put(pml4, fr, restorer, 8)
+    // The handler's first instruction.
+    var nm = old | amask
+    if flags & SA_NODEFER == 0 {
+        nm = nm | bit(sig)
+    }
+    sched.set_self_sigmask(nm & !UNBLOCKABLE)
+    if flags & SA_RESETHAND != 0 {
+        aput(a, w, SIG_DFL) // the handler alone: the flags stay (measured)
+    }
+    fpu.exec(s) // a fresh x87/SSE state (measured: FCW 0x037f, MXCSR 0x1f80)
+    put_word(f, W_RIP, handler)
+    put_word(f, W_RSP, fr)
+    put_word(f, W_RDI, sig)
+    put_word(f, W_RSI, si)
+    put_word(f, W_RDX, uc)
+    put_word(f, W_RAX, 0)
+    put_word(f, W_RFLAGS, (word(f, W_RFLAGS) & !(FLAG_TF | FLAG_DF)) | FLAGS_FIXED)
+    put_word(f, W_CS, USER_CS)
+    put_word(f, W_SS, USER_SS)
+    put_word(f, W_VECTOR, SIGNAL_VECTOR)
+    let n = sched.count_signal()
+    if n % 2500 == 0 && !log.quiet() {
+        // The census line (tests/mpx3-threads' soak reads four of them).
+        who()
+        log.put(" signals: ")
+        log.dec(n as int)
+        log.put(" delivered since boot; slots busy ")
+        log.dec(sched.slots_busy() as int)
+        log.put(", frames free ")
+        log.dec(frames.free_count() as int)
+        log.put(", this frame at ")
+        log.hex(fr)
+        log.end()
+    }
+    sched.masks_changed()
+    true
+}
+
+/// siginfo's code, pid and status for an origin word.
+fn origin(info: u64) -> (u64, u64, u64) {
+    let kind = info & 0xff
+    let pid = (info >> 8) & 0xffffff
+    let status = info >> 32
+    if kind == sched.I_TKILL {
+        return (SI_TKILL, pid, 0)
+    }
+    if kind == sched.I_KERNEL {
+        return (SI_KERNEL, 0, 0)
+    }
+    if kind == sched.I_CHLD_EXITED {
+        return (CLD_EXITED, pid, status)
+    }
+    if kind == sched.I_CHLD_KILLED {
+        return (CLD_KILLED, pid, status)
+    }
+    (SI_USER, pid, 0)
+}
+
+/// Act on signal `sig` (origin `info`), taken by the running thread
+/// about to resume the frame `f`: the frame to resume.
+fn act(f: u64, sig: u64, info: u64) -> u64 {
+    let a = area()
+    let w = SIG_WORDS + (sig - 1) * 4
+    var h = aget(a, w)
+    if sig == SIGKILL || sig == SIGSTOP {
+        h = SIG_DFL
+    }
+    if h == SIG_IGN {
+        return f
+    }
+    if h == SIG_DFL {
+        if sched.self_pid() == 1 {
+            return f
+        }
+        if sig == SIGCHLD || sig == SIGURG || sig == SIGWINCH || sig == SIGCONT {
+            return f
+        }
+        if sig == SIGSTOP || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU {
+            who()
+            log.put(" signal ")
+            log.dec(sig as int)
+            log.put(" (")
+            log.put(name(sig))
+            log.put("): refused: stopping a process (no job control), the signal is dropped")
+            log.end()
+            return f
+        }
+        return die(f, sig, if info & 0xff == sched.I_PIPE { ", a write to a pipe with no reader" } else { "" })
+    }
+    settle_wait(f, aget(a, w + 1) & SA_RESTART != 0)
+    let (code, pid, status) = origin(info)
+    if !enter(f, sig, code, pid, status, false, 0, 0, 0) {
+        return die(f, SIGSEGV, ", no room on its stack for a signal's frame")
+    }
+    f
+}
+
+/// The frame `f` is about to be resumed (kernel/interrupts, for every
+/// vector): when it returns to ring 3 and the running thread has a
+/// signal to take, take every one; the frame to resume, which is
+/// another thread's when a signal ended this one's process.
+pub fn on_return(f: u64) -> u64 {
+    var g = f
+    var guard: u64 = 0
+    while guard < 256 {
+        if word(g, W_CS) & 3 != 3 || !sched.signal_waits() {
+            return g
+        }
+        let (sig, info) = sched.take_signal()
+        if sig == 0 {
+            return g
+        }
+        g = act(g, sig, info)
+        guard += 1
+    }
+    g
+}
+
+/// `rt_sigreturn()` from the frame `f` (a system call's): the frame as
+/// the ucontext at its RSP says, or the next thread's when that cannot
+/// be honoured and the process ends with SIGSEGV.
+pub fn sigreturn(f: u64) -> u64 {
+    let pml4 = paging.live()
+    let uc = word(f, W_RSP)
+    if !uaccess.readable(pml4, uc, UC_BYTES) {
+        return die(f, SIGSEGV, ", rt_sigreturn with no frame to read")
+    }
+    let m = uc + UC_MCONTEXT
+    let rip = uaccess.get64(pml4, m + 128)
+    let rsp = uaccess.get64(pml4, m + 120)
+    if rip >= paging.USER_TOP || rsp >= paging.USER_TOP {
+        return die(f, SIGSEGV, ", rt_sigreturn to an address outside the user half")
+    }
+    let fp = uaccess.get64(pml4, m + 184)
+    let fb = fpu.frame_bytes()
+    if fp != 0 && fb != 0 {
+        let s = sched.self_slot()
+        let dst = fpu.area(s)
+        if !uaccess.copy_in(pml4, dst, fp, fb) || !fpu.adopt(s) {
+            fpu.exec(s)
+            return die(f, SIGSEGV, ", rt_sigreturn with an extended state that cannot be loaded")
+        }
+    }
+    put_word(f, W_R8, uaccess.get64(pml4, m))
+    put_word(f, W_R9, uaccess.get64(pml4, m + 8))
+    put_word(f, W_R10, uaccess.get64(pml4, m + 16))
+    put_word(f, W_R11, uaccess.get64(pml4, m + 24))
+    put_word(f, W_R12, uaccess.get64(pml4, m + 32))
+    put_word(f, W_R13, uaccess.get64(pml4, m + 40))
+    put_word(f, W_R14, uaccess.get64(pml4, m + 48))
+    put_word(f, W_R15, uaccess.get64(pml4, m + 56))
+    put_word(f, W_RDI, uaccess.get64(pml4, m + 64))
+    put_word(f, W_RSI, uaccess.get64(pml4, m + 72))
+    put_word(f, W_RBP, uaccess.get64(pml4, m + 80))
+    put_word(f, W_RBX, uaccess.get64(pml4, m + 88))
+    put_word(f, W_RDX, uaccess.get64(pml4, m + 96))
+    put_word(f, W_RAX, uaccess.get64(pml4, m + 104))
+    put_word(f, W_RCX, uaccess.get64(pml4, m + 112))
+    put_word(f, W_RSP, rsp)
+    put_word(f, W_RIP, rip)
+    put_word(f, W_RFLAGS, (uaccess.get64(pml4, m + 136) & FLAGS_USER) | FLAGS_FIXED)
+    put_word(f, W_CS, USER_CS)
+    put_word(f, W_SS, USER_SS)
+    put_word(f, W_VECTOR, SIGNAL_VECTOR)
+    let mask = uaccess.get64(pml4, uc + UC_SIGMASK) & !UNBLOCKABLE
+    sched.set_self_sigmask(mask)
+    sched.masks_changed()
+    f
+}
+
+/// An exception in ring 3 (kernel/user's `kill`, vector `v`, frame
+/// `f`): when the thread has a handler for its signal and does not
+/// block it, the handler runs with the fault's siginfo and `f` is
+/// returned pointing at it; otherwise 0, and kernel/user ends the
+/// process as before px26 (Linux too ends a process whose fault's
+/// signal is blocked or ignored: measured).
+pub fn fault(f: u64, v: u64) -> u64 {
+    let sig = process.fault_signal(v)
+    let a = area()
+    let w = SIG_WORDS + (sig - 1) * 4
+    let h = aget(a, w)
+    if h == SIG_DFL || h == SIG_IGN || sched.self_sigmask() & bit(sig) != 0 {
+        return 0
+    }
+    var code = SI_KERNEL
+    var addr: u64 = 0
+    let err = word(f, W_ERROR)
+    if v == 14 {
+        // # Safety: cpu.S's MOV from CR2; this page fault set it.
+        addr = unsafe { pax_cr2() }
+        // Nothing at the address is SEGV_MAPERR; a page that is there, or
+        // reserved (PROT_NONE), and refuses the access is SEGV_ACCERR.
+        code = if err & 1 != 0 || vm.reserved(area(), addr) { SEGV_ACCERR } else { SEGV_MAPERR }
+    } else if v == 0 {
+        code = FPE_INTDIV
+        addr = word(f, W_RIP)
+    } else if v == 6 {
+        code = ILL_ILLOPN
+        addr = word(f, W_RIP)
+    } else if v == 16 || v == 19 {
+        code = FPE_FLTINV
+        addr = word(f, W_RIP)
+    }
+    let _w = sched.self_wait()
+    if !enter(f, sig, code, 0, 0, true, addr, v, err) {
+        return 0
+    }
+    f
+}
