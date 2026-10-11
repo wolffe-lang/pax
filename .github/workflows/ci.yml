@@ -1049,6 +1049,92 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px27: the writable file tree. user/elf/tree.c (tools/mkprobes) is
+  # the first program on kmain_console and, the same file, pid 1 on
+  # Linux with its root a tmpfs; and a session is typed into pelt with
+  # boreutils' mkdir, rmdir, rm, mv and cp at user/boreutils.pin (bu21).
+  # The programs under test remove files, and one session types `rm -rf
+  # /`: nothing under test runs on this runner itself. The Linux side of
+  # every session is tools/linux-tree, a throwaway container (docker,
+  # no network, nothing of the runner mounted but a staging directory
+  # under build/). tests/mpx3-tree: the build (T0), the outputs
+  # byte-identical to Linux's (T1), what PAX refuses by name, counted
+  # (T2), -ENOSYS and deaths as named (T3), every frame and inode back
+  # (T4), the soak — 10,000 rounds of create, write, rename, unlink —
+  # with the kernel's books flat and the fill to ENOSPC and back (T5),
+  # Linux's root intact after `rm -rf /` (T6), 16 MiB written and read
+  # (T7), the end (T8); both tiers, BIOS and UEFI. The suite stops at
+  # the first failing probes boot, each boot has a 300 s deadline, and
+  # the job ends at 60 minutes: a kernel that hangs here fails fast.
+  mpx3-tree:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          qemu-system-x86_64 --version
+          clang --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx3-tree-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the image the Linux side's containers are made from
+        run: |
+          docker pull docker.io/library/python:3.12-slim
+          docker image inspect --format '{{.Id}} {{.RepoDigests}}' docker.io/library/python:3.12-slim
+
+      - name: the writable tree against Linux's tmpfs, the typed session, the soak and the fill; both tiers, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+        run: tests/mpx3-tree
+
+      - name: keep the programs' sums, the Linux side, the outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx3-tree-linux
+          path: |
+            build/mpx3-tree/probes.txt
+            build/mpx3-tree/bore/sums.txt
+            build/mpx3-tree/peltbin/sums.txt
+            build/mpx3-tree/linux/
+            build/mpx3-tree/*.initramfs.txt
+            build/mpx3-tree/*/kmain_console.elf
+            build/mpx3-tree/*/*.log
+            build/mpx3-tree-*.session
+            build/mpx3-tree-*.session.linux
+            build/mpx3-tree-*.log
+            build/mpx3-tree-*.norm
+            build/mpx3-tree-*.meta
+            build/mpx3-tree-*.halt
+            build/mpx3-tree-*.verdict
+            build/mpx3-tree-*.typed
+            build/mpx3-tree-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   # px18: the speaker. pelt as pid 1 runs /bin/play (user/play, wolf),
   # which sounds note files through the console's KIOCSOUND; the kernel
   # drives the 8254's channel 2 and port 0x61 (kernel/speaker). QEMU's
