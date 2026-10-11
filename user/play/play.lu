@@ -14,9 +14,31 @@
 //!     <note> <length>   C D E F G A B, then `#` or `b` or nothing, then
 //!                       the octave 2-7 (A4 = 440 Hz, equal temperament)
 //!     r <length>        a rest
+//!     <chord> <length>  px29: two to four notes joined by commas, no
+//!                       spaces (`C4,E4,G4 2`): one slot, sounded as an
+//!                       arpeggio on the speaker's one voice (below)
+//!     arp <ms>          px29, optional, 10-100 in tens (default 20): how
+//!                       long each pitch of a chord sounds before the next
+//!     order <way>       px29, optional: `up` (low to high, the default),
+//!                       `down`, or `written` (as the chord is spelled)
+//!     tempo <bpm>       again, anywhere: the lengths after it use it
 //!
 //! A length is 1 2 4 8 16 or 32 (whole to thirty-second), a trailing `.`
-//! dots it, and `+` ties lengths together (`4+16`, `2.+8`).
+//! dots it, a trailing `t` makes it a triplet's (two thirds of it: three
+//! `8t` fill a quarter; px29), and `+` ties lengths together (`4+16`,
+//! `2.+8`, `1+1`).
+//!
+//! **A chord** sounds its pitches one after another, each for the `arp`
+//! time, in the tune's `order`, over and over until its slot's sounding
+//! time ends (a slot need not hold whole cycles), with no silence between
+//! them; the `gap` comes at the slot's end, as for a note. A chord
+//! carries at most four pitches, each once. The time is a whole number of
+//! the kernel's 10 ms ticks because a step that is not one lands a tick
+//! early or late (measured, notes/px29-the-chord.md); 20 ms, fifty
+//! pitches a second, is heard as one chord.
+//!
+//! **Dynamics** (`p`, `mf`, `ff`, `cresc`, ...) are refused by name: the
+//! speaker is one bit, so it has one loudness.
 //!
 //! Every file is read and checked whole before a sound: a bad line is
 //! `play: <path>: line <n>: <what>` on standard error, status 2, and
@@ -40,15 +62,19 @@
 
 /// The tunes' directory.
 const TUNES: str = "/usr/share/tunes"
+
 /// KIOCSOUND (uapi linux/kd.h).
 const KIOCSOUND: int = 0x4b2f
+
 /// The PC's 8254 input clock, in hundredths of a hertz.
 const PIT_CENTI_HZ: int = 119318200
 
 extern "c" fn play_kd(fd: int, req: int, arg: int) -> int
 
 /// A checked note file: its notes' counts (0 a rest) and lengths, or
-/// the reason it is refused.
+/// the reason it is refused. A chord's slot (px29) keeps its first
+/// pitch in `counts` and all of its pitches, in sounding order, in
+/// `chords`, from `chord_at[i]` for `chord_n[i]` (0 for a note or rest).
 struct Tune {
     title: str,
     err: str,
@@ -56,6 +82,10 @@ struct Tune {
     lengths: List[int], // microseconds
     gap: int, // microseconds
     total: int, // microseconds
+    chord_at: List[int],
+    chord_n: List[int],
+    chords: List[int],
+    arp: int, // microseconds a chord's pitch sounds
 }
 
 fn main() -> int {
@@ -228,8 +258,12 @@ fn perform(fd: int, t: Tune) {
             if sound < len / 2 {
                 sound = len / 2
             }
-            tone(fd, t.counts[i])
-            until(t0 + (at + sound) / 1000)
+            if t.chord_n[i] > 0 {
+                arpeggio(fd, t, i, t0, at, at + sound)
+            } else {
+                tone(fd, t.counts[i])
+                until(t0 + (at + sound) / 1000)
+            }
             tone(fd, 0)
         }
         at += len
@@ -237,6 +271,25 @@ fn perform(fd: int, t: Tune) {
         i += 1
     }
     tone(fd, 0)
+}
+
+/// Sound slot `i`'s chord from `from` to `to` (microseconds since `t0`,
+/// in ms): each pitch for `t.arp`, in order, round and round; the last
+/// step is cut at `to`. No silence between steps.
+fn arpeggio(fd: int, t: Tune, i: int, t0: int, from: int, to: int) {
+    let n = t.chord_n[i]
+    var at = from
+    var k = 0
+    while at < to {
+        tone(fd, t.chords[t.chord_at[i] + k % n])
+        var next = at + t.arp
+        if next > to {
+            next = to
+        }
+        until(t0 + next / 1000)
+        at = next
+        k += 1
+    }
 }
 
 /// Read and check the note file at `path`.
@@ -251,7 +304,18 @@ fn load(path: str) -> Tune {
 }
 
 fn refused(why: str) -> Tune {
-    Tune { title: "", err: why, counts: List[int](), lengths: List[int](), gap: 0, total: 0 }
+    Tune {
+        title: "",
+        err: why,
+        counts: List[int](),
+        lengths: List[int](),
+        gap: 0,
+        total: 0,
+        chord_at: List[int](),
+        chord_n: List[int](),
+        chords: List[int](),
+        arp: 0,
+    }
 }
 
 /// The words of one line, its comment dropped (a `#` that starts a
@@ -402,6 +466,10 @@ fn length_of(w: str, bpm: int) -> int {
         if j < b.len && b[j] as int == 46 {
             us = us * 3 / 2
             j += 1
+        } else if j < b.len && b[j] as int == 116 {
+            // A triplet's: two thirds (px29).
+            us = 160000000 / (bpm * n)
+            j += 1
         }
         total += us
         if j < b.len {
@@ -415,6 +483,69 @@ fn length_of(w: str, bpm: int) -> int {
     total
 }
 
+/// Whether `w` names a dynamic (px29: refused, the speaker has one
+/// loudness).
+fn dynamic(w: str) -> bool {
+    let names: List[str] = [
+        "ppp",
+        "pp",
+        "p",
+        "mp",
+        "mf",
+        "f",
+        "ff",
+        "fff",
+        "sf",
+        "sfz",
+        "fp",
+        "cresc",
+        "dim",
+        "crescendo",
+        "diminuendo",
+        "dynamic",
+        "volume",
+    ]
+    for d in names {
+        if w == d {
+            return true
+        }
+    }
+    false
+}
+
+/// A chord's 8254 counts in sounding order: `up` is low to high (the
+/// largest count first), `down` high to low, `written` as spelled.
+fn arrange(chord: List[int], order: str) -> List[int] {
+    var out = List[int]()
+    for k in chord {
+        var at = out.len
+        if order != "written" {
+            var j = 0
+            while j < out.len {
+                if order == "up" && k > out[j] || order == "down" && k < out[j] {
+                    at = j
+                    break
+                }
+                j += 1
+            }
+        }
+        var next = List[int]()
+        var m = 0
+        while m < out.len {
+            if m == at {
+                (mut next).push(k)
+            }
+            (mut next).push(out[m])
+            m += 1
+        }
+        if at == out.len {
+            (mut next).push(k)
+        }
+        out = next
+    }
+    out
+}
+
 /// Check a note file's text whole; the first bad line refuses it.
 fn parse(text: str) -> Tune {
     var title = ""
@@ -423,6 +554,11 @@ fn parse(text: str) -> Tune {
     var counts = List[int]()
     var lengths = List[int]()
     var total = 0
+    var arp = 20000
+    var order = "up"
+    var chord_at = List[int]()
+    var chord_n = List[int]()
+    var chords = List[int]()
     var line_no = 0
     let b = text.bytes()
     var start = 0
@@ -455,8 +591,30 @@ fn parse(text: str) -> Tune {
             title = t
             continue
         }
+        if dynamic(w) {
+            return refused(
+                "line {line_no}: '{w}' is a dynamic: the speaker is one bit, with one loudness",
+            )
+        }
         if ws.len != 2 {
             return refused("line {line_no}: '{line}' is not two words")
+        }
+        if w == "arp" {
+            let v = number(ws[1])
+            if v < 10 || v > 100 || v % 10 != 0 {
+                return refused(
+                    "line {line_no}: arp '{ws[1]}' is not 10-100 ms in tens (the 10 ms tick)",
+                )
+            }
+            arp = v * 1000
+            continue
+        }
+        if w == "order" {
+            if ws[1] != "up" && ws[1] != "down" && ws[1] != "written" {
+                return refused("line {line_no}: order '{ws[1]}' is not up, down or written")
+            }
+            order = copy ws[1]
+            continue
         }
         if w == "tempo" {
             let v = number(ws[1])
@@ -475,10 +633,33 @@ fn parse(text: str) -> Tune {
             continue
         }
         var c = 0
-        if w != "r" {
+        var chord = List[int]()
+        if w.contains(",") {
+            for nw in w.split(",") {
+                let k = count_of(nw)
+                if k < 0 {
+                    return refused(
+                        "line {line_no}: '{nw}' in '{w}' is not a note (C D E F G A B, # or b, an octave 2-7)",
+                    )
+                }
+                for e in chord {
+                    if e == k {
+                        return refused("line {line_no}: chord '{w}' has {nw} twice")
+                    }
+                }
+                (mut chord).push(k)
+            }
+            if chord.len > 4 {
+                return refused("line {line_no}: chord '{w}' has {chord.len} notes; at most 4")
+            }
+            chord = arrange(chord, order)
+            c = chord[0]
+        } else if w != "r" {
             c = count_of(w)
             if c < 0 {
-                return refused("line {line_no}: '{w}' is not a note (C D E F G A B, # or b, an octave 2-7)")
+                return refused(
+                    "line {line_no}: '{w}' is not a note (C D E F G A B, # or b, an octave 2-7)",
+                )
             }
         }
         if bpm == 0 {
@@ -486,10 +667,17 @@ fn parse(text: str) -> Tune {
         }
         let us = length_of(ws[1], bpm)
         if us < 0 {
-            return refused("line {line_no}: '{ws[1]}' is not a length (1 2 4 8 16 32, a dot, + to tie)")
+            return refused(
+                "line {line_no}: '{ws[1]}' is not a length (1 2 4 8 16 32, a dot, + to tie)",
+            )
         }
         (mut counts).push(c)
         (mut lengths).push(us)
+        (mut chord_at).push(chords.len)
+        (mut chord_n).push(chord.len)
+        for k in chord {
+            (mut chords).push(k)
+        }
         total += us
     }
     if counts.len == 0 {
@@ -498,5 +686,16 @@ fn parse(text: str) -> Tune {
     if title == "" {
         title = "untitled"
     }
-    Tune { title: title, err: "", counts: counts, lengths: lengths, gap: gap, total: total }
+    Tune {
+        title: title,
+        err: "",
+        counts: counts,
+        lengths: lengths,
+        gap: gap,
+        total: total,
+        chord_at: chord_at,
+        chord_n: chord_n,
+        chords: chords,
+        arp: arp,
+    }
 }
