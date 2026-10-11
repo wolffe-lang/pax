@@ -127,6 +127,7 @@ use event
 use frames
 use initramfs
 use sched
+use sound
 use tcp
 use tree
 use uaccess
@@ -200,6 +201,7 @@ const K_INET: u64 = 8 // px22: an AF_INET datagram socket (kernel/udp's)
 const K_TCP: u64 = 9 // px23: an AF_INET stream socket (kernel/tcp's)
 const K_EVENT: u64 = 10 // px24: an eventfd (kernel/event's counter)
 const K_EPOLL: u64 = 11 // px24: an epoll object (kernel/event's)
+const K_DSP: u64 = 12 // px30: /dev/dsp, the sound device (kernel/sound's)
 
 // Nodes: a type in the top byte, a reference below (an entry's offset).
 const T_SHIFT: u64 = 56
@@ -216,6 +218,7 @@ const T_TCP: u64 = 10 // px23: a stream socket; the reference kernel/tcp's block
 const T_INO: u64 = 11 // px27: a file or a directory of the tree; the reference kernel/tree's inode
 const T_EVENT: u64 = 12 // px24: an eventfd; the reference kernel/event's counter
 const T_EPOLL: u64 = 13 // px24: an epoll object; the reference kernel/event's
+const T_DSP: u64 = 14 // px30: /dev/dsp
 const T_ERR: u64 = 0xff // an errno below
 const REF_MASK: u64 = 0x00ffffffffffffff
 
@@ -280,6 +283,7 @@ const S_IFCHR: u64 = 0x2000
 const MODE_DIR: u64 = 0x41ed // 040755
 const MODE_CONSOLE: u64 = 0x2190 // 020620
 const MODE_NULL: u64 = 0x21b6 // 020666
+const MODE_DSP: u64 = 0x21b6 // 020666 (px30: one user here)
 const MODE_FIFO: u64 = 0x1180 // 010600: a pipe's end (px17, measured)
 const MODE_SOCK: u64 = 0xc1ff // 0140777: a socketpair's end (px17, measured)
 const MODE_ANON: u64 = 0x180 // 0600 and no type: an eventfd, an epoll object (px24, measured)
@@ -516,11 +520,14 @@ fn of_drop(o: u64) {
     if ty(n) == T_INO {
         tree.release(rf(n)) // px27: the last close of a file with no name gives its frames back
     }
+    if k == K_DSP {
+        sound.release() // px30: the last close of /dev/dsp
+    }
 }
 
 /// Whether a kind keeps an open file (an offset, a pipe end).
 fn has_of(k: u64) -> bool {
-    k == K_FILE || k == K_DIR || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_EVENT || k == K_EPOLL
+    k == K_FILE || k == K_DIR || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_EVENT || k == K_EPOLL || k == K_DSP
 }
 
 // --- descriptors -------------------------------------------------------------
@@ -611,7 +618,8 @@ pub fn is_open(a: u64, fd: u64) -> bool {
 /// 1 the console (kernel/user sends the bytes), 0 a sink that swallows
 /// them (/dev/null), 2 nothing writable (-EBADF), 3 a pipe or a socket
 /// (px17: `pipe_write`), 4 a file of the tree (px27: `file_write`),
-/// 5 an eventfd (px24: `event_write`), 6 an epoll object (px24: -EINVAL).
+/// 5 an eventfd (px24: `event_write`), 6 an epoll object (px24: -EINVAL), 7
+/// /dev/dsp (px30: kernel/sound's `write`).
 pub fn write_target(a: u64, fd: u64) -> u64 {
     let k = kind(a, fd)
     if k == K_CLOSED || access(a, fd) == O_RDONLY {
@@ -634,6 +642,9 @@ pub fn write_target(a: u64, fd: u64) -> u64 {
     }
     if k == K_EPOLL {
         return 6
+    }
+    if k == K_DSP {
+        return 7 // px30: kernel/sound's `write`
     }
     2
 }
@@ -690,6 +701,17 @@ pub fn close(a: u64, fd: u64) -> u64 {
     }
     of_drop(o)
     0
+}
+
+/// px30: whether closing `fd` is the last close of /dev/dsp that
+/// waits for the device to play what is queued (a blocking open file,
+/// its last reference): kernel/user drains it (`sound.drain`) first.
+pub fn closes_dsp(a: u64, fd: u64) -> bool {
+    if kind(a, fd) != K_DSP {
+        return false
+    }
+    let o = get(a, fdw(fd, D_OF))
+    o != 0 && ofw(o - 1, O_REFS) == 1 && status(a, fd) & O_NONBLOCK == 0
 }
 
 /// The open flags descriptor `fd` (open) carries: the console's
@@ -1912,6 +1934,9 @@ fn child_named(d: u64, s: u64, n: u64) -> u64 {
         if comp_is(s, n, "console") {
             return (T_CONSOLE << T_SHIFT) | CONSOLE
         }
+        if comp_is(s, n, "dsp") && sound.up() {
+            return T_DSP << T_SHIFT // px30: only with the device, as Linux without a card
+        }
         return err(ENOENT)
     }
     if rf(d) == tree.ROOT && comp_is(s, n, "dev") {
@@ -2138,6 +2163,17 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
         k = K_CONSOLE
     } else if ty(n) == T_NULL {
         k = K_NULL
+    } else if ty(n) == T_DSP {
+        // px30: one opener, for writing (kernel/sound says why not).
+        let r = sound.open(sched.self_pid(), acc)
+        if r != 0 {
+            return r
+        }
+        let fd = open_new(a, 0, K_DSP, n, flags)
+        if fd >= 0x8000000000000000 {
+            sound.release()
+        }
+        return fd
     } else if is_dir_node(n) {
         if acc != O_RDONLY || flags & O_CREAT != 0 {
             return neg(EISDIR)
@@ -2292,7 +2328,7 @@ pub fn lseek(a: u64, fd: u64, off: u64, whence: u64) -> u64 {
     if k == K_CLOSED {
         return neg(EBADF)
     }
-    if k == K_CONSOLE || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP {
+    if k == K_CONSOLE || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_DSP {
         return neg(ESPIPE)
     }
     if k == K_NULL || k == K_EPOLL || k == K_EVENT {
@@ -2384,6 +2420,15 @@ pub fn ioctl(a: u64, pml4: u64, fd: u64, req: u64, arg: u64) -> u64 {
     }
     if k == K_CONSOLE {
         return console.ioctl(pml4, req, arg)
+    }
+    if k == K_DSP {
+        // px30: OSS's requests (kernel/sound); SNDCTL_DSP_NONBLOCK sets
+        // the open file's O_NONBLOCK here.
+        let r = sound.ioctl(pml4, req, arg)
+        if r == 0 && req == 0x500e {
+            set_nonblocking(a, fd, true)
+        }
+        return r
     }
     if req == FIONBIO && (k == K_INET || k == K_TCP) {
         // px23: what wolf's runtime does to every socket it makes.
@@ -2744,6 +2789,9 @@ fn n_mode(n: u64) -> u64 {
     if t == T_NULL {
         return MODE_NULL
     }
+    if t == T_DSP {
+        return MODE_DSP
+    }
     if t == T_PIPE {
         return MODE_FIFO
     }
@@ -2773,6 +2821,9 @@ fn n_ino(n: u64) -> u64 {
     }
     if t == T_NULL {
         return 4
+    }
+    if t == T_DSP {
+        return 7 // px30
     }
     if t == T_CONSOLE && rf(n) != 0 {
         return 4 + rf(n) // px21a: /dev/tty0 5, /dev/console 6
@@ -2815,6 +2866,9 @@ fn n_rdev(n: u64, which: int) -> u64 {
     if t == T_NULL {
         return if which == 0 { 1 } else { 3 }
     }
+    if t == T_DSP {
+        return if which == 0 { 14 } else { 3 } // px30: OSS's dsp, 14:3
+    }
     0
 }
 
@@ -2825,7 +2879,7 @@ fn n_rdev(n: u64, which: int) -> u64 {
 /// look alike).
 fn n_dev(n: u64) -> u64 {
     let t = ty(n)
-    if t == T_DEV || t == T_NULL || t == T_STD || t == T_CONSOLE {
+    if t == T_DEV || t == T_NULL || t == T_STD || t == T_CONSOLE || t == T_DSP {
         return 5
     }
     1
@@ -2955,6 +3009,9 @@ fn dev_child(k: u64) -> u64 {
     if k == 4 || k == 5 {
         return (T_CONSOLE << T_SHIFT) | (k - 3) // px21a: tty0, console
     }
+    if k == 6 && sound.up() {
+        return T_DSP << T_SHIFT // px30: only with the device
+    }
     err(ENOENT)
 }
 
@@ -2967,6 +3024,9 @@ fn fixed_name(c: u64) -> str {
     }
     if t == T_NULL {
         return "null"
+    }
+    if t == T_DSP {
+        return "dsp" // px30
     }
     if t == T_CONSOLE {
         return if rf(c) == TTY0 { "tty0" } else { "console" }
@@ -2988,6 +3048,9 @@ fn fixed_len(c: u64) -> u64 {
     }
     if t == T_NULL {
         return 4
+    }
+    if t == T_DSP {
+        return 3 // px30
     }
     if t == T_CONSOLE {
         return if rf(c) == TTY0 { 4 } else { 7 }
