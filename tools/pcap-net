@@ -319,6 +319,8 @@ class TcpConn:
     """One connection as the capture shows it so far."""
 
     def __init__(self):
+        self.gaps_seen = 0     # the count of identification gaps when PAX last sent on this connection
+        self.unknown = []      # ranges of `buf` never seen on the wire (pushed out of kernel/arp's queue)
         self.pax_iss = None    # PAX's SYN's sequence number
         self.pax_max = None    # the end of the highest sequence number PAX has sent
         self.pax_ack = None    # the last acknowledgement PAX sent
@@ -369,6 +371,7 @@ def tcp_in(conns, last_in, key, seg, c):
         if k.base is not None and px.seq_lt(k.base, seg.ack):
             gone = min((seg.ack - k.base) & px.M32, len(k.buf))
             del k.buf[:gone]
+            k.unknown = [(max(lo - gone, 0), hi - gone) for lo, hi in k.unknown if hi > gone]
             k.base = (k.base + gone) & px.M32
 
 
@@ -466,12 +469,31 @@ def tcp_out(conns, last_in, key, seg, c):
         else:
             data, at = seg.data, (seg.seq - k.base) & px.M32
         if at > len(k.buf):
-            return "leaves a gap in what PAX has sent (from %d)" % ((k.base + len(k.buf)) & px.M32)
+            # px24: segments PAX counted as sent and kernel/arp pushed
+            # out of its queue (an entry that aged while a window was
+            # going out) never reached the wire: the bytes between are
+            # unknown until PAX retransmits them. Allowed only where the
+            # IP identifications show datagrams missing just here, and
+            # the kernel's own count of what it pushed out is held to
+            # those gaps at the end (`against`).
+            if c["ident-gaps"] == k.gaps_seen:
+                return "leaves a gap in what PAX has sent (from %d)" % ((k.base + len(k.buf)) & px.M32)
+            k.unknown.append((len(k.buf), at))
+            k.buf += bytes(at - len(k.buf))
+        k.gaps_seen = c["ident-gaps"]
         old = bytes(k.buf[at:at + len(data)])
-        if old != data[:len(old)]:
+        same = True
+        for i in range(len(old)):
+            if old[i] != data[i] and not any(lo <= at + i < hi for lo, hi in k.unknown):
+                same = False
+                break
+        if not same:
             return "carries other bytes than the first time for the same sequence numbers"
+        fresh = len(data) - len(old) + sum(max(0, min(hi, at + len(old)) - max(lo, at)) for lo, hi in k.unknown)
+        if k.unknown:
+            k.unknown = [(lo, hi) for lo, hi in k.unknown if not (at <= lo and hi <= at + len(data))]
         k.buf[at:at + len(data)] = data
-        c["tcp.bytes-out"] += len(data) - len(old)
+        c["tcp.bytes-out"] += fresh
     if fl & px.FIN:
         at = (seg.seq + len(seg.data)) & px.M32
         if k.pax_fin is not None and k.pax_fin != at:
