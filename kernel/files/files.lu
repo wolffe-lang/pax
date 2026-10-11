@@ -93,7 +93,10 @@
 //! number): `dup`, `fcntl` and a child's table share it as they share
 //! any open file, and the last close frees the socket (`udp.close`).
 //! Its calls are kernel/socket's; here it is only a descriptor: `fstat`
-//! S_IFSOCK|0777, `lseek` and `pread` -ESPIPE, `ioctl` -ENOTTY.
+//! S_IFSOCK|0777, `lseek` and `pread` -ESPIPE, `ioctl` -ENOTTY. A stream
+//! socket (px23) is the same shape over one of kernel/tcp's blocks
+//! (kind K_TCP; the last close calls `tcp.close`), and `ioctl(FIONBIO)`
+//! sets or clears O_NONBLOCK on either kind's open file.
 //!
 //! Every user buffer goes through kernel/uaccess (checked whole, then
 //! copied through the HHDM). A path is copied into boot/user.S's
@@ -106,6 +109,7 @@ use console
 use frames
 use initramfs
 use sched
+use tcp
 use uaccess
 use udp
 
@@ -115,6 +119,7 @@ extern "c" let pax_pipes: *u64
 
 const PAGE: u64 = 4096
 const PATH_MAX: u64 = 4095 // bytes before the NUL
+const FIONBIO: u64 = 0x5421 // uapi asm-generic/ioctls.h (px23)
 /// The number dup3 and dup2 take as "too large" (px14): FDS + 1, so
 /// FDS itself can mean "the lowest free" for `dup`.
 pub const FDS: u64 = 32
@@ -167,6 +172,7 @@ const K_NULL: u64 = 5
 const K_PIPE: u64 = 6 // px17: an end of a pipe (O_RDONLY reads, O_WRONLY writes)
 const K_SOCK: u64 = 7 // px17: an end of a socketpair
 const K_INET: u64 = 8 // px22: an AF_INET datagram socket (kernel/udp's)
+const K_TCP: u64 = 9 // px23: an AF_INET stream socket (kernel/tcp's)
 
 // Nodes: a type in the top byte, a reference below (an entry's offset).
 const T_SHIFT: u64 = 56
@@ -181,6 +187,7 @@ const T_STD: u64 = 6 // /dev/stdin, stdout, stderr: the reference is 0, 1, 2
 const T_PIPE: u64 = 7 // px17: a pipe; the reference its record
 const T_SOCK: u64 = 8 // px17: a socketpair's end; the reference rx << 8 | tx
 const T_INET: u64 = 9 // px22: an AF_INET socket; the reference kernel/udp's number
+const T_TCP: u64 = 10 // px23: a stream socket; the reference kernel/tcp's block
 const T_ERR: u64 = 0xff // an errno below
 const REF_MASK: u64 = 0x00ffffffffffffff
 
@@ -370,6 +377,9 @@ fn pipe_ends(k: u64, n: u64, acc: u64, up: bool) {
         if k == K_INET && !up {
             udp.close(rf(n)) // px22: the socket goes with its last descriptor
         }
+        if k == K_TCP && !up {
+            tcp.close(rf(n)) // px23: the connection closes with its last descriptor
+        }
         return
     }
     sched.wake_pipes() // an end opened or closed: a waiter's answer may change
@@ -425,7 +435,7 @@ fn of_drop(o: u64) {
 
 /// Whether a kind keeps an open file (an offset, a pipe end).
 fn has_of(k: u64) -> bool {
-    k == K_FILE || k == K_DIR || k == K_PIPE || k == K_SOCK || k == K_INET
+    k == K_FILE || k == K_DIR || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP
 }
 
 // --- descriptors -------------------------------------------------------------
@@ -985,8 +995,10 @@ pub const NOT_OPEN: u64 = 0
 pub const NOT_SOCKET: u64 = 1
 /// It is an end of an AF_UNIX socketpair (px17).
 pub const UNIX: u64 = 2
-/// It is an AF_INET socket.
+/// It is an AF_INET datagram socket.
 pub const INET: u64 = 3
+/// It is an AF_INET stream socket (px23).
+pub const TCP: u64 = 4
 
 /// What descriptor `fd` is, to a socket call.
 pub fn sock_kind(a: u64, fd: u64) -> u64 {
@@ -996,6 +1008,9 @@ pub fn sock_kind(a: u64, fd: u64) -> u64 {
     }
     if k == K_INET {
         return INET
+    }
+    if k == K_TCP {
+        return TCP
     }
     if k == K_SOCK {
         return UNIX
@@ -1011,9 +1026,28 @@ pub fn inet_open(a: u64, s: u64, flags: u64) -> u64 {
     open_new(a, 0, K_INET, (T_INET << T_SHIFT) | s, flags)
 }
 
-/// kernel/udp's socket behind descriptor `fd` (an AF_INET socket).
+/// kernel/udp's socket, or kernel/tcp's block, behind descriptor `fd`
+/// (an AF_INET socket).
 pub fn inet_sock(a: u64, fd: u64) -> u64 {
     rf(node_of(a, fd))
+}
+
+/// px23: a new descriptor, the lowest free, on a new open file naming
+/// kernel/tcp's block `c`, with `flags` (O_RDWR, O_CLOEXEC,
+/// O_NONBLOCK): the number, or -EMFILE / -ENFILE (the block is then
+/// the caller's to close).
+pub fn tcp_open(a: u64, c: u64, flags: u64) -> u64 {
+    open_new(a, 0, K_TCP, (T_TCP << T_SHIFT) | c, flags)
+}
+
+/// px23: set or clear O_NONBLOCK on descriptor `fd`'s open file
+/// (`ioctl(FIONBIO)`).
+pub fn set_nonblocking(a: u64, fd: u64, on: bool) {
+    let o = of_of(a, fd)
+    if o != 0 {
+        let fl = ofw(o - 1, O_FLAGS) & !O_NONBLOCK
+        put_ofw(o - 1, O_FLAGS, if on { fl | O_NONBLOCK } else { fl })
+    }
 }
 
 /// Whether descriptor `fd`'s open file has O_NONBLOCK set.
@@ -1332,7 +1366,7 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64) -> u64 {
         }
         k = kind(a, src)
         n = node_of(a, src)
-        if k == K_SOCK || k == K_INET {
+        if k == K_SOCK || k == K_INET || k == K_TCP {
             return neg(ENXIO) // px17: a socket is not reopened through a path
         }
     } else if ty(n) == T_CONSOLE {
@@ -1395,7 +1429,7 @@ pub fn read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
     if k == K_PIPE || k == K_SOCK {
         return pipe_read(a, pml4, fd, buf, n, false) // px17
     }
-    if k == K_INET {
+    if k == K_INET || k == K_TCP {
         return neg(EINVAL) // px22: kernel/user sends a socket's read to kernel/socket
     }
     let r = file_read(pml4, node_of(a, fd), pos(a, fd), buf, n)
@@ -1429,7 +1463,7 @@ pub fn lseek(a: u64, fd: u64, off: u64, whence: u64) -> u64 {
     if k == K_CLOSED {
         return neg(EBADF)
     }
-    if k == K_CONSOLE || k == K_PIPE || k == K_SOCK || k == K_INET {
+    if k == K_CONSOLE || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP {
         return neg(ESPIPE)
     }
     if k == K_NULL {
@@ -1475,6 +1509,14 @@ pub fn ioctl(a: u64, pml4: u64, fd: u64, req: u64, arg: u64) -> u64 {
     }
     if k == K_CONSOLE {
         return console.ioctl(pml4, req, arg)
+    }
+    if req == FIONBIO && (k == K_INET || k == K_TCP) {
+        // px23: what wolf's runtime does to every socket it makes.
+        if !uaccess.readable(pml4, arg, 4) {
+            return neg(EFAULT)
+        }
+        set_nonblocking(a, fd, uaccess.get(pml4, arg, 4) != 0)
+        return 0
     }
     neg(ENOTTY)
 }
@@ -1586,7 +1628,7 @@ fn n_mode(n: u64) -> u64 {
     if t == T_PIPE {
         return MODE_FIFO
     }
-    if t == T_SOCK || t == T_INET {
+    if t == T_SOCK || t == T_INET || t == T_TCP {
         return MODE_SOCK
     }
     MODE_DIR
@@ -1621,6 +1663,9 @@ fn n_ino(n: u64) -> u64 {
     }
     if t == T_INET {
         return 0x200 + rf(n) // px22: one number per socket
+    }
+    if t == T_TCP {
+        return 0x300 + rf(n) // px23: one number per block
     }
     3 // the console
 }
