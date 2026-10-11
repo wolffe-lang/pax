@@ -162,6 +162,8 @@ class Conn:
         self.opened_at = self.first_at = self.last_at = None
         self.mute = False                # True: answer nothing more (a host that went away)
         self.crossed = False             # this end's SYN crossed PAX's (a simultaneous open)
+        self.zero_windows = 0            # segments in which PAX advertised a window of zero
+        self.probes = 0                  # bytes this end sent past a closed window
 
     # --- sending -------------------------------------------------------------
     def tx(self, flags, seq, data=b"", options=b"", window=None, ack=None, **kw):
@@ -233,6 +235,7 @@ class Conn:
                 self.rexmt += 1
             self.tx(flags, self.snd_nxt, self.out[off:off + n])
             if probe:
+                self.probes += 1
                 break
             self.snd_nxt = sadd(self.snd_nxt, n + (1 if fin else 0))
             if fin:
@@ -346,6 +349,8 @@ class Conn:
         if seg.flags & SYN:
             return
         # The acknowledgement.
+        if seg.flags & ACK and seg.window == 0:
+            self.zero_windows += 1
         if seg.flags & ACK:
             if px.seq_lt(self.snd_una, seg.ack) and px.seq_leq(seg.ack, self.snd_max):
                 if px.seq_lt(self.out_seq, seg.ack):

@@ -4,10 +4,16 @@
      tcpbulk send IP PORT BYTES
          connect, send BYTES of the pattern, close this end's half, and
          read the one line the receiver says (what it got)
-     tcpbulk recv PORT READY-IP READY-PORT
+     tcpbulk recv PORT READY-IP READY-PORT [nap MS]
          listen on PORT, say "ready" to READY-IP:READY-PORT with one
          UDP datagram, take one connection, read to its end, say what
-         came ("got N bytes, crc X") and close
+         came ("got N bytes, crc X") and close. With `nap MS` it reads
+         nothing for MS milliseconds first: the sender fills this
+         end's window and has to wait for it to open again
+     tcpbulk leave IP PORT BYTES
+         connect, write BYTES of the pattern and close at once, bytes
+         still unsent: they and the FIN after them are the kernel's to
+         deliver, with no process left
      tcpbulk loop BYTES
          both on this machine, across fork, over 127.0.0.1 port 4040
 
@@ -16,10 +22,11 @@
 #include "say.h"
 #include <stdlib.h>
 #include <sys/wait.h>
+#include <time.h>
 
 static unsigned char buf[65536], want[65536];
 
-static int do_send(const char *ip, int port, unsigned long long bytes, const char *who)
+static int do_send(const char *ip, int port, unsigned long long bytes, const char *who, int leave)
 {
     struct sockaddr_in srv = sin_of(ip, port);
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -41,6 +48,11 @@ static int do_send(const char *ip, int port, unsigned long long bytes, const cha
         off += n;
         piece = piece == 1000 ? 65536 : piece == 65536 ? 16384 : piece == 16384 ? 4099 : 65536;
     }
+    if (leave) {
+        close(fd);
+        say("%s: wrote %llu bytes, crc %08lx, and closed at once\n", who, off, crc);
+        return 0;
+    }
     if (shutdown(fd, SHUT_WR) < 0) {
         say("%s: shutdown: %s\n", who, ename(errno));
         return 1;
@@ -58,12 +70,16 @@ static int do_send(const char *ip, int port, unsigned long long bytes, const cha
     return 0;
 }
 
-static int do_recv(int lfd, const char *who)
+static int do_recv(int lfd, const char *who, long nap_ms)
 {
     int c = accept(lfd, 0, 0);
     if (c < 0) {
         say("%s: accept: %s\n", who, ename(errno));
         return 1;
+    }
+    if (nap_ms > 0) {
+        struct timespec ts = {nap_ms / 1000, (nap_ms % 1000) * 1000000L};
+        nanosleep(&ts, 0);
     }
     unsigned long long off = 0;
     unsigned long crc = 0;
@@ -110,8 +126,10 @@ static int listener(int port)
 int main(int argc, char **argv)
 {
     if (argc == 5 && strcmp(argv[1], "send") == 0)
-        return do_send(argv[2], atoi(argv[3]), strtoull(argv[4], 0, 10), "tcpbulk send");
-    if (argc == 5 && strcmp(argv[1], "recv") == 0) {
+        return do_send(argv[2], atoi(argv[3]), strtoull(argv[4], 0, 10), "tcpbulk send", 0);
+    if (argc == 5 && strcmp(argv[1], "leave") == 0)
+        return do_send(argv[2], atoi(argv[3]), strtoull(argv[4], 0, 10), "tcpbulk leave", 1);
+    if ((argc == 5 || (argc == 7 && strcmp(argv[5], "nap") == 0)) && strcmp(argv[1], "recv") == 0) {
         int fd = listener(atoi(argv[2]));
         if (fd < 0)
             return 1;
@@ -122,7 +140,7 @@ int main(int argc, char **argv)
             return 1;
         }
         close(u);
-        int r = do_recv(fd, "tcpbulk recv");
+        int r = do_recv(fd, "tcpbulk recv", argc == 7 ? atol(argv[6]) : 0);
         close(fd);
         return r;
     }
@@ -137,15 +155,15 @@ int main(int argc, char **argv)
         }
         if (pid == 0) {
             close(fd);
-            _exit(do_send("127.0.0.1", 4040, strtoull(argv[2], 0, 10), "tcpbulk loop, the sender"));
+            _exit(do_send("127.0.0.1", 4040, strtoull(argv[2], 0, 10), "tcpbulk loop, the sender", 0));
         }
-        int r = do_recv(fd, "tcpbulk loop, the receiver");
+        int r = do_recv(fd, "tcpbulk loop, the receiver", 0);
         int st = 0;
         waitpid(pid, &st, 0);
         say("tcpbulk loop: the sender ended with status %d\n", WIFEXITED(st) ? WEXITSTATUS(st) : -1);
         close(fd);
         return r || !WIFEXITED(st) || WEXITSTATUS(st);
     }
-    say("usage: tcpbulk send IP PORT BYTES | recv PORT READY-IP READY-PORT | loop BYTES\n");
+    say("usage: tcpbulk send IP PORT BYTES | recv PORT READY-IP READY-PORT [nap MS] | leave IP PORT BYTES | loop BYTES\n");
     return 2;
 }

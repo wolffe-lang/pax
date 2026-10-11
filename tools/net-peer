@@ -139,8 +139,13 @@
 #   T4  `tcpclient 10.0.2.2 9099`: this script's echo server, PAX the
 #       one that connects, a half-close at the end
 #   T5  `tcpbulk send 10.0.2.2 9100 BYTES` (--bulk, 16 MiB): the stream
-#       pattern out of PAX, held to its length and CRC-32
-#   T6  `tcpbulk recv 7100 10.0.2.2 9097`: the same into PAX
+#       pattern out of PAX, held to its length and CRC-32; and
+#       `tcpbulk leave 10.0.2.2 9110 60000`: a writer that closes at
+#       once, whose bytes and FIN come all the same
+#   T6  `tcpbulk recv 7100 10.0.2.2 9097`: the same into PAX; and
+#       `tcpbulk recv 7140 10.0.2.2 9097 nap 1500`: a receiver that
+#       reads nothing at first, whose window closes, is probed and
+#       opens again
 #   T7  `tcpsoak to 10.0.2.2 9099 N`: N connections from PAX, each
 #       opened, answered and closed
 #   T8  how a connection ends: `tcpend` to port 9 (nobody: a reset, the
@@ -896,6 +901,7 @@ class Peer:
         # came before its listener would be refused.
         st.listen(px.TCP_SERVICE, serve("echo"))
         st.listen(px.TCP_BULK, serve("sink"))
+        st.listen(px.TCP_LEAVE, serve("sink"))
         st.silent.add(px.TCP_SILENT)
         st.silent.add(px.TCP_WOLF_GATE)
 
@@ -952,9 +958,24 @@ class Peer:
         span = (c.last_at - c.first_at) if c.first_at and c.last_at and c.last_at > c.first_at else 0
         print("net-peer: ok T5 %d bytes out of PAX, every byte the pattern's, crc %08x, in %.2f s (%d KB/s by this script's clock); PAX retransmitted %d of %d segments"
               % (c.count, c.crc, span, c.count / 1000 / span if span else 0, c.pax_rexmt, c.pax_segments))
+        # A writer that closes at once: the bytes it left unsent, and
+        # its FIN, come all the same.
+        c = one(px.TCP_LEAVE)
+        if c.count != px.TCP_LEAVE_BYTES or not c.right or not c.eof:
+            self.fail("T5: tcpbulk leave: %d bytes came (%d were due)%s%s"
+                      % (c.count, px.TCP_LEAVE_BYTES, "" if c.right else ", not the pattern", "" if c.eof else ", and no FIN"))
+        print("net-peer: ok T5 tcpbulk leave: %d bytes written and the socket closed at once: every byte came, then PAX's FIN" % c.count)
         # T6: the bulk into PAX.
         self.tcp_ready(st, px.TCP_READY_BULK, 300.0, "tcpbulk recv")
         self.tcp_bulk_in(st, G, sport(), px.TCP_BULK_IN, bulk, "T6", None)
+        # A receiver that reads nothing for a second and a half: its
+        # window closes, this end probes it, and it opens again.
+        self.tcp_ready(st, px.TCP_READY_BULK, 300.0, "the tcpbulk recv that naps")
+        c = self.tcp_bulk_in(st, G, sport(), px.TCP_BULK_NAP, px.TCP_NAP_BYTES, "T6 (the receiver naps)", None)
+        if strict and (c.zero_windows == 0 or c.probes == 0):
+            self.fail("T6: a receiver that read nothing for 1.5 s advertised a window of zero %d times and was probed %d times" % (c.zero_windows, c.probes))
+        print("net-peer: ok T6 a receiver that naps: its window closed (%d segments said zero), this end probed it %d times, it opened and every byte arrived"
+              % (c.zero_windows, c.probes))
         # T7: the soak out.
         t0 = time.time()
         base = len(served)
@@ -1250,12 +1271,15 @@ class Peer:
         got = c.take()
         if c.reset or c.gave_up or got != want:
             self.fail("%s: the receiver said %r, %r was due%s" % (tag, got[:80], want, ", reset" if c.reset else ""))
+        if faults is None and "naps" in tag:
+            return c
         if faults is None:
             print("net-peer: ok %s %d bytes into PAX, its line back \"%s\", in %.2f s (%d KB/s by this script's clock); this end retransmitted %d segments"
                   % (tag, n, want.decode().strip(), span, n / 1000 / span if span else 0, c.rexmt))
         else:
             print("net-peer: %s: %d bytes into PAX exact in %.2f s (%d KB/s); this end retransmitted %d segments; %s"
                   % (tag, n, span, n / 1000 / span if span else 0, c.rexmt, faults.text()))
+        return c
 
     def send_raw(self, src_ip, payload):
         """One datagram of protocol 17 with `payload` as it is."""
