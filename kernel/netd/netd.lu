@@ -11,7 +11,10 @@
 //!     0x0806  kernel/arp's `input`
 //!     0x0800  kernel/ip's `input`, which judges the header and says
 //!             whose the datagram is: kernel/icmp's `input` for
-//!             protocol 1; kernel/udp's `input` for protocol 17, and
+//!             protocol 1 (and, px23, kernel/tcp's `unreached` for a
+//!             destination unreachable that quotes a TCP segment of
+//!             this station's); kernel/tcp's `input` for protocol 6
+//!             (px23); kernel/udp's `input` for protocol 17, and
 //!             kernel/icmp's `unreachable` (code 3) when it says no
 //!             socket takes the datagram (px22); kernel/icmp's
 //!             `unreachable` (code 2) for a protocol nothing speaks;
@@ -34,8 +37,8 @@
 //! else would deliver. No device is needed for any of it.
 //!
 //! `pax_net_clock` (px21) is the network's clock: a second thread that
-//! turns every tick (px23; every ten before) and runs kernel/arp's
-//! `tick` on every tenth turn — the retries, the giving up, the ageing
+//! turns every tick (px23; every ten before), runs kernel/tcp's `tick`
+//! (its timers) on every turn and kernel/arp's `tick` on every tenth — the retries, the giving up, the ageing
 //! — which nothing else would do while no frame arrives; then `drain`.
 //! A kernel with no network device runs it alone.
 //!
@@ -51,6 +54,7 @@ use ip
 use net
 use sched
 use sync
+use tcp
 use udp
 
 extern "c" let pax_net_stats: *u64
@@ -75,7 +79,16 @@ pub fn clock_turns() -> u64 {
 pub fn deliver(frame: u64, len: u64, looped: bool) {
     let (what, ihl, total) = ip.input(frame, len, looped)
     if what == ip.TO_ICMP {
-        let _e = icmp.input(frame, ihl, total, looped)
+        if icmp.input(frame, ihl, total, looped) == icmp.ERROR {
+            // px23: a destination unreachable goes to the protocol whose
+            // datagram it quotes, when that datagram was this station's.
+            let (code, proto, src, dst, a, b) = icmp.quoted(frame, ihl)
+            if proto == ip.TCP && ip.local(src) {
+                tcp.unreached(code, src, a >> 16, dst, a & 0xffff, b)
+            }
+        }
+    } else if what == ip.TO_TCP {
+        tcp.input(frame, ihl, total)
     } else if what == ip.TO_UDP {
         // px22: a datagram no socket takes draws a port unreachable,
         // and kernel/udp counts what became of the wire's.
@@ -145,6 +158,7 @@ export fn pax_net_clock(_arg: u64) {
     while true {
         let _s = sched.sleep(1)
         turn += 1
+        tcp.tick()
         if turn % 10 == 0 {
             arp.tick()
             // # Safety: as `clock_turns`; only this thread writes the word.

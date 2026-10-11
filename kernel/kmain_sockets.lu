@@ -1,6 +1,6 @@
 //! member: false
 // kmain_sockets.lu — Linux programs that speak UDP (px22,
-// tests/mpx4-udp). The kernel starts as kmain_boreutils does (PAX's
+// tests/mpx4-udp) and TCP (px23, tests/mpx4-tcp). The kernel starts as kmain_boreutils does (PAX's
 // paging with the initramfs mapped, the timer, the FPU state, the
 // scheduler, SYSCALL) and as kmain_net does (the PCI scan, kernel/net
 // and, over it, kernel/arp, kernel/ip, kernel/icmp and kernel/udp as
@@ -23,7 +23,7 @@
 //     user: sockerr pid <p> exit_group 0 after <r> runs
 //     user: frames free <A> before, <B> with 1 processes, <A> after
 //     user: run 1 took <t> ticks, <u> us by the time-stamp counter
-//     user: books: heap pages <h>, live blocks <b>, net frames <n>, stack frames <s>, open files <o>, pipes <q>, sockets <k>, datagrams waiting <w>
+//     user: books: heap pages <h>, live blocks <b>, net frames <n>, stack frames <s>, open files <o>, pipes <q>, sockets <k>, datagrams waiting <w>, tcp blocks <t>, time-wait <e>
 //     …
 //     run: <k> commands
 //     net: … arp: … ip: … icmp: … udp: … (the counters)
@@ -48,9 +48,11 @@ use netd
 use paging
 use panic
 use pci
+use process
 use sched
 use serial
 use sync
+use tcp
 use timer
 use udp
 use user
@@ -106,7 +108,16 @@ fn calibrate() -> u64 {
 
 /// Frames the protocols above the driver hold.
 fn stack_frames() -> u64 {
-    arp.frames_held() + ip.frames_held() + icmp.frames_held() + udp.frames_held()
+    arp.frames_held() + ip.frames_held() + icmp.frames_held() + udp.frames_held() + tcp.frames_held()
+}
+
+/// px23: ping `dst`, an address of this machine, and say whether the
+/// reply came back over kernel/ip's loopback queue.
+fn ping_self(dst: u64, seq: u64) -> bool {
+    let _r = icmp.ping(dst, seq, 56)
+    let _n = netd.drain()
+    let (got, _rtt, _ttl) = icmp.answer()
+    got
 }
 
 /// Run line number `k`, the `n` bytes at `a`: one command, waited for
@@ -138,6 +149,13 @@ fn run(k: u64, a: u64, n: u64, floor: u64, per20: u64) {
     sched.wait_down_to(floor)
     let c1 = tsc()
     let t1 = timer.ticks()
+    // px23: a connection its process closed may still be saying
+    // goodbye (a FIN to be acknowledged): up to three seconds for that,
+    // so the books below are the line's and not the middle of it.
+    let patience = timer.ticks() + 300
+    while tcp.finishing() != 0 && timer.ticks() < patience {
+        let _s = sched.sleep(1)
+    }
     let after = frames.free_count()
     let s2 = sync.acquire(sync.console())
     log.put("user: frames free ")
@@ -174,6 +192,10 @@ fn run(k: u64, a: u64, n: u64, floor: u64, per20: u64) {
     log.dec(udp.open_count() as int)
     log.put(", datagrams waiting ")
     log.dec(udp.waiting() as int)
+    log.put(", tcp blocks ")
+    log.dec(tcp.blocks() as int)
+    log.put(", time-wait ")
+    log.dec(tcp.waiting() as int)
     log.end()
     sync.release(sync.console(), s2)
 }
@@ -205,9 +227,11 @@ export fn kmain() {
     ip.start(OWN_IP, NETMASK, GATEWAY)
     icmp.start()
     udp.start()
+    tcp.start(process.random_word(0))
     ip.report()
     udp.report()
-    if stack_frames() != 76 {
+    tcp.report()
+    if stack_frames() != 205 {
         panic.fail("sockets: no frame for the stack, frames", stack_frames())
     }
     // # Safety: the addresses of kernel/netd's exports; nothing is read.
@@ -222,6 +246,21 @@ export fn kmain() {
     sched.create(clock, 0)
     sync.enable()
     let per20 = calibrate()
+    // px23: loopback is below every protocol: the kernel's own echo to
+    // 127.0.0.1 and to this station's address comes back with no device
+    // asked.
+    let l1 = ping_self(ip.LOOPBACK, 1)
+    let l2 = ping_self(OWN_IP, 2)
+    let sl = sync.acquire(sync.console())
+    log.put("loopback: 127.0.0.1 ")
+    log.put(if l1 { "answers" } else { "does NOT answer" })
+    log.put(" the kernel's echo, 10.0.2.15 ")
+    log.put(if l2 { "answers" } else { "does NOT answer" })
+    log.put(", ")
+    log.dec(net.count(net.C_TX_FRAMES) as int)
+    log.put(" frames on the wire")
+    log.end()
+    sync.release(sync.console(), sl)
 
     let e = initramfs.lookup(RUN_LIST)
     if e == initramfs.END {
@@ -253,6 +292,7 @@ export fn kmain() {
     ip.counters()
     icmp.counters()
     udp.counters()
+    tcp.counters()
     log.put("netd: ")
     log.dec(netd.turns() as int)
     log.put(" turns, ")
