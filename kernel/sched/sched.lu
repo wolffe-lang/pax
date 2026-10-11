@@ -133,6 +133,31 @@
 //! device's interrupt makes it ready (`wake_net`) and `kick` runs it
 //! at once when the CPU was idle.
 //!
+//! **Threads** (px26): a process is a GROUP of slots with one leader.
+//! A thread's `lead` names its leader's slot, whose process area and
+//! address space the whole group uses (`proc_area` follows it), and its
+//! `tgid` is the process's pid; its own `pid` is its tid. `clone_thread`
+//! makes one in the caller's group. `end_thread` ends one thread (a
+//! leader's slot is HELD until its last thread has ended: it carries the
+//! pid, the area and the space); `end_with` ends the process, every
+//! thread at once, wherever each was waiting or queued, and leaves the
+//! leader's slot the zombie a parent waits for; `exec_alone` ends the
+//! others before an `execve` and makes the caller the leader. A parent
+//! is a process: any of its threads may wait for a child.
+//!
+//! **Futexes** (px26): a thread may wait on a futex (`futex_wait`, state
+//! FUTEX): its slot holds the key, the bitset and its place in line;
+//! `futex_wake` readies the longest-waiting matches with 0 as their
+//! call's result; a deadline leaves -ETIMEDOUT (`wake_sleepers`).
+//!
+//! **Signals** (px26): each slot holds the signals pending for its
+//! thread and, a leader's, for its process (`raise_thread`,
+//! `raise_group`), with a word per signal for where it came from.
+//! `take_signal` hands kernel/signal the running thread's next one;
+//! `poke` readies a thread waiting in a system call when a signal
+//! arrives that will run a handler or end its process, and each wait
+//! says how it is to be ended (`W_*`, read through `self_wait`).
+//!
 //! **Regions** (px21a): wolf's freestanding runtime keeps one
 //! ambient-region slot, and every switch moves it with the thread:
 //! `run_next` stores `heap.ambient()` in the outgoing thread's record
@@ -143,7 +168,8 @@
 //! thread and needs nothing saved. What is still refused by rule: a
 //! system call's handler leaves no region open where it gives up its
 //! kernel stack for good (`sleep_current`, `block_input`,
-//! `block_pipe`, `vfork_wait`, `wait_child`, `end_with`, `execve`: the
+//! `block_pipe`, `vfork_wait`, `wait_child`, `futex_wait`,
+//! `yield_current`, `end_thread`, `end_with`, `execve`: the
 //! code after such a wait never runs, so the region would never be
 //! left), and no interrupt handler allocates.
 //!
@@ -177,6 +203,7 @@ extern "c" let pax_thread_entry: *u8
 extern "c" let pax_idle: *u8
 extern "c" let pax_syscall_state: *u64
 extern "c" let pax_procs: *u64
+extern "c" let pax_siginfo: *u64
 
 /// One thread's record (boot/sched.S: 16 of them, 256 bytes each; 72
 /// before px09 added `cr3` and `prog`, 88 before px10's four, 120
@@ -208,6 +235,21 @@ struct Thread {
     zombie: u64, // px14: 1 when a parent will wait for it (the slot outlives the reap)
     sigmask: u64, // px14: its blocked signals (rt_sigprocmask)
     amb: u64, // px21a: its ambient region while it is switched out; 0 the root
+    tgid: u64, // px26: its process's pid (`pid` is the thread's own id, the tid)
+    lead: u64, // px26: the slot of its group's leader, whose area and space the group shares
+    threads: u64, // px26: a leader's count of its group's threads that have not ended
+    gone: u64, // px26: 1 for a leader that has ended as a thread while its group lives
+    ctid: u64, // px26: where 0 is written and a futex woken when it ends (set_tid_address)
+    pend: u64, // px26: the signals pending for this thread (bit n - 1 for signal n)
+    gpend: u64, // px26: a leader's: the signals pending for the process
+    fkey: u64, // px26: the futex it waits on (the word's physical address)
+    fbits: u64, // px26: that wait's bitset
+    fseq: u64, // px26: that wait's place in line
+    rst: u64, // px26: how its system call is waiting (W_*), for a signal that ends the wait
+    rarg: u64, // px26: that wait's argument (a sleep's `rem` pointer)
+    done: u64, // px26: bytes a waiting pipe write has written (the area's word before threads)
+    name0: u64, // px26: PR_SET_NAME's sixteen bytes
+    name1: u64,
 }
 
 /// How many slots there are (px14: `clone_current` and `child_ended`
@@ -229,6 +271,24 @@ const VFORK: u64 = 8 // px14: a parent suspended until its vfork child execs or 
 const WAITING: u64 = 9 // px14: in wait4/waitid until a child ends
 const PIPE: u64 = 10 // px17: in a read or write of a pipe or socket that must wait
 const NET: u64 = 11 // px20: the network thread, until the device's interrupt
+const FUTEX: u64 = 12 // px26: in a futex wait
+const HELD: u64 = 13 // px26: a leader that has ended while its group's threads live on: no stack, never run, its slot the group's
+
+/// px26: how a thread's system call is waiting, read when a signal ends
+/// the wait (kernel/signal): `W_REWOUND` the frame is rewound to run the
+/// call again (a read of the console or a pipe, a pipe write, wait4,
+/// waitid: run again under SA_RESTART, else -EINTR); `W_SLEEP` a sleep,
+/// its result already in the frame (-EINTR always); `W_FUTEX` a futex
+/// wait with no timeout, its result in the frame (run again under
+/// SA_RESTART, else -EINTR); `W_TIMED` a futex wait with a deadline,
+/// its result in the frame (-EINTR always); `W_TIMED_REWOUND` a
+/// receive with a timeout, its frame rewound (-EINTR always).
+pub const W_NONE: u64 = 0
+pub const W_REWOUND: u64 = 1
+pub const W_SLEEP: u64 = 2
+pub const W_FUTEX: u64 = 3
+pub const W_TIMED: u64 = 4
+pub const W_TIMED_REWOUND: u64 = 5
 
 const STACKS: u64 = 0xffffd00000000000 // PML4 slot 416
 const SPAN: u64 = 65536 // each slot's virtual space
@@ -280,6 +340,25 @@ const S_WAITER: u64 = 7 // slot + 1 of the thread in wait_all; 0 none
 const S_PML4: u64 = 8
 const S_NEXT_PID: u64 = 9 // px14: the next Linux pid (1 first)
 const S_FLOOR: u64 = 10 // px22: the live count the waiter waits for (0: `wait_all`'s)
+const S_FSEQ: u64 = 11 // px26: the next futex waiter's place in line
+const S_THREADS: u64 = 12 // px26: threads made by clone since boot
+const S_SIGNALS: u64 = 13 // px26: signals delivered to a handler since boot
+
+const W_RAX_OFF: u64 = 112 // the frame's %rax (word 14)
+const NEG_ETIMEDOUT: u64 = 0xffffffffffffff92 // -110
+const NSIG: u64 = 64
+const SIG_WORDS: u64 = 256 // the area's signal actions, four words a signal (kernel/process)
+const SIG_DFL: u64 = 0
+const SIG_IGN: u64 = 1
+const SIGKILL: u64 = 9
+const SIGCHLD: u64 = 17
+const SIGCONT: u64 = 18
+const SIGSTOP: u64 = 19
+const SIGTSTP: u64 = 20
+const SIGTTIN: u64 = 21
+const SIGTTOU: u64 = 22
+const SIGURG: u64 = 23
+const SIGWINCH: u64 = 28
 
 /// Field `off` of slot `s`'s record. Volatile: threads poll their own
 /// record while the timer rewrites it.
@@ -349,7 +428,11 @@ fn wake_sleepers() {
         let at = field(s, offset_of(Thread, wake))
         // px22: a pipe or socket wait with a deadline (`at` not 0) ends
         // at its tick too.
-        if (st == SLEEPING || (st == PIPE && at != 0)) && at <= now {
+        // px26: and a futex wait with one (its -ETIMEDOUT is in its frame).
+        if (st == SLEEPING || ((st == PIPE || st == FUTEX) && at != 0)) && at <= now {
+            if st != PIPE {
+                put_field(s, offset_of(Thread, rst), W_NONE) // the wait is over: no signal ends it now
+            }
             put_field(s, offset_of(Thread, state), READY)
             enqueue(s)
         }
@@ -528,7 +611,22 @@ fn clear(s: u64) {
     put_field(s, offset_of(Thread, zombie), 0)
     put_field(s, offset_of(Thread, sigmask), 0)
     put_field(s, offset_of(Thread, amb), 0)
-    let a = proc_area(s)
+    put_field(s, offset_of(Thread, tgid), 0)
+    put_field(s, offset_of(Thread, lead), s)
+    put_field(s, offset_of(Thread, threads), 0)
+    put_field(s, offset_of(Thread, gone), 0)
+    put_field(s, offset_of(Thread, ctid), 0)
+    put_field(s, offset_of(Thread, pend), 0)
+    put_field(s, offset_of(Thread, gpend), 0)
+    put_field(s, offset_of(Thread, fkey), 0)
+    put_field(s, offset_of(Thread, fbits), 0)
+    put_field(s, offset_of(Thread, fseq), 0)
+    put_field(s, offset_of(Thread, rst), 0)
+    put_field(s, offset_of(Thread, rarg), 0)
+    put_field(s, offset_of(Thread, done), 0)
+    put_field(s, offset_of(Thread, name0), 0)
+    put_field(s, offset_of(Thread, name1), 0)
+    let a = own_area(s)
     var i: u64 = 0
     while i < PROC_AREA / 8 {
         // # Safety: slot s's area, inside boot/sched.S's pax_procs (s < SLOTS).
@@ -537,14 +635,25 @@ fn clear(s: u64) {
     }
 }
 
-/// Slot `s`'s process area (px12): PROC_AREA bytes of boot/sched.S's
-/// `pax_procs`, zero for a fresh process.
-pub fn proc_area(s: u64) -> u64 {
+/// Slot `s`'s own area, whichever group it is in (px26).
+fn own_area(s: u64) -> u64 {
     if s >= SLOTS {
         panic.fail("sched: no process area for slot", s)
     }
     // # Safety: the address only; s < SLOTS keeps it inside pax_procs.
     unsafe { pax_procs as u64 + s * PROC_AREA }
+}
+
+/// Slot `s`'s process area (px12): PROC_AREA bytes of boot/sched.S's
+/// `pax_procs`, zero for a fresh process. px26: the area of the thread's
+/// process, which is its leader's slot's — every thread of a group
+/// reads and writes the same descriptors, working directory, break and
+/// signal actions.
+pub fn proc_area(s: u64) -> u64 {
+    if s >= SLOTS {
+        panic.fail("sched: no process area for slot", s)
+    }
+    own_area(field(s, offset_of(Thread, lead)))
 }
 
 /// Thread `id`'s process area (px12; the id from `create_process`).
@@ -580,8 +689,17 @@ pub fn sleep_current(f: u64, wake: u64) -> u64 {
     put_field(c, offset_of(Thread, frame), f)
     put_field(c, offset_of(Thread, wake), wake)
     put_field(c, offset_of(Thread, state), SLEEPING)
+    put_field(c, offset_of(Thread, rst), W_SLEEP) // px26: a signal ends it with -EINTR
     wake_sleepers()
     run_next()
+}
+
+/// px26: `sleep_current` for a relative sleep that reports the time left
+/// when a signal ends it: `rem` is the user address of the timespec to
+/// write (0 none), kept for kernel/signal (`self_wait`).
+pub fn sleep_current_rem(f: u64, wake: u64, rem: u64) -> u64 {
+    put_field(cur(), offset_of(Thread, rarg), rem)
+    sleep_current(f, wake)
 }
 
 /// Put the running thread to wait for console input from a system call
@@ -593,6 +711,7 @@ pub fn block_input(f: u64) -> u64 {
     let c = cur()
     put_field(c, offset_of(Thread, frame), f)
     put_field(c, offset_of(Thread, state), INPUT)
+    put_field(c, offset_of(Thread, rst), W_REWOUND) // px26
     wake_sleepers()
     run_next()
 }
@@ -669,7 +788,19 @@ fn reap() {
     var s: u64 = FIRST
     while s < SLOTS {
         if s != cur() && field(s, offset_of(Thread, state)) == DEAD {
-            free_stack(s)
+            if field(s, offset_of(Thread, stack_lo)) != 0 { // px26: a held leader's went at its own end
+                free_stack(s)
+                put_field(s, offset_of(Thread, stack_lo), 0)
+                put_field(s, offset_of(Thread, stack_hi), 0)
+            }
+            if field(s, offset_of(Thread, gone)) == 1 && field(s, offset_of(Thread, threads)) > 0 {
+                // px26: a leader whose threads live on keeps its slot
+                // (the pid, the area, the space) until the last has ended.
+                put_field(s, offset_of(Thread, state), HELD)
+                put_field(s, offset_of(Thread, frame), 0)
+                s += 1
+                continue
+            }
             let c = field(s, offset_of(Thread, cr3))
             if c != 0 && field(s, offset_of(Thread, owns)) == 1 {
                 let _freed = paging.free_user(c) // px09: the user half, its tables, its PML4
@@ -741,8 +872,12 @@ fn start_thread(body: u64, arg: u64, cr3: u64, prog: u64) -> u64 {
     put_field(s, offset_of(Thread, owns), if cr3 != 0 { 1 } else { 0 })
     put_field(s, offset_of(Thread, prog), prog)
     if prog != 0 {
-        put_field(s, offset_of(Thread, pid), take_pid()) // px14: a process, started by the kernel (ppid 0)
+        let pid = take_pid()
+        put_field(s, offset_of(Thread, pid), pid) // px14: a process, started by the kernel (ppid 0)
+        put_field(s, offset_of(Thread, tgid), pid) // px26: a group of one, its own leader
+        put_field(s, offset_of(Thread, threads), 1)
     }
+    put_field(s, offset_of(Thread, lead), s)
     put_field(s, offset_of(Thread, state), READY)
     enqueue(s)
     sync.irq_restore(saved)
@@ -817,12 +952,9 @@ pub fn exit() {
     panic.fail("sched: a dead thread ran again, slot", c)
 }
 
-/// Mark slot `c` dead: one live thread fewer, the waiter readied when it
-/// was the last. px14: a vfork parent it held is resumed; its children
-/// go to pid 1 (or, when it is pid 1 or pid 1 is gone, to nobody, and a
-/// zombie nobody will wait for is let go); it stays a zombie for a
-/// parent, which is woken if it is waiting. IF clear.
-fn finish(c: u64) {
+/// One live thread fewer: the waiter (kmain's `wait_all`) readied when
+/// the count has come down to what it waits for. IF clear.
+fn thread_gone() {
     let n = sv(S_LIVE) - 1
     put_sv(S_LIVE, n)
     let w = sv(S_WAITER)
@@ -831,30 +963,57 @@ fn finish(c: u64) {
         enqueue(w - 1)
         put_sv(S_WAITER, 0)
     }
-    release_vfork(c)
-    let me = field(c, offset_of(Thread, pid))
+}
+
+/// The process whose leader is slot `l` has ended with wait status `st`
+/// (px14's `finish`, a process's half): a vfork parent it held is
+/// resumed; its children go to pid 1 (or, when it is pid 1 or pid 1 is
+/// gone, to nobody, and a zombie nobody will wait for is let go); it
+/// stays a zombie for a parent, which is woken if it is waiting and
+/// (px26) sent SIGCHLD. IF clear.
+fn process_ends(l: u64, st: u64) {
+    put_field(l, offset_of(Thread, status), st)
+    put_field(l, offset_of(Thread, threads), 0)
+    put_field(l, offset_of(Thread, gpend), 0)
+    release_vfork(l)
+    let me = field(l, offset_of(Thread, tgid))
     if me != 0 {
-        reparent(c, me)
-        let pp = field(c, offset_of(Thread, ppid))
-        if pp != 0 && live_slot(pp) != SLOTS {
-            put_field(c, offset_of(Thread, zombie), 1)
+        reparent(l, me)
+        let pp = field(l, offset_of(Thread, ppid))
+        let ps = if pp != 0 { live_slot(pp) } else { SLOTS }
+        if ps != SLOTS {
+            put_field(l, offset_of(Thread, zombie), 1)
             wake_waiter(pp)
+            // px26: SIGCHLD for the parent (`signal(7)`; siginfo's
+            // CLD_EXITED with the exit code, CLD_KILLED with the signal).
+            let killed = st & 0x7f != 0
+            raise_group(ps, SIGCHLD, sig_info(if killed { I_CHLD_KILLED } else { I_CHLD_EXITED }, me, if killed { st & 0x7f } else { (st >> 8) & 0xff }))
         }
     }
+}
+
+/// Mark slot `c`, a kernel thread or the one thread of its process, dead
+/// (px14's `finish`): one live thread fewer, and its process's end.
+/// IF clear.
+fn finish(c: u64) {
+    thread_gone()
+    process_ends(c, field(c, offset_of(Thread, status)))
     put_field(c, offset_of(Thread, state), DEAD)
 }
 
-/// Whether slot `s` holds a process that has not ended.
+/// Whether slot `s` holds a process that has not ended (px26: a leader
+/// held for its threads has not).
 fn running_state(s: u64) -> bool {
     let st = field(s, offset_of(Thread, state))
     st != FREE && st != DEAD && st != ZOMBIE
 }
 
-/// The slot of the process `pid` that has not ended; SLOTS if none.
+/// The leader's slot of the process `pid` that has not ended; SLOTS if
+/// none.
 fn live_slot(pid: u64) -> u64 {
     var s: u64 = FIRST
     while s < SLOTS {
-        if field(s, offset_of(Thread, pid)) == pid && running_state(s) {
+        if field(s, offset_of(Thread, pid)) == pid && field(s, offset_of(Thread, tgid)) == pid && running_state(s) {
             return s
         }
         s += 1
@@ -862,14 +1021,88 @@ fn live_slot(pid: u64) -> u64 {
     SLOTS
 }
 
-/// The process `pid`, when it is in wait4/waitid, made ready: its
-/// call runs again and finds what changed.
+/// The process `pid`: every thread of it in wait4/waitid made ready
+/// (px26: any thread of a parent may be the one waiting); its call runs
+/// again and finds what changed.
 fn wake_waiter(pid: u64) {
-    let p = live_slot(pid)
-    if p != SLOTS && field(p, offset_of(Thread, state)) == WAITING {
-        put_field(p, offset_of(Thread, state), READY)
-        enqueue(p)
+    var p: u64 = FIRST
+    while p < SLOTS {
+        if field(p, offset_of(Thread, tgid)) == pid && field(p, offset_of(Thread, state)) == WAITING {
+            put_field(p, offset_of(Thread, state), READY)
+            enqueue(p)
+        }
+        p += 1
     }
+}
+
+/// px26: slot `s` taken out of the run queue, if it is in it (a thread
+/// ended by another's `exit_group` while it was ready). IF clear.
+fn unqueue(s: u64) {
+    var prev: u64 = 0
+    var h = sv(S_HEAD)
+    while h != 0 {
+        let n = field(h - 1, offset_of(Thread, next))
+        if h - 1 == s {
+            if prev == 0 {
+                put_sv(S_HEAD, n)
+            } else {
+                put_field(prev - 1, offset_of(Thread, next), n)
+            }
+            if n == 0 {
+                put_sv(S_TAIL, prev)
+            }
+            put_field(s, offset_of(Thread, next), 0)
+            return
+        }
+        prev = h
+        h = n
+    }
+}
+
+/// px26: every thread of the group led by slot `l` but slot `keep` ended
+/// at once, wherever it was waiting or queued (`exit_group`, a fatal
+/// signal, `execve`): none of them is running (one CPU, and `keep` is),
+/// so each is simply dead, its stack reaped later like any other. A
+/// leader already held stays held: the caller decides its slot's fate.
+/// IF clear.
+fn end_others(l: u64, keep: u64) {
+    var t: u64 = FIRST
+    while t < SLOTS {
+        let st = field(t, offset_of(Thread, state))
+        if t != keep && st != FREE && st != DEAD && st != ZOMBIE && st != HELD && field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, tgid)) != 0 {
+            if st == READY {
+                unqueue(t)
+            }
+            // A vfork child one of them was waiting for keeps running in
+            // the space it borrowed: nothing is done to it here, and
+            // `own_borrowed` (below) leaves the space to it.
+            thread_gone()
+            put_field(t, offset_of(Thread, state), DEAD)
+            put_field(t, offset_of(Thread, rst), W_NONE)
+        }
+        t += 1
+    }
+}
+
+/// px26: the group led by `l` is ending while a vfork child still runs
+/// in its address space (a thread of it was suspended for that child,
+/// and another thread ended the process): the space becomes the
+/// child's, which frees it when it execs or ends; the group's slots no
+/// longer own it. Returns whether a child took it. IF clear.
+fn own_borrowed(l: u64) -> bool {
+    let c = field(l, offset_of(Thread, cr3))
+    var t: u64 = FIRST
+    while t < SLOTS {
+        let vp = field(t, offset_of(Thread, vparent))
+        if vp != 0 && field(t, offset_of(Thread, state)) != FREE && field(t, offset_of(Thread, cr3)) == c && field(t, offset_of(Thread, owns)) == 0 && field(vp - 1, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, lead)) != l {
+            put_field(t, offset_of(Thread, owns), 1)
+            put_field(t, offset_of(Thread, vparent), 0)
+            put_field(l, offset_of(Thread, owns), 0)
+            return true
+        }
+        t += 1
+    }
+    false
 }
 
 /// Slot `c`'s vfork parent, if it holds one suspended, resumed.
@@ -920,13 +1153,54 @@ pub fn end_current(_f: u64) -> u64 {
 
 /// `end_current` with the wait status word `st` kept for the parent
 /// (px14: `code << 8` for an exit, the signal's number for a kill).
+/// px26: this ends the PROCESS — every thread of the caller's group
+/// (`exit_group`, a fatal signal, a fault, the last thread's `exit`).
 pub fn end_with(_f: u64, st: u64) -> u64 {
     let c = cur()
-    speaker.ended(field(c, offset_of(Thread, pid))) // px18: its tone stops with it
-    put_field(c, offset_of(Thread, status), st)
-    finish(c)
+    let l = field(c, offset_of(Thread, lead))
+    speaker.ended(field(l, offset_of(Thread, tgid))) // px18: its tone stops with it
+    end_others(l, c)
+    let _taken = own_borrowed(l)
+    process_ends(l, st)
+    if l != c {
+        // The leader is another slot: ended above, or held since its own
+        // `exit`. Either way it is dead now, and its reap gives the
+        // space back and keeps the zombie.
+        put_field(l, offset_of(Thread, gone), 0)
+        put_field(l, offset_of(Thread, state), DEAD)
+    }
+    thread_gone()
+    put_field(c, offset_of(Thread, state), DEAD)
+    put_field(c, offset_of(Thread, rst), W_NONE)
     wake_sleepers()
     run_next()
+}
+
+/// px26: `exit` (60) from a thread whose group lives on: this thread
+/// alone ends. Its frame is dropped; a leader's slot is kept (`gone`)
+/// for the group, any other's is free at the next reap. The caller
+/// (kernel/process) has cleared and woken the clear-child-tid word.
+/// With no other thread left the caller uses `end_with` instead. IF
+/// clear. The next thread's frame.
+pub fn end_thread(_f: u64) -> u64 {
+    let c = cur()
+    let l = field(c, offset_of(Thread, lead))
+    put_field(l, offset_of(Thread, threads), field(l, offset_of(Thread, threads)) - 1)
+    if c == l {
+        put_field(c, offset_of(Thread, gone), 1)
+    }
+    thread_gone()
+    put_field(c, offset_of(Thread, state), DEAD)
+    put_field(c, offset_of(Thread, rst), W_NONE)
+    poke(l) // a process's pending signal may now be another thread's to take
+    wake_sleepers()
+    run_next()
+}
+
+/// px26: how many threads of the running thread's process have not
+/// ended.
+pub fn self_threads() -> u64 {
+    field(field(cur(), offset_of(Thread, lead)), offset_of(Thread, threads))
 }
 
 /// boot/sched.S's pax_thread_entry calls this when a body returns.
@@ -1046,14 +1320,20 @@ pub fn pml4() -> u64 {
 
 // --- processes (px14) --------------------------------------------------------
 
-/// The running process's pid (0 for a kernel thread).
+/// The running process's pid (0 for a kernel thread). px26: the
+/// process's, whichever of its threads is running (`getpid`).
 pub fn self_pid() -> u64 {
+    field(cur(), offset_of(Thread, tgid))
+}
+
+/// px26: the running thread's own id (`gettid`; the leader's is the pid).
+pub fn self_tid() -> u64 {
     field(cur(), offset_of(Thread, pid))
 }
 
 /// The running process's parent's pid (0: started by the kernel).
 pub fn self_ppid() -> u64 {
-    field(cur(), offset_of(Thread, ppid))
+    field(field(cur(), offset_of(Thread, lead)), offset_of(Thread, ppid))
 }
 
 /// Thread `id`'s pid (0 if no such thread or not a process): the
@@ -1127,10 +1407,16 @@ pub fn clone_current(f: u64, usp: u64, cr3: u64) -> u64 {
     put_field(s, offset_of(Thread, name_len), field(p, offset_of(Thread, name_len)))
     put_field(s, offset_of(Thread, fs), field(p, offset_of(Thread, fs)))
     put_field(s, offset_of(Thread, sigmask), field(p, offset_of(Thread, sigmask)))
-    put_field(s, offset_of(Thread, pid), take_pid())
-    put_field(s, offset_of(Thread, ppid), field(p, offset_of(Thread, pid)))
-    let from = proc_area(p)
-    let to = proc_area(s)
+    let pid = take_pid()
+    put_field(s, offset_of(Thread, pid), pid)
+    put_field(s, offset_of(Thread, tgid), pid) // px26: a new process, a group of one
+    put_field(s, offset_of(Thread, lead), s)
+    put_field(s, offset_of(Thread, threads), 1)
+    put_field(s, offset_of(Thread, name0), field(p, offset_of(Thread, name0)))
+    put_field(s, offset_of(Thread, name1), field(p, offset_of(Thread, name1)))
+    put_field(s, offset_of(Thread, ppid), field(p, offset_of(Thread, tgid))) // px26: the caller's process
+    let from = proc_area(p) // px26: the caller's process's area, whichever thread calls
+    let to = own_area(s)
     i = 0
     while i < PROC_AREA / 8 {
         // # Safety: two slots' areas inside boot/sched.S's pax_procs.
@@ -1140,6 +1426,143 @@ pub fn clone_current(f: u64, usp: u64, cr3: u64) -> u64 {
     put_field(s, offset_of(Thread, state), READY)
     enqueue(s)
     s
+}
+
+/// px26: a THREAD of the running thread's process made from its system
+/// call frame `f` (`clone`/`clone3` with CLONE_THREAD): a new slot and
+/// kernel stack and a tid of its own, in the caller's group — the same
+/// leader, so the same area (descriptors, working directory, break,
+/// signal actions), the same address space (not its own to free) and
+/// the same pid. Its first frame is `f`'s with %rax 0 and %rsp `usp`
+/// (a thread always names its stack); its FS base `tls` when `settls`,
+/// else the caller's; the caller's signal mask and x87/SSE state; its
+/// clear-child-tid word `ctid` (0 none). Queued ready. Returns its slot;
+/// SLOTS when no slot is free. IF clear (a system call).
+pub fn clone_thread(f: u64, usp: u64, settls: bool, tls: u64, ctid: u64) -> u64 {
+    let p = cur()
+    let l = field(p, offset_of(Thread, lead))
+    reap()
+    var s: u64 = FIRST
+    while s < SLOTS && field(s, offset_of(Thread, state)) != FREE {
+        s += 1
+    }
+    if s == SLOTS {
+        return SLOTS
+    }
+    make_stack(s)
+    fpu.fork(p, s)
+    let hi = field(s, offset_of(Thread, stack_hi))
+    let cf = hi - FRAME_WORDS * 8
+    var i: u64 = 0
+    while i < FRAME_WORDS {
+        // # Safety: as `clone_current`.
+        unsafe { ((cf + i * 8) as *u64).write_volatile(((f + i * 8) as *u64).read_volatile()) }
+        i += 1
+    }
+    // # Safety: as above.
+    unsafe {
+        ((cf + W_RAX * 8) as *u64).write_volatile(0)
+        if usp != 0 {
+            ((cf + W_RSP * 8) as *u64).write_volatile(usp)
+        }
+    }
+    put_field(s, offset_of(Thread, frame), cf)
+    let id = sv(S_NEXT_ID)
+    put_sv(S_NEXT_ID, id + 1)
+    put_sv(S_LIVE, sv(S_LIVE) + 1)
+    put_sv(S_THREADS, sv(S_THREADS) + 1)
+    put_field(s, offset_of(Thread, id), id)
+    put_field(s, offset_of(Thread, cr3), field(l, offset_of(Thread, cr3)))
+    put_field(s, offset_of(Thread, owns), 0)
+    put_field(s, offset_of(Thread, prog), field(p, offset_of(Thread, prog)))
+    put_field(s, offset_of(Thread, entry), field(p, offset_of(Thread, entry)))
+    put_field(s, offset_of(Thread, usp), field(p, offset_of(Thread, usp)))
+    put_field(s, offset_of(Thread, name), field(p, offset_of(Thread, name)))
+    put_field(s, offset_of(Thread, name_len), field(p, offset_of(Thread, name_len)))
+    put_field(s, offset_of(Thread, fs), if settls { tls } else { field(p, offset_of(Thread, fs)) })
+    put_field(s, offset_of(Thread, sigmask), field(p, offset_of(Thread, sigmask)))
+    put_field(s, offset_of(Thread, pid), take_pid())
+    put_field(s, offset_of(Thread, tgid), field(l, offset_of(Thread, tgid)))
+    put_field(s, offset_of(Thread, lead), l)
+    put_field(s, offset_of(Thread, ppid), 0) // a thread is nobody's child: wait4 sees processes
+    put_field(s, offset_of(Thread, ctid), ctid)
+    put_field(s, offset_of(Thread, name0), field(p, offset_of(Thread, name0)))
+    put_field(s, offset_of(Thread, name1), field(p, offset_of(Thread, name1)))
+    put_field(l, offset_of(Thread, threads), field(l, offset_of(Thread, threads)) + 1)
+    put_field(s, offset_of(Thread, state), READY)
+    enqueue(s)
+    s
+}
+
+/// px26: threads made by `clone` since boot (kernel/process's census
+/// line every 2500th).
+pub fn threads_made() -> u64 {
+    sv(S_THREADS)
+}
+
+/// px26: slots that are not free (the same census line).
+pub fn slots_busy() -> u64 {
+    var n: u64 = 0
+    var s: u64 = 0
+    while s < SLOTS {
+        if field(s, offset_of(Thread, state)) != FREE {
+            n += 1
+        }
+        s += 1
+    }
+    n
+}
+
+/// px26: before `execve`'s point of no return in a process with more
+/// than one thread: every other thread ends, and the caller becomes the
+/// leader if it was not — the pid, the parent, the area (copied into its
+/// own slot), the address space and the process's pending signals are
+/// its own from here on, and its tid is the pid (`execve(2)`: "all
+/// threads other than the calling thread are destroyed … the thread ID
+/// of the new program is the process ID"). The old leader's slot, held
+/// or just ended, is let go without the space. IF clear.
+pub fn exec_alone() {
+    let c = cur()
+    let l = field(c, offset_of(Thread, lead))
+    if field(l, offset_of(Thread, threads)) <= 1 && l == c {
+        return
+    }
+    end_others(l, c)
+    if l != c {
+        let from = own_area(l)
+        let to = own_area(c)
+        var i: u64 = 0
+        while i < PROC_AREA / 8 {
+            // # Safety: two slots' areas inside boot/sched.S's pax_procs.
+            unsafe { ((to + i * 8) as *u64).write_volatile(((from + i * 8) as *u64).read_volatile()) }
+            i += 1
+        }
+        i = 0
+        while i < NSIG {
+            put_info(c, 1, i + 1, info_of(l, 1, i + 1))
+            i += 1
+        }
+        put_field(c, offset_of(Thread, pid), field(l, offset_of(Thread, tgid)))
+        put_field(c, offset_of(Thread, ppid), field(l, offset_of(Thread, ppid)))
+        put_field(c, offset_of(Thread, owns), field(l, offset_of(Thread, owns)))
+        put_field(c, offset_of(Thread, vparent), field(l, offset_of(Thread, vparent)))
+        put_field(c, offset_of(Thread, gpend), field(l, offset_of(Thread, gpend)))
+        put_field(c, offset_of(Thread, lead), c)
+        // The old leader: no pid, no parent, no space; its stack (if it
+        // still has one) and its slot go at the next reap.
+        put_field(l, offset_of(Thread, pid), 0)
+        put_field(l, offset_of(Thread, tgid), 0)
+        put_field(l, offset_of(Thread, ppid), 0)
+        put_field(l, offset_of(Thread, cr3), 0)
+        put_field(l, offset_of(Thread, owns), 0)
+        put_field(l, offset_of(Thread, vparent), 0)
+        put_field(l, offset_of(Thread, zombie), 0)
+        put_field(l, offset_of(Thread, gone), 0)
+        put_field(l, offset_of(Thread, threads), 0)
+        put_field(l, offset_of(Thread, lead), l)
+        put_field(l, offset_of(Thread, state), DEAD)
+    }
+    put_field(c, offset_of(Thread, threads), 1)
 }
 
 /// Slot `s`'s pid (px14).
@@ -1178,6 +1601,11 @@ pub fn exec_current(cr3: u64, entry: u64, usp: u64, name: u64, len: u64) {
     put_field(c, offset_of(Thread, name), name)
     put_field(c, offset_of(Thread, name_len), len)
     put_field(c, offset_of(Thread, fs), 0)
+    // px26: the new program starts with no clear-child-tid word and
+    // the program's own name; pending signals stay.
+    put_field(c, offset_of(Thread, ctid), 0)
+    put_field(c, offset_of(Thread, name0), 0)
+    put_field(c, offset_of(Thread, name1), 0)
     paging.load(cr3)
     // # Safety: as in `enter_space`.
     unsafe { pax_wrmsr(FS_BASE, 0) }
@@ -1193,7 +1621,7 @@ pub fn exec_current(cr3: u64, entry: u64, usp: u64, name: u64, len: u64) {
 /// that has ended or SLOTS).
 pub fn child_ended(sel: u64) -> (bool, u64) {
     reap()
-    let me = field(cur(), offset_of(Thread, pid))
+    let me = field(cur(), offset_of(Thread, tgid)) // px26: the caller's process
     var any = false
     var s: u64 = FIRST
     while s < SLOTS {
@@ -1235,6 +1663,7 @@ pub fn block_pipe_until(f: u64, wake: u64) -> u64 {
     put_field(c, offset_of(Thread, frame), f)
     put_field(c, offset_of(Thread, wake), wake)
     put_field(c, offset_of(Thread, state), PIPE)
+    put_field(c, offset_of(Thread, rst), if wake == 0 { W_REWOUND } else { W_TIMED_REWOUND }) // px26
     wake_sleepers()
     run_next()
 }
@@ -1287,8 +1716,457 @@ pub fn wait_child(f: u64) -> u64 {
     let c = cur()
     put_field(c, offset_of(Thread, frame), f)
     put_field(c, offset_of(Thread, state), WAITING)
+    put_field(c, offset_of(Thread, rst), W_REWOUND) // px26
     wake_sleepers()
     run_next()
+}
+
+// --- threads' words (px26) ---------------------------------------------------
+
+/// The running thread's clear-child-tid address (0 none).
+pub fn self_ctid() -> u64 {
+    field(cur(), offset_of(Thread, ctid))
+}
+
+/// `set_tid_address`: the running thread's clear-child-tid address.
+pub fn set_self_ctid(v: u64) {
+    put_field(cur(), offset_of(Thread, ctid), v)
+}
+
+/// The running thread's name (`which` 0 and 1: PR_SET_NAME's sixteen
+/// bytes as two words; both 0 when it never set one).
+pub fn self_name(which: int) -> u64 {
+    if which == 0 {
+        return field(cur(), offset_of(Thread, name0))
+    }
+    field(cur(), offset_of(Thread, name1))
+}
+
+pub fn set_self_name(a: u64, b: u64) {
+    put_field(cur(), offset_of(Thread, name0), a)
+    put_field(cur(), offset_of(Thread, name1), b)
+}
+
+/// Bytes a waiting pipe write of the running thread has written so far
+/// (kernel/files; a word of the area before a process had threads).
+pub fn self_done() -> u64 {
+    field(cur(), offset_of(Thread, done))
+}
+
+pub fn set_self_done(v: u64) {
+    put_field(cur(), offset_of(Thread, done), v)
+}
+
+/// A system call begins (kernel/user): whatever wait the thread's last
+/// call was in is over.
+pub fn syscall_begins() {
+    put_field(cur(), offset_of(Thread, rst), W_NONE)
+}
+
+/// How the running thread's system call was waiting when it was made
+/// ready (W_*), and that wait's argument; read once by kernel/signal
+/// when it delivers a signal, and cleared.
+pub fn self_wait() -> (u64, u64) {
+    let c = cur()
+    let r = (field(c, offset_of(Thread, rst)), field(c, offset_of(Thread, rarg)))
+    put_field(c, offset_of(Thread, rst), W_NONE)
+    put_field(c, offset_of(Thread, rarg), 0)
+    r
+}
+
+/// The tick the running thread's last timed wait was to end at (a sleep
+/// a signal cut short: kernel/signal writes the time left).
+pub fn self_wake() -> u64 {
+    field(cur(), offset_of(Thread, wake))
+}
+
+/// `sched_yield` from a system call: the running thread goes to the
+/// queue's tail with its frame `f` (the result already in it); the next
+/// thread's frame. IF clear.
+pub fn yield_current(f: u64) -> u64 {
+    let c = cur()
+    if sv(S_HEAD) == 0 {
+        return f
+    }
+    put_field(c, offset_of(Thread, frame), f)
+    put_field(c, offset_of(Thread, state), READY)
+    enqueue(c)
+    wake_sleepers()
+    run_next()
+}
+
+// --- futexes (px26) ----------------------------------------------------------
+//
+// A futex has no entry anywhere: a waiter is a thread in state FUTEX
+// whose slot names the word it waits on (its physical address: threads
+// of one process meet on it, and PAX shares no frame between address
+// spaces), the bitset it waits with and its place in line. A wake walks
+// the sixteen slots. A system call runs with IF clear from entry to the
+// switch, so no waker runs between the caller's look at the word
+// (kernel/process) and this wait.
+
+/// Put the running thread to wait on the futex `key` with bitset `bits`
+/// until a wake, tick `wake` (0: no deadline) or a signal: its frame `f`
+/// saved with -ETIMEDOUT as the result a deadline leaves (a wake writes
+/// 0, kernel/signal -EINTR or the call again); the next thread's frame.
+/// IF clear.
+pub fn futex_wait(f: u64, key: u64, bits: u64, wake: u64) -> u64 {
+    let c = cur()
+    // # Safety: the caller's live frame (22 words).
+    unsafe { ((f + W_RAX_OFF) as *u64).write_volatile(NEG_ETIMEDOUT) }
+    let q = sv(S_FSEQ) + 1
+    put_sv(S_FSEQ, q)
+    put_field(c, offset_of(Thread, frame), f)
+    put_field(c, offset_of(Thread, fkey), key)
+    put_field(c, offset_of(Thread, fbits), bits)
+    put_field(c, offset_of(Thread, fseq), q)
+    put_field(c, offset_of(Thread, wake), wake)
+    put_field(c, offset_of(Thread, state), FUTEX)
+    put_field(c, offset_of(Thread, rst), if wake == 0 { W_FUTEX } else { W_TIMED })
+    wake_sleepers()
+    run_next()
+}
+
+/// Wake at most `n` threads waiting on the futex `key` whose bitset
+/// shares a bit with `bits`, the longest-waiting first: each is made
+/// ready with 0 as its call's result. Returns how many. IF clear.
+pub fn futex_wake(key: u64, bits: u64, n: u64) -> u64 {
+    var woke: u64 = 0
+    while woke < n {
+        var best: u64 = SLOTS
+        var s: u64 = FIRST
+        while s < SLOTS {
+            if field(s, offset_of(Thread, state)) == FUTEX && field(s, offset_of(Thread, fkey)) == key && field(s, offset_of(Thread, fbits)) & bits != 0 {
+                if best == SLOTS || field(s, offset_of(Thread, fseq)) < field(best, offset_of(Thread, fseq)) {
+                    best = s
+                }
+            }
+            s += 1
+        }
+        if best == SLOTS {
+            break
+        }
+        let bf = field(best, offset_of(Thread, frame))
+        // # Safety: a waiting thread's saved frame, on its own kernel stack.
+        unsafe { ((bf + W_RAX_OFF) as *u64).write_volatile(0) }
+        put_field(best, offset_of(Thread, rst), W_NONE)
+        put_field(best, offset_of(Thread, fkey), 0)
+        put_field(best, offset_of(Thread, state), READY)
+        enqueue(best)
+        woke += 1
+    }
+    woke
+}
+
+/// How many threads wait on a futex now (the soak's census line).
+pub fn futex_waiters() -> u64 {
+    var n: u64 = 0
+    var s: u64 = FIRST
+    while s < SLOTS {
+        if field(s, offset_of(Thread, state)) == FUTEX {
+            n += 1
+        }
+        s += 1
+    }
+    n
+}
+
+// --- signals: what is pending, and who is woken (px26) ----------------------------
+//
+// A thread's slot holds the signals pending for it (`pend`), and its
+// leader's the signals pending for the process (`gpend`); one word of
+// boot/sched.S's `pax_siginfo` per signal and kind says where each came
+// from (`sig_info`). kernel/signal decides what a taken signal does;
+// this module only keeps the sets, picks the thread, and makes a
+// waiting thread ready for a signal that will run a handler or end its
+// process (`poke`).
+
+/// What a pending signal's word says of its origin, for siginfo
+/// (kernel/signal): a `kill` (SI_USER), a `tgkill` or `tkill`
+/// (SI_TKILL), the terminal (SI_KERNEL), a child's end (CLD_EXITED,
+/// CLD_KILLED), a write to a pipe with no reader (SI_USER from itself).
+pub const I_USER: u64 = 1
+pub const I_TKILL: u64 = 2
+pub const I_KERNEL: u64 = 3
+pub const I_CHLD_EXITED: u64 = 4
+pub const I_CHLD_KILLED: u64 = 5
+pub const I_PIPE: u64 = 6
+
+/// An origin word: the kind, the sender's (or the child's) pid, and a
+/// status (a child's exit code or signal).
+pub fn sig_info(kind: u64, pid: u64, status: u64) -> u64 {
+    (kind & 0xff) | ((pid & 0xffffff) << 8) | ((status & 0xffffffff) << 32)
+}
+
+fn info_of(s: u64, group: u64, sig: u64) -> u64 {
+    // # Safety: s < SLOTS, group < 2, 1 <= sig <= 64: inside the 16 * 2 *
+    // 64 words of boot/sched.S's pax_siginfo.
+    unsafe { ((pax_siginfo as u64 + ((s * 2 + group) * NSIG + sig - 1) * 8) as *u64).read_volatile() }
+}
+
+fn put_info(s: u64, group: u64, sig: u64, v: u64) {
+    // # Safety: as `info_of`.
+    unsafe { ((pax_siginfo as u64 + ((s * 2 + group) * NSIG + sig - 1) * 8) as *u64).write_volatile(v) }
+}
+
+fn bit(sig: u64) -> u64 {
+    1 << (sig - 1)
+}
+
+/// The action's handler word of signal `sig` in the process led by `l`
+/// (the area's signal words, kernel/process's `rt_sigaction`).
+fn handler_of(l: u64, sig: u64) -> u64 {
+    // # Safety: the leader's area, word SIG_WORDS + (sig - 1) * 4 < 512.
+    unsafe { ((own_area(l) + (SIG_WORDS + (sig - 1) * 4) * 8) as *u64).read_volatile() }
+}
+
+/// Whether signal `sig`, taken by the process led by `l`, would do
+/// nothing: its action is SIG_IGN; or the default, for a signal whose
+/// default is to be ignored (SIGCHLD, SIGURG, SIGWINCH), to continue
+/// (SIGCONT) or to stop (SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU: PAX stops
+/// no process, and kernel/signal says so when it drops one); or the
+/// default at all, for pid 1 (`kill(2)`: init gets only the signals it
+/// has a handler for).
+fn inert(l: u64, sig: u64) -> bool {
+    let h = handler_of(l, sig)
+    if sig == SIGKILL || sig == SIGSTOP {
+        return field(l, offset_of(Thread, tgid)) == 1 || sig == SIGSTOP
+    }
+    if h == SIG_IGN {
+        return true
+    }
+    if h != SIG_DFL {
+        return false
+    }
+    field(l, offset_of(Thread, tgid)) == 1 || sig == SIGCHLD || sig == SIGURG || sig == SIGWINCH || sig == SIGCONT || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU
+}
+
+/// Whether slot `t` is a thread that can still take a signal.
+fn takes(t: u64) -> bool {
+    let st = field(t, offset_of(Thread, state))
+    st != FREE && st != DEAD && st != ZOMBIE && st != HELD
+}
+
+/// The thread of the group led by `l` that takes the process's signal
+/// `sig`: the leader when it has it unblocked, else the lowest-numbered
+/// thread that has; SLOTS when every thread blocks it.
+fn taker(l: u64, sig: u64) -> u64 {
+    if takes(l) && field(l, offset_of(Thread, sigmask)) & bit(sig) == 0 {
+        return l
+    }
+    var best: u64 = SLOTS
+    var t: u64 = FIRST
+    while t < SLOTS {
+        if t != l && field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, tgid)) != 0 && takes(t) && field(t, offset_of(Thread, sigmask)) & bit(sig) == 0 {
+            if best == SLOTS || field(t, offset_of(Thread, pid)) < field(best, offset_of(Thread, pid)) {
+                best = t
+            }
+        }
+        t += 1
+    }
+    best
+}
+
+/// The lowest-numbered signal slot `t` would take now, and whether it
+/// is the process's (1) or the thread's own (0); (0, 0) when none.
+fn next_for(t: u64) -> (u64, u64) {
+    let l = field(t, offset_of(Thread, lead))
+    let m = field(t, offset_of(Thread, sigmask))
+    let own = field(t, offset_of(Thread, pend)) & !m
+    let grp = field(l, offset_of(Thread, gpend)) & !m
+    if own == 0 && grp == 0 {
+        return (0, 0)
+    }
+    var sig: u64 = 1
+    while sig <= NSIG {
+        if own & bit(sig) != 0 {
+            return (sig, 0)
+        }
+        if grp & bit(sig) != 0 && taker(l, sig) == t {
+            return (sig, 1)
+        }
+        sig += 1
+    }
+    (0, 0)
+}
+
+/// Make slot `t` ready if it waits in a system call a signal may end
+/// (not a vfork parent's wait: `vfork(2)`).
+fn interrupt(t: u64) {
+    let st = field(t, offset_of(Thread, state))
+    if st == INPUT || st == PIPE || st == WAITING || st == SLEEPING || st == FUTEX {
+        put_field(t, offset_of(Thread, state), READY)
+        enqueue(t)
+    }
+}
+
+/// Every waiting thread of the group led by `l` that now has a signal
+/// to take which will run a handler or end the process is made ready.
+/// Called when a signal is raised, a mask changes or a thread ends.
+/// IF clear.
+fn poke(l: u64) {
+    var t: u64 = FIRST
+    while t < SLOTS {
+        if field(t, offset_of(Thread, lead)) == l && takes(t) && field(t, offset_of(Thread, state)) != READY && field(t, offset_of(Thread, state)) != RUNNING {
+            // Any of its deliverable signals that is not inert wakes it.
+            let m = field(t, offset_of(Thread, sigmask))
+            let own = field(t, offset_of(Thread, pend)) & !m
+            let grp = field(l, offset_of(Thread, gpend)) & !m
+            var sig: u64 = 1
+            var hit = false
+            while sig <= NSIG && !hit {
+                if (own & bit(sig) != 0 || (grp & bit(sig) != 0 && taker(l, sig) == t)) && !inert(l, sig) {
+                    hit = true
+                }
+                sig += 1
+            }
+            if hit {
+                interrupt(t)
+            }
+        }
+        t += 1
+    }
+}
+
+/// Raise signal `sig` for the thread in slot `t` with origin word
+/// `info`: pending for it, unless it would do nothing and the thread
+/// does not block it (`signal(7)`: an ignored signal is discarded when
+/// it is generated; a blocked one waits, since its action may change).
+/// A waiting thread it will reach is made ready. IF clear.
+pub fn raise_thread(t: u64, sig: u64, info: u64) {
+    if !takes(t) {
+        return
+    }
+    let l = field(t, offset_of(Thread, lead))
+    if inert(l, sig) && field(t, offset_of(Thread, sigmask)) & bit(sig) == 0 && !stops(sig, l) {
+        return
+    }
+    put_field(t, offset_of(Thread, pend), field(t, offset_of(Thread, pend)) | bit(sig))
+    put_info(t, 0, sig, info)
+    poke(l)
+}
+
+/// Raise signal `sig` for the process led by slot `l` (as
+/// `raise_thread`; discarded when it would do nothing and some thread
+/// has it unblocked).
+pub fn raise_group(l: u64, sig: u64, info: u64) {
+    if !running_state(l) {
+        return
+    }
+    if inert(l, sig) && taker(l, sig) != SLOTS && !stops(sig, l) {
+        return
+    }
+    put_field(l, offset_of(Thread, gpend), field(l, offset_of(Thread, gpend)) | bit(sig))
+    put_info(l, 1, sig, info)
+    poke(l)
+}
+
+/// Whether `sig`'s default action in the process led by `l` is a stop
+/// PAX refuses by name: such a signal is kept until its thread returns
+/// to ring 3, so kernel/signal can say it dropped it (it wakes nobody).
+fn stops(sig: u64, l: u64) -> bool {
+    (sig == SIGSTOP || ((sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU) && handler_of(l, sig) == SIG_DFL)) && field(l, offset_of(Thread, tgid)) != 1
+}
+
+/// Raise `sig` for the process `pid` (`kill`): false when there is no
+/// such process. `sig` 0 only asks.
+pub fn raise_pid(pid: u64, sig: u64, info: u64) -> bool {
+    let l = live_slot(pid)
+    if l == SLOTS {
+        return false
+    }
+    if sig != 0 {
+        raise_group(l, sig, info)
+    }
+    true
+}
+
+/// Raise `sig` for the thread `tid` of process `tgid` (`tgkill`; `tgid`
+/// 0 for `tkill`: any process's): false when there is no such thread.
+pub fn raise_tid(tgid: u64, tid: u64, sig: u64, info: u64) -> bool {
+    var t: u64 = FIRST
+    while t < SLOTS {
+        if takes(t) && field(t, offset_of(Thread, pid)) == tid && field(t, offset_of(Thread, tgid)) != 0 && (tgid == 0 || field(t, offset_of(Thread, tgid)) == tgid) {
+            if sig != 0 {
+                raise_thread(t, sig, info)
+            }
+            return true
+        }
+        t += 1
+    }
+    false
+}
+
+/// Raise `sig` for every process (the terminal's signal, `kill(0)`,
+/// `kill(-pgid)`: PAX has one session and one process group, the
+/// console its terminal) but `but` (a pid; 0 none) and, when `spare1`,
+/// pid 1 (`kill(-1)`). Returns how many processes there were.
+pub fn raise_all(sig: u64, info: u64, but: u64, spare1: bool) -> u64 {
+    var n: u64 = 0
+    var l: u64 = FIRST
+    while l < SLOTS {
+        let pid = field(l, offset_of(Thread, tgid))
+        if pid != 0 && field(l, offset_of(Thread, pid)) == pid && running_state(l) && pid != but && !(spare1 && pid == 1) {
+            n += 1
+            if sig != 0 {
+                raise_group(l, sig, info)
+            }
+        }
+        l += 1
+    }
+    n
+}
+
+/// Whether the running thread has a signal to take now (kernel/signal
+/// asks on every return to ring 3). False before `start`.
+pub fn signal_waits() -> bool {
+    if sv(S_STARTED) == 0 {
+        return false
+    }
+    let c = cur()
+    if field(c, offset_of(Thread, tgid)) == 0 {
+        return false
+    }
+    let (sig, _g) = next_for(c)
+    sig != 0
+}
+
+/// Take the running thread's next signal: (its number, its origin
+/// word); (0, 0) when none. The lowest-numbered first.
+pub fn take_signal() -> (u64, u64) {
+    let c = cur()
+    let l = field(c, offset_of(Thread, lead))
+    let (sig, g) = next_for(c)
+    if sig == 0 {
+        return (0, 0)
+    }
+    if g == 1 {
+        put_field(l, offset_of(Thread, gpend), field(l, offset_of(Thread, gpend)) & !bit(sig))
+        return (sig, info_of(l, 1, sig))
+    }
+    put_field(c, offset_of(Thread, pend), field(c, offset_of(Thread, pend)) & !bit(sig))
+    (sig, info_of(c, 0, sig))
+}
+
+/// The signals pending for the running thread, its own and its
+/// process's (`rt_sigpending`).
+pub fn self_pending() -> u64 {
+    let c = cur()
+    field(c, offset_of(Thread, pend)) | field(field(c, offset_of(Thread, lead)), offset_of(Thread, gpend))
+}
+
+/// The running thread's mask has changed, or an action has: a signal of
+/// the process may be another thread's to take now.
+pub fn masks_changed() {
+    poke(field(cur(), offset_of(Thread, lead)))
+}
+
+/// A signal was delivered to a handler (kernel/signal counts them for
+/// its census line).
+pub fn count_signal() -> u64 {
+    let n = sv(S_SIGNALS) + 1
+    put_sv(S_SIGNALS, n)
+    n
 }
 
 /// The scheduler's line:
