@@ -1,0 +1,44 @@
+== keepalive: three requests on one connection
+200 50 conns=1
+200 6 conns=0
+200 50 conns=0
+== close
+200 50
+== http/1.0
+200 6
+== a static file of 300000 bytes
+200 300000
+same
+== a range, a HEAD, a 404, a conditional
+xxxxxxxxxx 206 10
+200
+404 151
+304 0
+== proxied: a GET, a POST, two on one connection
+upstream saw /api/one
+ 200
+upstream got 11 bytes
+ 200
+upstream saw /api/a
+ 200 conns=1
+upstream saw /api/b
+ 200 conns=0
+== eight at once
+200 200 200 200 200 200 200 200 
+== status, reload, a request after it
+lobo status
+current generation: 1
+quitting: false
+events: 2
+live-region-bytes: 131072
+generation 1: current live=0 age-ms=222 id=2baff6932dfecb5a mem-hw=65616 budget-503s=0 mem-rt-hw=65584
+status rc=0
+reload complete (generation 2)
+reload rc=0
+200 50
+upstream saw /api/after
+ 200
+== an idle second, then stop
+stop: shutting down (generation 2)
+stop rc=0
+serve rc=0
