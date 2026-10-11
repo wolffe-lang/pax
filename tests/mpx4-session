@@ -81,7 +81,7 @@
 # <tier>/kmain_session.elf, <tier>/session.iso and linux/). Without it
 # the script builds (linux x86-64; the Linux side needs root: sudo -n
 # when not root); --no-boot stops after E0. --pelt DIR and --bore DIR
-# take pelt and the boreutils from DIR instead of building them.
+# use pelt and the boreutils from DIR instead of building them.
 # --linux-files DIR runs only session-files' Linux side on what a build
 # left in DIR (DIR/root), into DIR/linux, and exits: for a host whose
 # build ran in a container with no container engine inside it.
@@ -108,8 +108,8 @@ while [ $# -gt 0 ]; do
         *)          die "$usage" ;;
     esac
 done
-case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
-case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware is bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier is native, release or both" ;; esac
 need readelf python3
 
 BORE="cat echo ls mkdir rm sleep"
@@ -328,7 +328,7 @@ except Exception as e:
 PY
 }
 
-record() { # tier leg session status
+note_run() { # tier leg session status
     ran=$((ran + 1))
     printf '%s kmain_session %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" "$4" \
         "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
@@ -371,7 +371,7 @@ for leg in $legs; do
                 --elf "$elf" --marker 'halt' --type "$PAX_ROOT/user/console/$s.keys" --prompt "$PROMPT" \
                 ${q[@]+"${q[@]}"} "$iso" >"$log.verdict" 2>&1 || hrc=$?
             [ -n "$cpid" ] && { kill "$cpid" 2>/dev/null; wait "$cpid" 2>/dev/null; }
-            record "$tier" "$leg" "$s" "$hrc"
+            note_run "$tier" "$leg" "$s" "$hrc"
             norm=$log.norm; serial_norm "$log" > "$norm"
             out=$PAX_BUILD/mpx4-session-$tier-$leg-$s.session
             # The session: after `run 1: /bin/pelt`, up to `run: 1 commands`;
