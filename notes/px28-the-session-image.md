@@ -121,3 +121,72 @@ that cannot be proved on nomad-1 is cut or replaced and said so in §4.
   A planted break (the counter not counted) is red in CI by run id.
 - **Not in the image** (P10): the writable tree's step (`mkdir`, `cat >
   file`, `rm -r`, `rm -rf /` refused): px27 is not on trunk.
+
+## The measurement against the prediction
+
+Drift after §3 was committed: px27 merged (trunk `1af462d`, the
+orchestrator's word), so the branch was rebased onto it and the
+writable tree's step added as a third session (P10 reversed, as the
+contract says). The image design moved with it: bu21's `mkdir` and
+`rm` joined, and the boreutils the session never runs (`env`, `false`,
+`head`, `readlink`, `stat`, `tail`, `true`, `wc`) left, so the
+initramfs holds 11 programs, not 17.
+
+| | predicted | measured |
+|---|---|---|
+| P1 the image | 17 programs, initramfs 196.8 MB, ISO 203.0–204.5 MB; 256 MiB under BIOS; prompt in 3.0 s ± 0.6 | **wrong on size, by design change** (above): 11 programs, initramfs 119,246,368 bytes (`d4e605f2…`), native ISO 125,550,592 bytes (`4f520a32…`). 256 MiB under BIOS holds every step (kasumi, 6 boots; nomad-1, 3 sessions and 1 check). Prompt in **1.95, 1.90, 1.90 s** on nomad-1: right (inside the band) |
+| P2 the long listing | `total 192184`, 17 lines, 15 wolf | for the 11-program image: `total 116460`, 11 lines, 9 wolf, 2 C (`notes/px28/nomad-1/session-2.serial.txt`) |
+| P3 Ctrl-C on a child | `^Cuser: sleep pid <p> killed: SIGINT after 2 runs`, an empty line, `$ `; `130` | **right in shape**: `^Cuser: sleep pid 5 killed: SIGINT after 3 runs` (3, 3, 2 in three sessions), the empty line, `130`. E2 holds it to Linux with the kernel's line cut out |
+| P4 the shell's handler | `$ ^C`, then after Enter `not today` | **right** |
+| P5 reaching out | four lines, 8.8.8.8 and 8.8.4.4, ttl varying | **right** (ttl 217 each time on nomad-1) |
+| P6 answering | tcpecho's three lines; nc reads the line and `eof after 24 bytes, crc 9d337024`; Ctrl-C ends it blocked in `accept` | **right**, every line: `^Cuser: tcpecho pid 15 killed: SIGINT after 8 runs`. `tcpwolf`'s four lines as on Linux |
+| P7 the speaker beside the network device | `play mambo` 44.3 s, the speaker line | **right**: `speaker: 160 tones, … sounding 0`, the prompt 44.39–44.43 s later; the test's `play scale` is 8 tones in QEMU's WAV with the network device attached |
+| P8 the end | `run: 1 commands`, console, `signals: <k>` with k the Ctrl-C's typed (3), the speaker, the network line(s), init's status, `halt` | **right** with one change of form: two network lines, `network: frames 10 in, 10 out; udp datagrams 1 in, 2 out` and `network: tcp connections 2 accepted, 1 made, 0 open`; `signals: 3 raised from the terminal` |
+| P9 the test | the shell steps byte-identical to Linux; resolve's shape; tcpecho's text; the counter; the halt; a plant red in CI | right; the files session byte-identical to Linux too (in a throwaway container, `tools/linux-tree`); the plant's run below |
+
+## 4. Evidence index
+
+- **The suite at the head's tree** (`d2121b7`; the head adds and
+  reverts only the plant): kasumi, QEMU 11.1.1 TCG, both tiers, BIOS
+  (256 MiB) and UEFI (512 MiB), three sessions: **51 PASS, 0 FAIL, 0
+  SKIP** in 12 boots (`notes/px28/kasumi/h1-d2121b7-boot.out`,
+  `…-runs.txt`, `…-summary`, `…-images.sha256`,
+  `…-build.txt`). Built in `px13-ubuntu` with `PAX_REQUIRE_UEFI=1`;
+  the build's one FAIL there is E0's `tools/linux-tree` (no container
+  engine inside that container), whose step ran on kasumi's host by
+  `--linux-files` with podman and image `localhost/px13-ubuntu`
+  (`linux-files rc=0`, the summary). On the CI runner the whole suite
+  runs in one place with docker.
+- **The image**: native `session.iso` `4f520a323fbf6e867ed1fc462b2a02808d7262b634c4196c5987fd24d93424ad`,
+  kernel `d3a1b1101ffdf4cc7d6bdf8541a89fc023928e64d19166cfca523708c46e13fd`,
+  initramfs `d4e605f209c04ec82e0d0a5b5ed435f5c0e9d69f7e5cdeafe796c7277697c8f0`;
+  release `04ad34c3…` (the summary's images file).
+- **nomad-1**: three typed sessions of every step, fish in two
+  pseudo-terminals, the second running `nc`
+  (`notes/px28/nomad-1/session-{1,2,3}.serial.txt`, `…nc.txt`); they
+  differ only in the file times and one `after N runs`. The check
+  script's run: `GO` (`notes/px28/nomad-1/check.out`), and `NO GO:
+  port` with 127.0.0.1:7070 held (`check-port-held.out`). The first
+  loud boot of the kernel, every program narrated
+  (`dev1-loud.txt`: frames free 15766 before and after pelt at 256
+  MiB with the 196.8 MB initramfs of §2).
+- **The inputs**: `notes/px28/inputs/` (§2).
+- **CI**: the plant `1274b4b` (the counter not counted): run
+  38164131233, job `mpx4-session` **failure**, for the reason it names
+  and no other: E4 `'signals: 0 raised from the terminal', not 'signals:
+  2 …'` (session-shell) and `not 'signals: 1 …'` (session-net) on every
+  leg, every other assertion PASS, E0 included — the runner built
+  everything and ran both Linux sides itself, the files' in docker
+  (`notes/px28/ci-38164131233-mpx4-session-plant-1274b4b.txt`). The
+  run's other jobs were cancelled by this lane once that job had
+  failed (its own run; two runs at most). The revert is `91a68a1`.
+  The head's run is named in the PR (a commit cannot name its own run).
+
+## 5. Done-when
+
+- [ ] branch `px28` on origin, PR #34 open and unmerged, five sections
+- [ ] CI green at the head sha (the run named in the PR)
+- [x] the plant red in its own run (38164131233), mpx4-session's job
+- [ ] `wolf/tools/lane-audit.sh pax px28 34` from the org directory, its exit status read
+- [ ] the image's folder on nomad-1 ready, its check `GO`; no QEMU of this lane left on nomad-1 or kasumi; kasumi's `~/lanes/px28` pruned
+- Close nothing. Nothing to close.
