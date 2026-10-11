@@ -31,14 +31,14 @@
 
 const TLEN: int = 2048
 const BLK: int = 64
-const MAXV: int = 32
+const MAXV: int = 48
 const NP: int = 8
 const MASK32: int = 4294967295
 const BANDS: int = 8
 const NTIMBRES: int = 17
 /// The limiter's ceiling and the mix's master gain (/65536).
 const CEIL: int = 30000
-const MASTER: int = 36000
+const MASTER: int = 30000
 
 /// What a part-format performance did.
 struct OrchDone {
@@ -573,10 +573,22 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
             while pc[p] < sc.p_count[p] && frame_of(sc.n_start[first + pc[p]], rate) < bend {
                 let n = first + pc[p]
                 pc[p] += 1
-                // a free voice, else the quietest releasing or struck one
-                var v = -1
-                var best: int = 1 << 40
+                // a drum, bell or tam-tam struck again while it rings is
+                // the same instrument: struck in place
+                var again = -1
                 var j = 0
+                if prm[p * 9] == 1 {
+                    while j < MAXV {
+                        if v_on[j] && v_part[j] == p && sc.n_hz[v_note[j]] == sc.n_hz[n] {
+                            again = j
+                        }
+                        j += 1
+                    }
+                }
+                // a free voice, else the quietest releasing or struck one
+                var v = again
+                var best: int = 1 << 40
+                j = if again >= 0 { MAXV } else { 0 }
                 while j < MAXV {
                     if !v_on[j] {
                         v = j
@@ -589,7 +601,7 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
                     }
                     j += 1
                 }
-                if v_on[v] {
+                if v_on[v] && again < 0 {
                     stolen += 1
                 }
                 let t = sc.timbres[p]
@@ -633,14 +645,20 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
                 } else {
                     v_stage[v] = 1
                     v_env[v] = 65536
-                    strike(mut pph, mut pinc, mut pamp, mut pdec, mut ptop, mut p0amp, v * NP, t, inc, rate)
+                    if again >= 0 {
+                        restrike(mut ptop, p0amp, v * NP, NP, 4096 * 45)
+                    } else {
+                        strike(mut pph, mut pinc, mut pamp, mut pdec, mut ptop, mut p0amp, v * NP, t, inc, rate)
+                    }
                     v_np[v] = if t == 15 { 0 } else { if t == 16 { 2 } else { if t == 14 { 8 } else { if t == 12 { 6 } else { 7 } } } }
                     let (na, nd) = noise_of(t, rate)
                     v_namp[v] = na
                     v_ndec[v] = nd
                     v_lp[v] = 0
                 }
-                v_g[v] = 0
+                if again < 0 {
+                    v_g[v] = 0
+                }
                 let trem = sc.n_marks[n] & M_TREM != 0
                 v_stroke[v] = if struck(t) { rate / 16 } else { rate * 10 / 128 }
                 v_trem[v] = if trem { v_stroke[v] } else { -1 }
@@ -696,7 +714,8 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
                     env = sus + (env - sus) * (d - run) / d
                 }
             } else {
-                let r = (if v_fast[v] { 15 } else { prm[pb + 4] }) * rate / 1000 + 1
+                // the release falls by e every third of its time (to -26 dB at its end)
+                let r = (if v_fast[v] { 15 } else { prm[pb + 4] }) * rate / 3000 + 1
                 env = env * (r - run) / r
             }
             // a tremolo's stroke, a roll's strike
