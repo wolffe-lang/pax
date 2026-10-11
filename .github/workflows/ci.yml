@@ -1217,6 +1217,70 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px30: sampled sound. QEMU's virtio sound device under kmain_console,
+  # its output to the `wav` backend at 48 kHz; unmodified static Linux
+  # programs (user/sound: dsptone, dspprobe) and /bin/play's mixed mode
+  # through OSS's /dev/dsp. tests/mpx3-sound: the device (S1), the
+  # witnesses' answers and a two-channel tone (S2), a ramp exact frame
+  # for frame (S3), an underrun (S4), a process ended mid-sound (S5),
+  # O_NONBLOCK (S6), play mixed (S7).
+  mpx3-sound:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev make
+          qemu-system-x86_64 --version
+          qemu-system-x86_64 -audiodev help
+          qemu-system-x86_64 -device help | grep -i -E 'virtio-sound|AC97|hda'
+          clang --version
+          gcc --version | head -n 1
+          python3 --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx3-sound-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the sound device plays, both tiers, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx3-sound
+
+      - name: keep the programs, the captures' verdicts, the transcripts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx3-sound-linux
+          path: |
+            build/mpx3-sound/sound.txt
+            build/mpx3-sound/play.txt
+            build/mpx3-sound/*/kmain_console.elf
+            build/mpx3-sound/*/*.log
+            build/mpx3-sound-*.log
+            build/mpx3-sound-*.norm
+            build/mpx3-sound-*.txt
+            build/mpx3-sound-*.verdict
+            build/mpx3-sound-*.spec
+            build/mpx3-sound-*.wav
+            build/mpx3-sound-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   # px08: the tour of the kernel. kmain_tour and kmain_tour_text
   # (kernel/pax_tour's stages over the test kernels' paths), two ISOs behind
   # Limine's menu (tools/tour build), both tiers, BIOS and UEFI.
