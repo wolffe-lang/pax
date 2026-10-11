@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# mknet — build px22's eight network witnesses (user/net/*.c) into OUTDIR.
+# mknet — build the network witnesses (user/net/) into OUTDIR: px22's
+# eight for UDP and px23's ten for TCP.
 #
 #   tools/mknet OUTDIR
 #
@@ -19,6 +20,27 @@
 #   udpfill    a receive queue filled past its bound, over loopback
 #   udphold    a receive queue filled past its bound, from the wire
 #   resolve    a stub resolver (RFC 1035): one A question to a server
+#   tcperr     what AF_INET stream sockets answer with nothing on the
+#              wire: the refusals by errno, SO_REUSEADDR, listen and
+#              accept, a refused connect, half-close, a reset, SIGPIPE,
+#              the options, time-wait and bind
+#   tcpecho    a TCP echo server that says when it listens; `fork`: a
+#              child a connection
+#   tcpclient  a client of an echo server; a half-close at the end
+#   tcploop    a forking server and its client over 127.0.0.1 and the
+#              machine's own address
+#   tcpbulk    a transfer with a CRC-32: send, recv, or both over
+#              loopback
+#   tcpsoak    N connections opened and closed, one at a time
+#   tcpend     how a connection that cannot go on ends: refused, timed
+#              out, reset
+#   tcpfull    a listen queue nobody empties
+# and two wolf programs (user/net/*.lu), built `--release` by the pinned
+# wolf ($PAX_WOLF, else `wolf`) through a `cc` that adds -static, as
+# tools/mkwolf-hello does:
+#   tcpwolf    a listener, a client and one request served in one
+#              process over 127.0.0.1
+#   tcpwolfd   one request served to another machine
 # and prints one line per file: `<name> <sha256> <bytes>`, also written
 # to OUTDIR/sums.txt.
 #
@@ -35,9 +57,25 @@ out=$(cd "$out" && pwd)
 cc=${CC:-cc}
 need "$cc" readelf
 : > "$out/sums.txt"
-for p in sockerr udploop udpecho udpclient udpsoak udpfill udphold resolve; do
+for p in sockerr udploop udpecho udpclient udpsoak udpfill udphold resolve \
+         tcperr tcpecho tcpclient tcploop tcpbulk tcpsoak tcpend tcpfull; do
     "$cc" -O1 -Wall -Wextra -static -no-pie -Wl,--build-id=none -Wl,-z,noexecstack \
         -o "$out/$p" "$PAX_ROOT/user/net/$p.c" || die "cc: $p"
+    readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
+    ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP"
+    printf '%s %s %s\n' "$p" "$(sha256_of "$out/$p")" "$(wc -c < "$out/$p" | tr -d ' ')" | tee -a "$out/sums.txt"
+done
+wolf=${PAX_WOLF:-wolf}
+need "$wolf"
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-mknet.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+mkdir -p "$w/bin"
+printf '#!/bin/sh\nexec %s -static "$@"\n' "$(command -v "$cc")" > "$w/bin/cc"
+chmod +x "$w/bin/cc"
+for p in tcpwolf tcpwolfd; do
+    mkdir -p "$w/$p"
+    cp "$PAX_ROOT/user/net/$p.lu" "$w/$p/$p.lu"
+    (cd "$w/$p" && PATH="$w/bin:$PATH" "$wolf" build --release --no-cache "$p.lu" -o "$out/$p") >&2 || die "wolf build: $p"
     readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
     ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP"
     printf '%s %s %s\n' "$p" "$(sha256_of "$out/$p")" "$(wc -c < "$out/$p" | tr -d ' ')" | tee -a "$out/sums.txt"
