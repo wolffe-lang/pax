@@ -560,7 +560,7 @@ fn readable(buf: u64, len: u64) -> bool {
 /// is -EBADF.
 fn write(fd: u64, buf: u64, len: u64) -> u64 {
     if socket.is_inet(area(), fd) {
-        return socket.sendto(area(), paging.live(), fd, buf, len, 0, 0) // px22
+        return socket.sendto(area(), paging.live(), fd, buf, len, 0, 0, 0) // px22
     }
     let t = files.write_target(area(), fd)
     if t == 2 {
@@ -677,6 +677,7 @@ const SYS_SOCKET: u64 = 41
 const SYS_CONNECT: u64 = 42
 const SYS_ACCEPT: u64 = 43
 const SYS_BIND: u64 = 49
+const SYS_SHUTDOWN: u64 = 48 // px23
 const SYS_LISTEN: u64 = 50
 const SYS_GETSOCKNAME: u64 = 51
 const SYS_GETPEERNAME: u64 = 52
@@ -1176,7 +1177,7 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     }
     if nr == SYS_SENDTO {
         if socket.is_inet(a, a0) {
-            return socket.sendto(a, pml4, a0, a1, a2, a4, int32(a5)) // px22
+            return socket.sendto(a, pml4, a0, a1, a2, int32(a3), a4, int32(a5)) // px22
         }
         return files.sendto(a, pml4, a0, a1, a2, int32(a3), a4)
     }
@@ -1208,8 +1209,14 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     if nr == SYS_GETSOCKOPT {
         return socket.getsockopt(a, pml4, a0, int32(a1), int32(a2), a3, a4)
     }
-    if nr == SYS_LISTEN || nr == SYS_ACCEPT || nr == SYS_ACCEPT4 {
-        return socket.no_connections(a, a0, nr)
+    if nr == SYS_LISTEN {
+        return socket.listen(a, a0, int32(a1))
+    }
+    if nr == SYS_ACCEPT || nr == SYS_ACCEPT4 {
+        return socket.accept(a, pml4, a0, a1, a2, if nr == SYS_ACCEPT4 { int32(a3) } else { 0 }, nr) // px23
+    }
+    if nr == SYS_SHUTDOWN {
+        return socket.shutdown(a, int32(r0), int32(a1)) // px23
     }
     if nr == SYS_FCNTL {
         return files.fcntl(a, a0, int32(a1), a2)

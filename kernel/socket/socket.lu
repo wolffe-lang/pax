@@ -1,4 +1,5 @@
-//! socket — the socket system calls for AF_INET datagram sockets (px22).
+//! socket — the socket system calls for AF_INET sockets: datagram
+//! (px22) and stream (px23).
 //!
 //! What a static Linux program's UDP calls reach: `socket` (41),
 //! `connect` (42), `accept` (43), `sendto` (44), `recvfrom` (45),
@@ -55,10 +56,44 @@
 //! process has one thread, and its own reference keeps the socket), so
 //! these are the only ends a receive has.
 //!
+//! **Stream sockets** (px23; kernel/tcp's): `socket(AF_INET,
+//! SOCK_STREAM, 0 or 6)`, `bind`, `listen` (50), `accept` (43) and
+//! `accept4` (288; `SOCK_CLOEXEC` and `SOCK_NONBLOCK`, any other flag
+//! -EINVAL), `connect`, `sendto`/`write`, `recvfrom`/`read`, `shutdown`
+//! (48), `getsockname`, `getpeername`, `setsockopt` and `getsockopt`.
+//! Each errno is the one Linux answered user/net/tcperr.c
+//! (`notes/px23-tcp.md`): a protocol that is not TCP's
+//! -EPROTONOSUPPORT, one over 255 -EINVAL; `accept` on a socket that
+//! does not listen, `listen` and `bind` on one that is connected
+//! -EINVAL; `connect` on one that is connected or listens -EISCONN;
+//! not connected: `recv` and `getpeername` -ENOTCONN, `send` -EPIPE,
+//! `shutdown` -ENOTCONN (a `how` over 2 -EINVAL first); after the
+//! connection ended, the error it ended with once, then `send` -EPIPE
+//! and `recv` 0. A write that answers -EPIPE is kernel/user's to turn
+//! into SIGPIPE, as a pipe's (px17), unless `MSG_NOSIGNAL` is set.
+//!
+//! A stream call that cannot answer yet waits as a datagram receive
+//! does (`files.WAIT`; kernel/tcp wakes every waiter on every change):
+//! `accept` for a connection, `connect` for the handshake (the call run
+//! again finds it done, refused or timed out), `recv` for a byte or
+//! the end of the stream, `send` until every byte is in the send
+//! buffer (what it has put there across waits is the process area's
+//! word 13, a pipe write's too). Under `O_NONBLOCK` (`fcntl`, `accept4`
+//! or `ioctl(FIONBIO)`) or `MSG_DONTWAIT` each answers -EAGAIN instead
+//! (`connect` -EINPROGRESS), and nothing here can wait for more than
+//! one socket: `poll` and `epoll` are not there.
+//!
+//! Stream options: `SO_REUSEADDR` (2), `SO_TYPE`, `SO_ERROR` (the error
+//! a connection ended with, taken); at level 6 (IPPROTO_TCP, uapi
+//! `linux/tcp.h`) `TCP_NODELAY` (1), `TCP_SYNCNT` (7; 1 to 255) and
+//! `TCP_USER_TIMEOUT` (18, milliseconds). Every other -ENOPROTOOPT, by
+//! name.
+//!
 //! Written from the man pages socket(2), bind(2), connect(2),
 //! sendto(2), recvfrom(2), getsockname(2), getpeername(2),
-//! getsockopt(2), listen(2), accept(2), udp(7), ip(7), socket(7); the
-//! uapi headers `linux/in.h`, `linux/socket.h`, `linux/net.h`,
+//! getsockopt(2), listen(2), accept(2), shutdown(2), send(2), recv(2),
+//! udp(7), tcp(7), ip(7), socket(7); the uapi headers `linux/in.h`,
+//! `linux/tcp.h`, `linux/socket.h`, `linux/net.h`,
 //! `asm-generic/socket.h`, `asm-generic/errno.h`; and black-box strace
 //! of the witnesses on Linux. No Linux source; no other kernel's or
 //! libc's source.
@@ -67,12 +102,14 @@ use arp
 use files
 use ip
 use log
+use tcp
 use timer
 use uaccess
 use udp
 
 const AF_UNSPEC: u64 = 0
 const AF_INET: u64 = 2
+const SOCK_STREAM: u64 = 1
 const SOCK_DGRAM: u64 = 2
 const SOCK_TYPE_MASK: u64 = 0xf
 const SOCK_CLOEXEC: u64 = 0x80000 // O_CLOEXEC
@@ -85,7 +122,12 @@ const MSG_PEEK: u64 = 0x2
 const MSG_TRUNC: u64 = 0x20
 const MSG_DONTWAIT: u64 = 0x40
 
+const MSG_OOB: u64 = 0x1
 const SOL_SOCKET: u64 = 1
+const SO_REUSEADDR: u64 = 2
+const TCP_NODELAY: u64 = 1 // uapi linux/tcp.h
+const TCP_SYNCNT: u64 = 7
+const TCP_USER_TIMEOUT: u64 = 18
 const SO_TYPE: u64 = 3
 const SO_ERROR: u64 = 4
 const SO_RCVTIMEO_OLD: u64 = 20
@@ -96,6 +138,7 @@ const EAGAIN: u64 = 11
 const EACCES: u64 = 13
 const EFAULT: u64 = 14
 const EINVAL: u64 = 22
+const EPIPE: u64 = 32
 const EDOM: u64 = 33
 const ENOTSOCK: u64 = 88
 const EMSGSIZE: u64 = 90
@@ -106,11 +149,13 @@ const EOPNOTSUPP: u64 = 95
 const EAFNOSUPPORT: u64 = 97
 const ENOBUFS: u64 = 105
 const ENOTCONN: u64 = 107
+const EINPROGRESS: u64 = 115
 
 // The process area's words this module keeps (kernel/sched's
 // `proc_area`; 3 is the refusal word kernel/vm, kernel/files and
 // kernel/process share).
 const A_REFUSAL: u64 = 3
+const A_DONE: u64 = 13 // bytes a waiting stream send has queued (a pipe write's word)
 const A_DEADLINE: u64 = 14 // the tick a waiting receive gives up at; 0 none
 const A_NAMED: u64 = 15 // the refusals already logged, a bit each
 const A_DETAIL: u64 = 144 // two words: the numbers a refusal's line names
@@ -124,6 +169,9 @@ const R_OPTION: u64 = 67
 const R_FRAGMENT: u64 = 68
 const R_BROADCAST: u64 = 69
 const R_UNIX: u64 = 70
+const R_STREAM_PROTOCOL: u64 = 71
+const R_SHUTDOWN: u64 = 72
+const R_OOB: u64 = 73
 
 /// The first refusal code that is this module's.
 pub const REFUSALS: u64 = 64
@@ -151,7 +199,16 @@ pub fn why(r: u64) -> str {
         return "a socket of a family PAX has none of: family"
     }
     if r == R_TYPE {
-        return "an AF_INET socket that is not a datagram socket: type"
+        return "an AF_INET socket that is neither a datagram nor a stream socket: type"
+    }
+    if r == R_STREAM_PROTOCOL {
+        return "a stream socket of a protocol that is not TCP: protocol"
+    }
+    if r == R_SHUTDOWN {
+        return "shutdown of a datagram socket: how"
+    }
+    if r == R_OOB {
+        return "out-of-band data on a stream socket (PAX reads no urgent pointer): flags"
     }
     if r == R_PROTOCOL {
         return "a datagram socket of a protocol that is not UDP: protocol"
@@ -199,9 +256,14 @@ fn refuse(a: u64, code: u64, e: u64, d0: u64, d1: u64) -> u64 {
     neg(e)
 }
 
-/// Whether descriptor `fd` is an AF_INET socket.
+/// Whether descriptor `fd` is an AF_INET socket, of either type.
 pub fn is_inet(a: u64, fd: u64) -> bool {
-    files.sock_kind(a, fd) == files.INET
+    let k = files.sock_kind(a, fd)
+    k == files.INET || k == files.TCP
+}
+
+fn is_stream(a: u64, fd: u64) -> bool {
+    files.sock_kind(a, fd) == files.TCP
 }
 
 /// The tick the running receive gives up at; 0 when it has no deadline
@@ -236,6 +298,24 @@ pub fn socket(a: u64, domain: u64, ty: u64, proto: u64) -> u64 {
     if ty & !(SOCK_TYPE_MASK | SOCK_CLOEXEC | SOCK_NONBLOCK) != 0 || base == 0 || base == 7 || base == 8 || base == 9 || base > 10 {
         // No such type (uapi linux/net.h: 1-6 and 10).
         return refuse(a, R_TYPE, EINVAL, ty, 0)
+    }
+    if base == SOCK_STREAM {
+        // px23: a stream socket is one of kernel/tcp's blocks.
+        if proto > 255 {
+            return refuse(a, R_STREAM_PROTOCOL, EINVAL, proto, 0)
+        }
+        if proto != 0 && proto != tcp.PROTOCOL {
+            return refuse(a, R_STREAM_PROTOCOL, EPROTONOSUPPORT, proto, 0)
+        }
+        let c = tcp.open()
+        if c == tcp.CONNS {
+            return neg(ENOBUFS)
+        }
+        let sfd = files.tcp_open(a, c, O_RDWR | (ty & (SOCK_CLOEXEC | SOCK_NONBLOCK)))
+        if sfd >= 0x8000000000000000 {
+            tcp.close(c)
+        }
+        return sfd
     }
     if base != SOCK_DGRAM {
         return refuse(a, R_TYPE, ESOCKTNOSUPPORT, base, 0)
@@ -318,6 +398,13 @@ fn errno_of(e: u64) -> u64 {
 
 /// `bind(fd, addr, len)`.
 pub fn bind(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
+    if is_stream(a, fd) {
+        let (se, sip, sport) = addr_in(pml4, addr, len)
+        if se != 0 {
+            return se
+        }
+        return errno_of(tcp.bind(files.inet_sock(a, fd), sip, sport))
+    }
     let (e, s) = sock(a, fd, 49)
     if e != 0 {
         return e
@@ -329,8 +416,23 @@ pub fn bind(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
     errno_of(udp.bind(s, ip4, port))
 }
 
-/// `connect(fd, addr, len)`: the default peer; AF_UNSPEC forgets it.
+/// `connect(fd, addr, len)`: the default peer; AF_UNSPEC forgets it. On
+/// a stream socket: the handshake, waited for.
 pub fn connect(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
+    if is_stream(a, fd) {
+        let (se, sip, sport) = addr_in(pml4, addr, len)
+        if se != 0 {
+            return se
+        }
+        let r = tcp.connect(files.inet_sock(a, fd), sip, sport)
+        if r == tcp.PENDING {
+            if files.nonblocking(a, fd) {
+                return neg(EINPROGRESS)
+            }
+            return files.WAIT
+        }
+        return errno_of(r)
+    }
     let (e, s) = sock(a, fd, 42)
     if e != 0 {
         return e
@@ -353,8 +455,12 @@ pub fn connect(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
 }
 
 /// `sendto(fd, buf, n, flags, addr, len)` on an AF_INET socket, and
-/// `write` (no flags, no address): `n`, or -errno.
-pub fn sendto(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, addr: u64, len: u64) -> u64 {
+/// `write` (no flags, no address): `n`, or -errno. A datagram socket
+/// reads no flag; a stream socket's are `stream_send`'s.
+pub fn sendto(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64, addr: u64, len: u64) -> u64 {
+    if is_stream(a, fd) {
+        return stream_send(a, pml4, fd, buf, n, flags)
+    }
     let (e, s) = sock(a, fd, 44)
     if e != 0 {
         return e
@@ -400,6 +506,25 @@ pub fn sendto(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, addr: u64, len: u64)
 /// `read` (no flags, no address): the bytes copied (the datagram's
 /// whole length under MSG_TRUNC), -errno, or `files.WAIT`.
 pub fn recvfrom(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64, addr: u64, lenp: u64) -> u64 {
+    if is_stream(a, fd) {
+        if flags & MSG_OOB != 0 {
+            return refuse(a, R_OOB, EINVAL, flags, 0)
+        }
+        let (got, re) = tcp.recv(files.inet_sock(a, fd), pml4, buf, n, flags & MSG_PEEK != 0)
+        if re != 0 {
+            return neg(re)
+        }
+        if got == tcp.EMPTY {
+            if n == 0 {
+                return 0
+            }
+            if flags & MSG_DONTWAIT != 0 || files.nonblocking(a, fd) {
+                return neg(EAGAIN)
+            }
+            return files.WAIT
+        }
+        return got
+    }
     let (e, s) = sock(a, fd, 45)
     if e != 0 {
         return e
@@ -443,6 +568,29 @@ pub fn recvfrom(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64, addr: 
 
 /// `getsockname(fd, addr, lenp)` (`peer` false) and `getpeername`.
 pub fn getname(a: u64, pml4: u64, fd: u64, addr: u64, lenp: u64, peer: bool) -> u64 {
+    if is_stream(a, fd) {
+        let c = files.inet_sock(a, fd)
+        var sip: u64 = 0
+        var sport: u64 = 0
+        if peer {
+            let (connected, pa, pp) = tcp.peer(c)
+            if !connected {
+                return neg(ENOTCONN)
+            }
+            sip = pa
+            sport = pp
+        } else {
+            let (la, lp) = tcp.name(c)
+            sip = la
+            sport = lp
+        }
+        let sr = addr_room(pml4, addr, lenp)
+        if sr != 0 {
+            return sr
+        }
+        addr_out(pml4, addr, lenp, sip, sport)
+        return 0
+    }
     let (e, s) = sock(a, fd, if peer { 52 } else { 51 })
     if e != 0 {
         return e
@@ -471,6 +619,27 @@ pub fn getname(a: u64, pml4: u64, fd: u64, addr: u64, lenp: u64, peer: bool) -> 
 
 /// `setsockopt(fd, level, option, value, len)`: SO_RCVTIMEO_OLD.
 pub fn setsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u64, len: u64) -> u64 {
+    if is_stream(a, fd) {
+        let o = stream_option(level, option)
+        if o == NO_OPTION {
+            return refuse(a, R_OPTION, ENOPROTOOPT, level, option)
+        }
+        if len < 4 || len >= 0x80000000 {
+            return neg(EINVAL)
+        }
+        if !uaccess.readable(pml4, value, 4) {
+            return neg(EFAULT)
+        }
+        let v = uaccess.get(pml4, value, 4)
+        if o == tcp.O_SYNCNT && (v < 1 || v > 255) {
+            return neg(EINVAL)
+        }
+        if o == tcp.O_USER_TIMEOUT && v >= 0x80000000 {
+            return neg(EINVAL)
+        }
+        tcp.set_option(files.inet_sock(a, fd), o, v)
+        return 0
+    }
     let (e, s) = sock(a, fd, 54)
     if e != 0 {
         return e
@@ -501,6 +670,36 @@ pub fn setsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u6
 /// `getsockopt(fd, level, option, value, lenp)`: SO_TYPE, SO_ERROR,
 /// SO_RCVTIMEO_OLD.
 pub fn getsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u64, lenp: u64) -> u64 {
+    if is_stream(a, fd) {
+        let c = files.inet_sock(a, fd)
+        let o = stream_option(level, option)
+        let plain = level == SOL_SOCKET && (option == SO_TYPE || option == SO_ERROR)
+        if o == NO_OPTION && !plain {
+            return refuse(a, R_OPTION, ENOPROTOOPT, level, option)
+        }
+        if !uaccess.readable(pml4, lenp, 4) || !uaccess.writable(pml4, lenp, 4) {
+            return neg(EFAULT)
+        }
+        let scap = uaccess.get(pml4, lenp, 4)
+        if scap >= 0x80000000 {
+            return neg(EINVAL)
+        }
+        let sn = if scap < 4 { scap } else { 4 }
+        if !uaccess.writable(pml4, value, sn) {
+            return neg(EFAULT)
+        }
+        var sv: u64 = 0
+        if o != NO_OPTION {
+            sv = tcp.option(c, o)
+        } else if option == SO_TYPE {
+            sv = SOCK_STREAM
+        } else {
+            sv = tcp.take_error(c)
+        }
+        uaccess.put(pml4, value, sv, sn)
+        uaccess.put(pml4, lenp, sn, 4)
+        return 0
+    }
     let (e, s) = sock(a, fd, 55)
     if e != 0 {
         return e
@@ -537,12 +736,137 @@ pub fn getsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u6
     0
 }
 
-/// `listen(fd, backlog)`, `accept(fd, …)` and `accept4` (`nr` the
-/// call's number): a datagram socket has no connections to take.
-pub fn no_connections(a: u64, fd: u64, nr: u64) -> u64 {
-    let (e, _s) = sock(a, fd, nr)
+/// `listen(fd, backlog)`: a stream socket takes connections from now
+/// on; a datagram socket has none to take.
+pub fn listen(a: u64, fd: u64, backlog: u64) -> u64 {
+    if is_stream(a, fd) {
+        // A negative backlog is as large as one can be (listen(2)).
+        return errno_of(tcp.listen(files.inet_sock(a, fd), backlog & 0x7fffffff))
+    }
+    let (e, _s) = sock(a, fd, 50)
     if e != 0 {
         return e
     }
     neg(EOPNOTSUPP)
+}
+
+/// `accept(fd, addr, lenp)` and `accept4(…, flags)` (`nr` the call's
+/// number): the next established connection of a listening stream
+/// socket as a descriptor of its own, its peer's address written when
+/// asked for; `files.WAIT` (or -EAGAIN) while there is none.
+pub fn accept(a: u64, pml4: u64, fd: u64, addr: u64, lenp: u64, flags: u64, nr: u64) -> u64 {
+    if !is_stream(a, fd) {
+        let (e, _s) = sock(a, fd, nr)
+        if e != 0 {
+            return e
+        }
+        return neg(EOPNOTSUPP)
+    }
+    if flags & !(SOCK_CLOEXEC | SOCK_NONBLOCK) != 0 {
+        return neg(EINVAL)
+    }
+    let l = files.inet_sock(a, fd)
+    if tcp.state(l) != tcp.LISTEN {
+        return neg(EINVAL)
+    }
+    let wants = addr != 0 && lenp != 0
+    if wants {
+        let ar = addr_room(pml4, addr, lenp)
+        if ar != 0 {
+            return ar
+        }
+    }
+    let c = tcp.accept(l)
+    if c == tcp.EMPTY {
+        if files.nonblocking(a, fd) {
+            return neg(EAGAIN)
+        }
+        return files.WAIT
+    }
+    let nfd = files.tcp_open(a, c, O_RDWR | flags)
+    if nfd >= 0x8000000000000000 {
+        tcp.close(c)
+        return nfd
+    }
+    if wants {
+        let (_connected, pa, pp) = tcp.peer(c)
+        addr_out(pml4, addr, lenp, pa, pp)
+    }
+    nfd
+}
+
+/// `shutdown(fd, how)` on a stream socket.
+pub fn shutdown(a: u64, fd: u64, how: u64) -> u64 {
+    if !is_stream(a, fd) {
+        let (e, _s) = sock(a, fd, 48)
+        if e != 0 {
+            return e
+        }
+        return refuse(a, R_SHUTDOWN, EOPNOTSUPP, how, 0)
+    }
+    if how > 2 {
+        return neg(EINVAL)
+    }
+    errno_of(tcp.shutdown(files.inet_sock(a, fd), how))
+}
+
+/// What `stream_option` answers for an option a stream socket has not.
+const NO_OPTION: u64 = 99
+
+/// kernel/tcp's name (`tcp.O_*`) for a stream socket's option, or
+/// NO_OPTION.
+fn stream_option(level: u64, option: u64) -> u64 {
+    if level == SOL_SOCKET && option == SO_REUSEADDR {
+        return tcp.O_REUSE
+    }
+    if level == tcp.PROTOCOL {
+        if option == TCP_NODELAY {
+            return tcp.O_NODELAY
+        }
+        if option == TCP_SYNCNT {
+            return tcp.O_SYNCNT
+        }
+        if option == TCP_USER_TIMEOUT {
+            return tcp.O_USER_TIMEOUT
+        }
+    }
+    NO_OPTION
+}
+
+/// `send`, `sendto` and `write` on a stream socket: every one of the
+/// `n` bytes at `buf` into the send buffer, waiting while it is full
+/// (`flags`: MSG_DONTWAIT). `n`; what was queued before an error or
+/// before -EAGAIN; `files.EPIPE_R` for -EPIPE (kernel/user decides
+/// SIGPIPE); -errno; or `files.WAIT`.
+pub fn stream_send(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64) -> u64 {
+    if flags & MSG_OOB != 0 {
+        return refuse(a, R_OOB, EOPNOTSUPP, flags, 0)
+    }
+    let c = files.inet_sock(a, fd)
+    var done = get(a, A_DONE)
+    if done > n {
+        done = 0
+    }
+    if done == 0 && n > 0 && !uaccess.readable(pml4, buf, n) {
+        return neg(EFAULT)
+    }
+    let (taken, e) = tcp.send(c, pml4, buf + done, n - done)
+    if e != 0 {
+        put(a, A_DONE, 0)
+        if done > 0 {
+            return done
+        }
+        return if e == EPIPE { files.EPIPE_R } else { neg(e) }
+    }
+    done += taken
+    if done == n {
+        put(a, A_DONE, 0)
+        return n
+    }
+    if flags & MSG_DONTWAIT != 0 || files.nonblocking(a, fd) {
+        put(a, A_DONE, 0)
+        return if done > 0 { done } else { neg(EAGAIN) }
+    }
+    put(a, A_DONE, done)
+    files.WAIT
 }
