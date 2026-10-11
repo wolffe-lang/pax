@@ -66,9 +66,10 @@
 //! run under kernel/sync's heap lock (`sync.heap()`, a spinlock on
 //! kw11's atomics that also clears IF, so on one CPU the holder is
 //! never preempted and the lock never spins). wolf's freestanding
-//! runtime takes no lock of its own (kw12); its region bump and its one
-//! ambient-region slot are not the heap's to guard (see px06's notes
-//! and wolf-lang's ambient-slot issue). No interrupt handler allocates:
+//! runtime takes no lock of its own (kw12); its region bump is each
+//! region's own, and its one ambient-region slot is kernel/sched's to
+//! carry: saved and restored per thread at every switch through
+//! `ambient` and `set_ambient` below (px21a). No interrupt handler allocates:
 //! one that did would spin forever on the lock its own CPU holds.
 //!
 //! State: the books are a `#[repr(c)] struct HeapState` at the start of

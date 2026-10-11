@@ -4,8 +4,8 @@
 
    Listed under `asm` in kernel/wolf.pkg like every file here. Module
    state holds scalars only ([mem.static.3]), the device's interrupt
-   writes its words behind every thread's back, and nothing here may
-   hold a `region` (wolf-lang#611), so the state is words, named with
+   writes its words behind every thread's back, and no interrupt
+   handler allocates (kernel/sched, "Regions"), so the state is words, named with
    `extern "c" let` and read and written volatile:
 
      pax_pci_table   64 records of 8 eight-byte words, one per PCI

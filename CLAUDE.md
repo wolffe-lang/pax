@@ -33,4 +33,5 @@ The planning repo's refs clone (`wolf/refs/repos/linux`) is a sparse checkout of
 - The repository is public (since 2026-10-06, on the maintainer's word); no secret or credential goes in it.
 - The harness never installs packages; lanes never install on the pool.
 - A gap in wolf is filed upstream (wolf-lang) with a witness, and the track index names it as a blocker.
+- A `region` may stay open across a yield, a preemption or a wait: `kernel/sched` saves the runtime's ambient-region slot in the outgoing thread's record and restores the incoming thread's at every switch (px21a, wolf 0.2.27; `tests/mpx2-heap` H11 to H13). Two things are still refused: an interrupt handler allocates nothing, and a system call's handler holds no `region` open where it gives up its kernel stack for good (a wait that runs the `syscall` again, `clock_nanosleep`'s sleep, an exit, `execve`), because the code after that point never runs and the region would never be left.
 

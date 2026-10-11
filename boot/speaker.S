@@ -4,7 +4,7 @@
    Listed under `asm` in kernel/wolf.pkg like every file here. Module
    state holds scalars only ([mem.static.3]), the tick handler writes
    the state behind every thread's back (a KDMKTONE tone's end), and
-   nothing near a return to ring 3 may hold a `region` (wolf-lang#611),
+   no interrupt handler allocates (kernel/sched, "Regions"),
    so the state is words here, named by kernel/speaker with
    `extern "c" let` and read and written volatile:
 

@@ -2,9 +2,9 @@
    kernel/console keeps its state in.
 
    Listed under `asm` in kernel/wolf.pkg like every file here. Module
-   state holds scalars only ([mem.static.3]) and nothing near a return
-   to ring 3 may allocate from wolf's heap or hold a `region`
-   (wolf-lang#611), so the input queue and the terminal's settings are
+   state holds scalars only ([mem.static.3]) and a system call that
+   waits gives up its kernel stack, so it may hold no `region` there
+   (kernel/sched, "Regions"), so the input queue and the terminal's settings are
    bytes here, named by kernel/console with `extern "c" let` and read
    and written volatile (an interrupt handler writes them behind every
    thread's back, wolf-lang#598's shape):

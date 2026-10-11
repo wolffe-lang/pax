@@ -1,6 +1,6 @@
 # kernel/
 
-The wolf kernel: first light (px01, M-PX1), physical frames (px02), paging (px03), interrupts (kw10), preemptive kernel threads (px07), the heap (px06) and user mode (px09, below), on the wolf 0.2.26 release archive (px05 moved pax to the archive at 0.2.23; px07 to 0.2.24 for kw11's atomics; px10 to 0.2.25; px16 to 0.2.26). `kmain.lu` brings up COM1,
+The wolf kernel: first light (px01, M-PX1), physical frames (px02), paging (px03), interrupts (kw10), preemptive kernel threads (px07), the heap (px06) and user mode (px09, below), on the wolf 0.2.27 release archive (px05 moved pax to the archive at 0.2.23; px07 to 0.2.24 for kw11's atomics; px10 to 0.2.25; px16 to 0.2.26; px21a to 0.2.27 for the ambient pair). `kmain.lu` brings up COM1,
 reads what Limine handed it and prints one line each — the banner, the
 UART, the bootloader and base revision, the firmware, a memory-map
 summary, the HHDM offset, the frame allocator's totals — switches to its own
@@ -39,7 +39,7 @@ text (`tests/tour`, `tools/tour`).
 | `interrupts/` | `pax_interrupt`, the `export fn` every trampoline calls with its frame (`[abi.interrupt]`): a breakpoint prints and returns, vector 32 ticks the timer, a spurious 8259 request returns, every other vector panics `PANIC <name> vector <v> error … rip … rsp … frame …[ cr2 …[ (heap)]]` (` (heap)` for an address in the heap's slot, px06); `start`/`report` for the tables (kw10) |
 | `apic/` | the local APIC's page mapped uncached at PML4 slot 352 (`0xffffb00000000000`) and LINT0 set to ExtINT, unmasked: Limine leaves it masked, and an 8259 request would never arrive (kw10) |
 | `timer/` | the 8259s remapped to 32/40 and masked; the PIT's channel 0 at divisor 11932 (99.998 Hz) with line 0 alone unmasked; `tick` (EOI), `ticks`, `wait` (STI; HLT; CLI), `spurious`, `stop` (kw10; the PIT argued against the local APIC timer in the module's header) |
-| `heap/` | the kernel heap and wolf's allocator hook (px06): `wolf_alloc`/`wolf_free` as `export fn`s over `alloc`/`free`; PML4 slot 384 (`0xffffc00000000000`): a state page and 64-byte page descriptors, then the heap's pages from `0xffffc04000000000`, each a `frames.alloc()` frame mapped RW+NX by `paging.map` as the heap grows, never unmapped; address-ordered first-fit page runs with boundary tags for sizes above 2048, eight power-of-two size classes (16-2048) in their own zone (`0xffffc05000000000`) with a per-page allocated map; limit 32768 pages (128 MiB); named panics (`PANIC heap: double free …`, `free outside the heap`, `free with the wrong size`, `out of memory`, …); `report`, `pages`, `live_blocks`, `frames_taken`, …; `alloc`/`free` under `sync.heap()` (px07's threads are preempted); no `region` across a thread switch until wolf-lang#611 |
+| `heap/` | the kernel heap and wolf's allocator hook (px06): `wolf_alloc`/`wolf_free` as `export fn`s over `alloc`/`free`; PML4 slot 384 (`0xffffc00000000000`): a state page and 64-byte page descriptors, then the heap's pages from `0xffffc04000000000`, each a `frames.alloc()` frame mapped RW+NX by `paging.map` as the heap grows, never unmapped; address-ordered first-fit page runs with boundary tags for sizes above 2048, eight power-of-two size classes (16-2048) in their own zone (`0xffffc05000000000`) with a per-page allocated map; limit 32768 pages (128 MiB); named panics (`PANIC heap: double free …`, `free outside the heap`, `free with the wrong size`, `out of memory`, …); `report`, `pages`, `live_blocks`, `frames_taken`, …; `alloc`/`free` under `sync.heap()` (px07's threads are preempted); `ambient`/`set_ambient`, the runtime's ambient-region slot, which `sched` saves and restores per thread at every switch (px21a): a `region` may stay open across a yield, a preemption or a wait |
 | `panic/` | `wolf_trap`, the freestanding trap hook, in wolf; `fail(what, v)`, a fault the kernel detects, by name; `halt` |
 | `sync/` | the spinlock (px07): a lock is an 8-byte word's address; `acquire` saves RFLAGS and clears IF, then test-and-test-and-set (`atomic_load` relaxed, `atomic_cas` acquire/relaxed, kw11), `release` is a release store and IF as saved; `irq_save`/`irq_restore`/`enable`, `relax` (PAUSE), `console()` (the lock threads write whole lines under) |
 | `sched/` | kernel threads on one CPU (px07): 16 records in `boot/sched.S`'s `.bss` (`#[repr(c)] Thread`, its words at `offset_of`), slot 0 the kernel's own context, slot 1 the idle thread (`pax_idle`, HLT with IF set); each stack four frames mapped RW NX at the top of its slot's 64 KiB in PML4 slot 416 (`0xffffd00000000000`), the 48 KiB below never mapped (the guard); a FIFO run queue; `preempt` (the tick: wake sleepers, rotate after a two-tick quantum, idle gives way at once), `switched` (after `pax_switch`), `create(body, arg)`, `yield`, `sleep(n) -> (from, woke)`, `wait_all`, `exit` (the stack reaped by the next `create` or `wait_all`), `guard_of` (for the overflow panic), `report` |
@@ -119,7 +119,7 @@ text (`tests/tour`, `tools/tour`).
   `tools/fetch-wolf` stages it and never builds; px02 and kw10 built
   wolf-lang `eb955c3b` and `6a4e6151` from source while no release
   carried kw06-kw09), and lupin's release and digest
-  (`tools/fetch-lupin`; 0.1.49, 0.2.26's pairing, since px16; 0.1.48
+  (`tools/fetch-lupin`; 0.1.50, 0.2.27's pairing, since px21a; 0.1.49 from px16; 0.1.48
   from px10: it had
   been held at 0.1.44 for `tests/mkw` step 6's recorded clap error,
   which 0.1.48 replaces with an `unsupported` verdict naming the
@@ -195,7 +195,10 @@ witnesses (`tests/mpx3-user`).
   compiler may merge or move); the state handlers
   write lives in `pax_syscall_state` and the thread records, read
   volatile, never in module `var`s (wolf-lang#598, not fixed in 0.2.24);
-  no `region` anywhere near a return to ring 3 (wolf-lang#611).
+  no `region` is left open where a system call gives up its kernel
+  stack (a wait that runs the call again, an exit, `execve`): the code
+  after it never runs (`sched`'s "Regions"; a return to ring 3 itself
+  switches no thread and needs nothing saved).
 - Not yet: FXSAVE/XSAVE per thread (no program here touches x87 or
   SSE, and the kernel uses neither; px10's static binaries will),
   `exit_group` (231), an ELF loader, argv/envp/auxv on the stack (px10),
@@ -223,7 +226,7 @@ witnesses (`tests/mpx3-user`).
   boot/limine-initramfs.conf --add … initramfs.cpio` (the module).
 - No `region`, no heap: the archive is read in place, a process's pages
   and stack are frames written through the HHDM before its space is
-  live, and the FPU areas are frames (wolf-lang#611's rule holds).
+  live, and the FPU areas are frames.
 - Not yet (the gap to M-PX3, `notes/px10-the-loader.md` §4): `brk`,
   `arch_prctl(ARCH_SET_FS)` and FS per thread, `mprotect`, anonymous
   `mmap`, `getrandom`, `readlinkat` of `/proc/self/exe`, the files
@@ -453,7 +456,7 @@ user-visible: the surface is kernel-internal (`net.send`, `ip.send`,
 - No frame is touched with an interrupt in service, and nothing on
   the frame path allocates: the rings and buffers are 66 frames taken
   once, the state words in `.bss` read and written volatile under
-  `sync.net()` (no `region`, wolf-lang#611's rule).
+  `sync.net()` (no `region`: the device's interrupt allocates nothing).
 - A module `const` cannot be initialised from another module's on
   wolf 0.2.26 (wolf-lang#653): `net`'s feature mask spells
   `virtio.F_VERSION_1` out.
