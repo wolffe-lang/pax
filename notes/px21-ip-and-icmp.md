@@ -176,3 +176,213 @@ capture's conversation), N6 (the soak becomes 10,000 echoes), N8 (the
 the cache and the peer. No other suite's assertions move; kernels
 other than `kmain_net` change only if `kernel/net`'s bytes do (it is
 linked into each).
+
+## What was built
+
+1. **IPv4 receive** (`kernel/ip`'s `input`): the one place a header is
+   judged, in the order §3 gives, a counter per cause — `short`,
+   `version`, `ihl`, `checksum`, `length`, `ttl`, `fragment`, `source`,
+   `option`, `source-route`, `other`, `protocol`. It returns what the
+   datagram is and `kernel/netd` makes the call, so `ip` imports no
+   protocol above it.
+2. **IPv4 send** (`ip.send`): version 4, IHL 5, DF, TTL 64, an
+   identification counted from boot, the RFC 1071 sum (`ip.sum`);
+   on-link or by way of the gateway from `ip.start`'s
+   address/netmask/gateway; the broadcasts without resolution; a
+   payload over 1480 bytes refused (`size`). The frame goes out
+   through `arp.send`.
+3. **The ARP cache** (`kernel/arp`, rewritten): 8 entries; a resolved
+   one ages out a minute (`start`'s `age`) after the last ARP packet
+   from its address; an incomplete one is asked for three times, a
+   second apart, then given up (`unresolved`); two frames wait per
+   address and a third pushes out the oldest (`pushed out`); a new
+   address evicts the resolved entry confirmed longest ago and never an
+   incomplete one (`table full`); RFC 826's learning, so a gratuitous
+   announcement changes an entry that exists and creates none; a
+   sender of 0.0.0.0 or the broadcast teaches nothing and one claiming
+   PAX's address is a `conflict`. A second kernel thread
+   (`pax_net_clock`) runs the cache's clock every ten ticks.
+4. **ICMP** (`kernel/icmp`): an echo request answered in place (type
+   0, the checksum made again, the data entire) and routed by its
+   destination; the kernel's own echo request (`ping`, `answer`: the
+   round trip by the time-stamp counter), behind `ping` on the kernel
+   command line in `kmain_net` (six to the gateway); destination
+   unreachable, code 2, for a protocol nothing speaks, one a second
+   (`limited`), none where RFC 1122 forbids (`silent`).
+5. **Tests** (`tests/mpx4-net`: G0, N0–N12, P1–P4; `tools/net-peer`,
+   `tools/pcap-net`, `tools/gateway-probe`, `tools/paxnet.py`), below.
+
+Not filed: nothing new in wolf was hit. `take` is a reserved word
+(E0008, with a clear message). wolf-lang#653 stays as px20 left it.
+
+## 3. The prediction against the measurement
+
+| predicted | measured |
+|---|---|
+| `kernel/ip`, `kernel/icmp` new; `kernel/arp` rewritten; `netd` gains the demultiplexing and a clock thread; `net`'s `ipv4` cause retires; two lock words; more storage | so. One thing not predicted in the layout: `ip.input` does not call `icmp` — wolf modules would import each other — so `netd` makes the call from `input`'s answer |
+| the drop causes and their order | as predicted, and each seen from outside: `tools/net-peer` sends 31 datagrams that must be dropped, the model in `tools/paxnet.py` names the cause of each, and the kernel's counters equal the model's in every boot (`short` 2, `version` 1, `ihl` 1, `checksum` 1, `length` 2, `ttl` 1, `fragment` 2, `source` 7, `option` 3, `source-route` 2, `other` 2, `protocol` 9; ICMP's `short` 1, `checksum` 1, `broadcast` 2, `type` 2, `stray` 2) |
+| the cache: 8 entries, a minute, three requests a second apart, two frames kept, the oldest pushed out | so: 4 echo requests sent before the address is known give `4 queued, 2 pushed out` and the last two on the wire (identifications 2 and 3); 10.0.2.99 is asked for 3 times, 1.00 and 1.00 s apart, and given up after 300–301 ticks with 1 frame dropped; an entry aged at 2 s (the `peer` kernel's setting) is asked for again |
+| the route: on-link, else the gateway; a reply routed by its destination | so: echo requests for 192.0.2.1 leave for the gateway's hardware address, and the reply to a request from 192.0.2.1 does too |
+| DF, TTL 64, no fragments, a 1500-byte MTU, 1480 bytes the most `send` takes | so: 1472 data bytes go out in a 1514-byte frame and are answered; 1473 are refused by name |
+| PAX asks the gateway: 25,000 echoes/s on kasumi TCG, 18,000 on CI, 55,000 under KVM | kasumi TCG **19,954–21,150** (native) and 46,440–53,466 (release); CI **13,716–16,403** and 22,718–27,179; nomad-1 TCG 12,144–16,672 and 29,096–31,552; hasu KVM **55,109–58,754** and 64,935–70,198. The KVM figure held; the TCG ones were high by a fifth on the native tier and low by half on the release tier — the prediction gave one number for two tiers that differ by 2.4 times under TCG (the byte-at-a-time sum is the native tier's cost) |
+| the peer asks PAX: 4,000/s on kasumi, 3,000 on CI, 5,000 under KVM, "the script's rate" | kasumi 19,363–20,588 (native), 34,021–35,054 (release); CI 9,661–9,800, 12,136–12,485; nomad-1 12,723–13,304, 19,669–20,903; hasu KVM 31,996–36,856. **Low by 3 to 7 times**, and the stated bound was wrong: on the native tier under TCG the kernel, not the script, is the slower end (the rate equals PAX's own against the gateway) |
+| the mechanism: a `socket,udp=` netdev and a host script; works on CI's QEMU 8.2.2 | so, first try (run 38093374371). Not predicted: a frame of 26 bytes reaches the guest as 26 bytes on 8.2.2 and 11.1.x alike, so `short` is exact on every host |
+| CI's gateway answers echo itself | so (G0 in run 38093374371) |
+| CI's gateway proxies an echo to an outside address | **wrong**: `outside=0/2`. The runner's `ping_group_range` is `1 0` (no group admitted), not Ubuntu's desktop default; kasumi, hasu and nomad-1 all proxy (2/2). Nothing in the test stands on it |
+| tests that move: `tests/mpx4-net` N5, N6, N8 only | those, and N4 (the gateway is already in the cache from its own request, so `0 requests`) and N2 (kernel/ip's line); px20's ARP soak is gone (the echo soak resolves once and the cache holds). No other suite's assertions moved (the gauntlet) |
+| files: as listed; `kernel/virtio`, `kernel/pci`, `kernel/sched`, `kernel/interrupts` unchanged | so. `tools/paxnet.py` was not predicted (the model the three tools share) |
+
+Rates are by the time-stamp counter, calibrated against 20 PIT ticks
+in the same boot, QEMU's capture on (kasumi: the gauntlet's suite run
+and `t1`; CI: run 38093374371; hasu: three rounds; nomad-1: one run).
+Round trips of the six pings (N12): median 53 µs under KVM (14–151),
+77 µs on CI (36–572), 243 µs on kasumi (26–2,284: the first of a boot
+is the slow one).
+
+## 4. Evidence index
+
+Files are under `notes/px21/`.
+
+- **`-netdev user` and ICMP, per host** (`tools/gateway-probe`, no
+  guest): `gateway-probe.{kasumi,hasu,nomad-1}.txt`; CI's is G0's line
+  in `ci-38093374371-mpx4-net-991c56b.txt`, whose first line is the
+  runner's `ping_group_range`.
+- **The captures and the checker's verdicts.** A run is 12 captures
+  (2 tiers × 2 firmwares × net, modern, peer): 45,016 frames in each
+  of the eight against the gateway (35,008 from PAX, 10,008 to it) and
+  20,174 to 20,186 in each of the four against the peer (how often an
+  entry ages out under the 10,000 echoes varies by a few ARP
+  exchanges; OVMF's own driver sends one or two frames first on some
+  UEFI boots, printed as "before the kernel"): 440,861 frames in the
+  gauntlet's run, every one PAX sent rebuilt and compared byte for
+  byte, every one that reached it judged, 40,027 and 40,207 checksums
+  recomputed per capture.
+  `kasumi-g1-mpx4-net.checks.txt` has each capture's digest, size and
+  verdict lines (the model's counts under the kernel's names, and
+  `the kernel's counters are the capture's (52 held)`); the digests
+  are also in `kasumi-g1-mpx4-net-runs.txt`. A capture is 2.3 or 11.5
+  MB, so the repository carries two heads as pcap files of their own:
+  `kasumi-g1-native-bios-peer.head.pcap` (the first 120 frames of
+  `04bc4de9ddc6…`: all of part A and the start of part B) and
+  `kasumi-g1-native-bios-net.head.pcap` (the first 24 of
+  `f555ab39420d…`: the gateway's request, PAX's reply, this script's
+  datagram and PAX's destination unreachable for it, the six pings,
+  the soak's start). They are cut short, so `tools/pcap-net --list N`
+  prints them and then says what the cut left unanswered. CI's twelve
+  are in each run's `pax-mpx4-net-linux` artifact, with their digests
+  in the `halt-status` lines of the CI file here.
+- **Counters**: every boot's two `net:`, two `arp:`, two `ip:` and two
+  `icmp:` lines, held against its capture by `tools/pcap-net --serial`
+  (N8) and, for the peer way, to exact numbers (P4). Whole
+  transcripts: `kasumi-g1-native-uefi-peer.transcript.txt` (with
+  `tools/net-peer`'s account of the same boot,
+  `kasumi-g1-native-uefi-peer.net-peer.txt`) and
+  `kasumi-g1-native-bios-net.transcript.txt`.
+- **The soaks**: 10,000 echoes out (N6) and 10,000 in (P3, 10,028
+  with the battery's) on every leg, and the books the same before and
+  after on every one — for example kasumi native BIOS: `frames free
+  64694, heap pages 0, live blocks 0, net frames 66, stack frames 11`
+  both times. The heap's books are flat because nothing on the frame
+  path allocates from it (§1); what could leak is frames, queue slots
+  and ring entries, and N8 holds those: every sent buffer reclaimed,
+  every received one restocked, every queued frame sent, pushed out
+  or given up, 64 of 64 transmit buffers free at the end.
+- **Planted breaks, red in CI**:
+  - a wrong checksum fold (`82f8e08`: `ip.sum` drops the carries
+    instead of adding them back): run **38093741823**, the `mpx4-net`
+    job alone red — N12, N6 on all eight gateway legs (`0 of 6 ping
+    lines`; `soak: 1 echo requests, 0 replies in 301 ticks`), N5 and
+    N8 on all twelve captures (`pcap-net: FAIL frame 3 of 25012: a
+    destination unreachable from PAX that quotes no unanswered
+    datagram of an unknown protocol, byte for byte`), P1–P4 and N9 on
+    the four peer legs (`net-peer: FAIL part A: not echo request 3 …
+    byte for byte`); 67 assertions still green
+    (`ci-38093741823-mpx4-net-plant-82f8e08.txt`); reverted in
+    `297be14`.
+  - an echo reply with the two addresses unswapped (`fdb84ca`:
+    `icmp.input` sends the reply to the request's destination, PAX's
+    own address): run **38095372801**, the `mpx4-net` job alone red —
+    P1, P3, P4, N5, N8 and N9 on the four peer legs (`net-peer: FAIL
+    PAX asked for 10.0.2.15, which this script does not play`;
+    `pcap-net: FAIL frame 48 of 48: the capture ends with 1 echo
+    requests to PAX unanswered; the oldest is from 10.0.2.100`; the
+    kernel never told to stop, so no `halt` in 180 s); the eight
+    gateway legs stay green, as they must: no echo request reaches PAX
+    there, which is why the peer way exists; 103 assertions still
+    green (`ci-38095372801-mpx4-net-plant-fdb84ca.txt`). Reverted in
+    `d1556ec`.
+- **Boot counts** (`tests/mpx4-net` is 20 boots: 2 tiers × 2
+  firmwares × net, modern, peer, absent, legacy):
+  - kasumi, QEMU 11.1.1, TCG: 40 in two full runs (`t1` on the
+    working tree and the gauntlet at `991c56b`, each 127 PASS, 0 FAIL,
+    0 SKIP) and four single boots while the kernel and the plants were
+    tried;
+  - hasu, QEMU 11.1.0, **KVM**: 60 in three rounds (kasumi-built
+    images of the same kernel source, each round 125 PASS, 0 FAIL;
+    `hasu-kvm-k1.log`, `hasu-kvm-k1-round1.out`,
+    `hasu-kvm-k1-round1-runs.txt`);
+  - nomad-1, QEMU 11.1.1, TCG on macOS arm64: 20 (the same images,
+    125 PASS, 0 FAIL; `nomad-1-tcg.out`, `nomad-1-tcg-runs.txt`);
+  - CI, QEMU 8.2.2, TCG: 20 a run.
+- **The gauntlet** on kasumi at `991c56b` (strict env, QEMU 11.1.1
+  TCG, wolf 0.2.26, clang 23.1.1; user programs built in
+  `px13-ubuntu`): every pax suite exit 0, 0 FAIL, 0 SKIP
+  (`kasumi-g1.summary`, `kasumi-g1.versions`). The head differs from
+  `991c56b` by the two plants, their reverts and these notes: no file
+  under `kernel/`, `boot/`, `tools/` or `tests/` differs.
+- **CI green**: run 38093374371 at `991c56b` (19 jobs; `mpx4-net` 127
+  PASS, `ci-38093374371-mpx4-net-991c56b.txt`), and at the head (the
+  PR names the run).
+
+## 5. Done-when
+
+Branch `px21`; PR pax#24 open, unmerged, five sections by name, commit
+shas as bullets, a test checklist; CI green at the head;
+`wolf/tools/lane-audit.sh pax px21 24` run by the lane. Nothing is
+closed. To close at merge: nothing.
+
+**px22 (UDP and the socket syscalls) inherits:**
+
+- `ip.send(dst, protocol, payload, len)` (answers `arp.SENT`,
+  `arp.QUEUED`, or why not) and `ip.input`'s answer in `kernel/netd`:
+  add protocol 17 where `netd` now calls `icmp.unreachable` for
+  `ip.NO_PROTOCOL`. `tests/mpx4-net` holds `protocol` to 9 in the peer
+  way and to this script's datagrams against the gateway, and
+  `tools/paxnet.py`'s `judge_ip` calls every protocol but 1 unknown:
+  all three move when UDP lands (a datagram for a port nobody listens
+  on is then a port unreachable, code 3, which `icmp.unreachable` does
+  not send yet);
+- the UDP checksum is the kernel's to compute and check (no offload);
+  `ip.sum` is the RFC 1071 sum, and the pseudo-header is px22's;
+- a frame's bytes are the protocol's only until `netd` gives the
+  buffer back: a socket's receive queue must copy. Nothing on the
+  path allocates from the heap today, and no `region` may span a
+  switch until pax adopts s223;
+- **no loopback**: a datagram for PAX's own address is routed like any
+  other and waits on an ARP request nobody answers (seen in the
+  second plant); 127/8 is refused as a source and has no interface.
+  lobo binds a loopback TCP socket to itself (px04's census), so
+  px23 at the latest needs one;
+- the address, netmask and gateway are `kmain_net`'s constants handed
+  to `ip.start`: there is no DHCP and no word on the command line for
+  them; QEMU's DNS is 10.0.2.3 (it answers echo, G0);
+- one echo is waited for at a time (`icmp.ping`/`answer`), kernel-only;
+  a ping socket is not this;
+- the MTU is 1500 and nothing fragments or reassembles: a UDP datagram
+  over 1472 bytes cannot be sent and a fragmented one that arrives is
+  dropped by name (QEMU's user network does not fragment toward the
+  guest in anything measured here);
+- received ICMP errors are counted `type` and used by nothing: a
+  socket that should see ECONNREFUSED from a port unreachable needs
+  them delivered;
+- `tools/net-peer` and `tools/pcap-net` are rule-based: a new protocol
+  is a new verdict in `tools/paxnet.py`'s model, and the peer can play
+  any host. The user-mode gateway forwards UDP into the guest
+  (`hostfwd=udp:…`, which the `net` way already uses to wake the
+  gateway) and answers DNS;
+- the ARP cache's lock order is `sync.ip()`, then `sync.arp()`, then
+  `sync.net()`; `sync.icmp()` is never held across a call into `ip`;
+- owed by earlier lanes and not this one's: `docs/CENSUS.md` lines 56
+  and 640 and `docs/SOURCES.md` line 77 (px19's note); `/dev/tty0`
+  (px18's); MSI-X, EVENT_IDX and merged buffers (px20's untaken
+  levers).
