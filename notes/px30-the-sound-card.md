@@ -207,3 +207,75 @@ What PAX answers (a difference from Linux is named and counted):
   imports sound); `/dev`'s listing changes only when the device is
   attached, which no existing test does. `tests/mpx3-speaker` stays
   green unchanged.
+
+## What was built
+
+1. **The driver** (`kernel/sound`, `boot/sound.S`): discovery
+   (`1af4:1059`), VERSION_1 alone, queues 0/1/2, `PCM_INFO`, the first
+   output stream; eight 4096-byte periods (12 frames held in all, taken
+   once); `SET_PARAMS`, `PREPARE`, `START` at two periods, `STOP` after a
+   drain, `RELEASE` at the last close; INTx, the periods taken back in
+   the interrupt; counters by cause (`sound:` summary line). Both tiers,
+   BIOS and UEFI, TCG and KVM.
+2. **`/dev/dsp`** (`kernel/files`, `kernel/user`): one opener, write
+   (blocking and O_NONBLOCK), the OSS requests of §3's table, drain on
+   the last close, silence at a process's end. `kernel/virtio` gained a
+   transport record per device (`use_words`, `attach_at`).
+3. **`play`'s mixed mode** (`user/play/mix.lu`, `kd.S`'s `play_dsp_*`):
+   `-m`/`-s`/`-w`/`-c`; integer synthesis at 48 kHz, square and
+   triangle, 5 ms attack, 30 ms release, peak 0.75 FS / N.
+4. **Tests** (`tests/mpx3-sound`, S0-S7, the CI job), the witnesses
+   (`user/sound/dsptone.c`, `dspprobe.c`, `tools/mksound`), the judge
+   (`tools/wav-notes --pcm/--ramp/--gaps/--expect`), the Linux side
+   (`tools/linux-sound`).
+
+## 3. The prediction against the measurement
+
+| predicted | measured |
+|---|---|
+| P1 virtio-sound-pci; VERSION_1 only; INTx | **right**: line 11 (vector 43) on every host and firmware; offered `0x0000010179000000` (bits 24, 27-30, 32, 40), taken `0x100000000` |
+| P1 two streams, 0 OUTPUT, 1-2 channels, U8 and S16, rates 8000-192000 (not 5512, 384000) | **right but for the rates**: formats `0xe0078` (S8 U8 S16 U16 S32 U32 FLOAT), rates `0x3fff` — **all fourteen, 5512 and 384000 included** (so SPEED 1000 → 5512, 400000 → 384000) |
+| P1 the CI runner's QEMU 8.2.2 has the device (unverified then) | **right**: run 38164251904's `-device help` lists `virtio-sound-pci`, and every scenario's device line and captures came from it |
+| P2 OSS `/dev/dsp`; the table of answers | **right**, item by item (`user/sound/dspprobe.expect` against Linux's `notes/px30/linux-dspprobe-virtio.serial.log`: 9 lines differ, each a named difference of §3; `dsptone`'s lines equal Linux's byte for byte). **Wrong twice, fixed to Linux's**: OSS_GETVERSION — Linux answers 0x030810, not the header's 0x030802, PAX now answers Linux's; an O_NONBLOCK close — §3 had it drop the queue, Linux drains (close 1012 ms, `notes/px30/linux-close-underrun-exit.txt`), PAX now drains every last close |
+| P3 8 × 4096 bytes; latency ≤ 170.7 ms after a full queue | **right**: the writes of a 1000 ms tone return 830 ms after the first, the close 170 ms later (every run, `tests/mpx3-sound` and `notes/px30/kasumi-pax-first-sound.serial.log`); Linux's virtio driver buffers about a second (writes 3 ms, close 1012 ms), its AC97 path 363 ms. First sound: START at the second period (42.7 ms of data queued) |
+| P3 an underrun audible as silence in the WAV | **wrong about the WAV**: QEMU's `wav` backend writes nothing while the stream has no data (11.1.1 and Linux's own capture alike: `notes/px30/linux-close-underrun-exit.txt`, `gap` span 2000 ms for 2400 ms of run), so the gap is not in the file. Measured instead: the underrun counted (S4), the ramp exact across it (no stale or repeated frame), the program not hung (in step). QEMU 8.2.2 does write silence between streams (CI's tone capture: 1605 ms span for 1500 ms of sound) |
+| P3 a process that ends mid-sound: silence at once | **right**: S5, both `_exit` and a fault: `stopped undrained … 8 periods dropped`, each tone 1340-1350 ms of the 1500 written (the dropped 170 ms never sound), the device opened and played at once by the next program |
+| P3 soak flat | see §4 (hasu, KVM, an hour) |
+| P4 the mixed mode, 48 kHz, square and triangle, envelope, 0.75/N | as built; 0 samples clamped in every tune (`cost` lines); chords judged by spectrum: px29's cadence 5/5 slots, each pitch of each chord present, onsets within 6 ms (`notes/px30/kasumi-chords-mixed.expect.txt`) |
+| P4 CPU ≤ 15% of real time for four voices under TCG, ≤ 1% KVM | **right, by far**: 0.2-0.6% under TCG (kasumi, nomad-1, CI), four voices 0.4% (auferstehung-end 71 s in 350 ms); the clock is PAX's 10 ms tick, so a 10-20 ms figure is ±10 ms |
+| P5 no existing test moves | the gauntlet and CI (§4) |
+| P2 `poll` ready for px24 | not on trunk yet: `poll` is -ENOSYS (dspprobe's line); `sound.writable` is the seam |
+
+Not predicted: QEMU returns a transmit buffer as soon as it has taken
+the period, and stops at STOP with what it holds unplayed: without a
+period of silence after the sound, the last 1.6 ms of a ramp was
+missing (`79168f5`); every drain now queues 4096 bytes of silence
+first (21 ms at 48 kHz stereo).
+
+## 4. Evidence index
+
+- **The device survey per host**: `-device help` on kasumi 11.1.1,
+  hasu 11.1.0, nomad-1 11.1.1 (§2), CI 8.2.2 (run 38164251904's log,
+  the `qemu … (apt)` step). Linux with each candidate:
+  `notes/px30/linux-survey-*.serial.log` and `.pcm.txt`.
+- **The straces**: `notes/px30/linux-strace-virtio.serial.log` (dsptone
+  -q, -n, a 100000-byte chunk); aplay not straced (§2).
+- **Linux's edges**: `notes/px30/linux-dspprobe-{virtio,AC97}.serial.log`;
+  close, underrun and exit: `notes/px30/linux-close-underrun-exit.txt`.
+- **Captures and verdicts**: kasumi TCG — the runs files and verdict
+  lines of the gauntlet (`kasumi:~/lanes/px30/ev/g1/`) and
+  `tests/mpx3-sound` (S0-S7); hasu KVM — three rounds of the kasumi
+  images, 32 PASS, 0 FAIL, 0 SKIP each, 16 boots each, `accel: kvm` on
+  all 16 (`hasu:~/lanes/px30/ev/hasu.log`); CI — the job's
+  `pax-mpx3-sound-linux` artifact; nomad-1 —
+  `notes/px30/nomad1-mixed.txt`, `nomad1-auferstehung-end.txt`.
+- **The ramp, exact**: 96000 of 96000 frames on every leg, every host.
+- **The WAVs for the maintainer**, nomad-1, QEMU 11.1.1, the `wav`
+  backend at 48 kHz: `~/scratch/wolf/pax-sound/mixed/pax-mixed.wav`
+  (`9d0a78d1…`: px29's cadence twice, then the mambo, mixed),
+  `auferstehung-end.wav` (`d76ed116…`), the images `pax-mixed.iso`
+  (`76a8d7e5…`) and `pax-auferstehung.iso` (`ba514432…`), and
+  `HOW-TO-PLAY.txt` with the live CoreAudio commands. The chord images'
+  `play` (`16700669…`) is this branch stacked on px29 at `96279d9`
+  with `slot_pitches` reading px29's chords (below); this branch alone
+  sounds each slot's one pitch until px29 lands.
