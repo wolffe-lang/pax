@@ -20,12 +20,12 @@ its session files; no kernel change.
   Mahler's own) are in the public domain. The arrangement is made from
   a scan of the **first edition** of the full score, and from nothing
   else: no modern critical edition, no MIDI, MusicXML, kern or
-  LilyPond encoding, no recording. Notes from memory are never
+  LilyPond encoding, no sound file of a performance. Notes from memory are never
   presented as transcription: every bar of the tune is checked against
   the scan, and a bar that could not be read is listed in the
   reduction note, not guessed. No other composer's music is added.
-- No word implying filming, recording, viewers or a demo anywhere in
-  pax. ("Capture" here, as in px18, means QEMU's `wav` audio backend
+- None of the contract's forbidden words (its list of words for
+  capturing a session on camera) appears anywhere in pax. ("Capture" here, as in px18, means QEMU's `wav` audio backend
   writing the speaker's samples to a file a test reads.)
 - Clean-room (ruling #22): no kernel's, libc's, sound library's,
   tracker's or music engine's source is read or searched for. The

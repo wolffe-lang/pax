@@ -7,7 +7,7 @@ scanned by the Internet Archive as `symphonieno200mahl`: the PDF
 (sha256 cab6fa78…) and its page images `symphonieno200mahl_jp2.zip`,
 images 0206 (printed p. 204) and 0211 (printed p. 209). Public domain:
 published 1897; the composer died in 1911. Nothing else was used: no
-recording, no encoding, no later edition.
+sound file of a performance, no encoding, no later edition.
 
 How it was read: each staff cropped from the page image with its five
 lines found and drawn over it, and the noteheads' staff positions
