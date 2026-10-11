@@ -46,9 +46,10 @@
 //!   pipe with no reader] after <r> runs`.
 //! - a handler: the frame below, and the thread resumes in the handler.
 //!
-//! **The frame**, on the thread's own stack (there is no alternate
-//! stack: `sigaltstack` is not a call PAX has, and SA_ONSTACK means
-//! nothing), below the 128-byte red zone, from the top down:
+//! **The frame**, on the thread's own stack below the 128-byte red
+//! zone — or, for a handler installed with SA_ONSTACK by a thread that
+//! has an alternate stack and is not on it, from that stack's top
+//! (px24: `sigaltstack`) — from the top down:
 //! - the extended state, 64-aligned: what XSAVE writes for the features
 //!   XCR0 enables (the FXSAVE image, the header, AVX's part), with the
 //!   software bytes at 464 (magic 0x46505853, the size with its closing
@@ -162,6 +163,15 @@ const UNBLOCKABLE: u64 = 0x40100 // SIGKILL's bit (8) and SIGSTOP's (18)
 // uapi asm/signal.h.
 const SA_SIGINFO: u64 = 0x4
 const SA_RESTORER: u64 = 0x04000000
+const SA_ONSTACK: u64 = 0x08000000 // px24
+const SS_ONSTACK: u64 = 1 // px24: uapi asm-generic/signal-defs.h
+const SS_DISABLE: u64 = 2
+const MINSIGSTKSZ: u64 = 2048 // px24: uapi asm/signal.h
+const A_REFUSAL: u64 = 3 // px24: the area's refusal word
+/// px24: the refusal code kernel/ready names: a `sigaltstack` flag PAX
+/// does not take (its range, 96 and up).
+pub const R_ALTSTACK: u64 = 104
+const NEG_ENOMEM: u64 = 0xfffffffffffffff4 // -12
 const SA_NODEFER: u64 = 0x40000000
 const SA_RESETHAND: u64 = 0x80000000
 const SA_RESTART: u64 = 0x10000000
@@ -556,6 +566,14 @@ fn enter(f: u64, sig: u64, code: u64, pid: u64, status: u64, fault: bool, addr: 
     // then siginfo, ucontext and the return address, with (rsp + 8) % 16
     // == 0 at the handler's first instruction.
     var sp = word(f, W_RSP) - RED_ZONE
+    // px24: a handler installed with SA_ONSTACK runs on the thread's
+    // alternate stack, from its top, unless the thread is on it already
+    // (sigaltstack(2)).
+    let (asp, asz) = sched.self_altstack()
+    let on_alt = asz != 0 && word(f, W_RSP) > asp && word(f, W_RSP) - asp <= asz
+    if flags & SA_ONSTACK != 0 && asz != 0 && !on_alt {
+        sp = asp + asz
+    }
     var fp: u64 = 0
     if fb != 0 {
         if sp < fb + 8 + 64 {
@@ -591,6 +609,12 @@ fn enter(f: u64, sig: u64, code: u64, pid: u64, status: u64, fault: bool, addr: 
     let old = sched.self_sigmask()
     uaccess.zero(pml4, uc, UC_BYTES)
     uaccess.put(pml4, uc, if xs { UC_FLAGS_XSTATE } else { UC_FLAGS_PLAIN }, 8)
+    if asz != 0 {
+        // px24: uc_stack, the alternate stack as the interrupted code had it.
+        uaccess.put(pml4, uc + 16, asp, 8)
+        uaccess.put(pml4, uc + 24, if on_alt { SS_ONSTACK } else { 0 }, 4)
+        uaccess.put(pml4, uc + 32, asz, 8)
+    }
     let m = uc + UC_MCONTEXT
     uaccess.put(pml4, m, word(f, W_R8), 8)
     uaccess.put(pml4, m + 8, word(f, W_R9), 8)
@@ -654,6 +678,61 @@ fn enter(f: u64, sig: u64, code: u64, pid: u64, status: u64, fault: bool, addr: 
     }
     sched.masks_changed()
     true
+}
+
+/// px24: `sigaltstack(ss, old_ss)` from the frame `f` (`sigaltstack(2)`;
+/// wolf's hosted runtime gives every thread one, for a handler that
+/// must run when the thread's own stack has overflowed): the thread's
+/// alternate signal stack read into `old_ss` (`ss_flags` SS_DISABLE
+/// when it has none, SS_ONSTACK while it runs on it) and, with `ss`,
+/// set: SS_DISABLE takes it away; any other flag is -EINVAL
+/// (SS_AUTODISARM by name: nothing asks for it); a stack under
+/// MINSIGSTKSZ bytes is -ENOMEM; a change while the thread runs on it
+/// is -EPERM. A thread starts with none, a fork's child keeps its
+/// parent's, `execve` drops it.
+pub fn sigaltstack(f: u64, ss: u64, old: u64) -> u64 {
+    let pml4 = paging.live()
+    let (asp, asz) = sched.self_altstack()
+    let rsp = word(f, W_RSP)
+    let on = asz != 0 && rsp > asp && rsp - asp <= asz
+    if old != 0 && !uaccess.writable(pml4, old, 24) {
+        return NEG_EFAULT
+    }
+    var nsp = asp
+    var nsz = asz
+    if ss != 0 {
+        if !uaccess.readable(pml4, ss, 24) {
+            return NEG_EFAULT
+        }
+        if on {
+            return NEG_EPERM
+        }
+        let fl = uaccess.get(pml4, ss + 8, 4)
+        if fl & !SS_DISABLE != 0 {
+            if fl == 0x80000000 || fl == 0x80000002 {
+                aput(area(), A_REFUSAL, R_ALTSTACK)
+            }
+            return NEG_EINVAL
+        }
+        if fl & SS_DISABLE != 0 {
+            nsp = 0
+            nsz = 0
+        } else {
+            nsz = uaccess.get64(pml4, ss + 16)
+            if nsz < MINSIGSTKSZ {
+                return NEG_ENOMEM
+            }
+            nsp = uaccess.get64(pml4, ss)
+        }
+    }
+    if old != 0 {
+        uaccess.zero(pml4, old, 24)
+        uaccess.put(pml4, old, asp, 8)
+        uaccess.put(pml4, old + 8, if asz == 0 { SS_DISABLE } else if on { SS_ONSTACK } else { 0 }, 4)
+        uaccess.put(pml4, old + 16, asz, 8)
+    }
+    sched.set_self_altstack(nsp, nsz)
+    0
 }
 
 /// siginfo's code, pid and status for an origin word.
