@@ -1,16 +1,16 @@
 //! sched — preemptive kernel threads on one CPU (px07, M-PX2's
 //! scheduler).
 //!
-//! **A thread** is a record in boot/sched.S's `pax_threads` (16 slots;
+//! **A thread** is a record in boot/sched.S's `pax_threads` (64 slots since px24, 16 before;
 //! module state holds scalars only, [mem.static.3]), a stack, and, while
 //! it is not running, the frame it resumes from. Slot 0 is the kernel's
 //! own first context (kmain on Limine's stack), adopted by `start` as
 //! thread 0; slot 1 is the idle thread (boot/sched.S's `pax_idle`, HLT
 //! with IF set), run only when no other thread is ready and never
-//! queued; slots 2-15 are spawned threads. Ids are 0 (main), 1 (idle),
+//! queued; slots 2-63 are spawned threads. Ids are 0 (main), 1 (idle),
 //! then 2, 3, … in spawn order, never reused; slots are.
 //!
-//! **A stack** (slots 1-15): slot s owns the 64 KiB of virtual space at
+//! **A stack** (slots 1-63): slot s owns the 64 KiB of virtual space at
 //! `STACKS + s * SPAN`, PML4 slot 416 (0xffffd00000000000, free since
 //! px03: PAX maps 256, 320, 352 and 511). Its low 48 KiB are never
 //! mapped — the guard — and its high 16 KiB are four frames from
@@ -205,7 +205,7 @@ extern "c" let pax_syscall_state: *u64
 extern "c" let pax_procs: *u64
 extern "c" let pax_siginfo: *u64
 
-/// One thread's record (boot/sched.S: 16 of them, 256 bytes each; 72
+/// One thread's record (boot/sched.S: 64 of them, 512 bytes each; 72
 /// before px09 added `cr3` and `prog`, 88 before px10's four, 120
 /// before px12's `fs`, 128 bytes a slot before px14's seven; px21a's
 /// `amb` is the 24th word).
@@ -2234,7 +2234,7 @@ pub fn count_signal() -> u64 {
 }
 
 /// The scheduler's line:
-/// `sched: main 0, idle 1, 16 slots, stacks 16 KiB above a 48 KiB guard from 0x<STACKS>, quantum 2 ticks`.
+/// `sched: main 0, idle 1, 64 slots, stacks 16 KiB above a 48 KiB guard from 0x<STACKS>, quantum 2 ticks`.
 pub fn report() {
     log.put("sched: main 0, idle 1, ")
     log.dec(SLOTS as int)
