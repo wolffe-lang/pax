@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+# tests/mpx3-orchestra — px32: play's part format (notes/px32-format.md):
+# independent parts, dynamics and hairpins, articulation, synthesised
+# timbres, through px30's sound device. /bin/play is a static Linux
+# program, so its parser and its synthesis are judged twice: on this host
+# (play -o writes the frames to standard output) and under QEMU
+# (kmain_console with virtio sound, its output to QEMU's `wav` backend),
+# both by tools/orch-check against the same spec.
+#
+#   tests/mpx3-orchestra [--play DIR] [--host-only | --no-boot]
+#                        [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# Assertions:
+#   O0 build: play static (tools/mkplay, or --play DIR); kmain_console on
+#      each tier; one image per scenario.
+#   O1 refusals: every user/play/parts-test/refused/NAME exits 2 with
+#      `play: PATH: line N: ...` holding its `# expect:` text (`no bars`
+#      has no line); px29's user/play/refused/* are still refused.
+#   O2 the old formats unchanged: play -c of scale, mambo, entertainer
+#      and chords gives user/play/parts-test/old-cost.expect (px30 and
+#      px29's play, before px32, less the timings); play -s refuses a
+#      part-format tune with status 1, by name.
+#   O3 timing: each accepted case in user/play/parts-test (a `# written:`
+#      line) has that written length (the cost line's `ms written`)
+#      within 5 ms: fermatas, `at`, rit, a beat unit, meters and tuplets.
+#   O4 the host: play -o of parts-test/checks judged by checks.spec (each
+#      part's onsets on its own, presence and absence, pp < ff and
+#      ff > pp, tremolo and roll, the struck instruments) and of the
+#      study (user/tunes/orchestra) by orchestra.spec; the study sounds at
+#      least 16 voices at once, with 0 clamped and 0 stolen.
+#   O5 boot (checks: both tiers, BIOS and UEFI; the study: native BIOS
+#      and release UEFI): the sound device's line, the run to `halt`, no
+#      `refused:` line, play's `played` line with 0 clamped, the capture
+#      judged by the same spec as O4.
+#   O6 the cost under TCG (or KVM), in the guest: play -c of the study:
+#      at least 16 voices, 0 clamped, under 50% of real time (so it
+#      streams in real time); the figures go to the runs file.
+#
+# Exit 0 when every assertion held, 1 otherwise, 2 on a usage or tool
+# error. The UEFI leg needs OVMF (PAX_REQUIRE_UEFI=1 makes its absence a
+# failure).
+set -uo pipefail
+export PYTHONDONTWRITEBYTECODE=1
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+legs=both tiers=both playdir= hostonly=0 noboot=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --play)      playdir=$2; shift 2 ;;
+        --host-only) hostonly=1; shift ;;
+        --no-boot)   noboot=1; shift ;;
+        --firmware)  legs=$2; shift 2 ;;
+        --tier)      tiers=$2; shift 2 ;;
+        *)           die "usage: tests/mpx3-orchestra [--play DIR] [--host-only | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+need readelf python3
+
+work=$PAX_BUILD/mpx3-orchestra
+runs=$PAX_BUILD/mpx3-orchestra-runs.txt
+fail=0
+bad() { say "FAIL $*"; fail=1; }
+check=$PAX_ROOT/tools/orch-check
+pt=$PAX_ROOT/user/play/parts-test
+tunes=$PAX_ROOT/user/tunes
+rm -rf "$work"
+mkdir -p "$work"
+: > "$runs"
+
+# O0: play.
+wolf=${PAX_WOLF:-wolf}
+why=
+if [ -n "$playdir" ]; then
+    cp "$playdir/play" "$work/play" || why+=" no $playdir/play;"
+else
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    if PAX_WOLF=$wolf "$PAX_ROOT/tools/mkplay" "$work/playbin" > "$work/play.txt"; then
+        cp "$work/playbin/play" "$work/play"
+    else
+        why+=" tools/mkplay;"
+    fi
+fi
+play=$work/play
+if [ -z "$why" ]; then
+    readelf -hW "$play" | command grep -Eq 'Type: +EXEC' || why+=" play is not ET_EXEC;"
+    ! readelf -lW "$play" | command grep -q INTERP || why+=" play has a PT_INTERP;"
+fi
+[ -z "$why" ] && say "PASS O0 play: $(sha256_of "$play") $(wc -c < "$play" | tr -d ' ') bytes" || { bad "O0:$why"; exit 1; }
+
+# O1: refusals.
+why= n=0
+for f in "$pt"/refused/*; do
+    n=$((n + 1))
+    want=$(sed -n 's/^# expect: //p' "$f" | head -n 1)
+    out=$("$play" -c "$f" 2>&1); rc=$?
+    [ "$rc" = 2 ] || why+=" ${f##*/}: status $rc;"
+    case $out in *"$want"*) ;; *) why+=" ${f##*/}: '$out' lacks '$want';" ;; esac
+    case $want in "no bars") ;; *) case $out in "play: $f: line "*) ;; *) why+=" ${f##*/}: no line number;" ;; esac ;; esac
+done
+for f in "$PAX_ROOT"/user/play/refused/*; do
+    n=$((n + 1))
+    "$play" -c "$f" > /dev/null 2>&1; rc=$?
+    [ "$rc" = 2 ] || why+=" px29's ${f##*/}: status $rc;"
+done
+[ -z "$why" ] && say "PASS O1: $n files refused, each by its own message" || bad "O1:$why"
+
+# O2: the old formats.
+why=
+(cd "$tunes" && "$play" -c ./scale ./mambo ./entertainer ./chords) 2>&1 \
+    | sed -E 's/ synthesised in .* of real time,//' > "$work/old-cost.txt"
+cmp -s "$pt/old-cost.expect" "$work/old-cost.txt" || why+=" cost lines differ: $(diff "$pt/old-cost.expect" "$work/old-cost.txt" | head -n 4 | tr '\n' '|');"
+out=$("$play" -s "$pt/checks" 2>&1); rc=$?
+[ "$rc" = 1 ] || why+=" play -s of a part-format tune: status $rc;"
+case $out in *"a part-format tune sounds only through /dev/dsp"*) ;; *) why+=" play -s said '$out';" ;; esac
+[ -z "$why" ] && say "PASS O2: scale, mambo, entertainer, chords as before px32; -s refuses the part format" || bad "O2:$why"
+
+# O3: timing.
+why= n=0
+for f in "$pt"/*; do
+    [ -f "$f" ] || continue
+    want=$(sed -n 's/^# written: \([0-9]*\) ms$/\1/p' "$f" | head -n 1)
+    [ -n "$want" ] || continue
+    n=$((n + 1))
+    got=$("$play" -c "$f" 2>&1 | sed -n 's/.* ms of sound, \([0-9]*\) ms written,.*/\1/p')
+    [ -n "$got" ] && [ $((got - want)) -le 5 ] && [ $((want - got)) -le 5 ] || why+=" ${f##*/}: ${got:-none} ms, want $want;"
+    printf 'timing %s %s ms (want %s)\n' "${f##*/}" "$got" "$want" >> "$runs"
+done
+[ -z "$why" ] && [ "$n" -gt 0 ] && say "PASS O3: $n written lengths within 5 ms" || bad "O3:$why (n=$n)"
+
+# O4: the host's frames.
+why=
+for t in checks orchestra; do
+    src=$pt/checks; [ "$t" = orchestra ] && src=$tunes/orchestra
+    "$play" -o "$src" > "$work/host-$t.raw" 2> "$work/host-$t.played"
+    "$check" --expect "$pt/$t.spec" "$work/host-$t.raw" > "$work/host-$t.verdict" 2>&1 \
+        || why+=" $t: $(grep '^FAIL' "$work/host-$t.verdict" | head -n 3 | tr '\n' '|');"
+    pl=$(grep '^played ' "$work/host-$t.played")
+    case $pl in *" 0 stolen, 0 clamped,"*) ;; *) why+=" $t: '$pl';" ;; esac
+    printf 'host %s %s; %s\n' "$t" "$pl" "$(tail -n 1 "$work/host-$t.verdict")" >> "$runs"
+done
+v=$(sed -n 's/^played .*: [0-9]* frames, \([0-9]*\) voices at most.*/\1/p' "$work/host-orchestra.played")
+[ "${v:-0}" -ge 16 ] || why+=" the study sounds ${v:-0} voices at most, not 16;"
+[ -z "$why" ] && say "PASS O4 host: checks $(tail -n 1 "$work/host-checks.verdict" | sed 's/orch-check: //'), the study $(tail -n 1 "$work/host-orchestra.verdict" | sed 's/orch-check: //'), $v voices at most" || bad "O4 host:$why"
+rm -f "$work"/host-*.raw
+
+if [ "$hostonly" = 1 ]; then
+    [ "$fail" = 0 ] && say "mpx3-orchestra (host only): PASS" || say "mpx3-orchestra (host only): FAIL"
+    exit "$fail"
+fi
+
+# O0: the kernels and the images.
+"$PAX_ROOT/tools/fetch-limine" || exit 2
+SCENARIOS="checks study"
+runlist() {
+    case $1 in
+        checks) printf '%s\n' "/bin/play -m /usr/share/px32/checks" ;;
+        study) printf '%s\n' "/bin/play -c orchestra" "/bin/play -m orchestra" ;;
+    esac
+}
+why=
+for s in $SCENARIOS; do
+    r=$work/root-$s
+    mkdir -p "$r/bin" "$r/etc" "$r/usr/share/tunes" "$r/usr/share/px32"
+    cp "$play" "$r/bin/play"
+    cp "$tunes"/* "$r/usr/share/tunes/"
+    cp "$pt/checks" "$r/usr/share/px32/"
+    runlist "$s" > "$r/etc/pax-run"
+    pairs=()
+    for f in $(cd "$r" && find . -type f | sort); do
+        f=${f#./}
+        mode=644; [ -x "$r/$f" ] && mode=755
+        pairs+=("/$f=$r/$f:$mode")
+    done
+    "$PAX_ROOT/tools/mkinitramfs" "$work/$s.cpio" "${pairs[@]}" > "$work/$s.initramfs.txt" || why+=" $s: mkinitramfs;"
+done
+for tier in $tiers; do
+    flag=(); [ "$tier" = release ] && flag=(--release)
+    mkdir -p "$work/$tier"
+    log=$work/$tier/kmain_console.build-kernel.log
+    if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+        cp "$elf" "$work/$tier/kmain_console.elf" 2>/dev/null
+        for s in $SCENARIOS; do
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                --add "$work/$s.cpio" initramfs.cpio "$elf" "$work/$tier/$s.iso" >/dev/null || why+=" $tier $s: mkimage;"
+        done
+        say "built $tier: elf $(sha256_of "$elf")"
+    else
+        cat "$log" >&2
+        why+=" $tier kmain_console: tools/build-kernel;"
+    fi
+done
+[ -z "$why" ] && say "PASS O0 images: kmain_console ($tiers), $(echo $SCENARIOS | wc -w | tr -d ' ') scenarios" || bad "O0 images:$why"
+[ "$noboot" = 1 ] && exit "$fail"
+
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        for s in $SCENARIOS; do
+            [ "$s" = study ] && { [ "$tier-$leg" = native-bios ] || [ "$tier-$leg" = release-uefi ] || continue; }
+            id="$tier $leg $s"
+            base=$PAX_BUILD/mpx3-orchestra-$tier-$leg-$s
+            log=$base.serial.log wav=$base.wav
+            elf=$work/$tier/kmain_console.elf iso=$work/$tier/$s.iso
+            rm -f "$log" "$wav" "$base".*.txt
+            if [ ! -f "$iso" ]; then
+                bad "O5 $id: no image"
+                continue
+            fi
+            hrc=0
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 600 \
+                --elf "$elf" --marker 'halt' \
+                --qemu -audiodev --qemu "wav,id=snd0,path=$wav,out.frequency=48000" \
+                --qemu -device --qemu virtio-sound-pci,audiodev=snd0 \
+                "$iso" > "$base.verdict" 2>&1 || hrc=$?
+            norm=$base.norm; serial_norm "$log" > "$norm" 2>/dev/null || cp "$log" "$norm"
+            accel=$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)
+            why=
+            grep -Eq '^sound: virtio sound at .*: /dev/dsp$' "$norm" || why+=" no sound device line;"
+            grep -Eq '^halt' "$norm" || why+=" no halt (qemu-halt $hrc);"
+            grep -q 'refused:' "$norm" && why+=" a refused: line: $(grep -m1 'refused:' "$norm");"
+            pl=$(grep -m1 '^played ' "$norm")
+            case $pl in *", 0 clamped,"*) ;; *) why+=" played line: '${pl:-none}';" ;; esac
+            spec=$pt/checks.spec; [ "$s" = study ] && spec=$pt/orchestra.spec
+            if [ -s "$wav" ]; then
+                "$check" --expect "$spec" "$wav" > "$base.expect.txt" 2>&1 \
+                    || why+=" $(grep '^FAIL' "$base.expect.txt" | head -n 3 | tr '\n' '|');"
+            else
+                why+=" no capture;"
+            fi
+            [ -z "$why" ] && say "PASS O5 $id: $(tail -n 1 "$base.expect.txt" | sed 's/orch-check: //') checks; $pl" || bad "O5 $id:$why"
+            cost=
+            if [ "$s" = study ]; then
+                cost=$(grep -m1 '^cost ' "$norm")
+                why=
+                v=$(printf '%s' "$cost" | sed -n 's/.* parts, \([0-9]*\) voices at most.*/\1/p')
+                pct=$(printf '%s' "$cost" | sed -n 's/.*, \([0-9]*\)\.[0-9]% of real time.*/\1/p')
+                [ "${v:-0}" -ge 16 ] || why+=" ${v:-0} voices;"
+                [ -n "$pct" ] && [ "$pct" -lt 50 ] || why+=" ${pct:-?}% of real time;"
+                case $cost in *" 0 clamped,"*) ;; *) why+=" clamping;" ;; esac
+                [ -z "$why" ] && say "PASS O6 $id ($accel): $cost" || bad "O6 $id:$why '$cost'"
+            fi
+            printf '%s %s %s halt-status=%s accel=%s serial=%s wav=%s iso=%s | %s | %s\n' "$tier" "$leg" "$s" "$hrc" "$accel" \
+                "$(sha256_of "$log" 2>/dev/null)" "$(sha256_of "$wav" 2>/dev/null)" "$(sha256_of "$iso")" "$pl" "$cost" >> "$runs"
+        done
+    done
+done
+[ "$fail" = 0 ] && say "mpx3-orchestra: PASS" || say "mpx3-orchestra: FAIL"
+exit "$fail"
