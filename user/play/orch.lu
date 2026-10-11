@@ -307,7 +307,6 @@ fn struck(t: int) -> bool {
 /// The level step (x128, 0 ppp .. 896 fff, past it an accent) as an
 /// amplitude /4096: about 4 dB a step.
 fn amp_of(lv: int) -> int {
-    let amps: List[int] = [163, 258, 410, 649, 1029, 1630, 2584, 4096, 6492, 6492]
     var l = lv
     if l < 0 {
         l = 0
@@ -317,7 +316,24 @@ fn amp_of(lv: int) -> int {
     }
     let k = l / 128
     let f = l % 128
-    amps[k] + (amps[k + 1] - amps[k]) * f / 128
+    let a = step_amp(k)
+    a + (step_amp(k + 1) - a) * f / 128
+}
+
+/// Level step `k`'s amplitude /4096 (no list: this runs per voice per
+/// block, and a list literal would allocate every time).
+fn step_amp(k: int) -> int {
+    match k {
+        0 => 163,
+        1 => 258,
+        2 => 410,
+        3 => 649,
+        4 => 1029,
+        5 => 1630,
+        6 => 2584,
+        7 => 4096,
+        _ => 6492,
+    }
 }
 
 /// Part `p`'s level at `us` from cursor `c`: (level, the new cursor).
