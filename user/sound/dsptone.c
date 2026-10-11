@@ -26,6 +26,9 @@
  *            still open: nothing drains it (what the kernel does with
  *            the queued sound is the test)
  *   -X fault half way, write through a null pointer (SIGSEGV)
+ *   -S SECS  soak: after the -t signal, write it again and again until
+ *            SECS seconds of sound have gone (each second's bytes the
+ *            same), printing every 60 s what GETOPTR and GETOSPACE say
  *   -N       open with O_NONBLOCK: a full queue answers EAGAIN, which
  *            this program waits out with a 5 ms sleep and counts
  *
@@ -108,10 +111,10 @@ int main(int argc, char **argv)
 {
     const char *dev = "/dev/dsp", *pat = "tone", *fmtname = "s16";
     int rate = 48000, ch = 2, ms = 1000, lhz = 440, rhz = 660;
-    int chunk = 4096, gap = 0, queries = 0, defaults = 0, nonblock = 0;
+    int chunk = 4096, gap = 0, queries = 0, defaults = 0, nonblock = 0, soak = 0;
     const char *end = NULL;
     int o;
-    while ((o = getopt(argc, argv, "d:r:c:f:t:l:R:p:k:g:qnX:N")) != -1) {
+    while ((o = getopt(argc, argv, "d:r:c:f:t:l:R:p:k:g:qnX:NS:")) != -1) {
         switch (o) {
         case 'd': dev = optarg; break;
         case 'r': rate = atoi(optarg); break;
@@ -127,6 +130,7 @@ int main(int argc, char **argv)
         case 'n': defaults = 1; break;
         case 'X': end = optarg; break;
         case 'N': nonblock = 1; break;
+        case 'S': soak = atoi(optarg); break;
         default:
             say("usage: dsptone [-d DEV] [-r RATE] [-c CH] [-f s16|u8] [-t MS] [-l HZ] [-R HZ] [-p tone|ramp] [-k BYTES] [-g MS] [-q] [-n]\n");
             return 2;
@@ -279,6 +283,35 @@ int main(int argc, char **argv)
             nanosleep(&ts, NULL);
             gapped = 1;
             say("dsptone: paused %d ms at byte %ld\n", gap, off);
+        }
+    }
+    if (soak > 0 && total > 0) {
+        long rounds = (long)soak * 1000 / (ms > 0 ? ms : 1), next = 60;
+        for (long k = 1; k < rounds; k++) {
+            long o2 = 0;
+            while (o2 < total) {
+                long n2 = total - o2 > chunk ? chunk : total - o2;
+                ssize_t w = write(fd, buf + o2, n2);
+                if (w < 0) {
+                    if (errno == EINTR)
+                        continue;
+                    say("dsptone: soak write: %s\n", ename(errno));
+                    return 1;
+                }
+                o2 += w;
+            }
+            off += total;
+            if ((k + 1) * (long)ms / 1000 >= next) {
+                count_info ci;
+                audio_buf_info bi;
+                memset(&ci, 0, sizeof ci);
+                memset(&bi, 0, sizeof bi);
+                ioctl(fd, SNDCTL_DSP_GETOPTR, &ci);
+                ioctl(fd, SNDCTL_DSP_GETOSPACE, &bi);
+                say("dsptone: soak %ld s written, GETOPTR bytes %d, GETOSPACE fragments %d of %d\n",
+                    (k + 1) * (long)ms / 1000, ci.bytes, bi.fragments, bi.fragstotal);
+                next += 60;
+            }
         }
     }
     long t1 = now_ms();
