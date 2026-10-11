@@ -349,10 +349,6 @@ O_NONBLOCK writes were already in (S6).
 - Silence during an underrun in what a listener hears: the WAV cannot
   show it (QEMU writes nothing then); the counter, the exact ramp across
   it and the program's timing are what is measured.
-- `play`'s chords on this branch alone: they need px29's `Tune`; the
-  chord captures and both WAVs were made from this branch stacked on
-  px29 at `96279d9` with one function changed (`slot_pitches`,
-  below). Not committed here; the rebase after px29 merges carries it.
 - epoll on `/dev/dsp`: `node_poll` answers it as for poll, never run
   by a test here.
 - The gauntlet at the final head: CI's run is the final head's evidence;
@@ -368,11 +364,15 @@ named above; no QEMU of this lane left running. Nothing closed.
 
 **What the next sound lane inherits**
 
-- The px29 seam: once px29 merges, `user/play/play.lu`'s
-  `slot_pitches` reads a chord slot's pitches (`t.chord_n[i]`,
-  `t.chords[t.chord_at[i] + k]`), the seven lines tested on the
-  stacked branch; px29's four-pitch cap is px29's, the mixer takes any
-  number (the organ's E-flat 2 and B-flat 5 of bar 51 could sound).
+- px29 merged (`e168668`) and this branch is rebased onto it:
+  `slot_pitches` reads a chord slot's pitches (`d32fcb2`; the same
+  change px31 made privately, d339bff/50d1b19), and S7 judges px29's
+  chord study mixed, every pitch of every chord at once (13/13 on
+  kasumi). The `play` built at the head is byte-identical
+  (`16700669…`) to the stacked one the nomad-1 WAVs were made with.
+  px29's four-pitch cap is px29's; the mixer takes any number (the
+  organ's E-flat 2 and B-flat 5 of bar 51 could sound) — a softer
+  waveform for sustained organ chords is `-w triangle` already.
 - Capture (the device's stream 1, INPUT, and queue 3; `O_RDONLY` is
   ENXIO today), a second stream (one opener today), a mixer device
   (`/dev/mixer`, volume: none; the device has no controls without
