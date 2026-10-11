@@ -74,7 +74,7 @@ Permissively licensed kernels: none consulted.
 | podman | 6.1.3 (kasumi) | Apache-2.0 (a program we run) | run, rootless, a lane-private store | `tools/census/census` |
 | Arch Linux `archlinux:base-devel` | digest `sha256:8185e444…`, then `pacman -Syu` on 2026-10-04 (`out/image-pacman-Q.txt`) | various (programs we run) | run: the traced userspace (glibc 2.44, bash 5.3.20, dash 0.5.13.4, pacman 7.1.0, gcc 16.2.1, make 4.4.1, OpenSSH 10.5p1, curl 8.22.0) | every workload |
 | boreutils | `010f3144a9ba…` | GPL-3.0 (the project's own) | read: `tools/difftest` (its CLI, `--bin`, the case-result lines), `tools/build` (the link), `wolf-toolchain.toml` (the std pin); run: the suite | `workloads/boreutils-*.sh`, `inject.sh`, `stage.sh` |
-| lobo | release v0.1.1 (archive `6e21e151…`), trunk `f79418d1181d…` for its demo site (the directory `tools/census/inside/stage.sh` fetches) | GPL-3.0 (the project's own) | read: the demo site's four shell scripts and its configs; run: lobo | `workloads/lobo.sh` |
+| lobo | release v0.1.1 (archive `6e21e151…`), trunk `f79418d1181d…` for lobo's live site (the directory `tools/census/inside/stage.sh` fetches) | GPL-3.0 (the project's own) | read: the live site's four shell scripts and its configs; run: lobo | `workloads/lobo.sh` |
 | wolf | release v0.2.22 (archive `df0f2fea…`) | the project's own | run: `wolf build --release` (the link line read from `--verbose`), `wolf run` | `stage.sh` |
 
 ## px02 — physical frames (2026-10-04)
