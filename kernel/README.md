@@ -550,7 +550,7 @@ programs that open AF_INET stream sockets (`tests/mpx4-tcp`,
 | `files/` | kind `K_TCP`: a descriptor on an open file whose node is `tcp`'s block; the last close calls `tcp.close`; `tcp_open`; `ioctl(FIONBIO)` on a socket |
 | `user/` | 43, 48, 50, 288; `netd.drain` after every call (and the call run again when it had answered "wait" and the drain delivered something); `EPIPE` on a stream socket to SIGPIPE |
 | `sync/` | word 7, `tcp()`: the last of the eight |
-| `kmain_sockets.lu` | `tcp.start` with a key from `process.random_word`; the kernel's echo to 127.0.0.1 and to its own address; after each command up to 3 s for closed connections to finish; `tcp blocks` and `time-wait` in the books |
+| `kmain_sockets.lu` | `tcp.start` with a key from `process.random_word`; the kernel's echo to 127.0.0.1 and to its own address; after each command up to 30 s for closed connections to finish; `tcp blocks` and `time-wait` in the books |
 
 - Layering: `socket` → `files` → `tcp` → `ip` → `arp` → `net`, beside
   `udp`; `netd` above them makes the calls between `ip`, `icmp`, `udp`
