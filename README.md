@@ -32,7 +32,8 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
               qemu-fault, qemu-gdb, expect-serial, mkuser, mkboreutils,
               mkpelt, linux-run, linux-tty, mkfont and screen-ref (px19:
               the glyph table, the reference renderer), mkplay and
-              wav-notes (px18), pcap-net (px20, px21: a capture held to
+              wav-notes (px18), mkbeep (px21a: Ubuntu's beep from its
+              source package, linked static), pcap-net (px20, px21: a capture held to
               what PAX must send, byte by byte), net-peer (px21: the
               other end of a socket netdev), gateway-probe (px21: what
               QEMU's user-mode gateway answers on this host), paxnet.py

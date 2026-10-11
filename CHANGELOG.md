@@ -125,6 +125,27 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   monitor. Named drift from Linux, on purpose: a tone stops when the
   process that started it ends, and every halt silences the speaker.
   Not yet: `/dev/tty0`, `/dev/console`, the evdev speaker.
+- **wolf 0.2.27, a region across a switch, `/dev/tty0` and
+  `/dev/console` (px21a).** pax builds with wolf 0.2.27 and lupin
+  0.1.50, by archive digest; its three manifests that declare C list
+  the `ffi` capability the release asks for. `kernel/sched` saves the
+  freestanding runtime's ambient-region slot in the outgoing thread's
+  record and restores the incoming thread's at every switch
+  (`wolf_rt_ambient_get`/`_set`, through `kernel/heap`), so a kernel
+  thread may hold a `region` open across a yield, a preemption or a
+  wait and its allocations stay its own: `tests/mpx2-heap` H11 now
+  asserts where the List lands, and H12 and H13 hold a region's bytes
+  to a single-threaded control across preemptions and across a
+  blocked `wait_all` and a sleep, with the heap's ledger at zero. The
+  rule that remains: no allocation in an interrupt handler, and no
+  region left open where a system call gives up its kernel stack.
+  Every kernel now links `kernel/heap` and the runtime archive (the
+  pair lives there). `/dev/tty0` and `/dev/console` open the console
+  and answer its ioctls; Ubuntu's `beep`, built static from its
+  source package by `tools/mkbeep` (the packaged binary is dynamic,
+  and PAX has no loader for that yet), sounds 440 Hz and 880 Hz
+  through them within 1% (`tests/mpx3-speaker` K7). wolf-lang#653 is
+  still open at this pin; `kernel/net`'s literal stays.
 - **Pipes, redirection and `cd` (px17).** pelt `3e7516c` (H2, wolf
   0.2.26) is the shell PAX boots, and its plumbing runs as on Linux:
   `ls /bin | wc -l`, `cat /etc/motd > /dev/null`, `cd /etc; cat motd`,

@@ -418,9 +418,19 @@ pcspk-audiodev=snd0`) and measures it.
 - Where PAX differs from Linux, on purpose: a tone stops when the
   process that started it ends (Linux leaves it sounding), and a halt
   silences it.
-- Not yet: `/dev/tty0` and `/dev/console` (a Linux beep program opens
-  one of them; PAX's console is descriptors 0-2 of a fresh process, so
-  `play` asks 0, 1 and 2 in turn); the evdev speaker (`EVIOCGSND`).
+- `/dev/tty0` and `/dev/console` (px21a, `files/`) open the console
+  whatever descriptors 0-2 have become, and answer its ioctls, these
+  two among them. Ubuntu's `beep` (1.4.9, its source package built
+  with `-static` by `../tools/mkbeep`, nothing of it committed) runs
+  unmodified on them: `beep -f 440 -l 300` opens `/dev/tty0`,
+  `beep -e /dev/console …` the other, and `tests/mpx3-speaker` K7
+  holds both tones to 1% of the pitch asked. The package's own binary
+  is a PIE that loads libc through `ld.so`, which `elf/` refuses by
+  name: PAX has no dynamic loader yet. An input-device request on the
+  console (`EVIOCGSND`, which beep also tries) is plain `-ENOTTY`, as
+  on a Linux terminal.
+- Not yet: the evdev speaker; a dynamic loader (so the packaged
+  `beep` itself).
 
 ## The network (px20, px21)
 
