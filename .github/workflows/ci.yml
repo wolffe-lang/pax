@@ -1710,3 +1710,96 @@ jobs:
             build/mpx4-ready-runs.txt
           retention-days: 14
           if-no-files-found: warn
+
+  # px28: the session image. kmain_session starts the console, the
+  # speaker and the network stack together and runs pelt as pid 1,
+  # quiet; its one initramfs holds pelt, bu21's cat, echo, ls, mkdir, rm
+  # and sleep, play and its tunes, tcpwolf, resolve and tcpecho. Three
+  # sessions are typed into it on COM1 (user/console/session-*.keys):
+  # the shell's (a long listing, Ctrl-C on a child, tcpwolf over
+  # loopback, a trap) and the files' (px27's tree, `rm -rf /` refused),
+  # each byte-identical to the same keys typed into the same binaries on
+  # this runner's Linux (the files' in a throwaway container); and the
+  # network's, with QEMU's user-mode network and a forwarded port:
+  # resolve asks QEMU's DNS server, tcpecho answers this runner through
+  # the port and is ended by Ctrl-C, play sounds into a WAV file.
+  # tests/mpx4-session: the build (E0), quiet (E1), the sessions (E2,
+  # E3), what was typed and the closing lines — the keys that raised a
+  # signal, the speaker, the network's frames, datagrams and
+  # connections (E4), init's end and the halt (E5); both tiers, BIOS at
+  # 256 MiB and UEFI.
+  mpx4-session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          qemu-system-x86_64 --version
+          clang --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx4-session-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the image the files session's Linux container is made from (by digest, as mpx3-tree's)
+        run: |
+          docker pull "$PAX_TREE_IMAGE"
+          docker image inspect --format '{{.Id}} {{.RepoDigests}}' "$PAX_TREE_IMAGE"
+        env:
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+      - name: the session image, three typed sessions, both tiers, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+        run: tests/mpx4-session
+
+      - name: keep the programs' sums, the Linux side, the transcripts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx4-session
+          path: |
+            build/mpx4-session/peltbin/sums.txt
+            build/mpx4-session/bore/sums.txt
+            build/mpx4-session/net/sums.txt
+            build/mpx4-session/playbin/sums.txt
+            build/mpx4-session/session.initramfs.txt
+            build/mpx4-session/linux/
+            build/mpx4-session/*/kmain_session.elf
+            build/mpx4-session/*/*.log
+            build/mpx4-session-*.session
+            build/mpx4-session-*.masked
+            build/mpx4-session-*.log
+            build/mpx4-session-*.norm
+            build/mpx4-session-*.verdict
+            build/mpx4-session-*.typed
+            build/mpx4-session-*.client
+            build/mpx4-session-*.halt
+            build/mpx4-session-linux.*
+            build/mpx4-session-files-linux.*
+            build/mpx4-session-gateway-probe.txt
+            build/mpx4-session-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
