@@ -1,0 +1,16 @@
+kasumi, the first gauntlet (g1) at 9a74fd9, QEMU 11.1.1 TCG: tests/mpx3-shell, one assertion of 152 red
+mpx3-shell rc=1 secs=193 PASS=151 FAIL=2 SKIP=0
+mpx3-shell: FAIL S5 native uefi shell-howl: not halted (qemu-halt: NOT HALTED: the serial log grew from 3860 to 3861 bytes after the marker);
+
+the boot: native, UEFI, session shell-howl; tools/qemu-halt verdict:
+qemu-halt: NOT HALTED: the serial log grew from 3860 to 3861 bytes after the marker
+
+the serial log as it ended (wc -c, then od -c of its last 8 bytes):
+3861
+0000000  \r  \n   h   a   l   t  \r  \n
+0000010
+
+3860 bytes is the log without its last LF: the marker (a whole line reading halt, CRs dropped) matched on the text halt + CR, the size was taken, and the LF arrived before the second probe.
+
+the same suite in the gauntlet at a31e7a5 (g2), with the marker held until its line is whole:
+mpx3-shell rc=0 secs=193 PASS=152 FAIL=0 SKIP=0

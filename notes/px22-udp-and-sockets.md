@@ -239,3 +239,240 @@ MSG_DONTWAIT" line reads a datagram where Linux reads `EAGAIN`:
 `tests/mpx4-udp`'s comparison red on every leg; the capture's checker
 green (nothing on the wire is wrong), which is why the comparison
 with Linux exists.
+
+## What was built
+
+1. **UDP** (`kernel/udp`): `input` judges a datagram in §3's order —
+   `short`, `length`, `checksum` (zero is "none made", counted and
+   taken), `port-zero` — and hands it to the socket that takes it, or
+   answers `NO_PORT`, on which `kernel/netd` asks `kernel/icmp` for a
+   destination unreachable of code 3 through px21's limiter and its
+   silence for broadcasts, and `kernel/udp` counts what became of it.
+   `send` puts a header and a checksum (a computed zero sent as
+   0xffff) before the caller's bytes and gives the datagram to
+   `ip.send`. Counters by cause, four lines.
+2. **The socket calls** (`kernel/socket`; the descriptor in
+   `kernel/files`; the dispatch in `kernel/user`): `socket`, `bind`,
+   `connect` (and AF_UNSPEC), `sendto`, `recvfrom` (`MSG_DONTWAIT`,
+   `MSG_PEEK`, `MSG_TRUNC`), `getsockname`, `getpeername`,
+   `setsockopt` and `getsockopt` (`SO_RCVTIMEO_OLD`; `SO_TYPE`,
+   `SO_ERROR`), `read` and `write` on a socket, `listen`, `accept` and
+   `accept4` answered `EOPNOTSUPP`. A receive with nothing queued
+   parks the thread until a datagram or the timeout
+   (`sched.block_pipe_until`). Six refusals are named and logged once
+   a process: a family, a type, a protocol, an option, a broadcast
+   destination, a datagram over 1472 bytes. glibc's `send` and `recv`
+   are `sendto` and `recvfrom`; `sendmsg` and `recvmsg` are not there
+   (no witness's libc calls them).
+3. **Loopback** landed, in `kernel/udp`: a datagram for the station's
+   own address, for 127/8 or for 0.0.0.0 (which Linux takes as
+   127.0.0.1: measured) is put on the receiving socket's queue in the
+   sender's call. A third way of the test boots with **no network
+   device at all** and the loopback programs print the same.
+4. **Witnesses** (`user/net/`, C, static glibc, built by
+   `tools/mknet`): `sockerr`, `udploop`, `udpecho`, `udpclient`,
+   `udpsoak`, `resolve`, each byte-identical to Linux in output and
+   exit status on both tiers, BIOS and UEFI; `udpfill` and `udphold`,
+   whose answers are the receiving kernel's bounds, held to files of
+   PAX's own. The echo server on PAX answers `tools/net-peer` (the
+   `peer` way) and the host through `hostfwd=udp` (the `user` way);
+   the client talks to `net-peer`'s server and to a host server at
+   10.0.2.2; client and server both on PAX over loopback; the resolver
+   asks `net-peer`'s DNS server for `pax.test` (the `peer` way: the
+   name every host answers alike, because the script answers it) and
+   **QEMU's own DNS server for `dns.google`** (the `user` way), where
+   PAX's answer is held to what `tools/gateway-probe --dns` got from
+   the same server on the same host moments before. On CI the runner
+   resolved it (rcode 0, 8.8.4.4 and 8.8.8.8), as kasumi, hasu and
+   nomad-1 did; a host that resolves nothing would have to see PAX
+   time out the same way, a branch that never ran.
+   **No wolf-built witness**: wolf's `net_*` builtins are stream
+   sockets only; filed as wolffe-lang/wolf-lang#675.
+5. **Tests** (`tests/mpx4-udp`: G1, U0–U9; `tools/net-peer --udp`,
+   `tools/linux-net`, `tools/udp-host`, `tools/pcap-net`,
+   `tools/paxnet.py`, `tools/gateway-probe --dns`), below.
+
+**The reference side.** `tools/linux-net` runs the peer's run list on
+Linux in a network namespace of its own, addressed as PAX is, with a
+tap device whose other end is the same `net-peer` script that plays
+to PAX — so every line a witness prints on Linux is Linux's answer to
+the datagrams PAX is sent, the malformed ones included. The namespace
+and the tap are made with `unshare` and `ioctl` alone; nothing is
+installed and nothing outside the namespace changes.
+
+**Found on the way, and fixed:** `tools/qemu-halt` measured the serial
+log the moment the marker's text was there, which can be between the
+line's CR and its LF; the LF then read as "a byte written after the
+halt" (`mpx3-shell` S5, once in this lane's first gauntlet:
+`notes/px22/kasumi-g1-qemu-halt-race.txt`). The marker's line must
+now be whole. Every gauntlet before this one ran with that window
+open.
+
+## 3. The prediction against the measurement
+
+| predicted | measured |
+|---|---|
+| `kernel/udp` and `kernel/socket` new; `files`, `user`, `sched`, `ip`, `icmp`, `netd`, `sync`, `boot/net.S` touched; `kmain_sockets` new; `net`, `virtio`, `pci`, `arp`, `process`, `vm` unchanged | so. Not predicted: `kernel/socket` imports `arp` (for a refusal line's address) and `kernel/udp` does not import `timer`; `kmain_net` starts `kernel/udp`; `tools/qemu-halt` changed (above); a third run list and way (`none`); an eighth witness (`udphold`) |
+| the socket as an open file's node: shared by `dup` and `fork`, `FD_CLOEXEC` the descriptor's, freed at the last close | so: `sockerr` reads through a duplicate after the first descriptor is closed and finds the port held until the last one goes; `udploop`'s child closes its copy and the parent's socket stays bound. **Not exercised by any witness:** `execve` closing a socket marked close-on-exec, and two processes reading one socket |
+| no close can reach a socket a receive is parked on; a receive ends by a datagram or `SO_RCVTIMEO` | so, by construction; the timeout ends `sockerr`'s receive on an idle socket with `EAGAIN` |
+| 16 sockets are the port table; `EADDRINUSE` on the same address or on 0.0.0.0; ephemeral 32768–60999 from a start the time-stamp counter picks, then sequential | so (`sockerr`; every boot's `udp:` line names its start, a different one each boot; `tools/net-peer` holds `udpclient`'s two ports to the range). **Not exercised:** the seventeenth socket, and the range wrapping or skipping a held port |
+| 65,536 bytes a queue; `udpfill` keeps **65** of 200 (Linux 92) | **65**, on every leg. Linux kept 92 in the container on kasumi and all 200 on the CI runner (its receive buffer is larger), which is why the line is held to PAX's own file. Added: from the wire, `udphold` keeps **44** of 60 datagrams of 1472 bytes (44 × 1480 = 65,120) and `kernel/udp` counts 16 `full` |
+| the drop causes and their order | so, each from the wire and counted exactly in every `peer` boot: 1 `short`, 2 `length`, 1 `checksum`, 1 `port-zero`, 7 `no-port`, 16 `full`; 1 datagram with no checksum taken |
+| the errnos, as Linux answered | every line of `sockerr` is Linux's, 93 lines. Three answers were measured after the prediction and PAX made to match: a broadcast destination is `EACCES` (PAX names it); a socket bound in 127/8 sending off the machine is `EINVAL`; **a destination of 0.0.0.0 is 127.0.0.1** — PAX first answered `ENETUNREACH` (`notes/px22/probes/`). **Not exercised:** `ENETDOWN`, `ENOBUFS`, `EMFILE`, every `EFAULT`, `getsockopt(SO_RCVTIMEO)`, `SO_ERROR`, `accept4` |
+| loopback in `kernel/udp`, never below it | so: `tools/pcap-net` fails any datagram for 10.0.2.15 or 127/8 on the wire and found none in the gauntlet's 8 captures or in CI's; the `none` way has no wire at all |
+| datagrams a second, into PAX and out — kasumi TCG native / release: 6,000 / 9,000 | into PAX **6,207–6,867** / 13,012–16,133; out **7,410–8,370** / 14,493–17,729. The native tier as predicted; the release tier 1.4 to 2.0 times the number |
+| CI TCG: 3,500 / 5,000 | in 2,580–2,865 / 4,223–4,759; out 2,989–3,276 / 4,380–5,077: within a third |
+| hasu KVM: 15,000 / 15,000 | in 17,350–28,134 / 21,018–32,008; out 19,388–29,989 / 20,473–33,571. **Low**: by up to 2.2 times against the host's sockets (the `user` way), which is past the bar this prediction set itself; within it against `net-peer` (17,350–22,879), whose script is the slower end |
+| `tests/mpx4-net` moves: 12 stack frames; N8's pokes are `no-port` with a port unreachable; P4's `9 protocol` is 2 with 7 `no-port` (2 silent); B7 expects code 3; the held counters grow | so (66 held, from 52). Its `3 broadcast` did not move, as it should not |
+| plant 1 (the pseudo-header omits the length): `mpx4-udp` red on every leg, `mpx4-net` N8 red | so, for every leg with a wire: 8 of 8 `peer` and `user` boots red on U2–U9, and `mpx4-net` N8 red on its 8 gateway legs (the pokes counted `checksum`). The 4 `none` boots stayed green, as they must: loopback sums nothing. (The `none` way did not exist when the prediction was written) |
+| plant 2 (a datagram to the first bound socket): `sockerr`'s "a, MSG_DONTWAIT" line differs; the capture's checker green; `mpx4-net` green | red on all 12 boots and `mpx4-net` green, but **not by that line being printed wrong**: the datagram for `b` went to `a`, so `sockerr`'s next receive on `b` waited for good and the boot never reached a program that uses the wire. The capture was empty, which U6 counts a failure: the checker was not green, it had nothing to check |
+
+Rates are from the kernel's time-stamp counter around each run-list
+line (calibrated against 20 PIT ticks in the same boot), so they
+include the program's start and, for the echo server, the battery
+before the soak; 10,006 and 10,000 datagrams. One boot on kasumi while
+other lanes loaded it measured 1,914 and 2,766 on the release tier's
+`peer` way (the script's end starved); the ranges above are the
+gauntlet's.
+
+## 4. Evidence index
+
+Files are under `notes/px22/`.
+
+- **The straces of the witnesses on Linux.** Before the design:
+  `first-strace/` (each witness under `strace -f`, a stand-in at the
+  other end; `outputs.txt`). At the head, by `tools/linux-net`
+  against the real script on a tap: `linux/<k>.strace` for the nine
+  commands of `user/mpx4-udp.run` (the two soaks' cut to their first
+  120 and last 20 lines: 5.3 and 4.3 MB whole), `linux/<k>.out` and
+  `.rc` (what `tests/mpx4-udp` holds PAX to), `linux/peer.txt` (the
+  script's account of Linux) and `linux/linux.txt` (each command's
+  set of calls). What Linux answers the three sends measured late:
+  `probes/linux-answers.kasumi.txt`.
+- **The captures, their digests and the checker's verdicts.** A run of
+  `tests/mpx4-udp` is 8 captures (2 tiers × 2 firmwares × `peer`,
+  `user`): 40,128 frames in each against the peer and 40,029–40,031
+  against QEMU's network, every frame PAX sent rebuilt from its
+  meaning and equal byte for byte, both checksums of every datagram
+  recomputed (80,244 and 80,050 a capture), the kernel's 66 counters
+  held to the capture's. `kasumi-g2-mpx4-udp.checks.txt` has each
+  capture's verdict lines; the digests are in
+  `kasumi-g2-mpx4-udp-runs.txt`. A capture is 4.7–4.8 MB, so the
+  repository carries one head as a pcap file of its own,
+  `kasumi-g2-native-bios-peer.head.pcap` (the first 60 frames of
+  `7f4f07e0d224…`: the ARP exchange, "ready", the battery and the
+  soak's start; `tools/pcap-net` passes it as it is). CI's eight are in each run's `pax-mpx4-udp-linux`
+  artifact.
+- **Counters.** Every boot's four `udp:` lines, held to the capture
+  by `tools/pcap-net --serial` (U6) and to exact numbers (U7):
+  `kasumi-g2-mpx4-udp.out` (its build and the Linux side:
+  `kasumi-g2-mpx4-udp-build.out`). Whole transcripts:
+  `kasumi-g2-native-bios-peer.transcript.txt` (with the script's
+  account, `kasumi-g2-native-bios-peer.net-peer.txt`),
+  `kasumi-g2-native-bios-user.transcript.txt` (and
+  `kasumi-g2-native-bios-user.udp-host.txt`),
+  `kasumi-g2-native-bios-none.transcript.txt`.
+- **The soaks.** 10,000 datagrams into PAX and 10,000 out on every
+  `peer` and `user` boot (U8), and after every run-list line the
+  frames free equal to before and the books `heap pages 0, live
+  blocks 0, net frames 66, stack frames 12, open files 0, pipes 0,
+  sockets 0, datagrams waiting 0` (U3): every frame, descriptor and
+  socket came back.
+- **Planted breaks, red in CI.**
+  - the pseudo-header checksum without the length (`47bf338`): run
+    **38104145909** at `3fa7dc9` — `mpx4-udp` red (77 FAIL lines: U2–
+    U9 on all 8 boots with a wire; `net-peer: FAIL udpecho's "ready"
+    to port 9099: a UDP datagram from PAX with a wrong length or
+    checksum`; `pcap-net: FAIL frame 2 … byte for byte`) and
+    `mpx4-net` red (N8 on 8 legs: `udp.checksum: the kernel says 1,
+    the capture 0`), every other job green:
+    `ci-38104145909-mpx4-udp-plant-47bf338.txt`,
+    `ci-38104145909-mpx4-net-plant-47bf338.txt`. The plant's own
+    commit ran first as run 38103264988, where `mpx4-net` went red the
+    same way (`ci-38103264988-mpx4-net-plant-47bf338.txt`) and
+    `mpx4-udp` was waiting out eight 420-second timeouts: the lane
+    cancelled its own run and made a failed boot stop early
+    (`3fa7dc9`). Reverted in `eac85c0`.
+  - a datagram delivered to the first bound socket whatever its port
+    (`19a859c`): run **38104977671** — `mpx4-udp` alone red (97 FAIL
+    lines, all 12 boots), `mpx4-net` and every other job green:
+    `ci-38104977671-mpx4-udp-plant-19a859c.txt`. Reverted in `d018400`.
+- **Boots.** `tests/mpx4-udp` is 12 (2 tiers × 2 firmwares × `peer`,
+  `user`, `none`), `tests/mpx4-net` 20:
+  - kasumi, QEMU 11.1.1, TCG: 12 + 20 in the gauntlet at `a31e7a5`
+    (97 and 127 PASS), 12 + 20 in the first gauntlet at `9a74fd9`, and
+    23 of `mpx4-udp`'s in five partial runs while the test was
+    written (one of them with the first plant in);
+  - hasu, QEMU 11.1.0, **KVM**: 36 + 60 in three rounds (97 and 125
+    PASS each, 0 FAIL: `hasu-kvm-k1.log`, the `*.runs.txt`), and 12
+    once before (`9a74fd9`'s images);
+  - nomad-1, QEMU 11.1.1, TCG on macOS arm64: 12 + 20 (97 and 125
+    PASS: `nomad-1-tcg-*.out`), and 12 once before;
+  - CI, QEMU 8.2.2, TCG: 12 + 20 a run.
+- **What QEMU's DNS server answers, per host** (no guest):
+  `probes/dns-probe.{kasumi,hasu,nomad-1}.txt`; CI's is G1's line in
+  `ci-38102613365-mpx4-udp-5b29a81.txt`.
+- **Modules cannot import each other:** `import-cycle.txt`.
+- **The gauntlet** on kasumi at `a31e7a5` (strict env, QEMU 11.1.1
+  TCG, wolf 0.2.26, clang 23.1.1; user programs built in
+  `px13-ubuntu`): `kasumi-g2.summary`, `kasumi-g2.versions`. The head
+  differs from `a31e7a5` by these notes only.
+- **CI green**: run 38102109238 at `9a74fd9` and run 38102613365 at
+  `5b29a81` (20 jobs each; `mpx4-udp` 98 PASS,
+  `ci-38102613365-mpx4-udp-5b29a81.txt`); at the head, the PR names
+  the run.
+
+## 5. Done-when
+
+Branch `px22`; PR pax#25 open, unmerged, five sections by name, commit
+shas as bullets, a test checklist; CI green at the head;
+`wolf/tools/lane-audit.sh pax px22 25` run by the lane. Nothing is
+closed. To close at merge: nothing in pax. Filed:
+wolffe-lang/wolf-lang#675 (no datagram surface in wolf's `net_*`
+builtins). wolf-lang#653 is as it was.
+
+**Not verified, plainly:** the paths the table above names as not
+exercised; `ENETDOWN` for a send off the machine with no device (the
+`none` way sends nothing off it); what a host without a working
+resolver makes of the `user` way's outside name; anything on more
+than one CPU; KVM anywhere but hasu.
+
+**px23 (TCP) inherits:**
+
+- the descriptor shape: a kind in `kernel/files` whose node is the
+  protocol's socket number, freed from `pipe_ends` at the open
+  file's last close; `files.sock_kind`, `inet_open`, `nonblocking`.
+  `kernel/socket`'s `sock()` answers `ENOTSOCK`/`EBADF` and its
+  address helpers read and write `struct sockaddr_in`; `socket()`
+  refuses `SOCK_STREAM` by name (`ESOCKTNOSUPPORT`): that line and
+  `listen`/`accept`'s `EOPNOTSUPP` are TCP's to replace;
+- waiting: `files.WAIT` reruns the call on `sched.wake_pipes`, and
+  `sched.block_pipe_until` adds a deadline (the process area's word
+  14). Every waiter wakes on every change: fine for a few sockets,
+  not for many;
+- `kernel/udp`'s port table is its own 16 sockets: TCP needs its own
+  or a shared one, and the ephemeral range's cursor is in
+  `pax_udp_state`;
+- **no loopback below UDP.** `ip.send` to the station's own address
+  or 127/8 still goes to the cache and the wire, and `ip.input` drops
+  a source of 127/8 or its own. lobo binds a loopback TCP socket to
+  itself: px23 needs a door at the IP layer (and `icmp.ping` to
+  itself would then work too);
+- received ICMP errors still reach nothing: a connected UDP socket
+  never sees `ECONNREFUSED`, over the wire or over loopback;
+- `sendmsg`, `recvmsg`, `shutdown`, `poll` and every option but
+  `SO_RCVTIMEO`, `SO_TYPE`, `SO_ERROR` are absent; `SO_REUSEADDR` is
+  the first one a server will ask for;
+- a system call may call `ip.send` (IF clear, no switch on the path);
+  the lock order is `udp` → `ip` → `arp` → `net`, and lock word 7
+  is the last free one of eight;
+- the reference side for anything on the network: `tools/linux-net`
+  (a namespace and a tap, the same script both ends see) and
+  `tools/net-peer`'s `Peer` over a wire with `send` and `recv`;
+  `tests/mpx4-udp` stops a boot 20 s after its other end says FAIL;
+- wolf modules cannot import each other (E0303): TCP sits beside
+  `udp` under `socket`, and `netd` makes the calls between them and
+  `icmp`;
+- owed by earlier lanes and not this one's: `docs/CENSUS.md` lines 56
+  and 640 and `docs/SOURCES.md` line 77 (px19's note); `/dev/tty0`
+  (px18's); MSI-X, EVENT_IDX and merged buffers (px20's).
