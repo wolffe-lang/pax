@@ -90,6 +90,9 @@ pub const PERIOD: u64 = 4096
 /// How many periods.
 pub const PERIODS: u64 = 8
 const PAGE: u64 = 4096
+/// The silence a drain queues after the sound (bytes; 21.3 ms at
+/// 48 kHz stereo S16).
+const TAIL: u64 = 4096
 const CTLQ_SIZE: u64 = 8
 const EVTQ_SIZE: u64 = 8
 const TXQ_SIZE: u64 = 32
@@ -194,6 +197,7 @@ const W_BLOCKS: u64 = 75 // periods played since the last GETOPTR
 const W_START_TICK: u64 = 76 // the tick START was sent at
 const W_DIRTY: u64 = 77 // parameters changed since the last SET_PARAMS
 const W_STARTS: u64 = 78
+const W_PADDED: u64 = 79 // a drain has queued its tail of silence
 
 // The stream's phases.
 const P_CLOSED: u64 = 0
@@ -240,8 +244,7 @@ pub const C_EAGAIN: u64 = 16
 pub const C_WAITS: u64 = 17
 /// Drains completed (SYNC, close).
 pub const C_DRAINS: u64 = 18
-/// Streams stopped undrained at their last close (a process's end,
-/// an O_NONBLOCK close).
+/// Streams stopped undrained at their last close (a process's end).
 pub const C_ENDED: u64 = 19
 /// Periods dropped (RESET, a process's end).
 pub const C_DROPPED: u64 = 20
@@ -791,6 +794,7 @@ fn halt() {
     put_sw(W_INFLIGHT, 0)
     put_sw(W_FILL, 0)
     put_sw(W_DRAINING, 0)
+    put_sw(W_PADDED, 0)
     put_sw(W_PHASE, P_OPEN)
     put_sw(W_DIRTY, 1)
     var j: u64 = 0
@@ -839,10 +843,10 @@ pub fn open(pid: u64, acc: u64) -> u64 {
 }
 
 /// The last close of /dev/dsp (kernel/files' `of_drop`): after a
-/// drain (kernel/user drains a blocking close first) the stream is
-/// stopped and released; with periods still queued — an O_NONBLOCK
-/// close, or the process's end (exit, a fault, a signal: kernel/user
-/// closes every descriptor then, and nothing drains) — it is stopped at
+/// drain (kernel/user drains a close first) the stream is stopped and
+/// released; with periods still queued — the process's end (exit, a
+/// fault, a signal: kernel/user closes every descriptor then, and
+/// nothing drains; Linux plays them out, measured) — it is stopped at
 /// once and the periods dropped, counted, and (unless quiet) one line
 /// names it: the speaker's rule, where Linux would play them out. The
 /// device is free again either way.
@@ -901,9 +905,22 @@ fn drain_selected() -> u64 {
             return 0
         }
         hand(true)
-    } else {
-        hand(true) // starts a prepared stream with fewer than two periods
     }
+    // The tail: once, `TAIL` bytes of silence after the last of the
+    // sound, so that the device's own buffering, cut short when the
+    // stream stops, cuts silence and not the end of the sound (measured:
+    // without it the last 1.6 ms of a ramp were missing from QEMU's
+    // capture; Linux leaves about 40 ms of silence after a stream).
+    if sw(W_PADDED) == 0 && (sw(W_INFLIGHT) > 0 || sw(W_PHASE) == P_RUNNING) && sw(W_INFLIGHT) < PERIODS {
+        let k = sw(W_CUR)
+        let t = TAIL - TAIL % frame_bytes()
+        // # Safety: period k's frame through the HHDM, t < PAGE bytes.
+        unsafe { pax_fb_fill(sw(W_PERIOD0 + k) + frames.hhdm(), (if sw(W_FMT) == AFMT_U8 { 0x8080808080808080 } else { 0 }), PAGE / 8) }
+        put_sw(W_FILL, t)
+        hand(true)
+        put_sw(W_PADDED, 1)
+    }
+    hand(true) // starts a prepared stream with fewer than two periods
     let _n = reclaim()
     if sw(W_INFLIGHT) > 0 {
         if sw(W_DRAINING) == 0 {
@@ -916,6 +933,7 @@ fn drain_selected() -> u64 {
         bump(C_DRAINS, 1)
     }
     put_sw(W_DRAINING, 0)
+    put_sw(W_PADDED, 0)
     if sw(W_PHASE) == P_RUNNING {
         let _s = stream_req(R_PCM_STOP)
         put_sw(W_PHASE, P_PREPARED)
