@@ -1,0 +1,950 @@
+//! parts — px32: the part format's parser (`notes/px32-format.md`).
+//!
+//! A file with a `part` line is read here; any other file by play.lu's
+//! `parse`, as before. The text becomes a `Score`: the parts (name,
+//! timbre, pan), every note with its start and sounding end in
+//! microseconds, its pitch in centi-hertz, its marks and its accent, and
+//! per part a level curve of (microseconds, level) points that the
+//! synthesiser (orch.lu) reads as straight lines between them.
+//!
+//! Musical time is counted in units of 1/80640 of a whole note (every
+//! length the format has is a whole number of them), mapped to
+//! microseconds through a grid of sixty-fourth notes that carries the
+//! tempo, `rit`/`accel` (the tempo moved linearly in musical position)
+//! and the fermatas' added time.
+
+/// Units in a whole note: 64 x 9 x 5 x 7 x 4, so 64ths, dots, double
+/// dots, triplets and 5-, 6-, 7- and 9-tuplets are whole numbers.
+const WHOLE: int = 80640
+/// The time grid's step: a sixty-fourth note.
+const STEP: int = 1260
+const MAX_PARTS: int = 24
+const MAX_CHORD: int = 6
+
+/// A note's marks (bits of `n_marks`).
+const M_STAC: int = 1
+const M_MARC: int = 2
+const M_ACC: int = 4
+const M_TEN: int = 8
+const M_SLUR: int = 16
+const M_TREM: int = 32
+/// Slurred into from the part's previous note: no new attack.
+const M_LEGIN: int = 64
+
+/// A checked part-format tune.
+struct Score {
+    title: str,
+    err: str,
+    total: int, // microseconds to the last bar's end
+    names: List[str],
+    timbres: List[int],
+    pans: List[int],
+    p_first: List[int], // part p's notes: from p_first[p], p_count[p] of them, in start order
+    p_count: List[int],
+    n_start: List[int], // microseconds
+    n_end: List[int], // microseconds: where the release begins
+    n_hz: List[int], // centi-hertz
+    n_marks: List[int],
+    n_boost: List[int], // level steps x 128 added at the attack
+    n_boost_us: List[int], // and falling away over this long
+    l_first: List[int], // part p's level points: from l_first[p], l_count[p]
+    l_count: List[int],
+    l_us: List[int],
+    l_lv: List[int], // level x 128: 0 ppp .. 896 fff
+}
+
+/// Whether `text` is in the part format: a line whose first word is `part`.
+fn is_parts(text: str) -> bool {
+    for line in text.lines() {
+        let ws = words(line)
+        if ws.len > 0 && ws[0] == "part" {
+            return true
+        }
+    }
+    false
+}
+
+fn score_refused(why: str) -> Score {
+    Score {
+        title: "",
+        err: why,
+        total: 0,
+        names: List[str](),
+        timbres: List[int](),
+        pans: List[int](),
+        p_first: List[int](),
+        p_count: List[int](),
+        n_start: List[int](),
+        n_end: List[int](),
+        n_hz: List[int](),
+        n_marks: List[int](),
+        n_boost: List[int](),
+        n_boost_us: List[int](),
+        l_first: List[int](),
+        l_count: List[int](),
+        l_us: List[int](),
+        l_lv: List[int](),
+    }
+}
+
+/// The timbre a name names (orch.lu's numbering), or -1.
+fn timbre_of(w: str) -> int {
+    let names: List[str] = [
+        "strings",
+        "horn",
+        "trumpet",
+        "trombone",
+        "clarinet",
+        "oboe",
+        "flute",
+        "organ",
+        "pedal",
+        "choir",
+        "voice",
+        "harp",
+        "timpani",
+        "bells",
+        "tamtam",
+        "cymbal",
+        "drum",
+    ]
+    if w == "brass" {
+        return 1
+    }
+    if w == "woodwind" {
+        return 4
+    }
+    var i = 0
+    while i < names.len {
+        if names[i] == w {
+            return i
+        }
+        i += 1
+    }
+    -1
+}
+
+/// A dynamic word's level step (ppp 0 .. fff 7), or -1.
+fn dyn_step(w: str) -> int {
+    let names: List[str] = ["ppp", "pp", "p", "mp", "mf", "f", "ff", "fff"]
+    var i = 0
+    while i < names.len {
+        if names[i] == w {
+            return i
+        }
+        i += 1
+    }
+    -1
+}
+
+/// Whether `w` is a word of the format itself (not a part's name).
+fn reserved(w: str) -> bool {
+    let names: List[str] = [
+        "r",
+        "bar",
+        "part",
+        "tempo",
+        "meter",
+        "title",
+        "cresc",
+        "dim",
+        "sf",
+        "sfz",
+        "fz",
+        "fp",
+        "rit",
+        "accel",
+        "fermata",
+        "over",
+        "at",
+        "pan",
+    ]
+    for n in names {
+        if n == w {
+            return true
+        }
+    }
+    dyn_step(w) >= 0
+}
+
+/// A part's name: 1-16 letters, digits or `-`, a letter first.
+fn good_name(w: str) -> bool {
+    let b = w.bytes()
+    if b.len == 0 || b.len > 16 {
+        return false
+    }
+    var i = 0
+    while i < b.len {
+        let c = b[i] as int
+        let letter = c >= 97 && c <= 122 || c >= 65 && c <= 90
+        let digit = c >= 48 && c <= 57
+        if !letter && !(i > 0 && (digit || c == 45)) {
+            return false
+        }
+        i += 1
+    }
+    true
+}
+
+/// A length word in units (`4`, `8.`, `2..`, `8t`, `16x5`, `2+8`), or -1.
+fn units_of(w: str) -> int {
+    let b = w.bytes()
+    if b.len == 0 {
+        return -1
+    }
+    var total: int = 0
+    var i = 0
+    while i < b.len {
+        var j = i
+        while j < b.len && b[j] as int >= 48 && b[j] as int <= 57 {
+            j += 1
+        }
+        if j == i {
+            return -1
+        }
+        let n = number(w[i..j])
+        if n != 1 && n != 2 && n != 4 && n != 8 && n != 16 && n != 32 && n != 64 {
+            return -1
+        }
+        let base = WHOLE / n
+        var u = base
+        if j < b.len && b[j] as int == 46 {
+            u += base / 2
+            j += 1
+            if j < b.len && b[j] as int == 46 {
+                u += base / 4
+                j += 1
+            }
+        }
+        if j < b.len && b[j] as int == 116 {
+            u = u * 2 / 3
+            j += 1
+        } else if j < b.len && b[j] as int == 120 {
+            j += 1
+            if j >= b.len {
+                return -1
+            }
+            let k = b[j] as int - 48
+            j += 1
+            var p = 0
+            if k == 3 {
+                p = 2
+            } else if k == 5 || k == 6 || k == 7 {
+                p = 4
+            } else if k == 9 {
+                p = 8
+            } else {
+                return -1
+            }
+            if u * p % k != 0 {
+                return -1
+            }
+            u = u * p / k
+        }
+        total += u
+        if j < b.len {
+            if b[j] as int != 43 || j + 1 == b.len {
+                return -1
+            }
+            j += 1
+        }
+        i = j
+    }
+    total
+}
+
+/// A note word's semitone number (C4 = 60, A4 = 69), A0 (21) to C8
+/// (108); -1 when it is not one.
+fn semi_of(w: str) -> int {
+    let b = w.bytes()
+    if b.len < 2 || b.len > 4 {
+        return -1
+    }
+    var semi = match b[0] as int {
+        67 => 0,
+        68 => 2,
+        69 => 4,
+        70 => 5,
+        71 => 7,
+        65 => 9,
+        66 => 11,
+        _ => -100,
+    }
+    if semi < 0 {
+        return -1
+    }
+    var i = 1
+    while i < b.len - 1 {
+        let c = b[i] as int
+        if c == 35 {
+            semi += 1
+        } else if c == 98 {
+            semi -= 1
+        } else {
+            return -1
+        }
+        i += 1
+    }
+    if b.len == 4 && b[1] as int != b[2] as int {
+        return -1
+    }
+    let oct = b[b.len - 1] as int - 48
+    if oct < 0 || oct > 8 {
+        return -1
+    }
+    let n = (oct + 1) * 12 + semi
+    if n < 21 || n > 108 {
+        return -1
+    }
+    n
+}
+
+/// Semitone `n`'s frequency in centi-hertz (equal temperament, A4 = 440).
+fn hz_of(n: int) -> int {
+    let oct = n / 12 - 1
+    let c = centi_hz4(n % 12)
+    if oct >= 4 {
+        return c * pow2(oct - 4)
+    }
+    let d = pow2(4 - oct)
+    (c + d / 2) / d
+}
+
+/// `tempo BPM [UNIT]` from word `i` of `ws`: (units a minute, the words
+/// it took), or (-1, 0).
+fn tempo_at(ws: List[str], i: int) -> (int, int) {
+    if i >= ws.len {
+        return (-1, 0)
+    }
+    let bpm = number(ws[i])
+    if bpm < 20 || bpm > 400 {
+        return (-1, 0)
+    }
+    if i + 1 < ws.len && !reserved(ws[i + 1]) {
+        let u = units_of(ws[i + 1])
+        if u <= 0 {
+            return (-1, 0)
+        }
+        return (bpm * u, 2)
+    }
+    (bpm * (WHOLE / 4), 1)
+}
+
+/// `n/d` as units, or -1.
+fn meter_of(w: str) -> int {
+    let at = w.find("/") else -1
+    if at <= 0 {
+        return -1
+    }
+    let n = number(w[0..at])
+    let d = number(w[at + 1..])
+    if n < 1 || n > 32 {
+        return -1
+    }
+    if d != 1 && d != 2 && d != 4 && d != 8 && d != 16 && d != 32 {
+        return -1
+    }
+    n * (WHOLE / d)
+}
+
+/// Check a part-format text whole; the first bad line refuses it.
+fn parse_parts(text: str) -> Score {
+    var title = ""
+    var upm0 = 0
+    var meter = WHOLE
+    var names = List[str]()
+    var timbres = List[int]()
+    var levels = List[int]()
+    var pans = List[int]()
+    // the bars
+    var b_no = List[int]()
+    var b_len = List[int]()
+    var b_upm = List[int]() // a tempo set at this bar, or 0
+    var b_rit = List[int]() // a rit/accel's target, or 0
+    var b_over = List[int]()
+    var f_bar = List[int]()
+    var f_at = List[int]() // in the bar, units; -1 its end
+    var f_len = List[int]()
+    // the part lines' words
+    var t_word = List[str]()
+    var t_part = List[int]()
+    var t_bar = List[int]()
+    var t_line = List[int]()
+    var line_no = 0
+    for line in text.lines() {
+        line_no += 1
+        let ws = words(line)
+        if ws.len == 0 {
+            continue
+        }
+        let w = ws[0]
+        let in_bars = b_no.len > 0
+        if w == "title" {
+            if in_bars || ws.len < 2 {
+                return score_refused("line {line_no}: a title needs words, before the first bar")
+            }
+            var t = copy ws[1]
+            var k = 2
+            while k < ws.len {
+                t = "{t} {ws[k]}"
+                k += 1
+            }
+            title = t
+            continue
+        }
+        if w == "tempo" {
+            if in_bars {
+                return score_refused("line {line_no}: after the first bar, a tempo goes on a bar line (`bar N tempo BPM`)")
+            }
+            let (u, k) = tempo_at(ws, 1)
+            if u < 0 || 1 + k != ws.len {
+                return score_refused("line {line_no}: tempo is BPM (20-400) and an optional beat length")
+            }
+            upm0 = u
+            continue
+        }
+        if w == "meter" {
+            let m = if ws.len == 2 { meter_of(ws[1]) } else { -1 }
+            if in_bars || m < 0 {
+                return score_refused("line {line_no}: meter is n/d (n 1-32, d 1 2 4 8 16 32), before the first bar")
+            }
+            meter = m
+            continue
+        }
+        if w == "part" {
+            if in_bars {
+                return score_refused("line {line_no}: parts are declared before the first bar")
+            }
+            if ws.len != 4 && ws.len != 6 {
+                return score_refused("line {line_no}: part NAME TIMBRE LEVEL [pan P]")
+            }
+            let name = ws[1]
+            if !good_name(name) || reserved(name) {
+                return score_refused("line {line_no}: '{name}' cannot name a part (1-16 letters, digits or -, a letter first, not a word of the format)")
+            }
+            for n in names {
+                if n == name {
+                    return score_refused("line {line_no}: part '{name}' is declared twice")
+                }
+            }
+            let tb = timbre_of(ws[2])
+            if tb < 0 {
+                return score_refused("line {line_no}: '{ws[2]}' is not a timbre (notes/px32-format.md §5)")
+            }
+            let lv = dyn_step(ws[3])
+            if lv < 0 {
+                return score_refused("line {line_no}: '{ws[3]}' is not a level (ppp pp p mp mf f ff fff)")
+            }
+            var pan = 0
+            if ws.len == 6 {
+                let neg = ws[5].starts_with("-")
+                let v = number(if neg { ws[5][1..] } else { ws[5] })
+                if ws[4] != "pan" || v < 0 || v > 100 {
+                    return score_refused("line {line_no}: pan is -100 to 100")
+                }
+                pan = if neg { 0 - v } else { v }
+            }
+            if names.len == MAX_PARTS {
+                return score_refused("line {line_no}: more than {MAX_PARTS} parts")
+            }
+            (mut names).push(copy name)
+            (mut timbres).push(tb)
+            (mut levels).push(lv * 128)
+            (mut pans).push(pan)
+            continue
+        }
+        if w == "bar" {
+            if names.len == 0 {
+                return score_refused("line {line_no}: a bar before any part")
+            }
+            if upm0 == 0 {
+                return score_refused("line {line_no}: a bar before the tempo")
+            }
+            let n = if ws.len > 1 { number(ws[1]) } else { -1 }
+            if n < 0 {
+                return score_refused("line {line_no}: bar takes its number")
+            }
+            if in_bars && n != b_no[b_no.len - 1] + 1 {
+                return score_refused("line {line_no}: bar {n} follows bar {b_no[b_no.len - 1]} (bars are numbered one by one)")
+            }
+            var upm = 0
+            var rit = 0
+            var over = 0
+            var k = 2
+            while k < ws.len {
+                let kw = ws[k]
+                if kw == "meter" && k + 1 < ws.len && meter_of(ws[k + 1]) > 0 {
+                    meter = meter_of(ws[k + 1])
+                    k += 2
+                } else if kw == "tempo" {
+                    let (u, used) = tempo_at(ws, k + 1)
+                    if u < 0 {
+                        return score_refused("line {line_no}: tempo is BPM (20-400) and an optional beat length")
+                    }
+                    upm = u
+                    k += 1 + used
+                } else if kw == "rit" || kw == "accel" {
+                    let (u, used) = tempo_at(ws, k + 1)
+                    let o = k + 1 + used
+                    let bars = if o + 1 < ws.len && ws[o] == "over" { number(ws[o + 1]) } else { -1 }
+                    if u < 0 || bars < 1 {
+                        return score_refused("line {line_no}: {kw} BPM [UNIT] over BARS")
+                    }
+                    rit = u
+                    over = bars
+                    k = o + 2
+                } else if kw == "fermata" {
+                    let fl = if k + 1 < ws.len { units_of(ws[k + 1]) } else { -1 }
+                    if fl <= 0 {
+                        return score_refused("line {line_no}: fermata takes a length")
+                    }
+                    var fat = -1
+                    k += 2
+                    if k + 1 < ws.len && ws[k] == "at" {
+                        fat = units_of(ws[k + 1])
+                        if fat < 0 || fat > meter {
+                            return score_refused("line {line_no}: a fermata's `at` is a length inside the bar")
+                        }
+                        k += 2
+                    }
+                    (mut f_bar).push(b_no.len)
+                    (mut f_at).push(fat)
+                    (mut f_len).push(fl)
+                } else {
+                    return score_refused("line {line_no}: '{kw}' is not meter, tempo, rit, accel or fermata")
+                }
+            }
+            if meter % STEP != 0 {
+                return score_refused("line {line_no}: the meter is not a whole number of sixty-fourths")
+            }
+            (mut b_no).push(n)
+            (mut b_len).push(meter)
+            (mut b_upm).push(upm)
+            (mut b_rit).push(rit)
+            (mut b_over).push(over)
+            continue
+        }
+        var pi = -1
+        var i = 0
+        while i < names.len {
+            if names[i] == w {
+                pi = i
+            }
+            i += 1
+        }
+        if pi < 0 {
+            return score_refused("line {line_no}: '{w}' is not a part, a bar or a word of the head")
+        }
+        if !in_bars {
+            return score_refused("line {line_no}: part '{w}' has notes before the first bar")
+        }
+        var k = 1
+        while k < ws.len {
+            (mut t_word).push(copy ws[k])
+            (mut t_part).push(pi)
+            (mut t_bar).push(b_no.len - 1)
+            (mut t_line).push(line_no)
+            k += 1
+        }
+    }
+    if names.len == 0 || b_no.len == 0 {
+        return score_refused("no bars")
+    }
+    let nb = b_no.len
+
+    // The time grid: microseconds at every sixty-fourth from the start.
+    var b_start = List[int]()
+    var pos: int = 0
+    for l in b_len {
+        (mut b_start).push(pos)
+        pos += l
+    }
+    let end_pos = pos
+    var grid = List[int]()
+    (mut grid).push(0)
+    var cur = upm0
+    var r_on = false
+    var r_from = 0
+    var r_to = 0
+    var r_p0: int = 0
+    var r_p1: int = 0
+    var us: int = 0
+    var b = 0
+    while b < nb {
+        if b_upm[b] > 0 {
+            cur = b_upm[b]
+            r_on = false
+        }
+        if b_rit[b] > 0 {
+            r_on = true
+            r_from = cur
+            r_to = b_rit[b]
+            r_p0 = b_start[b]
+            let last = if b + b_over[b] < nb { b_start[b + b_over[b]] } else { end_pos }
+            r_p1 = last
+        }
+        var s: int = 0
+        while s < b_len[b] {
+            let mid = b_start[b] + s + STEP / 2
+            var u = cur
+            if r_on {
+                if mid < r_p1 {
+                    u = r_from + (r_to - r_from) * (mid - r_p0) / (r_p1 - r_p0)
+                } else {
+                    r_on = false
+                    cur = r_to
+                    u = cur
+                }
+            }
+            us += STEP * 60000000 / u
+            (mut grid).push(us)
+            s += STEP
+        }
+        b += 1
+    }
+    // The fermatas, at global positions, in order, their time added.
+    var fp_pos = List[int]()
+    var fp_us = List[int]()
+    var fi = 0
+    while fi < f_bar.len {
+        let fb = f_bar[fi]
+        let fat = b_start[fb] + (if f_at[fi] < 0 { b_len[fb] } else { f_at[fi] })
+        var gk = fat / STEP
+        if gk > 0 && (gk == grid.len - 1 || fat % STEP == 0) {
+            gk -= 1
+        }
+        let step_us = grid[gk + 1] - grid[gk]
+        let add = f_len[fi] * step_us / STEP
+        var j = fp_pos.len
+        while j > 0 && fp_pos[j - 1] > fat {
+            j -= 1
+        }
+        (mut fp_pos).push(fat)
+        (mut fp_us).push(add)
+        var m = fp_pos.len - 1
+        while m > j {
+            fp_pos[m] = fp_pos[m - 1]
+            fp_us[m] = fp_us[m - 1]
+            m -= 1
+        }
+        fp_pos[j] = fat
+        fp_us[j] = add
+        fi += 1
+    }
+
+    // Each part's words, bar by bar, into notes and level points (in
+    // units for now).
+    var p_first = List[int]()
+    var p_count = List[int]()
+    var n_s = List[int]()
+    var n_e = List[int]()
+    var n_hz = List[int]()
+    var n_marks = List[int]()
+    var n_boost = List[int]()
+    var n_boost_us = List[int]()
+    var l_first = List[int]()
+    var l_count = List[int]()
+    var l_pos = List[int]()
+    var l_lv = List[int]()
+    var p = 0
+    while p < names.len {
+        (mut p_first).push(n_s.len)
+        (mut l_first).push(l_pos.len)
+        var lv = levels[p]
+        (mut l_pos).push(0)
+        (mut l_lv).push(lv)
+        var hair = 0 // +1 a crescendo open, -1 a diminuendo, 0 none
+        var hair_from = 0
+        var hair_line = 0
+        var tie_from = -1 // the tied notes: n_s indices tie_from .. tie_to
+        var tie_to = -1
+        var tie_line = 0
+        var slur_end: int = -1 // where a slurred note ends, for the next
+        var boost = 0
+        var boost_us = 0
+        var fp = false
+        var ti = 0
+        var bi = 0
+        while bi < nb {
+            var here: int = 0
+            var any = false
+            var last_line = 0
+            while ti < t_word.len && t_bar[ti] < bi {
+                ti += 1
+            }
+            var tj = ti
+            while tj < t_word.len && t_bar[tj] == bi {
+                if t_part[tj] != p {
+                    tj += 1
+                    continue
+                }
+                any = true
+                let w = t_word[tj]
+                let ln = t_line[tj]
+                last_line = ln
+                tj += 1
+                let g = b_start[bi] + here
+                let st = dyn_step(w)
+                if st >= 0 {
+                    if hair != 0 {
+                        (mut l_pos).push(g)
+                        (mut l_lv).push(st * 128)
+                        hair = 0
+                    } else {
+                        (mut l_pos).push(g)
+                        (mut l_lv).push(lv)
+                        (mut l_pos).push(g)
+                        (mut l_lv).push(st * 128)
+                    }
+                    lv = st * 128
+                    continue
+                }
+                if w == "<" || w == ">" || w == "cresc" || w == "dim" || w == "!" {
+                    if hair != 0 {
+                        var to = hair_from + hair * 256
+                        to = if to < 0 { 0 } else { if to > 896 { 896 } else { to } }
+                        (mut l_pos).push(g)
+                        (mut l_lv).push(to)
+                        lv = to
+                        hair = 0
+                    } else if w == "!" {
+                        return score_refused("line {ln}: '!' ends a hairpin, and none is open in part '{names[p]}'")
+                    }
+                    if w != "!" {
+                        hair = if w == "<" || w == "cresc" { 1 } else { -1 }
+                        hair_from = lv
+                        hair_line = ln
+                        (mut l_pos).push(g)
+                        (mut l_lv).push(lv)
+                    }
+                    continue
+                }
+                if w == "sfz" || w == "sf" || w == "fz" {
+                    boost = 896 - lv
+                    boost_us = 200000
+                    continue
+                }
+                if w == "fp" {
+                    fp = true
+                    continue
+                }
+                // an event: PITCHES/LENGTH[MARKS]
+                let slash = w.find("/") else -1
+                if slash <= 0 {
+                    return score_refused("line {ln}: '{w}' is not an event, a dynamic or a hairpin")
+                }
+                let lb = w.bytes()
+                var me = lb.len
+                while me > slash + 1 {
+                    let c = lb[me - 1] as int
+                    if c == 39 || c == 94 || c == 62 || c == 45 || c == 95 || c == 42 || c == 126 {
+                        me -= 1
+                    } else {
+                        break
+                    }
+                }
+                let len = units_of(w[slash + 1..me])
+                if len <= 0 {
+                    return score_refused("line {ln}: '{w}': '{w[slash + 1..me]}' is not a length (1 2 4 8 16 32 64, dots, t or xN, + to join)")
+                }
+                var marks = 0
+                var tie = false
+                var mi = me
+                while mi < lb.len {
+                    let c = lb[mi] as int
+                    if c == 39 {
+                        marks = marks | M_STAC
+                    } else if c == 94 {
+                        marks = marks | M_MARC
+                    } else if c == 62 {
+                        marks = marks | M_ACC
+                    } else if c == 45 {
+                        marks = marks | M_TEN
+                    } else if c == 95 {
+                        marks = marks | M_SLUR
+                    } else if c == 42 {
+                        marks = marks | M_TREM
+                    } else {
+                        tie = true
+                    }
+                    mi += 1
+                }
+                if here + len > b_len[bi] {
+                    return score_refused("line {ln}: part '{names[p]}' overfills bar {b_no[bi]} by {here + len - b_len[bi]} units ({WHOLE} a whole note)")
+                }
+                let ps = w[0..slash]
+                var semis = List[int]()
+                if ps != "r" {
+                    for pw in ps.split(",") {
+                        let sm = semi_of(pw)
+                        if sm < 0 {
+                            return score_refused("line {ln}: '{pw}' is not a note (C D E F G A B, # b ## bb, octave 0-8, A0 to C8)")
+                        }
+                        (mut semis).push(sm)
+                    }
+                    if semis.len > MAX_CHORD {
+                        return score_refused("line {ln}: a chord of more than {MAX_CHORD} notes")
+                    }
+                } else if tie || marks != 0 {
+                    return score_refused("line {ln}: a rest takes no marks and no tie")
+                }
+                // a tie continues the notes before it
+                if tie_from >= 0 {
+                    var same = semis.len == tie_to - tie_from + 1
+                    var qq = 0
+                    while same && qq < semis.len {
+                        if hz_of(semis[qq]) != n_hz[tie_from + qq] {
+                            same = false
+                        }
+                        qq += 1
+                    }
+                    if !same {
+                        return score_refused("line {tie_line}: a tie in part '{names[p]}' to '{w}' (line {ln}), which is not the same notes")
+                    }
+                    qq = tie_from
+                    while qq <= tie_to {
+                        n_e[qq] = g + len
+                        n_marks[qq] = (n_marks[qq] & (M_LEGIN | M_TREM)) | marks
+                        qq += 1
+                    }
+                    if !tie {
+                        tie_from = -1
+                        tie_to = -1
+                    } else {
+                        tie_line = ln
+                    }
+                    slur_end = if marks & M_SLUR != 0 { g + len } else { -1 }
+                    here += len
+                    continue
+                }
+                if semis.len > 0 {
+                    if fp {
+                        (mut l_pos).push(g)
+                        (mut l_lv).push(lv)
+                        (mut l_pos).push(g)
+                        (mut l_lv).push(256)
+                        boost = if lv > 640 { lv - 256 } else { 384 }
+                        boost_us = 200000
+                        lv = 256
+                        fp = false
+                    }
+                    var bst = boost
+                    var bus = boost_us
+                    if marks & (M_ACC | M_MARC) != 0 && bst < 192 {
+                        bst = 192
+                        bus = 150000
+                    }
+                    var mk = marks
+                    if slur_end == g {
+                        mk = mk | M_LEGIN
+                    }
+                    if tie {
+                        tie_from = n_s.len
+                        tie_to = n_s.len + semis.len - 1
+                        tie_line = ln
+                    }
+                    for sm in semis {
+                        (mut n_s).push(g)
+                        (mut n_e).push(g + len)
+                        (mut n_hz).push(hz_of(sm))
+                        (mut n_marks).push(mk)
+                        (mut n_boost).push(bst)
+                        (mut n_boost_us).push(bus)
+                    }
+                    boost = 0
+                    boost_us = 0
+                }
+                slur_end = if marks & M_SLUR != 0 { g + len } else { -1 }
+                here += len
+            }
+            if !any {
+                if tie_from >= 0 {
+                    return score_refused("line {tie_line}: part '{names[p]}' ties into bar {b_no[bi]}, where it has no notes")
+                }
+                here = b_len[bi]
+                slur_end = -1
+            }
+            if here != b_len[bi] {
+                return score_refused("line {last_line}: part '{names[p]}' fills bar {b_no[bi]} short by {b_len[bi] - here} units ({WHOLE} a whole note)")
+            }
+            ti = tj
+            bi += 1
+        }
+        if tie_from >= 0 {
+            return score_refused("line {tie_line}: part '{names[p]}' ties past the last bar")
+        }
+        if hair != 0 {
+            return score_refused("line {hair_line}: part '{names[p]}' opens a hairpin that never ends (a dynamic or ! ends it)")
+        }
+        (mut p_count).push(n_s.len - p_first[p])
+        (mut l_count).push(l_pos.len - l_first[p])
+        p += 1
+    }
+
+    // Units to microseconds.
+    var n_start = List[int]()
+    var n_end = List[int]()
+    var q = 0
+    while q < n_s.len {
+        let t0 = time_at(grid, fp_pos, fp_us, n_s[q])
+        let t1 = time_at(grid, fp_pos, fp_us, n_e[q])
+        let len = t1 - t0
+        let m = n_marks[q]
+        var sound = len
+        if m & M_STAC != 0 {
+            sound = len / 2
+        } else if m & M_MARC != 0 {
+            sound = len * 3 / 4
+        } else if m & (M_TEN | M_SLUR) == 0 {
+            let gap = if len / 8 < 40000 { len / 8 } else { 40000 }
+            sound = len - gap
+        }
+        (mut n_start).push(t0)
+        (mut n_end).push(t0 + sound)
+        q += 1
+    }
+    var l_us = List[int]()
+    for lp in l_pos {
+        (mut l_us).push(time_at(grid, fp_pos, fp_us, lp))
+    }
+    if title == "" {
+        title = "untitled"
+    }
+    Score {
+        title: title,
+        err: "",
+        total: time_at(grid, fp_pos, fp_us, end_pos),
+        names: names,
+        timbres: timbres,
+        pans: pans,
+        p_first: p_first,
+        p_count: p_count,
+        n_start: n_start,
+        n_end: n_end,
+        n_hz: n_hz,
+        n_marks: n_marks,
+        n_boost: n_boost,
+        n_boost_us: n_boost_us,
+        l_first: l_first,
+        l_count: l_count,
+        l_us: l_us,
+        l_lv: l_lv,
+    }
+}
+
+/// Position `pos` (units from the start) in microseconds: the grid, and
+/// every fermata at or before it (held through when a note ends there,
+/// waited for when one starts there).
+fn time_at(grid: List[int], fp_pos: List[int], fp_us: List[int], pos: int) -> int {
+    let k = pos / STEP
+    var t = grid[grid.len - 1]
+    if k < grid.len - 1 {
+        t = grid[k] + (grid[k + 1] - grid[k]) * (pos % STEP) / STEP
+    }
+    var i = 0
+    while i < fp_pos.len && fp_pos[i] <= pos {
+        t += fp_us[i]
+        i += 1
+    }
+    t
+}
