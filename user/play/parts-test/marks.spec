@@ -46,4 +46,13 @@ onset 783.99 32773 20
 onset 880.00 34773 20
 present 880.00 35000 38500 -30 250
 onset 1046.50 38773 20
+# bar 19 (tempo 60, a half note 2000 ms): C4 tied while E4,G4 move to F4,A4
+dip 261.63 44773 0 4
+onset 349.23 44773 20
+onset 440.00 44773 20
+present 329.63 43000 44500 -30 250
+absent 329.63 45200 46500 -45 250
+absent 392.00 45200 46500 -45 250
+# bar 20, the same without the tie: C4 is struck again (a gap, then a new attack)
+dip 261.63 48773 8 99
 noclip
