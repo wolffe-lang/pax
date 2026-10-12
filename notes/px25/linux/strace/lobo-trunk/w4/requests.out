@@ -1,0 +1,69 @@
+== keepalive: three requests on one connection
+200 50 conns=1
+200 6 conns=0
+200 50 conns=0
+== close
+200 50
+== http/1.0
+200 6
+== a static file of 300000 bytes
+200 300000
+same
+== a range, a HEAD, a 404, a conditional
+xxxxxxxxxx 206 10
+200
+404 151
+304 0
+== px25: a file written while serving
+written at run time
+ 200
+== proxied: a GET, a POST, two on one connection
+upstream saw /api/one
+ 200
+upstream got 11 bytes
+ 200
+upstream saw /api/a
+ 200 conns=1
+upstream saw /api/b
+ 200 conns=0
+== eight at once
+200 200 200 200 200 200 200 200 
+== status, reload, a request after it
+lobo status
+current generation: 1
+quitting: false
+events: 6
+live-region-bytes: 524288
+workers: 4
+worker 1: serving control=unix:logs/control.sock.w1 generation=1 live=0 accepted=8 events=2 live-region-bytes=131072 budget-503s=0 restarts=0
+worker 2: serving control=unix:logs/control.sock.w2 generation=1 live=0 accepted=5 events=2 live-region-bytes=131072 budget-503s=0 restarts=0
+worker 3: serving control=unix:logs/control.sock.w3 generation=1 live=0 accepted=4 events=2 live-region-bytes=131072 budget-503s=0 restarts=0
+worker 4: serving control=unix:logs/control.sock.w4 generation=1 live=0 accepted=4 events=2 live-region-bytes=131072 budget-503s=0 restarts=0
+status rc=0
+reload complete (generation 2) workers=4/4
+reload rc=0
+200 50
+== px25: SIGHUP to the master (reload by signal)
+kill -HUP rc=0
+200 50
+== px25: SIGKILL to one worker, the master replaces it
+workers before: 4
+kill -KILL rc=0
+workers after: 4; the victim gone: yes
+200 200 200 200 200 200 
+workers: 4
+worker 1: serving control=unix:logs/control.sock.w1 generation=1 live=0 accepted=3 events=2 live-region-bytes=131072 budget-503s=0 restarts=1
+worker 2: serving control=unix:logs/control.sock.w2 generation=3 live=0 accepted=7 events=12 live-region-bytes=195584 budget-503s=0 restarts=0
+worker 3: serving control=unix:logs/control.sock.w3 generation=3 live=0 accepted=4 events=12 live-region-bytes=195584 budget-503s=0 restarts=0
+worker 4: serving control=unix:logs/control.sock.w4 generation=3 live=0 accepted=6 events=12 live-region-bytes=195584 budget-503s=0 restarts=0
+== an idle second, then stop
+stop: shutting down (generation 3) workers=4/4
+stop rc=0
+serve rc=0
+threads of the master (no strace): 6
+threads of worker 237: 6; VmRSS VmRSS:	    2940 kB
+threads of worker 240: 6; VmRSS VmRSS:	    2844 kB
+threads of worker 243: 6; VmRSS VmRSS:	    2848 kB
+threads of worker 253: 6; VmRSS VmRSS:	    2844 kB
+master VmRSS:	    4936 kB
+serve after SIGTERM rc=0
