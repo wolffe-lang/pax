@@ -165,12 +165,17 @@ stays until the opening (43.5-46.10, being re-read) is joined.
   on kasumi): the joined file 317940 ms of sound (309939 written), 24
   parts, 95 voices at most, 0 stolen, 0 clamped, 0 notes dropped,
   status 0; the close 254624 ms (246623 written), 95 voices at most, 0
-  stolen, 0 clamped, 0 notes dropped, status 0.
+  stolen, 0 clamped, 0 notes dropped, status 0. The same figures from
+  px32 c3720b5 (after df224e7: marks on a tie's last event cut only
+  that event). Its `play -o` frames for the close equal 27a8383's except
+  at 36.3-37.8 s and 171.0-173.8 s (largest sample difference 3339):
+  the two ties that end on a marcato, the trumpets into 47.12 and the
+  cellos and basses into 49.11, now hold their whole length.
 - **Length**: play 246.6 s written; from the bar lines alone (`notes/px33/tools/length.py`: meter,
   tempo, rit, integrated) 248.1 s: 0.6% apart, the difference in the
   ritardandi. The prediction (about 190 s) was short: 48 Pesante at
   q 40 is 6 s a bar.
-- **The image** (`pax-mahler-orchestra-5.iso`, sha256 2708b13c...)
+- **The image** (`pax-mahler-orchestra-6.iso`, sha256 f079d7be...; play from px32 c3720b5)
   under TCG with QEMU's wav backend, `-m 256M`, through pelt:
   `play -m auferstehung-close`: 95 voices at most, 0 stolen, 0
   clamped, 0 notes dropped, 12939 blocks limited; the device 11937
@@ -208,9 +213,10 @@ stays until the opening (43.5-46.10, being re-read) is joined.
   printed there (check-p207-209.txt); the tie ends lose it
   (`fa13b7b`, `5858bd2`); `notes/px33/tools/tie-stacc.py` finds no
   other tie into a staccato in 46.11-51.13. In image 5 the horns' G4
-  holds within 2 dB from 232 to 243 s and ends with the last eighth.
-  For px32 to rule: whether `'` on a tie's end should shorten the whole
-  tied note.
+  holds within 2 dB from 232 to 243 s and ends with the last eighth (images 5 and 6).
+  px32 ruled (df224e7): a mark on a tie's last event cuts only that
+  event. The tune keeps the fix on its own ground: no staccato is
+  printed on those tie ends.
 
 ## 5. Done-when
 
