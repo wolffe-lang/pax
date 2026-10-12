@@ -693,6 +693,13 @@ static void ready(void)
         cl_say("  client: epoll_wait %d, %s, data %llu\n", m, m > 0 ? ebits(got_ev[0].events, e, sizeof e) : "none",
             m > 0 ? (unsigned long long)got_ev[0].data.u64 : 0ULL);
         epoll_ctl(ep, EPOLL_CTL_DEL, c, 0);
+        /* px25: the server closes only once told the wait is over, so
+           what epoll_wait reports does not hang on which of the two runs
+           first (it raced: IN on Linux, IN HUP RDHUP on PAX's one CPU,
+           and the other way now and then); then wait for that close. */
+        send(c, "k", 1, MSG_NOSIGNAL);
+        struct pollfd hq = { c, POLLRDHUP, 0 };
+        poll(&hq, 1, 5000);
         size_t t = 0;
         while ((n = recv(c, b + t, sizeof b - 1 - t, 0)) > 0)
             t += n;
@@ -716,6 +723,12 @@ static void ready(void)
     say("server: verb %ld bytes \"%.*s\"\n", n, n > 0 ? (int)n - 1 : 0, v);
     nap(100);
     sent("server: answer", s, "lobo status\nquitting: false\n", 0);
+    /* px25: the client's word that its epoll_wait is done (see above). */
+    char k1;
+    while (recv(s, &k1, 1, 0) < 0 && errno == EAGAIN) {
+        struct pollfd q = { s, POLLIN, 0 };
+        poll(&q, 1, 250);
+    }
     close(s);
     int st;
     waitpid(k, &st, 0);
