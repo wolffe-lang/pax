@@ -111,12 +111,12 @@ most 2 dB, the limiter holding peaks.
 - **Seen wrong, then fixed**: the first `play -c` refused the join at
   44.13 (`'!' ends a hairpin, and none is open in part 'cb'`): the
   cellos and basses' octave split had copied the `!` that closes a
-  hairpin only the cellos carried (fixed in `e60a254`). `pins.py` was written then and finds that one place only.
+  hairpin only the cellos carried (fixed in `3635748`). `pins.py` was written then and finds that one place only.
 - **Levels entering the close** (px33-c's `levels.py` at bar 63 of the
   join and bar 1 of the close): every part's first sound after 47.1
   follows a dynamic word, after bar 69's second violins were given the
   ff of 47.1.
-- **`play -c`** (play built on kasumi from this branch at `6ad9ff8`,
+- **`play -c`** (play built on kasumi from this branch at `0e53345`,
   wolf 0.2.27, the binary trunk's play is: sha256 `ba9f2e68…`):
   - the join and `auferstehung`: 463769 ms written (471770 ms of
     sound), 36 parts, **125 voices at most, 0 stolen, 0 clamped, 0
