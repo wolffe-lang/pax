@@ -235,10 +235,10 @@ fi
 lx=$images/linux
 [ -d "$lx" ] || die "no $lx (build first, and run the Linux side)"
 
-record() { # tier leg session status
+record() { # tier leg session status seconds
     ran=$((ran + 1))
-    printf '%s kmain_console %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" "$4" \
-        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" \
+    printf '%s kmain_console %s %s halt-status=%s accel=%s secs=%s serial=%s iso=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$5" "$(sha256_of "$log")" \
         "$(sha256_of "$iso")" >> "$runs"
 }
 
@@ -282,9 +282,10 @@ for leg in $legs; do
                 continue
             fi
             hrc=0
+            t0=$SECONDS
             "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 300 --qemu -m --qemu "$(mem_of "$s")" \
                 --elf "$elf" --marker 'halt|PANIC .*' "$iso" >"$log.verdict" 2>&1 || hrc=$?
-            record "$tier" "$leg" "$s" "$hrc"
+            record "$tier" "$leg" "$s" "$hrc" "$((SECONDS - t0))"
             norm=$log.norm; serial_norm "$log" > "$norm"
 
             # U1: the session against Linux's.
