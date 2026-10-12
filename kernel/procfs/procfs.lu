@@ -23,7 +23,8 @@
 //!   table's size), NStgid and NSpid as Tgid and Pid, Threads, SigBlk
 //!   (the thread's mask), SigIgn and SigCgt (the process's actions),
 //!   VmRSS, VmHWM, VmSize, VmPeak, RssAnon and VmData the pages the
-//!   process maps — and fixed values where it keeps none: 0 for
+//!   process maps, VmPTE its page tables' frames (px25) — and fixed
+//!   values where it keeps none: 0 for
 //!   TracerPid, Ngid, Kthread, VmLck, VmPin, RssFile, RssShmem, VmLib,
 //!   VmSwap, HugetlbPages, CoreDumping, the pending sets, the
 //!   capability sets (no capability set: a process on PAX is root by
@@ -453,7 +454,7 @@ fn status(base: u64, s: u64, pid0: u64, area: u64, umask: u64, fds: u64) -> u64 
     k = put_kb(base, k, "VmStk", 132)
     k = put_kb(base, k, "VmExe", 0)
     k = put_kb(base, k, "VmLib", 0)
-    k = put_kb(base, k, "VmPTE", 0)
+    k = put_kb(base, k, "VmPTE", if space == 0 { 0 } else { paging.table_pages(space) * 4 }) // px25: the page tables
     k = put_kb(base, k, "VmSwap", 0)
     k = put_kb(base, k, "HugetlbPages", 0)
     k = put_field(base, k, "CoreDumping", 0)
