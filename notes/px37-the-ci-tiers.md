@@ -2,7 +2,8 @@
 
 Contract: px37's, `sprints/pax/37-the-ci-tiers/` in wolffe-lang/wolf
 (read 2026-10-12). Branch `px37` in pax, cut from pax trunk `6316c51`
-(px32 merged).
+(px32 merged); rebased onto `feba3fc` (px25 merged, which added
+`mpx4-lobo`: 29 suites since).
 
 One deliverable: pax CI in tiers, with no loss of coverage before a
 merge to trunk. Measured on 2026-10-12 a green run was 28 jobs and 251
@@ -14,10 +15,10 @@ included, paid the whole of it.
 
 | event | tier | suites | legs |
 |---|---|---|---|
-| push to trunk | full | all 28 | all four |
-| nightly (`schedule`, 06:17 UTC, trunk) | full | all 28 | all four |
-| pull request labelled `full-matrix` (any push, or adding the label) | full | all 28 | all four |
-| pull request touching a FULL path (below) | full | all 28 | all four |
+| push to trunk | full | all 29 | all four |
+| nightly (`schedule`, 06:17 UTC, trunk) | full | all 29 | all four |
+| pull request labelled `full-matrix` (any push, or adding the label) | full | all 29 | all four |
+| pull request touching a FULL path (below) | full | all 29 | all four |
 | any other pull-request push | pr | those the change can affect | `--tier native --firmware bios` |
 | pull request touching only prose (`notes/`, `*.md`, licences) | pr | none (the plan and the verdict only) | — |
 | `labeled` with another label | noop | none | — |
@@ -75,18 +76,19 @@ whole package.
 
 | area | paths | suites (pr tier) |
 |---|---|---|
-| toolchain and core: FULL | `kernel/wolf.pin`, `kernel/wolf.pkg`, `boot/limine.pin`, `boot/limine.conf`, `boot/{start,io,cpu,isr,sched,fpu}.S`, `boot/kernel.ld`; `kernel/{serial,log,panic,boot_info,frames,paging,gdt,idt,interrupts,apic,timer,heap,sync,sched,fpu}`; `tools/{lib.sh,build-kernel,mkimage,fetch-wolf,fetch-limine,qemu-halt,qemu-run,qemu-fault,expect-serial}` | all 28, all legs |
-| CI itself | `.github/`, `tools/ci-plan`, `tools/ci-tiers.map`, `tests/ci-plan` | all 28, pr leg (the label's full run before merge covers the rest) |
-| user mode | `kernel/{user,process,elf,files,initramfs,signal,futex,rtc,vm,uaccess,procfs,tree,ready,event,console}`, `boot/{user,console,tree,event}.S`, `user/programs.S`, `tools/mkinitramfs` | every mpx3-* and mpx4-* (17) |
-| network | `kernel/{net,netd,arp,ip,icmp,udp,tcp,socket,unix}`, `boot/{net,unix}.S`, `user/net/`, `user/unix/`, `user/mpx4-*.run` | mpx4-net, -udp, -tcp, -ready, -session, -unix |
-| the bus and transport | `kernel/{pci,virtio}` | network's six + mpx3-sound, mpx3-orchestra |
+| toolchain and core: FULL | `kernel/wolf.pin`, `kernel/wolf.pkg`, `boot/limine.pin`, `boot/limine.conf`, `boot/{start,io,cpu,isr,sched,fpu}.S`, `boot/kernel.ld`; `kernel/{serial,log,panic,boot_info,frames,paging,gdt,idt,interrupts,apic,timer,heap,sync,sched,fpu}`; `tools/{lib.sh,build-kernel,mkimage,fetch-wolf,fetch-limine,qemu-halt,qemu-run,qemu-fault,expect-serial}` | all 29, all legs |
+| CI itself | `.github/`, `tools/ci-plan`, `tools/ci-tiers.map`, `tests/ci-plan` | all 29, pr leg (the label's full run before merge covers the rest) |
+| user mode | `kernel/{user,process,elf,files,initramfs,signal,futex,rtc,vm,uaccess,procfs,tree,ready,event,console}`, `boot/{user,console,tree,event}.S`, `user/programs.S`, `tools/mkinitramfs` | every mpx3-* and mpx4-* (18) |
+| network | `kernel/{net,netd,arp,ip,icmp,udp,tcp,socket,unix}`, `boot/{net,unix}.S`, `user/net/`, `user/unix/`, `user/mpx4-*.run` | mpx4-net, -udp, -tcp, -ready, -session, -unix, -lobo |
+| lobo (px25) | `user/lobo/`, `tools/lobo-*`, `tools/mklobokit`; `user/lobo.pin` also mpx4-unix | mpx4-lobo |
+| the bus and transport | `kernel/{pci,virtio}` | network's seven + mpx3-sound, mpx3-orchestra |
 | sound | `kernel/{speaker,sound}`, `boot/{speaker,sound}.S`, `user/{play,tunes,scores,sound}/` | mpx3-speaker, -sound, -orchestra, mpx4-session |
 | the screen | `kernel/{fb,screen}`, `boot/{screen,font}.S`, `font/spleen-8x16.bdf` | every suite booting kmain_console or kmain_session, and tour |
 | one suite's own | `kernel/schedtest` → mpx2-sched, tour; `kernel/heapthreads` → mpx2-heap; `kernel/pax_tour` → tour; `boot/stub/`, `tools/qemu-gdb`, `tests/gdb-attach` → proof; `tests/expect-serial-selftest` → proof, mkw, mpx1; `tools/census/`, `docs/CENSUS.md` → census | as named |
-| prose | `notes/`, `*.md`, `LICENSE*` | none |
+| prose, and a hand-run probe | `notes/`, `*.md`, `LICENSE*`, `tools/tw-probe` | none |
 | everything else | derived from the tests' text (kmains, tools, user programs, Limine configurations, key files) | the suites that read it |
 
-Each of the 1,539 tracked paths at `6316c51` is known to the map or read
+Each of the 2,091 tracked paths at `feba3fc` plus px37 is known to the map or read
 by a suite (`tests/ci-plan` P5). A new file in a new place is FULL until
 a rule names it.
 
@@ -134,28 +136,30 @@ builds its own kernels, and a release kmain takes about three minutes
 | mpx4-ready | 25.6 | 1.0 | 8.2 |
 | mpx4-session | 7.8 | 3.0 | 2.7 |
 | mpx4-unix | 5.0 | 2.9 | 1.5 |
-| **all 28** | **251.2** | **125.6** | **53.8** |
+| mpx4-lobo (px25's run 38277342063) | 23.4 | 4.1 | 13.4 |
+| **all 29** | **274.6** | **129.7** | **67.2** |
 
 The pr leg is the job's setup, the native build and the native BIOS
 boots. Native BIOS is the leg on which every suite runs its widest set:
 mpx3-orchestra's study, marks, timbres and balance run on native BIOS
 and release UEFI, its long and wide stresses on release BIOS alone;
 mpx3-sound's scenarios past tone and ramp on native BIOS and release
-UEFI; mpx3-speaker's tunes on native BIOS alone. What the pr leg does
+UEFI; mpx3-speaker's tunes on native BIOS alone; mpx4-lobo's load, diff
+and control on BIOS, its serve-release on native BIOS alone. What the pr leg does
 not run (release codegen, UEFI's memory map, orchestra's stresses) the
 full run before merge does.
 
-Both firmwares on the native tier would be 76.6 (+23).
+Both firmwares on the native tier would be 90.9 (+24).
 
 ## 4. Before and after, per pull-request push
 
 | change | before | after (pr tier, est.) | jobs |
 |---|---:|---:|---:|
-| network: `kernel/tcp/tcp.lu`, `tests/mpx4-tcp`, its note | 251 | 19.8 + plan + verdict ≈ 21 | 28 → 8 |
-| music: `user/play/parts.lu`, `tests/mpx3-orchestra`, its note | 251 | 14.9 + plan + verdict ≈ 16 | 28 → 6 |
-| notes only | 251 | plan + verdict ≈ 1 | 28 → 2 |
-| CI itself (this lane) | 251 | ≈ 55 | 30 |
-| a FULL path (pin, core, harness) | 251 | 251 + plan + verdict | 30 |
+| network: `kernel/tcp/tcp.lu`, `tests/mpx4-tcp`, its note | 275 | 33.2 + plan + verdict ≈ 34 | 29 → 9 |
+| music: `user/play/parts.lu`, `tests/mpx3-orchestra`, its note | 275 | 14.9 + plan + verdict ≈ 16 | 29 → 6 |
+| notes only | 275 | plan + verdict ≈ 1 | 29 → 2 |
+| CI itself (this lane) | 275 | ≈ 68 | 31 |
+| a FULL path (pin, core, harness) | 275 | 275 + plan + verdict | 31 |
 
 The planner over every open and recent PR, whole diff, in its own tree:
 px33b (#43), px33 (#38) and px29 (#33) take the music tier (4 to 6
