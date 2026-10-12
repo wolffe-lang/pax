@@ -35,16 +35,19 @@
 #      and the study
 #      (user/scores/orchestra), each by its NAME.spec; the study sounds at
 #      least 16 voices at once, reaches the limiter, 0 clamped, 0 stolen;
-#      parts-test/voices asks 72 voices at fff: 64 sound, at least 8
-#      are cut and counted, 0 clamped.
+#      parts-test/voices asks 72 voices at fff: all sound, 0 clamped;
+#      parts-test/dense asks more than 128 (92 held, tied, under short
+#      chords): the ceiling binds (tails cut, new notes dropped, counted)
+#      and every held note keeps its level within 6 dB (the limiter's
+#      pumping; a stolen note falls 40 dB and more).
 #   O5 boot (checks: both tiers, BIOS and UEFI; marks, timbres, balance, the
 #      study: native BIOS and release UEFI; long: release BIOS): the
 #      sound device's line, the run to `halt`, no `refused:` line, play's
 #      `played` line with 0 clamped, the capture judged by the same spec
 #      as O4. long is tools/orch-stress's 230 s, 16 parts, 42 voices, and
-#      wide its 48 parts (the most a score may have) for 40 bars, 64
-#      voices, each in QEMU's 256 MiB: play holds at most 2048 frames
-#      (8 MiB) at its end, its cost under 50% of real time, nothing clips.
+#      wide its 48 parts (the most a score may have) for 40 bars, each in QEMU's 256 MiB: play holds at most 2048 frames
+#      (8 MiB) at its end, its cost under 50% of real time, nothing stolen
+#      or clipped.
 #   O6 the cost under TCG (or KVM), in the guest: play -c of the study:
 #      at least 16 voices, 0 clamped, under 50% of real time (so it
 #      streams in real time); the figures go to the runs file.
@@ -160,17 +163,25 @@ v=$(sed -n 's/^played .*: [0-9]* frames, \([0-9]*\) voices at most.*/\1/p' "$wor
 [ "${v:-0}" -ge 16 ] || why+=" the study sounds ${v:-0} voices at most, not 16;"
 lim=$(sed -n 's/.* \([0-9]*\) blocks limited.*/\1/p' "$work/host-orchestra.played")
 [ "${lim:-0}" -gt 0 ] || why+=" the study's climax never reached the limiter;"
-# 72 voices at fff: 64 sound, the rest are cut and counted, nothing clips
+# 72 voices at fff: all sound (the ceiling is 128), nothing clips
 vo=$("$play" -c "$pt/voices" 2>&1)
-case $vo in *" 64 voices at most) "*" 0 clamped, "*) ;; *) why+=" voices: '$vo';" ;; esac
+case $vo in *" 72 voices at most) "*" 0 clamped, "*" 0 stolen, "*) ;; *) why+=" voices: '$vo';" ;; esac
 st=$(printf '%s' "$vo" | sed -n 's/.* clamped, \([0-9]*\) stolen,.*/\1/p')
-[ "${st:-0}" -ge 8 ] || why+=" voices: ${st:-0} stolen, want >= 8;"
 printf 'host voices %s\n' "$vo" >> "$runs"
 python3 "$PAX_ROOT/tools/orch-stress" 48 40 > "$work/wide"
 wd=$("$play" -c "$work/wide" 2>&1)
-case $wd in *", 48 parts, 64 voices at most) "*" 0 clamped, "*) ;; *) why+=" wide: '$wd';" ;; esac
+case $wd in *", 48 parts, "*" voices at most) "*" 0 clamped, "*) ;; *) why+=" wide: '$wd';" ;; esac
 printf 'host wide %s\n' "$wd" >> "$runs"
-[ -z "$why" ] && say "PASS O4 host: checks, marks, timbres, balance, the study: $(for t in checks marks timbres balance orchestra; do tail -n 1 "$work/host-$t.verdict" | sed 's/orch-check: //'; done | tr '\n' ' ')checks; the study $v voices at most, limited in $lim blocks, 0 clamped; 72 voices asked: 64 sound, $st stolen, 0 clamped; 48 parts read and sounded" || bad "O4 host:$why"
+# the voice ceiling binds: tails cut, new notes dropped, no held note cut
+"$play" -o "$pt/dense" > "$work/host-dense.raw" 2> "$work/host-dense.played"
+"$check" --expect "$pt/dense.spec" "$work/host-dense.raw" > "$work/host-dense.verdict" 2>&1 \
+    || why+=" dense: $(grep '^FAIL' "$work/host-dense.verdict" | head -n 2 | tr '\n' '|');"
+dn=$(grep '^played ' "$work/host-dense.played")
+case $dn in *" 128 voices at most, "*" 0 clamped,"*) ;; *) why+=" dense: '$dn';" ;; esac
+case $dn in *" 0 stolen,"*" 0 notes dropped"*) why+=" dense: the ceiling never bound;" ;; esac
+printf 'host dense %s; %s\n' "$dn" "$(tail -n 1 "$work/host-dense.verdict")" >> "$runs"
+rm -f "$work/host-dense.raw"
+[ -z "$why" ] && say "PASS O4 host: checks, marks, timbres, balance, the study: $(for t in checks marks timbres balance orchestra; do tail -n 1 "$work/host-$t.verdict" | sed 's/orch-check: //'; done | tr '\n' ' ')checks; the study $v voices at most, limited in $lim blocks, 0 clamped; $(printf '%s' "$vo" | sed -n 's/.* \([0-9]*\) voices at most).*/\1/p') of 72 voices sound, 0 clamped; 48 parts read and sounded; dense: $(printf '%s' "$dn" | sed 's/^played px32 dense: //')" || bad "O4 host:$why"
 rm -f "$work"/host-*.raw
 
 if [ "$hostonly" = 1 ]; then
@@ -271,8 +282,7 @@ for leg in $legs; do
                 b=$(printf '%s' "$fr" | sed -E 's/^user: frames free ([0-9]+) before, ([0-9]+) with.*/\1/')
                 w=$(printf '%s' "$fr" | sed -E 's/^user: frames free ([0-9]+) before, ([0-9]+) with.*/\2/')
                 [ -n "$b" ] && [ -n "$w" ] && [ $((b - w)) -le 2048 ] || why+=" play held $((${b:-0} - ${w:-0})) frames (want <= 2048): '$fr';"
-                vw=42; [ "$s" = wide ] && vw=64
-                case $pl in *" $vw voices at most,"*) ;; *) why+=" not $vw voices at most;" ;; esac
+                case $pl in *" 0 stolen, 0 clamped,"*) ;; *) why+=" stolen or clamped: '$pl';" ;; esac
                 cl=$(grep -m1 '^cost ' "$norm")
                 pc=$(printf '%s' "$cl" | sed -n 's/.*, \([0-9]*\)\.[0-9]% of real time.*/\1/p')
                 [ -n "$pc" ] && [ "$pc" -lt 50 ] || why+=" cost ${pc:-?}% of real time;"
