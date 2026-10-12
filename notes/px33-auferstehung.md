@@ -273,37 +273,41 @@ Halbe = wie zuletzt die Ganze), and "scharf abreissen" on the last bar
 (p209). **Corrected**: Nicht schleppen stands over 45.13, not 45.12,
 and Wieder etwas zurückhaltend over 46.22, not 46.21.
 
-| bar | fig. | word (relation) | old | new |
-|---|---|---|---|---|
-| 0 | 43.5 b4 | Schneller | q 60 | q 72 |
-| 2 | 43.7 | Langsamer; fermata on the beat-3 rest | q 48, fermata a quarter | q 58, fermata a quarter (2x the rest) |
-| 7 | 44.1 | Mit Aufschwung, aber nicht eilen (h = the last q) | h 48 | h 58 |
-| 27 | 45.5 | Vorwärts | h 54 | h 66 |
-| 31 | 45.9 | Drängend | h 60 | h 72 |
-| 35 | 45.13 | Nicht schleppen (was at bar 34) | h 52 | h 62 |
-| 39 | 46.1 | Langsam (q = the last h); 46.5 Halbe taktiren, no change | q 52 | q 62 |
-| 49 | 46.11 | (restated) | q 52 | q 62 |
-| 51 | 46.13 | Etwas drängend. Langsam steigern | q 56 at once | accel to q 68 over two bars |
-| 60 | 46.22 | Wieder etwas zurückhaltend (was at bar 59) | q 50 at once | rit to q 60 over two bars |
-| 62 | 46.24 | Luft-Pause | an eighth | an eighth |
-| 63 | 47.1 | Più mosso | h 38 | h 48 |
-| 75 | 47.13 | Ritenuto | rit to h 30 over 2 | rit to h 40 over 2 |
-| 79 | 48.1 | Pesante (q = the earlier h: 47's, before the Ritenuto) | q 40 | q 48 |
-| 87 | 48.9 | Etwas schneller | q 46 | q 55 |
-| 88 | 48.10 | (continues; px33 restated another value) | q 56 | q 55 |
-| 93 | 49.1 | Wieder zurückhaltend. Rit. | rit to q 44 over 4 | rit to q 47 over 4 |
-| 97 | 49.5 | Molto rit. | rit to q 36 over 2 | rit to q 40 over 2 |
-| 99 | 49.7 | Etwas bewegter (Langsame Halbe taktiren) | h 36 | h 36 (kept) |
-| 107 | 50.1 | Più mosso | h 42 | h 44 |
-| 111 | 50.5 | Noch schneller (Ganze Takte schlagen) | w 40 | w 46 |
-| 119 | 51.1 | Noch einmal so langsam (h = the last w) | h 40 | h 46 |
+| bar | fig. | word (relation) | old | new | t2 (x1.15) |
+|---|---|---|---|---|---|
+| 0 | 43.5 b4 | Schneller | q 60 | q 72 | q 83 |
+| 2 | 43.7 | Langsamer; fermata on the beat-3 rest | q 48, fermata a quarter | q 58, fermata a quarter (2x the rest) | q 67, fermata a quarter |
+| 7 | 44.1 | Mit Aufschwung, aber nicht eilen (h = the last q) | h 48 | h 58 | h 67 |
+| 27 | 45.5 | Vorwärts | h 54 | h 66 | h 76 |
+| 31 | 45.9 | Drängend | h 60 | h 72 | h 83 |
+| 35 | 45.13 | Nicht schleppen (was at bar 34) | h 52 | h 62 | h 71 |
+| 39 | 46.1 | Langsam (q = the last h); 46.5 Halbe taktiren, no change | q 52 | q 62 | q 71 |
+| 49 | 46.11 | (restated) | q 52 | q 62 | q 71 |
+| 51 | 46.13 | Etwas drängend. Langsam steigern | q 56 at once | accel to q 68 over two bars | accel to q 78 over two bars |
+| 60 | 46.22 | Wieder etwas zurückhaltend (was at bar 59) | q 50 at once | rit to q 60 over two bars | rit to q 69 over two bars |
+| 62 | 46.24 | Luft-Pause | an eighth | an eighth | an eighth |
+| 63 | 47.1 | Più mosso | h 38 | h 48 | h 55 |
+| 75 | 47.13 | Ritenuto | rit to h 30 over 2 | rit to h 40 over 2 | rit to h 46 over 2 |
+| 79 | 48.1 | Pesante (q = the earlier h: 47's, before the Ritenuto) | q 40 | q 48 | q 55 |
+| 87 | 48.9 | Etwas schneller | q 46 | q 55 | q 63 |
+| 88 | 48.10 | (continues; px33 restated another value) | q 56 | q 55 | q 63 |
+| 93 | 49.1 | Wieder zurückhaltend. Rit. | rit to q 44 over 4 | rit to q 47 over 4 | rit to q 54 over 4 |
+| 97 | 49.5 | Molto rit. | rit to q 36 over 2 | rit to q 40 over 2 | rit to q 46 over 2 |
+| 99 | 49.7 | Etwas bewegter (Langsame Halbe taktiren) | h 36 | h 36 (kept) | h 41 |
+| 107 | 50.1 | Più mosso | h 42 | h 44 | h 51 |
+| 111 | 50.5 | Noch schneller (Ganze Takte schlagen) | w 40 | w 46 | w 53 |
+| 119 | 51.1 | Noch einmal so langsam (h = the last w) | h 40 | h 46 | h 53 |
 
-49.7 stays at h 36. At h 38 or faster, harp I's and harp II's runs at
-49.7-9 ring past play's 128 voices: 3 stolen at h 38, 10 at h 40, 23 at
-h 44, measured with `play -c`. At h 36 there are 125 voices and none
-stolen. It is still "etwas bewegter" than the Molto rit.'s quarter 40
-(the quarter is now 72), and the halves are "langsame". The written
-lengths are 463.8 → **398.1 s** (`auferstehung`, -14.2%) and 246.6 →
-**218.6 s** (`auferstehung-close`, -11.4%). By play's `play -c`
-(0 stolen, 0 dropped, 125 voices at most) and the listing; by
-`notes/px33/tools/length.py` 399.0 s and 219.5 s.
+In the first pass 49.7 stayed at h 36: at h 38 or faster, harp I's and harp II's runs at
+49.7-9 rang past play's 128 voices (3 stolen at h 38, 10 at h 40, 23 at h 44). Each pluck of
+a harp string took a new voice and left the earlier pluck of the same string ringing for
+its whole decay (about 11 s to play's floor), a sound a single string cannot make. The
+second pass (t2, the maintainer: "another 15% across the board") fixes that cause in play:
+a harp string plucked again while it rings is plucked in place, as a bell struck again
+already was (`user/play/orch.lu`; test `parts-test/replay` in mpx3-orchestra O4, red at
+the test's own commit with 17 voices, green with the fix). Every value is then x1.15,
+49.7 included (h 36 to 41), and the four printed equivalences stay exact (44: h 67 = q 67;
+46: q 71 = h 71; 48: q 55 = 47's h 55; 51: h 53 = w 53). `play -c`: 84 voices at most,
+0 stolen, 0 dropped. Written lengths after the first pass: 463.8 to 398.1 s
+(`auferstehung`) and 246.6 to 218.6 s (`auferstehung-close`); after the second:
+**346.7 s** and **190.6 s** (play's listing; `length.py` 347.4 s).
