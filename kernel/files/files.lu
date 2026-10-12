@@ -335,6 +335,18 @@ const DT_REG: u64 = 8
 const DT_SOCK: u64 = 12 // px34
 const DT_LNK: u64 = 10 // px36
 const MAXLINKS: u64 = 40 // px36: links followed in one resolution (path_resolution(7))
+// px36: what a walk does with a symbolic link as the last component
+// (measured on tmpfs): F_YES follows it; F_NO does not, but does when a
+// `/` comes after it (`lstat`, `readlink`); F_NEVER does not even then,
+// and answers the link itself, the trailing `/` said (`mkdir`, `rmdir`,
+// `unlink`, `rename`, a new name for `link` and `symlink`).
+const F_NO: u64 = 0
+const F_YES: u64 = 1
+const F_NEVER: u64 = 2
+
+fn fol(b: bool) -> u64 {
+    if b { F_YES } else { F_NO }
+}
 const AT_SYMLINK_FOLLOW: u64 = 0x400 // px36: linkat
 const UTIME_NOW: u64 = 0x3fffffff // px36: (1 << 30) - 1, uapi linux/stat.h
 const UTIME_OMIT: u64 = 0x3ffffffe
@@ -2258,7 +2270,7 @@ pub fn unix_bind(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
     if e != 0 {
         return e
     }
-    let (n, par, ns, nl, trail) = walk_k(a, AT_FDCWD, l, false, false)
+    let (n, par, ns, nl, trail) = walk_k(a, AT_FDCWD, l, false, F_NO)
     if !is_err(n) {
         return neg(EADDRINUSE)
     }
@@ -2793,7 +2805,7 @@ const LAST_DOTDOT: u64 = 2 // `..`
 /// resolution is -ELOOP; a rewritten path longer than PATH_MAX is
 /// -ENAMETOOLONG. A link followed has its atime moved by relatime's
 /// rule, as on tmpfs (measured).
-fn walk(a: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool, follow: bool) -> (u64, u64, u64, u64, bool) {
+fn walk(a: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool, follow: u64) -> (u64, u64, u64, u64, bool) {
     let rl = path_in(pml4, va)
     if is_err(rl) {
         return (rl, rl, 0, 0, false)
@@ -2833,7 +2845,7 @@ fn follow_link(c: u64, at: u64, len: u64) -> u64 {
 
 /// px34: `walk` of the path already in pax_kbuf[0..rl) (a socket's
 /// name, copied out of its `struct sockaddr_un`).
-fn walk_k(a: u64, dirfd: u64, rl0: u64, empty_ok: bool, follow: bool) -> (u64, u64, u64, u64, bool) {
+fn walk_k(a: u64, dirfd: u64, rl0: u64, empty_ok: bool, follow: u64) -> (u64, u64, u64, u64, bool) {
     var rl = rl0
     if rl == 0 {
         if !empty_ok {
@@ -2897,7 +2909,8 @@ fn walk_k(a: u64, dirfd: u64, rl0: u64, empty_ok: bool, follow: bool) -> (u64, u
         }
         // px36: a symbolic link: followed unless it is the last
         // component, unfollowed and with no `/` after it.
-        if !is_err(c) && ty(c) == T_INO && tree.is_link(rf(c)) && (!last || follow || i < rl) {
+        let link = !is_err(c) && ty(c) == T_INO && tree.is_link(rf(c))
+        if link && (!last || follow == F_YES || (i < rl && follow == F_NO)) {
             links += 1
             if links > MAXLINKS {
                 return (err(ELOOP), err(ELOOP), 0, 0, false)
@@ -2915,7 +2928,7 @@ fn walk_k(a: u64, dirfd: u64, rl0: u64, empty_ok: bool, follow: bool) -> (u64, u
         }
         if last {
             let trail = i < rl
-            if trail && !is_err(c) && !is_dir_node(c) && ty(c) != T_STD {
+            if trail && !is_err(c) && !is_dir_node(c) && ty(c) != T_STD && !link {
                 c = err(ENOTDIR)
             }
             if dots != 0 {
@@ -2933,7 +2946,7 @@ fn walk_k(a: u64, dirfd: u64, rl0: u64, empty_ok: bool, follow: bool) -> (u64, u
 
 /// Resolve (dirfd, path at va) to a node (`walk`'s first answer).
 /// px36: and `follow` says whether a last symbolic link is followed.
-fn resolve(a: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool, follow: bool) -> u64 {
+fn resolve(a: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool, follow: u64) -> u64 {
     let (n, _p, _s, _l, _t) = walk(a, pml4, dirfd, va, empty_ok, follow)
     n
 }
@@ -2941,7 +2954,7 @@ fn resolve(a: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool, follow: bool)
 /// px34: `resolve` of the path in pax_kbuf[0..rl) (px36: a last link
 /// followed, as `connect` does).
 fn resolve_k(a: u64, dirfd: u64, rl: u64) -> u64 {
-    let (n, _p, _s, _l, _t) = walk_k(a, dirfd, rl, false, true)
+    let (n, _p, _s, _l, _t) = walk_k(a, dirfd, rl, false, F_YES)
     n
 }
 
@@ -3005,7 +3018,7 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
     // px36: a last symbolic link is followed but for O_NOFOLLOW (then
     // -ELOOP) and O_CREAT|O_EXCL (then -EEXIST, dangling or not).
     let excl = flags & O_CREAT != 0 && flags & O_EXCL != 0
-    let (n0, par, ns, nl, trail) = walk(a, pml4, dirfd, va, false, flags & O_NOFOLLOW == 0 && !excl)
+    let (n0, par, ns, nl, trail) = walk(a, pml4, dirfd, va, false, fol(flags & O_NOFOLLOW == 0 && !excl))
     var n = n0
     if !is_err(n) && ty(n) == T_INO && tree.is_link(rf(n)) && !excl {
         return neg(if flags & O_DIRECTORY != 0 { ENOTDIR } else { ELOOP }) // measured: O_DIRECTORY answers first
@@ -3333,7 +3346,7 @@ pub fn ftruncate(a: u64, fd: u64, len: u64) -> u64 {
 /// px27: `truncate(path, len)`: as `ftruncate` for the file the path
 /// names: -EISDIR for a directory, -EINVAL for what is no file.
 pub fn truncate(a: u64, pml4: u64, va: u64, len: u64) -> u64 {
-    let n = resolve(a, pml4, AT_FDCWD, va, false, true)
+    let n = resolve(a, pml4, AT_FDCWD, va, false, F_YES)
     if is_err(n) {
         return neg(rf(n))
     }
@@ -3403,7 +3416,7 @@ pub fn ioctl(a: u64, pml4: u64, fd: u64, req: u64, arg: u64) -> u64 {
 /// loader reads one contiguous image): a program written or copied
 /// since boot is refused by name, -EACCES.
 pub fn exec_lookup(a: u64, pml4: u64, va: u64) -> (u64, u64, u64) {
-    let n = resolve(a, pml4, AT_FDCWD, va, false, true)
+    let n = resolve(a, pml4, AT_FDCWD, va, false, F_YES)
     if is_err(n) {
         return (0, neg(rf(n)), 0)
     }
@@ -3507,7 +3520,7 @@ pub fn getcwd(a: u64, pml4: u64, buf: u64, size: u64) -> u64 {
 /// px17: `chdir(path)`: the working directory becomes the directory the
 /// path names (-ENOENT, -ENOTDIR, the path's own errors).
 pub fn chdir(a: u64, pml4: u64, va: u64) -> u64 {
-    let n = resolve(a, pml4, AT_FDCWD, va, false, true)
+    let n = resolve(a, pml4, AT_FDCWD, va, false, F_YES)
     if is_err(n) {
         return neg(rf(n))
     }
@@ -3577,7 +3590,7 @@ pub fn readlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, buf: u64, size: u64) -
     if size == 0 || size >= 0x80000000 {
         return neg(EINVAL)
     }
-    let n = resolve(a, pml4, dirfd, va, false, false)
+    let n = resolve(a, pml4, dirfd, va, false, F_NO)
     if is_err(n) {
         return neg(rf(n))
     }
@@ -3606,7 +3619,7 @@ pub fn readlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, buf: u64, size: u64) -
 /// been removed, -ENOTDIR for a file on the way, -ENOSPC; in `/dev`
 /// refused by name, -EROFS.
 pub fn mkdirat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64) -> u64 {
-    let (n, par, ns, nl, _trail) = walk(a, pml4, dirfd, va, false, false)
+    let (n, par, ns, nl, _trail) = walk(a, pml4, dirfd, va, false, F_NEVER)
     if !is_err(n) {
         return neg(EEXIST)
     }
@@ -3641,9 +3654,12 @@ pub fn unlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64) -> u64 {
         refuse(a, R_ATFLAG)
         return neg(EINVAL)
     }
-    let (n, par, ns, nl, _trail) = walk(a, pml4, dirfd, va, false, false)
+    let (n, par, ns, nl, trail) = walk(a, pml4, dirfd, va, false, F_NEVER)
     if is_err(n) {
         return neg(rf(n))
+    }
+    if trail && ty(n) == T_INO && tree.is_link(rf(n)) {
+        return neg(ENOTDIR) // px36: measured, `unlink("link/")` and `rmdir`
     }
     if flags & AT_REMOVEDIR != 0 {
         if !is_dir_node(n) {
@@ -3687,9 +3703,12 @@ pub fn renameat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, fla
         refuse(a, R_RENFLAG)
         return neg(EINVAL)
     }
-    let (on, op, os, ol, _ot) = walk(a, pml4, odfd, ova, false, false)
+    let (on, op, os, ol, ot) = walk(a, pml4, odfd, ova, false, F_NEVER)
     if is_err(on) {
         return neg(rf(on))
+    }
+    if ot && ty(on) == T_INO && tree.is_link(rf(on)) {
+        return neg(ENOTDIR) // px36: measured, a link renamed with a trailing slash
     }
     if ol == 0 || ty(on) == T_DEV {
         return neg(EBUSY)
@@ -3701,7 +3720,7 @@ pub fn renameat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, fla
         put_kb(NORM + k, kb(os + k))
         k += 1
     }
-    let (nn, np, ns, nl, nt) = walk(a, pml4, ndfd, nva, false, false)
+    let (nn, np, ns, nl, nt) = walk(a, pml4, ndfd, nva, false, F_NEVER)
     if is_err(nn) && (rf(nn) != ENOENT || is_err(np)) {
         return neg(rf(nn))
     }
@@ -3713,6 +3732,9 @@ pub fn renameat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, fla
     }
     if is_err(nn) && nt && !tree.is_dir(rf(on)) {
         return neg(ENOTDIR)
+    }
+    if !is_err(nn) && nt && ty(nn) == T_INO && tree.is_link(rf(nn)) {
+        return neg(ENOTDIR) // px36: measured, a rename onto `link/`
     }
     tree.rename(rf(op), raw() + NORM, ol, rf(np), raw() + ns, nl)
 }
@@ -3727,7 +3749,7 @@ pub fn faccessat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64, flags: u64) 
     if mode & !7 != 0 || flags & !AT_EACCESS != 0 {
         return neg(EINVAL)
     }
-    let n = resolve(a, pml4, dirfd, va, false, true)
+    let n = resolve(a, pml4, dirfd, va, false, F_YES)
     if is_err(n) {
         return neg(rf(n))
     }
@@ -3761,7 +3783,7 @@ pub fn fchmodat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64, flags: u64) -
     if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
         return neg(EINVAL)
     }
-    let n = resolve(a, pml4, dirfd, va, flags & AT_EMPTY_PATH != 0, flags & AT_SYMLINK_NOFOLLOW == 0)
+    let n = resolve(a, pml4, dirfd, va, flags & AT_EMPTY_PATH != 0, fol(flags & AT_SYMLINK_NOFOLLOW == 0))
     if is_err(n) {
         return neg(rf(n))
     }
@@ -3818,7 +3840,7 @@ pub fn fchownat(a: u64, pml4: u64, dirfd: u64, va: u64, owner: u64, group: u64, 
         if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
             return neg(EINVAL)
         }
-        n = resolve(a, pml4, dirfd, va, flags & AT_EMPTY_PATH != 0, flags & AT_SYMLINK_NOFOLLOW == 0)
+        n = resolve(a, pml4, dirfd, va, flags & AT_EMPTY_PATH != 0, fol(flags & AT_SYMLINK_NOFOLLOW == 0))
         if is_err(n) {
             return neg(rf(n))
         }
@@ -3904,7 +3926,7 @@ pub fn utimensat(a: u64, pml4: u64, dirfd: u64, va: u64, times: u64, flags: u64)
         }
         n = node_of(a, dirfd)
     } else {
-        n = resolve(a, pml4, dirfd, va, flags & AT_EMPTY_PATH != 0, flags & AT_SYMLINK_NOFOLLOW == 0)
+        n = resolve(a, pml4, dirfd, va, flags & AT_EMPTY_PATH != 0, fol(flags & AT_SYMLINK_NOFOLLOW == 0))
         if is_err(n) {
             return neg(rf(n))
         }
@@ -3931,14 +3953,14 @@ pub fn linkat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, flags
     if flags & !(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH) != 0 {
         return neg(EINVAL)
     }
-    let on = resolve(a, pml4, odfd, ova, flags & AT_EMPTY_PATH != 0, flags & AT_SYMLINK_FOLLOW != 0)
+    let on = resolve(a, pml4, odfd, ova, flags & AT_EMPTY_PATH != 0, fol(flags & AT_SYMLINK_FOLLOW != 0))
     if is_err(on) {
         return neg(rf(on))
     }
     if is_dir_node(on) {
         return neg(EPERM)
     }
-    let (nn, np, ns, nl, nt) = walk(a, pml4, ndfd, nva, false, false)
+    let (nn, np, ns, nl, nt) = walk(a, pml4, ndfd, nva, false, F_NEVER)
     if !is_err(nn) {
         return neg(EEXIST)
     }
@@ -3973,7 +3995,7 @@ pub fn symlinkat(a: u64, pml4: u64, tva: u64, ndfd: u64, nva: u64) -> u64 {
         put_kb(NORM + k, kb(k))
         k += 1
     }
-    let (nn, np, ns, nl, nt) = walk(a, pml4, ndfd, nva, false, false)
+    let (nn, np, ns, nl, nt) = walk(a, pml4, ndfd, nva, false, F_NEVER)
     if !is_err(nn) {
         return neg(EEXIST)
     }
@@ -4247,7 +4269,7 @@ pub fn fstatat(a: u64, pml4: u64, dirfd: u64, va: u64, st: u64, flags: u64) -> u
     if flags & (0xffffffff - AT_SYMLINK_NOFOLLOW - AT_EMPTY_PATH - 0x800) != 0 {
         return neg(EINVAL)
     }
-    let n = resolve(a, pml4, dirfd, va, flags & AT_EMPTY_PATH != 0, flags & AT_SYMLINK_NOFOLLOW == 0)
+    let n = resolve(a, pml4, dirfd, va, flags & AT_EMPTY_PATH != 0, fol(flags & AT_SYMLINK_NOFOLLOW == 0))
     if is_err(n) {
         return neg(rf(n))
     }
@@ -4257,7 +4279,7 @@ pub fn fstatat(a: u64, pml4: u64, dirfd: u64, va: u64, st: u64, flags: u64) -> u
 /// `statx(dirfd, path, flags, mask, sx)`: every basic field, whatever
 /// the mask asks (statx(2) allows more than asked).
 pub fn statx(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, sx: u64) -> u64 {
-    let n = resolve(a, pml4, dirfd, va, flags & AT_EMPTY_PATH != 0, flags & AT_SYMLINK_NOFOLLOW == 0)
+    let n = resolve(a, pml4, dirfd, va, flags & AT_EMPTY_PATH != 0, fol(flags & AT_SYMLINK_NOFOLLOW == 0))
     if is_err(n) {
         return neg(rf(n))
     }
