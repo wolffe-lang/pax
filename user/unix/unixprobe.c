@@ -40,6 +40,13 @@
 static char rb[96];
 #define N(label, call) do { long r_ = (call); say("%s: %s\n", label, res(r_, rb, sizeof rb, 1)); } while (0)
 
+static long ms_now(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1000L + t.tv_nsec / 1000000L;
+}
+
 static void nap(long ms)
 {
     struct timespec t = { ms / 1000, (ms % 1000) * 1000000L };
@@ -1078,6 +1085,7 @@ static int soak(void)
     close(l);
     unsigned long crc = 0;
     int bad = 0;
+    long t0 = ms_now();
     for (int i = 0; i < n; i++) {
         char q[32], a[32];
         int s = usock();
@@ -1103,6 +1111,7 @@ static int soak(void)
     waitpid(k, &st, 0);
     unlink("/u/soak.sock");
     say("soak: %d connections, %d wrong, crc %08lx, the server ended %d\n", n, bad, crc, WEXITSTATUS(st));
+    say("~soak: %d connections in %ld ms\n", n, ms_now() - t0);
     stacks();
     rmdir("/u");
     return bad != 0;

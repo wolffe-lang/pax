@@ -26,6 +26,13 @@
 #define NAME "logs/control.sock"
 #define ANSWER "lobo status\ncurrent generation: 1\nquitting: false\nworkers: 0\ncontrol: unix:" NAME " (px34's server, on this machine)\n"
 
+static long ms_now(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1000L + t.tv_nsec / 1000000L;
+}
+
 static void nap(long ms)
 {
     struct timespec t = { ms / 1000, (ms % 1000) * 1000000L };
@@ -140,6 +147,7 @@ int main(int argc, char **argv)
     say("its name: %s\n", S_ISSOCK(st.st_mode) ? "a socket" : "not a socket");
 
     /* lobo's own client. */
+    long t0 = ms_now();
     pid_t lc = fork();
     if (lc == 0) {
         char *av[] = { "/bin/lobo", "-c", "conf/lobo.conf", "status", 0 };
@@ -150,7 +158,9 @@ int main(int argc, char **argv)
     }
     int s = -1;
     waitpid(lc, &s, 0);
+    long t1 = ms_now();
     say("lobo -c conf/lobo.conf status: %s %d\n", WIFEXITED(s) ? "exit" : "signal", WIFEXITED(s) ? WEXITSTATUS(s) : WTERMSIG(s));
+    say("~ctl: lobo's client, from its fork to its end, %ld ms\n", t1 - t0);
 
     ask("status");
     ask("reload");
