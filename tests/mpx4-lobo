@@ -44,7 +44,8 @@
 #   L4 the end: `PAX: init /bin/pelt ended with status 0`, `halt`
 # serve and hands run on every leg (BIOS 256 MiB, UEFI 512 MiB, both
 # tiers); load, diff and control on BIOS, both tiers; serve-release on
-# native BIOS. Exit 0 when every assertion held, 1 otherwise, 2 on a
+# native BIOS. The boots stop at the first session whose steps did not
+# hold on PAX (`stopped early`). Exit 0 when every assertion held, 1 otherwise, 2 on a
 # usage or tool error. The UEFI leg needs OVMF (SKIPPED LOUDLY without
 # it unless PAX_REQUIRE_UEFI=1). The Linux side needs a container engine
 # (PAX_ENGINE, else docker, else podman) and PAX_TREE_IMAGE (python).
@@ -205,6 +206,7 @@ done
 
 runs=$PAX_BUILD/mpx4-lobo-runs.txt
 : > "$runs"
+stop=0
 read -r ovmf_code ovmf_vars <<<"$(find_ovmf)" || true
 for leg in $legs; do
     if [ "$leg" = uefi ] && [ -z "${ovmf_code:-}" ]; then
@@ -234,7 +236,7 @@ for leg in $legs; do
             printf '%s %s %s status=%s accel=%s console=%s iso=%s\n' "$tier" "$leg" "$s" "$src" "$accel" \
                 "$(sha256_of "$out/console.log" 2>/dev/null)" "$(sha256_of "$iso")" >> "$runs"
             [ "$src" = 0 ] && say "PASS L1 $id: every step held ($(grep -c '\] step ' "$out/steps.log") steps, $(tail -n 1 "$out/steps.log"))" \
-                || bad "L1 $id: $(tail -n 3 "$out.out" | tr '\n' '|')"
+                || { bad "L1 $id: $(tail -n 3 "$out.out" | tr '\n' '|')"; stop=1; }
             norm=$out/console.norm
             serial_norm "$out/console.log" > "$norm"
             why=
@@ -260,6 +262,10 @@ for leg in $legs; do
             command grep -aq '^PAX: init /bin/pelt ended with status 0; nothing left to run$' "$norm" || why+=" init's end;"
             command grep -aq '^halt$' "$norm" || why+=" no halt;"
             [ -z "$why" ] && say "PASS L4 $id: init ended with status 0, halt" || bad "L4 $id:$why"
+            if [ "$stop" = 1 ]; then
+                say "stopped early: $id did not hold (the rest of the boots not made)"
+                break 3
+            fi
         done
     done
 done
