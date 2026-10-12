@@ -607,8 +607,9 @@ otherwise than Linux, or what was never run with lobo:
   twice each): `kmain_console` release trunk 200 s / 199 s, head 54 s /
   54 s; `kmain_sockets` release trunk 180 s, head 54 s; native 1–2 s
   both.
-- **Boot counts**: kasumi TCG — the gauntlet 255 boots across every
-  suite (`g1-041a4c8/*-runs.txt`; mpx4-unix 12), the reruns of
+- **Boot counts**: kasumi TCG — the gauntlet: 167 boots in the eleven
+  suites whose runs lists were kept (`g1-041a4c8/*-runs.txt`; mpx4-unix
+  12) and the host suites' own (not counted), the reruns of
   mpx4-tcp and mpx4-ready on its images, the development runs of
   mpx4-unix (about 30), four readiness boots at 128 and 256 MiB; hasu
   KVM — mpx4-unix 60 boots (five rounds of 12, one under taskset), all
