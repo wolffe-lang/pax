@@ -1,0 +1,392 @@
+//! procfs — the files of `/proc` and `/sys` lobo reads (px34), and
+//! the directories they sit in: fixed text where PAX has no fact to
+//! give, said so here file by file. Below kernel/files, which resolves
+//! their paths, opens them and reads them; this module only names them
+//! and makes their text.
+//!
+//! **The entries** are a fixed table (`ENTRIES`), each a name, the
+//! entry it sits in (or the root), whether it is a directory, its mode
+//! and the size `stat` answers. Two file systems, as on Linux: `/proc`
+//! (procfs: every file's size 0) and `/sys` (sysfs, where a regular
+//! attribute's size is 4096, and cgroupfs at `/sys/fs/cgroup`, where it
+//! is 0): measured in `px13-ubuntu`, `notes/px34/linux/witness/`.
+//!
+//! **The text** is made when a file is opened (`make`), into a frame the
+//! open file holds and gives back at its last close (kernel/files), so
+//! a reader in pieces of 32, 32, 64, 128 … bytes — glibc's and lobo's
+//! way — reads one text, never two halves of two. What each says:
+//!
+//! - `/proc/self/status` (`proc_pid_status(5)`): Linux 7.2.8's fields
+//!   in its order and format; PAX's values where it keeps them — Name
+//!   (the thread's, or the program's), Umask, State `R (running)` (the
+//!   reader is running), Tgid, Pid, PPid, Uid and Gid 0, FDSize (the
+//!   table's size), NStgid and NSpid as Tgid and Pid, Threads, SigBlk
+//!   (the thread's mask), SigIgn and SigCgt (the process's actions),
+//!   VmRSS, VmHWM, VmSize, VmPeak, RssAnon and VmData the pages the
+//!   process maps — and fixed values where it keeps none: 0 for
+//!   TracerPid, Ngid, Kthread, VmLck, VmPin, RssFile, RssShmem, VmLib,
+//!   VmSwap, HugetlbPages, CoreDumping, the pending sets, the
+//!   capability sets (no capability set: a process on PAX is root by
+//!   rule, not by capability), NoNewPrivs, Seccomp and the context
+//!   switches; NSpgid and NSsid 1; VmStk 132 kB and VmExe 0 kB; one CPU
+//!   (`Cpus_allowed: 1`, `Cpus_allowed_list: 0`) and one memory node.
+//! - `/proc/self/cgroup`: `0::/` (cgroup v2, the root: `cgroups(7)`).
+//! - `/proc/sys/vm/overcommit_memory`: `0` (the heuristic, Linux's
+//!   default; glibc's malloc reads it).
+//! - `/sys/fs/cgroup/cgroup.controllers`: `cpu` — fixed: the one
+//!   controller whose file lobo reads (Linux's lists every controller
+//!   the hierarchy has; PAX has none, and says the one it answers for).
+//! - `/sys/fs/cgroup/cpu.max`: `max 100000` (no limit, `cgroups(7)`).
+//! - `/sys/devices/system/cpu/online`: `0` (one CPU, `sysfs(5)`'s list
+//!   format).
+//!
+//! No region, no heap. Written from proc(5), proc_pid_status(5),
+//! cgroups(7), sysfs(5) and black-box reads of the files on Linux. No
+//! Linux source; no other kernel's source.
+
+use frames
+use paging
+use sched
+
+const PAGE: u64 = 4096
+
+/// How many entries there are; also `NONE`'s value.
+pub const ENTRIES: u64 = 16
+/// No entry.
+pub const NONE: u64 = 16
+/// An entry's parent when it sits in the root directory.
+pub const ROOT: u64 = 0xffff
+
+// What `make` writes for a file.
+const G_STATUS: u64 = 1
+const G_CGROUP: u64 = 2
+const G_OVERCOMMIT: u64 = 3
+const G_CONTROLLERS: u64 = 4
+const G_CPUMAX: u64 = 5
+const G_ONLINE: u64 = 6
+
+const S_IFDIR: u64 = 0x4000
+const S_IFREG: u64 = 0x8000
+
+/// Entry `e`'s name.
+pub fn name(e: u64) -> str {
+    if e == 0 { return "proc" }
+    if e == 1 { return "self" }
+    if e == 2 { return "status" }
+    if e == 3 { return "cgroup" }
+    if e == 4 { return "sys" }
+    if e == 5 { return "vm" }
+    if e == 6 { return "overcommit_memory" }
+    if e == 7 { return "sys" }
+    if e == 8 { return "fs" }
+    if e == 9 { return "cgroup" }
+    if e == 10 { return "cgroup.controllers" }
+    if e == 11 { return "cpu.max" }
+    if e == 12 { return "devices" }
+    if e == 13 { return "system" }
+    if e == 14 { return "cpu" }
+    "online"
+}
+
+/// The length of entry `e`'s name.
+pub fn name_len(e: u64) -> u64 {
+    var n: u64 = 0
+    for _b in name(e).bytes() {
+        n += 1
+    }
+    n
+}
+
+/// The entry `e` sits in, or ROOT.
+pub fn parent(e: u64) -> u64 {
+    if e == 0 || e == 7 { return ROOT }
+    if e == 1 || e == 4 { return 0 }
+    if e == 2 || e == 3 { return 1 }
+    if e == 5 { return 4 }
+    if e == 6 { return 5 }
+    if e == 8 || e == 12 { return 7 }
+    if e == 9 { return 8 }
+    if e == 10 || e == 11 { return 9 }
+    if e == 13 { return 12 }
+    if e == 14 { return 13 }
+    14
+}
+
+fn gen(e: u64) -> u64 {
+    if e == 2 { return G_STATUS }
+    if e == 3 { return G_CGROUP }
+    if e == 6 { return G_OVERCOMMIT }
+    if e == 10 { return G_CONTROLLERS }
+    if e == 11 { return G_CPUMAX }
+    if e == 15 { return G_ONLINE }
+    0
+}
+
+/// Whether entry `e` is a directory.
+pub fn is_dir(e: u64) -> bool {
+    gen(e) == 0
+}
+
+/// Entry `e`'s mode, type and permission bits (measured).
+pub fn mode(e: u64) -> u64 {
+    if is_dir(e) {
+        if e <= 7 {
+            return S_IFDIR | 0x16d // 0555: /proc, /proc/self, /proc/sys, /proc/sys/vm, /sys
+        }
+        return S_IFDIR | 0x1ed // 0755
+    }
+    if e == 6 || e == 11 {
+        return S_IFREG | 0x1a4 // 0644: overcommit_memory, cpu.max
+    }
+    S_IFREG | 0x124 // 0444
+}
+
+/// The size `stat` answers: 4096 for a sysfs attribute, 0 for procfs's
+/// and cgroupfs's files (measured), 0 for a directory.
+pub fn size(e: u64) -> u64 {
+    if e == 15 { 4096 } else { 0 }
+}
+
+/// Which file system entry `e` is in: 0 `/proc`, 1 `/sys`.
+pub fn fs(e: u64) -> u64 {
+    if e <= 6 { 0 } else { 1 }
+}
+
+/// The `k`th entry (from 0) that sits in `d` (an entry, or ROOT), or
+/// NONE past the last.
+pub fn child_at(d: u64, k: u64) -> u64 {
+    var seen: u64 = 0
+    var e: u64 = 0
+    while e < ENTRIES {
+        if parent(e) == d {
+            if seen == k {
+                return e
+            }
+            seen += 1
+        }
+        e += 1
+    }
+    NONE
+}
+
+// --- the text --------------------------------------------------------------------
+
+fn put_b(base: u64, at: u64, b: u64) -> u64 {
+    if at >= PAGE {
+        return at
+    }
+    // # Safety: a byte of the frame `make` took, through the HHDM; at < 4096.
+    unsafe { ((base + at) as *u8).write_volatile((b & 0xff) as u8) }
+    at + 1
+}
+
+fn put_s(base: u64, at: u64, s: str) -> u64 {
+    var k = at
+    for b in s.bytes() {
+        k = put_b(base, k, b as int as u64)
+    }
+    k
+}
+
+fn put_dec(base: u64, at: u64, v: u64) -> u64 {
+    var d: u64 = 1
+    while v / d >= 10 {
+        d *= 10
+    }
+    var k = at
+    while d > 0 {
+        k = put_b(base, k, 48 + (v / d) % 10)
+        d /= 10
+    }
+    k
+}
+
+/// `v` right-aligned in `width` columns.
+fn put_dec_w(base: u64, at: u64, v: u64, width: u64) -> u64 {
+    var digits: u64 = 1
+    var t = v
+    while t >= 10 {
+        t /= 10
+        digits += 1
+    }
+    var k = at
+    var pad = digits
+    while pad < width {
+        k = put_b(base, k, 32)
+        pad += 1
+    }
+    put_dec(base, k, v)
+}
+
+fn put_hex16(base: u64, at: u64, v: u64) -> u64 {
+    var k = at
+    var i: u64 = 0
+    while i < 16 {
+        let n = (v >> ((15 - i) * 4)) & 0xf
+        k = put_b(base, k, if n < 10 { 48 + n } else { 87 + n })
+        i += 1
+    }
+    k
+}
+
+/// A memory line: `<name>:\t<kB, eight wide> kB\n`, Linux's form.
+fn put_kb(base: u64, at: u64, label: str, kb: u64) -> u64 {
+    var k = put_s(base, at, label)
+    k = put_s(base, k, ":\t")
+    k = put_dec_w(base, k, kb, 8)
+    put_s(base, k, " kB\n")
+}
+
+fn put_field(base: u64, at: u64, label: str, v: u64) -> u64 {
+    var k = put_s(base, at, label)
+    k = put_s(base, k, ":\t")
+    k = put_dec(base, k, v)
+    put_b(base, k, 10)
+}
+
+fn put_mask(base: u64, at: u64, label: str, v: u64) -> u64 {
+    var k = put_s(base, at, label)
+    k = put_s(base, k, ":\t")
+    k = put_hex16(base, k, v)
+    put_b(base, k, 10)
+}
+
+/// The running thread's name, as `prctl(PR_GET_NAME)` answers it (its
+/// own when set, else its program's, at most 15 bytes).
+fn put_name(base: u64, at: u64) -> u64 {
+    let w0 = sched.self_name(0)
+    let w1 = sched.self_name(1)
+    var k = at
+    if w0 != 0 || w1 != 0 {
+        var i: u64 = 0
+        while i < 15 {
+            let b = if i < 8 { (w0 >> (i * 8)) & 0xff } else { (w1 >> ((i - 8) * 8)) & 0xff }
+            if b == 0 {
+                return k
+            }
+            k = put_b(base, k, b)
+            i += 1
+        }
+        return k
+    }
+    let a = sched.self_exec(2)
+    let l = sched.self_exec(3)
+    let n = if l < 15 { l } else { 15 }
+    var j: u64 = 0
+    while j < n {
+        // # Safety: a byte of the program's name (kernel/sched's record of it).
+        let v = unsafe { ((a + j) as *u8).read_volatile() }
+        k = put_b(base, k, v as u64)
+        j += 1
+    }
+    k
+}
+
+/// `/proc/self/status` into the frame at `base`: its length. `area` is
+/// the process's area (the signal actions), `umask` its mask, `fds` the
+/// descriptor table's size.
+fn status(base: u64, area: u64, umask: u64, fds: u64) -> u64 {
+    var k = put_s(base, 0, "Name:\t")
+    k = put_name(base, k)
+    k = put_s(base, k, "\nUmask:\t0")
+    k = put_b(base, k, 48 + ((umask >> 6) & 7))
+    k = put_b(base, k, 48 + ((umask >> 3) & 7))
+    k = put_b(base, k, 48 + (umask & 7))
+    k = put_s(base, k, "\nState:\tR (running)\n")
+    let pid = sched.self_pid()
+    let tid = sched.self_tid()
+    k = put_field(base, k, "Tgid", pid)
+    k = put_field(base, k, "Ngid", 0)
+    k = put_field(base, k, "Pid", tid)
+    k = put_field(base, k, "PPid", sched.self_ppid())
+    k = put_field(base, k, "TracerPid", 0)
+    k = put_s(base, k, "Uid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\n")
+    k = put_field(base, k, "FDSize", fds)
+    k = put_s(base, k, "Groups:\t \n")
+    k = put_field(base, k, "NStgid", pid)
+    k = put_field(base, k, "NSpid", tid)
+    k = put_field(base, k, "NSpgid", 1)
+    k = put_field(base, k, "NSsid", 1)
+    k = put_field(base, k, "Kthread", 0)
+    let rss = paging.user_pages(paging.live()) * 4
+    k = put_kb(base, k, "VmPeak", rss)
+    k = put_kb(base, k, "VmSize", rss)
+    k = put_kb(base, k, "VmLck", 0)
+    k = put_kb(base, k, "VmPin", 0)
+    k = put_kb(base, k, "VmHWM", rss)
+    k = put_kb(base, k, "VmRSS", rss)
+    k = put_kb(base, k, "RssAnon", rss)
+    k = put_kb(base, k, "RssFile", 0)
+    k = put_kb(base, k, "RssShmem", 0)
+    k = put_kb(base, k, "VmData", rss)
+    k = put_kb(base, k, "VmStk", 132)
+    k = put_kb(base, k, "VmExe", 0)
+    k = put_kb(base, k, "VmLib", 0)
+    k = put_kb(base, k, "VmPTE", 0)
+    k = put_kb(base, k, "VmSwap", 0)
+    k = put_kb(base, k, "HugetlbPages", 0)
+    k = put_field(base, k, "CoreDumping", 0)
+    k = put_field(base, k, "THP_enabled", 0)
+    k = put_s(base, k, "untag_mask:\t0xffffffffffffffff\n")
+    k = put_field(base, k, "Threads", sched.self_threads())
+    k = put_s(base, k, "SigQ:\t0/0\n")
+    k = put_mask(base, k, "SigPnd", 0)
+    k = put_mask(base, k, "ShdPnd", 0)
+    k = put_mask(base, k, "SigBlk", sched.self_sigmask())
+    var ign: u64 = 0
+    var cgt: u64 = 0
+    var sig: u64 = 1
+    while sig <= 64 {
+        // # Safety: the process's area, word 256 + (sig - 1) * 4 < 512 (its signal actions).
+        let h = unsafe { ((area + (256 + (sig - 1) * 4) * 8) as *u64).read_volatile() }
+        if h == 1 {
+            ign = ign | (1 << (sig - 1))
+        } else if h != 0 {
+            cgt = cgt | (1 << (sig - 1))
+        }
+        sig += 1
+    }
+    k = put_mask(base, k, "SigIgn", ign)
+    k = put_mask(base, k, "SigCgt", cgt)
+    k = put_mask(base, k, "CapInh", 0)
+    k = put_mask(base, k, "CapPrm", 0)
+    k = put_mask(base, k, "CapEff", 0)
+    k = put_mask(base, k, "CapBnd", 0)
+    k = put_mask(base, k, "CapAmb", 0)
+    k = put_field(base, k, "NoNewPrivs", 0)
+    k = put_field(base, k, "Seccomp", 0)
+    k = put_field(base, k, "Seccomp_filters", 0)
+    k = put_s(base, k, "Speculation_Store_Bypass:\tunknown\n")
+    k = put_s(base, k, "SpeculationIndirectBranch:\tunknown\n")
+    k = put_s(base, k, "Cpus_allowed:\t1\nCpus_allowed_list:\t0\n")
+    k = put_s(base, k, "Mems_allowed:\t1\nMems_allowed_list:\t0\n")
+    k = put_field(base, k, "voluntary_ctxt_switches", 0)
+    put_field(base, k, "nonvoluntary_ctxt_switches", 0)
+}
+
+/// Make file entry `e`'s text in a fresh frame: (its physical address,
+/// the text's length), or (0, 0) when no frame is free (the open is
+/// then -ENOMEM). `area`, `umask` and `fds` are `status`'s.
+pub fn make(e: u64, area: u64, umask: u64, fds: u64) -> (u64, u64) {
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        return (0, 0)
+    }
+    let base = pa + frames.hhdm()
+    let g = gen(e)
+    var n: u64 = 0
+    if g == G_STATUS {
+        n = status(base, area, umask, fds)
+    } else if g == G_CGROUP {
+        n = put_s(base, 0, "0::/\n")
+    } else if g == G_OVERCOMMIT {
+        n = put_s(base, 0, "0\n")
+    } else if g == G_CONTROLLERS {
+        n = put_s(base, 0, "cpu\n")
+    } else if g == G_CPUMAX {
+        n = put_s(base, 0, "max 100000\n")
+    } else {
+        n = put_s(base, 0, "0\n")
+    }
+    (pa, n)
+}
