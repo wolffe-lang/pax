@@ -80,6 +80,11 @@ hn1  G4/2 r/4
 | LENGTH | `1 2 4 8 16 32 64` (whole to sixty-fourth); `.` or `..` dots it; then `t` (triplet: two thirds) or `xN` (an N-tuplet: N in the time of the largest power of two below N; `x3` = `t`, `x5` = 4 in 5, `x6` 4 in 6, `x7` 4 in 7, `x9` 8 in 9); `+` joins lengths (`2+8`, `1+4.`) |
 | MARKS | any of these, in any order, after the length (none for a rest except `~` is refused): `'` staccato (sounds half its length), `^` marcato (accent and three quarters), `>` accent (the attack a level and a half louder, falling back over 150 ms), `-` tenuto (sounds its full length), `_` slur to the next note of this part (no gap, no new attack: legato), `*` tremolo (strings: unmeasured bowed tremolo; timpani, drums, cymbal, tam-tam: a roll; others: a flutter of repeated attacks), `~` tie: each note of this event that the part's next event sounds again continues as one note, across a bar line too; the next event's other notes start anew and this event's other notes end (so one note of a chord can hold while the others move: `C4,E4,G4/2~ C4,F4,A4/2` holds C4); a tie whose next event sounds none of its notes is refused |
 
+On a tied note the marks that shorten (`'`, `^`, and the unmarked
+gap) are the last event's and cut only that event's length: `G4/1~ |
+G4/2.~ G4/8'` holds through the bars and sounds half of its last eighth
+(the tie's release), not half of the whole.
+
 An unmarked note sounds its length less a short gap (an eighth of it,
 at most 40 ms) and then releases (§5), so repeated notes part.
 
