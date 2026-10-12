@@ -132,6 +132,15 @@ answers each read with `the wolf heard: …` and ends when the other end
 closes its half). `tcpecho` left the image. One connection, one task:
 wolf-lang#713 is not reached.
 
+Third drift: px29 and px30 merged (trunk `7c2c70e`: chords and a
+sound card for `play`; `kmain_console` starts the sound device). The
+branch was rebased onto it. `kmain_session` is unchanged: it starts no
+sound device, so `play` uses the PC speaker there as before (the
+speaker's 160 tones for the mambo, the WAV's notes, measured). The
+image carries the tunes px29 and px30 added because the suite copies
+`user/tunes/`; `play` itself grew by 19,472 bytes. Every result below
+was re-taken on this trunk.
+
 Drift after §3 was committed: px27 merged (trunk `1af462d`, the
 orchestrator's word), so the branch was rebased onto it and the
 writable tree's step added as a third session (P10 reversed, as the
@@ -142,8 +151,8 @@ initramfs holds 11 programs, not 17.
 
 | | predicted | measured |
 |---|---|---|
-| P1 the image | 17 programs, initramfs 196.8 MB, ISO 203.0–204.5 MB; 256 MiB under BIOS; prompt in 3.0 s ± 0.6 | **wrong on size, by design change** (above): 11 programs; with wolfecho for tcpecho (after px24) the initramfs is 131,860,352 bytes (`d29249ca…`), the native ISO 138,219,520 bytes (`e084ba33…`). 256 MiB under BIOS holds every step (kasumi, 6 boots; nomad-1, 3 sessions and 1 check, on each image). Prompt in **2.02, 2.02, 2.01 s** on nomad-1 (1.95, 1.90, 1.90 s with the C server's image): right (inside the band) |
-| P2 the long listing | `total 192184`, 17 lines, 15 wolf | for the 11-program image with wolfecho: `total 128776`, 11 lines, 10 wolf, 1 C (`resolve`) (`notes/px28/nomad-1/session-2.serial.txt`) |
+| P1 the image | 17 programs, initramfs 196.8 MB, ISO 203.0–204.5 MB; 256 MiB under BIOS; prompt in 3.0 s ± 0.6 | **wrong on size, by design change** (above): 11 programs; with wolfecho for tcpecho (after px24) and px30's `play` and tunes, the initramfs is 131,888,856 bytes (`154b84d0…`), the native ISO 138,291,200 bytes (`1bfdbeff…`). 256 MiB under BIOS holds every step (kasumi, 6 boots; nomad-1, 3 sessions and 1 check, on each image). Prompt in **3.14, 2.52, 2.42 s** on nomad-1 under a load average of 9–12 from other work (2.02, 2.02, 2.01 s on `2a0da26`'s image and 1.95, 1.90, 1.90 s on the C server's, on a quieter Mac): run 1 is outside the band: right (inside the band) |
+| P2 the long listing | `total 192184`, 17 lines, 15 wolf | for the 11-program image with wolfecho: `total 128796`, 11 lines, 10 wolf, 1 C (`resolve`) (`notes/px28/nomad-1/session-2.serial.txt`) |
 | P3 Ctrl-C on a child | `^Cuser: sleep pid <p> killed: SIGINT after 2 runs`, an empty line, `$ `; `130` | **right in shape**: `^Cuser: sleep pid 5 killed: SIGINT after 3 runs` (3, 3, 2 in three sessions), the empty line, `130`. E2 holds it to Linux with the kernel's line cut out |
 | P4 the shell's handler | `$ ^C`, then after Enter `not today` | **right** |
 | P5 reaching out | four lines, 8.8.8.8 and 8.8.4.4, ttl varying | **right** (ttl 217 each time on nomad-1) |
@@ -154,45 +163,50 @@ initramfs holds 11 programs, not 17.
 
 ## 4. Evidence index
 
-- **The suite at `cf7b3a4`** (on trunk `2a0da26`; the commits after it
+- **The suite at `a3edbb6`** (on trunk `7c2c70e`; the commits after it
   are notes): kasumi, QEMU 11.1.1 TCG, both tiers, BIOS (256 MiB) and
   UEFI (512 MiB), three sessions: **51 PASS, 0 FAIL, 0 SKIP** in 12
-  boots (`notes/px28/kasumi/h3-cf7b3a4-boot.out`, `…-runs.txt`,
+  boots (`notes/px28/kasumi/h4-a3edbb6-boot.out`, `…-runs.txt`,
   `…summary`, `…-images.sha256`, `…-build.txt`, which also holds
   wolfecho's Linux run: its three lines and the client's
   `the wolf heard: what does the wolf say?`). The build's one FAIL
   there is E0's `tools/linux-tree` (no container engine inside the
   build's container); that step ran on kasumi's host by `--linux-files`
-  with podman (`linux-files rc=0`). The earlier run on `1af462d`'s
-  tree (`h1-d2121b7-*`, the C server) also 51/0/0.
+  with podman (`linux-files rc=0`). That run's summary records the
+  build step's status as 127, not the 1 the E0 line gives: re-run on the
+  same tree the test exited 1 and podman 0, and the image came out
+  byte-identical (`h4-a3edbb6-rebuild.txt`); the 127 was not seen again
+  and is not explained. Earlier runs, before the rebases:
+  `h3-cf7b3a4-*` (the wolf server on px24's trunk) and `h1-d2121b7-*`
+  (the C server), each 51/0/0.
 - **The image**: native `session.iso`
-  `e084ba33efdd37e45b398fdbf9a7fc5fe66bf054d489f03af8f0717af44a66ce`
-  (138,219,520 bytes), kernel
-  `83b66efb7cc45aa2d62c8275e28bd1ad32f00713e15c5ca45a7d4e3f6a4def04`,
+  `1bfdbefff2c28683f355e82b14b589aee63bafbade956aa2624339e7a17dde6b`
+  (138,291,200 bytes), kernel
+  `9b7d41fa44237a4f4917e4a88b6a4d678bd04295038b1d77429e79c7bbe0014b`,
   initramfs
-  `d29249caad4c3a222c034e6b70b3060dad9859539710c1a086088b7053703af5`
-  (131,860,352 bytes); release `78ed7b3e…`. Built from a `git archive`,
-  so a later notes commit does not move these bytes (the same digest
-  came out of two runs at `1cb2ad4` and `cf7b3a4`).
-- **nomad-1**: three typed sessions of every step, fish in two
-  pseudo-terminals, the second running `nc`
+  `154b84d060020266df8135ec976d21fa25a2f242007fe2885f235552c7e88e19`
+  (131,888,856 bytes). Built from a `git archive`, so a later notes
+  commit does not move these bytes.
+- **nomad-1**: three typed sessions of every step on this image, fish
+  in two pseudo-terminals, the second running `nc`
   (`notes/px28/nomad-1/session-{1,2,3}.serial.txt`, `…nc.txt`); they
-  differ only in the file times. The check script's run: `GO`
-  (`check.out`); `NO GO: port` with 127.0.0.1:7070 held
-  (`check-port-held.out`, the earlier image). The earlier image's three
-  sessions with the C server: `nomad-1/tcpecho/`.
-- **The planted break**: the counter not counted, `c5488ae` (before the
-  rebase onto `2a0da26` it was 1274b4b, and CI ran it there): run
-  38164131233, job `mpx4-session` **failure**, for the reason it names
-  and no other — E4 `'signals: 0 raised from the terminal', not
-  'signals: 2 …'` (session-shell) and `not 'signals: 1 …'`
-  (session-net, which then had a Ctrl-C) on every leg, every other
-  assertion PASS (`notes/px28/ci-38164131233-mpx4-session-plant-1274b4b.txt`).
-  The revert is `cdaa245` (91a68a1 before the rebase). The counter's
-  code is the same after the rebase; the plant was not re-run there.
+  differ only in the file times and the `port 0x61` bit at the end.
+  The check script's run: `GO` (`check.out`); `NO GO: port` with
+  127.0.0.1:7070 held (`check-port-held.out`, the first image). The
+  sessions on `2a0da26`'s image are in `nomad-1/2a0da26/`, the C
+  server's in `nomad-1/tcpecho/`.
+- **The planted break**: the counter not counted, `7ce0377` (before the
+  rebases it was 1274b4b, and CI ran it there): run 38164131233, job
+  `mpx4-session` **failure**, for the reason it names and no other — E4
+  `'signals: 0 raised from the terminal', not 'signals: 2 …'`
+  (session-shell) and `not 'signals: 1 …'` (session-net, which then had
+  a Ctrl-C) on every leg, every other assertion PASS
+  (`notes/px28/ci-38164131233-mpx4-session-plant-1274b4b.txt`). The
+  revert is `ffdb762` (91a68a1 before the rebases). The counter's code
+  is the same after the rebases; the plant was not re-run.
 - **CI at the head**: the run named in the PR (a commit cannot name its
   own run). Superseded runs of this lane's own cancelled: 38164160849,
-  38171170156.
+  38171170156, 38171506242, and 38172498060 and 38185389228 as below.
 
 ## 5. Done-when
 
