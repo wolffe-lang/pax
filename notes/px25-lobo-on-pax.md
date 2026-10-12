@@ -409,7 +409,9 @@ identical to lobo's on Linux but for `Date` (R1).
   `kasumi/conc1`, `conc4`, `conc4b`, `k4`.
 - **Differential table**: above.
 - **Plants by run id**: A2 (`2400aae`, branch `px25-plant-a2`) run
-  38227647983; B2 (`9b56ed7`, branch `px25-plant-b2`) run RUN_PLANT_B2;
+  38227647983, `mpx4-lobo` red for the reason it names and no other:
+  serve and serve-release held, then `native bios hands: … request 1 of
+  20: timed out`, `stopped early` (`ci/ci-38227647983-…`); B2 (`9b56ed7`, branch `px25-plant-b2`) run RUN_PLANT_B2;
   locally `kasumi/plants/`. The first A (`f0a66be`, run 38222405571) did
   not go red as planted (above).
 - **Boot counts**: kasumi TCG — exploratory x1, x2 ×2, x3; development
