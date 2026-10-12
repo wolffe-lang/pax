@@ -12,7 +12,10 @@
    and what PAX refuses by name).
 
    `unixprobe soak` instead makes 10,000 connections through one
-   listener in a second process, each a request and an answer. */
+   listener in a second process, each a request and an answer; then it
+   takes all the memory it can and makes a thread (with a raw clone, its
+   stack its own): on PAX no frame is left for the thread's kernel stack,
+   and the clone must answer EAGAIN, not take the kernel down. */
 #define _GNU_SOURCE
 #include "../net/say.h"
 #pragma GCC diagnostic ignored "-Wunused-result"
@@ -30,6 +33,7 @@
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <sys/un.h>
+#include <sched.h>
 #include <sys/wait.h>
 #include <time.h>
 
@@ -938,6 +942,70 @@ static void noreserve(void)
     N("munmap", munmap(m, len));
 }
 
+/* --- a thread with no frame for its kernel stack ------------------------- */
+
+/* A thread by the raw clone(2) call, on the stack whose top is `top`:
+   it ends at once (exit(2), the thread alone). The new thread's id, or
+   -errno. */
+static long raw_thread(char *top)
+{
+    long r;
+    register long r10 __asm__("r10") = 0;
+    register long r8 __asm__("r8") = 0;
+    unsigned long flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM;
+    __asm__ volatile(
+        "syscall\n\t"
+        "test %%rax, %%rax\n\t"
+        "jnz 1f\n\t"
+        "mov $60, %%eax\n\t"
+        "xor %%edi, %%edi\n\t"
+        "syscall\n\t"
+        "1:"
+        : "=a"(r)
+        : "0"(56L), "D"(flags), "S"(top), "d"(0L), "r"(r10), "r"(r8)
+        : "rcx", "r11", "memory");
+    return r;
+}
+
+static void *chunks[2048];
+static void *pages[8192];
+
+static void stacks(void)
+{
+    say("== a thread with no frame for its kernel stack\n");
+    size_t sz = 65536;
+    char *st = mmap(0, 3 * sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    memset(st, 0, 3 * sz);
+    long r = raw_thread(st + sz);
+    say("a thread before: %s\n", r > 0 ? "ok" : ename((int)-r));
+    nap(50);
+    int nc = 0, np = 0;
+    while (nc < 2048) {
+        void *m = mmap(0, 1 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (m == MAP_FAILED)
+            break;
+        chunks[nc++] = m;
+    }
+    while (np < 8192) {
+        void *m = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (m == MAP_FAILED)
+            break;
+        pages[np++] = m;
+    }
+    r = raw_thread(st + 2 * sz);
+    say("~stack: %d MiB and %d pages taken%s; a thread then: %s\n", nc, np,
+        nc < 2048 || np < 8192 ? " (no more to take)" : "", r > 0 ? "ok" : ename((int)-r));
+    for (int i = 0; i < nc; i++)
+        munmap(chunks[i], 1 << 20);
+    for (int i = 0; i < np; i++)
+        munmap(pages[i], 4096);
+    nap(50);
+    r = raw_thread(st + 3 * sz);
+    say("a thread after the memory came back: %s\n", r > 0 ? "ok" : ename((int)-r));
+    nap(50);
+    munmap(st, 3 * sz);
+}
+
 /* --- the soak ------------------------------------------------------------ */
 
 static int soak(void)
@@ -994,6 +1062,8 @@ static int soak(void)
     waitpid(k, &st, 0);
     unlink("/u/soak.sock");
     say("soak: %d connections, %d wrong, crc %08lx, the server ended %d\n", n, bad, crc, WEXITSTATUS(st));
+    stacks();
+    rmdir("/u");
     return bad != 0;
 }
 

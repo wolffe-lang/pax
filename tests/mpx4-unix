@@ -55,15 +55,21 @@
 #      the read's page after the touches (12 kB), all of them back
 #      after MADV_DONTNEED and MADV_FREE.
 #   U3 -ENOSYS only for set_robust_list (273) and rseq (334); no
-#      `refused:` line but U2's; one process killed in the probes (the
-#      child that touches the guard: SIGSEGV), none elsewhere.
+#      `refused:` line but U2's and U5's; two processes killed in the probes (the
+#      child that touches the guard: a page fault, SIGSEGV; the child
+#      that sends without MSG_NOSIGNAL to a peer gone: SIGPIPE), none
+#      elsewhere.
 #   U4 everything given back: the frames line shows as many frames free
 #      after init's end as before the first program; the tree's frames
 #      and inodes as when it was made but for the inode table's growth;
 #      and the kernel's `unix:` books line, 0 sockets and 0 buffers.
 #   U5 soak: the kernel's census lines, one every 2,500 connections
 #      (`user: unixprobe pid 1 unix: <n> connections since boot;
-#      sockets <s>, buffers <b>, frames free <f>`), four, and flat.
+#      sockets <s>, buffers <b>, frames free <f>`), four, and flat; then,
+#      with every frame the program could take taken, a thread's clone
+#      answered EAGAIN (`~stack: … a thread then: EAGAIN`) with its
+#      `refused:` line (no frame for a thread's kernel stack), and a
+#      thread made again once the memory was given back (U1).
 #   U6 ctl: lobo's client exited 0 and printed the server's answer (U1
 #      holds it to Linux's).
 #   U7 the end: `PAX: init … ended with status <s>; nothing left to
@@ -108,6 +114,7 @@ REFUSED='~refused: socket SOCK_RAW ESOCKTNOSUPPORT, socket SOCK_SEQPACKET ESOCKT
 REFUSALS='syscall 41: refused: an AF_UNIX socket of a type PAX has on a path neither (SOCK_STREAM only), -94|syscall 41: refused: an AF_UNIX socket of a type PAX has on a path neither (SOCK_STREAM only), -94|syscall 41: refused: an AF_UNIX socket of a type PAX has on a path neither (SOCK_STREAM only), -94|syscall 49: refused: an abstract name or autobind (PAX names Unix sockets by path only), -22|syscall 49: refused: an abstract name or autobind (PAX names Unix sockets by path only), -22|syscall 54: refused: an option set on a Unix socket (PAX has none to set), -92'
 SEQ_LINE='~seqpacket: a message of 8000 bytes: -EMSGSIZE'
 PAX_LINES='~  FDSize:	1024|~  VmRSS:	*|~  Cpus_allowed_list:	0|~  * lines|~  "cpu"|~  "0"|~rlimit: RLIMIT_NOFILE 1024 1024'
+STACK_REFUSAL="syscall 56: refused: no frame for a thread's kernel stack, -11"
 NORESERVE='~noreserve: VmRSS * kB before, 0 kB more after the mmap|~noreserve: 12 kB more after three pages and a read|~noreserve: -12 kB after MADV_FREE than before it'
 
 work=$PAX_BUILD/mpx4-unix
@@ -317,14 +324,17 @@ for leg in $legs; do
             why=
             ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
             [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
-            if [ "$s" != probes ]; then
+            if [ "$s" = soak ]; then
+                [ "$rf" = "$STACK_REFUSAL" ] || why+=" refusals '$rf', not '$STACK_REFUSAL';"
+            elif [ "$s" != probes ]; then
                 [ -z "$rf" ] || why+=" refusals '$rf';"
             fi
             kl=$(grep -c 'user: [^ ]* pid [0-9]* killed: ' "$norm")
-            want_k=0; [ "$s" = probes ] && want_k=1
+            want_k=0; [ "$s" = probes ] && want_k=2
             [ "$kl" = "$want_k" ] || why+=" $kl killed: lines, not $want_k ($(grep -m1 ' killed: ' "$norm" | cut -c1-120));"
             if [ "$s" = probes ]; then
                 grep -q 'user: unixprobe pid [0-9]* killed: page fault vector 14 ' "$norm" || why+=" the guard's touch was not a page fault;"
+                grep -q 'user: unixprobe pid [0-9]* killed: SIGPIPE, ' "$norm" || why+=" the send without MSG_NOSIGNAL was not SIGPIPE;"
             fi
             [ -z "$why" ] && say "PASS U3 $id: -ENOSYS only for 273 and 334; $kl killed ($want_k wanted)" || bad "U3 $id:$why"
 
@@ -356,7 +366,10 @@ for leg in $legs; do
                 [ "$cl" = 4 ] || why+=" $cl census lines, not 4;"
                 cu=$(sed -n -E 's/^user: unixprobe pid 1 unix: [0-9]+ connections since boot; (sockets [0-9]+, buffers [0-9]+, frames free [0-9]+)$/\1/p' "$norm" | sort -u)
                 [ "$(printf '%s\n' "$cu" | grep -c .)" = 1 ] || why+=" the census is not flat: $(printf '%s' "$cu" | tr '\n' '|');"
-                [ -z "$why" ] && say "PASS U5 $id: $cl census lines, all '$cu'" || bad "U5 $id:$why"
+                sk=$(grep -m1 '^~stack: ' "$out")
+                printf '%s\n' "$sk" | grep -Eq '^~stack: [0-9]+ MiB and [0-9]+ pages taken \(no more to take\); a thread then: EAGAIN$' \
+                    || why+=" the thread with no frame for its kernel stack: '$sk';"
+                [ -z "$why" ] && say "PASS U5 $id: $cl census lines, all '$cu'; $sk (Linux here: $(grep -m1 '^~stack: ' "$out.linux"))" || bad "U5 $id:$why"
             fi
 
             # U6: lobo's own client.

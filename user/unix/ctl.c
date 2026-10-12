@@ -89,11 +89,12 @@ static int server(void)
             break;
     }
     close(l);
-    unlink(NAME);
+    int gone = unlink(NAME) == 0;
     unlink("logs/lobo.pid");
-    say("server: %d verbs answered; it waited for a verb %s; its name unlinked\n", asked, waits ? "at least once" : "never");
     (void)polls;
-    return 0;
+    /* What it did, for its parent to say once it has ended (a line of
+       its own here would race the parent's last answer). */
+    return (asked & 15) | (waits ? 16 : 0) | (gone ? 32 : 0);
 }
 
 /* This program's own client: the verb, and what came back. */
@@ -155,7 +156,13 @@ int main(int argc, char **argv)
     ask("reload");
     ask("stop");
     waitpid(sv, &s, 0);
-    say("the server ended %d\n", WIFEXITED(s) ? WEXITSTATUS(s) : -1);
+    int x = WIFEXITED(s) ? WEXITSTATUS(s) : -1;
+    if (x < 0)
+        say("the server did not end by exit\n");
+    else {
+        say("the server ended: %d verbs answered; its name %s\n", x & 15, x & 32 ? "unlinked" : "not unlinked");
+        say("~the server waited for a verb after an accept: %s\n", x & 16 ? "at least once" : "never");
+    }
     say("its name after: %s\n", stat(NAME, &st) < 0 ? ename(errno) : "still there");
     struct sockaddr_un a;
     socklen_t al = un_of(&a, NAME);
