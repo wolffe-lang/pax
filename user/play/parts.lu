@@ -48,6 +48,7 @@ struct Score {
     names: List[str],
     timbres: List[int],
     pans: List[int],
+    gains: List[int], // each part's balance, /1024 (its `gain` in dB)
     p_first: List[int], // part p's notes: from p_first[p], p_count[p] of them, in start order
     p_count: List[int],
     n_start: List[int], // microseconds
@@ -82,6 +83,7 @@ fn score_refused(why: str) -> Score {
         names: List[str](),
         timbres: List[int](),
         pans: List[int](),
+        gains: List[int](),
         p_first: List[int](),
         p_count: List[int](),
         n_start: List[int](),
@@ -135,6 +137,18 @@ fn timbre_of(w: str) -> int {
     -1
 }
 
+/// `db` decibels (-24 to 12) as an amplitude /1024: 10^(db/20), by
+/// whole decibels (x 1.1220 each).
+fn gain_of(db: int) -> int {
+    var g: int = 1024 * 1000
+    var i = 0
+    while i < (if db < 0 { 0 - db } else { db }) {
+        g = if db < 0 { g * 1000 / 1122 } else { g * 1122 / 1000 }
+        i += 1
+    }
+    (g + 500) / 1000
+}
+
 /// A dynamic word's level step (ppp 0 .. fff 7), or -1.
 fn dyn_step(w: str) -> int {
     let names: List[str] = ["ppp", "pp", "p", "mp", "mf", "f", "ff", "fff"]
@@ -169,6 +183,7 @@ fn reserved(w: str) -> bool {
         "over",
         "at",
         "pan",
+        "gain",
     ]
     for n in names {
         if n == w {
@@ -367,6 +382,7 @@ fn parse_parts(text: str) -> Score {
     var timbres = List[int]()
     var levels = List[int]()
     var pans = List[int]()
+    var gains = List[int]()
     // the bars
     var b_no = List[int]()
     var b_len = List[int]()
@@ -432,8 +448,8 @@ fn parse_parts(text: str) -> Score {
             if in_bars {
                 return score_refused("line {line_no}: parts are declared before the first bar")
             }
-            if ws.len != 4 && ws.len != 6 {
-                return score_refused("line {line_no}: part NAME TIMBRE LEVEL [pan P]")
+            if ws.len < 3 {
+                return score_refused("line {line_no}: part NAME TIMBRE [LEVEL] [pan P] [gain DB]")
             }
             let name = ws[1]
             if !good_name(name) || reserved(name) {
@@ -452,20 +468,39 @@ fn parse_parts(text: str) -> Score {
                     "line {line_no}: '{ws[2]}' is not a timbre (notes/px32-format.md §5)",
                 )
             }
-            let lv = dyn_step(ws[3])
-            if lv < 0 {
-                return score_refused(
-                    "line {line_no}: '{ws[3]}' is not a level (ppp pp p mp mf f ff fff)",
-                )
-            }
+            // the level is mf unless one is named; pan 0 and gain 0 dB
+            var lv = 4
             var pan = 0
-            if ws.len == 6 {
-                let neg = ws[5].starts_with("-")
-                let v = number(if neg { ws[5][1..] } else { ws[5] })
-                if ws[4] != "pan" || v < 0 || v > 100 {
-                    return score_refused("line {line_no}: pan is -100 to 100")
+            var gain = 0
+            var k = 3
+            while k < ws.len {
+                let st = dyn_step(ws[k])
+                if st >= 0 && k == 3 {
+                    lv = st
+                    k += 1
+                    continue
                 }
-                pan = if neg { 0 - v } else { v }
+                if (ws[k] == "pan" || ws[k] == "gain") && k + 1 < ws.len {
+                    let neg = ws[k + 1].starts_with("-") || ws[k + 1].starts_with("+")
+                    let v = number(if neg { ws[k + 1][1..] } else { ws[k + 1] })
+                    let sv = if ws[k + 1].starts_with("-") { 0 - v } else { v }
+                    if ws[k] == "pan" {
+                        if v < 0 || v > 100 {
+                            return score_refused("line {line_no}: pan is -100 to 100")
+                        }
+                        pan = sv
+                    } else {
+                        if v < 0 || sv < -24 || sv > 12 {
+                            return score_refused("line {line_no}: gain is -24 to 12 (dB)")
+                        }
+                        gain = sv
+                    }
+                    k += 2
+                    continue
+                }
+                return score_refused(
+                    "line {line_no}: '{ws[k]}' is not a level (ppp pp p mp mf f ff fff, after the timbre), pan P or gain DB",
+                )
             }
             if names.len == MAX_PARTS {
                 return score_refused("line {line_no}: more than {MAX_PARTS} parts")
@@ -474,6 +509,7 @@ fn parse_parts(text: str) -> Score {
             (mut timbres).push(tb)
             (mut levels).push(lv * 128)
             (mut pans).push(pan)
+            (mut gains).push(gain_of(gain))
             continue
         }
         if w == "bar" {
@@ -976,6 +1012,7 @@ fn parse_parts(text: str) -> Score {
         names: names,
         timbres: timbres,
         pans: pans,
+        gains: gains,
         p_first: p_first,
         p_count: p_count,
         n_start: n_start,
