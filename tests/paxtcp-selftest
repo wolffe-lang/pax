@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+# tests/paxtcp-selftest — px35: the TCP of tools/net-peer (tools/paxtcp.py)
+# held to RFC 5681 and RFC 9293 where pax#29 caught it out, on the host,
+# with no QEMU: a connection is driven segment by segment from scripted
+# segments "from PAX", and what it puts on its wire is read back.
+#
+#   F1 a fast retransmission never reaches past SND.MAX. Run 38192937184
+#      (mpx4-tcp, the loss matrix, port 7101): PAX's window closed under
+#      a slow reader and this end's segments shrank to fit it; one was
+#      lost; on the third duplicate ACK this end retransmitted a whole
+#      MSS from SND.UNA — bytes it had never sent — and then ignored
+#      PAX's acknowledgement of them as an ACK of something not yet sent
+#      (RFC 9293 §3.10.7.4), for good. Here: a window of 1000 bytes,
+#      two 500-byte segments, the first lost, three duplicate ACKs; the
+#      retransmission must end at SND.MAX (RFC 5681 §3.2: the segment
+#      that was lost is sent again), and PAX's ACK of everything sent
+#      must then be taken.
+#   F2 the same after a timeout: the retransmission from SND.UNA (go-back)
+#      reaches no further than the window allows and PAX's ACK of all
+#      that was sent is taken.
+#
+# Exit 0 when every check held, 1 otherwise.
+import os
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
+import paxnet as px  # noqa: E402
+import paxtcp  # noqa: E402
+
+fail = 0
+
+
+def say(msg):
+    print("paxtcp-selftest: " + msg, flush=True)
+
+
+def check(ok, what):
+    global fail
+    say(("PASS " if ok else "FAIL ") + what)
+    if not ok:
+        fail = 1
+
+
+class Wire:
+    def __init__(self):
+        self.frames = []
+
+    def send(self, f):
+        self.frames.append(f)
+
+
+class Peer:
+    """What a Conn asks of tools/net-peer's Peer: a datagram to PAX."""
+
+    def __init__(self):
+        self.wire = Wire()
+        self.my_ident = 0
+
+    def datagram(self, src_ip, payload, proto=6, ttl=64, **kw):
+        self.my_ident = (self.my_ident + 1) & 0xffff
+        return px.frame(px.PAX_MAC, px.PEER_MAC, px.ipv4(src_ip, px.PAX_IP, proto, payload, ttl=ttl, ident=self.my_ident))
+
+
+PAX_PORT, PORT = 7101, 50028
+PAX_ISS = 2911913371
+
+
+def connection():
+    peer = Peer()
+    st = paxtcp.Stack(peer)
+    c = paxtcp.Conn(st, px.GW_IP, PORT, PAX_PORT)
+    c.open()
+    return peer, c
+
+
+def from_pax(c, seq, ack, flags, window, data=b""):
+    f = px.tcp_from_pax(c.ip, PAX_PORT, PORT, seq, ack, flags, window, data, 1, px.PEER_MAC)
+    c.on_segment(px.Segment(f))
+
+
+def sent(peer, k0):
+    """The data segments this end put on the wire from frame k0: (seq, length)."""
+    out = []
+    for f in peer.wire.frames[k0:]:
+        s = px.Segment(f)
+        if s.data:
+            out.append((s.seq, len(s.data)))
+    return out
+
+
+def handshake(peer, c, window):
+    from_pax(c, PAX_ISS, paxtcp.sadd(c.iss, 1), px.SYN | px.ACK, window)
+    return c.state == "established"
+
+
+def f1():
+    peer, c = connection()
+    check(handshake(peer, c, 1000), "F1: the handshake")
+    k0 = len(peer.wire.frames)
+    c.send(bytes(px.stream_pattern(0, 6000)))
+    # A window of 1000 (PAX's reader is behind) and a cwnd of ten
+    # segments: the first flight is one segment of 1000 bytes, short of
+    # the MSS (1460).
+    first = sent(peer, k0)
+    base = paxtcp.sadd(c.iss, 1)
+    check(first == [(base, 1000)], "F1: the first flight is the window's 1000 bytes: %r" % first)
+    # PAX takes nothing of it (the segment is lost) and its window stays
+    # 1000: three duplicate ACKs at SND.UNA.
+    k1 = len(peer.wire.frames)
+    for _ in range(3):
+        from_pax(c, PAX_ISS + 1, base, px.ACK, 1000)
+    rexmt = sent(peer, k1)
+    check(len(rexmt) >= 1 and rexmt[0][0] == base, "F1: the third duplicate ACK retransmits from SND.UNA: %r" % rexmt[:1])
+    fast = rexmt[0] if rexmt else (base, 0)
+    check(paxtcp.ssub(paxtcp.sadd(fast[0], fast[1]), c.snd_max) <= 0,
+          "F1: the fast retransmission (%d bytes from SND.UNA) ends at or before SND.MAX (%d bytes sent)" % (fast[1], paxtcp.ssub(c.snd_max, base)))
+    # PAX acknowledges every byte that reached it.
+    got = paxtcp.sadd(fast[0], fast[1])
+    from_pax(c, PAX_ISS + 1, got, px.ACK, 65535)
+    check(c.snd_una == got, "F1: PAX's ACK of all it was sent is taken: SND.UNA %+d, the ACK %+d" % (paxtcp.ssub(c.snd_una, base), paxtcp.ssub(got, base)))
+
+
+def f2():
+    peer, c = connection()
+    check(handshake(peer, c, 700), "F2: the handshake")
+    k0 = len(peer.wire.frames)
+    c.send(bytes(px.stream_pattern(0, 6000)))
+    base = paxtcp.sadd(c.iss, 1)
+    first = sent(peer, k0)
+    check(first == [(base, 700)], "F2: the first flight is the window's 700 bytes: %r" % first)
+    # Nothing comes back: the timer goes off.
+    k1 = len(peer.wire.frames)
+    c.on_timer(0.0)
+    rexmt = sent(peer, k1)
+    check(len(rexmt) == 1 and rexmt[0][0] == base and rexmt[0][1] <= 700,
+          "F2: the timeout retransmits from SND.UNA within the window: %r" % rexmt)
+    if rexmt:
+        got = paxtcp.sadd(rexmt[0][0], rexmt[0][1])
+        from_pax(c, PAX_ISS + 1, got, px.ACK, 65535)
+        check(c.snd_una == got, "F2: PAX's ACK is taken: SND.UNA %+d" % paxtcp.ssub(c.snd_una, base))
+
+
+f1()
+f2()
+say("PASS" if fail == 0 else "FAIL")
+sys.exit(fail)
