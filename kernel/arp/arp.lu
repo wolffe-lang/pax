@@ -15,14 +15,24 @@
 //! received one may carry padding, which is not read.
 //!
 //! **The cache.** `ENTRIES` (8) entries, each free, incomplete (asked
-//! for, not yet answered) or resolved.
+//! for, not yet answered), resolved or stale (resolved once, past its
+//! age).
 //!
 //! - *Ageing.* A resolved entry is good for `age` ticks (`start`'s
 //!   argument; 6000, a minute, unless a test shortens it: RFC 1122
 //!   §2.3.2.1 asks for a timeout "on the order of a minute") from the
-//!   last ARP packet that named its sender. Past that it is not used:
-//!   `send` makes it incomplete and asks again, and `tick` frees one
-//!   nobody has used.
+//!   last ARP packet that named its sender. Past that it is stale
+//!   (`tick`, or the first `send` that finds it so, counts it `aged`):
+//!   `lookup` no longer answers it, but a frame for it still goes to
+//!   the address it holds, and the first such frame asks for the
+//!   address again, as an incomplete entry is asked for (px35, pax#32:
+//!   RFC 1122 §2.3.2.1 lets a cache refresh an entry in use, and Linux,
+//!   black-box, keeps sending while it asks; until px35 the entry was
+//!   made incomplete and every frame after the first two was pushed out
+//!   of its queue while the answer was out). An answer makes it
+//!   resolved again; `TRIES` requests unanswered and it is freed,
+//!   counted `given up` with no frame dropped. A stale entry nobody
+//!   sends to is never asked for, and is taken first for a new address.
 //! - *Retry.* An incomplete entry is asked for at once and then once
 //!   every `RETRY` ticks (a second: the rate RFC 1122 §2.3.2.1
 //!   recommends as the most a host should ask), `TRIES` (3) requests
@@ -117,6 +127,7 @@ const E_LEN: u64 = 6 // two words: their lengths
 const FREE: u64 = 0
 const INCOMPLETE: u64 = 1
 const RESOLVED: u64 = 2
+const STALE: u64 = 3 // past its age: still used; E_TRIES requests out since (E_STAMP the last's)
 
 /// The counters (`count`): requests sent.
 pub const C_REQUESTS_OUT: u64 = 3
@@ -300,16 +311,18 @@ fn find(ip: u64) -> u64 {
     ENTRIES
 }
 
-/// An entry for a new address: a free one, else the resolved one
-/// confirmed longest ago; ENTRIES when every entry is incomplete.
+/// An entry for a new address: a free one, else the resolved or
+/// stale one stamped longest ago; ENTRIES when every entry is
+/// incomplete.
 fn claim() -> u64 {
     var best: u64 = ENTRIES
     var i: u64 = 0
     while i < ENTRIES {
-        if ew(i, E_STATE) == FREE {
+        let st = ew(i, E_STATE)
+        if st == FREE {
             return i
         }
-        if ew(i, E_STATE) == RESOLVED && (best == ENTRIES || ew(i, E_STAMP) < ew(best, E_STAMP)) {
+        if (st == RESOLVED || st == STALE) && (best == ENTRIES || ew(i, E_STAMP) < ew(best, E_STAMP)) {
             best = i
         }
         i += 1
@@ -358,6 +371,14 @@ fn ask(e: u64, now: u64) {
     put_ew(e, E_STAMP, now)
 }
 
+/// Resolved entry `e` is past its age: stale, nothing asked yet,
+/// counted. The ARP lock held.
+fn age_out(e: u64) {
+    put_ew(e, E_STATE, STALE)
+    put_ew(e, E_TRIES, 0)
+    bump(C_AGED, 1)
+}
+
 /// Make entry `e` an incomplete one for `ip`, with nothing waiting,
 /// and ask. The ARP lock held.
 fn begin(e: u64, ip: u64, now: u64) {
@@ -384,24 +405,27 @@ fn flush(e: u64) {
 
 /// Send the `len`-byte frame at `frame` to the station whose protocol
 /// address is `hop`: bytes 0-5, the destination address, are written
-/// here; the rest is the caller's. With a resolved entry of an age to
-/// be used the frame goes out now (SENT, or FAILED when kernel/net
-/// refuses it); otherwise it is copied onto the address's queue and a
-/// request is out or goes out (QUEUED), or there is no entry to be had
+/// here; the rest is the caller's. With a resolved or a stale entry
+/// the frame goes out now (SENT, or FAILED when kernel/net refuses
+/// it), a stale one asked for again first if it is not being asked
+/// for; otherwise it is copied onto the address's queue and a request
+/// is out or goes out (QUEUED), or there is no entry to be had
 /// (DROPPED). `len` is at most 1514.
 pub fn send(hop: u64, frame: u64, len: u64) -> u64 {
     let saved = sync.acquire(sync.arp())
     let now = timer.ticks()
     var e = find(hop)
-    if e < ENTRIES && ew(e, E_STATE) == RESOLVED {
-        if now - ew(e, E_STAMP) <= aw(A_AGE) {
-            put_hw(frame, ew(e, E_HW))
-            let q = net.send(frame, len) else 0
-            sync.release(sync.arp(), saved)
-            return if q != 0 { SENT } else { FAILED }
+    if e < ENTRIES && (ew(e, E_STATE) == RESOLVED || ew(e, E_STATE) == STALE) {
+        if ew(e, E_STATE) == RESOLVED && now - ew(e, E_STAMP) > aw(A_AGE) {
+            age_out(e)
         }
-        bump(C_AGED, 1)
-        begin(e, hop, now)
+        if ew(e, E_STATE) == STALE && ew(e, E_TRIES) == 0 {
+            ask(e, now)
+        }
+        put_hw(frame, ew(e, E_HW))
+        let q = net.send(frame, len) else 0
+        sync.release(sync.arp(), saved)
+        return if q != 0 { SENT } else { FAILED }
     }
     if e == ENTRIES {
         e = claim()
@@ -439,14 +463,17 @@ pub fn send(hop: u64, frame: u64, len: u64) -> u64 {
 }
 
 /// Start resolving `ip` with no frame waiting, unless an entry of an
-/// age to be used, or a request, is already there.
+/// age to be used, or a request, is already there (a stale entry is
+/// asked for again).
 pub fn query(ip: u64) {
     let saved = sync.acquire(sync.arp())
     let now = timer.ticks()
     var e = find(ip)
     if e < ENTRIES && ew(e, E_STATE) == RESOLVED && now - ew(e, E_STAMP) > aw(A_AGE) {
-        bump(C_AGED, 1)
-        begin(e, ip, now)
+        age_out(e)
+    }
+    if e < ENTRIES && ew(e, E_STATE) == STALE && ew(e, E_TRIES) == 0 {
+        ask(e, now)
     }
     if e == ENTRIES {
         e = claim()
@@ -476,8 +503,8 @@ pub fn lookup(ip: u64) -> (bool, u64) {
 
 /// The cache's clock (kernel/netd's second thread, every ten ticks):
 /// ask again for what is still unanswered after `RETRY` ticks, give an
-/// address up after `TRIES` requests, free a resolved entry past its
-/// age.
+/// address up after `TRIES` requests, make a resolved entry past its
+/// age stale.
 pub fn tick() {
     let saved = sync.acquire(sync.arp())
     let now = timer.ticks()
@@ -494,9 +521,19 @@ pub fn tick() {
             } else {
                 ask(e, now)
             }
+        } else if st == STALE && ew(e, E_TRIES) > 0 && now - ew(e, E_STAMP) >= RETRY {
+            if ew(e, E_TRIES) >= TRIES {
+                // Asked for again and never answered: the station is
+                // gone. Nothing waited for it.
+                bump(C_GAVE_UP, 1)
+                put_aw(A_GAVE_IP, ew(e, E_IP))
+                put_aw(A_GAVE_FRAMES, 0)
+                clear(e)
+            } else {
+                ask(e, now)
+            }
         } else if st == RESOLVED && now - ew(e, E_STAMP) > aw(A_AGE) {
-            bump(C_AGED, 1)
-            clear(e)
+            age_out(e)
         }
         e += 1
     }
@@ -605,6 +642,7 @@ pub fn put_hw_text(m: u64) {
 /// The cache, one line per entry in use:
 ///
 ///     arp: entry <i>: <a.b.c.d> at <aa:bb:cc:dd:ee:ff>, confirmed <t> ticks ago
+///     arp: entry <i>: <a.b.c.d> at <aa:bb:cc:dd:ee:ff>, stale, <n> requests
 ///     arp: entry <i>: <a.b.c.d> incomplete, <n> requests, <p> frames waiting
 pub fn report() {
     let saved = sync.acquire(sync.arp())
@@ -623,6 +661,12 @@ pub fn report() {
                 log.put(", confirmed ")
                 log.dec((now - ew(e, E_STAMP)) as int)
                 log.put(" ticks ago")
+            } else if st == STALE {
+                log.put(" at ")
+                put_hw_text(ew(e, E_HW))
+                log.put(", stale, ")
+                log.dec(ew(e, E_TRIES) as int)
+                log.put(" requests")
             } else {
                 log.put(" incomplete, ")
                 log.dec(ew(e, E_TRIES) as int)
