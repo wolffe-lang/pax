@@ -453,7 +453,11 @@ identical to lobo's on Linux but for `Date` (R1).
   Linux they spread.
 - trunk's own CI run 38207077489 failed `mpx4-unix` (U1: `epoll_wait 1,
   IN` against Linux's `IN HUP RDHUP`), a timing difference not of this
-  lane; this lane's runs passed it.
+  lane; this lane's run 38222398830 passed it and its run 38226927218
+  (head `34d3ce6`, `45f3602` after the rebase) failed it with the same
+  line while `mpx4-lobo` there passed, 15 boots: a race in px34's
+  probe (whether the peer's close lands before `epoll_wait`), seen with
+  and without this lane's changes.
 
 ## What the next PAX lanes inherit
 
