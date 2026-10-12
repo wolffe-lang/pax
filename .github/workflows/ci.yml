@@ -2224,15 +2224,19 @@ jobs:
             build/mpx4-lobo-runs.txt
           retention-days: 14
           if-no-files-found: warn
+
   # The run's verdict and its name: `tier full` or `tier pr` (`tier
   # noop`). It needs every job, runs whatever they did, and fails unless
   # the plan succeeded, every suite the plan chose succeeded, and every
   # suite it did not choose was skipped (a job that ran unasked, or one
   # skipped although chosen, is a broken wiring, not a pass). The name is
   # what tools/lane-audit can read to know a green run was a full one.
+  # `!cancelled()`, not `always()`: a run superseded by a newer push must
+  # end, not hold its concurrency group (and the newer run) until a
+  # runner is free to judge a run nobody needs (seen on 38275354849).
   tier:
     name: tier ${{ needs.plan.outputs.tier || 'unplanned' }}
-    if: always()
+    if: ${{ !cancelled() }}
     needs:
       - plan
       - proof
