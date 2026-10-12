@@ -1616,6 +1616,88 @@ pub fn slot_pid(s: u64) -> u64 {
     field(s, offset_of(Thread, pid))
 }
 
+// --- px25: processes by pid, for /proc/<pid> (kernel/procfs) ------------------
+
+/// Whether slot `s` holds a process's leader that has not been reaped:
+/// a pid, its own group's leader, not free or dead (a zombie and a held
+/// leader count, as Linux keeps `/proc/<pid>` until the reap).
+fn is_proc(s: u64) -> bool {
+    let st = field(s, offset_of(Thread, state))
+    let p = field(s, offset_of(Thread, pid))
+    st != FREE && st != DEAD && p != 0 && field(s, offset_of(Thread, tgid)) == p
+}
+
+/// px25: the slot of process `pid`'s leader, SLOTS if no such process.
+pub fn proc_slot(pid: u64) -> u64 {
+    if pid == 0 {
+        return SLOTS
+    }
+    var s: u64 = FIRST
+    while s < SLOTS {
+        if is_proc(s) && field(s, offset_of(Thread, pid)) == pid {
+            return s
+        }
+        s += 1
+    }
+    SLOTS
+}
+
+/// px25: the live processes' pids in increasing order: the smallest
+/// pid above `after`, 0 when there is none.
+pub fn proc_after(after: u64) -> u64 {
+    var best: u64 = 0
+    var s: u64 = FIRST
+    while s < SLOTS {
+        if is_proc(s) {
+            let p = field(s, offset_of(Thread, pid))
+            if p > after && (best == 0 || p < best) {
+                best = p
+            }
+        }
+        s += 1
+    }
+    best
+}
+
+/// px25: what /proc/<pid>/status reads of the leader in slot `s`:
+/// 0 its parent's pid, 1 its threads not ended, 2 its blocked signals,
+/// 3 its PML4 (0 for a zombie: its space is given back), 4 and 5 its
+/// PR_SET_NAME words, 6 its program name's first byte, 7 that name's
+/// length, 8 1 when it is a zombie.
+pub fn proc_word(s: u64, which: int) -> u64 {
+    let zombie = field(s, offset_of(Thread, state)) == ZOMBIE
+    if which == 0 {
+        return field(s, offset_of(Thread, ppid))
+    }
+    if which == 1 {
+        return field(s, offset_of(Thread, threads))
+    }
+    if which == 2 {
+        return field(s, offset_of(Thread, sigmask))
+    }
+    if which == 3 {
+        return if zombie { 0 } else { field(s, offset_of(Thread, cr3)) }
+    }
+    if which == 4 {
+        return field(s, offset_of(Thread, name0))
+    }
+    if which == 5 {
+        return field(s, offset_of(Thread, name1))
+    }
+    if which == 6 {
+        return field(s, offset_of(Thread, name))
+    }
+    if which == 7 {
+        return field(s, offset_of(Thread, name_len))
+    }
+    if zombie { 1 } else { 0 }
+}
+
+/// px25: the process area of the leader in slot `s` (its own).
+pub fn proc_area_of_leader(s: u64) -> u64 {
+    own_area(s)
+}
+
 /// Suspend the running process until its vfork child in slot `s` execs
 /// or ends (`release_vfork`): its frame `f` saved with %rax the child's
 /// pid, the frame returned the next thread's. IF clear.
