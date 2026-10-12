@@ -7,6 +7,19 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The file changes (px36).** A file can be changed after it is
+  made, as Linux's tmpfs answers: hard links (`link`, `linkat`, link
+  counts, a file kept while any name or descriptor holds it), symbolic
+  links (`symlink`, `symlinkat`, `readlink` of a written link, followed
+  by every walk as `path_resolution(7)` says, 40 at most, `O_NOFOLLOW`,
+  `AT_SYMLINK_NOFOLLOW`, `DT_LNK`), modes (`chmod`, `fchmod`,
+  `fchmodat`, `fchmodat2`), times to the nanosecond (`utimensat`,
+  `futimens`, UTIME_NOW, UTIME_OMIT, before 1970), and root's `chown`
+  to root. An owner that is not root is refused by name (-EINVAL); so
+  is a change to `/dev`, `/proc` or `/sys` (-EROFS). boreutils at bu22
+  (`2ab3651`): `chmod`, `touch` and `ln` join the shell's image, and a
+  typed session with them, `mkdir -m` and `cp -p` is byte-identical to
+  Linux (`tests/mpx3-tree`).
 - **wolf 0.2.28 (px36).** pax builds with wolf 0.2.28 and lupin
   0.1.51, by archive digest: the soundness release (#660, #665 and
   #678's direct half refused by E1010). No kernel source changes for it
