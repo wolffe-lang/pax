@@ -20,7 +20,7 @@ const WHOLE: int = 80640
 /// The time grid's step: a sixty-fourth note.
 const STEP: int = 1260
 
-const MAX_PARTS: int = 24
+const MAX_PARTS: int = 48
 
 const MAX_CHORD: int = 6
 
@@ -735,8 +735,7 @@ fn parse_parts(text: str) -> Score {
         var hair = 0 // +1 a crescendo open, -1 a diminuendo, 0 none
         var hair_from = 0
         var hair_line = 0
-        var tie_from = -1 // the tied notes: n_s indices tie_from .. tie_to
-        var tie_to = -1
+        var tie_set = List[int]() // the tied notes, by n_s index
         var tie_line = 0
         var slur_end: int = -1 // where a slurred note ends, for the next
         var boost = 0
@@ -875,37 +874,29 @@ fn parse_parts(text: str) -> Score {
                 } else if tie || marks != 0 {
                     return score_refused("line {ln}: a rest takes no marks and no tie")
                 }
-                // a tie continues the notes before it
-                if tie_from >= 0 {
-                    var same = semis.len == tie_to - tie_from + 1
-                    var qq = 0
-                    while same && qq < semis.len {
-                        if hz_of(semis[qq]) != n_hz[tie_from + qq] {
-                            same = false
+                // a tie continues each tied note whose pitch this event
+                // sounds again (one note of a chord may hold while the
+                // others move); the rest of this event's notes start anew
+                var cont = List[int]() // the n_s index each pitch continues, or -1
+                var held = 0
+                for sm in semis {
+                    var at = -1
+                    for q in tie_set {
+                        if at < 0 && n_hz[q] == hz_of(sm) {
+                            at = q
                         }
-                        qq += 1
                     }
-                    if !same {
-                        return score_refused(
-                            "line {tie_line}: a tie in part '{names[p]}' to '{w}' (line {ln}), which is not the same notes",
-                        )
+                    if at >= 0 {
+                        held += 1
                     }
-                    qq = tie_from
-                    while qq <= tie_to {
-                        n_e[qq] = g + len
-                        n_marks[qq] = n_marks[qq] & (M_LEGIN | M_TREM) | marks
-                        qq += 1
-                    }
-                    if !tie {
-                        tie_from = -1
-                        tie_to = -1
-                    } else {
-                        tie_line = ln
-                    }
-                    slur_end = if marks & M_SLUR != 0 { g + len } else { -1 }
-                    here += len
-                    continue
+                    (mut cont).push(at)
                 }
+                if tie_set.len > 0 && held == 0 {
+                    return score_refused(
+                        "line {tie_line}: a tie in part '{names[p]}' to '{w}' (line {ln}), which sounds none of the tied notes again",
+                    )
+                }
+                var next_tie = List[int]()
                 if semis.len > 0 {
                     if fp {
                         (mut l_pos).push(g)
@@ -927,27 +918,36 @@ fn parse_parts(text: str) -> Score {
                     if slur_end == g {
                         mk = mk | M_LEGIN
                     }
-                    if tie {
-                        tie_from = n_s.len
-                        tie_to = n_s.len + semis.len - 1
-                        tie_line = ln
-                    }
-                    for sm in semis {
-                        (mut n_s).push(g)
-                        (mut n_e).push(g + len)
-                        (mut n_hz).push(hz_of(sm))
-                        (mut n_marks).push(mk)
-                        (mut n_boost).push(bst)
-                        (mut n_boost_us).push(bus)
+                    var k = 0
+                    while k < semis.len {
+                        let q = cont[k]
+                        if q >= 0 {
+                            n_e[q] = g + len
+                            n_marks[q] = (n_marks[q] & (M_LEGIN | M_TREM)) | marks
+                            (mut next_tie).push(q)
+                        } else {
+                            (mut next_tie).push(n_s.len)
+                            (mut n_s).push(g)
+                            (mut n_e).push(g + len)
+                            (mut n_hz).push(hz_of(semis[k]))
+                            (mut n_marks).push(mk)
+                            (mut n_boost).push(bst)
+                            (mut n_boost_us).push(bus)
+                        }
+                        k += 1
                     }
                     boost = 0
                     boost_us = 0
+                }
+                tie_set = if tie { next_tie } else { List[int]() }
+                if tie {
+                    tie_line = ln
                 }
                 slur_end = if marks & M_SLUR != 0 { g + len } else { -1 }
                 here += len
             }
             if !any {
-                if tie_from >= 0 {
+                if tie_set.len > 0 {
                     return score_refused(
                         "line {tie_line}: part '{names[p]}' ties into bar {b_no[bi]}, where it has no notes",
                     )
@@ -963,7 +963,7 @@ fn parse_parts(text: str) -> Score {
             ti = tj
             bi += 1
         }
-        if tie_from >= 0 {
+        if tie_set.len > 0 {
             return score_refused("line {tie_line}: part '{names[p]}' ties past the last bar")
         }
         if hair != 0 {
