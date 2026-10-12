@@ -28,12 +28,16 @@
 #      the struck instruments), marks (staccato, unmarked and tenuto
 #      repeats, a tie, a slur, accent, sfz, fp, pan, a chord in a part,
 #      the pedal's 16', brightness, vibrato, tremolo, rit, a fermata),
-#      timbres (each of the 17 by its own spectrum) and the study
+#      timbres (each of the 17 by its own spectrum), balance (a part
+#      with no level plays mf; a dynamic holds; pp < ff and ff > pp over
+#      two bars, 20 dB or more; `gain`; a 16-part tutti at pp quiet in
+#      absolute terms, -35 dBFS or under, and 18 dB under the same at ff)
+#      and the study
 #      (user/tunes/orchestra), each by its NAME.spec; the study sounds at
 #      least 16 voices at once, reaches the limiter, 0 clamped, 0 stolen;
-#      parts-test/voices asks 60 voices at fff: 48 sound, at least 12
+#      parts-test/voices asks 72 voices at fff: 64 sound, at least 8
 #      are cut and counted, 0 clamped.
-#   O5 boot (checks: both tiers, BIOS and UEFI; marks, timbres, the
+#   O5 boot (checks: both tiers, BIOS and UEFI; marks, timbres, balance, the
 #      study: native BIOS and release UEFI; long: release BIOS): the
 #      sound device's line, the run to `halt`, no `refused:` line, play's
 #      `played` line with 0 clamped, the capture judged by the same spec
@@ -142,7 +146,7 @@ done
 
 # O4: the host's frames.
 why=
-for t in checks marks timbres orchestra; do
+for t in checks marks timbres balance orchestra; do
     src=$pt/$t; [ "$t" = orchestra ] && src=$tunes/orchestra
     "$play" -o "$src" > "$work/host-$t.raw" 2> "$work/host-$t.played"
     "$check" --expect "$pt/$t.spec" "$work/host-$t.raw" > "$work/host-$t.verdict" 2>&1 \
@@ -155,13 +159,13 @@ v=$(sed -n 's/^played .*: [0-9]* frames, \([0-9]*\) voices at most.*/\1/p' "$wor
 [ "${v:-0}" -ge 16 ] || why+=" the study sounds ${v:-0} voices at most, not 16;"
 lim=$(sed -n 's/.* \([0-9]*\) blocks limited.*/\1/p' "$work/host-orchestra.played")
 [ "${lim:-0}" -gt 0 ] || why+=" the study's climax never reached the limiter;"
-# sixty voices at fff: 48 sound, the rest are cut and counted, nothing clips
+# 72 voices at fff: 64 sound, the rest are cut and counted, nothing clips
 vo=$("$play" -c "$pt/voices" 2>&1)
-case $vo in *" 48 voices at most) "*" 0 clamped, "*) ;; *) why+=" voices: '$vo';" ;; esac
+case $vo in *" 64 voices at most) "*" 0 clamped, "*) ;; *) why+=" voices: '$vo';" ;; esac
 st=$(printf '%s' "$vo" | sed -n 's/.* clamped, \([0-9]*\) stolen,.*/\1/p')
-[ "${st:-0}" -ge 12 ] || why+=" voices: ${st:-0} stolen, want >= 12;"
+[ "${st:-0}" -ge 8 ] || why+=" voices: ${st:-0} stolen, want >= 8;"
 printf 'host voices %s\n' "$vo" >> "$runs"
-[ -z "$why" ] && say "PASS O4 host: checks, marks, timbres, the study: $(for t in checks marks timbres orchestra; do tail -n 1 "$work/host-$t.verdict" | sed 's/orch-check: //'; done | tr '\n' ' ')checks; the study $v voices at most, limited in $lim blocks, 0 clamped; 60 voices asked: 48 sound, $st stolen, 0 clamped" || bad "O4 host:$why"
+[ -z "$why" ] && say "PASS O4 host: checks, marks, timbres, balance, the study: $(for t in checks marks timbres balance orchestra; do tail -n 1 "$work/host-$t.verdict" | sed 's/orch-check: //'; done | tr '\n' ' ')checks; the study $v voices at most, limited in $lim blocks, 0 clamped; 72 voices asked: 64 sound, $st stolen, 0 clamped" || bad "O4 host:$why"
 rm -f "$work"/host-*.raw
 
 if [ "$hostonly" = 1 ]; then
@@ -171,10 +175,10 @@ fi
 
 # O0: the kernels and the images.
 "$PAX_ROOT/tools/fetch-limine" || exit 2
-SCENARIOS="checks marks timbres study long"
+SCENARIOS="checks marks timbres balance study long"
 runlist() {
     case $1 in
-        checks|marks|timbres) printf '%s\n' "/bin/play -m /usr/share/px32/$1" ;;
+        checks|marks|timbres|balance) printf '%s\n' "/bin/play -m /usr/share/px32/$1" ;;
         study) printf '%s\n' "/bin/play -c orchestra" "/bin/play -m orchestra" ;;
         long) printf '%s\n' "/bin/play -m /usr/share/px32/long" ;;
     esac
@@ -185,7 +189,7 @@ for s in $SCENARIOS; do
     mkdir -p "$r/bin" "$r/etc" "$r/usr/share/tunes" "$r/usr/share/px32"
     cp "$play" "$r/bin/play"
     cp "$tunes"/* "$r/usr/share/tunes/"
-    cp "$pt/checks" "$pt/marks" "$pt/timbres" "$r/usr/share/px32/"
+    cp "$pt/checks" "$pt/marks" "$pt/timbres" "$pt/balance" "$r/usr/share/px32/"
     [ "$s" = long ] && python3 "$PAX_ROOT/tools/orch-stress" > "$r/usr/share/px32/long"
     runlist "$s" > "$r/etc/pax-run"
     pairs=()
@@ -227,7 +231,7 @@ for leg in $legs; do
     for tier in $tiers; do
         for s in $SCENARIOS; do
             case $s in
-                study|marks|timbres) [ "$tier-$leg" = native-bios ] || [ "$tier-$leg" = release-uefi ] || continue ;;
+                study|marks|timbres|balance) [ "$tier-$leg" = native-bios ] || [ "$tier-$leg" = release-uefi ] || continue ;;
                 long) [ "$tier-$leg" = release-bios ] || continue ;;
             esac
             id="$tier $leg $s"
