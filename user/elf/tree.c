@@ -1156,6 +1156,23 @@ static void symlinks(void) {
     long rd2 = r(rmdir("/t/y/ds/new"));
     say("symlink: mkdir over a link to a directory %ld, over one that leads nowhere %ld, through one %ld; rmdir of the link %ld, through it %ld\n",
         mk, mk2, mk3, rd1, rd2);
+    /* a trailing slash after a link: which calls follow it then */
+    symlink("nowhere3", "/t/y/dd");
+    long ts1 = r(mkdir("/t/y/dd/", 0777));
+    const char *ts1s = lst("/t/y/nowhere3");
+    symlink("sub/in", "/t/y/dj");
+    long ts2 = r(rmdir("/t/y/dj/"));
+    long ts3 = r(unlink("/t/y/dj/"));
+    put("/t/y/tf", "t");
+    long ts4 = r(rename("/t/y/tf", "/t/y/dj/"));
+    long ts5 = r(rename("/t/y/dj/", "/t/y/dk"));
+    say("symlink: with a trailing slash: mkdir through a link that leads nowhere %ld (%s); rmdir of a link to a directory %ld, unlink %ld; a file renamed onto one %ld, the link renamed %ld; dj %s, in %s\n",
+        ts1, ts1s, ts2, ts3, ts4, ts5, lst("/t/y/dj") + 12, st("/t/y/sub/in") + 11);
+    rmdir("/t/y/nowhere3");
+    unlink("/t/y/dd");
+    unlink("/t/y/dj");
+    unlink("/t/y/dk");
+    unlink("/t/y/tf");
     chdir("/t/y/di");
     char cw[64];
     char *c = getcwd(cw, sizeof cw);
