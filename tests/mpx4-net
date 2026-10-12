@@ -279,11 +279,17 @@ boot() { # tier leg way
 # The value of the last line of the normalised log matching sed BRE $2
 # with one group.
 grab() { serial_norm "$1" | sed -n "s/^$2\$/\\1/p" | tail -n 1; }
-has() { serial_norm "$1" | grep -Eqx -- "$2"; }
+# px35: never `grep -q` at the end of a pipe from serial_norm. Under
+# pipefail, grep -q leaves at its first match and sed's next write to
+# the pipe dies of SIGPIPE: the pipe fails though the line is there. A
+# log longer than one write makes that likely, a starved host turns it
+# into a coin toss (kasumi, a 4,601-byte log, CPUs 0-3 loaded: 6 of 300
+# false; 205,916 bytes: 50 of 50). grep without -q reads to the end.
+has() { serial_norm "$1" | grep -Ex -- "$2" > /dev/null; }
 line_of() { serial_norm "$1" | grep -E -m1 -- "$2"; }
 
 halted() { # assertion label status
-    if serial_norm "$log" | grep -q '^PANIC'; then bad "$1 $2: $(serial_norm "$log" | grep -m1 '^PANIC')"; fi
+    if serial_norm "$log" | grep '^PANIC' > /dev/null; then bad "$1 $2: $(serial_norm "$log" | grep -m1 '^PANIC')"; fi
     if [ "$3" = 0 ]; then
         say "PASS $1 $2: halted: $(tail -n 1 "$log.verdict")"
     else
@@ -309,14 +315,14 @@ device_up() { # label device-id census?
         nfun=$(serial_norm "$log" | grep -Ec '^pci [0-9a-f]{2}:[0-9a-f]{2}\.[0-7] [0-9a-f]{4}:[0-9a-f]{4} class ')
         nvend=$(printf '%s\n' $caps | grep -c '^09@')
         if [ -n "$n" ] && [ "$n" -ge 4 ] && [ "$nfun" = "$n" ] && [ -n "$dev" ] && [ "$nvend" -ge 4 ] \
-            && serial_norm "$log" | grep -Eq "^pci $at bar[0-5] mem(32|64) (prefetchable )?$HEX\$"; then
+            && serial_norm "$log" | grep -E "^pci $at bar[0-5] mem(32|64) (prefetchable )?$HEX\$" > /dev/null; then
             say "PASS N1 $L: $n functions; $dev; caps $caps; $(serial_norm "$log" | grep -E "^pci $at bar" | sed "s/^pci $at //" | paste -sd, -)"
         else
             bad "N1 $L: the census: n='$n' lines=$nfun device='$dev' caps='$caps'"
         fi
     else
         at='[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]' line=
-        if serial_norm "$log" | grep -q '^pci '; then bad "N1 $L: a census nobody asked for"; else say "PASS N1 $L: no \`pci\` on the command line, no census"; fi
+        if serial_norm "$log" | grep '^pci ' > /dev/null; then bad "N1 $L: a census nobody asked for"; else say "PASS N1 $L: no \`pci\` on the command line, no census"; fi
     fi
     local offered taken ok2=1 vec mac held bar
     bar=$(serial_norm "$log" | sed -n "s/^net: virtio-net 1af4:$id at $at, \(bar[0-5] 0x[0-9a-f]*\), 1\.x interface\$/\1/p" | tail -n 1)
@@ -501,7 +507,7 @@ with_peer() { # tier leg
     local entries
     entries=$(serial_norm "$log" | sed -n '/^serve: after:/,$p' | grep -c '^arp: entry ')
     [ "$entries" -ge 1 ] && [ "$entries" -le 8 ] || ok=0
-    serial_norm "$log" | grep -q '^arp: entry [0-9]: 10\.0\.2\.123 ' && ok=0
+    serial_norm "$log" | grep '^arp: entry [0-9]: 10\.0\.2\.123 ' > /dev/null && ok=0
     if [ "$ok" = 1 ]; then
         say "PASS P4 $L: $(line_of "$log" '^ip: rx' | sed 's/^.*dropped/ip dropped/'); $(line_of "$log" '^icmp: echo' | sed 's/^.*matched, //'); $(line_of "$log" '^icmp: unreachable'); $(line_of "$log" '^udp: rx' | sed 's/^.*dropped/udp dropped/'); $(line_of "$log" '^udp: unreachable'); ARP 6 bad, 1 conflict, 2 pushed out, 1 unresolved; $entries cache entries at the end, none for 10.0.2.123"
     else
@@ -515,7 +521,7 @@ without() { # label tier leg way line-ERE
     local hrc=0
     boot "$2" "$3" "$4" || hrc=$?
     if "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" "$5" 'halt' >"$log.expect" 2>&1 \
-        && ! serial_norm "$log" | grep -q '^PANIC\|^arp:\|^ip:\|^net: virtio-net' && [ "$hrc" = 0 ]; then
+        && ! serial_norm "$log" | grep '^PANIC\|^arp:\|^ip:\|^net: virtio-net' > /dev/null && [ "$hrc" = 0 ]; then
         say "PASS $1 $2 $3 $4: $(serial_norm "$log" | grep -m1 '^net: ') then halt, no panic; $(tail -n 1 "$log.verdict")"
     else
         cat "$log.expect" >&2
