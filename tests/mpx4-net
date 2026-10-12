@@ -103,7 +103,10 @@
 #      from 10.0.2.100 and 9-10 from 192.0.2.1 with ttl=63; `arp:
 #      10.0.2.99 unresolved after 3 requests in <t> ticks, 1 frames
 #      dropped`, t in 290..400; 10.0.2.100 aged out and asked for
-#      again; 8 and 1480 bytes answered; 1473 data bytes refused.
+#      again; 8 and 1480 bytes answered; 1473 data bytes refused;
+#      (px35, pax#32) once that entry has aged again, four echo requests
+#      made back to back while it is asked for again: `renew: … 0 pushed
+#      out, 1 requests` — the entry is used while it renews.
 #   P3 (peer) the soak and the books: `serve: told to stop after <t>
 #      ticks, <n> echo requests answered`, n = 28 + 10000, and the books
 #      the same before and after.
@@ -463,10 +466,11 @@ with_peer() { # tier leg
     has "$log" 'icmp: 8 bytes from 10\.0\.2\.100: seq=13 ttl=64 time=[0-9]+ us' || ok=0
     has "$log" 'icmp: 1480 bytes from 10\.0\.2\.100: seq=14 ttl=64 time=[0-9]+ us' || ok=0
     has "$log" 'icmp: 1473 data bytes to 10\.0\.2\.100 refused: 1481 bytes is over the 1480 a datagram carries' || ok=0
+    has "$log" 'renew: 4 echo requests to 10\.0\.2\.100 while its entry is asked for again: 0 pushed out, 1 requests' || ok=0
     if [ "$ok" = 1 ]; then
-        say "PASS P2 $L: 4 queued, 2 pushed out, echo 4 answered, 1 stray; 5 echoes from 10.0.2.100 and 2 from 192.0.2.1 (ttl 63, by way of the gateway); 10.0.2.99 given up after 3 requests in $t ticks, 1 frame dropped; 10.0.2.100 aged out and asked for again; 0 and 1472 data bytes answered, 1473 refused"
+        say "PASS P2 $L: 4 queued, 2 pushed out, echo 4 answered, 1 stray; 5 echoes from 10.0.2.100 and 2 from 192.0.2.1 (ttl 63, by way of the gateway); 10.0.2.99 given up after 3 requests in $t ticks, 1 frame dropped; 10.0.2.100 aged out and asked for again; 0 and 1472 data bytes answered, 1473 refused; $(line_of "$log" '^renew:' | sed 's/^renew: //')"
     else
-        bad "P2 $L: pinged=$pinged far=$far unresolved-ticks='$t'; $(serial_norm "$log" | grep '^queue:\|^icmp: no reply\|^arp: 10.0.2.99\|^arp: 10.0.2.100 \|NOT refused' | paste -sd'|' -)"
+        bad "P2 $L: pinged=$pinged far=$far unresolved-ticks='$t'; $(serial_norm "$log" | grep '^queue:\|^icmp: no reply\|^arp: 10.0.2.99\|^arp: 10.0.2.100 \|NOT refused\|^renew:' | paste -sd'|' -)"
     fi
     # --- N5: the capture --------------------------------------------------
     capture "$L"
@@ -489,7 +493,7 @@ with_peer() { # tier leg
     has "$log" 'udp: rx 0 datagrams queued \(7 without a checksum\), dropped 0 short 0 length 0 checksum 0 port-zero 7 no-port 0 full' || ok=0
     has "$log" 'udp: unreachable 1 sent, 4 limited, 2 silent; 0 not sent' || ok=0
     has "$log" 'ip: tx [0-9]+ datagrams, not sent 1 size 0 dropped' || ok=0
-    has "$log" "icmp: echo $((SOAK + 28)) requests answered \($((SOAK + 28)) replies sent\), 14 requests sent, 10 replies matched, 2 stray; dropped 1 short 1 checksum 2 broadcast 2 type" || ok=0
+    has "$log" "icmp: echo $((SOAK + 28)) requests answered \($((SOAK + 28)) replies sent\), 18 requests sent, 10 replies matched, 2 stray; dropped 1 short 1 checksum 2 broadcast 2 type" || ok=0
     has "$log" 'icmp: unreachable 2 sent, 5 limited, 2 silent; 0 not sent' || ok=0
     has "$log" 'arp: [0-9]+ requests sent, [0-9]+ replies received, 11 requests answered \(11 replies sent\), 6 bad, 1 conflict' || ok=0
     has "$log" 'arp: cache [0-9]+ learned, [0-9]+ updated, [1-9][0-9]* aged; pending [0-9]+ queued, [0-9]+ sent, 2 pushed out, 1 unresolved \(1 addresses given up\), 0 table full' || ok=0

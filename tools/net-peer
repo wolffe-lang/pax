@@ -34,6 +34,10 @@
 #   A5 aged        another ARP request for 10.0.2.100 (the entry aged
 #                  out in 2 s), then echo request 12
 #   A6 sizes       echo requests 13 (no data) and 14 (1472 data bytes)
+#   A6r renew      (px35) once 10.0.2.100's entry has aged again, an ARP
+#                  request for it and echo requests 16-19, back to back,
+#                  identifications 14-17: none pushed out while the entry
+#                  is asked for again; this script leaves them unanswered
 #   A7             the kernel's frame of type 0x88b5: it is serving
 #
 # then this script asks (part B) and the kernel answers; every answer
@@ -401,7 +405,9 @@ class Peer:
     def part_a(self):
         plan = [(px.PEER_IP, 3, 56, 2), (px.PEER_IP, 4, 56, 3), (px.PEER_IP, 5, 56, 4), (px.PEER_IP, 6, 56, 5),
                 (px.PEER_IP, 7, 56, 6), (px.PEER_IP, 8, 56, 7), (px.FAR_IP, 9, 56, 8), (px.FAR_IP, 10, 56, 9),
-                (px.PEER_IP, 12, 56, 11), (px.PEER_IP, 13, 0, 12), (px.PEER_IP, 14, 1472, 13)]
+                (px.PEER_IP, 12, 56, 11), (px.PEER_IP, 13, 0, 12), (px.PEER_IP, 14, 1472, 13),
+                (px.PEER_IP, 16, 56, 14), (px.PEER_IP, 17, 56, 15), (px.PEER_IP, 18, 56, 16), (px.PEER_IP, 19, 56, 17)]
+        unanswered = (16, 17, 18, 19)  # A6r: the renewal's burst
         step = 0
         first = True
         end = time.time() + self.boot
@@ -451,6 +457,8 @@ class Peer:
                           % (seq, n, ident, px.dotted(dst), self.hop_mac(dst).hex(":")), f, want)
             self.note_ident(f)
             step += 1
+            if seq in unanswered:
+                continue
             src_mac = self.hop_mac(dst)
             self.my_ident += 1
             self.send(px.frame(px.PAX_MAC, src_mac, px.ipv4(dst, px.PAX_IP, 1, px.echo(0, px.ECHO_IDENT, seq, px.pattern(n)),
@@ -467,7 +475,7 @@ class Peer:
             self.fail("A3: the gateway was never asked for")
         if self.gaps != 3:
             self.fail("part A: %d identifications never reached the wire; 3 were due (0 and 1 pushed out, 10 unresolved)" % self.gaps)
-        print("net-peer: ok A2-A7 echo requests 3-10 and 12-14 exact (identifications 2-9, 11-13); 9 and 10 by way of the gateway; "
+        print("net-peer: ok A2-A7 echo requests 3-10, 12-14 and 16-19 exact (identifications 2-9, 11-17); 9 and 10 by way of the gateway; "
               "10.0.2.99 asked for 3 times, %s s apart, and given up; 10.0.2.100 asked for %d times; the ready frame"
               % (" and ".join("%.2f" % g for g in gaps), len(self.asked[px.PEER_IP])))
 

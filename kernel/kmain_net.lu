@@ -475,6 +475,35 @@ fn with_peer(scratch: u64, per20: u64) {
     log.put(if big == ip.SIZE { " refused: 1481 bytes is over the 1480 a datagram carries" } else { " NOT refused" })
     log.end()
 
+    // renew (px35, pax#32): an entry past its age is still used while
+    // it is asked for again. Wait for 10.0.2.100's to age, then make four
+    // echo requests back to back (tools/net-peer leaves them unanswered):
+    // every one leaves, none is pushed out of a queue.
+    let w0 = timer.ticks()
+    var fresh = true
+    while fresh && timer.ticks() - w0 < 2 * PEER_AGE {
+        let (kn, _hw2) = arp.lookup(PEER)
+        fresh = kn
+        if fresh {
+            let _s = sched.sleep(1)
+        }
+    }
+    let pushed0 = arp.count(arp.C_PUSHED)
+    let asked2 = arp.count(arp.C_REQUESTS_OUT)
+    var rs: u64 = 16
+    while rs <= 19 {
+        let _r = icmp.ping(PEER, rs, 56)
+        rs += 1
+    }
+    log.put("renew: 4 echo requests to ")
+    arp.put_ip(PEER)
+    log.put(if fresh { " before its entry aged: " } else { " while its entry is asked for again: " })
+    log.dec((arp.count(arp.C_PUSHED) - pushed0) as int)
+    log.put(" pushed out, ")
+    log.dec((arp.count(arp.C_REQUESTS_OUT) - asked2) as int)
+    log.put(" requests")
+    log.end()
+
     // serve
     let f = scratch
     var k: u64 = 0
