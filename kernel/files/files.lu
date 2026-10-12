@@ -2663,12 +2663,36 @@ fn is_dir_node(n: u64) -> bool {
 /// px34: the entry of /proc or /sys named [s, s + n) of pax_kbuf in `d`
 /// (an entry, or procfs.ROOT), or an error node (ENOENT).
 fn syn_child(d: u64, s: u64, n: u64) -> u64 {
+    if d != procfs.ROOT && procfs.entry(d) == procfs.PIDDIR {
+        if comp_is(s, n, "status") {
+            return (T_SYN << T_SHIFT) | procfs.child_at(d, 0) // px25
+        }
+        return err(ENOENT)
+    }
     var e: u64 = 0
-    while e < procfs.ENTRIES {
+    while e < procfs.PIDDIR {
         if procfs.parent(e) == d && comp_is(s, n, procfs.name(e)) {
             return (T_SYN << T_SHIFT) | e
         }
         e += 1
+    }
+    // px25: `/proc/<pid>`, a process's number as Linux writes it (no
+    // sign, no leading zero), while the process is not yet reaped.
+    if d == 0 && n >= 1 && n <= 10 && kb(s) != 48 {
+        var v: u64 = 0
+        var i: u64 = 0
+        while i < n {
+            let c = kb(s + i)
+            if c < 48 || c > 57 {
+                return err(ENOENT)
+            }
+            v = v * 10 + (c - 48)
+            i += 1
+        }
+        let r = procfs.pid_child(0, v)
+        if r != procfs.NONE {
+            return (T_SYN << T_SHIFT) | r
+        }
     }
     err(ENOENT)
 }
@@ -2995,9 +3019,18 @@ fn syn_open(a: u64, n: u64, flags: u64) -> u64 {
     if !of_room() {
         return neg(ENFILE)
     }
-    let (pa, len) = procfs.make(rf(n), a, mask_of(a), FDS)
+    // px25: /proc/<pid>/status reads the named process's area
+    var ta = a
+    let tp = procfs.pid_of(rf(n))
+    if tp != 0 {
+        let sl = sched.proc_slot(tp)
+        if sl != sched.SLOTS {
+            ta = sched.proc_area_of_leader(sl)
+        }
+    }
+    let (pa, len) = procfs.make(rf(n), ta, mask_of(ta), FDS, open_files(), OFILES)
     if pa == 0 {
-        return neg(ENOMEM)
+        return neg(if len == 1 { ENOENT } else { ENOMEM })
     }
     let fd = open_new(a, 0, K_SYN, n, flags)
     if fd >= 0x8000000000000000 {
@@ -4025,8 +4058,8 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
                     let _ok = uaccess.copy_out(pml4, r + 19, na, nl)
                 } else if ty(c) == T_SYN {
                     var j: u64 = 0
-                    for b in procfs.name(rf(c)).bytes() {
-                        uaccess.put(pml4, r + 19 + j, b as int as u64, 1)
+                    while j < nl {
+                        uaccess.put(pml4, r + 19 + j, procfs.name_byte(rf(c), j), 1) // px25: a pid's digits too
                         j += 1
                     }
                 } else {
