@@ -139,10 +139,13 @@ it. A tamtam/cymbal/drum note's pitch is ignored (write any note).
 ## 6. Voices, mix, budget
 
 - A **voice** is one sounding pitch of one event, release tail
-  included. At most **64** sound at once; past that the quietest
-  releasing (or ringing) voice is cut (counted as `stolen` on the
-  `played` line). A drum, bell or tam-tam struck again while it rings is
-  struck in place (no new voice).
+  included. At most **128** sound at once (px33's whole close, 24
+  parts, needs 95). Past that a new note takes the quietest releasing
+  tail, else the quietest struck voice still ringing; **a held note is
+  never cut**: with every voice held, the new note is dropped. The
+  `played` and `cost` lines count each: `N stolen` (tails and rings),
+  `N of the stolen ringing`, `N notes dropped`. A drum, bell or tam-tam
+  struck again while it rings is struck in place (no new voice).
 - Each part is placed by its `pan`. The mix has a fixed master gain:
   one part's mf sits near -39 dBFS, a 16-part tutti at pp near
   -38 dBFS, the same tutti at ff near -12 dBFS. A look-ahead **limiter**
