@@ -389,16 +389,20 @@ fn begin(e: u64, ip: u64, now: u64) {
 }
 
 /// Send what waits on entry `e`, oldest first, to its hardware
-/// address. The ARP lock held.
+/// address, as one batch (px35: kernel/net hands the device both at
+/// once; both were made before the answer was taken in). The ARP lock
+/// held.
 fn flush(e: u64) {
     let base = aw(A_SLOTS + e)
+    let n = ew(e, E_PENDING)
     var s: u64 = 0
-    while s < ew(e, E_PENDING) {
-        let f = base + s * HALF
-        put_hw(f, ew(e, E_HW))
-        let _sent = net.send(f, ew(e, E_LEN + s)) else 0
-        bump(C_FLUSHED, 1)
+    while s < n {
+        put_hw(base + s * HALF, ew(e, E_HW))
         s += 1
+    }
+    if n > 0 {
+        let _taken = net.send_batch(base, ew(e, E_LEN), base + HALF, ew(e, E_LEN + 1), n)
+        bump(C_FLUSHED, n)
     }
     put_ew(e, E_PENDING, 0)
 }

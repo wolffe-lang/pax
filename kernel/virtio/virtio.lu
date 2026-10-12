@@ -491,10 +491,26 @@ pub fn quiet(q: u64, on: bool) {
 
 /// Offer the buffer whose head descriptor is `id` to the device.
 pub fn offer(q: u64, id: u64) {
+    place(q, id, 0)
+    publish(q, 1)
+}
+
+/// px35: write head descriptor `id` into the available ring `k` places
+/// past its index, not yet the device's: `publish` hands over every
+/// placed one at once (the split virtqueue of the virtio
+/// specification: the device reads no entry past the index the driver
+/// has written).
+pub fn place(q: u64, id: u64, k: u64) {
     let a = qw(q, Q_AVAIL)
     let idx = r16(a + 2)
-    w16(a + 4 + (idx % qw(q, Q_SIZE)) * 2, id)
-    w16(a + 2, (idx + 1) & 0xffff)
+    w16(a + 4 + ((idx + k) % qw(q, Q_SIZE)) * 2, id)
+}
+
+/// Hand the next `n` placed entries to the device: one write of the
+/// available ring's index.
+pub fn publish(q: u64, n: u64) {
+    let a = qw(q, Q_AVAIL)
+    w16(a + 2, (r16(a + 2) + n) & 0xffff)
 }
 
 /// Tell the device the queue has new buffers, unless it asked not to

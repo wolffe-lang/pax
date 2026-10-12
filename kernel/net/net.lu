@@ -494,22 +494,16 @@ pub fn tx_free() -> u64 {
     n
 }
 
-/// Send the `len` bytes at `src` as one frame (14 to 1514 bytes: the
-/// two addresses, the type, the payload; shorter than 60 is padded
-/// with zeros). Returns the bytes queued. Rows, each counted: `down`,
-/// `size`, `full` (every buffer is still with the device).
-pub fn send(src: u64, len: u64) -> u64 ! SendError {
+/// Put the `len` bytes at `src` in a free transmit buffer as one frame
+/// and place it `k` places past the available ring's index, not yet
+/// the device's: `(bytes on the wire, 0)`, or `(0, 1)` for a size and
+/// `(0, 2)` when every buffer is still with the device, each counted.
+/// The net lock held, the device up.
+fn stage(src: u64, len: u64, k: u64) -> (u64, u64) {
     let txq = virtio.state(N_TXQ)
-    let saved = sync.acquire(sync.net())
-    if nw(N_UP) != 1 {
-        bump(C_TX_DOWN, 1)
-        sync.release(sync.net(), saved)
-        return down
-    }
     if len < ETH_HEADER || len > FRAME_MAX {
         bump(C_TX_SIZE, 1)
-        sync.release(sync.net(), saved)
-        return size
+        return (0, 1)
     }
     reclaim()
     var head = nw(N_TX_HEAD)
@@ -526,8 +520,7 @@ pub fn send(src: u64, len: u64) -> u64 ! SendError {
     }
     if head == 0 {
         bump(C_TX_FULL, 1)
-        sync.release(sync.net(), saved)
-        return full
+        return (0, 2)
     }
     let id = head - 1
     put_nw(N_TX_HEAD, virtio.desc_next(txq, id))
@@ -543,12 +536,72 @@ pub fn send(src: u64, len: u64) -> u64 ! SendError {
         pax_fb_copy(buf + HEADER, src, len)
     }
     virtio.set_desc_len(txq, id, HEADER + wire)
-    virtio.offer(txq, id)
-    let _told = virtio.notify(txq)
+    virtio.place(txq, id, k)
     bump(C_TX_FRAMES, 1)
     bump(C_TX_BYTES, wire)
+    (wire, 0)
+}
+
+/// Send the `len` bytes at `src` as one frame (14 to 1514 bytes: the
+/// two addresses, the type, the payload; shorter than 60 is padded
+/// with zeros). Returns the bytes queued. Rows, each counted: `down`,
+/// `size`, `full` (every buffer is still with the device).
+pub fn send(src: u64, len: u64) -> u64 ! SendError {
+    let txq = virtio.state(N_TXQ)
+    let saved = sync.acquire(sync.net())
+    if nw(N_UP) != 1 {
+        bump(C_TX_DOWN, 1)
+        sync.release(sync.net(), saved)
+        return down
+    }
+    let (wire, why) = stage(src, len, 0)
+    if why == 0 {
+        virtio.publish(txq, 1)
+        let _told = virtio.notify(txq)
+    }
     sync.release(sync.net(), saved)
+    if why == 1 {
+        return size
+    }
+    if why == 2 {
+        return full
+    }
     wire
+}
+
+/// px35 (pax#29, N8): the frames kernel/arp's answer lets go — `n` of
+/// them, 1 or 2, the first `alen` bytes at `a`, the second `blen` at
+/// `b` — staged together, handed to the device with one write of the
+/// ring's index and told once: the device never holds the first without
+/// the second. Sent one at a time, on a starved host a reply to the
+/// first reached the wire before the second left, though the kernel had
+/// made both before it took that reply in. Each refused one is counted
+/// as `send` counts it. How many were taken.
+pub fn send_batch(a: u64, alen: u64, b: u64, blen: u64, n: u64) -> u64 {
+    let txq = virtio.state(N_TXQ)
+    let saved = sync.acquire(sync.net())
+    if nw(N_UP) != 1 {
+        bump(C_TX_DOWN, n)
+        sync.release(sync.net(), saved)
+        return 0
+    }
+    var k: u64 = 0
+    let (_wa, why_a) = stage(a, alen, k)
+    if why_a == 0 {
+        k += 1
+    }
+    if n > 1 {
+        let (_wb, why_b) = stage(b, blen, k)
+        if why_b == 0 {
+            k += 1
+        }
+    }
+    if k > 0 {
+        virtio.publish(txq, k)
+        let _told = virtio.notify(txq)
+    }
+    sync.release(sync.net(), saved)
+    k
 }
 
 fn put_mac() {
