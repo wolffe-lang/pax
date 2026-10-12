@@ -242,11 +242,22 @@ its CI job, the driver.
   `tools/lobo-check` (PAX against Linux, reply for reply),
   `user/lobo/{srv,requests,steps}`, `tests/mpx4-lobo` and its CI job,
   `tools/tw-probe`.
-- **Plants**, each its own commit, run by its own CI run, reverted:
-  A `f0a66be` (dup2 keeps a TCP socket's close-on-exec: a worker never
-  gets its listener), reverted `6cdc2c6`; B `1f7abba` (a Unix listener
-  readable only until its first connection: the reload after `status`
-  is never answered), reverted `29f105b`.
+- **Plants**, each its own commit, run by its own CI run on its own
+  branch, reverted. A first pair was planted before the time-wait fix:
+  A `f0a66be` (dup2 keeps a TCP socket's close-on-exec), reverted
+  `6cdc2c6`, **never went red as planted**: its run 38222405571 held
+  every hands step (the listener a worker inherits did not carry the
+  flag that plant copied), and its one red row was the time-wait
+  defect's (release control row 2, 2 timeouts); B `1f7abba`, reverted
+  `29f105b`, was not run. Both were planted again on the head, past the
+  fix: A2 `2400aae` (dup2 marks a TCP socket's copy at 3 or above
+  close-on-exec: a worker never gets its listener), reverted `78b566e`;
+  B2 `9b56ed7` (a Unix listener readable only until its first
+  connection: the reload after `status` is never answered), reverted
+  `7e31dae`. Each was red on kasumi before CI (`kasumi/plants/pa2`:
+  hands, `request 1 of 20: timed out` in 38 s; `pb2`: serve, `the
+  master … did not answer within 2000 ms`, `reload complete` not seen,
+  66 s).
 
 ## 3. The prediction against the measurement
 
@@ -344,9 +355,10 @@ identical to lobo's on Linux but for `Date` (R1).
   concurrency on KVM `hasu/k2-d71ff80/*-conc{1,4}/`, on TCG
   `kasumi/conc1`, `conc4`, `conc4b`, `k4`.
 - **Differential table**: above.
-- **Plants by run id**: A (`f0a66be`) run RUN_PLANT_A; B (`1f7abba`)
-  run RUN_PLANT_B. Each on its own branch (`px25-plant-a`,
-  `px25-plant-b`), dispatched; reverted in `6cdc2c6` and `29f105b`.
+- **Plants by run id**: A2 (`2400aae`, branch `px25-plant-a2`) run
+  38227647983; B2 (`9b56ed7`, branch `px25-plant-b2`) run RUN_PLANT_B2;
+  locally `kasumi/plants/`. The first A (`f0a66be`, run 38222405571) did
+  not go red as planted (above).
 - **Boot counts**: kasumi TCG — exploratory x1, x2 ×2, x3; development
   sessions about 20; conc ×3, k4; the head's gauntlet 15
   (`kasumi/g4-d71ff80/mpx4-lobo-runs.txt`), an earlier gauntlet at
@@ -436,4 +448,5 @@ says `halt`, and Ctrl-A then X ends QEMU. No audio device is given.
 - `wolf/tools/lane-audit.sh pax px25 40` run from the org directory,
   its exit status read directly (in the PR).
 - Nothing merged, tagged, filed or closed. The plant branches
-  `px25-plant-a` and `px25-plant-b` are on origin for the record.
+  `px25-plant-a`, `px25-plant-b`, `px25-plant-a2`, `px25-plant-b2` are on
+  origin for the record.
