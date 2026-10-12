@@ -480,12 +480,13 @@ PAX does not raise it.
 | P2 files | text made at open; sizes 0 | right but one: `/sys/devices/system/cpu/online` is a sysfs attribute, size 4096; open for writing works as root and the write is -EINVAL (predicted -EACCES: **wrong**); `mkdir` in `/proc/self` -ENOENT |
 | P3 seqpacket | boundaries, 4,088 the largest | right (Linux takes 8,000 bytes: `~seqpacket`) |
 | P4 NORESERVE | backed on touch; under 32 frames a parked task | VmRSS +0 kB after the 8 MiB `mmap`, +12 kB after three pages and a `read` into a page never touched, -12 kB after MADV_DONTNEED and MADV_FREE (Linux: +0, +2,056 kB — transparent huge pages — and -4 kB); the waiting wolf witness: §4 (mpx4-ready's frames lines) |
+| P4/P8 the waiting wolf witness | boots in 256 MiB where px24 needed 1 GiB | better: mpx4-ready's network-less run list (the probes, the epoll server's 10,000 connections, `waitwolf` loop, serve/call twice, push/pull) booted at **128 MiB**: every command exit 0 on this lane's kernel; on trunk's kernel `waitwolf` was killed (SIGABRT after `mmap` and `mprotect` -ENOMEM, out of frames) in run 9 and its `pair` exited 1 (`notes/px34/kasumi/{,trunk-}ready-none-128M.log`); at 256 MiB both ran all ten. The suite itself still boots at 1 GiB (not moved) |
 | P4 kernel stack | -EAGAIN by name | right: `~stack: 244 MiB and 36 pages taken (no more to take); a thread then: EAGAIN`, its `refused:` line, and a thread made again once the memory came back (every leg, both hosts) |
 | P5 limits | about 3.1 MiB more `.bss`, about 760 frames | `kmain_console`'s RW segment 1,249,376 → 4,411,488 bytes (+3,162,112: 772 frames), its text +45,968 bytes (12 frames), rodata +1,072 |
 | P5 TCP memory | "1,024 connections need about 4 GiB" | **wrong arithmetic**: 32 frames (128 KiB) a connection in use is **128 MiB** for 1,024 |
 | P6 refusals | six by name | six: SOCK_RAW, SOCK_SEQPACKET and SOCK_DGRAM on a path, `setsockopt`, an abstract name, autobind (`listen` unbound left the list, SOCK_RAW joined it) |
 | P8 times | status under 50 ms KVM, 2 s TCG; 10,000 connections under 30 s KVM, 5 min TCG | KVM (hasu): lobo's client 0–30 ms by the guest's clock, the whole `ctl` boot 2–3 s; the soak 40–90 ms by the guest's clock for 10,000 connections (Linux in the container 72 ms), the whole soak boot 2–3 s. TCG: §4 |
-| P10 what moves | no transcript lists `/`; RLIMIT_NOFILE nowhere printed | right (checked before the change); the gauntlet's verdicts are §4 |
+| P10 what moves | no transcript lists `/`; RLIMIT_NOFILE nowhere printed | right for those; **missed**: mpx4-tcp's and mpx4-ready's T1 assert the `tcp: 256 blocks` line, red in the gauntlet (`g1-041a4c8/mpx4-tcp.out`, `mpx4-ready.out`); the line moved to 1024 in both suites (`b29fe25`) and both reran green on the same images (100/0, 102/0) |
 | P11 what fails first | #711's compile time; a spurious -EFAULT; EPOLLRDHUP timing | none of the three: the release tier got **faster** (`kmain_console` 200 s → 54 s, `kmain_sockets` 180 s → 54 s, the same container, twice each; not investigated); what failed first was a name defined twice (`ring_put`, E0302), and the stack witness reusing a dead thread's kernel stack (`reap` runs at the next `clone`: the witness now keeps a thread parked) |
 
 ## What lobo's list now answers
@@ -562,3 +563,74 @@ otherwise than Linux, or what was never run with lobo:
   datagram or seqpacket socket on a path, `SO_REUSEPORT`,
   `SO_KEEPALIVE`, `SO_LINGER`, `SO_SNDBUF`, `SO_RCVBUF`, `ppoll`,
   `epoll_pwait`, `timerfd`, `signalfd`.
+
+## 4. Evidence index
+
+- **The straces and the marked list**: `notes/px34/linux/lobo-944edc1/`
+  (`w1/`, `w4/`: `serve`, `status`, `-s status`, `-s reload`, `-s stop`,
+  `requests.out`; strace 6.8 `-f -s 256 -yy`, Linux 7.2.8, lobo
+  `2dc94b06…`), `lobo.shapes.tsv` (100 lines), `strip-yy.py`,
+  `build-lobo.sh`, `strace-lobo.sh`; the files' text:
+  `proc-sys-container.txt`. The marked list: §2.
+- **The probes on both**: Linux's transcripts before any kernel change,
+  `notes/px34/linux/witness/{probes,soak,ctl}.linux.txt`; red first on
+  the trunk kernel: `notes/px34/kasumi/red-trunk-7c2c70e.mpx4-unix.out`
+  and its serial log (`cc26498c…`: AF_UNIX -EAFNOSUPPORT, seqpacket
+  messages merged, the boot hung at the deadline); green: every leg of
+  `tests/mpx4-unix` (probes 259 lines, soak, ctl 20 lines, each
+  byte-identical to Linux's but the `~` lines U2 holds): kasumi TCG
+  (`notes/px34/kasumi/g1-041a4c8/mpx4-unix.out`, 60 PASS) and hasu KVM
+  (`notes/px34/hasu/k1-4dacb8d/` three rounds, `k2-35a8289/` one round
+  and one under `taskset -c 0-3`, 60 PASS each).
+- **The soak**: 10,000 Unix connections through one listener in a
+  second process, four census lines flat (`sockets 3, buffers 2,
+  frames free 62399` native BIOS; every leg flat), U4's books back to
+  `unix: sockets 0, buffers 0`, frames and inodes as before.
+- **lobo's client**: `lobo -c conf/lobo.conf status` (lobo `944edc1`,
+  `faa15783…`, built by `tools/mklobo`) exit 0, the server's answer
+  printed, byte-identical to Linux's (U6, every leg, both hosts).
+- **The kernel stack**: `~stack: 244 MiB and 36 pages taken (no more to
+  take); a thread then: EAGAIN` with `syscall 56: refused: no frame for
+  a thread's kernel stack, -11` (U5, every leg); trunk panicked there
+  (`sched: no frame for a stack`, px24's report; not re-run on trunk).
+- **The wolf witness's memory**: `notes/px34/kasumi/ready-none-128M.log`
+  (head, all ten commands exit 0) against
+  `trunk-ready-none-128M.log` (`waitwolf` killed after -ENOMEM).
+- **Planted breaks, red in CI and reverted**: A, seqpacket messages
+  merged (`fc3d06a`), run **38192212617**: mpx4-unix U1 (the messages
+  read as one), the boot held to its 300 s deadline; reverted
+  `eae4e15`. B, an unlinked socket name kept (`67c1275`), run
+  **38198179503**: mpx4-unix U1 and U4 (the inodes left), red in 3 s;
+  reverted `c5bca96`. Every other job of 38198179503 green, mpx4-tcp
+  and mpx4-ready with the 1024-block line among them.
+- **Kernel build times** (kasumi, `px13-ubuntu`, the same container,
+  twice each): `kmain_console` release trunk 200 s / 199 s, head 54 s /
+  54 s; `kmain_sockets` release trunk 180 s, head 54 s; native 1–2 s
+  both.
+- **Boot counts**: kasumi TCG — the gauntlet 255 boots across every
+  suite (`g1-041a4c8/*-runs.txt`; mpx4-unix 12), the reruns of
+  mpx4-tcp and mpx4-ready on its images, the development runs of
+  mpx4-unix (about 30), four readiness boots at 128 and 256 MiB; hasu
+  KVM — mpx4-unix 60 boots (five rounds of 12, one under taskset), all
+  `accel=kvm`; CI — the runs below.
+- **The gauntlet** (`g1-041a4c8/summary.txt`, wolf 0.2.27 `6f5713a2…`,
+  lupin 0.1.50, QEMU 11.1.1, strict env: `PAX_REQUIRE_UEFI=1`,
+  `WOLF_PAIRING_REQUIRE_SIBLING=1`): every suite rc 0 but mpx4-tcp and
+  mpx4-ready (T1, the `tcp: 256 blocks` line: P10's miss), both rc 0
+  after `b29fe25` on the same images. 0 SKIP throughout.
+- **CI green at head**: in the PR.
+
+## 5. Done-when
+
+- Branch `px34` on origin; PR wolffe-lang/pax#37, open, unmerged, the
+  five sections by name, commit shas as bullets, a test checklist.
+- CI green at the head (the PR names the run).
+- `wolf/tools/lane-audit.sh pax px34 37` run from the org directory,
+  its exit status read directly (in the PR).
+- Trees: kasumi `~/lanes/px34/` pruned to the scripts, the evidence,
+  lobo's build and the caches (build trees, gauntlet tree and trunk
+  tree removed); hasu `~/lanes/px34/` the head's copy, the images and
+  the evidence; no worktree; no process of the lane left. podman
+  images untouched (`px13-ubuntu` is every lane's; this lane made
+  none; every container ran `--rm`).
+- Nothing merged, nothing tagged, nothing closed; nothing filed.
