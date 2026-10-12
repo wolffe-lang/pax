@@ -967,17 +967,56 @@ static long raw_thread(char *top)
     return r;
 }
 
+/* A thread like `raw_thread`'s that waits on the futex word `w` until
+   it is no longer 0, and only then ends: while it waits it holds its
+   kernel stack, so no dead thread's stack is left to reuse. */
+static long parked_thread(char *top, volatile int *w)
+{
+    long r;
+    register long r10 __asm__("r10") = 0;
+    register long r8 __asm__("r8") = 0;
+    register volatile int *r12 __asm__("r12") = w;
+    unsigned long flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM;
+    __asm__ volatile(
+        "syscall\n\t"
+        "test %%rax, %%rax\n\t"
+        "jnz 1f\n\t"
+        "2:\n\t"
+        "mov $202, %%eax\n\t"
+        "mov %%r12, %%rdi\n\t"
+        "xor %%esi, %%esi\n\t"
+        "xor %%edx, %%edx\n\t"
+        "xor %%r10d, %%r10d\n\t"
+        "syscall\n\t"
+        "cmpl $0, (%%r12)\n\t"
+        "je 2b\n\t"
+        "mov $60, %%eax\n\t"
+        "xor %%edi, %%edi\n\t"
+        "syscall\n\t"
+        "1:"
+        : "=a"(r)
+        : "0"(56L), "D"(flags), "S"(top), "d"(0L), "r"(r10), "r"(r8), "r"(r12)
+        : "rcx", "r11", "memory");
+    return r;
+}
+
 static void *chunks[2048];
 static void *pages[8192];
+static volatile int parked;
 
 static void stacks(void)
 {
     say("== a thread with no frame for its kernel stack\n");
     size_t sz = 65536;
-    char *st = mmap(0, 3 * sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    memset(st, 0, 3 * sz);
+    char *st = mmap(0, 4 * sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    memset(st, 0, 4 * sz);
     long r = raw_thread(st + sz);
     say("a thread before: %s\n", r > 0 ? "ok" : ename((int)-r));
+    nap(50);
+    /* This clone takes back the stack of the one that ended; the thread
+       then waits, keeping its own. */
+    r = parked_thread(st + 2 * sz, &parked);
+    say("a thread that waits: %s\n", r > 0 ? "ok" : ename((int)-r));
     nap(50);
     int nc = 0, np = 0;
     while (nc < 2048) {
@@ -992,18 +1031,20 @@ static void stacks(void)
             break;
         pages[np++] = m;
     }
-    r = raw_thread(st + 2 * sz);
+    r = raw_thread(st + 3 * sz);
     say("~stack: %d MiB and %d pages taken%s; a thread then: %s\n", nc, np,
         nc < 2048 || np < 8192 ? " (no more to take)" : "", r > 0 ? "ok" : ename((int)-r));
     for (int i = 0; i < nc; i++)
         munmap(chunks[i], 1 << 20);
     for (int i = 0; i < np; i++)
         munmap(pages[i], 4096);
+    parked = 1;
+    syscall(SYS_futex, &parked, 1 /* FUTEX_WAKE */, 1, 0, 0, 0);
     nap(50);
-    r = raw_thread(st + 3 * sz);
+    r = raw_thread(st + 4 * sz);
     say("a thread after the memory came back: %s\n", r > 0 ? "ok" : ename((int)-r));
     nap(50);
-    munmap(st, 3 * sz);
+    munmap(st, 4 * sz);
 }
 
 /* --- the soak ------------------------------------------------------------ */
