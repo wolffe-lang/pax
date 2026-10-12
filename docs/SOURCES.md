@@ -591,3 +591,21 @@ start-up.
 | the textbook methods: additive synthesis (a periodic wave as a sum of sine partials), wavetable lookup by a phase accumulator, ADSR envelopes, the linear-congruential generator, one-pole low-pass filters, vowel formants as a fixed spectral envelope, constant-power panning, a look-ahead peak limiter, the Goertzel algorithm (one DFT bin) | — | general knowledge | the author's own knowledge, no text copied | `user/play/orch.lu`, `tools/orch-check` |
 | the published partial series of church and tubular bells (hum 0.5, prime 1, tierce 1.2, quint 1.5, nominal 2) and of a kettledrum's membrane modes (about 1 : 1.50 : 1.74 : 2.00 : 2.24 : 2.49); the vowel "ah"'s first formants (about 750, 1150, 2800 Hz) | — | general knowledge (acoustics) | the author's own knowledge | `orch.lu`'s bells, timpani and choir |
 | QEMU 11.1.1's `wav` backend (kasumi, nomad-1) and the CI runner's | — | GPL-2.0 (a program we run) | measured: its data size is left 0 when QEMU ends (as px30's `wav-notes` found) | `tools/orch-check` |
+
+## px36: the file changes (modes, times and links; the pin to 0.2.28)
+
+No kernel's, libc's or file system's source was read or searched for
+(not Linux's, a BSD's, any tmpfs). boreutils and pelt are used as built
+from their own repositories at their pins; their source was not read.
+No GNU, busybox, uutils or toybox source. Permissively licensed
+kernels: none consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| man-pages `chmod(2)`/`fchmodat(2)`, `chown(2)` (root since Linux 2.2.13 "treated like other users": the set-ID bits), `utimensat(2)` (UTIME_NOW, UTIME_OMIT, ctime "even if the other timestamps don't change", AT_SYMLINK_NOFOLLOW, "the greatest value supported … not greater than the specified time"), `link(2)`/`linkat(2)` (Linux does not dereference `oldpath`; AT_SYMLINK_FOLLOW, AT_EMPTY_PATH), `symlink(2)`, `readlink(2)`, `open(2)` (O_NOFOLLOW), `path_resolution(7)` (a link before the last component, the final link, trailing slashes, 40 links), `symlink(7)` (a link's permissions are always 0777), `capabilities(7)` (CAP_FSETID) | man-pages 6.x on kasumi | their own | read | every new call's arguments and errors; which calls follow a last link |
+| POSIX.1-2024 `chown` (EINVAL for an owner or group ID the implementation does not support) | 2024 | IEEE/The Open Group | read | the refusal of an owner that is not root |
+| uapi headers in the sparse checkout: `linux/fcntl.h` (AT_SYMLINK_FOLLOW, AT_SYMLINK_NOFOLLOW, AT_EMPTY_PATH), `linux/stat.h` (UTIME_NOW, UTIME_OMIT, S_IFLNK), `arch/x86/entry/syscalls/syscall_64.tbl` (the numbers) | the sparse checkout's | GPL-2.0 WITH Linux-syscall-note | read | the constants |
+| wolf's CHANGELOG at `v0.2.28` ("Read this before you bump the pin") | wolf-lang `f71ece8e` | wolf's own | read | the pin |
+| black-box Linux 7.2.8 (kasumi, a throwaway `px13-ubuntu` container as root, strace 6.8, every program on a tmpfs): `strace -f` of pax's own builds of boreutils `2ab3651` (`chmod`, `touch`, `ln`, `mkdir -m`, `cp -p`, and `ls -l`, `stat`, `readlink`, `cat`, `rm`, `mv` meeting links; `notes/px36/straces/`) | — | — | measured | the calls and flags bu22's binaries make: `chmod`, `utimensat` (UTIME_NOW, UTIME_OMIT, AT_SYMLINK_NOFOLLOW), `linkat`, `symlink`, `readlink`, `rename` over a temporary name |
+| black-box Linux: `user/elf/tree.c`'s px36 sections, pid 1 with its root a tmpfs in a throwaway container (`tools/linux-tree`) | — | pax's own | measured | what the man pages leave open: a link's `st_blocks` (none below a 128-byte target, eight from it), a link's atime moved by a walk through it and by `readlink`, root's `chown` clearing set-ID bits whatever ids were asked, -1 included, a new name with a trailing slash -ENOENT, O_NOFOLLOW with O_DIRECTORY -ENOTDIR, `fchmodat2`'s AT_SYMLINK_NOFOLLOW on a link -EOPNOTSUPP, both UTIME_OMIT leaving ctime, times before 1970 and past 2262 |
+| black-box Linux: `user/console/shell-changes.keys` typed into the same binaries (`tools/linux-tree`) | — | — | measured | the session's reference transcript, taken afresh at every run |
