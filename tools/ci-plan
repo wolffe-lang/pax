@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+"""tools/ci-plan — which suites a CI run runs, and on which legs (px37).
+
+    tools/ci-plan [--event E] [--action A] [--label L] [--labels L1,L2]
+                  [--base SHA --head SHA | --paths-from FILE]
+                  [--tier full|pr] [--suites "S..."]
+                  [--github-output FILE] [--json]
+
+Every option also reads an environment variable of its name in capitals
+(EVENT, ACTION, LABEL, LABELS, BASE, HEAD, IN_TIER, IN_SUITES), which is
+how the workflow's `plan` job passes the event in.
+
+THE TIERS. A suite is a job of .github/workflows/ci.yml (proof, mkw,
+mpx1, ..., mpx4-unix). A leg is one tier of the compiler (native,
+release) on one firmware (BIOS, UEFI); the full suite runs four.
+
+  full  every suite, every leg. A push to trunk, the nightly `schedule`,
+        a `workflow_dispatch` (unless it asks for `pr`), a pull request
+        carrying the `full-matrix` label, and a pull request whose
+        change touches a FULL path of tools/ci-tiers.map (the toolchain
+        pins, the kernel's core, the harness every boot goes through).
+  pr    a pull request's other runs: the suites the change can affect
+        (tools/ci-tiers.map and the tests' own text, below), each on
+        ONE leg, `--tier native --firmware bios` (PR_LEGS). Native is
+        the tier whose build is cheap (the release tier's LLVM build is
+        about half of every full run's job-minutes); BIOS is the leg on
+        which every suite runs its widest set of scenarios.
+  noop  a pull request's `labeled` event for a label other than
+        `full-matrix`: nothing runs.
+
+WHICH SUITES A PATH SELECTS (the pr tier). The union of:
+  - every rule of tools/ci-tiers.map whose glob matches the path;
+  - tests/S and anything under tests/S.d/: suite S;
+  - a kernel/kmainNAME.lu: each suite whose script names kmainNAME;
+  - a tools/, user/, boot/, font/, kernel/ or tests/ path: each suite
+    whose script (or its job's block in ci.yml, or a tool the script
+    names, followed through the tools it names in turn) names that path
+    or a directory above it. A FULL tool's text is not followed: a
+    change to it is FULL anyway, and following lib.sh would make every
+    path every suite's.
+FULL wins over everything. A path that nothing matches is FULL: an
+unknown path never shrinks a run. `macos-run` runs when `proof` does
+(it boots proof's ISO).
+
+Output: `tier=`, `suites=` (a JSON list) and `legs=` lines, to
+--github-output (appended) and to standard output; with --json, one
+JSON object instead. The reasons, one line per changed path, go to
+standard error, so a run's log says why it has the jobs it has.
+Exit 0; 2 on a usage error or a broken map.
+"""
+import argparse
+import fnmatch
+import json
+import os
+import re
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WORKFLOW = ".github/workflows/ci.yml"
+MAP = "tools/ci-tiers.map"
+PR_LEGS = "--tier native --firmware bios"
+FULL_LABEL = "full-matrix"
+NOT_SUITES = {"plan", "tier"}
+SPECIAL = {"FULL", "ALL", "NONE"}
+
+
+def die(msg):
+    print("ci-plan: " + msg, file=sys.stderr)
+    sys.exit(2)
+
+
+def read(rel):
+    with open(os.path.join(ROOT, rel), encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+def workflow_jobs():
+    """The workflow's jobs, in order: {id: the job's block of text}."""
+    jobs, cur, inside = {}, None, False
+    for line in read(WORKFLOW).splitlines():
+        if re.match(r"^jobs:\s*$", line):
+            inside = True
+            continue
+        if not inside:
+            continue
+        m = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+        if m:
+            # The comment block above a job describes that job, not the
+            # one before it: move it.
+            lead = []
+            if cur:
+                while jobs[cur] and re.match(r"^\s*(#.*)?$", jobs[cur][-1]):
+                    lead.insert(0, jobs[cur].pop())
+            cur = m.group(1)
+            jobs[cur] = lead
+        elif re.match(r"^\S", line):
+            inside = False
+        elif cur:
+            jobs[cur].append(line)
+    return {k: "\n".join(v) for k, v in jobs.items()}
+
+
+def suites_of(jobs):
+    return [j for j in jobs if j not in NOT_SUITES]
+
+
+def load_map(suites):
+    groups, rules = {}, []
+    for n, raw in enumerate(read(MAP).splitlines(), 1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        m = re.match(r"^(@[a-z0-9_-]+)\s*=\s*(.*)$", line)
+        if m:
+            members = m.group(2).split()
+            for s in members:
+                if s not in suites:
+                    die("%s:%d: group %s names %s, which is no job of %s" % (MAP, n, m.group(1), s, WORKFLOW))
+            groups[m.group(1)] = members
+            continue
+        f = line.split()
+        if len(f) < 2:
+            die("%s:%d: a rule is GLOB TARGET..." % (MAP, n))
+        targets = []
+        for t in f[1:]:
+            if t in SPECIAL:
+                targets.append(t)
+            elif t.startswith("@"):
+                if t not in groups:
+                    die("%s:%d: no group %s (define it above its first use)" % (MAP, n, t))
+                targets += groups[t]
+            elif t in suites:
+                targets.append(t)
+            else:
+                die("%s:%d: %s is no job of %s" % (MAP, n, t, WORKFLOW))
+        rules.append((f[0], targets, n))
+    return groups, rules
+
+
+def full_tools(rules):
+    return {g for g, t, _ in rules if "FULL" in t and g.startswith("tools/") and "*" not in g}
+
+
+REF = re.compile(r"(?<![A-Za-z0-9_.-])((?:tools|user|boot|font|kernel|tests|docs)/[A-Za-z0-9._/-]*[A-Za-z0-9_-])")
+KMAIN = re.compile(r"\b(kmain(?:_[a-z0-9_]+)?)\b")
+
+
+def suite_refs(suite, jobs, fulltools):
+    """The paths (or path prefixes) a suite reads, by its own text."""
+    texts = [jobs.get(suite, "")]
+    scripts = ["tests/" + suite] if os.path.isfile(os.path.join(ROOT, "tests", suite)) else []
+    texts += [read(s) for s in scripts]
+    refs, kmains = set(scripts), set()
+    for t in texts:
+        kmains |= set(KMAIN.findall(t))
+    todo = []
+    for t in texts:
+        todo += REF.findall(t)
+    seen = set()
+    while todo:
+        r = todo.pop().rstrip("/.")
+        if r in seen:
+            continue
+        seen.add(r)
+        if r.count("/") < 1 or r.endswith("/"):
+            continue
+        refs.add(r)
+        if r.startswith("tools/") and r not in fulltools and os.path.isfile(os.path.join(ROOT, r)):
+            text = read(r)
+            todo += REF.findall(text)
+            kmains |= set(KMAIN.findall(text))
+    for k in kmains:
+        refs.add("kernel/%s.lu" % k)
+    return refs
+
+
+def derived(path, suites, refs):
+    out = set()
+    for s in suites:
+        if path == "tests/" + s or path.startswith("tests/%s.d/" % s):
+            out.add(s)
+            continue
+        for r in refs[s]:
+            if path == r or path.startswith(r + "/"):
+                out.add(s)
+                break
+    return out
+
+
+def classify(path, suites, rules, refs):
+    """-> (set of targets, list of reasons); a target is a suite, FULL or ALL."""
+    got, why, matched = set(), [], False
+    for g, targets, n in rules:
+        if fnmatch.fnmatchcase(path, g):
+            matched = True
+            got |= set(targets) - {"NONE"}
+            why.append("%s:%d %s" % (MAP, n, g))
+    d = derived(path, suites, refs)
+    if d:
+        matched = True
+        got |= d
+        why.append("read by " + " ".join(sorted(d)))
+    if not matched:
+        got.add("FULL")
+        why.append("no rule and no suite reads it: FULL")
+    return got, why
+
+
+def changed_paths(base, head):
+    try:
+        out = subprocess.run(["git", "-C", ROOT, "diff", "--name-only", "--no-renames", base, head],
+                             check=True, capture_output=True, text=True).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print("ci-plan: git diff %s %s failed (%s): FULL" % (base, head, e), file=sys.stderr)
+        return None
+    return [p for p in out.splitlines() if p]
+
+
+def plan(a):
+    jobs = workflow_jobs()
+    suites = suites_of(jobs)
+    _, rules = load_map(suites)
+    ft = full_tools(rules)
+    refs = {s: suite_refs(s, jobs, ft) for s in suites}
+    log = []
+
+    def result(tier, chosen, legs):
+        if "proof" in chosen and "macos-run" in suites:
+            chosen = set(chosen) | {"macos-run"}
+        return {"tier": tier, "suites": [s for s in suites if s in chosen], "legs": legs, "log": log}
+
+    labels = [x for x in (a.labels or "").split(",") if x]
+    asked = [s for s in (a.suites or "").split() if s]
+    for s in asked:
+        if s not in suites:
+            die("--suites: %s is no job of %s" % (s, WORKFLOW))
+    ev = a.event or "workflow_dispatch"
+    log.append("event=%s action=%s label=%s labels=%s" % (ev, a.action or "-", a.label or "-", ",".join(labels) or "-"))
+
+    if ev == "pull_request" and a.action == "labeled" and a.label != FULL_LABEL:
+        log.append("a label other than %s: noop" % FULL_LABEL)
+        return result("noop", set(), PR_LEGS)
+    if ev == "workflow_dispatch":
+        tier = a.tier or "full"
+        if tier not in ("full", "pr"):
+            die("--tier takes full or pr")
+        chosen = set(asked) if asked else set(suites)
+        log.append("dispatch: tier %s, %s" % (tier, " ".join(asked) if asked else "every suite"))
+        return result(tier, chosen, "" if tier == "full" else PR_LEGS)
+    if ev != "pull_request":
+        log.append("%s: full" % ev)
+        return result("full", set(suites), "")
+    if FULL_LABEL in labels:
+        log.append("the %s label: full" % FULL_LABEL)
+        return result("full", set(suites), "")
+
+    if a.paths_from:
+        f = sys.stdin if a.paths_from == "-" else open(a.paths_from)
+        paths = [p.strip() for p in f.read().splitlines() if p.strip()]
+    elif a.base and a.head:
+        paths = changed_paths(a.base, a.head)
+    else:
+        paths = None
+    if paths is None:
+        log.append("no list of changed paths: full")
+        return result("full", set(suites), "")
+
+    chosen, full = set(), []
+    for p in paths:
+        got, why = classify(p, suites, rules, refs)
+        if "FULL" in got:
+            full.append(p)
+        if "ALL" in got:
+            got |= set(suites)
+        got -= SPECIAL
+        log.append("%s -> %s  [%s]" % (p, "FULL" if p in full else (" ".join(s for s in suites if s in got) or "nothing"), "; ".join(why)))
+        chosen |= got
+    if full:
+        log.append("%d path(s) FULL: full" % len(full))
+        return result("full", set(suites), "")
+    log.append("%d path(s): pr tier, %d suite(s), legs %s" % (len(paths), len(chosen), PR_LEGS))
+    return result("pr", chosen, PR_LEGS)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="which suites a CI run runs (px37)")
+    env = os.environ.get
+    ap.add_argument("--event", default=env("EVENT"))
+    ap.add_argument("--action", default=env("ACTION"))
+    ap.add_argument("--label", default=env("LABEL"))
+    ap.add_argument("--labels", default=env("LABELS"))
+    ap.add_argument("--base", default=env("BASE"))
+    ap.add_argument("--head", default=env("HEAD"))
+    ap.add_argument("--paths-from")
+    ap.add_argument("--tier", default=env("IN_TIER") or None)
+    ap.add_argument("--suites", default=env("IN_SUITES"))
+    ap.add_argument("--github-output")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args()
+    r = plan(a)
+    for line in r["log"]:
+        print("ci-plan: " + line, file=sys.stderr)
+    if a.json:
+        print(json.dumps({k: r[k] for k in ("tier", "suites", "legs")}))
+    else:
+        out = "tier=%s\nsuites=%s\nlegs=%s\n" % (r["tier"], json.dumps(r["suites"]), r["legs"])
+        sys.stdout.write(out)
+        if a.github_output:
+            with open(a.github_output, "a") as f:
+                f.write(out)
+
+
+if __name__ == "__main__":
+    main()
