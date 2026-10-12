@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""tests/ci-plan — the CI planner's own proof (px37). No QEMU: python3 only.
+
+    tests/ci-plan
+
+  P1  the tiers by event: a trunk push, the nightly, a dispatch, the
+      `full-matrix` label are full (every suite, every leg); another
+      label's `labeled` event is a noop; a dispatch can ask for the pr
+      leg or for named suites.
+  P2  the pr tier by path, one change per area: the network's suites for
+      kernel/tcp, sound's for user/play, nothing for notes; a kmain, a
+      test, a user program and a shared device select their readers.
+  P3  FULL wins: the toolchain pins, the kernel's core, the harness and
+      any path no rule knows make a pull request's run full; a pull
+      request whose changed paths cannot be read is full too.
+  P4  the wiring of .github/workflows/ci.yml: every suite job needs the
+      plan and runs only when chosen; every test that takes a leg gets
+      $PAX_LEGS and accepts --tier and --firmware; the `tier` job needs
+      every job; cancel-in-progress is for pull requests only; the
+      trunk push, the nightly and the label are triggers.
+  P5  (a WARN, not a failure) every tracked path is known to the map or
+      read by a suite; an unknown one makes its pull request full.
+
+Exit 0 when every check passes, 1 otherwise.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PLAN = os.path.join(ROOT, "tools", "ci-plan")
+PR_LEGS = "--tier native --firmware bios"
+NET = ["mpx4-net", "mpx4-udp", "mpx4-tcp", "mpx4-ready", "mpx4-session", "mpx4-unix"]
+MUSIC = ["mpx3-speaker", "mpx3-sound", "mpx3-orchestra", "mpx4-session"]
+fails = 0
+
+
+def say(ok, what):
+    global fails
+    print("ci-plan: %s %s" % ("PASS" if ok else "FAIL", what))
+    fails += not ok
+
+
+def plan(paths=None, **kw):
+    args = [PLAN, "--json"]
+    for k, v in kw.items():
+        args += ["--" + k.replace("_", "-"), v]
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("EVENT", "ACTION", "LABEL", "LABELS", "BASE", "HEAD", "IN_TIER", "IN_SUITES")}
+    if paths is not None:
+        args += ["--paths-from", "-"]
+    r = subprocess.run(args, input="\n".join(paths or []) + "\n", capture_output=True, text=True, env=env)
+    if r.returncode != 0:
+        return {"tier": "ERROR rc=%d %s" % (r.returncode, r.stderr.strip()[-300:]), "suites": [], "legs": ""}
+    return json.loads(r.stdout)
+
+
+def jobs():
+    out, inside = [], False
+    for line in open(os.path.join(ROOT, ".github/workflows/ci.yml")):
+        if line.rstrip() == "jobs:":
+            inside = True
+        elif inside:
+            m = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+            if m:
+                out.append(m.group(1))
+    return out
+
+
+JOBS = jobs()
+SUITES = [j for j in JOBS if j not in ("plan", "tier")]
+
+
+def expect(name, got, tier, suites=None, has=(), lacks=(), legs=None):
+    why = []
+    if got["tier"] != tier:
+        why.append("tier %s, wanted %s" % (got["tier"], tier))
+    if suites is not None and sorted(got["suites"]) != sorted(suites):
+        why.append("suites %s, wanted %s" % (" ".join(got["suites"]) or "none", " ".join(suites) or "none"))
+    for s in has:
+        if s not in got["suites"]:
+            why.append("lacks " + s)
+    for s in lacks:
+        if s in got["suites"]:
+            why.append("has " + s)
+    if legs is None:
+        legs = "" if tier == "full" else PR_LEGS
+    if got["legs"] != legs:
+        why.append("legs '%s', wanted '%s'" % (got["legs"], legs))
+    shown = "every suite (%d)" % len(SUITES) if sorted(got["suites"]) == sorted(SUITES) else (" ".join(got["suites"]) or "no suite")
+    say(not why, "%s: %s%s" % (name, tier, (" (" + "; ".join(why) + ")") if why else ", " + shown))
+
+
+# --- P1 the tiers by event ------------------------------------------------------
+expect("P1 a push to trunk", plan(event="push"), "full", SUITES)
+expect("P1 the nightly", plan(event="schedule"), "full", SUITES)
+expect("P1 a dispatch, no inputs", plan(event="workflow_dispatch"), "full", SUITES)
+expect("P1 a dispatch, tier pr", plan(event="workflow_dispatch", tier="pr"), "pr", SUITES)
+expect("P1 a dispatch, one suite", plan(event="workflow_dispatch", suites="mpx3-tree"), "full", ["mpx3-tree"])
+expect("P1 a dispatch, proof brings macos-run", plan(event="workflow_dispatch", suites="proof"), "full", ["proof", "macos-run"])
+expect("P1 a pull request labelled full-matrix, notes only",
+       plan(["notes/px99.md"], event="pull_request", action="synchronize", labels="bug,full-matrix"), "full", SUITES)
+expect("P1 the full-matrix label added",
+       plan(["notes/px99.md"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "full", SUITES)
+expect("P1 another label added",
+       plan(["kernel/tcp/tcp.lu"], event="pull_request", action="labeled", label="bug", labels="bug"), "noop", [])
+
+# --- P2 the pr tier by path -------------------------------------------------------
+pr = dict(event="pull_request", action="synchronize")
+expect("P2 a network change (kernel/tcp)", plan(["kernel/tcp/tcp.lu"], **pr), "pr", NET)
+expect("P2 a network change with its test and its note",
+       plan(["kernel/tcp/tcp.lu", "tests/mpx4-tcp", "notes/px99-tcp.md"], **pr), "pr", NET)
+expect("P2 a music change (user/play)", plan(["user/play/play.lu"], **pr), "pr", MUSIC)
+expect("P2 a music change with its test and its note",
+       plan(["user/play/parts.lu", "tests/mpx3-orchestra", "notes/px99-format.md"], **pr), "pr", MUSIC)
+expect("P2 a notes-only change", plan(["notes/px99-x.md", "notes/px99/run.txt", "README.md"], **pr), "pr", [])
+expect("P2 two areas: the union", plan(["kernel/tcp/tcp.lu", "user/play/play.lu"], **pr), "pr", sorted(set(NET + MUSIC)))
+expect("P2 a kmain selects its suites", plan(["kernel/kmain_sockets.lu"], **pr), "pr",
+       has=["mpx4-udp", "mpx4-tcp", "mpx4-ready"], lacks=["mpx3-orchestra", "mpx2-heap"])
+expect("P2 a test selects itself", plan(["tests/mpx3-tree"], **pr), "pr", has=["mpx3-tree"], lacks=["mpx4-tcp"])
+expect("P2 a user program selects its reader", plan(["user/elf/threads.c"], **pr), "pr", has=["mpx3-threads"], lacks=["mpx4-tcp"])
+expect("P2 the bus the sound device shares", plan(["kernel/pci/pci.lu"], **pr), "pr", has=["mpx4-net", "mpx3-sound"], lacks=["mpx2-heap"])
+expect("P2 the stub selects the proof and macos-run", plan(["boot/stub/stub.S"], **pr), "pr", has=["proof", "macos-run"], lacks=["mpx4-tcp"])
+expect("P2 the census's own", plan(["docs/CENSUS.md"], **pr), "pr", ["census"])
+expect("P2 CI itself: every suite, the pr leg", plan([".github/workflows/ci.yml"], **pr), "pr", SUITES)
+
+# --- P3 FULL wins ---------------------------------------------------------------------
+for p in ["kernel/wolf.pin", "boot/limine.pin", "kernel/wolf.pkg", "kernel/sched/sched.lu",
+          "kernel/interrupts/interrupts.lu", "boot/isr.S", "tools/build-kernel", "tools/lib.sh"]:
+    expect("P3 %s" % p, plan([p, "notes/px99.md"], **pr), "full", SUITES)
+expect("P3 a path no rule knows", plan(["newplace/thing.c"], **pr), "full", SUITES)
+expect("P3 FULL beside a narrow change", plan(["kernel/tcp/tcp.lu", "kernel/sched/sched.lu"], **pr), "full", SUITES)
+expect("P3 no changed paths to read", plan(**pr), "full", SUITES)
+expect("P3 a diff git cannot take", plan(base="0" * 40, head="1" * 40, **pr), "full", SUITES)
+
+# --- P4 the wiring -------------------------------------------------------------------------
+wf = open(os.path.join(ROOT, ".github/workflows/ci.yml")).read()
+blocks = {}
+for j in JOBS:
+    m = re.search(r"^  %s:\s*\n(.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)" % re.escape(j), wf, re.M | re.S)
+    blocks[j] = m.group(1) if m else ""
+say("plan" in JOBS and "tier" in JOBS, "P4 the workflow has a plan job and a tier job")
+for j in SUITES:
+    b = blocks[j]
+    needs = "[plan, proof]" if j == "macos-run" else "plan"
+    ok = ("    needs: %s\n" % needs) in b and ("    if: contains(fromJSON(needs.plan.outputs.suites), '%s')\n" % j) in b
+    why = ""
+    script = os.path.join(ROOT, "tests", j)
+    run = re.search(r"^\s+run: tests/%s\b(.*)$" % re.escape(j), b, re.M)
+    if run and j not in ("proof", "census"):
+        text = open(script).read()
+        takes = "--tier)" in text and "--firmware)" in text
+        ok = ok and run.group(1).endswith(" $PAX_LEGS") and takes and "PAX_LEGS: ${{ needs.plan.outputs.legs }}" in b
+        why = " (the step: tests/%s%s; the script takes --tier/--firmware: %s)" % (j, run.group(1), takes)
+    say(ok, "P4 %s needs the plan, runs when chosen%s" % (j, why))
+tn = re.findall(r"^      - ([A-Za-z0-9_-]+)\s*$", blocks["tier"], re.M)
+say(sorted(tn) == sorted(["plan"] + SUITES) and "    if: always()" in blocks["tier"],
+    "P4 the tier job runs always and needs every job (%d of %d)" % (len(tn), len(SUITES) + 1))
+say("cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in wf, "P4 cancel-in-progress for pull requests only")
+say(re.search(r"^  push:\n    branches: \[trunk\]", wf, re.M) is not None, "P4 a push to trunk runs")
+say(re.search(r"^  schedule:\n(\s+#.*\n)*\s+- cron: ", wf, re.M) is not None, "P4 the nightly runs")
+say("types: [opened, synchronize, reopened, labeled]" in wf, "P4 adding a label starts a run")
+
+# --- P5 every tracked path is known --------------------------------------------------------
+try:
+    tracked = subprocess.run(["git", "-C", ROOT, "ls-files"], check=True, capture_output=True, text=True).stdout.split()
+except (subprocess.CalledProcessError, FileNotFoundError):
+    tracked = []
+if tracked:
+    r = subprocess.run([PLAN, "--event", "pull_request", "--paths-from", "-"], input="\n".join(tracked),
+                       capture_output=True, text=True)
+    unknown = [l.split(" -> ")[0].replace("ci-plan: ", "") for l in r.stderr.splitlines() if "no rule and no suite reads it" in l]
+    if unknown:
+        print("ci-plan: WARN P5 %d tracked path(s) no rule knows (a pull request touching one runs full): %s"
+              % (len(unknown), " ".join(unknown[:20])))
+    else:
+        print("ci-plan: PASS P5 every one of %d tracked paths is known" % len(tracked))
+else:
+    print("ci-plan: WARN P5 not a git checkout: the tracked paths not checked")
+
+print("ci-plan: %s" % ("PASS" if fails == 0 else "FAIL (%d)" % fails))
+sys.exit(1 if fails else 0)
