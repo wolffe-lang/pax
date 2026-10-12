@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""tw-probe — px25: what Linux does with a SYN that reuses a four-tuple its
+server end holds in TIME-WAIT, its sequence number below the old
+connection's, and with a reset that follows. Black box, on loopback, as
+root (a raw socket and a packet socket): the rule kernel/tcp follows.
+
+  tools/tw-probe [--no-rst]   (in a throwaway container, --privileged)
+
+The server listens on 127.0.0.1:P; a client from 127.0.0.1:Q connects;
+the server closes first, the client after, so the server's end of
+(P, Q) is in TIME-WAIT (its listener still listening — lobo's case, and
+QEMU's user network reusing the host's port Q within 60 s). Then, from
+raw segments with no option (PAX's peers send none but MSS):
+  1. a SYN from Q, its sequence number 100,000 below where the old
+     connection ended: what comes back (an ACK of the old numbers, or a
+     SYN-ACK);
+  2. a reset with the sequence number that ACK asked for;
+  3. the same SYN again: what comes back.
+--no-rst leaves step 2 out (the control: what the SYN meets without it).
+Prints one line a step; exit 0 when the probe ran.
+Written from RFC 9293, RFC 1122 §4.2.2.13, RFC 1337, packet(7), raw(7).
+No network stack's source.
+"""
+import os, select, socket, struct, sys, time
+
+P, Q = 47801, 47802
+
+
+def csum(b):
+    if len(b) % 2:
+        b += b"\0"
+    s = sum(struct.unpack("!%dH" % (len(b) // 2), b))
+    while s >> 16:
+        s = (s & 0xffff) + (s >> 16)
+    return ~s & 0xffff
+
+
+def seg(sport, dport, seq, ack, flags, win=65535):
+    h = struct.pack("!HHIIBBHHH", sport, dport, seq & 0xffffffff, ack & 0xffffffff, 5 << 4, flags, win, 0, 0)
+    ph = socket.inet_aton("127.0.0.1") * 2 + struct.pack("!BBH", 0, 6, len(h))
+    c = csum(ph + h)
+    return h[:16] + struct.pack("!H", c) + h[18:]
+
+
+FIN, SYN, RST, PSH, ACK = 1, 2, 4, 8, 16
+NAMES = [(SYN, "SYN"), (ACK, "ACK"), (FIN, "FIN"), (RST, "RST"), (PSH, "PSH")]
+
+
+def fl(f):
+    return "|".join(n for b, n in NAMES if f & b) or "none"
+
+
+sniff = socket.socket(socket.AF_PACKET, socket.SOCK_DGRAM, socket.htons(0x0800))
+sniff.bind(("lo", 0))
+
+
+def segments(timeout):
+    """TCP segments between P and Q seen on lo for `timeout` seconds."""
+    out, end = [], time.time() + timeout
+    while time.time() < end:
+        r, _, _ = select.select([sniff], [], [], max(0, end - time.time()))
+        if not r:
+            break
+        d = sniff.recv(65535)
+        ihl = (d[0] & 15) * 4
+        if d[9] != 6:
+            continue
+        sp, dp, sq, ak, off, f = struct.unpack("!HHIIBB", d[ihl:ihl + 14])
+        if {sp, dp} == {P, Q}:
+            out.append((sp, dp, sq, ak, f))
+    return out
+
+
+lst = socket.socket()
+lst.bind(("127.0.0.1", P))
+lst.listen(8)
+cl = socket.socket()
+cl.bind(("127.0.0.1", Q))
+cl.connect(("127.0.0.1", P))
+a, _ = lst.accept()
+a.sendall(b"x")
+cl.recv(1)
+a.close()                       # the server's FIN first
+cl.recv(1)
+cl.close()                      # the client's FIN, ACKed: the server is in TIME-WAIT
+seen = segments(0.5)
+cfin = [s for s in seen if s[0] == Q and s[4] & FIN]
+if not cfin:
+    print("tw-probe: no FIN from the client seen"); sys.exit(2)
+end_seq = cfin[-1][2] + 1        # RCV.NXT of the server's TIME-WAIT end
+print("tw-probe: the server's end of 127.0.0.1:%d <- :%d is in TIME-WAIT (its listener still listening)" % (P, Q))
+
+raw = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
+low = end_seq - 100000
+raw.sendto(seg(Q, P, low, 0, SYN), ("127.0.0.1", 0))
+seen1 = segments(1.0)
+back = [s for s in seen1 if s[0] == P]
+print("tw-probe: 1. a SYN 100000 below RCV.NXT: the answer %s" % (", ".join(fl(s[4]) + (" ack=RCV.NXT" if s[3] == end_seq else "") for s in back) or "none"))
+mine = [s for s in seen1 if s[0] == Q and not (s[4] == SYN and s[2] == low & 0xffffffff)]
+print("tw-probe:    and from port %d after it (this host's own stack: no socket holds the port): %s" % (Q, ", ".join(fl(s[4]) for s in mine) or "nothing"))
+ackseq = next((s[3] for s in back if s[4] == ACK), None)
+if ackseq is None:
+    print("tw-probe: 2-3 not run: no bare ACK came"); sys.exit(0)
+if "--no-rst" in sys.argv:
+    print("tw-probe: 2. no reset (the control)")
+else:
+    raw.sendto(seg(Q, P, ackseq, 0, RST), ("127.0.0.1", 0))
+    segments(0.3)
+    print("tw-probe: 2. a reset at the sequence number that ACK asked for: sent")
+raw.sendto(seg(Q, P, low, 0, SYN), ("127.0.0.1", 0))
+back = [s for s in segments(1.0) if s[0] == P]
+print("tw-probe: 3. the same SYN again: the answer %s" % (", ".join(fl(s[4]) for s in back) or "none"))
+sys.exit(0)
