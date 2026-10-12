@@ -206,7 +206,7 @@ initramfs holds 11 programs, not 17.
   is the same after the rebases; the plant was not re-run.
 - **CI at the head**: the run named in the PR (a commit cannot name its
   own run). Superseded runs of this lane's own cancelled: 38164160849,
-  38171170156, 38171506242, 38185389228. Run 38172498060 (head 1f51b28
+  38171170156, 38171506242, 38185389228, 38186917715. Run 38172498060 (head 1f51b28
   before the rebase onto `7c2c70e`) finished green.
 
 ## 5. Done-when
