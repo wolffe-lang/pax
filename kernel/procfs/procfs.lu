@@ -40,6 +40,24 @@
 //! - `/sys/devices/system/cpu/online`: `0` (one CPU, `sysfs(5)`'s list
 //!   format).
 //!
+//! - px25: `/proc/<pid>/status` for every process not yet reaped, and
+//!   `/proc` lists their numbers after its fixed names (Linux's order):
+//!   the same fields as `self`'s, of that process's leader — Name, its
+//!   parent, its threads, the leader's mask, its resident pages — with
+//!   `State` `S (sleeping)` (PAX keeps no finer state for a reader that
+//!   is not the process itself: fixed, said so) or `Z (zombie)`.
+//! - px25: the test's census files, Linux's format with PAX's values:
+//!   `/proc/meminfo` (MemTotal, MemFree, MemAvailable only: the usable
+//!   frames, the free ones, the free ones again), `/proc/sys/fs/file-nr`
+//!   (open files in the table, 0, the table's size) and
+//!   `/proc/net/sockstat` (`sockets: used` the AF_UNIX sockets live,
+//!   `TCP: inuse` the blocks a descriptor or listener holds, `orphan 0`,
+//!   `tw` the live time-wait entries, `alloc` every block in use, `mem`
+//!   the frames kernel/tcp holds; `UDP: inuse` the datagram sockets
+//!   open, `mem 0`; the other lines Linux prints left out). Linux's
+//!   `/proc/net` is a link to `self/net`; here it is a directory
+//!   (named drift).
+//!
 //! No region, no heap. Written from proc(5), proc_pid_status(5),
 //! cgroups(7), sysfs(5) and black-box reads of the files on Linux. No
 //! Linux source; no other kernel's source.
@@ -47,13 +65,21 @@
 use frames
 use paging
 use sched
+use tcp
+use udp
+use unix
 
 const PAGE: u64 = 4096
 
 /// How many entries there are; also `NONE`'s value.
-pub const ENTRIES: u64 = 16
+pub const ENTRIES: u64 = 23
 /// No entry.
-pub const NONE: u64 = 16
+pub const NONE: u64 = 23
+/// px25: the entry `/proc/<pid>` (a reference carries the pid above
+/// bit 16: `pid << 16 | PIDDIR`), and its `status`.
+pub const PIDDIR: u64 = 21
+const PSTATUS: u64 = 22
+const EMASK: u64 = 0xffff
 /// An entry's parent when it sits in the root directory.
 pub const ROOT: u64 = 0xffff
 
@@ -64,46 +90,108 @@ const G_OVERCOMMIT: u64 = 3
 const G_CONTROLLERS: u64 = 4
 const G_CPUMAX: u64 = 5
 const G_ONLINE: u64 = 6
+const G_MEMINFO: u64 = 7 // px25
+const G_FILENR: u64 = 8
+const G_SOCKSTAT: u64 = 9
+const G_PSTATUS: u64 = 10
 
 const S_IFDIR: u64 = 0x4000
 const S_IFREG: u64 = 0x8000
 
-/// Entry `e`'s name.
+/// A reference's entry (px25: the low 16 bits; the pid above them).
+pub fn entry(r: u64) -> u64 {
+    r & EMASK
+}
+
+/// px25: the pid a reference carries (0: none, a fixed entry).
+pub fn pid_of(r: u64) -> u64 {
+    r >> 16
+}
+
+/// px25: the reference of `/proc/<pid>`.
+pub fn pid_dir(pid: u64) -> u64 {
+    (pid << 16) | PIDDIR
+}
+
+/// Fixed entry `e`'s name (not PIDDIR's, whose name is its pid).
 pub fn name(e: u64) -> str {
     if e == 0 { return "proc" }
     if e == 1 { return "self" }
-    if e == 2 { return "status" }
+    if e == 2 || e == PSTATUS { return "status" }
     if e == 3 { return "cgroup" }
     if e == 4 { return "sys" }
     if e == 5 { return "vm" }
     if e == 6 { return "overcommit_memory" }
     if e == 7 { return "sys" }
-    if e == 8 { return "fs" }
+    if e == 8 || e == 17 { return "fs" }
     if e == 9 { return "cgroup" }
     if e == 10 { return "cgroup.controllers" }
     if e == 11 { return "cpu.max" }
     if e == 12 { return "devices" }
     if e == 13 { return "system" }
     if e == 14 { return "cpu" }
+    if e == 16 { return "meminfo" }
+    if e == 18 { return "file-nr" }
+    if e == 19 { return "net" }
+    if e == 20 { return "sockstat" }
     "online"
 }
 
-/// The length of entry `e`'s name.
-pub fn name_len(e: u64) -> u64 {
-    var n: u64 = 0
-    for _b in name(e).bytes() {
+fn digits(v: u64) -> u64 {
+    var n: u64 = 1
+    var t = v
+    while t >= 10 {
+        t /= 10
         n += 1
     }
     n
 }
 
-/// The entry `e` sits in, or ROOT.
-pub fn parent(e: u64) -> u64 {
+/// The length of reference `r`'s name.
+pub fn name_len(r: u64) -> u64 {
+    if entry(r) == PIDDIR {
+        return digits(pid_of(r))
+    }
+    var n: u64 = 0
+    for _b in name(entry(r)).bytes() {
+        n += 1
+    }
+    n
+}
+
+/// Byte `i` of reference `r`'s name (i < name_len(r)).
+pub fn name_byte(r: u64, i: u64) -> u64 {
+    if entry(r) == PIDDIR {
+        let p = pid_of(r)
+        var d: u64 = 1
+        var k = digits(p) - 1 - i
+        while k > 0 {
+            d *= 10
+            k -= 1
+        }
+        return 48 + (p / d) % 10
+    }
+    var k: u64 = 0
+    for b in name(entry(r)).bytes() {
+        if k == i {
+            return b as int as u64
+        }
+        k += 1
+    }
+    0
+}
+
+/// The reference `r` sits in, or ROOT.
+pub fn parent(r: u64) -> u64 {
+    let e = entry(r)
     if e == 0 || e == 7 { return ROOT }
-    if e == 1 || e == 4 { return 0 }
+    if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR { return 0 }
     if e == 2 || e == 3 { return 1 }
-    if e == 5 { return 4 }
+    if e == 5 || e == 17 { return 4 }
     if e == 6 { return 5 }
+    if e == 18 { return 17 }
+    if e == 20 { return 19 }
+    if e == PSTATUS { return pid_dir(pid_of(r)) }
     if e == 8 || e == 12 { return 7 }
     if e == 9 { return 8 }
     if e == 10 || e == 11 { return 9 }
@@ -112,8 +200,13 @@ pub fn parent(e: u64) -> u64 {
     14
 }
 
-fn gen(e: u64) -> u64 {
+fn gen(r: u64) -> u64 {
+    let e = entry(r)
     if e == 2 { return G_STATUS }
+    if e == 16 { return G_MEMINFO }
+    if e == 18 { return G_FILENR }
+    if e == 20 { return G_SOCKSTAT }
+    if e == PSTATUS { return G_PSTATUS }
     if e == 3 { return G_CGROUP }
     if e == 6 { return G_OVERCOMMIT }
     if e == 10 { return G_CONTROLLERS }
@@ -122,15 +215,16 @@ fn gen(e: u64) -> u64 {
     0
 }
 
-/// Whether entry `e` is a directory.
-pub fn is_dir(e: u64) -> bool {
-    gen(e) == 0
+/// Whether reference `r` is a directory.
+pub fn is_dir(r: u64) -> bool {
+    gen(r) == 0
 }
 
-/// Entry `e`'s mode, type and permission bits (measured).
-pub fn mode(e: u64) -> u64 {
-    if is_dir(e) {
-        if e <= 7 {
+/// Reference `r`'s mode, type and permission bits (measured).
+pub fn mode(r: u64) -> u64 {
+    let e = entry(r)
+    if is_dir(r) {
+        if e <= 7 || e == 17 || e == 19 || e == PIDDIR {
             return S_IFDIR | 0x16d // 0555: /proc, /proc/self, /proc/sys, /proc/sys/vm, /sys
         }
         return S_IFDIR | 0x1ed // 0755
@@ -143,21 +237,27 @@ pub fn mode(e: u64) -> u64 {
 
 /// The size `stat` answers: 4096 for a sysfs attribute, 0 for procfs's
 /// and cgroupfs's files (measured), 0 for a directory.
-pub fn size(e: u64) -> u64 {
-    if e == 15 { 4096 } else { 0 }
+pub fn size(r: u64) -> u64 {
+    if entry(r) == 15 { 4096 } else { 0 }
 }
 
-/// Which file system entry `e` is in: 0 `/proc`, 1 `/sys`.
-pub fn fs(e: u64) -> u64 {
-    if e <= 6 { 0 } else { 1 }
+/// Which file system reference `r` is in: 0 `/proc`, 1 `/sys`.
+pub fn fs(r: u64) -> u64 {
+    let e = entry(r)
+    if e <= 6 || e >= 16 { 0 } else { 1 }
 }
 
-/// The `k`th entry (from 0) that sits in `d` (an entry, or ROOT), or
-/// NONE past the last.
+/// The `k`th reference (from 0) that sits in `d` (a reference, or
+/// ROOT), or NONE past the last. px25: `/proc` lists its fixed names,
+/// then each process's number in increasing order; `/proc/<pid>` its
+/// `status`.
 pub fn child_at(d: u64, k: u64) -> u64 {
     var seen: u64 = 0
+    if d != ROOT && entry(d) == PIDDIR {
+        return if k == 0 { (pid_of(d) << 16) | PSTATUS } else { NONE }
+    }
     var e: u64 = 0
-    while e < ENTRIES {
+    while e < PIDDIR {
         if parent(e) == d {
             if seen == k {
                 return e
@@ -166,7 +266,27 @@ pub fn child_at(d: u64, k: u64) -> u64 {
         }
         e += 1
     }
+    if d != 0 {
+        return NONE
+    }
+    var p = sched.proc_after(0)
+    while p != 0 {
+        if seen == k {
+            return pid_dir(p)
+        }
+        seen += 1
+        p = sched.proc_after(p)
+    }
     NONE
+}
+
+/// px25: the child of `d` named by a process number `v` (`/proc/<v>`),
+/// or NONE when no process has it.
+pub fn pid_child(d: u64, v: u64) -> u64 {
+    if d != 0 || sched.proc_slot(v) == sched.SLOTS {
+        return NONE
+    }
+    pid_dir(v)
 }
 
 // --- the text --------------------------------------------------------------------
@@ -251,11 +371,13 @@ fn put_mask(base: u64, at: u64, label: str, v: u64) -> u64 {
     put_b(base, k, 10)
 }
 
-/// The running thread's name, as `prctl(PR_GET_NAME)` answers it (its
-/// own when set, else its program's, at most 15 bytes).
-fn put_name(base: u64, at: u64) -> u64 {
-    let w0 = sched.self_name(0)
-    let w1 = sched.self_name(1)
+/// A thread's name, as `prctl(PR_GET_NAME)` answers it (its own when
+/// set, else its program's, at most 15 bytes): the running thread's when
+/// `s` is sched.SLOTS, else the leader's in slot `s` (px25).
+fn put_name(base: u64, at: u64, s: u64) -> u64 {
+    let me = s == sched.SLOTS
+    let w0 = if me { sched.self_name(0) } else { sched.proc_word(s, 4) }
+    let w1 = if me { sched.self_name(1) } else { sched.proc_word(s, 5) }
     var k = at
     if w0 != 0 || w1 != 0 {
         var i: u64 = 0
@@ -269,8 +391,8 @@ fn put_name(base: u64, at: u64) -> u64 {
         }
         return k
     }
-    let a = sched.self_exec(2)
-    let l = sched.self_exec(3)
+    let a = if me { sched.self_exec(2) } else { sched.proc_word(s, 6) }
+    let l = if me { sched.self_exec(3) } else { sched.proc_word(s, 7) }
     let n = if l < 15 { l } else { 15 }
     var j: u64 = 0
     while j < n {
@@ -282,23 +404,31 @@ fn put_name(base: u64, at: u64) -> u64 {
     k
 }
 
-/// `/proc/self/status` into the frame at `base`: its length. `area` is
-/// the process's area (the signal actions), `umask` its mask, `fds` the
-/// descriptor table's size.
-fn status(base: u64, area: u64, umask: u64, fds: u64) -> u64 {
+/// `/proc/self/status` (`s` sched.SLOTS) or px25's `/proc/<pid>/status`
+/// (`s` the process's leader's slot, `pid` its pid) into the frame at
+/// `base`: its length. `area` is the process's area (the signal
+/// actions), `umask` its mask, `fds` the descriptor table's size.
+fn status(base: u64, s: u64, pid0: u64, area: u64, umask: u64, fds: u64) -> u64 {
+    let me = s == sched.SLOTS
     var k = put_s(base, 0, "Name:\t")
-    k = put_name(base, k)
+    k = put_name(base, k, s)
     k = put_s(base, k, "\nUmask:\t0")
     k = put_b(base, k, 48 + ((umask >> 6) & 7))
     k = put_b(base, k, 48 + ((umask >> 3) & 7))
     k = put_b(base, k, 48 + (umask & 7))
-    k = put_s(base, k, "\nState:\tR (running)\n")
-    let pid = sched.self_pid()
-    let tid = sched.self_tid()
+    if me {
+        k = put_s(base, k, "\nState:\tR (running)\n")
+    } else if sched.proc_word(s, 8) == 1 {
+        k = put_s(base, k, "\nState:\tZ (zombie)\n")
+    } else {
+        k = put_s(base, k, "\nState:\tS (sleeping)\n")
+    }
+    let pid = if me { sched.self_pid() } else { pid0 }
+    let tid = if me { sched.self_tid() } else { pid0 }
     k = put_field(base, k, "Tgid", pid)
     k = put_field(base, k, "Ngid", 0)
     k = put_field(base, k, "Pid", tid)
-    k = put_field(base, k, "PPid", sched.self_ppid())
+    k = put_field(base, k, "PPid", if me { sched.self_ppid() } else { sched.proc_word(s, 0) })
     k = put_field(base, k, "TracerPid", 0)
     k = put_s(base, k, "Uid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\n")
     k = put_field(base, k, "FDSize", fds)
@@ -308,7 +438,8 @@ fn status(base: u64, area: u64, umask: u64, fds: u64) -> u64 {
     k = put_field(base, k, "NSpgid", 1)
     k = put_field(base, k, "NSsid", 1)
     k = put_field(base, k, "Kthread", 0)
-    let rss = paging.user_pages(paging.live()) * 4
+    let space = if me { paging.live() } else { sched.proc_word(s, 3) }
+    let rss = if space == 0 { 0 } else { paging.user_pages(space) * 4 }
     k = put_kb(base, k, "VmPeak", rss)
     k = put_kb(base, k, "VmSize", rss)
     k = put_kb(base, k, "VmLck", 0)
@@ -328,11 +459,11 @@ fn status(base: u64, area: u64, umask: u64, fds: u64) -> u64 {
     k = put_field(base, k, "CoreDumping", 0)
     k = put_field(base, k, "THP_enabled", 0)
     k = put_s(base, k, "untag_mask:\t0xffffffffffffffff\n")
-    k = put_field(base, k, "Threads", sched.self_threads())
+    k = put_field(base, k, "Threads", if me { sched.self_threads() } else { sched.proc_word(s, 1) })
     k = put_s(base, k, "SigQ:\t0/0\n")
     k = put_mask(base, k, "SigPnd", 0)
     k = put_mask(base, k, "ShdPnd", 0)
-    k = put_mask(base, k, "SigBlk", sched.self_sigmask())
+    k = put_mask(base, k, "SigBlk", if me { sched.self_sigmask() } else { sched.proc_word(s, 2) })
     var ign: u64 = 0
     var cgt: u64 = 0
     var sig: u64 = 1
@@ -364,19 +495,66 @@ fn status(base: u64, area: u64, umask: u64, fds: u64) -> u64 {
     put_field(base, k, "nonvoluntary_ctxt_switches", 0)
 }
 
-/// Make file entry `e`'s text in a fresh frame: (its physical address,
+/// px25: `/proc/meminfo`'s three lines (frames as kB).
+fn meminfo(base: u64) -> u64 {
+    var k = put_kb(base, 0, "MemTotal", frames.usable() * 4)
+    k = put_kb(base, k, "MemFree", frames.free_count() * 4)
+    put_kb(base, k, "MemAvailable", frames.free_count() * 4)
+}
+
+/// px25: `/proc/net/sockstat`, Linux's lines for the families PAX has.
+fn sockstat(base: u64) -> u64 {
+    var k = put_s(base, 0, "sockets: used ")
+    k = put_dec(base, k, unix.live())
+    let all = tcp.blocks()
+    let fin = tcp.finishing()
+    k = put_s(base, k, "\nTCP: inuse ")
+    k = put_dec(base, k, all - fin)
+    k = put_s(base, k, " orphan 0 tw ")
+    k = put_dec(base, k, tcp.waiting())
+    k = put_s(base, k, " alloc ")
+    k = put_dec(base, k, all)
+    k = put_s(base, k, " mem ")
+    k = put_dec(base, k, tcp.frames_held())
+    k = put_s(base, k, "\nUDP: inuse ")
+    k = put_dec(base, k, udp.open_count())
+    put_s(base, k, " mem 0\n")
+}
+
+/// Make reference `r`'s text in a fresh frame: (its physical address,
 /// the text's length), or (0, 0) when no frame is free (the open is
-/// then -ENOMEM). `area`, `umask` and `fds` are `status`'s.
-pub fn make(e: u64, area: u64, umask: u64, fds: u64) -> (u64, u64) {
+/// then -ENOMEM), or (0, 1) when `/proc/<pid>`'s process has gone (the
+/// open is -ENOENT). `area`, `umask` and `fds` are `status`'s (px25:
+/// the named process's for `/proc/<pid>/status`); `files` the open
+/// files in use and `files_max` the table's size, for `file-nr`.
+pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64) -> (u64, u64) {
+    let g = gen(r)
+    var slot = sched.SLOTS
+    if g == G_PSTATUS {
+        slot = sched.proc_slot(pid_of(r))
+        if slot == sched.SLOTS {
+            return (0, 1)
+        }
+    }
     let pa = frames.alloc() else 0
     if pa == 0 {
         return (0, 0)
     }
     let base = pa + frames.hhdm()
-    let g = gen(e)
     var n: u64 = 0
     if g == G_STATUS {
-        n = status(base, area, umask, fds)
+        n = status(base, sched.SLOTS, 0, area, umask, fds)
+    } else if g == G_PSTATUS {
+        n = status(base, slot, pid_of(r), area, umask, fds)
+    } else if g == G_MEMINFO {
+        n = meminfo(base)
+    } else if g == G_FILENR {
+        n = put_dec(base, 0, files)
+        n = put_s(base, n, "\t0\t")
+        n = put_dec(base, n, files_max)
+        n = put_b(base, n, 10)
+    } else if g == G_SOCKSTAT {
+        n = sockstat(base)
     } else if g == G_CGROUP {
         n = put_s(base, 0, "0::/\n")
     } else if g == G_OVERCOMMIT {
