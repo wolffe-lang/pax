@@ -1,0 +1,23 @@
+# px25: the host's browser path (run by hand on a Mac, not by
+# tests/mpx4-lobo): lobo serving at pelt's prompt, the page fetched by
+# curl through the forward and compared with the image's file, the
+# host's browser opened on it, and lobo's access log read at the prompt.
+# Run as: tools/lobo-session --pax ISO --forward 80=PORT --steps THIS
+#         --data user/lobo --out DIR
+pax: wait ^\$ $ 120
+type cd /srv
+mark
+type lobo -c conf/lobo.conf serve &
+wait generation-activated gen=1 seq=2 120
+host curl -sS -o {OUT}/page.html -D {OUT}/page.head http://127.0.0.1:{H80}/ && cmp {OUT}/page.html {DATA}/srv/html/index.html && echo "the page: $(wc -c < {OUT}/page.html) bytes, the same as srv/html/index.html" && cat {OUT}/page.head
+host open http://127.0.0.1:{H80}/ && echo opened
+sleep 8
+mark
+type cat logs/access.log
+wait \$ $ 30
+mark
+type lobo -s stop -c conf/lobo.conf
+wait stop: shutting down 60
+type wait
+type exit
+halt 60
