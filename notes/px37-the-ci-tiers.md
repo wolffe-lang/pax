@@ -45,7 +45,10 @@ pushes, the nightly and dispatches get a group of their own run id:
 never cancelled, never replaced while pending (a shared group would
 keep only the newest pending run, and each trunk push's full run is the
 coverage that merge is owed). The setting applies to runs started after
-it lands; no run already queued was touched.
+it lands; no run already queued was touched. The verdict job runs on `!cancelled()`, not
+`always()`: under `always()` a superseded run (38275354849, this lane's
+first pr-tier run) cancelled its suites but kept its verdict job queued,
+which held the group and left the newer run pending behind it.
 
 **Planted breaks.** A plant needs only the suite it breaks:
 `gh workflow run ci -r <plant-branch> -f suites=<job>` runs that one job
