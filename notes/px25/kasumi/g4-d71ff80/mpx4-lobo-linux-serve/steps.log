@@ -1,0 +1,54 @@
+side: linux
+forwards: 32835->80
+container: podman run --rm -i --name pax-lobo-3383163-1791793312 --privileged --network host -v /home/mfwolffe/lanes/px25/b/g4/mpx4-lobo-linux-serve/stage:/stage:ro -e PATH=/usr/local/bin:/usr/bin:/bin localhost/px13-ubuntu bash -c set -e; mkdir -p /srv && mount -t tmpfs -o size=512m tmpfs /srv && cp -a /stage/srv/. /srv/ && cp /stage/bin/* /usr/local/bin/ && chown -R 0:0 /srv && find /srv -exec touch -h -d @0 {} + && umask 022 && cd /srv && exec bash
+[   0.00] step 6: type cd /srv
+[   0.00] step 7: mark
+[   0.10] step 8: type lobo -c conf/lobo.conf serve &
+[   0.10] step 9: wait generation-activated gen=1 seq=2 120
+          seen after 0.10 s
+[   0.20] step 10: req serve 80 requests/[0-9]*.req
+          01-index.req: 461 bytes, HTTP/1.1 200 OK
+          02-index-html.req: 461 bytes, HTTP/1.1 200 OK
+          03-small.req: 227 bytes, HTTP/1.1 200 OK
+          04-http10.req: 227 bytes, HTTP/1.1 200 OK
+          05-big.req: 288230 bytes, HTTP/1.1 200 OK
+          06-range.req: 262 bytes, HTTP/1.1 206 Partial Content
+          07-range-suffix.req: 361 bytes, HTTP/1.1 206 Partial Content
+          08-head.req: 230 bytes, HTTP/1.1 200 OK
+          09-404.req: 299 bytes, HTTP/1.1 404 Not Found
+          10-cond-304.req: 227 bytes, HTTP/1.1 200 OK
+          11-cond-etag.req: 227 bytes, HTTP/1.1 200 OK
+          12-keepalive-three.req: 1159 bytes, HTTP/1.1 200 OK
+          13-dir-redirect.req: 357 bytes, HTTP/1.1 301 Moved Permanently
+          14-bad-method.req: 305 bytes, HTTP/1.1 405 Not Allowed
+[   0.71] step 11: type echo written at run time > html/new.txt
+[   0.71] step 12: type echo wrote $?
+[   0.71] step 13: wait ^wrote 0 30
+          seen after 0.05 s
+[   0.76] step 14: req written 80 requests/new.req
+          new.req: 250 bytes, HTTP/1.1 200 OK
+[   0.76] step 15: mark
+[   0.86] step 16: type lobo -c conf/lobo.conf status
+[   0.86] step 17: wait ^generation 1: current 60
+          seen after 0.05 s
+[   0.91] step 18: mark
+[   1.01] step 19: type lobo -s reload -c conf/lobo.conf
+[   1.01] step 20: wait ^reload complete \(generation 2\) 60
+          seen after 0.05 s
+[   1.06] step 21: type echo reload $?
+[   1.06] step 22: wait ^reload 0 30
+          seen after 0.05 s
+[   1.11] step 23: req after 80 requests/page.req
+          page.req: 461 bytes, HTTP/1.1 200 OK
+[   1.11] step 24: mark
+[   1.21] step 25: type lobo -s stop -c conf/lobo.conf
+[   1.21] step 26: wait ^stop: shutting down \(generation 2\) 60
+          seen after 0.05 s
+[   1.26] step 27: type wait
+[   1.26] step 28: type echo serve ended $?
+[   1.26] step 29: wait ^serve ended 0 60
+          seen after 0.05 s
+[   1.31] step 30: type ls logs
+[   1.31] step 33: halt 60
+          ended after 0.16 s
+ended: 0, 1.8 s

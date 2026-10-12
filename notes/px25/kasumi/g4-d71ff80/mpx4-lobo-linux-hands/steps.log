@@ -1,0 +1,59 @@
+side: linux
+forwards: 37433->80
+container: podman run --rm -i --name pax-lobo-3383483-1791793316 --privileged --network host -v /home/mfwolffe/lanes/px25/b/g4/mpx4-lobo-linux-hands/stage:/stage:ro -e PATH=/usr/local/bin:/usr/bin:/bin localhost/px13-ubuntu bash -c set -e; mkdir -p /srv && mount -t tmpfs -o size=512m tmpfs /srv && cp -a /stage/srv/. /srv/ && cp /stage/bin/* /usr/local/bin/ && chown -R 0:0 /srv && find /srv -exec touch -h -d @0 {} + && umask 022 && cd /srv && exec bash
+[   0.00] step 6: type cd /srv
+[   0.00] step 7: mark
+[   0.10] step 8: type lobo -c conf/four.conf serve &
+[   0.10] step 9: type echo master $!
+[   0.10] step 10: wait master (\d+)\s*$ 30
+          seen after 0.10 s
+[   0.20] step 11: capture M master (\d+)\s*$
+          M = 9
+[   0.20] step 12: wait serving on .*worker=4 120
+          seen after 0.00 s
+[   0.20] step 13: wait generation-activated gen=1 seq=2 worker=4 120
+          seen after 0.00 s
+[   0.20] step 14: get hands 80 / 20 new
+          get hands: 20 requests (new) of / in 0.00 s: 8365.2 a second; 0 not 200
+[   0.21] step 15: mark
+[   0.31] step 16: type lobo -c conf/four.conf status
+[   0.31] step 17: wait ^worker 4: serving 60
+          seen after 0.05 s
+[   0.36] step 18: mark
+[   0.46] step 19: type kill -HUP {M}
+[   0.46] step 20: wait generation-retired gen=1 .*worker=4 60
+          seen after 0.05 s
+[   0.51] step 21: get after-hup 80 / 5 new
+          get after-hup: 5 requests (new) of / in 0.00 s: 10917.0 a second; 0 not 200
+[   0.51] step 22: mark
+[   0.61] step 23: type cat /proc/[0-9]*/status
+[   0.61] step 24: wait PPid:\s+{M}\s 30
+          seen after 0.05 s
+[   0.66] step 25: sleep 2
+[   2.66] step 26: capture W Pid:\s+(\d+)\s+PPid:\s+{M}\s
+          W = 46
+[   2.66] step 27: load gap 80 / 25 2
+[   2.66] step 28: sleep 5
+[   7.66] step 29: mark
+[   7.76] step 30: type kill -KILL {W}
+[   7.76] step 31: wait worker-started worker=\d restarts=1 60
+          seen after 0.75 s
+[   8.51] step 32: loadwait gap
+          load gap: 566728 ok, 0 failed {} in 25.0 s: 22669.0 requests a second; latency p50 0.0 ms p99 0.1 ms
+[  27.70] step 33: mark
+[  27.80] step 34: type lobo -c conf/four.conf status
+[  27.80] step 35: wait restarts=1 60
+          seen after 0.05 s
+[  27.85] step 36: get after-kill 80 / 10 new
+          get after-kill: 10 requests (new) of / in 0.00 s: 2234.8 a second; 0 not 200
+[  27.85] step 37: mark
+[  27.95] step 38: type kill -TERM {M}
+[  27.95] step 39: wait worker-exited worker=\d reason=exit code=0 60
+          seen after 0.05 s
+[  28.00] step 40: type wait
+[  28.00] step 41: type echo hands ended $?
+[  28.00] step 42: wait ^hands ended 0 60
+          seen after 0.05 s
+[  28.05] step 44: halt 60
+          ended after 0.16 s
+ended: 0, 28.5 s
