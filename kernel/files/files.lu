@@ -88,6 +88,30 @@
 //! there, up to what was asked; wolf's spawn sends one 8-byte record).
 //! `fstat` S_IFSOCK|0777.
 //!
+//! **AF_UNIX path sockets** (px34, `unix(7)`; the records are
+//! kernel/unix's, the calls kernel/socket's way in): a descriptor of kind
+//! K_UNIX names a socket record. `bind` makes a name in the tree (an
+//! inode of mode S_IFSOCK, kernel/tree's `mksock`) that the socket holds
+//! while it lives; `connect` resolves a path as `open` does and, at a
+//! listener with room on its queue, makes the server's end at once (a
+//! second record, QUEUED) and two buffers of the kind a socketpair has,
+//! one each way, so a connection reads, writes, waits and is polled as a
+//! socketpair's end; `accept` gives the queue's head a descriptor. The
+//! answers are what Linux answered user/unix/unixprobe.c
+//! (`notes/px34/linux/witness/`): a name that exists -EADDRINUSE; a name
+//! that is no socket, a socket that does not listen and the name a
+//! closed socket left -ECONNREFUSED; a queue of backlog + 1; a queued
+//! connection whose listener closes, and a connection closed with bytes
+//! unread, -ECONNRESET once at the peer's next read; `shutdown`'s two
+//! halves, each end's from both sides. **socketpair(SOCK_SEQPACKET)**
+//! (px34) keeps its messages: each goes into its buffer whole, behind an
+//! eight-byte length, and a read takes one, the rest of it discarded.
+//!
+//! **`/proc` and `/sys`** (px34): the files lobo reads, kernel/procfs's,
+//! each made when it is opened into a frame the open file holds (its
+//! words 5 and 6) and given back at its last close; two file systems of
+//! their own beside `/dev`, which the root does not list.
+//!
 //! **Copies in the kernel** (px26, what bu20's `cat` asks; px27, what
 //! bu21's `cp` does): `sendfile` writes a file to the console,
 //! `/dev/null`, a pipe, a socketpair or another file; `splice` moves
@@ -126,12 +150,14 @@ use console
 use event
 use frames
 use initramfs
+use procfs
 use sched
 use sound
 use tcp
 use tree
 use uaccess
 use udp
+use unix
 
 extern "c" let pax_kbuf: *u8
 extern "c" let pax_ofiles: *u64
@@ -142,7 +168,7 @@ const PATH_MAX: u64 = 4095 // bytes before the NUL
 const FIONBIO: u64 = 0x5421 // uapi asm-generic/ioctls.h (px23)
 /// The number dup3 and dup2 take as "too large" (px14): FDS + 1, so
 /// FDS itself can mean "the lowest free" for `dup`.
-pub const FDS: u64 = 128 // px24: 32 before
+pub const FDS: u64 = 1024 // px34: lobo's worker_connections 1024 (128 since px24, 32 before)
 const A_REFUSAL: u64 = 3 // the area's refusal word (kernel/vm's too)
 const A_CWD: u64 = 12 // px17: the working directory's node; 0 the root
 // word 13 was px17's count of bytes a waiting pipe write has written; px26
@@ -151,7 +177,7 @@ const A_CWD: u64 = 12 // px17: the working directory's node; 0 the root
 const A_UMASK: u64 = 254 // px27: the file mode creation mask, with bit 16 set once `umask` has set it (0: 022)
 const A_CONFL: u64 = 146 // px24: the status flags (O_NONBLOCK, O_APPEND) of the console as descriptors 0-2 name it from the start: one open file on Linux, so one word here
 const A_EXE: u64 = 255 // px26: the initramfs entry the program was loaded from, + 1 (0: none); words 14, 15, 144 and 145 are kernel/socket's
-const A_FD: u64 = 512 // the first descriptor's word (px24: the area's second half, FDS * FD_WORDS words; 16 before, for 32)
+const A_FD: u64 = 512 // the first descriptor's word (px24: FDS * FD_WORDS words from here; px34: 4096 of them, kernel/vm's ranges after)
 const FD_WORDS: u64 = 4
 // A descriptor's words: kind, node, open file + 1 (0 none), flags.
 const D_KIND: u64 = 0
@@ -161,14 +187,16 @@ const D_FLAGS: u64 = 3
 
 // px17: open files (boot/user.S's pax_ofiles, 8 words each) and pipe
 // buffers (pax_pipes, 32 words each).
-const OFILES: u64 = 512 // px24: 64 before
+const OFILES: u64 = 2048 // px34: 512 since px24, 64 before
 const OF_WORDS: u64 = 8
 const O_REFS: u64 = 0
 const O_KIND: u64 = 1
 const O_NODE: u64 = 2
 const O_POS: u64 = 3
 const O_FLAGS: u64 = 4
-const PIPES: u64 = 64 // px24: 16 before
+const O_TEXT: u64 = 5 // px34: a /proc or /sys file's text: its frame (physical)
+const O_TEXT_LEN: u64 = 6 // and its length
+const PIPES: u64 = 512 // px34: Unix connections take two each (64 since px24, 16 before)
 const PP_WORDS: u64 = 32
 const P_PAGES: u64 = 0 // frames held; 0 a free record
 const P_READERS: u64 = 1
@@ -176,6 +204,7 @@ const P_WRITERS: u64 = 2
 const P_RD: u64 = 3 // bytes read since it was made
 const P_WR: u64 = 4 // bytes written
 const P_OGEN: u64 = 5 // px24: times a read gave a writer room it did not have (an edge-triggered registration's count)
+const P_MSG: u64 = 6 // px34: 1 for a SOCK_SEQPACKET buffer: messages behind an eight-byte length
 const P_FRAME: u64 = 8 // the frames' physical addresses, from here
 const PIPE_PAGES: u64 = 16 // 65536 bytes, Linux's default capacity
 const SOCK_PAGES: u64 = 1
@@ -202,6 +231,8 @@ const K_TCP: u64 = 9 // px23: an AF_INET stream socket (kernel/tcp's)
 const K_EVENT: u64 = 10 // px24: an eventfd (kernel/event's counter)
 const K_EPOLL: u64 = 11 // px24: an epoll object (kernel/event's)
 const K_DSP: u64 = 12 // px30: /dev/dsp, the sound device (kernel/sound's)
+const K_UNIX: u64 = 13 // px34: an AF_UNIX path socket (kernel/unix's record)
+const K_SYN: u64 = 14 // px34: a file of /proc or /sys (kernel/procfs's)
 
 // Nodes: a type in the top byte, a reference below (an entry's offset).
 const T_SHIFT: u64 = 56
@@ -212,13 +243,15 @@ const T_CONSOLE: u64 = 4 // the reference: 0 the console as 0-2 name it, TTY0, C
 const T_NULL: u64 = 5
 const T_STD: u64 = 6 // /dev/stdin, stdout, stderr: the reference is 0, 1, 2
 const T_PIPE: u64 = 7 // px17: a pipe; the reference its record
-const T_SOCK: u64 = 8 // px17: a socketpair's end; the reference rx << 8 | tx
+const T_SOCK: u64 = 8 // px17: a socketpair's end; the reference rx << 16 | tx (px34; << 8 before)
 const T_INET: u64 = 9 // px22: an AF_INET socket; the reference kernel/udp's number
 const T_TCP: u64 = 10 // px23: a stream socket; the reference kernel/tcp's block
 const T_INO: u64 = 11 // px27: a file or a directory of the tree; the reference kernel/tree's inode
 const T_EVENT: u64 = 12 // px24: an eventfd; the reference kernel/event's counter
 const T_EPOLL: u64 = 13 // px24: an epoll object; the reference kernel/event's
 const T_DSP: u64 = 14 // px30: /dev/dsp
+const T_UNIX: u64 = 15 // px34: an AF_UNIX path socket; the reference kernel/unix's record
+const T_SYN: u64 = 16 // px34: a directory or file of /proc or /sys; the reference kernel/procfs's entry
 const T_ERR: u64 = 0xff // an errno below
 const REF_MASK: u64 = 0x00ffffffffffffff
 
@@ -251,6 +284,15 @@ const EXDEV: u64 = 18
 const ELOOP: u64 = 40
 const ENOTEMPTY: u64 = 39
 const EOPNOTSUPP: u64 = 95
+const ENOMEM: u64 = 12 // px34
+const EMSGSIZE: u64 = 90 // px34
+const EPROTOTYPE: u64 = 91
+const ENOPROTOOPT: u64 = 92
+const EADDRINUSE: u64 = 98
+const ENOBUFS: u64 = 105
+const ECONNRESET: u64 = 104
+const ENOTCONN: u64 = 107
+const ECONNREFUSED: u64 = 111
 
 // open flags (uapi asm-generic/fcntl.h, linux/fcntl.h)
 const O_ACCMODE: u64 = 3
@@ -290,6 +332,7 @@ const MODE_ANON: u64 = 0x180 // 0600 and no type: an eventfd, an epoll object (p
 const DT_CHR: u64 = 2
 const DT_DIR: u64 = 4
 const DT_REG: u64 = 8
+const DT_SOCK: u64 = 12 // px34
 
 // Refusal codes for the area's word (kernel/vm uses 1-15).
 // 16 was px12's refusal of every write (the initramfs was read-only).
@@ -322,6 +365,9 @@ fn put(a: u64, i: u64, v: u64) {
 
 /// A refusal code's name ("" when not this module's).
 pub fn why(r: u64) -> str {
+    if r >= unix.R_ABSTRACT && r <= unix.R_OPTION {
+        return unix.why(r) // px34: codes 20-22
+    }
     if r == R_OFLAG {
         return "an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE)"
     }
@@ -404,6 +450,7 @@ fn pipe_new(pages: u64) -> u64 {
     put_ppw(p, P_WRITERS, 0)
     put_ppw(p, P_RD, 0)
     put_ppw(p, P_WR, 0)
+    put_ppw(p, P_MSG, 0)
     put_ppw(p, P_PAGES, pages)
     p
 }
@@ -438,8 +485,8 @@ fn pipe_ends(k: u64, n: u64, acc: u64, up: bool) {
             pipe_settle(p)
         }
     } else if k == K_SOCK {
-        let rx = (rf(n) >> 8) & 0xff
-        let tx = rf(n) & 0xff
+        let rx = (rf(n) >> 16) & 0xffff
+        let tx = rf(n) & 0xffff
         put_ppw(rx, P_READERS, if up { ppw(rx, P_READERS) + 1 } else { ppw(rx, P_READERS) - 1 })
         put_ppw(tx, P_WRITERS, if up { ppw(tx, P_WRITERS) + 1 } else { ppw(tx, P_WRITERS) - 1 })
         if !up {
@@ -458,6 +505,9 @@ fn pipe_ends(k: u64, n: u64, acc: u64, up: bool) {
         }
         if k == K_EPOLL && !up {
             event.ep_free(rf(n)) // px24: its registrations go with it
+        }
+        if k == K_UNIX && !up {
+            unix_close(rf(n)) // px34: the socket goes with its last descriptor
         }
         return
     }
@@ -520,6 +570,11 @@ fn of_drop(o: u64) {
     if ty(n) == T_INO {
         tree.release(rf(n)) // px27: the last close of a file with no name gives its frames back
     }
+    if k == K_SYN && ofw(i, O_TEXT) != 0 {
+        frames.free(ofw(i, O_TEXT)) // px34: a /proc or /sys file's text
+        put_ofw(i, O_TEXT, 0)
+        put_ofw(i, O_TEXT_LEN, 0)
+    }
     if k == K_DSP {
         sound.release() // px30: the last close of /dev/dsp
     }
@@ -527,7 +582,7 @@ fn of_drop(o: u64) {
 
 /// Whether a kind keeps an open file (an offset, a pipe end).
 fn has_of(k: u64) -> bool {
-    k == K_FILE || k == K_DIR || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_EVENT || k == K_EPOLL || k == K_DSP
+    k == K_FILE || k == K_DIR || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_EVENT || k == K_EPOLL || k == K_DSP || k == K_UNIX || k == K_SYN
 }
 
 // --- descriptors -------------------------------------------------------------
@@ -619,7 +674,10 @@ pub fn is_open(a: u64, fd: u64) -> bool {
 /// them (/dev/null), 2 nothing writable (-EBADF), 3 a pipe or a socket
 /// (px17: `pipe_write`), 4 a file of the tree (px27: `file_write`),
 /// 5 an eventfd (px24: `event_write`), 6 an epoll object (px24: -EINVAL), 7
-/// /dev/dsp (px30: kernel/sound's `write`).
+/// /dev/dsp (px30: kernel/sound's `write`); px34: an AF_UNIX path socket
+/// is 3 (`pipe_write` answers for a socket that is not connected), a file
+/// of /proc or /sys 6 (-EINVAL, as Linux answered a write to
+/// /proc/self/cgroup).
 pub fn write_target(a: u64, fd: u64) -> u64 {
     let k = kind(a, fd)
     if k == K_CLOSED || access(a, fd) == O_RDONLY {
@@ -631,11 +689,14 @@ pub fn write_target(a: u64, fd: u64) -> u64 {
     if k == K_NULL {
         return 0
     }
-    if k == K_PIPE || k == K_SOCK {
+    if k == K_PIPE || k == K_SOCK || k == K_UNIX {
         return 3
     }
     if k == K_FILE {
         return 4
+    }
+    if k == K_SYN {
+        return 6
     }
     if k == K_EVENT {
         return 5
@@ -952,14 +1013,19 @@ pub fn socketpair(a: u64, pml4: u64, domain: u64, ty: u64, proto: u64, sv: u64) 
         pipe_settle(c1)
         return neg(ENFILE)
     }
+    if base == 5 {
+        // px34: SOCK_SEQPACKET keeps each message whole.
+        put_ppw(c1, P_MSG, 1)
+        put_ppw(c2, P_MSG, 1)
+    }
     let fl = O_RDWR | (ty & (O_CLOEXEC | O_NONBLOCK))
-    let f0 = open_new(a, 0, K_SOCK, (T_SOCK << T_SHIFT) | (c2 << 8) | c1, fl)
+    let f0 = open_new(a, 0, K_SOCK, (T_SOCK << T_SHIFT) | (c2 << 16) | c1, fl)
     if f0 >= 0x8000000000000000 {
         pipe_settle(c1)
         pipe_settle(c2)
         return f0
     }
-    let f1 = open_new(a, 0, K_SOCK, (T_SOCK << T_SHIFT) | (c1 << 8) | c2, fl)
+    let f1 = open_new(a, 0, K_SOCK, (T_SOCK << T_SHIFT) | (c1 << 16) | c2, fl)
     if f1 >= 0x8000000000000000 {
         let _c = close(a, f0)
         return f1
@@ -988,19 +1054,28 @@ fn took(p: u64, k: u64) {
     }
 }
 
-/// The buffer descriptor `fd` reads from (a pipe's, a socket's rx).
+/// The buffer descriptor `fd` reads from (a pipe's, a socket's rx; px34:
+/// a connected path socket's, from its record).
 fn rx_of(a: u64, fd: u64) -> u64 {
     let n = node_of(a, fd)
-    if kind(a, fd) == K_SOCK {
-        return (rf(n) >> 8) & 0xff
+    let k = kind(a, fd)
+    if k == K_SOCK {
+        return (rf(n) >> 16) & 0xffff
+    }
+    if k == K_UNIX {
+        return unix.buf(rf(n), 0)
     }
     rf(n)
 }
 
 fn tx_of(a: u64, fd: u64) -> u64 {
     let n = node_of(a, fd)
-    if kind(a, fd) == K_SOCK {
-        return rf(n) & 0xff
+    let k = kind(a, fd)
+    if k == K_SOCK {
+        return rf(n) & 0xffff
+    }
+    if k == K_UNIX {
+        return unix.buf(rf(n), 1)
     }
     rf(n)
 }
@@ -1019,19 +1094,48 @@ fn ring_at(p: u64, at: u64) -> (u64, u64) {
 /// it is empty and no writer is open, WAIT (or -EAGAIN) when it is empty
 /// and a writer is.
 fn pipe_read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool) -> u64 {
+    pipe_recv(a, pml4, fd, buf, n, if nonblock { MSG_DONTWAIT } else { 0 })
+}
+
+const MSG_PEEK: u64 = 0x2 // px34: recv(2)'s flags a socket's read reads
+const MSG_TRUNC: u64 = 0x20
+const MSG_DONTWAIT: u64 = 0x40
+
+/// px34: `pipe_read` with recv(2)'s flags: MSG_DONTWAIT as O_NONBLOCK,
+/// MSG_PEEK (the bytes stay), and for a message buffer MSG_TRUNC (the
+/// message's whole length answered). A path socket that is not connected
+/// is -EINVAL; one whose connection was reset answers -ECONNRESET once;
+/// one that can read no more answers 0 once its buffer is empty.
+fn pipe_recv(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64) -> u64 {
+    var shut = false
+    if kind(a, fd) == K_UNIX {
+        let r = rf(node_of(a, fd))
+        if unix.state(r) != unix.CONN {
+            return neg(EINVAL) // measured: recv on a socket not connected
+        }
+        let e = unix.err(r)
+        if e != 0 {
+            unix.set_err(r, 0)
+            return neg(e)
+        }
+        shut = unix_rcv_shut(r)
+    }
     let p = rx_of(a, fd)
     let avail = ppw(p, P_WR) - ppw(p, P_RD)
     if avail == 0 {
-        if ppw(p, P_WRITERS) == 0 {
+        if ppw(p, P_WRITERS) == 0 || shut {
             return 0
         }
-        if n == 0 {
+        if n == 0 && ppw(p, P_MSG) == 0 {
             return 0
         }
-        if nonblock || status(a, fd) & O_NONBLOCK != 0 {
+        if flags & MSG_DONTWAIT != 0 || status(a, fd) & O_NONBLOCK != 0 {
             return neg(EAGAIN)
         }
         return WAIT
+    }
+    if ppw(p, P_MSG) != 0 {
+        return msg_read(p, pml4, buf, n, flags)
     }
     if n == 0 {
         return 0
@@ -1047,9 +1151,133 @@ fn pipe_read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool) -> u6
         let _ok = uaccess.copy_out(pml4, buf + done, src, c)
         done += c
     }
-    took(p, k)
-    sched.wake_pipes()
+    if flags & MSG_PEEK == 0 {
+        took(p, k)
+        sched.wake_pipes()
+    }
     k
+}
+
+/// px34: byte `at` (a count since the buffer was made) of buffer `p`.
+fn ring_byte(p: u64, at: u64) -> u64 {
+    let (src, _room) = ring_at(p, at)
+    // # Safety: a byte of the buffer's frame, through the HHDM.
+    let v = unsafe { (src as *u8).read_volatile() }
+    v as u64
+}
+
+fn ring_set(p: u64, at: u64, b: u64) {
+    let (dst, _room) = ring_at(p, at)
+    // # Safety: as `ring_byte`.
+    unsafe { (dst as *u8).write_volatile((b & 0xff) as u8) }
+}
+
+/// px34: the length of the message at the head of message buffer `p`.
+fn msg_len(p: u64) -> u64 {
+    let at = ppw(p, P_RD)
+    var m: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        m = m | (ring_byte(p, at + i) << (i * 8))
+        i += 1
+    }
+    m
+}
+
+/// px34: read one message of buffer `p` (one is there): at most `n`
+/// bytes of it to `buf`, the rest discarded (unless MSG_PEEK); the count,
+/// or the whole length under MSG_TRUNC.
+fn msg_read(p: u64, pml4: u64, buf: u64, n: u64, flags: u64) -> u64 {
+    let m = msg_len(p)
+    let k = if n < m { n } else { m }
+    if k > 0 && !uaccess.writable(pml4, buf, k) {
+        return neg(EFAULT)
+    }
+    let start = ppw(p, P_RD) + 8
+    var done: u64 = 0
+    while done < k {
+        let (src, room) = ring_at(p, start + done)
+        let c = if k - done < room { k - done } else { room }
+        let _ok = uaccess.copy_out(pml4, buf + done, src, c)
+        done += c
+    }
+    if flags & MSG_PEEK == 0 {
+        took(p, 8 + m)
+        sched.wake_pipes()
+    }
+    if flags & MSG_TRUNC != 0 { m } else { k }
+}
+
+/// px34: the room a message of `m` bytes needs in buffer `p`, and
+/// whether it can ever fit (a frame less its length word).
+fn msg_fits(p: u64, m: u64) -> bool {
+    m + 8 <= ppw(p, P_PAGES) * PAGE
+}
+
+/// px34: one message into buffer `p` from the `cnt` parts of the iovec
+/// array at user `iov` (`cnt` 0: the `m` bytes at `buf`), `m` bytes in
+/// all, the length word first. The caller checked the room and the
+/// parts.
+fn msg_put(p: u64, pml4: u64, buf: u64, iov: u64, cnt: u64, m: u64) {
+    let at = ppw(p, P_WR)
+    var i: u64 = 0
+    while i < 8 {
+        ring_set(p, at + i, (m >> (i * 8)) & 0xff)
+        i += 1
+    }
+    if cnt == 0 {
+        ring_in(p, pml4, at + 8, buf, m)
+    } else {
+        var w = at + 8
+        var j: u64 = 0
+        while j < cnt {
+            let l = uaccess.get64(pml4, iov + j * 16 + 8)
+            ring_in(p, pml4, w, uaccess.get64(pml4, iov + j * 16), l)
+            w += l
+            j += 1
+        }
+    }
+    put_ppw(p, P_WR, at + 8 + m)
+    sched.wake_pipes()
+}
+
+/// px34: `n` bytes from user `src` into buffer `p` from byte `at` on.
+fn ring_in(p: u64, pml4: u64, at: u64, src: u64, n: u64) {
+    var off: u64 = 0
+    while off < n {
+        let (dst, room) = ring_at(p, at + off)
+        let c = if n - off < room { n - off } else { room }
+        let _ok = uaccess.copy_in(pml4, dst, src + off, c)
+        off += c
+    }
+}
+
+/// px34: `writev` to a SOCK_SEQPACKET socket: the parts are one message
+/// (measured: two parts read as one). Called by kernel/user, which has
+/// checked every part and summed them (`m`).
+pub fn msg_writev(a: u64, pml4: u64, fd: u64, iov: u64, cnt: u64, m: u64) -> u64 {
+    let p = tx_of(a, fd)
+    if ppw(p, P_READERS) == 0 {
+        return EPIPE_R
+    }
+    if !msg_fits(p, m) {
+        return neg(EMSGSIZE)
+    }
+    let cap = ppw(p, P_PAGES) * PAGE
+    if cap - (ppw(p, P_WR) - ppw(p, P_RD)) < m + 8 {
+        if status(a, fd) & O_NONBLOCK != 0 {
+            return neg(EAGAIN)
+        }
+        return WAIT
+    }
+    msg_put(p, pml4, 0, iov, cnt, m)
+    m
+}
+
+/// px34: whether descriptor `fd` writes a message buffer (a
+/// SOCK_SEQPACKET socketpair's end).
+pub fn is_msg(a: u64, fd: u64) -> bool {
+    kind(a, fd) == K_SOCK && ppw(tx_of(a, fd), P_MSG) != 0
 }
 
 /// px17: `write` to a pipe or socket (kernel/user's `write`): every byte
@@ -1072,6 +1300,12 @@ pub fn pipe_write_part(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
 /// socketpair's); all of it when no reader is left (the write answers
 /// -EPIPE, not "wait").
 pub fn pipe_room(a: u64, fd: u64) -> u64 {
+    if kind(a, fd) == K_UNIX {
+        let r = rf(node_of(a, fd))
+        if unix.state(r) != unix.CONN || unix_snd_shut(r) {
+            return PIPE_PAGES * PAGE // the write answers why not, not "wait"
+        }
+    }
     let p = tx_of(a, fd)
     let cap = ppw(p, P_PAGES) * PAGE
     if ppw(p, P_READERS) == 0 {
@@ -1081,7 +1315,39 @@ pub fn pipe_room(a: u64, fd: u64) -> u64 {
 }
 
 fn pipe_put(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool, atomic: bool) -> u64 {
+    if kind(a, fd) == K_UNIX {
+        // px34: a path socket writes only while connected and not shut.
+        let r = rf(node_of(a, fd))
+        if unix.state(r) != unix.CONN {
+            return neg(ENOTCONN)
+        }
+        if unix_snd_shut(r) {
+            sched.set_self_done(0)
+            return EPIPE_R
+        }
+    }
     let p = tx_of(a, fd)
+    if ppw(p, P_MSG) != 0 {
+        // px34: a message goes in whole, or waits.
+        if ppw(p, P_READERS) == 0 {
+            return EPIPE_R
+        }
+        if !msg_fits(p, n) {
+            return neg(EMSGSIZE)
+        }
+        if n > 0 && !uaccess.readable(pml4, buf, n) {
+            return neg(EFAULT)
+        }
+        let cap = ppw(p, P_PAGES) * PAGE
+        if cap - (ppw(p, P_WR) - ppw(p, P_RD)) < n + 8 {
+            if nonblock || status(a, fd) & O_NONBLOCK != 0 {
+                return neg(EAGAIN)
+            }
+            return WAIT
+        }
+        msg_put(p, pml4, buf, 0, 0, n)
+        return n
+    }
     let done = sched.self_done()
     if ppw(p, P_READERS) == 0 {
         sched.set_self_done(0)
@@ -1435,7 +1701,7 @@ pub fn recvfrom(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64, addr: 
     if k == K_CLOSED {
         return neg(EBADF)
     }
-    if k != K_SOCK {
+    if k != K_SOCK && k != K_UNIX {
         return neg(ENOTSOCK)
     }
     if addr != 0 && alen != 0 {
@@ -1444,7 +1710,8 @@ pub fn recvfrom(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64, addr: 
         }
         uaccess.put(pml4, alen, 0, 4)
     }
-    pipe_read(a, pml4, fd, buf, n, flags & 0x40 != 0)
+    // px34: MSG_PEEK, MSG_TRUNC and MSG_DONTWAIT read; a path socket's too.
+    pipe_recv(a, pml4, fd, buf, n, flags & (MSG_PEEK | MSG_TRUNC | MSG_DONTWAIT))
 }
 
 /// px17: `sendto(fd, buf, n, flags, addr, addrlen)` on a socketpair's
@@ -1455,10 +1722,14 @@ pub fn sendto(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64, addr: u6
     if k == K_CLOSED {
         return neg(EBADF)
     }
-    if k != K_SOCK {
+    if k != K_SOCK && k != K_UNIX {
         return neg(ENOTSOCK)
     }
     if addr != 0 {
+        // px34: a path socket not connected is no datagram socket (measured).
+        if k == K_UNIX && unix.state(rf(node_of(a, fd))) != unix.CONN {
+            return neg(EOPNOTSUPP)
+        }
         return neg(EISCONN)
     }
     pipe_write(a, pml4, fd, buf, n, flags & 0x40 != 0)
@@ -1476,6 +1747,8 @@ pub const UNIX: u64 = 2
 pub const INET: u64 = 3
 /// It is an AF_INET stream socket (px23).
 pub const TCP: u64 = 4
+/// It is an AF_UNIX path socket (px34).
+pub const PATH: u64 = 5
 
 /// What descriptor `fd` is, to a socket call.
 pub fn sock_kind(a: u64, fd: u64) -> u64 {
@@ -1491,6 +1764,9 @@ pub fn sock_kind(a: u64, fd: u64) -> u64 {
     }
     if k == K_SOCK {
         return UNIX
+    }
+    if k == K_UNIX {
+        return PATH
     }
     NOT_SOCKET
 }
@@ -1637,8 +1913,8 @@ fn pipe_poll(k: u64, n: u64, acc: u64) -> (u64, u64, u64) {
     var gin: u64 = 0
     var gout: u64 = 0
     if k == K_SOCK {
-        let rx = (rf(n) >> 8) & 0xff
-        let tx = rf(n) & 0xff
+        let rx = (rf(n) >> 16) & 0xffff
+        let tx = rf(n) & 0xffff
         let peer_gone = ppw(rx, P_WRITERS) == 0
         if ppw(rx, P_WR) > ppw(rx, P_RD) {
             m = POLLIN
@@ -1685,6 +1961,9 @@ fn pipe_poll(k: u64, n: u64, acc: u64) -> (u64, u64, u64) {
 fn node_poll(k: u64, n: u64, acc: u64) -> (u64, u64, u64) {
     if k == K_PIPE || k == K_SOCK {
         return pipe_poll(k, n, acc)
+    }
+    if k == K_UNIX {
+        return unix_poll(rf(n)) // px34
     }
     if k == K_TCP {
         return tcp.poll(rf(n))
@@ -1760,6 +2039,469 @@ pub fn watch(a: u64, fd: u64) -> (u64, u64) {
         return (W_NO_FILE, 0)
     }
     (W_OPEN, o)
+}
+
+// --- AF_UNIX path sockets (px34; kernel/socket's calls reach here) -----------------
+
+const AF_UNIX: u64 = 1
+const SOCK_STREAM: u64 = 1
+const UN_LEN: u64 = 110 // sizeof(struct sockaddr_un): the family and 108 bytes
+const SOMAXCONN: u64 = 4096 // listen(2): a backlog is cut to this
+const POLLIN_X: u64 = 0x1
+const POLLOUT_X: u64 = 0x4
+const POLLERR_X: u64 = 0x8
+const POLLHUP_X: u64 = 0x10
+const POLLRDHUP_X: u64 = 0x2000
+
+/// Whether path socket `r` (connected) can read no more once its buffer
+/// is empty: it shut its reading half, its peer shut its writing half,
+/// or its peer is gone.
+fn unix_rcv_shut(r: u64) -> bool {
+    if unix.shut(r) & unix.RD != 0 {
+        return true
+    }
+    let p = unix.peer(r)
+    if p != unix.SOCKS && unix.shut(p) & unix.WR != 0 {
+        return true
+    }
+    let rx = unix.buf(r, 0)
+    rx == unix.NONE_BUF || ppw(rx, P_WRITERS) == 0
+}
+
+/// Whether path socket `r` (connected) can write no more: it shut its
+/// writing half, its peer shut its reading half, or its peer is gone.
+fn unix_snd_shut(r: u64) -> bool {
+    if unix.shut(r) & unix.WR != 0 {
+        return true
+    }
+    let p = unix.peer(r)
+    if p != unix.SOCKS && unix.shut(p) & unix.RD != 0 {
+        return true
+    }
+    let tx = unix.buf(r, 1)
+    tx == unix.NONE_BUF || ppw(tx, P_READERS) == 0
+}
+
+/// What `poll` says of path socket `r`, as Linux answered unixprobe: a
+/// socket neither listening nor connected POLLOUT|POLLHUP; a listener
+/// POLLIN while a connection waits (its edge count the connections ever
+/// queued); a connected one POLLIN with bytes to read or nothing more to
+/// come, POLLRDHUP when nothing more will come, POLLHUP when it can
+/// neither read nor write any more, POLLERR while a reset waits to be
+/// read, POLLOUT while it can write or a write would answer at once.
+fn unix_poll(r: u64) -> (u64, u64, u64) {
+    let st = unix.state(r)
+    if st == unix.LISTEN {
+        return (if unix.qlen(r) > 0 { POLLIN_X } else { 0 }, unix.ever(r), 0)
+    }
+    if st != unix.CONN {
+        return (POLLOUT_X | POLLHUP_X, 0, 0)
+    }
+    let rx = unix.buf(r, 0)
+    let tx = unix.buf(r, 1)
+    let rs = unix_rcv_shut(r)
+    let ss = unix_snd_shut(r)
+    var m: u64 = 0
+    if ppw(rx, P_WR) > ppw(rx, P_RD) || rs {
+        m = POLLIN_X
+    }
+    if rs {
+        m = m | POLLRDHUP_X
+    }
+    if rs && ss {
+        m = m | POLLHUP_X
+    }
+    if unix.err(r) != 0 {
+        m = m | POLLERR_X
+    }
+    if ss || ppw(tx, P_PAGES) * PAGE > ppw(tx, P_WR) - ppw(tx, P_RD) {
+        m = m | POLLOUT_X
+    }
+    let gin = ppw(rx, P_WR) + (if rs { GONE } else { 0 })
+    let gout = ppw(tx, P_OGEN) + (if ss { GONE } else { 0 })
+    (m, gin, gout)
+}
+
+/// One end `c` of a connection (CONN or QUEUED) closes: its peer is
+/// told — reset (-ECONNRESET at its next read) when `reset` (its
+/// listener closed before the end was accepted) or when bytes sent to
+/// `c` were never read (measured both) — and its buffers' ends drop.
+fn unix_end(c: u64, reset: bool) {
+    let rx = unix.buf(c, 0)
+    let tx = unix.buf(c, 1)
+    let p = unix.peer(c)
+    if p != unix.SOCKS {
+        if reset || (rx != unix.NONE_BUF && ppw(rx, P_WR) > ppw(rx, P_RD)) {
+            unix.set_err(p, ECONNRESET)
+        }
+        unix.set_peer(p, unix.SOCKS)
+    }
+    if rx != unix.NONE_BUF {
+        put_ppw(rx, P_READERS, ppw(rx, P_READERS) - 1)
+        pipe_settle(rx)
+    }
+    if tx != unix.NONE_BUF {
+        put_ppw(tx, P_WRITERS, ppw(tx, P_WRITERS) - 1)
+        pipe_settle(tx)
+    }
+    unix.set_bufs(c, unix.NONE_BUF, unix.NONE_BUF)
+    unix.set_peer(c, unix.SOCKS)
+}
+
+/// Path socket `r`'s last descriptor closed: a listener's queued ends
+/// go with it (their clients reset), a connection's end closes, its
+/// name stays in the tree leading nowhere (`unix(7)`: until unlinked).
+fn unix_close(r: u64) {
+    let st = unix.state(r)
+    if st == unix.LISTEN {
+        var c = unix.dequeue(r)
+        while c != unix.SOCKS {
+            unix_end(c, true)
+            unix.free(c)
+            c = unix.dequeue(r)
+        }
+    }
+    if st == unix.CONN {
+        unix_end(r, false)
+    }
+    let i = unix.ino(r)
+    if i != unix.NONE_INO {
+        tree.sock_gone(i)
+        unix.set_ino(r, unix.NONE_INO)
+        tree.release(i)
+    }
+    unix.free(r)
+    sched.wake_pipes()
+}
+
+/// `socket(AF_UNIX, ty, proto)`: a stream socket (SOCK_CLOEXEC and
+/// SOCK_NONBLOCK taken); protocol 0 or 1 (PF_UNIX, measured), another
+/// -EPROTONOSUPPORT; a type there is none of -EINVAL; SOCK_DGRAM,
+/// SOCK_RAW, SOCK_SEQPACKET (Linux has them; no strace asks one on a
+/// path) refused by name, -ESOCKTNOSUPPORT.
+pub fn unix_socket(a: u64, ty: u64, proto: u64) -> u64 {
+    let base = ty & 0xf
+    if ty & !(0xf | O_CLOEXEC | O_NONBLOCK) != 0 || base == 0 || base == 7 || base == 8 || base == 9 || base > 10 {
+        return neg(EINVAL)
+    }
+    if proto != 0 && proto != 1 {
+        return neg(EPROTONOSUPPORT)
+    }
+    if base != SOCK_STREAM {
+        put(a, A_REFUSAL, unix.R_TYPE)
+        unix.refuse()
+        return neg(ESOCKTNOSUPPORT)
+    }
+    let r = unix.new(SOCK_STREAM)
+    if r == unix.SOCKS {
+        return neg(ENFILE)
+    }
+    let fd = open_new(a, 0, K_UNIX, (T_UNIX << T_SHIFT) | r, O_RDWR | (ty & (O_CLOEXEC | O_NONBLOCK)))
+    if fd >= 0x8000000000000000 {
+        unix.free(r)
+    }
+    fd
+}
+
+/// The `struct sockaddr_un` of `len` bytes at user `addr`: its path (the
+/// bytes of `sun_path` up to the first NUL or the length's end) copied
+/// into pax_kbuf[0..] with a NUL after it: (0, its length), or
+/// (-errno, 0): a length under 2 or over 110 -EINVAL, -EFAULT, a family
+/// that is not AF_UNIX -EINVAL (all measured); autobind (a length of
+/// 2) and an abstract name refused by name, -EINVAL.
+fn un_path(a: u64, pml4: u64, addr: u64, len: u64) -> (u64, u64) {
+    if len < 2 || len > UN_LEN {
+        return (neg(EINVAL), 0)
+    }
+    if !uaccess.readable(pml4, addr, len) {
+        return (neg(EFAULT), 0)
+    }
+    if uaccess.get(pml4, addr, 2) != AF_UNIX {
+        return (neg(EINVAL), 0)
+    }
+    if len == 2 || uaccess.get(pml4, addr + 2, 1) == 0 {
+        put(a, A_REFUSAL, unix.R_ABSTRACT)
+        unix.refuse()
+        return (neg(EINVAL), 0)
+    }
+    var l: u64 = 0
+    while l < len - 2 && uaccess.get(pml4, addr + 2 + l, 1) != 0 {
+        put_kb(l, uaccess.get(pml4, addr + 2 + l, 1))
+        l += 1
+    }
+    put_kb(l, 0)
+    (0, l)
+}
+
+/// `bind(fd, addr, len)` on a path socket: the name made in the tree,
+/// mode S_IFSOCK and `0777 & ~umask` (measured: 0755 under 022). A name
+/// that exists, whatever it is, -EADDRINUSE; a missing directory
+/// -ENOENT, a file on the way -ENOTDIR; a socket already bound, or
+/// listening or connected, -EINVAL (measured, after the name's check);
+/// in /dev refused by name, -EROFS, as px27 refuses every name there.
+pub fn unix_bind(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
+    let r = rf(node_of(a, fd))
+    let (e, l) = un_path(a, pml4, addr, len)
+    if e != 0 {
+        return e
+    }
+    let (n, par, ns, nl, trail) = walk_k(a, AT_FDCWD, l, false)
+    if !is_err(n) {
+        return neg(EADDRINUSE)
+    }
+    if rf(n) != ENOENT || is_err(par) {
+        return neg(rf(n))
+    }
+    if unix.ino(r) != unix.NONE_INO || unix.state(r) != unix.FRESH {
+        return neg(EINVAL)
+    }
+    if trail {
+        return neg(EISDIR)
+    }
+    if ty(par) == T_SYN {
+        return neg(ENOENT)
+    }
+    if ty(par) != T_INO {
+        refuse(a, R_DEVRO)
+        return neg(EROFS)
+    }
+    let i = tree.mksock(rf(par), raw() + ns, nl, 0x1ff & !mask_of(a), r)
+    if tree.failed(i) {
+        return i
+    }
+    tree.hold(i)
+    unix.set_ino(r, i)
+    unix.set_name(r, raw(), l)
+    0
+}
+
+/// `listen(fd, backlog)` on a path socket: it takes connections from
+/// now on, `backlog + 1` waiting at most (measured), a negative backlog
+/// and one past SOMAXCONN as SOMAXCONN; again on a listener changes the
+/// backlog. Unbound, or connected: -EINVAL (measured).
+pub fn unix_listen(a: u64, fd: u64, backlog: u64) -> u64 {
+    let r = rf(node_of(a, fd))
+    let st = unix.state(r)
+    if (st != unix.FRESH && st != unix.LISTEN) || unix.ino(r) == unix.NONE_INO {
+        return neg(EINVAL)
+    }
+    let b = backlog & 0xffffffff
+    unix.set_backlog(r, if b >= 0x80000000 || b > SOMAXCONN { SOMAXCONN } else { b })
+    unix.set_state(r, unix.LISTEN)
+    sched.wake_pipes() // a blocked connect may find room
+    0
+}
+
+/// `connect(fd, addr, len)` on a path socket. The path resolved as
+/// `open` resolves it (-ENOENT, -ENOTDIR); a name that is no socket, or
+/// a socket that does not listen or has closed, -ECONNREFUSED (measured
+/// all four); the caller listening -EINVAL, connected -EISCONN. At a
+/// listener with room the server's end is made and queued and the call
+/// answers 0 at once; with the queue full it waits for room, or answers
+/// -EAGAIN under O_NONBLOCK (measured).
+pub fn unix_connect(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
+    let r = rf(node_of(a, fd))
+    let (e, l) = un_path(a, pml4, addr, len)
+    if e != 0 {
+        return e
+    }
+    let st = unix.state(r)
+    if st == unix.LISTEN {
+        return neg(EINVAL)
+    }
+    if st == unix.CONN {
+        return neg(EISCONN)
+    }
+    let n = resolve_k(a, AT_FDCWD, l)
+    if is_err(n) {
+        return neg(rf(n))
+    }
+    if ty(n) != T_INO || tree.sock_of(rf(n)) == 0 {
+        return neg(ECONNREFUSED)
+    }
+    let lr = tree.sock_of(rf(n)) - 1
+    if unix.state(lr) != unix.LISTEN {
+        return neg(ECONNREFUSED)
+    }
+    if unix.kind(lr) != unix.kind(r) {
+        return neg(EPROTOTYPE)
+    }
+    if !unix.room(lr) {
+        if status(a, fd) & O_NONBLOCK != 0 {
+            return neg(EAGAIN)
+        }
+        return WAIT
+    }
+    let srv = unix.new(unix.kind(r))
+    if srv == unix.SOCKS {
+        return neg(ENOBUFS)
+    }
+    let b1 = pipe_new(SOCK_PAGES)
+    if b1 == PIPES {
+        unix.free(srv)
+        return neg(ENOBUFS)
+    }
+    let b2 = pipe_new(SOCK_PAGES)
+    if b2 == PIPES {
+        pipe_settle(b1)
+        unix.free(srv)
+        return neg(ENOBUFS)
+    }
+    // The client reads b1 and writes b2; the server's end the other way.
+    put_ppw(b1, P_READERS, 1)
+    put_ppw(b1, P_WRITERS, 1)
+    put_ppw(b2, P_READERS, 1)
+    put_ppw(b2, P_WRITERS, 1)
+    unix.set_bufs(r, b1, b2)
+    unix.set_bufs(srv, b2, b1)
+    unix.set_peer(r, srv)
+    unix.set_peer(srv, r)
+    unix.copy_name(srv, lr) // an accepted end answers its listener's name
+    unix.set_state(srv, unix.QUEUED)
+    unix.set_state(r, unix.CONN)
+    unix.enqueue(lr, srv)
+    sched.wake_pipes()
+    0
+}
+
+/// Write path socket `who`'s name as a `struct sockaddr_un` at user
+/// `addr`, cut to the room at `lenp`, and its whole length there: 2 for
+/// an unnamed socket, else 2 + its length + 1 (`unix(7)`; measured,
+/// with a NUL-less name too). -EFAULT, -EINVAL as getsockname(2).
+fn un_out(pml4: u64, addr: u64, lenp: u64, who: u64) -> u64 {
+    if !uaccess.readable(pml4, lenp, 4) || !uaccess.writable(pml4, lenp, 4) {
+        return neg(EFAULT)
+    }
+    let cap = uaccess.get(pml4, lenp, 4)
+    if cap >= 0x80000000 {
+        return neg(EINVAL)
+    }
+    let nl = unix.name_len(who)
+    let full = if nl == 0 { 2 } else { 2 + nl + 1 }
+    let k = if cap < full { cap } else { full }
+    if k > 0 && !uaccess.writable(pml4, addr, k) {
+        return neg(EFAULT)
+    }
+    var i: u64 = 0
+    while i < k {
+        var b: u64 = 0
+        if i == 0 {
+            b = AF_UNIX
+        } else if i >= 2 && i - 2 < nl {
+            b = unix.name_byte(who, i - 2)
+        }
+        uaccess.put(pml4, addr + i, b, 1)
+        i += 1
+    }
+    uaccess.put(pml4, lenp, full, 4)
+    0
+}
+
+/// `accept4(fd, addr, lenp, flags)` on a path socket (and `accept`):
+/// the queue's head as a descriptor (SOCK_CLOEXEC, SOCK_NONBLOCK;
+/// another flag -EINVAL), its client's name written when asked; a socket
+/// that does not listen -EINVAL; an empty queue waits, or -EAGAIN.
+pub fn unix_accept(a: u64, pml4: u64, fd: u64, addr: u64, lenp: u64, flags: u64) -> u64 {
+    if flags & !(O_CLOEXEC | O_NONBLOCK) != 0 {
+        return neg(EINVAL)
+    }
+    let r = rf(node_of(a, fd))
+    if unix.state(r) != unix.LISTEN {
+        return neg(EINVAL)
+    }
+    if unix.qlen(r) == 0 {
+        if status(a, fd) & O_NONBLOCK != 0 {
+            return neg(EAGAIN)
+        }
+        return WAIT
+    }
+    if lowest_free(a, 0) == FDS {
+        return neg(EMFILE)
+    }
+    if !of_room() {
+        return neg(ENFILE)
+    }
+    let c = unix.dequeue(r)
+    let nfd = open_new(a, 0, K_UNIX, (T_UNIX << T_SHIFT) | c, O_RDWR | flags)
+    unix.set_state(c, unix.CONN)
+    if addr != 0 && lenp != 0 {
+        let p = unix.peer(c)
+        let _w = un_out(pml4, addr, lenp, if p == unix.SOCKS { c } else { p })
+    }
+    sched.wake_pipes() // room on the queue for a waiting connect
+    nfd
+}
+
+/// `getsockname` (`peer` false) and `getpeername` on a path socket:
+/// its own name (an accepted end its listener's), or its peer's;
+/// -ENOTCONN for a peer it has not (measured).
+pub fn unix_getname(a: u64, pml4: u64, fd: u64, addr: u64, lenp: u64, peer: bool) -> u64 {
+    let r = rf(node_of(a, fd))
+    var who = r
+    if peer {
+        if unix.state(r) != unix.CONN || unix.peer(r) == unix.SOCKS {
+            return neg(ENOTCONN)
+        }
+        who = unix.peer(r)
+    }
+    un_out(pml4, addr, lenp, who)
+}
+
+/// `getsockopt(fd, SOL_SOCKET, …)` on a path socket: SO_TYPE (3),
+/// SO_ERROR (4: the reset waiting, taken) and SO_ACCEPTCONN (30); any
+/// other -ENOPROTOOPT (measured for one Linux has not).
+pub fn unix_getsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u64, lenp: u64) -> u64 {
+    let r = rf(node_of(a, fd))
+    if level != 1 || (option != 3 && option != 4 && option != 30) {
+        return neg(ENOPROTOOPT)
+    }
+    if !uaccess.readable(pml4, lenp, 4) || !uaccess.writable(pml4, lenp, 4) {
+        return neg(EFAULT)
+    }
+    let cap = uaccess.get(pml4, lenp, 4)
+    if cap >= 0x80000000 {
+        return neg(EINVAL)
+    }
+    let k = if cap < 4 { cap } else { 4 }
+    if !uaccess.writable(pml4, value, k) {
+        return neg(EFAULT)
+    }
+    var v: u64 = 0
+    if option == 3 {
+        v = unix.kind(r)
+    } else if option == 30 {
+        v = if unix.state(r) == unix.LISTEN { 1 } else { 0 }
+    } else {
+        v = unix.err(r)
+        unix.set_err(r, 0)
+    }
+    uaccess.put(pml4, value, v, k)
+    uaccess.put(pml4, lenp, k, 4)
+    0
+}
+
+/// `setsockopt` on a path socket: refused by name, -ENOPROTOOPT (no
+/// strace sets one; Linux takes SO_REUSEADDR, measured).
+pub fn unix_setsockopt(a: u64) -> u64 {
+    put(a, A_REFUSAL, unix.R_OPTION)
+    unix.refuse()
+    neg(ENOPROTOOPT)
+}
+
+/// `shutdown(fd, how)` on a path socket: SHUT_RD (0), SHUT_WR (1),
+/// SHUT_RDWR (2) for this end, which its peer sees as the other half
+/// (measured); `how` over 2 -EINVAL; on a socket that is not connected
+/// it answers 0 and changes nothing (measured).
+pub fn unix_shutdown(a: u64, fd: u64, how: u64) -> u64 {
+    if how > 2 {
+        return neg(EINVAL)
+    }
+    let r = rf(node_of(a, fd))
+    if unix.state(r) == unix.CONN {
+        unix.add_shut(r, if how == 0 { unix.RD } else if how == 1 { unix.WR } else { unix.RD | unix.WR })
+        sched.wake_pipes()
+    }
+    0
 }
 
 // --- paths ------------------------------------------------------------------
@@ -1915,7 +2657,20 @@ fn is_proc_exe(pml4: u64, va: u64) -> bool {
 
 fn is_dir_node(n: u64) -> bool {
     let t = ty(n)
-    t == T_DEV || (t == T_INO && tree.is_dir(rf(n)))
+    t == T_DEV || (t == T_INO && tree.is_dir(rf(n))) || (t == T_SYN && procfs.is_dir(rf(n)))
+}
+
+/// px34: the entry of /proc or /sys named [s, s + n) of pax_kbuf in `d`
+/// (an entry, or procfs.ROOT), or an error node (ENOENT).
+fn syn_child(d: u64, s: u64, n: u64) -> u64 {
+    var e: u64 = 0
+    while e < procfs.ENTRIES {
+        if procfs.parent(e) == d && comp_is(s, n, procfs.name(e)) {
+            return (T_SYN << T_SHIFT) | e
+        }
+        e += 1
+    }
+    err(ENOENT)
 }
 
 /// What the name [s, s + n) of pax_kbuf leads to in directory node `d`:
@@ -1946,8 +2701,14 @@ fn child_named(d: u64, s: u64, n: u64) -> u64 {
         }
         return err(ENOENT)
     }
+    if ty(d) == T_SYN {
+        return syn_child(rf(d), s, n) // px34
+    }
     if rf(d) == tree.ROOT && comp_is(s, n, "dev") {
         return T_DEV << T_SHIFT
+    }
+    if rf(d) == tree.ROOT && (comp_is(s, n, "proc") || comp_is(s, n, "sys")) {
+        return syn_child(procfs.ROOT, s, n) // px34
     }
     let i = tree.lookup(rf(d), raw() + s, n)
     if i == tree.NONE {
@@ -1960,6 +2721,10 @@ fn child_named(d: u64, s: u64, n: u64) -> u64 {
 fn up(d: u64) -> u64 {
     if ty(d) == T_DEV {
         return root_node()
+    }
+    if ty(d) == T_SYN {
+        let p = procfs.parent(rf(d)) // px34
+        return if p == procfs.ROOT { root_node() } else { (T_SYN << T_SHIFT) | p }
     }
     ino_node(tree.parent(rf(d)))
 }
@@ -1986,6 +2751,12 @@ fn walk(a: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool) -> (u64, u64, u6
     if is_err(rl) {
         return (rl, rl, 0, 0, false)
     }
+    walk_k(a, dirfd, rl, empty_ok)
+}
+
+/// px34: `walk` of the path already in pax_kbuf[0..rl) (a socket's
+/// name, copied out of its `struct sockaddr_un`).
+fn walk_k(a: u64, dirfd: u64, rl: u64, empty_ok: bool) -> (u64, u64, u64, u64, bool) {
     if rl == 0 {
         if !empty_ok {
             return (err(ENOENT), err(ENOENT), 0, 0, false)
@@ -2069,6 +2840,12 @@ fn resolve(a: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool) -> u64 {
     n
 }
 
+/// px34: `resolve` of the path in pax_kbuf[0..rl).
+fn resolve_k(a: u64, dirfd: u64, rl: u64) -> u64 {
+    let (n, _p, _s, _l, _t) = walk_k(a, dirfd, rl, false)
+    n
+}
+
 /// px27: the process's file mode creation mask (`umask(2)`): 022 until
 /// it sets one.
 fn mask_of(a: u64) -> u64 {
@@ -2136,6 +2913,9 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
         if trail {
             return neg(EISDIR)
         }
+        if ty(par) == T_SYN {
+            return neg(ENOENT) // px34: nothing is made in /proc or /sys (measured: ENOENT)
+        }
         if ty(par) != T_INO {
             refuse(a, R_DEVRO)
             return neg(EROFS)
@@ -2163,7 +2943,7 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
         }
         k = kind(a, src)
         n = node_of(a, src)
-        if k == K_SOCK || k == K_INET || k == K_TCP {
+        if k == K_SOCK || k == K_INET || k == K_TCP || k == K_UNIX {
             return neg(ENXIO) // px17: a socket is not reopened through a path
         }
     } else if ty(n) == T_CONSOLE {
@@ -2186,9 +2966,16 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
             return neg(EISDIR)
         }
         k = K_DIR
+    } else if ty(n) == T_INO && tree.is_sock(rf(n)) {
+        return neg(ENXIO) // px34: a socket's name is not opened (measured)
+    } else if ty(n) == T_SYN {
+        k = K_SYN // px34: a file of /proc or /sys
     }
     if flags & O_DIRECTORY != 0 && k != K_DIR {
         return neg(ENOTDIR)
+    }
+    if k == K_SYN {
+        return syn_open(a, n, flags)
     }
     // px17: a new open file (offset 0), also when /dev/std* reopens a
     // file or a pipe's end (as /proc/self/fd's links do on Linux).
@@ -2197,6 +2984,49 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
         let _t = tree.truncate(rf(n), 0)
     }
     fd
+}
+
+/// px34: open a file of /proc or /sys: its text made now (kernel/procfs)
+/// into a frame the new open file holds.
+fn syn_open(a: u64, n: u64, flags: u64) -> u64 {
+    if lowest_free(a, 0) == FDS {
+        return neg(EMFILE)
+    }
+    if !of_room() {
+        return neg(ENFILE)
+    }
+    let (pa, len) = procfs.make(rf(n), a, mask_of(a), FDS)
+    if pa == 0 {
+        return neg(ENOMEM)
+    }
+    let fd = open_new(a, 0, K_SYN, n, flags)
+    if fd >= 0x8000000000000000 {
+        frames.free(pa)
+        return fd
+    }
+    let o = of_of(a, fd)
+    put_ofw(o - 1, O_TEXT, pa)
+    put_ofw(o - 1, O_TEXT_LEN, len)
+    fd
+}
+
+/// px34: a read of a /proc or /sys file: its text from the offset on.
+fn syn_read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
+    let o = of_of(a, fd)
+    let len = ofw(o - 1, O_TEXT_LEN)
+    let off = ofw(o - 1, O_POS)
+    if off >= len || n == 0 {
+        if !uaccess.in_user(buf, 0) {
+            return neg(EFAULT)
+        }
+        return 0
+    }
+    let k = if n < len - off { n } else { len - off }
+    if !uaccess.copy_out(pml4, buf, ofw(o - 1, O_TEXT) + frames.hhdm() + off, k) {
+        return neg(EFAULT)
+    }
+    put_ofw(o - 1, O_POS, off + k)
+    k
 }
 
 /// Copy up to `n` bytes of file node `node` from offset `off` to user
@@ -2234,8 +3064,11 @@ pub fn read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
         // kernel/user to wait; end of file before the console is started.
         return console.read(pml4, buf, n, status(a, fd) & O_NONBLOCK != 0)
     }
-    if k == K_PIPE || k == K_SOCK {
-        return pipe_read(a, pml4, fd, buf, n, false) // px17
+    if k == K_PIPE || k == K_SOCK || k == K_UNIX {
+        return pipe_read(a, pml4, fd, buf, n, false) // px17; px34: a path socket
+    }
+    if k == K_SYN {
+        return syn_read(a, pml4, fd, buf, n) // px34
     }
     if k == K_INET || k == K_TCP {
         return neg(EINVAL) // px22: kernel/user sends a socket's read to kernel/socket
@@ -2335,7 +3168,7 @@ pub fn lseek(a: u64, fd: u64, off: u64, whence: u64) -> u64 {
     if k == K_CLOSED {
         return neg(EBADF)
     }
-    if k == K_CONSOLE || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_DSP {
+    if k == K_CONSOLE || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_DSP || k == K_UNIX {
         return neg(ESPIPE)
     }
     if k == K_NULL || k == K_EPOLL || k == K_EVENT {
@@ -2437,7 +3270,7 @@ pub fn ioctl(a: u64, pml4: u64, fd: u64, req: u64, arg: u64) -> u64 {
         }
         return r
     }
-    if req == FIONBIO && (k == K_INET || k == K_TCP) {
+    if req == FIONBIO && (k == K_INET || k == K_TCP || k == K_UNIX || k == K_SOCK) {
         // px23: what wolf's runtime does to every socket it makes.
         if !uaccess.readable(pml4, arg, 4) {
             return neg(EFAULT)
@@ -2648,6 +3481,9 @@ pub fn mkdirat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64) -> u64 {
     if rf(n) != ENOENT || is_err(par) {
         return neg(rf(n))
     }
+    if ty(par) == T_SYN {
+        return neg(ENOENT) // px34: measured, mkdir in /proc/self
+    }
     if ty(par) != T_INO {
         refuse(a, R_DEVRO)
         return neg(EROFS)
@@ -2802,8 +3638,11 @@ fn n_mode(n: u64) -> u64 {
     if t == T_PIPE {
         return MODE_FIFO
     }
-    if t == T_SOCK || t == T_INET || t == T_TCP {
+    if t == T_SOCK || t == T_INET || t == T_TCP || t == T_UNIX {
         return MODE_SOCK
+    }
+    if t == T_SYN {
+        return procfs.mode(rf(n)) // px34
     }
     if t == T_EVENT || t == T_EPOLL {
         return MODE_ANON // px24
@@ -2814,6 +3653,9 @@ fn n_mode(n: u64) -> u64 {
 fn n_size(n: u64) -> u64 {
     if ty(n) == T_INO {
         return tree.size(rf(n))
+    }
+    if ty(n) == T_SYN {
+        return procfs.size(rf(n)) // px34
     }
     0
 }
@@ -2844,6 +3686,12 @@ fn n_ino(n: u64) -> u64 {
     if t == T_TCP {
         return 0x300 + rf(n) // px23: one number per block
     }
+    if t == T_UNIX {
+        return 0x800 + rf(n) // px34: one number per socket
+    }
+    if t == T_SYN {
+        return 0x700 + rf(n) // px34
+    }
     3 // the console
 }
 
@@ -2852,7 +3700,7 @@ fn n_nlink(n: u64) -> u64 {
     if t == T_INO {
         return tree.nlink(rf(n))
     }
-    if t == T_DEV {
+    if t == T_DEV || (t == T_SYN && procfs.is_dir(rf(n))) {
         return 2
     }
     1
@@ -2888,6 +3736,9 @@ fn n_dev(n: u64) -> u64 {
     let t = ty(n)
     if t == T_DEV || t == T_NULL || t == T_STD || t == T_CONSOLE || t == T_DSP {
         return 5
+    }
+    if t == T_SYN {
+        return 6 + procfs.fs(rf(n)) // px34: /proc 0:6, /sys 0:7
     }
     1
 }
@@ -3072,7 +3923,10 @@ fn d_type(c: u64) -> u64 {
     if is_dir_node(c) {
         return DT_DIR
     }
-    if ty(c) == T_INO {
+    if ty(c) == T_INO && tree.is_sock(rf(c)) {
+        return DT_SOCK // px34 (measured: 12)
+    }
+    if ty(c) == T_INO || ty(c) == T_SYN {
         return DT_REG
     }
     DT_CHR
@@ -3123,6 +3977,14 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
             } else {
                 nl = fixed_len(c)
             }
+        } else if p >= 2 && ty(d) == T_SYN {
+            let e = procfs.child_at(rf(d), p - 2) // px34
+            if e == procfs.NONE {
+                more = false
+            } else {
+                c = (T_SYN << T_SHIFT) | e
+                nl = procfs.name_len(e)
+            }
         } else if p >= DEV_DONE {
             more = false
         } else if p >= 2 {
@@ -3161,6 +4023,12 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
                     uaccess.put(pml4, r + 20, 46, 1)
                 } else if na != 0 {
                     let _ok = uaccess.copy_out(pml4, r + 19, na, nl)
+                } else if ty(c) == T_SYN {
+                    var j: u64 = 0
+                    for b in procfs.name(rf(c)).bytes() {
+                        uaccess.put(pml4, r + 19 + j, b as int as u64, 1)
+                        j += 1
+                    }
                 } else {
                     var j: u64 = 0
                     for b in fixed_name(c).bytes() {
