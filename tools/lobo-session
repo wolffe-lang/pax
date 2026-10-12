@@ -46,7 +46,8 @@ Steps, one a line (`#` comments). A line may start with `pax:` or
                          DIR/resp/OUT
   kclose NAME            close it
   host CMD               CMD in bash on this host ({H<g>} the host port
-                         forwarded to guest port g); its output and status
+                         forwarded to guest port g, {OUT} DIR, {DATA} the
+                         data directory); its output and status
                          into the steps log
   halt [SECS]            PAX: the kernel's `halt`, then QEMU ended; Linux: the shell ended
 DIR/steps.log has every step, its time and what it saw. Exit 0 when
@@ -448,7 +449,7 @@ for n, line in enumerate(open(a.steps), 1):
         loads[arg]["t"].join()
         log.write("          %s\n" % loads[arg]["res"]["summary"])
     elif op == "host":
-        cmdline = subst(arg)
+        cmdline = subst(arg).replace("{OUT}", os.path.abspath(a.out)).replace("{DATA}", os.path.abspath(a.data))
         for gp, h in fwd.items():
             cmdline = cmdline.replace("{H%d}" % gp, str(h))
         r = subprocess.run(["bash", "-c", cmdline], capture_output=True)
