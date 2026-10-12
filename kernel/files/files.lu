@@ -808,7 +808,10 @@ pub fn dup(a: u64, old: u64, new: u64, cloexec: bool) -> u64 {
     if kind(a, new) != K_CLOSED {
         let _c = close(a, new)
     }
-    copy_fd(a, old, new, cloexec)
+    // PLANT (px25, a worker that never gets its listener): dup2 marks a
+    // TCP socket's copy at 3 or above close-on-exec, so execve closes
+    // the listener a worker inherits as descriptor 3.
+    copy_fd(a, old, new, cloexec || (kind(a, old) == K_TCP && new >= 3))
     new
 }
 
