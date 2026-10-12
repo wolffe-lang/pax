@@ -35,7 +35,7 @@ part ch choir                       # no level: mf
   against the others in whole decibels, -24 to 12 (`+3`, `-6`), default
   0: it scales every level of the part, so `gain -6` on the brass keeps
   their ff 6 dB under the strings' ff. `pan` and `gain` in either
-  order. At most 24 parts. Parts sound in the order declared; the order
+  order. At most **48** parts (measured: 48 parts, 64 voices, 122 s, 2.0% of real time natively; the guest figures are in `notes/px32-the-orchestra.md`). Parts sound in the order declared; the order
   has no other meaning.
 
 ## 2. Bars
@@ -78,7 +78,7 @@ hn1  G4/2 r/4
 |---|---|
 | PITCHES | `r` (a rest), one note (`C4`, `F#3`, `Bb5`, `C##4`, `Dbb4`: letter, accidental `#` `b` `##` `bb` or none, octave 0-8; A4 = 440 Hz, equal temperament; sounding range A0 to C8), or up to 6 notes joined by commas, no spaces (`C3,G3,E4`): a chord in one part (divisi, organ) |
 | LENGTH | `1 2 4 8 16 32 64` (whole to sixty-fourth); `.` or `..` dots it; then `t` (triplet: two thirds) or `xN` (an N-tuplet: N in the time of the largest power of two below N; `x3` = `t`, `x5` = 4 in 5, `x6` 4 in 6, `x7` 4 in 7, `x9` 8 in 9); `+` joins lengths (`2+8`, `1+4.`) |
-| MARKS | any of these, in any order, after the length (none for a rest except `~` is refused): `'` staccato (sounds half its length), `^` marcato (accent and three quarters), `>` accent (the attack a level and a half louder, falling back over 150 ms), `-` tenuto (sounds its full length), `_` slur to the next note of this part (no gap, no new attack: legato), `*` tremolo (strings: unmeasured bowed tremolo; timpani, drums, cymbal, tam-tam: a roll; others: a flutter of repeated attacks), `~` tie (the next event of this part has the same pitches; the two sound as one note, across a bar line too) |
+| MARKS | any of these, in any order, after the length (none for a rest except `~` is refused): `'` staccato (sounds half its length), `^` marcato (accent and three quarters), `>` accent (the attack a level and a half louder, falling back over 150 ms), `-` tenuto (sounds its full length), `_` slur to the next note of this part (no gap, no new attack: legato), `*` tremolo (strings: unmeasured bowed tremolo; timpani, drums, cymbal, tam-tam: a roll; others: a flutter of repeated attacks), `~` tie: each note of this event that the part's next event sounds again continues as one note, across a bar line too; the next event's other notes start anew and this event's other notes end (so one note of a chord can hold while the others move: `C4,E4,G4/2~ C4,F4,A4/2` holds C4); a tie whose next event sounds none of its notes is refused |
 
 An unmarked note sounds its length less a short gap (an eighth of it,
 at most 40 ms) and then releases (§5), so repeated notes part.
