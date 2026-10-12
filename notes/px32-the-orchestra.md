@@ -243,6 +243,35 @@ maintainer's finding; each is fixed with a test, and the format only grew.
   stolen, 0 dropped, 0 clamped, 0.6% of real time natively, 11.8 MB RSS.
 - **CI green at head**: the PR's run (below).
 
+## The real-time gate (after px33's CI run 38208203649)
+
+The test's cost bound (under 50% of real time, `wide`) failed once on
+px33's CI run 38208203649 at 52%, under TCG on a loaded runner, with
+the same play that passed in 38207190550. The guest's clock is the
+host's wall time under TCG, so no figure play measures in the guest
+(wall or "CPU" time) is free of the runner's load. The gate is now what
+the budget is for: **`play -m` kept the device fed**, the kernel's own
+`underruns` count is 0 (O5 long and wide, O6 the study). The cost is
+still recorded and bounded only by real time itself, 100%, twice the
+worst seen (measured spread: long 9.5-11.3%, wide 26.8-30.7% on
+kasumi, 52% on the loaded runner; the study 5.1-7.0% kasumi, 8.6% CI).
+
+Seen red, on kasumi only, not committed: play with a 2 ms sleep before
+every 64-frame block (rounded to the 10 ms tick, about 7.5x slower than
+real time) booted with the study image: `sound: ... 1822 underruns` and
+the test's gate expression answers `1822 underruns;`
+(`kasumi:~/lanes/px32/plant-study-underruns.serial.log`, sha256
+`568e8221f1c2d744…`). Under the same plant the `checks` capture still
+passed its spectral checks, since QEMU's `wav` backend writes nothing
+while the stream is dry: the capture alone cannot see a slow player,
+the underrun count can. Unplanted, kasumi r12 at this test: 14 boots,
+each `0 underruns`, whole PASS.
+
+Disclosure: stopping the planted run, a `pgrep -f` pattern that also
+matched my own ssh command line was used to pick pids, so my own
+session's shell (3559811, 3559818, 3559823) was killed with the
+plant's processes; nothing else matched (listed before and after).
+
 ## Not verified
 
 - Listening: no person has heard these timbres; every judgement is
