@@ -1946,3 +1946,81 @@ jobs:
             build/mpx4-unix-runs.txt
           retention-days: 14
           if-no-files-found: warn
+
+  # tests/mpx4-lobo (px25, M-PX4): lobo, unmodified, built from its own
+  # tree at the pin (trunk) and at its release v0.1.3, as PAX processes
+  # serving this runner through QEMU's hostfwd: every session typed at
+  # pelt's prompt on PAX and the same steps run on Linux in a container,
+  # reply for reply (serve, serve-release, hands — four workers, SIGHUP,
+  # a worker SIGKILLed and replaced, SIGTERM —, load with the census
+  # flat and a reload losing no request, lobo's 24 static and 7 proxy
+  # differential rows, its control rows 1-6 and its signal row); serve
+  # and hands on both tiers, BIOS and UEFI.
+  mpx4-lobo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          qemu-system-x86_64 --version
+          clang --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx4-lobo-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the image the Linux side's containers are made from (by digest)
+        run: |
+          docker pull "$PAX_TREE_IMAGE"
+          docker image inspect --format '{{.Id}} {{.RepoDigests}}' "$PAX_TREE_IMAGE"
+        env:
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+      - name: lobo on PAX against lobo on Linux; both tiers, BIOS and UEFI
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+        run: tests/mpx4-lobo --round 30
+
+      - name: keep the programs' sums, the sessions on both sides, the runs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx4-lobo
+          path: |
+            build/mpx4-lobo/*.txt
+            build/mpx4-lobo/lobo/sums.txt
+            build/mpx4-lobo/lobo-release/sums.txt
+            build/mpx4-lobo/*/kmain_session.build-kernel.log
+            build/mpx4-lobo-*/steps.log
+            build/mpx4-lobo-*/console.log
+            build/mpx4-lobo-*/resp/
+            build/mpx4-lobo-*/backend/
+            build/mpx4-lobo-*/load-*.txt
+            build/mpx4-lobo-*/get-*.txt
+            build/mpx4-lobo-*.out
+            build/mpx4-lobo-*.check
+            build/mpx4-lobo-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
