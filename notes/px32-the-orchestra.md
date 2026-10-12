@@ -188,17 +188,20 @@ parser's hand-over, the options), `user/tunes` (the study only),
   timbres, balance and the study on native BIOS and release UEFI
   36/36, 25/25, 14/14, 11/11; long (230 s, 16 parts) in 256 MiB:
   60898 → 60545 frames free (353 held), 0 clamped.
-- **Measured levels** (balance.spec, the host and every capture alike):
-  mf with no level = mf (0.0 dB); pp held three bars within 0.0 dB; pp
-  → ff over two bars +21.4 dB, ff → pp -21.5 dB; `gain -12` = -13.4
-  dB before `883c0d1`'s exact arithmetic; a 16-part tutti at pp
-  **-37.8 dBFS**, at ff -12.0 dBFS (25.7 dB apart). marks.spec:
-  staccato 66 dB down at three quarters of its length; unmarked
-  repeats dip 11.5 dB, tenuto 0.5-0.6 dB, a tie 0.0 dB; slur onsets
-  within 5 ms; accent +4.3 dB, sfz +13.3, fp +10.2; pan ±95-100 dB;
-  pedal 16' present; horn ff 7.3 dB brighter than p; voice vibrato
-  1.32%, organ 0.16% (none); tremolo waver 2.1 dB against 0.7 plain;
-  rit onsets within 8 ms of the integral.
+- **Measured levels** (r5's host verdicts, `9822dbb`; the captures
+  pass the same specs): a part with no level equals one marked mf (0.0
+  dB) and ff is 10.0 dB over it (two steps); pp held over three bars
+  within 0.2 dB, ff over two within 0.2 dB, 25.2 dB apart; pp → ff
+  over two bars +20.3 dB, ff → pp -20.6 dB; `gain -12` 12.1 dB down; a
+  16-part tutti (29 voices) at pp **-37.2 dBFS**, at ff -12.0 dBFS (25.2
+  dB apart). marks.spec: staccato 55.7 dB down at three quarters of its
+  length; unmarked repeats dip 11.2 dB, tenuto 0.5 dB, a tie 0.0 dB; a
+  slur wavers 0.23 dB against 2.26 for unmarked repeats; accent +6.1 dB,
+  sfz +16.1, fp +12.5; pan 99.2 and -105.6 dB; the pedal's 16' present;
+  the horn's fourth harmonic 7.2 dB stronger at ff than at p and the
+  note 19.5 dB louder; the voice's vibrato spans 1.32%, the organ's
+  0.16% (none, the estimate's floor); bowed tremolo wavers 2.11 dB,
+  plain bowing 0.72; rit onsets within 8 ms of the integral.
 - **px33's preview** (`~/lanes/px33/work/auferstehung-preview`, 24
   parts, 101 s) in the guest under 256 MiB with the final play: played
   whole, 32 voices, 0 stolen, 0 clamped, 0 underruns, 353 frames held
