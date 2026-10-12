@@ -1,0 +1,157 @@
+# tools/ci-tiers.map — which CI suites a changed path can affect (px37).
+#
+# Read by tools/ci-plan, proven by tests/ci-plan. One rule a line:
+#
+#   GLOB  TARGET...
+#
+# GLOB is a repository path matched with fnmatch (`*` crosses `/`).
+# A TARGET is a suite (a job of .github/workflows/ci.yml), a group
+# (`@name`, defined by a `@name = suite...` line), or one of:
+#   FULL  the full tier: every suite, every leg (native and release,
+#         BIOS and UEFI), whatever else changed;
+#   ALL   every suite, on the pull-request leg;
+#   NONE  nothing runs for this path (prose that no test reads).
+# Every rule a path matches applies (the union), FULL wins. Beside these
+# rules tools/ci-plan derives, from the tests' own text, the suites that
+# read a path: tests/S and tests/S.d/ are S's; a kernel/kmain*.lu is the
+# suite's whose script names it; a tools/, user/, boot/ or font/ path is
+# the suite's whose script, or a tool that script names, names it
+# (README in tools/ci-plan). A path no rule and no derivation matches is
+# FULL: an unknown path never shrinks a run.
+#
+# Why a kernel module is mapped by what RUNS it, not by what imports it:
+# every kernel imports every module (kernel/interrupts reaches the
+# system-call table, which reaches the rest), so the import closure of
+# each kmain is the whole kernel (43 to 47 of 47 modules, px37's census).
+# A change that breaks the BUILD shows up in any suite, because each one
+# compiles the whole package; a change that breaks BEHAVIOUR shows up in
+# the suites that run the code, and those are the targets below. The
+# full tier, before every merge, on every trunk push and nightly, runs
+# all of them on every leg.
+
+@user    = mpx3-user mpx3-loader mpx3-boreutils mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-speaker mpx3-sound mpx3-orchestra mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix
+@net     = mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix
+@music   = mpx3-speaker mpx3-sound mpx3-orchestra mpx4-session
+@console = mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-speaker mpx3-sound mpx3-orchestra mpx4-unix mpx4-session tour
+
+# --- the toolchain and the kernel's core: FULL ------------------------------
+kernel/wolf.pin                 FULL
+kernel/wolf.pkg                 FULL
+boot/limine.pin                 FULL
+boot/limine.conf                FULL
+boot/start.S                    FULL
+boot/kernel.ld                  FULL
+boot/io.S                       FULL
+boot/cpu.S                      FULL
+boot/isr.S                      FULL
+boot/sched.S                    FULL
+boot/fpu.S                      FULL
+kernel/serial/*                 FULL
+kernel/log/*                    FULL
+kernel/panic/*                  FULL
+kernel/boot_info/*              FULL
+kernel/frames/*                 FULL
+kernel/paging/*                 FULL
+kernel/gdt/*                    FULL
+kernel/idt/*                    FULL
+kernel/interrupts/*             FULL
+kernel/apic/*                   FULL
+kernel/timer/*                  FULL
+kernel/heap/*                   FULL
+kernel/sync/*                   FULL
+kernel/sched/*                  FULL
+kernel/fpu/*                    FULL
+# the harness every boot goes through
+tools/lib.sh                    FULL
+tools/build-kernel              FULL
+tools/mkimage                   FULL
+tools/fetch-wolf                FULL
+tools/fetch-limine              FULL
+tools/qemu-halt                 FULL
+tools/qemu-run                  FULL
+tools/qemu-fault                FULL
+tools/expect-serial             FULL
+
+# --- CI itself: every suite on the pull-request leg --------------------------
+# (the merge rule's labelled full run covers the other legs before merge)
+.github/*                       ALL
+tools/ci-plan                   ALL
+tools/ci-tiers.map              ALL
+tests/ci-plan                   ALL
+
+# --- user mode: processes, files, signals, the tree, readiness --------------
+kernel/user/*                   @user
+kernel/process/*                @user
+kernel/elf/*                    @user
+kernel/files/*                  @user
+kernel/initramfs/*              @user
+kernel/signal/*                 @user
+kernel/futex/*                  @user
+kernel/rtc/*                    @user
+kernel/vm/*                     @user
+kernel/uaccess/*                @user
+kernel/procfs/*                 @user
+kernel/tree/*                   @user
+kernel/ready/*                  @user
+kernel/event/*                  @user
+kernel/console/*                @user
+boot/user.S                     @user
+boot/console.S                  @user
+boot/tree.S                     @user
+boot/event.S                    @user
+user/programs.S                 @user
+tools/mkinitramfs               @user
+
+# --- the network --------------------------------------------------------------
+kernel/net/*                    @net
+kernel/netd/*                   @net
+kernel/arp/*                    @net
+kernel/ip/*                     @net
+kernel/icmp/*                   @net
+kernel/udp/*                    @net
+kernel/tcp/*                    @net
+kernel/socket/*                 @net
+kernel/unix/*                   @net
+boot/net.S                      @net
+boot/unix.S                     @net
+user/net/*                      @net
+user/unix/*                     @net
+user/mpx4-*.run                 @net
+# the bus and the transport carry the sound device too
+kernel/pci/*                    @net mpx3-sound mpx3-orchestra
+kernel/virtio/*                 @net mpx3-sound mpx3-orchestra
+
+# --- sound: the speaker, the sound device, play -------------------------------
+kernel/speaker/*                @music
+kernel/sound/*                  @music
+boot/speaker.S                  @music
+boot/sound.S                    @music
+user/play/*                     @music
+user/tunes/*                    @music
+user/scores/*                   @music
+user/sound/*                    @music
+
+# --- the screen -----------------------------------------------------------------
+kernel/fb/*                     @console
+kernel/screen/*                 @console
+boot/screen.S                   @console
+boot/font.S                     @console
+font/spleen-8x16.bdf            @console
+
+# --- one suite's own -------------------------------------------------------------
+kernel/schedtest/*              mpx2-sched tour
+kernel/heapthreads/*            mpx2-heap
+kernel/pax_tour/*               tour
+boot/stub/*                     proof
+tests/expect-serial-selftest    proof mkw mpx1
+tests/gdb-attach                proof
+tools/qemu-gdb                  proof
+tools/census/*                  census
+docs/CENSUS.md                  census
+
+# --- prose no test reads ----------------------------------------------------------
+notes/*                         NONE
+*.md                            NONE
+LICENSE*                        NONE
+font/LICENSE.spleen             NONE
+.gitignore                      NONE
