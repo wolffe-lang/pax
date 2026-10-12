@@ -1,0 +1,75 @@
+side: pax
+forwards: 59107->80
+qemu: qemu-system-x86_64 -machine q35 -cpu max -m 256M -accel kvm -display none -vga std -monitor none -parallel none -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04 -drive file=/home/mfwolffe/lanes/px25/img/native/lobo-trunk.iso,format=raw,media=cdrom,readonly=on -boot d -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:59107-:80 -serial tcp:127.0.0.1:50581,server=on,wait=on
+[   0.05] step 10: wait ^\$ $ 120
+          seen after 0.55 s
+[   0.60] step 11: type cd /srv
+[   0.64] step 12: mark
+[   0.74] step 13: type lobo -c conf/four.conf serve &
+[   0.86] step 14: type echo master $!
+[   0.92] step 15: wait master (\d+)\s*$ 30
+          seen after 0.05 s
+[   0.97] step 16: capture M master (\d+)\s*$
+          M = 3
+[   0.97] step 17: wait generation-activated gen=1 seq=2 worker=4 120
+          seen after 0.45 s
+[   1.43] step 18: get warm 80 / 50 new
+          get warm: 50 requests (new) of / in 0.13 s: 381.5 a second; 0 not 200
+[   1.56] step 19: get warm-big 80 /big.txt 10 new
+          get warm-big: 10 requests (new) of /big.txt in 0.10 s: 97.2 a second; 0 not 200
+[   1.66] step 20: load r0 80 /,/big.txt 60 4
+[   1.66] step 21: loadwait r0
+          load r0: 34891 ok, 0 failed {} in 60.9 s: 572.6 requests a second; latency p50 4.4 ms p99 14.5 ms
+[  62.60] step 22: sleep 2
+[  64.60] step 23: mark
+[  64.89] step 24: type echo census 0; cat /proc/meminfo /proc/sys/fs/file-nr /proc/net/sockstat /proc/[0-9]*/status; echo census end
+[  65.34] step 25: wait ^census end 60
+          seen after 0.15 s
+[  65.49] step 26: load r1 80 /,/big.txt 60 4
+[  65.49] step 27: loadwait r1
+          load r1: 34332 ok, 0 failed {} in 60.6 s: 566.6 requests a second; latency p50 4.2 ms p99 14.9 ms
+[ 126.09] step 28: sleep 2
+[ 128.09] step 29: mark
+[ 128.19] step 30: type echo census 1; cat /proc/meminfo /proc/sys/fs/file-nr /proc/net/sockstat /proc/[0-9]*/status; echo census end
+[ 128.65] step 31: wait ^census end 60
+          seen after 0.15 s
+[ 128.80] step 32: load r2 80 /,/big.txt 60 4
+[ 128.80] step 33: loadwait r2
+          load r2: 33630 ok, 0 failed {} in 60.9 s: 552.2 requests a second; latency p50 4.4 ms p99 15.2 ms
+[ 189.70] step 34: sleep 2
+[ 191.70] step 35: mark
+[ 191.80] step 36: type echo census 2; cat /proc/meminfo /proc/sys/fs/file-nr /proc/net/sockstat /proc/[0-9]*/status; echo census end
+[ 192.25] step 37: wait ^census end 60
+          seen after 0.15 s
+[ 192.40] step 38: load r3 80 /,/big.txt 60 4
+[ 192.40] step 39: loadwait r3
+          load r3: 34124 ok, 0 failed {} in 61.0 s: 559.5 requests a second; latency p50 4.2 ms p99 14.6 ms
+[ 253.40] step 40: sleep 2
+[ 255.41] step 41: mark
+[ 255.51] step 42: type echo census 3; cat /proc/meminfo /proc/sys/fs/file-nr /proc/net/sockstat /proc/[0-9]*/status; echo census end
+[ 255.96] step 43: wait ^census end 60
+          seen after 0.15 s
+[ 256.11] step 44: load reload 80 / 30 4
+[ 256.11] step 45: sleep 10
+[ 266.11] step 46: mark
+[ 266.21] step 47: type lobo -s reload -c conf/four.conf
+[ 266.35] step 48: wait ^reload complete \(generation 2\) workers=4/4 60
+          seen after 0.10 s
+[ 266.45] step 49: loadwait reload
+          load reload: 18304 ok, 0 failed {} in 33.9 s: 539.2 requests a second; latency p50 0.3 ms p99 1.6 ms
+[ 290.06] step 50: mark
+[ 290.16] step 51: type echo census 4; cat /proc/meminfo /proc/sys/fs/file-nr /proc/net/sockstat /proc/[0-9]*/status; echo census end
+[ 290.61] step 52: wait ^census end 60
+          seen after 0.15 s
+[ 290.77] step 53: mark
+[ 290.87] step 54: type lobo -s stop -c conf/four.conf
+[ 290.99] step 55: wait ^stop: shutting down 60
+          seen after 0.10 s
+[ 291.09] step 56: type wait
+[ 291.11] step 57: type echo load ended $?
+[ 291.19] step 58: wait ^load ended 0 60
+          seen after 0.05 s
+[ 291.24] step 59: type exit
+[ 291.26] step 60: halt 60
+          ended after 0.05 s
+ended: -9, 291.6 s
