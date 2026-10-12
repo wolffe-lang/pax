@@ -1,4 +1,4 @@
-# the study (user/tunes/orchestra), ms from its first sound: tempo 66,
+# the study (user/scores/orchestra), ms from its first sound: tempo 66,
 # a bar 3636 ms; the crescendo bars 5-6 (14545-21818), the climax bar 7
 # (21818), the last bar's fermata to 30909, then the struck parts ring.
 # the strings' tremolo, bars 1-2 and 3

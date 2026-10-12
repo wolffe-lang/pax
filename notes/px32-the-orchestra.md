@@ -96,7 +96,7 @@ real time on either host, and then the fallback is render-ahead with the
 wait stated. A 230 s 16-part tune parses in under 1 s under TCG and
 holds under 2 MiB of tables.
 
-**P4. The study** (`user/tunes/orchestra`, ≈ 30 s, this lane's own
+**P4. The study** (`user/scores/orchestra`, ≈ 30 s, this lane's own
 music): a brass chorale (horns, trumpets, trombones) over string
 tremolo, woodwind lines, organ with pedal, choir, a crescendo pp → ff,
 bells, timpani and tam-tam at the climax; at least 16 voices at its
@@ -146,7 +146,7 @@ parser's hand-over, the options), `user/tunes` (the study only),
 - **`play`**: `-m` (and the default) plays a part-format tune through
   `/dev/dsp`; `-c` its cost; `-o` its frames to standard output (for
   the host tests); `-s` refuses it by name. The tune is parsed once.
-- **The study** `user/tunes/orchestra` (original, 31 s written, 39 s
+- **The study** `user/scores/orchestra` (original, 31 s written, 39 s
   with the ring): 17 parts, strings' tremolo, a woodwind line, the brass
   chorale, choir, organ with pedal, pp to ff over bars 5-6, timpani,
   bells, tam-tam and cymbal at the climax; **45 voices at its peak**.

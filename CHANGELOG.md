@@ -21,7 +21,7 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   timbre names, up to 48 voices, constant-power pan and a look-ahead
   limiter (0 samples clamped). `play -o` writes the frames to standard
   output. A 230 s, 16-part tune of 42 voices costs 9-10% of real time
-  under TCG; the study `orchestra` (17 parts, 45 voices) 6-9%. Old tune
+  under TCG; the study `user/scores/orchestra` (17 parts, 45 voices) 6-9%. Old tune
   files read and sound as before. `tests/mpx3-orchestra`,
   `tools/orch-check` (Goertzel power per pitch per window).
 - **The sound card (px30).** PAX plays sampled sound. `kernel/sound`
