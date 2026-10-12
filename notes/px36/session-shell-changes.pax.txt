@@ -1,0 +1,111 @@
+$ mkdir /w
+$ cd /w
+$ echo one > f
+$ chmod 600 f
+$ ls -l f
+-rw------- 1 root root 4 Oct 12 11:30 f
+$ chmod u+x,g+r f
+$ chmod -v 644 f
+mode of 'f' changed from 0740 (rwxr-----) to 0644 (rw-r--r--)
+$ chmod -c 644 f
+$ touch -t 202001020304.05 f
+$ ls -l f
+-rw-r--r-- 1 root root 4 Jan  2  2020 f
+$ stat -c '%n %s %a %A %h %F %Y %X' f
+f 4 644 -rw-r--r-- 1 regular file 1577934245 1577934245
+$ touch -a -t 199901010000 f
+$ stat -c '%n %X %Y' f
+f 915148800 1577934245
+$ touch -m -t 200006070809 f
+$ stat -c '%n %X %Y' f
+f 915148800 960365340
+$ touch g
+$ cat g
+$ touch -r f g
+$ stat -c '%n %X %Y' g
+g 915148800 960365340
+$ ln f h
+$ ls -l f h
+-rw-r--r-- 2 root root 4 Jun  7  2000 f
+-rw-r--r-- 2 root root 4 Jun  7  2000 h
+$ echo two >> h
+$ cat f
+one
+two
+$ ln f h
+ln: failed to create hard link 'h': File exists
+$ ln -f g h
+$ stat -c '%n %h' f g h
+f 1
+g 2
+h 2
+$ ln -s f s
+$ ls -l s
+lrwxrwxrwx 1 root root 1 Oct 12 11:30 s -> f
+$ cat s
+one
+two
+$ readlink s
+f
+$ ln -s nowhere d
+$ cat d
+cat: d: No such file or directory
+$ ls -l d
+lrwxrwxrwx 1 root root 7 Oct 12 11:30 d -> nowhere
+$ ln -sf f d
+$ readlink d
+f
+$ cat d
+one
+two
+$ ln -sfn f d
+$ mkdir -m 700 m
+$ mkdir -p -m 711 p/q
+$ mkdir -m 1777 k
+$ ls -ld m p p/q k
+drwxrwxrwt 2 root root 40 Oct 12 11:30 k
+drwx------ 2 root root 40 Oct 12 11:30 m
+drwxr-xr-x 3 root root 60 Oct 12 11:30 p
+drwx--x--x 2 root root 40 Oct 12 11:30 p/q
+$ ln -s p ps
+$ ls ps
+q
+$ echo deep > ps/q/x
+$ cat p/q/x
+deep
+$ touch -t 202001020304.05 f
+$ cp -p f c
+$ stat -c '%n %a %Y' f c
+f 644 1577934245
+c 644 1577934245
+$ cp -P s s2
+$ readlink s2
+f
+$ cp s s3
+$ ls -l s3
+-rw-r--r-- 1 root root 8 Oct 12 11:30 s3
+$ chmod -R 700 p
+$ stat -c '%n %a' p p/q p/q/x
+p 700
+p/q 700
+p/q/x 700
+$ chmod 4755 f
+$ ls -l f
+-rwsr-xr-x 1 root root 8 Jan  2  2020 f
+$ mv s t
+$ readlink t
+f
+$ cat t
+one
+two
+$ rm h
+$ stat -c '%n %h' f
+f 1
+$ rm t s2 s3 d
+$ ls
+c  f  g  k  m  p  ps
+$ cd /
+$ rm -r /w
+$ ls /w
+ls: cannot access '/w': No such file or directory
+$ exit
