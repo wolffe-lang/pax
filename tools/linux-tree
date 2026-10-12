@@ -4,7 +4,7 @@
 # whole root a tmpfs inside a THROWAWAY CONTAINER.
 #
 #   tools/linux-tree --root DIR --keys KEYS --prompt TEXT [--argv0 NAME]
-#                    [--size SIZE] OUT -- PROG [ARG...]
+#                    [--size SIZE] [--sys] OUT -- PROG [ARG...]
 #
 # The programs under test remove and overwrite files (`rm`, `rmdir`,
 # `mv`, `cp`, a shell's `>`), and one session types `rm -rf /` to see it
@@ -25,6 +25,8 @@
 # OUT gets what the terminal showed, OUT.rc the program's exit status,
 # OUT.after the names in the root when the session was over (sorted,
 # `/dev` and `/proc` left out). The staging directory is removed.
+# --sys (px34): tools/linux-tty's --sys, a sysfs and a cgroup2 mount in
+# the root (`/sys` is then left out of OUT.after as well).
 #
 # The engine: PAX_ENGINE, else docker when there is one, else podman.
 # Exit 0 when the session ran (whatever the program's status), 1 when
@@ -32,7 +34,7 @@
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
-root= keys= prompt= argv0= size=64m
+root= keys= prompt= argv0= size=64m sys=
 while [ $# -gt 0 ]; do
     case $1 in
         --root)   root=$2; shift 2 ;;
@@ -40,6 +42,7 @@ while [ $# -gt 0 ]; do
         --prompt) prompt=$2; shift 2 ;;
         --argv0)  argv0=$2; shift 2 ;;
         --size)   size=$2; shift 2 ;;
+        --sys)    sys=--sys; shift ;;
         --)       break ;;
         -*)       die "unknown option $1" ;;
         *)        break ;;
@@ -69,6 +72,7 @@ cp "$PAX_ROOT/tools/linux-tty" "$stage/linux-tty"
 cp "$keys" "$stage/keys"
 printf '%s' "$prompt" > "$stage/prompt"
 printf '%s' "$argv0" > "$stage/argv0"
+printf '%s' "$sys" > "$stage/sys"
 : > "$stage/argv"
 for a in "$@"; do printf '%s\n' "$a" >> "$stage/argv"; done
 cat > "$stage/run.sh" <<'EOF'
@@ -84,13 +88,14 @@ find /r -exec touch -h -d @0 {} +
 set --
 while IFS= read -r a; do set -- "$@" "$a"; done < /x/argv
 a0=$(cat /x/argv0)
+sy=$(cat /x/sys)
 if [ -n "$a0" ]; then
-    python3 /x/linux-tty --root /r --pid1 --keys /x/keys --prompt "$(cat /x/prompt)" --argv0 "$a0" /x/out -- "$@"
+    python3 /x/linux-tty --root /r --pid1 $sy --keys /x/keys --prompt "$(cat /x/prompt)" --argv0 "$a0" /x/out -- "$@"
 else
-    python3 /x/linux-tty --root /r --pid1 --keys /x/keys --prompt "$(cat /x/prompt)" /x/out -- "$@"
+    python3 /x/linux-tty --root /r --pid1 $sy --keys /x/keys --prompt "$(cat /x/prompt)" /x/out -- "$@"
 fi
 rc=$?
-(cd /r && find . -mindepth 1 \( -path ./dev -o -path ./proc \) -prune -o -print | LC_ALL=C sort) > /x/after
+(cd /r && find . -mindepth 1 \( -path ./dev -o -path ./proc -o -path ./sys \) -prune -o -print | LC_ALL=C sort) > /x/after
 chmod -R a+rwX /x
 exit $rc
 EOF

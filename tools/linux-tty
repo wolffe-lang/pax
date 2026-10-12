@@ -4,7 +4,7 @@
 # sessions (tests/mpx3-console), the reference PAX's console is held to.
 #
 #   tools/linux-tty --keys KEYS --prompt TEXT [--cwd DIR] [--argv0 NAME]
-#                   [--root DIR] [--pid1] OUT -- PROG [ARG...]
+#                   [--root DIR] [--pid1] [--sys] OUT -- PROG [ARG...]
 #
 # PROG runs on the slave side of a fresh pseudo-terminal (its
 # descriptors 0, 1 and 2, its controlling terminal), in DIR (default /),
@@ -17,6 +17,9 @@
 # is made from, so `ls /bin` and `cat /etc/motd` name the same files on
 # both; DIR/dev is the host's /dev bound in (boreutils opens
 # /dev/stdout) and DIR/proc a proc mount, both removed at the end.
+# --sys (px34, with --root): DIR/sys a sysfs mount and DIR/sys/fs/cgroup
+# a cgroup2 mount as well (lobo reads /sys/fs/cgroup/cpu.max and
+# /sys/devices/system/cpu/online), removed at the end too.
 # --pid1 (px14): PROG is the first process of a fresh pid namespace,
 # pid 1 as PAX's first program is, its children numbered 2, 3, … and
 # orphans reparented to it. Both need root (CI runs this under sudo). Before PROG starts, the terminal's settings
@@ -103,6 +106,7 @@ def main(argv):
     argv0 = None
     root = None
     pid1 = False
+    sysfs = False
     args = argv[1:]
     while args and args[0].startswith("--") and args[0] != "--":
         if args[0] == "--keys":
@@ -119,6 +123,10 @@ def main(argv):
             pid1 = True
             args = args[1:]
             continue
+        elif args[0] == "--sys":
+            sysfs = True
+            args = args[1:]
+            continue
         elif args[0] == "--isig":
             args = args[1:]
             continue
@@ -126,7 +134,7 @@ def main(argv):
             die("unknown option %s" % args[0])
         args = args[2:]
     if not keys or prompt is None or len(args) < 3 or args[1] != "--":
-        die("usage: linux-tty --keys KEYS --prompt TEXT [--cwd DIR] [--argv0 NAME] [--root DIR] [--pid1] [--isig] OUT -- PROG [ARG...]")
+        die("usage: linux-tty --keys KEYS --prompt TEXT [--cwd DIR] [--argv0 NAME] [--root DIR] [--pid1] [--sys] [--isig] OUT -- PROG [ARG...]")
     out, prog = args[0], args[2:]
     steps = [l.rstrip("\n") for l in open(keys)]
     pb = prompt.encode()
@@ -142,6 +150,17 @@ def main(argv):
             unmount(mounted)
             die("cannot mount proc in %s" % root)
         mounted.append(os.path.join(root, "proc"))
+        if sysfs:
+            sd = os.path.join(root, "sys")
+            os.makedirs(sd, exist_ok=True)
+            if subprocess.call(["mount", "-t", "sysfs", "sysfs", sd]) != 0:
+                unmount(mounted)
+                die("cannot mount sysfs in %s" % root)
+            mounted.append(sd)
+            if subprocess.call(["mount", "-t", "cgroup2", "cgroup2", os.path.join(sd, "fs", "cgroup")]) != 0:
+                unmount(mounted)
+                die("cannot mount cgroup2 in %s" % root)
+            mounted.append(os.path.join(sd, "fs", "cgroup"))
     if pid1:
         os.unshare(os.CLONE_NEWPID)  # the next child is pid 1 of a new namespace
 
