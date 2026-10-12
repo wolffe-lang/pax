@@ -21,15 +21,22 @@ tempo 60 2                          #   ... the beat a half note (any length: 4.
 meter 4/4                           # optional (default 4/4): n 1-32 / d 1 2 4 8 16 32
 part hn1 horn mf pan -30            # a part: name, timbre, starting level, pan
 part vn1 strings p pan -60
-part org organ mp
+part org organ mp gain -3           # gain: the part's balance in dB
+part ch choir                       # no level: mf
 ```
 
-- **`part NAME TIMBRE LEVEL [pan P]`** — NAME is 1-16 letters, digits
-  or `-`, starting with a letter, not a word of this format (`r`, a
-  dynamic, `bar`, `part`, `tempo`, `meter`, `title`, `cresc`, `dim`).
-  TIMBRE is from §5. LEVEL is a dynamic (§3). `pan` is -100 (left) to
-  100 (right), default 0. At most 24 parts. Parts sound in the order
-  declared; the order has no other meaning.
+- **`part NAME TIMBRE [LEVEL] [pan P] [gain DB]`** — NAME is 1-16
+  letters, digits or `-`, starting with a letter, not a word of this
+  format (`r`, a dynamic, `bar`, `part`, `tempo`, `meter`, `title`,
+  `cresc`, `dim`, `pan`, `gain`, ...). TIMBRE is from §5. LEVEL, right
+  after the timbre, is a dynamic (§3): the part's level until its first
+  dynamic mark; **with none the part plays mf** (never louder). `pan` is
+  -100 (left) to 100 (right), default 0. `gain` is the part's balance
+  against the others in whole decibels, -24 to 12 (`+3`, `-6`), default
+  0: it scales every level of the part, so `gain -6` on the brass keeps
+  their ff 6 dB under the strings' ff. `pan` and `gain` in either
+  order. At most 24 parts. Parts sound in the order declared; the order
+  has no other meaning.
 
 ## 2. Bars
 
@@ -77,8 +84,10 @@ An unmarked note sounds its length less a short gap (an eighth of it,
 at most 40 ms) and then releases (§5), so repeated notes part.
 
 **Levels.** A dynamic word in a part line sets that part's level from
-that point: `ppp pp p mp mf f ff fff` (eight steps about 4 dB apart,
-fff the loudest a part can be). The level is loudness and, for
+that point until the part's next dynamic word or hairpin, across any
+number of bars and rests: `ppp pp p mp mf f ff fff`, eight steps **5 dB
+apart** (ppp 35 dB under fff, the loudest a part can be). Levels are
+absolute: nothing raises a quiet passage (§6). The level is loudness and, for
 instruments that do it (§5), brightness: an ff horn is brassier than a
 p horn, not only louder. `sfz` (also `sf`, `fz`): the next note's
 attack at fff, falling back to the current level over 200 ms. `fp`:
@@ -130,27 +139,35 @@ it. A tamtam/cymbal/drum note's pitch is ignored (write any note).
 ## 6. Voices, mix, budget
 
 - A **voice** is one sounding pitch of one event, release tail
-  included. At most **32** sound at once; past that the oldest
-  releasing voice is cut (counted as `stolen` on the playing line).
-  At least 16 voices are within the budget below.
-- Each part is placed by its `pan`; the mix passes a limiter, so 16
-  voices at fff never clip: no sample is clamped (counted, and `0` is
-  the test's verdict).
+  included. At most **64** sound at once; past that the quietest
+  releasing (or ringing) voice is cut (counted as `stolen` on the
+  `played` line). A drum, bell or tam-tam struck again while it rings is
+  struck in place (no new voice).
+- Each part is placed by its `pan`. The mix has a fixed master gain:
+  one part's mf sits near -39 dBFS, a 16-part tutti at pp near
+  -38 dBFS, the same tutti at ff near -12 dBFS. A look-ahead **limiter**
+  turns the mix down only where its peaks would pass 30000 (about
+  -0.8 dBFS), and lets it back up within half a second: it never
+  raises anything, so pp stays quiet; no sample is ever clamped
+  (counted; `0` is the tests' verdict).
 - **The budget**: the synthesis runs in real time, ahead of the device
   by its 8 periods (170 ms); `play -c NAME` says the cost against real
   time. Measured figures are in `notes/px32-the-orchestra.md`.
 
-## 7. What `play` says (the figures illustrative)
+## 7. What `play` says
 
 ```
-play -m study
-playing Chorale and tremolo (31.5 s), 10 parts, 21 voices at most, 48000 Hz
-play -c study
-cost Chorale and tremolo: 1512000 frames (31500 ms of sound, 10 parts, 21 voices at most) synthesised in 2410 ms, 7.6% of real time, 0 clamped, 0 stolen
+play -m orchestra
+playing Chorale over tremolo, an orchestra study (30.9 s), 17 parts, 48000 Hz
+played Chorale over tremolo, an orchestra study: 45 voices at most, 0 stolen, 0 clamped, 60 blocks limited, set up in 60 ms
+play -c orchestra
+cost Chorale over tremolo, an orchestra study: 1867648 frames (38909 ms of sound, 30908 ms written, 17 parts, 45 voices at most) synthesised in 2360 ms, 6.0% of real time, 0 clamped, 0 stolen, 60 blocks limited; read in 10 ms, set up in 60 ms
+play -o orchestra > frames.raw      # S16_LE, two channels, 48000 Hz, to standard output
 ```
 
 `play` alone lists part-format tunes with their title and length as it
-lists the others.
+lists the others. (The figures above are TCG on kasumi; the measured
+ones are in `notes/px32-the-orchestra.md`.)
 
 ## 8. A whole example
 
