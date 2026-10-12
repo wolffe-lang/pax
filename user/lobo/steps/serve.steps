@@ -1,0 +1,33 @@
+# tests/mpx4-lobo, session `serve` (px25): one lobo process
+# (worker_processes 1) started at pelt's prompt; every request in
+# requests/[0-9]*.req from this host through the forward; a file written
+# at the prompt and served; status, reload, a request after it, stop.
+pax: wait ^\$ $ 120
+type cd /srv
+mark
+type lobo -c conf/lobo.conf serve &
+wait generation-activated gen=1 seq=2 120
+req serve 80 requests/[0-9]*.req
+type echo written at run time > html/new.txt
+type echo wrote $?
+wait ^wrote 0 30
+req written 80 requests/new.req
+mark
+type lobo -c conf/lobo.conf status
+wait ^generation 1: current 60
+mark
+type lobo -s reload -c conf/lobo.conf
+wait ^reload complete \(generation 2\) 60
+type echo reload $?
+wait ^reload 0 30
+req after 80 requests/page.req
+mark
+type lobo -s stop -c conf/lobo.conf
+wait ^stop: shutting down \(generation 2\) 60
+type wait
+type echo serve ended $?
+wait ^serve ended 0 60
+type ls logs
+pax: wait ^\$ $ 30
+pax: type exit
+halt 60

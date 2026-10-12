@@ -1,0 +1,61 @@
+# tests/mpx4-lobo, session `control` (px25): lobo's control differential
+# rows (tools/lobo-control-differential) and its signal row
+# (tools/lobo-signal), on PAX and on Linux. Started from `/` with `-p
+# /srv` (rows 5 and 6: a relative pid, control and root resolve against
+# the prefix); a keepalive connection opened before the reload (row 3);
+# the config edited at the prompt and reloaded under load (rows 1 and 2);
+# a bad config refused, exit 1, the old generation serving (row 4); a
+# reload by `-s reload` and one by SIGHUP, whose event blocks differ only
+# in `source` (the signal row).
+pax: wait ^\$ $ 120
+type cd /
+type cat /srv/conf/r1.conf > /srv/conf/live.conf
+mark
+type lobo -p /srv -c conf/live.conf serve &
+type echo master $!
+wait master (\d+)\s*$ 30
+capture M master (\d+)\s*$
+wait generation-activated gen=1 seq=2 120
+type ls /srv/logs
+wait live\.sock 30
+req row5-first 80 requests/page.req
+kopen held 80
+kreq held / row3-before
+type cat /srv/conf/r2.conf > /srv/conf/live.conf
+load row2 80 / 20 2
+sleep 6
+mark
+type lobo -p /srv -s reload -c conf/live.conf
+wait ^reload complete \(generation 2\) 60
+type echo reload $?
+wait ^reload 0 30
+loadwait row2
+kreq held / row3-after
+kclose held
+req row1-after 80 requests/page.req
+type cat /srv/conf/bad.conf > /srv/conf/live.conf
+mark
+type lobo -p /srv -s reload -c conf/live.conf
+wait ^reload rejected 60
+type echo rejected $?
+wait ^rejected 1 30
+req row4-after 80 requests/page.req
+type cat /srv/conf/r1.conf > /srv/conf/live.conf
+mark
+type lobo -p /srv -s reload -c conf/live.conf
+wait ^reload complete \(generation 3\) 60
+wait generation-retired gen=2 60
+mark
+type kill -HUP {M}
+wait generation-retired gen=3 60
+sleep 1
+req signal-after 80 requests/page.req
+mark
+type lobo -p /srv -s stop -c conf/live.conf
+wait ^stop: shutting down \(generation 4\) 60
+type wait
+type echo control ended $?
+wait ^control ended 0 60
+type ls /srv/logs
+pax: type exit
+halt 60

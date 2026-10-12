@@ -1,0 +1,57 @@
+# tests/mpx4-lobo, session `load` (px25): four workers under a sustained
+# load from this host through the forward: after a warm-up of both
+# paths, three identical rounds of ROUND seconds (@ROUND@, the test
+# writes it in) of four clients, a connection a request, alternating `/`
+# and the 300,000-byte file, with the census between rounds (`census N`,
+# then /proc/meminfo, /proc/sys/fs/file-nr, /proc/net/sockstat and
+# every process's /proc/<pid>/status); then a reload under a load,
+# which must lose no request.
+pax: wait ^\$ $ 120
+type cd /srv
+mark
+type lobo -c conf/four.conf serve &
+type echo master $!
+wait master (\d+)\s*$ 30
+capture M master (\d+)\s*$
+wait generation-activated gen=1 seq=2 worker=4 120
+get warm 80 / 50 new
+get warm-big 80 /big.txt 10 new
+sleep 2
+mark
+type echo census 0; cat /proc/meminfo /proc/sys/fs/file-nr /proc/net/sockstat /proc/[0-9]*/status; echo census end
+wait ^census end 60
+load r1 80 /,/big.txt @ROUND@ 4
+loadwait r1
+sleep 2
+mark
+type echo census 1; cat /proc/meminfo /proc/sys/fs/file-nr /proc/net/sockstat /proc/[0-9]*/status; echo census end
+wait ^census end 60
+load r2 80 /,/big.txt @ROUND@ 4
+loadwait r2
+sleep 2
+mark
+type echo census 2; cat /proc/meminfo /proc/sys/fs/file-nr /proc/net/sockstat /proc/[0-9]*/status; echo census end
+wait ^census end 60
+load r3 80 /,/big.txt @ROUND@ 4
+loadwait r3
+sleep 2
+mark
+type echo census 3; cat /proc/meminfo /proc/sys/fs/file-nr /proc/net/sockstat /proc/[0-9]*/status; echo census end
+wait ^census end 60
+load reload 80 / 30 4
+sleep 10
+mark
+type lobo -s reload -c conf/four.conf
+wait ^reload complete \(generation 2\) workers=4/4 60
+loadwait reload
+mark
+type echo census 4; cat /proc/meminfo /proc/sys/fs/file-nr /proc/net/sockstat /proc/[0-9]*/status; echo census end
+wait ^census end 60
+mark
+type lobo -s stop -c conf/four.conf
+wait ^stop: shutting down 60
+type wait
+type echo load ended $?
+wait ^load ended 0 60
+pax: type exit
+halt 60
