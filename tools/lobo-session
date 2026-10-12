@@ -1,0 +1,490 @@
+#!/usr/bin/env python3
+"""lobo-session — px25: one session of tests/mpx4-lobo, on PAX or on Linux.
+
+  tools/lobo-session --pax ISO  [--mem 256M] [--accel tcg|kvm] [--firmware bios|uefi]
+  tools/lobo-session --linux TREE [--engine docker|podman] [--image IMAGE]
+                     --steps FILE --out DIR --forward G[,G…] [--data DIR] [--timeout S]
+
+On PAX: QEMU boots ISO (q35, -cpu max, no audio, no display, the exit
+device at 0xf4, `-nic user,model=virtio-net-pci` with a `hostfwd` from a
+free port of this host's 127.0.0.1 to each guest port G), COM1 on a
+local socket: what the steps type goes to the guest's console, what the
+console says is DIR/console.log. On Linux: a throwaway container
+(`--network host`, nothing of the host mounted but a staging copy of
+TREE, which becomes /srv with every time 0 and owned by root, as
+tools/mkinitramfs writes an archive) runs `bash` with its standard
+input the steps' typing and its output DIR/console.log; lobo and kill
+are TREE/bin's, on PATH. Each guest port G is the same free host port H
+on both: on Linux the configuration files under TREE/srv/conf have
+`@P<G>@` replaced by H, `@BACKEND@` by 127.0.0.1 (PAX's image was built
+with G and 10.0.2.2, QEMU's address for this host).
+
+Steps, one a line (`#` comments). A line may start with `pax:` or
+`linux:` to run on that side only.
+  wait REGEX [SECS]      the console (since the mark) matches REGEX
+  mark                   the mark to the console's end
+  capture NAME REGEX     NAME := group 1 of the last match since the mark
+  type TEXT              TEXT and a newline typed ({NAME} substituted)
+  sleep SECS
+  req NAME G FILE…       each raw request (DATA/FILE, a glob) sent to
+                         guest port G, the reply read to its close
+                         (deadline 30 s) into DIR/resp/NAME.<file>
+  case NAME G CASE…      lobo's differential case files (DATA/CASE): the
+                         `--- request` section sent as `req` sends it
+  backend BPORT CASE     a backend on this host's 127.0.0.1:BPORT for the
+                         next case: answers with CASE's `--- reply`,
+                         keeps the request in DIR/backend/<case>
+  get NAME G PATH N MODE N requests of GET PATH: MODE `new` a connection
+                         each, `keep` one connection; the times and the
+                         statuses in DIR/get-NAME.txt
+  load NAME G PATHS SECS CONC  CONC clients, each a connection a request
+                         (PATHS comma-separated, taken in turn), for SECS
+                         seconds, in the background; DIR/load-NAME.txt
+  loadwait NAME          wait for that load; its counts in the steps log
+  kopen NAME G           a keepalive connection to guest port G, held
+  kreq NAME PATH OUT     GET PATH on it; the reply (head and body) into
+                         DIR/resp/OUT
+  kclose NAME            close it
+  halt [SECS]            PAX: the kernel's `halt`, then QEMU ended; Linux: the shell ended
+DIR/steps.log has every step, its time and what it saw. Exit 0 when
+every step held, 1 at the first that did not (named), 2 on a tool error.
+QEMU and the container are ended by their own pid and name, always.
+"""
+import argparse, glob, json, os, re, shutil, socket, subprocess, sys, threading, time
+
+ap = argparse.ArgumentParser()
+g = ap.add_mutually_exclusive_group(required=True)
+g.add_argument("--pax")
+g.add_argument("--linux")
+ap.add_argument("--steps", required=True)
+ap.add_argument("--out", required=True)
+ap.add_argument("--forward", required=True)
+ap.add_argument("--data", default=".")
+ap.add_argument("--mem", default="256M")
+ap.add_argument("--accel", default="tcg")
+ap.add_argument("--firmware", default="bios")
+ap.add_argument("--timeout", type=int, default=600)
+ap.add_argument("--qemu", default=os.environ.get("PAX_QEMU", "qemu-system-x86_64"))
+ap.add_argument("--ovmf", default=os.environ.get("PAX_OVMF_CODE", ""))
+ap.add_argument("--ovmf-vars", default=os.environ.get("PAX_OVMF_VARS", ""))
+ap.add_argument("--engine", default=os.environ.get("PAX_ENGINE", ""))
+ap.add_argument("--image", default=os.environ.get("PAX_TREE_IMAGE", "docker.io/library/python:3.12-slim"))
+a = ap.parse_args()
+side = "pax" if a.pax else "linux"
+os.makedirs(os.path.join(a.out, "resp"), exist_ok=True)
+os.makedirs(os.path.join(a.out, "backend"), exist_ok=True)
+log = open(os.path.join(a.out, "steps.log"), "w", buffering=1)
+t_start = time.time()
+
+
+def free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+fwd = {}
+for gp in a.forward.split(","):
+    fwd[int(gp)] = free_port()
+log.write("side: %s\nforwards: %s\n" % (side, ", ".join("%d->%d" % (h, gp) for gp, h in sorted(fwd.items()))))
+
+buf = bytearray()
+con = open(os.path.join(a.out, "console.log"), "wb", buffering=0)
+lock = threading.Lock()
+proc = None
+cname = None
+ser = None
+engine = None
+stage = None
+
+
+def reader(stream):
+    while True:
+        d = stream.read1(65536) if hasattr(stream, "read1") else stream.read(1)
+        if not d:
+            return
+        with lock:
+            buf.extend(d)
+            con.write(d)
+
+
+if side == "pax":
+    sp = free_port()
+    hf = ",".join("hostfwd=tcp:127.0.0.1:%d-:%d" % (h, gp) for gp, h in sorted(fwd.items()))
+    cmd = [a.qemu, "-machine", "q35", "-cpu", "max", "-m", a.mem, "-accel", a.accel,
+           "-display", "none", "-vga", "std", "-monitor", "none", "-parallel", "none", "-no-reboot",
+           "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+           "-drive", "file=%s,format=raw,media=cdrom,readonly=on" % a.pax, "-boot", "d",
+           "-nic", "user,model=virtio-net-pci," + hf,
+           "-serial", "tcp:127.0.0.1:%d,server=on,wait=on" % sp]
+    if a.firmware == "uefi":
+        if not a.ovmf:
+            print("lobo-session: --firmware uefi needs PAX_OVMF_CODE"); sys.exit(2)
+        cmd += ["-drive", "if=pflash,format=raw,unit=0,readonly=on,file=%s" % a.ovmf]
+        if a.ovmf_vars:
+            vars_copy = os.path.join(a.out, "ovmf-vars.fd")
+            shutil.copyfile(a.ovmf_vars, vars_copy)
+            os.chmod(vars_copy, 0o644)
+            cmd += ["-drive", "if=pflash,format=raw,unit=1,file=%s" % vars_copy]
+    log.write("qemu: %s\n" % " ".join(cmd))
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=open(os.path.join(a.out, "qemu.log"), "w"),
+                            stderr=subprocess.STDOUT)
+    open(os.path.join(a.out, "qemu.pid"), "w").write("%d\n" % proc.pid)
+    for _ in range(200):
+        try:
+            ser = socket.create_connection(("127.0.0.1", sp))
+            break
+        except OSError:
+            time.sleep(0.05)
+    if ser is None:
+        proc.kill(); print("lobo-session: no serial socket"); sys.exit(2)
+    threading.Thread(target=reader, args=(ser.makefile("rb", buffering=0),), daemon=True).start()
+
+    def send(b):
+        for ch in b:
+            ser.sendall(bytes([ch]))
+            time.sleep(0.004)
+else:
+    engine = a.engine or ("docker" if shutil.which("docker") else "podman")
+    stage = os.path.join(os.path.abspath(a.out), "stage")
+    shutil.rmtree(stage, ignore_errors=True)
+    shutil.copytree(a.linux, stage, symlinks=True)
+    sub = {"@BACKEND@": "127.0.0.1", "@LISTEN@": "127.0.0.1"}
+    for gp, h in fwd.items():
+        sub["@P%d@" % gp] = str(h)
+    for f in glob.glob(os.path.join(stage, "srv", "conf", "*.conf")):
+        t = open(f).read()
+        for k, v in sub.items():
+            t = t.replace(k, v)
+        open(f, "w").write(t)
+    cname = "pax-lobo-%d-%d" % (os.getpid(), int(time.time()))
+    init = ("set -e; mkdir -p /srv && mount -t tmpfs -o size=512m tmpfs /srv && cp -a /stage/srv/. /srv/ && "
+            "cp /stage/bin/* /usr/local/bin/ && chown -R 0:0 /srv && find /srv -exec touch -h -d @0 {} + && "
+            "umask 022 && cd /srv && exec bash")
+    cmd = [engine, "run", "--rm", "-i", "--name", cname, "--privileged", "--network", "host",
+           "-v", "%s:/stage:ro" % stage, "-e", "PATH=/usr/local/bin:/usr/bin:/bin", a.image, "bash", "-c", init]
+    log.write("container: %s\n" % " ".join(cmd))
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    threading.Thread(target=reader, args=(proc.stdout,), daemon=True).start()
+
+    def send(b):
+        proc.stdin.write(b)
+        proc.stdin.flush()
+
+mark = 0
+vars_ = {}
+loads = {}
+held = {}
+backend = {"thread": None}
+
+
+def subst(s):
+    for k, v in vars_.items():
+        s = s.replace("{%s}" % k, v)
+    return s
+
+
+def finish(rc, why=""):
+    if why:
+        log.write("STOP: %s\n" % why)
+        print("lobo-session (%s): %s" % (side, why))
+    time.sleep(0.3)
+    if side == "pax":
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+    else:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            subprocess.run([engine, "rm", "-f", cname], capture_output=True)
+            proc.wait()
+        shutil.rmtree(stage, ignore_errors=True)
+    log.write("ended: %s, %.1f s\n" % (proc.returncode, time.time() - t_start))
+    sys.exit(rc)
+
+
+def view():
+    with lock:
+        return bytes(buf[mark:])
+
+
+def section(path, name):
+    out, on = [], False
+    for line in open(path, "rb").read().split(b"\n"):
+        probe = line.rstrip(b"\r")
+        if probe.startswith(b"--- "):
+            on = probe == b"--- " + name.encode()
+            continue
+        if on:
+            out.append(line)
+    return b"\n".join(out) + (b"\n" if out else b"")
+
+
+def exchange(port, data, deadline=30):
+    s = socket.create_connection(("127.0.0.1", port), timeout=deadline)
+    s.sendall(data)
+    got = b""
+    end = time.time() + deadline
+    while time.time() < end:
+        try:
+            d = s.recv(65536)
+        except socket.timeout:
+            break
+        if not d:
+            break
+        got += d
+    s.close()
+    return got
+
+
+def http_get(sock, path, keep):
+    req = "GET %s HTTP/1.1\r\nHost: pax\r\n%s\r\n" % (path, "" if keep else "Connection: close\r\n")
+    sock.sendall(req.encode())
+    head = b""
+    while b"\r\n\r\n" not in head:
+        d = sock.recv(65536)
+        if not d:
+            raise OSError("closed before the head")
+        head += d
+    h, _, body = head.partition(b"\r\n\r\n")
+    status = int(h.split(b" ")[1])
+    m = re.search(rb"(?i)\r\ncontent-length: *(\d+)", h)
+    n = int(m.group(1)) if m else 0
+    while len(body) < n:
+        d = sock.recv(65536)
+        if not d:
+            raise OSError("closed in the body")
+        body += d
+    return status, len(body)
+
+
+def backend_run(bport, case, ready):
+    reply = section(case, "reply")
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", bport))
+    srv.listen(4)
+    srv.settimeout(40)
+    ready.set()
+    try:
+        c, _ = srv.accept()
+    except socket.timeout:
+        srv.close(); return
+    c.settimeout(10)
+    got = b""
+    while b"\r\n\r\n" not in got:
+        d = c.recv(65536)
+        if not d:
+            break
+        got += d
+    h, _, body = got.partition(b"\r\n\r\n")
+    m = re.search(rb"(?i)\r\ncontent-length: *(\d+)", h)
+    need = int(m.group(1)) if m else 0
+    while len(body) < need:
+        d = c.recv(65536)
+        if not d:
+            break
+        body += d
+    open(os.path.join(a.out, "backend", os.path.basename(case)), "wb").write(h + b"\r\n\r\n" + body)
+    c.sendall(reply)
+    c.close()
+    srv.close()
+
+
+def load_run(name, port, path, secs, conc):
+    res = {"ok": 0, "bad": 0, "errors": {}, "lat": []}
+    rl = threading.Lock()
+    end = time.time() + secs
+
+    paths = path.split(",")
+
+    def one():
+        k = 0
+        while time.time() < end:
+            t0 = time.time()
+            p = paths[k % len(paths)]
+            k += 1
+            try:
+                s = socket.create_connection(("127.0.0.1", port), timeout=20)
+                s.settimeout(20)
+                st, _ = http_get(s, p, False)
+                s.close()
+                with rl:
+                    if st == 200:
+                        res["ok"] += 1
+                        res["lat"].append(time.time() - t0)
+                    else:
+                        res["bad"] += 1
+                        res["errors"]["status %d" % st] = res["errors"].get("status %d" % st, 0) + 1
+            except Exception as e:
+                with rl:
+                    res["bad"] += 1
+                    k = type(e).__name__
+                    res["errors"][k] = res["errors"].get(k, 0) + 1
+    ts = [threading.Thread(target=one) for _ in range(conc)]
+    t0 = time.time()
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    el = time.time() - t0
+    lat = sorted(res["lat"])
+    summary = "load %s: %d ok, %d failed %s in %.1f s: %.1f requests a second; latency p50 %.1f ms p99 %.1f ms" % (
+        name, res["ok"], res["bad"], json.dumps(res["errors"], sort_keys=True), el, res["ok"] / el,
+        1000 * lat[len(lat) // 2] if lat else 0, 1000 * lat[int(len(lat) * 0.99)] if lat else 0)
+    open(os.path.join(a.out, "load-%s.txt" % name), "w").write(summary + "\n")
+    res["summary"] = summary
+    loads[name]["res"] = res
+
+
+for n, line in enumerate(open(a.steps), 1):
+    line = line.rstrip("\n")
+    if not line.strip() or line.lstrip().startswith("#"):
+        continue
+    m = re.match(r"(pax|linux):\s*(.*)$", line)
+    if m:
+        if m.group(1) != side:
+            continue
+        line = m.group(2)
+    if time.time() - t_start > a.timeout:
+        finish(1, "the deadline (%d s) passed before step %d" % (a.timeout, n))
+    op, _, arg = line.partition(" ")
+    t0 = time.time()
+    log.write("[%7.2f] step %d: %s\n" % (t0 - t_start, n, line))
+    if op == "wait":
+        m = re.match(r"(.*?)(?:\s+(\d+))?$", arg)
+        rx, secs = re.compile(subst(m.group(1)).encode(), re.M), int(m.group(2) or 120)
+        while not rx.search(view()):
+            if proc.poll() is not None:
+                finish(1, "step %d: the machine ended before %r" % (n, m.group(1)))
+            if time.time() - t0 > secs:
+                finish(1, "step %d: %r not seen in %d s" % (n, m.group(1), secs))
+            time.sleep(0.05)
+        log.write("          seen after %.2f s\n" % (time.time() - t0))
+    elif op == "mark":
+        time.sleep(0.1)
+        with lock:
+            mark = len(buf)
+    elif op == "capture":
+        name, _, rx = subst(arg).partition(" ")
+        ms = list(re.finditer(rx.encode(), view(), re.M))
+        if not ms:
+            finish(1, "step %d: nothing to capture for %s" % (n, name))
+        vars_[name] = ms[-1].group(1).decode()
+        log.write("          %s = %s\n" % (name, vars_[name]))
+    elif op == "type":
+        send((subst(arg) + "\n").encode())
+    elif op == "sleep":
+        time.sleep(float(arg))
+    elif op in ("req", "case"):
+        parts = arg.split()
+        name, gp, pats = parts[0], int(parts[1]), parts[2:]
+        files = sorted(f for p in pats for f in glob.glob(os.path.join(a.data, p)))
+        if not files:
+            finish(2, "step %d: no file for %s" % (n, pats))
+        for f in files:
+            data = open(f, "rb").read() if op == "req" else section(f, "request")
+            try:
+                got = exchange(fwd[gp], data)
+            except OSError as e:
+                finish(1, "step %d: %s: %s" % (n, os.path.basename(f), e))
+            base = os.path.basename(f)
+            open(os.path.join(a.out, "resp", "%s.%s" % (name, base)), "wb").write(got)
+            first = got.split(b"\r\n", 1)[0].decode(errors="replace")
+            log.write("          %s: %d bytes, %s\n" % (base, len(got), first))
+            if backend["thread"] is not None:
+                backend["thread"].join(15)
+                backend["thread"] = None
+    elif op == "backend":
+        bport, case = arg.split()
+        ready = threading.Event()
+        backend["thread"] = threading.Thread(target=backend_run, args=(int(bport), os.path.join(a.data, case), ready), daemon=True)
+        backend["thread"].start()
+        ready.wait(5)
+    elif op == "get":
+        name, gp, path, cnt, mode = arg.split()
+        cnt = int(cnt)
+        lines, t1 = [], time.time()
+        s = None
+        try:
+            for i in range(cnt):
+                if s is None or mode == "new":
+                    s = socket.create_connection(("127.0.0.1", fwd[int(gp)]), timeout=30)
+                    s.settimeout(30)
+                st, ln = http_get(s, path, mode == "keep")
+                lines.append("%d %d" % (st, ln))
+                if mode == "new":
+                    s.close()
+                    s = None
+        except OSError as e:
+            finish(1, "step %d: request %d of %d: %s" % (n, len(lines) + 1, cnt, e))
+        if s is not None:
+            s.close()
+        el = time.time() - t1
+        bad = [x for x in lines if not x.startswith("200 ")]
+        summary = "get %s: %d requests (%s) of %s in %.2f s: %.1f a second; %d not 200" % (
+            name, cnt, mode, path, el, cnt / el, len(bad))
+        open(os.path.join(a.out, "get-%s.txt" % name), "w").write(summary + "\n" + "\n".join(lines) + "\n")
+        log.write("          %s\n" % summary)
+    elif op == "load":
+        name, gp, path, secs, conc = arg.split()
+        loads[name] = {"t": threading.Thread(target=load_run, args=(name, fwd[int(gp)], path, float(secs), int(conc)))}
+        loads[name]["t"].start()
+    elif op == "loadwait":
+        loads[arg]["t"].join()
+        log.write("          %s\n" % loads[arg]["res"]["summary"])
+    elif op == "kopen":
+        name, gp = arg.split()
+        held[name] = socket.create_connection(("127.0.0.1", fwd[int(gp)]), timeout=30)
+        held[name].settimeout(30)
+    elif op == "kreq":
+        name, path, outn = arg.split()
+        k = held[name]
+        k.sendall(("GET %s HTTP/1.1\r\nHost: pax\r\n\r\n" % path).encode())
+        head = b""
+        try:
+            while b"\r\n\r\n" not in head:
+                d = k.recv(65536)
+                if not d:
+                    break
+                head += d
+            h, _, body = head.partition(b"\r\n\r\n")
+            m2 = re.search(rb"(?i)\r\ncontent-length: *(\d+)", h)
+            need = int(m2.group(1)) if m2 else 0
+            while len(body) < need:
+                d = k.recv(65536)
+                if not d:
+                    break
+                body += d
+        except OSError as e:
+            finish(1, "step %d: %s" % (n, e))
+        got = h + b"\r\n\r\n" + body if head else b""
+        open(os.path.join(a.out, "resp", outn), "wb").write(got)
+        log.write("          %s: %d bytes, %s\n" % (outn, len(got), got.split(b"\r\n", 1)[0].decode(errors="replace")))
+    elif op == "kclose":
+        held.pop(arg).close()
+    elif op == "halt":
+        secs = int(arg or 60)
+        if side == "pax":
+            while not re.search(rb"^halt\r?$", view(), re.M):
+                if proc.poll() is not None or time.time() - t0 > secs:
+                    finish(1, "step %d: no halt in %d s" % (n, secs))
+                time.sleep(0.05)
+        else:
+            proc.stdin.close()
+            try:
+                proc.wait(timeout=secs)
+            except subprocess.TimeoutExpired:
+                finish(1, "step %d: the shell did not end in %d s" % (n, secs))
+        log.write("          ended after %.2f s\n" % (time.time() - t0))
+        finish(0)
+    else:
+        finish(2, "step %d: unknown op %r" % (n, op))
+finish(0)
