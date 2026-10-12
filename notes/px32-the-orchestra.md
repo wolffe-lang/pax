@@ -160,6 +160,20 @@ parser's hand-over, the options), `user/tunes` (the study only),
 - **No kernel change.** px30's `mix.lu` and the old `perform_mixed`
   path are untouched; `play.lu` gained the hand-over and the options.
 
+## After px33 began writing (2026-10-11/12): its findings and the maintainer's
+
+Each was a request from the orchestrator, carrying px33's or the
+maintainer's finding; each is fixed with a test, and the format only grew.
+
+| finding | fix | test |
+|---|---|---|
+| px33's 101 s preview ran QEMU's 256 MiB out of frames | `dfd0754`: no list literal per voice per block; `f34d13b`: parse once | `long` and `wide` in 256 MiB: 353 frames held |
+| "at full blast" outside marked dynamics | `07cd33f`, `883c0d1`: level optional (mf), 5 dB steps, `gain`, timbre balance, master gain so pp tutti stay quiet | `balance`: pp tutti -37.2 dBFS, ff -12.0, held dynamics, two-bar hairpins ±20 dB |
+| the study in user/tunes moved mpx3-speaker's listing (CI 38188215276 K1) | `c405d20`: the study lives in `user/scores/` | mpx3-speaker unchanged and green |
+| 24 parts too few; a tie could not hold one note of a chord | 48 parts; a tie holds per note | `wide` (48 parts); marks bars 19-20 (tied C4 dips 2.3 dB, untied 19.6) |
+| the close's held tied notes were cut by voice stealing at fig. 51 | `b192ca0`'s parent: 128 voices (the close needs 95); a held note is never cut: tails, then ringing struck voices, else the new note is dropped (counted) | `dense`: 92 held under short chords past 128, held within 6 dB; the close 0 stolen |
+| a staccato on a tie's last event halved the whole tie | `df224e7`'s parents: the marks cut only the last event | marks bars 21-24 |
+
 ## 3. The prediction against the measurement
 
 | prediction | measured |
@@ -219,6 +233,14 @@ parser's hand-over, the options), `user/tunes` (the study only),
   (the image runs `play -c orchestra` then `play -m orchestra`, then
   halts; Ctrl-A x ends QEMU).
 - **Planted break**: run 38184258230 (above).
+- **Later runs on kasumi** (`~/lanes/px32/o-r9.out`, at `27a8383`, whole
+  PASS in 1213 s): host checks 22, marks 43, timbres 25, balance 14,
+  study 11; dense 5/5 with 2268 tails cut, 768 notes dropped, 0 held
+  cut; wide 48 parts in 256 MiB 126 voices, **26.8% of real time** under
+  TCG, 353 frames held; long 9.5%; the study 5.1-5.4%.
+- **px33's close** (`~/lanes/px33-c/pax/user/tunes/auferstehung-close`,
+  24 parts, 255 s) with play at `7b29505`: 95 voices at most, 0
+  stolen, 0 dropped, 0 clamped, 0.6% of real time natively, 11.8 MB RSS.
 - **CI green at head**: the PR's run (below).
 
 ## Not verified
@@ -233,6 +255,11 @@ parser's hand-over, the options), `user/tunes` (the study only),
 - px33's full `auferstehung` (not yet written in this format): only its
   preview, its `span-partial` and `close/t.txt` drafts were played
   (parse, cost, and the preview in the guest).
+- Process hygiene on kasumi: twice a run was stopped mid-way (r7, r8,
+  after a test-glob fix): o.sh's pid killed, then the test processes it
+  had left (listed by `pgrep -af`, then killed by those pids, one with
+  `pkill -P <recorded pid>`). Their outputs were discarded and r9 run
+  clean.
 - Memory is bounded by the score's size, not its length: about 0.8 KiB
   of parse per note stays for the run (a 15,000-note score would hold
   about 12 MiB); not reduced further.
