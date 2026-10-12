@@ -250,7 +250,10 @@ if session == "control":
         t = re.sub(r"id=[0-9a-f]+", "id=H", t)
         t = re.sub(r"age-ms=\d+", "age-ms=A", t)
         return t
-    x, y = block(cp, b"control"), block(cp, b"signal")
+    # pelt's prompt can land at the start of any of lobo's lines (the
+    # notices come while the shell prints `$ `): left out first.
+    unprompt = lambda c: re.sub(rb"(?m)^(\$ )+", b"", c)
+    x, y = block(unprompt(cp), b"control"), block(unprompt(cp), b"signal")
     if x and y:
         dl = [l for l, k in zip(x.splitlines(), y.splitlines()) if l != k]
         ok = len(dl) == 1 and x.replace("source=control", "source=signal") == y
