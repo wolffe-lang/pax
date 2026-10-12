@@ -459,7 +459,13 @@ identical to lobo's on Linux but for `Date` (R1).
   (head `34d3ce6`, `45f3602` after the rebase) failed it with the same
   line while `mpx4-lobo` there passed, 15 boots: a race in px34's
   probe (whether the peer's close lands before `epoll_wait`), seen with
-  and without this lane's changes.
+  and without this lane's changes. **Fixed here** (`user/unix/unixprobe.c`):
+  the server closes only after the client says its `epoll_wait` is
+  over, and the client waits for that close before it reads to the end,
+  so both sides print `epoll_wait 1, IN` and `then the end` whatever
+  runs first. mpx4-unix then passed three times on kasumi, native BIOS,
+  against a fresh Linux side (`kasumi/unix-race/`); CI at the head runs
+  it on every leg.
 
 ## What the next PAX lanes inherit
 
