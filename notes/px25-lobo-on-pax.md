@@ -303,6 +303,59 @@ and tree (every file's time 0), the same requests (`tools/lobo-check`).
 | `tools/lobo-signal` | SIGHUP against `-s reload` | **run, pass** | the five-line event blocks differ in exactly `source` |
 | `tools/lobo-prefork` | a worker killed under requests | **run, measured** | hands' `load gap`: TCG 0 failed (kasumi 9,444, CI 2,601); KVM before the time-wait fix 2 of 33,951 timed out (the time-wait cause, not the kill) |
 
+## What moved at the rebase (trunk `6316c51`: px32, the orchestra)
+
+px32 merged while this lane ran; it touches none of this lane's files,
+no kernel file and no tool this lane uses, and `.github/workflows/ci.yml`
+gained `mpx3-orchestra` beside this lane's `mpx4-lobo` (29 jobs, both
+kept). The rebase moved every sha. Every sha named in this note and
+every evidence directory (`k2-d71ff80`, `g4-d71ff80`) is the
+pre-rebase one; the plants ran in CI on their pre-rebase shas, on their
+own branches. The kernel, the images' bytes and the tests are the same
+after the rebase as at `d71ff80` but for `tools/lobo-check` (its
+prompt rule, `e2d9362`/`45f3602`, run against CI's artifacts before
+the rebase).
+
+| before | after |
+|---|---|
+| `c64f646` | `b0c7d70` |
+| `e53b536` | `fe34b0d` |
+| `f812ea9` | `51ca314` |
+| `0276c45` | `8213abe` |
+| `4603ad2` | `87c75e4` |
+| `f1a1e01` | `77488a8` |
+| `a97781b` | `777243e` |
+| `0990452` | `f23698f` |
+| `5daf2ff` | `9a20b6f` |
+| `bf8630c` | `284dfa7` |
+| `935fda4` | `d16502a` |
+| `48724ec` | `b58dc45` |
+| `86f7c63` | `39f308b` |
+| `e8a2bb3` | `627e8a2` |
+| `ded3a11` | `050d4eb` |
+| `812a20f` | `f1e1c25` |
+| `b5fb08c` | `ecacf37` |
+| `605e401` | `eb0486d` |
+| `732e011` | `5fe54c4` |
+| `d71ff80` | `29a56a2` |
+| `112d068` | `872a915` |
+| `dc89031` | `e2d9362` |
+| `34d3ce6` | `45f3602` |
+| `2400aae` | `80f114b` |
+| `78b566e` | `8f96016` |
+| `9b56ed7` | `2045313` |
+| `7e31dae` | `412e542` |
+| `f0a66be` | `1c4855d` |
+| `6cdc2c6` | `fadf6a3` |
+| `1f7abba` | `0515855` |
+| `29f105b` | `5dabdc6` |
+| `0608c5a` | `a5de162` |
+| `baba4a9` | `0f680a1` |
+| `671f3b9` | `3d401d1` |
+| `1af7cad` | `28784a7` |
+| `0417440` | `8fc8d9e` |
+| `50b68c9` | `f35a4cd` |
+
 ## M-PX4
 
 **Met** (the CI run at the head is named in the PR): lobo, static and
