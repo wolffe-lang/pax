@@ -413,3 +413,152 @@ The release tier's compile time (wolf-lang#711) on a longer
 `MAP_NORESERVE` range before backing it (a spurious -EFAULT); the
 wolf runtime's reactor reading a Unix socket's `EPOLLRDHUP` at a time
 PAX does not raise it.
+
+## What was built
+
+- **`kernel/unix`** (new; `boot/unix.S`): 256 socket records of 32
+  words, a listener's queue through its queued ends, each socket's name
+  as bound, the books (sockets live and made, connections, refusals)
+  and the census every 2,500 connections.
+- **`kernel/files`**, the calls (`unix_socket`, `unix_bind`,
+  `unix_listen`, `unix_connect`, `unix_accept`, `unix_getname`,
+  `unix_getsockopt`, `unix_setsockopt`, `unix_shutdown`, `unix_close`,
+  `unix_poll`), reached from `kernel/socket` for AF_UNIX and for any
+  descriptor that names a path socket; a connection's bytes cross two
+  of the pipe buffers a socketpair uses (now 512, a node naming 16-bit
+  buffer numbers), so `read`, `write`, `recvfrom`, `sendto`, `writev`,
+  `poll` and epoll reach it as they reach a socketpair's end, with a
+  path socket's own rules on top (not connected, shut, reset). `walk`
+  split so a path already in `pax_kbuf` (a `sockaddr_un`'s) resolves
+  as an `open`'s does (`walk_k`). `recv`'s MSG_PEEK and MSG_TRUNC
+  read; FIONBIO taken on a socketpair's end too (Linux takes it,
+  measured).
+- **`socketpair(SOCK_SEQPACKET)`**: messages behind an eight-byte
+  length, read one at a time, the rest of one cut off, `writev`'s parts
+  one message; a message that can never fit (over 4,088 bytes)
+  -EMSGSIZE.
+- **`kernel/tree`**: `mksock`, an inode of mode S_IFSOCK naming its
+  socket while the socket lives (`sock_of`, `sock_gone`).
+- **`kernel/procfs`** (new): `/proc/self/status`, `/proc/self/cgroup`,
+  `/proc/sys/vm/overcommit_memory`, `/sys/fs/cgroup/cgroup.controllers`,
+  `/sys/fs/cgroup/cpu.max`, `/sys/devices/system/cpu/online` and the
+  directories they sit in; text made at `open` into a frame the open
+  file holds. `kernel/paging`'s `user_pages` for VmRSS.
+- **`kernel/vm`**: MAP_NORESERVE read-write mappings backed on touch
+  (a reservation of their own kind; `back`), from the page-fault path
+  (`kernel/interrupts` → `kernel/user`'s `fault_in`) and from
+  `kernel/uaccess` before a buffer is checked; MADV_DONTNEED and
+  MADV_FREE give such a page's frame back; `mprotect` to PROT_NONE of
+  part of one makes that part fault for good. Reservations 16 → 256 a
+  process.
+- **`kernel/sched`, `kernel/process`**: `make_stack` answers false
+  where it panicked; `clone` and `clone3` answer -EAGAIN, refused by
+  name ("no frame for a thread's kernel stack"); a kernel thread's own
+  stack still panics (`make_stack_or_die`).
+- **Limits**: 1,024 descriptors a process (`RLIMIT_NOFILE` 1024), 2,048
+  open files, 512 buffers, 1,024 TCP blocks; the process area 8,192 →
+  40,960 bytes (the descriptors, then kernel/vm's 256 reservations).
+- **Tests**: `tests/mpx4-unix` and its CI job; `user/unix/unixprobe.c`,
+  `user/unix/ctl.c`, `user/unix/lobo.conf`; `tools/mkunix`,
+  `tools/mklobo`, `user/lobo.pin`; `tools/linux-tty` and
+  `tools/linux-tree` learn `--sys` (sysfs and cgroup2 in the session's
+  root, for the Linux side of `/sys`).
+
+## 3. The prediction against the measurement
+
+| | predicted | measured |
+|---|---|---|
+| P1 queue | backlog + 1 | 2 on a backlog of 1, the third -EAGAIN (Linux; PAX the same) |
+| P1 `bind` | a name that exists -EADDRINUSE; a bound socket -EINVAL | as predicted, but the name is checked first: binding a socket to the name it already has is -EADDRINUSE, not -EINVAL (measured; PAX follows) |
+| P1 `listen` unbound | refused by name, -EINVAL (autobind) | **wrong**: Linux answers -EINVAL itself (no autobind on `listen`): PAX answers -EINVAL with no refusal line |
+| P1 `connect` | -ENOENT, -ENOTDIR; a file, a non-listener, a closed one -ECONNREFUSED | as predicted; a directory -ECONNREFUSED too; a wrong family, a length of 1 or of 111 -EINVAL |
+| P1 a listener closed, a connection closed with bytes unread | -ECONNRESET predicted for both | **right**: -ECONNRESET once, then 0, `send` -EPIPE, `poll` IN OUT ERR HUP RDHUP; a queued client that sent nothing is reset too; a peer that closes with nothing unread is a clean end (data, then 0) |
+| P1 `shutdown` | not connected -ENOTCONN | **wrong**: Linux answers 0 on a socket that is not connected and nothing changes (`poll` still OUT HUP); PAX the same |
+| P1 types and protocol | protocol 0 only; SEQPACKET and DGRAM refused | protocol 1 (PF_UNIX) is taken too (2 -EPROTONOSUPPORT); Linux also takes SOCK_RAW (as a datagram socket): refused by name like the other two |
+| P1 not connected | `send` -ENOTCONN, `recv` -EINVAL | right; `sendto` with an address on one -EOPNOTSUPP (not predicted; measured) |
+| P1 `poll` | fresh OUT\|HUP | right; and a listener nothing until a connection waits, a connection by its two halves (table in `unix_poll`'s comment) |
+| P2 files | text made at open; sizes 0 | right but one: `/sys/devices/system/cpu/online` is a sysfs attribute, size 4096; open for writing works as root and the write is -EINVAL (predicted -EACCES: **wrong**); `mkdir` in `/proc/self` -ENOENT |
+| P3 seqpacket | boundaries, 4,088 the largest | right (Linux takes 8,000 bytes: `~seqpacket`) |
+| P4 NORESERVE | backed on touch; under 32 frames a parked task | VmRSS +0 kB after the 8 MiB `mmap`, +12 kB after three pages and a `read` into a page never touched, -12 kB after MADV_DONTNEED and MADV_FREE (Linux: +0, +2,056 kB — transparent huge pages — and -4 kB); the waiting wolf witness: §4 (mpx4-ready's frames lines) |
+| P4 kernel stack | -EAGAIN by name | right: `~stack: 244 MiB and 36 pages taken (no more to take); a thread then: EAGAIN`, its `refused:` line, and a thread made again once the memory came back (every leg, both hosts) |
+| P5 limits | about 3.1 MiB more `.bss`, about 760 frames | `kmain_console`'s RW segment 1,249,376 → 4,411,488 bytes (+3,162,112: 772 frames), its text +45,968 bytes (12 frames), rodata +1,072 |
+| P5 TCP memory | "1,024 connections need about 4 GiB" | **wrong arithmetic**: 32 frames (128 KiB) a connection in use is **128 MiB** for 1,024 |
+| P6 refusals | six by name | six: SOCK_RAW, SOCK_SEQPACKET and SOCK_DGRAM on a path, `setsockopt`, an abstract name, autobind (`listen` unbound left the list, SOCK_RAW joined it) |
+| P8 times | status under 50 ms KVM, 2 s TCG; 10,000 connections under 30 s KVM, 5 min TCG | KVM (hasu): lobo's client 0–30 ms by the guest's clock, the whole `ctl` boot 2–3 s; the soak 40–90 ms by the guest's clock for 10,000 connections (Linux in the container 72 ms), the whole soak boot 2–3 s. TCG: §4 |
+| P10 what moves | no transcript lists `/`; RLIMIT_NOFILE nowhere printed | right (checked before the change); the gauntlet's verdicts are §4 |
+| P11 what fails first | #711's compile time; a spurious -EFAULT; EPOLLRDHUP timing | none of the three: the release tier got **faster** (`kmain_console` 200 s → 54 s, `kmain_sockets` 180 s → 54 s, the same container, twice each; not investigated); what failed first was a name defined twice (`ring_put`, E0302), and the stack witness reusing a dead thread's kernel stack (`reap` runs at the next `clone`: the witness now keeps a thread parked) |
+
+## What lobo's list now answers
+
+Every line §2 marked "absent and this lane's" is answered as Linux
+answered it, each proved by a line of `unixprobe` byte-identical to
+Linux's (or, where PAX's answer is its own, by a `~` line the suite
+holds to PAX's value):
+
+- the control socket's whole life — `socket(AF_UNIX,
+  SOCK_STREAM|SOCK_CLOEXEC, 0)`, `bind` to a relative path with its NUL
+  counted, `listen(fd, -1)`, `ioctl(FIONBIO)`, `poll(POLLIN)` beside
+  other descriptors, `accept4(…, SOCK_CLOEXEC|SOCK_NONBLOCK)`,
+  `recvfrom` (-EAGAIN, then the verb), `epoll_ctl(ADD,
+  EPOLLIN|EPOLLRDHUP|EPOLLONESHOT)` and the event back, `sendto(…,
+  MSG_NOSIGNAL)`, `close`, `unlink` of the name — and the client's
+  (`connect`, -ENOENT before the name exists, -ECONNREFUSED after its
+  listener closed and before the name is unlinked, -EPIPE without a
+  signal for an answer to a connection already closed); and, end to
+  end, lobo's own `status` client against a server shaped as lobo's,
+  its output byte-identical to Linux's (`ctl`, U1 and U6, every leg on
+  both hosts);
+- `socketpair(AF_UNIX, SOCK_SEQPACKET|SOCK_CLOEXEC)` with its messages
+  kept (px17's drift closed);
+- `/proc/self/status`, `/proc/self/cgroup`, `/sys/fs/cgroup/cpu.max`,
+  `/sys/devices/system/cpu/online`, `/proc/sys/vm/overcommit_memory`
+  opened, `statx`ed, `lseek(SEEK_CUR)`ed and read in glibc's growing
+  pieces, and `statx` of `/sys/fs/cgroup/cgroup.controllers`;
+- `mmap(…MAP_NORESERVE)` of a task's stack backed where it is touched,
+  `madvise(MADV_FREE)` of it giving the frames back;
+- the descriptor table at Linux's default soft limit, 1,024.
+
+Named by item 1 and done on its word (no strace shows them on a Unix
+socket): `shutdown`, `getsockname`, `getpeername`,
+`getsockopt(SO_ACCEPTCONN)` (and SO_TYPE, SO_ERROR).
+
+## What px25 still lacks
+
+From lobo's list (§2's marks, after this lane), what PAX answers
+otherwise than Linux, or what was never run with lobo:
+
+- **lobo serving on PAX was not run** (px25's): no line of the serve
+  strace beyond the control channel and the files above was exercised
+  by lobo itself here; the master/worker spawn (`clone` without
+  CLONE_VM, `execve` of itself, `dup2`, `wait4`, `kill(SIGUSR2)`,
+  `SIGKILL`, handlers for HUP, QUIT, TERM, USR2) is px14's and px26's
+  and unrun with lobo.
+- `set_robust_list` (273) and `rseq` (334): -ENOSYS (glibc goes on).
+- `prlimit64(RLIMIT_STACK)` answers PAX's 128 KiB main stack both ways
+  (Linux: 8 MiB, unlimited).
+- **glibc's thread stacks** (`mmap(PROT_NONE, MAP_STACK)` of 2 MiB and
+  `mprotect` to read-write) are backed whole at the `mprotect` (px26):
+  2 MiB a thread. lobo with one worker ran 25 threads on Linux, with
+  four 112: about 50 MiB of thread stacks a process for one worker
+  (lobo's own wolf tasks' stacks are MAP_NORESERVE and now cost what
+  they touch). px25 sizes its guest for that, or a later lane backs
+  those on touch too (not this lane's item: no strace marks them
+  NORESERVE).
+- A Unix connection's buffers are one frame each way (Linux's are far
+  larger): a reply over 4 KiB waits for its reader, which lobo's
+  non-blocking writes meet as -EAGAIN and an EPOLLOUT wait; never run
+  with a reply that large.
+- A seqpacket message is at most 4,088 bytes (Linux took 8,000; lobo's
+  spawn channel sends 8 bytes, only when an `execve` fails).
+- `/proc/self/status`: fixed values where PAX keeps nothing (VmPeak and
+  VmSize are the resident pages, the capability sets 0);
+  `cgroup.controllers` says `cpu` only.
+- TCP: 1,024 blocks, but a connection in use holds 32 frames: 1,024 at
+  once need 128 MiB of guest memory for TCP alone; `kernel/arp`'s
+  two-frame queue (pax#32) and the virtio driver's 64 transmit buffers
+  under many connections, as px24 left them.
+- Not in lobo's request set and not on PAX: `sendmsg`, `recvmsg`,
+  `SCM_RIGHTS`, `SO_PASSCRED`, `SO_PEERCRED`, abstract names, a
+  datagram or seqpacket socket on a path, `SO_REUSEPORT`,
+  `SO_KEEPALIVE`, `SO_LINGER`, `SO_SNDBUF`, `SO_RCVBUF`, `ppoll`,
+  `epoll_pwait`, `timerfd`, `signalfd`.
