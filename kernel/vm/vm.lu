@@ -50,9 +50,24 @@
 //! their range out of the reservations (a hole cut in the middle of one
 //! needs a second entry: when none is free the tail stays reserved,
 //! address space lost and nothing else). A reserved address is never
-//! handed out by a later `mmap`. With the sixteen entries in use a
+//! handed out by a later `mmap`. With every entry in use (px34: 256; sixteen before) a
 //! PROT_NONE mapping is made the old way, a frame a page. A fork's
 //! child inherits the reservations with the area; `execve` drops them.
+//!
+//! **Backed on touch** (px34: `MAP_NORESERVE`, what wolf's runtime maps
+//! a task's 8 MiB stack with). A private anonymous read-write mapping
+//! with MAP_NORESERVE takes no frame at the call: its range is kept as
+//! a reservation of its own kind, and a page of it is backed with a
+//! zeroed read-write frame the first time ring 3 touches it (`back`,
+//! from kernel/user's page-fault path) or a system call's buffer covers
+//! it (kernel/uaccess backs before it checks). `mprotect` to PROT_NONE of
+//! part of one (the runtime's 64 KiB guard) makes that part an ordinary
+//! reservation: it faults for good; to read-write it changes nothing;
+//! to anything else it backs the pages now. MADV_DONTNEED and MADV_FREE
+//! on a page of one give its frame back: the next touch reads zeros,
+//! which both allow (`madvise(2)`). Without MAP_NORESERVE a mapping is
+//! backed at the call, as before. The reservations (both kinds) are 256
+//! a process (px34; 16 before), after the descriptors in the area.
 //!
 //! **madvise** (28, px26): MADV_DONTNEED on private anonymous memory
 //! makes the pages read zero again (`madvise(2)`); PAX zeroes them in
@@ -85,8 +100,9 @@ const A_BRK_START: u64 = 0
 const A_BRK: u64 = 1
 const A_MMAP: u64 = 2
 const A_REFUSAL: u64 = 3
-const A_RESV: u64 = 222 // px26: sixteen reserved ranges, (lo, hi) each, words 222-253; lo 0 a free entry
-const RESV: u64 = 16
+const A_RESV: u64 = 4608 // px34: 256 reserved ranges, (lo, hi) each, after kernel/files' 1024 descriptors (px26: sixteen at word 222); lo 0 a free entry; hi's bit 0 set for a range backed on touch
+const RESV: u64 = 256
+const LAZY: u64 = 1 // in hi: the range is backed on touch (MAP_NORESERVE)
 
 const PROT_WRITE: u64 = 0x2
 const PROT_EXEC: u64 = 0x4
@@ -100,6 +116,8 @@ const MAP_SHARED_VALIDATE: u64 = 0x03
 const MAP_FIXED: u64 = 0x10
 const MAP_ANONYMOUS: u64 = 0x20
 const MAP_FIXED_NOREPLACE: u64 = 0x100000
+const MAP_NORESERVE: u64 = 0x4000 // px34
+const PROT_RW: u64 = 0x3
 
 // -errno as %rax carries it (uapi asm-generic/errno-base.h).
 const NEG_ENOMEM: u64 = 0xfffffffffffffff4 // -12
@@ -116,11 +134,12 @@ const R_ADVICE: u64 = 4 // px26
 const NEG_EAGAIN: u64 = 0xfffffffffffffff5 // -11
 const PROT_NONE_BITS: u64 = 0x7
 const MADV_DONTNEED: u64 = 4
+const MADV_FREE: u64 = 8 // px34
 const MADV_GUARD_INSTALL: u64 = 102
 const MADV_GUARD_REMOVE: u64 = 103
 
 fn get(a: u64, i: u64) -> u64 {
-    // # Safety: `a` is a process area (sched.proc_area), 4096 bytes; i < 8.
+    // # Safety: `a` is a process area (sched.proc_area), 40960 bytes; i < 5120.
     unsafe { ((a + i * 8) as *u64).read_volatile() }
 }
 
@@ -159,26 +178,28 @@ pub fn why(r: u64) -> str {
 
 // --- reservations (px26) -------------------------------------------------------
 
-/// Whether user address `va` lies in a range reserved with PROT_NONE.
+/// Whether user address `va` lies in a reserved range (PROT_NONE, or
+/// px34's backed on touch).
 pub fn reserved(a: u64, va: u64) -> bool {
-    var i: u64 = 0
-    while i < RESV {
-        let lo = get(a, A_RESV + i * 2)
-        if lo != 0 && va >= lo && va < get(a, A_RESV + i * 2 + 1) {
-            return true
-        }
-        i += 1
-    }
-    false
+    reserved_from(a, va) != 0
 }
 
-/// Reserve [lo, hi): false when no entry is free.
-fn reserve(a: u64, lo: u64, hi: u64) -> bool {
+fn hi_of(a: u64, i: u64) -> u64 {
+    get(a, A_RESV + i * 2 + 1) & !LAZY
+}
+
+fn lazy_of(a: u64, i: u64) -> u64 {
+    get(a, A_RESV + i * 2 + 1) & LAZY
+}
+
+/// Reserve [lo, hi), backed on touch when `lazy` is LAZY: false when no
+/// entry is free.
+fn reserve_kind(a: u64, lo: u64, hi: u64, lazy: u64) -> bool {
     var i: u64 = 0
     while i < RESV {
         if get(a, A_RESV + i * 2) == 0 {
             put(a, A_RESV + i * 2, lo)
-            put(a, A_RESV + i * 2 + 1, hi)
+            put(a, A_RESV + i * 2 + 1, hi | lazy)
             return true
         }
         i += 1
@@ -186,14 +207,21 @@ fn reserve(a: u64, lo: u64, hi: u64) -> bool {
     false
 }
 
+/// Reserve [lo, hi) (PROT_NONE): false when no entry is free.
+fn reserve(a: u64, lo: u64, hi: u64) -> bool {
+    reserve_kind(a, lo, hi, 0)
+}
+
 /// Take [lo, hi) out of every reservation: an entry inside it goes, one
 /// that overlaps an end is cut back, one that contains it is split in
-/// two (or, with no free entry, keeps its tail too).
+/// two (or, with no free entry, keeps its tail too). A cut keeps its
+/// entry's kind.
 fn unreserve(a: u64, lo: u64, hi: u64) {
     var i: u64 = 0
     while i < RESV {
         let rl = get(a, A_RESV + i * 2)
-        let rh = get(a, A_RESV + i * 2 + 1)
+        let rh = hi_of(a, i)
+        let k = lazy_of(a, i)
         if rl != 0 && lo < rh && hi > rl {
             if lo <= rl && hi >= rh {
                 put(a, A_RESV + i * 2, 0)
@@ -201,14 +229,38 @@ fn unreserve(a: u64, lo: u64, hi: u64) {
             } else if lo <= rl {
                 put(a, A_RESV + i * 2, hi)
             } else if hi >= rh {
-                put(a, A_RESV + i * 2 + 1, lo)
+                put(a, A_RESV + i * 2 + 1, lo | k)
             } else {
-                put(a, A_RESV + i * 2 + 1, lo)
-                let _kept = reserve(a, hi, rh)
+                put(a, A_RESV + i * 2 + 1, lo | k)
+                let _kept = reserve_kind(a, hi, rh, k)
             }
         }
         i += 1
     }
+}
+
+/// px34: whether user page `pg` lies in a range backed on touch.
+fn lazy_at(a: u64, pg: u64) -> bool {
+    var i: u64 = 0
+    while i < RESV {
+        let lo = get(a, A_RESV + i * 2)
+        if lo != 0 && pg >= lo && pg < hi_of(a, i) {
+            return lazy_of(a, i) != 0
+        }
+        i += 1
+    }
+    false
+}
+
+/// px34: back user page `pg` of the space at `pml4` with a zeroed
+/// read-write frame when it lies in a range backed on touch and has none
+/// yet: true when it did (kernel/user's page-fault path, kernel/uaccess
+/// before it checks a buffer). False otherwise, or with no frame left.
+pub fn back(a: u64, pml4: u64, pg: u64) -> bool {
+    if pg >= paging.USER_TOP || mapped(pml4, pg) != 0 || !lazy_at(a, pg) {
+        return false
+    }
+    map_zero(pml4, pg, paging.RW | paging.NX)
 }
 
 /// Whether user page `pg` is taken: mapped, or reserved.
@@ -223,7 +275,7 @@ fn reserved_from(a: u64, pg: u64) -> u64 {
     var i: u64 = 0
     while i < RESV {
         let lo = get(a, A_RESV + i * 2)
-        if lo != 0 && pg >= lo && pg < get(a, A_RESV + i * 2 + 1) {
+        if lo != 0 && pg >= lo && pg < hi_of(a, i) {
             return lo
         }
         i += 1
@@ -410,6 +462,9 @@ pub fn mmap(a: u64, pml4: u64, addr: u64, len: u64, prot: u64, flags: u64) -> u6
     if prot & PROT_KNOWN == 0 && reserve(a, va, va + n) {
         return va // px26: PROT_NONE takes no frame; `mprotect` backs what is used
     }
+    if flags & MAP_NORESERVE != 0 && prot & PROT_KNOWN == PROT_RW && reserve_kind(a, va, va + n, LAZY) {
+        return va // px34: backed page by page where it is touched
+    }
     let fl = leaf(prot)
     var pg = va
     while pg < va + n {
@@ -467,10 +522,24 @@ pub fn mprotect(a: u64, pml4: u64, addr: u64, len: u64, prot: u64) -> u64 {
     if prot & PROT_KNOWN != 0 {
         fl = fl | paging.US
     }
+    // px34: in a range backed on touch, PROT_NONE makes the part an
+    // ordinary reservation (it faults for good) and read-write leaves the
+    // untouched pages to be backed when touched.
+    var any_lazy = false
+    pg = addr
+    while pg < end && !any_lazy {
+        any_lazy = mapped(pml4, pg) == 0 && lazy_at(a, pg)
+        pg += PAGE
+    }
+    if any_lazy && prot & PROT_KNOWN == 0 {
+        unreserve(a, addr, end)
+        let _r = reserve(a, addr, end)
+    }
+    let keep_lazy = any_lazy && prot & PROT_KNOWN == PROT_RW && prot & PROT_EXEC == 0
     pg = addr
     while pg < end {
         if mapped(pml4, pg) == 0 {
-            if prot & PROT_KNOWN != 0 {
+            if prot & PROT_KNOWN != 0 && !(keep_lazy && lazy_at(a, pg)) {
                 if !map_zero(pml4, pg, leaf(prot)) {
                     put(a, A_REFUSAL, R_NO_FRAMES)
                     return NEG_ENOMEM
@@ -488,8 +557,8 @@ pub fn mprotect(a: u64, pml4: u64, addr: u64, len: u64, prot: u64) -> u64 {
 /// each advice does here).
 pub fn madvise(a: u64, pml4: u64, addr: u64, len: u64, advice: u64) -> u64 {
     let adv = advice & 0xffffffff
-    let hint = adv <= 3 || adv == 8 || (adv >= 14 && adv <= 17)
-    if !hint && adv != MADV_DONTNEED && adv != MADV_GUARD_INSTALL && adv != MADV_GUARD_REMOVE {
+    let hint = adv <= 3 || (adv >= 14 && adv <= 17)
+    if !hint && adv != MADV_DONTNEED && adv != MADV_FREE && adv != MADV_GUARD_INSTALL && adv != MADV_GUARD_REMOVE {
         put(a, A_REFUSAL, R_ADVICE)
         return NEG_EINVAL
     }
@@ -513,7 +582,14 @@ pub fn madvise(a: u64, pml4: u64, addr: u64, len: u64, advice: u64) -> u64 {
     pg = addr
     while pg < end {
         let pa = mapped(pml4, pg)
-        if pa != 0 {
+        if pa != 0 && (adv == MADV_DONTNEED || adv == MADV_FREE) && lazy_at(a, pg) {
+            // px34: a page of a range backed on touch gives its frame
+            // back; its next touch backs a zeroed one.
+            let f = paging.unmap(pml4, pg) else 0
+            if f != 0 {
+                frames.free(f)
+            }
+        } else if pa != 0 && adv != MADV_FREE { // MADV_FREE elsewhere: a hint, the page keeps its frame
             if adv == MADV_DONTNEED {
                 let v = (pa & !(PAGE - 1)) + frames.hhdm()
                 var i: u64 = 0

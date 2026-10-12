@@ -15,6 +15,11 @@
 //! prefix). System calls run with IF clear on one CPU, so nothing unmaps
 //! a page between the check and the copy.
 //!
+//! px34: a page of a MAP_NORESERVE range the program has not touched
+//! yet is backed (kernel/vm's `back`) before it is checked, in the live
+//! space only, as Linux's copy faults it in: a `read` into a fresh task
+//! stack works.
+//!
 //! Lengths come from ring 3 and may be anything: every sum is checked
 //! against the user half's top before it is formed (wolf's arithmetic
 //! traps on overflow). No region, no heap. No Linux source; no other
@@ -22,8 +27,25 @@
 
 use frames
 use paging
+use sched
+use vm
 
 const PAGE: u64 = 4096
+
+/// px34: whether user page `pg` is present and user-accessible
+/// (`write`: and writable) in the structures at `pml4`, backing it first
+/// when it is an untouched page of a MAP_NORESERVE range of the running
+/// process (the live space only).
+fn page_ok(pml4: u64, pg: u64, write: bool) -> bool {
+    let ok = if write { paging.user_ok_write(pml4, pg) } else { paging.user_ok(pml4, pg) }
+    if ok {
+        return true
+    }
+    if pml4 != paging.live() || !vm.back(sched.proc_area(sched.self_slot()), pml4, pg) {
+        return false
+    }
+    if write { paging.user_ok_write(pml4, pg) } else { paging.user_ok(pml4, pg) }
+}
 
 /// Whether [va, va + len) lies in the user half (len may be 0).
 pub fn in_user(va: u64, len: u64) -> bool {
@@ -42,7 +64,7 @@ pub fn readable(pml4: u64, va: u64, len: u64) -> bool {
     }
     var pg = va & !(PAGE - 1)
     while pg < va + len {
-        if !paging.user_ok(pml4, pg) {
+        if !page_ok(pml4, pg, false) {
             return false
         }
         pg += PAGE
@@ -60,7 +82,7 @@ pub fn writable(pml4: u64, va: u64, len: u64) -> bool {
     }
     var pg = va & !(PAGE - 1)
     while pg < va + len {
-        if !paging.user_ok_write(pml4, pg) {
+        if !page_ok(pml4, pg, true) {
             return false
         }
         pg += PAGE
@@ -190,7 +212,7 @@ pub fn string_in(pml4: u64, va: u64, dst: u64, max: u64) -> u64 {
         let a = va + i
         let pg = a & !(PAGE - 1)
         if pg != page {
-            if !paging.user_ok(pml4, pg) {
+            if !page_ok(pml4, pg, false) {
                 return max + 2
             }
             page = pg

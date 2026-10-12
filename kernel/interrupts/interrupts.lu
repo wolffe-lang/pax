@@ -62,6 +62,8 @@
 //!
 //!   (` (heap)` when CR2 lies in kernel/heap's PML4 slot, px06), then
 //!   halt (kernel/panic: `cli; hlt`, forever). A double fault or
+//!   page fault in ring 3 on a page of a MAP_NORESERVE range not yet
+//!   backed is backed and resumed (px34, kernel/user's `fault_in`); a
 //!   page fault whose CR2 lies in a thread's stack guard (kernel/sched)
 //!   is a stack overflow, and says so (px07):
 //!
@@ -322,6 +324,18 @@ fn route(f: *Frame) -> *Frame {
         let _n = sched.wake_net()
         // # Safety: as above.
         return unsafe { sched.kick(f as u64) as *Frame }
+    }
+    // # Safety: the frame's address; nothing is read here.
+    if v == 14 && user.from_user(unsafe { f as u64 }) {
+        // px34: a page of a MAP_NORESERVE range touched for the first
+        // time is backed now and the instruction runs again.
+        // # Safety: cpu.S's MOV from CR2: this page fault's address.
+        let cr2 = unsafe { pax_cr2() }
+        // # Safety: the trampoline's frame, live for this call.
+        let e = unsafe { f[0].error }
+        if user.fault_in(cr2, e) {
+            return f
+        }
     }
     // # Safety: the frame's address; nothing is read here.
     if v < 32 && v != 8 && v != 18 && user.from_user(unsafe { f as u64 }) {
