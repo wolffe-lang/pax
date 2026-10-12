@@ -121,7 +121,7 @@ const I_DEPTH: u64 = 8
 const I_BLOCKS: u64 = 9 // data frames held
 const I_BACK: u64 = 10 // the archive's bytes (a kernel address); 0 none
 const I_BACKLEN: u64 = 11 // how many of them the file still reads
-const I_PARENT: u64 = 12 // a directory's parent
+const I_PARENT: u64 = 12 // a directory's parent; px34: a socket's record (kernel/unix), + 1, while it lives
 const I_ENTRIES: u64 = 13 // a directory's entries; a file: its archive entry + 1
 const I_BTIME: u64 = 14
 const I_NEXT: u64 = 15 // the free list
@@ -129,6 +129,7 @@ const I_NEXT: u64 = 15 // the free list
 const S_IFMT: u64 = 0xf000
 const S_IFDIR: u64 = 0x4000
 const S_IFREG: u64 = 0x8000
+const S_IFSOCK: u64 = 0xc000 // px34
 
 // errnos (uapi asm-generic/errno-base.h, errno.h)
 const ENOENT: u64 = 2
@@ -1019,6 +1020,42 @@ pub fn create(d: u64, name: u64, len: u64, perm: u64) -> u64 {
     ip(d, I_ENTRIES, ig(d, I_ENTRIES) + 1)
     touch_change(d)
     i
+}
+
+/// px34: a socket's name [name, name + len) in directory `d` (`bind` on
+/// an AF_UNIX path socket), mode S_IFSOCK with the permission bits
+/// `perm`, size 0, one link, naming socket record `sock` (kernel/unix):
+/// its inode, or -ENOENT (the directory has been removed), -ENOSPC.
+pub fn mksock(d: u64, name: u64, len: u64, perm: u64, sock: u64) -> u64 {
+    let i = create(d, name, len, perm)
+    if failed(i) {
+        return i
+    }
+    ip(i, I_MODE, S_IFSOCK | (perm & 0xfff))
+    ip(i, I_PARENT, sock + 1)
+    i
+}
+
+/// px34: whether inode `i` is a socket's name.
+pub fn is_sock(i: u64) -> bool {
+    ig(i, I_MODE) & S_IFMT == S_IFSOCK
+}
+
+/// px34: the socket record a socket's name leads to, + 1; 0 when the
+/// socket it named has closed (connect is then refused, unix(7)).
+pub fn sock_of(i: u64) -> u64 {
+    if !is_sock(i) {
+        return 0
+    }
+    ig(i, I_PARENT)
+}
+
+/// px34: the socket the name led to has closed: the name stays, leading
+/// nowhere, until it is unlinked.
+pub fn sock_gone(i: u64) {
+    if is_sock(i) {
+        ip(i, I_PARENT, 0)
+    }
 }
 
 /// A new directory named [name, name + len) in directory `d`: its
