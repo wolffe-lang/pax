@@ -398,8 +398,12 @@ class Conn:
                     if self.dupacks == 3:
                         self.ssthresh = max(ssub(self.snd_max, self.snd_una) // 2, 2 * self.mss)
                         self.cwnd = self.ssthresh
+                        # RFC 5681 §3.2: the segment that was lost goes
+                        # again — never a byte past SND.MAX, which PAX's
+                        # ACK of it would then answer beyond what this
+                        # end counts as sent (pax#29, run 38192937184).
                         off = ssub(self.snd_una, self.out_seq)
-                        n = min(len(self.out) - off, self.peer_mss) if off < len(self.out) else 0
+                        n = min(len(self.out) - off, self.peer_mss, ssub(self.snd_max, self.snd_una)) if off < len(self.out) else 0
                         fin = self.fin_sent and off + n == len(self.out)
                         if n or fin:
                             self.rexmt += 1
