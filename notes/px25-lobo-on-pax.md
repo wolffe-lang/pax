@@ -411,7 +411,7 @@ identical to lobo's on Linux but for `Date` (R1).
 - **Plants by run id**: A2 (`2400aae`, branch `px25-plant-a2`) run
   38227647983, `mpx4-lobo` red for the reason it names and no other:
   serve and serve-release held, then `native bios hands: … request 1 of
-  20: timed out`, `stopped early` (`ci/ci-38227647983-…`); B2 (`9b56ed7`, branch `px25-plant-b2`) run RUN_PLANT_B2;
+  20: timed out`, `stopped early` (`ci/ci-38227647983-…`); B2 (`9b56ed7`, branch `px25-plant-b2`) run 38234040400, `mpx4-lobo` red for the reason it names: `native bios serve: … '^reload complete \(generation 2\)' not seen in 60 s`, the reply after it missing, `stopped early` (`ci/ci-38234040400-…`);
   locally `kasumi/plants/`. The first A (`f0a66be`, run 38222405571) did
   not go red as planted (above).
 - **Boot counts**: kasumi TCG — exploratory x1, x2 ×2, x3; development
@@ -421,7 +421,7 @@ identical to lobo's on Linux but for `Date` (R1).
   KVM — k1 (`29f105b`) 11, the time-wait experiment 4, k2 (`d71ff80`)
   15. nomad-1 TCG — 4 (two browser sessions, two typed by pty). CI —
   the runs named in the PR.
-- **CI green at head**: the run named in the PR.
+- **CI**: at `ee9bf57` (the rebased head before the probe fix) run 38232957625: `mpx4-lobo` PASS, 15 boots (`ci/ci-38232957625-…`), only mpx4-unix's race red; CI green at the final head: the run named in the PR.
 
 ## Not verified
 
