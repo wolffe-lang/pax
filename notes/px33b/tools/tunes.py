@@ -10,7 +10,8 @@ body[0] = 'title Auferstehung, "Bereite dich" to the end (Mahler, Symphony No. 2
 open(out + "/auferstehung", "w").write(open(hf).read() + "\n".join(body).rstrip("\n") + "\n")
 head = [l for l in body if l.startswith("part ")]
 b63 = next(i for i, l in enumerate(body) if l.startswith("bar 63"))
-close = ["title Auferstehung, fig. 47 to the end (Mahler, Symphony No. 2, 1897)", "tempo 38 2", "meter 2/2"] + head
+t63 = re.search(r"tempo (\d+) (\d+)", body[b63]).group(0)   # the close's head takes 47.1's own tempo
+close = ["title Auferstehung, fig. 47 to the end (Mahler, Symphony No. 2, 1897)", t63, "meter 2/2"] + head
 for l in body[b63:]:
     m = re.match(r"^bar (\d+)(.*)$", l)
     close.append("bar %d%s" % (int(m.group(1)) - 62, m.group(2)) if m else l)
