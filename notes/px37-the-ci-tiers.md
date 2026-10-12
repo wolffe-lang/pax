@@ -168,8 +168,20 @@ superseded run may have been cancelled before it proved anything).
 
 ## 5. Evidence
 
-The planted break: `tests/ci-plan` must fail when the network's rule
-goes. (Filled in below from the run.)
+The planted break, seen red before the planner was trusted: branch
+`px37-plant` (`53083e5`, never to be merged) drops the one line
+`kernel/tcp/* @net` from the map. Locally and in CI (dispatch run
+38250338023, `-f suites=census`) `tests/ci-plan` fails three P2 checks:
+the network change selects mpx4-net, -udp, -tcp, -ready and -session
+(the tests' own text still names `kernel/tcp`) but not mpx4-unix, which
+only the rule gave. The plan job failed, every suite job was skipped,
+and the verdict job, named `tier unplanned`, failed with "the plan did
+not succeed (failure)": a broken plan turns the run red, never into a
+quiet run of nothing. Every P1, P3, P4 and P5 check passed in the same
+run.
+
+The pull request's own runs (the pr tier, then the labelled full run)
+are named in the PR, since a commit naming them would move the head.
 
 ## 6. What lane-audit should read under tiers
 
