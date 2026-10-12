@@ -172,7 +172,7 @@ initramfs holds 11 programs, not 17.
   `the wolf heard: what does the wolf say?`). The build's one FAIL
   there is E0's `tools/linux-tree` (no container engine inside the
   build's container); that step ran on kasumi's host by `--linux-files`
-  with podman (`linux-files rc=0`). That run's summary records the
+  with podman (`linux-files rc=0`). That run's summary gives the
   build step's status as 127, not the 1 the E0 line gives: re-run on the
   same tree the test exited 1 and podman 0, and the image came out
   byte-identical (`h4-a3edbb6-rebuild.txt`); the 127 was not seen again
@@ -206,7 +206,8 @@ initramfs holds 11 programs, not 17.
   is the same after the rebases; the plant was not re-run.
 - **CI at the head**: the run named in the PR (a commit cannot name its
   own run). Superseded runs of this lane's own cancelled: 38164160849,
-  38171170156, 38171506242, and 38172498060 and 38185389228 as below.
+  38171170156, 38171506242, 38185389228. Run 38172498060 (head 1f51b28
+  before the rebase onto `7c2c70e`) finished green.
 
 ## 5. Done-when
 
