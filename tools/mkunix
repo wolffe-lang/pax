@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# mkunix — build px34's witnesses of AF_UNIX path sockets
+# (user/unix/unixprobe.c: the probe and, as `unixprobe soak`, the soak;
+# user/unix/ctl.c: lobo's control channel, both ends), each a static
+# x86-64 Linux executable.
+#
+#   tools/mkunix OUTDIR
+#
+# The host's cc and its static glibc: `cc -static -no-pie -O1`, ET_EXEC
+# with no PT_INTERP (checked), the same file run on Linux and on PAX
+# (tests/mpx4-unix). Build on a baseline x86-64 glibc (the CI runner's
+# Ubuntu; an Ubuntu container on kasumi), never on kasumi's own, whose
+# start-up uses AVX-512 (px10). Prints `<name> <sha256> <bytes>` for
+# each. Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkunix OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${CC:-cc}
+need "$cc" readelf
+for p in unixprobe ctl; do
+    "$cc" -static -no-pie -O1 -Wall -Wextra -Wno-unused-result -Wl,--build-id=none -Wl,-z,noexecstack \
+        -o "$out/$p" "$PAX_ROOT/user/unix/$p.c" || die "cc: $p"
+    readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
+    ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP (not static)"
+    printf '%s %s %s\n' "$p" "$(sha256_of "$out/$p")" "$(wc -c < "$out/$p" | tr -d ' ')"
+done
