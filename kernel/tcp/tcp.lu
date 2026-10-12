@@ -104,8 +104,9 @@
 //! taken at `start`; an entry is looked for in the 16 that follow where
 //! its four values hash to): the addresses and ports, SND.NXT, RCV.NXT
 //! and the tick it ends at. A segment for an entry is
-//! acknowledged (a FIN starts the wait again), a reset is ignored (RFC
-//! 1337), and a SYN above RCV.NXT with a listener there ends the entry
+//! acknowledged (a FIN starts the wait again), a reset at RCV.NXT ends
+//! it (px25: Linux's way, `tools/tw-probe`; any other reset is ignored,
+//! RFC 1337), and a SYN above RCV.NXT with a listener there ends the entry
 //! and is taken (RFC 1122 §4.2.2.13). Sixteen live entries where a new
 //! one belongs give up the one that ends soonest (`time-wait-evicted`). A block whose descriptor is still open
 //! when it gets there (its process shut its half and the peer's FIN
@@ -367,7 +368,7 @@ pub const C_PERSIST: u64 = 78
 pub const C_DUP_ACKS: u64 = 79
 /// Connections that could not have their buffers.
 pub const C_NO_FRAMES: u64 = 80
-/// Resets ignored in time-wait.
+/// Resets ignored in time-wait (px25: those not at RCV.NXT).
 pub const C_TW_RST: u64 = 81
 /// Of the segments received, those that came over loopback.
 pub const C_LOOP_IN: u64 = 82
@@ -375,6 +376,9 @@ pub const C_LOOP_IN: u64 = 82
 pub const C_LOOP_OUT: u64 = 83
 /// Of the retransmissions, those for this machine itself.
 pub const C_LOOP_REXMT: u64 = 84
+/// px25: time-wait entries ended by a reset at RCV.NXT (Linux's way,
+/// `tools/tw-probe`).
+pub const C_TW_RST_ENDED: u64 = 85
 
 // A block's words (CONN_WORDS a block).
 const CONN_WORDS: u64 = 128
@@ -1657,7 +1661,20 @@ fn time_wait_in(e: u64, la: u64, lp: u64, ra: u64, rp: u64, flags: u64, seq: u64
     let snd_nxt = tw_word(e, 2) >> 32
     let rcv_nxt = tw_word(e, 2) & M32
     if flags & RST != 0 {
-        bump(C_TW_RST)
+        // px25: a reset at RCV.NXT ends the entry, as Linux does
+        // (tools/tw-probe: its TIME-WAIT answers a SYN below RCV.NXT
+        // with the old ACK, the peer's reset at that number ends the
+        // wait, and the SYN sent again is taken). QEMU's user network
+        // reuses this host's ports within the 60 s: without this, a
+        // client whose port came round met the ACK, reset, and the
+        // same ACK again until the wait ran out. Any other reset is
+        // still ignored (RFC 1337).
+        if seq == rcv_nxt {
+            put_tw_word(e, 1, 0)
+            bump(C_TW_RST_ENDED)
+        } else {
+            bump(C_TW_RST)
+        }
         return false
     }
     if flags & SYN != 0 && flags & ACK == 0 && seq_lt(rcv_nxt, seq) && listener(la, lp) != CONNS {
@@ -2946,6 +2963,7 @@ fn line_blocks() {
     item(C_TW_REOPENED, "reopened,")
     item(C_TW_SEGMENTS, "segments answered,")
     item(C_TW_RST, "resets ignored,")
+    item(C_TW_RST_ENDED, "ended by a reset,")
     log.put(" ")
     log.dec(waiting() as int)
     log.put(" waiting")
@@ -2973,7 +2991,7 @@ fn line_loopback() {
 ///     tcp: options <m> mss, skipped <…> window-scale <…> sack-permitted <…> sack <…> timestamps <…> fast-open <…> other
 ///     tcp: tx <n> segments (<d> with data, <b> bytes; <a> acks, <r> resets, <p> probes), <f> not sent; <x> retransmitted, <t> timeouts, <q> fast retransmits, <s> round trips measured, <w> window updates, <o> persist
 ///     tcp: connections <a> active, <p> passive, <c> accepted, <r> refused, <g> gave-up, <h> half-open gone, <k> reset at close, <s> simultaneous, <n> no-frames; icmp <x> ended a connect, <y> ignored
-///     tcp: blocks <m> made, <f> freed, <u> in use; time-wait <w> made, <e> evicted, <o> reopened, <s> segments answered, <r> resets ignored, <l> waiting
+///     tcp: blocks <m> made, <f> freed, <u> in use; time-wait <w> made, <e> evicted, <o> reopened, <s> segments answered, <r> resets ignored, <x> ended by a reset, <l> waiting
 ///     tcp: loopback <o> segments sent, <i> received, <x> retransmitted
 pub fn counters() {
     line_dropped()
