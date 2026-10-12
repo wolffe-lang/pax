@@ -1,0 +1,85 @@
+# tests/mpx4-lobo, session `diff` (px25): lobo's own differential rows,
+# lobo on PAX against the same lobo on Linux (the same config, the same
+# tree, every file's time 0): the 24 static rows of
+# tests/differential/cases (lobo's tree at the pin, kept by
+# tools/mklobo), each on the server its `--- server` section asks for
+# (conf/d1.conf … d4.conf, one lobo each: lobo serves its first server
+# block only), and the 7 proxy rows of
+# tests/differential/proxy-cases (conf/proxy.conf), each with a backend
+# on this host's port 18090 that answers the case's `--- reply` and
+# keeps what it was asked. proxy-https-cases/https_upstream.case is not
+# run: its upstream is the pinned nginx serving TLS (the test says so).
+pax: wait ^\$ $ 120
+type cd /srv
+mark
+type lobo -c conf/d1.conf serve &
+wait control unix:logs/d1\.sock 120
+type lobo -c conf/d2.conf serve &
+wait control unix:logs/d2\.sock 120
+type lobo -c conf/d3.conf serve &
+wait control unix:logs/d3\.sock 120
+type lobo -c conf/d4.conf serve &
+wait control unix:logs/d4\.sock 120
+sleep 2
+case static 8084 differential/cases/alias_exact_file_slash.case
+case static 8084 differential/cases/alias_exact_file.case
+case static 8081 differential/cases/cond304.case
+case static 8081 differential/cases/head.case
+case static 8081 differential/cases/range_clamp.case
+case static 8081 differential/cases/range_cond304.case
+case static 8081 differential/cases/range_garbage.case
+case static 8081 differential/cases/range_head.case
+case static 8081 differential/cases/range_ifrange_date.case
+case static 8081 differential/cases/range_ifrange_etag.case
+case static 8081 differential/cases/range_ifrange_stale.case
+case static 8082 differential/cases/range_max0.case
+case static 8083 differential/cases/range_max1.case
+case static 8081 differential/cases/range_multi_one_unsat.case
+case static 8081 differential/cases/range_multi.case
+case static 8081 differential/cases/range_open.case
+case static 8081 differential/cases/range_other_unit.case
+case static 8081 differential/cases/range_overlap_declined.case
+case static 8081 differential/cases/range_reversed.case
+case static 8081 differential/cases/range_single.case
+case static 8081 differential/cases/range_suffix_zero.case
+case static 8081 differential/cases/range_suffix.case
+case static 8081 differential/cases/range_unsat.case
+case static 8081 differential/cases/static_basic.case
+mark
+type lobo -s stop -c conf/d1.conf
+wait stop: shutting down 60
+mark
+type lobo -s stop -c conf/d2.conf
+wait stop: shutting down 60
+mark
+type lobo -s stop -c conf/d3.conf
+wait stop: shutting down 60
+mark
+type lobo -s stop -c conf/d4.conf
+wait stop: shutting down 60
+type wait
+mark
+type lobo -c conf/proxy.conf serve &
+wait generation-activated gen=1 seq=2 120
+backend 18090 differential/proxy-cases/chunked.case
+case proxy 8090 differential/proxy-cases/chunked.case
+backend 18090 differential/proxy-cases/hopbyhop.case
+case proxy 8090 differential/proxy-cases/hopbyhop.case
+backend 18090 differential/proxy-cases/keep.case
+case proxy 8090 differential/proxy-cases/keep.case
+backend 18090 differential/proxy-cases/respheaders.case
+case proxy 8090 differential/proxy-cases/respheaders.case
+backend 18090 differential/proxy-cases/rewrite.case
+case proxy 8090 differential/proxy-cases/rewrite.case
+backend 18090 differential/proxy-cases/strip.case
+case proxy 8090 differential/proxy-cases/strip.case
+backend 18090 differential/proxy-cases/xff.case
+case proxy 8090 differential/proxy-cases/xff.case
+mark
+type lobo -s stop -c conf/proxy.conf
+wait ^stop: shutting down 60
+type wait
+type echo diff ended $?
+wait ^diff ended 0 60
+pax: type exit
+halt 60
