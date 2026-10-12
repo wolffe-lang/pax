@@ -218,6 +218,7 @@ use speaker
 use timer
 use tree
 use uaccess
+use unix
 use vm
 
 extern "c" fn pax_rdmsr(msr: u64) -> u64
@@ -573,22 +574,22 @@ fn runs_tail() {
 }
 
 /// Whether every page of [buf, buf + len) (len > 0) is user-readable in
-/// the live tables, the whole range below 0x800000000000.
+/// the live tables, the whole range below 0x800000000000 (px34:
+/// kernel/uaccess's answer, which backs a page of a MAP_NORESERVE range
+/// the program has not touched yet).
 fn readable(buf: u64, len: u64) -> bool {
-    let top = paging.USER_TOP
-    if buf >= top || len > top - buf {
-        return false
+    uaccess.readable(paging.live(), buf, len)
+}
+
+/// px34: a page fault in ring 3 at `cr2` with error code `err`: true
+/// when it was a page of a MAP_NORESERVE range not yet backed, now
+/// backed (the faulting instruction runs again), false when it is the
+/// program's to die of (kernel/interrupts).
+pub fn fault_in(cr2: u64, err: u64) -> bool {
+    if err & 1 != 0 {
+        return false // a present page: a protection fault, not a missing one
     }
-    let pml4 = paging.live()
-    let end = buf + len
-    var pg = buf & !(PAGE - 1)
-    while pg < end {
-        if !paging.user_ok(pml4, pg) {
-            return false
-        }
-        pg += PAGE
-    }
-    true
+    vm.back(area(), paging.live(), cr2 & !(PAGE - 1))
 }
 
 /// `write(fd, buf, len)`: the result for %rax. The console's descriptors
@@ -688,6 +689,10 @@ fn writev(fd: u64, iov: u64, cnt: u64) -> u64 {
         }
         sum += l
         i += 1
+    }
+    // px34: to a SOCK_SEQPACKET socket the parts are one message.
+    if files.is_msg(area(), fd) {
+        return files.msg_writev(area(), pml4, fd, iov, cnt, sum)
     }
     // A pipe takes a write of at most PIPE_BUF bytes whole or not at
     // all (pipe(7)), and to a pipe the parts are one write: the sum is
@@ -1375,7 +1380,36 @@ pub fn syscall(f: u64) -> u64 {
     put_word(f, W_RAX, r)
     refusal_line(nr, r)
     tree_lines()
+    unix_lines()
     f
+}
+
+/// px34: kernel/unix's census after a call, in the caller's name: every
+/// 2500th connection (`user: <name> pid <pid> unix: <n> connections
+/// since boot; sockets <s>, buffers <b>, frames free <f>`), which a soak
+/// holds flat. Nothing when the console is quiet.
+fn unix_lines() {
+    let n = unix.census_due()
+    if n == 0 || log.quiet() {
+        return
+    }
+    who()
+    log.put(" unix: ")
+    log.dec(n as int)
+    log.put(" connections since boot; sockets ")
+    log.dec(unix.live() as int)
+    log.put(", buffers ")
+    log.dec(files.pipes_held() as int)
+    log.put(", frames free ")
+    log.dec(frames.free_count() as int)
+    log.end()
+}
+
+/// px34: kernel/unix's books after a kernel's frames line (`unix:
+/// sockets <s>, buffers <b>; made <m>, connections <c>, refused <r>`),
+/// when a Unix socket was ever made.
+pub fn unix_report() {
+    unix.report(files.pipes_held())
 }
 
 /// px27: what kernel/tree has to say after a call, in the caller's
