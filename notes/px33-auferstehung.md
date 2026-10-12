@@ -218,6 +218,29 @@ stays until the opening (43.5-46.10, being re-read) is joined.
   event. The tune keeps the fix on its own ground: no staccato is
   printed on those tie ends.
 
+**The full span (px33-c, after the opening's third pass).** px33-r0c's
+`p196-200.txt` (43.5-46.10, bars 0-48, 1176 rows read, 0 doubtful) is
+joined to 46.11-51.13 in
+`notes/px33/transcription/joined-43.5-51.13.txt` (bars 0-131); its head
+names the changes: the ties out of 46.10 (clarinets' D5, horns' D4,
+"tied on to p. 201"), and two alto-solo slips that px32's play refused
+(a second hairpin end at 45.11; a tie into a different note at 45.13,
+which the check list reads as a slur). `user/tunes/auferstehung` is
+that file with a header; it replaces px29's.
+
+- check.py `errors 0`; `play -c` (px32 c3720b5): 463.8 s written, 95
+  voices at most, 0 stolen, 0 clamped, 0 notes dropped, status 0.
+  From the bar lines alone 465.2 s (0.3% apart).
+- `pax-mahler-orchestra-7.iso` (sha256 4c80f3c7...), TCG, wav backend,
+  `-m 256M`, through pelt: `play -m auferstehung`: 95 voices at most,
+  0 stolen, 0 clamped; the device 22116 periods, 0 underruns. 471.8 s
+  of sound.
+- Levels per 5 s against the marks: "Bereite dich" (chorus p/pp) -27
+  falling to -49 by 43.11; 44.1 Mit Aufschwung -25; 46.1-10 pp -42 to
+  -49; 46.11-24 "langsam steigern" -38 rising to -15; 47 ff -15 to
+  -18; 48 fff -10; 49.1 p -30; 49.6 fff -12.5; 50.1 pp -23; 51 ff -14;
+  51.9-12 fff -9.9; then the release.
+
 ## 5. Done-when
 
 Branch `px33`; PR open, unmerged; CI green at head;
