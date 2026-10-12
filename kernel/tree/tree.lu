@@ -56,6 +56,16 @@
 //! **Times** come from the wall clock kernel/user set at boot
 //! (boot/user.S's word 6) plus the ticks since: 10 ms steps.
 //!
+//! **Links and changes (px36).** A file may have many names (`link`:
+//! a second record leading to the same inode; the inode and its bytes
+//! go when the last name and the last holder are gone). A symbolic link
+//! is an inode of its own, S_IFLNK|0777, whose bytes are its target,
+//! held as a file's; kernel/files follows it. `set_mode`, `set_times`
+//! (signed nanoseconds, to the nanosecond) and `owned` (root to root)
+//! are the changes after a file is made; each moves ctime. Written
+//! from `link(2)`, `symlink(2)`, `symlink(7)`, `chmod(2)`, `chown(2)`,
+//! `utimensat(2)` and black-box runs on tmpfs (`notes/px36/`).
+//!
 //! One CPU, and a system call runs with interrupts off from entry to
 //! return, so nothing here locks: a `rename` is every check, then the
 //! room for the new name, then the change, with no call between. No
@@ -130,6 +140,14 @@ const S_IFMT: u64 = 0xf000
 const S_IFDIR: u64 = 0x4000
 const S_IFREG: u64 = 0x8000
 const S_IFSOCK: u64 = 0xc000 // px34
+const S_IFLNK: u64 = 0xa000 // px36
+const S_ISUID: u64 = 0x800 // px36
+const S_ISGID: u64 = 0x400
+const S_IXGRP: u64 = 0x8
+/// px36: a symbolic link's target at least this long costs a page in
+/// `st_blocks`; a shorter one costs none (tmpfs keeps it with the
+/// inode: measured, `symlink: blocks by the target's length`).
+const LINK_INLINE: u64 = 128
 
 // errnos (uapi asm-generic/errno-base.h, errno.h)
 const ENOENT: u64 = 2
@@ -467,9 +485,14 @@ pub fn archive_entry(i: u64) -> u64 {
 
 /// A file's 512-byte blocks: eight for every page that holds bytes, a
 /// frame of the tree's or a page of the archive not yet written over.
+/// px36: a symbolic link's are tmpfs's: none for a target shorter than
+/// LINK_INLINE, eight for a longer one (its one frame).
 pub fn blocks(i: u64) -> u64 {
     if is_dir(i) {
         return 0
+    }
+    if is_link(i) {
+        return if ig(i, I_SIZE) < LINK_INLINE { 0 } else { 8 }
     }
     let bl = ig(i, I_BACKLEN)
     var n = ig(i, I_BLOCKS)
@@ -489,10 +512,17 @@ pub fn blocks(i: u64) -> u64 {
     n * 8
 }
 
+/// Whether time `a` is not after time `b`: px36, times are signed
+/// nanoseconds (a time set before 1970 is negative) held in a u64.
+fn not_after(a: u64, b: u64) -> bool {
+    (a ^ 0x8000000000000000) <= (b ^ 0x8000000000000000)
+}
+
 /// The read of a file sets its access time when that is not after its
-/// last change (relatime's rule).
+/// last change (relatime's rule); px36: a symbolic link's too, when a
+/// walk follows it or `readlink` reads it (measured on tmpfs).
 pub fn touch_read(i: u64) {
-    if ig(i, I_ATIME) <= ig(i, I_MTIME) || ig(i, I_ATIME) <= ig(i, I_CTIME) {
+    if not_after(ig(i, I_ATIME), ig(i, I_MTIME)) || not_after(ig(i, I_ATIME), ig(i, I_CTIME)) {
         ip(i, I_ATIME, now())
     }
 }
@@ -1034,6 +1064,115 @@ pub fn mksock(d: u64, name: u64, len: u64, perm: u64, sock: u64) -> u64 {
     ip(i, I_MODE, S_IFSOCK | (perm & 0xfff))
     ip(i, I_PARENT, sock + 1)
     i
+}
+
+/// px36: whether inode `i` is a symbolic link.
+pub fn is_link(i: u64) -> bool {
+    ig(i, I_MODE) & S_IFMT == S_IFLNK
+}
+
+/// px36: a new symbolic link named [name, name + len) in directory `d`
+/// whose target is the `tlen` kernel bytes at `target` (1 to 4095:
+/// the caller has refused the rest): mode S_IFLNK|0777 (`symlink(7)`:
+/// a link's permission bits are not used), one link, its bytes the
+/// target's, held as a file's are; its inode, or -ENOENT (the directory
+/// has been removed), -ENOSPC.
+pub fn symlink(d: u64, name: u64, len: u64, target: u64, tlen: u64) -> u64 {
+    if ig(d, I_NLINK) == 0 {
+        return neg(ENOENT)
+    }
+    let i = inode_new(S_IFLNK | 0x1ff)
+    if i == NONE {
+        return neg(ENOSPC)
+    }
+    let w = write(0, i, 0, target, tlen)
+    if w != tlen || !insert(d, name, len, i) {
+        inode_free(i)
+        return neg(ENOSPC)
+    }
+    let t = ig(i, I_BTIME)
+    ip(i, I_MTIME, t) // `write` stamped them again; one time, as made
+    ip(i, I_CTIME, t)
+    ip(i, I_NLINK, 1)
+    ip(d, I_ENTRIES, ig(d, I_ENTRIES) + 1)
+    touch_change(d)
+    i
+}
+
+/// px36: copy at most `n` bytes of link `i`'s target to kernel `dst`:
+/// how many.
+pub fn target(i: u64, dst: u64, n: u64) -> u64 {
+    let k = if n < ig(i, I_SIZE) { n } else { ig(i, I_SIZE) }
+    var done: u64 = 0
+    while done < k {
+        let (src, c) = span(i, done, k - done)
+        bcopy(dst + done, src, c)
+        done += c
+    }
+    k
+}
+
+/// px36: `link`: inode `i` (a file or a link, never a directory) gains
+/// the name [name, name + len) in directory `d`: its count up, its
+/// ctime and the directory's times moved. 0, or -ENOENT (the directory
+/// has been removed, or the file has no name left), -ENOSPC.
+pub fn link(d: u64, name: u64, len: u64, i: u64) -> u64 {
+    if ig(d, I_NLINK) == 0 || ig(i, I_NLINK) == 0 {
+        return neg(ENOENT)
+    }
+    if !insert(d, name, len, i) {
+        return neg(ENOSPC)
+    }
+    ip(i, I_NLINK, ig(i, I_NLINK) + 1)
+    ip(i, I_CTIME, now())
+    ip(d, I_ENTRIES, ig(d, I_ENTRIES) + 1)
+    touch_change(d)
+    0
+}
+
+/// px36: `chmod`: inode `i`'s twelve permission bits become `perm`'s,
+/// its type kept; ctime moves.
+pub fn set_mode(i: u64, perm: u64) {
+    ip(i, I_MODE, (ig(i, I_MODE) & S_IFMT) | (perm & 0xfff))
+    ip(i, I_CTIME, now())
+}
+
+/// px36: `chown` by root to root (the only owner there is): ctime moves,
+/// and a regular file loses its set-user-ID bit and, when it is
+/// group-executable, its set-group-ID bit (measured on tmpfs, as
+/// `chown(2)` says of root since Linux 2.2.13), whichever ids were
+/// asked for, -1 included.
+pub fn owned(i: u64) {
+    let m = ig(i, I_MODE)
+    if m & S_IFMT == S_IFREG {
+        var keep = m & !S_ISUID
+        if m & S_IXGRP != 0 {
+            keep = keep & !S_ISGID
+        }
+        ip(i, I_MODE, keep)
+    }
+    ip(i, I_CTIME, now())
+}
+
+/// px36: `utimensat`: inode `i`'s access time becomes `at` when `which`
+/// has bit 0, its modification time `mt` when it has bit 1 (signed
+/// nanoseconds since the epoch, to the nanosecond); ctime moves to now
+/// when either does.
+pub fn set_times(i: u64, at: u64, mt: u64, which: u64) {
+    if which & 1 != 0 {
+        ip(i, I_ATIME, at)
+    }
+    if which & 2 != 0 {
+        ip(i, I_MTIME, mt)
+    }
+    if which != 0 {
+        ip(i, I_CTIME, now())
+    }
+}
+
+/// px36: the wall clock as the tree stamps a change (`UTIME_NOW`).
+pub fn clock() -> u64 {
+    now()
 }
 
 /// px34: whether inode `i` is a socket's name.
