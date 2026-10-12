@@ -1,0 +1,78 @@
+side: pax
+forwards: 42027->80
+qemu: qemu-system-x86_64 -machine q35 -cpu max -m 256M -accel kvm -display none -vga std -monitor none -parallel none -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04 -drive file=/home/mfwolffe/lanes/px25/img/native/lobo-trunk.iso,format=raw,media=cdrom,readonly=on -boot d -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:42027-:80 -serial tcp:127.0.0.1:56115,server=on,wait=on
+[   0.05] step 10: wait ^\$ $ 120
+          seen after 0.55 s
+[   0.60] step 11: type cd /
+[   0.62] step 12: type cat /srv/conf/r1.conf > /srv/conf/live.conf
+[   0.81] step 13: mark
+[   0.91] step 14: type lobo -p /srv -c conf/live.conf serve &
+[   1.07] step 15: type echo master $!
+[   1.13] step 16: wait master (\d+)\s*$ 30
+          seen after 0.05 s
+[   1.18] step 17: capture M master (\d+)\s*$
+          M = 4
+[   1.18] step 18: wait generation-activated gen=1 seq=2 120
+          seen after 0.00 s
+[   1.18] step 19: type ls /srv/logs
+[   1.23] step 20: wait live\.sock 30
+          seen after 0.00 s
+[   1.23] step 21: req row5-first 80 requests/page.req
+          page.req: 461 bytes, HTTP/1.1 200 OK
+[   1.23] step 22: kopen held 80
+[   1.23] step 23: kreq held / row3-before
+          row3-before: 466 bytes, HTTP/1.1 200 OK
+[   1.23] step 24: type cat /srv/conf/r2.conf > /srv/conf/live.conf
+[   1.41] step 25: load row2 80 / 20 2
+[   1.42] step 26: sleep 6
+[   7.42] step 27: mark
+[   7.52] step 28: type lobo -p /srv -s reload -c conf/live.conf
+[   7.68] step 29: wait ^reload complete \(generation 2\) 60
+          seen after 0.10 s
+[   7.79] step 30: type echo reload $?
+[   7.85] step 31: wait ^reload 0 30
+          seen after 0.05 s
+[   7.90] step 32: loadwait row2
+          load row2: 36114 ok, 2 failed {"TimeoutError": 2} in 23.4 s: 1540.2 requests a second; latency p50 0.2 ms p99 0.4 ms
+[  24.87] step 33: kreq held / row3-after
+          row3-after: 466 bytes, HTTP/1.1 200 OK
+[  24.87] step 34: kclose held
+[  24.87] step 35: req row1-after 80 requests/page.req
+          page.req: 314 bytes, HTTP/1.1 200 OK
+[  24.88] step 36: type cat /srv/conf/bad.conf > /srv/conf/live.conf
+[  25.07] step 37: mark
+[  25.17] step 38: type lobo -p /srv -s reload -c conf/live.conf
+[  25.34] step 39: wait ^reload rejected 60
+          seen after 0.05 s
+[  25.39] step 40: type echo rejected $?
+[  25.46] step 41: wait ^rejected 1 30
+          seen after 0.05 s
+[  25.51] step 42: req row4-after 80 requests/page.req
+          page.req: 314 bytes, HTTP/1.1 200 OK
+[  25.51] step 43: type cat /srv/conf/r1.conf > /srv/conf/live.conf
+[  25.69] step 44: mark
+[  25.79] step 45: type lobo -p /srv -s reload -c conf/live.conf
+[  25.96] step 46: wait ^reload complete \(generation 3\) 60
+          seen after 0.05 s
+[  26.01] step 47: wait generation-retired gen=2 60
+          seen after 0.00 s
+[  26.01] step 48: mark
+[  26.11] step 49: type kill -HUP {M}
+[  26.16] step 50: wait generation-retired gen=3 60
+          seen after 0.05 s
+[  26.21] step 51: sleep 1
+[  27.21] step 52: req signal-after 80 requests/page.req
+          page.req: 461 bytes, HTTP/1.1 200 OK
+[  27.22] step 53: mark
+[  27.32] step 54: type lobo -p /srv -s stop -c conf/live.conf
+[  27.48] step 55: wait ^stop: shutting down \(generation 4\) 60
+          seen after 0.10 s
+[  27.58] step 56: type wait
+[  27.60] step 57: type echo control ended $?
+[  27.69] step 58: wait ^control ended 0 60
+          seen after 0.05 s
+[  27.74] step 59: type ls /srv/logs
+[  27.79] step 60: type exit
+[  27.82] step 61: halt 60
+          ended after 0.05 s
+ended: -9, 28.2 s

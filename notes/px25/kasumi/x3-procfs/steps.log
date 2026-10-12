@@ -1,0 +1,66 @@
+cmd: qemu-system-x86_64 -machine q35 -cpu max -m 256M -accel tcg -nographic -monitor none -parallel none -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04 -drive file=b/img1/lobo.iso,format=raw,media=cdrom,readonly=on -boot d -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:59237-:80 -serial tcp:127.0.0.1:48185,server=on,wait=on
+hostport: 59237
+[   0.10] step 1: wait \$ $ 120
+          seen after 1.61 s
+[   1.72] step 2: type cat /proc/meminfo /proc/sys/fs/file-nr /proc/net/sockstat
+[   2.30] step 3: type ls /proc
+[   2.39] step 4: type cat /proc/1/status
+[   2.59] step 5: sleep 3
+[   5.59] step 6: type cd /srv
+[   5.67] step 7: type echo 'worker_processes 4;' > conf/four.conf
+[   6.12] step 8: type cat conf/lobo.conf >> conf/four.conf
+[   6.49] step 9: sleep 1
+[   7.50] step 10: mark
+[   7.60] step 11: type lobo -c conf/four.conf serve &
+[   7.92] step 12: type echo master $!
+[   8.07] step 13: wait worker-started worker=4 120
+          seen after 2.12 s
+[  10.19] step 14: capture M master (\d+)
+          M = 7
+[  10.29] step 15: sleep 15
+[  25.30] step 16: type cat /proc/meminfo /proc/sys/fs/file-nr /proc/net/sockstat
+[  25.89] step 17: type ls /proc
+[  25.98] step 18: sleep 3
+[  28.99] step 19: host for i in 1 2 3 4 5 6 7 8; do curl -sS -m 20 -o /dev/null -w '%{http_code} %{size_download}\n' http://127.0.0.1:{HP}/; done
+200 187
+200 187
+200 187
+200 187
+200 187
+200 187
+200 187
+200 187
+          rc 0 in 0.11 s
+[  29.15] step 20: mark
+[  29.25] step 21: type cat /proc/[0-9]*/status
+[  29.49] step 22: sleep 8
+[  37.49] step 23: type kill -HUP {M}
+[  37.62] step 24: sleep 15
+[  52.62] step 25: host curl -sS -m 20 -o /dev/null -w '%{http_code} %{size_download}\n' http://127.0.0.1:{HP}/
+200 187
+          rc 0 in 0.01 s
+[  52.68] step 26: capture W Pid:\s+(\d+)\s+PPid:\s+{M}
+          W = 17
+[  52.78] step 27: type kill -KILL {W}
+[  52.92] step 28: sleep 15
+[  67.92] step 29: type lobo -c conf/four.conf status
+[  68.23] step 30: sleep 15
+[  83.23] step 31: host for i in 1 2 3 4 5 6; do curl -sS -m 20 -o /dev/null -w '%{http_code} %{size_download}\n' http://127.0.0.1:{HP}/; done
+200 187
+200 187
+200 187
+200 187
+200 187
+200 187
+          rc 0 in 0.06 s
+[  83.35] step 32: type cat /proc/meminfo /proc/sys/fs/file-nr /proc/net/sockstat
+[  83.94] step 33: type kill -TERM {M}
+[  84.07] step 34: sleep 20
+[ 104.07] step 35: type wait
+[ 104.12] step 36: type echo waited $?
+[ 104.27] step 37: type ls /proc
+[ 104.36] step 38: type cat /proc/meminfo /proc/sys/fs/file-nr /proc/net/sockstat
+[ 104.95] step 39: type exit
+[ 105.00] step 40: wait ^halt 60
+STOP: step 40: '^halt' not seen in 60 s
+qemu ended: -9; 165.3 s
