@@ -96,8 +96,8 @@ for line in open(src):
     line = line.rstrip("\n")
     w = line.split()
     if w and w[0] == "part":
-        if head_lines is None: out.append(line)
-        elif not parts_done: out.extend(head_lines); parts_done = True
+        if head_lines is None: body.append(line)
+        elif not parts_done: body.extend(head_lines); parts_done = True
         continue
     if w and w[0] == "bar":
         flush(); bar = int(w[1]); out.append(line); continue
