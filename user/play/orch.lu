@@ -33,7 +33,7 @@ const TLEN: int = 2048
 
 const BLK: int = 64
 
-const MAXV: int = 64
+const MAXV: int = 128
 
 const NP: int = 8
 
@@ -55,6 +55,8 @@ struct OrchDone {
     stolen: int,
     most: int,
     limited: int, // blocks the limiter turned down
+    stolen_rings: int, // of `stolen`, struck voices still ringing (the rest releasing tails)
+    dropped: int, // new notes not sounded: every voice held
     setup_ms: int,
     err: int,
 }
@@ -615,6 +617,8 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
     var frames: int = 0
     var clamped: int = 0
     var stolen: int = 0
+    var stolen_rings: int = 0
+    var dropped: int = 0
     var most: int = 0
     var limited: int = 0
     var obuf = List[byte]()
@@ -656,7 +660,9 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
                         j += 1
                     }
                 }
-                // a free voice, else the quietest releasing or struck one
+                // a free voice; else the quietest releasing tail; else the
+                // quietest struck voice still ringing; never a held note:
+                // with every voice held, the new note is dropped (counted)
                 var v = again
                 var best: int = 1 << 40
                 j = if again >= 0 { MAXV } else { 0 }
@@ -665,16 +671,25 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
                         v = j
                         break
                     }
-                    let sv = v_env[j] +
-                        (if v_stage[j] == 2 || struck(sc.timbres[v_part[j]]) { 0 } else { 1 << 20 })
-                    if sv < best {
-                        best = sv
-                        v = j
+                    let ring = struck(sc.timbres[v_part[j]])
+                    if v_stage[j] == 2 || ring {
+                        let sv = v_env[j] + (if v_stage[j] == 2 && !ring { 0 } else { 1 << 20 })
+                        if sv < best {
+                            best = sv
+                            v = j
+                        }
                     }
                     j += 1
                 }
+                if v < 0 {
+                    dropped += 1
+                    continue
+                }
                 if v_on[v] && again < 0 {
                     stolen += 1
+                    if struck(sc.timbres[v_part[v]]) && v_stage[v] != 2 {
+                        stolen_rings += 1
+                    }
                 }
                 let t = sc.timbres[p]
                 let pb = p * 9
@@ -987,6 +1002,8 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
                     stolen: stolen,
                     most: most,
                     limited: limited,
+                    stolen_rings: stolen_rings,
+                    dropped: dropped,
                     setup_ms: setup_ms,
                     err: perr,
                 }
@@ -1031,6 +1048,8 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
                 stolen: stolen,
                 most: most,
                 limited: limited,
+                stolen_rings: stolen_rings,
+                dropped: dropped,
                 setup_ms: setup_ms,
                 err: -5,
             }
@@ -1042,6 +1061,8 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
         stolen: stolen,
         most: most,
         limited: limited,
+        stolen_rings: stolen_rings,
+        dropped: dropped,
         setup_ms: setup_ms,
         err: if ferr < 0 { ferr } else { 0 },
     }
