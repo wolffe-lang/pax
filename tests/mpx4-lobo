@@ -1,0 +1,267 @@
+#!/usr/bin/env bash
+# tests/mpx4-lobo — px25: lobo, the web server in wolf, unmodified, as
+# PAX processes serving this host (M-PX4). The lobo image is the session
+# image's kernel (kmain_session: the console, the network, pelt as pid
+# 1, quiet) with an initramfs of pelt, six boreutils (cat echo ls mkdir
+# rm sleep), kill (user/lobo/kill.c: pelt has no `kill`), lobo, and /srv
+# (user/lobo/srv: the page, a 300,000-byte file, a directory, the
+# configs; lobo's differential www). lobo is built by tools/mklobo from
+# its own tree at user/lobo.pin's trunk commit, and at its release
+# v0.1.3 (LOBO_RELEASE_REV) for the second image.
+#
+#   tests/mpx4-lobo [--images DIR | --no-boot] [--sessions LIST]
+#                   [--firmware bios|uefi|both] [--tier native|release|both]
+#                   [--round SECS] [--accel tcg|kvm]
+#
+# Each session (user/lobo/steps/<session>.steps, typed at pelt's prompt by
+# tools/lobo-session, with this host's requests through QEMU's `hostfwd`)
+# runs on PAX and, the same steps and the same binaries, on Linux in a
+# throwaway container (`--network host`, /srv a tmpfs with every time 0),
+# and tools/lobo-check compares them:
+#   serve          one process: 14 requests (keepalive, close, HTTP/1.0,
+#                  the 300,000-byte file, two ranges, HEAD, 404, two
+#                  conditionals, three on one connection, a directory,
+#                  a method lobo refuses), a file written at the prompt
+#                  and served, status, reload, a request, stop
+#   serve-release  the same with lobo v0.1.3 (native, BIOS only)
+#   hands          four workers: requests, status, SIGHUP, one worker
+#                  SIGKILLed under a load and replaced, SIGTERM
+#   load           four workers, three rounds of ROUND seconds (default
+#                  60) of four clients through the forward with the
+#                  census between them, a reload under a load
+#   diff           lobo's 24 static and 7 proxy differential rows
+#   control        lobo's control differential rows 1-6 and its signal row
+# Assertions, per leg (tier, firmware) and session:
+#   L0 build: the programs static, the images built (digests printed)
+#   L1 the session's steps all held on PAX and on Linux (each waits for
+#      what lobo prints: reload complete, stop, the restarts, …)
+#   L2 quiet: no PANIC, no refusal by name, no process killed but the
+#      one SIGKILL the hands session sends
+#   L3 tools/lobo-check: the replies byte-identical to Linux's (Date
+#      normalized), the page's bytes, the written file, the census flat
+#      across the load's rounds, no request lost across a reload, the
+#      control and signal rows
+#   L4 the end: `PAX: init /bin/pelt ended with status 0`, `halt`
+# serve and hands run on every leg (BIOS 256 MiB, UEFI 512 MiB, both
+# tiers); load, diff and control on BIOS, both tiers; serve-release on
+# native BIOS. Exit 0 when every assertion held, 1 otherwise, 2 on a
+# usage or tool error. The UEFI leg needs OVMF (SKIPPED LOUDLY without
+# it unless PAX_REQUIRE_UEFI=1). The Linux side needs a container engine
+# (PAX_ENGINE, else docker, else podman) and PAX_TREE_IMAGE (python).
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+
+images= legs=both tiers=both noboot=0 sessions="serve serve-release hands load diff control" round=60 accel=tcg
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --sessions) sessions=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        --round)    round=$2; shift 2 ;;
+        --accel)    accel=$2; shift 2 ;;
+        *)          die "usage: tests/mpx4-lobo [--images DIR | --no-boot] [--sessions LIST] [--firmware bios|uefi|both] [--tier native|release|both] [--round SECS] [--accel tcg|kvm]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware is bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier is native, release or both" ;; esac
+need readelf python3
+
+BORE="cat echo ls mkdir rm sleep"
+work=$PAX_BUILD/mpx4-lobo
+fail=0
+bad() { say "FAIL $*"; fail=1; }
+
+static_ok() {
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+# render SRC DST: user/lobo/srv's configs for PAX (the guest's ports,
+# 0.0.0.0, and 10.0.2.2 for this host).
+render_pax() {
+    sed -E -e 's/@P([0-9]+)@/\1/g' -e 's/@LISTEN@/0.0.0.0/g' -e 's/@BACKEND@/10.0.2.2/g' "$1" > "$2"
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work"
+    why=
+    "$PAX_ROOT/tools/mklobo" "$work/lobo" > "$work/lobo.txt" || why+=" tools/mklobo;"
+    "$PAX_ROOT/tools/mklobo" "$work/lobo-release" release > "$work/lobo-release.txt" || why+=" tools/mklobo release;"
+    "$PAX_ROOT/tools/mkpelt" "$work/peltbin" > "$work/pelt.txt" || why+=" tools/mkpelt;"
+    # shellcheck disable=SC2086
+    "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
+    "$PAX_ROOT/tools/mklobokit" "$work/kit" > "$work/kit.txt" || why+=" tools/mklobokit;"
+    for v in trunk release; do
+        lb=$work/lobo; [ "$v" = release ] && lb=$work/lobo-release
+        r=$work/root-$v l=$work/linux-$v
+        mkdir -p "$r/bin" "$r/etc" "$l/bin"
+        cp "$work/peltbin/pelt" "$r/bin/pelt" || why+=" no pelt;"
+        for u in $BORE; do cp "$work/bore/$u" "$r/bin/$u" || why+=" no $u;"; done
+        cp "$work/kit/kill" "$r/bin/kill" || why+=" no kill;"
+        cp "$lb/lobo" "$r/bin/lobo" || why+=" no lobo ($v);"
+        printf 'root:x:0:0:root:/:/bin/pelt\n' > "$r/etc/passwd"
+        printf 'root:x:0:\n' > "$r/etc/group"
+        "$PAX_ROOT/tools/mkzone" "$r/etc/localtime" > "$work/zone.txt" || why+=" tools/mkzone;"
+        echo /bin/pelt > "$r/etc/pax-run"
+        cp -R "$PAX_ROOT/user/lobo/srv" "$r/srv"
+        # 300,000 bytes: a numbered line of 50 bytes, 6,000 times
+        python3 -c 'import sys; sys.stdout.write("".join("line %06d of the three-hundred-kilobyte file.\n" % i for i in range(6000)))' > "$r/srv/html/big.txt"
+        cp -R "$lb/differential/www" "$r/srv/www" || why+=" no lobo's differential www;"
+        # Linux: the same tree with the configs as templates, lobo and kill.
+        cp -R "$r/srv" "$l/srv"
+        cp "$r/bin/lobo" "$r/bin/kill" "$l/bin/"
+        for c in "$r"/srv/conf/*.conf; do render_pax "$PAX_ROOT/user/lobo/srv/conf/${c##*/}" "$c"; done
+        pairs=()
+        for f in $(cd "$r" && find . -type f | sort); do
+            f=${f#./}
+            mode=644; [ -x "$r/$f" ] && [ "${f%%/*}" = bin ] && mode=755
+            pairs+=("/$f=$r/$f:$mode")
+        done
+        if "$PAX_ROOT/tools/mkinitramfs" "$work/lobo-$v.cpio" "${pairs[@]}" > "$work/lobo-$v.initramfs.txt"; then
+            sed 's/^/  initramfs: /' "$work/lobo-$v.initramfs.txt" >&2
+        else
+            why+=" tools/mkinitramfs $v;"
+        fi
+    done
+    for f in "$work"/root-trunk/bin/* "$work"/root-release/bin/lobo; do
+        x=$(static_ok "$f") || why+=" $x;"
+        say "  program: ${f#"$work"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+    done
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_session.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_session.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            for v in trunk release; do
+                [ "$v" = release ] && [ "$tier" != native ] && continue
+                "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs-quiet.conf" \
+                    --add "$work/lobo-$v.cpio" initramfs.cpio "$elf" "$work/$tier/lobo-$v.iso" >/dev/null \
+                    || why+=" $tier $v: mkimage;"
+                say "built $tier lobo-$v: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/lobo-$v.iso") ($(wc -c < "$work/$tier/lobo-$v.iso" | tr -d ' ') bytes), initramfs $(sha256_of "$work/lobo-$v.cpio") ($(wc -c < "$work/lobo-$v.cpio" | tr -d ' ') bytes)"
+            done
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_session: tools/build-kernel;"
+        fi
+    done
+    # The data the sessions send: the requests and lobo's case files.
+    mkdir -p "$work/data"
+    cp -R "$PAX_ROOT/user/lobo/requests" "$work/data/requests"
+    cp -R "$work/lobo/differential" "$work/data/differential"
+    [ -z "$why" ] && say "PASS L0: kmain_session built ($tiers), every program static, the lobo images built (trunk $(sha256_of "$work/lobo/lobo" | cut -c1-12)…, release $(sha256_of "$work/lobo-release/lobo" | cut -c1-12)…)" || bad "L0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx4-lobo build (L0): PASS (no boot: --no-boot)" || say "mpx4-lobo build: FAIL"
+        exit "$fail"
+    fi
+fi
+[ -d "$images/data" ] || die "no $images/data (build first)"
+
+forwards() { # session -> the guest ports it reaches
+    case $1 in
+        diff) echo 8081,8082,8083,8084,8090 ;;
+        *) echo 80 ;;
+    esac
+}
+steps_of() { # session -> its steps file (made with ROUND for load)
+    local s=$1 f
+    [ "$s" = serve-release ] && s=serve
+    f=$PAX_ROOT/user/lobo/steps/$s.steps
+    if [ "$s" = load ]; then
+        sed "s/@ROUND@/$round/g" "$f" > "$PAX_BUILD/mpx4-lobo-load.steps"
+        f=$PAX_BUILD/mpx4-lobo-load.steps
+    fi
+    echo "$f"
+}
+deadline() { # session -> seconds
+    case $1 in
+        load) echo $((round * 3 + 420)) ;;
+        diff) echo 600 ;;
+        *) echo 420 ;;
+    esac
+}
+
+# The Linux side: each session once, the same steps and binaries.
+for s in $sessions; do
+    v=trunk; [ "$s" = serve-release ] && v=release
+    lx=$PAX_BUILD/mpx4-lobo-linux-$s
+    rm -rf "$lx"
+    if python3 "$PAX_ROOT/tools/lobo-session" --linux "$images/linux-$v" --steps "$(steps_of "$s")" --out "$lx" \
+        --forward "$(forwards "$s")" --data "$images/data" --timeout "$(deadline "$s")" > "$lx.out" 2>&1; then
+        say "PASS L1 linux $s: every step held ($(grep -c '\] step ' "$lx/steps.log") steps, $(tail -n 1 "$lx/steps.log"))"
+    else
+        bad "L1 linux $s: $(cat "$lx.out" | tail -n 3 | tr '\n' '|')"
+    fi
+done
+
+runs=$PAX_BUILD/mpx4-lobo-runs.txt
+: > "$runs"
+read -r ovmf_code ovmf_vars <<<"$(find_ovmf)" || true
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "${ovmf_code:-}" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"; else say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"; fi
+        continue
+    fi
+    mem=256M; [ "$leg" = uefi ] && mem=512M
+    for tier in $tiers; do
+        for s in $sessions; do
+            case $s in
+                load|diff|control) [ "$leg" = bios ] || continue ;;
+                serve-release) [ "$leg" = bios ] && [ "$tier" = native ] || continue ;;
+            esac
+            v=trunk; [ "$s" = serve-release ] && v=release
+            iso=$images/$tier/lobo-$v.iso
+            id="$tier $leg $s"
+            out=$PAX_BUILD/mpx4-lobo-$tier-$leg-$s
+            rm -rf "$out"
+            if [ ! -f "$iso" ]; then
+                bad "L1 $id: no image $iso"
+                continue
+            fi
+            src=0
+            python3 "$PAX_ROOT/tools/lobo-session" --pax "$iso" --mem "$mem" --accel "$accel" --firmware "$leg" \
+                --ovmf "${ovmf_code:-}" --ovmf-vars "${ovmf_vars:-}" --steps "$(steps_of "$s")" --out "$out" \
+                --forward "$(forwards "$s")" --data "$images/data" --timeout "$(deadline "$s")" > "$out.out" 2>&1 || src=$?
+            printf '%s %s %s status=%s accel=%s console=%s iso=%s\n' "$tier" "$leg" "$s" "$src" "$accel" \
+                "$(sha256_of "$out/console.log" 2>/dev/null)" "$(sha256_of "$iso")" >> "$runs"
+            [ "$src" = 0 ] && say "PASS L1 $id: every step held ($(grep -c '\] step ' "$out/steps.log") steps, $(tail -n 1 "$out/steps.log"))" \
+                || bad "L1 $id: $(tail -n 3 "$out.out" | tr '\n' '|')"
+            norm=$out/console.norm
+            serial_norm "$out/console.log" > "$norm"
+            why=
+            ! command grep -aq PANIC "$norm" || why+=" a PANIC;"
+            rf=$(command grep -ac ': refused: ' "$norm")
+            [ "$rf" = 0 ] || why+=" $rf refusals ($(command grep -a -m2 ': refused: ' "$norm" | tr '\n' '|'));"
+            kills=$(command grep -aEo 'user: [^ ]+ pid [0-9]+ killed: [A-Z]+' "$norm" | sed -E 's/ pid [0-9]+//' | paste -sd'|' -)
+            want=; [ "$s" = hands ] && want="user: lobo killed: SIGKILL"
+            [ "$kills" = "$want" ] || why+=" kills '$kills', not '$want';"
+            [ -z "$why" ] && say "PASS L2 $id: no PANIC, no refusal, kills '${kills:-none}'" || bad "L2 $id:$why"
+            if [ -d "$PAX_BUILD/mpx4-lobo-linux-$s" ]; then
+                if python3 "$PAX_ROOT/tools/lobo-check" "$s" "$out" "$PAX_BUILD/mpx4-lobo-linux-$s" \
+                    --page "$PAX_ROOT/user/lobo/srv/html/index.html" > "$out.check" 2>&1; then
+                    sed "s/^/  /; s/^  PASS $s/PASS L3 $tier $leg $s/" "$out.check" >&2
+                else
+                    sed "s/^/  /" "$out.check" >&2
+                    bad "L3 $id: $(command grep -c '^FAIL' "$out.check") rows failed"
+                fi
+            else
+                bad "L3 $id: no Linux side to compare"
+            fi
+            why=
+            command grep -aq '^PAX: init /bin/pelt ended with status 0; nothing left to run$' "$norm" || why+=" init's end;"
+            command grep -aq '^halt$' "$norm" || why+=" no halt;"
+            [ -z "$why" ] && say "PASS L4 $id: init ended with status 0, halt" || bad "L4 $id:$why"
+        done
+    done
+done
+[ "$fail" = 0 ] && say "mpx4-lobo: PASS ($(wc -l < "$runs" | tr -d ' ') boots)" || say "mpx4-lobo: FAIL"
+exit "$fail"
