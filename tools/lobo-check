@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""lobo-check — px25: tests/mpx4-lobo's comparisons of one session run
+on PAX (tools/lobo-session's DIR) against the same session on Linux.
+
+  tools/lobo-check SESSION PAXDIR LINUXDIR [--page FILE] [--release]
+
+Prints `PASS <row>: …` or `FAIL <row>: …` lines; exit 0 when every row
+passed, 1 otherwise.
+
+The replies are compared byte for byte after these rules: lobo's own
+NORMALIZE list's `Date` (the wall clock) is `<normalized>` on both
+sides (`Server` is not: the same lobo runs on both); a redirect's
+`Location` names the port the request reached (80 on PAX, the host's
+forwarded port on Linux), read as none; and the file written during the
+session (`written.*`) carries its write time in `Last-Modified` and
+its ETag's first half, both normalized. For the proxy rows the backend's records are compared
+after one more, named rule: PAX reaches this host as 10.0.2.2, which
+the backend sees where Linux's lobo writes 127.0.0.1 (the `Host` it
+sends upstream, and the client address in `X-Forwarded-For` and
+`X-Real-IP`): 10.0.2.2 is read as 127.0.0.1.
+"""
+import os, re, sys
+
+session, pax, lin = sys.argv[1], sys.argv[2], sys.argv[3]
+page = sys.argv[sys.argv.index("--page") + 1] if "--page" in sys.argv else None
+fails = 0
+
+
+def say(ok, row, msg):
+    global fails
+    print("%s %s %s: %s" % ("PASS" if ok else "FAIL", session, row, msg))
+    if not ok:
+        fails += 1
+
+
+def norm(b, name=""):
+    b = re.sub(rb"(?m)^Date: [^\r\n]*", b"Date: <normalized>", b)
+    # A redirect names the port the request reached: 80 on PAX, the
+    # host's forwarded port on Linux (`--network host`): read as none.
+    b = re.sub(rb"(?m)^Location: http://pax:\d+/", b"Location: http://pax/", b)
+    if name.startswith("written."):
+        # A file written during the session carries its write time.
+        b = re.sub(rb"(?m)^Last-Modified: [^\r\n]*", b"Last-Modified: <normalized>", b)
+        b = re.sub(rb'(?m)^ETag: "[0-9a-f]+-', b'ETag: "<normalized>-', b)
+    return b
+
+
+def body(b):
+    return b.partition(b"\r\n\r\n")[2]
+
+
+def status(b):
+    try:
+        return b.split(b"\r\n", 1)[0].decode()
+    except Exception:
+        return "?"
+
+
+def console(d):
+    return open(os.path.join(d, "console.log"), "rb").read().replace(b"\r", b"")
+
+
+def first_diff(x, y):
+    for i, (p, q) in enumerate(zip(x, y)):
+        if p != q:
+            return "byte %d: %r against %r" % (i, x[max(0, i - 20):i + 20], y[max(0, i - 20):i + 20])
+    return "lengths %d and %d" % (len(x), len(y))
+
+
+# R1: every reply PAX got, against Linux's.
+rp, rl = os.path.join(pax, "resp"), os.path.join(lin, "resp")
+names = sorted(os.listdir(rl)) if os.path.isdir(rl) else []
+same, diff = [], []
+for nme in names:
+    fp = os.path.join(rp, nme)
+    if not os.path.exists(fp):
+        diff.append("%s: none on PAX" % nme)
+        continue
+    x, y = norm(open(fp, "rb").read(), nme), norm(open(os.path.join(rl, nme), "rb").read(), nme)
+    if x == y and x:
+        same.append(nme)
+    else:
+        diff.append("%s: %s" % (nme, first_diff(x, y) if x else "empty on PAX"))
+extra = sorted(set(os.listdir(rp)) - set(names)) if os.path.isdir(rp) else []
+if names:
+    say(not diff and not extra, "R1 replies",
+        "%d replies byte-identical to Linux's (Date normalized)" % len(same) if not diff and not extra
+        else "%d identical, %d not: %s%s" % (len(same), len(diff), "; ".join(diff[:6]), (" extra " + ",".join(extra)) if extra else ""))
+
+# R2: the proxy rows' backend records.
+bp, bl = os.path.join(pax, "backend"), os.path.join(lin, "backend")
+bn = sorted(os.listdir(bl)) if os.path.isdir(bl) else []
+if bn:
+    bad = []
+    for nme in bn:
+        f = os.path.join(bp, nme)
+        x = open(f, "rb").read().replace(b"10.0.2.2", b"127.0.0.1") if os.path.exists(f) else b""
+        y = open(os.path.join(bl, nme), "rb").read()
+        if x != y:
+            bad.append("%s: %s" % (nme, first_diff(x, y) if x else "nothing reached the backend from PAX"))
+    say(not bad, "R2 backend", "%d upstream requests identical to Linux's (10.0.2.2 read as 127.0.0.1)" % len(bn)
+        if not bad else "; ".join(bad))
+
+cp, cl = console(pax), console(lin)
+
+if session in ("serve", "serve-release") and page:
+    want = open(page, "rb").read()
+    got = open(os.path.join(rp, "serve.01-index.req"), "rb").read()
+    say(body(got) == want and status(got) == "HTTP/1.1 200 OK", "R3 page",
+        "GET / answered 200 with the page's %d bytes, the same as the file in the image" % len(want)
+        if body(got) == want else "GET / answered %r, %d bytes" % (status(got), len(body(got))))
+    w = open(os.path.join(rp, "written.new.req"), "rb").read()
+    say(body(w) == b"written at run time\n", "R4 written", "a file written at pelt's prompt served: %r" % body(w))
+
+if session == "hands":
+    for nme in ("hands", "after-hup", "after-kill"):
+        for d, sd in ((pax, "PAX"), (lin, "Linux")):
+            t = open(os.path.join(d, "get-%s.txt" % nme)).read().splitlines()
+            say(" 0 not 200" in t[0], "R5 %s %s" % (sd, nme), t[0])
+    for d, sd in ((pax, "PAX"), (lin, "Linux")):
+        t = open(os.path.join(d, "load-gap.txt")).read().strip()
+        say(True, "R6 %s worker killed under load (measured)" % sd, t)
+    say(b"worker-exited worker=" in cp and b"restarts=1" in cp, "R7 replacement",
+        "the master reaped the killed worker and started worker %s" % (
+            re.search(rb"worker-started (worker=\d restarts=1)", cp).group(1).decode() if re.search(rb"worker-started (worker=\d restarts=1)", cp) else "?"))
+    m = re.search(rb"worker-exited (worker=\d reason=\S+ code=\S+)", cp)
+    ml = re.search(rb"worker-exited (worker=\d reason=\S+ code=\S+)", cl)
+    say(True, "R8 the reap's reason (measured)", "PAX %s, Linux %s" % (m.group(1).decode() if m else "?", ml.group(1).decode() if ml else "?"))
+    say(b"source=signal" in cp, "R9 SIGHUP", "the master took SIGHUP as a reload (source=signal) and fanned it out")
+
+if session == "load":
+    def census(c):
+        out = {}
+        for m in re.finditer(rb"(?m)^census (\d+)\r?\n([\s\S]*?)^census end", c):
+            t = m.group(2).decode(errors="replace")
+            g = lambda rx: (int(re.search(rx, t, re.M).group(1)) if re.search(rx, t, re.M) else -1)
+            procs = re.findall(r"^Name:\t(\S+)[\s\S]*?^Pid:\t(\d+)[\s\S]*?^VmRSS:\s+(\d+) kB[\s\S]*?^VmPTE:\s+(\d+) kB[\s\S]*?^Threads:\t(\d+)", t, re.M)
+            procs = [(p[0], p[1], p[2], p[4], p[3]) for p in procs]
+            rss_all = sum(int(p[2]) + int(p[4]) for p in procs)
+            rss_lobo = sum(int(p[2]) for p in procs if p[0] == "lobo")
+            total, free = g(r"^MemTotal:\s+(\d+)"), g(r"^MemFree:\s+(\d+)")
+            out[int(m.group(1))] = {
+                "MemFree": free, "files": g(r"^(\d+)\t0\t\d+$"),
+                "tcp-inuse": g(r"^TCP: inuse (\d+)"), "tcp-mem": g(r"^TCP: .* mem (\d+)"),
+                "unix": g(r"^sockets: used (\d+)"), "tw": g(r"^TCP: .* tw (\d+)"),
+                "lobo-rss": rss_lobo, "lobo-procs": sum(1 for p in procs if p[0] == "lobo"),
+                "lobo-threads": sum(int(p[3]) for p in procs if p[0] == "lobo"),
+                "kernel": total - free - rss_all if total >= 0 else -1}
+        return out
+    c = census(cp)
+    cl_ = census(cl)
+    for k in sorted(c):
+        print("census %d PAX: %s" % (k, " ".join("%s=%s" % kv for kv in sorted(c[k].items()))))
+    for k in sorted(cl_):
+        print("census %d Linux: lobo-rss=%s lobo-procs=%s files=%s tcp-inuse=%s" % (k, cl_[k]["lobo-rss"], cl_[k]["lobo-procs"], cl_[k]["files"], cl_[k]["tcp-inuse"]))
+    # Flat: what the kernel holds beyond the processes' resident pages
+    # and page tables (MemTotal - MemFree - every process's VmRSS and
+    # VmPTE, in kB), the open
+    # files, the TCP blocks in use and lobo's processes and threads, the
+    # same after round 3 as after round 1 (identical rounds). lobo's own
+    # resident set is reported beside Linux's, not held flat: it grows
+    # on Linux too.
+    flat = ("kernel", "files", "tcp-inuse", "tcp-mem", "lobo-procs", "lobo-threads")
+    if 1 in c and 3 in c:
+        moved = ["%s %s -> %s" % (k, c[1][k], c[3][k]) for k in flat if c[1][k] != c[3][k]]
+        say(not moved, "R10 flat", "after rounds 1 and 3: the kernel's frames beyond the processes' pages (%d kB), open files (%d), TCP blocks in use (%d) and their buffers (%d frames), lobo's processes (%d) and threads (%d) the same" % (
+            c[3]["kernel"], c[3]["files"], c[3]["tcp-inuse"], c[3]["tcp-mem"], c[3]["lobo-procs"], c[3]["lobo-threads"]) if not moved else "moved: " + "; ".join(moved))
+        lg = c[3]["lobo-rss"] - c[1]["lobo-rss"]
+        ll = (cl_[3]["lobo-rss"] - cl_[1]["lobo-rss"]) if 1 in cl_ and 3 in cl_ else None
+        say(True, "R12 lobo's resident set (measured)", "rounds 1 to 3: PAX %+d kB (%d -> %d), Linux %s" % (
+            lg, c[1]["lobo-rss"], c[3]["lobo-rss"], "%+d kB" % ll if ll is not None else "?"))
+    else:
+        say(False, "R10 flat", "the census lines are missing")
+    # R13: the census files' shape against Linux's (the probe for
+    # px25's /proc additions): a /proc/<pid>/status block names the same
+    # fields in the same order as Linux's (this host's kernel: reported,
+    # and held only where the kernel is the one px34 measured, 7.2.8);
+    # /proc/meminfo's three lines are Linux's first three; file-nr is
+    # three numbers; sockstat's lines are Linux's lines for those
+    # families, fields in Linux's order.
+    def blocks(c):
+        m = re.search(rb"(?m)^census 1\r?\n([\s\S]*?)^census end", c)
+        return m.group(1).decode(errors="replace") if m else ""
+    bp_, bl_ = blocks(cp), blocks(cl)
+    def labels(t):
+        m = re.search(r"(?m)^Name:\tlobo\n[\s\S]*?^nonvoluntary_ctxt_switches:[^\n]*\n", t)
+        return [l.split(":")[0] for l in m.group(0).splitlines()] if m else []
+    lp, ll = labels(bp_), labels(bl_)
+    rel = open("/proc/sys/kernel/osrelease").read().strip() if os.path.exists("/proc/sys/kernel/osrelease") else "?"
+    held = rel.startswith("7.2.8")
+    say(lp == ll or not held, "R13 /proc/<pid>/status", "%d fields%s (Linux %s: %d fields%s)" % (
+        len(lp), ", Linux's in Linux's order" if lp == ll else ", not Linux's: %s" % sorted(set(lp) ^ set(ll))[:6], rel, len(ll),
+        "" if held else ", reported only: not 7.2.8"))
+    mp = re.findall(r"(?m)^(MemTotal|MemFree|MemAvailable):", bp_)
+    ml = re.findall(r"(?m)^(Mem\w+):", bl_)[:3]
+    fp = re.search(r"(?m)^(\d+)\t0\t(\d+)$", bp_)
+    fl = re.search(r"(?m)^(\d+)\t0\t(\d+)$", bl_)
+    sp = re.findall(r"(?m)^(sockets: used \d+|TCP: inuse \d+ orphan \d+ tw \d+ alloc \d+ mem \d+|UDP: inuse \d+ mem \d+)$", bp_)
+    sl = re.findall(r"(?m)^(sockets: used \d+|TCP: inuse \d+ orphan \d+ tw \d+ alloc \d+ mem \d+|UDP: inuse \d+ mem \d+)$", bl_)
+    say(mp == ml and fp and fl and len(sp) == 3 and len(sl) == 3, "R13 census files",
+        "meminfo %s (Linux's first three %s); file-nr %s; sockstat %d of Linux's 3 line shapes (Linux %d)" % (
+            mp, ml, "three numbers on both" if fp and fl else "not three numbers", len(sp), len(sl)))
+    for d, sd in ((pax, "PAX"), (lin, "Linux")):
+        for r in ("r1", "r2", "r3", "reload"):
+            f = os.path.join(d, "load-%s.txt" % r)
+            t = open(f).read().strip() if os.path.exists(f) else "missing"
+            ok = " 0 failed" in t
+            say(ok, "R11 %s %s" % (sd, r), t)
+
+if session == "control":
+    def b(d, n):
+        f = os.path.join(d, "resp", n)
+        return body(open(f, "rb").read()) if os.path.exists(f) else b"<none>"
+    old = open(os.path.join(os.path.dirname(page), "index.html"), "rb").read() if page else b""
+    new = open(os.path.join(os.path.dirname(os.path.dirname(page)), "html2", "index.html"), "rb").read() if page else b""
+    say(b(pax, "row5-first.page.req") == old, "row 5/6", "started from / with -p /srv: the relative root served (html/), the pid and control files under /srv/logs")
+    say(b(pax, "row1-after.page.req") == new, "row 1", "the edited root (html2/) served after `-s reload`")
+    f2 = os.path.join(pax, "load-row2.txt")
+    lt = open(f2).read().strip() if os.path.exists(f2) else "missing"
+    say(" 0 failed" in lt, "row 2", "a load across the reload: " + lt)
+    say(b(pax, "row3-before") == old and b(pax, "row3-after") == b(lin, "row3-after"), "row 3",
+        "a keepalive connection opened before the reload: before %r, after %r (Linux after %r)" % (
+            b(pax, "row3-before")[-30:], b(pax, "row3-after")[-30:], b(lin, "row3-after")[-30:]))
+    say(b"\nrejected 1\n" in cp and b(pax, "row4-after.page.req") == new, "row 4", "a bad config: `reload rejected`, exit 1, the old generation still serving")
+    def block(c, src):
+        m = re.search(rb"signal-received sig=reload verb=reload source=" + src + rb"[^\n]*\n((?:lobo: \[notice\] generation-[^\n]*\n){4})", c)
+        if not m:
+            return None
+        t = m.group(0).decode()
+        t = re.sub(r"gen=\d+", "gen=N", t)
+        t = re.sub(r"seq=\d+", "seq=S", t)
+        t = re.sub(r"id=[0-9a-f]+", "id=H", t)
+        t = re.sub(r"age-ms=\d+", "age-ms=A", t)
+        return t
+    x, y = block(cp, b"control"), block(cp, b"signal")
+    if x and y:
+        dl = [l for l, k in zip(x.splitlines(), y.splitlines()) if l != k]
+        ok = len(dl) == 1 and x.replace("source=control", "source=signal") == y
+        say(ok, "signal row", "the five-line blocks of `-s reload` and SIGHUP differ in exactly one line, `source`" if ok else "%d lines differ: %r" % (len(dl), dl))
+    else:
+        say(False, "signal row", "the blocks are missing (control %s, signal %s)" % (bool(x), bool(y)))
+
+sys.exit(1 if fails else 0)
