@@ -16,6 +16,33 @@
 # Limine comes from its release archive BY DIGEST (tools/fetch-limine
 # refuses on a mismatch). Every step runs bare and its exit code is read
 # directly: no pipes, so nothing masks a failure.
+#
+# THE TIERS (px37). A full run is 28 jobs and about 251 job-minutes
+# (pr run 38226524690, 2026-10-12), and the org has 20 concurrent jobs
+# for every repository; every push of every lane paid all of it. So the
+# `plan` job (tools/ci-plan, proven by tests/ci-plan) decides which
+# suites a run runs and on which legs (a leg: one compiler tier on one
+# firmware), and every other job reads its answer:
+#
+#   full  every suite on every leg (native and release, BIOS and UEFI),
+#         as before px37: a push to trunk, the nightly `schedule`, a
+#         `workflow_dispatch` (unless its `tier` input says pr), a pull
+#         request labelled `full-matrix`, and a pull request whose change
+#         touches the toolchain pins, the kernel's core or the harness
+#         every boot goes through (the FULL rules of tools/ci-tiers.map).
+#   pr    any other pull-request run: the suites the change can affect
+#         (tools/ci-tiers.map and the tests' own text), each on ONE leg,
+#         `--tier native --firmware bios`. Nothing changed: no suite
+#         dropped, none narrowed — a suite is left out of a PR run, or
+#         run on fewer legs there, and runs in full before the merge.
+#   noop  a `labeled` event for any label but `full-matrix`.
+#
+# THE MERGE RULE: a lane's PR is merged only with a green FULL run at its
+# head. A lane gets one by adding the `full-matrix` label when the head
+# is the one to merge (a later push to a labelled PR runs full again).
+# The `tier` job, last, is named `tier full` or `tier pr`, checks that
+# every suite the plan chose succeeded and every other was skipped, and
+# is what says which tier a run was.
 
 name: ci
 
@@ -23,13 +50,74 @@ on:
   push:
     branches: [trunk]
   pull_request:
+    # `labeled` so adding `full-matrix` starts the full run at once; any
+    # other label's run is a noop (the plan, then nothing).
+    types: [opened, synchronize, reopened, labeled]
+  schedule:
+    # Nightly, the full tier, on trunk.
+    - cron: "17 6 * * *"
   workflow_dispatch:
+    inputs:
+      tier:
+        description: "full: every leg; pr: --tier native --firmware bios"
+        type: choice
+        options: [full, pr]
+        default: full
+      suites:
+        description: "the suites (job names, space-separated); empty: every suite"
+        type: string
+        default: ""
 
 permissions:
   contents: read
 
+# A pull request's runs: one group per branch and tier, cancel-in-progress,
+# so a new push frees the slots of the run it supersedes. The full run
+# and the pr run live in SEPARATE groups (adding the label must not cancel
+# the pr run at the same head), and another label's noop run gets a group
+# of its own so it cancels nothing. Every other run (a trunk push, the
+# nightly, a dispatch) gets a group of its own run id: never cancelled,
+# and never replaced while pending, since each trunk push's full run is
+# the coverage that merge is owed.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}-{1}', github.head_ref, (github.event.action == 'labeled' && github.event.label.name != 'full-matrix') && format('noop-{0}', github.run_id) || (contains(github.event.pull_request.labels.*.name, 'full-matrix') && 'full' || 'pr')) || format('ci-{0}-{1}', github.event_name, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # Which suites this run runs, and on which legs (THE TIERS, above),
+  # decided once and printed path by path, so a run's log says why it
+  # has the jobs it has. The planner's own proof runs first.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tier: ${{ steps.plan.outputs.tier }}
+      suites: ${{ steps.plan.outputs.suites }}
+      legs: ${{ steps.plan.outputs.legs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: the planner can say no (tests/ci-plan)
+        run: tests/ci-plan
+
+      - name: the plan
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          LABEL: ${{ github.event.label.name }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.sha }}
+          IN_TIER: ${{ inputs.tier }}
+          IN_SUITES: ${{ inputs.suites }}
+        run: tools/ci-plan --github-output "$GITHUB_OUTPUT"
+
   proof:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'proof')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -86,7 +174,8 @@ jobs:
           if-no-files-found: warn
 
   macos-run:
-    needs: proof
+    needs: [plan, proof]
+    if: contains(fromJSON(needs.plan.outputs.suites), 'macos-run')
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -117,6 +206,10 @@ jobs:
   # recorded; and the seen-red variants (no --target; KWD) refused in the
   # same run. Every step bare, exit codes read directly.
   mkw:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mkw')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -155,10 +248,10 @@ jobs:
       - name: expect-serial can say no (incl. --tail)
         run: tests/expect-serial-selftest
 
-      - name: M-KW, both tiers, BIOS and UEFI
+      - name: M-KW, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mkw
+        run: tests/mkw $PAX_LEGS
 
       - name: keep the kernels and the logs
         if: always()
@@ -179,6 +272,10 @@ jobs:
   # panic kernel's `PANIC <kind> <file>:<line>` and halt (A4, A5), and a
   # spinning kernel refused by the halt probe in the same run (A6).
   mpx1:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx1')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -210,10 +307,10 @@ jobs:
       - name: expect-serial can say no (incl. --tail, --regex)
         run: tests/expect-serial-selftest
 
-      - name: M-PX1, both tiers, BIOS and UEFI
+      - name: M-PX1, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx1
+        run: tests/mpx1 $PAX_LEGS
 
       - name: keep the kernels, the transcripts and the halt probes
         if: always()
@@ -237,6 +334,8 @@ jobs:
   # number and a P3 lane (C3). No tracing here: the traces run in
   # containers on kasumi (tools/census/census).
   census:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'census')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -256,6 +355,10 @@ jobs:
   # handed out again (F5), and a double free and a free of a frame never
   # usable each panicking by name (F6, F7), every halt proven (F8).
   mpx2-frames:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx2-frames')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -284,10 +387,10 @@ jobs:
       - name: fetch limine (by digest)
         run: tools/fetch-limine
 
-      - name: physical frames, both tiers, BIOS and UEFI
+      - name: physical frames, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx2-frames
+        run: tests/mpx2-frames $PAX_LEGS
 
       - name: keep the kernels, the transcripts and the halt probes
         if: always()
@@ -313,6 +416,10 @@ jobs:
   # to text, moved to mpx2-interrupts I1 at kw10 (it now panics by name). px02's frame exercise on the new structures is the
   # mpx2-frames job's (G5).
   mpx2-paging:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx2-paging')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -342,10 +449,10 @@ jobs:
       - name: fetch limine (by digest)
         run: tools/fetch-limine
 
-      - name: paging, both tiers, BIOS and UEFI
+      - name: paging, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx2-paging
+        run: tests/mpx2-paging $PAX_LEGS
 
       - name: keep the kernels, the transcripts, the monitor's answers
         if: always()
@@ -376,6 +483,10 @@ jobs:
   # the descriptor-table registers read back from the halted machine
   # (I6).
   mpx2-interrupts:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx2-interrupts')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -405,10 +516,10 @@ jobs:
       - name: fetch limine (by digest)
         run: tools/fetch-limine
 
-      - name: interrupts, both tiers, BIOS and UEFI
+      - name: interrupts, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx2-interrupts
+        run: tests/mpx2-interrupts $PAX_LEGS
 
       - name: keep the kernels, the transcripts, the monitor's answers
         if: always()
@@ -436,6 +547,10 @@ jobs:
   # updates (S4), a stack overflow into the guard panicking by name
   # (S5), the halt (S6).
   mpx2-sched:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx2-sched')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -465,10 +580,10 @@ jobs:
       - name: fetch limine (by digest)
         run: tools/fetch-limine
 
-      - name: the scheduler, both tiers, BIOS and UEFI
+      - name: the scheduler, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx2-sched
+        run: tests/mpx2-sched $PAX_LEGS
 
       - name: keep the kernels, the transcripts, the halt probes
         if: always()
@@ -498,6 +613,10 @@ jobs:
   # outside the heap (H7), out of memory (H8) and a page fault in the
   # heap (H9) each panicking by name.
   mpx2-heap:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx2-heap')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -526,10 +645,10 @@ jobs:
       - name: fetch limine (by digest)
         run: tools/fetch-limine
 
-      - name: the heap, both tiers, BIOS and UEFI
+      - name: the heap, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx2-heap
+        run: tests/mpx2-heap $PAX_LEGS
 
       - name: keep the kernels, the transcripts and the halt probes
         if: always()
@@ -562,6 +681,10 @@ jobs:
   # refused a user byte without STAC (U7) and a jump into a user page
   # (U8).
   mpx3-user:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-user')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -591,10 +714,10 @@ jobs:
       - name: fetch limine (by digest)
         run: tools/fetch-limine
 
-      - name: user mode, both tiers, BIOS and UEFI
+      - name: user mode, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx3-user
+        run: tests/mpx3-user $PAX_LEGS
 
       - name: keep the kernels, the transcripts, the halt probes
         if: always()
@@ -623,6 +746,10 @@ jobs:
   # linked static against the runner's glibc run until PAX lacks what it
   # asks for (L8, the gap census); both tiers, BIOS and UEFI.
   mpx3-loader:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-loader')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -659,10 +786,10 @@ jobs:
           tools/mkwolf-hello build/wolf-hello
           file build/wolf-hello
 
-      - name: the loader, both tiers, BIOS and UEFI
+      - name: the loader, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx3-loader --wolf-hello build/wolf-hello
+        run: tests/mpx3-loader --wolf-hello build/wolf-hello $PAX_LEGS
 
       - name: keep the kernels, the programs, the initramfs, the transcripts
         if: always()
@@ -695,6 +822,10 @@ jobs:
   # for set_robust_list and rseq (B4), the halt (B5); both tiers, BIOS
   # and UEFI.
   mpx3-boreutils:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-boreutils')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -725,10 +856,10 @@ jobs:
       - name: fetch limine (by digest)
         run: tools/fetch-limine
 
-      - name: M-PX3, both tiers, BIOS and UEFI
+      - name: M-PX3, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx3-boreutils
+        run: tests/mpx3-boreutils $PAX_LEGS
 
       - name: keep the programs, the Linux side, the transcripts
         if: always()
@@ -768,6 +899,10 @@ jobs:
   # refusals as named (T4), init's end and the halt (T5); both tiers,
   # BIOS and UEFI.
   mpx3-console:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-console')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -799,10 +934,10 @@ jobs:
       - name: fetch limine (by digest)
         run: tools/fetch-limine
 
-      - name: the console, both tiers, BIOS and UEFI
+      - name: the console, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx3-console
+        run: tests/mpx3-console $PAX_LEGS
 
       - name: keep the programs, the Linux side, the transcripts
         if: always()
@@ -840,6 +975,10 @@ jobs:
   # PS/2 on the screen (V5), ask's window size with and without the
   # screen (V6); both tiers, BIOS and UEFI.
   mpx3-screen:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-screen')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -870,10 +1009,10 @@ jobs:
       - name: fetch limine (by digest)
         run: tools/fetch-limine
 
-      - name: the screen, both tiers, BIOS and UEFI
+      - name: the screen, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx3-screen
+        run: tests/mpx3-screen $PAX_LEGS
 
       - name: keep the screendumps, the references, the logs
         if: always()
@@ -913,6 +1052,10 @@ jobs:
   # refusals as named (S4), init's end and the halt (S5); both tiers,
   # BIOS and UEFI.
   mpx3-shell:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-shell')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -944,10 +1087,10 @@ jobs:
       - name: fetch limine (by digest)
         run: tools/fetch-limine
 
-      - name: the shell runs programs, both tiers, BIOS and UEFI
+      - name: the shell runs programs, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx3-shell
+        run: tests/mpx3-shell $PAX_LEGS
 
       - name: keep the programs' sums, the Linux side, the transcripts
         if: always()
@@ -991,6 +1134,10 @@ jobs:
   # BIOS and UEFI. The suite stops at the first failing probes boot, and
   # the job at 45 minutes: a kernel that hangs here fails fast.
   mpx3-threads:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-threads')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -1022,10 +1169,10 @@ jobs:
       - name: fetch limine (by digest)
         run: tools/fetch-limine
 
-      - name: threads, futexes and signals against Linux, and the soak; both tiers, BIOS and UEFI
+      - name: threads, futexes and signals against Linux, and the soak; the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx3-threads
+        run: tests/mpx3-threads $PAX_LEGS
 
       - name: keep the program's sum, the Linux side, the outputs
         if: always()
@@ -1067,6 +1214,10 @@ jobs:
   # the first failing probes boot, each boot has a 300 s deadline, and
   # the job ends at 60 minutes: a kernel that hangs here fails fast.
   mpx3-tree:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-tree')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -1110,12 +1261,12 @@ jobs:
         env:
           PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 
-      - name: the writable tree against Linux's tmpfs, the typed session, the soak and the fill; both tiers, BIOS and UEFI
+      - name: the writable tree against Linux's tmpfs, the typed session, the soak and the fill; the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
           PAX_ENGINE: docker
           PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
-        run: tests/mpx3-tree
+        run: tests/mpx3-tree $PAX_LEGS
 
       - name: keep the programs' sums, the Linux side, the outputs
         if: always()
@@ -1153,6 +1304,10 @@ jobs:
   # beep through /dev/tty0 and /dev/console (K7, px21a: tools/mkbeep
   # builds it static from its source package, by digest).
   mpx3-speaker:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-speaker')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -1184,10 +1339,10 @@ jobs:
       - name: fetch limine (by digest)
         run: tools/fetch-limine
 
-      - name: the speaker plays, both tiers, BIOS and UEFI
+      - name: the speaker plays, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx3-speaker
+        run: tests/mpx3-speaker $PAX_LEGS
 
       - name: keep the programs' sums, the captures' tones, the timelines, the transcripts
         if: always()
@@ -1225,6 +1380,10 @@ jobs:
   # for frame (S3), an underrun (S4), a process ended mid-sound (S5),
   # O_NONBLOCK (S6), play mixed (S7).
   mpx3-sound:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-sound')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -1256,10 +1415,10 @@ jobs:
       - name: fetch limine (by digest)
         run: tools/fetch-limine
 
-      - name: the sound device plays, both tiers, BIOS and UEFI
+      - name: the sound device plays, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx3-sound
+        run: tests/mpx3-sound $PAX_LEGS
 
       - name: keep the programs, the captures' verdicts, the transcripts
         if: always()
@@ -1288,6 +1447,10 @@ jobs:
   # voices), then QEMU's virtio sound under kmain_console: the captures
   # judged by the same specs (O5) and the cost in the guest (O6).
   mpx3-orchestra:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-orchestra')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -1315,10 +1478,10 @@ jobs:
       - name: fetch limine (by digest)
         run: tools/fetch-limine
 
-      - name: the orchestra, on the runner and under QEMU, both tiers, BIOS and UEFI
+      - name: the orchestra, on the runner and under QEMU, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx3-orchestra
+        run: tests/mpx3-orchestra $PAX_LEGS
 
       - name: keep the verdicts, the transcripts and the captures
         if: always()
@@ -1347,6 +1510,10 @@ jobs:
   # write to text, each panicking by name and halted (R5, R6), the pauses
   # (R7).
   tour:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'tour')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -1376,10 +1543,10 @@ jobs:
       - name: fetch limine (by digest)
         run: tools/fetch-limine
 
-      - name: the tour, both tiers, BIOS and UEFI
+      - name: the tour, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/tour
+        run: tests/tour $PAX_LEGS
 
       - name: keep the ISOs, the transcripts, the timings, the halt probes
         if: always()
@@ -1419,6 +1586,10 @@ jobs:
   # socket holds draws a port unreachable (this kernel makes no
   # socket); the sockets themselves are the mpx4-udp job's.
   mpx4-net:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-net')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -1454,10 +1625,10 @@ jobs:
       - name: the runner's ICMP policy
         run: cat /proc/sys/net/ipv4/ping_group_range
 
-      - name: the network, both tiers, BIOS and UEFI
+      - name: the network, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx4-net
+        run: tests/mpx4-net $PAX_LEGS
 
       - name: keep the kernels, the transcripts, the captures and the halt probes
         if: always()
@@ -1504,6 +1675,10 @@ jobs:
   # kernel's counters against it (U6); the counters exactly (U7); 10000
   # datagrams each way (U8); the halt (U9).
   mpx4-udp:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-udp')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -1542,10 +1717,10 @@ jobs:
           sudo modprobe tun
           ls -l /dev/net/tun
 
-      - name: UDP and sockets, both tiers, BIOS and UEFI
+      - name: UDP and sockets, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx4-udp
+        run: tests/mpx4-udp $PAX_LEGS
 
       - name: keep the programs' sums, the Linux side, the transcripts, the captures
         if: always()
@@ -1607,6 +1782,10 @@ jobs:
   # grown for 300 s; and no boot is started after one that failed: a
   # broken kernel is red here in minutes.
   mpx4-tcp:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-tcp')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 150
     steps:
@@ -1650,10 +1829,10 @@ jobs:
       - name: net-peer's TCP, its own witness
         run: tests/paxtcp-selftest
 
-      - name: TCP, both tiers, BIOS and UEFI
+      - name: TCP, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx4-tcp --deadline 7200
+        run: tests/mpx4-tcp --deadline 7200 $PAX_LEGS
 
       - name: keep the programs' sums, the Linux side, the transcripts, the captures
         if: always()
@@ -1703,6 +1882,10 @@ jobs:
   # control block or frame left. A boot that stalls is stopped after 240
   # seconds, and none starts 40 minutes after the first.
   mpx4-ready:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-ready')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 100
     steps:
@@ -1741,10 +1924,10 @@ jobs:
           sudo modprobe tun
           ls -l /dev/net/tun
 
-      - name: readiness, both tiers, BIOS and UEFI
+      - name: readiness, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
-        run: tests/mpx4-ready
+        run: tests/mpx4-ready $PAX_LEGS
 
       - name: keep the programs' sums, the Linux side, the transcripts, the captures
         if: always()
@@ -1791,6 +1974,10 @@ jobs:
   # connections (E4), init's end and the halt (E5); both tiers, BIOS at
   # 256 MiB and UEFI.
   mpx4-session:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-session')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -1830,12 +2017,12 @@ jobs:
         env:
           PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 
-      - name: the session image, three typed sessions, both tiers, BIOS and UEFI
+      - name: the session image, three typed sessions, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
           PAX_ENGINE: docker
           PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
-        run: tests/mpx4-session
+        run: tests/mpx4-session $PAX_LEGS
 
       - name: keep the programs' sums, the Linux side, the transcripts
         if: always()
@@ -1882,6 +2069,10 @@ jobs:
   # failing probes boot, each boot has a 300 s deadline, and the job ends
   # at 60 minutes: a kernel that hangs here fails fast.
   mpx4-unix:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-unix')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -1921,12 +2112,12 @@ jobs:
         env:
           PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 
-      - name: Unix sockets, /proc and /sys, MAP_NORESERVE, the soak and lobo's client against Linux; both tiers, BIOS and UEFI
+      - name: Unix sockets, /proc and /sys, MAP_NORESERVE, the soak and lobo's client against Linux; the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
           PAX_ENGINE: docker
           PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
-        run: tests/mpx4-unix
+        run: tests/mpx4-unix $PAX_LEGS
 
       - name: keep the programs' sums, the Linux side, the outputs
         if: always()
@@ -1962,6 +2153,10 @@ jobs:
   # differential rows, its control rows 1-6 and its signal row); serve
   # and hands on both tiers, BIOS and UEFI.
   mpx4-lobo:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-lobo')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -2001,12 +2196,12 @@ jobs:
         env:
           PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 
-      - name: lobo on PAX against lobo on Linux; both tiers, BIOS and UEFI
+      - name: lobo on PAX against lobo on Linux; the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
           PAX_ENGINE: docker
           PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
-        run: tests/mpx4-lobo --round 30
+        run: tests/mpx4-lobo --round 30 $PAX_LEGS
 
       - name: keep the programs' sums, the sessions on both sides, the runs
         if: always()
@@ -2029,3 +2224,70 @@ jobs:
             build/mpx4-lobo-runs.txt
           retention-days: 14
           if-no-files-found: warn
+  # The run's verdict and its name: `tier full` or `tier pr` (`tier
+  # noop`). It needs every job, runs whatever they did, and fails unless
+  # the plan succeeded, every suite the plan chose succeeded, and every
+  # suite it did not choose was skipped (a job that ran unasked, or one
+  # skipped although chosen, is a broken wiring, not a pass). The name is
+  # what tools/lane-audit can read to know a green run was a full one.
+  tier:
+    name: tier ${{ needs.plan.outputs.tier || 'unplanned' }}
+    if: always()
+    needs:
+      - plan
+      - proof
+      - macos-run
+      - mkw
+      - mpx1
+      - census
+      - mpx2-frames
+      - mpx2-paging
+      - mpx2-interrupts
+      - mpx2-sched
+      - mpx2-heap
+      - mpx3-user
+      - mpx3-loader
+      - mpx3-boreutils
+      - mpx3-console
+      - mpx3-screen
+      - mpx3-shell
+      - mpx3-threads
+      - mpx3-tree
+      - mpx3-speaker
+      - mpx3-sound
+      - mpx3-orchestra
+      - tour
+      - mpx4-net
+      - mpx4-udp
+      - mpx4-tcp
+      - mpx4-ready
+      - mpx4-session
+      - mpx4-unix
+      - mpx4-lobo
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: every chosen suite succeeded, every other was skipped
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS"])
+          plan = needs["plan"]
+          if plan["result"] != "success":
+              print("tier: the plan did not succeed (%s)" % plan["result"])
+              sys.exit(1)
+          out = plan["outputs"]
+          chosen = set(json.loads(out["suites"]))
+          print("tier %s, legs '%s', %d of %d suites" % (out["tier"], out["legs"], len(chosen), len(needs) - 1))
+          bad = 0
+          for job, r in needs.items():
+              if job == "plan":
+                  continue
+              want = "success" if job in chosen else "skipped"
+              ok = r["result"] == want
+              bad += not ok
+              print("  %-16s %-8s %s" % (job, r["result"], "ok" if ok else "WANTED " + want))
+          sys.exit(1 if bad else 0)
+          PY
