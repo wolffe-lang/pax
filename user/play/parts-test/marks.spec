@@ -55,4 +55,9 @@ absent 329.63 45200 46500 -45 250
 absent 392.00 45200 46500 -45 250
 # bar 20, the same without the tie: C4 is struck again (a gap, then a new attack)
 dip 261.63 48773 8 99
+# bars 21-24 (tempo 60, a bar 4000 ms, from 50773 ms): the horn's G4 tied
+# for 15 eighths into a staccato eighth (65773 ms) sounds to the middle of
+# that eighth (66023 ms), not to half the whole note (58273 ms)
+present 392.00 51000 65750 -30 250
+absent 392.00 66500 67000 -45 250
 noclip
