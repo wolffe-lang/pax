@@ -1773,15 +1773,61 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     if nr == SYS_FACCESSAT2 {
         return files.faccessat(a, pml4, int32(r0), a1, int32(a2), int32(a3))
     }
-    if nr == SYS_LINK || nr == SYS_SYMLINK || nr == SYS_LINKAT || nr == SYS_SYMLINKAT || nr == SYS_MKNOD || nr == SYS_MKNODAT {
+    if nr == SYS_MKNOD || nr == SYS_MKNODAT {
         return files.refused(a, 0)
     }
-    if nr == SYS_CHMOD || nr == SYS_FCHMOD || nr == SYS_FCHMODAT || nr == SYS_FCHMODAT2 || nr == SYS_CHOWN || nr == SYS_FCHOWN || nr == SYS_LCHOWN || nr == SYS_FCHOWNAT || nr == SYS_UTIMENSAT || nr == SYS_UTIMES || nr == SYS_UTIME {
+    if nr == SYS_UTIMES || nr == SYS_UTIME {
         return files.refused(a, 1)
+    }
+    // px36: the changes after a file is made, in a function of their own.
+    if nr == SYS_LINK || nr == SYS_SYMLINK || nr == SYS_LINKAT || nr == SYS_SYMLINKAT || nr == SYS_CHMOD || nr == SYS_FCHMOD || nr == SYS_FCHMODAT || nr == SYS_FCHMODAT2 || nr == SYS_CHOWN || nr == SYS_FCHOWN || nr == SYS_LCHOWN || nr == SYS_FCHOWNAT || nr == SYS_UTIMENSAT {
+        return change_calls(nr, a, pml4, r0, a1, a2, a3, a4)
     }
     // px24: readiness (kernel/ready) and the gathered write, in a
     // function of their own (this one is long enough: wolf-lang#711).
     ready_calls(nr, a, pml4, a0, a1, a2, a3)
+}
+
+/// px36: link, symlink, the modes, the owners and the times
+/// (kernel/files, kernel/tree).
+fn change_calls(nr: u64, a: u64, pml4: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    if nr == SYS_LINK {
+        return files.linkat(a, pml4, AT_FDCWD, r0, AT_FDCWD, a1, 0)
+    }
+    if nr == SYS_LINKAT {
+        return files.linkat(a, pml4, int32(r0), a1, int32(a2), a3, int32(a4))
+    }
+    if nr == SYS_SYMLINK {
+        return files.symlinkat(a, pml4, r0, AT_FDCWD, a1)
+    }
+    if nr == SYS_SYMLINKAT {
+        return files.symlinkat(a, pml4, r0, int32(a1), a2)
+    }
+    if nr == SYS_CHMOD {
+        return files.fchmodat(a, pml4, AT_FDCWD, r0, int32(a1), 0)
+    }
+    if nr == SYS_FCHMOD {
+        return files.fchmod(a, int32(r0), int32(a1))
+    }
+    if nr == SYS_FCHMODAT {
+        return files.fchmodat(a, pml4, int32(r0), a1, int32(a2), 0) // three arguments: no flags
+    }
+    if nr == SYS_FCHMODAT2 {
+        return files.fchmodat(a, pml4, int32(r0), a1, int32(a2), int32(a3))
+    }
+    if nr == SYS_CHOWN {
+        return files.fchownat(a, pml4, AT_FDCWD, r0, a1, a2, 0, false)
+    }
+    if nr == SYS_LCHOWN {
+        return files.fchownat(a, pml4, AT_FDCWD, r0, a1, a2, AT_SYMLINK_NOFOLLOW, false)
+    }
+    if nr == SYS_FCHOWN {
+        return files.fchownat(a, pml4, int32(r0), 0, a1, a2, 0, true)
+    }
+    if nr == SYS_FCHOWNAT {
+        return files.fchownat(a, pml4, int32(r0), a1, a2, a3, int32(a4), false)
+    }
+    files.utimensat(a, pml4, int32(r0), a1, a2, int32(a3))
 }
 
 /// px24's calls that answer in place: `poll`, the three epoll calls,
