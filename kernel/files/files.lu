@@ -333,6 +333,11 @@ const DT_CHR: u64 = 2
 const DT_DIR: u64 = 4
 const DT_REG: u64 = 8
 const DT_SOCK: u64 = 12 // px34
+const DT_LNK: u64 = 10 // px36
+const MAXLINKS: u64 = 40 // px36: links followed in one resolution (path_resolution(7))
+const AT_SYMLINK_FOLLOW: u64 = 0x400 // px36: linkat
+const UTIME_NOW: u64 = 0x3fffffff // px36: (1 << 30) - 1, uapi linux/stat.h
+const UTIME_OMIT: u64 = 0x3ffffffe
 
 // Refusal codes for the area's word (kernel/vm uses 1-15).
 // 16 was px12's refusal of every write (the initramfs was read-only).
@@ -347,6 +352,8 @@ const R_META: u64 = 28
 const R_RENFLAG: u64 = 27
 const R_ATFLAG: u64 = 26
 const R_EXEC: u64 = 25
+const R_FIXED: u64 = 24 // px36
+const R_OWNER: u64 = 23 // px36
 
 /// -e as %rax carries it.
 pub fn neg(e: u64) -> u64 {
@@ -375,10 +382,16 @@ pub fn why(r: u64) -> str {
         return "making or removing a name in /dev (PAX's /dev is fixed)"
     }
     if r == R_LINK {
-        return "a hard link, a symbolic link or a device node (the tree makes none)"
+        return "a device node (the tree makes none)"
     }
     if r == R_META {
-        return "a change of mode, owner or times (the tree keeps what a file was made with)"
+        return "utime or utimes (in no strace: utimensat sets the times)"
+    }
+    if r == R_FIXED {
+        return "a mode, an owner, times or a link of what PAX keeps fixed (/dev, /proc, /sys, a pipe, a socket)"
+    }
+    if r == R_OWNER {
+        return "an owner or a group that is not root (PAX has one user)"
     }
     if r == R_RENFLAG {
         return "a renameat2 flag (RENAME_NOREPLACE, RENAME_EXCHANGE, RENAME_WHITEOUT)"
@@ -2245,7 +2258,7 @@ pub fn unix_bind(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
     if e != 0 {
         return e
     }
-    let (n, par, ns, nl, trail) = walk_k(a, AT_FDCWD, l, false)
+    let (n, par, ns, nl, trail) = walk_k(a, AT_FDCWD, l, false, false)
     if !is_err(n) {
         return neg(EADDRINUSE)
     }
@@ -2770,17 +2783,58 @@ const LAST_DOTDOT: u64 = 2 // `..`
 /// LAST_*; whether a `/` follows it). A trailing `/` on what is not a
 /// directory is -ENOTDIR. `empty_ok`: AT_EMPTY_PATH, an empty path
 /// naming dirfd itself.
-fn walk(a: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool) -> (u64, u64, u64, u64, bool) {
+///
+/// px36: a symbolic link met before the last component is followed;
+/// the last one is followed when `follow` says so or a `/` comes after
+/// it. Following rewrites the path in pax_kbuf in place — the target,
+/// then what was left — and the walk goes on from the directory the
+/// link is in (from `/` for an absolute target): so the offsets the
+/// walk answers are into the rewritten path. The 41st link in one
+/// resolution is -ELOOP; a rewritten path longer than PATH_MAX is
+/// -ENAMETOOLONG. A link followed has its atime moved by relatime's
+/// rule, as on tmpfs (measured).
+fn walk(a: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool, follow: bool) -> (u64, u64, u64, u64, bool) {
     let rl = path_in(pml4, va)
     if is_err(rl) {
         return (rl, rl, 0, 0, false)
     }
-    walk_k(a, dirfd, rl, empty_ok)
+    walk_k(a, dirfd, rl, empty_ok, follow)
+}
+
+/// px36: the link at node `c` replaces pax_kbuf[0..at) (the components
+/// walked and the link's own name): the path becomes the link's target
+/// and then pax_kbuf[at..len), NUL-ended. The new length, or an error
+/// node (ENAMETOOLONG).
+fn follow_link(c: u64, at: u64, len: u64) -> u64 {
+    let i = rf(c)
+    let tl = tree.bytes(i)
+    let rest = len - at
+    if tl + rest > PATH_MAX {
+        return err(ENAMETOOLONG)
+    }
+    if tl > at {
+        var k = rest
+        while k > 0 {
+            k -= 1
+            put_kb(tl + k, kb(at + k))
+        }
+    } else if tl < at {
+        var k: u64 = 0
+        while k < rest {
+            put_kb(tl + k, kb(at + k))
+            k += 1
+        }
+    }
+    let _n = tree.target(i, raw(), tl)
+    put_kb(tl + rest, 0)
+    tree.touch_read(i)
+    tl + rest
 }
 
 /// px34: `walk` of the path already in pax_kbuf[0..rl) (a socket's
 /// name, copied out of its `struct sockaddr_un`).
-fn walk_k(a: u64, dirfd: u64, rl: u64, empty_ok: bool) -> (u64, u64, u64, u64, bool) {
+fn walk_k(a: u64, dirfd: u64, rl0: u64, empty_ok: bool, follow: bool) -> (u64, u64, u64, u64, bool) {
+    var rl = rl0
     if rl == 0 {
         if !empty_ok {
             return (err(ENOENT), err(ENOENT), 0, 0, false)
@@ -2806,6 +2860,7 @@ fn walk_k(a: u64, dirfd: u64, rl: u64, empty_ok: bool) -> (u64, u64, u64, u64, b
             return (err(ENOTDIR), err(ENOTDIR), 0, 0, false)
         }
     }
+    var links: u64 = 0
     var i: u64 = 0
     while i < rl {
         while i < rl && kb(i) == 47 {
@@ -2840,6 +2895,24 @@ fn walk_k(a: u64, dirfd: u64, rl: u64, empty_ok: bool) -> (u64, u64, u64, u64, b
         } else {
             c = child_named(cur, s, n)
         }
+        // px36: a symbolic link: followed unless it is the last
+        // component, unfollowed and with no `/` after it.
+        if !is_err(c) && ty(c) == T_INO && tree.is_link(rf(c)) && (!last || follow || i < rl) {
+            links += 1
+            if links > MAXLINKS {
+                return (err(ELOOP), err(ELOOP), 0, 0, false)
+            }
+            let nl = follow_link(c, i, rl)
+            if is_err(nl) {
+                return (nl, nl, 0, 0, false)
+            }
+            rl = nl
+            i = 0
+            if kb(0) == 47 {
+                cur = root_node()
+            }
+            continue
+        }
         if last {
             let trail = i < rl
             if trail && !is_err(c) && !is_dir_node(c) && ty(c) != T_STD {
@@ -2859,14 +2932,16 @@ fn walk_k(a: u64, dirfd: u64, rl: u64, empty_ok: bool) -> (u64, u64, u64, u64, b
 }
 
 /// Resolve (dirfd, path at va) to a node (`walk`'s first answer).
-fn resolve(a: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool) -> u64 {
-    let (n, _p, _s, _l, _t) = walk(a, pml4, dirfd, va, empty_ok)
+/// px36: and `follow` says whether a last symbolic link is followed.
+fn resolve(a: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool, follow: bool) -> u64 {
+    let (n, _p, _s, _l, _t) = walk(a, pml4, dirfd, va, empty_ok, follow)
     n
 }
 
-/// px34: `resolve` of the path in pax_kbuf[0..rl).
+/// px34: `resolve` of the path in pax_kbuf[0..rl) (px36: a last link
+/// followed, as `connect` does).
 fn resolve_k(a: u64, dirfd: u64, rl: u64) -> u64 {
-    let (n, _p, _s, _l, _t) = walk_k(a, dirfd, rl, false)
+    let (n, _p, _s, _l, _t) = walk_k(a, dirfd, rl, false, true)
     n
 }
 
@@ -2927,8 +3002,14 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
     if flags & O_NOFOLLOW != 0 && is_proc_exe(pml4, va) {
         return neg(ELOOP)
     }
-    let (n0, par, ns, nl, trail) = walk(a, pml4, dirfd, va, false)
+    // px36: a last symbolic link is followed but for O_NOFOLLOW (then
+    // -ELOOP) and O_CREAT|O_EXCL (then -EEXIST, dangling or not).
+    let excl = flags & O_CREAT != 0 && flags & O_EXCL != 0
+    let (n0, par, ns, nl, trail) = walk(a, pml4, dirfd, va, false, flags & O_NOFOLLOW == 0 && !excl)
     var n = n0
+    if !is_err(n) && ty(n) == T_INO && tree.is_link(rf(n)) && !excl {
+        return neg(if flags & O_DIRECTORY != 0 { ENOTDIR } else { ELOOP }) // measured: O_DIRECTORY answers first
+    }
     var made = false
     if is_err(n) {
         if rf(n) != ENOENT || flags & O_CREAT == 0 || is_err(par) {
@@ -3252,7 +3333,7 @@ pub fn ftruncate(a: u64, fd: u64, len: u64) -> u64 {
 /// px27: `truncate(path, len)`: as `ftruncate` for the file the path
 /// names: -EISDIR for a directory, -EINVAL for what is no file.
 pub fn truncate(a: u64, pml4: u64, va: u64, len: u64) -> u64 {
-    let n = resolve(a, pml4, AT_FDCWD, va, false)
+    let n = resolve(a, pml4, AT_FDCWD, va, false, true)
     if is_err(n) {
         return neg(rf(n))
     }
@@ -3322,7 +3403,7 @@ pub fn ioctl(a: u64, pml4: u64, fd: u64, req: u64, arg: u64) -> u64 {
 /// loader reads one contiguous image): a program written or copied
 /// since boot is refused by name, -EACCES.
 pub fn exec_lookup(a: u64, pml4: u64, va: u64) -> (u64, u64, u64) {
-    let n = resolve(a, pml4, AT_FDCWD, va, false)
+    let n = resolve(a, pml4, AT_FDCWD, va, false, true)
     if is_err(n) {
         return (0, neg(rf(n)), 0)
     }
@@ -3426,7 +3507,7 @@ pub fn getcwd(a: u64, pml4: u64, buf: u64, size: u64) -> u64 {
 /// px17: `chdir(path)`: the working directory becomes the directory the
 /// path names (-ENOENT, -ENOTDIR, the path's own errors).
 pub fn chdir(a: u64, pml4: u64, va: u64) -> u64 {
-    let n = resolve(a, pml4, AT_FDCWD, va, false)
+    let n = resolve(a, pml4, AT_FDCWD, va, false, true)
     if is_err(n) {
         return neg(rf(n))
     }
@@ -3491,11 +3572,29 @@ pub fn readlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, buf: u64, size: u64) -
         }
         return k
     }
-    let n = resolve(a, pml4, dirfd, va, false)
+    // px36: a link of the tree: its target, at most `size` bytes, no
+    // NUL; its atime moved by relatime's rule (measured).
+    if size == 0 || size >= 0x80000000 {
+        return neg(EINVAL)
+    }
+    let n = resolve(a, pml4, dirfd, va, false, false)
     if is_err(n) {
         return neg(rf(n))
     }
-    neg(EINVAL)
+    if ty(n) != T_INO || !tree.is_link(rf(n)) {
+        return neg(EINVAL)
+    }
+    let i = rf(n)
+    let k = if tree.bytes(i) < size { tree.bytes(i) } else { size }
+    if !uaccess.writable(pml4, buf, k) {
+        return neg(EFAULT)
+    }
+    let _c = tree.target(i, raw() + NORM, k)
+    if !uaccess.copy_out(pml4, buf, raw() + NORM, k) {
+        return neg(EFAULT)
+    }
+    tree.touch_read(i)
+    k
 }
 
 // --- making, removing and renaming (px27) ----------------------------------------
@@ -3507,7 +3606,7 @@ pub fn readlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, buf: u64, size: u64) -
 /// been removed, -ENOTDIR for a file on the way, -ENOSPC; in `/dev`
 /// refused by name, -EROFS.
 pub fn mkdirat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64) -> u64 {
-    let (n, par, ns, nl, _trail) = walk(a, pml4, dirfd, va, false)
+    let (n, par, ns, nl, _trail) = walk(a, pml4, dirfd, va, false, false)
     if !is_err(n) {
         return neg(EEXIST)
     }
@@ -3542,7 +3641,7 @@ pub fn unlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64) -> u64 {
         refuse(a, R_ATFLAG)
         return neg(EINVAL)
     }
-    let (n, par, ns, nl, _trail) = walk(a, pml4, dirfd, va, false)
+    let (n, par, ns, nl, _trail) = walk(a, pml4, dirfd, va, false, false)
     if is_err(n) {
         return neg(rf(n))
     }
@@ -3588,7 +3687,7 @@ pub fn renameat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, fla
         refuse(a, R_RENFLAG)
         return neg(EINVAL)
     }
-    let (on, op, os, ol, _ot) = walk(a, pml4, odfd, ova, false)
+    let (on, op, os, ol, _ot) = walk(a, pml4, odfd, ova, false, false)
     if is_err(on) {
         return neg(rf(on))
     }
@@ -3602,7 +3701,7 @@ pub fn renameat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, fla
         put_kb(NORM + k, kb(os + k))
         k += 1
     }
-    let (nn, np, ns, nl, nt) = walk(a, pml4, ndfd, nva, false)
+    let (nn, np, ns, nl, nt) = walk(a, pml4, ndfd, nva, false, false)
     if is_err(nn) && (rf(nn) != ENOENT || is_err(np)) {
         return neg(rf(nn))
     }
@@ -3628,7 +3727,7 @@ pub fn faccessat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64, flags: u64) 
     if mode & !7 != 0 || flags & !AT_EACCESS != 0 {
         return neg(EINVAL)
     }
-    let n = resolve(a, pml4, dirfd, va, false)
+    let n = resolve(a, pml4, dirfd, va, false, true)
     if is_err(n) {
         return neg(rf(n))
     }
@@ -3638,11 +3737,270 @@ pub fn faccessat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64, flags: u64) 
     0
 }
 
+// --- the changes after a file is made (px36) ----------------------------------------
+
+/// px36: what a change of mode, owner or times may be made to: a node of
+/// the tree (0), else what PAX keeps fixed — `/dev` and what is in it,
+/// `/proc`, `/sys`, a pipe, a socket — refused by name, -EROFS (root on
+/// Linux may change them: named drift).
+fn changeable(a: u64, n: u64) -> u64 {
+    if ty(n) == T_INO {
+        return 0
+    }
+    refuse(a, R_FIXED)
+    neg(EROFS)
+}
+
+/// px36: `fchmodat(dirfd, path, mode)` (and `chmod`; `fchmodat2` with
+/// its flags; `fchmod` through `fchmod`): the twelve permission bits
+/// become `mode & 07777`, the type is kept, ctime moves. A last link is
+/// followed; `fchmodat2`'s AT_SYMLINK_NOFOLLOW on a link -EOPNOTSUPP (a
+/// link keeps no mode of its own: measured on tmpfs), on anything else
+/// as without it; any other flag -EINVAL.
+pub fn fchmodat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64, flags: u64) -> u64 {
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return neg(EINVAL)
+    }
+    let n = resolve(a, pml4, dirfd, va, flags & AT_EMPTY_PATH != 0, flags & AT_SYMLINK_NOFOLLOW == 0)
+    if is_err(n) {
+        return neg(rf(n))
+    }
+    if ty(n) == T_INO && tree.is_link(rf(n)) {
+        return neg(EOPNOTSUPP)
+    }
+    let r = changeable(a, n)
+    if r != 0 {
+        return r
+    }
+    tree.set_mode(rf(n), mode)
+    0
+}
+
+/// px36: `fchmod(fd, mode)`: as `fchmodat` for the file `fd` names;
+/// -EBADF for a closed descriptor.
+pub fn fchmod(a: u64, fd: u64, mode: u64) -> u64 {
+    if kind(a, fd) == K_CLOSED {
+        return neg(EBADF)
+    }
+    let n = node_of(a, fd)
+    let r = changeable(a, n)
+    if r != 0 {
+        return r
+    }
+    tree.set_mode(rf(n), mode)
+    0
+}
+
+/// px36: an id as `chown` reads it: 0 (root) and 0xffffffff (-1, left
+/// alone) are what PAX has.
+fn root_or_none(id: u64) -> bool {
+    id & 0xffffffff == 0 || id & 0xffffffff == 0xffffffff
+}
+
+/// px36: `fchownat(dirfd, path, owner, group, flags)` (and `chown`,
+/// `lchown`; `fchown` with `fd` and no path, `va` 0): PAX has one user,
+/// root, so an owner and a group each 0 or -1 are what root asks on
+/// Linux: 0, ctime moved, a regular file's set-user-ID bit (and its
+/// set-group-ID bit when it is group-executable) cleared (measured on
+/// tmpfs). Any other id is refused by name, -EINVAL: POSIX's errno for
+/// an id that is not a value the implementation supports (Linux, as
+/// root, would keep it: named drift). Flags AT_SYMLINK_NOFOLLOW and
+/// AT_EMPTY_PATH; any other -EINVAL. `byfd`: `fchown`, `dirfd` the
+/// descriptor and no path.
+pub fn fchownat(a: u64, pml4: u64, dirfd: u64, va: u64, owner: u64, group: u64, flags: u64, byfd: bool) -> u64 {
+    var n: u64 = 0
+    if byfd {
+        if kind(a, dirfd) == K_CLOSED {
+            return neg(EBADF)
+        }
+        n = node_of(a, dirfd)
+    } else {
+        if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+            return neg(EINVAL)
+        }
+        n = resolve(a, pml4, dirfd, va, flags & AT_EMPTY_PATH != 0, flags & AT_SYMLINK_NOFOLLOW == 0)
+        if is_err(n) {
+            return neg(rf(n))
+        }
+    }
+    if !root_or_none(owner) || !root_or_none(group) {
+        refuse(a, R_OWNER)
+        return neg(EINVAL)
+    }
+    let r = changeable(a, n)
+    if r != 0 {
+        return r
+    }
+    tree.owned(rf(n))
+    0
+}
+
+/// px36: one `struct timespec` of `utimensat` at user `ts`: (which bit
+/// it sets, the time in signed nanoseconds, or an errno). UTIME_NOW is
+/// the tree's clock, UTIME_OMIT sets nothing, a `tv_nsec` that is
+/// neither and not below 10^9 (a negative one included) -EINVAL. A
+/// second count past what 64 bits of nanoseconds hold (1677 to 2262) is
+/// held at that end: named drift (tmpfs keeps it).
+fn timespec_in(pml4: u64, ts: u64) -> (bool, u64, u64) {
+    let sec = uaccess.get(pml4, ts, 8)
+    let ns = uaccess.get(pml4, ts + 8, 8)
+    if ns == UTIME_OMIT {
+        return (false, 0, 0)
+    }
+    if ns == UTIME_NOW {
+        return (true, tree.clock(), 0)
+    }
+    if ns >= NS {
+        return (false, 0, EINVAL)
+    }
+    // sec is a signed 64-bit count; 9223372036 s is the last second
+    // that fits in signed nanoseconds, -9223372036 the first.
+    let max_s: u64 = 9223372035
+    if sec < 0x8000000000000000 && sec > max_s {
+        return (true, 0x7fffffffffffffff, 0)
+    }
+    if sec >= 0x8000000000000000 && sec < 0xffffffffffffffff - max_s {
+        return (true, 0x8000000000000000, 0)
+    }
+    if sec < 0x8000000000000000 {
+        return (true, sec * NS + ns, 0)
+    }
+    // before 1970: -(m) where m = |sec| * 10^9 - ns, in two's complement
+    // (no step here can overflow: |sec| <= 9223372036, ns < 10^9)
+    let m = (!sec + 1) * NS - ns
+    (true, !m + 1, 0)
+}
+
+/// px36: `utimensat(dirfd, path, times, flags)`: `times` 0 sets both to
+/// now; else two `struct timespec` (atime, mtime), each a time to the
+/// nanosecond, UTIME_NOW or UTIME_OMIT; ctime moves unless both are
+/// UTIME_OMIT. `path` 0 names the descriptor `dirfd` (glibc's
+/// `futimens`). AT_SYMLINK_NOFOLLOW sets a link's own times; any other
+/// flag -EINVAL.
+pub fn utimensat(a: u64, pml4: u64, dirfd: u64, va: u64, times: u64, flags: u64) -> u64 {
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return neg(EINVAL)
+    }
+    var which: u64 = 3
+    var at = tree.clock()
+    var mt = at
+    if times != 0 {
+        if !uaccess.readable(pml4, times, 32) {
+            return neg(EFAULT)
+        }
+        let (sa, ta, ea) = timespec_in(pml4, times)
+        let (sm, tm, em) = timespec_in(pml4, times + 16)
+        if ea != 0 || em != 0 {
+            return neg(EINVAL)
+        }
+        which = (if sa { 1 } else { 0 }) | (if sm { 2 } else { 0 })
+        at = ta
+        mt = tm
+    }
+    var n: u64 = 0
+    if va == 0 {
+        if kind(a, dirfd) == K_CLOSED {
+            return neg(EBADF)
+        }
+        n = node_of(a, dirfd)
+    } else {
+        n = resolve(a, pml4, dirfd, va, flags & AT_EMPTY_PATH != 0, flags & AT_SYMLINK_NOFOLLOW == 0)
+        if is_err(n) {
+            return neg(rf(n))
+        }
+    }
+    if which == 0 {
+        return 0
+    }
+    let r = changeable(a, n)
+    if r != 0 {
+        return r
+    }
+    tree.set_times(rf(n), at, mt, which)
+    0
+}
+
+/// px36: `linkat(olddirfd, old, newdirfd, new, flags)` (and `link`): the
+/// file `old` names gains the name `new`. A last link in `old` is not
+/// followed (a hard link to the link itself, as Linux's `link` does)
+/// unless AT_SYMLINK_FOLLOW; AT_EMPTY_PATH links the descriptor's file;
+/// any other flag -EINVAL. A directory -EPERM; a name that exists
+/// -EEXIST (a link there not followed); a file with no name left
+/// -ENOENT; across `/dev` -EXDEV; the path errors of each side.
+pub fn linkat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, flags: u64) -> u64 {
+    if flags & !(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH) != 0 {
+        return neg(EINVAL)
+    }
+    let on = resolve(a, pml4, odfd, ova, flags & AT_EMPTY_PATH != 0, flags & AT_SYMLINK_FOLLOW != 0)
+    if is_err(on) {
+        return neg(rf(on))
+    }
+    if is_dir_node(on) {
+        return neg(EPERM)
+    }
+    let (nn, np, ns, nl, nt) = walk(a, pml4, ndfd, nva, false, false)
+    if !is_err(nn) {
+        return neg(EEXIST)
+    }
+    if rf(nn) != ENOENT || is_err(np) {
+        return neg(rf(nn))
+    }
+    if nt {
+        return neg(ENOENT) // measured: a new name with a trailing slash
+    }
+    if ty(on) != T_INO || ty(np) != T_INO {
+        return neg(EXDEV)
+    }
+    tree.link(rf(np), raw() + ns, nl, rf(on))
+}
+
+/// px36: `symlinkat(target, newdirfd, path)` (and `symlink`): a new
+/// symbolic link whose bytes are `target`'s (1 to 4095; empty -ENOENT,
+/// longer -ENAMETOOLONG). A name that exists -EEXIST (a link there not
+/// followed); a trailing slash -ENOENT (measured); in `/dev` refused by
+/// name, -EROFS; the path's errors. The target is kept in pax_kbuf's
+/// second half while the path is walked in its first.
+pub fn symlinkat(a: u64, pml4: u64, tva: u64, ndfd: u64, nva: u64) -> u64 {
+    let tl = path_in(pml4, tva)
+    if is_err(tl) {
+        return neg(rf(tl))
+    }
+    if tl == 0 {
+        return neg(ENOENT)
+    }
+    var k: u64 = 0
+    while k < tl {
+        put_kb(NORM + k, kb(k))
+        k += 1
+    }
+    let (nn, np, ns, nl, nt) = walk(a, pml4, ndfd, nva, false, false)
+    if !is_err(nn) {
+        return neg(EEXIST)
+    }
+    if rf(nn) != ENOENT || is_err(np) {
+        return neg(rf(nn))
+    }
+    if nt {
+        return neg(ENOENT)
+    }
+    if ty(np) == T_SYN {
+        return neg(ENOENT) // as anything made in /proc or /sys (px34)
+    }
+    if ty(np) != T_INO {
+        refuse(a, R_FIXED)
+        return neg(EROFS)
+    }
+    let i = tree.symlink(rf(np), raw() + ns, nl, raw() + NORM, tl)
+    if tree.failed(i) {
+        return i
+    }
+    0
+}
+
 /// px27: the calls the tree refuses by name, each with the errno Linux
-/// gives a file system that cannot do it: `which` 0 a hard link, a
-/// symbolic link or a device node (-EPERM: `link(2)`, `symlink(2)`,
-/// `mknod(2)`), 1 a change of mode, owner or times (-EOPNOTSUPP). No
-/// strace of a program in an image asks any of them.
+/// gives a file system that cannot do it: `which` 0 a device node
+/// (-EPERM: `mknod(2)`), 1 `utime` or `utimes` (-EOPNOTSUPP; px36: in no
+/// strace, `utimensat` is the call every program here makes).
 pub fn refused(a: u64, which: u64) -> u64 {
     if which == 0 {
         refuse(a, R_LINK)
@@ -3805,6 +4163,26 @@ fn n_time(n: u64, which: int) -> u64 {
 
 const NS: u64 = 1000000000
 
+/// px36: a time (signed nanoseconds since the epoch, in a u64) as
+/// `struct timespec` holds it: (the seconds, signed, rounded down; the
+/// nanoseconds, 0 to 10^9 - 1).
+fn tsec(t: u64) -> u64 {
+    if t < 0x8000000000000000 {
+        return t / NS
+    }
+    let m = !t + 1
+    let q = if m % NS == 0 { m / NS } else { m / NS + 1 }
+    !q + 1
+}
+
+fn tnsec(t: u64) -> u64 {
+    if t < 0x8000000000000000 {
+        return t % NS
+    }
+    let r = (!t + 1) % NS
+    if r == 0 { 0 } else { NS - r }
+}
+
 /// Write `struct stat` (x86-64, 144 bytes) for node `n` at user `st`.
 fn put_stat(pml4: u64, st: u64, n: u64) -> u64 {
     if !uaccess.writable(pml4, st, 144) {
@@ -3819,12 +4197,12 @@ fn put_stat(pml4: u64, st: u64, n: u64) -> u64 {
     uaccess.put(pml4, st + 48, n_size(n), 8) // st_size
     uaccess.put(pml4, st + 56, PAGE, 8) // st_blksize
     uaccess.put(pml4, st + 64, n_blocks(n), 8) // st_blocks
-    uaccess.put(pml4, st + 72, n_time(n, 0) / NS, 8) // st_atim
-    uaccess.put(pml4, st + 80, n_time(n, 0) % NS, 8)
-    uaccess.put(pml4, st + 88, n_time(n, 1) / NS, 8) // st_mtim
-    uaccess.put(pml4, st + 96, n_time(n, 1) % NS, 8)
-    uaccess.put(pml4, st + 104, n_time(n, 2) / NS, 8) // st_ctim
-    uaccess.put(pml4, st + 112, n_time(n, 2) % NS, 8)
+    uaccess.put(pml4, st + 72, tsec(n_time(n, 0)), 8) // st_atim (px36: signed)
+    uaccess.put(pml4, st + 80, tnsec(n_time(n, 0)), 8)
+    uaccess.put(pml4, st + 88, tsec(n_time(n, 1)), 8) // st_mtim
+    uaccess.put(pml4, st + 96, tnsec(n_time(n, 1)), 8)
+    uaccess.put(pml4, st + 104, tsec(n_time(n, 2)), 8) // st_ctim
+    uaccess.put(pml4, st + 112, tnsec(n_time(n, 2)), 8)
     0
 }
 
@@ -3842,14 +4220,14 @@ fn put_statx(pml4: u64, sx: u64, n: u64) -> u64 {
     uaccess.put(pml4, sx + 32, n_ino(n), 8) // stx_ino
     uaccess.put(pml4, sx + 40, n_size(n), 8) // stx_size
     uaccess.put(pml4, sx + 48, n_blocks(n), 8) // stx_blocks
-    uaccess.put(pml4, sx + 64, n_time(n, 0) / NS, 8) // stx_atime
-    uaccess.put(pml4, sx + 72, n_time(n, 0) % NS, 4)
-    uaccess.put(pml4, sx + 80, n_time(n, 3) / NS, 8) // stx_btime
-    uaccess.put(pml4, sx + 88, n_time(n, 3) % NS, 4)
-    uaccess.put(pml4, sx + 96, n_time(n, 2) / NS, 8) // stx_ctime
-    uaccess.put(pml4, sx + 104, n_time(n, 2) % NS, 4)
-    uaccess.put(pml4, sx + 112, n_time(n, 1) / NS, 8) // stx_mtime
-    uaccess.put(pml4, sx + 120, n_time(n, 1) % NS, 4)
+    uaccess.put(pml4, sx + 64, tsec(n_time(n, 0)), 8) // stx_atime (px36: signed)
+    uaccess.put(pml4, sx + 72, tnsec(n_time(n, 0)), 4)
+    uaccess.put(pml4, sx + 80, tsec(n_time(n, 3)), 8) // stx_btime
+    uaccess.put(pml4, sx + 88, tnsec(n_time(n, 3)), 4)
+    uaccess.put(pml4, sx + 96, tsec(n_time(n, 2)), 8) // stx_ctime
+    uaccess.put(pml4, sx + 104, tnsec(n_time(n, 2)), 4)
+    uaccess.put(pml4, sx + 112, tsec(n_time(n, 1)), 8) // stx_mtime
+    uaccess.put(pml4, sx + 120, tnsec(n_time(n, 1)), 4)
     uaccess.put(pml4, sx + 128, n_rdev(n, 0), 4) // stx_rdev_major
     uaccess.put(pml4, sx + 132, n_rdev(n, 1), 4) // stx_rdev_minor
     uaccess.put(pml4, sx + 140, n_dev(n), 4) // stx_dev_minor (0:1, /dev 0:5)
@@ -3869,7 +4247,7 @@ pub fn fstatat(a: u64, pml4: u64, dirfd: u64, va: u64, st: u64, flags: u64) -> u
     if flags & (0xffffffff - AT_SYMLINK_NOFOLLOW - AT_EMPTY_PATH - 0x800) != 0 {
         return neg(EINVAL)
     }
-    let n = resolve(a, pml4, dirfd, va, flags & AT_EMPTY_PATH != 0)
+    let n = resolve(a, pml4, dirfd, va, flags & AT_EMPTY_PATH != 0, flags & AT_SYMLINK_NOFOLLOW == 0)
     if is_err(n) {
         return neg(rf(n))
     }
@@ -3879,7 +4257,7 @@ pub fn fstatat(a: u64, pml4: u64, dirfd: u64, va: u64, st: u64, flags: u64) -> u
 /// `statx(dirfd, path, flags, mask, sx)`: every basic field, whatever
 /// the mask asks (statx(2) allows more than asked).
 pub fn statx(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, sx: u64) -> u64 {
-    let n = resolve(a, pml4, dirfd, va, flags & AT_EMPTY_PATH != 0)
+    let n = resolve(a, pml4, dirfd, va, flags & AT_EMPTY_PATH != 0, flags & AT_SYMLINK_NOFOLLOW == 0)
     if is_err(n) {
         return neg(rf(n))
     }
@@ -3955,6 +4333,9 @@ fn fixed_len(c: u64) -> u64 {
 fn d_type(c: u64) -> u64 {
     if is_dir_node(c) {
         return DT_DIR
+    }
+    if ty(c) == T_INO && tree.is_link(rf(c)) {
+        return DT_LNK // px36
     }
     if ty(c) == T_INO && tree.is_sock(rf(c)) {
         return DT_SOCK // px34 (measured: 12)
