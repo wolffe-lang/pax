@@ -1,6 +1,7 @@
 # tests/mpx4-lobo, session `load` (px25): four workers under a sustained
 # load from this host through the forward: after a warm-up of both
-# paths, three identical rounds of ROUND seconds (@ROUND@, the test
+# paths and one unmeasured round (r0: lobo's thread pool and kept files
+# grow to the load), three identical rounds of ROUND seconds (@ROUND@, the test
 # writes it in) of four clients, a connection a request, alternating `/`
 # and the 300,000-byte file, with the census between rounds (`census N`,
 # then /proc/meminfo, /proc/sys/fs/file-nr, /proc/net/sockstat and
@@ -16,6 +17,8 @@ capture M master (\d+)\s*$
 wait generation-activated gen=1 seq=2 worker=4 120
 get warm 80 / 50 new
 get warm-big 80 /big.txt 10 new
+load r0 80 /,/big.txt @ROUND@ 4
+loadwait r0
 sleep 2
 mark
 type echo census 0; cat /proc/meminfo /proc/sys/fs/file-nr /proc/net/sockstat /proc/[0-9]*/status; echo census end

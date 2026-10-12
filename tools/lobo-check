@@ -160,11 +160,20 @@ if session == "load":
     # same after round 3 as after round 1 (identical rounds). lobo's own
     # resident set is reported beside Linux's, not held flat: it grows
     # on Linux too.
-    flat = ("kernel", "files", "tcp-inuse", "tcp-mem", "lobo-procs", "lobo-threads")
+    # Each thread holds a 16 KiB kernel stack (4 frames): what the
+    # kernel holds beyond the processes' pages, less 16 kB a lobo thread,
+    # is held within 8 kB (2 frames: the census's own read of /proc
+    # holds a frame of text while `cat` runs, measured ±1 frame); the
+    # rest exactly.
+    flat = ("files", "tcp-inuse", "tcp-mem", "lobo-procs")
     if 1 in c and 3 in c:
         moved = ["%s %s -> %s" % (k, c[1][k], c[3][k]) for k in flat if c[1][k] != c[3][k]]
-        say(not moved, "R10 flat", "after rounds 1 and 3: the kernel's frames beyond the processes' pages (%d kB), open files (%d), TCP blocks in use (%d) and their buffers (%d frames), lobo's processes (%d) and threads (%d) the same" % (
-            c[3]["kernel"], c[3]["files"], c[3]["tcp-inuse"], c[3]["tcp-mem"], c[3]["lobo-procs"], c[3]["lobo-threads"]) if not moved else "moved: " + "; ".join(moved))
+        k1 = c[1]["kernel"] - 16 * c[1]["lobo-threads"]
+        k3 = c[3]["kernel"] - 16 * c[3]["lobo-threads"]
+        if abs(k3 - k1) > 8:
+            moved.append("kernel less 16 kB a thread %d -> %d kB" % (k1, k3))
+        say(not moved, "R10 flat", "after rounds 1 and 3: the kernel's frames beyond the processes' pages and page tables less 16 kB a thread %d -> %d kB (within 8 kB), open files (%d), TCP blocks in use (%d) and their buffers (%d frames), lobo's processes (%d) the same; lobo's threads %d -> %d" % (
+            k1, k3, c[3]["files"], c[3]["tcp-inuse"], c[3]["tcp-mem"], c[3]["lobo-procs"], c[1]["lobo-threads"], c[3]["lobo-threads"]) if not moved else "moved: " + "; ".join(moved))
         lg = c[3]["lobo-rss"] - c[1]["lobo-rss"]
         ll = (cl_[3]["lobo-rss"] - cl_[1]["lobo-rss"]) if 1 in cl_ and 3 in cl_ else None
         say(True, "R12 lobo's resident set (measured)", "rounds 1 to 3: PAX %+d kB (%d -> %d), Linux %s" % (
@@ -201,7 +210,7 @@ if session == "load":
         "meminfo %s (Linux's first three %s); file-nr %s; sockstat %d of Linux's 3 line shapes (Linux %d)" % (
             mp, ml, "three numbers on both" if fp and fl else "not three numbers", len(sp), len(sl)))
     for d, sd in ((pax, "PAX"), (lin, "Linux")):
-        for r in ("r1", "r2", "r3", "reload"):
+        for r in ("r0", "r1", "r2", "r3", "reload"):
             f = os.path.join(d, "load-%s.txt" % r)
             t = open(f).read().strip() if os.path.exists(f) else "missing"
             ok = " 0 failed" in t
