@@ -246,3 +246,64 @@ that file with a header; it replaces px29's.
 Branch `px33`; PR open, unmerged; CI green at head;
 `wolf/tools/lane-audit.sh pax px33 <PR>` from the org directory, exit
 status read directly.
+
+## Tempo pass (px33b, 2026-10-12)
+
+The maintainer, hearing the 36-part render: "plodding … more natural,
+but not blistering". Every tempo instruction on pp. 196-209 was read
+again in the 1897 score (page images 0198-0211). **There is no
+metronome mark in the span** (no M.M., no note = number); the score
+gives words and three printed equivalences. So every number is the
+arranger's, and the score's relations are kept exactly. Words
+confirmed from the scan: Schneller (p196, from 43.5), Langsamer and the
+fermata on 43.7's rest (p197), 44 Mit Aufschwung, aber nicht eilen
+(die Halbe wie zuletzt die Viertel), Vorwärts 45.5, Drängend 45.9 and
+Nicht schleppen 45.13 (p199), 46 Langsam (die Viertel wie zuletzt die
+Halben) and at 46.5 "Halbe taktiren (aber das Zeitmass zunächst noch
+nicht beschleunigen)" (p200; a footnote asks the conductor to beat
+quarters in the first bars), Etwas drängend. Langsam steigern 46.13
+(p201), Wieder etwas zurückhaltend 46.22 and the Luft-Pause after
+46.24 (p202), 47 Più mosso and Ritenuto 47.13 (p203), 48 Pesante (die
+Viertel wie früher die Halbe) and Etwas schneller 48.9 (p204), 49
+Wieder zurückhaltend. Rit. (p205), Molto rit. 49.5 and Etwas bewegter
+(Langsame Halbe taktiren) 49.7 (p206), nothing on p207, 50 Più mosso
+and Noch schneller (Ganze Takte schlagen) 50.5 (p208), 51 Mit höchster
+Kraftentfaltung. Noch einmal so langsam. Halbe breit taktiren (die
+Halbe = wie zuletzt die Ganze), and "scharf abreissen" on the last bar
+(p209). **Corrected**: Nicht schleppen stands over 45.13, not 45.12,
+and Wieder etwas zurückhaltend over 46.22, not 46.21.
+
+| bar | fig. | word (relation) | old | new |
+|---|---|---|---|---|
+| 0 | 43.5 b4 | Schneller | q 60 | q 72 |
+| 2 | 43.7 | Langsamer; fermata on the beat-3 rest | q 48, fermata a quarter | q 58, fermata a quarter (2x the rest) |
+| 7 | 44.1 | Mit Aufschwung, aber nicht eilen (h = the last q) | h 48 | h 58 |
+| 27 | 45.5 | Vorwärts | h 54 | h 66 |
+| 31 | 45.9 | Drängend | h 60 | h 72 |
+| 35 | 45.13 | Nicht schleppen (was at bar 34) | h 52 | h 62 |
+| 39 | 46.1 | Langsam (q = the last h); 46.5 Halbe taktiren, no change | q 52 | q 62 |
+| 49 | 46.11 | (restated) | q 52 | q 62 |
+| 51 | 46.13 | Etwas drängend. Langsam steigern | q 56 at once | accel to q 68 over two bars |
+| 60 | 46.22 | Wieder etwas zurückhaltend (was at bar 59) | q 50 at once | rit to q 60 over two bars |
+| 62 | 46.24 | Luft-Pause | an eighth | an eighth |
+| 63 | 47.1 | Più mosso | h 38 | h 48 |
+| 75 | 47.13 | Ritenuto | rit to h 30 over 2 | rit to h 40 over 2 |
+| 79 | 48.1 | Pesante (q = the earlier h: 47's, before the Ritenuto) | q 40 | q 48 |
+| 87 | 48.9 | Etwas schneller | q 46 | q 55 |
+| 88 | 48.10 | (continues; px33 restated another value) | q 56 | q 55 |
+| 93 | 49.1 | Wieder zurückhaltend. Rit. | rit to q 44 over 4 | rit to q 47 over 4 |
+| 97 | 49.5 | Molto rit. | rit to q 36 over 2 | rit to q 40 over 2 |
+| 99 | 49.7 | Etwas bewegter (Langsame Halbe taktiren) | h 36 | h 36 (kept) |
+| 107 | 50.1 | Più mosso | h 42 | h 44 |
+| 111 | 50.5 | Noch schneller (Ganze Takte schlagen) | w 40 | w 46 |
+| 119 | 51.1 | Noch einmal so langsam (h = the last w) | h 40 | h 46 |
+
+49.7 stays at h 36. At h 38 or faster, harp I's and harp II's runs at
+49.7-9 ring past play's 128 voices: 3 stolen at h 38, 10 at h 40, 23 at
+h 44, measured with `play -c`. At h 36 there are 125 voices and none
+stolen. It is still "etwas bewegter" than the Molto rit.'s quarter 40
+(the quarter is now 72), and the halves are "langsame". The written
+lengths are 463.8 → **398.1 s** (`auferstehung`, -14.2%) and 246.6 →
+**218.6 s** (`auferstehung-close`, -11.4%). By play's `play -c`
+(0 stolen, 0 dropped, 125 voices at most) and the listing; by
+`notes/px33/tools/length.py` 399.0 s and 219.5 s.
