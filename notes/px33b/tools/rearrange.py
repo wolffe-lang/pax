@@ -7,6 +7,7 @@
 #   + P WORDS...         add a line for P (after the bar's existing lines)
 #   move P Q             P's line(s) become Q's
 #   copy P Q             Q gets a copy of P's line(s)
+#   barline WORDS        the bar's own line becomes `bar N WORDS` (meter, tempo, rit, fermata: px33b's tempo pass)
 #   split P K LOW HIGH   P's events: the K lowest notes of each chord to LOW, the rest to HIGH; rests and
 #                        dynamic words to both; a chord with K or fewer notes is an error
 # Every op must find what it names; anything else is an error (status 2).
@@ -100,7 +101,13 @@ for line in open(src):
         elif not parts_done: body.extend(head_lines); parts_done = True
         continue
     if w and w[0] == "bar":
-        flush(); bar = int(w[1]); out.append(line); continue
+        flush(); bar = int(w[1])
+        bl = [x for x in ops.get(bar, []) if x[0].split()[0] == "barline"]
+        if bl:
+            ops[bar] = [x for x in ops[bar] if x not in bl]
+            c = re.search(r"(^|\s)#(.*)$", bl[-1][1])
+            line = ("bar %d %s" % (bar, " ".join(bl[-1][0].split()[1:]))).rstrip() + ("   # px33b: " + c.group(2).strip() if c else "")
+        out.append(line); continue
     body.append(line)
 flush()
 if ops: die("ops left for bars not in SOURCE: %s" % sorted(ops))
