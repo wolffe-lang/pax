@@ -41,9 +41,10 @@
 #      study: native BIOS and release UEFI; long: release BIOS): the
 #      sound device's line, the run to `halt`, no `refused:` line, play's
 #      `played` line with 0 clamped, the capture judged by the same spec
-#      as O4. long is tools/orch-stress's 230 s, 16 parts, 42 voices in
-#      QEMU's 256 MiB: play holds at most 2048 frames (8 MiB) at its
-#      end, nothing clips.
+#      as O4. long is tools/orch-stress's 230 s, 16 parts, 42 voices, and
+#      wide its 48 parts (the most a score may have) for 40 bars, 64
+#      voices, each in QEMU's 256 MiB: play holds at most 2048 frames
+#      (8 MiB) at its end, its cost under 50% of real time, nothing clips.
 #   O6 the cost under TCG (or KVM), in the guest: play -c of the study:
 #      at least 16 voices, 0 clamped, under 50% of real time (so it
 #      streams in real time); the figures go to the runs file.
@@ -165,7 +166,11 @@ case $vo in *" 64 voices at most) "*" 0 clamped, "*) ;; *) why+=" voices: '$vo';
 st=$(printf '%s' "$vo" | sed -n 's/.* clamped, \([0-9]*\) stolen,.*/\1/p')
 [ "${st:-0}" -ge 8 ] || why+=" voices: ${st:-0} stolen, want >= 8;"
 printf 'host voices %s\n' "$vo" >> "$runs"
-[ -z "$why" ] && say "PASS O4 host: checks, marks, timbres, balance, the study: $(for t in checks marks timbres balance orchestra; do tail -n 1 "$work/host-$t.verdict" | sed 's/orch-check: //'; done | tr '\n' ' ')checks; the study $v voices at most, limited in $lim blocks, 0 clamped; 72 voices asked: 64 sound, $st stolen, 0 clamped" || bad "O4 host:$why"
+python3 "$PAX_ROOT/tools/orch-stress" 48 40 > "$work/wide"
+wd=$("$play" -c "$work/wide" 2>&1)
+case $wd in *", 48 parts, 64 voices at most) "*" 0 clamped, "*) ;; *) why+=" wide: '$wd';" ;; esac
+printf 'host wide %s\n' "$wd" >> "$runs"
+[ -z "$why" ] && say "PASS O4 host: checks, marks, timbres, balance, the study: $(for t in checks marks timbres balance orchestra; do tail -n 1 "$work/host-$t.verdict" | sed 's/orch-check: //'; done | tr '\n' ' ')checks; the study $v voices at most, limited in $lim blocks, 0 clamped; 72 voices asked: 64 sound, $st stolen, 0 clamped; 48 parts read and sounded" || bad "O4 host:$why"
 rm -f "$work"/host-*.raw
 
 if [ "$hostonly" = 1 ]; then
@@ -175,12 +180,12 @@ fi
 
 # O0: the kernels and the images.
 "$PAX_ROOT/tools/fetch-limine" || exit 2
-SCENARIOS="checks marks timbres balance study long"
+SCENARIOS="checks marks timbres balance study long wide"
 runlist() {
     case $1 in
         checks|marks|timbres|balance) printf '%s\n' "/bin/play -m /usr/share/px32/$1" ;;
         study) printf '%s\n' "/bin/play -c orchestra" "/bin/play -m orchestra" ;;
-        long) printf '%s\n' "/bin/play -m /usr/share/px32/long" ;;
+        long|wide) printf '%s\n' "/bin/play -c /usr/share/px32/$1" "/bin/play -m /usr/share/px32/$1" ;;
     esac
 }
 why=
@@ -191,6 +196,7 @@ for s in $SCENARIOS; do
     cp "$tunes"/* "$PAX_ROOT"/user/scores/* "$r/usr/share/tunes/"
     cp "$pt/checks" "$pt/marks" "$pt/timbres" "$pt/balance" "$r/usr/share/px32/"
     [ "$s" = long ] && python3 "$PAX_ROOT/tools/orch-stress" > "$r/usr/share/px32/long"
+    [ "$s" = wide ] && python3 "$PAX_ROOT/tools/orch-stress" 48 40 > "$r/usr/share/px32/wide"
     runlist "$s" > "$r/etc/pax-run"
     pairs=()
     for f in $(cd "$r" && find . -type f | sort); do
@@ -232,7 +238,7 @@ for leg in $legs; do
         for s in $SCENARIOS; do
             case $s in
                 study|marks|timbres|balance) [ "$tier-$leg" = native-bios ] || [ "$tier-$leg" = release-uefi ] || continue ;;
-                long) [ "$tier-$leg" = release-bios ] || continue ;;
+                long|wide) [ "$tier-$leg" = release-bios ] || continue ;;
             esac
             id="$tier $leg $s"
             base=$PAX_BUILD/mpx3-orchestra-$tier-$leg-$s
@@ -258,15 +264,19 @@ for leg in $legs; do
             pl=$(grep -m1 '^played ' "$norm")
             case $pl in *", 0 clamped,"*) ;; *) why+=" played line: '${pl:-none}';" ;; esac
             spec=$pt/$s.spec; [ "$s" = study ] && spec=$pt/orchestra.spec
-            if [ "$s" = long ]; then
+            if [ "$s" = long ] || [ "$s" = wide ]; then
                 # 230 s, 16 parts, 42 voices in QEMU's 256 MiB: play's
                 # memory is the score's, not the tune's length's
                 fr=$(grep -m1 -E '^user: frames free [0-9]+ before, [0-9]+ with 1 processes' "$norm")
                 b=$(printf '%s' "$fr" | sed -E 's/^user: frames free ([0-9]+) before, ([0-9]+) with.*/\1/')
                 w=$(printf '%s' "$fr" | sed -E 's/^user: frames free ([0-9]+) before, ([0-9]+) with.*/\2/')
                 [ -n "$b" ] && [ -n "$w" ] && [ $((b - w)) -le 2048 ] || why+=" play held $((${b:-0} - ${w:-0})) frames (want <= 2048): '$fr';"
-                case $pl in *" 42 voices at most,"*) ;; *) why+=" not 42 voices;" ;; esac
-                printf 'long: %s\n' "$fr" > "$base.expect.txt"
+                vw=42; [ "$s" = wide ] && vw=64
+                case $pl in *" $vw voices at most,"*) ;; *) why+=" not $vw voices at most;" ;; esac
+                cl=$(grep -m1 '^cost ' "$norm")
+                pc=$(printf '%s' "$cl" | sed -n 's/.*, \([0-9]*\)\.[0-9]% of real time.*/\1/p')
+                [ -n "$pc" ] && [ "$pc" -lt 50 ] || why+=" cost ${pc:-?}% of real time;"
+                printf '%s: %s; %s\n' "$s" "$fr" "$cl" > "$base.expect.txt"
                 [ -s "$wav" ] || why+=" no capture;"
                 [ -s "$wav" ] && "$check" --expect /dev/stdin "$wav" <<< "noclip" >> "$base.expect.txt" 2>&1 || why+=" clipped;"
             elif [ -s "$wav" ]; then
