@@ -1,0 +1,160 @@
+make: umask 022; mkdir /t 0, again -17, /t: mode 40755 links 2 size 40 blocks 0
+make: mkdir /t/no/such -2, under a file -20, with a trailing slash 0 (mode 40755 links 2 size 40 blocks 0), of . -17, of / -17, of /dev -17
+create: O_CREAT|O_EXCL makes it 1, mode 100644 links 1 size 0 blocks 0; again -17; O_CREAT alone opens it 1
+create: write 5 bytes 5, mode 100644 links 1 size 5 blocks 8, the offset 5; a read on it -9
+create: read back 'hello'; a write on a descriptor opened to read -9
+create: O_TRUNC leaves mode 100644 links 1 size 0 blocks 0
+create: O_RDONLY|O_TRUNC opens 1 and leaves mode 100644 links 1 size 0 blocks 0
+create: a directory opened to write -21, to read and write -21, with O_CREAT -21; a file with a trailing slash -20; O_DIRECTORY on a file -20
+create: in a missing directory -2, under a file -20, a new name with a trailing slash -21, a missing name without O_CREAT -2
+mode: under umask 027 (the old one 022): mode 100640 links 1 size 0 blocks 0; mode 40750 links 2 size 40 blocks 0
+mode: under umask 0: mode 100666 links 1 size 0 blocks 0; made with mode 0: mode 100000 links 1 size 0 blocks 0, and root opens it to write 1
+mode: umask answers the old mask 000
+make: unlink the five 0 0 0 0 0, rmdir the two 0 0
+append: two descriptors, three writes: 'one
+two
+three
+' (mode 100644 links 1 size 14 blocks 8)
+append: a third without O_APPEND writes at its own offset: 'ONE
+two
+three
+'
+append: after lseek to 0 the appending one still appends: size 19 blocks 8, its offset 19
+append: pwrite at 0 on it 5: the file starts 'ONE' and is size 24 blocks 8
+append: two processes, 200 lines each: the child's status 0, size 12800 blocks 32, the child's lines 200, the parent's 200, every line whole 1
+hole: lseek past the end 1048576 leaves size 0 blocks 0; one byte written there: size 1048577 blocks 8
+hole: 16 bytes read from the hole 16, all zero 1; read at the end 1, past it 0
+hole: pwrite of 3 bytes at 12288: 3, size 1048577 blocks 16
+hole: ftruncate to 5000: 0, size 5000 blocks 0; to 10000: 0, size 10000 blocks 0
+hole: 20 bytes across the page boundary at 4086: 20, size 10000 blocks 16
+hole: cut to 4090 and grown again: the four bytes kept 'qqqq', what was cut reads zero 1, size 10000 blocks 8
+hole: ftruncate to 0: 0, size 0 blocks 0; to -1: -22
+hole: ftruncate on a descriptor opened to read -22; truncate by path to 7: 0 (size 7 blocks 0), of a directory -21, of a missing name -2
+hole: pwrite on a descriptor opened to read -9, pread on one opened to write -9, pwrite at a negative offset -22
+sync: fsync 0, fdatasync 0, of a directory 0, of a closed descriptor -9
+hole: 5 MiB written 5242880, size 5242880 blocks 10240; cut to 3 MiB and 100 bytes 0, size 3145828 blocks 6152; to 1 MiB 0, size 1048576 blocks 2048
+hole: grown back to 5 MiB: what was cut reads zero 1 (8), what was kept is there 1 (8); 3 bytes written at 4 MiB 3, size 5242880 blocks 2056; one byte at 700 MiB 1, size 734003201 blocks 2064
+unlinked: mode 100644 links 1 size 12288 blocks 24; unlink 0; by name -2; by descriptor mode 100644 links 0 size 12288 blocks 24
+unlinked: still read 8 'uuuuuuuu', written 4096, size 16384 blocks 32; the name made again is another file: mode 100644 links 1 size 3 blocks 8
+unlinked: after one close the other descriptor still reads 8; then closed
+remove: unlink of a directory -21, of a missing name -2, of a file with a trailing slash -20, of . -21
+remove: rmdir of a file -20, of a directory with an entry -39, of a missing name -2, of d/. -22, of d/.. -39, of / -16, of /dev -16
+remove: unlinkat with AT_REMOVEDIR on a file -20, without it on a directory -21; then the file 0 and the directory 0
+cwd: chdir 0, getcwd '/t/w'; rmdir of it from inside 0; then getcwd -2, . is mode 40755 links 0 size 40 blocks 0, by descriptor mode 40755 links 0 size 40 blocks 0, a reading of it -2
+cwd: a file made in it -2, a directory -2, . opened 1, .. is /t 1, the name is gone -2
+cwd: chdir .. 0, getcwd '/t'; /t: mode 40755 links 2 size 40 blocks 0
+rename: a to c 0: a -2, c 'aaa', the same inode 1
+rename: c over b 0: b 'aaa', c -2; the replaced file by its descriptor: mode 100644 links 0 size 5 blocks 8, read 'bbbbb'; the moved file's descriptor writes on: 1, b 'Zaa'
+rename: b to b 0, to ./b 0 (mode 100644 links 1 size 3 blocks 8); a missing name -2; into a missing directory -2; a file to a missing name with a slash -20
+rename: /t links 5 size 120 blocks 0, d1 links 3 size 60 blocks 0; a file onto a directory -21, a directory onto a file -20, a directory onto one with an entry -39, into itself -22, below itself -22
+rename: a directory onto an empty one 0 (d2's inode is now e's 1, e -2); to a new name with a slash 0
+rename: a directory moved under another 0: /t links 4 size 100 blocks 0, d3 links 3 size 60 blocks 0, d1 links 2 size 40 blocks 0; a process working in it is now in '/t/d3/moved', its .. is d3 1, its file 'f'
+rename: of . -16, of .. -16, onto . -16, of / -16, of /dev -16, onto /dev -16, into /dev -18, out of /dev -18
+rename: renameat by descriptors 0, renameat2 with no flag 0; b -2, z 'Zaa'
+rename: removed: 0 0 0 0
+dir: empty mode 40755 links 2 size 40 blocks 0; with three files and two directories mode 40755 links 4 size 140 blocks 0; its names, sorted: ../,./,one ,s1/,s2/,three ,two 
+dir: . is the directory's inode 1, .. its parent's 1; a buffer too small for one entry -22; after lseek to 0 it reads again 1; read() on it -21
+dir: one file removed mode 40755 links 4 size 120 blocks 0, one directory removed mode 40755 links 3 size 100 blocks 0
+dir: read while it changes: every name that stayed was returned exactly once 1, a name returned twice 0, a removed name returned after its removal 0
+dir: then 36 names, mode 40755 links 2 size 760 blocks 0
+dir: emptied mode 40755 links 2 size 40 blocks 0, removed 0
+dir: 600 names made 600, listed with . and .. 602, mode 40755 links 2 size 12040 blocks 0; a third removed 200 and 100 more made: listed 502, the same name twice 0, mode 40755 links 2 size 10040 blocks 0
+dir: the last of the 600 still reads 'm', the first is gone -2; 40 names of 250 bytes made 40: listed 542, mode 40755 links 2 size 10840 blocks 0
+dir: every name removed while the directory is read: 540; mode 40755 links 2 size 40 blocks 0; rmdir 0
+names: 255 bytes made 1 and removed 0; 256 bytes: open -36, mkdir -36, stat -36, rename onto it -36
+names: a path of 4095 bytes 0, of 4096 bytes -36
+errno: ELOOP: /proc/self/exe opened with O_NOFOLLOW -40; EXDEV: a file renamed into /dev -18; ENOTEMPTY -39; EEXIST -17; EISDIR -21; ENOTDIR -20; EINVAL -22; EBUSY -16
+access: a 0644 file to read and write 0, to execute -13 (root); a directory to execute 0; a missing name -2; a bad mode -22; faccessat (glibc's, and the call itself) 0 -13
+errno: EACCES: execve of a file with no execute bit -13; EBADF: write to a closed descriptor -9
+paths: /.. is / 1, /t/p/../.. is / 1; through a missing directory and back -2; .. of a file -20; a directory with a trailing slash 0, with /. 0
+paths: / and /t are one file system 1 and two files 1; /dev is another 1, /dev/null is on it 1
+paths: openat in a directory descriptor writes 2 ('pg'), mkdirat 0, faccessat 0; under a file -20; with a file as the directory -20
+paths: fchdir 0, getcwd '/t/p'; unlinkat there 0, with AT_REMOVEDIR 0; an empty path -2
+paths: a reader at offset 2 of a file cut to 1 byte reads 0; SEEK_END - 1 is 0; lseek before the start -22, whence 9 -22
+initramfs: /etc/pax-run read 1, links 1 size 10 blocks 8; one byte written in it 1: the rest unchanged 1
+initramfs: cut to 3 0 and grown to 9 0: three bytes kept and six zeros 1
+initramfs: renamed 0, removed 0, made again with what it held '/bin/tree'
+initramfs: the program renamed 0, run by its new name: status 7; renamed back 0
+initramfs: the program copied: every byte 1, mode 100755 links 1 size 856920 blocks 1680
+~exec: a program copied since boot, run: status 113 (7: it ran; 113: -EACCES)
+atomic: 500 renames over a name while another process opens it: the renames failed 0 times, the reader's status 0 (0: it never found the name missing or empty)
+times: a new file's times lie between the clock before and after: mtime 1, ctime 1, atime 1; mtime is ctime 1
+times: a write moves mtime 1 and ctime 1, and leaves the directory's alone 1
+times: a read leaves mtime 1 and ctime 1; it moves an atime that was not after them 1, and a second read does not move it again 1
+times: a rename leaves the file's mtime 1, moves its ctime 1 and the directory's mtime 1
+times: a truncation moves mtime 1; an unlink moves the directory's mtime 1 and ctime 1
+copy: copy_file_range of 10000 bytes 10000, then 0; the same bytes 1; offsets 10000 and 10000
+copy: with offsets 50: they moved to 150 and 20050, the descriptors' did not 1, the bytes are the source's 1, size 20050 blocks 32
+copy: onto an O_APPEND descriptor -9; from a pipe -22; a file onto itself, overlapping -22, apart 10; with a flag -22; from a directory -21
+copy: sendfile file to file 10000, size 10000 blocks 24; onto an O_APPEND descriptor -22; splice file to file -22
+link: link a b 0; a mode 100644 links 2 size 3 blocks 8; b mode 100644 links 2 size 3 blocks 8; one inode 1; its ctime moved 1, its mtime did not 1
+link: again -17; a missing name -2; into a missing directory -2; a new name with a trailing slash -2, an old one -20; through a file -20; a flag -22; into /dev -18; out of /dev -18
+link: written through b, read through a: abcdef; the directory mode 40755 links 2 size 80 blocks 0
+link: unlink a 0; b mode 100644 links 1 size 6 blocks 8, abcdef; a -2
+link: 100 more names 100; b mode 100644 links 101 size 6 blocks 8; the directory mode 40755 links 2 size 2060 blocks 0
+link: every name removed while it is open 0: mode 100644 links 0 size 6 blocks 8; still reads 6 'abcdef'
+link: AT_EMPTY_PATH of a file with no name -2; of one with a name 0, mode 100644 links 2 size 1 blocks 8
+link: a rename of one name over another of the same file 0; p mode 100644 links 2 size 1 blocks 8; q mode 100644 links 2 size 1 blocks 8
+link: /bin/tree linked 0, run by its second name: status 7; /bin/tree links 2 size 856920 blocks 1680
+link: /bin/tree again links 1 size 856920 blocks 1680
+link: gone: rmdir 0
+symlink: s -> f 0; lstat mode 120777 links 1 size 1 blocks 0; stat mode 100644 links 1 size 3 blocks 8; reads eff; its times lie between the clock before and after 1 1 1
+symlink: readlink s 'f' 1, with room for 1 'f' 1; of f -22
+symlink: readlink of a missing name -2; of s/ -20; of / -22
+symlink: readlink with no room -22; symlinkat 0; readlinkat 6 '../y/f'; reads eff
+symlink: an empty target -2; over a file -17; over a link -17; in a missing directory -2; under a file -20; a name with a trailing slash -2
+symlink: a target of 4095 bytes 0, mode 120777 links 1 size 4095 blocks 8; of 4096 -36
+symlink: blocks by the target's length 1:0 59:0 60:0 61:0 127:0 128:8 129:8 255:8 256:8 1000:8 4095:8
+symlink: d -> nowhere: open -2, access -2, O_CREAT|O_EXCL -17; O_CREAT 0: nowhere mode 100644 links 1 size 4 blocks 8 'made'; d mode 120777 links 1 size 7 blocks 0
+symlink: O_NOFOLLOW on a link -40, on a file 0, with O_DIRECTORY on a link -20
+symlink: through a link to a directory deep; an absolute one deep; one with dots and slashes deep; .. after one is the target's parent 1
+symlink: ds mode 120777 links 1 size 3 blocks 0; ds/ mode 40755 links 3 size 60 blocks 0 (lstat); s/ -20; s/x -20
+symlink: mkdir over a link to a directory -17, over one that leads nowhere -17, through one 0; rmdir of the link -20, through it 0
+symlink: with a trailing slash: mkdir through a link that leads nowhere -17 (-2); rmdir of a link to a directory -20, unlink -20; a file renamed onto one -20, the link renamed -20; dj links 1 size 6 blocks 0, in links 2 size 60 blocks 0
+symlink: chdir through a link, getcwd '/t/y/sub/in'; ../x deep
+symlink: a chain: 39 links end, 40 end, 41 -40; lstat of the 41st links 1 size 3 blocks 0
+symlink: a link to itself -40, a loop of two -40, through it -40; stat -40; lstat links 1 size 4 blocks 0
+symlink: rename of a link 0: s3 'f' 1, f mode 100644 links 1 size 3 blocks 8
+symlink: rename over a link 0: s3 'nowhere2' 8, f eff
+symlink: a hard link to a link 0: mode 120777 links 2 size 6 blocks 0, '../y/f' 6; with AT_SYMLINK_FOLLOW 0: mode 100644 links 2 size 3 blocks 8
+symlink: unlink of one of them 0: hs links 1 size 6 blocks 0; f links 2 size 3 blocks 8
+symlink: truncate through a link 0: de
+symlink: the directory mode 40755 links 3 size 1160 blocks 0: 51 links, 4 files, 3 directories
+symlink: gone: rmdir 0
+mode: chmod 0600 0: mode 100600 links 1 size 1 blocks 8; ctime moved 1, mtime did not 1
+mode: 07777 0 mode 107777 links 1 size 1 blocks 8; with type bits 0 mode 100644 links 1 size 1 blocks 8; 0 0 mode 100000 links 1 size 1 blocks 8, and root still opens it to read and write 0
+mode: fchmod 0 mode 100640 links 1 size 1 blocks 8; fchmodat 0 mode 100444 links 1 size 1 blocks 8; relative to a directory 0 mode 100664 links 1 size 1 blocks 8
+mode: chmod through a link 0: f mode 100604 links 1 size 1 blocks 8, s mode 120777 links 1 size 1 blocks 0
+mode: fchmodat with AT_SYMLINK_NOFOLLOW on a link -95: s links 1 size 1 blocks 0, f links 1 size 1 blocks 8; on a file 0: f links 1 size 1 blocks 8
+mode: a missing name -2; through a file -20; a closed descriptor -9; a fourth argument to fchmodat 0 (it has three); a directory 0 mode 41700 links 2 size 80 blocks 0
+~mode: 06755 and a write by root: mode 106755 links 1 size 2 blocks 8
+mode: /bin/tree 0644 0: run 113, X_OK -13; 0100 0: run 7, X_OK 0; 0755 again 0: run 7
+mode: gone: rmdir 0
+time: set to the nanosecond 0: atime 1.123456789 mtime 2.987654321; ctime moved to now 1
+time: both UTIME_OMIT 0: atime 1.123456789 mtime 2.987654321; ctime moved 0
+time: atime UTIME_NOW, mtime 3.000000300 0: atime now 1, mtime 3.000000300
+time: no times 0: atime now 1, mtime now 1, ctime now 1
+time: a nanosecond of 10^9 -22, of -1 -22; a flag -22; a missing name -2; through a file -20
+time: before 1970 0: atime -2208988800.000000005 mtime -1.999999999
+time: 2100 0: mtime 4102444800.000000002
+~time: the year 3000 as atime: atime 9223372036.854775807 mtime 4102444800.000000002
+time: futimens 0: atime 1.123456789 mtime 2.987654321
+time: a link's own 0: s atime 100.000000001 mtime 200.000000002; f atime 1.123456789 mtime 2.987654321
+time: through the link 0: f atime 300.000000003 mtime 400.000000004; s's mtime 200.000000002, its atime moved to now by the walk through it 1
+time: a readlink after it moves the link's atime 0
+time: a readlink of a link whose atime is before its mtime moves it to now 1
+time: a directory 0: atime 1.123456789 mtime 2.987654321
+time: an atime before mtime, then a read: atime moved 1
+time: gone: rmdir 0
+owner: chown 0 0 0: uid 0 gid 0; ctime moved 1
+owner: chown -1 -1 0: ctime moved 1
+owner: 06755 and chown 0 0 0: mode 100755 links 1 size 1 blocks 8; 06755 and -1 -1 0: mode 100755 links 1 size 1 blocks 8; 06745 and 0 -1 0: mode 102745 links 1 size 1 blocks 8; 06644 and -1 0 0: mode 102644 links 1 size 1 blocks 8
+owner: a directory 02755 and chown 0 0 0: mode 42755 links 2 size 60 blocks 0
+owner: fchown 0; lchown 0; fchownat with AT_SYMLINK_NOFOLLOW 0; a flag -22; a missing name -2; a closed descriptor -9
+~owner: chown 1000 1000 -22: uid 0
+owner: gone: rmdir 0
+~fixed: chmod of /dev -30, its times -30, a symbolic link made in /dev -30
+~refused: link 0, symlink 0, chmod 0, chown 0, utimensat 0, O_SYNC -22, O_TMPFILE -95, RENAME_NOREPLACE -22
+~limits: a file made in /dev -30, a directory -30; a byte written at 1 GiB -27, a file grown to 2 GiB -27
+errno: EPERM: a hard link to a directory -1
+end: rmdir /t 0; / still has it mode 40755 links 2 size 40 blocks 0
