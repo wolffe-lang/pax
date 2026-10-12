@@ -717,6 +717,7 @@ fn parse_parts(text: str) -> Score {
     var p_count = List[int]()
     var n_s = List[int]()
     var n_e = List[int]()
+    var n_l = List[int]() // where a note's last event (of a tie) starts
     var n_hz = List[int]()
     var n_marks = List[int]()
     var n_boost = List[int]()
@@ -923,12 +924,14 @@ fn parse_parts(text: str) -> Score {
                         let q = cont[k]
                         if q >= 0 {
                             n_e[q] = g + len
+                            n_l[q] = g
                             n_marks[q] = (n_marks[q] & (M_LEGIN | M_TREM)) | marks
                             (mut next_tie).push(q)
                         } else {
                             (mut next_tie).push(n_s.len)
                             (mut n_s).push(g)
                             (mut n_e).push(g + len)
+                            (mut n_l).push(g)
                             (mut n_hz).push(hz_of(semis[k]))
                             (mut n_marks).push(mk)
                             (mut n_boost).push(bst)
@@ -983,17 +986,20 @@ fn parse_parts(text: str) -> Score {
     while q < n_s.len {
         let t0 = time_at(grid, fp_pos, fp_us, n_s[q])
         let t1 = time_at(grid, fp_pos, fp_us, n_e[q])
-        let len = t1 - t0
+        // the marks are the last event's and cut only its length: a
+        // tie held over four bars into a staccato eighth sounds to the
+        // middle of that eighth
+        let last = t1 - time_at(grid, fp_pos, fp_us, n_l[q])
         let m = n_marks[q]
-        var sound = len
+        var cut = 0
         if m & M_STAC != 0 {
-            sound = len / 2
+            cut = last - last / 2
         } else if m & M_MARC != 0 {
-            sound = len * 3 / 4
+            cut = last - last * 3 / 4
         } else if m & (M_TEN | M_SLUR) == 0 {
-            let gap = if len / 8 < 40000 { len / 8 } else { 40000 }
-            sound = len - gap
+            cut = if last / 8 < 40000 { last / 8 } else { 40000 }
         }
+        let sound = t1 - t0 - cut
         (mut n_start).push(t0)
         (mut n_end).push(t0 + sound)
         q += 1
