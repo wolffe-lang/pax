@@ -19,7 +19,7 @@ raising a timeout without a measured reason.
 - No assertion weakened, no retry loop, no timeout raised without a
   measured reason. Where a test's expectation is wrong it is proved
   against Linux first.
-- No word implying filming, recording, viewers or a demo in pax. No
+- None of the words the contract's §1 bars from pax. No
   trailer of any kind on a commit or the PR; no merge, tag, issue filed
   or closed; nothing under `~/.claude`; nothing installed; no build on
   nomad-1; no `/tmp` (scratch under `~/lanes/px35/` on every host); a
@@ -132,3 +132,125 @@ and is chased only if the repeated runs show it.
 Proof per flake: red under the load (or the witness) that reproduced
 it, green after, the counts kept under `notes/px35/`; then CI on the
 branch at least three times green.
+
+## 4. What was found, flake by flake
+
+Trees on kasumi (Linux 7.2.8, QEMU 11.1.1 TCG, wolf 0.2.27 by digest,
+test programs built in `px13-ubuntu`): `trunk` = `0f7cd28`; `w1` =
+`02a07c6` (trunk's kernel and the renewal witness); `w2` = `cad6fc9`;
+`w3` = `7bb705d` (every fix); `w4` = `795ad71` (`w3` rebased onto trunk
+`6316c51`, px32's merge; nothing of px32's touches the network). "Under
+load" is 12 busy loops pinned to four CPUs with the suite or program
+under `taskset` to the same four (`notes/px35/kasumi/scripts/`).
+
+**pax#39 (mpx4-unix U1) — the probe raced, and the side that read
+`IN` alone was Linux.** pax#39 says PAX read `IN`; the diff in U1 is
+`diff linux pax`, so its `<` line is Linux's. Both CI reds (38207077489,
+38208203649) have `session.linux` line 172 `IN, data 7` and PAX's
+`IN HUP RDHUP` (the artifacts' `*.session` and `*.session.linux`). The
+prediction's direction was wrong; its cause was right. Counted on
+kasumi with trunk's probe:
+
+| side, trunk probe | `IN` alone | `IN HUP RDHUP` |
+|---|---|---|
+| Linux (px13-ubuntu container), under load | 21 of 40 | 19 |
+| Linux, no added load | 1 of 40 | 39 |
+| PAX (TCG), under load | 0 of 40 | 40 |
+
+PAX never showed it: a system call runs with IF clear on its one CPU,
+so the server's console write and close are not split by a tick the
+way Linux's two CPUs split them. Linux promises no order between a
+woken waiter's collection and its peer's next call (`epoll(7)` reports
+readiness as it is when collected); the probe asked for one. The kernel
+is unchanged. The probe now waits twice, each wait woken by one event
+the other process cannot overtake (a pipe orders them): the answer
+while the server holds the connection open (`IN`), then the close
+(`IN HUP RDHUP`); the client's first `recv` can no longer meet an early
+answer either. Fixed probe, under load: Linux 40 of 40 and PAX 20 of 20
+the same twelve lines.
+
+**pax#29 N8 (mpx4-net) — the wire's order was not the kernel's.** The
+kernel awaits the last echo it made; in the queue step that is seq 4
+before either queued request leaves, so seq 3's reply is stray, always.
+`tools/pcap-net` judges by the wire; when kernel/arp's flush handed
+kernel/net the two queued frames one at a time, each published and
+notified on its own, seq 3's reply could reach the wire before seq 4
+left. Trunk under load: N8 peer red in 4 of 5 runs, each with seq 4
+1,848–3,396 µs after seq 3 and the reply between; the one green had
+them 47 µs apart. The fix stages both, publishes the avail index once
+and notifies once (`net.send_batch`, `virtio.place`/`publish`): `w3`
+under the same load, N8 peer green in 5 of 5, seq 4 18–54 µs after seq
+3 and both before either reply.
+
+**pax#29 T10 (mpx4-tcp) and pax#32 — an aged entry dropped the
+kernel's own frames.** The failing capture shows the gateway's entry
+aging at 60.259 s on the first of the stray segments, the four resets
+queued behind the new request and the first two pushed out. The new
+mpx4-net step makes four echo requests while 10.0.2.100's entry renews:
+`w1` (trunk's kernel) `2 pushed out`, net-peer red at A7
+(`notes/px35/kasumi/w1/net-peer-red.out`); `w2` `0 pushed out, 1
+requests`, mpx4-net 32 PASS 0 FAIL (`w2/net-bios-native.out`). The
+cache now keeps a stale entry in use while it asks again (three
+requests a second apart, then freed); P2's own assertions (`4 queued,
+2 pushed out`, the aged step, `1 unresolved`) stand unchanged. Not
+reproduced as T10 itself (the 60 s boundary would have to fall on the
+burst); reproduced as its mechanism. The px27 sighting on kasumi (one
+TCP segment counted as an echo request, a loaded run past 60 s, before
+px24's pcap-net) is read as the same mechanism, not re-run.
+
+**pax#29 T11 (mpx4-tcp) — net-peer's TCP, not PAX's.** PAX acknowledged
+exactly what it was sent; net-peer's fast retransmission had sent 41
+bytes past its SND.MAX and so ignored that ACK forever. The witness
+`tests/paxtcp-selftest` (no QEMU; CI runs it first in the mpx4-tcp job)
+is red at `e8bb8ca` before the fix (F1: 1,460 bytes retransmitted when
+1,000 were sent, the ACK not taken) and green after `f3d7c4b`.
+
+**Found under load, not yet seen on CI: `grep -q` under pipefail.**
+Trunk under load also failed N1, N3 and N8 on the `net` and `modern`
+legs with every line they look for present in the log. mpx4-net's `has`
+was `serial_norm | grep -Eqx`: grep leaves at its first match and sed's
+next write dies of SIGPIPE, so the pipe fails. A 205,916-byte log with
+the match on line 1: the old `has` true 0 of 50, the new 50 of 50; a
+4,601-byte log under load: 294 of 300 against 300 of 300
+(`pipefail/result.txt`). Every `serial_norm | grep -q` in the tests
+(mpx4-net six, mpx2-heap one) now reads to the end.
+
+**Under load, beside the point:** on the fullest kasumi (other lanes'
+work plus four of these load sets, load average above 30) the `net`
+and `modern` legs' 10,000-echo soak ran at about 20 echoes a second and
+missed the boot's 180 s deadline, on trunk's kernel and this one's
+alike (`netrace2-trunk-load12`, `netrace2-w4-load12`). On CI the soak
+takes about 40 s. No deadline was raised.
+
+## 5. Evidence index
+
+- CI reds read: 38207077489, 38198213544, 38133240315, 38192937184,
+  38208203649 (logs and artifacts in `~/lanes/px35/ci/` on nomad-1).
+- kasumi, `notes/px35/kasumi/`: `race-*` (pax#39 counts and lines),
+  `netrace-*` (N8: the first four ICMP frames of each peer capture,
+  and every FAIL line), `w1`/`w2` (the renewal witness red and green),
+  `w3/summary.txt` (mpx4-unix 60/0, mpx4-tcp 100/0 at `7bb705d`),
+  `pipefail/result.txt`, `scripts/` (how each was run; `race.sh` as it
+  stands after its CPU set became a variable).
+- The gauntlet at the rebased head and the CI runs: the PR body.
+
+## 6. Not verified
+
+- T10 itself red-to-green (its mechanism is; the 60 s boundary was
+  not steered onto the burst).
+- Linux's own behaviour when an entry ages, by capture: the cache rule
+  rests on RFC 1122 §2.3.2.1; no Linux tap capture past a minute was
+  taken.
+- hasu KVM: nothing run there.
+- `tests/mpx3-sound`'s `grep … | grep -qv` (px32's file): the same
+  shape, a grep on both sides; left to its owner.
+- The px27 sighting re-run.
+
+## 7. Done-when
+
+- [x] each flake's cause found and fixed, none by a weaker assertion,
+      a retry or a longer timeout
+- [x] each fix red-to-green under the load or witness that reproduced it
+- [ ] CI green three times at the head (the PR body)
+- [ ] `wolf/tools/lane-audit.sh pax px35 <PR>` exit 0
+- To close when this merges: pax#39, pax#29, pax#32.
