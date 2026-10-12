@@ -158,8 +158,8 @@ for j in SUITES:
         why = " (the step: tests/%s%s; the script takes --tier/--firmware: %s)" % (j, run.group(1), takes)
     say(ok, "P4 %s needs the plan, runs when chosen%s" % (j, why))
 tn = re.findall(r"^      - ([A-Za-z0-9_-]+)\s*$", blocks["tier"], re.M)
-say(sorted(tn) == sorted(["plan"] + SUITES) and "    if: always()" in blocks["tier"],
-    "P4 the tier job runs always and needs every job (%d of %d)" % (len(tn), len(SUITES) + 1))
+say(sorted(tn) == sorted(["plan"] + SUITES) and "    if: ${{ !cancelled() }}" in blocks["tier"],
+    "P4 the tier job runs unless cancelled and needs every job (%d of %d)" % (len(tn), len(SUITES) + 1))
 say("cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in wf, "P4 cancel-in-progress for pull requests only")
 say(re.search(r"^  push:\n    branches: \[trunk\]", wf, re.M) is not None, "P4 a push to trunk runs")
 say(re.search(r"^  schedule:\n(\s+#.*\n)*\s+- cron: ", wf, re.M) is not None, "P4 the nightly runs")
