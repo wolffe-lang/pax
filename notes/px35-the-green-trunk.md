@@ -139,7 +139,10 @@ Trees on kasumi (Linux 7.2.8, QEMU 11.1.1 TCG, wolf 0.2.27 by digest,
 test programs built in `px13-ubuntu`): `trunk` = `0f7cd28`; `w1` =
 `02a07c6` (trunk's kernel and the renewal witness); `w2` = `cad6fc9`;
 `w3` = `7bb705d` (every fix); `w4` = `795ad71` (`w3` rebased onto trunk
-`6316c51`, px32's merge; nothing of px32's touches the network). "Under
+`6316c51`, px32's merge; nothing of px32's touches the network). The
+branch was rebased again onto `feba3fc` (px25), dropping this lane's
+probe commit (pax#39, below); the gauntlet and CI at the new head are
+in the PR body. "Under
 load" is 12 busy loops pinned to four CPUs with the suite or program
 under `taskset` to the same four (`notes/px35/kasumi/scripts/`).
 
@@ -162,12 +165,14 @@ so the server's console write and close are not split by a tick the
 way Linux's two CPUs split them. Linux promises no order between a
 woken waiter's collection and its peer's next call (`epoll(7)` reports
 readiness as it is when collected); the probe asked for one. The kernel
-is unchanged. The probe now waits twice, each wait woken by one event
-the other process cannot overtake (a pipe orders them): the answer
-while the server holds the connection open (`IN`), then the close
-(`IN HUP RDHUP`); the client's first `recv` can no longer meet an early
-answer either. Fixed probe, under load: Linux 40 of 40 and PAX 20 of 20
-the same twelve lines.
+is unchanged. This lane's probe fix (two waits ordered by a pipe:
+under load Linux 40 of 40 and PAX 20 of 20 the same lines, `w3`) was
+**dropped at the rebase onto `feba3fc`**: px25 fixed the same race in
+the probe (`e8931f4`: the server closes only after the client's word
+that its wait is over) and pax#39 is closed. What this lane's version
+covered beyond it — a client more than 100 ms late to its first `recv`
+meeting the answer already there — was never seen, and is listed under
+§6.
 
 **pax#29 N8 (mpx4-net) — the wire's order was not the kernel's.** The
 kernel awaits the last echo it made; in the queue step that is seq 4
@@ -197,6 +202,13 @@ reproduced as T10 itself (the 60 s boundary would have to fall on the
 burst); reproduced as its mechanism. The px27 sighting on kasumi (one
 TCP segment counted as an echo request, a loaded run past 60 s, before
 px24's pcap-net) is read as the same mechanism, not re-run.
+
+**px25's time-wait change (`feba3fc`) does not explain these mpx4-tcp
+reds.** It ends a time-wait entry on a reset at RCV.NXT, for QEMU's
+user network reusing host ports (the `user` way). Both CI reds traced
+here are the `peer` way and neither capture involves a time-wait
+entry: T10's two resets never left PAX (ARP, above); T11's stall is
+net-peer ignoring a correct ACK (below).
 
 **pax#29 T11 (mpx4-tcp) — net-peer's TCP, not PAX's.** PAX acknowledged
 exactly what it was sent; net-peer's fast retransmission had sent 41
@@ -245,6 +257,8 @@ takes about 40 s. No deadline was raised.
 - `tests/mpx3-sound`'s `grep … | grep -qv` (px32's file): the same
   shape, a grep on both sides; left to its owner.
 - The px27 sighting re-run.
+- After px25's probe fix: a client late to its first `recv` (the answer
+  already there) would still print `first recv data`; never seen.
 
 ## 7. Done-when
 
@@ -253,4 +267,5 @@ takes about 40 s. No deadline was raised.
 - [x] each fix red-to-green under the load or witness that reproduced it
 - [ ] CI green three times at the head (the PR body)
 - [ ] `wolf/tools/lane-audit.sh pax px35 <PR>` exit 0
-- To close when this merges: pax#39, pax#29, pax#32.
+- To close when this merges: pax#29, pax#32 (pax#39 was closed at
+  px25's merge).
