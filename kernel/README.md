@@ -618,16 +618,25 @@ programs. `tests/mpx3-tree` holds it to Linux's tmpfs.
 |---|---|
 | `tree/` | **inodes** (16 words; a table that grows a frame at a time, 32 a frame, at most 16,384; a freed inode is the next one made): mode, link count, size, holders (`hold`, `release`: open files, working directories, a removed directory's hold on its parent), four times, where the bytes are. **a file's bytes**: frames under an index of depth 0 (the frame alone), 1 (512 pointers) or 2 (1 GiB, the largest file); a page never written has no frame (`span` answers the page of zeros); `cut` gives back every frame past a size. **the initramfs under it** (`start`, `adopt`): an archive file's inode reads the archive in place (`I_BACK`, `I_BACKLEN`) until a page is written, which copies that page; `archive_entry` says whether a file is still the archive's whole (what `execve` can load). **directories**: records (inode + 1, lengths, name), none across a page, a removed one free again and joined to the free ones after it; `lookup`, `entry_at` (the first live record at or after a position, found from its page's start), `name_of`; a directory with no entry holds no frame. **the changes**: `create`, `mkdir`, `unlink`, `rmdir`, `rename` (every refusal and the room for the new name before the first change), `truncate`, `read`, `write` (from a user buffer or kernel bytes). **the cap**: half the frames free at `start`, and never below `RESERVE` (2,048) free in the machine (`grab`); `held`, `live`, `table_frames`, `base` for the books; `census_due`, `full_news` for kernel/user's lines; `refuse` counts a refusal by name |
 | `../boot/tree.S` | `pax_tree_state` (32 words), `pax_tree_copy` and `pax_tree_zero` (REP MOVS, REP STOS on kernel addresses) |
-| `files/` | a node may be an inode (`T_INO`); `walk` resolves a path a directory at a time (`.`, `..`, -ENOTDIR, -ENOENT, -ENAMETOOLONG for a component past 255 bytes; the directory and name of the last component for the calls that make or remove one); `openat` with `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_WRONLY`/`O_RDWR`, `O_NOFOLLOW`, the mode and `umask`; `file_write`, `pwrite`, `ftruncate`, `truncate`, `fsync`, `mkdirat`, `unlinkat`, `renameat`, `faccessat`, `umask`, `refused`; `copy_file_range` and `sendfile` between files, `splice` from a pipe into one; an open file and a working directory hold their inode (`of_new`, `of_drop`, `set_cwd`, `inherit`, `close_all`); `getcwd` walks up; `put_stat`/`put_statx` with times, blocks and two device numbers (the tree 0:1, `/dev` 0:5); `getdents` from the records, `dev` last in the root; `exec_lookup` asks `tree.archive_entry` |
+| `files/` | a node may be an inode (`T_INO`); `walk` resolves a path a directory at a time (`.`, `..`, -ENOTDIR, -ENOENT, -ENAMETOOLONG for a component past 255 bytes; the directory and name of the last component for the calls that make or remove one); `openat` with `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_WRONLY`/`O_RDWR`, `O_NOFOLLOW`, the mode and `umask`; `file_write`, `pwrite`, `ftruncate`, `truncate`, `fsync`, `mkdirat`, `unlinkat`, `renameat`, `faccessat`, `umask`, `refused`; `copy_file_range` and `sendfile` between files, `splice` from a pipe into one; an open file and a working directory hold their inode (`of_new`, `of_drop`, `set_cwd`, `inherit`, `close_all`); `getcwd` walks up; `put_stat`/`put_statx` with times, blocks and two device numbers (the tree 0:1, `/dev` 0:5; px36: signed times, `tsec`/`tnsec`); `getdents` from the records (px36: `DT_LNK`), `dev` last in the root; `exec_lookup` asks `tree.archive_entry` |
 | `initramfs/` | `mtime` |
-| `user/` | `tree.start` in `start`; the dispatch (18, 21, 74-77, 82-84, 87, 95, 258, 263, 264, 269, 316, 439; refused by name 86, 88, 90-94, 132, 133, 235, 259, 260, 265, 266, 268, 280, 452); `write` to a file; `tree_lines` (every 2500th file removed: the books; the tree at its cap) and `tree_report` (after a kernel's frames line) |
+| `user/` | `tree.start` in `start`; the dispatch (18, 21, 74-77, 82-84, 87, 95, 258, 263, 264, 269, 316, 439; px36's `change_calls`: 86, 88, 90-94, 260, 265, 266, 268, 280, 452; refused by name 132, 133, 235, 259); `write` to a file; `tree_lines` (every 2500th file removed: the books; the tree at its cap) and `tree_report` (after a kernel's frames line) |
 | `kmain_console.lu` | `user.tree_report()` after the frames line |
 
 - Layering: `user` → `files` → `tree` → `frames`, `initramfs`, `paging`.
   `tree` knows no descriptor, path or process; `files` keeps those and
   holds inodes by number.
-- What is not there: links of either kind, `chmod`, `chown`, times set
-  by a call, `mmap` of a file, a second writable file system (`/dev` is
+- px36 (`notes/px36-the-file-changes.md`): `tree`'s `link`, `symlink`
+  (S_IFLNK|0777, the target held as a file's bytes; `target`),
+  `set_mode`, `set_times` (signed nanoseconds), `owned` (root's chown);
+  `files`' `walk` follows a symbolic link before the last component and,
+  as the call says, at it (the path rewritten in pax_kbuf, 40 at most),
+  and `linkat`, `symlinkat`, `readlinkat`, `fchmodat`, `fchmod`,
+  `fchownat`, `utimensat`; `changeable` refuses a change to what PAX
+  keeps fixed (-EROFS), `root_or_none` an owner that is not root
+  (-EINVAL).
+- What is not there: an owner other than root, `utime` and `utimes`
+  (refused by name), `mmap` of a file, a second writable file system (`/dev` is
   fixed), `/proc` and `/sys` beyond `/proc/self/exe`, file locks,
   `fallocate`, `statfs`. `execve` runs a file only while it is still
   the archive's own bytes.
