@@ -96,3 +96,81 @@ stolen, 0 notes dropped, 0 clamped; lengths unchanged (463.8 s and
 dB of px33's image 7 except at 46.11-24 (harp II and oboes), 48.5-14
 (trumpets, trombones, triangle), and 51.9-12 (oboes): louder there by at
 most 2 dB, the limiter holding peaks.
+
+## 4. Evidence index
+
+- **The join**: `notes/px33b/transcription/joined-36-43.5-51.13.txt`,
+  made from px33's join by `notes/px33b/edits.txt` through
+  `notes/px33b/tools/rearrange.py` (every op names its source: a px33
+  check-list row or a reading in `notes/px33b/check-px33b.txt`). The
+  tunes come from it with `notes/px33b/tools/tunes.py` and the two
+  headers. `notes/px33/tools/check.py`: errors 0 on the join and both
+  tunes; `notes/px33b/tools/pins.py` (hairpin ends, open hairpins, ties
+  into notes the next event does not sound): errors 0 on all three, and
+  0 on px33's join.
+- **Seen wrong, then fixed**: the first `play -c` refused the join at
+  44.13 (`'!' ends a hairpin, and none is open in part 'cb'`): the
+  cellos and basses' octave split had copied the `!` that closes a
+  hairpin only the cellos carried (fixed in `e60a254`). `pins.py` was written then and finds that one place only.
+- **Levels entering the close** (px33-c's `levels.py` at bar 63 of the
+  join and bar 1 of the close): every part's first sound after 47.1
+  follows a dynamic word, after bar 69's second violins were given the
+  ff of 47.1.
+- **`play -c`** (play built on kasumi from this branch at `6ad9ff8`,
+  wolf 0.2.27, the binary trunk's play is: sha256 `ba9f2e68…`):
+  - the join and `auferstehung`: 463769 ms written (471770 ms of
+    sound), 36 parts, **125 voices at most, 0 stolen, 0 clamped, 0
+    notes dropped**, 22282 blocks limited, status 0;
+  - `auferstehung-close`: 246623 ms written, 36 parts, 125 voices at
+    most, 0 stolen, 0 clamped, 0 dropped, status 0.
+  - The listing over the image's tunes equals `user/console/speaker.expect`
+    (463.8 s and 246.6 s, unchanged).
+- **The image** `pax-mahler-orchestra-36.iso` (sha256 `0083e5b8…`),
+  played on nomad-1 under TCG with QEMU's wav backend, `-m 256M`,
+  through pelt: `play -m auferstehung` 125 voices at most, 0 stolen, 0
+  clamped, 0 dropped; the device 22116 periods, 0 underruns, 0 dropped;
+  `auferstehung-36.wav` 471.8 s (sha256 `1f880aad…`). `play -m
+  auferstehung-close`: the same counts, 11937 periods, 0 underruns;
+  `auferstehung-close-36.wav` (sha256 `092e4687…`). QEMU stopped by its
+  recorded pid after "halt" both times.
+- **Levels per 5 s** (`tools/orch-check --env`, dBFS, the 36-part
+  render against image 7's `auferstehung-full.wav`): equal within 1 dB
+  through 43.5-46.8 except 25-30 s (44.1's ff chord, +1.0 and +1.6: the
+  harp's notes past six and the second violins), 85 s (+1.3) and 100 s
+  (46.1, pp: -46.5 to -43.4, +3.1: harp I's two notes past six and the
+  second violins' chord, now its own part); the build 46.11-24 moves
+  -1.0 to +3.1 dB from 145 s to 215 s, louder from 190 s (+1.9 to +3.1:
+  harp II apart, the oboes, the cellos' own fff line at 46.21-24);
+  47-48.4 within 0.4 dB;
+  48.5-14 within 0.4 dB (the added trumpets and trombones double lines
+  already sounding); 49.5-7 +0.8 to +2.1 dB (360-380 s: trumpets 3-6,
+  harp II); 50-51.8 within 0.5 dB; 51.9-12 **-1.0 dB** (450-460 s: the
+  limiter, with the oboes and the split parts, takes the held fff a
+  little lower); the last chord's ring after 465 s +2 to +3.6 dB. The marks still read in the curve: "Bereite dich" -27
+  falling to -48; 46.1-10 pp about -44; the build -42 to -13; 48 fff
+  -10; 49.1 p -30; 49.6 fff -11.7; 51.9-12 fff -10.8.
+- **Prediction against measure**: 36 parts, right. Voices 125 at most,
+  inside the predicted 105-125 but at its edge (3 voices from px32's
+  128; 0 stolen). Lengths and the listing unchanged, right. Levels
+  "within 1.5 dB except three places, louder there by at most 2 dB":
+  **wrong in degree** — the build at 46.11-24 is up to 3.1 dB louder,
+  46.1 3.1 dB, 49.5-7 2.1 dB, and 51.9-12 is 1.0 dB quieter, not
+  louder. "No carried note changes except corrections": right; the two
+  corrections are horns 1.3 at 45.5-6 (rhythm) and harp I at 49.8
+  (pitches), both read in the score (`check-px33b.txt`).
+
+## 5. Not carried, and not done
+
+- Listed in the tune headers: harp II 49.10-50.4 (not re-read); the
+  second violins where px33 gives one chord for both sections and at
+  44.10; the trumpets' and trombones' pairs given as one chord (47.1-12,
+  49.3-4 Pos 4 and tuba, 49.11) and trumpets 3.4's A4 at 49.1; the
+  woodwinds' grace notes into 48.1; the oboes 3.4's p < at 46.17; the
+  cellos' pizz A at 44.9 (in the basses' chord); the organ at
+  48.10-12; one clarinet note at 46.24.
+- The triangle sounds on the bells' timbre at a nominal C7 and the high
+  tam-tam as the deep one (play ignores a tam-tam's pitch): stated
+  stand-ins, not readings.
+- Not run: KVM (hasu); listening by a person; a spectral check that
+  each added line is heard apart (the counts and levels are the
+  evidence here).
