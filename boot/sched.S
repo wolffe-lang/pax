@@ -82,7 +82,8 @@
                        vparent, zombie and sigmask; 256-byte slots
                        before px26's fifteen words for threads, futexes
                        and signals)
-     pax_procs         64 process areas, 8192 bytes each (2048 before
+     pax_procs         64 process areas, 40960 bytes each (px34: 1024
+                       descriptors and 256 reservations; 8192 before, 2048 before
                        px14, 4096 before px24's 128 descriptors), one
                        per slot (px12): the words kernel/vm,
                        kernel/files, kernel/user and kernel/process keep
@@ -181,7 +182,7 @@ pax_threads:
         .p2align 6
         .globl pax_procs
 pax_procs:
-        .zero 64 * 8192
+        .zero 64 * 40960
         .p2align 6
         .globl pax_siginfo
 pax_siginfo:

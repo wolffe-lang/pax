@@ -81,11 +81,11 @@
                          kernel's words, or an execve caller's vectors
                          copied out of its memory), [65536, 69632) the
                          path; IF clear for the whole call.
-     pax_ofiles          512 open files (64 before px24), 64 bytes each (px17): what a
+     pax_ofiles          2048 open files (px34; 512 since px24, 64 before), 64 bytes each (px17): what a
                          descriptor names and every descriptor duplicated
                          from it shares (kernel/files): a reference count,
                          the kind, the node, the offset, the open flags.
-     pax_pipes           64 pipe buffers' records (16 before px24), 256 bytes each (px17):
+     pax_pipes           512 pipe buffers' records (px34; 64 since px24, 16 before), 256 bytes each (px17):
                          the frames holding the bytes (kernel/files), the
                          readers and writers open, the bytes read and
                          written so far. A socketpair is two of them.
@@ -180,9 +180,9 @@ pax_argbuf:
         .p2align 6
         .globl pax_ofiles
 pax_ofiles:
-        .zero 512 * 64
+        .zero 2048 * 64
         .globl pax_pipes
 pax_pipes:
-        .zero 64 * 256
+        .zero 512 * 256
 
         .section .note.GNU-stack, "", @progbits

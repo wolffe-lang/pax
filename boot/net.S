@@ -42,7 +42,7 @@
                      segment is composed in, the next ephemeral port,
                      the key of the initial sequence numbers, the
                      counters; px23)
-     pax_tcp_conns   256 control blocks (64 before px24) of 128 eight-byte words: each
+     pax_tcp_conns   1024 control blocks (px34; 256 since px24, 64 before) of 128 eight-byte words: each
                      one's addresses, ports, state, sequence numbers,
                      timers and the 32 frames of its two buffers (px23)
      pax_tcp_tw      256 eight-byte words: the frames of the time-wait
@@ -91,6 +91,6 @@ pax_tcp_tw:
         .zero 2048
         .globl pax_tcp_conns
 pax_tcp_conns:
-        .zero 256 * 1024
+        .zero 1024 * 1024
 
         .section .note.GNU-stack, "", @progbits
