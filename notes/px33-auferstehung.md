@@ -147,7 +147,63 @@ about 50 bars.
 
 ## 4. Evidence index
 
-(after the work)
+**The close, joined (px33-c).** The readers' pages (px33-r1b p201-202,
+r2b p203-204, r3 p205-206, r4b p207-209) are joined in
+`notes/px33/transcription/joined-46.11-51.13.txt` (46.11 to 51.13,
+bars 49-131, the opening's numbering continued); its head names every
+change from the page files. `user/tunes/auferstehung-close` is its
+bars 63-131 (47.1 to 51.13, 69 bars, no cut), renumbered from 1, with a
+header naming the work, the source, what is not carried and what is
+doubtful. It replaces px29's `auferstehung-end`; px29's `auferstehung`
+stays until the opening (43.5-46.10, being re-read) is joined.
+
+- **The excerpt starts at 47 ("Sterben werd' ich")**, not "O glaube":
+  the readers' pages begin at 46.11, and 47.1 to the end is the
+  climb to 48 and the whole close unbroken.
+- **Checks**: `notes/px33/tools/check.py` on both files: `errors 0`.
+  px32's `play -c` (built from px32 835d5e1 on kasumi): the joined file
+  317940 ms of sound (309939 written), 24 parts, 64 voices at most, 145
+  stolen, 0 clamped, status 0; the close 254624 ms (246623 written),
+  64 voices at most, 131 stolen, 0 clamped, status 0.
+- **Length**: play 246.6 s written; from the bar lines alone (meter,
+  tempo, rit, integrated) 248.1 s: 0.6% apart, the difference in the
+  ritardandi. The prediction (about 190 s) was short: 48 Pesante at
+  q 40 is 6 s a bar.
+- **The image** (`pax-mahler-orchestra-3.iso`, sha256 0e552418...)
+  under TCG with QEMU's wav backend, `-m 256M`, through pelt:
+  `play -m auferstehung-close`: 64 voices at most, 131 stolen, 0
+  clamped, 9568 blocks limited; the device 11937 periods, 0 underruns,
+  0 dropped. 254.6 s of sound, as play's figure.
+- **Levels** (tools/orch-check --env, 5 s windows, dBFS, time from the
+  first sound) against the score's marks:
+
+  | s | dB | bars (fig.) | marked |
+  |---|---|---|---|
+  | 0-20 | -17.5 -17.6 -16.1 -16.4 | 47.1-6 | chorus ff, 47.5 ff brass, cymbal |
+  | 20-25 | -20.0 | 47.7-8 | chorus rests; horns ff, trumpets mf |
+  | 25-45 | -16.8 -16.1 -15.7 -17.8 | 47.9-14 | ff, 47.13 fff then > f |
+  | 45-50 | -21.2 | 47.15-16 | the chorus off at 47.16, < |
+  | 50-60 | -12.4 -11.3 | 48.1-2 | fff "Aufersteh'n": 9 dB over 45-50 |
+  | 60-105 | -14.7 to -12.1 | 48.2-9 | fff chorus, ff orchestra |
+  | 105-125 | -14.0 -16.8 -14.9 -13.9 | 48.9-13 | p, then fff/ff, > p |
+  | 125-135 | -21.2 -29.9 | 48.14-49.1 | p/pp: the quietest place |
+  | 135-150 | -23.9 -21.9 -19.6 | 49.2-5 | ff chorus, < |
+  | 150-160 | -13.6 -12.0 | 49.5-6 | < fff |
+  | 160-185 | -14.3 -16.8 -19.5 -21.0 -23.6 | 49.7-14 | fff tutti, tam-tam; dim. to p/mf |
+  | 185-200 | -20.8 -20.6 -19.4 | 50.1-4 | pp strings, harp fff, < ff |
+  | 200-205 | -24.1 (1 s: -18 at 195 to -37 at 206) | 50.5-12 | ff, > to p |
+  | 205-230 | -16.3 -14.2 -16.3 -15.3 -16.7 | 51.1-8 | ff/fff |
+  | 230-240 | -11.5 -12.1 | 51.9-11 | fff tutti |
+  | 240-245 | -17.6 | 51.11-13 | fff held: **see below** |
+
+- **Seen wrong, play's, not the score's**: at 51.11 (about 238 s) the
+  horns' held fff chord (G3 Bb3 Eb4 G4 Bb4, tied 51.9-12) stops: 392 Hz
+  falls 49-59 dB within a second and sounds again only in the last
+  chord; Bb5 and G5 (violins, clarinets) fall about 15 dB; the whole
+  sound falls 6.9 dB (233-237 s against 239-243 s). The same with
+  `play -o` on kasumi (59.2 dB). The same horn chord tied over four
+  bars alone holds (0 stolen). Read as the voice limit (64) taking held
+  notes; reported to px32's lane, left as it is here.
 
 ## 5. Done-when
 
