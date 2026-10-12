@@ -150,7 +150,9 @@ it. A tamtam/cymbal/drum note's pitch is ignored (write any note).
   never cut**: with every voice held, the new note is dropped. The
   `played` and `cost` lines count each: `N stolen` (tails and rings),
   `N of the stolen ringing`, `N notes dropped`. A drum, bell or tam-tam
-  struck again while it rings is struck in place (no new voice).
+  struck again while it rings is struck in place (no new voice); so is
+  a harp string (one pitch in one part) plucked again while it rings
+  (px33b).
 - Each part is placed by its `pan`. The mix has a fixed master gain:
   one part's mf sits near -39 dBFS, a 16-part tutti at pp near
   -38 dBFS, the same tutti at ff near -12 dBFS. A look-ahead **limiter**
