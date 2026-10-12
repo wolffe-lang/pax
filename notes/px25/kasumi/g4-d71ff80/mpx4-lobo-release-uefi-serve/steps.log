@@ -1,0 +1,59 @@
+side: pax
+forwards: 49377->80
+qemu: qemu-system-x86_64 -machine q35 -cpu max -m 512M -accel tcg -display none -vga std -monitor none -parallel none -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04 -drive file=/home/mfwolffe/lanes/px25/b/g4/mpx4-lobo/release/lobo-trunk.iso,format=raw,media=cdrom,readonly=on -boot d -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:49377-:80 -serial tcp:127.0.0.1:47787,server=on,wait=on -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.4m.fd -drive if=pflash,format=raw,unit=1,file=/home/mfwolffe/lanes/px25/b/g4/mpx4-lobo-release-uefi-serve/ovmf-vars.fd
+[   0.05] step 5: wait ^\$ $ 120
+          seen after 2.30 s
+[   2.36] step 6: type cd /srv
+[   2.39] step 7: mark
+[   2.49] step 8: type lobo -c conf/lobo.conf serve &
+[   2.62] step 9: wait generation-activated gen=1 seq=2 120
+          seen after 0.20 s
+[   2.82] step 10: req serve 80 requests/[0-9]*.req
+          01-index.req: 461 bytes, HTTP/1.1 200 OK
+          02-index-html.req: 461 bytes, HTTP/1.1 200 OK
+          03-small.req: 227 bytes, HTTP/1.1 200 OK
+          04-http10.req: 227 bytes, HTTP/1.1 200 OK
+          05-big.req: 288230 bytes, HTTP/1.1 200 OK
+          06-range.req: 262 bytes, HTTP/1.1 206 Partial Content
+          07-range-suffix.req: 361 bytes, HTTP/1.1 206 Partial Content
+          08-head.req: 230 bytes, HTTP/1.1 200 OK
+          09-404.req: 299 bytes, HTTP/1.1 404 Not Found
+          10-cond-304.req: 227 bytes, HTTP/1.1 200 OK
+          11-cond-etag.req: 227 bytes, HTTP/1.1 200 OK
+          12-keepalive-three.req: 1159 bytes, HTTP/1.1 200 OK
+          13-dir-redirect.req: 351 bytes, HTTP/1.1 301 Moved Permanently
+          14-bad-method.req: 305 bytes, HTTP/1.1 405 Not Allowed
+[   3.52] step 11: type echo written at run time > html/new.txt
+[   3.69] step 12: type echo wrote $?
+[   3.75] step 13: wait ^wrote 0 30
+          seen after 0.05 s
+[   3.80] step 14: req written 80 requests/new.req
+          new.req: 250 bytes, HTTP/1.1 200 OK
+[   3.81] step 15: mark
+[   3.91] step 16: type lobo -c conf/lobo.conf status
+[   4.03] step 17: wait ^generation 1: current 60
+          seen after 0.10 s
+[   4.13] step 18: mark
+[   4.23] step 19: type lobo -s reload -c conf/lobo.conf
+[   4.37] step 20: wait ^reload complete \(generation 2\) 60
+          seen after 0.10 s
+[   4.47] step 21: type echo reload $?
+[   4.53] step 22: wait ^reload 0 30
+          seen after 0.05 s
+[   4.58] step 23: req after 80 requests/page.req
+          page.req: 461 bytes, HTTP/1.1 200 OK
+[   4.59] step 24: mark
+[   4.69] step 25: type lobo -s stop -c conf/lobo.conf
+[   4.82] step 26: wait ^stop: shutting down \(generation 2\) 60
+          seen after 0.10 s
+[   4.92] step 27: type wait
+[   4.94] step 28: type echo serve ended $?
+[   5.03] step 29: wait ^serve ended 0 60
+          seen after 0.05 s
+[   5.08] step 30: type ls logs
+[   5.11] step 31: wait ^\$ $ 30
+          seen after 0.05 s
+[   5.16] step 32: type exit
+[   5.18] step 33: halt 60
+          ended after 0.05 s
+ended: -9, 5.5 s
