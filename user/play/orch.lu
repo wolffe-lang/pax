@@ -649,10 +649,12 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
                 let n = first + pc[p]
                 pc[p] += 1
                 // a drum, bell or tam-tam struck again while it rings is
-                // the same instrument: struck in place
+                // the same instrument: struck in place; so is a harp's
+                // string plucked again while it rings (px33b): one
+                // string, one sound, in a part
                 var again = -1
                 var j = 0
-                if prm[p * 9] == 1 {
+                if prm[p * 9] == 1 || sc.timbres[p] == 11 {
                     while j < MAXV {
                         if v_on[j] && v_part[j] == p && sc.n_hz[v_note[j]] == sc.n_hz[n] {
                             again = j
@@ -718,8 +720,11 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
                 }
                 let inc = hz * (TWO32 / 100) / rate
                 v_inc[v] = inc
-                v_ph[v] = 0
-                v_ph2[v] = v_seed[v] % 4096 * 1048576
+                if again < 0 {
+                    // a re-plucked harp string keeps its phase: no jump
+                    v_ph[v] = 0
+                    v_ph2[v] = v_seed[v] % 4096 * 1048576
+                }
                 v_inc2[v] = if prm[pb + 6] > 0 {
                     inc + inc / 10000 * prm[pb + 6] * 578 / 100
                 } else {
@@ -730,7 +735,8 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
                     v_ta[v] = tab[(t * BANDS + bnd) * 2]
                     v_tb[v] = tab[(t * BANDS + bnd) * 2 + 1]
                     v_stage[v] = if legin { 1 } else { 0 }
-                    v_env[v] = if legin { prm[pb + 3] * 65536 / 1000 } else { 0 }
+                    // a re-plucked harp string rises from where it rang
+                    v_env[v] = if legin { prm[pb + 3] * 65536 / 1000 } else if again >= 0 { v_env[v] } else { 0 }
                     v_np[v] = 0
                     v_namp[v] = 0
                 } else {
