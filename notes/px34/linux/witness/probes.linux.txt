@@ -1,0 +1,271 @@
+unixprobe
+== socket
+socket(AF_UNIX, SOCK_STREAM, 0): ok
+socket(AF_UNIX, SOCK_STREAM, 1): ok
+socket(AF_UNIX, SOCK_STREAM, 2): -EPROTONOSUPPORT
+socket(AF_UNIX, 11, 0): -EINVAL
+fstat of a fresh one: socket 0777, size 0
+getsockname of a fresh one: length 2, family 1, unnamed
+getpeername of a fresh one: -ENOTCONN
+poll a fresh one: 1, OUT HUP
+getsockopt SO_TYPE: 0
+  SO_TYPE 1, length 4
+getsockopt SO_ACCEPTCONN: 0
+  SO_ACCEPTCONN 0
+getsockopt SO_ERROR: 0
+  SO_ERROR 0
+getsockopt option 9999: -ENOPROTOOPT
+recv on a fresh one: -EINVAL
+send on a fresh one: -ENOTCONN
+shutdown of a fresh one: 0
+poll a fresh one after its shutdown: 1, OUT HUP
+sendto with an address on a fresh one: -EOPNOTSUPP
+accept on a fresh one: -EINVAL
+lseek on one: -ESPIPE
+ioctl FIONBIO: 0
+  O_NONBLOCK now set
+ioctl FIONBIO 0: 0
+  O_NONBLOCK now clear
+== bind
+bind /u/b.sock: 0
+getsockname: length 12, family 1, "/u/b.sock"
+stat /u/b.sock: 0
+  socket 0755, size 0, links 1
+bind it again: -EADDRINUSE
+bind the bound socket elsewhere: -EINVAL
+bind another to the same name: -EADDRINUSE
+bind to a file's name: -EADDRINUSE
+bind to a directory's name: -EADDRINUSE
+bind under a missing directory: -ENOENT
+bind under a file: -ENOTDIR
+bind with family AF_INET: -EINVAL
+bind with length 111: -EINVAL
+bind with length 1: -EINVAL
+bind with a bad pointer: -EFAULT
+bind "/u/b4.sockXYZ" with length 2+10 (no NUL in it): 0
+  getsockname: length 13, family 1, "/u/b4.sock"
+stat /u/b4.sock: 0
+bind logs/control.sock (relative): 0
+  getsockname: length 20, family 1, "logs/control.sock"
+stat /u/logs/control.sock: 0
+bound under umask 077: socket 0700
+open of the socket's name: -ENXIO
+open of it to write: -ENXIO
+readdir /u: b.sock, d_type 12
+stat after its socket closed: 0
+bind a third to the name its closed socket left: -EADDRINUSE
+unlink /u/b.sock: 0
+== listen, the queue
+listen on an unbound socket: -EINVAL
+SO_ACCEPTCONN on the listener: 1
+poll the listener, empty: 0, none
+non-blocking connect 1 to a listener of backlog 1: ok
+non-blocking connect 2 to a listener of backlog 1: ok
+non-blocking connect 3 to a listener of backlog 1: -EAGAIN
+poll the listener, two queued: 1, IN
+getpeername of a queued client: length 12, family 1, "/u/q.sock"
+getsockname of a queued client: length 2, family 1, unnamed
+send from a queued client: 5
+the child's blocking connect still waits: yes
+accept4 with an address: length 2, family 1, unnamed
+the accepted end reads what its client sent before the accept: 5 "early"
+the child's blocking connect: ok
+getsockname of an accepted end: length 12, family 1, "/u/q.sock"
+getpeername of an accepted end (unnamed client): length 2, family 1, unnamed
+the queue drained: EAGAIN
+accept4 with flag 1: -EINVAL
+listen again, backlog 4: 0
+connect on a listener: -EINVAL
+backlog -1: eight connected
+a bound client connects: 0
+accept4 of a bound client: length 14, family 1, "/u/q3c.sock"
+getpeername of its accepted end: length 14, family 1, "/u/q3c.sock"
+getpeername of the client: length 13, family 1, "/u/q3.sock"
+getpeername with room for 4: 0
+  length 14, family 1, first bytes "/u"
+== connect
+connect to a missing name: -ENOENT
+connect under a missing directory: -ENOENT
+connect to a file: -ECONNREFUSED
+connect under a file: -ENOTDIR
+connect to a directory: -ECONNREFUSED
+connect to a socket bound and not listening: -ECONNREFUSED
+connect to the name a closed socket left: -ECONNREFUSED
+connect with family AF_INET: -EINVAL
+connect with length 1: -EINVAL
+connect with length 111: -EINVAL
+connect: 0
+connect again: -EISCONN
+connect to the same listener, a second socket: 0
+sendto with an address on a connected socket: -EISCONN
+sendto with no address: 1
+== data
+poll a connected client, idle: 1, OUT
+send hello: 5
+poll the server end, with five bytes: 1, IN OUT
+recv MSG_PEEK: 3 "hel"
+recv 3: 3 "hel"
+read the rest: 2 "lo"
+recv MSG_DONTWAIT on empty: -EAGAIN
+write 4 by write(2): 4
+read by read(2): 4
+writev of two parts: 9
+recv them: 9 "head body"
+recv after FIONBIO, nothing there: -EAGAIN
+300000 bytes through, 300000 read, crc same, the writer ended 0
+poll a client whose peer closed: 1, IN OUT HUP RDHUP
+recv after the peer closed: 0 ""
+send after the peer closed: -EPIPE
+send without MSG_NOSIGNAL after the peer closed: SIGPIPE
+== ends
+send to the queued end: 4
+poll a client whose listener closed before accepting it: 1, IN OUT ERR HUP RDHUP
+its recv: -ECONNRESET
+its recv again: 0 ""
+its send: -EPIPE
+connect to the name the closed listener left: -ECONNREFUSED
+poll a client that sent nothing, its listener closed: 1, IN OUT ERR HUP RDHUP
+its recv: -ECONNRESET
+its send: -EPIPE
+the server end sends two bytes: 2
+poll a client with two bytes to read, its peer gone: 1, IN OUT HUP RDHUP
+its recv: 2 "zz"
+its recv again: 0 ""
+send three bytes nobody reads: 3
+poll a client whose peer closed with bytes unread: 1, IN OUT ERR HUP RDHUP
+its recv: -ECONNRESET
+its recv again: 0 ""
+its send: -EPIPE
+send before SHUT_WR: 4
+shutdown SHUT_WR: 0
+poll the client after its SHUT_WR: 1, OUT
+poll its peer: 1, IN OUT RDHUP
+the peer reads: 4 "last"
+the peer reads again: 0 ""
+send after SHUT_WR: -EPIPE
+the peer still sends: 5
+the client still reads: 5 "reply"
+shutdown SHUT_RD: 0
+poll the peer after its SHUT_RD: 1, IN OUT RDHUP
+the peer reads after SHUT_RD: 0 ""
+shutdown how 3: -EINVAL
+shutdown SHUT_RDWR: 0
+poll the client after its peer's SHUT_RDWR: 1, IN OUT HUP RDHUP
+the client reads: 0 ""
+== a name unlinked while its socket listens
+connect before the unlink: 0
+unlink /u/g.sock: 0
+connect after the unlink: -ENOENT
+poll the listener, one queued from before: 1, IN
+accept of the connection made before: ok
+it still talks: 5
+its client reads: 5 "still"
+the listener's getsockname, its name gone: length 12, family 1, "/u/g.sock"
+a second listener bound to the same path: 0
+connect now: 0
+the second listener has it: yes; the first: EAGAIN
+== epoll, two processes
+server: poll 1, IN
+server: verb 7 bytes "status"
+server: answer: 28
+  client: connect ok, first recv EAGAIN
+  client: epoll_wait 1, IN, data 7
+  client: read 28 bytes "lobo status", then the end
+server: the client ended 0
+epoll_ctl ADD a listener: 0
+epoll_wait, nobody queued: 0
+epoll_wait, one queued: 1, IN
+poll an accepted end whose client is gone: 1, IN OUT HUP RDHUP
+== socketpair SOCK_SEQPACKET
+socketpair(AF_UNIX, SOCK_SEQPACKET|SOCK_CLOEXEC): 0
+send 5: 5
+send 0: 0
+send 7: 7
+send 11: 11
+send 2: 2
+poll the reading end, four messages waiting: 1, IN OUT
+recv 100: 5 "fives"
+recv 100: 0 ""
+recv 100: 7 "sevenxx"
+recv 3 of 11: 3 "ele"
+recv 1 MSG_TRUNC|MSG_PEEK: 2
+recv 100: 2 "ab"
+recv MSG_DONTWAIT on none: -EAGAIN
+writev of two parts is one message: 6
+write 4: 4
+recv 100: 6 "onetwo"
+read 64: 4
+recv after the writer's end closed, one message left: 1 "x"
+recv at the end: 0 ""
+~seqpacket: a message of 8000 bytes: 8000
+a message of 4000 bytes: 4000
+its read: 4000
+a stream pair's two writes: 4 "abcd"
+ioctl FIONBIO on a pair's end: 0
+recv on it, nothing there: -EAGAIN
+== /proc and /sys
+/proc/self/status: file 0444, size 0, lseek SEEK_CUR 0
+  Name:	unixprobe
+  Umask:	0022
+  State:	R (running)
+  TracerPid:	0
+  Uid:	0	0	0	0
+  Gid:	0	0	0	0
+~  FDSize:	64
+  Kthread:	0
+  VmLck:	       0 kB
+~  VmRSS:	     740 kB
+  VmSwap:	       0 kB
+  Threads:	1
+  SigPnd:	0000000000000000
+  ShdPnd:	0000000000000000
+  SigBlk:	0000000000000000
+  SigCgt:	0000000000000000
+  NoNewPrivs:	0
+~  Cpus_allowed_list:	0-15
+~  61 lines
+  a second read at the end: 0
+/proc/self/cgroup: file 0444, size 0, lseek SEEK_CUR 0
+  "0::/"
+  a second read at the end: 0
+/sys/fs/cgroup/cpu.max: file 0644, size 0, lseek SEEK_CUR 0
+  "max 100000"
+  a second read at the end: 0
+/sys/fs/cgroup/cgroup.controllers: file 0444, size 0, lseek SEEK_CUR 0
+~  "cpuset cpu io memory pids"
+  a second read at the end: 0
+/sys/devices/system/cpu/online: file 0444, size 4096, lseek SEEK_CUR 0
+~  "0-15"
+  a second read at the end: 0
+/proc/sys/vm/overcommit_memory: file 0644, size 0, lseek SEEK_CUR 0
+  "0"
+  a second read at the end: 0
+statx /sys/fs/cgroup/cgroup.controllers: ok, file 0444, size 0
+fstatat by AT_EMPTY_PATH: 0
+open /proc/self/cgroup to write: ok
+  write to it: -EINVAL
+open /proc/self/nothing: -ENOENT
+open /sys/fs/cgroup/nothing: -ENOENT
+mkdir /proc/self/x: -ENOENT
+readlink /proc/self/exe: "/bin/unixprobe"
+~rlimit: RLIMIT_NOFILE 1048576 1048576
+== MAP_NORESERVE
+mmap of 8486912 bytes, MAP_NORESERVE: ok
+~noreserve: VmRSS 740 kB before, 0 kB more after the mmap
+a page never touched reads 0
+three bytes written and read back: abz
+read(2) into a page never touched: 14
+  it holds "through a pipe"
+mprotect of the first 65536 bytes to PROT_NONE: 0
+~noreserve: 2056 kB more after three pages and a read
+madvise MADV_DONTNEED of a written page: 0
+it reads 0 after
+madvise MADV_FREE of the rest: 0
+~noreserve: -4 kB after MADV_FREE than before it
+written again after MADV_FREE: c
+  child: a page the parent wrote: c; one it never touched: 0
+the child ended 0; the parent's page is still 0
+a touch of the guard: SIGSEGV
+munmap: 0
+~refused: socket SOCK_RAW ok, socket SOCK_SEQPACKET ok, socket SOCK_DGRAM ok, setsockopt SO_REUSEADDR ok, bind abstract ok, bind autobind ok
+unixprobe: done, 0 names left
