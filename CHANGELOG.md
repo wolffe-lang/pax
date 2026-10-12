@@ -7,6 +7,10 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **wolf 0.2.28 (px36).** pax builds with wolf 0.2.28 and lupin
+  0.1.51, by archive digest: the soundness release (#660, #665 and
+  #678's direct half refused by E1010). No kernel source changes for it
+  but the tour's banner.
 - **The orchestra (px32).** `/bin/play`'s tune file gains a part
   format (`notes/px32-format.md`): parts declared with a name, a timbre,
   a starting level and a pan; bars numbered one by one, each part's
