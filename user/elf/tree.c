@@ -8,12 +8,19 @@
    while it is open, what `rename` replaces and refuses, a directory's
    size and link count, what a reading of a directory returns while the
    directory changes, a working directory that has been removed, which
-   times move and when, and the errnos.
+   times move and when, and the errnos. px36 adds the changes after a
+   file is made: hard links (counts, a name removed, a rename between
+   two names of one file), symbolic links (what follows them and what
+   does not, ELOOP, O_NOFOLLOW, what a target costs), modes, times set
+   to the nanosecond, owners as root sees them, and what PAX keeps
+   fixed.
 
      tree             every probe, in order (it works in /t, which it
                       makes and removes)
      tree soak        10,000 rounds of create, write, rename, unlink
-                      (and mkdir, rmdir), then a fill to ENOSPC and
+                      (and mkdir, rmdir; px36: link, symlink, chmod,
+                      utimensat and two renames over names), then a
+                      fill to ENOSPC and
                       back, twice: the second time with 120 MiB of the
                       program's own memory held
      tree noop        (a role the probe starts: exit 7)
@@ -944,6 +951,511 @@ static void copies(void) {
     unlink("/t/src"); unlink("/t/dst");
 }
 
+/* ==== px36: the changes after a file is made ====================================== */
+
+/* lstat's "mode 120777 links 1 size 1 blocks 0", or "-2" */
+static const char *lst(const char *path) {
+    static char b[4][96];
+    static int k;
+    struct stat s;
+    char *o = b[k++ & 3];
+    if (lstat(path, &s) != 0) snprintf(o, 96, "%d", -errno);
+    else snprintf(o, 96, "mode %o links %lu size %lld blocks %lld", s.st_mode, (unsigned long)s.st_nlink,
+                  (long long)s.st_size, (long long)s.st_blocks);
+    return o;
+}
+/* readlink's answer: the bytes and the count, or "-E" */
+static const char *rl(const char *path, size_t size) {
+    static char b[4][128];
+    static int k;
+    char *o = b[k++ & 3];
+    char t[100];
+    ssize_t n = readlink(path, t, size < sizeof t ? size : sizeof t);
+    if (n < 0) snprintf(o, 128, "%d", -errno);
+    else snprintf(o, 128, "'%.*s' %ld", (int)n, t, (long)n);
+    return o;
+}
+/* a program run: its exit status, or 100 + errno when execve failed */
+static int run(const char *path) {
+    pid_t k = fork();
+    if (k == 0) {
+        char *argv[] = { (char *)path, "noop", 0 };
+        execve(path, argv, argv + 2);
+        _exit(100 + errno);
+    }
+    int ws = 0;
+    waitpid(k, &ws, 0);
+    return WEXITSTATUS(ws);
+}
+static long long sec_of(struct timespec t) { return (long long)t.tv_sec; }
+static int lies(long long t, long long lo, long long hi) { return t >= lo - 20000000 && t <= hi; }
+
+/* ---- hard links ------------------------------------------------------------------ */
+static void hardlinks(void) {
+    struct stat a, b;
+    mkdir("/t/h", 0777);
+    put("/t/h/a", "abc");
+    stat("/t/h/a", &a);
+    ms(30);
+    long l1 = r(link("/t/h/a", "/t/h/b"));
+    stat("/t/h/b", &b);
+    say("link: link a b %ld; a %s; b %s; one inode %d; its ctime moved %d, its mtime did not %d\n", l1, st("/t/h/a"), st("/t/h/b"),
+        ino_of("/t/h/a") == ino_of("/t/h/b"), ns_of(b.st_ctim) > ns_of(a.st_ctim), ns_of(b.st_mtim) == ns_of(a.st_mtim));
+    long l2 = r(link("/t/h/a", "/t/h/b"));
+    long l3 = r(link("/t/h/nope", "/t/h/c"));
+    long l4 = r(link("/t/h/a", "/t/h/no/c"));
+    long l5 = r(link("/t/h/a", "/t/h/c/"));
+    long l6 = r(link("/t/h/a/", "/t/h/c"));
+    long l7 = r(link("/t/h/a/x", "/t/h/c"));
+    long l8 = r(linkat(AT_FDCWD, "/t/h/a", AT_FDCWD, "/t/h/c", 0x8000));
+    long l9 = r(link("/t/h/a", "/dev/px36"));
+    long l10 = r(link("/dev/null", "/t/h/null"));
+    say("link: again %ld; a missing name %ld; into a missing directory %ld; a new name with a trailing slash %ld, an old one %ld; through a file %ld; a flag %ld; into /dev %ld; out of /dev %ld\n",
+        l2, l3, l4, l5, l6, l7, l8, l9, l10);
+    int fd = open("/t/h/b", O_WRONLY | O_APPEND);
+    write(fd, "def", 3);
+    close(fd);
+    say("link: written through b, read through a: %s; the directory %s\n", get("/t/h/a"), st("/t/h"));
+    long u1 = r(unlink("/t/h/a"));
+    say("link: unlink a %ld; b %s, %s; a %s\n", u1, st("/t/h/b"), get("/t/h/b"), st("/t/h/a"));
+    char nm[64];
+    int ok = 0;
+    for (int i = 0; i < 100; i++) {
+        snprintf(nm, sizeof nm, "/t/h/m%d", i);
+        if (link("/t/h/b", nm) == 0) ok++;
+    }
+    say("link: 100 more names %d; b %s; the directory %s\n", ok, st("/t/h/b"), st("/t/h"));
+    int o = open("/t/h/m7", O_RDONLY);
+    for (int i = 0; i < 100; i++) {
+        snprintf(nm, sizeof nm, "/t/h/m%d", i);
+        unlink(nm);
+    }
+    long u2 = r(unlink("/t/h/b"));
+    char back[16] = "";
+    long rd = r(pread(o, back, sizeof back - 1, 0));
+    say("link: every name removed while it is open %ld: %s; still reads %ld '%s'\n", u2, fst(o), rd, back);
+    long e1 = r(linkat(o, "", AT_FDCWD, "/t/h/back", AT_EMPTY_PATH));
+    close(o);
+    put("/t/h/p", "p");
+    int po = open("/t/h/p", O_RDONLY);
+    long e2 = r(linkat(po, "", AT_FDCWD, "/t/h/p2", AT_EMPTY_PATH));
+    close(po);
+    say("link: AT_EMPTY_PATH of a file with no name %ld; of one with a name %ld, %s\n", e1, e2, st("/t/h/p2"));
+    unlink("/t/h/p2");
+    link("/t/h/p", "/t/h/q");
+    long rn = r(rename("/t/h/p", "/t/h/q"));
+    say("link: a rename of one name over another of the same file %ld; p %s; q %s\n", rn, st("/t/h/p"), st("/t/h/q"));
+    long x1 = r(link("/bin/tree", "/t/h/tl"));
+    int s1 = run("/t/h/tl");
+    say("link: /bin/tree linked %ld, run by its second name: status %d; /bin/tree %s\n", x1, s1, st("/bin/tree") + 12);
+    unlink("/t/h/tl");
+    say("link: /bin/tree again %s\n", st("/bin/tree") + 12);
+    unlink("/t/h/p");
+    unlink("/t/h/q");
+    say("link: gone: rmdir %ld\n", r(rmdir("/t/h")));
+}
+
+/* ---- symbolic links ------------------------------------------------------------- */
+static void symlinks(void) {
+    struct stat a;
+    char nm[64];
+    mkdir("/t/y", 0777);
+    put("/t/y/f", "eff");
+    long long t0 = wall();
+    ms(30);
+    long s1 = r(symlink("f", "/t/y/s"));
+    ms(30);
+    long long t1 = wall();
+    lstat("/t/y/s", &a);
+    say("symlink: s -> f %ld; lstat %s; stat %s; reads %s; its times lie between the clock before and after %d %d %d\n", s1, lst("/t/y/s"),
+        st("/t/y/s"), get("/t/y/s"), lies(ns_of(a.st_mtim), t0, t1), lies(ns_of(a.st_ctim), t0, t1), lies(ns_of(a.st_atim), t0, t1));
+    const char *k1 = rl("/t/y/s", 64);
+    const char *k2 = rl("/t/y/s", 1);
+    const char *k3 = rl("/t/y/f", 64);
+    say("symlink: readlink s %s, with room for 1 %s; of f %s\n", k1, k2, k3);
+    k1 = rl("/t/y/nope", 64);
+    k2 = rl("/t/y/s/", 64);
+    k3 = rl("/", 64);
+    say("symlink: readlink of a missing name %s; of s/ %s; of / %s\n", k1, k2, k3);
+    char t[8];
+    long z = r(readlink("/t/y/s", t, 0));
+    int dfd = open("/t/y", O_RDONLY | O_DIRECTORY);
+    long sa = r(symlinkat("../y/f", dfd, "s2"));
+    ssize_t n = readlinkat(dfd, "s2", nm, sizeof nm);
+    say("symlink: readlink with no room %ld; symlinkat %ld; readlinkat %ld '%.*s'; reads %s\n", z, sa, (long)n, n > 0 ? (int)n : 0, nm,
+        get("/t/y/s2"));
+    long e1 = r(symlink("", "/t/y/e"));
+    long e2 = r(symlink("x", "/t/y/f"));
+    long e3 = r(symlink("x", "/t/y/s"));
+    long e4 = r(symlink("x", "/t/y/no/e"));
+    long e5 = r(symlink("x", "/t/y/f/e"));
+    long e6 = r(symlink("x", "/t/y/e/"));
+    say("symlink: an empty target %ld; over a file %ld; over a link %ld; in a missing directory %ld; under a file %ld; a name with a trailing slash %ld\n",
+        e1, e2, e3, e4, e5, e6);
+    static char longt[5000];
+    memset(longt, 'z', sizeof longt);
+    longt[4095] = 0;
+    long g1 = r(symlink(longt, "/t/y/long"));
+    const char *g1s = lst("/t/y/long");
+    unlink("/t/y/long");
+    longt[4095] = 'z';
+    longt[4096] = 0;
+    long g2 = r(symlink(longt, "/t/y/long"));
+    say("symlink: a target of 4095 bytes %ld, %s; of 4096 %ld\n", g1, g1s, g2);
+    /* what a link costs, by its target's length */
+    int lens[] = { 1, 59, 60, 61, 127, 128, 129, 255, 256, 1000, 4095 };
+    char costs[256] = "";
+    for (unsigned i = 0; i < sizeof lens / sizeof lens[0]; i++) {
+        memset(longt, 'q', lens[i]);
+        longt[lens[i]] = 0;
+        symlink(longt, "/t/y/cost");
+        struct stat c;
+        lstat("/t/y/cost", &c);
+        unlink("/t/y/cost");
+        snprintf(costs + strlen(costs), sizeof costs - strlen(costs), " %d:%lld", lens[i], (long long)c.st_blocks);
+    }
+    say("symlink: blocks by the target's length%s\n", costs);
+    /* a link that leads nowhere */
+    symlink("nowhere", "/t/y/d");
+    int o1 = open("/t/y/d", O_RDONLY);
+    long d1 = o1 < 0 ? -errno : 0;
+    long d2 = r(access("/t/y/d", F_OK));
+    int o3 = open("/t/y/d", O_WRONLY | O_CREAT | O_EXCL, 0644);
+    long d3 = o3 < 0 ? -errno : 0;
+    int o4 = open("/t/y/d", O_WRONLY | O_CREAT, 0644);
+    long d4 = o4 < 0 ? -errno : 0;
+    if (o4 >= 0) { write(o4, "made", 4); close(o4); }
+    say("symlink: d -> nowhere: open %ld, access %ld, O_CREAT|O_EXCL %ld; O_CREAT %ld: nowhere %s '%s'; d %s\n", d1, d2, d3, d4,
+        st("/t/y/nowhere"), get("/t/y/nowhere"), lst("/t/y/d"));
+    int o5 = open("/t/y/s", O_RDONLY | O_NOFOLLOW);
+    long d5 = o5 < 0 ? -errno : 0;
+    int o6 = open("/t/y/f", O_RDONLY | O_NOFOLLOW);
+    long d6 = o6 < 0 ? -errno : 0;
+    if (o6 >= 0) close(o6);
+    int o7 = open("/t/y/s", O_RDONLY | O_NOFOLLOW | O_DIRECTORY);
+    long d7 = o7 < 0 ? -errno : 0;
+    say("symlink: O_NOFOLLOW on a link %ld, on a file %ld, with O_DIRECTORY on a link %ld\n", d5, d6, d7);
+    /* links to directories, relative and absolute; .. after one */
+    mkdir("/t/y/sub", 0777);
+    mkdir("/t/y/sub/in", 0777);
+    put("/t/y/sub/in/x", "deep");
+    symlink("sub", "/t/y/ds");
+    symlink("sub/in", "/t/y/di");
+    symlink("/t/y/sub/in/x", "/t/y/abs");
+    symlink("../y/./sub//in/", "/t/y/odd");
+    struct stat p, q;
+    stat("/t/y/di/..", &p);
+    stat("/t/y/sub", &q);
+    say("symlink: through a link to a directory %s; an absolute one %s; one with dots and slashes %s; .. after one is the target's parent %d\n",
+        get("/t/y/ds/in/x"), get("/t/y/abs"), get("/t/y/odd/x"), p.st_ino == q.st_ino);
+    say("symlink: ds %s; ds/ %s (lstat); s/ %s; s/x %s\n", lst("/t/y/ds"), lst("/t/y/ds/"), st("/t/y/s/"), st("/t/y/s/x"));
+    long mk = r(mkdir("/t/y/ds", 0777));
+    long mk2 = r(mkdir("/t/y/d", 0777));
+    long mk3 = r(mkdir("/t/y/ds/new", 0777));
+    long rd1 = r(rmdir("/t/y/ds"));
+    long rd2 = r(rmdir("/t/y/ds/new"));
+    say("symlink: mkdir over a link to a directory %ld, over one that leads nowhere %ld, through one %ld; rmdir of the link %ld, through it %ld\n",
+        mk, mk2, mk3, rd1, rd2);
+    chdir("/t/y/di");
+    char cw[64];
+    char *c = getcwd(cw, sizeof cw);
+    say("symlink: chdir through a link, getcwd '%s'; ../x %s\n", c ? cw : "?", get("../in/x"));
+    chdir("/");
+    /* how many links one path may follow */
+    put("/t/y/c0", "end");
+    for (int i = 1; i <= 41; i++) {
+        char to[16];
+        snprintf(to, sizeof to, "c%d", i - 1);
+        snprintf(nm, sizeof nm, "/t/y/c%d", i);
+        symlink(to, nm);
+    }
+    say("symlink: a chain: 39 links %s, 40 %s, 41 %s; lstat of the 41st %s\n", get("/t/y/c39"), get("/t/y/c40"), get("/t/y/c41"),
+        lst("/t/y/c41") + 12);
+    symlink("loop", "/t/y/loop");
+    symlink("l2", "/t/y/l1");
+    symlink("l1", "/t/y/l2");
+    say("symlink: a link to itself %s, a loop of two %s, through it %s; stat %s; lstat %s\n", get("/t/y/loop"), get("/t/y/l1"),
+        get("/t/y/l1/x"), st("/t/y/loop"), lst("/t/y/loop") + 12);
+    /* the calls that do not follow a last link */
+    long r1 = r(rename("/t/y/s", "/t/y/s3"));
+    say("symlink: rename of a link %ld: s3 %s, f %s\n", r1, rl("/t/y/s3", 64), st("/t/y/f"));
+    symlink("nowhere2", "/t/y/v");
+    long r2 = r(rename("/t/y/v", "/t/y/s3"));
+    say("symlink: rename over a link %ld: s3 %s, f %s\n", r2, rl("/t/y/s3", 64), get("/t/y/f"));
+    long h1 = r(link("/t/y/s2", "/t/y/hs"));
+    long h2 = r(linkat(AT_FDCWD, "/t/y/s2", AT_FDCWD, "/t/y/hf", AT_SYMLINK_FOLLOW));
+    say("symlink: a hard link to a link %ld: %s, %s; with AT_SYMLINK_FOLLOW %ld: %s\n", h1, lst("/t/y/hs"), rl("/t/y/hs", 64), h2,
+        lst("/t/y/hf"));
+    long un = r(unlink("/t/y/s2"));
+    say("symlink: unlink of one of them %ld: hs %s; f %s\n", un, lst("/t/y/hs") + 12, st("/t/y/f") + 12);
+    long tr = r(truncate("/t/y/ds/in/x", 2));
+    say("symlink: truncate through a link %ld: %s\n", tr, get("/t/y/sub/in/x"));
+    /* a directory's entries: DT_LNK */
+    int dd = open("/t/y", O_RDONLY | O_DIRECTORY);
+    char db[4096];
+    long nb = syscall(SYS_getdents64, dd, db, sizeof db);
+    int lnk = 0, reg = 0, dir = 0;
+    for (long off = 0; off < nb;) {
+        unsigned short rlen = *(unsigned short *)(db + off + 16);
+        unsigned char ty = *(unsigned char *)(db + off + 18);
+        if (ty == DT_LNK) lnk++;
+        else if (ty == DT_REG) reg++;
+        else if (ty == DT_DIR) dir++;
+        off += rlen;
+    }
+    close(dd);
+    say("symlink: the directory %s: %d links, %d files, %d directories\n", st("/t/y"), lnk, reg, dir);
+    /* gone */
+    for (int i = 0; i <= 41; i++) {
+        snprintf(nm, sizeof nm, "/t/y/c%d", i);
+        unlink(nm);
+    }
+    const char *names[] = { "f", "s3", "e", "long", "d", "nowhere", "ds", "di", "abs", "odd", "loop", "l1", "l2", "hs", "hf" };
+    for (unsigned i = 0; i < sizeof names / sizeof names[0]; i++) {
+        snprintf(nm, sizeof nm, "/t/y/%s", names[i]);
+        unlink(nm);
+    }
+    unlink("/t/y/sub/in/x");
+    rmdir("/t/y/sub/in");
+    rmdir("/t/y/sub");
+    close(dfd);
+    say("symlink: gone: rmdir %ld\n", r(rmdir("/t/y")));
+}
+
+/* ---- modes -------------------------------------------------------------------------- */
+static void modes(void) {
+    struct stat a, b;
+    mkdir("/t/m", 0777);
+    put("/t/m/f", "m");
+    stat("/t/m/f", &a);
+    ms(30);
+    long c1 = r(chmod("/t/m/f", 0600));
+    stat("/t/m/f", &b);
+    say("mode: chmod 0600 %ld: %s; ctime moved %d, mtime did not %d\n", c1, st("/t/m/f"), ns_of(b.st_ctim) > ns_of(a.st_ctim),
+        ns_of(b.st_mtim) == ns_of(a.st_mtim));
+    long c2 = r(chmod("/t/m/f", 07777));
+    const char *m2 = st("/t/m/f");
+    long c3 = r(chmod("/t/m/f", 0170644));
+    const char *m3 = st("/t/m/f");
+    long c4 = r(chmod("/t/m/f", 0));
+    const char *m4 = st("/t/m/f");
+    int fd = open("/t/m/f", O_RDWR);
+    long o4 = fd < 0 ? -errno : 0;
+    if (fd >= 0) close(fd);
+    say("mode: 07777 %ld %s; with type bits %ld %s; 0 %ld %s, and root still opens it to read and write %ld\n", c2, m2, c3, m3, c4, m4, o4);
+    fd = open("/t/m/f", O_RDONLY);
+    long c5 = r(fchmod(fd, 0640));
+    const char *m5 = fst(fd);
+    long c6 = r(fchmodat(AT_FDCWD, "/t/m/f", 0444, 0));
+    const char *m6 = fst(fd);
+    close(fd);
+    int dfd = open("/t/m", O_RDONLY | O_DIRECTORY);
+    long c7 = r(fchmodat(dfd, "f", 0664, 0));
+    const char *m7 = st("/t/m/f");
+    say("mode: fchmod %ld %s; fchmodat %ld %s; relative to a directory %ld %s\n", c5, m5, c6, m6, c7, m7);
+    symlink("f", "/t/m/s");
+    long c8 = r(chmod("/t/m/s", 0604));
+    say("mode: chmod through a link %ld: f %s, s %s\n", c8, st("/t/m/f"), lst("/t/m/s"));
+    long c9 = r(fchmodat(AT_FDCWD, "/t/m/s", 0600, AT_SYMLINK_NOFOLLOW));
+    long c10 = r(fchmodat(AT_FDCWD, "/t/m/f", 0600, AT_SYMLINK_NOFOLLOW));
+    say("mode: fchmodat with AT_SYMLINK_NOFOLLOW on a link %ld: s %s, f %s; on a file %ld: f %s\n", c9, lst("/t/m/s") + 12,
+        st("/t/m/f") + 12, c10, st("/t/m/f") + 12);
+    long c11 = r(chmod("/t/m/nope", 0600));
+    long c12 = r(chmod("/t/m/f/x", 0600));
+    long c13 = r(fchmod(99, 0600));
+    long c14 = r(syscall(SYS_fchmodat, AT_FDCWD, "/t/m/f", 0600, 0x8000));
+    long c15 = r(chmod("/t/m", 01700));
+    say("mode: a missing name %ld; through a file %ld; a closed descriptor %ld; a fourth argument to fchmodat %ld (it has three); a directory %ld %s\n",
+        c11, c12, c13, c14, c15, st("/t/m"));
+    chmod("/t/m", 0755);
+    /* set-id bits and a write by root */
+    chmod("/t/m/f", 06755);
+    fd = open("/t/m/f", O_WRONLY | O_APPEND);
+    write(fd, "w", 1);
+    close(fd);
+    say("~mode: 06755 and a write by root: %s\n", st("/t/m/f"));
+    /* the bits decide execve and access */
+    long x0 = r(chmod("/bin/tree", 0644));
+    int s0 = run("/bin/tree");
+    long a0 = r(access("/bin/tree", X_OK));
+    long x1 = r(chmod("/bin/tree", 0100));
+    int s1 = run("/bin/tree");
+    long a1 = r(access("/bin/tree", X_OK));
+    long x2 = r(chmod("/bin/tree", 0755));
+    int s2 = run("/bin/tree");
+    say("mode: /bin/tree 0644 %ld: run %d, X_OK %ld; 0100 %ld: run %d, X_OK %ld; 0755 again %ld: run %d\n", x0, s0, a0, x1, s1, a1, x2, s2);
+    unlink("/t/m/s");
+    unlink("/t/m/f");
+    close(dfd);
+    say("mode: gone: rmdir %ld\n", r(rmdir("/t/m")));
+}
+
+/* ---- times, set ------------------------------------------------------------------------ */
+static const char *tm(const char *path, int nofollow) {
+    static char b[4][160];
+    static int k;
+    struct stat s;
+    char *o = b[k++ & 3];
+    if ((nofollow ? lstat(path, &s) : stat(path, &s)) != 0) snprintf(o, 160, "%d", -errno);
+    else snprintf(o, 160, "atime %lld.%09ld mtime %lld.%09ld", sec_of(s.st_atim), s.st_atim.tv_nsec, sec_of(s.st_mtim), s.st_mtim.tv_nsec);
+    return o;
+}
+static void stamps(void) {
+    struct stat a, b;
+    mkdir("/t/u", 0777);
+    put("/t/u/f", "u");
+    struct timespec ts[2] = { { 1, 123456789 }, { 2, 987654321 } };
+    stat("/t/u/f", &a);
+    ms(30);
+    long long t0 = wall();
+    long u1 = r(utimensat(AT_FDCWD, "/t/u/f", ts, 0));
+    long long t1 = wall();
+    stat("/t/u/f", &b);
+    say("time: set to the nanosecond %ld: %s; ctime moved to now %d\n", u1, tm("/t/u/f", 0), lies(ns_of(b.st_ctim), t0, t1));
+    struct timespec om[2] = { { 0, UTIME_OMIT }, { 0, UTIME_OMIT } };
+    ms(30);
+    stat("/t/u/f", &a);
+    long u2 = r(utimensat(AT_FDCWD, "/t/u/f", om, 0));
+    stat("/t/u/f", &b);
+    say("time: both UTIME_OMIT %ld: %s; ctime moved %d\n", u2, tm("/t/u/f", 0), ns_of(b.st_ctim) != ns_of(a.st_ctim));
+    struct timespec n1[2] = { { 5, UTIME_NOW }, { 3, 300 } };
+    ms(30);
+    t0 = wall();
+    long u3 = r(utimensat(AT_FDCWD, "/t/u/f", n1, 0));
+    t1 = wall();
+    stat("/t/u/f", &b);
+    say("time: atime UTIME_NOW, mtime 3.000000300 %ld: atime now %d, mtime %lld.%09ld\n", u3, lies(ns_of(b.st_atim), t0, t1),
+        sec_of(b.st_mtim), b.st_mtim.tv_nsec);
+    ms(30);
+    t0 = wall();
+    long u4 = r(utimensat(AT_FDCWD, "/t/u/f", 0, 0));
+    t1 = wall();
+    stat("/t/u/f", &b);
+    say("time: no times %ld: atime now %d, mtime now %d, ctime now %d\n", u4, lies(ns_of(b.st_atim), t0, t1), lies(ns_of(b.st_mtim), t0, t1),
+        lies(ns_of(b.st_ctim), t0, t1));
+    struct timespec bad1[2] = { { 1, 1000000000 }, { 1, 0 } };
+    struct timespec bad2[2] = { { 1, 0 }, { 1, -1 } };
+    long b1 = r(utimensat(AT_FDCWD, "/t/u/f", bad1, 0));
+    long b2 = r(utimensat(AT_FDCWD, "/t/u/f", bad2, 0));
+    long b3 = r(utimensat(AT_FDCWD, "/t/u/f", ts, 0x8000));
+    long b4 = r(utimensat(AT_FDCWD, "/t/u/nope", ts, 0));
+    long b5 = r(utimensat(AT_FDCWD, "/t/u/f/x", ts, 0));
+    say("time: a nanosecond of 10^9 %ld, of -1 %ld; a flag %ld; a missing name %ld; through a file %ld\n", b1, b2, b3, b4, b5);
+    struct timespec old[2] = { { -2208988800LL, 5 }, { -1, 999999999 } };
+    long p1 = r(utimensat(AT_FDCWD, "/t/u/f", old, 0));
+    say("time: before 1970 %ld: %s\n", p1, tm("/t/u/f", 0));
+    struct timespec far[2] = { { 32503680000LL, 1 }, { 4102444800LL, 2 } };
+    long p2 = r(utimensat(AT_FDCWD, "/t/u/f", far, 0));
+    stat("/t/u/f", &b);
+    say("time: 2100 %ld: mtime %lld.%09ld\n", p2, sec_of(b.st_mtim), b.st_mtim.tv_nsec);
+    say("~time: the year 3000 as atime: %s\n", tm("/t/u/f", 0));
+    int fd = open("/t/u/f", O_RDONLY);
+    long p3 = r(futimens(fd, ts));
+    say("time: futimens %ld: %s\n", p3, tm("/t/u/f", 0));
+    close(fd);
+    symlink("f", "/t/u/s");
+    struct timespec lt[2] = { { 100, 1 }, { 200, 2 } };
+    long q1 = r(utimensat(AT_FDCWD, "/t/u/s", lt, AT_SYMLINK_NOFOLLOW));
+    say("time: a link's own %ld: s %s; f %s\n", q1, tm("/t/u/s", 1), tm("/t/u/f", 0));
+    struct timespec tt[2] = { { 300, 3 }, { 400, 4 } };
+    ms(30);
+    t0 = wall();
+    long q2 = r(utimensat(AT_FDCWD, "/t/u/s", tt, 0));
+    t1 = wall();
+    lstat("/t/u/s", &b);
+    say("time: through the link %ld: f %s; s's mtime %lld.%09ld, its atime moved to now by the walk through it %d\n", q2, tm("/t/u/f", 0),
+        sec_of(b.st_mtim), b.st_mtim.tv_nsec, lies(ns_of(b.st_atim), t0, t1));
+    ms(30);
+    t0 = wall();
+    char lb[8];
+    readlink("/t/u/s", lb, sizeof lb);
+    t1 = wall();
+    lstat("/t/u/s", &a);
+    say("time: a readlink after it moves the link's atime %d\n", ns_of(a.st_atim) != ns_of(b.st_atim) && lies(ns_of(a.st_atim), t0, t1));
+    utimensat(AT_FDCWD, "/t/u/s", lt, AT_SYMLINK_NOFOLLOW);
+    ms(30);
+    t0 = wall();
+    readlink("/t/u/s", lb, sizeof lb);
+    t1 = wall();
+    lstat("/t/u/s", &a);
+    say("time: a readlink of a link whose atime is before its mtime moves it to now %d\n", lies(ns_of(a.st_atim), t0, t1));
+    long q3 = r(utimensat(AT_FDCWD, "/t/u", ts, 0));
+    say("time: a directory %ld: %s\n", q3, tm("/t/u", 0));
+    /* a read moves atime by relatime's rule from a time that was set */
+    struct timespec rt[2] = { { 1000, 0 }, { 2000, 0 } };
+    utimensat(AT_FDCWD, "/t/u/f", rt, 0);
+    get("/t/u/f");
+    stat("/t/u/f", &b);
+    say("time: an atime before mtime, then a read: atime moved %d\n", sec_of(b.st_atim) > 2000);
+    unlink("/t/u/s");
+    unlink("/t/u/f");
+    say("time: gone: rmdir %ld\n", r(rmdir("/t/u")));
+}
+
+/* ---- owners (every process here is root) ----------------------------------------------- */
+static void owners(void) {
+    struct stat a, b;
+    mkdir("/t/o", 0777);
+    put("/t/o/f", "o");
+    stat("/t/o/f", &a);
+    ms(30);
+    long w1 = r(chown("/t/o/f", 0, 0));
+    stat("/t/o/f", &b);
+    say("owner: chown 0 0 %ld: uid %d gid %d; ctime moved %d\n", w1, (int)b.st_uid, (int)b.st_gid, ns_of(b.st_ctim) > ns_of(a.st_ctim));
+    ms(30);
+    long w2 = r(chown("/t/o/f", -1, -1));
+    stat("/t/o/f", &a);
+    say("owner: chown -1 -1 %ld: ctime moved %d\n", w2, ns_of(a.st_ctim) > ns_of(b.st_ctim));
+    chmod("/t/o/f", 06755);
+    long w3 = r(chown("/t/o/f", 0, 0));
+    const char *m3 = st("/t/o/f");
+    chmod("/t/o/f", 06755);
+    long w4 = r(chown("/t/o/f", -1, -1));
+    const char *m4 = st("/t/o/f");
+    chmod("/t/o/f", 06745);
+    long w5 = r(chown("/t/o/f", 0, -1));
+    const char *m5 = st("/t/o/f");
+    chmod("/t/o/f", 06644);
+    long w6 = r(chown("/t/o/f", -1, 0));
+    const char *m6 = st("/t/o/f");
+    say("owner: 06755 and chown 0 0 %ld: %s; 06755 and -1 -1 %ld: %s; 06745 and 0 -1 %ld: %s; 06644 and -1 0 %ld: %s\n", w3, m3, w4, m4, w5,
+        m5, w6, m6);
+    chmod("/t/o", 02755);
+    long w7 = r(chown("/t/o", 0, 0));
+    say("owner: a directory 02755 and chown 0 0 %ld: %s\n", w7, st("/t/o"));
+    chmod("/t/o", 0755);
+    int fd = open("/t/o/f", O_RDONLY);
+    long w8 = r(fchown(fd, 0, 0));
+    close(fd);
+    symlink("f", "/t/o/s");
+    long w9 = r(lchown("/t/o/s", 0, 0));
+    long w10 = r(fchownat(AT_FDCWD, "/t/o/s", 0, 0, AT_SYMLINK_NOFOLLOW));
+    long w11 = r(fchownat(AT_FDCWD, "/t/o/f", 0, 0, 0x8000));
+    long w12 = r(chown("/t/o/nope", 0, 0));
+    long w13 = r(fchown(99, 0, 0));
+    say("owner: fchown %ld; lchown %ld; fchownat with AT_SYMLINK_NOFOLLOW %ld; a flag %ld; a missing name %ld; a closed descriptor %ld\n", w8,
+        w9, w10, w11, w12, w13);
+    long w14 = r(chown("/t/o/f", 1000, 1000));
+    stat("/t/o/f", &a);
+    say("~owner: chown 1000 1000 %ld: uid %d\n", w14, (int)a.st_uid);
+    chown("/t/o/f", 0, 0);
+    unlink("/t/o/s");
+    unlink("/t/o/f");
+    say("owner: gone: rmdir %ld\n", r(rmdir("/t/o")));
+}
+
+/* ---- what PAX keeps fixed and Linux changes (not compared) ------------------------------- */
+static void fixed(void) {
+    /* /dev itself, never a device: on Linux it is the container's own */
+    struct stat d;
+    stat("/dev", &d);
+    long a = r(chmod("/dev", d.st_mode & 07777));
+    long b = r(utimensat(AT_FDCWD, "/dev", 0, 0));
+    long c = r(symlink("null", "/dev/px36-link"));
+    if (c == 0) unlink("/dev/px36-link");
+    say("~fixed: chmod of /dev %ld, its times %ld, a symbolic link made in /dev %ld\n", a, b, c);
+}
+
 /* ---- what PAX refuses by name and Linux does (not compared) ------------------------ */
 static void refused(void) {
     put("/t/a", "a");
@@ -1006,7 +1518,7 @@ static void empty(int files) {
 }
 static int soak(void) {
     static char block[8192], back[8192];
-    char a[64], b[64];
+    char a[64], b[64], h[64], l[64];
     int bad = 0;
     for (int i = 0; i < 8192; i++) block[i] = 'A' + i % 26;
     mkdir("/t", 0777);
@@ -1026,9 +1538,17 @@ static int soak(void) {
             close(fd);
         }
         if (mkdir("/t/s/d", 0777) != 0 || rmdir("/t/s/d") != 0) bad++;
-        if (unlink(b) != 0) bad++;
+        /* px36: a second name, a symbolic link, a mode and the times;
+           then the link renamed over the first name and that over the
+           second, so one unlink a round removes the last name */
+        snprintf(h, sizeof h, "/t/s/h%d", i % 3);
+        snprintf(l, sizeof l, "/t/s/l%d", i % 4);
+        if (link(b, h) != 0 || symlink(b, l) != 0) bad++;
+        if (chmod(b, 0600) != 0 || utimensat(AT_FDCWD, l, 0, 0) != 0) bad++;
+        if (rename(l, b) != 0 || rename(b, h) != 0) bad++;
+        if (unlink(h) != 0) bad++;
     }
-    say("soak: 10000 rounds of create, write 8192 bytes, rename, mkdir, rmdir, unlink: %d errors; /t/s: %s; the program's break moved %ld bytes\n",
+    say("soak: 10000 rounds of create, write 8192 bytes, rename, mkdir, rmdir, link, symlink, chmod, utimensat, two renames over names, unlink: %d errors; /t/s: %s; the program's break moved %ld bytes\n",
         bad, st("/t/s"), (long)((char *)sbrk(0) - brk0));
     /* the fill: 1 MiB files until ENOSPC, then back */
     int files = 0;
@@ -1123,6 +1643,12 @@ int main(int argc, char **argv) {
     atomic();
     times();
     copies();
+    hardlinks();
+    symlinks();
+    modes();
+    stamps();
+    owners();
+    fixed();
     refused();
     say("end: rmdir /t %ld; / still has it %s\n", r(rmdir("/t")), st("/t"));
     return 0;
