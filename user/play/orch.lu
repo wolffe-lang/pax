@@ -33,7 +33,7 @@ const TLEN: int = 2048
 
 const BLK: int = 64
 
-const MAXV: int = 48
+const MAXV: int = 64
 
 const NP: int = 8
 
@@ -46,7 +46,7 @@ const NTIMBRES: int = 17
 /// The limiter's ceiling and the mix's master gain (/65536).
 const CEIL: int = 30000
 
-const MASTER: int = 30000
+const MASTER: int = 23600
 
 /// What a part-format performance did.
 struct OrchDone {
@@ -281,12 +281,12 @@ fn tparams(t: int) -> List[int] {
     match t {
         0 => [0, 70, 300, 850, 180, 1, 7, 30, 900],
         1 => [0, 45, 200, 800, 130, 2, 0, 0, 1000],
-        2 => [0, 18, 150, 780, 90, 2, 0, 6, 800],
-        3 => [0, 32, 200, 800, 110, 2, 0, 0, 950],
-        4 => [0, 30, 150, 850, 80, 1, 0, 0, 800],
+        2 => [0, 18, 150, 780, 90, 2, 0, 6, 1100],
+        3 => [0, 32, 200, 800, 110, 2, 0, 0, 1100],
+        4 => [0, 30, 150, 850, 80, 1, 0, 0, 700],
         5 => [0, 25, 150, 850, 80, 1, 0, 20, 700],
-        6 => [0, 40, 150, 850, 90, 0, 0, 30, 800],
-        7 => [0, 25, 50, 1000, 60, 0, 0, 0, 650],
+        6 => [0, 40, 150, 850, 90, 0, 0, 30, 600],
+        7 => [0, 25, 50, 1000, 60, 0, 0, 0, 800],
         8 => [0, 35, 50, 1000, 80, 0, 0, 0, 900],
         9 => [0, 100, 300, 850, 250, 1, 9, 40, 900],
         10 => [0, 60, 250, 850, 180, 1, 0, 70, 1000],
@@ -305,7 +305,7 @@ fn struck(t: int) -> bool {
 }
 
 /// The level step (x128, 0 ppp .. 896 fff, past it an accent) as an
-/// amplitude /4096: about 4 dB a step.
+/// amplitude /4096: 5 dB a step, ppp 35 dB under fff.
 fn amp_of(lv: int) -> int {
     var l = lv
     if l < 0 {
@@ -324,15 +324,15 @@ fn amp_of(lv: int) -> int {
 /// block, and a list literal would allocate every time).
 fn step_amp(k: int) -> int {
     match k {
-        0 => 163,
-        1 => 258,
-        2 => 410,
-        3 => 649,
-        4 => 1029,
-        5 => 1630,
-        6 => 2584,
+        0 => 73,
+        1 => 130,
+        2 => 230,
+        3 => 410,
+        4 => 728,
+        5 => 1295,
+        6 => 2303,
         7 => 4096,
-        _ => 6492,
+        _ => 7284,
     }
 }
 
@@ -861,8 +861,7 @@ fn perform_parts(sc: Score, sink: int, rate: int, channels: int) -> OrchDone {
                     inc2 = inc2 - inc2 / 10000 * w / 2
                 }
             }
-            var g1 = env / 16 * amp / 4096 * prm[pb + 8] / 1000 * 16
-            g1 = g1 / 256 * (trem / 256)
+            let g1 = env * amp / 4096 * prm[pb + 8] / 1000 * sc.gains[p2] / 1024 * trem / 65536
             let g0 = v_g[v]
             if prm[pb + 0] == 0 {
                 var bw = 0
