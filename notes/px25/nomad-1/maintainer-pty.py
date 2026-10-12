@@ -36,5 +36,10 @@ try:
     typ("cat logs/access.log"); pump(2)
     typ("lobo -s stop -c conf/lobo.conf"); print("stopped", wait(rb"stop: shutting down", 60))
     typ("exit"); print("halt", wait(rb"\nhalt", 60))
+    os.write(m, b"\x01x")
+    for _ in range(50):
+        if q.poll() is not None: break
+        time.sleep(0.1)
+    print("Ctrl-A x: qemu", "ended by itself, status %s" % q.returncode if q.poll() is not None else "still running")
 finally:
     q.kill(); q.wait(); print("qemu ended", q.returncode)

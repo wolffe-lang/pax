@@ -212,3 +212,228 @@ Nothing existing: no kernel change is predicted beyond P6's three
 files (and what P1 finds), so every other suite's transcript holds;
 `kmain_*`'s bytes move with `kernel/procfs`. New: `tests/mpx4-lobo`,
 its CI job, the driver.
+
+## What was built
+
+- **`kernel/procfs`, `kernel/files`, `kernel/sched`, `kernel/paging`**
+  (`e53b536`, `f812ea9`, `0276c45`): `/proc/<pid>/status` for every
+  process not yet reaped (`/proc` lists their numbers after its fixed
+  names, Linux's order; the fields of `self`'s, the named process's
+  leader's values, `State` `S (sleeping)` or `Z (zombie)` — fixed, said
+  so), `VmPTE` the page tables' frames (it was 0), and the census
+  files `/proc/meminfo` (MemTotal, MemFree, MemAvailable),
+  `/proc/sys/fs/file-nr` and `/proc/net/sockstat` (`sockets: used`, the
+  TCP and UDP lines; `/proc/net` a directory where Linux has a link to
+  `self/net`: named drift). Why: pelt has no `ps`, lobo's pid file
+  holds no pid (wolf-lang#126), so a worker's pid for item 1's SIGKILL
+  and item 3's census (RSS, frames, descriptors, TCP blocks) had no way
+  out of PAX. No lobo line uses them.
+- **`kernel/tcp`** (`f1a1e01`): **a reset at RCV.NXT ends a time-wait
+  entry**, as Linux does (`tools/tw-probe`, below); any other reset is
+  still ignored (RFC 1337). The one kernel defect lobo tripped on (§3,
+  P1 4). The counters line gains `ended by a reset` (mpx4-tcp and
+  mpx4-ready's patterns follow).
+- **The test kit**: `user/lobo/kill.c` and `tools/mklobokit` (kill(1)'s
+  shape: pelt has no `kill`), `tools/mklobo OUT release` (lobo's v0.1.3
+  tree, `d6bd15b`, and its differential data kept),
+  `tools/lobo-session` (types a session at PAX's console or at `bash`
+  in a Linux container, with this host's requests, a backend, held
+  keepalive connections, loads, host commands, a fixed port),
+  `tools/lobo-check` (PAX against Linux, reply for reply),
+  `user/lobo/{srv,requests,steps}`, `tests/mpx4-lobo` and its CI job,
+  `tools/tw-probe`.
+- **Plants**, each its own commit, run by its own CI run, reverted:
+  A `f0a66be` (dup2 keeps a TCP socket's close-on-exec: a worker never
+  gets its listener), reverted `6cdc2c6`; B `1f7abba` (a Unix listener
+  readable only until its first connection: the reload after `status`
+  is never answered), reverted `29f105b`.
+
+## 3. The prediction against the measurement
+
+| | predicted | measured |
+|---|---|---|
+| P1 1: four workers at 256 MiB out of frames | ~30 MiB a process; the fourth or fifth fails | **wrong**: master and four workers start and serve at 256 MiB (`kasumi/x3-procfs`): 33.8 MiB of frames for the five (MemFree 140,416 → 106,624 kB), each process's VmRSS 5,848–5,852 kB, 6 threads each |
+| P1 2: `kill -HUP` | poll -EINTR where Linux restarts; harmless | **right in effect**: the reload completes (`signal-received sig=reload … source=signal`, fanned out to the four); whether lobo's poll saw -EINTR was not looked at |
+| P1 3: the worker kill | reaped and replaced within 4 s | **right**: `worker-exited worker=N reason=unreachable code=-1` then `worker-started … restarts=1`, as on Linux; the replacement serves (CI and every leg) |
+| P1 4: under load, the transmit path | no stall at the forward's pace | **wrong in its place, right that load finds it**: at KVM's pace (500–1,500 connections a second) a client now and then waited out its 20 s timeout: QEMU's user network reuses this host's port inside PAX's 60 s time-wait; PAX answered the SYN below RCV.NXT with the old ACK, ignored the reset that came back (RFC 1337), and so on until the wait ran out (counters: `12 segments answered, 12 resets ignored`, 4 failed of 38,485). Linux ends the wait on that reset (`tools/tw-probe`). Fixed `f1a1e01`: `40 ended by a reset`, 0 failed of 48,844 and 45,766 (`hasu/tw/`). TCG's pace never reached it |
+| first thing that failed | P1 1 | **the tooling, not the kernel**: pelt has no `kill`, nothing gives a worker's pid, PAX printed no census (P6, built) |
+| P2 signals | as px26 built them | right: HUP (reload), TERM (stop, `source=signal`, fanned out), KILL (a worker), the runtime's own USR2, SIGCHLD to the master |
+| P3 memory | 30 ± 10 MiB one process; 150 ± 40 MiB four workers; 256 MiB / 512 MiB floors | **wrong, too high five times**: ~6 MiB a process (VmRSS 5.8–6.9 MB), 32–35 MiB for five at the census's start (`lobo-rss` 32,084–34,748 kB); both shapes at 256 MiB. The loaded image is not copied whole and the runtime's stacks are backed on touch (px34) |
+| P4 requests a second, TCG kasumi native | new 40–80, keepalive 150–400 | one worker: new 87–94, keepalive 157 (kasumi's load average ~14, `kasumi/conc1`); **four workers: new 30–39, keepalive 37–43** (`conc4`, `conc4b`, `k4`): four workers on one CPU are three to four times slower than one (the cause not isolated: px24's wake-every-waiter readiness is the likely one); 377 a second from two clients on a quiet host (hands, earlier) |
+| P4 TCG CI native | — | hands' load 104 a second (two clients, four workers) |
+| P4 KVM hasu native | new 20–40, keepalive 1,000–3,000 | new **520–1,540** a second (four workers; the forward is not the limit on hasu here); keepalive: §4 (`hasu/k2-…/*-conc*`) |
+| P4 300,000-byte file | 3–10 MB/s TCG | 1.5 MB/s TCG under four clients (5.1 a second); KVM mixed with `/` 520–600 requests a second |
+| P5 static rows | 24/24 identical | **right**: 24/24 byte-identical to lobo on Linux (Date normalized), every leg |
+| P5 proxy rows | 6/7 and `xff` differing by the address | **right with the rule made general**: 7/7 client replies identical; the backend's records identical once 10.0.2.2 is read as 127.0.0.1 — the `Host` lobo sends upstream carries the backend's address too, not only `xff` |
+| P5 proxy-https | not applicable | as predicted (its upstream is the pinned nginx serving TLS) |
+| P5 control rows | 1–6 run; 7–8 KVM only | 1, 2, 3, 4, 5/6 run and pass on every leg; **7 and 8 not run** (named in §4); the signal row passes |
+| P5 one server block a lobo | (not foreseen) | lobo serves its first `server` block only at this pin (lobo's docs/DRYRUN.md): the four static configs are four lobo processes, `conf/d1.conf` … `d4.conf` |
+| P6 census files | as specified | built; their shape held to Linux's (R13: meminfo's three lines are Linux's first three, file-nr three numbers, sockstat Linux's three line shapes) |
+| P7 the image and the test | as specified | as specified, plus `serve-release` (lobo v0.1.3), `control` and `browser` (by hand); a session that does not hold stops the boots |
+| P8 what moves | nothing existing | mpx4-tcp's and mpx4-ready's counters pattern (the new `ended by a reset`); every kernel's bytes |
+
+## lobo's differential rows on PAX (item 4)
+
+Each row lobo on PAX against the same lobo on Linux, the same config
+and tree (every file's time 0), the same requests (`tools/lobo-check`).
+
+| suite | row | on PAX | how compared |
+|---|---|---|---|
+| `tests/differential/cases` | 24 static rows (`static_basic`, `head`, `cond304`, 19 `range_*`, 2 `alias_*`) | **run, 24/24 identical** | reply bytes, `Date` normalized |
+| `tests/differential/proxy-cases` | 7 rows (`chunked`, `hopbyhop`, `keep`, `respheaders`, `rewrite`, `strip`, `xff`) | **run, 7/7 identical; 7/7 upstream records identical** | client reply bytes; the backend's record with 10.0.2.2 read as 127.0.0.1 (PAX reaches this host as 10.0.2.2: `Host` upstream, `X-Forwarded-For`, `X-Real-IP`) |
+| `tests/differential/proxy-https-cases` | `https_upstream` | **not applicable**: its upstream is the pinned nginx serving TLS, which the pool does not build and the image does not carry | — |
+| `tools/lobo-control-differential` | 1 config re-read | **run, pass** | the edited root served after `-s reload` |
+| | 2 the listener survives a reload | **run, pass** (0 failed of 2,622–8,118 on TCG) | a load across the reload |
+| | 3 an open keepalive connection keeps its generation | **run, pass** (identical to Linux) | a held connection, before and after |
+| | 4 a bad config refused, exit 1, the old one serving | **run, pass** | `reload rejected`, `$?` 1, the old root served |
+| | 5, 6 relative `pid`, `control`, `root` against `-p` | **run, pass** | started from `/` with `-p /srv` |
+| | 7, 8 `worker_shutdown_timeout` (a drain, a streamed download, 2 s) | **not run**: they need a slow upstream stream and a 2 s wall-clock window this lane did not build into the sessions; nothing on PAX is known to stop them (named in "Not verified") | — |
+| | D1–D3 | **not applicable**: nginx-against-lobo deltas, not rows | — |
+| `tools/lobo-signal` | SIGHUP against `-s reload` | **run, pass** | the five-line event blocks differ in exactly `source` |
+| `tools/lobo-prefork` | a worker killed under requests | **run, measured** | hands' `load gap`: TCG 0 failed (kasumi 9,444, CI 2,601); KVM before the time-wait fix 2 of 33,951 timed out (the time-wait cause, not the kill) |
+
+## M-PX4
+
+**Met** (the CI run at the head is named in the PR): lobo, static and
+unmodified, built from its own tree at its release v0.1.3 (`d6bd15b`,
+`ff480eb1…`) and at trunk (`944edc1`, `faa15783…`), runs as PAX
+processes — one process, and a master with four workers (fork, `execve`
+of itself, the listener inherited) — started at pelt's prompt, and
+serves `/` and static files from PAX's tree, and a file written at the
+prompt, to the host through QEMU's `hostfwd`: curl on kasumi (TCG),
+hasu (KVM), the CI runner, and nomad-1, where Safari fetched the page
+too (lobo's access log at the prompt shows its request, `Version/26.4
+Safari/605.1.15`). `lobo -c CONF status`, `-s reload` and `-s stop`
+work, and SIGHUP, SIGTERM and a worker's SIGKILL (replaced by the
+master) do. lobo's differential rows that make sense on PAX are
+identical to lobo on Linux (the table above). One kernel defect was
+found and fixed on the way (time-wait reuse under load, `f1a1e01`).
+
+The page's bytes: 238 bytes, `GET /` on PAX byte-identical to
+`user/lobo/srv/html/index.html` (R3, every leg; nomad-1: `cmp` of
+curl's body, `nomad-1/browser-{1,2}/page.html`), and the whole reply
+identical to lobo's on Linux but for `Date` (R1).
+
+## 4. Evidence index
+
+- **The straces**: `notes/px25/linux/strace/` (lobo at both revisions,
+  one CPU, one worker and four, `strace -f -s 256 -yy`, Linux 7.2.8,
+  strace 6.8; the larger straces gzipped), `lobo-{trunk,v013}.shapes.tsv`
+  (104 lines), `strace-lobo.sh` (its ports are inside a container on
+  kasumi). The marked list: §2.
+- **Probe verdicts**: `tools/tw-probe` on Linux
+  (`notes/px25/linux/tw-probe/linux-7.2.8.txt`, four runs: the SYN below
+  RCV.NXT answered with the old ACK, this host's own reset, the SYN
+  taken); PAX's side: `notes/px25/hasu/tw/` (the same KVM load on the
+  kernel before the fix, `tw-kx1-…`: 4 of 38,485 failed, `12 segments
+  answered, 12 resets ignored`; after it, `tw-kx2-…` twice: 0 failed of
+  48,844 and 45,766, `40 ended by a reset`). The census files' shape
+  against Linux: R13 in every load check.
+- **The host's requests and the page bytes**: every session's
+  `resp/` on both sides and `.check` (R1, R3, R4), kasumi
+  (`kasumi/g4-d71ff80/`), hasu (`hasu/k2-d71ff80/`), CI (the run's
+  artifact `pax-mpx4-lobo`); nomad-1 `nomad-1/browser-{1,2}/` (curl's
+  head and body, `cmp` same, Safari's request in lobo's access log) and
+  `nomad-1/maintainer-pty.txt` (the maintainer's commands below, typed
+  into a pseudo-terminal: the prompt in 2.4 s, the page `cmp` same,
+  stop, `exit`, `halt`; and `maintainer-pty-2.txt`, the same with
+  Ctrl-A X at the end: QEMU ended by itself, status 0; no QEMU left).
+- **Load figures**: `kasumi/g4-d71ff80/g4-{native,release}-load.check`
+  and `hasu/k2-d71ff80/{native,release}-load.check` (the census lines,
+  R10 flat, R11 every round 0 failed, R12 lobo's resident set);
+  concurrency on KVM `hasu/k2-d71ff80/*-conc{1,4}/`, on TCG
+  `kasumi/conc1`, `conc4`, `conc4b`, `k4`.
+- **Differential table**: above.
+- **Plants by run id**: A (`f0a66be`) run RUN_PLANT_A; B (`1f7abba`)
+  run RUN_PLANT_B. Each on its own branch (`px25-plant-a`,
+  `px25-plant-b`), dispatched; reverted in `6cdc2c6` and `29f105b`.
+- **Boot counts**: kasumi TCG — exploratory x1, x2 ×2, x3; development
+  sessions about 20; conc ×3, k4; the head's gauntlet 15
+  (`kasumi/g4-d71ff80/mpx4-lobo-runs.txt`), an earlier gauntlet at
+  `29f105b` 15; the experiment kernel 0 (its runs were on hasu). hasu
+  KVM — k1 (`29f105b`) 11, the time-wait experiment 4, k2 (`d71ff80`)
+  15. nomad-1 TCG — 4 (two browser sessions, two typed by pty). CI —
+  the runs named in the PR.
+- **CI green at head**: the run named in the PR.
+
+## Not verified
+
+- Control differential rows 7 and 8 (`worker_shutdown_timeout`).
+- The cause of four workers being three to four times slower than one
+  on one CPU (TCG and KVM alike; px24's wake-every-waiter readiness is
+  the likely one, not isolated).
+- Why TCG native's rate fell between rounds 1 and 2 in one gauntlet
+  (44 → 19 a second; release steady at 220; kasumi's load average
+  was ~14 from other work).
+- Under KVM a reused port still costs a client one SYN retransmission
+  (about a second: rounds of 15 s took up to 21 s); Linux avoids it with
+  TCP timestamps (PAWS), which PAX does not send (px23's debt list).
+- Whether lobo's `poll` saw -EINTR at SIGHUP (lobo's reload completed
+  either way).
+- The maintainer's commands with a browser typed by a person: Safari was
+  opened by `open` from the script, and its request seen in the access
+  log; no screenshot (not required).
+- UEFI on hasu (KVM legs were BIOS); UEFI ran on kasumi and CI.
+
+## Findings for the orchestrator (lobo's, not PAX's)
+
+- lobo serves its first `server` block only (docs/DRYRUN.md says so);
+  a config with servers on several ports serves one.
+- A worker the master replaced comes back at `generation=1` while its
+  siblings are at the current one, on Linux too.
+- lobo's resident set grows under load on both sides (rounds 1→3: PAX
+  +11–14 MB, Linux +144 MB), and its thread pool by a thread now and
+  then; its pid file holds no pid (wolf-lang#126).
+- On PAX every accept goes to worker 1 (`accepted=` in `status`); on
+  Linux they spread.
+- trunk's own CI run 38207077489 failed `mpx4-unix` (U1: `epoll_wait 1,
+  IN` against Linux's `IN HUP RDHUP`), a timing difference not of this
+  lane; this lane's runs passed it.
+
+## What the next PAX lanes inherit
+
+- `/proc/<pid>/status` for every process, `/proc/meminfo`,
+  `/proc/sys/fs/file-nr`, `/proc/net/sockstat`, a real `VmPTE`: a
+  census any test can read at the prompt.
+- `tests/mpx4-lobo` and its tools: `tools/lobo-session` drives any PAX
+  image and the same steps on Linux in a container, with requests,
+  backends, held connections, loads and host commands;
+  `tools/lobo-check` compares them reply for reply; `user/lobo/kill.c`.
+- Time-wait ended by a reset at RCV.NXT (Linux's behaviour).
+- Open: per-object wait queues (four workers' cost), TCP timestamps (the
+  reused-port retransmission), lobo's one-server-block limit for any
+  multi-site image, accept distribution across workers.
+
+## For the maintainer: lobo on the Mac
+
+The image is `build/mpx4-lobo/native/lobo-trunk.iso` from
+`tests/mpx4-lobo --no-boot` (or the CI artifact's build). Host port
+8380 (never 8080 or 8088 on this Mac):
+
+```
+qemu-system-x86_64 -machine q35 -m 256M -display none -serial mon:stdio \
+    -no-reboot -cdrom lobo-trunk.iso \
+    -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:8380-:80
+```
+
+At pelt's `$ ` prompt:
+
+```
+cd /srv
+lobo -c conf/lobo.conf serve &
+```
+
+In a second terminal: `curl http://127.0.0.1:8380/` or `open
+http://127.0.0.1:8380/`. Back at the prompt: `cat logs/access.log` shows
+the browser's request; `lobo -s stop -c conf/lobo.conf`, `exit`; PAX
+says `halt`, and Ctrl-A then X ends QEMU. No audio device is given.
+
+## 5. Done-when
+
+- Branch `px25` on origin; PR wolffe-lang/pax#40, open, unmerged, the
+  five sections by name, commit shas as bullets, a test checklist.
+- CI green at the head (the PR names the run).
+- `wolf/tools/lane-audit.sh pax px25 40` run from the org directory,
+  its exit status read directly (in the PR).
+- Nothing merged, tagged, filed or closed. The plant branches
+  `px25-plant-a` and `px25-plant-b` are on origin for the record.
