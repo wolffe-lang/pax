@@ -46,11 +46,13 @@
 #      `played` line with 0 clamped, the capture judged by the same spec
 #      as O4. long is tools/orch-stress's 230 s, 16 parts, 42 voices, and
 #      wide its 48 parts (the most a score may have) for 40 bars, each in QEMU's 256 MiB: play holds at most 2048 frames
-#      (8 MiB) at its end, its cost under 50% of real time, nothing stolen
-#      or clipped.
+#      (8 MiB) at its end, 0 underruns (play -m kept the device fed),
+#      its cost (wall time, which a loaded runner moves) under 100% of
+#      real time, nothing stolen or clipped.
 #   O6 the cost under TCG (or KVM), in the guest: play -c of the study:
-#      at least 16 voices, 0 clamped, under 50% of real time (so it
-#      streams in real time); the figures go to the runs file.
+#      at least 16 voices, 0 clamped; play -m of it kept the device fed
+#      (0 underruns: the gate, since a loaded runner moves wall time);
+#      the cost under 100% of real time; the figures go to the runs file.
 #
 # Exit 0 when every assertion held, 1 otherwise, 2 on a usage or tool
 # error. The UEFI leg needs OVMF (PAX_REQUIRE_UEFI=1 makes its absence a
@@ -285,7 +287,18 @@ for leg in $legs; do
                 case $pl in *" 0 stolen, 0 clamped,"*) ;; *) why+=" stolen or clamped: '$pl';" ;; esac
                 cl=$(grep -m1 '^cost ' "$norm")
                 pc=$(printf '%s' "$cl" | sed -n 's/.*, \([0-9]*\)\.[0-9]% of real time.*/\1/p')
-                [ -n "$pc" ] && [ "$pc" -lt 50 ] || why+=" cost ${pc:-?}% of real time;"
+                # the gate is what the budget is for: play -m kept the
+                # device fed (the kernel's underrun count), which the
+                # runner's load can only move by breaking real time. The
+                # cost is wall time under TCG (the guest's clock is the
+                # host's), so it moves with the runner's load: 9.5-11.3%
+                # (long) and 26.8-30.7% (wide) on kasumi, 52% (wide) on
+                # a loaded CI runner (38208203649); it is recorded and
+                # bounded only by real time itself, 100%, twice the worst
+                # seen.
+                [ -n "$pc" ] && [ "$pc" -lt 100 ] || why+=" cost ${pc:-?}% of real time;"
+                un=$(grep -m1 -E '^sound: [0-9]+ opens' "$norm" | sed -n 's/.*, \([0-9]*\) underruns,.*/\1/p')
+                [ "${un:-x}" = 0 ] || why+=" ${un:-no} underruns;"
                 printf '%s: %s; %s\n' "$s" "$fr" "$cl" > "$base.expect.txt"
                 [ -s "$wav" ] || why+=" no capture;"
                 [ -s "$wav" ] && "$check" --expect /dev/stdin "$wav" <<< "noclip" >> "$base.expect.txt" 2>&1 || why+=" clipped;"
@@ -303,9 +316,13 @@ for leg in $legs; do
                 v=$(printf '%s' "$cost" | sed -n 's/.* parts, \([0-9]*\) voices at most.*/\1/p')
                 pct=$(printf '%s' "$cost" | sed -n 's/.*, \([0-9]*\)\.[0-9]% of real time.*/\1/p')
                 [ "${v:-0}" -ge 16 ] || why+=" ${v:-0} voices;"
-                [ -n "$pct" ] && [ "$pct" -lt 50 ] || why+=" ${pct:-?}% of real time;"
+                # as long/wide: the gate is 0 underruns; the wall-time cost
+                # (5.1-7.0% kasumi, 8.6% CI) is bounded by real time only
+                [ -n "$pct" ] && [ "$pct" -lt 100 ] || why+=" ${pct:-?}% of real time;"
+                un=$(grep -m1 -E '^sound: [0-9]+ opens' "$norm" | sed -n 's/.*, \([0-9]*\) underruns,.*/\1/p')
+                [ "${un:-x}" = 0 ] || why+=" ${un:-no} underruns;"
                 case $cost in *" 0 clamped,"*) ;; *) why+=" clamping;" ;; esac
-                [ -z "$why" ] && say "PASS O6 $id ($accel): $cost" || bad "O6 $id:$why '$cost'"
+                [ -z "$why" ] && say "PASS O6 $id ($accel): 0 underruns; $cost" || bad "O6 $id:$why '$cost'"
             fi
             printf '%s %s %s halt-status=%s accel=%s serial=%s wav=%s iso=%s | %s | %s\n' "$tier" "$leg" "$s" "$hrc" "$accel" \
                 "$(sha256_of "$log" 2>/dev/null)" "$(sha256_of "$wav" 2>/dev/null)" "$(sha256_of "$iso")" "$pl" "$cost" >> "$runs"
