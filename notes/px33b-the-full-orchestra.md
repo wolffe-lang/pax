@@ -174,3 +174,39 @@ most 2 dB, the limiter holding peaks.
 - Not run: KVM (hasu); listening by a person; a spectral check that
   each added line is heard apart (the counts and levels are the
   evidence here).
+
+## 6. The tempo passes and the harp fix (after the maintainer listened)
+
+- **t** ("plodding … more natural, but not blistering"): every tempo
+  word on pp. 196-209 was read again. There is **no metronome mark**,
+  and the four printed equivalences are kept exactly. Two words were
+  misplaced in px33's join and are corrected: Nicht schleppen is at
+  45.13 (not 45.12) and Wieder etwas zurückhaltend at 46.22 (not
+  46.21). Rit., zurückhaltend and Langsam steigern now move over their
+  bars. 463.8 → 398.1 s; the close 246.6 → 218.6 s.
+  - 49.7 had to stay at h 36. The harps' runs there overran 128 voices
+    at h 38 or faster (3 to 23 stolen, measured).
+  - Image `pax-mahler-orchestra-36t.iso` (sha256 `74315611…`). The full
+    render had 121 device underruns at a nomad-1 load of 17-21 (another
+    lane's soak); the file is whole (406.1 s, play's sound length). The
+    close render had 0 underruns.
+- **t2** ("another 15% across the board"): every value ×1.15, 49.7
+  included, the equivalences exact. 346.7 s; the close 190.6 s.
+  - The overrun's cause, fixed in play (`user/play/orch.lu`): a harp
+    string plucked again while it rings took a new voice and left the
+    earlier pluck ringing about 11 s, a sound one string cannot make.
+    It is now plucked in place, as a bell struck again already was,
+    with its phase and level carried (no click). `notes/px32-format.md`
+    §6 says so.
+  - Test `user/play/parts-test/replay` in mpx3-orchestra O4: red at the
+    test's own commit (`17 voices at most`); green with the fix. The
+    other O4 checks are unchanged (host-only on kasumi, play sha256
+    `035554da…`).
+  - `play -c`: 84 voices at most (was 125), 0 stolen, 0 dropped.
+  - Image `pax-mahler-orchestra-36t2.iso` (sha256 `e2579f3a…`): both
+    renders 0 underruns at load 2-6. `auferstehung-36-t2.wav` (sha256
+    `fbdbd146…`) and the close (`d3d0db76…`).
+  - The 5 s levels still follow the marks: the build -45 to -12; 48 fff
+    -11.6; 49.1 p -29.6; the last fff -11.3.
+- The tempo table (old, t, t2) is in `notes/px33-auferstehung.md`,
+  "Tempo pass".
