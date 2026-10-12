@@ -1,0 +1,396 @@
+//! unix — AF_UNIX path sockets' records (px34): the storage and the
+//! bookkeeping, below kernel/files. The system calls are kernel/files'
+//! (`unix_*`, reached from kernel/socket); a descriptor that names one
+//! is kernel/files' too, and so are the buffers a connection's bytes
+//! cross and the name a socket is bound to in the tree.
+//!
+//! **A socket** is one of 256 records of 32 words in boot/unix.S's
+//! `pax_unix`: its state, its type, the inode its name is (+ 1), its
+//! peer (+ 1), the two buffers it reads and writes (kernel/files' pipe
+//! buffer numbers, + 1), a listener's backlog and queue, a queued end's
+//! listener, its shutdown bits, the error it has pending, how many
+//! connections a listener has ever queued, and the name it was bound
+//! with (up to 108 bytes, as `bind` gave it, for `getsockname` and a
+//! peer's `getpeername`).
+//!
+//! **The states** (`unix(7)`, measured: `notes/px34/linux/witness/`):
+//! FRESH (made by `socket`; bound or not), LISTEN (`listen`), CONN (one
+//! end of a connection: a client after `connect`, or a server's end
+//! after `accept`), QUEUED (a server's end made by a `connect`, waiting
+//! on its listener's queue for an `accept`; its client is CONN and can
+//! already write to it). A record is freed when its descriptor's open
+//! file is last closed, or, for a QUEUED end, when its listener goes.
+//!
+//! **The queue** is a list through the queued ends' U_QNEXT words, in
+//! the order the connections came; it holds `backlog + 1` (measured:
+//! Linux took two connections on a backlog of 1 and refused the third).
+//!
+//! One CPU, and a system call runs with interrupts off from entry to
+//! return: nothing here locks. No region, no heap. Written from unix(7),
+//! socket(2), bind(2), listen(2), accept(2), connect(2), shutdown(2),
+//! getsockname(2) and black-box runs of user/unix/unixprobe.c on Linux.
+//! No Linux source; no other kernel's source.
+
+use log
+
+extern "c" let pax_unix_state: *u64
+extern "c" let pax_unix: *u64
+
+/// How many sockets there are; also `new`'s answer when none is free.
+pub const SOCKS: u64 = 256
+/// The longest name `bind` takes: `sun_path`'s 108 bytes.
+pub const NAME_MAX: u64 = 108
+
+/// A free record.
+pub const FREE: u64 = 0
+/// Made by `socket`, bound or not; not listening, not connected.
+pub const FRESH: u64 = 1
+/// Listening.
+pub const LISTEN: u64 = 2
+/// One end of a connection.
+pub const CONN: u64 = 3
+/// A server's end waiting on its listener's queue.
+pub const QUEUED: u64 = 4
+
+/// Shutdown bits (`U_SHUT`): this end will read no more.
+pub const RD: u64 = 1
+/// This end will write no more.
+pub const WR: u64 = 2
+
+const WORDS: u64 = 32
+const U_STATE: u64 = 0
+const U_TYPE: u64 = 1
+const U_INO: u64 = 2 // the inode its name is, + 1
+const U_PEER: u64 = 3 // + 1
+const U_RX: u64 = 4 // the buffer it reads, + 1
+const U_TX: u64 = 5 // the buffer it writes, + 1
+const U_BACKLOG: u64 = 6
+const U_QHEAD: u64 = 7 // + 1
+const U_QTAIL: u64 = 8 // + 1
+const U_QLEN: u64 = 9
+const U_QNEXT: u64 = 10 // + 1
+const U_LISTENER: u64 = 11 // a queued end's listener, + 1
+const U_SHUT: u64 = 12
+const U_ERR: u64 = 13 // the errno a read answers once
+const U_EVER: u64 = 14 // connections ever queued on a listener
+const U_NLEN: u64 = 15 // the name's length (0: unnamed)
+const U_NAME: u64 = 16 // the name's bytes, from here (14 words: 112 bytes)
+
+// pax_unix_state's words.
+const S_LIVE: u64 = 0
+const S_MADE: u64 = 1
+const S_CONNS: u64 = 2 // connections made since boot
+const S_REFUSED: u64 = 3
+const S_CENSUS: u64 = 4 // the count the last census line was for
+
+// Refusal codes: kernel/files' range (16-31), the ones it leaves free.
+/// An abstract name or autobind.
+pub const R_ABSTRACT: u64 = 20
+/// A Unix socket of a type PAX has not on a path.
+pub const R_TYPE: u64 = 21
+/// An option set on a Unix socket.
+pub const R_OPTION: u64 = 22
+
+fn st(i: u64) -> u64 {
+    // # Safety: i < 16, inside boot/unix.S's pax_unix_state.
+    unsafe { ((pax_unix_state as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_st(i: u64, v: u64) {
+    // # Safety: as `st`.
+    unsafe { ((pax_unix_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+fn w(r: u64, i: u64) -> u64 {
+    // # Safety: r < SOCKS, i < WORDS: inside boot/unix.S's pax_unix.
+    unsafe { ((pax_unix as u64 + (r * WORDS + i) * 8) as *u64).read_volatile() }
+}
+
+fn put(r: u64, i: u64, v: u64) {
+    // # Safety: as `w`.
+    unsafe { ((pax_unix as u64 + (r * WORDS + i) * 8) as *u64).write_volatile(v) }
+}
+
+/// A refusal code's name ("" when not this module's).
+pub fn why(r: u64) -> str {
+    if r == R_ABSTRACT {
+        return "an abstract name or autobind (PAX names Unix sockets by path only)"
+    }
+    if r == R_TYPE {
+        return "an AF_UNIX socket of a type PAX has on a path neither (SOCK_STREAM only)"
+    }
+    if r == R_OPTION {
+        return "an option set on a Unix socket (PAX has none to set)"
+    }
+    ""
+}
+
+/// A refusal by name: counted.
+pub fn refuse() {
+    put_st(S_REFUSED, st(S_REFUSED) + 1)
+}
+
+/// A new record of type `ty`, FRESH, unbound: its number, or SOCKS when
+/// none is free.
+pub fn new(ty: u64) -> u64 {
+    var r: u64 = 0
+    while r < SOCKS && w(r, U_STATE) != FREE {
+        r += 1
+    }
+    if r == SOCKS {
+        return SOCKS
+    }
+    var i: u64 = 0
+    while i < WORDS {
+        put(r, i, 0)
+        i += 1
+    }
+    put(r, U_STATE, FRESH)
+    put(r, U_TYPE, ty)
+    put_st(S_LIVE, st(S_LIVE) + 1)
+    put_st(S_MADE, st(S_MADE) + 1)
+    r
+}
+
+/// Record `r` is free again.
+pub fn free(r: u64) {
+    if w(r, U_STATE) == FREE {
+        return
+    }
+    put(r, U_STATE, FREE)
+    put_st(S_LIVE, st(S_LIVE) - 1)
+}
+
+/// Record `r`'s state (FREE, FRESH, LISTEN, CONN, QUEUED).
+pub fn state(r: u64) -> u64 {
+    w(r, U_STATE)
+}
+
+/// Record `r` is in state `s` now.
+pub fn set_state(r: u64, s: u64) {
+    put(r, U_STATE, s)
+}
+
+/// Record `r`'s type (SOCK_STREAM, 1).
+pub fn kind(r: u64) -> u64 {
+    w(r, U_TYPE)
+}
+
+/// The inode its name is, or NONE_INO.
+pub const NONE_INO: u64 = 0xffffffffffffffff
+
+/// The inode record `r`'s name is (kernel/tree's), or NONE_INO.
+pub fn ino(r: u64) -> u64 {
+    let i = w(r, U_INO)
+    if i == 0 { NONE_INO } else { i - 1 }
+}
+
+/// Record `r`'s name is inode `i` now (NONE_INO: none).
+pub fn set_ino(r: u64, i: u64) {
+    put(r, U_INO, if i == NONE_INO { 0 } else { i + 1 })
+}
+
+/// Its peer, or SOCKS.
+pub fn peer(r: u64) -> u64 {
+    let p = w(r, U_PEER)
+    if p == 0 { SOCKS } else { p - 1 }
+}
+
+/// Record `r`'s peer is `p` now (SOCKS: none).
+pub fn set_peer(r: u64, p: u64) {
+    put(r, U_PEER, if p == SOCKS { 0 } else { p + 1 })
+}
+
+/// The buffers it reads (`which` 0) and writes (1): kernel/files' pipe
+/// buffer numbers, or NONE_BUF.
+pub const NONE_BUF: u64 = 0xffffffffffffffff
+
+/// The buffer record `r` reads (`which` 0) or writes (1), or NONE_BUF.
+pub fn buf(r: u64, which: int) -> u64 {
+    let b = w(r, if which == 0 { U_RX } else { U_TX })
+    if b == 0 { NONE_BUF } else { b - 1 }
+}
+
+/// Record `r` reads buffer `rx` and writes buffer `tx` now.
+pub fn set_bufs(r: u64, rx: u64, tx: u64) {
+    put(r, U_RX, if rx == NONE_BUF { 0 } else { rx + 1 })
+    put(r, U_TX, if tx == NONE_BUF { 0 } else { tx + 1 })
+}
+
+/// A listener's backlog.
+pub fn backlog(r: u64) -> u64 {
+    w(r, U_BACKLOG)
+}
+
+/// A listener's backlog is `n` now.
+pub fn set_backlog(r: u64, n: u64) {
+    put(r, U_BACKLOG, n)
+}
+
+/// Record `r`'s shutdown bits (RD, WR).
+pub fn shut(r: u64) -> u64 {
+    w(r, U_SHUT)
+}
+
+/// Record `r` shuts the halves `bits` too.
+pub fn add_shut(r: u64, bits: u64) {
+    put(r, U_SHUT, w(r, U_SHUT) | bits)
+}
+
+/// The error a read answers once (0 none).
+pub fn err(r: u64) -> u64 {
+    w(r, U_ERR)
+}
+
+/// The errno record `r`'s next read answers is `e` now (0 none).
+pub fn set_err(r: u64, e: u64) {
+    put(r, U_ERR, e)
+}
+
+/// Connections a listener has ever had queued (an edge-triggered
+/// registration's count).
+pub fn ever(r: u64) -> u64 {
+    w(r, U_EVER)
+}
+
+// --- the queue ------------------------------------------------------------------
+
+/// How many ends wait on listener `l`'s queue.
+pub fn qlen(l: u64) -> u64 {
+    w(l, U_QLEN)
+}
+
+/// Whether listener `l`'s queue has room for one more (backlog + 1).
+pub fn room(l: u64) -> bool {
+    w(l, U_QLEN) <= w(l, U_BACKLOG)
+}
+
+/// Queued end `c` goes to the tail of listener `l`'s queue.
+pub fn enqueue(l: u64, c: u64) {
+    put(c, U_QNEXT, 0)
+    put(c, U_LISTENER, l + 1)
+    let t = w(l, U_QTAIL)
+    if t == 0 {
+        put(l, U_QHEAD, c + 1)
+    } else {
+        put(t - 1, U_QNEXT, c + 1)
+    }
+    put(l, U_QTAIL, c + 1)
+    put(l, U_QLEN, w(l, U_QLEN) + 1)
+    put(l, U_EVER, w(l, U_EVER) + 1)
+    put_st(S_CONNS, st(S_CONNS) + 1)
+}
+
+/// The head of listener `l`'s queue, taken off it; SOCKS when empty.
+pub fn dequeue(l: u64) -> u64 {
+    let h = w(l, U_QHEAD)
+    if h == 0 {
+        return SOCKS
+    }
+    let c = h - 1
+    let n = w(c, U_QNEXT)
+    put(l, U_QHEAD, n)
+    if n == 0 {
+        put(l, U_QTAIL, 0)
+    }
+    put(l, U_QLEN, w(l, U_QLEN) - 1)
+    put(c, U_QNEXT, 0)
+    put(c, U_LISTENER, 0)
+    c
+}
+
+// --- names ------------------------------------------------------------------------
+
+/// Record `r`'s name becomes the `n` bytes at kernel address `src`
+/// (n <= NAME_MAX).
+pub fn set_name(r: u64, src: u64, n: u64) {
+    var i: u64 = 0
+    while i < 14 {
+        put(r, U_NAME + i, 0)
+        i += 1
+    }
+    i = 0
+    while i < n {
+        // # Safety: a byte of the caller's kernel buffer.
+        let v = unsafe { ((src + i) as *u8).read_volatile() }
+        let b = v as u64
+        let k = U_NAME + i / 8
+        put(r, k, w(r, k) | (b << ((i % 8) * 8)))
+        i += 1
+    }
+    put(r, U_NLEN, n)
+}
+
+/// The length of record `r`'s name (0: unnamed).
+pub fn name_len(r: u64) -> u64 {
+    w(r, U_NLEN)
+}
+
+/// Byte `i` of record `r`'s name.
+pub fn name_byte(r: u64, i: u64) -> u64 {
+    (w(r, U_NAME + i / 8) >> ((i % 8) * 8)) & 0xff
+}
+
+/// Record `to` takes record `from`'s name (an accepted end answers its
+/// listener's name to `getsockname`, measured).
+pub fn copy_name(to: u64, from: u64) {
+    var i: u64 = 0
+    while i < 14 {
+        put(to, U_NAME + i, w(from, U_NAME + i))
+        i += 1
+    }
+    put(to, U_NLEN, w(from, U_NLEN))
+}
+
+// --- the books ---------------------------------------------------------------------
+
+/// Sockets in use.
+pub fn live() -> u64 {
+    st(S_LIVE)
+}
+
+/// Sockets made since boot.
+pub fn made() -> u64 {
+    st(S_MADE)
+}
+
+/// Connections made since boot.
+pub fn conns() -> u64 {
+    st(S_CONNS)
+}
+
+/// Refusals by name since boot.
+pub fn refusals() -> u64 {
+    st(S_REFUSED)
+}
+
+/// The count of connections since boot when it has just reached a
+/// multiple of 2500 (kernel/user's census line), else 0.
+pub fn census_due() -> u64 {
+    let n = st(S_CONNS)
+    if n == 0 || n % 2500 != 0 || st(S_CENSUS) == n {
+        return 0
+    }
+    put_st(S_CENSUS, n)
+    n
+}
+
+/// `unix: sockets <s>, buffers <b>; made <m>, connections <c>, refused
+/// <r>`, when a socket was ever made (no line otherwise, so no session
+/// without one changes): `bufs` is kernel/files' count of buffers held.
+pub fn report(bufs: u64) {
+    if st(S_MADE) == 0 {
+        return
+    }
+    log.put("unix: sockets ")
+    log.dec(st(S_LIVE) as int)
+    log.put(", buffers ")
+    log.dec(bufs as int)
+    log.put("; made ")
+    log.dec(st(S_MADE) as int)
+    log.put(", connections ")
+    log.dec(st(S_CONNS) as int)
+    log.put(", refused ")
+    log.dec(st(S_REFUSED) as int)
+    log.end()
+}
