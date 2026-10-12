@@ -91,6 +91,11 @@
 //! `TCP_USER_TIMEOUT` (18, milliseconds). Every other -ENOPROTOOPT, by
 //! name.
 //!
+//! **AF_UNIX path sockets** (px34): `socket(AF_UNIX, …)` and every call
+//! here on a descriptor that names one go to kernel/files' `unix_*`,
+//! which resolve its name in the tree; `sendto`, `recvfrom`, `read` and
+//! `write` on one are kernel/files' as a socketpair's are.
+//!
 //! Written from the man pages socket(2), bind(2), connect(2),
 //! sendto(2), recvfrom(2), getsockname(2), getpeername(2),
 //! getsockopt(2), listen(2), accept(2), shutdown(2), send(2), recv(2),
@@ -111,6 +116,7 @@ use uaccess
 use udp
 
 const AF_UNSPEC: u64 = 0
+const AF_UNIX: u64 = 1 // px34
 const AF_INET: u64 = 2
 const SOCK_STREAM: u64 = 1
 const SOCK_DGRAM: u64 = 2
@@ -298,6 +304,9 @@ fn sock(a: u64, fd: u64, nr: u64) -> (u64, u64) {
 
 /// `socket(domain, type, protocol)`: the descriptor or -errno.
 pub fn socket(a: u64, domain: u64, ty: u64, proto: u64) -> u64 {
+    if domain == AF_UNIX {
+        return files.unix_socket(a, ty, proto) // px34
+    }
     if domain != AF_INET {
         return refuse(a, R_FAMILY, EAFNOSUPPORT, domain, 0)
     }
@@ -403,8 +412,16 @@ fn errno_of(e: u64) -> u64 {
     if e == 0 { 0 } else { neg(e) }
 }
 
+/// px34: whether descriptor `fd` is an AF_UNIX path socket.
+fn is_path(a: u64, fd: u64) -> bool {
+    files.sock_kind(a, fd) == files.PATH
+}
+
 /// `bind(fd, addr, len)`.
 pub fn bind(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
+    if is_path(a, fd) {
+        return files.unix_bind(a, pml4, fd, addr, len) // px34
+    }
     if is_stream(a, fd) {
         let (se, sip, sport) = addr_in(pml4, addr, len)
         if se != 0 {
@@ -426,6 +443,9 @@ pub fn bind(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
 /// `connect(fd, addr, len)`: the default peer; AF_UNSPEC forgets it. On
 /// a stream socket: the handshake, waited for.
 pub fn connect(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
+    if is_path(a, fd) {
+        return files.unix_connect(a, pml4, fd, addr, len) // px34
+    }
     if is_stream(a, fd) {
         let (se, sip, sport) = addr_in(pml4, addr, len)
         if se != 0 {
@@ -578,6 +598,9 @@ pub fn recvfrom(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64, addr: 
 
 /// `getsockname(fd, addr, lenp)` (`peer` false) and `getpeername`.
 pub fn getname(a: u64, pml4: u64, fd: u64, addr: u64, lenp: u64, peer: bool) -> u64 {
+    if is_path(a, fd) {
+        return files.unix_getname(a, pml4, fd, addr, lenp, peer) // px34
+    }
     if is_stream(a, fd) {
         let c = files.inet_sock(a, fd)
         var sip: u64 = 0
@@ -629,6 +652,9 @@ pub fn getname(a: u64, pml4: u64, fd: u64, addr: u64, lenp: u64, peer: bool) -> 
 
 /// `setsockopt(fd, level, option, value, len)`: SO_RCVTIMEO_OLD.
 pub fn setsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u64, len: u64) -> u64 {
+    if is_path(a, fd) {
+        return files.unix_setsockopt(a) // px34
+    }
     if is_stream(a, fd) {
         let o = stream_option(level, option)
         if o == NO_OPTION {
@@ -680,6 +706,9 @@ pub fn setsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u6
 /// `getsockopt(fd, level, option, value, lenp)`: SO_TYPE, SO_ERROR,
 /// SO_RCVTIMEO_OLD.
 pub fn getsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u64, lenp: u64) -> u64 {
+    if is_path(a, fd) {
+        return files.unix_getsockopt(a, pml4, fd, level, option, value, lenp) // px34
+    }
     if is_stream(a, fd) {
         let c = files.inet_sock(a, fd)
         let o = stream_option(level, option)
@@ -751,6 +780,9 @@ pub fn getsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u6
 /// `listen(fd, backlog)`: a stream socket takes connections from now
 /// on; a datagram socket has none to take.
 pub fn listen(a: u64, fd: u64, backlog: u64) -> u64 {
+    if is_path(a, fd) {
+        return files.unix_listen(a, fd, backlog) // px34
+    }
     if is_stream(a, fd) {
         // A negative backlog is as large as one can be (listen(2)).
         return errno_of(tcp.listen(files.inet_sock(a, fd), backlog & 0x7fffffff))
@@ -767,6 +799,9 @@ pub fn listen(a: u64, fd: u64, backlog: u64) -> u64 {
 /// socket as a descriptor of its own, its peer's address written when
 /// asked for; `files.WAIT` (or -EAGAIN) while there is none.
 pub fn accept(a: u64, pml4: u64, fd: u64, addr: u64, lenp: u64, flags: u64, nr: u64) -> u64 {
+    if is_path(a, fd) {
+        return files.unix_accept(a, pml4, fd, addr, lenp, flags) // px34
+    }
     if !is_stream(a, fd) {
         let (e, _s) = sock(a, fd, nr)
         if e != 0 {
@@ -809,6 +844,9 @@ pub fn accept(a: u64, pml4: u64, fd: u64, addr: u64, lenp: u64, flags: u64, nr: 
 
 /// `shutdown(fd, how)` on a stream socket.
 pub fn shutdown(a: u64, fd: u64, how: u64) -> u64 {
+    if is_path(a, fd) {
+        return files.unix_shutdown(a, fd, how) // px34
+    }
     if !is_stream(a, fd) {
         let (e, _s) = sock(a, fd, 48)
         if e != 0 {
