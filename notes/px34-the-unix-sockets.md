@@ -486,7 +486,7 @@ PAX does not raise it.
 | P5 TCP memory | "1,024 connections need about 4 GiB" | **wrong arithmetic**: 32 frames (128 KiB) a connection in use is **128 MiB** for 1,024 |
 | P6 refusals | six by name | six: SOCK_RAW, SOCK_SEQPACKET and SOCK_DGRAM on a path, `setsockopt`, an abstract name, autobind (`listen` unbound left the list, SOCK_RAW joined it) |
 | P8 times | status under 50 ms KVM, 2 s TCG; 10,000 connections under 30 s KVM, 5 min TCG | KVM (hasu): lobo's client 0–30 ms by the guest's clock, the whole `ctl` boot 2–3 s; the soak 40–90 ms by the guest's clock for 10,000 connections (Linux in the container 72 ms), the whole soak boot 2–3 s. TCG: §4 |
-| P10 what moves | no transcript lists `/`; RLIMIT_NOFILE nowhere printed | right for those; **missed**: mpx4-tcp's and mpx4-ready's T1 assert the `tcp: 256 blocks` line, red in the gauntlet (`g1-041a4c8/mpx4-tcp.out`, `mpx4-ready.out`); the line moved to 1024 in both suites (`b29fe25`) and both reran green on the same images (100/0, 102/0) |
+| P10 what moves | no transcript lists `/`; RLIMIT_NOFILE nowhere printed | right for those; **missed**: mpx4-tcp's and mpx4-ready's T1 assert the `tcp: 256 blocks` line, red in the gauntlet (`g1-041a4c8/mpx4-tcp.out`, `mpx4-ready.out`); the line moved to 1024 in both suites (`c830d8a`) and both reran green on the same images (100/0, 102/0) |
 | P11 what fails first | #711's compile time; a spurious -EFAULT; EPOLLRDHUP timing | none of the three: the release tier got **faster** (`kmain_console` 200 s → 54 s, `kmain_sockets` 180 s → 54 s, the same container, twice each; not investigated); what failed first was a name defined twice (`ring_put`, E0302), and the stack witness reusing a dead thread's kernel stack (`reap` runs at the next `clone`: the witness now keeps a thread parked) |
 
 ## What lobo's list now answers
@@ -564,6 +564,18 @@ otherwise than Linux, or what was never run with lobo:
   `SO_KEEPALIVE`, `SO_LINGER`, `SO_SNDBUF`, `SO_RCVBUF`, `ppoll`,
   `epoll_pwait`, `timerfd`, `signalfd`.
 
+## What moved at the rebase (trunk `579ac9f`: px28, the session image)
+
+px28 merged while this lane ran; its commits touch none of this lane's
+files but `.github/workflows/ci.yml`, where both added a job at the
+end: resolved as trunk's file with this lane's `mpx4-unix` job after
+px28's `mpx4-session` (27 jobs). The rebase moved every sha; the
+evidence directories are named by the shas they were taken at, before
+it: `g1-041a4c8` and `hasu/k1-4dacb8d`, `hasu/k2-35a8289` are the
+trees of `14ec416`, `3a4aa98` and `78c1074` now (the same files; only
+the parent moved). The plants ran in CI on their pre-rebase shas
+(fc3d06a, 67c1275). CI at the head is the run on the rebased branch.
+
 ## 4. Evidence index
 
 - **The straces and the marked list**: `notes/px34/linux/lobo-944edc1/`
@@ -597,11 +609,11 @@ otherwise than Linux, or what was never run with lobo:
   (head, all ten commands exit 0) against
   `trunk-ready-none-128M.log` (`waitwolf` killed after -ENOMEM).
 - **Planted breaks, red in CI and reverted**: A, seqpacket messages
-  merged (`fc3d06a`), run **38192212617**: mpx4-unix U1 (the messages
+  merged (`1c7259c`, run on its pre-rebase sha fc3d06a), run **38192212617**: mpx4-unix U1 (the messages
   read as one), the boot held to its 300 s deadline; reverted
-  `eae4e15`. B, an unlinked socket name kept (`67c1275`), run
+  `9c8a7b7`. B, an unlinked socket name kept (`f07a5ee`, run on its pre-rebase sha 67c1275), run
   **38198179503**: mpx4-unix U1 and U4 (the inodes left), red in 3 s;
-  reverted `c5bca96`. Every other job of 38198179503 green, mpx4-tcp
+  reverted `90779c6`. Every other job of 38198179503 green, mpx4-tcp
   and mpx4-ready with the 1024-block line among them.
 - **Kernel build times** (kasumi, `px13-ubuntu`, the same container,
   twice each): `kmain_console` release trunk 200 s / 199 s, head 54 s /
@@ -618,7 +630,7 @@ otherwise than Linux, or what was never run with lobo:
   lupin 0.1.50, QEMU 11.1.1, strict env: `PAX_REQUIRE_UEFI=1`,
   `WOLF_PAIRING_REQUIRE_SIBLING=1`): every suite rc 0 but mpx4-tcp and
   mpx4-ready (T1, the `tcp: 256 blocks` line: P10's miss), both rc 0
-  after `b29fe25` on the same images. 0 SKIP throughout.
+  after `c830d8a` on the same images. 0 SKIP throughout.
 - **CI green at head**: in the PR.
 
 ## 5. Done-when
