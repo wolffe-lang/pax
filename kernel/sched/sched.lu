@@ -299,7 +299,7 @@ const GUARD: u64 = 49152 // its low part, never mapped
 const STACK: u64 = 16384 // its high part, mapped
 const PAGE: u64 = 4096
 const PAGES: u64 = 4
-const PROC_AREA: u64 = 8192 // px12: each slot's bytes of boot/sched.S's pax_procs (2048 before px14, 4096 before px24)
+const PROC_AREA: u64 = 40960 // px12: each slot's bytes of boot/sched.S's pax_procs (px34: 1024 descriptors and 256 reservations; 8192 before, 4096 before px24, 2048 before px14)
 const FS_BASE: u64 = 0xc0000100 // px12: IA32_FS_BASE (Intel SDM vol. 4)
 
 const QUANTUM: u64 = 2 // ticks
@@ -530,15 +530,24 @@ pub fn switched(f: u64) -> u64 {
     run_next()
 }
 
-/// Map four fresh frames as slot `s`'s stack; record its bounds.
-fn make_stack(s: u64) {
+/// Map four fresh frames as slot `s`'s stack; record its bounds. px34:
+/// false when the frames are not to be had (none kept), so a `clone`
+/// answers -EAGAIN instead of the kernel panicking.
+fn make_stack(s: u64) -> bool {
     let pml4 = sv(S_PML4)
     let lo = base_of(s) + GUARD
     var k: u64 = 0
     while k < PAGES {
         let pa = frames.alloc() else 0
         if pa == 0 {
-            panic.fail("sched: no frame for a stack, slot", s)
+            while k > 0 {
+                k -= 1
+                let f = paging.unmap(pml4, lo + k * PAGE) else 0
+                if f != 0 {
+                    frames.free(f)
+                }
+            }
+            return false
         }
         let n = paging.map(pml4, lo + k * PAGE, pa, paging.RW | paging.NX) else 99
         if n == 99 {
@@ -548,7 +557,20 @@ fn make_stack(s: u64) {
     }
     put_field(s, offset_of(Thread, stack_lo), lo)
     put_field(s, offset_of(Thread, stack_hi), lo + STACK)
+    true
 }
+
+/// A kernel thread's stack (one the kernel makes for itself, at boot or
+/// for a program it starts): no frame for it is the kernel's end.
+fn make_stack_or_die(s: u64) {
+    if !make_stack(s) {
+        panic.fail("sched: no frame for a stack, slot", s)
+    }
+}
+
+/// px34: `clone_current`'s and `clone_thread`'s answer when no frame is
+/// left for the new thread's kernel stack (kernel/process: -EAGAIN).
+pub const NO_STACK: u64 = SLOTS + 1
 
 /// Unmap slot `s`'s stack and give its frames back.
 fn free_stack(s: u64) {
@@ -778,12 +800,12 @@ pub fn start(pml4: u64) {
     put_field(MAIN, offset_of(Thread, state), RUNNING)
     put_field(MAIN, offset_of(Thread, id), 0)
     put_field(MAIN, offset_of(Thread, runs), 1)
-    make_stack(IDLE)
+    make_stack_or_die(IDLE)
     // px24: sixty-four slots' stacks span two page tables (2 MiB each);
     // the second is taken now, by mapping and unmapping the last slot's
     // stack, so the first process to run more than thirty threads does
     // not leave the count of free frames one short for good.
-    make_stack(SLOTS - 1)
+    make_stack_or_die(SLOTS - 1)
     free_stack(SLOTS - 1)
     put_field(SLOTS - 1, offset_of(Thread, stack_lo), 0)
     put_field(SLOTS - 1, offset_of(Thread, stack_hi), 0)
@@ -877,7 +899,7 @@ fn start_thread(body: u64, arg: u64, cr3: u64, prog: u64) -> u64 {
     if s == SLOTS {
         panic.fail("sched: no free thread slot, live", live_count())
     }
-    make_stack(s)
+    make_stack_or_die(s)
     fpu.reset(s)
     // # Safety: the address of boot/sched.S's entry; nothing is read.
     first_frame(s, unsafe { pax_thread_entry as u64 }, body, arg)
@@ -1392,7 +1414,9 @@ pub fn clone_current(f: u64, usp: u64, cr3: u64) -> u64 {
     if s == SLOTS {
         return SLOTS
     }
-    make_stack(s)
+    if !make_stack(s) {
+        return NO_STACK // px34
+    }
     fpu.fork(p, s)
     let hi = field(s, offset_of(Thread, stack_hi))
     let cf = hi - FRAME_WORDS * 8
@@ -1469,7 +1493,9 @@ pub fn clone_thread(f: u64, usp: u64, settls: bool, tls: u64, ctid: u64) -> u64 
     if s == SLOTS {
         return SLOTS
     }
-    make_stack(s)
+    if !make_stack(s) {
+        return NO_STACK // px34
+    }
     fpu.fork(p, s)
     let hi = field(s, offset_of(Thread, stack_hi))
     let cf = hi - FRAME_WORDS * 8

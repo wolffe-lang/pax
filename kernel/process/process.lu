@@ -52,7 +52,8 @@
 //! to the open files they inherit (kernel/files' `inherit`). Refused by
 //! name: CLONE_VM without CLONE_VFORK (a thread or a process sharing
 //! memory while both run and is not a thread, -ENOSYS), any other flag
-//! (-EINVAL), no free slot (-EAGAIN), no frames for the copy (-ENOMEM).
+//! (-EINVAL), no free slot or (px34) no frame for its kernel stack
+//! (-EAGAIN, each by name), no frames for the copy (-ENOMEM).
 //!
 //! **execve** (59): path, argv and envp read out of the caller's memory
 //! first; then the file (kernel/files' `exec_lookup`: -ENOENT, -EACCES
@@ -98,7 +99,8 @@
 //! CLONE_SIGHAND, or CLONE_SIGHAND without CLONE_VM (-EINVAL,
 //! `clone(2)`); a thread that would not share descriptors and working
 //! directory, or one with no stack of its own (by name, -EINVAL); a
-//! flag PAX does not take (-EINVAL); no free slot (-EAGAIN). Every
+//! flag PAX does not take (-EINVAL); no free slot or no frame for its
+//! kernel stack (-EAGAIN, px34). Every
 //! 2500th thread made since boot writes a census line (`user: <name>
 //! pid <n> threads: <k> made since boot; slots busy <b>, frames free
 //! <f>`), which tests/mpx3-threads' soak holds flat. `execve` from a
@@ -246,6 +248,7 @@ const R_FORK: u64 = 32
 const R_SHARED: u64 = 33
 const R_FLAGS: u64 = 34
 const R_SLOTS: u64 = 35
+const R_STACK: u64 = 36 // px34
 const R_NOT_ELF: u64 = 37
 const R_NOMEM: u64 = 38 // px17
 const R_FUTEX: u64 = 39 // px26 (kernel/futex's R_OPERATION)
@@ -270,6 +273,9 @@ pub fn why(r: u64) -> str {
     }
     if r == R_SLOTS {
         return "no free process slot"
+    }
+    if r == R_STACK {
+        return "no frame for a thread's kernel stack"
     }
     if r == R_NOT_ELF {
         return "not a static x86-64 ELF executable PAX runs"
@@ -927,8 +933,8 @@ pub fn clone(f: u64, nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u6
         return f
     }
     let s = sched.clone_current(f, usp, 0)
-    if s == sched.SLOTS {
-        put_word(f, W_RAX, refuse_with(R_SLOTS, NEG_EAGAIN))
+    if s == sched.SLOTS || s == sched.NO_STACK {
+        put_word(f, W_RAX, refuse_with(if s == sched.NO_STACK { R_STACK } else { R_SLOTS }, NEG_EAGAIN))
         return f
     }
     files.inherit(sched.proc_area(s)) // px17: shared open files
@@ -958,9 +964,9 @@ fn fork(f: u64, flags: u64, usp: u64, ptid: u64, ctid: u64) -> u64 {
         return f
     }
     let s = sched.clone_current(f, usp, space)
-    if s == sched.SLOTS {
+    if s == sched.SLOTS || s == sched.NO_STACK {
         let _freed = paging.free_user(space)
-        put_word(f, W_RAX, refuse_with(R_SLOTS, NEG_EAGAIN))
+        put_word(f, W_RAX, refuse_with(if s == sched.NO_STACK { R_STACK } else { R_SLOTS }, NEG_EAGAIN))
         return f
     }
     let a = sched.proc_area(s)
@@ -1006,8 +1012,8 @@ fn thread(f: u64, flags: u64, usp: u64, ptid: u64, ctid: u64, tls: u64) -> u64 {
         return f
     }
     let s = sched.clone_thread(f, usp, flags & CLONE_SETTLS != 0, tls, if flags & CLONE_CHILD_CLEARTID != 0 { ctid } else { 0 })
-    if s == sched.SLOTS {
-        put_word(f, W_RAX, refuse_with(R_SLOTS, NEG_EAGAIN))
+    if s == sched.SLOTS || s == sched.NO_STACK {
+        put_word(f, W_RAX, refuse_with(if s == sched.NO_STACK { R_STACK } else { R_SLOTS }, NEG_EAGAIN))
         return f
     }
     let t = sched.slot_pid(s)
