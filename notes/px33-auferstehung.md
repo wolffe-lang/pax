@@ -161,19 +161,20 @@ stays until the opening (43.5-46.10, being re-read) is joined.
   the readers' pages begin at 46.11, and 47.1 to the end is the
   climb to 48 and the whole close unbroken.
 - **Checks**: `notes/px33/tools/check.py` on both files: `errors 0`.
-  px32's `play -c` (built from px32 835d5e1 on kasumi): the joined file
-  317940 ms of sound (309939 written), 24 parts, 64 voices at most, 145
-  stolen, 0 clamped, status 0; the close 254624 ms (246623 written),
-  64 voices at most, 131 stolen, 0 clamped, status 0.
-- **Length**: play 246.6 s written; from the bar lines alone (meter,
+  px32's `play -c` (built from px32 27a8383, with 7b29505's 128 voices,
+  on kasumi): the joined file 317940 ms of sound (309939 written), 24
+  parts, 95 voices at most, 0 stolen, 0 clamped, 0 notes dropped,
+  status 0; the close 254624 ms (246623 written), 95 voices at most, 0
+  stolen, 0 clamped, 0 notes dropped, status 0.
+- **Length**: play 246.6 s written; from the bar lines alone (`notes/px33/tools/length.py`: meter,
   tempo, rit, integrated) 248.1 s: 0.6% apart, the difference in the
   ritardandi. The prediction (about 190 s) was short: 48 Pesante at
   q 40 is 6 s a bar.
-- **The image** (`pax-mahler-orchestra-3.iso`, sha256 0e552418...)
+- **The image** (`pax-mahler-orchestra-5.iso`, sha256 2708b13c...)
   under TCG with QEMU's wav backend, `-m 256M`, through pelt:
-  `play -m auferstehung-close`: 64 voices at most, 131 stolen, 0
-  clamped, 9568 blocks limited; the device 11937 periods, 0 underruns,
-  0 dropped. 254.6 s of sound, as play's figure.
+  `play -m auferstehung-close`: 95 voices at most, 0 stolen, 0
+  clamped, 0 notes dropped, 12939 blocks limited; the device 11937
+  periods, 0 underruns, 0 dropped. 254.6 s of sound, as play's figure.
 - **Levels** (tools/orch-check --env, 5 s windows, dBFS, time from the
   first sound) against the score's marks:
 
@@ -189,21 +190,27 @@ stays until the opening (43.5-46.10, being re-read) is joined.
   | 125-135 | -21.2 -29.9 | 48.14-49.1 | p/pp: the quietest place |
   | 135-150 | -23.9 -21.9 -19.6 | 49.2-5 | ff chorus, < |
   | 150-160 | -13.6 -12.0 | 49.5-6 | < fff |
-  | 160-185 | -14.3 -16.8 -19.5 -21.0 -23.6 | 49.7-14 | fff tutti, tam-tam; dim. to p/mf |
+  | 160-185 | -14.0 -16.0 -18.5 -19.9 -23.5 | 49.7-14 | fff tutti, tam-tam; dim. to p/mf |
   | 185-200 | -20.8 -20.6 -19.4 | 50.1-4 | pp strings, harp fff, < ff |
-  | 200-205 | -24.1 (1 s: -18 at 195 to -37 at 206) | 50.5-12 | ff, > to p |
-  | 205-230 | -16.3 -14.2 -16.3 -15.3 -16.7 | 51.1-8 | ff/fff |
-  | 230-240 | -11.5 -12.1 | 51.9-11 | fff tutti |
-  | 240-245 | -17.6 | 51.11-13 | fff held: **see below** |
+  | 200-205 | -24.2 (1 s: -18 at 195 to -37 at 206) | 50.5-12 | ff, > to p |
+  | 205-230 | -16.4 -14.1 -16.2 -15.2 -16.7 | 51.1-8 | ff/fff |
+  | 230-245 | -11.5 -10.3 -11.6 | 51.9-13 | fff held, one level (1 s: -10.1 to -10.6 from 232 to 242 s) |
 
-- **Seen wrong, play's, not the score's**: at 51.11 (about 238 s) the
-  horns' held fff chord (G3 Bb3 Eb4 G4 Bb4, tied 51.9-12) stops: 392 Hz
-  falls 49-59 dB within a second and sounds again only in the last
-  chord; Bb5 and G5 (violins, clarinets) fall about 15 dB; the whole
-  sound falls 6.9 dB (233-237 s against 239-243 s). The same with
-  `play -o` on kasumi (59.2 dB). The same horn chord tied over four
-  bars alone holds (0 stolen). Read as the voice limit (64) taking held
-  notes; reported to px32's lane, left as it is here.
+- **Seen wrong, then fixed (the tune's)**: in the first image (3) and
+  again in image 4 (play with 128 voices, 0 stolen) the held fff chord
+  of 51.9-12 stopped at 51.11: the horns' 392 Hz fell 49-59 dB within a
+  second, Bb5 and G5 about 15 dB, the whole sound 6.9 dB. It was read
+  first as the 64-voice limit; image 4 ruled that out. Bisected with
+  `play -o` on kasumi: the held notes tie into 51.13's eighth, which
+  p207-209.txt marked staccato for "scharf abreissen", and play sounds
+  a tied note as one, so the staccato halved the whole held chord (a
+  horn chord tied four bars into `/8'` stops after two). No staccato is
+  printed there (check-p207-209.txt); the tie ends lose it
+  (`fa13b7b`, `5858bd2`); `notes/px33/tools/tie-stacc.py` finds no
+  other tie into a staccato in 46.11-51.13. In image 5 the horns' G4
+  holds within 2 dB from 232 to 243 s and ends with the last eighth.
+  For px32 to rule: whether `'` on a tie's end should shorten the whole
+  tied note.
 
 ## 5. Done-when
 
