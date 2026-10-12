@@ -101,7 +101,9 @@ if bn:
     say(not bad, "R2 backend", "%d upstream requests identical to Linux's (10.0.2.2 read as 127.0.0.1)" % len(bn)
         if not bad else "; ".join(bad))
 
-cp, cl = console(pax), console(lin)
+# pelt's prompt can land at the start of any of lobo's lines (lobo's
+# notices come while the shell prints `$ `): left out of what is read.
+cp, cl = [re.sub(rb"(?m)^(\$ )+", b"", console(d)) for d in (pax, lin)]
 
 if session in ("serve", "serve-release") and page:
     want = open(page, "rb").read()
@@ -250,10 +252,7 @@ if session == "control":
         t = re.sub(r"id=[0-9a-f]+", "id=H", t)
         t = re.sub(r"age-ms=\d+", "age-ms=A", t)
         return t
-    # pelt's prompt can land at the start of any of lobo's lines (the
-    # notices come while the shell prints `$ `): left out first.
-    unprompt = lambda c: re.sub(rb"(?m)^(\$ )+", b"", c)
-    x, y = block(unprompt(cp), b"control"), block(unprompt(cp), b"signal")
+    x, y = block(cp, b"control"), block(cp, b"signal")
     if x and y:
         dl = [l for l, k in zip(x.splitlines(), y.splitlines()) if l != k]
         ok = len(dl) == 1 and x.replace("source=control", "source=signal") == y
