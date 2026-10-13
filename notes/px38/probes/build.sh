@@ -12,5 +12,5 @@ for p in ids cred perm setid sig vminit; do
     ! readelf -lW "$out/$p" | grep -q INTERP
     printf '%s %s %s\n' "$p" "$(sha256sum "$out/$p" | cut -d' ' -f1)" "$(wc -c < "$out/$p")"
 done
-cc --version | head -n 1
-ldd --version | head -n 1
+cc --version | sed -n 1p
+ldd --version | sed -n 1p
