@@ -327,7 +327,16 @@ PY
                 why=
                 grep -E '^cost ' "$norm" > "$base.cost.txt"
                 [ -s "$base.cost.txt" ] || why+=" no cost line;"
-                grep -E '^cost ' "$base.cost.txt" | grep -qv ' 0 clamped$' && why+=" clamping in a cost line;"
+                # px41: no `grep … | grep -qv` under pipefail. grep -q leaves
+                # at the first line it wants, the grep before it dies of
+                # SIGPIPE on its next write, the pipe is false, and the
+                # clamping this line exists to catch is passed over (px35
+                # found the shape in mpx4-net; notes/px41, on kasumi: a
+                # cost file of 20,000 lines, the first one clamped, was
+                # called clean 50 times of 50, one of 200 lines once in
+                # 300, today's three lines never in 300). The file holds
+                # only cost lines already.
+                grep -v ' 0 clamped$' "$base.cost.txt" > /dev/null && why+=" clamping in a cost line;"
                 grep -q '^playing C major scale, C4 to C5 (4.0 s), mixed' "$norm" || why+=" no mixed playing line;"
                 # the scale's eight quarters at 120: 500 ms each, 480 sounding
                 : > "$base.spec"
