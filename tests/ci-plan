@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tests/ci-plan — the CI planner's own proof (px37). No QEMU: python3 only.
+"""tests/ci-plan — the CI planner's own proof (px37, px40). No QEMU: python3 only.
 
     tests/ci-plan
 
@@ -10,9 +10,12 @@
   P2  the pr tier by path, one change per area: the network's suites for
       kernel/tcp, sound's for user/play, nothing for notes; a kmain, a
       test, a user program and a shared device select their readers.
-  P3  FULL wins: the toolchain pins, the kernel's core, the harness and
-      any path no rule knows make a pull request's run full; a pull
-      request whose changed paths cannot be read is full too.
+      The kernel's core (px40, ruling #76: its fifteen modules and their
+      assembly) and CI's own files select every suite, on the pr leg.
+  P3  FULL wins: the toolchain pins, the harness, the kernel's entry,
+      link script and Limine configuration, and any path no rule knows
+      make a pull request's run full, alone or beside a core change; a
+      pull request whose changed paths cannot be read is full too.
   P4  the wiring of .github/workflows/ci.yml: every suite job needs the
       plan and runs only when chosen; every test that takes a leg gets
       $PAX_LEGS and accepts --tier and --firmware; the `tier` job needs
@@ -138,12 +141,27 @@ expect("P2 procfs reaches lobo", plan(["kernel/procfs/procfs.lu"], **pr), "pr", 
 expect("P2 the census's own", plan(["docs/CENSUS.md"], **pr), "pr", ["census"])
 expect("P2 CI itself: every suite, the pr leg", plan([".github/workflows/ci.yml"], **pr), "pr", SUITES)
 
+# The kernel's core (px40, ruling #76): every suite, on the pr leg.
+CORE = ["serial", "log", "panic", "boot_info", "frames", "paging", "gdt", "idt", "interrupts",
+        "apic", "timer", "heap", "sync", "sched", "fpu"]
+CORE_ASM = ["boot/io.S", "boot/cpu.S", "boot/isr.S", "boot/sched.S", "boot/fpu.S"]
+expect("P2 a core-only change (kernel/sched): every suite, the pr leg", plan(["kernel/sched/sched.lu"], **pr), "pr", SUITES)
+for p in ["kernel/%s/%s.lu" % (m, m) for m in CORE] + CORE_ASM:
+    expect("P2 the core: %s" % p, plan([p, "notes/px99.md"], **pr), "pr", SUITES)
+expect("P2 the core beside a narrow change", plan(["kernel/tcp/tcp.lu", "kernel/sched/sched.lu"], **pr), "pr", SUITES)
+
 # --- P3 FULL wins ---------------------------------------------------------------------
-for p in ["kernel/wolf.pin", "boot/limine.pin", "kernel/wolf.pkg", "kernel/sched/sched.lu",
-          "kernel/interrupts/interrupts.lu", "boot/isr.S", "tools/build-kernel", "tools/lib.sh"]:
+PINS = ["kernel/wolf.pin", "kernel/wolf.pkg", "boot/limine.pin"]
+HARNESS = ["tools/lib.sh", "tools/build-kernel", "tools/mkimage", "tools/fetch-wolf", "tools/fetch-limine",
+           "tools/qemu-halt", "tools/qemu-run", "tools/qemu-fault", "tools/expect-serial"]
+ENTRY = ["boot/start.S", "boot/kernel.ld", "boot/limine.conf"]
+for p in PINS + HARNESS + ENTRY:
     expect("P3 %s" % p, plan([p, "notes/px99.md"], **pr), "full", SUITES)
 expect("P3 a path no rule knows", plan(["newplace/thing.c"], **pr), "full", SUITES)
-expect("P3 FULL beside a narrow change", plan(["kernel/tcp/tcp.lu", "kernel/sched/sched.lu"], **pr), "full", SUITES)
+expect("P3 FULL beside a narrow change", plan(["kernel/tcp/tcp.lu", "kernel/wolf.pin"], **pr), "full", SUITES)
+expect("P3 a pin beside a core change", plan(["kernel/sched/sched.lu", "kernel/wolf.pin"], **pr), "full", SUITES)
+expect("P3 a harness tool beside a core change", plan(["kernel/heap/heap.lu", "tools/qemu-run"], **pr), "full", SUITES)
+expect("P3 an unknown path beside a core change", plan(["kernel/sched/sched.lu", "newplace/thing.c"], **pr), "full", SUITES)
 expect("P3 no changed paths to read", plan(**pr), "full", SUITES)
 expect("P3 a diff git cannot take", plan(base="0" * 40, head="1" * 40, **pr), "full", SUITES)
 
