@@ -24,7 +24,8 @@
 //! then the path, AT_EXECFN's), each with its NUL; sixteen random bytes
 //! (AT_RANDOM); then, 16-aligned at the bottom, argc, the argv pointers
 //! and a NULL, the envp pointers and a NULL, and the auxiliary vector
-//! (px10's sixteen pairs). The strings are staged first in boot/user.S's
+//! (px10's sixteen pairs; px39: AT_UID, AT_EUID, AT_GID, AT_EGID and
+//! AT_SECURE are the process's own, kernel/cred). The strings are staged first in boot/user.S's
 //! `pax_argbuf`, NUL-terminated one after another: the kernel's
 //! space-separated words for `exec_span`, the caller's vectors (copied
 //! out of its memory before anything else changes) for `execve`.
@@ -60,7 +61,9 @@
 //! for a directory, a device or a file with no execute bit), the image
 //! (-ENOEXEC for what kernel/elf refuses, logged by name), and only then
 //! the point of no return: descriptors with close-on-exec closed,
-//! handled signals reset (the mask kept), the break and mmap cursor
+//! handled signals reset (the mask kept), the saved and file-system ids
+//! made the effective ids (px39, kernel/cred: no id is ever raised, the
+//! file's set-ID bits are not read), the break and mmap cursor
 //! fresh, the x87/SSE state the template, FS 0, the new space live and
 //! the old one given back (or handed back to a vfork parent, which
 //! resumes); the frame becomes the new program's first: RIP the entry,
@@ -118,6 +121,7 @@
 //! read and written volatile; no `region`, no heap (these calls give up
 //! their kernel stack when they wait or end: kernel/sched, "Regions").
 
+use cred
 use elf
 use files
 use fpu
@@ -528,8 +532,11 @@ fn map_stack(pml4: u64) -> bool {
 /// The psABI's initial stack in the space at `pml4` for the file at
 /// `file` (loaded, entry `entry`): argc strings staged at `av` (`ab`
 /// bytes), envc at `ev` (`eb` bytes), the path's `pl` bytes at `pa`.
+/// px39: `ca` is the process area whose ids the vector tells (the
+/// caller's for `execve`; 0 for a program the kernel starts, which is
+/// root: every id 0, AT_SECURE 0).
 /// Returns the stack pointer (argc's address).
-fn build_stack(pml4: u64, file: u64, entry: u64, av: u64, argc: u64, ab: u64, ev: u64, envc: u64, eb: u64, pa: u64, pl: u64) -> u64 {
+fn build_stack(pml4: u64, file: u64, entry: u64, av: u64, argc: u64, ab: u64, ev: u64, envc: u64, eb: u64, pa: u64, pl: u64, ca: u64) -> u64 {
     // The strings' block, under eight zero bytes at the top: argv's,
     // envp's, the path's.
     let sbytes = ab + eb + pl + 1
@@ -563,12 +570,15 @@ fn build_stack(pml4: u64, file: u64, entry: u64, av: u64, argc: u64, ab: u64, ev
     a = put_aux(pml4, a, AT_BASE, 0)
     a = put_aux(pml4, a, AT_FLAGS, 0)
     a = put_aux(pml4, a, AT_ENTRY, entry)
-    a = put_aux(pml4, a, AT_UID, 0)
-    a = put_aux(pml4, a, AT_EUID, 0)
-    a = put_aux(pml4, a, AT_GID, 0)
-    a = put_aux(pml4, a, AT_EGID, 0)
+    // px39: who the new program is (kernel/cred): the real and effective
+    // ids, which `execve` keeps, and whether they call for care.
+    let known = ca != 0
+    a = put_aux(pml4, a, AT_UID, if known { cred.uid(ca, cred.REAL) } else { 0 })
+    a = put_aux(pml4, a, AT_EUID, if known { cred.uid(ca, cred.EFFECTIVE) } else { 0 })
+    a = put_aux(pml4, a, AT_GID, if known { cred.gid(ca, cred.REAL) } else { 0 })
+    a = put_aux(pml4, a, AT_EGID, if known { cred.gid(ca, cred.EFFECTIVE) } else { 0 })
     a = put_aux(pml4, a, AT_CLKTCK, 100)
-    a = put_aux(pml4, a, AT_SECURE, 0)
+    a = put_aux(pml4, a, AT_SECURE, if known { cred.secure(ca) } else { 0 })
     a = put_aux(pml4, a, AT_RANDOM, rnd)
     a = put_aux(pml4, a, AT_EXECFN, path_at)
     a = put_aux(pml4, a, AT_NULL, 0)
@@ -683,7 +693,7 @@ pub fn exec_span(body: u64, pa: u64, pl: u64, aa: u64, al: u64, ea: u64, el: u64
     let av = argbuf()
     let (argc, ab) = stage_words(av, aa, al)
     let (envc, eb) = stage_words(av + ab, ea, el)
-    let sp = build_stack(pml4, file, entry, av, argc, ab, av + ab, envc, eb, pa, pl)
+    let sp = build_stack(pml4, file, entry, av, argc, ab, av + ab, envc, eb, pa, pl, 0)
     let (na, nl) = base_name(e)
     let id = sched.create_process(body, sched.ELF_PROG - 1, pml4, entry, sp, na, nl)
     vm.start(sched.area_of(id), image_top(file))
@@ -833,7 +843,7 @@ pub fn execve(f: u64, path: u64, argv: u64, envp: u64) -> u64 {
         let _freed = paging.free_user(space)
         return NEG_ENOMEM
     }
-    let sp = build_stack(space, file, entry, av, argc, ae, av + ae, envc, ee - ae, pa, rl)
+    let sp = build_stack(space, file, entry, av, argc, ae, av + ae, envc, ee - ae, pa, rl, a)
     // The point of no return. px26: every other thread of the process
     // ends first, and the caller is its leader from here (the area is
     // then its own slot's: `a` is read again).
@@ -847,6 +857,7 @@ pub fn execve(f: u64, path: u64, argv: u64, envp: u64) -> u64 {
     }
     sched.exec_alone()
     let na = area()
+    cred.exec(na) // px39: the saved and file-system ids become the effective ids; nothing is raised
     files.exec_close(na)
     reset_handlers(na)
     var k: u64 = 0
