@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tools/ci-plan — which suites a CI run runs, and on which legs (px37).
+"""tools/ci-plan — which suites a CI run runs, and on which legs (px37, px40).
 
     tools/ci-plan [--event E] [--action A] [--label L] [--labels L1,L2]
                   [--base SHA --head SHA | --paths-from FILE]
@@ -18,10 +18,14 @@ release) on one firmware (BIOS, UEFI); the full suite runs four.
         a `workflow_dispatch` (unless it asks for `pr`), a pull request
         carrying the `full-matrix` label, and a pull request whose
         change touches a FULL path of tools/ci-tiers.map (the toolchain
-        pins, the kernel's core, the harness every boot goes through).
+        pins, the harness every boot goes through, the kernel's entry,
+        link script and Limine configuration).
   pr    a pull request's other runs: the suites the change can affect
         (tools/ci-tiers.map and the tests' own text, below), each on
-        ONE leg, `--tier native --firmware bios` (PR_LEGS). Native is
+        ONE leg, `--tier native --firmware bios` (PR_LEGS). A change to
+        the kernel's core or to CI itself (the map's ALL paths) can
+        affect every suite, so it runs every suite, on that leg (px40,
+        ruling #76: the core was FULL before). Native is
         the tier whose build is cheap (the release tier's LLVM build is
         about half of every full run's job-minutes); BIOS is the leg on
         which every suite runs its widest set of scenarios.
@@ -38,8 +42,9 @@ WHICH SUITES A PATH SELECTS (the pr tier). The union of:
     or a directory above it. A FULL tool's text is not followed: a
     change to it is FULL anyway, and following lib.sh would make every
     path every suite's.
-FULL wins over everything. A path that nothing matches is FULL: an
-unknown path never shrinks a run. `macos-run` runs when `proof` does
+FULL wins over everything, ALL included (a pin beside a core change is
+a full run). A path that nothing matches is FULL: an unknown path never
+shrinks a run. `macos-run` runs when `proof` does
 (it boots proof's ISO).
 
     tools/ci-plan --verdict     (NEEDS: the `tier` job's `toJSON(needs)`)
