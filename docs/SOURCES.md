@@ -609,3 +609,13 @@ kernels: none consulted.
 | black-box Linux 7.2.8 (kasumi, a throwaway `px13-ubuntu` container as root, strace 6.8, every program on a tmpfs): `strace -f` of pax's own builds of boreutils `2ab3651` (`chmod`, `touch`, `ln`, `mkdir -m`, `cp -p`, and `ls -l`, `stat`, `readlink`, `cat`, `rm`, `mv` meeting links; `notes/px36/straces/`) | — | — | measured | the calls and flags bu22's binaries make: `chmod`, `utimensat` (UTIME_NOW, UTIME_OMIT, AT_SYMLINK_NOFOLLOW), `linkat`, `symlink`, `readlink`, `rename` over a temporary name |
 | black-box Linux: `user/elf/tree.c`'s px36 sections, pid 1 with its root a tmpfs in a throwaway container (`tools/linux-tree`) | — | pax's own | measured | what the man pages leave open: a link's `st_blocks` (none below a 128-byte target, eight from it), a link's atime moved by a walk through it and by `readlink`, root's `chown` clearing set-ID bits whatever ids were asked, -1 included, a new name with a trailing slash -ENOENT, O_NOFOLLOW with O_DIRECTORY -ENOTDIR, `fchmodat2`'s AT_SYMLINK_NOFOLLOW on a link -EOPNOTSUPP, both UTIME_OMIT leaving ctime, times before 1970 and past 2262 |
 | black-box Linux: `user/console/shell-changes.keys` typed into the same binaries (`tools/linux-tree`) | — | — | measured | the session's reference transcript, taken afresh at every run |
+
+## px41: the runner flakes (play's sleep, lobo-session's ports)
+
+| source | where | licence | how | used for |
+|---|---|---|---|---|
+| man-pages `clock_nanosleep(2)` (TIMER_ABSTIME; the raw call answers a negative errno; EINTR on an absolute sleep is answered by calling again), `clock_gettime(2)`, `nanosleep(2)` (a sleep is never shorter than asked) | the man-pages project | as the man pages | read | `user/play/kd.S`'s `play_now_ms` and `play_sleep_until_ms`; why PAX's sleep ends the tick after its target |
+| `syscall_64.tbl` (clock_gettime 228, clock_nanosleep 230) and the uapi `linux/time.h` (CLOCK_MONOTONIC 1, TIMER_ABSTIME 1) | the sparse checkout | GPL-2.0 WITH Linux-syscall-note | read | the numbers |
+| pax's own `kernel/user` (`sleep_until`), `kernel/timer`, `kernel/speaker` | this repository | pax's own | read | the arithmetic of a late tick (`notes/px41-the-runner-flakes.md`) |
+| man-pages `ip(7)` (`ip_local_port_range`, a port of 0 at `bind`), `bind(2)`; QEMU's documentation of `-serial tcp:` (a connection made by QEMU when `server` is not given) and of `-nic user,hostfwd=` | the man-pages project; QEMU's manual | as each | read | `tools/lobo-session`'s ports and its console |
+| black-box Linux 7.2.8 (kasumi) and QEMU 11.1.1: a million rounds of bind to port 0, read, close; a QEMU given one host port for two forwards | — | — | measured | how often one port is answered twice; what QEMU does then (`notes/px41/kasumi/`) |
