@@ -185,7 +185,7 @@ suite each.
 | # | predicted | measured | verdict |
 |---|---|---|---|
 | P1 | 42 words of the process area, zero is root; `kernel/sched` and `boot/sched.S` untouched | words 160 to 201 (`kernel/cred`); `git diff 58428ba -- kernel/sched boot/` is empty; a fork's child, a vfork's child, a thread and an `execve` all carry the record with no line of the scheduler changed (`ident`'s `vfork:`, `~thread:` and `exec` rows; `cred`'s `forked` rows) | right |
-| P2 | the model needs no correction: all 2,640 matrix rows at the first boot that runs to the end | the first boot of `cred` (kasumi, native BIOS, the tree of `60f3fd3`) wrote all 2,640 matrix rows as recorded; `kernel/cred`'s four `set*` functions are `check-cred.py`'s `model` line for line and were not edited after | right |
+| P2 | the model needs no correction: all 2,640 matrix rows at the first boot that runs to the end | the first boot of `cred` (kasumi, native BIOS, the tree of `037d5bc`) wrote all 2,640 matrix rows as recorded; `kernel/cred`'s four `set*` functions are `check-cred.py`'s `model` line for line and were not edited after | right |
 | P3 | as root 2,683 of 2,684, the one line `= -22, then getgroups(0, NULL) = 4`; on four legs | exactly that, on native and release, BIOS and UEFI (`notes/px39/kasumi-mpx5-users-059e677.out`; CI run 38474383913's `mpx5-users` job on native BIOS). The other 43 non-matrix lines needed what §2 named: PR_GET_DUMPABLE, `/proc/self/setgroups`, the two partial masks | right |
 | P4 | dropped to 1000:1000, **2,983** lines on Linux; PAX identical in all of them; Linux refuses a user's `setgroups` before it reads the count | **3,983** lines on Linux (the slip above); PAX byte-identical in all 3,983; a user's `setgroups(65537, …)`, `(-1, …)`, `(65536, …)` and `(1, NULL)` are all -EPERM on Linux, so the R4 line does not differ for a user | wrong on the count (arithmetic); right on the rest |
 | P5a | dumpable cleared by a change of value of an effective or file-system id, by nothing else; at `execve` 1 when real and effective are equal | the first half as predicted (29 `dump:` rows as root, 29 as a user). **At `execve` the file-system ids count too**: 1 only when real, effective *and file-system* ids are equal, user and group (`exec 5`, `6`, `12`, `13`, `15`, `16`, `19`, `20`: 0 with only a file-system id apart) | half right |
@@ -394,24 +394,35 @@ its break.
 Shas are this branch's (`px39`). kasumi paths are under
 `~/lanes/px39/`.
 
+**The rebase.** Trunk moved to `7d2e9ba` (px40 merged: the CI tiers'
+map, planner and workflow; nothing under `kernel/`) when the work was
+otherwise ready, and the branch was rebased onto it once, with no
+conflict. The shas below are the rebased ones. The history before it is
+kept on origin as `px39-prerebase` (head `68d5946`); the kasumi and
+hasu logs and CI run 38474383913 name shas of that history (`ae80ea3`,
+`059e677`, `211b095`), and the plant branches are cut from it. The
+rebase changed no file under `kernel/`, `user/`, `boot/` or this
+suite: the native kernel built from the rebased tree is the same bytes
+(`24f9bf0a…`), checked on kasumi after it.
+
 ### What was written
 
-- The prediction: `0d65e61` (§1 to §3, before any change).
-- The programs: `b4d4c41` (px38's `cred.c`, `ids.c`, `px38.h` copied
+- The prediction: `fed8c0f` (§1 to §3, before any change).
+- The programs: `46819ba` (px38's `cred.c`, `ids.c`, `px38.h` copied
   to `user/elf/`: `tests/mpx5-users` U0 holds them to
-  `notes/px38/probes/` byte for byte), `53a9b7f` (`ident.c`, `as.c`),
-  `950c358` (`tools/mkcred`).
-- The recorders: `3e4d7ab` (`notes/px39/vminit.c`, `linux-vm.sh`,
-  `build.sh`), `9932634` (`linux-ct.sh` and its three outputs).
-- The kernel: `8f83276` (`kernel/cred`), `59f915c` (`kernel/process`),
-  `e91e726` (`kernel/procfs`, `kernel/files`), `60f3fd3`
-  (`kernel/user`), `059e677` (the function that answers AT_SECURE
+  `notes/px38/probes/` byte for byte), `0d307dc` (`ident.c`, `as.c`),
+  `c17d975` (`tools/mkcred`).
+- The recorders: `d0ec235` (`notes/px39/vminit.c`, `linux-vm.sh`,
+  `build.sh`), `0e19e7e` (`linux-ct.sh` and its three outputs).
+- The kernel: `82aace3` (`kernel/cred`), `d73f881` (`kernel/process`),
+  `121597c` (`kernel/procfs`, `kernel/files`), `037d5bc`
+  (`kernel/user`), `1689b23` (the function that answers AT_SECURE
   renamed `at_secure`: no behaviour moves, every kernel's bytes do, so
   kasumi's and hasu's runs were taken again at it).
-- The suite: `022b77c` (`tests/mpx5-users`, the recordings, `ids.pax`),
-  `ae80ea3` (the CI job, the map, `tests/ci-plan`).
-- The words: `c793209` (`docs/SOURCES.md`), `d43ddea` (CHANGELOG),
-  `c1fe39f` (`kernel/README.md`).
+- The suite: `ec9fb34` (`tests/mpx5-users`, the recordings, `ids.pax`),
+  `83361d6` (the CI job, the map, `tests/ci-plan`).
+- The words: `3cade0b` (`docs/SOURCES.md`), `b84a6b2` (CHANGELOG),
+  `49e138b` (`kernel/README.md`).
 
 ### What was measured, and where it is
 
