@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# mkcred — build px39's programs of the credentials suite
+# (tests/mpx5-users), each a static x86-64 Linux executable: px38's
+# `cred` and `ids` (user/elf/cred.c, user/elf/ids.c, with
+# user/elf/px38.h: the files of notes/px38/probes, byte for byte), and
+# px39's `ident` (user/elf/ident.c) and `as` (user/elf/as.c).
+#
+#   tools/mkcred OUTDIR
+#
+# The host's cc and its static glibc, as notes/px38/probes/build.sh
+# built the recorded runs: `cc -static -no-pie -O1`, ET_EXEC with no
+# PT_INTERP (checked); `ident` with -pthread. The same files run on
+# Linux and on PAX. Build on a baseline x86-64 glibc (the CI runner's
+# Ubuntu; an Ubuntu container on kasumi), never on kasumi's own, whose
+# start-up uses AVX-512 (px10). Prints `<name> <sha256> <bytes>` for
+# each. Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkcred OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${CC:-cc}
+need "$cc" readelf
+for p in cred ids ident as; do
+    thr=(); [ "$p" != ident ] || thr=(-pthread)
+    "$cc" -static -no-pie -O1 ${thr[@]+"${thr[@]}"} -Wall -Wextra -Wno-unused-result -Wno-unused-function \
+        -Wl,--build-id=none -Wl,-z,noexecstack -o "$out/$p" "$PAX_ROOT/user/elf/$p.c" || die "cc: $p"
+    readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
+    ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP (not static)"
+    printf '%s %s %s\n' "$p" "$(sha256_of "$out/$p")" "$(wc -c < "$out/$p" | tr -d ' ')"
+done
