@@ -1,6 +1,6 @@
 /* sig.c — px38, item 2(d): who may signal whom, and what /proc/<pid>
  * shows to whom. Root starts target processes in chosen states; senders
- * and viewers are fresh children that became someone for good.
+ * and readers are fresh children that became someone for good.
  *
  *   sig DIR           DIR on a tmpfs without nosuid (a set-ID copy is made)
  *   sig wait          (a target: sleeps until killed)
@@ -81,7 +81,7 @@ static long rl(const char *p)
     return readlink(p, b, sizeof b) < 0 ? -(long)errno : 0;
 }
 
-static void view_row(long uid, pid_t t, const char *tname)
+static void read_row(long uid, pid_t t, const char *tname)
 {
     pid_t p = fork();
     if (p == 0) {
@@ -104,7 +104,7 @@ static void view_row(long uid, pid_t t, const char *tname)
         snprintf(b, sizeof b, "/proc/%d/environ", t);
         if (stat(b, &s) == 0) snprintf(o[1], 64, "%u:%u %o", s.st_uid, s.st_gid, s.st_mode & 07777);
         else snprintf(o[1], 64, "%d", -errno);
-        say("viewer %4ld of %s: /proc/<pid> is %s; read status %ld stat %ld cmdline %ld environ %ld maps %ld mem %ld auxv %ld io %ld limits %ld; readlink exe %ld cwd %ld root %ld; open fd/ %ld; environ is %s\n",
+        say("reader %4ld of %s: /proc/<pid> is %s; read status %ld stat %ld cmdline %ld environ %ld maps %ld mem %ld auxv %ld io %ld limits %ld; readlink exe %ld cwd %ld root %ld; open fd/ %ld; environ is %s\n",
             uid, tname, o[0], r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], le, lc, lr, lf, o[1]);
         _exit(0);
     }
@@ -197,7 +197,7 @@ int main(int argc, char **argv)
     say("== what /proc/<pid> shows to whom\n");
     static const long VW[] = { 1000, 1001, 1002, 1003, 0 };
     for (int i = 0; i < NT; i++)
-        for (unsigned v = 0; v < sizeof VW / sizeof *VW; v++) view_row(VW[v], pid[i], T[i].name);
+        for (unsigned v = 0; v < sizeof VW / sizeof *VW; v++) read_row(VW[v], pid[i], T[i].name);
 
     for (int i = 0; i < NT; i++) { kill(pid[i], SIGKILL); reap(pid[i]); }
     unlink(suid);
