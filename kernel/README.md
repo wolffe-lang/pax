@@ -607,6 +607,30 @@ programs that open AF_INET stream sockets (`tests/mpx4-tcp`,
   delivered to a UDP socket; more than 256 control blocks or a listen
   queue past 129 (64 and 33 before px24); a closed connection whose peer acknowledges and never
   opens its window stays until the peer goes.
+## Who a process is (px39)
+
+The first lane of the users campaign (`notes/px39-the-credentials.md`,
+ruling #75 in the planning repository). A process has an identity;
+**nothing yet checks it** — no `open`, path walk, `kill`, `bind` or
+`ioctl` asks who the caller is. `tests/mpx5-users` holds the ids and
+the id calls to a real Linux's recorded answers, as root and as a user.
+
+| module or file | what |
+|---|---|
+| `cred/` | the record, 42 words of the process area (words 160 to 201): four user ids and four group ids (real, effective, saved, file-system), the count and the sorted list of supplementary groups (32 at most, ruling R4), one word for "not dumpable"; all zero is root with no group, so no start path changes. `setid`, `setre`, `setres`, `setfs` (the rules of `setuid`, `setreuid`, `setresuid`, `setfsuid` and their group twins, privilege the effective USER id), `getres`, `getgroups`, `setgroups` (more than 32 refused by name, -EINVAL), `secure` (AT_SECURE), `exec` (saved and file-system ids become the effective ids; nothing raised), `dumpable`, `cap` (the masks `/proc/<pid>/status` prints) |
+| `user/` | the dispatch's `id_calls` (102, 104 to 108, 113 to 120, 122, 123); `prctl`'s PR_GET_DUMPABLE, PR_GET_KEEPCAPS, PR_GET_SECUREBITS, PR_GET_NO_NEW_PRIVS |
+| `process/` | `build_stack` writes AT_UID, AT_EUID, AT_GID, AT_EGID and AT_SECURE from the caller's record; `execve` calls `cred.exec` at its point of no return |
+| `procfs/` | `status`'s `Uid`, `Gid`, `Groups` and five `Cap*` lines from the record; `/proc/self/setgroups` and `/proc/<pid>/setgroups` (`allow`) |
+
+- kernel/sched is not touched: it already copies the process area
+  whole for a fork's and a vfork's child, keeps it over `execve` and
+  gives a process's threads their leader's. So ids are a process's on
+  PAX; Linux keeps them per thread (a named difference).
+- What is not there: any permission check; set-ID execution (ruling
+  R5); `capget` and `capset` (-ENOSYS, R9); more than 32 groups;
+  `PR_SET_DUMPABLE`; per-thread ids; an owner for a file (the next
+  lane).
+
 ## The writable tree (px27)
 
 Every kernel that links `kernel/user` makes the file tree at
