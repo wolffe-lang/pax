@@ -306,8 +306,8 @@ straces.
 
 ## 3a. The prediction, scored
 
-§1–§3 above are as committed (`a08b544`), before any change. "The
-probe" is `user/elf/tree.c` at `1a5f93b`; "Linux" a throwaway
+§1–§3 above are as committed (`26a86c8`), before any change. "The
+probe" is `user/elf/tree.c` at `bd19332`; "Linux" a throwaway
 `px13-ubuntu` container on kasumi (Linux 7.2.8, the container's root,
 its root a tmpfs); "PAX" the same binary as the first program
 (`notes/px36/session-probes.{linux,pax}.txt`).
@@ -317,7 +317,7 @@ its root a tmpfs); "PAX" the same binary as the first program
 | Q1 | the pin its own commit with the banner; every kernel builds with no diagnostic; under ten kernels' loaded bytes move; every verdict unchanged | every kernel builds with no diagnostic on both tiers (62 of 62, `notes/px36/elfbuild-*.txt`). **All 62 kernels' loaded bytes move**, each by +224 bytes of `.text`, native and release alike (`elfcmp-base-pin.txt`): every kernel links wolf's freestanding runtime (since px21a) and the archive moved (`kmain_console.rt-none.a` `46544be6…` → `362c112f…`); the kernel's own 63 objects are identical once stripped of debug (`objcmp-kmain_console-base-pin.txt`). Verdicts: CI run 38241641184 at `d5eddba` (pin and changes together) green on all 28 jobs, every other suite's verdicts as on trunk; the kasumi runs of `tests/mpx3-tree` above | wrong on the count; right on the cause the prediction named |
 | Q2 | 39 utilities; the shell image gains `chmod`, `touch`, `ln`; `tests/mpx3-shell`'s `/bin` transcripts move | 39 at bu22, static (`kasumi:~/lanes/px36/st/bore/sums.txt`); `tests/mpx3-tree`'s shell image gains the three. **`tests/mpx3-shell` does not move**: its transcripts mask every size under `/bin`, and its own image keeps bu21's seventeen | wrong on mpx3-shell |
 | Q3 | hard links as listed | **right, all of it** (`link:` lines on both: `again -17; a missing name -2; into a missing directory -2; a new name with a trailing slash -2, an old one -20; through a file -20; a flag -22; into /dev -18; out of /dev -18`; `AT_EMPTY_PATH of a file with no name -2`; 101 names on one file; `/bin/tree linked 0, run by its second name: status 7`). `/proc/self/exe` after a run by a second name was left out of the probe (§5) | right |
-| Q4 | symbolic links as listed; the cost threshold "guessed at 128 bytes" | **right** (`blocks by the target's length … 127:0 128:8 …`: the guess was the threshold; `a chain: 39 links end, 40 end, 41 -40`; `.. after one is the target's parent 1`; `fchmodat` with AT_SYMLINK_NOFOLLOW on a link -95, through glibc 2.39's `fchmodat2`, 452). **Not predicted, measured, implemented**: `O_NOFOLLOW\|O_DIRECTORY` on a link -ENOTDIR; a walk through a link and a `readlink` of it move its atime by relatime's rule; a trailing `/` after a last link is followed by a lookup (`lstat("ds/")` is the directory, `readlink("s/")` -ENOTDIR) and never by a call that makes or removes a name (`mkdir("dangling/")` -EEXIST and makes nothing; `rmdir`, `unlink`, `rename` of `link/` and a rename onto it -ENOTDIR): found after the first full run, fixed in `6747b4f`, probed in `1a5f93b` | right, with answers not predicted |
+| Q4 | symbolic links as listed; the cost threshold "guessed at 128 bytes" | **right** (`blocks by the target's length … 127:0 128:8 …`: the guess was the threshold; `a chain: 39 links end, 40 end, 41 -40`; `.. after one is the target's parent 1`; `fchmodat` with AT_SYMLINK_NOFOLLOW on a link -95, through glibc 2.39's `fchmodat2`, 452). **Not predicted, measured, implemented**: `O_NOFOLLOW\|O_DIRECTORY` on a link -ENOTDIR; a walk through a link and a `readlink` of it move its atime by relatime's rule; a trailing `/` after a last link is followed by a lookup (`lstat("ds/")` is the directory, `readlink("s/")` -ENOTDIR) and never by a call that makes or removes a name (`mkdir("dangling/")` -EEXIST and makes nothing; `rmdir`, `unlink`, `rename` of `link/` and a rename onto it -ENOTDIR): found after the first full run, fixed in `6994c65`, probed in `bd19332` | right, with answers not predicted |
 | Q5 | modes as listed; a write by root keeps a set-user-ID bit | **right** on PAX (`mode:` lines on both). **The write by root clears both set-ID bits in kasumi's container** (`~mode: … mode 100755`) where PAX keeps them: the container's root is root in a user namespace, without CAP_FSETID over the tmpfs (`capabilities(7)`: a process with it does not clear the bits). The line is `~`, held to PAX's answer by T2; the CI runner (docker, the host's root) answers `mode 106755`, **the bits kept, as PAX keeps them** (run 38241641184, job mpx3-tree, `notes/px36/ci-38241641184-mpx3-tree.txt`): the prediction holds for a root with CAP_FSETID | right on PAX; host-dependent on Linux |
 | Q6 | times as listed; past 2262 clamped (named drift) | **right** (`time: set to the nanosecond 0: atime 1.123456789 mtime 2.987654321`; `both UTIME_OMIT … ctime moved 0`; `before 1970 0: atime -2208988800.000000005 mtime -1.999999999`). The year 3000: tmpfs keeps `32503680000.000000001`, PAX `9223372036.854775807` (`~time`, T2; `utimensat(2)`: "the greatest value supported … not greater than the specified time") | right |
 | Q7 | owners: set-ID bits cleared when an id is given, **kept when both are -1**; another id refused, -EINVAL | **wrong on -1 -1**: Linux clears them whatever the ids (`06755 and -1 -1 0: mode 100755`); a set-group-ID bit without group execute is kept (`102745`), a directory's too (`42755`). Implemented as measured. The rest right (`~owner: chown 1000 1000 -22: uid 0`) | half |
@@ -334,29 +334,45 @@ at, which are the pre-rebase history, kept on origin as branch
 `px36-prerebase` (`ee574f0`; the plant branches hang off it too). The
 rebase changed none of this lane's files except `kernel/files/files.lu`,
 which gained px25's hunks (`syn_child`, `syn_open`, `getdents`'s `/proc`
-names), with no conflict. The head's own runs: `tests/mpx3-tree` whole on kasumi at `8a8efe4` (the rebased code and notes), 132 PASS, 0 FAIL, 0 SKIP (`notes/px36/kasumi-mpx3-tree-8a8efe4.out`); CI at the head is named in the PR body.
+names), with no conflict. After it: `tests/mpx3-tree` whole on kasumi
+at `8a8efe4`, 132 PASS, 0 FAIL, 0 SKIP
+(`notes/px36/kasumi-mpx3-tree-8a8efe4.out`), and CI run 38297543688 at
+`7eb091c`, 29 jobs green on its second attempt: on the first, 28 were
+green and mpx3-speaker (job 114972170137) failed one assertion, `K8
+release uefi chord: 2 steps held [0, 4] ticks`, the PC speaker's
+timing gate, which this lane does not touch; the same code passed it
+in run 38294969881 (`8a8efe4`) and in the re-run of that one job. Not
+explained; listed for an issue.
+
+**The second rebase.** Trunk moved again (`c86ba5e`: px33 and px33b,
+tunes, notes, `user/play/orch.lu`, `tests/mpx3-orchestra`), and the
+branch was rebased onto it once more, at the orchestrator's word, so
+the PR fast-forwards: the shas in "What was built" are from this
+rebase; `7eb091c` and what it descends from are kept on origin as
+`px36-prerebase2`. It changed no file of this lane. The runs at the
+final head are named in the PR body.
 
 Shas are this branch's (`px36`). kasumi paths are under `~/lanes/px36/`,
 hasu's under `~/lanes/px36/` there.
 
 ### What was built
 
-- The prediction: `a08b544` (with the straces of §2).
-- The pin: `451e1e9` (wolf 0.2.28 / lupin 0.1.51, the tour's banner);
-  `edd86e4` (boreutils at bu22).
-- The tree: `2e54ad2` (`kernel/tree`: `link`, `symlink`, `target`,
+- The prediction: `26a86c8` (with the straces of §2).
+- The pin: `4998a51` (wolf 0.2.28 / lupin 0.1.51, the tour's banner);
+  `bf0922d` (boreutils at bu22).
+- The tree: `9bd75b0` (`kernel/tree`: `link`, `symlink`, `target`,
   `set_mode`, `set_times`, `owned`, `clock`; a link's blocks; relatime
-  on signed times). The calls: `05c3081` (`kernel/files`: the walk
+  on signed times). The calls: `e4a438d` (`kernel/files`: the walk
   follows links; `linkat`, `symlinkat`, `readlinkat`, `fchmodat`,
   `fchmod`, `fchownat`, `utimensat`; signed times in `stat` and
-  `statx`; DT_LNK), `6747b4f` (a trailing slash after a last link,
-  measured), `d830799` (`kernel/user`: `change_calls`).
-- The tests: `5329c82`, `1a5f93b` (`user/elf/tree.c`: `hardlinks`,
+  `statx`; DT_LNK), `6994c65` (a trailing slash after a last link,
+  measured), `f5c0907` (`kernel/user`: `change_calls`).
+- The tests: `9d91f71`, `bd19332` (`user/elf/tree.c`: `hardlinks`,
   `symlinks`, `modes`, `stamps`, `owners`, `fixed`; the soak's links and
-  renames over names), `4079ac8` (`user/console/shell-changes.keys`),
-  `b215dc1` (`tests/mpx3-tree`).
-- The words: `01094fa` (`docs/SOURCES.md`), `5dd7264` (CHANGELOG),
-  `3f12474` (README, kernel/README).
+  renames over names), `e56e56b` (`user/console/shell-changes.keys`),
+  `d186457` (`tests/mpx3-tree`).
+- The words: `691e411` (`docs/SOURCES.md`), `ce209c6` (CHANGELOG),
+  `d903573` (README, kernel/README).
 
 ### The Linux side
 
@@ -462,7 +478,7 @@ hasu's under `~/lanes/px36/` there.
   `symlink`), `readlinkat` of written links, `fchownat` (and `chown`,
   `fchown`, `lchown`) as root sees it, an owner other than root refused
   by name (argued, Q7).
-- The pin at wolf 0.2.28 / lupin 0.1.51, its own commit (`451e1e9`): no
+- The pin at wolf 0.2.28 / lupin 0.1.51, its own commit (`4998a51`): no
   kernel source changed but the banner; every kernel's bytes moved by
   the runtime archive alone.
 - Close nothing. To close: none (no pax issue names this work). Filed:
