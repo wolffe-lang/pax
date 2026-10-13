@@ -12,6 +12,7 @@ mpx3-tree's by the test's own text, with the other suites that read
 `tests/paxtcp-selftest`, a step of the mpx4-tcp job with no leg of its
 own, is mpx4-tcp's by that job's text and runs whenever mpx4-tcp does;
 mpx4-net's new renew step is part of its peer boot on every leg; P2).
+Last, onto `fe7c05b` (px38, notes only).
 
 One deliverable: pax CI in tiers, with no loss of coverage before a
 merge to trunk. Measured on 2026-10-12 a green run was 28 jobs and 251
@@ -171,6 +172,10 @@ Both firmwares on the native tier would be 90.9 (+24).
 | notes only | 275 | plan + verdict ≈ 1 | 29 → 2 |
 | CI itself (this lane) | 275 | ≈ 68; measured 62.0 (run 38297084222, on `feba3fc`) | 31 |
 | a FULL path (pin, core, harness) | 275 | 275 + plan + verdict | 31 |
+
+A real notes-only change: px38 (`c3e3fc2..fe7c05b`, 115 paths, all under
+`notes/`) plans as the pr tier with no suite: the plan and the verdict,
+about a minute, where its push paid the full run.
 
 The planner over every open and recent PR, whole diff, in its own tree:
 px33b (#43), px33 (#38) and px29 (#33) take the music tier (4 to 6
