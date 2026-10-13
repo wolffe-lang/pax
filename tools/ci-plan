@@ -42,6 +42,11 @@ FULL wins over everything. A path that nothing matches is FULL: an
 unknown path never shrinks a run. `macos-run` runs when `proof` does
 (it boots proof's ISO).
 
+    tools/ci-plan --verdict     (NEEDS: the `tier` job's `toJSON(needs)`)
+
+checks a finished run: exit 0 when the plan succeeded, every suite it
+chose succeeded and every other was skipped; 1 otherwise.
+
 Output: `tier=`, `suites=` (a JSON list) and `legs=` lines, to
 --github-output (appended) and to standard output; with --json, one
 JSON object instead. The reasons, one line per changed path, go to
@@ -283,7 +288,40 @@ def plan(a):
     return result("pr", chosen, PR_LEGS)
 
 
+def verdict(needs):
+    """The `tier` job's check, from `toJSON(needs)`: 0 when the plan
+    succeeded, every suite it chose succeeded and every other job was
+    skipped. An output the plan left empty (the full tier's `legs`) is
+    absent from `needs`, not empty: read each with a default."""
+    plan_job = needs.get("plan", {})
+    if plan_job.get("result") != "success":
+        print("tier: the plan did not succeed (%s)" % plan_job.get("result"))
+        return 1
+    out = plan_job.get("outputs") or {}
+    try:
+        chosen = set(json.loads(out["suites"]))
+    except (KeyError, ValueError):
+        print("tier: the plan has no list of suites")
+        return 1
+    print("tier %s, legs '%s', %d of %d suites" % (out.get("tier", "?"), out.get("legs", ""), len(chosen), len(needs) - 1))
+    bad = 0
+    for job, r in needs.items():
+        if job == "plan":
+            continue
+        want = "success" if job in chosen else "skipped"
+        ok = r.get("result") == want
+        bad += not ok
+        print("  %-16s %-8s %s" % (job, r.get("result"), "ok" if ok else "WANTED " + want))
+    missing = chosen - set(needs)
+    if missing:
+        print("tier: chosen but not needed by the tier job: %s" % " ".join(sorted(missing)))
+        bad += 1
+    return 1 if bad else 0
+
+
 def main():
+    if sys.argv[1:] == ["--verdict"]:
+        sys.exit(verdict(json.loads(os.environ["NEEDS"])))
     ap = argparse.ArgumentParser(description="which suites a CI run runs (px37)")
     env = os.environ.get
     ap.add_argument("--event", default=env("EVENT"))
