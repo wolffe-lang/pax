@@ -19,18 +19,24 @@
 //! - `/proc/self/status` (`proc_pid_status(5)`): Linux 7.2.8's fields
 //!   in its order and format; PAX's values where it keeps them — Name
 //!   (the thread's, or the program's), Umask, State `R (running)` (the
-//!   reader is running), Tgid, Pid, PPid, Uid and Gid 0, FDSize (the
+//!   reader is running), Tgid, Pid, PPid, Uid, Gid and Groups (px39: the
+//!   process's own, kernel/cred; 0 and no group before), FDSize (the
 //!   table's size), NStgid and NSpid as Tgid and Pid, Threads, SigBlk
 //!   (the thread's mask), SigIgn and SigCgt (the process's actions),
 //!   VmRSS, VmHWM, VmSize, VmPeak, RssAnon and VmData the pages the
 //!   process maps, VmPTE its page tables' frames (px25) — and fixed
 //!   values where it keeps none: 0 for
 //!   TracerPid, Ngid, Kthread, VmLck, VmPin, RssFile, RssShmem, VmLib,
-//!   VmSwap, HugetlbPages, CoreDumping, the pending sets, the
-//!   capability sets (no capability set: a process on PAX is root by
-//!   rule, not by capability), NoNewPrivs, Seccomp and the context
+//!   VmSwap, HugetlbPages, CoreDumping, the pending sets, NoNewPrivs,
+//!   Seccomp and the context
 //!   switches; NSpgid and NSsid 1; VmStk 132 kB and VmExe 0 kB; one CPU
 //!   (`Cpus_allowed: 1`, `Cpus_allowed_list: 0`) and one memory node.
+//!   The capability sets (px39, ruling #75 R9): PAX keeps none — a
+//!   process is root by its ids, not by capability — and prints what
+//!   Linux prints for a process with the same ids (kernel/cred's `cap`).
+//! - px39: `/proc/self/setgroups` and `/proc/<pid>/setgroups`: `allow`
+//!   (`user_namespaces(7)`: PAX has no user namespace, so the call is
+//!   never switched off; mode 0644, measured).
 //! - `/proc/self/cgroup`: `0::/` (cgroup v2, the root: `cgroups(7)`).
 //! - `/proc/sys/vm/overcommit_memory`: `0` (the heuristic, Linux's
 //!   default; glibc's malloc reads it).
@@ -63,6 +69,7 @@
 //! cgroups(7), sysfs(5) and black-box reads of the files on Linux. No
 //! Linux source; no other kernel's source.
 
+use cred
 use frames
 use paging
 use sched
@@ -73,13 +80,16 @@ use unix
 const PAGE: u64 = 4096
 
 /// How many entries there are; also `NONE`'s value.
-pub const ENTRIES: u64 = 23
+pub const ENTRIES: u64 = 25
 /// No entry.
-pub const NONE: u64 = 23
+pub const NONE: u64 = 25
 /// px25: the entry `/proc/<pid>` (a reference carries the pid above
-/// bit 16: `pid << 16 | PIDDIR`), and its `status`.
-pub const PIDDIR: u64 = 21
-const PSTATUS: u64 = 22
+/// bit 16: `pid << 16 | PIDDIR`), and its `status`; px39: its
+/// `setgroups` (entry 21 is `/proc/self/setgroups`: the fixed entries
+/// are those below PIDDIR).
+pub const PIDDIR: u64 = 22
+const PSTATUS: u64 = 23
+const PSETGROUPS: u64 = 24
 const EMASK: u64 = 0xffff
 /// An entry's parent when it sits in the root directory.
 pub const ROOT: u64 = 0xffff
@@ -95,6 +105,7 @@ const G_MEMINFO: u64 = 7 // px25
 const G_FILENR: u64 = 8
 const G_SOCKSTAT: u64 = 9
 const G_PSTATUS: u64 = 10
+const G_SETGROUPS: u64 = 11 // px39
 
 const S_IFDIR: u64 = 0x4000
 const S_IFREG: u64 = 0x8000
@@ -135,6 +146,7 @@ pub fn name(e: u64) -> str {
     if e == 18 { return "file-nr" }
     if e == 19 { return "net" }
     if e == 20 { return "sockstat" }
+    if e == 21 || e == PSETGROUPS { return "setgroups" }
     "online"
 }
 
@@ -187,12 +199,12 @@ pub fn parent(r: u64) -> u64 {
     let e = entry(r)
     if e == 0 || e == 7 { return ROOT }
     if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR { return 0 }
-    if e == 2 || e == 3 { return 1 }
+    if e == 2 || e == 3 || e == 21 { return 1 }
     if e == 5 || e == 17 { return 4 }
     if e == 6 { return 5 }
     if e == 18 { return 17 }
     if e == 20 { return 19 }
-    if e == PSTATUS { return pid_dir(pid_of(r)) }
+    if e == PSTATUS || e == PSETGROUPS { return pid_dir(pid_of(r)) }
     if e == 8 || e == 12 { return 7 }
     if e == 9 { return 8 }
     if e == 10 || e == 11 { return 9 }
@@ -208,6 +220,7 @@ fn gen(r: u64) -> u64 {
     if e == 18 { return G_FILENR }
     if e == 20 { return G_SOCKSTAT }
     if e == PSTATUS { return G_PSTATUS }
+    if e == 21 || e == PSETGROUPS { return G_SETGROUPS }
     if e == 3 { return G_CGROUP }
     if e == 6 { return G_OVERCOMMIT }
     if e == 10 { return G_CONTROLLERS }
@@ -230,8 +243,8 @@ pub fn mode(r: u64) -> u64 {
         }
         return S_IFDIR | 0x1ed // 0755
     }
-    if e == 6 || e == 11 {
-        return S_IFREG | 0x1a4 // 0644: overcommit_memory, cpu.max
+    if e == 6 || e == 11 || e == 21 || e == PSETGROUPS {
+        return S_IFREG | 0x1a4 // 0644: overcommit_memory, cpu.max, setgroups
     }
     S_IFREG | 0x124 // 0444
 }
@@ -251,11 +264,14 @@ pub fn fs(r: u64) -> u64 {
 /// The `k`th reference (from 0) that sits in `d` (a reference, or
 /// ROOT), or NONE past the last. px25: `/proc` lists its fixed names,
 /// then each process's number in increasing order; `/proc/<pid>` its
-/// `status`.
+/// `status` and (px39) its `setgroups`.
 pub fn child_at(d: u64, k: u64) -> u64 {
     var seen: u64 = 0
     if d != ROOT && entry(d) == PIDDIR {
-        return if k == 0 { (pid_of(d) << 16) | PSTATUS } else { NONE }
+        if k == 0 {
+            return (pid_of(d) << 16) | PSTATUS
+        }
+        return if k == 1 { (pid_of(d) << 16) | PSETGROUPS } else { NONE }
     }
     var e: u64 = 0
     while e < PIDDIR {
@@ -372,6 +388,20 @@ fn put_mask(base: u64, at: u64, label: str, v: u64) -> u64 {
     put_b(base, k, 10)
 }
 
+/// px39: an id line, `<name>:\t<real>\t<effective>\t<saved>\t<file-system>\n`.
+fn put_ids(base: u64, at: u64, label: str, r: u64, e: u64, s: u64, f: u64) -> u64 {
+    var k = put_s(base, at, label)
+    k = put_s(base, k, ":\t")
+    k = put_dec(base, k, r)
+    k = put_b(base, k, 9)
+    k = put_dec(base, k, e)
+    k = put_b(base, k, 9)
+    k = put_dec(base, k, s)
+    k = put_b(base, k, 9)
+    k = put_dec(base, k, f)
+    put_b(base, k, 10)
+}
+
 /// A thread's name, as `prctl(PR_GET_NAME)` answers it (its own when
 /// set, else its program's, at most 15 bytes): the running thread's when
 /// `s` is sched.SLOTS, else the leader's in slot `s` (px25).
@@ -431,9 +461,24 @@ fn status(base: u64, s: u64, pid0: u64, area: u64, umask: u64, fds: u64) -> u64 
     k = put_field(base, k, "Pid", tid)
     k = put_field(base, k, "PPid", if me { sched.self_ppid() } else { sched.proc_word(s, 0) })
     k = put_field(base, k, "TracerPid", 0)
-    k = put_s(base, k, "Uid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\n")
+    // px39: who the process is (kernel/cred): real, effective, saved,
+    // file-system; then its groups, each followed by a space, and one
+    // space when there is none (Linux's line, measured both ways).
+    k = put_ids(base, k, "Uid", cred.uid(area, cred.REAL), cred.uid(area, cred.EFFECTIVE), cred.uid(area, cred.SAVED), cred.uid(area, cred.FS))
+    k = put_ids(base, k, "Gid", cred.gid(area, cred.REAL), cred.gid(area, cred.EFFECTIVE), cred.gid(area, cred.SAVED), cred.gid(area, cred.FS))
     k = put_field(base, k, "FDSize", fds)
-    k = put_s(base, k, "Groups:\t \n")
+    k = put_s(base, k, "Groups:\t")
+    let ng = cred.ngroups(area)
+    if ng == 0 {
+        k = put_b(base, k, 32)
+    }
+    var gi: u64 = 0
+    while gi < ng {
+        k = put_dec(base, k, cred.group(area, gi))
+        k = put_b(base, k, 32)
+        gi += 1
+    }
+    k = put_b(base, k, 10)
     k = put_field(base, k, "NStgid", pid)
     k = put_field(base, k, "NSpid", tid)
     k = put_field(base, k, "NSpgid", 1)
@@ -480,11 +525,12 @@ fn status(base: u64, s: u64, pid0: u64, area: u64, umask: u64, fds: u64) -> u64 
     }
     k = put_mask(base, k, "SigIgn", ign)
     k = put_mask(base, k, "SigCgt", cgt)
-    k = put_mask(base, k, "CapInh", 0)
-    k = put_mask(base, k, "CapPrm", 0)
-    k = put_mask(base, k, "CapEff", 0)
-    k = put_mask(base, k, "CapBnd", 0)
-    k = put_mask(base, k, "CapAmb", 0)
+    // px39: ruling #75 R9, in Linux's words (kernel/cred's `cap`).
+    k = put_mask(base, k, "CapInh", cred.cap(area, 0))
+    k = put_mask(base, k, "CapPrm", cred.cap(area, 1))
+    k = put_mask(base, k, "CapEff", cred.cap(area, 2))
+    k = put_mask(base, k, "CapBnd", cred.cap(area, 3))
+    k = put_mask(base, k, "CapAmb", cred.cap(area, 4))
     k = put_field(base, k, "NoNewPrivs", 0)
     k = put_field(base, k, "Seccomp", 0)
     k = put_field(base, k, "Seccomp_filters", 0)
@@ -531,7 +577,7 @@ fn sockstat(base: u64) -> u64 {
 pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64) -> (u64, u64) {
     let g = gen(r)
     var slot = sched.SLOTS
-    if g == G_PSTATUS {
+    if g == G_PSTATUS || (g == G_SETGROUPS && pid_of(r) != 0) {
         slot = sched.proc_slot(pid_of(r))
         if slot == sched.SLOTS {
             return (0, 1)
@@ -556,6 +602,8 @@ pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64)
         n = put_b(base, n, 10)
     } else if g == G_SOCKSTAT {
         n = sockstat(base)
+    } else if g == G_SETGROUPS {
+        n = put_s(base, 0, "allow\n") // px39: no user namespace: `setgroups` is never switched off
     } else if g == G_CGROUP {
         n = put_s(base, 0, "0::/\n")
     } else if g == G_OVERCOMMIT {
