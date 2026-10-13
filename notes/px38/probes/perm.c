@@ -15,7 +15,9 @@
  */
 #include "px38.h"
 #include <dirent.h>
+#include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/un.h>
 
 static const char *D;
 static char self_path[256];
@@ -296,6 +298,29 @@ static void create_row(long unused)
     unlink(in("c0/u0")); unlink(in("c0/u27")); rmdir(in("c0/ud27")); unlink(in("c0/u777"));
 }
 
+/* --- I: an AF_UNIX socket's name, and a descriptor that outlives a chmod --- */
+static void unix_row(long mode)
+{
+    struct sockaddr_un a;
+    memset(&a, 0, sizeof a);
+    a.sun_family = AF_UNIX;
+    snprintf(a.sun_path, sizeof a.sun_path, "%s", in("sock"));
+    int s = socket(AF_UNIX, SOCK_STREAM, 0);
+    long r = s < 0 ? -(long)errno : connect(s, (struct sockaddr *)&a, sizeof a) == 0 ? 0L : -(long)errno;
+    if (s >= 0) close(s);
+    say("unix socket 1000:2000 mode %04lo %s: connect %ld\n", mode, cur_actor, r);
+}
+
+static void held_row(long unused)
+{
+    (void)unused;
+    /* descriptor 9 was opened by this actor while the file was 0666; root has since made it 0000 */
+    char b[4];
+    long r = read(9, b, 1) == 1 ? 0L : -(long)errno, w = write(9, "y", 1) == 1 ? 0L : -(long)errno;
+    say("held %s: a file opened at mode 0666, then made 0000 and root's: read on the old descriptor %ld, write %ld, a new open %ld, fchmod on it %ld\n",
+        cur_actor, r, w, op(in("held"), O_RDWR), rc(SYS_fchmod, 9, 0600, 0, 0, 0));
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && strcmp(argv[1], "hello") == 0) return 7;
@@ -519,6 +544,53 @@ int main(int argc, char **argv)
         }
         reap(p);
         unlink(in("c0/fs"));
+    }
+    say("== I: an AF_UNIX socket's name; a descriptor that outlives a change of mode\n");
+    {
+        struct sockaddr_un a;
+        memset(&a, 0, sizeof a);
+        a.sun_family = AF_UNIX;
+        snprintf(a.sun_path, sizeof a.sun_path, "%s", in("sock"));
+        int ls = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (ls < 0 || bind(ls, (struct sockaddr *)&a, sizeof a) != 0 || listen(ls, 64) != 0) say("! listening socket: %d\n", -errno);
+        else {
+            say("a socket bound by root with umask 000 is %s %04o\n", own_of(in("sock")), mode_of(in("sock")));
+            chown(in("sock"), 1000, 2000);
+            static const unsigned M[] = { 0000, 0200, 0020, 0002, 0400, 0600, 0755, 0775, 0777 };
+            for (unsigned i = 0; i < sizeof M / sizeof *M; i++)
+                for (int k = 0; k < NA; k++) {
+                    if (k == SUP) continue;
+                    chmod(in("sock"), M[i]);
+                    cur_actor = A[k].name;
+                    as(k, unix_row, M[i]);
+                }
+            close(ls);
+            unlink(in("sock"));
+        }
+        for (int k = 0; k < NA; k++) {
+            if (k == SUP || k == GRP) continue;
+            put_file(in("held"), "h\n", 0666, 1000, 2000);
+            cur_actor = A[k].name;
+            pid_t p = fork();
+            if (p == 0) {
+                if (A[k].uid != 0) become(A[k].uid, A[k].gid, A[k].ng, A[k].gs);
+                int fd = open(in("held"), O_RDWR);
+                if (fd < 0 || dup2(fd, 9) != 9) _exit(93);
+                /* stop; the parent (root) gives the file to root at mode 0000 and continues this process */
+                kill(getpid(), SIGSTOP);
+                held_row(0);
+                _exit(0);
+            }
+            int st = 0;
+            waitpid(p, &st, WUNTRACED);
+            if (WIFSTOPPED(st)) {
+                chown(in("held"), 0, 0);
+                chmod(in("held"), 0);
+                kill(p, SIGCONT);
+                reap(p);
+            } else say("! the holder did not stop\n");
+        }
+        unlink(in("held"));
     }
     say("perm: done\n");
     return 0;
