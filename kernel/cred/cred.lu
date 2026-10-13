@@ -1,0 +1,425 @@
+//! cred — who a process is (px39, the first lane of the users campaign):
+//! its eight ids and its supplementary groups, the twelve calls that
+//! read and change them, and what `execve` does to them.
+//!
+//! **Nothing here decides what a process may do to a file, a signal, a
+//! port or a device.** Those checks do not exist yet (they are the
+//! lanes after this one): a process may now BE a user, and the only
+//! rules that treat it differently are the id calls' own. Set-ID
+//! execution is not honoured (ruling #75 R5): `exec` never raises an id.
+//!
+//! **The record** is forty-two words of the process area (kernel/sched's
+//! `proc_area`; words 160 to 201, which nothing else names): the user
+//! ids real, effective, saved and file-system; the same four group ids;
+//! the count of supplementary groups and the list, kept sorted, at most
+//! GROUPS_MAX of them (R4); and one word that is 1 when the process is
+//! not dumpable. All zero for a fresh process, which is therefore root
+//! (every id 0) with no group and dumpable: the kernel's own programs
+//! start that way with no code here run. kernel/sched copies the area
+//! whole for a fork's child and a vfork's (each then has its own
+//! record), keeps it over `execve`, and gives every thread of a process
+//! its leader's — so **ids are a process's on PAX**, where Linux keeps
+//! them per thread and leaves it to the C library to make them one
+//! (`nptl(7)`): a named difference, one line of user/elf/ident.c.
+//!
+//! **The rules** are Linux's, measured: px38's model
+//! (`notes/px38/check-cred.py`, held to 2,640 recorded rows a reference)
+//! and px39's rows beside it (`notes/px39-the-credentials.md`). A caller
+//! is PRIVILEGED when its effective USER id is 0 — for the group calls
+//! too. An id argument is 32 bits of its register; 0xffffffff (-1)
+//! means "leave it".
+//! - `setuid(x)` (105), `setgid` (106): -EINVAL for -1. Privileged:
+//!   real, effective and saved all become x. Otherwise x must be the
+//!   real or the saved id, and only the effective id moves; else -EPERM.
+//! - `setreuid(r, e)` (113), `setregid` (114): unprivileged, r must be
+//!   the real or the effective id and e the real, effective or saved;
+//!   else -EPERM and nothing moves. The saved id becomes the new
+//!   effective id when r is given, or e is given and is not the old
+//!   real id.
+//! - `setresuid(r, e, s)` (117), `setresgid` (119): unprivileged, each
+//!   must be one of the three current ids; else -EPERM, nothing moves.
+//! - after each of those that succeeds the file-system id is the
+//!   effective id.
+//! - `setfsuid(x)` (122), `setfsgid` (123): always answers the previous
+//!   file-system id; it moves when the caller is privileged or x is one
+//!   of the four current ids; -1 and a refused x change nothing and are
+//!   not errors.
+//! - `getresuid` (118), `getresgid` (120): the three written in order,
+//!   each four bytes; -EFAULT at the first pointer that cannot be
+//!   written, those before it already written.
+//! - `getgroups(n, list)` (115): n is an int. 0: the count. Negative,
+//!   or below the count: -EINVAL (before the pointer is looked at).
+//!   Else the list, four bytes a group, and the count; -EFAULT.
+//! - `setgroups(n, list)` (116): unprivileged: -EPERM, before anything
+//!   else is looked at. n is an int, read unsigned: above 65,536
+//!   -EINVAL, as Linux; **above GROUPS_MAX -EINVAL and refused by
+//!   name** (Linux takes them: R4's bound); then -EFAULT for a list
+//!   that cannot be read. The list is kept sorted, repeats and all.
+//! - `execve` (`exec`): the saved ids become the effective ids, the
+//!   file-system ids too; the real and effective ids and the groups
+//!   are kept.
+//!
+//! **Dumpable** (`prctl(PR_GET_DUMPABLE)`; Linux's `fs.suid_dumpable`
+//! is 0 on the reference, and fixed 0 here): cleared when a call leaves
+//! the effective or the file-system id, user or group, with a
+//! different value than it had (not by a call that changes only a real
+//! or a saved id, nor by `setgroups`); at `execve` it becomes 1 exactly
+//! when real, effective and file-system ids were equal, user and
+//! group, and 0 otherwise. Nothing on PAX reads it but that `prctl`.
+//!
+//! **AT_SECURE** (`secure`, read before `exec`): 1 when the real and
+//! effective user ids differ, or the real and effective group ids, or
+//! the effective group id is neither the file-system group id nor in
+//! the list. (The last is what Linux answers and is measured, not
+//! reasoned: a file-system USER id apart leaves it 0.)
+//!
+//! **The capability masks** (`cap`, for `/proc/<pid>/status`; ruling
+//! R9): PAX has no capability sets and no `capget`; root is the
+//! effective user id 0 for everything but files and the file-system
+//! user id 0 for files. The status lines say that in Linux's words, as
+//! Linux 7.2.8 prints them for the same ids: `CapBnd` every capability
+//! (`000001ffffffffff`); `CapPrm` every capability while one of the
+//! three user ids is 0, else none; `CapEff` the permitted set cut to
+//! the non-file capabilities (`000001fef7fffde0`) when the effective
+//! id is 0 and the file capabilities (`000000010800021f`) when the
+//! file-system id is 0; `CapInh` and `CapAmb` none.
+//!
+//! No region, no heap; every word read and written volatile, as the
+//! rest of the process area. Written from credentials(7),
+//! capabilities(7), setuid(2), setreuid(2), setresuid(2), setfsuid(2),
+//! getresuid(2), getgroups(2), execve(2), PR_SET_DUMPABLE(2const),
+//! getauxval(3), proc_pid_status(5) and black-box runs of Linux. No
+//! Linux source; no other kernel's source; no libc's.
+
+use uaccess
+
+/// The most supplementary groups a process keeps (ruling #75 R4).
+pub const GROUPS_MAX: u64 = 32
+const LINUX_GROUPS_MAX: u64 = 65536 // what Linux takes (measured): above it Linux says -EINVAL too
+
+// The record's words in the process area.
+const C_UID: u64 = 160 // four words: real, effective, saved, file-system
+const C_GID: u64 = 164 // the same four
+const C_NGROUPS: u64 = 168
+const C_UNDUMP: u64 = 169 // 1: not dumpable
+const C_GROUPS: u64 = 170 // GROUPS_MAX words, sorted
+const A_REFUSAL: u64 = 3 // the area's refusal word (kernel/user writes the line)
+
+/// Which id of the four.
+pub const REAL: u64 = 0
+pub const EFFECTIVE: u64 = 1
+pub const SAVED: u64 = 2
+pub const FS: u64 = 3
+
+/// The refusal by name (kernel/process's range of codes, 32 to 63).
+pub const R_GROUPS: u64 = 41
+
+const KEEP: u64 = 0xffffffff // -1 as an id: leave it
+const M32: u64 = 0xffffffff
+const NEG_EPERM: u64 = 0xffffffffffffffff // -1
+const NEG_EFAULT: u64 = 0xfffffffffffffff2 // -14
+const NEG_EINVAL: u64 = 0xffffffffffffffea // -22
+
+const CAP_FULL: u64 = 0x000001ffffffffff // Linux 7.2.8's 41 capabilities
+const CAP_FILE: u64 = 0x000000010800021f // those that follow the file-system user id (capabilities(7))
+
+fn get(a: u64, i: u64) -> u64 {
+    // # Safety: `a` is a process area (sched.proc_area); i < 512.
+    unsafe { ((a + i * 8) as *u64).read_volatile() }
+}
+
+fn put(a: u64, i: u64, v: u64) {
+    // # Safety: as `get`.
+    unsafe { ((a + i * 8) as *u64).write_volatile(v) }
+}
+
+/// The refusal's name.
+pub fn why() -> str {
+    "more supplementary groups than PAX keeps (32; Linux takes 65536)"
+}
+
+/// The user id `which` (REAL, EFFECTIVE, SAVED, FS) of the process whose
+/// area is `a`.
+pub fn uid(a: u64, which: u64) -> u64 {
+    get(a, C_UID + which)
+}
+
+/// The group id `which` of the process whose area is `a`.
+pub fn gid(a: u64, which: u64) -> u64 {
+    get(a, C_GID + which)
+}
+
+/// How many supplementary groups the process has.
+pub fn ngroups(a: u64) -> u64 {
+    get(a, C_NGROUPS)
+}
+
+/// Its `i`th supplementary group (i < ngroups), in increasing order.
+pub fn group(a: u64, i: u64) -> u64 {
+    get(a, C_GROUPS + i)
+}
+
+/// Whether the caller is privileged for these calls: effective user id 0.
+fn privileged(a: u64) -> bool {
+    get(a, C_UID + EFFECTIVE) == 0
+}
+
+/// `prctl(PR_GET_DUMPABLE)`: 1 or 0.
+pub fn dumpable(a: u64) -> u64 {
+    1 - get(a, C_UNDUMP)
+}
+
+/// The four ids at `base` (C_UID or C_GID) become real `r`, effective
+/// `e`, saved `s`, file-system `f`; the process stops being dumpable
+/// when the effective or the file-system id is left with another value.
+fn commit(a: u64, base: u64, r: u64, e: u64, s: u64, f: u64) {
+    if get(a, base + EFFECTIVE) != e || get(a, base + FS) != f {
+        put(a, C_UNDUMP, 1)
+    }
+    put(a, base + REAL, r)
+    put(a, base + EFFECTIVE, e)
+    put(a, base + SAVED, s)
+    put(a, base + FS, f)
+}
+
+fn base_of(user: bool) -> u64 {
+    if user { C_UID } else { C_GID }
+}
+
+/// `setuid(x)` (`user`) or `setgid(x)`.
+pub fn setid(a: u64, user: bool, x0: u64) -> u64 {
+    let b = base_of(user)
+    let x = x0 & M32
+    if x == KEEP {
+        return NEG_EINVAL
+    }
+    if privileged(a) {
+        commit(a, b, x, x, x, x)
+        return 0
+    }
+    let r = get(a, b + REAL)
+    let s = get(a, b + SAVED)
+    if x != r && x != s {
+        return NEG_EPERM
+    }
+    commit(a, b, r, x, s, x)
+    0
+}
+
+/// `setreuid(r, e)` (`user`) or `setregid(r, e)`.
+pub fn setre(a: u64, user: bool, r0: u64, e0: u64) -> u64 {
+    let b = base_of(user)
+    let wr = r0 & M32
+    let we = e0 & M32
+    let r = get(a, b + REAL)
+    let e = get(a, b + EFFECTIVE)
+    let s = get(a, b + SAVED)
+    let p = privileged(a)
+    var nr = r
+    var ne = e
+    if wr != KEEP {
+        if !p && wr != r && wr != e {
+            return NEG_EPERM
+        }
+        nr = wr
+    }
+    if we != KEEP {
+        if !p && we != r && we != e && we != s {
+            return NEG_EPERM
+        }
+        ne = we
+    }
+    var ns = s
+    if wr != KEEP || (we != KEEP && we != r) {
+        ns = ne
+    }
+    commit(a, b, nr, ne, ns, ne)
+    0
+}
+
+/// Whether an unprivileged caller may name `x` in `setresuid`: one of
+/// the three current ids.
+fn one_of(x: u64, r: u64, e: u64, s: u64) -> bool {
+    x == r || x == e || x == s
+}
+
+/// `setresuid(r, e, s)` (`user`) or `setresgid(r, e, s)`.
+pub fn setres(a: u64, user: bool, r0: u64, e0: u64, s0: u64) -> u64 {
+    let b = base_of(user)
+    let wr = r0 & M32
+    let we = e0 & M32
+    let ws = s0 & M32
+    let r = get(a, b + REAL)
+    let e = get(a, b + EFFECTIVE)
+    let s = get(a, b + SAVED)
+    if !privileged(a) {
+        if (wr != KEEP && !one_of(wr, r, e, s)) || (we != KEEP && !one_of(we, r, e, s)) || (ws != KEEP && !one_of(ws, r, e, s)) {
+            return NEG_EPERM
+        }
+    }
+    let ne = if we == KEEP { e } else { we }
+    commit(a, b, if wr == KEEP { r } else { wr }, ne, if ws == KEEP { s } else { ws }, ne)
+    0
+}
+
+/// `setfsuid(x)` (`user`) or `setfsgid(x)`: the previous file-system id,
+/// whatever happened.
+pub fn setfs(a: u64, user: bool, x0: u64) -> u64 {
+    let b = base_of(user)
+    let x = x0 & M32
+    let r = get(a, b + REAL)
+    let e = get(a, b + EFFECTIVE)
+    let s = get(a, b + SAVED)
+    let f = get(a, b + FS)
+    if x != KEEP && (privileged(a) || one_of(x, r, e, s) || x == f) {
+        commit(a, b, r, e, s, x)
+    }
+    f
+}
+
+/// `getresuid(r, e, s)` (`user`) or `getresgid`: the three ids written
+/// at the three user pointers, in order.
+pub fn getres(a: u64, pml4: u64, user: bool, rp: u64, ep: u64, sp: u64) -> u64 {
+    let b = base_of(user)
+    if !uaccess.writable(pml4, rp, 4) {
+        return NEG_EFAULT
+    }
+    uaccess.put(pml4, rp, get(a, b + REAL), 4)
+    if !uaccess.writable(pml4, ep, 4) {
+        return NEG_EFAULT
+    }
+    uaccess.put(pml4, ep, get(a, b + EFFECTIVE), 4)
+    if !uaccess.writable(pml4, sp, 4) {
+        return NEG_EFAULT
+    }
+    uaccess.put(pml4, sp, get(a, b + SAVED), 4)
+    0
+}
+
+/// `getgroups(n, list)`.
+pub fn getgroups(a: u64, pml4: u64, n0: u64, list: u64) -> u64 {
+    let n = n0 & M32
+    let have = get(a, C_NGROUPS)
+    if n >= 0x80000000 {
+        return NEG_EINVAL
+    }
+    if n == 0 {
+        return have
+    }
+    if n < have {
+        return NEG_EINVAL
+    }
+    if have > 0 && !uaccess.writable(pml4, list, have * 4) {
+        return NEG_EFAULT
+    }
+    var i: u64 = 0
+    while i < have {
+        uaccess.put(pml4, list + i * 4, get(a, C_GROUPS + i), 4)
+        i += 1
+    }
+    have
+}
+
+/// `setgroups(n, list)`.
+pub fn setgroups(a: u64, pml4: u64, n0: u64, list: u64) -> u64 {
+    if !privileged(a) {
+        return NEG_EPERM
+    }
+    let n = n0 & M32
+    if n > LINUX_GROUPS_MAX {
+        return NEG_EINVAL
+    }
+    if n > GROUPS_MAX {
+        put(a, A_REFUSAL, R_GROUPS)
+        return NEG_EINVAL
+    }
+    if n > 0 && !uaccess.readable(pml4, list, n * 4) {
+        return NEG_EFAULT
+    }
+    // An insertion sort straight into the record: the list is the
+    // caller's to read whole (checked), so nothing fails from here.
+    var i: u64 = 0
+    while i < n {
+        let g = uaccess.get(pml4, list + i * 4, 4)
+        var k = i
+        while k > 0 && get(a, C_GROUPS + k - 1) > g {
+            put(a, C_GROUPS + k, get(a, C_GROUPS + k - 1))
+            k -= 1
+        }
+        put(a, C_GROUPS + k, g)
+        i += 1
+    }
+    put(a, C_NGROUPS, n)
+    0
+}
+
+/// Whether the group `g` is in the process's supplementary list.
+fn in_list(a: u64, g: u64) -> bool {
+    let n = get(a, C_NGROUPS)
+    var i: u64 = 0
+    while i < n {
+        if get(a, C_GROUPS + i) == g {
+            return true
+        }
+        i += 1
+    }
+    false
+}
+
+/// AT_SECURE for a program this process is about to `execve` (read
+/// before `exec`): 1 or 0.
+pub fn secure(a: u64) -> u64 {
+    let eg = get(a, C_GID + EFFECTIVE)
+    if get(a, C_UID + REAL) != get(a, C_UID + EFFECTIVE) || get(a, C_GID + REAL) != eg {
+        return 1
+    }
+    if eg != get(a, C_GID + FS) && !in_list(a, eg) {
+        return 1
+    }
+    0
+}
+
+/// `execve`'s point of no return: the saved and the file-system ids
+/// become the effective ids, and the process is dumpable again exactly
+/// when its real, effective and file-system ids were equal. Nothing is
+/// raised: no bit of the file is read here.
+pub fn exec(a: u64) {
+    var same = true
+    var b = C_UID
+    while b <= C_GID {
+        let e = get(a, b + EFFECTIVE)
+        if get(a, b + REAL) != e || get(a, b + FS) != e {
+            same = false
+        }
+        put(a, b + SAVED, e)
+        put(a, b + FS, e)
+        b += 4
+    }
+    put(a, C_UNDUMP, if same { 0 } else { 1 })
+}
+
+/// A capability mask of `/proc/<pid>/status`: 0 CapInh, 1 CapPrm,
+/// 2 CapEff, 3 CapBnd, 4 CapAmb.
+pub fn cap(a: u64, which: u64) -> u64 {
+    if which == 3 {
+        return CAP_FULL
+    }
+    if which == 0 || which == 4 {
+        return 0
+    }
+    let e = get(a, C_UID + EFFECTIVE)
+    if get(a, C_UID + REAL) != 0 && e != 0 && get(a, C_UID + SAVED) != 0 {
+        return 0
+    }
+    if which == 1 {
+        return CAP_FULL
+    }
+    var m: u64 = 0
+    if e == 0 {
+        m = CAP_FULL & !CAP_FILE
+    }
+    if get(a, C_UID + FS) == 0 {
+        m = m | CAP_FILE
+    }
+    m
+}
