@@ -214,8 +214,8 @@ net-peer ignoring a correct ACK (below).
 exactly what it was sent; net-peer's fast retransmission had sent 41
 bytes past its SND.MAX and so ignored that ACK forever. The witness
 `tests/paxtcp-selftest` (no QEMU; CI runs it first in the mpx4-tcp job)
-is red at `9bcae04` before the fix (F1: 1,460 bytes retransmitted when
-1,000 were sent, the ACK not taken) and green after `76a9a21`.
+is red at `73c9af2` before the fix (F1: 1,460 bytes retransmitted when
+1,000 were sent, the ACK not taken) and green after `522ef16`.
 
 **Found under load, not yet seen on CI: `grep -q` under pipefail.**
 Trunk under load also failed N1, N3 and N8 on the `net` and `modern`
@@ -272,26 +272,28 @@ takes about 40 s. No deadline was raised.
 
 ## 8. The rebases, and the shas named again
 
-The branch was rebased three times as trunk moved: onto `6316c51`
-(px32), onto `feba3fc` (px25; this lane's probe commit dropped there)
-and onto `c86ba5e` (px33, px33b). None of the three touched a file
-this lane changes but `user/unix/unixprobe.c`. The trees kasumi ran
+The branch was rebased four times as trunk moved: onto `6316c51`
+(px32), onto `feba3fc` (px25; this lane's probe commit dropped there),
+onto `c86ba5e` (px33, px33b) and onto `89f04a9` (px36, which moves the
+pin to wolf 0.2.28). None touched a file this lane changes but
+`user/unix/unixprobe.c` (px25) and `kernel/README.md` (px36, other
+rows). The trees kasumi ran
 were cut before the last rebase, so their shas are no longer on the
 branch; each is the same change as the commit beside it:
 
 | what | as kasumi ran it | on the branch now |
 |---|---|---|
-| the prediction | `1cdf2c1` | `39a38ad` |
-| tests/paxtcp-selftest, red | `2f9a7c3` | `9bcae04` |
-| CI runs it | `e27079f` | `7174af3` |
-| tools/paxtcp, the fix | `b57a758` | `76a9a21` |
-| the renewal witness (`w1`) | `02a07c6` | `a200307` |
-| kernel/arp, the fix | `88d8a1b` | `d54cc06` |
-| kernel/net, the batch | `a01c17f` | `36b4de7` |
+| the prediction | `1cdf2c1` | `79f0b75` |
+| tests/paxtcp-selftest, red | `2f9a7c3` | `73c9af2` |
+| CI runs it | `e27079f` | `93d6d37` |
+| tools/paxtcp, the fix | `b57a758` | `522ef16` |
+| the renewal witness (`w1`) | `02a07c6` | `7c8340f` |
+| kernel/arp, the fix | `88d8a1b` | `383597f` |
+| kernel/net, the batch | `a01c17f` | `9fe930a` |
 | the probe (`w2` = `cad6fc9`) | `cad6fc9` | dropped (px25's `e8931f4`) |
-| the pipefail fix (`w3` = `7bb705d`, `w4` = `795ad71`) | `7bb705d` | `9b79510` |
+| the pipefail fix (`w3` = `7bb705d`, `w4` = `795ad71`) | `7bb705d` | `e987357` |
 
-After the second rebase the gauntlet ran on `w5` = `0aa5702` and after
-the third on `w6` = `079f5bd` (this section's commit follows it and
-changes only this note); their summaries and the CI runs are in the PR
-body.
+After the second rebase the gauntlet ran on `w5` = `0aa5702`, after
+the third on `w6` = `079f5bd` (both wolf 0.2.27), and after the fourth
+on `w7`, the commit before this section's last edit, built by wolf
+0.2.28; the summaries and the CI runs are in the PR body.
