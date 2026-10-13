@@ -77,11 +77,13 @@ def free_ports(n):
         for _ in range(n):
             s = socket.socket()
             s.bind(("127.0.0.1", 0))
-            socks.append(s)
-        return [s.getsockname()[1] for s in socks]
+            socks.append(s.getsockname()[1])
+            s.close()  # PLANT (px41): each socket closed before the next is asked for, as trunk did
+        return socks
+    except OSError:
+        raise
     finally:
-        for s in socks:
-            s.close()
+        pass
 
 
 if len(sys.argv) == 4 and sys.argv[1] == "--free-ports":
