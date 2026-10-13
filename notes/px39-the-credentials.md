@@ -172,3 +172,323 @@ root run is still green for the (0 0 0) rows and red on the first row
 of state (1000 1000 1000) whose answer is -EPERM; with `fork` not
 carrying the record, red at `case 0 forked`. Both red in CI, one
 suite each.
+
+### Corrections to §3, found after it was committed
+
+- P4's count, "2,983 lines", is an arithmetic slip: the parts P4 lists
+  (264 rows that can be set up, 1,320 and 528 rows of two lines each,
+  ten lines of groups, the headers) add up to **3,983**, which is what
+  Linux wrote. The slip was published, so it is scored as one.
+
+## 3a. The prediction, scored
+
+| # | predicted | measured | verdict |
+|---|---|---|---|
+| P1 | 42 words of the process area, zero is root; `kernel/sched` and `boot/sched.S` untouched | words 160 to 201 (`kernel/cred`); `git diff 58428ba -- kernel/sched boot/` is empty; a fork's child, a vfork's child, a thread and an `execve` all carry the record with no line of the scheduler changed (`ident`'s `vfork:`, `~thread:` and `exec` rows; `cred`'s `forked` rows) | right |
+| P2 | the model needs no correction: all 2,640 matrix rows at the first boot that runs to the end | the first boot of `cred` (kasumi, native BIOS, the tree of `60f3fd3`) wrote all 2,640 matrix rows as recorded; `kernel/cred`'s four `set*` functions are `check-cred.py`'s `model` line for line and were not edited after | right |
+| P3 | as root 2,683 of 2,684, the one line `= -22, then getgroups(0, NULL) = 4`; on four legs | exactly that, on native and release, BIOS and UEFI (`notes/px39/kasumi-mpx5-users-059e677.out`; CI run 38474383913's `mpx5-users` job on native BIOS). The other 43 non-matrix lines needed what §2 named: PR_GET_DUMPABLE, `/proc/self/setgroups`, the two partial masks | right |
+| P4 | dropped to 1000:1000, **2,983** lines on Linux; PAX identical in all of them; Linux refuses a user's `setgroups` before it reads the count | **3,983** lines on Linux (the slip above); PAX byte-identical in all 3,983; a user's `setgroups(65537, …)`, `(-1, …)`, `(65536, …)` and `(1, NULL)` are all -EPERM on Linux, so the R4 line does not differ for a user | wrong on the count (arithmetic); right on the rest |
+| P5a | dumpable cleared by a change of value of an effective or file-system id, by nothing else; at `execve` 1 when real and effective are equal | the first half as predicted (29 `dump:` rows as root, 29 as a user). **At `execve` the file-system ids count too**: 1 only when real, effective *and file-system* ids are equal, user and group (`exec 5`, `6`, `12`, `13`, `15`, `16`, `19`, `20`: 0 with only a file-system id apart) | half right |
+| P5b | AT_SECURE is 1 exactly when real and effective user or group ids differ; the file-system id does not enter | true of the file-system **user** id (`exec 5`, `12`, `19`: 0). **False of the group side**: AT_SECURE is also 1 when the effective group id is neither the file-system group id nor in the supplementary list (`exec 6`, `14`, `17`, `20`: 1; `13`, `15`, `16`: 0, the effective group in the list) | wrong |
+| P5c | `CapPrm` full while one of the three user ids is 0, else zero; `CapInh`, `CapAmb` zero; `CapBnd` full always | as predicted, in nine states and after every `execve` (`status` and `exec` rows) | right |
+| P5d | an id is 32 bits | `setuid(0x1000003e8)` is `setuid(1000)`; `0x1ffffffff` is -1; `getgroups`' and `setgroups`' count is an int too | right |
+| P5e | `getresuid` with a bad pointer -EFAULT; `getgroups(2, bad)` -EFAULT | as predicted; and the three ids are written in order, those before the bad pointer already written; `getgroups` and `setgroups` look at the count before the pointer | right |
+| P5f | `Groups:` with no group is `Groups:\t\n`, and PAX's `Groups:\t \n` is wrong | **Linux prints `Groups:\t \n`**: one space when there is no group, and a space after each group when there are some. PAX's line (px34's) was right | wrong |
+| P6 | every existing suite unchanged; no existing test reads the bytes that move | no file under `tests/` is edited but `tests/ci-plan` (two new cases); all 29 existing suites green on the pr leg at `ae80ea3` (run 38474383913) and on every leg at the head (the PR names that run) | right |
+| P7 | 100,000 id changes and 10,000 forks leave the frames where they were | 1,000,000 calls and 10,000 children, as root and as a user: the free memory the program reads is one number at every quarter (`MemFree … 247316 247316 247316 247316 kB`), and the kernel's frames line the same before and after, on every leg | right |
+| P8 | plant A red on the first -EPERM row of state (1000 1000 1000), the (0 0 0) rows green; plant B red at `case 0 forked` | A exactly (line 268, `(1000 1000 1000) setuid(0)`, 23 lines). **B is red earlier**, at line 2,117, the first `u1000` row: every row is asked by a forked child, and a child that starts as root answers the user's group rows as root (536 lines) | A right; B wrong on where |
+
+## A. Where identity lives; what fork and execve do with it (item 1)
+
+**The record** is 42 words of the process area (`kernel/cred`,
+words 160 to 201): four user ids and four group ids (real, effective,
+saved, file-system), the count of supplementary groups, one word that
+is 1 when the process is not dumpable, and 32 words of groups, kept
+sorted. Zero is root with no group and dumpable, so a process the
+kernel starts needs no code here.
+
+| event | what happens to the record | where |
+|---|---|---|
+| a fork (`clone` without CLONE_VM) | the child has a copy: the area is copied whole | `sched.clone_current`, unchanged |
+| a vfork (CLONE_VM\|CLONE_VFORK) | the same: its own copy, though it borrows the address space (`ident`: a vfork child's `setresuid` leaves the parent root, as on Linux) | `sched.clone_current`, unchanged |
+| a thread (CLONE_THREAD) | none of its own: every thread reads its leader's area. **Ids are a process's on PAX; Linux keeps them per thread** and glibc makes them one by signalling every thread (`nptl(7)`). Measured: a second thread's raw `setresuid(1000, 1000, 1000)` leaves the first thread's `getuid` 0 on Linux, 1000 on PAX (`~thread`). A libc that repeats the call in every thread gets the same answer each time on PAX: each `set*id` call that succeeds once succeeds again unchanged (checked against the model for all four) | `sched.proc_area`, unchanged |
+| `execve` | real and effective ids and the groups are kept; **the saved and the file-system ids become the effective ids**; dumpable becomes 1 only if real, effective and file-system ids were equal; the new program is told AT_UID, AT_EUID, AT_GID, AT_EGID and AT_SECURE. **No id is raised: the file's set-ID bits are not read** (R5; `ident`: a mode-6755 root file run by 1000 leaves 1000 1000 1000 1000, AT_SECURE 0, as Linux on a nosuid mount) | `cred.exec`, `cred.at_secure`, `process.build_stack` |
+| `execve` from a thread | the caller becomes the leader with a copy of the old leader's area | `sched.exec_alone`, unchanged |
+
+## B. The twelve calls (item 2)
+
+Privileged means effective **user** id 0, for the group calls too. An
+id is 32 bits of its register; -1 leaves an id alone.
+
+| call | rule (`kernel/cred`) | held by |
+|---|---|---|
+| `setuid` 105, `setgid` 106 | -EINVAL for -1; privileged: real, effective, saved; else the effective id alone, to the real or saved id, or -EPERM | 72 rows a run |
+| `setreuid` 113, `setregid` 114 | unprivileged: real to real or effective, effective to real, effective or saved, else -EPERM; saved := the new effective when the real id is given or the effective id is given and is not the old real id | 432 |
+| `setresuid` 117, `setresgid` 119 | unprivileged: each one of the three current ids, else -EPERM | 2,592 |
+| `setfsuid` 122, `setfsgid` 123 | answers the previous file-system id always; moves when privileged or naming one of the four current ids | 72 |
+| every one of those | on success the file-system id is the effective id; dumpable cleared when the effective or file-system id changed value | `dump:` rows |
+| `getresuid` 118, `getresgid` 120 | three 4-byte writes in order; -EFAULT at the first bad pointer | `fault:` rows |
+| `getgroups` 115 | 0: the count; below the count or negative: -EINVAL, before the pointer; -EFAULT | `fault:`, groups rows |
+| `setgroups` 116 | unprivileged: -EPERM first; above 65,536: -EINVAL (Linux's); **above 32: -EINVAL, refused by name** (R4); -EFAULT; kept sorted, repeats kept | groups rows; `~bound` |
+| `getuid` 102, `getgid` 104, `geteuid` 107, `getegid` 108 | from the record (they were one `return 0`) | `get` rows |
+
+**What surprised me.**
+- **AT_SECURE's group rule is not symmetric with its user rule.** A
+  file-system *user* id apart from the effective one leaves AT_SECURE
+  0; a file-system *group* id apart makes it 1 unless the effective
+  group is also in the supplementary list. Seven `execve` rows were
+  added to find the edges (`exec 12` to `20`); the rule in `at_secure`
+  is what fits all 23, and it is measured, not explained: no man page
+  I read says it.
+- **dumpable at `execve` reads the file-system ids.** A root process
+  that only called `setfsuid(1000)` is not dumpable after its next
+  `execve`, though every id it then has is 0.
+- **`Groups:` ends in a space even when empty.**
+- **`setuid(-1)` is -EINVAL but `setfsuid(-1)` is not an error** (px38
+  found the first; the second is its mirror: it answers the old id).
+- **`prctl(PR_GET_NO_NEW_PRIVS, 1)` is -EINVAL** (every other argument
+  must be 0), and the other three getters do not care.
+- A user who is refused `setgroups` is refused before the count is
+  read, so the 32-group bound is invisible to anyone but root.
+
+## C. `/proc` and the auxiliary vector (item 3)
+
+- `/proc/self/status` and `/proc/<pid>/status`: `Uid:` and `Gid:` the
+  four ids tab-separated, `Groups:` the sorted list, each followed by a
+  space (one space when empty). Read for another process too
+  (`other:` rows: a parent reads its child's).
+- The capability lines (R9), as Linux 7.2.8 prints them for the same
+  ids: `CapBnd` `000001ffffffffff`; `CapPrm` that while one of the
+  three user ids is 0, else zero; `CapEff` the permitted set cut to
+  `000001fef7fffde0` when the effective id is 0 plus `000000010800021f`
+  when the file-system id is 0; `CapInh`, `CapAmb` zero. A function of
+  the ids alone: with no `capset` and no honoured set-ID file there is
+  no other state (a process whose three ids are all non-zero can never
+  get a 0 back). `capget` stays -ENOSYS.
+- `/proc/self/setgroups`, `/proc/<pid>/setgroups`: `allow`, mode 0644.
+- AT_UID, AT_EUID, AT_GID, AT_EGID, AT_SECURE: the process's own (23
+  `execve` rows, as root; the user's start line).
+- `prctl`: PR_GET_DUMPABLE from the record; PR_GET_KEEPCAPS,
+  PR_GET_SECUREBITS 0; PR_GET_NO_NEW_PRIVS 0, or -EINVAL when another
+  argument is not 0 (pax#49's two, and the two beside them).
+
+## D. The programs against Linux (item 4)
+
+Every reference is the **vm** root: kasumi's kernel image (Linux
+7.2.8-1-cachyos, `f4c00d5d…`) booted under QEMU 11.1.1 with
+`notes/px39/vminit.c` as pid 1, root of the initial user namespace,
+`CapEff 000001ffffffffff` (`tests/mpx5-users.d/linux/vm.meta`). The
+`-user` rows are the same boot after `as 1000 1000`. No row is compared
+with a container's root.
+
+| session | first program on PAX | lines | reference | identical | by rule |
+|---|---|---:|---|---:|---|
+| cred | `/bin/cred` (px38's binary: `72ab09fc…`, the digest px38 recorded) | 2,684 | vm, root: px38's recording, re-taken here byte for byte | 2,683 | 1: ruling R4 (`setgroups(65536, list)`) |
+| cred-user | `/bin/as 1000 1000 /bin/cred` | 3,983 | vm, after `as 1000 1000` | 3,983 | 0 |
+| ident | `/bin/ident /bin/ident-setid` | 225 | vm, root | 222 | 3 `~` lines: `~bound` (33 groups, R4), `~thread` (per process), `~owner` (a `/proc` file's owner: U2) |
+| ident-user | `/bin/as 1000 1000 /bin/ident /bin/ident-setid` | 129 | vm, after `as 1000 1000` | 126 | the same 3 |
+| ids | `/bin/ids` (px38's: `a053d49e…`) | 71 | vm, root | 59 | 12 named in `tests/mpx5-users.d/ids.pax`: five process-group calls and `capget` (-ENOSYS), SO_PEERCRED (U5), `chown` to 1000 (U2), four that are the machine's (the parent's pid, `/`'s mode, a `/bin`, `/etc/passwd`). Before px39: 29 of 71 (`notes/px38/pax/pax-ids.txt`) |
+| soak, soak-user | `/bin/ident soak 100000` | 2 | vm | 1 | 1 `~soak` line (free memory) |
+
+On all four legs (native and release, BIOS and UEFI): kasumi, TCG,
+`notes/px39/kasumi-mpx5-users-059e677.out` (122 PASS, 0 FAIL, 0 SKIP,
+28 boots; and the same at `ae80ea3`, before `at_secure` got its name),
+and again under `taskset -c 0-3`
+(`kasumi-taskset-0-3-mpx5-users-059e677.out`); hasu, KVM, kasumi's
+images, BIOS, both tiers (`hasu-kvm-059e677.log`: three rounds, 42
+boots; `hasu-kvm-211b095.log`: four rounds, 56 boots, the earlier
+kernel); CI's runner on the pr leg and the full tier (the PR). **UEFI
+under KVM on hasu is not shown**: with the firmware QEMU 11.1.0 ships
+there, four native sessions passed and then Limine itself could not
+open the kernel in the `ids` image (`PANIC: limine: Failed to open
+executable`, before PAX runs); the same ISO boots under OVMF on kasumi.
+Not chased: it is the boot loader's, on one host's firmware.
+
+**The second witness for a user's rows**: the same three `-user`
+sessions as uid 1000 of a rootless podman container
+(`notes/px39/linux-ct.sh`, `notes/px39/linux/ct/`). It agrees with the
+vm's in 3,980 of cred's 3,983 lines and 127 of ident's 129; the five
+that differ are the two classes px38 named for a user namespace: an id
+with no mapping is -EINVAL there (where the vm, and PAX, say -EPERM to
+a user), and `CapBnd` is the container's. PAX has no namespace and
+matches the vm.
+
+**Repeatability of the reference**: `cred` was recorded three times
+(px38's boot and two of this lane's), `cred-user`, `ident` and
+`ident-user` twice each, and each is the same bytes every time; `ids`
+differs in one line between boots (`setsid()` answers a pid).
+
+## E. Existing suites unchanged; the soak (item 5)
+
+- **No existing test is edited.** `git diff 58428ba --stat -- tests/`
+  shows `tests/ci-plan` (+4 lines: two cases for the new suite) and
+  the new `tests/mpx5-users` and `tests/mpx5-users.d/`; nothing else.
+  No expect file, key file or recorded transcript under `user/` or
+  `tests/` moves.
+- **Every existing suite ran and is green**: all 29, with mpx5-users
+  the thirtieth, on native BIOS at `ae80ea3` (run 38474383913, `tier
+  pr`: the PR touches `.github/`, which selects every suite on the pr
+  leg), and on all four legs at the head (the `tier full` run the PR
+  names). On kasumi I ran only this lane's suite; the other 29 are
+  CI's (as px36: their programs must not be built with kasumi's
+  glibc).
+- **What an existing program can see move**: `/proc/<pid>/status`'s
+  `CapPrm`, `CapEff` and `CapBnd` (zeros before; `000001ffffffffff`
+  for root now), and a `setgroups` entry in `/proc/self` and
+  `/proc/<pid>`. `Uid:`, `Gid:` and `Groups:` are the same bytes for
+  root as before. No existing test reads any of it.
+- **No permission check changed.** `kernel/files`' diff is three lines
+  (the name `setgroups` under `/proc/<pid>`); `kernel/tree`,
+  `kernel/signal`, `kernel/socket`, `kernel/console`, `kernel/speaker`
+  have no diff. A process that is 1000 opens, removes, signals and
+  binds what root does: `mpx5-users` shows that the ids are kept, not
+  that anything is kept from them.
+- **The soak**: `ident soak 100000`, as root and as 1000:1000: a
+  million id calls and 10,000 children that drop their ids for good;
+  0 wrong answers; `/proc/meminfo`'s `MemFree` read at the start and at
+  each quarter is one number; the kernel's frames line the same before
+  the first program and after its end (U3, U4), on every leg.
+
+## F. Plants (item 6)
+
+| plant | break | red on kasumi | red in CI |
+|---|---|---|---|
+| A, branch `px39-plant-a` `958f650` | `setuid` and `setgid` by a user name any id (the unprivileged check removed) | `notes/px39/kasumi-plant-a.mpx5-users.out`: U1 at line 268, `(1000 1000 1000) setuid(0) = 0 -> 1000 0 1000 0 cap full`, 23 lines | run 38476629293, job 115568908234 (`mpx5-users`, the only suite chosen; `tier pr` red after it): `notes/px39/ci-38476629293-plant-a-mpx5-users.txt` |
+| B, branch `px39-plant-b` `c6f4bc7` | a fork's child starts as root (the record zeroed in `process.fork`) | `notes/px39/kasumi-plant-b.mpx5-users.out`: U1 at line 2,117, the first `u1000` row, 536 lines | run 38476633056, job 115568897498: `notes/px39/ci-38476633056-plant-b-mpx5-users.txt` |
+
+Both stop at the first boot (`stopped early`); U2, U3 and U5 of that
+boot stay green, so each plant reddens the one assertion that names
+its break.
+
+## What U2 (owners) should know
+
+- **The ids to stamp on a new inode are `cred.uid(a, cred.FS)` and
+  `cred.gid(a, cred.FS)`**, not the effective ids: `setfsuid` moves one
+  without the other, and `execve` makes them equal again.
+- **Group membership is "the file-system group id or any of
+  `cred.group(a, 0 .. ngroups)`"**; the list is sorted, so a search may
+  stop early. `cred` has a private `in_list`; make it `pub` rather than
+  write a second one.
+- **Privilege for a file is file-system user id 0** (R9), not the
+  effective id: `(0 1000 0)` after `setfsuid(0)` has root's file rights
+  with effective id 1000, and `(1000 0 1000)` after `setfsuid(1000)`
+  has none of them with effective id 0. Both states are in `ident`'s
+  `status` rows with Linux's masks.
+- `tests/mpx5-users.d/ids.pax` holds the `chown: to 1000:1000 -22`
+  line and the kernel's `refused: an owner or a group that is not
+  root` line (U2 in the test's `IDS_REFUSED`): when `R_OWNER` goes,
+  that line becomes Linux's and `IDS_LINUX_LINES` goes from 59 to 60.
+- `ident`'s `~owner` line holds `/proc/self/setgroups` to `0:0`; on
+  Linux a process's `/proc` files are its effective ids' (measured:
+  `1000:1000` for the user). When `/proc/<pid>` gets its owner the
+  line loses its `~`.
+- `user/elf/as.c` is the way to run anything as a user with no account
+  (`/bin/as 1000 1000 PROG …` in `/etc/pax-run`); px38's `perm` probe
+  drops by itself.
+- An image still cannot carry a file that is not root's (pax#48); the
+  set-ID copy in this suite's image is root's, mode 6755.
+- Until U3 lands, every suite passes as a user whatever the checks do.
+
+## 4. Evidence index
+
+Shas are this branch's (`px39`). kasumi paths are under
+`~/lanes/px39/`.
+
+### What was written
+
+- The prediction: `0d65e61` (§1 to §3, before any change).
+- The programs: `b4d4c41` (px38's `cred.c`, `ids.c`, `px38.h` copied
+  to `user/elf/`: `tests/mpx5-users` U0 holds them to
+  `notes/px38/probes/` byte for byte), `53a9b7f` (`ident.c`, `as.c`),
+  `950c358` (`tools/mkcred`).
+- The recorders: `3e4d7ab` (`notes/px39/vminit.c`, `linux-vm.sh`,
+  `build.sh`), `9932634` (`linux-ct.sh` and its three outputs).
+- The kernel: `8f83276` (`kernel/cred`), `59f915c` (`kernel/process`),
+  `e91e726` (`kernel/procfs`, `kernel/files`), `60f3fd3`
+  (`kernel/user`), `059e677` (the function that answers AT_SECURE
+  renamed `at_secure`: no behaviour moves, every kernel's bytes do, so
+  kasumi's and hasu's runs were taken again at it).
+- The suite: `022b77c` (`tests/mpx5-users`, the recordings, `ids.pax`),
+  `ae80ea3` (the CI job, the map, `tests/ci-plan`).
+- The words: `c793209` (`docs/SOURCES.md`), `d43ddea` (CHANGELOG),
+  `c1fe39f` (`kernel/README.md`).
+
+### What was measured, and where it is
+
+- **Linux, real root**: `tests/mpx5-users.d/linux/` (seven sessions,
+  their exit statuses, `vm.meta`: the kernel image's digest, QEMU's
+  version, each program's digest). `cred.txt` is px38's
+  `notes/px38/linux/vm.txt` lines 77 to 2,760 to the byte (U0 compares
+  them at every run).
+- **Linux, a container's uid 1000**: `notes/px39/linux/ct/`.
+- **PAX**: `notes/px39/kasumi-mpx5-users-059e677.out` (four legs, 28
+  boots; kernels `24f9bf0a…` native, `599c7229…` release),
+  `kasumi-taskset-0-3-mpx5-users-059e677.out`, `hasu-kvm-059e677.log`;
+  at the earlier kernel (`ad579536…`), `kasumi-mpx5-users-ae80ea3.out`
+  and `hasu-kvm-211b095.log`; CI run 38474383913 at `ae80ea3` (`tier
+  pr`, 30 suites on native BIOS, all green).
+- **The plants**: §F.
+- The pull request's own runs at its head (the pr tier, then the
+  labelled full run) are named in the PR, since a commit naming them
+  would move the head.
+
+### Measured, inferred, not verified
+
+**Measured**: everything in §A to §F.
+
+**Inferred**: that a C library which repeats a `set*id` call in every
+thread is unharmed by per-process ids (reasoned from the model, call
+by call; no threaded program that drops privilege was run on PAX);
+that the capability masks are a function of the ids alone (argued in
+§C from what PAX lacks; every measured state agrees, and a state Linux
+could reach only through `capset` or a set-ID file was not looked
+for); that words 160 to 201 of the area are free (every `get` and
+`put` of an area in `kernel/` was read; nothing mechanical holds it).
+
+**Not verified**:
+
+- Real root was measured on one kernel build (kasumi's CachyOS 7.2.8);
+  the AT_SECURE and dumpable rules at `execve` are that build's
+  answers. The CI runner's Linux was not asked.
+- The other 29 suites did not run on kasumi or under KVM: CI only.
+- UEFI under KVM (hasu): above.
+- `PR_SET_DUMPABLE`, `PR_SET_KEEPCAPS`, `PR_SET_NO_NEW_PRIVS`,
+  `PR_SET_SECUREBITS` are -EINVAL on PAX (not asked of Linux here; a
+  program that sets one is told no).
+- More than one thread changing ids at once; a `set*id` call racing an
+  `execve` in another thread.
+- The 32-group bound against a real program (`su` passes two).
+- A set-ID file was run from the initramfs only (PAX runs no program
+  written since boot).
+
+### Issues
+
+- **To close at merge**: pax#49 (`prctl(PR_GET_NO_NEW_PRIVS)` and
+  `(PR_GET_SECUREBITS)` answer 0; `ident`'s and `ids`' `prctl` rows).
+- **Not this lane's, still open**: pax#48 (U2).
+- **Would file (none filed)**:
+  1. pax: ids are per process, Linux's are per thread (named in
+     `kernel/cred` and held by `~thread`): a note for whoever ports a
+     program that relies on a thread having ids of its own.
+  2. pax: `PR_SET_DUMPABLE` and the other three setters are -EINVAL.
+- Two trunk flakes were not chased and did not occur: pax#45, pax#47.
+
+## 5. Done-when
+
+- Branch `px39` on origin; pax PR #52, open, unmerged.
+- The five sections §1 to §5; the six items §A to §F.
+- The test checklist:
+  - [x] `tests/mpx5-users`, native and release, BIOS and UEFI, kasumi (TCG)
+  - [x] the same under `taskset -c 0-3`
+  - [x] the same images under KVM on hasu (BIOS)
+  - [x] `tests/ci-plan` (two new cases)
+  - [x] plant A red on kasumi and in CI; plant B the same
+  - [x] all 30 suites on the pr leg in CI
+  - [ ] all 30 suites on every leg (`tier full`) at the head: named in the PR
+- `wolf/tools/lane-audit.sh pax px39 52` exit 0: named in the PR.
+- Close pax#49 at merge; nothing filed.
+- Trees: kasumi `~/lanes/px39/` keeps `out/` and `bin/`; build
+  directories removed. hasu `~/lanes/px39/` keeps `out/`. Plant
+  branches `px39-plant-a` and `px39-plant-b` stay on origin, never to
+  be merged; their local worktrees are removed.
+
