@@ -236,7 +236,7 @@ Read from `kernel/` at `89f04a9`, then booted: the kernel built by the
 tree's own tools at its own pin (wolf 0.2.28), `kmain_console`, native
 tier, BIOS, QEMU 11.1.1 TCG on kasumi, the probe the first program
 (`notes/px38/pax-boot.sh`; kernel `f095f5df…`; `pax/pax-ids.meta`,
-`pax/pax-priv.meta`). The same binaries ran on Linux (`linux/vm.txt`).
+`pax/pax-priv.meta`; and again at `c3e3fc2`, §4). The same binaries ran on Linux (`linux/vm.txt`).
 
 **Where a process's identity could live.** Nowhere today. The process
 area (`sched.PROC_AREA`, 40,960 bytes a slot, in `boot/sched.S`'s
@@ -732,30 +732,44 @@ told the truth in Linux's words. `capget` stays -ENOSYS.
 Shas are this branch's (`px38`). kasumi paths are under
 `~/lanes/px38/`.
 
+**The rebase.** Trunk moved to `c3e3fc2` (px35 merged: `kernel/arp`,
+`kernel/net`, `kernel/virtio`, two tools, three tests) after the first
+green run, and the branch was rebased onto it so the PR fast-forwards.
+The shas below are the rebased ones; the history before it is kept on
+origin as `px38-prerebase` (its head is the commit the first two CI
+runs name). The rebase changed no file of this lane. Because the
+kernel's sources moved, PAX was booted again at `c3e3fc2` with both
+probes: the programs' lines are the same to the byte, and the kernel's
+own lines the same but for one scheduling count (`after 2 runs` for
+`after 1 runs`). The files under `pax/` are that second boot's (kernel
+`cf27ed83…`); the first boot's, at `89f04a9` (kernel `f095f5df…`), are
+in commits `1f8e930` and `18f69bb`.
+
 ### What was written
 
-- The prediction: `3f1c5d1` (§1 to §3, before any measurement).
-- The probes: `2e7568d` (`ids`, `cred`, `perm`, `setid`, `sig`,
-  `vminit`), `1c5e2ae` (`priv`), `d98aec7` (the AF_UNIX and held rows);
-  the runs as they stand were taken with the probes at `d0f53eb`
+- The prediction: `d87eff6` (§1 to §3, before any measurement).
+- The probes: `b533ff5` (`ids`, `cred`, `perm`, `setid`, `sig`,
+  `vminit`), `18f69bb` (`priv`), `eb07e24` (the AF_UNIX and held rows);
+  the runs as they stand were taken with the probes at `f9092b0`
   (`linux/build.txt`).
-- The runners: `2ae3f83` (`vm-run.sh`, `ct-run.sh`, `pax-boot.sh`),
-  `08c8a8c` (`run-all.sh`).
-- The models: `963079c` (`check-cred.py`), `08c8a8c`
+- The runners: `19691c7` (`vm-run.sh`, `ct-run.sh`, `pax-boot.sh`),
+  `17a4a56` (`run-all.sh`).
+- The models: `1ac7c55` (`check-cred.py`), `17a4a56`
   (`check-perm.py`, `check-sig.py`).
-- The tools' traces: `5cd2db2` (`strace-tools.sh`,
+- The tools' traces: `b31f7c7` (`strace-tools.sh`,
   `strace-tools-run.sh`, `pty-type.py`, `strace-summary.py`,
   `straces/`). The hashes in the kept traces were cut by the
   expression `strace-tools-run.sh` ends with.
 
 ### What was measured, and where it is
 
-- **PAX at `89f04a9`** (the tree of this branch, whose `kernel/`,
-  `boot/`, `tools/` and `user/` are trunk's): `pax/pax-ids.txt` (71
-  lines), `pax/pax-ids.kernel.txt` (the kernel's -ENOSYS and refusal
-  lines), `pax/pax-priv.txt`, `pax/pax-priv.kernel.txt`; the kernel
-  `f095f5df…`, wolf 0.2.28 pin `f71ece8`, QEMU TCG (`pax/*.meta`).
-  `qemu-halt` exit 0 on both boots: the machine halted.
+- **PAX at `89f04a9` and again at `c3e3fc2`** (the tree of this
+  branch, whose `kernel/`, `boot/`, `tools/` and `user/` are trunk's):
+  `pax/pax-ids.txt` (71 lines), `pax/pax-ids.kernel.txt` (the kernel's
+  -ENOSYS and refusal lines), `pax/pax-priv.txt`,
+  `pax/pax-priv.kernel.txt`; wolf 0.2.28 pin `f71ece8`, QEMU TCG
+  (`pax/*.meta`). `qemu-halt` exit 0 on all four boots: the machine
+  halted.
 - **Linux 7.2.8-1-cachyos, three ways**: `linux/vm.txt`
   (`17227722…`), `linux/vm-protected.txt` (`0876f64d…`),
   `linux/ct.txt` (`3586b261…`), 3,400 lines each; `linux/*.meta` (the
