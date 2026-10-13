@@ -59,7 +59,7 @@ int main(void)
         say("=== px38 vm: fs.suid_dumpable %s\n", b);
     }
     char *w = strstr(cmd, "px38=");
-    const char *want = w ? w + 5 : "ids,cred,perm,setid,sig";
+    const char *want = w ? w + 5 : "ids,cred,perm,setid,sig,priv";
     char list[256];
     snprintf(list, sizeof list, "%s", want);
     list[strcspn(list, " \n")] = 0;
@@ -69,6 +69,7 @@ int main(void)
         else if (!strcmp(t, "perm")) { mkdir("/t/perm", 0777); run("/perm", "/t/perm", NULL); }
         else if (!strcmp(t, "setid")) { mkdir("/t/setid", 0777); mkdir("/tn/setid", 0777); run("/setid", "/t/setid", "/tn/setid"); }
         else if (!strcmp(t, "sig")) { mkdir("/t/sig", 0777); run("/sig", "/t/sig", NULL); }
+        else if (!strcmp(t, "priv")) { mkdir("/t/priv", 0777); run("/priv", "/t/priv", NULL); }
     }
     say("=== px38 vm: done\n");
     sync();
