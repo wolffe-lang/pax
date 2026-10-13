@@ -5,7 +5,10 @@ Contract: px37's, `sprints/pax/37-the-ci-tiers/` in wolffe-lang/wolf
 (px32 merged); rebased onto `feba3fc` (px25 merged, which added
 `mpx4-lobo`: 29 suites since), then once more onto `c86ba5e` (px33 and
 px33b merged: `user/play/parts-test/replay`, read by mpx3-orchestra,
-falls under `user/play/*`, sound's four suites; `tests/ci-plan` P2).
+falls under `user/play/*`, sound's four suites; `tests/ci-plan` P2),
+and onto `89f04a9` (px36 merged: `user/console/shell-changes.keys` is
+mpx3-tree's by the test's own text, with the other suites that read
+`user/console`; P2).
 
 One deliverable: pax CI in tiers, with no loss of coverage before a
 merge to trunk. Measured on 2026-10-12 a green run was 28 jobs and 251
@@ -93,7 +96,7 @@ whole package.
 | prose, and a hand-run probe | `notes/`, `*.md`, `LICENSE*`, `tools/tw-probe` | none |
 | everything else | derived from the tests' text (kmains, tools, user programs, Limine configurations, key files) | the suites that read it |
 
-Each of the 2,136 tracked paths at `c86ba5e` plus px37 is known to the map or read
+Each of the 2,281 tracked paths at `89f04a9` plus px37 is known to the map or read
 by a suite (`tests/ci-plan` P5). A new file in a new place is FULL until
 a rule names it.
 
