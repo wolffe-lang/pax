@@ -80,7 +80,7 @@
 //!   deadline, kernel/sched's `sleep_current`), `uname` (63, "PAX"),
 //!   `prctl` (157) PR_GET_NAME, `prlimit64` (302, read-only: the stack
 //!   PAX gives, kernel/files' descriptors, the rest unlimited), `getuid`, `getgid`,
-//!   `geteuid`, `getegid` (0).
+//!   `geteuid`, `getegid` (0 until px39).
 //! - processes (px14, kernel/process and kernel/sched): `clone` (56),
 //!   `clone3` (435) and `vfork` (58) with CLONE_VM|CLONE_VFORK, `execve`
 //!   (59), `wait4` (61), `waitid` (247), `getpid` (39), `getppid` (110),
@@ -147,6 +147,17 @@
 //!   `chown`, `fchown`, `lchown`, `fchownat`, `utimensat`, `utimes`,
 //!   `utime` (-EOPNOTSUPP). After a call, kernel/tree's lines: the
 //!   books at every 2500th file removed, and the tree at its cap.
+//! - who the process is (px39, kernel/cred: the first lane of the users
+//!   campaign): `getuid` (102), `getgid` (104), `geteuid` (107),
+//!   `getegid` (108) answer the process's own ids, and `setuid` (105),
+//!   `setgid` (106), `setreuid` (113), `setregid` (114), `getgroups`
+//!   (115), `setgroups` (116), `setresuid` (117), `getresuid` (118),
+//!   `setresgid` (119), `getresgid` (120), `setfsuid` (122), `setfsgid`
+//!   (123) follow Linux's rules for root and for a user; `prctl` answers
+//!   PR_GET_DUMPABLE, PR_GET_KEEPCAPS, PR_GET_SECUREBITS and
+//!   PR_GET_NO_NEW_PRIVS. **No other call asks who the caller is**: no
+//!   file, signal, port or device is refused to anyone on that ground
+//!   yet. `capget`, `capset` and the process-group calls stay -ENOSYS.
 //! Every other number is -ENOSYS, logged once per program (`unknown`),
 //! among them `set_robust_list` (273) and `rseq` (334), which glibc
 //! tolerates (px09's hello asks `_sysctl` (156), which Linux answers
@@ -199,6 +210,7 @@
 
 use boot_info
 use console
+use cred
 use files
 use frames
 use futex
@@ -855,6 +867,24 @@ const SYS_RENAMEAT2: u64 = 316
 const SYS_FACCESSAT2: u64 = 439
 const SYS_FCHMODAT2: u64 = 452
 const AT_REMOVEDIR: u64 = 0x200
+// px39: the credentials (kernel/cred): the twelve numbers px38's traces
+// and probes hold.
+const SYS_SETUID: u64 = 105
+const SYS_SETGID: u64 = 106
+const SYS_SETREUID: u64 = 113
+const SYS_SETREGID: u64 = 114
+const SYS_GETGROUPS: u64 = 115
+const SYS_SETGROUPS: u64 = 116
+const SYS_SETRESUID: u64 = 117
+const SYS_GETRESUID: u64 = 118
+const SYS_SETRESGID: u64 = 119
+const SYS_GETRESGID: u64 = 120
+const SYS_SETFSUID: u64 = 122
+const SYS_SETFSGID: u64 = 123
+const PR_GET_DUMPABLE: u64 = 3 // uapi linux/prctl.h
+const PR_GET_KEEPCAPS: u64 = 7
+const PR_GET_SECUREBITS: u64 = 27
+const PR_GET_NO_NEW_PRIVS: u64 = 39
 // px24: readiness, and the rest wolf's hosted runtime and lobo ask.
 const SYS_POLL: u64 = 7
 const SYS_WRITEV: u64 = 20
@@ -951,7 +981,7 @@ fn refusal_line(nr: u64, r: u64) {
         log.put(socket.why(c)) // px22
         socket.detail(area(), c)
     } else {
-        log.put(if c < 16 { vm.why(c) } else if c < 32 { files.why(c) } else { process.why(c) })
+        log.put(if c < 16 { vm.why(c) } else if c < 32 { files.why(c) } else if c == cred.R_GROUPS { cred.why() } else { process.why(c) })
     }
     log.put(", -")
     num(0xffffffffffffffff - r + 1)
@@ -1008,8 +1038,9 @@ fn arch_prctl(code: u64, addr: u64) -> u64 {
 /// `prctl(option, arg2, …)`: PR_GET_NAME (the thread's name, at most 15
 /// bytes and a NUL, as Linux's 16-byte comm: the program's name until
 /// the thread sets one) and, px26, PR_SET_NAME (the thread's own, cut
-/// at 15 bytes); anything else -EINVAL.
-fn prctl(option: u64, arg2: u64) -> u64 {
+/// at 15 bytes); px39: PR_GET_DUMPABLE, PR_GET_KEEPCAPS,
+/// PR_GET_SECUREBITS and PR_GET_NO_NEW_PRIVS; anything else -EINVAL.
+fn prctl(option: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> u64 {
     let pml4 = paging.live()
     if option == PR_SET_NAME {
         var w0: u64 = 0
@@ -1035,6 +1066,20 @@ fn prctl(option: u64, arg2: u64) -> u64 {
         }
         sched.set_self_name(w0, w1)
         return 0
+    }
+    // px39: what a process may ask about its own privilege. PAX keeps
+    // no securebits, no no_new_privs and no keep-capabilities flag, and
+    // says so with Linux's answer for a process that set none (0;
+    // pax#49); dumpable is kernel/cred's.
+    if option == PR_GET_DUMPABLE {
+        return cred.dumpable(area())
+    }
+    if option == PR_GET_KEEPCAPS || option == PR_GET_SECUREBITS {
+        return 0
+    }
+    if option == PR_GET_NO_NEW_PRIVS {
+        // Linux wants every other argument 0 here, and only here (measured).
+        return if arg2 != 0 || arg3 != 0 || arg4 != 0 || arg5 != 0 { NEG_EINVAL } else { 0 }
     }
     if option != PR_GET_NAME {
         return NEG_EINVAL
@@ -1655,7 +1700,7 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
         return arch_prctl(a0, a1)
     }
     if nr == SYS_PRCTL {
-        return prctl(a0, a1)
+        return prctl(a0, a1, a2, a3, a4)
     }
     if nr == SYS_PRLIMIT64 {
         return prlimit(a0, a1, a2, a3)
@@ -1721,8 +1766,9 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     if nr == SYS_TKILL {
         return signal.tgkill(0, a0, a1, true)
     }
-    if nr == SYS_GETUID || nr == SYS_GETGID || nr == SYS_GETEUID || nr == SYS_GETEGID {
-        return 0
+    // px39: who the process is (kernel/cred), in a function of its own.
+    if nr == SYS_GETUID || nr == SYS_GETGID || nr == SYS_GETEUID || nr == SYS_GETEGID || nr == SYS_SETUID || nr == SYS_SETGID || nr == SYS_SETREUID || nr == SYS_SETREGID || nr == SYS_GETGROUPS || nr == SYS_SETGROUPS || nr == SYS_SETRESUID || nr == SYS_GETRESUID || nr == SYS_SETRESGID || nr == SYS_GETRESGID || nr == SYS_SETFSUID || nr == SYS_SETFSGID {
+        return id_calls(nr, a, pml4, r0, a1, a2)
     }
     // px27: the writable tree (kernel/files, kernel/tree).
     if nr == SYS_MKDIR {
@@ -1786,6 +1832,43 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     // px24: readiness (kernel/ready) and the gathered write, in a
     // function of their own (this one is long enough: wolf-lang#711).
     ready_calls(nr, a, pml4, a0, a1, a2, a3)
+}
+
+/// px39: the sixteen calls that read and change who the process is
+/// (kernel/cred, which holds the rules). No call here, and none
+/// anywhere yet, asks these ids whether something is allowed.
+fn id_calls(nr: u64, a: u64, pml4: u64, r0: u64, a1: u64, a2: u64) -> u64 {
+    if nr == SYS_GETUID {
+        return cred.uid(a, cred.REAL)
+    }
+    if nr == SYS_GETEUID {
+        return cred.uid(a, cred.EFFECTIVE)
+    }
+    if nr == SYS_GETGID {
+        return cred.gid(a, cred.REAL)
+    }
+    if nr == SYS_GETEGID {
+        return cred.gid(a, cred.EFFECTIVE)
+    }
+    if nr == SYS_SETUID || nr == SYS_SETGID {
+        return cred.setid(a, nr == SYS_SETUID, r0)
+    }
+    if nr == SYS_SETREUID || nr == SYS_SETREGID {
+        return cred.setre(a, nr == SYS_SETREUID, r0, a1)
+    }
+    if nr == SYS_SETRESUID || nr == SYS_SETRESGID {
+        return cred.setres(a, nr == SYS_SETRESUID, r0, a1, a2)
+    }
+    if nr == SYS_GETRESUID || nr == SYS_GETRESGID {
+        return cred.getres(a, pml4, nr == SYS_GETRESUID, r0, a1, a2)
+    }
+    if nr == SYS_SETFSUID || nr == SYS_SETFSGID {
+        return cred.setfs(a, nr == SYS_SETFSUID, r0)
+    }
+    if nr == SYS_GETGROUPS {
+        return cred.getgroups(a, pml4, r0, a1)
+    }
+    cred.setgroups(a, pml4, r0, a1)
 }
 
 /// px36: link, symlink, the modes, the owners and the times
