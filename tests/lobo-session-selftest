@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+# tests/lobo-session-selftest — px41: tools/lobo-session's own start held
+# to what pax#53 caught, on the host, with no guest booted.
+#
+# Run 38475501062 (mpx4-lobo, release bios diff) ended `lobo-session: no
+# serial socket` after ten seconds. Its steps.log has `forwards:
+# 55403->8081, 42365->8082, 50483->8083, 50041->8084, 50483->8090`: the
+# tool asked the kernel for a free port once a forward, closing each
+# socket before asking again, and was answered 50483 twice. QEMU refuses
+# the second forward and ends in 30 ms; the tool never looked at QEMU,
+# tried for ten seconds to reach a console that would never open, and
+# named the console. Measured on kasumi (notes/px41): one port twice in
+# 1,113 of 1,000,000 rounds of six calls, 707 of five, 78 of two.
+#
+#   W1 the ports of one session are all different: 200,000 rounds of six
+#      (five forwards and the console's), no port twice in a round. The
+#      old way repeats in about 220 of them.
+#   W2 a QEMU that ends before its console is up fails the session at
+#      once, with QEMU's own words: a forward to a host port this test
+#      holds open makes the real QEMU refuse the rule and end; the tool
+#      exits 2 within 5 s, prints QEMU's line, and does not blame the
+#      console. (Skipped loudly without a QEMU; a failure when
+#      PAX_REQUIRE_QEMU=1, which CI sets.)
+#   W3 the console is a connection QEMU makes to the tool: a stand-in
+#      QEMU (this file, `--stand-in`) that connects to the address its
+#      `-serial tcp:` names, prints a prompt and echoes what is typed
+#      holds a three-step session; the tool exits 0.
+#   W4 a stand-in that never connects and never ends is given up on at
+#      the session's own deadline (`--timeout 3`), by name, exit 2: the
+#      wait is for the connection or QEMU's end, and the only clock is
+#      the one the session already has.
+#   W5 two forwards given one host port by hand (`G=H,G2=H`) are refused
+#      by name before anything is started, exit 2.
+#
+# Exit 0 when every check held, 1 otherwise.
+import os
+import re
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+
+sys.dont_write_bytecode = True
+here = os.path.dirname(os.path.abspath(__file__))
+tool = os.path.join(here, "..", "tools", "lobo-session")
+
+
+def stand_in(argv):
+    """A QEMU for W3 and W4: `--stand-in talk|mute QEMU-ARGS…`."""
+    mode = argv[0]
+    if mode == "mute":
+        time.sleep(600)
+        return
+    ser = argv[argv.index("-serial") + 1] if "-serial" in argv[:-1] else ""
+    m = re.match(r"tcp:127\.0\.0\.1:(\d+)$", ser)
+    if not m:
+        sys.stderr.write("stand-in: no `-serial tcp:127.0.0.1:PORT` to connect to\n")
+        sys.exit(1)
+    s = socket.create_connection(("127.0.0.1", int(m.group(1))))
+    s.sendall(b"$ ")
+    buf = b""
+    while True:
+        d = s.recv(4096)
+        if not d:
+            return
+        buf += d
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            if line.strip() == b"exit":
+                s.sendall(b"exit\r\nhalt\r\n")
+                time.sleep(600)
+            s.sendall(line + b"\r\nsaid " + line + b"\r\n$ ")
+
+
+if len(sys.argv) > 2 and sys.argv[1] == "--stand-in":
+    stand_in(sys.argv[2:])
+    sys.exit(0)
+
+fail = 0
+
+
+def say(msg):
+    print("lobo-session-selftest: " + msg, flush=True)
+
+
+def check(ok, what):
+    global fail
+    say(("PASS " if ok else "FAIL ") + what)
+    if not ok:
+        fail = 1
+
+
+def session(tmp, name, steps, forward, qemu=None, timeout=20):
+    """-> (exit status, seconds, output)."""
+    out = os.path.join(tmp, name)
+    sf = os.path.join(tmp, name + ".steps")
+    open(sf, "w").write(steps)
+    iso = os.path.join(tmp, "empty.iso")
+    open(iso, "wb").close()
+    cmd = [sys.executable, tool, "--pax", iso, "--steps", sf, "--out", out, "--forward", forward, "--timeout", str(timeout)]
+    if qemu:
+        cmd += ["--qemu", qemu]
+    t0 = time.time()
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        return r.returncode, time.time() - t0, (r.stdout + r.stderr).strip()
+    except subprocess.TimeoutExpired:
+        return -1, time.time() - t0, "still running after 60 s"
+
+
+with tempfile.TemporaryDirectory(prefix="lobo-selftest.", dir=os.environ.get("TMPDIR") or None) as tmp:
+    # W1
+    r = subprocess.run([sys.executable, tool, "--free-ports", "6", "200000"], capture_output=True, text=True)
+    m = re.search(r"(\d+) rounds of (\d+) ports, (\d+) with a port twice", r.stdout)
+    check(r.returncode == 0 and m is not None and m.group(1) == "200000" and m.group(3) == "0",
+          "W1 six ports a session, all different: %s" % ((r.stdout + r.stderr).strip() or "no answer (status %d)" % r.returncode))
+
+    # W2
+    qemu = os.environ.get("PAX_QEMU", "qemu-system-x86_64")
+    have = subprocess.run(["sh", "-c", "command -v %s" % qemu], capture_output=True).returncode == 0
+    if have:
+        held = socket.socket()
+        held.bind(("127.0.0.1", 0))
+        held.listen(1)
+        rc, secs, text = session(tmp, "w2", "wait ^never$ 5\n", "80=%d" % held.getsockname()[1])
+        held.close()
+        check(rc == 2 and secs < 5 and "Could not set up host forwarding rule" in text and "no serial socket" not in text,
+              "W2 QEMU's end before its console is the failure, at once and in QEMU's words: status %d after %.1f s: %s"
+              % (rc, secs, text.replace("\n", " | ")[-300:]))
+    elif os.environ.get("PAX_REQUIRE_QEMU") == "1":
+        check(False, "W2 no %s on this host and PAX_REQUIRE_QEMU=1" % qemu)
+    else:
+        say("SKIP W2: no %s on this host" % qemu)
+
+    # W3
+    me = os.path.join(tmp, "stand-in-talk")
+    open(me, "w").write("#!/bin/sh\nexec %s %s --stand-in talk \"$@\"\n" % (sys.executable, os.path.abspath(__file__)))
+    os.chmod(me, 0o755)
+    rc, secs, text = session(tmp, "w3", "wait ^\\$ $ 10\ntype hello\nwait ^said hello\\r?$ 10\ntype exit\nhalt 10\n", "80", qemu=me)
+    check(rc == 0, "W3 the console is QEMU's connection to the tool: a stand-in's three steps held: status %d after %.1f s%s"
+          % (rc, secs, (": " + text.replace("\n", " | ")[-300:]) if text else ""))
+
+    # W4
+    mute = os.path.join(tmp, "stand-in-mute")
+    open(mute, "w").write("#!/bin/sh\nexec %s %s --stand-in mute \"$@\"\n" % (sys.executable, os.path.abspath(__file__)))
+    os.chmod(mute, 0o755)
+    rc, secs, text = session(tmp, "w4", "wait ^\\$ $ 10\n", "80", qemu=mute, timeout=3)
+    check(rc == 2 and 2.5 < secs < 8 and "did not connect its console" in text,
+          "W4 a QEMU that never connects is given up on at the session's deadline, by name: status %d after %.1f s: %s"
+          % (rc, secs, text.replace("\n", " | ")[-300:]))
+
+    # W5
+    rc, secs, text = session(tmp, "w5", "wait ^never$ 5\n", "80=45001,81=45001", qemu=mute)
+    check(rc == 2 and secs < 2 and "45001" in text and "twice" in text,
+          "W5 one host port for two forwards is refused by name: status %d after %.1f s: %s" % (rc, secs, text.replace("\n", " | ")[-300:]))
+
+say("PASS" if not fail else "FAIL")
+sys.exit(fail)
