@@ -19,8 +19,10 @@
   P4  the wiring of .github/workflows/ci.yml: every suite job needs the
       plan and runs only when chosen; every test that takes a leg gets
       $PAX_LEGS and accepts --tier and --firmware; the `tier` job needs
-      every job; cancel-in-progress is for pull requests only; the
-      trunk push, the nightly and the label are triggers.
+      every job and runs unless cancelled; cancel-in-progress is for
+      pull requests only and every other run has a concurrency group
+      of its own run id; the trunk push, the nightly and the label are
+      triggers.
   P6  the verdict (`tools/ci-plan --verdict`, the `tier` job): green for
       a full run whose `legs` output is absent (GitHub drops an empty
       output; run 38344726280 was red on exactly that), for a pr run
@@ -224,6 +226,9 @@ say(sorted(tn) == sorted(["plan"] + SUITES) and "    if: ${{ !cancelled() }}" in
 say("        run: tools/ci-plan --verdict\n" in blocks["tier"] and "actions/checkout" in blocks["tier"],
     "P4 the tier job's check is tools/ci-plan --verdict")
 say("cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in wf, "P4 cancel-in-progress for pull requests only")
+group = re.search(r"^concurrency:\n  group: (.*)$", wf, re.M)
+say(group is not None and group.group(1).rstrip().endswith("|| format('ci-{0}-{1}', github.event_name, github.run_id) }}"),
+    "P4 a run that is no pull request's has a group of its own run id")
 say(re.search(r"^  push:\n    branches: \[trunk\]", wf, re.M) is not None, "P4 a push to trunk runs")
 say(re.search(r"^  schedule:\n(\s+#.*\n)*\s+- cron: ", wf, re.M) is not None, "P4 the nightly runs")
 say("types: [opened, synchronize, reopened, labeled]" in wf, "P4 adding a label starts a run")
