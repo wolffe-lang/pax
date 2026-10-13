@@ -1,0 +1,129 @@
+start: uid 1000 1000 1000 1000 | gid 1000 1000 1000 1000 | groups  | CapPrm 0000000000000000 CapEff 0000000000000000 | AT_UID 1000 AT_EUID 1000 AT_GID 1000 AT_EGID 1000 AT_SECURE 0 | dumpable 1 | getresuid (1000 1000 1000) getresgid (1000 1000 1000)
+/proc/self/setgroups: mode 644
+~owner: /proc/self/setgroups is owned 1000:1000
+== the status lines and the getters, state by state
+status root: Uid:\t1000\t1000\t1000\t1000$
+status root: Gid:\t1000\t1000\t1000\t1000$
+status root: Groups:\t $
+status root: CapInh:\t0000000000000000$
+status root: CapPrm:\t0000000000000000$
+status root: CapEff:\t0000000000000000$
+status root: CapBnd:\t000001ffffffffff$
+status root: CapAmb:\t0000000000000000$
+status root: NoNewPrivs:\t0$
+get root: getuid 1000 geteuid 1000 getgid 1000 getegid 1000 | getresuid 0 (1000 1000 1000) | getresgid 0 (1000 1000 1000) | getgroups(0) 0, getgroups(40) 0 ()
+status root, groups 2000 2001: cannot (-1)
+status (1000 1000 1000) gid (2000 2000 2000) groups 7: cannot (-1)
+status (1000 1001 1002) gid (2000 2001 2002): cannot (-1)
+status (1000 0 1000), fs 1000: cannot (-1)
+status (0 1000 0), fs 0: cannot (-1)
+status (1000 1000 0): cannot (-1)
+status (0 1000 1000): cannot (-1)
+status (1000 1000 0), fs 0: cannot (-1)
+== a pointer the caller cannot use (8: nothing is mapped there; text: mapped, not writable)
+fault: getresuid(8, &e, &s) = -14 (e 77 s 77)
+fault: getresuid(&r, 8, &s) = -14 (r 1000 s 77)
+fault: getresuid(&r, &e, 8) = -14 (r 1000 e 1000)
+fault: getresuid(&r, &e, text) = -14 (r 1000 e 1000)
+fault: getresuid(&x, &x, &x) = 0 (x 1000)
+fault: getresgid(8, &e, &s) = -14 (e 77 s 77)
+fault: getresgid(&r, 8, &s) = -14 (r 1000 s 77)
+fault: getresgid(&r, &e, 8) = -14 (r 1000 e 1000)
+fault: getresgid(&r, &e, text) = -14 (r 1000 e 1000)
+fault: getresgid(&x, &x, &x) = 0 (x 1000)
+fault: with setgroups(2, {2000, 2001}) = -1, getgroups(0, NULL) = 0: getgroups(2, 8) = 0, getgroups(2, text) = 0, getgroups(0, 8) = 0, getgroups(1, 8) = 0, getgroups(0x100000004, list) = 0 (77 77 77)
+fault: setgroups(2, 8) = -1, setgroups(0, 8) = -1, then getgroups(0, NULL) = 0; setgroups(0x100000001, {2000}) = -1, then groups ''
+fault: setgroups(-1, list) = -1, setgroups(65537, 8) = -1, setgroups(1, NULL) = -1
+== an id argument is 32 bits of its register
+width: setuid(0x1000003e8) = 0 -> 1000 1000 1000 1000
+width: setgid(0x1000007d0) = -1 -> 1000 1000 1000 1000
+width: setreuid(0x1ffffffff, 0x1000003e8) = 0 -> 1000 1000 1000 1000
+width: setresuid(0x1ffffffff, 0x1000003e8, 0x1ffffffff) = 0 -> 1000 1000 1000 1000
+width: setresgid(0x1000007d0, 0x1ffffffff, 0x1ffffffff) = -1 -> 1000 1000 1000 1000
+width: setfsuid(0x1000003e8) = 1000 -> 1000 1000 1000 1000
+width: setfsgid(0x1000007d0) = 1000 -> 1000 1000 1000 1000
+width: setuid(4294967295) = -22 -> 1000 1000 1000 1000
+width: setfsuid(4294967295) = 1000 -> 1000 1000 1000 1000
+width: setuid(4294967294) = -1 -> 1000 1000 1000 1000
+width: setfsuid(4294967294) = 1000, then setfsuid(0) = 1000 -> 1000 1000 1000 1000
+== prctl, and which call clears dumpable (the caller's ids are 1000 and 1000: `me` and `mine`)
+prctl: PR_GET_DUMPABLE 1 PR_GET_KEEPCAPS 0 PR_GET_NO_NEW_PRIVS 0 PR_GET_SECUREBITS 0
+prctl: with a second argument of 1: PR_GET_DUMPABLE 1 PR_GET_KEEPCAPS 0 PR_GET_NO_NEW_PRIVS -22 PR_GET_SECUREBITS 0; with a fifth of 1: PR_GET_NO_NEW_PRIVS -22
+dump: setuid(me) = 0: dumpable 1 -> 1
+dump: setreuid(me, me) = 0: dumpable 1 -> 1
+dump: setreuid(-1, -1) = 0: dumpable 1 -> 1
+dump: setresuid(me, me, me) = 0: dumpable 1 -> 1
+dump: setresuid(-1, -1, -1) = 0: dumpable 1 -> 1
+dump: setfsuid(me) = 1000: dumpable 1 -> 1
+dump: setfsuid(-1) = 1000: dumpable 1 -> 1
+dump: setgid(mine) = 0: dumpable 1 -> 1
+dump: setregid(mine, mine) = 0: dumpable 1 -> 1
+dump: setresgid(mine, mine, mine) = 0: dumpable 1 -> 1
+dump: setfsgid(mine) = 1000: dumpable 1 -> 1
+dump: setgroups(0, NULL) = -1: dumpable 1 -> 1
+dump: setgroups(2, {2000, 2001}) = -1: dumpable 1 -> 1
+dump: setresuid(1000, -1, -1) = 0: dumpable 1 -> 1
+dump: setresuid(-1, 1000, -1) = 0: dumpable 1 -> 1
+dump: setresuid(-1, -1, 1000) = 0: dumpable 1 -> 1
+dump: setreuid(1000, -1) = 0: dumpable 1 -> 1
+dump: setreuid(-1, 1000) = 0: dumpable 1 -> 1
+dump: setuid(1000) = 0: dumpable 1 -> 1
+dump: setfsuid(1000) = 1000: dumpable 1 -> 1
+dump: setresgid(2000, -1, -1) = -1: dumpable 1 -> 1
+dump: setresgid(-1, 2000, -1) = -1: dumpable 1 -> 1
+dump: setresgid(-1, -1, 2000) = -1: dumpable 1 -> 1
+dump: setregid(2000, -1) = -1: dumpable 1 -> 1
+dump: setregid(-1, 2000) = -1: dumpable 1 -> 1
+dump: setgid(2000) = -1: dumpable 1 -> 1
+dump: setfsgid(2000) = 1000: dumpable 1 -> 1
+dump: setuid(-1) = -22: dumpable 1 -> 1
+dump: setresuid(-1, 1000, -1) = 0: dumpable 1; back, setresuid(-1, me, -1) = 0: dumpable 1
+== execve: what the new program is, and what it is told
+exec 0: cannot (-1 -1 0)
+exec 1: cannot (-1 -1 -1)
+exec 2: cannot (-1 -1 -1)
+exec 3: cannot (-1 -1 -1)
+exec 4: cannot (-1 -1 -1)
+exec 5: cannot (-1 -1 -1)
+exec 6: cannot (-1 -1 -1)
+exec 7: cannot (-1 -1 -1)
+exec 8: cannot (-1 -1 -1)
+exec 9: cannot (-1 -1 -1)
+exec 10: cannot (-1 -1 0)
+exec 11: cannot (-1 -1 0)
+exec 12: cannot (-1 -1 -1)
+exec 13: cannot (-1 -1 0)
+exec 14: cannot (-1 -1 0)
+exec 15: cannot (-1 -1 -1)
+exec 16: cannot (-1 -1 -1)
+exec 17: cannot (-1 -1 -1)
+exec 18: cannot (-1 -1 -1)
+exec 19: cannot (-1 -1 -1)
+exec 20: cannot (-1 -1 -1)
+exec 21: cannot (-1 -1 -1)
+exec 22: cannot (-1 -1 0)
+== execve of a set-ID file where the bits are not honoured
+setid: the file is mode 6755, owned 0:0
+setid as the caller before  : uid 1000 1000 1000 1000 | gid 1000 1000 1000 1000 | groups  | CapPrm 0000000000000000 CapEff 0000000000000000 | AT_UID 1000 AT_EUID 1000 AT_GID 1000 AT_EGID 1000 AT_SECURE 0 | dumpable 1 | getresuid (1000 1000 1000) getresgid (1000 1000 1000)
+setid as the caller execve'd: uid 1000 1000 1000 1000 | gid 1000 1000 1000 1000 | groups  | CapPrm 0000000000000000 CapEff 0000000000000000 | AT_UID 1000 AT_EUID 1000 AT_GID 1000 AT_EGID 1000 AT_SECURE 0 | dumpable 1 | getresuid (1000 1000 1000) getresgid (1000 1000 1000)
+setid as (1000 1000 1000): cannot (-1 -1 0)
+== a vfork child's ids are its own
+vfork: the child called setresuid(1000, 1000, 1000) and ended; the parent is 1000 1000 1000 1000
+== another process's status
+other: Uid:\t1000\t1000\t1000\t1000$
+other: Gid:\t1000\t1000\t1000\t1000$
+other: Groups:\t $
+other: CapPrm:\t0000000000000000$
+other: CapEff:\t0000000000000000$
+== ids and threads
+~thread: a second thread's raw setresuid(1000, 1000, 1000) = 0; the first thread's getuid is then 1000
+== the order that drops, and the order that does not
+drop: setgroups(2, {1000, 2000}) = -1, setgid(1000) = 0, setuid(1000) = 0 -> uid 1000 1000 1000 1000 gid 1000 1000 1000 1000 groups ''
+drop: then setuid(0) = -1, setgid(0) = -1, setgroups(0, NULL) = -1
+drop: the other way, setuid(1000) = 0, setgid(2000) = -1, setgroups(2, {1000, 2000}) = -1 -> uid 1000 1000 1000 1000 gid 1000 1000 1000 1000 groups ''
+== how many groups
+groups: setgroups(4, {9, 3, 5, 3}) = -1 -> ''
+groups: setgroups(32, {3000 down to 2969}) = -1, getgroups(40, list) = 0
+groups: Groups:\t $
+~bound: setgroups(33, list) = -1, then getgroups(0, NULL) = 0
+ident: done
