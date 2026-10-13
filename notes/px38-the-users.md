@@ -331,22 +331,24 @@ own kernel image, `f4c00d5d…`, booted under QEMU with
 them) and `linux/ct.txt` (`ct-run.sh`: root of a rootless podman
 container, `CapEff 00000000800405fb`, uid map `0 1000 1; 1 100000
 65536`, the host's settings: the four at 1, `fs.suid_dumpable` 2).
-3,400 lines each (ct's has one more header line). `check-cred.py`, `check-perm.py` and `check-sig.py`
-hold a written rule to 2,640, 210 and 102 of those lines a run and
+3,400 lines each (ct's has one more header line). `check-cred.py`,
+`check-perm.py` and `check-sig.py` hold a written rule to 2,640, 210 and 102 of those lines a run and
 find no exception on any of the three.
 
 **The two roots.** Every table below is vm's unless it says ct. ct
 differs from vm-protected in 99 lines (vm-protected from vm in 7:
-the protected rows), of these classes and no other:
+the protected rows), every one of them in one of these classes
+(counted; none is left over):
 
 | class | vm (real root) | ct (root of a user namespace) |
 |---|---|---|
 | an id with no mapping (70000; 4294967294) | `setuid`, `setgid`, `chown` 0 | -EINVAL |
 | a write, truncation, `O_TRUNC`, `pwrite`, `fallocate` or append **by root** to a set-ID file | the bits stay | cleared, as for a user (px36's row) |
 | `/proc/<pid>/environ`, `maps`, `auxv`, `io`, `exe`, `cwd`, `root` of another user's process, read by root | 0 | -EACCES |
-| `mknod` of a character device; a raw socket; `setpriority` below 0 | 0 | -EPERM, -EPERM, -EACCES |
+| `mknod` of a character device; a raw socket; `setpriority` below 0 (and one limit row that is the container's soft limit, not a rule) | 0 | -EPERM, -EPERM, -EACCES |
 | `dumpable` after an id change | 0 | 2 (the host's `fs.suid_dumpable`) |
-| capability masks, `/dev/null`'s owner (65534), `/proc`'s mount options | | |
+| capability masks (14 lines) | every capability | the container's set |
+| what the container is made of (28 lines): devices it has or lacks, its root directory and account files, mounts, process ids, `/dev/null` owned 65534 | | |
 
 So a container's root is a sound reference for every rule below about
 **users**, and an unsound one for what **root** may do to set-ID bits,
@@ -532,7 +534,7 @@ already answered and gains a check.
 |---|---|---|
 | `setsid` 112, `setpgid` 109, `getpgrp` 111, `getsid` 124 | `su`, `login`, the shell | the job-control lane's (ruling #69 R8, after pelt's sh16) |
 | `capget` 125, `capset` 126 | this lane's `setpriv` wrapper only | capabilities are out (§D); stay -ENOSYS |
-| `keyctl` 250, `getpriority` 140, `setpriority` 141, `alarm` 37, `pselect6` 270, `signalfd4` 289 | PAM, `script(1)` | Ubuntu's PAM stack and harness, which PAX does not run |
+| `keyctl` 250, `getpriority` 140, `setpriority` 141, `alarm` 37, `pselect6` 270, `signalfd4` 289 | PAM's modules, the password prompt's timeout in `su`, `passwd` and `login`, `script(1)` | Ubuntu's PAM stack and this lane's harness, which PAX does not run; a prompt with a timeout is px-U8's to ask for |
 | `statfs` 137, `fstatfs` 138, `lgetxattr` 192, `listxattr` 194 | glibc's and coreutils' SELinux and ACL lookups | PAX's tools are boreutils, which ask none of them |
 | `set_robust_list` 273, `rseq` 334 | glibc | -ENOSYS already, tolerated (px26) |
 
@@ -599,7 +601,7 @@ Sizes are the board's: S half a lane or less, M one lane, L more.
 day one (it needs nothing of PAX: Linux and macOS answer the calls
 already), because a release and three pin bumps stand between it and
 px-U6. bu-U and sh-U follow s-U's release. px-U6 needs px-U3 at least
-(a second account with no check is theatre) and reads best after
+(a second account means nothing before the checks exist) and reads best after
 px-U5. px-U7 closes.
 
 **Against job control.** Nothing in px-U1 to px-U6 needs a process
@@ -657,9 +659,9 @@ image this project publishes** — a new account is locked (`!`, as
 today.** Every existing image, session and test starts as pid 1 pelt,
 root; nothing moves. `su <user>` is how a user's shell starts; `login`
 exists as a program root may run, and an image may name it as its
-first program. A login prompt with no passwords behind it would claim
-a gate that is not there: whoever is at the console is root on any
-Unix until the disk is theirs to lock.
+first program. A login prompt with no password behind it would look
+like a gate and protect nothing: the person at the console controls
+the machine whatever the prompt says.
 
 **R3. The default account. — `pax`, uid 1000, gid 1000, group `pax`,
 home `/home/pax`, shell `/bin/pelt`; and a service account `lobo`, uid
@@ -676,8 +678,9 @@ OSS device left to measure a mode from.)
 that drops privilege without clearing root's groups keeps root's group
 rights. The saved id is one word and is what makes every row of the
 2,640 Linux's: without it PAX's `setuid` would follow a rule of its
-own that no Linux run could check. Bound the list (32 is NGROUPS in
-POSIX's sense; Linux takes 65,536) and refuse more by name.
+own that no Linux run could check. Bound the list (32, Linux's own
+limit before 2.6.4 by `getgroups(2)`; it takes 65,536 now, measured)
+and refuse more by name.
 
 **R5. Set-ID, given that PAX runs only the image's own programs. —
 Not honoured in the first cut: `execve` ignores the bits, as Linux
@@ -685,9 +688,9 @@ does on a `nosuid` mount (measured: ids unchanged, AT_SECURE 0).** The
 bits are still stored, listed and cleared by the measured rules, so
 every listing matches. With no passwords there is no honest use for a
 set-ID root program — `su` upward would be a door with no lock — so
-privilege only ever drops, and the oldest way up in Unix is closed
-rather than guarded. It also makes PAX's limit on running written
-files irrelevant to safety instead of load-bearing for it. Honoured
+privilege only ever drops: the usual route to gaining it does not
+exist, instead of existing and needing a guard. It also means PAX's
+limit on running written files is not what safety rests on. Honoured
 set-ID arrives with passwords, in px-U8, as one decision.
 
 **R6. The security claim. — "Enforced for honest programs; not a
@@ -703,11 +706,12 @@ slots; it runs on one CPU in a virtual machine.* The claim can grow
 only by a lane that tries to break it (a syscall fuzzer as a user, an
 audit of every user pointer), which is not in this sequence.
 
-**R7 (new). The protected settings. — On, all four, fixed.** Every
-distribution sets them, the CI runner's reference will have them (not
-measured here), and they are three rules whose rows are already taken
-(`linux/vm-protected.txt`). Off would make PAX match a Linux nobody
-runs.
+**R7 (new). The protected settings. — On, all four, fixed.** kasumi's
+distribution sets all four to 1 (measured), so a container reference
+there has them; the CI runner's were not measured and are expected to
+be on. They are three rules whose rows are already taken
+(`linux/vm-protected.txt`). Off would match the kernel's own default
+(`linux/vm.txt`) and no reference a PAX test will be compared with.
 
 **R8 (new). Where `su` and `login` live. — pax's `user/`, in wolf; the
 six identity tools in boreutils.** `id`, `whoami`, `groups`,
@@ -733,15 +737,16 @@ Shas are this branch's (`px38`). kasumi paths are under
 - The prediction: `3f1c5d1` (§1 to §3, before any measurement).
 - The probes: `2e7568d` (`ids`, `cred`, `perm`, `setid`, `sig`,
   `vminit`), `1c5e2ae` (`priv`), `d98aec7` (the AF_UNIX and held rows);
-  the runs as they stand were taken with the probes of this note's
-  own commit (`linux/build.txt`).
+  the runs as they stand were taken with the probes at `d0f53eb`
+  (`linux/build.txt`).
 - The runners: `2ae3f83` (`vm-run.sh`, `ct-run.sh`, `pax-boot.sh`),
   `08c8a8c` (`run-all.sh`).
 - The models: `963079c` (`check-cred.py`), `08c8a8c`
   (`check-perm.py`, `check-sig.py`).
 - The tools' traces: `5cd2db2` (`strace-tools.sh`,
   `strace-tools-run.sh`, `pty-type.py`, `strace-summary.py`,
-  `straces/`).
+  `straces/`). The hashes in the kept traces were cut by the
+  expression `strace-tools-run.sh` ends with.
 
 ### What was measured, and where it is
 
