@@ -119,12 +119,18 @@ int main(int argc, char **argv)
         while (fd >= 0 && k < (long)sizeof b - 1 && (r = read(fd, b + k, sizeof b - 1 - k)) > 0) k += r;
         if (fd >= 0) close(fd);
         b[k] = 0;
-        int found = 0;
+        /* the mount the directory is on: the longest mount point that is a prefix of its path */
+        char best[256] = "", bopt[256] = "";
         for (char *l = strtok(b, "\n"); l; l = strtok(NULL, "\n")) {
             char mp[256], opt[256];
-            if (sscanf(l, "%*d %*d %*s %*s %255s %255s", mp, opt) == 2 && strcmp(mp, argv[i]) == 0) { found = 1; say("mount: %s %s\n", mp, opt); }
+            if (sscanf(l, "%*d %*d %*s %*s %255s %255s", mp, opt) != 2) continue;
+            size_t n = strlen(mp);
+            if (strncmp(mp, argv[i], n) == 0 && (argv[i][n] == '/' || argv[i][n] == 0 || n == 1) && n >= strlen(best)) {
+                snprintf(best, sizeof best, "%s", mp);
+                snprintf(bopt, sizeof bopt, "%s", opt);
+            }
         }
-        if (!found) say("mount: %s is not a mount point of its own\n", argv[i]);
+        say("mount: %s is on %s, mounted %s\n", argv[i], best, bopt);
     }
 
     say("== execve of a set-ID file, by 1000:2000 with groups {2999}\n");
@@ -188,6 +194,7 @@ int main(int argc, char **argv)
     }
 
     say("== what takes the bits away (a file 1000:2000; `owner` is 1000 in group 2000, `other` is 1002, each with write permission)\n");
+    chmod(D, 0777); /* so that a rename or a new link is the actor's to make */
     static const unsigned M[] = { 06777, 04777, 02777, 02767, 06766 };
     for (unsigned m = 0; m < sizeof M / sizeof *M; m++) {
         bits("its owner", 1000, M[m], 0);

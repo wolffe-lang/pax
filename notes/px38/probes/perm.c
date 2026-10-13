@@ -187,8 +187,9 @@ static void chmod_row(long unused)
     (void)unused;
     const char *f = in("fm");
     long a = rc(SYS_chmod, (long)f, 0640, 0, 0, 0);
+    /* the file is 0644 to begin with, so anyone may open it to read: the answer is fchmod's, not open's */
     int fd = open(f, O_RDONLY);
-    long b = fd >= 0 ? rc(SYS_fchmod, fd, 0644, 0, 0, 0) : -(long)errno;
+    long b = fd >= 0 ? rc(SYS_fchmod, fd, 0644, 0, 0, 0) : 7000 + errno;
     if (fd >= 0) close(fd);
     long c = rc(SYS_chmod, (long)f, 04755, 0, 0, 0);
     unsigned mc = mode_of(f);
@@ -376,7 +377,7 @@ int main(int argc, char **argv)
 
     say("== D: chmod\n");
     for (int a = 0; a < NA; a++) {
-        put_file(in("fm"), "m\n", 0600, 1000, 2000);
+        put_file(in("fm"), "m\n", 0644, 1000, 2000);
         mkdir(in("dm"), 0755); chown(in("dm"), 1000, 2000); chmod(in("dm"), 0755);
         cur_actor = A[a].name;
         as(a, chmod_row, 0);
