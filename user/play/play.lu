@@ -67,12 +67,14 @@
 //! a pseudo-terminal answers -ENOTTY), so it runs unmodified on a Linux
 //! virtual console and on PAX's console; with none it says `play: no
 //! console speaker on descriptors 0-2` and exits 1. The call is kd.S's
-//! `play_kd`, the one routine wolf has no builtin for.
+//! `play_kd`; wolf has no builtin for it, nor for the clock and the
+//! absolute sleep beside it.
 //!
 //! **The time** is an absolute schedule: every note's start is the
-//! first note's start plus the lengths before it, read from the
-//! monotonic clock, and play sleeps only the difference, so no error
-//! accumulates. The speaker is silenced at the end of every note and
+//! first note's start plus the lengths before it, on the monotonic
+//! clock, and play sleeps to that time (`clock_nanosleep` with
+//! `TIMER_ABSTIME`, kd.S: px41), so no error accumulates and no tick
+//! between a clock read and a sleep can lengthen a note. The speaker is silenced at the end of every note and
 //! before every exit.
 
 /// The tunes' directory.
@@ -85,6 +87,8 @@ const KIOCSOUND: int = 0x4b2f
 const PIT_CENTI_HZ: int = 119318200
 
 extern "c" fn play_kd(fd: int, req: int, arg: int) -> int
+extern "c" fn play_now_ms() -> int
+extern "c" fn play_sleep_until_ms(t: int) -> int
 
 /// A checked note file: its notes' counts (0 a rest) and lengths, or
 /// the reason it is refused. A chord's slot (px29) keeps its first
@@ -427,17 +431,27 @@ fn tone(fd: int, n: int) {
     let _ = kd(fd, n)
 }
 
-/// Sleep until `t` milliseconds on the monotonic clock.
+/// The monotonic clock, in milliseconds (kd.S).
+fn now_ms() -> int {
+    // # Safety: kd.S's clock_gettime(2) into its own stack; no memory is
+    // passed.
+    unsafe { play_now_ms() }
+}
+
+/// Sleep until `t` milliseconds on the monotonic clock: a sleep to that
+/// time, not for the difference from a clock read here (px41, pax#45: a
+/// tick between that read and the kernel's lengthened the sleep by one,
+/// and the next pitch of an arpeggio was then held 0 ticks). A time
+/// already past returns at once.
 fn until(t: int) {
-    let now = time_now_ms()
-    if t > now {
-        time_sleep_ms(t - now)
-    }
+    // # Safety: kd.S's clock_nanosleep(2), the time in its own stack; no
+    // memory is passed.
+    let _ = unsafe { play_sleep_until_ms(t) }
 }
 
 /// Play `t` on `fd`'s speaker, on an absolute schedule.
 fn perform(fd: int, t: Tune) {
-    let t0 = time_now_ms()
+    let t0 = now_ms()
     var at = 0 // microseconds since t0
     var i = 0
     while i < t.counts.len {
