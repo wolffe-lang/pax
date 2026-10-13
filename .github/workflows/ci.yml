@@ -2212,7 +2212,17 @@ jobs:
           PAX_REQUIRE_UEFI: "1"
           PAX_ENGINE: docker
           PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
-        run: tests/mpx4-lobo --round 30 $PAX_LEGS
+        run: |
+          # PROBE (px41, pax#47; never merged): a kernel that prints the open-file table at every
+          # open of a /proc file, and the load session alone, release BIOS, six times over.
+          tests/mpx4-lobo --no-boot --tier release
+          for i in 1 2 3 4 5 6; do
+            tests/mpx4-lobo --images build/mpx4-lobo --round 30 --sessions load --tier release --firmware bios || true
+            mkdir -p build/probe47/$i
+            cp -r build/mpx4-lobo-release-bios-load build/mpx4-lobo-release-bios-load.check build/mpx4-lobo-release-bios-load.out build/probe47/$i/ || true
+            rm -rf build/probe47/$i/mpx4-lobo-release-bios-load/resp build/probe47/$i/mpx4-lobo-release-bios-load/backend
+          done
+          grep -a -h 'census [0-9] PAX' build/probe47/*/mpx4-lobo-release-bios-load.check || true
 
       - name: keep the programs' sums, the sessions on both sides, the runs
         if: always()
@@ -2234,6 +2244,7 @@ jobs:
             build/mpx4-lobo-*.out
             build/mpx4-lobo-*.check
             build/mpx4-lobo-runs.txt
+            build/probe47/
           retention-days: 14
           if-no-files-found: warn
 
