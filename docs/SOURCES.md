@@ -609,3 +609,20 @@ kernels: none consulted.
 | black-box Linux 7.2.8 (kasumi, a throwaway `px13-ubuntu` container as root, strace 6.8, every program on a tmpfs): `strace -f` of pax's own builds of boreutils `2ab3651` (`chmod`, `touch`, `ln`, `mkdir -m`, `cp -p`, and `ls -l`, `stat`, `readlink`, `cat`, `rm`, `mv` meeting links; `notes/px36/straces/`) | — | — | measured | the calls and flags bu22's binaries make: `chmod`, `utimensat` (UTIME_NOW, UTIME_OMIT, AT_SYMLINK_NOFOLLOW), `linkat`, `symlink`, `readlink`, `rename` over a temporary name |
 | black-box Linux: `user/elf/tree.c`'s px36 sections, pid 1 with its root a tmpfs in a throwaway container (`tools/linux-tree`) | — | pax's own | measured | what the man pages leave open: a link's `st_blocks` (none below a 128-byte target, eight from it), a link's atime moved by a walk through it and by `readlink`, root's `chown` clearing set-ID bits whatever ids were asked, -1 included, a new name with a trailing slash -ENOENT, O_NOFOLLOW with O_DIRECTORY -ENOTDIR, `fchmodat2`'s AT_SYMLINK_NOFOLLOW on a link -EOPNOTSUPP, both UTIME_OMIT leaving ctime, times before 1970 and past 2262 |
 | black-box Linux: `user/console/shell-changes.keys` typed into the same binaries (`tools/linux-tree`) | — | — | measured | the session's reference transcript, taken afresh at every run |
+
+## px39: the credentials (a process's ids and groups)
+
+No kernel's, libc's or file system's source was read or searched for,
+nor that of `su`, `login`, shadow-utils or util-linux. The rules are
+px38's model (`notes/px38/check-cred.py`, written from the man pages
+and held to px38's recorded rows) and black-box runs this lane took.
+Permissively licensed kernels: none consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| man-pages `credentials(7)`, `setuid(2)`, `setreuid(2)`, `setresuid(2)`, `setfsuid(2)`, `getresuid(2)`, `getgroups(2)` (NGROUPS_MAX "32 before Linux 2.6.4"), `execve(2)` (the saved set-user-ID copied from the effective), `capabilities(7)` ("Effect of user ID changes on capabilities"), `prctl(2)` and `PR_SET_DUMPABLE(2const)` (when the attribute is reset), `PR_GET_NO_NEW_PRIVS(2const)`, `getauxval(3)` (AT_SECURE), `proc_pid_status(5)` (`Uid`, `Gid`, `Groups`, the `Cap*` lines), `user_namespaces(7)` (`/proc/<pid>/setgroups`), `nptl(7)` (ids are per thread in the kernel) | man-pages 6.x | various free licences | read | the rules of `kernel/cred`; what to measure |
+| uapi headers in the sparse checkout: `arch/x86/entry/syscalls/syscall_64.tbl` (105, 106, 113 to 120, 122, 123), `linux/prctl.h` (PR_GET_DUMPABLE 3, PR_GET_KEEPCAPS 7, PR_GET_SECUREBITS 27, PR_GET_NO_NEW_PRIVS 39), `linux/auxvec.h` (AT_UID to AT_SECURE) | the sparse checkout's | GPL-2.0 WITH Linux-syscall-note | read | the numbers |
+| px38's recorded answers: `notes/px38/linux/vm.txt` (the `cred` section, 2,684 lines, real root of Linux 7.2.8 under QEMU) and `notes/px38/check-cred.py` | pax `fe7c05b` | pax's own | read; the recording is `tests/mpx5-users.d/linux/cred.txt` to the byte | the reference `kernel/cred` is held to |
+| black-box Linux 7.2.8-1-cachyos (kasumi's own kernel image booted under QEMU 11.1.1 with `notes/px39/vminit.c` as pid 1: root of the initial user namespace, every capability; `notes/px39/linux-vm.sh`): `user/elf/cred.c` again (byte-identical to px38's recording), the same after `as 1000 1000`, `user/elf/ident.c` as root and as 1000:1000, `user/elf/ids.c`, the soak | — | pax's own programs | measured (`tests/mpx5-users.d/linux/`, `vm.meta`) | what the man pages leave open: which call clears dumpable, dumpable and AT_SECURE at `execve` (the file-system ids and the group list enter into both), `CapPrm`, the `Groups:` line with no group, the order `getresuid` writes in, the order `setgroups` and `getgroups` check in, 32-bit ids, `prctl`'s other arguments, the mode of `/proc/self/setgroups` |
+| black-box Linux 7.2.8: the same programs as uid 1000 of a rootless podman container (`px13-ubuntu`; `notes/px39/linux-ct.sh`) | — | pax's own programs | measured (`notes/px39/linux/ct/`) | a second witness for a user's rows only; never a reference for root |
+
