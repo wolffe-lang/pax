@@ -7,6 +7,25 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Who a process is (px39).** The first lane of multi-user PAX: a
+  process has eight ids (real, effective, saved and file-system; user
+  and group) and up to 32 supplementary groups, kept over `fork` and
+  `execve` as Linux keeps them (`kernel/cred`). `setuid`, `setgid`,
+  `setreuid`, `setregid`, `setresuid`, `setresgid`, `getresuid`,
+  `getresgid`, `setfsuid`, `setfsgid`, `getgroups` and `setgroups`
+  follow Linux's rules for root and for a user; `getuid` and its three
+  answer from the record; `/proc/<pid>/status` prints the ids, the
+  groups and Linux's capability masks for them; the auxiliary vector's
+  AT_UID, AT_EUID, AT_GID, AT_EGID and AT_SECURE are the process's own;
+  `prctl` answers PR_GET_DUMPABLE, PR_GET_KEEPCAPS, PR_GET_SECUREBITS
+  and PR_GET_NO_NEW_PRIVS. px38's `cred` probe as the first program
+  writes 2,683 of the 2,684 lines the same program wrote as real root
+  of a Linux (the one is the 32-group bound), and all 3,983 lines after
+  first becoming uid 1000 (`tests/mpx5-users`). **Nothing is checked
+  against these ids yet**: no file, signal, port or device is refused
+  to anyone because of who asks, and a set-ID file's bits are not
+  honoured (`execve` never raises an id). The checks are the lanes that
+  follow.
 - **The file changes (px36).** A file can be changed after it is
   made, as Linux's tmpfs answers: hard links (`link`, `linkat`, link
   counts, a file kept while any name or descriptor holds it), symbolic
