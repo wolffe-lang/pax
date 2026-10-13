@@ -2271,27 +2271,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
+
       - name: every chosen suite succeeded, every other was skipped
         env:
           NEEDS: ${{ toJSON(needs) }}
-        run: |
-          python3 - <<'PY'
-          import json, os, sys
-          needs = json.loads(os.environ["NEEDS"])
-          plan = needs["plan"]
-          if plan["result"] != "success":
-              print("tier: the plan did not succeed (%s)" % plan["result"])
-              sys.exit(1)
-          out = plan["outputs"]
-          chosen = set(json.loads(out["suites"]))
-          print("tier %s, legs '%s', %d of %d suites" % (out["tier"], out["legs"], len(chosen), len(needs) - 1))
-          bad = 0
-          for job, r in needs.items():
-              if job == "plan":
-                  continue
-              want = "success" if job in chosen else "skipped"
-              ok = r["result"] == want
-              bad += not ok
-              print("  %-16s %-8s %s" % (job, r["result"], "ok" if ok else "WANTED " + want))
-          sys.exit(1 if bad else 0)
-          PY
+        run: tools/ci-plan --verdict
