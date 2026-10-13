@@ -7,9 +7,13 @@
 
 On PAX: QEMU boots ISO (q35, -cpu max, no audio, no display, the exit
 device at 0xf4, `-nic user,model=virtio-net-pci` with a `hostfwd` from a
-free port of this host's 127.0.0.1 to each guest port G), COM1 on a
-local socket: what the steps type goes to the guest's console, what the
-console says is DIR/console.log. On Linux: a throwaway container
+free port of this host's 127.0.0.1 to each guest port G), COM1 a
+connection QEMU makes to this tool, which listens before QEMU starts
+(`-serial tcp:127.0.0.1:<port>`): what the steps type goes to the
+guest's console, what the console says is DIR/console.log. A QEMU that
+ends before its console is up fails the session at once with its own
+last lines (DIR/qemu.log); the wait for the connection has no clock but
+the session's. On Linux: a throwaway container
 (`--network host`, nothing of the host mounted but a staging copy of
 TREE, which becomes /srv with every time 0 and owned by root, as
 tools/mkinitramfs writes an archive) runs `bash` with its standard
@@ -18,6 +22,14 @@ are TREE/bin's, on PATH. Each guest port G is the same free host port H
 on both: on Linux the configuration files under TREE/srv/conf have
 `@P<G>@` replaced by H, `@BACKEND@` by 127.0.0.1 (PAX's image was built
 with G and 10.0.2.2, QEMU's address for this host).
+
+The free ports of one session are all different (px41, pax#53): each
+is read from a socket bound to port 0, and every socket is held until
+the last is read. Asked one at a time, each socket closed before the
+next, the kernel answers one port twice in about one session of six
+ports in a thousand; QEMU then refuses the second forward and ends.
+`tools/lobo-session --free-ports N ROUNDS` counts it (tests/
+lobo-session-selftest W1).
 
 Steps, one a line (`#` comments). A line may start with `pax:` or
 `linux:` to run on that side only.
@@ -56,6 +68,28 @@ QEMU and the container are ended by their own pid and name, always.
 """
 import argparse, glob, json, os, re, shutil, socket, subprocess, sys, threading, time
 
+
+def free_ports(n):
+    """n TCP ports free on 127.0.0.1 now, all different: every socket is
+    held until the last port is read (pax#53)."""
+    socks = []
+    try:
+        for _ in range(n):
+            s = socket.socket()
+            s.bind(("127.0.0.1", 0))
+            socks.append(s)
+        return [s.getsockname()[1] for s in socks]
+    finally:
+        for s in socks:
+            s.close()
+
+
+if len(sys.argv) == 4 and sys.argv[1] == "--free-ports":
+    n_, rounds_ = int(sys.argv[2]), int(sys.argv[3])
+    twice = sum(1 for _ in range(rounds_) if len(set(free_ports(n_))) < n_)
+    print("%d rounds of %d ports, %d with a port twice" % (rounds_, n_, twice))
+    sys.exit(1 if twice else 0)
+
 ap = argparse.ArgumentParser()
 g = ap.add_mutually_exclusive_group(required=True)
 g.add_argument("--pax")
@@ -81,21 +115,27 @@ log = open(os.path.join(a.out, "steps.log"), "w", buffering=1)
 t_start = time.time()
 
 
-def free_port():
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    p = s.getsockname()[1]
-    s.close()
-    return p
-
+# COM1's listener first (PAX): held open from here until QEMU has
+# connected, so no forward below can be answered its port.
+con_srv = None
+if side == "pax":
+    con_srv = socket.socket()
+    con_srv.bind(("127.0.0.1", 0))
+    con_srv.listen(1)
 
 fwd = {}
-for gp in a.forward.split(","):
+asked = a.forward.split(",")
+free = iter(free_ports(sum(1 for gp in asked if "=" not in gp)))
+for gp in asked:
     if "=" in gp:  # G=H: a fixed host port (the maintainer's browser path)
         g_, h_ = gp.split("=")
         fwd[int(g_)] = int(h_)
     else:
-        fwd[int(gp)] = free_port()
+        fwd[int(gp)] = next(free)
+for h in sorted(set(fwd.values())):
+    if list(fwd.values()).count(h) > 1:
+        print("lobo-session: host port %d is given to two forwards (twice in --forward %s)" % (h, a.forward))
+        sys.exit(2)
 log.write("side: %s\nforwards: %s\n" % (side, ", ".join("%d->%d" % (h, gp) for gp, h in sorted(fwd.items()))))
 
 buf = bytearray()
@@ -119,14 +159,14 @@ def reader(stream):
 
 
 if side == "pax":
-    sp = free_port()
+    sp = con_srv.getsockname()[1]
     hf = ",".join("hostfwd=tcp:127.0.0.1:%d-:%d" % (h, gp) for gp, h in sorted(fwd.items()))
     cmd = [a.qemu, "-machine", "q35", "-cpu", "max", "-m", a.mem, "-accel", a.accel,
            "-display", "none", "-vga", "std", "-monitor", "none", "-parallel", "none", "-no-reboot",
            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
            "-drive", "file=%s,format=raw,media=cdrom,readonly=on" % a.pax, "-boot", "d",
            "-nic", "user,model=virtio-net-pci," + hf,
-           "-serial", "tcp:127.0.0.1:%d,server=on,wait=on" % sp]
+           "-serial", "tcp:127.0.0.1:%d" % sp]
     if a.firmware == "uefi":
         if not a.ovmf:
             print("lobo-session: --firmware uefi needs PAX_OVMF_CODE"); sys.exit(2)
@@ -140,14 +180,28 @@ if side == "pax":
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=open(os.path.join(a.out, "qemu.log"), "w"),
                             stderr=subprocess.STDOUT)
     open(os.path.join(a.out, "qemu.pid"), "w").write("%d\n" % proc.pid)
-    for _ in range(200):
+    # QEMU connects its COM1 here before the machine starts. Wait for
+    # that connection or for QEMU's end, whichever comes; the session's
+    # own deadline is the only clock (pax#53: ten seconds of connect
+    # tries hid a QEMU that had ended in 30 ms, and named the console).
+    con_srv.settimeout(0.05)
+    while ser is None:
         try:
-            ser = socket.create_connection(("127.0.0.1", sp))
-            break
-        except OSError:
-            time.sleep(0.05)
-    if ser is None:
-        proc.kill(); print("lobo-session: no serial socket"); sys.exit(2)
+            ser, _ = con_srv.accept()
+        except socket.timeout:
+            pass
+        if ser is None and proc.poll() is not None:
+            said = open(os.path.join(a.out, "qemu.log"), errors="replace").read().strip().splitlines()[-3:]
+            log.write("STOP: QEMU ended with status %s before its console was up\n" % proc.returncode)
+            print("lobo-session: QEMU ended with status %s before its console was up: %s" % (proc.returncode, " | ".join(said) or "(it said nothing)"))
+            sys.exit(2)
+        if ser is None and time.time() - t_start > a.timeout:
+            proc.kill(); proc.wait()
+            log.write("STOP: QEMU did not connect its console in %d s\n" % a.timeout)
+            print("lobo-session: QEMU did not connect its console in %d s (the session's deadline)" % a.timeout)
+            sys.exit(2)
+    con_srv.close()
+    ser.settimeout(None)
     threading.Thread(target=reader, args=(ser.makefile("rb", buffering=0),), daemon=True).start()
 
     def send(b):
