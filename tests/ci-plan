@@ -18,6 +18,11 @@
       $PAX_LEGS and accepts --tier and --firmware; the `tier` job needs
       every job; cancel-in-progress is for pull requests only; the
       trunk push, the nightly and the label are triggers.
+  P6  the verdict (`tools/ci-plan --verdict`, the `tier` job): green for
+      a full run whose `legs` output is absent (GitHub drops an empty
+      output; run 38344726280 was red on exactly that), for a pr run
+      and a noop; red for a chosen suite failed, skipped or cancelled,
+      a suite that ran unasked, a failed plan, a plan with no suites.
   P5  (a WARN, not a failure) every tracked path is known to the map or
       read by a suite; an unknown one makes its pull request full.
 
@@ -139,6 +144,39 @@ expect("P3 FULL beside a narrow change", plan(["kernel/tcp/tcp.lu", "kernel/sche
 expect("P3 no changed paths to read", plan(**pr), "full", SUITES)
 expect("P3 a diff git cannot take", plan(base="0" * 40, head="1" * 40, **pr), "full", SUITES)
 
+# --- P6 the verdict -----------------------------------------------------------------------
+def verdict(needs):
+    env = dict(os.environ, NEEDS=json.dumps(needs))
+    r = subprocess.run([PLAN, "--verdict"], capture_output=True, text=True, env=env)
+    return r.returncode, r.stdout + r.stderr
+
+
+def run_of(tier, chosen, results=None, legs=PR_LEGS):
+    outs = {"tier": tier, "suites": json.dumps(chosen)}
+    if legs:  # GitHub leaves an empty output out of `needs`
+        outs["legs"] = legs
+    n = {"plan": {"result": "success", "outputs": outs}}
+    for s in SUITES:
+        n[s] = {"result": "success" if s in chosen else "skipped", "outputs": {}}
+    n.update(results or {})
+    return n
+
+
+def vexpect(name, needs, want):
+    rc, text = verdict(needs)
+    say(rc == want, "P6 %s: exit %d%s" % (name, rc, "" if rc == want else " (wanted %d) %s" % (want, text.strip()[-200:])))
+
+
+vexpect("a green full run, its legs output absent", run_of("full", SUITES, legs=""), 0)
+vexpect("a green pr run of two suites", run_of("pr", ["mpx3-sound", "census"]), 0)
+vexpect("a noop run", run_of("noop", []), 0)
+vexpect("a chosen suite failed", run_of("full", SUITES, {"mpx1": {"result": "failure", "outputs": {}}}, legs=""), 1)
+vexpect("a chosen suite was skipped", run_of("pr", ["mpx3-sound"], {"mpx3-sound": {"result": "skipped", "outputs": {}}}), 1)
+vexpect("a chosen suite was cancelled", run_of("pr", ["mpx3-sound"], {"mpx3-sound": {"result": "cancelled", "outputs": {}}}), 1)
+vexpect("a suite ran unasked", run_of("pr", ["census"], {"mpx4-tcp": {"result": "success", "outputs": {}}}), 1)
+vexpect("the plan failed", {"plan": {"result": "failure", "outputs": {}}, "census": {"result": "skipped", "outputs": {}}}, 1)
+vexpect("the plan chose nothing readable", {"plan": {"result": "success", "outputs": {}}, "census": {"result": "skipped", "outputs": {}}}, 1)
+
 # --- P4 the wiring -------------------------------------------------------------------------
 wf = open(os.path.join(ROOT, ".github/workflows/ci.yml")).read()
 blocks = {}
@@ -162,6 +200,8 @@ for j in SUITES:
 tn = re.findall(r"^      - ([A-Za-z0-9_-]+)\s*$", blocks["tier"], re.M)
 say(sorted(tn) == sorted(["plan"] + SUITES) and "    if: ${{ !cancelled() }}" in blocks["tier"],
     "P4 the tier job runs unless cancelled and needs every job (%d of %d)" % (len(tn), len(SUITES) + 1))
+say("        run: tools/ci-plan --verdict\n" in blocks["tier"] and "actions/checkout" in blocks["tier"],
+    "P4 the tier job's check is tools/ci-plan --verdict")
 say("cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in wf, "P4 cancel-in-progress for pull requests only")
 say(re.search(r"^  push:\n    branches: \[trunk\]", wf, re.M) is not None, "P4 a push to trunk runs")
 say(re.search(r"^  schedule:\n(\s+#.*\n)*\s+- cron: ", wf, re.M) is not None, "P4 the nightly runs")
