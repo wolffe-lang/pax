@@ -5,6 +5,9 @@
 #
 #   tools/arp-check TUNE TIMELINE WAV
 #   tools/arp-check --tones TUNE     how many tones the file starts
+#   tools/arp-check --starts TUNE TIMELINE N
+#                                    N plays of TUNE, one after another:
+#                                    how each began (px41, below)
 #
 # From the file (play's own arithmetic, user/play/play.lu): every slot's
 # length and sounding time (the length less the gap, at least half of
@@ -29,6 +32,20 @@
 # pitch the order says comes next; the median heard step of each pitch
 # is within 30% of the arp time; and the slot's heard time is its
 # sounding time within 10% (QEMU renders about 3% short).
+#
+# --starts (px41, pax#45): the timeline of N plays of a tune that is one
+# chord, each play begun by the shell at whatever phase of a tick it
+# falls on. Every play's tones are the file's, count for count, and no
+# play's second pitch is started on the tick of its third: the first
+# step a tick long and the second held 0 ticks, which is what a tick
+# between a clock reading and a relative sleep did to trunk's play (9
+# of 600 plays on kasumi with no load added, 22 of 300 with the host
+# held to a quarter of the CPU it wanted, and three CI runs). Only that
+# is judged here: the first step is the one a play's phase decides. How
+# long each first step was held (three ticks; two when a tick fell
+# between play's first clock reading and its first tone) and the steps
+# after it are counted in the summary; the chord study above judges a
+# chord's steps.
 #
 # Prints `PASS <summary>` or `FAIL <reasons> | <summary>`; exit 0 either
 # way (the caller reads the word), 2 on a usage or format error.
@@ -128,9 +145,52 @@ def tones(sl):
     return out
 
 
+def starts(sl, timeline, n):
+    want = tones(sl)
+    ev = [l.split() for l in open(timeline) if l.startswith("event ")]
+    plays, cur = [], []
+    for e in ev:
+        if e[4] == "on":
+            cur.append((int(e[3]), int(e[5])))
+        elif cur:
+            plays.append(cur)
+            cur = []
+    bad = []
+    if len(plays) != n:
+        bad.append("%d plays in the timeline, not %d" % (len(plays), n))
+    first = {}
+    late = wrong = uneven = 0
+    shapes = {}
+    for p in plays:
+        if [c for _, c in p] != want:
+            wrong += 1
+            continue
+        h = [b[0] - a[0] for a, b in zip(p, p[1:])]
+        if h[1] == 0:
+            late += 1
+            k = " ".join(str(x) for x in h[:3])
+            shapes[k] = shapes.get(k, 0) + 1
+        else:
+            first[h[0]] = first.get(h[0], 0) + 1
+        if any(x != 2 for x in h[2:]):
+            uneven += 1
+    if wrong:
+        bad.append("%d plays whose tones are not the file's" % wrong)
+    if late:
+        bad.append("%d plays began a tick late and lost their second step (the first steps held %s ticks)"
+                   % (late, "; ".join("%s, %d times" % kv for kv in sorted(shapes.items()))))
+    summary = ("%d plays of %d tones: the first step held %s; a later step not 2 ticks in %d plays"
+               % (len(plays), len(want),
+                  ", ".join("%d ticks in %d" % kv for kv in sorted(first.items(), reverse=True)) or "nothing", uneven))
+    print(("FAIL " + "; ".join(bad) + " | " if bad else "PASS ") + summary)
+
+
 def main(argv):
     if len(argv) == 3 and argv[1] == "--tones":
         print(len(tones(slots(argv[2]))))
+        return
+    if len(argv) == 5 and argv[1] == "--starts":
+        starts(slots(argv[2]), argv[3], int(argv[4]))
         return
     if len(argv) != 4:
         die("usage: arp-check TUNE TIMELINE WAV")
