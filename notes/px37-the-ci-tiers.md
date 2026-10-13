@@ -8,7 +8,10 @@ px33b merged: `user/play/parts-test/replay`, read by mpx3-orchestra,
 falls under `user/play/*`, sound's four suites; `tests/ci-plan` P2),
 and onto `89f04a9` (px36 merged: `user/console/shell-changes.keys` is
 mpx3-tree's by the test's own text, with the other suites that read
-`user/console`; P2).
+`user/console`; P2), and last onto `c3e3fc2` (px35 merged:
+`tests/paxtcp-selftest`, a step of the mpx4-tcp job with no leg of its
+own, is mpx4-tcp's by that job's text and runs whenever mpx4-tcp does;
+mpx4-net's new renew step is part of its peer boot on every leg; P2).
 
 One deliverable: pax CI in tiers, with no loss of coverage before a
 merge to trunk. Measured on 2026-10-12 a green run was 28 jobs and 251
@@ -96,7 +99,7 @@ whole package.
 | prose, and a hand-run probe | `notes/`, `*.md`, `LICENSE*`, `tools/tw-probe` | none |
 | everything else | derived from the tests' text (kmains, tools, user programs, Limine configurations, key files) | the suites that read it |
 
-Each of the 2,281 tracked paths at `89f04a9` plus px37 is known to the map or read
+Each of the 2,312 tracked paths at `c3e3fc2` plus px37 is known to the map or read
 by a suite (`tests/ci-plan` P5). A new file in a new place is FULL until
 a rule names it.
 
