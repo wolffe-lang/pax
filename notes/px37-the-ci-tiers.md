@@ -103,8 +103,8 @@ a rule names it.
 `tests/ci-plan` (run first in the `plan` job) proves the tiers by event
 (P1), one change per area selecting its suites and nothing else (P2),
 FULL for the pins, the core, the harness, an unknown path and an
-unreadable diff (P3), the wiring of every job (P4), and the map's
-coverage of the tree (P5, a warning). Seen red: below, §5.
+unreadable diff (P3), the wiring of every job (P4), the map's
+coverage of the tree (P5, a warning), and the verdict (P6). Seen red: below, §5.
 
 ## 3. The legs: measured
 
@@ -191,6 +191,16 @@ and the verdict job, named `tier unplanned`, failed with "the plan did
 not succeed (failure)": a broken plan turns the run red, never into a
 quiet run of nothing. Every P1, P3, P4 and P5 check passed in the same
 run.
+
+The verdict job seen red on its own fault: the first labelled full run
+(38344726280, on `4675690`) had all 29 suites green on its second
+attempt (the first lost mpx1 to a 403 from the wolf release download,
+before any test ran) and `tier full` red: `KeyError: 'legs'`. GitHub
+leaves an output that is empty out of `needs`, and the full tier's legs
+are the empty string, so every full run's verdict would have failed;
+the pr tier's never did. The check moved into `tools/ci-plan --verdict`
+(each output read with a default) and `tests/ci-plan` P6 holds it to
+nine cases, that one first.
 
 The pull request's own runs (the pr tier, then the labelled full run)
 are named in the PR, since a commit naming them would move the head.
