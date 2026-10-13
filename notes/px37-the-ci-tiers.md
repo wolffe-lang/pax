@@ -3,7 +3,9 @@
 Contract: px37's, `sprints/pax/37-the-ci-tiers/` in wolffe-lang/wolf
 (read 2026-10-12). Branch `px37` in pax, cut from pax trunk `6316c51`
 (px32 merged); rebased onto `feba3fc` (px25 merged, which added
-`mpx4-lobo`: 29 suites since).
+`mpx4-lobo`: 29 suites since), then once more onto `c86ba5e` (px33 and
+px33b merged: `user/play/parts-test/replay`, read by mpx3-orchestra,
+falls under `user/play/*`, sound's four suites; `tests/ci-plan` P2).
 
 One deliverable: pax CI in tiers, with no loss of coverage before a
 merge to trunk. Measured on 2026-10-12 a green run was 28 jobs and 251
@@ -91,7 +93,7 @@ whole package.
 | prose, and a hand-run probe | `notes/`, `*.md`, `LICENSE*`, `tools/tw-probe` | none |
 | everything else | derived from the tests' text (kmains, tools, user programs, Limine configurations, key files) | the suites that read it |
 
-Each of the 2,091 tracked paths at `feba3fc` plus px37 is known to the map or read
+Each of the 2,136 tracked paths at `c86ba5e` plus px37 is known to the map or read
 by a suite (`tests/ci-plan` P5). A new file in a new place is FULL until
 a rule names it.
 
@@ -161,7 +163,7 @@ Both firmwares on the native tier would be 90.9 (+24).
 | network: `kernel/tcp/tcp.lu`, `tests/mpx4-tcp`, its note | 275 | 33.2 + plan + verdict ≈ 34 | 29 → 9 |
 | music: `user/play/parts.lu`, `tests/mpx3-orchestra`, its note | 275 | 14.9 + plan + verdict ≈ 16 | 29 → 6 |
 | notes only | 275 | plan + verdict ≈ 1 | 29 → 2 |
-| CI itself (this lane) | 275 | ≈ 68 | 31 |
+| CI itself (this lane) | 275 | ≈ 68; measured 62.0 (run 38297084222, on `feba3fc`) | 31 |
 | a FULL path (pin, core, harness) | 275 | 275 + plan + verdict | 31 |
 
 The planner over every open and recent PR, whole diff, in its own tree:
