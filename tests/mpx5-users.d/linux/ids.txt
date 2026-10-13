@@ -1,0 +1,71 @@
+ids: the calls, each as root, each a raw syscall
+ask: getuid()                   102 = 0
+ask: getgid()                   104 = 0
+ask: geteuid()                  107 = 0
+ask: getegid()                  108 = 0
+ask: getppid()                  110 = 1
+ask: setuid(0)                  105 = 0
+ask: setgid(0)                  106 = 0
+ask: setreuid(-1, -1)           113 = 0
+ask: setregid(-1, -1)           114 = 0
+ask: setresuid(-1, -1, -1)      117 = 0
+ask: setresgid(-1, -1, -1)      119 = 0
+ask: getresuid(&r, &e, &s)      118 = 0 (0 0 0)
+ask: getresgid(&r, &e, &s)      120 = 0 (0 0 0)
+ask: setfsuid(-1)               122 = 0
+ask: setfsgid(-1)               123 = 0
+ask: getgroups(0, NULL)         115 = 0
+ask: getgroups(4, list)         115 = 0 (first 77)
+ask: setgroups(1, {0})          116 = 0
+ask: setgroups(0, NULL)         116 = 0
+ask: capget(v3, self)           125 = 0 (effective 000001ffffffffff)
+ask: prctl(PR_GET_DUMPABLE)     157 = 1
+ask: prctl(PR_GET_KEEPCAPS)     157 = 0
+ask: prctl(PR_GET_NO_NEW_PRIVS) 157 = 0
+ask: prctl(PR_GET_SECUREBITS)   157 = 0
+ask: getpgrp()                  111 = 0
+ask: getpgid(0)                 121 = 0
+ask: getsid(0)                  124 = 0
+ask: setpgid(0, 0)              109 = 0
+ask: setsid()                   112 = 5039
+ids: the calls a user who is not root would be made by, each in a child
+ask: setuid(1000)               105 = 0
+ask: setgid(1000)               106 = 0
+ask: setreuid(1000, 1000)       113 = 0
+ask: setregid(1000, 1000)       114 = 0
+ask: setresuid(1000,1000,1000)  117 = 0
+ask: setresgid(1000,1000,1000)  119 = 0
+ask: setfsuid(1000)             122 = 0
+ask: setfsgid(1000)             123 = 0
+after setuid(1000) = 0: getuid 1000 geteuid 1000
+ids: what a process is told
+auxv: AT_UID 0 AT_EUID 0 AT_GID 0 AT_EGID 0 AT_SECURE 0
+status: Uid: 0 0 0 0
+status: Gid: 0 0 0 0
+status: Groups: 
+status: CapInh: 0000000000000000
+status: CapPrm: 000001ffffffffff
+status: CapEff: 000001ffffffffff
+status: CapBnd: 000001ffffffffff
+status: CapAmb: 0000000000000000
+status: NoNewPrivs: 0
+peer: SO_PEERCRED on a socketpair 0 (uid 0 gid 0)
+ids: what a file is said to belong to
+stat: /                      uid 0 gid 0 mode 41777
+stat: /bin                   -2
+stat: /dev/null              uid 0 gid 0 mode 20666
+stat: /proc                  uid 0 gid 0 mode 40555
+stat: /proc/self             uid 0 gid 0 mode 40555
+stat: /proc/self/status      uid 0 gid 0 mode 100444
+stat: /proc/1                uid 0 gid 0 mode 40555
+ids: whether anything checks (as root: Linux lets root past every check but one)
+made: a file is owned 0:0
+chown: to 1000:1000 0, then owned 1000:1000
+chown: back to 0:0 0
+mode 0000 file: open O_RDONLY 0, O_WRONLY 0, access(R_OK|W_OK) 0, access(X_OK) -13
+mode 0000 directory: stat of a name in it 0, a file made in it 0, opened to list 0
+execve by mode (7: it ran; 113: -EACCES): chmod 0644 0 then 113; chmod 0001 0 then 7; chmod 04755 0 then 7
+kill: kill(1, 0) 0, kill(getppid(), 0) 0
+accounts: /etc/passwd -2
+accounts: /etc/shadow -2
+ids: done

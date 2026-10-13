@@ -1,0 +1,392 @@
+#!/usr/bin/env bash
+# tests/mpx5-users — px39, the first lane of the users campaign: a
+# process has an identity. Static Linux programs run as the first
+# program on PAX, and every line they write is held to what the same
+# programs wrote on a real Linux, recorded (tests/mpx5-users.d/linux/):
+#
+#   - cred (user/elf/cred.c: px38's probe, byte for byte): every
+#     `set*id` call from six user-id states and four group-id states
+#     over six values each, the groups, `fork` and `execve`: 2,684
+#     lines as root;
+#   - the same program run by a process that first became 1000:1000
+#     with no supplementary group (user/elf/as.c): 3,983 lines;
+#   - ident (user/elf/ident.c), as root and as 1000:1000: the status
+#     lines byte by byte, the getters, bad pointers, 32-bit ids, which
+#     call clears dumpable, 23 `execve`s and what each new program is
+#     told, a set-ID file not honoured, a vfork child, another
+#     process's status, the order that drops, 32 groups and 33;
+#   - ids (user/elf/ids.c: px38's): every identity call once as root;
+#   - `ident soak 100000`, as root and as 1000:1000: a million id calls
+#     and 10,000 children that change their ids.
+#
+#   tests/mpx5-users [--images DIR | --no-boot | --only build] [--bin DIR]
+#                    [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# **The reference is a recording, and each row says which.** Root's
+# rows are compared with the real root of a Linux kernel booted under
+# QEMU with the program a child of pid 1 (the `vm` root of
+# notes/px38-the-users.md: every capability, the initial user
+# namespace); a rootless container's root is not a reference for what
+# root may do, and is not used. The user's rows are compared with the
+# same boot after `as 1000 1000` (a rootless container as uid 1000
+# agrees, notes/px39-the-credentials.md). The recordings were taken on
+# kasumi (Linux 7.2.8, notes/px39/linux-vm.sh; tests/mpx5-users.d/linux/
+# vm.meta holds the digests) and `linux/cred.txt` is, to the byte, the
+# `cred` section of px38's notes/px38/linux/vm.txt (U0 checks it).
+# **No account is made anywhere**: the ids are numbers a program asks
+# the kernel for.
+#
+# **What this suite does not hold.** No permission check exists yet:
+# a process that is 1000 may still open, remove, signal and bind what
+# root may (those are the lanes after px39). Nothing here shows a
+# boundary; it shows that the ids are kept and that the id calls follow
+# Linux's rules.
+#
+# `--bin DIR`: the programs already built (tools/mkcred's four) — for a
+# host whose own libc they must not be built with: build them in a
+# container (notes/px39/build.sh) and pass the directory.
+#
+# Images, per tier: one a session (the five programs, /etc/pax-run),
+# one kernel, kmain_console. Assertions, per tier, firmware and session:
+#   U0 build: kmain_console built; every program static; user/elf's
+#      cred.c, ids.c and px38.h are notes/px38/probes' files; the
+#      recordings are there, `linux/cred.txt` is px38's recorded
+#      section, and each has its line count.
+#   U1 the output, differential: every line the session wrote on PAX
+#      (the kernel's own `user: …` lines left out) is byte-identical to
+#      the recording's, and the exit status is the recording's. Three
+#      things are compared by rule, each named:
+#        - a line that starts with `~` is left out of the comparison and
+#          held to PAX's own text (U2);
+#        - cred, as root: ONE of its 2,684 lines, `root setgroups(65536,
+#          list) = 0, then getgroups(0, NULL) = 65536`, reads `= -22,
+#          then getgroups(0, NULL) = 4` on PAX: ruling #75 R4 bounds the
+#          list at 32, so 2,683 lines are Linux's and one is the
+#          ruling's, held exactly;
+#        - ids: 59 of its 71 lines are Linux's; the twelve PAX answers
+#          otherwise, none for a reason that is this lane's, are held to
+#          tests/mpx5-users.d/ids.pax (what PAX writes, whole): the five
+#          process-group calls (-ENOSYS: the job-control lane's),
+#          `capget` (-ENOSYS: ruling R9), SO_PEERCRED and an owner that
+#          is not root (refused by name: U5's and U2's), and what is the
+#          machine's (the parent's pid, the root directory's mode, a
+#          `/bin`, the account file). U1 holds PAX to that file and
+#          counts the lines that are Linux's.
+#   U2 by name: the `~` lines are exactly PAX's (`~bound`: 33 groups
+#      -EINVAL; `~thread`: ids are a process's; `~owner`: a file of
+#      /proc is root's until owners exist); the kernel's `refused:`
+#      lines are exactly the `setgroups` ones (65,536 groups in cred,
+#      33 in ident, as root; none as a user, who is refused -EPERM
+#      first as on Linux; and ids' two, which are px34's and px36's);
+#      -ENOSYS only for the numbers named; nobody killed.
+#   U3 every frame back: the frames line shows as many free after init's
+#      end as before the first program (but for the inode table's own
+#      growth, which the tree's line counts).
+#   U4 the soak: the program's line (a million calls, 10,000 children,
+#      0 wrong answers) is the recording's (U1), and the free memory it
+#      read at each quarter is one number.
+#   U5 the end: `PAX: init … ended with status <s>; nothing left to
+#      run`, `halt`, and qemu-halt holds the machine halted.
+# The cred session of the first leg runs first, and the suite stops at
+# its first failure: `stopped early`. A boot ends at the kernel's `halt`
+# or at a `PANIC` line, whichever comes.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 only= bindir=
+usage="usage: tests/mpx5-users [--images DIR | --no-boot | --only build] [--bin DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --bin)      bindir=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build) ;; *) die "--only takes build" ;; esac
+need readelf python3
+
+PROGS="cred ids ident as"
+SESSIONS="cred cred-user ident ident-user ids soak soak-user"
+ref=$here/mpx5-users.d/linux
+run_of() {
+    case $1 in
+        cred)       echo "/bin/cred" ;;
+        cred-user)  echo "/bin/as 1000 1000 /bin/cred" ;;
+        ident)      echo "/bin/ident /bin/ident-setid" ;;
+        ident-user) echo "/bin/as 1000 1000 /bin/ident /bin/ident-setid" ;;
+        ids)        echo "/bin/ids /px38w" ;;
+        soak)       echo "/bin/ident soak 100000" ;;
+        soak-user)  echo "/bin/as 1000 1000 /bin/ident soak 100000" ;;
+    esac
+}
+lines_of() { # the recording's line count: a change to a recording is a change here
+    case $1 in cred) echo 2684 ;; cred-user) echo 3983 ;; ident) echo 225 ;; ident-user) echo 129 ;; ids) echo 71 ;; soak|soak-user) echo 2 ;; esac
+}
+init_of() { case $1 in *-user) echo as ;; soak) echo ident ;; *) echo "$1" ;; esac; }
+# cred's one line by ruling R4, as Linux wrote it and as PAX writes it.
+R4_LINUX='root setgroups(65536, list) = 0, then getgroups(0, NULL) = 65536'
+R4_PAX='root setgroups(65536, list) = -22, then getgroups(0, NULL) = 4'
+BOUND='~bound: setgroups(33, list) = -22, then getgroups(0, NULL) = 32'
+THREAD_ROOT='~thread: a second thread'"'"'s raw setresuid(1000, 1000, 1000) = 0; the first thread'"'"'s getuid is then 1000'
+OWNER='~owner: /proc/self/setgroups is owned 0:0'
+BOUND_USER='~bound: setgroups(33, list) = -1, then getgroups(0, NULL) = 0'
+GROUPS_WHY='refused: more supplementary groups than PAX keeps (32; Linux takes 65536), -22'
+# ids asks the calls PAX does not have: the process-group calls and capget.
+IDS_ENOSYS="109 111 112 121 124 125 273 334"
+IDS_LINUX_LINES=59 # of ids' 71 lines, those that are Linux's to the byte (the other 12 are tests/mpx5-users.d/ids.pax's)
+IDS_REFUSED="syscall 55: refused: an AF_UNIX socketpair's end, which has no name or options: call 55, -95|syscall 92: refused: an owner or a group that is not root (PAX has one user), -22"
+
+work=$PAX_BUILD/mpx5-users
+runs=$PAX_BUILD/mpx5-users-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+# U0's part that needs no build: the sources and the recordings.
+refs_ok() { # -> reasons on stdout
+    local f s n px=$PAX_ROOT/notes/px38
+    for f in cred.c ids.c px38.h; do
+        if [ -f "$px/probes/$f" ]; then
+            cmp -s "$px/probes/$f" "$PAX_ROOT/user/elf/$f" || printf ' user/elf/%s is not notes/px38/probes/%s;' "$f" "$f"
+        fi
+    done
+    for s in $SESSIONS; do
+        [ -f "$ref/$s.txt" ] || { printf ' no recording %s.txt;' "$s"; continue; }
+        n=$(wc -l < "$ref/$s.txt" | tr -d ' ')
+        [ "$n" = "$(lines_of "$s")" ] || printf ' %s.txt has %s lines, not %s;' "$s" "$n" "$(lines_of "$s")"
+        [ "$(cat "$ref/$s.rc" 2>/dev/null)" = 0 ] || printf ' %s.rc is not 0;' "$s"
+    done
+    if [ -f "$px/linux/vm.txt" ]; then
+        awk '$0 == "=== BEGIN cred" { on = 1; next } index($0, "=== END cred status ") == 1 { on = 0 } on' "$px/linux/vm.txt" \
+            | cmp -s - "$ref/cred.txt" || printf " linux/cred.txt is not the cred section of notes/px38/linux/vm.txt;"
+    fi
+    [ "$(grep -cxF -- "$R4_LINUX" "$ref/cred.txt")" = 1 ] || printf " the recording has not exactly one '%s';" "$R4_LINUX"
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/bin"
+    why=$(refs_ok)
+    if [ -n "$bindir" ]; then
+        for p in $PROGS; do cp "$bindir/$p" "$work/bin/$p" || why+=" no $bindir/$p;"; done
+        say "programs from $bindir"
+    else
+        "$PAX_ROOT/tools/mkcred" "$work/bin" > "$work/programs.txt" || why+=" tools/mkcred;"
+    fi
+    for p in $PROGS; do
+        r=$(static_ok "$work/bin/$p") || why+=" $r;"
+        say "  program: $p $(sha256_of "$work/bin/$p") $(wc -c < "$work/bin/$p" | tr -d ' ') bytes"
+    done
+    printf 'root:x:0:0:root:/:/bin/pelt\n' > "$work/passwd"
+    printf 'root:x:0:\n' > "$work/group"
+    for s in $SESSIONS; do
+        run_of "$s" > "$work/$s.run"
+        # The set-ID copy of ident: mode 6755, root's, where the kernel
+        # does not honour the bits (anywhere on PAX: ruling R5).
+        if "$PAX_ROOT/tools/mkinitramfs" "$work/$s.cpio" "/bin/cred=$work/bin/cred:755" "/bin/ids=$work/bin/ids:755" \
+            "/bin/ident=$work/bin/ident:755" "/bin/ident-setid=$work/bin/ident:6755" "/bin/as=$work/bin/as:755" \
+            "/etc/passwd=$work/passwd:644" "/etc/group=$work/group:644" "/etc/pax-run=$work/$s.run:644" > "$work/$s.initramfs.txt"; then
+            say "  initramfs $s: $(tail -n 1 "$work/$s.initramfs.txt")"
+        else
+            why+=" tools/mkinitramfs $s;"
+        fi
+    done
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            for s in $SESSIONS; do
+                "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                    --add "$work/$s.cpio" initramfs.cpio "$elf" "$work/$tier/users-$s.iso" >/dev/null \
+                    || why+=" $tier users-$s: mkimage;"
+            done
+            say "built $tier: elf $(sha256_of "$elf"), $(echo $SESSIONS | wc -w | tr -d ' ') images"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    [ -z "$why" ] && say "PASS U0: kmain_console built ($tiers), four programs static, user/elf's cred.c, ids.c and px38.h are px38's, seven recordings with their line counts (cred's is px38's recorded section, 2684 lines)" || bad "U0:$why"
+    images=$work
+    if [ "$only" = build ] || [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx5-users build (U0): PASS (no boot)" || say "mpx5-users build: FAIL"
+        exit "$fail"
+    fi
+else
+    why=$(refs_ok)
+    [ -z "$why" ] && say "PASS U0 (recordings): seven, with their line counts; the sources are px38's" || bad "U0 (recordings):$why"
+fi
+
+record() { # tier leg session status
+    ran=$((ran + 1))
+    printf '%s kmain_console %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" \
+        "$(sha256_of "$iso")" >> "$runs"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+stopped=
+for leg in $legs; do
+    [ -z "$stopped" ] || break
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        [ -z "$stopped" ] || break
+        for s in $SESSIONS; do
+            i=$(init_of "$s")
+            id="$tier $leg $s"
+            before=$fail
+            log=$PAX_BUILD/mpx5-users-$tier-$leg-$s.serial.log
+            elf=$images/$tier/kmain_console.elf iso=$images/$tier/users-$s.iso
+            rm -f "$log" "$log.verdict"
+            if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+                for t in U1 U2 U3 U5; do bad "$t $id: no image"; done
+                continue
+            fi
+            hrc=0
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 900 --qemu -m --qemu 256M \
+                --elf "$elf" --marker 'halt|PANIC .*' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+            record "$tier" "$leg" "$s" "$hrc"
+            norm=$log.norm; serial_norm "$log" > "$norm"
+
+            # U1: the session against the recording.
+            why=
+            out=$PAX_BUILD/mpx5-users-$tier-$leg-$s.session
+            awk '/^user: exec pid 1 / { if (!on) { on = 1; next } } on && /^user: [^ ]+ pid 1 (exit_group|exit) [0-9]+ after / { exit }
+                 on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$norm" > "$out"
+            n=$(wc -l < "$out" | tr -d ' ')
+            same=0 note=
+            case $s in
+                cred)
+                    # 2,683 lines are Linux's; the one R4 names is held to PAX's text.
+                    sed "s/^$(printf '%s' "$R4_LINUX" | sed 's/[][\.*^$/]/\\&/g')\$/$R4_PAX/" "$ref/$s.txt" > "$out.want"
+                    cmp -s "$out.want" "$out" || why+=" the session differs: $(diff "$out.want" "$out" | head -n 10 | cut -c1-400 | tr '\n' '|');"
+                    same=$(diff "$ref/$s.txt" "$out" | grep -c '^>')
+                    [ "$same" = 1 ] || why+=" $same lines differ from the recording, not the one of ruling R4;"
+                    note="$((n - same)) of $n lines byte-identical to real root's (vm), 1 by ruling R4 ('$R4_PAX')"
+                    ;;
+                ids)
+                    cmp -s "$here/mpx5-users.d/ids.pax" "$out" || why+=" the session differs from tests/mpx5-users.d/ids.pax: $(diff "$here/mpx5-users.d/ids.pax" "$out" | head -n 10 | cut -c1-400 | tr '\n' '|');"
+                    same=$((n - $(diff "$ref/$s.txt" "$out" | grep -c '^>')))
+                    [ "$same" = "$IDS_LINUX_LINES" ] || why+=" $same lines are real root's, not $IDS_LINUX_LINES;"
+                    note="$same of $n lines byte-identical to real root's (vm), $((n - same)) named in tests/mpx5-users.d/ids.pax"
+                    ;;
+                *)
+                    grep -v '^~' "$ref/$s.txt" > "$out.want"
+                    grep -v '^~' "$out" > "$out.cmp"
+                    cmp -s "$out.want" "$out.cmp" || why+=" the session differs: $(diff "$out.want" "$out.cmp" | head -n 10 | cut -c1-400 | tr '\n' '|');"
+                    [ "$(wc -l < "$ref/$s.txt" | tr -d ' ')" = "$n" ] || why+=" $n lines, the recording has $(wc -l < "$ref/$s.txt" | tr -d ' ');"
+                    t=$(grep -c '^~' "$out")
+                    case $s in *-user) who="1000:1000's on the same boot (vm, after as 1000 1000)" ;; *) who="real root's (vm)" ;; esac
+                    note="$((n - t)) of $n lines byte-identical to $who, $t '~' lines by rule"
+                    ;;
+            esac
+            pst=$(sed -n -E "s/^user: [^ ]+ pid 1 (exit_group|exit) ([0-9]+) after .*/\\2/p" "$norm" | head -n 1)
+            lst=$(cat "$ref/$s.rc" 2>/dev/null)
+            [ "$pst" = "$lst" ] || why+=" exit '$pst' on PAX, '$lst' on Linux;"
+            [ "$n" = "$(lines_of "$s")" ] || why+=" $n lines, not $(lines_of "$s");"
+            [ -z "$why" ] && say "PASS U1 $id: $note ($(sha256_of "$out" | cut -c1-12)…), exit $pst" || bad "U1 $id:$why"
+
+            # U2: what is PAX's own, by name.
+            why=
+            tl=$(grep '^~' "$out" | grep -v '^~soak: ' | paste -sd'|' -)
+            rf=$(grep ': refused: ' "$norm" | sed -E 's/^.*user: [^ ]+ pid [0-9]+ //' | LC_ALL=C sort | paste -sd'|' -)
+            ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
+            wt= wr= wn="273 334"
+            case $s in
+                cred)       wr="syscall 116: $GROUPS_WHY" ;;
+                ident)      wt="$OWNER|$THREAD_ROOT|$BOUND"; wr="syscall 116: $GROUPS_WHY" ;;
+                ident-user) wt="$OWNER|$THREAD_ROOT|$BOUND_USER" ;;
+                ids)        wn=$IDS_ENOSYS; wr=$IDS_REFUSED ;;
+            esac
+            [ "$tl" = "$wt" ] || why+=" the '~' lines are '$tl', not '$wt';"
+            [ "$rf" = "$wr" ] || why+=" refusal lines '$rf', not '$wr';"
+            [ "$ns" = "$wn" ] || why+=" -ENOSYS for '$ns', not '$wn';"
+            kl=$(grep -c 'user: [^ ]* pid [0-9]* killed: ' "$norm")
+            [ "$kl" = 0 ] || why+=" $kl killed: lines ($(grep -m1 ' killed: ' "$norm" | cut -c1-120));"
+            [ -z "$why" ] && say "PASS U2 $id: '~' lines: ${wt:-none}; refused by name: ${wr:-nothing}; -ENOSYS only for $wn; nobody killed" || bad "U2 $id:$why"
+
+            # U3: every frame back.
+            why=
+            fl=$(grep -m1 '^user: frames free ' "$norm")
+            trl=$(grep -m1 '^tree: frames ' "$norm")
+            set -- $(printf '%s\n' "$fl" | sed -n -E 's/^user: frames free ([0-9]+) before, [0-9]+ with 1 processes, ([0-9]+) after$/\1 \2/p')
+            fb=${1:-} fa=${2:-}
+            set -- $(printf '%s\n' "$trl" | sed -n -E "s/^tree: frames ([0-9]+) \\(([0-9]+) when made\\), ([0-9]+) \\(([0-9]+)\\) of them the inode table's, inodes ([0-9]+) \\(([0-9]+)\\), cap ([0-9]+), refusals [0-9]+\$/\\1 \\2 \\3 \\4 \\5 \\6/p")
+            th=${1:-} tb=${2:-} tt=${3:-} ttb=${4:-} ti=${5:-} tib=${6:-}
+            if [ -z "$fb" ] || [ -z "$th" ]; then
+                why+=" no frames line or no tree line ('$fl' / '$trl');"
+            else
+                grew=$((tt - ttb)) # the inode table's frames are never given back
+                [ $((fb - fa)) = "$grew" ] || why+=" $((fb - fa)) frames not back (the inode table grew by $grew) ('$fl');"
+                [ $((th - tb)) = "$grew" ] || why+=" the tree holds $((th - tb)) frames more than when made ('$trl');"
+                [ "$ti" = "$tib" ] || why+=" the tree has $ti inodes, $tib when made;"
+            fi
+            [ -z "$why" ] && say "PASS U3 $id: $fl" || bad "U3 $id:$why"
+
+            # U4: the soak.
+            case $s in soak|soak-user)
+                why=
+                sk=$(grep -m1 '^soak: ' "$out")
+                printf '%s\n' "$sk" | grep -Eq '^soak: 100000 rounds, 1000000 calls, 10000 children that changed their ids, 0 wrong answers ' || why+=" '$sk';"
+                ml=$(grep -m1 '^~soak: ' "$out")
+                set -- $(printf '%s\n' "$ml" | sed -n -E 's/^~soak: MemFree before ([0-9]+) kB, at each quarter ([0-9]+) ([0-9]+) ([0-9]+) ([0-9]+) kB$/\1 \2 \3 \4 \5/p')
+                if [ $# != 5 ]; then
+                    why+=" no free-memory line ('$ml');"
+                else
+                    for v in "$2" "$3" "$4" "$5"; do [ "$v" = "$1" ] || why+=" free memory moved: '$ml';"; done
+                fi
+                [ -z "$why" ] && say "PASS U4 $id: $sk; $ml (Linux here: $(grep -m1 '^~soak: ' "$ref/$s.txt"))" || bad "U4 $id:$why"
+                ;;
+            esac
+
+            # U5
+            why=
+            grep -qx "PAX: init /bin/$i ended with status $lst; nothing left to run" "$norm" \
+                || why+=" no 'PAX: init /bin/$i ended with status $lst' ($(grep -m1 '^PAX: init ' "$norm"));"
+            pn=$(grep -m1 '^PANIC ' "$norm")
+            [ -z "$pn" ] || why+=" the kernel panicked: $pn;"
+            [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+            [ -z "$why" ] && say "PASS U5 $id: init ended, status $lst; $(tail -n 1 "$log.verdict")" || bad "U5 $id:$why"
+
+            if [ "$s" = cred ] && [ "$before" = 0 ] && [ "$fail" != 0 ]; then
+                stopped="$id"
+                say "FAIL stopped early: cred failed on $id; the later boots are not run"
+                break
+            fi
+        done
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx5-users: PASS" || say "mpx5-users: FAIL"
+exit "$fail"
