@@ -14,6 +14,13 @@ own, is mpx4-tcp's by that job's text and runs whenever mpx4-tcp does;
 mpx4-net's new renew step is part of its peer boot on every leg; P2).
 Last, onto `fe7c05b` (px38, notes only).
 
+**Changed by px40 (ruling #76, 2026-10-13; `notes/px40-the-core-tier.md`):**
+a pull request that touches the kernel's core runs every suite on the
+pr leg, no longer the full tier. The tables of §1, §2 and §4 below say
+what holds now; the pins, the harness tools, the kernel's entry
+(`boot/start.S`, `boot/kernel.ld`, `boot/limine.conf`), an unknown path
+and an unreadable diff are still full, and the merge rule is unchanged.
+
 One deliverable: pax CI in tiers, with no loss of coverage before a
 merge to trunk. Measured on 2026-10-12 a green run was 28 jobs and 251
 job-minutes; the org has 20 concurrent jobs for every repository, and
@@ -27,7 +34,8 @@ included, paid the whole of it.
 | push to trunk | full | all 29 | all four |
 | nightly (`schedule`, 06:17 UTC, trunk) | full | all 29 | all four |
 | pull request labelled `full-matrix` (any push, or adding the label) | full | all 29 | all four |
-| pull request touching a FULL path (below) | full | all 29 | all four |
+| pull request touching a FULL path (below: a pin, a harness tool, the kernel's entry) | full | all 29 | all four |
+| pull request touching the kernel's core or CI itself (px40) | pr | all 29 | `--tier native --firmware bios` |
 | any other pull-request push | pr | those the change can affect | `--tier native --firmware bios` |
 | pull request touching only prose (`notes/`, `*.md`, licences) | pr | none (the plan and the verdict only) | — |
 | `labeled` with another label | noop | none | — |
@@ -88,7 +96,8 @@ whole package.
 
 | area | paths | suites (pr tier) |
 |---|---|---|
-| toolchain and core: FULL | `kernel/wolf.pin`, `kernel/wolf.pkg`, `boot/limine.pin`, `boot/limine.conf`, `boot/{start,io,cpu,isr,sched,fpu}.S`, `boot/kernel.ld`; `kernel/{serial,log,panic,boot_info,frames,paging,gdt,idt,interrupts,apic,timer,heap,sync,sched,fpu}`; `tools/{lib.sh,build-kernel,mkimage,fetch-wolf,fetch-limine,qemu-halt,qemu-run,qemu-fault,expect-serial}` | all 29, all legs |
+| pins, entry and harness: FULL | `kernel/wolf.pin`, `kernel/wolf.pkg`, `boot/limine.pin`; `boot/limine.conf`, `boot/start.S`, `boot/kernel.ld`; `tools/{lib.sh,build-kernel,mkimage,fetch-wolf,fetch-limine,qemu-halt,qemu-run,qemu-fault,expect-serial}` | all 29, all legs |
+| the kernel's core (px40; FULL before) | `kernel/{serial,log,panic,boot_info,frames,paging,gdt,idt,interrupts,apic,timer,heap,sync,sched,fpu}`, `boot/{io,cpu,isr,sched,fpu}.S` | all 29, pr leg (the label's full run before merge covers the rest) |
 | CI itself | `.github/`, `tools/ci-plan`, `tools/ci-tiers.map`, `tests/ci-plan` | all 29, pr leg (the label's full run before merge covers the rest) |
 | user mode | `kernel/{user,process,elf,files,initramfs,signal,futex,rtc,vm,uaccess,procfs,tree,ready,event,console}`, `boot/{user,console,tree,event}.S`, `user/programs.S`, `tools/mkinitramfs` | every mpx3-* and mpx4-* (18) |
 | network | `kernel/{net,netd,arp,ip,icmp,udp,tcp,socket,unix}`, `boot/{net,unix}.S`, `user/net/`, `user/unix/`, `user/mpx4-*.run` | mpx4-net, -udp, -tcp, -ready, -session, -unix, -lobo |
@@ -106,8 +115,9 @@ a rule names it.
 
 `tests/ci-plan` (run first in the `plan` job) proves the tiers by event
 (P1), one change per area selecting its suites and nothing else (P2),
-FULL for the pins, the core, the harness, an unknown path and an
-unreadable diff (P3), the wiring of every job (P4), the map's
+every suite on the pr leg for the core (P2, px40), FULL for the pins,
+the harness, the kernel's entry, an unknown path and an unreadable diff
+(P3), the wiring of every job (P4), the map's
 coverage of the tree (P5, a warning), and the verdict (P6). Seen red: below, §5.
 
 ## 3. The legs: measured
@@ -171,7 +181,8 @@ Both firmwares on the native tier would be 90.9 (+24).
 | music: `user/play/parts.lu`, `tests/mpx3-orchestra`, its note | 275 | 14.9 + plan + verdict ≈ 16 | 29 → 6 |
 | notes only | 275 | plan + verdict ≈ 1 | 29 → 2 |
 | CI itself (this lane) | 275 | ≈ 68; measured 62.0 (run 38297084222, on `feba3fc`) | 31 |
-| a FULL path (pin, core, harness) | 275 | 275 + plan + verdict | 31 |
+| a FULL path (pin, harness, the kernel's entry) | 275 | 275 + plan + verdict | 31 |
+| the kernel's core (px40) | 275 | every suite on the pr leg; measured in `notes/px40-the-core-tier.md` | 31 |
 
 A real notes-only change: px38 (`c3e3fc2..fe7c05b`, 115 paths, all under
 `notes/`) plans as the pr tier with no suite: the plan and the verdict,
@@ -181,8 +192,9 @@ The planner over every open and recent PR, whole diff, in its own tree:
 px33b (#43), px33 (#38) and px29 (#33) take the music tier (4 to 6
 suites); px35 (#41) touches `ci.yml` (every suite, pr leg); px36 (#42,
 the wolf pin), px25 (#40, `kernel/sched`, `kernel/paging`) and px34
-(#37, `kernel/interrupts`, `kernel/sched`) are full. A lane that touches
-the core pays full on every push after it, because a pull request's
+(#37, `kernel/interrupts`, `kernel/sched`) are full (px36 still is;
+since px40 the other two are every suite on the pr leg). A lane that touches
+the core pays that on every push after it, because a pull request's
 paths are its whole diff against its base, not the last push's (a
 superseded run may have been cancelled before it proved anything).
 
