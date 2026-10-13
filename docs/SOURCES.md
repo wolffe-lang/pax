@@ -626,3 +626,13 @@ Permissively licensed kernels: none consulted.
 | black-box Linux 7.2.8-1-cachyos (kasumi's own kernel image booted under QEMU 11.1.1 with `notes/px39/vminit.c` as pid 1: root of the initial user namespace, every capability; `notes/px39/linux-vm.sh`): `user/elf/cred.c` again (byte-identical to px38's recording), the same after `as 1000 1000`, `user/elf/ident.c` as root and as 1000:1000, `user/elf/ids.c`, the soak | — | pax's own programs | measured (`tests/mpx5-users.d/linux/`, `vm.meta`) | what the man pages leave open: which call clears dumpable, dumpable and AT_SECURE at `execve` (the file-system ids and the group list enter into both), `CapPrm`, the `Groups:` line with no group, the order `getresuid` writes in, the order `setgroups` and `getgroups` check in, 32-bit ids, `prctl`'s other arguments, the mode of `/proc/self/setgroups` |
 | black-box Linux 7.2.8: the same programs as uid 1000 of a rootless podman container (`px13-ubuntu`; `notes/px39/linux-ct.sh`) | — | pax's own programs | measured (`notes/px39/linux/ct/`) | a second witness for a user's rows only; never a reference for root |
 
+
+## px41: the runner flakes (play's sleep, lobo-session's ports)
+
+| source | where | licence | how | used for |
+|---|---|---|---|---|
+| man-pages `clock_nanosleep(2)` (TIMER_ABSTIME; the raw call answers a negative errno; EINTR on an absolute sleep is answered by calling again), `clock_gettime(2)`, `nanosleep(2)` (a sleep is never shorter than asked) | the man-pages project | as the man pages | read | `user/play/kd.S`'s `play_now_ms` and `play_sleep_until_ms`; why PAX's sleep ends the tick after its target |
+| `syscall_64.tbl` (clock_gettime 228, clock_nanosleep 230) and the uapi `linux/time.h` (CLOCK_MONOTONIC 1, TIMER_ABSTIME 1) | the sparse checkout | GPL-2.0 WITH Linux-syscall-note | read | the numbers |
+| pax's own `kernel/user` (`sleep_until`), `kernel/timer`, `kernel/speaker` | this repository | pax's own | read | the arithmetic of a late tick (`notes/px41-the-runner-flakes.md`) |
+| man-pages `ip(7)` (`ip_local_port_range`, a port of 0 at `bind`), `bind(2)`; QEMU's documentation of `-serial tcp:` (a connection made by QEMU when `server` is not given) and of `-nic user,hostfwd=` | the man-pages project; QEMU's manual | as each | read | `tools/lobo-session`'s ports and its console |
+| black-box Linux 7.2.8 (kasumi) and QEMU 11.1.1: a million rounds of bind to port 0, read, close; a QEMU given one host port for two forwards | — | — | measured | how often one port is answered twice; what QEMU does then (`notes/px41/kasumi/`) |
