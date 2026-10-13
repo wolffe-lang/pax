@@ -23,10 +23,11 @@ run() { echo "=== BEGIN $1"; "${@:2}"; echo "=== END $1 status $?"; }
 # every probe starts with no supplementary group, as pid 1 of the vm has none
 run ids setpriv --clear-groups /t/ids /t/idsw
 run cred setpriv --clear-groups /p/cred
-mkdir -m 0777 /t/perm /t/setid /tn/setid /t/sig
+mkdir -m 0777 /t/perm /t/setid /tn/setid /t/sig /t/priv
 run perm setpriv --clear-groups /p/perm /t/perm
 run setid setpriv --clear-groups /p/setid /t/setid /tn/setid
 run sig setpriv --clear-groups /p/sig /t/sig
+run priv setpriv --clear-groups /p/priv /t/priv
 echo "=== px38 ct: done"
 IN
 podman run --rm --network none --tmpfs /t:rw,exec,suid,dev,size=256m,mode=0777 --tmpfs /tn:rw,exec,nosuid,size=64m,mode=0777 \

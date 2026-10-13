@@ -5,7 +5,7 @@
 set -euo pipefail
 src=$1 out=$2
 mkdir -p "$out"
-for p in ids cred perm setid sig vminit; do
+for p in ids cred perm setid sig priv vminit; do
     cc -static -no-pie -O1 -Wall -Wextra -Wno-unused-result -Wno-unused-function -Wl,--build-id=none -Wl,-z,noexecstack \
         -o "$out/$p" "$src/$p.c"
     readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC'

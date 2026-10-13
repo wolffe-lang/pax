@@ -8,7 +8,7 @@
 # PAXROOT: a pax tree (for tools/mkinitramfs). BINDIR: the static probes
 # (probes/build.sh). OUT: the console log; OUT.txt gets it with carriage
 # returns and the kernel's own lines removed. PROBES: comma-separated
-# (default ids,cred,perm,setid,sig). The kernel is the host's own image,
+# (default ids,cred,perm,setid,sig,priv). The kernel is the host's own image,
 # world-readable, run as a guest and never read: PX38_KERNEL, default
 # /usr/lib/modules/$(uname -r)/vmlinuz. EXTRA goes on the kernel command
 # line: `px38prot=1` has the init turn on fs.protected_hardlinks,
@@ -16,14 +16,14 @@
 # setting; the kernel's own default is 0). TCG, 1 CPU, 1 GiB, no network,
 # no disk. Exit 0 when the guest wrote its last marker.
 set -uo pipefail
-pax=$1 bin=$2 out=$3 probes=${4:-ids,cred,perm,setid,sig} extra=${5:-}
+pax=$1 bin=$2 out=$3 probes=${4:-ids,cred,perm,setid,sig,priv} extra=${5:-}
 k=${PX38_KERNEL:-/usr/lib/modules/$(uname -r)/vmlinuz}
 [ -r "$k" ] || { echo "vm-run: no readable kernel image $k" >&2; exit 2; }
 work=$(dirname "$out")/vm-work.$$
 mkdir -p "$work"
 trap 'rm -rf "$work"' EXIT
 pairs=("/init=$bin/vminit:755")
-for p in ids cred perm setid sig; do pairs+=("/$p=$bin/$p:755"); done
+for p in ids cred perm setid sig priv; do pairs+=("/$p=$bin/$p:755"); done
 "$pax/tools/mkinitramfs" "$work/probes.cpio" "${pairs[@]}" > "$out.initramfs.txt" || exit 2
 {
     echo "kernel: $k $(sha256sum "$k" | cut -d' ' -f1)"
