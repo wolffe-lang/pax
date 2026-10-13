@@ -2234,6 +2234,81 @@ jobs:
   # `!cancelled()`, not `always()`: a run superseded by a newer push must
   # end, not hold its concurrency group (and the newer run) until a
   # runner is free to judge a run nobody needs (seen on 38275354849).
+  # px39: the credentials, the first lane of the users campaign. Static
+  # Linux programs (tools/mkcred: px38's cred and ids, px39's ident and
+  # as) are the first program on kmain_console, as root and again after
+  # becoming 1000:1000, and every line they write is held to what the
+  # same programs wrote under the real root of a Linux booted under QEMU
+  # (tests/mpx5-users.d/linux/, recorded on kasumi: no account is made
+  # anywhere, and no rootless container's root is a reference for
+  # root). tests/mpx5-users: the build and the recordings (U0), the
+  # outputs byte-identical (U1: cred 2,683 of 2,684 lines as root, the
+  # one by ruling R4; 3,983 of 3,983 as a user), what is PAX's own by
+  # name (U2), every frame back (U3), a million id calls with the free
+  # memory flat (U4), the end (U5); both tiers, BIOS and UEFI. No
+  # permission check exists yet: the suite holds the ids and the id
+  # calls' rules, nothing more.
+  mpx5-users:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-users')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          qemu-system-x86_64 --version
+          clang --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-users-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the credentials against real root's recording, as root and as a user; the plan's legs (all four in the full tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx5-users $PAX_LEGS
+
+      - name: keep the programs' sums, the sessions, the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-users-linux
+          path: |
+            build/mpx5-users/programs.txt
+            build/mpx5-users/*.initramfs.txt
+            build/mpx5-users/*/kmain_console.elf
+            build/mpx5-users/*/*.log
+            build/mpx5-users-*.session
+            build/mpx5-users-*.log
+            build/mpx5-users-*.norm
+            build/mpx5-users-*.meta
+            build/mpx5-users-*.halt
+            build/mpx5-users-*.verdict
+            build/mpx5-users-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   tier:
     name: tier ${{ needs.plan.outputs.tier || 'unplanned' }}
     if: ${{ !cancelled() }}
@@ -2268,6 +2343,7 @@ jobs:
       - mpx4-session
       - mpx4-unix
       - mpx4-lobo
+      - mpx5-users
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
