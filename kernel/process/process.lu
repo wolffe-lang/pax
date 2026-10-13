@@ -982,6 +982,13 @@ fn fork(f: u64, flags: u64, usp: u64, ptid: u64, ctid: u64) -> u64 {
     }
     let a = sched.proc_area(s)
     files.inherit(a)
+    // PLANT B (px39, never to be merged): a fork's child does not carry
+    // its parent's identity: the record's 42 words start again as root.
+    var pw: u64 = 160
+    while pw < 202 {
+        aput(a, pw, 0)
+        pw += 1
+    }
     if flags & CLONE_CLEAR_SIGHAND != 0 {
         reset_handlers(a)
     }
