@@ -656,3 +656,19 @@ consulted.
 | black-box Linux 7.2.8, the same boot with PAX's image archive as its initramfs (a second archive after it holds `/init`): boreutils' `ls -ln` and `ls -l` | boreutils `2ab3651` | pax's build of boreutils' own | measured (`ls.txt`, `ls-names.txt`, `vm-image.meta`) | an image's owners as Linux reads the same bytes |
 | black-box Linux in a container (`tools/linux-tree`): `user/elf/tree.c`'s `owner:` line | — | pax's own | measured afresh at every run of `tests/mpx3-tree` | `chown` to 1000:1000 by root |
 
+
+## px43: the file checks (open, truncate, access, execve, the walk)
+
+No kernel's, libc's or file system's source was read or searched for,
+nor that of `su`, `login`, shadow-utils, util-linux or coreutils. Every
+rule the kernel follows is a row Linux answered (px38's recording, or
+this lane's probe on the same kind of boot); where a man page and a
+measurement could part, the measurement decides and the note says so.
+Permissively licensed kernels: none consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| man-pages `path_resolution(7)` (search permission on each directory of the lookup, EACCES), `inode(7)` and `credentials(7)` (the class; the file-system ids), `open(2)` (O_TRUNC, O_CREAT, EISDIR), `truncate(2)`, `access(2)` and `faccessat2` (the real ids; AT_EACCESS), `execve(2)` (EACCES for no execute permission), `chdir(2)` and `fchdir`, `getcwd(3)`, `unix(7)`; POSIX.1-2024 XBD 4.5 (file access permissions) and 4.16 (pathname resolution) | the pages px38 cites | their own | recalled, not opened in this lane; no row rests on them: each is measured | what to ask |
+| uapi constants already in pax's source (`kernel/files`: AT_EACCESS 0x200, AT_EMPTY_PATH, O_TRUNC, O_CREAT, O_DIRECTORY; `kernel/user`: 21, 76, 80, 81, 269, 439, all answered before this lane), taken from the sparse checkout by earlier lanes | the sparse checkout's | GPL-2.0 WITH Linux-syscall-note | not opened again | flags; no number added |
+| px38's recorded answers: `notes/px38/linux/vm.txt`'s `perm` section (sections A, B, G: 221 rows, real root of Linux 7.2.8 under QEMU) | pax `fe7c05b` | pax's own | read; `tests/mpx5-users.d/linux/perm.txt` to the byte | the class, root's three rules, real against file-system ids |
+| black-box Linux 7.2.8-1-cachyos (kasumi's own kernel image under QEMU 11.1.1, `notes/px43/vminit.c` as pid 1: root of the initial user namespace, every capability; the initramfs PAX's own `chk` archive with `/init` after it; `notes/px43/linux-vm.sh`): `user/elf/chk.c` as root dropping to px38's five actors, and after `as 1000 1000`; the soaks | — | pax's own programs | measured (`tests/mpx5-users.d/linux/chk*.txt`, `vm-chk.meta`) | what px38 did not ask: `.`, `..`, a trailing `/`, a missing or too-long name under a directory one may not search, a working directory and a directory descriptor that lost search, links through such a directory, O_TRUNC with O_RDONLY, O_CREAT and O_EXCL where the directory refuses, `truncate` and O_WRONLY of a directory, a socket's name, `access` with real, effective and file-system ids apart (AT_EACCESS is the file-system ids), `execve` by class of an archive file, a descriptor held across a `chmod` |
