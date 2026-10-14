@@ -3,16 +3,23 @@
 # PAX reads (kernel/initramfs; Documentation/driver-api/early-userspace/
 # buffer-format.rst; cpio(5)).
 #
-#   tools/mkinitramfs OUT.cpio /PATH=FILE[:MODE]...
+#   tools/mkinitramfs OUT.cpio ARG...
+#       ARG: /PATH=FILE[:MODE[:UID:GID]]   a file
+#            /PATH/[:MODE[:UID:GID]]       a directory (px42)
 #
-# Each argument puts FILE's bytes at PATH (a leading `/` is dropped, as
-# cpio writes names); MODE is octal permission bits (default 755 when
-# FILE is executable, else 644). Every directory a PATH passes through
-# gets its own entry first (mode 040755). Reproducible: inodes numbered
-# 1, 2, … in the order written, mtime 0, uid and gid 0, nlink 1 (2 for a
-# directory), devices 0, check 0 (`070701`), entries sorted by path,
-# the archive ending with `TRAILER!!!`. Prints one line per entry and
-# the archive's sha256. Exit 0, or 2 on a usage error.
+# A file argument puts FILE's bytes at PATH (a leading `/` is dropped,
+# as cpio writes names); MODE is octal permission bits (default 755
+# when FILE is executable, else 644). Every directory a PATH passes
+# through gets its own entry first (mode 040755, root's), unless a
+# directory argument names it: then it has that MODE (default 755).
+# UID and GID are decimal, the entry's owner and group (px42, pax#48:
+# an image can hold a file that is not root's); without them 0 and 0,
+# and the archive is then the bytes it was before px42. Reproducible:
+# inodes numbered 1, 2, … in the order written, mtime 0, nlink 1 (2 for
+# a directory), devices 0, check 0 (`070701`), entries sorted by path,
+# the archive ending with `TRAILER!!!`. Prints one line per entry (its
+# owner too when that is not 0:0) and the archive's sha256. Exit 0, or
+# 2 on a usage error.
 import hashlib
 import os
 import sys
@@ -23,8 +30,8 @@ def die(msg):
     sys.exit(2)
 
 
-def header(ino, mode, nlink, size, name):
-    fields = [ino, mode, 0, 0, nlink, 0, size, 0, 0, 0, 0, len(name) + 1, 0]
+def header(ino, mode, nlink, size, name, uid=0, gid=0):
+    fields = [ino, mode, uid, gid, nlink, 0, size, 0, 0, 0, 0, len(name) + 1, 0]
     return b"070701" + b"".join(b"%08x" % f for f in fields)
 
 
@@ -32,19 +39,47 @@ def pad4(buf):
     return buf + b"\0" * (-len(buf) % 4)
 
 
+def attrs(spec, what):
+    """[MODE[:UID:GID]] after a path -> (mode or None, uid, gid)."""
+    parts = spec.split(":") if spec else []
+    if len(parts) not in (0, 1, 3):
+        die("not MODE or MODE:UID:GID: %s" % what)
+    try:
+        mode = int(parts[0], 8) if parts else None
+        uid, gid = (int(parts[1]), int(parts[2])) if len(parts) == 3 else (0, 0)
+    except ValueError:
+        die("not MODE or MODE:UID:GID: %s" % what)
+    if mode is not None and not 0 <= mode <= 0o7777:
+        die("bad mode: %s" % what)
+    if not (0 <= uid < 2**32 and 0 <= gid < 2**32):
+        die("bad owner: %s" % what)
+    return mode, uid, gid
+
+
+def clean(path):
+    name = path.strip("/")
+    if not name or "//" in name or ".." in name.split("/") or "." in name.split("/"):
+        die("bad path: %s" % path)
+    return name
+
+
 def main(argv):
     if len(argv) < 3:
-        die("usage: mkinitramfs OUT.cpio /PATH=FILE[:MODE]...")
+        die("usage: mkinitramfs OUT.cpio /PATH=FILE[:MODE[:UID:GID]]... /PATH/[:MODE[:UID:GID]]...")
     out = argv[1]
     files = {}
+    named = {}
     for arg in argv[2:]:
         if "=" not in arg:
-            die("not PATH=FILE: %s" % arg)
+            path, sep, spec = arg.partition("/:")
+            if not sep and not arg.endswith("/"):
+                die("not PATH=FILE or PATH/: %s" % arg)
+            mode, uid, gid = attrs(spec, arg)
+            named[clean(path)] = (0o755 if mode is None else mode, uid, gid)
+            continue
         path, src = arg.split("=", 1)
-        mode = None
-        if ":" in src:
-            src, m = src.rsplit(":", 1)
-            mode = int(m, 8)
+        src, _, spec = src.partition(":")
+        mode, uid, gid = attrs(spec, arg)
         name = path.lstrip("/")
         if not name or name.startswith("/") or ".." in name.split("/"):
             die("bad path: %s" % path)
@@ -54,24 +89,30 @@ def main(argv):
             die("%s: %s" % (src, e))
         if mode is None:
             mode = 0o755 if os.access(src, os.X_OK) else 0o644
-        files[name] = (data, mode)
-    dirs = set()
-    for name in files:
+        files[name] = (data, mode, uid, gid)
+    dirs = {}
+    for name in list(files) + [d + "/." for d in named]:
         parts = name.split("/")[:-1]
         for i in range(1, len(parts) + 1):
-            dirs.add("/".join(parts[:i]))
-    entries = [(d, None, 0o040755) for d in dirs] + [(n, d, m | 0o100000) for n, (d, m) in files.items()]
+            dirs["/".join(parts[:i])] = (0o755, 0, 0)
+    dirs.update(named)
+    for d in dirs:
+        if d in files:
+            die("both a file and a directory: %s" % d)
+    entries = [(d, None, m | 0o040000, u, g) for d, (m, u, g) in dirs.items()]
+    entries += [(n, d, m | 0o100000, u, g) for n, (d, m, u, g) in files.items()]
     entries.sort(key=lambda e: e[0])
     buf = b""
     ino = 1
-    for name, data, mode in entries:
+    for name, data, mode, uid, gid in entries:
         nb = name.encode()
         size = 0 if data is None else len(data)
         nlink = 2 if data is None else 1
-        buf = pad4(buf + header(ino, mode, nlink, size, nb) + nb + b"\0")
+        buf = pad4(buf + header(ino, mode, nlink, size, nb, uid, gid) + nb + b"\0")
         if data is not None:
             buf = pad4(buf + data)
-        print("%s %o %d %s" % ("dir " if data is None else "file", mode, size, name))
+        own = "" if (uid, gid) == (0, 0) else " %d:%d" % (uid, gid)
+        print("%s %o %d %s%s" % ("dir " if data is None else "file", mode, size, name, own))
         ino += 1
     buf = pad4(buf + header(0, 0, 1, 0, b"TRAILER!!!") + b"TRAILER!!!\0")
     with open(out, "wb") as f:
