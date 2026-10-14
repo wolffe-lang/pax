@@ -249,6 +249,27 @@ pub fn mode(r: u64) -> u64 {
     S_IFREG | 0x124 // 0444
 }
 
+/// px42: reference `r`'s owner (`which` 0) or group (1), given the
+/// area of the process it is about (the reader's for `/proc/self`).
+/// Measured on Linux 7.2.8 (`own`'s `proc` rows): `/proc/<pid>` itself
+/// is the process's effective user and group, dumpable or not; the
+/// files in it are those too while the process is dumpable and root's
+/// (0:0) once it is not — after any change of its ids, until an
+/// `execve` with its ids equal (kernel/cred's rule). Everything else
+/// in `/proc` and `/sys` is root's. (`/proc/self/cgroup` was not asked
+/// of Linux by name: it follows `status`.)
+pub fn owner(r: u64, area: u64, which: int) -> u64 {
+    let e = entry(r)
+    let per = e == 2 || e == 3 || e == 21 || e == PSTATUS || e == PSETGROUPS
+    if e != 1 && e != PIDDIR && !per {
+        return 0
+    }
+    if per && cred.dumpable(area) != 1 {
+        return 0
+    }
+    if which == 0 { cred.uid(area, cred.EFFECTIVE) } else { cred.gid(area, cred.EFFECTIVE) }
+}
+
 /// The size `stat` answers: 4096 for a sysfs attribute, 0 for procfs's
 /// and cgroupfs's files (measured), 0 for a directory.
 pub fn size(r: u64) -> u64 {
