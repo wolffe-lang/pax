@@ -487,17 +487,18 @@ static void proc_rows(void)
 static int user_main(void)
 {
     unsigned me = getuid(), g = getgid();
+    /* (no line here may hold the text "user: ": the harness reads that as the kernel's own) */
     say("own: started as uid %s", uids());
     say(" gid %s groups '%s'\n", gids(), groups());
     umask(022);
     if (mkdir(D, 0777) != 0) { say("! mkdir %s: %d\n", D, -errno); return 1; }
     chmod(D, 0777);
-    cur = "user";
+    cur = "self";
     int fd = open(in("f"), O_WRONLY | O_CREAT | O_EXCL, 0666); if (fd >= 0) close(fd);
     mkdir(in("d"), 0777);
     symlink("f", in("l"));
     int sk = bind_at(in("s"));
-    say("made user: a file %s; a directory %s; a symbolic link %s; a socket %s\n", om(in("f")), om(in("d")), om(in("l")), om(in("s")));
+    say("made self: a file %s; a directory %s; a symbolic link %s; a socket %s\n", om(in("f")), om(in("d")), om(in("l")), om(in("s")));
     if (sk >= 0) close(sk);
     unlink(in("s"));
     chmod(in("f"), 06755);
@@ -512,19 +513,19 @@ static int user_main(void)
     const char *o3 = om(f);
     long d = rc(SYS_chown, (long)f, 1001, -1, 0, 0);
     long e = rc(SYS_chown, (long)f, 0, 0, 0, 0);
-    say("chown user (its own file, mode 6755 each time): (-1, -1) = %ld (%s); (its uid, its gid) = %ld (%s); (-1, 2000) = %ld (%s); (1001, -1) = %ld; (0, 0) = %ld (%s)\n",
+    say("chown self (its own file, mode 6755 each time): (-1, -1) = %ld (%s); (its uid, its gid) = %ld (%s); (-1, 2000) = %ld (%s); (1001, -1) = %ld; (0, 0) = %ld (%s)\n",
         a, o1, b, o2, c, o3, d, e, om(f));
     fd = open(f, O_RDONLY);
     long h = rc(SYS_fchown, fd, -1, g, 0, 0), i = rc(SYS_fchown, fd, 0, -1, 0, 0);
     if (fd >= 0) close(fd);
     long j = rc(SYS_lchown, (long)in("l"), -1, g, 0, 0), k = rc(SYS_lchown, (long)in("l"), 0, -1, 0, 0);
     long m = rc(SYS_fchownat, AT_FDCWD, (long)in("d"), -1, g, 0), n = rc(SYS_fchownat, AT_FDCWD, (long)in("d"), -1, 0, 0);
-    say("chown user: fchown(-1, its gid) %ld, (0, -1) %ld; lchown of its link (-1, its gid) %ld, (0, -1) %ld; fchownat of its directory (-1, its gid) %ld, (-1, 0) %ld\n",
+    say("chown self: fchown(-1, its gid) %ld, (0, -1) %ld; lchown of its link (-1, its gid) %ld, (0, -1) %ld; fchownat of its directory (-1, its gid) %ld, (-1, 0) %ld\n",
         h, i, j, k, m, n);
-    say("chown user, root's things: chown(-1, -1) of / %ld; of its own program %ld; chown(its uid, -1) of it %ld; a missing name %ld\n",
+    say("chown self, root's things: chown(-1, -1) of / %ld; of its own program %ld; chown(its uid, -1) of it %ld; a missing name %ld\n",
         rc(SYS_chown, (long)"/", -1, -1, 0, 0), rc(SYS_chown, (long)SELF, -1, -1, 0, 0), rc(SYS_chown, (long)SELF, me, -1, 0, 0),
         rc(SYS_chown, (long)in("nope"), -1, -1, 0, 0));
-    proc_self("user");
+    proc_self("self");
     desc_row(0);
     unlink(in("f")); rmdir(in("d")); unlink(in("l"));
     say("own: gone: rmdir %ld\n", rmdir(D) == 0 ? 0L : -(long)errno);
