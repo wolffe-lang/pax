@@ -2981,11 +2981,12 @@ fn member(a: u64, g: u64) -> bool {
 /// on tmpfs for a file, a directory, a symbolic link and a socket's
 /// name alike (px38's `perm` section H; `own` section S).
 fn stamp(a: u64, d: u64) -> (u64, u64, u64) {
-    let u = cred.uid(a, cred.FS)
+    // PLANT A (px42-plant-a, never to be merged): the effective ids, not the file-system ids.
+    let u = cred.uid(a, cred.EFFECTIVE)
     if tree.mode(d) & S_ISGID != 0 {
         return (u, tree.gid(d), S_ISGID)
     }
-    (u, cred.gid(a, cred.FS), 0)
+    (u, cred.gid(a, cred.EFFECTIVE), 0)
 }
 
 /// px42: a new file's permission bits: `perm` as asked (the umask
