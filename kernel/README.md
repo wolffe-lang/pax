@@ -628,8 +628,31 @@ the id calls to a real Linux's recorded answers, as root and as a user.
   PAX; Linux keeps them per thread (a named difference).
 - What is not there: any permission check; set-ID execution (ruling
   R5); `capget` and `capset` (-ENOSYS, R9); more than 32 groups;
-  `PR_SET_DUMPABLE`; per-thread ids; an owner for a file (the next
-  lane).
+  `PR_SET_DUMPABLE`; per-thread ids.
+
+## Who a file belongs to (px42)
+
+The second lane of the users campaign (`notes/px42-the-owners.md`).
+A file has an owner and a group, stored, stamped, changed, reported
+and carried by an image. **Still nothing checks them** on `open`,
+`execve`, a path walk, a signal or a device: the one rule about who
+asks is `chown`'s own. The campaign's ruled claim, when its checks
+exist, is "enforced for honest programs; not a boundary against an
+attacker"; this lane enforces nothing but that one rule.
+
+| module or file | what |
+|---|---|
+| `tree/` | an inode's sixteenth word is its owner's user id (low 32 bits) and its group's id (high 32): `uid`, `gid`. The inode is the 128 bytes it was (32 a frame, 16,384 at most): the free list's link, the only use the sixteenth word had, lives in a free record's birth-time word. `create`, `mkdir`, `symlink`, `mksock` take the ids to stamp; `chown` (px36's `owned`) sets them, moves ctime and takes a regular file's set-user-ID bit, and its set-group-ID bit when the file is group-executable or the caller is outside its group; `adopt` gives an inode the archive entry's uid and gid |
+| `files/` | `stamp`: a new name is its maker's **file-system** user id and group id, or the directory's group under a set-group-ID directory (which a new directory there inherits; `file_perm`: a file made group-executable with S_ISGID there by one outside the group loses the bit). `mkdirat` keeps a sticky bit and never takes S_ISGID from its caller. `fchownat` (92, 93, 94, 260): any id for file-system user id 0; for anyone else Linux's rule, measured (its doc comment). `put_stat`/`put_statx` write uid and gid (`n_owner`): an inode's own, a `/proc` node's by `procfs.owner`, 0 for `/dev`, a pipe and a socket |
+| `procfs/` | `owner`: `/proc/<pid>` is its process's effective ids; its files too while the process is dumpable, root's once it is not |
+| `cred/` | `in_list` is public |
+| `initramfs/` | `uid`, `gid` (the header's third and fourth fields) |
+| `tools/mkinitramfs` | `/PATH=FILE:MODE:UID:GID` and a directory entry `/PATH/:MODE:UID:GID`; without an owner the archive is the bytes it was |
+
+- What is not there: every check but `chown`'s (the next lanes); an
+  owner for a pipe or a socket (`fstat` says 0:0; Linux says the
+  maker's ids); a `chown` of `/dev` or `/proc` (refused by name,
+  -EROFS); `O_TMPFILE`.
 
 ## The writable tree (px27)
 
@@ -652,14 +675,14 @@ programs. `tests/mpx3-tree` holds it to Linux's tmpfs.
   holds inodes by number.
 - px36 (`notes/px36-the-file-changes.md`): `tree`'s `link`, `symlink`
   (S_IFLNK|0777, the target held as a file's bytes; `target`),
-  `set_mode`, `set_times` (signed nanoseconds), `owned` (root's chown);
+  `set_mode`, `set_times` (signed nanoseconds), `owned` (root's chown; px42: `chown`);
   `files`' `walk` follows a symbolic link before the last component and,
   as the call says, at it (the path rewritten in pax_kbuf, 40 at most),
   and `linkat`, `symlinkat`, `readlinkat`, `fchmodat`, `fchmod`,
   `fchownat`, `utimensat`; `changeable` refuses a change to what PAX
-  keeps fixed (-EROFS), `root_or_none` an owner that is not root
-  (-EINVAL).
-- What is not there: an owner other than root, `utime` and `utimes`
+  keeps fixed (-EROFS). (px42: `owned` is `chown` and keeps any id;
+  `root_or_none` and its -EINVAL are gone.)
+- What is not there: `utime` and `utimes`
   (refused by name), `mmap` of a file, a second writable file system (`/dev` is
   fixed), `/proc` and `/sys` beyond `/proc/self/exe`, file locks,
   `fallocate`, `statfs`. `execve` runs a file only while it is still
