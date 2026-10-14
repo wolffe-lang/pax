@@ -15,14 +15,14 @@ for f in sys.argv[1:]:
         elif cur:
             h = [b - a for a, b in zip(cur, cur[1:])]
             cur = []
-            if len(h) < 3:
+            if len(h) < 2:
                 continue
             tot["plays"] += 1
             if h[0] == 3 and all(x == 2 for x in h[1:]):
                 tot["usual"] += 1
             elif h[0] == 2 and all(x == 2 for x in h[1:]):
                 tot["first2"] += 1
-            elif h[1] == 0 and all(x != 0 for x in h[2:]):
+            elif len(h) > 1 and h[1] == 0 and all(x != 0 for x in h[2:]):
                 tot["first_collapse"] += 1
             elif 0 in h[2:]:
                 tot["later_collapse"] += 1
