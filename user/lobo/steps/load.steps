@@ -7,6 +7,23 @@
 # then /proc/meminfo, /proc/sys/fs/file-nr, /proc/net/sockstat and
 # every process's /proc/<pid>/status); then a reload under a load,
 # which must lose no request.
+#
+# file-nr is read by the shell itself (`read … < file`), not by `cat`
+# (px41, pax#47). A shell that starts a program keeps one end of a
+# close-on-exec socket pair open until it has seen the program's
+# `execve` succeed (pelt: `socketpair(AF_UNIX, SOCK_SEQPACKET |
+# SOCK_CLOEXEC)`, closed after the child's exec; strace, notes/px41),
+# and whether it has run again to close it before the program opens its
+# second file is a race inside the guest, settled by where the timer
+# tick falls. When `cat` won, file-nr counted the shell's socket: one
+# open file more, in 7 of 320 censuses on CI, and R10 failed when
+# censuses 1 and 3 fell on different sides. The shell's own read starts
+# nothing, so nothing of the kind is open when the count is made. It
+# comes first, and the rest is still one `cat`: the frames free and
+# every process's pages must be read with the shell asleep between them
+# (read by two programs with the shell awake in between, the shell's
+# own heap grew 124 kB between the two readings at census 1, and R10's
+# frames moved, three runs of three on kasumi).
 pax: wait ^\$ $ 120
 type cd /srv
 mark
@@ -21,25 +38,25 @@ load r0 80 /,/big.txt @ROUND@ 4
 loadwait r0
 sleep 2
 mark
-type echo census 0; cat /proc/meminfo /proc/sys/fs/file-nr /proc/net/sockstat /proc/[0-9]*/status; echo census end
+type echo census 0; read fn < /proc/sys/fs/file-nr; echo "$fn"; cat /proc/meminfo /proc/net/sockstat /proc/[0-9]*/status; echo census end
 wait ^census end 60
 load r1 80 /,/big.txt @ROUND@ 4
 loadwait r1
 sleep 2
 mark
-type echo census 1; cat /proc/meminfo /proc/sys/fs/file-nr /proc/net/sockstat /proc/[0-9]*/status; echo census end
+type echo census 1; read fn < /proc/sys/fs/file-nr; echo "$fn"; cat /proc/meminfo /proc/net/sockstat /proc/[0-9]*/status; echo census end
 wait ^census end 60
 load r2 80 /,/big.txt @ROUND@ 4
 loadwait r2
 sleep 2
 mark
-type echo census 2; cat /proc/meminfo /proc/sys/fs/file-nr /proc/net/sockstat /proc/[0-9]*/status; echo census end
+type echo census 2; read fn < /proc/sys/fs/file-nr; echo "$fn"; cat /proc/meminfo /proc/net/sockstat /proc/[0-9]*/status; echo census end
 wait ^census end 60
 load r3 80 /,/big.txt @ROUND@ 4
 loadwait r3
 sleep 2
 mark
-type echo census 3; cat /proc/meminfo /proc/sys/fs/file-nr /proc/net/sockstat /proc/[0-9]*/status; echo census end
+type echo census 3; read fn < /proc/sys/fs/file-nr; echo "$fn"; cat /proc/meminfo /proc/net/sockstat /proc/[0-9]*/status; echo census end
 wait ^census end 60
 load reload 80 / 30 4
 sleep 10
@@ -48,7 +65,7 @@ type lobo -s reload -c conf/four.conf
 wait ^reload complete \(generation 2\) workers=4/4 60
 loadwait reload
 mark
-type echo census 4; cat /proc/meminfo /proc/sys/fs/file-nr /proc/net/sockstat /proc/[0-9]*/status; echo census end
+type echo census 4; read fn < /proc/sys/fs/file-nr; echo "$fn"; cat /proc/meminfo /proc/net/sockstat /proc/[0-9]*/status; echo census end
 wait ^census end 60
 mark
 type lobo -s stop -c conf/four.conf
