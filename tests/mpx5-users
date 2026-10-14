@@ -32,14 +32,18 @@
 #     and /proc report: 278 lines; and by 1000:1000: 9 lines;
 #   - perm (user/elf/perm.c: px38's probe, byte for byte), as root,
 #     which drops to each of its five actors itself: 382 lines on
-#     Linux. PAX has `chown`'s rule and the stamps and NO other
-#     permission check yet, so what is held is: all 71 lines of section
-#     E (`chown`) and all 13 of section H (who owns what is made), for
-#     every actor; and the root actor's 81 rows, of which 67 are
-#     Linux's, 13 differ only in `execve` of a program written since
-#     boot (px27's named limit, -EACCES) and one is a check on `open`
-#     (the next lane's). Every line PAX writes is held to
-#     tests/mpx5-users.d/perm.pax, so the lane that adds the checks
+#     Linux. px43 adds the file checks, so what is held is: all 71
+#     lines of section E (`chown`), all 13 of H (who owns what is
+#     made) and all 11 of G (access by the real ids, open by the
+#     file-system ids), for every actor; A (a file by mode and actor)
+#     62 of 105 whole and the other 43 Linux's but for `execve` of a
+#     program written since boot (px27's named limit, -EACCES; 30 of
+#     them a user's); B (a directory) 91 of 105 whole and its first
+#     four columns (list, stat of a name, chdir, create) in all 105 —
+#     the other 14 are directory write, U4's; the root actor's 81 rows,
+#     68 Linux's and 13 differing only in that `execve`. 295 of the 382
+#     lines in all. Every line PAX writes is held to
+#     tests/mpx5-users.d/perm.pax, so the lane that adds the next checks
 #     moves that file and the counts with it;
 #   - `own soak 100000`, as root and as 1000:1000: 1.2 million calls
 #     that make, chown and remove;
@@ -48,6 +52,28 @@
 #     owners (tools/mkinitramfs; kernel/tree's `adopt`; pax#48): the
 #     reference is the same binary on a Linux that unpacked the same
 #     archive as its root.
+#
+# px43, the third lane: the file checks. Four sessions in an image of
+# their own, whose /k carries every case with its owner and mode in the
+# archive (no `chown` at run time); the reference is real root's Linux
+# booted with the same archive as its root:
+#
+#   - chk (user/elf/chk.c), as root, dropping to px38's five actors and
+#     to twelve states of real, effective and file-system ids: the
+#     search of every directory a path passes (`.`, `..`, a trailing
+#     `/`, a missing or too-long name, a working directory and a
+#     directory descriptor that lost search, symbolic links through
+#     them); open and truncate (O_TRUNC, O_CREAT where the directory
+#     refuses, a directory, a socket's name); a name made in a
+#     directory; the access family's ids (AT_EACCESS asks the
+#     file-system ids); `execve` of an archive file (user/elf/seven.S)
+#     at 21 modes by every actor, which perm cannot show on PAX; a
+#     descriptor held across a `chmod`: 264 lines;
+#   - the same as 1000:1000 alone (`as 1000 1000 /bin/chk user`, its
+#     own file made 0000 by itself while it holds it): 46 lines;
+#   - `chk soak 100000`, as root and as 1000:1000: a million calls that
+#     open, are refused, walk, ask `access`, truncate, make and remove,
+#     and 200 execs.
 #
 #   tests/mpx5-users [--images DIR | --no-boot | --only build] [--bin DIR] [--bore DIR]
 #                    [--firmware bios|uefi|both] [--tier native|release|both]
@@ -67,12 +93,13 @@
 # **No account is made anywhere**: the ids are numbers a program asks
 # the kernel for.
 #
-# **What this suite does not hold.** No permission check exists yet
-# but `chown`'s own (px42): a process that is 1000 may still open,
-# remove, signal and bind what root may (those are the lanes after
-# px42). Nothing here shows a boundary; it shows that the ids are kept,
-# that the id calls follow Linux's rules, that a file has the owner
-# Linux would give it, and who may change that owner.
+# **What this suite does not hold.** px43's checks decide who may open,
+# truncate, ask `access` about, run and walk through a file; a process
+# that is 1000 may still remove, rename, `chmod`, signal and bind what
+# root may (directory write, the sticky bit and the ownership rules are
+# U4's; signals and devices U5's). The checks are enforced for honest
+# programs; not a boundary against an attacker: nothing here shows a
+# boundary, only that each check answers as Linux's does.
 #
 # `--bin DIR`: the programs already built (tools/mkcred's six) — for a
 # host whose own libc they must not be built with: build them in a
@@ -109,29 +136,33 @@
 #        - perm: the classes above, counted, and the whole of PAX's
 #          text held to tests/mpx5-users.d/perm.pax.
 #   U2 by name: the `~` lines are exactly PAX's (`~bound`: 33 groups
-#      -EINVAL; `~thread`: ids are a process's; px42: `~desc`: a pipe's
-#      and a socket's `fstat` say 0:0, where Linux says the maker's
-#      ids; `~fixed`: a `chown` of /dev/null and of a /proc file is
+#      -EINVAL; `~thread`: ids are a process's; px42's `~desc` is
+#      gone: px43 (pax#58) gives a pipe, a socketpair and an AF_UNIX
+#      socket their maker's file-system ids, and own's `desc` lines are
+#      compared with Linux's; `~fixed`: a `chown` of /dev/null and of a /proc file is
 #      -EROFS and O_TMPFILE -EOPNOTSUPP); the kernel's `refused:`
 #      lines are exactly the `setgroups` ones (65,536 groups in cred,
 #      33 in ident, as root; none as a user, who is refused -EPERM
 #      first as on Linux; ids' one, which is px34's; own's three,
-#      which are `~fixed`'s; perm's, which are px27's loader limit, 65
-#      times, and a SIGSTOP that is dropped, three times);
+#      which are `~fixed`'s; perm's, which are px27's loader limit, 43
+#      times (65 before px43: now only where the class allows execute),
+#      and a SIGSTOP that is dropped, three times; none in chk's);
 #      -ENOSYS only for the numbers named; nobody killed.
 #   U3 every frame back: the frames line shows as many free after init's
 #      end as before the first program (but for the inode table's own
 #      growth, which the tree's line counts). perm leaves its files
-#      behind, on Linux too: there the frames that are not back are
-#      exactly those the tree's line says it holds.
+#      behind, on Linux too, and chk writes into the image's files (a
+#      held descriptor's write; root's O_TRUNC): there the frames that
+#      are not back are exactly those the tree's line says it holds.
 #   U4 the soak: the program's line (a million calls, 10,000 children,
 #      0 wrong answers; px42's: 1.2 million calls that make, chown and
-#      remove, 0 wrong answers) is the recording's (U1), and the free
+#      remove, 0 wrong answers; px43's: a million calls and 200 execs, 0
+#      wrong answers) is the recording's (U1), and the free
 #      memory it read at each quarter is one number.
 #   U5 the end: `PAX: init … ended with status <s>; nothing left to
 #      run`, `halt`, and qemu-halt holds the machine halted.
-# The own and perm sessions of the first leg run first, and the suite
-# stops at the first failure of either: `stopped early`. A boot ends at the kernel's `halt`
+# The own, perm and chk sessions of the first leg run first, and the
+# suite stops at the first failure of any of them: `stopped early`. A boot ends at the kernel's `halt`
 # or at a `PANIC` line, whichever comes.
 #
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
@@ -207,9 +238,6 @@ R4_PAX='root setgroups(65536, list) = -22, then getgroups(0, NULL) = 4'
 BOUND='~bound: setgroups(33, list) = -22, then getgroups(0, NULL) = 32'
 THREAD_ROOT='~thread: a second thread'"'"'s raw setresuid(1000, 1000, 1000) = 0; the first thread'"'"'s getuid is then 1000'
 # px42's by-rule lines.
-DESC_OWN='~desc own : a pipe it made is 0:0, a socketpair 0:0, a socket 0:0'
-DESC_ROOT='~desc root: a pipe it made is 0:0, a socketpair 0:0, a socket 0:0'
-DESC_USER='~desc self: a pipe it made is 0:0, a socketpair 0:0, a socket 0:0'
 FIXED='~fixed: chown(0, 0) of /dev/null -30, of /proc/self/status -30; open(O_TMPFILE) -95'
 FIXED_WHY='refused: a mode, an owner, times or a link of what PAX keeps fixed (/dev, /proc, /sys, a pipe, a socket), -30'
 TMPFILE_WHY='refused: an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE), -95'
@@ -565,8 +593,7 @@ for leg in $legs; do
                 ident)      wt="$THREAD_ROOT|$BOUND"; wr="syscall 116: $GROUPS_WHY" ;;
                 ident-user) wt="$THREAD_ROOT|$BOUND_USER" ;;
                 ids)        wn=$IDS_ENOSYS; wr=$IDS_REFUSED ;;
-                own)        wt="$DESC_OWN|$DESC_ROOT|$FIXED"; wr="syscall 257: $TMPFILE_WHY|syscall 92: $FIXED_WHY|syscall 92: $FIXED_WHY" ;;
-                own-user)   wt="$DESC_USER" ;;
+                own)        wt="$FIXED"; wr="syscall 257: $TMPFILE_WHY|syscall 92: $FIXED_WHY|syscall 92: $FIXED_WHY" ;;
                 perm)       wr=$PERM_REFUSED ;;
             esac
             [ "$tl" = "$wt" ] || why+=" the '~' lines are '$tl', not '$wt';"
