@@ -535,26 +535,41 @@ other check, so a user's rows differ wherever Linux refuses him):
 Shas are this branch's (`px42`). kasumi paths are under
 `~/lanes/px42/`; hasu's likewise.
 
+**The rebase.** Trunk moved to `35660af` (px41 merged: the runner
+flakes, in the harness, `user/play`, three other suites' scripts and
+`docs/SOURCES.md`; nothing under `kernel/`) when the work was otherwise
+ready, and the branch was rebased onto it once; the one conflict was
+`docs/SOURCES.md`, both sections kept. The shas in this note are the
+rebased ones. The history before it is kept on origin as
+`px42-prerebase` (head `4286b3e`, the code at `7e96721`): the kasumi
+and hasu logs (`*-7e96721.*`), CI run 38504776952 and the two plant
+branches name that history. The rebase changed no file under `kernel/`
+(`git diff 4286b3e 65ab5a7 -- kernel/` is empty) and none of this
+lane's suites or tools: `kmain_console` built from the two trees, at
+the same path on kasumi, is the same bytes (native `0ac7fd21…`, release
+`e85bd036…`; a native build at another path differs only by the path
+it records).
+
 ### What was written
 
-- The prediction: `b269b06` (§1 to §3, before any change).
-- The programs: `2a9ac04` (`user/elf/own.c`; px38's `perm.c` copied to
+- The prediction: `c9805de` (§1 to §3, before any change).
+- The programs: `24b1660` (`user/elf/own.c`; px38's `perm.c` copied to
   `user/elf/`, held to `notes/px38/probes/perm.c` by U0;
-  `tools/mkcred` builds both), `861d11b` (the rows the first Linux run
+  `tools/mkcred` builds both), `14e72b5` (the rows the first Linux run
   asked for).
-- The recorder: `e0bbd12`, `319cea3` (`notes/px42/vminit.c`,
+- The recorder: `fb632b4`, `3861b35` (`notes/px42/vminit.c`,
   `linux-vm.sh`, `build.sh`).
-- The kernel: `a1cccd5` (`kernel/cred`: `in_list` public), `5b38494`
-  (`kernel/initramfs`: uid, gid), `8243273` (`kernel/procfs`:
-  `owner`), `76dc79f` (`kernel/tree` and `kernel/files`: the owner
-  word, the stamps, `chown`'s rule, `stat`), `f9aceba` (comments).
-- The image tool: `8e752e2` (`tools/mkinitramfs`).
-- The suites: `a9d3ce9` (`tests/mpx3-tree`, `user/elf/tree.c`),
-  `007eed0` (`user/elf/ident.c` and px39's recordings taken again),
-  `13a87b6` (real root's recordings of the new sessions), `929b1cf`
+- The kernel: `c03c02a` (`kernel/cred`: `in_list` public), `dfa1a52`
+  (`kernel/initramfs`: uid, gid), `b68c667` (`kernel/procfs`:
+  `owner`), `1e30611` (`kernel/tree` and `kernel/files`: the owner
+  word, the stamps, `chown`'s rule, `stat`), `1f5d6e6` (comments).
+- The image tool: `a8d55c3` (`tools/mkinitramfs`).
+- The suites: `7502f98` (`tests/mpx3-tree`, `user/elf/tree.c`),
+  `57da6ba` (`user/elf/ident.c` and px39's recordings taken again),
+  `dbe829d` (real root's recordings of the new sessions), `1a27569`
   (`tests/mpx5-users`, `perm.pax`, `ids.pax`).
-- The words: `23c6c73` (`kernel/README.md`), `170e784`
-  (`docs/SOURCES.md`), `7e96721` (CHANGELOG).
+- The words: `ed714c6` (`kernel/README.md`), `5291315`
+  (`docs/SOURCES.md`), `f456fc8` (CHANGELOG).
 
 ### What was measured, and where it is
 
