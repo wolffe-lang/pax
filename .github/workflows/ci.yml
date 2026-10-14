@@ -1316,10 +1316,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace (apt)
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev make
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev make strace
+          strace -V | head -n 1
           qemu-system-x86_64 --version
           qemu-system-x86_64 -audiodev help
           clang --version
@@ -1345,6 +1346,7 @@ jobs:
       - name: the speaker plays, the plan's legs (all four in the full tier)
         env:
           PAX_REQUIRE_UEFI: "1"
+          PAX_REQUIRE_STRACE: "1" # px41: K9, play's sleeps
         run: tests/mpx3-speaker $PAX_LEGS
 
       - name: keep the programs' sums, the captures' tones, the timelines, the transcripts
@@ -1372,6 +1374,7 @@ jobs:
             build/mpx3-speaker-*.typed
             build/mpx3-speaker-*.wav
             build/mpx3-speaker-runs.txt
+            build/mpx3-speaker-play.strace
           retention-days: 14
           if-no-files-found: warn
 
