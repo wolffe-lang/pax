@@ -147,6 +147,7 @@
 //! kernel stack: kernel/sched, "Regions").
 
 use console
+use cred
 use event
 use frames
 use initramfs
@@ -321,6 +322,12 @@ const AT_EMPTY_PATH: u64 = 0x1000
 
 // mode bits
 const S_IFDIR: u64 = 0x4000
+const S_IFMT: u64 = 0xf000 // px42, with the next five
+const S_IFREG: u64 = 0x8000
+const S_ISUID: u64 = 0x800
+const S_ISGID: u64 = 0x400
+const S_ISVTX: u64 = 0x200
+const S_IXGRP: u64 = 0x8
 const S_IFCHR: u64 = 0x2000
 const MODE_DIR: u64 = 0x41ed // 040755
 const MODE_CONSOLE: u64 = 0x2190 // 020620
@@ -365,7 +372,7 @@ const R_RENFLAG: u64 = 27
 const R_ATFLAG: u64 = 26
 const R_EXEC: u64 = 25
 const R_FIXED: u64 = 24 // px36
-const R_OWNER: u64 = 23 // px36
+// 23 was px36's R_OWNER (an owner that is not root): px42 keeps any id
 
 /// -e as %rax carries it.
 pub fn neg(e: u64) -> u64 {
@@ -401,9 +408,6 @@ pub fn why(r: u64) -> str {
     }
     if r == R_FIXED {
         return "a mode, an owner, times or a link of what PAX keeps fixed (/dev, /proc, /sys, a pipe, a socket)"
-    }
-    if r == R_OWNER {
-        return "an owner or a group that is not root (PAX has one user)"
     }
     if r == R_RENFLAG {
         return "a renameat2 flag (RENAME_NOREPLACE, RENAME_EXCHANGE, RENAME_WHITEOUT)"
@@ -2290,7 +2294,8 @@ pub fn unix_bind(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
         refuse(a, R_DEVRO)
         return neg(EROFS)
     }
-    let i = tree.mksock(rf(par), raw() + ns, nl, 0x1ff & !mask_of(a), r)
+    let (su, sg, _dg) = stamp(a, rf(par))
+    let i = tree.mksock(rf(par), raw() + ns, nl, 0x1ff & !mask_of(a), r, su, sg)
     if tree.failed(i) {
         return i
     }
@@ -2961,6 +2966,39 @@ fn resolve_k(a: u64, dirfd: u64, rl: u64) -> u64 {
     n
 }
 
+/// px42: whether the process is in group `g` for a file's sake: its
+/// file-system group id or one of its supplementary groups.
+fn member(a: u64, g: u64) -> bool {
+    cred.gid(a, cred.FS) == g || cred.in_list(a, g)
+}
+
+/// px42: what a name made in directory inode `d` is stamped with: the
+/// maker's file-system user id, and its file-system group id — or the
+/// directory's group when the directory is set-group-ID: (the user id,
+/// the group id, S_ISGID when the directory has it, else 0). Measured
+/// on tmpfs for a file, a directory, a symbolic link and a socket's
+/// name alike (px38's `perm` section H; `own` section S).
+fn stamp(a: u64, d: u64) -> (u64, u64, u64) {
+    let u = cred.uid(a, cred.FS)
+    if tree.mode(d) & S_ISGID != 0 {
+        return (u, tree.gid(d), S_ISGID)
+    }
+    (u, cred.gid(a, cred.FS), 0)
+}
+
+/// px42: a new file's permission bits: `perm` as asked (the umask
+/// applied), without S_ISGID when the file is group-executable and its
+/// maker is neither privileged (file-system user id 0) nor in the
+/// group `g` it is given — which can only be a set-group-ID
+/// directory's (measured: 06777 there by one outside the group is
+/// 4755, 02666 keeps the bit, root keeps both).
+fn file_perm(a: u64, perm: u64, g: u64) -> u64 {
+    if perm & S_ISGID != 0 && perm & S_IXGRP != 0 && cred.uid(a, cred.FS) != 0 && !member(a, g) {
+        return perm & !S_ISGID
+    }
+    perm
+}
+
 /// px27: the process's file mode creation mask (`umask(2)`): 022 until
 /// it sets one.
 fn mask_of(a: u64) -> u64 {
@@ -3047,7 +3085,8 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
         if !of_room() {
             return neg(ENFILE)
         }
-        let i = tree.create(rf(par), raw() + ns, nl, mode & !mask_of(a) & 0xfff)
+        let (su, sg, _dg) = stamp(a, rf(par))
+        let i = tree.create(rf(par), raw() + ns, nl, file_perm(a, mode & !mask_of(a) & 0xfff, sg), su, sg)
         if tree.failed(i) {
             return i
         }
@@ -3636,7 +3675,11 @@ pub fn mkdirat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64) -> u64 {
         refuse(a, R_DEVRO)
         return neg(EROFS)
     }
-    let i = tree.mkdir(rf(par), raw() + ns, nl, mode & !mask_of(a) & 0x1ff)
+    // px42: a new directory keeps the sticky bit it is asked for and
+    // never S_ISGID, which it has exactly when its parent has (measured:
+    // 02777 in a plain directory is 0755 for root too; 01777 is 1755).
+    let (su, sg, dg) = stamp(a, rf(par))
+    let i = tree.mkdir(rf(par), raw() + ns, nl, (mode & ((0x1ff & !mask_of(a)) | S_ISVTX)) | dg, su, sg)
     if tree.failed(i) {
         return i
     }
@@ -3816,22 +3859,33 @@ pub fn fchmod(a: u64, fd: u64, mode: u64) -> u64 {
     0
 }
 
-/// px36: an id as `chown` reads it: 0 (root) and 0xffffffff (-1, left
-/// alone) are what PAX has.
-fn root_or_none(id: u64) -> bool {
-    id & 0xffffffff == 0 || id & 0xffffffff == 0xffffffff
-}
-
-/// px36: `fchownat(dirfd, path, owner, group, flags)` (and `chown`,
-/// `lchown`; `fchown` with `fd` and no path, `va` 0): PAX has one user,
-/// root, so an owner and a group each 0 or -1 are what root asks on
-/// Linux: 0, ctime moved, a regular file's set-user-ID bit (and its
-/// set-group-ID bit when it is group-executable) cleared (measured on
-/// tmpfs). Any other id is refused by name, -EINVAL: POSIX's errno for
-/// an id that is not a value the implementation supports (Linux, as
-/// root, would keep it: named drift). Flags AT_SYMLINK_NOFOLLOW and
-/// AT_EMPTY_PATH; any other -EINVAL. `byfd`: `fchown`, `dirfd` the
-/// descriptor and no path.
+/// `fchownat(dirfd, path, owner, group, flags)` (and `chown`, `lchown`;
+/// `fchown` with `fd` and no path, `va` 0). px36 answered root asking
+/// for root; px42: any id is kept, and who may ask is Linux's rule,
+/// measured for the four calls alike (px38's `perm` section E, `own`
+/// section C; kernel/tree's `chown` does the change):
+///
+/// - an id is the low 32 bits of its register; -1 leaves it alone;
+/// - **privileged** is file-system user id 0 (ruling R9; the effective
+///   id is not asked: `fsid` rows) and may set anything;
+/// - anyone else naming an owner must be the file's owner (by
+///   file-system user id) and name that same id; naming a group, must
+///   be the file's owner and name the group the file has, its own
+///   file-system group id or one of its supplementary groups;
+/// - a regular file's set-user-ID bit goes at every success, and its
+///   set-group-ID bit when the file is group-executable, or when the
+///   caller is not privileged and not in the group the file had; one
+///   who is not the owner may not make a call that would take a bit;
+/// - so `(-1, -1)` on a file with no bit to lose is 0 for anybody,
+///   and moves ctime like every success; everything else by one who is
+///   not the owner is -EPERM, and a refusal changes nothing.
+///
+/// Flags AT_SYMLINK_NOFOLLOW (the link itself, as `lchown`) and
+/// AT_EMPTY_PATH; any other -EINVAL. What PAX keeps fixed (`/dev`,
+/// `/proc`, `/sys`, a pipe, a socket) is refused by name, -EROFS, as
+/// before (px36's named drift). `byfd`: `fchown`, `dirfd` the
+/// descriptor and no path. This is the one rule about who asks that
+/// PAX has before U3: no `open`, walk or `chmod` asks yet.
 pub fn fchownat(a: u64, pml4: u64, dirfd: u64, va: u64, owner: u64, group: u64, flags: u64, byfd: bool) -> u64 {
     var n: u64 = 0
     if byfd {
@@ -3848,15 +3902,28 @@ pub fn fchownat(a: u64, pml4: u64, dirfd: u64, va: u64, owner: u64, group: u64, 
             return neg(rf(n))
         }
     }
-    if !root_or_none(owner) || !root_or_none(group) {
-        refuse(a, R_OWNER)
-        return neg(EINVAL)
-    }
     let r = changeable(a, n)
     if r != 0 {
         return r
     }
-    tree.owned(rf(n))
+    let i = rf(n)
+    let u = owner & 0xffffffff
+    let g = group & 0xffffffff
+    let fu = cred.uid(a, cred.FS)
+    if fu != 0 {
+        let mine = tree.uid(i) == fu
+        if u != tree.KEEP && !(mine && u == fu) {
+            return neg(EPERM)
+        }
+        if g != tree.KEEP && !(mine && (g == tree.gid(i) || member(a, g))) {
+            return neg(EPERM)
+        }
+        let m = tree.mode(i)
+        if !mine && m & S_IFMT == S_IFREG && (m & S_ISUID != 0 || (m & S_ISGID != 0 && (m & S_IXGRP != 0 || !member(a, tree.gid(i))))) {
+            return neg(EPERM)
+        }
+    }
+    tree.chown(i, u, g, fu != 0 && !member(a, tree.gid(i)))
     0
 }
 
@@ -4015,7 +4082,8 @@ pub fn symlinkat(a: u64, pml4: u64, tva: u64, ndfd: u64, nva: u64) -> u64 {
         refuse(a, R_FIXED)
         return neg(EROFS)
     }
-    let i = tree.symlink(rf(np), raw() + ns, nl, raw() + NORM, tl)
+    let (su, sg, _dg) = stamp(a, rf(np))
+    let i = tree.symlink(rf(np), raw() + ns, nl, raw() + NORM, tl, su, sg)
     if tree.failed(i) {
         return i
     }
@@ -4208,8 +4276,42 @@ fn tnsec(t: u64) -> u64 {
     if r == 0 { 0 } else { NS - r }
 }
 
+/// px42: the area of the process a `/proc` node is about: the named
+/// process's for `/proc/<pid>` and what is in it, else the caller's
+/// (`/proc/self`); 0 when the named process is gone.
+fn syn_area(a: u64, n: u64) -> u64 {
+    let tp = procfs.pid_of(rf(n))
+    if tp == 0 {
+        return a
+    }
+    let sl = sched.proc_slot(tp)
+    if sl == sched.SLOTS {
+        return 0
+    }
+    sched.proc_area_of_leader(sl)
+}
+
+/// px42: a node's owner (`which` 0) or group (1): an inode's own;
+/// a `/proc` node's by kernel/procfs's rule; 0 for everything else
+/// (`/dev` and what is in it, a pipe, a socket: PAX keeps no owner for
+/// them, named drift).
+fn n_owner(a: u64, n: u64, which: int) -> u64 {
+    let t = ty(n)
+    if t == T_INO {
+        return if which == 0 { tree.uid(rf(n)) } else { tree.gid(rf(n)) }
+    }
+    if t == T_SYN {
+        let ta = syn_area(a, n)
+        if ta == 0 {
+            return 0
+        }
+        return procfs.owner(rf(n), ta, which)
+    }
+    0
+}
+
 /// Write `struct stat` (x86-64, 144 bytes) for node `n` at user `st`.
-fn put_stat(pml4: u64, st: u64, n: u64) -> u64 {
+fn put_stat(a: u64, pml4: u64, st: u64, n: u64) -> u64 {
     if !uaccess.writable(pml4, st, 144) {
         return neg(EFAULT)
     }
@@ -4218,6 +4320,8 @@ fn put_stat(pml4: u64, st: u64, n: u64) -> u64 {
     uaccess.put(pml4, st + 8, n_ino(n), 8) // st_ino
     uaccess.put(pml4, st + 16, n_nlink(n), 8) // st_nlink
     uaccess.put(pml4, st + 24, n_mode(n), 4) // st_mode
+    uaccess.put(pml4, st + 28, n_owner(a, n, 0), 4) // st_uid (px42)
+    uaccess.put(pml4, st + 32, n_owner(a, n, 1), 4) // st_gid
     uaccess.put(pml4, st + 40, dev_t(n_rdev(n, 0), n_rdev(n, 1)), 8) // st_rdev
     uaccess.put(pml4, st + 48, n_size(n), 8) // st_size
     uaccess.put(pml4, st + 56, PAGE, 8) // st_blksize
@@ -4232,7 +4336,7 @@ fn put_stat(pml4: u64, st: u64, n: u64) -> u64 {
 }
 
 /// Write `struct statx` (256 bytes) for node `n` at user `sx`.
-fn put_statx(pml4: u64, sx: u64, n: u64) -> u64 {
+fn put_statx(a: u64, pml4: u64, sx: u64, n: u64) -> u64 {
     if !uaccess.writable(pml4, sx, 256) {
         return neg(EFAULT)
     }
@@ -4241,6 +4345,8 @@ fn put_statx(pml4: u64, sx: u64, n: u64) -> u64 {
     uaccess.put(pml4, sx, if ty(n) == T_INO { 0xfff } else { 0x7ff }, 4)
     uaccess.put(pml4, sx + 4, PAGE, 4) // stx_blksize
     uaccess.put(pml4, sx + 16, n_nlink(n), 4) // stx_nlink
+    uaccess.put(pml4, sx + 20, n_owner(a, n, 0), 4) // stx_uid (px42)
+    uaccess.put(pml4, sx + 24, n_owner(a, n, 1), 4) // stx_gid
     uaccess.put(pml4, sx + 28, n_mode(n), 2) // stx_mode
     uaccess.put(pml4, sx + 32, n_ino(n), 8) // stx_ino
     uaccess.put(pml4, sx + 40, n_size(n), 8) // stx_size
@@ -4264,7 +4370,7 @@ pub fn fstat(a: u64, pml4: u64, fd: u64, st: u64) -> u64 {
     if kind(a, fd) == K_CLOSED {
         return neg(EBADF)
     }
-    put_stat(pml4, st, node_of(a, fd))
+    put_stat(a, pml4, st, node_of(a, fd))
 }
 
 /// `newfstatat(dirfd, path, st, flags)` (and `stat`, `lstat` through it).
@@ -4276,7 +4382,7 @@ pub fn fstatat(a: u64, pml4: u64, dirfd: u64, va: u64, st: u64, flags: u64) -> u
     if is_err(n) {
         return neg(rf(n))
     }
-    put_stat(pml4, st, n)
+    put_stat(a, pml4, st, n)
 }
 
 /// `statx(dirfd, path, flags, mask, sx)`: every basic field, whatever
@@ -4286,7 +4392,7 @@ pub fn statx(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, sx: u64) -> u64
     if is_err(n) {
         return neg(rf(n))
     }
-    put_statx(pml4, sx, n)
+    put_statx(a, pml4, sx, n)
 }
 
 // --- directories --------------------------------------------------------------
