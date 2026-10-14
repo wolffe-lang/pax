@@ -17,9 +17,28 @@
 #
 # The timeline: the tones started (`on` events) are exactly the file's,
 # step by step, count for count (so every pitch, the order and the
-# number of steps); every step but each slot's last is held arp/10 ms
-# ticks within one, and at least 90% of them exactly; each slot sounds
-# (its first `on` to its `off`) its sounding time within one tick.
+# number of steps); at least 90% of the steps but each slot's last are
+# held exactly arp/10 ms ticks; every tone of a chord starts within one
+# tick of its place; each slot sounds (its first `on` to its `off`) its
+# sounding time within one tick.
+#
+# A tone's place (px41, pax#45). play's schedule gives every tone a
+# time; PAX's sleep ends on the tick after its target (a sleep is never
+# shorter than asked, and the clock counts whole ticks), so a chord's
+# tones start every arp/10 ms ticks, each one tick after its time. A
+# chord's places are the ticks that spacing gives, fixed by the middle
+# one of its tones (the median of each tone's start less its step times
+# the spacing). The rule here was "every step is held the spacing
+# within one tick". It was meant to let one late tick pass and it does
+# not: a tone one tick late starts on the NEXT tone's time, play then
+# has nothing to sleep and starts that tone in the same tick, so one
+# late tick reads 3, 0, 3: a step two ticks off, though no tone is more
+# than one tick from its place. Reproduced on kasumi with play's sleep
+# already absolute and the host loaded (notes/px41: the suite's native
+# UEFI chord, steps 195 to 197 held 3, 0, 3; one start of 600 so under
+# 12 busy loops on four CPUs). Held to its place, a tone two ticks late
+# still fails (the same run's release UEFI chord: steps of 4 and 0), as
+# does a chord that drifts (the slot's time, below).
 #
 # The capture: QEMU 11.1's `wav` backend writes only while the speaker
 # sounds and renders in steps of about 1.9 ms, so a 20 ms step comes out
@@ -208,6 +227,7 @@ def main(argv):
                    % (k + 1, len(want), got[k:k + 6], want[k:k + 6]))
     else:
         held = []      # (ticks, step ticks) for every step but a slot's last
+        astray = []    # tones more than one tick from their place
         spans = []     # (slot ticks, wanted ms)
         j = 0
         for kind, cs, us, sound, arp in sl:
@@ -223,17 +243,24 @@ def main(argv):
                 continue
             spans.append((off - mine[0][1], sound / 1000.0))
             if kind == "chord":
+                step = arp // 10000
                 for (a, b) in zip(mine, mine[1:]):
-                    held.append((b[1] - a[1], arp // 10000))
+                    held.append((b[1] - a[1], step))
+                dev = [t - mine[0][1] - i * step for i, (_, t, _) in enumerate(mine)]
+                mid = sorted(dev)[len(dev) // 2]
+                for i, d in enumerate(dev):
+                    if abs(d - mid) > 1:
+                        astray.append("tone %d of slot %d is %+d ticks from its place" % (i + 1, len(spans), d - mid))
         if held:
             exact = sum(1 for h, w in held if h == w)
-            far = [h for h, w in held if abs(h - w) > 1]
-            if far:
-                bad.append("%d steps held %s ticks" % (len(far), sorted(set(far))))
+            if astray:
+                bad.append("; ".join(astray[:4]) + (" and %d more" % (len(astray) - 4) if len(astray) > 4 else ""))
             if exact < 0.9 * len(held):
                 bad.append("only %d of %d steps held exactly" % (exact, len(held)))
-            parts.append("timeline: %d tones as the file, %d of %d steps held exactly %d ticks"
-                         % (len(got), exact, len(held), held[0][1]))
+            odd = sorted(set(h for h, w in held if abs(h - w) > 1))
+            parts.append("timeline: %d tones as the file, %d of %d steps held exactly %d ticks%s, every tone within a tick of its place"
+                         % (len(got), exact, len(held), held[0][1],
+                            (" (a late tick: steps of %s)" % ", ".join(str(x) for x in odd)) if odd and not astray else ""))
         for k, (ticks, ms) in enumerate(spans):
             if abs(ticks * 10.0 - ms) > 10.5:
                 bad.append("slot %d sounded %d ticks, the file %.0f ms" % (k + 1, ticks, ms))
