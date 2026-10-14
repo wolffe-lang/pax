@@ -558,7 +558,7 @@ int main(int argc, char **argv)
     SETID = argc > 1 && strcmp(argv[1], "-") != 0 ? argv[1] : NULL;
     show("start");
     say("/proc/self/setgroups: mode %o\n", mode_of("/proc/self/setgroups"));
-    say("~owner: /proc/self/setgroups is owned %s\n", own_of("/proc/self/setgroups"));
+    say("owner: /proc/self/setgroups is owned %s\n", own_of("/proc/self/setgroups")); /* px42: a /proc file has its process's owner */
     section_states();
     section_faults();
     section_width();
