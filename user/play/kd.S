@@ -1,6 +1,4 @@
-/* kd.S — play's system calls wolf has no builtin for (px18: ioctl;
-   px30: /dev/dsp; px41: the monotonic clock and a sleep to an absolute
-   time, below).
+/* kd.S — play's one system call wolf has no builtin for (px18).
 
    `play_kd(fd, request, arg) -> result` is `ioctl(2)` (x86-64 system
    call 16) made directly: %rax 16, the arguments in %rdi, %rsi, %rdx as
@@ -26,74 +24,6 @@ play_kd:
         syscall
         ret
         .size play_kd, . - play_kd
-
-/* px41: the speaker's clock and its sleep. play's schedule is absolute
-   (every tone's start is the first one's plus the lengths before it),
-   and so must its sleep be: read the clock, subtract, and ask for a
-   relative sleep (wolf's `time_sleep_ms`, all the prelude has), and a
-   timer tick that falls between the read and the kernel's own reading
-   makes the sleep one tick longer than the schedule asked. On PAX,
-   whose sleep ends the tick after its target, that one tick puts a tone
-   on the next tone's target, which is then started in the same tick: a
-   pitch of an arpeggio held 0 ticks (pax#45; notes/px41). A sleep to
-   an absolute time has no such window.
-
-     play_now_ms()              clock_gettime(CLOCK_MONOTONIC): the
-                                clock in milliseconds, or -errno
-     play_sleep_until_ms(t)     clock_nanosleep(CLOCK_MONOTONIC,
-                                TIMER_ABSTIME, t): 0 at or after t (at
-                                once when t has passed), or -errno;
-                                tried again after EINTR
-
-   Written from the x86-64 psABI and syscall table (clock_gettime 228,
-   clock_nanosleep 230), clock_gettime(2), clock_nanosleep(2) (the raw
-   call answers a negative errno) and the uapi linux/time.h
-   (CLOCK_MONOTONIC 1, TIMER_ABSTIME 1). No libc source; no kernel
-   source. */
-
-        .text
-        .globl play_now_ms
-        .type play_now_ms, @function
-play_now_ms:
-        subq    $24, %rsp               /* a timespec, the stack kept at 16 */
-        movl    $1, %edi                /* CLOCK_MONOTONIC */
-        movq    %rsp, %rsi
-        movl    $228, %eax
-        syscall
-        testq   %rax, %rax
-        js      1f
-        movq    8(%rsp), %rax           /* nanoseconds */
-        xorl    %edx, %edx
-        movl    $1000000, %ecx
-        divq    %rcx
-        imulq   $1000, (%rsp), %rcx     /* seconds */
-        addq    %rcx, %rax
-1:      addq    $24, %rsp
-        ret
-        .size play_now_ms, . - play_now_ms
-
-        .globl play_sleep_until_ms
-        .type play_sleep_until_ms, @function
-play_sleep_until_ms:
-        subq    $24, %rsp
-        movq    %rdi, %rax
-        xorl    %edx, %edx
-        movl    $1000, %ecx
-        divq    %rcx                    /* seconds; %rdx the milliseconds left */
-        movq    %rax, (%rsp)
-        imulq   $1000000, %rdx, %rdx
-        movq    %rdx, 8(%rsp)
-1:      movl    $1, %edi                /* CLOCK_MONOTONIC */
-        movl    $1, %esi                /* TIMER_ABSTIME */
-        movq    %rsp, %rdx
-        xorl    %r10d, %r10d            /* no remainder: the time is absolute */
-        movl    $230, %eax
-        syscall
-        cmpq    $-4, %rax               /* EINTR: again, to the same time */
-        je      1b
-        addq    $24, %rsp
-        ret
-        .size play_sleep_until_ms, . - play_sleep_until_ms
 
 /* px30: /dev/dsp, for play's mixed mode. wolf's file handles are its
    own table's indices, not descriptors (measured: a reopened file's
