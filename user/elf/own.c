@@ -407,7 +407,8 @@ static void desc_row(long unused)
     else fstat(sp[0], &b);
     int s = socket(AF_UNIX, SOCK_STREAM, 0);
     if (s >= 0) fstat(s, &c);
-    say("~desc %s: a pipe it made is %u:%u, a socketpair %u:%u, a socket %u:%u\n", cur, a.st_uid, a.st_gid, b.st_uid, b.st_gid, c.st_uid, c.st_gid);
+    /* px43 (pax#58): the maker's file-system ids on PAX too, so no longer a `~` line */
+    say("desc %s: a pipe it made is %u:%u, a socketpair %u:%u, a socket %u:%u\n", cur, a.st_uid, a.st_gid, b.st_uid, b.st_gid, c.st_uid, c.st_gid);
 }
 
 static const char *dump(void)
