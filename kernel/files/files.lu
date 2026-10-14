@@ -208,7 +208,8 @@ const P_RD: u64 = 3 // bytes read since it was made
 const P_WR: u64 = 4 // bytes written
 const P_OGEN: u64 = 5 // px24: times a read gave a writer room it did not have (an edge-triggered registration's count)
 const P_MSG: u64 = 6 // px34: 1 for a SOCK_SEQPACKET buffer: messages behind an eight-byte length
-const P_FRAME: u64 = 8 // the frames' physical addresses, from here
+const P_FRAME: u64 = 8 // the frames' physical addresses, from here (16 at most: words 8 to 23)
+const P_OWNER: u64 = 24 // px43 (pax#58): a pipe's or a socketpair's maker's file-system user id (low 32 bits) and group id (high 32)
 const PIPE_PAGES: u64 = 16 // 65536 bytes, Linux's default capacity
 const SOCK_PAGES: u64 = 1
 /// PIPE_BUF (`pipe(7)`): a write of at most this many bytes is atomic.
@@ -992,6 +993,7 @@ pub fn pipe2(a: u64, pml4: u64, va: u64, flags: u64) -> u64 {
     if p == PIPES {
         return neg(ENFILE)
     }
+    put_ppw(p, P_OWNER, fs_ids(a)) // px43 (pax#58)
     let n = (T_PIPE << T_SHIFT) | p
     let fr = open_new(a, 0, K_PIPE, n, O_RDONLY | flags)
     if fr >= 0x8000000000000000 {
@@ -1049,6 +1051,8 @@ pub fn socketpair(a: u64, pml4: u64, domain: u64, ty: u64, proto: u64, sv: u64) 
         put_ppw(c1, P_MSG, 1)
         put_ppw(c2, P_MSG, 1)
     }
+    put_ppw(c1, P_OWNER, fs_ids(a)) // px43 (pax#58)
+    put_ppw(c2, P_OWNER, fs_ids(a))
     let fl = O_RDWR | (ty & (O_CLOEXEC | O_NONBLOCK))
     let f0 = open_new(a, 0, K_SOCK, (T_SOCK << T_SHIFT) | (c2 << 16) | c1, fl)
     if f0 >= 0x8000000000000000 {
@@ -2227,6 +2231,7 @@ pub fn unix_socket(a: u64, ty: u64, proto: u64) -> u64 {
     if r == unix.SOCKS {
         return neg(ENFILE)
     }
+    unix.owned(r, cred.uid(a, cred.FS), cred.gid(a, cred.FS)) // px43 (pax#58)
     let fd = open_new(a, 0, K_UNIX, (T_UNIX << T_SHIFT) | r, O_RDWR | (ty & (O_CLOEXEC | O_NONBLOCK)))
     if fd >= 0x8000000000000000 {
         unix.free(r)
@@ -2993,6 +2998,12 @@ fn resolve_who(a: u64, who: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool,
 fn resolve_k(a: u64, dirfd: u64, rl: u64) -> u64 {
     let (n, _p, _s, _l, _t) = walk_k(a, dirfd, rl, false, F_YES)
     n
+}
+
+/// px43 (pax#58): the process's file-system user id (low 32 bits) and
+/// group id (high 32), one word, as a pipe's or a socket's maker.
+fn fs_ids(a: u64) -> u64 {
+    (cred.uid(a, cred.FS) & 0xffffffff) | (cred.gid(a, cred.FS) << 32)
 }
 
 /// px42: whether the process is in group `g` for a file's sake: its
@@ -4410,13 +4421,23 @@ fn syn_area(a: u64, n: u64) -> u64 {
 }
 
 /// px42: a node's owner (`which` 0) or group (1): an inode's own;
-/// a `/proc` node's by kernel/procfs's rule; 0 for everything else
-/// (`/dev` and what is in it, a pipe, a socket: PAX keeps no owner for
-/// them, named drift).
+/// a `/proc` node's by kernel/procfs's rule; px43 (pax#58): a pipe's, a
+/// socketpair's and an AF_UNIX socket's maker's file-system ids
+/// (measured, `own`'s `desc` rows); 0 for everything else (`/dev` and
+/// what is in it, an AF_INET socket, an eventfd, an epoll object, an
+/// end `accept` made: PAX keeps no owner for them, named drift).
 fn n_owner(a: u64, n: u64, which: int) -> u64 {
     let t = ty(n)
     if t == T_INO {
         return if which == 0 { tree.uid(rf(n)) } else { tree.gid(rf(n)) }
+    }
+    if t == T_PIPE || t == T_SOCK {
+        let o = ppw(rf(n) & 0xffff, P_OWNER)
+        return if which == 0 { o & 0xffffffff } else { o >> 32 }
+    }
+    if t == T_UNIX {
+        let (u, g) = unix.owner(rf(n))
+        return if which == 0 { u } else { g }
     }
     if t == T_SYN {
         let ta = syn_area(a, n)

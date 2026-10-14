@@ -75,6 +75,7 @@ const U_ERR: u64 = 13 // the errno a read answers once
 const U_EVER: u64 = 14 // connections ever queued on a listener
 const U_NLEN: u64 = 15 // the name's length (0: unnamed)
 const U_NAME: u64 = 16 // the name's bytes, from here (14 words: 112 bytes)
+const U_OWNER: u64 = 30 // px43 (pax#58): its maker's file-system user id (low 32 bits) and group id (high 32), for `fstat`
 
 // pax_unix_state's words.
 const S_LIVE: u64 = 0
@@ -177,6 +178,19 @@ pub fn kind(r: u64) -> u64 {
 }
 
 /// The inode its name is, or NONE_INO.
+/// px43 (pax#58): the ids `fstat` reports for socket `r`: (user,
+/// group), its maker's file-system ids as `owned` set them; 0:0 for one
+/// nobody stamped (an end `accept` made: not measured).
+pub fn owner(r: u64) -> (u64, u64) {
+    let o = w(r, U_OWNER)
+    (o & 0xffffffff, o >> 32)
+}
+
+/// px43 (pax#58): socket `r` was made by file-system ids (uid, gid).
+pub fn owned(r: u64, uid: u64, gid: u64) {
+    put(r, U_OWNER, (uid & 0xffffffff) | (gid << 32))
+}
+
 pub const NONE_INO: u64 = 0xffffffffffffffff
 
 /// The inode record `r`'s name is (kernel/tree's), or NONE_INO.
