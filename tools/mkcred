@@ -5,7 +5,8 @@
 # user/elf/px38.h: the files of notes/px38/probes, byte for byte), and
 # px39's `ident` (user/elf/ident.c) and `as` (user/elf/as.c); px42:
 # px38's `perm` (user/elf/perm.c, byte for byte) and `own`
-# (user/elf/own.c).
+# (user/elf/own.c); px43: `chk` (user/elf/chk.c) and `seven`
+# (user/elf/seven.S, no libc: `cc -nostdlib`, exits 7).
 #
 #   tools/mkcred OUTDIR
 #
@@ -24,10 +25,14 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd)
 cc=${CC:-cc}
 need "$cc" readelf
-for p in cred ids ident as own perm; do
+for p in cred ids ident as own perm chk seven; do
     thr=(); [ "$p" != ident ] || thr=(-pthread)
-    "$cc" -static -no-pie -O1 ${thr[@]+"${thr[@]}"} -Wall -Wextra -Wno-unused-result -Wno-unused-function \
-        -Wl,--build-id=none -Wl,-z,noexecstack -o "$out/$p" "$PAX_ROOT/user/elf/$p.c" || die "cc: $p"
+    if [ "$p" = seven ]; then
+        "$cc" -static -no-pie -nostdlib -Wl,--build-id=none -Wl,-z,noexecstack -o "$out/$p" "$PAX_ROOT/user/elf/$p.S" || die "cc: $p"
+    else
+        "$cc" -static -no-pie -O1 ${thr[@]+"${thr[@]}"} -Wall -Wextra -Wno-unused-result -Wno-unused-function \
+            -Wl,--build-id=none -Wl,-z,noexecstack -o "$out/$p" "$PAX_ROOT/user/elf/$p.c" || die "cc: $p"
+    fi
     readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
     ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP (not static)"
     printf '%s %s %s\n' "$p" "$(sha256_of "$out/$p")" "$(wc -c < "$out/$p" | tr -d ' ')"
