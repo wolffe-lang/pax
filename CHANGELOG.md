@@ -7,6 +7,30 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Who may open, run and walk (px43).** The third lane of multi-user
+  PAX, where it begins to refuse: one function in `kernel/files`
+  (`may`) holds the class rule — owner, group, other, chosen by the
+  file-system user id; the group by the file-system group id or a
+  supplementary group; file-system user id 0 passes every read, write
+  and search, and executes where any execute bit is set — and `open`
+  (read, write, O_TRUNC, O_CREAT in a directory), `truncate`,
+  `access`/`faccessat`/`faccessat2` (the real ids, or with AT_EACCESS
+  the file-system ones), `execve`, `chdir`, `fchdir` and the search of
+  every directory of every path walk ask it. A descriptor keeps what it
+  was opened with. px38's `perm` probe, run by its five actors: 295 of
+  its 382 lines are real root's recording to the byte (173 before);
+  every line of the access section, and of the file and directory
+  sections all but what is directory write (U4) or `execve` of a
+  program written since boot (px27's limit). A new probe, `chk`,
+  answers 264 of 264 lines as real root's Linux does, and 46 of 46 as
+  1000:1000 — the walk, open and truncate, the access family's ids,
+  `execve` by class of an archive file, a descriptor held across a
+  `chmod` (`tests/mpx5-users`). The checks are **enforced for honest
+  programs; not a boundary against an attacker**. Directory write, the
+  sticky bit, `chmod` and `utimensat` ownership, signals and devices are
+  the lanes that follow. And pax#58: a pipe, a socketpair and an
+  AF_UNIX socket report their maker's file-system ids to `fstat`, as
+  Linux's do (0:0 before).
 - **Who a file belongs to (px42).** The second lane of multi-user
   PAX: an inode has an owner and a group (one word that only a free
   record used: an inode is the 128 bytes it was). A new file,
