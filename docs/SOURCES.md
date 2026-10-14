@@ -626,3 +626,23 @@ Permissively licensed kernels: none consulted.
 | black-box Linux 7.2.8-1-cachyos (kasumi's own kernel image booted under QEMU 11.1.1 with `notes/px39/vminit.c` as pid 1: root of the initial user namespace, every capability; `notes/px39/linux-vm.sh`): `user/elf/cred.c` again (byte-identical to px38's recording), the same after `as 1000 1000`, `user/elf/ident.c` as root and as 1000:1000, `user/elf/ids.c`, the soak | — | pax's own programs | measured (`tests/mpx5-users.d/linux/`, `vm.meta`) | what the man pages leave open: which call clears dumpable, dumpable and AT_SECURE at `execve` (the file-system ids and the group list enter into both), `CapPrm`, the `Groups:` line with no group, the order `getresuid` writes in, the order `setgroups` and `getgroups` check in, 32-bit ids, `prctl`'s other arguments, the mode of `/proc/self/setgroups` |
 | black-box Linux 7.2.8: the same programs as uid 1000 of a rootless podman container (`px13-ubuntu`; `notes/px39/linux-ct.sh`) | — | pax's own programs | measured (`notes/px39/linux/ct/`) | a second witness for a user's rows only; never a reference for root |
 
+
+## px42: the owners (a file's owner and group)
+
+No kernel's, libc's or file system's source was read or searched for,
+nor that of `su`, `login`, shadow-utils, util-linux or coreutils. The
+rules are px38's recorded rows and black-box runs this lane took; where
+the man pages and the measurement part, the measurement is what PAX
+does and the note says so. Permissively licensed kernels: none
+consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| man-pages `chown(2)` (the owner may change the group to one he is in; the set-ID bits on a change by an unprivileged user, and by root "Linux-specific"), `fchownat(2)` (AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW), `stat(2)` and `statx(2)` (`st_uid`, `st_gid`; `stx_uid`, `stx_gid`, STATX_UID, STATX_GID), `inode(7)`, `mkdir(2)` and `open(2)` (the group of a new file; the set-group-ID directory), `symlink(2)`, `unix(7)` (a socket's name), `credentials(7)` (the file-system ids), `proc(5)` (who owns `/proc/<pid>`), `cpio(5)` | the pages px36 and px38 cite | their own (GPL-2.0-or-later, BSD, verbatim) | recalled, not opened again in this lane (`px13-ubuntu` holds no man pages); no row rests on them: each is measured | what to ask |
+| uapi headers in the sparse checkout: `arch/x86/include/uapi/asm/stat.h` (`struct stat`: `st_uid` at 28, `st_gid` at 32), `include/uapi/linux/stat.h` (`struct statx`: `stx_uid` at 20, `stx_gid` at 24; STATX_UID 8, STATX_GID 16), `linux/fcntl.h`, `arch/x86/entry/syscalls/syscall_64.tbl` (92, 93, 94, 260: all answered since px36) | the sparse checkout's | GPL-2.0 WITH Linux-syscall-note | read | offsets and numbers; no number added |
+| `Documentation/driver-api/early-userspace/buffer-format.rst` | the sparse checkout's | GPL-2.0 | read | the header's uid and gid fields |
+| px38's recorded answers: `notes/px38/linux/vm.txt` (the `perm` section, 382 lines, real root of Linux 7.2.8 under QEMU) | pax `fe7c05b` | pax's own | read; `tests/mpx5-users.d/linux/perm.txt` to the byte | sections E (`chown`, 71 rows) and H (who owns what is made, 13 rows): the rule and the stamps |
+| black-box Linux 7.2.8-1-cachyos (kasumi's own kernel image booted under QEMU 11.1.1 with `notes/px42/vminit.c` as pid 1: root of the initial user namespace, every capability; `notes/px42/linux-vm.sh`): `user/elf/own.c` as root and after `as 1000 1000`, `user/elf/perm.c` again (byte-identical to px38's recording), the soak | — | pax's own programs | measured (`tests/mpx5-users.d/linux/`, `vm-own.meta`) | what px38 did not ask: a link's and a socket's stamp, S_ISGID and the sticky bit at creation, `fchown`, `lchown`, `fchownat`, a `chown` that asks for nothing, which group decides the set-group-ID bit, the file-system ids against the effective ones, 32-bit ids, `/proc/<pid>`'s owner and when its files are root's |
+| black-box Linux 7.2.8, the same boot with PAX's image archive as its initramfs (a second archive after it holds `/init`): boreutils' `ls -ln` and `ls -l` | boreutils `2ab3651` | pax's build of boreutils' own | measured (`ls.txt`, `ls-names.txt`, `vm-image.meta`) | an image's owners as Linux reads the same bytes |
+| black-box Linux in a container (`tools/linux-tree`): `user/elf/tree.c`'s `owner:` line | — | pax's own | measured afresh at every run of `tests/mpx3-tree` | `chown` to 1000:1000 by root |
+
