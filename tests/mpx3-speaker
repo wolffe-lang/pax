@@ -34,10 +34,6 @@
 #            (a dynamic, a chord of five pitches), `play chords` (the
 #            chord study, user/tunes/chords), `echo $?`, `exit` (every
 #            tier and firmware)
-#   starts   user/console/speaker-starts.keys (px41): `play /etc/starts`
-#            (user/play/starts: one chord, three steps) two hundred
-#            times in a shell loop, `echo $?`, `exit` (every tier and
-#            firmware)
 # Assertions, per tier, firmware and session:
 #   K0 build: kmain_console built; every program static (ET_EXEC, no
 #      PT_INTERP); the initramfs and the image built (digests printed).
@@ -99,19 +95,20 @@
 #      chord heard, 85% of the changes in order, each pitch's median
 #      step within 30% of 20 ms, each slot heard for its time within
 #      10%. K4's tones are tools/arp-check --tones of the file (197).
-#   K9 the starts (starts; px41, pax#45), by tools/arp-check --starts:
-#      two hundred plays begun by the shell, each at whatever phase of
-#      a tick it falls on: every play's tones are the file's, and at
-#      most one has its second pitch started on the tick of its third
-#      (a first step a tick long, the second step lost). K8 plays once
-#      and so sees one phase a boot; trunk's play, which slept for a
-#      difference from a clock read a moment before, began so in 9 of
-#      600 plays on kasumi and in three CI runs of some 230. One such
-#      start a session is what the host holding the guest for a tick
-#      makes (1 of 600 under load with the sleep absolute); two are
-#      not (tools/arp-check has the rates). The summary counts how long
-#      each first step was held. K4's tones are two hundred times the
-#      file's three.
+#   K9 play's sleeps (px41, pax#45), on the host that built it, with
+#      no boot: /bin/play plays the chord study under strace with its
+#      KIOCSOUND answered 0 (`-e inject=ioctl:retval=0`: no console
+#      speaker is needed), and every sleep it makes is
+#      `clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, …)`, to times
+#      that never go back; none is relative; the tones it asks for are
+#      the file's 197. trunk's play read the clock and slept for the
+#      difference: a tick between the two made the sleep a tick longer,
+#      and on PAX, where a sleep ends the tick after its target, that
+#      put a tone on the next tone's time and the next was held 0
+#      ticks (K8 on three CI runs; 9 of 600 plays on kasumi, 45 of 600
+#      under load, against 1 and 1 with the sleep absolute: notes/px41).
+#      Needs Linux and strace: SKIPPED LOUDLY without them unless
+#      PAX_REQUIRE_STRACE=1 (CI sets it), when it is a failure.
 #
 # --images DIR boots what this script built earlier (DIR holds
 # <tier>/kmain_console.elf, <tier>/speaker.iso): any host with QEMU and
@@ -129,9 +126,10 @@ here=$(cd "$(dirname "$0")" && pwd)
 grep() { command grep -a "$@"; }
 
 images= legs=both tiers=both noboot=0 peltdir= playdir= beepdir=
+given= # --images was given: nothing is built here
 while [ $# -gt 0 ]; do
     case $1 in
-        --images)   images=$2; shift 2 ;;
+        --images)   images=$2 given=1; shift 2 ;;
         --no-boot)  noboot=1; shift ;;
         --pelt)     peltdir=$2; shift 2 ;;
         --play)     playdir=$2; shift 2 ;;
@@ -146,7 +144,6 @@ case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier
 need readelf python3
 
 PROMPT='$ '
-STARTS=200 # K9: the plays user/console/speaker-starts.keys asks for
 # The equal-tempered scale, C4 to C5, A4 = 440 Hz.
 SCALE_HZ="261.63 293.66 329.63 349.23 392.00 440.00 493.88 523.25"
 
@@ -154,6 +151,32 @@ work=$PAX_BUILD/mpx3-speaker
 runs=$PAX_BUILD/mpx3-speaker-runs.txt
 fail=0 ran=0
 bad() { say "FAIL $*"; fail=1; }
+
+# K9: play's sleeps, under strace on this host (Linux), no boot. Its
+# KIOCSOUND is answered 0 by strace, so it plays the chord study to a
+# speaker that is not there, in the tune's own time (4.5 s).
+k9() { # /bin/play
+    local play=$1 tr=$PAX_BUILD/mpx3-speaker-play.strace why= abs other tones want rc=0
+    if [ "$(uname -s)" != Linux ] || ! command -v strace >/dev/null 2>&1; then
+        if [ "${PAX_REQUIRE_STRACE:-0}" = 1 ]; then bad "K9: no strace on this host (or not Linux) and PAX_REQUIRE_STRACE=1"; else say "SKIP K9: play's sleeps need Linux and strace (set PAX_REQUIRE_STRACE=1 to make this a failure)"; fi
+        return
+    fi
+    [ -x "$play" ] || { bad "K9: no $play"; return; }
+    mkdir -p "$PAX_BUILD"
+    strace -f -o "$tr" -e trace=ioctl,nanosleep,clock_nanosleep -e inject=ioctl:retval=0 \
+        "$play" -s "$PAX_ROOT/user/tunes/chords" > "$tr.out" 2>&1 < /dev/null || rc=$?
+    [ "$rc" = 0 ] || why+=" play ended with status $rc ($(head -n 2 "$tr.out" | tr '\n' '|'));"
+    abs=$(command grep -c 'clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, ' "$tr")
+    other=$(command grep -E 'nanosleep\(' "$tr" | command grep -vc 'clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, ')
+    tones=$(command grep -Ec 'ioctl\([0-9]+, KIOCSOUND, [1-9]' "$tr")
+    want=$(python3 "$PAX_ROOT/tools/arp-check" --tones "$PAX_ROOT/user/tunes/chords")
+    [ "$tones" = "$want" ] || why+=" $tones tones asked for, the file has $want;"
+    [ "$abs" -ge "$want" ] || why+=" $abs sleeps to an absolute time for $want tones;"
+    [ "$other" = 0 ] || why+=" $other sleeps that are not to an absolute time on the monotonic clock ($(command grep -E 'nanosleep\(' "$tr" | command grep -v TIMER_ABSTIME | head -n 1 | cut -c1-120));"
+    back=$(sed -n -E 's/.*TIMER_ABSTIME, \{tv_sec=([0-9]+), tv_nsec=([0-9]+)\}.*/\1 \2/p' "$tr" | awk 'NR > 1 && ($1 < s || ($1 == s && $2 < n)) { b++ } { s = $1; n = $2 } END { print b + 0 }')
+    [ "$back" = 0 ] || why+=" $back sleeps to a time before the one before;"
+    [ -z "$why" ] && say "PASS K9: play's $abs sleeps for $tones tones are all clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME), to times that never go back; none relative" || bad "K9:$why"
+}
 
 static_ok() { # file -> reason on failure
     readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
@@ -200,7 +223,6 @@ if [ -z "$images" ]; then
     fi
     cp "$PAX_ROOT"/user/tunes/* "$r/usr/share/tunes/"
     cp "$PAX_ROOT"/user/play/refused/* "$r/etc/refused/"
-    cp "$PAX_ROOT/user/play/starts" "$r/etc/starts" # px41: K9's one chord, outside play's list
     echo /bin/pelt > "$r/etc/pax-run"
     for f in "$r"/bin/*; do
         x=$(static_ok "$f") || why+=" $x;"
@@ -234,11 +256,14 @@ if [ -z "$images" ]; then
     done
     [ -z "$why" ] && say "PASS K0: kmain_console built ($tiers), every program static, the initramfs and the image built" || bad "K0:$why"
     images=$work
+    k9 "$work/playbin/play"
     if [ "$noboot" = 1 ]; then
         [ "$fail" = 0 ] && say "mpx3-speaker build (K0): PASS (no boot: --no-boot)" || say "mpx3-speaker build: FAIL"
         exit "$fail"
     fi
 fi
+
+[ -n "$given" ] && k9 "$images/playbin/play"
 
 # A note file's sounding notes and its length in ms (play's arithmetic:
 # 240000000 us / (bpm * n) a length, dotted x 3/2, ties summed).
@@ -293,7 +318,7 @@ for leg in $legs; do
         continue
     fi
     for tier in $tiers; do
-        for s in speaker tunes beep chord starts; do
+        for s in speaker tunes beep chord; do
             [ "$s" = tunes ] && { [ "$tier" = native ] && [ "$leg" = bios ] || continue; }
             id="$tier $leg $s"
             log=$PAX_BUILD/mpx3-speaker-$tier-$leg-$s.serial.log
@@ -303,7 +328,6 @@ for leg in $legs; do
             [ "$s" = tunes ] && keys=$PAX_ROOT/user/console/speaker-tunes.keys
             [ "$s" = beep ] && keys=$PAX_ROOT/user/console/speaker-beep.keys
             [ "$s" = chord ] && keys=$PAX_ROOT/user/console/speaker-chord.keys
-            [ "$s" = starts ] && keys=$PAX_ROOT/user/console/speaker-starts.keys
             rm -f "$log" "$log.verdict" "$log.typed" "$wav"
             if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
                 bad "K1 $id: no image"
@@ -354,7 +378,6 @@ PY
             [ "$s" = tunes ] && want=$PAX_ROOT/user/console/speaker-tunes.expect
             [ "$s" = beep ] && want=$PAX_ROOT/user/console/speaker-beep.expect
             [ "$s" = chord ] && want=$PAX_ROOT/user/console/speaker-chord.expect
-            [ "$s" = starts ] && want=$PAX_ROOT/user/console/speaker-starts.expect
             if ! cmp -s "$want" "$out"; then
                 why+=" the session differs from ${want#"$PAX_ROOT"/}: $(diff "$want" "$out" | head -n 12 | tr '\n' '|');"
             fi
@@ -438,10 +461,6 @@ PY
                     k8="FAIL no capture"
                 fi
                 case $k8 in PASS*) say "PASS K8 $id: ${k8#PASS }" ;; *) bad "K8 $id: ${k8#FAIL }" ;; esac
-            elif [ "$s" = starts ]; then
-                # K9: sixty plays, how each began (the kernel's timeline).
-                k9=$(python3 "$PAX_ROOT/tools/arp-check" --starts "$PAX_ROOT/user/play/starts" "$timeline" "$STARTS" 2>&1)
-                case $k9 in PASS*) say "PASS K9 $id: ${k9#PASS }" ;; *) bad "K9 $id: ${k9#FAIL }" ;; esac
             elif [ "$s" = beep ]; then
                 # K7: Ubuntu's beep through /dev/tty0 and /dev/console.
                 k7=$(python3 - "$notes" "$timeline" <<'PY'
@@ -551,7 +570,6 @@ PY
             st=$(printf '%s\n' "$sl" | sed -n -E 's/^speaker: ([0-9]+) tones, ([0-9]+) stopped at their process.s end, sounding ([0-9]+), .*/\1 \2 \3/p')
             if [ "$s" = speaker ]; then wt="9 1 0"; elif [ "$s" = beep ]; then wt="2 0 0"
             elif [ "$s" = chord ]; then wt="$(python3 "$PAX_ROOT/tools/arp-check" --tones "$PAX_ROOT/user/tunes/chords") 0 0"
-            elif [ "$s" = starts ]; then wt="$((STARTS * $(python3 "$PAX_ROOT/tools/arp-check" --tones "$PAX_ROOT/user/play/starts"))) 0 0"
             else wt="$((mn + en)) 0 0"; fi
             [ "$st" = "$wt" ] || why+=" '$sl': not '$wt' (tones, stopped at an end, sounding);"
             [ -n "$sv" ] && [ $((0x$sv & 3)) = 0 ] || why+=" port 0x61 '0x$sv' has a gate bit set;"
