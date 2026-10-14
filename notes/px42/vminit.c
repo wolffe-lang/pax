@@ -8,10 +8,10 @@
  *   own        /own /t/ownw                     root
  *   own-user   /as 1000 1000 /own /t/ownu       dropped to 1000:1000 first
  *   perm       /perm /t/perm                    root (px38's probe)
- *   soak       /own soak 100000 /t/soak         root
- *   soak-user  /as 1000 1000 /own soak 100000 /t/soaku
- *   ls         /bin/ls -ln /home /home/pax /home/pax/notes   the image's own archive is the root
- *   ls-names   /bin/ls -l  /home /home/pax /home/pax/notes
+ *   own-soak       /own soak 100000 /t/soak     root
+ *   own-soak-user  /as 1000 1000 /own soak 100000 /t/soaku
+ *   ls         /bin/ls -ln /home /home/pax /home/pax/notes /srv   the image's own archive is the root
+ *   ls-names   /bin/ls -l  /home /home/pax /home/pax/notes /srv
  *
  * For `ls` and `ls-names` the initramfs is PAX's image archive itself
  * (tests/mpx5-users builds it) with this program in a second archive
@@ -49,7 +49,7 @@ int main(void)
     if (fd >= 0) { long n = read(fd, cmd, sizeof cmd - 1); if (n > 0) cmd[n] = 0; close(fd); }
     char *w = strstr(cmd, "px42=");
     char list[256];
-    snprintf(list, sizeof list, "%s", w ? w + 5 : "own,own-user,perm,soak,soak-user");
+    snprintf(list, sizeof list, "%s", w ? w + 5 : "own,own-user,perm,own-soak,own-soak-user");
     list[strcspn(list, " \n")] = 0;
     int image = strncmp(list, "ls", 2) == 0;
     if (!image) {
@@ -73,10 +73,10 @@ int main(void)
         if (!strcmp(t, "own")) run(t, (char *[]){ "/own", "/t/ownw", NULL });
         else if (!strcmp(t, "own-user")) run(t, (char *[]){ "/as", "1000", "1000", "/own", "/t/ownu", NULL });
         else if (!strcmp(t, "perm")) { mkdir("/t/perm", 0777); chmod("/t/perm", 0777); run(t, (char *[]){ "/perm", "/t/perm", NULL }); }
-        else if (!strcmp(t, "soak")) run(t, (char *[]){ "/own", "soak", "100000", "/t/soak", NULL });
-        else if (!strcmp(t, "soak-user")) run(t, (char *[]){ "/as", "1000", "1000", "/own", "soak", "100000", "/t/soaku", NULL });
-        else if (!strcmp(t, "ls")) run(t, (char *[]){ "/bin/ls", "-ln", "/home", "/home/pax", "/home/pax/notes", NULL });
-        else if (!strcmp(t, "ls-names")) run(t, (char *[]){ "/bin/ls", "-l", "/home", "/home/pax", "/home/pax/notes", NULL });
+        else if (!strcmp(t, "own-soak")) run(t, (char *[]){ "/own", "soak", "100000", "/t/soak", NULL });
+        else if (!strcmp(t, "own-soak-user")) run(t, (char *[]){ "/as", "1000", "1000", "/own", "soak", "100000", "/t/soaku", NULL });
+        else if (!strcmp(t, "ls")) run(t, (char *[]){ "/bin/ls", "-ln", "/home", "/home/pax", "/home/pax/notes", "/srv", NULL });
+        else if (!strcmp(t, "ls-names")) run(t, (char *[]){ "/bin/ls", "-l", "/home", "/home/pax", "/home/pax/notes", "/srv", NULL });
         else say("! no session %s\n", t);
     }
     say("=== px42 vm: done\n");

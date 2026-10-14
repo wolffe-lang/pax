@@ -11,13 +11,13 @@
 # BINDIR: the static programs (notes/px42/build.sh's). OUTDIR gets
 # vm.log (the console), vm.meta, and for each session S the lines it
 # wrote as S.txt and its exit status as S.rc. SESSIONS: comma-separated
-# (default own,own-user,perm,soak,soak-user). With IMAGE.cpio (for the
+# (default own,own-user,perm,own-soak,own-soak-user). With IMAGE.cpio (for the
 # sessions `ls` and `ls-names`) the initramfs is that archive, byte for
 # byte, followed by a second archive holding only /init: the root Linux
 # unpacks is the tree PAX's image carries. Exit 0 when the guest wrote
 # its last marker.
 set -uo pipefail
-pax=$1 bin=$2 out=$3 sessions=${4:-own,own-user,perm,soak,soak-user} image=${5:-}
+pax=$1 bin=$2 out=$3 sessions=${4:-own,own-user,perm,own-soak,own-soak-user} image=${5:-}
 k=${PX42_KERNEL:-/usr/lib/modules/$(uname -r)/vmlinuz}
 [ -r "$k" ] || { echo "linux-vm: no readable kernel image $k" >&2; exit 2; }
 mkdir -p "$out"
