@@ -649,10 +649,42 @@ attacker"; this lane enforces nothing but that one rule.
 | `initramfs/` | `uid`, `gid` (the header's third and fourth fields) |
 | `tools/mkinitramfs` | `/PATH=FILE:MODE:UID:GID` and a directory entry `/PATH/:MODE:UID:GID`; without an owner the archive is the bytes it was |
 
-- What is not there: every check but `chown`'s (the next lanes); an
-  owner for a pipe or a socket (`fstat` says 0:0; Linux says the
-  maker's ids); a `chown` of `/dev` or `/proc` (refused by name,
+- What is not there: every check but `chown`'s (px43 adds the file
+  checks); an owner for a pipe or a socket (`fstat` says 0:0; Linux says the
+  maker's ids; px43 gives pipes, socketpairs and AF_UNIX sockets theirs); a `chown` of `/dev` or `/proc` (refused by name,
   -EROFS); `O_TMPFILE`.
+
+## Who may open, run and walk (px43)
+
+The third lane of the users campaign (`notes/px43-the-file-checks.md`).
+**The class rule now decides** `open`, `truncate`, the `access` family,
+`execve`, `chdir`, `fchdir` and the search of every directory a path
+walk passes. The campaign's ruled claim: these checks are **enforced
+for honest programs; not a boundary against an attacker** — the
+kernel has not been fuzzed or audited and loads programs at fixed
+addresses.
+
+| module | what |
+|---|---|
+| `files/` | `may(a, who, n, want)`: the one function every check calls. `who` is `cred.FS` (every call but the access family) or `cred.REAL` (`access`, `faccessat`, `faccessat2` without AT_EACCESS). That user id 0 reads and writes anything and searches every directory, and executes a non-directory only where some execute bit is set (R9). Anyone else gets one class, chosen once: the owner's bits for the owner, else the group's for a member (`member_as`: that group id or a supplementary group), else the others'. `walk_as` (`walk`, `walk_k`, `walk_who`) asks MAY_X of every directory a component is looked up in — `.`, `..` and the last component's included — before the component's length or existence; `openat` asks read, write or both by the access mode, write for O_TRUNC of a file, write and search of the directory for a name O_CREAT makes (a file the call made is exempt), and asks a socket's name before its -ENXIO; `truncate` write; `faccessat` the mode, with the real ids or (AT_EACCESS) the file-system ones, walking with the same ids; `exec_lookup` execute; `chdir` and `fchdir` search of the directory itself |
+
+- pax#58: a pipe, a socketpair and an AF_UNIX socket are their maker's
+  file-system ids to `fstat` (`files`' `P_OWNER`, `unix`'s `owned`),
+  as on Linux; an AF_INET socket, an eventfd, an epoll object and an
+  end `accept` made still say 0:0 (not measured).
+- A descriptor keeps what it was opened with: no check runs on `read`,
+  `write`, `ftruncate` (which asks only that the descriptor was opened
+  for writing), `getdents64` or `fstat`.
+- Files that are not the tree's — `/dev`'s devices, `/proc`'s and
+  `/sys`'s files, what `/dev/std*` reopens — keep their answers (U5
+  gives `/dev` modes that count); their directories are searched by the
+  rule like any other (0755 and 0555: anyone may).
+- What is not there: write on a directory to remove or rename a name,
+  the sticky rule, the protected settings, `chmod` and `utimensat`
+  ownership, set-ID clearing on a write (U4); signals, ports, the
+  speaker, `/dev` (U5); set-ID execution (R5). `execve` still runs only
+  an archive file whole (px27): a program written since boot is refused
+  whatever its mode.
 
 ## The writable tree (px27)
 
