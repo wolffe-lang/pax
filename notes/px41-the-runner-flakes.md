@@ -234,7 +234,7 @@ short there. Prediction P2's numbers held (about 1% and over 5%); of
 the 54 plays under load that were not the usual shape, 45 were at the
 first step (P2 said nine in ten).
 
-**Fix in `play`** (`61016b4`): `until` sleeps to the absolute time
+**Fix in `play`** (`44d784e`): `until` sleeps to the absolute time
 (`clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)` from `kd.S`, with the
 clock read there too), which no tick between a reading and a call can
 lengthen. wolf's prelude has only a relative sleep.
@@ -247,7 +247,7 @@ of 23 to 35: **K8 red on 2 of 4 legs with the fixed play** (`w2/k8-red/`,
 `suite-lines.txt`): native UEFI steps 195–197 held 3, 0, 3 (one late
 tick), release UEFI steps of 4 and 0 (two ticks late) with the capture
 15% long. So K8 is **restated with that run beside it**
-(`tools/arp-check`, `0c024bd`): every tone of a chord within one tick
+(`tools/arp-check`, `d2e7e04`): every tone of a chord within one tick
 of its place, the places being the ticks the chord's spacing gives.
 One late tick passes, as the old words meant it to; a tone two ticks
 late still fails (the release UEFI leg of that run does), 90% of the
@@ -304,7 +304,7 @@ for `cat` to win. Under KVM on hasu, where `cat` always wins: **29 of
 (`hasu/hasu-census-cat-kvm`). On CI: 7 of 325 censuses, all release
 tier (`ci/harvest.txt`), R10 red when 1 and 3 differed.
 
-**Fix** (`ee38206`): the shell reads `file-nr` itself
+**Fix** (`f729733`): the shell reads `file-nr` itself
 (`read fn < /proc/sys/fs/file-nr; echo "$fn"`), first, and the rest
 stays one `cat`. The shell's own read starts no program, so no such
 socket is open when the count is made: the count waits on nothing and
@@ -350,7 +350,7 @@ first dies of SIGPIPE on its next write, the pipe is false, and the
 clamping is **passed over** (the opposite of a flake: a failure
 hidden). `kasumi/pipeshape/result.txt`, the first line clamped: 20,000
 lines, called clean 50 times of 50; 200 lines, once in 300; today's
-three lines, never in 300. Fixed (`c142558`): one grep that reads to
+three lines, never in 300. Fixed (`c31da2e`): one grep that reads to
 the end. The same shape with `readelf … | grep -q` stands in the
 suites' `static_ok`; its input is one short write and it is not
 changed here (§6).
@@ -398,3 +398,29 @@ changed here (§6).
 In the PR body: the commits, the CI runs, the audit.
 
 - To close when this merges: pax#53, pax#45, pax#47.
+
+## 8. The rebase, and the shas named again
+
+The branch was rebased once, onto `d3f4aa9` (px39 merged; one conflict,
+`docs/SOURCES.md`, where both lanes had added a section: both kept).
+px39 changed `kernel/user`, `kernel/process`, `kernel/procfs` and three
+lines of `kernel/files`; `sleep_until`'s `ceil(target) + 1` is as it
+was, and none of this lane's files moved under it. The trees kasumi and
+hasu ran were cut before the rebase (branch `px41-prerebase`, head
+`2de1866`); each is the same change as the commit beside it:
+
+| what | as the hosts ran it | on the branch now |
+|---|---|---|
+| the prediction | `b5f9534` | `a36de33` |
+| tests/lobo-session-selftest, red | `55c0265` | `43ab257` |
+| tools/lobo-session, the fix | `d64f0e4` | `f2580f5` |
+| CI keeps `qemu.log` | `a8593dd` | `db9df5d` |
+| play's absolute sleep | `61016b4` | `44d784e` |
+| tests/mpx3-sound's pipe (`w1` = `c142558`) | `c142558` | `c31da2e` |
+| K9 as a session of 60 (`w2` = `17fb15e`) | `17fb15e` | `a3a8c4f` |
+| K8's place rule | `0c024bd` | `d2e7e04` |
+| K9 as 200 plays (`w3` = `4b8b974`) | `4b8b974` | `7b950fb` |
+| the census by the shell (`w4`, `w5` = `d1a9ff3` and this file) | `ee38206` | `f729733` |
+| K9 under strace (`w6` = `188124b`) | `188124b` | `44a9330` |
+
+The suites at the rebased head on kasumi, and the CI runs: the PR body.
