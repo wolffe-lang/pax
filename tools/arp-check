@@ -53,18 +53,22 @@
 # sounding time within 10% (QEMU renders about 3% short).
 #
 # --starts (px41, pax#45): the timeline of N plays of a tune that is one
-# chord, each play begun by the shell at whatever phase of a tick it
-# falls on. Every play's tones are the file's, count for count, and no
-# play's second pitch is started on the tick of its third: the first
-# step a tick long and the second held 0 ticks, which is what a tick
-# between a clock reading and a relative sleep did to trunk's play (9
-# of 600 plays on kasumi with no load added, 22 of 300 with the host
-# held to a quarter of the CPU it wanted, and three CI runs). Only that
-# is judged here: the first step is the one a play's phase decides. How
-# long each first step was held (three ticks; two when a tick fell
+# short chord, each play begun by the shell at whatever phase of a tick
+# it falls on. Every play's tones are the file's, count for count, and
+# at most one play has its second pitch started on the tick of its third
+# (the first step a tick long, the second held 0 ticks). That is what a
+# tick between a clock reading and a relative sleep did to trunk's play:
+# 9 of 600 plays on kasumi with no load added, 45 of 600 under 12 busy
+# loops on four CPUs, three CI runs. With the sleep absolute it takes
+# the host holding the guest a whole tick at that one wake: 1 of 600
+# under the same load, none in some 43,000 steps of CI's chord study.
+# So one late start in a session is the host's and two are not: at
+# trunk's rate on CI (3 of ~230) two or more of 200 plays come up in
+# about three sessions of four; at the host's, in one of ten thousand.
+# Only the first step is judged here, the one a play's phase decides.
+# How long each first step was held (three ticks; two when a tick fell
 # between play's first clock reading and its first tone) and the steps
-# after it are counted in the summary; the chord study above judges a
-# chord's steps.
+# after it are counted in the summary; the chord study judges a chord.
 #
 # Prints `PASS <summary>` or `FAIL <reasons> | <summary>`; exit 0 either
 # way (the caller reads the word), 2 on a usage or format error.
@@ -195,12 +199,14 @@ def starts(sl, timeline, n):
             uneven += 1
     if wrong:
         bad.append("%d plays whose tones are not the file's" % wrong)
-    if late:
-        bad.append("%d plays began a tick late and lost their second step (the first steps held %s ticks)"
-                   % (late, "; ".join("%s, %d times" % kv for kv in sorted(shapes.items()))))
-    summary = ("%d plays of %d tones: the first step held %s; a later step not 2 ticks in %d plays"
+    how = "; ".join("%s, %d times" % kv for kv in sorted(shapes.items()))
+    if late > 1:
+        bad.append("%d plays began a tick late and lost their second step (the first steps held %s ticks)" % (late, how))
+    summary = ("%d plays of %d tones: the first step held %s; %s; a later step not 2 ticks in %d plays"
                % (len(plays), len(want),
-                  ", ".join("%d ticks in %d" % kv for kv in sorted(first.items(), reverse=True)) or "nothing", uneven))
+                  ", ".join("%d ticks in %d" % kv for kv in sorted(first.items(), reverse=True)) or "nothing",
+                  "one began a tick late (%s ticks): the host's" % how.split(",")[0] if late == 1 else "%d began a tick late" % late,
+                  uneven))
     print(("FAIL " + "; ".join(bad) + " | " if bad else "PASS ") + summary)
 
 
