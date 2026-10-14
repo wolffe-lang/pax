@@ -7,6 +7,24 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Who a file belongs to (px42).** The second lane of multi-user
+  PAX: an inode has an owner and a group (one word that only a free
+  record used: an inode is the 128 bytes it was). A new file,
+  directory, symbolic link or socket name is its maker's file-system
+  ids, or its directory's group under a set-group-ID directory;
+  `chown`, `fchown`, `lchown` and `fchownat` keep any id for root (the
+  refusal of an owner that is not root is gone) and follow Linux's rule
+  for a user; `stat`, `statx` and `/proc/<pid>` report owners;
+  `tools/mkinitramfs` writes them and the tree adopts them, so an image
+  can hold `/home/pax` owned 1000:1000 (pax#48), and boreutils' `ls
+  -ln` of it is byte-identical to the same binary's on a Linux that
+  unpacked the same archive. px38's `perm` probe now runs on PAX: its
+  `chown` section (71 lines) and its who-owns-what-is-made section (13)
+  are real root's recording to the byte, for every actor
+  (`tests/mpx5-users`). **`chown`'s own rule is the only one that asks
+  who the caller is**: nothing is refused on `open`, `execve`, a path
+  walk, a signal or a device yet. Those checks are the lanes that
+  follow.
 - **Who a process is (px39).** The first lane of multi-user PAX: a
   process has eight ids (real, effective, saved and file-system; user
   and group) and up to 32 supplementary groups, kept over `fork` and
