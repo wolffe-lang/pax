@@ -1409,7 +1409,7 @@ static void stamps(void) {
     say("time: gone: rmdir %ld\n", r(rmdir("/t/u")));
 }
 
-/* ---- owners (every process here is root) ----------------------------------------------- */
+/* ---- owners (every process here is root; px42's user/elf/own.c asks as a user) ----------------------------------------------- */
 static void owners(void) {
     struct stat a, b;
     mkdir("/t/o", 0777);
@@ -1454,7 +1454,7 @@ static void owners(void) {
         w9, w10, w11, w12, w13);
     long w14 = r(chown("/t/o/f", 1000, 1000));
     stat("/t/o/f", &a);
-    say("~owner: chown 1000 1000 %ld: uid %d\n", w14, (int)a.st_uid);
+    say("owner: chown 1000 1000 %ld: uid %d\n", w14, (int)a.st_uid); /* px42: PAX keeps any id */
     chown("/t/o/f", 0, 0);
     unlink("/t/o/s");
     unlink("/t/o/f");
