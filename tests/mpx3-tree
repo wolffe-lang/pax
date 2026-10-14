@@ -62,9 +62,11 @@
 #      -EINVAL), the `execve` of a program copied since boot (`~exec`:
 #      -EACCES), a file and a directory made in `/dev` (`~limits`:
 #      -EROFS), and px36's: a mode, times and a symbolic link in `/dev`
-#      (`~fixed`: -EROFS) and an owner that is not root (`~owner`:
-#      -EINVAL), each with its `refused:` line, and the kernel counted
-#      them: ten. And what PAX answers where Linux's answer depends on
+#      (`~fixed`: -EROFS), each with its `refused:` line, and the kernel
+#      counted them: nine (px42: an owner that is not root was the
+#      tenth, -EINVAL; PAX keeps any id now, and the line `owner: chown
+#      1000 1000 0: uid 1000` is compared with Linux's like the rest:
+#      T1). And what PAX answers where Linux's answer depends on
 #      more than the ABI: PAX's largest file (a byte at 1 GiB and a file
 #      grown to 2 GiB are -EFBIG, `~limits`; tmpfs takes both), a time
 #      past 2262 held at PAX's last nanosecond (`~time`), and a write by
@@ -146,12 +148,11 @@ SHELL_MOTD='PAX. Kernel: wolf. Shell: wolf. Tools: wolf. Nothing here existed la
 PROMPT='$ '
 REFUSED='~refused: link 0, symlink 0, chmod 0, chown 0, utimensat 0, O_SYNC -22, O_TMPFILE -95, RENAME_NOREPLACE -22'
 FIXED='~fixed: chmod of /dev -30, its times -30, a symbolic link made in /dev -30'
-OWNER='~owner: chown 1000 1000 -22: uid 0'
 SETID='~mode: 06755 and a write by root: mode 106755 links 1 size 2 blocks 8'
 FAR='~time: the year 3000 as atime: atime 9223372036.854775807 mtime 4102444800.000000002'
 LIMITS='~limits: a file made in /dev -30, a directory -30; a byte written at 1 GiB -27, a file grown to 2 GiB -27'
 EXEC_LINE='~exec: a program copied since boot, run: status 113 (7: it ran; 113: -EACCES)'
-REFUSALS='syscall 257: refused: an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE), -22|syscall 257: refused: an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE), -95|syscall 257: refused: making or removing a name in /dev (PAX'"'"'s /dev is fixed), -30|syscall 280: refused: a mode, an owner, times or a link of what PAX keeps fixed (/dev, /proc, /sys, a pipe, a socket), -30|syscall 316: refused: a renameat2 flag (RENAME_NOREPLACE, RENAME_EXCHANGE, RENAME_WHITEOUT), -22|syscall 59: refused: a program written since boot (the loader reads the archive'"'"'s own bytes), -13|syscall 83: refused: making or removing a name in /dev (PAX'"'"'s /dev is fixed), -30|syscall 88: refused: a mode, an owner, times or a link of what PAX keeps fixed (/dev, /proc, /sys, a pipe, a socket), -30|syscall 90: refused: a mode, an owner, times or a link of what PAX keeps fixed (/dev, /proc, /sys, a pipe, a socket), -30|syscall 92: refused: an owner or a group that is not root (PAX has one user), -22'
+REFUSALS='syscall 257: refused: an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE), -22|syscall 257: refused: an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE), -95|syscall 257: refused: making or removing a name in /dev (PAX'"'"'s /dev is fixed), -30|syscall 280: refused: a mode, an owner, times or a link of what PAX keeps fixed (/dev, /proc, /sys, a pipe, a socket), -30|syscall 316: refused: a renameat2 flag (RENAME_NOREPLACE, RENAME_EXCHANGE, RENAME_WHITEOUT), -22|syscall 59: refused: a program written since boot (the loader reads the archive'"'"'s own bytes), -13|syscall 83: refused: making or removing a name in /dev (PAX'"'"'s /dev is fixed), -30|syscall 88: refused: a mode, an owner, times or a link of what PAX keeps fixed (/dev, /proc, /sys, a pipe, a socket), -30|syscall 90: refused: a mode, an owner, times or a link of what PAX keeps fixed (/dev, /proc, /sys, a pipe, a socket), -30'
 NREF=$(printf '%s' "$REFUSALS" | tr '|' '\n' | grep -c .)
 
 work=$PAX_BUILD/mpx3-tree
@@ -362,11 +363,11 @@ for leg in $legs; do
                 lm=$(grep -m1 '^~limits' "$out")
                 [ "$lm" = "$LIMITS" ] || why+=" '$lm';"
                 rn=$(printf '%s\n' "$tl" | sed -n -E 's/.*, refusals ([0-9]+)$/\1/p')
-                for v in "$FIXED" "$OWNER" "$SETID" "$FAR"; do
+                for v in "$FIXED" "$SETID" "$FAR"; do
                     grep -qxF -- "$v" "$out" || why+=" no '$v' ('$(grep -m1 -- "^${v%%:*}" "$out")');"
                 done
                 [ "$rn" = "$NREF" ] || why+=" the kernel counted '$rn' refusals, not $NREF ('$tl');"
-                [ -z "$why" ] && say "PASS T2 $id: $g; $x; $lm; $FIXED; $OWNER; $SETID; $FAR; $NREF refusal lines, $NREF counted (Linux here: $(grep -m1 '^~refused' "$out.linux"); $(grep -m1 '^~exec' "$out.linux"); $(grep -m1 '^~limits' "$out.linux"); $(grep -m1 '^~fixed' "$out.linux"); $(grep -m1 '^~owner' "$out.linux"); $(grep -m1 '^~mode' "$out.linux"); $(grep -m1 '^~time' "$out.linux"))" || bad "T2 $id:$why"
+                [ -z "$why" ] && say "PASS T2 $id: $g; $x; $lm; $FIXED; $SETID; $FAR; $NREF refusal lines, $NREF counted (Linux here: $(grep -m1 '^~refused' "$out.linux"); $(grep -m1 '^~exec' "$out.linux"); $(grep -m1 '^~limits' "$out.linux"); $(grep -m1 '^~fixed' "$out.linux"); $(grep -m1 '^~mode' "$out.linux"); $(grep -m1 '^~time' "$out.linux"))" || bad "T2 $id:$why"
             fi
 
             # T3: what PAX lacks; nobody killed.
