@@ -2815,12 +2815,23 @@ const LAST_DOTDOT: u64 = 2 // `..`
 /// resolution is -ELOOP; a rewritten path longer than PATH_MAX is
 /// -ENAMETOOLONG. A link followed has its atime moved by relatime's
 /// rule, as on tmpfs (measured).
+///
+/// px43: every directory a component is looked up in — `.` and `..`
+/// and the last component's included, and the directory a relative
+/// path starts in — must be searchable by the class rule (`may`,
+/// MAY_X), else -EACCES; asked with the file-system ids (`walk_as`
+/// takes the real ones for the access family).
 fn walk(a: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool, follow: u64) -> (u64, u64, u64, u64, bool) {
+    walk_who(a, cred.FS, pml4, dirfd, va, empty_ok, follow)
+}
+
+/// px43: `walk`, asking with the ids `who`.
+fn walk_who(a: u64, who: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool, follow: u64) -> (u64, u64, u64, u64, bool) {
     let rl = path_in(pml4, va)
     if is_err(rl) {
         return (rl, rl, 0, 0, false)
     }
-    walk_k(a, dirfd, rl, empty_ok, follow)
+    walk_as(a, who, dirfd, rl, empty_ok, follow)
 }
 
 /// px36: the link at node `c` replaces pax_kbuf[0..at) (the components
@@ -2856,6 +2867,12 @@ fn follow_link(c: u64, at: u64, len: u64) -> u64 {
 /// px34: `walk` of the path already in pax_kbuf[0..rl) (a socket's
 /// name, copied out of its `struct sockaddr_un`).
 fn walk_k(a: u64, dirfd: u64, rl0: u64, empty_ok: bool, follow: u64) -> (u64, u64, u64, u64, bool) {
+    walk_as(a, cred.FS, dirfd, rl0, empty_ok, follow)
+}
+
+/// px43: `walk_k`, asking with the ids `who` (cred.FS; cred.REAL for the
+/// access family).
+fn walk_as(a: u64, who: u64, dirfd: u64, rl0: u64, empty_ok: bool, follow: u64) -> (u64, u64, u64, u64, bool) {
     var rl = rl0
     if rl == 0 {
         if !empty_ok {
@@ -2903,6 +2920,10 @@ fn walk_k(a: u64, dirfd: u64, rl0: u64, empty_ok: bool, follow: u64) -> (u64, u6
         let last = j >= rl
         if !is_dir_node(cur) {
             return (err(ENOTDIR), err(ENOTDIR), 0, 0, false)
+        }
+        // px43: the directory the component is looked up in is searched.
+        if !may(a, who, cur, MAY_X) {
+            return (err(EACCES), err(EACCES), 0, 0, false)
         }
         if n > tree.NAME_MAX {
             return (err(ENAMETOOLONG), err(ENAMETOOLONG), 0, 0, false)
@@ -2961,6 +2982,12 @@ fn resolve(a: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool, follow: u64) 
     n
 }
 
+/// px43: `resolve`, asking with the ids `who`.
+fn resolve_who(a: u64, who: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool, follow: u64) -> u64 {
+    let (n, _p, _s, _l, _t) = walk_who(a, who, pml4, dirfd, va, empty_ok, follow)
+    n
+}
+
 /// px34: `resolve` of the path in pax_kbuf[0..rl) (px36: a last link
 /// followed, as `connect` does).
 fn resolve_k(a: u64, dirfd: u64, rl: u64) -> u64 {
@@ -2971,7 +2998,51 @@ fn resolve_k(a: u64, dirfd: u64, rl: u64) -> u64 {
 /// px42: whether the process is in group `g` for a file's sake: its
 /// file-system group id or one of its supplementary groups.
 fn member(a: u64, g: u64) -> bool {
-    cred.gid(a, cred.FS) == g || cred.in_list(a, g)
+    member_as(a, cred.FS, g)
+}
+
+/// px43: the same, asking with the ids `who` (cred.FS, or cred.REAL for
+/// the access family): that group id, or a supplementary group.
+fn member_as(a: u64, who: u64, g: u64) -> bool {
+    cred.gid(a, who) == g || cred.in_list(a, g)
+}
+
+// px43: what a check asks for (the low three bits of a mode's class,
+// and of `access(2)`'s mode).
+const MAY_X: u64 = 1
+const MAY_W: u64 = 2
+const MAY_R: u64 = 4
+
+/// px43: THE class rule, the one place every permission check on a file
+/// or a directory is decided (`inode(7)`, `path_resolution(7)`, POSIX
+/// XBD 4.5; px38's `perm` A and B, measured): may the process, asking
+/// with its ids `who` — the file-system ids (cred.FS) for every call but
+/// the access family, the real ids (cred.REAL) for `access`,
+/// `faccessat` and `faccessat2` without AT_EACCESS — have all of `want`
+/// (MAY_R, MAY_W, MAY_X) of node `n`?
+///
+/// Privileged is that user id 0 (ruling #75 R9: file-system user id 0
+/// for files): it reads and writes anything and searches every
+/// directory, and executes what is not a directory only where some
+/// execute bit is set. Anyone else is given exactly ONE class, chosen
+/// once: the owner's bits when the user id is the node's owner — even
+/// where they deny what the group's or the others' would allow — else
+/// the group's when the group id or a supplementary group is the
+/// node's group (`member_as`), else the others'. Callers: `walk_as`
+/// (search, every directory a component is looked up in), `openat`,
+/// `truncate`, `faccessat`, `exec_lookup`, `chdir`, `fchdir`.
+fn may(a: u64, who: u64, n: u64, want: u64) -> bool {
+    let m = n_mode(n)
+    if cred.uid(a, who) == 0 {
+        return want & MAY_X == 0 || is_dir_node(n) || m & 0x49 != 0 // 0o111
+    }
+    var bits = m & 7
+    if cred.uid(a, who) == n_owner(a, n, 0) {
+        bits = (m >> 6) & 7
+    } else if member_as(a, who, n_owner(a, n, 1)) {
+        bits = (m >> 3) & 7
+    }
+    want & 7 & !bits == 0
 }
 
 /// px42: what a name made in directory inode `d` is stamped with: the
@@ -3081,6 +3152,10 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
             refuse(a, R_DEVRO)
             return neg(EROFS)
         }
+        // px43: a new name needs write and search of its directory.
+        if !may(a, cred.FS, par, MAY_W | MAY_X) {
+            return neg(EACCES)
+        }
         if lowest_free(a, 0) == FDS {
             return neg(EMFILE)
         }
@@ -3097,7 +3172,16 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
     } else if flags & O_CREAT != 0 && flags & O_EXCL != 0 {
         return neg(EEXIST)
     }
+    // px43: what the access mode asks of the class (`may`): read for
+    // O_RDONLY, write for O_WRONLY, both for O_RDWR.
+    var want = MAY_R
+    if acc == O_WRONLY {
+        want = MAY_W
+    } else if acc == O_RDWR {
+        want = MAY_R | MAY_W
+    }
     var k = K_FILE
+    let named = ty(n) == T_INO // px43: a name of the tree, not /dev/std*'s descriptor
     if ty(n) == T_STD {
         let src = rf(n)
         if kind(a, src) == K_CLOSED {
@@ -3129,6 +3213,9 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
         }
         k = K_DIR
     } else if ty(n) == T_INO && tree.is_sock(rf(n)) {
+        if !may(a, cred.FS, n, want) {
+            return neg(EACCES) // px43: the class is asked first (measured: a 0000 one is -EACCES to a user, -ENXIO to root)
+        }
         return neg(ENXIO) // px34: a socket's name is not opened (measured)
     } else if ty(n) == T_SYN {
         k = K_SYN // px34: a file of /proc or /sys
@@ -3138,6 +3225,18 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
     }
     if k == K_SYN {
         return syn_open(a, n, flags)
+    }
+    // px43: a file or a directory of the tree opens only for what its
+    // class allows (`want`, above), and O_TRUNC of a file asks write
+    // whatever the access mode. A file this call made is exempt (its
+    // first descriptor writes whatever its mode). /dev's and /proc's
+    // files, and what /dev/std* reopens, keep their own answers (U5;
+    // not measured).
+    if flags & O_TRUNC != 0 && k == K_FILE {
+        want = want | MAY_W
+    }
+    if !made && named && !may(a, cred.FS, n, want) {
+        return neg(EACCES)
     }
     // px17: a new open file (offset 0), also when /dev/std* reopens a
     // file or a pipe's end (as /proc/self/fd's links do on Linux).
@@ -3388,7 +3487,9 @@ pub fn ftruncate(a: u64, fd: u64, len: u64) -> u64 {
 }
 
 /// px27: `truncate(path, len)`: as `ftruncate` for the file the path
-/// names: -EISDIR for a directory, -EINVAL for what is no file.
+/// names: -EISDIR for a directory, -EINVAL for what is no file; px43:
+/// -EACCES unless the class rule gives write (`ftruncate` asks only
+/// that its descriptor was opened for writing).
 pub fn truncate(a: u64, pml4: u64, va: u64, len: u64) -> u64 {
     let n = resolve(a, pml4, AT_FDCWD, va, false, F_YES)
     if is_err(n) {
@@ -3399,6 +3500,9 @@ pub fn truncate(a: u64, pml4: u64, va: u64, len: u64) -> u64 {
     }
     if ty(n) != T_INO || len >= 0x8000000000000000 {
         return neg(EINVAL)
+    }
+    if !may(a, cred.FS, n, MAY_W) {
+        return neg(EACCES) // px43: the class's write bit
     }
     tree.truncate(rf(n), len)
 }
@@ -3456,6 +3560,8 @@ pub fn ioctl(a: u64, pml4: u64, fd: u64, req: u64, arg: u64) -> u64 {
 /// path's length as copied into pax_kbuf[0..]) or (0, -errno, 0). A
 /// regular file with an execute bit; a directory, a device or a file
 /// with no execute bit is -EACCES (execve(2)); a missing one -ENOENT.
+/// px43: the execute bit of the class the file-system ids choose (root:
+/// any of the three); set-ID bits are not honoured (ruling #75 R5).
 /// px27: the file must still be the archive's own bytes, whole (the
 /// loader reads one contiguous image): a program written or copied
 /// since boot is refused by name, -EACCES.
@@ -3467,7 +3573,7 @@ pub fn exec_lookup(a: u64, pml4: u64, va: u64) -> (u64, u64, u64) {
     if ty(n) != T_INO || tree.is_dir(rf(n)) {
         return (0, neg(EACCES), 0)
     }
-    if tree.mode(rf(n)) & 0x49 == 0 { // 0o111
+    if !may(a, cred.FS, n, MAY_X) { // px43: the class's execute bit (root: any)
         return (0, neg(EACCES), 0)
     }
     let e = tree.archive_entry(rf(n))
@@ -3571,6 +3677,9 @@ pub fn chdir(a: u64, pml4: u64, va: u64) -> u64 {
     if !is_dir_node(n) {
         return neg(ENOTDIR)
     }
+    if !may(a, cred.FS, n, MAY_X) {
+        return neg(EACCES) // px43: the directory itself is searched
+    }
     set_cwd(a, n)
     0
 }
@@ -3584,6 +3693,9 @@ pub fn fchdir(a: u64, fd: u64) -> u64 {
     let n = node_of(a, fd)
     if !is_dir_node(n) {
         return neg(ENOTDIR)
+    }
+    if !may(a, cred.FS, n, MAY_X) {
+        return neg(EACCES) // px43: as `chdir`, whatever the descriptor was opened for
     }
     set_cwd(a, n)
     0
@@ -3788,20 +3900,24 @@ pub fn renameat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, fla
 }
 
 /// px27: `faccessat(dirfd, path, mode)` (and `access`; `faccessat2`
-/// with flags 0 or AT_EACCESS): every process is root, so what exists
-/// may be read and written (0), and may be executed unless it is a
-/// file with no execute bit at all (-EACCES, as root is answered on
-/// Linux); -EINVAL for a mode outside R_OK|W_OK|X_OK or another flag;
-/// the path's own errors.
+/// with flags 0 or AT_EACCESS); -EINVAL for a mode outside
+/// R_OK|W_OK|X_OK or another flag; the path's own errors. px43: the
+/// path is walked and the node asked by the class rule with the REAL
+/// user and group ids (privileged when the real user id is 0), or with
+/// AT_EACCESS the file-system ones, as `open` asks (px38's `perm` G:
+/// (0 1000 0) is told 0 for root's 0600 file it then cannot open).
+/// What is not a node of the tree — /dev's and /proc's files — keeps
+/// its present answer (0), but its directories are searched.
 pub fn faccessat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64, flags: u64) -> u64 {
     if mode & !7 != 0 || flags & !AT_EACCESS != 0 {
         return neg(EINVAL)
     }
-    let n = resolve(a, pml4, dirfd, va, false, F_YES)
+    let who = if flags & AT_EACCESS != 0 { cred.FS } else { cred.REAL }
+    let n = resolve_who(a, who, pml4, dirfd, va, false, F_YES)
     if is_err(n) {
         return neg(rf(n))
     }
-    if mode & 1 != 0 && ty(n) == T_INO && !tree.is_dir(rf(n)) && tree.mode(rf(n)) & 0x49 == 0 {
+    if ty(n) == T_INO && !may(a, who, n, mode) {
         return neg(EACCES)
     }
     0
