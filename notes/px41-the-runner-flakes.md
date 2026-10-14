@@ -258,6 +258,29 @@ with the fixed play, CI's 225 chord sessions held no late tick after
 the first step (0 of some 43,000 steps), so the restatement is for the
 loaded host, not for CI as measured.
 
+**K8 itself under the reproducing load cannot be shown green, on any
+tree.** The chord session alone, release BIOS, ten boots each, judged
+by trunk's rule and by the place rule (`kasumi/k8-*`, `k8loop.sh`):
+
+| play | load on CPUs 12–15 (host besides) | K8 whole | timeline, trunk's rule | timeline, the place rule |
+|---|---|---|---|---|
+| trunk's | 12 loops (18–23) | red 10 of 10 | red 1 | red 0 |
+| the head's | 12 loops (23–34) | red 10 of 10 | red 6 | red 0 |
+| trunk's | 4 loops (28 falling to 13) | red 6 of 10 | red 5 | red 3 |
+| the head's | 4 loops (13 falling to 8) | red 1 of 10 | red 0 | red 0 |
+
+Under 12 loops every boot's *capture* fails (QEMU's `wav` file runs 20
+to 45% long and steps merge): that half of K8 measures the host's
+audio thread and nothing here touches it. The two 4-loop rows are not
+a fair pair: the host's own load fell by half between them. What the
+table does show is the timeline half: with the place rule no boot of
+20 under 12 loops failed on its timeline, where trunk's rule failed 7 ("the head's" is
+`w6`, the same play and rule as the head).
+The suite at the rebased head on kasumi (`w7`, the host at 7 to 25)
+failed K8 once of four legs, on the capture alone (slot 3 heard 1185
+ms; its timeline had a late tick and passed). On CI the capture half
+has not failed in the 225 sessions read.
+
 **K9, and a prediction that was wrong.** To hold `play` to the fix I
 first added a session of 60, then 200, plays in a shell loop with "at
 most one begins a tick late". With trunk's `play` put back it **passed
@@ -386,7 +409,9 @@ changed here (§6).
   trunk's play). Possibly a tick pending while a system call ran; not
   chased.
 - K8 on a host loaded as kasumi was still fails when a tone is two
-  ticks late or the capture runs long; nothing here changes that.
+  ticks late or the capture runs long (10 of 10 under 12 loops, either
+  tree); nothing here changes that, and no pair of runs here shows K8
+  whole going from red to green under one load.
 - `static_ok`'s `readelf … | grep -q` in eleven suites: not measured
   under load, not changed.
 - The 8 kB R10 allows the kernel's frames is, by the probe, the same
@@ -423,4 +448,8 @@ hasu ran were cut before the rebase (branch `px41-prerebase`, head
 | the census by the shell (`w4`, `w5` = `d1a9ff3` and this file) | `ee38206` | `f729733` |
 | K9 under strace (`w6` = `188124b`) | `188124b` | `44a9330` |
 
-The suites at the rebased head on kasumi, and the CI runs: the PR body.
+At the rebased tree on kasumi (`w7` = `3aef2f7`, the code of the head;
+the host at 5 to 25): `tests/lobo-session-selftest` PASS; `mpx4-lobo`
+52 PASS, 0 FAIL, 15 boots, R10 flat on both tiers; `mpx3-speaker` 56
+PASS and K8 red on one leg of four, on its capture alone (above)
+(`kasumi/w7/summary.txt`, `suite-lines.txt`). The CI runs: the PR body.
