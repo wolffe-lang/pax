@@ -17,8 +17,20 @@
 //! directories, and a removed directory's hold on its parent), the
 //! three times and the time it was made (nanoseconds since the epoch),
 //! where its bytes are, and for a directory its parent and how many
-//! entries it has. A freed inode goes on a list and is the next one
-//! made; the table's frames are never given back (at most 512).
+//! entries it has, and (px42) its owner and its group. A freed inode
+//! goes on a list and is the next one made; the table's frames are
+//! never given back (at most 512).
+//!
+//! **Owners (px42).** An inode's last word holds its owner's user id
+//! (the low 32 bits) and its group's id (the high 32). The sixteen
+//! words were all named before, but one of them, the free list's link,
+//! was only ever used by a record that is free: the link now lives in
+//! the word a live inode keeps its birth time in, and the inode is the
+//! 128 bytes it was. `create`, `mkdir`, `symlink` and `mksock` are told
+//! the ids to stamp (kernel/files reads them from the maker's
+//! file-system ids and the directory, `stamp`); `chown` changes them;
+//! `adopt` takes the archive's. The tree asks nobody who they are: who
+//! may change an owner is kernel/files' rule.
 //!
 //! **A file's bytes** are 4096-byte frames under an index whose depth
 //! grows with the file: depth 0, the one frame alone (up to 4096
@@ -61,8 +73,9 @@
 //! go when the last name and the last holder are gone). A symbolic link
 //! is an inode of its own, S_IFLNK|0777, whose bytes are its target,
 //! held as a file's; kernel/files follows it. `set_mode`, `set_times`
-//! (signed nanoseconds, to the nanosecond) and `owned` (root to root)
-//! are the changes after a file is made; each moves ctime. Written
+//! (signed nanoseconds, to the nanosecond) and `chown` (px36's `owned`,
+//! root to root; px42: any id) are the changes after a file is made;
+//! each moves ctime. Written
 //! from `link(2)`, `symlink(2)`, `symlink(7)`, `chmod(2)`, `chown(2)`,
 //! `utimensat(2)` and black-box runs on tmpfs (`notes/px36/`).
 //!
@@ -134,7 +147,10 @@ const I_BACKLEN: u64 = 11 // how many of them the file still reads
 const I_PARENT: u64 = 12 // a directory's parent; px34: a socket's record (kernel/unix), + 1, while it lives
 const I_ENTRIES: u64 = 13 // a directory's entries; a file: its archive entry + 1
 const I_BTIME: u64 = 14
-const I_NEXT: u64 = 15 // the free list
+const I_NEXT: u64 = 14 // the free list: a free record's link, in the word a live inode's birth time is in (px42)
+const I_OWNER: u64 = 15 // px42: the owner's user id (low 32 bits) and the group's id (high 32)
+/// px42: the id `chown` leaves alone (-1 as 32 bits).
+pub const KEEP: u64 = 0xffffffff
 
 const S_IFMT: u64 = 0xf000
 const S_IFDIR: u64 = 0x4000
@@ -354,9 +370,10 @@ fn ip(i: u64, w: u64, v: u64) {
     wr(iaddr(i) + w * 8, v)
 }
 
-/// A new inode with `mode`, no link yet, every time now: its index, or
-/// NONE (the table full, or no frame for it).
-fn inode_new(mode: u64) -> u64 {
+/// A new inode with `mode`, owned `uid`:`gid` (px42), no link yet,
+/// every time now: its index, or NONE (the table full, or no frame for
+/// it).
+fn inode_new(mode: u64, uid: u64, gid: u64) -> u64 {
     var i = NONE
     let head = st(S_FREE)
     if head != 0 {
@@ -388,8 +405,23 @@ fn inode_new(mode: u64) -> u64 {
     ip(i, I_MTIME, t)
     ip(i, I_CTIME, t)
     ip(i, I_BTIME, t)
+    ip(i, I_OWNER, pack(uid, gid))
     put_st(S_LIVE, st(S_LIVE) + 1)
     i
+}
+
+fn pack(uid: u64, gid: u64) -> u64 {
+    (uid & 0xffffffff) | ((gid & 0xffffffff) << 32)
+}
+
+/// px42: inode `i`'s owner, a user id.
+pub fn uid(i: u64) -> u64 {
+    ig(i, I_OWNER) & 0xffffffff
+}
+
+/// px42: inode `i`'s group, a group id.
+pub fn gid(i: u64) -> u64 {
+    ig(i, I_OWNER) >> 32
 }
 
 /// Inode `i` is gone for good: its bytes given back, its record free.
@@ -1031,13 +1063,13 @@ pub fn name_of(d: u64, c: u64) -> (u64, u64) {
 }
 
 /// A new file named [name, name + len) in directory `d`, with the
-/// permission bits `perm`: its inode, or -ENOENT (the directory has
-/// been removed), -ENOSPC.
-pub fn create(d: u64, name: u64, len: u64, perm: u64) -> u64 {
+/// permission bits `perm`, owned `uid`:`gid` (px42): its inode, or
+/// -ENOENT (the directory has been removed), -ENOSPC.
+pub fn create(d: u64, name: u64, len: u64, perm: u64, uid: u64, gid: u64) -> u64 {
     if ig(d, I_NLINK) == 0 {
         return neg(ENOENT)
     }
-    let i = inode_new(S_IFREG | (perm & 0xfff))
+    let i = inode_new(S_IFREG | (perm & 0xfff), uid, gid)
     if i == NONE {
         return neg(ENOSPC)
     }
@@ -1054,10 +1086,11 @@ pub fn create(d: u64, name: u64, len: u64, perm: u64) -> u64 {
 
 /// px34: a socket's name [name, name + len) in directory `d` (`bind` on
 /// an AF_UNIX path socket), mode S_IFSOCK with the permission bits
-/// `perm`, size 0, one link, naming socket record `sock` (kernel/unix):
-/// its inode, or -ENOENT (the directory has been removed), -ENOSPC.
-pub fn mksock(d: u64, name: u64, len: u64, perm: u64, sock: u64) -> u64 {
-    let i = create(d, name, len, perm)
+/// `perm`, size 0, one link, owned `uid`:`gid` (px42), naming socket
+/// record `sock` (kernel/unix): its inode, or -ENOENT (the directory
+/// has been removed), -ENOSPC.
+pub fn mksock(d: u64, name: u64, len: u64, perm: u64, sock: u64, uid: u64, gid: u64) -> u64 {
+    let i = create(d, name, len, perm, uid, gid)
     if failed(i) {
         return i
     }
@@ -1075,13 +1108,13 @@ pub fn is_link(i: u64) -> bool {
 /// whose target is the `tlen` kernel bytes at `target` (1 to 4095:
 /// the caller has refused the rest): mode S_IFLNK|0777 (`symlink(7)`:
 /// a link's permission bits are not used), one link, its bytes the
-/// target's, held as a file's are; its inode, or -ENOENT (the directory
-/// has been removed), -ENOSPC.
-pub fn symlink(d: u64, name: u64, len: u64, target: u64, tlen: u64) -> u64 {
+/// target's, held as a file's are, owned `uid`:`gid` (px42); its inode,
+/// or -ENOENT (the directory has been removed), -ENOSPC.
+pub fn symlink(d: u64, name: u64, len: u64, target: u64, tlen: u64, uid: u64, gid: u64) -> u64 {
     if ig(d, I_NLINK) == 0 {
         return neg(ENOENT)
     }
-    let i = inode_new(S_IFLNK | 0x1ff)
+    let i = inode_new(S_IFLNK | 0x1ff, uid, gid)
     if i == NONE {
         return neg(ENOSPC)
     }
@@ -1137,16 +1170,25 @@ pub fn set_mode(i: u64, perm: u64) {
     ip(i, I_CTIME, now())
 }
 
-/// px36: `chown` by root to root (the only owner there is): ctime moves,
-/// and a regular file loses its set-user-ID bit and, when it is
-/// group-executable, its set-group-ID bit (measured on tmpfs, as
-/// `chown(2)` says of root since Linux 2.2.13), whichever ids were
-/// asked for, -1 included.
-pub fn owned(i: u64) {
+/// `chown` (px36's `owned`; px42: any id): inode `i`'s owner becomes
+/// `uid` and its group `gid`, each left as it is when KEEP (-1); ctime
+/// moves, and a regular file loses its set-user-ID bit and, when it is
+/// group-executable, its set-group-ID bit (measured on tmpfs for root
+/// and for an owner alike, px38's `perm` section E), whichever ids
+/// were asked for, -1 and -1 included. A directory's bits and the
+/// sticky bit stay. `outside`: the caller is neither privileged nor in
+/// the group the file has, and the set-group-ID bit then goes whether
+/// or not the file is group-executable (measured: an owner outside the
+/// group turns 2644 into 0644 with `chown(-1, -1)`; one inside it, and
+/// root, leave it). Who may ask is the caller's to decide.
+pub fn chown(i: u64, uid: u64, gid: u64, outside: bool) {
+    let u = if uid & 0xffffffff == KEEP { ig(i, I_OWNER) & 0xffffffff } else { uid }
+    let g = if gid & 0xffffffff == KEEP { ig(i, I_OWNER) >> 32 } else { gid }
+    ip(i, I_OWNER, pack(u, g))
     let m = ig(i, I_MODE)
     if m & S_IFMT == S_IFREG {
         var keep = m & !S_ISUID
-        if m & S_IXGRP != 0 {
+        if m & S_IXGRP != 0 || outside {
             keep = keep & !S_ISGID
         }
         ip(i, I_MODE, keep)
@@ -1197,13 +1239,13 @@ pub fn sock_gone(i: u64) {
     }
 }
 
-/// A new directory named [name, name + len) in directory `d`: its
-/// inode, or -ENOENT, -ENOSPC.
-pub fn mkdir(d: u64, name: u64, len: u64, perm: u64) -> u64 {
+/// A new directory named [name, name + len) in directory `d`, owned
+/// `uid`:`gid` (px42): its inode, or -ENOENT, -ENOSPC.
+pub fn mkdir(d: u64, name: u64, len: u64, perm: u64, uid: u64, gid: u64) -> u64 {
     if ig(d, I_NLINK) == 0 {
         return neg(ENOENT)
     }
-    let i = inode_new(S_IFDIR | (perm & 0xfff))
+    let i = inode_new(S_IFDIR | (perm & 0xfff), uid, gid)
     if i == NONE {
         return neg(ENOSPC)
     }
@@ -1359,8 +1401,8 @@ pub fn rename(od: u64, on: u64, ol: u64, nd: u64, nn: u64, nl: u64) -> u64 {
 /// The root directory's inode.
 pub const ROOT: u64 = 0
 
-fn make_dir(d: u64, name: u64, len: u64, perm: u64) -> u64 {
-    let i = mkdir(d, name, len, perm)
+fn make_dir(d: u64, name: u64, len: u64, perm: u64, uid: u64, gid: u64) -> u64 {
+    let i = mkdir(d, name, len, perm, uid, gid)
     if failed(i) {
         panic.fail("tree: no room for a directory of the initramfs, frames held", st(S_HELD))
     }
@@ -1368,14 +1410,17 @@ fn make_dir(d: u64, name: u64, len: u64, perm: u64) -> u64 {
 }
 
 /// Archive entry `e` becomes an inode under the root: every directory
-/// on its path made when missing (0755), then the entry itself — a
-/// directory with its mode, or a file whose bytes are the archive's own.
-/// Anything else (a link, a device) is left out.
+/// on its path made when missing (0755, root's), then the entry itself
+/// — a directory with its mode, or a file whose bytes are the archive's
+/// own — owned as the archive says (px42: the header's uid and gid;
+/// pax#48). Anything else (a link, a device) is left out.
 fn adopt(e: u64) {
     let a = initramfs.name_addr(e)
     let l = initramfs.name_length(e)
     let m = initramfs.mode(e)
     let t = initramfs.mtime(e) * NS_PER_SEC
+    let eu = initramfs.uid(e)
+    let eg = initramfs.gid(e)
     put_st(S_STAMP, t + 1)
     var d = ROOT
     var s: u64 = 0
@@ -1400,23 +1445,24 @@ fn adopt(e: u64) {
         let c = lookup(d, a + s, n)
         if !last {
             if c == NONE {
-                d = make_dir(d, a + s, n, 0x1ed)
+                d = make_dir(d, a + s, n, 0x1ed, 0, 0)
             } else if is_dir(c) {
                 d = c
             } else {
                 return
             }
         } else if m & S_IFMT == S_IFDIR {
-            let i = if c == NONE { make_dir(d, a + s, n, m & 0xfff) } else { c }
+            let i = if c == NONE { make_dir(d, a + s, n, m & 0xfff, eu, eg) } else { c }
             if is_dir(i) {
                 ip(i, I_MODE, S_IFDIR | (m & 0xfff))
+                ip(i, I_OWNER, pack(eu, eg))
                 ip(i, I_ATIME, t)
                 ip(i, I_MTIME, t)
                 ip(i, I_CTIME, t)
                 ip(i, I_BTIME, t)
             }
         } else if m & S_IFMT == S_IFREG && c == NONE {
-            let i = create(d, a + s, n, m & 0xfff)
+            let i = create(d, a + s, n, m & 0xfff, eu, eg)
             if failed(i) {
                 panic.fail("tree: no room for a file of the initramfs, frames held", st(S_HELD))
             }
@@ -1446,7 +1492,7 @@ pub fn start() {
     put_st(S_TABLE, t)
     put_st(S_ZERO, z)
     put_st(S_STAMP, 1)
-    let r = inode_new(S_IFDIR | 0x1ed)
+    let r = inode_new(S_IFDIR | 0x1ed, 0, 0)
     if r != ROOT {
         panic.fail("tree: the root is not inode 0 but", r)
     }
