@@ -1621,11 +1621,23 @@ pub fn slot_pid(s: u64) -> u64 {
 
 /// Whether slot `s` holds a process's leader that has not been reaped:
 /// a pid, its own group's leader, not free or dead (a zombie and a held
-/// leader count, as Linux keeps `/proc/<pid>` until the reap).
+/// leader count, as Linux keeps `/proc/<pid>` until the reap). px45: a
+/// process that has ended for a parent to wait for is a zombie from its
+/// end, not from the next `reap` (which runs at the next fork, clone or
+/// wait): before, it was no process at all in between — `/proc/<pid>`
+/// -ENOENT and `kill` -ESRCH — where Linux's is a zombie at once.
 fn is_proc(s: u64) -> bool {
     let st = field(s, offset_of(Thread, state))
     let p = field(s, offset_of(Thread, pid))
-    st != FREE && st != DEAD && p != 0 && field(s, offset_of(Thread, tgid)) == p
+    st != FREE && (st != DEAD || ended(s)) && p != 0 && field(s, offset_of(Thread, tgid)) == p
+}
+
+/// px45: whether slot `s` is a process that has ended and waits for its
+/// parent: a ZOMBIE, or DEAD and marked for one (`process_ends`) with no
+/// thread left, before `reap` makes it a ZOMBIE.
+fn ended(s: u64) -> bool {
+    let st = field(s, offset_of(Thread, state))
+    st == ZOMBIE || (st == DEAD && field(s, offset_of(Thread, zombie)) == 1 && field(s, offset_of(Thread, threads)) == 0)
 }
 
 /// px25: the slot of process `pid`'s leader, SLOTS if no such process.
@@ -1666,7 +1678,7 @@ pub fn proc_after(after: u64) -> u64 {
 /// PR_SET_NAME words, 6 its program name's first byte, 7 that name's
 /// length, 8 1 when it is a zombie.
 pub fn proc_word(s: u64, which: int) -> u64 {
-    let zombie = field(s, offset_of(Thread, state)) == ZOMBIE
+    let zombie = ended(s) // px45: from its end (`is_proc`)
     if which == 0 {
         return field(s, offset_of(Thread, ppid))
     }
