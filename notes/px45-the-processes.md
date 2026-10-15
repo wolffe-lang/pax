@@ -256,9 +256,9 @@ process area gains under ten words; no inode or table changes.
 | P1 | one signal rule in `kernel/signal`, asked by `kill`, `tgkill`, `tkill` and each process `kill(-1)` and `kill(0)` reach; what the kernel raises asks nothing; one privilege test in `kernel/cred` | `signal.may_signal` (§A), asked at those six places and nowhere else; `cred.privileged`, made public, asked by kernel/socket, kernel/process, kernel/files (`/proc`'s guard), kernel/user (`mknod`, the speaker) — no second copy of either | right |
 | P2 | Linux's unrecorded answers (§3's list) | right but for: **`tgkill` of a zombie** answers by the rule like `kill` (0 or -EPERM), not -ESRCH; **`chroot`, `umount2` and `clock_settime`** ask their arguments first (a missing directory -ENOENT, a file -ENOTDIR, CLOCK_MONOTONIC -EINVAL, to a user too), where §3 said -EPERM first (only `reboot` and `sethostname` answer -EPERM before their arguments); **a listening socket's own SO_PEERCRED** is its own ids at `listen` and an AF_INET socket's is pid 0 and -1, neither predicted; `setpriority` of a zombie is 0 (not predicted); a zombie's `/proc` files are root's (not predicted). The rest as §3 said (§A to §E). The kernel was written after this measurement (`rights` on vm-protected, `notes/px45/devs.c` under tools/linux-sound), so P3's first boot is a test of the code against Linux, not of P2 | wrong (5) |
 | P3 | `sig` 99 of 102 sender rows, the three set-ID rows left; `priv` 20 of 30; `rights` every line Linux's at the first boot; `ids` 61 of 71 | `sig` **99 of 102**, exactly the three rows named; `priv` **19 of 30** — the user's KIOCSOUND row is PAX's too: Linux gates the speaker by the controlling terminal (measured, §B) and every PAX process has the console for one; `rights` **276 of 284** at the first boot (the kernel at `92e113b`; `notes/px45/pax-p4a-rights.txt` against the same probe's Linux run, `linux-try2-rights.txt`: eight lines of four kinds, two each — the three the probe's above, and one the kernel's: a process that had just ended had no `/proc/<pid>` until the next fork or wait, where Linux's is a zombie at once; kernel/sched fixed, `9731dbd`), then **284 of 284** and `rights-user` **20 of 20** at every boot after; `ids` **61 of 71** | wrong (priv by one; rights not at the first boot) |
-| P4 | every existing suite green as root; no test edited but `tests/mpx5-users` and its directory | {{P4}} | {{P4V}} |
-| P5 | the soak: 0 wrong, `MemFree` one number | `rights soak 100000` as root and as 1000:1000: 1,000,000 calls each, **0 wrong answers**, `MemFree` one number at every quarter on {{SOAKLEGS}} | right |
-| P6 | plant A red first in `sig` at `(1000 1000 1000)` to `(1002 1000 1001) no exec`; plant B red first in `priv` at its user `bind` line | {{P6}} | {{P6V}} |
+| P4 | every existing suite green as root; no test edited but `tests/mpx5-users` and its directory | `git diff 2167620 --stat -- tests/` is `tests/mpx5-users` and its directory only; on kasumi `mpx5-users` four legs 433 PASS, the same under `taskset -c 0-3` 433, `mpx3-tree` four legs 134 PASS (px44's 134) and 133 under `taskset -c 0-3`, hasu KVM 2 × 217; every other suite in CI's pr tier (every suite on the PR leg: kernel/sched is core) and the labelled full tier, named in the PR | right |
+| P5 | the soak: 0 wrong, `MemFree` one number | `rights soak 100000` as root and as 1000:1000: 1,000,000 calls each, **0 wrong answers**, `MemFree` one number at every quarter on every leg (native and release, BIOS and UEFI) and on hasu under KVM | right |
+| P6 | plant A red first in `sig` at `(1000 1000 1000)` to `(1002 1000 1001) no exec`; plant B red first in `priv` at its user `bind` line | A red first in `sig` at exactly that row; B red first in `priv` at its user `bind` line (§G), each on kasumi and in CI with `mpx5-users` the only suite | right |
 | P7 | under 8 KiB of text; under ten area words; no inode or table changes | `.text` **+24,096 bytes** (859,259 to 883,355; `.rodata` +560, `.data` +344), six area words, and kernel/unix's table **+4 KiB** of `.bss` (`notes/px45/kasumi-kernel-cost.txt`) | wrong |
 
 ## A. Who may signal whom (item 1)
@@ -443,7 +443,17 @@ good. No row is compared with a container's root.
 | ids | root | 71 | 60 | **61** | the ten PAX lines named in `ids.pax` (process groups, `capget`, the machine's) |
 | every other session | | | | unchanged | |
 
-{{SUITES}}
+**Existing suites as root.** `git diff 2167620 --stat -- tests/` is
+`tests/mpx5-users` and `tests/mpx5-users.d/` only. On kasumi:
+`tests/mpx5-users`, four legs, 100 boots (25 sessions a leg), **433
+PASS, 0 FAIL, 0 SKIP** (`notes/px45/kasumi-mpx5-users-d6ebffe.out`); the
+same images under `taskset -c 0-3`, 433 PASS, 0 FAIL; `tests/mpx3-tree`,
+four legs, **134 PASS**, 0 FAIL, 0 SKIP (px44's 134), and under `taskset
+-c 0-3`, 133 (the build's T0 not repeated); hasu, KVM, BIOS, both tiers,
+two rounds of 50 boots, **217 PASS each**, 0 FAIL
+(`notes/px45/hasu-kvm-d6ebffe.log`). In CI: the `tier pr` run (every
+suite on native BIOS: kernel/sched is the kernel's core) and the
+labelled `tier full` run at the head, named in the PR.
 
 ## G. Soak and plants (item 6)
 
@@ -455,7 +465,7 @@ good. No row is compared with a container's root.
   target's `environ`, SO_PEERCRED of a socketpair, `chroot("/")`,
   `reboot` with a bad magic: **1,000,000 calls a soak, 0 wrong
   answers**, `MemFree` one number at the start and every quarter on
-  {{SOAKLEGS}} (247,124 kB native BIOS). Linux's: the same line,
+  every leg (native and release, BIOS and UEFI) and on hasu under KVM (247,124 kB native BIOS). Linux's: the same line,
   `MemFree` 921,692 kB flat.
 - **The plants** (cut from `d6ebffe`, never to be merged):
 
