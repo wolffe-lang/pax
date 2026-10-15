@@ -606,7 +606,7 @@ Shas are this branch's (`px45`). kasumi paths are under
 
 ## 5. Done-when
 
-- Branch `px45` on origin; pax PR {{PR}}, open, unmerged.
+- Branch `px45` on origin; pax PR #64, open, unmerged.
 - The five sections §1 to §5; the items §A to §G.
 - The test checklist:
   - [x] `tests/mpx5-users`, native and release, BIOS and UEFI, kasumi (TCG)
