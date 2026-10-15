@@ -561,6 +561,8 @@ Shas are this branch's (`px45`). kasumi paths are under
   zombie as a process (0); not measured.
 - SO_PEERCRED of an accepted end after its connector changes its ids:
   the ids at `connect` (measured with no change after).
+- SIGPIPE's `si_uid` is the writer's real id, as `kill`'s is (only
+  `kill`'s, `tgkill`'s and SIGCHLD's were measured).
 
 **Not verified**:
 - Real root was one kernel build (kasumi's CachyOS 7.2.8); the speaker's
