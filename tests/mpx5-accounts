@@ -1,0 +1,331 @@
+#!/usr/bin/env bash
+# tests/mpx5-accounts — px46, P5 lane U6: the accounts. An image with
+# root, `pax` (1000) and `lobo` (990) (ruling #75 R3), pelt as pid 1 as
+# root (R2), boreutils' identity tools, and PAX's own `su` (user/su,
+# tools/mksu: root dropping to a user; no passwords, R1; set-ID not
+# honoured, R5). One typed session (user/console/accounts.keys): root's
+# `id`; `su pax`; `id`, `whoami`, `groups`, the environment `su` set; a
+# file made and listed in the home directory; root's 0600 file, a
+# 0750 directory of lobo's, `rm` of a program in /bin, `chmod` of
+# root's file and `kill 1` refused; `kill -l`; a file left in the
+# sticky /tmp and root's file there left alone; `su` back to root and to
+# lobo refused; `exit`; `su - pax -c` with a login's environment; `su
+# lobo` (its shell /bin/false); lobo's own `id` and directory; a user
+# that does not exist.
+#
+#   tests/mpx5-accounts [--images DIR | --no-boot | --only build | --only linux --images DIR]
+#                       [--pelt DIR] [--bore DIR] [--su DIR]
+#                       [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# **The session is the same binaries on three systems, byte for byte.**
+# PAX (COM1, and the PS/2 keyboard); Linux in a throwaway container
+# (tools/linux-tree --owners: pelt as pid 1 of a fresh pid namespace,
+# its root a tmpfs holding the image's tree with the image's owners and
+# modes), run live, as the other suites' Linux sides are; and real root
+# — a real Linux booted under QEMU with the same archive as its root,
+# the session typed on a pseudo-terminal by notes/px46/vmtty.c, the four
+# protected settings on (R7) — recorded on kasumi and committed
+# (tests/mpx5-accounts.d/linux/accounts.tty, vm-accounts.meta). The
+# recording is what makes a broken `su` red: the container runs the
+# same `su`, so a `su` that keeps root's groups agrees with itself there.
+# No account is made anywhere but in the image.
+#
+# What is compared, by rule: both sides are normalised as PAX's serial
+# log is (tools/lib.sh's serial_norm: carriage returns and terminal
+# escape sequences removed — pelt's editor asks the terminal where its
+# cursor is, ESC [ 6 n, before each first prompt), the kernel's own
+# `user: …` lines are left out, and in `ls -l` the date of a file made
+# in the session (`Mon DD HH:MM`) is masked on every side; a date from
+# 1970, the archive's, is compared as it stands.
+#
+# Assertions, per tier, firmware and session:
+#   A0 build: kmain_console built; pelt, su and the boreutils static;
+#      the image built (digests printed); the recording is there; the
+#      Linux side ran in its container and agrees with the recording.
+#   A1 the session on PAX is byte-identical to Linux's in the container,
+#      and the exit status is Linux's.
+#   A2 the session on PAX is byte-identical to real root's recording,
+#      and the exit status is the recording's.
+#   A3 -ENOSYS only for set_robust_list (273) and rseq (334); no
+#      `refused:` line; nobody killed.
+#   A4 the end: `PAX: init /bin/pelt ended with status <s>; nothing
+#      left to run`, `halt`, held halted.
+#
+# The checks this exercises are enforced for honest programs; not a
+# boundary against an attacker (R6).
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 only= peltdir= boredir= sudir=
+usage="usage: tests/mpx5-accounts [--images DIR | --no-boot | --only build | --only linux --images DIR] [--pelt DIR] [--bore DIR] [--su DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --pelt)     peltdir=$2; shift 2 ;;
+        --bore)     boredir=$2; shift 2 ;;
+        --su)       sudir=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+[ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
+need readelf python3
+
+BORE="cat chmod env false groups id ls rm touch whoami"
+SESSIONS="accounts accounts-ps2"
+KEYS=$PAX_ROOT/user/console/accounts.keys
+REC=$here/mpx5-accounts.d/linux
+PROMPT='$ '
+MOTD='PAX. Accounts: root, pax and lobo. No passwords; su is root dropping to a user.'
+kbd_of() { case $1 in *-ps2) echo ps2 ;; *) echo serial ;; esac; }
+
+work=$PAX_BUILD/mpx5-accounts
+runs=$PAX_BUILD/mpx5-accounts-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+# A transcript as compared: normalised as a serial log is, the kernel's
+# lines out, and the date of a file made in the session masked.
+norm_session() {
+    serial_norm "$1" | sed -E 's/^([-dlcbps][-rwxsStT]{9} +[0-9]+ +[^ ]+ +[^ ]+ +[0-9]+) [A-Z][a-z]{2} +[0-9]+ +[0-9]{2}:[0-9]{2} /\1 DATE /'
+}
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+# The image's tree, owners and modes: one line `PATH MODE UID GID` each,
+# read by tools/mkinitramfs (as :MODE:UID:GID) and tools/linux-tree --owners.
+owners_of() {
+    cat <<'EOF'
+/etc/secret 600 0 0
+/tmp 1777 0 0
+/tmp/rootfile 600 0 0
+/home 755 0 0
+/home/pax 755 1000 1000
+/home/pax/hello.txt 644 1000 1000
+/srv 755 0 0
+/srv/lobo 750 990 990
+/srv/lobo/index.html 640 990 990
+EOF
+}
+
+linux_side() { # dir -> reasons on stdout
+    mkdir -p "$1/linux"
+    if "$PAX_ROOT/tools/linux-tree" --root "$1/root" --keys "$KEYS" --prompt "$PROMPT" --argv0 /bin/pelt --size 512m \
+        --owners "$1/owners.txt" "$1/linux/accounts.tty" -- /bin/pelt; then
+        say "  linux accounts: $(wc -c < "$1/linux/accounts.tty" | tr -d ' ') bytes, status $(cat "$1/linux/accounts.tty.rc")"
+    else
+        printf ' tools/linux-tree accounts;'
+    fi
+}
+
+if [ "$only" = linux ]; then
+    why=$(linux_side "$images")
+    [ -z "$why" ] && say "PASS A0 (linux): the Linux side ran in a throwaway container" || bad "A0 (linux):$why"
+    exit "$fail"
+fi
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    r=$work/root
+    mkdir -p "$r/bin" "$r/etc" "$r/tmp" "$r/home/pax" "$r/srv/lobo"
+    why=
+    if [ -n "$peltdir" ]; then
+        cp "$peltdir/pelt" "$r/bin/pelt" || why+=" no $peltdir/pelt;"
+        say "pelt from $peltdir"
+    elif "$PAX_ROOT/tools/mkpelt" "$work/peltbin" > "$work/pelt.txt"; then
+        cp "$work/peltbin/pelt" "$r/bin/pelt"
+    else
+        why+=" tools/mkpelt;"
+    fi
+    if [ -n "$sudir" ]; then
+        cp "$sudir/su" "$r/bin/su" || why+=" no $sudir/su;"
+        say "su from $sudir"
+    elif "$PAX_ROOT/tools/mksu" "$work/subin" > "$work/su.txt"; then
+        cp "$work/subin/su" "$r/bin/su"
+    else
+        why+=" tools/mksu;"
+    fi
+    if [ -z "$boredir" ]; then
+        # shellcheck disable=SC2086
+        "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
+        boredir=$work/bore
+    else
+        say "boreutils from $boredir"
+    fi
+    for u in $BORE; do
+        cp "$boredir/$u" "$r/bin/$u" || why+=" no $boredir/$u;"
+    done
+    printf '%s\n' "$MOTD" > "$r/etc/motd"
+    printf 'root:x:0:0:root:/:/bin/pelt\npax:x:1000:1000:pax:/home/pax:/bin/pelt\nlobo:x:990:990:lobo:/srv/lobo:/bin/false\n' > "$r/etc/passwd"
+    printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\n' > "$r/etc/group"
+    printf 'ENV_PATH\tPATH=/bin\nENV_SUPATH\tPATH=/bin\n' > "$r/etc/login.defs"
+    printf 'root only: 0600\n' > "$r/etc/secret"
+    printf 'left here by root\n' > "$r/tmp/rootfile"
+    printf 'hello from pax\n' > "$r/home/pax/hello.txt"
+    printf '<p>lobo</p>\n' > "$r/srv/lobo/index.html"
+    "$PAX_ROOT/tools/mkzone" "$r/etc/localtime" > "$work/zone.txt" || why+=" tools/mkzone;"
+    echo /bin/pelt > "$r/etc/pax-run"
+    owners_of > "$work/owners.txt"
+    for f in "$r"/bin/*; do
+        x=$(static_ok "$f") || why+=" $x;"
+        say "  program: ${f#"$r"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+    done
+    # The archive: every file and directory, with the owners and modes above.
+    pairs=()
+    while read -r p; do
+        p=${p#.}
+        line=$(awk -v p="$p" '$1 == p { print $2 ":" $3 ":" $4 }' "$work/owners.txt")
+        if [ -d "$r$p" ]; then
+            [ -n "$line" ] && pairs+=("$p/:$line")
+        else
+            mode=644; [ -x "$r$p" ] && mode=755
+            pairs+=("$p=$r$p:${line:-$mode}")
+        fi
+    done < <(cd "$r" && find . -mindepth 1 | LC_ALL=C sort)
+    if "$PAX_ROOT/tools/mkinitramfs" "$work/accounts.cpio" "${pairs[@]}" > "$work/initramfs.txt"; then
+        sed 's/^/  initramfs: /' "$work/initramfs.txt" >&2
+    else
+        why+=" tools/mkinitramfs;"
+    fi
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                --add "$work/accounts.cpio" initramfs.cpio "$elf" "$work/$tier/accounts.iso" >/dev/null \
+                || why+=" $tier accounts: mkimage;"
+            say "built $tier accounts: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/accounts.iso"), initramfs $(sha256_of "$work/accounts.cpio")"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    for f in accounts.tty accounts.tty.rc vm-accounts.meta; do
+        [ -s "$REC/$f" ] || why+=" no recording $REC/$f;"
+    done
+    if [ "$only" = build ]; then
+        [ -z "$why" ] && say "PASS A0 (build): kmain_console built ($tiers), every program static, the image built, the recording there" || bad "A0 (build):$why"
+        exit "$fail"
+    fi
+    if [ "$(uname -s)" != Linux ]; then
+        why+=" the Linux side needs Linux (this is $(uname -s)): build on Linux, boot here with --images;"
+    else
+        why+=$(linux_side "$work")
+    fi
+    [ -z "$why" ] && say "PASS A0: kmain_console built ($tiers), every program static, the image built, the Linux side ran in a throwaway container" || bad "A0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx5-accounts build (A0): PASS (no boot: --no-boot)" || say "mpx5-accounts build: FAIL"
+        exit "$fail"
+    fi
+fi
+lx=$images/linux
+[ -f "$lx/accounts.tty" ] || die "no $lx/accounts.tty (build first, and run the Linux side)"
+
+# The three Linux sides agree before PAX is held to them.
+norm_session "$lx/accounts.tty" > "$lx/accounts.cmp"
+norm_session "$REC/accounts.tty" > "$images/recording.cmp"
+lst=$(cat "$lx/accounts.tty.rc" 2>/dev/null) rst=$(cat "$REC/accounts.tty.rc" 2>/dev/null)
+if cmp -s "$lx/accounts.cmp" "$images/recording.cmp" && [ "$lst" = "$rst" ]; then
+    say "PASS A0 linux: the container's session is real root's recording, $(wc -l < "$lx/accounts.cmp" | tr -d ' ') lines ($(sha256_of "$lx/accounts.cmp" | cut -c1-12)…), status $lst"
+else
+    bad "A0 linux: the container's session is not real root's recording (status '$lst' / '$rst'): $(diff "$images/recording.cmp" "$lx/accounts.cmp" | head -n 14 | cut -c1-300 | tr '\n' '|')"
+fi
+
+record() { # tier leg session status
+    ran=$((ran + 1))
+    printf '%s kmain_console %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        for s in $SESSIONS; do
+            kb=$(kbd_of "$s")
+            id="$tier $leg $s"
+            log=$PAX_BUILD/mpx5-accounts-$tier-$leg-$s.serial.log
+            elf=$images/$tier/kmain_console.elf iso=$images/$tier/accounts.iso
+            rm -f "$log" "$log.verdict" "$log.typed"
+            if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+                for t in A1 A2 A3 A4; do bad "$t $id: no image"; done
+                continue
+            fi
+            hrc=0
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 400 --qemu -m --qemu 512M \
+                --elf "$elf" --marker 'halt|PANIC .*' --type "$KEYS" --prompt "$PROMPT" --keyboard "$kb" "$iso" >"$log.verdict" 2>&1 || hrc=$?
+            record "$tier" "$leg" "$s" "$hrc"
+            norm=$log.norm; serial_norm "$log" > "$norm"
+            out=$PAX_BUILD/mpx5-accounts-$tier-$leg-$s.session
+            awk '/^user: exec pid 1 / { if (!on) { on = 1; next } } on && /^user: [^ ]+ pid 1 (exit_group|exit) [0-9]+ after / { exit }
+                 on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$norm" > "$out"
+            norm_session "$out" > "$out.cmp"
+            pst=$(sed -n -E "s/^user: [^ ]+ pid 1 (exit_group|exit) ([0-9]+) after .*/\\2/p" "$norm" | head -n 1)
+
+            # A1: against the container.
+            why=
+            cmp -s "$lx/accounts.cmp" "$out.cmp" || why+=" the session differs from the container's: $(diff "$lx/accounts.cmp" "$out.cmp" | head -n 14 | cut -c1-300 | tr '\n' '|');"
+            [ "$pst" = "$lst" ] || why+=" exit '$pst' on PAX, '$lst' in the container;"
+            [ "$(wc -l < "$out.cmp" | tr -d ' ')" -gt 20 ] || why+=" a short session;"
+            [ -z "$why" ] && say "PASS A1 $id: $(wc -l < "$out.cmp" | tr -d ' ') lines byte-identical to the container's ($(sha256_of "$out.cmp" | cut -c1-12)…; $(grep -c ' DATE ' "$out.cmp") dates masked), exit $pst" || bad "A1 $id:$why"
+
+            # A2: against real root's recording.
+            why=
+            cmp -s "$images/recording.cmp" "$out.cmp" || why+=" the session differs from real root's recording: $(diff "$images/recording.cmp" "$out.cmp" | head -n 14 | cut -c1-300 | tr '\n' '|');"
+            [ "$pst" = "$rst" ] || why+=" exit '$pst' on PAX, '$rst' recorded;"
+            [ -z "$why" ] && say "PASS A2 $id: byte-identical to real root's recording ($(sed -n 's/^kernel: //p' "$REC/vm-accounts.meta" | cut -c1-60)), exit $pst" || bad "A2 $id:$why"
+
+            # A3: what PAX lacks; nothing refused; nobody killed.
+            why=
+            ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
+            [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
+            rf=$(grep -c ': refused: ' "$norm")
+            [ "$rf" = 0 ] || why+=" $rf refused lines ($(grep -m1 ': refused: ' "$norm" | cut -c1-160));"
+            kl=$(grep -c 'user: [^ ]* pid [0-9]* killed: ' "$norm")
+            [ "$kl" = 0 ] || why+=" $kl killed: lines ($(grep -m1 ' killed: ' "$norm" | cut -c1-160));"
+            [ -z "$why" ] && say "PASS A3 $id: -ENOSYS only for 273 and 334; nothing refused by name; nobody killed" || bad "A3 $id:$why"
+
+            # A4: the end.
+            why=
+            grep -qx "PAX: init /bin/pelt ended with status $lst; nothing left to run" "$norm" \
+                || why+=" no 'PAX: init /bin/pelt ended with status $lst' ($(grep -m1 '^PAX: init ' "$norm"));"
+            pn=$(grep -m1 '^PANIC ' "$norm")
+            [ -z "$pn" ] || why+=" the kernel panicked: $pn;"
+            [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+            [ -z "$why" ] && say "PASS A4 $id: init ended, status $lst; $(tail -n 1 "$log.verdict")" || bad "A4 $id:$why"
+        done
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx5-accounts: PASS" || say "mpx5-accounts: FAIL"
+exit "$fail"
