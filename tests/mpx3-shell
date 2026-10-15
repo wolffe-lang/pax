@@ -54,7 +54,10 @@
 #                 its status, `env`, exit
 #   shell-sigs    user/console/shell-sigs.keys through COM1 (px26):
 #                 sh05's pelt — `trap 'echo caught' INT`, Ctrl-C at
-#                 the prompt and Enter (the trap runs), `trap - INT`,
+#                 the prompt (the trap runs; px46: since sh11 at once,
+#                 and the editor draws a new prompt, so the next step
+#                 waits for it; Ctrl-\ at a prompt is read by the
+#                 editor and does nothing), `trap - INT`,
 #                 Ctrl-C at an empty prompt and a command typed after
 #                 it, `sleep 30` and Ctrl-C a moment later (`$?` is
 #                 130), a pipeline whose reader ends first (`cat
@@ -362,7 +365,10 @@ for leg in $legs; do
             fl=$(grep -m1 '^user: frames free ' "$norm")
             fa=$(printf '%s\n' "$fl" | sed -n -E 's/^user: frames free ([0-9]+) before, [0-9]+ with 1 processes, ([0-9]+) after$/\1 \2/p')
             set -- $fa
-            [ -n "$fa" ] && [ "$1" = "$2" ] || why+=" frames not all back ('$fl');"
+            # px46: a typed session leaves pelt's history file, /.sh_history
+            # (sh12; root's HOME is /), and its one page; procs types nothing.
+            keep=0; [ "$i" = pelt ] && keep=1
+            [ -n "$fa" ] && [ "$1" = $(( $2 + keep )) ] || why+=" frames not all back but $keep ('$fl');"
             [ -z "$why" ] && say "PASS S1 $id: $n programs, pids $execs, each ended; $fl" || bad "S1 $id:$why"
             fi
 
