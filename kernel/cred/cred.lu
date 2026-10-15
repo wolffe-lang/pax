@@ -3,10 +3,10 @@
 //! read and change them, and what `execve` does to them.
 //!
 //! **Nothing here decides what a process may do to a file, a signal, a
-//! port or a device.** Those checks do not exist yet (they are the
-//! lanes after this one): a process may now BE a user, and the only
-//! rules that treat it differently are the id calls' own. Set-ID
-//! execution is not honoured (ruling #75 R5): `exec` never raises an id.
+//! port or a device**: kernel/files' `may` decides a file (px43, px44),
+//! and the rules on processes and root's things (px45) ask `privileged`
+//! here and the ids it keeps. Set-ID execution is not honoured (ruling
+//! #75 R5): `exec` never raises an id.
 //!
 //! **The record** is forty-two words of the process area (kernel/sched's
 //! `proc_area`; words 160 to 201, which nothing else names): the user
@@ -159,8 +159,16 @@ pub fn group(a: u64, i: u64) -> u64 {
     get(a, C_GROUPS + i)
 }
 
-/// Whether the caller is privileged for these calls: effective user id 0.
-fn privileged(a: u64) -> bool {
+/// Whether the process is privileged: effective user id 0 (ruling #75
+/// R9: root for everything but files, for which kernel/files asks the
+/// file-system user id). The id calls ask it, and px45's rules on
+/// processes and on what only root may do: who may signal whom
+/// (kernel/signal), a port below 1024 and a raw socket (kernel/socket),
+/// a priority raised or another's changed (kernel/process), the
+/// console's speaker (kernel/console), `/proc/<pid>`'s guarded files
+/// (kernel/files), and root's calls (kernel/user). PAX has no
+/// capabilities: this one test stands for every one Linux would ask.
+pub fn privileged(a: u64) -> bool {
     get(a, C_UID + EFFECTIVE) == 0
 }
 
