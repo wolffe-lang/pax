@@ -229,3 +229,191 @@ only suite.
 
 **P7. What it costs.** The kernel's text grows by under 8 KiB; the
 process area gains under ten words; no inode or table changes.
+
+### Corrections to §2 and §3, found after they were committed
+
+- §3 P2 named `rights`' rows before they were written; they came out as
+  seven sections (S, K, H, E, P, D, R, C): 284 lines as root dropping to
+  its states and 20 as 1000:1000 (§F).
+- §3 P1 said "under ten words" of the process area and "no inode or
+  table changes" (P7): the area gained six words (202 to 207), and
+  kernel/unix's table grew by two words a socket (SO_PEERCRED's), 4 KiB
+  of `.bss` (§F, P7).
+- After the first boot of `rights` on PAX (eight lines apart, of four
+  kinds, §3a P3), three kinds were the probe's and were changed before
+  any count was taken: root's raw socket (PAX has none: refused by name, so it is a
+  user's row only), a user's KIOCSOUND on root's descriptor (Linux's
+  probe has no controlling terminal and every PAX process's is the
+  console: §B), and the environment a target that does not `execve`
+  inherits (the machine's own; the probe now re-executes itself with
+  one environment, `PX45=rights`, on both). The Linux recording was
+  taken again with the changed probe (`vm-rights.meta`).
+
+## 3a. The prediction, scored
+
+| # | predicted | measured | verdict |
+|---|---|---|---|
+| P1 | one signal rule in `kernel/signal`, asked by `kill`, `tgkill`, `tkill` and each process `kill(-1)` and `kill(0)` reach; what the kernel raises asks nothing; one privilege test in `kernel/cred` | `signal.may_signal` (§A), asked at those six places and nowhere else; `cred.privileged`, made public, asked by kernel/socket, kernel/process, kernel/files (`/proc`'s guard), kernel/user (`mknod`, the speaker) — no second copy of either | right |
+| P2 | Linux's unrecorded answers (§3's list) | right but for: **`tgkill` of a zombie** answers by the rule like `kill` (0 or -EPERM), not -ESRCH; **`chroot`, `umount2` and `clock_settime`** ask their arguments first (a missing directory -ENOENT, a file -ENOTDIR, CLOCK_MONOTONIC -EINVAL, to a user too), where §3 said -EPERM first (only `reboot` and `sethostname` answer -EPERM before their arguments); **a listening socket's own SO_PEERCRED** is its own ids at `listen` and an AF_INET socket's is pid 0 and -1, neither predicted; `setpriority` of a zombie is 0 (not predicted); a zombie's `/proc` files are root's (not predicted). The rest as §3 said (§A to §E). The kernel was written after this measurement (`rights` on vm-protected, `notes/px45/devs.c` under tools/linux-sound), so P3's first boot is a test of the code against Linux, not of P2 | wrong (5) |
+| P3 | `sig` 99 of 102 sender rows, the three set-ID rows left; `priv` 20 of 30; `rights` every line Linux's at the first boot; `ids` 61 of 71 | `sig` **99 of 102**, exactly the three rows named; `priv` **19 of 30** — the user's KIOCSOUND row is PAX's too: Linux gates the speaker by the controlling terminal (measured, §B) and every PAX process has the console for one; `rights` **276 of 284** at the first boot (the kernel at `92e113b`; `notes/px45/pax-p4a-rights.txt` against the same probe's Linux run, `linux-try2-rights.txt`: eight lines of four kinds, two each — the three the probe's above, and one the kernel's: a process that had just ended had no `/proc/<pid>` until the next fork or wait, where Linux's is a zombie at once; kernel/sched fixed, `9731dbd`), then **284 of 284** and `rights-user` **20 of 20** at every boot after; `ids` **61 of 71** | wrong (priv by one; rights not at the first boot) |
+| P4 | every existing suite green as root; no test edited but `tests/mpx5-users` and its directory | {{P4}} | {{P4V}} |
+| P5 | the soak: 0 wrong, `MemFree` one number | `rights soak 100000` as root and as 1000:1000: 1,000,000 calls each, **0 wrong answers**, `MemFree` one number at every quarter on {{SOAKLEGS}} | right |
+| P6 | plant A red first in `sig` at `(1000 1000 1000)` to `(1002 1000 1001) no exec`; plant B red first in `priv` at its user `bind` line | {{P6}} | {{P6V}} |
+| P7 | under 8 KiB of text; under ten area words; no inode or table changes | `.text` **+24,096 bytes** (859,259 to 883,355; `.rodata` +560, `.data` +344), six area words, and kernel/unix's table **+4 KiB** of `.bss` (`notes/px45/kasumi-kernel-cost.txt`) | wrong |
+
+## A. Who may signal whom (item 1)
+
+`kernel/signal`'s `may_signal(me, t, sig)` is the rule, measured on
+real root (px38's `sig`, 102 rows; `rights` S, 119 rows with `tkill`,
+the set-ID state and two zombies):
+
+- a sender may signal when its **effective user id is 0**, or its
+  **real or effective user id is the target's real or saved user id**
+  — a target's effective id is never asked; a sender whose only match
+  is its own saved id is refused; (0, 1003, 0) is refused every user's
+  process and allowed root's, (1003, 0, 1003) allowed everyone's;
+- **SIGCONT** to anyone: Linux allows it within a session, and PAX has
+  one session holding every process (no job control, ruling #79);
+- **a zombie** answers by the same rule against the ids it ended with
+  (`kill`, `tgkill`, `tkill`: 0 or -EPERM) and is signalled nothing;
+  before px45 PAX answered -ESRCH;
+- **validity first**: signal 65 is -EINVAL before any permission (root's
+  target, by a user), no such process -ESRCH, `tgkill` of a thread not
+  in the group -ESRCH, `tkill(999999)` -ESRCH;
+- **`kill(-1, sig)`** signals every permitted process but pid 1 and the
+  caller and answers 0 whenever some such process exists, permitted or
+  not (five sender states); **`kill(0, sig)`** and a negative group are
+  every process on PAX (one group), each by the rule, 0 when one was
+  signalled (the caller always is);
+- **siginfo** (`rights` H): `si_uid` is the sender's **real** user id
+  ((1003 1000 1003) is told as 1003), `si_code` SI_USER (0) for `kill`
+  and SI_TKILL (-6) for `tgkill`, `si_pid` the sender's;
+- **a child's end** (`rights` E): SIGCHLD reaches the parent whatever
+  either's ids (a parent of 1002 or 1003, children of 1000, 1001,
+  (1001 1003 1001) and (0 1003 0)), with CLD_EXITED or CLD_KILLED, the
+  child's pid, its **real** user id and its status;
+- what the kernel raises — SIGCHLD, the terminal's keys, SIGPIPE, a
+  fault — asks nothing.
+
+`sig` on PAX: **99 of 102** sender rows Linux's (33 at trunk
+`2167620`). The three left are the set-ID target's (`1000 ran 04755 of
+1001`) where the sender matches only 1001, the copy's owner:
+`(1001 1001 1001)`, `(1003 1001 1003)`, `(1001 1003 1003)`. On Linux
+that target is (1000 1001 1001); on PAX its copy cannot run (written
+since boot, px27) and would raise no id if it did (R5), so it is a
+zombie of (1000 1000 1000). `rights` makes the same state without a
+bit (`setresuid(1000, 1001, 1002)` then `execve`: (1000 1001 1001)) and
+holds its rows, all Linux's. Its other lines: the 30 `/proc` reader
+rows are PAX's whole (PAX has no `stat`, `maps`, `mem`, `auxv`, `io`,
+`limits`, `exe`, `cwd`, `root` of another process); `/proc is mounted`
+reads `? (?)` (no mountinfo); the set-ID target's line and its `!`
+line. Held whole to `tests/mpx5-users.d/sig.pax`.
+
+`tgkill`'s race (pax#62) is the reference's: Linux answers a just-joined
+thread's tid before it retires it; nothing here touches `mpx3-threads`'
+probe or PAX's answer (-ESRCH, unchanged), and the fix is not one line
+(the probe must wait for the tid to go), so it stays its issue's.
+
+## B. What only root may do (item 2)
+
+Each measured as Linux answers a user (`rights` P, four states: root,
+(1000 1000 1000), (1000 0 1000) which is root by its effective id, and
+(0 1000 0) which is not), and px38's `priv`:
+
+| operation | Linux, to a user | Linux, to root | PAX now |
+|---|---|---|---|
+| `bind` TCP or UDP 1 to 1023 | -EACCES, before whether the port is taken (81 held by root: -EACCES to a user, -EADDRINUSE to root) | 0 | the same (`socket.may_bind`) |
+| `bind` 0, 1024 and up | 0 | 0 | the same |
+| `/proc/sys/net/ipv4/ip_unprivileged_port_start` | `1024`, 0644, root's | | the same, fixed |
+| `socket(AF_INET, SOCK_RAW)` | -EPERM | 0 | -EPERM to a user; root's refused by name (-ESOCKTNOSUPPORT: PAX has no raw socket) |
+| `setpriority(PRIO_PROCESS)` | its nice raised: 0; lowered (even from 5 to 4): -EACCES; another's: 0 when the caller's effective id is the target's real or effective one (a zombie's too), else -EPERM; no process -ESRCH; `which` 7 -EINVAL; 25 is cut to 19 | anything | the same (`process.setpriority`; kept and reported, the scheduler unchanged: named drift); PRIO_PGRP and PRIO_USER refused by name |
+| `getpriority` | 20 minus the nice value, anyone's | | the same |
+| `sched_setscheduler` | SCHED_FIFO, SCHED_RR -EPERM; SCHED_OTHER 0; priority out of range -EINVAL first; another's by the same rule as `setpriority` | 0 | the same (kept and reported); SCHED_DEADLINE and SCHED_RESET_ON_FORK refused by name |
+| `chroot` | the path first (missing -ENOENT, a file -ENOTDIR), then -EPERM | 0 | the same; root: the tree's root 0, any other directory refused by name (-EOPNOTSUPP: PAX keeps one root) |
+| `reboot` | -EPERM, even with a bad magic | a bad magic -EINVAL | the same; root's with a good magic refused by name (PAX halts when init ends) |
+| `sethostname`, `setdomainname` | -EPERM, even for 100 bytes | 100 bytes -EINVAL | the same; root's refused by name (uname is fixed) |
+| `clock_settime` | CLOCK_MONOTONIC -EINVAL first; CLOCK_REALTIME -EPERM | MONOTONIC -EINVAL | the same; root's REALTIME refused by name |
+| `settimeofday` | -EPERM | (not asked: it would change the machine) | -EPERM; root's refused by name |
+| `mount` | -EPERM | (not asked) | -EPERM; root's refused by name ("mounting if any path exists": none does) |
+| `umount2` | the path first (-ENOENT), then -EPERM | a missing path -ENOENT | the same; root's refused by name |
+| `mknod` of a character device | -EPERM | 0 | -EPERM to a user; root's refused by name as before (PAX makes no node) |
+| `prlimit64` raising a hard limit | -EPERM (lowering it 0) | 0 | -EPERM for both, as before (limits are out of the campaign) |
+| `kill(1, SIGTERM)` | -EPERM | | the same (§A) |
+| KIOCSOUND, KDMKTONE (the speaker) | -EPERM on a virtual terminal that is not its controlling terminal, whether root opened it or the user owns it; **0 on its controlling terminal** (`notes/px45/devs.c`, `linux-devs.serial.log`) | 0 | the rule (`console.controlling`): the console is every PAX process's controlling terminal (one session), so anyone with a console descriptor may sound it — as a user `su`'d on Linux's console may; `priv`'s user row (Linux's probe has no controlling terminal) is held to PAX's text by name |
+| the sound card (`/dev/dsp`, OSS on virtio-snd) | its own `open` -EACCES (0600, root's: devtmpfs's, no udev); the OSS ioctls on a descriptor root opened 0, and a write 4096 (not gated) | 0 | the same (§C): the class rule on `open`, nothing on the ioctls |
+
+`reboot`/halt from pelt's `exit`: PAX halts when init ends and nothing
+else halts it; a user cannot be init (R2: the image boots to root's
+shell), and `reboot(2)` is -EPERM to a user.
+
+## C. `/dev`: modes and owners, checked on open (item 3)
+
+Measured on devtmpfs with no udev (`rights` D, `priv`'s device lines):
+every node 0:0.
+
+| node | mode | numbers | PAX |
+|---|---|---|---|
+| `null`, `zero`, `full`, `random`, `urandom` | 0666 | 1:3, 1:5, 1:7, 1:8, 1:9 | the same; `zero` and `full` read zeros, `full`'s write -ENOSPC, `random` and `urandom` are `getrandom`'s (never blocking) — `zero`, `full`, `random`, `urandom` new |
+| `tty` | 0666 | 5:0 | new: opens the console (every process's controlling terminal); Linux's probe has none and is told -ENXIO (named) |
+| `console`, `tty0`, `ttyS0` | **0600** | 5:1, 4:0, 4:64 | 0600 (0620 before); `ttyS0` new |
+| `dsp` | **0600** | 14:3 | 0600 (0666 before) |
+| `mem`, `kmsg`, `ptmx` | 0600, 0644, 0666 | | not there (-ENOENT) |
+
+`open` and the access family ask the class rule of each (`files.checked`
+and `may`, owner 0): a user's open of `console`, `tty0`, `ttyS0` and
+`dsp` is -EACCES, of the 0666 ones 0 (`rights` D, `priv`). A descriptor
+already open keeps what it was opened with (a user's inherited console
+descriptors 0-2). What `/dev/stdin`, `stdout` and `stderr` reopen keeps
+its own answer: devtmpfs has no such names to measure (they are udev's
+links), named. A distribution's udev gives some nodes to a group
+(`tty0` 0620 root:tty, `dsp` 0660 root:audio); PAX has no such group
+and keeps the kernel's own (named).
+
+## D. `/proc/<pid>` by owner and dumpable (item 4)
+
+Measured (`sig`'s 30 reader rows and `rights` R: 8 readers, 7 targets,
+two of them zombies):
+
+- `/proc/<pid>` is the target's **effective** ids, 0555, dumpable or not;
+- `status` and `cmdline` (0444) are anyone's to read; their owner is
+  the target's effective ids while it is dumpable, **0:0** when it is
+  not and when it has ended;
+- `environ` (0400) and `fd/` (0500), owned as above, are read only by
+  the target itself, by a reader whose **effective user id is 0** — and
+  whose file-system ids pass the mode (root after `setfsuid(1002)` is
+  refused 1000's `environ`) — or by one whose **file-system user and
+  group ids are each of the target's real, effective and saved ones
+  while it is dumpable** ((1003 1000 1003) with file-system id 1000
+  reads (1000 1000 1000)'s; (0 1000 0) does not read root's); everyone
+  else -EACCES (`files.may_read_of`);
+- `cmdline` is the program's argument strings as they are now in its
+  memory and `environ` its environment strings, NULs included (at most
+  a page on PAX, named); a zombie's `cmdline` is empty, its `environ`
+  opens for root and its read is -ESRCH, its files are 0:0;
+- `fd/` lists the open descriptors (three for a target that `execve`d);
+  PAX lists them as links and does not follow or read them (a lookup
+  of `fd/<n>` is -ENOENT: named).
+
+## E. SO_PEERCRED (item 5)
+
+Measured (`rights` C, `ids`): `getsockopt(SOL_SOCKET, SO_PEERCRED)`
+answers a `struct ucred` — pid, uid, gid — of the **effective** ids:
+
+- a socketpair's ends (stream and SOCK_SEQPACKET): the maker's pid and
+  ids at `socketpair` (a child that becomes 1002 later is still told
+  its parent's 0:0; a maker (1001 1002 1003) with groups (2001 2002
+  2003) gives 1002:2002, and still after `setfsuid(1003)`);
+- a listening path socket: its own pid and ids **at `listen`** (root
+  that listened and then became 1001 is told 0);
+- a connector's end: the listener's at `listen`; the accepted end: the
+  connector's at `connect` ((1002 1003 1002), gids (2002 2003 2002):
+  1003:2003);
+- a socket never connected, and every AF_INET socket: pid 0, uid and
+  gid -1;
+- a length of 8 writes 8 bytes (the gid untouched) and answers 8; 16
+  answers 12.
+
+`kernel/files`' `peercred`; kernel/unix keeps the pid and ids in two
+new words a socket. `ids`' socketpair line is Linux's now (61 of 71).
+pax#58's remainder (an AF_INET socket's, an eventfd's and an accepted
+end's `fstat` owner) was not reached.
