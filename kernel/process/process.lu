@@ -130,6 +130,7 @@ use initramfs
 use log
 use paging
 use panic
+use procfs
 use sched
 use uaccess
 use vm
@@ -247,18 +248,13 @@ const A_REFUSAL: u64 = 3
 const A_LOGGED: u64 = 4 // 8 words, kernel/user's
 const SIG_WORDS: u64 = 256
 // px45: the nice value (two's complement, -20 to 19; 0 for a fresh
-// process), the scheduling policy and its priority (SCHED_OTHER, 0),
-// and where the program's argument and environment strings are on its
-// stack (the user address of argv's first byte, argv's bytes, envp's
-// bytes: envp's follow argv's) for /proc/<pid>/cmdline and environ.
-// A fork's child has its parent's (the area is copied), `execve`
-// keeps the first three and sets the last three.
+// process), the scheduling policy and its priority (SCHED_OTHER, 0). A
+// fork's child has its parent's (the area is copied), `execve` keeps
+// them. (Words 205 to 207 are kernel/procfs's: where a program's strings
+// are, set here at each exec.)
 const A_NICE: u64 = 202
 const A_POLICY: u64 = 203
 const A_RTPRIO: u64 = 204
-const A_ARGV: u64 = 205
-const A_ARGLEN: u64 = 206
-const A_ENVLEN: u64 = 207
 
 // Refusal codes (32 and up: kernel/vm uses 1-15, kernel/files 16-31).
 const R_FORK: u64 = 32
@@ -1227,26 +1223,11 @@ pub fn fault_signal(v: u64) -> u64 {
 // --- px45: the arguments, priority and the scheduler, and root's calls ------------
 
 /// px45: where `build_stack` put the strings of a program with `ab`
-/// bytes of argv, `eb` of envp and a path of `pl` bytes: the area's
-/// record of them (the strings' block starts STACK_TOP - 8 - their
-/// bytes and the path's and its NUL).
+/// bytes of argv, `eb` of envp and a path of `pl` bytes (the strings'
+/// block starts STACK_TOP - 8 - their bytes and the path's and its
+/// NUL), for kernel/procfs's `cmdline` and `environ`.
 fn set_args(a: u64, ab: u64, eb: u64, pl: u64) {
-    aput(a, A_ARGV, STACK_TOP - 8 - (ab + eb + pl + 1))
-    aput(a, A_ARGLEN, ab)
-    aput(a, A_ENVLEN, eb)
-}
-
-/// px45: the program's argument strings (`which` 0) or environment
-/// strings (1) of the process whose area is `a`: (their user address,
-/// their bytes, NULs included); (0, 0) for a process the kernel started
-/// before px45 kept them (none: every exec sets them).
-pub fn args(a: u64, which: int) -> (u64, u64) {
-    let at = aget(a, A_ARGV)
-    let ab = aget(a, A_ARGLEN)
-    if which == 0 {
-        return (at, ab)
-    }
-    (at + ab, aget(a, A_ENVLEN))
+    procfs.set_args(a, STACK_TOP - 8 - (ab + eb + pl + 1), ab, eb)
 }
 
 const PRIO_PROCESS: u64 = 0
