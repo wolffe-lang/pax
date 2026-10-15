@@ -282,6 +282,7 @@ const ENFILE: u64 = 23 // px17: the open-file table (or the pipes) full
 const EAGAIN: u64 = 11 // px17
 const ENXIO: u64 = 6 // px17: reopening a socket through /dev/std*
 const ENOSPC: u64 = 28 // px45: a write to /dev/full
+const ESRCH: u64 = 3 // px45: a zombie's environ read
 const ENOTSOCK: u64 = 88 // px17
 const EAFNOSUPPORT: u64 = 97 // px17
 const EPROTONOSUPPORT: u64 = 93 // px17
@@ -2815,6 +2816,21 @@ fn syn_child(d: u64, s: u64, n: u64) -> u64 {
         if comp_is(s, n, "setgroups") {
             return (T_SYN << T_SHIFT) | procfs.child_at(d, 1) // px39
         }
+        if comp_is(s, n, "cmdline") {
+            return (T_SYN << T_SHIFT) | procfs.child_at(d, 2) // px45
+        }
+        if comp_is(s, n, "environ") {
+            return (T_SYN << T_SHIFT) | procfs.child_at(d, 3)
+        }
+        if comp_is(s, n, "fd") {
+            return (T_SYN << T_SHIFT) | procfs.child_at(d, 4)
+        }
+        return err(ENOENT)
+    }
+    if d != procfs.ROOT && procfs.entry(d) == procfs.PFD {
+        // px45: a descriptor's link is listed (`getdents`), not followed
+        // or read: a lookup of one finds nothing (named: Linux's link
+        // names what the descriptor is open on).
         return err(ENOENT)
     }
     var e: u64 = 0
@@ -3479,6 +3495,9 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
         if acc != O_RDONLY || flags & O_CREAT != 0 {
             return neg(EISDIR)
         }
+        if !may_read_of(a, n, MAY_R) {
+            return neg(EACCES) // px45: /proc/<pid>/fd
+        }
         k = K_DIR
     } else if ty(n) == T_INO && tree.is_sock(rf(n)) {
         if !may(a, cred.FS, n, want) {
@@ -3492,6 +3511,9 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
         return neg(ENOTDIR)
     }
     if k == K_SYN {
+        if !may_read_of(a, n, want) {
+            return neg(EACCES) // px45: /proc/<pid>/environ
+        }
         return syn_open(a, n, flags)
     }
     // px43: a file or a directory of the tree opens only for what its
@@ -3518,6 +3540,57 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
         wrote(a, rf(n)) // px44: O_TRUNC takes the set-ID bits, as a write does
     }
     fd
+}
+
+/// px45: the lowest open descriptor at or above `from` of the process
+/// whose `/proc/<pid>/fd` is node `d` (the reader's own for its own),
+/// and the position after it; FDS when there is none (or the process is
+/// gone).
+fn fd_after(a: u64, d: u64, from: u64) -> (u64, u64) {
+    let ta = syn_area(a, d)
+    if ta == 0 {
+        return (FDS, 0)
+    }
+    var f = from
+    while f < FDS {
+        if kind(ta, f) != K_CLOSED {
+            return (f, f + 1)
+        }
+        f += 1
+    }
+    (FDS, 0)
+}
+
+/// px45: may the process read the guarded `/proc` node `n` (kernel/
+/// procfs's `guarded`: a process's `environ` and `fd/`)? Its mode by the
+/// class rule first (0400 and 0500, the target's effective ids while it
+/// is dumpable and root's once it is not: kernel/procfs's `owner`); then
+/// `ptrace(2)`'s access mode with the file-system ids (measured, px38's
+/// `sig` and px45's `rights` R): the process itself, a privileged one
+/// (effective user id 0), or one whose file-system user and group ids
+/// are each of the target's real, effective and saved ones while the
+/// target is dumpable. Every other node of /proc keeps its mode's
+/// answer only where `open` asks it.
+fn may_read_of(a: u64, n: u64, want: u64) -> bool {
+    if ty(n) != T_SYN || !procfs.guarded(rf(n)) {
+        return true
+    }
+    if !may(a, cred.FS, n, want) {
+        return false
+    }
+    let ta = syn_area(a, n)
+    if ta == 0 {
+        return false
+    }
+    if ta == a || cred.privileged(a) {
+        return true
+    }
+    if cred.dumpable(ta) != 1 {
+        return false
+    }
+    let u = cred.uid(a, cred.FS)
+    let g = cred.gid(a, cred.FS)
+    u == cred.uid(ta, cred.REAL) && u == cred.uid(ta, cred.EFFECTIVE) && u == cred.uid(ta, cred.SAVED) && g == cred.gid(ta, cred.REAL) && g == cred.gid(ta, cred.EFFECTIVE) && g == cred.gid(ta, cred.SAVED)
 }
 
 /// px34: open a file of /proc or /sys: its text made now (kernel/procfs)
@@ -3556,6 +3629,10 @@ fn syn_open(a: u64, n: u64, flags: u64) -> u64 {
 /// px34: a read of a /proc or /sys file: its text from the offset on.
 fn syn_read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
     let o = of_of(a, fd)
+    let r = rf(node_of(a, fd))
+    if procfs.guarded(r) && procfs.gone(r) {
+        return neg(ESRCH) // px45: a zombie's environ (measured: its open succeeds, its read does not)
+    }
     let len = ofw(o - 1, O_TEXT_LEN)
     let off = ofw(o - 1, O_POS)
     if off >= len || n == 0 {
@@ -3603,6 +3680,12 @@ fn dev_read(pml4: u64, r: u64, buf: u64, n: u64) -> u64 {
     }
     uaccess.zero(pml4, buf, n)
     n
+}
+
+/// px45: whether descriptor `fd` is the console (kernel/user asks it of
+/// the speaker's ioctls).
+pub fn is_console(a: u64, fd: u64) -> bool {
+    kind(a, fd) == K_CONSOLE
 }
 
 /// px45: whether a read of descriptor `fd` is /dev/random's or
@@ -5082,6 +5165,12 @@ fn d_type(c: u64) -> u64 {
     if ty(c) == T_INO && tree.is_sock(rf(c)) {
         return DT_SOCK // px34 (measured: 12)
     }
+    if ty(c) == T_SYN {
+        let (isfd, _n) = procfs.fd_of(rf(c))
+        if isfd {
+            return DT_LNK // px45: a descriptor of /proc/<pid>/fd
+        }
+    }
     if ty(c) == T_INO || ty(c) == T_SYN {
         return DT_REG
     }
@@ -5132,6 +5221,16 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
                 more = false
             } else {
                 nl = fixed_len(c)
+            }
+        } else if p >= 2 && ty(d) == T_SYN && procfs.entry(rf(d)) == procfs.PFD {
+            // px45: /proc/<pid>/fd lists the process's open descriptors
+            let (f, cnext) = fd_after(a, d, p - 2)
+            if f == FDS {
+                more = false
+            } else {
+                c = (T_SYN << T_SHIFT) | procfs.fd_entry(procfs.pid_of(rf(d)), f)
+                nl = procfs.name_len(rf(c))
+                next = cnext + 2
             }
         } else if p >= 2 && ty(d) == T_SYN {
             let e = procfs.child_at(rf(d), p - 2) // px34
