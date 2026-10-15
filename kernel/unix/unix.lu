@@ -4,14 +4,15 @@
 //! is kernel/files' too, and so are the buffers a connection's bytes
 //! cross and the name a socket is bound to in the tree.
 //!
-//! **A socket** is one of 256 records of 32 words in boot/unix.S's
-//! `pax_unix`: its state, its type, the inode its name is (+ 1), its
-//! peer (+ 1), the two buffers it reads and writes (kernel/files' pipe
-//! buffer numbers, + 1), a listener's backlog and queue, a queued end's
-//! listener, its shutdown bits, the error it has pending, how many
-//! connections a listener has ever queued, and the name it was bound
-//! with (up to 108 bytes, as `bind` gave it, for `getsockname` and a
-//! peer's `getpeername`).
+//! **A socket** is one of 256 records of 34 words (32 before px45) in
+//! boot/unix.S's `pax_unix`: its state, its type, the inode its name is
+//! (+ 1), its peer (+ 1), the two buffers it reads and writes
+//! (kernel/files' pipe buffer numbers, + 1), a listener's backlog and
+//! queue, a queued end's listener, its shutdown bits, the error it has
+//! pending, how many connections a listener has ever queued, the name
+//! it was bound with (up to 108 bytes, as `bind` gave it, for
+//! `getsockname` and a peer's `getpeername`), its maker's ids (px43),
+//! and px45: the credentials SO_PEERCRED answers (`cred`).
 //!
 //! **The states** (`unix(7)`, measured: `notes/px34/linux/witness/`):
 //! FRESH (made by `socket`; bound or not), LISTEN (`listen`), CONN (one
@@ -57,7 +58,7 @@ pub const RD: u64 = 1
 /// This end will write no more.
 pub const WR: u64 = 2
 
-const WORDS: u64 = 32
+const WORDS: u64 = 34 // px45: 32 before (U_CPID and U_CIDS)
 const U_STATE: u64 = 0
 const U_TYPE: u64 = 1
 const U_INO: u64 = 2 // the inode its name is, + 1
@@ -76,6 +77,13 @@ const U_EVER: u64 = 14 // connections ever queued on a listener
 const U_NLEN: u64 = 15 // the name's length (0: unnamed)
 const U_NAME: u64 = 16 // the name's bytes, from here (14 words: 112 bytes)
 const U_OWNER: u64 = 30 // px43 (pax#58): its maker's file-system user id (low 32 bits) and group id (high 32), for `fstat`
+// px45: SO_PEERCRED's credentials (`unix(7)`): a pid + 1 (0: none), and
+// an effective user id (low 32 bits) and group id (high 32). A
+// listener's are its own at `listen`; a connected end's are its peer's:
+// the listener's for the connector's end, the connector's at `connect`
+// for the server's end (measured).
+const U_CPID: u64 = 31
+const U_CIDS: u64 = 32
 
 // pax_unix_state's words.
 const S_LIVE: u64 = 0
@@ -151,6 +159,27 @@ pub fn new(ty: u64) -> u64 {
     put_st(S_LIVE, st(S_LIVE) + 1)
     put_st(S_MADE, st(S_MADE) + 1)
     r
+}
+
+/// px45: record `r`'s SO_PEERCRED: (whether it has any, the pid, the
+/// user id, the group id).
+pub fn cred(r: u64) -> (bool, u64, u64, u64) {
+    let p = w(r, U_CPID)
+    let ids = w(r, U_CIDS)
+    (p != 0, if p == 0 { 0 } else { p - 1 }, ids & 0xffffffff, ids >> 32)
+}
+
+/// px45: record `r`'s SO_PEERCRED becomes pid `pid`, user id `uid`,
+/// group id `gid`.
+pub fn set_cred(r: u64, pid: u64, uid: u64, gid: u64) {
+    put(r, U_CPID, pid + 1)
+    put(r, U_CIDS, (uid & 0xffffffff) | ((gid & 0xffffffff) << 32))
+}
+
+/// px45: record `to` takes record `from`'s SO_PEERCRED.
+pub fn copy_cred(to: u64, from: u64) {
+    put(to, U_CPID, w(from, U_CPID))
+    put(to, U_CIDS, w(from, U_CIDS))
 }
 
 /// Record `r` is free again.
