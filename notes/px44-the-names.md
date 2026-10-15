@@ -230,3 +230,314 @@ a 0555 one. Each red in CI with `mpx5-users` the only suite.
 **P7. What it costs.** The kernel's text grows by under 4 KiB; no
 inode, area word or table changes; `/proc/sys/fs/` gains four fixed
 files.
+
+### Corrections to §2 and §3, found after they were committed
+
+- §3 P2 named `chk`'s rows before they were written; they came out as
+  eight sections (N, K, P, M, T, B, U, R): 75 lines as root dropping to
+  the actors and two id states, 19 as 1000:1000 (§G).
+- §3 P3 said the settings' files are mode 0600: measured 0644 (§C).
+- The soak first failed its own free-memory check on every leg (one
+  frame, 4 kB, gone before the first quarter and flat after: the
+  set-ID file the archive carries takes a frame of its own at its first
+  write). Not a leak: the soak now writes that file once before it
+  counts (`c7e5c4a`), and was recorded again on Linux (`3f0c8b9`). The
+  red run is kept on kasumi (`~/lanes/px44/keep/`).
+
+## 3a. The prediction, scored
+
+| # | predicted | measured | verdict |
+|---|---|---|---|
+| P1 | directory write, `connect`, the writer of `utimensat` and the hard-link rule's read and write all `may`; the group `member`; the rest two ownership tests | `may` gains seven call sites (§A); the ownership tests are `owns` and `sticky_ok`, plus the three protected helpers, which ask owners only; no other function reads a class's bits | right |
+| P2 | Linux's unrecorded answers (§3 list) | right but for five: **`rename` of a name onto itself** in a 0555 directory is 0 (two names of one file: nothing asked), not -EACCES; **`link`** by a non-owner of a file it may not write, into a 0555 directory, is -EPERM (protected_hardlinks before the directory's -EACCES), which §3 did not order; **a bound socket's second `bind`** into a 0555 directory is -EACCES for a user (the directory before the -EINVAL); **protected_symlinks** acts only on a path's last component — a link in the middle of a path is followed by anyone; the settings' files are **0644**. The kernel was written before the measurement and corrected to it at these five places before its first boot (so P3's "first boot" is not a test of P2) | wrong (5) |
+| P3 | `perm` 337 of 382 against vm-protected; `setid` 50 of 50 `bits:`; `chk` every new line Linux's, as root and as a user; other sessions unchanged | `perm` **337** (`ALL 337`; B 105, C 12, D 6, F 8, I 36 whole; the 43 `execve` rows and own's and oth's held rows left); `setid` **50 of 50**; `chk` **339 of 339**, `chk-user` **65 of 65** at the first boot of the corrected kernel; `own` 277 of 278, `own-user` 9 of 9, every other session as before | right |
+| P4 | every existing suite green as root; no test edited but `tests/mpx5-users` | `git diff e4755fd --stat -- tests/` is `tests/mpx5-users` and its directory only; `mpx3-tree` and the CI tiers below | right |
+| P5 | the soak: 0 wrong, `MemFree` one number, frames flat | 2,000,000 calls and 200 execs a soak, 0 wrong, as root and as 1000:1000, every leg; `MemFree` one number after the correction above | right after a correction to the probe |
+| P6 | plant A red first in `perm` at `sticky … grp`; plant B `perm` green, `chk` red first at its first rename into a 0555 directory | both, at exactly those rows (§H) | right |
+| P7 | under 4 KiB of text | **7,104 bytes** (852,155 to 859,259; rodata +144, data +56; `notes/px44/kasumi-kernel-cost.txt`) | wrong |
+
+## A. One rule, called (P1, item 1)
+
+`kernel/files`, every new call site of `may` (`git grep -n 'may(a' kernel/`):
+
+| caller | asks | when |
+|---|---|---|
+| `unname` (behind `unlinkat`, a file and AT_REMOVEDIR) | MAY_W \| MAY_X of the directory, then `sticky_ok` | after the walk, the trailing-slash and `.`/`..`/`/` answers; before -EISDIR, -ENOTDIR, -ENOTEMPTY |
+| `may_make` (`mkdirat`, `symlinkat`, `linkat`'s new directory, `unix_bind`) | MAY_W \| MAY_X of the directory | after -EEXIST (-EADDRINUSE), -ENOENT and /dev's and /proc's answers; `bind` before a bound socket's -EINVAL; `link` after the hard-link rule |
+| `renameat` | MAY_W \| MAY_X of both directories; then `sticky_ok` for the old name and a name replaced; MAY_W of a directory that changes parent | after every structural answer and "two names of one file" (0) |
+| `may_hardlink` (`linkat`) | MAY_R \| MAY_W of the file, for a non-owner who is not file-system user id 0 | after -EEXIST; before the directory |
+| `utimensat` | MAY_W of the file, for NULL or {NOW, NOW} by one who does not own it | after the walk and {OMIT, OMIT} |
+| `unix_connect` | MAY_W of the name | before whether anything listens |
+
+Beside it: `owns` (file-system user id 0 or the owner: `chmod_as`,
+`utimensat`, `may_hardlink`), `sticky_ok`, `may_follow`,
+`may_creat_open`, and `wrote` (set-ID bits), which asks `member`.
+Asked of the tree's directories only: `/dev`'s and `/proc`'s keep their
+answers (-EROFS, -ENOENT) to making and removing names.
+
+## B. Directory write (item 1) and the sticky bit (item 2)
+
+Measured on vm-protected (`chk` N and K, `perm` B and C):
+
+- a name made (`mkdir`, `symlink`, `link`, `bind`) in a directory the
+  class may search but not write: -EACCES; an existing name there
+  -EEXIST (`bind` -EADDRINUSE) first; a missing one -ENOENT; a name
+  that is there -EACCES before what it is (`unlink` of a directory,
+  `rmdir` of a file or a full one: root's -EISDIR, -ENOTDIR,
+  -ENOTEMPTY);
+- `rename` asks both directories (out of a 0555 one -EACCES, into one
+  -EACCES); a directory moved to another parent needs write on itself
+  (a 0555 one -EACCES to everyone but root, a 0755 one of 1000's moved
+  by 1000 only), renamed in its own parent it does not; two names of
+  one file: 0 with nothing asked;
+- a bound socket binding again into a 0555 directory: -EACCES for a
+  user, -EINVAL for root;
+- sticky: in a 1777 directory of 1000's a name goes for its owner, the
+  directory's owner and root (-EPERM otherwise: `unlink`, `rmdir`,
+  `rename` away and `rename` over); in root's 1777 directory a user's
+  own name only; in a 1771 one (not world-writable) the same rule; one
+  who may not write the directory is told -EACCES first;
+- root after `setfsuid(1002)` is refused (-EPERM) where 1002 would be;
+  (0, 1000, 0) after `setfsuid(0)` is root again (R9).
+
+## C. The protected settings, on and fixed (item 3, R7)
+
+- `/proc/sys/fs/protected_hardlinks`, `_symlinks`, `_regular`,
+  `_fifos`: `1`, mode 0644, root's (`perm`'s settings line Linux's at
+  last);
+- **symlinks**: a link that is a path's last component, in a sticky
+  world-writable directory, is followed (stat, open, `access`, `chdir`)
+  only by its owner, or by anyone when the directory's owner owns it —
+  root included (refused 1002's link in 1000's directory); a link met
+  in the middle of a path is followed by anyone; `lstat`, `readlink`
+  and `utimensat(AT_SYMLINK_NOFOLLOW)` never follow; not in a 1771
+  directory nor a 0777 one;
+- **regular**: O_CREAT (any access mode, without O_EXCL) of an existing
+  regular file in a sticky world-writable directory: -EACCES unless the
+  opener or the directory's owner owns it — root included; without
+  O_CREAT it opens; O_CREAT\|O_EXCL -EEXIST; a new name is made;
+- **hardlinks**: a non-owner who is not file-system user id 0 links a
+  regular file without S_ISUID and without S_ISGID with group execute
+  that it may read and write (02767 yes; 04777, 02777, 0644, 0600 and a
+  0660 file of a group it is not in, -EPERM); a symbolic link of
+  another's -EPERM; root anything; root after `setfsuid(1002)` like
+  1002;
+- **fifos**: nothing to act on (PAX makes no FIFO: `mknod` -EPERM by
+  name).
+
+## D. `chmod` and `utimensat` (item 4)
+
+- `chmod`, `fchmodat`, `fchmod` (on any descriptor): the owner or
+  file-system user id 0, else -EPERM (also on root's file, also of a
+  directory); S_ISGID asked by an owner outside the group is dropped
+  without an error (file 02644 → 0644, directory 02755 → 0755), kept by
+  one in it by a supplementary group; S_ISUID and the sticky bit kept;
+  root after `setfsuid(1002)` -EPERM on 1000's file, 0 on 1002's;
+  `perm` D 6 of 6;
+- `utimensat`: the owner or file-system user id 0 any times; anyone else
+  NULL or {NOW, NOW} when the class gives write — of the file, not the
+  descriptor (`futimens` NULL on a read-only descriptor of a 0666 file
+  0, of a 0644 one -EACCES) — else -EACCES; {1, 2}, {OMIT, NOW},
+  {NOW, 5}: -EPERM; {OMIT, OMIT} 0; a symbolic link's own times
+  (AT_SYMLINK_NOFOLLOW): NULL for anyone (a link is 0777), {1, 2} its
+  owner's; `perm` F 8 of 8.
+
+## E. Set-ID bits (item 5)
+
+`chk` B and R, `setid`'s 50 `bits:` lines: a write of a byte or more
+(`write`, `writev`, `pwrite`, append, `copy_file_range`, `sendfile`,
+`splice`), O_TRUNC (of an empty file too), `ftruncate` (to any length),
+`truncate` (to its own size too) and `fallocate` by one whose
+file-system user id is not 0 take S_ISUID, and S_ISGID when the file is
+group-executable or the writer is not in its group (02767 kept by a
+member, 0767 for another); root keeps both. The writer's ids decide: a
+descriptor root opened before the drop writes as the user (0777). A
+write of no bytes, an O_RDWR open, `utimensat`, `rename`, a hard link
+and `chmod` to the same mode keep the bits; `fallocate` of no bytes is
+-EINVAL and keeps them. **`fallocate` (285) is new**, mode 0 only: the
+file grows by a hole (no space set aside: named drift); -EBADF on a
+read-only descriptor; other modes refused by name (-EOPNOTSUPP).
+
+## F. AF_UNIX `connect` (item 6)
+
+Write on the socket's name by the class rule, before whether anything
+listens: root's 0775 and 0000 listeners -EACCES to a user, 0777 and
+0772 0; a closed 0000 name -EACCES, a closed 0777 one -ECONNREFUSED; a
+0000 regular file -EACCES, a 0666 one -ECONNREFUSED; a socket in root's
+0700 directory -EACCES (the walk); root connects to all but the closed
+and the files. `perm` I: 36 of 36.
+
+## G. The probes against Linux; every existing suite (item 7)
+
+Every Linux line is real root's: kasumi's own kernel image (Linux
+7.2.8-1-cachyos, `f4c00d5d…`) under QEMU 11.1.1, the program a child
+of pid 1, every capability, **the four protected settings written to 1
+first** (`notes/px44/vminit.c`; `vm-chk.meta`: archive `d362a6a3…`, `chk`
+`eef4c2df…`). `perm` and `setid` are px38's vm-protected recordings,
+their sections to the byte (`tests/mpx5-users` U0 checks it; `perm` and
+`setid` are the very binaries px38 recorded, digests `e75fe694…` and
+`cfd6e650…`). A user's rows are an actor that dropped for good or the
+whole program after `as 1000 1000`. No row is compared with a
+container's root.
+
+| session | run by | Linux lines | identical on PAX before (trunk `e4755fd`) | after | the rest |
+|---|---|---:|---:|---:|---|
+| perm | root, dropping to own, grp, sup, oth | 382 | 291 (vm-protected; 295 against vm) | **337** | 43 A rows Linux's but for `execve 0` → -13 (px27; 30 a user's); own's and oth's held rows (job control) |
+| perm B / C / D / F / I `connect` | the actors | 105 / 12 / 6 / 8 / 36 | 91 / 6 / 2 / 4 / 19 | **105 / 12 / 6 / 8 / 36** | |
+| setid `bits:` | its owner, another user, root | 50 | (not run) | **50** | its other 20 PAX lines held: `execve` refused (px27), not honoured (R5) |
+| chk | root, dropping to the actors and two id states | 339 | 285 | **339** | |
+| chk-user | 1000:1000 | 65 | 54 | **65** | |
+| chk-soak, chk-soak-user | root; 1000:1000 | 2, 2 | | 1, 1 | `~soak` (free memory, PAX's one number) |
+| own, own-user | root; 1000:1000 | 278, 9 | 277, 9 | 277, 9 | `~fixed` |
+
+`chk`'s new rows as users: 65 actor rows of the 75 (own, grp, sup, oth
+dropped for good; the R rows' two id states and the supplementary-group
+owner) and all 19 of `chk-user`'s. `chk-user` cannot show
+protected_symlinks refusing (a user alone can make only its own link);
+the actors show it, in `chk` and in `perm` C.
+
+**Existing suites as root.** `git diff e4755fd --stat -- tests/` is
+`tests/mpx5-users` and `tests/mpx5-users.d/` only. On kasumi:
+`tests/mpx5-users`, four legs, 76 boots (19 sessions a leg), **329
+PASS, 0 FAIL, 0 SKIP** (`notes/px44/kasumi-mpx5-users-8f01cc9.out`);
+the same images under `taskset -c 0-3`, 329 PASS, 0 FAIL;
+`tests/mpx3-tree`, four legs, 134 PASS, 0 FAIL, 0 SKIP (px43's 134),
+and under `taskset -c 0-3`, 133 (the build's T0 not repeated); hasu,
+KVM, BIOS, both tiers, two rounds of 38 boots, 165 PASS each, 0 FAIL
+(`notes/px44/hasu-kvm-8f01cc9.log`). In CI:
+the `tier pr` run (the 19 `@user` suites on native BIOS) and the
+labelled `tier full` run at the head, named in the PR.
+
+## H. Soak and plants (item 7)
+
+- **The soak**: `chk soak 100000`, as root and as 1000:1000, every leg:
+  px43's ten calls a round and ten more — `mkdir` in a 0555 directory,
+  `rename` from a 0777 one into it, `rename` of another's name in a
+  sticky directory, a hard link to root's 0600 file, O_CREAT of root's
+  file in a sticky world-writable directory, `chmod` and `utimensat
+  {1, 2}` of root's file, `chmod 06777` of a set-ID file, a `pwrite` to
+  it and its mode read back: **2,000,000 calls and 200 execs, 0 wrong
+  answers**, `MemFree` one number at the start and every quarter on
+  every leg (249,276 kB native BIOS).
+- **The plants** (cut from `ff5f51e`, never to be merged):
+
+  | plant | break | red on kasumi | red in CI |
+  |---|---|---|---|
+  | A, branch `px44-plant-a` `c4d28ad` | `sticky_ok` always yes | `notes/px44/kasumi-plant-a.mpx5-users.out`: U1 `perm` at its line 216, `sticky 1777 dir of 1000 grp` (unlink 1000's file 0 where Linux says -1) | run 38659145396, job 116179065212 (`mpx5-users` the only suite): `notes/px44/ci-38659145396-plant-a-mpx5-users.txt` |
+  | B, branch `px44-plant-b` `438ca10` | `renameat` asks write of the old name's directory only | `notes/px44/kasumi-plant-b.mpx5-users.out`: `perm` passes; U1 `chk` at its line 267, own's `names … made` row (`into it 0` for -13) | run 38659148372, job 116178797870: `notes/px44/ci-38659148372-plant-b-mpx5-users.txt` |
+
+## I. `perm`'s remaining lines, and what they need
+
+- **The loader (px27)**: A's 43 `execve 0` rows (13 root's, 30 a
+  user's): PAX runs only an archive file whole; `chk` X shows the class
+  rule on archive files, 105 of 105 (px43). `setid`'s 14 refused
+  `execve`s, the same.
+- **Job control**: own's and oth's held rows: the holder stops itself
+  with SIGSTOP, which PAX drops, so it asks while the file is still
+  1000's at 0666 (own: new open 0, fchmod 0; oth: new open 0, fchmod
+  -1). `chk` H holds the rule with a pipe; `fchmod` by a non-owner on a
+  held descriptor is -EPERM on PAX now (oth's line).
+- **U5**: none of `perm`'s lines; `/dev` and `/proc` names' answers to
+  making and removing (-EROFS, -ENOENT) and their files' checks.
+
+## What U5 (processes and root's things) should know
+
+- The class rule is `kernel/files`' `may`; ownership is `owns`; root
+  for files is file-system user id 0 everywhere (R9). Signals ask the
+  effective id (px38 §(d)), not these.
+- `/dev` keeps fixed modes and is not checked on `open` or `access`, and
+  making or removing a name there is -EROFS by name before any
+  permission; `/proc` the same with -ENOENT; U5's `/dev` modes will
+  meet `may` at `openat`'s `named` test (`ty(n) == T_INO` today).
+- `chk` (`user/elf/chk.c`) is the probe to extend; its recorder is
+  `notes/px44/linux-vm.sh` (vm-protected). The suite's session
+  extraction now matches a kernel line as `user: <name> pid <n> `, so a
+  probe may print `user: ` itself (setid does).
+- `perm`'s held rows wait for job control, not for U5.
+
+## 4. Evidence index
+
+Shas are this branch's (`px44`). kasumi paths are under
+`~/lanes/px44/`; hasu's likewise.
+
+### What was written
+
+- The prediction: `7a53caa`.
+- The programs: `be58c2e` (setid, `tools/mkcred`), `2d9844a` and
+  `c7e5c4a` (`user/elf/chk.c`).
+- The recorder: `76165f3` (`notes/px44/vminit.c`, `linux-vm.sh`,
+  `build.sh`).
+- The kernel: `378f22c` (`kernel/procfs`), `a270cef` (`kernel/files`),
+  `1be1453` (`kernel/user`: `fallocate`), `348c17a`, `e52031f`
+  (comments).
+- The suite: `47ae40e`, `3f0c8b9` (chk recorded on vm-protected),
+  `cc182ac` (perm and setid against vm-protected), `5ca1fb4`, `eb14dfe`
+  (`tests/mpx5-users`).
+- The words: `ce88d07` (`kernel/README.md`), `efadd0d`
+  (`docs/SOURCES.md`), `ff5f51e` (CHANGELOG).
+
+### What was measured, and where it is
+
+- **Linux, vm-protected**: `tests/mpx5-users.d/linux/chk*.txt`,
+  `vm-chk.meta`; `perm.txt`, `setid.txt` (px38's
+  `notes/px38/linux/vm-protected.txt`, `vm-protected.meta`).
+- **The kernel's cost**: `notes/px44/kasumi-kernel-cost.txt`.
+- **PAX**: `notes/px44/kasumi-mpx5-users-8f01cc9.out` (four legs),
+  `kasumi-taskset-0-3-mpx5-users-8f01cc9.out`,
+  `kasumi-mpx3-tree-8f01cc9.out`,
+  `kasumi-taskset-0-3-mpx3-tree-8f01cc9.out`, `hasu-kvm-8f01cc9.log`
+  (all at `8f01cc9`; what follows it is notes and one message string of
+  the suite).
+- **The plants**: §H.
+- **CI**: named in the PR (a commit naming the head's runs would move
+  the head).
+
+### Measured, inferred, not verified
+
+**Measured**: everything in §A to §I.
+
+**Inferred**: that `renameat`'s order between two refusals of its two
+directories (the old one sticky, the new one unwritable) is Linux's
+(not asked: PAX asks write of both, then the sticky rule); that a
+`fallocate` by a user that changes nothing but the bits clears them
+like a write (asked only with a growing length); that `ctime` moves when
+a write takes the bits (`set_mode` moves it; not measured).
+
+**Not verified**:
+
+- Real root was one kernel build (kasumi's CachyOS 7.2.8).
+- `mknod` of a FIFO (refused by name on PAX for everyone), so nothing
+  of protected_fifos.
+- More than one process naming in one directory at once (PAX runs one
+  CPU; a call runs with interrupts off).
+- UEFI under KVM on hasu (pax#56): BIOS only there.
+- `mpx3-tree` as a user (U7's, as px43 said).
+
+### Issues
+
+- **To close at merge**: none.
+- **Would file (none filed)**:
+  1. pax: `fallocate` modes other than 0 (KEEP_SIZE, PUNCH_HOLE) are
+     refused by name; tmpfs takes them.
+  2. pax: `perm`'s held rows need a holder that can stop itself (as
+     px43 listed).
+- pax#58 and pax#60 not reached (AF_INET/eventfd owners;
+  `faccessat2`'s flags).
+- Not chased, did not occur in this lane's runs: pax#45, #47, #53.
+
+## 5. Done-when
+
+- Branch `px44` on origin; pax PR #61, open, unmerged.
+- The five sections §1 to §5; the items §A to §I.
+- The test checklist:
+  - [x] `tests/mpx5-users`, native and release, BIOS and UEFI, kasumi (TCG)
+  - [x] the same under `taskset -c 0-3`
+  - [x] the same images under KVM on hasu (BIOS)
+  - [x] `tests/mpx3-tree`, four legs, kasumi, and under `taskset -c 0-3`
+  - [x] `tools/ci-plan` on the branch's paths (19 `@user` suites, pr tier; no map line needed)
+  - [x] plant A red on kasumi and in CI; plant B the same
+  - [ ] the pr tier at the final head, and all suites on every leg (`tier full`): named in the PR
+- `wolf/tools/lane-audit.sh pax px44 61` exit 0: named in the PR.
+- Trees: kasumi `~/lanes/px44/` keeps `out/`, `bin/`, `keep/`; build
+  directories removed. hasu `~/lanes/px44/` keeps `out/`. Plant
+  branches stay on origin, never to be merged.
