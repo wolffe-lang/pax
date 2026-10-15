@@ -925,6 +925,9 @@ static int soak(long n)
     static const struct timespec T12[2] = { { 1, 0 }, { 2, 0 } };
     int bfd = open("/k/soak/b", O_WRONLY);
     if (bfd < 0) { say("! soak: /k/soak/b %d\n", -errno); return 1; }
+    /* the set-ID file's one page written once before the count: a file the
+     * archive carries takes a frame of its own at its first write */
+    if (rc(SYS_pwrite64, bfd, (long)"X", 1, 0, 0) != 1) { say("! soak: pwrite %d\n", -errno); return 1; }
     mem[0] = memfree();
     for (long i = 0; i < n; i++) {
         wrong += op("/k/o/g", O_RDONLY) != no;
