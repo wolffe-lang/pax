@@ -246,6 +246,19 @@ const NEG_ENOSYS: u64 = 0xffffffffffffffda // -38
 const A_REFUSAL: u64 = 3
 const A_LOGGED: u64 = 4 // 8 words, kernel/user's
 const SIG_WORDS: u64 = 256
+// px45: the nice value (two's complement, -20 to 19; 0 for a fresh
+// process), the scheduling policy and its priority (SCHED_OTHER, 0),
+// and where the program's argument and environment strings are on its
+// stack (the user address of argv's first byte, argv's bytes, envp's
+// bytes: envp's follow argv's) for /proc/<pid>/cmdline and environ.
+// A fork's child has its parent's (the area is copied), `execve`
+// keeps the first three and sets the last three.
+const A_NICE: u64 = 202
+const A_POLICY: u64 = 203
+const A_RTPRIO: u64 = 204
+const A_ARGV: u64 = 205
+const A_ARGLEN: u64 = 206
+const A_ENVLEN: u64 = 207
 
 // Refusal codes (32 and up: kernel/vm uses 1-15, kernel/files 16-31).
 const R_FORK: u64 = 32
@@ -257,6 +270,14 @@ const R_NOT_ELF: u64 = 37
 const R_NOMEM: u64 = 38 // px17
 const R_FUTEX: u64 = 39 // px26 (kernel/futex's R_OPERATION)
 const R_THREAD: u64 = 40 // px26
+// px45 (41 is kernel/cred's R_GROUPS).
+const R_PRIO_WHICH: u64 = 42
+const R_POLICY: u64 = 43
+const R_CHROOT: u64 = 44
+const R_REBOOT: u64 = 45
+const R_HOSTNAME: u64 = 46
+const R_CLOCK: u64 = 47
+const R_MOUNT: u64 = 48
 
 /// A refusal code's name ("" when not this module's).
 pub fn why(r: u64) -> str {
@@ -286,6 +307,27 @@ pub fn why(r: u64) -> str {
     }
     if r == R_NOMEM {
         return "no frames for a copy of the address space"
+    }
+    if r == R_PRIO_WHICH {
+        return "a priority of a process group or of a user's processes (PAX sets one process's)"
+    }
+    if r == R_POLICY {
+        return "a scheduling policy PAX does not record (SCHED_DEADLINE, SCHED_RESET_ON_FORK)"
+    }
+    if r == R_CHROOT {
+        return "a root directory that is not the tree's (PAX keeps one root for every process)"
+    }
+    if r == R_REBOOT {
+        return "a reboot or a halt by system call (PAX halts when init ends)"
+    }
+    if r == R_HOSTNAME {
+        return "a host or domain name set (PAX's uname is fixed)"
+    }
+    if r == R_CLOCK {
+        return "the time of day set (PAX reads the clock at boot and counts its ticks)"
+    }
+    if r == R_MOUNT {
+        return "a mount or an unmount (PAX's file systems are fixed)"
     }
     ""
 }
@@ -696,6 +738,7 @@ pub fn exec_span(body: u64, pa: u64, pl: u64, aa: u64, al: u64, ea: u64, el: u64
     let sp = build_stack(pml4, file, entry, av, argc, ab, av + ab, envc, eb, pa, pl, 0)
     let (na, nl) = base_name(e)
     let id = sched.create_process(body, sched.ELF_PROG - 1, pml4, entry, sp, na, nl)
+    set_args(sched.area_of(id), ab, eb, pl)
     vm.start(sched.area_of(id), image_top(file))
     files.set_exe(sched.area_of(id), e) // px26: /proc/self/exe
     describe_elf(file, sched.pid_of(id), pml4, entry, sp, argc, envc)
@@ -860,6 +903,7 @@ pub fn execve(f: u64, path: u64, argv: u64, envp: u64) -> u64 {
     cred.exec(na) // px39: the saved and file-system ids become the effective ids; nothing is raised
     files.exec_close(na)
     reset_handlers(na)
+    set_args(na, ae, ee - ae, rl)
     var k: u64 = 0
     while k < 8 {
         aput(na, A_LOGGED + k, 0)
@@ -1178,4 +1222,287 @@ pub fn fault_signal(v: u64) -> u64 {
         return 7
     }
     11
+}
+
+// --- px45: the arguments, priority and the scheduler, and root's calls ------------
+
+/// px45: where `build_stack` put the strings of a program with `ab`
+/// bytes of argv, `eb` of envp and a path of `pl` bytes: the area's
+/// record of them (the strings' block starts STACK_TOP - 8 - their
+/// bytes and the path's and its NUL).
+fn set_args(a: u64, ab: u64, eb: u64, pl: u64) {
+    aput(a, A_ARGV, STACK_TOP - 8 - (ab + eb + pl + 1))
+    aput(a, A_ARGLEN, ab)
+    aput(a, A_ENVLEN, eb)
+}
+
+/// px45: the program's argument strings (`which` 0) or environment
+/// strings (1) of the process whose area is `a`: (their user address,
+/// their bytes, NULs included); (0, 0) for a process the kernel started
+/// before px45 kept them (none: every exec sets them).
+pub fn args(a: u64, which: int) -> (u64, u64) {
+    let at = aget(a, A_ARGV)
+    let ab = aget(a, A_ARGLEN)
+    if which == 0 {
+        return (at, ab)
+    }
+    (at + ab, aget(a, A_ENVLEN))
+}
+
+const PRIO_PROCESS: u64 = 0
+const PRIO_PGRP: u64 = 1
+const PRIO_USER: u64 = 2
+const NICE_MIN: int = -20
+const NICE_MAX: int = 19
+const NEG_EPERM: u64 = 0xffffffffffffffff // -1
+const NEG_ESRCH: u64 = 0xfffffffffffffffd // -3
+const NEG_EACCES: u64 = 0xfffffffffffffff3 // -13
+const NEG_EOPNOTSUPP: u64 = 0xffffffffffffffa1 // -95
+const SCHED_OTHER: u64 = 0
+const SCHED_FIFO: u64 = 1
+const SCHED_RR: u64 = 2
+const SCHED_BATCH: u64 = 3
+const SCHED_IDLE: u64 = 5
+const SCHED_RESET_ON_FORK: u64 = 0x40000000
+
+/// px45: the area of the process a priority or scheduler call names
+/// (`who` 0: the caller), a zombie's too (measured: Linux sets a
+/// zombie's nice); 0 when there is none.
+fn target(who: u64) -> u64 {
+    if who == 0 {
+        return area()
+    }
+    let sl = sched.proc_slot(who)
+    if sl == sched.SLOTS {
+        return 0
+    }
+    sched.proc_area_of_leader(sl)
+}
+
+/// px45: may the process whose area is `me` change the priority or the
+/// scheduling of the one whose area is `t` (`setpriority(2)`,
+/// `sched_setscheduler(2)`; measured: the caller's effective user id
+/// is the target's real or effective one, or the caller is privileged).
+/// Not the signal rule: the target's effective id counts here, its
+/// saved one does not.
+fn may_change(me: u64, t: u64) -> bool {
+    let e = cred.uid(me, cred.EFFECTIVE)
+    cred.privileged(me) || e == cred.uid(t, cred.REAL) || e == cred.uid(t, cred.EFFECTIVE)
+}
+
+fn nice_of(t: u64) -> int {
+    let v = aget(t, A_NICE)
+    if v >= 0x8000000000000000 { -((!v + 1) as int) } else { v as int }
+}
+
+/// px45: `getpriority(which, who)` (140): 20 minus the nice value, as
+/// the system call answers it (glibc turns it into the nice value).
+/// PRIO_PROCESS: anyone may read anyone's (measured). The group's and
+/// a user's are refused by name.
+pub fn getpriority(which: u64, who: u64) -> u64 {
+    let w = which & 0xffffffff
+    if w == PRIO_PGRP || w == PRIO_USER {
+        aput(area(), A_REFUSAL, R_PRIO_WHICH)
+        return NEG_EINVAL
+    }
+    if w != PRIO_PROCESS {
+        return NEG_EINVAL
+    }
+    let t = target(who & 0xffffffff)
+    if t == 0 {
+        return NEG_ESRCH
+    }
+    (20 - nice_of(t)) as u64
+}
+
+/// px45: `setpriority(which, who, prio)` (141), PRIO_PROCESS: the value
+/// is cut to -20..19; another process's needs `may_change` (-EPERM); a
+/// value below the target's current one needs privilege (-EACCES:
+/// RLIMIT_NICE is 0, measured: a user may raise its nice, never lower
+/// it). PAX's scheduler gives every thread the same turn: the value is
+/// kept and reported, and changes nothing else (named drift).
+pub fn setpriority(which: u64, who: u64, prio: u64) -> u64 {
+    let w = which & 0xffffffff
+    if w == PRIO_PGRP || w == PRIO_USER {
+        aput(area(), A_REFUSAL, R_PRIO_WHICH)
+        return NEG_EINVAL
+    }
+    if w != PRIO_PROCESS {
+        return NEG_EINVAL
+    }
+    let me = area()
+    let t = target(who & 0xffffffff)
+    if t == 0 {
+        return NEG_ESRCH
+    }
+    let p0 = prio & 0xffffffff
+    var v: int = if p0 >= 0x80000000 { -((0x100000000 - p0) as int) } else { p0 as int }
+    if v < NICE_MIN {
+        v = NICE_MIN
+    }
+    if v > NICE_MAX {
+        v = NICE_MAX
+    }
+    if !may_change(me, t) {
+        return NEG_EPERM
+    }
+    if v < nice_of(t) && !cred.privileged(me) {
+        return NEG_EACCES
+    }
+    aput(t, A_NICE, if v < 0 { 0xffffffffffffffff - ((0 - v) as u64) + 1 } else { v as u64 })
+    0
+}
+
+/// px45: `sched_getscheduler(pid)` (145): the policy PAX keeps for the
+/// process (SCHED_OTHER until one is set).
+pub fn sched_getscheduler(pid: u64) -> u64 {
+    let p = pid & 0xffffffff
+    if p >= 0x80000000 {
+        return NEG_EINVAL
+    }
+    let t = target(p)
+    if t == 0 {
+        return NEG_ESRCH
+    }
+    aget(t, A_POLICY)
+}
+
+/// px45: `sched_setscheduler(pid, policy, param)` (144): SCHED_OTHER,
+/// SCHED_BATCH and SCHED_IDLE with priority 0, SCHED_FIFO and SCHED_RR
+/// with 1 to 99 (else -EINVAL, asked first: measured); another
+/// process's needs `may_change` (-EPERM); a real-time policy needs
+/// privilege (-EPERM: RLIMIT_RTPRIO is 0, measured). Kept and
+/// reported, as the nice value is: PAX's scheduler runs every thread
+/// alike (named drift). SCHED_DEADLINE and SCHED_RESET_ON_FORK are
+/// refused by name.
+pub fn sched_setscheduler(pid: u64, policy: u64, param: u64) -> u64 {
+    let p = pid & 0xffffffff
+    let pol = policy & 0xffffffff
+    if p >= 0x80000000 || param == 0 {
+        return NEG_EINVAL
+    }
+    let pml4 = paging.live()
+    if !uaccess.readable(pml4, param, 4) {
+        return NEG_EFAULT
+    }
+    if pol & SCHED_RESET_ON_FORK != 0 || pol == 6 {
+        aput(area(), A_REFUSAL, R_POLICY)
+        return NEG_EINVAL
+    }
+    let rt = pol == SCHED_FIFO || pol == SCHED_RR
+    if !rt && pol != SCHED_OTHER && pol != SCHED_BATCH && pol != SCHED_IDLE {
+        return NEG_EINVAL
+    }
+    let prio = uaccess.get(pml4, param, 4)
+    if (rt && (prio < 1 || prio > 99)) || (!rt && prio != 0) {
+        return NEG_EINVAL
+    }
+    let me = area()
+    let t = target(p)
+    if t == 0 {
+        return NEG_ESRCH
+    }
+    if !may_change(me, t) {
+        return NEG_EPERM
+    }
+    if rt && !cred.privileged(me) {
+        return NEG_EPERM
+    }
+    aput(t, A_POLICY, pol)
+    aput(t, A_RTPRIO, prio)
+    0
+}
+
+/// px45: a call only root may make that PAX does not do (`what` its
+/// refusal code): -EPERM for anyone else (measured: Linux's answer to a
+/// user, asked before the arguments where px45's `rights` shows it),
+/// and refused by name for root (-EOPNOTSUPP), since PAX keeps no
+/// such state to change.
+fn root_only(what: u64) -> u64 {
+    let a = area()
+    if !cred.privileged(a) {
+        return NEG_EPERM
+    }
+    aput(a, A_REFUSAL, what)
+    NEG_EOPNOTSUPP
+}
+
+const REBOOT_MAGIC1: u64 = 0xfee1dead // uapi linux/reboot.h
+const REBOOT_MAGIC2: u64 = 672274793
+const REBOOT_MAGIC2A: u64 = 85072278
+const REBOOT_MAGIC2B: u64 = 369367448
+const REBOOT_MAGIC2C: u64 = 537993216
+const HOST_NAME_MAX: u64 = 64
+const CLOCK_REALTIME: u64 = 0
+
+/// px45: what only root may do, beside files and signals (`chroot(2)`,
+/// `reboot(2)`, `sethostname(2)`, `setdomainname(2)`,
+/// `settimeofday(2)`, `clock_settime(2)`, `mount(2)`, `umount(2)`),
+/// each answered to a user as Linux answers (measured, `rights` P):
+/// - `chroot` (161): the path first (-ENOENT, -ENOTDIR, -EACCES), then
+///   -EPERM; root: the tree's root is 0 (nothing changes), any other
+///   directory refused by name;
+/// - `reboot` (169): -EPERM first; root: a bad magic -EINVAL, else
+///   refused by name (PAX halts when init ends);
+/// - `sethostname` (170), `setdomainname` (171): -EPERM first; root: a
+///   name over 64 bytes -EINVAL, else refused by name;
+/// - `clock_settime` (227): a clock that cannot be set is -EINVAL first
+///   (measured: CLOCK_MONOTONIC to a user too); CLOCK_REALTIME -EPERM,
+///   root refused by name; `settimeofday` (164) the same;
+/// - `mount` (165): -EPERM; root refused by name; `umount2` (166): the
+///   path first, then -EPERM, root refused by name.
+pub fn root_call(nr: u64, a0: u64, a1: u64, a2: u64) -> u64 {
+    let a = area()
+    let pml4 = paging.live()
+    if nr == 161 {
+        let (e, is_root) = files.chroot_dir(a, pml4, a0)
+        if e != 0 {
+            return e
+        }
+        if !cred.privileged(a) {
+            return NEG_EPERM
+        }
+        if is_root {
+            return 0
+        }
+        aput(a, A_REFUSAL, R_CHROOT)
+        return NEG_EOPNOTSUPP
+    }
+    if nr == 169 {
+        if !cred.privileged(a) {
+            return NEG_EPERM
+        }
+        let m2 = a1 & 0xffffffff
+        if a0 & 0xffffffff != REBOOT_MAGIC1 || (m2 != REBOOT_MAGIC2 && m2 != REBOOT_MAGIC2A && m2 != REBOOT_MAGIC2B && m2 != REBOOT_MAGIC2C) {
+            return NEG_EINVAL
+        }
+        return root_only(R_REBOOT)
+    }
+    if nr == 170 || nr == 171 {
+        if !cred.privileged(a) {
+            return NEG_EPERM
+        }
+        if a1 > HOST_NAME_MAX {
+            return NEG_EINVAL
+        }
+        return root_only(R_HOSTNAME)
+    }
+    if nr == 227 {
+        if a0 & 0xffffffff != CLOCK_REALTIME {
+            return NEG_EINVAL
+        }
+        return root_only(R_CLOCK)
+    }
+    if nr == 164 {
+        return root_only(R_CLOCK)
+    }
+    if nr == 166 {
+        let e = files.path_found(a, pml4, a0)
+        if e != 0 {
+            return e
+        }
+        return root_only(R_MOUNT)
+    }
+    let _unused = a2
+    root_only(R_MOUNT) // 165, mount
 }
