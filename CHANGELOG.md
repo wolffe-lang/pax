@@ -7,6 +7,26 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Who may name, change and keep (px44).** The fourth lane of
+  multi-user PAX: making, removing, renaming and linking a name asks
+  write and search of its directory (both directories for `rename`,
+  and write on a directory that changes parent) by px43's one class
+  rule; the sticky bit keeps a name for its owner, the directory's
+  owner and root; the four `fs.protected_*` settings are on and fixed
+  (ruling #75 R7: links followed in sticky world-writable directories,
+  O_CREAT opens there, hard links to what one may not read and write);
+  only the owner or root may `chmod` or set explicit times (a writer may
+  set them to now), and S_ISGID asked by one outside the group is
+  dropped; a write, a truncation or `fallocate` by a user takes the
+  set-ID bits as Linux's does; AF_UNIX `connect` asks write on the name.
+  `/proc/sys/fs/protected_*` read `1`; `fallocate` (mode 0) is new. px38's
+  `perm` probe, against real root's recording with the settings on:
+  337 of 382 lines to the byte (291 before) — all but `execve` of a
+  program written since boot (px27) and two held rows that need job
+  control; its `setid` probe's 50 `bits:` lines all Linux's; `chk`
+  grows to 339 lines and 65 as 1000:1000, every one Linux's
+  (`tests/mpx5-users`). The checks are **enforced for honest programs;
+  not a boundary against an attacker**.
 - **Who may open, run and walk (px43).** The third lane of multi-user
   PAX, where it begins to refuse: one function in `kernel/files`
   (`may`) holds the class rule — owner, group, other, chosen by the
