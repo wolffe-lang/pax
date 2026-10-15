@@ -652,6 +652,9 @@ fn write(fd: u64, buf: u64, len: u64) -> u64 {
         // a full pipe's writer and runs again) or -EAGAIN.
         return sound.write(paging.live(), buf, len, files.nonblocking(area(), fd))
     }
+    if t == 8 {
+        return NEG_ENOSPC // px45: /dev/full
+    }
     if t == 0 || len == 0 {
         return len
     }
@@ -880,6 +883,22 @@ const SYS_UTIMENSAT: u64 = 280
 const SYS_RENAMEAT2: u64 = 316
 const SYS_FACCESSAT2: u64 = 439
 const SYS_FCHMODAT2: u64 = 452
+// px45: priority, the scheduler, and root's calls.
+const SYS_GETPRIORITY: u64 = 140
+const SYS_SETPRIORITY: u64 = 141
+const SYS_SCHED_SETSCHEDULER: u64 = 144
+const SYS_SCHED_GETSCHEDULER: u64 = 145
+const SYS_CHROOT: u64 = 161
+const SYS_SETTIMEOFDAY: u64 = 164
+const SYS_MOUNT: u64 = 165
+const SYS_UMOUNT2: u64 = 166
+const SYS_REBOOT: u64 = 169
+const SYS_SETHOSTNAME: u64 = 170
+const SYS_SETDOMAINNAME: u64 = 171
+const SYS_CLOCK_SETTIME: u64 = 227
+const S_IFMT: u64 = 0xf000
+const S_IFCHR: u64 = 0x2000
+const S_IFBLK: u64 = 0x6000
 const AT_REMOVEDIR: u64 = 0x200
 // px39: the credentials (kernel/cred): the twelve numbers px38's traces
 // and probes hold.
@@ -916,6 +935,7 @@ const GRND_RANDOM: u64 = 2
 const GRND_INSECURE: u64 = 4
 
 const NEG_EPERM: u64 = 0xffffffffffffffff // -1
+const NEG_ENOSPC: u64 = 0xffffffffffffffe4 // -28 (px45: /dev/full)
 const NEG_ESRCH: u64 = 0xfffffffffffffffd // -3
 const NEG_EINVAL: u64 = 0xffffffffffffffea // -22
 const AT_FDCWD: u64 = 0xffffff9c // -100, as an int (`int32`)
@@ -1557,6 +1577,9 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
         if socket.is_inet(a, a0) {
             return socket.recvfrom(a, pml4, a0, a1, a2, 0, 0, 0) // px22
         }
+        if files.is_random(a, a0) {
+            return getrandom(a1, a2, 0) // px45: /dev/random, /dev/urandom
+        }
         return files.read(a, pml4, a0, a1, a2)
     }
     if nr == SYS_PREAD64 {
@@ -1837,7 +1860,31 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
         return files.faccessat(a, pml4, int32(r0), a1, int32(a2), int32(a3))
     }
     if nr == SYS_MKNOD || nr == SYS_MKNODAT {
+        // px45: a device node is root's to make (`mknod(2)`, measured:
+        // -EPERM to a user); PAX makes none for anyone (refused by name).
+        let m = if nr == SYS_MKNOD { a1 } else { a2 }
+        let t = m & S_IFMT
+        if (t == S_IFCHR || t == S_IFBLK) && !cred.privileged(a) {
+            return NEG_EPERM
+        }
         return files.refused(a, 0)
+    }
+    // px45: priority and the scheduler (kernel/process), and the calls
+    // only root may make.
+    if nr == SYS_GETPRIORITY {
+        return process.getpriority(r0, a1)
+    }
+    if nr == SYS_SETPRIORITY {
+        return process.setpriority(r0, a1, a2)
+    }
+    if nr == SYS_SCHED_SETSCHEDULER {
+        return process.sched_setscheduler(r0, a1, a2)
+    }
+    if nr == SYS_SCHED_GETSCHEDULER {
+        return process.sched_getscheduler(r0)
+    }
+    if nr == SYS_CHROOT || nr == SYS_SETTIMEOFDAY || nr == SYS_MOUNT || nr == SYS_UMOUNT2 || nr == SYS_REBOOT || nr == SYS_SETHOSTNAME || nr == SYS_SETDOMAINNAME || nr == SYS_CLOCK_SETTIME {
+        return process.root_call(nr, r0, a1, a2)
     }
     if nr == SYS_UTIMES || nr == SYS_UTIME {
         return files.refused(a, 1)
