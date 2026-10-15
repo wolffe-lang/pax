@@ -4,7 +4,7 @@
 # whole root a tmpfs inside a THROWAWAY CONTAINER.
 #
 #   tools/linux-tree --root DIR --keys KEYS --prompt TEXT [--argv0 NAME]
-#                    [--size SIZE] [--sys] OUT -- PROG [ARG...]
+#                    [--size SIZE] [--sys] [--owners FILE] OUT -- PROG [ARG...]
 #
 # The programs under test remove and overwrite files (`rm`, `rmdir`,
 # `mv`, `cp`, a shell's `>`), and one session types `rm -rf /` to see it
@@ -27,6 +27,10 @@
 # `/dev` and `/proc` left out). The staging directory is removed.
 # --sys (px34): tools/linux-tty's --sys, a sysfs and a cgroup2 mount in
 # the root (`/sys` is then left out of OUT.after as well).
+# --owners FILE (px46): after the copy is made root's, each line
+# `PATH MODE UID GID` of FILE (PATH from the root, MODE octal) is given
+# that owner, group and mode, as tools/mkinitramfs's `:MODE:UID:GID`
+# gives them in PAX's archive (an account's home, a 0600 file of root's).
 #
 # The engine: PAX_ENGINE, else docker when there is one, else podman.
 # Exit 0 when the session ran (whatever the program's status), 1 when
@@ -34,7 +38,7 @@
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
-root= keys= prompt= argv0= size=64m sys=
+root= keys= prompt= argv0= size=64m sys= owners=
 while [ $# -gt 0 ]; do
     case $1 in
         --root)   root=$2; shift 2 ;;
@@ -43,13 +47,14 @@ while [ $# -gt 0 ]; do
         --argv0)  argv0=$2; shift 2 ;;
         --size)   size=$2; shift 2 ;;
         --sys)    sys=--sys; shift ;;
+        --owners) owners=$2; shift 2 ;;
         --)       break ;;
         -*)       die "unknown option $1" ;;
         *)        break ;;
     esac
 done
 [ -n "$root" ] && [ -n "$keys" ] && [ $# -ge 3 ] && [ "$2" = -- ] \
-    || die "usage: linux-tree --root DIR --keys KEYS --prompt TEXT [--argv0 NAME] [--size SIZE] OUT -- PROG [ARG...]"
+    || die "usage: linux-tree --root DIR --keys KEYS --prompt TEXT [--argv0 NAME] [--size SIZE] [--sys] [--owners FILE] OUT -- PROG [ARG...]"
 out=$1; shift 2
 [ -d "$root" ] || die "no directory $root"
 [ -f "$keys" ] || die "no keys file $keys"
@@ -73,6 +78,8 @@ cp "$keys" "$stage/keys"
 printf '%s' "$prompt" > "$stage/prompt"
 printf '%s' "$argv0" > "$stage/argv0"
 printf '%s' "$sys" > "$stage/sys"
+: > "$stage/owners"
+if [ -n "$owners" ]; then cp "$owners" "$stage/owners" || die "no owners file $owners"; fi
 : > "$stage/argv"
 for a in "$@"; do printf '%s\n' "$a" >> "$stage/argv"; done
 cat > "$stage/run.sh" <<'EOF'
@@ -84,6 +91,10 @@ mkdir /r || exit 2
 mount -t tmpfs -o "size=$1,mode=755" none /r || { echo "linux-tree: cannot mount a tmpfs (is the container privileged?)" >&2; exit 2; }
 cp -R /x/root/. /r/ || exit 2
 chown -R 0:0 /r
+while read -r p m u g; do
+    [ -n "$p" ] || continue
+    chown -h "$u:$g" "/r$p" && chmod "$m" "/r$p" || exit 2
+done < /x/owners
 find /r -exec touch -h -d @0 {} +
 set --
 while IFS= read -r a; do set -- "$@" "$a"; done < /x/argv
