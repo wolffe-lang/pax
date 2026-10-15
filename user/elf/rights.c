@@ -342,7 +342,8 @@ static void priv_rows(const struct pstate *P, int others)
     say("%s: bind TCP 80 %ld, 1023 %ld, 1024 %ld, 0 %ld, 81 held by root %ld; UDP 53 %ld, 1024 %ld\n", w, bind_port(SOCK_STREAM, 80, 0),
         bind_port(SOCK_STREAM, 1023, 0), bind_port(SOCK_STREAM, 1024, 0), bind_port(SOCK_STREAM, 0, 0), bind_port(SOCK_STREAM, 81, 0),
         bind_port(SOCK_DGRAM, 53, 0), bind_port(SOCK_DGRAM, 1024, 0));
-    {
+    if (P->e != 0) {
+        /* a user's refusal; root's raw socket is one PAX does not have (refused by name) */
         int s = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
         long r = s < 0 ? -(long)errno : 0;
         if (s >= 0) close(s);
@@ -425,11 +426,20 @@ static void priv_rows(const struct pstate *P, int others)
             w, a, b, c, d, e, f, g, h);
     }
     if (tty0 >= 0) {
-        long a = rc(SYS_ioctl, tty0, KIOCSOUND, 0, 0, 0);
-        long b = rc(SYS_ioctl, tty0, KDMKTONE, 0, 0, 0);
+        /* The speaker's ioctls are the privileged's and the controlling
+         * terminal's (measured, notes/px45/devs.c): a user's on a terminal
+         * root opened is -EPERM on Linux, where this probe has no
+         * controlling terminal, and 0 on PAX, whose console is every
+         * process's. So only root's answer is a row here (px38's priv
+         * holds the user's, by name). */
+        if (P->e == 0) {
+            long a = rc(SYS_ioctl, tty0, KIOCSOUND, 0, 0, 0);
+            long b = rc(SYS_ioctl, tty0, KDMKTONE, 0, 0, 0);
+            say("%s: on /dev/tty0 as root opened it: KIOCSOUND 0 %ld, KDMKTONE 0 %ld\n", w, a, b);
+        }
         long c = rc(SYS_open, (long)"/dev/tty0", O_RDWR | O_NOCTTY | O_NONBLOCK, 0, 0, 0);
         if (c >= 0) close((int)c);
-        say("%s: on /dev/tty0 as root opened it: KIOCSOUND 0 %ld, KDMKTONE 0 %ld; its own open of /dev/tty0 %ld\n", w, a, b, c >= 0 ? 0 : c);
+        say("%s: its own open of /dev/tty0 %ld\n", w, c >= 0 ? 0 : c);
     } else say("%s: no /dev/tty0 (%d)\n", w, tty0);
 }
 
@@ -553,10 +563,8 @@ static void read_row(const long R[4], int i)
             while (dd && (de = readdir(dd))) if (de->d_name[0] != '.') nent++;
             if (dd) closedir(dd);
         }
-        if (T[i].how != 1 && ev > 0) snprintf(en, sizeof en, "(what %s holds)", SELF); /* inherited: the machine's own start */
-        say("reader (%4ld %4ld %4ld fs %4ld) of %s: dir %s; status %s %s; cmdline %s %ld '%s'; environ %s %s '%s'; fd/ %s open %ld",
-            R[0], R[1], R[2], R[3] >= 0 ? R[3] : R[1], T[i].name, own(d), so, st >= 0 ? "read" : "-", co, cm, cl, eo,
-            ev > 0 && T[i].how != 1 ? "read" : (snprintf(f, sizeof f, "%ld", ev), f), en, fo, lf);
+        say("reader (%4ld %4ld %4ld fs %4ld) of %s: dir %s; status %s %s; cmdline %s %ld '%s'; environ %s %ld '%s'; fd/ %s open %ld",
+            R[0], R[1], R[2], R[3] >= 0 ? R[3] : R[1], T[i].name, own(d), so, st >= 0 ? "read" : "-", co, cm, cl, eo, ev, en, fo, lf);
         if (T[i].how == 1 && lf == 0) say(" (%d entries)", nent);
         say("\n");
         if (st < 0) say("! status %ld\n", st);
@@ -812,6 +820,14 @@ int main(int argc, char **argv)
         if (write(fd, "k", 1) != 1) return 94;
         close(fd);
         for (;;) nap(100000);
+    }
+    if (!getenv("PX45")) {
+        /* one environment on every machine (a target that does not exec
+         * inherits it, and /proc/<pid>/environ shows it) */
+        char *ev[] = { (char *)"PX45=rights", NULL };
+        execve(SELF, argv, ev);
+        say("! re-exec: %d\n", -errno);
+        return 2;
     }
     if (argc > 2 && strcmp(argv[1], "soak") == 0) return soak(atol(argv[2]), argc > 3 ? atol(argv[3]) : -1);
     alone = argc > 1 && strcmp(argv[1], "user") == 0;
