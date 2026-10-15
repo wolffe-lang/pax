@@ -7,6 +7,29 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Who may signal whom, and what only root may do (px45).** The fifth
+  lane of multi-user PAX: `kill`, `tgkill` and `tkill` ask Linux's rule
+  (root by the effective id, or the sender's real or effective id is
+  the target's real or saved one, or SIGCONT in PAX's one session), as
+  does each process `kill(-1)` and `kill(0)` reach; a zombie answers by
+  the rule; a handler is told its sender's real id (`si_uid`), a
+  parent its child's. A port below 1024 and a raw socket are root's;
+  `setpriority`, `getpriority`, `sched_setscheduler` and
+  `sched_getscheduler` are new and keep Linux's rules (a user may lower
+  its own priority, never raise it, and change only its own
+  processes'); `chroot`, `reboot`, `sethostname`, the clock, `mount`,
+  `umount2` and `mknod` of a device are refused to a user as Linux
+  refuses them (root's refused by name: PAX keeps no such state).
+  `/dev` gains `zero`, `full`, `random`, `urandom`, `tty` and `ttyS0`,
+  every node with devtmpfs's mode and checked on `open` (the terminals
+  and `/dev/dsp` 0600, root's); `/proc/<pid>` gains `cmdline`,
+  `environ` and `fd/`, owned and guarded as Linux's; SO_PEERCRED is
+  answered on every socket; a process that has ended is a zombie at
+  once. px38's `sig` probe: 99 of its 102 sender rows to the byte (33
+  before; the three left need a set-ID run, R5); its `priv` probe: 19 of
+  30 lines (4 before); this lane's `rights`, 284 lines as root and 20 as
+  1000:1000, every one Linux's (`tests/mpx5-users`). The checks are
+  **enforced for honest programs; not a boundary against an attacker**.
 - **Who may name, change and keep (px44).** The fourth lane of
   multi-user PAX: making, removing, renaming and linking a name asks
   write and search of its directory (both directories for `rename`,
