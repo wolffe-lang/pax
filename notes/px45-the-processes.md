@@ -435,7 +435,7 @@ good. No row is compared with a container's root.
 | session | run by | Linux lines | identical on PAX at trunk `2167620` | after | the rest |
 |---|---|---:|---:|---:|---|
 | sig: sender rows | root, dropping to seventeen states | 102 | 33 | **99** | the set-ID target's three rows where only the copy's owner matches (px27, R5) |
-| sig: all its lines | | 144 | | 107 | its 30 `/proc` rows (§A), `/proc is mounted`, the set-ID target's line (and PAX's `!` line); held to `sig.pax` |
+| sig: all its lines | | 144 | | 109 | its 30 `/proc` rows (§A), `/proc is mounted`, the set-ID target's line (and PAX's `!` line); held to `sig.pax` |
 | priv | root, dropping to 1000:2000 | 30 | 4 | **19** | `/dev/mem`, `kmsg`, `ptmx`; root's raw socket; `prlimit64` (two); `mknod` of a FIFO (two, with `chroot`); `/dev/tty` in the two open lines; the user's KIOCSOUND (the controlling terminal, §B); held to `priv.pax` |
 | rights | root, dropping to its states | 284 | (new) | **284** | |
 | rights-user | 1000:1000 | 20 | (new) | **20** | |
