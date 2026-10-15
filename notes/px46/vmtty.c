@@ -78,6 +78,7 @@ static char *slurp(const char *path) {
 }
 
 int main(void) {
+    mkdir("/proc", 0555);
     mount("proc", "/proc", "proc", 0, NULL);
     mkdir("/dev", 0755);
     mount("devtmpfs", "/dev", "devtmpfs", 0, NULL);
