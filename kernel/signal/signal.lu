@@ -56,8 +56,9 @@
 //!   word, XCR0's features, the size) and the word 0x46505845 after it;
 //!   on a CPU without XSAVE, FXSAVE's 512 bytes and no magic;
 //! - the siginfo, 128 bytes: si_signo, si_errno 0, si_code, then by
-//!   kind the sender's pid and uid 0 (`kill`, `tgkill`, a pipe), the
-//!   child's pid, uid 0 and status (SIGCHLD), or the address (a fault);
+//!   kind the sender's pid and real user id (`kill`, `tgkill`, a pipe;
+//!   px45, measured: the real id, not the effective one), the child's
+//!   pid, real user id and status (SIGCHLD), or the address (a fault);
 //! - the ucontext, 304 bytes: uc_flags (7 with XSAVE: the three UC_*
 //!   bits; 6 without), uc_link 0, a zero stack triple, the sigcontext
 //!   (r8-r15, rdi, rsi, rbp, rbx, rdx, rax, rcx, rsp, rip, eflags, cs
@@ -105,10 +106,34 @@
 //! Real-time signals (32-64) are signals like the rest: one instance
 //! pending, not a queue (named).
 //!
+//! **Who may signal whom** (px45; `kill(2)`, measured on Linux 7.2.8 as
+//! real root: px38's `sig`, 102 rows, and px45's `rights`): `may_signal`,
+//! the one rule. A sender may signal a target when it is privileged
+//! (effective user id 0, kernel/cred's `privileged`: ruling #75 R9), or
+//! its real or effective user id is the target's real or saved user id
+//! — a target's effective id is never asked, and a sender whose only
+//! match is its own saved id is refused — or the signal is SIGCONT and
+//! both are in one session, which on PAX every process is (no job
+//! control: ruling #79's track). Else -EPERM. Asked by `kill` of a pid,
+//! by `tgkill` and `tkill` of the thread's process, and of each process
+//! `kill(-1)`, `kill(0)` and a negative group reach (each one signalled
+//! only when the rule allows: `kill(-1)` answers 0 whenever some other
+//! process than pid 1 and the caller exists, permitted or not, and a
+//! group 0 when at least one was signalled, measured). A zombie is a
+//! process until it is reaped: `kill`, `tgkill` and `tkill` of one
+//! answer by the rule, against the ids it ended with, and signal
+//! nothing (measured; -ESRCH before px45). Signal 0 asks the same. What
+//! the kernel raises asks nothing: a child's end (its parent gets
+//! SIGCHLD whatever either's ids, measured), the terminal's keys, a
+//! write to a pipe with no reader, a fault. Validity is answered first
+//! (-EINVAL for a bad signal, then -ESRCH for no such process or a
+//! thread not in its group), the rule last.
+//!
 //! The actions are kernel/process's words in the process area; masks
 //! and pending sets are kernel/sched's. No region, no heap: `act` may
 //! end the thread.
 
+use cred
 use files
 use fpu
 use frames
@@ -400,6 +425,36 @@ fn int_of(x: u64) -> (bool, u64) {
     (false, v)
 }
 
+/// px45: THE rule of who may signal whom (`kill(2)`; the module's
+/// comment): may the process whose area is `me` send `sig` to the
+/// process whose area is `t`?
+pub fn may_signal(me: u64, t: u64, sig: u64) -> bool {
+    if sig == SIGCONT || cred.privileged(me) {
+        return true // SIGCONT: PAX's one session holds every process
+    }
+    let r = cred.uid(me, cred.REAL)
+    let e = cred.uid(me, cred.EFFECTIVE)
+    let tr = cred.uid(t, cred.REAL)
+    let ts = cred.uid(t, cred.SAVED)
+    r == tr || r == ts || e == tr || e == ts
+}
+
+/// px45: the area of process `pid` (a zombie's too: its ids are kept
+/// until it is reaped), or 0 when there is no such process.
+fn area_of_pid(pid: u64) -> u64 {
+    let sl = sched.proc_slot(pid)
+    if sl == sched.SLOTS {
+        return 0
+    }
+    sched.proc_area_of_leader(sl)
+}
+
+/// px45: whether process `pid` has ended and is not yet reaped.
+fn is_zombie(pid: u64) -> bool {
+    let sl = sched.proc_slot(pid)
+    sl != sched.SLOTS && sched.proc_word(sl, 8) == 1
+}
+
 /// `kill(pid, sig)`.
 pub fn kill(pid: u64, sig: u64) -> u64 {
     let s = sig & 0xffffffff
@@ -407,18 +462,41 @@ pub fn kill(pid: u64, sig: u64) -> u64 {
         return NEG_EINVAL
     }
     let me = sched.self_pid()
-    let info = sched.sig_info(sched.I_USER, me, 0)
+    let a = area()
+    let info = sched.sig_info(sched.I_USER, me, 0, cred.uid(a, cred.REAL))
     let (neg, p) = int_of(pid)
     if !neg && p != 0 {
-        return if sched.raise_pid(p, s, info) { 0 } else { NEG_ESRCH }
+        let t = area_of_pid(p)
+        if t == 0 {
+            return NEG_ESRCH
+        }
+        if !may_signal(a, t, s) {
+            return NEG_EPERM
+        }
+        let _live = sched.raise_pid(p, s, info) // a zombie takes nothing
+        return 0
     }
-    if neg && p == 1 {
-        // Every process but pid 1 and the caller (`kill(2)`).
-        return if sched.raise_all(s, info, me, true) > 0 { 0 } else { NEG_ESRCH }
+    // -1: every process but pid 1 and the caller (`kill(2)`); 0, or a
+    // group: PAX has one process group, every process's. Each by the rule.
+    let all = neg && p == 1
+    var seen: u64 = 0
+    var sent: u64 = 0
+    var q = sched.proc_after(0)
+    while q != 0 {
+        if !all || (q != 1 && q != me) {
+            seen += 1
+            let t = area_of_pid(q)
+            if t != 0 && may_signal(a, t, s) {
+                sent += 1
+                let _live = sched.raise_pid(q, s, info)
+            }
+        }
+        q = sched.proc_after(q)
     }
-    // 0, or a group: PAX has one process group, every process's.
-    let _n = sched.raise_all(s, info, 0, false)
-    0
+    if all {
+        return if seen > 0 { 0 } else { NEG_ESRCH } // measured: 0 with none permitted
+    }
+    if sent > 0 { 0 } else { NEG_EPERM }
 }
 
 /// `tgkill(tgid, tid, sig)` and `tkill(tid, sig)` (`tgid` 0).
@@ -429,11 +507,32 @@ pub fn tgkill(tgid: u64, tid: u64, sig: u64, any_group: bool) -> u64 {
     if s > NSIG || tneg || t == 0 || (!any_group && (gneg || g == 0)) {
         return NEG_EINVAL
     }
-    let info = sched.sig_info(sched.I_TKILL, sched.self_pid(), 0)
-    if sched.raise_tid(if any_group { 0 } else { g }, t, s, info) {
-        return 0
+    // px45: the process the thread is in (for `tkill`, whichever holds
+    // it); a zombie's leader is its own thread until it is reaped.
+    var owner: u64 = 0
+    if any_group {
+        var q = sched.proc_after(0)
+        while q != 0 && owner == 0 {
+            if sched.raise_tid(q, t, 0, 0) || (q == t && is_zombie(q)) {
+                owner = q
+            }
+            q = sched.proc_after(q)
+        }
+    } else if sched.raise_tid(g, t, 0, 0) || (g == t && is_zombie(g)) {
+        owner = g
     }
-    NEG_ESRCH
+    if owner == 0 {
+        return NEG_ESRCH
+    }
+    let a = area()
+    let ta = area_of_pid(owner)
+    if ta == 0 || !may_signal(a, ta, s) {
+        return NEG_EPERM
+    }
+    if s != 0 {
+        let _live = sched.raise_tid(owner, t, s, sched.sig_info(sched.I_TKILL, sched.self_pid(), 0, cred.uid(a, cred.REAL)))
+    }
+    0
 }
 
 /// A write met a pipe with no reader, or (`conn`, px23) a stream socket
@@ -441,7 +540,7 @@ pub fn tgkill(tgid: u64, tid: u64, sig: u64, any_group: bool) -> u64 {
 /// SIGPIPE for the writing thread, from itself (`pipe(7)`; siginfo's
 /// SI_USER with its own pid, measured).
 pub fn pipe(conn: bool) {
-    sched.raise_thread(sched.self_slot(), SIGPIPE, sched.sig_info(if conn { sched.I_CONN } else { sched.I_PIPE }, sched.self_pid(), 0))
+    sched.raise_thread(sched.self_slot(), SIGPIPE, sched.sig_info(if conn { sched.I_CONN } else { sched.I_PIPE }, sched.self_pid(), 0, cred.uid(area(), cred.REAL)))
 }
 
 /// The terminal's signals (kernel/console's ISIG; `mask` has bit n - 1
@@ -453,7 +552,7 @@ pub fn tty(mask: u64) {
     var sig: u64 = 1
     while sig <= 32 {
         if mask & bit(sig) != 0 {
-            let _n = sched.raise_all(sig, sched.sig_info(sched.I_KERNEL, 0, 0), 0, false)
+            let _n = sched.raise_all(sig, sched.sig_info(sched.I_KERNEL, 0, 0, 0), 0, false)
         }
         sig += 1
     }
@@ -483,8 +582,9 @@ fn die(f: u64, sig: u64, why: str) -> u64 {
 }
 
 /// The siginfo at user `si` for signal `sig` with origin word `info`
-/// (kernel/sched's `sig_info`); `addr` is a fault's address.
-fn put_siginfo(pml4: u64, si: u64, sig: u64, code: u64, pid: u64, status: u64, addr: u64, fault: bool) {
+/// (kernel/sched's `sig_info`); `addr` is a fault's address. px45:
+/// `si_uid` (at 20) the sender's, or the child's, real user id.
+fn put_siginfo(pml4: u64, si: u64, sig: u64, code: u64, pid: u64, uid: u64, status: u64, addr: u64, fault: bool) {
     uaccess.zero(pml4, si, SIGINFO_BYTES)
     uaccess.put(pml4, si, sig, 4)
     uaccess.put(pml4, si + 8, code, 4)
@@ -492,6 +592,7 @@ fn put_siginfo(pml4: u64, si: u64, sig: u64, code: u64, pid: u64, status: u64, a
         uaccess.put(pml4, si + 16, addr, 8)
     } else {
         uaccess.put(pml4, si + 16, pid, 4)
+        uaccess.put(pml4, si + 20, uid, 4)
         uaccess.put(pml4, si + 24, status, 4)
     }
 }
@@ -551,7 +652,7 @@ fn settle_wait(f: u64, restart: bool) {
 /// handler. False when the stack has no room (nothing changed).
 /// `fault`: siginfo carries `addr`, and the sigcontext `trapno`, `err`
 /// and `cr2`.
-fn enter(f: u64, sig: u64, code: u64, pid: u64, status: u64, fault: bool, addr: u64, trapno: u64, err: u64) -> bool {
+fn enter(f: u64, sig: u64, code: u64, pid: u64, uid: u64, status: u64, fault: bool, addr: u64, trapno: u64, err: u64) -> bool {
     let a = area()
     let pml4 = paging.live()
     let w = SIG_WORDS + (sig - 1) * 4
@@ -605,7 +706,7 @@ fn enter(f: u64, sig: u64, code: u64, pid: u64, status: u64, fault: bool, addr: 
             uaccess.put(pml4, fp + fb, MAGIC2, 4)
         }
     }
-    put_siginfo(pml4, si, sig, code, pid, status, addr, fault)
+    put_siginfo(pml4, si, sig, code, pid, uid, status, addr, fault)
     let old = sched.self_sigmask()
     uaccess.zero(pml4, uc, UC_BYTES)
     uaccess.put(pml4, uc, if xs { UC_FLAGS_XSTATE } else { UC_FLAGS_PLAIN }, 8)
@@ -735,24 +836,22 @@ pub fn sigaltstack(f: u64, ss: u64, old: u64) -> u64 {
     0
 }
 
-/// siginfo's code, pid and status for an origin word.
-fn origin(info: u64) -> (u64, u64, u64) {
-    let kind = info & 0xff
-    let pid = (info >> 8) & 0xffffff
-    let status = info >> 32
+/// siginfo's code, pid, user id and status for an origin word.
+fn origin(info: u64) -> (u64, u64, u64, u64) {
+    let (kind, pid, status, uid) = sched.info_parts(info)
     if kind == sched.I_TKILL {
-        return (SI_TKILL, pid, 0)
+        return (SI_TKILL, pid, uid, 0)
     }
     if kind == sched.I_KERNEL {
-        return (SI_KERNEL, 0, 0)
+        return (SI_KERNEL, 0, 0, 0)
     }
     if kind == sched.I_CHLD_EXITED {
-        return (CLD_EXITED, pid, status)
+        return (CLD_EXITED, pid, uid, status)
     }
     if kind == sched.I_CHLD_KILLED {
-        return (CLD_KILLED, pid, status)
+        return (CLD_KILLED, pid, uid, status)
     }
-    (SI_USER, pid, 0)
+    (SI_USER, pid, uid, 0)
 }
 
 /// Act on signal `sig` (origin `info`), taken by the running thread
@@ -784,12 +883,12 @@ fn act(f: u64, sig: u64, info: u64) -> u64 {
             log.end()
             return f
         }
-        let k = info & 0xff
+        let (k, _p, _s, _u) = sched.info_parts(info)
         return die(f, sig, if k == sched.I_PIPE { ", a write to a pipe with no reader" } else if k == sched.I_CONN { ", a write to a connection that is over" } else { "" })
     }
     settle_wait(f, aget(a, w + 1) & SA_RESTART != 0)
-    let (code, pid, status) = origin(info)
-    if !enter(f, sig, code, pid, status, false, 0, 0, 0) {
+    let (code, pid, uid, status) = origin(info)
+    if !enter(f, sig, code, pid, uid, status, false, 0, 0, 0) {
         return die(f, SIGSEGV, ", no room on its stack for a signal's frame")
     }
     f
@@ -902,7 +1001,7 @@ pub fn fault(f: u64, v: u64) -> u64 {
         addr = word(f, W_RIP)
     }
     let _w = sched.self_wait()
-    if !enter(f, sig, code, 0, 0, true, addr, v, err) {
+    if !enter(f, sig, code, 0, 0, 0, true, addr, v, err) {
         return 0
     }
     f
