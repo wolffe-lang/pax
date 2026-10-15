@@ -55,9 +55,12 @@
 //! Honoured: ICRNL, INLCR and IGNCR on input; ICANON; ECHO, ECHOE,
 //! ECHOK, ECHOKE, ECHOCTL and ECHONL; VERASE, VKILL, VEOF, VEOL and
 //! (with IEXTEN) VWERASE; VMIN 0 against at least 1 in non-canonical
-//! mode; OPOST|ONLCR for the echo and for every `write` to the console
-//! (kernel/user). Stored and answered but not acted on: every other
-//! bit, VTIME, VREPRINT, VLNEXT, VDISCARD, the speed. In canonical mode
+//! mode, and with VMIN 0 a VTIME above 0 (px46: a read with nothing
+//! ready waits that many tenths of a second for a byte, then answers 0;
+//! pelt's editor reads so since sh11); OPOST|ONLCR for the echo and for
+//! every `write` to the console (kernel/user). Stored and answered but
+//! not acted on: every other bit, VTIME with VMIN above 0 (Linux's
+//! timer between bytes), VREPRINT, VLNEXT, VDISCARD, the speed. In canonical mode
 //! a line is edited until NL (Enter, by ICRNL), VEOL or VEOF; VEOF on an
 //! empty line is end of file (the next `read` answers 0), on a
 //! non-empty one it hands the line over without a newline. A line
@@ -174,6 +177,7 @@ const VEOF: u64 = 4
 const VERASE: u64 = 2
 const VKILL: u64 = 3
 const VMIN: u64 = 6
+const VTIME: u64 = 5
 const VEOL: u64 = 11
 const VWERASE: u64 = 14
 
@@ -191,6 +195,13 @@ const TIOCSWINSZ: u64 = 0x5414
 /// What `read` answers when the thread must wait (kernel/user rewinds
 /// the system call and sleeps the thread on input).
 pub const RESTART: u64 = 0xfffffffffffffe00 // -512: never seen by ring 3
+/// px46: what `read` answers when nothing is ready, VMIN is 0 and VTIME
+/// is not, and the wait's deadline has not come: kernel/files answers
+/// its `WAIT`, and the thread waits as a pipe's reader does, until a
+/// key or the deadline (the thread's own word, `sched.self_until`).
+pub const TIMED: u64 = 0xfffffffffffffdfd // -515: never seen by ring 3
+/// A PIT tick in nanoseconds (kernel/ready's NS_PER_TICK).
+const NS_PER_TICK: u64 = 10000151
 /// What `ioctl` answers for a request refused by name (kernel/user
 /// logs it and answers -ENOTTY).
 pub const REFUSED: u64 = 0xfffffffffffffdff // -513: an ioctl refused by name
@@ -478,8 +489,11 @@ pub fn signal_keys() -> u64 {
     sv(C_SIG_KEYS)
 }
 
-/// Whether a `read` would answer now (data, or a pending end of file,
-/// or a non-blocking poll in non-canonical mode with VMIN 0).
+/// Whether there is something for a `read` to take: data, or a pending
+/// end of file. px46: not "a read would not wait": with VMIN 0 a read
+/// answers 0 at once, but `poll` and `select` still wait for a byte, as
+/// Linux's terminal does (measured: notes/px46-the-accounts.md §B), and
+/// pelt's editor polls before it reads.
 pub fn readable() -> bool {
     if sv(C_STARTED) == 0 {
         return true
@@ -488,18 +502,19 @@ pub fn readable() -> bool {
     if sv(C_C) > r {
         return true
     }
-    if sv(C_EOF) == r + 1 {
-        return true
-    }
-    !lflag(ICANON) && cc(VMIN) == 0
+    sv(C_EOF) == r + 1
 }
 
 /// `read(fd, buf, n)` on the console: the count, 0 at end of file,
 /// `RESTART` to wait, -EAGAIN for a non-blocking descriptor with
-/// nothing ready, -EFAULT.
-pub fn read(pml4: u64, buf: u64, n: u64, nonblock: bool) -> u64 {
+/// nothing ready, -EFAULT. px46: `until` is the calling thread's
+/// deadline word (0: this read has not waited yet); the second value is
+/// what that word must hold after the call. With VMIN 0 and VTIME above
+/// 0 and nothing ready, the first run sets a deadline VTIME tenths of a
+/// second away and answers `TIMED`, and a run past it answers 0.
+pub fn read(pml4: u64, buf: u64, n: u64, nonblock: bool, until: u64) -> (u64, u64) {
     if sv(C_STARTED) == 0 {
-        return 0 // px12: end of file until the console is started
+        return (0, 0) // px12: end of file until the console is started
     }
     let r = sv(C_R)
     let c = sv(C_C)
@@ -507,20 +522,31 @@ pub fn read(pml4: u64, buf: u64, n: u64, nonblock: bool) -> u64 {
         if sv(C_EOF) == r + 1 {
             put_sv(C_EOF, 0)
             bump(C_READS)
-            return 0
+            return (0, 0)
         }
         if !lflag(ICANON) && cc(VMIN) == 0 {
+            let t = cc(VTIME)
+            if t != 0 && !nonblock {
+                let now = timer.ticks()
+                if until == 0 {
+                    // The tick after: a partial tick never shortens a wait.
+                    return (TIMED, now + (t * 100000000 + NS_PER_TICK - 1) / NS_PER_TICK + 1)
+                }
+                if now < until {
+                    return (TIMED, until)
+                }
+            }
             bump(C_READS)
-            return 0
+            return (0, 0)
         }
         if nonblock {
-            return NEG_EAGAIN
+            return (NEG_EAGAIN, 0)
         }
         bump(C_WAITS)
-        return RESTART
+        return (RESTART, 0)
     }
     if n == 0 {
-        return 0
+        return (0, 0)
     }
     var k = c - r
     if lflag(ICANON) {
@@ -536,7 +562,7 @@ pub fn read(pml4: u64, buf: u64, n: u64, nonblock: bool) -> u64 {
         k = n
     }
     if !uaccess.writable(pml4, buf, k) {
-        return NEG_EFAULT
+        return (NEG_EFAULT, 0)
     }
     var j: u64 = 0
     while j < k {
@@ -545,7 +571,7 @@ pub fn read(pml4: u64, buf: u64, n: u64, nonblock: bool) -> u64 {
     }
     put_sv(C_R, r + k)
     bump(C_READS)
-    k
+    (k, 0)
 }
 
 // --- the terminal's ioctls ----------------------------------------------
