@@ -507,8 +507,8 @@ Shas are this branch's (`px45`). kasumi paths are under
   `priv.c` copied byte for byte; `tools/mkcred`), `2f88afd` (rights:
   one environment; the machine's own rows left out).
 - The recorders: `1b15a11` (`notes/px45/vminit.c`, `linux-vm.sh`,
-  `build.sh`, `devs.c`), `2318605` (devs asks of a controlling
-  terminal; its log).
+  `build.sh`, `devs.c` as it ran), `2318605` (devs' Linux log only: its
+  message says more than the commit holds).
 - The kernel: `fd49eb6` (`kernel/cred`), `815e160`, `9731dbd`
   (`kernel/sched`), `a27f150` (`kernel/signal`), `9cd0d40`, `889dec9`
   (`kernel/process`), `856f848`, `af8191a` (`kernel/files`), `f4ccb8f`
