@@ -417,3 +417,80 @@ answers a `struct ucred` — pid, uid, gid — of the **effective** ids:
 new words a socket. `ids`' socketpair line is Linux's now (61 of 71).
 pax#58's remainder (an AF_INET socket's, an eventfd's and an accepted
 end's `fstat` owner) was not reached.
+
+## F. The probes against Linux; every existing suite (item 6)
+
+Every Linux line is real root's: kasumi's own kernel image (Linux
+7.2.8-1-cachyos, `f4c00d5d…`) under QEMU 11.1.1, the program a child of
+pid 1, every capability, the four protected settings written to 1 first
+(`notes/px45/vminit.c`; `tests/mpx5-users.d/linux/vm-rights.meta`:
+archive `dfc1043d…`, `rights` `5dfd07ed…`). `sig` and `priv` are px38's
+binaries (`d84c3243…`, `a3a24d21…`) and their reference px38's
+vm-protected sections, which this lane's boot of the same binaries on
+its own archive reproduced to the byte. A user's rows are an actor that
+dropped for good, or the whole program after `as 1000 1000`, or (the
+user's soak) a program root started that then became 1000:1000 for
+good. No row is compared with a container's root.
+
+| session | run by | Linux lines | identical on PAX at trunk `2167620` | after | the rest |
+|---|---|---:|---:|---:|---|
+| sig: sender rows | root, dropping to seventeen states | 102 | 33 | **99** | the set-ID target's three rows where only the copy's owner matches (px27, R5) |
+| sig: all its lines | | 144 | | 107 | its 30 `/proc` rows (§A), `/proc is mounted`, the set-ID target's line (and PAX's `!` line); held to `sig.pax` |
+| priv | root, dropping to 1000:2000 | 30 | 4 | **19** | `/dev/mem`, `kmsg`, `ptmx`; root's raw socket; `prlimit64` (two); `mknod` of a FIFO (two, with `chroot`); `/dev/tty` in the two open lines; the user's KIOCSOUND (the controlling terminal, §B); held to `priv.pax` |
+| rights | root, dropping to its states | 284 | (new) | **284** | |
+| rights-user | 1000:1000 | 20 | (new) | **20** | |
+| rights-soak, rights-soak-user | root; 1000:1000 | 2, 2 | (new) | 1, 1 | `~soak` (free memory, PAX's one number) |
+| ids | root | 71 | 60 | **61** | the ten PAX lines named in `ids.pax` (process groups, `capget`, the machine's) |
+| every other session | | | | unchanged | |
+
+{{SUITES}}
+
+## G. Soak and plants (item 6)
+
+- **The soak**: `rights soak 100000` as root, and `rights soak 100000
+  1000` (root starts a target of its own, then becomes 1000:1000 for
+  good): ten calls a round — a signal to another process (allowed to
+  root, -EPERM to a user), a `tgkill` of it, one to itself, `bind` of
+  port 80, `setpriority` to -1, `open` of `/dev/console`, a read of the
+  target's `environ`, SO_PEERCRED of a socketpair, `chroot("/")`,
+  `reboot` with a bad magic: **1,000,000 calls a soak, 0 wrong
+  answers**, `MemFree` one number at the start and every quarter on
+  {{SOAKLEGS}} (247,124 kB native BIOS). Linux's: the same line,
+  `MemFree` 921,692 kB flat.
+- **The plants** (cut from `d6ebffe`, never to be merged):
+
+  | plant | break | red on kasumi | red in CI |
+  |---|---|---|---|
+  | A, branch `px45-plant-a` `b05c7e5` | `may_signal` always yes | `notes/px45/kasumi-plant-a.mpx5-users.out`: U1 `sig` at its line 13, `(1000 1000 1000) -> target (1002 1000 1001) no exec` (kill 0 where Linux says -1); then `priv` (a user's `kill(1, SIGTERM)` 0), `rights` | run 38680128699, job 116242642195 (`mpx5-users` the only suite, `tier pr`): `notes/px45/ci-38680128699-plant-a-mpx5-users.txt` |
+  | B, branch `px45-plant-b` `c69c853` | `may_bind` always yes | `notes/px45/kasumi-plant-b.mpx5-users.out`: U1 `priv` at its line 21, the user's `bind` line (80 0 where Linux says -13); then `rights`, `rights-user`, the user's soak | run 38680131635, job 116242642567: `notes/px45/ci-38680131635-plant-b-mpx5-users.txt` |
+
+## What U6 (accounts, `su`, `login`) should know
+
+- **Root is two tests**: `cred.privileged` (effective user id 0) for
+  signals, ports, priority, the speaker, `/proc`'s guarded files and
+  root's calls; `files.may`/`owns` (file-system user id 0) for files
+  (R9). `su` from root to a user (groups, then gids, then uids, as
+  `user/elf/as.c` does) leaves no privilege of either kind.
+- **The typed session's refusals** are all Linux's now: `kill 1` is
+  -EPERM to a user (`may_signal`: pid 1 is root's); `cat /etc/shadow`
+  or a 0600 root file -EACCES, `rm /bin/ls` and `chmod` of root's file
+  refused (px43, px44); a user may signal only its own processes (by
+  the four ids, §A), so `kill` of root's shell from the user's is
+  -EPERM.
+- **The terminal**: `/dev/console`, `/dev/tty0` and `/dev/ttyS0` are
+  0600 and root's (devtmpfs's), so a user cannot open them by name —
+  but descriptors 0 to 2, inherited across `su`, keep working (Linux's
+  `su` on root's virtual terminal behaves the same). `/dev/tty` (0666)
+  opens the console for anyone. `login` handing the terminal over
+  (`fchown`/`fchmod` of it) needs `/dev` to take an owner: today it is
+  -EROFS by name (px42's `~fixed`), and the controlling terminal and
+  sessions are job control's (U9, ruling #79's track).
+- **The speaker** is anyone's on a console descriptor
+  (`console.controlling`: one session); when sessions exist, the rule
+  in kernel/user already refuses one that is not the caller's
+  controlling terminal.
+- **`/proc`**: a user reads every process's `status` and `cmdline`, and
+  `environ` and `fd/` only of its own processes while they are dumpable
+  (after `su`, the shell `execve`d with its ids equal is dumpable again).
+- **Not there for U6**: `setsid`, process groups, `TIOCSCTTY`; `chroot`
+  to anything but `/`; passwords (R1).
