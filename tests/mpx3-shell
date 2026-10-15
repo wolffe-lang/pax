@@ -379,7 +379,7 @@ for leg in $legs; do
                 awk '/^user: exec pid 1 / { if (!on) { on = 1; next } } on && /^user: [^ ]+ pid 1 (exit_group|exit) [0-9]+ after / { exit }
                      on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$norm" > "$out"
             fi
-            tr -d '\r' < "$lx/$ls.tty" > "$out.linux"
+            serial_norm "$lx/$ls.tty" > "$out.linux" # px46: as the serial log is (pelt's ESC [ 6 n)
             [ -z "$(tail -c 1 "$out.linux")" ] || printf '\n' >> "$out.linux"
             if ! cmp -s "$out.linux" "$out"; then
                 why+=" the session differs from Linux's: $(diff "$out.linux" "$out" | head -n 12 | tr '\n' '|');"
