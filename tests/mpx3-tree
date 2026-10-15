@@ -93,8 +93,10 @@
 #      program's break did not move (T1's line).
 #   T6 each shell session, on Linux: when it was over the root held
 #      exactly the names it started with (the session removed what it
-#      made; `rm -rf /` removed nothing). T1 holds PAX to the same
-#      transcript, and T4 to the same inodes.
+#      made; `rm -rf /` removed nothing) and, since px46's pin of pelt
+#      (sh12), pelt's history file /.sh_history (root's HOME is /). T1
+#      holds PAX to the same transcript, and T4 to the same inodes (one
+#      more than at the start: the history file, and its page).
 #   T7 speed: 16 MiB written and read back and 64 more passes over it,
 #      1 GiB each way (T1), and the times the program measured (10 ms
 #      steps on PAX).
@@ -337,7 +339,7 @@ for leg in $legs; do
             out=$PAX_BUILD/mpx3-tree-$tier-$leg-$s.session
             awk '/^user: exec pid 1 / { if (!on) { on = 1; next } } on && /^user: [^ ]+ pid 1 (exit_group|exit) [0-9]+ after / { exit }
                  on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$norm" > "$out"
-            tr -d '\r' < "$lx/$ls.tty" > "$out.linux"
+            serial_norm "$lx/$ls.tty" > "$out.linux" # px46: as the serial log is (pelt's ESC [ 6 n)
             [ -z "$(tail -c 1 "$out.linux")" ] || printf '\n' >> "$out.linux"
             grep -v '^~' "$out" | mask /dev/stdin > "$out.cmp"
             grep -v '^~' "$out.linux" | mask /dev/stdin > "$out.linux.cmp"
@@ -388,16 +390,20 @@ for leg in $legs; do
             fb=${1:-} fa=${2:-}
             set -- $(printf '%s\n' "$tl" | sed -n -E "s/^tree: frames ([0-9]+) \\(([0-9]+) when made\\), ([0-9]+) \\(([0-9]+)\\) of them the inode table's, inodes ([0-9]+) \\(([0-9]+)\\), cap ([0-9]+), refusals [0-9]+\$/\\1 \\2 \\3 \\4 \\5 \\6/p")
             th=${1:-} tb=${2:-} tt=${3:-} ttb=${4:-} ti=${5:-} tib=${6:-}
-            left=0
+            left=0 hist=0
             [ "$p" != shell ] || [ "$(linux_of "$s")" != shell-tree ] || left=1 # the page of /etc/motd the session appended to
             [ "$s" != probes ] || left=1 # the page of /etc/pax-run, which the probe removed and made again
+            # px46: pelt keeps its history in $HOME/.sh_history since sh12,
+            # and root's HOME is /: a typed session leaves that file, one
+            # inode and its one page, on PAX and on Linux (T6).
+            [ "$p" != shell ] || { left=$((left + 1)); hist=1; }
             if [ -z "$fb" ] || [ -z "$th" ]; then
                 why+=" no frames line or no tree line ('$fl' / '$tl');"
             else
                 grew=$((tt - ttb)) # the inode table's frames are never given back
                 [ $((fb - fa)) = $((left + grew)) ] || why+=" $((fb - fa)) frames not back, not $left and the inode table's $grew ('$fl');"
                 [ $((th - tb)) = $((left + grew)) ] || why+=" the tree holds $((th - tb)) frames more than when made, not $left and the inode table's $grew ('$tl');"
-                [ "$ti" = "$tib" ] || why+=" the tree has $ti inodes, $tib when made;"
+                [ "$ti" = $((tib + hist)) ] || why+=" the tree has $ti inodes, $tib when made$( [ "$hist" = 1 ] && echo ' and the history file');"
             fi
             [ -z "$why" ] && say "PASS T4 $id: $fl; $tl" || bad "T4 $id:$why"
 
@@ -424,11 +430,11 @@ for leg in $legs; do
 
             # T6: the tree intact, on Linux.
             if [ "$s" = shell-tree ] || [ "$s" = shell-changes ]; then
-                want=$( (cd "$images/shell/root" 2>/dev/null && find . -mindepth 1 | LC_ALL=C sort) )
+                want=$( (cd "$images/shell/root" 2>/dev/null && { find . -mindepth 1; echo ./.sh_history; } | LC_ALL=C sort) ) # px46: pelt's history file (sh12)
                 if [ -z "$want" ]; then
                     say "PASS T6 $id: (the shell's tree is not on this host; the build host compared it)"
                 elif [ "$(cat "$lx/$s.tty.after")" = "$want" ]; then
-                    say "PASS T6 $id: after the session Linux's root holds the $(printf '%s\n' "$want" | wc -l | tr -d ' ') names it started with: rm -rf / removed nothing, the session removed what it made"
+                    say "PASS T6 $id: after the session Linux's root holds the $(printf '%s\n' "$want" | wc -l | tr -d ' ') names it started with and pelt's history file: rm -rf / removed nothing, the session removed what it made"
                 else
                     bad "T6 $id: the root on Linux after the session: $(diff <(printf '%s\n' "$want") "$lx/$s.tty.after" | head -n 8 | tr '\n' '|')"
                 fi
