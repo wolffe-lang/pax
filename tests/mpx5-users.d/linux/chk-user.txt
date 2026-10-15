@@ -43,4 +43,23 @@ exec self: a directory -13; /k/w/n/seven (0755, in a 0000 directory) -13; /k/w/o
 == H: a descriptor that outlives a change of mode
 held self: its own file and directory made 0000 by itself: chmod 0, 0
 held self: a file and a directory opened at 0666 and 0755, then made 0000: read on the old read descriptor 0, write on the old O_RDWR one 0, ftruncate 0, write on the read one -9, fstat 0 mode 0000; a new open O_RDONLY -13, O_WRONLY -13; the directory: getdents64 0, fstatat f -13, fchdir -13; in it as the working directory: stat f -13, getcwd 0
+== N: names made, removed and renamed (write and search of the directory)
+image (px44): /k/n/own/r 0555 1000:2000 /k/n/own/w 0777 1000:2000 /k/n/own/w/dd 0555 1000:2000 /k/s/own/st 1777 1000:2000 /k/s/own/rt 1777 0:0 /k/s/own/sg 1771 1000:2000 /k/p/st 1777 1000:2000 /k/p/sg 1771 1000:2000 /k/p/ww 0777 1000:2000 /k/p/rt 1777 0:0 /k/p/h/s4777 4777 0:0 /k/p/h/g2777 2777 0:0 /k/p/h/g2767 2767 0:0 /k/m/own/f 0644 1000:2000 /k/b/own/w 6777 1000:2000 /k/b/own/g 2767 1000:2000 /k/b/own/u 6766 1000:2000 /k/b/own/h 6777 1000:2000 /k/s/self/st 1777 1001:2000 /k/b/self/w 6777 1000:2000 /k/soak/st 1777 1001:2000 /k/soak/b 6777 1000:1000
+names in a 0555 directory of 1000:2000 self: an existing name: mkdir -17, symlink -17, link -17, bind -98; a missing one: unlink -2, rename -2; rmdir of a full directory -13, of a file -13; unlink of a directory -13; rename of a name onto itself 0
+names in a 0555 directory of 1000:2000 self: made: mkdir -13, symlink -13, link -13, bind -13; renamed in it -13, out of it -13, into it -13; a socket bound in a 0777 one 0, then bound again into the 0555 one -13; removed: unlinkat(AT_REMOVEDIR) -13; a rename over a name in it -13; unlink -13
+directories moved in a 0777 directory self: its 0555 one renamed in place 0 and back 0, moved to another directory -13; its 0755 one (1000's) moved 0; its 0777 one moved 0
+== K: the sticky bit
+sticky self: in its 1777 directory st: unlink 1000's 0, 1001's -1, root's -1; rename 1002's away -1; rmdir 1001's -1; a file of its own made 0 and renamed over 1002's -1; in root's 1777 one: unlink 1000's 0, 1002's -1; in a 1771 one of 1000:2000: unlink 1001's 0, 1002's 0
+== P: the protected settings
+settings: protected_hardlinks 1 0644 0:0 protected_symlinks 1 0644 0:0 protected_regular 1 0644 0:0 protected_fifos 1 0644 0:0
+protected_symlinks self: its own link in 1001's 1777 directory made 0, followed 0
+protected_regular self: in 1000's 1777 directory, O_WRONLY|O_CREAT of 1000's 0666 file 0, 1001's -13, 1002's -13, root's -13; root's O_RDONLY|O_CREAT -13, O_WRONLY 0, O_CREAT|O_EXCL -17; a new name 0; in root's 1777 one, root's 0, 1002's -13; 1001's in a 1771 one 0; 1002's in a 0777 one 0
+protected_hardlinks self: a hard link to root's 0600 file -1, 0666 0, 0644 -1, 04777 -1, 02777 -1, 02767 0, 0:2000's 0660 -1; to 1000:2000's 0000 file 0; to a directory -1; to 1002's symbolic link itself -2, through it (AT_SYMLINK_FOLLOW) -2
+== M: chmod
+chmod self: its 1000:2000 file 0640 0 mode 0640; fchmodat 0644 0; fchmod on a read-only descriptor 0, of root's file -1; root's file 0600 -1; the directory 0750 0; the file 02644 0 mode 0644, the directory 02755 0 mode 0755, the file 04644 0 mode 4644, 01644 0 mode 1644; a file in a 0000 directory -13
+== T: utimensat
+times self: futimens NULL on a read-only descriptor of the 0666 file 0, of the 0644 file 0; {1, 2} on the 0666 one 0; {NOW, NOW} on a write-only one 0; utimensat NULL of a 0777 directory 0; root's 0666 file {NOW, NOW} 0, {1, 2} -1; the 0666 file {OMIT, NOW} 0, {NOW, 5} 0; a file in a 0000 directory -13; 1002's link itself (AT_SYMLINK_NOFOLLOW) NULL -2, {1, 2} -2
+== B: what takes the set-ID bits away
+bits self (files 1000:2000): a byte written to 06777 1 mode 0777, to 02767 1 mode 0767, to 06766 1 mode 0766; writev 1 mode 0777; copy_file_range 1 mode 0777; sendfile 1 mode 0777; splice 1 mode 0777; O_TRUNC of an empty one 0 mode 0777; ftruncate to 64 0 mode 0777; truncate 0 mode 0777; fallocate on a read-only descriptor -9, of no bytes -22 mode 6777, of 4096 0 mode 0777 size 4096; a write of no bytes 0 mode 6777; an O_RDWR open mode 6777
+bits self: a byte written on a descriptor it opened itself 1, mode 0777
 chk: done
