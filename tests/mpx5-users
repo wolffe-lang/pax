@@ -106,6 +106,37 @@
 # settings line and four `protected` rows differ from vm's): 337 of 382
 # lines (291 before against it; 295 against vm).
 #
+# px45, the fifth lane: processes and root's things. Six sessions in an
+# image of their own (/bin/rights, /bin/sig, /bin/priv, /bin/as, /t/,
+# /t/sig/ and /t/priv/ 0777); the reference is real root's Linux booted
+# with the same archive, the protected settings on (notes/px45/linux-vm.sh,
+# vm-protected), and for sig and priv px38's own vm-protected recording,
+# which that boot reproduced to the byte:
+#
+#   - rights (user/elf/rights.c), as root, dropping to px38's seventeen
+#     sender states and to readers: who may signal whom (kill, tgkill,
+#     tkill, SIGCONT, a zombie), kill(-1) and kill(0), what a handler is
+#     told of its sender (si_uid the real id) and a child's end
+#     (SIGCHLD whatever the ids); a port below 1024, a raw socket,
+#     setpriority and sched_setscheduler of oneself and of others,
+#     chroot, reboot, sethostname, the clock, mount, umount2, mknod of a
+#     device, the speaker's ioctls on a terminal root opened; /dev's
+#     nodes, modes and opens; /proc/<pid>'s status, cmdline, environ
+#     and fd/ by owner and dumpable; SO_PEERCRED: 284 lines;
+#   - rights-user, the rows a user makes alone (`as 1000 1000 /bin/rights
+#     user`): 20 lines;
+#   - rights-soak and rights-soak-user (`rights soak 100000 [1000]`): a
+#     million calls that signal, bind a low port, lower a priority, open
+#     a 0600 node, read another's environ, ask SO_PEERCRED, chroot and
+#     reboot, as root and as 1000:1000;
+#   - sig (px38's probe, byte for byte): 99 of its 102 sender rows
+#     Linux's (SIG_LINUX_ROWS), the three left the set-ID target's whose
+#     sender matches only the copy's owner (R5, px27), the whole held to
+#     tests/mpx5-users.d/sig.pax;
+#   - priv (px38's, byte for byte): PRIV_LINUX_LINES (19) of its 30
+#     lines Linux's, the whole held to tests/mpx5-users.d/priv.pax.
+# And ids' SO_PEERCRED line is Linux's: 61 of its 71 (IDS_LINUX_LINES).
+#
 #   tests/mpx5-users [--images DIR | --no-boot | --only build] [--bin DIR] [--bore DIR]
 #                    [--firmware bios|uefi|both] [--tier native|release|both]
 #
@@ -127,11 +158,10 @@
 # **What this suite does not hold.** px43's checks decide who may open,
 # truncate, ask `access` about, run and walk through a file; px44's who
 # may make, remove, rename and link a name, `chmod`, set times and keep
-# set-ID bits, and connect to a socket's name. A process that is 1000
-# may still signal what root may, and use what /dev holds (U5's). The
-# checks are enforced for honest programs; not a boundary against an
-# attacker: nothing here shows a boundary, only that each check answers
-# as Linux's does.
+# set-ID bits, and connect to a socket's name; px45's who may signal
+# whom and what only root may do. The checks are enforced for honest
+# programs; not a boundary against an attacker: nothing here shows a
+# boundary, only that each check answers as Linux's does.
 #
 # `--bin DIR`: the programs already built (tools/mkcred's nine) — for a
 # host whose own libc they must not be built with: build them in a
@@ -164,11 +194,14 @@
 #          machine's (the parent's pid, the root directory's mode, a
 #          `/bin`, the account file). U1 holds PAX to that file and
 #          counts the lines that are Linux's (px42: 60, the `chown` to
-#          1000:1000 is kept now);
+#          1000:1000 is kept now; px45: 61, SO_PEERCRED answered);
 #        - perm: the classes above, counted, and the whole of PAX's
 #          text held to tests/mpx5-users.d/perm.pax;
 #        - setid (px44): its 50 `bits:` lines Linux's, the whole held
-#          to tests/mpx5-users.d/setid.pax.
+#          to tests/mpx5-users.d/setid.pax;
+#        - sig (px45): SIG_LINUX_ROWS of its 102 sender rows Linux's,
+#          the whole held to tests/mpx5-users.d/sig.pax; priv (px45):
+#          PRIV_LINUX_LINES of its 30, the whole held to priv.pax.
 #   U2 by name: the `~` lines are exactly PAX's (`~bound`: 33 groups
 #      -EINVAL; `~thread`: ids are a process's; px42's `~desc` is
 #      gone: px43 (pax#58) gives a pipe, a socketpair and an AF_UNIX
@@ -181,8 +214,12 @@
 #      which are `~fixed`'s; perm's, which are px27's loader limit, 43
 #      times (65 before px43: now only where the class allows execute),
 #      and a SIGSTOP that is dropped, three times; setid's, px27's, 14
-#      times; none in chk's);
-#      -ENOSYS only for the numbers named; nobody killed.
+#      times; none in chk's; px45: ids' SO_PEERCRED one is gone;
+#      sig's one, px27's; priv's four, a device node and a FIFO (root's
+#      and the user's) and root's raw socket; none in rights');
+#      -ENOSYS only for the numbers named (px45: sig's targets wait in
+#      `pause`, 34, which PAX has not); nobody killed but what a
+#      session ends itself (px45: rights' 21, sig's 5, rights-user's 1).
 #   U3 every frame back: the frames line shows as many free after init's
 #      end as before the first program (but for the inode table's own
 #      growth, which the tree's line counts). perm and setid leave their
@@ -197,8 +234,9 @@
 #      memory it read at each quarter is one number.
 #   U5 the end: `PAX: init … ended with status <s>; nothing left to
 #      run`, `halt`, and qemu-halt holds the machine halted.
-# The own, perm, chk and setid sessions of the first leg run first, and
-# the suite stops at the first failure of any of them: `stopped early`. A boot ends at the kernel's `halt`
+# The own, perm, chk, setid and (px45) rights sessions of the first leg
+# run first, and the suite stops at the first failure of any of them:
+# `stopped early`. A boot ends at the kernel's `halt`
 # or at a `PANIC` line, whichever comes.
 #
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
@@ -228,12 +266,13 @@ case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier
 case $only in ''|build) ;; *) die "--only takes build" ;; esac
 need readelf python3
 
-PROGS="cred ids ident as own perm chk seven setid"
+PROGS="cred ids ident as own perm chk seven setid sig priv rights"
 CRED_SESSIONS="cred cred-user ident ident-user ids soak soak-user" # px39's, in px39's archive
 OWN_SESSIONS="own perm own-user own-soak own-soak-user ls ls-names" # px42's, in the archive that carries owners
 CHK_SESSIONS="chk chk-user chk-soak chk-soak-user" # px43's, in the archive that carries the cases (/k); px44 adds its rows
 SETID_SESSIONS="setid" # px44's: px38's set-ID probe, its `bits:` lines
-SESSIONS="own perm chk setid own-user $CRED_SESSIONS own-soak own-soak-user ls ls-names chk-user chk-soak chk-soak-user"
+RIGHTS_SESSIONS="rights sig priv rights-user rights-soak rights-soak-user" # px45's, in the archive of their own
+SESSIONS="own perm chk setid rights own-user $CRED_SESSIONS own-soak own-soak-user ls ls-names chk-user chk-soak chk-soak-user sig priv rights-user rights-soak rights-soak-user"
 LS_ARGS="/home /home/pax /home/pax/notes /srv"
 ref=$here/mpx5-users.d/linux
 run_of() {
@@ -250,6 +289,12 @@ run_of() {
         chk-soak)      echo "/bin/chk soak 100000" ;;
         chk-soak-user) echo "/bin/as 1000 1000 /bin/chk soak 100000" ;;
         setid)         echo "/bin/setid /t/setid" ;;
+        rights)        echo "/bin/rights" ;;
+        rights-user)   echo "/bin/as 1000 1000 /bin/rights user" ;;
+        rights-soak)   echo "/bin/rights soak 100000" ;;
+        rights-soak-user) echo "/bin/rights soak 100000 1000" ;;
+        sig)           echo "/bin/sig /t/sig" ;;
+        priv)          echo "/bin/priv /t/priv" ;;
         cred)       echo "/bin/cred" ;;
         cred-user)  echo "/bin/as 1000 1000 /bin/cred" ;;
         ident)      echo "/bin/ident /bin/ident-setid" ;;
@@ -262,15 +307,17 @@ run_of() {
 lines_of() { # the recording's line count: a change to a recording is a change here
     case $1 in cred) echo 2684 ;; cred-user) echo 3983 ;; ident) echo 225 ;; ident-user) echo 129 ;; ids) echo 71 ;; soak|soak-user) echo 2 ;;
         own) echo 278 ;; own-user) echo 9 ;; perm) echo 382 ;; own-soak|own-soak-user) echo 2 ;; ls|ls-names) echo 18 ;;
-        chk) echo 339 ;; chk-user) echo 65 ;; chk-soak|chk-soak-user) echo 2 ;; setid) echo 74 ;; esac
+        chk) echo 339 ;; chk-user) echo 65 ;; chk-soak|chk-soak-user) echo 2 ;; setid) echo 74 ;;
+        rights) echo 284 ;; rights-user) echo 20 ;; rights-soak|rights-soak-user) echo 2 ;; sig) echo 144 ;; priv) echo 30 ;; esac
 }
-pax_lines_of() { # what PAX writes: the recording's count, but for perm (three `!` lines: a SIGSTOP PAX drops) and setid (px44: its execve rows)
-    case $1 in perm) echo 385 ;; setid) echo 70 ;; *) lines_of "$1" ;; esac
+pax_lines_of() { # what PAX writes: the recording's count, but for perm (three `!` lines: a SIGSTOP PAX drops), setid (px44: its execve rows) and sig (px45: one `!` line, the set-ID target that does not settle)
+    case $1 in perm) echo 385 ;; setid) echo 70 ;; sig) echo 145 ;; *) lines_of "$1" ;; esac
 }
-init_of() { case $1 in *-user) echo as ;; soak) echo ident ;; own-soak) echo own ;; chk-soak) echo chk ;; ls-names) echo ls ;; *) echo "$1" ;; esac; }
+init_of() { case $1 in rights-soak-user) echo rights ;; *-user) echo as ;; soak) echo ident ;; own-soak) echo own ;; chk-soak) echo chk ;; rights-soak) echo rights ;; ls-names) echo ls ;; *) echo "$1" ;; esac; }
 is_own() { case " $OWN_SESSIONS " in *" $1 "*) return 0 ;; esac; return 1; }
 is_chk() { case " $CHK_SESSIONS " in *" $1 "*) return 0 ;; esac; return 1; }
 is_setid() { case " $SETID_SESSIONS " in *" $1 "*) return 0 ;; esac; return 1; }
+is_rights() { case " $RIGHTS_SESSIONS " in *" $1 "*) return 0 ;; esac; return 1; }
 # cred's one line by ruling R4, as Linux wrote it and as PAX writes it.
 R4_LINUX='root setgroups(65536, list) = 0, then getgroups(0, NULL) = 65536'
 R4_PAX='root setgroups(65536, list) = -22, then getgroups(0, NULL) = 4'
@@ -303,8 +350,15 @@ GROUPS_WHY='refused: more supplementary groups than PAX keeps (32; Linux takes 6
 IDS_ENOSYS="109 111 112 121 124 125 273 334"
 SETID_BITS=50 # px44: setid's `bits:` lines, all of them Linux's
 SETID_REFUSED="14 syscall 59: refused: a program written since boot (the loader reads the archive's own bytes), -13" # its copies, run
-IDS_LINUX_LINES=60 # of ids' 71 lines, those that are Linux's to the byte (the other 11 are tests/mpx5-users.d/ids.pax's); 59 before px42
-IDS_REFUSED="syscall 55: refused: an AF_UNIX socketpair's end, which has no name or options: call 55, -95"
+IDS_LINUX_LINES=61 # of ids' 71 lines, those that are Linux's to the byte (the other 10 are tests/mpx5-users.d/ids.pax's); 59 before px42, 60 before px45 (SO_PEERCRED)
+IDS_REFUSED="" # px45: SO_PEERCRED is answered (px34's refusal of it is gone)
+# px45: sig's 102 sender rows, of which PAX writes these Linux's; and
+# priv's 30 lines.
+SIG_LINUX_ROWS=99
+PRIV_LINUX_LINES=19 # px45 (4 before): the eleven left are what PAX has not (/dev/mem, /dev/kmsg, /dev/ptmx, a raw socket, limits, a FIFO), /dev/tty (Linux's probe has no controlling terminal; every PAX process's is the console) and, for that same reason, the user's KIOCSOUND row
+PRIV_REFUSED="syscall 133: refused: a device node (the tree makes none), -1|syscall 133: refused: a device node (the tree makes none), -1|syscall 133: refused: a device node (the tree makes none), -1|syscall 41: refused: an AF_INET socket that is neither a datagram nor a stream socket: type 3, -94"
+SIG_ENOSYS="34 273 334" # pause (sig's targets wait in it; PAX has none: they spin) and glibc's two
+
 
 work=$PAX_BUILD/mpx5-users
 runs=$PAX_BUILD/mpx5-users-runs.txt
@@ -319,7 +373,7 @@ static_ok() { # file -> reason on failure
 # U0's part that needs no build: the sources and the recordings.
 refs_ok() { # -> reasons on stdout
     local f s n px=$PAX_ROOT/notes/px38
-    for f in cred.c ids.c perm.c setid.c px38.h; do
+    for f in cred.c ids.c perm.c setid.c sig.c priv.c px38.h; do
         if [ -f "$px/probes/$f" ]; then
             cmp -s "$px/probes/$f" "$PAX_ROOT/user/elf/$f" || printf ' user/elf/%s is not notes/px38/probes/%s;' "$f" "$f"
         fi
@@ -337,7 +391,7 @@ refs_ok() { # -> reasons on stdout
     # px44: perm's and setid's reference is px38's vm-protected run (ruling
     # #75 R7: the four protected settings on, fixed), not its vm run.
     if [ -f "$px/linux/vm-protected.txt" ]; then
-        for f in perm setid; do
+        for f in perm setid sig priv; do
             awk -v f="$f" '$0 == "=== BEGIN " f { on = 1; next } index($0, "=== END " f " status ") == 1 { on = 0 } on' "$px/linux/vm-protected.txt" \
                 | cmp -s - "$ref/$f.txt" || printf " linux/%s.txt is not the %s section of notes/px38/linux/vm-protected.txt;" "$f" "$f"
         done
@@ -559,6 +613,19 @@ if [ -z "$images" ]; then
             why+=" tools/mkinitramfs $s;"
         fi
     done
+    # px45: px38's sig and priv, and rights, which start their targets
+    # and change nothing of the archive's (sig's set-ID copy and rights'
+    # socket name are made and removed under /t).
+    for s in $RIGHTS_SESSIONS; do
+        run_of "$s" > "$work/$s.run"
+        if "$PAX_ROOT/tools/mkinitramfs" "$work/$s.cpio" "/bin/rights=$work/bin/rights:755" "/bin/as=$work/bin/as:755" "/bin/sig=$work/bin/sig:755" \
+            "/bin/priv=$work/bin/priv:755" "/etc/passwd=$work/passwd:644" "/etc/group=$work/group:644" "/t/:777" "/t/sig/:777" "/t/priv/:777" \
+            "/etc/pax-run=$work/$s.run:644" > "$work/$s.initramfs.txt"; then
+            say "  initramfs $s: $(tail -n 1 "$work/$s.initramfs.txt")"
+        else
+            why+=" tools/mkinitramfs $s;"
+        fi
+    done
     for s in $CRED_SESSIONS; do
         run_of "$s" > "$work/$s.run"
         # The set-ID copy of ident: mode 6755, root's, where the kernel
@@ -588,7 +655,7 @@ if [ -z "$images" ]; then
             why+=" $tier kmain_console: tools/build-kernel;"
         fi
     done
-    [ -z "$why" ] && say "PASS U0: kmain_console built ($tiers), nine programs and boreutils' ls static, user/elf's cred.c, ids.c, perm.c, setid.c and px38.h are px38's, nineteen recordings with their line counts (cred's is px38's recorded vm section, 2684 lines; perm's and setid's its vm-protected sections, 382 and 74)" || bad "U0:$why"
+    [ -z "$why" ] && say "PASS U0: kmain_console built ($tiers), twelve programs and boreutils' ls static, user/elf's cred.c, ids.c, perm.c, setid.c, sig.c, priv.c and px38.h are px38's, twenty-five recordings with their line counts (cred's is px38's recorded vm section, 2684 lines; perm's, setid's, sig's and priv's its vm-protected sections, 382, 74, 144 and 30)" || bad "U0:$why"
     images=$work
     if [ "$only" = build ] || [ "$noboot" = 1 ]; then
         [ "$fail" = 0 ] && say "mpx5-users build (U0): PASS (no boot)" || say "mpx5-users build: FAIL"
@@ -596,7 +663,7 @@ if [ -z "$images" ]; then
     fi
 else
     why=$(refs_ok)
-    [ -z "$why" ] && say "PASS U0 (recordings): nineteen, with their line counts; the sources are px38's" || bad "U0 (recordings):$why"
+    [ -z "$why" ] && say "PASS U0 (recordings): twenty-five, with their line counts; the sources are px38's" || bad "U0 (recordings):$why"
 fi
 
 record() { # tier leg session status
@@ -680,6 +747,24 @@ for leg in $legs; do
                     [ "$same" = "$SETID_BITS" ] || why+=" $same bits: lines are real root's, not $SETID_BITS;"
                     note="all $SETID_BITS of its bits: lines (what a write, a truncation, fallocate, utimensat, chmod, rename and a link by the owner, another user and root do to the set-ID bits) byte-identical to real root's recording with the protected settings on (vm-protected); its execve rows PAX's (R5: set-ID execution not honoured; px27: the copies are written since boot), the whole held to tests/mpx5-users.d/setid.pax"
                     ;;
+                sig)
+                    # px45: every line PAX writes is held to sig.pax; of its 102
+                    # sender rows SIG_LINUX_ROWS are the recording's to the byte.
+                    cmp -s "$here/mpx5-users.d/sig.pax" "$out" || why+=" the session differs from tests/mpx5-users.d/sig.pax: $(diff "$here/mpx5-users.d/sig.pax" "$out" | head -n 10 | cut -c1-400 | tr '\n' '|');"
+                    grep '^sender (.*->' "$ref/$s.txt" > "$out.want"
+                    grep '^sender (.*->' "$out" > "$out.cmp"
+                    same=$(paste -d'\n' "$out.want" "$out.cmp" | awk 'NR % 2 { a = $0; next } a == $0 { n++ } END { print n + 0 }')
+                    [ "$(wc -l < "$out.cmp" | tr -d ' ')" = 102 ] || why+=" $(wc -l < "$out.cmp" | tr -d ' ') sender rows, not 102;"
+                    [ "$same" = "$SIG_LINUX_ROWS" ] || why+=" $same of the 102 sender rows are real root's, not $SIG_LINUX_ROWS;"
+                    note="$same of its 102 sender rows (kill, tgkill, SIGCONT, SIGURG by seventeen id states to six targets) byte-identical to real root's recording (vm-protected), the other $((102 - same)) the set-ID target's (not run: px27; not honoured: R5) where the sender matches only the copy's owner; the whole held to tests/mpx5-users.d/sig.pax"
+                    ;;
+                priv)
+                    # px45: every line PAX writes is held to priv.pax; PRIV_LINUX_LINES are Linux's.
+                    cmp -s "$here/mpx5-users.d/priv.pax" "$out" || why+=" the session differs from tests/mpx5-users.d/priv.pax: $(diff "$here/mpx5-users.d/priv.pax" "$out" | head -n 10 | cut -c1-400 | tr '\n' '|');"
+                    same=$(paste -d'\n' "$ref/$s.txt" "$out" | awk 'NR % 2 { a = $0; next } a == $0 { n++ } END { print n + 0 }')
+                    [ "$same" = "$PRIV_LINUX_LINES" ] || why+=" $same of its 30 lines are real root's, not $PRIV_LINUX_LINES;"
+                    note="$same of its 30 lines byte-identical to real root's recording (vm-protected), the rest named in tests/mpx5-users.d/priv.pax"
+                    ;;
                 ids)
                     cmp -s "$here/mpx5-users.d/ids.pax" "$out" || why+=" the session differs from tests/mpx5-users.d/ids.pax: $(diff "$here/mpx5-users.d/ids.pax" "$out" | head -n 10 | cut -c1-400 | tr '\n' '|');"
                     same=$((n - $(diff "$ref/$s.txt" "$out" | grep -c '^>')))
@@ -695,6 +780,9 @@ for leg in $legs; do
                     case $s in
                         chk*-user) who="1000:1000's on a Linux that unpacked the same archive as its root, the protected settings on (vm-protected, after as 1000 1000)" ;;
                         chk*) who="real root's on a Linux that unpacked the same archive as its root, the protected settings on (vm-protected)" ;;
+                        rights-soak-user) who="1000:1000's on a Linux that unpacked the same archive as its root, the protected settings on (vm-protected; root started its target, then became 1000:1000)" ;;
+                        rights-user) who="1000:1000's on a Linux that unpacked the same archive as its root, the protected settings on (vm-protected, after as 1000 1000)" ;;
+                        rights*) who="real root's on a Linux that unpacked the same archive as its root, the protected settings on (vm-protected)" ;;
                         *-user) who="1000:1000's on the same boot (vm, after as 1000 1000)" ;;
                         ls*) who="the same ls on a Linux that unpacked the same archive as its root (vm)" ;;
                         *) who="real root's (vm)" ;;
@@ -712,7 +800,7 @@ for leg in $legs; do
             why=
             tl=$(grep '^~' "$out" | grep -v '^~soak: ' | paste -sd'|' -)
             rf=$(grep ': refused: ' "$norm" | sed -E 's/^.*user: [^ ]+ pid [0-9]+ //' | LC_ALL=C sort | paste -sd'|' -)
-            { [ "$s" != perm ] && [ "$s" != setid ]; } || rf=$(grep ': refused: ' "$norm" | sed -E 's/^.*user: [^ ]+ pid [0-9]+ //' | LC_ALL=C sort | uniq -c | sed -E 's/^ +//' | LC_ALL=C sort -rn | paste -sd'|' -)
+            { [ "$s" != perm ] && [ "$s" != setid ] && [ "$s" != rights ]; } || rf=$(grep ': refused: ' "$norm" | sed -E 's/^.*user: [^ ]+ pid [0-9]+ //' | LC_ALL=C sort | uniq -c | sed -E 's/^ +//' | LC_ALL=C sort -rn | paste -sd'|' -)
             ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
             wt= wr= wn="273 334"
             case $s in
@@ -723,13 +811,24 @@ for leg in $legs; do
                 own)        wt="$FIXED"; wr="syscall 257: $TMPFILE_WHY|syscall 92: $FIXED_WHY|syscall 92: $FIXED_WHY" ;;
                 perm)       wr=$PERM_REFUSED ;;
                 setid)      wr=$SETID_REFUSED ;;
+                rights)     wr="" ;;
+                sig)        wn=$SIG_ENOSYS; wr="syscall 59: refused: a program written since boot (the loader reads the archive's own bytes), -13" ;;
+                priv)       wr=$PRIV_REFUSED ;;
             esac
             [ "$tl" = "$wt" ] || why+=" the '~' lines are '$tl', not '$wt';"
             [ "$rf" = "$wr" ] || why+=" refusal lines '$rf', not '$wr';"
             [ "$ns" = "$wn" ] || why+=" -ENOSYS for '$ns', not '$wn';"
             kl=$(grep -c 'user: [^ ]* pid [0-9]* killed: ' "$norm")
-            [ "$kl" = 0 ] || why+=" $kl killed: lines ($(grep -m1 ' killed: ' "$norm" | cut -c1-120));"
-            [ -z "$why" ] && say "PASS U2 $id: '~' lines: ${wt:-none}; refused by name: ${wr:-nothing}; -ENOSYS only for $wn; nobody killed" || bad "U2 $id:$why"
+            # px45: rights, sig and rights-user end the targets they started:
+            # SIGKILL each that still runs (rights' five, its fourteen
+            # senders; sig's five; rights-user's one), and rights' two
+            # children that end by SIGTERM for the SIGCHLD rows.
+            wk=0 wks=0 wkt=0
+            case $s in rights) wk=21 wks=19 wkt=2 ;; sig) wk=5 wks=5 ;; rights-user) wk=1 wks=1 ;; esac
+            ks=$(grep -c 'user: [^ ]* pid [0-9]* killed: SIGKILL after ' "$norm")
+            kt=$(grep -c 'user: [^ ]* pid [0-9]* killed: SIGTERM after ' "$norm")
+            [ "$kl $ks $kt" = "$wk $wks $wkt" ] || why+=" $kl killed: lines ($ks SIGKILL, $kt SIGTERM), not $wk ($wks, $wkt) ($(grep -m1 ' killed: ' "$norm" | cut -c1-120));"
+            [ -z "$why" ] && say "PASS U2 $id: '~' lines: ${wt:-none}; refused by name: ${wr:-nothing}; -ENOSYS only for $wn; $([ "$wk" = 0 ] && echo "nobody killed" || echo "killed: the $wk the session ended itself")" || bad "U2 $id:$why"
 
             # U3: every frame back.
             why=
@@ -759,12 +858,13 @@ for leg in $legs; do
             [ -z "$why" ] && say "PASS U3 $id: $fl; $trl" || bad "U3 $id:$why"
 
             # U4: the soak.
-            case $s in soak|soak-user|own-soak|own-soak-user|chk-soak|chk-soak-user)
+            case $s in soak|soak-user|own-soak|own-soak-user|chk-soak|chk-soak-user|rights-soak|rights-soak-user)
                 why=
                 sk=$(grep -m1 '^soak: ' "$out")
                 case $s in
                     own-soak*) printf '%s\n' "$sk" | grep -Eq '^soak: 100000 rounds, 1200000 calls that make, chown and remove, 0 wrong answers, as uid (0|1000)$' || why+=" '$sk';" ;;
                     chk-soak*) printf '%s\n' "$sk" | grep -Eq '^soak: 100000 rounds, 2000000 calls that open, walk, ask access, truncate, make, remove, rename, link, chmod, set times and write set-ID files, 200 execs, 0 wrong answers, as uid (0|1000)$' || why+=" '$sk';" ;;
+                    rights-soak*) printf '%s\n' "$sk" | grep -Eq '^soak: 100000 rounds, 1000000 calls that signal, bind a low port, lower a priority, open a 0600 node, read another.s environ, ask SO_PEERCRED, chroot and reboot, 0 wrong answers, as uid (0|1000)$' || why+=" '$sk';" ;;
                     *) printf '%s\n' "$sk" | grep -Eq '^soak: 100000 rounds, 1000000 calls, 10000 children that changed their ids, 0 wrong answers ' || why+=" '$sk';" ;;
                 esac
                 ml=$(grep -m1 '^~soak: ' "$out")
@@ -787,7 +887,7 @@ for leg in $legs; do
             [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
             [ -z "$why" ] && say "PASS U5 $id: init ended, status $lst; $(tail -n 1 "$log.verdict")" || bad "U5 $id:$why"
 
-            if { [ "$s" = own ] || [ "$s" = perm ] || [ "$s" = chk ] || [ "$s" = setid ]; } && [ "$before" = 0 ] && [ "$fail" != 0 ]; then
+            if { [ "$s" = own ] || [ "$s" = perm ] || [ "$s" = chk ] || [ "$s" = setid ] || [ "$s" = rights ]; } && [ "$before" = 0 ] && [ "$fail" != 0 ]; then
                 stopped="$id"
                 say "FAIL stopped early: $s failed on $id; the later boots are not run"
                 break
