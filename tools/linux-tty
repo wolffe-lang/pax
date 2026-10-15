@@ -46,6 +46,7 @@ import ctypes
 import os
 import pty
 import select
+import signal
 import subprocess
 import sys
 import termios
@@ -167,6 +168,13 @@ def main(argv):
     pid, fd = pty.fork()
     if pid == 0:
         try:
+            # px46: Python starts with SIGPIPE and SIGXFSZ ignored, and an
+            # ignored signal stays ignored across execve; PAX starts its
+            # first program with every signal at its default, so PROG does
+            # here too (since sh14 pelt keeps what it was given, and its
+            # children wrote "Broken pipe" where PAX's are killed).
+            signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+            signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
             a = termios.tcgetattr(0)
             a[0] &= ~termios.IXON
             termios.tcsetattr(0, termios.TCSANOW, a)
