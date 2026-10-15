@@ -1026,7 +1026,8 @@ fn process_ends(l: u64, st: u64) {
             // px26: SIGCHLD for the parent (`signal(7)`; siginfo's
             // CLD_EXITED with the exit code, CLD_KILLED with the signal).
             let killed = st & 0x7f != 0
-            raise_group(ps, SIGCHLD, sig_info(if killed { I_CHLD_KILLED } else { I_CHLD_EXITED }, me, if killed { st & 0x7f } else { (st >> 8) & 0xff }))
+            // px45: and the child's real user id, si_uid (measured).
+            raise_group(ps, SIGCHLD, sig_info(if killed { I_CHLD_KILLED } else { I_CHLD_EXITED }, me, if killed { st & 0x7f } else { (st >> 8) & 0xff }, real_uid(l)))
         }
     }
 }
@@ -2064,10 +2065,29 @@ pub const I_CHLD_KILLED: u64 = 5
 pub const I_PIPE: u64 = 6
 pub const I_CONN: u64 = 7 // px23's: a write to a stream socket whose connection is over
 
-/// An origin word: the kind, the sender's (or the child's) pid, and a
-/// status (a child's exit code or signal).
-pub fn sig_info(kind: u64, pid: u64, status: u64) -> u64 {
-    (kind & 0xff) | ((pid & 0xffffff) << 8) | ((status & 0xffffffff) << 32)
+/// An origin word: the kind (three bits), a status (a child's exit
+/// code or signal: eight bits), the sender's (or the child's) pid
+/// (twenty-one bits: a pid above 2,097,151 is carried modulo that,
+/// named), and px45: the sender's (or the child's) real user id, all
+/// 32 bits — siginfo's `si_uid` (measured on Linux: the real id, not
+/// the effective one).
+pub fn sig_info(kind: u64, pid: u64, status: u64, uid: u64) -> u64 {
+    (kind & 7) | ((status & 0xff) << 3) | ((pid & 0x1fffff) << 11) | ((uid & 0xffffffff) << 32)
+}
+
+/// px45: the kind, pid, status and user id an origin word carries
+/// (kernel/signal's siginfo).
+pub fn info_parts(info: u64) -> (u64, u64, u64, u64) {
+    (info & 7, (info >> 11) & 0x1fffff, (info >> 3) & 0xff, info >> 32)
+}
+
+/// px45: the real user id of the process whose leader is slot `l`:
+/// kernel/cred's record, word 160 of the process area (kernel/cred's
+/// C_UID; read here by its place, since kernel/cred imports what imports
+/// this module and wolf refuses an import cycle).
+fn real_uid(l: u64) -> u64 {
+    // # Safety: the leader's own area, word 160 < 512.
+    unsafe { ((own_area(l) + 160 * 8) as *u64).read_volatile() }
 }
 
 fn info_of(s: u64, group: u64, sig: u64) -> u64 {
