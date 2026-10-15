@@ -210,6 +210,8 @@ const P_OGEN: u64 = 5 // px24: times a read gave a writer room it did not have (
 const P_MSG: u64 = 6 // px34: 1 for a SOCK_SEQPACKET buffer: messages behind an eight-byte length
 const P_FRAME: u64 = 8 // the frames' physical addresses, from here (16 at most: words 8 to 23)
 const P_OWNER: u64 = 24 // px43 (pax#58): a pipe's or a socketpair's maker's file-system user id (low 32 bits) and group id (high 32)
+const P_CPID: u64 = 25 // px45: a socketpair's maker's pid + 1, for SO_PEERCRED (0: a pipe's)
+const P_CIDS: u64 = 26 // px45: and its effective user id (low 32 bits) and group id (high 32)
 const PIPE_PAGES: u64 = 16 // 65536 bytes, Linux's default capacity
 const SOCK_PAGES: u64 = 1
 /// PIPE_BUF (`pipe(7)`): a write of at most this many bytes is atomic.
@@ -242,6 +244,14 @@ const K_SYN: u64 = 14 // px34: a file of /proc or /sys (kernel/procfs's)
 const T_SHIFT: u64 = 56
 const TTY0: u64 = 1 // px21a: T_CONSOLE's reference for /dev/tty0
 const CONSOLE: u64 = 2 // px21a: and for /dev/console
+const TTY: u64 = 3 // px45: /dev/tty (every process's controlling terminal is the console: one session)
+const TTYS0: u64 = 4 // px45: /dev/ttyS0, the serial port the console is
+// px45: T_NULL's references: /dev/null 0, and the memory devices
+// `null(4)` and `random(4)` name beside it.
+const ZERO: u64 = 1
+const FULL: u64 = 2
+const RANDOM: u64 = 3
+const URANDOM: u64 = 4
 const T_DEV: u64 = 2
 const T_CONSOLE: u64 = 4 // the reference: 0 the console as 0-2 name it, TTY0, CONSOLE
 const T_NULL: u64 = 5
@@ -271,6 +281,7 @@ const EMFILE: u64 = 24
 const ENFILE: u64 = 23 // px17: the open-file table (or the pipes) full
 const EAGAIN: u64 = 11 // px17
 const ENXIO: u64 = 6 // px17: reopening a socket through /dev/std*
+const ENOSPC: u64 = 28 // px45: a write to /dev/full
 const ENOTSOCK: u64 = 88 // px17
 const EAFNOSUPPORT: u64 = 97 // px17
 const EPROTONOSUPPORT: u64 = 93 // px17
@@ -335,9 +346,14 @@ const S_ISVTX: u64 = 0x200
 const S_IXGRP: u64 = 0x8
 const S_IFCHR: u64 = 0x2000
 const MODE_DIR: u64 = 0x41ed // 040755
-const MODE_CONSOLE: u64 = 0x2190 // 020620
+// px45: /dev's modes are devtmpfs's own (no udev), measured on Linux
+// 7.2.8: the memory devices and /dev/tty 0666; the terminals and the
+// sound card 0600 (root's alone: a user's `open` is -EACCES by the
+// class rule; a distribution's udev gives some to a group instead,
+// which PAX has no rule for). Everything in /dev is root's, 0:0.
+const MODE_CONSOLE: u64 = 0x2180 // 020600 (020620 before px45)
 const MODE_NULL: u64 = 0x21b6 // 020666
-const MODE_DSP: u64 = 0x21b6 // 020666 (px30: one user here)
+const MODE_DSP: u64 = 0x2180 // 020600 (020666 before px45; px30: one user here)
 const MODE_FIFO: u64 = 0x1180 // 010600: a pipe's end (px17, measured)
 const MODE_SOCK: u64 = 0xc1ff // 0140777: a socketpair's end (px17, measured)
 const MODE_ANON: u64 = 0x180 // 0600 and no type: an eventfd, an epoll object (px24, measured)
@@ -489,6 +505,7 @@ fn pipe_new(pages: u64) -> u64 {
     put_ppw(p, P_RD, 0)
     put_ppw(p, P_WR, 0)
     put_ppw(p, P_MSG, 0)
+    put_ppw(p, P_CPID, 0) // px45: a pipe's, until a socketpair sets it
     put_ppw(p, P_PAGES, pages)
     p
 }
@@ -653,7 +670,8 @@ fn node_of(a: u64, fd: u64) -> u64 {
         return if ty(n) == T_CONSOLE { n } else { T_CONSOLE << T_SHIFT }
     }
     if k == K_NULL {
-        return T_NULL << T_SHIFT
+        let n = get(a, fdw(fd, D_NODE)) // px45: which memory device
+        return if ty(n) == T_NULL { n } else { T_NULL << T_SHIFT }
     }
     get(a, fdw(fd, D_NODE))
 }
@@ -725,7 +743,7 @@ pub fn write_target(a: u64, fd: u64) -> u64 {
         return 1
     }
     if k == K_NULL {
-        return 0
+        return if rf(node_of(a, fd)) == FULL { 8 } else { 0 } // px45: /dev/full is always full
     }
     if k == K_PIPE || k == K_SOCK || k == K_UNIX {
         return 3
@@ -1059,6 +1077,14 @@ pub fn socketpair(a: u64, pml4: u64, domain: u64, ty: u64, proto: u64, sv: u64) 
     }
     put_ppw(c1, P_OWNER, fs_ids(a)) // px43 (pax#58)
     put_ppw(c2, P_OWNER, fs_ids(a))
+    // px45: SO_PEERCRED, both ends: the maker's pid and effective ids at
+    // `socketpair` (measured: a child that changes its ids after is told
+    // the same).
+    let ids = (cred.uid(a, cred.EFFECTIVE) & 0xffffffff) | (cred.gid(a, cred.EFFECTIVE) << 32)
+    put_ppw(c1, P_CPID, sched.self_pid() + 1)
+    put_ppw(c2, P_CPID, sched.self_pid() + 1)
+    put_ppw(c1, P_CIDS, ids)
+    put_ppw(c2, P_CIDS, ids)
     let fl = O_RDWR | (ty & (O_CLOEXEC | O_NONBLOCK))
     let f0 = open_new(a, 0, K_SOCK, (T_SOCK << T_SHIFT) | (c2 << 16) | c1, fl)
     if f0 >= 0x8000000000000000 {
@@ -1452,6 +1478,9 @@ pub fn sendfile(a: u64, pml4: u64, out: u64, inf: u64, offp: u64, count: u64) ->
     let t = write_target(a, out)
     if t == 2 {
         return neg(EBADF)
+    }
+    if t == 8 {
+        return neg(ENOSPC) // px45: /dev/full
     }
     if kind(a, inf) != K_FILE {
         return neg(EINVAL)
@@ -2337,6 +2366,9 @@ pub fn unix_listen(a: u64, fd: u64, backlog: u64) -> u64 {
     let b = backlog & 0xffffffff
     unix.set_backlog(r, if b >= 0x80000000 || b > SOMAXCONN { SOMAXCONN } else { b })
     unix.set_state(r, unix.LISTEN)
+    // px45: a listener's credentials, its own at `listen` (measured: what
+    // SO_PEERCRED answers on it, and what a connector is told of it).
+    unix.set_cred(r, sched.self_pid(), cred.uid(a, cred.EFFECTIVE), cred.gid(a, cred.EFFECTIVE))
     sched.wake_pipes() // a blocked connect may find room
     0
 }
@@ -2409,6 +2441,10 @@ pub fn unix_connect(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
     unix.set_peer(r, srv)
     unix.set_peer(srv, r)
     unix.copy_name(srv, lr) // an accepted end answers its listener's name
+    // px45: SO_PEERCRED: the connector is told the listener's, the
+    // server's end the connector's, at `connect` (measured).
+    unix.copy_cred(r, lr)
+    unix.set_cred(srv, sched.self_pid(), cred.uid(a, cred.EFFECTIVE), cred.gid(a, cred.EFFECTIVE))
     unix.set_state(srv, unix.QUEUED)
     unix.set_state(r, unix.CONN)
     unix.enqueue(lr, srv)
@@ -2529,6 +2565,63 @@ pub fn unix_getsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, valu
     }
     uaccess.put(pml4, value, v, k)
     uaccess.put(pml4, lenp, k, 4)
+    0
+}
+
+/// px45: `getsockopt(fd, SOL_SOCKET, SO_PEERCRED, value, lenp)` on any
+/// socket (`unix(7)`, `socket(7)`; measured on Linux 7.2.8): a `struct
+/// ucred` (pid, uid, gid, four bytes each), cut to the room at `lenp`
+/// (12 at most; the length written back is what was written, with no
+/// error under 12). A socketpair's end answers its maker's pid and
+/// effective ids at `socketpair`; a listening path socket its own at
+/// `listen`; a connected one its peer's (kernel/unix's `cred`); one that
+/// never connected, and every AF_INET socket, pid 0 and uid and gid -1.
+/// -EBADF, -ENOTSOCK, -EFAULT, -EINVAL (a negative length).
+pub fn peercred(a: u64, pml4: u64, fd: u64, value: u64, lenp: u64) -> u64 {
+    let k = kind(a, fd)
+    if k == K_CLOSED {
+        return neg(EBADF)
+    }
+    if k != K_SOCK && k != K_UNIX && k != K_INET && k != K_TCP {
+        return neg(ENOTSOCK)
+    }
+    if !uaccess.readable(pml4, lenp, 4) || !uaccess.writable(pml4, lenp, 4) {
+        return neg(EFAULT)
+    }
+    let cap = uaccess.get(pml4, lenp, 4)
+    if cap >= 0x80000000 {
+        return neg(EINVAL)
+    }
+    let n = if cap < 12 { cap } else { 12 }
+    if n > 0 && !uaccess.writable(pml4, value, n) {
+        return neg(EFAULT)
+    }
+    var pid: u64 = 0
+    var uid: u64 = 0xffffffff
+    var gid: u64 = 0xffffffff
+    let r = rf(node_of(a, fd))
+    if k == K_SOCK {
+        let c = r & 0xffff
+        if ppw(c, P_CPID) != 0 {
+            pid = ppw(c, P_CPID) - 1
+            uid = ppw(c, P_CIDS) & 0xffffffff
+            gid = ppw(c, P_CIDS) >> 32
+        }
+    } else if k == K_UNIX {
+        let (has, p, u, g) = unix.cred(r)
+        if has {
+            pid = p
+            uid = u
+            gid = g
+        }
+    }
+    var i: u64 = 0
+    while i < n {
+        let word = if i < 4 { pid } else if i < 8 { uid } else { gid }
+        uaccess.put(pml4, value + i, (word >> ((i % 4) * 8)) & 0xff, 1)
+        i += 1
+    }
+    uaccess.put(pml4, lenp, n, 4)
     0
 }
 
@@ -2769,11 +2862,29 @@ fn child_named(d: u64, s: u64, n: u64) -> u64 {
         if comp_is(s, n, "null") {
             return T_NULL << T_SHIFT
         }
+        if comp_is(s, n, "zero") {
+            return (T_NULL << T_SHIFT) | ZERO // px45
+        }
+        if comp_is(s, n, "full") {
+            return (T_NULL << T_SHIFT) | FULL
+        }
+        if comp_is(s, n, "random") {
+            return (T_NULL << T_SHIFT) | RANDOM
+        }
+        if comp_is(s, n, "urandom") {
+            return (T_NULL << T_SHIFT) | URANDOM
+        }
         if comp_is(s, n, "tty0") {
             return (T_CONSOLE << T_SHIFT) | TTY0
         }
         if comp_is(s, n, "console") {
             return (T_CONSOLE << T_SHIFT) | CONSOLE
+        }
+        if comp_is(s, n, "tty") {
+            return (T_CONSOLE << T_SHIFT) | TTY // px45
+        }
+        if comp_is(s, n, "ttyS0") {
+            return (T_CONSOLE << T_SHIFT) | TTYS0
         }
         if comp_is(s, n, "dsp") && sound.up() {
             return T_DSP << T_SHIFT // px30: only with the device, as Linux without a card
@@ -3333,7 +3444,9 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
         want = MAY_R | MAY_W
     }
     var k = K_FILE
-    let named = ty(n) == T_INO // px43: a name of the tree, not /dev/std*'s descriptor
+    // px43: a name of the tree, not /dev/std*'s descriptor; px45: /dev's
+    // devices too, by their modes and owners (`checked`).
+    let named = checked(n)
     if ty(n) == T_STD {
         let src = rf(n)
         if kind(a, src) == K_CLOSED {
@@ -3349,6 +3462,9 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
     } else if ty(n) == T_NULL {
         k = K_NULL
     } else if ty(n) == T_DSP {
+        if !may(a, cred.FS, n, want) {
+            return neg(EACCES) // px45: 0600, root's (devtmpfs's, measured: a user is told -EACCES)
+        }
         // px30: one opener, for writing (kernel/sound says why not).
         let r = sound.open(sched.self_pid(), acc)
         if r != 0 {
@@ -3381,9 +3497,11 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
     // px43: a file or a directory of the tree opens only for what its
     // class allows (`want`, above), and O_TRUNC of a file asks write
     // whatever the access mode. A file this call made is exempt (its
-    // first descriptor writes whatever its mode). /dev's and /proc's
-    // files, and what /dev/std* reopens, keep their own answers (U5;
-    // not measured).
+    // first descriptor writes whatever its mode). px45: /dev's devices
+    // the same, by their modes (measured on devtmpfs). /proc's guarded
+    // files ask kernel/procfs's rule in `syn_open`; what /dev/std*
+    // reopens keeps its own answer (Linux's devtmpfs has no /dev/std*:
+    // named).
     if flags & O_TRUNC != 0 && k == K_FILE {
         want = want | MAY_W
     }
@@ -3472,6 +3590,33 @@ fn file_read(pml4: u64, node: u64, off: u64, buf: u64, n: u64) -> u64 {
     tree.read(pml4, i, off, buf, k)
 }
 
+/// px45: a read of a memory device (`null(4)`): /dev/null is at its
+/// end; /dev/zero and /dev/full give zeros, as much as was asked,
+/// checked whole first. (/dev/random and /dev/urandom are kernel/user's
+/// `getrandom`: `is_random`.)
+fn dev_read(pml4: u64, r: u64, buf: u64, n: u64) -> u64 {
+    if r == 0 || n == 0 {
+        return 0
+    }
+    if !uaccess.writable(pml4, buf, n) {
+        return neg(EFAULT)
+    }
+    uaccess.zero(pml4, buf, n)
+    n
+}
+
+/// px45: whether a read of descriptor `fd` is /dev/random's or
+/// /dev/urandom's (`random(4)`): kernel/user answers it as `getrandom`
+/// does, from PAX's one pool (RDRAND when the CPU has it), and neither
+/// ever blocks, as Linux's do once their pool is ready.
+pub fn is_random(a: u64, fd: u64) -> bool {
+    if kind(a, fd) != K_NULL || access(a, fd) == O_WRONLY {
+        return false
+    }
+    let r = rf(node_of(a, fd))
+    r == RANDOM || r == URANDOM
+}
+
 /// `read(fd, buf, n)`.
 pub fn read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
     let k = kind(a, fd)
@@ -3482,7 +3627,7 @@ pub fn read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
         return neg(EISDIR)
     }
     if k == K_NULL {
-        return 0 // end-of-file
+        return dev_read(pml4, rf(node_of(a, fd)), buf, n) // /dev/null's end-of-file; px45: zeros, random bytes
     }
     if k == K_CONSOLE {
         // px13: what was typed (kernel/console), or console.RESTART for
@@ -3897,6 +4042,33 @@ pub fn chdir(a: u64, pml4: u64, va: u64) -> u64 {
     0
 }
 
+/// px45: what `chroot(path)` finds before it asks who the caller is
+/// (measured on Linux: a missing directory -ENOENT and a file -ENOTDIR
+/// to a user too): 0 and whether the directory is the tree's root, or
+/// -errno — the walk's answers, -ENOTDIR, and -EACCES when the
+/// directory may not be searched (as `chdir`; inferred, not measured).
+pub fn chroot_dir(a: u64, pml4: u64, va: u64) -> (u64, bool) {
+    let n = resolve(a, pml4, AT_FDCWD, va, false, F_YES)
+    if is_err(n) {
+        return (neg(rf(n)), false)
+    }
+    if !is_dir_node(n) {
+        return (neg(ENOTDIR), false)
+    }
+    if !may(a, cred.FS, n, MAY_X) {
+        return (neg(EACCES), false)
+    }
+    (0, n == root_node())
+}
+
+/// px45: whether a path resolves (`umount2(2)` asks it before who the
+/// caller is: measured, a missing path -ENOENT to a user): 0 or the
+/// walk's -errno.
+pub fn path_found(a: u64, pml4: u64, va: u64) -> u64 {
+    let n = resolve(a, pml4, AT_FDCWD, va, false, F_YES)
+    if is_err(n) { neg(rf(n)) } else { 0 }
+}
+
 /// px17: `fchdir(fd)`: the directory descriptor `fd` names (-EBADF,
 /// -ENOTDIR).
 pub fn fchdir(a: u64, fd: u64) -> u64 {
@@ -4160,10 +4332,20 @@ pub fn faccessat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64, flags: u64) 
     if is_err(n) {
         return neg(rf(n))
     }
-    if ty(n) == T_INO && !may(a, who, n, mode) {
+    if checked(n) && !may(a, who, n, mode) {
         return neg(EACCES)
     }
     0
+}
+
+/// px45: whether `open` and the access family ask the class rule of
+/// node `n`: an inode of the tree (px43), and /dev's devices (their
+/// modes and owner 0:0, devtmpfs's: measured). Not /dev itself, not
+/// /dev/std* (which reopen a descriptor), not /proc's and /sys's files
+/// (kernel/procfs's rules, in `syn_open`).
+fn checked(n: u64) -> bool {
+    let t = ty(n)
+    t == T_INO || t == T_NULL || t == T_CONSOLE || t == T_DSP
 }
 
 // --- the changes after a file is made (px36) ----------------------------------------
@@ -4508,6 +4690,9 @@ fn n_mode(n: u64) -> u64 {
     if t == T_INO {
         return tree.mode(rf(n))
     }
+    if t == T_CONSOLE && rf(n) == TTY {
+        return MODE_NULL // px45: /dev/tty is anyone's, 0666 (measured)
+    }
     if t == T_CONSOLE || t == T_STD {
         return MODE_CONSOLE
     }
@@ -4551,13 +4736,16 @@ fn n_ino(n: u64) -> u64 {
         return 1
     }
     if t == T_NULL {
-        return 4
+        return if rf(n) == 0 { 4 } else { 0x10 + rf(n) } // px45: zero 0x11 to urandom 0x14
     }
     if t == T_DSP {
         return 7 // px30
     }
-    if t == T_CONSOLE && rf(n) != 0 {
+    if t == T_CONSOLE && (rf(n) == TTY0 || rf(n) == CONSOLE) {
         return 4 + rf(n) // px21a: /dev/tty0 5, /dev/console 6
+    }
+    if t == T_CONSOLE && rf(n) != 0 {
+        return 0x15 + rf(n) // px45: /dev/tty 0x18, /dev/ttyS0 0x19
     }
     if t == T_PIPE || t == T_SOCK {
         return 0x100 + (rf(n) & 0xff) // px17: one number per buffer
@@ -4597,11 +4785,16 @@ fn n_rdev(n: u64, which: int) -> u64 {
     if t == T_CONSOLE && rf(n) == CONSOLE {
         return if which == 0 { 5 } else { 1 }
     }
+    if t == T_CONSOLE && rf(n) == TTY {
+        return if which == 0 { 5 } else { 0 } // px45: /dev/tty 5:0
+    }
     if t == T_CONSOLE || t == T_STD {
         return if which == 0 { 4 } else { 64 }
     }
     if t == T_NULL {
-        return if which == 0 { 1 } else { 3 }
+        // px45: mem's minors (Linux's numbers, measured): null 3, zero 5, full 7, random 8, urandom 9
+        let r = rf(n)
+        return if which == 0 { 1 } else if r == ZERO { 5 } else if r == FULL { 7 } else if r == RANDOM { 8 } else if r == URANDOM { 9 } else { 3 }
     }
     if t == T_DSP {
         return if which == 0 { 14 } else { 3 } // px30: OSS's dsp, 14:3
@@ -4817,7 +5010,13 @@ fn dev_child(k: u64) -> u64 {
     if k == 4 || k == 5 {
         return (T_CONSOLE << T_SHIFT) | (k - 3) // px21a: tty0, console
     }
-    if k == 6 && sound.up() {
+    if k >= 6 && k <= 9 {
+        return (T_NULL << T_SHIFT) | (k - 5) // px45: zero, full, random, urandom
+    }
+    if k == 10 || k == 11 {
+        return (T_CONSOLE << T_SHIFT) | (k - 7) // px45: tty, ttyS0
+    }
+    if k == 12 && sound.up() {
         return T_DSP << T_SHIFT // px30: only with the device
     }
     err(ENOENT)
@@ -4831,13 +5030,15 @@ fn fixed_name(c: u64) -> str {
         return "dev"
     }
     if t == T_NULL {
-        return "null"
+        let r = rf(c)
+        return if r == ZERO { "zero" } else if r == FULL { "full" } else if r == RANDOM { "random" } else if r == URANDOM { "urandom" } else { "null" }
     }
     if t == T_DSP {
         return "dsp" // px30
     }
     if t == T_CONSOLE {
-        return if rf(c) == TTY0 { "tty0" } else { "console" }
+        let r = rf(c)
+        return if r == TTY0 { "tty0" } else if r == TTY { "tty" } else if r == TTYS0 { "ttyS0" } else { "console" }
     }
     if rf(c) == 0 {
         return "stdin"
@@ -4855,13 +5056,15 @@ fn fixed_len(c: u64) -> u64 {
         return 3
     }
     if t == T_NULL {
-        return 4
+        let r = rf(c)
+        return if r == ZERO || r == FULL { 4 } else if r == RANDOM { 6 } else if r == URANDOM { 7 } else { 4 }
     }
     if t == T_DSP {
         return 3 // px30
     }
     if t == T_CONSOLE {
-        return if rf(c) == TTY0 { 4 } else { 7 }
+        let r = rf(c)
+        return if r == TTY0 { 4 } else if r == TTY { 3 } else if r == TTYS0 { 5 } else { 7 }
     }
     if rf(c) == 0 {
         return 5
