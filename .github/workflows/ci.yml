@@ -2324,6 +2324,89 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px46: the accounts (P5 U6). An image with root, pax and lobo, pelt
+  # as pid 1, boreutils' identity tools and PAX's own su (user/su,
+  # tools/mksu: wolf 0.2.30 by digest); one typed session against the
+  # same binaries in a throwaway container (tools/linux-tree --owners)
+  # and against real root's committed recording
+  # (tests/mpx5-accounts.d/linux/).
+  mpx5-accounts:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-accounts')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          qemu-system-x86_64 --version
+          clang --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-accounts-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the image the Linux side's container is made from (by digest)
+        run: |
+          docker pull "$PAX_TREE_IMAGE"
+          docker image inspect --format '{{.Id}} {{.RepoDigests}}' "$PAX_TREE_IMAGE"
+        env:
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+      - name: the accounts' typed session against the container and real root's recording; the plan's legs (all four in the full tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+        run: tests/mpx5-accounts $PAX_LEGS
+
+      - name: keep the programs' sums, the Linux side, the sessions, the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-accounts-linux
+          path: |
+            build/mpx5-accounts/initramfs.txt
+            build/mpx5-accounts/bore/sums.txt
+            build/mpx5-accounts/peltbin/sums.txt
+            build/mpx5-accounts/subin/sums.txt
+            build/mpx5-accounts/linux/
+            build/mpx5-accounts/recording.cmp
+            build/mpx5-accounts/*/kmain_console.elf
+            build/mpx5-accounts/*/*.log
+            build/mpx5-accounts-*.session
+            build/mpx5-accounts-*.cmp
+            build/mpx5-accounts-*.log
+            build/mpx5-accounts-*.norm
+            build/mpx5-accounts-*.meta
+            build/mpx5-accounts-*.halt
+            build/mpx5-accounts-*.verdict
+            build/mpx5-accounts-*.typed
+            build/mpx5-accounts-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   tier:
     name: tier ${{ needs.plan.outputs.tier || 'unplanned' }}
     if: ${{ !cancelled() }}
@@ -2359,6 +2442,7 @@ jobs:
       - mpx4-unix
       - mpx4-lobo
       - mpx5-users
+      - mpx5-accounts
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
