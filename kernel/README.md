@@ -654,6 +654,25 @@ attacker"; this lane enforces nothing but that one rule.
   maker's ids; px43 gives pipes, socketpairs and AF_UNIX sockets theirs); a `chown` of `/dev` or `/proc` (refused by name,
   -EROFS); `O_TMPFILE`.
 
+## Who may name, change and keep (px44)
+
+The fourth lane of the users campaign (`notes/px44-the-names.md`). The
+rules on **names and metadata**, each by px43's one class rule (`may`)
+and px42's group test (`member`), with two ownership tests beside them.
+The ruled claim stands: **enforced for honest programs; not a boundary
+against an attacker**.
+
+| module | what |
+|---|---|
+| `files/` | **Directory write**: `may_make` (write and search of the directory: `mkdirat`, `symlinkat`, `linkat`'s new directory, `unix_bind`) and `unname` (the same, then the sticky rule: `unlinkat` for a file and AT_REMOVEDIR, `renameat` for the name moved and a name replaced); `renameat` asks both directories, and write on a directory that changes parent; an existing name answers -EEXIST (-EADDRINUSE for `bind`) first, a missing one -ENOENT, and the permission comes before what the name is (-EISDIR, -ENOTDIR, -ENOTEMPTY); two names of one file are renamed with nothing asked. **Sticky** (`sticky_ok`): in an S_ISVTX directory a name goes only for its owner, the directory's owner or file-system user id 0 (-EPERM). **The protected settings** (R7, on, fixed): `may_follow` (a path's last component that is a link in a sticky world-writable directory is followed only by its owner or when the directory's owner owns it, root included; one in the middle of a path by anyone), `may_creat_open` (O_CREAT of an existing regular file there: the opener's or the directory owner's, else -EACCES, root included), `may_hardlink` (a non-owner links only a regular file without S_ISUID or S_ISGID with group execute that it may read and write, else -EPERM, before the directory's -EACCES). **`chmod`** (`chmod_as`, `owns`): the owner or file-system user id 0, else -EPERM; S_ISGID asked by one outside the group is dropped. **`utimensat`**: the owner or file-system user id 0 sets any times; anyone else both to now when the class gives write (of the file, not the descriptor), else -EACCES; other times -EPERM. **Set-ID bits** (`wrote`): a write of a byte or more (`write`, `writev`, `pwrite`, `sendfile`, `splice`, `copy_file_range`), O_TRUNC, `ftruncate`, `truncate` and `fallocate` by one whose file-system user id is not 0 take S_ISUID, and S_ISGID when the file is group-executable or the writer is outside its group — the writer's ids at the call. **`connect`** asks write of an AF_UNIX name before whether anything listens. `fallocate` (285), mode 0: the file grows by a hole; other modes refused by name |
+| `procfs/` | `/proc/sys/fs/protected_hardlinks`, `_symlinks`, `_regular`, `_fifos`: `1`, mode 0644, root's |
+
+- What is not there: signals, ports, the speaker, `/dev` modes (U5); a
+  FIFO (`mknod` is refused by name, so `protected_fifos` has nothing
+  to act on); `/dev`'s and `/proc`'s directories keep their answers to
+  making and removing names (-EROFS, -ENOENT); `fallocate`'s other
+  modes; space set aside by `fallocate` (a hole, like `ftruncate`).
+
 ## Who may open, run and walk (px43)
 
 The third lane of the users campaign (`notes/px43-the-file-checks.md`).
@@ -681,8 +700,8 @@ addresses.
   rule like any other (0755 and 0555: anyone may).
 - What is not there: write on a directory to remove or rename a name,
   the sticky rule, the protected settings, `chmod` and `utimensat`
-  ownership, set-ID clearing on a write (U4); signals, ports, the
-  speaker, `/dev` (U5); set-ID execution (R5). `execve` still runs only
+  ownership, set-ID clearing on a write (U4, px44: above); signals,
+  ports, the speaker, `/dev` (U5); set-ID execution (R5). `execve` still runs only
   an archive file whole (px27): a program written since boot is refused
   whatever its mode.
 
