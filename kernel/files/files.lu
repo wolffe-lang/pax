@@ -278,6 +278,8 @@ const ESOCKTNOSUPPORT: u64 = 94 // px17
 const EISCONN: u64 = 106 // px17
 const ENOTTY: u64 = 25
 const ESPIPE: u64 = 29
+const ENODEV: u64 = 19 // px44: fallocate of what is not a file
+const EFBIG: u64 = 27 // px44
 const EROFS: u64 = 30
 const ERANGE: u64 = 34
 const ENAMETOOLONG: u64 = 36
@@ -368,6 +370,7 @@ const R_SOCKTYPE: u64 = 18 // px17
 const R_FCNTL: u64 = 19 // px17
 // px27 (from 31 down):
 const R_OFLAG: u64 = 31
+const R_FALLOC: u64 = 23 // px44
 const R_DEVRO: u64 = 30
 const R_LINK: u64 = 29
 const R_META: u64 = 28
@@ -399,6 +402,9 @@ pub fn why(r: u64) -> str {
     }
     if r == R_OFLAG {
         return "an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE)"
+    }
+    if r == R_FALLOC {
+        return "a fallocate mode PAX does not honour (only 0: a file made at least so long)"
     }
     if r == R_DEVRO {
         return "making or removing a name in /dev (PAX's /dev is fixed)"
@@ -1477,6 +1483,7 @@ pub fn sendfile(a: u64, pml4: u64, out: u64, inf: u64, offp: u64, count: u64) ->
             return r
         }
         set_pos(a, out, q + r)
+        wrote(a, rf(node_of(a, out))) // px44
         done = r
     } else {
         if t == 3 {
@@ -1642,6 +1649,7 @@ pub fn splice(a: u64, pml4: u64, inf: u64, offin: u64, out: u64, offout: u64, le
                 full = true
             } else {
                 set_pos(a, out, q + r)
+                wrote(a, rf(node_of(a, out))) // px44
                 full = r < c
                 c = r
             }
@@ -1714,6 +1722,7 @@ pub fn copy_file_range(a: u64, pml4: u64, inf: u64, offin: u64, out: u64, offout
     if tree.failed(r) {
         return r
     }
+    wrote(a, j) // px44
     tree.touch_read(i)
     if offin != 0 {
         uaccess.put(pml4, offin, off + r, 8)
@@ -2288,6 +2297,9 @@ pub fn unix_bind(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
     if rf(n) != ENOENT || is_err(par) {
         return neg(rf(n))
     }
+    if !may_make(a, par) {
+        return neg(EACCES) // px44: write and search of the directory (measured: before a bound socket's -EINVAL)
+    }
     if unix.ino(r) != unix.NONE_INO || unix.state(r) != unix.FRESH {
         return neg(EINVAL)
     }
@@ -2352,6 +2364,9 @@ pub fn unix_connect(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
     let n = resolve_k(a, AT_FDCWD, l)
     if is_err(n) {
         return neg(rf(n))
+    }
+    if ty(n) == T_INO && !may(a, cred.FS, n, MAY_W) {
+        return neg(EACCES) // px44: write on the name (unix(7)), before whether anything listens
     }
     if ty(n) != T_INO || tree.sock_of(rf(n)) == 0 {
         return neg(ECONNREFUSED)
@@ -2947,6 +2962,14 @@ fn walk_as(a: u64, who: u64, dirfd: u64, rl0: u64, empty_ok: bool, follow: u64) 
         // component, unfollowed and with no `/` after it.
         let link = !is_err(c) && ty(c) == T_INO && tree.is_link(rf(c))
         if link && (!last || follow == F_YES || (i < rl && follow == F_NO)) {
+            // px44: fs.protected_symlinks (R7): a link in a sticky
+            // world-writable directory is followed, as the path's last
+            // component, only by its owner or when the directory's owner
+            // owns it (measured: one met in the middle of a path is
+            // followed by anyone).
+            if last && !may_follow(a, who, cur, c) {
+                return (err(EACCES), err(EACCES), 0, 0, false)
+            }
             links += 1
             if links > MAXLINKS {
                 return (err(ELOOP), err(ELOOP), 0, 0, false)
@@ -3054,6 +3077,119 @@ fn may(a: u64, who: u64, n: u64, want: u64) -> bool {
         bits = (m >> 3) & 7
     }
     want & 7 & !bits == 0
+}
+
+/// px44: the owner-or-privileged test (`chmod(2)`, `utimensat(2)`'s
+/// explicit times): the process's file-system user id is node `n`'s
+/// owner, or 0 (ruling #75 R9). Not a class rule: no mode bit is read.
+fn owns(a: u64, n: u64) -> bool {
+    let u = cred.uid(a, cred.FS)
+    u == 0 || u == n_owner(a, n, 0)
+}
+
+/// px44: the sticky rule (`inode(7)`, `unlink(2)`, `rename(2)`; px38's
+/// `perm` C): in a directory inode `d` with S_ISVTX, the name of inode
+/// `i` may be removed, renamed or replaced only by its owner, the
+/// directory's owner, or file-system user id 0 (R9); in any other
+/// directory by whoever may write it.
+fn sticky_ok(a: u64, d: u64, i: u64) -> bool {
+    if tree.mode(d) & S_ISVTX == 0 {
+        return true
+    }
+    let u = cred.uid(a, cred.FS)
+    u == 0 || u == tree.uid(i) || u == tree.uid(d)
+}
+
+/// px44: whether a name of directory node `d` may be taken away or
+/// replaced — the name of node `n`: 0, or EACCES when the class rule
+/// gives no write and search of the directory (`may`), or EPERM when
+/// the sticky rule refuses. Asked of the tree's directories (`/dev`'s
+/// and `/proc`'s keep their own answers).
+fn unname(a: u64, d: u64, n: u64) -> u64 {
+    if ty(d) != T_INO || ty(n) != T_INO {
+        return 0
+    }
+    if !may(a, cred.FS, d, MAY_W | MAY_X) {
+        return EACCES
+    }
+    if !sticky_ok(a, rf(d), rf(n)) {
+        return EPERM
+    }
+    0
+}
+
+/// px44: whether a name may be made in directory node `d` (`mkdir`,
+/// `symlink`, `link`, `bind`): write and search by the class rule, as
+/// `openat`'s O_CREAT asks (px43). The tree's directories only.
+fn may_make(a: u64, d: u64) -> bool {
+    ty(d) != T_INO || may(a, cred.FS, d, MAY_W | MAY_X)
+}
+
+/// px44: `fs.protected_symlinks` = 1, fixed (ruling #75 R7;
+/// `proc_sys_fs(5)`): a symbolic link `c` that is a path's last
+/// component, whose name is in directory node `d`, may be followed
+/// unless `d` is sticky and world-writable and neither the follower
+/// (its user id `who`: the file-system one, or the real one for the
+/// access family) nor the directory's owner owns the link — root
+/// included (px38 measured root refused). A link met in the middle of a
+/// path is followed by anyone (measured).
+fn may_follow(a: u64, who: u64, d: u64, c: u64) -> bool {
+    if ty(d) != T_INO || tree.mode(rf(d)) & 0x202 != 0x202 {
+        return true // not sticky (01000) and world-writable (0002)
+    }
+    let lu = tree.uid(rf(c))
+    cred.uid(a, who) == lu || tree.uid(rf(d)) == lu
+}
+
+/// px44: `fs.protected_regular` = 1, fixed (R7): `open` with O_CREAT of
+/// an existing regular file `n` whose name is in a sticky
+/// world-writable directory `d` is refused unless the opener's
+/// file-system user id or the directory's owner owns the file — root
+/// included. (`fs.protected_fifos` = 1 has nothing to act on: PAX makes
+/// no FIFO, `mknod` is refused by name.)
+fn may_creat_open(a: u64, d: u64, n: u64) -> bool {
+    if ty(d) != T_INO || ty(n) != T_INO || tree.mode(rf(d)) & 0x202 != 0x202 || tree.mode(rf(n)) & S_IFMT != S_IFREG {
+        return true
+    }
+    let fu = tree.uid(rf(n))
+    cred.uid(a, cred.FS) == fu || tree.uid(rf(d)) == fu
+}
+
+/// px44: `fs.protected_hardlinks` = 1, fixed (R7): a hard link to node
+/// `n` by one who is neither its owner nor file-system user id 0 is
+/// refused (-EPERM) unless it is a regular file without S_ISUID and
+/// without S_ISGID together with group execute, that the class rule
+/// lets the caller read and write.
+fn may_hardlink(a: u64, n: u64) -> bool {
+    if owns(a, n) {
+        return true
+    }
+    let m = n_mode(n)
+    if ty(n) != T_INO || m & S_IFMT != S_IFREG || m & S_ISUID != 0 || m & (S_ISGID | S_IXGRP) == (S_ISGID | S_IXGRP) {
+        return false
+    }
+    may(a, cred.FS, n, MAY_R | MAY_W)
+}
+
+/// px44: what a write by the process does to file inode `i`'s set-ID
+/// bits (px38's `setid` `bits:` rows, vm-protected): unless its
+/// file-system user id is 0 (R9; root keeps them), S_ISUID goes, and
+/// S_ISGID when the file is group-executable or the writer is not in
+/// its group (`member`). Called after a write of at least one byte, a
+/// truncation (to any length) and `fallocate` succeed: the writer's ids
+/// at that call decide, not the opener's.
+fn wrote(a: u64, i: u64) {
+    let m = tree.mode(i)
+    if m & (S_ISUID | S_ISGID) == 0 || cred.uid(a, cred.FS) == 0 {
+        return
+    }
+    var keep = m & !S_ISUID
+    if m & S_IXGRP != 0 || !member(a, tree.gid(i)) {
+        keep = keep & !S_ISGID
+    }
+    if keep != m {
+        tree.set_mode(i, keep & 0xfff)
+    }
 }
 
 /// px42: what a name made in directory inode `d` is stamped with: the
@@ -3182,6 +3318,8 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
         made = true
     } else if flags & O_CREAT != 0 && flags & O_EXCL != 0 {
         return neg(EEXIST)
+    } else if flags & O_CREAT != 0 && !is_err(par) && !may_creat_open(a, par, n) {
+        return neg(EACCES) // px44: fs.protected_regular (R7)
     }
     // px43: what the access mode asks of the class (`may`): read for
     // O_RDONLY, write for O_WRONLY, both for O_RDWR.
@@ -3252,8 +3390,11 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
     // px17: a new open file (offset 0), also when /dev/std* reopens a
     // file or a pipe's end (as /proc/self/fd's links do on Linux).
     let fd = open_new(a, 0, k, n, flags)
-    if fd < 0x8000000000000000 && k == K_FILE && !made && flags & O_TRUNC != 0 && ty(n) == T_INO && tree.bytes(rf(n)) != 0 {
-        let _t = tree.truncate(rf(n), 0)
+    if fd < 0x8000000000000000 && k == K_FILE && !made && flags & O_TRUNC != 0 && ty(n) == T_INO {
+        if tree.bytes(rf(n)) != 0 {
+            let _t = tree.truncate(rf(n), 0)
+        }
+        wrote(a, rf(n)) // px44: O_TRUNC takes the set-ID bits, as a write does
     }
     fd
 }
@@ -3409,6 +3550,7 @@ pub fn file_write(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
     let r = tree.write(pml4, i, p, buf, k)
     if !tree.failed(r) {
         set_pos(a, fd, p + r)
+        wrote(a, i) // px44
     }
     r
 }
@@ -3438,7 +3580,11 @@ pub fn pwrite(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, off: u64) -> u64 {
     }
     let i = rf(node_of(a, fd))
     let p = if status(a, fd) & O_APPEND != 0 { tree.bytes(i) } else { off }
-    tree.write(pml4, i, p, buf, c)
+    let r = tree.write(pml4, i, p, buf, c)
+    if !tree.failed(r) {
+        wrote(a, i) // px44
+    }
+    r
 }
 
 /// `lseek(fd, off, whence)`: SEEK_SET 0, SEEK_CUR 1, SEEK_END 2. px27:
@@ -3494,7 +3640,56 @@ pub fn ftruncate(a: u64, fd: u64, len: u64) -> u64 {
     if k != K_FILE || access(a, fd) == O_RDONLY || len >= 0x8000000000000000 {
         return neg(EINVAL)
     }
-    tree.truncate(rf(node_of(a, fd)), len)
+    let i = rf(node_of(a, fd))
+    let r = tree.truncate(i, len)
+    if r == 0 {
+        wrote(a, i) // px44: to any length, the same one too
+    }
+    r
+}
+
+/// px44: `fallocate(fd, mode, offset, len)` (`fallocate(2)`), mode 0
+/// only: the file is at least `offset + len` bytes long afterwards (it
+/// grows by a hole: the tree gives a frame when a page is written, so
+/// the space is not set aside — named drift), and the call takes the
+/// set-ID bits as a write does (px38's `setid`: `fallocate` by a user
+/// clears them, by root keeps them). -EBADF for a closed descriptor and
+/// one not open for writing; -EINVAL for a negative offset or a length
+/// not above 0; -ESPIPE for a pipe; -ENODEV for what is no file; -EFBIG
+/// past the largest file; any other mode refused by name, -EOPNOTSUPP.
+pub fn fallocate(a: u64, fd: u64, mode: u64, off: u64, len: u64) -> u64 {
+    let k = kind(a, fd)
+    if k == K_CLOSED {
+        return neg(EBADF)
+    }
+    if off >= 0x8000000000000000 || len == 0 || len >= 0x8000000000000000 {
+        return neg(EINVAL)
+    }
+    if access(a, fd) == O_RDONLY || k == K_DIR {
+        return neg(EBADF)
+    }
+    if k == K_PIPE {
+        return neg(ESPIPE)
+    }
+    if k != K_FILE {
+        return neg(ENODEV)
+    }
+    if mode & 0xffffffff != 0 {
+        refuse(a, R_FALLOC)
+        return neg(EOPNOTSUPP)
+    }
+    let i = rf(node_of(a, fd))
+    if len > 0x7fffffffffffffff - off {
+        return neg(EFBIG)
+    }
+    if off + len > tree.bytes(i) {
+        let r = tree.truncate(i, off + len)
+        if r != 0 {
+            return r
+        }
+    }
+    wrote(a, i)
+    0
 }
 
 /// px27: `truncate(path, len)`: as `ftruncate` for the file the path
@@ -3515,7 +3710,11 @@ pub fn truncate(a: u64, pml4: u64, va: u64, len: u64) -> u64 {
     if !may(a, cred.FS, n, MAY_W) {
         return neg(EACCES) // px43: the class's write bit
     }
-    tree.truncate(rf(n), len)
+    let r = tree.truncate(rf(n), len)
+    if r == 0 {
+        wrote(a, rf(n)) // px44
+    }
+    r
 }
 
 /// px27: `fsync(fd)` and `fdatasync(fd)`: 0 for a file or a directory
@@ -3800,6 +3999,9 @@ pub fn mkdirat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64) -> u64 {
         refuse(a, R_DEVRO)
         return neg(EROFS)
     }
+    if !may_make(a, par) {
+        return neg(EACCES) // px44: write and search of the directory
+    }
     // px42: a new directory keeps the sticky bit it is asked for and
     // never S_ISGID, which it has exactly when its parent has (measured:
     // 02777 in a plain directory is 0755 for root too; 01777 is 1755).
@@ -3833,10 +4035,7 @@ pub fn unlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64) -> u64 {
         return neg(ENOTDIR) // px36: measured, `unlink("link/")` and `rmdir`
     }
     if flags & AT_REMOVEDIR != 0 {
-        if !is_dir_node(n) {
-            return neg(ENOTDIR)
-        }
-        if nl == 0 {
+        if nl == 0 && is_dir_node(n) {
             if ns == LAST_DOT {
                 return neg(EINVAL)
             }
@@ -3848,7 +4047,20 @@ pub fn unlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64) -> u64 {
         if ty(n) == T_DEV {
             return neg(EBUSY)
         }
+        // px44: write and search of the directory, then the sticky
+        // rule, before what the name is (a file, a full directory).
+        let e = unname(a, par, n)
+        if e != 0 {
+            return neg(e)
+        }
+        if !is_dir_node(n) {
+            return neg(ENOTDIR)
+        }
         return tree.rmdir(rf(par), raw() + ns, nl)
+    }
+    let e = unname(a, par, n) // px44
+    if e != 0 {
+        return neg(e)
     }
     if is_dir_node(n) {
         return neg(EISDIR)
@@ -3906,6 +4118,23 @@ pub fn renameat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, fla
     }
     if !is_err(nn) && nt && ty(nn) == T_INO && tree.is_link(rf(nn)) {
         return neg(ENOTDIR) // px36: measured, a rename onto `link/`
+    }
+    // px44: two names of one file: nothing to do, and nothing asked
+    // (measured: 0 in a 0555 directory; rename(2)).
+    if !is_err(nn) && ty(nn) == T_INO && rf(nn) == rf(on) {
+        return 0
+    }
+    // px44: write and search of BOTH directories; the sticky rule for
+    // the name moved and for a name replaced; a directory that changes
+    // parent needs write on itself (its `..`, rename(2)).
+    if !may(a, cred.FS, op, MAY_W | MAY_X) || !may(a, cred.FS, np, MAY_W | MAY_X) {
+        return neg(EACCES)
+    }
+    if !sticky_ok(a, rf(op), rf(on)) || (!is_err(nn) && ty(nn) == T_INO && !sticky_ok(a, rf(np), rf(nn))) {
+        return neg(EPERM)
+    }
+    if op != np && is_dir_node(on) && !may(a, cred.FS, on, MAY_W) {
+        return neg(EACCES)
     }
     tree.rename(rf(op), raw() + NORM, ol, rf(np), raw() + ns, nl)
 }
@@ -3965,12 +4194,7 @@ pub fn fchmodat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64, flags: u64) -
     if ty(n) == T_INO && tree.is_link(rf(n)) {
         return neg(EOPNOTSUPP)
     }
-    let r = changeable(a, n)
-    if r != 0 {
-        return r
-    }
-    tree.set_mode(rf(n), mode)
-    0
+    chmod_as(a, n, mode)
 }
 
 /// px36: `fchmod(fd, mode)`: as `fchmodat` for the file `fd` names;
@@ -3979,12 +4203,27 @@ pub fn fchmod(a: u64, fd: u64, mode: u64) -> u64 {
     if kind(a, fd) == K_CLOSED {
         return neg(EBADF)
     }
-    let n = node_of(a, fd)
+    chmod_as(a, node_of(a, fd), mode)
+}
+
+/// px44: the change of mode both calls make, by `chmod(2)`'s rule as
+/// px38 measured it (`perm` D): only the owner or file-system user id 0
+/// (R9) may (-EPERM, whatever the mode or the descriptor); S_ISGID asked
+/// by one who is neither privileged nor in the node's group (`member`)
+/// is dropped without an error, on a file and on a directory alike.
+fn chmod_as(a: u64, n: u64, mode: u64) -> u64 {
+    if !owns(a, n) {
+        return neg(EPERM)
+    }
     let r = changeable(a, n)
     if r != 0 {
         return r
     }
-    tree.set_mode(rf(n), mode)
+    var m = mode & 0xfff
+    if m & S_ISGID != 0 && cred.uid(a, cred.FS) != 0 && !member(a, n_owner(a, n, 1)) {
+        m = m & !S_ISGID
+    }
+    tree.set_mode(rf(n), m)
     0
 }
 
@@ -4105,6 +4344,7 @@ pub fn utimensat(a: u64, pml4: u64, dirfd: u64, va: u64, times: u64, flags: u64)
     var which: u64 = 3
     var at = tree.clock()
     var mt = at
+    var now2 = true // px44: NULL, or UTIME_NOW in both: a writer may
     if times != 0 {
         if !uaccess.readable(pml4, times, 32) {
             return neg(EFAULT)
@@ -4117,6 +4357,7 @@ pub fn utimensat(a: u64, pml4: u64, dirfd: u64, va: u64, times: u64, flags: u64)
         which = (if sa { 1 } else { 0 }) | (if sm { 2 } else { 0 })
         at = ta
         mt = tm
+        now2 = uaccess.get(pml4, times + 8, 8) == UTIME_NOW && uaccess.get(pml4, times + 24, 8) == UTIME_NOW
     }
     var n: u64 = 0
     if va == 0 {
@@ -4132,6 +4373,19 @@ pub fn utimensat(a: u64, pml4: u64, dirfd: u64, va: u64, times: u64, flags: u64)
     }
     if which == 0 {
         return 0
+    }
+    // px44: `utimensat(2)`'s rule as px38 measured it (`perm` F): the
+    // owner or file-system user id 0 (R9) may set any times; anyone
+    // else may set both to now (NULL or {NOW, NOW}) when the class rule
+    // gives write (asked of the file, not of the descriptor's access
+    // mode), else -EACCES; any other times -EPERM.
+    if !owns(a, n) {
+        if !now2 {
+            return neg(EPERM)
+        }
+        if !may(a, cred.FS, n, MAY_W) {
+            return neg(EACCES)
+        }
     }
     let r = changeable(a, n)
     if r != 0 {
@@ -4172,6 +4426,15 @@ pub fn linkat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, flags
     if ty(on) != T_INO || ty(np) != T_INO {
         return neg(EXDEV)
     }
+    // px44: fs.protected_hardlinks (R7), then write and search of the
+    // new name's directory (measured in this order: a non-owner's link
+    // to a file it may not write, into a 0555 directory, is -EPERM).
+    if !may_hardlink(a, on) {
+        return neg(EPERM)
+    }
+    if !may_make(a, np) {
+        return neg(EACCES)
+    }
     tree.link(rf(np), raw() + ns, nl, rf(on))
 }
 
@@ -4210,6 +4473,9 @@ pub fn symlinkat(a: u64, pml4: u64, tva: u64, ndfd: u64, nva: u64) -> u64 {
     if ty(np) != T_INO {
         refuse(a, R_FIXED)
         return neg(EROFS)
+    }
+    if !may_make(a, np) {
+        return neg(EACCES) // px44
     }
     let (su, sg, _dg) = stamp(a, rf(np))
     let i = tree.symlink(rf(np), raw() + ns, nl, raw() + NORM, tl, su, sg)
