@@ -96,6 +96,17 @@
 //! which resolve its name in the tree; `sendto`, `recvfrom`, `read` and
 //! `write` on one are kernel/files' as a socketpair's are.
 //!
+//! **What only root may do** (px45; `ip(7)`, `raw(7)`, measured on
+//! Linux 7.2.8 as real root and as a user, px38's `priv` and px45's
+//! `rights`): `bind` of a TCP or UDP port from 1 to 1023 by a process
+//! that is not privileged (kernel/cred's `privileged`: effective user
+//! id 0) is -EACCES, asked after the address is read and before
+//! whether the port is taken; port 0 and 1024 and up are anyone's. A
+//! raw socket is -EPERM to a user before PAX refuses its type by name.
+//! **SO_PEERCRED** (17) on any socket is kernel/files' `peercred`: the
+//! pid and effective ids of the peer, as `unix(7)` and `socket(7)` give
+//! them (measured).
+//!
 //! Written from the man pages socket(2), bind(2), connect(2),
 //! sendto(2), recvfrom(2), getsockname(2), getpeername(2),
 //! getsockopt(2), listen(2), accept(2), shutdown(2), send(2), recv(2),
@@ -106,6 +117,7 @@
 //! libc's source.
 
 use arp
+use cred
 use files
 use ip
 use log
@@ -141,6 +153,13 @@ const SO_TYPE: u64 = 3
 const SO_ERROR: u64 = 4
 const SO_RCVTIMEO_OLD: u64 = 20
 const SO_ACCEPTCONN: u64 = 30 // px24: whether the socket listens (lobo asks its inherited listeners)
+const SO_PEERCRED: u64 = 17 // px45: uapi asm-generic/socket.h
+const SOCK_RAW: u64 = 3 // px45
+const EPERM: u64 = 1 // px45
+/// px45: the first port anyone may bind (`ip(7)`'s
+/// net.ipv4.ip_unprivileged_port_start, 1024 on Linux, measured; fixed
+/// on PAX and reported by /proc/sys/net/ipv4/ip_unprivileged_port_start).
+pub const UNPRIVILEGED_PORT_START: u64 = 1024
 
 // errnos (uapi asm-generic/errno-base.h, errno.h)
 const EBADF: u64 = 9
@@ -315,6 +334,9 @@ pub fn socket(a: u64, domain: u64, ty: u64, proto: u64) -> u64 {
         // No such type (uapi linux/net.h: 1-6 and 10).
         return refuse(a, R_TYPE, EINVAL, ty, 0)
     }
+    if base == SOCK_RAW && !cred.privileged(a) {
+        return neg(EPERM) // px45: `raw(7)`, measured: a user is told -EPERM before PAX refuses the type by name
+    }
     if base == SOCK_STREAM {
         // px23: a stream socket is one of kernel/tcp's blocks.
         if proto > 255 {
@@ -417,6 +439,13 @@ fn is_path(a: u64, fd: u64) -> bool {
     files.sock_kind(a, fd) == files.PATH
 }
 
+/// px45: whether the process may bind `port` (`ip(7)`; measured: a
+/// port below 1024 is the privileged's, -EACCES to anyone else, asked
+/// before whether it is taken; port 0 asks for any free one).
+fn may_bind(a: u64, port: u64) -> bool {
+    port == 0 || port >= UNPRIVILEGED_PORT_START || cred.privileged(a)
+}
+
 /// `bind(fd, addr, len)`.
 pub fn bind(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
     if is_path(a, fd) {
@@ -427,6 +456,9 @@ pub fn bind(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
         if se != 0 {
             return se
         }
+        if !may_bind(a, sport) {
+            return neg(EACCES)
+        }
         return errno_of(tcp.bind(files.inet_sock(a, fd), sip, sport))
     }
     let (e, s) = sock(a, fd, 49)
@@ -436,6 +468,9 @@ pub fn bind(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
     let (ae, ip4, port) = addr_in(pml4, addr, len)
     if ae != 0 {
         return ae
+    }
+    if !may_bind(a, port) {
+        return neg(EACCES)
     }
     errno_of(udp.bind(s, ip4, port))
 }
@@ -706,6 +741,9 @@ pub fn setsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u6
 /// `getsockopt(fd, level, option, value, lenp)`: SO_TYPE, SO_ERROR,
 /// SO_RCVTIMEO_OLD.
 pub fn getsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u64, lenp: u64) -> u64 {
+    if level == SOL_SOCKET && option == SO_PEERCRED {
+        return files.peercred(a, pml4, fd, value, lenp) // px45: every kind of socket
+    }
     if is_path(a, fd) {
         return files.unix_getsockopt(a, pml4, fd, level, option, value, lenp) // px34
     }
