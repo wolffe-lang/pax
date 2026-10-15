@@ -40,6 +40,10 @@
 //! - `/proc/self/cgroup`: `0::/` (cgroup v2, the root: `cgroups(7)`).
 //! - `/proc/sys/vm/overcommit_memory`: `0` (the heuristic, Linux's
 //!   default; glibc's malloc reads it).
+//! - px44: `/proc/sys/fs/protected_hardlinks`, `protected_symlinks`,
+//!   `protected_regular`, `protected_fifos`: `1` each, root's, mode 0644 (measured)
+//!   (`proc_sys_fs(5)`; ruling #75 R7: on and fixed; kernel/files acts
+//!   on the first three, and PAX makes no FIFO for the fourth).
 //! - `/sys/fs/cgroup/cgroup.controllers`: `cpu` — fixed: the one
 //!   controller whose file lobo reads (Linux's lists every controller
 //!   the hierarchy has; PAX has none, and says the one it answers for).
@@ -80,16 +84,19 @@ use unix
 const PAGE: u64 = 4096
 
 /// How many entries there are; also `NONE`'s value.
-pub const ENTRIES: u64 = 25
+pub const ENTRIES: u64 = 29
 /// No entry.
-pub const NONE: u64 = 25
+pub const NONE: u64 = 29
+/// px44: entries 22 to 25 are `/proc/sys/fs/protected_hardlinks`,
+/// `_symlinks`, `_regular` and `_fifos` (ruling #75 R7: on, fixed).
+const PROTECTED: u64 = 22
 /// px25: the entry `/proc/<pid>` (a reference carries the pid above
 /// bit 16: `pid << 16 | PIDDIR`), and its `status`; px39: its
 /// `setgroups` (entry 21 is `/proc/self/setgroups`: the fixed entries
 /// are those below PIDDIR).
-pub const PIDDIR: u64 = 22
-const PSTATUS: u64 = 23
-const PSETGROUPS: u64 = 24
+pub const PIDDIR: u64 = 26
+const PSTATUS: u64 = 27
+const PSETGROUPS: u64 = 28
 const EMASK: u64 = 0xffff
 /// An entry's parent when it sits in the root directory.
 pub const ROOT: u64 = 0xffff
@@ -106,6 +113,7 @@ const G_FILENR: u64 = 8
 const G_SOCKSTAT: u64 = 9
 const G_PSTATUS: u64 = 10
 const G_SETGROUPS: u64 = 11 // px39
+const G_PROTECTED: u64 = 12 // px44
 
 const S_IFDIR: u64 = 0x4000
 const S_IFREG: u64 = 0x8000
@@ -147,6 +155,10 @@ pub fn name(e: u64) -> str {
     if e == 19 { return "net" }
     if e == 20 { return "sockstat" }
     if e == 21 || e == PSETGROUPS { return "setgroups" }
+    if e == PROTECTED { return "protected_hardlinks" }
+    if e == PROTECTED + 1 { return "protected_symlinks" }
+    if e == PROTECTED + 2 { return "protected_regular" }
+    if e == PROTECTED + 3 { return "protected_fifos" }
     "online"
 }
 
@@ -202,7 +214,7 @@ pub fn parent(r: u64) -> u64 {
     if e == 2 || e == 3 || e == 21 { return 1 }
     if e == 5 || e == 17 { return 4 }
     if e == 6 { return 5 }
-    if e == 18 { return 17 }
+    if e == 18 || (e >= PROTECTED && e < PROTECTED + 4) { return 17 }
     if e == 20 { return 19 }
     if e == PSTATUS || e == PSETGROUPS { return pid_dir(pid_of(r)) }
     if e == 8 || e == 12 { return 7 }
@@ -221,6 +233,7 @@ fn gen(r: u64) -> u64 {
     if e == 20 { return G_SOCKSTAT }
     if e == PSTATUS { return G_PSTATUS }
     if e == 21 || e == PSETGROUPS { return G_SETGROUPS }
+    if e >= PROTECTED && e < PROTECTED + 4 { return G_PROTECTED }
     if e == 3 { return G_CGROUP }
     if e == 6 { return G_OVERCOMMIT }
     if e == 10 { return G_CONTROLLERS }
@@ -243,8 +256,8 @@ pub fn mode(r: u64) -> u64 {
         }
         return S_IFDIR | 0x1ed // 0755
     }
-    if e == 6 || e == 11 || e == 21 || e == PSETGROUPS {
-        return S_IFREG | 0x1a4 // 0644: overcommit_memory, cpu.max, setgroups
+    if e == 6 || e == 11 || e == 21 || e == PSETGROUPS || (e >= PROTECTED && e < PROTECTED + 4) {
+        return S_IFREG | 0x1a4 // 0644: overcommit_memory, cpu.max, setgroups, px44's protected settings (measured)
     }
     S_IFREG | 0x124 // 0444
 }
@@ -629,6 +642,8 @@ pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64)
         n = put_s(base, 0, "0::/\n")
     } else if g == G_OVERCOMMIT {
         n = put_s(base, 0, "0\n")
+    } else if g == G_PROTECTED {
+        n = put_s(base, 0, "1\n") // px44: R7, on and fixed
     } else if g == G_CONTROLLERS {
         n = put_s(base, 0, "cpu\n")
     } else if g == G_CPUMAX {
