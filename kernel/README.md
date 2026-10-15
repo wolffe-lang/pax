@@ -654,6 +654,40 @@ attacker"; this lane enforces nothing but that one rule.
   maker's ids; px43 gives pipes, socketpairs and AF_UNIX sockets theirs); a `chown` of `/dev` or `/proc` (refused by name,
   -EROFS); `O_TMPFILE`.
 
+## Who may signal whom, and what only root may do (px45)
+
+The fifth lane of the users campaign (`notes/px45-the-processes.md`):
+the rules on **processes and root's things**. Root for signals and
+privilege is effective user id 0 (`cred.privileged`, ruling #75 R9);
+root for files stays file-system user id 0 (`files.may`). The ruled
+claim stands: **enforced for honest programs; not a boundary against
+an attacker**.
+
+| module or file | what |
+|---|---|
+| `signal/` | `may_signal`, the one rule: privileged, or the sender's real or effective user id is the target's real or saved one, or SIGCONT (PAX's one session holds every process); else -EPERM. `kill` of a pid, `tgkill` and `tkill` of the thread's process, and each process `kill(-1)`, `kill(0)` and a group reach ask it (`kill(-1)` answers 0 when any other process exists, a group 0 when one was signalled). A zombie answers by the rule and takes nothing. siginfo's `si_uid` is the sender's real user id (a child's for SIGCHLD); what the kernel raises asks nothing |
+| `sched/` | an origin word carries the real user id (`sig_info`, `info_parts`; the pid in 21 bits); a process that has ended for its parent is a zombie from its end (`ended`), not from the next `reap` |
+| `cred/` | `privileged` is public: the one test for root's things |
+| `socket/` | `bind` of a port from 1 to 1023 by the unprivileged: -EACCES, before whether it is taken; a raw socket -EPERM to a user; SO_PEERCRED on every socket (`files.peercred`) |
+| `files/` | `/dev`'s devices with devtmpfs's modes and owners (0:0; `null`, `zero`, `full`, `random`, `urandom`, `tty` 0666; `console`, `tty0`, `ttyS0`, `dsp` 0600), checked by `may` on `open` and `access` (`checked`); `/dev/zero` and `/dev/full` read zeros, `/dev/full` takes no write (-ENOSPC), `/dev/random` and `/dev/urandom` are `getrandom`'s; `/proc/<pid>/environ` and `fd/` guarded as `ptrace(2)`'s read mode (`may_read_of`: the mode, then the process itself, the privileged, or the file-system ids equal to all of the target's while it is dumpable); `fd/` lists the descriptors (its links are not followed: named); `peercred` (a socketpair's maker, a listener's own at `listen`, a connected end's peer, else pid 0 and ids -1); `chroot_dir`, `path_found` |
+| `unix/` | 34 words a socket (32 before): SO_PEERCRED's pid and ids (`cred`, `set_cred`, `copy_cred`) |
+| `procfs/` | `/proc/<pid>/cmdline` and `environ` (the program's strings as they are now in its memory, at most a page), `fd/`; `/proc/self/cmdline`, `environ`; `/proc/sys/net/ipv4/ip_unprivileged_port_start` `1024`; a zombie's files root's, its `cmdline` empty, its `environ` -ESRCH to read |
+| `process/` | `setpriority`, `getpriority` (PRIO_PROCESS; a nice value lowered only by the privileged, another's changed by its real or effective user id); `sched_setscheduler`, `sched_getscheduler` (real-time policies the privileged's); both kept and reported, the scheduler unchanged (named drift); `root_call`: `chroot`, `reboot`, `sethostname`, `setdomainname`, `settimeofday`, `clock_settime`, `mount`, `umount2` refused to a user as Linux refuses (-EPERM, after the path where Linux asks it first), refused by name for root (PAX keeps no such state), `chroot("/")` 0 |
+| `console/` | `controlling`: the console is every process's controlling terminal (one session), so the speaker's ioctls, Linux's for the privileged and a terminal's own session, are anyone's on a console descriptor |
+| `user/` | the dispatch of 140, 141, 144, 145, 161, 164 to 166, 169 to 171, 227; `mknod` of a device -EPERM to a user (root's still refused by name) |
+
+- What is not there: job control, sessions and process groups (every
+  process is in PAX's one session and one group: `kill(0)` and a
+  negative group are every process, each by the rule); a raw socket,
+  `mknod` of any node, a FIFO; limits (`prlimit64` as before);
+  capabilities (root is effective user id 0 and nothing finer); a root
+  directory that is not the tree's; the time, the host name and file
+  systems set by root (refused by name); `/proc/<pid>`'s `stat`,
+  `maps`, `mem`, `auxv`, `io`, `limits` and its `exe`, `cwd`, `root`
+  links; `/dev/mem`, `/dev/kmsg`, `/dev/ptmx`; what `/dev/std*`
+  reopens keeps its answer; a priority or a policy that changes how
+  PAX schedules.
+
 ## Who may name, change and keep (px44)
 
 The fourth lane of the users campaign (`notes/px44-the-names.md`). The
@@ -667,7 +701,7 @@ against an attacker**.
 | `files/` | **Directory write**: `may_make` (write and search of the directory: `mkdirat`, `symlinkat`, `linkat`'s new directory, `unix_bind`) and `unname` (the same, then the sticky rule: `unlinkat` for a file and AT_REMOVEDIR, `renameat` for the name moved and a name replaced); `renameat` asks both directories, and write on a directory that changes parent; an existing name answers -EEXIST (-EADDRINUSE for `bind`) first, a missing one -ENOENT, and the permission comes before what the name is (-EISDIR, -ENOTDIR, -ENOTEMPTY); two names of one file are renamed with nothing asked. **Sticky** (`sticky_ok`): in an S_ISVTX directory a name goes only for its owner, the directory's owner or file-system user id 0 (-EPERM). **The protected settings** (R7, on, fixed): `may_follow` (a path's last component that is a link in a sticky world-writable directory is followed only by its owner or when the directory's owner owns it, root included; one in the middle of a path by anyone), `may_creat_open` (O_CREAT of an existing regular file there: the opener's or the directory owner's, else -EACCES, root included), `may_hardlink` (a non-owner links only a regular file without S_ISUID or S_ISGID with group execute that it may read and write, else -EPERM, before the directory's -EACCES). **`chmod`** (`chmod_as`, `owns`): the owner or file-system user id 0, else -EPERM; S_ISGID asked by one outside the group is dropped. **`utimensat`**: the owner or file-system user id 0 sets any times; anyone else both to now when the class gives write (of the file, not the descriptor), else -EACCES; other times -EPERM. **Set-ID bits** (`wrote`): a write of a byte or more (`write`, `writev`, `pwrite`, `sendfile`, `splice`, `copy_file_range`), O_TRUNC, `ftruncate`, `truncate` and `fallocate` by one whose file-system user id is not 0 take S_ISUID, and S_ISGID when the file is group-executable or the writer is outside its group — the writer's ids at the call. **`connect`** asks write of an AF_UNIX name before whether anything listens. `fallocate` (285), mode 0: the file grows by a hole; other modes refused by name |
 | `procfs/` | `/proc/sys/fs/protected_hardlinks`, `_symlinks`, `_regular`, `_fifos`: `1`, mode 0644, root's |
 
-- What is not there: signals, ports, the speaker, `/dev` modes (U5); a
+- What is not there: signals, ports, the speaker, `/dev` modes (U5, px45: above); a
   FIFO (`mknod` is refused by name, so `protected_fifos` has nothing
   to act on); `/dev`'s and `/proc`'s directories keep their answers to
   making and removing names (-EROFS, -ENOENT); `fallocate`'s other
