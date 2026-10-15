@@ -452,7 +452,11 @@ for leg in $legs; do
                 ws="signals: 0 raised from the terminal" wn1="network: frames 0 in, 0 out; udp datagrams 0 in, 0 out" wn2="network: tcp connections 0 accepted, 0 made, 0 open"
                 ! grep -q '^speaker: ' "$norm" || why+=" a speaker line with no tone played;"
             elif [ "$s" = session-shell ]; then
-                ws="signals: 2 raised from the terminal" wn1="network: frames 0 in, 0 out; udp datagrams 0 in, 0 out" wn2="network: tcp connections 1 accepted, 1 made, 0 open"
+                # px46: one, not two. The ^C at `sleep 30` is the
+                # terminal's signal; the ^C at the prompt is a byte pelt's
+                # editor reads itself (ISIG off while it edits, sh11) and
+                # turns into the trap.
+                ws="signals: 1 raised from the terminal" wn1="network: frames 0 in, 0 out; udp datagrams 0 in, 0 out" wn2="network: tcp connections 1 accepted, 1 made, 0 open"
                 ! grep -q '^speaker: ' "$norm" || why+=" a speaker line with no tone played;"
             else
                 ws="signals: 0 raised from the terminal" wn1= wn2="network: tcp connections 1 accepted, 0 made, 0 open"
@@ -464,9 +468,14 @@ for leg in $legs; do
             grep -qx "$wn2" "$norm" || why+=" '$(grep -m1 '^network: tcp' "$norm")', not '$wn2';"
             [ -z "$why" ] && say "PASS E4 $id: $typed bytes typed, all counted; $ws; $(grep -m1 '^network: tcp' "$norm")" || bad "E4 $id:$why"
 
-            # E5: the end (session-files ends on `cat` of what is gone: Linux's status, 1).
+            # E5: the end, with Linux's status (session-files ends on `cat`
+            # of what is gone: 1; px46: session-shell's `exit` follows the
+            # Ctrl-C at the prompt, and pelt's `exit` with no number is the
+            # last status, 130, on both).
             why=
-            st=0; [ "$s" = session-files ] && st=$(cat "$lx/session-files.tty.rc" 2>/dev/null)
+            st=0
+            [ "$s" = session-files ] && st=$(cat "$lx/session-files.tty.rc" 2>/dev/null)
+            [ "$s" = session-shell ] && st=$(cat "$lx/session-shell.tty.rc" 2>/dev/null)
             grep -qx "PAX: init /bin/pelt ended with status $st; nothing left to run" "$norm" || why+=" '$(grep -m1 '^PAX: init ' "$norm")', not status '$st';"
             [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
             "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'PAX: init .*' 'halt' >/dev/null \
