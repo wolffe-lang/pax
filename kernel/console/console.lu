@@ -588,6 +588,20 @@ fn termios_in(pml4: u64, arg: u64, flush: bool) -> u64 {
     0
 }
 
+/// px45: whether the console is the calling process's controlling
+/// terminal. On PAX always: one session holds every process, and the
+/// console is its terminal (kernel/signal's `tty`; no job control yet,
+/// ruling #79's track). kernel/user asks it before the speaker's
+/// ioctls, which Linux gives only to the privileged and to a terminal's
+/// own session (measured, notes/px45/devs.c under tools/linux-sound: a
+/// user on its controlling terminal 0, on a virtual terminal that is not
+/// its controlling terminal -EPERM, whether or not it owns it); so on
+/// PAX anyone with a console descriptor may sound the speaker, until
+/// sessions exist.
+pub fn controlling() -> bool {
+    true
+}
+
 /// A terminal ioctl on the console: the result for %rax, or `REFUSED`
 /// for a request PAX does not answer. -ENOTTY for everything before
 /// `start` (px12's console).

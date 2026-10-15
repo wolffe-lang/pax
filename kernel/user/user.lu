@@ -1624,6 +1624,12 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
         // px13: the console answers the terminal ioctls; a request it
         // refuses is named here and answered -ENOTTY.
         let req = int32(a1)
+        // px45: the speaker is the privileged's and the controlling
+        // terminal's (kernel/console's `controlling`: every process's on
+        // PAX), measured; -EPERM to anyone else.
+        if speaker.request(req) && files.is_console(a, a0) && !cred.privileged(a) && !console.controlling() {
+            return NEG_EPERM
+        }
         let r = files.ioctl(a, pml4, a0, req, a2)
         if r == 0 && speaker.request(req) {
             speaker.own(sched.self_pid()) // px18: the tone stops when this process ends
