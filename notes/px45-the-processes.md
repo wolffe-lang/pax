@@ -494,3 +494,117 @@ good. No row is compared with a container's root.
   (after `su`, the shell `execve`d with its ids equal is dumpable again).
 - **Not there for U6**: `setsid`, process groups, `TIOCSCTTY`; `chroot`
   to anything but `/`; passwords (R1).
+
+## 4. Evidence index
+
+Shas are this branch's (`px45`). kasumi paths are under
+`~/lanes/px45/`; hasu's likewise.
+
+### What was written
+
+- The prediction: `402aee8`.
+- The programs: `c20e3ff` (`user/elf/rights.c`; px38's `sig.c` and
+  `priv.c` copied byte for byte; `tools/mkcred`), `2f88afd` (rights:
+  one environment; the machine's own rows left out).
+- The recorders: `1b15a11` (`notes/px45/vminit.c`, `linux-vm.sh`,
+  `build.sh`, `devs.c`), `2318605` (devs asks of a controlling
+  terminal; its log).
+- The kernel: `fd49eb6` (`kernel/cred`), `815e160`, `9731dbd`
+  (`kernel/sched`), `a27f150` (`kernel/signal`), `9cd0d40`, `889dec9`
+  (`kernel/process`), `856f848`, `af8191a` (`kernel/files`), `f4ccb8f`
+  (`kernel/unix`, `boot/unix.S`), `a9388ff` (`kernel/socket`), `0cf060f`
+  (`kernel/user`), `dac1fe1` (`kernel/procfs`), `92e113b`
+  (`kernel/console`, `kernel/user`), `bb4b155` (comments).
+- The suite: `4515049` (the recordings), `3b0e5dd`, `d6ebffe`
+  (`tests/mpx5-users`, `sig.pax`, `priv.pax`, `ids.pax`).
+- The words: `db3b90b` (`kernel/README.md`), `d57879e`
+  (`docs/SOURCES.md`, CHANGELOG).
+
+### What was measured, and where it is
+
+- **Linux, vm-protected**: `tests/mpx5-users.d/linux/rights*.txt`,
+  `sig.txt`, `priv.txt`, `vm-rights.meta` (the boot of `bf3ba053…`:
+  PAX's own archive `dfc1043d…` and `/init`); `sig` and `priv` are also
+  px38's `notes/px38/linux/vm-protected.txt` to the byte (U0 checks it).
+  The first `rights` recording, of the probe before `2f88afd`:
+  `notes/px45/linux-try2-rights.txt`.
+- **Linux, the sound card and the speaker**: `notes/px45/linux-devs.serial.log`
+  (`tools/linux-sound --device virtio-sound-pci`, `devs` `19643720…`).
+- **PAX at trunk**: `notes/px45/pax-2167620-sig.txt`, `pax-2167620-priv.txt`.
+- **PAX, the first boot of `rights`**: `notes/px45/pax-p4a-rights.txt`.
+- **The kernel's cost**: `notes/px45/kasumi-kernel-cost.txt`.
+- **PAX**: `notes/px45/kasumi-mpx5-users-d6ebffe.out` (four legs),
+  `kasumi-taskset-0-3-mpx5-users-d6ebffe.out`,
+  `kasumi-mpx3-tree-d6ebffe.out`,
+  `kasumi-taskset-0-3-mpx3-tree-d6ebffe.out`, `hasu-kvm-d6ebffe.log`
+  (all at `d6ebffe`; what follows it is notes, docs and evidence).
+- **The plants**: §G.
+- **CI**: named in the PR (a commit naming the head's runs would move
+  the head).
+
+### Measured, inferred, not verified
+
+**Measured**: everything in §A to §G.
+
+**Inferred**:
+- `chroot` asks search (MAY_X) of the directory itself, as `chdir` does
+  (Linux's answers for a missing directory and a file were measured,
+  not for an unsearchable one).
+- A bound socket's second `bind` to a low port by a user answers
+  -EACCES before -EINVAL (PAX asks the port first; not measured).
+- `mknod` of a device by a user: -EPERM before the path's errors (PAX
+  answers it first; Linux's order not measured).
+- `setpriority` and `sched_setscheduler` of another's process at a
+  value that both rules refuse: PAX answers -EPERM before -EACCES (not
+  measured).
+- `kill(-1, sig)` when every other process is a zombie: PAX counts a
+  zombie as a process (0); not measured.
+- SO_PEERCRED of an accepted end after its connector changes its ids:
+  the ids at `connect` (measured with no change after).
+
+**Not verified**:
+- Real root was one kernel build (kasumi's CachyOS 7.2.8); the speaker's
+  and the sound card's rules one device each (a virtual terminal, QEMU's
+  virtio-sound-pci with the OSS emulation).
+- The speaker's refusal on PAX: `console.controlling` is always true
+  (one session), so no row can show the -EPERM branch; it is reached
+  only when sessions exist (ruling #79's track).
+- `/proc/<pid>/fd/<n>`'s links (listed, not followed); `/dev/std*`'s
+  reopen rules (devtmpfs has none to measure).
+- More than one process signalling at once (PAX runs one CPU; a call
+  runs with interrupts off).
+- UEFI under KVM on hasu (pax#56): BIOS only there.
+- `mpx3-tree` and the other suites as a user (U7's).
+
+### Issues
+
+- **To close at merge**: none.
+- **Would file (none filed)**:
+  1. pax: `/proc/<pid>/fd/<n>` is listed and not followed (a lookup is
+     -ENOENT); Linux's is a link naming the open file.
+  2. pax: `/proc/<pid>/cmdline` and `environ` give at most a page.
+  3. pax: `pause` (34) is -ENOSYS; px38's `sig` targets spin in it.
+  4. pax: `/proc/<pid>`'s `stat`, `maps`, `mem`, `auxv`, `io`, `limits`,
+     `exe`, `cwd`, `root` of another process (px38's `sig` reader rows).
+- pax#58's remainder (an AF_INET socket's, an eventfd's, an epoll
+  object's and an accepted end's `fstat` owner): not reached.
+- pax#62 (`mpx3-threads`' racy `tgkill` row): the reference's race,
+  untouched (§A); not chased.
+- Not chased, did not occur in this lane's runs: pax#45, #47, #53.
+
+## 5. Done-when
+
+- Branch `px45` on origin; pax PR {{PR}}, open, unmerged.
+- The five sections §1 to §5; the items §A to §G.
+- The test checklist:
+  - [x] `tests/mpx5-users`, native and release, BIOS and UEFI, kasumi (TCG)
+  - [x] the same images under `taskset -c 0-3`
+  - [x] the same images under KVM on hasu (BIOS), two rounds
+  - [x] `tests/mpx3-tree`, four legs, kasumi, and under `taskset -c 0-3`
+  - [x] `tools/ci-plan` on the branch's paths (every suite, pr tier: kernel/sched is core; no map line needed)
+  - [x] plant A red on kasumi and in CI; plant B the same
+  - [ ] the pr tier at the final head, and all suites on every leg (`tier full`): named in the PR
+- `wolf/tools/lane-audit.sh pax px45 <PR>` exit 0: named in the PR.
+- Trees: kasumi `~/lanes/px45/` keeps `out/`, `bin/`; build directories
+  removed. hasu `~/lanes/px45/` keeps `out/`. Plant branches stay on
+  origin, never to be merged.
