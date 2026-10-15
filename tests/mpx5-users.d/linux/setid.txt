@@ -1,0 +1,74 @@
+mount: /t/setid is on /t, mounted rw,relatime
+mount: /tn/setid is on /tn, mounted rw,nosuid,relatime
+== execve of a set-ID file, by 1000:2000 with groups {2999}
+plain 0755 of 1001:2001   : uid 1000 1000 1000 1000 | gid 2000 2000 2000 2000 | groups 2999 | cap none | AT_SECURE 0 AT_UID 1000 AT_EUID 1000 AT_GID 2000 AT_EGID 2000 | dumpable 1
+04755 of 1001:2001        : uid 1000 1001 1001 1001 | gid 2000 2000 2000 2000 | groups 2999 | cap none | AT_SECURE 1 AT_UID 1000 AT_EUID 1001 AT_GID 2000 AT_EGID 2000 | dumpable 0
+02755 of 1001:2001        : uid 1000 1000 1000 1000 | gid 2000 2001 2001 2001 | groups 2999 | cap none | AT_SECURE 1 AT_UID 1000 AT_EUID 1000 AT_GID 2000 AT_EGID 2001 | dumpable 0
+06755 of 1001:2001        : uid 1000 1001 1001 1001 | gid 2000 2001 2001 2001 | groups 2999 | cap none | AT_SECURE 1 AT_UID 1000 AT_EUID 1001 AT_GID 2000 AT_EGID 2001 | dumpable 0
+04755 of 0:0              : uid 1000 0 0 0 | gid 2000 2000 2000 2000 | groups 2999 | cap full | AT_SECURE 1 AT_UID 1000 AT_EUID 0 AT_GID 2000 AT_EGID 2000 | dumpable 0
+02755 of 0:0              : uid 1000 1000 1000 1000 | gid 2000 0 0 0 | groups 2999 | cap none | AT_SECURE 1 AT_UID 1000 AT_EUID 1000 AT_GID 2000 AT_EGID 0 | dumpable 0
+04655 of 1001:2001        : uid 1000 1001 1001 1001 | gid 2000 2000 2000 2000 | groups 2999 | cap none | AT_SECURE 1 AT_UID 1000 AT_EUID 1001 AT_GID 2000 AT_EGID 2000 | dumpable 0
+02745 of 1001:2001        : uid 1000 1000 1000 1000 | gid 2000 2000 2000 2000 | groups 2999 | cap none | AT_SECURE 0 AT_UID 1000 AT_EUID 1000 AT_GID 2000 AT_EGID 2000 | dumpable 1
+06755 of 1000:2000 (own)  : uid 1000 1000 1000 1000 | gid 2000 2000 2000 2000 | groups 2999 | cap none | AT_SECURE 0 AT_UID 1000 AT_EUID 1000 AT_GID 2000 AT_EGID 2000 | dumpable 1
+== the same, by root
+root runs plain           : uid 0 0 0 0 | gid 0 0 0 0 | groups  | cap full | AT_SECURE 0 AT_UID 0 AT_EUID 0 AT_GID 0 AT_EGID 0 | dumpable 1
+root runs 04755 of 1001   : uid 0 1001 1001 1001 | gid 0 0 0 0 | groups  | cap none | AT_SECURE 1 AT_UID 0 AT_EUID 1001 AT_GID 0 AT_EGID 0 | dumpable 0
+root runs 06755 of 1001   : uid 0 1001 1001 1001 | gid 0 2001 2001 2001 | groups  | cap none | AT_SECURE 1 AT_UID 0 AT_EUID 1001 AT_GID 0 AT_EGID 2001 | dumpable 0
+== where the bits are not honoured
+06755 with no_new_privs   : uid 1000 1000 1000 1000 | gid 2000 2000 2000 2000 | groups 2999 | cap none | AT_SECURE 0 AT_UID 1000 AT_EUID 1000 AT_GID 2000 AT_EGID 2000 | dumpable 1
+/t/setid/script: uid 1000 1000 1000 1000 | gid 2000 2000 2000 2000 | groups 2999 | cap none | AT_SECURE 0 AT_UID 1000 AT_EUID 1000 AT_GID 2000 AT_EGID 2000 | dumpable 1
+06755 on a nosuid mount   : uid 1000 1000 1000 1000 | gid 2000 2000 2000 2000 | groups 2999 | cap none | AT_SECURE 0 AT_UID 1000 AT_EUID 1000 AT_GID 2000 AT_EGID 2000 | dumpable 1
+06755 of 1001:2001, itself: uid 1000 1001 1001 1001 | gid 2000 2001 2001 2001 | groups 2999 | cap none | AT_SECURE 1 AT_UID 1000 AT_EUID 1001 AT_GID 2000 AT_EGID 2001 | dumpable 0
+  and the plain program it runs: uid 1000 1001 1001 1001 | gid 2000 2001 2001 2001 | groups 2999 | cap none | AT_SECURE 1 AT_UID 1000 AT_EUID 1001 AT_GID 2000 AT_EGID 2001 | dumpable 0
+== what takes the bits away (a file 1000:2000; `owner` is 1000 in group 2000, `other` is 1002, each with write permission)
+bits: mode 6777, write of one byte by its owner: 1, mode after 0777
+bits: mode 6777, write of one byte by another user: 1, mode after 0777
+bits: mode 6777, write of one byte by root: 1, mode after 6777
+bits: mode 4777, write of one byte by its owner: 1, mode after 0777
+bits: mode 4777, write of one byte by another user: 1, mode after 0777
+bits: mode 4777, write of one byte by root: 1, mode after 4777
+bits: mode 2777, write of one byte by its owner: 1, mode after 0777
+bits: mode 2777, write of one byte by another user: 1, mode after 0777
+bits: mode 2777, write of one byte by root: 1, mode after 2777
+bits: mode 2767, write of one byte by its owner: 1, mode after 2767
+bits: mode 2767, write of one byte by another user: 1, mode after 0767
+bits: mode 2767, write of one byte by root: 1, mode after 2767
+bits: mode 6766, write of one byte by its owner: 1, mode after 2766
+bits: mode 6766, write of one byte by another user: 1, mode after 0766
+bits: mode 6766, write of one byte by root: 1, mode after 6766
+bits: mode 6777, write of no bytes by its owner: 0, mode after 6777
+bits: mode 6777, write of no bytes by another user: 0, mode after 6777
+bits: mode 6777, write of no bytes by root: 0, mode after 6777
+bits: mode 6777, ftruncate to 0 by its owner: 0, mode after 0777
+bits: mode 6777, ftruncate to 0 by another user: 0, mode after 0777
+bits: mode 6777, ftruncate to 0 by root: 0, mode after 6777
+bits: mode 6777, truncate(path) to its own size by its owner: 0, mode after 0777
+bits: mode 6777, truncate(path) to its own size by another user: 0, mode after 0777
+bits: mode 6777, truncate(path) to its own size by root: 0, mode after 6777
+bits: mode 6777, open with O_TRUNC by its owner: 0, mode after 0777
+bits: mode 6777, open with O_TRUNC by another user: 0, mode after 0777
+bits: mode 6777, open with O_TRUNC by root: 0, mode after 6777
+bits: mode 6777, pwrite at 4096 by its owner: 1, mode after 0777
+bits: mode 6777, pwrite at 4096 by another user: 1, mode after 0777
+bits: mode 6777, pwrite at 4096 by root: 1, mode after 6777
+bits: mode 6777, utimensat by its owner: 0, mode after 6777
+bits: mode 6777, utimensat by another user: 0, mode after 6777
+bits: mode 6777, utimensat by root: 0, mode after 6777
+bits: mode 6777, chmod to the same mode by its owner: 0, mode after 6777
+bits: mode 6777, chmod to the same mode by root: 0, mode after 6777
+bits: mode 6777, rename by its owner: 0, mode after 6777
+bits: mode 6777, rename by another user: 0, mode after 6777
+bits: mode 6777, rename by root: 0, mode after 6777
+bits: mode 6777, a hard link made by its owner: 0, mode after 6777
+bits: mode 6777, a hard link made by another user: -1, mode after 6777
+bits: mode 6777, a hard link made by root: 0, mode after 6777
+bits: mode 6777, fallocate by its owner: 0, mode after 0777
+bits: mode 6777, fallocate by another user: 0, mode after 0777
+bits: mode 6777, fallocate by root: 0, mode after 6777
+bits: mode 6777, an O_RDWR open and close by its owner: 0, mode after 6777
+bits: mode 6777, an O_RDWR open and close by another user: 0, mode after 6777
+bits: mode 6777, an O_RDWR open and close by root: 0, mode after 6777
+bits: mode 6777, append (O_APPEND) of one byte by its owner: 1, mode after 0777
+bits: mode 6777, append (O_APPEND) of one byte by another user: 1, mode after 0777
+bits: mode 6777, append (O_APPEND) of one byte by root: 1, mode after 6777
+setid: done
