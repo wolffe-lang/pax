@@ -1,0 +1,456 @@
+//! su — run a shell as another user (px46, P5 lane U6; ruling #75 R8).
+//!
+//! PAX's `su` is ROOT DROPPING TO A USER, and nothing else. Ruling #75
+//! has no passwords (R1) and does not honour set-ID execution (R5), so
+//! there is no way up: run by root it becomes the user it names for
+//! good — the groups, then the group ids, then the user ids, in one
+//! `os_set_ids` that is whole or ends the process — and runs that user's
+//! shell; run by anyone else it refuses, with the message and the status
+//! Linux's `su` gives a user who cannot authenticate. Nothing here is a
+//! boundary against an attacker: the checks it relies on are enforced
+//! for honest programs (R6).
+//!
+//! References consulted: `su(1)` and `login.defs(5)` (util-linux 2.39,
+//! shadow 4.13), `passwd(5)`, `group(5)`, `credentials(7)`; pax
+//! `notes/px38-the-users.md` (Ubuntu 24.04's `su` traced) and
+//! `notes/px46-the-accounts.md` §A, which holds every row below as
+//! measured: Ubuntu 24.04's own `su` (util-linux 2.39.3) run black-box as
+//! a throwaway container's root with accounts made in that container,
+//! once as installed and once with nothing configuring it (no
+//! `pam_env`, `pam_mail` or `pam_umask`; `ENV_PATH` and `ENV_SUPATH`
+//! given and taken away) — `notes/px46/su-ct.sh`, its output
+//! `notes/px46/linux/su-ct.txt`. Never the source of `su`, `login`,
+//! util-linux, shadow-utils, PAM or any libc.
+//!
+//! What Linux's `su` does, measured, and what this one does:
+//!
+//! - **`su [USER]`** (root when no USER): the target's shell, as the
+//!   target (its user id, its group id, and the groups `/etc/group`
+//!   gives it: its own first, then each group naming it); the
+//!   environment kept, but `HOME` and `SHELL` set to the target's, and
+//!   `USER` and `LOGNAME` too when the target is not root; `PATH`, the
+//!   working directory and the umask untouched; argv[0] the shell's base
+//!   name. Words after USER go to the shell (`su pax -c CMD one two`
+//!   gives it `-c CMD one two`; `su pax -` gives it `-`).
+//! - **`su - [USER]`**, `-l`, `--login`: the environment emptied but
+//!   `TERM`, then `HOME`, `SHELL`, `USER`, `LOGNAME` (root's too) and
+//!   `PATH` set; `PATH` is `/etc/login.defs`' `ENV_PATH` (`ENV_SUPATH`
+//!   for root), written `PATH=…` or bare, else `/usr/local/bin:/usr/bin`
+//!   (root: `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin`); the
+//!   working directory the home, or, when that fails, `su: warning:
+//!   cannot change directory to HOME: …` and the one it had; argv[0] `-`
+//!   and the shell's base name. `-` is login only as the first word that
+//!   is not an option.
+//! - **`-c CMD`**, `--command=CMD`: the shell is given `-c CMD` (a second
+//!   `-c` replaces the first). **`-s SHELL`**, `--shell=SHELL`: that
+//!   shell. **`-m`**, `-p`, `--preserve-environment`: the environment
+//!   kept whole, nothing set, and the shell `$SHELL` when it is set (else
+//!   the target's); with `-` it is ignored: `su: ignoring
+//!   --preserve-environment, it's mutually exclusive with --login`. A
+//!   target whose shell field is empty gets `/bin/sh`.
+//! - **Refusals**, each status 1, in this order: an option (`su: invalid
+//!   option -- 'x'`, `su: unrecognized option '--x'`, `su: option
+//!   requires an argument -- 'c'`, each followed by `Try 'su --help' for
+//!   more information.`); a user `/etc/passwd` does not hold (`su: user
+//!   NAME does not exist or the user entry does not contain all the
+//!   required fields`); then, when the caller is not root, `su:
+//!   Authentication failure` — Linux's words for a user without the
+//!   password, after a `Password: ` prompt and a pause of about three
+//!   seconds. **This one asks for no password** (there is none: R1), so
+//!   it prints the message alone, at once. A shell that is not there:
+//!   `su: failed to execute SHELL: No such file or directory`, 127.
+//!
+//! **What this one does not do, by name:** no PAM, so none of what
+//! Ubuntu's PAM adds (`MAIL`, `LANG`, `/etc/environment`'s `PATH`, the
+//! umask from `pam_umask`, the delay); no `setsid` with `-c` (PAX has
+//! one session; job control is ruling #79's track); no parent left
+//! waiting: Linux's `su` stays as the shell's parent to close its PAM
+//! session and passes the shell's status on (`Terminated` and 143 for a
+//! shell killed by SIGTERM), where this one REPLACES itself with the
+//! shell, so the caller sees the shell's own end; `-f`, `-g`, `-G`, `-P`,
+//! `-w`, `-V`, `--session-command` and the other options Linux's has are
+//! refused by name; `ALWAYS_SET_PATH` and the rest of `login.defs` are
+//! not read.
+
+use std.os.users
+
+const TRY: str = "Try 'su --help' for more information."
+
+struct Args {
+    login: bool,
+    keep: bool,
+    command: str,
+    has_command: bool,
+    shell: str,
+    help: bool,
+    words: List[str],
+    error: str,
+    builtless: str,
+}
+
+fn main() -> int {
+    let a = parse(env_args())
+    if a.error.len > 0 {
+        eprint("su: {a.error}\n{TRY}")
+        return 1
+    }
+    if a.builtless.len > 0 {
+        eprint("su: {a.builtless}: not built in PAX's su (notes/px46-the-accounts.md)\n{TRY}")
+        return 1
+    }
+    if a.help {
+        print_raw(help())
+        return 0
+    }
+    var keep = a.keep
+    if a.login && keep {
+        eprint("su: ignoring --preserve-environment, it's mutually exclusive with --login")
+        keep = false
+    }
+    var at = 0
+    var login = a.login
+    if at < a.words.len && a.words[at] == "-" {
+        login = true
+        at += 1
+        if keep {
+            eprint("su: ignoring --preserve-environment, it's mutually exclusive with --login")
+            keep = false
+        }
+    }
+    var name = "root"
+    if at < a.words.len {
+        name = a.words[at]
+        at += 1
+    }
+    let passwd = fs_read_text("/etc/passwd") else ""
+    let u = users.user_named(passwd, name) else |_| {
+        eprint("su: user {name} does not exist or the user entry does not contain all the required fields")
+        return 1
+    }
+    let euid = os_euid() else -1
+    if euid != 0 {
+        // No password exists to ask for (R1), and set-ID is not honoured
+        // (R5): a user can become no one.
+        eprint("su: Authentication failure")
+        return 1
+    }
+    let group = fs_read_text("/etc/group") else ""
+    let groups = users.groups_of(group, u.name, u.gid)
+
+    // The shell, and what it is given.
+    var shell = u.shell
+    if shell.len == 0 {
+        shell = "/bin/sh"
+    }
+    if keep {
+        let mine = env_get("SHELL") else ""
+        if mine.len > 0 {
+            shell = mine
+        }
+    }
+    if a.shell.len > 0 {
+        shell = a.shell
+    }
+    let base = base_name(shell)
+    var argv = List[str]()
+    (mut argv).push(if login then "-" + base else base)
+    if a.has_command {
+        (mut argv).push("-c")
+        (mut argv).push(a.command)
+    }
+    while at < a.words.len {
+        (mut argv).push(a.words[at])
+        at += 1
+    }
+
+    var env = List[str]()
+    if login {
+        set(mut env, "HOME", u.home)
+        set(mut env, "LOGNAME", u.name)
+        set(mut env, "PATH", login_path(u.uid == 0))
+        set(mut env, "SHELL", shell)
+        for kv in env_vars() {
+            if kv.starts_with("TERM=") {
+                (mut env).push(kv)
+            }
+        }
+        set(mut env, "USER", u.name)
+    } else {
+        for kv in env_vars() {
+            (mut env).push(kv)
+        }
+        if !keep {
+            set(mut env, "HOME", u.home)
+            set(mut env, "SHELL", shell)
+            if u.uid != 0 {
+                set(mut env, "USER", u.name)
+                set(mut env, "LOGNAME", u.name)
+            }
+        }
+    }
+
+    // The drop: whole, or the process ends (`[os.proc.ids.set]`).
+    var why = ""
+    os_set_ids(u.uid, u.gid, groups) else |e| match e {
+        denied => {
+            why = "Operation not permitted"
+        },
+        invalid => {
+            why = "Invalid argument"
+        },
+        io => {
+            why = "Input/output error"
+        },
+        unsupported => {
+            why = "this host cannot change a process's ids"
+        },
+    }
+    if why.len > 0 {
+        eprint("su: cannot set user and group ids: {why}")
+        return 1
+    }
+
+    if login {
+        os_chdir(u.home) else |e| {
+            let w = match e {
+                not_found => "No such file or directory",
+                denied => "Permission denied",
+                io => if fs_exists(u.home) then "Not a directory" else "Input/output error",
+            }
+            eprint("su: warning: cannot change directory to {u.home}: {w}")
+        }
+    }
+
+    var row = ""
+    var status = 1
+    os_exec(shell, argv, env, List[int]()) else |e| match e {
+        not_found => {
+            row = "No such file or directory"
+            status = 127
+        },
+        denied => {
+            row = "Permission denied"
+            status = 126
+        },
+        io => {
+            row = "Exec format error"
+            status = 126
+        },
+        invalid => {
+            row = "Invalid argument"
+            status = 1
+        },
+        unsupported => {
+            row = "this host has no exec"
+            status = 1
+        },
+    }
+    // Only a failed exec comes back.
+    eprint("su: failed to execute {shell}: {row}")
+    status
+}
+
+/// The command line, as getopt_long reads it for `su`: options anywhere
+/// before `--`, a short cluster (`-lm`), an argument joined (`-cCMD`,
+/// `--command=CMD`) or the next word.
+fn parse(args: List[str]) -> Args {
+    var a = Args {
+        login: false,
+        keep: false,
+        command: "",
+        has_command: false,
+        shell: "",
+        help: false,
+        words: List[str](),
+        error: "",
+        builtless: "",
+    }
+    var i = 0
+    var rest = false
+    while i < args.len {
+        let w = args[i]
+        i += 1
+        if rest || w == "-" || !w.starts_with("-") {
+            (mut a.words).push(w)
+            continue
+        }
+        if w == "--" {
+            rest = true
+            continue
+        }
+        if w.starts_with("--") {
+            let body = w[2..]
+            let eq = body.find("=") else -1
+            var name = body
+            var value = ""
+            if eq >= 0 {
+                name = body[0..eq]
+                value = body[eq + 1..]
+            }
+            if name == "login" && eq < 0 {
+                a.login = true
+            } else if (name == "preserve-environment") && eq < 0 {
+                a.keep = true
+            } else if name == "help" && eq < 0 {
+                a.help = true
+            } else if name == "command" || name == "shell" {
+                if eq < 0 {
+                    if i >= args.len {
+                        a.error = "option '--{name}' requires an argument"
+                        return a
+                    }
+                    value = args[i]
+                    i += 1
+                }
+                if name == "command" {
+                    a.command = value
+                    a.has_command = true
+                } else {
+                    a.shell = value
+                }
+            } else if linux_long(name) {
+                if a.builtless.len == 0 {
+                    a.builtless = "--{name}"
+                }
+            } else {
+                a.error = "unrecognized option '{w}'"
+                return a
+            }
+            continue
+        }
+        // A cluster of short options.
+        var k = 1
+        while k < w.len {
+            let c = w[k..k + 1]
+            k += 1
+            if c == "l" {
+                a.login = true
+            } else if c == "m" || c == "p" {
+                a.keep = true
+            } else if c == "h" {
+                a.help = true
+            } else if c == "c" || c == "s" {
+                var value = w[k..]
+                k = w.len
+                if value.len == 0 {
+                    if i >= args.len {
+                        a.error = "option requires an argument -- '{c}'"
+                        return a
+                    }
+                    value = args[i]
+                    i += 1
+                }
+                if c == "c" {
+                    a.command = value
+                    a.has_command = true
+                } else {
+                    a.shell = value
+                }
+            } else if c == "f" || c == "g" || c == "G" || c == "P" || c == "w" || c == "V" {
+                if a.builtless.len == 0 {
+                    a.builtless = "-{c}"
+                }
+                if c == "g" || c == "G" || c == "w" {
+                    // These take an argument on Linux.
+                    if k >= w.len {
+                        i += 1
+                    }
+                    k = w.len
+                }
+            } else {
+                a.error = "invalid option -- '{c}'"
+                return a
+            }
+        }
+    }
+    a
+}
+
+/// A long option Linux's `su` has and this one does not build.
+fn linux_long(name: str) -> bool {
+    name == "fast" || name == "group" || name == "supp-group" || name == "pty" ||
+        name == "session-command" || name == "whitelist-environment" || name == "version"
+}
+
+/// `PATH` for a login: `ENV_SUPATH` (root) or `ENV_PATH` from
+/// `/etc/login.defs`, as `PATH=…` or bare; else Linux's own defaults.
+fn login_path(root: bool) -> str {
+    let key = if root then "ENV_SUPATH" else "ENV_PATH"
+    let defs = fs_read_text("/etc/login.defs") else ""
+    for line in defs.split("\n") {
+        if !line.starts_with(key) {
+            continue
+        }
+        let rest = line[key.len..]
+        if rest.len == 0 || !(rest.starts_with(" ") || rest.starts_with("\t")) {
+            continue
+        }
+        var v = trim(rest)
+        if v.starts_with("PATH=") {
+            v = v[5..]
+        }
+        if v.len > 0 {
+            return v
+        }
+    }
+    if root {
+        return "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+    }
+    "/usr/local/bin:/usr/bin"
+}
+
+fn trim(s: str) -> str {
+    var b = 0
+    var e = s.len
+    while b < e && (s[b..b + 1] == " " || s[b..b + 1] == "\t") {
+        b += 1
+    }
+    while e > b && (s[e - 1..e] == " " || s[e - 1..e] == "\t" || s[e - 1..e] == "\r") {
+        e -= 1
+    }
+    s[b..e]
+}
+
+/// The last component of a path.
+fn base_name(path: str) -> str {
+    let cut = path.rfind("/") else -1
+    if cut < 0 {
+        return path
+    }
+    path[cut + 1..]
+}
+
+/// Set `name` to `value` in an environment list, in place or at its end.
+fn set(mut env: List[str], name: str, value: str) {
+    let entry = "{name}={value}"
+    var k = 0
+    while k < env.len {
+        let kv = env[k]
+        let eq = kv.find("=") else kv.len
+        if kv[0..eq] == name {
+            env[k] = entry
+            return
+        }
+        k += 1
+    }
+    (mut env).push(entry)
+}
+
+fn help() -> str {
+    """
+    Usage: su [OPTION]... [-] [USER [ARG]...]
+    Run USER's shell (root when no USER is named) as USER. Only root may
+    use it: PAX has no passwords, and a set-user-ID bit is not honoured.
+
+      -, -l, --login                  a login shell: the environment
+                                      emptied but TERM, HOME, SHELL,
+                                      USER, LOGNAME and PATH set, and
+                                      the home directory entered
+      -c, --command=COMMAND           give the shell -c COMMAND
+      -s, --shell=SHELL               run SHELL instead of USER's shell
+      -m, -p, --preserve-environment  keep the whole environment
+      -h, --help                      print this help and exit
+
+    pax: https://github.com/wolffe-lang/pax (user/su)
+    """
+}
