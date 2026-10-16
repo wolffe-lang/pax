@@ -2,7 +2,7 @@
 """lobo-session — px25: one session of tests/mpx4-lobo, on PAX or on Linux.
 
   tools/lobo-session --pax ISO  [--mem 256M] [--accel tcg|kvm] [--firmware bios|uefi]
-  tools/lobo-session --linux TREE [--engine docker|podman] [--image IMAGE]
+  tools/lobo-session --linux TREE [--engine docker|podman] [--image IMAGE] [--owners FILE]
                      --steps FILE --out DIR --forward G[=H][,…] [--data DIR] [--timeout S]
 
 On PAX: QEMU boots ISO (q35, -cpu max, no audio, no display, the exit
@@ -21,7 +21,11 @@ input the steps' typing and its output DIR/console.log; lobo and kill
 are TREE/bin's, on PATH. Each guest port G is the same free host port H
 on both: on Linux the configuration files under TREE/srv/conf have
 `@P<G>@` replaced by H, `@BACKEND@` by 127.0.0.1 (PAX's image was built
-with G and 10.0.2.2, QEMU's address for this host).
+with G and 10.0.2.2, QEMU's address for this host); px47: those under
+TREE/srv/*/conf too (lobo's own home, /srv/lobo). --owners FILE (px47):
+after /srv is made root's, each line `PATH MODE UID GID` of FILE is
+given that owner, group and mode, as tools/mkinitramfs's `:MODE:UID:GID`
+gives them in PAX's image (tools/linux-tree's --owners).
 
 The free ports of one session are all different (px41, pax#53): each
 is read from a socket bound to port 0, and every socket is held until
@@ -107,6 +111,7 @@ ap.add_argument("--ovmf", default=os.environ.get("PAX_OVMF_CODE", ""))
 ap.add_argument("--ovmf-vars", default=os.environ.get("PAX_OVMF_VARS", ""))
 ap.add_argument("--engine", default=os.environ.get("PAX_ENGINE", ""))
 ap.add_argument("--image", default=os.environ.get("PAX_TREE_IMAGE", "docker.io/library/python:3.12-slim"))
+ap.add_argument("--owners", default="")
 a = ap.parse_args()
 side = "pax" if a.pax else "linux"
 os.makedirs(os.path.join(a.out, "resp"), exist_ok=True)
@@ -216,14 +221,19 @@ else:
     sub = {"@BACKEND@": "127.0.0.1", "@LISTEN@": "127.0.0.1"}
     for gp, h in fwd.items():
         sub["@P%d@" % gp] = str(h)
-    for f in glob.glob(os.path.join(stage, "srv", "conf", "*.conf")):
+    for f in glob.glob(os.path.join(stage, "srv", "conf", "*.conf")) + glob.glob(os.path.join(stage, "srv", "*", "conf", "*.conf")):
         t = open(f).read()
         for k, v in sub.items():
             t = t.replace(k, v)
         open(f, "w").write(t)
     cname = "pax-lobo-%d-%d" % (os.getpid(), int(time.time()))
+    owners = ""
+    if a.owners:
+        shutil.copy(a.owners, os.path.join(stage, "owners"))
+        owners = ("while read -r p m u g; do [ -n \"$p\" ] || continue; chown -h \"$u:$g\" \"$p\" && chmod \"$m\" \"$p\"; "
+                  "done < /stage/owners && ")
     init = ("set -e; mkdir -p /srv && mount -t tmpfs -o size=512m tmpfs /srv && cp -a /stage/srv/. /srv/ && "
-            "cp /stage/bin/* /usr/local/bin/ && chown -R 0:0 /srv && find /srv -exec touch -h -d @0 {} + && "
+            "cp /stage/bin/* /usr/local/bin/ && chown -R 0:0 /srv && " + owners + "find /srv -exec touch -h -d @0 {} + && "
             "umask 022 && cd /srv && exec bash")
     cmd = [engine, "run", "--rm", "-i", "--name", cname, "--privileged", "--network", "host",
            "-v", "%s:/stage:ro" % stage, "-e", "PATH=/usr/local/bin:/usr/bin:/bin", a.image, "bash", "-c", init]

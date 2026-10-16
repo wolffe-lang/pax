@@ -31,6 +31,20 @@
 #                  census between them, a reload under a load
 #   diff           lobo's 24 static and 7 proxy differential rows
 #   control        lobo's control differential rows 1-6 and its signal row
+#   serve-user     px47 (P5 U7): lobo AS A USER. Root asks `lobo -t` of
+#                  /srv/lobo's config, whose `user lobo;` lobo at the pin
+#                  refuses to root by name (it cannot drop privileges:
+#                  lobo#52); the shell becomes lobo (990, ruling #75 R3:
+#                  `su -s /bin/pelt lobo` on PAX, px46; an exec dropping
+#                  the same ids in the container on Linux); as lobo, in
+#                  its home /srv/lobo (owned by lobo, by tools/
+#                  mkinitramfs's owners on PAX and lobo-session --owners
+#                  on Linux): port 80 refused, then port 8000 with `user
+#                  lobo;` warned of (nginx's warning) and served, every
+#                  request of serve, a file written by lobo and served,
+#                  stop. lobo-check holds the replies (R1), the page and
+#                  the written file (R3, R4) and lobo's lines about the
+#                  directive and the refused port (R9) to Linux's
 # Assertions, per leg (tier, firmware) and session:
 #   L0 build: the programs static, the images built (digests printed)
 #   L1 the session's steps all held on PAX and on Linux (each waits for
@@ -42,7 +56,7 @@
 #      across the load's rounds, no request lost across a reload, the
 #      control and signal rows
 #   L4 the end: `PAX: init /bin/pelt ended with status 0`, `halt`
-# serve and hands run on every leg (BIOS 256 MiB, UEFI 512 MiB, both
+# serve, hands and serve-user run on every leg (BIOS 256 MiB, UEFI 512 MiB, both
 # tiers); load, diff and control on BIOS, both tiers; serve-release on
 # native BIOS. The boots stop at the first session whose steps did not
 # hold on PAX (`stopped early`). Exit 0 when every assertion held, 1 otherwise, 2 on a
@@ -53,7 +67,7 @@ set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 
-images= legs=both tiers=both noboot=0 sessions="serve serve-release hands load diff control" round=60 accel=tcg
+images= legs=both tiers=both noboot=0 sessions="serve serve-release hands load diff control serve-user" round=60 accel=tcg
 while [ $# -gt 0 ]; do
     case $1 in
         --images)   images=$2; shift 2 ;;
@@ -70,7 +84,7 @@ case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware is bios
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier is native, release or both" ;; esac
 need readelf python3
 
-BORE="cat echo ls mkdir rm sleep"
+BORE="cat echo ls mkdir rm sleep id" # px47: id, for serve-user
 work=$PAX_BUILD/mpx4-lobo
 fail=0
 bad() { say "FAIL $*"; fail=1; }
@@ -100,6 +114,7 @@ if [ -z "$images" ]; then
     # shellcheck disable=SC2086
     "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
     "$PAX_ROOT/tools/mklobokit" "$work/kit" > "$work/kit.txt" || why+=" tools/mklobokit;"
+    "$PAX_ROOT/tools/mksu" "$work/subin" > "$work/su.txt" || why+=" tools/mksu;" # px47
     for v in trunk release; do
         lb=$work/lobo; [ "$v" = release ] && lb=$work/lobo-release
         r=$work/root-$v l=$work/linux-$v
@@ -110,22 +125,40 @@ if [ -z "$images" ]; then
         cp "$lb/lobo" "$r/bin/lobo" || why+=" no lobo ($v);"
         printf 'root:x:0:0:root:/:/bin/pelt\n' > "$r/etc/passwd"
         printf 'root:x:0:\n' > "$r/etc/group"
+        if [ "$v" = trunk ]; then
+            # px47: the accounts (px46's lines, R3) and `su`, for serve-user.
+            cp "$work/subin/su" "$r/bin/su" || why+=" no su;"
+            printf 'root:x:0:0:root:/:/bin/pelt\npax:x:1000:1000:pax:/home/pax:/bin/pelt\nlobo:x:990:990:lobo:/srv/lobo:/bin/false\n' > "$r/etc/passwd"
+            printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\n' > "$r/etc/group"
+            printf 'ENV_PATH\tPATH=/bin\nENV_SUPATH\tPATH=/bin\n' > "$r/etc/login.defs"
+        fi
         "$PAX_ROOT/tools/mkzone" "$r/etc/localtime" > "$work/zone.txt" || why+=" tools/mkzone;"
         echo /bin/pelt > "$r/etc/pax-run"
         cp -R "$PAX_ROOT/user/lobo/srv" "$r/srv"
         # 300,000 bytes: a numbered line of 50 bytes, 6,000 times
         python3 -c 'import sys; sys.stdout.write("".join("line %06d of the three-hundred-kilobyte file.\n" % i for i in range(6000)))' > "$r/srv/html/big.txt"
         cp -R "$lb/differential/www" "$r/srv/www" || why+=" no lobo's differential www;"
+        # px47: lobo's own home for serve-user, the same pages, all lobo's.
+        cp -R "$r/srv/html" "$r/srv/lobo/html"
+        ( cd "$r" && find srv/lobo -mindepth 0 | LC_ALL=C sort | while read -r p; do
+            if [ -d "$p" ]; then m=755; [ "$p" = srv/lobo ] && m=750; else m=644; fi
+            echo "/$p $m 990 990"
+          done ) > "$work/$v.owners"
         # Linux: the same tree with the configs as templates, lobo and kill.
         cp -R "$r/srv" "$l/srv"
         cp "$r/bin/lobo" "$r/bin/kill" "$l/bin/"
         for c in "$r"/srv/conf/*.conf; do render_pax "$PAX_ROOT/user/lobo/srv/conf/${c##*/}" "$c"; done
+        for c in "$r"/srv/lobo/conf/*.conf; do render_pax "$PAX_ROOT/user/lobo/srv/lobo/conf/${c##*/}" "$c"; done # px47
         pairs=()
         for f in $(cd "$r" && find . -type f | sort); do
             f=${f#./}
             mode=644; [ -x "$r/$f" ] && [ "${f%%/*}" = bin ] && mode=755
-            pairs+=("/$f=$r/$f:$mode")
+            own=$(awk -v p="/$f" '$1 == p { print ":" $2 ":" $3 ":" $4 }' "$work/$v.owners") # px47
+            pairs+=("/$f=$r/$f${own:-:$mode}")
         done
+        while read -r d m u g; do # px47: lobo's directories
+            [ -d "$r$d" ] && pairs+=("$d/:$m:$u:$g")
+        done < "$work/$v.owners"
         if "$PAX_ROOT/tools/mkinitramfs" "$work/lobo-$v.cpio" "${pairs[@]}" > "$work/lobo-$v.initramfs.txt"; then
             sed 's/^/  initramfs: /' "$work/lobo-$v.initramfs.txt" >&2
         else
@@ -170,6 +203,7 @@ fi
 forwards() { # session -> the guest ports it reaches
     case $1 in
         diff) echo 8081,8082,8083,8084,8090 ;;
+        serve-user) echo 8000 ;; # px47
         *) echo 80 ;;
     esac
 }
@@ -196,7 +230,8 @@ for s in $sessions; do
     v=trunk; [ "$s" = serve-release ] && v=release
     lx=$PAX_BUILD/mpx4-lobo-linux-$s
     rm -rf "$lx"
-    if python3 "$PAX_ROOT/tools/lobo-session" --linux "$images/linux-$v" --steps "$(steps_of "$s")" --out "$lx" \
+    own=(); [ "$s" = serve-user ] && own=(--owners "$images/$v.owners") # px47
+    if python3 "$PAX_ROOT/tools/lobo-session" --linux "$images/linux-$v" ${own[@]+"${own[@]}"} --steps "$(steps_of "$s")" --out "$lx" \
         --forward "$(forwards "$s")" --data "$images/data" --timeout "$(deadline "$s")" > "$lx.out" 2>&1; then
         say "PASS L1 linux $s: every step held ($(grep -c '\] step ' "$lx/steps.log") steps, $(tail -n 1 "$lx/steps.log"))"
     else

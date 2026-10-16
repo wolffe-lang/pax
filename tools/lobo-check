@@ -266,4 +266,32 @@ if session == "control":
     else:
         say(False, "signal row", "the blocks are missing (control %s, signal %s)" % (bool(x), bool(y)))
 
+if session == "serve-user":
+    # px47 (P5 U7): lobo as a user. R3 and R4 as serve's, from lobo's
+    # own home; R9 the lines that say who lobo is and what it was
+    # refused: the `user` directive refused to root and warned of to
+    # lobo (lobo#52), the port below 1024 refused, the shell's echoes of
+    # the statuses — PAX's against Linux's, with the listening address
+    # read as one (0.0.0.0 on PAX, 127.0.0.1 on Linux) and the config's
+    # line number kept.
+    if page:
+        want = open(page, "rb").read()
+        got = open(os.path.join(rp, "serve.01-index.req"), "rb").read() if os.path.exists(os.path.join(rp, "serve.01-index.req")) else b""
+        say(body(got) == want and status(got) == "HTTP/1.1 200 OK", "R3 page",
+            "GET / answered 200 with the page's %d bytes, served by lobo as lobo from its home" % len(want)
+            if body(got) == want else "GET / answered %r, %d bytes" % (status(got), len(body(got))))
+    wf = os.path.join(rp, "written.new.req")
+    w = open(wf, "rb").read() if os.path.exists(wf) else b""
+    say(body(w) == b"written by lobo\n", "R4 written", "a file lobo wrote in its own home, served: %r" % body(w))
+    def who(c):
+        out = []
+        for l in c.split(b"\n"):
+            if re.search(rb'"user" directive|bind|listen|Permission denied|EACCES|^root-test |^low |^990\s*$|^serve ended ', l):
+                l = re.sub(rb"(0\.0\.0\.0|127\.0\.0\.1):(\d+)", rb"<listen>:\2", l)
+                out.append(l.rstrip())
+        return out
+    x, y = who(cp), who(cl)
+    say(x == y and len(x) >= 5, "R9 user", "%d lines the same: %s" % (len(x), " | ".join(t.decode(errors="replace") for t in x))
+        if x == y and len(x) >= 5 else "PAX %r, Linux %r" % (x, y))
+
 sys.exit(1 if fails else 0)

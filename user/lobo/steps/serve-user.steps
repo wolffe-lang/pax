@@ -1,0 +1,46 @@
+# tests/mpx4-lobo, session `serve-user` (px47, P5 U7): lobo AS A USER.
+# Root first asks lobo to test /srv/lobo's config, whose `user lobo;`
+# lobo at pax's pin refuses by name to root (it cannot drop privileges:
+# lobo#52, ws54); then the shell becomes lobo (990, ruling #75 R3):
+# on PAX through `su -s /bin/pelt lobo` (px46; lobo's own shell is
+# /bin/false), on Linux by an `exec` that drops the same ids in the
+# container (no account anywhere). As lobo, in its home: a config on
+# port 80, refused (EACCES: a port below 1024), then the same config on
+# port 8000 with `user lobo;`, which lobo warns of as nginx does and
+# serves; every request of `serve` through the forward, a file written
+# by lobo and served, stop.
+pax: wait ^(\x1b\[6n)?\$ $ 120
+type cd /srv/lobo
+mark
+type lobo -t -c conf/lobo.conf
+type echo root-test $?
+wait ^root-test \d+ 30
+pax: type su -s /bin/pelt lobo
+linux: type exec python3 -c 'import os; os.setgroups([]); os.setresgid(990, 990, 990); os.setresuid(990, 990, 990); os.execv("/bin/bash", ["bash"])'
+type id -u
+wait ^990\s*$ 30
+mark
+type lobo -c conf/low.conf serve
+type echo low $?
+wait ^low \d+ 60
+mark
+type lobo -c conf/lobo.conf serve &
+wait generation-activated gen=1 seq=2 120
+req serve 8000 requests/[0-9]*.req
+type echo written by lobo > html/new.txt
+type echo wrote $?
+wait ^wrote 0 30
+req written 8000 requests/new.req
+mark
+type lobo -s stop -c conf/lobo.conf
+wait ^stop: shutting down \(generation 1\) 60
+type wait
+type echo serve ended $?
+wait ^serve ended 0 60
+type ls logs
+pax: wait ^(\x1b\[6n)?\$ $ 30
+mark
+pax: type exit
+pax: wait ^(\x1b\[6n)?\$ $ 30
+type exit
+halt 60
