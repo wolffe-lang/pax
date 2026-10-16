@@ -325,12 +325,14 @@ for leg in $legs; do
         # B6 (px47, the user run): it was a user's. B2 holds PAX to a
         # Linux side that runs the same `as`, so a broken `as` would agree
         # with itself there; this asks each side's own answer: every
-        # command of the user's that names root's 0600 file or 0700
-        # directory was told `Permission denied`, and root's was not.
+        # command of the user's that reads root's 0600 file or what is
+        # in its 0700 directory was told `Permission denied` (`ls -l -d`
+        # of the two names is not: it asks only /etc), and root's was not.
         if [ "$sfx" = -user ]; then
             why= n6=0
             while IFS=$'\t' read -r kk _s _h ln; do
                 case $ln in
+                    "/bin/as 1000 1000 /bin/ls -l -d "*) ;;
                     "/bin/as 1000 1000 "*/etc/secret*|"/bin/as 1000 1000 "*/etc/private*)
                         n6=$((n6 + 1))
                         grep -q 'Permission denied' "$out/$kk.out" || why+=" $kk ($ln): not refused on PAX;"
@@ -339,7 +341,7 @@ for leg in $legs; do
                         ! grep -q 'Permission denied' "$out/$kk.out" || why+=" $kk ($ln): root refused;" ;;
                 esac
             done < "$out/summary.tsv"
-            [ "$n6" -ge 8 ] || why+=" $n6 of the user's refusal lines checked, not 8;"
+            [ "$n6" = 7 ] || why+=" $n6 of the user's refusal lines checked, not 7;"
             [ -z "$why" ] && say "PASS B6 $id: $n6 commands of the user's told Permission denied on both sides, root's read the same file" || bad "B6 $id:$why"
         fi
 
