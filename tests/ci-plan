@@ -147,9 +147,34 @@ expect("P2 who a process is (px39) reaches every user suite", plan(["kernel/cred
 expect("P2 the credentials' programs and recordings are mpx5-users' alone",
        plan(["user/elf/cred.c", "user/elf/ident.c", "tools/mkcred", "tests/mpx5-users.d/linux/cred.txt"], **pr), "pr", ["mpx5-users"])
 expect("P2 the census's own", plan(["docs/CENSUS.md"], **pr), "pr", ["census"])
-expect("P2 su and its recording are mpx5-accounts' alone (px46)",
-       plan(["user/su/su.lu", "user/su/wolf-toolchain.toml", "tools/mksu",
-             "tests/mpx5-accounts.d/linux/accounts.tty"], **pr), "pr", ["mpx5-accounts"])
+expect("P2 the accounts' recording is mpx5-accounts' alone (px46)",
+       plan(["tests/mpx5-accounts.d/linux/accounts.tty"], **pr), "pr", ["mpx5-accounts"])
+# px47 (P5 U7): every suite as a user. `su` and `as` reach each suite
+# whose user run uses them; a user run's own files reach their suite.
+SUUSER = ["mpx3-tree", "mpx3-shell", "mpx3-speaker", "mpx4-lobo", "mpx5-accounts"]
+ASUSER = ["mpx3-tree", "mpx3-shell", "mpx3-boreutils", "mpx4-unix", "mpx4-tcp", "mpx4-udp"]
+expect("P2 su reaches every suite whose user run uses it (px47)",
+       plan(["user/su/su.lu", "user/su/wolf-toolchain.toml", "tools/mksu"], **pr), "pr", SUUSER)
+expect("P2 as reaches every suite whose user run uses it, and mpx5-users (px47)",
+       plan(["user/elf/as.c"], **pr), "pr", ASUSER + ["mpx5-users"])
+expect("P2 tools/mkas reaches the user runs, not mpx5-users (px47)", plan(["tools/mkas"], **pr), "pr", ASUSER)
+expect("P2 the other credential probes stay mpx5-users' (px47: the suites build `as` with tools/mkas)",
+       plan(["user/elf/perm.c", "user/elf/chk.c"], **pr), "pr", ["mpx5-users"])
+expect("P2 a user run's own files reach their suite (px47)",
+       plan(["user/mpx3-boreutils-user.run"], **pr), "pr", ["mpx3-boreutils"])
+expect("P2 the tree's user recording and keys (px47)",
+       plan(["tests/mpx3-tree.d/probes-user.pax", "user/console/shell-tree-user.keys"], **pr), "pr",
+       has=["mpx3-tree"], lacks=["mpx4-tcp", "mpx2-heap"])
+expect("P2 the speaker's user sessions (px47)",
+       plan(["user/console/beep-user.keys", "tests/mpx3-speaker.d/linux/beep-user.tty"], **pr), "pr",
+       has=["mpx3-speaker"], lacks=["mpx4-tcp", "mpx2-heap"])
+expect("P2 lobo's user session (px47)", plan(["user/lobo/steps/serve-user.steps", "user/lobo/srv/lobo/conf/lobo.conf"], **pr),
+       "pr", ["mpx4-lobo"])
+expect("P2 the net suites' user run lists (px47)", plan(["user/mpx4-tcp-none-user.run", "user/mpx4-udp-none-user.run"], **pr),
+       "pr", has=["mpx4-tcp", "mpx4-udp"], lacks=["mpx3-speaker", "mpx2-heap"])
+expect("P2 the container's Linux side reaches every suite that uses it (px47)", plan(["tools/linux-tree"], **pr), "pr",
+       has=["mpx3-tree", "mpx3-shell", "mpx3-boreutils", "mpx4-unix", "mpx4-tcp", "mpx4-udp", "mpx5-accounts"],
+       lacks=["mpx2-heap", "mpx3-speaker"])
 expect("P2 the accounts' keys reach mpx5-accounts (and the suites that read user/console)",
        plan(["user/console/accounts.keys"], **pr), "pr", has=["mpx5-accounts"], lacks=["mpx2-heap", "mpx4-tcp"])
 expect("P2 CI itself: every suite, the pr leg", plan([".github/workflows/ci.yml"], **pr), "pr", SUITES)
