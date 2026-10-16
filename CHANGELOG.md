@@ -7,6 +7,27 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Every suite as a user (px47).** The seventh lane of multi-user PAX:
+  the tree, shell, boreutils, Unix-socket, TCP, UDP, speaker and lobo
+  suites each run their sessions again as a user beside root's — `tree`
+  and its soak, procs, the run lists, the Unix probes and lobo's
+  client as 1000:1000 through `as` (`tools/mkas`), the typed sessions
+  after `su pax`, lobo as `lobo` (990) in its own home — each held byte
+  for byte to the same binaries run as the same user on Linux in a
+  throwaway container (`tools/linux-tree --owners`, and `--runlist`,
+  `--net` for the run lists), with `beep`'s refusals held to real
+  root's Linux under QEMU. What only a user meets, found and fixed: a
+  user's `rmdir` and `rename` of `/dev` and a name made in `/dev` are
+  -EACCES before PAX's fixed answer (-EBUSY, -EROFS), and every `/proc`
+  and `/sys` file now asks its mode on `open` (a user opened its 0444
+  `/proc/self/cgroup` to write). A user may not bind ports 7 or 1023,
+  read root's 0600 files or 0700 directories, write `/etc`, or reach
+  `/dev/tty0` and `/dev/console`; a user sounds the speaker through the
+  console as root does; lobo as `lobo` warns of its `user` directive and
+  serves, as root it refuses it (lobo#52). pelt is pinned at `06223a8`
+  (sh16, tab completion). The checks are **enforced for honest
+  programs; not a boundary against an attacker**.
+
 - **Who may signal whom, and what only root may do (px45).** The fifth
   lane of multi-user PAX: `kill`, `tgkill` and `tkill` ask Linux's rule
   (root by the effective id, or the sender's real or effective id is
