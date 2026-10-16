@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# mkas — build px39's `as` (user/elf/as.c, with user/elf/px38.h) alone,
+# a static x86-64 Linux executable, for the suites' user runs (px47, P5
+# U7): `as UID GID PROG [ARG...]` drops to those ids and runs PROG, on
+# PAX and in a Linux container alike, with no account anywhere.
+#
+#   tools/mkas OUTDIR
+#
+# The same compiler line as mkcred's for the same file (`cc -static
+# -no-pie -O1`, ET_EXEC with no PT_INTERP, checked), so the binary is
+# the one mpx5-users runs; its own tool so that a change to the other
+# credential probes does not reach every suite with a user run (the CI
+# map follows the tools a test names). Build on a baseline x86-64 glibc
+# (the CI runner's Ubuntu; an Ubuntu container on kasumi), never on
+# kasumi's own (px10). Prints `as <sha256> <bytes>`. Exit 0, or 2 on a
+# tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkas OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${CC:-cc}
+need "$cc" readelf
+"$cc" -static -no-pie -O1 -Wall -Wextra -Wno-unused-result -Wno-unused-function \
+    -Wl,--build-id=none -Wl,-z,noexecstack -o "$out/as" "$PAX_ROOT/user/elf/as.c" || die "cc: as"
+readelf -hW "$out/as" | grep -Eq 'Type: +EXEC' || die "as is not ET_EXEC"
+! readelf -lW "$out/as" | grep -q INTERP || die "as has a PT_INTERP (not static)"
+printf '%s %s %s\n' as "$(sha256_of "$out/as")" "$(wc -c < "$out/as" | tr -d ' ')"
