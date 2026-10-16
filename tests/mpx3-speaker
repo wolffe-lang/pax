@@ -418,7 +418,11 @@ PY
             # K1: the session against its expect file.
             why=
             out=$PAX_BUILD/mpx3-speaker-$tier-$leg-$s.session
-            awk '/^user: exec pid 1 / { on = 1; next } on && /^user: pelt pid 1 (exit_group|exit) [0-9]+ after / { exit } on && !/^user: / { print }' "$norm" > "$out"
+            # px47: a kernel line that lands after a byte with no newline
+            # (beep's BEL, beep-user) is cut out with its newline, and the
+            # line goes on (as tests/mpx3-shell's).
+            awk '/^user: exec pid 1 / { on = 1; next } on && /^user: pelt pid 1 (exit_group|exit) [0-9]+ after / { exit }
+                 on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$norm" > "$out"
             want=$PAX_ROOT/user/console/$s.expect
             [ "$s" = tunes ] && want=$PAX_ROOT/user/console/speaker-tunes.expect
             [ "$s" = beep ] && want=$PAX_ROOT/user/console/speaker-beep.expect
@@ -513,6 +517,8 @@ PY
                     k8="FAIL no capture"
                 fi
                 case $k8 in PASS*) say "PASS K8 $id: ${k8#PASS }" ;; *) bad "K8 $id: ${k8#FAIL }" ;; esac
+            elif [ "$s" = beep-user ]; then
+                : # px47: refused before any tone: K1, K4 and K5 hold it
             elif [ "$s" = beep ]; then
                 # K7: Ubuntu's beep through /dev/tty0 and /dev/console.
                 k7=$(python3 - "$notes" "$timeline" <<'PY'
