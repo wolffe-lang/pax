@@ -507,8 +507,22 @@ one() { # tier leg way
         printf '%s\t%s\t%s\t%s\n' "$n" "$s" "$(sha256_of "$out/$n.out")" "$line" >> "$out/summary.tsv"
     done < "$list"
     [ "$n" = "$ncmd" ] || why+=" $n commands read, the list has $ncmd;"
+    # px47: none-user was a user's: ports 7 and 1023 refused, EACCES, on
+    # both sides (T2 holds PAX to a Linux side that runs the same `as`).
+    if [ "$way" = none-user ]; then
+        local lo=0 kk ln
+        while IFS=$'\t' read -r kk _s _h ln; do
+            case $ln in
+                "/bin/as 1000 1000 /bin/tcpecho 7 "*|"/bin/as 1000 1000 /bin/tcpbulk recv 1023 "*)
+                    lo=$((lo + 1))
+                    grep -q 'EACCES' "$out/$kk.out" || why+=" $kk ($ln): not EACCES on PAX;"
+                    grep -q 'EACCES' "$images/linux-none-user/$kk.out" || why+=" $kk ($ln): not EACCES on Linux;" ;;
+            esac
+        done < "$out/summary.tsv"
+        [ "$lo" = 2 ] || why+=" $lo low-port lines, not 2;"
+    fi
     if [ -z "$why" ]; then
-        say "PASS T2 $L: $n commands, each one's output and exit status byte-identical to Linux's ($(cut -f2 "$out/summary.tsv" | paste -sd, -))"
+        say "PASS T2 $L: $n commands, each one's output and exit status byte-identical to Linux's ($(cut -f2 "$out/summary.tsv" | paste -sd, -))$([ "$way" = none-user ] && echo "; ports 7 and 1023 EACCES to the user on both sides")"
     else
         bad "T2 $L:$why"
     fi

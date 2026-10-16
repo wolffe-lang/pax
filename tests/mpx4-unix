@@ -344,6 +344,17 @@ for leg in $legs; do
                 [ -z "$why" ] && say "PASS U2 $id: $g; $q; $(printf '%s' "$pl" | tr '\t' ' '); $nr (Linux here: $(grep -m1 '^~refused' "$out.linux"); $(grep '^~noreserve' "$out.linux" | paste -sd'|' -))" || bad "U2 $id:$why"
             fi
 
+            # px47: probes-user was a user's: its own answer to opening its
+            # 0444 /proc/self/cgroup to write (U1 holds it to a Linux side
+            # that runs the same `as`, which would agree with a broken one).
+            if [ "$s" = probes-user ]; then
+                if grep -qx 'open /proc/self/cgroup to write: EACCES' "$out" && grep -qx 'open /proc/self/cgroup to write: EACCES' "$out.linux"; then
+                    say "PASS U2 $id: a user's: its open of /proc/self/cgroup to write is EACCES on both sides (root's is ok)"
+                else
+                    bad "U2 $id: not a user's: '$(grep -m1 '^open /proc/self/cgroup to write' "$out")' on PAX, '$(grep -m1 '^open /proc/self/cgroup to write' "$out.linux")' on Linux"
+                fi
+            fi
+
             # U3: what PAX lacks; who was killed.
             why=
             ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
