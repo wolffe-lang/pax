@@ -25,6 +25,7 @@
 # its status), 2 on a usage or tool error.
 import os
 import shutil
+import signal
 import subprocess
 import sys
 
@@ -62,6 +63,14 @@ def run(root, argv):
     if pid == 0:
         try:
             os.close(r)
+            # px47: Python starts with SIGPIPE and SIGXFSZ ignored, and an
+            # ignored signal stays ignored across execve (px46 found it in
+            # tools/linux-tty, px23 in linux-net); PAX starts every program
+            # with each signal at its default, so the program here does
+            # too (tcperr's child, run by tests/mpx4-tcp's none-user list,
+            # wrote "EPIPE: not killed" here where PAX's dies of SIGPIPE).
+            signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+            signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
             os.chroot(root)
             os.chdir("/")
             n = os.open("/dev/null", os.O_RDONLY)
