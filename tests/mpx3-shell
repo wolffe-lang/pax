@@ -203,7 +203,9 @@ linux_user_side() { # dir -> reasons on stdout
         p=$(image_of "$s") ip=$(initpath_of "$s")
         own=(); [ -f "$1/$p.owners" ] && own=(--owners "$1/$p.owners")
         args=("/bin/$ip"); [ "$s" = procs-user ] && args=(/bin/as 1000 1000 /bin/procs)
-        if "$PAX_ROOT/tools/linux-tree" --root "$1/$p/root" --keys "$(images=$1 keys_of "$s")" --prompt "$PROMPT" --argv0 "/bin/$ip" --size 512m \
+        # --rdev: shell-user writes /dev/null, which a rootless engine's
+        # container has only through a bind of the host's node.
+        if "$PAX_ROOT/tools/linux-tree" --root "$1/$p/root" --keys "$(images=$1 keys_of "$s")" --prompt "$PROMPT" --argv0 "/bin/$ip" --size 512m --rdev \
             ${own[@]+"${own[@]}"} "$1/linux/$s.tty" -- "${args[@]}"; then
             say "  linux $s: $(wc -c < "$1/linux/$s.tty" | tr -d ' ') bytes, status $(cat "$1/linux/$s.tty.rc") (a container, as 1000:1000)"
         else
