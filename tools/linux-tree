@@ -5,6 +5,7 @@
 #
 #   tools/linux-tree --root DIR --keys KEYS --prompt TEXT [--argv0 NAME]
 #                    [--size SIZE] [--sys] [--owners FILE] OUT -- PROG [ARG...]
+#   tools/linux-tree --root DIR --runlist LIST [--size SIZE] [--owners FILE] OUTDIR
 #
 # The programs under test remove and overwrite files (`rm`, `rmdir`,
 # `mv`, `cp`, a shell's `>`), and one session types `rm -rf /` to see it
@@ -31,6 +32,20 @@
 # `PATH MODE UID GID` of FILE (PATH from the root, MODE octal) is given
 # that owner, group and mode, as tools/mkinitramfs's `:MODE:UID:GID`
 # gives them in PAX's archive (an account's home, a 0600 file of root's).
+# --runlist LIST (px47): instead of a typed session, tools/linux-run
+# runs LIST (kmain_boreutils' and kmain_sockets' format) chrooted in the
+# same tmpfs, as root in the container; OUTDIR gets its <k>.out and
+# <k>.rc, OUTDIR/runs.txt its summary and OUTDIR/after the names left.
+# A line `/bin/as UID GID PROG …` runs PROG as that user (px39's `as`).
+# So a user's run of a run list needs no root on the host.
+#
+# **A user's port.** Docker and podman give a container's own network
+# namespace net.ipv4.ip_unprivileged_port_start 0, so a container's
+# user could bind any port; Linux's default is 1024 and PAX's is fixed
+# at 1024 (px45). The script writes 1024 there (the container's network
+# namespace only: --network none makes one) before anything runs, and
+# prints what it found and what it left. Nothing else of the host's
+# /proc/sys is written: fs.protected_* are the host's, read and printed.
 #
 # The engine: PAX_ENGINE, else docker when there is one, else podman.
 # Exit 0 when the session ran (whatever the program's status), 1 when
@@ -38,7 +53,7 @@
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
-root= keys= prompt= argv0= size=64m sys= owners=
+root= keys= prompt= argv0= size=64m sys= owners= runlist=
 while [ $# -gt 0 ]; do
     case $1 in
         --root)   root=$2; shift 2 ;;
@@ -48,16 +63,23 @@ while [ $# -gt 0 ]; do
         --size)   size=$2; shift 2 ;;
         --sys)    sys=--sys; shift ;;
         --owners) owners=$2; shift 2 ;;
+        --runlist) runlist=$2; shift 2 ;;
         --)       break ;;
         -*)       die "unknown option $1" ;;
         *)        break ;;
     esac
 done
-[ -n "$root" ] && [ -n "$keys" ] && [ $# -ge 3 ] && [ "$2" = -- ] \
-    || die "usage: linux-tree --root DIR --keys KEYS --prompt TEXT [--argv0 NAME] [--size SIZE] [--sys] [--owners FILE] OUT -- PROG [ARG...]"
-out=$1; shift 2
+usage="usage: linux-tree --root DIR --keys KEYS --prompt TEXT [--argv0 NAME] [--size SIZE] [--sys] [--owners FILE] OUT -- PROG [ARG...] | --root DIR --runlist LIST [--size SIZE] [--owners FILE] OUTDIR"
+if [ -n "$runlist" ]; then
+    [ -n "$root" ] && [ $# -eq 1 ] || die "$usage"
+    [ -f "$runlist" ] || die "no run list $runlist"
+    out=$1; shift
+else
+    [ -n "$root" ] && [ -n "$keys" ] && [ $# -ge 3 ] && [ "$2" = -- ] || die "$usage"
+    out=$1; shift 2
+    [ -f "$keys" ] || die "no keys file $keys"
+fi
 [ -d "$root" ] || die "no directory $root"
-[ -f "$keys" ] || die "no keys file $keys"
 
 engine=${PAX_ENGINE:-}
 if [ -z "$engine" ]; then
@@ -74,7 +96,8 @@ trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/root"
 cp -R "$root/." "$stage/root/" || die "cannot copy $root"
 cp "$PAX_ROOT/tools/linux-tty" "$stage/linux-tty"
-cp "$keys" "$stage/keys"
+cp "$PAX_ROOT/tools/linux-run" "$stage/linux-run"
+if [ -n "$runlist" ]; then cp "$runlist" "$stage/runlist"; else cp "$keys" "$stage/keys"; fi
 printf '%s' "$prompt" > "$stage/prompt"
 printf '%s' "$argv0" > "$stage/argv0"
 printf '%s' "$sys" > "$stage/sys"
@@ -87,6 +110,12 @@ cat > "$stage/run.sh" <<'EOF'
 # Inside the container. /x is the staging directory, the one thing of
 # the host's that is mounted.
 umask 022
+# px47: Linux's default for who may bind a port below 1024, in this
+# container's own network namespace (the engines set 0).
+pf=/proc/sys/net/ipv4/ip_unprivileged_port_start
+was=$(cat $pf)
+echo 1024 > $pf || { echo "linux-tree: cannot set $pf" >&2; exit 2; }
+echo "linux-tree: ip_unprivileged_port_start $was in the container, now $(cat $pf); host fs.protected_hardlinks $(cat /proc/sys/fs/protected_hardlinks) symlinks $(cat /proc/sys/fs/protected_symlinks) regular $(cat /proc/sys/fs/protected_regular) fifos $(cat /proc/sys/fs/protected_fifos)" >&2
 mkdir /r || exit 2
 mount -t tmpfs -o "size=$1,mode=755" none /r || { echo "linux-tree: cannot mount a tmpfs (is the container privileged?)" >&2; exit 2; }
 cp -R /x/root/. /r/ || exit 2
@@ -96,6 +125,13 @@ while read -r p m u g; do
     chown -h "$u:$g" "/r$p" && chmod "$m" "/r$p" || exit 2
 done < /x/owners
 find /r -exec touch -h -d @0 {} +
+if [ -f /x/runlist ]; then
+    python3 /x/linux-run /r /x/runlist /x/runs > /x/runs.txt
+    rc=$?
+    (cd /r && find . -mindepth 1 \( -path ./dev -o -path ./proc \) -prune -o -print | LC_ALL=C sort) > /x/after
+    chmod -R a+rwX /x
+    exit $rc
+fi
 set --
 while IFS= read -r a; do set -- "$@" "$a"; done < /x/argv
 a0=$(cat /x/argv0)
@@ -112,6 +148,15 @@ exit $rc
 EOF
 rc=0
 "$engine" run --rm --network none --privileged -v "$stage:/x" "$image" sh /x/run.sh "$size" >&2 || rc=$?
+if [ -n "$runlist" ]; then
+    [ -d "$stage/runs" ] || { say "the container ran no run list (engine $engine, image $image, exit $rc)"; exit 1; }
+    mkdir -p "$out"
+    cp "$stage/runs/"* "$out/" 2>/dev/null
+    cp "$stage/runs.txt" "$out/runs.txt"
+    cp "$stage/after" "$out/after" 2>/dev/null || : > "$out/after"
+    [ "$rc" = 0 ] || { say "the run list did not run to its end (exit $rc)"; exit 1; }
+    exit 0
+fi
 [ -f "$stage/out" ] || { say "the container wrote no transcript (engine $engine, image $image, exit $rc)"; exit 1; }
 cp "$stage/out" "$out"
 cp "$stage/out.rc" "$out.rc" 2>/dev/null || echo none > "$out.rc"
