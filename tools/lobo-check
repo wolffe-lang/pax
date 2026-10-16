@@ -284,10 +284,14 @@ if session == "serve-user":
     w = open(wf, "rb").read() if os.path.exists(wf) else b""
     say(body(w) == b"written by lobo\n", "R4 written", "a file lobo wrote in its own home, served: %r" % body(w))
     def who(c):
+        # lobo's own lines are read from `lobo: [` on: on PAX one can land
+        # on the end of pelt's echo of the line typed before it.
         out = []
         for l in c.split(b"\n"):
-            if re.search(rb'"user" directive|bind\(\)|Permission denied|EACCES|^root-test \d+\s*$|^low \d+\s*$|^990\s*$|^serve ended \d+\s*$', l):
-                l = re.sub(rb"(0\.0\.0\.0|127\.0\.0\.1):(\d+)", rb"<listen>:\2", l)
+            k = l.find(b"lobo: [")
+            if k >= 0 and re.search(rb'"user" directive|bind\(\)|Permission denied|EACCES', l[k:]):
+                out.append(re.sub(rb"(0\.0\.0\.0|127\.0\.0\.1):(\d+)", rb"<listen>:\2", l[k:]).rstrip())
+            elif re.search(rb'^root-test \d+\s*$|^low \d+\s*$|^990\s*$|^serve ended \d+\s*$', l):
                 out.append(l.rstrip())
         return out
     x, y = who(cp), who(cl)
