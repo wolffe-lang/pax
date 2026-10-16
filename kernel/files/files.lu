@@ -3259,9 +3259,14 @@ fn unname(a: u64, d: u64, n: u64) -> u64 {
 
 /// px44: whether a name may be made in directory node `d` (`mkdir`,
 /// `symlink`, `link`, `bind`): write and search by the class rule, as
-/// `openat`'s O_CREAT asks (px43). The tree's directories only.
+/// `openat`'s O_CREAT asks (px43). The tree's directories, and px47:
+/// `/dev` itself (root's 040755), asked BEFORE its fixed answer
+/// (-EROFS by name), so a user is told -EACCES as Linux tells a user of
+/// devtmpfs (measured: `tests/mpx3-tree`'s probes-user, a file, a
+/// directory and a symbolic link made in /dev), and root still the
+/// fixed answer.
 fn may_make(a: u64, d: u64) -> bool {
-    ty(d) != T_INO || may(a, cred.FS, d, MAY_W | MAY_X)
+    (ty(d) != T_INO && ty(d) != T_DEV) || may(a, cred.FS, d, MAY_W | MAY_X)
 }
 
 /// px44: `fs.protected_symlinks` = 1, fixed (ruling #75 R7;
@@ -3433,6 +3438,9 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
         }
         if ty(par) == T_SYN {
             return neg(ENOENT) // px34: nothing is made in /proc or /sys (measured: ENOENT)
+        }
+        if !may_make(a, par) {
+            return neg(EACCES) // px47: a user's file in /dev, as a user's on Linux
         }
         if ty(par) != T_INO {
             refuse(a, R_DEVRO)
@@ -4270,12 +4278,12 @@ pub fn mkdirat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64) -> u64 {
     if ty(par) == T_SYN {
         return neg(ENOENT) // px34: measured, mkdir in /proc/self
     }
+    if !may_make(a, par) {
+        return neg(EACCES) // px44: write and search of the directory; px47: /dev's too, first
+    }
     if ty(par) != T_INO {
         refuse(a, R_DEVRO)
         return neg(EROFS)
-    }
-    if !may_make(a, par) {
-        return neg(EACCES) // px44: write and search of the directory
     }
     // px42: a new directory keeps the sticky bit it is asked for and
     // never S_ISGID, which it has exactly when its parent has (measured:
@@ -4320,6 +4328,12 @@ pub fn unlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64) -> u64 {
             return neg(EBUSY)
         }
         if ty(n) == T_DEV {
+            // px47: /dev is a name in `/`: a user who may not write `/`
+            // is told so before /dev is busy (measured: -EACCES for a
+            // user, -EBUSY for root, `tests/mpx3-tree`'s probes-user).
+            if !may(a, cred.FS, par, MAY_W | MAY_X) {
+                return neg(EACCES)
+            }
             return neg(EBUSY)
         }
         // px44: write and search of the directory, then the sticky
@@ -4339,6 +4353,9 @@ pub fn unlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64) -> u64 {
     }
     if is_dir_node(n) {
         return neg(EISDIR)
+    }
+    if ty(par) == T_DEV && !may(a, cred.FS, par, MAY_W | MAY_X) {
+        return neg(EACCES) // px47: a user's unlink in /dev, as on Linux
     }
     if ty(n) != T_INO || ty(par) != T_INO {
         refuse(a, R_DEVRO)
@@ -4368,9 +4385,14 @@ pub fn renameat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, fla
     if ot && ty(on) == T_INO && tree.is_link(rf(on)) {
         return neg(ENOTDIR) // px36: measured, a link renamed with a trailing slash
     }
-    if ol == 0 || ty(on) == T_DEV {
+    if ol == 0 {
         return neg(EBUSY)
     }
+    // px47: /dev itself, renamed or replaced, is -EBUSY only after the
+    // directories' write and search (measured: a user -EACCES, root
+    // -EBUSY, `tests/mpx3-tree`'s probes-user); a name in /dev and one
+    // out of it stay -EXDEV, which Linux answers first.
+    let busy_o = ty(on) == T_DEV
     // The old name is kept in pax_kbuf's second half while the new
     // path is walked in its first.
     var k: u64 = 0
@@ -4382,13 +4404,14 @@ pub fn renameat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, fla
     if is_err(nn) && (rf(nn) != ENOENT || is_err(np)) {
         return neg(rf(nn))
     }
-    if nl == 0 || ty(nn) == T_DEV {
+    if nl == 0 {
         return neg(EBUSY)
     }
-    if ty(on) != T_INO || ty(op) != T_INO || ty(np) != T_INO {
+    let busy_n = !is_err(nn) && ty(nn) == T_DEV
+    if (ty(on) != T_INO && !busy_o) || ty(op) != T_INO || ty(np) != T_INO {
         return neg(EXDEV)
     }
-    if is_err(nn) && nt && !tree.is_dir(rf(on)) {
+    if is_err(nn) && nt && !busy_o && !tree.is_dir(rf(on)) {
         return neg(ENOTDIR)
     }
     if !is_err(nn) && nt && ty(nn) == T_INO && tree.is_link(rf(nn)) {
@@ -4396,7 +4419,7 @@ pub fn renameat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, fla
     }
     // px44: two names of one file: nothing to do, and nothing asked
     // (measured: 0 in a 0555 directory; rename(2)).
-    if !is_err(nn) && ty(nn) == T_INO && rf(nn) == rf(on) {
+    if !busy_o && !is_err(nn) && ty(nn) == T_INO && rf(nn) == rf(on) {
         return 0
     }
     // px44: write and search of BOTH directories; the sticky rule for
@@ -4404,6 +4427,9 @@ pub fn renameat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, fla
     // parent needs write on itself (its `..`, rename(2)).
     if !may(a, cred.FS, op, MAY_W | MAY_X) || !may(a, cred.FS, np, MAY_W | MAY_X) {
         return neg(EACCES)
+    }
+    if busy_o || busy_n {
+        return neg(EBUSY) // px47
     }
     if !sticky_ok(a, rf(op), rf(on)) || (!is_err(nn) && ty(nn) == T_INO && !sticky_ok(a, rf(np), rf(nn))) {
         return neg(EPERM)
@@ -4755,12 +4781,12 @@ pub fn symlinkat(a: u64, pml4: u64, tva: u64, ndfd: u64, nva: u64) -> u64 {
     if ty(np) == T_SYN {
         return neg(ENOENT) // as anything made in /proc or /sys (px34)
     }
+    if !may_make(a, np) {
+        return neg(EACCES) // px44; px47: /dev's too, first
+    }
     if ty(np) != T_INO {
         refuse(a, R_FIXED)
         return neg(EROFS)
-    }
-    if !may_make(a, np) {
-        return neg(EACCES) // px44
     }
     let (su, sg, _dg) = stamp(a, rf(np))
     let i = tree.symlink(rf(np), raw() + ns, nl, raw() + NORM, tl, su, sg)
