@@ -49,12 +49,12 @@
 # IP/PREFIX,GATEWAY addresses the container as PAX is addressed when it
 # has no network device (px23: the address, its subnet and a default
 # route through the gateway configured, loopback answering the address):
-# a tap `eth0` made persistent with nothing at its other end (TUNSETIFF,
-# TUNSETPERSIST), given the address and netmask (SIOCSIFADDR,
+# a tap `eth0` held by a process that drops what reaches it (TUNSETIFF),
+# given the address and netmask (SIOCSIFADDR,
 # SIOCSIFNETMASK), up (SIOCSIFFLAGS), and a default route through the
 # gateway (SIOCADDRT): the uapi headers' numbers (linux/if_tun.h,
 # linux/sockios.h, linux/route.h). A frame sent there goes nowhere, as
-# on PAX with no device.
+# on PAX with no device; nothing answers.
 #
 # **A user's port.** Docker and podman give a container's own network
 # namespace net.ipv4.ip_unprivileged_port_start 0, so a container's
@@ -145,8 +145,14 @@ ip, pfx = cidr.split("/")
 mask = socket.inet_ntoa(struct.pack(">I", (0xffffffff << (32 - int(pfx))) & 0xffffffff))
 t = os.open("/dev/net/tun", os.O_RDWR)
 fcntl.ioctl(t, 0x400454ca, struct.pack("16sH14s", b"eth0", 0x0002 | 0x1000, b""))  # TUNSETIFF: IFF_TAP | IFF_NO_PI
-fcntl.ioctl(t, 0x400454cb, 1)  # TUNSETPERSIST
-os.close(t)
+# The tap's carrier is on while a descriptor holds it: a child keeps it
+# until the container ends, reading and dropping what is sent there.
+if os.fork() == 0:
+    os.setsid()
+    for fd in (0, 1, 2):
+        os.close(fd)
+    while True:
+        os.read(t, 65536)
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 def ifaddr(name, addr):
     return struct.pack("16sH2s4s8s", name, socket.AF_INET, b"\0\0", socket.inet_aton(addr), b"\0" * 8)
@@ -156,15 +162,17 @@ for name in (b"lo", b"eth0"):
     fl = struct.unpack("16sH14s", fcntl.ioctl(s, 0x8913, struct.pack("16sH14s", name, 0, b"")))[1]  # SIOCGIFFLAGS
     fcntl.ioctl(s, 0x8914, struct.pack("16sH14s", name, fl | 0x1, b""))  # SIOCSIFFLAGS: IFF_UP
 class sa(ctypes.Structure):
-    _fields_ = [("family", ctypes.c_ushort), ("port", ctypes.c_ushort), ("addr", ctypes.c_char * 4), ("zero", ctypes.c_char * 8)]
+    _fields_ = [("family", ctypes.c_ushort), ("port", ctypes.c_ushort), ("addr", ctypes.c_uint32), ("zero", ctypes.c_ubyte * 8)]
 class rtentry(ctypes.Structure):
     _fields_ = [("pad1", ctypes.c_ulong), ("dst", sa), ("gateway", sa), ("genmask", sa), ("flags", ctypes.c_ushort),
                 ("pad2", ctypes.c_short), ("pad3", ctypes.c_ulong), ("pad4", ctypes.c_void_p), ("metric", ctypes.c_short),
                 ("dev", ctypes.c_char_p), ("mtu", ctypes.c_ulong), ("window", ctypes.c_ulong), ("irtt", ctypes.c_ushort)]
 r = rtentry()
-r.dst = sa(socket.AF_INET, 0, socket.inet_aton("0.0.0.0"))
-r.gateway = sa(socket.AF_INET, 0, socket.inet_aton(gw))
-r.genmask = sa(socket.AF_INET, 0, socket.inet_aton("0.0.0.0"))
+def a4(x):  # the address's bytes as they lie in memory (network order)
+    return struct.unpack("=I", socket.inet_aton(x))[0]
+r.dst = sa(socket.AF_INET, 0, a4("0.0.0.0"))
+r.gateway = sa(socket.AF_INET, 0, a4(gw))
+r.genmask = sa(socket.AF_INET, 0, a4("0.0.0.0"))
 r.flags = 0x0001 | 0x0002  # RTF_UP | RTF_GATEWAY
 fcntl.ioctl(s, 0x890B, bytes(r))  # SIOCADDRT
 PY
