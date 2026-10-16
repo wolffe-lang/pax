@@ -22,6 +22,9 @@
 #     writes an archive), umask 022;
 #   - tools/linux-tty types the session: PROG chrooted in /r, pid 1 of a
 #     fresh pid namespace, on a pseudo-terminal, with PAX's environment;
+#     px47: with --rdev, the container's /dev bound with its submounts
+#     (a rootless engine's /dev/null is the host's node bound onto a
+#     file, which a plain bind left out: a user was refused it);
 #   - afterwards the names left in /r are listed.
 # OUT gets what the terminal showed, OUT.rc the program's exit status,
 # OUT.after the names in the root when the session was over (sorted,
@@ -137,9 +140,9 @@ while IFS= read -r a; do set -- "$@" "$a"; done < /x/argv
 a0=$(cat /x/argv0)
 sy=$(cat /x/sys)
 if [ -n "$a0" ]; then
-    python3 /x/linux-tty --root /r --pid1 $sy --keys /x/keys --prompt "$(cat /x/prompt)" --argv0 "$a0" /x/out -- "$@"
+    python3 /x/linux-tty --root /r --pid1 --rdev $sy --keys /x/keys --prompt "$(cat /x/prompt)" --argv0 "$a0" /x/out -- "$@"
 else
-    python3 /x/linux-tty --root /r --pid1 $sy --keys /x/keys --prompt "$(cat /x/prompt)" /x/out -- "$@"
+    python3 /x/linux-tty --root /r --pid1 --rdev $sy --keys /x/keys --prompt "$(cat /x/prompt)" /x/out -- "$@"
 fi
 rc=$?
 (cd /r && find . -mindepth 1 \( -path ./dev -o -path ./proc -o -path ./sys \) -prune -o -print | LC_ALL=C sort) > /x/after

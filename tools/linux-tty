@@ -4,7 +4,7 @@
 # sessions (tests/mpx3-console), the reference PAX's console is held to.
 #
 #   tools/linux-tty --keys KEYS --prompt TEXT [--cwd DIR] [--argv0 NAME]
-#                   [--root DIR] [--pid1] [--sys] OUT -- PROG [ARG...]
+#                   [--root DIR] [--pid1] [--sys] [--rdev] OUT -- PROG [ARG...]
 #
 # PROG runs on the slave side of a fresh pseudo-terminal (its
 # descriptors 0, 1 and 2, its controlling terminal), in DIR (default /),
@@ -17,6 +17,9 @@
 # is made from, so `ls /bin` and `cat /etc/motd` name the same files on
 # both; DIR/dev is the host's /dev bound in (boreutils opens
 # /dev/stdout) and DIR/proc a proc mount, both removed at the end.
+# --rdev (px47, with --root): /dev bound with what is mounted under it,
+# made private, and taken away whole (tools/linux-tree's container, whose
+# device nodes are binds of the host's).
 # --sys (px34, with --root): DIR/sys a sysfs mount and DIR/sys/fs/cgroup
 # a cgroup2 mount as well (lobo reads /sys/fs/cgroup/cpu.max and
 # /sys/devices/system/cpu/online), removed at the end too.
@@ -62,13 +65,15 @@ def die(msg, code=2):
     sys.exit(code)
 
 
-def unmount(paths):
+def unmount(paths, detach=()):
     # umount(2) itself, not umount(8): after --pid1's unshare every child
     # this process forks lands in the new namespace, which is gone once
-    # its pid 1 has ended, so a fork would fail.
+    # its pid 1 has ended, so a fork would fail. px47: a recursive bind
+    # (--rdev) is taken away whole, MNT_DETACH (umount2's 2).
     libc = ctypes.CDLL(None, use_errno=True)
     for p in reversed(paths):
-        if libc.umount(p.encode()) != 0:
+        r = libc.umount2(p.encode(), 2) if p in detach else libc.umount(p.encode())
+        if r != 0:
             sys.stderr.write("linux-tty: umount %s: errno %d\n" % (p, ctypes.get_errno()))
 
 
@@ -108,6 +113,7 @@ def main(argv):
     root = None
     pid1 = False
     sysfs = False
+    rdev = False
     args = argv[1:]
     while args and args[0].startswith("--") and args[0] != "--":
         if args[0] == "--keys":
@@ -128,6 +134,10 @@ def main(argv):
             sysfs = True
             args = args[1:]
             continue
+        elif args[0] == "--rdev":
+            rdev = True
+            args = args[1:]
+            continue
         elif args[0] == "--isig":
             args = args[1:]
             continue
@@ -135,31 +145,44 @@ def main(argv):
             die("unknown option %s" % args[0])
         args = args[2:]
     if not keys or prompt is None or len(args) < 3 or args[1] != "--":
-        die("usage: linux-tty --keys KEYS --prompt TEXT [--cwd DIR] [--argv0 NAME] [--root DIR] [--pid1] [--sys] [--isig] OUT -- PROG [ARG...]")
+        die("usage: linux-tty --keys KEYS --prompt TEXT [--cwd DIR] [--argv0 NAME] [--root DIR] [--pid1] [--sys] [--rdev] [--isig] OUT -- PROG [ARG...]")
     out, prog = args[0], args[2:]
     steps = [l.rstrip("\n") for l in open(keys)]
     pb = prompt.encode()
 
     mounted = []
+    detach = []
     if root:
         for d in ("dev", "proc"):
             os.makedirs(os.path.join(root, d), exist_ok=True)
-        if subprocess.call(["mount", "--bind", "/dev", os.path.join(root, "dev")]) != 0:
+        # px47: --rdev binds /dev with what is mounted under it, made
+        # private (tools/linux-tree, in its container): a rootless
+        # container's /dev/null is the host's node bound onto a file of
+        # the container's /dev, which a plain bind leaves out, so a user
+        # was refused the placeholder file under it (EACCES) where Linux
+        # gives anyone /dev/null. The plain bind stays for a host's /dev.
+        bind = ["mount", "--rbind" if rdev else "--bind", "/dev", os.path.join(root, "dev")]
+        if subprocess.call(bind) != 0:
             die("cannot bind /dev into %s (root?)" % root)
+        if rdev and subprocess.call(["mount", "--make-rprivate", os.path.join(root, "dev")]) != 0:
+            subprocess.call(["umount", "-l", os.path.join(root, "dev")])
+            die("cannot make %s/dev private" % root)
         mounted.append(os.path.join(root, "dev"))
+        if rdev:
+            detach.append(os.path.join(root, "dev"))
         if subprocess.call(["mount", "-t", "proc", "proc", os.path.join(root, "proc")]) != 0:
-            unmount(mounted)
+            unmount(mounted, detach)
             die("cannot mount proc in %s" % root)
         mounted.append(os.path.join(root, "proc"))
         if sysfs:
             sd = os.path.join(root, "sys")
             os.makedirs(sd, exist_ok=True)
             if subprocess.call(["mount", "-t", "sysfs", "sysfs", sd]) != 0:
-                unmount(mounted)
+                unmount(mounted, detach)
                 die("cannot mount sysfs in %s" % root)
             mounted.append(sd)
             if subprocess.call(["mount", "-t", "cgroup2", "cgroup2", os.path.join(sd, "fs", "cgroup")]) != 0:
-                unmount(mounted)
+                unmount(mounted, detach)
                 die("cannot mount cgroup2 in %s" % root)
             mounted.append(os.path.join(sd, "fs", "cgroup"))
     if pid1:
@@ -240,12 +263,12 @@ def main(argv):
     if st is None:
         os.kill(pid, 9)
         os.waitpid(pid, 0)
-        unmount(mounted)
+        unmount(mounted, detach)
         sys.stderr.write("linux-tty: %s did not end\n" % prog[0])
         open(out + ".rc", "w").write("none\n")
         return 1
     open(out + ".rc", "w").write("%d\n" % os.waitstatus_to_exitcode(st))
-    unmount(mounted)
+    unmount(mounted, detach)
     return 0 if ok else 1
 
 
