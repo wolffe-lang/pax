@@ -22,6 +22,16 @@
 #     status`, lobo at user/lobo.pin built by tools/mklobo — which
 #     prints what the server answered; then `status`, `reload` and
 #     `stop` from ctl's own client, and the name unlinked.
+#   - px47 (P5 U7): the three again AS A USER (probes-user, soak-user,
+#     ctl-user): pid 1 is `/bin/as 1000 1000 /bin/unixprobe` (or ctl),
+#     px39's `as`; the image holds the directories the programs make
+#     their names in (/u, /logs) as the user's own, 0755, by
+#     tools/mkinitramfs's owners, since a user may not make them in
+#     root's /. The Linux side is the same binaries as the same user in a
+#     throwaway container (tools/linux-tree --owners). U1, U3 to U7 hold
+#     for them as for root's; U2 for probes-user holds its `~` lines and
+#     refusal lines to PAX's own recorded text,
+#     tests/mpx4-unix.d/probes-user.pax.
 #
 #   tests/mpx4-unix [--images DIR | --no-boot | --only build | --only linux --images DIR]
 #                   [--lobo DIR] [--firmware bios|uefi|both] [--tier native|release|both]
@@ -107,10 +117,13 @@ case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
 [ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
 need readelf python3
 
-SESSIONS="probes soak ctl"
-init_of() { case $1 in ctl) echo ctl ;; *) echo unixprobe ;; esac; }
-args_of() { case $1 in soak) echo soak ;; *) echo ;; esac; }
-mem_of() { case $1 in ctl) echo 512M ;; *) echo 256M ;; esac; }
+SESSIONS="probes soak ctl probes-user soak-user ctl-user"
+prog_of() { case $1 in ctl*) echo ctl ;; *) echo unixprobe ;; esac; }
+init_of() { case $1 in *-user) echo as ;; *) prog_of "$1" ;; esac; } # px47: pid 1's file
+args_of() { case $1 in soak) echo soak ;; *-user) echo "1000 1000 /bin/$(prog_of "$1")$(a=$(args_of "${1%-user}"); echo "${a:+ $a}")" ;; *) echo ;; esac; }
+base_of() { echo "${1%-user}"; }
+owners_of() { case $1 in probes-user|soak-user) echo '/u 755 1000 1000' ;; ctl-user) echo '/logs 755 1000 1000' ;; esac; }
+mem_of() { case $1 in ctl*) echo 512M ;; *) echo 256M ;; esac; }
 REFUSED='~refused: socket SOCK_RAW ESOCKTNOSUPPORT, socket SOCK_SEQPACKET ESOCKTNOSUPPORT, socket SOCK_DGRAM ESOCKTNOSUPPORT, setsockopt SO_REUSEADDR ENOPROTOOPT, bind abstract EINVAL, bind autobind EINVAL'
 REFUSALS='syscall 41: refused: an AF_UNIX socket of a type PAX has on a path neither (SOCK_STREAM only), -94|syscall 41: refused: an AF_UNIX socket of a type PAX has on a path neither (SOCK_STREAM only), -94|syscall 41: refused: an AF_UNIX socket of a type PAX has on a path neither (SOCK_STREAM only), -94|syscall 49: refused: an abstract name or autobind (PAX names Unix sockets by path only), -22|syscall 49: refused: an abstract name or autobind (PAX names Unix sockets by path only), -22|syscall 54: refused: an option set on a Unix socket (PAX has none to set), -92'
 SEQ_LINE='~seqpacket: a message of 8000 bytes: -EMSGSIZE'
@@ -134,9 +147,10 @@ linux_side() { # dir -> reasons on stdout
     mkdir -p "$1/linux"
     for s in $SESSIONS; do
         i=$(init_of "$s") a=$(args_of "$s")
+        own=(); [ -f "$1/$s.owners" ] && own=(--owners "$1/$s.owners") # px47
         # shellcheck disable=SC2086
         if "$PAX_ROOT/tools/linux-tree" --root "$1/$s/root" --keys "$1/none.keys" --prompt '$ ' --argv0 "/bin/$i" --size 64m --sys \
-            "$1/linux/$s.tty" -- "/bin/$i" $a; then
+            ${own[@]+"${own[@]}"} "$1/linux/$s.tty" -- "/bin/$i" $a; then
             say "  linux $s: $(wc -c < "$1/linux/$s.tty" | tr -d ' ') bytes, status $(cat "$1/linux/$s.tty.rc")"
         else
             printf ' tools/linux-tree %s;' "$s"
@@ -160,6 +174,7 @@ if [ -z "$images" ]; then
     why=
     "$PAX_ROOT/tools/mkunix" "$work/bin" > "$work/unix.txt" || why+=" tools/mkunix;"
     sed 's/^/  program: /' "$work/unix.txt" >&2
+    "$PAX_ROOT/tools/mkas" "$work/cred" > "$work/cred.txt" && cp "$work/cred/as" "$work/bin/as" || why+=" tools/mkas;" # px47
     if [ -n "$lobodir" ]; then
         cp "$lobodir/lobo" "$work/bin/lobo" || why+=" no $lobodir/lobo;"
         say "lobo from $lobodir"
@@ -172,16 +187,21 @@ if [ -z "$images" ]; then
     for s in $SESSIONS; do
         r=$work/$s/root
         mkdir -p "$r/bin" "$r/etc"
-        i=$(init_of "$s") a=$(args_of "$s")
-        cp "$work/bin/$i" "$r/bin/$i" || why+=" no $i;"
-        if [ "$s" = ctl ]; then
+        i=$(init_of "$s") a=$(args_of "$s") pg=$(prog_of "$s")
+        cp "$work/bin/$pg" "$r/bin/$pg" || why+=" no $pg;"
+        if [ "$i" = as ]; then # px47: the user's image
+            cp "$work/bin/as" "$r/bin/as" || why+=" no as;"
+            owners_of "$s" > "$work/$s.owners"
+            while read -r d _; do mkdir -p "$r$d"; done < "$work/$s.owners"
+        fi
+        if [ "$(base_of "$s")" = ctl ]; then
             cp "$work/bin/lobo" "$r/bin/lobo" || why+=" no lobo;"
             mkdir -p "$r/conf"
             cp "$PAX_ROOT/user/unix/lobo.conf" "$r/conf/lobo.conf"
         fi
         echo "/bin/$i${a:+ $a}" > "$r/etc/pax-run"
     done
-    for f in "$work/bin/unixprobe" "$work/bin/ctl" "$work/bin/lobo"; do
+    for f in "$work/bin/unixprobe" "$work/bin/ctl" "$work/bin/lobo" "$work/bin/as"; do
         r=$(static_ok "$f") || why+=" $r;"
         say "  program: ${f#"$work"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
     done
@@ -193,6 +213,9 @@ if [ -z "$images" ]; then
             mode=644; [ -x "$r/$f" ] && mode=755
             pairs+=("/$f=$r/$f:$mode")
         done
+        if [ -f "$work/$s.owners" ]; then # px47: the user's directories
+            while read -r d m u g; do pairs+=("$d/:$m:$u:$g"); done < "$work/$s.owners"
+        fi
         if "$PAX_ROOT/tools/mkinitramfs" "$work/$s.cpio" "${pairs[@]}" > "$work/$s.initramfs.txt"; then
             sed "s/^/  initramfs $s: /" "$work/$s.initramfs.txt" >&2
         else
@@ -217,7 +240,7 @@ if [ -z "$images" ]; then
         fi
     done
     if [ "$only" = build ]; then
-        [ -z "$why" ] && say "PASS U0 (build): kmain_console built ($tiers), every program static, three images a tier" || bad "U0 (build):$why"
+        [ -z "$why" ] && say "PASS U0 (build): kmain_console built ($tiers), every program static, six images a tier" || bad "U0 (build):$why"
         exit "$fail"
     fi
     if [ "$(uname -s)" != Linux ]; then
@@ -225,7 +248,7 @@ if [ -z "$images" ]; then
     else
         why+=$(linux_side "$work")
     fi
-    [ -z "$why" ] && say "PASS U0: kmain_console built ($tiers), every program static, three images a tier, Linux ran $(echo $SESSIONS | wc -w | tr -d ' ') sessions, each in a throwaway container" || bad "U0:$why"
+    [ -z "$why" ] && say "PASS U0: kmain_console built ($tiers), every program static, six images a tier, Linux ran $(echo $SESSIONS | wc -w | tr -d ' ') sessions, each in a throwaway container" || bad "U0:$why"
     images=$work
     if [ "$noboot" = 1 ]; then
         [ "$fail" = 0 ] && say "mpx4-unix build (U0): PASS (no boot: --no-boot)" || say "mpx4-unix build: FAIL"
@@ -271,7 +294,7 @@ for leg in $legs; do
     for tier in $tiers; do
         [ -z "$stopped" ] || break
         for s in $SESSIONS; do
-            i=$(init_of "$s")
+            i=$(init_of "$s") b=$(base_of "$s")
             id="$tier $leg $s"
             before=$fail
             log=$PAX_BUILD/mpx4-unix-$tier-$leg-$s.serial.log
@@ -321,20 +344,32 @@ for leg in $legs; do
                 lines_match "$nr" "$NORESERVE" || why+=" the MAP_NORESERVE lines '$nr';"
                 [ -z "$why" ] && say "PASS U2 $id: $g; $q; $(printf '%s' "$pl" | tr '\t' ' '); $nr (Linux here: $(grep -m1 '^~refused' "$out.linux"); $(grep '^~noreserve' "$out.linux" | paste -sd'|' -))" || bad "U2 $id:$why"
             fi
+            # px47: a user's `~` lines and refusals, PAX's own recorded text.
+            if [ "$s" = probes-user ]; then
+                why=
+                rec=$here/mpx4-unix.d/probes-user.pax
+                { grep '^~' "$out" | sed -E -e 's/^(~  VmRSS:\t).*/\1*/' -e 's/^(~noreserve: VmRSS )[0-9]+/\1*/'; printf '%s\n' "$rf" | tr '|' '\n' | sed '/^$/d; s/^/refused: /'; } > "$out.pax"
+                if [ ! -f "$rec" ]; then
+                    why+=" no recording $rec;"
+                elif ! cmp -s "$rec" "$out.pax"; then
+                    why+=" PAX's own answers differ from the recording: $(diff "$rec" "$out.pax" | head -n 10 | cut -c1-300 | tr '\n' '|');"
+                fi
+                [ -z "$why" ] && say "PASS U2 $id: $(wc -l < "$out.pax" | tr -d ' ') lines (\`~\` and refusals) are the recording's ($(sha256_of "$out.pax" | cut -c1-12)…)" || bad "U2 $id:$why"
+            fi
 
             # U3: what PAX lacks; who was killed.
             why=
             ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
             [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
-            if [ "$s" = soak ]; then
+            if [ "$b" = soak ]; then
                 [ "$rf" = "$STACK_REFUSAL" ] || why+=" refusals '$rf', not '$STACK_REFUSAL';"
-            elif [ "$s" != probes ]; then
+            elif [ "$b" != probes ]; then
                 [ -z "$rf" ] || why+=" refusals '$rf';"
             fi
             kl=$(grep -c 'user: [^ ]* pid [0-9]* killed: ' "$norm")
-            want_k=0; [ "$s" = probes ] && want_k=2
+            want_k=0; [ "$b" = probes ] && want_k=2
             [ "$kl" = "$want_k" ] || why+=" $kl killed: lines, not $want_k ($(grep -m1 ' killed: ' "$norm" | cut -c1-120));"
-            if [ "$s" = probes ]; then
+            if [ "$b" = probes ]; then
                 grep -q 'user: unixprobe pid [0-9]* killed: page fault vector 14 ' "$norm" || why+=" the guard's touch was not a page fault;"
                 grep -q 'user: unixprobe pid [0-9]* killed: SIGPIPE, ' "$norm" || why+=" the send without MSG_NOSIGNAL was not SIGPIPE;"
             fi
@@ -362,7 +397,7 @@ for leg in $legs; do
             [ -z "$why" ] && say "PASS U4 $id: $fl; $tl; $ul" || bad "U4 $id:$why"
 
             # U5: the soak's census.
-            if [ "$s" = soak ]; then
+            if [ "$b" = soak ]; then
                 why=
                 cl=$(grep -c '^user: unixprobe pid 1 unix: [0-9]* connections since boot' "$norm")
                 [ "$cl" = 4 ] || why+=" $cl census lines, not 4;"
@@ -375,7 +410,7 @@ for leg in $legs; do
             fi
 
             # U6: lobo's own client.
-            if [ "$s" = ctl ]; then
+            if [ "$b" = ctl ]; then
                 why=
                 grep -qx 'lobo -c conf/lobo.conf status: exit 0' "$out" || why+=" lobo's client did not exit 0 ($(grep -m1 '^lobo -c' "$out"));"
                 grep -q '^control: unix:logs/control.sock (px34' "$out" || why+=" lobo's client did not print the answer;"
