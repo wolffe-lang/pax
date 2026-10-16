@@ -23,9 +23,22 @@
 #     modes set and listed, times set with `touch -t`, `-a`, `-m`, `-r`
 #     and read back with `stat`, hard and symbolic links made, followed,
 #     replaced and removed, `readlink`, `cp -P`.
+#   - px47 (P5 U7): every one of them again AS A USER, beside root's.
+#     `tree` and `tree soak` as 1000:1000 through px39's `as` (pid 1
+#     is `/bin/as 1000 1000 /bin/tree`; the image holds `/t` as the
+#     user's own, 0755, made by tools/mkinitramfs's owners, since a
+#     user may not make it in root's `/`); shell-tree and
+#     shell-changes typed after `su pax` (px46) in the user's home
+#     (user/console/shell-tree-user.keys, shell-changes-user.keys),
+#     with what only root may do refused: a write to /etc/motd, a name
+#     made in /etc or /bin, `rm` of /etc/motd, `rmdir /bin`, `chmod`,
+#     `touch` and `ln` of root's file, `chown` to root. The Linux side
+#     of each is the same binaries as the same user in a throwaway
+#     container (tools/linux-tree --owners: the image's owners and
+#     modes), so no host account and no root on the host.
 #
 #   tests/mpx3-tree [--images DIR | --no-boot | --only build | --only linux --images DIR]
-#                   [--pelt DIR] [--bore DIR]
+#                   [--pelt DIR] [--bore DIR] [--su DIR]
 #                   [--firmware bios|uefi|both] [--tier native|release|both]
 #
 # **Nothing under test runs on a host.** The Linux side of every session
@@ -102,6 +115,16 @@
 #      steps on PAX).
 #   T8 the end: `PAX: init … ended with status <s>; nothing left to
 #      run`, `halt`, and qemu-halt holds the machine halted.
+# The user sessions (px47) are held to the same T1, T3, T4, T5 (soak-
+# user), T6 (the two typed ones) and T8; T2 for probes-user holds its
+# `~` lines and refusal lines to PAX's own recorded text,
+# tests/mpx3-tree.d/probes-user.pax (a user's answers where Linux's
+# depend on more than the ABI, and what PAX refuses by name before a
+# user's check). T4 for them: nothing of root's is changed (the tree
+# keeps /etc/pax-run and /etc/motd), and each typed session leaves two
+# history files, root's /.sh_history and the user's
+# /home/pax/.sh_history (pelt keeps one per HOME), and the page of
+# entries the user's home, empty in the image, gained.
 # The probes session of the first leg runs first, and the suite stops
 # at its first failure: `stopped early`. A boot ends at the kernel's
 # `halt` or at a `PANIC` line, whichever comes (a kernel that panics is
@@ -116,8 +139,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 grep() { command grep -a "$@"; }
 
-images= legs=both tiers=both noboot=0 only= peltdir= boredir=
-usage="usage: tests/mpx3-tree [--images DIR | --no-boot | --only build | --only linux --images DIR] [--pelt DIR] [--bore DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
+images= legs=both tiers=both noboot=0 only= peltdir= boredir= sudir=
+usage="usage: tests/mpx3-tree [--images DIR | --no-boot | --only build | --only linux --images DIR] [--pelt DIR] [--bore DIR] [--su DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
 while [ $# -gt 0 ]; do
     case $1 in
         --images)   images=$2; shift 2 ;;
@@ -125,6 +148,7 @@ while [ $# -gt 0 ]; do
         --only)     only=$2; shift 2 ;;
         --pelt)     peltdir=$2; shift 2 ;;
         --bore)     boredir=$2; shift 2 ;;
+        --su)       sudir=$2; shift 2 ;;
         --firmware) legs=$2; shift 2 ;;
         --tier)     tiers=$2; shift 2 ;;
         *)          die "$usage" ;;
@@ -137,11 +161,13 @@ case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
 need readelf python3
 
 BORE="cat echo env false head ls readlink sleep stat tail true wc mkdir rmdir rm mv cp chmod touch ln" # px36: bu22's three
-SESSIONS="probes soak speed shell-tree shell-tree-ps2 shell-changes shell-changes-ps2"
-LINUX_SESSIONS="probes soak speed shell-tree shell-changes"
-image_of() { case $1 in shell-*) echo shell ;; *) echo "$1" ;; esac; }
-init_of() { case $1 in shell-*) echo pelt ;; *) echo tree ;; esac; }
-args_of() { case $1 in soak|speed) echo "$1" ;; *) echo ;; esac; }
+USER_BORE="chown chgrp" # px47: the user's image also has bu24's two owner tools
+SESSIONS="probes soak speed shell-tree shell-tree-ps2 shell-changes shell-changes-ps2 probes-user soak-user shell-tree-user shell-changes-user"
+LINUX_SESSIONS="probes soak speed shell-tree shell-changes probes-user soak-user shell-tree-user shell-changes-user"
+image_of() { case $1 in shell-*-user) echo shell-user ;; shell-*) echo shell ;; *) echo "$1" ;; esac; }
+init_of() { case $1 in shell-*) echo pelt ;; *-user) echo as ;; *) echo tree ;; esac; }
+args_of() { case $1 in soak|speed) echo "$1" ;; probes-user) echo "1000 1000 /bin/tree" ;; soak-user) echo "1000 1000 /bin/tree soak" ;; *) echo ;; esac; }
+user_of() { case $1 in *-user) echo 1 ;; *) echo 0 ;; esac; }
 kbd_of() { case $1 in *-ps2) echo ps2 ;; *) echo serial ;; esac; }
 linux_of() { case $1 in *-ps2) echo "${1%-ps2}" ;; *) echo "$1" ;; esac; }
 mem_of() { case $1 in shell-*) echo 512M ;; *) echo 256M ;; esac; }
@@ -164,8 +190,9 @@ bad() { say "FAIL $*"; fail=1; }
 
 # A transcript with the date of every file made in the session masked
 # (`ls -l`'s `Mon DD HH:MM`; a date with a year is left as it is).
+# px47: whoever owns it (the user's sessions list `pax pax` files).
 mask() {
-    sed -E 's/^([-dl][-rwxsStT]{9} +[0-9]+ root root +[0-9]+) [A-Z][a-z]{2} +[0-9]+ +[0-9]{2}:[0-9]{2} /\1 DATE /' "$1"
+    sed -E 's/^([-dl][-rwxsStT]{9} +[0-9]+ [^ ]+ +[^ ]+ +[0-9]+) [A-Z][a-z]{2} +[0-9]+ +[0-9]{2}:[0-9]{2} /\1 DATE /' "$1"
 }
 
 static_ok() { # file -> reason on failure
@@ -181,9 +208,10 @@ linux_side() { # dir -> reasons on stdout
         p=$(image_of "$s") i=$(init_of "$s") a=$(args_of "$s")
         keys=$1/none.keys; [ "$i" = pelt ] && keys=$(keys_of "$s")
         size=64m; [ "$i" = pelt ] && size=512m
+        own=(); [ -f "$1/$p.owners" ] && own=(--owners "$1/$p.owners") # px47: the user's images
         # shellcheck disable=SC2086
         if "$PAX_ROOT/tools/linux-tree" --root "$1/$p/root" --keys "$keys" --prompt "$PROMPT" --argv0 "/bin/$i" --size "$size" \
-            "$1/linux/$s.tty" -- "/bin/$i" $a; then
+            ${own[@]+"${own[@]}"} "$1/linux/$s.tty" -- "/bin/$i" $a; then
             say "  linux $s: $(wc -c < "$1/linux/$s.tty" | tr -d ' ') bytes, status $(cat "$1/linux/$s.tty.rc"), $(wc -l < "$1/linux/$s.tty.after" | tr -d ' ') names left"
         else
             printf ' tools/linux-tree %s;' "$s"
@@ -208,6 +236,13 @@ if [ -z "$images" ]; then
     sh=$work/shell/root
     "$PAX_ROOT/tools/mkprobes" "$work/bin" > "$work/probes.txt" || why+=" tools/mkprobes;"
     sed 's/^/  program: /' "$work/probes.txt" >&2
+    "$PAX_ROOT/tools/mkas" "$work/cred" > "$work/cred.txt" || why+=" tools/mkas;" # px47: `as`
+    if [ -n "$sudir" ]; then
+        mkdir -p "$work/subin" && cp "$sudir/su" "$work/subin/su" || why+=" no $sudir/su;"
+        say "su from $sudir"
+    else
+        "$PAX_ROOT/tools/mksu" "$work/subin" > "$work/su.txt" || why+=" tools/mksu;"
+    fi
     if [ -n "$peltdir" ]; then
         cp "$peltdir/pelt" "$sh/bin/pelt" || why+=" no $peltdir/pelt;"
         say "pelt from $peltdir"
@@ -218,7 +253,7 @@ if [ -z "$images" ]; then
     fi
     if [ -z "$boredir" ]; then
         # shellcheck disable=SC2086
-        "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
+        "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE $USER_BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
         boredir=$work/bore
     else
         say "boreutils from $boredir"
@@ -239,18 +274,57 @@ if [ -z "$images" ]; then
         a=$(args_of "$s")
         echo "/bin/tree${a:+ $a}" > "$r/etc/pax-run"
     done
-    for f in "$sh"/bin/* "$work/bin/tree"; do
+    # px47: the user's images. `tree` as 1000:1000 through `as`, with
+    # /t the user's own (a user may not make it in root's /); the
+    # shell's tree with su, the accounts (px46's lines, R3), the
+    # user's home and chown/chgrp.
+    for s in probes-user soak-user; do
+        r=$work/$s/root
+        mkdir -p "$r/bin" "$r/etc" "$r/t"
+        cp "$work/bin/tree" "$r/bin/tree" || why+=" no tree;"
+        cp "$work/cred/as" "$r/bin/as" || why+=" no as;"
+        echo "/bin/as $(args_of "$s")" > "$r/etc/pax-run"
+        printf '/t 755 1000 1000\n' > "$work/$s.owners"
+    done
+    su_=$work/shell-user/root
+    mkdir -p "$su_"
+    cp -R "$sh/." "$su_/"
+    mkdir -p "$su_/home/pax"
+    for u in $USER_BORE; do
+        cp "$boredir/$u" "$su_/bin/$u" || why+=" no $boredir/$u;"
+    done
+    cp "$work/subin/su" "$su_/bin/su" || why+=" no su;"
+    printf 'root:x:0:0:root:/:/bin/pelt\npax:x:1000:1000:pax:/home/pax:/bin/pelt\nlobo:x:990:990:lobo:/srv/lobo:/bin/false\n' > "$su_/etc/passwd"
+    printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\n' > "$su_/etc/group"
+    printf 'ENV_PATH\tPATH=/bin\nENV_SUPATH\tPATH=/bin\n' > "$su_/etc/login.defs"
+    printf '/home 755 0 0\n/home/pax 755 1000 1000\n' > "$work/shell-user.owners"
+    for f in "$sh"/bin/* "$su_"/bin/su "$su_"/bin/chown "$su_"/bin/chgrp "$work/bin/tree" "$work/cred/as"; do
         r=$(static_ok "$f") || why+=" $r;"
         say "  program: ${f#"$work"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
     done
-    for p in probes soak speed shell; do
+    for p in probes soak speed shell probes-user soak-user shell-user; do
         pairs=()
         r=$work/$p/root
+        if [ -f "$work/$p.owners" ]; then
+            # px47: every name, with the owners and modes of $p.owners (a
+            # directory with no line is implied, root's 0755)
+            while read -r f; do
+                f=${f#.}
+                line=$(awk -v p="$f" '$1 == p { print $2 ":" $3 ":" $4 }' "$work/$p.owners")
+                if [ -d "$r$f" ]; then
+                    [ -n "$line" ] && pairs+=("$f/:$line")
+                else
+                    mode=644; [ -x "$r$f" ] && mode=755
+                    pairs+=("$f=$r$f:${line:-$mode}")
+                fi
+            done < <(cd "$r" && find . -mindepth 1 | LC_ALL=C sort)
+        else
         for f in $(cd "$r" && find . -type f | sort); do
             f=${f#./}
             mode=644; [ -x "$r/$f" ] && mode=755
             pairs+=("/$f=$r/$f:$mode")
         done
+        fi
         if "$PAX_ROOT/tools/mkinitramfs" "$work/$p.cpio" "${pairs[@]}" > "$work/$p.initramfs.txt"; then
             sed "s/^/  initramfs $p: /" "$work/$p.initramfs.txt" >&2
         else
@@ -263,7 +337,7 @@ if [ -z "$images" ]; then
         log=$work/$tier/kmain_console.build-kernel.log
         if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
             cat "$log" >&2
-            for p in probes soak speed shell; do
+            for p in probes soak speed shell probes-user soak-user shell-user; do
                 "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
                     --add "$work/$p.cpio" initramfs.cpio "$elf" "$work/$tier/tree-$p.iso" >/dev/null \
                     || why+=" $tier tree-$p: mkimage;"
@@ -275,7 +349,7 @@ if [ -z "$images" ]; then
         fi
     done
     if [ "$only" = build ]; then
-        [ -z "$why" ] && say "PASS T0 (build): kmain_console built ($tiers), every program static, four images a tier" || bad "T0 (build):$why"
+        [ -z "$why" ] && say "PASS T0 (build): kmain_console built ($tiers), every program static, seven images a tier" || bad "T0 (build):$why"
         exit "$fail"
     fi
     if [ "$(uname -s)" != Linux ]; then
@@ -283,7 +357,7 @@ if [ -z "$images" ]; then
     else
         why+=$(linux_side "$work")
     fi
-    [ -z "$why" ] && say "PASS T0: kmain_console built ($tiers), every program static, four images a tier, Linux ran $(echo $LINUX_SESSIONS | wc -w | tr -d ' ') sessions, each in a throwaway container" || bad "T0:$why"
+    [ -z "$why" ] && say "PASS T0: kmain_console built ($tiers), every program static, seven images a tier, Linux ran $(echo $LINUX_SESSIONS | wc -w | tr -d ' ') sessions, each in a throwaway container" || bad "T0:$why"
     images=$work
     if [ "$noboot" = 1 ]; then
         [ "$fail" = 0 ] && say "mpx3-tree build (T0): PASS (no boot: --no-boot)" || say "mpx3-tree build: FAIL"
@@ -372,11 +446,25 @@ for leg in $legs; do
                 [ -z "$why" ] && say "PASS T2 $id: $g; $x; $lm; $FIXED; $SETID; $FAR; $NREF refusal lines, $NREF counted (Linux here: $(grep -m1 '^~refused' "$out.linux"); $(grep -m1 '^~exec' "$out.linux"); $(grep -m1 '^~limits' "$out.linux"); $(grep -m1 '^~fixed' "$out.linux"); $(grep -m1 '^~mode' "$out.linux"); $(grep -m1 '^~time' "$out.linux"))" || bad "T2 $id:$why"
             fi
 
+            # T2 for a user (px47): the `~` lines and the refusal lines are
+            # PAX's own recorded answers for 1000:1000.
+            if [ "$s" = probes-user ]; then
+                why=
+                rec=$here/mpx3-tree.d/probes-user.pax
+                { grep '^~' "$out"; printf '%s\n' "$rf" | tr '|' '\n' | sed '/^$/d; s/^/refused: /'; } > "$out.pax"
+                if [ ! -f "$rec" ]; then
+                    why+=" no recording $rec;"
+                elif ! cmp -s "$rec" "$out.pax"; then
+                    why+=" PAX's own answers differ from the recording: $(diff "$rec" "$out.pax" | head -n 10 | cut -c1-300 | tr '\n' '|');"
+                fi
+                [ -z "$why" ] && say "PASS T2 $id: $(wc -l < "$out.pax" | tr -d ' ') lines (\`~\` and refusals) are the recording's ($(sha256_of "$out.pax" | cut -c1-12)…); Linux's \`~\` lines here: $(grep -c '^~' "$out.linux")" || bad "T2 $id:$why"
+            fi
+
             # T3: what PAX lacks; nobody killed.
             why=
             ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
             [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
-            if [ "$s" != probes ]; then
+            if [ "$s" != probes ] && [ "$s" != probes-user ]; then
                 [ -z "$rf" ] || why+=" refusals '$rf';"
             fi
             kl=$(grep -c 'user: [^ ]* pid [0-9]* killed: ' "$norm")
@@ -397,18 +485,23 @@ for leg in $legs; do
             # and root's HOME is /: a typed session leaves that file, one
             # inode and its one page, on PAX and on Linux (T6).
             [ "$p" != shell ] || { left=$((left + 1)); hist=1; }
+            # px47: a user's typed session leaves two, root's and the
+            # user's (/home/pax/.sh_history), the second in a home that
+            # had no entry, so the home's first page of entries too; a
+            # user changes nothing of root's.
+            [ "$p" != shell-user ] || { left=$((left + 3)); hist=2; }
             if [ -z "$fb" ] || [ -z "$th" ]; then
                 why+=" no frames line or no tree line ('$fl' / '$tl');"
             else
                 grew=$((tt - ttb)) # the inode table's frames are never given back
                 [ $((fb - fa)) = $((left + grew)) ] || why+=" $((fb - fa)) frames not back, not $left and the inode table's $grew ('$fl');"
                 [ $((th - tb)) = $((left + grew)) ] || why+=" the tree holds $((th - tb)) frames more than when made, not $left and the inode table's $grew ('$tl');"
-                [ "$ti" = $((tib + hist)) ] || why+=" the tree has $ti inodes, $tib when made$( [ "$hist" = 1 ] && echo ' and the history file');"
+                [ "$ti" = $((tib + hist)) ] || why+=" the tree has $ti inodes, $tib when made$( [ "$hist" != 0 ] && echo " and $hist history files");"
             fi
             [ -z "$why" ] && say "PASS T4 $id: $fl; $tl" || bad "T4 $id:$why"
 
             # T5: the soak's census and the fill.
-            if [ "$s" = soak ]; then
+            if [ "$s" = soak ] || [ "$s" = soak-user ]; then
                 why=
                 cl=$(grep -c '^user: tree pid 1 tree: [0-9]* files removed since boot' "$norm")
                 [ "$cl" = 4 ] || why+=" $cl census lines, not 4;"
@@ -429,12 +522,12 @@ for leg in $legs; do
             fi
 
             # T6: the tree intact, on Linux.
-            if [ "$s" = shell-tree ] || [ "$s" = shell-changes ]; then
-                want=$( (cd "$images/shell/root" 2>/dev/null && { find . -mindepth 1; echo ./.sh_history; } | LC_ALL=C sort) ) # px46: pelt's history file (sh12)
+            if [ "$s" = shell-tree ] || [ "$s" = shell-changes ] || [ "$s" = shell-tree-user ] || [ "$s" = shell-changes-user ]; then
+                want=$( (cd "$images/$p/root" 2>/dev/null && { find . -mindepth 1; echo ./.sh_history; [ "$p" != shell-user ] || echo ./home/pax/.sh_history; } | LC_ALL=C sort) ) # px46: pelt's history file (sh12); px47: and the user's
                 if [ -z "$want" ]; then
                     say "PASS T6 $id: (the shell's tree is not on this host; the build host compared it)"
                 elif [ "$(cat "$lx/$s.tty.after")" = "$want" ]; then
-                    say "PASS T6 $id: after the session Linux's root holds the $(printf '%s\n' "$want" | wc -l | tr -d ' ') names it started with and pelt's history file: rm -rf / removed nothing, the session removed what it made"
+                    say "PASS T6 $id: after the session Linux's root holds the $(printf '%s\n' "$want" | wc -l | tr -d ' ') names it started with and pelt's history file$( [ "$p" = shell-user ] && echo "s (root's and the user's)"): rm -rf / removed nothing, the session removed what it made"
                 else
                     bad "T6 $id: the root on Linux after the session: $(diff <(printf '%s\n' "$want") "$lx/$s.tty.after" | head -n 8 | tr '\n' '|')"
                 fi
