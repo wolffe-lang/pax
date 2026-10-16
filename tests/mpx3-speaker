@@ -34,6 +34,29 @@
 #            (a dynamic, a chord of five pitches), `play chords` (the
 #            chord study, user/tunes/chords), `echo $?`, `exit` (every
 #            tier and firmware)
+#   speaker-user  px47 (P5 U7): user/console/speaker-user.keys, AS A
+#            USER: `su pax` (px46) at root's prompt, `id`, then the
+#            speaker session's `play`, a refused file, `hold`, `play
+#            scale`; `exit` twice. Held to user/console/speaker-user.expect
+#            and to K2 to K4 as `speaker` is: a user sounds the speaker
+#            as root does. Linux's row is px45's measurement (KIOCSOUND
+#            and KDMKTONE answer 0 on the caller's controlling virtual
+#            terminal, whoever it is; PAX's console is every process's,
+#            `console.controlling`); a pseudo-terminal has no speaker, so
+#            no container can be its reference (every tier and firmware)
+#   beep-user  px47: user/console/beep-user.keys, AS A USER: `beep`
+#            through /dev/tty0 and through /dev/console, and pelt's `>`
+#            to each, all refused (devtmpfs's modes: tty0 0620 root:tty,
+#            console 0600; px45). Held to real root's Linux, recorded:
+#            kasumi's kernel under QEMU, the same archive as its root,
+#            the session typed on a pseudo-terminal by notes/px46/vmtty.c
+#            (notes/px47/linux-vm.sh; tests/mpx3-speaker.d/linux/
+#            beep-user.tty, vm-beep-user.meta), both sides normalised as
+#            the serial log is; no tone (every tier and firmware)
+# The image also holds px46's accounts (/etc/passwd, /etc/group,
+# /etc/login.defs), `su`, boreutils' `id` and the user's home
+# /home/pax (1000:1000, by tools/mkinitramfs's owners) for the two user
+# sessions; root's sessions do not read them.
 # Assertions, per tier, firmware and session:
 #   K0 build: kmain_console built; every program static (ET_EXEC, no
 #      PT_INTERP); the initramfs and the image built (digests printed).
@@ -125,7 +148,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 grep() { command grep -a "$@"; }
 
-images= legs=both tiers=both noboot=0 peltdir= playdir= beepdir=
+images= legs=both tiers=both noboot=0 peltdir= playdir= beepdir= sudir= boredir=
 given= # --images was given: nothing is built here
 while [ $# -gt 0 ]; do
     case $1 in
@@ -134,9 +157,11 @@ while [ $# -gt 0 ]; do
         --pelt)     peltdir=$2; shift 2 ;;
         --play)     playdir=$2; shift 2 ;;
         --beep)     beepdir=$2; shift 2 ;;
+        --su)       sudir=$2; shift 2 ;;
+        --bore)     boredir=$2; shift 2 ;;
         --firmware) legs=$2; shift 2 ;;
         --tier)     tiers=$2; shift 2 ;;
-        *)          die "usage: tests/mpx3-speaker [--images DIR | --no-boot] [--pelt DIR] [--play DIR] [--beep DIR] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+        *)          die "usage: tests/mpx3-speaker [--images DIR | --no-boot] [--pelt DIR] [--play DIR] [--beep DIR] [--su DIR] [--bore DIR] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
     esac
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
@@ -224,6 +249,24 @@ if [ -z "$images" ]; then
     cp "$PAX_ROOT"/user/tunes/* "$r/usr/share/tunes/"
     cp "$PAX_ROOT"/user/play/refused/* "$r/etc/refused/"
     echo /bin/pelt > "$r/etc/pax-run"
+    # px47: the user sessions' accounts, `su` and `id`.
+    if [ -n "$sudir" ]; then
+        cp "$sudir/su" "$r/bin/su" || why+=" no $sudir/su;"
+        say "su from $sudir"
+    elif "$PAX_ROOT/tools/mksu" "$work/subin" > "$work/su.txt"; then
+        cp "$work/subin/su" "$r/bin/su"
+    else
+        why+=" tools/mksu;"
+    fi
+    if [ -z "$boredir" ]; then
+        "$PAX_ROOT/tools/mkboreutils" "$work/bore" id > "$work/bore.txt" || why+=" tools/mkboreutils;"
+        boredir=$work/bore
+    fi
+    cp "$boredir/id" "$r/bin/id" || why+=" no $boredir/id;"
+    mkdir -p "$r/home/pax"
+    printf 'root:x:0:0:root:/:/bin/pelt\npax:x:1000:1000:pax:/home/pax:/bin/pelt\nlobo:x:990:990:lobo:/srv/lobo:/bin/false\n' > "$r/etc/passwd"
+    printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\n' > "$r/etc/group"
+    printf 'ENV_PATH\tPATH=/bin\nENV_SUPATH\tPATH=/bin\n' > "$r/etc/login.defs"
     for f in "$r"/bin/*; do
         x=$(static_ok "$f") || why+=" $x;"
         say "  program: ${f#"$work"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
@@ -234,6 +277,7 @@ if [ -z "$images" ]; then
         mode=644; [ -x "$r/$f" ] && mode=755
         pairs+=("/$f=$r/$f:$mode")
     done
+    pairs+=("/home/:755:0:0" "/home/pax/:755:1000:1000") # px47: the user's home
     if "$PAX_ROOT/tools/mkinitramfs" "$work/speaker.cpio" "${pairs[@]}" > "$work/initramfs.txt"; then
         sed "s/^/  initramfs: /" "$work/initramfs.txt" >&2
     else
@@ -318,7 +362,7 @@ for leg in $legs; do
         continue
     fi
     for tier in $tiers; do
-        for s in speaker tunes beep chord; do
+        for s in speaker tunes beep chord speaker-user beep-user; do
             [ "$s" = tunes ] && { [ "$tier" = native ] && [ "$leg" = bios ] || continue; }
             id="$tier $leg $s"
             log=$PAX_BUILD/mpx3-speaker-$tier-$leg-$s.serial.log
@@ -328,6 +372,7 @@ for leg in $legs; do
             [ "$s" = tunes ] && keys=$PAX_ROOT/user/console/speaker-tunes.keys
             [ "$s" = beep ] && keys=$PAX_ROOT/user/console/speaker-beep.keys
             [ "$s" = chord ] && keys=$PAX_ROOT/user/console/speaker-chord.keys
+            # px47: speaker-user.keys, beep-user.keys are $s.keys
             rm -f "$log" "$log.verdict" "$log.typed" "$wav"
             if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
                 bad "K1 $id: no image"
@@ -378,12 +423,19 @@ PY
             [ "$s" = tunes ] && want=$PAX_ROOT/user/console/speaker-tunes.expect
             [ "$s" = beep ] && want=$PAX_ROOT/user/console/speaker-beep.expect
             [ "$s" = chord ] && want=$PAX_ROOT/user/console/speaker-chord.expect
+            if [ "$s" = beep-user ]; then
+                # px47: real root's Linux, recorded, normalised as the serial log is.
+                [ -s "$here/mpx3-speaker.d/linux/beep-user.tty" ] || why+=" no recording tests/mpx3-speaker.d/linux/beep-user.tty;"
+                serial_norm "$here/mpx3-speaker.d/linux/beep-user.tty" > "$out.linux"
+                [ -z "$(tail -c 1 "$out.linux")" ] || printf '\n' >> "$out.linux"
+                want=$out.linux
+            fi
             if ! cmp -s "$want" "$out"; then
                 why+=" the session differs from ${want#"$PAX_ROOT"/}: $(diff "$want" "$out" | head -n 12 | tr '\n' '|');"
             fi
             [ -z "$why" ] && say "PASS K1 $id: the session is ${want#"$PAX_ROOT"/} ($(wc -l < "$out" | tr -d ' ') lines, $(sha256_of "$out" | cut -c1-12)…)" || bad "K1 $id:$why"
 
-            if [ "$s" = speaker ]; then
+            if [ "$s" = speaker ] || [ "$s" = speaker-user ]; then
                 # K2: the scale: frequencies from the capture, time from the kernel.
                 why=
                 k2=$(python3 - "$notes" "$timeline" $SCALE_HZ <<'PY'
@@ -568,11 +620,17 @@ PY
             sl=$(grep -E '^speaker: [0-9]+ tones, ' "$norm" | head -n 1)
             sv=$(printf '%s\n' "$sl" | sed -n -E 's/.*port 0x61 0x([0-9a-f]{2})$/\1/p')
             st=$(printf '%s\n' "$sl" | sed -n -E 's/^speaker: ([0-9]+) tones, ([0-9]+) stopped at their process.s end, sounding ([0-9]+), .*/\1 \2 \3/p')
-            if [ "$s" = speaker ]; then wt="9 1 0"; elif [ "$s" = beep ]; then wt="2 0 0"
+            if [ "$s" = speaker ] || [ "$s" = speaker-user ]; then wt="9 1 0"; elif [ "$s" = beep ]; then wt="2 0 0"
             elif [ "$s" = chord ]; then wt="$(python3 "$PAX_ROOT/tools/arp-check" --tones "$PAX_ROOT/user/tunes/chords") 0 0"
             else wt="$((mn + en)) 0 0"; fi
+            if [ "$s" = beep-user ]; then
+                # px47: nothing sounded, so the kernel prints no summary.
+                [ -z "$sl" ] || why+=" '$sl': a tone sounded for a user refused the device;"
+                [ -z "$why" ] && sl="no tone started: no speaker line"
+            else
             [ "$st" = "$wt" ] || why+=" '$sl': not '$wt' (tones, stopped at an end, sounding);"
             [ -n "$sv" ] && [ $((0x$sv & 3)) = 0 ] || why+=" port 0x61 '0x$sv' has a gate bit set;"
+            fi
             [ -z "$why" ] && say "PASS K4 $id: $sl" || bad "K4 $id:$why"
 
             # K5: the end.
