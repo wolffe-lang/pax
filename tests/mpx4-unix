@@ -28,10 +28,9 @@
 #     their names in (/u, /logs) as the user's own, 0755, by
 #     tools/mkinitramfs's owners, since a user may not make them in
 #     root's /. The Linux side is the same binaries as the same user in a
-#     throwaway container (tools/linux-tree --owners). U1, U3 to U7 hold
-#     for them as for root's; U2 for probes-user holds its `~` lines and
-#     refusal lines to PAX's own recorded text,
-#     tests/mpx4-unix.d/probes-user.pax.
+#     throwaway container (tools/linux-tree --owners). U1 to U7 hold
+#     for them as for root's: a user's `~` lines and refusals are root's
+#     (measured: PAX answers the probes' by-name rows alike for both).
 #
 #   tests/mpx4-unix [--images DIR | --no-boot | --only build | --only linux --images DIR]
 #                   [--lobo DIR] [--firmware bios|uefi|both] [--tier native|release|both]
@@ -331,7 +330,7 @@ for leg in $legs; do
 
             # U2: what PAX answers by design.
             rf=$(grep ': refused: ' "$norm" | sed -E 's/^.*user: [^ ]+ pid [0-9]+ //' | LC_ALL=C sort | paste -sd'|' -)
-            if [ "$s" = probes ]; then
+            if [ "$b" = probes ]; then # px47: probes-user answers as root's does
                 why=
                 g=$(grep -m1 '^~refused' "$out")
                 [ "$g" = "$REFUSED" ] || why+=" '$g';"
@@ -343,18 +342,6 @@ for leg in $legs; do
                 nr=$(grep '^~noreserve' "$out" | paste -sd'|' -)
                 lines_match "$nr" "$NORESERVE" || why+=" the MAP_NORESERVE lines '$nr';"
                 [ -z "$why" ] && say "PASS U2 $id: $g; $q; $(printf '%s' "$pl" | tr '\t' ' '); $nr (Linux here: $(grep -m1 '^~refused' "$out.linux"); $(grep '^~noreserve' "$out.linux" | paste -sd'|' -))" || bad "U2 $id:$why"
-            fi
-            # px47: a user's `~` lines and refusals, PAX's own recorded text.
-            if [ "$s" = probes-user ]; then
-                why=
-                rec=$here/mpx4-unix.d/probes-user.pax
-                { grep '^~' "$out" | sed -E -e 's/^(~  VmRSS:\t).*/\1*/' -e 's/^(~noreserve: VmRSS )[0-9]+/\1*/'; printf '%s\n' "$rf" | tr '|' '\n' | sed '/^$/d; s/^/refused: /'; } > "$out.pax"
-                if [ ! -f "$rec" ]; then
-                    why+=" no recording $rec;"
-                elif ! cmp -s "$rec" "$out.pax"; then
-                    why+=" PAX's own answers differ from the recording: $(diff "$rec" "$out.pax" | head -n 10 | cut -c1-300 | tr '\n' '|');"
-                fi
-                [ -z "$why" ] && say "PASS U2 $id: $(wc -l < "$out.pax" | tr -d ' ') lines (\`~\` and refusals) are the recording's ($(sha256_of "$out.pax" | cut -c1-12)…)" || bad "U2 $id:$why"
             fi
 
             # U3: what PAX lacks; who was killed.
