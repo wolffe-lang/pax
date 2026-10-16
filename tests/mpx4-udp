@@ -164,7 +164,7 @@ need nm python3
 # a throwaway container with no network.
 linux_user_side() { # dir -> reasons on stdout
     rm -rf "$1/linux-none-user"
-    if "$PAX_ROOT/tools/linux-tree" --root "$1/root-user" --runlist "$1/none-user.run" "$1/linux-none-user"; then
+    if "$PAX_ROOT/tools/linux-tree" --root "$1/root-user" --runlist "$1/none-user.run" --size 256m "$1/linux-none-user"; then
         sed 's/^/  linux none-user: /' "$1/linux-none-user/runs.txt" | cut -c1-220 >&2
     else
         printf ' tools/linux-tree --runlist (none-user);'
@@ -387,7 +387,7 @@ one() { # tier leg way
         n=$((n + 1))
         awk -v h="run $n: $line" '$0 == h { on = 1; next } on && /^run [0-9]+: |^run: [0-9]+ commands$/ { exit } on { print }' "$norm" > "$out/$n.block"
         # px47: `as` and the program it runs are one pid (two exec lines).
-        pids=$(sed -n -E 's/^user: exec pid ([0-9]+) cr3 .*/\1/p' "$out/$n.block" | uniq | paste -sd' ' -)
+        pids=$(sed -n -E 's/^user: exec pid ([0-9]+) cr3 .*/\1/p' "$out/$n.block" | awk '!seen[$0]++' | paste -sd' ' -)
         if [ "$(printf '%s\n' $pids | grep -c .)" != 1 ]; then
             why+=" $n ($line): $(printf '%s\n' $pids | grep -c .) exec lines, not 1 ($(head -n 2 "$out/$n.block" | tr '\n' '|'));"
             continue

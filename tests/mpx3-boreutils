@@ -105,7 +105,7 @@ USER_OWNERS='/etc/secret 600 0 0
 linux_user_side() { # dir -> reasons on stdout
     rm -rf "$1/linux-user"
     printf '%s\n' "$USER_OWNERS" > "$1/user.owners"
-    if "$PAX_ROOT/tools/linux-tree" --root "$1/root-user" --runlist "$1/root-user/etc/pax-run" --owners "$1/user.owners" "$1/linux-user"; then
+    if "$PAX_ROOT/tools/linux-tree" --root "$1/root-user" --runlist "$1/root-user/etc/pax-run" --size 256m --owners "$1/user.owners" "$1/linux-user"; then
         sed 's/^/  linux user: /' "$1/linux-user/runs.txt" >&2
     else
         printf ' tools/linux-tree --runlist (the user run);'
@@ -290,8 +290,9 @@ for leg in $legs; do
             # The block: from `run k: line` to the next `run ` line.
             awk -v h="run $k: $line" '$0 == h { on = 1; next } on && /^run [0-9]+: |^run: [0-9]+ commands$/ { exit } on { print }' "$norm" > "$out/$k.block"
             m=$(printf '%s\n' "$line" | awk -F ' & ' '{ print NF }')
-            # px47: `as` and the program it runs are one pid (two exec lines).
-            pids=$(sed -n -E 's/^user: exec pid ([0-9]+) cr3 .*/\1/p' "$out/$k.block" | uniq | paste -sd' ' -)
+            # px47: `as` and the program it runs are one pid (two exec lines, not
+            # always next to each other when two commands run at once).
+            pids=$(sed -n -E 's/^user: exec pid ([0-9]+) cr3 .*/\1/p' "$out/$k.block" | awk '!seen[$0]++' | paste -sd' ' -)
             if [ "$(printf '%s\n' $pids | grep -c .)" != "$m" ]; then
                 why+=" $k ($line): $(printf '%s\n' $pids | grep -c .) exec lines, not $m ($(head -n 2 "$out/$k.block" | tr '\n' '|'));"
                 continue
