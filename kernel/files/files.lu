@@ -3586,14 +3586,20 @@ fn fd_after(a: u64, d: u64, from: u64) -> (u64, u64) {
 /// `sig` and px45's `rights` R): the process itself, a privileged one
 /// (effective user id 0), or one whose file-system user and group ids
 /// are each of the target's real, effective and saved ones while the
-/// target is dumpable. Every other node of /proc keeps its mode's
-/// answer only where `open` asks it.
+/// target is dumpable. px47: every other node of /proc and /sys is asked
+/// its mode by the class rule too, as Linux asks of procfs and sysfs
+/// (measured: a user's open of its own 0444 `/proc/self/cgroup` to write
+/// is -EACCES, root's 0; `tests/mpx4-unix`'s probes-user), where PAX
+/// opened any of them for anyone.
 fn may_read_of(a: u64, n: u64, want: u64) -> bool {
-    if ty(n) != T_SYN || !procfs.guarded(rf(n)) {
+    if ty(n) != T_SYN {
         return true
     }
     if !may(a, cred.FS, n, want) {
         return false
+    }
+    if !procfs.guarded(rf(n)) {
+        return true
     }
     let ta = syn_area(a, n)
     if ta == 0 {
