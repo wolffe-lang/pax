@@ -4,7 +4,8 @@
 # from the initramfs, their output and exit status byte-identical to the
 # same binaries on Linux.
 #
-#   tests/mpx3-boreutils [--images DIR | --no-boot] [--bore DIR]
+#   tests/mpx3-boreutils [--images DIR | --no-boot | --only build | --only linux --images DIR]
+#                        [--bore DIR]
 #                        [--firmware bios|uefi|both] [--tier native|release|both]
 #
 # The programs: boreutils (user/boreutils.pin's tree, tools/mkboreutils:
@@ -45,6 +46,18 @@
 #      reported, not asserted: under KVM these programs can finish
 #      between two ticks (hasu, px12: one boot of 32 counted 0).
 #
+# **As a user (px47, P5 U7).** A second image runs
+# user/mpx3-boreutils-user.run: every line above under px39's `as 1000
+# 1000` (the ids made whole, then the program), then root's 0600
+# /etc/secret and 0700 /etc/private (owners and modes by
+# tools/mkinitramfs) refused to the user, and read by root once. Its
+# Linux side is tools/linux-tree --runlist: the same list chrooted in a
+# throwaway container with the same owners and modes (no account and no
+# root on the host). B1 to B5 hold for it as for root's (B2: `as` and
+# the program it runs are one pid, so one command a pid); `--only
+# build` makes both images and root's Linux side and stops, `--only
+# linux --images DIR` then runs the user's Linux side from the host.
+#
 # --images DIR boots ISOs and ELFs built earlier by this script (DIR holds
 # <tier>/kmain_boreutils.{iso,elf}, root/ and linux/): any host with
 # QEMU, no wolf, no root. Without it the script builds (linux x86-64);
@@ -59,19 +72,22 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 grep() { command grep -a "$@"; }
 
-images= legs=both tiers=both noboot=0 bore=
+images= legs=both tiers=both noboot=0 bore= only=
 while [ $# -gt 0 ]; do
     case $1 in
         --images)   images=$2; shift 2 ;;
         --no-boot)  noboot=1; shift ;;
         --bore)     bore=$2; shift 2 ;;
+        --only)     only=$2; shift 2 ;;
         --firmware) legs=$2; shift 2 ;;
         --tier)     tiers=$2; shift 2 ;;
-        *)          die "usage: tests/mpx3-boreutils [--images DIR | --no-boot] [--bore DIR] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+        *)          die "usage: tests/mpx3-boreutils [--images DIR | --no-boot | --only build | --only linux --images DIR] [--bore DIR] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
     esac
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+[ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
 need readelf python3
 
 UTILS="echo cat head wc tail pwd sleep ls"
@@ -80,6 +96,26 @@ runs=$PAX_BUILD/mpx3-boreutils-runs.txt
 fail=0 ran=0
 bad() { say "FAIL $*"; fail=1; }
 HEX='0x[0-9a-f]{16}'
+# px47: the user's image: root's tree, `as`, and what only root may read.
+USER_OWNERS='/etc/secret 600 0 0
+/etc/private 700 0 0
+/etc/private/note 600 0 0'
+
+# px47: the user's run list on Linux, in a throwaway container.
+linux_user_side() { # dir -> reasons on stdout
+    rm -rf "$1/linux-user"
+    printf '%s\n' "$USER_OWNERS" > "$1/user.owners"
+    if "$PAX_ROOT/tools/linux-tree" --root "$1/root-user" --runlist "$1/root-user/etc/pax-run" --owners "$1/user.owners" "$1/linux-user"; then
+        sed 's/^/  linux user: /' "$1/linux-user/runs.txt" >&2
+    else
+        printf ' tools/linux-tree --runlist (the user run);'
+    fi
+}
+if [ "$only" = linux ]; then
+    why=$(linux_user_side "$images")
+    [ -z "$why" ] && say "PASS B0 (linux): the user's run list ran in a throwaway container, $(grep -c '' "$images/linux-user/runs.txt") commands" || bad "B0 (linux):$why"
+    exit "$fail"
+fi
 
 static_ok() { # file -> reason on failure
     readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
@@ -113,6 +149,16 @@ if [ -z "$images" ]; then
     done
     printf 'PAX: this is /etc/motd, a text file in the initramfs, and not an ELF executable.\n' > "$root/etc/motd"
     printf 'alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\n' > "$root/etc/words"
+    # px47: the user's tree, made before root's list goes in.
+    ru=$work/root-user
+    mkdir -p "$ru"
+    cp -R "$root/." "$ru/"
+    "$PAX_ROOT/tools/mkas" "$work/cred" > "$work/cred.txt" && cp "$work/cred/as" "$ru/bin/as" || why+=" tools/mkas;"
+    [ -f "$ru/bin/as" ] && { r=$(static_ok "$ru/bin/as") || why+=" $r;"; say "  program: bin/as $(sha256_of "$ru/bin/as") $(wc -c < "$ru/bin/as" | tr -d ' ') bytes"; }
+    printf 'root only: 0600\n' > "$ru/etc/secret"
+    mkdir -p "$ru/etc/private"
+    printf 'in a 0700 directory of root'"'"'s\n' > "$ru/etc/private/note"
+    cp "$PAX_ROOT/user/mpx3-boreutils-user.run" "$ru/etc/pax-run"
     cp "$PAX_ROOT/user/mpx3-boreutils.run" "$root/etc/pax-run"
     pairs=()
     while IFS= read -r f; do pairs+=("/$f=$root/$f"); done < <(cd "$root" && find bin etc -type f | sort)
@@ -120,6 +166,21 @@ if [ -z "$images" ]; then
         sed 's/^/  initramfs: /' "$work/initramfs.txt" >&2
     else
         bad "B0: tools/mkinitramfs"
+    fi
+    printf '%s\n' "$USER_OWNERS" > "$work/user.owners"
+    pairs=()
+    while read -r f; do
+        line=$(awk -v p="/$f" '$1 == p { print $2 ":" $3 ":" $4 }' "$work/user.owners")
+        if [ -d "$ru/$f" ]; then
+            [ -n "$line" ] && pairs+=("/$f/:$line")
+        else
+            pairs+=("/$f=$ru/$f${line:+:$line}")
+        fi
+    done < <(cd "$ru" && find bin etc -mindepth 1 | LC_ALL=C sort)
+    if "$PAX_ROOT/tools/mkinitramfs" "$work/initramfs-user.cpio" "${pairs[@]}" > "$work/initramfs-user.txt"; then
+        sed 's/^/  initramfs user: /' "$work/initramfs-user.txt" >&2
+    else
+        bad "B0: tools/mkinitramfs (user)"
     fi
     for tier in $tiers; do
         flag=(); [ "$tier" = release ] && flag=(--release)
@@ -131,6 +192,10 @@ if [ -z "$images" ]; then
                 --add "$work/initramfs.cpio" initramfs.cpio "$elf" "$work/$tier/kmain_boreutils.iso" >/dev/null \
                 || bad "B0 $tier kmain_boreutils: mkimage"
             say "built $tier kmain_boreutils: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/kmain_boreutils.iso"), initramfs $(sha256_of "$work/initramfs.cpio")"
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                --add "$work/initramfs-user.cpio" initramfs.cpio "$elf" "$work/$tier/kmain_boreutils-user.iso" >/dev/null \
+                || bad "B0 $tier kmain_boreutils-user: mkimage"
+            say "built $tier kmain_boreutils-user: iso $(sha256_of "$work/$tier/kmain_boreutils-user.iso"), initramfs $(sha256_of "$work/initramfs-user.cpio")"
         else
             cat "$log" >&2
             why+=" $tier kmain_boreutils: tools/build-kernel;"
@@ -154,24 +219,24 @@ if [ -z "$images" ]; then
             why+=" tools/linux-run (needs root);"
         fi
         "${sudo[@]}" chown -R "$(id -u):$(id -g)" "$root" || why+=" chown back;"
+        [ "$only" = build ] || why+=$(linux_user_side "$work")
     fi
     [ -z "$why" ] && say "PASS B0: kmain_boreutils built ($tiers), every program static, initramfs $(wc -c < "$work/initramfs.cpio" | tr -d ' ') bytes, Linux ran $(grep -c '' "$work/linux.txt" 2>/dev/null) commands" || bad "B0:$why"
     images=$work
-    if [ "$noboot" = 1 ]; then
-        [ "$fail" = 0 ] && say "mpx3-boreutils build (B0): PASS (no boot: --no-boot)" || say "mpx3-boreutils build: FAIL"
+    if [ "$noboot" = 1 ] || [ "$only" = build ]; then
+        [ "$fail" = 0 ] && say "mpx3-boreutils build (B0): PASS (no boot$( [ "$only" = build ] && echo '; --only build: the user run'"'"'s Linux side is --only linux'))" || say "mpx3-boreutils build: FAIL"
         exit "$fail"
     fi
 fi
-root=$images/root
-lx=$images/linux
-[ -f "$images/initramfs.cpio" ] && [ -f "$root/etc/pax-run" ] && [ -d "$lx" ] || die "no $images/initramfs.cpio, root/etc/pax-run or linux/ (build first)"
-ncmd=$(command grep -cv -e '^#' -e '^$' "$root/etc/pax-run")
+for sfx in '' -user; do
+    [ -f "$images/initramfs$sfx.cpio" ] && [ -f "$images/root$sfx/etc/pax-run" ] && [ -d "$images/linux$sfx" ] || die "no $images/initramfs$sfx.cpio, root$sfx/etc/pax-run or linux$sfx/ (build first, and run the user's Linux side)"
+done
 
 record() { # tier leg status
     ran=$((ran + 1))
-    printf '%s kmain_boreutils %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" \
+    printf '%s kmain_boreutils%s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$sfx" "$2" "$3" \
         "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" \
-        "$(sha256_of "$images/$1/kmain_boreutils.iso")" >> "$runs"
+        "$(sha256_of "$iso")" >> "$runs"
 }
 
 mkdir -p "$PAX_BUILD"
@@ -186,9 +251,12 @@ for leg in $legs; do
         continue
     fi
     for tier in $tiers; do
-        id="$tier kmain_boreutils $leg"
-        log=$PAX_BUILD/mpx3-boreutils-$tier-$leg.serial.log
-        elf=$images/$tier/kmain_boreutils.elf iso=$images/$tier/kmain_boreutils.iso
+      for sfx in '' -user; do # px47: root's run, then the user's
+        root=$images/root$sfx lx=$images/linux$sfx
+        ncmd=$(command grep -cv -e '^#' -e '^$' "$root/etc/pax-run")
+        id="$tier kmain_boreutils$sfx $leg"
+        log=$PAX_BUILD/mpx3-boreutils-$tier-$leg$sfx.serial.log
+        elf=$images/$tier/kmain_boreutils.elf iso=$images/$tier/kmain_boreutils$sfx.iso
         rm -f "$log" "$log.verdict"
         if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
             for s in B1 B2 B3 B4 B5; do bad "$s $id: no image"; done
@@ -202,18 +270,18 @@ for leg in $legs; do
 
         # B1
         why=
-        n=$(sed -n 's/^\(dir \|file\) .*/x/p' "$images/initramfs.txt" | wc -l | tr -d ' ')
-        b=$(wc -c < "$images/initramfs.cpio" | tr -d ' ')
+        n=$(sed -n 's/^\(dir \|file\) .*/x/p' "$images/initramfs$sfx.txt" | wc -l | tr -d ' ')
+        b=$(wc -c < "$images/initramfs$sfx.cpio" | tr -d ' ')
         grep -Eqx "initramfs: module $HEX, $b bytes, $n entries" "$norm" || why+=" no 'initramfs: module …, $b bytes, $n entries' line ($(grep -m1 '^initramfs: ' "$norm"));"
         while read -r kind _mode size name; do
             case $kind in dir|file) ;; *) continue ;; esac
             grep -qx "initramfs: $kind $size $name" "$norm" || why+=" no 'initramfs: $kind $size $name';"
-        done < "$images/initramfs.txt"
+        done < "$images/initramfs$sfx.txt"
         [ -z "$why" ] && say "PASS B1 $id: the module, $b bytes, $n entries, each listed with its size" || bad "B1 $id:$why"
 
         # B2: each command against Linux.
         why=
-        out=$PAX_BUILD/mpx3-boreutils-$tier-$leg.out
+        out=$PAX_BUILD/mpx3-boreutils-$tier-$leg$sfx.out
         rm -rf "$out"; mkdir -p "$out"
         k=0
         while IFS= read -r line; do
@@ -222,7 +290,8 @@ for leg in $legs; do
             # The block: from `run k: line` to the next `run ` line.
             awk -v h="run $k: $line" '$0 == h { on = 1; next } on && /^run [0-9]+: |^run: [0-9]+ commands$/ { exit } on { print }' "$norm" > "$out/$k.block"
             m=$(printf '%s\n' "$line" | awk -F ' & ' '{ print NF }')
-            pids=$(sed -n -E 's/^user: exec pid ([0-9]+) cr3 .*/\1/p' "$out/$k.block" | paste -sd' ' -)
+            # px47: `as` and the program it runs are one pid (two exec lines).
+            pids=$(sed -n -E 's/^user: exec pid ([0-9]+) cr3 .*/\1/p' "$out/$k.block" | uniq | paste -sd' ' -)
             if [ "$(printf '%s\n' $pids | grep -c .)" != "$m" ]; then
                 why+=" $k ($line): $(printf '%s\n' $pids | grep -c .) exec lines, not $m ($(head -n 2 "$out/$k.block" | tr '\n' '|'));"
                 continue
@@ -281,6 +350,7 @@ for leg in $legs; do
         "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'user: ticks in ring 3 [0-9]+' 'halt' >/dev/null \
             || why+=" the log does not end with the ticks line and halt;"
         [ -z "$why" ] && say "PASS B5 $id: $ncmd commands, $tk ticks in ring 3; $(tail -n 1 "$log.verdict")" || bad "B5 $id:$why"
+      done
     done
 done
 cat "$runs"
