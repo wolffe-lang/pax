@@ -11,7 +11,8 @@
 # kept until waited for, an orphan reparented to pid 1, waitid, ECHILD,
 # execve's errors, the signal mask and actions across execve, dup2/dup3.
 #
-#   tests/mpx3-shell [--images DIR | --no-boot] [--pelt DIR] [--bore DIR]
+#   tests/mpx3-shell [--images DIR | --no-boot | --only build | --only linux --images DIR]
+#                    [--pelt DIR] [--bore DIR] [--su DIR]
 #                    [--firmware bios|uefi|both] [--tier native|release|both]
 #
 # The programs, each unmodified: pelt (user/pelt.pin, tools/mkpelt),
@@ -71,6 +72,23 @@
 #   procs         nothing typed: procs runs to its end
 #   procs-quiet   procs on the quiet image (its refusals and the fault
 #                 it causes still print); its reference is procs'
+#   shell-user    px47 (P5 U7): user/console/shell-user.keys through
+#                 COM1, AS A USER: `su pax` (px46) at root's prompt, then
+#                 the listings, a pipeline, a group read from a file,
+#                 `cd` to the home, a file made and read there, root's
+#                 0600 /etc/secret and a name made in /etc refused,
+#                 `ls -l /etc`, `stat` of who owns what, a trap and
+#                 Ctrl-C on a running `sleep`, SIGPIPE, `env`, `exit`
+#                 twice. Its image is the shell's with `su`, the
+#                 accounts (/etc/passwd, /etc/group, /etc/login.defs,
+#                 px46's lines) and /home/pax, owners and modes by
+#                 tools/mkinitramfs
+#   procs-user    px47: procs as 1000:1000 (pid 1 is `/bin/as 1000 1000
+#                 /bin/procs`, px39's `as`)
+# The two user sessions' Linux side is the same binaries as the same
+# user in a throwaway container (tools/linux-tree --owners), so it needs
+# no account and no root on the host; the root sessions' stays
+# tools/linux-tty as below.
 # Assertions, per tier (native, release), firmware (bios, uefi) and
 # session:
 #   S0 build: kmain_console built; every program static (ET_EXEC, no
@@ -131,28 +149,34 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 grep() { command grep -a "$@"; }
 
-images= legs=both tiers=both noboot=0 peltdir= boredir=
+images= legs=both tiers=both noboot=0 peltdir= boredir= sudir= only=
 while [ $# -gt 0 ]; do
     case $1 in
         --images)   images=$2; shift 2 ;;
         --no-boot)  noboot=1; shift ;;
         --pelt)     peltdir=$2; shift 2 ;;
         --bore)     boredir=$2; shift 2 ;;
+        --su)       sudir=$2; shift 2 ;;
+        --only)     only=$2; shift 2 ;;
         --firmware) legs=$2; shift 2 ;;
         --tier)     tiers=$2; shift 2 ;;
-        *)          die "usage: tests/mpx3-shell [--images DIR | --no-boot] [--pelt DIR] [--bore DIR] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+        *)          die "usage: tests/mpx3-shell [--images DIR | --no-boot | --only build | --only linux --images DIR] [--pelt DIR] [--bore DIR] [--su DIR] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
     esac
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+[ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
 need readelf python3
 
 BORE="cat echo env false head ls readlink sleep stat tail true wc mkdir rmdir rm mv cp" # px27: bu21's five join /bin
-SESSIONS="shell-serial shell-ps2 shell-howl shell-howl-quiet shell-plumb shell-long shell-sigs shell-sigs-ps2 procs procs-quiet"
+SESSIONS="shell-serial shell-ps2 shell-howl shell-howl-quiet shell-plumb shell-long shell-sigs shell-sigs-ps2 procs procs-quiet shell-user procs-user"
 LINUX_SESSIONS="shell-serial shell-ps2 shell-howl shell-plumb shell-long shell-sigs procs" # a -quiet session's reference is its namesake's
-image_of() { case $1 in procs) echo procs ;; procs-quiet) echo procs-quiet ;; *-quiet) echo shell-quiet ;; *) echo shell ;; esac; }
+USER_SESSIONS="shell-user procs-user" # px47: their Linux side is tools/linux-tree --owners
+image_of() { case $1 in procs) echo procs ;; procs-quiet) echo procs-quiet ;; *-quiet) echo shell-quiet ;; *-user) echo "$1" ;; *) echo shell ;; esac; }
 init_of() { case $1 in procs*) echo procs ;; *) echo pelt ;; esac; }
-keys_of() { case $1 in shell-serial) echo "$PAX_ROOT/user/console/shell.keys" ;; shell-ps2) echo "$PAX_ROOT/user/console/shell-ps2.keys" ;; shell-howl*) echo "$PAX_ROOT/user/console/shell-howl.keys" ;; shell-plumb) echo "$PAX_ROOT/user/console/shell-plumb.keys" ;; shell-long) echo "$PAX_ROOT/user/console/shell-long.keys" ;; shell-sigs*) echo "$PAX_ROOT/user/console/shell-sigs.keys" ;; *) echo "$images/procs.keys" ;; esac; }
+initpath_of() { case $1 in procs-user) echo as ;; *) init_of "$1" ;; esac; } # px47: pid 1's file, as the kernel names it
+keys_of() { case $1 in shell-user) echo "$PAX_ROOT/user/console/shell-user.keys" ;; shell-serial) echo "$PAX_ROOT/user/console/shell.keys" ;; shell-ps2) echo "$PAX_ROOT/user/console/shell-ps2.keys" ;; shell-howl*) echo "$PAX_ROOT/user/console/shell-howl.keys" ;; shell-plumb) echo "$PAX_ROOT/user/console/shell-plumb.keys" ;; shell-long) echo "$PAX_ROOT/user/console/shell-long.keys" ;; shell-sigs*) echo "$PAX_ROOT/user/console/shell-sigs.keys" ;; *) echo "$images/procs.keys" ;; esac; }
 kbd_of() { case $1 in *-ps2) echo ps2 ;; *) echo serial ;; esac; }
 linux_of() { case $1 in *-quiet) echo "${1%-quiet}" ;; shell-sigs-ps2) echo shell-sigs ;; *) echo "$1" ;; esac; }
 quiet_of() { case $1 in *-quiet) echo 1 ;; *) echo 0 ;; esac; }
@@ -170,6 +194,29 @@ mask() { # a transcript with every program's size, blocks and /bin's total as wo
         -e 's/^(\/bin\/[a-z]+) [0-9]+ (755 .*) [0-9]+ (regular file)/\1 SIZE \2 BLOCKS \3/' "$1"
 }
 
+# px47: the user sessions' Linux side, each in a throwaway container with
+# the image's owners and modes (no account and no root on the host).
+linux_user_side() { # dir -> reasons on stdout
+    local s p ip own args
+    mkdir -p "$1/linux"
+    for s in $USER_SESSIONS; do
+        p=$(image_of "$s") ip=$(initpath_of "$s")
+        own=(); [ -f "$1/$p.owners" ] && own=(--owners "$1/$p.owners")
+        args=("/bin/$ip"); [ "$s" = procs-user ] && args=(/bin/as 1000 1000 /bin/procs)
+        if "$PAX_ROOT/tools/linux-tree" --root "$1/$p/root" --keys "$(images=$1 keys_of "$s")" --prompt "$PROMPT" --argv0 "/bin/$ip" --size 512m \
+            ${own[@]+"${own[@]}"} "$1/linux/$s.tty" -- "${args[@]}"; then
+            say "  linux $s: $(wc -c < "$1/linux/$s.tty" | tr -d ' ') bytes, status $(cat "$1/linux/$s.tty.rc") (a container, as 1000:1000)"
+        else
+            printf ' tools/linux-tree %s;' "$s"
+        fi
+    done
+}
+if [ "$only" = linux ]; then
+    why=$(linux_user_side "$images")
+    [ -z "$why" ] && say "PASS S0 (linux): the user sessions' Linux side ran, each in a throwaway container" || bad "S0 (linux):$why"
+    exit "$fail"
+fi
+
 static_ok() { # file -> reason on failure
     readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
     ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
@@ -182,6 +229,7 @@ if [ -z "$images" ]; then
     "$PAX_ROOT/tools/fetch-limine" || exit 2
     rm -rf "$work"
     mkdir -p "$work/shell/root/bin" "$work/shell/root/etc" "$work/procs/root/bin" "$work/procs/root/etc" "$work/linux"
+    mkdir -p "$work/procs-user/root/bin" "$work/procs-user/root/etc"
     why=
     sh=$work/shell/root pr=$work/procs/root
     # The programs.
@@ -189,6 +237,14 @@ if [ -z "$images" ]; then
         cp "$work/user/procs" "$pr/bin/procs"
     else
         why+=" tools/mkuser;"
+    fi
+    # px47: `as` (px39) and `su` (px46) for the user sessions.
+    "$PAX_ROOT/tools/mkas" "$work/cred" > "$work/cred.txt" || why+=" tools/mkas;"
+    if [ -n "$sudir" ]; then
+        mkdir -p "$work/subin" && cp "$sudir/su" "$work/subin/su" || why+=" no $sudir/su;"
+        say "su from $sudir"
+    else
+        "$PAX_ROOT/tools/mksu" "$work/subin" > "$work/su.txt" || why+=" tools/mksu;"
     fi
     if [ -n "$peltdir" ]; then
         cp "$peltdir/pelt" "$sh/bin/pelt" || why+=" no $peltdir/pelt;"
@@ -220,18 +276,49 @@ if [ -z "$images" ]; then
     echo /bin/pelt > "$sh/etc/pax-run"
     echo /bin/procs > "$pr/etc/pax-run"
     : > "$work/procs.keys"
-    for f in "$sh"/bin/* "$pr"/bin/*; do
+    # px47: the user's images. The shell's tree with su, the accounts
+    # (px46's lines, R3), root's 0600 /etc/secret and the user's home;
+    # procs' tree with `as` running procs as 1000:1000.
+    su_=$work/shell-user/root pu=$work/procs-user/root
+    mkdir -p "$su_"
+    cp -R "$sh/." "$su_/"
+    mkdir -p "$su_/home/pax"
+    cp "$work/subin/su" "$su_/bin/su" || why+=" no su;"
+    printf 'root:x:0:0:root:/:/bin/pelt\npax:x:1000:1000:pax:/home/pax:/bin/pelt\nlobo:x:990:990:lobo:/srv/lobo:/bin/false\n' > "$su_/etc/passwd"
+    printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\n' > "$su_/etc/group"
+    printf 'ENV_PATH\tPATH=/bin\nENV_SUPATH\tPATH=/bin\n' > "$su_/etc/login.defs"
+    printf 'root only: 0600\n' > "$su_/etc/secret"
+    printf '/etc/secret 600 0 0\n/home 755 0 0\n/home/pax 755 1000 1000\n' > "$work/shell-user.owners"
+    cp -R "$pr/." "$pu/"
+    cp "$work/cred/as" "$pu/bin/as" || why+=" no as;"
+    echo /bin/as 1000 1000 /bin/procs > "$pu/etc/pax-run"
+    for f in "$sh"/bin/* "$pr"/bin/* "$su_/bin/su" "$pu/bin/as"; do
         r=$(static_ok "$f") || why+=" $r;"
         say "  program: ${f#"$work"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
     done
-    for p in shell procs; do
+    for p in shell procs shell-user procs-user; do
         pairs=()
         r=$work/$p/root
+        if [ -f "$work/$p.owners" ]; then
+            # px47: every name, with the owners and modes of $p.owners (a
+            # directory with no line is implied, root's 0755)
+            while read -r f; do
+                f=${f#.}
+                line=$(awk -v p="$f" '$1 == p { print $2 ":" $3 ":" $4 }' "$work/$p.owners")
+                if [ -d "$r$f" ]; then
+                    [ -n "$line" ] && pairs+=("$f/:$line")
+                else
+                    mode=644; [ -x "$r$f" ] && mode=755
+                    pairs+=("$f=$r$f:${line:-$mode}")
+                fi
+            done < <(cd "$r" && find . -mindepth 1 | LC_ALL=C sort)
+        else
         for f in $(cd "$r" && find . -type f | sort); do
             f=${f#./}
             mode=644; [ -x "$r/$f" ] && mode=755
             pairs+=("/$f=$r/$f:$mode")
         done
+        fi
         if "$PAX_ROOT/tools/mkinitramfs" "$work/$p.cpio" "${pairs[@]}" > "$work/$p.initramfs.txt"; then
             sed "s/^/  initramfs $p: /" "$work/$p.initramfs.txt" >&2
         else
@@ -244,7 +331,7 @@ if [ -z "$images" ]; then
         log=$work/$tier/kmain_console.build-kernel.log
         if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
             cat "$log" >&2
-            for p in shell procs shell-quiet procs-quiet; do
+            for p in shell procs shell-quiet procs-quiet shell-user procs-user; do
                 conf=$PAX_ROOT/boot/limine-initramfs.conf cpio=$work/${p%-quiet}.cpio
                 case $p in *-quiet) conf=$PAX_ROOT/boot/limine-initramfs-quiet.conf ;; esac
                 "$PAX_ROOT/tools/mkimage" --conf "$conf" \
@@ -280,11 +367,15 @@ if [ -z "$images" ]; then
             fi
         done
         ${asroot[@]+"${asroot[@]}"} chown -R "$me" "$work/shell/root" "$work/procs/root" || why+=" chown back;"
+        # px47: the user sessions, each in a throwaway container (not
+        # from inside one: --only build stops before them, and --only
+        # linux --images DIR runs them from the host).
+        [ "$only" = build ] || why+=$(linux_user_side "$work")
     fi
     [ -z "$why" ] && say "PASS S0: kmain_console built ($tiers), every program static, two initramfs, four images a tier, Linux ran $(echo $LINUX_SESSIONS | wc -w | tr -d ' ') sessions" || bad "S0:$why"
     images=$work
-    if [ "$noboot" = 1 ]; then
-        [ "$fail" = 0 ] && say "mpx3-shell build (S0): PASS (no boot: --no-boot)" || say "mpx3-shell build: FAIL"
+    if [ "$noboot" = 1 ] || [ "$only" = build ]; then
+        [ "$fail" = 0 ] && say "mpx3-shell build (S0): PASS (no boot$( [ "$only" = build ] && echo '; --only build: the user sessions'"'"' Linux side is --only linux'))" || say "mpx3-shell build: FAIL"
         exit "$fail"
     fi
 fi
@@ -312,7 +403,7 @@ for leg in $legs; do
     fi
     for tier in $tiers; do
         for s in $SESSIONS; do
-            p=$(image_of "$s") i=$(init_of "$s") kb=$(kbd_of "$s") q=$(quiet_of "$s") ls=$(linux_of "$s")
+            p=$(image_of "$s") i=$(init_of "$s") kb=$(kbd_of "$s") q=$(quiet_of "$s") ls=$(linux_of "$s") ip=$(initpath_of "$s")
             id="$tier $leg $s"
             log=$PAX_BUILD/mpx3-shell-$tier-$leg-$s.serial.log
             elf=$images/$tier/kmain_console.elf iso=$images/$tier/console-$p.iso
@@ -351,8 +442,10 @@ for leg in $legs; do
             n=$(printf '%s\n' $execs | wc -l | tr -d ' ')
             [ "$n" -ge 2 ] || why+=" fewer than two programs ran ('$execs');"
             # px17: rising from 1 (a fork child that never execs takes a pid).
-            # px26: pid 1 again is init's own `exec`.
-            printf '%s\n' $execs | awk 'NR == 1 && $1 != 1 { bad = 1 } NR > 1 && $1 == 1 { next } NR > 1 && $1 <= last { bad = 1 } { last = $1 } END { exit bad }' \
+            # px26: pid 1 again is init's own `exec`. px47: and a pid
+            # again is that program's own `exec` (`su` runs the user's
+            # shell in its place; `as` runs procs in its).
+            printf '%s\n' $execs | awk 'NR == 1 && $1 != 1 { bad = 1 } NR > 1 && $1 == 1 { next } NR > 1 && $1 == last { next } NR > 1 && $1 <= last { bad = 1 } { last = $1 } END { exit bad }' \
                 || why+=" exec pids '$execs' do not rise from 1;"
             for k in $execs; do
                 # px26: a `killed:` line may follow the terminal's own echo
@@ -368,7 +461,25 @@ for leg in $legs; do
             # px46: a typed session leaves pelt's history file, /.sh_history
             # (sh12; root's HOME is /), and its one page; procs types nothing.
             keep=0; [ "$i" = pelt ] && keep=1
+            if [ "$s" = shell-user ]; then
+                # px47: a user's shell keeps its own, /home/pax/.sh_history,
+                # in a directory that had no entry, so the tree holds two
+                # history pages, the home's first page of entries and what
+                # the inode table grew by, and nothing else is kept.
+                tl=$(grep -m1 '^tree: frames ' "$norm")
+                tv=$(printf '%s\n' "$tl" | sed -n -E "s/^tree: frames ([0-9]+) \\(([0-9]+) when made\\), ([0-9]+) \\(([0-9]+)\\) of them the inode table's, inodes ([0-9]+) \\(([0-9]+)\\), .*/\\1 \\2 \\3 \\4 \\5 \\6/p")
+                read -r th tb tt ttb ti tib <<< "$tv"
+                if [ -z "$fa" ] || [ -z "$tv" ]; then
+                    why+=" no frames line or no tree line ('$fl' / '$tl');"
+                else
+                    keep=$((3 + tt - ttb))
+                    [ "$1" = $(( $2 + keep )) ] && [ $((th - tb)) = "$keep" ] && [ "$ti" = $((tib + 2)) ] \
+                        || why+=" not every frame back but the tree's $keep (two history pages, the home's page, the inode table's $((tt - ttb))), or not two inodes more ('$fl'; '$tl');"
+                fi
+                fl="$fl; $tl"
+            else
             [ -n "$fa" ] && [ "$1" = $(( $2 + keep )) ] || why+=" frames not all back but $keep ('$fl');"
+            fi
             [ -z "$why" ] && say "PASS S1 $id: $n programs, pids $execs, each ended; $fl" || bad "S1 $id:$why"
             fi
 
@@ -419,6 +530,7 @@ for leg in $legs; do
             why=
             ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
             want="273 334"; [ "$i" = procs ] || [ "$q" = 1 ] && want=
+            [ "$s" = procs-user ] && want="273 334" # px47: `as` is a glibc program; procs has no libc
             [ "$ns" = "$want" ] || why+=" -ENOSYS for '$ns', not '$want';"
             rf=$(grep ': refused: ' "$norm" | sed -E 's/^user: [^ ]+ pid [0-9]+ //' | paste -sd'|' -)
             if [ "$i" = procs ]; then # quiet or not: refusals print
@@ -431,8 +543,8 @@ for leg in $legs; do
 
             # S5
             why=
-            grep -qx "PAX: init /bin/$i ended with status $lst; nothing left to run" "$norm" \
-                || why+=" no 'PAX: init /bin/$i ended with status $lst' ($(grep -m1 '^PAX: init ' "$norm"));"
+            grep -qx "PAX: init /bin/$ip ended with status $lst; nothing left to run" "$norm" \
+                || why+=" no 'PAX: init /bin/$ip ended with status $lst' ($(grep -m1 '^PAX: init ' "$norm"));"
             [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
             "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'PAX: init .*' 'halt' >/dev/null \
                 || why+=" the log does not end with the init line and halt;"
