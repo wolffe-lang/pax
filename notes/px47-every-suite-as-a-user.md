@@ -150,11 +150,11 @@ sentence whole; CHANGELOG gains px47's entry. Nothing says "secure".
 
 | # | predicted | measured | verdict |
 |---|---|---|---|
-| P1 | mkpelt in `px13-ubuntu` builds a digest that is not sh16's, the same twice and in CI; hiding `ld.lld` gives sh16's `6774441b…`; no expected text moves | `af7351d1…`, 15,002,424 bytes, twice; with `ld.lld` hidden `6774441b…`, 14,765,328 bytes, sh16's to the byte (`notes/px47/kasumi-pins.out`); CI: §A; no root session's text moved on any suite run here (§B) | right |
-| P2 | user runs held to Linux's users; one to four user-only findings, none in boreutils or the net runs beyond the low port; Docker and podman give a container port start 0; the tree probe's `/dev` rows -EROFS where Linux says -EACCES; lobo warns as lobo, refuses as root | **two kernel findings** (§C 1, 2: `/dev` and `/proc`/`/sys`), both fixed, plus **three harness findings** (§C 3–5) none of which I predicted; the `/dev` one was predicted for names made in `/dev` and was also `rmdir`/`rename` of `/dev` (-EBUSY); rootless podman already gave 1024 (CI's Docker: §E); boreutils and the net runs found nothing of the kernel's; lobo as predicted | right on the count (two of the kernel's), wrong on the harness |
+| P1 | mkpelt in `px13-ubuntu` builds a digest that is not sh16's, the same twice and in CI; hiding `ld.lld` gives sh16's `6774441b…`; no expected text moves | `af7351d1…`, 15,002,424 bytes, twice and in CI (§E); with `ld.lld` hidden `6774441b…`, 14,765,328 bytes, sh16's to the byte (`notes/px47/kasumi-pins.out`); no root session's text moved | right |
+| P2 | user runs held to Linux's users; one to four user-only findings, none in boreutils or the net runs beyond the low port; Docker and podman give a container port start 0; the tree probe's `/dev` rows -EROFS where Linux says -EACCES; lobo warns as lobo, refuses as root | **two kernel findings** (§C 1, 2: `/dev` and `/proc`/`/sys`), both fixed, plus **three harness findings** (§C 3–5) none of which I predicted; the `/dev` one was predicted for names made in `/dev` and was also `rmdir`/`rename` of `/dev` (-EBUSY); rootless podman already gave 1024, CI's Docker 0; boreutils and the net runs found nothing of the kernel's; lobo as predicted | right on the count (two of the kernel's), wrong on the harness; the port start: right for CI's Docker (0), wrong for kasumi's rootless podman (1024) |
 | P3 | each typed `su` session's container transcript is real root's guest's, byte for byte | `shell-changes-user` 136 lines the same after the dates; `shell-tree-user` differs in two lines, both about `/` itself: the guest's `/` is the initramfs root, **1777** (measured, `notes/px47/linux/px47-root-mode.tty`), where PAX's and the container's are 0755, so a user's `mkdir /t` succeeds there and `rmdir /bin` is -EPERM (sticky) for -EACCES (§G) | wrong (2 lines, the guest's `/`, not a user rule) |
-| P4 | about a fifth more boot time on the typed suites; no job past 60 minutes a leg | §E | §E |
-| P5 | plant A red in the user runs only; plant B agrees with itself in the container, red only where a check names the uid | §F | §F |
+| P4 | about a fifth more boot time on the typed suites; no job past 60 minutes a leg | in the pull request's body (`tier full`'s job minutes against px46's 38811441834) | there |
+| P5 | plant A red in the user runs only; plant B agrees with itself in the container, red only where a check names the uid | A: root's run green, the user's B2 and B6 red on four legs; B: B2 green (both sides root), only B6 red (§F) | right |
 | P6 | README and CHANGELOG in R6's words; nothing says secure | so (§D) | right |
 
 ## A. The pelt pin (item 1)
@@ -204,8 +204,12 @@ the run list needs PAX's addressing; lobo's through
 cannot have: `beep`'s `/dev/tty0` and `/dev/console` (devtmpfs's modes),
 and P3's cross-check.
 
-Measured on kasumi, native BIOS, at the code of `5f17292`
-(`notes/px47/kasumi-*.out`); every leg in CI (§E).
+Measured on kasumi, native BIOS (`notes/px47/kasumi-*.out`), each
+suite at the branch's code when its run began: the kernel of `cacf66a`
+(both fixes) in every one, each test and tool at its last commit before
+`5f17292` (B6's fix: `bore2b`, after it) or, for lobo, `309ffe5`; the
+code has not moved since but for `487806a` (a comment in
+`tools/linux-run`). Every leg of the final head: CI (§E).
 
 | suite | user session | how | its checks | the Linux row each is held to | kasumi |
 |---|---|---|---|---|---|
@@ -289,8 +293,15 @@ host's login uid).
 5. **Prediction and harness: the container's port start.** Rootless
    podman's `--network none` namespace already had
    `ip_unprivileged_port_start` 1024 (every `linux-tree` line in the
-   logs; P2 said 0 for both engines); CI's Docker: §E. `linux-tree`
-   writes 1024 there anyway and prints what it found.
+   kasumi logs); **CI's Docker gave 0** (`linux-tree:
+   ip_unprivileged_port_start 0 in the container, now 1024`, run
+   38958926108, `notes/px47/ci-38958926108-plant-b.txt`): without the
+   write, the runner's container would have let the user bind ports 7
+   and 1023 and PAX's refusals would have read as reds. P2 was right
+   for Docker, wrong for rootless podman. The same line shows the
+   runner's `fs.protected_regular` 2 (kasumi's and PAX's: 1): no user
+   session here opens a file with O_CREAT in a group-writable sticky
+   directory, the one place 1 and 2 differ.
 
 Not findings but what the user sides needed (setup): run lists in a
 container (`--runlist`, `57df9d4`), more than 64 MiB for them
@@ -327,6 +338,59 @@ entry, ending with the same claim. Nothing in either says "secure"
 (checked: `grep -i secur README.md CHANGELOG.md` finds only px39's
 `AT_SECURE`).
 
+## E. CI (item 5)
+
+The user runs are each suite's own sessions, so they run in that suite's
+job; `tools/ci-tiers.map` says where `as` and `su` reach (`5a2ffba`:
+groups `@asuser` and `@suuser`, `user/elf/as.c`, `tools/mkas`,
+`user/su/*`, `tools/mksu`, `user/mpx3-boreutils-user.run`; every other
+new file — keys, run lists, steps, recordings — is its suite's by the
+derivation), and `tests/ci-plan` holds it (eleven new P2 cases: `su`
+and `as` reach exactly the suites whose user runs use them, `tools/mkas`
+not `mpx5-users`, the other credential probes stay `mpx5-users`' alone,
+each user run's own files reach their suite, the container's Linux side
+reaches its readers). `tools/mkas` exists so that a change to px38's
+probes does not reach every suite with a user run.
+
+**A slip of this lane's, caught by `tests/ci-plan`:** a comment in
+`tools/linux-run` named a test (`tests/mpx4-tcp`), and since
+`tools/ci-plan` follows a tool's text, every reader of `linux-run`
+became that test's reader: P2 "a network change with its test and its
+note" went red, in the planner job of the plant dispatch 38957060478
+(not in the pull request's run, which had not started). `487806a` names
+no test there.
+
+- `tier pr` at the code head `487806a`: run 38958878907, **green**,
+  33 of 33 jobs (every suite on the pr leg: the map and `tests/ci-plan`
+  changed, so ALL), each suite's user sessions PASS in it. Its
+  container lines read `ip_unprivileged_port_start 0 in the container,
+  now 1024; host fs.protected_… regular 2` (§C 5).
+- CI built the same pelt: `af7351d1…`, 15,002,424 bytes (`mpx3-tree`
+  and `mpx4-lobo` jobs of 38958878907, `program: … bin/pelt`), as
+  kasumi's (§A).
+- `tier full` at the final head, the job minutes against px46's
+  (P4), and the audit: in the pull request's body (the note cannot name
+  the run that tests it).
+
+## F. Plants (P5)
+
+Each a branch never to be merged, cut from `487806a` (the code and
+the tests as at the head but the note), one commit, run by dispatch with
+`mpx3-boreutils` alone (`gh workflow run ci -r <branch> -f
+suites=mpx3-boreutils`; a dispatch is the full tier's four legs of that
+one suite). The first dispatches (runs 38956322756, 38956326113, then
+38957060478) were cut before B6's `ls -l -d` fix and before
+`tools/linux-run` stopped naming a test, so they were cancelled or
+ended at the plan; they show nothing and are not counted.
+
+| plant | branch, commit | break | expected | CI |
+|---|---|---|---|---|
+| A | `px47-plant-a` `d80cebf` | `kernel/files`' `may` answers every caller as root does | root's run green; the user run red | run 38958923050, job 117174821714: root's B1–B5 PASS on all four legs; the user's **B2 red** at its line 22 (`ls -R /etc` reads into the 0700 `/etc/private`: PAX lists `note`, Linux says `Permission denied`) and at every refusal line, and **B6 red** (seven `not refused on PAX`) on all four legs (`notes/px47/ci-38958923050-plant-a.txt`) |
+| B | `px47-plant-b` `13f690c` | `as` keeps root's user ids (no `setresuid`) | the container runs the same `as` and agrees: red only where a check asks each side's own answer | run 38958926108, job 117175285454: root's B1–B5 and the user's **B2 PASS** (38 lines identical: both sides read root's files as root), **B6 red** (`not refused on PAX` and `not refused on Linux`) on all four legs (`notes/px47/ci-38958926108-plant-b.txt`) |
+
+Plant B is the reason §C's witnesses exist: without B6 a broken `as`
+would have been green in every user run held only to its container.
+
 ## G. P3: the container against real root's guest
 
 `notes/px47/linux/`: real root's recordings of `shell-tree-user` and
@@ -352,3 +416,151 @@ and `rmdir /bin` meets the sticky rule (-EPERM); PAX's `/` and the
 container's (`mount -t tmpfs -o mode=755`) are 0755 root's. Not a user
 rule: the recording is not committed as a reference, and the container
 stays the user runs' Linux side.
+
+## H. A second witness: KVM on hasu
+
+The `mpx3-tree` images built on kasumi at the code of `5f17292` (the
+kernel of both fixes), booted under KVM on hasu (NixOS, QEMU there,
+BIOS, native): every session, root's and the four user ones, PASS, the
+user sessions' lines the same counts and digests as kasumi's TCG run
+(`notes/px47/hasu-kvm-mpx3-tree.out`: probes-user 154 lines
+`e595071c…`, soak-user 5, shell-tree-user 85, shell-changes-user 136).
+hasu was left as it was found but `~/lanes/px47/out/`.
+
+## What U8 and U9 (and every lane after) should know
+
+- **A user run is a session or a run-list line**, never an account on
+  a host: `as UID GID PROG` (`tools/mkas`) as pid 1 or a run-list
+  line; `su pax`/`su -s /bin/pelt lobo` typed at root's pelt in an
+  image with px46's three files. Owners and modes go into the image
+  (`tools/mkinitramfs` `:MODE:UID:GID`, `/PATH/:MODE:UID:GID` for a
+  directory) and into the container (`linux-tree --owners`,
+  `lobo-session --owners`), from one `PATH MODE UID GID` file.
+- **A differential check cannot see a broken `as` or `su`**: the
+  container runs the same binary. Give every user run a row that asks
+  each side's own answer (a refusal by its words, a recorded PAX
+  answer, an `id`), as §C's last paragraph lists.
+- **A rootless container is not a whole Linux**: its `/dev/null` is a
+  bound host node (`linux-tree --rdev` when a user writes it; it moves
+  `/dev/null` to another file system), and a guest booted from an
+  archive has a 1777 `/` (§G). CI's Docker is rootful.
+- **Python runners start programs with SIGPIPE ignored** unless they
+  say otherwise: `linux-tty`, `linux-net` and now `linux-run` do.
+- **A tool's comment that names a test path makes every reader of the
+  tool that test's** (`tools/ci-plan` follows tools' text): a plant's
+  planner ran red at `tests/ci-plan` P2 on exactly that (§E); run
+  `tests/ci-plan` before each push.
+- `login` (U9) will need the terminal to take an owner: px42's `~fixed`
+  `/dev` refuses `fchown`; with this lane a user's write to `/dev`
+  meets its 0755 first.
+- Passwords (U8): the accounts' field is `x` with no `/etc/shadow`; the
+  user runs here never type one.
+
+## 4. Evidence index
+
+Shas are this branch's (`px47`) unless named otherwise. kasumi paths
+are under `~/lanes/px47/`; hasu's likewise.
+
+### What was written
+
+- The prediction: `8b578e3` (§1 to §3, before any change).
+- The pin: `f29ba05` (`user/pelt.pin` → pelt `06223a8`).
+- The kernel (§C 1, 2): `5e49a18` (`/dev`'s write asks the directory
+  first), `cacf66a` (every `/proc` and `/sys` file asks its mode).
+- The harness: `57df9d4`, `7465906`, `ca3940f` (`tools/linux-tree`:
+  `--runlist`, the port start, `--net`, `--rdev`), `a35bfd1`
+  (`tools/linux-tty --rdev`), `f6620d3`, `487806a` (`tools/linux-run`:
+  signals at their defaults; no test named), `cac3e04` (`tools/mkas`),
+  `edb2f2f`, `26df788`, `309ffe5` (`tools/lobo-session --owners`,
+  `tools/lobo-check` serve-user's rows), `aa30065`, `d642bd2`
+  (`notes/px47/linux-vm.sh`).
+- The suites: `9490d2c` (`mpx3-tree`, its keys, `probes-user.pax`),
+  `a337285`, `6c121a9` (`mpx3-shell`, `shell-user.keys`), `a5202cf`,
+  `078104e`, `5f17292` (`mpx3-boreutils`, its run list, B6), `2e3c226`,
+  `286f8cf` (`mpx4-unix`), `6b57b1c`, `aa08c76`, `6f9ff97`
+  (`mpx4-tcp`, `mpx4-udp`, their run lists), `2c9ad8f` (the witnesses),
+  `cab2541`, `deea149` (`mpx3-speaker`, its keys, `.expect`, real root's
+  `beep-user` recording), `edb2f2f` (`mpx4-lobo`, `serve-user.steps`,
+  `/srv/lobo`), `b160e4b` (the run lists' room; one pid a command).
+- CI: `5a2ffba` (`tools/ci-tiers.map`, `tests/ci-plan`).
+- The words: `8e6afb2` (README), `5001d79` (CHANGELOG).
+
+### What was measured, and where it is
+
+- The pin: `notes/px47/kasumi-pins.out` (three builds in `px13-ubuntu`;
+  `su` `4a5a4e21…`, px46's digest).
+- Each suite's user run on kasumi (TCG, native BIOS):
+  `notes/px47/kasumi-mpx3-tree.out`, `kasumi-mpx3-shell.out`,
+  `kasumi-mpx3-boreutils-build.out` and `kasumi-mpx3-boreutils.out`,
+  `kasumi-mpx4-unix.out`, `kasumi-mpx4-tcp-none-user.out`,
+  `kasumi-mpx4-udp-none-user.out`, `kasumi-mpx3-speaker.out`,
+  `kasumi-mpx4-lobo.out`; every one exit 0.
+- The same before each fix: `kasumi-mpx3-tree-before-dev-fix.out`,
+  `kasumi-mpx4-unix-before-proc-fix.out`,
+  `kasumi-mpx3-shell-before-rdev.out`,
+  `kasumi-mpx4-tcp-before-linux-run-fix.out`, and `--rdev` on root's
+  probes: `kasumi-mpx3-tree-rdev-on-root-probes.out`.
+- KVM on hasu: `notes/px47/hasu-kvm-mpx3-tree.out`.
+- Real root's guest: `tests/mpx3-speaker.d/linux/beep-user.tty`,
+  `.rc`, `vm-beep-user.meta` (the reference); `notes/px47/linux/`
+  (P3's recordings, the container's, the guest's `/`).
+- The plants: `notes/px47/ci-38958923050-plant-a.txt`,
+  `notes/px47/ci-38958926108-plant-b.txt`.
+- CI: §E and the pull request.
+
+### Measured, inferred, not verified
+
+**Inferred**:
+- A user's `unlink("/dev")` is -EISDIR on PAX and, by `unlink(2)`'s
+  order (the permission check first), -EACCES on Linux; no session asks
+  it, nothing was changed for it.
+- `lobo`'s `bind() … failed` for port 80 is EACCES: lobo prints no
+  errno; the same program on the same port answered the same on both
+  sides, and `tcpecho` and `udpecho` say EACCES for 7 and 1023.
+
+**Not verified**:
+- The speaker as a user on a real Linux: px45's VT measurement is the
+  row (a pseudo-terminal has none, and the guest here runs with no
+  display); `beep-user`'s refusals are real root's.
+- The real-root guest for `mpx3-shell`'s `shell-user` (only the tree's
+  two typed sessions were recorded there; §G).
+- hasu: `mpx3-tree` only; UEFI under KVM not run (pax#56).
+- `soak-user` and `ctl-user` exercise the same rules as `probes-user`;
+  `procs-user` asks nothing a user is refused (its 45 lines are
+  root's).
+- Docker on CI is rootful; rootless Docker was not tried.
+- More than one user at once: PAX has one console.
+
+### Issues
+
+- **To close at merge**: none.
+- **Would file (none filed)**:
+  1. pax: PAX's `/` is 0755 root's; Linux's initramfs root is 1777
+     when the archive names no entry for `/` (§G, measured): which PAX
+     follows is a ruling, not a bug.
+  2. pax: `unlink` of `/dev` by a user answers -EISDIR before the
+     permission check (inferred, above).
+  3. pax: `procs-user` (`mpx3-shell`) has no row of its own that a
+     broken `as` would redden (§C's last paragraph): procs asks nothing
+     a user is refused.
+- pax#62 and pax#67: named in the pull request if they redden.
+- Not chased, did not occur: pax#55, #56, #58, #60, #63, #66, #68.
+
+## 5. Done-when
+
+- Branch `px47` on origin; pax PR #69, open, unmerged.
+- The five sections §1 to §5; the items §A to §H.
+- The test checklist:
+  - [x] `tests/ci-plan`, every case, eleven of them new, locally and in CI's planner
+  - [x] each suite's user run, kasumi TCG native BIOS (§B, §4)
+  - [x] `mpx3-tree` under KVM on hasu, BIOS
+  - [x] the speaker's `beep-user` against real root's guest; P3's two
+        tree sessions against it
+  - [x] plants A and B red in CI (§F)
+  - [x] `tier pr` at the code head, 38958878907 green (§E)
+  - [ ] `tier full` at the final head: named in the PR
+- `wolf/tools/lane-audit.sh pax px47 <PR>` exit status: named in the PR.
+- Trees: kasumi `~/lanes/px47/` keeps `out/`, `pins/`, `vm/`, `bin/`;
+  build directories removed at the end. hasu `~/lanes/px47/` keeps
+  `out/`. Plant branches stay on origin, never to be merged.
+
