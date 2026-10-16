@@ -6,7 +6,8 @@
 # exit status byte-identical to the same binaries on Linux, and stay
 # exact under loss, duplication, reordering and corruption.
 #
-#   tests/mpx4-tcp [--images DIR | --no-boot] [--progs DIR] [--soak N]
+#   tests/mpx4-tcp [--images DIR | --no-boot | --only build | --only linux --images DIR]
+#                  [--ways LIST] [--progs DIR] [--soak N]
 #                  [--bulk BYTES] [--lossy BYTES] [--deadline SECONDS]
 #                  [--stall SECONDS] [--keep-going]
 #                  [--firmware bios|uefi|both] [--tier native|release|both]
@@ -33,6 +34,14 @@
 #   none   no network device at all: the lines that put nothing on the
 #          wire (user/mpx4-tcp-none.run), a 16 MiB transfer and 10,000
 #          connections over loopback among them
+#   none-user  px47 (P5 U7): the `none` way AS A USER
+#          (user/mpx4-tcp-none-user.run: each line under px39's `as
+#          1000 1000`), then ports 7 and 1023 refused to the user
+#          (px45). Its Linux side is the same list as the same user in a
+#          throwaway container with no network (tools/linux-tree
+#          --runlist, which sets ip_unprivileged_port_start to Linux's
+#          1024 there); T1 to T9 hold for it as for `none`, each line
+#          held to that side's output for the same line
 #
 # the first two with `-object filter-dump` writing every frame to a pcap
 # file.
@@ -100,6 +109,12 @@
 # started (--keep-going boots them all), and none is started once
 # --deadline seconds (2700) have passed since the first.
 #
+# --only build (px47) makes the programs and the images and stops
+# before either Linux side; --only linux --images DIR then runs the
+# none-user way's Linux side (a container, from the host). --ways LIST
+# boots only those ways (default: peer user none none-user), and needs
+# only their Linux sides.
+#
 # --images DIR boots what this script built earlier (DIR holds
 # <tier>/kmain_sockets.elf, <tier>/kmain_sockets-{peer,user,none}.iso,
 # peer.run, user.run, none.run, linux/ and sizes): any host with QEMU,
@@ -117,12 +132,14 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 grep() { command grep -a "$@"; }
 
-images= legs=both tiers=both noboot=0 accel=auto progs= soak=10000 bulk=16777216 lossy=1048576 deadline=2700 stall=300 keep=0
-usage="usage: tests/mpx4-tcp [--images DIR | --no-boot] [--progs DIR] [--soak N] [--bulk BYTES] [--lossy BYTES] [--deadline SECONDS] [--stall SECONDS] [--keep-going] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg]"
+images= legs=both tiers=both noboot=0 only= ways="peer user none none-user" accel=auto progs= soak=10000 bulk=16777216 lossy=1048576 deadline=2700 stall=300 keep=0
+usage="usage: tests/mpx4-tcp [--images DIR | --no-boot | --only build | --only linux --images DIR] [--ways LIST] [--progs DIR] [--soak N] [--bulk BYTES] [--lossy BYTES] [--deadline SECONDS] [--stall SECONDS] [--keep-going] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg]"
 while [ $# -gt 0 ]; do
     case $1 in
         --images)   images=$2; shift 2 ;;
         --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --ways)     ways=$2; shift 2 ;;
         --progs)    progs=$2; shift 2 ;;
         --soak)     soak=$2; shift 2 ;;
         --bulk)     bulk=$2; shift 2 ;;
@@ -138,6 +155,9 @@ while [ $# -gt 0 ]; do
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+[ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
+for w in $ways; do case $w in peer|user|none|none-user) ;; *) die "--ways takes peer, user, none and none-user" ;; esac; done
 
 k=kmain_sockets
 PROGS="tcperr tcpecho tcpclient tcploop tcpbulk tcpsoak tcpend tcpfull tcpwolf tcpwolfd"
@@ -152,6 +172,22 @@ static_ok() { # file -> reason on failure
     readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
     ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
 }
+
+# px47: the none-user way's Linux side, the same list as the same user in
+# a throwaway container with no network.
+linux_user_side() { # dir -> reasons on stdout
+    rm -rf "$1/linux-none-user"
+    if "$PAX_ROOT/tools/linux-tree" --root "$1/root-user" --runlist "$1/none-user.run" "$1/linux-none-user"; then
+        sed 's/^/  linux none-user: /' "$1/linux-none-user/runs.txt" | cut -c1-220 >&2
+    else
+        printf ' tools/linux-tree --runlist (none-user);'
+    fi
+}
+if [ "$only" = linux ]; then
+    why=$(linux_user_side "$images")
+    [ -z "$why" ] && say "PASS T0 (linux): the none-user way's list ran in a throwaway container, $(grep -c '' "$images/linux-none-user/runs.txt") commands" || bad "T0 (linux):$why"
+    exit "$fail"
+fi
 
 # A run list with this run's sizes.
 sized() { # file
@@ -185,9 +221,16 @@ if [ -z "$images" ]; then
     sized "$PAX_ROOT/user/mpx4-tcp.run" > "$work/peer.run"
     sized "$PAX_ROOT/user/mpx4-tcp-user.run" > "$work/user.run"
     sized "$PAX_ROOT/user/mpx4-tcp-none.run" > "$work/none.run"
-    for way in peer user none; do
+    sized "$PAX_ROOT/user/mpx4-tcp-none-user.run" > "$work/none-user.run" # px47
+    "$PAX_ROOT/tools/mkas" "$work/cred" > "$work/cred.txt" || why+=" tools/mkas;"
+    mkdir -p "$work/root-user"
+    cp -R "$root/." "$work/root-user/"
+    cp "$work/cred/as" "$work/root-user/bin/as" || why+=" no as;"
+    say "  program: bin/as $(sha256_of "$work/cred/as") $(wc -c < "$work/cred/as" | tr -d ' ') bytes"
+    for way in peer user none none-user; do
         pairs=()
         for p in $PROGS; do pairs+=("/bin/$p=$root/bin/$p"); done
+        [ "$way" != none-user ] || pairs+=("/bin/as=$work/root-user/bin/as")
         pairs+=("/etc/pax-run=$work/$way.run")
         "$PAX_ROOT/tools/mkinitramfs" "$work/$way.cpio" "${pairs[@]}" > "$work/$way.initramfs.txt" || why+=" tools/mkinitramfs ($way);"
     done
@@ -197,7 +240,7 @@ if [ -z "$images" ]; then
         log=$work/$tier/$k.build-kernel.log
         if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/$k.lu" "$work/$tier" 2>"$log"); then
             cat "$log" >&2
-            for way in peer user none; do
+            for way in peer user none none-user; do
                 "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
                     --add "$work/$way.cpio" initramfs.cpio "$elf" "$work/$tier/$k-$way.iso" >/dev/null \
                     || why+=" $tier $k: mkimage ($way);"
@@ -210,7 +253,9 @@ if [ -z "$images" ]; then
     done
     # The Linux side: the same binaries, the same tree, the peer's list,
     # the same script at the other end.
-    if [ "$(uname -s)" != Linux ]; then
+    if [ "$only" = build ]; then
+        :
+    elif [ "$(uname -s)" != Linux ]; then
         why+=" the Linux side needs Linux (this is $(uname -s)): build on Linux, boot here with --images;"
     else
         sudo=(); [ "$(id -u)" = 0 ] || sudo=(sudo -n)
@@ -231,6 +276,11 @@ if [ -z "$images" ]; then
                 { head -n 150 "$s"; printf '… %s lines not kept …\n' "$(( $(wc -l < "$s") - 180 ))"; tail -n 30 "$s"; } > "$s.cut" && mv "$s.cut" "$s"
             fi
         done
+        why+=$(linux_user_side "$work")
+    fi
+    if [ "$only" = build ]; then
+        [ -z "$why" ] && say "PASS T0 (build): $k built ($tiers), the programs static, four initramfs" || bad "T0 (build):$why"
+        exit "$fail"
     fi
     [ -z "$why" ] && say "PASS T0: $k built ($tiers), 10 programs static (two of them wolf's), three initramfs ($(wc -c < "$work/peer.cpio" | tr -d ' '), $(wc -c < "$work/user.cpio" | tr -d ' ') and $(wc -c < "$work/none.cpio" | tr -d ' ') bytes), Linux ran $(grep -c ' -> ' "$work/linux.txt") commands; $(grep '^peer: ' "$work/linux.txt"); the tap: $(cut -d'(' -f1 "$work/linux/tap.txt" 2>/dev/null)" || bad "T0:$why"
     images=$work
@@ -240,7 +290,9 @@ if [ -z "$images" ]; then
     fi
 fi
 lx=$images/linux
-[ -f "$images/peer.run" ] && [ -f "$images/user.run" ] && [ -f "$images/none.run" ] && [ -d "$lx" ] && [ -f "$images/sizes" ] || die "no $images/peer.run, user.run, none.run, sizes or linux/ (build first)"
+[ -f "$images/peer.run" ] && [ -f "$images/user.run" ] && [ -f "$images/none.run" ] && [ -f "$images/none-user.run" ] && [ -f "$images/sizes" ] || die "no $images/peer.run, user.run, none.run, none-user.run or sizes (build first)"
+case " $ways " in *" peer "*|*" user "*|*" none "*) [ -d "$lx" ] || die "no $lx (build first)" ;; esac
+case " $ways " in *" none-user "*) [ -d "$images/linux-none-user" ] || die "no $images/linux-none-user (run --only linux)" ;; esac
 read -r soak bulk lossy < "$images/sizes"
 
 # Four ports on this host, free to bind (two UDP for the socket netdev,
@@ -274,6 +326,18 @@ line_of() { grep -E -m1 -- "$2" "$1"; }
 # list); nothing when the command is not one of its lines.
 linux_line() { # command
     awk -v c="$1" '/^#/ || /^$/ { next } { n++ } $0 == c { print n; exit }' "$images/peer.run"
+}
+# px47: the Linux output a way's k-th line is held to, without .out/.rc:
+# the peer's list's line for the root ways, the user side's k-th for
+# none-user (the same list).
+ref_of() { # way k line
+    local lk
+    if [ "$1" = none-user ]; then
+        echo "$images/linux-none-user/$2"
+    else
+        lk=$(linux_line "$3")
+        [ -z "$lk" ] || echo "$lx/$lk"
+    fi
 }
 
 started=$SECONDS
@@ -339,10 +403,10 @@ boot() { # tier leg way
             while [ "$checked" -lt "$seen" ] && [ "$stopped" = 0 ]; do
                 checked=$((checked + 1))
                 line=$(awk -v k="$checked" '/^#/ || /^$/ { next } { n++ } n == k { print; exit }' "$images/$way.run")
-                lk=$(linux_line "$line")
+                lk=$(ref_of "$way" "$checked" "$line")
                 awk -v h="run $checked: $line" '$0 == h { on = 1; next } on && /^run [0-9]+: |^run: [0-9]+ commands$/ { exit } on { print }' "$norm.live" \
                     | awk '/^user: exec pid / { on = 1; next } on && !/^user: / { print }' > "$norm.live.out"
-                if [ -n "$lk" ] && ! cmp -s "$lx/$lk.out" "$norm.live.out"; then
+                if [ -n "$lk" ] && ! cmp -s "$lk.out" "$norm.live.out"; then
                     kill "$hpid" 2>/dev/null; stopped=1
                     printf 'qemu-halt: NOT HALTED: stopped by tests/mpx4-tcp: command %s (%s) had printed other than Linux did\n' "$checked" "$line" >> "$log.verdict"
                 fi
@@ -400,7 +464,7 @@ one() { # tier leg way
 
     # --- T1: the stack up ---------------------------------------------------
     local netline="net: $MAC, line [0-9]+ \(vector [0-9]+, level; elcr [0-9a-f]+ -> [0-9a-f]+\), 66 frames held" netframes=66
-    [ "$way" = none ] && netline='net: no virtio network device among [0-9]+ PCI functions; the network is off' netframes=0
+    case $way in none*) netline='net: no virtio network device among [0-9]+ PCI functions; the network is off' netframes=0 ;; esac
     if has "$norm" "$netline" \
         && has "$norm" 'ip: 10\.0\.2\.15 netmask 255\.255\.255\.0 gateway 10\.0\.2\.2, MTU 1500, TTL 64, DF set, no fragments either way' \
         && has "$norm" 'tcp: 1024 blocks, 65536 bytes each way a connection, MSS 1460, ports 32768-60999 from [0-9]+, RTO 200 ms to 60 s, time-wait 60 s in 32768 entries' \
@@ -431,9 +495,9 @@ one() { # tier leg way
         esac
         s=$(printf '%s\n' "$endl" | sed -E 's/.* (exit_group|exit) ([0-9]+) after .*/\2/')
         awk '/^user: exec pid / { on = 1; next } on && !/^user: / { print }' "$out/$n.block" > "$out/$n.out"
-        lk=$(linux_line "$line")
+        lk=$(ref_of "$way" "$n" "$line")
         [ -n "$lk" ] || { why+=" $n ($line): not a line of the Linux side's list;"; continue; }
-        want=$lx/$lk.out wrc=$(cat "$lx/$lk.rc" 2>/dev/null)
+        want=$lk.out wrc=$(cat "$lk.rc" 2>/dev/null)
         if ! cmp -s "$want" "$out/$n.out"; then
             why+=" $n ($line): output differs from ${want##*/}: $(diff "$want" "$out/$n.out" | head -n 6 | tr '\n' '|');"
         fi
@@ -477,7 +541,7 @@ tcperr syscall 54: refused: a socket option PAX does not have: level and option 
     [ -z "$why" ] && say "PASS T4 $L: -ENOSYS only for set_robust_list (273) and rseq (334); two refusals by name (a stream socket of protocol 17; option 9999 at level 1); one process killed: tcperr's child, by SIGPIPE" || bad "T4 $L:$why"
 
     # --- T5: the other end ----------------------------------------------------------
-    if [ "$way" = none ]; then
+    if [ "$way" = none ] || [ "$way" = none-user ]; then
         :
     elif [ "$way" = peer ]; then
         local steps; steps=$(sed -n -E 's/^net-peer: ok (T[0-9]+) .*/\1/p' "$log.end" | sort -u | paste -sd' ' -)
@@ -496,7 +560,7 @@ tcperr syscall 54: refused: a socket option PAX does not have: level and option 
     fi
 
     # --- T6: the capture ---------------------------------------------------------------
-    if [ "$way" = none ]; then
+    if [ "$way" = none ] || [ "$way" = none-user ]; then
         :
     elif [ -s "$pcap" ] && "$PAX_ROOT/tools/pcap-net" --tcp --serial "$log" "$pcap" >"$pcap.check" 2>&1; then
         say "PASS T6 $L: $(grep '^pcap-net: [0-9]' "$pcap.check" | cut -c1-330); $(grep '^pcap-net: the kernel' "$pcap.check"); $(grep -o 'tcp\.in=[0-9]* tcp\.out=[0-9]* tcp\.retransmitted=[0-9]* tcp\.resets-out=[0-9]* tcp\.probes=[0-9]* tcp\.connections=[0-9]* tcp\.bytes-out=[0-9]*' "$pcap.check") [pcap $(sha256_of "$pcap" | cut -c1-12)…]"
@@ -508,7 +572,7 @@ tcperr syscall 54: refused: a socket option PAX does not have: level and option 
     # whole above and its digest written with the boot's line, it is
     # kept as its first 4000 frames (PAX_KEEP_PCAP=1 keeps it whole,
     # which a failed check does too).
-    if [ "$way" != none ] && [ -s "$pcap" ] && [ "${PAX_KEEP_PCAP:-0}" != 1 ] && grep -q '^pcap-net: PASS' "$pcap.check" 2>/dev/null; then
+    if [ "$way" != none ] && [ "$way" != none-user ] && [ -s "$pcap" ] && [ "${PAX_KEEP_PCAP:-0}" != 1 ] && grep -q '^pcap-net: PASS' "$pcap.check" 2>/dev/null; then
         python3 - "$pcap" "$PAX_BUILD/mpx4-tcp-$tier-$leg-$way.head.pcap" <<'PY'
 import struct, sys
 d = open(sys.argv[1], "rb").read()
@@ -545,7 +609,7 @@ PY
         has "$norm" 'tcp: rx data [0-9]+ bytes in order, [1-9][0-9]* out-of-order queued, [0-9]+ out-of-order-dropped, [0-9]+ trimmed, [0-9]+ after-close, 1 syn-data, 1 urgent; [0-9]+ resets taken, [0-9]+ duplicate acks' || why+=" rx data;"
         has "$norm" 'tcp: options [0-9]+ mss, skipped [1-9][0-9]* window-scale [1-9][0-9]* sack-permitted 0 sack [1-9][0-9]* timestamps [1-9][0-9]* fast-open [1-9][0-9]* other' || why+=" options;"
         has "$norm" 'tcp: tx .* [1-9][0-9]* probes\), 0 not sent; [1-9][0-9]* retransmitted, [1-9][0-9]* timeouts, [0-9]+ fast retransmits, .*' || why+=" retransmissions;"
-    elif [ "$way" = none ]; then
+    elif [ "$way" = none ] || [ "$way" = none-user ]; then
         has "$norm" 'tcp: rx [0-9]+ segments, dropped 0 short 0 header 0 checksum 0 broadcast 0 port-zero 0 option' || why+=" rx;"
         has "$norm" 'tcp: rx for nobody 1 reset, 0 resets dropped; listeners 6 listen-full 0 no-block 0 other; .*' || why+=" listeners;"
         [ "$(sed -n -E 's/^tcp: loopback ([0-9]+) segments sent, ([0-9]+) received, [0-9]+ retransmitted$/\1/p' "$norm")" = "$(sed -n -E 's/^tcp: loopback ([0-9]+) segments sent, ([0-9]+) received, .*/\2/p' "$norm")" ] || why+=" loopback's segments;"
@@ -559,7 +623,7 @@ PY
     # --- T8: the transfers, the soaks, the loss matrix --------------------------------------
     why=
     local uo ui ul so si sl t8=
-    if [ "$way" != none ]; then
+    if [ "$way" != none ] && [ "$way" != none-user ]; then
         uo=$(stamp "$list" "$norm" '^/bin/tcpbulk send 10\.0\.2\.2 9100 ') ui=$(stamp "$list" "$norm" '^/bin/tcpbulk recv 7100 ')
         so=$(stamp "$list" "$norm" '^/bin/tcpsoak to ') si=$(stamp "$list" "$norm" '^/bin/tcpecho 7 10\.0\.2\.2 9099$')
         has "$norm" "tcpbulk send: sent $bulk bytes, crc [0-9a-f]{8}; the receiver said \"got $bulk bytes, crc [0-9a-f]{8}\"" || why+=" the transfer out;"
@@ -569,7 +633,7 @@ PY
         t8+="$bulk bytes out of PAX in $uo us ($(rate "$bulk" "$uo") bytes a second) and into PAX in $ui us ($(rate "$bulk" "$ui")); $soak connections out in $so us ($(rate "$soak" "$so") a second) and $((soak + 7)) in, in $si us ($(rate $((soak + 7)) "$si")); "
     fi
     if [ "$way" != user ]; then
-        ul=$(stamp "$list" "$norm" '^/bin/tcpbulk loop ') sl=$(stamp "$list" "$norm" '^/bin/tcpsoak loop ')
+        ul=$(stamp "$list" "$norm" '^(/bin/as 1000 1000 )?/bin/tcpbulk loop ') sl=$(stamp "$list" "$norm" '^(/bin/as 1000 1000 )?/bin/tcpsoak loop ')
         has "$norm" "tcpbulk loop, the receiver: received $bulk bytes, crc [0-9a-f]{8}, every byte the pattern's" || why+=" the transfer over loopback;"
         has "$norm" "tcpsoak: $soak connections served over loopback, each closed .*; the client ended with status 0" || why+=" the soak over loopback;"
         t8+="over loopback $bulk bytes in $ul us ($(rate "$bulk" "$ul") bytes a second) and $soak connections in $sl us ($(rate "$soak" "$sl") a second); "
@@ -605,9 +669,9 @@ for leg in $legs; do
         continue
     fi
     for tier in $tiers; do
-        one "$tier" "$leg" peer
-        one "$tier" "$leg" user
-        one "$tier" "$leg" none
+        for way in $ways; do
+            one "$tier" "$leg" "$way"
+        done
     done
 done
 cat "$runs"
