@@ -38,7 +38,9 @@
 #          (px45). Its Linux side is the same list as the same user in a
 #          throwaway container with no network (tools/linux-tree
 #          --runlist, which sets ip_unprivileged_port_start to Linux's
-#          1024 there); U1 to U9 hold for it as for `none` (udpfill to
+#          1024 there, and addresses the container as PAX is addressed
+#          with no device: 10.0.2.15/24, a default route through
+#          10.0.2.2, a tap with nothing at its other end); U1 to U9 hold for it as for `none` (udpfill to
 #          its file), each other line held to that side's output for
 #          the same line
 #
@@ -164,7 +166,7 @@ need nm python3
 # a throwaway container with no network.
 linux_user_side() { # dir -> reasons on stdout
     rm -rf "$1/linux-none-user"
-    if "$PAX_ROOT/tools/linux-tree" --root "$1/root-user" --runlist "$1/none-user.run" --size 256m "$1/linux-none-user"; then
+    if "$PAX_ROOT/tools/linux-tree" --root "$1/root-user" --runlist "$1/none-user.run" --size 256m --net 10.0.2.15/24,10.0.2.2 "$1/linux-none-user"; then
         sed 's/^/  linux none-user: /' "$1/linux-none-user/runs.txt" | cut -c1-220 >&2
     else
         printf ' tools/linux-tree --runlist (none-user);'

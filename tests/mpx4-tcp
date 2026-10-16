@@ -40,7 +40,9 @@
 #          (px45). Its Linux side is the same list as the same user in a
 #          throwaway container with no network (tools/linux-tree
 #          --runlist, which sets ip_unprivileged_port_start to Linux's
-#          1024 there); T1 to T9 hold for it as for `none`, each line
+#          1024 there, and addresses the container as PAX is addressed
+#          with no device: 10.0.2.15/24, a default route through
+#          10.0.2.2, a tap with nothing at its other end); T1 to T9 hold for it as for `none`, each line
 #          held to that side's output for the same line
 #
 # the first two with `-object filter-dump` writing every frame to a pcap
@@ -177,7 +179,7 @@ static_ok() { # file -> reason on failure
 # a throwaway container with no network.
 linux_user_side() { # dir -> reasons on stdout
     rm -rf "$1/linux-none-user"
-    if "$PAX_ROOT/tools/linux-tree" --root "$1/root-user" --runlist "$1/none-user.run" --size 256m "$1/linux-none-user"; then
+    if "$PAX_ROOT/tools/linux-tree" --root "$1/root-user" --runlist "$1/none-user.run" --size 256m --net 10.0.2.15/24,10.0.2.2 "$1/linux-none-user"; then
         sed 's/^/  linux none-user: /' "$1/linux-none-user/runs.txt" | cut -c1-220 >&2
     else
         printf ' tools/linux-tree --runlist (none-user);'
@@ -374,7 +376,7 @@ boot() { # tier leg way
         local w=0
         while [ "$w" -lt 18000 ] && ! grep -q '^tcp-host: 127.0.0.1 ports\|^tcp-host: FAIL' "$log.end" 2>/dev/null; do sleep 0.1; w=$((w + 1)); done
     fi
-    [ "$way" = none ] || q+=(--qemu -device --qemu "virtio-net-pci,netdev=n0,mac=$MAC" --qemu -object --qemu "filter-dump,id=f0,netdev=n0,file=$pcap")
+    [ "$way" = none ] || [ "$way" = none-user ] || q+=(--qemu -device --qemu "virtio-net-pci,netdev=n0,mac=$MAC" --qemu -object --qemu "filter-dump,id=f0,netdev=n0,file=$pcap")
     "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 1200 --accel "$accel" \
         --elf "$elf" --marker halt ${q[@]+"${q[@]}"} "$iso" >"$log.verdict" 2>&1 &
     local hpid=$! said=0 checked=0 seen=0 quiet=0 size=0 now line lk stopped=0
