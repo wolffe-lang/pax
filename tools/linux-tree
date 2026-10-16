@@ -4,8 +4,8 @@
 # whole root a tmpfs inside a THROWAWAY CONTAINER.
 #
 #   tools/linux-tree --root DIR --keys KEYS --prompt TEXT [--argv0 NAME]
-#                    [--size SIZE] [--sys] [--owners FILE] OUT -- PROG [ARG...]
-#   tools/linux-tree --root DIR --runlist LIST [--size SIZE] [--owners FILE] OUTDIR
+#                    [--size SIZE] [--sys] [--rdev] [--owners FILE] OUT -- PROG [ARG...]
+#   tools/linux-tree --root DIR --runlist LIST [--size SIZE] [--owners FILE] [--net IP/PREFIX,GATEWAY] OUTDIR
 #
 # The programs under test remove and overwrite files (`rm`, `rmdir`,
 # `mv`, `cp`, a shell's `>`), and one session types `rm -rf /` to see it
@@ -22,9 +22,14 @@
 #     writes an archive), umask 022;
 #   - tools/linux-tty types the session: PROG chrooted in /r, pid 1 of a
 #     fresh pid namespace, on a pseudo-terminal, with PAX's environment;
-#     px47: with --rdev, the container's /dev bound with its submounts
-#     (a rootless engine's /dev/null is the host's node bound onto a
-#     file, which a plain bind left out: a user was refused it);
+#     px47: --rdev passes linux-tty's --rdev, the container's /dev bound
+#     with its submounts: a rootless engine's /dev/null is the host's
+#     node bound onto a file, which a plain bind leaves out (a user is
+#     refused the file under it, where Linux gives anyone /dev/null),
+#     though with it /dev/null is on another file system than /dev (the
+#     host's devtmpfs), which the tree probe's `paths:` line tells; a
+#     rootful engine (CI's Docker) makes its nodes in the container's
+#     /dev and is right either way;
 #   - afterwards the names left in /r are listed.
 # OUT gets what the terminal showed, OUT.rc the program's exit status,
 # OUT.after the names in the root when the session was over (sorted,
@@ -40,7 +45,16 @@
 # same tmpfs, as root in the container; OUTDIR gets its <k>.out and
 # <k>.rc, OUTDIR/runs.txt its summary and OUTDIR/after the names left.
 # A line `/bin/as UID GID PROG …` runs PROG as that user (px39's `as`).
-# So a user's run of a run list needs no root on the host.
+# So a user's run of a run list needs no root on the host. --net
+# IP/PREFIX,GATEWAY addresses the container as PAX is addressed when it
+# has no network device (px23: the address, its subnet and a default
+# route through the gateway configured, loopback answering the address):
+# a tap `eth0` made persistent with nothing at its other end (TUNSETIFF,
+# TUNSETPERSIST), given the address and netmask (SIOCSIFADDR,
+# SIOCSIFNETMASK), up (SIOCSIFFLAGS), and a default route through the
+# gateway (SIOCADDRT): the uapi headers' numbers (linux/if_tun.h,
+# linux/sockios.h, linux/route.h). A frame sent there goes nowhere, as
+# on PAX with no device.
 #
 # **A user's port.** Docker and podman give a container's own network
 # namespace net.ipv4.ip_unprivileged_port_start 0, so a container's
@@ -56,7 +70,7 @@
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
-root= keys= prompt= argv0= size=64m sys= owners= runlist=
+root= keys= prompt= argv0= size=64m sys= owners= runlist= net= rdev=
 while [ $# -gt 0 ]; do
     case $1 in
         --root)   root=$2; shift 2 ;;
@@ -67,12 +81,14 @@ while [ $# -gt 0 ]; do
         --sys)    sys=--sys; shift ;;
         --owners) owners=$2; shift 2 ;;
         --runlist) runlist=$2; shift 2 ;;
+        --net)    net=$2; shift 2 ;;
+        --rdev)   rdev=--rdev; shift ;;
         --)       break ;;
         -*)       die "unknown option $1" ;;
         *)        break ;;
     esac
 done
-usage="usage: linux-tree --root DIR --keys KEYS --prompt TEXT [--argv0 NAME] [--size SIZE] [--sys] [--owners FILE] OUT -- PROG [ARG...] | --root DIR --runlist LIST [--size SIZE] [--owners FILE] OUTDIR"
+usage="usage: linux-tree --root DIR --keys KEYS --prompt TEXT [--argv0 NAME] [--size SIZE] [--sys] [--rdev] [--owners FILE] OUT -- PROG [ARG...] | --root DIR --runlist LIST [--size SIZE] [--owners FILE] [--net IP/PREFIX,GATEWAY] OUTDIR"
 if [ -n "$runlist" ]; then
     [ -n "$root" ] && [ $# -eq 1 ] || die "$usage"
     [ -f "$runlist" ] || die "no run list $runlist"
@@ -104,6 +120,8 @@ if [ -n "$runlist" ]; then cp "$runlist" "$stage/runlist"; else cp "$keys" "$sta
 printf '%s' "$prompt" > "$stage/prompt"
 printf '%s' "$argv0" > "$stage/argv0"
 printf '%s' "$sys" > "$stage/sys"
+printf '%s' "$rdev" > "$stage/rdev"
+printf '%s' "$net" > "$stage/net"
 : > "$stage/owners"
 if [ -n "$owners" ]; then cp "$owners" "$stage/owners" || die "no owners file $owners"; fi
 : > "$stage/argv"
@@ -119,6 +137,39 @@ pf=/proc/sys/net/ipv4/ip_unprivileged_port_start
 was=$(cat $pf)
 echo 1024 > $pf || { echo "linux-tree: cannot set $pf" >&2; exit 2; }
 echo "linux-tree: ip_unprivileged_port_start $was in the container, now $(cat $pf); host fs.protected_hardlinks $(cat /proc/sys/fs/protected_hardlinks) symlinks $(cat /proc/sys/fs/protected_symlinks) regular $(cat /proc/sys/fs/protected_regular) fifos $(cat /proc/sys/fs/protected_fifos)" >&2
+if [ -s /x/net ]; then
+    python3 - "$(cat /x/net)" <<'PY' || { echo "linux-tree: cannot address the container as $(cat /x/net)" >&2; exit 2; }
+import ctypes, fcntl, os, socket, struct, sys
+cidr, gw = sys.argv[1].split(",")
+ip, pfx = cidr.split("/")
+mask = socket.inet_ntoa(struct.pack(">I", (0xffffffff << (32 - int(pfx))) & 0xffffffff))
+t = os.open("/dev/net/tun", os.O_RDWR)
+fcntl.ioctl(t, 0x400454ca, struct.pack("16sH14s", b"eth0", 0x0002 | 0x1000, b""))  # TUNSETIFF: IFF_TAP | IFF_NO_PI
+fcntl.ioctl(t, 0x400454cb, 1)  # TUNSETPERSIST
+os.close(t)
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+def ifaddr(name, addr):
+    return struct.pack("16sH2s4s8s", name, socket.AF_INET, b"\0\0", socket.inet_aton(addr), b"\0" * 8)
+fcntl.ioctl(s, 0x8916, ifaddr(b"eth0", ip))  # SIOCSIFADDR
+fcntl.ioctl(s, 0x891c, ifaddr(b"eth0", mask))  # SIOCSIFNETMASK
+for name in (b"lo", b"eth0"):
+    fl = struct.unpack("16sH14s", fcntl.ioctl(s, 0x8913, struct.pack("16sH14s", name, 0, b"")))[1]  # SIOCGIFFLAGS
+    fcntl.ioctl(s, 0x8914, struct.pack("16sH14s", name, fl | 0x1, b""))  # SIOCSIFFLAGS: IFF_UP
+class sa(ctypes.Structure):
+    _fields_ = [("family", ctypes.c_ushort), ("port", ctypes.c_ushort), ("addr", ctypes.c_char * 4), ("zero", ctypes.c_char * 8)]
+class rtentry(ctypes.Structure):
+    _fields_ = [("pad1", ctypes.c_ulong), ("dst", sa), ("gateway", sa), ("genmask", sa), ("flags", ctypes.c_ushort),
+                ("pad2", ctypes.c_short), ("pad3", ctypes.c_ulong), ("pad4", ctypes.c_void_p), ("metric", ctypes.c_short),
+                ("dev", ctypes.c_char_p), ("mtu", ctypes.c_ulong), ("window", ctypes.c_ulong), ("irtt", ctypes.c_ushort)]
+r = rtentry()
+r.dst = sa(socket.AF_INET, 0, socket.inet_aton("0.0.0.0"))
+r.gateway = sa(socket.AF_INET, 0, socket.inet_aton(gw))
+r.genmask = sa(socket.AF_INET, 0, socket.inet_aton("0.0.0.0"))
+r.flags = 0x0001 | 0x0002  # RTF_UP | RTF_GATEWAY
+fcntl.ioctl(s, 0x890B, bytes(r))  # SIOCADDRT
+PY
+    echo "linux-tree: the container is $(cat /x/net) (a tap with nothing at its other end, a default route)" >&2
+fi
 mkdir /r || exit 2
 mount -t tmpfs -o "size=$1,mode=755" none /r || { echo "linux-tree: cannot mount a tmpfs (is the container privileged?)" >&2; exit 2; }
 cp -R /x/root/. /r/ || exit 2
@@ -139,10 +190,11 @@ set --
 while IFS= read -r a; do set -- "$@" "$a"; done < /x/argv
 a0=$(cat /x/argv0)
 sy=$(cat /x/sys)
+rd=$(cat /x/rdev)
 if [ -n "$a0" ]; then
-    python3 /x/linux-tty --root /r --pid1 --rdev $sy --keys /x/keys --prompt "$(cat /x/prompt)" --argv0 "$a0" /x/out -- "$@"
+    python3 /x/linux-tty --root /r --pid1 $rd $sy --keys /x/keys --prompt "$(cat /x/prompt)" --argv0 "$a0" /x/out -- "$@"
 else
-    python3 /x/linux-tty --root /r --pid1 --rdev $sy --keys /x/keys --prompt "$(cat /x/prompt)" /x/out -- "$@"
+    python3 /x/linux-tty --root /r --pid1 $rd $sy --keys /x/keys --prompt "$(cat /x/prompt)" /x/out -- "$@"
 fi
 rc=$?
 (cd /r && find . -mindepth 1 \( -path ./dev -o -path ./proc -o -path ./sys \) -prune -o -print | LC_ALL=C sort) > /x/after
