@@ -14,9 +14,10 @@
  * time or address is printed, and what several processes heard is
  * printed sorted, each once. Where it wants a key typed, R writes the prompt `$ `
  * and waits (tools/qemu-halt --type, tools/linux-tty, notes/px48's
- * vmjob): five keys, ^C ^\ ^Z ^Z ^C (user/console/jobs.keys).
+ * vmjob): five keys, ^C ^\ ^Z ^Z ^C, then the keys of V (VMIN and VTIME,
+ * pax#66): x, y 1.5 s later, ab, q 1.5 s later (user/console/jobs.keys).
  *
- *   jobs            every section, G K S T H
+ *   jobs            every section, G K S T V H
  *   jobs soak N     N rounds: a group made, stopped, continued, given the
  *                   terminal and back, signalled, reaped (P5)
  *   jobs idle       (internal) a target that only waits, exec'd
@@ -1020,6 +1021,37 @@ static void terminal(void) {
     }
 }
 
+/* --- V: VMIN and VTIME (pax#66), R in the foreground, echo off ------------------- */
+static void vread(const char *what, int vmin, int vtime) {
+    struct termios t0, t;
+    tcgetattr(0, &t0);
+    t = t0;
+    t.c_lflag &= ~(ICANON | ECHO);
+    t.c_cc[VMIN] = (cc_t)vmin;
+    t.c_cc[VTIME] = (cc_t)vtime;
+    tcsetattr(0, TCSANOW, &t);
+    printf("$ ");
+    fflush(stdout);
+    char b[16];
+    ssize_t n = read(0, b, sizeof b);
+    tcsetattr(0, TCSANOW, &t0);
+    printf("\nV: %s: read %zd bytes \"", what, n);
+    for (ssize_t i = 0; i < n; i++) putchar(b[i] >= 32 && b[i] < 127 ? b[i] : '?');
+    printf("\"\n");
+}
+
+static void vmin_vtime(void) {
+    sigset_t ttou, old;
+    sigemptyset(&ttou);
+    sigaddset(&ttou, SIGTTOU);
+    sigprocmask(SIG_BLOCK, &ttou, &old);
+    printf("V: R has the terminal, in the foreground: %s\n", yesno(tcgetpgrp(0) == getpgrp()));
+    vread("VMIN 2, VTIME 0, one key and a second 1.5 s later", 2, 0);
+    vread("VMIN 5, VTIME 5, two keys, then nothing", 5, 5);
+    vread("VMIN 5, VTIME 5, nothing for 1.5 s, then one key", 5, 5);
+    sigprocmask(SIG_SETMASK, &old, 0);
+}
+
 /* --- H: hangup, and the orphaned group ------------------------------------------- */
 static void hangup(void) {
     char h[1024];
@@ -1171,6 +1203,7 @@ int main(int argc, char **argv) {
         kill_groups();
         stops();
         terminal();
+        vmin_vtime();
         hangup();
         fflush(stdout);
         _exit(0);
