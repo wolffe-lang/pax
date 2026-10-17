@@ -1,0 +1,44 @@
+mkdir /w
+cd /w
+mk() { echo one > f; echo two >> f; }
+s() { echo "status $?"; cat f; }
+echo A > a; echo B > b
+mk; cat f >> f; s
+mk; cat < f >> f; s
+mk; cat - < f >> f; s
+mk; cat /dev/stdin < f >> f; s
+mk; ln f h; cat h >> f; s; rm h
+mk; ln -s f l; cat l >> f; s; rm l
+mk; { read x; cat; } < f >> f; s
+mk; cat f f >> f; s
+mk; cat - - < f >> f; s
+mk; cat a f b >> f; s
+mk; cat nope f >> f; s
+mk; mkdir d; cat d >> f; s; rmdir d
+mk; cat -n f >> f; s
+mk; cat -A f >> f; s
+mk; cat f /dev/null >> f; s
+: > f; cat f >> f; s
+mk; { read x; read y; cat; } < f >> f; s
+mk; cat f > f; s
+mk; cat < f > f; s
+mk; cat f 1<> f; s
+mk; cat < f 1<> f; s
+mk; { read x; cat; } < f 1<> f; s
+mk; { echo -n AB; cat; } < f 1<> f; s
+mk; { echo -n AB; cat f; } 1<> f; s
+mk; cat a f 1<> f; s
+mk; cat f f 1<> f; s
+mk; cat - - < f 1<> f; s
+mk; { read x; echo -n Z; cat /dev/stdin; } < f 1<> f; s
+mk; cat a >> f; s
+mk; cat f >> a; s; cat a; echo A > a
+mk; exec 3>> f; cat f > g; s; exec 3>&-; cat g; rm g
+mk; cat f f | wc -c
+mk; cat /dev/null >> f; s
+mk; cat f > /dev/null; s
+mk; cp f g; cat g >> f; s; rm g
+rm f a b
+cd /
+rmdir /w
+exit
