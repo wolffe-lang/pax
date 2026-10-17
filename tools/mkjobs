@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# mkjobs — build px48's job-control probe (user/elf/jobs.c) alone, a
+# static x86-64 Linux executable.
+#
+#   tools/mkjobs OUTDIR
+#
+# The compiler line of tools/mkas (`cc -static -no-pie -O1`, ET_EXEC
+# with no PT_INTERP, checked), with -pthread (the probe asks a thread's
+# ids). Build on a baseline x86-64 glibc (the CI runner's Ubuntu; an
+# Ubuntu container on kasumi), never on kasumi's own (px10). Prints
+# `jobs <sha256> <bytes>`. Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkjobs OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${CC:-cc}
+need "$cc" readelf
+"$cc" -static -no-pie -O1 -pthread -Wall -Wextra -Wno-unused-result -Wno-unused-function \
+    -Wl,--build-id=none -Wl,-z,noexecstack -o "$out/jobs" "$PAX_ROOT/user/elf/jobs.c" || die "cc: jobs"
+readelf -hW "$out/jobs" | grep -Eq 'Type: +EXEC' || die "jobs is not ET_EXEC"
+! readelf -lW "$out/jobs" | grep -q INTERP || die "jobs has a PT_INTERP (not static)"
+printf '%s %s %s\n' jobs "$(sha256_of "$out/jobs")" "$(wc -c < "$out/jobs" | tr -d ' ')"
