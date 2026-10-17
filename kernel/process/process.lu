@@ -76,8 +76,15 @@
 //! otherwise the caller blocks, its frame rewound to run the call
 //! again when a child ends; no child at all is -ECHILD. waitid fills
 //! the SIGCHLD siginfo (si_signo 17, si_code CLD_EXITED or CLD_KILLED,
-//! si_pid, si_status) and keeps the zombie under WNOWAIT. No process
-//! groups yet: wait4's 0 and -pgid, and waitid's P_PGID, mean any child.
+//! si_pid, si_status) and keeps the zombie under WNOWAIT. px48: wait4's
+//! 0 and -pgid and waitid's P_PGID select a process group (0: the
+//! caller's), and WUNTRACED (WSTOPPED) and WCONTINUED report a stop and
+//! a continue once each (kernel/sched's `wait_find`); no such child at
+//! all is -ECHILD.
+//!
+//! **Groups and sessions** (px48): `setpgid` (109), `getpgrp` (111),
+//! `setsid` (112), `getpgid` (121), `getsid` (124), by kernel/sched's
+//! words, as Linux answers them (measured, notes/px48-job-control.md).
 //!
 //! **Signals** are kernel/signal's since px26 (the calls, the frame,
 //! delivery); this module keeps what `execve` and `clone` do to the
@@ -213,7 +220,9 @@ const CLONE_DETACHED: u64 = 0x400000 // ignored, as Linux ignores it
 
 // wait options and idtypes (uapi linux/wait.h).
 const WNOHANG: u64 = 0x1
+const WUNTRACED: u64 = 0x2 // px48: wait4's; waitid's WSTOPPED is the same bit
 const WEXITED: u64 = 0x4
+const WCONTINUED: u64 = 0x8 // px48
 const WNOWAIT: u64 = 0x01000000
 const WAIT4_KNOWN: u64 = 0xe000000b // WNOHANG WUNTRACED WCONTINUED __WNOTHREAD __WALL __WCLONE
 const WAITID_KNOWN: u64 = 0xe100000f // + WEXITED, WNOWAIT
@@ -228,6 +237,9 @@ const SIG_DFL: u64 = 0
 const SIG_IGN: u64 = 1
 const CLD_EXITED: u64 = 1
 const CLD_KILLED: u64 = 2
+const CLD_STOPPED: u64 = 5 // px48
+const CLD_CONTINUED: u64 = 6
+const SIGCONT: u64 = 18
 
 // -errno as %rax carries it (uapi asm-generic/errno-base.h).
 const NEG_ENOENT: u64 = 0xfffffffffffffffe // -2
@@ -1099,16 +1111,35 @@ fn thread(f: u64, flags: u64, usp: u64, ptid: u64, ctid: u64, tls: u64) -> u64 {
     f
 }
 
-// --- wait4, waitid (px14) -------------------------------------------------------
+// --- wait4, waitid (px14; px48: groups, stops, continues) -------------------------
 
-/// A 32-bit pid argument read as an int: 0 any child (also for -1 and
-/// for a negative process group: PAX has one group), else that pid.
-fn pid_sel(x: u64) -> u64 {
+/// px48: wait4's pid as Linux reads it (an int): (how, sel) for
+/// kernel/sched's `wait_find` — > 0 that child, -1 any child, 0 the
+/// children in the caller's process group, < -1 those in group -pid.
+fn pid_sel(x: u64) -> (u64, u64) {
     let p = x & 0xffffffff
-    if p >= 0x80000000 {
-        return 0
+    if p == 0 {
+        return (2, sched.self_pgid())
     }
-    p
+    if p == 0xffffffff {
+        return (0, 0)
+    }
+    if p >= 0x80000000 {
+        return (2, 0x100000000 - p)
+    }
+    (1, p)
+}
+
+/// What a wait's options want (kernel/sched's W_*).
+fn wants(o: u64, exited: bool) -> u64 {
+    var w: u64 = if exited { sched.W_EXITED } else { 0 }
+    if o & WUNTRACED != 0 {
+        w = w | sched.W_STOPPED
+    }
+    if o & WCONTINUED != 0 {
+        w = w | sched.W_CONTINUED
+    }
+    w
 }
 
 /// Run the call in `f` again when a child ends (number `nr`).
@@ -1118,7 +1149,9 @@ fn block(f: u64, nr: u64) -> u64 {
     sched.wait_child(f)
 }
 
-/// `wait4(pid, wstatus, options, rusage)` (`nr` 61) from `f`.
+/// `wait4(pid, wstatus, options, rusage)` (`nr` 61) from `f`. px48: a
+/// stop is reported under WUNTRACED as `(sig << 8) | 0x7f` and a
+/// continue under WCONTINUED as `0xffff`, each once (measured).
 pub fn wait4(f: u64, nr: u64, pid: u64, wstatus: u64, options: u64, rusage: u64) -> u64 {
     let o = options & 0xffffffff
     if o & (0xffffffff ^ WAIT4_KNOWN) != 0 {
@@ -1126,7 +1159,8 @@ pub fn wait4(f: u64, nr: u64, pid: u64, wstatus: u64, options: u64, rusage: u64)
         return f
     }
     let pml4 = paging.live()
-    let (any, s) = sched.child_ended(pid_sel(pid))
+    let (how, sel) = pid_sel(pid)
+    let (any, s, what) = sched.wait_find(how, sel, wants(o, true))
     if !any {
         put_word(f, W_RAX, NEG_ECHILD)
         return f
@@ -1142,7 +1176,17 @@ pub fn wait4(f: u64, nr: u64, pid: u64, wstatus: u64, options: u64, rusage: u64)
         put_word(f, W_RAX, NEG_EFAULT)
         return f
     }
-    let (cp, st) = sched.zombie(s, true)
+    var cp: u64 = 0
+    var st: u64 = 0
+    if what == sched.W_EXITED {
+        let (zp, zs) = sched.zombie(s, true)
+        cp = zp
+        st = zs
+    } else {
+        let (rp, sig) = sched.wait_report(s, what, true)
+        cp = rp
+        st = if what == sched.W_STOPPED { (sig << 8) | 0x7f } else { 0xffff }
+    }
     if wstatus != 0 {
         uaccess.put(pml4, wstatus, st, 4)
     }
@@ -1154,16 +1198,28 @@ pub fn wait4(f: u64, nr: u64, pid: u64, wstatus: u64, options: u64, rusage: u64)
 }
 
 /// `waitid(idtype, id, infop, options, rusage)` (`nr` 247) from `f`.
+/// px48: P_PGID with 0 is the caller's group; WSTOPPED and WCONTINUED
+/// report a stop (CLD_STOPPED, the signal) and a continue
+/// (CLD_CONTINUED, SIGCONT); one of WEXITED, WSTOPPED, WCONTINUED is
+/// needed (else -EINVAL).
 pub fn waitid(f: u64, nr: u64, idtype: u64, id: u64, infop: u64, options: u64, rusage: u64) -> u64 {
     let o = options & 0xffffffff
     let t = idtype & 0xffffffff
-    if o & (0xffffffff ^ WAITID_KNOWN) != 0 || o & WEXITED == 0 || (t != P_ALL && t != P_PID && t != P_PGID) {
+    if o & (0xffffffff ^ WAITID_KNOWN) != 0 || o & (WEXITED | WUNTRACED | WCONTINUED) == 0 || (t != P_ALL && t != P_PID && t != P_PGID) {
         put_word(f, W_RAX, NEG_EINVAL)
         return f
     }
     let pml4 = paging.live()
-    let sel = if t == P_PID { id & 0xffffffff } else { 0 }
-    let (any, s) = sched.child_ended(sel)
+    var how: u64 = 0
+    var sel: u64 = 0
+    if t == P_PID {
+        how = 1
+        sel = id & 0xffffffff
+    } else if t == P_PGID {
+        how = 2
+        sel = if id & 0xffffffff == 0 { sched.self_pgid() } else { id & 0xffffffff }
+    }
+    let (any, s, what) = sched.wait_find(how, sel, wants(o, o & WEXITED != 0))
     if !any {
         put_word(f, W_RAX, NEG_ECHILD)
         return f
@@ -1182,20 +1238,92 @@ pub fn waitid(f: u64, nr: u64, idtype: u64, id: u64, infop: u64, options: u64, r
         }
         return block(f, nr)
     }
-    let (cp, st) = sched.zombie(s, o & WNOWAIT == 0)
+    var cp: u64 = 0
+    var code: u64 = 0
+    var status: u64 = 0
+    if what == sched.W_EXITED {
+        let (zp, st) = sched.zombie(s, o & WNOWAIT == 0)
+        let killed = st & 0x7f != 0
+        cp = zp
+        code = if killed { CLD_KILLED } else { CLD_EXITED }
+        status = if killed { st & 0x7f } else { (st >> 8) & 0xff }
+    } else {
+        let (rp, sig) = sched.wait_report(s, what, o & WNOWAIT == 0)
+        cp = rp
+        code = if what == sched.W_STOPPED { CLD_STOPPED } else { CLD_CONTINUED }
+        status = if what == sched.W_STOPPED { sig } else { SIGCONT }
+    }
     if infop != 0 {
         uaccess.zero(pml4, infop, 128)
         uaccess.put(pml4, infop, SIGCHLD, 4)
-        let killed = st & 0x7f != 0
-        uaccess.put(pml4, infop + 8, if killed { CLD_KILLED } else { CLD_EXITED }, 4)
+        uaccess.put(pml4, infop + 8, code, 4)
         uaccess.put(pml4, infop + 16, cp, 4)
-        uaccess.put(pml4, infop + 24, if killed { st & 0x7f } else { (st >> 8) & 0xff }, 4)
+        uaccess.put(pml4, infop + 24, status, 4)
     }
     if rusage != 0 {
         uaccess.zero(pml4, rusage, 144)
     }
     put_word(f, W_RAX, 0)
     f
+}
+
+// --- px48: process groups and sessions --------------------------------------------
+
+/// A 32-bit argument read as an int: (negative, magnitude).
+fn int_arg(x: u64) -> (bool, u64) {
+    let v = x & 0xffffffff
+    if v >= 0x80000000 {
+        return (true, 0x100000000 - v)
+    }
+    (false, v)
+}
+
+/// `setpgid(pid, pgid)` (109), `setpgid(2)`, XSH setpgid; measured
+/// (notes/px48-job-control.md): a negative pgid -EINVAL; the target the
+/// caller or a child of it, else -ESRCH; a child that has exec'd
+/// -EACCES; a session leader, or a target or group of another session,
+/// or a group that does not exist, -EPERM.
+pub fn setpgid(pid: u64, pgid: u64) -> u64 {
+    let (gneg, g) = int_arg(pgid)
+    let (pneg, p0) = int_arg(pid)
+    if gneg {
+        return NEG_EINVAL
+    }
+    if pneg {
+        return NEG_ESRCH
+    }
+    let p = if p0 == 0 { sched.self_pid() } else { p0 }
+    let r = sched.setpgid(p, if g == 0 { p } else { g })
+    if r == 0 {
+        return 0
+    }
+    if r == 3 { NEG_ESRCH } else if r == 13 { NEG_EACCES } else { NEG_EPERM }
+}
+
+/// `getpgid(pid)` (121) and `getsid(pid)` (124): a process's group or
+/// session (`pid` 0 the caller; any process, another session's too, a
+/// zombie until reaped), -ESRCH when there is none. `getpgrp()` (111) is
+/// `getpgid(0)`.
+pub fn getpgid(pid: u64, session: bool) -> u64 {
+    let (neg, p) = int_arg(pid)
+    if neg {
+        return NEG_ESRCH
+    }
+    if p == 0 {
+        return if session { sched.self_sid() } else { sched.self_pgid() }
+    }
+    let sl = sched.proc_slot(p)
+    if sl == sched.SLOTS {
+        return NEG_ESRCH
+    }
+    if session { sched.sid_of(sl) } else { sched.pgid_of(sl) }
+}
+
+/// `setsid()` (112): the new session's id, or -EPERM for a process
+/// that leads a process group (a session leader too).
+pub fn setsid() -> u64 {
+    let s = sched.setsid()
+    if s == 0 { NEG_EPERM } else { s }
 }
 
 // --- signals: what an exception stands for (px14; the rest is kernel/signal's) ---
