@@ -584,7 +584,12 @@ pub fn tty(mask: u64) {
     var sig: u64 = 1
     while sig <= 32 {
         if mask & bit(sig) != 0 {
-            let _n = sched.raise_pgrp(g, sig, sched.sig_info(sched.I_KERNEL, 0, 0, 0))
+            // PLANT A (px48, never to be merged): the keys for every process, the foreground group ignored.
+            var q = sched.proc_after(0)
+            while q != 0 {
+                let _l = sched.raise_pid(q, sig, sched.sig_info(sched.I_KERNEL, 0, 0, 0))
+                q = sched.proc_after(q)
+            }
         }
         sig += 1
     }
