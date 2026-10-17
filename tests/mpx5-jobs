@@ -1,0 +1,378 @@
+#!/usr/bin/env bash
+# tests/mpx5-jobs — px48: job control. Process groups and sessions, the
+# console as a controlling terminal and its ioctls, `kill` to a group,
+# stops and continues and the waits that report them, the console's
+# signals for its foreground group and its background rules (TOSTOP),
+# hangup and the orphaned group; held to Linux black-box, as root and as
+# a user, by this lane's probe (user/elf/jobs.c, tools/mkjobs) and by a
+# typed job-control session in a distribution's static Almquist shell
+# (Ubuntu 24.04's busybox-static, `sh -i`: tools/fetch-busybox; the
+# contract's static dash is packaged nowhere: notes/px48-job-control.md).
+#
+#   tests/mpx5-jobs [--images DIR | --no-boot | --only build | --only linux --images DIR]
+#                   [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# Three images, each kmain_console with an `/etc/pax-run` of its own:
+#   probe   `/bin/jobs`, then `/bin/as 1000 1000 /bin/jobs`, then the
+#           soak `/bin/jobs soak 3000` and `/bin/as 1000 1000 /bin/jobs
+#           soak 3000`; user/console/jobs.keys typed twice (^C ^\ ^Z ^Z
+#           ^C each time), prompt `$ `; booted with the keys on COM1 and
+#           again on the PS/2 keyboard (probe-ps2);
+#   shell   `/bin/sh -i` as root: user/console/jobs-shell.keys, prompt
+#           `# ` (`sleep 100 &`, `jobs`, a foreground `sleep` stopped by
+#           ^Z, `bg`, `fg`, ^C, `kill %2`, `wait`, …);
+#   shell-user  `/bin/as 1000 1000 /bin/sh -i`: jobs-shell.keys,
+#           prompt `$ `, the same keys.
+# Each command of the probe image is a process the kernel starts: a
+# session leader with the console as its controlling terminal (named:
+# Linux's init has neither), as the probe and the shell are on Linux on
+# a pseudo-terminal.
+#
+# **The Linux sides.** Real root: kasumi's own kernel image under QEMU
+# with notes/px48/vmjob.c as pid 1 running each program on a fresh
+# pseudo-terminal as its session leader (notes/px48/linux-vm.sh),
+# recorded and committed (tests/mpx5-jobs.d/linux/*.tty, vm-*.meta):
+# the root rows' only reference (a rootless container is no reference
+# for what root may do). A user's rows also in a throwaway container,
+# run live (tools/linux-tree: the programs on a pseudo-terminal, pid 1
+# of a fresh pid namespace, run through `as 1000 1000`), and held to the
+# recording before PAX is held to either.
+#
+# What is compared, by rule: each command's transcript — what the
+# terminal showed from its `run <k>:` line to its end — normalised as a
+# serial log is (tools/lib.sh's serial_norm: carriage returns and escape
+# sequences out: the shell asks where the cursor is, ESC [ 6 n, before
+# each prompt), the kernel's own `user: …` lines out, and in the shell's
+# `[<n>] <pid>` line the pid masked (PAX's pids are not the guest's).
+# The soak's lines are held to their own rules (J5).
+#
+# Assertions, per tier, firmware and session:
+#   J0 build: kmain_console built; jobs, as and busybox static (busybox
+#      by its digest); the images built; the recordings there; the
+#      container's user sessions ran and agree with the recordings.
+#   J1 the probe as root (and over PS/2), byte-identical to real root's
+#      recording; the probe as 1000:1000 likewise.
+#   J2 the shell as root and as 1000:1000, byte-identical to real root's
+#      recordings, the shell's exit status the recording's.
+#   J3 the user sessions byte-identical to the container's too.
+#   J4 each run's own witness that it is what it says: the probe's
+#      first line names root or a user and its mixed-group rows run or
+#      are skipped by name; the shell's prompt is `# ` or `$ `; the
+#      job-control lines are there (`Stopped`, `Running`, `Done`,
+#      `Terminated`, the ^Z and ^C rows heard by the foreground job
+#      only).
+#   J5 the soak, as root and as 1000:1000: `soak: 3000 rounds of nine
+#      calls, 0 wrong answers`, and MemFree one number at every quarter.
+#   J6 -ENOSYS only for set_robust_list (273) and rseq (334); no
+#      `refused:` line; the end: `PAX: init /bin/… ended with status 0;
+#      nothing left to run`, `halt`, held halted.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 only=
+usage="usage: tests/mpx5-jobs [--images DIR | --no-boot | --only build | --only linux --images DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+[ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
+need readelf python3
+
+SOAK=3000
+REC=$here/mpx5-jobs.d/linux
+JKEYS=$PAX_ROOT/user/console/jobs.keys
+SKEYS=$PAX_ROOT/user/console/jobs-shell.keys
+UKEYS=$SKEYS # the same keys; the user's prompt is `$ `
+# image: its run list (one command a line), its keys, its prompt.
+image_runs() {
+    case $1 in
+        probe) printf '%s\n' /bin/jobs '/bin/as 1000 1000 /bin/jobs' "/bin/jobs soak $SOAK" "/bin/as 1000 1000 /bin/jobs soak $SOAK" ;;
+        shell) printf '%s\n' '/bin/sh -i' ;;
+        shell-user) printf '%s\n' '/bin/as 1000 1000 /bin/sh -i' ;;
+    esac
+}
+image_prompt() { case $1 in shell) printf '# ' ;; *) printf '$ ' ;; esac; }
+image_keys() { # image -> a keys file (the probe's typed twice: its two typed runs)
+    case $1 in
+        probe) cat "$JKEYS" "$JKEYS" ;;
+        shell) cat "$SKEYS" ;;
+        shell-user) cat "$UKEYS" ;;
+    esac
+}
+# boot: image and keyboard. The probe over both; the shells over COM1.
+BOOTS="probe:serial probe:ps2 shell:serial shell-user:serial"
+# Each typed run's name, by image and run number, and its recording.
+run_name() { # image k
+    case $1:$2 in
+        probe:1) echo probe ;; probe:2) echo probe-user ;; probe:3) echo soak ;; probe:4) echo soak-user ;;
+        shell:1) echo shell ;; shell-user:1) echo shell-user ;;
+    esac
+}
+TYPED="probe probe-user shell shell-user"
+
+work=$PAX_BUILD/mpx5-jobs
+runs=$PAX_BUILD/mpx5-jobs-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+# A transcript as compared: normalised as a serial log is; the shell's
+# `[n] <pid>` line's pid masked.
+norm_session() {
+    serial_norm "$1" | sed -E 's/^(\[[0-9]+\]) [0-9]+$/\1 PID/'
+}
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+# The container's user sessions: the probe and the shell through `as`.
+linux_side() { # dir -> reasons on stdout
+    mkdir -p "$1/linux"
+    if "$PAX_ROOT/tools/linux-tree" --root "$1/root" --keys "$JKEYS" --prompt '$ ' --argv0 /bin/as --size 256m --rdev --nsproc \
+        "$1/linux/probe-user.tty" -- /bin/as 1000 1000 /bin/jobs; then
+        say "  linux probe-user: $(wc -c < "$1/linux/probe-user.tty" | tr -d ' ') bytes, status $(cat "$1/linux/probe-user.tty.rc")"
+    else
+        printf ' tools/linux-tree probe-user;'
+    fi
+    if "$PAX_ROOT/tools/linux-tree" --root "$1/root" --keys "$UKEYS" --prompt '$ ' --argv0 /bin/as --size 256m --rdev --nsproc \
+        "$1/linux/shell-user.tty" -- /bin/as 1000 1000 /bin/sh -i; then
+        say "  linux shell-user: $(wc -c < "$1/linux/shell-user.tty" | tr -d ' ') bytes, status $(cat "$1/linux/shell-user.tty.rc")"
+    else
+        printf ' tools/linux-tree shell-user;'
+    fi
+}
+
+if [ "$only" = linux ]; then
+    why=$(linux_side "$images")
+    [ -z "$why" ] && say "PASS J0 (linux): the Linux side ran in a throwaway container" || bad "J0 (linux):$why"
+    exit "$fail"
+fi
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    r=$work/root
+    mkdir -p "$r/bin" "$r/etc" "$work/bin"
+    why=
+    "$PAX_ROOT/tools/mkjobs" "$work/bin" > "$work/jobs.txt" || why+=" tools/mkjobs;"
+    "$PAX_ROOT/tools/mkas" "$work/bin" > "$work/as.txt" || why+=" tools/mkas;"
+    "$PAX_ROOT/tools/fetch-busybox" "$work/bin" > "$work/busybox.txt" || why+=" tools/fetch-busybox;"
+    cp "$work/bin/jobs" "$r/bin/jobs" 2>/dev/null || why+=" no jobs;"
+    cp "$work/bin/as" "$r/bin/as" 2>/dev/null || why+=" no as;"
+    cp "$work/bin/busybox" "$r/bin/sh" 2>/dev/null || why+=" no busybox;"
+    cp "$work/bin/busybox" "$r/bin/sleep" 2>/dev/null || true
+    for f in "$r"/bin/*; do
+        x=$(static_ok "$f") || why+=" $x;"
+        say "  program: ${f#"$r"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+    done
+    for im in probe shell shell-user; do
+        image_runs "$im" > "$work/$im.run"
+        "$PAX_ROOT/tools/mkinitramfs" "$work/$im.cpio" /bin/jobs="$r/bin/jobs":755 /bin/as="$r/bin/as":755 \
+            /bin/sh="$r/bin/sh":755 /bin/sleep="$r/bin/sleep":755 /etc/pax-run="$work/$im.run":644 > "$work/$im.initramfs.txt" \
+            || why+=" tools/mkinitramfs $im;"
+    done
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            for im in probe shell shell-user; do
+                "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                    --add "$work/$im.cpio" initramfs.cpio "$elf" "$work/$tier/$im.iso" >/dev/null \
+                    || why+=" $tier $im: mkimage;"
+                say "built $tier $im: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/$im.iso"), initramfs $(sha256_of "$work/$im.cpio")"
+            done
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    for n in $TYPED; do
+        for f in "$n.tty" "$n.tty.rc" "vm-$n.meta"; do
+            [ -s "$REC/$f" ] || why+=" no recording $REC/$f;"
+        done
+    done
+    if [ "$only" = build ]; then
+        [ -z "$why" ] && say "PASS J0 (build): kmain_console built ($tiers), every program static, the images built, the recordings there" || bad "J0 (build):$why"
+        exit "$fail"
+    fi
+    if [ "$(uname -s)" != Linux ]; then
+        why+=" the Linux side needs Linux (this is $(uname -s)): build on Linux, boot here with --images;"
+    else
+        why+=$(linux_side "$work")
+    fi
+    [ -z "$why" ] && say "PASS J0: kmain_console built ($tiers), every program static, the images built, the Linux side ran in a throwaway container" || bad "J0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx5-jobs build (J0): PASS (no boot: --no-boot)" || say "mpx5-jobs build: FAIL"
+        exit "$fail"
+    fi
+fi
+lx=$images/linux
+
+# The recordings and the container agree before PAX is held to them.
+for n in $TYPED; do
+    norm_session "$REC/$n.tty" > "$images/rec-$n.cmp"
+done
+for n in probe-user shell-user; do
+    if [ ! -f "$lx/$n.tty" ]; then
+        bad "J0 linux $n: no $lx/$n.tty (build first, and run the Linux side)"
+        continue
+    fi
+    norm_session "$lx/$n.tty" > "$lx/$n.cmp"
+    if cmp -s "$lx/$n.cmp" "$images/rec-$n.cmp" && [ "$(cat "$lx/$n.tty.rc")" = "$(cat "$REC/$n.tty.rc")" ]; then
+        say "PASS J0 linux $n: the container's session is real root's recording, $(wc -l < "$lx/$n.cmp" | tr -d ' ') lines ($(sha256_of "$lx/$n.cmp" | cut -c1-12)…)"
+    else
+        bad "J0 linux $n: the container's session is not real root's recording: $(diff "$images/rec-$n.cmp" "$lx/$n.cmp" | head -n 14 | cut -c1-300 | tr '\n' '|')"
+    fi
+done
+
+record() { # tier leg boot status
+    ran=$((ran + 1))
+    printf '%s kmain_console %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
+}
+
+# Run k's transcript: from its `run <k>:` line to the kernel's `user:
+# frames free …` line after it (the run's report: its tree and its
+# sockets' lines follow), the kernel's own lines left out.
+run_part() { # norm k
+    awk -v k="$2" '
+        $0 ~ "^run " k ": " { on = 1; next }
+        on && /^run [0-9]+: |^run: [0-9]+ commands$|^user: frames free / { exit }
+        on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$1"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        for b in $BOOTS; do
+            im=${b%%:*} kb=${b#*:}
+            bn=$im; [ "$kb" = ps2 ] && bn=$im-ps2
+            id="$tier $leg $bn"
+            log=$PAX_BUILD/mpx5-jobs-$tier-$leg-$bn.serial.log
+            elf=$images/$tier/kmain_console.elf iso=$images/$tier/$im.iso
+            rm -f "$log" "$log.verdict" "$log.typed"
+            if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+                bad "J6 $id: no image"
+                continue
+            fi
+            image_keys "$im" > "$images/$bn.keys"
+            hrc=0
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 900 --qemu -m --qemu 512M \
+                --elf "$elf" --marker 'halt|PANIC .*' --type "$images/$bn.keys" --prompt "$(image_prompt "$im")" --keyboard "$kb" "$iso" >"$log.verdict" 2>&1 || hrc=$?
+            record "$tier" "$leg" "$bn" "$hrc"
+            norm=$log.norm; serial_norm "$log" > "$norm"
+            nk=$(image_runs "$im" | wc -l | tr -d ' ')
+            k=1
+            while [ "$k" -le "$nk" ]; do
+                n=$(run_name "$im" "$k")
+                out=$PAX_BUILD/mpx5-jobs-$tier-$leg-$bn-$n.session
+                run_part "$norm" "$k" > "$out"
+                norm_session "$out" > "$out.cmp"
+                case $n in
+                    soak|soak-user)
+                        # J5: the soak's own rules.
+                        why=
+                        grep -qx "soak: $SOAK rounds of nine calls, 0 wrong answers" "$out.cmp" || why+=" no 'soak: $SOAK rounds of nine calls, 0 wrong answers' ($(grep -m1 '^soak: ' "$out.cmp"));"
+                        q=$(grep -c '^~soak: ' "$out.cmp")
+                        [ "$q" = 4 ] || why+=" $q quarter lines, not 4;"
+                        mf=$(sed -n 's/^~soak: [0-9]* rounds, [0-9]* wrong; MemFree:[[:space:]]*\([0-9]*\) kB$/\1/p' "$out.cmp" | sort -u | wc -l | tr -d ' ')
+                        [ "$mf" = 1 ] || why+=" MemFree moved: $(sed -n 's/^~soak: .*MemFree:[[:space:]]*//p' "$out.cmp" | tr '\n' ' ');"
+                        if [ "$n" = soak ]; then grep -qx "jobs: px48's probe, as root" "$out.cmp" || why+=" not root's;"
+                        else grep -qx "jobs: px48's probe, as a user" "$out.cmp" || why+=" not a user's;"; fi
+                        [ -z "$why" ] && say "PASS J5 $id $n: $SOAK rounds, 0 wrong, MemFree $(sed -n 's/^~soak: .*MemFree:[[:space:]]*//p' "$out.cmp" | head -n 1) at every quarter" || bad "J5 $id $n:$why"
+                        ;;
+                    *)
+                        # J1/J2: real root's recording; J3: the container's.
+                        rec=$images/rec-$n.cmp
+                        why=
+                        cmp -s "$rec" "$out.cmp" || why+=" the session differs from real root's recording: $(diff "$rec" "$out.cmp" | head -n 14 | cut -c1-300 | tr '\n' '|');"
+                        [ "$(wc -l < "$out.cmp" | tr -d ' ')" -gt 10 ] || why+=" a short session;"
+                        t=J1; case $n in shell*) t=J2 ;; esac
+                        [ -z "$why" ] && say "PASS $t $id $n: $(wc -l < "$out.cmp" | tr -d ' ') lines byte-identical to real root's recording ($(sha256_of "$out.cmp" | cut -c1-12)…)" || bad "$t $id $n:$why"
+                        case $n in
+                            *-user)
+                                why=
+                                if [ -f "$lx/$n.cmp" ]; then
+                                    cmp -s "$lx/$n.cmp" "$out.cmp" || why+=" differs from the container's: $(diff "$lx/$n.cmp" "$out.cmp" | head -n 10 | cut -c1-300 | tr '\n' '|');"
+                                else
+                                    why+=" no container session;"
+                                fi
+                                [ -z "$why" ] && say "PASS J3 $id $n: byte-identical to the container's too" || bad "J3 $id $n:$why"
+                                ;;
+                        esac
+                        # J4: the run's own witness.
+                        why=
+                        case $n in
+                            probe) grep -qx "jobs: px48's probe, as root" "$out.cmp" || why+=" not root's;"
+                                   grep -q '^K: as 1000, kill(-G) G={a root member, a 1000 member}: 0, heard Yuser:USR1$' "$out.cmp" || why+=" no mixed-group row;" ;;
+                            probe-user) grep -qx "jobs: px48's probe, as a user" "$out.cmp" || why+=" not a user's;"
+                                        grep -qx 'K: the mixed groups: skipped by name (not root)' "$out.cmp" || why+=" no skip by name;" ;;
+                            shell) grep -q '^~ # ' "$out.cmp" || why+=" no root prompt;" ;;
+                            shell-user) grep -q '^~ \$ ' "$out.cmp" || why+=" no user prompt;" ;;
+                        esac
+                        case $n in
+                            probe*) for w in 'T: ^C with the job in the foreground: heard J1:INT,J2:INT' \
+                                             'T: ^Z with a job at its default in the foreground: stopped by TSTP (status 0x147f)' \
+                                             'T: the jobs that were not in the foreground heard -'; do
+                                        grep -qxF "$w" "$out.cmp" || why+=" no '$w';"
+                                    done ;;
+                            shell*) for w in Stopped Running Terminated Done; do
+                                        grep -q "^\[[0-9]\]. *$w" "$out.cmp" || why+=" no '$w' job line;"
+                                    done ;;
+                        esac
+                        [ -z "$why" ] && say "PASS J4 $id $n: its own witness (who it runs as, the foreground group's keys, the job lines)" || bad "J4 $id $n:$why"
+                        ;;
+                esac
+                k=$((k + 1))
+            done
+
+            # J6: what PAX lacks; nothing refused; the end.
+            why=
+            ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
+            [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
+            rf=$(grep -c ': refused: ' "$norm")
+            [ "$rf" = 0 ] || why+=" $rf refused lines ($(grep -m1 ': refused: ' "$norm" | cut -c1-160));"
+            init=$(image_runs "$im" | head -n 1 | cut -d' ' -f1)
+            grep -qx "PAX: init $init ended with status 0; nothing left to run" "$norm" \
+                || why+=" no 'PAX: init $init ended with status 0' ($(grep -m1 '^PAX: init ' "$norm"));"
+            pn=$(grep -m1 '^PANIC ' "$norm")
+            [ -z "$pn" ] || why+=" the kernel panicked: $pn;"
+            [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+            [ -z "$why" ] && say "PASS J6 $id: -ENOSYS only for 273 and 334; nothing refused by name; init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "J6 $id:$why"
+        done
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx5-jobs: PASS" || say "mpx5-jobs: FAIL"
+exit "$fail"
