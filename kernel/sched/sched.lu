@@ -253,6 +253,14 @@ struct Thread {
     until: u64, // px24: the tick its waiting call gives up at (poll, epoll_wait, a receive with a timeout); 0 none
     ss_sp: u64, // px24: sigaltstack: the alternate signal stack's lowest byte
     ss_size: u64, // px24: its size; 0 none (SS_DISABLE)
+    pgid: u64, // px48: a leader's: its process's group
+    sid: u64, // px48: a leader's: its process's session
+    ctty: u64, // px48: a leader's: 1 when the console is its process's controlling terminal (while its session holds the console)
+    execd: u64, // px48: a leader's: 1 once its process has called execve since its fork (setpgid's EACCES)
+    stopped: u64, // px48: a leader's: 1 while its process is stopped
+    wstop: u64, // px48: a leader's: a stop no wait has reported yet: the signal (0 none)
+    wcont: u64, // px48: a leader's: 1 while a continue no wait has reported yet
+    ssold: u64, // px48: the mask `rt_sigsuspend` replaced, while the thread is suspended in it
 }
 
 /// How many slots there are (px14: `clone_current` and `child_ended`
@@ -276,6 +284,8 @@ const PIPE: u64 = 10 // px17: in a read or write of a pipe or socket that must w
 const NET: u64 = 11 // px20: the network thread, until the device's interrupt
 const FUTEX: u64 = 12 // px26: in a futex wait
 const HELD: u64 = 13 // px26: a leader that has ended while its group's threads live on: no stack, never run, its slot the group's
+const STOPPED: u64 = 14 // px48: a thread of a stopped process, parked with its frame until the process is continued (or killed)
+const SUSPEND: u64 = 15 // px48: in rt_sigsuspend until a signal that runs a handler or ends the process
 
 /// px26: how a thread's system call is waiting, read when a signal ends
 /// the wait (kernel/signal): `W_REWOUND` the frame is rewound to run the
@@ -292,6 +302,9 @@ pub const W_SLEEP: u64 = 2
 pub const W_FUTEX: u64 = 3
 pub const W_TIMED: u64 = 4
 pub const W_TIMED_REWOUND: u64 = 5
+/// px48: `rt_sigsuspend`: -EINTR in the frame, and the mask it replaced
+/// put back (by the handler's frame, or by `suspend_over`).
+pub const W_SUSPEND: u64 = 6
 
 const STACKS: u64 = 0xffffd00000000000 // PML4 slot 416
 const SPAN: u64 = 65536 // each slot's virtual space
@@ -346,6 +359,9 @@ const S_FLOOR: u64 = 10 // px22: the live count the waiter waits for (0: `wait_a
 const S_FSEQ: u64 = 11 // px26: the next futex waiter's place in line
 const S_THREADS: u64 = 12 // px26: threads made by clone since boot
 const S_SIGNALS: u64 = 13 // px26: signals delivered to a handler since boot
+const S_TTY_ON: u64 = 14 // px48: 1 once the console is a terminal (kernel/console's `start`)
+const S_TTY_SID: u64 = 15 // px48: the session the console is the controlling terminal of; 0 none
+const S_TTY_PGRP: u64 = 16 // px48: the console's foreground process group; 0 none
 
 const W_RAX_OFF: u64 = 112 // the frame's %rax (word 14)
 const NEG_ETIMEDOUT: u64 = 0xffffffffffffff92 // -110
@@ -377,7 +393,7 @@ fn put_field(s: u64, off: int, v: u64) {
 
 /// Scheduler word `i` (S_*), read volatile (#598).
 fn sv(i: u64) -> u64 {
-    // # Safety: i < 16, inside boot/sched.S's 128-byte pax_sched_state.
+    // # Safety: i < 32, inside boot/sched.S's 256-byte pax_sched_state (px48; 128 before).
     unsafe { ((pax_sched_state as u64 + i * 8) as *u64).read_volatile() }
 }
 
@@ -472,7 +488,13 @@ fn enter_space(s: u64) {
 /// its run, start its quantum, make its space live, return its frame.
 fn run_next() -> u64 {
     let from = cur()
-    let n = dequeue()
+    var n = dequeue()
+    // px48: a thread of a stopped process runs nothing: it is parked
+    // (STOPPED), its frame kept, until the process is continued.
+    while n != 0 && parks(n - 1) {
+        put_field(n - 1, offset_of(Thread, state), STOPPED)
+        n = dequeue()
+    }
     let s = if n == 0 { IDLE } else { n - 1 }
     if s != from {
         fpu.switch(from, s) // px10: a no-op before fpu.start
@@ -654,6 +676,14 @@ fn clear(s: u64) {
     put_field(s, offset_of(Thread, until), 0)
     put_field(s, offset_of(Thread, ss_sp), 0)
     put_field(s, offset_of(Thread, ss_size), 0)
+    put_field(s, offset_of(Thread, pgid), 0)
+    put_field(s, offset_of(Thread, sid), 0)
+    put_field(s, offset_of(Thread, ctty), 0)
+    put_field(s, offset_of(Thread, execd), 0)
+    put_field(s, offset_of(Thread, stopped), 0)
+    put_field(s, offset_of(Thread, wstop), 0)
+    put_field(s, offset_of(Thread, wcont), 0)
+    put_field(s, offset_of(Thread, ssold), 0)
     let a = own_area(s)
     var i: u64 = 0
     while i < PROC_AREA / 8 {
@@ -915,6 +945,18 @@ fn start_thread(body: u64, arg: u64, cr3: u64, prog: u64) -> u64 {
         put_field(s, offset_of(Thread, pid), pid) // px14: a process, started by the kernel (ppid 0)
         put_field(s, offset_of(Thread, tgid), pid) // px26: a group of one, its own leader
         put_field(s, offset_of(Thread, threads), 1)
+        // px48: it leads a session and a process group of its own, and
+        // takes the console as its controlling terminal, its group in the
+        // foreground, when the console is a terminal and no session holds
+        // it (named: Linux's init is in session 0 with no terminal; this
+        // is what a getty or `setsid -c` gives a shell there).
+        put_field(s, offset_of(Thread, pgid), pid)
+        put_field(s, offset_of(Thread, sid), pid)
+        if sv(S_TTY_ON) == 1 && sv(S_TTY_SID) == 0 {
+            put_sv(S_TTY_SID, pid)
+            put_sv(S_TTY_PGRP, pid)
+            put_field(s, offset_of(Thread, ctty), 1)
+        }
     }
     put_field(s, offset_of(Thread, lead), s)
     put_field(s, offset_of(Thread, state), READY)
@@ -1017,7 +1059,51 @@ fn process_ends(l: u64, st: u64) {
     release_vfork(l)
     let me = field(l, offset_of(Thread, tgid))
     if me != 0 {
+        // px48: a controlling process's end hangs its terminal up: the
+        // foreground group is sent SIGHUP (measured: not SIGCONT) and the
+        // console belongs to no session (XSH _exit, XBD 11.1.3).
+        if field(l, offset_of(Thread, sid)) == me && sv(S_TTY_SID) == me {
+            let fg = sv(S_TTY_PGRP)
+            tty_leaves(me)
+            hangup_group(fg, false)
+        }
+        // px48: the groups this end may orphan — its own, and each
+        // child's — as they stand before it: `kids` has bit t for a child
+        // in slot t whose group is not orphaned yet.
+        let own = field(l, offset_of(Thread, pgid))
+        let own_was = own != 0 && !orphaned_but(own, SLOTS)
+        var kids: u64 = 0
+        var t: u64 = FIRST
+        while t < SLOTS {
+            if t != l && live_leader(t) && field(t, offset_of(Thread, ppid)) == me && !orphaned_but(field(t, offset_of(Thread, pgid)), SLOTS) {
+                kids = kids | (1 << t)
+            }
+            t += 1
+        }
         reparent(l, me)
+        // A group this end orphaned that has a stopped member is sent
+        // SIGHUP, then SIGCONT (XSH _exit; measured), once.
+        if own_was && orphaned_but(own, l) && has_stopped(own) {
+            hangup_group(own, true)
+        }
+        t = FIRST
+        while t < SLOTS {
+            if kids & (1 << t) != 0 {
+                let g = field(t, offset_of(Thread, pgid))
+                var first = g != own || !own_was
+                var u: u64 = FIRST
+                while u < t {
+                    if kids & (1 << u) != 0 && field(u, offset_of(Thread, pgid)) == g {
+                        first = false
+                    }
+                    u += 1
+                }
+                if first && orphaned_but(g, l) && has_stopped(g) {
+                    hangup_group(g, true)
+                }
+            }
+            t += 1
+        }
         let pp = field(l, offset_of(Thread, ppid))
         let ps = if pp != 0 { live_slot(pp) } else { SLOTS }
         if ps != SLOTS {
@@ -1460,6 +1546,12 @@ pub fn clone_current(f: u64, usp: u64, cr3: u64) -> u64 {
     put_field(s, offset_of(Thread, name0), field(p, offset_of(Thread, name0)))
     put_field(s, offset_of(Thread, name1), field(p, offset_of(Thread, name1)))
     put_field(s, offset_of(Thread, ppid), field(p, offset_of(Thread, tgid))) // px26: the caller's process
+    // px48: a fork's child is in its parent's group and session, with its
+    // controlling terminal; it has not exec'd, and it runs.
+    let pl = field(p, offset_of(Thread, lead))
+    put_field(s, offset_of(Thread, pgid), field(pl, offset_of(Thread, pgid)))
+    put_field(s, offset_of(Thread, sid), field(pl, offset_of(Thread, sid)))
+    put_field(s, offset_of(Thread, ctty), field(pl, offset_of(Thread, ctty)))
     let from = proc_area(p) // px26: the caller's process's area, whichever thread calls
     let to = own_area(s)
     i = 0
@@ -1594,6 +1686,14 @@ pub fn exec_alone() {
         put_field(c, offset_of(Thread, owns), field(l, offset_of(Thread, owns)))
         put_field(c, offset_of(Thread, vparent), field(l, offset_of(Thread, vparent)))
         put_field(c, offset_of(Thread, gpend), field(l, offset_of(Thread, gpend)))
+        // px48: the process's group, session, terminal and reports.
+        put_field(c, offset_of(Thread, pgid), field(l, offset_of(Thread, pgid)))
+        put_field(c, offset_of(Thread, sid), field(l, offset_of(Thread, sid)))
+        put_field(c, offset_of(Thread, ctty), field(l, offset_of(Thread, ctty)))
+        put_field(c, offset_of(Thread, execd), field(l, offset_of(Thread, execd)))
+        put_field(c, offset_of(Thread, stopped), field(l, offset_of(Thread, stopped)))
+        put_field(c, offset_of(Thread, wstop), field(l, offset_of(Thread, wstop)))
+        put_field(c, offset_of(Thread, wcont), field(l, offset_of(Thread, wcont)))
         put_field(c, offset_of(Thread, lead), c)
         // The old leader: no pid, no parent, no space; its stack (if it
         // still has one) and its slot go at the next reap.
@@ -1676,8 +1776,26 @@ pub fn proc_after(after: u64) -> u64 {
 /// 0 its parent's pid, 1 its threads not ended, 2 its blocked signals,
 /// 3 its PML4 (0 for a zombie: its space is given back), 4 and 5 its
 /// PR_SET_NAME words, 6 its program name's first byte, 7 that name's
-/// length, 8 1 when it is a zombie.
+/// length, 8 1 when it is a zombie; px48: 9 its process group, 10 its
+/// session, 11 1 when it is stopped, 12 1 when the console is its
+/// controlling terminal, 13 its signals pending (its own thread's and
+/// the process's).
 pub fn proc_word(s: u64, which: int) -> u64 {
+    if which == 9 {
+        return field(s, offset_of(Thread, pgid))
+    }
+    if which == 10 {
+        return field(s, offset_of(Thread, sid))
+    }
+    if which == 11 {
+        return field(s, offset_of(Thread, stopped))
+    }
+    if which == 12 {
+        return if has_tty(s) { 1 } else { 0 }
+    }
+    if which == 13 {
+        return field(s, offset_of(Thread, pend)) | field(s, offset_of(Thread, gpend))
+    }
     let zombie = ended(s) // px45: from its end (`is_proc`)
     if which == 0 {
         return field(s, offset_of(Thread, ppid))
@@ -1749,6 +1867,7 @@ pub fn exec_current(cr3: u64, entry: u64, usp: u64, name: u64, len: u64) {
     put_field(c, offset_of(Thread, ss_size), 0)
     put_field(c, offset_of(Thread, name0), 0)
     put_field(c, offset_of(Thread, name1), 0)
+    put_field(c, offset_of(Thread, execd), 1) // px48: setpgid of it by its parent is -EACCES from here
     paging.load(cr3)
     // # Safety: as in `enter_space`.
     unsafe { pax_wrmsr(FS_BASE, 0) }
@@ -1763,20 +1882,65 @@ pub fn exec_current(cr3: u64, entry: u64, usp: u64, name: u64, len: u64) {
 /// first. Returns (whether it has such a child at all, the slot of one
 /// that has ended or SLOTS).
 pub fn child_ended(sel: u64) -> (bool, u64) {
+    let (any, s, _w) = wait_find(if sel == 0 { 0 } else { 1 }, sel, W_EXITED)
+    (any, s)
+}
+
+/// px48: what a wait selects and wants (wait4(2), waitid(2)): `how` 0
+/// any child, 1 the child whose pid is `sel`, 2 the children in process
+/// group `sel`; `want` W_EXITED, W_STOPPED, W_CONTINUED. Returns
+/// (whether such a child exists at all, the slot of the first in slot
+/// order with something to report or SLOTS, what: W_EXITED a zombie,
+/// W_STOPPED a stop not yet reported, W_CONTINUED a continue not yet
+/// reported). Dead threads are reaped first.
+pub const W_EXITED: u64 = 1
+pub const W_STOPPED: u64 = 2
+pub const W_CONTINUED: u64 = 4
+
+pub fn wait_find(how: u64, sel: u64, want: u64) -> (bool, u64, u64) {
     reap()
     let me = field(cur(), offset_of(Thread, tgid)) // px26: the caller's process
     var any = false
     var s: u64 = FIRST
     while s < SLOTS {
-        if field(s, offset_of(Thread, state)) != FREE && field(s, offset_of(Thread, ppid)) == me && (sel == 0 || field(s, offset_of(Thread, pid)) == sel) {
+        let st = field(s, offset_of(Thread, state))
+        let ok = how == 0 || (how == 1 && field(s, offset_of(Thread, pid)) == sel) || (how == 2 && field(s, offset_of(Thread, pgid)) == sel)
+        if st != FREE && field(s, offset_of(Thread, ppid)) == me && field(s, offset_of(Thread, tgid)) == field(s, offset_of(Thread, pid)) && ok {
             any = true
-            if field(s, offset_of(Thread, state)) == ZOMBIE {
-                return (true, s)
+            if st == ZOMBIE {
+                if want & W_EXITED != 0 {
+                    return (true, s, W_EXITED)
+                }
+            } else if running_state(s) {
+                if want & W_STOPPED != 0 && field(s, offset_of(Thread, wstop)) != 0 {
+                    return (true, s, W_STOPPED)
+                }
+                if want & W_CONTINUED != 0 && field(s, offset_of(Thread, wcont)) != 0 {
+                    return (true, s, W_CONTINUED)
+                }
             }
         }
         s += 1
     }
-    (any, SLOTS)
+    (any, SLOTS, 0)
+}
+
+/// px48: a stop or continue report of the child in slot `s`: (its pid,
+/// the stop's signal, or 0 for a continue); `consume` clears it (a wait
+/// without WNOWAIT).
+pub fn wait_report(s: u64, what: u64, consume: bool) -> (u64, u64) {
+    let pid = field(s, offset_of(Thread, pid))
+    if what == W_STOPPED {
+        let sig = field(s, offset_of(Thread, wstop))
+        if consume {
+            put_field(s, offset_of(Thread, wstop), 0)
+        }
+        return (pid, sig)
+    }
+    if consume {
+        put_field(s, offset_of(Thread, wcont), 0)
+    }
+    (pid, 0)
 }
 
 /// The zombie in slot `s`: (its pid, its status word); `reap_it` lets the
@@ -2076,21 +2240,23 @@ pub const I_CHLD_EXITED: u64 = 4
 pub const I_CHLD_KILLED: u64 = 5
 pub const I_PIPE: u64 = 6
 pub const I_CONN: u64 = 7 // px23's: a write to a stream socket whose connection is over
+pub const I_CHLD_STOPPED: u64 = 8 // px48: a child stopped (CLD_STOPPED, the signal)
+pub const I_CHLD_CONTINUED: u64 = 9 // px48: a child continued (CLD_CONTINUED, SIGCONT)
 
-/// An origin word: the kind (three bits), a status (a child's exit
-/// code or signal: eight bits), the sender's (or the child's) pid
-/// (twenty-one bits: a pid above 2,097,151 is carried modulo that,
-/// named), and px45: the sender's (or the child's) real user id, all
-/// 32 bits — siginfo's `si_uid` (measured on Linux: the real id, not
-/// the effective one).
+/// An origin word: the kind (four bits; three before px48), a status (a
+/// child's exit code or signal: eight bits), the sender's (or the
+/// child's) pid (twenty bits since px48, twenty-one before: a pid above
+/// 1,048,575 is carried modulo that, named), and px45: the sender's (or
+/// the child's) real user id, all 32 bits — siginfo's `si_uid`
+/// (measured on Linux: the real id, not the effective one).
 pub fn sig_info(kind: u64, pid: u64, status: u64, uid: u64) -> u64 {
-    (kind & 7) | ((status & 0xff) << 3) | ((pid & 0x1fffff) << 11) | ((uid & 0xffffffff) << 32)
+    (kind & 15) | ((status & 0xff) << 4) | ((pid & 0xfffff) << 12) | ((uid & 0xffffffff) << 32)
 }
 
 /// px45: the kind, pid, status and user id an origin word carries
 /// (kernel/signal's siginfo).
 pub fn info_parts(info: u64) -> (u64, u64, u64, u64) {
-    (info & 7, (info >> 11) & 0x1fffff, (info >> 3) & 0xff, info >> 32)
+    (info & 15, (info >> 12) & 0xfffff, (info >> 4) & 0xff, info >> 32)
 }
 
 /// px45: the real user id of the process whose leader is slot `l`:
@@ -2126,15 +2292,16 @@ fn handler_of(l: u64, sig: u64) -> u64 {
 
 /// Whether signal `sig`, taken by the process led by `l`, would do
 /// nothing: its action is SIG_IGN; or the default, for a signal whose
-/// default is to be ignored (SIGCHLD, SIGURG, SIGWINCH), to continue
-/// (SIGCONT) or to stop (SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU: PAX stops
-/// no process, and kernel/signal says so when it drops one); or the
-/// default at all, for pid 1 (`kill(2)`: init gets only the signals it
-/// has a handler for).
+/// default is to be ignored (SIGCHLD, SIGURG, SIGWINCH) or to continue
+/// (SIGCONT, whose continuing is done when it is sent: `job_signal`);
+/// or the default at all, for pid 1 (`kill(2)`: init gets only the
+/// signals it has a handler for), a stop included. px48: a stop at its
+/// default is not inert: it stops the process (`job_signal` when it is
+/// sent, kernel/signal when a blocked one is taken).
 fn inert(l: u64, sig: u64) -> bool {
     let h = handler_of(l, sig)
     if sig == SIGKILL || sig == SIGSTOP {
-        return field(l, offset_of(Thread, tgid)) == 1 || sig == SIGSTOP
+        return field(l, offset_of(Thread, tgid)) == 1
     }
     if h == SIG_IGN {
         return true
@@ -2142,7 +2309,7 @@ fn inert(l: u64, sig: u64) -> bool {
     if h != SIG_DFL {
         return false
     }
-    field(l, offset_of(Thread, tgid)) == 1 || sig == SIGCHLD || sig == SIGURG || sig == SIGWINCH || sig == SIGCONT || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU
+    field(l, offset_of(Thread, tgid)) == 1 || sig == SIGCHLD || sig == SIGURG || sig == SIGWINCH || sig == SIGCONT
 }
 
 /// Whether slot `t` is a thread that can still take a signal.
@@ -2198,7 +2365,7 @@ fn next_for(t: u64) -> (u64, u64) {
 /// (not a vfork parent's wait: `vfork(2)`).
 fn interrupt(t: u64) {
     let st = field(t, offset_of(Thread, state))
-    if st == INPUT || st == PIPE || st == WAITING || st == SLEEPING || st == FUTEX {
+    if st == INPUT || st == PIPE || st == WAITING || st == SLEEPING || st == FUTEX || st == SUSPEND {
         put_field(t, offset_of(Thread, state), READY)
         enqueue(t)
     }
@@ -2242,7 +2409,10 @@ pub fn raise_thread(t: u64, sig: u64, info: u64) {
         return
     }
     let l = field(t, offset_of(Thread, lead))
-    if inert(l, sig) && field(t, offset_of(Thread, sigmask)) & bit(sig) == 0 && !stops(sig, l) {
+    if job_signal(l, sig, field(t, offset_of(Thread, sigmask)) & bit(sig) != 0) {
+        return // px48: a stop done now, or one an orphaned group does not take
+    }
+    if inert(l, sig) && field(t, offset_of(Thread, sigmask)) & bit(sig) == 0 {
         return
     }
     put_field(t, offset_of(Thread, pend), field(t, offset_of(Thread, pend)) | bit(sig))
@@ -2257,7 +2427,10 @@ pub fn raise_group(l: u64, sig: u64, info: u64) {
     if !running_state(l) {
         return
     }
-    if inert(l, sig) && taker(l, sig) != SLOTS && !stops(sig, l) {
+    if job_signal(l, sig, taker(l, sig) == SLOTS) {
+        return // px48: a stop done now, or one an orphaned group does not take
+    }
+    if inert(l, sig) && taker(l, sig) != SLOTS {
         return
     }
     put_field(l, offset_of(Thread, gpend), field(l, offset_of(Thread, gpend)) | bit(sig))
@@ -2265,12 +2438,6 @@ pub fn raise_group(l: u64, sig: u64, info: u64) {
     poke(l)
 }
 
-/// Whether `sig`'s default action in the process led by `l` is a stop
-/// PAX refuses by name: such a signal is kept until its thread returns
-/// to ring 3, so kernel/signal can say it dropped it (it wakes nobody).
-fn stops(sig: u64, l: u64) -> bool {
-    (sig == SIGSTOP || ((sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU) && handler_of(l, sig) == SIG_DFL)) && field(l, offset_of(Thread, tgid)) != 1
-}
 
 /// Raise `sig` for the process `pid` (`kill`): false when there is no
 /// such process. `sig` 0 only asks.
@@ -2301,16 +2468,276 @@ pub fn raise_tid(tgid: u64, tid: u64, sig: u64, info: u64) -> bool {
     false
 }
 
-/// Raise `sig` for every process (the terminal's signal, `kill(0)`,
-/// `kill(-pgid)`: PAX has one session and one process group, the
-/// console its terminal) but `but` (a pid; 0 none) and, when `spare1`,
-/// pid 1 (`kill(-1)`). Returns how many processes there were.
-pub fn raise_all(sig: u64, info: u64, but: u64, spare1: bool) -> u64 {
+// --- job control (px48) ---------------------------------------------------------
+//
+// A process's group and session are its leader's `pgid` and `sid`; its
+// controlling terminal is the console when its leader's `ctty` is 1 and
+// its session is the one the console belongs to (`S_TTY_SID`), whose
+// foreground group is `S_TTY_PGRP`. A stopped process is its leader's
+// `stopped`; its threads are parked (STOPPED) when next dequeued or when
+// they return to ring 3, and readied when it is continued or killed.
+// `wstop` and `wcont` are the reports a parent's wait has not taken yet.
+// Written from POSIX.1-2024 (XBD 3's process group, session and
+// orphaned process group; XBD 11.1.2-11.1.4; XSH setpgid, setsid,
+// tcsetpgrp, waitpid, _exit's consequences) and the man pages, against
+// black-box runs on Linux (notes/px48-job-control.md); no kernel's source.
+
+const SA_NOCLDSTOP: u64 = 1
+const SIGHUP: u64 = 1
+const STOPS: u64 = 0x3c0000 // SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU: bits 18 to 21
+
+fn is_stop(sig: u64) -> bool {
+    sig == SIGSTOP || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU
+}
+
+fn lw(l: u64, off: int) -> u64 {
+    field(l, off)
+}
+
+/// Whether slot `l` is a live process's leader: it has a pid, leads its
+/// group, and has not ended (a held leader has not).
+fn live_leader(l: u64) -> bool {
+    let p = field(l, offset_of(Thread, tgid))
+    p != 0 && field(l, offset_of(Thread, pid)) == p && running_state(l)
+}
+
+/// Whether thread `t` is to be parked: its process is stopped.
+fn parks(t: u64) -> bool {
+    field(t, offset_of(Thread, tgid)) != 0 && field(field(t, offset_of(Thread, lead)), offset_of(Thread, stopped)) == 1
+}
+
+/// The running thread's process: its group, its session.
+pub fn self_pgid() -> u64 {
+    lw(field(cur(), offset_of(Thread, lead)), offset_of(Thread, pgid))
+}
+
+pub fn self_sid() -> u64 {
+    lw(field(cur(), offset_of(Thread, lead)), offset_of(Thread, sid))
+}
+
+/// Process group and session of the process led by slot `l` (a zombie's
+/// too, until it is reaped).
+pub fn pgid_of(l: u64) -> u64 {
+    lw(l, offset_of(Thread, pgid))
+}
+
+pub fn sid_of(l: u64) -> u64 {
+    lw(l, offset_of(Thread, sid))
+}
+
+/// Whether the process led by slot `l` is stopped.
+pub fn is_stopped(l: u64) -> bool {
+    lw(l, offset_of(Thread, stopped)) == 1
+}
+
+/// Whether some process not yet reaped (a zombie counts) is in group
+/// `g`, and (`sid` not 0) in session `sid`.
+pub fn group_exists(g: u64, sid: u64) -> bool {
+    if g == 0 {
+        return false
+    }
+    var l: u64 = FIRST
+    while l < SLOTS {
+        if is_proc(l) && field(l, offset_of(Thread, pgid)) == g && (sid == 0 || field(l, offset_of(Thread, sid)) == sid) {
+            return true
+        }
+        l += 1
+    }
+    false
+}
+
+/// px48: the members of group `g`, in increasing pid order: the smallest
+/// pid above `after` of a process not yet reaped in `g`, 0 when none.
+pub fn member_after(g: u64, after: u64) -> u64 {
+    var best: u64 = 0
+    var l: u64 = FIRST
+    while l < SLOTS {
+        if is_proc(l) && field(l, offset_of(Thread, pgid)) == g {
+            let p = field(l, offset_of(Thread, pid))
+            if p > after && (best == 0 || p < best) {
+                best = p
+            }
+        }
+        l += 1
+    }
+    best
+}
+
+/// `setpgid(pid, pgid)` (pid and pgid already 0-resolved by the caller:
+/// `pid` 0 is the caller, `pgid` 0 is `pid`): 0, or the errno (1 EPERM,
+/// 3 ESRCH, 13 EACCES). XSH setpgid, measured: the target is the caller
+/// or a child of it (else ESRCH); a child that has exec'd is EACCES; a
+/// target in another session, or a session leader, is EPERM; a pgid
+/// other than the target's pid names a group that must exist in the
+/// caller's session (else EPERM).
+pub fn setpgid(pid: u64, pgid: u64) -> u64 {
+    let me = field(cur(), offset_of(Thread, lead))
+    let mypid = field(me, offset_of(Thread, tgid))
+    let t = if pid == mypid { me } else { live_slot(pid) }
+    if t == SLOTS || (t != me && field(t, offset_of(Thread, ppid)) != mypid) {
+        return 3
+    }
+    if t != me && field(t, offset_of(Thread, execd)) == 1 {
+        return 13
+    }
+    let msid = field(me, offset_of(Thread, sid))
+    if field(t, offset_of(Thread, sid)) != msid || field(t, offset_of(Thread, sid)) == pid {
+        return 1
+    }
+    if pgid != pid && !group_exists(pgid, msid) {
+        return 1
+    }
+    put_field(t, offset_of(Thread, pgid), pgid)
+    0
+}
+
+/// `setsid()`: the new session's id (the caller's pid), or 0 when the
+/// caller leads a process group (a group with its pid as id exists:
+/// EPERM). The caller leads a new session and a new group and has no
+/// controlling terminal.
+pub fn setsid() -> u64 {
+    let me = field(cur(), offset_of(Thread, lead))
+    let p = field(me, offset_of(Thread, tgid))
+    if group_exists(p, 0) {
+        return 0
+    }
+    put_field(me, offset_of(Thread, pgid), p)
+    put_field(me, offset_of(Thread, sid), p)
+    put_field(me, offset_of(Thread, ctty), 0)
+    p
+}
+
+/// Whether the process led by slot `l` has the console as its
+/// controlling terminal.
+pub fn has_tty(l: u64) -> bool {
+    let t = sv(S_TTY_SID)
+    t != 0 && field(l, offset_of(Thread, ctty)) == 1 && field(l, offset_of(Thread, sid)) == t
+}
+
+/// Whether the running thread's process has the console as its
+/// controlling terminal.
+pub fn self_tty() -> bool {
+    field(cur(), offset_of(Thread, tgid)) != 0 && has_tty(field(cur(), offset_of(Thread, lead)))
+}
+
+/// kernel/console's `start`: the console is a terminal from here, which
+/// the next process the kernel starts takes (`start_thread`).
+pub fn tty_on() {
+    put_sv(S_TTY_ON, 1)
+}
+
+/// The console's session (0: no session holds it) and foreground group
+/// (0: none).
+pub fn tty_session() -> u64 {
+    sv(S_TTY_SID)
+}
+
+pub fn tty_pgrp() -> u64 {
+    sv(S_TTY_PGRP)
+}
+
+pub fn set_tty_pgrp(g: u64) {
+    put_sv(S_TTY_PGRP, g)
+}
+
+/// The console leaves session `sid`: no process of it has the console
+/// as its controlling terminal any more (XBD 11.1.3).
+fn tty_leaves(sid: u64) {
+    if sv(S_TTY_SID) != sid {
+        return
+    }
+    put_sv(S_TTY_SID, 0)
+    put_sv(S_TTY_PGRP, 0)
+    var l: u64 = FIRST
+    while l < SLOTS {
+        if field(l, offset_of(Thread, sid)) == sid {
+            put_field(l, offset_of(Thread, ctty), 0)
+        }
+        l += 1
+    }
+}
+
+/// TIOCSCTTY by the running thread's process (`steal`: arg 1 by a
+/// privileged caller): 0 or the errno (1 EPERM). A session leader with no
+/// controlling terminal takes the console when no session holds it, or
+/// (`steal`) from the session that does, whose foreground group is sent
+/// SIGHUP and SIGCONT (measured: the group heard SIGHUP); its own group
+/// is the console's foreground group. Its own terminal: 0.
+pub fn take_tty(steal: bool) -> u64 {
+    let me = field(cur(), offset_of(Thread, lead))
+    let p = field(me, offset_of(Thread, tgid))
+    if has_tty(me) {
+        return 0
+    }
+    if field(me, offset_of(Thread, sid)) != p {
+        return 1
+    }
+    let old = sv(S_TTY_SID)
+    if old != 0 {
+        if !steal {
+            return 1
+        }
+        let fg = sv(S_TTY_PGRP)
+        tty_leaves(old)
+        hangup_group(fg, true)
+    }
+    put_sv(S_TTY_SID, p)
+    put_sv(S_TTY_PGRP, field(me, offset_of(Thread, pgid)))
+    put_field(me, offset_of(Thread, ctty), 1)
+    0
+}
+
+/// A session leader with no controlling terminal opens the console
+/// (without O_NOCTTY, kernel/files): it takes it when no session holds
+/// it (XBD 11.1.3: the first terminal a session leader opens).
+pub fn open_tty() {
+    let me = field(cur(), offset_of(Thread, lead))
+    let p = field(me, offset_of(Thread, tgid))
+    if p != 0 && sv(S_TTY_ON) == 1 && sv(S_TTY_SID) == 0 && field(me, offset_of(Thread, sid)) == p {
+        let _r = take_tty(false)
+    }
+}
+
+/// TIOCNOTTY by the running thread's process: 0, or 25 (ENOTTY) when
+/// the console is not its controlling terminal. A session leader's
+/// session loses it and the foreground group is sent SIGHUP and
+/// SIGCONT (measured); any other process loses it alone.
+pub fn drop_tty() -> u64 {
+    let me = field(cur(), offset_of(Thread, lead))
+    if !has_tty(me) {
+        return 25
+    }
+    let p = field(me, offset_of(Thread, tgid))
+    if field(me, offset_of(Thread, sid)) == p {
+        let fg = sv(S_TTY_PGRP)
+        tty_leaves(p)
+        hangup_group(fg, true)
+    } else {
+        put_field(me, offset_of(Thread, ctty), 0)
+    }
+    0
+}
+
+/// SIGHUP, and (`cont`) SIGCONT, for every process of group `g`, from
+/// the kernel (no permission asked).
+fn hangup_group(g: u64, cont: bool) {
+    if g == 0 {
+        return
+    }
+    let info = sig_info(I_KERNEL, 0, 0, 0)
+    let _n = raise_pgrp(g, SIGHUP, info)
+    if cont {
+        let _m = raise_pgrp(g, SIGCONT, info)
+    }
+}
+
+/// Raise `sig` for every live process of group `g` (the terminal's
+/// keys, its background rules, a hangup): how many there were.
+pub fn raise_pgrp(g: u64, sig: u64, info: u64) -> u64 {
     var n: u64 = 0
     var l: u64 = FIRST
     while l < SLOTS {
-        let pid = field(l, offset_of(Thread, tgid))
-        if pid != 0 && field(l, offset_of(Thread, pid)) == pid && running_state(l) && pid != but && !(spare1 && pid == 1) {
+        if live_leader(l) && field(l, offset_of(Thread, pgid)) == g {
             n += 1
             if sig != 0 {
                 raise_group(l, sig, info)
@@ -2319,6 +2746,248 @@ pub fn raise_all(sig: u64, info: u64, but: u64, spare1: bool) -> u64 {
         l += 1
     }
     n
+}
+
+/// Whether group `g` is orphaned (XBD 3): no live member but `skip` (a
+/// slot; SLOTS none) has a parent, other than `skip`, in another group
+/// of the same session. A group with no live member is orphaned.
+fn orphaned_but(g: u64, skip: u64) -> bool {
+    var l: u64 = FIRST
+    while l < SLOTS {
+        if l != skip && live_leader(l) && field(l, offset_of(Thread, pgid)) == g {
+            let pp = field(l, offset_of(Thread, ppid))
+            let ps = if pp != 0 { live_slot(pp) } else { SLOTS }
+            if ps != SLOTS && ps != skip && field(ps, offset_of(Thread, pgid)) != g && field(ps, offset_of(Thread, sid)) == field(l, offset_of(Thread, sid)) {
+                return false
+            }
+        }
+        l += 1
+    }
+    true
+}
+
+/// Whether the running thread's process group is orphaned.
+pub fn self_orphaned() -> bool {
+    orphaned_but(self_pgid(), SLOTS)
+}
+
+/// Whether group `g` has a stopped live member.
+fn has_stopped(g: u64) -> bool {
+    var l: u64 = FIRST
+    while l < SLOTS {
+        if live_leader(l) && field(l, offset_of(Thread, pgid)) == g && field(l, offset_of(Thread, stopped)) == 1 {
+            return true
+        }
+        l += 1
+    }
+    false
+}
+
+/// Whether the running thread blocks `sig` or its process ignores it
+/// (the terminal's background rules: then a read is -EIO and a write
+/// goes ahead).
+pub fn self_refuses(sig: u64) -> bool {
+    let c = cur()
+    field(c, offset_of(Thread, sigmask)) & bit(sig) != 0 || handler_of(field(c, offset_of(Thread, lead)), sig) == SIG_IGN
+}
+
+/// The parent of the process led by `l` is told of a stop or a continue
+/// (`kind` I_CHLD_STOPPED or I_CHLD_CONTINUED, `sig` the signal): its
+/// waiting threads are woken, and it is sent SIGCHLD unless its action
+/// for SIGCHLD has SA_NOCLDSTOP (sigaction(2), measured both ways).
+fn tell_parent(l: u64, kind: u64, sig: u64) {
+    let pp = field(l, offset_of(Thread, ppid))
+    let ps = if pp != 0 { live_slot(pp) } else { SLOTS }
+    if ps == SLOTS {
+        return
+    }
+    wake_waiter(pp)
+    // # Safety: the parent's area, word SIG_WORDS + 16 * 4 + 1 < 512: its SIGCHLD action's flags.
+    let fl = unsafe { ((own_area(ps) + (SIG_WORDS + (SIGCHLD - 1) * 4 + 1) * 8) as *u64).read_volatile() }
+    if fl & SA_NOCLDSTOP == 0 {
+        raise_group(ps, SIGCHLD, sig_info(kind, field(l, offset_of(Thread, tgid)), sig, real_uid(l)))
+    }
+}
+
+/// Stop the process led by `l` with `sig`: it runs nothing until
+/// continued; its parent is told. A stopped process stopped again is
+/// told nothing new.
+fn stop_proc(l: u64, sig: u64) {
+    if field(l, offset_of(Thread, stopped)) == 1 {
+        return
+    }
+    put_field(l, offset_of(Thread, stopped), 1)
+    put_field(l, offset_of(Thread, wstop), sig)
+    put_field(l, offset_of(Thread, wcont), 0)
+    tell_parent(l, I_CHLD_STOPPED, sig)
+}
+
+/// Every parked thread of the process led by `l` made ready.
+fn unpark(l: u64) {
+    var t: u64 = FIRST
+    while t < SLOTS {
+        if field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, state)) == STOPPED {
+            put_field(t, offset_of(Thread, state), READY)
+            enqueue(t)
+        }
+        t += 1
+    }
+}
+
+/// The stop signals pending for the process led by `l`, or (`cont`)
+/// its SIGCONT, discarded (signal(7): a SIGCONT discards a pending stop,
+/// a stop a pending SIGCONT).
+fn discard(l: u64, cont: bool) {
+    let m = if cont { bit(SIGCONT) } else { STOPS }
+    put_field(l, offset_of(Thread, gpend), field(l, offset_of(Thread, gpend)) & !m)
+    var t: u64 = FIRST
+    while t < SLOTS {
+        if field(t, offset_of(Thread, lead)) == l && takes(t) {
+            put_field(t, offset_of(Thread, pend), field(t, offset_of(Thread, pend)) & !m)
+        }
+        t += 1
+    }
+}
+
+/// What a signal does when it is sent, before it is made pending (px48):
+/// true when that is all it does. SIGKILL readies a stopped process's
+/// threads so it can end. SIGCONT continues a stopped process whatever
+/// its action (blocked or ignored too) and discards a pending stop; the
+/// parent is told. A stop discards a pending SIGCONT; at its default
+/// (SIGSTOP always), when some thread takes it now (`blocked` false), it
+/// stops the process at once — or, for SIGTSTP, SIGTTIN and SIGTTOU, is
+/// discarded when the process's group is orphaned (XBD 11.1.4) — and is
+/// not made pending. pid 1 is never stopped (`inert`).
+fn job_signal(l: u64, sig: u64, blocked: bool) -> bool {
+    if field(l, offset_of(Thread, tgid)) == 1 {
+        return false
+    }
+    if sig == SIGKILL {
+        if field(l, offset_of(Thread, stopped)) == 1 {
+            put_field(l, offset_of(Thread, stopped), 0)
+            unpark(l)
+        }
+        return false
+    }
+    if sig == SIGCONT {
+        discard(l, false)
+        continue_proc(l)
+        return false
+    }
+    if !is_stop(sig) {
+        return false
+    }
+    discard(l, true)
+    if sig != SIGSTOP && (handler_of(l, sig) != SIG_DFL || blocked) {
+        return false
+    }
+    if sig != SIGSTOP && orphaned_but(field(l, offset_of(Thread, pgid)), SLOTS) {
+        return true
+    }
+    stop_proc(l, sig)
+    true
+}
+
+/// The process led by `l`, stopped, continued: its threads ready again,
+/// its parent told.
+fn continue_proc(l: u64) {
+    if field(l, offset_of(Thread, stopped)) == 0 {
+        return
+    }
+    put_field(l, offset_of(Thread, stopped), 0)
+    put_field(l, offset_of(Thread, wstop), 0)
+    put_field(l, offset_of(Thread, wcont), 1)
+    unpark(l)
+    tell_parent(l, I_CHLD_CONTINUED, SIGCONT)
+}
+
+/// kernel/signal: the running thread took stop signal `sig` at its
+/// default (one that was blocked when it was sent): its process stops,
+/// unless it is a SIGTSTP, SIGTTIN or SIGTTOU and its group is orphaned
+/// (then the signal is discarded).
+pub fn stop_self(sig: u64) {
+    let l = field(cur(), offset_of(Thread, lead))
+    if field(l, offset_of(Thread, tgid)) == 1 {
+        return
+    }
+    if sig != SIGSTOP && orphaned_but(field(l, offset_of(Thread, pgid)), SLOTS) {
+        return
+    }
+    stop_proc(l, sig)
+}
+
+/// Whether the running thread is to be parked now (its process is
+/// stopped): kernel/signal asks before it takes a signal.
+pub fn self_parks() -> bool {
+    parks(cur())
+}
+
+/// Park the running thread (its process is stopped) with its frame
+/// `f`, which it resumes when continued; the next thread's frame. IF
+/// clear.
+pub fn park_current(f: u64) -> u64 {
+    let c = cur()
+    put_field(c, offset_of(Thread, frame), f)
+    put_field(c, offset_of(Thread, state), STOPPED)
+    wake_sleepers()
+    run_next()
+}
+
+/// px48: the running thread's system call, rewound to run again, is to
+/// be ended by a signal's handler as a waiting call is (W_REWOUND: run
+/// again under SA_RESTART, else -EINTR): the terminal's background rule
+/// sent its group SIGTTIN or SIGTTOU (kernel/console).
+pub fn self_rewound() {
+    put_field(cur(), offset_of(Thread, rst), W_REWOUND)
+}
+
+/// px48: `rt_sigsuspend(mask)` from the frame `f` (sigsuspend(2)): the
+/// running thread's mask is `mask` (SIGKILL and SIGSTOP never blocked)
+/// until a signal comes that runs a handler or ends the process; the
+/// call then answers -EINTR, and the mask it replaced is put back — by
+/// the handler's frame (kernel/signal gives it that mask to restore) or,
+/// when the thread is let go without a handler, by `suspend_over`. The
+/// next thread's frame. IF clear.
+pub fn suspend_current(f: u64, mask: u64) -> u64 {
+    let c = cur()
+    // # Safety: the caller's live frame (22 words).
+    unsafe { ((f + W_RAX * 8) as *u64).write_volatile(0xfffffffffffffffc) } // -EINTR
+    put_field(c, offset_of(Thread, ssold), field(c, offset_of(Thread, sigmask)))
+    put_field(c, offset_of(Thread, sigmask), mask & !0x40100)
+    put_field(c, offset_of(Thread, frame), f)
+    put_field(c, offset_of(Thread, state), SUSPEND)
+    put_field(c, offset_of(Thread, rst), W_SUSPEND)
+    poke(field(c, offset_of(Thread, lead))) // a signal already pending and now unblocked ends it at once
+    wake_sleepers()
+    run_next()
+}
+
+/// px48: whether the running thread is leaving `rt_sigsuspend`, and the
+/// mask it is to have back.
+pub fn self_suspended() -> (bool, u64) {
+    let c = cur()
+    (field(c, offset_of(Thread, rst)) == W_SUSPEND, field(c, offset_of(Thread, ssold)))
+}
+
+/// px48: the running thread leaves `rt_sigsuspend` with no handler run
+/// for it (kernel/signal, on its way to ring 3): its mask put back.
+pub fn suspend_over() {
+    let c = cur()
+    if field(c, offset_of(Thread, rst)) == W_SUSPEND {
+        put_field(c, offset_of(Thread, sigmask), field(c, offset_of(Thread, ssold)))
+        put_field(c, offset_of(Thread, rst), W_NONE)
+    }
+}
+
+/// The session of the process whose area is `a` (a leader's own area,
+/// `proc_area`'s; kernel/signal's `may_signal` has areas).
+pub fn sid_of_area(a: u64) -> u64 {
+    // # Safety: the address only.
+    let base = unsafe { pax_procs as u64 }
+    if a < base || a >= base + SLOTS * PROC_AREA {
+        return 0
+    }
+    field((a - base) / PROC_AREA, offset_of(Thread, sid))
 }
 
 /// Whether the running thread has a signal to take now (kernel/signal
