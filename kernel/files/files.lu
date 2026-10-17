@@ -253,7 +253,7 @@ const K_SYN: u64 = 14 // px34: a file of /proc or /sys (kernel/procfs's)
 const T_SHIFT: u64 = 56
 const TTY0: u64 = 1 // px21a: T_CONSOLE's reference for /dev/tty0
 const CONSOLE: u64 = 2 // px21a: and for /dev/console
-const TTY: u64 = 3 // px45: /dev/tty (every process's controlling terminal is the console: one session)
+const TTY: u64 = 3 // px45: /dev/tty; px48: the caller's controlling terminal, -ENXIO when it has none
 const TTYS0: u64 = 4 // px45: /dev/ttyS0, the serial port the console is
 // px45: T_NULL's references: /dev/null 0, and the memory devices
 // `null(4)` and `random(4)` name beside it.
@@ -335,6 +335,7 @@ const O_RDWR: u64 = 2
 const O_APPEND: u64 = 0x400 // px17: F_GETFL / F_SETFL
 const O_DIRECT: u64 = 0x4000 // px17: pipe2 refuses it by name (packet mode)
 const O_NOFOLLOW: u64 = 0x20000 // px27
+const O_NOCTTY: u64 = 0x100 // px48: the console opened by a session leader does not become its terminal
 const O_DSYNC: u64 = 0x1000 // px27: refused by name, with the next five
 const O_SYNC_BIT: u64 = 0x100000 // O_SYNC is this and O_DSYNC
 const O_NOATIME: u64 = 0x40000
@@ -2834,7 +2835,13 @@ fn syn_child(d: u64, s: u64, n: u64) -> u64 {
         if comp_is(s, n, "fd") {
             return (T_SYN << T_SHIFT) | procfs.child_at(d, 4)
         }
+        if comp_is(s, n, "stat") {
+            return (T_SYN << T_SHIFT) | procfs.child_at(d, 5) // px48
+        }
         return err(ENOENT)
+    }
+    if d == 1 && comp_is(s, n, "stat") {
+        return (T_SYN << T_SHIFT) | procfs.self_stat() // px48: /proc/self/stat
     }
     if d != procfs.ROOT && procfs.entry(d) == procfs.PFD {
         // px45: a descriptor's link is listed (`getdents`), not followed
@@ -3547,9 +3554,15 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
     if !made && named && !may(a, cred.FS, n, want) {
         return neg(EACCES)
     }
+    if k == K_CONSOLE && ty(n) == T_CONSOLE && rf(n) == TTY && !sched.self_tty() {
+        return neg(ENXIO) // px48: /dev/tty is the caller's controlling terminal, and it has none (measured)
+    }
     // px17: a new open file (offset 0), also when /dev/std* reopens a
     // file or a pipe's end (as /proc/self/fd's links do on Linux).
     let fd = open_new(a, 0, k, n, flags)
+    if fd < 0x8000000000000000 && k == K_CONSOLE && !(ty(n) == T_CONSOLE && rf(n) == TTY) && flags & O_NOCTTY == 0 {
+        sched.open_tty() // px48: a session leader with no terminal that opens the console takes it, when no session holds it
+    }
     if fd < 0x8000000000000000 && k == K_FILE && !made && flags & O_TRUNC != 0 && ty(n) == T_INO {
         if tree.bytes(rf(n)) != 0 {
             let _t = tree.truncate(rf(n), 0)
@@ -3741,6 +3754,12 @@ pub fn read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
         // px46: with VMIN 0 and VTIME above 0, console.TIMED: the read
         // waits as a pipe's does (WAIT), until a key or its deadline,
         // which it keeps in the thread's own word as `poll` does.
+        // px48: a background reader of its controlling terminal is sent
+        // SIGTTIN (or told -EIO): kernel/console's `job`.
+        let j = console.job(console.J_READ)
+        if j != 0 {
+            return j
+        }
         let (r, u) = console.read(pml4, buf, n, status(a, fd) & O_NONBLOCK != 0, sched.self_until())
         sched.set_self_until(u)
         if r == console.TIMED {
@@ -4006,7 +4025,7 @@ pub fn ioctl(a: u64, pml4: u64, fd: u64, req: u64, arg: u64) -> u64 {
         return neg(EBADF)
     }
     if k == K_CONSOLE {
-        return console.ioctl(pml4, req, arg)
+        return console.ioctl(a, pml4, req, arg)
     }
     if k == K_DSP {
         // px30: OSS's requests (kernel/sound); SNDCTL_DSP_NONBLOCK sets
