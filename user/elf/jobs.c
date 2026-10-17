@@ -820,7 +820,7 @@ static void terminal(void) {
     int st;
     pid_t w;
     snprintf(tag, sizeof tag, "R");
-    on(SIGINT); on(SIGQUIT); on(SIGHUP); on(SIGWINCH);
+    on(SIGINT); on(SIGQUIT); on(SIGHUP); on(SIGWINCH); on(SIGCONT);
     signal(SIGTSTP, SIG_IGN);
     (void)!pipe(bgp);
     fcntl(bgp[0], F_SETFL, O_NONBLOCK);
