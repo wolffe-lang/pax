@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# fetch-busybox — Ubuntu 24.04's busybox-static, by digest (px48).
+#
+#   tools/fetch-busybox OUTDIR
+#
+# user/busybox.pin's .deb from Ubuntu's archive, refused on a sha256
+# mismatch (cached by digest); `usr/bin/busybox` taken out of its data
+# archive (ar, then tar: the data member is zstd) in a directory of its
+# own, refused unless its sha256 is the pin's and it is ET_EXEC with no
+# PT_INTERP; copied to OUTDIR/busybox, and kept in the cache by its own
+# digest (a later run, or a host without zstd, takes it from there).
+# Nothing is built and no package script runs. Prints `busybox <sha256>
+# <bytes>`. Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: fetch-busybox OUTDIR"
+out=$1
+need readelf
+. "$PAX_ROOT/user/busybox.pin"
+mkdir -p "$out" "$PAX_CACHE"
+out=$(cd "$out" && pwd)
+bin=$PAX_CACHE/busybox-$BUSYBOX_SHA256
+check() { # file -> dies unless it is the pin's binary
+    [ "$(sha256_of "$1")" = "$BUSYBOX_SHA256" ] || die "usr/bin/busybox: sha256 $(sha256_of "$1"), the pin says $BUSYBOX_SHA256"
+    readelf -hW "$1" | grep -Eq 'Type: +EXEC' || die "busybox is not ET_EXEC"
+    ! readelf -lW "$1" | grep -q INTERP || die "busybox has a PT_INTERP (not static)"
+}
+if [ ! -f "$bin" ] || [ "$(sha256_of "$bin")" != "$BUSYBOX_SHA256" ]; then
+    need curl ar tar zstd
+    deb=$PAX_CACHE/busybox-$BUSYBOX_DEB_SHA256.deb
+    if [ ! -f "$deb" ] || [ "$(sha256_of "$deb")" != "$BUSYBOX_DEB_SHA256" ]; then
+        curl -sSfL -o "$deb.part" "$BUSYBOX_URL" || die "cannot fetch $BUSYBOX_URL"
+        mv "$deb.part" "$deb"
+    fi
+    [ "$(sha256_of "$deb")" = "$BUSYBOX_DEB_SHA256" ] || die "$BUSYBOX_URL: sha256 $(sha256_of "$deb"), the pin says $BUSYBOX_DEB_SHA256"
+    w=$(mktemp -d "${TMPDIR:-/tmp}/pax-busybox.XXXXXX")
+    trap 'rm -rf "$w"' EXIT
+    ( cd "$w" && ar x "$deb" ) || die "ar: $deb"
+    data=$(cd "$w" && ls data.tar.* 2>/dev/null | head -n 1)
+    [ -n "$data" ] || die "$deb has no data.tar member"
+    mkdir -p "$w/data"
+    tar -xf "$w/$data" -C "$w/data" ./usr/bin/busybox || die "tar: $data has no ./usr/bin/busybox"
+    check "$w/data/usr/bin/busybox"
+    cp "$w/data/usr/bin/busybox" "$bin.part"
+    mv "$bin.part" "$bin"
+fi
+check "$bin"
+cp "$bin" "$out/busybox"
+chmod 755 "$out/busybox"
+printf '%s %s %s\n' busybox "$(sha256_of "$out/busybox")" "$(wc -c < "$out/busybox" | tr -d ' ')"
