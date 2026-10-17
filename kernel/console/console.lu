@@ -109,7 +109,9 @@
 //! black-box runs on Linux (`notes/px13/`). The uapi termios header was
 //! not read (§2 of the note). No Linux source; no other kernel's source.
 
+use cred
 use log
+use sched
 use screen
 use serial
 use speaker
@@ -146,6 +148,7 @@ const C_READS: u64 = 21 // reads answered
 const C_WAITS: u64 = 22 // reads that waited
 const C_SIGNALS: u64 = 23 // px26: the signals keys have raised and nobody has taken (bit n - 1)
 const C_SIG_KEYS: u64 = 24 // px28: keys that raised a signal, since boot
+const C_LAST: u64 = 25 // px48: the tick the last byte was queued at (VTIME's timer between bytes, pax#66)
 
 const RING: u64 = 4096
 const LINE_MAX: u64 = 4095 // bytes before the newline
@@ -166,6 +169,7 @@ const ECHOKE: u64 = 0x800
 const IEXTEN: u64 = 0x8000
 const ISIG: u64 = 0x1 // px26
 const NOFLSH: u64 = 0x80
+const TOSTOP: u64 = 0x100 // px48: a background write is SIGTTOU's
 const VINTR: u64 = 0
 const VQUIT: u64 = 1
 const VSUSP: u64 = 10
@@ -190,6 +194,16 @@ const TCSETSW: u64 = 0x5403
 const TCSETSF: u64 = 0x5404
 const TIOCGWINSZ: u64 = 0x5413
 const TIOCSWINSZ: u64 = 0x5414
+// px48: the controlling terminal's (uapi asm-generic/ioctls.h, ioctl_tty(2)).
+const TIOCSCTTY: u64 = 0x540e
+const TIOCGPGRP: u64 = 0x540f
+const TIOCSPGRP: u64 = 0x5410
+const TIOCNOTTY: u64 = 0x5422
+const TIOCGSID: u64 = 0x5429
+const SIGHUP: u64 = 1
+const SIGTTIN: u64 = 21
+const SIGTTOU: u64 = 22
+const SIGWINCH: u64 = 28
 
 // What `read` and `ioctl` answer besides a count.
 /// What `read` answers when the thread must wait (kernel/user rewinds
@@ -207,6 +221,16 @@ const NS_PER_TICK: u64 = 10000151
 pub const REFUSED: u64 = 0xfffffffffffffdff // -513: an ioctl refused by name
 const NEG_EFAULT: u64 = 0xfffffffffffffff2 // -14
 const NEG_EAGAIN: u64 = 0xfffffffffffffff5 // -11
+const NEG_EPERM: u64 = 0xffffffffffffffff // -1
+const NEG_ESRCH: u64 = 0xfffffffffffffffd // -3
+const NEG_EIO: u64 = 0xfffffffffffffffb // -5
+const NEG_EINVAL: u64 = 0xffffffffffffffea // -22
+/// px48: what a read, a write or a setting of the console answers when
+/// the caller is in the background and the console has just sent its
+/// group SIGTTIN or SIGTTOU (`job`): kernel/user rewinds the call to run
+/// again once the group is continued (or a handler has run: then as a
+/// waiting call, SA_RESTART's).
+pub const JOB_STOP: u64 = 0xfffffffffffffdfc // -516: never seen by ring 3
 /// -ENOTTY, what a refused request answers ring 3.
 pub const NEG_ENOTTY: u64 = 0xffffffffffffffe7 // -25
 
@@ -352,6 +376,7 @@ fn queue(b: u64, nl: bool) -> bool {
     }
     put_ring(e, b)
     put_sv(C_E, e + 1)
+    put_sv(C_LAST, timer.ticks()) // px48: VTIME's timer runs from the last byte
     true
 }
 
@@ -557,6 +582,24 @@ pub fn read(pml4: u64, buf: u64, n: u64, nonblock: bool, until: u64) -> (u64, u6
         if i < k {
             k = i + 1
         }
+    } else {
+        // px48 (pax#66): VMIN m above 0 waits for min(m, n) bytes; with
+        // VTIME t above 0, a read that has some answers them once t
+        // tenths of a second pass after the last byte came (termios(3),
+        // measured: notes/px48-job-control.md §F).
+        let m = cc(VMIN)
+        let want = if m < n { m } else { n }
+        if m > 0 && k < want && !nonblock {
+            let t = cc(VTIME)
+            if t == 0 {
+                bump(C_WAITS)
+                return (RESTART, 0)
+            }
+            let end = sv(C_LAST) + (t * 100000000 + NS_PER_TICK - 1) / NS_PER_TICK + 1
+            if timer.ticks() < end {
+                return (TIMED, end)
+            }
+        }
     }
     if k > n {
         k = n
@@ -615,34 +658,126 @@ fn termios_in(pml4: u64, arg: u64, flush: bool) -> u64 {
 }
 
 /// px45: whether the console is the calling process's controlling
-/// terminal. On PAX always: one session holds every process, and the
-/// console is its terminal (kernel/signal's `tty`; no job control yet,
-/// ruling #79's track). kernel/user asks it before the speaker's
-/// ioctls, which Linux gives only to the privileged and to a terminal's
-/// own session (measured, notes/px45/devs.c under tools/linux-sound: a
-/// user on its controlling terminal 0, on a virtual terminal that is not
-/// its controlling terminal -EPERM, whether or not it owns it); so on
-/// PAX anyone with a console descriptor may sound the speaker, until
-/// sessions exist.
+/// terminal; px48: kernel/sched's sessions (`self_tty`). kernel/user
+/// asks it before the speaker's ioctls, which Linux gives only to the
+/// privileged and to a terminal's own session (measured,
+/// notes/px45/devs.c under tools/linux-sound: a user on its controlling
+/// terminal 0, on a virtual terminal that is not its controlling
+/// terminal -EPERM, whether or not it owns it).
 pub fn controlling() -> bool {
-    true
+    sched.self_tty()
 }
 
-/// A terminal ioctl on the console: the result for %rax, or `REFUSED`
-/// for a request PAX does not answer. -ENOTTY for everything before
-/// `start` (px12's console).
-pub fn ioctl(pml4: u64, req: u64, arg: u64) -> u64 {
+/// px48: what the console's background rules say to the running
+/// process (XBD 11.1.4, termios(3)'s TOSTOP, measured on Linux:
+/// notes/px48-job-control.md §D). Nothing to a process whose
+/// controlling terminal the console is not, or that is in the
+/// foreground group. `kind` J_READ: SIGTTIN for the caller's group
+/// (`JOB_STOP`), or -EIO when the caller blocks or ignores it or its
+/// group is orphaned. J_WRITE: with TOSTOP set, SIGTTOU likewise, but a
+/// caller that blocks or ignores it writes. J_SET (a setting changed:
+/// TCSETS*, TIOCSPGRP): SIGTTOU whatever TOSTOP says, by the same rule.
+/// 0: go ahead.
+pub const J_READ: u64 = 1
+pub const J_WRITE: u64 = 2
+pub const J_SET: u64 = 3
+
+pub fn job(kind: u64) -> u64 {
+    if sv(C_STARTED) == 0 || !sched.self_tty() {
+        return 0
+    }
+    let g = sched.self_pgid()
+    if g == sched.tty_pgrp() {
+        return 0
+    }
+    if kind == J_WRITE && !lflag(TOSTOP) {
+        return 0
+    }
+    let sig = if kind == J_READ { SIGTTIN } else { SIGTTOU }
+    if sched.self_refuses(sig) {
+        return if kind == J_READ { NEG_EIO } else { 0 }
+    }
+    if sched.self_orphaned() || sched.self_pid() == 1 {
+        return NEG_EIO
+    }
+    let _n = sched.raise_pgrp(g, sig, sched.sig_info(sched.I_KERNEL, 0, 0, 0))
+    sched.self_rewound()
+    JOB_STOP
+}
+
+/// px48: an int the caller gives (TIOCSPGRP's), or None-ish: (ok, v).
+fn int_in(pml4: u64, arg: u64) -> (bool, u64) {
+    if !uaccess.readable(pml4, arg, 4) {
+        return (false, 0)
+    }
+    (true, uaccess.get(pml4, arg, 4))
+}
+
+/// A terminal ioctl on the console by the process whose area is `a`:
+/// the result for %rax, or `REFUSED` for a request PAX does not answer.
+/// -ENOTTY for everything before `start` (px12's console). px48: the
+/// controlling terminal's requests (TIOCSCTTY, TIOCNOTTY, TIOCGPGRP,
+/// TIOCSPGRP, TIOCGSID: -ENOTTY to a process whose controlling terminal
+/// the console is not, but TIOCSCTTY), and the background rule for a
+/// setting (`job`).
+pub fn ioctl(a: u64, pml4: u64, req: u64, arg: u64) -> u64 {
     if sv(C_STARTED) == 0 {
         return NEG_ENOTTY
     }
     if req == TCGETS {
         return termios_out(pml4, arg)
     }
-    if req == TCSETS || req == TCSETSW {
-        return termios_in(pml4, arg, false)
+    if req == TCSETS || req == TCSETSW || req == TCSETSF {
+        let j = job(J_SET)
+        if j != 0 {
+            return j
+        }
+        return termios_in(pml4, arg, req == TCSETSF)
     }
-    if req == TCSETSF {
-        return termios_in(pml4, arg, true)
+    if req == TIOCSCTTY {
+        // ioctl_tty(2): a session leader with no controlling terminal
+        // takes it; another session's, only with arg 1 by the privileged.
+        return if sched.take_tty((arg & 0xffffffff) == 1 && cred.privileged(a)) == 0 { 0 } else { NEG_EPERM }
+    }
+    if req == TIOCNOTTY {
+        return if sched.drop_tty() == 0 { 0 } else { NEG_ENOTTY }
+    }
+    if req == TIOCGPGRP || req == TIOCGSID {
+        if !sched.self_tty() {
+            return NEG_ENOTTY
+        }
+        if !uaccess.writable(pml4, arg, 4) {
+            return NEG_EFAULT
+        }
+        uaccess.put(pml4, arg, if req == TIOCGPGRP { sched.tty_pgrp() } else { sched.tty_session() }, 4)
+        return 0
+    }
+    if req == TIOCSPGRP {
+        if !sched.self_tty() {
+            return NEG_ENOTTY
+        }
+        let j = job(J_SET)
+        if j == NEG_EIO {
+            return NEG_ENOTTY // measured: an orphaned background group is told -ENOTTY
+        }
+        if j != 0 {
+            return j
+        }
+        let (ok, v) = int_in(pml4, arg)
+        if !ok {
+            return NEG_EFAULT
+        }
+        if v >= 0x80000000 {
+            return NEG_EINVAL
+        }
+        if !sched.group_exists(v, 0) {
+            return NEG_ESRCH
+        }
+        if !sched.group_exists(v, sched.tty_session()) {
+            return NEG_EPERM
+        }
+        sched.set_tty_pgrp(v)
+        return 0
     }
     if req == TIOCGWINSZ {
         if !uaccess.writable(pml4, arg, 8) {
@@ -655,7 +790,14 @@ pub fn ioctl(pml4: u64, req: u64, arg: u64) -> u64 {
         if !uaccess.readable(pml4, arg, 8) {
             return NEG_EFAULT
         }
-        put_sv(C_WINSZ, uaccess.get(pml4, arg, 8))
+        let w = uaccess.get(pml4, arg, 8)
+        let old = sv(C_WINSZ)
+        put_sv(C_WINSZ, w)
+        let g = sched.tty_pgrp()
+        if w != old && g != 0 && sched.tty_session() != 0 {
+            // px48: a new size is SIGWINCH for the foreground group (measured).
+            let _n = sched.raise_pgrp(g, SIGWINCH, sched.sig_info(sched.I_KERNEL, 0, 0, 0))
+        }
         return 0
     }
     if speaker.request(req) {
@@ -960,6 +1102,7 @@ pub fn start() {
     serial.receive_on()
     kbd_start()
     put_sv(C_STARTED, 1)
+    sched.tty_on() // px48: the next process the kernel starts takes it as its controlling terminal
     timer.unmask(COM1_LINE)
     timer.unmask(KBD_LINE)
 }
