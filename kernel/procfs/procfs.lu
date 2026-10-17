@@ -98,9 +98,9 @@ use unix
 const PAGE: u64 = 4096
 
 /// How many entries there are; also `NONE`'s value.
-pub const ENTRIES: u64 = 37
+pub const ENTRIES: u64 = 39
 /// No entry.
-pub const NONE: u64 = 37
+pub const NONE: u64 = 39
 /// px44: entries 22 to 25 are `/proc/sys/fs/protected_hardlinks`,
 /// `_symlinks`, `_regular` and `_fifos` (ruling #75 R7: on, fixed).
 const PROTECTED: u64 = 22
@@ -122,6 +122,9 @@ const PCMDLINE: u64 = 34
 const PENVIRON: u64 = 35
 /// px45: `/proc/<pid>/fd`; and FDENT + n is its entry for descriptor n.
 pub const PFD: u64 = 36
+/// px48: `/proc/self/stat` and `/proc/<pid>/stat`.
+const SSTAT: u64 = 37
+const PSTAT: u64 = 38
 pub const FDENT: u64 = 0x1000
 const FDS_MAX: u64 = 1024 // kernel/files' FDS
 const EMASK: u64 = 0xffff
@@ -152,6 +155,7 @@ const G_PROTECTED: u64 = 12 // px44
 const G_UNPRIV: u64 = 13 // px45
 const G_CMDLINE: u64 = 14
 const G_ENVIRON: u64 = 15
+const G_STAT: u64 = 16 // px48
 
 const S_IFDIR: u64 = 0x4000
 const S_IFREG: u64 = 0x8000
@@ -240,6 +244,7 @@ pub fn name(e: u64) -> str {
     if e == SCMDLINE || e == PCMDLINE { return "cmdline" }
     if e == SENVIRON || e == PENVIRON { return "environ" }
     if e == PFD { return "fd" }
+    if e == SSTAT || e == PSTAT { return "stat" }
     if e == PROTECTED { return "protected_hardlinks" }
     if e == PROTECTED + 1 { return "protected_symlinks" }
     if e == PROTECTED + 2 { return "protected_regular" }
@@ -301,13 +306,13 @@ pub fn parent(r: u64) -> u64 {
     let e = entry(r)
     if e == 0 || e == 7 { return ROOT }
     if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR { return 0 }
-    if e == 2 || e == 3 || e == 21 || e == SCMDLINE || e == SENVIRON { return 1 }
+    if e == 2 || e == 3 || e == 21 || e == SCMDLINE || e == SENVIRON || e == SSTAT { return 1 }
     if e == NET { return 4 }
     if e == IPV4 { return NET }
     if e == UNPRIV { return IPV4 }
     let (isfd, _n) = fd_of(r)
     if isfd { return (pid_of(r) << 16) | PFD }
-    if e == PCMDLINE || e == PENVIRON || e == PFD { return pid_dir(pid_of(r)) }
+    if e == PCMDLINE || e == PENVIRON || e == PFD || e == PSTAT { return pid_dir(pid_of(r)) }
     if e == 5 || e == 17 { return 4 }
     if e == 6 { return 5 }
     if e == 18 || (e >= PROTECTED && e < PROTECTED + 4) { return 17 }
@@ -333,6 +338,7 @@ fn gen(r: u64) -> u64 {
     if e == UNPRIV { return G_UNPRIV }
     if e == SCMDLINE || e == PCMDLINE { return G_CMDLINE }
     if e == SENVIRON || e == PENVIRON { return G_ENVIRON }
+    if e == SSTAT || e == PSTAT { return G_STAT }
     let (isfd, _n) = fd_of(r)
     if isfd { return G_CMDLINE } // px45: not a directory; never opened (`syn_child` finds none)
     if e == 3 { return G_CGROUP }
@@ -385,7 +391,7 @@ pub fn mode(r: u64) -> u64 {
 pub fn owner(r: u64, area: u64, which: int) -> u64 {
     let e = entry(r)
     let (isfd, _n) = fd_of(r)
-    let per = e == 2 || e == 3 || e == 21 || e == PSTATUS || e == PSETGROUPS || e == SCMDLINE || e == SENVIRON || e == PCMDLINE || e == PENVIRON || e == PFD || isfd
+    let per = e == 2 || e == 3 || e == 21 || e == PSTATUS || e == PSETGROUPS || e == SCMDLINE || e == SENVIRON || e == PCMDLINE || e == PENVIRON || e == PFD || e == SSTAT || e == PSTAT || isfd
     if e != 1 && e != PIDDIR && !per {
         return 0
     }
@@ -426,8 +432,8 @@ pub fn fs(r: u64) -> u64 {
 pub fn child_at(d: u64, k: u64) -> u64 {
     var seen: u64 = 0
     if d != ROOT && entry(d) == PIDDIR {
-        // px45: status, setgroups, cmdline, environ, fd (kernel/files lists fd's own)
-        let e = if k == 0 { PSTATUS } else if k == 1 { PSETGROUPS } else if k == 2 { PCMDLINE } else if k == 3 { PENVIRON } else if k == 4 { PFD } else { NONE }
+        // px45: status, setgroups, cmdline, environ, fd (kernel/files lists fd's own); px48: stat
+        let e = if k == 0 { PSTATUS } else if k == 1 { PSETGROUPS } else if k == 2 { PCMDLINE } else if k == 3 { PENVIRON } else if k == 4 { PFD } else if k == 5 { PSTAT } else { NONE }
         return if e == NONE { NONE } else { (pid_of(d) << 16) | e }
     }
     var e: u64 = 0
@@ -439,6 +445,9 @@ pub fn child_at(d: u64, k: u64) -> u64 {
             seen += 1
         }
         e += 1
+    }
+    if d == 1 {
+        return if seen == k { SSTAT } else { NONE } // px48: /proc/self/stat, after the others
     }
     if d != 0 {
         return NONE
@@ -452,6 +461,12 @@ pub fn child_at(d: u64, k: u64) -> u64 {
         p = sched.proc_after(p)
     }
     NONE
+}
+
+/// px48: `/proc/self/stat`'s entry (kernel/files finds it by name: it
+/// is not one of the entries below PIDDIR).
+pub fn self_stat() -> u64 {
+    SSTAT
 }
 
 /// px25: the child of `d` named by a process number `v` (`/proc/<v>`),
@@ -608,6 +623,8 @@ fn status(base: u64, s: u64, pid0: u64, area: u64, umask: u64, fds: u64) -> u64 
         k = put_s(base, k, "\nState:\tR (running)\n")
     } else if sched.proc_word(s, 8) == 1 {
         k = put_s(base, k, "\nState:\tZ (zombie)\n")
+    } else if sched.proc_word(s, 11) == 1 {
+        k = put_s(base, k, "\nState:\tT (stopped)\n") // px48
     } else {
         k = put_s(base, k, "\nState:\tS (sleeping)\n")
     }
@@ -638,8 +655,8 @@ fn status(base: u64, s: u64, pid0: u64, area: u64, umask: u64, fds: u64) -> u64 
     k = put_b(base, k, 10)
     k = put_field(base, k, "NStgid", pid)
     k = put_field(base, k, "NSpid", tid)
-    k = put_field(base, k, "NSpgid", 1)
-    k = put_field(base, k, "NSsid", 1)
+    k = put_field(base, k, "NSpgid", if me { sched.self_pgid() } else { sched.proc_word(s, 9) }) // px48: its group and session (1 and 1 before)
+    k = put_field(base, k, "NSsid", if me { sched.self_sid() } else { sched.proc_word(s, 10) })
     k = put_field(base, k, "Kthread", 0)
     let space = if me { paging.live() } else { sched.proc_word(s, 3) }
     let rss = if space == 0 { 0 } else { paging.user_pages(space) * 4 }
@@ -697,6 +714,82 @@ fn status(base: u64, s: u64, pid0: u64, area: u64, umask: u64, fds: u64) -> u64 
     k = put_s(base, k, "Mems_allowed:\t1\nMems_allowed_list:\t0\n")
     k = put_field(base, k, "voluntary_ctxt_switches", 0)
     put_field(base, k, "nonvoluntary_ctxt_switches", 0)
+}
+
+/// px48: a signed number (`v` as an int64).
+fn put_sdec(base: u64, at: u64, v: u64) -> u64 {
+    if v >= 0x8000000000000000 {
+        return put_dec(base, put_b(base, at, 45), (!v) + 1)
+    }
+    put_dec(base, at, v)
+}
+
+/// px48: `/proc/<pid>/stat` (and `self`'s: `me`) of the process led by
+/// slot `s` (`proc_pid_stat(5)`'s 52 fields in its order and format):
+/// the pid, `(comm)`, the state (R for the reader's own process, Z ended, T
+/// stopped, S otherwise: PAX keeps no finer state, as `status` says),
+/// the parent, the process group and session, the controlling
+/// terminal's number (the console's 4:64 as `(major << 8) | minor`, 0
+/// when none) and its foreground group (-1 when none), the thread count,
+/// the resident and virtual size, the signal sets (pending, blocked,
+/// ignored, caught), the exit signal 17 (SIGCHLD); every field PAX does
+/// not keep (flags, faults, times, start time, addresses, the scheduling
+/// class, the accounting) reads 0, and priority 20 and nice 0 (named).
+fn stat(base: u64, s: u64, me: bool, area: u64) -> u64 {
+    let pid = sched.slot_pid(s)
+    var k = put_dec(base, 0, pid)
+    k = put_s(base, k, " (")
+    k = put_name(base, k, if me { sched.SLOTS } else { s })
+    k = put_s(base, k, ") ")
+    let running = me || s == sched.proc_slot(sched.self_pid()) // the reader's own process is running (measured: R, by /proc/<pid> too)
+    let st = if running { 82 } else if sched.proc_word(s, 8) == 1 { 90 } else if sched.proc_word(s, 11) == 1 { 84 } else { 83 }
+    k = put_b(base, k, st)
+    k = put_b(base, k, 32)
+    k = put_dec(base, k, sched.proc_word(s, 0))
+    k = put_b(base, k, 32)
+    k = put_dec(base, k, sched.proc_word(s, 9))
+    k = put_b(base, k, 32)
+    k = put_dec(base, k, sched.proc_word(s, 10))
+    k = put_b(base, k, 32)
+    let tty = sched.proc_word(s, 12) == 1
+    k = put_dec(base, k, if tty { 0x440 } else { 0 })
+    k = put_b(base, k, 32)
+    k = put_sdec(base, k, if tty { sched.tty_pgrp() } else { 0xffffffffffffffff })
+    // flags minflt cminflt majflt cmajflt utime stime cutime cstime
+    k = put_s(base, k, " 0 0 0 0 0 0 0 0 0 20 0 ")
+    k = put_dec(base, k, sched.proc_word(s, 1))
+    k = put_s(base, k, " 0 0 ")
+    let space = if me { paging.live() } else { sched.proc_word(s, 3) }
+    let pages = if space == 0 { 0 } else { paging.user_pages(space) }
+    k = put_dec(base, k, pages * PAGE)
+    k = put_b(base, k, 32)
+    k = put_dec(base, k, pages)
+    // rsslim startcode endcode startstack kstkesp kstkeip
+    k = put_s(base, k, " 18446744073709551615 0 0 0 0 0 ")
+    k = put_dec(base, k, sched.proc_word(s, 13))
+    k = put_b(base, k, 32)
+    k = put_dec(base, k, if me { sched.self_sigmask() } else { sched.proc_word(s, 2) })
+    var ign: u64 = 0
+    var cgt: u64 = 0
+    var sig: u64 = 1
+    while sig <= 64 {
+        // # Safety: the process's area, word 256 + (sig - 1) * 4 < 512 (its signal actions).
+        let h = unsafe { ((area + (256 + (sig - 1) * 4) * 8) as *u64).read_volatile() }
+        if h == 1 {
+            ign = ign | (1 << (sig - 1))
+        } else if h != 0 {
+            cgt = cgt | (1 << (sig - 1))
+        }
+        sig += 1
+    }
+    k = put_b(base, k, 32)
+    k = put_dec(base, k, ign)
+    k = put_b(base, k, 32)
+    k = put_dec(base, k, cgt)
+    // wchan nswap cnswap exit_signal processor rt_priority policy
+    // delayacct_blkio_ticks guest_time cguest_time start_data end_data
+    // start_brk arg_start arg_end env_start env_end exit_code
+    put_s(base, k, " 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n")
 }
 
 /// px25: `/proc/meminfo`'s three lines (frames as kB).
@@ -759,7 +852,7 @@ fn strings(base: u64, area: u64, which: int, space: u64) -> u64 {
 pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64) -> (u64, u64) {
     let g = gen(r)
     var slot = sched.SLOTS
-    if g == G_PSTATUS || ((g == G_SETGROUPS || g == G_CMDLINE || g == G_ENVIRON) && pid_of(r) != 0) {
+    if g == G_PSTATUS || ((g == G_SETGROUPS || g == G_CMDLINE || g == G_ENVIRON || g == G_STAT) && pid_of(r) != 0) {
         slot = sched.proc_slot(pid_of(r))
         if slot == sched.SLOTS {
             return (0, 1)
@@ -775,6 +868,8 @@ pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64)
         n = status(base, sched.SLOTS, 0, area, umask, fds)
     } else if g == G_PSTATUS {
         n = status(base, slot, pid_of(r), area, umask, fds)
+    } else if g == G_STAT {
+        n = stat(base, if slot == sched.SLOTS { sched.proc_slot(sched.self_pid()) } else { slot }, slot == sched.SLOTS, area)
     } else if g == G_MEMINFO {
         n = meminfo(base)
     } else if g == G_FILENR {
