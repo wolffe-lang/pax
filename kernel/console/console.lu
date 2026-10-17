@@ -81,7 +81,8 @@
 //! TIOCGWINSZ (0x5413; 0 rows and 0 columns, what a Linux serial line
 //! and pseudo-terminal answer until someone sets them — or, px19, when
 //! the screen is the console (kernel/screen attached before `start`),
-//! the screen's rows and columns, its pixel fields 0) and TIOCSWINSZ
+//! the screen's rows and columns, its pixel fields 0; px48, pax#68: the
+//! size of the device input last came from, `typed_at`) and TIOCSWINSZ
 //! (0x5414); and (px18) the speaker's KIOCSOUND (0x4B2F) and KDMKTONE
 //! (0x4B30), kernel/speaker's. Every other request is refused by name (kernel/user
 //! writes `refused: tty ioctl 0x<req>`, -ENOTTY). `struct termios` is
@@ -149,6 +150,7 @@ const C_WAITS: u64 = 22 // reads that waited
 const C_SIGNALS: u64 = 23 // px26: the signals keys have raised and nobody has taken (bit n - 1)
 const C_SIG_KEYS: u64 = 24 // px28: keys that raised a signal, since boot
 const C_LAST: u64 = 25 // px48: the tick the last byte was queued at (VTIME's timer between bytes, pax#66)
+const C_SRC: u64 = 26 // px48: the device the last input came from: 0 none yet, 1 COM1, 2 the keyboard (pax#68)
 
 const RING: u64 = 4096
 const LINE_MAX: u64 = 4095 // bytes before the newline
@@ -1133,6 +1135,7 @@ pub fn irq(v: u64) {
             let b = serial.receive()
             bump(C_RX_COM1)
             if sv(C_STARTED) != 0 {
+                typed_at(1)
                 input(b)
             }
             n += 1
@@ -1143,12 +1146,34 @@ pub fn irq(v: u64) {
             let st = inp(KBD_CMD)
             let b = inp(KBD_DATA)
             if st & KBD_AUX == 0 && sv(C_STARTED) != 0 {
+                typed_at(2)
                 scancode(b)
             }
             n += 1
         }
     }
     timer.eoi(v)
+}
+
+/// px48 (pax#68): the window's size follows the device a person types
+/// at. PAX's one console is a serial line and, when there is a screen,
+/// a screen at once, where Linux has two terminals (ttyS0, answered 0
+/// rows 0 columns until someone sets it, and a virtual terminal, its
+/// screen's grid). So when input comes from another device than the
+/// last input did (`src` 1 COM1, 2 the keyboard), the size becomes that
+/// device's: a serial line's 0 by 0 for COM1, the screen's grid for the
+/// keyboard; before any input it is the screen's grid when there is a
+/// screen (px19). A size a program sets (TIOCSWINSZ) holds until the
+/// person moves to the other device. No SIGWINCH is sent for the move
+/// (named: no program here redraws for it).
+fn typed_at(src: u64) {
+    if sv(C_SRC) == src {
+        return
+    }
+    put_sv(C_SRC, src)
+    if screen.on() {
+        put_sv(C_WINSZ, if src == 1 { 0 } else { screen.rows() | (screen.cols() << 16) })
+    }
 }
 
 /// `console: com1 irq 4 vector 36, i8042 0x<cfg> -> 0x<cfg> irq 1 vector
