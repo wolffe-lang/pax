@@ -677,7 +677,7 @@ static void deaths(void) {
     waitpid(c, &st, 0);
     say("; default, in a child: its status 0x%x\n", st);
     signal(SIGPIPE, SIG_DFL);
-    /* a stop: Linux stops the child; PAX has no stopped state and says so: not compared */
+    /* a stop: in an orphaned group (this program is pid 1, alone in its group) SIGTSTP is discarded, on Linux and since px48 on PAX; not compared */
     c = fork();
     if (c == 0) { kill(getpid(), SIGTSTP); _exit(3); }
     waitpid(c, &st, WUNTRACED);

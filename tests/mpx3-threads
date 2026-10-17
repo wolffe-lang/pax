@@ -36,10 +36,12 @@
 #      and a write then raises nothing.
 #   T3 what PAX lacks or refuses: -ENOSYS only for set_robust_list
 #      (273) and rseq (334), which glibc tolerates; refused by name in
-#      probes exactly the two things the program asks that Linux does
-#      and PAX does not (its `~futex` and `~stop` lines): FUTEX_REQUEUE
-#      (202, -38) and a stop (SIGTSTP's default action, dropped), and
-#      in soak nothing; `killed:` lines only for the processes the
+#      probes exactly the one thing the program asks that Linux does
+#      and PAX does not (its `~futex` line): FUTEX_REQUEUE (202, -38),
+#      and in soak nothing (px48: its `~stop` line's SIGTSTP is
+#      discarded on both, the child's group being orphaned: the probe is
+#      pid 1, alone in its group, on both sides; before px48 PAX dropped
+#      every stop by name); `killed:` lines only for the processes the
 #      program has killed (probes: by SIGTERM, SIGKILL, SIGUSR1,
 #      SIGPIPE, and page faults; soak: none).
 #   T4 everything given back: the frames line after init's end shows
@@ -232,7 +234,7 @@ for leg in $legs; do
             [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
             rf=$(grep ': refused: ' "$norm" | sed -E 's/^.*user: [^ ]+ pid [0-9]+ //' | LC_ALL=C sort -u | paste -sd'|' -)
             wr=
-            [ "$s" != probes ] || wr="signal 20 (SIGTSTP): refused: stopping a process (no job control), the signal is dropped|syscall 202: refused: a futex operation PAX does not have (wait and wake only), -38"
+            [ "$s" != probes ] || wr="syscall 202: refused: a futex operation PAX does not have (wait and wake only), -38"
             [ "$rf" = "$wr" ] || why+=" refusals '$rf', not '$wr';"
             kl=$(sed -n -E 's/.*user: [^ ]+ pid [0-9]+ killed: ([A-Za-z0-9 ]+).*/\1/p' "$norm" | sed -E 's/ vector.*//; s/ after [0-9]+ runs$//; s/ +$//' | LC_ALL=C sort | uniq -c | awk '{ n = $1; $1 = ""; sub(/^ /, ""); printf "%s%s x%d", sep, $0, n; sep = ", " }')
             if [ "$s" = probes ]; then
