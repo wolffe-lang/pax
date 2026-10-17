@@ -23,6 +23,16 @@
 #     modes set and listed, times set with `touch -t`, `-a`, `-m`, `-r`
 #     and read back with `stat`, hard and symbolic links made, followed,
 #     replaced and removed, `readlink`, `cp -P`.
+#   - px50 (pax#78): a third typed session (user/console/shell-inout.keys)
+#     of boreutils' `cat` with its input its output (bu25's shapes,
+#     boreutils' tests/inout/cases.toml, rewritten for pelt: `read` and
+#     `echo -n` move the offsets where those use `dd`): `f >> f`, `<`,
+#     `-`, `/dev/stdin`, a hard and a symbolic link, `>`, `1<>` behind,
+#     at and ahead of the input, the other operands copied; cat finds
+#     its output's identity through /proc/self/fd/1 and its append flag
+#     in /proc/self/fdinfo/1, so PAX refuses as Linux does; and again
+#     after `su pax` (shell-inout-user.keys, without the three shapes
+#     that name /dev/null: the container's is not the user's to open).
 #   - px47 (P5 U7): every one of them again AS A USER, beside root's.
 #     `tree` and `tree soak` as 1000:1000 through px39's `as` (pid 1
 #     is `/bin/as 1000 1000 /bin/tree`; the image holds `/t` as the
@@ -162,8 +172,8 @@ need readelf python3
 
 BORE="cat echo env false head ls readlink sleep stat tail true wc mkdir rmdir rm mv cp chmod touch ln" # px36: bu22's three
 USER_BORE="chown chgrp" # px47: the user's image also has bu24's two owner tools
-SESSIONS="probes soak speed shell-tree shell-tree-ps2 shell-changes shell-changes-ps2 probes-user soak-user shell-tree-user shell-changes-user"
-LINUX_SESSIONS="probes soak speed shell-tree shell-changes probes-user soak-user shell-tree-user shell-changes-user"
+SESSIONS="probes soak speed shell-tree shell-tree-ps2 shell-changes shell-changes-ps2 probes-user soak-user shell-tree-user shell-changes-user shell-inout shell-inout-user"
+LINUX_SESSIONS="probes soak speed shell-tree shell-changes probes-user soak-user shell-tree-user shell-changes-user shell-inout shell-inout-user"
 image_of() { case $1 in shell-*-user) echo shell-user ;; shell-*) echo shell ;; *) echo "$1" ;; esac; }
 init_of() { case $1 in shell-*) echo pelt ;; *-user) echo as ;; *) echo tree ;; esac; }
 args_of() { case $1 in soak|speed) echo "$1" ;; probes-user) echo "1000 1000 /bin/tree" ;; soak-user) echo "1000 1000 /bin/tree soak" ;; *) echo ;; esac; }
@@ -522,7 +532,7 @@ for leg in $legs; do
             fi
 
             # T6: the tree intact, on Linux.
-            if [ "$s" = shell-tree ] || [ "$s" = shell-changes ] || [ "$s" = shell-tree-user ] || [ "$s" = shell-changes-user ]; then
+            if [ "$s" = shell-tree ] || [ "$s" = shell-changes ] || [ "$s" = shell-tree-user ] || [ "$s" = shell-changes-user ] || [ "$s" = shell-inout ] || [ "$s" = shell-inout-user ]; then
                 want=$( (cd "$images/$p/root" 2>/dev/null && { find . -mindepth 1; echo ./.sh_history; [ "$p" != shell-user ] || echo ./home/pax/.sh_history; } | LC_ALL=C sort) ) # px46: pelt's history file (sh12); px47: and the user's
                 if [ -z "$want" ]; then
                     say "PASS T6 $id: (the shell's tree is not on this host; the build host compared it)"
