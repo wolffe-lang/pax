@@ -81,7 +81,12 @@
 #      on a host whose dev.tty.legacy_tiocsti is not 0, which lets a
 #      user put a byte in its own terminal, gaps-user's TIOCSTI rows are
 #      the host's and left out of the container's comparisons, named; J1
-#      holds them to real root's recording all the same).
+#      holds them to real root's recording all the same; px50: fds-user's
+#      zombie row is the host kernel's — a zombie's fd/ is its own ids on
+#      Linux 7.2.8, the recordings' and kasumi's, and root's, so -EACCES
+#      to the user, under the CI runner's kernel (run 39076252598) — and
+#      is left out of the container's comparisons; J8 holds it to real
+#      root's recording).
 #   J4 each run's own witness that it is what it says: the probe's
 #      first line names root or a user and its mixed-group rows run or
 #      are skipped by name; the shell's prompt is `# ` or `$ `; the
@@ -332,7 +337,9 @@ lx=$images/linux
 # where gaps-user is held to the container.
 STI=$(cat /proc/sys/dev/tty/legacy_tiocsti 2>/dev/null || echo 0)
 host_rows() { # name file -> the file, the host's rows left out
-    if [ "$1" = gaps-user ] && [ "$STI" != 0 ]; then command grep -v '^I: TIOCSTI' "$2"; else cat "$2"; fi
+    if [ "$1" = gaps-user ] && [ "$STI" != 0 ]; then command grep -v '^I: TIOCSTI' "$2"
+    elif [ "$1" = fds-user ]; then command grep -v "^P: its zombie child's fd/: " "$2" # px50: the host kernel's (below)
+    else cat "$2"; fi
 }
 # The recordings and the container agree before PAX is held to them.
 for n in $TYPED; do
@@ -346,6 +353,7 @@ for n in probe-user shell-user gaps-user fds-user; do
     norm_session "$lx/$n.tty" | host_rows "$n" /dev/stdin > "$lx/$n.cmp"
     host_rows "$n" "$images/rec-$n.cmp" > "$images/rec-$n.host.cmp"
     hn=; [ "$n" = gaps-user ] && [ "$STI" != 0 ] && hn=" (this host's dev.tty.legacy_tiocsti is $STI: its TIOCSTI rows left out)"
+    [ "$n" = fds-user ] && hn=" (its zombie row left out: the host kernel's)"
     if cmp -s "$lx/$n.cmp" "$images/rec-$n.host.cmp" && [ "$(cat "$lx/$n.tty.rc")" = "$(cat "$REC/$n.tty.rc")" ]; then
         say "PASS J0 linux $n: the container's session is real root's recording, $(wc -l < "$lx/$n.cmp" | tr -d ' ') lines ($(sha256_of "$lx/$n.cmp" | cut -c1-12)…)$hn"
     else
