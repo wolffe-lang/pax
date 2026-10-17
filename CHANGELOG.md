@@ -7,6 +7,22 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The small gaps (px49).** `pause` (pax#73); `rt_sigsuspend` and
+  `pause` keep waiting across a stop and when another thread takes the
+  signal (pax#75); TIOCSTI, TCFLSH and TCSBRK on the console (pax#74);
+  SIGTTOU for a background group's `sendfile` and `splice` to the
+  console under TOSTOP (pax#76); `fstat`'s owner of an AF_INET or TCP
+  socket and an accepted end (pax#58); `faccessat2`'s
+  AT_SYMLINK_NOFOLLOW and AT_EMPTY_PATH (pax#60); `fallocate`'s
+  KEEP_SIZE and PUNCH_HOLE, the other modes answered as tmpfs answers
+  (pax#63); a user's `unlink("/dev")` -EACCES (pax#70); and
+  `tests/mpx3-shell`'s procs-user a row of its own a broken `as` turns
+  red (pax#71). Each measured against real Linux under QEMU as root and
+  as a user (`user/elf/gaps.c`, `tests/mpx5-jobs`' gaps image). pelt's
+  pin moves to `1102498` (sh17) and boreutils' to `8f0bbb1` (bu25);
+  no compared session moved. bu25's `cat` cannot see an input that is
+  its output on PAX (no `/proc/self/fd` links): recorded.
+
 - **Job control (px48).** Process groups and sessions (`setpgid`,
   `getpgrp`, `setsid`, `getpgid`, `getsid`), the console as a
   controlling terminal and its ioctls (`TIOCSCTTY`, `TIOCNOTTY`,
