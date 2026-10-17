@@ -7,6 +7,23 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The descriptor table in /proc (px50).** `/proc/<pid>/fd`'s entries
+  are magic links: looked up, followed by `stat`, `open` and a walk to
+  what the descriptor is open on, read by `readlink` as Linux reads
+  them (a file's path, ` (deleted)`, `pipe:[N]`, `socket:[N]`,
+  `anon_inode:[…]`), listed with their access mode's bits;
+  `/proc/<pid>/fdinfo` and its entries (`pos`, `flags`, `mnt_id`,
+  `ino`, an eventfd's and an AF_UNIX socket's lines); `/proc/self/fd`
+  and `fdinfo`; `ptrace(2)`'s read mode for another process's;
+  `prctl(PR_SET_DUMPABLE)`; `stat` of `/dev/stdin` the descriptor's
+  (pax#78). boreutils' `cat` now refuses an input that is its output on
+  PAX as on Linux, as root and as `pax` (`tests/mpx3-tree`'s
+  shell-inout sessions). A user's `rmdir` and `rename` of `/proc` and
+  `/sys` -EACCES before -EBUSY (pax#80). `tests/mpx4-ready`'s nbprobe
+  settles past Linux's delayed acknowledgement before its `a write of 1
+  then` row (pax#79). Measured against real Linux under QEMU as root
+  and as a user (`user/elf/fdtab.c`, `tests/mpx5-jobs`' fds image).
+
 - **The small gaps (px49).** `pause` (pax#73); `rt_sigsuspend` and
   `pause` keep waiting across a stop and when another thread takes the
   signal (pax#75); TIOCSTI, TCFLSH and TCSBRK on the console (pax#74);
