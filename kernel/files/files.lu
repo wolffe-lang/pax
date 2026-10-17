@@ -44,7 +44,8 @@
 //! and `/dev/dsp` 0600 (measured). Nothing is a symbolic link
 //! but `/proc/self/exe` (px26: `readlink` answers the path the program
 //! was loaded from; there is no `/proc` beside it), and none can be
-//! made. `openat` creates, truncates and opens for writing; `write`,
+//! made (px36: the tree's own links; px50: `/proc/<pid>/fd`'s entries,
+//! below). `openat` creates, truncates and opens for writing; `write`,
 //! `pwrite64`, `ftruncate`, `mkdir`, `rmdir`, `unlink` and `rename`
 //! change the tree (px27, below); a hard link, a change of mode, owner
 //! or times are refused by name.
@@ -118,6 +119,25 @@
 //! each made when it is opened into a frame the open file holds (its
 //! words 5 and 6) and given back at its last close; two file systems of
 //! their own beside `/dev`, which the root does not list.
+//!
+//! **A process's descriptors in `/proc`** (px50, pax#78; `proc_pid_fd(5)`,
+//! `proc_pid_fdinfo(5)`, measured black-box on Linux 7.2.8 by
+//! `user/elf/fdtab.c`): an entry of `/proc/<pid>/fd` is a magic link. A
+//! walk follows it where it would follow a link (not as the last
+//! component of `lstat`, `readlink` or O_NOFOLLOW) to what the descriptor
+//! is open on — no text is read, so a file renamed or removed since is
+//! still reached, and `stat`, `statx` and a walk through a directory's
+//! entry answer the target — after `ptrace(2)`'s read mode
+//! (`may_trace`). `open` through it makes a new open file (offset 0) as
+//! /dev/std* does; a pipe's end opens as the end asked, by the pipe's
+//! owner and mode; a socket's -ENXIO; an eventfd's and an epoll
+//! object's -EACCES or -ENXIO. `readlink` reads `fd_text`: a file's path
+//! (the open file keeps the directory it was opened in, words 5 and 6,
+//! and the name that directory gives it now; a removed name reads
+//! `<path> (deleted)`), `pipe:[N]`, `socket:[N]`, `anon_inode:[eventfd]`.
+//! `fdinfo/N` is made at open (`fdinfo_of`). A lookup in another
+//! process's `fd/` or `fdinfo/` asks ptrace(2)'s read mode; a process
+//! enters its own whatever their owner.
 //!
 //! **Copies in the kernel** (px26, what bu20's `cat` asks; px27, what
 //! bu21's `cp` does): `sendfile` writes a file to the console,
@@ -209,6 +229,14 @@ const O_FLAGS: u64 = 4
 const O_TEXT: u64 = 5 // px34: a /proc or /sys file's text: its frame (physical)
 const O_TEXT_LEN: u64 = 6 // and its length
 const O_OWNER: u64 = 7 // px49 (pax#58): an AF_INET or TCP socket's maker's file-system ids (P_OWNER's shape)
+// px50: a file's or a directory's open file uses words 5 and 6 (a /proc
+// file's text's words) for what `/proc/<pid>/fd/N` reads: the directory
+// the file was opened in (its inode + 1, held while the open file lives),
+// and, once the name is gone, a frame holding the text the link reads
+// (`<path> (deleted)`: its length in the first word, the bytes after).
+const O_DIRI: u64 = 5
+const O_GONE: u64 = 6
+const O_LARGEFILE: u64 = 0x8000 // px50: what fdinfo's flags show for every file `open` made (x86-64, measured)
 const PIPES: u64 = 512 // px34: Unix connections take two each (64 since px24, 16 before)
 const PP_WORDS: u64 = 32
 const P_PAGES: u64 = 0 // frames held; 0 a free record
@@ -594,6 +622,8 @@ fn of_new(k: u64, n: u64, flags: u64) -> u64 {
     put_ofw(i, O_POS, 0)
     put_ofw(i, O_FLAGS, flags & !O_CLOEXEC)
     put_ofw(i, O_OWNER, 0)
+    put_ofw(i, O_DIRI, 0) // px50 (O_TEXT's word)
+    put_ofw(i, O_GONE, 0)
     pipe_ends(k, n, flags & O_ACCMODE, true)
     if ty(n) == T_INO {
         tree.hold(rf(n)) // px27: an open file keeps its inode, named or not
@@ -639,6 +669,19 @@ fn of_drop(o: u64) {
         frames.free(ofw(i, O_TEXT)) // px34: a /proc or /sys file's text
         put_ofw(i, O_TEXT, 0)
         put_ofw(i, O_TEXT_LEN, 0)
+    }
+    if k == K_FILE || k == K_DIR {
+        // px50: the directory it was opened in, and a gone name's text
+        let di = ofw(i, O_DIRI)
+        let g = ofw(i, O_GONE)
+        put_ofw(i, O_DIRI, 0)
+        put_ofw(i, O_GONE, 0)
+        if di != 0 {
+            tree.release(di - 1)
+        }
+        if g != 0 {
+            frames.free(g)
+        }
     }
     if k == K_DSP {
         sound.release() // px30: the last close of /dev/dsp
@@ -2881,16 +2924,45 @@ fn syn_child(d: u64, s: u64, n: u64) -> u64 {
         if comp_is(s, n, "stat") {
             return (T_SYN << T_SHIFT) | procfs.child_at(d, 5) // px48
         }
+        if comp_is(s, n, "fdinfo") {
+            return (T_SYN << T_SHIFT) | procfs.child_at(d, 6) // px50
+        }
         return err(ENOENT)
     }
     if d == 1 && comp_is(s, n, "stat") {
         return (T_SYN << T_SHIFT) | procfs.self_stat() // px48: /proc/self/stat
     }
-    if d != procfs.ROOT && procfs.entry(d) == procfs.PFD {
-        // px45: a descriptor's link is listed (`getdents`), not followed
-        // or read: a lookup of one finds nothing (named: Linux's link
-        // names what the descriptor is open on).
-        return err(ENOENT)
+    // px50: /proc/self/fd and /proc/self/fdinfo are the reader's own
+    // (`/proc/<pid>`'s, its process's number in the reference).
+    if d == 1 && comp_is(s, n, "fd") {
+        return (T_SYN << T_SHIFT) | procfs.fd_dir(sched.self_pid(), 0)
+    }
+    if d == 1 && comp_is(s, n, "fdinfo") {
+        return (T_SYN << T_SHIFT) | procfs.fd_dir(sched.self_pid(), 1)
+    }
+    if d != procfs.ROOT && (procfs.entry(d) == procfs.PFD || procfs.entry(d) == procfs.PFDINFO) {
+        // px50: an open descriptor's number as Linux writes it (no sign,
+        // no leading zero: `fd/01` is -ENOENT, measured) names its entry
+        // (px45 listed them and found none).
+        if n == 0 || n > 4 || (n > 1 && kb(s) == 48) {
+            return err(ENOENT)
+        }
+        var v: u64 = 0
+        var i: u64 = 0
+        while i < n {
+            let c = kb(s + i)
+            if c < 48 || c > 57 {
+                return err(ENOENT)
+            }
+            v = v * 10 + (c - 48)
+            i += 1
+        }
+        let ta = pid_area(procfs.pid_of(d))
+        if v >= FDS || ta == 0 || kind(ta, v) == K_CLOSED {
+            return err(ENOENT)
+        }
+        let r = if procfs.entry(d) == procfs.PFD { procfs.fd_entry(procfs.pid_of(d), v) } else { procfs.fi_entry(procfs.pid_of(d), v) }
+        return (T_SYN << T_SHIFT) | r
     }
     var e: u64 = 0
     while e < procfs.PIDDIR {
@@ -2918,6 +2990,98 @@ fn syn_child(d: u64, s: u64, n: u64) -> u64 {
         }
     }
     err(ENOENT)
+}
+
+/// px50: the area of process `pid`, or 0 when it is gone (reaped).
+fn pid_area(pid: u64) -> u64 {
+    let sl = sched.proc_slot(pid)
+    if sl == sched.SLOTS {
+        return 0
+    }
+    sched.proc_area_of_leader(sl)
+}
+
+/// px50: whether node `n` is an entry of a `/proc/<pid>/fd` (a magic
+/// link: what it names is a descriptor's open file, not a path).
+fn is_fd_entry(n: u64) -> bool {
+    if is_err(n) || ty(n) != T_SYN {
+        return false
+    }
+    let (isfd, _d) = procfs.fd_of(rf(n))
+    isfd
+}
+
+// px50: the descriptor the last walk's last component led through, when
+// it was an entry of `fd/` that was followed (openat reopens what it
+// names: a pipe's end, the directory a file was opened in). One CPU,
+// IF clear for the whole call: read by the call that walked.
+var fdl_area: u64 = 0
+var fdl_fd: u64 = 0
+var fdl_last: bool = false
+
+/// px50: the walk's note of the fd/ entry it followed (`last`: as the
+/// path's last component).
+fn fdl_note(ta: u64, fd: u64, last: bool) {
+    // # Safety: one CPU, IF clear for the whole system call; the walk
+    // and the open that reads the note are one call.
+    unsafe {
+        fdl_area = ta
+        fdl_fd = fd
+        fdl_last = last
+    }
+}
+
+/// px50: the note (`fdl_note`): whether the last walk ended through an
+/// fd/ entry, and its process's area and descriptor.
+fn fdl_read() -> (bool, u64, u64) {
+    // # Safety: as `fdl_note`.
+    unsafe { (fdl_last, fdl_area, fdl_fd) }
+}
+
+/// px50: `ptrace(2)`'s read access mode with the file-system ids
+/// (PTRACE_MODE_READ_FSCREDS, `proc_pid_fd(5)`; measured, px45's `sig`
+/// and `rights` R and px50's `fdtab` P): may the process (area `a`) read
+/// process `ta`'s descriptors, `environ`? Itself, a privileged one, or
+/// one whose file-system user and group ids are each of the target's
+/// real, effective and saved ones while the target is dumpable.
+fn may_trace(a: u64, ta: u64) -> bool {
+    if ta == a || cred.privileged(a) {
+        return true
+    }
+    if cred.dumpable(ta) != 1 {
+        return false
+    }
+    let u = cred.uid(a, cred.FS)
+    let g = cred.gid(a, cred.FS)
+    u == cred.uid(ta, cred.REAL) && u == cred.uid(ta, cred.EFFECTIVE) && u == cred.uid(ta, cred.SAVED) && g == cred.gid(ta, cred.REAL) && g == cred.gid(ta, cred.EFFECTIVE) && g == cred.gid(ta, cred.SAVED)
+}
+
+/// px50: what the `fd/` entry node `c` names, followed: (the node its
+/// descriptor is open on, 0), or (0, an errno): -ENOENT when the process
+/// or the descriptor is gone, -EACCES when `ptrace(2)`'s read mode says
+/// no. Remembers the descriptor (`fdl_area`, `fdl_fd`).
+fn fd_follow(a: u64, c: u64) -> (u64, u64) {
+    let ta = pid_area(procfs.pid_of(rf(c)))
+    let (_isfd, fd) = procfs.fd_of(rf(c))
+    if ta == 0 || kind(ta, fd) == K_CLOSED {
+        return (0, ENOENT)
+    }
+    if !may_trace(a, ta) {
+        return (0, EACCES)
+    }
+    fdl_note(ta, fd, false)
+    (node_of(ta, fd), 0)
+}
+
+/// px50: whether node `d` is the caller's own `/proc/<pid>/fd` or
+/// `fdinfo` (Linux lets a process into its own even when it is not
+/// dumpable and `fd/` is root's 0500: measured).
+fn own_fd_dir(a: u64, d: u64) -> bool {
+    if ty(d) != T_SYN {
+        return false
+    }
+    let e = procfs.entry(rf(d))
+    (e == procfs.PFD || e == procfs.PFDINFO) && pid_area(procfs.pid_of(rf(d))) == a
 }
 
 /// What the name [s, s + n) of pax_kbuf leads to in directory node `d`:
@@ -3079,6 +3243,7 @@ fn walk_k(a: u64, dirfd: u64, rl0: u64, empty_ok: bool, follow: u64) -> (u64, u6
 /// px43: `walk_k`, asking with the ids `who` (cred.FS; cred.REAL for the
 /// access family).
 fn walk_as(a: u64, who: u64, dirfd: u64, rl0: u64, empty_ok: bool, follow: u64) -> (u64, u64, u64, u64, bool) {
+    fdl_note(0, 0, false) // px50
     var rl = rl0
     if rl == 0 {
         if !empty_ok {
@@ -3128,8 +3293,17 @@ fn walk_as(a: u64, who: u64, dirfd: u64, rl0: u64, empty_ok: bool, follow: u64) 
             return (err(ENOTDIR), err(ENOTDIR), 0, 0, false)
         }
         // px43: the directory the component is looked up in is searched.
-        if !may(a, who, cur, MAY_X) {
+        // px50: a process's own fd/ and fdinfo/ whatever their owner; a
+        // name looked up in another's asks ptrace(2)'s read mode (measured:
+        // a 0555 fdinfo/ of a process not dumpable is -EACCES to a user).
+        if !may(a, who, cur, MAY_X) && !own_fd_dir(a, cur) {
             return (err(EACCES), err(EACCES), 0, 0, false)
+        }
+        if ty(cur) == T_SYN && (procfs.entry(rf(cur)) == procfs.PFD || procfs.entry(rf(cur)) == procfs.PFDINFO) {
+            let ta = pid_area(procfs.pid_of(rf(cur)))
+            if ta != 0 && !may_trace(a, ta) {
+                return (err(EACCES), err(EACCES), 0, 0, false)
+            }
         }
         if n > tree.NAME_MAX {
             return (err(ENAMETOOLONG), err(ENAMETOOLONG), 0, 0, false)
@@ -3143,6 +3317,32 @@ fn walk_as(a: u64, who: u64, dirfd: u64, rl0: u64, empty_ok: bool, follow: u64) 
             c = up(cur)
         } else {
             c = child_named(cur, s, n)
+        }
+        // px50: an entry of fd/ is followed where a link would be, to
+        // what its descriptor is open on (`proc_pid_fd(5)`: no text is
+        // read, no path is walked: a file removed or moved since is
+        // still reached), after ptrace(2)'s read mode; it counts as a
+        // link against MAXLINKS.
+        if is_fd_entry(c) && (!last || follow == F_YES || (i < rl && follow == F_NO)) {
+            let (tc, fe) = fd_follow(a, c)
+            if fe != 0 {
+                return (err(fe), err(fe), 0, 0, false)
+            }
+            links += 1
+            if links > MAXLINKS {
+                return (err(ELOOP), err(ELOOP), 0, 0, false)
+            }
+            if last {
+                let trail = i < rl
+                if trail && !is_dir_node(tc) {
+                    return (err(ENOTDIR), err(ENOTDIR), 0, 0, false)
+                }
+                let (_l, fa, ff) = fdl_read()
+                fdl_note(fa, ff, true)
+                return (tc, cur, s, n, trail)
+            }
+            cur = tc
+            continue
         }
         // px36: a symbolic link: followed unless it is the last
         // component, unfollowed and with no `/` after it.
@@ -3442,6 +3642,34 @@ fn of_room() -> bool {
     i < OFILES
 }
 
+/// px50: the new open file `o` (index + 1) of a file records the
+/// directory it was opened in, held: the reopened open file's (`src`,
+/// index + 1, when /dev/std* or an fd/ entry reopened it; its gone
+/// name's text copied too), else `dir` (an inode + 1; 0 none).
+fn opened_in(o: u64, src: u64, dir: u64) {
+    var di = dir
+    if src != 0 && (ofw(src - 1, O_KIND) == K_FILE || ofw(src - 1, O_KIND) == K_DIR) {
+        di = ofw(src - 1, O_DIRI)
+        let g = ofw(src - 1, O_GONE)
+        if g != 0 {
+            let c = frames.alloc() else 0
+            if c != 0 {
+                var w: u64 = 0
+                while w < PAGE / 8 {
+                    // # Safety: two frames through the HHDM, w < 512 words.
+                    unsafe { ((c + frames.hhdm() + w * 8) as *u64).write_volatile(((g + frames.hhdm() + w * 8) as *u64).read_volatile()) }
+                    w += 1
+                }
+                put_ofw(o - 1, O_GONE, c)
+            }
+        }
+    }
+    if di != 0 {
+        tree.hold(di - 1)
+        put_ofw(o - 1, O_DIRI, di)
+    }
+}
+
 /// `openat(dirfd, path, flags, mode)`: the descriptor or -errno. px27:
 /// O_CREAT makes the file when its name is missing (its permission bits
 /// `mode & ~umask`; -EISDIR for a name with a trailing `/`; -ENOENT in
@@ -3474,9 +3702,12 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
     // -ELOOP) and O_CREAT|O_EXCL (then -EEXIST, dangling or not).
     let excl = flags & O_CREAT != 0 && flags & O_EXCL != 0
     let (n0, par, ns, nl, trail) = walk(a, pml4, dirfd, va, false, fol(flags & O_NOFOLLOW == 0 && !excl))
+    // px50: the last component was an entry of fd/, followed: what it
+    // names is reopened (a new open file, as Linux's does).
+    let (via, src_area, src_fd) = fdl_read()
     var n = n0
-    if !is_err(n) && ty(n) == T_INO && tree.is_link(rf(n)) && !excl {
-        return neg(if flags & O_DIRECTORY != 0 { ENOTDIR } else { ELOOP }) // measured: O_DIRECTORY answers first
+    if !is_err(n) && ((ty(n) == T_INO && tree.is_link(rf(n))) || is_fd_entry(n)) && !excl {
+        return neg(if flags & O_DIRECTORY != 0 { ENOTDIR } else { ELOOP }) // measured: O_DIRECTORY answers first; px50: an fd/ entry not followed too
     }
     var made = false
     if is_err(n) {
@@ -3530,12 +3761,34 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
     // px43: a name of the tree, not /dev/std*'s descriptor; px45: /dev's
     // devices too, by their modes and owners (`checked`).
     let named = checked(n)
+    var srcof: u64 = 0 // px50: the open file a reopen came from
+    var sk = K_CLOSED
+    if via {
+        // px50 (measured): a socket's entry -ENXIO; an eventfd's and an
+        // epoll object's -EACCES to whoever their 0600 (root's) mode
+        // refuses, else -ENXIO; a pipe's end by its owner and 0600 mode
+        // (`proc_pid_fd(5)`'s example), opened as the end asked.
+        sk = kind(src_area, src_fd)
+        srcof = of_of(src_area, src_fd)
+        if sk == K_SOCK || sk == K_INET || sk == K_TCP || sk == K_UNIX {
+            return neg(ENXIO)
+        }
+        if sk == K_EVENT || sk == K_EPOLL || sk == K_PIPE {
+            if !may(a, cred.FS, n, want) {
+                return neg(EACCES)
+            }
+            if sk != K_PIPE {
+                return neg(ENXIO)
+            }
+        }
+    }
     if ty(n) == T_STD {
         let src = rf(n)
         if kind(a, src) == K_CLOSED {
             return neg(ENOENT)
         }
         k = kind(a, src)
+        srcof = of_of(a, src) // px50
         n = node_of(a, src)
         if k == K_SOCK || k == K_INET || k == K_TCP || k == K_UNIX {
             return neg(ENXIO) // px17: a socket is not reopened through a path
@@ -3573,6 +3826,8 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
         return neg(ENXIO) // px34: a socket's name is not opened (measured)
     } else if ty(n) == T_SYN {
         k = K_SYN // px34: a file of /proc or /sys
+    } else if sk == K_PIPE {
+        k = K_PIPE // px50: a pipe's end, through its fd/ entry
     }
     if flags & O_DIRECTORY != 0 && k != K_DIR {
         return neg(ENOTDIR)
@@ -3605,6 +3860,9 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
     let fd = open_new(a, 0, k, n, flags)
     if fd < 0x8000000000000000 && k == K_CONSOLE && !(ty(n) == T_CONSOLE && rf(n) == TTY) && flags & O_NOCTTY == 0 {
         sched.open_tty() // px48: a session leader with no terminal that opens the console takes it, when no session holds it
+    }
+    if fd < 0x8000000000000000 && k == K_FILE && ty(n) == T_INO {
+        opened_in(of_of(a, fd), srcof, if !is_err(par) && ty(par) == T_INO { rf(par) + 1 } else { 0 })
     }
     if fd < 0x8000000000000000 && k == K_FILE && !made && flags & O_TRUNC != 0 && ty(n) == T_INO {
         if tree.bytes(rf(n)) != 0 {
@@ -3651,8 +3909,8 @@ fn may_read_of(a: u64, n: u64, want: u64) -> bool {
     if ty(n) != T_SYN {
         return true
     }
-    if !may(a, cred.FS, n, want) {
-        return false
+    if !may(a, cred.FS, n, want) && !(want == MAY_R && own_fd_dir(a, n)) {
+        return false // px50: a process opens its own fd/ even when it is root's (not dumpable: measured)
     }
     if !procfs.guarded(rf(n)) {
         return true
@@ -3661,15 +3919,7 @@ fn may_read_of(a: u64, n: u64, want: u64) -> bool {
     if ta == 0 {
         return false
     }
-    if ta == a || cred.privileged(a) {
-        return true
-    }
-    if cred.dumpable(ta) != 1 {
-        return false
-    }
-    let u = cred.uid(a, cred.FS)
-    let g = cred.gid(a, cred.FS)
-    u == cred.uid(ta, cred.REAL) && u == cred.uid(ta, cred.EFFECTIVE) && u == cred.uid(ta, cred.SAVED) && g == cred.gid(ta, cred.REAL) && g == cred.gid(ta, cred.EFFECTIVE) && g == cred.gid(ta, cred.SAVED)
+    may_trace(a, ta) // px50: the rule px45 wrote here, now shared with fd/'s links
 }
 
 /// px34: open a file of /proc or /sys: its text made now (kernel/procfs)
@@ -3690,9 +3940,29 @@ fn syn_open(a: u64, n: u64, flags: u64) -> u64 {
             ta = sched.proc_area_of_leader(sl)
         }
     }
-    let (pa, len) = procfs.make(rf(n), ta, mask_of(ta), FDS, open_files(), OFILES)
-    if pa == 0 {
-        return neg(if len == 1 { ENOENT } else { ENOMEM })
+    var pa: u64 = 0
+    var len: u64 = 0
+    let (isfi, dn) = procfs.fi_of(rf(n))
+    if isfi {
+        // px50: fdinfo/N, made here from the descriptor (kernel/procfs
+        // writes the lines)
+        let fa = pid_area(tp)
+        if fa == 0 || kind(fa, dn) == K_CLOSED {
+            return neg(ENOENT)
+        }
+        let (p2, l2) = fdinfo_of(fa, dn)
+        if p2 == 0 {
+            return neg(ENOMEM)
+        }
+        pa = p2
+        len = l2
+    } else {
+        let (p1, l1) = procfs.make(rf(n), ta, mask_of(ta), FDS, open_files(), OFILES)
+        if p1 == 0 {
+            return neg(if l1 == 1 { ENOENT } else { ENOMEM })
+        }
+        pa = p1
+        len = l1
     }
     let fd = open_new(a, 0, K_SYN, n, flags)
     if fd >= 0x8000000000000000 {
@@ -3703,6 +3973,54 @@ fn syn_open(a: u64, n: u64, flags: u64) -> u64 {
     put_ofw(o - 1, O_TEXT, pa)
     put_ofw(o - 1, O_TEXT_LEN, len)
     fd
+}
+
+/// px50: `fdinfo/<fd>` of process `ta` (`proc_pid_fdinfo(5)`, measured):
+/// the offset; the access mode and the status flags as `open` kept them
+/// (O_APPEND, O_NONBLOCK, O_DIRECTORY, O_NOFOLLOW; O_CREAT, O_EXCL,
+/// O_TRUNC and O_NOCTTY are not kept), O_CLOEXEC while the descriptor
+/// has it, O_LARGEFILE for what `open` made (not a pipe, a socket, an
+/// eventfd or an epoll object); a mount number per file system
+/// (`mnt_of`); the `st_ino` `fstat` answers; an eventfd's counter, an
+/// AF_UNIX socket's `scm_fds: 0`. (the frame, its length).
+fn fdinfo_of(ta: u64, fd: u64) -> (u64, u64) {
+    let k = kind(ta, fd)
+    let nd = node_of(ta, fd)
+    var f = access(ta, fd) | (status(ta, fd) & (O_APPEND | O_NONBLOCK | O_DIRECTORY | O_NOFOLLOW))
+    if flags_of(ta, fd) & O_CLOEXEC != 0 {
+        f = f | O_CLOEXEC
+    }
+    if k == K_FILE || k == K_DIR || k == K_CONSOLE || k == K_NULL || k == K_SYN || k == K_DSP {
+        f = f | O_LARGEFILE
+    }
+    let extra: u64 = if k == K_EVENT { 1 } else if k == K_SOCK || k == K_UNIX { 2 } else { 0 }
+    let cnt = if k == K_EVENT { event.ev_value(rf(nd)) } else { 0 }
+    procfs.fdinfo(pos(ta, fd), f, mnt_of(nd), n_ino(nd), extra, cnt, rf(nd))
+}
+
+/// px50: the number fdinfo's `mnt_id` gives node `n`'s file system: one
+/// for the tree, one each for /proc, /sys and /dev, and the kernel's own
+/// for pipes, sockets and anonymous inodes (Linux's numbers are its
+/// mounts' and differ from machine to machine; `fdtab` asks only which
+/// are the same).
+fn mnt_of(n: u64) -> u64 {
+    let t = ty(n)
+    if t == T_INO {
+        return 21
+    }
+    if t == T_SYN {
+        return 22 + procfs.fs(rf(n))
+    }
+    if t == T_DEV || t == T_NULL || t == T_CONSOLE || t == T_DSP || t == T_STD {
+        return 24
+    }
+    if t == T_PIPE {
+        return 13
+    }
+    if t == T_EVENT || t == T_EPOLL {
+        return 15
+    }
+    14
 }
 
 /// px34: a read of a /proc or /sys file: its text from the offset on.
@@ -4323,6 +4641,30 @@ pub fn readlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, buf: u64, size: u64) -
     if is_err(n) {
         return neg(rf(n))
     }
+    if is_fd_entry(n) {
+        // px50: an entry of fd/ reads as what its descriptor is open on
+        // (`proc_pid_fd(5)`), after ptrace(2)'s read mode.
+        let tp = procfs.pid_of(rf(n))
+        let ta = pid_area(tp)
+        let (_x, fd) = procfs.fd_of(rf(n))
+        if ta == 0 || kind(ta, fd) == K_CLOSED {
+            return neg(ENOENT)
+        }
+        if !may_trace(a, ta) {
+            return neg(EACCES)
+        }
+        let cap = KBUF_END - NORM
+        let l = fd_text(ta, fd, tp, raw() + NORM, cap)
+        let lk = if l < cap { l } else { cap }
+        let k = if lk < size { lk } else { size }
+        if !uaccess.writable(pml4, buf, k) {
+            return neg(EFAULT)
+        }
+        if !uaccess.copy_out(pml4, buf, raw() + NORM, k) {
+            return neg(EFAULT)
+        }
+        return k
+    }
     if ty(n) != T_INO || !tree.is_link(rf(n)) {
         return neg(EINVAL)
     }
@@ -4337,6 +4679,232 @@ pub fn readlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, buf: u64, size: u64) -
     }
     tree.touch_read(i)
     k
+}
+
+// --- what a descriptor's link reads (px50) ---------------------------------------
+
+/// px50: byte `b` at kernel address `base + at` when `at < cap`; at + 1.
+fn tput(base: u64, at: u64, cap: u64, b: u64) -> u64 {
+    if at < cap {
+        // # Safety: `base` is pax_kbuf's second half or a frame through
+        // the HHDM, `cap` bytes long; at < cap.
+        unsafe { ((base + at) as *u8).write_volatile((b & 0xff) as u8) }
+    }
+    at + 1
+}
+
+fn tstr(base: u64, at: u64, cap: u64, t: str) -> u64 {
+    var k = at
+    for b in t.bytes() {
+        k = tput(base, k, cap, b as int as u64)
+    }
+    k
+}
+
+fn tdec(base: u64, at: u64, cap: u64, v: u64) -> u64 {
+    var d: u64 = 1
+    while v / d >= 10 {
+        d *= 10
+    }
+    var k = at
+    while d > 0 {
+        k = tput(base, k, cap, 48 + (v / d) % 10)
+        d /= 10
+    }
+    k
+}
+
+/// px50: directory inode `d`'s absolute path at `base + at`: the end.
+/// Found by walking up, as `getcwd` does (each directory knows its
+/// parent, and the parent the name it gives it).
+fn tpath(base: u64, at: u64, cap: u64, d: u64) -> u64 {
+    if d == tree.ROOT {
+        return tput(base, at, cap, 47)
+    }
+    var len: u64 = 0
+    var x = d
+    var up: u64 = 0
+    while x != tree.ROOT && up < 2048 {
+        let p = tree.parent(x)
+        let (_na, nl) = tree.name_of(p, x)
+        len += 1 + nl
+        x = p
+        up += 1
+    }
+    let end = at + len
+    var k = end
+    x = d
+    up = 0
+    while x != tree.ROOT && k > at && up < 2048 {
+        let p = tree.parent(x)
+        let (na, nl) = tree.name_of(p, x)
+        k -= nl
+        var j: u64 = 0
+        while j < nl {
+            // # Safety: a byte of a directory record's name (kernel/tree's `name_of`).
+            let _w = tput(base, k + j, cap, unsafe { ((na + j) as *u8).read_volatile() as u64 })
+            j += 1
+        }
+        k -= 1
+        let _s = tput(base, k, cap, 47)
+        x = p
+        up += 1
+    }
+    end
+}
+
+/// px50: the path of /proc or /sys reference `r` at `base + at`, with
+/// `/proc/self` written as the process `pid`'s number (Linux's
+/// `/proc/self` is a link to it, so what was opened through it reads as
+/// `/proc/<pid>/…`: measured).
+fn syn_text(r: u64, pid: u64, base: u64, at: u64, cap: u64) -> u64 {
+    let p = procfs.parent(r)
+    var k = at
+    if p != procfs.ROOT {
+        k = syn_text(p, pid, base, k, cap)
+    }
+    k = tput(base, k, cap, 47)
+    if procfs.entry(r) == 1 && procfs.pid_of(r) == 0 {
+        return tdec(base, k, cap, pid)
+    }
+    let nl = procfs.name_len(r)
+    var j: u64 = 0
+    while j < nl {
+        k = tput(base, k, cap, procfs.name_byte(r, j))
+        j += 1
+    }
+    k
+}
+
+/// px50: what `/proc/<pid>/fd/<fd>` reads (`proc_pid_fd(5)`, measured on
+/// Linux 7.2.8), process `ta`'s descriptor `fd` (of process `pid`), at
+/// `base`: its length. A file: the directory it was opened in and the
+/// name that directory gives it now (a rename is followed; a removed
+/// name reads `<path> (deleted)`, kept when it went: `mark_gone`); a
+/// directory: its path; /dev's nodes their names (the console as a
+/// process starts with it is `/dev/ttyS0`, the serial port it is: its
+/// numbers, 4:64); a pipe's end `pipe:[<st_ino>]`, every socket
+/// `socket:[<st_ino>]`, an eventfd `anon_inode:[eventfd]`, an epoll
+/// object `anon_inode:[eventpoll]`; a /proc or /sys file its path.
+fn fd_text(ta: u64, fd: u64, pid: u64, base: u64, cap: u64) -> u64 {
+    let nd = node_of(ta, fd)
+    let t = ty(nd)
+    let o = of_of(ta, fd)
+    if t == T_INO {
+        let i = rf(nd)
+        let fk = if o != 0 { ofw(o - 1, O_KIND) } else { K_CLOSED }
+        let g = if fk == K_FILE || fk == K_DIR { ofw(o - 1, O_GONE) } else { 0 }
+        if g != 0 {
+            // # Safety: the frame `mark_gone` filled: its length, then its bytes.
+            let l = unsafe { ((g + frames.hhdm()) as *u64).read_volatile() }
+            var j: u64 = 0
+            while j < l {
+                let _w = tput(base, j, cap, unsafe { ((g + frames.hhdm() + 8 + j) as *u8).read_volatile() as u64 })
+                j += 1
+            }
+            return l
+        }
+        if tree.is_dir(i) {
+            return tpath(base, 0, cap, i)
+        }
+        let di = if fk == K_FILE { ofw(o - 1, O_DIRI) } else { 0 }
+        if di == 0 {
+            return tput(base, 0, cap, 47) // named: a file whose directory was not kept (none is opened so)
+        }
+        var k: u64 = 0
+        if di - 1 != tree.ROOT {
+            k = tpath(base, 0, cap, di - 1)
+        }
+        k = tput(base, k, cap, 47)
+        let (na, nl) = tree.name_of(di - 1, i)
+        var j: u64 = 0
+        while j < nl {
+            // # Safety: a byte of a directory record's name.
+            k = tput(base, k, cap, unsafe { ((na + j) as *u8).read_volatile() as u64 })
+            j += 1
+        }
+        return k
+    }
+    if t == T_DEV {
+        return tstr(base, 0, cap, "/dev")
+    }
+    if t == T_CONSOLE {
+        let r = rf(nd)
+        let nm = if r == TTY0 { "/dev/tty0" } else if r == CONSOLE { "/dev/console" } else if r == TTY { "/dev/tty" } else { "/dev/ttyS0" }
+        return tstr(base, 0, cap, nm)
+    }
+    if t == T_NULL || t == T_DSP {
+        let k = tstr(base, 0, cap, "/dev/")
+        return tstr(base, k, cap, fixed_name(nd))
+    }
+    if t == T_PIPE || t == T_SOCK || t == T_INET || t == T_TCP || t == T_UNIX {
+        var k = tstr(base, 0, cap, if t == T_PIPE { "pipe:[" } else { "socket:[" })
+        k = tdec(base, k, cap, n_ino(nd))
+        return tput(base, k, cap, 93)
+    }
+    if t == T_EVENT {
+        return tstr(base, 0, cap, "anon_inode:[eventfd]")
+    }
+    if t == T_EPOLL {
+        return tstr(base, 0, cap, "anon_inode:[eventpoll]")
+    }
+    if t == T_SYN {
+        return syn_text(rf(nd), pid, base, 0, cap)
+    }
+    tstr(base, 0, cap, "/")
+}
+
+/// px50: once the last name of inode `child` (the name [na, na + nl) of
+/// pax_kbuf in directory `par`) is gone, every open file of it keeps
+/// what its link reads, `<path> (deleted)` (measured), in a frame of its
+/// own (given back at its last close).
+fn mark_gone(par: u64, child: u64, na: u64, nl: u64) {
+    if tree.nlink(child) != 0 {
+        return
+    }
+    var i: u64 = 0
+    while i < OFILES {
+        let k = ofw(i, O_KIND)
+        if ofw(i, O_REFS) != 0 && (k == K_FILE || k == K_DIR) && ofw(i, O_NODE) == ino_node(child) && ofw(i, O_GONE) == 0 {
+            let f = frames.alloc() else 0
+            if f != 0 {
+                let base = f + frames.hhdm() + 8
+                let cap = PAGE - 8
+                var t: u64 = 0
+                if par != tree.ROOT {
+                    t = tpath(base, 0, cap, par)
+                }
+                t = tput(base, t, cap, 47)
+                var j: u64 = 0
+                while j < nl {
+                    t = tput(base, t, cap, kb(na + j))
+                    j += 1
+                }
+                t = tstr(base, t, cap, " (deleted)")
+                // # Safety: the frame's first word, through the HHDM.
+                unsafe { ((f + frames.hhdm()) as *u64).write_volatile(if t < cap { t } else { cap }) }
+                put_ofw(i, O_GONE, f)
+            }
+        }
+        i += 1
+    }
+}
+
+/// px50: a file renamed from directory `od` to `nd`: its open files that
+/// were opened in `od` are now in `nd` (what their links read follows).
+fn moved(file: u64, od: u64, nd: u64) {
+    if od == nd {
+        return
+    }
+    var i: u64 = 0
+    while i < OFILES {
+        if ofw(i, O_REFS) != 0 && ofw(i, O_KIND) == K_FILE && ofw(i, O_NODE) == ino_node(file) && ofw(i, O_DIRI) == od + 1 {
+            tree.hold(nd)
+            put_ofw(i, O_DIRI, nd + 1)
+            tree.release(od)
+        }
+        i += 1
+    }
 }
 
 // --- making, removing and renaming (px27) ----------------------------------------
@@ -4409,14 +4977,18 @@ pub fn unlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64) -> u64 {
             }
             return neg(EBUSY)
         }
-        if ty(n) == T_DEV {
+        if mount_root(n) {
             // px47: /dev is a name in `/`: a user who may not write `/`
             // is told so before /dev is busy (measured: -EACCES for a
             // user, -EBUSY for root, `tests/mpx3-tree`'s probes-user).
+            // px50 (pax#80): /proc and /sys the same (measured, `fdtab` X).
             if !may(a, cred.FS, par, MAY_W | MAY_X) {
                 return neg(EACCES)
             }
             return neg(EBUSY)
+        }
+        if ty(par) == T_SYN {
+            return neg(EPERM) // px50: nothing is removed in /proc or /sys (measured: rmdir of /proc/self/fd -EPERM to anyone)
         }
         // px44: write and search of the directory, then the sticky
         // rule, before what the name is (a file, a full directory).
@@ -4427,7 +4999,11 @@ pub fn unlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64) -> u64 {
         if !is_dir_node(n) {
             return neg(ENOTDIR)
         }
-        return tree.rmdir(rf(par), raw() + ns, nl)
+        let rr = tree.rmdir(rf(par), raw() + ns, nl)
+        if rr == 0 {
+            mark_gone(rf(par), rf(n), ns, nl) // px50
+        }
+        return rr
     }
     let e = unname(a, par, n) // px44
     if e != 0 {
@@ -4449,7 +5025,18 @@ pub fn unlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64) -> u64 {
         refuse(a, R_DEVRO)
         return neg(EROFS)
     }
-    tree.unlink(rf(par), raw() + ns, nl)
+    let r = tree.unlink(rf(par), raw() + ns, nl)
+    if r == 0 {
+        mark_gone(rf(par), rf(n), ns, nl) // px50
+    }
+    r
+}
+
+/// px50: whether node `n` is a file system's root that is a name in `/`
+/// (`/dev`, `/proc`, `/sys`): removed or renamed, -EBUSY after `/`'s
+/// write and search (px47's rule for /dev; pax#80 for the other two).
+fn mount_root(n: u64) -> bool {
+    !is_err(n) && (ty(n) == T_DEV || (ty(n) == T_SYN && procfs.parent(rf(n)) == procfs.ROOT))
 }
 
 /// `renameat2(olddirfd, old, newdirfd, new, flags)` (and `rename`,
@@ -4480,7 +5067,7 @@ pub fn renameat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, fla
     // directories' write and search (measured: a user -EACCES, root
     // -EBUSY, `tests/mpx3-tree`'s probes-user); a name in /dev and one
     // out of it stay -EXDEV, which Linux answers first.
-    let busy_o = ty(on) == T_DEV
+    let busy_o = mount_root(on) // px50: /proc and /sys too (pax#80)
     // The old name is kept in pax_kbuf's second half while the new
     // path is walked in its first.
     var k: u64 = 0
@@ -4495,7 +5082,10 @@ pub fn renameat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, fla
     if nl == 0 {
         return neg(EBUSY)
     }
-    let busy_n = !is_err(nn) && ty(nn) == T_DEV
+    let busy_n = mount_root(nn)
+    if busy_o && busy_n && nn == on {
+        return 0 // px50: /proc renamed to itself, 0 to anyone (measured)
+    }
     if (ty(on) != T_INO && !busy_o) || ty(op) != T_INO || ty(np) != T_INO {
         return neg(EXDEV)
     }
@@ -4525,7 +5115,19 @@ pub fn renameat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, fla
     if op != np && is_dir_node(on) && !may(a, cred.FS, on, MAY_W) {
         return neg(EACCES)
     }
-    tree.rename(rf(op), raw() + NORM, ol, rf(np), raw() + ns, nl)
+    let rep_i = if !is_err(nn) && ty(nn) == T_INO { rf(nn) } else { tree.NONE }
+    let r = tree.rename(rf(op), raw() + NORM, ol, rf(np), raw() + ns, nl)
+    if r == 0 {
+        // px50: a replaced file's open files read `(deleted)`; the moved
+        // file's open files are in its new directory.
+        if rep_i != tree.NONE {
+            mark_gone(rf(np), rep_i, ns, nl)
+        }
+        if !tree.is_dir(rf(on)) {
+            moved(rf(on), rf(op), rf(np))
+        }
+    }
+    r
 }
 
 /// px27: `faccessat(dirfd, path, mode)` (and `access`; `faccessat2`
@@ -4929,6 +5531,15 @@ fn n_mode(n: u64) -> u64 {
         return MODE_SOCK
     }
     if t == T_SYN {
+        let (isfd, fd) = procfs.fd_of(rf(n))
+        if isfd {
+            // px50: a descriptor's link has the read and the write bit of
+            // its access mode, and the search bit (measured: 0500 for
+            // O_RDONLY, 0300 O_WRONLY, 0700 O_RDWR; px45 said 0700).
+            let ta = pid_area(procfs.pid_of(rf(n)))
+            let acc = if ta == 0 { O_RDWR } else { access(ta, fd) }
+            return 0xa000 | 0x40 | (if acc != O_WRONLY { 0x100 } else { 0 }) | (if acc != O_RDONLY { 0x80 } else { 0 })
+        }
         return procfs.mode(rf(n)) // px34
     }
     if t == T_EVENT || t == T_EPOLL {
@@ -4942,6 +5553,23 @@ fn n_size(n: u64) -> u64 {
         return tree.size(rf(n))
     }
     if ty(n) == T_SYN {
+        // px50 (measured): a descriptor's link is 64 bytes, and fd/ is
+        // as large as the process has descriptors open.
+        if is_fd_entry(n) {
+            return 64
+        }
+        if procfs.entry(rf(n)) == procfs.PFD {
+            let ta = pid_area(procfs.pid_of(rf(n)))
+            var c: u64 = 0
+            var f: u64 = 0
+            while ta != 0 && f < FDS {
+                if kind(ta, f) != K_CLOSED {
+                    c += 1
+                }
+                f += 1
+            }
+            return c
+        }
         return procfs.size(rf(n)) // px34
     }
     0
@@ -5364,13 +5992,15 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
             } else {
                 nl = fixed_len(c)
             }
-        } else if p >= 2 && ty(d) == T_SYN && procfs.entry(rf(d)) == procfs.PFD {
-            // px45: /proc/<pid>/fd lists the process's open descriptors
+        } else if p >= 2 && ty(d) == T_SYN && (procfs.entry(rf(d)) == procfs.PFD || procfs.entry(rf(d)) == procfs.PFDINFO) {
+            // px45: /proc/<pid>/fd lists the process's open descriptors;
+            // px50: and fdinfo/ the same numbers
             let (f, cnext) = fd_after(a, d, p - 2)
             if f == FDS {
                 more = false
             } else {
-                c = (T_SYN << T_SHIFT) | procfs.fd_entry(procfs.pid_of(rf(d)), f)
+                let tp = procfs.pid_of(rf(d))
+                c = (T_SYN << T_SHIFT) | if procfs.entry(rf(d)) == procfs.PFD { procfs.fd_entry(tp, f) } else { procfs.fi_entry(tp, f) }
                 nl = procfs.name_len(rf(c))
                 next = cnext + 2
             }
