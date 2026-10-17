@@ -75,16 +75,28 @@
 //!   them all), read through its own address space; a zombie's
 //!   `cmdline` is empty and its `environ` answers a read -ESRCH
 //!   (measured). `/proc/<pid>/fd`: a directory of its open descriptors,
-//!   each a link (0700) that is listed and not followed (named).
+//!   each a link (px50: kernel/files follows it and reads it).
 //!   Owners: a process's files are its effective ids while it is
 //!   dumpable, root's when it is not or has ended; `environ` 0400 and
 //!   `fd` 0500, which kernel/files guards further (`guarded`: ptrace's
 //!   read mode, measured). `/proc/sys/net/ipv4/ip_unprivileged_port_start`:
 //!   `1024`, 0644, root's (kernel/socket's, fixed).
 //!
+//! - px50 (pax#78): `/proc/<pid>/fdinfo` (0555, the process's effective
+//!   ids whatever its dumpable state) and its entries (0444, the files'
+//!   owner rule), one per open descriptor, whose text kernel/files makes
+//!   (`fdinfo`: `pos`, `flags`, `mnt_id`, `ino`, and an eventfd's and
+//!   an AF_UNIX socket's lines); `/proc/self/fd` and `/proc/self/fdinfo`
+//!   are the reader's `/proc/<pid>`'s, and `/proc/self` lists them;
+//!   `fd/` is root's while the process is not dumpable, its ids again
+//!   once it is a zombie; a descriptor's link has its access mode's read
+//!   and write bits (kernel/files). Measured on Linux 7.2.8
+//!   (`user/elf/fdtab.c`, `notes/px50-the-fd-table.md`).
+//!
 //! No region, no heap. Written from proc(5), proc_pid_status(5),
-//! cgroups(7), sysfs(5) and black-box reads of the files on Linux. No
-//! Linux source; no other kernel's source.
+//! cgroups(7), sysfs(5), px50's proc_pid_fd(5) and proc_pid_fdinfo(5),
+//! and black-box reads of the files on Linux. No Linux source (none of
+//! its procfs); no other kernel's source.
 
 use cred
 use frames
@@ -98,9 +110,9 @@ use unix
 const PAGE: u64 = 4096
 
 /// How many entries there are; also `NONE`'s value.
-pub const ENTRIES: u64 = 39
+pub const ENTRIES: u64 = 40
 /// No entry.
-pub const NONE: u64 = 39
+pub const NONE: u64 = 40
 /// px44: entries 22 to 25 are `/proc/sys/fs/protected_hardlinks`,
 /// `_symlinks`, `_regular` and `_fifos` (ruling #75 R7: on, fixed).
 const PROTECTED: u64 = 22
@@ -125,7 +137,10 @@ pub const PFD: u64 = 36
 /// px48: `/proc/self/stat` and `/proc/<pid>/stat`.
 const SSTAT: u64 = 37
 const PSTAT: u64 = 38
+/// px50: `/proc/<pid>/fdinfo`; FIENT + n its entry for descriptor n.
+pub const PFDINFO: u64 = 39
 pub const FDENT: u64 = 0x1000
+pub const FIENT: u64 = 0x1400
 const FDS_MAX: u64 = 1024 // kernel/files' FDS
 const EMASK: u64 = 0xffff
 /// An entry's parent when it sits in the root directory.
@@ -156,6 +171,7 @@ const G_UNPRIV: u64 = 13 // px45
 const G_CMDLINE: u64 = 14
 const G_ENVIRON: u64 = 15
 const G_STAT: u64 = 16 // px48
+const G_FDINFO: u64 = 17 // px50: made by kernel/files (`fdinfo`), not by `make`
 
 const S_IFDIR: u64 = 0x4000
 const S_IFREG: u64 = 0x8000
@@ -187,14 +203,44 @@ pub fn fd_of(r: u64) -> (bool, u64) {
     (e >= FDENT && e < FDENT + FDS_MAX, e - if e >= FDENT { FDENT } else { 0 })
 }
 
+/// px50: the reference of `/proc/<pid>/fdinfo/<n>`.
+pub fn fi_entry(pid: u64, n: u64) -> u64 {
+    (pid << 16) | (FIENT + n)
+}
+
+/// px50: whether reference `r` is an entry of a `/proc/<pid>/fdinfo`,
+/// and which descriptor.
+pub fn fi_of(r: u64) -> (bool, u64) {
+    let e = entry(r)
+    (e >= FIENT && e < FIENT + FDS_MAX, e - if e >= FIENT { FIENT } else { 0 })
+}
+
+/// px50: reference `r`'s descriptor when it is an entry of `fd/` or of
+/// `fdinfo/` (FDS_MAX when it is neither).
+pub fn desc_of(r: u64) -> u64 {
+    let (isfd, n) = fd_of(r)
+    if isfd {
+        return n
+    }
+    let (isfi, m) = fi_of(r)
+    if isfi { m } else { FDS_MAX }
+}
+
+/// px50: the reference of `/proc/<pid>/fd` (`which` 0) or `fdinfo` (1).
+pub fn fd_dir(pid: u64, which: u64) -> u64 {
+    (pid << 16) | if which == 0 { PFD } else { PFDINFO }
+}
+
 /// px45: whether reference `r` is what Linux guards beyond its mode
 /// (`proc_pid_environ(5)`, `proc_pid_fd(5)`; `ptrace(2)`'s access mode,
 /// read with the file-system ids): a process's `environ` (its own's
 /// too: `/proc/self/environ`) and its `fd/`. kernel/files asks
-/// `may_read_of` of them.
+/// `may_read_of` of them. px50: and `fdinfo/` and its entries (a 0555
+/// directory and 0444 files, guarded all the same: measured).
 pub fn guarded(r: u64) -> bool {
     let e = entry(r)
-    e == PENVIRON || e == SENVIRON || e == PFD
+    let (isfi, _n) = fi_of(r)
+    e == PENVIRON || e == SENVIRON || e == PFD || e == PFDINFO || isfi
 }
 
 /// px45: record where a new program's strings are (kernel/process, at
@@ -244,6 +290,7 @@ pub fn name(e: u64) -> str {
     if e == SCMDLINE || e == PCMDLINE { return "cmdline" }
     if e == SENVIRON || e == PENVIRON { return "environ" }
     if e == PFD { return "fd" }
+    if e == PFDINFO { return "fdinfo" } // px50
     if e == SSTAT || e == PSTAT { return "stat" }
     if e == PROTECTED { return "protected_hardlinks" }
     if e == PROTECTED + 1 { return "protected_symlinks" }
@@ -267,9 +314,9 @@ pub fn name_len(r: u64) -> u64 {
     if entry(r) == PIDDIR {
         return digits(pid_of(r))
     }
-    let (isfd, n) = fd_of(r)
-    if isfd {
-        return digits(n) // px45
+    let n = desc_of(r)
+    if n != FDS_MAX {
+        return digits(n) // px45; px50: fdinfo's too
     }
     var n: u64 = 0
     for _b in name(entry(r)).bytes() {
@@ -280,7 +327,8 @@ pub fn name_len(r: u64) -> u64 {
 
 /// Byte `i` of reference `r`'s name (i < name_len(r)).
 pub fn name_byte(r: u64, i: u64) -> u64 {
-    let (isfd, fdn) = fd_of(r)
+    let fdn = desc_of(r)
+    let isfd = fdn != FDS_MAX
     if entry(r) == PIDDIR || isfd {
         let p = if isfd { fdn } else { pid_of(r) }
         var d: u64 = 1
@@ -312,7 +360,9 @@ pub fn parent(r: u64) -> u64 {
     if e == UNPRIV { return IPV4 }
     let (isfd, _n) = fd_of(r)
     if isfd { return (pid_of(r) << 16) | PFD }
-    if e == PCMDLINE || e == PENVIRON || e == PFD || e == PSTAT { return pid_dir(pid_of(r)) }
+    let (isfi, _m) = fi_of(r)
+    if isfi { return (pid_of(r) << 16) | PFDINFO } // px50
+    if e == PCMDLINE || e == PENVIRON || e == PFD || e == PFDINFO || e == PSTAT { return pid_dir(pid_of(r)) }
     if e == 5 || e == 17 { return 4 }
     if e == 6 { return 5 }
     if e == 18 || (e >= PROTECTED && e < PROTECTED + 4) { return 17 }
@@ -340,7 +390,9 @@ fn gen(r: u64) -> u64 {
     if e == SENVIRON || e == PENVIRON { return G_ENVIRON }
     if e == SSTAT || e == PSTAT { return G_STAT }
     let (isfd, _n) = fd_of(r)
-    if isfd { return G_CMDLINE } // px45: not a directory; never opened (`syn_child` finds none)
+    if isfd { return G_CMDLINE } // px45: not a directory (px50: a link kernel/files follows; never opened itself)
+    let (isfi, _m) = fi_of(r)
+    if isfi { return G_FDINFO } // px50
     if e == 3 { return G_CGROUP }
     if e == 6 { return G_OVERCOMMIT }
     if e == 10 { return G_CONTROLLERS }
@@ -364,6 +416,9 @@ pub fn mode(r: u64) -> u64 {
     if is_dir(r) {
         if e == PFD {
             return S_IFDIR | 0x140 // px45: 0500 (measured)
+        }
+        if e == PFDINFO {
+            return S_IFDIR | 0x16d // px50: 0555 (measured)
         }
         if e <= 7 || e == 17 || e == 19 || e == NET || e == IPV4 || e == PIDDIR {
             return S_IFDIR | 0x16d // 0555: /proc, /proc/self, /proc/sys, /proc/sys/vm, /sys; px45: /proc/sys/net, its ipv4
@@ -390,12 +445,18 @@ pub fn mode(r: u64) -> u64 {
 /// of Linux by name: it follows `status`.)
 pub fn owner(r: u64, area: u64, which: int) -> u64 {
     let e = entry(r)
-    let (isfd, _n) = fd_of(r)
+    let isfd = desc_of(r) != FDS_MAX
     let per = e == 2 || e == 3 || e == 21 || e == PSTATUS || e == PSETGROUPS || e == SCMDLINE || e == SENVIRON || e == PCMDLINE || e == PENVIRON || e == PFD || e == SSTAT || e == PSTAT || isfd
-    if e != 1 && e != PIDDIR && !per {
+    if e != 1 && e != PIDDIR && e != PFDINFO && !per {
         return 0
     }
-    if per && (cred.dumpable(area) != 1 || gone(r)) {
+    // px50 (measured): `fd/` is root's while the process is not
+    // dumpable, but a zombie's is still its ids; `fdinfo/` is always
+    // its ids; their entries follow the files' rule.
+    if e == PFD && cred.dumpable(area) != 1 {
+        return 0
+    }
+    if per && e != PFD && (cred.dumpable(area) != 1 || gone(r)) {
         return 0 // px45: a zombie's files are root's too (measured), the directory its ids
     }
     if which == 0 { cred.uid(area, cred.EFFECTIVE) } else { cred.gid(area, cred.EFFECTIVE) }
@@ -432,8 +493,8 @@ pub fn fs(r: u64) -> u64 {
 pub fn child_at(d: u64, k: u64) -> u64 {
     var seen: u64 = 0
     if d != ROOT && entry(d) == PIDDIR {
-        // px45: status, setgroups, cmdline, environ, fd (kernel/files lists fd's own); px48: stat
-        let e = if k == 0 { PSTATUS } else if k == 1 { PSETGROUPS } else if k == 2 { PCMDLINE } else if k == 3 { PENVIRON } else if k == 4 { PFD } else if k == 5 { PSTAT } else { NONE }
+        // px45: status, setgroups, cmdline, environ, fd (kernel/files lists fd's own); px48: stat; px50: fdinfo
+        let e = if k == 0 { PSTATUS } else if k == 1 { PSETGROUPS } else if k == 2 { PCMDLINE } else if k == 3 { PENVIRON } else if k == 4 { PFD } else if k == 5 { PSTAT } else if k == 6 { PFDINFO } else { NONE }
         return if e == NONE { NONE } else { (pid_of(d) << 16) | e }
     }
     var e: u64 = 0
@@ -447,7 +508,12 @@ pub fn child_at(d: u64, k: u64) -> u64 {
         e += 1
     }
     if d == 1 {
-        return if seen == k { SSTAT } else { NONE } // px48: /proc/self/stat, after the others
+        // px48: /proc/self/stat, after the others; px50: then its fd and
+        // fdinfo, the reader's own (`/proc/<pid>`'s).
+        if seen == k { return SSTAT }
+        if seen + 1 == k { return fd_dir(sched.self_pid(), 0) }
+        if seen + 2 == k { return fd_dir(sched.self_pid(), 1) }
+        return NONE
     }
     if d != 0 {
         return NONE
@@ -461,6 +527,72 @@ pub fn child_at(d: u64, k: u64) -> u64 {
         p = sched.proc_after(p)
     }
     NONE
+}
+
+/// px50: `fdinfo/N`'s text (`proc_pid_fdinfo(5)`, measured on Linux
+/// 7.2.8) into a new frame: `pos:\t`, `flags:\t0` and the flags in
+/// octal, `mnt_id:\t`, `ino:\t`, each a line; then for an eventfd
+/// (`kind` 1) `eventfd-count: ` the counter in hexadecimal sixteen wide,
+/// `eventfd-id: ` `id` and `eventfd-semaphore: 0`; for an AF_UNIX socket
+/// (`kind` 2) `scm_fds: 0`. (the frame, its length), or (0, 0) with no
+/// frame free.
+pub fn fdinfo(pos: u64, flags: u64, mnt: u64, ino: u64, kind: u64, count: u64, id: u64) -> (u64, u64) {
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        return (0, 0)
+    }
+    let base = pa + frames.hhdm()
+    var k = put_field(base, 0, "pos", pos)
+    k = put_s(base, k, "flags:\t0")
+    k = put_oct(base, k, flags)
+    k = put_b(base, k, 10)
+    k = put_field(base, k, "mnt_id", mnt)
+    k = put_field(base, k, "ino", ino)
+    if kind == 1 {
+        k = put_s(base, k, "eventfd-count: ")
+        k = put_hex_w(base, k, count, 16)
+        k = put_s(base, k, "\neventfd-id: ")
+        k = put_dec(base, k, id)
+        k = put_s(base, k, "\neventfd-semaphore: 0\n")
+    } else if kind == 2 {
+        k = put_s(base, k, "scm_fds: 0\n")
+    }
+    (pa, k)
+}
+
+/// px50: `v` in octal, no leading zero (but `0` itself).
+fn put_oct(base: u64, at: u64, v: u64) -> u64 {
+    var d: u64 = 1
+    while v / d >= 8 {
+        d *= 8
+    }
+    var k = at
+    while d > 0 {
+        k = put_b(base, k, 48 + (v / d) % 8)
+        d /= 8
+    }
+    k
+}
+
+/// px50: `v` in lowercase hexadecimal, right-aligned in `width` columns.
+fn put_hex_w(base: u64, at: u64, v: u64, width: u64) -> u64 {
+    var n: u64 = 1
+    while n < 16 && v >> (n * 4) != 0 {
+        n += 1
+    }
+    var k = at
+    var pad = n
+    while pad < width {
+        k = put_b(base, k, 32)
+        pad += 1
+    }
+    var i: u64 = 0
+    while i < n {
+        let h = (v >> ((n - 1 - i) * 4)) & 0xf
+        k = put_b(base, k, if h < 10 { 48 + h } else { 87 + h })
+        i += 1
+    }
+    k
 }
 
 /// px48: `/proc/self/stat`'s entry (kernel/files finds it by name: it
