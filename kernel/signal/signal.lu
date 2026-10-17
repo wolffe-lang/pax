@@ -953,12 +953,19 @@ pub fn on_return(f: u64) -> u64 {
             continue
         }
         if !sched.signal_waits() {
-            sched.suspend_over() // px48: let go of rt_sigsuspend with no handler: its mask back
+            let (susp, _was) = sched.self_suspended()
+            if susp {
+                // px49 (pax#75): out of rt_sigsuspend with no handler run
+                // (a stop and a continue, or another thread took the
+                // signal): it waits again.
+                g = sched.resuspend(g)
+                guard += 1
+                continue
+            }
             return g
         }
         let (sig, info) = sched.take_signal()
         if sig == 0 {
-            sched.suspend_over()
             return g
         }
         g = act(g, sig, info)
