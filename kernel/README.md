@@ -665,7 +665,7 @@ an attacker**.
 
 | module or file | what |
 |---|---|
-| `signal/` | `may_signal`, the one rule: privileged, or the sender's real or effective user id is the target's real or saved one, or SIGCONT (PAX's one session holds every process); else -EPERM. `kill` of a pid, `tgkill` and `tkill` of the thread's process, and each process `kill(-1)`, `kill(0)` and a group reach ask it (`kill(-1)` answers 0 when any other process exists, a group 0 when one was signalled). A zombie answers by the rule and takes nothing. siginfo's `si_uid` is the sender's real user id (a child's for SIGCHLD); what the kernel raises asks nothing |
+| `signal/` | `may_signal`, the one rule: privileged, or the sender's real or effective user id is the target's real or saved one, or SIGCONT (PAX's one session held every process; px48: within the sender's session); else -EPERM. `kill` of a pid, `tgkill` and `tkill` of the thread's process, and each process `kill(-1)`, `kill(0)` and a group reach ask it (`kill(-1)` answers 0 when any other process exists, a group 0 when one was signalled). A zombie answers by the rule and takes nothing. siginfo's `si_uid` is the sender's real user id (a child's for SIGCHLD); what the kernel raises asks nothing |
 | `sched/` | an origin word carries the real user id (`sig_info`, `info_parts`; the pid in 21 bits); a process that has ended for its parent is a zombie from its end (`ended`), not from the next `reap` |
 | `cred/` | `privileged` is public: the one test for root's things |
 | `socket/` | `bind` of a port from 1 to 1023 by the unprivileged: -EACCES, before whether it is taken; a raw socket -EPERM to a user; SO_PEERCRED on every socket (`files.peercred`) |
@@ -673,12 +673,13 @@ an attacker**.
 | `unix/` | 34 words a socket (32 before): SO_PEERCRED's pid and ids (`cred`, `set_cred`, `copy_cred`) |
 | `procfs/` | `/proc/<pid>/cmdline` and `environ` (the program's strings as they are now in its memory, at most a page), `fd/`; `/proc/self/cmdline`, `environ`; `/proc/sys/net/ipv4/ip_unprivileged_port_start` `1024`; a zombie's files root's, its `cmdline` empty, its `environ` -ESRCH to read |
 | `process/` | `setpriority`, `getpriority` (PRIO_PROCESS; a nice value lowered only by the privileged, another's changed by its real or effective user id); `sched_setscheduler`, `sched_getscheduler` (real-time policies the privileged's); both kept and reported, the scheduler unchanged (named drift); `root_call`: `chroot`, `reboot`, `sethostname`, `setdomainname`, `settimeofday`, `clock_settime`, `mount`, `umount2` refused to a user as Linux refuses (-EPERM, after the path where Linux asks it first), refused by name for root (PAX keeps no such state), `chroot("/")` 0 |
-| `console/` | `controlling`: the console is every process's controlling terminal (one session), so the speaker's ioctls, Linux's for the privileged and a terminal's own session, are anyone's on a console descriptor |
+| `console/` | `controlling`: the console is every process's controlling terminal (one session), so the speaker's ioctls, Linux's for the privileged and a terminal's own session, are anyone's on a console descriptor (px48: the caller's own controlling terminal, by sessions) |
 | `user/` | the dispatch of 140, 141, 144, 145, 161, 164 to 166, 169 to 171, 227; `mknod` of a device -EPERM to a user (root's still refused by name) |
 
 - What is not there: job control, sessions and process groups (every
   process is in PAX's one session and one group: `kill(0)` and a
-  negative group are every process, each by the rule); a raw socket,
+  negative group are every process, each by the rule; px48 adds them);
+  a raw socket,
   `mknod` of any node, a FIFO; limits (`prlimit64` as before);
   capabilities (root is effective user id 0 and nothing finer); a root
   directory that is not the tree's; the time, the host name and file
@@ -687,6 +688,35 @@ an attacker**.
   links; `/dev/mem`, `/dev/kmsg`, `/dev/ptmx`; what `/dev/std*`
   reopens keeps its answer; a priority or a policy that changes how
   PAX schedules.
+
+## Job control (px48)
+
+Process groups, sessions and the controlling terminal, as Linux keeps
+them, measured black-box (`notes/px48-job-control.md`): by px48's probe
+(`user/elf/jobs.c`) and a typed job-control session in Ubuntu's static
+busybox `sh -i`, each as root and as a user, against real root's
+recordings (kasumi's kernel under QEMU, the program on a pseudo-terminal
+as its session leader) and a container's for the user's.
+
+| module or file | what |
+|---|---|
+| `sched/` | a leader's `pgid`, `sid`, `ctty`, `execd`, `stopped`, `wstop`, `wcont` (a fork's child takes the first three, `execve` sets `execd`); the console's session and foreground group (`S_TTY_SID`, `S_TTY_PGRP`); a process the kernel starts leads a session and a group and takes the console when it is a terminal and free (named: Linux's init is in session 0 with none); `setpgid`, `setsid`, `group_exists`, `member_after`, `take_tty` (TIOCSCTTY: a session leader with none, or a steal by the privileged with arg 1: the old foreground group hears SIGHUP and SIGCONT), `drop_tty` (TIOCNOTTY), `open_tty`; **stops**: a stop signal at its default stops the process when it is sent (`job_signal`; a blocked one when it is taken), a STOPPED thread is parked when dequeued or on its way to ring 3 (`park_current`), SIGCONT continues whatever its action and discards a pending stop, a stop discards a pending SIGCONT, SIGKILL readies a stopped process; the parent is told (SIGCHLD with CLD_STOPPED or CLD_CONTINUED unless SA_NOCLDSTOP, `wait_find`'s W_STOPPED and W_CONTINUED); SIGTSTP, SIGTTIN and SIGTTOU to an orphaned group are discarded; **hangup**: a controlling process's end sends its terminal's foreground group SIGHUP and frees the console; an end that orphans a group with a stopped member sends it SIGHUP and SIGCONT (`orphaned_but`); `rt_sigsuspend` (`suspend_current`, SUSPEND, W_SUSPEND); the origin word's kind four bits, its pid twenty |
+| `signal/` | `kill(0)` the caller's group, `kill(-g)` group g's members (a zombie one), -ESRCH with none, each by `may_signal`; SIGCONT within a session to anyone, across sessions by the rule; the console's keys for its foreground group only; a stop taken (`stop_self`) and parking in `on_return`; CLD_STOPPED and CLD_CONTINUED in siginfo; a handler run from `rt_sigsuspend` restores its mask at `rt_sigreturn` |
+| `process/` | `setpgid` (109), `getpgrp` (111), `setsid` (112), `getpgid` (121), `getsid` (124); `wait4` by pid, -1, 0 and -pgid with WUNTRACED (`(sig << 8) \| 0x7f`) and WCONTINUED (`0xffff`); `waitid` P_PGID (0 the caller's), WSTOPPED, WCONTINUED, WNOWAIT |
+| `console/` | TIOCSCTTY, TIOCNOTTY, TIOCGPGRP, TIOCSPGRP, TIOCGSID; `job`: a background reader is sent SIGTTIN (or told -EIO when it blocks or ignores it or its group is orphaned), a background writer under TOSTOP SIGTTOU (one that blocks or ignores it writes), a background setting (TCSETS*, TIOCSPGRP) SIGTTOU; `JOB_STOP` runs the call again once continued; SIGWINCH for the foreground group on a new size; `controlling` is the caller's own; VMIN above 0 waits for its bytes and VTIME then times the gap after the last byte (pax#66) |
+| `files/` | `/dev/tty` -ENXIO to a process with no controlling terminal; a session leader with none that opens the console (no O_NOCTTY) takes it; a read of the console asks `console.job` first |
+| `user/` | the five group calls, `rt_sigsuspend` (130), the console's background write rule, `JOB_STOP`'s rewind |
+| `procfs/` | `/proc/<pid>/stat` and `/proc/self/stat` (`proc_pid_stat(5)`'s 52 fields: the state, parent, group, session, the console's number 0x440 and its foreground group, threads, sizes, signal sets; what PAX does not keep, 0); `status`'s State `T (stopped)`, NSpgid and NSsid the process's |
+| `../boot/sched.S` | 400 bytes of the 512-byte thread record; `pax_sched_state` 32 words |
+
+- What is not there: a second terminal (no pseudo-terminal: the
+  console is PAX's one tty); the hangup of a terminal's open files
+  (Linux's own `vhangup`; a controlling process's end only frees the
+  terminal and sends SIGHUP, which is what Linux was measured to do
+  there); `pause` (34) stays -ENOSYS; TIOCSTI, TIOCCONS, TIOCEXCL,
+  TIOCOUTQ; `tcflush` and `tcdrain` (refused by name); the background
+  rules for a console written by `sendfile` or `splice`; PRIO_PGRP and
+  PRIO_USER (refused by name, as before).
 
 ## Who may name, change and keep (px44)
 
