@@ -4512,8 +4512,9 @@ pub fn renameat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, fla
 }
 
 /// px27: `faccessat(dirfd, path, mode)` (and `access`; `faccessat2`
-/// with flags 0 or AT_EACCESS); -EINVAL for a mode outside
-/// R_OK|W_OK|X_OK or another flag; the path's own errors. px43: the
+/// with flags 0 or AT_EACCESS, px49: AT_SYMLINK_NOFOLLOW and
+/// AT_EMPTY_PATH too); -EINVAL for a mode outside R_OK|W_OK|X_OK or
+/// another flag; the path's own errors. px43: the
 /// path is walked and the node asked by the class rule with the REAL
 /// user and group ids (privileged when the real user id is 0), or with
 /// AT_EACCESS the file-system ones, as `open` asks (px38's `perm` G:
@@ -4521,11 +4522,16 @@ pub fn renameat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, fla
 /// What is not a node of the tree — /dev's and /proc's files — keeps
 /// its present answer (0), but its directories are searched.
 pub fn faccessat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64, flags: u64) -> u64 {
-    if mode & !7 != 0 || flags & !AT_EACCESS != 0 {
+    if mode & !7 != 0 || flags & !(AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
         return neg(EINVAL)
     }
     let who = if flags & AT_EACCESS != 0 { cred.FS } else { cred.REAL }
-    let n = resolve_who(a, who, pml4, dirfd, va, false, F_YES)
+    // px49 (pax#60): AT_SYMLINK_NOFOLLOW asks of a last link itself (its
+    // 0777 mode: every mode 0 for anyone, a dangling link's F_OK 0), and
+    // AT_EMPTY_PATH of the descriptor's own file when the path is empty
+    // (without it "" is -ENOENT), as measured on Linux
+    // (notes/px49-the-small-gaps.md §F).
+    let n = resolve_who(a, who, pml4, dirfd, va, flags & AT_EMPTY_PATH != 0, fol(flags & AT_SYMLINK_NOFOLLOW == 0))
     if is_err(n) {
         return neg(rf(n))
     }
