@@ -1022,7 +1022,7 @@ static void terminal(void) {
 }
 
 /* --- V: VMIN and VTIME (pax#66), R in the foreground, echo off ------------------- */
-static void vread(const char *what, int vmin, int vtime) {
+static void vread(const char *what, int vmin, int vtime, int prompt) {
     struct termios t0, t;
     tcgetattr(0, &t0);
     t = t0;
@@ -1030,7 +1030,7 @@ static void vread(const char *what, int vmin, int vtime) {
     t.c_cc[VMIN] = (cc_t)vmin;
     t.c_cc[VTIME] = (cc_t)vtime;
     tcsetattr(0, TCSANOW, &t);
-    printf("$ ");
+    if (prompt) printf("$ "); /* the third read is typed at by a timed step, which waits for no prompt */
     fflush(stdout);
     char b[16];
     ssize_t n = read(0, b, sizeof b);
@@ -1046,9 +1046,9 @@ static void vmin_vtime(void) {
     sigaddset(&ttou, SIGTTOU);
     sigprocmask(SIG_BLOCK, &ttou, &old);
     printf("V: R has the terminal, in the foreground: %s\n", yesno(tcgetpgrp(0) == getpgrp()));
-    vread("VMIN 2, VTIME 0, one key and a second 1.5 s later", 2, 0);
-    vread("VMIN 5, VTIME 5, two keys, then nothing", 5, 5);
-    vread("VMIN 5, VTIME 5, nothing for 1.5 s, then one key", 5, 5);
+    vread("VMIN 2, VTIME 0, one key and a second 1.5 s later", 2, 0, 1);
+    vread("VMIN 5, VTIME 5, two keys, then nothing", 5, 5, 1);
+    vread("VMIN 5, VTIME 5, nothing for 1.5 s, then one key", 5, 5, 0);
     sigprocmask(SIG_SETMASK, &old, 0);
 }
 
