@@ -208,6 +208,7 @@ const O_POS: u64 = 3
 const O_FLAGS: u64 = 4
 const O_TEXT: u64 = 5 // px34: a /proc or /sys file's text: its frame (physical)
 const O_TEXT_LEN: u64 = 6 // and its length
+const O_OWNER: u64 = 7 // px49 (pax#58): an AF_INET or TCP socket's maker's file-system ids (P_OWNER's shape)
 const PIPES: u64 = 512 // px34: Unix connections take two each (64 since px24, 16 before)
 const PP_WORDS: u64 = 32
 const P_PAGES: u64 = 0 // frames held; 0 a free record
@@ -595,6 +596,7 @@ fn of_new(k: u64, n: u64, flags: u64) -> u64 {
     put_ofw(i, O_NODE, n)
     put_ofw(i, O_POS, 0)
     put_ofw(i, O_FLAGS, flags & !O_CLOEXEC)
+    put_ofw(i, O_OWNER, 0)
     pipe_ends(k, n, flags & O_ACCMODE, true)
     if ty(n) == T_INO {
         tree.hold(rf(n)) // px27: an open file keeps its inode, named or not
@@ -1875,7 +1877,36 @@ pub fn sock_kind(a: u64, fd: u64) -> u64 {
 /// O_NONBLOCK): the number, or -EMFILE / -ENFILE (the socket is then
 /// the caller's to free).
 pub fn inet_open(a: u64, s: u64, flags: u64) -> u64 {
-    open_new(a, 0, K_INET, (T_INET << T_SHIFT) | s, flags)
+    owned(a, open_new(a, 0, K_INET, (T_INET << T_SHIFT) | s, flags))
+}
+
+/// px49 (pax#58): the open file new descriptor `fd` (or an -errno, passed
+/// on) names keeps its maker's file-system ids, a socket's owner to
+/// `fstat` (measured on Linux 7.2.8: an AF_INET datagram socket, a TCP
+/// socket and the end `accept` makes are their maker's, the acceptor's
+/// for the last; an eventfd and an epoll object 0:0, an anonymous inode
+/// being the kernel's: PAX's 0 already).
+fn owned(a: u64, fd: u64) -> u64 {
+    if fd < FDS {
+        let o = of_of(a, fd)
+        if o != 0 {
+            put_ofw(o - 1, O_OWNER, fs_ids(a))
+        }
+    }
+    fd
+}
+
+/// px49: the owner word of the open file that names socket node `n` (an
+/// AF_INET or TCP socket has one open file: a `dup` shares it).
+fn sock_owner(n: u64) -> u64 {
+    var i: u64 = 0
+    while i < OFILES {
+        if ofw(i, O_REFS) != 0 && ofw(i, O_NODE) == n {
+            return ofw(i, O_OWNER)
+        }
+        i += 1
+    }
+    0
 }
 
 /// kernel/udp's socket, or kernel/tcp's block, behind descriptor `fd`
@@ -1889,7 +1920,7 @@ pub fn inet_sock(a: u64, fd: u64) -> u64 {
 /// O_NONBLOCK): the number, or -EMFILE / -ENFILE (the block is then
 /// the caller's to close).
 pub fn tcp_open(a: u64, c: u64, flags: u64) -> u64 {
-    open_new(a, 0, K_TCP, (T_TCP << T_SHIFT) | c, flags)
+    owned(a, open_new(a, 0, K_TCP, (T_TCP << T_SHIFT) | c, flags))
 }
 
 /// px23: set or clear O_NONBLOCK on descriptor `fd`'s open file
@@ -5051,9 +5082,10 @@ fn syn_area(a: u64, n: u64) -> u64 {
 /// px42: a node's owner (`which` 0) or group (1): an inode's own;
 /// a `/proc` node's by kernel/procfs's rule; px43 (pax#58): a pipe's, a
 /// socketpair's and an AF_UNIX socket's maker's file-system ids
-/// (measured, `own`'s `desc` rows); 0 for everything else (`/dev` and
-/// what is in it, an AF_INET socket, an eventfd, an epoll object, an
-/// end `accept` made: PAX keeps no owner for them, named drift).
+/// (measured, `own`'s `desc` rows); px49 (pax#58): an AF_INET datagram
+/// socket's, a TCP socket's and an accepted end's (the open file's
+/// O_OWNER); 0 for everything else (`/dev` and what is in it; an eventfd
+/// and an epoll object, as on Linux: measured).
 fn n_owner(a: u64, n: u64, which: int) -> u64 {
     let t = ty(n)
     if t == T_INO {
@@ -5066,6 +5098,10 @@ fn n_owner(a: u64, n: u64, which: int) -> u64 {
     if t == T_UNIX {
         let (u, g) = unix.owner(rf(n))
         return if which == 0 { u } else { g }
+    }
+    if t == T_INET || t == T_TCP {
+        let o = sock_owner(n) // px49 (pax#58)
+        return if which == 0 { o & 0xffffffff } else { o >> 32 }
     }
     if t == T_SYN {
         let ta = syn_area(a, n)
