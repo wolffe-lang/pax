@@ -206,8 +206,8 @@ no record grows (the open file's word 7 was free).
 |---|---|---|---|
 | P1 | one probe (`gaps`) in a fourth image of `mpx5-jobs`, root and 1000:1000, held to real root's guest (px49's `vmjob`, the loopback up) and the user's to the container; #70 a `tree` row, #71 a `procs` row and a check that asks each side | so, but the gaps image boots **kmain_session**, not kmain_console: on trunk's kmain_console (which starts no network stack) the probe's `connect` to 127.0.0.1 waited for good (`build/t0`'s boot, `prompt 2 … did not come within 900s`), so the image takes the session kernel (the console as kmain_console's, the network as kmain_sockets') and `mpx5-jobs` builds both. Not predicted: `/sys` mounted in the guest too (for root's `unlink("/sys")`) | right (one kernel more) |
 | P2 | Linux's answers (§3's list) | every row as predicted but **two**: `fallocate`'s COLLAPSE_RANGE\|KEEP_SIZE and INSERT_RANGE\|KEEP_SIZE are -EOPNOTSUPP on tmpfs, not -EINVAL. The weak guesses held: eventfd and epoll 0:0; TCSBRK(0) 0 at once on a pseudo-terminal; TCFLSH, TCSBRK(1) and TCSBRK(0) from the background stopped by SIGTTOU; a user's set-ID bits taken by every served mode, past the end too. Not predicted: TIOCSTI by root into a terminal that is not its own is 0 (the byte arrives); a user's TIOCSTI is -EIO before its pointer is read; an output flush on a pseudo-terminal discards lines its reader has not taken (the container lost three, §C); in a user namespace the anonymous inode reads 65534:65534 (§E) | wrong (2 rows) |
-| P3 | `gaps` about 60 lines, byte-identical at the first boot after the fixes; trunk's kernel differs in every item but #58's eventfd/epoll and #75(a); one line each in `tree` and `procs` | **103** lines; the first boot of the branch (`b1`, native) byte-identical as root and as 1000:1000; trunk's 49 of 103 lines differ, in every item but #58's eventfd and epoll rows, #75(a) and #70 (root's `unlink` is -EISDIR before and after: the user's row is `tree`'s, red on trunk, §J); `tree` and `procs` one line each | right (but the line count) |
-| P4 | `07bb5156…` (15,047,176) and `1f00ef21…` (13,952,560), twice and in CI; no compared session moves; cat's refusal dark, `cat f >> f` copies | both digests in `mpx3-shell`'s and `mpx3-tree`'s builds on kasumi (two builds) and CI's (§I); no compared session moved on kasumi (`mpx3-shell`, `mpx3-tree`, `mpx3-speaker`, `mpx5-accounts`, `mpx3-boreutils`, `mpx3-console`, `mpx3-screen`) nor in CI; on PAX `cat /cf >> /cf` **did not end in 600 s** (it reads what it appends, without end), where the container's cat refused it (`input file is output file`, status 1) | right ("copies" understated: without end) |
+| P3 | `gaps` about 60 lines, byte-identical at the first boot after the fixes; trunk's kernel differs in every item but #58's eventfd/epoll and #75(a); one line each in `tree` and `procs` | **103** lines; the first boot of the branch (`b1`, native) byte-identical as root and as 1000:1000; trunk's 49 of 103 lines differ, in every item but #58's eventfd and epoll rows, #75(a) and #70 (root's `unlink` is -EISDIR before and after: the user's row is `tree`'s, red on trunk, §H); `tree` and `procs` one line each | right (but the line count) |
+| P4 | `07bb5156…` (15,047,176) and `1f00ef21…` (13,952,560), twice and in CI; no compared session moves; cat's refusal dark, `cat f >> f` copies | both digests in `mpx3-shell`'s and `mpx3-tree`'s builds on kasumi (two builds) and CI's (§L); no compared session moved on kasumi (`mpx3-shell`, `mpx3-tree`, `mpx3-speaker`, `mpx5-accounts`, `mpx3-boreutils`, `mpx3-console`, `mpx3-screen`) nor in CI; on PAX `cat /cf >> /cf` **did not end in 600 s** (it reads what it appends, without end), where the container's cat refused it (`input file is output file`, status 1) | right ("copies" understated: without end) |
 | P5 | every suite green as root and as a user; `mpx5-users`' allowance for 34 goes | so (`mpx5-users`' sig U2: `-ENOSYS only for 273 334`; its rows unchanged) | right |
 | P6 | plant A red in `mpx3-shell` at the new check only, S2 green; plant B red first at #75's (b) row | §K | see §K |
 | P7 | under 6 KiB of text native; no table and no record grows | kmain_console native `.text` 907,083 → **910,171** (+3,088), kmain_session 909,835 → 912,923 (+3,088); release −18,512 (kmain_console) and +14,192 (kmain_session), the release tier's inlining; `.rodata` −80, `.data` and `.bss` the same; the open file's free word 7 (`notes/px49/kasumi-kernel-cost.txt`) | right (native; release not predicted) |
@@ -347,8 +347,8 @@ guest's initramfs root is 1777, so the guest is no reference for it):
 of /dev -21, of /proc -21` (root) and `-13, -13` (the user), T1 green on
 both. The container has no `/sys` (`tools/linux-tree` without `--sys`),
 so the user's `/sys` is asked by neither side. Trunk's kernel with the
-branch's probes-user image: `-21, -21` for the user (§J), which T1 holds
-against the container's `-13, -13`.
+branch's probes-user image: `-21, -21` for the user (seen red, §K), which T1 holds
+against the container's `-13, -13` (`notes/px49/kasumi-trunk-6d4072c-tree-probes-user.out`).
 
 ## I. procs-user's own witness (pax#71, item 5)
 
@@ -393,3 +393,170 @@ appended, and had not ended when the 600 s ran out
 (`notes/px49/cat-dark-pax.txt`, `cat-dark-linux.txt`). `/proc/self/fd`
 is not added in this lane (the contract).
 
+## K. Plants (P6)
+
+Each a branch never to be merged, cut from the code head `bd94f7f`, one
+commit, run in CI by dispatch with one suite (`gh workflow run ci -r
+<branch> -f suites=<job>`), every leg.
+
+| plant | branch, commit | break | predicted | CI |
+|---|---|---|---|---|
+| A | `px49-plant-a` `625cf7a` | `as` keeps root's user ids (px47's plant B, re-cut) | `mpx3-shell` red at S7 for procs-user only, S2 green | run 39058423046, job 117471175066: on all four legs procs-user's **S2 PASS** (46 lines, both sides root's) and **S7 FAIL** (`creds: getresuid 0: 0 0 0; getresgid 0: 1000 1000 1000` on PAX and on Linux); procs' and procs-quiet's S7 PASS; nothing else red (`notes/px49/ci-39058423046-plant-a.txt`) — right |
+| B | `px49-plant-b` `e6fba96` | `on_return` lets a thread out of `rt_sigsuspend` go with no handler run (px48's way) | `mpx5-jobs` red first at #75's (b) row | run 39058425318, job 117471157632: on all four legs gaps and gaps-user **J7 FAIL first at line 19** (`U: SIGCONT: continued; the child said sigsuspend returned EINTR, with no handler run`), then line 21 (`A left sigsuspend without its own handler 20 times`), J4 at the two-thread row, J3 the container's; the probe's and the shells' J1–J6 green (`notes/px49/ci-39058425318-plant-b.txt`) — right |
+
+Before CI, on kasumi: trunk's kernel is red at every row the fixes turn
+(`notes/px49/pax-6d4072c-gaps*.session`, 49 of 103 lines each), and at
+the user's `unlink` (`kasumi-trunk-6d4072c-tree-probes-user.out`).
+
+## L. CI
+
+- The tiers (px37, px40): the branch changes `kernel/sched` (the
+  core), so a pull request's push runs every suite on the pr leg; the
+  pins and `tests/ci-plan` are full-tier changes, so the `full-matrix`
+  label, added once the head is final, runs every suite on every leg.
+- `tools/ci-tiers.map`: `@net` gains `mpx5-jobs` (gaps' TCP rows run
+  on kmain_session's network); `tests/ci-plan` four new P2 cases (the
+  gaps probe, its recordings, its keys, kmain_session) and NET's
+  expectation; 147 PASS on kasumi (`notes/px49/kasumi-ci-plan.out`).
+  `tools/mkjobs` names each source whole: a `user/elf/$p.c` in its text
+  made the plan's derivation read `user/elf` as a prefix (and a comment
+  naming the plan's own tool pulled that tool's paths in), which
+  `tests/ci-plan` caught (seven cases red, fixed in `d2fa8cb`).
+- The pull request's first run at `54faba0` (run 39058414358, the pr
+  tier, every suite on native BIOS): 31 of 32 suites green at the first
+  attempt; **mpx4-ready red** on a Linux-side race not this lane's
+  (`nbprobe`'s `a write of 1 then`: the container's Linux let one more
+  byte through after both buffers filled, `1`, where PAX answers
+  `-EAGAIN` as every recording since px24 does;
+  `notes/px49/ci-39058414358-mpx4-ready-attempt1.txt`); its second
+  attempt (the failed job alone) green, and the run's `tier pr` with it:
+  32 of 32 suites green at the code head.
+- The final head's runs: named in the pull request (a commit naming
+  them would move the head).
+
+## 4. Evidence index
+
+Shas are this branch's (`px49`). kasumi paths are under `~/lanes/px49/`.
+
+### What was written
+
+- The prediction: `ee28630` (§1 to §3, before any change or
+  measurement).
+- The probe and its tools: `aaecf93` (`user/elf/gaps.c`,
+  `user/console/gaps.keys`), `c64dfe5`, `d2fa8cb` (`tools/mkjobs`),
+  `e74581a` (`notes/px49/vmjob.c`).
+- The kernel: `9fc4fde` (`kernel/user`: pause), `2c83555`
+  (`kernel/sched`: resuspend), `010e92a` (`kernel/signal`), `5769a55`
+  (`kernel/console`: TCFLSH, TCSBRK, TIOCSTI), `705a31c`
+  (`kernel/files`: sendfile and splice), `ac91d8a` (socket owners),
+  `0eda7ac` (faccessat2), `a310e41` (`kernel/tree`: punch), `6d6457b`
+  (fallocate), `9b740f4` (unlink of /dev).
+- The suites: `c8d3843` (real root's recordings of gaps), `18af688`,
+  `673ec83` (`tests/mpx5-jobs`), `9933c9b` (`tools/ci-tiers.map`),
+  `c8c205a` (`tests/ci-plan`), `3b749d1` (`user/elf/procs.c`), `5b560ae`
+  (`tests/mpx3-shell` S7), `3cf2612` (`user/elf/tree.c`), `ae34f9b`
+  (`tests/mpx5-users`).
+- The pins: `5377c55` (pelt `1102498`), `c1ee083` (boreutils
+  `8f0bbb1`).
+- The words: `b30c615` (`kernel/README.md`), `6db4e6c`
+  (`docs/SOURCES.md`), `68b98fe` (README), `bd94f7f` (CHANGELOG).
+
+### What was measured, and where it is
+
+- **Real root's Linux** (kasumi's 7.2.8-1-cachyos `f4c00d5d…` under QEMU
+  11.1.1, `notes/px49/vmjob.c` as pid 1, the suite's own archive
+  `df8b4752…`): `tests/mpx5-jobs.d/linux/gaps.tty`, `gaps-user.tty` and
+  their `vm-*.meta`; recorded twice (`vm/rec1`, `vm/rec2`), the same
+  bytes (`bfc51e12…`, `828d19a5…`). The first measurement, by the
+  probe as first written: `notes/px49/linux-first-gaps.txt`,
+  `linux-first-gaps-user.txt` (§3a's P2), and the container's first run
+  that showed the output flush (`container-first-gaps-user.txt`).
+- **PAX at trunk `6d4072c`**, the gaps image (the branch's archive) on
+  trunk's kmain_session: `notes/px49/pax-6d4072c-gaps.session`,
+  `pax-6d4072c-gaps-user.session`, `kasumi-trunk-6d4072c-gaps.out` (its
+  refusals: 30 fallocate modes, 34 tty ioctls, `pause` -ENOSYS); the
+  tree's probes-user on trunk's kmain_console:
+  `kasumi-trunk-6d4072c-tree-probes-user.out`.
+- **PAX, the branch** (kasumi, TCG, BIOS): `kasumi-mpx5-jobs.out`
+  (native and release, every J PASS), `kasumi-mpx3-shell.out`,
+  `kasumi-mpx3-tree.out`, `kasumi-mpx5-users.out`,
+  `kasumi-mpx3-threads.out`, `kasumi-mpx5-accounts.out`,
+  `kasumi-mpx3-speaker.out`, `kasumi-mpx3-boreutils.out`,
+  `kasumi-mpx3-console.out`, `kasumi-mpx3-screen.out` (native; every
+  suite PASS); `mpx4-session`, `mpx4-lobo`, `mpx4-unix` and the rest:
+  CI's runs only.
+- **cat's refusal**: `notes/px49/cat-dark-pax.txt`, `cat-dark-linux.txt`
+  (`cat-dark.sh`).
+- **The kernel's cost**: `notes/px49/kasumi-kernel-cost.txt`.
+- **The plants in CI**: §K.
+
+### Measured, inferred, not verified
+
+**Measured**: everything in §A to §J but what follows.
+
+**Inferred**:
+- A key put in by TIOCSTI that is a signal's (`^C` with ISIG) raises
+  it at the next interrupt, not at once (not asked of either side).
+- TCFLSH, TCSBRK and TIOCSTI on a console that is not the caller's
+  controlling terminal by a user: the background rule does not apply
+  (it is no background process of that terminal) and TIOCSTI is -EIO
+  first; root's TIOCSTI there measured, a user's TCFLSH there not.
+- An eventfd's and an epoll object's owner under a `setfsuid` other than
+  1001 (one id asked).
+
+**Not verified**:
+- Real root was one kernel build (kasumi's CachyOS 7.2.8, with
+  `dev.tty.legacy_tiocsti` 0) and one terminal kind (a pseudo-terminal);
+  PAX's console is a serial line and a screen. A serial line's
+  `tcsendbreak` (a real break) was not measured.
+- A user's `unlink("/sys")`: the container has no `/sys`
+  (`tools/linux-tree` without `--sys`) and the guest's `/` is 1777;
+  PAX's answer (-EACCES, by the same rule as `/dev` and `/proc`) is
+  asked of neither side for a user.
+- `fallocate`'s modes on anything but a regular file of the tree (a
+  device, a socket: -ENODEV as before); `st_blocks` after a punch (PAX
+  keeps the frames).
+- UEFI under KVM on hasu (pax#56): no soak in this lane; UEFI on CI's
+  full tier only.
+- More than one CPU (PAX runs one): #75's two-thread row's race is
+  PAX's single-CPU order on PAX's side.
+
+### Issues
+
+- **To close at merge** (each with its row and its Linux recording):
+  pax#58 (`O:` rows, `tests/mpx5-jobs.d/linux/gaps*.tty`), pax#60 (`A:`),
+  pax#63 (`F:`), pax#70 (`tree`'s `remove: unlink of /dev` row against
+  the container, root's `D:` on the guest), pax#71 (`mpx3-shell` S7,
+  plant A), pax#73 (`P:`), pax#74 (`I:`), pax#75 (`U:`, plant B),
+  pax#76 (`B:`).
+- **Left open**: none of the nine.
+- **Would file (none filed)**:
+  1. pax: `/proc/<pid>/fd` entries cannot be looked up (px45: listed,
+     not followed), so boreutils' `cat f >> f` copies without end on
+     PAX where Linux refuses (§J); the contract kept `/proc/self/fd`
+     out of this lane.
+  2. pax: `tests/mpx4-ready`'s nbprobe row `a write of 1 then` races on
+     the Linux side (one more byte after both buffers filled), seen once
+     in run 39058414358.
+  3. pax: a user's `rmdir("/proc")` and `rename` of `/proc` or `/sys`
+     were not asked (only `/dev`'s, px47's); the same order may be
+     missing there.
+
+## 5. Done-when
+
+- Branch `px49` on origin; pax PR #77, open, unmerged.
+- The five sections §1 to §5; the items §A to §L.
+- The test checklist:
+  - [x] `tests/mpx5-jobs` on kasumi, native and release, BIOS (every J,
+        gaps J7 byte-identical as root and as a user)
+  - [x] `tests/mpx3-shell`, `mpx3-tree`, `mpx5-users`, `mpx3-threads`,
+        `mpx5-accounts`, `mpx3-speaker`, `mpx3-boreutils`,
+        `mpx3-console`, `mpx3-screen` on kasumi, native BIOS
+  - [x] `tests/ci-plan`, every case, four of them new
+  - [x] trunk's kernel red on the gaps rows and the user's `unlink`
+  - [x] plants A and B red in CI (39058423046, 39058425318)
+  - [ ] `tier full` at the final head: named in the PR
+- `wolf/tools/lane-audit.sh pax px49 77` exit status: named in the PR.
+- Trees: kasumi `~/lanes/px49/` keeps `out/`, `vm/rec1`, `vm/rec2`,
+  `bin/`, `cache/`; build directories removed at the end. Plant
+  branches stay on origin, never to be merged.
