@@ -538,10 +538,10 @@ Each a branch never to be merged, cut from `f660b32` (the code and the
 tests as at the head but the note), one commit, run in CI by dispatch
 with `mpx5-jobs` the only suite; see §4 for the runs.
 
-| plant | branch, commit | break |
-|---|---|---|
-| A | `px48-plant-a` `bf939d8` | the console's keys raised for every process (the foreground group ignored) |
-| B | `px48-plant-b` `4ff0135` | a stopped process parks nothing (it is reported stopped and runs on) |
+| plant | branch, commit | break | red on kasumi | red in CI |
+|---|---|---|---|---|
+| A | `px48-plant-a` `bf939d8` | the console's keys raised for every process (the foreground group ignored) | `notes/px48/kasumi-plant-a-bf939d8.out`: J1 first at `T: ^C with the job in the foreground: heard J1:INT,J2:INT,R:INT` (R, in the background, heard it), then the ^\ and ^Z rows; J4; both shells (^Z stopped the background `sleep 100`: `[1]- Stopped sleep 100`, no `Terminated` line) | run 39031698260, job 117393442308 (`mpx5-jobs` the only suite, all four legs): `notes/px48/ci-39031698260-plant-a.txt` |
+| B | `px48-plant-b` `4ff0135` | a stopped process parks nothing (it is reported stopped and runs on) | `notes/px48/kasumi-plant-b-4ff0135.out`: J1 first at `S: a stopped group runs nothing: no`, then `S: SIGSTOP to it: it runs on yes`; J3 | run 39031699683, job 117395529203: `notes/px48/ci-39031699683-plant-b.txt` |
 
 ## K. What U9 (`login` makes a session) needs next (item 9)
 
