@@ -152,7 +152,7 @@ expect("P2 the accounts' recording is mpx5-accounts' alone (px46)",
 # px47 (P5 U7): every suite as a user. `su` and `as` reach each suite
 # whose user run uses them; a user run's own files reach their suite.
 SUUSER = ["mpx3-tree", "mpx3-shell", "mpx3-speaker", "mpx4-lobo", "mpx5-accounts"]
-ASUSER = ["mpx3-tree", "mpx3-shell", "mpx3-boreutils", "mpx4-unix", "mpx4-tcp", "mpx4-udp"]
+ASUSER = ["mpx3-tree", "mpx3-shell", "mpx3-boreutils", "mpx4-unix", "mpx4-tcp", "mpx4-udp", "mpx5-jobs"]  # px48: mpx5-jobs
 expect("P2 su reaches every suite whose user run uses it (px47)",
        plan(["user/su/su.lu", "user/su/wolf-toolchain.toml", "tools/mksu"], **pr), "pr", SUUSER)
 expect("P2 as reaches every suite whose user run uses it, and mpx5-users (px47)",
@@ -177,6 +177,17 @@ expect("P2 the container's Linux side reaches every suite that uses it (px47)", 
        lacks=["mpx2-heap", "mpx3-speaker"])
 expect("P2 the accounts' keys reach mpx5-accounts (and the suites that read user/console)",
        plan(["user/console/accounts.keys"], **pr), "pr", has=["mpx5-accounts"], lacks=["mpx2-heap", "mpx4-tcp"])
+# px48: job control's own files reach mpx5-jobs and nothing they do not run.
+expect("P2 the job-control tools, busybox and the recordings are mpx5-jobs' alone (px48)",
+       plan(["tools/mkjobs", "user/busybox.pin", "tools/fetch-busybox",
+             "tests/mpx5-jobs.d/linux/probe.tty", "tests/mpx5-jobs.d/linux/shell-user.tty"], **pr), "pr", ["mpx5-jobs"])
+expect("P2 the job-control probe reaches mpx5-jobs (and mpx5-users, which reads user/elf)",
+       plan(["user/elf/jobs.c"], **pr), "pr", ["mpx5-jobs", "mpx5-users"])
+expect("P2 the job-control keys reach mpx5-jobs (and the suites that read user/console)",
+       plan(["user/console/jobs.keys", "user/console/jobs-shell.keys"], **pr), "pr", has=["mpx5-jobs"], lacks=["mpx2-heap", "mpx4-tcp"])
+expect("P2 the console, signals and processes reach mpx5-jobs (px48)",
+       plan(["kernel/console/console.lu", "kernel/signal/signal.lu", "kernel/process/process.lu"], **pr), "pr",
+       has=["mpx5-jobs", "mpx3-shell", "mpx5-users"], lacks=["mpx2-heap", "census"])
 expect("P2 CI itself: every suite, the pr leg", plan([".github/workflows/ci.yml"], **pr), "pr", SUITES)
 
 # The kernel's core (px40, ruling #76): every suite, on the pr leg.
