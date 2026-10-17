@@ -15,6 +15,7 @@
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <time.h>
 
 static char rb[64];
 #define R(label, call) do { long r_ = (call); say("%s: %s\n", label, res(r_, rb, sizeof rb, 0)); } while (0)
@@ -194,6 +195,21 @@ int main(void)
     while ((w = send(s, buf, sizeof buf, MSG_NOSIGNAL)) > 0)
         put += w;
     say("sends until both buffers are full: %s, then -%s\n", put >= 65536 ? "65536 bytes or more" : "under 65536 bytes", ename(errno));
+    /* px50 (pax#79): on Linux the peer's delayed acknowledgement frees
+     * send buffer 30 to 49 ms after the -EAGAIN (POLLOUT stays clear),
+     * so a write a runner is that slow to make found room. Settle: wait
+     * past it and send again, until a send after the wait takes
+     * nothing (one more on Linux, none on PAX:
+     * notes/px50-the-fd-table.md, notes/px50/nbrace.c). */
+    for (;;) {
+        struct timespec ts = { 0, 100000000L };
+        nanosleep(&ts, 0);
+        long more = 0;
+        while ((w = send(s, buf, sizeof buf, MSG_NOSIGNAL)) > 0)
+            more += w;
+        if (more == 0)
+            break;
+    }
     N("a write of 1 then", write(s, "z", 1));
     N("a blocking socket's send with MSG_DONTWAIT, its buffer not full", send(c, "q", 1, MSG_DONTWAIT | MSG_NOSIGNAL));
     close(s);
