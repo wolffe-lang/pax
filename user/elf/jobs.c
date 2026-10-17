@@ -512,6 +512,20 @@ static void stops(void) {
     printf("S: a stopped group runs nothing: %s\n", yesno(!ticking(tp[0], 300)));
     struct pstat ps = pstat_of(a);
     printf("S: a stopped member's /proc stat state: %c\n", ps.state);
+    {
+        char path[64], b[512], st_line[64] = "?";
+        snprintf(path, sizeof path, "/proc/%d/status", (int)a);
+        int fd = open(path, O_RDONLY);
+        ssize_t k = fd >= 0 ? read(fd, b, sizeof b - 1) : -1;
+        if (fd >= 0) close(fd);
+        if (k > 0) {
+            b[k] = 0;
+            char *q = strstr(b, "State:");
+            if (q) { char *e = strchr(q, '\n'); if (e) *e = 0; snprintf(st_line, sizeof st_line, "%s", q); }
+        }
+        for (char *t = st_line; *t; t++) if (*t == '\t') *t = ' ';
+        printf("S: its /proc status: %s\n", st_line);
+    }
     w = waitpid(-a, &st, WNOHANG);
     printf("S: waitpid(-G, WNOHANG) of a stopped group without WUNTRACED: %s\n", how(w, st));
     ANS("S: kill(-G, SIGCONT)", kill(-a, SIGCONT));
@@ -1049,6 +1063,10 @@ static void vmin_vtime(void) {
     vread("VMIN 2, VTIME 0, one key and a second 1.5 s later", 2, 0, 1);
     vread("VMIN 5, VTIME 5, two keys, then nothing", 5, 5, 1);
     vread("VMIN 5, VTIME 5, nothing for 1.5 s, then one key", 5, 5, 0);
+    struct winsize ws;
+    memset(&ws, 0, sizeof ws);
+    int r = ioctl(0, TIOCGWINSZ, &ws);
+    printf("V: TIOCGWINSZ after the keys: %s, %d rows %d cols\n", r < 0 ? ename(errno) : "0", ws.ws_row, ws.ws_col);
     sigprocmask(SIG_SETMASK, &old, 0);
 }
 
