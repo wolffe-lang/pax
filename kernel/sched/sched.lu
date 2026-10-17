@@ -303,7 +303,8 @@ pub const W_FUTEX: u64 = 3
 pub const W_TIMED: u64 = 4
 pub const W_TIMED_REWOUND: u64 = 5
 /// px48: `rt_sigsuspend`: -EINTR in the frame, and the mask it replaced
-/// put back (by the handler's frame, or by `suspend_over`).
+/// put back by the handler's frame (px49: a thread out of it with no
+/// handler run waits again, `resuspend`).
 pub const W_SUSPEND: u64 = 6
 
 const STACKS: u64 = 0xffffd00000000000 // PML4 slot 416
@@ -2944,10 +2945,11 @@ pub fn self_rewound() {
 /// px48: `rt_sigsuspend(mask)` from the frame `f` (sigsuspend(2)): the
 /// running thread's mask is `mask` (SIGKILL and SIGSTOP never blocked)
 /// until a signal comes that runs a handler or ends the process; the
-/// call then answers -EINTR, and the mask it replaced is put back — by
-/// the handler's frame (kernel/signal gives it that mask to restore) or,
-/// when the thread is let go without a handler, by `suspend_over`. The
-/// next thread's frame. IF clear.
+/// call then answers -EINTR, and the mask it replaced is put back by the
+/// handler's frame (kernel/signal gives it that mask to restore); px49:
+/// a thread that comes out with no handler run waits again
+/// (`resuspend`), and `pause` (pax#73) is this with the caller's own
+/// mask. The next thread's frame. IF clear.
 pub fn suspend_current(f: u64, mask: u64) -> u64 {
     let c = cur()
     // # Safety: the caller's live frame (22 words).
@@ -2969,14 +2971,20 @@ pub fn self_suspended() -> (bool, u64) {
     (field(c, offset_of(Thread, rst)) == W_SUSPEND, field(c, offset_of(Thread, ssold)))
 }
 
-/// px48: the running thread leaves `rt_sigsuspend` with no handler run
-/// for it (kernel/signal, on its way to ring 3): its mask put back.
-pub fn suspend_over() {
+/// px49 (pax#75): the running thread is on its way back to ring 3 from
+/// `rt_sigsuspend` (or `pause`) with no handler run for it — it took a
+/// stop at its default and was continued, or it was woken for a process
+/// signal another thread took first — and its process is not ending: it
+/// waits again with the same mask and the same mask to put back, as
+/// Linux keeps it waiting (measured: notes/px49-the-small-gaps.md §B).
+/// px48 let it go with -EINTR. The next thread's frame. IF clear.
+pub fn resuspend(f: u64) -> u64 {
     let c = cur()
-    if field(c, offset_of(Thread, rst)) == W_SUSPEND {
-        put_field(c, offset_of(Thread, sigmask), field(c, offset_of(Thread, ssold)))
-        put_field(c, offset_of(Thread, rst), W_NONE)
-    }
+    put_field(c, offset_of(Thread, frame), f)
+    put_field(c, offset_of(Thread, state), SUSPEND)
+    poke(field(c, offset_of(Thread, lead))) // a signal deliverable now ends it at once
+    wake_sleepers()
+    run_next()
 }
 
 /// The session of the process whose area is `a` (a leader's own area,
