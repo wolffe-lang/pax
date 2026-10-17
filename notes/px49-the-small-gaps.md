@@ -202,4 +202,194 @@ no record grows (the open file's word 7 was free).
 
 ## 3a. The prediction, scored
 
-(after the measurements)
+| # | predicted | measured | verdict |
+|---|---|---|---|
+| P1 | one probe (`gaps`) in a fourth image of `mpx5-jobs`, root and 1000:1000, held to real root's guest (px49's `vmjob`, the loopback up) and the user's to the container; #70 a `tree` row, #71 a `procs` row and a check that asks each side | so, but the gaps image boots **kmain_session**, not kmain_console: on trunk's kmain_console (which starts no network stack) the probe's `connect` to 127.0.0.1 waited for good (`build/t0`'s boot, `prompt 2 … did not come within 900s`), so the image takes the session kernel (the console as kmain_console's, the network as kmain_sockets') and `mpx5-jobs` builds both. Not predicted: `/sys` mounted in the guest too (for root's `unlink("/sys")`) | right (one kernel more) |
+| P2 | Linux's answers (§3's list) | every row as predicted but **two**: `fallocate`'s COLLAPSE_RANGE\|KEEP_SIZE and INSERT_RANGE\|KEEP_SIZE are -EOPNOTSUPP on tmpfs, not -EINVAL. The weak guesses held: eventfd and epoll 0:0; TCSBRK(0) 0 at once on a pseudo-terminal; TCFLSH, TCSBRK(1) and TCSBRK(0) from the background stopped by SIGTTOU; a user's set-ID bits taken by every served mode, past the end too. Not predicted: TIOCSTI by root into a terminal that is not its own is 0 (the byte arrives); a user's TIOCSTI is -EIO before its pointer is read; an output flush on a pseudo-terminal discards lines its reader has not taken (the container lost three, §C); in a user namespace the anonymous inode reads 65534:65534 (§E) | wrong (2 rows) |
+| P3 | `gaps` about 60 lines, byte-identical at the first boot after the fixes; trunk's kernel differs in every item but #58's eventfd/epoll and #75(a); one line each in `tree` and `procs` | **103** lines; the first boot of the branch (`b1`, native) byte-identical as root and as 1000:1000; trunk's 49 of 103 lines differ, in every item but #58's eventfd and epoll rows, #75(a) and #70 (root's `unlink` is -EISDIR before and after: the user's row is `tree`'s, red on trunk, §J); `tree` and `procs` one line each | right (but the line count) |
+| P4 | `07bb5156…` (15,047,176) and `1f00ef21…` (13,952,560), twice and in CI; no compared session moves; cat's refusal dark, `cat f >> f` copies | both digests in `mpx3-shell`'s and `mpx3-tree`'s builds on kasumi (two builds) and CI's (§I); no compared session moved on kasumi (`mpx3-shell`, `mpx3-tree`, `mpx3-speaker`, `mpx5-accounts`, `mpx3-boreutils`, `mpx3-console`, `mpx3-screen`) nor in CI; on PAX `cat /cf >> /cf` **did not end in 600 s** (it reads what it appends, without end), where the container's cat refused it (`input file is output file`, status 1) | right ("copies" understated: without end) |
+| P5 | every suite green as root and as a user; `mpx5-users`' allowance for 34 goes | so (`mpx5-users`' sig U2: `-ENOSYS only for 273 334`; its rows unchanged) | right |
+| P6 | plant A red in `mpx3-shell` at the new check only, S2 green; plant B red first at #75's (b) row | §K | see §K |
+| P7 | under 6 KiB of text native; no table and no record grows | kmain_console native `.text` 907,083 → **910,171** (+3,088), kmain_session 909,835 → 912,923 (+3,088); release −18,512 (kmain_console) and +14,192 (kmain_session), the release tier's inlining; `.rodata` −80, `.data` and `.bss` the same; the open file's free word 7 (`notes/px49/kasumi-kernel-cost.txt`) | right (native; release not predicted) |
+
+## A. pause (pax#73, item 6)
+
+`pause` (34) is `rt_sigsuspend` with the caller's own mask
+(`kernel/user`): it answers -EINTR only after a handler ran, and waits
+through SIGCHLD and SIGURG at their default, SIGCONT to a running
+process, an ignored signal, and a stop and a continue; SIGKILL ends it.
+Measured (`P` of `gaps`, real root's guest and PAX, root and 1000:1000,
+byte-identical). Trunk answered -ENOSYS at once (the child reported it
+on every round). `tests/mpx5-users`' sig targets, which wait in `pause`,
+no longer spin: sig's 99 of 102 rows as before, its -ENOSYS list `273
+334`.
+
+## B. rt_sigsuspend across a stop and another thread's take (pax#75, item 8)
+
+Measured on Linux first (`U` of `gaps`, this lane's first guest boot,
+`notes/px49/linux-first-gaps*.txt`): (a) SIGSTOP and SIGCONT to a child
+waiting in `sigsuspend`: it keeps waiting, and a later SIGUSR1 with a
+handler ends it (-EINTR); (b) a SIGTSTP blocked and pending at its
+default, then `sigsuspend` with an empty mask: the child stops; SIGCONT:
+it keeps waiting; (c) two threads, A in `sigsuspend` and B (the main
+thread) sending the process SIGUSR1 while blocking it and then
+unblocking it, 20 rounds: each signal handled once, and A **never**
+leaves `sigsuspend` without its own handler (0 of 20); a `tgkill` to B
+leaves A waiting.
+
+PAX's trunk: (a) right (a SUSPEND thread is not readied by a stop or a
+continue), (b) `sigsuspend returned EINTR, with no handler run` at the
+SIGCONT, (c) 20 of 20 returns without A's handler (A was woken as the
+signal's taker, B took it first, A found nothing and was let go). The
+fix is one rule in `kernel/signal`'s `on_return`: a thread on its way
+back to ring 3 from `rt_sigsuspend` (W_SUSPEND) with nothing to take
+goes back to its wait (`sched.resuspend`: state SUSPEND, the same frame
+with -EINTR in it, the same mask and the same mask to put back), so
+only a handler (or the process's end) lets it go. px48's `suspend_over`
+is gone. Measured: `U`, byte-identical as root and as 1000:1000.
+
+## C. TIOCSTI, TCFLSH and TCSBRK (pax#74, item 7)
+
+| request | Linux (real root's guest, a pseudo-terminal; kasumi's `dev.tty.legacy_tiocsti` 0) | PAX (`kernel/console`) |
+|---|---|---|
+| TCFLSH (0x540b) | the background rule first (SIGTTOU, as TCSETS); TCIFLUSH discards a typed line not read (a read after it: 0 bytes); TCOFLUSH, TCIOFLUSH 0; 3 -EINVAL | the same; TCIFLUSH and TCIOFLUSH empty the input queue and the line being edited; TCOFLUSH has nothing to discard (the console writes as it is asked) |
+| TCSBRK (0x5409) | after the background rule (SIGTTOU for arg 1 and arg 0): `tcdrain` 0, `tcsendbreak` 0 at once | the same; no break is put on COM1 (named) |
+| TIOCSTI (0x5412) | root: 0, the byte read back as typed, also into a terminal that is not its own (a child in a session of its own put `w` in main's input); a bad pointer -EFAULT; a user: -EIO before anything else | the same: `dev.tty.legacy_tiocsti` 0 is PAX's fixed setting; the byte goes through the line discipline's `input`; a key that raises a signal raises it at the next interrupt (named) |
+
+**An output flush on a pseudo-terminal discards what its reader has not
+taken**: the container's first run lost the three lines printed just
+before TCOFLUSH (`notes/px49/container-first-gaps-user.txt`), which the
+guest's faster reader had taken. The probe waits 1.5 s before each
+output flush. PAX's console has no output queue: nothing is lost.
+
+**A host that lets a user TIOCSTI.** The container's user is refused
+TIOCSTI only where its host's `dev.tty.legacy_tiocsti` is 0 (kasumi's;
+the guest's own kernel too). A CI runner whose kernel says 1 would let
+the container's user put a byte in its terminal: `tests/mpx5-jobs`
+reads the host's setting and, when it is not 0, leaves `gaps-user`'s
+TIOCSTI rows out of the container's comparisons (J0, J3), named; J7
+holds PAX to real root's recording all the same.
+
+Measured: `I` of `gaps`, byte-identical as root and as 1000:1000.
+
+## D. sendfile and splice from the background under TOSTOP (pax#76, item 9)
+
+`sendfile` from a file and `splice` from a pipe to the controlling
+terminal by a background group: without TOSTOP written; under TOSTOP the
+group is stopped by SIGTTOU, and again when continued in the background;
+given the foreground and continued, the call runs again and writes; with
+SIGTTOU ignored, written (Linux measured, `B` of `gaps`). PAX's
+`files.sendfile` and `files.splice` now ask `console.job(J_WRITE)`
+before they write the console, as `write` does; its `JOB_STOP` rewinds
+the call (px48's). Trunk wrote at once under TOSTOP (`B: sendfile under
+TOSTOP: sendfile answered its count`). Measured: `B`, byte-identical.
+
+## E. fstat's owner of sockets, an eventfd and an epoll object (pax#58, item 1)
+
+Root, making each object under `setfsuid(1001)`/`setfsgid(2001)` (a
+listener under 1001, a client under 1002, the `accept` under 1003), and
+a user (all 1000:1000): an AF_INET datagram socket, a TCP socket, the
+client end and the end `accept` made are the **maker's file-system
+ids** (the acceptor's, 1003:2003, for the accepted end), as px43
+measured for a pipe; an eventfd and an epoll object are **0:0** on real
+root's guest (an anonymous inode is one, the kernel's) and **65534:65534**
+in the container (the host's root, unmapped in its user namespace: the
+overflow id), so the probe prints for those two only that they are not
+the maker's. PAX keeps the maker's file-system ids in the open file's
+free word 7 (`O_OWNER`) for K_INET and K_TCP (`files.owned`, set where
+`socket` and `accept` make the descriptor); `n_owner` finds the one open
+file that names the socket. An eventfd and an epoll object stay 0:0, as
+Linux's. Trunk: every socket 0:0. Measured: `O`, byte-identical.
+
+## F. faccessat2's AT_SYMLINK_NOFOLLOW and AT_EMPTY_PATH (pax#60, item 2)
+
+Measured (`A` of `gaps`): AT_SYMLINK_NOFOLLOW asks of a last link itself
+— its mode is 0777, so R_OK, W_OK and X_OK are 0 for root and a user
+alike (with AT_EACCESS too), a dangling link's F_OK 0 (-ENOENT
+following it); on a file it changes nothing (a user's R_OK of root's
+0600 file -EACCES). AT_EMPTY_PATH with `""` asks the descriptor's file
+(a user's W_OK of root's 0644 file -EACCES, its R_OK 0; the 1777
+directory's W_OK 0; AT_FDCWD the working directory); without the flag
+`""` is -ENOENT; with a name the flag changes nothing; a closed
+descriptor -EBADF; the flag 0x2 -EINVAL. PAX: `faccessat` takes both
+flags (`resolve_who` with `empty_ok` and F_NO for the last link). Trunk:
+-EINVAL for either. Measured: `A`, byte-identical.
+
+## G. fallocate's modes (pax#63, item 3)
+
+On the guest's root (tmpfs), each row on a fresh 10-byte file of mode
+06755 (`F` of `gaps`):
+
+| mode | Linux | the file after | PAX |
+|---|---|---|---|
+| 0, KEEP_SIZE (1), KEEP_SIZE past the end | 0 | mode 0: grown; KEEP_SIZE: the size kept | served (KEEP_SIZE sets nothing aside: named, as mode 0's hole) |
+| PUNCH_HOLE\|KEEP_SIZE (3), over the end, past the end | 0 | the range inside the size reads as zero, the size kept | served (`tree.punch`: the frames kept, zeroed) |
+| PUNCH_HOLE alone, ZERO_RANGE (with KEEP_SIZE or not), COLLAPSE_RANGE, INSERT_RANGE (each with KEEP_SIZE or not), UNSHARE_RANGE, PUNCH_HOLE\|ZERO_RANGE\|KEEP_SIZE, the bit 0x100 | -EOPNOTSUPP | unchanged | the same, no longer refused by name (px44's `R_FALLOC` is gone) |
+| KEEP_SIZE with length 0; PUNCH_HOLE\|KEEP_SIZE at -1 | -EINVAL | unchanged | the same (px44's order) |
+| a pipe; a read-only descriptor | -ESPIPE; -EBADF | — | the same |
+
+A served mode takes a user's set-ID bits as a write does, past the end
+too (06755 → 0755 for the user, kept for root); a refused one keeps
+them. Trunk: -EOPNOTSUPP refused by name for every mode but 0 (30
+`refused:` lines in its boot). Measured: `F`, byte-identical.
+
+## H. A user's unlink of /dev, /proc and /sys (pax#70, item 4)
+
+`unlinkat` asked the directory's write and search (`unname`) only when
+both the directory and the name were the tree's inodes, so `/dev`,
+`/proc` and `/sys`, names in `/` that are not, answered -EISDIR to
+anyone. Now a name in a directory of the tree that is no inode of it
+asks the directory's write and search first. Root's answers measured on
+real root's guest (`D` of `gaps`: -EISDIR for all three); a user's in
+the container, where `/` is root's 0755 as PAX's is (ruling #85: the
+guest's initramfs root is 1777, so the guest is no reference for it):
+`tests/mpx3-tree`'s probes and probes-user, a new line `remove: unlink
+of /dev -21, of /proc -21` (root) and `-13, -13` (the user), T1 green on
+both. The container has no `/sys` (`tools/linux-tree` without `--sys`),
+so the user's `/sys` is asked by neither side. Trunk's kernel with the
+branch's probes-user image: `-21, -21` for the user (§J), which T1 holds
+against the container's `-13, -13`.
+
+## I. procs-user's own witness (pax#71, item 5)
+
+`user/elf/procs.c` prints `creds: getresuid 0: R E S; getresgid 0: R E
+S` after its ids; `tests/mpx3-shell`'s new **S7** holds each side's own
+line, on PAX and on Linux, to root's 0s (procs, procs-quiet) or the
+user's 1000s (procs-user). S2 cannot see a broken `as`: the container
+runs the same `as` and agrees with itself. Plant A (§K) is red there.
+On kasumi: S7 PASS on all three sessions, procs-user's S2 46 lines.
+
+## J. The pins (items 10, 11)
+
+`user/pelt.pin` → pelt `1102498` (sh17); `user/boreutils.pin` →
+boreutils `8f0bbb1` (bu25), each its own commit. Built in `px13-ubuntu`
+by the suites' own tools (`tools/mkpelt` with `ld.lld`,
+`tools/mkboreutils`): pelt **`07bb5156919c1b9ceb2e97c755a377a33aee10910969d713f2d0faf3f75c2819`**,
+15,047,176 bytes, and cat **`1f00ef21b92277704045004df6bcf60b099da10fa637f9155a9c189a32ef0790`**,
+13,952,560 bytes, in `mpx3-shell`'s build and again in `mpx3-tree`'s
+(two builds, each digest read in each; `notes/px49/kasumi-mpx3-shell.out`,
+`kasumi-mpx3-tree.out`), the same as sh17's and bu25's own; CI's builds
+in §L.
+
+**What moved.** No compared session's text moved with either pin, on
+kasumi (`mpx3-shell`, `mpx3-tree`, `mpx3-speaker`, `mpx5-accounts`,
+`mpx3-boreutils`, `mpx3-console`, `mpx3-screen`) or in CI (every suite,
+§L): nothing PAX types asks an alias, `type`, `command`, `$'…'`,
+`pipefail` or `read`'s corners, and cat's new calls on PAX find no
+`/proc/self/fd/1` and refuse nothing (a `statx` of a missing name is
+-ENOENT, no `refused:` line). So nothing was re-recorded; the recorded
+references (`tests/mpx3-speaker.d/linux/`, `tests/mpx5-accounts.d/linux/`,
+`user/console/*.expect`) are held by their suites against the new
+binaries and stood.
+
+**cat's refusal, dark on PAX.** bu25's cat refuses an input that is its
+output by asking `/proc/self/fd/1` and `/proc/self/fdinfo/1`; PAX lists
+`/proc/<pid>/fd` (px45) but a lookup of an entry is -ENOENT, so on PAX
+the check finds nothing. Recorded once, mpx3-tree's shell image
+(`notes/px49/cat-dark.sh`): `echo abc > /cf`, then `cat /cf >> /cf;
+echo "status $?"`. The container: `cat: /cf: input file is output
+file`, `status 1`, `/cf` still `abc`. PAX: `cat` ran on, copying what it
+appended, and had not ended when the 600 s ran out
+(`notes/px49/cat-dark-pax.txt`, `cat-dark-linux.txt`). `/proc/self/fd`
+is not added in this lane (the contract).
+
