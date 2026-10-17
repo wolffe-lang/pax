@@ -622,7 +622,8 @@ hasu's likewise.
   `kasumi-mpx5-users-f660b32.out`, `kasumi-mpx3-threads-f660b32.out`,
   `kasumi-mpx3-shell-f660b32.out`, `kasumi-mpx5-accounts-f660b32.out`,
   `kasumi-mpx3-screen-f660b32.out`, `kasumi-mpx3-speaker-f660b32.out`,
-  `kasumi-mpx3-console-f660b32.out`, `kasumi-mpx3-tree-f660b32.out`
+  `kasumi-mpx3-console-f660b32.out`, `kasumi-mpx3-tree-f660b32.out`,
+  `kasumi-mpx3-boreutils-f660b32.out`
   (`mpx4-session` and `mpx4-lobo` need a container engine on the host
   for their Linux sides, which this lane's kasumi wrapper builds inside
   one: CI's runs only).
@@ -631,7 +632,11 @@ hasu's likewise.
 - **The kernel's cost**: `notes/px48/kasumi-kernel-cost.txt`.
 - **The plants on kasumi**: `notes/px48/kasumi-plant-a-bf939d8.out`,
   `kasumi-plant-b-4ff0135.out`; in CI: §J and the pull request.
-- **CI**: named in the pull request (a commit naming the head's runs
+- **CI at the code head** `f660b32` (the pull request's first push):
+  run 39031284481, a **full** tier (the branch changes `tools/qemu-halt`,
+  a harness file, so every suite ran on every leg), 34 of 34 jobs
+  green, `mpx5-jobs` among them on all four legs; the plants' runs §J.
+  The final head's run: named in the pull request (a commit naming it
   would move the head).
 
 ### A slip
@@ -698,10 +703,11 @@ One command of this lane wrote an 8,813-byte scratch file to kasumi's
         100,000-round soak as root and as 1000:1000
   - [x] `tests/mpx5-users`, `mpx3-threads`, `mpx3-shell`,
         `mpx5-accounts`, `mpx3-screen`, `mpx3-speaker`, `mpx3-console`,
-        `mpx3-tree` on kasumi
+        `mpx3-tree`, `mpx3-boreutils` on kasumi
   - [x] `tests/ci-plan`, every case, four of them new
   - [x] plants A and B red on kasumi; in CI: the pull request
-  - [ ] the pr tier at the final head, and `tier full`: named in the PR
+  - [x] CI at the code head `f660b32`: run 39031284481, `tier full`, 34 of 34
+  - [ ] `tier full` at the final head: named in the PR
 - `wolf/tools/lane-audit.sh pax px48 72` exit status: named in the PR.
 - Trees: kasumi `~/lanes/px48/` keeps `out/`, `vm/rec4`, `bin/`,
   `keep/`; build directories removed at the end. hasu `~/lanes/px48/`
