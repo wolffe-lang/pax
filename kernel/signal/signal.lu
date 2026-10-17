@@ -954,10 +954,9 @@ pub fn on_return(f: u64) -> u64 {
         }
         if !sched.signal_waits() {
             let (susp, _was) = sched.self_suspended()
-            if susp {
-                // px49 (pax#75): out of rt_sigsuspend with no handler run
-                // (a stop and a continue, or another thread took the
-                // signal): it waits again.
+            if susp && sched.self_pid() == 0 {
+                // PLANT px49-plant-b: a thread out of rt_sigsuspend with no
+                // handler run is let go (-EINTR), as before px49.
                 g = sched.resuspend(g)
                 guard += 1
                 continue
