@@ -740,7 +740,28 @@ against real root's recordings and a container's, and by a row each in
   a signal raises it at the next interrupt; `/proc/self/fd` links (a
   lookup of an entry is -ENOENT, so boreutils' `cat` cannot tell an
   input that is its output on PAX and `cat f >> f` copies without end:
-  `notes/px49/cat-dark-*.txt`).
+  `notes/px49/cat-dark-*.txt`; px50 serves them, below).
+
+## The descriptor table in /proc (px50)
+
+pax#78, #80 and #79, measured black-box against Linux as root and as a
+user (`notes/px50-the-fd-table.md`) by px50's probe (`user/elf/fdtab.c`,
+`tests/mpx5-jobs`' fds image on kmain_session) against real root's
+recordings and a container's, and by boreutils' `cat` with its input
+its output in two typed sessions (`tests/mpx3-tree`'s shell-inout and
+shell-inout-user).
+
+| module | what |
+|---|---|
+| `procfs/` | `/proc/<pid>/fdinfo` (0555, the process's effective ids whatever its dumpable state) and an entry per open descriptor (0444, the files' owner rule); `/proc/self/fd` and `/proc/self/fdinfo` are the reader's own, and `/proc/self` lists them; `fd/` is root's while the process is not dumpable and its ids again as a zombie; fdinfo's text (`fdinfo`: `pos`, `flags` in octal, `mnt_id`, `ino`; an eventfd's `eventfd-count` sixteen wide, `eventfd-id`, `eventfd-semaphore`; an AF_UNIX socket's `scm_fds`) |
+| `files/` | a lookup in `fd/` and `fdinfo/` finds an open descriptor's entry (no sign, no leading zero); **an `fd/` entry is a magic link**: a walk follows it where it would follow a link, to the descriptor's own node, after `ptrace(2)`'s read mode (`may_trace`, px45's rule now shared), so `stat`, `statx`, `chdir` and a walk through a directory's entry reach the target; `open` through it reopens (a pipe's end as the end asked, by its owner and 0600; a socket -ENXIO; an eventfd or epoll object -EACCES or -ENXIO); `lstat` of an entry is a link of its access mode's bits (0500, 0300, 0700), 64 bytes, and `fd/` is as large as the descriptors open; `readlink` reads `fd_text` (a file's path from the directory it was opened in, held by the open file's words 5 and 6, renames followed; a removed name's `<path> (deleted)` kept by `mark_gone`; `pipe:[N]`, `socket:[N]`, `anon_inode:[eventfd]`, `anon_inode:[eventpoll]`; the console as `/dev/ttyS0`; `/proc/self/…` as `/proc/<pid>/…`); a process enters its own `fd/` and `fdinfo/` whatever their owner, and a lookup in another's asks the read mode; `stat` of `/dev/stdin`, `stdout`, `stderr` answers the descriptor's node; `rmdir` and `rename` of `/proc` and `/sys` as of `/dev` (pax#80: -EACCES to a user, -EBUSY to root; `rename("/proc", "/proc")` 0), and nothing is removed in them (-EPERM) |
+| `cred/`, `user/` | `prctl(PR_SET_DUMPABLE, 0 or 1)` |
+
+- What is not there: the name a file was opened by when the directory
+  it was opened in has another name for it (a second hard link in the
+  same directory reads as the first); the `fdinfo` lines of descriptors PAX has no kind for (inotify, signalfd,
+  timerfd); a TCP socket's fdinfo past the four lines (not asked of
+  Linux).
 
 ## Who may name, change and keep (px44)
 
