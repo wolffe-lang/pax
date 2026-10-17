@@ -23,6 +23,18 @@
 #           ^Z, `bg`, `fg`, ^C, `kill %2`, `wait`, …);
 #   shell-user  `/bin/as 1000 1000 /bin/sh -i`: jobs-shell.keys,
 #           prompt `$ `, the same keys.
+#   gaps    px49: `/bin/gaps`, then `/bin/as 1000 1000 /bin/gaps`
+#           (user/elf/gaps.c, tools/mkjobs): pause, rt_sigsuspend across
+#           a stop and another thread's take, TIOCSTI, TCFLSH and TCSBRK,
+#           sendfile and splice from the background under TOSTOP, fstat's
+#           owner of sockets, an eventfd and an epoll object,
+#           faccessat2's flags, fallocate's modes, root's unlink of /dev,
+#           /proc and /sys (pax#58, #60, #63, #70, #73-#76);
+#           user/console/gaps.keys typed twice (one line, `zap`, which
+#           TCFLSH discards), prompt `$ `. Its archive has /g (1777) and
+#           root's /g/r644, /g/r600 and /g/sf. Its kernel is
+#           kmain_session (the console as kmain_console's, and the
+#           network stack: the TCP rows connect to 127.0.0.1).
 # Each command of the probe image is a process the kernel starts: a
 # session leader with the console as its controlling terminal (named:
 # Linux's init has neither), as the probe and the shell are on Linux on
@@ -69,6 +81,14 @@
 #   J6 -ENOSYS only for set_robust_list (273) and rseq (334); no
 #      `refused:` line; the end: `PAX: init /bin/… ended with status 0;
 #      nothing left to run`, `halt`, held halted.
+#   J7 px49: gaps as root and as 1000:1000, byte-identical to real root's
+#      recordings (tests/mpx5-jobs.d/linux/gaps.tty, gaps-user.tty: the
+#      guest's notes/px49/vmjob.c, which brings the loopback up and
+#      mounts /sys first), the user's to the container's too (J3); its
+#      J4 witness asks rows a user's run and root's answer differently
+#      (TIOCSTI on its own terminal, the accepted end's owner under
+#      setfsuid, a 0600 file through a link) and the rows each gap's fix
+#      turns (#75's two threads, #76's sendfile and splice stopped).
 #
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
@@ -101,32 +121,38 @@ REC=$here/mpx5-jobs.d/linux
 JKEYS=$PAX_ROOT/user/console/jobs.keys
 SKEYS=$PAX_ROOT/user/console/jobs-shell.keys
 UKEYS=$SKEYS # the same keys; the user's prompt is `$ `
+GKEYS=$PAX_ROOT/user/console/gaps.keys # px49
+GAPS_SF='B: the sendfile reached the terminal' # /g/sf's line (and /g/r644's, /g/r600's)
 # image: its run list (one command a line), its keys, its prompt.
 image_runs() {
     case $1 in
         probe) printf '%s\n' /bin/jobs '/bin/as 1000 1000 /bin/jobs' "/bin/jobs soak $SOAK" "/bin/as 1000 1000 /bin/jobs soak $SOAK" ;;
         shell) printf '%s\n' '/bin/sh -i' ;;
         shell-user) printf '%s\n' '/bin/as 1000 1000 /bin/sh -i' ;;
+        gaps) printf '%s\n' /bin/gaps '/bin/as 1000 1000 /bin/gaps' ;;
     esac
 }
+image_kernel() { case $1 in gaps) echo kmain_session ;; *) echo kmain_console ;; esac; } # px49
 image_prompt() { case $1 in shell) printf '# ' ;; *) printf '$ ' ;; esac; }
 image_keys() { # image -> a keys file (the probe's typed twice: its two typed runs)
     case $1 in
         probe) cat "$JKEYS" "$JKEYS" ;;
         shell) cat "$SKEYS" ;;
         shell-user) cat "$UKEYS" ;;
+        gaps) cat "$GKEYS" "$GKEYS" ;;
     esac
 }
 # boot: image and keyboard. The probe over both; the shells over COM1.
-BOOTS="probe:serial probe:ps2 shell:serial shell-user:serial"
+BOOTS="probe:serial probe:ps2 shell:serial shell-user:serial gaps:serial"
 # Each typed run's name, by image and run number, and its recording.
 run_name() { # image k
     case $1:$2 in
         probe:1) echo probe ;; probe:2) echo probe-user ;; probe:3) echo soak ;; probe:4) echo soak-user ;;
         shell:1) echo shell ;; shell-user:1) echo shell-user ;;
+        gaps:1) echo gaps ;; gaps:2) echo gaps-user ;;
     esac
 }
-TYPED="probe probe-user shell shell-user"
+TYPED="probe probe-user shell shell-user gaps gaps-user"
 
 work=$PAX_BUILD/mpx5-jobs
 runs=$PAX_BUILD/mpx5-jobs-runs.txt
@@ -159,6 +185,13 @@ linux_side() { # dir -> reasons on stdout
     else
         printf ' tools/linux-tree shell-user;'
     fi
+    # px49: gaps as 1000:1000, /g's modes as the archive gives them.
+    if "$PAX_ROOT/tools/linux-tree" --root "$1/groot" --keys "$GKEYS" --prompt '$ ' --argv0 /bin/as --size 256m --rdev --nsproc \
+        --owners "$1/gaps.owners" "$1/linux/gaps-user.tty" -- /bin/as 1000 1000 /bin/gaps; then
+        say "  linux gaps-user: $(wc -c < "$1/linux/gaps-user.tty" | tr -d ' ') bytes, status $(cat "$1/linux/gaps-user.tty.rc")"
+    else
+        printf ' tools/linux-tree gaps-user;'
+    fi
 }
 
 if [ "$only" = linux ]; then
@@ -180,6 +213,7 @@ if [ -z "$images" ]; then
     "$PAX_ROOT/tools/mkas" "$work/bin" > "$work/as.txt" || why+=" tools/mkas;"
     "$PAX_ROOT/tools/fetch-busybox" "$work/bin" > "$work/busybox.txt" || why+=" tools/fetch-busybox;"
     cp "$work/bin/jobs" "$r/bin/jobs" 2>/dev/null || why+=" no jobs;"
+    cp "$work/bin/gaps" "$r/bin/gaps" 2>/dev/null || why+=" no gaps;"
     cp "$work/bin/as" "$r/bin/as" 2>/dev/null || why+=" no as;"
     cp "$work/bin/busybox" "$r/bin/sh" 2>/dev/null || why+=" no busybox;"
     cp "$work/bin/busybox" "$r/bin/sleep" 2>/dev/null || true
@@ -193,21 +227,36 @@ if [ -z "$images" ]; then
             /bin/sh="$r/bin/sh":755 /bin/sleep="$r/bin/sleep":755 /etc/pax-run="$work/$im.run":644 > "$work/$im.initramfs.txt" \
             || why+=" tools/mkinitramfs $im;"
     done
+    # px49: the gaps image, and the same tree for the container (its
+    # modes by --owners, as the archive's).
+    g=$work/groot
+    mkdir -p "$g/bin" "$g/etc" "$g/g"
+    cp "$r/bin/gaps" "$r/bin/as" "$g/bin/" 2>/dev/null || why+=" no gaps or as for the gaps tree;"
+    printf '%s\n' "$GAPS_SF" > "$work/gaps.sf"
+    for f in r644 r600 sf; do cp "$work/gaps.sf" "$g/g/$f"; done
+    printf '%s\n' '/g 1777 0 0' '/g/r644 644 0 0' '/g/r600 600 0 0' '/g/sf 644 0 0' > "$work/gaps.owners"
+    image_runs gaps > "$work/gaps.run"
+    "$PAX_ROOT/tools/mkinitramfs" "$work/gaps.cpio" /bin/gaps="$r/bin/gaps":755 /bin/as="$r/bin/as":755 /g/:1777 \
+        /g/r644="$work/gaps.sf":644 /g/r600="$work/gaps.sf":600 /g/sf="$work/gaps.sf":644 /etc/pax-run="$work/gaps.run":644 \
+        > "$work/gaps.initramfs.txt" || why+=" tools/mkinitramfs gaps;"
     for tier in $tiers; do
         flag=(); [ "$tier" = release ] && flag=(--release)
         mkdir -p "$work/$tier"
-        log=$work/$tier/kmain_console.build-kernel.log
-        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
-            for im in probe shell shell-user; do
-                "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
-                    --add "$work/$im.cpio" initramfs.cpio "$elf" "$work/$tier/$im.iso" >/dev/null \
-                    || why+=" $tier $im: mkimage;"
-                say "built $tier $im: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/$im.iso"), initramfs $(sha256_of "$work/$im.cpio")"
-            done
-        else
-            cat "$log" >&2
-            why+=" $tier kmain_console: tools/build-kernel;"
-        fi
+        for kn in kmain_console kmain_session; do
+            log=$work/$tier/$kn.build-kernel.log
+            if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/$kn.lu" "$work/$tier" 2>"$log"); then
+                for im in probe shell shell-user gaps; do
+                    [ "$(image_kernel "$im")" = "$kn" ] || continue
+                    "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                        --add "$work/$im.cpio" initramfs.cpio "$elf" "$work/$tier/$im.iso" >/dev/null \
+                        || why+=" $tier $im: mkimage;"
+                    say "built $tier $im: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/$im.iso"), initramfs $(sha256_of "$work/$im.cpio")"
+                done
+            else
+                cat "$log" >&2
+                why+=" $tier $kn: tools/build-kernel;"
+            fi
+        done
     done
     for n in $TYPED; do
         for f in "$n.tty" "$n.tty.rc" "vm-$n.meta"; do
@@ -215,7 +264,7 @@ if [ -z "$images" ]; then
         done
     done
     if [ "$only" = build ]; then
-        [ -z "$why" ] && say "PASS J0 (build): kmain_console built ($tiers), every program static, the images built, the recordings there" || bad "J0 (build):$why"
+        [ -z "$why" ] && say "PASS J0 (build): kmain_console and kmain_session built ($tiers), every program static, the images built, the recordings there" || bad "J0 (build):$why"
         exit "$fail"
     fi
     if [ "$(uname -s)" != Linux ]; then
@@ -223,7 +272,7 @@ if [ -z "$images" ]; then
     else
         why+=$(linux_side "$work")
     fi
-    [ -z "$why" ] && say "PASS J0: kmain_console built ($tiers), every program static, the images built, the Linux side ran in a throwaway container" || bad "J0:$why"
+    [ -z "$why" ] && say "PASS J0: kmain_console and kmain_session built ($tiers), every program static, the images built, the Linux side ran in a throwaway container" || bad "J0:$why"
     images=$work
     if [ "$noboot" = 1 ]; then
         [ "$fail" = 0 ] && say "mpx5-jobs build (J0): PASS (no boot: --no-boot)" || say "mpx5-jobs build: FAIL"
@@ -236,7 +285,7 @@ lx=$images/linux
 for n in $TYPED; do
     norm_session "$REC/$n.tty" > "$images/rec-$n.cmp"
 done
-for n in probe-user shell-user; do
+for n in probe-user shell-user gaps-user; do
     if [ ! -f "$lx/$n.tty" ]; then
         bad "J0 linux $n: no $lx/$n.tty (build first, and run the Linux side)"
         continue
@@ -282,7 +331,7 @@ for leg in $legs; do
             bn=$im; [ "$kb" = ps2 ] && bn=$im-ps2
             id="$tier $leg $bn"
             log=$PAX_BUILD/mpx5-jobs-$tier-$leg-$bn.serial.log
-            elf=$images/$tier/kmain_console.elf iso=$images/$tier/$im.iso
+            elf=$images/$tier/$(image_kernel "$im").elf iso=$images/$tier/$im.iso
             rm -f "$log" "$log.verdict" "$log.typed"
             if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
                 bad "J6 $id: no image"
@@ -331,7 +380,7 @@ for leg in $legs; do
                         fi
                         cmp -s "$rec" "$out.cmp" || why+=" the session differs from real root's recording: $(diff "$rec" "$out.cmp" | head -n 14 | cut -c1-300 | tr '\n' '|');"
                         [ "$(wc -l < "$out.cmp" | tr -d ' ')" -gt 10 ] || why+=" a short session;"
-                        t=J1; case $n in shell*) t=J2 ;; esac
+                        t=J1; case $n in shell*) t=J2 ;; gaps*) t=J7 ;; esac
                         [ -z "$why" ] && say "PASS $t $id $n: $(wc -l < "$out.cmp" | tr -d ' ') lines byte-identical to real root's recording ($(sha256_of "$out.cmp" | cut -c1-12)…)" || bad "$t $id $n:$why"
                         case $n in
                             *-user)
@@ -353,6 +402,13 @@ for leg in $legs; do
                                         grep -qx 'K: the mixed groups: skipped by name (not root)' "$out.cmp" || why+=" no skip by name;" ;;
                             shell) grep -q '^~ # ' "$out.cmp" || why+=" no root prompt;" ;;
                             shell-user) grep -q '^~ \$ ' "$out.cmp" || why+=" no user prompt;" ;;
+                            # px49: who it is, by the rows that differ between root and a user.
+                            gaps) grep -qx "gaps: px49's probe, as root" "$out.cmp" || why+=" not root's;"
+                                  grep -qx "I: TIOCSTI 'q' on its own terminal: 0; a read then: 1 bytes \"q\"" "$out.cmp" || why+=" no root's TIOCSTI row;"
+                                  grep -qx 'O: the end accept made: 1003:2003 (the maker'"'"'s file-system ids)' "$out.cmp" || why+=" no root's accept row;" ;;
+                            gaps-user) grep -qx "gaps: px49's probe, as a user" "$out.cmp" || why+=" not a user's;"
+                                       grep -qx "I: TIOCSTI 'q' on its own terminal: EIO; a read then: 0 bytes" "$out.cmp" || why+=" no user's TIOCSTI row;"
+                                       grep -qx 'A: R_OK through the link: EACCES' "$out.cmp" || why+=" no user's refused access row;" ;;
                         esac
                         case $n in
                             probe*) for w in 'T: ^C with the job in the foreground: heard J1:INT,J2:INT' \
@@ -362,6 +418,11 @@ for leg in $legs; do
                                     done ;;
                             shell*) for w in Stopped Running Terminated Done; do
                                         grep -q "^\[[0-9]\]. *$w" "$out.cmp" || why+=" no '$w' job line;"
+                                    done ;;
+                            gaps*) for w in 'U: two threads, a process signal: 20 signals sent, each handled once yes; A left sigsuspend without its own handler 0 times; A waits at the end yes' \
+                                            'B: sendfile under TOSTOP: stopped by TTOU; continued in the background: stopped by TTOU' \
+                                            'B: splice under TOSTOP: stopped by TTOU; continued in the background: stopped by TTOU'; do
+                                        grep -qxF "$w" "$out.cmp" || why+=" no '$w';"
                                     done ;;
                         esac
                         [ -z "$why" ] && say "PASS J4 $id $n: its own witness (who it runs as, the foreground group's keys, the job lines)" || bad "J4 $id $n:$why"
