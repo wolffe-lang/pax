@@ -23,6 +23,11 @@
 # --sys (px34, with --root): DIR/sys a sysfs mount and DIR/sys/fs/cgroup
 # a cgroup2 mount as well (lobo reads /sys/fs/cgroup/cpu.max and
 # /sys/devices/system/cpu/online), removed at the end too.
+# --nsproc (px48, with --root and --pid1): DIR/proc is mounted by PROG's
+# own pid namespace (by its pid 1, before the chroot), so /proc/<pid>
+# names the pids PROG and its children see (getpid's); without it the
+# proc mount is the namespace this tool runs in, where /proc/self is
+# right and /proc/<pid> of a namespace pid is another process.
 # --pid1 (px14): PROG is the first process of a fresh pid namespace,
 # pid 1 as PAX's first program is, its children numbered 2, 3, … and
 # orphans reparented to it. Both need root (CI runs this under sudo). Before PROG starts, the terminal's settings
@@ -114,6 +119,7 @@ def main(argv):
     pid1 = False
     sysfs = False
     rdev = False
+    nsproc = False
     args = argv[1:]
     while args and args[0].startswith("--") and args[0] != "--":
         if args[0] == "--keys":
@@ -138,6 +144,10 @@ def main(argv):
             rdev = True
             args = args[1:]
             continue
+        elif args[0] == "--nsproc":
+            nsproc = True
+            args = args[1:]
+            continue
         elif args[0] == "--isig":
             args = args[1:]
             continue
@@ -145,7 +155,9 @@ def main(argv):
             die("unknown option %s" % args[0])
         args = args[2:]
     if not keys or prompt is None or len(args) < 3 or args[1] != "--":
-        die("usage: linux-tty --keys KEYS --prompt TEXT [--cwd DIR] [--argv0 NAME] [--root DIR] [--pid1] [--sys] [--rdev] [--isig] OUT -- PROG [ARG...]")
+        die("usage: linux-tty --keys KEYS --prompt TEXT [--cwd DIR] [--argv0 NAME] [--root DIR] [--pid1] [--nsproc] [--sys] [--rdev] [--isig] OUT -- PROG [ARG...]")
+    if nsproc and not (root and pid1):
+        die("--nsproc needs --root and --pid1")
     out, prog = args[0], args[2:]
     steps = [l.rstrip("\n") for l in open(keys)]
     pb = prompt.encode()
@@ -170,7 +182,7 @@ def main(argv):
         mounted.append(os.path.join(root, "dev"))
         if rdev:
             detach.append(os.path.join(root, "dev"))
-        if subprocess.call(["mount", "-t", "proc", "proc", os.path.join(root, "proc")]) != 0:
+        if not nsproc and subprocess.call(["mount", "-t", "proc", "proc", os.path.join(root, "proc")]) != 0:
             unmount(mounted, detach)
             die("cannot mount proc in %s" % root)
         mounted.append(os.path.join(root, "proc"))
@@ -201,6 +213,11 @@ def main(argv):
             a = termios.tcgetattr(0)
             a[0] &= ~termios.IXON
             termios.tcsetattr(0, termios.TCSANOW, a)
+            if nsproc:
+                # px48: this child is the new namespace's pid 1: its proc.
+                libc = ctypes.CDLL(None, use_errno=True)
+                if libc.mount(b"proc", os.path.join(root, "proc").encode(), b"proc", 0, None) != 0:
+                    raise OSError(ctypes.get_errno(), "mount proc in the new pid namespace")
             if root:
                 os.chroot(root)
             os.chdir(cwd)
