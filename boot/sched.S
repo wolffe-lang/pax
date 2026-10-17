@@ -75,7 +75,8 @@
 
    Storage (.bss, zero until kernel/sched writes it):
      pax_threads       64 thread slots (16 before px24), 512 bytes each (kernel/sched's
-                       #[repr(c)] Thread, 312 bytes of it; 72 before
+                       #[repr(c)] Thread, 400 bytes of it since px48's
+                       eight job-control words, 336 before; 72 before
                        px09's cr3 and prog, 88 before px10's entry, usp,
                        name and name_len, 120 before px12's fs; 128-byte
                        slots before px14's pid, ppid, status, owns,
@@ -98,7 +99,8 @@
                        `sig_info`), for the siginfo a handler is given
      pax_sched_locks   eight 8-byte lock words (kernel/sync; word 0 is
                        the console's)
-     pax_sched_state   sixteen 8-byte words: the scheduler's scalars
+     pax_sched_state   thirty-two 8-byte words (sixteen before px48's
+                       console session words): the scheduler's scalars
                        (the current slot, the run queue's ends, …),
                        kept here and read volatile rather than in module
                        `var`s, which wolf 0.2.24 forwards across a call
@@ -194,6 +196,6 @@ pax_sched_locks:
         .p2align 6
         .globl pax_sched_state
 pax_sched_state:
-        .zero 128
+        .zero 256
 
         .section .note.GNU-stack, "", @progbits
