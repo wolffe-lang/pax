@@ -155,8 +155,7 @@
 //!   `setresgid` (119), `getresgid` (120), `setfsuid` (122), `setfsgid`
 //!   (123) follow Linux's rules for root and for a user; `prctl` answers
 //!   PR_GET_DUMPABLE, PR_GET_KEEPCAPS, PR_GET_SECUREBITS and
-//!   PR_GET_NO_NEW_PRIVS. `capget`, `capset` and the process-group
-//!   calls stay -ENOSYS.
+//!   PR_GET_NO_NEW_PRIVS. `capget` and `capset` stay -ENOSYS.
 //! - who a file belongs to (px42, the second lane): a new name is
 //!   stamped with its maker's file-system ids, `chown` (92), `fchown`
 //!   (93), `lchown` (94) and `fchownat` (260) keep any id and follow
@@ -171,6 +170,13 @@
 //!   taken by a write, AF_UNIX `connect`, and `fallocate` (285, mode
 //!   0: a file made at least so long). Signals, ports and devices still
 //!   ask nobody (U5).
+//! - job control (px48, kernel/process, kernel/sched, kernel/console):
+//!   `setpgid` (109), `getpgrp` (111), `setsid` (112), `getpgid` (121),
+//!   `getsid` (124); the console as a controlling terminal (TIOCSCTTY,
+//!   TIOCNOTTY, TIOCGPGRP, TIOCSPGRP, TIOCGSID) and its background rules
+//!   (a read or write of it the console refuses with `console.JOB_STOP`
+//!   runs again once the caller's group, which it has just signalled, is
+//!   continued); stops and continues; waits by group.
 //! Every other number is -ENOSYS, logged once per program (`unknown`),
 //! among them `set_robust_list` (273) and `rseq` (334), which glibc
 //! tolerates (px09's hello asks `_sysctl` (156), which Linux answers
@@ -627,6 +633,14 @@ fn write(fd: u64, buf: u64, len: u64) -> u64 {
         return socket.sendto(area(), paging.live(), fd, buf, len, 0, 0, 0) // px22
     }
     let t = files.write_target(area(), fd)
+    if t == 1 {
+        // px48: a background writer of its controlling terminal under
+        // TOSTOP is sent SIGTTOU (or told -EIO): kernel/console's `job`.
+        let j = console.job(console.J_WRITE)
+        if j != 0 {
+            return j
+        }
+    }
     if t == 2 {
         who()
         log.put(" write fd ")
@@ -807,6 +821,11 @@ const SYS_EXECVE: u64 = 59
 const SYS_WAIT4: u64 = 61
 const SYS_KILL: u64 = 62
 const SYS_GETPPID: u64 = 110
+const SYS_SETPGID: u64 = 109 // px48
+const SYS_GETPGRP: u64 = 111
+const SYS_SETSID: u64 = 112
+const SYS_GETPGID: u64 = 121
+const SYS_GETSID: u64 = 124
 const SYS_TKILL: u64 = 200
 const SYS_TGKILL: u64 = 234
 const SYS_WAITID: u64 = 247
@@ -922,6 +941,7 @@ const PR_GET_NO_NEW_PRIVS: u64 = 39
 const SYS_POLL: u64 = 7
 const SYS_WRITEV: u64 = 20
 const SYS_SIGALTSTACK: u64 = 131
+const SYS_RT_SIGSUSPEND: u64 = 130 // px48: an Almquist shell's `wait`
 const SYS_SCHED_GETAFFINITY: u64 = 204
 const SYS_EPOLL_WAIT: u64 = 232
 const SYS_EPOLL_CTL: u64 = 233
@@ -1359,6 +1379,19 @@ pub fn syscall(f: u64) -> u64 {
         put_word(f, W_RAX, 0)
         return sched.yield_current(f)
     }
+    if nr == SYS_RT_SIGSUSPEND {
+        // px48: sigsuspend(2), the mask for the wait (kernel/sched).
+        if a1 != 8 {
+            put_word(f, W_RAX, NEG_EINVAL)
+            return f
+        }
+        let pml4 = paging.live()
+        if !uaccess.readable(pml4, a0, 8) {
+            put_word(f, W_RAX, NEG_EFAULT)
+            return f
+        }
+        return sched.suspend_current(f, uaccess.get64(pml4, a0))
+    }
     if nr == SYS_SIGALTSTACK {
         // px24: it reads the caller's stack pointer from the frame.
         let r = signal.sigaltstack(f, a0, a1)
@@ -1445,6 +1478,16 @@ pub fn syscall(f: u64) -> u64 {
         // px23: a stream socket whose connection is over is the other
         // thing a write can find broken; the line says which.
         signal.pipe(socket.is_inet(area(), int32(a0)))
+    }
+    if r == console.JOB_STOP {
+        // px48: the console sent the caller's group SIGTTIN or SIGTTOU:
+        // the call runs again when the group is continued (the thread is
+        // parked on its way out, `signal.on_return`), or a handler runs
+        // and it is a waiting call's (SA_RESTART's, kernel/sched's
+        // `self_rewound`).
+        put_word(f, W_RIP, word(f, W_RIP) - 2)
+        put_word(f, W_RAX, nr)
+        return f
     }
     if r == console.RESTART {
         // px13: a read of the console with nothing ready. The thread
@@ -1775,6 +1818,22 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     }
     if nr == SYS_GETPPID {
         return sched.self_ppid()
+    }
+    // px48: process groups and sessions (kernel/process, kernel/sched).
+    if nr == SYS_SETPGID {
+        return process.setpgid(r0, a1)
+    }
+    if nr == SYS_GETPGRP {
+        return process.getpgid(0, false)
+    }
+    if nr == SYS_SETSID {
+        return process.setsid()
+    }
+    if nr == SYS_GETPGID {
+        return process.getpgid(r0, false)
+    }
+    if nr == SYS_GETSID {
+        return process.getpgid(r0, true)
     }
     if nr == SYS_DUP {
         return files.dup(a, a0, files.FDS, false)
