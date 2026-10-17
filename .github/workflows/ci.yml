@@ -2407,6 +2407,87 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px48: job control. Process groups, sessions, the console as a
+  # controlling terminal, stops and continues, the foreground group's
+  # keys, the background rules, hangup and the orphaned group: px48's
+  # probe (user/elf/jobs.c, tools/mkjobs) and a typed job-control session
+  # in Ubuntu 24.04's static busybox (tools/fetch-busybox, by digest), as
+  # root and as a user, against real root's committed recordings
+  # (tests/mpx5-jobs.d/linux/) and, for the user's, a throwaway container
+  # (tools/linux-tree).
+  mpx5-jobs:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-jobs')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, zstd (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev zstd curl
+          qemu-system-x86_64 --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-jobs-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the image the Linux side's container is made from (by digest)
+        run: |
+          docker pull "$PAX_TREE_IMAGE"
+          docker image inspect --format '{{.Id}} {{.RepoDigests}}' "$PAX_TREE_IMAGE"
+        env:
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+      - name: job control against real root's recordings and the container, as root and as a user; the plan's legs (all four in the full tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+        run: tests/mpx5-jobs $PAX_LEGS
+
+      - name: keep the programs' sums, the Linux side, the sessions, the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-jobs-linux
+          path: |
+            build/mpx5-jobs/*.txt
+            build/mpx5-jobs/linux/
+            build/mpx5-jobs/rec-*.cmp
+            build/mpx5-jobs/*/kmain_console.elf
+            build/mpx5-jobs/*/*.log
+            build/mpx5-jobs-*.session
+            build/mpx5-jobs-*.cmp
+            build/mpx5-jobs-*.log
+            build/mpx5-jobs-*.norm
+            build/mpx5-jobs-*.meta
+            build/mpx5-jobs-*.halt
+            build/mpx5-jobs-*.verdict
+            build/mpx5-jobs-*.typed
+            build/mpx5-jobs-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   tier:
     name: tier ${{ needs.plan.outputs.tier || 'unplanned' }}
     if: ${{ !cancelled() }}
@@ -2443,6 +2524,7 @@ jobs:
       - mpx4-lobo
       - mpx5-users
       - mpx5-accounts
+      - mpx5-jobs
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
