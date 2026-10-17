@@ -713,10 +713,34 @@ as its session leader) and a container's for the user's.
   console is PAX's one tty); the hangup of a terminal's open files
   (Linux's own `vhangup`; a controlling process's end only frees the
   terminal and sends SIGHUP, which is what Linux was measured to do
-  there); `pause` (34) stays -ENOSYS; TIOCSTI, TIOCCONS, TIOCEXCL,
-  TIOCOUTQ; `tcflush` and `tcdrain` (refused by name); the background
-  rules for a console written by `sendfile` or `splice`; PRIO_PGRP and
-  PRIO_USER (refused by name, as before).
+  there); TIOCCONS, TIOCEXCL, TIOCOUTQ; PRIO_PGRP and PRIO_USER
+  (refused by name, as before). px49 adds `pause`, TIOCSTI, `tcflush`,
+  `tcdrain` and `tcsendbreak`, and the background rule for `sendfile`
+  and `splice` (below).
+
+## The small gaps (px49)
+
+Nine small gaps, each measured black-box against Linux as root and as a
+user (`notes/px49-the-small-gaps.md`), by px49's probe
+(`user/elf/gaps.c`, `tests/mpx5-jobs`' gaps image on kmain_session)
+against real root's recordings and a container's, and by a row each in
+`user/elf/tree.c` (`tests/mpx3-tree`) and `user/elf/procs.c`
+(`tests/mpx3-shell`).
+
+| module | what |
+|---|---|
+| `user/` | `pause` (34, pax#73): `rt_sigsuspend` with the caller's own mask |
+| `sched/`, `signal/` | `resuspend` (pax#75): a thread that comes back to ring 3 from `rt_sigsuspend` or `pause` with no handler run for it (a stop at its default and a continue, or a process signal another thread took first) waits again, its masks kept |
+| `console/` | TCFLSH (pax#74: TCIFLUSH and TCIOFLUSH discard what was typed and not read, TCOFLUSH has nothing to discard, another -EINVAL), TCSBRK (`tcdrain` and `tcsendbreak`: 0, no break put on COM1), each after the background rule (SIGTTOU, measured); TIOCSTI (a byte put in the input as if typed, by the line discipline): `dev.tty.legacy_tiocsti` is 0, fixed, so -EIO to anyone not privileged before anything else, -EFAULT for a bad pointer, and the privileged may put a byte in a terminal that is not theirs |
+| `files/` | `sendfile` and `splice` to the console ask `console.job(J_WRITE)` (pax#76: a background group's write under TOSTOP is SIGTTOU's); an AF_INET datagram socket's, a TCP socket's and an accepted end's `fstat` owner is its maker's file-system ids, the acceptor's for an accepted end (pax#58: the open file's word 7, `O_OWNER`; an eventfd and an epoll object stay 0:0, as Linux's anonymous inode, measured); `faccessat2` takes AT_SYMLINK_NOFOLLOW (a last link asked itself, 0777) and AT_EMPTY_PATH (pax#60); `fallocate` serves FALLOC_FL_KEEP_SIZE and FALLOC_FL_PUNCH_HOLE with it, each taking the set-ID bits as a write does, and answers every other mode -EOPNOTSUPP as tmpfs does (pax#63, no longer refused by name); `unlink` of a name in a directory of the tree that is no inode of it (`/dev`, `/proc`, `/sys`) asks the directory's write and search before -EISDIR (pax#70) |
+| `tree/` | `punch`: a range inside a file's size reads as zero (the frames under it kept, zeroed: `st_blocks` is not tmpfs's after a punch, named) |
+
+- What is not there: a break on COM1 (`tcsendbreak` answers 0 at once,
+  as Linux's pseudo-terminal did); a key put in by TIOCSTI that raises
+  a signal raises it at the next interrupt; `/proc/self/fd` links (a
+  lookup of an entry is -ENOENT, so boreutils' `cat` cannot tell an
+  input that is its output on PAX and `cat f >> f` copies without end:
+  `notes/px49/cat-dark-*.txt`).
 
 ## Who may name, change and keep (px44)
 
@@ -735,7 +759,8 @@ against an attacker**.
   FIFO (`mknod` is refused by name, so `protected_fifos` has nothing
   to act on); `/dev`'s and `/proc`'s directories keep their answers to
   making and removing names (-EROFS, -ENOENT); `fallocate`'s other
-  modes; space set aside by `fallocate` (a hole, like `ftruncate`).
+  modes (px49: served or answered as Linux does); space set aside by
+  `fallocate` (a hole, like `ftruncate`).
 
 ## Who may open, run and walk (px43)
 
@@ -754,7 +779,8 @@ addresses.
 - pax#58: a pipe, a socketpair and an AF_UNIX socket are their maker's
   file-system ids to `fstat` (`files`' `P_OWNER`, `unix`'s `owned`),
   as on Linux; an AF_INET socket, an eventfd, an epoll object and an
-  end `accept` made still say 0:0 (not measured).
+  end `accept` made still say 0:0 (not measured; px49: the sockets are
+  their maker's now, the other two 0:0 as on Linux).
 - A descriptor keeps what it was opened with: no check runs on `read`,
   `write`, `ftruncate` (which asks only that the descriptor was opened
   for writing), `getdents64` or `fstat`.
