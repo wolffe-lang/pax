@@ -1,0 +1,166 @@
+jobs: px48's probe, as a user
+main: leads its session, with the terminal in its group's hands: yes
+main: TIOCNOTTY by the session leader: 0, heard main:CONT,main:HUP
+main: tcgetpgrp(0) after: ENOTTY
+G: R leads its session and group: yes
+G: setsid by a session leader: EPERM
+G: setpgid(0, 0) by a session leader: EPERM
+G: setpgid(getpid(), getpid()) by a session leader: EPERM
+G: getpgid(0) and getsid(0) are getpgrp() and the pid: yes
+G: a child is in its parent's group and session: yes
+G: setsid by a group leader (not a session leader): EPERM
+G: setsid by a non-leader: sid is the pid yes, pgid is the pid yes, /dev/tty ENXIO, tcgetpgrp(0) ENOTTY
+G: its /proc stat: read yes, pgrp yes, session yes, tty_nr 0 yes, tpgid -1 yes, state R
+G: getsid of another session's leader is its pid, getpgid too: yes
+G: setpgid(child, a group of another session): EPERM
+G: setpgid(child, a group that does not exist): EPERM
+G: setpgid(child, -1): EINVAL
+G: setpgid(child, 0) before its exec: 0
+G: the child leads a group of its own now: yes
+G: setpgid(other child, the first child's group): 0
+G: the other child is in it: yes
+G: setpgid(child, the caller's group) back: 0
+G: setpgid(another session's leader, 0): EPERM
+G: the child's /proc stat: pgrp yes, session yes, tty_nr 0 yes, tpgid -1 yes, state S
+G: setpgid(child, 0) after the child's exec: EACCES
+G: setpgid(grandchild, 0): ESRCH
+G: setpgid(the parent, 0): ESRCH
+G: getpgid(a pid nobody has): ESRCH
+G: getsid(a pid nobody has): ESRCH
+G: setpgid(a pid nobody has, 0): ESRCH
+G: the parent is in another session: yes
+G: a thread's getpgrp, getsid and getpgid are its process's: yes
+G: R's /proc stat: pgrp yes, session yes, tty_nr 0 yes, tpgid -1 yes, state R
+K: kill(0) from a member of A={A,B}, C apart: 0, heard A:USR1,B:USR1,S:USR1
+K: kill(-A) from outside A: 0, heard A:USR1,B:USR1
+K: kill(-A, 0): 0, heard -
+K: kill(-A) with its leader reaped, B alive: 0, heard B:USR1
+K: kill(-A, 0) with its one member a zombie: 0
+K: kill(-A) with its one member a zombie: 0
+K: kill(-A, 0) with every member reaped: ESRCH
+K: kill(-A) with every member reaped: ESRCH
+K: kill(-999999, 0): ESRCH
+K: kill(INT_MIN, 0): ESRCH
+K: kill(-INT_MAX, 0): ESRCH
+K: kill(0, 0): 0
+K: kill(-getpgrp(), 0): 0
+K: the mixed groups: skipped by name (not root)
+S: a group of two, ticking: yes
+S: kill(-G, SIGSTOP): 0
+S: waitpid(-G, WUNTRACED) reported stopped by SIGSTOP (status 0x137f): 2 of 2
+S: R heard CHLD STOPPED STOP
+S: a second waitpid(-G, WNOHANG|WUNTRACED): 0 (nothing new)
+S: a stopped group runs nothing: yes
+S: a stopped member's /proc stat state: T
+S: waitpid(-G, WNOHANG) of a stopped group without WUNTRACED: 0 (nothing new)
+S: kill(-G, SIGCONT): 0
+S: waitpid(-G, WCONTINUED) reported continued (status 0xffff): 2 of 2
+S: R heard CHLD CONTINUED CONT
+S: a continued group runs again: yes
+S: waitpid(-G, WNOHANG|WCONTINUED|WUNTRACED) once both are reported: 0 (nothing new)
+S: kill(a, SIGTSTP): 0
+S: SIGTSTP at its default: stopped by TSTP (status 0x147f)
+S: kill(b, SIGTTIN): 0
+S: waitid(P_PGID, G, WSTOPPED|WNOWAIT): 0, code CLD_STOPPED, status TTIN, the pid b's yes
+S: waitid(P_PID, b, WSTOPPED) after WNOWAIT, the same: 0, code CLD_STOPPED, status TTIN
+S: waitid(P_PGID, G, WSTOPPED|WNOHANG) after: 0, pid 0 yes
+S: waitid(P_PID, b, WCONTINUED): 0, code CLD_CONTINUED, status CONT
+S: waitpid(a, WCONTINUED): continued (status 0xffff)
+S: R heard CHLD CONTINUED CONT,CHLD STOPPED TSTP,CHLD STOPPED TTIN
+S: under SA_NOCLDSTOP a stop and a continue: reported yes and yes, R heard -
+S: waitpid(-G, WNOHANG) while a child of another group ends: 0 (nothing new)
+S: waitpid(-G, WNOHANG) after it ended: 0 (nothing new)
+S: waitpid(0) (the caller's group) for it: exited 7, its pid yes
+S: waitpid(-999999, WNOHANG): ECHILD
+S: waitpid(0, WNOHANG) with no child in the caller's group: ECHILD
+S: waitid(P_PGID, 0, WEXITED|WNOHANG) the same: ECHILD
+S: R heard CHLD EXITED -
+S: SIGTSTP blocked: 0 (nothing new)
+S: SIGTSTP unblocked: stopped by TSTP (status 0x147f)
+S: SIGTSTP pending, then SIGCONT, then unblocked: 0 (nothing new)
+S: SIGKILL to a stopped child: killed by KILL
+S: SIGTSTP with a handler: heard T:TSTP, 0 (nothing new)
+S: nanosleep(900 ms) stopped at 200 ms for 300 ms: 0, at its deadline
+S: a read stopped and continued, then given a byte: 1
+S: an orphaned group's member, ticking: yes
+S: SIGTSTP to a process of an orphaned group: it runs on yes
+S: SIGTTIN likewise: it runs on yes
+S: SIGSTOP to it: it runs on no, state T
+S: SIGCONT to it: it runs on yes
+T: before it is R's, tcgetpgrp(0): ENOTTY
+T: before it is R's, TIOCGSID: ENOTTY
+T: TIOCSCTTY by a process that leads no session: EPERM
+T: TIOCSCTTY(0) by R, a session leader with no terminal: 0
+T: tcgetpgrp(0) is R's group: yes
+T: TIOCGSID: 0, R's session yes
+T: tcgetsid(0) is R's session: yes
+T: TIOCSCTTY(0) again, its own terminal: 0
+T: R's /proc stat: tty_nr the terminal's number yes, tpgid R's group yes
+T: /dev/tty: opened
+T: /dev/tty's tcgetpgrp is R's group: yes
+T: TIOCSCTTY(0) by another session's leader, R's terminal: EPERM
+T: tcgetpgrp(0) by another session's process: ENOTTY
+T: TIOCGSID by another session's process: ENOTTY
+T: tcsetpgrp(0, its group) by another session's process: ENOTTY
+T: tcsetpgrp(0, job) by R, SIGTTOU blocked: 0
+T: tcgetpgrp(0) is the job's group: yes
+T: a job member's /proc stat: tty_nr the terminal's yes, tpgid the job's group yes
+T: tcsetpgrp(0, R's group) by R in the background (its group is orphaned), SIGTTOU default: ENOTTY
+T: tcsetpgrp from a background group that is not orphaned, SIGTTOU default: stopped by TTOU
+T: tcsetpgrp from a background group that is not orphaned, SIGTTOU default, continued: stopped by TTOU (status 0x167f)
+T: tcsetpgrp from the background, SIGTTOU ignored: 0
+T: tcsetpgrp from the background, SIGTTOU blocked: 0
+T: tcsetpgrp from the background, R's orphaned group, SIGTTOU default: ENOTTY
+T: tcsetpgrp(0, a group of another session): EPERM
+T: tcsetpgrp(0, a group that does not exist): ESRCH
+T: tcsetpgrp(0, 0): ESRCH
+T: tcsetpgrp(0, -1): EINVAL
+T: a background read, SIGTTIN default: stopped by TTIN
+T: a background read, SIGTTIN default, continued: stopped by TTIN (status 0x157f)
+T: a background read, SIGTTIN ignored: EIO
+T: a background read, SIGTTIN blocked: EIO
+T: a background read from R's orphaned group, SIGTTIN default: EIO
+T: a background write
+T: a background write without TOSTOP, SIGTTOU default: 0
+T: tcsetattr from the background, SIGTTOU default: stopped by TTOU
+T: tcsetattr from the background, SIGTTOU default, continued: stopped by TTOU (status 0x167f)
+T: tcsetattr from the background, SIGTTOU ignored: 0
+T: TOSTOP set by R (SIGTTOU ignored): 0
+T: a background write with TOSTOP, SIGTTOU default: stopped by TTOU
+T: a background write with TOSTOP, SIGTTOU default, continued: stopped by TTOU (status 0x167f)
+T: a background write
+T: a background write with TOSTOP, SIGTTOU ignored: 0
+T: a background write
+T: a background write with TOSTOP, SIGTTOU blocked: 0
+T: a background write with TOSTOP from R's orphaned group, SIGTTOU default: EIO
+T: TIOCSWINSZ 33x77: 0
+T: the window's change, heard J1:WINCH,J2:WINCH
+T: the same size again, heard -
+$ ^C
+T: ^C with the job in the foreground: heard J1:INT,J2:INT
+$ ^\
+T: ^\ with the job in the foreground: heard J1:QUIT,J2:QUIT
+$ ^Z
+T: ^Z with the job in the foreground, both handling it: heard J1:TSTP,J2:TSTP
+$ ^Z
+T: ^Z with a job at its default in the foreground: stopped by TSTP (status 0x147f)
+$ ^C
+T: ^C with that job continued in the foreground: killed by INT
+T: the jobs that were not in the foreground heard -
+T: tcsetpgrp(0, R's group) back: 0
+T: TIOCNOTTY by a non-leader: 0; its tcgetpgrp(0) after: ENOTTY
+T: R still has it: yes; heard -
+T: TIOCSCTTY(1) by another session's leader: EPERM
+T: R's tcgetpgrp(0) after: a group; heard -
+V: R has the terminal, in the foreground: yes
+$ 
+V: VMIN 2, VTIME 0, one key and a second 1.5 s later: read 2 bytes "xy"
+$ 
+V: VMIN 5, VTIME 5, two keys, then nothing: read 2 bytes "ab"
+
+V: VMIN 5, VTIME 5, nothing for 1.5 s, then one key: read 1 bytes "q"
+H: TIOCNOTTY by R, the session leader (SIGHUP ignored): 0, R's group heard R:CONT
+H: L took the terminal: 0; its background member stopped: yes
+H: the foreground member after: a nonblocking read EAGAIN, tcgetpgrp ENOTTY
+H: after the leader L ended, heard F:HUP,G:CONT,G:HUP
+done: R exited 0
