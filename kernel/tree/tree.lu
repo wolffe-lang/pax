@@ -877,6 +877,32 @@ pub fn truncate(i: u64, size: u64) -> u64 {
     0
 }
 
+/// px49 (pax#63): `fallocate`'s FALLOC_FL_PUNCH_HOLE with
+/// FALLOC_FL_KEEP_SIZE: the bytes of file `i` in [off, off + len) that
+/// lie inside its size read as zero afterwards; the size is kept. A
+/// page with no frame is a hole already; the frames under the range are
+/// kept, zeroed (named: tmpfs gives a whole page back, so `st_blocks`
+/// is not Linux's after a punch).
+pub fn punch(i: u64, off: u64, len: u64) {
+    let size = ig(i, I_SIZE)
+    if off >= size {
+        touch_change(i)
+        return
+    }
+    let end = if len < size - off { off + len } else { size }
+    var p = off
+    while p < end {
+        let po = p % PAGE
+        let c = if end - p < PAGE - po { end - p } else { PAGE - po }
+        let pa = frame_of(i, p / PAGE)
+        if pa != 0 {
+            zero(pa + hh() + po, c)
+        }
+        p += c
+    }
+    touch_change(i)
+}
+
 // --- directories -----------------------------------------------------------------
 
 fn need(len: u64) -> u64 {
