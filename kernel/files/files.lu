@@ -4384,7 +4384,9 @@ pub fn mkdirat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64) -> u64 {
 /// entry (and for `..`), -EINVAL for `.`, -EBUSY for `/` and for `/dev`.
 /// A directory that is some process's working directory is removed
 /// like any other. Any other flag is refused by name, -EINVAL; a name
-/// in `/dev` -EROFS.
+/// in `/dev` -EROFS. px49 (pax#70): a name in a directory of the tree
+/// that is no inode of it (`/dev`, `/proc`, `/sys`) asks the directory's
+/// write and search before -EISDIR.
 pub fn unlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64) -> u64 {
     if flags & !AT_REMOVEDIR != 0 {
         refuse(a, R_ATFLAG)
@@ -4430,6 +4432,12 @@ pub fn unlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64) -> u64 {
     let e = unname(a, par, n) // px44
     if e != 0 {
         return neg(e)
+    }
+    if ty(par) == T_INO && ty(n) != T_INO && !may(a, cred.FS, par, MAY_W | MAY_X) {
+        // px49 (pax#70): /dev, /proc and /sys are names in `/` too: a user
+        // who may not write `/` is told so before what the name is
+        // (measured: -EACCES for a user, `tests/mpx3-tree`; root -EISDIR).
+        return neg(EACCES)
     }
     if is_dir_node(n) {
         return neg(EISDIR)
