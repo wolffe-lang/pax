@@ -934,6 +934,7 @@ const SYS_GETRESGID: u64 = 120
 const SYS_SETFSUID: u64 = 122
 const SYS_SETFSGID: u64 = 123
 const PR_GET_DUMPABLE: u64 = 3 // uapi linux/prctl.h
+const PR_SET_DUMPABLE: u64 = 4 // px50
 const PR_GET_KEEPCAPS: u64 = 7
 const PR_GET_SECUREBITS: u64 = 27
 const PR_GET_NO_NEW_PRIVS: u64 = 39
@@ -1094,7 +1095,8 @@ fn arch_prctl(code: u64, addr: u64) -> u64 {
 /// bytes and a NUL, as Linux's 16-byte comm: the program's name until
 /// the thread sets one) and, px26, PR_SET_NAME (the thread's own, cut
 /// at 15 bytes); px39: PR_GET_DUMPABLE, PR_GET_KEEPCAPS,
-/// PR_GET_SECUREBITS and PR_GET_NO_NEW_PRIVS; anything else -EINVAL.
+/// PR_GET_SECUREBITS and PR_GET_NO_NEW_PRIVS; px50: PR_SET_DUMPABLE;
+/// anything else -EINVAL.
 fn prctl(option: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> u64 {
     let pml4 = paging.live()
     if option == PR_SET_NAME {
@@ -1128,6 +1130,16 @@ fn prctl(option: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> u64 {
     // pax#49); dumpable is kernel/cred's.
     if option == PR_GET_DUMPABLE {
         return cred.dumpable(area())
+    }
+    // px50: PR_SET_DUMPABLE, 0 or 1 (`PR_SET_DUMPABLE(2const)`; 2, a
+    // core dump only root may read, is for the kernel's own setting:
+    // -EINVAL).
+    if option == PR_SET_DUMPABLE {
+        if arg2 > 1 {
+            return NEG_EINVAL
+        }
+        cred.set_dumpable(area(), arg2)
+        return 0
     }
     if option == PR_GET_KEEPCAPS || option == PR_GET_SECUREBITS {
         return 0
