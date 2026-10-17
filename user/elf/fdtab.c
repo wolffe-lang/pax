@@ -206,7 +206,13 @@ static void link_rows(void) {
     struct stat a, f;
     int via = k > 0 && stat(b, &a) == 0 && fstat(0, &f) == 0 && a.st_rdev == f.st_rdev && S_ISCHR(a.st_mode);
     out("L: descriptor 0: a path in /dev: %s; stat of that path is the descriptor's terminal: %s", yesno(k > 5 && strncmp(b, "/dev/", 5) == 0), yesno(via));
-    out("S: descriptor 0: %s; %s", lst(ent(0)), through(ent(0), 0));
+    /* Its mode is the host's (a pseudo-terminal's 0620, PAX's console
+     * 0600): only its type is printed. */
+    char th[200];
+    snprintf(th, sizeof th, "%s", through(ent(0), 0));
+    char *sp = strstr(th, "stat chr ");
+    if (sp) memcpy(sp + 9, "MODE", 4);
+    out("S: descriptor 0: %s; %s", lst(ent(0)), th);
     int p[2];
     (void)!pipe(p);
     row("a pipe's read end", p[0]);
@@ -296,6 +302,8 @@ static void link_rows(void) {
     unlink(ua.sun_path);
     unlink("/g/sub/f3c");
     rmdir("/g/sub");
+    unlink("/g/f1");
+    unlink("/g/f2");
 }
 
 /* ---- O: opening through an entry --------------------------------------- */
@@ -637,8 +645,8 @@ static void info_rows(void) {
     (void)!write(e, &v, 8);
     out("I: then a write of 7: %s", shown(e));
     close(e);
-    e = eventfd(0, EFD_NONBLOCK | EFD_SEMAPHORE);
-    out("I: an eventfd EFD_NONBLOCK|EFD_SEMAPHORE: %s", shown(e));
+    e = eventfd(0, EFD_NONBLOCK); /* EFD_SEMAPHORE: PAX refuses it by name (kernel/ready) */
+    out("I: an eventfd EFD_NONBLOCK: %s", shown(e));
     close(e);
     int ep = epoll_create1(0);
     out("I: an epoll object with nothing registered: %s", shown(ep));
