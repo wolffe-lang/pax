@@ -42,7 +42,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLAN = os.path.join(ROOT, "tools", "ci-plan")
 PR_LEGS = "--tier native --firmware bios"
-NET = ["mpx4-net", "mpx4-udp", "mpx4-tcp", "mpx4-ready", "mpx4-session", "mpx4-unix", "mpx4-lobo"]
+NET = ["mpx4-net", "mpx4-udp", "mpx4-tcp", "mpx4-ready", "mpx4-session", "mpx4-unix", "mpx4-lobo", "mpx5-jobs"]  # px49: mpx5-jobs (gaps' TCP rows)
 MUSIC = ["mpx3-speaker", "mpx3-sound", "mpx3-orchestra", "mpx4-session"]
 fails = 0
 
@@ -185,6 +185,15 @@ expect("P2 the job-control probe reaches mpx5-jobs (and mpx5-users, which reads 
        plan(["user/elf/jobs.c"], **pr), "pr", ["mpx5-jobs", "mpx5-users"])
 expect("P2 the job-control keys reach mpx5-jobs (and the suites that read user/console)",
        plan(["user/console/jobs.keys", "user/console/jobs-shell.keys"], **pr), "pr", has=["mpx5-jobs"], lacks=["mpx2-heap", "mpx4-tcp"])
+# px49: the gaps probe, its keys, its recordings and its guest's pid 1.
+expect("P2 the gaps probe reaches mpx5-jobs (and mpx5-users, which reads user/elf)",
+       plan(["user/elf/gaps.c"], **pr), "pr", ["mpx5-jobs", "mpx5-users"])
+expect("P2 gaps' recordings are mpx5-jobs' alone (px49)",
+       plan(["tests/mpx5-jobs.d/linux/gaps.tty", "tests/mpx5-jobs.d/linux/vm-gaps-user.meta"], **pr), "pr", ["mpx5-jobs"])
+expect("P2 gaps' keys reach mpx5-jobs (and the suites that read user/console)",
+       plan(["user/console/gaps.keys"], **pr), "pr", has=["mpx5-jobs"], lacks=["mpx2-heap", "mpx4-tcp"])
+expect("P2 kmain_session reaches mpx5-jobs too (px49: the gaps image's kernel)",
+       plan(["kernel/kmain_session.lu"], **pr), "pr", has=["mpx5-jobs", "mpx4-session"], lacks=["mpx2-heap"])
 expect("P2 the console, signals and processes reach mpx5-jobs (px48)",
        plan(["kernel/console/console.lu", "kernel/signal/signal.lu", "kernel/process/process.lu"], **pr), "pr",
        has=["mpx5-jobs", "mpx3-shell", "mpx5-users"], lacks=["mpx2-heap", "census"])
