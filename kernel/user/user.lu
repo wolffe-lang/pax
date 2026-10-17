@@ -942,6 +942,7 @@ const SYS_POLL: u64 = 7
 const SYS_WRITEV: u64 = 20
 const SYS_SIGALTSTACK: u64 = 131
 const SYS_RT_SIGSUSPEND: u64 = 130 // px48: an Almquist shell's `wait`
+const SYS_PAUSE: u64 = 34 // px49 (pax#73)
 const SYS_SCHED_GETAFFINITY: u64 = 204
 const SYS_EPOLL_WAIT: u64 = 232
 const SYS_EPOLL_CTL: u64 = 233
@@ -1378,6 +1379,11 @@ pub fn syscall(f: u64) -> u64 {
     if nr == SYS_SCHED_YIELD {
         put_word(f, W_RAX, 0)
         return sched.yield_current(f)
+    }
+    if nr == SYS_PAUSE {
+        // px49 (pax#73): pause(2) is a wait with the caller's own mask
+        // until a signal runs a handler (-EINTR) or ends the process.
+        return sched.suspend_current(f, sched.self_sigmask())
     }
     if nr == SYS_RT_SIGSUSPEND {
         // px48: sigsuspend(2), the mask for the wait (kernel/sched).
