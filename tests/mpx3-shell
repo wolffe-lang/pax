@@ -121,6 +121,11 @@
 #   S5 the end: `PAX: init /bin/<prog> ended with status <s>; nothing
 #      left to run` with s Linux's status, `halt`, and qemu-halt holds the
 #      machine halted.
+#   S7 procs, procs-quiet and procs-user (px49, pax#71): procs' `creds`
+#      line (getresuid, getresgid) is root's 0s, or the user's 1000s, on
+#      PAX and on Linux each: the witness S2 cannot be, since a broken
+#      `as` runs in the container too and agrees with itself (px47's
+#      plant B; px49's plant A is red here and green in S2).
 #   S6 shell-howl (both images): the Linux transcript is
 #      user/console/shell-howl.expect, byte for byte (CRs removed): the
 #      motd, the names in /bin (eighteen since px27), 42, awwwwwooo!, ` 1 12 77 /etc/motd`,
@@ -512,6 +517,18 @@ for leg in $legs; do
             [ "$pst" = "$lst" ] || why+=" exit '$pst' on PAX, '$lst' on Linux;"
             [ "$(wc -c < "$out" | tr -d ' ')" -gt 0 ] || why+=" an empty session;"
             [ -z "$why" ] && say "PASS S2 $id: the session byte-identical to Linux's ($(wc -l < "$out" | tr -d ' ') lines, $(sha256_of "$out" | cut -c1-12)…), exit $pst" || bad "S2 $id:$why"
+
+            # S7 (px49, pax#71): procs' own witness of who it runs as, on
+            # each side: S2 cannot see a broken `as`, which the container
+            # runs too and agrees with itself.
+            case $s in procs*)
+                why=
+                cw="creds: getresuid 0: 0 0 0; getresgid 0: 0 0 0"
+                [ "$s" = procs-user ] && cw="creds: getresuid 0: 1000 1000 1000; getresgid 0: 1000 1000 1000"
+                grep -qxF "$cw" "$out" || why+=" PAX's creds line is not '$cw' ($(grep -m1 '^creds: ' "$out"));"
+                grep -qxF "$cw" "$out.linux" || why+=" Linux's creds line is not '$cw' ($(grep -m1 '^creds: ' "$out.linux"));"
+                [ -z "$why" ] && say "PASS S7 $id: '$cw' on both sides" || bad "S7 $id:$why" ;;
+            esac
 
             # S3: what was typed arrived, by its path.
             why=
