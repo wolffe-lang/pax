@@ -7,6 +7,27 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Job control (px48).** Process groups and sessions (`setpgid`,
+  `getpgrp`, `setsid`, `getpgid`, `getsid`), the console as a
+  controlling terminal and its ioctls (`TIOCSCTTY`, `TIOCNOTTY`,
+  `TIOCGPGRP`, `TIOCSPGRP`, `TIOCGSID`; `/dev/tty` -ENXIO without one),
+  `kill` to 0 and to a group, stops and continues (a stopped process
+  runs nothing; its parent hears SIGCHLD with CLD_STOPPED or
+  CLD_CONTINUED unless SA_NOCLDSTOP), `wait4` and `waitid` by group with
+  WUNTRACED and WCONTINUED, Ctrl-C, Ctrl-\ and Ctrl-Z for the console's
+  foreground group only, the background rules (SIGTTIN; SIGTTOU under
+  TOSTOP and for a setting), a controlling process's end hanging up its
+  foreground group, an orphaned group with a stopped member sent SIGHUP
+  and SIGCONT, `rt_sigsuspend`, and `/proc/<pid>/stat`. Each measured
+  against real Linux under QEMU as root and as a user, by px48's probe
+  and by a job-control session typed at Ubuntu's static busybox `sh -i`
+  (`tests/mpx5-jobs`), byte for byte. The console's VMIN above 0 waits
+  for its bytes and VTIME times the gap after the last (pax#66), and its
+  window's size follows the device typed at (pax#68). A process the
+  kernel starts leads its own session with the console as its terminal
+  (Linux's init has neither: named). `tools/linux-tty` and
+  `tools/linux-tree` gain `--nsproc`; `tools/qemu-halt` types `^Z`.
+
 - **Every suite as a user (px47).** The seventh lane of multi-user PAX:
   the tree, shell, boreutils, Unix-socket, TCP, UDP, speaker and lobo
   suites each run their sessions again as a user beside root's — `tree`
