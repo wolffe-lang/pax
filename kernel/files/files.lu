@@ -1515,6 +1515,15 @@ pub fn sendfile(a: u64, pml4: u64, out: u64, inf: u64, offp: u64, count: u64) ->
     if k > 0x7ffff000 {
         k = 0x7ffff000
     }
+    if t == 1 {
+        // px49 (pax#76): the background rule, as `write` asks it (a
+        // background group's write to its terminal under TOSTOP is
+        // SIGTTOU's: measured for sendfile and splice too).
+        let j = console.job(console.J_WRITE)
+        if j != 0 {
+            return j
+        }
+    }
     var done: u64 = 0
     if t == 4 {
         let q = pos(a, out)
@@ -1666,6 +1675,12 @@ pub fn splice(a: u64, pml4: u64, inf: u64, offin: u64, out: u64, offout: u64, le
         }
         if k > space {
             k = space
+        }
+    }
+    if t == 1 {
+        let j = console.job(console.J_WRITE) // px49 (pax#76), as sendfile
+        if j != 0 {
+            return j
         }
     }
     var done: u64 = 0
