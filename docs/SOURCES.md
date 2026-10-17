@@ -746,3 +746,22 @@ none consulted.
 | black-box Linux 7.2.8-1-cachyos (kasumi's own kernel image `f4c00d5d…` under QEMU 11.1.1, `notes/px49/vmjob.c` as pid 1 — px48's with the loopback up and `/sys` mounted — the program on a fresh pseudo-terminal as its session leader; the initramfs the suite's own archive; `dev.tty.legacy_tiocsti` 0) | — | GPL-2.0 (a program we run) | run, never read: `gaps` as root and as 1000:1000, recorded twice, the same bytes | `tests/mpx5-jobs.d/linux/gaps*.tty` |
 | rootless podman on kasumi (`px13-ubuntu`), CI's Docker (`python:3.12-slim` by digest) | — | — | run: `gaps` as 1000:1000 (`tools/linux-tree --owners --rdev --nsproc`); `tree` as root and as 1000:1000 (`tests/mpx3-tree`); boreutils' `cat f >> f` (`notes/px49/cat-dark-linux.txt`) | J0, J3; mpx3-tree's T1; the record of `cat`'s refusal |
 | boreutils `8f0bbb1` (bu25) and pelt `1102498` (sh17), built from their own trees by `tools/mkboreutils` and `tools/mkpelt` | the org's own | the org's own | built and run, as before | the pins |
+
+## px50: the descriptor table in /proc (`/proc/<pid>/fd`, `fdinfo`), rmdir and rename of /proc and /sys, nbprobe's race
+
+No kernel's source was read or searched for, its procfs above all, nor
+any libc's, shell's or terminal driver's (ruling #22). Every rule the
+kernel follows is a row Linux answered on real root's guest (this lane's
+`fdtab` probe, as root and as 1000:1000) or in a container (the same
+probe as 1000:1000; boreutils' `cat` with its input its output, as root
+and as `pax`); where the prediction and the measurement parted, the
+measurement decided and the note says so. Permissively licensed
+kernels: none consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| man-pages `proc(5)`, `proc_pid_fd(5)`, `proc_pid_fdinfo(5)`, `readlink(2)`, `open(2)`, `stat(2)`, `statx(2)`, `getdents64(2)`, `ptrace(2)` (PTRACE_MODE_READ_FSCREDS), `prctl(2)` and `PR_SET_DUMPABLE(2const)`, `pipe(7)`, `socket(7)`, `unix(7)`, `eventfd(2)`, `epoll_create(2)`, `rmdir(2)`, `rename(2)`, `tcp(7)` (SIOCOUTQ, SIOCINQ), `poll(2)`, `send(2)` | man-pages 6.19 (kasumi) | GPL-compatible documentation | read | `kernel/files`, `kernel/procfs`, `kernel/cred`, `kernel/user`; `notes/px50/nbrace.c` |
+| uapi values: O_LARGEFILE 0100000, O_DIRECTORY 0200000, O_NOFOLLOW 0400000, O_CLOEXEC 02000000; PR_SET_DUMPABLE 4; SIOCINQ, SIOCOUTQ (`linux/sockios.h`) | — | GPL-2.0 WITH Linux-syscall-note | the author's own knowledge, confirmed black-box: fdinfo's `flags` line read on Linux | the constants |
+| black-box Linux 7.2.8-1-cachyos (kasumi's own kernel image `f4c00d5d…` under QEMU 11.1.1, `notes/px50/vmjob.c` as pid 1 — px49's with `/` made 0755 — the program on a fresh pseudo-terminal as its session leader; the initramfs the suite's own archive) | — | GPL-2.0 (a program we run) | run, never read: `fdtab` as root and as 1000:1000, recorded twice, the same bytes | `tests/mpx5-jobs.d/linux/fds*.tty` |
+| rootless podman on kasumi (`px13-ubuntu`), CI's Docker | — | — | run: `fdtab` as 1000:1000 (`tools/linux-tree --owners --rdev --nsproc --sys`); boreutils' `cat` in the shell-inout sessions (`tests/mpx3-tree`); `notes/px50/nbrace` over the container's loopback under `taskset -c 0-3` | J0, J3; mpx3-tree's T1; pax#79's evidence |
+| boreutils `8f0bbb1` (bu25): `src/bore/inout.lu` (the org's own source: which `/proc` lines `cat` reads) and `tests/inout/cases.toml` (its shapes) | the org's own | the org's own | read, as the org's own code | the witness |
