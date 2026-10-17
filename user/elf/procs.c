@@ -18,6 +18,10 @@
    with no argument it is the parent and walks the cases in order:
 
      ids       getpid, getppid, gettid (1, 0, 1)
+     creds     px49 (pax#71): getresuid and getresgid, the one line a
+               user's run (procs-user, through `as`) and root's answer
+               differently, which tests/mpx3-shell holds on each side
+               (a broken `as` agrees with itself in the differential)
      cloexec   /etc/motd opened with O_CLOEXEC (3) and without (4); a
                child exiting 3 finds 3 closed and 4 open (pread at 0:
                the offset is not shared state anyone reads); wait4
@@ -79,6 +83,8 @@ typedef long i64;
 #define SYS_kill 62
 #define SYS_getppid 110
 #define SYS_gettid 186
+#define SYS_getresuid 118
+#define SYS_getresgid 120
 #define SYS_exit_group 231
 #define SYS_waitid 247
 #define SYS_dup3 292
@@ -594,6 +600,19 @@ static void plumbing(i64 motd) {
 static int parent(void) {
     ids("procs");
     end();
+    {
+        unsigned u[3] = { 9, 9, 9 }, g[3] = { 9, 9, 9 };
+        i64 ru = sys(SYS_getresuid, &u[0], &u[1], &u[2]), rg = sys(SYS_getresgid, &g[0], &g[1], &g[2]);
+        put("creds: getresuid ");
+        dec(ru);
+        put(": ");
+        dec(u[0]); put(" "); dec(u[1]); put(" "); dec(u[2]);
+        put("; getresgid ");
+        dec(rg);
+        put(": ");
+        dec(g[0]); put(" "); dec(g[1]); put(" "); dec(g[2]);
+        end();
+    }
     { u64 zero[2] = { 0, 0 }; sys6(SYS_prlimit64, 0, RLIMIT_CORE, (i64)zero, 0, 0); }
 
     /* cloexec */
