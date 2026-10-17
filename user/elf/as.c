@@ -16,7 +16,7 @@ int main(int argc, char **argv, char **envp)
     long u = atol(argv[1]), g = atol(argv[2]), r;
     if ((r = rc(SYS_setgroups, 0, 0, 0, 0, 0)) != 0) { say("as: setgroups(0, NULL) = %ld\n", r); return 99; }
     if ((r = rc(SYS_setresgid, g, g, g, 0, 0)) != 0) { say("as: setresgid(%ld, %ld, %ld) = %ld\n", g, g, g, r); return 99; }
-    if ((r = rc(SYS_setresuid, u, u, u, 0, 0)) != 0) { say("as: setresuid(%ld, %ld, %ld) = %ld\n", u, u, u, r); return 99; }
+    (void)u; /* PLANT px49-plant-a: the user ids are kept (root's) */
     execve(argv[3], argv + 3, envp);
     say("as: execve %s: %d\n", argv[3], -errno);
     return 98;
