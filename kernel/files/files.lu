@@ -398,7 +398,7 @@ const R_SOCKTYPE: u64 = 18 // px17
 const R_FCNTL: u64 = 19 // px17
 // px27 (from 31 down):
 const R_OFLAG: u64 = 31
-const R_FALLOC: u64 = 23 // px44
+// 23 was px44's R_FALLOC (a fallocate mode): px49 answers every mode as Linux does
 const R_DEVRO: u64 = 30
 const R_LINK: u64 = 29
 const R_META: u64 = 28
@@ -430,9 +430,6 @@ pub fn why(r: u64) -> str {
     }
     if r == R_OFLAG {
         return "an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE)"
-    }
-    if r == R_FALLOC {
-        return "a fallocate mode PAX does not honour (only 0: a file made at least so long)"
     }
     if r == R_DEVRO {
         return "making or removing a name in /dev (PAX's /dev is fixed)"
@@ -3975,15 +3972,22 @@ pub fn ftruncate(a: u64, fd: u64, len: u64) -> u64 {
     r
 }
 
-/// px44: `fallocate(fd, mode, offset, len)` (`fallocate(2)`), mode 0
-/// only: the file is at least `offset + len` bytes long afterwards (it
-/// grows by a hole: the tree gives a frame when a page is written, so
-/// the space is not set aside — named drift), and the call takes the
-/// set-ID bits as a write does (px38's `setid`: `fallocate` by a user
-/// clears them, by root keeps them). -EBADF for a closed descriptor and
-/// one not open for writing; -EINVAL for a negative offset or a length
-/// not above 0; -ESPIPE for a pipe; -ENODEV for what is no file; -EFBIG
-/// past the largest file; any other mode refused by name, -EOPNOTSUPP.
+/// px44: `fallocate(fd, mode, offset, len)` (`fallocate(2)`): the file
+/// is at least `offset + len` bytes long afterwards (it grows by a hole:
+/// the tree gives a frame when a page is written, so the space is not
+/// set aside — named drift), and the call takes the set-ID bits as a
+/// write does (px38's `setid`: `fallocate` by a user clears them, by
+/// root keeps them). -EBADF for a closed descriptor and one not open for
+/// writing; -EINVAL for a negative offset or a length not above 0;
+/// -ESPIPE for a pipe; -ENODEV for what is no file; -EFBIG past the
+/// largest file. px49 (pax#63): the modes as Linux serves them on tmpfs
+/// (measured, notes/px49-the-small-gaps.md §G): FALLOC_FL_KEEP_SIZE
+/// (1), the size kept (and nothing set aside); FALLOC_FL_PUNCH_HOLE with
+/// it (3), the range inside the size reads as zero; each takes the
+/// set-ID bits as a write does, past the end too. Every other mode,
+/// PUNCH_HOLE alone, ZERO_RANGE, COLLAPSE_RANGE, INSERT_RANGE,
+/// UNSHARE_RANGE, a mix or an unknown bit: -EOPNOTSUPP, Linux's answer
+/// (no longer refused by name).
 pub fn fallocate(a: u64, fd: u64, mode: u64, off: u64, len: u64) -> u64 {
     let k = kind(a, fd)
     if k == K_CLOSED {
@@ -4001,15 +4005,17 @@ pub fn fallocate(a: u64, fd: u64, mode: u64, off: u64, len: u64) -> u64 {
     if k != K_FILE {
         return neg(ENODEV)
     }
-    if mode & 0xffffffff != 0 {
-        refuse(a, R_FALLOC)
+    let m = mode & 0xffffffff
+    if m != 0 && m != FALLOC_KEEP && m != FALLOC_KEEP | FALLOC_PUNCH {
         return neg(EOPNOTSUPP)
     }
     let i = rf(node_of(a, fd))
     if len > 0x7fffffffffffffff - off {
         return neg(EFBIG)
     }
-    if off + len > tree.bytes(i) {
+    if m == FALLOC_KEEP | FALLOC_PUNCH {
+        tree.punch(i, off, len)
+    } else if m == 0 && off + len > tree.bytes(i) {
         let r = tree.truncate(i, off + len)
         if r != 0 {
             return r
@@ -4018,6 +4024,9 @@ pub fn fallocate(a: u64, fd: u64, mode: u64, off: u64, len: u64) -> u64 {
     wrote(a, i)
     0
 }
+
+const FALLOC_KEEP: u64 = 0x1 // uapi linux/falloc.h's FALLOC_FL_KEEP_SIZE
+const FALLOC_PUNCH: u64 = 0x2 // FALLOC_FL_PUNCH_HOLE
 
 /// px27: `truncate(path, len)`: as `ftruncate` for the file the path
 /// names: -EISDIR for a directory, -EINVAL for what is no file; px43:
