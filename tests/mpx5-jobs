@@ -51,7 +51,10 @@
 #      by its digest); the images built; the recordings there; the
 #      container's user sessions ran and agree with the recordings.
 #   J1 the probe as root (and over PS/2), byte-identical to real root's
-#      recording; the probe as 1000:1000 likewise.
+#      recording; the probe as 1000:1000 likewise. Over PS/2 on a machine
+#      with a screen, the window's size after the keys is the screen's
+#      grid (pax#68: the device the person types at), held so and then
+#      compared as the serial line's 0 by 0.
 #   J2 the shell as root and as 1000:1000, byte-identical to real root's
 #      recordings, the shell's exit status the recording's.
 #   J3 the user sessions byte-identical to the container's too.
@@ -315,6 +318,17 @@ for leg in $legs; do
                         # J1/J2: real root's recording; J3: the container's.
                         rec=$images/rec-$n.cmp
                         why=
+                        if [ "$kb" = ps2 ]; then
+                            # pax#68: typed at the keyboard of a machine with a screen,
+                            # the window is the screen's grid; held so, then compared as
+                            # the serial line's 0 by 0 (Linux's pseudo-terminal's).
+                            wl=$(grep -m1 '^V: TIOCGWINSZ after the keys: ' "$out.cmp")
+                            case $wl in
+                                'V: TIOCGWINSZ after the keys: 0, '[1-9]*' rows '[1-9]*' cols') ;;
+                                *) why+=" the window after PS/2 keys is not the screen's grid ('$wl');" ;;
+                            esac
+                            sed -i.grid 's/^V: TIOCGWINSZ after the keys: 0, [0-9]* rows [0-9]* cols$/V: TIOCGWINSZ after the keys: 0, 0 rows 0 cols/' "$out.cmp"
+                        fi
                         cmp -s "$rec" "$out.cmp" || why+=" the session differs from real root's recording: $(diff "$rec" "$out.cmp" | head -n 14 | cut -c1-300 | tr '\n' '|');"
                         [ "$(wc -l < "$out.cmp" | tr -d ' ')" -gt 10 ] || why+=" a short session;"
                         t=J1; case $n in shell*) t=J2 ;; esac
