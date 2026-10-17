@@ -84,7 +84,9 @@
 //! the screen's rows and columns, its pixel fields 0; px48, pax#68: the
 //! size of the device input last came from, `typed_at`) and TIOCSWINSZ
 //! (0x5414); and (px18) the speaker's KIOCSOUND (0x4B2F) and KDMKTONE
-//! (0x4B30), kernel/speaker's. Every other request is refused by name (kernel/user
+//! (0x4B30), kernel/speaker's; px48's controlling-terminal five; px49
+//! (pax#74): TCFLSH (0x540b), TCSBRK (0x5409) and TIOCSTI (0x5412),
+//! measured on Linux. Every other request is refused by name (kernel/user
 //! writes `refused: tty ioctl 0x<req>`, -ENOTTY). `struct termios` is
 //! 36 bytes: four 32-bit flag words, the line discipline byte, 19
 //! control characters (measured: what TCGETS writes on Linux, and the
@@ -202,6 +204,11 @@ const TIOCGPGRP: u64 = 0x540f
 const TIOCSPGRP: u64 = 0x5410
 const TIOCNOTTY: u64 = 0x5422
 const TIOCGSID: u64 = 0x5429
+const TCSBRK: u64 = 0x5409 // px49 (pax#74): tcdrain (arg not 0), tcsendbreak (0)
+const TCFLSH: u64 = 0x540b // px49: tcflush
+const TIOCSTI: u64 = 0x5412 // px49: a byte put in the input as if typed
+const TCIFLUSH: u64 = 0
+const TCIOFLUSH: u64 = 2
 const SIGHUP: u64 = 1
 const SIGTTIN: u64 = 21
 const SIGTTOU: u64 = 22
@@ -735,6 +742,59 @@ pub fn ioctl(a: u64, pml4: u64, req: u64, arg: u64) -> u64 {
             return j
         }
         return termios_in(pml4, arg, req == TCSETSF)
+    }
+    if req == TCFLSH {
+        // px49 (pax#74): tcflush(3). The background rule first (measured:
+        // SIGTTOU, as TCSETS); TCIFLUSH and TCIOFLUSH discard what was
+        // typed and not read, the line being edited too; TCOFLUSH has
+        // nothing to discard (the console's output is written as it is
+        // asked for); any other -EINVAL.
+        let j = job(J_SET)
+        if j != 0 {
+            return j
+        }
+        let q = arg & 0xffffffff
+        if q > TCIOFLUSH {
+            return NEG_EINVAL
+        }
+        if q == TCIFLUSH || q == TCIOFLUSH {
+            put_sv(C_R, sv(C_E))
+            put_sv(C_C, sv(C_E))
+            put_sv(C_EOF, 0)
+        }
+        return 0
+    }
+    if req == TCSBRK {
+        // px49: tcdrain (arg not 0) and tcsendbreak (arg 0), after the
+        // background rule (measured: SIGTTOU for both). Nothing waits to
+        // be drained (writes are synchronous) and no break is put on
+        // COM1 (named: Linux's pseudo-terminal, the reference, answers 0
+        // at once too).
+        let j = job(J_SET)
+        if j != 0 {
+            return j
+        }
+        return 0
+    }
+    if req == TIOCSTI {
+        // px49: a byte put in the input as if it had been typed (echoed,
+        // edited, a line committed, by the line discipline). Measured on
+        // Linux with dev.tty.legacy_tiocsti 0, PAX's fixed setting: -EIO
+        // to anyone not privileged, before anything else; the privileged
+        // may put a byte in a terminal that is not their own; a bad
+        // pointer -EFAULT. A key that raises a signal is raised at the
+        // next interrupt (named).
+        if !cred.privileged(a) {
+            return NEG_EIO
+        }
+        if !uaccess.readable(pml4, arg, 1) {
+            return NEG_EFAULT
+        }
+        input(uaccess.get(pml4, arg, 1))
+        if readable() {
+            let _n = sched.wake_input()
+        }
+        return 0
     }
     if req == TIOCSCTTY {
         // ioctl_tty(2): a session leader with no controlling terminal
