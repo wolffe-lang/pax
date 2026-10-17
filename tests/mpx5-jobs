@@ -69,7 +69,11 @@
 #      compared as the serial line's 0 by 0.
 #   J2 the shell as root and as 1000:1000, byte-identical to real root's
 #      recordings, the shell's exit status the recording's.
-#   J3 the user sessions byte-identical to the container's too.
+#   J3 the user sessions byte-identical to the container's too (px49:
+#      on a host whose dev.tty.legacy_tiocsti is not 0, which lets a
+#      user put a byte in its own terminal, gaps-user's TIOCSTI rows are
+#      the host's and left out of the container's comparisons, named; J1
+#      holds them to real root's recording all the same).
 #   J4 each run's own witness that it is what it says: the probe's
 #      first line names root or a user and its mixed-group rows run or
 #      are skipped by name; the shell's prompt is `# ` or `$ `; the
@@ -281,6 +285,15 @@ if [ -z "$images" ]; then
 fi
 lx=$images/linux
 
+# px49: a container's user is refused TIOCSTI only where its host says
+# dev.tty.legacy_tiocsti 0 (kasumi's, and the recordings' guest: -EIO);
+# a host that says 1 lets a user put a byte in its own terminal. On such
+# a host the container's TIOCSTI rows are its host's, left out (named)
+# where gaps-user is held to the container.
+STI=$(cat /proc/sys/dev/tty/legacy_tiocsti 2>/dev/null || echo 0)
+host_rows() { # name file -> the file, the host's rows left out
+    if [ "$1" = gaps-user ] && [ "$STI" != 0 ]; then command grep -v '^I: TIOCSTI' "$2"; else cat "$2"; fi
+}
 # The recordings and the container agree before PAX is held to them.
 for n in $TYPED; do
     norm_session "$REC/$n.tty" > "$images/rec-$n.cmp"
@@ -290,11 +303,13 @@ for n in probe-user shell-user gaps-user; do
         bad "J0 linux $n: no $lx/$n.tty (build first, and run the Linux side)"
         continue
     fi
-    norm_session "$lx/$n.tty" > "$lx/$n.cmp"
-    if cmp -s "$lx/$n.cmp" "$images/rec-$n.cmp" && [ "$(cat "$lx/$n.tty.rc")" = "$(cat "$REC/$n.tty.rc")" ]; then
-        say "PASS J0 linux $n: the container's session is real root's recording, $(wc -l < "$lx/$n.cmp" | tr -d ' ') lines ($(sha256_of "$lx/$n.cmp" | cut -c1-12)…)"
+    norm_session "$lx/$n.tty" | host_rows "$n" /dev/stdin > "$lx/$n.cmp"
+    host_rows "$n" "$images/rec-$n.cmp" > "$images/rec-$n.host.cmp"
+    hn=; [ "$n" = gaps-user ] && [ "$STI" != 0 ] && hn=" (this host's dev.tty.legacy_tiocsti is $STI: its TIOCSTI rows left out)"
+    if cmp -s "$lx/$n.cmp" "$images/rec-$n.host.cmp" && [ "$(cat "$lx/$n.tty.rc")" = "$(cat "$REC/$n.tty.rc")" ]; then
+        say "PASS J0 linux $n: the container's session is real root's recording, $(wc -l < "$lx/$n.cmp" | tr -d ' ') lines ($(sha256_of "$lx/$n.cmp" | cut -c1-12)…)$hn"
     else
-        bad "J0 linux $n: the container's session is not real root's recording: $(diff "$images/rec-$n.cmp" "$lx/$n.cmp" | head -n 14 | cut -c1-300 | tr '\n' '|')"
+        bad "J0 linux $n: the container's session is not real root's recording$hn: $(diff "$images/rec-$n.host.cmp" "$lx/$n.cmp" | head -n 14 | cut -c1-300 | tr '\n' '|')"
     fi
 done
 
@@ -386,7 +401,8 @@ for leg in $legs; do
                             *-user)
                                 why=
                                 if [ -f "$lx/$n.cmp" ]; then
-                                    cmp -s "$lx/$n.cmp" "$out.cmp" || why+=" differs from the container's: $(diff "$lx/$n.cmp" "$out.cmp" | head -n 10 | cut -c1-300 | tr '\n' '|');"
+                                    host_rows "$n" "$out.cmp" > "$out.host.cmp"
+                                    cmp -s "$lx/$n.cmp" "$out.host.cmp" || why+=" differs from the container's: $(diff "$lx/$n.cmp" "$out.host.cmp" | head -n 10 | cut -c1-300 | tr '\n' '|');"
                                 else
                                     why+=" no container session;"
                                 fi
