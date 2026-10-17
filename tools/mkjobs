@@ -18,9 +18,12 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd)
 cc=${CC:-cc}
 need "$cc" readelf
-for p in jobs gaps; do
+# Each source named whole (the CI plan derives the paths a suite reads
+# from the names its tools write out).
+for src in "$PAX_ROOT/user/elf/jobs.c" "$PAX_ROOT/user/elf/gaps.c"; do
+    p=$(basename "$src" .c)
     "$cc" -static -no-pie -O1 -pthread -Wall -Wextra -Wno-unused-result -Wno-unused-function \
-        -Wl,--build-id=none -Wl,-z,noexecstack -o "$out/$p" "$PAX_ROOT/user/elf/$p.c" || die "cc: $p"
+        -Wl,--build-id=none -Wl,-z,noexecstack -o "$out/$p" "$src" || die "cc: $p"
     readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
     ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP (not static)"
     printf '%s %s %s\n' "$p" "$(sha256_of "$out/$p")" "$(wc -c < "$out/$p" | tr -d ' ')"
