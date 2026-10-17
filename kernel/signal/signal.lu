@@ -34,10 +34,14 @@
 //! **What a taken signal does** (`act`):
 //! - SIG_IGN, or the default for SIGCHLD, SIGURG, SIGWINCH and SIGCONT:
 //!   nothing.
-//! - the default for SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU: PAX stops no
-//!   process. The signal is dropped and a line says so:
-//!   `user: <name> pid <n> signal <s>: refused: stopping a process (no
-//!   job control), the signal is dropped`.
+//! - the default for SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU (px48): the
+//!   process stops — one that is sent while some thread takes it stops
+//!   the process when it is sent (kernel/sched's `job_signal`), one that
+//!   was blocked when it is taken here — every thread parked until a
+//!   SIGCONT (or SIGKILL); its parent is told (SIGCHLD with CLD_STOPPED
+//!   unless SA_NOCLDSTOP, and `wait4`'s WUNTRACED). SIGTSTP, SIGTTIN and
+//!   SIGTTOU to a process whose group is orphaned are discarded (XBD
+//!   11.1.4). A parked thread is parked here, on its way to ring 3.
 //! - any default for pid 1: nothing (`kill(2)`: init gets only the
 //!   signals it has a handler for).
 //! - any other default: the process ends, every thread of it, its wait
@@ -98,11 +102,13 @@
 //! A signal that does nothing wakes nobody; one that ends the process
 //! needs no answer.
 //!
-//! **Sending**: `kill` (62) — a pid is that process; 0 and a negative
-//! group are every process (PAX has one process group); -1 is every
-//! process but pid 1 and the caller; signal 0 only asks; -ESRCH,
-//! -EINVAL. `tgkill` (234) and `tkill` (200): that thread, -ESRCH when
-//! it has ended. The terminal's signals (`tty`): every process.
+//! **Sending**: `kill` (62) — a pid is that process; 0 the caller's
+//! process group, a negative pid the group it names (px48: every
+//! process of it not yet reaped, a zombie included, -ESRCH when it has
+//! none); -1 is every process but pid 1 and the caller; signal 0 only
+//! asks; -ESRCH, -EINVAL. `tgkill` (234) and `tkill` (200): that thread,
+//! -ESRCH when it has ended. The terminal's signals (`tty`): the
+//! console's foreground process group (px48; every process before).
 //! Real-time signals (32-64) are signals like the rest: one instance
 //! pending, not a queue (named).
 //!
@@ -113,13 +119,14 @@
 //! its real or effective user id is the target's real or saved user id
 //! — a target's effective id is never asked, and a sender whose only
 //! match is its own saved id is refused — or the signal is SIGCONT and
-//! both are in one session, which on PAX every process is (no job
-//! control: ruling #79's track). Else -EPERM. Asked by `kill` of a pid,
-//! by `tgkill` and `tkill` of the thread's process, and of each process
-//! `kill(-1)`, `kill(0)` and a negative group reach (each one signalled
-//! only when the rule allows: `kill(-1)` answers 0 whenever some other
-//! process than pid 1 and the caller exists, permitted or not, and a
-//! group 0 when at least one was signalled, measured). A zombie is a
+//! both are in one session (px48: their sessions, measured: SIGCONT to
+//! root's process in another session is -EPERM to a user). Else -EPERM.
+//! Asked by `kill` of a pid, by `tgkill` and `tkill` of the thread's
+//! process, and of each process `kill(-1)`, `kill(0)` and a negative
+//! group reach (each one signalled only when the rule allows: `kill(-1)`
+//! answers 0 whenever some other process than pid 1 and the caller
+//! exists, permitted or not, and a group 0 when at least one member was
+//! permitted, a zombie too, measured). A zombie is a
 //! process until it is reaped: `kill`, `tgkill` and `tkill` of one
 //! answer by the rule, against the ids it ended with, and signal
 //! nothing (measured; -ESRCH before px45). Signal 0 asks the same. What
@@ -225,6 +232,8 @@ const SI_KERNEL: u64 = 0x80
 const SI_TKILL: u64 = 0xfffffffa // -6 as an int
 const CLD_EXITED: u64 = 1
 const CLD_KILLED: u64 = 2
+const CLD_STOPPED: u64 = 5 // px48
+const CLD_CONTINUED: u64 = 6
 const SEGV_MAPERR: u64 = 1
 const SEGV_ACCERR: u64 = 2
 const ILL_ILLOPN: u64 = 2
@@ -429,8 +438,11 @@ fn int_of(x: u64) -> (bool, u64) {
 /// comment): may the process whose area is `me` send `sig` to the
 /// process whose area is `t`?
 pub fn may_signal(me: u64, t: u64, sig: u64) -> bool {
-    if sig == SIGCONT || cred.privileged(me) {
-        return true // SIGCONT: PAX's one session holds every process
+    if cred.privileged(me) {
+        return true
+    }
+    if sig == SIGCONT && sched.sid_of_area(me) == sched.sid_of_area(t) {
+        return true // px48: within a session, anyone's
     }
     let r = cred.uid(me, cred.REAL)
     let e = cred.uid(me, cred.EFFECTIVE)
@@ -476,25 +488,42 @@ pub fn kill(pid: u64, sig: u64) -> u64 {
         let _live = sched.raise_pid(p, s, info) // a zombie takes nothing
         return 0
     }
-    // -1: every process but pid 1 and the caller (`kill(2)`); 0, or a
-    // group: PAX has one process group, every process's. Each by the rule.
-    let all = neg && p == 1
+    // -1: every process but pid 1 and the caller (`kill(2)`), each by
+    // the rule.
+    if neg && p == 1 {
+        var seen: u64 = 0
+        var q = sched.proc_after(0)
+        while q != 0 {
+            if q != 1 && q != me {
+                seen += 1
+                let t = area_of_pid(q)
+                if t != 0 && may_signal(a, t, s) {
+                    let _live = sched.raise_pid(q, s, info)
+                }
+            }
+            q = sched.proc_after(q)
+        }
+        return if seen > 0 { 0 } else { NEG_ESRCH } // measured: 0 with none permitted
+    }
+    // px48: 0 is the caller's process group, -g group g: every member not
+    // yet reaped (a zombie is one, and is signalled nothing), each by the
+    // rule; -ESRCH with no member, 0 when some member was permitted,
+    // else -EPERM (measured, s240's grp and this lane's jobs).
+    let g = if p == 0 { sched.self_pgid() } else { p }
     var seen: u64 = 0
     var sent: u64 = 0
-    var q = sched.proc_after(0)
+    var q = sched.member_after(g, 0)
     while q != 0 {
-        if !all || (q != 1 && q != me) {
-            seen += 1
-            let t = area_of_pid(q)
-            if t != 0 && may_signal(a, t, s) {
-                sent += 1
-                let _live = sched.raise_pid(q, s, info)
-            }
+        seen += 1
+        let t = area_of_pid(q)
+        if t != 0 && may_signal(a, t, s) {
+            sent += 1
+            let _live = sched.raise_pid(q, s, info)
         }
-        q = sched.proc_after(q)
+        q = sched.member_after(g, q)
     }
-    if all {
-        return if seen > 0 { 0 } else { NEG_ESRCH } // measured: 0 with none permitted
+    if seen == 0 {
+        return NEG_ESRCH
     }
     if sent > 0 { 0 } else { NEG_EPERM }
 }
@@ -544,15 +573,18 @@ pub fn pipe(conn: bool) {
 }
 
 /// The terminal's signals (kernel/console's ISIG; `mask` has bit n - 1
-/// for each signal a key raised): for every process — PAX has one
-/// session and one process group with the console its controlling
-/// terminal, so the "foreground process group" Linux signals is all of
-/// them. Called from the console's interrupt, IF clear.
+/// for each signal a key raised): px48: for the console's foreground
+/// process group only (XBD 11.1.9), nobody when no session holds the
+/// console. Called from the console's interrupt, IF clear.
 pub fn tty(mask: u64) {
+    let g = sched.tty_pgrp()
+    if g == 0 || sched.tty_session() == 0 {
+        return
+    }
     var sig: u64 = 1
     while sig <= 32 {
         if mask & bit(sig) != 0 {
-            let _n = sched.raise_all(sig, sched.sig_info(sched.I_KERNEL, 0, 0, 0), 0, false)
+            let _n = sched.raise_pgrp(g, sig, sched.sig_info(sched.I_KERNEL, 0, 0, 0))
         }
         sig += 1
     }
@@ -602,8 +634,8 @@ fn put_siginfo(pml4: u64, si: u64, sig: u64, code: u64, pid: u64, uid: u64, stat
 /// the call again, or its -EINTR. `restart`: the action has SA_RESTART.
 fn settle_wait(f: u64, restart: bool) {
     let (w, arg) = sched.self_wait()
-    if w == sched.W_NONE {
-        return
+    if w == sched.W_NONE || w == sched.W_SUSPEND {
+        return // px48: rt_sigsuspend's -EINTR is in the frame already
     }
     if w == sched.W_REWOUND {
         // The frame is rewound to the `syscall` (two bytes), %rax its number.
@@ -652,7 +684,7 @@ fn settle_wait(f: u64, restart: bool) {
 /// handler. False when the stack has no room (nothing changed).
 /// `fault`: siginfo carries `addr`, and the sigcontext `trapno`, `err`
 /// and `cr2`.
-fn enter(f: u64, sig: u64, code: u64, pid: u64, uid: u64, status: u64, fault: bool, addr: u64, trapno: u64, err: u64) -> bool {
+fn enter(f: u64, sig: u64, code: u64, pid: u64, uid: u64, status: u64, fault: bool, addr: u64, trapno: u64, err: u64, saved: u64) -> bool {
     let a = area()
     let pml4 = paging.live()
     let w = SIG_WORDS + (sig - 1) * 4
@@ -707,7 +739,11 @@ fn enter(f: u64, sig: u64, code: u64, pid: u64, uid: u64, status: u64, fault: bo
         }
     }
     put_siginfo(pml4, si, sig, code, pid, uid, status, addr, fault)
-    let old = sched.self_sigmask()
+    // px48: `saved` is the mask the frame gives back at `rt_sigreturn`
+    // (the thread's own, or the one `rt_sigsuspend` replaced); the
+    // handler runs with the thread's mask now and the action's.
+    let old = saved
+    let now = sched.self_sigmask()
     uaccess.zero(pml4, uc, UC_BYTES)
     uaccess.put(pml4, uc, if xs { UC_FLAGS_XSTATE } else { UC_FLAGS_PLAIN }, 8)
     if asz != 0 {
@@ -744,7 +780,7 @@ fn enter(f: u64, sig: u64, code: u64, pid: u64, uid: u64, status: u64, fault: bo
     uaccess.put(pml4, uc + UC_SIGMASK, old, 8)
     uaccess.put(pml4, fr, restorer, 8)
     // The handler's first instruction.
-    var nm = old | amask
+    var nm = now | amask
     if flags & SA_NODEFER == 0 {
         nm = nm | bit(sig)
     }
@@ -851,6 +887,12 @@ fn origin(info: u64) -> (u64, u64, u64, u64) {
     if kind == sched.I_CHLD_KILLED {
         return (CLD_KILLED, pid, uid, status)
     }
+    if kind == sched.I_CHLD_STOPPED {
+        return (CLD_STOPPED, pid, uid, status) // px48: si_status the stop's signal
+    }
+    if kind == sched.I_CHLD_CONTINUED {
+        return (CLD_CONTINUED, pid, uid, status) // px48: si_status SIGCONT
+    }
     (SI_USER, pid, uid, 0)
 }
 
@@ -874,21 +916,19 @@ fn act(f: u64, sig: u64, info: u64) -> u64 {
             return f
         }
         if sig == SIGSTOP || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU {
-            who()
-            log.put(" signal ")
-            log.dec(sig as int)
-            log.put(" (")
-            log.put(name(sig))
-            log.put("): refused: stopping a process (no job control), the signal is dropped")
-            log.end()
+            // px48: a stop that was blocked when it was sent, taken now: the
+            // process stops (or, orphaned, does not), and `on_return`
+            // parks this thread before it takes anything more.
+            sched.stop_self(sig)
             return f
         }
         let (k, _p, _s, _u) = sched.info_parts(info)
         return die(f, sig, if k == sched.I_PIPE { ", a write to a pipe with no reader" } else if k == sched.I_CONN { ", a write to a connection that is over" } else { "" })
     }
+    let (susp, was) = sched.self_suspended() // px48: rt_sigsuspend's mask goes back at the handler's end
     settle_wait(f, aget(a, w + 1) & SA_RESTART != 0)
     let (code, pid, uid, status) = origin(info)
-    if !enter(f, sig, code, pid, uid, status, false, 0, 0, 0) {
+    if !enter(f, sig, code, pid, uid, status, false, 0, 0, 0, if susp { was } else { sched.self_sigmask() }) {
         return die(f, SIGSEGV, ", no room on its stack for a signal's frame")
     }
     f
@@ -902,11 +942,23 @@ pub fn on_return(f: u64) -> u64 {
     var g = f
     var guard: u64 = 0
     while guard < 256 {
-        if word(g, W_CS) & 3 != 3 || !sched.signal_waits() {
+        if word(g, W_CS) & 3 != 3 {
+            return g
+        }
+        if sched.self_parks() {
+            // px48: its process is stopped: it runs nothing, and takes
+            // nothing, until continued (or killed: SIGKILL readies it).
+            g = sched.park_current(g)
+            guard += 1
+            continue
+        }
+        if !sched.signal_waits() {
+            sched.suspend_over() // px48: let go of rt_sigsuspend with no handler: its mask back
             return g
         }
         let (sig, info) = sched.take_signal()
         if sig == 0 {
+            sched.suspend_over()
             return g
         }
         g = act(g, sig, info)
@@ -1001,7 +1053,7 @@ pub fn fault(f: u64, v: u64) -> u64 {
         addr = word(f, W_RIP)
     }
     let _w = sched.self_wait()
-    if !enter(f, sig, code, 0, 0, 0, true, addr, v, err) {
+    if !enter(f, sig, code, 0, 0, 0, true, addr, v, err, sched.self_sigmask()) {
         return 0
     }
     f
