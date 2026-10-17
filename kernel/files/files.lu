@@ -5836,7 +5836,26 @@ pub fn fstatat(a: u64, pml4: u64, dirfd: u64, va: u64, st: u64, flags: u64) -> u
     if is_err(n) {
         return neg(rf(n))
     }
-    put_stat(a, pml4, st, n)
+    let m = std_target(a, n, flags & AT_SYMLINK_NOFOLLOW == 0)
+    if is_err(m) {
+        return neg(rf(m))
+    }
+    put_stat(a, pml4, st, m)
+}
+
+/// px50: what `stat` of /dev/stdin, stdout or stderr answers when it
+/// follows (Linux's are links to /proc/self/fd/0, 1, 2): the
+/// descriptor's own node, -ENOENT when it is closed (bu25's `cat`
+/// compares `/dev/stdin` with its output by `dev` and `ino`). Any other
+/// node is itself.
+fn std_target(a: u64, n: u64, follow: bool) -> u64 {
+    if !follow || ty(n) != T_STD {
+        return n
+    }
+    if kind(a, rf(n)) == K_CLOSED {
+        return err(ENOENT)
+    }
+    node_of(a, rf(n))
 }
 
 /// `statx(dirfd, path, flags, mask, sx)`: every basic field, whatever
@@ -5846,7 +5865,11 @@ pub fn statx(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, sx: u64) -> u64
     if is_err(n) {
         return neg(rf(n))
     }
-    put_statx(a, pml4, sx, n)
+    let m = std_target(a, n, flags & AT_SYMLINK_NOFOLLOW == 0) // px50
+    if is_err(m) {
+        return neg(rf(m))
+    }
+    put_statx(a, pml4, sx, m)
 }
 
 // --- directories --------------------------------------------------------------
