@@ -727,3 +727,22 @@ note says so. Permissively licensed kernels: none consulted.
 | black-box Linux 7.2.8-1-cachyos (kasumi's own kernel image `f4c00d5d…` under QEMU 11.1.1, `notes/px48/vmjob.c` as pid 1, the program on a fresh pseudo-terminal as its session leader; the initramfs the suite's own archives) | — | GPL-2.0 (a program we run) | run, never read: `jobs` as root and as 1000:1000, the shell as root and as `pax` | `tests/mpx5-jobs.d/linux/` |
 | Ubuntu 24.04 `busybox-static` `1:1.36.1-6ubuntu3.1`, the .deb `944b2728…`, `usr/bin/busybox` `dbac288c…` | Ubuntu archive | GPL-2.0 (a program we run) | fetched by digest and run, never read (`tools/fetch-busybox`, `user/busybox.pin`) | the witness shell (`sh -i`), and `sleep` |
 | rootless podman 6.1.3 on kasumi, `px13-ubuntu`; CI's Docker with `python:3.12-slim` by digest | — | — | run: the user's sessions in a throwaway container (`tools/linux-tree --rdev --nsproc`) | J0, J3 |
+
+## px49: the small gaps (pause, rt_sigsuspend, TIOCSTI/TCFLSH/TCSBRK, sendfile and splice under TOSTOP, socket owners, faccessat2's flags, fallocate's modes, unlink of /dev)
+
+No kernel's, libc's, shell's or terminal driver's source was read or
+searched for (ruling #22). Every rule the kernel follows is a row Linux
+answered on real root's guest (this lane's `gaps` probe, as root and as
+1000:1000) or in a container (a user's `unlink` of `/dev` and `/proc`,
+`tests/mpx3-tree`); where the prediction and the measurement parted, the
+measurement decided and the note says so. Permissively licensed kernels:
+none consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| man-pages `pause(2)`, `sigsuspend(2)`, `signal(7)`, `ioctl_tty(2)` (TIOCSTI, TCFLSH, TCSBRK), `termios(3)` (`tcflush`, `tcdrain`, `tcsendbreak`, TOSTOP), `sendfile(2)`, `splice(2)`, `fallocate(2)`, `access(2)` (`faccessat2`), `unlink(2)`, `stat(2)`, `socket(7)`, `eventfd(2)`, `epoll_create(2)`, `accept(2)`, `setfsuid(2)`, `credentials(7)` | man-pages 6.x, the author's own knowledge | GPL-compatible documentation | the rules, as documentation | `kernel/user`, `kernel/sched`, `kernel/signal`, `kernel/console`, `kernel/files`, `kernel/tree` |
+| POSIX.1-2024: XSH `pause`, `sigsuspend`, `tcflush`, `tcdrain`, `tcsendbreak`, `faccessat`, `unlink`; XBD 11.1.4 (terminal access control) | 2024 | The Open Group | read (the author's own knowledge of it) | the same |
+| uapi values: TCSBRK 0x5409, TCFLSH 0x540b, TIOCSTI 0x5412, TCIFLUSH 0, TCOFLUSH 1, TCIOFLUSH 2; FALLOC_FL_KEEP_SIZE 1, PUNCH_HOLE 2, COLLAPSE_RANGE 8, ZERO_RANGE 0x10, INSERT_RANGE 0x20, UNSHARE_RANGE 0x40; AT_SYMLINK_NOFOLLOW 0x100, AT_EMPTY_PATH 0x1000; `pause` 34 | — | GPL-2.0 WITH Linux-syscall-note | the author's own knowledge, confirmed black-box: the probe, built against glibc 2.39's headers in `px13-ubuntu`, asked the same numbers of Linux and PAX | the constants |
+| black-box Linux 7.2.8-1-cachyos (kasumi's own kernel image `f4c00d5d…` under QEMU 11.1.1, `notes/px49/vmjob.c` as pid 1 — px48's with the loopback up and `/sys` mounted — the program on a fresh pseudo-terminal as its session leader; the initramfs the suite's own archive; `dev.tty.legacy_tiocsti` 0) | — | GPL-2.0 (a program we run) | run, never read: `gaps` as root and as 1000:1000, recorded twice, the same bytes | `tests/mpx5-jobs.d/linux/gaps*.tty` |
+| rootless podman on kasumi (`px13-ubuntu`), CI's Docker (`python:3.12-slim` by digest) | — | — | run: `gaps` as 1000:1000 (`tools/linux-tree --owners --rdev --nsproc`); `tree` as root and as 1000:1000 (`tests/mpx3-tree`); boreutils' `cat f >> f` (`notes/px49/cat-dark-linux.txt`) | J0, J3; mpx3-tree's T1; the record of `cat`'s refusal |
+| boreutils `8f0bbb1` (bu25) and pelt `1102498` (sh17), built from their own trees by `tools/mkboreutils` and `tools/mkpelt` | the org's own | the org's own | built and run, as before | the pins |
