@@ -1,0 +1,165 @@
+$ su pax
+$ cd
+$ mkdir w
+$ cd w
+$ mk() { echo one > f; echo two >> f; }
+$ s() { echo "status $?"; cat f; }
+$ echo A > a; echo B > b
+$ mk; cat f >> f; s
+cat: f: input file is output file
+status 1
+one
+two
+$ mk; cat < f >> f; s
+cat: -: input file is output file
+status 1
+one
+two
+$ mk; cat - < f >> f; s
+cat: -: input file is output file
+status 1
+one
+two
+$ mk; cat /dev/stdin < f >> f; s
+cat: /dev/stdin: input file is output file
+status 1
+one
+two
+$ mk; ln f h; cat h >> f; s; rm h
+cat: h: input file is output file
+status 1
+one
+two
+$ mk; ln -s f l; cat l >> f; s; rm l
+cat: l: input file is output file
+status 1
+one
+two
+$ mk; { read x; cat; } < f >> f; s
+cat: -: input file is output file
+status 1
+one
+two
+$ mk; cat f f >> f; s
+cat: f: input file is output file
+cat: f: input file is output file
+status 1
+one
+two
+$ mk; cat - - < f >> f; s
+cat: -: input file is output file
+cat: -: input file is output file
+status 1
+one
+two
+$ mk; cat a f b >> f; s
+cat: f: input file is output file
+status 1
+one
+two
+A
+B
+$ mk; cat nope f >> f; s
+cat: nope: No such file or directory
+cat: f: input file is output file
+status 1
+one
+two
+$ mk; mkdir d; cat d >> f; s; rmdir d
+cat: d: Is a directory
+status 1
+one
+two
+$ mk; cat -n f >> f; s
+cat: f: input file is output file
+status 1
+one
+two
+$ mk; cat -A f >> f; s
+cat: f: input file is output file
+status 1
+one
+two
+$ : > f; cat f >> f; s
+status 0
+$ mk; { read x; read y; cat; } < f >> f; s
+status 0
+one
+two
+$ mk; cat f > f; s
+status 0
+$ mk; cat < f > f; s
+status 0
+$ mk; cat f 1<> f; s
+status 0
+one
+two
+$ mk; cat < f 1<> f; s
+status 0
+one
+two
+$ mk; { read x; cat; } < f 1<> f; s
+status 0
+two
+two
+$ mk; { echo -n AB; cat; } < f 1<> f; s
+cat: -: input file is output file
+status 1
+ABe
+two
+$ mk; { echo -n AB; cat f; } 1<> f; s
+cat: f: input file is output file
+status 1
+ABe
+two
+$ mk; cat a f 1<> f; s
+cat: f: input file is output file
+status 1
+A
+e
+two
+$ mk; cat f f 1<> f; s
+cat: f: input file is output file
+status 1
+one
+two
+$ mk; cat - - < f 1<> f; s
+status 0
+one
+two
+$ mk; { read x; echo -n Z; cat /dev/stdin; } < f 1<> f; s
+cat: /dev/stdin: input file is output file
+status 1
+Zne
+two
+$ mk; cat a >> f; s
+status 0
+one
+two
+A
+$ mk; cat f >> a; s; cat a; echo A > a
+status 0
+one
+two
+A
+one
+two
+$ mk; exec 3>> f; cat f > g; s; exec 3>&-; cat g; rm g
+status 0
+one
+two
+one
+two
+$ mk; cat f f | wc -c
+16
+$ mk; cp f g; cat g >> f; s; rm g
+status 0
+one
+two
+one
+two
+$ rm f a b
+$ cd
+$ rmdir w
+$ exit
+$ exit
