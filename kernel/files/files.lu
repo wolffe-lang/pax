@@ -3061,6 +3061,9 @@ fn may_trace(a: u64, ta: u64) -> bool {
 /// or the descriptor is gone, -EACCES when `ptrace(2)`'s read mode says
 /// no. Remembers the descriptor (`fdl_area`, `fdl_fd`).
 fn fd_follow(a: u64, c: u64) -> (u64, u64) {
+    if a != 0 {
+        return (0, ENOENT) // px50 PLANT A: an fd/ entry is not followed (trunk's answer); never merged
+    }
     let ta = pid_area(procfs.pid_of(rf(c)))
     let (_isfd, fd) = procfs.fd_of(rf(c))
     if ta == 0 || kind(ta, fd) == K_CLOSED {
