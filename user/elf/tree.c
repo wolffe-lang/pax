@@ -374,6 +374,10 @@ static void unlinked(void) {
     long g = r(rmdir("/t/d/..")), h = r(rmdir("/")), i = r(rmdir("/dev"));
     say("remove: rmdir of a file %ld, of a directory with an entry %ld, of a missing name %ld, of d/. %ld, of d/.. %ld, of / %ld, of /dev %ld\n",
         a, c, e, f, g, h, i);
+    /* px49 (pax#70): /dev and /proc are names in `/`: a user who may not
+     * write `/` is told -EACCES before what they are (root -EISDIR). */
+    a = r(unlink("/dev")); c = r(unlink("/proc"));
+    say("remove: unlink of /dev %ld, of /proc %ld\n", a, c);
     a = r(unlinkat(AT_FDCWD, "/t/d/x", AT_REMOVEDIR));
     c = r(unlinkat(AT_FDCWD, "/t/d", 0));
     e = r(unlinkat(AT_FDCWD, "/t/d/x", 0));
