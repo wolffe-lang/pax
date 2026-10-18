@@ -765,3 +765,22 @@ kernels: none consulted.
 | black-box Linux 7.2.8-1-cachyos (kasumi's own kernel image `f4c00d5d…` under QEMU 11.1.1, `notes/px50/vmjob.c` as pid 1 — px49's with `/` made 0755 — the program on a fresh pseudo-terminal as its session leader; the initramfs the suite's own archive) | — | GPL-2.0 (a program we run) | run, never read: `fdtab` as root and as 1000:1000, recorded twice, the same bytes | `tests/mpx5-jobs.d/linux/fds*.tty` |
 | rootless podman on kasumi (`px13-ubuntu`), CI's Docker | — | — | run: `fdtab` as 1000:1000 (`tools/linux-tree --owners --rdev --nsproc --sys`); boreutils' `cat` in the shell-inout sessions (`tests/mpx3-tree`); `notes/px50/nbrace` over the container's loopback under `taskset -c 0-3` | J0, J3; mpx3-tree's T1; pax#79's evidence |
 | boreutils `8f0bbb1` (bu25): `src/bore/inout.lu` (the org's own source: which `/proc` lines `cat` reads) and `tests/inout/cases.toml` (its shapes) | the org's own | the org's own | read, as the org's own code | the witness |
+
+## px51: the pins at 0.2.32 (wolf, lupin, pelt's job control, boreutils' kill and timeout)
+
+No kernel's source was read or searched for, nor any libc's, shell's,
+terminal driver's, `kill`'s or `timeout`'s (ruling #22). No kernel code
+changed: the lane moves pins and measures. Every session is the org's
+own binaries typed at PAX's console and at real Linux under QEMU (and,
+for `pax`'s rows, in a container); where a session raced on the Linux
+side it was reshaped, never loosened (notes/px51-the-pins-0232.md).
+Permissively licensed kernels: none consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| wolf 0.2.32 (`v0.2.32` at `72de141f`, release 416327027) and lupin 0.1.54 (`v0.1.54` at `0e536e8`, release 415937354), the linux x86-64 archives `4c37f9c5…` and `175df238…`; wolf-std `d37c911` | the org's own | the org's own | fetched by digest, read twice (the release API, then `sha256sum` of the download on kasumi) | `kernel/wolf.pin`, `user/su/wolf-toolchain.toml` |
+| pelt `2676879` (sh18): `notes/sh18-job-control.md`, `tests/session/c_jc_*.keys` | the org's own | the org's own | read, as the org's own code and tests; the keys rewritten in `tools/qemu-halt`'s notation (`user/console/pjobs/`), five as named variants | the pjobs sessions |
+| boreutils `43ee185` (bu27): `notes/bu27-the-groups.md`, `notes/bu27/ev/straces.log` and its strace transcripts (kasumi) | the org's own | the org's own | read, as recorded runs of the org's own binaries | which calls `kill` and `timeout` make; the groups session |
+| man-pages `kill(1)`, `kill(2)`, `timeout(1)`, `setpgid(2)`, `socketpair(2)`, `unix(7)`, `vfork(2)`, `clone(2)`, `proc_pid_stat(5)`, `proc_pid_status(5)`; POSIX.1-2024 XCU 2.11, `kill`, `jobs`, `fg`, `bg`, `wait` | man-pages 6.19 (kasumi); POSIX.1-2024 | GPL-compatible documentation; IEEE/The Open Group | read | what each row should answer |
+| black-box Linux 7.2.8-1-cachyos (kasumi's own kernel image `f4c00d5d…` under QEMU 11.1.1, `notes/px50/vmjob.c` as pid 1, the shell on a fresh pseudo-terminal as its session leader; the suite's own pjobs archive) | — | GPL-2.0 (a program we run) | run, never read: each of the 26 pjobs sessions and the groups session as root and as 1000:1000, recorded twice, the same bytes | `tests/mpx5-jobs.d/linux/pjobs-*`, `groups*` |
+| rootless podman on kasumi (`px13-ubuntu`), CI's Docker | — | — | run: the user sessions (`tools/linux-tree --owners --rdev --nsproc`) | J0, J3 |
