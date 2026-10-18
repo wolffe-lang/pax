@@ -516,9 +516,13 @@ pub fn kill(pid: u64, sig: u64) -> u64 {
     while q != 0 {
         seen += 1
         let t = area_of_pid(q)
+        // px51 PLANT B (never to merge): a group send reaches its leader
+        // alone; the other members hear nothing.
         if t != 0 && may_signal(a, t, s) {
             sent += 1
-            let _live = sched.raise_pid(q, s, info)
+            if q == g {
+                let _live = sched.raise_pid(q, s, info)
+            }
         }
         q = sched.member_after(g, q)
     }
