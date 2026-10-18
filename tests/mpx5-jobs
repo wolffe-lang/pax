@@ -43,6 +43,21 @@
 #           and rename of /proc and /sys (pax#78, #80); nothing typed.
 #           Its archive has /g (1777) and root's /g/r644; kmain_session
 #           (its sockets).
+#   pjobs   px51: pelt's own job control (user/pelt.pin, sh18's): one
+#           run of `/bin/sh -i -m` (pelt) a case, each typed the keys of
+#           one of sh18's job-control sessions (user/console/pjobs/,
+#           pelt's tests/session/c_jc_* in tools/qemu-halt's notation;
+#           the ones that ask `ps` or `sed`, which PAX lacks, as
+#           variants that read /proc/<pid>/stat with `cut` or squeeze
+#           with `tr`, named `-proc` and `-tr`), prompt `$ `. Its
+#           archive: pelt as /bin/sh and /bin/pelt, boreutils' sleep,
+#           cat, cut, tr, wc, kill and timeout (user/boreutils.pin),
+#           `as`, /g (1777); kmain_console.
+#   pjobs-user  the same runs through `/bin/as 1000 1000 /bin/sh -i -m`.
+#   groups  px51: boreutils' `kill` to a group and `timeout`, typed at
+#           pelt (user/console/groups.keys, typed twice): `/bin/sh -i
+#           -m`, then `/bin/as 1000 1000 /bin/sh -i -m`; the pjobs
+#           archive with its own /etc/pax-run.
 # Each command of the probe image is a process the kernel starts: a
 # session leader with the console as its controlling terminal (named:
 # Linux's init has neither), as the probe and the shell are on Linux on
@@ -106,6 +121,18 @@
 #      differently (root's 0644 file reopened for writing through its
 #      entry, rmdir of /proc and /sys) and rows the fix turns (a file's
 #      link, an entry followed, fdinfo's append flag).
+#   J9 px51: each pjobs and pjobs-user run (one of sh18's sessions)
+#      byte-identical to real root's recording of the same pelt on the
+#      guest (tests/mpx5-jobs.d/linux/pjobs-*.tty), the user's to the
+#      container's too (J3); its J4 witness: pelt's prompt, and over the
+#      image the job lines (`Stopped`, `Running`, `Done`, `Terminated`,
+#      `Killed`, `Stopped (tty input)`) and `leader`, `foreground`,
+#      `own-group`, `group-is-pid` from /proc/<pid>/stat.
+#   J10 px51: groups and groups-user byte-identical to real root's
+#      recordings, the user's to the container's too (J3); its J4
+#      witness: a group sent to (`Terminated`, `Killed`), `kill 0`'s
+#      143, timeout's 124, 137, 125, 126, 127, `survived` once (the
+#      --foreground run's child alone outlives the expiry).
 #   J7 px49: gaps as root and as 1000:1000, byte-identical to real root's
 #      recordings (tests/mpx5-jobs.d/linux/gaps.tty, gaps-user.tty: the
 #      guest's notes/px49/vmjob.c, which brings the loopback up and
@@ -149,6 +176,33 @@ UKEYS=$SKEYS # the same keys; the user's prompt is `$ `
 GKEYS=$PAX_ROOT/user/console/gaps.keys # px49
 GAPS_SF='B: the sendfile reached the terminal' # /g/sf's line (and /g/r644's, /g/r600's)
 FDS_R644='root file' # px50: the fds archive's /g/r644
+PDIR=$PAX_ROOT/user/console/pjobs # px51: sh18's job-control sessions, one keys file a case
+PCASES="c_jc_terminal_back c_jc_background_job c_jc_bg c_jc_bg_running c_jc_bg_ttin c_jc_ctrl_c_job_only c_jc_ctrl_c_loop
+    c_jc_ctrl_z c_jc_done_message c_jc_exit_stopped c_jc_fg c_jc_fg_number c_jc_fg_pipeline c_jc_job_ids c_jc_jobs_list
+    c_jc_jobs_states c_jc_mixed_pipeline c_jc_numbering c_jc_shell_ignores_tstp c_jc_states c_jc_wait_stopped
+    c_jc_background_group-proc c_jc_foreground_group-proc c_jc_shell_is_leader-proc c_jc_kill_group-proc c_jc_jobs_l_pipeline-tr"
+PCASES=$(echo $PCASES)
+PBORE="sleep cat cut tr wc true kill timeout" # px51: boreutils in the pjobs archive
+PTEXT='not a program' # px51: /g/text, a file timeout cannot run (126)
+RKEYS=$PAX_ROOT/user/console/groups.keys # px51
+# px51: what a pjobs case must show (a word of each line), by case.
+pwitness() {
+    case ${1#user-} in
+        c_jc_background_job) echo Terminated ;;
+        c_jc_bg_ttin) echo 'Stopped.(tty.input)' ;;
+        c_jc_ctrl_z|c_jc_exit_stopped|c_jc_wait_stopped) echo Stopped ;;
+        c_jc_ctrl_c_loop) echo 'trapped$' ;;
+        c_jc_done_message) echo Done ;;
+        c_jc_bg) echo 'st=0' ;;
+        c_jc_states) echo 'st=TSTP st=STOP' ;;
+        c_jc_shell_ignores_tstp) echo '^alive' ;;
+        c_jc_background_group-proc|c_jc_shell_is_leader-proc) echo '^leader' ;;
+        c_jc_foreground_group-proc) echo '^foreground ^own-group' ;;
+        c_jc_kill_group-proc) echo '^group-is-pid' ;;
+        c_jc_fg) echo '^typed.after.fg' ;;
+    esac
+}
+pcase() { echo "$PCASES" | tr ' ' '\n' | sed -n "${1}p"; } # k -> the k-th case
 # image: its run list (one command a line), its keys, its prompt.
 image_runs() {
     case $1 in
@@ -157,6 +211,9 @@ image_runs() {
         shell-user) printf '%s\n' '/bin/as 1000 1000 /bin/sh -i' ;;
         gaps) printf '%s\n' /bin/gaps '/bin/as 1000 1000 /bin/gaps' ;;
         fds) printf '%s\n' /bin/fdtab '/bin/as 1000 1000 /bin/fdtab' ;;
+        pjobs) for c in $PCASES; do printf '%s\n' '/bin/sh -i -m'; done ;;
+        pjobs-user) for c in $PCASES; do printf '%s\n' '/bin/as 1000 1000 /bin/sh -i -m'; done ;;
+        groups) printf '%s\n' '/bin/sh -i -m' '/bin/as 1000 1000 /bin/sh -i -m' ;;
     esac
 }
 image_kernel() { case $1 in gaps|fds) echo kmain_session ;; *) echo kmain_console ;; esac; } # px49, px50
@@ -168,10 +225,12 @@ image_keys() { # image -> a keys file (the probe's typed twice: its two typed ru
         shell-user) cat "$UKEYS" ;;
         gaps) cat "$GKEYS" "$GKEYS" ;;
         fds) : ;; # px50: nothing typed
+        pjobs|pjobs-user) for c in $PCASES; do cat "$PDIR/$c.keys"; done ;;
+        groups) cat "$RKEYS" "$RKEYS" ;;
     esac
 }
 # boot: image and keyboard. The probe over both; the shells over COM1.
-BOOTS="probe:serial probe:ps2 shell:serial shell-user:serial gaps:serial fds:serial"
+BOOTS="probe:serial probe:ps2 shell:serial shell-user:serial gaps:serial fds:serial pjobs:serial pjobs-user:serial groups:serial"
 # Each typed run's name, by image and run number, and its recording.
 run_name() { # image k
     case $1:$2 in
@@ -179,9 +238,14 @@ run_name() { # image k
         shell:1) echo shell ;; shell-user:1) echo shell-user ;;
         gaps:1) echo gaps ;; gaps:2) echo gaps-user ;;
         fds:1) echo fds ;; fds:2) echo fds-user ;;
+        pjobs:*) echo "pjobs-$(pcase "$2")" ;; pjobs-user:*) echo "pjobs-user-$(pcase "$2")" ;;
+        groups:1) echo groups ;; groups:2) echo groups-user ;;
     esac
 }
-TYPED="probe probe-user shell shell-user gaps gaps-user fds fds-user"
+TYPED="probe probe-user shell shell-user gaps gaps-user fds fds-user groups groups-user"
+for c in $PCASES; do TYPED+=" pjobs-$c pjobs-user-$c"; done # px51
+UTYPED="probe-user shell-user gaps-user fds-user groups-user" # the user sessions the container runs
+for c in $PCASES; do UTYPED+=" pjobs-user-$c"; done
 
 work=$PAX_BUILD/mpx5-jobs
 runs=$PAX_BUILD/mpx5-jobs-runs.txt
@@ -230,6 +294,23 @@ linux_side() { # dir -> reasons on stdout
     else
         printf ' tools/linux-tree fds-user;'
     fi
+    # px51: pelt's sessions and the groups session as 1000:1000, /g as
+    # the archive gives it; one container a case.
+    local c
+    for c in $PCASES; do
+        if "$PAX_ROOT/tools/linux-tree" --root "$1/proot" --keys "$PDIR/$c.keys" --prompt '$ ' --argv0 /bin/as --size 256m --rdev --nsproc \
+            --owners "$1/pjobs.owners" "$1/linux/pjobs-user-$c.tty" -- /bin/as 1000 1000 /bin/sh -i -m; then
+            say "  linux pjobs-user-$c: $(wc -c < "$1/linux/pjobs-user-$c.tty" | tr -d ' ') bytes, status $(cat "$1/linux/pjobs-user-$c.tty.rc")"
+        else
+            printf ' tools/linux-tree pjobs-user-%s;' "$c"
+        fi
+    done
+    if "$PAX_ROOT/tools/linux-tree" --root "$1/proot" --keys "$RKEYS" --prompt '$ ' --argv0 /bin/as --size 256m --rdev --nsproc \
+        --owners "$1/pjobs.owners" "$1/linux/groups-user.tty" -- /bin/as 1000 1000 /bin/sh -i -m; then
+        say "  linux groups-user: $(wc -c < "$1/linux/groups-user.tty" | tr -d ' ') bytes, status $(cat "$1/linux/groups-user.tty.rc")"
+    else
+        printf ' tools/linux-tree groups-user;'
+    fi
 }
 
 if [ "$only" = linux ]; then
@@ -250,6 +331,8 @@ if [ -z "$images" ]; then
     "$PAX_ROOT/tools/mkjobs" "$work/bin" > "$work/jobs.txt" || why+=" tools/mkjobs;"
     "$PAX_ROOT/tools/mkas" "$work/bin" > "$work/as.txt" || why+=" tools/mkas;"
     "$PAX_ROOT/tools/fetch-busybox" "$work/bin" > "$work/busybox.txt" || why+=" tools/fetch-busybox;"
+    "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" || why+=" tools/mkpelt;" # px51
+    "$PAX_ROOT/tools/mkboreutils" "$work/bore" $PBORE > "$work/bore.txt" || why+=" tools/mkboreutils;" # px51
     cp "$work/bin/jobs" "$r/bin/jobs" 2>/dev/null || why+=" no jobs;"
     cp "$work/bin/gaps" "$r/bin/gaps" 2>/dev/null || why+=" no gaps;"
     cp "$work/bin/fdtab" "$r/bin/fdtab" 2>/dev/null || why+=" no fdtab;"
@@ -260,6 +343,23 @@ if [ -z "$images" ]; then
         x=$(static_ok "$f") || why+=" $x;"
         say "  program: ${f#"$r"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
     done
+    # px51: the pjobs tree (pelt as sh, boreutils, as, /g) for the
+    # archive and for the container.
+    pr=$work/proot
+    mkdir -p "$pr/bin" "$pr/etc" "$pr/g"
+    cp "$work/pelt/pelt" "$pr/bin/pelt" 2>/dev/null || why+=" no pelt;"
+    cp "$work/pelt/pelt" "$pr/bin/sh" 2>/dev/null || true
+    for u in $PBORE; do cp "$work/bore/$u" "$pr/bin/$u" 2>/dev/null || why+=" no $u;"; done
+    cp "$r/bin/as" "$pr/bin/as" 2>/dev/null || why+=" no as for the pjobs tree;"
+    for f in "$pr"/bin/*; do
+        x=$(static_ok "$f") || why+=" $x;"
+        say "  program: pjobs ${f#"$pr"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+    done
+    printf '%s\n' "$PTEXT" > "$work/pjobs.text"
+    cp "$work/pjobs.text" "$pr/g/text"
+    printf '%s\n' '/g 1777 0 0' '/g/text 644 0 0' > "$work/pjobs.owners"
+    pargs=(/g/:1777 /g/text="$work/pjobs.text":644)
+    for f in "$pr"/bin/*; do pargs+=("/bin/${f##*/}=$f:755"); done
     for im in probe shell shell-user; do
         image_runs "$im" > "$work/$im.run"
         "$PAX_ROOT/tools/mkinitramfs" "$work/$im.cpio" /bin/jobs="$r/bin/jobs":755 /bin/as="$r/bin/as":755 \
@@ -288,13 +388,20 @@ if [ -z "$images" ]; then
     image_runs fds > "$work/fds.run"
     "$PAX_ROOT/tools/mkinitramfs" "$work/fds.cpio" /bin/fdtab="$r/bin/fdtab":755 /bin/as="$r/bin/as":755 /g/:1777 \
         /g/r644="$work/fds.r644":644 /etc/pax-run="$work/fds.run":644 > "$work/fds.initramfs.txt" || why+=" tools/mkinitramfs fds;"
+    # px51: the pjobs, pjobs-user and groups images, one tree, each its
+    # own run list (the run list in the container's tree is pjobs').
+    for im in pjobs pjobs-user groups; do
+        image_runs "$im" > "$work/$im.run"
+        "$PAX_ROOT/tools/mkinitramfs" "$work/$im.cpio" "${pargs[@]}" /etc/pax-run="$work/$im.run":644 > "$work/$im.initramfs.txt" \
+            || why+=" tools/mkinitramfs $im;"
+    done
     for tier in $tiers; do
         flag=(); [ "$tier" = release ] && flag=(--release)
         mkdir -p "$work/$tier"
         for kn in kmain_console kmain_session; do
             log=$work/$tier/$kn.build-kernel.log
             if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/$kn.lu" "$work/$tier" 2>"$log"); then
-                for im in probe shell shell-user gaps fds; do
+                for im in probe shell shell-user gaps fds pjobs pjobs-user groups; do
                     [ "$(image_kernel "$im")" = "$kn" ] || continue
                     "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
                         --add "$work/$im.cpio" initramfs.cpio "$elf" "$work/$tier/$im.iso" >/dev/null \
@@ -345,7 +452,7 @@ host_rows() { # name file -> the file, the host's rows left out
 for n in $TYPED; do
     norm_session "$REC/$n.tty" > "$images/rec-$n.cmp"
 done
-for n in probe-user shell-user gaps-user fds-user; do
+for n in $UTYPED; do
     if [ ! -f "$lx/$n.tty" ]; then
         bad "J0 linux $n: no $lx/$n.tty (build first, and run the Linux side)"
         continue
@@ -442,11 +549,12 @@ for leg in $legs; do
                             sed -i.grid 's/^V: TIOCGWINSZ after the keys: 0, [0-9]* rows [0-9]* cols$/V: TIOCGWINSZ after the keys: 0, 0 rows 0 cols/' "$out.cmp"
                         fi
                         cmp -s "$rec" "$out.cmp" || why+=" the session differs from real root's recording: $(diff "$rec" "$out.cmp" | head -n 14 | cut -c1-300 | tr '\n' '|');"
-                        [ "$(wc -l < "$out.cmp" | tr -d ' ')" -gt 10 ] || why+=" a short session;"
-                        t=J1; case $n in shell*) t=J2 ;; gaps*) t=J7 ;; fds*) t=J8 ;; esac
+                        short=10; case $n in pjobs-*) short=2 ;; esac # px51: sh18's sessions are short ones
+                        [ "$(wc -l < "$out.cmp" | tr -d ' ')" -gt "$short" ] || why+=" a short session;"
+                        t=J1; case $n in shell*) t=J2 ;; gaps*) t=J7 ;; fds*) t=J8 ;; pjobs*) t=J9 ;; groups*) t=J10 ;; esac
                         [ -z "$why" ] && say "PASS $t $id $n: $(wc -l < "$out.cmp" | tr -d ' ') lines byte-identical to real root's recording ($(sha256_of "$out.cmp" | cut -c1-12)…)" || bad "$t $id $n:$why"
                         case $n in
-                            *-user)
+                            *-user|pjobs-user-*)
                                 why=
                                 if [ -f "$lx/$n.cmp" ]; then
                                     host_rows "$n" "$out.cmp" > "$out.host.cmp"
@@ -477,6 +585,16 @@ for leg in $legs; do
                             fds-user) grep -qx "fdtab: px50's probe, as a user" "$out.cmp" || why+=" not a user's;"
                                       grep -qx "O: root's 0644 file's O_RDONLY entry opened O_WRONLY: EACCES" "$out.cmp" || why+=" no user's reopen row;"
                                       grep -qx 'X: rmdir of /proc EACCES, /sys EACCES' "$out.cmp" || why+=" no user's rmdir row;" ;;
+                            # px51: pelt's prompt; the rows each case is about.
+                            pjobs-*) grep -q '^\$ ' "$out.cmp" || why+=" no prompt;"
+                                     for w in $(pwitness "${n#pjobs-}"); do
+                                         grep -q -- "$w" "$out.cmp" || why+=" no '$w';"
+                                     done ;;
+                            groups|groups-user)
+                                for w in st=124 st=137 st=125 st=126 st=127 st=143 'st=1$' Terminated Killed RTMAX checked; do
+                                    grep -q -- "$w" "$out.cmp" || why+=" no '$w';"
+                                done
+                                [ "$(grep -c '^survived$' "$out.cmp")" = 1 ] || why+=" 'survived' $(grep -c '^survived$' "$out.cmp") times, not once (the --foreground run's alone);" ;;
                             gaps-user) grep -qx "gaps: px49's probe, as a user" "$out.cmp" || why+=" not a user's;"
                                        grep -qx "I: TIOCSTI 'q' on its own terminal: EIO; a read then: 0 bytes" "$out.cmp" || why+=" no user's TIOCSTI row;"
                                        grep -qx 'A: R_OK through the link: EACCES' "$out.cmp" || why+=" no user's refused access row;" ;;
