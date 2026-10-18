@@ -7,6 +7,24 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The pins at 0.2.32 (px51).** The kernel builds from wolf 0.2.32
+  and lupin 0.1.54 (`kernel/wolf.pin`; from 0.2.28 / 0.1.51) and `su`
+  from wolf 0.2.32 with wolf-std `d37c911` (`user/su`; from 0.2.30),
+  each the release archive by digest. pelt moves to `2676879` (sh18:
+  job control) and boreutils to `43ee185` (bu27: `kill` to a process
+  group, `kill 0`, `kill -1`, and the new `timeout`), each rebuilt to
+  the digest its lane measured. Measured on PAX against real Linux under
+  QEMU and a container, as root and as `pax` (`tests/mpx5-jobs`' pjobs,
+  pjobs-user and groups images): 26 of sh18's job-control sessions
+  typed at pelt (`jobs`, `fg`, `bg`, `%` ids, Ctrl-Z and Ctrl-C to the
+  job alone, a background reader stopped by SIGTTIN, a job's group
+  killed), and `kill`'s group sends and `timeout`'s expiry, `-s KILL`,
+  `-k`, `--foreground`, `-p`, a stopped command and its 124/125/126/127
+  answers, each byte-identical to Linux with no kernel change: every
+  call the new binaries make (`setpgid`, `getpgrp`, `kill` of a group,
+  a SOCK_SEQPACKET pair and `recvfrom` for the spawn's error, threads)
+  PAX already served. No existing session moved.
+
 - **The descriptor table in /proc (px50).** `/proc/<pid>/fd`'s entries
   are magic links: looked up, followed by `stat`, `open` and a walk to
   what the descriptor is open on, read by `readlink` as Linux reads
