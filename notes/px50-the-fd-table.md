@@ -455,8 +455,10 @@ Shas are this branch's (`px50`). kasumi paths are under `~/lanes/px50/`.
 - **PAX at trunk `d0a48be`**: the fds image on trunk's kmain_session:
   `notes/px50/pax-d0a48be-fds.session`, `-fds-user.session`.
 - **PAX, the branch** (kasumi, TCG, BIOS): `out/b2-pax` (fdtab, 0
-  lines differ), `notes/px50/inout-*-pax.txt`; the suites' logs
-  `build/s-jobs.boot.log`, `s-tree.boot.log`, `s-users.boot.log`.
+  lines differ), `notes/px50/inout-*-pax.txt`; the three suite runs of
+  §H (`notes/px50/suite.sh`; their logs went with the build
+  directories when kasumi was pruned: §H keeps their verdicts, and
+  CI's runs hold every suite again).
 - **pax#79**: `notes/px50/nbrace-kasumi.txt`.
 - **The kernel's cost**: `notes/px50/kasumi-kernel-cost.txt`.
 - **The plants in CI**: §I.
