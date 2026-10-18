@@ -1,0 +1,32 @@
+sleep 30 & sleep 31 &
+jobs
+/bin/kill -- -$!; sleep 0.5
+jobs
+sh -c 'sleep 30 & sleep 31; wait' &
+sleep 0.5
+/bin/kill -s KILL -- -$!; sleep 0.5
+jobs
+/bin/kill -- -32000; echo st=$?
+sh -c '/bin/kill 0; echo not reached'; echo st=$?
+/bin/kill -0 0; echo st=$?
+/bin/kill -s 0 -- -1; echo st=$?
+/bin/kill -l 64; /bin/kill -t 34 | tr -s ' '
+kill %1; sleep 0.5
+timeout 1 sleep 5; echo st=$?
+timeout -s KILL 1 sleep 5; echo st=$?
+timeout -k 1 1 sh -c 'trap "" TERM; sleep 5'; echo st=$?
+timeout --foreground 1 sleep 5; echo st=$?
+timeout 5 true; echo st=$?
+timeout 5 sh -c 'exit 3'; echo st=$?
+timeout -p 1 sleep 5; echo st=$?
+timeout 1 sh -c 'sh -c "sleep 2; echo survived" & wait'; echo st=$?
+sleep 2.5; echo checked
+timeout --foreground 1 sh -c 'sh -c "sleep 2; echo survived" & wait'; echo st=$?
+sleep 2.5; echo checked
+timeout 1 sh -c 'kill -STOP $$'; echo st=$?
+timeout 0.5 cat; echo st=$?
+timeout -v 1 sleep 5; echo st=$?
+timeout 1x sleep 1; echo st=$?
+timeout 1 /nonexistent; echo st=$?
+timeout 1 /g/text; echo st=$?
+exit
