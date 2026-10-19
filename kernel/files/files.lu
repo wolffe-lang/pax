@@ -4698,7 +4698,8 @@ pub fn readlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, buf: u64, size: u64) -
         }
         return k
     }
-    if !is_link_node(n) {
+    // px52 PLANT C (never to merge): /dev/std* read as no link (-EINVAL).
+    if !is_link_node(n) || ty(n) == T_STD {
         return neg(EINVAL)
     }
     // px52: /dev/std*'s target, `/proc/self/fd/N`, as the tree's.
@@ -5554,7 +5555,7 @@ fn n_mode(n: u64) -> u64 {
         return MODE_CONSOLE
     }
     if t == T_STD {
-        return MODE_LINK // px52: /dev/std*, links
+        return MODE_CONSOLE // px52 PLANT C (never to merge): lstat of /dev/std* a character device
     }
     if t == T_NULL {
         return MODE_NULL
@@ -5989,7 +5990,7 @@ fn d_type(c: u64) -> u64 {
         }
     }
     if ty(c) == T_STD {
-        return DT_LNK // px52: /dev/std*
+        return DT_CHR // px52 PLANT C (never to merge): listed as a device
     }
     if ty(c) == T_INO || ty(c) == T_SYN {
         return DT_REG
