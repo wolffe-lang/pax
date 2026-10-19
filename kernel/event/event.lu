@@ -8,7 +8,12 @@
 //! written while 1 can still be added (the value never passes
 //! 0xfffffffffffffffe). Each counter also counts how often it was added
 //! to and how often it was taken: what an edge-triggered registration
-//! compares (below). No semaphore mode: nothing asks for it.
+//! compares (below). **A semaphore** (px52, pax#82; EFD_SEMAPHORE) is a
+//! counter whose `read` takes 1 and leaves the rest; everything else is
+//! a counter's (measured on Linux 7.2.8 by user/net/evprobe.c: a read
+//! answers the value 1, the waits, `poll` and the top are a counter's,
+//! two readers waiting at zero each take 1 of a write of 2). Its mark
+//! is the use word's value (2, not 1).
 //!
 //! **An epoll object** (`epoll(7)`) is one of 16 records in
 //! `pax_epolls`, each with four frames from kernel/frames, taken when
@@ -56,7 +61,7 @@ const EP_PAGES: u64 = 4
 const REG_WORDS: u64 = 8
 
 // An eventfd's words.
-const V_USE: u64 = 0
+const V_USE: u64 = 0 // 0 free, 1 a counter, 2 a semaphore (px52)
 const V_VALUE: u64 = 1
 const V_ADDS: u64 = 2
 const V_TAKES: u64 = 3
@@ -157,9 +162,9 @@ fn put_vw(v: u64, w: u64, x: u64) {
     unsafe { ((pax_eventfds as u64 + (v * EV_WORDS + w) * 8) as *u64).write_volatile(x) }
 }
 
-/// A new counter holding `init`: its number, or EVENTFDS when none is
-/// free.
-pub fn ev_new(init: u64) -> u64 {
+/// A new counter holding `init` (px52: a semaphore when `sem`): its
+/// number, or EVENTFDS when none is free.
+pub fn ev_new(init: u64, sem: bool) -> u64 {
     var v: u64 = 0
     while v < EVENTFDS && vw(v, V_USE) != 0 {
         v += 1
@@ -167,7 +172,7 @@ pub fn ev_new(init: u64) -> u64 {
     if v == EVENTFDS {
         return EVENTFDS
     }
-    put_vw(v, V_USE, 1)
+    put_vw(v, V_USE, if sem { 2 } else { 1 })
     put_vw(v, V_VALUE, init)
     put_vw(v, V_ADDS, 0)
     put_vw(v, V_TAKES, 0)
@@ -190,12 +195,19 @@ pub fn ev_value(v: u64) -> u64 {
     vw(v, V_VALUE)
 }
 
-/// Take counter `v`'s value: what it held; it holds zero after.
+/// Whether counter `v` is a semaphore (px52).
+pub fn ev_semaphore(v: u64) -> bool {
+    vw(v, V_USE) == 2
+}
+
+/// Take from counter `v` (its value is not zero): what it held, and it
+/// holds zero after; a semaphore (px52) 1, and it holds one less.
 pub fn ev_take(v: u64) -> u64 {
     let x = vw(v, V_VALUE)
-    put_vw(v, V_VALUE, 0)
+    let took: u64 = if vw(v, V_USE) == 2 { 1 } else { x }
+    put_vw(v, V_VALUE, x - took)
     put_vw(v, V_TAKES, vw(v, V_TAKES) + 1)
-    x
+    took
 }
 
 /// Add `x` to counter `v`: false when the sum would pass EV_MAX
