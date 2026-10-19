@@ -190,16 +190,31 @@ fi
 pick_ports() {
     python3 -c '
 import os, socket, sys
-p = 20000 + (os.getpid() * 7919 + int(sys.argv[1]) * 16) % 20000
+# px52 (pax#86): never a port of the ephemeral range of this host
+# (ip_local_port_range, ip(7)) nor of the dynamic range of IANA (49152
+# and up): a socket bound to port 0 lands there (the other end tools do
+# it, a resolver does), and one that takes the port between this probe
+# and the bind QEMU makes has QEMU refuse the forward (push run
+# 39086412018: 37606, in 32768-60999).
+lo, hi = 32768, 60999
+try:
+    lo, hi = map(int, open("/proc/sys/net/ipv4/ip_local_port_range").read().split())
+except (OSError, ValueError):
+    pass
+span = [q for q in range(20000, 49152) if not lo <= q <= hi]
+if not span:
+    sys.exit("no port from 20000 to 49151 outside the ephemeral range of this host, %d-%d" % (lo, hi))
+i = (os.getpid() * 7919 + int(sys.argv[1]) * 16) % len(span)
 got = []
 for k in range(400):
+    q = span[(i + k) % len(span)]
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s.bind(("127.0.0.1", p + k))
+        s.bind(("127.0.0.1", q))
     except OSError:
         continue
     s.close()
-    got.append(p + k)
+    got.append(q)
     if len(got) == 2:
         break
 print(*got)
@@ -293,7 +308,7 @@ halted() { # assertion label status
     if [ "$3" = 0 ]; then
         say "PASS $1 $2: halted: $(tail -n 1 "$log.verdict")"
     else
-        bad "$1 $2: not halted (qemu-halt $3): $(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict")"
+        bad "$1 $2: not halted (qemu-halt $3): $(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict")$([ -s "$log" ] || [ ! -s "$log.qemu.log" ] || printf '; QEMU refused to start, its log: %s' "$(head -n 1 "$log.qemu.log" | cut -c1-240)")"
     fi
 }
 
