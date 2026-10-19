@@ -7,6 +7,25 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The small fixes (px52).** `eventfd2` serves EFD_SEMAPHORE (pax#82):
+  a read takes 1 and leaves the rest, the waits, `poll`, epoll and the
+  top as a counter's, fdinfo's `eventfd-semaphore: 1`; refused by name
+  until now. `/dev/stdin`, `/dev/stdout` and `/dev/stderr` are symbolic
+  links to `/proc/self/fd/0`, `1`, `2` (pax#83): `readlink`, `lstat`,
+  `statx` without following and the listing's type say so, and `stat`,
+  `open` and a walk go through `/proc/self/fd/N` with its rules (a
+  reopen at offset 0, O_TRUNC truncating the file descriptor N names, a
+  socket -ENXIO, a closed descriptor -ENOENT). Both measured against
+  real Linux under QEMU and a container, as root and as a user
+  (`user/net/evprobe.c`, `user/elf/fdtab.c`, `tests/mpx3-tree`'s
+  shell-inout sessions). CI's `workflow_dispatch` takes `jobs_boots`,
+  mpx5-jobs' `PAX_JOBS_BOOTS`, so a plant's red at a later image is
+  seen in CI (pax#85). The network suites pick their host ports outside
+  the host's ephemeral range: the one silent UEFI boot of mpx4-udp
+  (pax#86) was QEMU refusing a forward whose port had been taken there
+  between the probe and QEMU's bind; a boot QEMU refuses now names
+  QEMU's line.
+
 - **The pins at 0.2.32 (px51).** The kernel builds from wolf 0.2.32
   and lupin 0.1.54 (`kernel/wolf.pin`; from 0.2.28 / 0.1.51) and `su`
   from wolf 0.2.32 with wolf-std `d37c911` (`user/su`; from 0.2.30),
