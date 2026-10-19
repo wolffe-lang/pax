@@ -4,10 +4,12 @@
    between and at the top, a blocking read ended by another process's
    write, the counter shared by a duplicate and across fork, and the
    counter in an epoll object: level-triggered, as wolf's runtime keeps
-   one to stir its waiting thread, and edge-triggered. Everything stays
-   on this machine. Its output on PAX must be its output on Linux, but
-   for the lines that start with `~`: what PAX refuses by name and Linux
-   takes (EFD_SEMAPHORE), which tests/mpx4-ready holds to PAX's answer. */
+   one to stir its waiting thread, and edge-triggered. px52 (pax#82):
+   EFD_SEMAPHORE, a read taking 1 and leaving the rest — at the top and
+   at zero, a blocking read ended by a child's write, two readers waiting
+   and one write of 2, in an epoll object. Everything stays on this
+   machine. Its output on PAX must be its output on Linux (before px52
+   the semaphore was a `~` line, PAX's -EINVAL). */
 #define _GNU_SOURCE
 #include "say.h"
 #pragma GCC diagnostic ignored "-Wunused-result"
@@ -62,6 +64,121 @@ static void twice(const char *label, int ep)
     say("%s: %d; asked again: %d\n", label, first, again);
 }
 
+/* px52 (pax#82): EFD_SEMAPHORE (eventfd(2)): a read takes 1 and leaves
+   the rest; everything else as a counter's. */
+static void semaphore(void)
+{
+    int s = eventfd(2, EFD_SEMAPHORE | EFD_NONBLOCK);
+    if (s < 0) {
+        say("semaphore: eventfd(2, EFD_SEMAPHORE|EFD_NONBLOCK) -%s\n", ename(errno));
+        return;
+    }
+    int fl = fcntl(s, F_GETFL);
+    say("semaphore: eventfd(2, EFD_SEMAPHORE|EFD_NONBLOCK): a descriptor; F_GETFL %s%s%s\n", (fl & O_ACCMODE) == O_RDWR ? "O_RDWR" : "other",
+        fl & O_NONBLOCK ? "|O_NONBLOCK" : "", fl & ~(O_ACCMODE | O_NONBLOCK) ? "|another bit" : "");
+    polled("semaphore: at 2", s);
+    got("semaphore: read", s);
+    polled("semaphore: at 1", s);
+    got("semaphore: read again", s);
+    got("semaphore: read at zero", s);
+    polled("semaphore: at zero", s);
+    N("semaphore: write 3", put(s, 3));
+    got("semaphore: read 1 of 3", s);
+    got("semaphore: read 2 of 3", s);
+    got("semaphore: read 3 of 3", s);
+    got("semaphore: then at zero", s);
+    N("semaphore: write 1, then a read into 4 bytes", (put(s, 1), read(s, (char[8]){0}, 4)));
+    got("semaphore: the 1 still there", s);
+    N("semaphore: write 0xffffffffffffffff", put(s, 0xffffffffffffffffULL));
+    N("semaphore: write 0xfffffffffffffffe", put(s, 0xfffffffffffffffeULL));
+    polled("semaphore: at the top", s);
+    N("semaphore: write 1 at the top", put(s, 1));
+    got("semaphore: read at the top", s);
+    polled("semaphore: one below the top", s);
+    N("semaphore: write 1 one below the top", put(s, 1));
+    close(s);
+
+    /* A blocking read at zero, ended by a child's write of 2 200 ms later:
+       it takes 1 and leaves 1. */
+    s = eventfd(0, EFD_SEMAPHORE);
+    pid_t k = fork();
+    if (k == 0) {
+        struct timespec nap = { 0, 200 * 1000000L };
+        nanosleep(&nap, 0);
+        put(s, 2);
+        _exit(0);
+    }
+    got("semaphore: a blocking read at zero, a child writing 2 in 200 ms", s);
+    int ws;
+    waitpid(k, &ws, 0);
+    fcntl(s, F_SETFL, O_NONBLOCK);
+    got("semaphore: what the write left", s);
+    got("semaphore: then", s);
+    close(s);
+
+    /* Two children wait at zero; one write of 2: each takes 1. Each says
+       what it read through a pipe; the parent says both, in order. */
+    s = eventfd(0, EFD_SEMAPHORE);
+    int p[2];
+    (void)!pipe(p);
+    pid_t c[2];
+    for (int i = 0; i < 2; i++) {
+        c[i] = fork();
+        if (c[i] == 0) {
+            uint64_t v = 0;
+            long r = read(s, &v, 8);
+            if (r != 8)
+                v = 1000 + (uint64_t)errno;
+            (void)!write(p[1], &v, 8);
+            _exit(0);
+        }
+    }
+    struct timespec nap = { 0, 300 * 1000000L };
+    nanosleep(&nap, 0);
+    N("semaphore: two readers waiting at zero, a write of 2", put(s, 2));
+    /* Both should end at once; one still waiting after 2 s is said, and
+       freed by a write of 1 (no signal). */
+    int ended = 0;
+    for (int t = 0; t < 200 && ended < 2; t++) {
+        for (int i = 0; i < 2; i++)
+            if (c[i] > 0 && waitpid(c[i], &ws, WNOHANG) == c[i]) {
+                c[i] = 0;
+                ended++;
+            }
+        if (ended < 2)
+            nanosleep(&(struct timespec){ 0, 10 * 1000000L }, 0);
+    }
+    say("semaphore: readers ended within 2 s of the write: %d\n", ended);
+    if (ended < 2) {
+        put(s, 1);
+        for (int i = 0; i < 2; i++)
+            if (c[i] > 0)
+                waitpid(c[i], &ws, 0);
+    }
+    uint64_t r1 = 0, r2 = 0;
+    (void)!read(p[0], &r1, 8);
+    (void)!read(p[0], &r2, 8);
+    say("semaphore: the two readers took %llu and %llu\n", (unsigned long long)r1, (unsigned long long)r2);
+    fcntl(s, F_SETFL, O_NONBLOCK);
+    got("semaphore: then", s);
+    close(p[0]);
+    close(p[1]);
+    close(s);
+
+    /* In an epoll object, level-triggered: ready while anything is left. */
+    s = eventfd(2, EFD_SEMAPHORE | EFD_NONBLOCK);
+    int ep = epoll_create1(EPOLL_CLOEXEC);
+    struct epoll_event ev = { EPOLLIN, { .u64 = 7 } };
+    N("semaphore: epoll: add it at 2, EPOLLIN, level", epoll_ctl(ep, EPOLL_CTL_ADD, s, &ev));
+    say("semaphore: epoll: at 2: %d\n", waited(ep));
+    got("semaphore: epoll: read", s);
+    say("semaphore: epoll: at 1: %d\n", waited(ep));
+    got("semaphore: epoll: read", s);
+    say("semaphore: epoll: at zero: %d\n", waited(ep));
+    close(ep);
+    close(s);
+}
+
 int main(void)
 {
     struct stat st;
@@ -99,17 +216,7 @@ int main(void)
     N("write 1 at the top", put(e, 1));
     got("read", e);
     N("eventfd with a flag that is none (8)", eventfd(0, 8));
-    {
-        int s = eventfd(2, EFD_SEMAPHORE | EFD_NONBLOCK);
-        uint64_t a = 0;
-        long r = s >= 0 ? read(s, &a, 8) : -1;
-        if (s < 0)
-            say("~semaphore: eventfd(2, EFD_SEMAPHORE|EFD_NONBLOCK) -%s\n", ename(errno));
-        else
-            say("~semaphore: eventfd(2, EFD_SEMAPHORE|EFD_NONBLOCK) a descriptor; a read takes %llu of %ld bytes\n", (unsigned long long)a, r);
-        if (s >= 0)
-            close(s);
-    }
+    semaphore();
 
     /* A duplicate and a child share the counter. */
     int d = dup(e);
