@@ -763,6 +763,27 @@ shell-inout-user).
   timerfd); a TCP socket's fdinfo past the four lines (not asked of
   Linux).
 
+## The small fixes (px52)
+
+pax#82 and #83, measured black-box against Linux as root and as a user
+(`notes/px52-the-small-fixes.md`): `user/net/evprobe.c`'s EFD_SEMAPHORE
+rows (`tests/mpx4-ready`, held to the same binary on Linux), and
+`user/elf/fdtab.c`'s semaphore fdinfo and N rows (`tests/mpx5-jobs`'
+fds image, held to real root's guest and a container), and the
+shell-inout sessions' `/dev/std*` lines (`tests/mpx3-tree`).
+
+| module | what |
+|---|---|
+| `event/` | a counter may be a semaphore (`ev_new`'s `sem`, the use word 2; `ev_semaphore`): `ev_take` takes 1 of it and leaves the rest |
+| `ready/` | `eventfd2` takes EFD_SEMAPHORE (refusal 103 retired); the descriptor's status flags are O_RDWR and O_NONBLOCK alone, never EFD_SEMAPHORE's bit (it is O_WRONLY's number) |
+| `procfs/` | fdinfo's `eventfd-semaphore: 1` for a semaphore |
+| `files/` | `/dev/stdin`, `/dev/stdout`, `/dev/stderr` are symbolic links to `/proc/self/fd/0`, `1`, `2` (`is_link_node`, `link_bytes`, `link_target`: 0777, root's, 15 bytes, `DT_LNK`, inodes 0x1a to 0x1c): a walk rewrites the path to the target as for the tree's links (one link against the 40, then px50's magic link), so `stat`, `open` and a walk through one are `/proc/self/fd/N`'s with its rules (a file by its mode, a socket -ENXIO, a closed descriptor -ENOENT); `readlink` reads the target, `lstat` and `statx` with AT_SYMLINK_NOFOLLOW the link, O_NOFOLLOW -ELOOP. px17's reopen of descriptor N and px50's `std_target` are gone |
+
+- What is not there: `/dev/fd` (a link to `/proc/self/fd` on Linux
+  beside the three; not asked for); root removing or renaming one (Linux's
+  root may; on PAX nothing in `/dev` is made, removed or renamed, and
+  this lane did not ask).
+
 ## Who may name, change and keep (px44)
 
 The fourth lane of the users campaign (`notes/px44-the-names.md`). The
