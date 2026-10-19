@@ -27,9 +27,12 @@
 //! across `execve`; `/` for a fresh process), or at a directory
 //! descriptor. Beside the tree, a synthetic `/dev`, a second file
 //! system (its own device number; nothing is made, removed or renamed
-//! in it): `/dev/stdin`, `/dev/stdout` and `/dev/stderr` open
-//! whatever descriptor 0, 1 or 2 is (as Linux's links to
-//! `/proc/self/fd/N` do; -ENOENT when it is closed), and `/dev/null`
+//! in it): `/dev/stdin`, `/dev/stdout` and `/dev/stderr` are symbolic
+//! links to `/proc/self/fd/0`, `1` and `2` (px52, pax#83: 0777, root's,
+//! 15 bytes, as a distribution's boot and a container runtime make them
+//! on Linux; devtmpfs alone has none), so a walk through one goes on
+//! through the caller's own descriptor (-ENOENT when it is closed), and
+//! `/dev/null`
 //! reads end-of-file and swallows writes; `/dev/tty0` and
 //! `/dev/console` (px21a) open the console itself, whatever descriptors
 //! 0-2 have become: reads, writes and the console's ioctls (the
@@ -45,7 +48,7 @@
 //! but `/proc/self/exe` (px26: `readlink` answers the path the program
 //! was loaded from; there is no `/proc` beside it), and none can be
 //! made (px36: the tree's own links; px50: `/proc/<pid>/fd`'s entries,
-//! below). `openat` creates, truncates and opens for writing; `write`,
+//! below; px52: `/dev/std*`). `openat` creates, truncates and opens for writing; `write`,
 //! `pwrite64`, `ftruncate`, `mkdir`, `rmdir`, `unlink` and `rename`
 //! change the tree (px27, below); a hard link, a change of mode, owner
 //! or times are refused by name.
@@ -70,8 +73,9 @@
 //! them move one offset; `close`, `execve`'s close-on-exec and the end
 //! of a process (`close_all`) drop a reference, and the last one frees
 //! the record. Reopening `/dev/stdin` (or stdout, stderr) makes a new
-//! open file at offset 0 on what that descriptor names, as Linux's
-//! `/proc/self/fd` links do.
+//! open file at offset 0 on what that descriptor names: px52, through
+//! the link and `/proc/self/fd/N`'s entry, so with its rules (a file by
+//! its mode, a socket -ENXIO).
 //!
 //! **Pipes** (px17, `pipe(7)`): 64 buffer records (px24; 16 before) in `pax_pipes`. A
 //! pipe holds 65536 bytes (Linux's default capacity) in 16 frames taken
@@ -293,7 +297,7 @@ const URANDOM: u64 = 4
 const T_DEV: u64 = 2
 const T_CONSOLE: u64 = 4 // the reference: 0 the console as 0-2 name it, TTY0, CONSOLE
 const T_NULL: u64 = 5
-const T_STD: u64 = 6 // /dev/stdin, stdout, stderr: the reference is 0, 1, 2
+const T_STD: u64 = 6 // /dev/stdin, stdout, stderr: the reference is 0, 1, 2; px52: links to /proc/self/fd/N
 const T_PIPE: u64 = 7 // px17: a pipe; the reference its record
 const T_SOCK: u64 = 8 // px17: a socketpair's end; the reference rx << 16 | tx (px34; << 8 before)
 const T_INET: u64 = 9 // px22: an AF_INET socket; the reference kernel/udp's number
@@ -392,6 +396,7 @@ const MODE_DIR: u64 = 0x41ed // 040755
 // class rule; a distribution's udev gives some to a group instead,
 // which PAX has no rule for). Everything in /dev is root's, 0:0.
 const MODE_CONSOLE: u64 = 0x2180 // 020600 (020620 before px45)
+const MODE_LINK: u64 = 0xa1ff // 0120777: /dev/std*'s links (px52, measured)
 const MODE_NULL: u64 = 0x21b6 // 020666
 const MODE_DSP: u64 = 0x2180 // 020600 (020666 before px45; px30: one user here)
 const MODE_FIFO: u64 = 0x1180 // 010600: a pipe's end (px17, measured)
@@ -3204,13 +3209,49 @@ fn walk_who(a: u64, who: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool, fo
     walk_as(a, who, dirfd, rl, empty_ok, follow)
 }
 
+/// px52: whether node `c` is a symbolic link: the tree's (px36), or
+/// `/dev/stdin`, `stdout`, `stderr` (pax#83).
+fn is_link_node(c: u64) -> bool {
+    !is_err(c) && ((ty(c) == T_INO && tree.is_link(rf(c))) || ty(c) == T_STD)
+}
+
+/// px52: the length of link `c`'s target: the tree's, or 15 for
+/// `/proc/self/fd/N`.
+fn link_bytes(c: u64) -> u64 {
+    if ty(c) == T_STD {
+        return 15
+    }
+    tree.bytes(rf(c))
+}
+
+/// px52: link `c`'s target's first `k` bytes to kernel address `dst`.
+fn link_target(c: u64, dst: u64, k: u64) {
+    if ty(c) != T_STD {
+        let _n = tree.target(rf(c), dst, k)
+        return
+    }
+    let t = "/proc/self/fd/"
+    var i: u64 = 0
+    for b in t.bytes() {
+        if i < k {
+            // # Safety: dst is pax_kbuf's (or its second half), at least k bytes.
+            unsafe { ((dst + i) as *u8).write_volatile(b) }
+        }
+        i += 1
+    }
+    if i < k {
+        // # Safety: as above.
+        unsafe { ((dst + i) as *u8).write_volatile((48 + rf(c)) as u8) }
+    }
+}
+
 /// px36: the link at node `c` replaces pax_kbuf[0..at) (the components
 /// walked and the link's own name): the path becomes the link's target
 /// and then pax_kbuf[at..len), NUL-ended. The new length, or an error
-/// node (ENAMETOOLONG).
+/// node (ENAMETOOLONG). px52: `/dev/std*`'s too.
 fn follow_link(c: u64, at: u64, len: u64) -> u64 {
     let i = rf(c)
-    let tl = tree.bytes(i)
+    let tl = link_bytes(c)
     let rest = len - at
     if tl + rest > PATH_MAX {
         return err(ENAMETOOLONG)
@@ -3228,9 +3269,11 @@ fn follow_link(c: u64, at: u64, len: u64) -> u64 {
             k += 1
         }
     }
-    let _n = tree.target(i, raw(), tl)
+    link_target(c, raw(), tl)
     put_kb(tl + rest, 0)
-    tree.touch_read(i)
+    if ty(c) == T_INO {
+        tree.touch_read(i)
+    }
     tl + rest
 }
 
@@ -3345,8 +3388,8 @@ fn walk_as(a: u64, who: u64, dirfd: u64, rl0: u64, empty_ok: bool, follow: u64) 
             continue
         }
         // px36: a symbolic link: followed unless it is the last
-        // component, unfollowed and with no `/` after it.
-        let link = !is_err(c) && ty(c) == T_INO && tree.is_link(rf(c))
+        // component, unfollowed and with no `/` after it. px52: /dev/std*.
+        let link = is_link_node(c)
         if link && (!last || follow == F_YES || (i < rl && follow == F_NO)) {
             // px44: fs.protected_symlinks (R7): a link in a sticky
             // world-writable directory is followed, as the path's last
@@ -3373,7 +3416,7 @@ fn walk_as(a: u64, who: u64, dirfd: u64, rl0: u64, empty_ok: bool, follow: u64) 
         }
         if last {
             let trail = i < rl
-            if trail && !is_err(c) && !is_dir_node(c) && ty(c) != T_STD && !link {
+            if trail && !is_err(c) && !is_dir_node(c) && !link {
                 c = err(ENOTDIR)
             }
             if dots != 0 {
@@ -3706,8 +3749,8 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
     // names is reopened (a new open file, as Linux's does).
     let (via, src_area, src_fd) = fdl_read()
     var n = n0
-    if !is_err(n) && ((ty(n) == T_INO && tree.is_link(rf(n))) || is_fd_entry(n)) && !excl {
-        return neg(if flags & O_DIRECTORY != 0 { ENOTDIR } else { ELOOP }) // measured: O_DIRECTORY answers first; px50: an fd/ entry not followed too
+    if (is_link_node(n) || is_fd_entry(n)) && !excl {
+        return neg(if flags & O_DIRECTORY != 0 { ENOTDIR } else { ELOOP }) // measured: O_DIRECTORY answers first; px50: an fd/ entry not followed too; px52: /dev/std*
     }
     var made = false
     if is_err(n) {
@@ -3782,18 +3825,7 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
             }
         }
     }
-    if ty(n) == T_STD {
-        let src = rf(n)
-        if kind(a, src) == K_CLOSED {
-            return neg(ENOENT)
-        }
-        k = kind(a, src)
-        srcof = of_of(a, src) // px50
-        n = node_of(a, src)
-        if k == K_SOCK || k == K_INET || k == K_TCP || k == K_UNIX {
-            return neg(ENXIO) // px17: a socket is not reopened through a path
-        }
-    } else if ty(n) == T_CONSOLE {
+    if ty(n) == T_CONSOLE {
         k = K_CONSOLE
     } else if ty(n) == T_NULL {
         k = K_NULL
@@ -3843,9 +3875,9 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
     // whatever the access mode. A file this call made is exempt (its
     // first descriptor writes whatever its mode). px45: /dev's devices
     // the same, by their modes (measured on devtmpfs). /proc's guarded
-    // files ask kernel/procfs's rule in `syn_open`; what /dev/std*
-    // reopens keeps its own answer (Linux's devtmpfs has no /dev/std*:
-    // named).
+    // files ask kernel/procfs's rule in `syn_open`. px52: what /dev/std*
+    // reopens is what its fd/ entry reopens, by the same rules (it was
+    // its own answer, no mode asked, until /dev/std* became links).
     if flags & O_TRUNC != 0 && k == K_FILE {
         want = want | MAY_W
     }
@@ -3855,8 +3887,8 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
     if k == K_CONSOLE && ty(n) == T_CONSOLE && rf(n) == TTY && !sched.self_tty() {
         return neg(ENXIO) // px48: /dev/tty is the caller's controlling terminal, and it has none (measured)
     }
-    // px17: a new open file (offset 0), also when /dev/std* reopens a
-    // file or a pipe's end (as /proc/self/fd's links do on Linux).
+    // px17: a new open file (offset 0), also when an fd/ entry (px50)
+    // or /dev/std* (px52, through one) reopens a file or a pipe's end.
     let fd = open_new(a, 0, k, n, flags)
     if fd < 0x8000000000000000 && k == K_CONSOLE && !(ty(n) == T_CONSOLE && rf(n) == TTY) && flags & O_NOCTTY == 0 {
         sched.open_tty() // px48: a session leader with no terminal that opens the console takes it, when no session holds it
@@ -4666,19 +4698,21 @@ pub fn readlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, buf: u64, size: u64) -
         }
         return k
     }
-    if ty(n) != T_INO || !tree.is_link(rf(n)) {
+    if !is_link_node(n) {
         return neg(EINVAL)
     }
-    let i = rf(n)
-    let k = if tree.bytes(i) < size { tree.bytes(i) } else { size }
+    // px52: /dev/std*'s target, `/proc/self/fd/N`, as the tree's.
+    let k = if link_bytes(n) < size { link_bytes(n) } else { size }
     if !uaccess.writable(pml4, buf, k) {
         return neg(EFAULT)
     }
-    let _c = tree.target(i, raw() + NORM, k)
+    link_target(n, raw() + NORM, k)
     if !uaccess.copy_out(pml4, buf, raw() + NORM, k) {
         return neg(EFAULT)
     }
-    tree.touch_read(i)
+    if ty(n) == T_INO {
+        tree.touch_read(rf(n))
+    }
     k
 }
 
@@ -5516,8 +5550,11 @@ fn n_mode(n: u64) -> u64 {
     if t == T_CONSOLE && rf(n) == TTY {
         return MODE_NULL // px45: /dev/tty is anyone's, 0666 (measured)
     }
-    if t == T_CONSOLE || t == T_STD {
+    if t == T_CONSOLE {
         return MODE_CONSOLE
+    }
+    if t == T_STD {
+        return MODE_LINK // px52: /dev/std*, links
     }
     if t == T_NULL {
         return MODE_NULL
@@ -5552,6 +5589,9 @@ fn n_mode(n: u64) -> u64 {
 fn n_size(n: u64) -> u64 {
     if ty(n) == T_INO {
         return tree.size(rf(n))
+    }
+    if ty(n) == T_STD {
+        return 15 // px52: `/proc/self/fd/N`
     }
     if ty(n) == T_SYN {
         // px50 (measured): a descriptor's link is 64 bytes, and fd/ is
@@ -5596,6 +5636,9 @@ fn n_ino(n: u64) -> u64 {
     if t == T_CONSOLE && rf(n) != 0 {
         return 0x15 + rf(n) // px45: /dev/tty 0x18, /dev/ttyS0 0x19
     }
+    if t == T_STD {
+        return 0x1a + rf(n) // px52: /dev/stdin 0x1a to /dev/stderr 0x1c (they were the console's 3)
+    }
     if t == T_PIPE || t == T_SOCK {
         return 0x100 + (rf(n) & 0xff) // px17: one number per buffer
     }
@@ -5637,7 +5680,7 @@ fn n_rdev(n: u64, which: int) -> u64 {
     if t == T_CONSOLE && rf(n) == TTY {
         return if which == 0 { 5 } else { 0 } // px45: /dev/tty 5:0
     }
-    if t == T_CONSOLE || t == T_STD {
+    if t == T_CONSOLE {
         return if which == 0 { 4 } else { 64 }
     }
     if t == T_NULL {
@@ -5837,26 +5880,10 @@ pub fn fstatat(a: u64, pml4: u64, dirfd: u64, va: u64, st: u64, flags: u64) -> u
     if is_err(n) {
         return neg(rf(n))
     }
-    let m = std_target(a, n, flags & AT_SYMLINK_NOFOLLOW == 0)
-    if is_err(m) {
-        return neg(rf(m))
-    }
-    put_stat(a, pml4, st, m)
-}
-
-/// px50: what `stat` of /dev/stdin, stdout or stderr answers when it
-/// follows (Linux's are links to /proc/self/fd/0, 1, 2): the
-/// descriptor's own node, -ENOENT when it is closed (bu25's `cat`
-/// compares `/dev/stdin` with its output by `dev` and `ino`). Any other
-/// node is itself.
-fn std_target(a: u64, n: u64, follow: bool) -> u64 {
-    if !follow || ty(n) != T_STD {
-        return n
-    }
-    if kind(a, rf(n)) == K_CLOSED {
-        return err(ENOENT)
-    }
-    node_of(a, rf(n))
+    // px52: /dev/std* followed reaches the descriptor's own node through
+    // `/proc/self/fd/N` (px50's `std_target` did it by hand: bu25's `cat`
+    // compares `/dev/stdin` with its output by `dev` and `ino`).
+    put_stat(a, pml4, st, n)
 }
 
 /// `statx(dirfd, path, flags, mask, sx)`: every basic field, whatever
@@ -5866,11 +5893,7 @@ pub fn statx(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, sx: u64) -> u64
     if is_err(n) {
         return neg(rf(n))
     }
-    let m = std_target(a, n, flags & AT_SYMLINK_NOFOLLOW == 0) // px50
-    if is_err(m) {
-        return neg(rf(m))
-    }
-    put_statx(a, pml4, sx, m)
+    put_statx(a, pml4, sx, n) // px52: /dev/std* as fstatat's
 }
 
 // --- directories --------------------------------------------------------------
@@ -5964,6 +5987,9 @@ fn d_type(c: u64) -> u64 {
         if isfd {
             return DT_LNK // px45: a descriptor of /proc/<pid>/fd
         }
+    }
+    if ty(c) == T_STD {
+        return DT_LNK // px52: /dev/std*
     }
     if ty(c) == T_INO || ty(c) == T_SYN {
         return DT_REG
