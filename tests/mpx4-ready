@@ -256,19 +256,34 @@ read -r soak < "$images/sizes"
 pick_ports() {
     python3 -c '
 import os, socket, sys
-p = 21000 + (os.getpid() * 7919 + int(sys.argv[1]) * 16) % 18000
+# px52 (pax#86): never a port of the ephemeral range of this host
+# (ip_local_port_range, ip(7)) nor of the dynamic range of IANA (49152
+# and up): a socket bound to port 0 lands there (the other end tools do
+# it, a resolver does), and one that takes the port between this probe
+# and the bind QEMU makes has QEMU refuse the forward (push run
+# 39086412018: 37606, in 32768-60999).
+lo, hi = 32768, 60999
+try:
+    lo, hi = map(int, open("/proc/sys/net/ipv4/ip_local_port_range").read().split())
+except (OSError, ValueError):
+    pass
+span = [q for q in range(21000, 49152) if not lo <= q <= hi]
+if not span:
+    sys.exit("no port from 21000 to 49151 outside the ephemeral range of this host, %d-%d" % (lo, hi))
+i = (os.getpid() * 7919 + int(sys.argv[1]) * 16) % len(span)
 got = []
 for k in range(400):
+    q = span[(i + k) % len(span)]
     ok = True
     for kind in (socket.SOCK_DGRAM, socket.SOCK_STREAM):
         s = socket.socket(socket.AF_INET, kind)
         try:
-            s.bind(("127.0.0.1", p + k))
+            s.bind(("127.0.0.1", q))
         except OSError:
             ok = False
         s.close()
     if ok:
-        got.append(p + k)
+        got.append(q)
     if len(got) == 2:
         break
 print(*got)
@@ -604,6 +619,8 @@ PY
     has "$norm" "run: $ncmd commands" || why+=" no 'run: $ncmd commands' ($(grep -m1 '^run: ' "$norm"));"
     grep -q '^PANIC' "$norm" && why+=" $(grep -m1 '^PANIC' "$norm");"
     [ "$hrc" = 0 ] || why+=" not halted (qemu-halt $hrc): $(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict");"
+    # px52 (pax#86): a boot QEMU itself refused (its serial log empty) says what QEMU said.
+    [ "$hrc" = 0 ] || [ -s "$log" ] || [ ! -s "$log.qemu.log" ] || why+=" QEMU refused to start, its log: $(head -n 1 "$log.qemu.log" | cut -c1-240);"
     "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'netd: [0-9]+ turns, [0-9]+ clock turns' 'halt' >/dev/null \
         || why+=" the log does not end with netd's line and halt;"
     [ -z "$why" ] && say "PASS T9 $L: $ncmd commands, then halt; $(tail -n 1 "$log.verdict")" || bad "T9 $L:$why"
