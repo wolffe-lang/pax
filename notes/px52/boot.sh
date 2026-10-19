@@ -1,6 +1,6 @@
 #!/bin/bash
 # px52 on kasumi: boot a built suite's images on kasumi itself (TCG), under taskset -c 0-3; the suite's Linux side
-# first when it has an `--only linux`.   boot.sh SUITE TAG BOOT-ARGS...
+# first when it has an `--only linux` (PX52_CPUS: another four, while a loop holds 0-3).   boot.sh SUITE TAG BOOT-ARGS...
 L=$HOME/lanes/px52
 S=$1 T=$2; shift 2
 B=$L/build/$T
@@ -11,7 +11,7 @@ if grep -q -- '--only linux' tests/$S && [ -z "${PX52_NO_LINUX:-}" ]; then
   tests/$S --only linux --images $W > $B.linux.log 2>&1
   echo "linux: $? ($(tail -n 1 $B.linux.log | cut -c1-200))"
 fi
-taskset -c 0-3 tests/$S --images $W "$@" > $B.boot.log 2>&1
+taskset -c ${PX52_CPUS:-0-3} tests/$S --images $W "$@" > $B.boot.log 2>&1
 rc=$?
 echo "boot: $rc"
 grep -a 'FAIL' $B.boot.log | cut -c1-600 | head -40
