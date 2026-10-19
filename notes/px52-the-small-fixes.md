@@ -193,7 +193,8 @@ and the shells before the pelt images). `.github/workflows/ci.yml` takes a
 prints `boots: … (PAX_JOBS_BOOTS: a subset of the suite's boots, not
 its verdict)`, ends `PASS (a subset, …)` or `FAIL (a subset, …)`, and
 runs the container's user sessions of the chosen images only (the
-fds-only plants' containers took a minute, not eleven). An ordinary run
+fds-only plants' container step took about a second in CI, 39302273238,
+where every session's takes eleven minutes). An ordinary run
 still stops at its first image whose first prompt never comes; that run
 is red, which is what the merge rule needs, and a dispatch shows the
 rest. Under ruling #92 a plant runs `-f tier=pr` (one leg): with
