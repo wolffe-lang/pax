@@ -2,7 +2,8 @@
 # px52 on kasumi: mpx5-jobs built (native) in px13-ubuntu, then its fds archive on real root's guest twice
 # (vm/rec1, vm/rec2), the two compared byte for byte.   fds-chain.sh TAG
 L=$HOME/lanes/px52; P=$L/pax/notes/px52; T=$1
-bash $P/build.sh mpx5-jobs $T --only build --tier native || exit 1
+[ -n "${PX52_SKIP_BUILD:-}" ] || bash $P/build.sh mpx5-jobs $T --only build --tier native || exit 1
+mkdir -p $L/vm
 for r in rec1 rec2; do
   rm -rf $L/vm/$r
   bash $P/vm-fds.sh $L/vm/$r $L/build/$T/mpx5-jobs/fds.cpio > $L/vm/$r.out 2>&1
