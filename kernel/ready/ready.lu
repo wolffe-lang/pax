@@ -67,12 +67,15 @@
 //! (-EINVAL: Linux nests them, nothing asked for it); the console or
 //! `/dev/null` in an epoll object (-EPERM: they keep no open file
 //! here); a 17th epoll object (-ENFILE) and a 257th registration
-//! (-ENOSPC); `eventfd2` with EFD_SEMAPHORE (-EINVAL). No strace this
-//! lane took shows any of them.
+//! (-ENOSPC). No strace this lane took shows any of them. (`eventfd2`
+//! with EFD_SEMAPHORE was refused too, until px52 served it.)
 //!
-//! **`eventfd2(initval, flags)`** (EFD_CLOEXEC, EFD_NONBLOCK; an unknown
-//! bit -EINVAL): a descriptor on one of kernel/event's counters; its
-//! `read` and `write` are kernel/files'.
+//! **`eventfd2(initval, flags)`** (EFD_CLOEXEC, EFD_NONBLOCK, px52
+//! EFD_SEMAPHORE; an unknown bit -EINVAL): a descriptor on one of
+//! kernel/event's counters (a semaphore's read takes 1, pax#82); its
+//! `read` and `write` are kernel/files'. The descriptor's status flags
+//! are O_RDWR and O_NONBLOCK alone: EFD_SEMAPHORE is the counter's,
+//! never a status flag (F_GETFL and fdinfo's `flags` on Linux, measured).
 //!
 //! **`sched_getaffinity(pid, len, mask)`**: PAX runs on one CPU: 8, and
 //! the mask's first eight bytes with bit 0 set; -EINVAL for a mask
@@ -152,7 +155,7 @@ const R_NESTED: u64 = 99
 const R_NO_FILE: u64 = 100
 const R_EPOLLS: u64 = 101
 const R_REGS: u64 = 102
-const R_SEMAPHORE: u64 = 103
+// 103 was EFD_SEMAPHORE, served since px52 (pax#82).
 // 104 is kernel/signal's R_ALTSTACK.
 
 fn neg(e: u64) -> u64 {
@@ -191,9 +194,6 @@ pub fn why(r: u64) -> str {
     }
     if r == R_REGS {
         return "more registrations than an epoll object holds (256)"
-    }
-    if r == R_SEMAPHORE {
-        return "an eventfd with EFD_SEMAPHORE"
     }
     if r == signal.R_ALTSTACK {
         return "sigaltstack with SS_AUTODISARM"
@@ -479,14 +479,11 @@ pub fn eventfd2(a: u64, init: u64, flags: u64) -> u64 {
     if flags & !(O_CLOEXEC | O_NONBLOCK | EFD_SEMAPHORE) != 0 {
         return neg(EINVAL)
     }
-    if flags & EFD_SEMAPHORE != 0 {
-        return refuse(a, R_SEMAPHORE, EINVAL)
-    }
-    let v = event.ev_new(init & 0xffffffff)
+    let v = event.ev_new(init & 0xffffffff, flags & EFD_SEMAPHORE != 0) // px52: pax#82
     if v == event.EVENTFDS {
         return neg(ENFILE)
     }
-    let fd = files.event_open(a, v, O_RDWR | flags)
+    let fd = files.event_open(a, v, O_RDWR | (flags & (O_CLOEXEC | O_NONBLOCK)))
     if fd >= 0x8000000000000000 {
         event.ev_free(v)
     }
