@@ -59,8 +59,9 @@
 #      end `user: <name> pid <p> exit_group <s>` (never `killed`), and
 #      the lines that are not the kernel's (`user: …`) byte-identical
 #      to Linux's output for that command, s Linux's exit status; and
-#      the `~` lines: epollprobe's two refusals -EINVAL, evprobe's
-#      EFD_SEMAPHORE -EINVAL, restprobe's one CPU.
+#      the `~` lines: epollprobe's two refusals -EINVAL, restprobe's
+#      one CPU and its clock (px52: evprobe's EFD_SEMAPHORE is no longer
+#      one: PAX serves it, pax#82, and its lines are held to Linux's).
 #   T3 frames and books: every line's `user: frames free <A> before, <B>
 #      with 1 processes, <A> after`, its books — nothing on the heap,
 #      no open file, pipe, socket or datagram, **0 tcp blocks** — and
@@ -70,9 +71,10 @@
 #      registration, buffer and frame came back.
 #   T4 what PAX lacks and what it refuses: -ENOSYS only for
 #      set_robust_list (273) and rseq (334); refused by name exactly the
-#      three things the probes ask that Linux takes and PAX does not (an
-#      epoll object in another, EPOLLEXCLUSIVE, EFD_SEMAPHORE), counted
-#      on the `user: ready:` line; nobody killed.
+#      two things the probes ask that Linux takes and PAX does not (an
+#      epoll object in another, EPOLLEXCLUSIVE; px52: EFD_SEMAPHORE, the
+#      third until then, is served), counted on the `user: ready:` line;
+#      nobody killed.
 #   T5 the other end's verdict: net-peer's steps R1 to R3 ok and PASS
 #      (peer); ready-host's H1 to H3 (user).
 #   T6 the capture, byte by byte (tools/pcap-net --tcp): every frame PAX
@@ -454,15 +456,14 @@ one() { # tier leg way
         local t
         for t in '~nested: an epoll object added to another: EINVAL' \
                  '~exclusive: a registration with EPOLLEXCLUSIVE: EINVAL' \
-                 '~semaphore: eventfd(2, EFD_SEMAPHORE|EFD_NONBLOCK) -EINVAL' \
                  '~cpus: 1'; do
             grep -qxF -- "$t" "$out/tilde.txt" || why+=" no line '$t';"
         done
         grep -Eqx '~clock: [0-9]+ distinct readings of 2000' "$out/tilde.txt" || why+=" no ~clock line;"
-        [ "$(wc -l < "$out/tilde.txt" | tr -d ' ')" = 5 ] || why+=" $(wc -l < "$out/tilde.txt" | tr -d ' ') lines start with ~, not 5;"
+        [ "$(wc -l < "$out/tilde.txt" | tr -d ' ')" = 4 ] || why+=" $(wc -l < "$out/tilde.txt" | tr -d ' ') lines start with ~, not 4;"
     fi
     if [ -z "$why" ]; then
-        say "PASS T2 $L: $n commands, each one's output and exit status byte-identical to Linux's ($(cut -f2 "$out/summary.tsv" | paste -sd, -))$([ "$way" != user ] && printf '; PAX'"'"'s own five lines: %s' "$(paste -sd'|' "$out/tilde.txt")")"
+        say "PASS T2 $L: $n commands, each one's output and exit status byte-identical to Linux's ($(cut -f2 "$out/summary.tsv" | paste -sd, -))$([ "$way" != user ] && printf '; PAX'"'"'s own four lines: %s' "$(paste -sd'|' "$out/tilde.txt")")"
     else
         bad "T2 $L:$why"
     fi
@@ -497,9 +498,8 @@ one() { # tier leg way
     rc=$(sed -n -E 's/^user: ready: .* refused ([0-9]+)$/\1/p' "$norm" | tail -n 1)
     if [ "$way" != user ]; then
         wr="epollprobe syscall 233: refused: an epoll object registered in another, -22
-epollprobe syscall 233: refused: EPOLLEXCLUSIVE, -22
-evprobe syscall 290: refused: an eventfd with EFD_SEMAPHORE, -22"
-        [ "$rc" = 3 ] || why+=" $rc refusals counted, not 3;"
+epollprobe syscall 233: refused: EPOLLEXCLUSIVE, -22"
+        [ "$rc" = 2 ] || why+=" $rc refusals counted, not 2;"
     else
         [ "$rc" = 0 ] || why+=" $rc refusals counted, not 0;"
     fi
