@@ -1,0 +1,76 @@
+[6n$ sleep 30 & sleep 31 &
+$ jobs
+[2] + Running                    sleep 31
+[1] - Running                    sleep 30
+$ /bin/kill -- -$!
+[2] + Terminated                 sleep 31
+$ sleep 0.5
+$ jobs
+[1] + Running                    sleep 30
+$ sh -c 'sleep 30 & sleep 31; wait' &
+$ sleep 0.5
+$ /bin/kill -s KILL -- -$!
+$ sleep 0.5
+[2] + Killed                     sh -c "sleep 30 & sleep 31; wait"
+$ jobs
+[1] + Running                    sleep 30
+$ /bin/kill -- -32000; echo st=$?
+kill: '-32000': No such process
+st=1
+$ sh -c '/bin/kill 0; echo not reached'; echo st=$?
+pelt: ended by signal 15 (TERM)
+st=143
+$ /bin/kill -0 0; echo st=$?
+st=0
+$ /bin/kill -s 0 -- -1; echo st=$?
+st=0
+$ /bin/kill -l 64; /bin/kill -t 34 | tr -s ' '
+RTMAX
+34 RTMIN Real-time signal 0
+$ kill %1; sleep 0.5
+[1] + Terminated                 sleep 30
+$ timeout 1 sleep 5; echo st=$?
+st=124
+$ timeout -s KILL 1 sleep 5; echo st=$?
+pelt: ended by signal 9 (KILL)
+st=137
+$ timeout -k 1 1 sh -c 'trap "" TERM; sleep 5'; echo st=$?
+pelt: ended by signal 9 (KILL)
+st=137
+$ timeout --foreground 1 sleep 5; echo st=$?
+st=124
+$ timeout 5 true; echo st=$?
+timeout: failed to run command 'true': No such file or directory
+st=127
+$ timeout 5 sh -c 'exit 3'; echo st=$?
+st=3
+$ timeout -p 1 sleep 5; echo st=$?
+st=143
+$ timeout 1 sh -c 'sh -c "sleep 2; echo survived" & wait'; echo st=$?
+st=124
+$ sleep 2.5; echo checked
+checked
+$ timeout --foreground 1 sh -c 'sh -c "sleep 2; echo survived" & wait'; echo st=
+$?
+st=124
+$ sleep 2.5; echo checked
+survived
+checked
+$ timeout 1 sh -c 'kill -STOP $$'; echo st=$?
+st=124
+$ timeout 0.5 cat; echo st=$?
+st=124
+$ timeout -v 1 sleep 5; echo st=$?
+timeout: sending signal TERM to command 'sleep'
+st=124
+$ timeout 1x sleep 1; echo st=$?
+timeout: invalid time interval '1x'
+Try 'timeout --help' for more information.
+st=125
+$ timeout 1 /nonexistent; echo st=$?
+timeout: failed to run command '/nonexistent': No such file or directory
+st=127
+$ timeout 1 /etc/pax-run; echo st=$?
+timeout: failed to run command '/etc/pax-run': Permission denied
+st=126
+$ exit
