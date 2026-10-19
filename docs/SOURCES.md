@@ -784,3 +784,25 @@ Permissively licensed kernels: none consulted.
 | man-pages `kill(1)`, `kill(2)`, `timeout(1)`, `setpgid(2)`, `socketpair(2)`, `unix(7)`, `vfork(2)`, `clone(2)`, `proc_pid_stat(5)`, `proc_pid_status(5)`; POSIX.1-2024 XCU 2.11, `kill`, `jobs`, `fg`, `bg`, `wait` | man-pages 6.19 (kasumi); POSIX.1-2024 | GPL-compatible documentation; IEEE/The Open Group | read | what each row should answer |
 | black-box Linux 7.2.8-1-cachyos (kasumi's own kernel image `f4c00d5d…` under QEMU 11.1.1, `notes/px50/vmjob.c` as pid 1, the shell on a fresh pseudo-terminal as its session leader; the suite's own pjobs archive) | — | GPL-2.0 (a program we run) | run, never read: each of the 26 pjobs sessions and the groups session as root and as 1000:1000, recorded twice, the same bytes | `tests/mpx5-jobs.d/linux/pjobs-*`, `groups*` |
 | rootless podman on kasumi (`px13-ubuntu`), CI's Docker | — | — | run: the user sessions (`tools/linux-tree --owners --rdev --nsproc`) | J0, J3 |
+
+## px52: the small fixes (EFD_SEMAPHORE, /dev/std* as links, a later image's red in CI, the silent UEFI boot)
+
+No kernel's source was read or searched for, Linux's above all, nor any
+libc's, shell's, container runtime's, init system's, device manager's or
+QEMU's (ruling #22). Every rule the kernel follows is a row Linux
+answered: `evprobe` in a rootless container on kasumi's 7.2.8 and on CI's
+runner (`tests/mpx4-ready`'s live Linux side); `fdtab` on real root's
+guest and in a container (`tests/mpx5-jobs` J8); the shell-inout
+sessions in a container (`tests/mpx3-tree`). Where the prediction and
+the measurement parted, the measurement decided and the note says so.
+Permissively licensed kernels: none consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| man-pages `eventfd(2)`, `read(2)`, `poll(2)`, `epoll(7)`, `proc_pid_fdinfo(5)`, `proc_pid_fd(5)`, `symlink(7)`, `path_resolution(7)`, `readlink(2)`, `lstat(2)`, `statx(2)`, `open(2)`, `readdir(3)`, `ip(7)` (`ip_local_port_range`), `udp(7)`, `unshare(1)` | man-pages 6.x | GPL-compatible documentation | the author's own knowledge (no page opened in this lane); no row rests on them alone: each is measured | `kernel/event`, `kernel/ready`, `kernel/files`, `kernel/procfs`; the port pickers; the loop's namespace |
+| uapi `linux/eventfd.h`: EFD_SEMAPHORE 1 (EFD_CLOEXEC and EFD_NONBLOCK are O_CLOEXEC and O_NONBLOCK) | — | GPL-2.0 WITH Linux-syscall-note | the author's own knowledge, confirmed black-box (F_GETFL and fdinfo's `flags` show no bit for it) | the flag |
+| black-box Linux 7.2.8-1-cachyos: `user/net/evprobe.c` (static, built in `px13-ubuntu`) in a rootless podman container on kasumi, as root and as 1000:1000, twice each, one digest | — | (a program we run) | run | §B (pax#82) |
+| black-box Linux 7.2.8-1-cachyos under QEMU 11.1.1 (kasumi's own kernel image `f4c00d5d…`, `notes/px52/vmjob.c` as pid 1: px50's, with what devtmpfs has at `/dev/fd`, `stdin`, `stdout`, `stderr` printed and then the four links made; the suite's own fds archive) | — | GPL-2.0 (a program we run) | run, never read: `fdtab` as root and as 1000:1000, recorded twice, the same bytes | `tests/mpx5-jobs.d/linux/fds*.tty` |
+| kasumi's own `/dev` (CachyOS, systemd's boot) and a rootless podman container's (`px13-ubuntu`): `ls -l`, `stat -c`, `readlink` of `/dev/stdin`, `stdout`, `stderr`, `fd` | — | (programs we run) | read, black-box | which links a Linux system has (§C) |
+| QEMU's documentation of `-netdev user` (`hostfwd`); QEMU 8.2.2's own line in CI's artifact 12120719249 (push run 39086412018) | — | GPL-2.0 (a program we run) | read; black-box | §D (pax#86) |
+| GitHub Actions' `workflow_dispatch` inputs (documentation) | — | — | the author's own knowledge | ci.yml's `jobs_boots` (pax#85) |
