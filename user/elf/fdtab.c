@@ -7,7 +7,12 @@
  * fdinfo files' lines, who may read another process's (ptrace(2)'s
  * read mode: root, a user's own, another user's, root's, a
  * non-dumpable one's, a zombie's); and (pax#80) rmdir and rename of
- * /proc and /sys. Run as the first program on a terminal (PAX's
+ * /proc and /sys. px52: an eventfd's fdinfo with EFD_SEMAPHORE (pax#82),
+ * and /dev/stdin, /dev/stdout, /dev/stderr as links to /proc/self/fd/0,
+ * 1, 2 (pax#83): readlink, lstat, statx without following, the
+ * listing's type, and stat and open through each with its descriptor a
+ * file, a directory, a pipe's end, a socket, closed, or another's file.
+ * Run as the first program on a terminal (PAX's
  * console; a Linux pseudo-terminal as its session leader, notes/px50's
  * guest and tools/linux-tree), as root and as a user (through `as`),
  * with /g a 1777 directory and /g/r644 root's 0644 file in the archive.
@@ -18,12 +23,13 @@
  * is the same as, the terminal's name as whether it is a path in /dev
  * that stat finds to be the descriptor's. No pid, time or address.
  *
- *   fdtab           every section, L S O D I P X
+ *   fdtab           every section, L S O D I P X N
  *
  * Written from the man pages (proc(5), proc_pid_fd(5),
  * proc_pid_fdinfo(5), readlink(2), open(2), stat(2), statx(2),
  * getdents64(2), ptrace(2), prctl(2), pipe(7), socket(7), unix(7),
- * eventfd(2), epoll_create(2), rmdir(2), rename(2)) and the uapi
+ * eventfd(2), epoll_create(2), rmdir(2), rename(2); px52: symlink(7),
+ * path_resolution(7), lstat(2), readdir(3)) and the uapi
  * headers' numbers. No C library's or kernel's source was read.
  * Written for this lane. */
 #define _GNU_SOURCE
@@ -645,8 +651,18 @@ static void info_rows(void) {
     (void)!write(e, &v, 8);
     out("I: then a write of 7: %s", shown(e));
     close(e);
-    e = eventfd(0, EFD_NONBLOCK); /* EFD_SEMAPHORE: PAX refuses it by name (kernel/ready) */
+    e = eventfd(0, EFD_NONBLOCK);
     out("I: an eventfd EFD_NONBLOCK: %s", shown(e));
+    close(e);
+    /* px52 (pax#82): EFD_SEMAPHORE, before and after a read takes 1. */
+    e = eventfd(3, EFD_SEMAPHORE);
+    out("I: an eventfd EFD_SEMAPHORE made with 3: %s", shown(e));
+    v = 0;
+    long sr = read(e, &v, 8);
+    out("I: then a read: %ld bytes, the value %llu: %s", sr, (unsigned long long)v, shown(e));
+    close(e);
+    e = eventfd(0, EFD_SEMAPHORE | EFD_NONBLOCK | EFD_CLOEXEC);
+    out("I: an eventfd EFD_SEMAPHORE|EFD_NONBLOCK|EFD_CLOEXEC: %s", shown(e));
     close(e);
     int ep = epoll_create1(0);
     out("I: an epoll object with nothing registered: %s", shown(ep));
@@ -846,6 +862,165 @@ static void mount_rows(void) {
     rmdir("/g/e");
 }
 
+/* ---- N: /dev/stdin, /dev/stdout, /dev/stderr (px52, pax#83) ------------- */
+
+static const char *const stdname[3] = { "/dev/stdin", "/dev/stdout", "/dev/stderr" };
+
+/* The type /dev's listing gives `name`. */
+static const char *dev_type(const char *name) {
+    DIR *d = opendir("/dev");
+    if (!d) return ename(errno);
+    const char *t = "absent";
+    struct dirent *e;
+    while ((e = readdir(d)))
+        if (strcmp(e->d_name, name) == 0) {
+            t = e->d_type == DT_LNK ? "DT_LNK" : e->d_type == DT_CHR ? "DT_CHR" : e->d_type == DT_REG ? "DT_REG" : e->d_type == DT_DIR ? "DT_DIR" : "another";
+            break;
+        }
+    closedir(d);
+    return t;
+}
+
+/* Descriptor n made `fd` for a while (swap_in), then itself again. */
+static int saved_std[3];
+static void swap_in(int n, int fd) { saved_std[n] = dup(n); dup2(fd, n); }
+static void swap_out(int n) { dup2(saved_std[n], n); close(saved_std[n]); }
+
+static void std_rows(void) {
+    char b[256];
+    for (int n = 0; n < 3; n++) {
+        struct statx x;
+        errno = 0;
+        int sx = statx(AT_FDCWD, stdname[n], AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS, &x);
+        char xs[80];
+        if (sx < 0) snprintf(xs, sizeof xs, "%s", ename(errno));
+        else snprintf(xs, sizeof xs, "%s size %llu", perm(x.stx_mode), (unsigned long long)x.stx_size);
+        out("N: %s: readlink %s; %s; statx AT_SYMLINK_NOFOLLOW %s; in /dev's listing %s", stdname[n], lnk(stdname[n], -1), lst(stdname[n]), xs, dev_type(stdname[n] + 5));
+    }
+    errno = 0;
+    ssize_t k = readlink("/dev/stdout", b, 5);
+    out("N: readlink of /dev/stdout with room for 5 bytes: %ld \"%.*s\"", (long)k, k > 0 ? (int)k : 0, b);
+    errno = 0;
+    int g = open("/dev/stdin", O_RDONLY | O_NOFOLLOW);
+    out("N: /dev/stdin opened O_NOFOLLOW: %s", rv(g, errno));
+    if (g >= 0) close(g);
+
+    /* Descriptor 0 a file at offset 3. */
+    put("/g/n0", "abcdef\n");
+    int f = open("/g/n0", O_RDONLY);
+    lseek(f, 3, SEEK_SET);
+    swap_in(0, f);
+    char th[200];
+    snprintf(th, sizeof th, "%s", through("/dev/stdin", 0));
+    errno = 0;
+    g = open("/dev/stdin", O_RDONLY);
+    int eg = errno;
+    char c[8] = {0};
+    ssize_t r = g < 0 ? -1 : read(g, c, 3);
+    long off0 = (long)lseek(0, 0, SEEK_CUR);
+    errno = 0;
+    struct stat st;
+    int ts = stat("/dev/stdin/", &st);
+    int ets = errno;
+    swap_out(0);
+    out("N: descriptor 0 a file at offset 3: %s; open /dev/stdin O_RDONLY %s, read 3 \"%.*s\", descriptor 0 still at %ld; with a trailing slash %s", th, rv(g, eg), r > 0 ? (int)r : 0, c, off0, rv(ts, ets));
+    if (g >= 0) close(g);
+    close(f);
+
+    /* Descriptor 0 root's 0644 file, opened O_RDONLY: reopened for writing by its mode. */
+    f = open("/g/r644", O_RDONLY);
+    swap_in(0, f);
+    errno = 0;
+    g = open("/dev/stdin", O_WRONLY);
+    eg = errno;
+    swap_out(0);
+    out("N: descriptor 0 root's 0644 file O_RDONLY: open /dev/stdin O_WRONLY %s", rv(g, eg));
+    if (g >= 0) close(g);
+    close(f);
+
+    /* Descriptor 0 the directory /g. */
+    f = open("/g", O_RDONLY | O_DIRECTORY);
+    swap_in(0, f);
+    snprintf(th, sizeof th, "%s", through("/dev/stdin", 0));
+    errno = 0;
+    g = open("/dev/stdin", O_RDONLY | O_DIRECTORY);
+    eg = errno;
+    errno = 0;
+    int td = stat("/dev/stdin/.", &st);
+    int etd = errno;
+    swap_out(0);
+    out("N: descriptor 0 the directory /g: %s; open /dev/stdin O_DIRECTORY %s; /dev/stdin/. %s", th, rv(g, eg), rv(td, etd));
+    if (g >= 0) close(g);
+    close(f);
+
+    /* Descriptor 1 a file opened O_APPEND: > /dev/stdout truncates it. */
+    put("/g/n1", "12345\n");
+    f = open("/g/n1", O_WRONLY | O_APPEND);
+    swap_in(1, f);
+    errno = 0;
+    g = open("/dev/stdout", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    eg = errno;
+    fstat(f, &st);
+    long long sz = (long long)st.st_size;
+    if (g >= 0) (void)!write(g, "x", 1);
+    (void)!write(1, "y", 1);
+    swap_out(1);
+    char t[16] = {0};
+    int rd = open("/g/n1", O_RDONLY);
+    (void)!read(rd, t, sizeof t - 1);
+    close(rd);
+    out("N: descriptor 1 a file O_APPEND of 6 bytes: open /dev/stdout O_WRONLY|O_CREAT|O_TRUNC %s, the file then %lld bytes; x through it, y through descriptor 1: \"%s\"", rv(g, eg), sz, t);
+    if (g >= 0) close(g);
+    close(f);
+
+    /* Descriptor 2 a pipe's write end. */
+    int p[2];
+    (void)!pipe(p);
+    swap_in(2, p[1]);
+    errno = 0;
+    g = open("/dev/stderr", O_WRONLY);
+    eg = errno;
+    if (g >= 0) { (void)!write(g, "p", 1); close(g); }
+    swap_out(2);
+    close(p[1]);
+    memset(c, 0, sizeof c);
+    r = read(p[0], c, sizeof c - 1);
+    close(p[0]);
+    out("N: descriptor 2 a pipe's write end: open /dev/stderr O_WRONLY %s; the read end then \"%.*s\"", rv(g, eg), r > 0 ? (int)r : 0, c);
+
+    /* Descriptor 0 a socketpair's end. */
+    int sv[2];
+    (void)!socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    swap_in(0, sv[0]);
+    errno = 0;
+    g = open("/dev/stdin", O_RDONLY);
+    eg = errno;
+    swap_out(0);
+    out("N: descriptor 0 a socketpair's end: open /dev/stdin %s", rv(g, eg));
+    if (g >= 0) close(g);
+    close(sv[0]); close(sv[1]);
+
+    /* Descriptor 0 closed. */
+    saved_std[0] = dup(0);
+    close(0);
+    errno = 0;
+    g = open("/dev/stdin", O_RDONLY);
+    eg = errno;
+    errno = 0;
+    ts = stat("/dev/stdin", &st);
+    ets = errno;
+    char ls[120];
+    snprintf(ls, sizeof ls, "%s", lst("/dev/stdin"));
+    char rl[64];
+    snprintf(rl, sizeof rl, "%s", lnk("/dev/stdin", -1));
+    if (g >= 0) close(g);
+    dup2(saved_std[0], 0);
+    close(saved_std[0]);
+    out("N: descriptor 0 closed: open /dev/stdin %s, stat %s; %s; readlink %s", rv(g, eg), rv(ts, ets), ls, rl);
+    unlink("/g/n0");
+    unlink("/g/n1");
+}
+
 int main(void) {
     root = geteuid() == 0;
     out("fdtab: px50's probe, as %s", root ? "root" : "a user");
@@ -855,6 +1030,7 @@ int main(void) {
     info_rows();
     perm_rows();
     mount_rows();
+    std_rows();
     out("fdtab: done");
     return 0;
 }
