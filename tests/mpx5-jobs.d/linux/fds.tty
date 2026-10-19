@@ -111,6 +111,9 @@ I: a UDP socket: pos:\t0|flags:\t02|mnt_id:\t<another>|ino:\t<fstat's>
 I: an eventfd made with 5: pos:\t0|flags:\t02|mnt_id:\t<another>|ino:\t<fstat's>|eventfd-count:                5|eventfd-id: N|eventfd-semaphore: 0
 I: then a write of 7: pos:\t0|flags:\t02|mnt_id:\t<another>|ino:\t<fstat's>|eventfd-count:                c|eventfd-id: N|eventfd-semaphore: 0
 I: an eventfd EFD_NONBLOCK: pos:\t0|flags:\t04002|mnt_id:\t<another>|ino:\t<fstat's>|eventfd-count:                0|eventfd-id: N|eventfd-semaphore: 0
+I: an eventfd EFD_SEMAPHORE made with 3: pos:\t0|flags:\t02|mnt_id:\t<another>|ino:\t<fstat's>|eventfd-count:                3|eventfd-id: N|eventfd-semaphore: 1
+I: then a read: 8 bytes, the value 1: pos:\t0|flags:\t02|mnt_id:\t<another>|ino:\t<fstat's>|eventfd-count:                2|eventfd-id: N|eventfd-semaphore: 1
+I: an eventfd EFD_SEMAPHORE|EFD_NONBLOCK|EFD_CLOEXEC: pos:\t0|flags:\t02004002|mnt_id:\t<another>|ino:\t<fstat's>|eventfd-count:                0|eventfd-id: N|eventfd-semaphore: 1
 I: an epoll object with nothing registered: pos:\t0|flags:\t02|mnt_id:\t<another>|ino:\t<fstat's>
 I: a closed descriptor's: ENOENT
 P: root, of 1001's: fd/ 1001:1001 0500, open 0; readlink fd/7 "/dev/null"; stat 0, lstat 0 1001:1001 0500, open 0; fdinfo/ 1001:1001 0555, open 0; fdinfo/7 1001:1001 0444, open 0
@@ -129,4 +132,16 @@ X: a directory renamed onto /proc EBUSY, onto /sys EBUSY
 X: rename of /proc to itself 0
 X: rename of /proc/self out EXDEV; rmdir of /proc/self/fd EPERM
 X: / is 0755; /proc and /sys still there: yes
+N: /dev/stdin: readlink "/proc/self/fd/0"; lstat link 0777 size 15 nlink 1 owner 0:0; statx AT_SYMLINK_NOFOLLOW link 0777 size 15; in /dev's listing DT_LNK
+N: /dev/stdout: readlink "/proc/self/fd/1"; lstat link 0777 size 15 nlink 1 owner 0:0; statx AT_SYMLINK_NOFOLLOW link 0777 size 15; in /dev's listing DT_LNK
+N: /dev/stderr: readlink "/proc/self/fd/2"; lstat link 0777 size 15 nlink 1 owner 0:0; statx AT_SYMLINK_NOFOLLOW link 0777 size 15; in /dev's listing DT_LNK
+N: readlink of /dev/stdout with room for 5 bytes: 5 "/proc"
+N: /dev/stdin opened O_NOFOLLOW: ELOOP
+N: descriptor 0 a file at offset 3: stat file 0644, fstat's: yes; statx fstat's: yes; open /dev/stdin O_RDONLY 0, read 3 "abc", descriptor 0 still at 3; with a trailing slash ENOTDIR
+N: descriptor 0 root's 0644 file O_RDONLY: open /dev/stdin O_WRONLY 0
+N: descriptor 0 the directory /g: stat dir 1777, fstat's: yes; statx fstat's: yes; open /dev/stdin O_DIRECTORY 0; /dev/stdin/. 0
+N: descriptor 1 a file O_APPEND of 6 bytes: open /dev/stdout O_WRONLY|O_CREAT|O_TRUNC 0, the file then 0 bytes; x through it, y through descriptor 1: "xy"
+N: descriptor 2 a pipe's write end: open /dev/stderr O_WRONLY 0; the read end then "p"
+N: descriptor 0 a socketpair's end: open /dev/stdin ENXIO
+N: descriptor 0 closed: open /dev/stdin ENOENT, stat ENOENT; lstat link 0777 size 15 nlink 1 owner 0:0; readlink "/proc/self/fd/0"
 fdtab: done
