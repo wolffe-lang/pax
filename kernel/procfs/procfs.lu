@@ -533,10 +533,10 @@ pub fn child_at(d: u64, k: u64) -> u64 {
 /// 7.2.8) into a new frame: `pos:\t`, `flags:\t0` and the flags in
 /// octal, `mnt_id:\t`, `ino:\t`, each a line; then for an eventfd
 /// (`kind` 1) `eventfd-count: ` the counter in hexadecimal sixteen wide,
-/// `eventfd-id: ` `id` and `eventfd-semaphore: 0`; for an AF_UNIX socket
-/// (`kind` 2) `scm_fds: 0`. (the frame, its length), or (0, 0) with no
-/// frame free.
-pub fn fdinfo(pos: u64, flags: u64, mnt: u64, ino: u64, kind: u64, count: u64, id: u64) -> (u64, u64) {
+/// `eventfd-id: ` `id` and `eventfd-semaphore: ` 1 for a semaphore
+/// (`sem`, px52), else 0; for an AF_UNIX socket (`kind` 2) `scm_fds: 0`.
+/// (the frame, its length), or (0, 0) with no frame free.
+pub fn fdinfo(pos: u64, flags: u64, mnt: u64, ino: u64, kind: u64, count: u64, id: u64, sem: bool) -> (u64, u64) {
     let pa = frames.alloc() else 0
     if pa == 0 {
         return (0, 0)
@@ -553,7 +553,7 @@ pub fn fdinfo(pos: u64, flags: u64, mnt: u64, ino: u64, kind: u64, count: u64, i
         k = put_hex_w(base, k, count, 16)
         k = put_s(base, k, "\neventfd-id: ")
         k = put_dec(base, k, id)
-        k = put_s(base, k, "\neventfd-semaphore: 0\n")
+        k = put_s(base, k, if sem { "\neventfd-semaphore: 1\n" } else { "\neventfd-semaphore: 0\n" })
     } else if kind == 2 {
         k = put_s(base, k, "scm_fds: 0\n")
     }

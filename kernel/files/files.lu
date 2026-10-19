@@ -2020,9 +2020,9 @@ pub fn epoll_open(a: u64, e: u64, flags: u64) -> u64 {
 }
 
 /// px24: `read` of an eventfd (`eventfd(2)`): the counter's eight bytes,
-/// and the counter is zero after. A buffer under eight bytes is
-/// -EINVAL; a counter that is zero waits (WAIT) or, under O_NONBLOCK,
-/// answers -EAGAIN.
+/// and the counter is zero after (px52, pax#82: a semaphore's 1, and the
+/// counter one less). A buffer under eight bytes is -EINVAL; a counter
+/// that is zero waits (WAIT) or, under O_NONBLOCK, answers -EAGAIN.
 fn event_read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
     if n < 8 {
         return neg(EINVAL)
@@ -3995,7 +3995,8 @@ fn fdinfo_of(ta: u64, fd: u64) -> (u64, u64) {
     }
     let extra: u64 = if k == K_EVENT { 1 } else if k == K_SOCK || k == K_UNIX { 2 } else { 0 }
     let cnt = if k == K_EVENT { event.ev_value(rf(nd)) } else { 0 }
-    procfs.fdinfo(pos(ta, fd), f, mnt_of(nd), n_ino(nd), extra, cnt, rf(nd))
+    let sem = k == K_EVENT && event.ev_semaphore(rf(nd)) // px52: pax#82
+    procfs.fdinfo(pos(ta, fd), f, mnt_of(nd), n_ino(nd), extra, cnt, rf(nd), sem)
 }
 
 /// px50: the number fdinfo's `mnt_id` gives node `n`'s file system: one
