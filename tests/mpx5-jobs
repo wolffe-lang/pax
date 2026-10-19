@@ -120,7 +120,14 @@
 #      mounted); its J4 witness asks rows root's run and a user's answer
 #      differently (root's 0644 file reopened for writing through its
 #      entry, rmdir of /proc and /sys) and rows the fix turns (a file's
-#      link, an entry followed, fdinfo's append flag).
+#      link, an entry followed, fdinfo's append flag). px52: an
+#      EFD_SEMAPHORE eventfd's fdinfo (pax#82) and fdtab's N section,
+#      /dev/stdin, stdout and stderr as links to /proc/self/fd/N (pax#83;
+#      the guest's links made at its start, notes/px52/vmjob.c, as a
+#      distribution's boot makes them: devtmpfs has none); its witness
+#      the semaphore's read, the stdin link, the truncating reopen, and
+#      the reopen of root's file by /dev/stdin, 0 to root, EACCES to a
+#      user.
 #   J9 px51: each pjobs and pjobs-user run (one of sh18's sessions)
 #      byte-identical to real root's recording of the same pelt on the
 #      guest (tests/mpx5-jobs.d/linux/pjobs-*.tty), the user's to the
@@ -613,9 +620,11 @@ for leg in $legs; do
                             # px50: who it is, by the rows that differ between root and a user.
                             fds) grep -qx "fdtab: px50's probe, as root" "$out.cmp" || why+=" not root's;"
                                  grep -qx "O: root's 0644 file's O_RDONLY entry opened O_WRONLY: 0" "$out.cmp" || why+=" no root's reopen row;"
+                                 grep -qx "N: descriptor 0 root's 0644 file O_RDONLY: open /dev/stdin O_WRONLY 0" "$out.cmp" || why+=" no root's /dev/stdin reopen row;"
                                  grep -qx 'X: rmdir of /proc EBUSY, /sys EBUSY' "$out.cmp" || why+=" no root's rmdir row;" ;;
                             fds-user) grep -qx "fdtab: px50's probe, as a user" "$out.cmp" || why+=" not a user's;"
                                       grep -qx "O: root's 0644 file's O_RDONLY entry opened O_WRONLY: EACCES" "$out.cmp" || why+=" no user's reopen row;"
+                                      grep -qx "N: descriptor 0 root's 0644 file O_RDONLY: open /dev/stdin O_WRONLY EACCES" "$out.cmp" || why+=" no user's /dev/stdin reopen row;"
                                       grep -qx 'X: rmdir of /proc EACCES, /sys EACCES' "$out.cmp" || why+=" no user's rmdir row;" ;;
                             # px51: pelt's prompt; the rows each case is about.
                             pjobs-*) grep -q '^\$ ' "$out.cmp" || why+=" no prompt;"
@@ -643,7 +652,10 @@ for leg in $legs; do
                             fds*) for w in 'L: a file opened O_RDONLY: "/g/f1"' \
                                            'L: a file unlinked while open: "/g/f5 (deleted)"' \
                                            'O: the directory'"'"'s entry, then o1: 0, /g/o1: yes' \
-                                           'I: O_WRONLY|O_APPEND (>>): pos:\t0|flags:\t0102001|mnt_id:\t<the tree'"'"'s>|ino:\t<fstat'"'"'s>'; do
+                                           'I: O_WRONLY|O_APPEND (>>): pos:\t0|flags:\t0102001|mnt_id:\t<the tree'"'"'s>|ino:\t<fstat'"'"'s>' \
+                                           'I: then a read: 8 bytes, the value 1: pos:\t0|flags:\t02|mnt_id:\t<another>|ino:\t<fstat'"'"'s>|eventfd-count:                2|eventfd-id: N|eventfd-semaphore: 1' \
+                                           'N: /dev/stdin: readlink "/proc/self/fd/0"; lstat link 0777 size 15 nlink 1 owner 0:0; statx AT_SYMLINK_NOFOLLOW link 0777 size 15; in /dev'"'"'s listing DT_LNK' \
+                                           'N: descriptor 1 a file O_APPEND of 6 bytes: open /dev/stdout O_WRONLY|O_CREAT|O_TRUNC 0, the file then 0 bytes; x through it, y through descriptor 1: "xy"'; do
                                         grep -qxF "$w" "$out.cmp" || why+=" no '$w';"
                                     done ;;
                             gaps*) for w in 'U: two threads, a process signal: 20 signals sent, each handled once yes; A left sigsuspend without its own handler 0 times; A waits at the end yes' \
