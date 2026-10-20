@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# tools/nightly-red — a red nightly opens an issue (tl29; tl28's
+# ci/nightly-red.sh, the shape every tiered repo of the org runs).
+#
+#   REPO=owner/name WORKFLOW=<the workflow's name> RUN_URL=<the run> \
+#     GH_TOKEN=... tools/nightly-red
+#
+# Run by the `tier` job's last step when a SCHEDULED run on trunk is red:
+# since tl29 three of the four legs (native UEFI, release BIOS and UEFI)
+# run only after the merge, on the trunk push and the nightly, so a red
+# night has to come and find a lane; the next lane on pax owes it (the
+# crawl's rule). One open issue per workflow: its title is the dedupe key.
+# An open issue carrying that title gets a comment naming this run;
+# otherwise one is opened with the `nightly-red` label (created here if
+# the repository lacks it). A week of red nights is one issue with seven
+# comments; closing it by hand, once a nightly is green again, is what
+# resets it.
+#
+# tests/ci-plan runs this against a stand-in `gh` (P7): no open issue, one
+# open issue, a label that already exists, the variables unset.
+set -euo pipefail
+: "${REPO:?REPO (owner/name) is unset}" "${WORKFLOW:?WORKFLOW is unset}" "${RUN_URL:?RUN_URL is unset}"
+
+label=nightly-red
+title="nightly red: $WORKFLOW on trunk"
+body=$(printf 'The scheduled run of `%s` on trunk is red: %s\n\nThe next lane on this repository owes it (crawl 54, ruling #92). A further red night comments here; close this issue once a nightly is green again.\n' "$WORKFLOW" "$RUN_URL")
+
+# The label may exist already; that is not a failure.
+gh label create "$label" --repo "$REPO" --color B60205 \
+  --description "a scheduled run on trunk is red; the next lane on the repo owes it" >/dev/null 2>&1 || true
+
+existing=$(gh issue list --repo "$REPO" --state open --label "$label" \
+  --search "in:title \"$title\"" --json number,title \
+  --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+if [ -n "$existing" ]; then
+  echo "nightly-red: commenting on #$existing ($title)"
+  gh issue comment "$existing" --repo "$REPO" --body "$body"
+else
+  echo "nightly-red: opening \"$title\""
+  gh issue create --repo "$REPO" --title "$title" --label "$label" --body "$body"
+fi
