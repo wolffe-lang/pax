@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""tests/ci-plan — the CI planner's own proof (px37, px40). No QEMU: python3 only.
+"""tests/ci-plan — the CI planner's own proof (px37, px40, tl29). No QEMU: python3 and bash.
 
     tests/ci-plan
 
-  P1  the tiers by event: a trunk push, the nightly, a dispatch, the
-      `full-matrix` label are full (every suite, every leg); another
-      label's `labeled` event is a noop; a dispatch can ask for the pr
-      leg or for named suites.
+  P1  the tiers by event (tl29): a trunk push, the nightly and a dispatch
+      are all (every suite, every leg); the `full-matrix` label is full,
+      the merge gate (every suite on the merge legs, native BIOS), and all
+      beside a FULL path or with no paths to read; another label's
+      `labeled` event is a noop; a dispatch can ask for full or pr, and
+      one naming suites is partial, on its tier input's legs.
   P2  the pr tier by path, one change per area: the network's suites for
       kernel/tcp, sound's for user/play, nothing for notes; a kmain, a
       test, a user program and a shared device select their readers.
@@ -14,20 +16,32 @@
       assembly) and CI's own files select every suite, on the pr leg.
   P3  FULL wins: the toolchain pins, the harness, the kernel's entry,
       link script and Limine configuration, and any path no rule knows
-      make a pull request's run full, alone or beside a core change; a
-      pull request whose changed paths cannot be read is full too.
+      make a pull request's run all (every leg), alone or beside a core
+      change; a pull request whose changed paths cannot be read is all too.
   P4  the wiring of .github/workflows/ci.yml: every suite job needs the
       plan and runs only when chosen; every test that takes a leg gets
       $PAX_LEGS and accepts --tier and --firmware; the `tier` job needs
       every job and runs unless cancelled; cancel-in-progress is for
       pull requests only and every other run has a concurrency group
       of its own run id; the trunk push, the nightly and the label are
-      triggers.
+      triggers; the dispatch's tier input is all, full or pr, all by
+      default; the tier job's last step, on a red nightly only and after
+      the verdict, runs tools/nightly-red, and only that job may write
+      issues.
   P6  the verdict (`tools/ci-plan --verdict`, the `tier` job): green for
-      a full run whose `legs` output is absent (GitHub drops an empty
-      output; run 38344726280 was red on exactly that), for a pr run
-      and a noop; red for a chosen suite failed, skipped or cancelled,
-      a suite that ran unasked, a failed plan, a plan with no suites.
+      an all run whose `legs` output is absent (GitHub drops an empty
+      output; run 38344726280 was red on exactly that), a full run on the
+      merge legs, a pr run, a partial run and a noop; red for a chosen
+      suite failed, skipped or cancelled, a suite that ran unasked, a
+      failed plan, a plan with no suites, and (tl29) a tier whose shape
+      does not hold: a full or an all run of fewer suites than every one,
+      a full run on every leg (px37's full, now all), an all run on the
+      merge legs, a pr run on every leg, a partial run of no suite, a
+      tier the planner never names.
+  P7  the red nightly's issue (tools/nightly-red, against a stand-in
+      `gh`, tl29): no open issue opens one, labelled nightly-red, under
+      the one title; an open one gets a comment and no new issue; a label
+      that already exists is no failure; unset variables are refused.
   P5  (a WARN, not a failure) every tracked path is known to the map or
       read by a suite; an unknown one makes its pull request full.
 
@@ -36,12 +50,17 @@ Exit 0 when every check passes, 1 otherwise.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLAN = os.path.join(ROOT, "tools", "ci-plan")
 PR_LEGS = "--tier native --firmware bios"
+MERGE_LEGS = "--tier native --firmware bios"  # tl29: the merge gate's legs
+TIER_LEGS = {"all": "", "full": MERGE_LEGS, "pr": PR_LEGS, "noop": PR_LEGS}
+NIGHTLY_RED = os.path.join(ROOT, "tools", "nightly-red")
 NET = ["mpx4-net", "mpx4-udp", "mpx4-tcp", "mpx4-ready", "mpx4-session", "mpx4-unix", "mpx4-lobo", "mpx5-jobs"]  # px49: mpx5-jobs (gaps' TCP rows)
 MUSIC = ["mpx3-speaker", "mpx3-sound", "mpx3-orchestra", "mpx4-session"]
 fails = 0
@@ -96,26 +115,42 @@ def expect(name, got, tier, suites=None, has=(), lacks=(), legs=None):
         if s in got["suites"]:
             why.append("has " + s)
     if legs is None:
-        legs = "" if tier == "full" else PR_LEGS
+        legs = TIER_LEGS.get(tier, "?")
     if got["legs"] != legs:
         why.append("legs '%s', wanted '%s'" % (got["legs"], legs))
     shown = "every suite (%d)" % len(SUITES) if sorted(got["suites"]) == sorted(SUITES) else (" ".join(got["suites"]) or "no suite")
     say(not why, "%s: %s%s" % (name, tier, (" (" + "; ".join(why) + ")") if why else ", " + shown))
 
 
-# --- P1 the tiers by event ------------------------------------------------------
-expect("P1 a push to trunk", plan(event="push"), "full", SUITES)
-expect("P1 the nightly", plan(event="schedule"), "full", SUITES)
-expect("P1 a dispatch, no inputs", plan(event="workflow_dispatch"), "full", SUITES)
+# --- P1 the tiers by event (tl29) -----------------------------------------------
+expect("P1 a push to trunk", plan(event="push"), "all", SUITES)
+expect("P1 the nightly", plan(event="schedule"), "all", SUITES)
+expect("P1 a dispatch, no inputs", plan(event="workflow_dispatch"), "all", SUITES)
+expect("P1 a dispatch, tier all", plan(event="workflow_dispatch", tier="all"), "all", SUITES)
+expect("P1 a dispatch, tier full: the merge gate", plan(event="workflow_dispatch", tier="full"), "full", SUITES)
 expect("P1 a dispatch, tier pr", plan(event="workflow_dispatch", tier="pr"), "pr", SUITES)
-expect("P1 a dispatch, one suite", plan(event="workflow_dispatch", suites="mpx3-tree"), "full", ["mpx3-tree"])
-expect("P1 a dispatch, proof brings macos-run", plan(event="workflow_dispatch", suites="proof"), "full", ["proof", "macos-run"])
-expect("P1 a pull request labelled full-matrix, notes only",
+say(plan(event="workflow_dispatch", tier="release")["tier"].startswith("ERROR rc=2"), "P1 a dispatch asking for a tier that is none is refused")
+expect("P1 a dispatch, one suite: partial, every leg", plan(event="workflow_dispatch", suites="mpx3-tree"), "partial", ["mpx3-tree"], legs="")
+expect("P1 a plant: one suite on the pr leg", plan(event="workflow_dispatch", tier="pr", suites="census"), "partial", ["census"], legs=PR_LEGS)
+expect("P1 a dispatch naming every suite is still partial", plan(event="workflow_dispatch", suites=" ".join(SUITES)), "partial", SUITES, legs="")
+expect("P1 a dispatch, proof brings macos-run", plan(event="workflow_dispatch", suites="proof"), "partial", ["proof", "macos-run"], legs="")
+expect("P1 a pull request labelled full-matrix, notes only: every suite, the merge legs",
        plan(["notes/px99.md"], event="pull_request", action="synchronize", labels="bug,full-matrix"), "full", SUITES)
 expect("P1 the full-matrix label added",
        plan(["notes/px99.md"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "full", SUITES)
+expect("P1 the label beside a core change: every suite, the merge legs",
+       plan(["kernel/sched/sched.lu"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "full", SUITES)
+expect("P1 the label beside a FULL path: all",
+       plan(["kernel/wolf.pin", "notes/px99.md"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "all", SUITES)
+expect("P1 the label beside a path no rule knows: all",
+       plan(["newplace/thing.c"], event="pull_request", action="synchronize", labels="full-matrix"), "all", SUITES)
+expect("P1 the label and no changed paths to read: all",
+       plan(event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "all", SUITES)
 expect("P1 another label added",
        plan(["kernel/tcp/tcp.lu"], event="pull_request", action="labeled", label="bug", labels="bug"), "noop", [])
+expect("P1 another label added to a labelled pull request",
+       plan(["kernel/tcp/tcp.lu"], event="pull_request", action="labeled", label="bug", labels="bug,full-matrix"), "noop", [])
+say(MERGE_LEGS == PR_LEGS, "P1 the merge gate's legs are the pull-request leg, native BIOS (tl29 §4)")
 
 # --- P2 the pr tier by path -------------------------------------------------------
 pr = dict(event="pull_request", action="synchronize")
@@ -228,14 +263,14 @@ HARNESS = ["tools/lib.sh", "tools/build-kernel", "tools/mkimage", "tools/fetch-w
            "tools/qemu-halt", "tools/qemu-run", "tools/qemu-fault", "tools/expect-serial"]
 ENTRY = ["boot/start.S", "boot/kernel.ld", "boot/limine.conf"]
 for p in PINS + HARNESS + ENTRY:
-    expect("P3 %s" % p, plan([p, "notes/px99.md"], **pr), "full", SUITES)
-expect("P3 a path no rule knows", plan(["newplace/thing.c"], **pr), "full", SUITES)
-expect("P3 FULL beside a narrow change", plan(["kernel/tcp/tcp.lu", "kernel/wolf.pin"], **pr), "full", SUITES)
-expect("P3 a pin beside a core change", plan(["kernel/sched/sched.lu", "kernel/wolf.pin"], **pr), "full", SUITES)
-expect("P3 a harness tool beside a core change", plan(["kernel/heap/heap.lu", "tools/qemu-run"], **pr), "full", SUITES)
-expect("P3 an unknown path beside a core change", plan(["kernel/sched/sched.lu", "newplace/thing.c"], **pr), "full", SUITES)
-expect("P3 no changed paths to read", plan(**pr), "full", SUITES)
-expect("P3 a diff git cannot take", plan(base="0" * 40, head="1" * 40, **pr), "full", SUITES)
+    expect("P3 %s" % p, plan([p, "notes/px99.md"], **pr), "all", SUITES)
+expect("P3 a path no rule knows", plan(["newplace/thing.c"], **pr), "all", SUITES)
+expect("P3 FULL beside a narrow change", plan(["kernel/tcp/tcp.lu", "kernel/wolf.pin"], **pr), "all", SUITES)
+expect("P3 a pin beside a core change", plan(["kernel/sched/sched.lu", "kernel/wolf.pin"], **pr), "all", SUITES)
+expect("P3 a harness tool beside a core change", plan(["kernel/heap/heap.lu", "tools/qemu-run"], **pr), "all", SUITES)
+expect("P3 an unknown path beside a core change", plan(["kernel/sched/sched.lu", "newplace/thing.c"], **pr), "all", SUITES)
+expect("P3 no changed paths to read", plan(**pr), "all", SUITES)
+expect("P3 a diff git cannot take", plan(base="0" * 40, head="1" * 40, **pr), "all", SUITES)
 
 # --- P6 the verdict -----------------------------------------------------------------------
 def verdict(needs):
@@ -260,15 +295,30 @@ def vexpect(name, needs, want):
     say(rc == want, "P6 %s: exit %d%s" % (name, rc, "" if rc == want else " (wanted %d) %s" % (want, text.strip()[-200:])))
 
 
-vexpect("a green full run, its legs output absent", run_of("full", SUITES, legs=""), 0)
+vexpect("a green all run, its legs output absent", run_of("all", SUITES, legs=""), 0)
+vexpect("a green full run, every suite on the merge legs", run_of("full", SUITES, legs=MERGE_LEGS), 0)
 vexpect("a green pr run of two suites", run_of("pr", ["mpx3-sound", "census"]), 0)
+vexpect("a green pr run of no suite (notes only)", run_of("pr", []), 0)
 vexpect("a noop run", run_of("noop", []), 0)
-vexpect("a chosen suite failed", run_of("full", SUITES, {"mpx1": {"result": "failure", "outputs": {}}}, legs=""), 1)
+vexpect("a green partial run, one suite on the pr leg", run_of("partial", ["census"]), 0)
+vexpect("a green partial run, one suite on every leg", run_of("partial", ["mpx3-tree"], legs=""), 0)
+vexpect("a chosen suite failed", run_of("all", SUITES, {"mpx1": {"result": "failure", "outputs": {}}}, legs=""), 1)
+vexpect("a chosen suite failed in the merge gate", run_of("full", SUITES, {"mpx5-jobs": {"result": "failure", "outputs": {}}}, legs=MERGE_LEGS), 1)
 vexpect("a chosen suite was skipped", run_of("pr", ["mpx3-sound"], {"mpx3-sound": {"result": "skipped", "outputs": {}}}), 1)
 vexpect("a chosen suite was cancelled", run_of("pr", ["mpx3-sound"], {"mpx3-sound": {"result": "cancelled", "outputs": {}}}), 1)
 vexpect("a suite ran unasked", run_of("pr", ["census"], {"mpx4-tcp": {"result": "success", "outputs": {}}}), 1)
 vexpect("the plan failed", {"plan": {"result": "failure", "outputs": {}}, "census": {"result": "skipped", "outputs": {}}}, 1)
 vexpect("the plan chose nothing readable", {"plan": {"result": "success", "outputs": {}}, "census": {"result": "skipped", "outputs": {}}}, 1)
+# tl29: the name says the shape.
+vexpect("a full run of one suite (px37's one-suite dispatch)", run_of("full", ["mpx3-tree"], legs=MERGE_LEGS), 1)
+vexpect("a full run on every leg (px37's full, now all)", run_of("full", SUITES, legs=""), 1)
+vexpect("an all run on the merge legs", run_of("all", SUITES, legs=MERGE_LEGS), 1)
+vexpect("an all run of every suite but one", run_of("all", SUITES[:-1], legs=""), 1)
+vexpect("a pr run on every leg", run_of("pr", ["census"], legs=""), 1)
+vexpect("a partial run of no suite", run_of("partial", [], legs=""), 1)
+vexpect("a partial run on legs no tier has", run_of("partial", ["census"], legs="--tier release --firmware uefi"), 1)
+vexpect("a noop run that chose a suite", run_of("noop", ["census"]), 1)
+vexpect("a tier the planner never names", run_of("release", SUITES, legs=""), 1)
 
 # --- P4 the wiring -------------------------------------------------------------------------
 wf = open(os.path.join(ROOT, ".github/workflows/ci.yml")).read()
@@ -302,6 +352,66 @@ say(group is not None and group.group(1).rstrip().endswith("|| format('ci-{0}-{1
 say(re.search(r"^  push:\n    branches: \[trunk\]", wf, re.M) is not None, "P4 a push to trunk runs")
 say(re.search(r"^  schedule:\n(\s+#.*\n)*\s+- cron: ", wf, re.M) is not None, "P4 the nightly runs")
 say("types: [opened, synchronize, reopened, labeled]" in wf, "P4 adding a label starts a run")
+say(re.search(r'^      tier:\n        description: .*\n        type: choice\n        options: \[all, full, pr\]\n        default: all\n', wf, re.M) is not None
+    and "IN_TIER: ${{ inputs.tier }}" in blocks["plan"], "P4 the dispatch's tier input is all, full or pr, all by default, and the plan reads it")
+red = re.findall(r"^      - name: a red nightly opens an issue\n        if: (.*)\n((?:        .*\n)+)", blocks["tier"], re.M)
+say(len(red) == 1 and red[0][0] == "failure() && github.event_name == 'schedule'" and "        run: tools/nightly-red\n" in red[0][1]
+    and "GH_TOKEN: ${{ github.token }}" in red[0][1] and "WORKFLOW: ${{ github.workflow }}" in red[0][1]
+    and blocks["tier"].index("tools/ci-plan --verdict") < blocks["tier"].index("tools/nightly-red"),
+    "P4 a red nightly, and only a nightly, runs tools/nightly-red, after the verdict")
+perms = re.search(r"^    permissions:\n((?:      .*\n)+)", blocks["tier"], re.M)
+say(perms is not None and sorted(perms.group(1).split()) == sorted(["contents:", "read", "issues:", "write"])
+    and wf.count("issues: write") == 1 and re.search(r"^permissions:\n  contents: read\n", wf, re.M) is not None,
+    "P4 the tier job alone may write issues; the workflow's token reads contents")
+
+# --- P7 the red nightly's issue (tl29) ------------------------------------------------------
+FAKE_GH = r'''#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_LOG"
+case "$1 $2" in
+  "label create") exit "${FAKE_LABEL_RC:-0}" ;;
+  "issue list") printf '%s' "${FAKE_EXISTING:-}"; [ -n "${FAKE_EXISTING:-}" ] && echo; exit 0 ;;
+esac
+exit 0
+'''
+
+
+def nightly_red(existing="", label_rc=0, unset=False):
+    d = tempfile.mkdtemp(prefix="ci-plan-gh-")
+    try:
+        with open(os.path.join(d, "gh"), "w") as f:
+            f.write(FAKE_GH)
+        os.chmod(os.path.join(d, "gh"), 0o755)
+        log = os.path.join(d, "log")
+        env = dict(os.environ, PATH=d + os.pathsep + os.environ.get("PATH", ""), FAKE_LOG=log, FAKE_EXISTING=existing,
+                   FAKE_LABEL_RC=str(label_rc), REPO="wolffe-lang/pax", WORKFLOW="ci",
+                   RUN_URL="https://github.com/wolffe-lang/pax/actions/runs/1")
+        if unset:
+            for k in ("REPO", "WORKFLOW", "RUN_URL"):
+                env.pop(k)
+        r = subprocess.run(["bash", NIGHTLY_RED], capture_output=True, text=True, env=env)
+        calls = open(log).read().splitlines() if os.path.exists(log) else []
+        return r.returncode, calls
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+TITLE = "nightly red: ci on trunk"
+rc, calls = nightly_red()
+creates = [c for c in calls if c.startswith("issue create")]
+say(rc == 0 and len(creates) == 1 and "--title %s" % TITLE in creates[0] and "--label nightly-red" in creates[0]
+    and "actions/runs/1" in creates[0] and not [c for c in calls if c.startswith("issue comment")],
+    "P7 no open issue: one is opened, labelled nightly-red, titled '%s', naming the run" % TITLE)
+lists = [c for c in calls if c.startswith("issue list")]
+say(len(lists) == 1 and "--state open" in lists[0] and "--label nightly-red" in lists[0] and TITLE in lists[0],
+    "P7 the dedupe asks for an open nightly-red issue under the title")
+rc, calls = nightly_red(existing="41")
+say(rc == 0 and [c for c in calls if c.startswith("issue comment 41 ")] and not [c for c in calls if c.startswith("issue create")],
+    "P7 an open issue of the title: a comment on it, no new issue")
+rc, calls = nightly_red(label_rc=1)
+say(rc == 0 and [c for c in calls if c.startswith("issue create")], "P7 a label that already exists is no failure")
+rc, calls = nightly_red(unset=True)
+say(rc != 0 and not calls, "P7 the script refuses to run without REPO, WORKFLOW and RUN_URL, and calls nothing")
+say(re.search(r"^name: ci$", wf, re.M) is not None, "P7 the workflow's name is ci, the title's")
 
 # --- P5 every tracked path is known --------------------------------------------------------
 try:
