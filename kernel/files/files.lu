@@ -31,7 +31,9 @@
 //! links to `/proc/self/fd/0`, `1` and `2` (px52, pax#83: 0777, root's,
 //! 15 bytes, as a distribution's boot and a container runtime make them
 //! on Linux; devtmpfs alone has none), so a walk through one goes on
-//! through the caller's own descriptor (-ENOENT when it is closed), and
+//! through the caller's own descriptor (-ENOENT when it is closed);
+//! px55 (pax#88): `/dev/fd` beside them is a link to `/proc/self/fd`
+//! (13 bytes), so `/dev/fd/N` is the caller's descriptor N; and
 //! `/dev/null`
 //! reads end-of-file and swallows writes; `/dev/tty0` and
 //! `/dev/console` (px21a) open the console itself, whatever descriptors
@@ -48,7 +50,7 @@
 //! but `/proc/self/exe` (px26: `readlink` answers the path the program
 //! was loaded from; there is no `/proc` beside it), and none can be
 //! made (px36: the tree's own links; px50: `/proc/<pid>/fd`'s entries,
-//! below; px52: `/dev/std*`). `openat` creates, truncates and opens for writing; `write`,
+//! below; px52: `/dev/std*`; px55: `/dev/fd`). `openat` creates, truncates and opens for writing; `write`,
 //! `pwrite64`, `ftruncate`, `mkdir`, `rmdir`, `unlink` and `rename`
 //! change the tree (px27, below); a hard link, a change of mode, owner
 //! or times are refused by name.
@@ -298,6 +300,7 @@ const T_DEV: u64 = 2
 const T_CONSOLE: u64 = 4 // the reference: 0 the console as 0-2 name it, TTY0, CONSOLE
 const T_NULL: u64 = 5
 const T_STD: u64 = 6 // /dev/stdin, stdout, stderr: the reference is 0, 1, 2; px52: links to /proc/self/fd/N
+const FD_LINK: u64 = 3 // px55 (pax#88): T_STD's reference for /dev/fd, a link to /proc/self/fd
 const T_PIPE: u64 = 7 // px17: a pipe; the reference its record
 const T_SOCK: u64 = 8 // px17: a socketpair's end; the reference rx << 16 | tx (px34; << 8 before)
 const T_INET: u64 = 9 // px22: an AF_INET socket; the reference kernel/udp's number
@@ -3103,6 +3106,9 @@ fn child_named(d: u64, s: u64, n: u64) -> u64 {
         if comp_is(s, n, "stderr") {
             return (T_STD << T_SHIFT) | 2
         }
+        if comp_is(s, n, "fd") {
+            return (T_STD << T_SHIFT) | FD_LINK // px55
+        }
         if comp_is(s, n, "null") {
             return T_NULL << T_SHIFT
         }
@@ -3210,21 +3216,24 @@ fn walk_who(a: u64, who: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool, fo
 }
 
 /// px52: whether node `c` is a symbolic link: the tree's (px36), or
-/// `/dev/stdin`, `stdout`, `stderr` (pax#83).
+/// `/dev/stdin`, `stdout`, `stderr` (pax#83); px55: and `/dev/fd`
+/// (pax#88).
 fn is_link_node(c: u64) -> bool {
     !is_err(c) && ((ty(c) == T_INO && tree.is_link(rf(c))) || ty(c) == T_STD)
 }
 
 /// px52: the length of link `c`'s target: the tree's, or 15 for
-/// `/proc/self/fd/N`.
+/// `/proc/self/fd/N`; px55: 13 for `/dev/fd`'s `/proc/self/fd`.
 fn link_bytes(c: u64) -> u64 {
     if ty(c) == T_STD {
-        return 15
+        return if rf(c) == FD_LINK { 13 } else { 15 }
     }
     tree.bytes(rf(c))
 }
 
-/// px52: link `c`'s target's first `k` bytes to kernel address `dst`.
+/// px52: link `c`'s target's first `k` bytes to kernel address `dst`
+/// (px55: `/dev/fd`'s `k` is at most its 13, so neither the last `/` nor
+/// a digit is written).
 fn link_target(c: u64, dst: u64, k: u64) {
     if ty(c) != T_STD {
         let _n = tree.target(rf(c), dst, k)
@@ -5591,7 +5600,7 @@ fn n_size(n: u64) -> u64 {
         return tree.size(rf(n))
     }
     if ty(n) == T_STD {
-        return 15 // px52: `/proc/self/fd/N`
+        return link_bytes(n) // px52: `/proc/self/fd/N`; px55: `/dev/fd`'s 13
     }
     if ty(n) == T_SYN {
         // px50 (measured): a descriptor's link is 64 bytes, and fd/ is
@@ -5637,7 +5646,7 @@ fn n_ino(n: u64) -> u64 {
         return 0x15 + rf(n) // px45: /dev/tty 0x18, /dev/ttyS0 0x19
     }
     if t == T_STD {
-        return 0x1a + rf(n) // px52: /dev/stdin 0x1a to /dev/stderr 0x1c (they were the console's 3)
+        return 0x1a + rf(n) // px52: /dev/stdin 0x1a to /dev/stderr 0x1c (they were the console's 3); px55: /dev/fd 0x1d
     }
     if t == T_PIPE || t == T_SOCK {
         return 0x100 + (rf(n) & 0xff) // px17: one number per buffer
@@ -5901,22 +5910,22 @@ pub fn statx(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, sx: u64) -> u64
 /// `/dev`'s child number `k` (after "." and ".."): a node, or an error
 /// node past the last.
 fn dev_child(k: u64) -> u64 {
-    if k < 3 {
-        return (T_STD << T_SHIFT) | k
+    if k < 4 {
+        return (T_STD << T_SHIFT) | k // px55: and fd, after stderr
     }
-    if k == 3 {
+    if k == 4 {
         return T_NULL << T_SHIFT
     }
-    if k == 4 || k == 5 {
-        return (T_CONSOLE << T_SHIFT) | (k - 3) // px21a: tty0, console
+    if k == 5 || k == 6 {
+        return (T_CONSOLE << T_SHIFT) | (k - 4) // px21a: tty0, console
     }
-    if k >= 6 && k <= 9 {
-        return (T_NULL << T_SHIFT) | (k - 5) // px45: zero, full, random, urandom
+    if k >= 7 && k <= 10 {
+        return (T_NULL << T_SHIFT) | (k - 6) // px45: zero, full, random, urandom
     }
-    if k == 10 || k == 11 {
-        return (T_CONSOLE << T_SHIFT) | (k - 7) // px45: tty, ttyS0
+    if k == 11 || k == 12 {
+        return (T_CONSOLE << T_SHIFT) | (k - 8) // px45: tty, ttyS0
     }
-    if k == 12 && sound.up() {
+    if k == 13 && sound.up() {
         return T_DSP << T_SHIFT // px30: only with the device
     }
     err(ENOENT)
@@ -5946,6 +5955,9 @@ fn fixed_name(c: u64) -> str {
     if rf(c) == 1 {
         return "stdout"
     }
+    if rf(c) == FD_LINK {
+        return "fd" // px55
+    }
     "stderr"
 }
 
@@ -5969,6 +5981,9 @@ fn fixed_len(c: u64) -> u64 {
     if rf(c) == 0 {
         return 5
     }
+    if rf(c) == FD_LINK {
+        return 2 // px55: fd
+    }
     6
 }
 
@@ -5989,7 +6004,7 @@ fn d_type(c: u64) -> u64 {
         }
     }
     if ty(c) == T_STD {
-        return DT_LNK // px52: /dev/std*
+        return DT_LNK // px52: /dev/std*; px55: /dev/fd
     }
     if ty(c) == T_INO || ty(c) == T_SYN {
         return DT_REG
