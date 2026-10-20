@@ -27,12 +27,18 @@ after /srv is made root's, each line `PATH MODE UID GID` of FILE is
 given that owner, group and mode, as tools/mkinitramfs's `:MODE:UID:GID`
 gives them in PAX's image (tools/linux-tree's --owners).
 
-The free ports of one session are all different (px41, pax#53): each
-is read from a socket bound to port 0, and every socket is held until
-the last is read. Asked one at a time, each socket closed before the
-next, the kernel answers one port twice in about one session of six
-ports in a thousand; QEMU then refuses the second forward and ends.
-`tools/lobo-session --free-ports N ROUNDS` counts it (tests/
+The free ports of one session are all different (px41, pax#53): every
+socket is held until the last port is chosen. Asked one at a time, each
+socket closed before the next, the kernel answered one port twice in
+about one session of six ports in a thousand; QEMU then refuses the
+second forward and ends. px55 (pax#89): and none is a port of this
+host's ephemeral range (`ip_local_port_range`, ip(7)) or of IANA's
+dynamic range (49152 and up): px52's picker (pax#86), each port from
+20000 to 49151 outside them, probed by a bind. A socket bound to port 0,
+as this tool's picker was, lands in the ephemeral range by
+construction, where any other socket bound to port 0 on the host can
+take it between the probe and QEMU's bind (#86's race).
+`tools/lobo-session --free-ports N ROUNDS` counts both (tests/
 lobo-session-selftest W1).
 
 Steps, one a line (`#` comments). A line may start with `pax:` or
@@ -73,15 +79,43 @@ QEMU and the container are ended by their own pid and name, always.
 import argparse, glob, json, os, re, shutil, socket, subprocess, sys, threading, time
 
 
+def ephemeral():
+    """This host's ephemeral range (ip_local_port_range, ip(7))."""
+    try:
+        lo, hi = map(int, open("/proc/sys/net/ipv4/ip_local_port_range").read().split())
+        return lo, hi
+    except (OSError, ValueError):
+        return 32768, 60999
+
+
+rounds_asked = 0
+
+
 def free_ports(n):
     """n TCP ports free on 127.0.0.1 now, all different: every socket is
-    held until the last port is read (pax#53)."""
+    held until the last port is chosen (pax#53); px55 (pax#89): each from
+    20000 to 49151 outside this host's ephemeral range (px52's picker,
+    pax#86), never one a socket bound to port 0 could be given."""
+    global rounds_asked
+    lo, hi = ephemeral()
+    span = [q for q in range(20000, 49152) if not lo <= q <= hi]
+    i = (os.getpid() * 7919 + rounds_asked * 16 * n) % max(len(span), 1)
+    rounds_asked += 1
     socks = []
     try:
-        for _ in range(n):
+        for k in range(len(span)):
+            if len(socks) == n:
+                break
             s = socket.socket()
-            s.bind(("127.0.0.1", 0))
+            try:
+                s.bind(("127.0.0.1", span[(i + k) % len(span)]))
+            except OSError:
+                s.close()
+                continue
             socks.append(s)
+        if len(socks) < n:
+            print("lobo-session: fewer than %d TCP ports free from 20000 to 49151 outside this host's ephemeral range, %d-%d" % (n, lo, hi))
+            sys.exit(2)
         return [s.getsockname()[1] for s in socks]
     finally:
         for s in socks:
@@ -90,9 +124,15 @@ def free_ports(n):
 
 if len(sys.argv) == 4 and sys.argv[1] == "--free-ports":
     n_, rounds_ = int(sys.argv[2]), int(sys.argv[3])
-    twice = sum(1 for _ in range(rounds_) if len(set(free_ports(n_))) < n_)
-    print("%d rounds of %d ports, %d with a port twice" % (rounds_, n_, twice))
-    sys.exit(1 if twice else 0)
+    lo_, hi_ = ephemeral()
+    twice = inside = 0
+    for _ in range(rounds_):
+        got = free_ports(n_)
+        twice += len(set(got)) < n_
+        inside += any(lo_ <= q <= hi_ or q >= 49152 for q in got)
+    print("%d rounds of %d ports, %d with a port twice, %d with a port in the ephemeral range %d-%d or at 49152 and up"
+          % (rounds_, n_, twice, inside, lo_, hi_))
+    sys.exit(1 if twice or inside else 0)
 
 ap = argparse.ArgumentParser()
 g = ap.add_mutually_exclusive_group(required=True)
