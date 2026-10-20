@@ -348,7 +348,7 @@ px53's pins (the head adds `sig.pax` and words), each boot on four cpus of its o
   -2` now `limits 0` — Linux's answer on every row
   (`tests/mpx5-users.d/linux/sig.txt`): a process's `limits` is anyone's
   to read, and PAX serves it now; `sig.pax` (PAX's own text) moved with
-  it (`f2ac320`), and the suite again: §F's last line in
+  it (`a4f05f4`), and the suite again: §F's last line in
   `kasumi-regress.out`.
 - `tests/ci-plan`: 153 PASS (px53's count; no case added).
 - `tests/lobo-session-selftest`: W1 to W5 PASS (§B).
@@ -383,28 +383,32 @@ rows and recordings.
 
 ## 4. Evidence index
 
-Shas are this branch's after the rebase (`px55` on pax trunk `c8b48cb`,
-px53's merge); kasumi paths are under `~/lanes/px55/`. The first
-measurements were made before the rebase, on the branch then (its
-commits `0874251` to `c11c921`, kept on origin by the plant branches).
+Shas are this branch's after its last rebase (`px55` on pax trunk
+`ff0709b`, tl29's merge, which changed CI's tiers, `CLAUDE.md` and notes
+only); kasumi paths are under `~/lanes/px55/`. The first measurements
+were made before the rebase onto px53's merge, on the branch then (its
+commits `0874251` to `c11c921`, kept on origin by plants A, B, D and E);
+the runs at the head (§F) at `f045f69` and `fa12ab7`, the same code and
+tests rebased onto px53's merge `c8b48cb` before tl29's (kept on origin
+by plant C), which are `cb85dfe` and `b1b9ce4` here.
 
 ### What was written
 
-- The prediction: `bb1f153` (§1 to §3, before any change or
+- The prediction: `4f2b180` (§1 to §3, before any change or
   measurement; first pushed as `0874251`).
-- #88: `3783b3e` (`kernel/files`), `7622df3` (fdtab's rows), `19d0b33`
-  (the fds recordings), `c0c57a7` (J8's witness).
-- #94: `daddac4` (`kernel/procfs`), `62c167a` (`kernel/files`' lookups),
-  `ee78893` (the tree probe), `a1df318` (`proc.pax`, `probes-user.pax`),
-  `68dbbea` (`tests/mpx3-tree` T2), `f2ac320` (`sig.pax`).
-- #93: `3bf57dd` (`kernel/user`), `78e9ffe` (sigwolf), `f045f69`
-  (`tests/mpx5-jobs`' sigs rows), `fa12ab7` (the sigs recordings).
-- #89: `7d60a54` (`tests/mpx4-session`), `4cba0b8`, `a9195b2`
-  (`tools/lobo-session`), `d5788ed` (the selftest).
-- #91: `adf7822` (`tests/mpx4-ready`), `5a80aa8` (ci.yml's `ways`).
-- The words: `4d772be` (`kernel/README.md`), `62c04aa`
-  (`docs/SOURCES.md`), `8fc26a3` (README), `22adc1d` (CHANGELOG),
-  `86dc9cb` (`CLAUDE.md`'s plant line), and this note's evidence after it.
+- #88: `16fc718` (`kernel/files`), `6af901a` (fdtab's rows), `a9cfef6`
+  (the fds recordings), `256c32b` (J8's witness).
+- #94: `78e8da6` (`kernel/procfs`), `369c22e` (`kernel/files`' lookups),
+  `bf55132` (the tree probe), `9274bd0` (`proc.pax`, `probes-user.pax`),
+  `e4f4dc0` (`tests/mpx3-tree` T2), `a4f05f4` (`sig.pax`).
+- #93: `c02c627` (`kernel/user`), `a4c1b0a` (sigwolf), `cb85dfe`
+  (`tests/mpx5-jobs`' sigs rows), `b1b9ce4` (the sigs recordings).
+- #89: `7edc5ff` (`tests/mpx4-session`), `bbd8e0c`, `541dc9e`
+  (`tools/lobo-session`), `7755252` (the selftest).
+- #91: `4acfd64` (`tests/mpx4-ready`), `39c2d06` (ci.yml's `ways`).
+- The words: `04c085f` (`kernel/README.md`), `6bb2a06`
+  (`docs/SOURCES.md`), `dfb1a5e` (README), `8dd0443` (CHANGELOG),
+  `d9ecd1a` (`CLAUDE.md`'s plant line), and this note's evidence after it.
 - The scripts: `notes/px55/*.sh` (launch, build, boot, regress,
   vm-rec, vm-tree, picker-loop).
 
