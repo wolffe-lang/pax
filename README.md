@@ -8,6 +8,8 @@ Users (P5, px38 to px47): PAX has accounts, root, `pax` (1000) and the service a
 
 Job control (px48): process groups and sessions, the console as a controlling terminal (`TIOCSCTTY`, `TIOCNOTTY`, `TIOCGPGRP`, `TIOCSPGRP`, `TIOCGSID`), `kill` to a group, stops and continues and the waits that report them, Ctrl-C, Ctrl-\\ and Ctrl-Z for the console's foreground group only, the background rules (`SIGTTIN`, `TOSTOP`'s `SIGTTOU`), hangup and the orphaned group, and `/proc/<pid>/stat`, each measured against real Linux as root and as a user; a distribution's static Almquist shell (Ubuntu's `busybox-static`, `sh -i`) runs `sleep 100 &`, `jobs`, Ctrl-Z, `bg`, `fg`, `kill %2` and `wait` on PAX's console byte for byte as on Linux (`tests/mpx5-jobs`). The image's shell, pid 1, leads its session with the console as its terminal, as a getty would give it on Linux.
 
+lope on PAX (px54, ruling #91 R4): lope, the directory jumper in wolf (the maintainer's gump ported and renamed; `user/lope.pin`, `tools/mklope`), is preinstalled as `/bin/lope`, and the console shell runs its hook before its first prompt: `/etc/pax-run` starts it as `/bin/env ENV=/etc/shrc /bin/sh -i -m`, and `/etc/shrc` (`user/shrc`) is `eval "$(lope init pelt)"`, run by pelt as POSIX's `$ENV` file, with pelt at `90d7c64` (sh21: `command_not_found_handle`). So `cd` records each directory, a word that names no command jumps to the directory lope knows by it (`etc` alone lands in `/etc`), `g -` goes back, `g` goes home and `gi` offers a numbered menu (PAX has no fzf); a typed session of all of it is byte-identical to the same binaries in a Linux container, as root and as `pax`, with no kernel change (`tests/mpx5-lope`). Every call lope makes is one PAX already served. **lope's store lives in memory**: `$HOME/.local/share/lope/store` (`/.local/share/lope/store` for root, whose `HOME` is `/`) in PAX's in-memory tree, kept while the machine runs and gone at reboot until PAX has storage. lope's repository is private for now, so pax's CI checks it out with the org's token.
+
 Exec from the tree, and `#!` (px56): `execve` and `execveat` run any program of the tree its mode allows — copied, written, rewritten in place or unlinked while open since boot — with the mode rule and every refusal (ETXTBSY included) as Linux answers; `#!` interpreter lines as Linux reads them (one argument, the script's path appended, five deep), and ENOEXEC for a file with neither, so pelt runs a script with no `#!` itself: the maintainer's `echo 'echo hi' > Script/greet.sh; chmod +x Script/greet.sh; ./Script/greet.sh` prints `hi` on PAX, as root and as `pax`, byte for byte as on real Linux under QEMU and in a container (`tests/mpx5-jobs`' execs image).
 
 The small fixes, two (px55): `/dev/fd` as Linux's link to `/proc/self/fd` (`readlink`, `lstat`, the listing, `ls -l /dev/fd/` and `cat /dev/fd/0`'s rows, as root and as `pax`, byte-identical to real Linux under QEMU and a container: `tests/mpx5-jobs`' fds image); `prlimit64`'s core limit soft 0 and hard unlimited, as Linux boots (PAX writes no core); `/proc/self/limits` (and `/proc/<pid>/limits`) in Linux's layout with PAX's values from the one table `prlimit64` reads, and `/proc/sys/kernel/core_pattern` reading `core` (`tests/mpx3-tree`'s tree probe: the layout held to Linux, the values to PAX's own text); mpx4-session's and lobo-session's host ports picked outside the ephemeral range (#86's race, in two more places); and mpx4-ready booting every way whatever an earlier one did, each its own verdict, with a CI dispatch that names its ways (`ways`).
@@ -44,7 +46,9 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
               tunes/ (its note files); net/ (px22: the eight UDP
               witnesses, C; px23: the eight TCP ones, C, and two in
               wolf) and mpx4-udp*.run, mpx4-tcp*.run (the commands
-              tests/mpx4-udp and tests/mpx4-tcp run)
+              tests/mpx4-udp and tests/mpx4-tcp run); lope.pin and
+              shrc (px54: lope, preinstalled, and the console shell's
+              $ENV file, its hook)
     tools/    the harness: fetch-limine, fetch-wolf, fetch-lupin,
               build-stub, build-kernel, mkimage, qemu-run, qemu-halt
               (--type: a typed session, px13; --no-screen, px19; --qemu, px18),
@@ -64,13 +68,14 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
               end of QEMU's network for TCP), mkprobes (px26, px27: the
               static C probes), linux-tree (px27: a session's Linux
               side in a throwaway container, its root a tmpfs: for
-              programs that remove files)
+              programs that remove files), mklope (px54: lope static,
+              from a clone of its private tree)
     font/     the screen's font (px19): Spleen 8x16, BSD-2-Clause, with
               its licence
     tests/    scripted QEMU tests: proof, mkw (with M-KW's frozen kernels
               in mkw.d/), mpx1, mpx2-frames, mpx2-paging, mpx2-interrupts,
               mpx2-sched, mpx3-user, mpx3-loader, mpx3-boreutils, mpx3-console,
-              mpx3-screen, mpx3-speaker (px18), mpx3-threads (px26), mpx3-tree (px27), mpx3-sound (px30), mpx4-net (px20, px21), mpx4-udp (px22), mpx4-tcp (px23), gdb-attach,
+              mpx3-screen, mpx3-speaker (px18), mpx3-threads (px26), mpx3-tree (px27), mpx3-sound (px30), mpx4-net (px20, px21), mpx4-udp (px22), mpx4-tcp (px23), mpx5-lope (px54), gdb-attach,
               expect-serial-selftest
     docs/     BOOT.md (the boot protocol, argued), SOURCES.md (the
               consulted-sources log), ABI notes as they come
