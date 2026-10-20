@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# mksigwolf — build sigwolf (user/sigwolf/sigwolf.lu, px53: what wolf
+# 0.2.33 asks of PAX), a probe in wolf, as a fully static x86-64 Linux
+# executable.
+#
+#   tools/mksigwolf OUTDIR
+#
+# tools/mksu's shape, with the probe's own toolchain file: the wolf
+# release archive user/sigwolf/wolf-toolchain.toml names for
+# x86_64-unknown-linux-gnu, by its sha256 (refused on a mismatch, and on
+# a `--version` that is not the file's `version_line`), and wolf-std at
+# the commit it names (`WOLF_STD`). So the probe is built by the wolf it
+# probes whatever the kernel's pin is. Built as su is (`wolf build
+# --release --deny-warnings`), through a `cc` first on PATH that adds
+# `-static`: a static glibc executable, ET_EXEC, no PT_INTERP, checked
+# (readelf); `OUTDIR/sums.txt` gets `sigwolf <sha256> <bytes>`.
+#
+# Build on a baseline x86-64 glibc (the CI runner's Ubuntu; an Ubuntu
+# container on kasumi), never on kasumi's CachyOS x86-64-v4 glibc (px10).
+# The release tier needs clang at run time (wolf's D33). Exit 0, or 2 on
+# a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mksigwolf OUTDIR"
+out=$1
+need git curl tar readelf cc clang
+mkdir -p "$out" "$PAX_CACHE"
+out=$(cd "$out" && pwd)
+
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-sigwolf.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+
+toml=$PAX_ROOT/user/sigwolf/wolf-toolchain.toml
+key() { # section key
+    awk -v s="[$1]" -v k="$2" '
+        /^\[/ { on = ($0 == s); next }
+        on && $1 == k { v = $0; sub(/^[^=]*= *"?/, "", v); sub(/"? *$/, "", v); print v; exit }' "$toml"
+}
+wv=$(key wolf version)
+wsha=$(key wolf x86_64-unknown-linux-gnu)
+wline=$(key wolf version_line)
+srepo=$(key std repo)
+srev=$(key std rev)
+[ -n "$wv" ] && [ -n "$wsha" ] && [ -n "$srepo" ] && [ -n "$srev" ] \
+    || die "cannot read wolf version/digest and std repo/rev from $toml"
+say "sigwolf pins wolf $wv (${wsha:0:8}…), wolf-std $srev"
+
+# wolf, by the digest the file names (cached by digest).
+arc=$PAX_CACHE/wolf-$wv-$wsha.tar.gz
+if [ ! -f "$arc" ] || [ "$(sha256_of "$arc")" != "$wsha" ]; then
+    curl -sSfL --retry 3 -o "$arc.part" \
+        "https://github.com/wolffe-lang/wolf-lang/releases/download/v$wv/wolf-$wv-x86_64-unknown-linux-gnu.tar.gz" \
+        || die "cannot download wolf $wv"
+    mv "$arc.part" "$arc"
+fi
+[ "$(sha256_of "$arc")" = "$wsha" ] || die "wolf $wv archive: sha256 $(sha256_of "$arc"), sigwolf pins $wsha"
+mkdir -p "$w/wolf"
+tar -xzf "$arc" -C "$w/wolf" --strip-components=1
+wolf=$w/wolf/wolf
+have=$("$wolf" --version | head -n 1)
+[ "$have" = "$wline" ] || die "wolf --version says '$have'; sigwolf pins '$wline'"
+say "$have"
+
+# wolf-std at the commit the file names.
+mkdir -p "$w/stdrepo"
+git -C "$w/stdrepo" init -q
+git -C "$w/stdrepo" fetch -q --depth 1 "https://github.com/${srepo}" "$srev" || die "cannot fetch $srepo at $srev"
+git -C "$w/stdrepo" checkout -q --detach FETCH_HEAD
+[ "$(git -C "$w/stdrepo" rev-parse HEAD)" = "$srev" ] || die "$srepo: HEAD is not $srev"
+std=$w/stdrepo/std
+[ -d "$std" ] || die "wolf-std $srev has no std/"
+
+# The static `cc`.
+mkdir -p "$w/bin" "$w/src"
+real=$(command -v cc)
+printf '#!/bin/sh\nexec %s -static "$@"\n' "$real" > "$w/bin/cc"
+chmod +x "$w/bin/cc"
+cp "$PAX_ROOT/user/sigwolf/sigwolf.lu" "$w/src/sigwolf.lu"
+
+: > "$out/sums.txt"
+(cd "$w/src" && PATH="$w/bin:$PATH" WOLF_STD=$std \
+    "$wolf" build --release --no-cache --deny-warnings sigwolf.lu -o "$out/sigwolf") >&2 \
+    || die "wolf build of user/sigwolf/sigwolf.lu"
+readelf -hW "$out/sigwolf" | grep -Eq 'Type: +EXEC' || die "sigwolf is not ET_EXEC"
+! readelf -lW "$out/sigwolf" | grep -q INTERP || die "sigwolf has a PT_INTERP (not static)"
+printf '%s %s %s\n' sigwolf "$(sha256_of "$out/sigwolf")" "$(wc -c < "$out/sigwolf" | tr -d ' ')" | tee -a "$out/sums.txt"
+printf 'linked against: %s\n' "$("$real" -print-file-name=libc.a)"
