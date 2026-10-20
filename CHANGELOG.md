@@ -7,6 +7,21 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The small fixes, two (px55).** `/dev/fd` is a symbolic link to
+  `/proc/self/fd` beside the three `/dev/std*` (pax#88), measured on
+  real Linux under QEMU and in a container as root and as a user
+  (`user/elf/fdtab.c`). `prlimit64` answers `RLIMIT_CORE` soft 0, hard
+  unlimited, as Linux boots (pax#93): PAX writes no core and sets no
+  wait status's core bit. `/proc/self/limits` and `/proc/<pid>/limits`
+  print PAX's limits in Linux's layout from the same table, and
+  `/proc/sys/kernel/core_pattern` reads `core` (pax#94; the tree probe's
+  `proc:` section). mpx4-session's and lobo-session's host ports are
+  picked outside the host's ephemeral range (pax#89), as the network
+  suites' have been since px52. `tests/mpx4-ready` boots every way
+  whatever an earlier one did, each with its own verdict, and CI's
+  `workflow_dispatch` takes `ways` (its `PAX_READY_WAYS`), so a later
+  way's or leg's red is seen (pax#91).
+
 - **The pins at 0.2.33 (px53).** The kernel builds from wolf 0.2.33
   (`kernel/wolf.pin`; lupin 0.1.54 unchanged) and `su` from 0.2.33 /
   wolf-std `cceda63` (`user/su/wolf-toolchain.toml`), with no source
