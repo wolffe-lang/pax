@@ -66,6 +66,16 @@
 # prints what it found and what it left. Nothing else of the host's
 # /proc/sys is written: fs.protected_* are the host's, read and printed.
 #
+# **No core reaches the host** (px53). A container shares its host's
+# kernel.core_pattern; kasumi's and CI's runner's pipe cores to a
+# program on the host, and an engine's default RLIMIT_CORE is unlimited,
+# so a program under test that dies of SEGV (sigwolf's children,
+# timeout's command) would hand the host a core to store. The container
+# runs with `--ulimit core=0:0`: the host's program is still started
+# (core(5): a piped pattern dumps whatever the limit says, and the
+# status carries the core bit) and, given a limit of 0, stores none
+# (kasumi: `coredumpctl` lists such ends with no core file).
+#
 # The engine: PAX_ENGINE, else docker when there is one, else podman.
 # Exit 0 when the session ran (whatever the program's status), 1 when
 # it did not, 2 on a usage or tool error.
@@ -215,7 +225,7 @@ chmod -R a+rwX /x
 exit $rc
 EOF
 rc=0
-"$engine" run --rm --network none --privileged -v "$stage:/x" "$image" sh /x/run.sh "$size" >&2 || rc=$?
+"$engine" run --rm --network none --privileged --ulimit core=0:0 -v "$stage:/x" "$image" sh /x/run.sh "$size" >&2 || rc=$?
 if [ -n "$runlist" ]; then
     [ -d "$stage/runs" ] || { say "the container ran no run list (engine $engine, image $image, exit $rc)"; exit 1; }
     mkdir -p "$out"
