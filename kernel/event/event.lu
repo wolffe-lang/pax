@@ -204,7 +204,9 @@ pub fn ev_semaphore(v: u64) -> bool {
 /// holds zero after; a semaphore (px52) 1, and it holds one less.
 pub fn ev_take(v: u64) -> u64 {
     let x = vw(v, V_VALUE)
-    let took: u64 = if vw(v, V_USE) == 2 { 1 } else { x }
+    // px55 PLANT B (never to merge; px52's plant B again): a semaphore's
+    // read takes the whole counter, as a plain counter's does.
+    let took: u64 = x
     put_vw(v, V_VALUE, x - took)
     put_vw(v, V_TAKES, vw(v, V_TAKES) + 1)
     took
