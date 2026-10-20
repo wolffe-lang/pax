@@ -4,6 +4,7 @@
 L=$HOME/lanes/px54
 t=$1; shift
 cd $L || exit 2
+rm -f $L/out/$t.rc $L/out/$t.pid  # a tag used again: no stale status
 setsid -f bash -c 'echo $$ > "$0/out/$1.pid"; shift 2; "$@"; echo $? > "'"$L/out/$t.rc"'"' "$L" "$t" x "$@" > $L/out/$t.out 2>&1 < /dev/null
 sleep 1
 echo "$t: pid $(cat $L/out/$t.pid)"
