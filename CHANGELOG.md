@@ -7,6 +7,21 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The pins at 0.2.33 (px53).** The kernel builds from wolf 0.2.33
+  (`kernel/wolf.pin`; lupin 0.1.54 unchanged) and `su` from 0.2.33 /
+  wolf-std `cceda63` (`user/su/wolf-toolchain.toml`), with no source
+  change. boreutils moves to `cc64f68` (bu28: the four refusals
+  retired, the group send as one signal, `kill -L`'s row 0) and pelt to
+  `be1a75d` (sh19). `user/console/groups.keys` gains bu28's rows
+  (`timeout -s SEGV`, `-s RTMIN`, `-s 16`, a command dead of SEGV and of
+  RTMIN, `kill -L 0`), and mpx5-jobs a `sigs` image (J11): `user/sigwolf`,
+  a wolf probe of 0.2.33's five signal calls and `text(0)`, built by its
+  own pin (`tools/mksigwolf`), each held byte-identical to real Linux
+  under QEMU as root and as `pax`. `tools/linux-tree` runs its container
+  with `RLIMIT_CORE` 0, so no core reaches the host; where the host's
+  `core_pattern` pipes (kasumi, CI's runner) its core line and the
+  probe's core rows are named the host's in the container's comparisons.
+
 - **The small fixes (px52).** `eventfd2` serves EFD_SEMAPHORE (pax#82):
   a read takes 1 and leaves the rest, the waits, `poll`, epoll and the
   top as a counter's, fdinfo's `eventfd-semaphore: 1`; refused by name
