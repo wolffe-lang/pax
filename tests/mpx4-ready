@@ -8,7 +8,7 @@
 # byte-identical to the same binaries on Linux.
 #
 #   tests/mpx4-ready [--images DIR | --no-boot] [--progs DIR] [--soak N]
-#                    [--deadline SECONDS] [--stall SECONDS] [--keep-going]
+#                    [--deadline SECONDS] [--stall SECONDS] [--keep-going | --fail-fast]
 #                    [--firmware bios|uefi|both] [--tier native|release|both]
 #                    [--accel auto|kvm|tcg] [--ways "none peer user"]
 #
@@ -100,10 +100,19 @@
 # as it grows); when its serial log has not grown for --stall seconds
 # (240, and four times that through QEMU's user-mode network, whose
 # soak is slow and silent: a command that waits for something that will
-# never come). After
-# a boot that failed no further boot is started (--keep-going boots them
-# all), and none is started once --deadline seconds (2400) have passed
-# since the first.
+# never come). px55 (pax#91): every boot is started whatever an earlier
+# one did (px52's plant B, run 39302273238, was red at its first way and
+# hid the rest), and each ends with its own verdict, `mpx4-ready: <tier>
+# <leg> <way>: PASS` or `FAIL (<the assertions that failed>)`, again
+# together before the suite's own; none is started once --deadline
+# seconds (2400) have passed since the first. --fail-fast starts no boot
+# after one that failed (the rule before px55, for a quick run by hand);
+# --keep-going is the default.
+#
+# **A subset.** PAX_READY_WAYS names the ways to boot (px55, pax#91: CI's
+# `workflow_dispatch` passes its `ways` input, empty on every other event
+# and there every way), as --ways does: a way that is not none, peer or
+# user is refused (exit 2), and the run says it is a subset.
 #
 # --images DIR boots what this script built earlier (DIR holds
 # <tier>/kmain_sockets.elf, <tier>/kmain_sockets-{peer,user,none}.iso,
@@ -122,8 +131,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 grep() { command grep -a "$@"; }
 
-images= legs=both tiers=both noboot=0 accel=auto progs= soak=10000 deadline=2400 stall=240 keep=0 ways="none peer user"
-usage="usage: tests/mpx4-ready [--images DIR | --no-boot] [--progs DIR] [--soak N] [--deadline SECONDS] [--stall SECONDS] [--keep-going] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg] [--ways \"none peer user\"]"
+images= legs=both tiers=both noboot=0 accel=auto progs= soak=10000 deadline=2400 stall=240 keep=1 ways="none peer user"
+usage="usage: tests/mpx4-ready [--images DIR | --no-boot] [--progs DIR] [--soak N] [--deadline SECONDS] [--stall SECONDS] [--keep-going | --fail-fast] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg] [--ways \"none peer user\"]"
 while [ $# -gt 0 ]; do
     case $1 in
         --images)   images=$2; shift 2 ;;
@@ -132,7 +141,8 @@ while [ $# -gt 0 ]; do
         --soak)     soak=$2; shift 2 ;;
         --deadline) deadline=$2; shift 2 ;;
         --stall)    stall=$2; shift 2 ;;
-        --keep-going) keep=1; shift ;;
+        --keep-going) keep=1; shift ;; # px55: the default
+        --fail-fast) keep=0; shift ;;
         --firmware) legs=$2; shift 2 ;;
         --tier)     tiers=$2; shift 2 ;;
         --accel)    accel=$2; shift 2 ;;
@@ -142,6 +152,17 @@ while [ $# -gt 0 ]; do
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+# px55 (pax#91): the ways, by --ways or a dispatch's PAX_READY_WAYS.
+subset=
+if [ -n "${PAX_READY_WAYS:-}" ]; then
+    ways=$(echo $PAX_READY_WAYS)
+    subset=" (a subset, PAX_READY_WAYS: $ways)"
+fi
+for w in $ways; do
+    case $w in none|peer|user) ;; *) die "a way '$w' is not one of: none peer user" ;; esac
+done
+[ -n "$(echo $ways)" ] || die "no way to boot"
+[ -z "$subset" ] || say "ways: $ways (PAX_READY_WAYS: a subset of the suite's ways, not its verdict)"
 
 k=kmain_sockets
 PROGS="nbprobe pollprobe epollprobe evprobe restprobe epollecho pair waitwolf"
@@ -149,8 +170,9 @@ MEM=1024M
 work=$PAX_BUILD/mpx4-ready
 runs=$PAX_BUILD/mpx4-ready-runs.txt
 MAC=52:54:00:12:34:56
-fail=0 ran=0
-bad() { say "FAIL $*"; fail=1; }
+fail=0 ran=0 bfail=
+# px55: a boot's failed assertions (bfail), for its own verdict.
+bad() { say "FAIL $*"; fail=1; bfail+=" ${1%% *}"; }
 need nm python3
 
 static_ok() { # file -> reason on failure
@@ -628,6 +650,7 @@ PY
 
 mkdir -p "$PAX_BUILD"
 : > "$runs"
+verdicts=()
 
 for leg in $legs; do
     if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
@@ -640,12 +663,19 @@ for leg in $legs; do
     fi
     for tier in $tiers; do
         for way in $ways; do
+            bfail=
             one "$tier" "$leg" "$way"
+            # px55 (pax#91): each boot its own verdict.
+            if [ -z "$bfail" ]; then v="$tier $leg $way: PASS"
+            else v="$tier $leg $way: FAIL ($(printf '%s\n' $bfail | awk '!seen[$0]++' | paste -sd' ' -))"; fi
+            verdicts+=("$v")
+            say "$v"
         done
     done
 done
 cat "$runs"
 say "elapsed: $((SECONDS - started)) s of a deadline of $deadline"
+for v in ${verdicts[@]+"${verdicts[@]}"}; do say "verdict $v"; done
 [ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
-[ "$fail" = 0 ] && say "mpx4-ready: PASS" || say "mpx4-ready: FAIL"
+[ "$fail" = 0 ] && say "mpx4-ready: PASS$subset" || say "mpx4-ready: FAIL$subset"
 exit "$fail"
