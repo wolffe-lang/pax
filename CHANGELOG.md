@@ -7,6 +7,23 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **lope on PAX (px54, ruling #91 R4).** lope (`user/lope.pin`: lope
+  `5ac37df`, lp00; `tools/mklope`, `tools/mkpelt`'s shape, from
+  `PAX_LOPE_REPO` since lope is private) is preinstalled as `/bin/lope`,
+  and pelt moves to `90d7c64` (sh21: `command_not_found_handle` in the
+  current shell, interactive only). The console shell runs lope's hook
+  before its first prompt: `/bin/env ENV=/etc/shrc /bin/sh -i -m`, with
+  `/etc/shrc` (`user/shrc`) `eval "$(lope init pelt)"`. A new suite,
+  `tests/mpx5-lope`, types `cd`, `lope list`, a bare word that jumps,
+  `g -`, `g`, `gi`'s numbered menu, real commands, a word with no match
+  (127) and a second shell reading the store the first wrote, as root and
+  as `pax`, each byte-identical to the same binaries in a Linux container
+  (L1) and each row held as its own witness (L2, L3). No kernel change:
+  lope's 23 calls on Linux are all ones PAX serves (`set_robust_list` and
+  `rseq` -ENOSYS, as for every static glibc program). The store is in
+  PAX's in-memory tree, gone at reboot. CI checks lope out with the org's
+  `WOLF_CI_TOKEN` and says so by name when the token is absent.
+
 - **Exec from the tree, and `#!` (px56).** `execve` loads any file of
   the tree its mode allows (pax#95): a program copied, written,
   rewritten in place or unlinked while open since boot runs, read
