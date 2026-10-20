@@ -827,3 +827,22 @@ kernels: none consulted.
 | man-pages `signal(7)`, `sigaction(2)`, `kill(2)`, `tgkill(2)`, `sigprocmask(2)`, `wait4(2)`, `core(5)`, `getrlimit(2)`, `proc_pid_stat(5)`, `proc_pid_status(5)`, `timeout(1)`, `kill(1)` | man-pages 6.19 (kasumi) | GPL-compatible documentation | read | what each row should answer; `core(5)`: a pattern that pipes is given a core whatever `RLIMIT_CORE` says |
 | black-box Linux 7.2.8-1-cachyos (kasumi's own kernel image `f4c00d5d…` under QEMU 11.1.1, `notes/px50/vmjob.c` as pid 1, the shell or the probe on a fresh pseudo-terminal as its session leader; the suite's own pjobs and sigs archives) | — | GPL-2.0 (a program we run) | run, never read: the 26 pjobs sessions (the same bytes as px51's), groups with bu28's rows, sigs, each as root and as 1000:1000, recorded twice, the same bytes; and `cat /proc/self/limits` and `core_pattern` typed there (`RLIMIT_CORE` soft 0, hard unlimited; `core`) | `tests/mpx5-jobs.d/linux/groups*`, `sigs*`, `notes/px53/linux-limits.txt` |
 | rootless podman on kasumi (`px13-ubuntu`, `--ulimit core=0:0`), CI's Docker | — | — | run: the user sessions (`tools/linux-tree`); the host's `systemd-coredump` lists their ends with no core file stored | J0, J3; `notes/px53/kasumi-corestore.txt` |
+## px55: the small fixes, two (/dev/fd, the port pickers, mpx4-ready's ways, the core limit, /proc/self/limits and core_pattern)
+
+No kernel's source was read or searched for, Linux's above all, nor any
+libc's, shell's, container runtime's, init system's or QEMU's (ruling
+#22). Every rule the kernel follows is a row Linux answered: `fdtab`'s
+`/dev/fd` rows on real root's guest and in a container (`tests/mpx5-jobs`
+J8, J3); the tree probe's `proc:` section in a container
+(`tests/mpx3-tree` T1) and on real root's guest (Linux's boot values:
+`notes/px55/`). Where the prediction and the measurement parted, the
+measurement decided and the note says so. Permissively licensed kernels:
+none consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| man-pages `proc(5)` (`/proc/pid/limits`, `/proc/sys/kernel/core_pattern`), `proc_pid_fd(5)`, `core(5)`, `getrlimit(2)`/`prlimit(2)`, `symlink(7)`, `path_resolution(7)`, `readlink(2)`, `lstat(2)`, `open(2)`, `getdents64(2)`, `ip(7)` (`ip_local_port_range`), `bind(2)` | man-pages 6.x | GPL-compatible documentation | the author's own knowledge (no page opened in this lane); no row rests on them alone: each is measured | `kernel/files`, `kernel/procfs`, `kernel/user`; the port pickers |
+| uapi `asm-generic/resource.h`: the sixteen `RLIMIT_*` numbers (`RLIMIT_STACK` 3, `RLIMIT_CORE` 4, `RLIMIT_NOFILE` 7, `RLIM_NLIMITS` 16) and `RLIM_INFINITY` | — | GPL-2.0 WITH Linux-syscall-note | the author's own knowledge, confirmed black-box (the limits file's rows in that order, each `getrlimit`'s) | `procfs.rlimit` |
+| black-box Linux 7.2.8-1-cachyos under QEMU 11.1.1 (kasumi's own kernel image `f4c00d5d…`, `notes/px52/vmjob.c` as pid 1: devtmpfs, then `/dev/fd` and the three `/dev/std*` made; the suite's own archives) | — | GPL-2.0 (a program we run) | run, never read: `fdtab` as root and as 1000:1000, recorded twice, the same bytes; the tree probe as root and as 1000:1000 for its `proc:` section | `tests/mpx5-jobs.d/linux/fds*.tty`; `notes/px55/` (the boot's limits and core pattern) |
+| rootless podman on kasumi (`px13-ubuntu`), CI's Docker | — | — | run: `fdtab` as a user (`tools/linux-tree --rdev --nsproc --sys`), the tree probe as root and a user, the port pickers' loop (`--network none`) | J0, J3; mpx3-tree T1; #89's loop |
+| GitHub Actions' `workflow_dispatch` inputs (documentation) | — | — | the author's own knowledge | ci.yml's `ways` (pax#91) |
