@@ -806,3 +806,24 @@ Permissively licensed kernels: none consulted.
 | kasumi's own `/dev` (CachyOS, systemd's boot) and a rootless podman container's (`px13-ubuntu`): `ls -l`, `stat -c`, `readlink` of `/dev/stdin`, `stdout`, `stderr`, `fd` | — | (programs we run) | read, black-box | which links a Linux system has (§C) |
 | QEMU's documentation of `-netdev user` (`hostfwd`); QEMU 8.2.2's own line in CI's artifact 12120719249 (push run 39086412018) | — | GPL-2.0 (a program we run) | read; black-box | §D (pax#86) |
 | GitHub Actions' `workflow_dispatch` inputs (documentation) | — | — | the author's own knowledge | ci.yml's `jobs_boots` (pax#85) |
+
+## px53: the pins at 0.2.33 (wolf, boreutils' retired refusals, pelt's leak and `cd`; the new calls)
+
+No kernel's source was read or searched for, Linux's above all, nor any
+libc's, shell's, `kill`'s or `timeout`'s, nor `systemd-coredump`'s
+(ruling #22). No kernel code changed: the lane moves pins and measures.
+Every row is the org's own binaries at PAX's console and at real Linux
+under QEMU (and, for `pax`'s rows, in a container); what a host's
+`core_pattern` decides is named as the host's, never loosened into the
+comparison (notes/px53-the-pins-0233.md). Permissively licensed
+kernels: none consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| wolf 0.2.33 (`v0.2.33` at `85dab5d7`, release 417610226) and lupin 0.1.54 (`v0.1.54` at `0e536e8`, release 415937354), the linux x86-64 archives `4f955e8d…` and `175df238…`; wolf-std `cceda63` | the org's own | the org's own | fetched by digest, read twice (the release API, then `sha256sum` of the download on kasumi) | `kernel/wolf.pin`, `user/su/wolf-toolchain.toml`, `user/sigwolf/wolf-toolchain.toml` |
+| wolf-lang `v0.2.33`: `CHANGELOG.md`, spec `11-os.md` (`[os.signal.disp.one]`, `[os.signal.exit]`, `[os.proc.status]`, `[os.proc.poll]`, `[os.signal.text]`, `[os.signal.gaps.note]`), `crates/wolf_rt/src/task/stack.rs` (the stack guard: a SENT SEGV by `si_code` ≤ 0), s246's fixtures `crates/wolf_driver/tests/fixtures/signal_gaps/` | the org's own | the org's own | read, as the org's own code and specification | what the five calls ask of a kernel; `user/sigwolf/sigwolf.lu`'s modes (s246's `exit_by.lu`, `group_fault.lu`, `core.lu` in the probe's own shape) |
+| boreutils `cc64f68` (bu28): `notes/bu28-the-retired-refusals.md`, `notes/bu28/ev/static-digests.txt`, `notes/bu28/ev/straces.log` | the org's own | the org's own | read, as recorded runs of the org's own binaries | which calls `timeout` and `kill` now make; the groups session's rows; the digests held |
+| pelt `be1a75d` (sh19, tl28): `notes/sh19-the-leak-and-the-ci.md` | the org's own | the org's own | read | the static digest held; which sessions `cd`'s join could move (none) |
+| man-pages `signal(7)`, `sigaction(2)`, `kill(2)`, `tgkill(2)`, `sigprocmask(2)`, `wait4(2)`, `core(5)`, `getrlimit(2)`, `proc_pid_stat(5)`, `proc_pid_status(5)`, `timeout(1)`, `kill(1)` | man-pages 6.19 (kasumi) | GPL-compatible documentation | read | what each row should answer; `core(5)`: a pattern that pipes is given a core whatever `RLIMIT_CORE` says |
+| black-box Linux 7.2.8-1-cachyos (kasumi's own kernel image `f4c00d5d…` under QEMU 11.1.1, `notes/px50/vmjob.c` as pid 1, the shell or the probe on a fresh pseudo-terminal as its session leader; the suite's own pjobs and sigs archives) | — | GPL-2.0 (a program we run) | run, never read: the 26 pjobs sessions (the same bytes as px51's), groups with bu28's rows, sigs, each as root and as 1000:1000, recorded twice, the same bytes; and `cat /proc/self/limits` and `core_pattern` typed there (`RLIMIT_CORE` soft 0, hard unlimited; `core`) | `tests/mpx5-jobs.d/linux/groups*`, `sigs*`, `notes/px53/linux-limits.txt` |
+| rootless podman on kasumi (`px13-ubuntu`, `--ulimit core=0:0`), CI's Docker | — | — | run: the user sessions (`tools/linux-tree`); the host's `systemd-coredump` lists their ends with no core file stored | J0, J3; `notes/px53/kasumi-corestore.txt` |
