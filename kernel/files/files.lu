@@ -3112,9 +3112,7 @@ fn child_named(d: u64, s: u64, n: u64) -> u64 {
         if comp_is(s, n, "stderr") {
             return (T_STD << T_SHIFT) | 2
         }
-        if comp_is(s, n, "fd") {
-            return (T_STD << T_SHIFT) | FD_LINK // px55
-        }
+        // px55 PLANT A (never to merge): /dev/fd gone again (pax#88).
         if comp_is(s, n, "null") {
             return T_NULL << T_SHIFT
         }
@@ -5916,22 +5914,23 @@ pub fn statx(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, sx: u64) -> u64
 /// `/dev`'s child number `k` (after "." and ".."): a node, or an error
 /// node past the last.
 fn dev_child(k: u64) -> u64 {
-    if k < 4 {
-        return (T_STD << T_SHIFT) | k // px55: and fd, after stderr
+    // px55 PLANT A (never to merge): /dev/fd not listed (trunk's listing)
+    if k < 3 {
+        return (T_STD << T_SHIFT) | k
     }
-    if k == 4 {
+    if k == 3 {
         return T_NULL << T_SHIFT
     }
-    if k == 5 || k == 6 {
-        return (T_CONSOLE << T_SHIFT) | (k - 4) // px21a: tty0, console
+    if k == 4 || k == 5 {
+        return (T_CONSOLE << T_SHIFT) | (k - 3) // px21a: tty0, console
     }
-    if k >= 7 && k <= 10 {
-        return (T_NULL << T_SHIFT) | (k - 6) // px45: zero, full, random, urandom
+    if k >= 6 && k <= 9 {
+        return (T_NULL << T_SHIFT) | (k - 5) // px45: zero, full, random, urandom
     }
-    if k == 11 || k == 12 {
-        return (T_CONSOLE << T_SHIFT) | (k - 8) // px45: tty, ttyS0
+    if k == 10 || k == 11 {
+        return (T_CONSOLE << T_SHIFT) | (k - 7) // px45: tty, ttyS0
     }
-    if k == 13 && sound.up() {
+    if k == 12 && sound.up() {
         return T_DSP << T_SHIFT // px30: only with the device
     }
     err(ENOENT)
