@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# mklope — build lope, the directory jumper in wolf (wolffe-lang/lope,
+# ruling #91: gump ported; R4: preinstalled on PAX), as a fully static
+# x86-64 Linux executable, unmodified, from lope's own tree (px54).
+#
+#   tools/mklope OUTDIR
+#
+# tools/mkpelt's shape. The tree is user/lope.pin's commit of
+# wolffe-lang/lope. lope is PRIVATE (this repository is public), so the
+# tree is fetched from PAX_LOPE_REPO when it is set — a local clone or
+# checkout that holds the commit (CI's checkout of lope with the org's
+# token; a clone made from a bundle on kasumi) — and from LOPE_REPO
+# otherwise, which needs git credentials that can read it. Nothing of
+# lope's tree is kept: the build directory is removed at the end. The
+# toolchain is the one THAT tree pins in its wolf-toolchain.toml: the
+# wolf release archive for x86_64-unknown-linux-gnu by its sha256
+# (refused on a mismatch, and on a `--version` that is not its
+# `version_line`), and wolf-std at the commit it names (`WOLF_STD`).
+# lope is built as its own tools/build --static builds it (`wolf build
+# --release --no-cache --deny-warnings src/lope.lu`, through a `cc`
+# first on PATH that adds `-static`), so the binary is a static glibc
+# executable: ET_EXEC, no PT_INTERP, checked (readelf); `OUTDIR/sums.txt`
+# gets `lope <sha256> <bytes>`.
+#
+# Build on a baseline x86-64 glibc (the CI runner's Ubuntu; an Ubuntu
+# container on kasumi), never on kasumi's CachyOS x86-64-v4 glibc (px10).
+# The release tier needs clang at run time (wolf's D33). Exit 0, or 2 on
+# a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mklope OUTDIR"
+out=$1
+need git curl tar readelf cc clang
+. "$PAX_ROOT/user/lope.pin"
+mkdir -p "$out" "$PAX_CACHE"
+out=$(cd "$out" && pwd)
+
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-lope.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+
+tree() { # repo rev dir
+    mkdir -p "$3"
+    git -C "$3" init -q
+    git -C "$3" fetch -q --depth 1 "$1" "$2" || die "cannot fetch $1 at $2 (lope is private: set PAX_LOPE_REPO to a clone that holds it)"
+    git -C "$3" checkout -q --detach FETCH_HEAD
+    [ "$(git -C "$3" rev-parse HEAD)" = "$2" ] || die "$1: HEAD is not $2"
+}
+
+# lope at the pin, and what it pins.
+src=${PAX_LOPE_REPO:-$LOPE_REPO}
+tree "$src" "$LOPE_REV" "$w/lope"
+toml=$w/lope/wolf-toolchain.toml
+key() { # section key
+    awk -v s="[$1]" -v k="$2" '
+        /^\[/ { on = ($0 == s); next }
+        on && $1 == k { v = $0; sub(/^[^=]*= *"?/, "", v); sub(/"? *$/, "", v); print v; exit }' "$toml"
+}
+wv=$(key wolf version)
+wsha=$(key wolf x86_64-unknown-linux-gnu)
+wline=$(key wolf version_line)
+srepo=$(key std repo)
+srev=$(key std rev)
+[ -n "$wv" ] && [ -n "$wsha" ] && [ -n "$srepo" ] && [ -n "$srev" ] \
+    || die "cannot read wolf version/digest and std repo/rev from lope's wolf-toolchain.toml"
+say "lope $LOPE_REV pins wolf $wv (${wsha:0:8}…), wolf-std $srev"
+
+# wolf, by the digest lope names (cached by digest).
+arc=$PAX_CACHE/wolf-$wv-$wsha.tar.gz
+if [ ! -f "$arc" ] || [ "$(sha256_of "$arc")" != "$wsha" ]; then
+    curl -sSfL --retry 3 -o "$arc.part" \
+        "https://github.com/wolffe-lang/wolf-lang/releases/download/v$wv/wolf-$wv-x86_64-unknown-linux-gnu.tar.gz" \
+        || die "cannot download wolf $wv"
+    mv "$arc.part" "$arc"
+fi
+[ "$(sha256_of "$arc")" = "$wsha" ] || die "wolf $wv archive: sha256 $(sha256_of "$arc"), lope pins $wsha"
+mkdir -p "$w/wolf"
+tar -xzf "$arc" -C "$w/wolf" --strip-components=1
+wolf=$w/wolf/wolf
+have=$("$wolf" --version | head -n 1)
+[ "$have" = "$wline" ] || die "wolf --version says '$have'; lope pins '$wline'"
+say "$have"
+
+# wolf-std at the commit lope names.
+tree "https://github.com/${srepo}" "$srev" "$w/stdrepo"
+std=$w/stdrepo/std
+[ -d "$std" ] || die "wolf-std $srev has no std/"
+
+# The static `cc`.
+mkdir -p "$w/bin"
+real=$(command -v cc)
+printf '#!/bin/sh\nexec %s -static "$@"\n' "$real" > "$w/bin/cc"
+chmod +x "$w/bin/cc"
+
+: > "$out/sums.txt"
+(cd "$w/lope" && PATH="$w/bin:$PATH" WOLF_STD=$std \
+    "$wolf" build --release --no-cache --deny-warnings src/lope.lu -o "$out/lope") >&2 \
+    || die "wolf build of src/lope.lu"
+readelf -hW "$out/lope" | grep -Eq 'Type: +EXEC' || die "lope is not ET_EXEC"
+! readelf -lW "$out/lope" | grep -q INTERP || die "lope has a PT_INTERP (not static)"
+"$out/lope" --version >&2 || die "lope --version"
+printf '%s %s %s\n' lope "$(sha256_of "$out/lope")" "$(wc -c < "$out/lope" | tr -d ' ')" | tee -a "$out/sums.txt"
+printf 'linked against: %s\n' "$("$real" -print-file-name=libc.a)"
