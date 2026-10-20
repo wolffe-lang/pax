@@ -2574,6 +2574,16 @@ jobs:
           echo "lope $LOPE_REV ($LOPE_REPO)"
           echo "rev=$LOPE_REV" >> "$GITHUB_OUTPUT"
 
+      - name: the token lope's checkout needs (absence is failure)
+        env:
+          TOKEN: ${{ secrets.WOLF_CI_TOKEN }}
+        run: |
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::error title=No WOLF_CI_TOKEN for lope::wolffe-lang/lope is private and this repository public, so this job checks lope out with the org's WOLF_CI_TOKEN, which this run does not have. A red job on purpose: a skip would leave lope's gate unrun under a green mark (lobo's acquire-toolchain lesson). Grant pax the secret with read access to wolffe-lang/lope, or make lope public and fetch it as pelt is fetched."
+            exit 1
+          fi
+          echo "WOLF_CI_TOKEN present"
+
       - name: lope at the pin (private; the org's WOLF_CI_TOKEN; absence is failure)
         uses: actions/checkout@v4
         with:
