@@ -12,6 +12,10 @@
  * 1, 2 (pax#83): readlink, lstat, statx without following, the
  * listing's type, and stat and open through each with its descriptor a
  * file, a directory, a pipe's end, a socket, closed, or another's file.
+ * px55 (pax#88): /dev/fd, the link to /proc/self/fd beside them:
+ * readlink, lstat, statx without following, the listing's type, what it
+ * names followed, `ls -l /dev/fd/`'s listing, `cat /dev/fd/0`, and the
+ * names that are no open descriptor's.
  * Run as the first program on a terminal (PAX's
  * console; a Linux pseudo-terminal as its session leader, notes/px50's
  * guest and tools/linux-tree), as root and as a user (through `as`),
@@ -29,7 +33,8 @@
  * proc_pid_fdinfo(5), readlink(2), open(2), stat(2), statx(2),
  * getdents64(2), ptrace(2), prctl(2), pipe(7), socket(7), unix(7),
  * eventfd(2), epoll_create(2), rmdir(2), rename(2); px52: symlink(7),
- * path_resolution(7), lstat(2), readdir(3)) and the uapi
+ * path_resolution(7), lstat(2), readdir(3); px55: proc_pid_fd(5)'s
+ * /dev/fd) and the uapi
  * headers' numbers. No C library's or kernel's source was read.
  * Written for this lane. */
 #define _GNU_SOURCE
@@ -1021,6 +1026,118 @@ static void std_rows(void) {
     unlink("/g/n1");
 }
 
+/* ---- N: /dev/fd (px55, pax#88) --------------------------------------- */
+
+static void fd_link_rows(void) {
+    struct statx x;
+    errno = 0;
+    int sx = statx(AT_FDCWD, "/dev/fd", AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS, &x);
+    char xs[80];
+    if (sx < 0) snprintf(xs, sizeof xs, "%s", ename(errno));
+    else snprintf(xs, sizeof xs, "%s size %llu", perm(x.stx_mode), (unsigned long long)x.stx_size);
+    out("N: /dev/fd: readlink %s; %s; statx AT_SYMLINK_NOFOLLOW %s; in /dev's listing %s", lnk("/dev/fd", -1), lst("/dev/fd"), xs, dev_type("fd"));
+
+    /* Followed: the reader's own /proc/self/fd, the very node. */
+    struct stat a, b, c;
+    errno = 0;
+    int ta = stat("/dev/fd", &a);
+    int eta = errno;
+    int tb = stat("/proc/self/fd", &b);
+    int tc = stat("/dev/fd/", &c);
+    int same = ta == 0 && tb == 0 && a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_mode == b.st_mode && a.st_uid == b.st_uid;
+    int same2 = tc == 0 && tb == 0 && c.st_dev == b.st_dev && c.st_ino == b.st_ino;
+    char st[40];
+    snprintf(st, sizeof st, "%s", ta == 0 ? perm(a.st_mode) : ename(eta));
+    errno = 0;
+    int g = open("/dev/fd", O_RDONLY | O_NOFOLLOW);
+    int eg = errno;
+    if (g >= 0) close(g);
+    errno = 0;
+    int h = open("/dev/fd", O_RDONLY | O_NOFOLLOW | O_DIRECTORY);
+    int eh = errno;
+    if (h >= 0) close(h);
+    out("N: /dev/fd followed: stat %s, the reader's own: %s, the node /proc/self/fd is: %s; /dev/fd/ the same: %s; opened O_NOFOLLOW %s, O_NOFOLLOW|O_DIRECTORY %s",
+        st, yesno(ta == 0 && a.st_uid == geteuid()), yesno(same), yesno(same2), rv(g, eg), rv(h, eh));
+
+    /* ls -l /dev/fd/: in a child with 0 1 2 open, the listing's own
+     * descriptor 3; each entry's type, and its link as /proc/self/fd/N's. */
+    pid_t k = fork();
+    if (k == 0) {
+        for (int i = 3; i < 1024; i++) close(i);
+        char l[400] = "";
+        size_t n = 0;
+        int agree = 1, entries = 0;
+        errno = 0;
+        DIR *d = opendir("/dev/fd/");
+        if (!d) { out("N: /dev/fd/ listed: %s", ename(errno)); _exit(0); }
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            const char *t = e->d_type == DT_LNK ? "l" : e->d_type == DT_DIR ? "d" : e->d_type == DT_UNKNOWN ? "?" : "o";
+            n += (size_t)snprintf(l + n, sizeof l > n ? sizeof l - n : 0, "%s%s(%s)", n ? " " : "", e->d_name, t);
+            if (e->d_name[0] == '.') continue;
+            entries++;
+            char p1[300], p2[300], b1[256], b2[256];
+            snprintf(p1, sizeof p1, "/dev/fd/%s", e->d_name);
+            snprintf(p2, sizeof p2, "/proc/self/fd/%s", e->d_name);
+            ssize_t r1 = readlink(p1, b1, sizeof b1 - 1), r2 = readlink(p2, b2, sizeof b2 - 1);
+            if (r1 < 0 || r2 < 0 || r1 != r2 || memcmp(b1, b2, (size_t)r1) != 0) agree = 0;
+        }
+        closedir(d);
+        out("N: /dev/fd/ listed with 0 1 2 open: %s; %d entries, each one's readlink /proc/self/fd/N's: %s; lstat of /dev/fd/0 %s",
+            l, entries, yesno(agree), lst("/dev/fd/0"));
+        _exit(0);
+    }
+    waitpid(k, 0, 0);
+
+    /* cat /dev/fd/0: descriptor 0 a file at offset 3. */
+    put("/g/n0", "abcdef\n");
+    int f = open("/g/n0", O_RDONLY);
+    lseek(f, 3, SEEK_SET);
+    swap_in(0, f);
+    char th[200];
+    snprintf(th, sizeof th, "%s", through("/dev/fd/0", 0));
+    errno = 0;
+    g = open("/dev/fd/0", O_RDONLY);
+    eg = errno;
+    char r3[8] = {0};
+    ssize_t r = g < 0 ? -1 : read(g, r3, 3);
+    long off0 = (long)lseek(0, 0, SEEK_CUR);
+    swap_out(0);
+    out("N: descriptor 0 a file at offset 3: /dev/fd/0 %s; open /dev/fd/0 O_RDONLY %s, read 3 \"%.*s\", descriptor 0 still at %ld", th, rv(g, eg), r > 0 ? (int)r : 0, r3, off0);
+    if (g >= 0) close(g);
+    close(f);
+    unlink("/g/n0");
+
+    /* Names that are no open descriptor's. */
+    struct stat s9;
+    errno = 0;
+    g = open("/dev/fd/9", O_RDONLY);
+    eg = errno;
+    if (g >= 0) close(g);
+    errno = 0;
+    int l9 = lstat("/dev/fd/9", &s9);
+    int el9 = errno;
+    errno = 0;
+    h = open("/dev/fd/00", O_RDONLY);
+    eh = errno;
+    if (h >= 0) close(h);
+    out("N: /dev/fd/9 (not open): open %s, lstat %s; /dev/fd/00: open %s", rv(g, eg), rv(l9, el9), rv(h, eh));
+
+    /* Descriptor 0 closed. */
+    saved_std[0] = dup(0);
+    close(0);
+    errno = 0;
+    g = open("/dev/fd/0", O_RDONLY);
+    eg = errno;
+    if (g >= 0) close(g);
+    errno = 0;
+    int t0 = stat("/dev/fd/0", &s9);
+    int et0 = errno;
+    dup2(saved_std[0], 0);
+    close(saved_std[0]);
+    out("N: descriptor 0 closed: open /dev/fd/0 %s, stat %s", rv(g, eg), rv(t0, et0));
+}
+
 int main(void) {
     root = geteuid() == 0;
     out("fdtab: px50's probe, as %s", root ? "root" : "a user");
@@ -1031,6 +1148,7 @@ int main(void) {
     perm_rows();
     mount_rows();
     std_rows();
+    fd_link_rows();
     out("fdtab: done");
     return 0;
 }
