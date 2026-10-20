@@ -1,4 +1,4 @@
-# tools/ci-tiers.map — which CI suites a changed path can affect (px37, px40).
+# tools/ci-tiers.map — which CI suites a changed path can affect (px37, px40, tl29).
 #
 # Read by tools/ci-plan, proven by tests/ci-plan. One rule a line:
 #
@@ -7,8 +7,10 @@
 # GLOB is a repository path matched with fnmatch (`*` crosses `/`).
 # A TARGET is a suite (a job of .github/workflows/ci.yml), a group
 # (`@name`, defined by a `@name = suite...` line), or one of:
-#   FULL  the full tier: every suite, every leg (native and release,
-#         BIOS and UEFI), whatever else changed;
+#   FULL  the all tier: every suite, every leg (native and release,
+#         BIOS and UEFI), whatever else changed, the `full-matrix` label
+#         included (the name is px37's, when that tier was called full;
+#         tl29 gave `full` to the merge gate, every suite on native BIOS);
 #   ALL   every suite, on the pull-request leg;
 #   NONE  nothing runs for this path (prose that no test reads).
 # Every rule a path matches applies (the union), FULL wins. Beside these
@@ -26,8 +28,8 @@
 # A change that breaks the BUILD shows up in any suite, because each one
 # compiles the whole package; a change that breaks BEHAVIOUR shows up in
 # the suites that run the code, and those are the targets below. The
-# full tier, before every merge, on every trunk push and nightly, runs
-# all of them on every leg.
+# merge gate (`tier full`, the label) runs all of them on native BIOS,
+# and every trunk push and nightly (`tier all`) on every leg (tl29).
 
 @user    = mpx3-user mpx3-loader mpx3-boreutils mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-speaker mpx3-sound mpx3-orchestra mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix mpx4-lobo mpx5-users mpx5-accounts mpx5-jobs
 @net     = mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix mpx4-lobo mpx5-jobs
@@ -48,7 +50,7 @@ boot/start.S                    FULL
 boot/kernel.ld                  FULL
 # --- the kernel's core: every suite on the pull-request leg (px40, ruling #76)
 # Every suite runs this code, so every suite runs; the other three legs
-# (release, UEFI) are the labelled full run's, before the merge.
+# (release, UEFI) are the trunk push's and the nightly's (tl29).
 boot/io.S                       ALL
 boot/cpu.S                      ALL
 boot/isr.S                      ALL
@@ -81,11 +83,12 @@ tools/qemu-fault                FULL
 tools/expect-serial             FULL
 
 # --- CI itself: every suite on the pull-request leg --------------------------
-# (the merge rule's labelled full run covers the other legs before merge)
+# (the other legs: the trunk push's all run, after the merge, tl29)
 .github/*                       ALL
 tools/ci-plan                   ALL
 tools/ci-tiers.map              ALL
 tests/ci-plan                   ALL
+tools/nightly-red               ALL
 
 # --- user mode: processes, files, signals, the tree, readiness --------------
 kernel/user/*                   @user
