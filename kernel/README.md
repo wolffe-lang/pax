@@ -1,6 +1,6 @@
 # kernel/
 
-The wolf kernel: first light (px01, M-PX1), physical frames (px02), paging (px03), interrupts (kw10), preemptive kernel threads (px07), the heap (px06) and user mode (px09, below), on the wolf 0.2.33 release archive (px05 moved pax to the archive at 0.2.23; px07 to 0.2.24 for kw11's atomics; px10 to 0.2.25; px16 to 0.2.26; px21a to 0.2.27 for the ambient pair; px36 to 0.2.28; px51 to 0.2.32; px53 to 0.2.33, with no source change). `kmain.lu` brings up COM1,
+The wolf kernel: first light (px01, M-PX1), physical frames (px02), paging (px03), interrupts (kw10), preemptive kernel threads (px07), the heap (px06) and user mode (px09, below), on the wolf 0.2.33 release archive (px05 moved pax to the archive at 0.2.23; px07 to 0.2.24 for kw11's atomics; px10 to 0.2.25; px16 to 0.2.26; px21a to 0.2.27 for the ambient pair; px36 to 0.2.28; px51 to 0.2.32; px53 to 0.2.33, with no source change and no section's size moved: notes/px53-the-pins-0233.md §J). `kmain.lu` brings up COM1,
 reads what Limine handed it and prints one line each — the banner, the
 UART, the bootloader and base revision, the firmware, a memory-map
 summary, the HHDM offset, the frame allocator's totals — switches to its own
