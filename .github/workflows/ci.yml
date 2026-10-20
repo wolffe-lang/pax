@@ -88,6 +88,10 @@ on:
         description: "mpx5-jobs only (px52, pax#85): its boots, as PAX_JOBS_BOOTS (e.g. 'pjobs:serial groups:serial'); empty: every boot"
         type: string
         default: ""
+      ways:
+        description: "mpx4-ready only (px55, pax#91): its ways, as PAX_READY_WAYS (e.g. 'peer user'); empty: every way"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -1905,7 +1909,9 @@ jobs:
   # tools/linux-net --ready on a tap device. After every command the
   # kernel's books: no epoll object, registration, eventfd, descriptor,
   # control block or frame left. A boot that stalls is stopped after 240
-  # seconds, and none starts 40 minutes after the first.
+  # seconds, and none starts 40 minutes after the first. px55 (pax#91):
+  # every way boots whatever an earlier one did, each its own verdict, so
+  # a later way's or leg's red is seen; a dispatch's `ways` names a subset.
   mpx4-ready:
     needs: plan
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-ready')
@@ -1952,6 +1958,9 @@ jobs:
       - name: readiness, the plan's legs (all four in the all tier)
         env:
           PAX_REQUIRE_UEFI: "1"
+          # px55 (pax#91): a dispatch's `ways` (empty on every other event:
+          # every way).
+          PAX_READY_WAYS: ${{ inputs.ways }}
         run: tests/mpx4-ready $PAX_LEGS
 
       - name: keep the programs' sums, the Linux side, the transcripts, the captures
