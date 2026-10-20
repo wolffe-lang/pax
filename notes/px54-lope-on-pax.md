@@ -185,3 +185,15 @@ reason, never a skip). Not known before the first run: whether that
 secret reaches pax and reads lope. If it does not, `mpx5-lope` is red by
 name and a ruling is asked (the secret granted to pax, or lope made
 public); nothing is routed around.
+
+**P6, by row** (added after the first boot, before either plant ran;
+the rows are tests/mpx5-lope's L2 and L3). **A**: L2 red at `etc`, `g -`,
+`g`, `gi`'s menu and the second shell's `bin`; green at `ls` (the
+built-in `cd /bin` still moved the shell), `true` and `zzqqxx`; L3 red
+at both store rows; L4 green. The menu's digit becomes a command line
+of its own (`2: not found`), so every later step is typed a prompt
+early: L1 may then part from the container's on type-ahead echo, a
+plant's noise. **B**: L2 red at `etc`, `g`, `gi`'s menu and `bin` (each
+`cd` and `g` prints lope's I/O error between its lines), green at `g
+-` (`/bin` printed before the hook's error), `ls`, `true` and
+`zzqqxx`; L3 red at both; L4 green; L1 as A's.
