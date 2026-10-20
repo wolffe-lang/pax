@@ -870,3 +870,23 @@ consulted.
 | black-box Linux 7.2.8-1-cachyos under QEMU 11.1.1 (kasumi's own kernel image `f4c00d5d…`, `notes/px52/vmjob.c` as pid 1, unchanged; the suite's own execs archive) | — | GPL-2.0 (a program we run) | run, never read: the probe as root and as 1000:1000 and the typed session as both, recorded twice, the same bytes | `tests/mpx5-jobs.d/linux/execs*.tty`, `xsh*.tty`; `notes/px56/kasumi-recordings-twice.out` |
 | rootless podman on kasumi (`px13-ubuntu`), CI's Docker | — | — | run: the user's probe and session (`tools/linux-tree --rdev --nsproc --owners`) | J0, J3 |
 | PAX trunk `241b322`'s loader (the archive's contiguous read) | the project's own | — | run: the speed of 780 fork–exec–wait rounds against the tree's | `notes/px56/kasumi-speed.txt`: the fast case not kept |
+
+## px54: lope on PAX (ruling #91 R4; the pelt hook)
+
+No kernel's source was read or searched for, Linux's above all, nor any
+libc's or shell's, nor any jumper's or matcher's (nucleo, fzf, skim,
+zoxide, autojump, z, fasd; ruling #91 R3). No kernel code changed: the
+lane adds a program, a start-up file and a suite, and measures. Every
+row is the org's own binaries at PAX's console and in a Linux container
+(notes/px54-lope-on-pax.md). Permissively licensed kernels: none
+consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| lope `5ac37df` (lp00; the maintainer's, private): `src/cmd/init.lu`, `src/db/paths.lu`, `src/db/store.lu`, `shell/pelt/*.sh`, `shell/posix/menu.sh`, `tools/build`, `tools/mkstatic`, `wolf-toolchain.toml`, `notes/lp00-the-port.md` | the org's own | GPL-3.0 + the wolf Training Data Permission | read and cited, as the maintainer's code; built, never copied into pax | `tools/mklope`, `user/lope.pin`, the hook's shape, where the store is, the session's rows |
+| pelt `90d7c64` (sh21): `src/sh/interact.lu`'s `run_env_file` (`$ENV`), `notes/sh21-the-hook.md` | the org's own | the org's own | read | how the console shell runs `/etc/shrc`; what the handler does |
+| wolf 0.2.33 (`4f955e8d…`, lope's) and 0.2.32 (`4c37f9c5…`, pelt's), the linux x86-64 release archives; wolf-std `cceda63` and `d37c911` | the org's own | the org's own | fetched by digest, the release API read twice | lope's and pelt's static builds |
+| POSIX.1-2024 XCU 2.5.3 (`ENV`), 2.9.1 (command search), `cd` (`cd -` writes the new directory), `read`, `env` | 2024 | (a standard) | the author's own knowledge | the hook line and what each row should show |
+| `strace(1)` 6.8 (as documentation and as a black box) in `localhost/px13-ubuntu` on kasumi | — | (a program we run) | run on lope's own runs, never read | lope's 23 calls (notes/px54/census/) |
+| black-box Linux 7.2.8-1-cachyos: rootless podman on kasumi (`px13-ubuntu`), CI's Docker | — | (programs we run) | run: the typed session on a pseudo-terminal, root and 1000:1000 (`tools/linux-tree`) | L1's reference |
+| lobo's `.github/actions/acquire-toolchain/action.yml` (the org's) | the org's own | the org's own | read | the org's way of reading a private sibling in CI (`WOLF_CI_TOKEN`, absence is failure) |
