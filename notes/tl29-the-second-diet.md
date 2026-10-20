@@ -242,3 +242,76 @@ its own proof (`tests/ci-plan`) change together, as every lane that moved
 the planner has done (px37, px40, px51, px53), because the contract's
 change is the planner's and a planner whose proof still asserts the old
 shape fails its own plan job. No suite script or assertion of PAX moves.
+
+**R-tl29-3 (asked; recommended: no change, implemented).** The kernel's
+core (px40, ruling #76) runs every suite on the pr leg on the grounds
+that "the labelled full run before merge covers the rest"; after tl29 the
+label covers native BIOS only. Of the core, `kernel/frames`,
+`kernel/paging` and `kernel/boot_info` read the bootloader's memory map,
+which UEFI's firmware draws differently from SeaBIOS's, so they are the
+one place an a priori case for UEFI before the merge is strong. The data
+has no such red (§4), and the trunk push runs UEFI within the hour; three
+lines in the map (`FULL` for those three) would buy it back at every push
+of a lane touching them. Recommended: leave the map as px40 ruled it.
+
+## 6. Evidence
+
+**The change, seen red in CI.** Branch `tl29-plant` (`7bc24ef`, never
+merged) plants two breaks over this branch's `42e361f`: `MERGE_LEGS = ""`
+in `tools/ci-plan` (the label buys every leg again, the gate before
+tl29) and `tools/nightly-red` without its dedupe (`existing=""`: every red
+night a new issue). Predicted, and seen locally first: exactly eight
+checks of `tests/ci-plan` red. The plant's run, `gh workflow run ci -r
+tl29-plant -f tier=pr -f suites=census` (`tier partial` by its own name;
+the plan job runs `tests/ci-plan` first): **run 39480009836**, the `plan`
+job 118825808930 failed at `the planner can say no (tests/ci-plan)` on
+exactly the eight —
+
+    ci-plan: FAIL P1 a dispatch, tier full: the merge gate: full (legs '', wanted '--tier native --firmware bios')
+    ci-plan: FAIL P1 a pull request labelled full-matrix, notes only: every suite, the merge legs: full (legs '', wanted '--tier native --firmware bios')
+    ci-plan: FAIL P1 the full-matrix label added: full (legs '', wanted '--tier native --firmware bios')
+    ci-plan: FAIL P1 the label beside a core change: every suite, the merge legs: full (legs '', wanted '--tier native --firmware bios')
+    ci-plan: FAIL P6 a green full run, every suite on the merge legs: exit 1 (wanted 0)
+    ci-plan: FAIL P6 a full run on every leg (px37's full, now all): exit 0 (wanted 1)
+    ci-plan: FAIL P7 the dedupe asks for an open nightly-red issue under the title
+    ci-plan: FAIL P7 an open issue of the title: a comment on it, no new issue
+    ci-plan: FAIL (8)
+
+— every suite job skipped, and the verdict (job 118825991253, `tier
+unplanned`) failed with its `a red nightly opens an issue` step
+**skipped**: a red dispatch opens nothing. The same run is the first to
+parse this branch's dispatch input (`tier`: all, full, pr) and the tier
+job's `permissions`; P5 read every one of 3,268 tracked paths as known.
+Unplanted, `tests/ci-plan` is green at `42e361f` (184 checks). The old
+planner (`d733bf4`'s) under the new proof is red on 46 checks (15 of P1,
+22 of P3, 9 of P6), every one a tier name or a shape tl29 changed, and
+P7 green (the reporter is the new file's).
+
+**The reporter's reads, against the real API**: its two `gh` calls are
+tl28's, which run on eight repos' nightlies since 2026-10-20; the
+`nightly-red` label does not exist on pax yet and the script creates it
+on the first red night (`gh label create … || true`). No issue was filed
+to prove the writes.
+
+**lane-audit**: the patch for the new shape (the report's) prints what
+each green tier run at the head held, from the verdict's own line, and
+fails a `tier full` or `tier all` whose line counts fewer suites than it
+had; tested against px52 (#87: `39338784206 held: tier full, legs '', 32
+of 32 suites`), is78 (wolf-interp#265), sh21 (pelt#43), s248
+(wolf-lang#804) and bu28 (boreutils#43), each CLEAN as before, and seen
+red under a stand-in `gh` whose verdict line says `31 of 32 suites`
+(AUDIT FAIL, where the unpatched script stays CLEAN).
+
+The pull request's own runs (the `tier pr` run, which touches CI and so
+is every suite on the pr leg: the new `tier full`'s shape job for job;
+then the labelled run) are named in the PR body: they run at this note's
+head.
+
+## 7. After the plan change
+
+At 19:21Z, 67 minutes after the switch: 17 runs across pax, wolf,
+wolf-interp and wolf-lang, none longer than 19 minutes, every one of 64
+jobs' runner waits 6 seconds or less, neither cap reached once
+(`notes/tl29/measure-after-1921.md`). A light hour proves nothing about a
+cap; the table is re-run at hand-back, before and after side by side, in
+the PR body.
