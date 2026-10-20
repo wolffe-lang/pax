@@ -1,0 +1,100 @@
+
+# lope hook - called after directory changes
+__lope_hook() {
+    command lope add -- "$PWD"
+}
+
+# Update when directory changes. pelt has no hook on a change of
+# directory, so `cd` is a function that records where it went (a function
+# is found before a regular built-in, POSIX XCU 2.9.1.4; `command cd` is
+# the built-in itself).
+cd() {
+    command cd "$@" && __lope_hook
+}
+
+# Jump function
+g() {
+    if [ $# -eq 0 ]; then
+        command cd ~ && __lope_hook
+    elif [ $# -eq 1 ] && [ "$1" = "-" ]; then
+        command cd - && __lope_hook
+    elif [ $# -eq 1 ] && [ -d "$1" ]; then
+        command cd -- "$1" && __lope_hook
+    else
+        __lope_result=$(command lope query --cwd -- "$@" 2>/dev/null)
+        if [ -z "$__lope_result" ]; then
+            __lope_result=$(command lope query -- "$@" 2>/dev/null)
+        fi
+        if [ -n "$__lope_result" ]; then
+            command cd -- "$__lope_result" && __lope_hook
+        else
+            echo "lope: no match found" >&2
+            return 1
+        fi
+    fi
+}
+
+# Interactive mode: fzf when it is installed, else a numbered menu
+gi() {
+    if command -v fzf >/dev/null 2>&1; then
+        __lope_result=$(command lope query --all -- "$@" | fzf --height=40% --reverse)
+    else
+        __lope_result=$(__lope_menu "$@")
+    fi
+    if [ -n "$__lope_result" ]; then
+        command cd -- "$__lope_result" && __lope_hook
+    fi
+}
+
+# A numbered menu of the best matches, for when fzf is not installed (and
+# on PAX, which has none): at most nine, chosen by one digit read from the
+# terminal; the chosen directory is printed. Shell built-ins and lope only.
+__lope_menu() {
+    command lope query --all -- "$@" >/dev/null 2>&1 || return 1
+    command lope query --all -- "$@" | {
+        __lope_n=0
+        while [ "$__lope_n" -lt 9 ] && IFS= read -r __lope_line; do
+            __lope_n=$((__lope_n + 1))
+            printf '%s) %s\n' "$__lope_n" "$__lope_line" >&2
+        done
+    }
+    printf 'lope: which? ' >&2
+    read -r __lope_pick || return 1
+    # (`:` in the arm: fortsh 1.10.0 stops at an empty case arm)
+    case $__lope_pick in
+    [1-9]) : ;;
+    *) return 1 ;;
+    esac
+    command lope query --all -- "$@" | {
+        __lope_n=0
+        while IFS= read -r __lope_line; do
+            __lope_n=$((__lope_n + 1))
+            if [ "$__lope_n" -eq "$__lope_pick" ]; then
+                printf '%s\n' "$__lope_line"
+                break
+            fi
+        done
+    }
+}
+
+# No-prefix directory jumping. pelt cc2fdc9 calls no function when a
+# command is not found (it says `NAME: not found` and the status is 127);
+# this is the function lope asks pelt to call then, in the shell's own
+# environment, with the command's words: it changes directory and answers
+# 0, or answers 127 and pelt says what it always says (sh21).
+command_not_found_handle() {
+    if [ -d "$1" ]; then
+        command cd -- "$1" && __lope_hook
+        return 0
+    fi
+    __lope_result=$(command lope query --cwd -- "$@" 2>/dev/null)
+    if [ -z "$__lope_result" ]; then
+        __lope_result=$(command lope query -- "$@" 2>/dev/null)
+    fi
+    if [ -n "$__lope_result" ]; then
+        command cd -- "$__lope_result" && __lope_hook
+        return 0
+    fi
+    return 127
+}
+
