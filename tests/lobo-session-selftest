@@ -15,7 +15,10 @@
 #
 #   W1 the ports of one session are all different: 200,000 rounds of six
 #      (five forwards and the console's), no port twice in a round. The
-#      old way repeats in about 220 of them.
+#      old way repeats in about 220 of them. px55 (pax#89): and none in
+#      this host's ephemeral range (ip_local_port_range) or at 49152 and
+#      up, where a socket bound to port 0 lands (#86's race); a picker
+#      that binds port 0 is there every round.
 #   W2 a QEMU that ends before its console is up fails the session at
 #      once, with QEMU's own words: a forward to a host port this test
 #      holds open makes the real QEMU refuse the rule and end; the tool
@@ -113,9 +116,9 @@ def session(tmp, name, steps, forward, qemu=None, timeout=20):
 with tempfile.TemporaryDirectory(prefix="lobo-selftest.", dir=os.environ.get("TMPDIR") or None) as tmp:
     # W1
     r = subprocess.run([sys.executable, tool, "--free-ports", "6", "200000"], capture_output=True, text=True)
-    m = re.search(r"(\d+) rounds of (\d+) ports, (\d+) with a port twice", r.stdout)
-    check(r.returncode == 0 and m is not None and m.group(1) == "200000" and m.group(3) == "0",
-          "W1 six ports a session, all different: %s" % ((r.stdout + r.stderr).strip() or "no answer (status %d)" % r.returncode))
+    m = re.search(r"(\d+) rounds of (\d+) ports, (\d+) with a port twice, (\d+) with a port in the ephemeral range", r.stdout)
+    check(r.returncode == 0 and m is not None and m.group(1) == "200000" and m.group(3) == "0" and m.group(4) == "0",
+          "W1 six ports a session, all different, none in the ephemeral range: %s" % ((r.stdout + r.stderr).strip() or "no answer (status %d)" % r.returncode))
 
     # W2
     qemu = os.environ.get("PAX_QEMU", "qemu-system-x86_64")
