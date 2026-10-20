@@ -2504,6 +2504,108 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px54 (ruling #91 R4): lope (user/lope.pin, tools/mklope), the
+  # directory jumper in wolf, preinstalled on PAX, and its no-prefix jump
+  # at the console through pelt's command_not_found_handle (sh21,
+  # user/pelt.pin): a typed session as root and as a user against the
+  # same binaries in a throwaway container (tools/linux-tree). lope is
+  # PRIVATE and this repository public, so lope is checked out with the
+  # org's WOLF_CI_TOKEN, as lobo checks out its private siblings: an
+  # absent or refused token is a red job with git's reason, never a
+  # skip. Nothing of lope's is uploaded but its sums (no binary, no
+  # image, no archive).
+  mpx5-lope:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-lope')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+          qemu-system-x86_64 --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-lope-${{ hashFiles('boot/limine.pin') }}
+
+      - name: lope's pin
+        id: lope
+        run: |
+          . user/lope.pin
+          echo "lope $LOPE_REV ($LOPE_REPO)"
+          echo "rev=$LOPE_REV" >> "$GITHUB_OUTPUT"
+
+      - name: lope at the pin (private; the org's WOLF_CI_TOKEN; absence is failure)
+        uses: actions/checkout@v4
+        with:
+          repository: wolffe-lang/lope
+          ref: ${{ steps.lope.outputs.rev }}
+          token: ${{ secrets.WOLF_CI_TOKEN }}
+          path: .lope
+          persist-credentials: false
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the image the Linux side's container is made from (by digest)
+        run: |
+          docker pull "$PAX_TREE_IMAGE"
+          docker image inspect --format '{{.Id}} {{.RepoDigests}}' "$PAX_TREE_IMAGE"
+        env:
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+      - name: lope's session against the container, as root and as a user; the plan's legs (all four in the full tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_LOPE_REPO: ${{ github.workspace }}/.lope
+          PAX_ENGINE: docker
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+        run: tests/mpx5-lope $PAX_LEGS
+
+      - name: keep the programs' sums, the Linux side, the sessions, the logs (no lope binary)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-lope
+          path: |
+            build/mpx5-lope/*.txt
+            build/mpx5-lope/lope/sums.txt
+            build/mpx5-lope/pelt/sums.txt
+            build/mpx5-lope/bore/sums.txt
+            build/mpx5-lope/linux/
+            build/mpx5-lope/*/kmain_console.elf
+            build/mpx5-lope/*/*.log
+            build/mpx5-lope-*.session
+            build/mpx5-lope-*.cmp
+            build/mpx5-lope-*.log
+            build/mpx5-lope-*.norm
+            build/mpx5-lope-*.meta
+            build/mpx5-lope-*.halt
+            build/mpx5-lope-*.verdict
+            build/mpx5-lope-*.typed
+            build/mpx5-lope-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   tier:
     name: tier ${{ needs.plan.outputs.tier || 'unplanned' }}
     if: ${{ !cancelled() }}
@@ -2541,6 +2643,7 @@ jobs:
       - mpx5-users
       - mpx5-accounts
       - mpx5-jobs
+      - mpx5-lope
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
