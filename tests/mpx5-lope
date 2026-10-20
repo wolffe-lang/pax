@@ -154,10 +154,12 @@ if [ -z "$images" ]; then
         x=$(static_ok "$f") || why+=" $x;"
         say "  program: ${f#"$r"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
     done
-    cp "$SHRC" "$r/etc/shrc" || why+=" no $SHRC;"
+    # PLANT A (px54, never merged): the image without the hook: no
+    # /etc/shrc, so pelt's $ENV names a file it cannot read and passes
+    # over, and lope's functions are never defined.
     printf '%s\n' "${RUNS[@]}" > "$r/etc/pax-run"
     printf '%s\n' '/home/pax 755 1000 1000' > "$work/owners"
-    args=(/home/pax/:755:1000:1000 /etc/shrc="$r/etc/shrc":644 /etc/pax-run="$r/etc/pax-run":644)
+    args=(/home/pax/:755:1000:1000 /etc/pax-run="$r/etc/pax-run":644)
     for f in "$r"/bin/*; do args+=("/bin/${f##*/}=$f:755"); done
     "$PAX_ROOT/tools/mkinitramfs" "$work/lope.cpio" "${args[@]}" > "$work/lope.initramfs.txt" || why+=" tools/mkinitramfs;"
     for tier in $tiers; do
