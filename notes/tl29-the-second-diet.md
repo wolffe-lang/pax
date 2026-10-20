@@ -3,7 +3,8 @@
 Contract: `sprints/tooling/tl29-the-second-diet.md` in wolffe-lang/wolf
 (planning trunk `560c78f`, read from origin 2026-10-20), under
 `sprints/RULES.md`. Branch `tl29` in pax, cut from pax trunk `d733bf4`
-(px52 merged). §1 to §5 are committed before the first change to the
+(px52 merged), and rebased onto `c8b48cb` (px53 merged, after §6's plant
+ran; below). §1 to §5 are committed before the first change to the
 workflow, the planner or the map. The wolf-interp half of the contract is
 wolf-interp's PR (`ci/tl29.md` there); the `lane-audit.sh` half is a patch
 handed to the orchestrator.
@@ -282,7 +283,17 @@ unplanned`) failed with its `a red nightly opens an issue` step
 **skipped**: a red dispatch opens nothing. The same run is the first to
 parse this branch's dispatch input (`tier`: all, full, pr) and the tier
 job's `permissions`; P5 read every one of 3,268 tracked paths as known.
-Unplanted, `tests/ci-plan` is green at `42e361f` (184 checks). The old
+Unplanted, `tests/ci-plan` is green at `42e361f` (184 checks).
+
+**Rebased** onto px53's merge, trunk `c8b48cb`, before the pull request's
+runs. px53 touched `ci.yml` (two comments and one artifact path, in
+mpx5-accounts' and mpx5-jobs' blocks), `tools/ci-tiers.map` (two rules,
+`user/sigwolf/*` and `tools/mksigwolf`, mpx5-jobs') and `tests/ci-plan`
+(two P2 checks), each beside this branch's hunks: the rebase applied
+without a conflict, and `tests/ci-plan` is green at the rebased head with
+186 checks (px53's two added). The plant's base `42e361f` is this
+branch's `e96aa9c` after the rebase (the same tree but for px53's lines);
+the plant is not re-run, since nothing it planted moved. The old
 planner (`d733bf4`'s) under the new proof is red on 46 checks (15 of P1,
 22 of P3, 9 of P6), every one a tier name or a shape tl29 changed, and
 P7 green (the reporter is the new file's).
