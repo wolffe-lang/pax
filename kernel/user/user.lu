@@ -79,7 +79,9 @@
 //!   and `nanosleep` (35) (the thread sleeps until the tick after the
 //!   deadline, kernel/sched's `sleep_current`), `uname` (63, "PAX"),
 //!   `prctl` (157) PR_GET_NAME, `prlimit64` (302, read-only: the stack
-//!   PAX gives, kernel/files' descriptors, the rest unlimited), `getuid`, `getgid`,
+//!   PAX gives, kernel/files' descriptors, the rest unlimited; px55: the
+//!   core file's soft limit 0, its hard one unlimited, kernel/procfs's
+//!   `rlimit`, the table `/proc/<pid>/limits` reads), `getuid`, `getgid`,
 //!   `geteuid`, `getegid` (0 until px39).
 //! - processes (px14, kernel/process and kernel/sched): `clone` (56),
 //!   `clone3` (435) and `vfork` (58) with CLONE_VM|CLONE_VFORK, `execve`
@@ -189,7 +191,8 @@
 //! px14, which also builds an `execve`'s image the same way): a static
 //! x86-64 executable read from the initramfs (kernel/initramfs) and
 //! loaded by kernel/elf into a fresh address space, with a stack of
-//! ELF_STACK_PAGES pages below
+//! kernel/process's ELF_STACK_PAGES pages (32; px55: kernel/procfs's
+//! STACK_LIMIT, its RLIMIT_STACK) below
 //! STACK_TOP (the page below them the guard) holding what the x86-64
 //! psABI §3.4.1 puts on a process's initial stack, from the top down:
 //! eight zero bytes; the strings (argv's, envp's, then the path,
@@ -238,6 +241,7 @@ use netd
 use paging
 use panic
 use process
+use procfs
 use ready
 use rtc
 use sched
@@ -290,7 +294,6 @@ const PAGE: u64 = 4096
 /// up by name would compare `str`s, which needs the hosted runtime on
 /// this target).
 pub const PROGS: u64 = 10
-const ELF_STACK_PAGES: u64 = 32 // px10: an ELF process's stack, 128 KiB
 
 
 // Linux's numbers (syscall_64.tbl) and -errno as the u64 %rax carries.
@@ -965,10 +968,6 @@ const AT_SYMLINK_NOFOLLOW: u64 = 0x100
 const ARCH_SET_FS: u64 = 0x1002 // uapi asm/prctl.h
 const ARCH_GET_FS: u64 = 0x1003
 const PR_GET_NAME: u64 = 16 // uapi linux/prctl.h
-const RLIMIT_STACK: u64 = 3 // uapi asm-generic/resource.h
-const RLIMIT_NOFILE: u64 = 7
-const RLIM_NLIMITS: u64 = 16
-const RLIM_INFINITY: u64 = 0xffffffffffffffff
 const TIMER_ABSTIME: u64 = 1
 const NS_PER_SEC: u64 = 1000000000
 // The PIT ticks at 1193182 / 11932 Hz (kernel/timer): 10000150.8 ns a
@@ -1174,11 +1173,15 @@ fn prctl(option: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> u64 {
 /// `prlimit64(pid, resource, new, old)`: the stack's limit is the
 /// stack PAX gives (ELF_STACK_PAGES pages, fixed), the descriptors' the
 /// table's (`files.FDS`), every other unlimited; setting one is -EPERM.
+/// px55 (pax#93): the core file's soft limit is 0 (hard unlimited), as
+/// Linux boots: PAX writes no core and never sets a wait status's core
+/// bit. The values are kernel/procfs's `rlimit`, which
+/// `/proc/<pid>/limits` prints (pax#94), so the two never part.
 fn prlimit(pid: u64, res: u64, new: u64, old: u64) -> u64 {
     if pid != 0 && pid != sched.self_pid() {
         return NEG_ESRCH
     }
-    if res >= RLIM_NLIMITS {
+    if res >= procfs.RLIM_NLIMITS {
         return NEG_EINVAL
     }
     if new != 0 {
@@ -1189,14 +1192,9 @@ fn prlimit(pid: u64, res: u64, new: u64, old: u64) -> u64 {
         if !uaccess.writable(pml4, old, 16) {
             return NEG_EFAULT
         }
-        var v = RLIM_INFINITY
-        if res == RLIMIT_STACK {
-            v = ELF_STACK_PAGES * PAGE
-        } else if res == RLIMIT_NOFILE {
-            v = files.FDS // px24: 128
-        }
-        uaccess.put(pml4, old, v, 8)
-        uaccess.put(pml4, old + 8, v, 8)
+        let (soft, hard) = procfs.rlimit(res, files.FDS) // px24: 128 descriptors; px34: 1024
+        uaccess.put(pml4, old, soft, 8)
+        uaccess.put(pml4, old + 8, hard, 8)
     }
     0
 }
