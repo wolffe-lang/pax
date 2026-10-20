@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""tools/ci-plan — which suites a CI run runs, and on which legs (px37, px40).
+"""tools/ci-plan — which suites a CI run runs, and on which legs (px37, px40, tl29).
 
     tools/ci-plan [--event E] [--action A] [--label L] [--labels L1,L2]
                   [--base SHA --head SHA | --paths-from FILE]
-                  [--tier full|pr] [--suites "S..."]
+                  [--tier all|full|pr] [--suites "S..."]
                   [--github-output FILE] [--json]
 
 Every option also reads an environment variable of its name in capitals
@@ -11,15 +11,22 @@ Every option also reads an environment variable of its name in capitals
 how the workflow's `plan` job passes the event in.
 
 THE TIERS. A suite is a job of .github/workflows/ci.yml (proof, mkw,
-mpx1, ..., mpx4-unix). A leg is one tier of the compiler (native,
-release) on one firmware (BIOS, UEFI); the full suite runs four.
+mpx1, ..., mpx5-jobs). A leg is one tier of the compiler (native,
+release) on one firmware (BIOS, UEFI); every leg is four.
 
-  full  every suite, every leg. A push to trunk, the nightly `schedule`,
-        a `workflow_dispatch` (unless it asks for `pr`), a pull request
-        carrying the `full-matrix` label, and a pull request whose
-        change touches a FULL path of tools/ci-tiers.map (the toolchain
-        pins, the harness every boot goes through, the kernel's entry,
-        link script and Limine configuration).
+  all   every suite, every leg. A push to trunk, the nightly `schedule`,
+        a `workflow_dispatch` (unless its `tier` input says full or pr),
+        and a pull request whose change touches a FULL path of
+        tools/ci-tiers.map (the toolchain pins, the harness every boot
+        goes through, the kernel's entry, link script and Limine
+        configuration), labelled or not.
+  full  THE MERGE GATE (tl29): every suite, on MERGE_LEGS,
+        `--tier native --firmware bios`. A pull request carrying the
+        `full-matrix` label (and no FULL path), and a dispatch with
+        `-f tier=full`. Native BIOS is the leg that caught every red of
+        the last 60 full runs that any leg caught for a reason not a
+        harness race (notes/tl29-the-second-diet.md §4); the other three
+        legs run after the merge, on the trunk push and the nightly.
   pr    a pull request's other runs: the suites the change can affect
         (tools/ci-tiers.map and the tests' own text, below), each on
         ONE leg, `--tier native --firmware bios` (PR_LEGS). A change to
@@ -27,8 +34,13 @@ release) on one firmware (BIOS, UEFI); the full suite runs four.
         affect every suite, so it runs every suite, on that leg (px40,
         ruling #76: the core was FULL before). Native is
         the tier whose build is cheap (the release tier's LLVM build is
-        about half of every full run's job-minutes); BIOS is the leg on
-        which every suite runs its widest set of scenarios.
+        about half of every all run's job-minutes); BIOS is the leg on
+        which every suite runs its widest set of scenarios. A dispatch
+        with `-f tier=pr` runs every suite on it.
+  partial  a `workflow_dispatch` that names suites (`-f suites=...`, a
+        plant): those suites, on its `tier` input's legs (every leg
+        unless it says full or pr). Never `full` or `all`, whatever it
+        names: a green `tier full` says every suite ran.
   noop  a pull request's `labeled` event for a label other than
         `full-matrix`: nothing runs.
 
@@ -42,15 +54,17 @@ WHICH SUITES A PATH SELECTS (the pr tier). The union of:
     or a directory above it. A FULL tool's text is not followed: a
     change to it is FULL anyway, and following lib.sh would make every
     path every suite's.
-FULL wins over everything, ALL included (a pin beside a core change is
-a full run). A path that nothing matches is FULL: an unknown path never
-shrinks a run. `macos-run` runs when `proof` does
-(it boots proof's ISO).
+FULL wins over everything, ALL and the label included (a pin beside a
+core change, or under the label, is an all run). A path that nothing
+matches is FULL: an unknown path never shrinks a run. `macos-run` runs
+when `proof` does (it boots proof's ISO).
 
     tools/ci-plan --verdict     (NEEDS: the `tier` job's `toJSON(needs)`)
 
-checks a finished run: exit 0 when the plan succeeded, every suite it
-chose succeeded and every other was skipped; 1 otherwise.
+checks a finished run: exit 0 when the plan succeeded, the tier's shape
+held (`all` and `full`: every suite, on that tier's legs; `pr`: PR_LEGS;
+`partial`: some suite; `noop`: none), every suite it chose succeeded and
+every other was skipped; 1 otherwise.
 
 Output: `tier=`, `suites=` (a JSON list) and `legs=` lines, to
 --github-output (appended) and to standard output; with --json, one
@@ -70,6 +84,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORKFLOW = ".github/workflows/ci.yml"
 MAP = "tools/ci-tiers.map"
 PR_LEGS = "--tier native --firmware bios"
+# tl29: the merge gate's legs. Every leg is the empty string (each test's
+# default, `both` and `both`).
+MERGE_LEGS = "--tier native --firmware bios"
+LEGS = {"all": "", "full": MERGE_LEGS, "pr": PR_LEGS}
+TIERS = ("all", "full", "pr", "partial", "noop")
 FULL_LABEL = "full-matrix"
 NOT_SUITES = {"plan", "tier"}
 SPECIAL = {"FULL", "ALL", "NONE"}
@@ -252,19 +271,22 @@ def plan(a):
         log.append("a label other than %s: noop" % FULL_LABEL)
         return result("noop", set(), PR_LEGS)
     if ev == "workflow_dispatch":
-        tier = a.tier or "full"
-        if tier not in ("full", "pr"):
-            die("--tier takes full or pr")
-        chosen = set(asked) if asked else set(suites)
-        log.append("dispatch: tier %s, %s" % (tier, " ".join(asked) if asked else "every suite"))
-        return result(tier, chosen, "" if tier == "full" else PR_LEGS)
+        tier = a.tier or "all"
+        if tier not in LEGS:
+            die("--tier takes all, full or pr")
+        if asked:
+            log.append("dispatch naming %s: partial, the %s tier's legs ('%s')" % (" ".join(asked), tier, LEGS[tier]))
+            return result("partial", set(asked), LEGS[tier])
+        log.append("dispatch: tier %s, every suite" % tier)
+        return result(tier, set(suites), LEGS[tier])
     if ev != "pull_request":
-        log.append("%s: full" % ev)
-        return result("full", set(suites), "")
-    if FULL_LABEL in labels:
-        log.append("the %s label: full" % FULL_LABEL)
-        return result("full", set(suites), "")
+        log.append("%s: all" % ev)
+        return result("all", set(suites), "")
+    labelled = FULL_LABEL in labels
 
+    # A pull request's paths are read with the label too: a FULL path
+    # makes the run an all run, labelled or not (tl29: the label alone
+    # buys the merge legs, never fewer suites than every one).
     if a.paths_from:
         f = sys.stdin if a.paths_from == "-" else open(a.paths_from)
         paths = [p.strip() for p in f.read().splitlines() if p.strip()]
@@ -273,8 +295,8 @@ def plan(a):
     else:
         paths = None
     if paths is None:
-        log.append("no list of changed paths: full")
-        return result("full", set(suites), "")
+        log.append("no list of changed paths: all")
+        return result("all", set(suites), "")
 
     chosen, full = set(), []
     for p in paths:
@@ -287,17 +309,21 @@ def plan(a):
         log.append("%s -> %s  [%s]" % (p, "FULL" if p in full else (" ".join(s for s in suites if s in got) or "nothing"), "; ".join(why)))
         chosen |= got
     if full:
-        log.append("%d path(s) FULL: full" % len(full))
-        return result("full", set(suites), "")
+        log.append("%d path(s) FULL: all%s" % (len(full), " (the %s label as well)" % FULL_LABEL if labelled else ""))
+        return result("all", set(suites), "")
+    if labelled:
+        log.append("the %s label: full, every suite on the merge legs ('%s')" % (FULL_LABEL, MERGE_LEGS))
+        return result("full", set(suites), MERGE_LEGS)
     log.append("%d path(s): pr tier, %d suite(s), legs %s" % (len(paths), len(chosen), PR_LEGS))
     return result("pr", chosen, PR_LEGS)
 
 
 def verdict(needs):
     """The `tier` job's check, from `toJSON(needs)`: 0 when the plan
-    succeeded, every suite it chose succeeded and every other job was
-    skipped. An output the plan left empty (the full tier's `legs`) is
-    absent from `needs`, not empty: read each with a default."""
+    succeeded, the tier's shape held, every suite it chose succeeded and
+    every other job was skipped. An output the plan left empty (the all
+    tier's `legs`) is absent from `needs`, not empty: read each with a
+    default."""
     plan_job = needs.get("plan", {})
     if plan_job.get("result") != "success":
         print("tier: the plan did not succeed (%s)" % plan_job.get("result"))
@@ -308,8 +334,31 @@ def verdict(needs):
     except (KeyError, ValueError):
         print("tier: the plan has no list of suites")
         return 1
-    print("tier %s, legs '%s', %d of %d suites" % (out.get("tier", "?"), out.get("legs", ""), len(chosen), len(needs) - 1))
+    tier, legs = out.get("tier", "?"), out.get("legs", "")
+    every = set(needs) - {"plan"}
+    print("tier %s, legs '%s', %d of %d suites" % (tier, legs, len(chosen), len(every)))
     bad = 0
+    # tl29: the name says the shape. A `full` or an `all` that chose fewer
+    # suites, or ran other legs than its tier's, is not that tier.
+    if tier not in TIERS:
+        print("tier: the plan named no tier this file knows (%r)" % tier)
+        bad += 1
+    elif tier in ("all", "full"):
+        if chosen != every:
+            print("tier: a %s run chose %d of the %d suites; every one, or it is not %s" % (tier, len(chosen), len(every), tier))
+            bad += 1
+        if legs != LEGS[tier]:
+            print("tier: a %s run on legs '%s'; its legs are '%s'" % (tier, legs, LEGS[tier]))
+            bad += 1
+    elif tier == "pr" and legs != PR_LEGS:
+        print("tier: a pr run on legs '%s'; its legs are '%s'" % (legs, PR_LEGS))
+        bad += 1
+    elif tier == "partial" and (not chosen or legs not in LEGS.values()):
+        print("tier: a partial run must name a suite and a tier's legs (%d suites, legs '%s')" % (len(chosen), legs))
+        bad += 1
+    elif tier == "noop" and chosen:
+        print("tier: a noop run chose %d suites" % len(chosen))
+        bad += 1
     for job, r in needs.items():
         if job == "plan":
             continue
@@ -327,7 +376,7 @@ def verdict(needs):
 def main():
     if sys.argv[1:] == ["--verdict"]:
         sys.exit(verdict(json.loads(os.environ["NEEDS"])))
-    ap = argparse.ArgumentParser(description="which suites a CI run runs (px37)")
+    ap = argparse.ArgumentParser(description="which suites a CI run runs (px37, tl29)")
     env = os.environ.get
     ap.add_argument("--event", default=env("EVENT"))
     ap.add_argument("--action", default=env("ACTION"))
