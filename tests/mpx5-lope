@@ -156,8 +156,14 @@ if [ -z "$images" ]; then
     done
     cp "$SHRC" "$r/etc/shrc" || why+=" no $SHRC;"
     printf '%s\n' "${RUNS[@]}" > "$r/etc/pax-run"
+    # PLANT B (px54, never merged): the store's path unwritable: a
+    # regular file where each session's ~/.local is (root's /.local and
+    # /home/pax/.local, both root's 0644), in the tree and the archive.
+    printf '%s\n' 'not a directory' > "$r/.local"
+    cp "$r/.local" "$r/home/pax/.local"
     printf '%s\n' '/home/pax 755 1000 1000' > "$work/owners"
     args=(/home/pax/:755:1000:1000 /etc/shrc="$r/etc/shrc":644 /etc/pax-run="$r/etc/pax-run":644)
+    args+=(/.local="$r/.local":644 /home/pax/.local="$r/home/pax/.local":644)
     for f in "$r"/bin/*; do args+=("/bin/${f##*/}=$f:755"); done
     "$PAX_ROOT/tools/mkinitramfs" "$work/lope.cpio" "${args[@]}" > "$work/lope.initramfs.txt" || why+=" tools/mkinitramfs;"
     for tier in $tiers; do
