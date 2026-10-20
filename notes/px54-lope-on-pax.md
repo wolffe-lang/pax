@@ -199,3 +199,346 @@ read), `g -` (the jump never moved the shell, so `cd -` goes back to
 between `g` and `pwd`), `gi`'s menu and `bin`; green at `true` and
 `zzqqxx`; L3 red at both; L4 green; L1 as A's. (Corrected before
 either plant ran: the first text had B's `g -` and `ls` green.)
+
+## 3a. The prediction, scored
+
+| # | predicted | measured | verdict |
+|---|---|---|---|
+| P1 | the pins and the hook, each its own commit; the kernel unchanged | `user/lope.pin` `d7aa154` (with `tools/mklope` `0d25b14`), `user/pelt.pin` `8508e93`, the hook `user/shrc` `d7c2402`; `git diff c8b48cb HEAD -- kernel boot` is empty | right |
+| P2 | lope `f9a2f064…` and pelt `5448cb27…` in `px13-ubuntu`, twice each | lope **`f9a2f064…`** (14,426,728) and pelt **`5448cb27…`** (15,201,640), each in two builds, the same bytes (§B); pelt at trunk's pin first gave sh19's `7be05ec0…` twice; every suite build since gave the same two | right |
+| P3 | the hook through `env ENV=/etc/shrc`, no kernel change; `ENV` inherited by `exec sh` and `su pax` | so: the second shell (`exec sh -i -m`) and the playground's `su pax` both run the hook (§D, §I) | right |
+| P4 | the session byte-identical to the container's as root and `pax` at the first boot, every row's witness; the menu's pause a race to size | **byte-identical at the first boot** (36 lines each, root and `pax`), L2's first text wrong in two of its own lines (`ls` prints columns on a terminal; pelt's not-found carries the line number 98, the hook's text counted), fixed in the suite before any commit of it; every row as predicted. The pause is no race: the same bytes with the digit 0.2 s after `gi` (§D) | right on PAX and Linux; wrong on the pause (in the safe direction) |
+| P5 | the census's names; every one served but 273 and 334 | **23 calls by name** (§E): no `mmap`, no signal call, no `sigaltstack`, no `clock_gettime` on Linux (the vDSO's); every one is in PAX's table; L4 on every boot: -ENOSYS 273 and 334 only, no `refused:` | right in the verdict, the list longer than lope asks |
+| P6 | plants A and B red at L2 and L3 by row, L1 noise | A and B red at exactly the rows predicted (§F, kasumi); in CI: not run, the token (§H) | right on kasumi; not in CI |
+| P7 | the pelt pin moves no recording; the pelt suites green on kasumi | mpx5-jobs' pelt images (52 pjobs runs, groups as root and `pax`) and gaps, fds, sigs: every J PASS; mpx3-shell, mpx3-tree, mpx5-accounts, mpx3-console, mpx3-screen, mpx3-speaker PASS (§G) | right |
+| P8 | the playground refreshed with lope, a new digest, on nomad-1 | **`cc15c60224f910f671bbc08df344c50d04aad455fb7dcd0f3dbb9bd2bdc27214`** (71,751,680 bytes), smoke-booted, on nomad-1, hashed twice (§I) | right |
+| P9 | the token: unknown | **absent for pax**: `Input required and not supplied: token` (run 39488153518), now said by name in its own step; a ruling asked (§H) | the open case |
+
+## A. The pins and the hook (item 1)
+
+- `user/lope.pin` (`d7aa154`): lope's repository and `5ac37df`, the
+  digest and the image it was built in. lope is private, so
+  `tools/mklope` (`0d25b14`) takes the tree from `PAX_LOPE_REPO` when it
+  is set; it is `tools/mkpelt` with lope's names, a fetch that says why
+  it fails, and a `lope --version` run after the link.
+- `user/pelt.pin` (`8508e93`): `90d7c64` (sh21), its paragraph beside
+  px53's.
+- The hook (`d7c2402`): `user/shrc`, which the image installs as
+  `/etc/shrc`: `eval "$(lope init pelt)"`. The console shell's line is
+  `/bin/env ENV=/etc/shrc /bin/sh -i -m`: boreutils' `env` puts `ENV` in
+  the environment, the kernel's fixed `HOME=/ TERM=linux PAX=1
+  PATH=/bin` (`kernel/kmain_console.lu:56`) is kept, and pelt runs the
+  file before its first prompt (`src/sh/interact.lu:262`). pelt reads no
+  other start-up file, and a kernel that set `ENV` would have been a
+  kernel change; `env` needs none. `HOME=/` and no XDG variable: root's
+  store is `/.local/share/lope/store` (the container's tree after the
+  session lists `./.local/share/lope/store` and `./.sh_history`,
+  `notes/px54/linux-lope.after.txt`).
+- **The kernel unchanged**: no file under `kernel/` or `boot/` moved.
+
+## B. The binaries (item 1)
+
+| program | built by | digest | where |
+|---|---|---|---|
+| lope (`5ac37df`, its own 0.2.33 / `cceda63`) | `tools/mklope` | `f9a2f064077f6bb33ede9219608b6fe72d4a45a66c84f61f3f9d9e5e94f5066c`, 14,426,728 | `localhost/px13-ubuntu` (`ad8964505189`), two builds the same bytes (`notes/px54/kasumi-bins-lope-twice-pelt-trunk.out`); lp00's `tools/mkstatic` digest, so `tools/mklope` builds what lope's own tool builds |
+| pelt (`90d7c64`, its own 0.2.32 / `d37c911`) | `tools/mkpelt` | `5448cb27d882553bccba66dbde2c4aaba417a7501ae1c6bf3944af0d00a93c5d`, 15,201,640 | two builds the same bytes (`kasumi-bins-pelt-90d7c64-twice.out`); sh21's digest; at `be1a75d` (trunk's pin) the same tool gave `7be05ec0…` twice first |
+| `env`, `ls`, `true` (boreutils `cc64f68`) | `tools/mkboreutils` | `88faec90…`, `1e34a02a…`, `a3bf0296…` (bu28's) | unchanged pin |
+
+CI's runner would build its own lope (lp00: its `libc.a` differs); not
+seen, since CI never reached the build (§H).
+
+## C. Where the session lives
+
+`tests/mpx5-lope`, a suite of its own (§3 P4 argued it): one image
+(kmain_console), two runs, the same keys
+(`user/console/lope.keys`), the container of the same tree as L1's
+reference for root's run and `pax`'s, L2 and L3 each run's own witness
+(a plant that breaks both sides alike is caught there), L4 as mpx5-jobs'
+J6. Wired as every suite is: its job in `ci.yml`, the `tier` job's
+needs, `tools/ci-tiers.map` (`user/lope.pin`, `tools/mklope`,
+`user/shrc`, `user/console/lope.keys`; and `mpx5-lope` among `as`'s
+users), `tests/ci-plan` (156 PASS on kasumi, two new cases, two moved).
+
+## D. The typed session (item 2)
+
+The container's transcript and PAX's, the same 36 lines as root
+(`notes/px54/linux-lope.txt`, `pax-native-bios-lope.txt`, sha256
+`b8f4e24c…`):
+
+```
+$ cd /etc
+$ cd /bin
+$ lope list
+/bin
+/etc
+$ etc
+$ pwd
+/etc
+$ g -
+/bin
+$ ls
+as  env  lope  ls  pelt  sh  true
+$ g
+$ pwd
+/
+$ gi
+1) /bin
+2) /etc
+3) /
+lope: which? 2
+$ pwd
+/etc
+$ true; echo st=$?
+st=0
+$ zzqqxx; echo st=$?
+pelt: line 98: zzqqxx: not found
+st=127
+$ exec sh -i -m
+$ lope list
+/etc
+/bin
+/
+$ bin
+$ pwd
+/bin
+$ exit
+```
+
+and as `pax` the same with `/home/pax` for `/` (`c7df6c42…`). Held on
+kasumi on all four legs (native and release, BIOS and UEFI, TCG,
+`taskset -c 0-3`): L1 to L4 PASS, 8 sessions (`kasumi-mpx5-lope.out`),
+at the first boot of the image and at every boot since. pelt's line
+number 98 counts the lines the hook's text took (the same on both
+sides). `lope list`'s first answer is a tie (one visit each) broken by
+byte order, as lope's rule says. The menu's digit (`^~2`) was typed 0.2,
+0.5, 1, 1.5, 2 and 3 s after `gi` under kasumi's load (12 to 13): the
+same bytes each time (`kasumi-first-boot-and-pause-sweep.out`; the
+sweep ran the suite's first text, whose `PAX_LOPE_PAUSE` set
+`PAX_TYPE_PAUSE`, since removed), so the default pause stands. A whole
+boot, two sessions, 44 s under TCG.
+
+## E. What lope asks of PAX (item 3)
+
+`strace -f -n` of lope's own runs on Linux 7.2.8 in `px13-ubuntu`
+(`notes/px54/census.sh`; `notes/px54/census/`: each run's calls, their
+failures, the union), the runs the hook makes: `--version`, `init pelt`,
+`list` with no store, `add -- DIR` making the store and adding to it,
+`list`, `query --cwd -- WORD` (a miss and a hit), `query -- WORD`,
+`query --all --`, a query with no match, `add` with a file where
+`~/.local` is. **23 calls by name**:
+
+| call | nr | runs | on PAX |
+|---|---|---|---|
+| `execve`, `arch_prctl`, `set_tid_address`, `prlimit64` (RLIMIT_STACK), `readlinkat` (`/proc/self/exe`), `getrandom`, `mprotect`, `brk`, `exit_group` | 59, 158, 218, 302, 267, 318, 10, 12, 231 | every one (glibc's start and end; the runtime allocates by `brk` alone, no `mmap`) | served (px10, px12) |
+| `set_robust_list`, `rseq` | 273, 334 | every one | **-ENOSYS**, as for every static glibc program PAX runs (glibc copes); L4's only two |
+| `openat`, `read`, `close`, `statx`, `readlink` | 257, 0, 3, 332, 89 | the store read; a path made canonical | served |
+| `mkdir`, `getpid`, `rename`, `write` | 83, 39, 82, 1 | `add`: `~/.local/share/lope` made, `store.tmp.PID` written, renamed over | served (px27's tree) |
+| `getcwd`, `fstat`, `getdents64` | 79, 5, 217 | `query --cwd`: the working directory's names | served |
+
+No signal call (lope installs no handler and starts no thread), no
+`fsync` (wolf 0.2.33 has none: ruling #96 D9), no `mmap`. Not seen on
+Linux and made on PAX: `clock_gettime` (228) for lope's clock, which
+Linux answers from the vDSO and PAX, which gives no vDSO, as a call
+(served since px12; inferred, PAX has no tracer). The failures lope
+meets and answers: `openat` ENOENT (no store yet), `mkdir` ENOENT and
+EEXIST (`create_dir_all`), and with a file at `~/.local` `openat`
+ENOTDIR, which lope reports as `lope: I/O error: Not a directory (os
+error 20)` — on PAX too, the same bytes (plant B's lines before its
+type-ahead). **Served: all but 273 and 334; refused: none. No kernel
+change.**
+
+## F. Plants (item 4)
+
+Branches never merged, one commit each, cut from `dc4c09f` (the suite
+and the CI as at the head):
+
+| plant | branch, commit | change | kasumi (native BIOS) |
+|---|---|---|---|
+| A | `px54-plant-a` `e89f87f` | the image without the hook: no `/etc/shrc` (the run lines unchanged: pelt passes over an `ENV` file it cannot read) | **red** (`kasumi-plant-a.out`): L2 at `etc`, `g -`, `g`, `gi`'s menu, `bin`, as root and as `pax`; `ls`, `true`, `zzqqxx` green; L3 at both store rows; L4 green; L1 apart on type-ahead (the menu's `2` became a command, every later step typed a prompt early), as predicted |
+| B | `px54-plant-b` `2225338` | lope's store path unwritable: a regular file at `/.local` and `/home/pax/.local`, in the tree and the archive | **red** (`kasumi-plant-b.out`): L2 at `etc`, `g -`, `ls`, `g`, `gi`'s menu, `bin`; `true`, `zzqqxx` green; L3 at both; L4 green; L1 on type-ahead only: root's first 30 lines, lope's ENOTDIR line among them, are the container's bytes, and `pax`'s run parts at its first line (the root run's early keys spill into it) |
+
+**Not run in CI** (RULES.md §7 asks it): CI cannot build lope while pax
+has no token for it (§H), so a dispatch of either plant would be red at
+the token step, not at the planted rows. Both are ready: `gh workflow
+run ci -R wolffe-lang/pax -r px54-plant-a -f tier=pr -f
+suites=mpx5-lope` (and `-plant-b`) once the ruling lands.
+
+## G. The suites that build pelt (P7)
+
+kasumi, native BIOS, `taskset -c 0-3`, builds in `px13-ubuntu` at
+`dc4c09f` (the code as at the head), every one with pelt `5448cb27…`:
+`mpx5-lope` both tiers and both firmwares PASS; `mpx5-jobs`: the 52
+pjobs runs and groups as root and `pax` byte-identical to real root's
+recordings (J9, J10, 54 PASS), gaps, fds and sigs PASS, 187 PASS lines;
+its four busybox images (probe, probe over PS/2, shell, shell-user) were
+not built (the lane's cache had no busybox: `tools/fetch-busybox` needs
+`zstd`, which `px13-ubuntu` lacks; run on the host after) and are no
+pelt image; `mpx3-shell`, `mpx3-tree`, `mpx5-accounts`, `mpx3-console`,
+`mpx3-screen`, `mpx3-speaker` PASS (`kasumi-*.out`, `kasumi-chain1.out`,
+`kasumi-chain2.out`; every build log names pelt `5448cb27…`). No fixed
+reference moved (the console's `.expect` files, the speaker's, the
+accounts' recording, the pjobs and groups recordings). CI's
+pull-request run runs every suite on the PR leg (the change touches
+`ci.yml`): §H.
+
+## H. CI, and lope's privacy (P9)
+
+lope is private and pax public. The job checks lope out at the pin with
+`secrets.WOLF_CI_TOKEN`, the org's grant to read private siblings
+(lobo's `acquire-toolchain`). **That secret does not reach pax**: the
+first dispatch, run 39488153518 (`-f tier=pr -f suites=mpx5-lope`, at
+`6e95404`), was red at the checkout, `Input required and not supplied:
+token`; since `dc4c09f` the job says so by name in a step of its own
+(`::error title=No WOLF_CI_TOKEN for lope::…`), never a skip. So in CI
+the suite cannot build lope, its plants cannot be seen red at their rows,
+and no `tier full` at this head can be green. Everything else of the
+lane is on kasumi (§D, §F, §G) and the rest of CI is the pull request's
+run (every suite on the PR leg). Listing the org's secrets to learn more
+was refused by the harness; nothing was routed around. **A ruling is
+asked** (RULING px54-R1): (a) grant pax `WOLF_CI_TOKEN` (an org secret
+visible to pax, with read on `wolffe-lang/lope`) — the smallest change,
+lope stays private; nothing of lope's is uploaded, the artifact keeps
+its sums and the transcripts — or (b) make lope public (the maintainer's
+step), when `tools/mklope` fetches it as `tools/mkpelt` fetches pelt and
+the token steps go. Recommended: (a) now, (b) when the maintainer
+publishes lope. After either, the two plant dispatches (§F) and the
+labelled full run complete the done-when.
+
+## I. The playground (item 5)
+
+The orchestrator's two scripts on kasumi, changed as the contract says
+(`notes/px54/playground.sh`, which applies the changes and runs them;
+their sha256 before and after in `notes/px54/kasumi-playground.txt`):
+`build.sh` gains `tools/mklope` (lope from a clone of its pin inside the
+playground's directory, `-e PAX_LOPE_REPO=$L/lope`, since lope is
+private); `assemble.sh` gains a stripped `/bin/lope` (as its other
+binaries), `/etc/shrc` from `user/shrc`, the hook line
+(`/etc/pax-run` `/bin/env ENV=/etc/shrc /bin/sh -i -m`), and two motd
+lines naming lope and saying its store is in memory; the first motd line
+names `pax px54 39f8597` (the code as at the head; only notes and prose
+after it), pelt `90d7c64`. Both rc 0; lope `f9a2f064…`, pelt
+`5448cb27…`. **`pax-playground.iso`
+`cc15c60224f910f671bbc08df344c50d04aad455fb7dcd0f3dbb9bd2bdc27214`**
+(71,751,680 bytes; px53's was `2336718e…`), `pax-smoke.iso`
+`11228dcb…`. Smoke-booted once (native BIOS, TCG,
+`notes/px54/playground.keys`): root's `cd`s, `lope list`, `etc` alone,
+`g -`, `gi` and `1`, `zzqqxx` 127, then `su pax` (HOME `/home/pax`,
+`ENV` kept: the hook runs in `pax`'s shell, its own store), `cd /tmp`,
+`cd /etc`, `g`, `lope list`, back to root's list, halt. Copied to
+nomad-1 `~/pax-playground/pax-playground.iso` over px53's, hashed there
+twice.
+
+## J. The kernel's cost
+
+None: no file under `kernel/` or `boot/` changed (`git diff c8b48cb HEAD
+-- kernel boot` is empty), so every kernel is px53's.
+
+## K. lope's README (item 6)
+
+Not written here (lope's lane): lope's README gains a PAX line — lope is
+preinstalled on PAX as `/bin/lope` at pax's `user/lope.pin`, its hook in
+`/etc/shrc` through pelt's `$ENV`, the store in PAX's in-memory tree
+until PAX has storage, `gi`'s menu the PAX path.
+
+## 4. Evidence index
+
+Shas are this branch's (`px54`). kasumi paths are under `~/lanes/px54/`.
+
+### What was written
+
+- The prediction: `fcd0521` (§1 to §3, before any change or
+  measurement); the plants' rows `850d77b`, corrected `39f8597`, both
+  before either plant ran.
+- The pins and the hook: `0d25b14` (`tools/mklope`), `d7aa154`
+  (`user/lope.pin`), `8508e93` (`user/pelt.pin`), `d7c2402`
+  (`user/shrc`).
+- The session and the suite: `2d8ce94` (`user/console/lope.keys`),
+  `abf6d6a` (`tests/mpx5-lope`), `de4d524` and `dc4c09f` (ci.yml's job,
+  the token said by name), `2500364` (`tools/ci-tiers.map`), `6e95404`
+  (`tests/ci-plan`).
+- The words: `a5a8b5f` (`docs/SOURCES.md`), `1d18fb7` (README),
+  `e06e162` (CHANGELOG), and this note.
+- The scripts: `4a2e7a9`, `1d4d446` (`notes/px54/*.sh`, the
+  playground's keys).
+- The plants: `px54-plant-a` `e89f87f`, `px54-plant-b` `2225338` (on
+  origin, never to be merged).
+
+### What was measured, and where it is
+
+- **The archives**: wolf 0.2.33 `4f955e8d…` and 0.2.32 `4c37f9c5…`, the
+  release API read twice (§1); `tools/mklope` and `tools/mkpelt` check
+  each download against them.
+- **The binaries**: `notes/px54/kasumi-bins-lope-twice-pelt-trunk.out`,
+  `kasumi-bins-pelt-90d7c64-twice.out`; every suite's build log.
+- **The session**: `notes/px54/linux-lope.txt`, `linux-lope-user.txt`
+  (the container), `pax-native-bios-lope.txt`,
+  `pax-native-bios-lope-user.txt` (PAX), the same bytes;
+  `linux-lope*.after.txt` (the store's files); `kasumi-mpx5-lope.out`
+  (four legs), `kasumi-first-boot-and-pause-sweep.out`.
+- **The census**: `notes/px54/census/` (`census.sh`).
+- **The plants**: `notes/px54/kasumi-plant-a.out`, `kasumi-plant-b.out`.
+- **The suites that build pelt**: `notes/px54/kasumi-mpx5-jobs.out`,
+  `kasumi-mpx3-*.out`, `kasumi-mpx5-accounts.out`, `kasumi-chain1.out`,
+  `kasumi-chain2.out`.
+- **The playground**: `notes/px54/kasumi-playground.txt`.
+- **CI**: run 39488153518 (the token absent); the pull request's run, in
+  the pull request.
+
+### Measured, inferred, not verified
+
+**Measured**: everything in §A to §I but what follows.
+
+**Inferred**:
+- That lope's clock is a `clock_gettime` call on PAX (PAX gives no vDSO;
+  Linux answers from it, so strace shows none there). PAX has no tracer;
+  no -ENOSYS for it in any boot.
+- Why the menu's digit may come early: not traced; measured only that
+  the transcript does not move (§D).
+
+**Not verified**:
+- Anything of lope in CI (§H): no CI build of lope, no plant in CI, no
+  `tier full`.
+- hasu under KVM; more than one CPU.
+- A lope store across a reboot: PAX has no storage (said in the README).
+
+### Issues
+
+- **To close at merge**: none (the contract names no pax issue).
+- **Would file (none filed)**:
+  1. pax: CI cannot read lope (private) — `WOLF_CI_TOKEN` is not
+     available to pax (run 39488153518); RULING px54-R1 (§H). If the
+     ruling is (a), the secret is the maintainer's to grant; nothing in
+     the tree changes.
+  2. lope: README's PAX line (§K), for lope's lane; and lope#3's pelt
+     rows (already filed by the orchestrator) go live at pelt `90d7c64`.
+  3. pax (small, the harness): `tools/fetch-busybox` needs `zstd`, which
+     `px13-ubuntu` lacks, so a suite built entirely in that container has
+     no busybox (px53 found it; again here); a lane fetches it on the
+     host first.
+- Nothing to file for the kernel, pelt or wolf: every call lope makes is
+  served.
+
+## 5. Done-when
+
+- Branch `px54` on origin; the pax pull request (number in the
+  hand-back), open, unmerged.
+- The five sections §1 to §5; the items §A to §K.
+- The test checklist:
+  - [x] the pins and the hook, each its own commit; the kernel unchanged
+  - [x] lope `f9a2f064…` and pelt `5448cb27…`, two builds each, the same
+        bytes
+  - [x] the session byte-identical to the container's as root and as
+        `pax` at the first boot, every row's witness (L1 to L4), four
+        legs on kasumi
+  - [x] the census: 23 calls, all served but 273 and 334
+  - [x] plants A and B red at the predicted rows on kasumi
+  - [ ] plants A and B red in CI (blocked: §H, RULING px54-R1)
+  - [x] the suites that build pelt green on kasumi at `90d7c64`
+  - [x] `tests/ci-plan` 156 PASS
+  - [x] the playground refreshed, smoke-booted, on nomad-1, hashed twice
+  - [ ] the pull request's run green at the final head: every suite but
+        `mpx5-lope`, which is red by name until the ruling (§H)
+  - [ ] `full-matrix` at the final head and a green `tier full`: not
+        added while `mpx5-lope` cannot be green (the label's run would
+        spend four legs to show the same token step red)
+- `wolf/tools/lane-audit.sh pax px54 <PR>`: named in the hand-back.
