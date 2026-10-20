@@ -136,7 +136,11 @@
 #      distribution's boot makes them: devtmpfs has none); its witness
 #      the semaphore's read, the stdin link, the truncating reopen, and
 #      the reopen of root's file by /dev/stdin, 0 to root, EACCES to a
-#      user.
+#      user. px55 (pax#88): and /dev/fd, the link to /proc/self/fd beside
+#      them (the guest's made at its start too): its readlink, lstat and
+#      listing, what it names followed, `ls -l /dev/fd/` and `cat
+#      /dev/fd/0`'s rows; its witness the link's row and the read through
+#      /dev/fd/0.
 #   J9 px51: each pjobs and pjobs-user run (one of sh18's sessions)
 #      byte-identical to real root's recording of the same pelt on the
 #      guest (tests/mpx5-jobs.d/linux/pjobs-*.tty), the user's to the
@@ -208,6 +212,9 @@ UKEYS=$SKEYS # the same keys; the user's prompt is `$ `
 GKEYS=$PAX_ROOT/user/console/gaps.keys # px49
 GAPS_SF='B: the sendfile reached the terminal' # /g/sf's line (and /g/r644's, /g/r600's)
 FDS_R644='root file' # px50: the fds archive's /g/r644
+# px55 (pax#88): fdtab's /dev/fd rows a run of fds must show (J4).
+FDLINK='N: /dev/fd: readlink "/proc/self/fd"; lstat link 0777 size 13 nlink 1 owner 0:0; statx AT_SYMLINK_NOFOLLOW link 0777 size 13; in /dev'"'"'s listing DT_LNK'
+FDCAT='N: descriptor 0 a file at offset 3: /dev/fd/0 stat file 0644, fstat'"'"'s: yes; statx fstat'"'"'s: yes; open /dev/fd/0 O_RDONLY 0, read 3 "abc", descriptor 0 still at 3'
 PDIR=$PAX_ROOT/user/console/pjobs # px51: sh18's job-control sessions, one keys file a case
 PCASES="c_jc_terminal_back c_jc_background_job c_jc_bg c_jc_bg_running c_jc_bg_ttin c_jc_ctrl_c_job_only c_jc_ctrl_c_loop
     c_jc_ctrl_z c_jc_done_message c_jc_exit_stopped c_jc_fg c_jc_fg_number c_jc_fg_pipeline c_jc_job_ids c_jc_jobs_list
@@ -684,11 +691,15 @@ for leg in $legs; do
                             fds) grep -qx "fdtab: px50's probe, as root" "$out.cmp" || why+=" not root's;"
                                  grep -qx "O: root's 0644 file's O_RDONLY entry opened O_WRONLY: 0" "$out.cmp" || why+=" no root's reopen row;"
                                  grep -qx "N: descriptor 0 root's 0644 file O_RDONLY: open /dev/stdin O_WRONLY 0" "$out.cmp" || why+=" no root's /dev/stdin reopen row;"
-                                 grep -qx 'X: rmdir of /proc EBUSY, /sys EBUSY' "$out.cmp" || why+=" no root's rmdir row;" ;;
+                                 grep -qx 'X: rmdir of /proc EBUSY, /sys EBUSY' "$out.cmp" || why+=" no root's rmdir row;"
+                                 grep -qxF "$FDLINK" "$out.cmp" || why+=" no /dev/fd link row;" # px55
+                                 grep -qxF "$FDCAT" "$out.cmp" || why+=" no read through /dev/fd/0;" ;;
                             fds-user) grep -qx "fdtab: px50's probe, as a user" "$out.cmp" || why+=" not a user's;"
                                       grep -qx "O: root's 0644 file's O_RDONLY entry opened O_WRONLY: EACCES" "$out.cmp" || why+=" no user's reopen row;"
                                       grep -qx "N: descriptor 0 root's 0644 file O_RDONLY: open /dev/stdin O_WRONLY EACCES" "$out.cmp" || why+=" no user's /dev/stdin reopen row;"
-                                      grep -qx 'X: rmdir of /proc EACCES, /sys EACCES' "$out.cmp" || why+=" no user's rmdir row;" ;;
+                                      grep -qx 'X: rmdir of /proc EACCES, /sys EACCES' "$out.cmp" || why+=" no user's rmdir row;"
+                                      grep -qxF "$FDLINK" "$out.cmp" || why+=" no /dev/fd link row;" # px55
+                                      grep -qxF "$FDCAT" "$out.cmp" || why+=" no read through /dev/fd/0;" ;;
                             # px51: pelt's prompt; the rows each case is about.
                             pjobs-*) grep -q '^\$ ' "$out.cmp" || why+=" no prompt;"
                                      for w in $(pwitness "${n#pjobs-}"); do
