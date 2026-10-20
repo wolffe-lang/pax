@@ -93,6 +93,19 @@
 //!   and write bits (kernel/files). Measured on Linux 7.2.8
 //!   (`user/elf/fdtab.c`, `notes/px50-the-fd-table.md`).
 //!
+//! - px55 (pax#94): `/proc/self/limits` and `/proc/<pid>/limits`
+//!   (`proc(5)`): Linux 7.2.8's layout, measured on its boot (real
+//!   root's guest) and in a container — a header, then the sixteen
+//!   limits in `asm-generic/resource.h`'s order, each name in 25
+//!   columns and a blank, each value (`unlimited` for RLIM_INFINITY, else
+//!   the number) in 20 and a blank, the units in 10, none after the hard
+//!   value where a limit has no units — with PAX's values (`rlimit`,
+//!   the one table `prlimit64` answers from too, kernel/user: so the
+//!   two cannot part); 0444, the process's (the files' owner rule).
+//!   `/proc/sys/kernel/core_pattern`: `core` (`core(5)`; Linux's boot
+//!   default, measured: PAX writes no core, pax#93), root's 0644, in a
+//!   `/proc/sys/kernel` that has nothing else (named: Linux's has many).
+//!
 //! No region, no heap. Written from proc(5), proc_pid_status(5),
 //! cgroups(7), sysfs(5), px50's proc_pid_fd(5) and proc_pid_fdinfo(5),
 //! and black-box reads of the files on Linux. No Linux source (none of
@@ -110,9 +123,9 @@ use unix
 const PAGE: u64 = 4096
 
 /// How many entries there are; also `NONE`'s value.
-pub const ENTRIES: u64 = 40
+pub const ENTRIES: u64 = 44
 /// No entry.
-pub const NONE: u64 = 40
+pub const NONE: u64 = 44
 /// px44: entries 22 to 25 are `/proc/sys/fs/protected_hardlinks`,
 /// `_symlinks`, `_regular` and `_fifos` (ruling #75 R7: on, fixed).
 const PROTECTED: u64 = 22
@@ -139,6 +152,13 @@ const SSTAT: u64 = 37
 const PSTAT: u64 = 38
 /// px50: `/proc/<pid>/fdinfo`; FIENT + n its entry for descriptor n.
 pub const PFDINFO: u64 = 39
+/// px55 (pax#94): `/proc/sys/kernel` and its `core_pattern`, fixed
+/// entries above PIDDIR's (`fixed`); `/proc/self/limits` (found by name,
+/// as `stat` is) and `/proc/<pid>/limits`.
+const KERNEL: u64 = 40
+const CORE_PATTERN: u64 = 41
+const SLIMITS: u64 = 42
+const PLIMITS: u64 = 43
 pub const FDENT: u64 = 0x1000
 pub const FIENT: u64 = 0x1400
 const FDS_MAX: u64 = 1024 // kernel/files' FDS
@@ -172,9 +192,85 @@ const G_CMDLINE: u64 = 14
 const G_ENVIRON: u64 = 15
 const G_STAT: u64 = 16 // px48
 const G_FDINFO: u64 = 17 // px50: made by kernel/files (`fdinfo`), not by `make`
+const G_CORE_PATTERN: u64 = 18 // px55
+const G_LIMITS: u64 = 19
+
+// px55: the resource limits (uapi asm-generic/resource.h).
+const RLIMIT_STACK: u64 = 3
+const RLIMIT_CORE: u64 = 4
+const RLIMIT_NOFILE: u64 = 7
+pub const RLIM_NLIMITS: u64 = 16
+pub const RLIM_INFINITY: u64 = 0xffffffffffffffff
+/// The stack an ELF process is given (kernel/process's ELF_STACK_PAGES,
+/// 32 pages, fixed): its RLIMIT_STACK, soft and hard.
+const STACK_LIMIT: u64 = 131072
 
 const S_IFDIR: u64 = 0x4000
 const S_IFREG: u64 = 0x8000
+
+/// px55 (pax#93, #94): PAX's limit `res` (below RLIM_NLIMITS), (soft,
+/// hard), for `prlimit64` (kernel/user) and `/proc/<pid>/limits` alike;
+/// `fds` is the descriptor table's size (kernel/files' FDS). The stack's
+/// is the stack PAX gives, the descriptors' the table's; the core
+/// file's soft limit 0 and its hard one unlimited, Linux's boot default
+/// (measured, px53): PAX writes no core and sets no wait status's core
+/// bit, and 0 says so; every other unlimited. None can be set.
+pub fn rlimit(res: u64, fds: u64) -> (u64, u64) {
+    if res == RLIMIT_STACK {
+        return (STACK_LIMIT, STACK_LIMIT)
+    }
+    if res == RLIMIT_NOFILE {
+        return (fds, fds)
+    }
+    if res == RLIMIT_CORE {
+        return (0, RLIM_INFINITY)
+    }
+    (RLIM_INFINITY, RLIM_INFINITY)
+}
+
+/// px55: limit `res`'s name in `/proc/<pid>/limits` (Linux's, measured).
+fn limit_name(res: u64) -> str {
+    if res == 0 { return "Max cpu time" }
+    if res == 1 { return "Max file size" }
+    if res == 2 { return "Max data size" }
+    if res == 3 { return "Max stack size" }
+    if res == 4 { return "Max core file size" }
+    if res == 5 { return "Max resident set" }
+    if res == 6 { return "Max processes" }
+    if res == 7 { return "Max open files" }
+    if res == 8 { return "Max locked memory" }
+    if res == 9 { return "Max address space" }
+    if res == 10 { return "Max file locks" }
+    if res == 11 { return "Max pending signals" }
+    if res == 12 { return "Max msgqueue size" }
+    if res == 13 { return "Max nice priority" }
+    if res == 14 { return "Max realtime priority" }
+    "Max realtime timeout"
+}
+
+/// px55: its units (the two priorities, 13 and 14, have none: `limits`).
+fn limit_units(res: u64) -> str {
+    if res == 0 { return "seconds" }
+    if res == 6 { return "processes" }
+    if res == 7 { return "files" }
+    if res == 10 { return "locks" }
+    if res == 11 { return "signals" }
+    if res == 15 { return "us" }
+    "bytes"
+}
+
+/// Whether `e` is a fixed entry (one a name finds in its directory, and
+/// a listing lists): those below PIDDIR, and px55's `/proc/sys/kernel`
+/// and its `core_pattern`.
+pub fn fixed(e: u64) -> bool {
+    e < PIDDIR || e == KERNEL || e == CORE_PATTERN
+}
+
+/// px55: `/proc/self/limits`'s entry (kernel/files finds it by name, as
+/// `stat`'s).
+pub fn self_limits() -> u64 {
+    SLIMITS
+}
 
 /// A reference's entry (px25: the low 16 bits; the pid above them).
 pub fn entry(r: u64) -> u64 {
@@ -292,6 +388,9 @@ pub fn name(e: u64) -> str {
     if e == PFD { return "fd" }
     if e == PFDINFO { return "fdinfo" } // px50
     if e == SSTAT || e == PSTAT { return "stat" }
+    if e == KERNEL { return "kernel" } // px55
+    if e == CORE_PATTERN { return "core_pattern" }
+    if e == SLIMITS || e == PLIMITS { return "limits" }
     if e == PROTECTED { return "protected_hardlinks" }
     if e == PROTECTED + 1 { return "protected_symlinks" }
     if e == PROTECTED + 2 { return "protected_regular" }
@@ -354,7 +453,9 @@ pub fn parent(r: u64) -> u64 {
     let e = entry(r)
     if e == 0 || e == 7 { return ROOT }
     if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR { return 0 }
-    if e == 2 || e == 3 || e == 21 || e == SCMDLINE || e == SENVIRON || e == SSTAT { return 1 }
+    if e == 2 || e == 3 || e == 21 || e == SCMDLINE || e == SENVIRON || e == SSTAT || e == SLIMITS { return 1 }
+    if e == KERNEL { return 4 } // px55
+    if e == CORE_PATTERN { return KERNEL }
     if e == NET { return 4 }
     if e == IPV4 { return NET }
     if e == UNPRIV { return IPV4 }
@@ -362,7 +463,7 @@ pub fn parent(r: u64) -> u64 {
     if isfd { return (pid_of(r) << 16) | PFD }
     let (isfi, _m) = fi_of(r)
     if isfi { return (pid_of(r) << 16) | PFDINFO } // px50
-    if e == PCMDLINE || e == PENVIRON || e == PFD || e == PFDINFO || e == PSTAT { return pid_dir(pid_of(r)) }
+    if e == PCMDLINE || e == PENVIRON || e == PFD || e == PFDINFO || e == PSTAT || e == PLIMITS { return pid_dir(pid_of(r)) }
     if e == 5 || e == 17 { return 4 }
     if e == 6 { return 5 }
     if e == 18 || (e >= PROTECTED && e < PROTECTED + 4) { return 17 }
@@ -389,6 +490,8 @@ fn gen(r: u64) -> u64 {
     if e == SCMDLINE || e == PCMDLINE { return G_CMDLINE }
     if e == SENVIRON || e == PENVIRON { return G_ENVIRON }
     if e == SSTAT || e == PSTAT { return G_STAT }
+    if e == CORE_PATTERN { return G_CORE_PATTERN } // px55
+    if e == SLIMITS || e == PLIMITS { return G_LIMITS }
     let (isfd, _n) = fd_of(r)
     if isfd { return G_CMDLINE } // px45: not a directory (px50: a link kernel/files follows; never opened itself)
     let (isfi, _m) = fi_of(r)
@@ -420,16 +523,16 @@ pub fn mode(r: u64) -> u64 {
         if e == PFDINFO {
             return S_IFDIR | 0x16d // px50: 0555 (measured)
         }
-        if e <= 7 || e == 17 || e == 19 || e == NET || e == IPV4 || e == PIDDIR {
-            return S_IFDIR | 0x16d // 0555: /proc, /proc/self, /proc/sys, /proc/sys/vm, /sys; px45: /proc/sys/net, its ipv4
+        if e <= 7 || e == 17 || e == 19 || e == NET || e == IPV4 || e == PIDDIR || e == KERNEL {
+            return S_IFDIR | 0x16d // 0555: /proc, /proc/self, /proc/sys, /proc/sys/vm, /sys; px45: /proc/sys/net, its ipv4; px55: /proc/sys/kernel
         }
         return S_IFDIR | 0x1ed // 0755
     }
     if e == PENVIRON || e == SENVIRON {
         return S_IFREG | 0x100 // px45: 0400 (measured)
     }
-    if e == 6 || e == 11 || e == 21 || e == PSETGROUPS || e == UNPRIV || (e >= PROTECTED && e < PROTECTED + 4) {
-        return S_IFREG | 0x1a4 // 0644: overcommit_memory, cpu.max, setgroups, px44's protected settings, px45's port setting (measured)
+    if e == 6 || e == 11 || e == 21 || e == PSETGROUPS || e == UNPRIV || (e >= PROTECTED && e < PROTECTED + 4) || e == CORE_PATTERN {
+        return S_IFREG | 0x1a4 // 0644: overcommit_memory, cpu.max, setgroups, px44's protected settings, px45's port setting, px55's core_pattern (measured)
     }
     S_IFREG | 0x124 // 0444
 }
@@ -446,7 +549,7 @@ pub fn mode(r: u64) -> u64 {
 pub fn owner(r: u64, area: u64, which: int) -> u64 {
     let e = entry(r)
     let isfd = desc_of(r) != FDS_MAX
-    let per = e == 2 || e == 3 || e == 21 || e == PSTATUS || e == PSETGROUPS || e == SCMDLINE || e == SENVIRON || e == PCMDLINE || e == PENVIRON || e == PFD || e == SSTAT || e == PSTAT || isfd
+    let per = e == 2 || e == 3 || e == 21 || e == PSTATUS || e == PSETGROUPS || e == SCMDLINE || e == SENVIRON || e == PCMDLINE || e == PENVIRON || e == PFD || e == SSTAT || e == PSTAT || e == SLIMITS || e == PLIMITS || isfd
     if e != 1 && e != PIDDIR && e != PFDINFO && !per {
         return 0
     }
@@ -493,13 +596,13 @@ pub fn fs(r: u64) -> u64 {
 pub fn child_at(d: u64, k: u64) -> u64 {
     var seen: u64 = 0
     if d != ROOT && entry(d) == PIDDIR {
-        // px45: status, setgroups, cmdline, environ, fd (kernel/files lists fd's own); px48: stat; px50: fdinfo
-        let e = if k == 0 { PSTATUS } else if k == 1 { PSETGROUPS } else if k == 2 { PCMDLINE } else if k == 3 { PENVIRON } else if k == 4 { PFD } else if k == 5 { PSTAT } else if k == 6 { PFDINFO } else { NONE }
+        // px45: status, setgroups, cmdline, environ, fd (kernel/files lists fd's own); px48: stat; px50: fdinfo; px55: limits
+        let e = if k == 0 { PSTATUS } else if k == 1 { PSETGROUPS } else if k == 2 { PCMDLINE } else if k == 3 { PENVIRON } else if k == 4 { PFD } else if k == 5 { PSTAT } else if k == 6 { PFDINFO } else if k == 7 { PLIMITS } else { NONE }
         return if e == NONE { NONE } else { (pid_of(d) << 16) | e }
     }
     var e: u64 = 0
-    while e < PIDDIR {
-        if parent(e) == d {
+    while e < ENTRIES {
+        if fixed(e) && parent(e) == d {
             if seen == k {
                 return e
             }
@@ -509,10 +612,11 @@ pub fn child_at(d: u64, k: u64) -> u64 {
     }
     if d == 1 {
         // px48: /proc/self/stat, after the others; px50: then its fd and
-        // fdinfo, the reader's own (`/proc/<pid>`'s).
+        // fdinfo, the reader's own (`/proc/<pid>`'s); px55: then limits.
         if seen == k { return SSTAT }
         if seen + 1 == k { return fd_dir(sched.self_pid(), 0) }
         if seen + 2 == k { return fd_dir(sched.self_pid(), 1) }
+        if seen + 3 == k { return SLIMITS }
         return NONE
     }
     if d != 0 {
@@ -924,6 +1028,60 @@ fn stat(base: u64, s: u64, me: bool, area: u64) -> u64 {
     put_s(base, k, " 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n")
 }
 
+/// px55: `s` and blanks to `w` columns (none when `s` is as long).
+fn put_pad(base: u64, at: u64, s: str, w: u64) -> u64 {
+    var k = put_s(base, at, s)
+    var n: u64 = 0
+    for _b in s.bytes() {
+        n += 1
+    }
+    while n < w {
+        k = put_b(base, k, 32)
+        n += 1
+    }
+    k
+}
+
+/// px55: a limit's value (`unlimited` for RLIM_INFINITY, else the
+/// number) and blanks to `w` columns.
+fn put_limit(base: u64, at: u64, v: u64, w: u64) -> u64 {
+    if v == RLIM_INFINITY {
+        return put_pad(base, at, "unlimited", w)
+    }
+    var k = put_dec(base, at, v)
+    var n = digits(v)
+    while n < w {
+        k = put_b(base, k, 32)
+        n += 1
+    }
+    k
+}
+
+/// px55 (pax#94): `/proc/<pid>/limits` (`proc(5)`; Linux 7.2.8's layout,
+/// measured): the header, then each limit's name in 25 columns and a
+/// blank, its soft and hard values each in 20 and a blank, its units in
+/// 10 (nothing where it has none); `fds` the descriptor table's size.
+fn limits(base: u64, fds: u64) -> u64 {
+    var k = put_pad(base, 0, "Limit", 26)
+    k = put_pad(base, k, "Soft Limit", 21)
+    k = put_pad(base, k, "Hard Limit", 21)
+    k = put_pad(base, k, "Units", 10)
+    k = put_b(base, k, 10)
+    var res: u64 = 0
+    while res < RLIM_NLIMITS {
+        let (soft, hard) = rlimit(res, fds)
+        k = put_pad(base, k, limit_name(res), 26)
+        k = put_limit(base, k, soft, 21)
+        k = put_limit(base, k, hard, 21)
+        if res != 13 && res != 14 {
+            k = put_pad(base, k, limit_units(res), 10) // the two priorities have no units
+        }
+        k = put_b(base, k, 10)
+        res += 1
+    }
+    k
+}
+
 /// px25: `/proc/meminfo`'s three lines (frames as kB).
 fn meminfo(base: u64) -> u64 {
     var k = put_kb(base, 0, "MemTotal", frames.usable() * 4)
@@ -984,7 +1142,7 @@ fn strings(base: u64, area: u64, which: int, space: u64) -> u64 {
 pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64) -> (u64, u64) {
     let g = gen(r)
     var slot = sched.SLOTS
-    if g == G_PSTATUS || ((g == G_SETGROUPS || g == G_CMDLINE || g == G_ENVIRON || g == G_STAT) && pid_of(r) != 0) {
+    if g == G_PSTATUS || ((g == G_SETGROUPS || g == G_CMDLINE || g == G_ENVIRON || g == G_STAT || g == G_LIMITS) && pid_of(r) != 0) {
         slot = sched.proc_slot(pid_of(r))
         if slot == sched.SLOTS {
             return (0, 1)
@@ -1023,6 +1181,10 @@ pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64)
         n = put_s(base, 0, "1024\n") // px45: kernel/socket's UNPRIVILEGED_PORT_START, fixed
     } else if g == G_CMDLINE || g == G_ENVIRON {
         n = strings(base, area, if g == G_CMDLINE { 0 } else { 1 }, if slot == sched.SLOTS { paging.live() } else { sched.proc_word(slot, 3) })
+    } else if g == G_LIMITS {
+        n = limits(base, fds) // px55: every process's are PAX's one table
+    } else if g == G_CORE_PATTERN {
+        n = put_s(base, 0, "core\n") // px55: Linux's boot default; PAX writes no core
     } else if g == G_CONTROLLERS {
         n = put_s(base, 0, "cpu\n")
     } else if g == G_CPUMAX {
