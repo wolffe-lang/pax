@@ -168,7 +168,11 @@
 #      and left out there, named); its J4 witness: who it runs as,
 #      `text(0)`'s words, a SENT SEGV ending the program under the
 #      default and lived through under the ignore, the group rows, the
-#      overflow's 134.
+#      overflow's 134. px55 (pax#93, #94): and the core file's limit as
+#      /proc/self/limits says it (`L:`), soft 0 and hard unlimited, the
+#      guest's boot and PAX's; the container's hard limit is
+#      tools/linux-tree's `--ulimit core=0:0`, so that row is left out of
+#      the container's comparisons (named); its witness both rows.
 #   J7 px49: gaps as root and as 1000:1000, byte-identical to real root's
 #      recordings (tests/mpx5-jobs.d/linux/gaps.tty, gaps-user.tty: the
 #      guest's notes/px49/vmjob.c, which brings the loopback up and
@@ -225,6 +229,7 @@ PBORE="sleep cat cut tr wc true kill timeout" # px51: boreutils in the pjobs arc
 PTEXT='not a program' # px51: /g/text, a file timeout cannot run (126)
 RKEYS=$PAX_ROOT/user/console/groups.keys # px51
 CORE_LINE='timeout: the monitored command dumped core' # px53: GNU's words, timeout's at a core
+LHARD='L: the core limit, hard: ' # px55: sigwolf's row of the hard core limit (the container's is its engine's)
 # px51: what a pjobs case must show (a word of each line), by case.
 pwitness() {
     case ${1#user-} in
@@ -551,7 +556,8 @@ host_rows() { # name file -> the file, the host's rows left out
     if [ "$1" = gaps-user ] && [ "$STI" != 0 ]; then command grep -v '^I: TIOCSTI' "$2"
     elif [ "$1" = fds-user ]; then command grep -v "^P: its zombie child's fd/: " "$2" # px50: the host kernel's (below)
     elif [ "$1" = groups-user ] && [ "$PIPED" = 1 ]; then command grep -vxF "$CORE_LINE" "$2"
-    elif [ "$1" = sigs-user ] && [ "$PIPED" = 1 ]; then command grep -v '^C: ' "$2"
+    elif [ "$1" = sigs-user ] && [ "$PIPED" = 1 ]; then command grep -v -e '^C: ' -e "^$LHARD" "$2"
+    elif [ "$1" = sigs-user ]; then command grep -v "^$LHARD" "$2" # px55: tools/linux-tree's own --ulimit core=0:0
     else cat "$2"; fi
 }
 # The recordings and the container agree before PAX is held to them.
@@ -569,7 +575,8 @@ for n in $UTYPED; do
     hn=; [ "$n" = gaps-user ] && [ "$STI" != 0 ] && hn=" (this host's dev.tty.legacy_tiocsti is $STI: its TIOCSTI rows left out)"
     [ "$n" = fds-user ] && hn=" (its zombie row left out: the host kernel's)"
     [ "$n" = groups-user ] && [ "$PIPED" = 1 ] && hn=" (this host's core_pattern pipes: timeout's 'dumped core' line left out)"
-    [ "$n" = sigs-user ] && [ "$PIPED" = 1 ] && hn=" (this host's core_pattern pipes: the C rows left out)"
+    [ "$n" = sigs-user ] && hn=" (the hard core limit's row left out: the container's is tools/linux-tree's --ulimit core=0:0)"
+    [ "$n" = sigs-user ] && [ "$PIPED" = 1 ] && hn=" (this host's core_pattern pipes: the C rows left out; the hard core limit's row left out: the container's is tools/linux-tree's --ulimit core=0:0)"
     if cmp -s "$lx/$n.cmp" "$images/rec-$n.host.cmp" && [ "$(cat "$lx/$n.tty.rc")" = "$(cat "$REC/$n.tty.rc")" ]; then
         say "PASS J0 linux $n: the container's session is real root's recording, $(wc -l < "$lx/$n.cmp" | tr -d ' ') lines ($(sha256_of "$lx/$n.cmp" | cut -c1-12)…)$hn"
     else
@@ -720,7 +727,8 @@ for leg in $legs; do
                                          'E: exit-segv: signal 11' 'E: ignored-rt: exit 0' 'E: defaulted-rt: signal 34' \
                                          'G: SEGMENT_FAULT to its own group, ignored by the leader: the job signal 11; the leader lives' \
                                          'G: host 34 to its own group, ignored by the leader: the job signal 34; the leader lives' \
-                                         'C: exit-segv, wait_status_core: signal 11' 'F: overflow-ignored: exit 134'; do
+                                         'C: exit-segv, wait_status_core: signal 11' 'F: overflow-ignored: exit 134' \
+                                         'L: the core limit, soft: 0' 'L: the core limit, hard: unlimited'; do # px55: the last two
                                     grep -qxF "$w" "$out.cmp" || why+=" no '$w';"
                                 done ;;
                             gaps-user) grep -qx "gaps: px49's probe, as a user" "$out.cmp" || why+=" not a user's;"
