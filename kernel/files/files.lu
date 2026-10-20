@@ -2935,10 +2935,16 @@ fn syn_child(d: u64, s: u64, n: u64) -> u64 {
         if comp_is(s, n, "fdinfo") {
             return (T_SYN << T_SHIFT) | procfs.child_at(d, 6) // px50
         }
+        if comp_is(s, n, "limits") {
+            return (T_SYN << T_SHIFT) | procfs.child_at(d, 7) // px55
+        }
         return err(ENOENT)
     }
     if d == 1 && comp_is(s, n, "stat") {
         return (T_SYN << T_SHIFT) | procfs.self_stat() // px48: /proc/self/stat
+    }
+    if d == 1 && comp_is(s, n, "limits") {
+        return (T_SYN << T_SHIFT) | procfs.self_limits() // px55: /proc/self/limits
     }
     // px50: /proc/self/fd and /proc/self/fdinfo are the reader's own
     // (`/proc/<pid>`'s, its process's number in the reference).
@@ -2973,8 +2979,8 @@ fn syn_child(d: u64, s: u64, n: u64) -> u64 {
         return (T_SYN << T_SHIFT) | r
     }
     var e: u64 = 0
-    while e < procfs.PIDDIR {
-        if procfs.parent(e) == d && comp_is(s, n, procfs.name(e)) {
+    while e < procfs.ENTRIES {
+        if procfs.fixed(e) && procfs.parent(e) == d && comp_is(s, n, procfs.name(e)) {
             return (T_SYN << T_SHIFT) | e
         }
         e += 1
