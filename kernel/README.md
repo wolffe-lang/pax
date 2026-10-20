@@ -780,9 +780,31 @@ shell-inout sessions' `/dev/std*` lines (`tests/mpx3-tree`).
 | `files/` | `/dev/stdin`, `/dev/stdout`, `/dev/stderr` are symbolic links to `/proc/self/fd/0`, `1`, `2` (`is_link_node`, `link_bytes`, `link_target`: 0777, root's, 15 bytes, `DT_LNK`, inodes 0x1a to 0x1c): a walk rewrites the path to the target as for the tree's links (one link against the 40, then px50's magic link), so `stat`, `open` and a walk through one are `/proc/self/fd/N`'s with its rules (a file by its mode, a socket -ENXIO, a closed descriptor -ENOENT); `readlink` reads the target, `lstat` and `statx` with AT_SYMLINK_NOFOLLOW the link, O_NOFOLLOW -ELOOP. px17's reopen of descriptor N and px50's `std_target` are gone |
 
 - What is not there: `/dev/fd` (a link to `/proc/self/fd` on Linux
-  beside the three; not asked for); root removing or renaming one (Linux's
+  beside the three; not asked for; px55 serves it, below); root removing or renaming one (Linux's
   root may; on PAX nothing in `/dev` is made, removed or renamed, and
   this lane did not ask).
+
+## The small fixes, two (px55)
+
+pax#88, #93 and #94, measured black-box against Linux as root and as a
+user (`notes/px55-the-small-fixes-two.md`): `user/elf/fdtab.c`'s
+`/dev/fd` rows (`tests/mpx5-jobs`' fds image, held to real root's guest
+and a container), and `user/elf/tree.c`'s `proc:` section
+(`tests/mpx3-tree`: the layout held to a container, PAX's values to
+`tests/mpx3-tree.d/proc.pax`; Linux's boot values measured on real root's
+guest).
+
+| module | what |
+|---|---|
+| `files/` | `/dev/fd` is a symbolic link to `/proc/self/fd` (`T_STD`'s fourth node, `FD_LINK`: 0777, root's, 13 bytes, `DT_LNK`, inode 0x1d, listed after `stderr`), so `/dev/fd/N` is the caller's descriptor N by the walk and px50's magic link; `/proc/self/limits`, `/proc/<pid>/limits` and `/proc/sys/kernel` are found by name (the fixed entries are `procfs.fixed`'s) |
+| `procfs/` | `rlimit`, PAX's one table of resource limits (the stack's 131072 both, the descriptors' 1024 both, the core file's soft 0 and hard unlimited, every other unlimited); `/proc/self/limits` and `/proc/<pid>/limits` print it in Linux's layout (a header, each name in 25 columns and a blank, each value in 20 and a blank, the units in 10, none for the two priorities; 0444, the process's); `/proc/sys/kernel` (0555) holds `core_pattern` alone: `core`, root's 0644 |
+| `user/` | `prlimit64` answers from `procfs.rlimit` (pax#93: `RLIMIT_CORE` soft 0, hard unlimited, as Linux boots: PAX writes no core and sets no wait status's core bit); a set is still -EPERM |
+
+- What is not there: the rest of Linux's `/proc/sys/kernel`; a write to
+  `core_pattern` (not asked); any limit set (`prlimit64`'s set and
+  `setrlimit` stay -EPERM); `RLIMIT_NICE` and `RLIMIT_RTPRIO` answer
+  unlimited while `setpriority` and `sched_setscheduler` act as Linux's
+  boot limit of 0 does (px45: named, to file).
 
 ## Who may name, change and keep (px44)
 
