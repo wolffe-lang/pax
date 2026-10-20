@@ -10,8 +10,10 @@ B=$L/build/$T
 rm -rf $B && mkdir -p $B
 cd $L/pax
 git log --oneline -1
+# a suite with no `--only build` builds (and runs its Linux side) under --no-boot
+ONLY=--no-boot; grep -q -- '--only build' tests/$S && ONLY="--only build"
 podman run --rm --privileged --cpuset-cpus 4-15 -v $L:$L:Z -e PAX_CACHE=$L/cache -e TMPDIR=$L/tmp -e PAX_BUILD=$B \
-    -e PAX_LOPE_REPO=$L/lope localhost/px13-ubuntu bash -c "cd $L/pax && export PAX_WOLF=\$(tools/fetch-wolf | tail -n 1) && tests/$S --only build --tier $TI" > $B.build.log 2>&1
+    -e PAX_LOPE_REPO=$L/lope localhost/px13-ubuntu bash -c "cd $L/pax && export PAX_WOLF=\$(tools/fetch-wolf | tail -n 1) && tests/$S $ONLY --tier $TI" > $B.build.log 2>&1
 echo "$S build: $? ($(tail -n 1 $B.build.log))"
 export PAX_CACHE=$L/cache PAX_BUILD=$B PAX_ENGINE=podman PAX_TREE_IMAGE=localhost/px13-ubuntu
 W=$B/$S
