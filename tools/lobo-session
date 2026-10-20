@@ -89,6 +89,7 @@ def ephemeral():
 
 
 rounds_asked = 0
+span_ = None
 
 
 def free_ports(n):
@@ -96,9 +97,11 @@ def free_ports(n):
     held until the last port is chosen (pax#53); px55 (pax#89): each from
     20000 to 49151 outside this host's ephemeral range (px52's picker,
     pax#86), never one a socket bound to port 0 could be given."""
-    global rounds_asked
+    global rounds_asked, span_
     lo, hi = ephemeral()
-    span = [q for q in range(20000, 49152) if not lo <= q <= hi]
+    if span_ is None:
+        span_ = [q for q in range(20000, 49152) if not lo <= q <= hi]
+    span = span_
     i = (os.getpid() * 7919 + rounds_asked * 16 * n) % max(len(span), 1)
     rounds_asked += 1
     socks = []
@@ -125,6 +128,7 @@ def free_ports(n):
 if len(sys.argv) == 4 and sys.argv[1] == "--free-ports":
     n_, rounds_ = int(sys.argv[2]), int(sys.argv[3])
     lo_, hi_ = ephemeral()
+    ephemeral = lambda: (lo_, hi_)  # noqa: E731  read once for every round
     twice = inside = 0
     for _ in range(rounds_):
         got = free_ports(n_)
