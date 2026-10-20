@@ -1,0 +1,236 @@
+// sigwolf — what wolf 0.2.33 asks of PAX (px53): s246's five new calls
+// and `os_signal_text(0)` (wolf-lang#783, #784, #785, #787; the spec's
+// `[os.signal.disp.one]`, `[os.signal.exit]`, `[os.proc.status]`,
+// `[os.proc.poll]`, `[os.signal.text]`), built for Linux by its own
+// pinned wolf (user/sigwolf/wolf-toolchain.toml, tools/mksigwolf),
+// linked static, run unmodified on PAX and on Linux and held to Linux
+// as root and as a user (tests/mpx5-jobs' `sigs` image).
+//
+// Run with no argument it is the parent: it prints every row, and
+// starts itself again (`os_exe()`) with one MODE for each child, whose
+// end it reports as the released wait answers it (`exit N`, `signal
+// N`) or, on the `C:` rows, as the `_core` siblings answer it (`signal
+// N core` when the host wrote a core: which ends dump one is the
+// host's, `[os.proc.status]`). The children signal only themselves and
+// the group one of them leads; nothing else is sent.
+//
+//   group               leads a group of its own (the parent cannot:
+//                       as root on PAX it is pid 1, and group 1 is no
+//                       group the sending calls take), starts a `wait`
+//                       job, ignores SEGMENT_FAULT and sends it to the
+//                       group, then host 34 the same way; the job ends
+//                       by each, the leader lives (GNU `timeout -s SEGV`
+//                       and `-s RTMIN` without --foreground)
+//   wait                sleeps 30 s (a job to be sent to)
+//   exit-segv           has run a task, then `os_exit_signal(SEGMENT_FAULT)`
+//   exit-rt             `os_exit_signal(-34)`, a host number
+//   exit-child          `os_exit_signal(CHILD)`: its default does
+//                       nothing, so it exits 128 + 17
+//   exit-term-listened  listens for TERMINATE, then ends by it
+//   sent-segv           has run a task, sends itself SEGV under the
+//                       default: the stack guard passes a SENT one
+//                       (siginfo's si_code at or below 0) to the default
+//   ignored-sent-segv   the same under `os_signal_ignore_one`: lives
+//   ignored-rt          ignores host 34, sends it to itself: lives
+//   defaulted-rt        ignores host 34, defaults it again, sends it
+//   masks               prints its own SigIgn (started while the parent
+//                       ignores SEGMENT_FAULT: the ignore crosses exec)
+//   overflow-ignored    ignores SEGMENT_FAULT, then a task overflows its
+//                       stack: a REAL fault is still the runtime's (its
+//                       report, exit 134)
+
+fn ended(st: int) -> str {
+    if st >= 0 {
+        return "exit {st}"
+    }
+    if st <= -256 {
+        return "signal {0 - st - 256} core"
+    }
+    "signal {0 - st}"
+}
+
+fn deep(n: int) -> int {
+    if n < 0 { 0 } else { deep(n + 1) + 1 }
+}
+
+fn a_task() {
+    scope s {
+        s.spawn(fn() { time_sleep_ms(1) })
+    }
+}
+
+/// `os_exit_signal(m)`, which does not return for a meaning in its
+/// shape; a row it answers is printed (and the caller exits 3).
+fn end_by(m: int) {
+    os_exit_signal(m) else |e| {
+        eprint(match e {
+            invalid => "exit_signal: invalid",
+            unsupported => "exit_signal: unsupported",
+        })
+        return
+    }
+    eprint("exit_signal: returned ok")
+}
+
+/// The leader's half of one group row: the job first, then the ignore,
+/// as GNU's `timeout` orders them (a meaning ignored here is ignored in
+/// a child started after, `[os.signal.disp.one]`).
+fn send_and_live(exe: str, group: int, m: int, name: str) -> !int {
+    let h = os_spawn([exe, "wait"])?
+    time_sleep_ms(300)
+    os_signal_ignore_one(m)?
+    os_signal_send_group(group, m)?
+    let st = os_wait_status(h)?
+    print("G: {name} to its own group, ignored by the leader: the job {ended(st)}; the leader lives")
+    0
+}
+
+fn lead(exe: str) -> !int {
+    os_set_pgid(0)?
+    let me = os_pgid()?
+    let leads = me == os_pid()
+    print("G: the leader leads its group: {leads}")
+    let _ = send_and_live(exe, me, 4194304, "SEGMENT_FAULT")?
+    let _ = send_and_live(exe, me, -34, "host 34")?
+    os_signal_default_one(4194304)?
+    os_signal_default_one(-34)?
+    print("G: SEGMENT_FAULT and host 34 back to the default")
+    0
+}
+
+fn masks() -> !int {
+    let text = fs_read_text("/proc/self/status")?
+    for line in text.split("\n") {
+        if line.starts_with("SigIgn:") {
+            let l = line.replace("\t", " ")
+            print("X: a child started under the fault ignore: {l}")
+        }
+    }
+    0
+}
+
+fn child(exe: str, mode: str) -> !int {
+    if mode == "group" {
+        return lead(exe)
+    }
+    if mode == "wait" {
+        time_sleep_ms(30000)
+        return 0
+    }
+    if mode == "exit-segv" {
+        a_task()
+        end_by(4194304)
+        return 3
+    }
+    if mode == "exit-rt" {
+        end_by(-34)
+        return 3
+    }
+    if mode == "exit-child" {
+        end_by(256)
+        return 3
+    }
+    if mode == "exit-term-listened" {
+        os_signal_listen(2)?
+        end_by(2)
+        return 3
+    }
+    if mode == "sent-segv" {
+        a_task()
+        os_signal_send(os_pid(), 4194304)?
+        time_sleep_ms(300)
+        return 0
+    }
+    if mode == "ignored-sent-segv" {
+        os_signal_ignore_one(4194304)?
+        a_task()
+        os_signal_send(os_pid(), 4194304)?
+        time_sleep_ms(300)
+        return 0
+    }
+    if mode == "ignored-rt" {
+        os_signal_ignore_one(-34)?
+        os_signal_send(os_pid(), -34)?
+        time_sleep_ms(300)
+        return 0
+    }
+    if mode == "defaulted-rt" {
+        os_signal_ignore_one(-34)?
+        os_signal_default_one(-34)?
+        os_signal_send(os_pid(), -34)?
+        time_sleep_ms(300)
+        return 0
+    }
+    if mode == "masks" {
+        return masks()
+    }
+    if mode == "overflow-ignored" {
+        os_signal_ignore_one(4194304)?
+        scope s {
+            s.spawn(fn() {
+                let x = deep(0)
+                print("unreachable: {x}")
+            })
+        }
+        return 0
+    }
+    4
+}
+
+/// A child's end as the released wait answers it.
+fn run(exe: str, mode: str) -> !str {
+    let h = os_spawn([exe, mode])?
+    let st = os_wait_status(h)?
+    ended(st)
+}
+
+fn main() -> !int {
+    let exe = os_exe()?
+    let args = env_args()
+    if args.len > 0 {
+        return child(exe, args[0])
+    }
+    let uid = os_uid()?
+    let who = if uid == 0 { "root" } else { "a user" }
+    print("sigwolf: px53's probe of wolf 0.2.33's signal calls, as {who}")
+    // #787: signal 0's words; a host number's; a meaning's.
+    let t0 = os_signal_text(0)?
+    let t34 = os_signal_text(-34)?
+    let tsegv = os_signal_text(4194304)?
+    print("T: text(0): {t0}")
+    print("T: text(host 34): {t34}")
+    print("T: text(SEGMENT_FAULT): {tsegv}")
+    // #783: one meaning ignored in the sending shape, sent to the group.
+    let g = os_spawn([exe, "group"])?
+    let gs = os_wait_status(g)?
+    print("G: the leader {ended(gs)}")
+    // #784: the end by a signal, and a SENT fault under each choice.
+    for mode in ["exit-segv", "exit-rt", "exit-child", "exit-term-listened", "sent-segv",
+                 "ignored-sent-segv", "ignored-rt", "defaulted-rt"] {
+        let e = run(exe, mode)?
+        print("E: {mode}: {e}")
+    }
+    // #785: the core siblings, by the wait and by the poll.
+    let a = os_spawn([exe, "exit-segv"])?
+    let ac = os_wait_status_core(a)?
+    print("C: exit-segv, wait_status_core: {ended(ac)}")
+    let b = os_spawn([exe, "sent-segv"])?
+    var r = os_wait_poll_core()?
+    while r.0 != b {
+        time_sleep_ms(5)
+        r = os_wait_poll_core()?
+    }
+    print("C: sent-segv, wait_poll_core: {ended(r.1)}")
+    let c = os_spawn([exe, "exit-rt"])?
+    let cc = os_wait_status_core(c)?
+    print("C: exit-rt, wait_status_core: {ended(cc)}")
+    // The fault ignore across exec: the child starts with SEGV ignored.
+    os_signal_ignore_one(4194304)?
+    let m = run(exe, "masks")?
+    print("X: the child {m}")
+    os_signal_default_one(4194304)?
+    // A real fault under the ignore is the runtime's.
+    let f = run(exe, "overflow-ignored")?
+    print("F: overflow-ignored: {f}")
+    0
+}
