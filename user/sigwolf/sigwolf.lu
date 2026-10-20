@@ -38,6 +38,11 @@
 //   overflow-ignored    ignores SEGMENT_FAULT, then a task overflows its
 //                       stack: a REAL fault is still the runtime's (its
 //                       report, exit 134)
+//
+// px55 (pax#93, #94): and the parent's core file limit, as
+// `/proc/self/limits` says it (no prelude call reads a limit), its soft
+// and its hard value (the `L:` rows): Linux boots with soft 0, hard
+// unlimited, and so does PAX, which writes no core.
 
 fn ended(st: int) -> str {
     if st >= 0 {
@@ -177,6 +182,25 @@ fn child(exe: str, mode: str) -> !int {
     4
 }
 
+/// px55 (pax#93, #94): the core file's limit, the `Max core file size`
+/// row of `/proc/self/limits`: its fifth and sixth words, the soft and
+/// the hard value (`unlimited`, or the number).
+fn core_limit() -> !int {
+    let text = fs_read_text("/proc/self/limits")?
+    for line in text.split("\n") {
+        if line.starts_with("Max core file size") {
+            let w = line.words()
+            if w.len >= 6 {
+                let soft = w[4]
+                let hard = w[5]
+                print("L: the core limit, soft: {soft}")
+                print("L: the core limit, hard: {hard}")
+            }
+        }
+    }
+    0
+}
+
 /// A child's end as the released wait answers it.
 fn run(exe: str, mode: str) -> !str {
     let h = os_spawn([exe, mode])?
@@ -224,6 +248,8 @@ fn main() -> !int {
     let c = os_spawn([exe, "exit-rt"])?
     let cc = os_wait_status_core(c)?
     print("C: exit-rt, wait_status_core: {ended(cc)}")
+    // px55 (pax#93): the limit under which no core is written.
+    let _ = core_limit()?
     // The fault ignore across exec: the child starts with SEGV ignored.
     os_signal_ignore_one(4194304)?
     let m = run(exe, "masks")?
