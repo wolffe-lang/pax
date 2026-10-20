@@ -70,4 +70,22 @@ st=127
 $ timeout 1 /g/text; echo st=$?
 timeout: failed to run command '/g/text': Permission denied
 st=126
+$ timeout -s SEGV 1 sleep 5; echo st=$?
+st=124
+$ timeout -s RTMIN 1 sleep 5; echo st=$?
+st=124
+$ timeout -s 16 1 sleep 5; echo st=$?
+st=124
+$ timeout -s RTMIN 1 sh -c 'sh -c "sleep 2; echo survived" & wait'; echo st=$?
+st=124
+$ sleep 2.5; echo checked
+checked
+$ timeout 5 sh -c 'exec /bin/kill -s SEGV $$'; echo st=$?
+pelt: ended by signal 11 (SEGV)
+st=139
+$ timeout 5 sh -c 'exec /bin/kill -s RTMIN $$'; echo st=$?
+pelt: ended by signal 34
+st=162
+$ /bin/kill -L 0 | tr -s ' '
+ 0 EXIT Unknown signal 0
 $ exit
