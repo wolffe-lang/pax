@@ -13,7 +13,10 @@
    two names of one file), symbolic links (what follows them and what
    does not, ELOOP, O_NOFOLLOW, what a target costs), modes, times set
    to the nanosecond, owners as root sees them, and what PAX keeps
-   fixed.
+   fixed. px55 (pax#93, #94): /proc/self/limits and
+   /proc/sys/kernel/core_pattern, their layout held to Linux and their
+   values (the host's on Linux: a container's limits are its engine's,
+   its core pattern the host's) as `~proc:` lines.
 
      tree             every probe, in order (it works in /t, which it
                       makes and removes)
@@ -45,6 +48,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/sendfile.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -1647,6 +1651,107 @@ static int speed(void) {
     return 0;
 }
 
+/* ---- px55 (pax#93, #94): /proc/self/limits, /proc/sys/kernel/core_pattern
+   (proc(5), getrlimit(2), core(5)). What every Linux answers is
+   compared: each file's mode, size and owner, its directory's listing,
+   the limits file's header and each row's name, units, length and
+   columns, and that every row's two values are getrlimit's. The values
+   themselves are the host's (a container's limits are its engine's and
+   its core pattern the host's), so they are `~proc:` lines, held on PAX
+   to PAX's own text (tests/mpx3-tree.d/proc.pax). */
+static int listed(const char *dir, const char *name) {
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    struct dirent *e;
+    int y = 0;
+    while ((e = readdir(d))) if (strcmp(e->d_name, name) == 0) y = 1;
+    closedir(d);
+    return y;
+}
+static const char *yno(int c) { return c ? "yes" : "no"; }
+/* a file's whole text (at most n - 1 bytes): its length, or -errno */
+static long slurp(const char *path, char *b, size_t n) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -errno;
+    size_t k = 0;
+    for (;;) {
+        ssize_t g = read(fd, b + k, n - 1 - k);
+        if (g < 0) { int e = errno; close(fd); return -e; }
+        if (g == 0 || k + (size_t)g >= n - 1) { k += (size_t)(g > 0 ? g : 0); break; }
+        k += (size_t)g;
+    }
+    close(fd);
+    b[k] = 0;
+    return (long)k;
+}
+/* [from, to) of line l with its blanks at both ends cut */
+static void field(const char *l, size_t len, size_t from, size_t to, char *o, size_t on) {
+    if (to > len) to = len;
+    while (from < to && l[from] == ' ') from++;
+    while (to > from && l[to - 1] == ' ') to--;
+    size_t k = to > from ? to - from : 0;
+    if (k > on - 1) k = on - 1;
+    memcpy(o, l + from, k);
+    o[k] = 0;
+}
+static void lim(rlim_t v, char *o, size_t on) {
+    if (v == RLIM_INFINITY) snprintf(o, on, "unlimited");
+    else snprintf(o, on, "%llu", (unsigned long long)v);
+}
+static void procfiles(void) {
+    struct stat s;
+    int sl = stat("/proc/self/limits", &s);
+    say("proc: /proc/self/limits: %s, the reader's: %s; /proc/self lists it: %s\n", st("/proc/self/limits"),
+        yno(sl == 0 && s.st_uid == geteuid() && s.st_gid == getegid()), yno(listed("/proc/self", "limits")));
+    static char t[8192];
+    long n = slurp("/proc/self/limits", t, sizeof t);
+    if (n < 0) { say("proc: /proc/self/limits read: %ld\n", n); }
+    int lines = 0;
+    for (long i = 0; i < n; i++) if (t[i] == '\n') lines++;
+    say("proc: /proc/self/limits: %ld bytes, %d lines, the last ended: %s\n", n, lines, yno(n > 0 && t[n - 1] == '\n'));
+    char *l = t;
+    for (int k = 0; n > 0 && k < lines; k++) {
+        char *e = strchr(l, '\n');
+        size_t len = (size_t)(e - l);
+        *e = 0;
+        say("~proc: limits: %s\n", l);
+        if (k == 0) {
+            say("proc: limits' header: \"%s\", %zu bytes\n", l, len);
+        } else {
+            char name[32], soft[32], hard[32], units[32], ws[32], wh[32];
+            field(l, len, 0, 25, name, sizeof name);
+            field(l, len, 26, 46, soft, sizeof soft);
+            field(l, len, 47, 67, hard, sizeof hard);
+            field(l, len, 68, len, units, sizeof units);
+            int cols = len >= 68 && l[25] == ' ' && l[26] != ' ' && l[46] == ' ' && l[47] != ' ' && l[67] == ' ' && (len == 68 || l[68] != ' ');
+            struct rlimit rl;
+            int g = getrlimit(k - 1, &rl);
+            lim(rl.rlim_cur, ws, sizeof ws);
+            lim(rl.rlim_max, wh, sizeof wh);
+            say("proc: limits' row %d: \"%s\", units \"%s\", %zu bytes, the values in columns 26 and 47: %s, getrlimit's: %s\n", k - 1, name,
+                units, len, yno(cols), yno(g == 0 && strcmp(soft, ws) == 0 && strcmp(hard, wh) == 0));
+        }
+        l = e + 1;
+    }
+    static char u[8192];
+    char p[64];
+    snprintf(p, sizeof p, "/proc/%d/limits", (int)getpid());
+    long m = slurp(p, u, sizeof u);
+    n = slurp("/proc/self/limits", t, sizeof t);
+    /* a container's /proc is the namespace its tool runs in, not the
+       probe's (tools/linux-tty without --nsproc): its own pid's file is
+       PAX's to answer */
+    say("~proc: /proc/<its pid>/limits is /proc/self/limits: %s\n", yno(m > 0 && m == n && memcmp(t, u, (size_t)m) == 0));
+    say("proc: /proc/sys/kernel/core_pattern: %s; /proc/sys/kernel lists it: %s\n", st("/proc/sys/kernel/core_pattern"),
+        yno(listed("/proc/sys/kernel", "core_pattern")));
+    n = slurp("/proc/sys/kernel/core_pattern", t, sizeof t);
+    lines = 0;
+    for (long i = 0; i < n; i++) if (t[i] == '\n') lines++;
+    say("proc: core_pattern: %d line, ended: %s\n", lines, yno(n > 0 && t[n - 1] == '\n'));
+    if (n > 0 && t[n - 1] == '\n') t[n - 1] = 0;
+    say("~proc: core_pattern: \"%s\"\n", n < 0 ? "" : t);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "soak")) return soak();
     if (argc > 1 && !strcmp(argv[1], "speed")) return speed();
@@ -1671,6 +1776,7 @@ int main(int argc, char **argv) {
     owners();
     fixed();
     refused();
+    procfiles();
     say("end: rmdir /t %ld; / still has it %s\n", r(rmdir("/t")), st("/t"));
     return 0;
 }
