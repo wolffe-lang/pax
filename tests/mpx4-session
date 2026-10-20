@@ -153,8 +153,37 @@ if [ -n "$filesonly" ]; then
     say "FAIL: tools/linux-tree session-files"; exit 1
 fi
 
-free_port() { # a TCP port free on 127.0.0.1 now
-    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
+free_port() { # a TCP port free on 127.0.0.1 now, outside this host's ephemeral range
+    python3 -c '
+import os, socket, sys
+# px55 (pax#89): the picker of px52 (pax#86). Never a port of the ephemeral
+# range of this host (ip_local_port_range, ip(7)) nor of the dynamic
+# range of IANA (49152 and up): a socket bound to port 0 lands in the
+# first by construction (the picker here did just that), and one that
+# takes the port between this probe and the bind QEMU makes has QEMU
+# refuse the forward (push run 39086412018: 37606, in 32768-60999).
+lo, hi = 32768, 60999
+try:
+    lo, hi = map(int, open("/proc/sys/net/ipv4/ip_local_port_range").read().split())
+except (OSError, ValueError):
+    pass
+span = [q for q in range(20000, 49152) if not lo <= q <= hi]
+if not span:
+    sys.exit("no port from 20000 to 49151 outside the ephemeral range of this host, %d-%d" % (lo, hi))
+i = (os.getpid() * 7919) % len(span)
+for k in range(400):
+    q = span[(i + k) % len(span)]
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", q))
+    except OSError:
+        continue
+    finally:
+        s.close()
+    print(q)
+    sys.exit(0)
+sys.exit("no free port from 20000 to 49151 outside the ephemeral range of this host, %d-%d" % (lo, hi))
+'
 }
 
 # This host's end of wolfecho's connection: wait for `listening` in
@@ -367,7 +396,7 @@ for leg in $legs; do
             q=(--qemu -m --qemu "$mem")
             pause=2 cpid=
             if [ "$s" = session-net ]; then
-                port=$(free_port)
+                port=$(free_port) || die "free_port: no TCP port free outside this host's ephemeral range" # px55 (pax#89)
                 q+=(--qemu -netdev --qemu "user,id=n0,ipv6=off,hostfwd=tcp:127.0.0.1:$port-:$GUEST_PORT"
                     --qemu -device --qemu "virtio-net-pci,netdev=n0"
                     --qemu -audiodev --qemu "wav,id=snd0,path=$log.wav" --qemu -machine --qemu "q35,pcspk-audiodev=snd0")
