@@ -57,7 +57,16 @@
 #   groups  px51: boreutils' `kill` to a group and `timeout`, typed at
 #           pelt (user/console/groups.keys, typed twice): `/bin/sh -i
 #           -m`, then `/bin/as 1000 1000 /bin/sh -i -m`; the pjobs
-#           archive with its own /etc/pax-run.
+#           archive with its own /etc/pax-run. px53: bu28's rows too:
+#           `timeout -s SEGV`, `-s RTMIN` and a host number (the signal
+#           ignored, then sent to timeout's own group), a command dead of
+#           SEGV and of RTMIN (timeout dies of it again), `kill -L`'s row 0.
+#   sigs    px53: what wolf 0.2.33 asks of PAX: `/bin/sigwolf`, then
+#           `/bin/as 1000 1000 /bin/sigwolf` (user/sigwolf/sigwolf.lu,
+#           built by 0.2.33 from its own pin, tools/mksigwolf): s246's
+#           five calls (one meaning ignored or defaulted in the sending
+#           shape, the end by a signal, the core siblings) and
+#           `os_signal_text(0)`; nothing typed; kmain_console.
 # Each command of the probe image is a process the kernel starts: a
 # session leader with the console as its controlling terminal (named:
 # Linux's init has neither), as the probe and the shell are on Linux on
@@ -139,7 +148,23 @@
 #      recordings, the user's to the container's too (J3); its J4
 #      witness: a group sent to (`Terminated`, `Killed`), `kill 0`'s
 #      143, timeout's 124, 137, 125, 126, 127, `survived` once (the
-#      --foreground run's child alone outlives the expiry).
+#      --foreground run's child alone outlives the expiry). px53: and
+#      139 and 162 (timeout dead of its command's SEGV and RTMIN), signal
+#      0's words. A host whose kernel.core_pattern pipes cores to a
+#      program dumps one whatever RLIMIT_CORE says (core(5); s246, bu28:
+#      kasumi's and CI's runner's), so in the container timeout's
+#      command carries the core bit and timeout says `the monitored
+#      command dumped core`; there that line is the host's, left out of
+#      the container's comparisons (named). Real root's guest (pid 1's
+#      RLIMIT_CORE, soft 0) and PAX (which writes no core) print none.
+#   J11 px53: sigs and sigs-user byte-identical to real root's
+#      recordings (tests/mpx5-jobs.d/linux/sigs.tty, sigs-user.tty), the
+#      user's to the container's too (J3; on a host whose core_pattern
+#      pipes, its `C:` rows, the core siblings' answers, are the host's
+#      and left out there, named); its J4 witness: who it runs as,
+#      `text(0)`'s words, a SENT SEGV ending the program under the
+#      default and lived through under the ignore, the group rows, the
+#      overflow's 134.
 #   J7 px49: gaps as root and as 1000:1000, byte-identical to real root's
 #      recordings (tests/mpx5-jobs.d/linux/gaps.tty, gaps-user.tty: the
 #      guest's notes/px49/vmjob.c, which brings the loopback up and
@@ -192,6 +217,7 @@ PCASES=$(echo $PCASES)
 PBORE="sleep cat cut tr wc true kill timeout" # px51: boreutils in the pjobs archive
 PTEXT='not a program' # px51: /g/text, a file timeout cannot run (126)
 RKEYS=$PAX_ROOT/user/console/groups.keys # px51
+CORE_LINE='timeout: the monitored command dumped core' # px53: GNU's words, timeout's at a core
 # px51: what a pjobs case must show (a word of each line), by case.
 pwitness() {
     case ${1#user-} in
@@ -221,6 +247,7 @@ image_runs() {
         pjobs) for c in $PCASES; do printf '%s\n' '/bin/sh -i -m'; done ;;
         pjobs-user) for c in $PCASES; do printf '%s\n' '/bin/as 1000 1000 /bin/sh -i -m'; done ;;
         groups) printf '%s\n' '/bin/sh -i -m' '/bin/as 1000 1000 /bin/sh -i -m' ;;
+        sigs) printf '%s\n' /bin/sigwolf '/bin/as 1000 1000 /bin/sigwolf' ;; # px53
     esac
 }
 image_kernel() { case $1 in gaps|fds) echo kmain_session ;; *) echo kmain_console ;; esac; } # px49, px50
@@ -234,10 +261,11 @@ image_keys() { # image -> a keys file (the probe's typed twice: its two typed ru
         fds) : ;; # px50: nothing typed
         pjobs|pjobs-user) for c in $PCASES; do cat "$PDIR/$c.keys"; done ;;
         groups) cat "$RKEYS" "$RKEYS" ;;
+        sigs) : ;; # px53: nothing typed
     esac
 }
 # boot: image and keyboard. The probe over both; the shells over COM1.
-BOOTS="probe:serial probe:ps2 shell:serial shell-user:serial gaps:serial fds:serial pjobs:serial pjobs-user:serial groups:serial"
+BOOTS="probe:serial probe:ps2 shell:serial shell-user:serial gaps:serial fds:serial pjobs:serial pjobs-user:serial groups:serial sigs:serial"
 # px51: PAX_JOBS_BOOTS names a subset (a plant's run of the images it
 # breaks, which the probe's boot would otherwise stop first: qemu-halt's
 # fail-fast refuses every typed boot after one whose first prompt never
@@ -272,11 +300,12 @@ run_name() { # image k
         fds:1) echo fds ;; fds:2) echo fds-user ;;
         pjobs:*) echo "pjobs-$(pcase "$2")" ;; pjobs-user:*) echo "pjobs-user-$(pcase "$2")" ;;
         groups:1) echo groups ;; groups:2) echo groups-user ;;
+        sigs:1) echo sigs ;; sigs:2) echo sigs-user ;; # px53
     esac
 }
-TYPED="probe probe-user shell shell-user gaps gaps-user fds fds-user groups groups-user"
+TYPED="probe probe-user shell shell-user gaps gaps-user fds fds-user groups groups-user sigs sigs-user"
 for c in $PCASES; do TYPED+=" pjobs-$c pjobs-user-$c"; done # px51
-UTYPED="probe-user shell-user gaps-user fds-user groups-user" # the user sessions the container runs
+UTYPED="probe-user shell-user gaps-user fds-user groups-user sigs-user" # the user sessions the container runs
 for c in $PCASES; do UTYPED+=" pjobs-user-$c"; done
 
 work=$PAX_BUILD/mpx5-jobs
@@ -349,6 +378,15 @@ linux_side() { # dir -> reasons on stdout
     else
         printf ' tools/linux-tree groups-user;'
     fi
+    # px53: the probe of 0.2.33's calls as 1000:1000; nothing typed.
+    : > "$1/sigs.keys"
+    if ! booted sigs; then :
+    elif "$PAX_ROOT/tools/linux-tree" --root "$1/sroot" --keys "$1/sigs.keys" --prompt '$ ' --argv0 /bin/as --size 256m --rdev --nsproc \
+        "$1/linux/sigs-user.tty" -- /bin/as 1000 1000 /bin/sigwolf; then
+        say "  linux sigs-user: $(wc -c < "$1/linux/sigs-user.tty" | tr -d ' ') bytes, status $(cat "$1/linux/sigs-user.tty.rc")"
+    else
+        printf ' tools/linux-tree sigs-user;'
+    fi
 }
 
 if [ "$only" = linux ]; then
@@ -371,6 +409,7 @@ if [ -z "$images" ]; then
     "$PAX_ROOT/tools/fetch-busybox" "$work/bin" > "$work/busybox.txt" || why+=" tools/fetch-busybox;"
     "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" || why+=" tools/mkpelt;" # px51
     "$PAX_ROOT/tools/mkboreutils" "$work/bore" $PBORE > "$work/bore.txt" || why+=" tools/mkboreutils;" # px51
+    "$PAX_ROOT/tools/mksigwolf" "$work/sigwolf" > "$work/sigwolf.txt" || why+=" tools/mksigwolf;" # px53
     cp "$work/bin/jobs" "$r/bin/jobs" 2>/dev/null || why+=" no jobs;"
     cp "$work/bin/gaps" "$r/bin/gaps" 2>/dev/null || why+=" no gaps;"
     cp "$work/bin/fdtab" "$r/bin/fdtab" 2>/dev/null || why+=" no fdtab;"
@@ -433,13 +472,26 @@ if [ -z "$images" ]; then
         "$PAX_ROOT/tools/mkinitramfs" "$work/$im.cpio" "${pargs[@]}" /etc/pax-run="$work/$im.run":644 > "$work/$im.initramfs.txt" \
             || why+=" tools/mkinitramfs $im;"
     done
+    # px53: the sigs image (the probe and `as`), and the same tree for
+    # the container.
+    sr=$work/sroot
+    mkdir -p "$sr/bin" "$sr/etc"
+    cp "$work/sigwolf/sigwolf" "$sr/bin/sigwolf" 2>/dev/null || why+=" no sigwolf;"
+    cp "$r/bin/as" "$sr/bin/as" 2>/dev/null || why+=" no as for the sigs tree;"
+    for f in "$sr"/bin/*; do
+        x=$(static_ok "$f") || why+=" $x;"
+        say "  program: sigs ${f#"$sr"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+    done
+    image_runs sigs > "$work/sigs.run"
+    "$PAX_ROOT/tools/mkinitramfs" "$work/sigs.cpio" /bin/sigwolf="$sr/bin/sigwolf":755 /bin/as="$sr/bin/as":755 \
+        /etc/pax-run="$work/sigs.run":644 > "$work/sigs.initramfs.txt" || why+=" tools/mkinitramfs sigs;"
     for tier in $tiers; do
         flag=(); [ "$tier" = release ] && flag=(--release)
         mkdir -p "$work/$tier"
         for kn in kmain_console kmain_session; do
             log=$work/$tier/$kn.build-kernel.log
             if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/$kn.lu" "$work/$tier" 2>"$log"); then
-                for im in probe shell shell-user gaps fds pjobs pjobs-user groups; do
+                for im in probe shell shell-user gaps fds pjobs pjobs-user groups sigs; do
                     [ "$(image_kernel "$im")" = "$kn" ] || continue
                     "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
                         --add "$work/$im.cpio" initramfs.cpio "$elf" "$work/$tier/$im.iso" >/dev/null \
@@ -481,9 +533,18 @@ lx=$images/linux
 # a host the container's TIOCSTI rows are its host's, left out (named)
 # where gaps-user is held to the container.
 STI=$(cat /proc/sys/dev/tty/legacy_tiocsti 2>/dev/null || echo 0)
+# px53: a host whose kernel.core_pattern pipes cores to a program dumps
+# one at every end by a core signal whatever RLIMIT_CORE says (core(5);
+# s246 and bu28 measured kasumi's and CI's runner's), so its container's
+# wait4 statuses carry the core bit: timeout's `dumped core` line and
+# sigwolf's `C:` rows are that host's there, left out (named).
+PIPED=0
+case $(cat /proc/sys/kernel/core_pattern 2>/dev/null) in '|'*) PIPED=1 ;; esac
 host_rows() { # name file -> the file, the host's rows left out
     if [ "$1" = gaps-user ] && [ "$STI" != 0 ]; then command grep -v '^I: TIOCSTI' "$2"
     elif [ "$1" = fds-user ]; then command grep -v "^P: its zombie child's fd/: " "$2" # px50: the host kernel's (below)
+    elif [ "$1" = groups-user ] && [ "$PIPED" = 1 ]; then command grep -vxF "$CORE_LINE" "$2"
+    elif [ "$1" = sigs-user ] && [ "$PIPED" = 1 ]; then command grep -v '^C: ' "$2"
     else cat "$2"; fi
 }
 # The recordings and the container agree before PAX is held to them.
@@ -500,6 +561,8 @@ for n in $UTYPED; do
     host_rows "$n" "$images/rec-$n.cmp" > "$images/rec-$n.host.cmp"
     hn=; [ "$n" = gaps-user ] && [ "$STI" != 0 ] && hn=" (this host's dev.tty.legacy_tiocsti is $STI: its TIOCSTI rows left out)"
     [ "$n" = fds-user ] && hn=" (its zombie row left out: the host kernel's)"
+    [ "$n" = groups-user ] && [ "$PIPED" = 1 ] && hn=" (this host's core_pattern pipes: timeout's 'dumped core' line left out)"
+    [ "$n" = sigs-user ] && [ "$PIPED" = 1 ] && hn=" (this host's core_pattern pipes: the C rows left out)"
     if cmp -s "$lx/$n.cmp" "$images/rec-$n.host.cmp" && [ "$(cat "$lx/$n.tty.rc")" = "$(cat "$REC/$n.tty.rc")" ]; then
         say "PASS J0 linux $n: the container's session is real root's recording, $(wc -l < "$lx/$n.cmp" | tr -d ' ') lines ($(sha256_of "$lx/$n.cmp" | cut -c1-12)…)$hn"
     else
@@ -590,7 +653,7 @@ for leg in $legs; do
                         cmp -s "$rec" "$out.cmp" || why+=" the session differs from real root's recording: $(diff "$rec" "$out.cmp" | head -n 14 | cut -c1-300 | tr '\n' '|');"
                         short=10; case $n in pjobs-*) short=2 ;; esac # px51: sh18's sessions are short ones
                         [ "$(wc -l < "$out.cmp" | tr -d ' ')" -gt "$short" ] || why+=" a short session;"
-                        t=J1; case $n in shell*) t=J2 ;; gaps*) t=J7 ;; fds*) t=J8 ;; pjobs*) t=J9 ;; groups*) t=J10 ;; esac
+                        t=J1; case $n in shell*) t=J2 ;; gaps*) t=J7 ;; fds*) t=J8 ;; pjobs*) t=J9 ;; groups*) t=J10 ;; sigs*) t=J11 ;; esac
                         [ -z "$why" ] && say "PASS $t $id $n: $(wc -l < "$out.cmp" | tr -d ' ') lines byte-identical to real root's recording ($(sha256_of "$out.cmp" | cut -c1-12)…)" || bad "$t $id $n:$why"
                         case $n in
                             *-user|pjobs-user-*)
@@ -632,10 +695,23 @@ for leg in $legs; do
                                          grep -q -- "$w" "$out.cmp" || why+=" no '$w';"
                                      done ;;
                             groups|groups-user)
-                                for w in st=124 st=137 st=125 st=126 st=127 st=143 'st=1$' Terminated Killed RTMAX checked; do
+                                for w in st=124 st=137 st=125 st=126 st=127 st=143 'st=1$' Terminated Killed RTMAX checked \
+                                         st=139 st=162 '^ 0 EXIT Unknown signal 0$'; do # px53: the last three
                                     grep -q -- "$w" "$out.cmp" || why+=" no '$w';"
                                 done
-                                [ "$(grep -c '^survived$' "$out.cmp")" = 1 ] || why+=" 'survived' $(grep -c '^survived$' "$out.cmp") times, not once (the --foreground run's alone);" ;;
+                                [ "$(grep -c '^survived$' "$out.cmp")" = 1 ] || why+=" 'survived' $(grep -c '^survived$' "$out.cmp") times, not once (the --foreground run's alone);"
+                                ! grep -qxF "$CORE_LINE" "$out.cmp" || why+=" '$CORE_LINE' on PAX, which writes no core;" ;;
+                            # px53: who it is, and the rows 0.2.33 turns.
+                            sigs|sigs-user)
+                                if [ "$n" = sigs ]; then grep -qx "sigwolf: px53's probe of wolf 0.2.33's signal calls, as root" "$out.cmp" || why+=" not root's;"
+                                else grep -qx "sigwolf: px53's probe of wolf 0.2.33's signal calls, as a user" "$out.cmp" || why+=" not a user's;"; fi
+                                for w in 'T: text(0): Unknown signal 0' 'E: sent-segv: signal 11' 'E: ignored-sent-segv: exit 0' \
+                                         'E: exit-segv: signal 11' 'E: ignored-rt: exit 0' 'E: defaulted-rt: signal 34' \
+                                         'G: SEGMENT_FAULT to its own group, ignored by the leader: the job signal 11; the leader lives' \
+                                         'G: host 34 to its own group, ignored by the leader: the job signal 34; the leader lives' \
+                                         'C: exit-segv, wait_status_core: signal 11' 'F: overflow-ignored: exit 134'; do
+                                    grep -qxF "$w" "$out.cmp" || why+=" no '$w';"
+                                done ;;
                             gaps-user) grep -qx "gaps: px49's probe, as a user" "$out.cmp" || why+=" not a user's;"
                                        grep -qx "I: TIOCSTI 'q' on its own terminal: EIO; a read then: 0 bytes" "$out.cmp" || why+=" no user's TIOCSTI row;"
                                        grep -qx 'A: R_OK through the link: EACCES' "$out.cmp" || why+=" no user's refused access row;" ;;
