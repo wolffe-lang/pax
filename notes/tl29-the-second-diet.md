@@ -69,7 +69,10 @@ at hand-back (§7). Per run (`notes/tl29/measure.py`):
 
 A job with no runner never ran (skipped, or cancelled in the queue:
 GitHub still stamps it started and completed) and counts nowhere. A
-cancelled run is counted and its job-minutes summed, never in a median.
+cancelled run, and a re-run (its wall holds the wait before someone
+re-ran it; its carried-over jobs keep the first attempt's times under the
+new attempt's `created_at`), is counted and its job-minutes summed, never
+in a median.
 A run is the tier its verdict job names; a verdict that never ran is
 "(cancelled before the verdict)".
 
@@ -80,12 +83,12 @@ Headline (medians; job-minutes' sum over the rows' runs in brackets):
 | pax | tier full | 21 | 52 / 91 | 10.0 | 421 (6,010) | 0.7 |
 | pax | tier pr | 5 | 17 / 125 | 1.5 | 95 (360) | 0.0 |
 | wolf-interp | tier full | 13 | 200 / 230 | 9.1 | 1,438 (17,973) | 369 |
-| wolf-interp | tier pr | 5 | 146 / 195 | 35 | 417 (2,042) | 11 |
+| wolf-interp | tier pr | 6 | 133 / 168 | 28 | 415 (2,416) | 11 |
 | wolf-lang | tier full | 7 | 62 / 140 | 25 | 148 (1,014) | 75 |
 | wolf-lang | tier pr | 4 | 58 / 106 | 33 | 49 (185) | 0.0 |
-| wolf-std | (every run) | 30 | 57 / 106 | 7.1 | 131 (3,128) | 40 |
+| wolf-std | (every run) | 30 | 57 / 103 | 7.3 | 131 (3,128) | 40 |
 | pelt | (every run) | 30 | 39 / 98 | 6.3 | 61 (1,307) | 35 |
-| lobo | (every run) | 30 | 32 / 75 | 5.0 | 40 (882) | 23 |
+| lobo | (every run) | 30 | 31 / 75 | 5.1 | 40 (882) | 22 |
 | wolf-book | (every run) | 30 | 18 / 91 | 2.5 | 58 (1,121) | 7.5 |
 
 Every repo, every tier: `notes/tl29/measure-before.md` (the table) and
@@ -96,10 +99,11 @@ before and after side by side, is §7.
 every run of every repo in the cache (2026-10-19T00:00Z on;
 `notes/tl29/saturation.py`, `saturation-before.txt`): **all 20 of the
 free plan's slots were in use 8.9 h (21%)**, and **all 5 macOS slots
-10.3 h (24%)**. Of 1,547 Linux jobs the median waited 1.0 min for a
-runner, the 90th percentile 33.7, the longest 184.4 (13,825 job-minutes of
-waiting); of 338 macOS jobs the median waited **6.7 min**, the 90th
-percentile **60.7**, the longest 145.7. The org never had more than 20
+10.3 h (24%)**. Of 1,498 Linux jobs the median waited 1.1 min for a
+runner, the 90th percentile 35.0, the longest 184.4 (16,333 job-minutes of
+waiting); of 330 macOS jobs the median waited **7.3 min**, the 90th
+percentile **60.9**, the longest 145.7 (a re-run's carried-over jobs read
+no wait). The org never had more than 20
 jobs running at any instant before the switch, nor (yet) after it: the
 switch shows in no run, only in the org record. The Team plan lifts the
 Linux cap to 60; it leaves the macOS cap at 5, which was full a quarter of
