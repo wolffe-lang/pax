@@ -193,7 +193,9 @@ built-in `cd /bin` still moved the shell), `true` and `zzqqxx`; L3 red
 at both store rows; L4 green. The menu's digit becomes a command line
 of its own (`2: not found`), so every later step is typed a prompt
 early: L1 may then part from the container's on type-ahead echo, a
-plant's noise. **B**: L2 red at `etc`, `g`, `gi`'s menu and `bin` (each
-`cd` and `g` prints lope's I/O error between its lines), green at `g
--` (`/bin` printed before the hook's error), `ls`, `true` and
-`zzqqxx`; L3 red at both; L4 green; L1 as A's.
+plant's noise. **B**: L2 red at `etc` (not found: the store cannot be
+read), `g -` (the jump never moved the shell, so `cd -` goes back to
+`/etc` and prints it), `ls` (it lists `/etc`), `g` (lope's I/O error
+between `g` and `pwd`), `gi`'s menu and `bin`; green at `true` and
+`zzqqxx`; L3 red at both; L4 green; L1 as A's. (Corrected before
+either plant ran: the first text had B's `g -` and `ls` green.)
