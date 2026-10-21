@@ -37,9 +37,25 @@
 //! The file is read in place (the initramfs's pages, read-only in the
 //! HHDM); the process's pages are written through the HHDM too, before
 //! its address space is ever live. No region, no heap.
+//!
+//! **px56 (pax#95): the file is the tree's.** Every function takes the
+//! file as its inode in kernel/tree (`f`), and every byte is read
+//! through `tree.span`, the path `read` takes: a page still the
+//! archive's in place, a page written since boot from its frame, a hole
+//! as the page of zeros. So a program copied, rewritten, downloaded or
+//! unlinked while open loads as the archive's own did (px27's limit,
+//! "the archive's whole bytes", is gone); the size is `tree.bytes`. The
+//! tree is not changed while a file loads (one CPU, IF clear for the
+//! whole `execve`). The archive's contiguous read was not kept as a
+//! fast case: measured against it on PAX (trunk `241b322`'s loader,
+//! TCG, 600 fork–exec–wait rounds of a 0.8 MB program and 180 of
+//! boreutils' `true`, interleaved), the tree's read took 26.75 and
+//! 26.78 ms a round where the archive's took 26.90 and 27.17
+//! (`notes/px56/kasumi-speed.txt`): nothing a run can see.
 
 use frames
 use paging
+use tree
 
 /// Why a file was refused.
 pub error ElfError = {too_small, not_elf, not_64, not_le, bad_version, not_x86_64, pie, not_exec, bad_phdrs, no_load, interp, misaligned, past_file, filesz, too_low, too_high, perm_conflict, overlap, out_of_memory}
@@ -60,16 +76,18 @@ const PT_PHDR: u64 = 6
 const PF_X: u64 = 1
 const PF_W: u64 = 2
 
-/// `n` bytes (1, 2, 4 or 8) at offset `o` of the file at `f`, little
-/// endian. The caller has checked o + n <= the file's size.
+/// `n` bytes (1, 2, 4 or 8) at offset `o` of file `f` (an inode),
+/// little endian. The caller has checked o + n <= the file's size.
 fn le(f: u64, o: u64, n: u64) -> u64 {
     var v: u64 = 0
     var i = n
     while i > 0 {
         i -= 1
-        // # Safety: f + o + i lies inside the file (the caller's
-        // check), which is the initramfs's read-only pages.
-        let b = unsafe { ((f + o + i) as *u8).read_volatile() } as u64
+        let (at, _c) = tree.span(f, o + i, 1)
+        // # Safety: `span` answers where byte o + i of the file is in
+        // kernel memory (an archive page, a frame, the page of zeros),
+        // inside the file (the caller's check).
+        let b = unsafe { (at as *u8).read_volatile() } as u64
         v = v * 256 + b
     }
     v
@@ -100,8 +118,8 @@ fn flags_of(pf: u64) -> u64 {
     fl
 }
 
-/// Check the file at `f` (`size` bytes): the header, the program
-/// headers, every `PT_LOAD`. Returns the number of program headers.
+/// Check file `f` (`size` bytes): the header, the program headers,
+/// every `PT_LOAD`. Returns the number of program headers.
 pub fn check(f: u64, size: u64) -> u64 ! ElfError {
     if size < EHDR {
         return too_small
@@ -218,9 +236,10 @@ fn page_at(pml4: u64, va: u64, fl: u64) -> u64 {
     pa
 }
 
-/// Copy `n` bytes from `src` (the file, in the HHDM) to `dst` (a frame,
-/// in the HHDM): words where both are 8-aligned (they agree modulo 8,
-/// since p_vaddr and p_offset agree modulo the page), bytes elsewhere.
+/// Copy `n` bytes from `src` (a page of the file in kernel memory,
+/// `tree.span`'s) to `dst` (a frame, in the HHDM): words where both are
+/// 8-aligned (they agree modulo 8, since p_vaddr and p_offset agree
+/// modulo the page), bytes elsewhere.
 fn copy_bytes(dst: u64, src: u64, n: u64) {
     var i: u64 = 0
     while i < n && (dst + i) % 8 != 0 {
@@ -241,10 +260,13 @@ fn copy_bytes(dst: u64, src: u64, n: u64) {
     }
 }
 
-/// Load the file at `f` (`size` bytes, `refusal` 0) into the user half
-/// of `pml4` (a fresh space, not live): every `PT_LOAD` mapped and
-/// filled. Returns the entry point, or 0 out of frames (what was mapped
-/// is left for the caller's `paging.free_user`).
+/// Load file `f` (`size` bytes, `refusal` 0) into the user half of
+/// `pml4` (a fresh space, not live): every `PT_LOAD` mapped and filled,
+/// its file bytes a span at a time (p_offset and p_vaddr agree modulo
+/// the page, so a page of the process takes bytes from one page of the
+/// file; a span may stop short of it where the archive's bytes end).
+/// Returns the entry point, or 0 out of frames (what was mapped is left
+/// for the caller's `paging.free_user`).
 pub fn load(f: u64, size: u64, pml4: u64) -> u64 {
     let phnum = check(f, size) else 0
     if phnum == 0 {
@@ -269,8 +291,11 @@ pub fn load(f: u64, size: u64, pml4: u64) -> u64 {
                 let lo = if pg > va { pg } else { va }
                 let top = va + fsz
                 let hi = if pg + PAGE < top { pg + PAGE } else { top }
-                if lo < hi {
-                    copy_bytes(pa + hhdm + (lo - pg), f + off + (lo - va), hi - lo)
+                var k = lo
+                while k < hi {
+                    let (src, c) = tree.span(f, off + (k - va), hi - k)
+                    copy_bytes(pa + hhdm + (k - pg), src, c)
+                    k += c
                 }
                 pg += PAGE
             }
@@ -280,7 +305,7 @@ pub fn load(f: u64, size: u64, pml4: u64) -> u64 {
     le(f, 24, 8)
 }
 
-/// The auxiliary vector's facts about the file at `f` (checked):
+/// The auxiliary vector's facts about file `f` (checked):
 /// AT_PHDR (`which` 0: `PT_PHDR`'s `p_vaddr`, else the address the
 /// loaded program headers land at, else 0), AT_PHNUM (1), AT_PHENT (2),
 /// AT_ENTRY (3).
@@ -356,7 +381,7 @@ pub fn seg(f: u64, k: u64, which: int) -> u64 {
     0
 }
 
-/// A refusal's code (0 none) for the file at `f` (`size` bytes): its
+/// A refusal's code (0 none) for file `f` (`size` bytes): its
 /// row's tag as a number, so it can be passed and named (an error row
 /// is not a value type, [type.err.alias.transparent]).
 pub fn refusal(f: u64, size: u64) -> u64 {
