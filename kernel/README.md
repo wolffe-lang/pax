@@ -829,10 +829,10 @@ by its `#!` line or, with none, by the shell that gets ENOEXEC.
 - What is not there: set-ID execution (ruling #75 R5: the bits are
   kept and not honoured, so `mpx5-users`' setid and sig rows that ask
   them stay PAX's); `execve` of `/proc/self/exe` and of `/proc/<pid>/exe`
-  (not links PAX's walk follows; not asked); a mount's `noexec`; the
-  non-dumpable mark of a program run without read permission; argv of
-  NULL as Linux's one empty string; E2BIG past the vectors' 64 KiB as
-  Linux counts it (PAX's bound is its staging buffer's).
+  (not links PAX's walk follows; not asked); a mount's `noexec`; whether
+  a program run without read permission is dumpable, argv NULL and
+  E2BIG past the vectors' 64 KiB (PAX's bound is its staging buffer's):
+  not asked of Linux.
 
 ## Who may name, change and keep (px44)
 
