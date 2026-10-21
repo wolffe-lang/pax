@@ -2813,6 +2813,90 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px58: yew (user/yew.pin, tools/mkyew), the modal terminal editor in
+  # wolf, on PAX's console: termwolf's rows (user/termwolf: the termios
+  # bits, yew's three modes, the timed reads, the output processing, the
+  # window's size and SIGWINCH, /dev/tty, the queries, the keys typed) as
+  # root and as a user, the escape classes read off the halted screen,
+  # the keyboard's cursor keys through a second monitor, and yew's own
+  # typed session as `pax`, each against the same binaries in a
+  # throwaway container (tools/linux-tree) but the gap table's named rows.
+  mpx5-yew:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-yew')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+          qemu-system-x86_64 --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-yew-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the image the Linux side's container is made from (by digest)
+        run: |
+          docker pull "$PAX_TREE_IMAGE"
+          docker image inspect --format '{{.Id}} {{.RepoDigests}}' "$PAX_TREE_IMAGE"
+        env:
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+      - name: the probe, the screen, the keyboard and yew's session against the container; the plan's legs (all four in the all tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+        run: tests/mpx5-yew $PAX_LEGS
+
+      - name: keep the programs' sums, the Linux side, the sessions, the screens, the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-yew
+          path: |
+            build/mpx5-yew/*.txt
+            build/mpx5-yew/yew/sums.txt
+            build/mpx5-yew/termwolf/sums.txt
+            build/mpx5-yew/pelt/sums.txt
+            build/mpx5-yew/bore/sums.txt
+            build/mpx5-yew/linux/
+            build/mpx5-yew/*/kmain_console.elf
+            build/mpx5-yew/*/*.log
+            build/mpx5-yew-*.raw
+            build/mpx5-yew-*.ppm
+            build/mpx5-yew-*.log
+            build/mpx5-yew-*.norm
+            build/mpx5-yew-*.meta
+            build/mpx5-yew-*.halt
+            build/mpx5-yew-*.verdict
+            build/mpx5-yew-*.typed
+            build/mpx5-yew-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   tier:
     name: tier ${{ needs.plan.outputs.tier || 'unplanned' }}
     if: ${{ !cancelled() }}
@@ -2853,6 +2937,7 @@ jobs:
       - mpx5-lope
       - mpx5-aspen
       - mpx5-lupin
+      - mpx5-yew
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # The issue step's token may write issues; nothing else.
