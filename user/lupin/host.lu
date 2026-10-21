@@ -1,0 +1,49 @@
+//! member: false
+// host.lu — the clock, the environment and the tree (px57):
+// /usr/share/lupin/host.lu, for `lupin conform-run --json`: the record
+// says what lupin's machine answers on the host it runs on. The clock
+// is a duration, never a time; the environment is the machine's own
+// overlay (lupin never reads the host's, so a program sees the same
+// answers on every host: HOME is missing until the program sets it);
+// the tree is the host's, served inside the working directory and
+// refused by name outside it (`[os.fs.path.domain]`: from `/`, root's
+// home, /usr/share/lupin is inside; from /home/pax it is not), its
+// names sorted (a directory's order is its file system's).
+fn sorted(xs: List[str]) -> List[str] {
+    var out: List[str] = []
+    for x in xs {
+        var i = 0
+        while i < out.len && out[i] < x {
+            i = i + 1
+        }
+        out.insert(i, x)
+    }
+    out
+}
+
+fn home() -> str {
+    let h = env_get("HOME") else |e| {
+        return match e {
+            invalid => "invalid",
+            missing => "missing",
+        }
+    }
+    h
+}
+
+fn main() -> !int {
+    let t0 = time_now_ms()
+    time_sleep_ms(20)
+    let t1 = time_now_ms()
+    print("clock: a 20 ms sleep, at least 20 ms passed: {t1 - t0 >= 20}")
+    print("env: HOME before the program sets it: {home()}")
+    env_set("HOME", "/home/wolf")?
+    print("env: HOME after env_set: {home()}")
+    let st = fs_stat("x.lu")?
+    print("tree: x.lu in the working directory: kind {st[0]}, {st[1]} bytes")
+    let names = fs_read_dir("/usr/share/lupin")?
+    for n in sorted(names) {
+        print("tree: /usr/share/lupin/{n}")
+    }
+    0
+}
