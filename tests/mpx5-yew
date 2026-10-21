@@ -531,8 +531,11 @@ for leg in $legs; do
             continue
         fi
         hrc=0
+        # The halted screen is kept (no row reads it: yew's frames on PAX's
+        # screen, CUP and the alternate screen dropped; px59's to serve).
         PAX_TYPE_PAUSE=${PAX_YEW_PAUSE:-6} "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 1200 --qemu -m --qemu 512M \
-            --elf "$elf" --marker 'halt|PANIC .*' --type "$YKEYS" --prompt '$ ' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+            --elf "$elf" --marker 'halt|PANIC .*' --type "$YKEYS" --prompt '$ ' \
+            --cmd "screendump $PAX_BUILD/mpx5-yew-$tier-$leg-session.ppm" "$iso" >"$log.verdict" 2>&1 || hrc=$?
         record "$tier" "$leg" session "$hrc"
         norm=$log.norm; serial_norm "$log" > "$norm"
         out=$PAX_BUILD/mpx5-yew-$tier-$leg-session.raw
