@@ -834,6 +834,30 @@ by its `#!` line or, with none, by the shell that gets ENOEXEC.
   E2BIG past the vectors' 64 KiB (PAX's bound is its staging buffer's):
   not asked of Linux.
 
+## yew on PAX: the census (px58)
+
+What yew, the modal editor in wolf (`user/yew.pin`, `tools/mkyew`),
+asks of a terminal, measured black-box on Linux under `strace -f` and
+asked of PAX's console by a probe (`user/termwolf`), with the gap table
+in `notes/px58-yew-on-pax.md` §D; `tests/mpx5-yew` holds each row (the
+probe as root and as `pax`, the escape classes on the halted screen,
+the keyboard's keys, yew's typed session) to the same binaries in a
+container. yew draws, edits and saves on PAX's console as on Linux, byte
+for byte over COM1.
+
+| module | what |
+|---|---|
+| `console/` | the keyboard's cursor and editing block (the E0-prefixed set-1 arrows, Home, End, PgUp, PgDn, Insert, Delete) gives the sequences a Linux virtual terminal gives (`ESC [ A` to `ESC [ D`; `ESC [ 1 ~` Home, `2 ~` Insert, `3 ~` Delete, `4 ~` End, `5 ~` PgUp, `6 ~` PgDn), measured on kasumi's kernel's VT with the same keys sent through QEMU's monitor, each byte through the line discipline as if typed (`cursor_key`) |
+
+- What is not there (px59's, "yew on PAX: the console"): the screen
+  draws text, CR, LF and SGR 0 1 7 30–37 39 40–47 49 90–97 and nothing
+  else yew writes
+  (cursor position, the alternate screen, cursor visibility and shape,
+  SGR 22 and 27, the bright backgrounds), so yew's frames are a smear on
+  the framebuffer while the serial line carries every byte; no answer to
+  DA1 or a cursor-position report (a Linux VT answers both); the
+  modifiers on the cursor keys, the function keys, Alt.
+
 ## Who may name, change and keep (px44)
 
 The fourth lane of the users campaign (`notes/px44-the-names.md`). The
