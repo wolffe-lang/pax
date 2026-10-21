@@ -890,3 +890,26 @@ consulted.
 | `strace(1)` 6.8 (as documentation and as a black box) in `localhost/px13-ubuntu` on kasumi | — | (a program we run) | run on lope's own runs, never read | lope's 23 calls (notes/px54/census/) |
 | black-box Linux 7.2.8-1-cachyos: rootless podman on kasumi (`px13-ubuntu`), CI's Docker | — | (programs we run) | run: the typed session on a pseudo-terminal, root and 1000:1000 (`tools/linux-tree`) | L1's reference |
 | lobo's `.github/actions/acquire-toolchain/action.yml` (the org's) | the org's own | the org's own | read | the org's way of reading a private sibling in CI (`WOLF_CI_TOKEN`, absence is failure) |
+
+## px57: the pins at 0.2.34, aspen on PAX, and a lupin that runs there
+
+No kernel's source was read or searched for, Linux's above all, nor any
+libc's (glibc's, musl's), shell's or init system's, nor tree's (aspen's
+rule 1, ruling #103), nor any interpreter's but lupin's own. No kernel
+code changed: the lane moves pins, adds two programs, two probes and two
+suites, and measures. Every row is the org's own binaries at PAX's
+console against real Linux under QEMU or a Linux container
+(notes/px57-the-pins-0234.md). Permissively licensed kernels: none
+consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| wolf 0.2.34 (`v0.2.34` at `9da7bdcf`, release 419552903) and lupin 0.1.55 (`v0.1.55` at `e642f26`, release 418932753), the linux x86-64 archives `88a9dd3d…` and `1152abc0…`; wolf-std `3bacc5f` (sc69's merge) | the org's own | the org's own | fetched by digest, read twice (the release API, then `sha256sum` of the download on kasumi) | `kernel/wolf.pin`, `user/su`, `user/sigwolf`, `user/edwolf` |
+| wolf-lang `v0.2.34`: `CHANGELOG.md`, spec `11-os.md` (`[os.proc.fork]`, `[os.signal.wait.fds]`, `[os.term.mode]`, `[os.term.restore]`, `[os.fs.open]`, `[os.fs.sync]`, `[os.fs.realpath]`, `[os.clock.ns]`, `[os.proc.spawn]`, `[os.proc.fds]`, `[os.host.sigs]`); wolf-lang#847's branch `s253`, its spec's `[os.uname]`, `[os.proc.core]`, `[os.proc.adopt]` | the org's own | the org's own | read, as the org's own specification | `user/edwolf/edwolf.lu`'s rows; `user/elf/hostq.c`'s (pax#107) |
+| aspen `103ba46` (ap00): `tools/mkaspen`, `tools/build`, `wolf-toolchain.toml`, `docs/MAP.md`, `notes/ap00-the-first-light.md`; built from its tree, never copied into pax | the org's own | GPL-3.0-or-later | read as the maintainer's code and records (its `src/` not read) | `tools/mkaspen`, `user/aspen.pin`; the digest held (ap00's) |
+| wolf-interp `v0.1.55` / `fcf2fd0`: `Cargo.toml`, `Cargo.lock`, `build.rs` (D57's stamp), `rust-toolchain.toml`, `.github/workflows/release.yml`, `src/main.rs`'s commands, `src/eval/builtin.rs`'s `env_get` (the machine's own overlay), `docs/manual/01-running-programs.md`, its corpus (`vendor/upstream/corpus`) | the org's own | GPL-3.0-or-later | read, as lupin's own code (the one interpreter whose source the lane reads); built at the tag | `tools/mklupin`, `user/lupin.pin`, `user/lupin/*.lu`, the census's programs |
+| Rust 1.97.1 and its `x86_64-unknown-linux-musl` target (rustup's prebuilt std with its self-contained musl CRT and libc), rustup-init `5be191e8…` | rust-lang's releases | MIT / Apache-2.0 (and musl's MIT, linked) | run: installed inside a throwaway image (notes/px57/rust/Containerfile) and on CI's runner; nothing of musl read | the static lupin |
+| man-pages `fork(2)`, `fsync(2)`, `realpath(3)`, `open(2)` (O_EXCL), `termios(3)`, `poll(2)`, `prctl(2)` (PR_SET_DUMPABLE), `getrlimit(2)` (prlimit64), `fcntl(2)` (F_GETFD, F_SETFD), `uname(2)`, `proc(5)` (`/proc/self/fd`), `strace(1)` | man-pages 6.19 (kasumi) | GPL-compatible documentation | read | what each row should answer |
+| `strace(1)` 6.8 in `localhost/px13-ubuntu` on kasumi | — | (a program we run) | run on aspen's and lupin's own runs, never read | the census (notes/px57/census/) |
+| black-box Linux 7.2.8-1-cachyos (kasumi's own kernel image `f4c00d5d…` under QEMU 11.1.1, `notes/px52/vmjob.c` as pid 1, unchanged; the suite's own eds archive) | — | GPL-2.0 (a program we run) | run, never read: edwolf and hostq as root and as 1000:1000, recorded twice, the same bytes | `tests/mpx5-jobs.d/linux/eds*.tty`, `hostq*.tty` |
+| rootless podman on kasumi (`px13-ubuntu`), CI's Docker | — | — | run: the user's probe rows and the aspen and lupin sessions (`tools/linux-tree`) | J0, J3; A1; U1 |
