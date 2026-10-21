@@ -1,0 +1,301 @@
+#!/usr/bin/env bash
+# tests/mpx5-aspen — px57 (item 2): aspen, tree(1) in wolf (user/aspen.pin,
+# tools/mkaspen; ruling #103's port of the maintainer's C aspen),
+# preinstalled on PAX as /bin/aspen and typed at the console's shell, held
+# byte for byte to the same binaries on Linux, as root and as `pax`.
+#
+#   tests/mpx5-aspen [--images DIR | --no-boot | --only build | --only linux --images DIR]
+#                    [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# One image, kmain_console with the archive: pelt as /bin/pelt and
+# /bin/sh, /bin/aspen, boreutils' env and head (user/boreutils.pin),
+# /bin/as; /etc (hostname, motd, pax-run), /home/pax (0755, 1000:1000)
+# with .profile, notes.txt and Script/greet.sh, and /usr with a small
+# tree (share/pax/README, share/pax/keys/aspen.keys, an empty lib/). Its
+# run list, one typed session a run (user/console/aspen.keys, typed
+# twice), prompt `$ `:
+#   aspen       `/bin/sh -i -m` (root, HOME=/);
+#   aspen-user  `/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m`
+#               (`pax`, the home `su pax` gives).
+# The keys: `aspen /etc`; `aspen -a -L 2 /home/pax`; `aspen -J /bin |
+# head`; `aspen --du /usr`; `exit`.
+#
+# **The Linux side** is the same binaries typed the same keys in a
+# throwaway container (tools/linux-tree: the tree a tmpfs, the shell on
+# a pseudo-terminal as pid 1 of a fresh pid namespace, PAX's
+# environment), as root and through `as 1000 1000`, run live.
+#
+# What is compared, by rule: each run's transcript, from its `run <k>:`
+# line to the kernel's `user: frames free` line after it, normalised as a
+# serial log is (tools/lib.sh's serial_norm), the kernel's own `user: …`
+# lines out; the container's whole transcript, normalised the same way.
+#
+# Assertions, per tier, firmware and session:
+#   A0 build: kmain_console built; pelt, aspen, env, head and as static;
+#      the image built; the container's two sessions ran.
+#   A1 each session byte-identical to the container's, and its status.
+#   A2 the listing rows, each a run of lines in the transcript, in order:
+#      `aspen /etc` lists hostname, motd and pax-run and reports `0
+#      directories, 3 files`; `-a -L 2 /home/pax` lists .profile, the
+#      Script directory and greet.sh in it; `-J /bin | head` opens the
+#      array with /bin's directory object; `--du /usr` prints sizes and
+#      its report counts the bytes used in 4 directories and 2 files.
+#   A3 -ENOSYS only for set_robust_list (273) and rseq (334); no
+#      `refused:` line; `PAX: init /bin/sh ended with status 0; nothing
+#      left to run`, `halt`, held halted.
+# A2 is each run's own witness: the container runs the same image, so a
+# break of both sides leaves A1 green and turns A2; a kernel break of
+# PAX's alone (a directory's size, an entry's kind) turns A1.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 only=
+usage="usage: tests/mpx5-aspen [--images DIR | --no-boot | --only build | --only linux --images DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+[ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
+need readelf python3
+
+KEYS=$PAX_ROOT/user/console/aspen.keys
+BORE="env head" # boreutils in the image (user/boreutils.pin)
+RUNS=("/bin/sh -i -m" "/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m")
+NAMES=(aspen aspen-user)
+HOMES=(/ /home/pax)
+
+work=$PAX_BUILD/mpx5-aspen
+runs=$PAX_BUILD/mpx5-aspen-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+# The container's two sessions, root's and the user's.
+linux_side() { # dir -> reasons on stdout
+    mkdir -p "$1/linux"
+    local k a0
+    for k in 0 1; do
+        # shellcheck disable=SC2086 # the run line's words, as the kernel splits them
+        set -- "$1" ${RUNS[$k]}
+        a0=$2
+        if "$PAX_ROOT/tools/linux-tree" --root "$1/root" --keys "$KEYS" --prompt '$ ' --argv0 "$a0" --size 256m --rdev --nsproc \
+            --owners "$1/owners" "$1/linux/${NAMES[$k]}.tty" -- "${@:2}"; then
+            say "  linux ${NAMES[$k]}: $(wc -c < "$1/linux/${NAMES[$k]}.tty" | tr -d ' ') bytes, status $(cat "$1/linux/${NAMES[$k]}.tty.rc")"
+        else
+            printf ' tools/linux-tree %s;' "${NAMES[$k]}"
+        fi
+    done
+}
+
+if [ "$only" = linux ]; then
+    why=$(linux_side "$images")
+    [ -z "$why" ] && say "PASS A0 (linux): the Linux side ran in a throwaway container" || bad "A0 (linux):$why"
+    exit "$fail"
+fi
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    r=$work/root
+    mkdir -p "$r/bin" "$r/etc" "$r/home/pax/Script" "$r/usr/share/pax/keys" "$r/usr/lib" "$work/bin"
+    why=
+    "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" || why+=" tools/mkpelt;"
+    "$PAX_ROOT/tools/mkaspen" "$work/aspen" > "$work/aspen.txt" || why+=" tools/mkaspen;"
+    "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
+    "$PAX_ROOT/tools/mkas" "$work/bin" > "$work/as.txt" || why+=" tools/mkas;"
+    cp "$work/pelt/pelt" "$r/bin/pelt" 2>/dev/null || why+=" no pelt;"
+    cp "$work/pelt/pelt" "$r/bin/sh" 2>/dev/null || true
+    cp "$work/aspen/aspen" "$r/bin/aspen" 2>/dev/null || why+=" no aspen;"
+    for u in $BORE; do cp "$work/bore/$u" "$r/bin/$u" 2>/dev/null || why+=" no $u;"; done
+    cp "$work/bin/as" "$r/bin/as" 2>/dev/null || why+=" no as;"
+    for f in "$r"/bin/*; do
+        x=$(static_ok "$f") || why+=" $x;"
+        say "  program: ${f#"$r"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+    done
+    # The tree aspen lists: /etc, pax's home, a small /usr (the same in
+    # the archive and in the container's root).
+    printf '%s\n' "${RUNS[@]}" > "$r/etc/pax-run"
+    printf 'pax\n' > "$r/etc/hostname"
+    printf 'PAX: aspen at the console (px57)\n' > "$r/etc/motd"
+    printf '# pax'"'"'s profile\n' > "$r/home/pax/.profile"
+    printf 'a note of pax'"'"'s\n' > "$r/home/pax/notes.txt"
+    printf 'echo hi\n' > "$r/home/pax/Script/greet.sh"
+    printf 'PAX: a Linux-compatible system written in wolf.\n' > "$r/usr/share/pax/README"
+    cp "$KEYS" "$r/usr/share/pax/keys/aspen.keys"
+    printf '%s\n' '/home/pax 755 1000 1000' '/home/pax/.profile 644 1000 1000' '/home/pax/notes.txt 644 1000 1000' \
+        '/home/pax/Script 755 1000 1000' '/home/pax/Script/greet.sh 755 1000 1000' > "$work/owners"
+    args=(/home/pax/:755:1000:1000 /home/pax/.profile="$r/home/pax/.profile":644:1000:1000
+        /home/pax/notes.txt="$r/home/pax/notes.txt":644:1000:1000 /home/pax/Script/:755:1000:1000
+        /home/pax/Script/greet.sh="$r/home/pax/Script/greet.sh":755:1000:1000
+        /etc/pax-run="$r/etc/pax-run":644 /etc/hostname="$r/etc/hostname":644 /etc/motd="$r/etc/motd":644
+        /usr/share/pax/README="$r/usr/share/pax/README":644 /usr/share/pax/keys/aspen.keys="$r/usr/share/pax/keys/aspen.keys":644
+        /usr/lib/:755)
+    for f in "$r"/bin/*; do args+=("/bin/${f##*/}=$f:755"); done
+    "$PAX_ROOT/tools/mkinitramfs" "$work/aspen.cpio" "${args[@]}" > "$work/aspen.initramfs.txt" || why+=" tools/mkinitramfs;"
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                --add "$work/aspen.cpio" initramfs.cpio "$elf" "$work/$tier/aspen.iso" >/dev/null || why+=" $tier: mkimage;"
+            say "built $tier aspen: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/aspen.iso"), initramfs $(sha256_of "$work/aspen.cpio")"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    if [ "$only" = build ]; then
+        [ -z "$why" ] && say "PASS A0 (build): kmain_console built ($tiers), every program static, the image built" || bad "A0 (build):$why"
+        exit "$fail"
+    fi
+    if [ "$(uname -s)" != Linux ]; then
+        why+=" the Linux side needs Linux (this is $(uname -s)): build on Linux, boot here with --images;"
+    else
+        why+=$(linux_side "$work")
+    fi
+    [ -z "$why" ] && say "PASS A0: kmain_console built ($tiers), every program static, the image built, the Linux side ran in a throwaway container" || bad "A0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx5-aspen build (A0): PASS (no boot: --no-boot)" || say "mpx5-aspen build: FAIL"
+        exit "$fail"
+    fi
+fi
+lx=$images/linux
+for n in "${NAMES[@]}"; do
+    [ -f "$lx/$n.tty" ] || { bad "A0 linux $n: no $lx/$n.tty (build first, and run the Linux side)"; continue; }
+    serial_norm "$lx/$n.tty" > "$lx/$n.cmp"
+done
+
+# Run k's transcript: from its `run <k>:` line to the kernel's `user:
+# frames free …` line after it, the kernel's own lines left out
+# (tests/mpx5-jobs' rule).
+run_part() { # norm k
+    awk -v k="$2" '
+        $0 ~ "^run " k ": " { on = 1; next }
+        on && /^run [0-9]+: |^run: [0-9]+ commands$|^user: frames free / { exit }
+        on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$1"
+}
+
+# A2: each row a run of whole lines that must follow one another in the
+# transcript, the rows in order (a row's first line after the last line
+# of the row before); a line is matched as a shell pattern. HOME is the
+# session's home (not read: aspen lists the paths it is given).
+rows() { # kind home -> NAME<TAB>line<TAB>line…, one row a line
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "aspen /etc" '$ aspen /etc' /etc '*hostname' '*motd' '*pax-run' '' '0 directories, 3 files'
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "-a -L 2 /home/pax: the dot file, Script and greet.sh in it" '$ aspen -a -L 2 /home/pax' /home/pax '*.profile' '*Script' '*greet.sh'
+    printf '%s\t%s\t%s\t%s\n' "-J /bin | head: the array and /bin's object" '$ aspen -J /bin | head' '[' '*"type":"directory","name":"/bin"*'
+    printf '%s\t%s\t%s\n' "--du /usr: sizes and the report" '$ aspen --du /usr' '*/usr'
+    printf '%s\t%s\n' "--du /usr's report: 4 directories, 2 files" '* used in 4 directories, 2 files'
+}
+held() { # file kind home -> the rows not held, on stdout
+    rows "$2" "$3" | python3 -c '
+import fnmatch, sys
+lines = open(sys.argv[1], encoding="utf-8", errors="replace").read().split("\n")
+at = 0
+for row in sys.stdin.read().split("\n"):
+    if not row:
+        continue
+    name, *want = row.split("\t")
+    found = -1
+    for i in range(at, len(lines) - len(want) + 1):
+        if all(fnmatch.fnmatchcase(l, w) for l, w in zip(lines[i:i + len(want)], want)):
+            found = i
+            break
+    if found < 0:
+        print(" no %r;" % name, end="")
+    else:
+        at = found + len(want)
+' "$1"
+}
+
+record() { # tier leg status
+    ran=$((ran + 1))
+    printf '%s kmain_console %s aspen halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        id="$tier $leg aspen"
+        log=$PAX_BUILD/mpx5-aspen-$tier-$leg.serial.log
+        elf=$images/$tier/kmain_console.elf iso=$images/$tier/aspen.iso
+        rm -f "$log" "$log.verdict" "$log.typed"
+        if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+            bad "A3 $id: no image"
+            continue
+        fi
+        cat "$KEYS" "$KEYS" > "$images/aspen.keys"
+        hrc=0
+        "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 900 --qemu -m --qemu 512M \
+            --elf "$elf" --marker 'halt|PANIC .*' --type "$images/aspen.keys" --prompt '$ ' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+        record "$tier" "$leg" "$hrc"
+        norm=$log.norm; serial_norm "$log" > "$norm"
+        for k in 0 1; do
+            n=${NAMES[$k]} h=${HOMES[$k]}
+            out=$PAX_BUILD/mpx5-aspen-$tier-$leg-$n.session
+            run_part "$norm" $((k + 1)) > "$out"
+            serial_norm "$out" > "$out.cmp"
+            # A1: the container's session.
+            why=
+            if [ -f "$lx/$n.cmp" ]; then
+                cmp -s "$lx/$n.cmp" "$out.cmp" || why+=" the session differs from the container's: $(diff "$lx/$n.cmp" "$out.cmp" | head -n 14 | cut -c1-300 | tr '\n' '|');"
+            else
+                why+=" no container session;"
+            fi
+            [ "$(wc -l < "$out.cmp" | tr -d ' ')" -gt 20 ] || why+=" a short session;"
+            [ -z "$why" ] && say "PASS A1 $id $n: $(wc -l < "$out.cmp" | tr -d ' ') lines byte-identical to the container's ($(sha256_of "$out.cmp" | cut -c1-12)…)" || bad "A1 $id $n:$why"
+            # A2: the session's own witness.
+            why=$(held "$out.cmp" list "$h")
+            [ -z "$why" ] && say "PASS A2 $id $n: the listing rows (/etc, -a -L 2 /home/pax, -J /bin | head, --du /usr)" || bad "A2 $id $n:$why"
+        done
+        # A3: what PAX lacks; nothing refused; the end.
+        why=
+        ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
+        [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
+        rf=$(grep -c ': refused: ' "$norm")
+        [ "$rf" = 0 ] || why+=" $rf refused lines ($(grep -m1 ': refused: ' "$norm" | cut -c1-160));"
+        grep -qx "PAX: init /bin/sh ended with status 0; nothing left to run" "$norm" \
+            || why+=" no 'PAX: init /bin/sh ended with status 0' ($(grep -m1 '^PAX: init ' "$norm"));"
+        pn=$(grep -m1 '^PANIC ' "$norm")
+        [ -z "$pn" ] || why+=" the kernel panicked: $pn;"
+        [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+        [ -z "$why" ] && say "PASS A3 $id: -ENOSYS only for 273 and 334; nothing refused by name; init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "A3 $id:$why"
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx5-aspen: PASS" || say "mpx5-aspen: FAIL"
+exit "$fail"
