@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# mklupin — build lupin, wolf-interp's reference interpreter for the wolf
+# language, as a fully static x86-64 Linux executable PAX can load, from
+# its release tag (user/lupin.pin; px57, ruling #110).
+#
+#   tools/mklupin OUTDIR
+#
+# The tree is user/lupin.pin's tag of wolffe-lang/wolf-interp, fetched
+# with the tag itself so build.rs sees it at HEAD and grants D57's stamp
+# (`--version` the release's line, never `+dev.<commit>`); the commit
+# the tag names is checked. The Rust is the one the tree pins
+# (rust-toolchain.toml): `cargo` and `rustc` must be that channel and
+# the musl target must be installed for it, or the tool refuses —
+# it installs nothing (RUSTUP_AUTO_INSTALL=0).
+#
+# The build is the release workflow's (`cargo build --release --locked`)
+# for x86_64-unknown-linux-musl, with two flags: `+crt-static` (the
+# target's default, said aloud) and `relocation-model=static`, because
+# the target's default output is a static PIE (ET_DYN, no PT_INTERP),
+# which PAX's loader refuses by name (kernel/elf: "a PIE or shared
+# object"); with it the binary is ET_EXEC with no PT_INTERP and no
+# dynamic section, checked (readelf). The build directory has a fixed
+# name and the source and cargo's registry are remapped
+# (--remap-path-prefix), so two builds on one host give one digest.
+# `OUTDIR/sums.txt` gets `lupin <sha256> <bytes>`.
+#
+# Needs git, cargo, rustc, rustup and readelf; network for the tree and
+# the crates (Cargo.lock's, `--locked`). Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mklupin OUTDIR"
+out=$1
+need git cargo rustc rustup readelf
+. "$PAX_ROOT/user/lupin.pin"
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+export RUSTUP_AUTO_INSTALL=0
+
+# The build directory: one fixed name, so the paths a build records are
+# the same in every build on this host (and remapped away besides).
+w=${PAX_LUPIN_BUILD_DIR:-${TMPDIR:-/tmp}/pax-mklupin}
+rm -rf "$w"
+mkdir -p "$w"
+trap 'rm -rf "$w"' EXIT
+
+# The tree at the tag, the tag kept (D57 reads `git tag --points-at HEAD`).
+git -C "$w" init -q src
+git -C "$w/src" fetch -q --depth 1 "$LUPIN_SRC_REPO" "refs/tags/$LUPIN_SRC_TAG:refs/tags/$LUPIN_SRC_TAG" \
+    || die "cannot fetch $LUPIN_SRC_REPO's tag $LUPIN_SRC_TAG"
+git -C "$w/src" -c advice.detachedHead=false checkout -q "refs/tags/$LUPIN_SRC_TAG"
+[ "$(git -C "$w/src" rev-parse HEAD)" = "$LUPIN_SRC_REV" ] || die "$LUPIN_SRC_TAG is not $LUPIN_SRC_REV"
+git -C "$w/src" tag --points-at HEAD | grep -qx "$LUPIN_SRC_TAG" || die "$LUPIN_SRC_TAG does not point at HEAD (D57's stamp would be refused)"
+say "lupin $LUPIN_SRC_TAG ($LUPIN_SRC_REV) from $LUPIN_SRC_REPO"
+
+# The Rust the tree pins, and its musl target, present (never installed here).
+cd "$w/src"
+ch=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+[ -n "$ch" ] || die "no channel in the tree's rust-toolchain.toml"
+rv=$(rustc --version) || die "rustc for channel $ch is not installed (the tool installs nothing)"
+case $rv in "rustc $ch "*) ;; *) die "rustc says '$rv'; the tree pins $ch" ;; esac
+rustup target list --installed --toolchain "$ch" 2>/dev/null | grep -qx "$LUPIN_SRC_TARGET" \
+    || die "the $LUPIN_SRC_TARGET target is not installed for $ch (the tool installs nothing)"
+say "$rv; $(cargo --version); target $LUPIN_SRC_TARGET"
+
+reg=${CARGO_HOME:-$HOME/.cargo}
+CARGO_TARGET_DIR=$w/target \
+RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static --remap-path-prefix=$w/src=/wolf-interp --remap-path-prefix=$reg=/cargo" \
+    cargo build -q --release --locked --target "$LUPIN_SRC_TARGET" >&2 \
+    || die "cargo build --release --locked --target $LUPIN_SRC_TARGET"
+bin=$w/target/$LUPIN_SRC_TARGET/release/lupin
+cp "$bin" "$out/lupin"
+readelf -hW "$out/lupin" | grep -Eq 'Type: +EXEC' || die "lupin is not ET_EXEC ($(readelf -hW "$out/lupin" | sed -n 's/^ *Type: *//p'))"
+! readelf -lW "$out/lupin" | grep -q INTERP || die "lupin has a PT_INTERP (not static)"
+readelf -dW "$out/lupin" | grep -q 'no dynamic section' || die "lupin has a dynamic section"
+have=$("$out/lupin" --version | head -n 1)
+[ "$have" = "$LUPIN_SRC_VERSION_LINE" ] || die "lupin --version says '$have'; the pin names '$LUPIN_SRC_VERSION_LINE'"
+say "$have"
+: > "$out/sums.txt"
+printf '%s %s %s\n' lupin "$(sha256_of "$out/lupin")" "$(wc -c < "$out/lupin" | tr -d ' ')" | tee -a "$out/sums.txt"
