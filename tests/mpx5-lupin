@@ -1,0 +1,310 @@
+#!/usr/bin/env bash
+# tests/mpx5-lupin — px57 (item 3; ruling #110: lupin in the base image,
+# wolf in a dev image later): lupin, the reference interpreter for the
+# wolf language, built static for x86_64-unknown-linux-musl from its
+# release tag (user/lupin.pin, tools/mklupin), preinstalled on PAX as
+# /bin/lupin with four programs under /usr/share/lupin (user/lupin/),
+# typed at the console's shell and held byte for byte to the same
+# binaries on Linux, as root and as `pax`.
+#
+#   tests/mpx5-lupin [--images DIR | --no-boot | --only build | --only linux --images DIR]
+#                    [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# One image, kmain_console with the archive: pelt as /bin/pelt and
+# /bin/sh, /bin/lupin, boreutils' cat and env (user/boreutils.pin),
+# /bin/as; /usr/share/lupin/hello.lu, loop.lu, signal.lu and host.lu;
+# /home/pax (0755, 1000:1000). Its run list, one typed session a run
+# (user/console/lupin.keys, typed twice), prompt `$ `:
+#   lupin       `/bin/sh -i -m` (root, HOME=/);
+#   lupin-user  `/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m`.
+# The keys: `cd` (to HOME: lupin's file tier serves the working
+# directory's tree, `[os.fs.path.domain]`); `lupin run
+# /usr/share/lupin/hello.lu`; `cat > x.lu`, a program typed line by
+# line and ^D; `lupin run x.lu`; `lupin conform-run --json` of loop.lu;
+# `lupin run` of signal.lu (INTERRUPT's number, then its words, which
+# lupin refuses by name: exit 4); `lupin conform-run --json` of host.lu
+# (the clock as a duration, the environment, which is lupin's own
+# overlay and never the host's, the tree: x.lu in the working directory,
+# and /usr/share/lupin, inside root's `/` and refused by name from
+# /home/pax); `exit`.
+#
+# **The Linux side** is the same binaries typed the same keys in a
+# throwaway container (tools/linux-tree), as root and through `as 1000
+# 1000`, run live.
+#
+# What is compared, by rule: each run's transcript, from its `run <k>:`
+# line to the kernel's `user: frames free` line after it, normalised as a
+# serial log is (tools/lib.sh's serial_norm), the kernel's own `user: …`
+# lines out; the container's whole transcript, normalised the same way.
+#
+# Assertions, per tier, firmware and session:
+#   U0 build: kmain_console built; pelt, lupin, cat, env and as static
+#      (lupin ET_EXEC with no PT_INTERP and no dynamic section); the
+#      image built; the container's two sessions ran.
+#   U1 each session byte-identical to the container's, and its status.
+#   U2 the session's rows, each a run of lines in the transcript, in
+#      order: hello's line; the typed program's line and st=0; loop's
+#      record (lupin 0.1.55, exit(0), its stdout inline); signal.lu's
+#      `INTERRUPT is signal 2 here`, lupin's refusal of os_signal_text by
+#      name and st=4; host.lu's record: root's exit(0) with the clock,
+#      the overlay's HOME rows, x.lu and the four programs, `pax`'s with
+#      the same rows to x.lu and then lupin's refusal by name of
+#      /usr/share/lupin outside the working directory.
+#   U3 -ENOSYS only for set_robust_list (273) and rseq (334) (pelt's;
+#      the musl lupin makes neither); no `refused:` line; `PAX: init
+#      /bin/sh ended with status 0; nothing left to run`, `halt`, held
+#      halted.
+# U2 is each run's own witness: the container runs the same image, so a
+# break of both sides leaves U1 green and turns U2.
+#
+# lupin is built with cargo for the musl target (tools/mklupin): on
+# kasumi in the throwaway Rust image (notes/px57/rust/Containerfile), in
+# CI on the runner after the workflow installs the tree's channel and
+# the target. The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 only=
+usage="usage: tests/mpx5-lupin [--images DIR | --no-boot | --only build | --only linux --images DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+[ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
+need readelf python3
+
+KEYS=$PAX_ROOT/user/console/lupin.keys
+BORE="cat env" # boreutils in the image (user/boreutils.pin)
+PROGS="hello loop signal host" # user/lupin/*.lu, the image's /usr/share/lupin
+RUNS=("/bin/sh -i -m" "/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m")
+NAMES=(lupin lupin-user)
+HOMES=(/ /home/pax)
+
+work=$PAX_BUILD/mpx5-lupin
+runs=$PAX_BUILD/mpx5-lupin-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+# The container's two sessions, root's and the user's.
+linux_side() { # dir -> reasons on stdout
+    mkdir -p "$1/linux"
+    local k a0
+    for k in 0 1; do
+        # shellcheck disable=SC2086 # the run line's words, as the kernel splits them
+        set -- "$1" ${RUNS[$k]}
+        a0=$2
+        if "$PAX_ROOT/tools/linux-tree" --root "$1/root" --keys "$KEYS" --prompt '$ ' --argv0 "$a0" --size 256m --rdev --nsproc \
+            --owners "$1/owners" "$1/linux/${NAMES[$k]}.tty" -- "${@:2}"; then
+            say "  linux ${NAMES[$k]}: $(wc -c < "$1/linux/${NAMES[$k]}.tty" | tr -d ' ') bytes, status $(cat "$1/linux/${NAMES[$k]}.tty.rc")"
+        else
+            printf ' tools/linux-tree %s;' "${NAMES[$k]}"
+        fi
+    done
+}
+
+if [ "$only" = linux ]; then
+    why=$(linux_side "$images")
+    [ -z "$why" ] && say "PASS U0 (linux): the Linux side ran in a throwaway container" || bad "U0 (linux):$why"
+    exit "$fail"
+fi
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    r=$work/root
+    mkdir -p "$r/bin" "$r/etc" "$r/home/pax" "$r/usr/share/lupin" "$work/bin"
+    why=
+    "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" || why+=" tools/mkpelt;"
+    "$PAX_ROOT/tools/mklupin" "$work/lupin" > "$work/lupin.txt" || why+=" tools/mklupin;"
+    "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
+    "$PAX_ROOT/tools/mkas" "$work/bin" > "$work/as.txt" || why+=" tools/mkas;"
+    cp "$work/pelt/pelt" "$r/bin/pelt" 2>/dev/null || why+=" no pelt;"
+    cp "$work/pelt/pelt" "$r/bin/sh" 2>/dev/null || true
+    cp "$work/lupin/lupin" "$r/bin/lupin" 2>/dev/null || why+=" no lupin;"
+    readelf -dW "$r/bin/lupin" 2>/dev/null | command grep -q 'no dynamic section' || why+=" lupin has a dynamic section;"
+    for u in $BORE; do cp "$work/bore/$u" "$r/bin/$u" 2>/dev/null || why+=" no $u;"; done
+    cp "$work/bin/as" "$r/bin/as" 2>/dev/null || why+=" no as;"
+    for f in "$r"/bin/*; do
+        x=$(static_ok "$f") || why+=" $x;"
+        say "  program: ${f#"$r"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+    done
+    # The programs, and pax's home.
+    printf '%s\n' "${RUNS[@]}" > "$r/etc/pax-run"
+    for p in $PROGS; do cp "$PAX_ROOT/user/lupin/$p.lu" "$r/usr/share/lupin/$p.lu" || why+=" no user/lupin/$p.lu;"; done
+    printf '%s\n' '/home/pax 755 1000 1000' > "$work/owners"
+    args=(/home/pax/:755:1000:1000 /etc/pax-run="$r/etc/pax-run":644)
+    for p in $PROGS; do args+=("/usr/share/lupin/$p.lu=$r/usr/share/lupin/$p.lu:644"); done
+    for f in "$r"/bin/*; do args+=("/bin/${f##*/}=$f:755"); done
+    "$PAX_ROOT/tools/mkinitramfs" "$work/lupin.cpio" "${args[@]}" > "$work/lupin.initramfs.txt" || why+=" tools/mkinitramfs;"
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                --add "$work/lupin.cpio" initramfs.cpio "$elf" "$work/$tier/lupin.iso" >/dev/null || why+=" $tier: mkimage;"
+            say "built $tier lupin: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/lupin.iso"), initramfs $(sha256_of "$work/lupin.cpio")"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    if [ "$only" = build ]; then
+        [ -z "$why" ] && say "PASS U0 (build): kmain_console built ($tiers), every program static, the image built" || bad "U0 (build):$why"
+        exit "$fail"
+    fi
+    if [ "$(uname -s)" != Linux ]; then
+        why+=" the Linux side needs Linux (this is $(uname -s)): build on Linux, boot here with --images;"
+    else
+        why+=$(linux_side "$work")
+    fi
+    [ -z "$why" ] && say "PASS U0: kmain_console built ($tiers), every program static, the image built, the Linux side ran in a throwaway container" || bad "U0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx5-lupin build (A0): PASS (no boot: --no-boot)" || say "mpx5-lupin build: FAIL"
+        exit "$fail"
+    fi
+fi
+lx=$images/linux
+for n in "${NAMES[@]}"; do
+    [ -f "$lx/$n.tty" ] || { bad "U0 linux $n: no $lx/$n.tty (build first, and run the Linux side)"; continue; }
+    serial_norm "$lx/$n.tty" > "$lx/$n.cmp"
+done
+
+# Run k's transcript: from its `run <k>:` line to the kernel's `user:
+# frames free …` line after it, the kernel's own lines left out
+# (tests/mpx5-jobs' rule).
+run_part() { # norm k
+    awk -v k="$2" '
+        $0 ~ "^run " k ": " { on = 1; next }
+        on && /^run [0-9]+: |^run: [0-9]+ commands$|^user: frames free / { exit }
+        on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$1"
+}
+
+# U2: each row a run of whole lines that must follow one another in the
+# transcript, the rows in order (a row's first line after the last line
+# of the row before); a line is matched as a shell pattern. HOME is the
+# session's home: root's host.lu record lists /usr/share/lupin (inside
+# its working directory `/`), `pax`'s is refused there by name.
+rows() { # kind home -> NAME<TAB>line<TAB>line…, one row a line
+    local h=$2 rec='{"protocol":1,"impl":"lupin","impl_version":"0.1.55","commit":"e642f26",'
+    printf '%s\t%s\t%s\n' "hello" '$ lupin run /usr/share/lupin/hello.lu' 'hello, wolf'
+    printf '%s\t%s\t%s\t%s\n' "the typed program run" '$ lupin run x.lu; echo st=$?' "typed at PAX's console, run by lupin" 'st=0'
+    printf '%s\t%s\t%s\n' "loop's record" '$ lupin conform-run --json /usr/share/lupin/loop.lu' "$rec"'*"verdict":"exit(0)"*"stdout_inline":"1 squared is 1\n*the sum of the squares: 385\n"}'
+    printf '%s\t%s\t%s\t%s\t%s\n' "signal.lu: the number, then the words refused by name" '$ lupin run /usr/share/lupin/signal.lu; echo st=$?' 'INTERRUPT is signal 2 here' '*unsupported: `os_signal_text` reads the C library*' 'st=4'
+    if [ "$h" = / ]; then
+        printf '%s\t%s\t%s\n' "host.lu: the clock, the overlay, x.lu and the four programs" '$ lupin conform-run --json /usr/share/lupin/host.lu' "$rec"'*"verdict":"exit(0)"*"stdout_inline":"clock: a 20 ms sleep, at least 20 ms passed: true\nenv: HOME before the program sets it: missing\nenv: HOME after env_set: /home/wolf\ntree: x.lu in the working directory: kind 0, *\ntree: /usr/share/lupin/hello.lu\ntree: /usr/share/lupin/host.lu\ntree: /usr/share/lupin/loop.lu\ntree: /usr/share/lupin/signal.lu\n"}'
+    else
+        printf '%s\t%s\t%s\n' "host.lu: the clock, the overlay, x.lu, then /usr/share/lupin refused by name" '$ lupin conform-run --json /usr/share/lupin/host.lu' "$rec"'*"verdict":"unsupported"*"x-unsupported":"`fs_read_dir(\"/usr/share/lupin\")` resolves outside the working directory*'
+    fi
+}
+held() { # file kind home -> the rows not held, on stdout
+    rows "$2" "$3" | python3 -c '
+import fnmatch, sys
+lines = open(sys.argv[1], encoding="utf-8", errors="replace").read().split("\n")
+at = 0
+for row in sys.stdin.read().split("\n"):
+    if not row:
+        continue
+    name, *want = row.split("\t")
+    found = -1
+    for i in range(at, len(lines) - len(want) + 1):
+        if all(fnmatch.fnmatchcase(l, w) for l, w in zip(lines[i:i + len(want)], want)):
+            found = i
+            break
+    if found < 0:
+        print(" no %r;" % name, end="")
+    else:
+        at = found + len(want)
+' "$1"
+}
+
+record() { # tier leg status
+    ran=$((ran + 1))
+    printf '%s kmain_console %s lupin halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        id="$tier $leg lupin"
+        log=$PAX_BUILD/mpx5-lupin-$tier-$leg.serial.log
+        elf=$images/$tier/kmain_console.elf iso=$images/$tier/lupin.iso
+        rm -f "$log" "$log.verdict" "$log.typed"
+        if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+            bad "U3 $id: no image"
+            continue
+        fi
+        cat "$KEYS" "$KEYS" > "$images/lupin.keys"
+        hrc=0
+        "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 900 --qemu -m --qemu 512M \
+            --elf "$elf" --marker 'halt|PANIC .*' --type "$images/lupin.keys" --prompt '$ ' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+        record "$tier" "$leg" "$hrc"
+        norm=$log.norm; serial_norm "$log" > "$norm"
+        for k in 0 1; do
+            n=${NAMES[$k]} h=${HOMES[$k]}
+            out=$PAX_BUILD/mpx5-lupin-$tier-$leg-$n.session
+            run_part "$norm" $((k + 1)) > "$out"
+            serial_norm "$out" > "$out.cmp"
+            # U1: the container's session.
+            why=
+            if [ -f "$lx/$n.cmp" ]; then
+                cmp -s "$lx/$n.cmp" "$out.cmp" || why+=" the session differs from the container's: $(diff "$lx/$n.cmp" "$out.cmp" | head -n 14 | cut -c1-300 | tr '\n' '|');"
+            else
+                why+=" no container session;"
+            fi
+            [ "$(wc -l < "$out.cmp" | tr -d ' ')" -gt 20 ] || why+=" a short session;"
+            [ -z "$why" ] && say "PASS U1 $id $n: $(wc -l < "$out.cmp" | tr -d ' ') lines byte-identical to the container's ($(sha256_of "$out.cmp" | cut -c1-12)…)" || bad "U1 $id $n:$why"
+            # U2: the session's own witness.
+            why=$(held "$out.cmp" rows "$h")
+            [ -z "$why" ] && say "PASS U2 $id $n: the session's rows (hello, the typed program, loop's record, signal.lu's refusal, host.lu's record)" || bad "U2 $id $n:$why"
+        done
+        # U3: what PAX lacks; nothing refused; the end.
+        why=
+        ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
+        [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
+        rf=$(grep -c ': refused: ' "$norm")
+        [ "$rf" = 0 ] || why+=" $rf refused lines ($(grep -m1 ': refused: ' "$norm" | cut -c1-160));"
+        grep -qx "PAX: init /bin/sh ended with status 0; nothing left to run" "$norm" \
+            || why+=" no 'PAX: init /bin/sh ended with status 0' ($(grep -m1 '^PAX: init ' "$norm"));"
+        pn=$(grep -m1 '^PANIC ' "$norm")
+        [ -z "$pn" ] || why+=" the kernel panicked: $pn;"
+        [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+        [ -z "$why" ] && say "PASS U3 $id: -ENOSYS only for 273 and 334; nothing refused by name; init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "U3 $id:$why"
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx5-lupin: PASS" || say "mpx5-lupin: FAIL"
+exit "$fail"
