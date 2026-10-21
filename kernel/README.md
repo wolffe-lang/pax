@@ -314,7 +314,7 @@ Linux pseudo-terminal (`tests/mpx3-shell`).
 |---|---|
 | `process/` | see the table above: the image builder and the process calls |
 | `sched/` (px14 additions) | the record grows to 184 bytes in a 256-byte slot (`pid`, `ppid`, `status`, `owns`, `vparent`, `zombie`, `sigmask`); the process area to 4096 bytes (the signal records); states ZOMBIE, VFORK, WAITING; `clone_current`, `vfork_wait`, `exec_current`, `child_ended`, `zombie`, `wait_child`, `end_with` (the status word), `self_pid`, `self_ppid`, `pid_of`; `finish` resumes a vfork parent, reparents to pid 1, keeps a zombie for a parent and wakes it; `reap` keeps a zombie's slot and never frees a borrowed space |
-| `files/` (px14 additions) | `dup` (dup, dup2, dup3: the copy without close-on-exec unless asked; a position per descriptor, not per open file, named), `exec_close` (O_CLOEXEC), `exec_lookup` (execve's file: -ENOENT, -EACCES for a directory, a device or no execute bit) |
+| `files/` (px14 additions) | `dup` (dup, dup2, dup3: the copy without close-on-exec unless asked; a position per descriptor, not per open file, named), `exec_close` (O_CLOEXEC), `exec_lookup` (execve's file: -ENOENT, -EACCES for a directory, a device or no execute bit; px56: `exec_open`) |
 | `fpu/` (px14 additions) | `fork` (a child's x87/SSE state is its parent's), `exec` (the template, loaded at once) |
 | `user/` (px14 changes) | a `who` line's `pid` is the Linux pid; `exit`/`exit_group` leave `code << 8`, a fault the signal (`process.fault_signal`); `getpid`, `getppid`, `gettid`, `set_tid_address` the pid; the process calls routed to `process/`; `last_exit` only for a program the kernel started |
 | `kmain_console.lu` (px14 change) | init's environment gains `PATH=/bin` |
@@ -325,7 +325,8 @@ Linux pseudo-terminal (`tests/mpx3-shell`).
   signal delivery (masks and actions are recorded; `kill` is refused by
   name; px17 adds SIGPIPE's default only), process groups and sessions
   (wait4's 0 and -pgid mean any child), rusage (zeroed), `execveat`,
-  `#!` scripts (-ENOEXEC). px17 did `fork` and the shared offset.
+  `#!` scripts (-ENOEXEC). px17 did `fork` and the shared offset; px56
+  `execveat` and `#!`.
 
 ## Pipes, redirection and `cd` (px17)
 
@@ -806,6 +807,33 @@ guest).
   unlimited while `setpriority` and `sched_setscheduler` act as Linux's
   boot limit of 0 does (px45: named, to file).
 
+## Exec from the tree, and `#!` (px56)
+
+pax#95 and #96, measured black-box against Linux 7.2.8 as root and as a
+user (`notes/px56-exec-from-the-tree.md`): `user/elf/execs.c`'s rows and
+a typed pelt session with the maintainer's `./Script/greet.sh`
+(`tests/mpx5-jobs`' execs image, J12, held to real root's guest and a
+container). px27's limit is gone: **a program written, copied,
+rewritten or unlinked while open since boot runs**, and a script runs
+by its `#!` line or, with none, by the shell that gets ENOEXEC.
+
+| module | what |
+|---|---|
+| `elf/` | every byte read through the tree (`tree.span`: an archive page in place, a written page's frame, a hole's zeros); the file an inode, its size `tree.bytes`. The archive's contiguous read is not kept as a fast case: measured against it (trunk's loader, 780 rounds), the tree's was no slower |
+| `files/` | `exec_open` (execve's and execveat's file, and a `#!` line's interpreter from the working directory): the walk's answers, -ELOOP for a last link under AT_SYMLINK_NOFOLLOW, -EACCES for what is no regular file of the tree or has no execute bit for the caller's class, **-ETXTBSY while any open file has it for writing**, then an open file of its own (O_RDONLY and a private O_EXE bit, the directory it was found in recorded by px50's rules: the descriptor's own through an fd/ entry or AT_EMPTY_PATH); `exec_kernel` (a program the kernel starts: the path from the root, no mode asked); the process's program is that open file (`A_EXE`, `set_exe`): a fork shares it, a process's end lets it go, `/proc/self/exe` reads its path as an fd/ entry does (a rename followed, `<path> (deleted)`); while one runs, `open` for writing and `truncate` of its file are **-ETXTBSY** (after the class rule); `is_cloexec`, `exe_name` |
+| `tree/` | a regular file's twelfth word (a directory's parent's, a socket's record's: no file used it) counts the programs running from it (`running`, `run_hold`, `run_release`); `is_regular`; `archive_entry` is gone |
+| `process/` | `execve` (59) and **`execveat` (322)**: the file, then the filename (AT_EXECFN; `/dev/fd/<dirfd>/<path>` or `/dev/fd/<fd>` for execveat), then the vectors; **`#!`**: the first 256 bytes, the line ending at the first newline, else at the file's end, else cut at byte 255; blanks and tabs after `#!` skipped, the interpreter to the next blank, tab or NUL, the rest stripped at both ends ONE argument (its text to a NUL in it); `interp [arg] <path> argv[1]…`, argv[0] dropped; five scripts deep, a sixth -ELOOP; -ENOEXEC for no interpreter (but a short file with no newline, whose empty name is the working directory: -EACCES) and for an interpreter the cut ends; a script named by a close-on-exec descriptor -ENOENT. **-ENOEXEC with no `refused:` line** for a file with no ELF magic or shorter than an ELF header (Linux's own answer); the `refused:` lines stay for an ELF PAX does not run. The name is the filename's last component, 15 bytes (AT_EMPTY_PATH: the file's own name) |
+| `sched/` | two words of the record hold a program's name when no archive memory does (`xname0`, `xname1`; `name` 0): copied by a fork and a thread; `set_self_xname`, `set_xname_of` |
+| `user/` | execveat dispatched |
+
+- What is not there: set-ID execution (ruling #75 R5: the bits are
+  kept and not honoured, so `mpx5-users`' setid and sig rows that ask
+  them stay PAX's); `execve` of `/proc/self/exe` and of `/proc/<pid>/exe`
+  (not links PAX's walk follows; not asked); a mount's `noexec`; the
+  non-dumpable mark of a program run without read permission; argv of
+  NULL as Linux's one empty string; E2BIG past the vectors' 64 KiB as
+  Linux counts it (PAX's bound is its staging buffer's).
+
 ## Who may name, change and keep (px44)
 
 The fourth lane of the users campaign (`notes/px44-the-names.md`). The
@@ -855,9 +883,9 @@ addresses.
 - What is not there: write on a directory to remove or rename a name,
   the sticky rule, the protected settings, `chmod` and `utimensat`
   ownership, set-ID clearing on a write (U4, px44: above); signals,
-  ports, the speaker, `/dev` (U5); set-ID execution (R5). `execve` still runs only
-  an archive file whole (px27): a program written since boot is refused
-  whatever its mode.
+  ports, the speaker, `/dev` (U5); set-ID execution (R5). (px56: `execve`
+  runs any file of the tree its mode allows; px27's archive-only limit
+  is gone.)
 
 ## The writable tree (px27)
 
@@ -868,9 +896,9 @@ programs. `tests/mpx3-tree` holds it to Linux's tmpfs.
 
 | module or file | what |
 |---|---|
-| `tree/` | **inodes** (16 words; a table that grows a frame at a time, 32 a frame, at most 16,384; a freed inode is the next one made): mode, link count, size, holders (`hold`, `release`: open files, working directories, a removed directory's hold on its parent), four times, where the bytes are. **a file's bytes**: frames under an index of depth 0 (the frame alone), 1 (512 pointers) or 2 (1 GiB, the largest file); a page never written has no frame (`span` answers the page of zeros); `cut` gives back every frame past a size. **the initramfs under it** (`start`, `adopt`): an archive file's inode reads the archive in place (`I_BACK`, `I_BACKLEN`) until a page is written, which copies that page; `archive_entry` says whether a file is still the archive's whole (what `execve` can load). **directories**: records (inode + 1, lengths, name), none across a page, a removed one free again and joined to the free ones after it; `lookup`, `entry_at` (the first live record at or after a position, found from its page's start), `name_of`; a directory with no entry holds no frame. **the changes**: `create`, `mkdir`, `unlink`, `rmdir`, `rename` (every refusal and the room for the new name before the first change), `truncate`, `read`, `write` (from a user buffer or kernel bytes). **the cap**: half the frames free at `start`, and never below `RESERVE` (2,048) free in the machine (`grab`); `held`, `live`, `table_frames`, `base` for the books; `census_due`, `full_news` for kernel/user's lines; `refuse` counts a refusal by name |
+| `tree/` | **inodes** (16 words; a table that grows a frame at a time, 32 a frame, at most 16,384; a freed inode is the next one made): mode, link count, size, holders (`hold`, `release`: open files, working directories, a removed directory's hold on its parent), four times, where the bytes are. **a file's bytes**: frames under an index of depth 0 (the frame alone), 1 (512 pointers) or 2 (1 GiB, the largest file); a page never written has no frame (`span` answers the page of zeros); `cut` gives back every frame past a size. **the initramfs under it** (`start`, `adopt`): an archive file's inode reads the archive in place (`I_BACK`, `I_BACKLEN`) until a page is written, which copies that page; `archive_entry` said whether a file was still the archive's whole (what `execve` could load; px56: gone, every file loads). **directories**: records (inode + 1, lengths, name), none across a page, a removed one free again and joined to the free ones after it; `lookup`, `entry_at` (the first live record at or after a position, found from its page's start), `name_of`; a directory with no entry holds no frame. **the changes**: `create`, `mkdir`, `unlink`, `rmdir`, `rename` (every refusal and the room for the new name before the first change), `truncate`, `read`, `write` (from a user buffer or kernel bytes). **the cap**: half the frames free at `start`, and never below `RESERVE` (2,048) free in the machine (`grab`); `held`, `live`, `table_frames`, `base` for the books; `census_due`, `full_news` for kernel/user's lines; `refuse` counts a refusal by name |
 | `../boot/tree.S` | `pax_tree_state` (32 words), `pax_tree_copy` and `pax_tree_zero` (REP MOVS, REP STOS on kernel addresses) |
-| `files/` | a node may be an inode (`T_INO`); `walk` resolves a path a directory at a time (`.`, `..`, -ENOTDIR, -ENOENT, -ENAMETOOLONG for a component past 255 bytes; the directory and name of the last component for the calls that make or remove one); `openat` with `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_WRONLY`/`O_RDWR`, `O_NOFOLLOW`, the mode and `umask`; `file_write`, `pwrite`, `ftruncate`, `truncate`, `fsync`, `mkdirat`, `unlinkat`, `renameat`, `faccessat`, `umask`, `refused`; `copy_file_range` and `sendfile` between files, `splice` from a pipe into one; an open file and a working directory hold their inode (`of_new`, `of_drop`, `set_cwd`, `inherit`, `close_all`); `getcwd` walks up; `put_stat`/`put_statx` with times, blocks and two device numbers (the tree 0:1, `/dev` 0:5; px36: signed times, `tsec`/`tnsec`); `getdents` from the records (px36: `DT_LNK`), `dev` last in the root; `exec_lookup` asks `tree.archive_entry` |
+| `files/` | a node may be an inode (`T_INO`); `walk` resolves a path a directory at a time (`.`, `..`, -ENOTDIR, -ENOENT, -ENAMETOOLONG for a component past 255 bytes; the directory and name of the last component for the calls that make or remove one); `openat` with `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_WRONLY`/`O_RDWR`, `O_NOFOLLOW`, the mode and `umask`; `file_write`, `pwrite`, `ftruncate`, `truncate`, `fsync`, `mkdirat`, `unlinkat`, `renameat`, `faccessat`, `umask`, `refused`; `copy_file_range` and `sendfile` between files, `splice` from a pipe into one; an open file and a working directory hold their inode (`of_new`, `of_drop`, `set_cwd`, `inherit`, `close_all`); `getcwd` walks up; `put_stat`/`put_statx` with times, blocks and two device numbers (the tree 0:1, `/dev` 0:5; px36: signed times, `tsec`/`tnsec`); `getdents` from the records (px36: `DT_LNK`), `dev` last in the root; `exec_lookup` asked `tree.archive_entry` (px56: `exec_open`, any file) |
 | `initramfs/` | `mtime` |
 | `user/` | `tree.start` in `start`; the dispatch (18, 21, 74-77, 82-84, 87, 95, 258, 263, 264, 269, 316, 439; px36's `change_calls`: 86, 88, 90-94, 260, 265, 266, 268, 280, 452; refused by name 132, 133, 235, 259); `write` to a file; `tree_lines` (every 2500th file removed: the books; the tree at its cap) and `tree_report` (after a kernel's frames line) |
 | `kmain_console.lu` | `user.tree_report()` after the frames line |
@@ -890,8 +918,8 @@ programs. `tests/mpx3-tree` holds it to Linux's tmpfs.
 - What is not there: `utime` and `utimes`
   (refused by name), `mmap` of a file, a second writable file system (`/dev` is
   fixed), `/proc` and `/sys` beyond `/proc/self/exe`, file locks,
-  `fallocate`, `statfs`. `execve` runs a file only while it is still
-  the archive's own bytes.
+  `fallocate`, `statfs`. (px56: `execve` runs a file written since
+  boot too; until then only one still the archive's own bytes.)
 
 ## Readiness (px24)
 
