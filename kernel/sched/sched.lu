@@ -261,6 +261,8 @@ struct Thread {
     wstop: u64, // px48: a leader's: a stop no wait has reported yet: the signal (0 none)
     wcont: u64, // px48: a leader's: 1 while a continue no wait has reported yet
     ssold: u64, // px48: the mask `rt_sigsuspend` replaced, while the thread is suspended in it
+    xname0: u64, // px56: the program's name when `name` is 0: the last component of the path it was run by, 15 bytes at most (Linux's comm), NUL-padded
+    xname1: u64,
 }
 
 /// How many slots there are (px14: `clone_current` and `child_ended`
@@ -1364,9 +1366,38 @@ pub fn self_exec(which: int) -> u64 {
         return field(c, offset_of(Thread, usp))
     }
     if which == 2 {
-        return field(c, offset_of(Thread, name))
+        return name_at(c)
     }
     field(c, offset_of(Thread, name_len))
+}
+
+/// px56: where slot `s`'s program name's bytes are: `name` (px10: the
+/// initramfs entry's), or, when that is 0, the record's own `xname0`
+/// words (the name `execve` and the kernel's starts give a program run
+/// from the tree, which no other memory holds for it).
+fn name_at(s: u64) -> u64 {
+    let n = field(s, offset_of(Thread, name))
+    if n != 0 {
+        return n
+    }
+    // # Safety: the address of slot `s`'s word in boot/sched.S's
+    // pax_threads; nothing is read.
+    unsafe { pax_threads as u64 + s * size_of(Thread) as u64 + offset_of(Thread, xname0) as u64 }
+}
+
+/// px56: the running thread's program name, as `execve` gives it (the
+/// sixteen bytes of `xname0`, `xname1`; `name` 0).
+pub fn set_self_xname(a: u64, b: u64) {
+    put_field(cur(), offset_of(Thread, xname0), a)
+    put_field(cur(), offset_of(Thread, xname1), b)
+}
+
+/// px56: the same for thread `id`, a process the kernel has just made
+/// (`create_process` with `name` 0).
+pub fn set_xname_of(id: u64, a: u64, b: u64) {
+    let s = slot_of(id)
+    put_field(s, offset_of(Thread, xname0), a)
+    put_field(s, offset_of(Thread, xname1), b)
 }
 
 /// How many times the running thread has called `yield`.
@@ -1546,6 +1577,8 @@ pub fn clone_current(f: u64, usp: u64, cr3: u64) -> u64 {
     put_field(s, offset_of(Thread, threads), 1)
     put_field(s, offset_of(Thread, name0), field(p, offset_of(Thread, name0)))
     put_field(s, offset_of(Thread, name1), field(p, offset_of(Thread, name1)))
+    put_field(s, offset_of(Thread, xname0), field(p, offset_of(Thread, xname0))) // px56
+    put_field(s, offset_of(Thread, xname1), field(p, offset_of(Thread, xname1)))
     put_field(s, offset_of(Thread, ppid), field(p, offset_of(Thread, tgid))) // px26: the caller's process
     // px48: a fork's child is in its parent's group and session, with its
     // controlling terminal; it has not exec'd, and it runs.
@@ -1628,6 +1661,8 @@ pub fn clone_thread(f: u64, usp: u64, settls: bool, tls: u64, ctid: u64) -> u64 
     put_field(s, offset_of(Thread, ctid), ctid)
     put_field(s, offset_of(Thread, name0), field(p, offset_of(Thread, name0)))
     put_field(s, offset_of(Thread, name1), field(p, offset_of(Thread, name1)))
+    put_field(s, offset_of(Thread, xname0), field(p, offset_of(Thread, xname0))) // px56
+    put_field(s, offset_of(Thread, xname1), field(p, offset_of(Thread, xname1)))
     put_field(l, offset_of(Thread, threads), field(l, offset_of(Thread, threads)) + 1)
     put_field(s, offset_of(Thread, state), READY)
     enqueue(s)
@@ -1817,7 +1852,7 @@ pub fn proc_word(s: u64, which: int) -> u64 {
         return field(s, offset_of(Thread, name1))
     }
     if which == 6 {
-        return field(s, offset_of(Thread, name))
+        return name_at(s) // px56: the record's own words when `name` is 0
     }
     if which == 7 {
         return field(s, offset_of(Thread, name_len))
