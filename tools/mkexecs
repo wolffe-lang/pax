@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# mkexecs — build px56's exec probe (user/elf/execs.c) and px43's
+# seven (user/elf/seven.S: exits 7, no libc), static x86-64 Linux
+# executables, for tests/mpx5-jobs' execs image.
+#
+#   tools/mkexecs OUTDIR
+#
+# tools/mkjobs' compiler line (`cc -static -no-pie -O1`, ET_EXEC with no
+# PT_INTERP, checked); seven as tools/mkcred builds it (`-nostdlib`).
+# Build on a baseline x86-64 glibc (the CI runner's Ubuntu; an Ubuntu
+# container on kasumi), never on kasumi's own (px10). Prints `<name>
+# <sha256> <bytes>` for each. Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkexecs OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${CC:-cc}
+need "$cc" readelf
+# Each source named whole (the CI plan derives the paths a suite reads
+# from the names its tools write out).
+"$cc" -static -no-pie -O1 -Wall -Wextra -Wno-unused-result -Wno-unused-function \
+    -Wl,--build-id=none -Wl,-z,noexecstack -o "$out/execs" "$PAX_ROOT/user/elf/execs.c" || die "cc: execs"
+"$cc" -nostdlib -static -no-pie -Wl,--build-id=none -Wl,-z,noexecstack \
+    -o "$out/seven" "$PAX_ROOT/user/elf/seven.S" || die "cc: seven"
+for p in execs seven; do
+    readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
+    ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP (not static)"
+    printf '%s %s %s\n' "$p" "$(sha256_of "$out/$p")" "$(wc -c < "$out/$p" | tr -d ' ')"
+done
