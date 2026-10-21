@@ -431,9 +431,10 @@ are under `~/lanes/px56/`.
   `64dfe3b` (`kernel/user`), `afdb007` (`kernel/elf`), `6cb3efe`
   (`boot/sched.S`'s comment).
 - The suites: `195c584` (`tests/mpx5-jobs`: the execs image, J12),
-  `77e3eb3` (`tests/mpx3-tree`), `4d6c2e5` (`tests/mpx3-shell`), and
-  mpx5-users' (perm, setid, sig: §D) after them.
-- The words: `02db6c4` (`kernel/README.md`), `2a90093`
+  `77e3eb3` (`tests/mpx3-tree`), `4d6c2e5` (`tests/mpx3-shell`),
+  `79de2d8`, `3ed64de`, `5fed40e` (`perm.pax`, `setid.pax`, `sig.pax`),
+  `2afa474` (`tests/mpx5-users`' counts and refusals).
+- The words: `02db6c4`, `ed455b8` (`kernel/README.md`), `2a90093`
   (`docs/SOURCES.md`), `6fef3b1` (CHANGELOG), `0729d10` (README), and
   this note's.
 - The scripts: `notes/px56/*.sh` (launch, build, boot, kbuild, sync,
@@ -450,8 +451,8 @@ are under `~/lanes/px56/`.
 - **PAX's first boot**: `notes/px56/kasumi-first-mpx5-jobs-execs.out`
   (J12, J3, J4, J6, the container's J0).
 - **The speed**: `notes/px56/kasumi-speed.txt`, `speed.run`.
-- **The suites at the head on kasumi**: kasumi `ev/regress.txt` (§D),
-  `out/u3-mpx5-users.boot.log` and `build/rg1-mpx5-users.boot.log`.
+- **The suites at the head on kasumi**: `notes/px56/kasumi-regress.out`
+  (§D: mpx5-users' perm, setid and sig rows, and every suite's verdict).
 - **The plants**: `notes/px56/ci-*-plant-*.txt`.
 - **The playground**: `notes/px56/kasumi-playground-session.txt`.
 
