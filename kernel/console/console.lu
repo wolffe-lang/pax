@@ -18,8 +18,13 @@
 //! extended key; both shifts, both controls and Caps Lock are tracked;
 //! Ctrl with a letter or one of `@[\]^_` gives the control character;
 //! Backspace gives DEL (0x7f, the erase character), Enter CR (0x0d),
-//! keypad Enter CR and keypad `/ * - +` their characters; arrows,
-//! function keys and the rest of the keypad give nothing. `irq` takes
+//! keypad Enter CR and keypad `/ * - +` their characters; (px58) the
+//! cursor and editing block (the E0-prefixed arrows, Home, End, PgUp,
+//! PgDn, Insert, Delete) gives the sequences a Linux virtual terminal
+//! gives (`ESC [ A` to `ESC [ D`, `ESC [ 1 ~` to `ESC [ 6 ~`, measured on
+//! kasumi's kernel's VT: notes/px58-yew-on-pax.md §E), each byte through
+//! the line discipline as if typed; function keys and the rest of the
+//! keypad give nothing. `irq` takes
 //! both vectors and acknowledges the 8259 (kernel/timer's `eoi`); both
 //! lines are unmasked by `start` (kernel/timer's `unmask`: the master's
 //! mask 0xfe becomes 0xec).
@@ -974,6 +979,28 @@ fn is_lower(c: u64) -> bool {
     c >= 97 && c <= 122
 }
 
+/// px58: an E0-prefixed set-1 make code's CSI sequence, as a Linux
+/// virtual terminal sends it (measured black-box, notes/px58 §E): the
+/// arrows `ESC [ A` to `ESC [ D` (the final byte), Home, Insert, Delete,
+/// End, PgUp and PgDn `ESC [ 1 ~` to `ESC [ 6 ~` (the digit, with 0x100
+/// for the `~`); 0 for any other key, which gives nothing. Modifiers
+/// change none of them (named).
+fn cursor_key(k: u64) -> u64 {
+    match k {
+        0x48 => 65, // up
+        0x50 => 66, // down
+        0x4d => 67, // right
+        0x4b => 68, // left
+        0x47 => 0x100 + 49, // Home
+        0x52 => 0x100 + 50, // Insert
+        0x53 => 0x100 + 51, // Delete
+        0x4f => 0x100 + 52, // End
+        0x49 => 0x100 + 53, // PgUp
+        0x51 => 0x100 + 54, // PgDn
+        _ => 0,
+    }
+}
+
 /// One byte from the i8042 (set 1).
 fn scancode(b: u64) {
     bump(C_SCANCODES)
@@ -1024,6 +1051,24 @@ fn scancode(b: u64) {
             c = 13 // keypad Enter
         } else if k == 0x35 {
             c = 47 // keypad /
+        } else {
+            // px58: the cursor and editing block give the sequences a
+            // Linux virtual terminal gives them (measured: notes/px58 §E,
+            // the same keys sent to kasumi's kernel's VT; terminfo's
+            // `linux` entry agrees), through the line discipline as if
+            // typed, so a program in raw mode reads them and canonical
+            // mode echoes `^[[A` as Linux's does.
+            let f = cursor_key(k)
+            if f != 0 {
+                bump(C_RX_KBD)
+                input(27)
+                input(91)
+                input(f & 0xff)
+                if f > 0xff {
+                    input(126)
+                }
+            }
+            return
         }
     } else {
         c = key_base(k)
