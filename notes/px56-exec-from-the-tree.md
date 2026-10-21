@@ -199,3 +199,327 @@ session's copied-program rows; **B** (#96) `#!` not read (every script
 ENOEXEC): J12 red at the script rows and the session's `#!` rows; **C**
 (ENOEXEC) a text file EACCES again: J12 red at the ENOEXEC rows and the
 session's `greet.sh` (`cannot be run`).
+
+## 3a. The prediction, scored
+
+| # | predicted | measured | verdict |
+|---|---|---|---|
+| P1 | a copy, a page rewritten in place, an archive text overwritten, a copy unlinked and run by `/proc/self/fd/N` (exe `<path> (deleted)`, name `N`) and by `execveat(N, "", AT_EMPTY_PATH)` (AT_EXECFN `/dev/fd/N`, name `N`, weak), a link (AT_EXECFN and name the link's, exe the target's): all run, root and 1000:1000 | every row as predicted on real root's guest, twice, the same bytes, root and 1000:1000, and the container's the same — **but `execveat(N, "", AT_EMPTY_PATH)` names the program by its file (`gone`), not `N`**: the weak point; and for a script so run, by its interpreter's file (`execs`) | right but the weak point |
+| P2 | the refusal table, root \| user (below, §B); ETXTBSY for a file held open for writing, for `open(O_WRONLY)`/`O_RDWR` and `truncate` of a running program's file, `unlink` 0 (weak); ENOEXEC for text, empty and `\x7fELF` alone; execveat's EINVAL, ELOOP, ENOTDIR, EBADF | every row as predicted, the weak point held (7.2.8 still refuses writes to a running program: ETXTBSY) | right |
+| P3 | `#!` as `execve(2)` says: argv[0] dropped, `interp [arg] path args`; blanks and tabs; no newline the same; CR in the word; `#!` alone, `#!\n`, `#!` and blanks ENOEXEC; past 256 bytes the interpreter cut ENOEXEC, the argument cut (weak: the byte); missing ENOENT, a directory EACCES, no x EACCES, text ENOEXEC, out of reach EACCES; relative from the working directory; five scripts run, six ELOOP (weak: four); 0711 runs, 0644 EACCES; `/dev/fd/<dirfd>/s1`, `/dev/fd/<fd>`, close-on-exec ENOENT; a script open for writing ETXTBSY (weak); a set-ID script leaves the effective id 1000 | every row as predicted, the weak points: the cut is at byte 255 (a newline at byte 255 ends the line; at 256 it is not read), five scripts run and the sixth is ELOOP, a script open for writing ETXTBSY — **but `#!` alone (and `#!` and blanks with no newline, in a file that short) is EACCES**, not ENOEXEC: with no newline and no interpreter the empty name is looked up, the working directory; with a newline, or cut, ENOEXEC (the rows added in the second round, §C); and NUL: it ends the interpreter (`/bin/ex`: ENOENT) and the argument's text (`a\0b` is `a`; a NUL first gives the empty argument `""`) | right but `#!` alone |
+| P4 | PAX byte-identical to P1–P3 at the first boot, root and user | **107 and 107 lines byte-identical at the first boot of the change**, root and `pax`, and the user's to the container's (J12, J3, `notes/px56/kasumi-first-mpx5-jobs-execs.out`) | right |
+| P5 | the tree's read within 2% of the archive's: not kept | trunk's archive read 26.90 ms and 27.17 ms a round (600 rounds of the 0.8 MB probe, 180 of boreutils' `true`), the tree's 26.75 and 26.78: within 1.5%, the tree's the faster, inside the run-to-run spread (23.7 to 30.0 ms a batch on either kernel) (`notes/px56/kasumi-speed.txt`) | right |
+| P6 | the typed session as the guest's at PAX's first boot, root and `pax`, the user's as the container's | 50 lines each, byte-identical at the first boot, root and `pax` and the container's (J12, J3) | right |
+
+## A. What loads: exec from the tree (pax#95, items 1 and 4)
+
+Linux 7.2.8 (real root's guest: kasumi's own kernel image `f4c00d5d…`
+under QEMU 11.1.1, `notes/px52/vmjob.c` unchanged as pid 1, the suite
+build's own execs archive; recorded twice, the same bytes,
+`notes/px56/kasumi-recordings-twice.out`), as root and as 1000:1000, and
+the container's user the same (J3): a copy of the probe written since
+boot with `read` and `write` runs, AT_EXECFN the path as given (`./copy`
+from its directory), `/proc/self/exe` the copy's path, the name its last
+component cut to 15 bytes (`a-name-longer-t`); an archive copy of the
+probe with the page holding its marker rewritten by `pwrite` runs the
+new marker (`px56 marker B`: the rest of the file still the archive's);
+an archive text file (0755, ENOEXEC as it is) overwritten with the
+probe runs; a copy opened, unlinked and run by `/proc/self/fd/9` runs,
+`/proc/self/exe` `…/gone (deleted)`, AT_EXECFN `/proc/self/fd/9`, the
+name `9`; by `execveat(9, "", AT_EMPTY_PATH)` AT_EXECFN `/dev/fd/9` and
+**the name `gone`**, the file's own; by a link, AT_EXECFN and the name
+the link's, `/proc/self/exe` the copy's. The typed session (both): `cp
+/bin/true t; ./t` 0, `cp /bin/false f; ./f` 1, `cat f > t; ./t` 1.
+
+PAX: `kernel/elf` reads every byte through `tree.span`, so a file is
+loaded from wherever its pages are (the archive in place, a written
+page's frame, a hole); `kernel/files`' `exec_open` finds it and makes it
+an open file of the process's (`A_EXE`), which is what `/proc/self/exe`
+reads (px50's fd/ text: the directory and the name it has now, `<path>
+(deleted)` once gone), what a fork shares and what a process's end lets
+go; kernel-started programs (`exec_span`) are the tree's too
+(`exec_kernel`). **Byte-identical at the first boot of the change**
+(`notes/px56/kasumi-first-mpx5-jobs-execs.out`: J12 107 and 107 lines,
+50 and 50; J3; J4; J6 nothing refused, -ENOSYS only 273 and 334).
+
+**The archive's fast case (P5)**: trunk `241b322`'s loader against this
+branch's, one archive (`notes/px56/speed.run`: `execs time 100
+/bin/execs`, `execs time 30 /bin/true`, twice), three boots each,
+interleaved, TCG, `taskset -c 0-3`: the archive's 26.90 ms (the probe)
+and 27.17 ms (`true`) a round, the tree's 26.75 and 26.78 (780 rounds a
+kernel; `notes/px56/kasumi-speed.txt`). Not kept.
+
+## B. The refusals (the mode rule; items 1 and 3)
+
+Real root's guest and the container, root | 1000:1000; PAX the same at
+the first boot (`user/elf/execs.c`'s E, T and X rows):
+
+| case | root | 1000:1000 |
+|---|---|---|
+| a missing file; a missing directory on the way; an empty path | ENOENT | ENOENT |
+| a file on the way | ENOTDIR | ENOTDIR |
+| a component of 256 bytes | ENAMETOOLONG | ENAMETOOLONG |
+| a loop of links | ELOOP | ELOOP |
+| a directory; `/dev/null`; a 0644 file | EACCES | EACCES |
+| root's 0744 file | runs (7) | EACCES |
+| root's 0701 file (execute, no read) | runs | runs |
+| 0:1000's 0710 file | runs | runs |
+| a 0755 file in root's 0700 directory | runs | EACCES |
+| a 0755 text file with no `#!`; an empty 0755 file; `\x7fELF` alone | ENOEXEC | ENOEXEC |
+| a file the caller holds open for writing | ETXTBSY | ETXTBSY |
+| while it runs: `open` O_WRONLY, O_RDWR; `truncate` | ETXTBSY | ETXTBSY |
+| while it runs: `open` O_RDONLY; `unlink` | 0 | 0 |
+| a script open for writing; a script whose interpreter is | ETXTBSY | ETXTBSY |
+| while a script runs: the script O_WRONLY / its interpreter O_WRONLY | 0 / ETXTBSY | 0 / ETXTBSY |
+| execveat: an unknown flag | EINVAL | EINVAL |
+| execveat: AT_SYMLINK_NOFOLLOW at a link (at a file: runs) | ELOOP | ELOOP |
+| execveat: a file's descriptor and a name / and "" without AT_EMPTY_PATH | ENOTDIR / ENOENT | ENOTDIR / ENOENT |
+| execveat: a closed descriptor, a name or AT_EMPTY_PATH | EBADF | EBADF |
+
+ETXTBSY is PAX's now: a regular file's twelfth inode word (a
+directory's parent's, a socket's record's; no file used it) counts the
+programs running from it, `open` for writing and `truncate` answer
+-ETXTBSY after the class rule while it is not 0, and `execve` of a file
+some open file has for writing is -ETXTBSY.
+
+## C. `#!` and ENOEXEC (pax#96, items 2 and 3)
+
+Linux (the same guest, both actors; S rows): `#!/bin/execs say` run
+with argv `zero a1 a2` gives the interpreter `/bin/execs say <path> a1
+a2`, AT_EXECFN the script's path, `/proc/self/exe` the interpreter's,
+the name the script's; no argument, no `say`; blanks and tabs after `#!`
+skipped, the argument ONE string with its inner blanks and tabs (`one
+two`, `x\ty`), stripped at both ends; no newline at the end the same; a
+carriage return stays in its word (`/bin/execs\r` ENOENT, an argument
+`x\r`); `#!\n` and `#!` and blanks and a newline ENOEXEC — **`#!` alone
+and `#!` and blanks with no newline EACCES** (with no newline in a file
+shorter than what is read, the empty name is looked up: the working
+directory), `#!` and 298 blanks with no newline (cut) ENOEXEC; the line
+is the first 256 bytes: a newline at byte 255 ends it, at 256 it is not
+read and the line is cut at 255 (an interpreter ending at 252 to 255
+runs, at 256 to 258 ENOEXEC; an argument ending at 252 to 255 is 239 to
+242 bytes, past it 242); a NUL ends the interpreter (`/bin/ex`: ENOENT)
+and the argument's text (`a\0b` is `a`, a NUL first `""`); an
+interpreter missing ENOENT, a directory EACCES, with no execute bit
+EACCES, text with no `#!` ENOEXEC, in root's 0700 directory runs for root
+and EACCES for a user; a relative interpreter from the working
+directory (from `/bin` runs, from `/` ENOENT); a chain of scripts:
+**five run**, each level's interpreter, argument and path before the
+ones after (`/bin/execs say c1 arg2 c2 arg3 … c5 z`), **six and seven
+ELOOP**; root's 0711 script runs for a user; a 0644 script EACCES;
+root's 04755 script leaves the effective id the caller's;
+`execveat(dirfd, "s1")` hands `/dev/fd/8/s1`, AT_EMPTY_PATH `/dev/fd/9`
+(the name then the interpreter's file's, `execs`), a close-on-exec fd or
+dirfd ENOENT, an ELF by a close-on-exec dirfd runs.
+
+PAX (`kernel/process`: `shebang`, `interp_args`, `run_file`): those
+rules, measured, and no others; ENOEXEC for a file with no ELF magic or
+shorter than an ELF header **with no `refused:` line**, so pelt's XCU
+2.9.1.4 fallback fires; the `refused:` lines stay for an ELF PAX does not
+run (ET_DYN, PT_INTERP, a 32-bit file). **Byte-identical at the first
+boot**, root and `pax`, every S row (J12), and the session's: `#!/bin/cat
+-n` numbers its own two lines, `#!/bin/sh` runs pelt on `s.sh` (`sh ran
+./s.sh with 2 args: one two`), `#!/g/t/n.sh` (a script whose interpreter
+is a script) numbers both, `./d4` (five deep) all six lines, `./d5`
+`cannot be run`, 126; `nx.sh` without `x` `cannot be run`, 126; `#!/nope`
+`not found`, 127; and the maintainer's three commands `hi`, 0.
+
+## D. The suites that held px27's refusal (P7)
+
+On kasumi (native, BIOS, TCG, every build in `px13-ubuntu`, each boot on
+four cpus of its own; `notes/px56/kasumi-regress.out`):
+
+- **mpx5-jobs**, every image: PASS (the execs image's J12 at the first
+  boot, §A; every older image's recordings held: nothing they type
+  moved).
+- **mpx3-tree**: PASS once T2 moved: `~exec: a program copied since
+  boot, run: status 7` (Linux's answer; 113, -EACCES, before), the
+  `syscall 59` refusal out of `REFUSALS` (eight, not nine; the kernel
+  counts eight) and out of `tests/mpx3-tree.d/probes-user.pax`.
+- **mpx3-shell**: PASS once procs' S4 moved: its execve of `/etc/script`
+  (text, mode 0755) is -ENOEXEC with no `refused:` line, Linux's own
+  answer (px14 to px55 named it twice).
+- **mpx5-users**: perm **382 of 382 lines Linux's** (339 before: A's 43
+  `execve` rows, 13 of them root's, are Linux's now; `perm.pax` is the
+  recording's bytes), no refusal; setid's copies run, 72 lines: the plain
+  copy, 02745, the owner's own 06755 and the script (`#!` the plain copy)
+  Linux's, every row that asks a set-ID bit PAX's (R5: no id raised,
+  AT_SECURE 0, dumpable 1), no refusal; sig's set-ID target runs (as
+  1000, R5) and settles, so its `!` line is gone (144 lines, Linux's
+  count), its five reader rows of that target read a 1000 process's
+  `/proc/<pid>`, its three sender rows stay PAX's (R5), six targets ended
+  by the session, not five; `setid.pax`, `sig.pax` and the counts move
+  with it.
+- **mpx3-loader** (px10's, `exec_span` through the tree now): PASS, its
+  six refusals by the same names.
+- mpx5-accounts, mpx3-boreutils, mpx3-user, mpx3-threads: PASS
+  unchanged. The network suites, mpx3-console, -screen, -speaker,
+  -sound, -orchestra, the tour and the core suites: CI's (`kernel/sched`
+  is in ruling #76's core list, so the pull request's run is every
+  suite on the one leg).
+
+## E. Plants (P8)
+
+Each a branch never to be merged, one commit on the head
+(`1475941`), run by dispatch on one leg, `-f tier=pr -f suites=mpx5-jobs
+-f jobs_boots=execs:serial`. (A first dispatch of all three, runs
+39613240023, 39613244187 and 39613248775, was red at the plan job, not
+the suite: `tools/mkexecs` named `tools/mkcred` in a comment, so the CI
+plan counted mpx5-users' credential probes as mpx5-jobs' too
+(`tests/ci-plan` P2). Fixed in `1475941`, the plants rebased, run
+again.)
+
+| plant | branch, commit | break | CI |
+|---|---|---|---|
+| A (#95) | `px56-plant-a` `ea99b07` | `exec_open` refuses a file that is not still the archive's whole (px27's limit back) | run **39615469293**, mpx5-jobs job 119275479233: J12 red at every F row written since boot (the copy, its relative run, the long name, the page rewritten, the text overwritten, the unlinked copy by `/proc/self/fd/9` and by AT_EMPTY_PATH, the link), every S row (the scripts are written since boot), root and `pax`, J3 at the user's, J4; the session red at `./Script/greet.sh` (`cannot be run`, 126: the maintainer's own symptom), the copied `true` and `false`; J6 green (`notes/px56/ci-39615469293-plant-a.txt`) |
+| B (#96) | `px56-plant-b` `4d0a371` | `#!` not read | run **39615475341**, job 119275491594: J12 red at the S rows (ENOEXEC where the interpreter ran), root and `pax`, J3, J4 (`#!/bin/execs say`, the chain's ELOOP); the session red at `#!/bin/cat -n` (pelt reads it as shell: `line: not found`, 127) and the chain (`ci-39615475341-plant-b.txt`) |
+| C (ENOEXEC) | `px56-plant-c` `7e0343c` | a file with no ELF magic answers EACCES again | run **39615480343**, job 119275499871: J12 red at the archive text file and the three ENOEXEC rows (EACCES), root and `pax`, J3, J4; the session red at `./Script/greet.sh` (`cannot be run`, 126) (`ci-39615480343-plant-c.txt`) |
+
+## F. CI
+
+- The pull request's runs: named in the pull request and the hand-back
+  (a commit naming them would move the head). `kernel/sched` and
+  `boot/sched.S` are in ruling #76's core list, so the pull request's own
+  run is every suite on the one leg (`tier pr`); under ruling #92 the
+  lane hands back once it is green at the final head and `full-matrix`
+  is on, and the orchestrator holds the `tier full` run.
+- The plants' runs: §E. `tests/ci-plan` at the head: PASS, every one of
+  the tracked paths known (the new probe, tool and keys derived from
+  mpx5-jobs' and `tools/mkexecs`' own text).
+
+## G. The playground (item 4)
+
+The orchestrator's `~/lanes/orch-paxplay/build.sh` and `assemble.sh` on
+kasumi, run unchanged but for the pax commit: the playground's pax tree
+was px54's `39f8597` (`tools/mklope`, `user/shrc`: px54's, not on trunk),
+so it moved to **`19f24e8`, a local merge of `39f8597` and this branch's
+`b32a791`** (made in `~/lanes/px56/play`, never pushed; `kernel/` and
+`boot/` byte-identical to `b32a791`'s), and `assemble.sh`'s one motd
+line to `PAX playground: pax px54 39f8597 + px56 b32a791 (19f24e8),
+wolf 0.2.33, pelt 90d7c64, boreutils cc64f68.` (it named `pax px54
+39f8597` before; the script as it was: kasumi
+`~/lanes/px56/ev/orch-assemble.sh.before`). Every step rc 0 (pelt, lope,
+the 47 boreutils, `as`, su, play, the zone, kmain_console native).
+**`pax-playground.iso`
+`c9ce2cdacb3a5a1612710eedf20526fa2c6e092c45ef9470a92a9b072006f606`**
+(71,782,400 bytes; px54's was `cc15c602…`, 71,751,680), `pax-smoke.iso`
+`6b87d8f8…`. Booted once on kasumi (TCG) with
+`notes/px56/playground.keys` typed at the console's pelt: `su pax`, `cd
+/home/pax`, `mkdir Script`, then the maintainer's line — **`hi`, st=0**
+— a `#!/bin/cat -n` script and a copied `/bin/true` (0); halted
+(`notes/px56/kasumi-playground-session.txt`). Copied to nomad-1
+`~/pax-playground/pax-playground.iso` over px54's, hashed there twice,
+the same digest.
+
+## 4. Evidence index
+
+Shas are this branch's (`px56`, on pax trunk `241b322`); kasumi paths
+are under `~/lanes/px56/`.
+
+### What was written
+
+- The prediction: `2b6faf0` (§1 to §3, before any change or
+  measurement).
+- The probe and its inputs: `cbd7a98` (`user/elf/execs.c`,
+  `tools/mkexecs`), `173a056` (`user/console/execs.keys`), `1475941`
+  (`tools/mkexecs`' comment: the CI plan reads names).
+- Linux's recordings: `e0c5fea` (`tests/mpx5-jobs.d/linux/execs*`,
+  `xsh*`, `vm-*.meta`), `e08fa73` (the scripts; the two recordings
+  compared).
+- The kernel: `d273284` (`kernel/tree`), `f1b483a` (`kernel/sched`),
+  `e2e019e` (`kernel/files`), `d48ad8c` and `11ad9db` (`kernel/process`),
+  `64dfe3b` (`kernel/user`), `afdb007` (`kernel/elf`), `6cb3efe`
+  (`boot/sched.S`'s comment).
+- The suites: `195c584` (`tests/mpx5-jobs`: the execs image, J12),
+  `77e3eb3` (`tests/mpx3-tree`), `4d6c2e5` (`tests/mpx3-shell`), and
+  mpx5-users' (perm, setid, sig: §D) after them.
+- The words: `02db6c4` (`kernel/README.md`), `2a90093`
+  (`docs/SOURCES.md`), `6fef3b1` (CHANGELOG), `0729d10` (README), and
+  this note's.
+- The scripts: `notes/px56/*.sh` (launch, build, boot, kbuild, sync,
+  vm-rec, speed, regress, playground-boot).
+
+### What was measured, and where it is
+
+- **Linux's answers**: `tests/mpx5-jobs.d/linux/execs.tty`,
+  `execs-user.tty` (107 lines each), `xsh.tty`, `xsh-user.tty` (50) and
+  their `vm-*.meta` (kasumi's 7.2.8 `f4c00d5d…`, vmjob `2a3a7f57…` from
+  `notes/px52/vmjob.c`, the execs archive `7627e1e7…`), made twice, the
+  same bytes (`notes/px56/kasumi-recordings-twice.out`); round one (the
+  first 101 lines, before §C's added rows) kasumi `vm/r1/`.
+- **PAX's first boot**: `notes/px56/kasumi-first-mpx5-jobs-execs.out`
+  (J12, J3, J4, J6, the container's J0).
+- **The speed**: `notes/px56/kasumi-speed.txt`, `speed.run`.
+- **The suites at the head on kasumi**: kasumi `ev/regress.txt` (§D),
+  `out/u3-mpx5-users.boot.log` and `build/rg1-mpx5-users.boot.log`.
+- **The plants**: `notes/px56/ci-*-plant-*.txt`.
+- **The playground**: `notes/px56/kasumi-playground-session.txt`.
+
+### Measured, inferred, not verified
+
+**Measured**: everything in §A to §G but what follows.
+
+**Inferred**:
+- That the archive's fast case would stay within the spread on a
+  faster machine (KVM, real hardware): the tree's read adds a lookup a
+  page to a copy of the page, measured only under TCG.
+- That PAX's empty-interpreter answer (-EACCES, the working directory
+  looked up as the empty name) is Linux's reason as well as its
+  answer: black-box, only the answer was seen (a working directory is
+  always a directory).
+
+**Not verified**:
+- Real root was one kernel build (kasumi's 7.2.8); CI's runner's kernel
+  is the container's for the user's rows (J3), not measured here.
+- `execve` of `/proc/self/exe` and `/proc/<pid>/exe` (to file, above);
+  a `noexec` mount (PAX has none); whether a program run without read
+  permission is dumpable; argv NULL; E2BIG past 64 KiB of vectors: none
+  asked of Linux.
+- UEFI, the release tier and more than one CPU: CI's full tier only; no
+  hasu (KVM) run.
+
+### Issues
+
+- **To close at merge, by hand**: pax#95 (any file of the tree runs,
+  the mode rule and the refusals measured, root and user; plant A
+  39615469293), pax#96 (`#!` as Linux reads it, ENOEXEC; plants B
+  39615475341 and C 39615480343).
+- **Would file (none filed)**:
+  1. pax: `execve` of `/proc/self/exe` (and `/proc/<pid>/exe`), the way
+     a program re-runs itself on Linux (`proc(5)`: a link to the
+     program's file): PAX's walk answers `/proc/self/exe` only to
+     `readlink` and O_NOFOLLOW (px26), so, by its code, such an
+     `execve` is -ENOENT; not measured here, not asked by any suite.
+
+## 5. Done-when
+
+- Branch `px56` on origin; the pax pull request (number in the
+  hand-back), open, unmerged; `full-matrix` added at the final head once
+  its `tier pr` run is green.
+- The five sections §1 to §5; the items §A to §G.
+- The test checklist:
+  - [x] Linux measured first: the probe as root and as 1000:1000 and
+        the typed session as both on real root's guest (twice, the same
+        bytes) and in a container (the user's)
+  - [x] PAX byte-identical at the first boot: execs, execs-user (107
+        lines), xsh, xsh-user (50) (J12, J3, J4, J6)
+  - [x] the archive's fast case measured against the tree's (780
+        rounds a kernel): not kept
+  - [x] `tests/mpx5-jobs` on kasumi, every image
+  - [x] `tests/mpx3-tree`, `mpx3-shell`, `mpx5-users` (their
+        expectations moved, §D), `mpx3-loader`, `mpx5-accounts`,
+        `mpx3-boreutils`, `mpx3-user`, `mpx3-threads` on kasumi, native
+        BIOS
+  - [x] `tests/ci-plan`, every case
+  - [x] plants A, B and C red in CI (39615469293, 39615475341,
+        39615480343)
+  - [x] the playground rebuilt (`c9ce2cda…`), the maintainer's session
+        typed on it, copied to nomad-1 and hashed twice
+  - [ ] `tier pr` green at the final head, `full-matrix` on: named in
+        the pull request; `tier full` held by the orchestrator (ruling #92)
+- `wolf/tools/lane-audit.sh pax px56 <PR>` exit status: named in the
+  hand-back.
+- Trees: kasumi `~/lanes/px56/` keeps `out/`, `ev/`, `vm/`, `bin/`,
+  `cache/`; build directories and the `head`, `trunk`, `plant-*` and
+  `play` worktrees removed at the end. Plant branches stay on origin,
+  never to be merged.
