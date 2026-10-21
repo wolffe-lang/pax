@@ -6,7 +6,9 @@
 //! Written from man-pages `clone(2)` (clone3's `struct clone_args`),
 //! `vfork(2)`, `execve(2)`, `wait4(2)`, `waitid(2)`, `wait(2)`,
 //! `getpid(2)`, `rt_sigprocmask(2)` (`sigprocmask(2)`), `sigaction(2)`,
-//! `kill(2)`, `signal(7)`, `credentials(7)`; the uapi headers
+//! `kill(2)`, `signal(7)`, `credentials(7)`; px56: `execve(2)`'s
+//! "Interpreter scripts" and NOTES, `execveat(2)`, `fexecve(3)`,
+//! `proc(5)`'s comm and exe; the uapi headers
 //! `linux/sched.h` (CLONE_*, `struct clone_args`), `linux/wait.h`
 //! (WNOHANG, WEXITED, P_*), `asm-generic/siginfo.h` (the SIGCHLD
 //! siginfo's layout, CLD_*), `arch/x86/include/uapi/asm/signal.h`
@@ -16,8 +18,10 @@
 //! source; no libc's.
 //!
 //! **A program's image** (`exec_span` for a program the kernel starts,
-//! `execve` for one a process starts): the file from the initramfs,
-//! checked and loaded by kernel/elf into a fresh address space; a stack
+//! `execve` for one a process starts): the file (px56: the tree's,
+//! whatever wrote it, read through kernel/tree; px10 to px55: the
+//! initramfs's), checked and loaded by kernel/elf into a fresh address
+//! space; a stack
 //! of ELF_STACK_PAGES pages below STACK_TOP (the page below them the
 //! guard) holding what the psABI puts on a process's initial stack,
 //! from the top down: eight zero bytes; the strings (argv's, envp's,
@@ -56,10 +60,13 @@
 //! (-EINVAL), no free slot or (px34) no frame for its kernel stack
 //! (-EAGAIN, each by name), no frames for the copy (-ENOMEM).
 //!
-//! **execve** (59): path, argv and envp read out of the caller's memory
-//! first; then the file (kernel/files' `exec_lookup`: -ENOENT, -EACCES
-//! for a directory, a device or a file with no execute bit), the image
-//! (-ENOEXEC for what kernel/elf refuses, logged by name), and only then
+//! **execve** (59; px56: and execveat, 322): the file first
+//! (kernel/files' `exec_open`: -ENOENT, -EACCES for a directory, a
+//! device or a file with no execute bit, -ETXTBSY for one open for
+//! writing), then the filename, argv and envp out of the caller's
+//! memory; px56: a `#!` line's interpreter in its place (`run_file`,
+//! `shebang`, `interp_args`); the image (-ENOEXEC for what kernel/elf
+//! refuses, logged by name when it is an ELF), and only then
 //! the point of no return: descriptors with close-on-exec closed,
 //! handled signals reset (the mask kept), the saved and file-system ids
 //! made the effective ids (px39, kernel/cred: no id is ever raised, the
