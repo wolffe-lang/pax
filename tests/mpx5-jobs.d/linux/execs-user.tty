@@ -1,0 +1,107 @@
+execs: px56's probe, as a user
+start: its work directory /g/w<uid> made: 0
+F: the archive's /bin/execs: run: argc 2: "execs" "say"; execfn "/bin/execs"; exe "/bin/execs"; name "execs"; ids 1000/1000
+F: a copy written since boot (read, write, 0755): run: argc 3: "copy" "one" "two"; execfn "/g/w1000/copy"; exe "/g/w1000/copy"; name "copy"; ids 1000/1000
+F: the copy by a relative path from its directory: run: argc 2: "./copy" "rel"; execfn "./copy"; exe "/g/w1000/copy"; name "copy"; ids 1000/1000
+F: a copy whose name is longer than 15 bytes: run: argc 2: "long" "x"; execfn "/g/w1000/a-name-longer-than-fifteen"; exe "/g/w1000/a-name-longer-than-fifteen"; name "a-name-longer-t"; ids 1000/1000
+F: an archive copy of the probe, as it is: run: marker "px56 marker A"
+F: its marker found: yes; rewritten in place by pwrite: 0
+F: the archive copy with that page rewritten: run: marker "px56 marker B"
+F: an archive text file (0755), as it is: errno ENOEXEC
+F: that file overwritten (O_TRUNC) with the probe: run: argc 2: "tx" "t"; execfn "/g/m/tx1000"; exe "/g/m/tx1000"; name "tx1000"; ids 1000/1000
+F: a copy opened (descriptor 9) and unlinked: 0
+F: run by /proc/self/fd/9: run: argc 2: "fd" "u"; execfn "/proc/self/fd/9"; exe "/g/w1000/gone (deleted)"; name "9"; ids 1000/1000
+F: run by execveat(9, "", AT_EMPTY_PATH): run: argc 2: "fd" "u"; execfn "/dev/fd/9"; exe "/g/w1000/gone (deleted)"; name "gone"; ids 1000/1000
+F: a link to the copy: 0
+F: run by the link: run: argc 2: "link" "l"; execfn "/g/w1000/link"; exe "/g/w1000/copy"; name "link"; ids 1000/1000
+E: a missing file: errno ENOENT
+E: a missing directory on the way: errno ENOENT
+E: a file on the way: errno ENOTDIR
+E: an empty path: errno ENOENT
+E: a component of 256 bytes: errno ENAMETOOLONG
+E: a loop of links: errno ELOOP
+E: a directory: errno EACCES
+E: /dev/null: errno EACCES
+E: a 0644 file: errno EACCES
+E: root's 0744 file: errno EACCES
+E: root's 0701 file (execute, no read): exit 7
+E: 0:1000's 0710 file: exit 7
+E: a 0755 file in root's 0700 directory: errno EACCES
+E: a 0755 text file with no #!: errno ENOEXEC
+E: an empty 0755 file: errno ENOEXEC
+E: a 0755 file of \x7fELF alone: errno ENOEXEC
+S: #!/bin/execs say, run with argv zero a1 a2: run: argc 5: "/bin/execs" "say" "/g/w1000/s1" "a1" "a2"; execfn "/g/w1000/s1"; exe "/bin/execs"; name "s1"; ids 1000/1000
+S: #!/bin/execs (no argument): run: argc 4: "/bin/execs" "/g/w1000/s2" "a1" "a2"; execfn "/g/w1000/s2"; exe "/bin/execs"; name "s2"; ids 1000/1000
+S: blanks after #!, around and inside the argument: run: argc 5: "/bin/execs" "one two" "/g/w1000/s3" "a1" "a2"; execfn "/g/w1000/s3"; exe "/bin/execs"; name "s3"; ids 1000/1000
+S: tabs: run: argc 5: "/bin/execs" "x\x09y" "/g/w1000/s4" "a1" "a2"; execfn "/g/w1000/s4"; exe "/bin/execs"; name "s4"; ids 1000/1000
+S: no newline at the end: run: argc 5: "/bin/execs" "a" "/g/w1000/s5" "a1" "a2"; execfn "/g/w1000/s5"; exe "/bin/execs"; name "s5"; ids 1000/1000
+S: a carriage return after the interpreter: errno ENOENT
+S: a carriage return after the argument: run: argc 5: "/bin/execs" "x\x0d" "/g/w1000/s7" "a1" "a2"; execfn "/g/w1000/s7"; exe "/bin/execs"; name "s7"; ids 1000/1000
+S: #! and a newline: errno ENOEXEC
+S: #! and blanks: errno ENOEXEC
+S: #! alone: errno EACCES
+S: #! and blanks, no newline: errno EACCES
+S: #! and 298 blanks, no newline: errno ENOEXEC
+S: #!/bin/execs and 288 blanks, no newline: run: argc 4: "/bin/execs" "/g/w1000/s19" "a1" "a2"; execfn "/g/w1000/s19"; exe "/bin/execs"; name "s19"; ids 1000/1000
+S: a NUL inside the argument: run: argc 5: "/bin/execs" "a" "/g/w1000/s20" "a1" "a2"; execfn "/g/w1000/s20"; exe "/bin/execs"; name "s20"; ids 1000/1000
+S: a NUL inside the interpreter: errno ENOENT
+S: a NUL where the argument starts: run: argc 5: "/bin/execs" "" "/g/w1000/s22" "a1" "a2"; execfn "/g/w1000/s22"; exe "/bin/execs"; name "s22"; ids 1000/1000
+S: an interpreter that is missing: errno ENOENT
+S: an interpreter that is a directory: errno EACCES
+S: an interpreter with no execute bit: errno EACCES
+S: an interpreter that is text with no #!: errno ENOEXEC
+S: an interpreter in root's 0700 directory: errno EACCES
+S: a relative interpreter, from /bin: run: argc 5: "execs" "rel" "/g/w1000/s16" "a1" "a2"; execfn "/g/w1000/s16"; exe "/bin/execs"; name "s16"; ids 1000/1000
+S: a relative interpreter, from /: errno ENOENT
+S: root's 0711 script: run: argc 5: "/bin/execs" "say" "/g/m/s0711" "a1" "a2"; execfn "/g/m/s0711"; exe "/bin/execs"; name "s0711"; ids 1000/1000
+S: a 0644 script: errno EACCES
+S: root's 04755 script: run: argc 5: "/bin/execs" "say" "/g/m/suid" "a1" "a2"; execfn "/g/m/suid"; exe "/bin/execs"; name "suid"; ids 1000/1000
+S: an argument that runs past byte 400: run: argc 5: "/bin/execs" (242 bytes) "/g/w1000/l1" "a1" "a2"; execfn "/g/w1000/l1"; exe "/bin/execs"; name "l1"; ids 1000/1000
+S: an interpreter whose name ends at byte 252, then a newline: run: argc 4: (250 bytes) "/g/w1000/l2" "a1" "a2"; execfn "/g/w1000/l2"; exe "/bin/execs"; name "l2"; ids 1000/1000
+S: an interpreter whose name ends at byte 253, then a newline: run: argc 4: (251 bytes) "/g/w1000/l2" "a1" "a2"; execfn "/g/w1000/l2"; exe "/bin/execs"; name "l2"; ids 1000/1000
+S: an interpreter whose name ends at byte 254, then a newline: run: argc 4: (252 bytes) "/g/w1000/l2" "a1" "a2"; execfn "/g/w1000/l2"; exe "/bin/execs"; name "l2"; ids 1000/1000
+S: an interpreter whose name ends at byte 255, then a newline: run: argc 4: (253 bytes) "/g/w1000/l2" "a1" "a2"; execfn "/g/w1000/l2"; exe "/bin/execs"; name "l2"; ids 1000/1000
+S: an interpreter whose name ends at byte 256, then a newline: errno ENOEXEC
+S: an interpreter whose name ends at byte 257, then a newline: errno ENOEXEC
+S: an interpreter whose name ends at byte 258, then a newline: errno ENOEXEC
+S: an argument that ends at byte 252, then a newline: run: argc 5: "/bin/execs" (239 bytes) "/g/w1000/l3" "a1" "a2"; execfn "/g/w1000/l3"; exe "/bin/execs"; name "l3"; ids 1000/1000
+S: an argument that ends at byte 253, then a newline: run: argc 5: "/bin/execs" (240 bytes) "/g/w1000/l3" "a1" "a2"; execfn "/g/w1000/l3"; exe "/bin/execs"; name "l3"; ids 1000/1000
+S: an argument that ends at byte 254, then a newline: run: argc 5: "/bin/execs" (241 bytes) "/g/w1000/l3" "a1" "a2"; execfn "/g/w1000/l3"; exe "/bin/execs"; name "l3"; ids 1000/1000
+S: an argument that ends at byte 255, then a newline: run: argc 5: "/bin/execs" (242 bytes) "/g/w1000/l3" "a1" "a2"; execfn "/g/w1000/l3"; exe "/bin/execs"; name "l3"; ids 1000/1000
+S: an argument that ends at byte 256, then a newline: run: argc 5: "/bin/execs" (242 bytes) "/g/w1000/l3" "a1" "a2"; execfn "/g/w1000/l3"; exe "/bin/execs"; name "l3"; ids 1000/1000
+S: an argument that ends at byte 257, then a newline: run: argc 5: "/bin/execs" (242 bytes) "/g/w1000/l3" "a1" "a2"; execfn "/g/w1000/l3"; exe "/bin/execs"; name "l3"; ids 1000/1000
+S: an argument that ends at byte 258, then a newline: run: argc 5: "/bin/execs" (242 bytes) "/g/w1000/l3" "a1" "a2"; execfn "/g/w1000/l3"; exe "/bin/execs"; name "l3"; ids 1000/1000
+S: a chain of 1 script: run: argc 4: "/bin/execs" "say" "/g/w1000/c1" "z"; execfn "/g/w1000/c1"; exe "/bin/execs"; name "c1"; ids 1000/1000
+S: a chain of 2 scripts: run: argc 6: "/bin/execs" "say" "/g/w1000/c1" "arg2" "/g/w1000/c2" "z"; execfn "/g/w1000/c2"; exe "/bin/execs"; name "c2"; ids 1000/1000
+S: a chain of 3 scripts: run: argc 8: "/bin/execs" "say" "/g/w1000/c1" "arg2" "/g/w1000/c2" "arg3" "/g/w1000/c3" "z"; execfn "/g/w1000/c3"; exe "/bin/execs"; name "c3"; ids 1000/1000
+S: a chain of 4 scripts: run: argc 10: "/bin/execs" "say" "/g/w1000/c1" "arg2" "/g/w1000/c2" "arg3" "/g/w1000/c3" "arg4" "/g/w1000/c4" "z"; execfn "/g/w1000/c4"; exe "/bin/execs"; name "c4"; ids 1000/1000
+S: a chain of 5 scripts: run: argc 12: "/bin/execs" "say" "/g/w1000/c1" "arg2" "/g/w1000/c2" "arg3" "/g/w1000/c3" "arg4" "/g/w1000/c4" "arg5" "/g/w1000/c5" "z"; execfn "/g/w1000/c5"; exe "/bin/execs"; name "c5"; ids 1000/1000
+S: a chain of 6 scripts: errno ELOOP
+S: a chain of 7 scripts: errno ELOOP
+S: execveat(dirfd 8, "s1"): run: argc 5: "/bin/execs" "say" "/dev/fd/8/s1" "a1" "a2"; execfn "/dev/fd/8/s1"; exe "/bin/execs"; name "s1"; ids 1000/1000
+S: execveat(9, "", AT_EMPTY_PATH) of s1: run: argc 5: "/bin/execs" "say" "/dev/fd/9" "a1" "a2"; execfn "/dev/fd/9"; exe "/bin/execs"; name "execs"; ids 1000/1000
+S: the same, descriptor 9 close-on-exec: errno ENOENT
+S: execveat(dirfd 8, "s1"), dirfd close-on-exec: errno ENOENT
+S: execveat(dirfd 8, "../m/r0744"), an ELF, dirfd close-on-exec: errno EACCES
+T: a copy the probe holds open for writing: errno ETXTBSY
+T: the same once closed: run: argc 2: "busy" "b"; execfn "/g/w1000/busy"; exe "/g/w1000/busy"; name "busy"; ids 1000/1000
+T: while a process runs it: open O_WRONLY ETXTBSY
+T: open O_RDWR ETXTBSY
+T: open O_RDONLY 0
+T: truncate to 0 ETXTBSY
+T: unlink 0
+T: a script the probe holds open for writing: errno ETXTBSY
+T: a script whose interpreter the probe holds open for writing: errno ETXTBSY
+T: while a script runs: the script open O_WRONLY 0
+T: its interpreter open O_WRONLY ETXTBSY
+X: execveat(AT_FDCWD, the copy's absolute path, 0): run: argc 2: "x" "y"; execfn "/g/w1000/copy"; exe "/g/w1000/copy"; name "copy"; ids 1000/1000
+X: execveat(dirfd /g/m, "r0744", 0): errno EACCES
+X: execveat(dirfd /g/m, an absolute path, 0): run: argc 2: "x" "y"; execfn "/g/w1000/copy"; exe "/g/w1000/copy"; name "copy"; ids 1000/1000
+X: execveat with flag 0x1: errno EINVAL
+X: execveat(AT_SYMLINK_NOFOLLOW) of a link: errno ELOOP
+X: execveat(AT_SYMLINK_NOFOLLOW) of the copy: run: argc 2: "x" "y"; execfn "/g/w1000/copy"; exe "/g/w1000/copy"; name "copy"; ids 1000/1000
+X: execveat(a file's descriptor, "x", 0): errno ENOTDIR
+X: execveat(a file's descriptor, "", 0): errno ENOENT
+X: execveat(a closed descriptor, "x", 0): errno EBADF
+X: execveat(a closed descriptor, "", AT_EMPTY_PATH): errno EBADF
+end: the work directory removed: 0
