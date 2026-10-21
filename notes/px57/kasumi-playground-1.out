@@ -1,0 +1,155 @@
+755f098edc4c460d4f309d042fc9c0afdf08599fbd26b054c45780fa48551a05  /home/mfwolffe/lanes/px57/ev/orch-build.sh.before
+41aead58559cc19be20f7f3c3c8f32c0723d7198e84344b2b823e20d3dce7e30  /home/mfwolffe/lanes/px57/ev/orch-assemble.sh.before
+c9ce2cdacb3a5a1612710eedf20526fa2c6e092c45ef9470a92a9b072006f606  /home/mfwolffe/lanes/orch-paxplay/out/pax-playground.iso
+120e36b notes/px57: the census (each run's calls, failures, outputs; the unions) and plant B's red run
+e8c6ca5f5929c02d6d0cf673140759e75ef3a1ec6154115c02222c1972de6064  /home/mfwolffe/lanes/orch-paxplay/build.sh
+aa19960e5ab530e06f4887c3c2f83384659329535f26dde25a61ab004fa5313c  /home/mfwolffe/lanes/orch-paxplay/assemble.sh
+3c3
+< # shell, boreutils, su, as, play, lope) from pax trunk, built in px13-ubuntu
+---
+> # shell, boreutils, su, as, play, lope, aspen, lupin) from pax trunk, built in px13-ubuntu
+13a14
+> tools/mkaspen $W/aspen > $W/aspen.txt 2>&1; echo "mkaspen rc=$?"
+22c23
+< ls -la $W/pelt $W/lope $W/bore $W/bin $W/su $W/play | head -80
+---
+> ls -la $W/pelt $W/lope $W/aspen $W/bore $W/bin $W/su $W/play | head -80
+24c25,30
+< echo "build.sh done rc=$?"
+---
+> rc=$?
+> # px57: the musl lupin, built in the throwaway Rust image (px13-ubuntu with rustup inside it).
+> R=${PAX_RUST_IMAGE:-localhost/px57-rust}
+> podman image exists $R || podman build -t $R -f $L/pax/notes/px57/rust/Containerfile $L/pax/notes/px57/rust
+> podman run --rm --cpuset-cpus 10-15 -v $L:$L:Z -e L="$L" $R bash -c 'cd $L/pax && tools/mklupin $L/w/lupin > $L/w/lupin.txt 2>&1; echo "mklupin rc=$?"; ls -la $L/w/lupin'
+> echo "build.sh done rc=$rc"
+12c12
+< strip -o $S/pelt $W/pelt/pelt; strip -o $S/lope $W/lope/lope; strip -o $S/su $W/su/su; strip -o $S/play $W/play/play; cp $W/bin/as $S/as
+---
+> strip -o $S/pelt $W/pelt/pelt; strip -o $S/lope $W/lope/lope; strip -o $S/aspen $W/aspen/aspen; strip -o $S/lupin $W/lupin/lupin; strip -o $S/su $W/su/su; strip -o $S/play $W/play/play; cp $W/bin/as $S/as
+16,20c16,22
+< PAX playground: pax px54 39f8597 + px56 b32a791 (19f24e8), wolf 0.2.33, pelt 90d7c64, boreutils cc64f68.
+< pelt is pid 1 with job control (sh -i -m). Try: ls -l /bin, jobs, Ctrl-Z, bg, fg,
+< kill %1, timeout, su pax, play mambo. exit (or Ctrl-D) halts the machine.
+< lope 5ac37df jumps (its hook in /etc/shrc): cd /etc, cd /bin, then etc alone,
+< g -, g, gi, lope list. Its store is in memory, gone at the next boot.
+---
+> PAX playground: pax px57 120e36b, wolf 0.2.34, pelt 90d7c64, boreutils cc64f68, lope 5ac37df,
+> aspen 103ba46, lupin 0.1.55 (static musl). pelt is pid 1 with job control (sh -i -m).
+> Try: ls -l /bin, jobs, Ctrl-Z, bg, fg, kill %1, timeout, su pax, play mambo.
+> lope jumps (its hook in /etc/shrc): cd /etc, cd /bin, then etc alone, g -, gi.
+> aspen is tree(1) in wolf: aspen /, aspen -a -L 2 /home/pax, aspen -J /bin, aspen --du /usr.
+> lupin runs wolf programs: cd /usr/share/lupin; lupin run hello.lu (or write one: cat > x.lu).
+> Files and lope's store are in memory, gone at the next boot. exit (or Ctrl-D) halts.
+46a49
+> for t in user/lupin/*.lu; do args+=(/usr/share/lupin/${t##*/}=$t:644); done
+fetch-wolf: wolf 0.2.34 staged (/home/mfwolffe/lanes/orch-paxplay/cache/wolf-0.2.34/wolf-0.2.34-x86_64-unknown-linux-gnu/wolf, archive sha256 88a9dd3da1c9a0e38c08eb6e2de9c1ef04d1ed93dcf51024d8dbbb76890c1821): wolf 0.2.34 (wolfgang, pin 9da7bdc)
+wolf: /home/mfwolffe/lanes/orch-paxplay/cache/wolf-0.2.34/wolf-0.2.34-x86_64-unknown-linux-gnu/wolf wolf 0.2.34 (wolfgang, pin 9da7bdc)
+fetch-limine: limine 12.9.1 already staged (/home/mfwolffe/lanes/orch-paxplay/cache/limine-12.9.1)
+limine rc=0
+mkpelt rc=0
+mklope rc=0
+mkaspen rc=0
+mkboreutils rc=0
+mkas rc=0
+mksu rc=0
+mkplay rc=0
+mkzone rc=0
+kernel rc=0 elf=/home/mfwolffe/lanes/orch-paxplay/w/native/kmain_console.elf
+/home/mfwolffe/lanes/orch-paxplay/w/aspen:
+total 14164
+drwxr-xr-x 1 root root       26 Oct 21 21:42 .
+drwxr-xr-x 1 root root      240 Oct 21 21:46 ..
+-rwxr-xr-x 1 root root 14497536 Oct 21 21:42 aspen
+-rw-r--r-- 1 root root       80 Oct 21 21:42 sums.txt
+
+/home/mfwolffe/lanes/orch-paxplay/w/bin:
+total 768
+drwxr-xr-x 1 root root      4 Oct 21 21:45 .
+drwxr-xr-x 1 root root    240 Oct 21 21:46 ..
+-rwxr-xr-x 1 root root 785416 Oct 21 21:45 as
+
+/home/mfwolffe/lanes/orch-paxplay/w/bore:
+total 644264
+drwxr-xr-x 1 root root      426 Oct 21 21:45 .
+drwxr-xr-x 1 root root      240 Oct 21 21:46 ..
+-rwxr-xr-x 1 root root 13970264 Oct 21 21:42 basename
+-rwxr-xr-x 1 root root 14021368 Oct 21 21:42 cat
+-rwxr-xr-x 1 root root 14018800 Oct 21 21:42 chgrp
+-rwxr-xr-x 1 root root 14015440 Oct 21 21:42 chmod
+-rwxr-xr-x 1 root root 14018800 Oct 21 21:42 chown
+-rwxr-xr-x 1 root root 14071224 Oct 21 21:43 cp
+-rwxr-xr-x 1 root root 14025904 Oct 21 21:43 cut
+-rwxr-xr-x 1 root root 13967968 Oct 21 21:43 dirname
+-rwxr-xr-x 1 root root 13964016 Oct 21 21:43 echo
+-rwxr-xr-x 1 root root 14028896 Oct 21 21:43 env
+-rwxr-xr-x 1 root root 14017720 Oct 21 21:43 expand
+-rwxr-xr-x 1 root root 13954560 Oct 21 21:43 false
+-rwxr-xr-x 1 root root 14018288 Oct 21 21:43 fold
+-rwxr-xr-x 1 root root 13983416 Oct 21 21:43 groups
+-rwxr-xr-x 1 root root 14019352 Oct 21 21:43 head
+-rwxr-xr-x 1 root root 13991208 Oct 21 21:43 id
+-rwxr-xr-x 1 root root 13999664 Oct 21 21:43 kill
+-rwxr-xr-x 1 root root 14024992 Oct 21 21:43 ln
+-rwxr-xr-x 1 root root 13982712 Oct 21 21:43 logname
+-rwxr-xr-x 1 root root 14114600 Oct 21 21:43 ls
+-rwxr-xr-x 1 root root 13990120 Oct 21 21:43 mkdir
+-rwxr-xr-x 1 root root 14008344 Oct 21 21:43 mv
+-rwxr-xr-x 1 root root 14022912 Oct 21 21:44 nl
+-rwxr-xr-x 1 root root 14008112 Oct 21 21:44 nproc
+-rwxr-xr-x 1 root root 14003872 Oct 21 21:44 paste
+-rwxr-xr-x 1 root root 13983040 Oct 21 21:44 printenv
+-rwxr-xr-x 1 root root 14038320 Oct 21 21:44 printf
+-rwxr-xr-x 1 root root 13992400 Oct 21 21:44 pwd
+-rwxr-xr-x 1 root root 13983512 Oct 21 21:44 readlink
+-rwxr-xr-x 1 root root 14031104 Oct 21 21:44 rm
+-rwxr-xr-x 1 root root 13988600 Oct 21 21:44 rmdir
+-rwxr-xr-x 1 root root 14003208 Oct 21 21:44 seq
+-rwxr-xr-x 1 root root 14310496 Oct 21 21:44 sleep
+-rwxr-xr-x 1 root root 14060128 Oct 21 21:44 sort
+-rwxr-xr-x 1 root root 14026904 Oct 21 21:44 stat
+-rw-r--r-- 1 root root     3730 Oct 21 21:45 sums.txt
+-rwxr-xr-x 1 root root 14001976 Oct 21 21:44 tac
+-rwxr-xr-x 1 root root 14364680 Oct 21 21:44 tail
+-rwxr-xr-x 1 root root 14000200 Oct 21 21:44 tee
+-rwxr-xr-x 1 root root 14579232 Oct 21 21:45 timeout
+-rwxr-xr-x 1 root root 14038176 Oct 21 21:45 touch
+-rwxr-xr-x 1 root root 14011632 Oct 21 21:45 tr
+-rwxr-xr-x 1 root root 13954560 Oct 21 21:45 true
+-rwxr-xr-x 1 root root 14019832 Oct 21 21:45 unexpand
+-rwxr-xr-x 1 root root 14013136 Oct 21 21:45 uniq
+-rwxr-xr-x 1 root root 14039832 Oct 21 21:45 wc
+-rwxr-xr-x 1 root root 13977960 Oct 21 21:45 whoami
+-rwxr-xr-x 1 root root 13967496 Oct 21 21:45 yes
+
+/home/mfwolffe/lanes/orch-paxplay/w/lope:
+total 14096
+drwxr-xr-x 1 root root       24 Oct 21 21:42 .
+drwxr-xr-x 1 root root      240 Oct 21 21:46 ..
+-rwxr-xr-x 1 root root 14426728 Oct 21 21:42 lope
+-rw-r--r-- 1 root root       79 Oct 21 21:42 sums.txt
+
+/home/mfwolffe/lanes/orch-paxplay/w/pelt:
+total 14852
+drwxr-xr-x 1 root root       24 Oct 21 21:42 .
+drwxr-xr-x 1 root root      240 Oct 21 21:46 ..
+-rwxr-xr-x 1 root root 15201640 Oct 21 21:42 pelt
+-rw-r--r-- 1 root root       79 Oct 21 21:42 sums.txt
+
+mklupin rc=0
+total 7236
+drwxr-xr-x 1 root root      26 Oct 21 21:46 .
+drwxr-xr-x 1 root root     268 Oct 21 21:46 ..
+-rwxr-xr-x 1 root root 7405200 Oct 21 21:46 lupin
+-rw-r--r-- 1 root root      79 Oct 21 21:46 sums.txt
+build.sh done rc=0
+/home/mfwolffe/lanes/orch-paxplay/assemble.sh: line 22: syntax error near unexpected token `('
+/home/mfwolffe/lanes/orch-paxplay/assemble.sh: line 22: `Files and lope's store are in memory, gone at the next boot. exit (or Ctrl-D) halts.'
+aspen b34106b5bf15252e1024d1bd67839044008b5e5f4f4ae483b75821a329cda384 14497536
+lupin 08a7766b21ec00afe780d9d76fb9cee548b1bb22e2a06f9c5cfcb3d167e197f8 7405200
+pelt 5448cb27d882553bccba66dbde2c4aaba417a7501ae1c6bf3944af0d00a93c5d 15201640
+lope f9a2f064077f6bb33ede9219608b6fe72d4a45a66c84f61f3f9d9e5e94f5066c 14426728
+c9ce2cdacb3a5a1612710eedf20526fa2c6e092c45ef9470a92a9b072006f606  /home/mfwolffe/lanes/orch-paxplay/out/pax-playground.iso
+c9ce2cdacb3a5a1612710eedf20526fa2c6e092c45ef9470a92a9b072006f606  /home/mfwolffe/lanes/orch-paxplay/out/pax-playground.iso
+6b87d8f8d30e82c3f8e866f51ca39cee7042aae1f9a3cef7e075aea14b4c1ec4  /home/mfwolffe/lanes/orch-paxplay/out/pax-smoke.iso
+-rw-r--r-- 1 mfwolffe mfwolffe 71782400 Oct 21 10:56 /home/mfwolffe/lanes/orch-paxplay/out/pax-playground.iso

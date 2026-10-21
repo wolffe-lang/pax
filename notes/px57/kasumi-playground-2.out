@@ -1,0 +1,73 @@
+755f098edc4c460d4f309d042fc9c0afdf08599fbd26b054c45780fa48551a05  /home/mfwolffe/lanes/px57/ev/orch-build.sh.before
+41aead58559cc19be20f7f3c3c8f32c0723d7198e84344b2b823e20d3dce7e30  /home/mfwolffe/lanes/px57/ev/orch-assemble.sh.before
+c9ce2cdacb3a5a1612710eedf20526fa2c6e092c45ef9470a92a9b072006f606  /home/mfwolffe/lanes/orch-paxplay/out/pax-playground.iso
+120e36b notes/px57: the census (each run's calls, failures, outputs; the unions) and plant B's red run
+e8c6ca5f5929c02d6d0cf673140759e75ef3a1ec6154115c02222c1972de6064  /home/mfwolffe/lanes/orch-paxplay/build.sh
+d41b1a762f7be47182b5a0549741858fabbc91cb0e46c1a1358a8221c1169576  /home/mfwolffe/lanes/orch-paxplay/assemble.sh
+3c3
+< # shell, boreutils, su, as, play, lope) from pax trunk, built in px13-ubuntu
+---
+> # shell, boreutils, su, as, play, lope, aspen, lupin) from pax trunk, built in px13-ubuntu
+13a14
+> tools/mkaspen $W/aspen > $W/aspen.txt 2>&1; echo "mkaspen rc=$?"
+22c23
+< ls -la $W/pelt $W/lope $W/bore $W/bin $W/su $W/play | head -80
+---
+> ls -la $W/pelt $W/lope $W/aspen $W/bore $W/bin $W/su $W/play | head -80
+24c25,30
+< echo "build.sh done rc=$?"
+---
+> rc=$?
+> # px57: the musl lupin, built in the throwaway Rust image (px13-ubuntu with rustup inside it).
+> R=${PAX_RUST_IMAGE:-localhost/px57-rust}
+> podman image exists $R || podman build -t $R -f $L/pax/notes/px57/rust/Containerfile $L/pax/notes/px57/rust
+> podman run --rm --cpuset-cpus 10-15 -v $L:$L:Z -e L="$L" $R bash -c 'cd $L/pax && tools/mklupin $L/w/lupin > $L/w/lupin.txt 2>&1; echo "mklupin rc=$?"; ls -la $L/w/lupin'
+> echo "build.sh done rc=$rc"
+12c12
+< strip -o $S/pelt $W/pelt/pelt; strip -o $S/lope $W/lope/lope; strip -o $S/su $W/su/su; strip -o $S/play $W/play/play; cp $W/bin/as $S/as
+---
+> strip -o $S/pelt $W/pelt/pelt; strip -o $S/lope $W/lope/lope; strip -o $S/aspen $W/aspen/aspen; strip -o $S/lupin $W/lupin/lupin; strip -o $S/su $W/su/su; strip -o $S/play $W/play/play; cp $W/bin/as $S/as
+16,20c16,22
+< PAX playground: pax px54 39f8597 + px56 b32a791 (19f24e8), wolf 0.2.33, pelt 90d7c64, boreutils cc64f68.
+< pelt is pid 1 with job control (sh -i -m). Try: ls -l /bin, jobs, Ctrl-Z, bg, fg,
+< kill %1, timeout, su pax, play mambo. exit (or Ctrl-D) halts the machine.
+< lope 5ac37df jumps (its hook in /etc/shrc): cd /etc, cd /bin, then etc alone,
+< g -, g, gi, lope list. Its store is in memory, gone at the next boot.
+---
+> PAX playground: pax px57 120e36b, wolf 0.2.34, pelt 90d7c64, boreutils cc64f68, lope 5ac37df,
+> aspen 103ba46, lupin 0.1.55 (static musl). pelt is pid 1 with job control (sh -i -m).
+> Try: ls -l /bin, jobs, Ctrl-Z, bg, fg, kill %1, timeout, su pax, play mambo.
+> lope jumps (its hook in /etc/shrc): cd /etc, cd /bin, then etc alone, g -, gi.
+> aspen is tree(1) in wolf: aspen /, aspen -a -L 2 /home/pax, aspen -J /bin, aspen --du /usr.
+> lupin runs wolf programs: cd /usr/share/lupin; lupin run hello.lu (or write one: cat > x.lu).
+> Files and the lope store are in memory, gone at the next boot. exit (or Ctrl-D) halts.
+46a49
+> for t in user/lupin/*.lu; do args+=(/usr/share/lupin/${t##*/}=$t:644); done
+play cpio rc=0
+smoke cpio rc=0
+play iso rc=0
+smoke iso rc=0
+-rw-r--r-- 1 root root 72717568 Oct 21 21:49 /home/mfwolffe/lanes/orch-paxplay/w/play.cpio
+-rw-r--r-- 1 root root 72718756 Oct 21 21:49 /home/mfwolffe/lanes/orch-paxplay/w/smoke.cpio
+
+/home/mfwolffe/lanes/orch-paxplay/out:
+total 155128
+drwxr-xr-x 1 root root      302 Oct 21 21:49 .
+drwxr-xr-x 1 root root      112 Oct 21 21:49 ..
+-rw-r--r-- 1 root root 79415296 Oct 21 21:49 pax-playground.iso
+-rw-r--r-- 1 root root      625 Oct 21 21:49 pax-playground.iso.bios-install.log
+-rw-r--r-- 1 root root      745 Oct 21 21:49 pax-playground.iso.xorriso.log
+-rw-r--r-- 1 root root 79417344 Oct 21 21:49 pax-smoke.iso
+-rw-r--r-- 1 root root      625 Oct 21 21:49 pax-smoke.iso.bios-install.log
+-rw-r--r-- 1 root root      735 Oct 21 21:49 pax-smoke.iso.xorriso.log
+242ecec2109485c322df7fb9fa520b6a8ae765f2e31aa5235d7515c159727fdf  /home/mfwolffe/lanes/orch-paxplay/out/pax-playground.iso
+0a2187c19cadf71e940169bb90a8962874e8aee6a7899ed29ece49054dd40ec2  /home/mfwolffe/lanes/orch-paxplay/out/pax-smoke.iso
+assemble.sh done rc=0
+aspen b34106b5bf15252e1024d1bd67839044008b5e5f4f4ae483b75821a329cda384 14497536
+lupin 08a7766b21ec00afe780d9d76fb9cee548b1bb22e2a06f9c5cfcb3d167e197f8 7405200
+pelt 5448cb27d882553bccba66dbde2c4aaba417a7501ae1c6bf3944af0d00a93c5d 15201640
+lope f9a2f064077f6bb33ede9219608b6fe72d4a45a66c84f61f3f9d9e5e94f5066c 14426728
+242ecec2109485c322df7fb9fa520b6a8ae765f2e31aa5235d7515c159727fdf  /home/mfwolffe/lanes/orch-paxplay/out/pax-playground.iso
+242ecec2109485c322df7fb9fa520b6a8ae765f2e31aa5235d7515c159727fdf  /home/mfwolffe/lanes/orch-paxplay/out/pax-playground.iso
+0a2187c19cadf71e940169bb90a8962874e8aee6a7899ed29ece49054dd40ec2  /home/mfwolffe/lanes/orch-paxplay/out/pax-smoke.iso
+-rw-r--r-- 1 mfwolffe mfwolffe 79415296 Oct 21 17:49 /home/mfwolffe/lanes/orch-paxplay/out/pax-playground.iso
