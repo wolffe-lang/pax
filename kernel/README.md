@@ -1,6 +1,6 @@
 # kernel/
 
-The wolf kernel: first light (px01, M-PX1), physical frames (px02), paging (px03), interrupts (kw10), preemptive kernel threads (px07), the heap (px06) and user mode (px09, below), on the wolf 0.2.33 release archive (px05 moved pax to the archive at 0.2.23; px07 to 0.2.24 for kw11's atomics; px10 to 0.2.25; px16 to 0.2.26; px21a to 0.2.27 for the ambient pair; px36 to 0.2.28; px51 to 0.2.32; px53 to 0.2.33, with no source change and no section's size moved: notes/px53-the-pins-0233.md §J). `kmain.lu` brings up COM1,
+The wolf kernel: first light (px01, M-PX1), physical frames (px02), paging (px03), interrupts (kw10), preemptive kernel threads (px07), the heap (px06) and user mode (px09, below), on the wolf 0.2.34 release archive (px05 moved pax to the archive at 0.2.23; px07 to 0.2.24 for kw11's atomics; px10 to 0.2.25; px16 to 0.2.26; px21a to 0.2.27 for the ambient pair; px36 to 0.2.28; px51 to 0.2.32; px53 to 0.2.33 and px57 to 0.2.34, each with no source change and no section's size moved: notes/px53-the-pins-0233.md §J, notes/px57-the-pins-0234.md §J). `kmain.lu` brings up COM1,
 reads what Limine handed it and prints one line each — the banner, the
 UART, the bootloader and base revision, the firmware, a memory-map
 summary, the HHDM offset, the frame allocator's totals — switches to its own
@@ -118,12 +118,12 @@ text (`tests/tour`, `tools/tour`).
   function-pointer value (wolf-lang#520) and the `extern` in the
   export's own module is E0302. A lock word lives in assembly-reserved
   `.bss` because a module `var` has no address (wolf-lang#597).
-- `wolf.pin` names wolf: the 0.2.33 release archive by digest (px53;
-  0.2.32 from px51, 0.2.28 from px36, 0.2.27 from px21a, 0.2.26 from px16, 0.2.25 from px10, 0.2.24 from px07, 0.2.23 from px05;
+- `wolf.pin` names wolf: the 0.2.34 release archive by digest (px57;
+  0.2.33 from px53, 0.2.32 from px51, 0.2.28 from px36, 0.2.27 from px21a, 0.2.26 from px16, 0.2.25 from px10, 0.2.24 from px07, 0.2.23 from px05;
   `tools/fetch-wolf` stages it and never builds; px02 and kw10 built
   wolf-lang `eb955c3b` and `6a4e6151` from source while no release
   carried kw06-kw09), and lupin's release and digest
-  (`tools/fetch-lupin`; 0.1.54, 0.2.32's and 0.2.33's pairing, since px51; 0.1.51 from px36; 0.1.50 from px21a; 0.1.49 from px16; 0.1.48
+  (`tools/fetch-lupin`; 0.1.55, 0.2.34's pairing, since px57; 0.1.54, 0.2.32's and 0.2.33's, from px51; 0.1.51 from px36; 0.1.50 from px21a; 0.1.49 from px16; 0.1.48
   from px10: it had
   been held at 0.1.44 for `tests/mkw` step 6's recorded clap error,
   which 0.1.48 replaces with an `unsupported` verdict naming the
