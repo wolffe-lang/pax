@@ -223,3 +223,14 @@ keeps no VTIME with VMIN 0 (a read answers 0 at once): red at Y1's
 timed-read row and, weak, the session (yew's polling turns into a spin:
 the bytes still match); **B** the keyboard's arrows give nothing again
 (P4 reverted): red at Y3 only.
+
+**P6, by row** (added after the first boots, before either plant ran;
+the plants are `px58-plant-a` `c15467d` and `px58-plant-b` `9f0bf41`,
+one commit each on `45364a3`). **A** (a VMIN 0 read answers at once,
+VTIME ignored): Y1 red as root and as `pax` at the two timed rows (`T:
+VMIN 0 VTIME 1 …` and `VTIME 5 …` read `early (N ms)` where Linux's are
+`in bounds`); green at the query rows (their half-second loop only spins
+faster) and the keys (VMIN 1); Y2, Y3, Y4, Y5 green (yew's VTIME polling
+spins between its deadlines and writes nothing more; weak). **B** (the
+cursor keys give nothing again): Y3 red (`typed '2e'`), every other row
+green.
