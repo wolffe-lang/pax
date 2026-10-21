@@ -7,6 +7,27 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Exec from the tree, and `#!` (px56).** `execve` loads any file of
+  the tree its mode allows (pax#95): a program copied, written,
+  rewritten in place or unlinked while open since boot runs, read
+  through the tree a page at a time (the archive's contiguous read was
+  measured and not kept); the mode rule, ENOENT, ENOTDIR, ENAMETOOLONG,
+  ELOOP and **ETXTBSY** (a file open for writing is not run; a running
+  program's file is not opened for writing or truncated) as Linux
+  answers, as root and as a user. `#!` lines as Linux reads them
+  (pax#96): the interpreter, one argument, the script's path appended,
+  argv[0] dropped, five scripts deep, the line's 256-byte bound, blanks,
+  tabs, carriage returns and NULs where Linux puts them; a file with no
+  ELF magic and no `#!` answers ENOEXEC with no `refused:` line, so a
+  shell runs it itself (the maintainer's `./Script/greet.sh` prints
+  `hi`). `execveat` (322) with AT_EMPTY_PATH and AT_SYMLINK_NOFOLLOW;
+  `/proc/self/exe` reads the program's path as an fd/ entry does
+  (`(deleted)` included); a program's name is the path's last
+  component, as Linux's comm. Measured by `user/elf/execs.c` and a typed
+  pelt session in mpx5-jobs' execs image (J12), byte-identical to real
+  Linux under QEMU and a container. mpx3-tree's `~exec` row, mpx5-users'
+  perm, setid and sig texts and mpx3-shell's procs refusals move with it.
+
 - **The small fixes, two (px55).** `/dev/fd` is a symbolic link to
   `/proc/self/fd` beside the three `/dev/std*` (pax#88), measured on
   real Linux under QEMU and in a container as root and as a user
