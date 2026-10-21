@@ -39,6 +39,7 @@ trc aspen-du / /usr/sbin/chroot \$R /bin/aspen --du /usr
 # lupin: its corpus at the tag
 C=$L/src/wolf-interp/vendor/upstream/corpus
 for p in hello fs/roundtrip procs os/args_cwd; do d=/w/\$(echo \$p | tr / -); mkdir -p \$d; cp \$C/\$p.lu \$d/; done
+mkdir -p /w/fs-roundtrip/target # roundtrip.lu writes target/s38-fs-roundtrip.tmp (the corpus runner's tree)
 trc lupin-version / $U --version
 trc lupin-hello /w/hello $U run hello.lu
 trc lupin-roundtrip /w/fs-roundtrip $U run roundtrip.lu
