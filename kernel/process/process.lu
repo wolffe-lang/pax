@@ -139,6 +139,7 @@ use paging
 use panic
 use procfs
 use sched
+use tree
 use uaccess
 use vm
 
@@ -251,6 +252,16 @@ const NEG_ENOMEM: u64 = 0xfffffffffffffff4 // -12
 const NEG_EFAULT: u64 = 0xfffffffffffffff2 // -14
 const NEG_EINVAL: u64 = 0xffffffffffffffea // -22
 const NEG_ENOSYS: u64 = 0xffffffffffffffda // -38
+const NEG_ENAMETOOLONG: u64 = 0xffffffffffffffdc // -36 (px56)
+const NEG_ELOOP: u64 = 0xffffffffffffffd8 // -40 (px56)
+
+// px56 (pax#96): `#!` lines and `execveat`, measured on Linux 7.2.8
+// (`user/elf/execs.c`'s S and X rows, real root's guest).
+const AT_FDCWD: u64 = 0xffffff9c // -100 as the 32-bit int
+const AT_SYMLINK_NOFOLLOW: u64 = 0x100
+const AT_EMPTY_PATH: u64 = 0x1000
+const HEAD: u64 = 256 // the bytes of a file read to tell what it is: a `#!` line ends by its 256th byte
+const SCRIPTS: u64 = 5 // scripts in a chain, each the one before's interpreter: a sixth is -ELOOP
 
 // The process area's words this module keeps (kernel/sched's
 // `proc_area`): the refusal word (kernel/vm's and kernel/files' too);
@@ -652,18 +663,35 @@ fn image_top(file: u64) -> u64 {
     top
 }
 
-/// Entry `e`'s name after its last `/`: (its first byte, its length).
-fn base_name(e: u64) -> (u64, u64) {
-    let nl = initramfs.name_length(e)
+/// px56: a program's name, as Linux's is (measured: `comm`,
+/// PR_GET_NAME): the last component of the path at [p, p + n), its
+/// first 15 bytes, as two words (the rest zero) and its length.
+fn comm_of(p: u64, n: u64) -> (u64, u64, u64) {
     var base: u64 = 0
     var i: u64 = 0
-    while i < nl {
-        if initramfs.name_byte(e, i) == 47 {
+    while i < n {
+        if sb(p, i) == 47 {
             base = i + 1
         }
         i += 1
     }
-    (initramfs.name_addr(e) + base, nl - base)
+    var l = n - base
+    if l > 15 {
+        l = 15
+    }
+    var w0: u64 = 0
+    var w1: u64 = 0
+    var k: u64 = 0
+    while k < l {
+        let b = sb(p, base + k)
+        if k < 8 {
+            w0 = w0 | (b << (k * 8))
+        } else {
+            w1 = w1 | (b << ((k - 8) * 8))
+        }
+        k += 1
+    }
+    (w0, w1, l)
 }
 
 /// `user: exec <path>: refused: <why>` (the path the `n` bytes at `p`).
@@ -716,18 +744,24 @@ pub fn exec_line(body: u64, pa: u64, pl: u64, aa: u64, al: u64, envp: str) -> u6
 /// A program the kernel starts (px12): the path the `pl` bytes at `pa`,
 /// argv the words of the `al` bytes at `aa`, envp the words of the `el`
 /// bytes at `ea`. Its parent is the kernel (ppid 0). Returns its thread
-/// id, or 0 when refused.
+/// id, or 0 when refused. px56: the file is the tree's (kernel/files'
+/// `exec_kernel`: the path from the root, no mode asked, as px10's
+/// archive lookup asked none), read through the tree; refused by the
+/// archive's words when the archive has no such file, else as a file
+/// of the tree that is gone.
 pub fn exec_span(body: u64, pa: u64, pl: u64, aa: u64, al: u64, ea: u64, el: u64) -> u64 {
-    let e = initramfs.lookup_span(pa, pl)
-    if e == initramfs.END {
-        refuse_line(pa, pl, initramfs.lookup_why_span(pa, pl))
+    let (o, bad) = files.exec_kernel(pa, pl)
+    if bad != 0 {
+        let why = if initramfs.lookup_span(pa, pl) == initramfs.END { initramfs.lookup_why_span(pa, pl) } else { "not a file of the tree (removed since boot)" }
+        refuse_line(pa, pl, why)
         return 0
     }
-    let file = initramfs.data(e)
-    let size = initramfs.size(e)
+    let file = files.exec_inode(o)
+    let size = tree.bytes(file)
     let r = elf.refusal(file, size)
     if r != 0 {
         refuse_line(pa, pl, elf.why(r))
+        files.exec_drop(o)
         return 0
     }
     let pml4 = paging.new_space(sched.pml4())
@@ -738,17 +772,19 @@ pub fn exec_span(body: u64, pa: u64, pl: u64, aa: u64, al: u64, ea: u64, el: u64
     if entry == 0 || !map_stack(pml4) {
         refuse_line(pa, pl, "out of frames")
         let _freed = paging.free_user(pml4)
+        files.exec_drop(o)
         return 0
     }
     let av = argbuf()
     let (argc, ab) = stage_words(av, aa, al)
     let (envc, eb) = stage_words(av + ab, ea, el)
     let sp = build_stack(pml4, file, entry, av, argc, ab, av + ab, envc, eb, pa, pl, 0)
-    let (na, nl) = base_name(e)
-    let id = sched.create_process(body, sched.ELF_PROG - 1, pml4, entry, sp, na, nl)
+    let (w0, w1, nl) = comm_of(pa, pl)
+    let id = sched.create_process(body, sched.ELF_PROG - 1, pml4, entry, sp, 0, nl)
+    sched.set_xname_of(id, w0, w1) // px56: the name is the record's own words
     set_args(sched.area_of(id), ab, eb, pl)
     vm.start(sched.area_of(id), image_top(file))
-    files.set_exe(sched.area_of(id), e) // px26: /proc/self/exe
+    files.set_exe(sched.area_of(id), o) // px26: /proc/self/exe; px56: its open file
     describe_elf(file, sched.pid_of(id), pml4, entry, sp, argc, envc)
     id
 }
@@ -852,49 +888,365 @@ fn reset_handlers(a: u64) {
 
 /// `execve(path, argv, envp)` from the frame `f`: 0 when the program was
 /// replaced (the frame is the new one's), else -errno with nothing of
-/// the caller changed.
+/// the caller changed. px56: `execveat` with AT_FDCWD and no flags.
 pub fn execve(f: u64, path: u64, argv: u64, envp: u64) -> u64 {
+    run_file(f, AT_FDCWD, path, argv, envp, 0)
+}
+
+/// px56: `execveat(dirfd, path, argv, envp, flags)` (322): the file at
+/// `path` from directory descriptor `dirfd` (an absolute path ignores
+/// it), AT_EMPTY_PATH for the descriptor itself (`fexecve(3)`),
+/// AT_SYMLINK_NOFOLLOW to refuse a last link (-ELOOP); any other flag
+/// -EINVAL, before anything else (measured).
+pub fn execveat(f: u64, dirfd: u64, path: u64, argv: u64, envp: u64, flags: u64) -> u64 {
+    if flags & 0xffffffff & !(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW) != 0 {
+        return NEG_EINVAL
+    }
+    run_file(f, dirfd & 0xffffffff, path, argv, envp, flags & 0xffffffff)
+}
+
+/// Byte `k` of file `i` (an inode; k < its size), through the tree.
+fn fbyte(i: u64, k: u64) -> u64 {
+    let (at, _c) = tree.span(i, k, 1)
+    // # Safety: `span` answers where byte k of the file is in kernel
+    // memory (k inside the file: the caller's check).
+    unsafe { (at as *u8).read_volatile() as u64 }
+}
+
+fn blank(c: u64) -> bool {
+    c == 32 || c == 9
+}
+
+/// px56: the filename `execve` was given, as AT_EXECFN shows it and a
+/// script's interpreter is handed it (measured): the user path at `va`
+/// as it is for an absolute path or AT_FDCWD, else `/dev/fd/<dirfd>/`
+/// and the path, or `/dev/fd/<dirfd>` alone for an empty path
+/// (AT_EMPTY_PATH), staged at `dst` (PATH_MAX bytes and a NUL): (its
+/// length, 0, whether it names the descriptor, whether it is the
+/// descriptor itself) or (0, -errno, …). The walk read the path already.
+fn filename(pml4: u64, dirfd: u64, va: u64, dst: u64) -> (u64, u64, bool, bool) {
+    let c0 = if uaccess.readable(pml4, va, 1) { uaccess.get(pml4, va, 1) } else { 0 }
+    var k: u64 = 0
+    if dirfd != AT_FDCWD && c0 != 47 {
+        for b in "/dev/fd/".bytes() {
+            put_sb(dst, k, b as int as u64)
+            k += 1
+        }
+        // the descriptor's number in decimal
+        var d = dirfd
+        var div: u64 = 1
+        while div * 10 <= d {
+            div = div * 10
+        }
+        while div > 0 {
+            put_sb(dst, k, 48 + d / div)
+            d = d % div
+            div = div / 10
+            k += 1
+        }
+        if c0 == 0 {
+            put_sb(dst, k, 0)
+            return (k, 0, true, true)
+        }
+        put_sb(dst, k, 47)
+        k += 1
+    }
+    let room = PATH_MAX - k
+    let l = uaccess.string_in(pml4, va, dst + k, room)
+    if l == room + 2 {
+        return (0, NEG_EFAULT, false, false)
+    }
+    if l == room + 1 {
+        return (0, NEG_ENAMETOOLONG, false, false)
+    }
+    (k + l, 0, k != 0, false)
+}
+
+/// px56 (pax#96): the `#!` line of script `i` (`size` bytes), as Linux
+/// reads one (measured, `user/elf/execs.c`'s S rows): the first HEAD
+/// bytes; the line ends at the first newline among them, else at the
+/// file's end when it is shorter, else (cut) at byte HEAD - 1. Blanks
+/// and tabs after `#!` are skipped; the interpreter runs to the next
+/// blank, tab or NUL; the rest, its blanks and tabs at both ends
+/// stripped, is ONE argument (inner blanks and tabs kept, a carriage
+/// return a byte like another) when it is not empty, its text ending at
+/// a NUL in it (so a NUL first gives the empty string). Answers (the
+/// interpreter's offset, its length, the argument's offset, its length,
+/// whether there is one, 0) or the errno: -ENOEXEC for no interpreter
+/// on a line that has a newline or is cut, and for an interpreter the
+/// cut ends. An empty interpreter in a short file with no newline is
+/// looked up as the empty name is (the working directory: -EACCES,
+/// measured), so it is answered with length 0.
+fn shebang(i: u64, size: u64) -> (u64, u64, u64, u64, bool, u64) {
+    let n = if size < HEAD { size } else { HEAD }
+    var end = n
+    var nl = false
+    var k: u64 = 2
+    while k < n {
+        if fbyte(i, k) == 10 {
+            end = k
+            nl = true
+            break
+        }
+        k += 1
+    }
+    let cut = !nl && n == HEAD
+    if cut {
+        end = HEAD - 1
+    }
+    var p: u64 = 2
+    while p < end && blank(fbyte(i, p)) {
+        p += 1
+    }
+    if p >= end || fbyte(i, p) == 0 {
+        if nl || cut {
+            return (0, 0, 0, 0, false, NEG_ENOEXEC)
+        }
+        return (p, 0, 0, 0, false, 0)
+    }
+    var q = p
+    while q < end && !blank(fbyte(i, q)) && fbyte(i, q) != 0 {
+        q += 1
+    }
+    if cut && q >= end {
+        return (0, 0, 0, 0, false, NEG_ENOEXEC) // the interpreter's name runs past what is read
+    }
+    var r = q
+    if r < end && fbyte(i, r) == 0 {
+        return (p, q - p, 0, 0, false, 0) // a NUL ends the line
+    }
+    while r < end && blank(fbyte(i, r)) {
+        r += 1
+    }
+    var t = end
+    while t > r && blank(fbyte(i, t - 1)) {
+        t -= 1
+    }
+    let some = t > r
+    var z = r
+    while z < t && fbyte(i, z) != 0 {
+        z += 1
+    }
+    (p, q - p, r, z - r, some, 0) // a NUL ends the argument's text (measured: a NUL first is "")
+}
+
+/// Move pax_argbuf's bytes [from, to) by `delta` (signed, as a u64):
+/// backwards when they move up.
+fn shift(from: u64, to: u64, up: bool, delta: u64) {
+    let av = argbuf()
+    if up {
+        var k = to
+        while k > from {
+            k -= 1
+            put_sb(av, k + delta, sb(av, k))
+        }
+    } else {
+        var k = from
+        while k < to {
+            put_sb(av, k - delta, sb(av, k))
+            k += 1
+        }
+    }
+}
+
+/// The length of the NUL-terminated string at pax_argbuf + `at`.
+fn slen(at: u64) -> u64 {
+    var l: u64 = 0
+    while sb(argbuf(), at + l) != 0 {
+        l += 1
+    }
+    l
+}
+
+/// px56 (pax#96): the argument vector a script's interpreter is given
+/// (`execve(2)`, measured): `interp [arg] <path> argv[1]…` — for the
+/// first script its path is the filename (`pa`, `pl`) in place of
+/// argv[0], which is dropped; for a script that is another's
+/// interpreter its path is already argv[0], the interpreter's name as
+/// the line before wrote it. The interpreter and the argument are bytes
+/// of script `i`. Rewrites pax_argbuf's argv and envp in place: (argc,
+/// the end of argv's bytes, the end of envp's, 0) or -E2BIG.
+fn interp_args(i: u64, ip: u64, il: u64, ap: u64, al: u64, arg: bool, first: bool, pa: u64, pl: u64, argc: u64, ae: u64, ee: u64) -> (u64, u64, u64, u64) {
+    var keep: u64 = 0 // where the strings that stay begin
+    var drop: u64 = 0 // argv's strings dropped (argv[0], the first time)
+    if first && argc > 0 {
+        keep = slen(0) + 1
+        drop = 1
+    }
+    var front = il + 1
+    if arg {
+        front += al + 1
+    }
+    if first {
+        front += pl + 1
+    }
+    let tail = ee - keep
+    if front + tail > ARG_BYTES - 1 {
+        return (0, 0, 0, NEG_E2BIG)
+    }
+    if front > keep {
+        shift(keep, ee, true, front - keep)
+    } else if front < keep {
+        shift(keep, ee, false, keep - front)
+    }
+    let av = argbuf()
+    var k: u64 = 0
+    var j: u64 = 0
+    while j < il {
+        put_sb(av, k, fbyte(i, ip + j))
+        k += 1
+        j += 1
+    }
+    put_sb(av, k, 0)
+    k += 1
+    if arg {
+        j = 0
+        while j < al {
+            put_sb(av, k, fbyte(i, ap + j))
+            k += 1
+            j += 1
+        }
+        put_sb(av, k, 0)
+        k += 1
+    }
+    if first {
+        j = 0
+        while j < pl {
+            put_sb(av, k, sb(pa, j))
+            k += 1
+            j += 1
+        }
+        put_sb(av, k, 0)
+        k += 1
+    }
+    var nc = argc - drop + 1
+    if arg {
+        nc += 1
+    }
+    if first {
+        nc += 1
+    }
+    (nc, front + (ae - keep), front + tail, 0)
+}
+
+/// px56 (pax#95, #96): `execve` and `execveat`. The file first
+/// (kernel/files' `exec_open`: the walk's answers, -EACCES for what is
+/// no regular file or has no execute bit for the caller's class,
+/// -ETXTBSY while it is open for writing), then the filename and the
+/// vectors out of the caller's memory (which a vfork child shares with
+/// its parent) before anything changes. Then what the file is, from its
+/// first bytes read through the tree: a `#!` line (`shebang`) makes its
+/// interpreter the file, with the vector rebuilt (`interp_args`), to
+/// SCRIPTS deep (-ELOOP past it; a script named by a close-on-exec
+/// descriptor -ENOENT, as its interpreter could not open it: measured);
+/// an ELF is loaded (kernel/elf, through the tree); anything else is
+/// -ENOEXEC — with no `refused:` line when it has no ELF magic or is
+/// shorter than an ELF header (Linux's own answer: measured), with one
+/// for an ELF PAX does not run (ET_DYN, PT_INTERP, a 32-bit file).
+/// Only then the point of no return: the program's name (the
+/// filename's last component; the file's own name for AT_EMPTY_PATH:
+/// measured), its open file (`/proc/self/exe`), and px14's resets.
+fn run_file(f: u64, dirfd: u64, path: u64, argv: u64, envp: u64, flags: u64) -> u64 {
     let a = area()
     let pml4 = paging.live()
-    let (e, err, rl) = files.exec_lookup(a, pml4, path)
-    if err != 0 {
-        return err
+    let (o0, e0) = files.exec_open(a, pml4, dirfd, path, 0, flags)
+    if e0 != 0 {
+        return e0
     }
-    // The path, then the vectors, out of the caller's memory (which a
-    // vfork child shares with its parent) before anything changes.
+    var o = o0
     let av = argbuf()
     let pa = av + PATH_AT
-    let kb = files.kbuf()
-    var i: u64 = 0
-    while i < rl {
-        put_sb(pa, i, sb(kb, i))
-        i += 1
+    let (pl, fe, viafd, itself) = filename(pml4, dirfd, path, pa)
+    if fe != 0 {
+        files.exec_drop(o)
+        return fe
     }
-    let (argc, ae, r1) = copy_vector(pml4, argv, 0)
+    // a filename /dev/fd/<dirfd>… names a descriptor the new program
+    // will not have when it is close-on-exec: a script's interpreter
+    // could not open it (execveat(2): -ENOENT)
+    let unreachable = viafd && files.is_cloexec(a, dirfd)
+    let (argc0, ae0, r1) = copy_vector(pml4, argv, 0)
     if r1 != 0 {
+        files.exec_drop(o)
         return r1
     }
-    let (envc, ee, r2) = copy_vector(pml4, envp, ae)
+    let (envc, ee0, r2) = copy_vector(pml4, envp, ae0)
     if r2 != 0 {
+        files.exec_drop(o)
         return r2
     }
-    let file = initramfs.data(e)
-    let size = initramfs.size(e)
+    var argc = argc0
+    var ae = ae0
+    var ee = ee0
+    var scripts: u64 = 0
+    while true {
+        let i = files.exec_inode(o)
+        let size = tree.bytes(i)
+        if size < 2 || fbyte(i, 0) != 35 || fbyte(i, 1) != 33 {
+            break
+        }
+        scripts += 1
+        if scripts > SCRIPTS {
+            files.exec_drop(o)
+            return NEG_ELOOP
+        }
+        let (ip, il, ap, al, arg, se) = shebang(i, size)
+        if se != 0 {
+            files.exec_drop(o)
+            return se
+        }
+        if scripts == 1 && unreachable {
+            files.exec_drop(o)
+            return NEG_ENOENT
+        }
+        let (nc, nae, nee, ae2) = interp_args(i, ip, il, ap, al, arg, scripts == 1, pa, pl, argc, ae, ee)
+        if ae2 != 0 {
+            files.exec_drop(o)
+            return ae2
+        }
+        argc = nc
+        ae = nae
+        ee = nee
+        // the interpreter's name into pax_kbuf, looked up from the
+        // working directory (an empty one: the directory itself)
+        let kb = files.kbuf()
+        var j: u64 = 0
+        while j < il {
+            put_sb(kb, j, fbyte(i, ip + j))
+            j += 1
+        }
+        put_sb(kb, il, 0)
+        files.exec_drop(o)
+        let (o2, e2) = files.exec_open(a, pml4, AT_FDCWD, 0, il, if il == 0 { AT_EMPTY_PATH } else { 0 })
+        if e2 != 0 {
+            return e2
+        }
+        o = o2
+    }
+    let file = files.exec_inode(o)
+    let size = tree.bytes(file)
     let rc = elf.refusal(file, size)
     if rc != 0 {
-        refuse_line(pa, rl, elf.why(rc))
+        files.exec_drop(o)
+        if rc == 1 || rc == 2 {
+            return NEG_ENOEXEC // shorter than an ELF header, or no ELF magic: Linux's own answer, no refusal
+        }
+        refuse_line(pa, pl, elf.why(rc))
         return refuse_with(R_NOT_ELF, NEG_ENOEXEC)
     }
     let space = paging.new_space(sched.pml4())
     if space == 0 {
+        files.exec_drop(o)
         return NEG_ENOMEM
     }
     let entry = elf.load(file, size, space)
     if entry == 0 || !map_stack(space) {
         let _freed = paging.free_user(space)
+        files.exec_drop(o)
         return NEG_ENOMEM
     }
-    let sp = build_stack(space, file, entry, av, argc, ae, av + ae, envc, ee - ae, pa, rl, a)
+    let sp = build_stack(space, file, entry, av, argc, ae, av + ae, envc, ee - ae, pa, pl, a)
+    let (w0, w1, nl) = if itself { files.exe_name(o) } else { comm_of(pa, pl) }
     // The point of no return. px26: every other thread of the process
     // ends first, and the caller is its leader from here (the area is
     // then its own slot's: `a` is read again).
@@ -911,16 +1263,16 @@ pub fn execve(f: u64, path: u64, argv: u64, envp: u64) -> u64 {
     cred.exec(na) // px39: the saved and file-system ids become the effective ids; nothing is raised
     files.exec_close(na)
     reset_handlers(na)
-    set_args(na, ae, ee - ae, rl)
+    set_args(na, ae, ee - ae, pl)
     var k: u64 = 0
     while k < 8 {
         aput(na, A_LOGGED + k, 0)
         k += 1
     }
     vm.start(na, image_top(file))
-    files.set_exe(na, e) // px26: /proc/self/exe
-    let (na, nl) = base_name(e)
-    sched.exec_current(space, entry, sp, na, nl)
+    files.set_exe(na, o) // px26: /proc/self/exe; px56: the program's open file
+    sched.exec_current(space, entry, sp, 0, nl)
+    sched.set_self_xname(w0, w1) // px56: its name, the record's own words
     fpu.exec(sched.self_slot())
     k = 0
     while k < FRAME_WORDS {
