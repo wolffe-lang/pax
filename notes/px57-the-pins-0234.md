@@ -280,6 +280,23 @@ the other rows green; **C** (lupin) the image without
 witness that names it, root and `pax`, the rest green. Each prediction
 by row is added after the first boot and before its plant runs.
 
+**P9, by row** (added after the first boots of the eds image and the
+two new suites, before any plant ran; plant C is a kernel break, not
+the image change §3 first named, so every plant is a kernel's). **A**,
+`kernel/files`' `fsync` answering 0 for what it cannot synchronise
+(`fsync(2)`'s -EINVAL for a pipe): J13 red at eds and eds-user (`S:
+fs_sync of a pipe: ok`, the recording's `io (22)`), J4 without that
+row, J3 for eds-user; hostq and hostq-user green; J6 green. **B**,
+`kernel/tree`'s directory size answered 0 (tmpfs's 40 and 20 an entry
+gone): A1 red at `aspen --du /usr` as root and as `pax` (every
+directory's size and the report's bytes, 125 for 445), A2 and A3 green
+(no witness row names a size). **C**, PAX's `stat` (4), the call the
+musl lupin makes and glibc's programs do not (they make `newfstatat`
+and `statx`), answering -ENOENT for every path: every lupin row red, U1
+and U2 (hello, the typed program, loop's record, signal.lu, host.lu) as
+root and as `pax`, U3 green (an ENOENT is no ENOSYS); weak: lupin's
+words for the program it cannot find.
+
 **P10. Cost.** The kernel's `.text` at 0.2.34 against 0.2.33: 0 bytes,
 every kernel (P1).
 
