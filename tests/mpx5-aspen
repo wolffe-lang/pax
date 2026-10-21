@@ -35,11 +35,13 @@
 #      the image built; the container's two sessions ran.
 #   A1 each session byte-identical to the container's, and its status.
 #   A2 the listing rows, each a run of lines in the transcript, in order:
-#      `aspen /etc` lists hostname, motd and pax-run and reports `0
-#      directories, 3 files`; `-a -L 2 /home/pax` lists .profile, the
-#      Script directory and greet.sh in it; `-J /bin | head` opens the
-#      array with /bin's directory object; `--du /usr` prints sizes and
-#      its report counts the bytes used in 4 directories and 2 files.
+#      `aspen /etc` lists hostname, motd and pax-run and reports `1
+#      directory, 3 files` (tree counts the root it lists); `-a -L 2
+#      /home/pax` lists .profile first, then the Script directory and
+#      greet.sh in it (a user's home holds pelt's .sh_history between
+#      them); `-J /bin | head` opens the array with /bin's directory
+#      object; `--du /usr` prints the root's size first and reports the
+#      bytes used in 5 directories and 2 files.
 #   A3 -ENOSYS only for set_robust_list (273) and rseq (334); no
 #      `refused:` line; `PAX: init /bin/sh ended with status 0; nothing
 #      left to run`, `halt`, held halted.
@@ -204,11 +206,12 @@ run_part() { # norm k
 # of the row before); a line is matched as a shell pattern. HOME is the
 # session's home (not read: aspen lists the paths it is given).
 rows() { # kind home -> NAME<TAB>line<TAB>line…, one row a line
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "aspen /etc" '$ aspen /etc' /etc '*hostname' '*motd' '*pax-run' '' '0 directories, 3 files'
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "-a -L 2 /home/pax: the dot file, Script and greet.sh in it" '$ aspen -a -L 2 /home/pax' /home/pax '*.profile' '*Script' '*greet.sh'
-    printf '%s\t%s\t%s\t%s\n' "-J /bin | head: the array and /bin's object" '$ aspen -J /bin | head' '[' '*"type":"directory","name":"/bin"*'
-    printf '%s\t%s\t%s\n' "--du /usr: sizes and the report" '$ aspen --du /usr' '*/usr'
-    printf '%s\t%s\n' "--du /usr's report: 4 directories, 2 files" '* used in 4 directories, 2 files'
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "aspen /etc" '$ aspen /etc' /etc '*hostname' '*motd' '*pax-run' '' '1 directory, 3 files'
+    printf '%s\t%s\t%s\t%s\n' "-a -L 2 /home/pax: the dot file" '$ aspen -a -L 2 /home/pax' /home/pax '*-- .profile'
+    printf '%s\t%s\t%s\n' "-a -L 2 /home/pax: Script and greet.sh in it" '*-- Script' '*`-- greet.sh'
+    printf '%s\t%s\t%s\t%s\n' "-J /bin | head: the array and /bin's object" '$ aspen -J /bin | head' '[' '*{"type":"directory","name":"/bin","contents":['
+    printf '%s\t%s\t%s\n' "--du /usr: its size first" '$ aspen --du /usr' '[[]*]  /usr'
+    printf '%s\t%s\n' "--du /usr's report: the bytes in 5 directories (the root among them) and 2 files" '* bytes used in 5 directories, 2 files'
 }
 held() { # file kind home -> the rows not held, on stdout
     rows "$2" "$3" | python3 -c '
