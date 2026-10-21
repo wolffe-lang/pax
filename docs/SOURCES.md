@@ -890,3 +890,26 @@ consulted.
 | `strace(1)` 6.8 (as documentation and as a black box) in `localhost/px13-ubuntu` on kasumi | — | (a program we run) | run on lope's own runs, never read | lope's 23 calls (notes/px54/census/) |
 | black-box Linux 7.2.8-1-cachyos: rootless podman on kasumi (`px13-ubuntu`), CI's Docker | — | (programs we run) | run: the typed session on a pseudo-terminal, root and 1000:1000 (`tools/linux-tree`) | L1's reference |
 | lobo's `.github/actions/acquire-toolchain/action.yml` (the org's) | the org's own | the org's own | read | the org's way of reading a private sibling in CI (`WOLF_CI_TOKEN`, absence is failure) |
+
+## px58: yew on PAX, the census
+
+No kernel's source was read or searched for, Linux's above all, nor any
+libc's, terminal driver's or terminal emulator's, nor any editor's but
+yew's and sagitta's (the maintainer's; Track 12's rule 1). One kernel
+change, `kernel/console`'s cursor and editing keys, written from the
+measurement below and the set-1 scancode table px13 used. Every row is
+the org's own binaries at PAX's console and on a Linux pseudo-terminal
+(notes/px58-yew-on-pax.md). Permissively licensed kernels: none
+consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| yew `77c1083` (the maintainer's, public): `src/term/tty.lu`, `src/term/input.lu`, `src/term/render.lu`, `src/edit/driver.lu`, `src/edit/cmdline.lu`, `src/edit/message.lu`, `src/yew.lu`, `runtime/init.fl`, `tools/build`, `tools/goldens`, `tools/oracle`, `docs/MAP.md`, `wolf-toolchain.toml` | the org's own | GPL-3.0 + the wolf Training Data Permission | read and cited; built, never copied into pax; no line changed | `tools/mkyew`, `user/yew.pin`, the census's roles, the session's keys, the 4 s message |
+| sagitta `9ace98c2` (the maintainer's C yew, the oracle): `tests/pty/registry.c`'s notepad cases; its PTY runner built by yew's `tools/oracle` | the maintainer's | GPL-3.0 | read; built and run | the census's first workload (64 of 64 green under strace) |
+| wolf 0.2.33 `spec/11-os.md` (`[os.term.*]`, `[os.signal.wait.fd]`), 0.2.34's (`[os.editor.calls.note]`, `[os.term.restore]`, `[os.signal.wait.fds]`, `[os.fs.sync]`, `[os.fs.realpath]`), 0.2.33's `spec/08-package.md` (`[pkg.caps]`) | the org's own | the org's own | read | termwolf's calls; the 0.2.34 calls listed as coming |
+| man-pages `termios(3)`, `ioctl_tty(2)`, `console_codes(4)`, `strace(1)`, `poll(2)`, `reboot(2)`; ECMA-48 (the control functions' names); POSIX.1-2024 XBD 11 | man-pages 6.x; 5th ed. | documentation | read | the rows' names, what each should answer |
+| uapi `asm-generic/termbits.h`, `termbits-common.h` (the flag bits' values), `asm-generic/ioctls.h` (TCGETS 0x5401 … TIOCSWINSZ 0x5414), the syscall table (ioctl 16) | — | GPL-2.0 WITH Linux-syscall-note | the author's own knowledge, confirmed black-box (strace's decoding) | termwolf's bit names and requests |
+| ncurses' terminfo database, `infocmp linux` on kasumi | — | (data) | read | the `linux` terminal's key strings, beside the measurement |
+| `strace(1)` 6.8 in `localhost/px13-ubuntu` on kasumi | — | (a program we run) | run on yew's goldens and the typed session, never read | §B, §C |
+| black-box Linux 7.2.8-1-cachyos under QEMU 11.1.1 (kasumi's own kernel image `f4c00d5d…`, a VGA display, the PS/2 keyboard; `notes/px58/vtkeys.c` as pid 1) | — | GPL-2.0 (a program we run) | run, never read: the VT's keys, window and answers, twice, the same rows | §E, `kernel/console`'s keys |
+| rootless podman on kasumi (`px13-ubuntu`), CI's Docker | — | — | run: the probe and the session on a pty (`tools/linux-tree`) | Y1, Y4's reference |
