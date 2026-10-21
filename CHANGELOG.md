@@ -7,6 +7,24 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **yew on PAX, the census (px58).** yew, the modal editor in wolf
+  (`user/yew.pin`: yew `77c1083`; `tools/mkyew`, `tools/mkpelt`'s shape,
+  static `c2daa653…`, 16,101,824 bytes), draws, edits and saves on PAX's
+  console: a session typed as `pax` (`G`, `O`, `delta`, ESC, `:w`, `:q`)
+  is byte-identical over COM1 to the same binary on a Linux pty, frames
+  and all. What yew asks of a terminal was measured on Linux under
+  `strace -f` (50 calls, three ioctls, four termios shapes, the escape
+  classes by name) and asked of PAX's console by a probe in wolf
+  (`user/termwolf`, with raw ioctls in `tio.S`): every call served but
+  `set_robust_list` and `rseq` (-ENOSYS, as ever), every termios bit kept,
+  the timed reads, the output processing, the window and SIGWINCH served;
+  the gap table in `notes/px58-yew-on-pax.md` §D. One gap closed:
+  the keyboard's arrows, Home, End, PgUp, PgDn, Insert and Delete give the
+  sequences a Linux virtual terminal gives (measured on kasumi's kernel's
+  VT). The framebuffer's escape interpretation (cursor addressing, the
+  alternate screen, cursor visibility, SGR 22 and 27) is px59's. A new
+  suite, `tests/mpx5-yew`.
+
 - **lope on PAX (px54, ruling #91 R4).** lope (`user/lope.pin`: lope
   `5ac37df`, lp00; `tools/mklope`, `tools/mkpelt`'s shape, from
   `PAX_LOPE_REPO` since lope is private) is preinstalled as `/bin/lope`,
