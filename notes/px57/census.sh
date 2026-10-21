@@ -13,12 +13,15 @@
 L=$HOME/lanes/px57; X=${PX57_TREE:-$L/pax}; A=$1 U=$2
 O=$L/ev/census; rm -rf $O; mkdir -p $O
 sha256sum $A $U | tee $O/binaries.txt
+# lupin's corpus at the tag (a clone on the host: git only, nothing built or run there)
+[ -d $L/src/wolf-interp ] || git clone -q --depth 1 --branch v0.1.55 https://github.com/wolffe-lang/wolf-interp $L/src/wolf-interp
+git -C $L/src/wolf-interp log --oneline -1 | tee -a $O/binaries.txt
 podman run --rm --network none --cpuset-cpus 4-15 -v $L:$L:Z localhost/px13-ubuntu bash -c "
 set -u
 O=$O; X=$X
 strace -V | head -n 1 > \$O/strace-version.txt; uname -r >> \$O/strace-version.txt
 E='env -i HOME=/ TERM=linux PAX=1 PATH=/bin'
-tr() { # name dir cmd... : strace the command in dir, its output kept
+trc() { # name dir cmd... : strace the command in dir, its output kept
   n=\$1 d=\$2; shift 2
   (cd \$d && strace -f -n -qq -o \$O/\$n.strace \"\$@\" > \$O/\$n.out 2>&1; echo \$? > \$O/\$n.rc)
 }
@@ -29,27 +32,26 @@ printf '/bin/sh -i -m\n' > \$R/etc/pax-run; printf 'pax\n' > \$R/etc/hostname; p
 printf '# pax profile\n' > \$R/home/pax/.profile; printf 'a note\n' > \$R/home/pax/notes.txt; printf 'echo hi\n' > \$R/home/pax/Script/greet.sh
 printf 'PAX: a Linux-compatible system written in wolf.\n' > \$R/usr/share/pax/README; cp \$X/user/console/aspen.keys \$R/usr/share/pax/keys/
 for b in env head sh pelt as; do : > \$R/bin/\$b; done
-tr aspen-version / \$E chroot \$R /bin/aspen --version
-tr aspen-etc / \$E chroot \$R /bin/aspen /etc
-tr aspen-home / \$E chroot \$R /bin/aspen -a -L 2 /home/pax
-tr aspen-json / \$E chroot \$R /bin/aspen -J /bin
-tr aspen-du / \$E chroot \$R /bin/aspen --du /usr
+trc aspen-version / \$E chroot \$R /bin/aspen --version
+trc aspen-etc / \$E chroot \$R /bin/aspen /etc
+trc aspen-home / \$E chroot \$R /bin/aspen -a -L 2 /home/pax
+trc aspen-json / \$E chroot \$R /bin/aspen -J /bin
+trc aspen-du / \$E chroot \$R /bin/aspen --du /usr
 # lupin: its corpus at the tag
-git clone -q --depth 1 --branch v0.1.55 https://github.com/wolffe-lang/wolf-interp /src 2>/dev/null || cp -a $L/src/wolf-interp /src
-C=/src/vendor/upstream/corpus
+C=$L/src/wolf-interp/vendor/upstream/corpus
 for p in hello fs/roundtrip procs os/args_cwd; do d=/w/\$(echo \$p | tr / -); mkdir -p \$d; cp \$C/\$p.lu \$d/; done
-tr lupin-version / \$E $U --version
-tr lupin-hello /w/hello \$E $U run hello.lu
-tr lupin-roundtrip /w/fs-roundtrip \$E $U run roundtrip.lu
-tr lupin-procs /w/procs \$E $U run procs.lu
-tr lupin-conform-args_cwd /w/os-args_cwd \$E $U conform-run --json args_cwd.lu
+trc lupin-version / \$E $U --version
+trc lupin-hello /w/hello \$E $U run hello.lu
+trc lupin-roundtrip /w/fs-roundtrip \$E $U run roundtrip.lu
+trc lupin-procs /w/procs \$E $U run procs.lu
+trc lupin-conform-args_cwd /w/os-args_cwd \$E $U conform-run --json args_cwd.lu
 mkdir -p /usr/share/lupin && cp \$X/user/lupin/*.lu /usr/share/lupin/
 printf '//! member: false\nfn main() -> !int {\n    print(\"typed\")\n    0\n}\n' > /x.lu
-tr lupin-s-hello / \$E $U run /usr/share/lupin/hello.lu
-tr lupin-s-x / \$E $U run x.lu
-tr lupin-s-loop / \$E $U conform-run --json /usr/share/lupin/loop.lu
-tr lupin-s-signal / \$E $U run /usr/share/lupin/signal.lu
-tr lupin-s-host / \$E $U conform-run --json /usr/share/lupin/host.lu
+trc lupin-s-hello / \$E $U run /usr/share/lupin/hello.lu
+trc lupin-s-x / \$E $U run x.lu
+trc lupin-s-loop / \$E $U conform-run --json /usr/share/lupin/loop.lu
+trc lupin-s-signal / \$E $U run /usr/share/lupin/signal.lu
+trc lupin-s-host / \$E $U conform-run --json /usr/share/lupin/host.lu
 "
 cd $O
 for f in *.strace; do
