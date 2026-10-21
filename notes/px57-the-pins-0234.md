@@ -314,15 +314,15 @@ wolf 0.2.34, aspen `103ba46` and lupin 0.1.55; a new
 |---|---|---|---|
 | P1 | one commit a pin; the kernel builds on 0.2.34 with no source change and no section moves; mkw step 6 holds at lupin 0.1.55; su builds unchanged | `kernel/wolf.pin` `bb98155` (with the tour's line), `user/su` `4f7f875`, `user/sigwolf` `099bcbd` (ci.yml's comments `2b3ef1f`); every kernel built with no source change; **not one section moved** on any of the four kernels (§J); `tests/mkw` PASS (step 6's rows as written) and `tests/tour` PASS at the pins alone; su built unchanged in source | right |
 | P2 | pelt, boreutils, lope unchanged; su and sigwolf move; edwolf new; each in two builds | pelt `5448cb27…`, the boreutils of every image bu28's, lope `f9a2f064…` (unchanged); su `388d2434…` → **`fbc2035e…`** (14,441,376), sigwolf `fa9f7de6…` → **`dba181aa…`** (14,958,920); edwolf **`1bfd0ca2…`** (15,036,336), hostq **`9eca259e…`** (790,520); each the same in two kasumi builds and in CI (§B) | right |
-| P3 | every recording held at the first boot at the pins; nothing re-recorded | the pins alone (`e32ffb3`'s tree): **mpx5-jobs PASS, 225 PASS lines, no FAIL** — the 52 pjobs runs, groups, sigs and sigs-user (sigwolf now built by 0.2.34: 26 lines each, the committed bytes), execs and xsh, gaps, fds; mpx5-lope PASS; mpx5-accounts ⟨ACC⟩; nothing re-recorded | right |
-| P4 | edwolf's rows byte-identical to real root's guest at PAX's first boot, but the named clock row; no kernel change | real root's guest recorded twice, the same bytes (58 lines root, 58 user); **PAX byte-identical at its first boot of the eds image**, root and `pax`, and the user's to the container's (J13, J3, J4, J6); `~N:` 19 of 20 and 20 of 20 rounds at 0 ns on PAX, 0 of 20 on the guest; no kernel change. The weak points held: the console's mode reads as the guest's pseudo-terminal's (flow off on both: vmjob and linux-tree clear IXON, PAX has none), and PAX's `fsync` of a pipe is -EINVAL | right |
+| P3 | every recording held at the first boot at the pins; nothing re-recorded | the pins alone (`e32ffb3`'s tree): **mpx5-jobs PASS, 225 PASS lines, no FAIL** — the 52 pjobs runs, groups, sigs and sigs-user (sigwolf now built by 0.2.34: 26 lines each, the committed bytes), execs and xsh, gaps, fds; mpx5-lope PASS; mpx5-accounts PASS (its 109 lines held, root, `pax` and the container); nothing re-recorded | right |
+| P4 | edwolf's rows byte-identical to real root's guest at PAX's first boot, but the named clock row; no kernel change | real root's guest recorded twice, the same bytes (59 lines root, 59 user; 58 compared, the `~N:` line apart); **PAX byte-identical at its first boot of the eds image**, root and `pax`, and the user's to the container's (J13, J3, J4, J6); `~N:` 19 of 20 and 20 of 20 rounds at 0 ns on PAX, 0 of 20 on the guest; no kernel change. The weak points held: the console's mode reads as the guest's pseudo-terminal's (flow off on both: vmjob and linux-tree clear IXON, PAX has none), and PAX's `fsync` of a pipe is -EINVAL | right |
 | P5 | pax#107's rows by a C probe: PAX, x86_64, soft 0 hard unlimited, sets -EPERM, dumpable served, F_GETFD/F_SETFD served; sysname and set rows named | every row as predicted, root and `pax`, at the first boot (§E); the guest: `Linux`, both sets 0 | right |
 | P6 | aspen `b34106b5…` twice; its session byte-identical to the container at the first boot; the census glibc's start plus the tree calls, every one served but 273 and 334 | **`b34106b5…` (14,497,536), twice, ap00's digest**, and the same in CI's runner; the session **byte-identical at the first boot**, root (37 lines) and `pax` (38), `--du`'s directory sizes PAX's tmpfs numbers; A2's first text wrong in its own lines (tree counts the root it lists: `1 directory, 3 files`, `5 directories`; a user's home holds pelt's `.sh_history` between `.profile` and `Script`), corrected before any plant (§F); the census **18 calls**, `sched_getaffinity` among them (unpredicted), no `mmap`, no thread; every one served but 273 and 334 | right but A2's text |
 | P7 | lupin from the tag, compiling with no source change, ET_EXEC only with `relocation-model=static`; two builds one digest; the census Rust's start and the interpreter's calls, every one served but `mremap` if made; the session byte-identical at the first boot | the musl build compiles at the first try; **without the flag: `DYN (Position-Independent Executable file)` with a `DYNAMIC` segment** (measured, `notes/px57/pie.sh`); with it **`08a7766b…` (7,405,200), ET_EXEC, no PT_INTERP, no dynamic section, twice, and the same bytes in CI's runner**; `--version` the release's line; the census **31 calls**: lupin starts a thread for every run (`clone`, `futex`, `gettid`, `prctl(PR_SET_NAME, "wolf-interp-par")`, 64 MiB stacks reserved `PROT_NONE`), musl makes the legacy `open`, `stat`, `lstat`, no `mremap`, no `set_robust_list`, no `rseq`; **every call served by PAX**; the session **byte-identical at the first boot, root and `pax`**, U3: -ENOSYS only pelt's 273 and 334; host.lu's first text reached `List.insert`, std.list's (the image has no std tree: refused by name on both sides), rewritten without std before any plant (§G) | right but host.lu's first text |
-| P8 | every suite green at the pins on kasumi; no fixed reference moves | ⟨SUITES⟩ | ⟨P8V⟩ |
+| P8 | every suite green at the pins on kasumi; no fixed reference moves | at the pins alone, every suite **PASS, no FAIL and no SKIP line**: mpx5-jobs (225 PASS), mpx5-lope (8), mpx5-accounts (10), mpx3-shell (70), mpx3-tree (64), mpx3-boreutils (12), mpx5-users (110), mpx3-speaker (27), mpx3-console (26), mpx3-screen (7), mpx3-threads (11), mkw (7), tour (22); the last four twice (beside it on cpus 4-7, the same verdicts); at the head mpx5-jobs every image, eds among them (238 PASS), mpx5-aspen, mpx5-lupin PASS; `tests/ci-plan` 200 PASS; no fixed reference moved | right on kasumi |
 | P9 | plants A, B, C red at the rows named | A **39680111521** red at exactly the rows (J13 and J4 at eds and eds-user, J3 for eds-user; hostq green; J6 green); B **39680114939** red at exactly A1's `--du /usr` (445 → 125 bytes), A2 and A3 green; C **39680118584** red at U1 and U2 at every lupin row, root and `pax` (lupin's words: `` `/usr/share/lupin/hello.lu` is not a readable file ``), **and at U3** (init ended with status 2: pelt's `exit` takes the last command's status, lupin's 2) — the one row predicted green (§K) | right but U3 in C |
 | P10 | 0 bytes of `.text` | 0 bytes, every section, every kernel (§J) | right |
-| P11 | the playground rebuilt with aspen and lupin, the sessions typed, on nomad-1 | ⟨PLAY⟩ | ⟨P11V⟩ |
+| P11 | the playground rebuilt with aspen and lupin, the sessions typed, on nomad-1 | build.sh and assemble.sh extended (the pre-edit copies kept), the second assemble rc 0 after the first failed on an apostrophe in the motd (§M); **`pax-playground.iso` `242ecec2…`** (79,415,296 bytes), booted once with the maintainer's sessions typed (`g -`, `aspen /`, `lupin run hello.lu`, `./Script/greet.sh` as `pax`: `hi`), copied to nomad-1 and hashed there twice | right |
 
 ## A. The pins (item 1)
 
@@ -357,7 +357,7 @@ tools, each in two builds or more, and again on CI's runner:
 | pelt (`90d7c64`, its own 0.2.32) | `tools/mkpelt` | `5448cb27d882553bccba66dbde2c4aaba417a7501ae1c6bf3944af0d00a93c5d`, 15,201,640 | sh21's; every suite build (first chain, eds2, s1, s2, the playground), CI's plants |
 | boreutils (`cc64f68`, its own 0.2.33) | `tools/mkboreutils` | bu28's: `cat` `930e58ac…`, `cut` `f5735f5b…`, `kill` `b0e45268…`, `sleep` `4d865fb9…`, `timeout` `245f8414…`, `tr` `8e9d4431…`, `wc` `f7596ab4…`, `true` `a3bf0296…`, `env` `88faec90…`, `head` `13eb6f10…`, … | every build; CI |
 | lope (`5ac37df`, its own 0.2.33) | `tools/mklope` | `f9a2f064077f6bb33ede9219608b6fe72d4a45a66c84f61f3f9d9e5e94f5066c`, 14,426,728 | lp00's; the first chain, the playground |
-| su (0.2.34 / `3bacc5f`) | `tools/mksu` | **`fbc2035e74a57f78d79c89fe395cedd1f95aa9a08613f1baba9f67a4fabc5780`, 14,441,376** (px53's `388d2434…`, 14,025,128) | ⟨SU2⟩ |
+| su (0.2.34 / `3bacc5f`) | `tools/mksu` | **`fbc2035e74a57f78d79c89fe395cedd1f95aa9a08613f1baba9f67a4fabc5780`, 14,441,376** (px53's `388d2434…`, 14,025,128) | the first chain (mpx5-accounts), the playground |
 | sigwolf (0.2.34 / `3bacc5f`) | `tools/mksigwolf` | **`dba181aac91fbfdef56df62baf0ded0a8517c34ca9e8c5bfb7751de6be5e3ac6`, 14,958,920** (px53's `fa9f7de6…`, 14,529,304) | the first chain, eds2 |
 | edwolf (0.2.34 / `3bacc5f`, its own pin) | `tools/mkedwolf` | **`1bfd0ca229b4c70bd6aeba6a93378817c8bc350aac4ad4c26a9a3252d38070cc`, 15,036,336** | eds1, eds2, h1; CI's plant A (39680111521) |
 | hostq | `tools/mkhostq` | **`9eca259ed970c48f220b3e10a477b639e63e36c38b92438e58dbe8559da7fa92`, 790,520** | eds1, eds2, h1; CI's plant A |
@@ -377,7 +377,7 @@ sigs-user (J11, 26 lines each: sigwolf at 0.2.34 answers every row
 and fds (J7, J8), the busybox probe and shells (J1, J2), the user runs
 to the container (J3), J6 on every boot
 (`notes/px57/kasumi-first-chain.out`); **mpx5-lope PASS** (L1 to L4,
-root and `pax`); **mpx5-accounts** ⟨ACC2⟩. Nothing was re-recorded:
+root and `pax`); **mpx5-accounts** PASS (its 109-line recording held, root, `pax` and the container; su `fbc2035e…`). Nothing was re-recorded:
 the only new recordings are the eds image's (§D, §E).
 
 ## D. What 0.2.34 asks of PAX: edwolf (item 1)
@@ -392,8 +392,8 @@ own eds archive `c36949e3…`), recorded twice, **the same bytes**
 (`notes/px57/kasumi-eds-recordings-twice.out`). **On PAX at its first
 boot of the image, byte-identical to the guest, as root and as `pax`,
 and the user's to the container's** (J13, J3, J4, J6:
-`notes/px57/kasumi-first-eds.out`), with no kernel change. Root's 58
-lines (the user's the same but the first and `/tmp/ed-1000`):
+`notes/px57/kasumi-first-eds.out`), with no kernel change. Root's 59
+lines (the user's the same but the first and `/tmp/ed-1000`; the `~N:` line PAX's own):
 
 ```
 edwolf: px57's probe of wolf 0.2.34's calls, as root
@@ -706,11 +706,11 @@ A3 and U3 on every boot: -ENOSYS only 273 and 334, no `refused:` line.
 Native, BIOS, TCG, every boot under `taskset -c 0-3` (the first chain)
 or `4-7` (the head's), every build in `px13-ubuntu` (the lupin suite's
 in the Rust image): **the pins alone** (`e32ffb3`,
-`notes/px57/kasumi-first-chain.out`): ⟨FIRSTCHAIN⟩. **The head**
+`notes/px57/kasumi-first-chain.out`): mkw (7 PASS) and tour (22) PASS; mpx5-jobs every image (225 PASS), mpx5-lope (8), mpx5-accounts (10), mpx3-shell (70), mpx3-tree (64), mpx3-boreutils (12), mpx5-users (110), mpx3-speaker (27), mpx3-console (26), mpx3-screen (7), mpx3-threads (11): **every one PASS, no FAIL and no SKIP line**; the last four run twice (a second chain on cpus 4-7 beside the first), the same verdicts. **The head**
 (`e677afa`, the code as at the final head; `notes/px57/kasumi-head.out`):
-mpx5-jobs every image, the eds image among them, ⟨HEADJOBS⟩; mpx5-aspen
+mpx5-jobs every image, the eds image among them, **PASS, 238 PASS lines, no FAIL**; mpx5-aspen
 and mpx5-lupin PASS (`notes/px57/kasumi-new-suites.out`); `tests/ci-plan`
-**200 PASS** (190 at px56: eight new cases, two widened). No fixed
+**200 PASS** (eight new cases, two widened). No fixed
 reference moved (the console's `.expect` files, the accounts' 109
 lines, the speaker's, every recording under `tests/mpx5-jobs.d/linux/`
 but the twelve new eds files). `mpx4-session`, `mpx4-lobo`,
