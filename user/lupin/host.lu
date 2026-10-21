@@ -9,16 +9,26 @@
 // refused by name outside it (`[os.fs.path.domain]`: from `/`, root's
 // home, /usr/share/lupin is inside; from /home/pax it is not), its
 // names sorted (a directory's order is its file system's).
-fn sorted(xs: List[str]) -> List[str] {
-    var out: List[str] = []
-    for x in xs {
-        var i = 0
-        while i < out.len && out[i] < x {
-            i = i + 1
+/// Each name, smallest first, by selection over the list (no std: the
+/// image carries no std tree, and `List.insert` is std.list's).
+fn print_sorted(dir: str, xs: List[str]) {
+    var last = ""
+    var first = true
+    var k = 0
+    while k < xs.len {
+        var best = ""
+        var have = false
+        for x in xs {
+            if (first || x > last) && (have == false || x < best) {
+                best = x
+                have = true
+            }
         }
-        out.insert(i, x)
+        print("tree: {dir}/{best}")
+        last = best
+        first = false
+        k = k + 1
     }
-    out
 }
 
 fn home() -> str {
@@ -42,8 +52,6 @@ fn main() -> !int {
     let st = fs_stat("x.lu")?
     print("tree: x.lu in the working directory: kind {st[0]}, {st[1]} bytes")
     let names = fs_read_dir("/usr/share/lupin")?
-    for n in sorted(names) {
-        print("tree: /usr/share/lupin/{n}")
-    }
+    print_sorted("/usr/share/lupin", names)
     0
 }
