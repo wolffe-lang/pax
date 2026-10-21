@@ -204,7 +204,7 @@ either plant ran: the first text had B's `g -` and `ls` green.)
 
 | # | predicted | measured | verdict |
 |---|---|---|---|
-| P1 | the pins and the hook, each its own commit; the kernel unchanged | `user/lope.pin` `e857153` (with `tools/mklope` `f86fe4e`), `user/pelt.pin` `46001a0`, the hook `user/shrc` `347c1c4`; `git diff c8b48cb HEAD -- kernel boot` is empty | right |
+| P1 | the pins and the hook, each its own commit; the kernel unchanged | `user/lope.pin` `85b7778` (with `tools/mklope` `6bcb188`), `user/pelt.pin` `93b65ca`, the hook `user/shrc` `3ad15ae`; `git diff c8b48cb HEAD -- kernel boot` is empty | right |
 | P2 | lope `f9a2f064…` and pelt `5448cb27…` in `px13-ubuntu`, twice each | lope **`f9a2f064…`** (14,426,728) and pelt **`5448cb27…`** (15,201,640), each in two builds, the same bytes (§B); pelt at trunk's pin first gave sh19's `7be05ec0…` twice; every suite build since gave the same two | right |
 | P3 | the hook through `env ENV=/etc/shrc`, no kernel change; `ENV` inherited by `exec sh` and `su pax` | so: the second shell (`exec sh -i -m`) and the playground's `su pax` both run the hook (§D, §I) | right |
 | P4 | the session byte-identical to the container's as root and `pax` at the first boot, every row's witness; the menu's pause a race to size | **byte-identical at the first boot** (36 lines each, root and `pax`), L2's first text wrong in two of its own lines (`ls` prints columns on a terminal; pelt's not-found carries the line number 98, the hook's text counted), fixed in the suite before any commit of it; every row as predicted. The pause is no race: the same bytes with the digit 0.2 s after `gi` (§D) | right on PAX and Linux; wrong on the pause (in the safe direction) |
@@ -216,14 +216,14 @@ either plant ran: the first text had B's `g -` and `ls` green.)
 
 ## A. The pins and the hook (item 1)
 
-- `user/lope.pin` (`e857153`): lope's repository and `5ac37df`, the
+- `user/lope.pin` (`85b7778`): lope's repository and `5ac37df`, the
   digest and the image it was built in. lope is private, so
-  `tools/mklope` (`f86fe4e`) takes the tree from `PAX_LOPE_REPO` when it
+  `tools/mklope` (`6bcb188`) takes the tree from `PAX_LOPE_REPO` when it
   is set; it is `tools/mkpelt` with lope's names, a fetch that says why
   it fails, and a `lope --version` run after the link.
-- `user/pelt.pin` (`46001a0`): `90d7c64` (sh21), its paragraph beside
+- `user/pelt.pin` (`93b65ca`): `90d7c64` (sh21), its paragraph beside
   px53's.
-- The hook (`347c1c4`): `user/shrc`, which the image installs as
+- The hook (`3ad15ae`): `user/shrc`, which the image installs as
   `/etc/shrc`: `eval "$(lope init pelt)"`. The console shell's line is
   `/bin/env ENV=/etc/shrc /bin/sh -i -m`: boreutils' `env` puts `ENV` in
   the environment, the kernel's fixed `HOME=/ TERM=linux PAX=1
@@ -352,7 +352,7 @@ change.**
 ## F. Plants (item 4)
 
 Branches never merged, one commit each, cut from `dc4c09f` (the suite and the CI as at
-that head, before the rebase; `c0d9cd6` after it):
+that head, before the rebase; `1cabdbc` after it):
 
 | plant | branch, commit | change | kasumi (native BIOS) |
 |---|---|---|---|
@@ -390,7 +390,7 @@ lope is private and pax public. The job checks lope out at the pin with
 (lobo's `acquire-toolchain`). **That secret does not reach pax**: the
 first dispatch, run 39488153518 (`-f tier=pr -f suites=mpx5-lope`, at
 `6e95404`, before the rebase), was red at the checkout, `Input required and not supplied:
-token`; since `dc4c09f` (`c0d9cd6` rebased) the job says so by name in a step of its own
+token`; since `dc4c09f` (`1cabdbc` rebased) the job says so by name in a step of its own
 (`::error title=No WOLF_CI_TOKEN for lope::…`), never a skip. So in CI
 the suite cannot build lope, its plants cannot be seen red at their rows,
 and no `tier full` could be green. Listing the org's secrets to learn
@@ -424,6 +424,16 @@ kernel changes touch nothing lope or pelt calls in the session (no
 `/dev/fd`, no limit but `RLIMIT_STACK` read, no core): the pull
 request's run at the new head is the measurement.
 
+Then px56 (exec from the tree and `#!`: `kernel/elf`, `kernel/files`,
+`kernel/sched`) merged first, and `px54` rebased again, onto `f83d627`
+(the head before it kept as `px54-prerebase2`, `b61683a`, whose `tier
+pr` run 39651106921 was green and whose labelled full run, superseded,
+was cancelled): the same three prose conflicts, kept both (px54's
+section after px56's in `docs/SOURCES.md`, px54's paragraph first in
+README and CHANGELOG); `tests/ci-plan` 190 PASS. lope and pelt are
+archive files, which PAX ran before px56 as after; the session's
+measurement at this base is the pull request's run.
+
 ## I. The playground (item 5)
 
 The orchestrator's two scripts on kasumi, changed as the contract says
@@ -436,7 +446,7 @@ binaries), `/etc/shrc` from `user/shrc`, the hook line
 (`/etc/pax-run` `/bin/env ENV=/etc/shrc /bin/sh -i -m`), and two motd
 lines naming lope and saying its store is in memory; the first motd line
 names `pax px54 39f8597` (the code as at the head then, before the
-rebase, `32b056e` after it; only notes and prose followed), pelt `90d7c64`. Both rc 0; lope `f9a2f064…`, pelt
+rebase, `48e5f8c` after it; only notes and prose followed), pelt `90d7c64`. Both rc 0; lope `f9a2f064…`, pelt
 `5448cb27…`. **`pax-playground.iso`
 `cc15c60224f910f671bbc08df344c50d04aad455fb7dcd0f3dbb9bd2bdc27214`**
 (71,751,680 bytes; px53's was `2336718e…`), `pax-smoke.iso`
@@ -466,19 +476,19 @@ Shas are this branch's (`px54`). kasumi paths are under `~/lanes/px54/`.
 
 ### What was written
 
-- The prediction: `ae4a894` (§1 to §3, before any change or
-  measurement); the plants' rows `d3c7b5c`, corrected `32b056e`, both
+- The prediction: `0049059` (§1 to §3, before any change or
+  measurement); the plants' rows `1245f48`, corrected `48e5f8c`, both
   before either plant ran.
-- The pins and the hook: `f86fe4e` (`tools/mklope`), `e857153`
-  (`user/lope.pin`), `46001a0` (`user/pelt.pin`), `347c1c4`
+- The pins and the hook: `6bcb188` (`tools/mklope`), `85b7778`
+  (`user/lope.pin`), `93b65ca` (`user/pelt.pin`), `3ad15ae`
   (`user/shrc`).
-- The session and the suite: `de55143` (`user/console/lope.keys`),
-  `4791e72` (`tests/mpx5-lope`), `9715c16` and `c0d9cd6` (ci.yml's job,
-  the token said by name), `d304cf7` (`tools/ci-tiers.map`), `81ee99d`
+- The session and the suite: `cb2e18e` (`user/console/lope.keys`),
+  `6a72990` (`tests/mpx5-lope`), `93c4a67` and `1cabdbc` (ci.yml's job,
+  the token said by name), `6e9db04` (`tools/ci-tiers.map`), `1fb8aa4`
   (`tests/ci-plan`).
-- The words: `b1d83d3` (`docs/SOURCES.md`), `6a76861` (README),
-  `7ca8524` (CHANGELOG), and this note.
-- The scripts: `cf8d763`, `66ced20` (`notes/px54/*.sh`, the
+- The words: `079cecc` (`docs/SOURCES.md`), `316db4b` (README),
+  `5f3d736` (CHANGELOG), and this note.
+- The scripts: `6710809`, `57407d6` (`notes/px54/*.sh`, the
   playground's keys).
 - The plants: `px54-plant-a` `e89f87f`, `px54-plant-b` `2225338` (on
   origin, never to be merged).
