@@ -7,6 +7,27 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The pins at 0.2.34, aspen and lupin on PAX (px57).** The kernel is
+  built from wolf 0.2.34 (lupin 0.1.55 for `tests/mkw`), and `su` and
+  `sigwolf` from 0.2.34 with wolf-std `3bacc5f`: no kernel source moved
+  and no section of any kernel moved by a byte; every recording held at
+  the first boot. A probe of 0.2.34's calls (`user/edwolf`: `os_fork`
+  and its `busy` rule, `os_signal_wait_fds`, the mode's bits 5-7 and
+  `os_term_restore_at_exit`, `fs_sync`, `fs_sync_dir`, the exclusive
+  create, `fs_realpath`, `os_clock_ns`) and one of s253's at the
+  system-call level (`user/elf/hostq.c`, pax#107) run in mpx5-jobs' new
+  `eds` image, byte-identical to real Linux under QEMU as root and as
+  `pax`, but for rows named PAX's own: the monotonic clock's 10 ms grain,
+  the kernel's name, and a set of the core limit, which PAX refuses.
+  aspen (`user/aspen.pin`, `tools/mkaspen`: tree(1) in wolf) is
+  preinstalled as `/bin/aspen`, and lupin (`user/lupin.pin`,
+  `tools/mklupin`: wolf-interp's release tag built static for
+  x86_64-unknown-linux-musl, ET_EXEC; ruling #110, lupin in the base
+  image) as `/bin/lupin` with four programs in `/usr/share/lupin`; two
+  new suites, `tests/mpx5-aspen` and `tests/mpx5-lupin`, type each at
+  pelt as root and as `pax`, byte-identical to the same binaries in a
+  Linux container. Every call either makes is one PAX serves.
+
 - **lope on PAX (px54, ruling #91 R4).** lope (`user/lope.pin`: lope
   `5ac37df`, lp00; `tools/mklope`, `tools/mkpelt`'s shape, from
   `PAX_LOPE_REPO` since lope is private) is preinstalled as `/bin/lope`,
