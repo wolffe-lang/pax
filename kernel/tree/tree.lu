@@ -145,6 +145,7 @@ const I_BLOCKS: u64 = 9 // data frames held
 const I_BACK: u64 = 10 // the archive's bytes (a kernel address); 0 none
 const I_BACKLEN: u64 = 11 // how many of them the file still reads
 const I_PARENT: u64 = 12 // a directory's parent; px34: a socket's record (kernel/unix), + 1, while it lives
+const I_RUNNING: u64 = 12 // px56: a regular file's: how many programs run from it (the word no file used)
 const I_ENTRIES: u64 = 13 // a directory's entries; a file: its archive entry + 1
 const I_BTIME: u64 = 14
 const I_NEXT: u64 = 14 // the free list: a free record's link, in the word a live inode's birth time is in (px42)
@@ -502,17 +503,35 @@ pub fn time(i: u64, which: int) -> u64 {
     ig(i, I_BTIME)
 }
 
-/// The archive entry a file still is, whole and unwritten (what
-/// `execve` can load: one contiguous image), or initramfs.END.
-pub fn archive_entry(i: u64) -> u64 {
-    if is_dir(i) || ig(i, I_ENTRIES) == 0 || ig(i, I_BLOCKS) != 0 || ig(i, I_BACKLEN) != ig(i, I_SIZE) {
-        return initramfs.END
+/// px56: whether inode `i` is a regular file (what `execve` loads).
+pub fn is_regular(i: u64) -> bool {
+    ig(i, I_MODE) & S_IFMT == S_IFREG
+}
+
+/// px56 (pax#95): how many programs run from regular file `i` (each
+/// process's program is an open file of kernel/files', which counts
+/// itself here when it is made and when it goes): while any does,
+/// kernel/files refuses to open the file for writing, -ETXTBSY
+/// (`open(2)`, measured). The word is a directory's parent's and a
+/// socket's record's; a regular file never used it (0 from `create`
+/// and `adopt`).
+pub fn running(i: u64) -> u64 {
+    if !is_regular(i) {
+        return 0
     }
-    let e = ig(i, I_ENTRIES) - 1
-    if initramfs.size(e) != ig(i, I_SIZE) {
-        return initramfs.END
+    ig(i, I_RUNNING)
+}
+
+pub fn run_hold(i: u64) {
+    if is_regular(i) {
+        ip(i, I_RUNNING, ig(i, I_RUNNING) + 1)
     }
-    e
+}
+
+pub fn run_release(i: u64) {
+    if is_regular(i) && ig(i, I_RUNNING) > 0 {
+        ip(i, I_RUNNING, ig(i, I_RUNNING) - 1)
+    }
 }
 
 /// A file's 512-byte blocks: eight for every page that holds bytes, a
