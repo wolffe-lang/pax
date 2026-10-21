@@ -1,0 +1,20 @@
+# px57: the throwaway image the musl lupin is built in. localhost/px13-ubuntu
+# (Ubuntu 24.04.5, gcc 13.3, clang 18, strace, git, curl; image ad8964505189)
+# has no rustup, cargo or rustc, so this image adds them INSIDE the image,
+# never on a host: rustup-init from static.rust-lang.org checked against the
+# digest its .sha256 names (read twice before the build), lupin's channel
+# (wolf-interp's rust-toolchain.toml, 1.97.1, profile minimal) and the
+# x86_64-unknown-linux-musl target (rustup's own prebuilt std for it, its
+# self-contained musl CRT and libc). Built on kasumi with
+#   podman build -t localhost/px57-rust -f notes/px57/rust/Containerfile notes/px57/rust
+# and removed when the lane ends.
+FROM localhost/px13-ubuntu
+ENV RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo PATH=/opt/rust/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ARG RUSTUP_INIT_SHA256=5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4
+RUN curl -sSfL --retry 3 -o /tmp/rustup-init https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init \
+ && echo "$RUSTUP_INIT_SHA256  /tmp/rustup-init" | sha256sum -c - \
+ && chmod +x /tmp/rustup-init \
+ && /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.97.1 --target x86_64-unknown-linux-musl \
+ && rm /tmp/rustup-init \
+ && chmod -R a+rX /opt/rust \
+ && rustc --version && cargo --version && rustup target list --installed
