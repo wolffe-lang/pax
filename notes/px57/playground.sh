@@ -53,7 +53,7 @@ lines[i:j] = [
     "lope jumps (its hook in /etc/shrc): cd /etc, cd /bin, then etc alone, g -, gi.",
     "aspen is tree(1) in wolf: aspen /, aspen -a -L 2 /home/pax, aspen -J /bin, aspen --du /usr.",
     "lupin runs wolf programs: cd /usr/share/lupin; lupin run hello.lu (or write one: cat > x.lu).",
-    "Files and lope's store are in memory, gone at the next boot. exit (or Ctrl-D) halts.",
+    "Files and the lope store are in memory, gone at the next boot. exit (or Ctrl-D) halts.",
 ]
 s = "\n".join(lines)
 old = 'for t in user/tunes/*; do args+=(/usr/share/tunes/${t##*/}=$t:644); done'
@@ -64,7 +64,10 @@ open(p, "w").write(s)
 PY
 sha256sum $O/build.sh $O/assemble.sh
 diff $E/orch-build.sh.before $O/build.sh; diff $E/orch-assemble.sh.before $O/assemble.sh
-bash $O/build.sh && bash $O/assemble.sh
+# (the motd sits inside assemble.sh's single-quoted script: no apostrophe in it)
+! sed -n '/^PAX playground: /,/^MOTD$/p' $O/assemble.sh | grep -q "'" || { echo "playground: an apostrophe in the motd"; exit 2; }
+if [ -z "${PX57_PLAY_SKIP_BUILD:-}" ]; then bash $O/build.sh || exit 1; fi
+bash $O/assemble.sh
 cat $O/w/aspen.txt $O/w/lupin.txt $O/w/pelt.txt $O/w/lope.txt | grep -E '^(aspen|lupin|pelt|lope) [0-9a-f]{64}'
 sha256sum $O/out/pax-playground.iso $O/out/pax-playground.iso $O/out/pax-smoke.iso
 ls -l $O/out/pax-playground.iso
