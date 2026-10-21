@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# mkaspen — build aspen, tree(1) in wolf (wolffe-lang/aspen, ruling #103:
+# the maintainer's C aspen ported), as a fully static x86-64 Linux
+# executable, unmodified, from aspen's own tree (px57).
+#
+#   tools/mkaspen OUTDIR
+#
+# tools/mklope's twin. The tree is user/aspen.pin's commit of
+# wolffe-lang/aspen (public), fetched from PAX_ASPEN_REPO when it is set
+# (a local clone or checkout that holds the commit) and from ASPEN_REPO
+# otherwise. Nothing of aspen's tree is kept: the build directory is
+# removed at the end. The toolchain is the one THAT tree pins in its
+# wolf-toolchain.toml: the wolf release archive for
+# x86_64-unknown-linux-gnu by its sha256 (refused on a mismatch, and on
+# a `--version` that is not its `version_line`), and wolf-std at the
+# commit it names (`WOLF_STD`; aspen pins a std other than the archive's
+# bundled one, which its own tools/fetch-toolchain stages in its place).
+# aspen is built as its own tools/build --static builds it (`wolf build
+# --release --no-cache --deny-warnings src/aspen.lu`, the manifest
+# src/wolf.pkg beside it, through a `cc` first on PATH that adds
+# `-static`), so the binary is a static glibc executable: ET_EXEC, no
+# PT_INTERP, checked (readelf); `OUTDIR/sums.txt` gets `aspen <sha256>
+# <bytes>`.
+#
+# Build on a baseline x86-64 glibc (the CI runner's Ubuntu; an Ubuntu
+# container on kasumi), never on kasumi's CachyOS x86-64-v4 glibc (px10).
+# The release tier needs clang at run time (wolf's D33). Exit 0, or 2 on
+# a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkaspen OUTDIR"
+out=$1
+need git curl tar readelf cc clang
+. "$PAX_ROOT/user/aspen.pin"
+mkdir -p "$out" "$PAX_CACHE"
+out=$(cd "$out" && pwd)
+
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-aspen.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+
+tree() { # repo rev dir
+    mkdir -p "$3"
+    git -C "$3" init -q
+    git -C "$3" fetch -q --depth 1 "$1" "$2" || die "cannot fetch $1 at $2"
+    git -C "$3" checkout -q --detach FETCH_HEAD
+    [ "$(git -C "$3" rev-parse HEAD)" = "$2" ] || die "$1: HEAD is not $2"
+}
+
+# aspen at the pin, and what it pins.
+src=${PAX_ASPEN_REPO:-$ASPEN_REPO}
+tree "$src" "$ASPEN_REV" "$w/aspen"
+toml=$w/aspen/wolf-toolchain.toml
+key() { # section key
+    awk -v s="[$1]" -v k="$2" '
+        /^\[/ { on = ($0 == s); next }
+        on && $1 == k { v = $0; sub(/^[^=]*= *"?/, "", v); sub(/"? *$/, "", v); print v; exit }' "$toml"
+}
+wv=$(key wolf version)
+wsha=$(key wolf x86_64-unknown-linux-gnu)
+wline=$(key wolf version_line)
+srepo=$(key std repo)
+srev=$(key std rev)
+[ -n "$wv" ] && [ -n "$wsha" ] && [ -n "$srepo" ] && [ -n "$srev" ] \
+    || die "cannot read wolf version/digest and std repo/rev from aspen's wolf-toolchain.toml"
+say "aspen $ASPEN_REV pins wolf $wv (${wsha:0:8}…), wolf-std $srev"
+
+# wolf, by the digest aspen names (cached by digest).
+arc=$PAX_CACHE/wolf-$wv-$wsha.tar.gz
+if [ ! -f "$arc" ] || [ "$(sha256_of "$arc")" != "$wsha" ]; then
+    curl -sSfL --retry 3 -o "$arc.part" \
+        "https://github.com/wolffe-lang/wolf-lang/releases/download/v$wv/wolf-$wv-x86_64-unknown-linux-gnu.tar.gz" \
+        || die "cannot download wolf $wv"
+    mv "$arc.part" "$arc"
+fi
+[ "$(sha256_of "$arc")" = "$wsha" ] || die "wolf $wv archive: sha256 $(sha256_of "$arc"), aspen pins $wsha"
+mkdir -p "$w/wolf"
+tar -xzf "$arc" -C "$w/wolf" --strip-components=1
+wolf=$w/wolf/wolf
+have=$("$wolf" --version | head -n 1)
+[ "$have" = "$wline" ] || die "wolf --version says '$have'; aspen pins '$wline'"
+say "$have"
+
+# wolf-std at the commit aspen names.
+tree "https://github.com/${srepo}" "$srev" "$w/stdrepo"
+std=$w/stdrepo/std
+[ -d "$std" ] || die "wolf-std $srev has no std/"
+
+# The static `cc`.
+mkdir -p "$w/bin"
+real=$(command -v cc)
+printf '#!/bin/sh\nexec %s -static "$@"\n' "$real" > "$w/bin/cc"
+chmod +x "$w/bin/cc"
+
+: > "$out/sums.txt"
+# The output path as aspen's own tools/build gives it (relative, under
+# the tree), then copied out.
+(cd "$w/aspen" && mkdir -p target/static && PATH="$w/bin:$PATH" WOLF_STD=$std \
+    "$wolf" build --release --no-cache --deny-warnings src/aspen.lu -o target/static/aspen) >&2 \
+    || die "wolf build of src/aspen.lu"
+cp "$w/aspen/target/static/aspen" "$out/aspen"
+readelf -hW "$out/aspen" | grep -Eq 'Type: +EXEC' || die "aspen is not ET_EXEC"
+! readelf -lW "$out/aspen" | grep -q INTERP || die "aspen has a PT_INTERP (not static)"
+"$out/aspen" --version >&2 || die "aspen --version"
+printf '%s %s %s\n' aspen "$(sha256_of "$out/aspen")" "$(wc -c < "$out/aspen" | tr -d ' ')" | tee -a "$out/sums.txt"
+printf 'linked against: %s\n' "$("$real" -print-file-name=libc.a)"
