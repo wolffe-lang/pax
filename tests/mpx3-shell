@@ -116,8 +116,9 @@
 #      on (the console's summary), as px13's T3.
 #   S4 what PAX lacks or refuses: -ENOSYS only for set_robust_list (273)
 #      and rseq (334) (glibc's start-up; none for procs, which has no
-#      libc); refused by name nothing in a shell session, and in procs'
-#      exactly the not-ELF execve (59, -8) (px26: `kill` answers).
+#      libc); refused by name nothing (px56: procs' execve of /etc/script,
+#      -ENOEXEC, is Linux's own answer and no refusal; px14 to px55 named
+#      it; px26: `kill` answers).
 #   S5 the end: `PAX: init /bin/<prog> ended with status <s>; nothing
 #      left to run` with s Linux's status, `halt`, and qemu-halt holds the
 #      machine halted.
@@ -552,12 +553,10 @@ for leg in $legs; do
             [ "$s" = procs-user ] && want="273 334" # px47: `as` is a glibc program; procs has no libc
             [ "$ns" = "$want" ] || why+=" -ENOSYS for '$ns', not '$want';"
             rf=$(grep ': refused: ' "$norm" | sed -E 's/^user: [^ ]+ pid [0-9]+ //' | paste -sd'|' -)
-            if [ "$i" = procs ]; then # quiet or not: refusals print
-                wr="user: exec /etc/script: refused: not an ELF file|syscall 59: refused: not a static x86-64 ELF executable PAX runs, -8"
-                [ "$rf" = "$wr" ] || why+=" refusals '$rf', not '$wr';"
-            else
-                [ -z "$rf" ] || why+=" refusals '$rf';"
-            fi
+            # px56: procs' execve of /etc/script (text, no `#!`) is -ENOEXEC
+            # with no `refused:` line: it is Linux's own answer (px14 to
+            # px55 named it, `not an ELF file`).
+            [ -z "$rf" ] || why+=" refusals '$rf';"
             [ -z "$why" ] && say "PASS S4 $id: -ENOSYS only for '${want:-nothing}'; refused: ${rf:-nothing}" || bad "S4 $id:$why"
 
             # S5
