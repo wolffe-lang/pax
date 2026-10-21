@@ -2514,6 +2514,7 @@ jobs:
             build/mpx5-jobs/pelt/sums.txt
             build/mpx5-jobs/bore/sums.txt
             build/mpx5-jobs/sigwolf/sums.txt
+            build/mpx5-jobs/edwolf/sums.txt
             build/mpx5-jobs/linux/
             build/mpx5-jobs/rec-*.cmp
             build/mpx5-jobs/*/kmain_console.elf
@@ -2642,6 +2643,176 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px57 (item 2): aspen (user/aspen.pin, tools/mkaspen), tree(1) in wolf,
+  # preinstalled on PAX as /bin/aspen and typed at pelt: a session as root
+  # and as a user against the same binaries in a throwaway container
+  # (tools/linux-tree). aspen is public: tools/mkaspen fetches it.
+  mpx5-aspen:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-aspen')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+          qemu-system-x86_64 --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-aspen-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the image the Linux side's container is made from (by digest)
+        run: |
+          docker pull "$PAX_TREE_IMAGE"
+          docker image inspect --format '{{.Id}} {{.RepoDigests}}' "$PAX_TREE_IMAGE"
+        env:
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+      - name: aspen's session against the container, as root and as a user; the plan's legs (all four in the all tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+        run: tests/mpx5-aspen $PAX_LEGS
+
+      - name: keep the programs' sums, the Linux side, the sessions, the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-aspen
+          path: |
+            build/mpx5-aspen/*.txt
+            build/mpx5-aspen/aspen/sums.txt
+            build/mpx5-aspen/pelt/sums.txt
+            build/mpx5-aspen/bore/sums.txt
+            build/mpx5-aspen/linux/
+            build/mpx5-aspen/*/kmain_console.elf
+            build/mpx5-aspen/*/*.log
+            build/mpx5-aspen-*.session
+            build/mpx5-aspen-*.cmp
+            build/mpx5-aspen-*.log
+            build/mpx5-aspen-*.norm
+            build/mpx5-aspen-*.meta
+            build/mpx5-aspen-*.halt
+            build/mpx5-aspen-*.verdict
+            build/mpx5-aspen-*.typed
+            build/mpx5-aspen-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
+  # px57 (item 3; ruling #110): lupin (user/lupin.pin, tools/mklupin),
+  # the reference interpreter, built static for x86_64-unknown-linux-musl
+  # from its release tag and preinstalled on PAX as /bin/lupin with four
+  # programs (user/lupin/): a session as root and as a user against the
+  # same binaries in a throwaway container. The runner gets the tree's
+  # Rust channel and the musl target here (rustup, the runner's own);
+  # tools/mklupin refuses another channel or a missing target and
+  # installs nothing.
+  mpx5-lupin:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-lupin')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+          qemu-system-x86_64 --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+          docker --version
+
+      - name: lupin's Rust (user/lupin.pin's channel, the tree's) and the musl target (rustup)
+        run: |
+          . user/lupin.pin
+          rustup --version
+          rustup toolchain install "$LUPIN_SRC_RUST" --profile minimal --target "$LUPIN_SRC_TARGET"
+          rustup run "$LUPIN_SRC_RUST" rustc --version
+          rustup target list --installed --toolchain "$LUPIN_SRC_RUST"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-lupin-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the image the Linux side's container is made from (by digest)
+        run: |
+          docker pull "$PAX_TREE_IMAGE"
+          docker image inspect --format '{{.Id}} {{.RepoDigests}}' "$PAX_TREE_IMAGE"
+        env:
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+      - name: lupin's session against the container, as root and as a user; the plan's legs (all four in the all tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+        run: tests/mpx5-lupin $PAX_LEGS
+
+      - name: keep the programs' sums, the Linux side, the sessions, the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-lupin
+          path: |
+            build/mpx5-lupin/*.txt
+            build/mpx5-lupin/lupin/sums.txt
+            build/mpx5-lupin/pelt/sums.txt
+            build/mpx5-lupin/bore/sums.txt
+            build/mpx5-lupin/linux/
+            build/mpx5-lupin/*/kmain_console.elf
+            build/mpx5-lupin/*/*.log
+            build/mpx5-lupin-*.session
+            build/mpx5-lupin-*.cmp
+            build/mpx5-lupin-*.log
+            build/mpx5-lupin-*.norm
+            build/mpx5-lupin-*.meta
+            build/mpx5-lupin-*.halt
+            build/mpx5-lupin-*.verdict
+            build/mpx5-lupin-*.typed
+            build/mpx5-lupin-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   tier:
     name: tier ${{ needs.plan.outputs.tier || 'unplanned' }}
     if: ${{ !cancelled() }}
@@ -2680,6 +2851,8 @@ jobs:
       - mpx5-accounts
       - mpx5-jobs
       - mpx5-lope
+      - mpx5-aspen
+      - mpx5-lupin
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # The issue step's token may write issues; nothing else.
