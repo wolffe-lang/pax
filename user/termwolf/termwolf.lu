@@ -1,0 +1,619 @@
+// termwolf — the terminal yew asks for, asked of the console (px58): the
+// termios state bit by bit (TCGETS, TCSETS), the five bits and the timer
+// wolf 0.2.33's `os_term_set_mode` reaches (yew's raw, poll and drain
+// modes, `[os.term.mode]`), the timed reads, the output processing, the
+// window's size and SIGWINCH (`[os.term.size]`), `/dev/tty`, the queries
+// a terminal answers, the escape classes yew's renderer writes, and the
+// keys typed. Built for Linux by its own pinned wolf
+// (user/termwolf/wolf-toolchain.toml, user/termwolf/build: sigwolf's
+// shape), linked static, run unmodified on PAX and on a Linux
+// pseudo-terminal, as root and as a user (tests/mpx5-yew).
+//
+//   termwolf            the probe: every row, then `keys> ` and the bytes
+//                       typed up to a `.`, read in yew's raw mode
+//   termwolf ps2        `ps2> ` and the bytes typed up to a `.` (the
+//                       keyboard's keys, sent by the test)
+//   termwolf screen     the escape classes, each between `<` and `>`, for
+//                       the screen to be read afterwards (tests/mpx5-yew
+//                       reads QEMU's screendump cell by cell)
+//
+// The raw ioctls are tio.S's (wolf has no ioctl builtin); everything else
+// is wolf's own builtins, the ones yew's `term.tty` calls. The bits are
+// named as the uapi `asm-generic/termbits.h` and `termbits-common.h` name
+// them (an allowed header) and as strace(1) prints them. No libc source;
+// no kernel source; no terminal's source.
+
+extern "c" fn tw_ioctl(fd: int, req: int, arg: int) -> int
+extern "c" fn tw_buf() -> int
+extern "c" fn tw_get32(off: int) -> int
+extern "c" fn tw_put32(off: int, v: int) -> int
+extern "c" fn tw_get16(off: int) -> int
+extern "c" fn tw_put16(off: int, v: int) -> int
+extern "c" fn tw_get8(off: int) -> int
+extern "c" fn tw_put8(off: int, v: int) -> int
+
+// The safe face of tio.S. # Safety, for every one: tio.S's routines
+// touch only their own 64-byte buffer in .bss (an offset below 64 is all
+// the probe passes) and make ioctl(2) on a descriptor with that buffer
+// as the argument, or an integer; no memory of wolf's is passed.
+fn ioc(fd: int, req: int, arg: int) -> int {
+    // # Safety: as above.
+    unsafe { tw_ioctl(fd, req, arg) }
+}
+
+fn buf() -> int {
+    // # Safety: as above.
+    unsafe { tw_buf() }
+}
+
+fn g32(off: int) -> int {
+    // # Safety: as above.
+    unsafe { tw_get32(off) }
+}
+
+fn p32(off: int, v: int) -> int {
+    // # Safety: as above.
+    unsafe { tw_put32(off, v) }
+}
+
+fn g16(off: int) -> int {
+    // # Safety: as above.
+    unsafe { tw_get16(off) }
+}
+
+fn p16(off: int, v: int) -> int {
+    // # Safety: as above.
+    unsafe { tw_put16(off, v) }
+}
+
+fn g8(off: int) -> int {
+    // # Safety: as above.
+    unsafe { tw_get8(off) }
+}
+
+fn p8(off: int, v: int) -> int {
+    // # Safety: as above.
+    unsafe { tw_put8(off, v) }
+}
+
+const TCGETS: int = 21505 // 0x5401
+const TCSETS: int = 21506 // 0x5402
+const TIOCGWINSZ: int = 21523 // 0x5413
+const TIOCSWINSZ: int = 21524 // 0x5414
+const WS: int = 40 // the winsize's offset in tio.S's buffer
+const RESIZE: int = 16384 // SIGWINCH's meaning ([os.signal.set])
+
+// The packed modes yew sets (`src/term/tty.lu`: rawios, pollios,
+// drainios): every one of the five bits off, VMIN in bits 8..15, VTIME in
+// bits 16..23.
+const RAW: int = 256
+const POLL: int = 65536
+const DRAIN: int = 0
+
+fn hexd(d: int) -> str {
+    let digits = "0123456789abcdef"
+    var one = List[byte]()
+    (mut one).push(digits.bytes()[d])
+    str_from_utf8(one) else "?"
+}
+
+/// `0x` and the hex digits of `v` (v >= 0), no leading zeros.
+fn hex(v: int) -> str {
+    if v == 0 {
+        return "0x0"
+    }
+    var s = ""
+    var x = v
+    while x > 0 {
+        s = hexd(x % 16) + s
+        x = x / 16
+    }
+    "0x" + s
+}
+
+/// Two hex digits.
+fn hex2(v: int) -> str {
+    hexd((v / 16) % 16) + hexd(v % 16)
+}
+
+fn tcgets(fd: int) -> int {
+    ioc(fd, TCGETS, buf())
+}
+
+fn tcsets(fd: int) -> int {
+    ioc(fd, TCSETS, buf())
+}
+
+/// The four flag words and c_line, as one line.
+fn state_text() -> str {
+    let i = hex(g32(0))
+    let o = hex(g32(4))
+    let c = hex(g32(8))
+    let l = hex(g32(12))
+    let n = g8(16)
+    "iflag {i} oflag {o} cflag {c} lflag {l} line {n}"
+}
+
+fn cc_text() -> str {
+    var s = "cc"
+    var i = 0
+    while i < 19 {
+        s = s + " " + hex2(g8(17 + i))
+        i += 1
+    }
+    s
+}
+
+/// The 36 bytes of a termios, saved as a list of ints.
+fn save() -> List[int] {
+    var v = List[int]()
+    var i = 0
+    while i < 36 {
+        (mut v).push(g8(i))
+        i += 1
+    }
+    v
+}
+
+fn load(v: List[int]) {
+    var i = 0
+    while i < 36 {
+        let _ = p8(i, v[i])
+        i += 1
+    }
+}
+
+/// Whether the buffer holds the termios `v`.
+fn holds(v: List[int]) -> bool {
+    var i = 0
+    while i < 36 {
+        if g8(i) != v[i] {
+            return false
+        }
+        i += 1
+    }
+    true
+}
+
+/// The named bits of one flag word (its offset in the termios): the
+/// names, in the order of `bit_values`.
+fn bit_names(word: int) -> List[str] {
+    if word == 0 {
+        return ["IGNBRK", "BRKINT", "IGNPAR", "PARMRK", "INPCK", "ISTRIP", "INLCR", "IGNCR", "ICRNL",
+                "IUCLC", "IXON", "IXANY", "IXOFF", "IMAXBEL", "IUTF8"]
+    }
+    if word == 4 {
+        return ["OPOST", "OLCUC", "ONLCR", "OCRNL", "ONOCR", "ONLRET", "OFILL", "OFDEL", "NL1", "CR1",
+                "CR2", "TAB1", "TAB2", "BS1", "VT1", "FF1"]
+    }
+    if word == 8 {
+        return ["CS6", "CS7", "CSTOPB", "CREAD", "PARENB", "PARODD", "HUPCL", "CLOCAL", "CMSPAR", "CRTSCTS"]
+    }
+    ["ISIG", "ICANON", "XCASE", "ECHO", "ECHOE", "ECHOK", "ECHONL", "NOFLSH", "TOSTOP", "ECHOCTL",
+     "ECHOPRT", "ECHOKE", "FLUSHO", "PENDIN", "IEXTEN", "EXTPROC"]
+}
+
+/// The uapi termbits values of `bit_names`' bits (cflag's CS6 and CS7
+/// are CSIZE's two bits, 0x10 and 0x20, flipped alone).
+fn bit_values(word: int) -> List[int] {
+    if word == 0 {
+        return [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+    }
+    if word == 4 {
+        return [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+    }
+    if word == 8 {
+        return [16, 32, 64, 128, 256, 512, 1024, 2048, 1073741824, 2147483648]
+    }
+    [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 16384, 32768, 65536]
+}
+
+fn word_name(word: int) -> str {
+    if word == 0 {
+        return "iflag"
+    }
+    if word == 4 {
+        return "oflag"
+    }
+    if word == 8 {
+        return "cflag"
+    }
+    "lflag"
+}
+
+/// The B rows: each named bit of each flag word flipped alone from the
+/// state as found, set (TCSETS), read back (TCGETS), the state restored.
+/// A bit is kept when the word read back is the word set.
+fn bit_rows(found: List[int]) {
+    for word in [0, 4, 8, 12] {
+        let names = bit_names(word)
+        let values = bit_values(word)
+        var kept = ""
+        var lost = ""
+        var k = 0
+        while k < names.len {
+            let bit = values[k]
+            load(found)
+            let w = g32(word)
+            let flipped = if (w / bit) % 2 == 1 { w - bit } else { w + bit }
+            let _ = p32(word, flipped)
+            let r = tcsets(0)
+            let _ = tcgets(0)
+            let back = g32(word)
+            if r == 0 && back == flipped {
+                kept = kept + " " + names[k]
+            } else if r == 0 {
+                lost = lost + " " + names[k] + "(" + hex(back) + ")"
+            } else {
+                lost = lost + " " + names[k] + "({r})"
+            }
+            load(found)
+            let _ = tcsets(0)
+            k += 1
+        }
+        if lost == "" {
+            lost = " none"
+        }
+        let wn = word_name(word)
+        print("B: {wn} kept:{kept}")
+        print("B: {wn} not kept:{lost}")
+    }
+}
+
+/// The C row: each control character set to its own value (0x41 + i)
+/// and read back.
+fn cc_rows(found: List[int]) {
+    load(found)
+    var i = 0
+    while i < 19 {
+        let _ = p8(17 + i, 65 + i)
+        i += 1
+    }
+    let r = tcsets(0)
+    let _ = tcgets(0)
+    var lost = ""
+    i = 0
+    while i < 19 {
+        if g8(17 + i) != 65 + i {
+            lost = lost + " {i}"
+        }
+        i += 1
+    }
+    if lost == "" {
+        lost = " none"
+    }
+    print("C: c_cc each set to 0x41 + i: TCSETS {r}; not kept:{lost}")
+    load(found)
+    let _ = tcsets(0)
+}
+
+/// One M row: yew's packed mode `m` set with wolf's call, read back, and
+/// the termios it leaves.
+fn mode_row(name: str, m: int) -> !int {
+    os_term_set_mode(0, m)?
+    let back = os_term_mode(0)?
+    let _ = tcgets(0)
+    let st = state_text()
+    let vmin = g8(17 + 6)
+    let vtime = g8(17 + 5)
+    print("M: yew's {name} mode ({hex(m)}): reads back {hex(back)}; {st} vmin {vmin} vtime {vtime}")
+    0
+}
+
+/// The M rows: wolf's packed mode as found, yew's three modes, and the
+/// mode as found set again.
+fn mode_rows(found: List[int]) -> !int {
+    let m0 = os_term_mode(0)?
+    print("M: wolf's mode as found: {hex(m0)}")
+    let _ = mode_row("raw", RAW)?
+    let _ = mode_row("poll", POLL)?
+    let _ = mode_row("drain", DRAIN)?
+    os_term_set_mode(0, m0)?
+    let _ = tcgets(0)
+    let st = state_text()
+    let same = holds(found)
+    print("M: the mode as found set again: {st}; the whole termios as found: {same}")
+    0
+}
+
+/// One read of descriptor 0 in the packed mode `m`, nothing typed: the
+/// bytes it answered and whether it took between `lo` and `hi` ms.
+fn timed(m: int, what: str, lo: int, hi: int) -> !int {
+    os_term_set_mode(0, m)?
+    let t0 = time_now_ms()
+    let got = fs_read_chunk(0, 64) else |e| match e {
+        eof => List[byte](),
+        io => List[byte](),
+    }
+    let n = got.len
+    let dt = time_now_ms() - t0
+    var verdict = "in bounds"
+    if dt < lo {
+        verdict = "early ({dt} ms)"
+    } else if dt >= hi {
+        verdict = "late ({dt} ms)"
+    }
+    print("T: {what}: {n} bytes, {verdict}")
+    0
+}
+
+fn timed_rows(found: List[int]) -> !int {
+    let _ = timed(DRAIN, "VMIN 0 VTIME 0 answers at once", 0, 50)?
+    let _ = timed(POLL, "VMIN 0 VTIME 1 answers after a tenth of a second", 90, 1500)?
+    let _ = timed(5 * 65536, "VMIN 0 VTIME 5 answers after half a second", 450, 2500)?
+    load(found)
+    let _ = tcsets(0)
+    0
+}
+
+/// One O row: the row's name, then `ab LF cd CR` written with oflag's
+/// bit `set` set and `clear` cleared, then (the setting as found again)
+/// `|` and a line end: what the terminal showed is the transcript.
+fn out_row(found: List[int], name: str, set: int, clear: int) {
+    load(found)
+    fs_write(1, "O: {name}: ") else |_| {}
+    var w = g32(4)
+    if set != 0 && (w / set) % 2 == 0 {
+        w = w + set
+    }
+    if clear != 0 && (w / clear) % 2 == 1 {
+        w = w - clear
+    }
+    let _ = p32(4, w)
+    let _ = tcsets(0)
+    fs_write(1, "ab\ncd\r") else |_| {}
+    load(found)
+    let _ = tcsets(0)
+    fs_write(1, "|\n") else |_| {}
+}
+
+fn out_rows(found: List[int]) {
+    out_row(found, "OPOST|ONLCR as found", 0, 0)
+    out_row(found, "OPOST cleared", 0, 1)
+    out_row(found, "ONLCR cleared", 0, 4)
+    out_row(found, "OCRNL set", 8, 0)
+    out_row(found, "OLCUC set", 2, 0)
+    out_row(found, "ONLRET set", 32, 0)
+}
+
+fn winsize() -> (int, int, int) {
+    let r = ioc(1, TIOCGWINSZ, buf() + WS)
+    (r, g16(WS), g16(WS + 2))
+}
+
+fn set_winsize(rows: int, cols: int) -> int {
+    let _ = p16(WS, rows)
+    let _ = p16(WS + 2, cols)
+    let _ = p16(WS + 4, 0)
+    let _ = p16(WS + 6, 0)
+    ioc(1, TIOCSWINSZ, buf() + WS)
+}
+
+/// Whether a SIGWINCH has come since the last ask (the runtime's signal
+/// thread takes it; a little time is given it).
+fn winched() -> !bool {
+    time_sleep_ms(300)
+    var seen = false
+    var m = os_signal_poll(RESIZE)?
+    while m != 0 {
+        seen = true
+        m = os_signal_poll(RESIZE)?
+    }
+    seen
+}
+
+fn win_row(moment: str) -> !int {
+    let (r, rows, cols) = winsize()
+    let (wr, wc) = os_term_size(1)?
+    print("W: {moment}: TIOCGWINSZ {r}, {rows} rows {cols} columns; os_term_size {wr} {wc}")
+    0
+}
+
+fn winch_rows() -> !int {
+    os_signal_listen(RESIZE)?
+    let _ = winched()?
+    let (_, rows, cols) = winsize()
+    let a = set_winsize(30, 100)
+    let (_, r1, c1) = winsize()
+    let s1 = winched()?
+    print("W: set 30 by 100: {a}; reads back {r1} by {c1}; SIGWINCH: {s1}")
+    let b = set_winsize(30, 100)
+    let s2 = winched()?
+    print("W: set 30 by 100 again: {b}; SIGWINCH: {s2}")
+    let c = set_winsize(rows, cols)
+    let (_, r3, c3) = winsize()
+    let s3 = winched()?
+    print("W: set back: {c}; reads back {r3} by {c3}; SIGWINCH: {s3}")
+    0
+}
+
+fn bytes_hex(v: List[byte]) -> str {
+    var s = ""
+    for b in v {
+        if s != "" {
+            s = s + " "
+        }
+        s = s + hex2(b as int)
+    }
+    s
+}
+
+/// A query a terminal answers: written in yew's poll mode, then half a
+/// second of reads; the answer's bytes, or none.
+fn query(name: str, q: str) -> !int {
+    os_term_set_mode(0, POLL)?
+    fs_write(1, q) else |_| {}
+    var got = List[byte]()
+    let t0 = time_now_ms()
+    while time_now_ms() - t0 < 500 {
+        let c = fs_read_chunk(0, 64) else |e| match e {
+            eof => List[byte](),
+            io => List[byte](),
+        }
+        for b in c {
+            (mut got).push(b)
+        }
+    }
+    fs_write(1, "\r") else |_| {}
+    var said = "no answer in half a second"
+    if got.len != 0 {
+        said = bytes_hex(got)
+    }
+    print("Q: {name}: {said}")
+    0
+}
+
+/// The bytes typed up to a `.`, read in yew's raw mode (VMIN 1): what
+/// the console delivered, every read's bytes together.
+fn keys(prompt: str, tag: str) -> !int {
+    os_term_set_mode(0, RAW)?
+    fs_write(1, prompt) else |_| {}
+    var got = List[byte]()
+    var done = false
+    while !done {
+        let c = fs_read_chunk(0, 64) else |e| match e {
+            eof => List[byte](),
+            io => List[byte](),
+        }
+        if c.len == 0 {
+            done = true
+        }
+        for b in c {
+            (mut got).push(b)
+            if b as int == 46 {
+                done = true
+            }
+        }
+    }
+    fs_write(1, "\r\n") else |_| {}
+    let h = bytes_hex(got)
+    print("{tag}: typed: {h}")
+    0
+}
+
+/// One E row: `E: NAME <` the sequence `>` and a line end.
+fn esc_row(name: str, s: str) {
+    fs_write(1, "E: " + name + " <" + s + ">\n") else |_| {}
+}
+
+/// The escape classes yew writes (the census, notes/px58 §C), each
+/// between `<` and `>` on a line of its own; an SGR class marks the cell
+/// after it with an `X` whose colours the screen keeps or not.
+fn screen() {
+    let e = "\x1b"
+    esc_row("CUP", e + "[5;5H")
+    esc_row("HVP", e + "[5;5f")
+    esc_row("CUU", e + "[A")
+    esc_row("CUD", e + "[B")
+    esc_row("CUF", e + "[3C")
+    esc_row("CUB", e + "[D")
+    esc_row("CHA", e + "[10G")
+    esc_row("VPA", e + "[3d")
+    esc_row("EL0", e + "[K")
+    esc_row("EL1", e + "[1K")
+    esc_row("EL2", e + "[2K")
+    esc_row("ECH", e + "[3X")
+    esc_row("ICH", e + "[@")
+    esc_row("DCH", e + "[P")
+    esc_row("IL", e + "[L")
+    esc_row("DL", e + "[M")
+    esc_row("DECSTBM", e + "[1;24r")
+    esc_row("DECSC", e + "7")
+    esc_row("DECRC", e + "8")
+    esc_row("ALTSCREEN", e + "[?1049h" + e + "[?1049l")
+    esc_row("DECTCEM", e + "[?25l" + e + "[?25h")
+    esc_row("DECSCUSR", e + "[2 q" + e + "[0 q")
+    esc_row("PASTE", e + "[?2004h" + e + "[?2004l")
+    esc_row("MOUSE", e + "[?1002h" + e + "[?1006h" + e + "[?1002l" + e + "[?1006l")
+    esc_row("FOCUS", e + "[?1004h" + e + "[?1004l")
+    esc_row("SYNC", e + "[?2026h" + e + "[?2026l")
+    esc_row("KITTY", e + "[>21u" + e + "[<u")
+    esc_row("OSC52", e + "]52;c;eA==\x07")
+    esc_row("SGR1", e + "[1mX" + e + "[0m")
+    esc_row("SGR2", e + "[2mX" + e + "[0m")
+    esc_row("SGR3", e + "[3mX" + e + "[0m")
+    esc_row("SGR4", e + "[4mX" + e + "[0m")
+    esc_row("SGR7", e + "[7mX" + e + "[0m")
+    esc_row("SGR22", e + "[1m" + e + "[22mX" + e + "[0m")
+    esc_row("SGR27", e + "[7m" + e + "[27mX" + e + "[0m")
+    esc_row("SGR31", e + "[31mX" + e + "[0m")
+    esc_row("SGR91", e + "[91mX" + e + "[0m")
+    esc_row("SGR41", e + "[41mX" + e + "[0m")
+    esc_row("SGR101", e + "[101mX" + e + "[0m")
+    esc_row("SGR39", e + "[31m" + e + "[39mX" + e + "[0m")
+    esc_row("SGR49", e + "[41m" + e + "[49mX" + e + "[0m")
+    esc_row("SGR38;5", e + "[38;5;9mX" + e + "[0m")
+}
+
+fn probe() -> !int {
+    let uid = os_uid()?
+    let who = if uid == 0 { "root" } else { "a user" }
+    print("termwolf: px58's probe of the terminal yew asks for, as {who}")
+    let a0 = os_isatty(0)?
+    let a1 = os_isatty(1)?
+    let a2 = os_isatty(2)?
+    print("I: isatty 0 1 2: {a0} {a1} {a2}")
+    let fg = os_term_foreground(0)?
+    let pg = os_pgid()?
+    let ours = fg == pg
+    print("G: the terminal's foreground group is this process's: {ours}")
+    let t = fs_open("/dev/tty") else |e| match e {
+        denied => -2,
+        io => -3,
+        not_found => -4,
+    }
+    if t >= 0 {
+        let ta = os_isatty(t)?
+        let tm = os_term_mode(t)?
+        let m0 = os_term_mode(0)?
+        let same = tm == m0
+        print("D: /dev/tty: opened, a terminal: {ta}; its mode is descriptor 0's: {same}")
+        fs_close(t)?
+    } else {
+        print("D: /dev/tty: not opened ({t})")
+    }
+    let r = tcgets(0)
+    let st = state_text()
+    print("S: TCGETS {r}: {st}")
+    print("S: {cc_text()}")
+    let found = save()
+    bit_rows(found)
+    cc_rows(found)
+    let _ = mode_rows(found)?
+    let _ = timed_rows(found)?
+    out_rows(found)
+    let _ = win_row("before anything is typed")?
+    let _ = winch_rows()?
+    let _ = query("DA1 (CSI c)", "\x1b[c")?
+    let _ = query("the cursor's position (CSI 6n)", "\x1b[6n")?
+    let _ = query("kitty's keyboard (CSI ? u)", "\x1b[?u")?
+    let _ = query("DECRQM 2026 (CSI ? 2026 $ p)", "\x1b[?2026$p")?
+    load(found)
+    let _ = tcsets(0)
+    let _ = keys("keys> ", "K")?
+    load(found)
+    let _ = tcsets(0)
+    let _ = win_row("after the keys")?
+    let _ = tcgets(0)
+    let st2 = state_text()
+    print("S: at the end: {st2}")
+    print("termwolf: done")
+    0
+}
+
+fn main() -> !int {
+    let args = env_args()
+    if args.len > 0 && args[0] == "ps2" {
+        let _ = tcgets(0)
+        let found = save()
+        let _ = keys("ps2> ", "P")?
+        load(found)
+        let _ = tcsets(0)
+        return 0
+    }
+    if args.len > 0 && args[0] == "screen" {
+        screen()
+        return 0
+    }
+    probe()
+}
