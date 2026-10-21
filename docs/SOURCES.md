@@ -846,3 +846,27 @@ none consulted.
 | black-box Linux 7.2.8-1-cachyos under QEMU 11.1.1 (kasumi's own kernel image `f4c00d5d…`, `notes/px52/vmjob.c` as pid 1: devtmpfs, then `/dev/fd` and the three `/dev/std*` made; the suite's own archives) | — | GPL-2.0 (a program we run) | run, never read: `fdtab` as root and as 1000:1000, recorded twice, the same bytes; the tree probe as root and as 1000:1000 for its `proc:` section | `tests/mpx5-jobs.d/linux/fds*.tty`; `notes/px55/` (the boot's limits and core pattern) |
 | rootless podman on kasumi (`px13-ubuntu`), CI's Docker | — | — | run: `fdtab` as a user (`tools/linux-tree --rdev --nsproc --sys`), the tree probe as root and a user, the port pickers' loop (`--network none`) | J0, J3; mpx3-tree T1; #89's loop |
 | GitHub Actions' `workflow_dispatch` inputs (documentation) | — | — | the author's own knowledge | ci.yml's `ways` (pax#91) |
+
+## px56: exec from the tree, and `#!` (pax#95, #96)
+
+No kernel's source was read or searched for, Linux's above all, nor any
+libc's, shell's, container runtime's, init system's or QEMU's (ruling
+#22). Every rule `execve` and `execveat` follow is a row Linux answered:
+`user/elf/execs.c` on real root's guest and in a container, as root and
+as 1000:1000 (`tests/mpx5-jobs`' execs image, J12, J3), and the typed
+pelt session (`user/console/execs.keys`, xsh, xsh-user). Where the
+prediction and the measurement parted (the name `execveat(fd, "",
+AT_EMPTY_PATH)` gives a program; an empty interpreter in a short file
+with no newline; a NUL where a `#!` argument starts), the measurement
+decided and the note says so. Permissively licensed kernels: none
+consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| man-pages `execve(2)` (its "Interpreter scripts" paragraph and NOTES: the interpreter, one optional argument with its inner blanks, the script's path appended, argv[0] not passed on, four recursions; ELOOP, ETXTBSY, ENOEXEC, EACCES), `execveat(2)` (AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, `/dev/fd/N/P`, the close-on-exec descriptor's ENOENT), `fexecve(3)`, `proc(5)` (`/proc/pid/exe`, `comm`), `prctl(2)` (PR_GET_NAME), `getauxval(3)` (AT_EXECFN), `path_resolution(7)`, `open(2)` and `truncate(2)` (ETXTBSY) | man-pages 6.x | GPL-compatible documentation | read | what each row should answer, the prediction |
+| POSIX.1-2024 XCU 2.9.1.4 (a script with no `#!` is the shell's), XSH `exec` | 2024 | the standard | read | ENOEXEC's place: the shell runs such a file itself |
+| uapi `linux/fcntl.h` (AT_FDCWD, AT_SYMLINK_NOFOLLOW 0x100, AT_EMPTY_PATH 0x1000), `asm-generic/errno-base.h` (ETXTBSY 26), the syscall table (execveat 322) | — | GPL-2.0 WITH Linux-syscall-note | the author's own knowledge, confirmed black-box | the numbers |
+| pelt `be1a75d`: `src/sh/exec.lu` (`is_script`, the `-125` fallback to `os_exe()`) | the org's own | the org's own | read | why the maintainer's `./Script/greet.sh` needs ENOEXEC; the session's rows |
+| black-box Linux 7.2.8-1-cachyos under QEMU 11.1.1 (kasumi's own kernel image `f4c00d5d…`, `notes/px52/vmjob.c` as pid 1, unchanged; the suite's own execs archive) | — | GPL-2.0 (a program we run) | run, never read: the probe as root and as 1000:1000 and the typed session as both, recorded twice, the same bytes | `tests/mpx5-jobs.d/linux/execs*.tty`, `xsh*.tty`; `notes/px56/kasumi-recordings-twice.out` |
+| rootless podman on kasumi (`px13-ubuntu`), CI's Docker | — | — | run: the user's probe and session (`tools/linux-tree --rdev --nsproc --owners`) | J0, J3 |
+| PAX trunk `241b322`'s loader (the archive's contiguous read) | the project's own | — | run: the speed of 780 fork–exec–wait rounds against the tree's | `notes/px56/kasumi-speed.txt`: the fast case not kept |
