@@ -9,8 +9,10 @@
 #
 #   census.py OUT.txt TRACE...
 #
-# A process is the guard when it execve'd with `--guard` (yew's terminal
-# guard sibling, ruling #93 R1 interim B); the editor otherwise.
+# A process's role is set by its execve: `yew --guard` is the guard (yew's
+# terminal guard sibling, ruling #93 R1 interim B), `yew` the editor,
+# anything else (the shell, `as`, `env`, `cat`) "other"; a child a
+# clone or fork makes has its parent's role until it execs.
 import collections
 import re
 import sys
@@ -140,7 +142,7 @@ def classify(data, classes, sgr):
 
 def main(argv):
     out = argv[1]
-    calls = {"editor": collections.Counter(), "guard": collections.Counter()}
+    calls = {"editor": collections.Counter(), "guard": collections.Counter(), "other": collections.Counter()}
     errs = collections.Counter()
     ioctls = collections.Counter()
     termios = collections.Counter()
@@ -152,16 +154,22 @@ def main(argv):
     text = 0
     procs = 0
     for path in argv[2:]:
-        guards = set()
+        role_of = {}
         writes = collections.defaultdict(bytearray)
         for line in open(path, errors="replace"):
             m = LINE.match(line)
             if not m:
                 continue
             pid, nr, name, rest = m.groups()
-            if name == "execve" and b"--guard" in unescape(rest):
-                guards.add(pid)
-            role = "guard" if pid in guards else "editor"
+            if name == "execve" and "= 0" in rest[-8:] or (name == "execve" and "<unfinished" in rest):
+                u = unescape(rest)
+                exe = u.split(b",")[0].strip(b'"')
+                role_of[pid] = "guard" if b"--guard" in u else ("editor" if exe.endswith(b"/yew") else "other")
+            role = role_of.setdefault(pid, "editor" if not role_of else "other")
+            if name in ("clone", "clone3", "fork", "vfork"):
+                cm = re.search(r"= (\d+)\s*$", rest)
+                if cm:
+                    role_of[cm.group(1)] = role
             calls[role]["%s %s" % (name, nr)] += 1
             em = re.search(r"= -1 (E[A-Z0-9]+)", rest)
             if em:
@@ -193,11 +201,12 @@ def main(argv):
                     writes[pid] += unescape(dm.group(2))
         procs += len(writes)
         for pid, data in writes.items():
-            text += classify(bytes(data), classes, sgr)
+            if role_of.get(pid, "editor") != "other":
+                text += classify(bytes(data), classes, sgr)
     names = collections.Counter()
     with open(out, "w") as f:
         f.write("traces: %d\n" % (len(argv) - 2))
-        for role in ("editor", "guard"):
+        for role in ("editor", "guard", "other"):
             f.write("\n%s calls: %d by name\n" % (role, len(calls[role])))
             for k, v in sorted(calls[role].items(), key=lambda kv: int(kv[0].split()[1])):
                 f.write("  %s %d\n" % (k, v))
@@ -217,7 +226,7 @@ def main(argv):
         f.write("\nsignals (role, signal, disposition, count)\n")
         for k, v in sorted(sigs.items()):
             f.write("  %s %d\n" % (k, v))
-        f.write("\nescape classes written to the terminal (%d bytes of text besides)\n" % text)
+        f.write("\nescape classes yew wrote to the terminal, the editor and the guard (%d bytes of text besides)\n" % text)
         for k, v in sorted(classes.items(), key=lambda kv: -kv[1]):
             f.write("  %s %d\n" % (k, v))
         f.write("\nSGR parameters\n")
