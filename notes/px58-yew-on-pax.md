@@ -234,3 +234,355 @@ faster) and the keys (VMIN 1); Y2, Y3, Y4, Y5 green (yew's VTIME polling
 spins between its deadlines and writes nothing more; weak). **B** (the
 cursor keys give nothing again): Y3 red (`typed '2e'`), every other row
 green.
+
+## 3a. The prediction, scored
+
+| # | predicted | measured | verdict |
+|---|---|---|---|
+| P1 | `tools/mkyew` builds yew `77c1083` the same bytes twice, 15–30 MB | **`c2daa653e398640e98c627c3b6cfb6bf454b60fa3d6444ed754767e0c8764b67`, 16,101,824 bytes**, two builds in `px13-ubuntu` the same bytes (167 s, 126 s; §A); every suite build since gave the same | right |
+| P2 | the calls by name; ioctls exactly TCGETS, TCSETSW, TIOCGWINSZ; the termios states; no `/dev/tty`; WINCH CONT TSTP CHLD TERM HUP QUIT caught, and SEGV and BUS on an alternate stack; the guard's seven ignored; CUP and SGR dominate, then EL … | **50 calls by name** (§B): every predicted family, and `fcntl(F_DUPFD_CLOEXEC)` (the runtime sets the mode and waits on a duplicate of fd 0), `prctl(PR_SET_NAME, "wolf-signal")`, `recvfrom` (the spawn's handshake), `linkat`, `chmod` (the save) that I did not name; **no `sigaltstack` and no SEGV or BUS handler** (wolf 0.2.33 installs none in yew); ioctls exactly the three; the termios states exactly as predicted (§C); no `/dev/tty`; the seven caught and the guard's seven ignored, and SIGPIPE ignored; CUP and SGR dominate, but **no EL, no ED**: yew's renderer writes spaces | right on the terminal, wrong on the stack guard and on EL |
+| P3 | -ENOSYS 273 and 334 only, no `refused:`; every termios bit round-trips; the initial c_iflag divergent; the raw-mode behaviours served; TIOCGWINSZ 0 by 0 after COM1 input; `/dev/tty`; the screen draws SGR 0 1 7 30–37 39 40–47 49 90–97 and drops the rest; the queries unanswered on both; the cursor keys dropped | -ENOSYS 273 and 334 only, nothing refused, in every boot (Y5); every bit and every c_cc round-trips on PAX, and **Linux's pty refuses four cflag bits** (CS6 CS7 CREAD PARENB: a divergence I did not foresee); **the initial c_iflag is the same** (0x100 on both: the harness clears the pty's IXON, as PAX starts); yew's three modes leave the same termios on both; the timed reads in bounds on both; OCRNL and OLCUC dropped on PAX (Linux converts); the window as predicted (PAX's screen grid before any key, root's rows); `/dev/tty` served; the screen exactly as predicted, SGR 22 and 27 among the dropped (§D) | right but the cflag bits |
+| P4 | the keyboard's cursor and editing keys, in `kernel/console/`, checked against a Linux VT | measured on kasumi's kernel's VT first (§E), then served (`c8ec73d`): Y3 red at the first boot, green after | right |
+| P5 | yew draws; the session byte-identical to the container's at 24 by 80; the file alpha beta gamma delta; weak: the pauses | **yew draws, edits and saves on PAX**; byte-identical (3,732 bytes) once both sides' pauses outlast yew's 4 s info message: the first boot parted at byte 3,279 because PAX's 6 s pause let "wrote notes.txt" expire before `:` (an extra statusline frame) where Linux's 1.5 s did not, a timing of the keys and not of PAX (§F); `o` on the last line opened a line after yew's phantom last line, so the keys use `O` | right but the pause (the weak point, in a way I did not foresee) |
+| P6 | the suite's rows; plants A and B red at their rows | §H | (scored there) |
+
+## A. The static yew (item 1)
+
+- `user/yew.pin` (`7bcfaa2`): yew's repository and `77c1083` (trunk;
+  yw04's PR #19 open, so not its head). `tools/mkyew` (`45fac96`):
+  `tools/mkpelt`'s shape with yew's names, the tree from `PAX_YEW_REPO`
+  when set (yew is public; CI fetches it as pelt), the archive by the
+  digest yew's `wolf-toolchain.toml` names and wolf-std at its commit,
+  `wolf build --release --no-cache --deny-warnings src/yew.lu` through a
+  `cc` that adds `-static` (yew's own `tools/build --static` exactly),
+  ET_EXEC and no PT_INTERP checked, `yew --version` run (`yew
+  1.0.0-dev`, `modules: lsp ai fuss plugins`).
+- **`c2daa653e398640e98c627c3b6cfb6bf454b60fa3d6444ed754767e0c8764b67`,
+  16,101,824 bytes**, built twice in `localhost/px13-ubuntu`
+  (`ad8964505189`, Ubuntu 24.04, libc6-dev 2.39), the same bytes
+  (`notes/px58/kasumi-bins-yew-twice.out`), and the same in each of the
+  suite's builds since (`notes/px58/kasumi-t2/programs.txt`).
+- termwolf (`user/termwolf`, `f2bcb31`): wolf 0.2.33 by digest, std
+  `cceda63`, its builder `user/termwolf/build` (`tools/mksigwolf`'s
+  shape, the directory a package so `asm: ["tio.S"]` carries the raw
+  terminal ioctls); 14,355,784 bytes at the head (`960e7e22…`).
+
+## B. The Linux census (item 2): the calls
+
+Two workloads, both the static yew of §A, under `strace -f -n -v -xx`
+in `px13-ubuntu` (strace 6.8), read by `notes/px58/census.py` (a
+process's role by its execve: `yew --guard` the guard, `yew` the
+editor, anything else other):
+
+1. **yew's goldens** (`notes/px58/census-goldens.sh`): the oracle (C
+   yew at `9ace98c2`, `tools/oracle --cc gcc --build-only`) and yew's
+   `tools/goldens` with the static yew as a wrapper that `exec`s `strace
+   -D -f` (so the PTY runner's pid and signals stay yew's): `version`,
+   `help` and campaign 03's 62 editor cases by name, **64 of 64 green
+   under strace** (`notes/px58/linux-census-goldens-verdicts.txt`), 102
+   traces (`linux-census-goldens.txt`). The runner's `modern` profile
+   (TERM xterm-256color, a terminal that answers the probe), 24 by 80
+   (two cases 12 by 40).
+2. **the typed session** (`notes/px58/census-session.sh`): `tests/
+   mpx5-yew`'s keys typed by `tools/linux-tty` into the suite's own
+   binaries on a pty as `pax` with PAX's environment (TERM=linux, an
+   unsized pty), the whole session traced (`linux-census-session.txt`;
+   the file saved alpha, beta, gamma, delta).
+
+**The calls, 50 by name** (the union, editor and guard; counts over the
+goldens, the session's within them):
+
+| | calls |
+|---|---|
+| files | `read` 0, `write` 1, `close` 3, `fstat` 5, `openat` 257, `statx` 332, `getdents64` 217, `getcwd` 79, `mkdir` 83, `rename` 82, `unlink` 87, `linkat` 265, `chmod` 90, `fchown` 93, `readlink` 89, `readlinkat` 267 (`/proc/self/exe`), `fcntl` 72 (F_DUPFD_CLOEXEC of fd 0 and 1, F_GETFL/F_SETFL), `dup2` 33, `pipe2` 293 |
+| terminal | `ioctl` 16 (§C), `poll` 7 |
+| processes | `clone` 56 (the guard's fork), `clone3` 435 (the runtime's signal thread), `execve` 59, `wait4` 61, `setpgid` 109 (the guard's own group: EACCES from the parent once the child has exec'd, as POSIX says), `socketpair` 53 and `recvfrom` 45 (the spawn's handshake), `exit_group` 231, `getpid` 39, `gettid` 186, `tgkill` 234 (a stop raised at itself) |
+| memory, start-up | `brk` 12, `mmap` 9, `mprotect` 10, `munmap` 11, `arch_prctl` 158, `set_tid_address` 218, `set_robust_list` 273, `rseq` 334, `prlimit64` 302, `getrandom` 318, `prctl` 157 (PR_SET_NAME `wolf-signal`), `futex` 202, `geteuid` 107, `getegid` 108 |
+| signals | `rt_sigaction` 13, `rt_sigprocmask` 14, `rt_sigreturn` 15, `restart_syscall` 219 (strace's name for a wait resumed after a stop: the suspend goldens only) |
+
+Failures, each by design: `mkdir` EEXIST (the state directories),
+`statx`/`openat` ENOENT (the runtime and config lookups), `read` EAGAIN
+(fd 0 non-blocking in the drain), `setpgid` EACCES (above).
+
+**Signals.** The editor catches WINCH, CONT, TSTP, CHLD, TERM, HUP,
+QUIT (yew's listen set, through wolf's signal thread) and ignores PIPE
+(the runtime); **no SEGV, BUS or alternate stack** at 0.2.33. The guard
+ignores HUP, INT, QUIT, TERM, TSTP, TTIN, TTOU and catches nothing.
+**`/dev/tty`**: never opened by yew (pelt opens it in the session).
+
+## C. The census: the terminal
+
+**ioctls, exactly three** (yew's processes): TCGETS (5,124 in the
+goldens), TCSETSW (1,508: wolf's `os_term_set_mode` is TCSADRAIN),
+TIOCGWINSZ (108, on fd 1). The guard: TCGETS and TCSETSW (its restore
+after a death). pelt adds TIOCGPGRP and TIOCSPGRP.
+
+**The termios states yew sets** (strace's own decoding):
+
+| shape | c_iflag | c_oflag | c_cflag | c_lflag | VMIN | VTIME | count (goldens) |
+|---|---|---|---|---|---|---|---|
+| raw (`rawios`) | ICRNL | OPOST\|ONLCR | B38400\|CS8\|CREAD | ECHOE\|ECHOK\|ECHOCTL\|ECHOKE | 1 | 0 | 612 |
+| drain (`drainios`) | ICRNL | OPOST\|ONLCR | as found | as raw | 0 | 0 | 532 |
+| poll (`pollios`) | ICRNL | OPOST\|ONLCR | as found | as raw | 0 | 1 | 266 |
+| restored (the mode as found) | ICRNL\|IXON | OPOST\|ONLCR | as found | ISIG\|ICANON\|ECHO\|ECHOE\|ECHOK\|IEXTEN\|ECHOCTL\|ECHOKE | 1 | 0 | 98 (+4 by the guard) |
+
+Bit by bit, the raw mode clears ICANON, ECHO, ISIG, IEXTEN and IXON and
+keeps ICRNL, OPOST and ONLCR (G34: wolf 0.2.33's mode int cannot reach
+them), every c_cc as found. **The window**: TIOCGWINSZ on fd 1, 24 by 80
+from the runner and 0 by 0 from an unsized pty, where yew lays out 24
+by 80 (`src/edit/driver.lu:213`); SIGWINCH caught.
+
+**The escape classes yew wrote**, by name (ECMA-48's and the DEC
+private modes', console_codes(4)), the goldens' (`modern`) and the
+session's (TERM=linux):
+
+| class | goldens | session |
+|---|---|---|
+| SGR | 6,178 | 73 |
+| cursor position (CUP, `CSI r;c H`) | 3,522 | 63 |
+| cursor visibility (`?25l` / `?25h`) | 390 / 492 | 14 / 15 |
+| synchronized output (`?2026h` / `?2026l`) | 290 / 392 | 0 / 1 (restore) |
+| cursor shape (DECSCUSR 2, 6, 0) | 214, 104, 102 | 4, 3, 1 |
+| bracketed paste, mouse 1002, mouse 1006, focus 1004 (`h` / `l`) | 202 / 196 each | 2 / 2 each |
+| alternate screen (`?1049h` / `?1049l`) | 102 / 196 | 1 / 2 |
+| DECSC / DECRC (`ESC 7` / `ESC 8`) | 102 / 94 | 1 / 1 |
+| kitty keyboard push `CSI >21u` / pop `CSI <u` | 102 / 196 | 0 / 2 |
+| queries: kitty `CSI ?u`, DECRQM `?2026$p`, DA1 `CSI c` | 100 each | 1 each |
+| cursor forward (CUF) | 86 | 1 |
+| LF, CR | 69, 6 | 0, 0 |
+
+No erase (EL, ED, ECH), no scroll region, no OSC in either (OSC 52 is
+the clipboard's, not reached). SGR parameters: the goldens' truecolor
+`38;2` (5,996) and `48;2` (1,076), `0`, `1`, `22`, `7`, `27`, `38;5`;
+the session's 16-colour tier `37 90 0 40 1 22 30 41 47 43 97 46 44`.
+
+**What 0.2.34 adds once yw05 bumps yew's pin** (`[os.editor.calls.note]`,
+listed as coming, not measured): `os_term_restore_at_exit` (a duplicate
+of the terminal at 3 or above, close-on-exec: `fcntl(F_DUPFD_CLOEXEC)`;
+at exit `tcgetattr`, `pthread_sigmask`, `tcsetattr` TCSADRAIN, `write`:
+TCGETS, TCSETSW, `rt_sigprocmask`, `write`, all served today) in place
+of the guard (the guard's fork, exec, pipe and `/dev/fd/3` go);
+`os_signal_wait_fds` (`poll(2)` on duplicates and one wake pipe, with a
+deadline: `poll`, `pipe2`, served) in place of VTIME polling, so the
+poll and drain TCSETSW shapes go; `fs_sync` (`fsync`, 74) and
+`fs_sync_dir` (an `O_DIRECTORY` `openat` and `fsync`), both in PAX's
+table; `fs_realpath` (a walk of `readlink`/`newfstatat` or glibc's
+`realpath`); `os_clock_ns` (the vDSO's clock, or `clock_gettime` 228,
+served); the mode's bits 5–7 (`RAW_CR`, `RAW_OUTPUT`, `STRIP8`: ICRNL
+and OPOST cleared, ISTRIP set, which PAX's console stores and acts on
+for ICRNL and OPOST, and stores for ISTRIP). px57, beside this lane,
+measures these calls on PAX itself (its `user/edwolf` probe,
+`tests/mpx5-jobs`' `eds` image); what yew does with them is yw05's.
+
+## D. The gap table (item 3)
+
+termwolf (`user/termwolf`) on PAX (`kmain_console`, the probe image) as
+root and as `pax`, against the same binary on a pty in a container
+(`tools/linux-tree`), and the halted screen read cell by cell
+(`tests/mpx5-yew`'s Y2). served = byte-identical to Linux; dropped = an
+escape the screen ignores, a bit kept and not acted on; divergent =
+served with another answer; refused = an errno.
+
+| row | Linux (pty) | PAX | verdict |
+|---|---|---|---|
+| isatty 0 1 2; the foreground group; `/dev/tty` opened, a terminal, its mode fd 0's | true; true; true | the same | served |
+| the termios as found | iflag 0x100 oflag 0x5 cflag 0xbf lflag 0x8a3b, c_cc `03 1c 7f 15 04 00 01 00 11 13 1a 00 12 0f 17 16 00 00 00` | the same | served |
+| every iflag, oflag and lflag bit flipped alone, TCSETS, TCGETS | kept | kept | served |
+| cflag CS6, CS7, CREAD, PARENB | **not kept** (a pty keeps CS8, CREAD, no parity) | kept | divergent (not yew's) |
+| c_cc, all 19 set and read back | kept | kept | served |
+| wolf's mode as found; yew's raw, poll, drain modes and the termios each leaves; the mode back | 0x117; the four rows of §C | the same | served |
+| VMIN 0 VTIME 0 / VTIME 1 / VTIME 5, nothing typed | 0 bytes at once / after a tenth / after half a second | the same, in bounds | served |
+| OPOST\|ONLCR, OPOST cleared, ONLCR cleared (`ab LF cd CR`) | `ab CR LF cd CR` / `ab LF cd CR` / `ab LF cd CR` | the same | served |
+| ONLRET set | `ab CR LF cd CR` | the same | served |
+| OCRNL set | `ab CR LF cd LF` | `ab CR LF cd CR` | dropped (not yew's) |
+| OLCUC set | `AB CR LF CD CR` | `ab CR LF cd CR` | dropped (not yew's) |
+| TIOCGWINSZ before any key | 0 by 0 | **50 by 160** (the screen's grid, px19) | divergent by design (pax#68's model: the device last typed at) |
+| TIOCGWINSZ after COM1 input; `os_term_size` | 0 by 0 | 0 by 0 | served |
+| TIOCSWINSZ 30 by 100, read back; SIGWINCH; again, none; back, SIGWINCH | 30 by 100, true, false, true | the same (back to 50 by 160 as root) | served |
+| DA1, CSI 6n, kitty `CSI ?u`, DECRQM 2026 | no answer in half a second | the same | served (a Linux VT answers DA1 `ESC [ ? 6 c` and 6n `ESC [ 3 ; 1 R`, §E: **no answer on PAX's screen**, px59's) |
+| keys typed over COM1 in yew's raw mode (`a b ^C ^Z ^\ DEL ESC [ A .`) | `61 62 03 1a 1c 7f 1b 5b 41 2e` | the same | served |
+| the keyboard's arrows, Home, End, PgUp, PgDn, Insert, Delete | a VT: `ESC [ A`…`D`, `ESC [ 1 ~`…`6 ~` (§E) | nothing at trunk; **the VT's sequences** from `c8ec73d` | **closed here** |
+| the escape classes' bytes on the serial line (`termwolf screen`) | 890 bytes | the same 890 bytes | served |
+| on the screen: text, CR, LF, SGR 0 1 7 30–37 39 40–47 49 90–97 | (console_codes(4)) | drawn | served |
+| on the screen: CUP, HVP, CUU, CUD, CUF, CUB, CHA, VPA, EL 0 1 2, ECH, ICH, DCH, IL, DL, DECSTBM, DECSC, DECRC, the alternate screen, DECTCEM, DECSCUSR, bracketed paste, mouse 1002/1006, focus, synchronized output, kitty push/pop | (console_codes(4); paste, mouse 1006, focus, sync and kitty are no VT's either) | `<>`: read and dropped | **dropped (px59)** |
+| on the screen: SGR 2, 3, 4, 22, 27, 101, `38;5` | dim, italic, underline, bold off, inverse off, bright background, 256-colour | drawn plain, or bold and inverse left on (22, 27) | **dropped (px59)** |
+| on the screen: OSC 52 | a string, not drawn | `52;c;eA==` drawn as text (ESC `]` two bytes dropped) | **divergent (px59)** |
+| system calls: yew's 50 | — | 47 in PAX's table; `set_robust_list` 273 and `rseq` 334 -ENOSYS (glibc copes); `restart_syscall` 219 is the kernel's own resume, PAX restarts by rewinding (px48) | served |
+
+What yew's session needs and PAX serves: every call, every ioctl, every
+termios state, the timed reads, the output processing, the window size
+at 0 by 0, the guard's process group and `/dev/fd/3`, the save (temp,
+`linkat`, `rename`, `chmod`, `fchown`). What a person at PAX's screen
+and keyboard still lacks (px59): the screen's cursor addressing and
+erase, the alternate screen, cursor visibility and shape, SGR 22 and 27
+and the bright backgrounds, DA1 and the cursor report, the modifiers on
+the cursor keys, Alt, the function keys.
+
+## E. The keyboard, measured, and the gap closed (item 4)
+
+A Linux virtual terminal's answer, black-box (`notes/px58/vtkeys.c`,
+`vt-run.sh`): kasumi's own kernel image (7.2.8-1-cachyos, `f4c00d5d…`,
+its VT, VGA console, i8042 and atkbd built in, as its
+`/proc/config.gz` says) under QEMU 11.1.1 (TCG, a VGA display), a probe
+as pid 1 that opens `/dev/tty1`, sets yew's raw mode there, asks the
+window size and the four queries, then reads what the keyboard gives
+while the host sends `up down right left home end pgup pgdn insert
+delete dot` through QEMU's monitor; twice, the same rows
+(`notes/px58/kasumi-vt-run.out`):
+
+```
+VT S: iflag 0x4500 oflag 0x5 cflag 0x4bf lflag 0x8a3b
+VT W: TIOCGWINSZ 0, 25 rows 80 columns
+VT Q: DA1 (CSI c): 1b 5b 3f 36 63
+VT Q: the cursor's position (CSI 6n): 1b 5b 33 3b 31 52
+VT Q: kitty's keyboard (CSI ? u): no answer in half a second
+VT Q: DECRQM 2026 (CSI ? 2026 $ p): no answer in half a second
+VT P: typed: 1b 5b 41 1b 5b 42 1b 5b 43 1b 5b 44 1b 5b 31 7e 1b 5b 34 7e 1b 5b 35 7e 1b 5b 36 7e 1b 5b 32 7e 1b 5b 33 7e 2e
+```
+
+terminfo's `linux` entry agrees (`kcuu1=\E[A`, `khome=\E[1~`,
+`kend=\E[4~`, `kich1=\E[2~`, `kdch1=\E[3~`, `kpp=\E[5~`, `knp=\E[6~`).
+
+**Closed here** (`c8ec73d`, `kernel/console/`, `cursor_key`): an
+E0-prefixed set-1 make code of the cursor and editing block puts the
+VT's sequence in the input through the line discipline as if typed
+(so raw mode reads it and canonical mode echoes `^[[A` with ECHOCTL);
+any other E0 key still gives nothing. At trunk the probe's `ps2` run
+read `2e` alone (`notes/px58/first-boot/`, Y3 red); after, the VT's
+bytes exactly (Y3 green, `kasumi-t2/`). yew's L mode moves by these keys
+(`runtime/init.fl`: `<up>`, `<down>`, `<home>`, `<end>`, `<pgup>`,
+`<pgdn>`), so a person at PAX's keyboard can now move in yew. Under a
+day; the other gaps are px59's (§D).
+
+## F. The session (item 5)
+
+`tests/mpx5-yew`'s session image: `/bin/as 1000 1000 /bin/env
+HOME=/home/pax /bin/sh -i -m` (pelt `90d7c64`), `/home/pax/notes.txt`
+(alpha, beta, gamma; 1000:1000), typed over COM1
+(`user/console/yew.keys`): `cd /home/pax`, `yew notes.txt`, then each
+key a `^~` step 6 s apart on PAX (1.5 s on Linux): `G`, `O`, `d e l t
+a`, ESC, `:`, `w` Enter, three empty steps, `:`, `q` Enter; then `cat
+notes.txt` and `exit`. The window is 0 by 0 on both (COM1; an unsized
+pty), so yew lays out 24 by 80 on both.
+
+**yew draws its first frame on PAX**, moves, opens a line, inserts,
+saves through its atomic save (temp file, `linkat`, `rename`, `chmod`,
+`fchown`), quits, and pelt's `cat` shows `alpha beta gamma delta`. The
+raw serial transcript (from `run 1:` to the kernel's `frames free`
+line, every kernel `user:` line taken out, CR LF kept) is
+**byte-identical to the container's: 3,732 bytes, sha256
+`3ad835bdef3c…`** (`notes/px58/kasumi-t2/pax-session.raw`,
+`linux-session.tty`). The kernel's own lines say yew pid 3 and its guard
+pid 5 ran, the signal thread started in each, -ENOSYS 273 and 334 and
+nothing refused.
+
+**Every difference named against §D, at the first boot**
+(`notes/px58/first-boot/`): one, at byte 3,279: an extra statusline
+frame on PAX between `:w` and `:q`. yew's info message ("wrote
+notes.txt, 5 lines") lasts 4 s (`MESSAGE_INFO_MS`, yew
+`src/edit/message.lu:17`); PAX's 6 s pause outlived it, Linux's 1.5 s did
+not, so PAX's yew repainted the statusline when the message expired and
+Linux's did not before `:` replaced it. A timing of the keys, not a row
+of §D: the keys now wait three empty steps after `:w` on both sides
+(4.5 s more on Linux, 18 s more on PAX), past the expiry on both, and
+the bytes match. `G` then `o` (the first text) opened a line after yew's
+empty last line (the line after the final newline), saving `gamma`,
+an empty line, `delta` with no final newline, the same on both sides;
+`O` opens it above, which is the shape the contract asks.
+
+**On the screen** (not the record): the framebuffer shows every frame's
+text appended, CUP and the alternate screen dropped
+(`build/mpx5-yew-*-session.ppm` in CI's artifact). The serial transcript
+is what is compared, as the contract says.
+
+The whole session boot under TCG on kasumi: 96 s (the probe image's:
+17 s); yew's start under TCG fits inside the 6 s pause.
+
+## G. The rows (item 6)
+
+`tests/mpx5-yew` (`dbb6f03`, `45364a3`), its own suite (mpx5-lope's
+shape), two images on `kmain_console`:
+
+| row | what |
+|---|---|
+| Y0 | the build: kmain_console; yew, termwolf, pelt, `env`, `cat`, `as` static; both images; the container's runs |
+| Y1 | the probe as root and as `pax`: every record the container's but the gap table's named rows (cflag's four, OCRNL, OLCUC; as root the window before any key and set back), each PAX's recorded answer; the screen run's 890 bytes the container's |
+| Y2 | the halted screen (QEMU's screendump against `font/spleen-8x16.bdf`): the drawn classes as ECMA-48 says, every other `<>`, SGR 22 and 27 leaving bold and inverse on, OSC 52's text drawn |
+| Y3 | the keyboard's cursor keys, sent through a second monitor: the VT's sequences |
+| Y4 | yew's session byte-identical to the container's; `cat notes.txt` alpha beta gamma delta on both |
+| Y5 | per boot: -ENOSYS 273 and 334 only, nothing refused, init's end, halted |
+
+Wired as every suite (`159e1d3` the job and the tier's needs;
+`9daafd7` `tools/ci-tiers.map`: yew's pin, builder, probe and keys
+mpx5-yew's alone, and mpx5-yew in @user, @console, @asuser; `65fd73f`
+`tests/ci-plan`, 195 PASS). No ISO rebuilt (px57's).
+
+## H. The plants (P6)
+
+Each a branch never merged, one commit on `45364a3`, dispatched `-f
+tier=pr -f suites=mpx5-yew` (a `tier partial` run of the one suite on
+native BIOS):
+
+| plant | the break | run, job | red at | green at | verdict |
+|---|---|---|---|---|---|
+| A, `px58-plant-a` `c15467d` | a VMIN 0 read answers at once, VTIME ignored (`kernel/console` `read`) | **39689580461**, mpx5-yew 119532339241 | Y1 root and `pax`: `T: VMIN 0 VTIME 1 …: 0 bytes, early (0 ms)` where Linux's is `in bounds` | Y0, Y1 screen, Y2, Y3, Y4 (byte-identical: yew's polling spins between deadlines and writes nothing more), Y5 | as predicted |
+| B, `px58-plant-b` `9f0bf41` | the cursor keys give nothing again (`cursor_key`'s answer times 0) | **39689583322**, mpx5-yew 119532308640 | Y3: `typed '2e'` | every other row | as predicted |
+
+Extracts: `notes/px58/ci-39689580461-plant-a.txt`,
+`ci-39689583322-plant-b.txt`. Both runs' builds on CI's runner gave the
+same programs as `px13-ubuntu` (yew `c2daa653…`, termwolf `960e7e22…`,
+pelt `5448cb27…`) and the same session digest (`3ad835bdef3c…`). The
+first boot's Y3 red (`notes/px58/first-boot/`) is the same gap seen
+before the fix.
+
+## I. Issues to file (none filed)
+
+**pax** (each for px59, "yew on PAX: the console", unless said):
+
+1. The framebuffer console draws none of the cursor addressing yew
+   writes (CUP 3,522 times in the goldens, 63 in a short session), nor
+   cursor visibility (`?25l/h`), cursor shape (DECSCUSR), DECSC/DECRC
+   or the alternate screen (`?1049h/l`): yew's frames are a smear on
+   PAX's screen while COM1 carries every byte (Y2's rows; §D).
+   `kernel/screen` and `tools/screen-ref` together.
+2. SGR 22 (normal intensity) and 27 (inverse off) are dropped, so bold
+   and inverse stay on after them; yew writes 22 in every frame (8 times
+   in the session); 100–107 (bright backgrounds) and `38;5`/`48;5` drawn
+   plain (Y2's SGR22, SGR27, SGR101, SGR38;5 rows).
+3. PAX's console answers no DA1 (`CSI c`) and no cursor-position report
+   (`CSI 6n`) where a Linux VT answers `ESC [ ? 6 c` and `ESC [ r ; c R`
+   (§E); yew asks DA1 at every start, pelt asks 6n at every prompt.
+4. An OSC string's text is drawn on the screen (`ESC ]` is two bytes
+   dropped, then `52;c;eA==` drawn): yew's OSC 52 clipboard writes would
+   land on the screen (the `OSC52` row).
+5. The keyboard gives nothing for the function keys and nothing more
+   for a modifier on a cursor key; Alt is not an ESC prefix (yew binds
+   `A-…` throughout `runtime/init.fl`).
+6. OCRNL and OLCUC are kept and not acted on (Linux's pty converts),
+   and cflag's CS6, CS7, CREAD and PARENB are kept where Linux's pty
+   forces CS8 and CREAD (§D): small, not yew's; a console lane's.
+7. Not measured here: yew stopped and continued (`C-z`, SIGTSTP then
+   SIGCONT: its suspend restores, stops and re-enters raw), a resize while
+   yew runs, and yew from the keyboard rather than COM1 (the screen's 50
+   by 160): rows for px59.
+
+**yew** (listed for the maintainer, none filed): `G` lands on the empty
+line after a final newline, and `o` there saves `gamma`, an empty line
+and `delta` with no final newline (the first session's keys, both
+sides: notes/px58/first-boot/linux-session.tty); whether that is C
+yew's own behaviour was not checked against the oracle here.
+
+## J. What was not done
+
+- No ISO rebuilt (px57's); the playground takes yew in a later lane.
+- Only native BIOS ran in CI (the merge gate); the four legs ran on
+  kasumi (§K).
+
+## K. The four legs on kasumi
+
+`tests/mpx5-yew` at `c8ec73d`'s suite (the kernel fix in), native and
+release × BIOS and UEFI under `taskset -c 0-3`, TCG
+(`notes/px58/kasumi-t3/t3.boot.log`): **37 PASS, 0 FAIL**, every leg's
+session the same 3,732 bytes (`3ad835bdef3c…`), the probe image's boots
+15.5–17.2 s and the session's 94.6–96.1 s. The UEFI screen is the BIOS
+one's (50 by 160: Y1's named window rows hold on every leg).
