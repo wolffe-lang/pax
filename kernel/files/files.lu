@@ -187,7 +187,6 @@ use console
 use cred
 use event
 use frames
-use initramfs
 use procfs
 use sched
 use sound
@@ -214,7 +213,7 @@ const A_CWD: u64 = 12 // px17: the working directory's node; 0 the root
 // process may each wait in a write.
 const A_UMASK: u64 = 254 // px27: the file mode creation mask, with bit 16 set once `umask` has set it (0: 022)
 const A_CONFL: u64 = 146 // px24: the status flags (O_NONBLOCK, O_APPEND) of the console as descriptors 0-2 name it from the start: one open file on Linux, so one word here
-const A_EXE: u64 = 255 // px26: the initramfs entry the program was loaded from, + 1 (0: none); words 14, 15, 144 and 145 are kernel/socket's
+const A_EXE: u64 = 255 // px26: the program's file; px56: its open file (`exec_open`) + 1 (0: none); words 14, 15, 144 and 145 are kernel/socket's
 const A_FD: u64 = 512 // the first descriptor's word (px24: FDS * FD_WORDS words from here; px34: 4096 of them, kernel/vm's ranges after)
 const FD_WORDS: u64 = 4
 // A descriptor's words: kind, node, open file + 1 (0 none), flags.
@@ -348,6 +347,7 @@ const ELOOP: u64 = 40
 const ENOTEMPTY: u64 = 39
 const EOPNOTSUPP: u64 = 95
 const ENOMEM: u64 = 12 // px34
+const ETXTBSY: u64 = 26 // px56 (pax#95): a running program's file opened for writing, or a file open for writing run
 const EMSGSIZE: u64 = 90 // px34
 const EPROTOTYPE: u64 = 91
 const ENOPROTOOPT: u64 = 92
@@ -377,6 +377,10 @@ const O_SYNC_BIT: u64 = 0x100000 // O_SYNC is this and O_DSYNC
 const O_NOATIME: u64 = 0x40000
 const O_PATH: u64 = 0x200000
 const O_TMPFILE_BIT: u64 = 0x400000 // O_TMPFILE is this and O_DIRECTORY
+// px56: an open file that is a process's program (`exec_open`: never a
+// descriptor's; no open flag has the bit): its last close releases the
+// inode's running count (tree.run_hold).
+const O_EXE: u64 = 0x10000000000
 const AT_REMOVEDIR: u64 = 0x200 // px27: unlinkat
 const AT_EACCESS: u64 = 0x200 // px27: faccessat2
 const AT_FDCWD: u64 = 0xffffff9c // -100 as the 32-bit int the caller passes (kernel/user masks)
@@ -440,7 +444,7 @@ const R_LINK: u64 = 29
 const R_META: u64 = 28
 const R_RENFLAG: u64 = 27
 const R_ATFLAG: u64 = 26
-const R_EXEC: u64 = 25
+// 25 was px27's R_EXEC (a program written since boot): px56 loads every file through the tree
 const R_FIXED: u64 = 24 // px36
 // 23 was px36's R_OWNER (an owner that is not root): px42 keeps any id
 
@@ -484,9 +488,6 @@ pub fn why(r: u64) -> str {
     }
     if r == R_ATFLAG {
         return "an unlinkat flag that is not AT_REMOVEDIR"
-    }
-    if r == R_EXEC {
-        return "a program written since boot (the loader reads the archive's own bytes)"
     }
     if r == R_DIRECT {
         return "a packet-mode pipe (O_DIRECT)"
@@ -660,6 +661,7 @@ fn of_drop(o: u64) {
     let k = ofw(i, O_KIND)
     let n = ofw(i, O_NODE)
     let acc = ofw(i, O_FLAGS) & O_ACCMODE
+    let exe = ofw(i, O_FLAGS) & O_EXE != 0
     // px24: a registration lasts as long as its open file (epoll(7)).
     if event.forget(o) != 0 {
         sched.wake_pipes()
@@ -670,6 +672,9 @@ fn of_drop(o: u64) {
     put_ofw(i, O_POS, 0)
     put_ofw(i, O_FLAGS, 0)
     pipe_ends(k, n, acc, false)
+    if exe && ty(n) == T_INO {
+        tree.run_release(rf(n)) // px56: one program fewer runs from it
+    }
     if ty(n) == T_INO {
         tree.release(rf(n)) // px27: the last close of a file with no name gives its frames back
     }
@@ -981,6 +986,7 @@ pub fn inherit(a: u64) {
     if ty(c) == T_INO {
         tree.hold(rf(c)) // px27: the child works in the directory too
     }
+    of_ref(get(a, A_EXE)) // px56: and runs the same program
 }
 
 /// px17: a process's end closes every descriptor it holds, so a pipe's
@@ -998,6 +1004,9 @@ pub fn close_all(a: u64) {
     if ty(c) == T_INO {
         tree.release(rf(c)) // px27: and leaves its working directory
     }
+    let x = get(a, A_EXE)
+    put(a, A_EXE, 0)
+    of_drop(x) // px56: and its program's file
 }
 
 /// px17: `fcntl(fd, cmd, arg)`: F_DUPFD (0), F_DUPFD_CLOEXEC (1030),
@@ -3899,6 +3908,9 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
     if !made && named && !may(a, cred.FS, n, want) {
         return neg(EACCES)
     }
+    if k == K_FILE && acc != O_RDONLY && running(n) {
+        return neg(ETXTBSY) // px56 (pax#95): a running program's file, after the class rule (measured)
+    }
     if k == K_CONSOLE && ty(n) == T_CONSOLE && rf(n) == TTY && !sched.self_tty() {
         return neg(ENXIO) // px48: /dev/tty is the caller's controlling terminal, and it has none (measured)
     }
@@ -4412,6 +4424,9 @@ pub fn truncate(a: u64, pml4: u64, va: u64, len: u64) -> u64 {
     if !may(a, cred.FS, n, MAY_W) {
         return neg(EACCES) // px43: the class's write bit
     }
+    if running(n) {
+        return neg(ETXTBSY) // px56 (pax#95): a running program's file (measured)
+    }
     let r = tree.truncate(rf(n), len)
     if r == 0 {
         wrote(a, rf(n)) // px44
@@ -4468,36 +4483,205 @@ pub fn ioctl(a: u64, pml4: u64, fd: u64, req: u64, arg: u64) -> u64 {
     neg(ENOTTY)
 }
 
-/// px14: what `execve(path)` would run: (the initramfs entry, 0, the
-/// path's length as copied into pax_kbuf[0..]) or (0, -errno, 0). A
-/// regular file with an execute bit; a directory, a device or a file
-/// with no execute bit is -EACCES (execve(2)); a missing one -ENOENT.
-/// px43: the execute bit of the class the file-system ids choose (root:
-/// any of the three); set-ID bits are not honoured (ruling #75 R5).
-/// px27: the file must still be the archive's own bytes, whole (the
-/// loader reads one contiguous image): a program written or copied
-/// since boot is refused by name, -EACCES.
-pub fn exec_lookup(a: u64, pml4: u64, va: u64) -> (u64, u64, u64) {
-    let n = resolve(a, pml4, AT_FDCWD, va, false, F_YES)
+/// px56 (pax#95): whether some open file has node `n` (a file of the
+/// tree) open for writing: `execve` of it is then -ETXTBSY (`execve(2)`,
+/// measured on Linux 7.2.8).
+fn has_writer(n: u64) -> bool {
+    var i: u64 = 0
+    while i < OFILES {
+        if ofw(i, O_REFS) != 0 && ofw(i, O_KIND) == K_FILE && ofw(i, O_NODE) == n && ofw(i, O_FLAGS) & O_ACCMODE != O_RDONLY {
+            return true
+        }
+        i += 1
+    }
+    false
+}
+
+/// px56 (pax#95): whether node `n` is a file a running program was
+/// loaded from (`tree.running`): opening it for writing, or `truncate`
+/// of it, is then -ETXTBSY (`open(2)`, `truncate(2)`, measured).
+fn running(n: u64) -> bool {
+    ty(n) == T_INO && tree.running(rf(n)) != 0
+}
+
+/// px56 (pax#95, #96): what `execve` (and `execveat`) runs: the file
+/// at the user path `va` from `dirfd` (`flags`: AT_EMPTY_PATH, the
+/// descriptor itself for an empty path; AT_SYMLINK_NOFOLLOW, a last
+/// link refused), or (`va` 0) at the kernel path pax_kbuf[0..rl), a
+/// `#!` line's interpreter, from the working directory. The walk's
+/// answers first (-ENOENT, -ENOTDIR, -ENAMETOOLONG, -ELOOP, and -EACCES
+/// for a directory that may not be searched: px43); then -ELOOP for a
+/// last link not followed; -EACCES for what is no regular file of the
+/// tree (a directory, a device, a file of /proc, a socket's name); the
+/// class's execute bit (px43: root's is any of the three; set-ID bits
+/// are not honoured, ruling #75 R5); -ETXTBSY while it is open for
+/// writing; then an open file of it (-ENFILE when the table is full),
+/// O_RDONLY and O_EXE, the directory it was found in recorded (px50's
+/// rules: the descriptor's own when it was reached through an fd/ entry
+/// or AT_EMPTY_PATH), so `/proc/self/exe` reads its path as an fd/ entry
+/// would, a rename and a removal followed. The open file counts itself a
+/// runner of the inode (`tree.run_hold`). Returns (the open file + 1, 0)
+/// or (0, -errno). The caller reads the file through `exec_inode` and
+/// either makes it the process's (`set_exe`) or lets it go
+/// (`exec_drop`). px27's limit (only an archive file, whole) is gone:
+/// a program written, copied, rewritten or unlinked while open since
+/// boot runs as Linux runs it.
+pub fn exec_open(a: u64, pml4: u64, dirfd: u64, va: u64, rl: u64, flags: u64) -> (u64, u64) {
+    let empty = flags & AT_EMPTY_PATH != 0
+    let fl = if flags & AT_SYMLINK_NOFOLLOW != 0 { F_NO } else { F_YES }
+    var n: u64 = 0
+    var par: u64 = 0
+    if va != 0 {
+        let (n0, p0, _s, _l, _t) = walk(a, pml4, dirfd, va, empty, fl)
+        n = n0
+        par = p0
+    } else {
+        let (n0, p0, _s, _l, _t) = walk_k(a, AT_FDCWD, rl, empty, F_YES) // an empty name: the working directory (measured)
+        n = n0
+        par = p0
+    }
+    let (via, sa, sf) = fdl_read()
     if is_err(n) {
-        return (0, neg(rf(n)), 0)
+        return (0, neg(rf(n)))
     }
-    if ty(n) != T_INO || tree.is_dir(rf(n)) {
-        return (0, neg(EACCES), 0)
+    if is_link_node(n) || is_fd_entry(n) {
+        return (0, neg(ELOOP)) // AT_SYMLINK_NOFOLLOW at a link (execveat(2))
     }
-    if !may(a, cred.FS, n, MAY_X) { // px43: the class's execute bit (root: any)
-        return (0, neg(EACCES), 0)
+    if ty(n) != T_INO || !tree.is_regular(rf(n)) {
+        return (0, neg(EACCES))
     }
-    let e = tree.archive_entry(rf(n))
-    if e == initramfs.END {
-        refuse(a, R_EXEC)
-        return (0, neg(EACCES), 0)
+    if !may(a, cred.FS, n, MAY_X) {
+        return (0, neg(EACCES)) // px43: the class's execute bit (root: any)
     }
-    var l: u64 = 0
-    while l < PATH_MAX && kb(l) != 0 {
-        l += 1
+    if has_writer(n) {
+        return (0, neg(ETXTBSY))
     }
-    (e, 0, l)
+    if !of_room() {
+        return (0, neg(ENFILE))
+    }
+    let o = of_new(K_FILE, n, O_RDONLY | O_EXE)
+    tree.run_hold(rf(n))
+    var src: u64 = 0
+    if via {
+        src = of_of(sa, sf) // reached through an fd/ entry: its open file's directory
+    } else if va != 0 && empty && dirfd != AT_FDCWD && is_err(par) && rf(par) == EBUSY {
+        src = of_of(a, dirfd) // AT_EMPTY_PATH: the descriptor's own
+    }
+    opened_in(o, src, if !is_err(par) && ty(par) == T_INO { rf(par) + 1 } else { 0 })
+    (o, 0)
+}
+
+/// px56: the inode an `exec_open` open file is of.
+pub fn exec_inode(o: u64) -> u64 {
+    rf(ofw(o - 1, O_NODE))
+}
+
+/// px56: whether descriptor `fd` is open with close-on-exec (execveat's
+/// script by a descriptor the new program will not have).
+pub fn is_cloexec(a: u64, fd: u64) -> bool {
+    kind(a, fd) != K_CLOSED && flags_of(a, fd) & O_CLOEXEC != 0
+}
+
+/// px56: the name `execveat(fd, "", AT_EMPTY_PATH)` gives a program
+/// (measured on Linux 7.2.8: the file's own name, not the descriptor's
+/// number): the last component of what its open file `o` reads as a
+/// link, ` (deleted)` left off, its first 15 bytes as two words and
+/// its length (kernel/process's `comm_of`'s shape).
+pub fn exe_name(o: u64) -> (u64, u64, u64) {
+    let cap = KBUF_END - NORM
+    var l = ino_text(o, exec_inode(o), raw() + NORM, cap)
+    if l > cap {
+        l = cap
+    }
+    let gone = ofw(o - 1, O_GONE) != 0
+    if gone && l >= 10 { // ` (deleted)`
+        l -= 10
+    }
+    var base: u64 = 0
+    var i: u64 = 0
+    while i < l {
+        if kb(NORM + i) == 47 {
+            base = i + 1
+        }
+        i += 1
+    }
+    var n = l - base
+    if n > 15 {
+        n = 15
+    }
+    var w0: u64 = 0
+    var w1: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        let b = kb(NORM + base + k)
+        if k < 8 {
+            w0 = w0 | (b << (k * 8))
+        } else {
+            w1 = w1 | (b << ((k - 8) * 8))
+        }
+        k += 1
+    }
+    (w0, w1, n)
+}
+
+/// px56: an `exec_open` open file not taken (a script's, once its
+/// interpreter is found; one refused later): let go.
+pub fn exec_drop(o: u64) {
+    of_drop(o)
+}
+
+/// px56: a program the kernel starts (kernel/process's `exec_span`: init
+/// and the run list, absolute paths of PAX's own): the file at the path
+/// [pa, pa + pl) looked up in the tree from the root, a name at a time,
+/// no mode asked (as px10's archive lookup asked none), no link
+/// followed. Its open file as `exec_open` makes one: (the open file +
+/// 1, 0), or (0, 1) for a path that is not a regular file of the tree.
+pub fn exec_kernel(pa: u64, pl: u64) -> (u64, u64) {
+    var d = tree.ROOT
+    var i: u64 = 0
+    var found = tree.NONE
+    while i < pl {
+        while i < pl && byte_at(pa, i) == 47 {
+            i += 1
+        }
+        if i >= pl {
+            break
+        }
+        let s = i
+        while i < pl && byte_at(pa, i) != 47 {
+            i += 1
+        }
+        if !tree.is_dir(d) {
+            return (0, 1)
+        }
+        let c = tree.lookup(d, pa + s, i - s)
+        if c == tree.NONE {
+            return (0, 1)
+        }
+        var j = i
+        while j < pl && byte_at(pa, j) == 47 {
+            j += 1
+        }
+        if j >= pl {
+            found = c
+        } else {
+            d = c
+        }
+    }
+    if found == tree.NONE || !tree.is_regular(found) || !of_room() {
+        return (0, 1)
+    }
+    let n = ino_node(found)
+    let o = of_new(K_FILE, n, O_RDONLY | O_EXE)
+    tree.run_hold(found)
+    opened_in(o, 0, d + 1)
+    (o, 0)
+}
+
+fn byte_at(p: u64, i: u64) -> u64 {
+    // # Safety: a byte of the caller's kernel path (pax_execbuf, the run
+    // list's line in the initramfs).
+    unsafe { ((p + i) as *u8).read_volatile() as u64 }
 }
 
 /// The working directory's node (px17): the area's word, 0 the root.
@@ -4640,11 +4824,15 @@ pub fn fchdir(a: u64, fd: u64) -> u64 {
     0
 }
 
-/// px26: the running program is the initramfs entry `e` (kernel/process,
-/// at `exec` and `execve`): what `/proc/self/exe` answers. A fork's child
-/// inherits it with the area.
-pub fn set_exe(a: u64, e: u64) {
-    put(a, A_EXE, e + 1)
+/// px26: the running program (kernel/process, at `exec` and `execve`):
+/// what `/proc/self/exe` answers. px56: `o` is its open file (+ 1,
+/// `exec_open`'s or `exec_kernel`'s), the area's from here; the one it
+/// had goes. A fork's child shares it (`inherit`), a process's end lets
+/// it go (`close_all`).
+pub fn set_exe(a: u64, o: u64) {
+    let old = get(a, A_EXE)
+    put(a, A_EXE, o)
+    of_drop(old)
 }
 
 /// `readlinkat(dirfd, path, buf, size)` (and `readlink`, with
@@ -4656,7 +4844,9 @@ pub fn set_exe(a: u64, e: u64) {
 /// no `/proc` directory beside it: every other path under it is
 /// -ENOENT. Anything else that exists is not a link: -EINVAL. (px27:
 /// the text is the path the program was loaded by; a program renamed
-/// since still answers that.)
+/// since still answers that. px56: the text is the program's open
+/// file's, as an fd/ entry's: a rename is followed, a removal reads
+/// `<path> (deleted)`.)
 pub fn readlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, buf: u64, size: u64) -> u64 {
     if is_proc_exe(pml4, va) {
         let x = get(a, A_EXE)
@@ -4666,17 +4856,18 @@ pub fn readlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, buf: u64, size: u64) -
         if size == 0 || size >= 0x80000000 {
             return neg(EINVAL)
         }
-        let e = x - 1
-        let nl = initramfs.name_length(e) + 1
-        let k = if nl < size { nl } else { size }
+        // px56: the program's open file's text, as an fd/ entry's: its
+        // directory's path and the name it has there now, or `<path>
+        // (deleted)` once it has none (measured on Linux 7.2.8).
+        let cap = KBUF_END - NORM
+        let l = ino_text(x, exec_inode(x), raw() + NORM, cap)
+        let lk = if l < cap { l } else { cap }
+        let k = if lk < size { lk } else { size }
         if !uaccess.writable(pml4, buf, k) {
             return neg(EFAULT)
         }
-        uaccess.put(pml4, buf, 47, 1)
-        var i: u64 = 1
-        while i < k {
-            uaccess.put(pml4, buf + i, initramfs.name_byte(e, i - 1), 1)
-            i += 1
+        if !uaccess.copy_out(pml4, buf, raw() + NORM, k) {
+            return neg(EFAULT)
         }
         return k
     }
@@ -4841,39 +5032,7 @@ fn fd_text(ta: u64, fd: u64, pid: u64, base: u64, cap: u64) -> u64 {
     let t = ty(nd)
     let o = of_of(ta, fd)
     if t == T_INO {
-        let i = rf(nd)
-        let fk = if o != 0 { ofw(o - 1, O_KIND) } else { K_CLOSED }
-        let g = if fk == K_FILE || fk == K_DIR { ofw(o - 1, O_GONE) } else { 0 }
-        if g != 0 {
-            // # Safety: the frame `mark_gone` filled: its length, then its bytes.
-            let l = unsafe { ((g + frames.hhdm()) as *u64).read_volatile() }
-            var j: u64 = 0
-            while j < l {
-                let _w = tput(base, j, cap, unsafe { ((g + frames.hhdm() + 8 + j) as *u8).read_volatile() as u64 })
-                j += 1
-            }
-            return l
-        }
-        if tree.is_dir(i) {
-            return tpath(base, 0, cap, i)
-        }
-        let di = if fk == K_FILE { ofw(o - 1, O_DIRI) } else { 0 }
-        if di == 0 {
-            return tput(base, 0, cap, 47) // named: a file whose directory was not kept (none is opened so)
-        }
-        var k: u64 = 0
-        if di - 1 != tree.ROOT {
-            k = tpath(base, 0, cap, di - 1)
-        }
-        k = tput(base, k, cap, 47)
-        let (na, nl) = tree.name_of(di - 1, i)
-        var j: u64 = 0
-        while j < nl {
-            // # Safety: a byte of a directory record's name.
-            k = tput(base, k, cap, unsafe { ((na + j) as *u8).read_volatile() as u64 })
-            j += 1
-        }
-        return k
+        return ino_text(o, rf(nd), base, cap)
     }
     if t == T_DEV {
         return tstr(base, 0, cap, "/dev")
@@ -4902,6 +5061,45 @@ fn fd_text(ta: u64, fd: u64, pid: u64, base: u64, cap: u64) -> u64 {
         return syn_text(rf(nd), pid, base, 0, cap)
     }
     tstr(base, 0, cap, "/")
+}
+
+/// px50: the text of inode `i`'s link through open file `o` (+ 1; 0
+/// none): a file's directory and the name it gives the file now, or
+/// `<path> (deleted)`; a directory's path. px56: `fd_text`'s, and
+/// `/proc/self/exe`'s through the program's open file.
+fn ino_text(o: u64, i: u64, base: u64, cap: u64) -> u64 {
+    let fk = if o != 0 { ofw(o - 1, O_KIND) } else { K_CLOSED }
+    let g = if fk == K_FILE || fk == K_DIR { ofw(o - 1, O_GONE) } else { 0 }
+    if g != 0 {
+        // # Safety: the frame `mark_gone` filled: its length, then its bytes.
+        let l = unsafe { ((g + frames.hhdm()) as *u64).read_volatile() }
+        var j: u64 = 0
+        while j < l {
+            let _w = tput(base, j, cap, unsafe { ((g + frames.hhdm() + 8 + j) as *u8).read_volatile() as u64 })
+            j += 1
+        }
+        return l
+    }
+    if tree.is_dir(i) {
+        return tpath(base, 0, cap, i)
+    }
+    let di = if fk == K_FILE { ofw(o - 1, O_DIRI) } else { 0 }
+    if di == 0 {
+        return tput(base, 0, cap, 47) // named: a file whose directory was not kept (none is opened so)
+    }
+    var k: u64 = 0
+    if di - 1 != tree.ROOT {
+        k = tpath(base, 0, cap, di - 1)
+    }
+    k = tput(base, k, cap, 47)
+    let (na, nl) = tree.name_of(di - 1, i)
+    var j: u64 = 0
+    while j < nl {
+        // # Safety: a byte of a directory record's name.
+        k = tput(base, k, cap, unsafe { ((na + j) as *u8).read_volatile() as u64 })
+        j += 1
+    }
+    k
 }
 
 /// px50: once the last name of inode `child` (the name [na, na + nl) of
