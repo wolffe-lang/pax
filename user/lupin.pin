@@ -1,0 +1,30 @@
+# The lupin PAX carries as /bin/lupin (px57; tools/mklupin builds it).
+#
+# Ruling #110 (the maintainer, 2026-10-22): lupin in the base image,
+# wolf in a dev image later (the Linux norm: an interpreter in base, the
+# compiler installable). lupin is wolf-interp's binary, the reference
+# interpreter for the wolf language; its release archives are linked
+# against glibc dynamically (the release workflow builds on ubuntu-22.04
+# for a glibc floor of 2.35), and PAX has no dynamic loader, so PAX's
+# lupin is built here: static, for x86_64-unknown-linux-musl (Rust's
+# own prebuilt std for the target, with its self-contained musl CRT and
+# libc), from the release TAG.
+#
+# Why the tag and not wolf-interp's trunk (fcf2fd0 at px57): the source
+# is the same (`git diff e642f26 fcf2fd0 -- src Cargo.toml Cargo.lock
+# build.rs rust-toolchain.toml vendor` is empty: tl29's CI files and
+# notes only), and the tag is the only commit at which build.rs grants
+# D57's stamp (`v{version}` pointing at HEAD), so this lupin says
+# `lupin 0.1.55 (wolf-interp, reference interpreter at pin 294d626)`, as
+# the glibc archive kernel/wolf.pin names does, never `+dev.fcf2fd0`.
+#
+# The Rust is the tree's own (rust-toolchain.toml, 1.97.1); tools/mklupin
+# refuses another, and a missing musl target, and never installs one.
+# On kasumi it is built in a throwaway image made FROM px13-ubuntu with
+# rustup inside it (notes/px57/rust/Containerfile); in CI the workflow
+# installs the channel and the target on the runner before the build.
+LUPIN_SRC_REPO=https://github.com/wolffe-lang/wolf-interp
+LUPIN_SRC_TAG=v0.1.55
+LUPIN_SRC_REV=e642f2630ad4c7f53740428d5cca705f2e0d295b
+LUPIN_SRC_TARGET=x86_64-unknown-linux-musl
+LUPIN_SRC_VERSION_LINE="lupin 0.1.55 (wolf-interp, reference interpreter at pin 294d626)"
