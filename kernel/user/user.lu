@@ -821,6 +821,7 @@ const SYS_GETPID: u64 = 39
 const SYS_CLONE: u64 = 56
 const SYS_VFORK: u64 = 58
 const SYS_EXECVE: u64 = 59
+const SYS_EXECVEAT: u64 = 322 // px56
 const SYS_WAIT4: u64 = 61
 const SYS_KILL: u64 = 62
 const SYS_GETPPID: u64 = 110
@@ -1423,8 +1424,9 @@ pub fn syscall(f: u64) -> u64 {
         }
         return g
     }
-    if nr == SYS_EXECVE {
-        let r = process.execve(f, a0, a1, a2)
+    if nr == SYS_EXECVE || nr == SYS_EXECVEAT {
+        // px56: execveat(dirfd, path, argv, envp, flags) too.
+        let r = if nr == SYS_EXECVE { process.execve(f, a0, a1, a2) } else { process.execveat(f, a0, a1, a2, a3, a4) }
         if r != 0 {
             put_word(f, W_RAX, r)
             refusal_line(nr, r)
