@@ -31,15 +31,18 @@
 # merge gate (`tier full`, the label) runs all of them on native BIOS,
 # and every trunk push and nightly (`tier all`) on every leg (tl29).
 
-@user    = mpx3-user mpx3-loader mpx3-boreutils mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-speaker mpx3-sound mpx3-orchestra mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix mpx4-lobo mpx5-users mpx5-accounts mpx5-jobs
+@user    = mpx3-user mpx3-loader mpx3-boreutils mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-speaker mpx3-sound mpx3-orchestra mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix mpx4-lobo mpx5-users mpx5-accounts mpx5-jobs mpx5-yew
 @net     = mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix mpx4-lobo mpx5-jobs
 @music   = mpx3-speaker mpx3-sound mpx3-orchestra mpx4-session
-@console = mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-speaker mpx3-sound mpx3-orchestra mpx4-unix mpx4-session mpx5-accounts mpx5-jobs tour
+@console = mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-speaker mpx3-sound mpx3-orchestra mpx4-unix mpx4-session mpx5-accounts mpx5-jobs tour mpx5-yew
 # px47 (P5 U7): the suites whose user runs become a user through `as`
 # (px39; tools/mkas builds it alone) and through `su` (px46); px48's
-# job-control suite runs its probe and its shell through `as` too, and
-# px54's lope suite its user session.
-@asuser  = mpx3-tree mpx3-shell mpx3-boreutils mpx4-unix mpx4-tcp mpx4-udp mpx5-users mpx5-jobs mpx5-lope mpx5-aspen mpx5-lupin
+# job-control suite runs its probe and its shell through `as` too,
+# px54's lope suite its user session, and px58's yew suite its user probe
+# and yew's session. px58: mpx5-yew is in @user (yew asks for the files,
+# the tree, the processes, the signals and the console a user's program
+# reaches) and @console (its screen rows).
+@asuser  = mpx3-tree mpx3-shell mpx3-boreutils mpx4-unix mpx4-tcp mpx4-udp mpx5-users mpx5-jobs mpx5-lope mpx5-aspen mpx5-lupin mpx5-yew
 @suuser  = mpx3-tree mpx3-shell mpx3-speaker mpx4-lobo mpx5-accounts
 
 # --- the toolchain pins, and how the kernel is entered, linked, loaded: FULL --
@@ -122,7 +125,7 @@ tools/mkinitramfs               @user
 # looks). Each user run's keys, run list, steps and recordings are its
 # suite's own, by the same derivation.
 user/elf/as.c                   @asuser
-tools/mkas                      mpx3-tree mpx3-shell mpx3-boreutils mpx4-unix mpx4-tcp mpx4-udp mpx5-jobs mpx5-lope mpx5-aspen mpx5-lupin
+tools/mkas                      mpx3-tree mpx3-shell mpx3-boreutils mpx4-unix mpx4-tcp mpx4-udp mpx5-jobs mpx5-lope mpx5-aspen mpx5-lupin mpx5-yew
 user/su/*                       @suuser
 tools/mksu                      @suuser
 user/mpx3-boreutils-user.run    mpx3-boreutils
@@ -152,6 +155,14 @@ user/lupin.pin                  mpx5-lupin
 tools/mklupin                   mpx5-lupin
 user/lupin/*                    mpx5-lupin
 user/console/lupin.keys         mpx5-lupin
+# px58: yew on PAX: its pin, its builder, termwolf (the probe, its
+# toolchain and its builder) and the two typed key files are mpx5-yew's
+# alone.
+user/yew.pin                    mpx5-yew
+tools/mkyew                     mpx5-yew
+user/termwolf/*                 mpx5-yew
+user/console/termwolf.keys      mpx5-yew
+user/console/yew.keys           mpx5-yew
 
 # --- the network --------------------------------------------------------------
 kernel/net/*                    @net
