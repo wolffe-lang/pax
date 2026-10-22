@@ -5,7 +5,7 @@
 # unmodified).
 set -eu
 L=$HOME/lanes/px61
-podman run --rm --privileged --cpuset-cpus 10-15 -v $L:$L:Z -e PAX_CACHE=$L/cache -e TMPDIR=$L/tmp -e L="$L" localhost/px13-ubuntu bash -c '
+podman run --rm --privileged --cpuset-cpus 8-11 -v $L:$L:Z -e PAX_CACHE=$L/cache -e TMPDIR=$L/tmp -e L="$L" localhost/px13-ubuntu bash -c '
 set -eu; cd $L/pax; W=$L/w; S=$W/strip; O=$L/out
 rm -rf $S $O; mkdir -p $S $O
 for f in $W/bore/*; do case $f in *.txt) continue ;; esac; strip -o $S/${f##*/} $f || echo "strip failed $f"; done
