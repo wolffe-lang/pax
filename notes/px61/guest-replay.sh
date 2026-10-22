@@ -17,7 +17,7 @@ for pass in 1 2; do
     argv='/bin/env HOME=/ /bin/sh -i -m'
     [ "$role" = root ] || argv='/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m'
     echo "guest $pass $name begin $(date -Is)"
-    taskset -c 8-11 "$L/pax/notes/px48/linux-vm.sh" "$L/pax" "$L/bin/vmjob" "$W/pelt.cpio" \
+    taskset -c 8-11 "$L/pax/notes/px61/linux-vm.sh" "$L/pax" "$L/bin/vmjob" "$W/pelt.cpio" \
         "$W/keys/$name.keys" "$argv" "$O" "$name" > "$O/$name.driver.log" 2>&1
     echo "guest $pass $name done $(date -Is): $(cat "$O/$name.tty.rc")"
   done < "$W/run-names"
