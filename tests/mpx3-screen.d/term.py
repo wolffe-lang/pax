@@ -72,4 +72,9 @@ class Osc(unittest.TestCase):
     def test_unterminated(self):
         t=term(b'A\33]52;ignored\n\33[31mZ'); self.assertEqual((t.cy,t.cx),(0,1))
 
+class Save(unittest.TestCase):
+    def test_position_and_attributes(self):
+        t=term(b'\33[31m\33[3;5H\0337\33[32m\33[H\0338X')
+        self.assertEqual(t.cells[2][4],(88,1,0)); self.assertEqual((t.cy,t.cx),(2,5))
+
 if __name__=='__main__': unittest.main(verbosity=2)
