@@ -3,8 +3,9 @@
 # draw, from a serial log, the picture kernel/screen should be showing,
 # and compare it with a screendump.
 #
-#   tools/screen-ref --from TEXT --size WxH [--font BDF] [--out REF.ppm]
-#                    [--compare DUMP.ppm] [--grid GRID.txt] SERIAL.log
+#   tools/screen-ref --from TEXT --size WxH [--upto N] [--font BDF]
+#                    [--out REF.ppm] [--compare DUMP.ppm] [--grid GRID.txt]
+#                    SERIAL.log
 #
 # The serial console and the screen are fed the same bytes (kernel/serial
 # hands every byte to kernel/screen), so the screen's picture is a
@@ -53,13 +54,16 @@
 #     its colours swapped;
 #   - the PC text palette, 0 000000 … 15 ffffff.
 #
-# --out writes the reference as a binary PPM (P6, 255); --grid writes the
-# final grid as text (one row a line, trailing blanks kept, the cursor's
-# row and column on a last line). --compare reads QEMU's `screendump`
-# (P6) and compares it pixel for pixel: exit 0 identical, 1 different
-# (the count of differing pixels and the first differing cell, its
-# expected and actual character rows, on stderr), 2 on a usage error or
-# an unreadable input.
+# --upto N (px59) reads the log only to its byte N (a screen taken while
+# a program ran: tools/ps2-session's `dump` records N). --out writes the
+# reference as a binary PPM (P6, 255); --grid writes the final grid as
+# text (one row a line, trailing blanks kept, the cursor's row and
+# column, whether it is shown and DECSCUSR's shape on a last line).
+# --compare reads QEMU's `screendump` (P6) and compares it pixel for
+# pixel, and cell by cell (px59: a cell is its 8x16 block): exit 0
+# identical (the pixels and the cells counted), 1 different (the count
+# of differing pixels, of differing cells, and the first differing cell,
+# on stderr), 2 on a usage error or an unreadable input.
 import sys
 
 PALETTE = [
@@ -405,7 +409,8 @@ def read_ppm(path):
 
 def main():
     args = sys.argv[1:]
-    opts = {"--font": None, "--from": None, "--size": None, "--out": None, "--compare": None, "--grid": None}
+    opts = {"--font": None, "--from": None, "--size": None, "--out": None, "--compare": None, "--grid": None,
+            "--upto": None}
     log = None
     while args:
         a = args.pop(0)
@@ -435,6 +440,11 @@ def main():
             data = f.read()
     except OSError as e:
         die(str(e))
+    if opts["--upto"] is not None:
+        try:
+            data = data[:int(opts["--upto"])]
+        except ValueError:
+            die("--upto takes a byte count")
     at = data.find(opts["--from"].encode())
     if at < 0:
         die("%r is not in %s" % (opts["--from"], log))
@@ -450,7 +460,8 @@ def main():
         with open(opts["--grid"], "w", encoding="utf-8") as f:
             for row in term.cells:
                 f.write("".join(chr(c[0]) if c[0] >= 32 else "?" for c in row) + "\n")
-            f.write("cursor %d %d, %d scrolls, %d bytes\n" % (term.cy, term.cx, term.scrolls, len(data) - at))
+            f.write("cursor %d %d %s shape %d, %d scrolls, %d bytes\n" % (term.cy, term.cx, "shown" if term.visible else "hidden",
+                                                                       term.shape, term.scrolls, len(data) - at))
     print("screen-ref: %s from byte %d: %d bytes, %dx%d cells, %d scrolls, cursor row %d column %d"
           % (log, at, len(data) - at, term.cols, term.rows, term.scrolls, term.cy, term.cx))
     if opts["--compare"]:
@@ -458,8 +469,10 @@ def main():
         if (dw, dh) != (w, h):
             sys.stderr.write("screen-ref: DIFFERENT: the dump is %dx%d, the reference %dx%d\n" % (dw, dh, w, h))
             sys.exit(1)
+        ncells = term.cols * term.rows
         if dump == bytes(px):
-            print("screen-ref: IDENTICAL: %s equals the reference, %d pixels" % (opts["--compare"], w * h))
+            print("screen-ref: IDENTICAL: %s equals the reference, %d pixels, %d of %d cells"
+                  % (opts["--compare"], w * h, ncells, ncells))
             sys.exit(0)
         n = 0
         first = None
@@ -468,10 +481,18 @@ def main():
                 n += 1
                 if first is None:
                     first = i // 3
+        bad = 0
+        for r in range(term.rows):
+            for c in range(term.cols):
+                for y in range(16):
+                    o = ((r * 16 + y) * w + c * 8) * 3
+                    if px[o:o + 24] != dump[o:o + 24]:
+                        bad += 1
+                        break
         fy, fx = divmod(first, w)
         cy, cx = fy // 16, fx // 8
-        sys.stderr.write("screen-ref: DIFFERENT: %d of %d pixels differ; the first at (%d, %d), cell row %d column %d (%r)\n"
-                         % (n, w * h, fx, fy, cy, cx, chr(term.cells[cy][cx][0]) if cy < term.rows and cx < term.cols else "outside the grid"))
+        sys.stderr.write("screen-ref: DIFFERENT: %d of %d pixels differ, %d of %d cells; the first at (%d, %d), cell row %d column %d (%r)\n"
+                         % (n, w * h, bad, ncells, fx, fy, cy, cx, chr(term.cells[cy][cx][0]) if cy < term.rows and cx < term.cols else "outside the grid"))
         sys.exit(1)
 
 
