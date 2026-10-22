@@ -2654,6 +2654,72 @@ jobs:
   # preinstalled on PAX as /bin/aspen and typed at pelt: a session as root
   # and as a user against the same binaries in a throwaway container
   # (tools/linux-tree). aspen is public: tools/mkaspen fetches it.
+  # px61: pelt's 22 corpus rows (one named FIFO blocker), nine sessions,
+  # eleven fork shapes, nine probes and static table checks, root and pax.
+  mpx5-pelt:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-pelt')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl zstd
+          qemu-system-x86_64 --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-pelt-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the image the Linux side's container is made from (by digest)
+        run: |
+          docker pull "$PAX_TREE_IMAGE"
+          docker image inspect --format '{{.Id}} {{.RepoDigests}}' "$PAX_TREE_IMAGE"
+        env:
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+      - name: pelt's complete fork replay against Linux, as root and as a user; the plan's legs (all four in the all tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+        run: tests/mpx5-pelt $PAX_LEGS
+
+      - name: keep the programs' sums, the Linux side, the sessions, the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-pelt
+          path: |
+            build/mpx5-pelt/*/sums.txt
+            build/mpx5-pelt/linux/
+            build/mpx5-pelt/*.txt
+            build/mpx5-pelt/run-names
+            build/mpx5-pelt-*.log*
+          retention-days: 14
+          if-no-files-found: warn
+
   mpx5-aspen:
     needs: plan
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-aspen')
@@ -3107,6 +3173,7 @@ jobs:
       - mpx5-accounts
       - mpx5-jobs
       - mpx5-lope
+      - mpx5-pelt
       - mpx5-aspen
       - mpx5-lupin
       - mpx5-wolf
