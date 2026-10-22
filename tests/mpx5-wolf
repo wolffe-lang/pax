@@ -13,12 +13,16 @@ while [ $# -gt 0 ]; do
         --only) only=$2; shift 2 ;;
         --firmware) legs=$2; shift 2 ;;
         --tier) tiers=$2; shift 2 ;;
-        *) die "usage: mpx5-wolf [--images DIR] [--only build|linux] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+        *) die "usage: mpx5-wolf [--images DIR] [--only build|linux|native] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
     esac
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "bad firmware" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "bad tier" ;; esac
-case $only in ""|build|linux) ;; *) die "bad --only" ;; esac
+case $only in ""|build|linux|native) ;; *) die "bad --only" ;; esac
+if [ "$only" = native ]; then
+    [ -n "$images" ] || die "--only native needs the native probe directory"
+    exec python3 -I "$PAX_ROOT/tests/mpx5-wolf.d/native.py" "$images/pax.serial.log" "$images/linux.tty"
+fi
 need readelf python3
 . "$PAX_ROOT/user/wolf.pin"
 KEYS=$PAX_ROOT/user/console/wolf.keys
@@ -138,7 +142,9 @@ for leg in $legs; do
         iso=$images/$tier/wolf.iso
         cat "$KEYS" "$KEYS" > "$images/wolf.keys"
         hrc=0
-        "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 1500 \
+        limit=()
+        if [ "$(uname -s)" = Linux ]; then need taskset; limit=(taskset -c 0-3); fi
+        "${limit[@]}" "$PAX_ROOT/tools/qemu-halt" --accel tcg --firmware "$leg" --serial "$log" --timeout 1500 \
           --qemu -m --qemu 1024M --elf "$images/$tier/kmain_console.elf" \
           --marker "halt|PANIC .*" --type "$images/wolf.keys" --prompt '$ ' "$iso" > "$log.verdict" 2>&1 || hrc=$?
         serial_norm "$log" > "$log.norm"
