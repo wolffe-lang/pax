@@ -21,4 +21,9 @@ with tempfile.TemporaryDirectory(prefix='px61-compare-') as d:
     assert r.returncode == 1 and 'FAIL F2 static table checks' in r.stdout
     r = run('run 1: /bin/env\nuser: frames free 20 before, 20 after\n')
     assert r.returncode == 1 and 'missing first prompt' in r.stdout
-print('px61 comparator selftest: PASS (green, wrong status red, empty replay red)')
+    (d / 'run-names').write_text('probes-root\n')
+    body = "$ sh childstate.sh\n/bin/ps: invalid option -- p\nUsage: ps [-o COL]\n$ exit 0\n"
+    (d / 'linux/probes-root.tty').write_text(body)
+    r = run('run 1: /bin/env\n' + body + 'user: frames free 20 before, 20 after\n')
+    assert r.returncode == 1 and 'PASS F1 probes-root' in r.stdout and 'FAIL F2 unexercised process-group probe' in r.stdout
+print('px61 comparator selftest: PASS (green; wrong status, empty replay and identical unusable helper red)')
