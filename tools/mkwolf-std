@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Stage the dev image standard library at the compiler source pin.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkwolf-std OUTDIR"
+. "$PAX_ROOT/user/wolf.pin"
+need git
+mkdir -p "$1" "$PAX_BUILD"
+out=$(cd "$1" && pwd)
+w=$(mktemp -d "$PAX_BUILD/px60-std.XXXXXX")
+say "source retained at $w"
+git -C "$w" init -q
+git -C "$w" fetch -q --depth 1 https://github.com/wolffe-lang/wolf-std "$WOLF_STD_REV"
+git -C "$w" checkout -q --detach FETCH_HEAD
+[ "$(git -C "$w" rev-parse HEAD)" = "$WOLF_STD_REV" ] || die "std revision differs from pin"
+cp -R "$w/std/." "$out/"
+printf "%s\n" "$WOLF_STD_REV" > "$out/STD-REV"

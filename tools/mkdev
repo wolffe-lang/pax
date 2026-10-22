@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Add the dev variant to a staging root. Never change the base image.
+# Inputs are tools/mkwolf output and tools/mkwolf-std output.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 3 ] || die "usage: mkdev ROOT WOLF-DIR STD-DIR"
+. "$PAX_ROOT/user/wolf.pin"
+r=$1 bins=$2 std=$3
+[ "$(cat "$std/STD-REV")" = "$WOLF_STD_REV" ] || die "std revision differs from pin"
+mkdir -p "$r/usr/bin" "$r/usr/share/wolf/std" "$r/etc"
+for f in wolf wolf-cimport-worker libwolf_rt.a; do cp "$bins/$f" "$r/usr/bin/$f"; done
+cp -R "$std/." "$r/usr/share/wolf/std/"
+cp "$PAX_ROOT"/user/wolf/*.lu "$r/usr/share/wolf/"
+# Preserve an existing base shrc, but do not import lope into the small
+# test root, where lope is absent. The playground supplies its base shrc.
+[ -f "$r/etc/shrc" ] || : > "$r/etc/shrc"
+cat >> "$r/etc/shrc" <<"SHRC"
+# PAX dev variant (px60).
+export PATH=/usr/bin:/bin
+export WOLF_STD=/usr/share/wolf/std
+export LUPIN_STD=/usr/share/wolf/std
+SHRC
