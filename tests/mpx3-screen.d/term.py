@@ -77,4 +77,25 @@ class Save(unittest.TestCase):
         t=term(b'\33[31m\33[3;5H\0337\33[32m\33[H\0338X')
         self.assertEqual(t.cells[2][4],(88,1,0)); self.assertEqual((t.cy,t.cx),(2,5))
 
+class Alternate(unittest.TestCase):
+    def test_restore(self):
+        t=term(b'MAIN\33[?1049h\33[Halt\33[?1049lX')
+        self.assertEqual(''.join(chr(c[0]) for c in t.cells[0][:6]),'MAINX ')
+    def test_entry_and_nested(self):
+        t=term(b'MAIN\33[?1049hA\33[?1049hB')
+        self.assertEqual(''.join(chr(c[0]) for c in t.cells[0][:7]),'    AB ')
+        self.assertEqual((t.cy,t.cx),(0,6))
+    def test_restore_attributes(self):
+        t=term(b'\33[31mMAIN\33[?1049h\33[32mA\33[?1049lB')
+        self.assertEqual(t.cells[0][4],(66,1,0))
+    def test_scroll_both(self):
+        t=term(b'A\r\nB\r\nC\r\nD',4,3)
+        saved=[row[:] for row in t.cells]
+        for b in b'\33[?1049h\33[HX\r\nY\r\nZ\r\nW': t.feed(b)
+        self.assertEqual([row[0][0] for row in t.cells],[89,90,87])
+        for b in b'\33[?1049l': t.feed(b)
+        self.assertEqual(t.cells,saved)
+        for b in b'\r\nE': t.feed(b)
+        self.assertEqual([row[0][0] for row in t.cells],[67,68,69])
+
 if __name__=='__main__': unittest.main(verbosity=2)
