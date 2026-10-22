@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+# tests/mpx5-screen — px59: PAX's screen draws what an editor writes as
+# a Linux VT draws it. tests/mpx3-screen's shape: the screen taken from
+# the machine through QEMU's monitor and held, pixel for pixel and cell
+# for cell, to tools/screen-ref's picture of the same serial bytes; and
+# screen-ref itself, and PAX's screen directly, held to a Linux VT's own
+# cells, measured black-box (notes/px59: kasumi's own kernel's VT under
+# QEMU, /dev/vcsa1 read after each case, twice).
+#
+#   tests/mpx5-screen [--images DIR | --no-boot | --only build]
+#                     [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# Two images, kmain_console with the archive:
+#   vt       /bin/vtcases (user/elf/vtcases.c, tools/mkvtcases) and
+#            /etc/vtcases, the two VT probes' cases as records
+#            (tests/mpx5-screen.d/records.py); its run list `/bin/vtcases`;
+#            booted by boot/limine-vt.conf, which asks Limine for 640 x
+#            400, so the grid is the VT's 80 x 25 (Limine gives it under
+#            the BIOS; OVMF gives 1280 x 800 whatever is asked);
+#   session  /bin/yew (tools/mkyew), pelt as /bin/sh, boreutils' env and
+#            cat, /bin/as, /home/pax holding notes.txt (alpha, beta,
+#            gamma); its run list `/bin/as 1000 1000 /bin/env
+#            HOME=/home/pax /bin/sh -i -m` (tests/mpx5-yew's session);
+#            boot/limine-initramfs.conf (160 x 50).
+# Both are typed at the PS/2 keyboard by tools/ps2-session through a
+# second monitor, which also takes the screens: the vt image's after each
+# case (its OSC string names it on the serial log), the session's at the
+# points user/console/yew-screen.keys names.
+#
+# Assertions, per tier and firmware:
+#   S0 build: kmain_console built; vtcases, yew, pelt, env, cat, as
+#      static; both images; screen-ref against the VT's rows, case by
+#      case (tests/mpx5-screen.d/vtcheck.py: every cell and the cursor of
+#      each screen, each query's answer, the named classes PAX's own) and
+#      its own unit rows (term.py).
+#   S1 the VT's cases on PAX: every case's screen equals screen-ref's
+#      picture of the serial log to that case's name, pixel for pixel;
+#      on an 80 x 25 grid, every case's 2,000 cells and the cursor are
+#      the VT's own (the named classes PAX's by name), and the answers
+#      vtcases read back (DA1, DECID, DSR 5 and 6 and ? 6, the ones the
+#      VT leaves unanswered, yew's probe) are the VT's, typed into the
+#      input because the keyboard was typed at first (R-px59-4); the
+#      echo rows (a query in canonical mode: `^[[?6c` echoed) the VT's.
+#   S2 yew from the keyboard at the screen's 160 x 50: each screen taken
+#      while it runs (opened, edited, saved, its message expired,
+#      suspended by C-z and continued by `fg`, quit) and the shell's
+#      after equals screen-ref's picture of the bytes to that moment,
+#      pixel for pixel and cell for cell; notes.txt reads alpha, beta,
+#      gamma, delta (`cat`).
+#   S3 pelt's prompt with its 6n: a pelt started from the keyboard (`sh
+#      -i`) is answered (it asks before every prompt only when its first
+#      report came: at least two `ESC [ 6 n` after it started), and the
+#      screen with `printf abc`'s prompt after `abc` equals screen-ref's.
+#   S4 per boot: no `refused:` line; init ended, status 0; halted.
+#
+# --images DIR boots what this script built earlier (any host with QEMU
+# and python3); --only build (or --no-boot) stops after S0. The UEFI leg
+# needs OVMF: SKIPPED LOUDLY without it unless PAX_REQUIRE_UEFI=1 (CI
+# sets it), when it is a failure. Exit 0 when every assertion held, 1
+# otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0
+usage="usage: tests/mpx5-screen [--images DIR | --no-boot | --only build] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     [ "$2" = build ] || die "$usage"; noboot=1; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+need readelf python3
+
+D=$here/mpx5-screen.d
+SKEYS=$PAX_ROOT/user/console/yew-screen.keys
+BORE="env cat"
+SRUN="/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m"
+NOTES=$'alpha\nbeta\ngamma\n'
+
+work=$PAX_BUILD/mpx5-screen
+runs=$PAX_BUILD/mpx5-screen-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+# screen-ref held to the VT (no boot, no build: any host with python3).
+refrows() {
+    local why= out
+    if out=$(python3 "$D/vtcheck.py" 2>&1); then
+        say "  $(printf '%s\n' "$out" | tail -n 1)"
+    else
+        printf '%s\n' "$out" | command grep -a '^FAIL' | head -n 5 >&2
+        why+=" screen-ref is not the VT's ($(printf '%s\n' "$out" | tail -n 1));"
+    fi
+    if out=$(python3 "$D/term.py" 2>&1); then
+        say "  term.py: $(printf '%s\n' "$out" | command grep -a '^Ran ')"
+    else
+        why+=" term.py: $(printf '%s\n' "$out" | tail -n 3 | tr '\n' ' ');"
+    fi
+    printf '%s' "$why"
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    v=$work/vt s=$work/session
+    mkdir -p "$v/bin" "$s/bin" "$s/home/pax" "$work/bin"
+    why=
+    "$PAX_ROOT/tools/mkvtcases" "$work/bin" > "$work/vtcases.txt" || why+=" tools/mkvtcases;"
+    "$PAX_ROOT/tools/mkyew" "$work/yew" > "$work/yew.txt" || why+=" tools/mkyew;"
+    "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" || why+=" tools/mkpelt;"
+    "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
+    "$PAX_ROOT/tools/mkas" "$work/bin" > "$work/as.txt" || why+=" tools/mkas;"
+    python3 "$D/records.py" "$work/vtcases.rec" "$work/vt.keys" || why+=" records.py;"
+    cp "$work/bin/vtcases" "$v/bin/vtcases" 2>/dev/null || why+=" no vtcases;"
+    cp "$work/yew/yew" "$s/bin/yew" 2>/dev/null || why+=" no yew;"
+    cp "$work/pelt/pelt" "$s/bin/sh" 2>/dev/null || why+=" no pelt;"
+    for u in $BORE; do cp "$work/bore/$u" "$s/bin/$u" 2>/dev/null || why+=" no $u;"; done
+    cp "$work/bin/as" "$s/bin/as" 2>/dev/null || why+=" no as;"
+    for f in "$v"/bin/* "$s"/bin/*; do
+        x=$(static_ok "$f") || why+=" $x;"
+        say "  program: ${f#"$work"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+    done
+    printf '%s' "$NOTES" > "$s/home/pax/notes.txt"
+    printf '%s\n' /bin/vtcases > "$v/pax-run"
+    printf '%s\n' "$SRUN" > "$s/pax-run"
+    "$PAX_ROOT/tools/mkinitramfs" "$work/vt.cpio" /bin/vtcases="$v/bin/vtcases":755 /etc/vtcases="$work/vtcases.rec":644 \
+        /etc/pax-run="$v/pax-run":644 > "$work/vt.initramfs.txt" || why+=" tools/mkinitramfs vt;"
+    args=(/home/pax/:755:1000:1000 /home/pax/notes.txt="$s/home/pax/notes.txt":644:1000:1000 /etc/pax-run="$s/pax-run":644)
+    for f in "$s"/bin/*; do args+=("/bin/${f##*/}=$f:755"); done
+    "$PAX_ROOT/tools/mkinitramfs" "$work/session.cpio" "${args[@]}" > "$work/session.initramfs.txt" || why+=" tools/mkinitramfs session;"
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-vt.conf" \
+                --add "$work/vt.cpio" initramfs.cpio "$elf" "$work/$tier/vt.iso" >/dev/null || why+=" $tier: mkimage vt;"
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                --add "$work/session.cpio" initramfs.cpio "$elf" "$work/$tier/session.iso" >/dev/null || why+=" $tier: mkimage session;"
+            for img in vt session; do
+                say "built $tier $img: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/$img.iso"), initramfs $(sha256_of "$work/$img.cpio")"
+            done
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    why+=$(refrows)
+    [ -z "$why" ] && say "PASS S0: kmain_console built ($tiers), every program static, both images built; screen-ref is the VT's case by case" || bad "S0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx5-screen build (S0): PASS (no boot: --only build)" || say "mpx5-screen build: FAIL"
+        exit "$fail"
+    fi
+else
+    why=$(refrows)
+    [ -z "$why" ] && say "PASS S0 (images): screen-ref is the VT's case by case" || bad "S0:$why"
+fi
+
+record() { # tier leg image status
+    ran=$((ran + 1))
+    printf '%s kmain_console %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
+}
+
+ends() { # norm -> reasons on stdout
+    local rf why=
+    rf=$(grep -c ': refused: ' "$1")
+    [ "$rf" = 0 ] || why+=" $rf refused lines ($(grep -m1 ': refused: ' "$1" | cut -c1-160));"
+    grep -Eqx "PAX: init /bin/(vtcases|as) ended with status 0; nothing left to run" "$1" \
+        || why+=" no 'PAX: init … ended with status 0' ($(grep -m1 '^PAX: init ' "$1"));"
+    grep -q '^PANIC ' "$1" && why+=" the kernel panicked: $(grep -m1 '^PANIC ' "$1");"
+    printf '%s' "$why"
+}
+
+# boot IMAGE KEYS TIMEOUT [ps2-session options]: the machine halted, the
+# session typed and its screens taken in $out.
+boot() {
+    local img=$1 keys=$2 t=$3; shift 3
+    iso=$images/$tier/$img.iso
+    log=$PAX_BUILD/mpx5-screen-$tier-$leg-$img.serial.log
+    out=$PAX_BUILD/mpx5-screen-$tier-$leg-$img
+    sock=$PAX_BUILD/mpx5-screen-$tier-$leg.mon2
+    rm -rf "$log" "$log.verdict" "$out" "$sock"
+    mkdir -p "$out"
+    hrc=0 krc=0
+    python3 "$PAX_ROOT/tools/ps2-session" --serial "$log" --monitor "$sock" --keys "$keys" --out "$out" "$@" \
+        > "$out/session.out" 2>&1 &
+    local kp=$!
+    "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout "$t" --qemu -m --qemu 512M \
+        --qemu -monitor --qemu "unix:$sock,server=on,wait=off" \
+        --elf "$elf" --marker 'halt|PANIC .*' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+    wait "$kp" || krc=$?
+    record "$tier" "$leg" "$img" "$hrc"
+    norm=$log.norm; serial_norm "$log" > "$norm"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        elf=$images/$tier/kmain_console.elf
+        if [ ! -f "$elf" ]; then
+            for t in S1 S2 S3 S4; do bad "$t $tier $leg: no image"; done
+            continue
+        fi
+
+        # --- the VT's cases: S1 ------------------------------------------------
+        id="$tier $leg vt"
+        boot vt "$images/vt.keys" 900 --gap 0.1
+        why=
+        [ "$krc" = 0 ] || why+=" the keys: $(tail -n 1 "$out/session.out");"
+        if r=$(python3 "$D/compare.py" ref "$log" 'PAX: the console' "$out" 2>&1); then
+            say "  S1 $id: $(printf '%s\n' "$r" | tail -n 1)"
+        else
+            printf '%s\n' "$r" | command grep -a '^FAIL' | head -n 5 >&2
+            why+=" against screen-ref: $(printf '%s\n' "$r" | tail -n 1);"
+        fi
+        if v=$(python3 "$D/compare.py" vt "$log" "$out" 2>&1); then
+            vl=$(printf '%s\n' "$v" | tail -n 1)
+        else
+            printf '%s\n' "$v" | command grep -a '^FAIL' | head -n 8 >&2
+            why+=" against the VT: $(printf '%s\n' "$v" | tail -n 1);"
+            vl=
+        fi
+        printf '%s\n%s\n' "$r" "$v" > "$out/verdicts.txt"
+        case $vl in *'; 0 not 80x25') ;; *' not 80x25')
+            say "SKIP S1 $id: the screen is not 80x25 (the firmware ignores Limine's 640x400), so the VT's cells are held through screen-ref alone (S0)" ;;
+        esac
+        n=$(wc -l < "$out/dumps.txt" 2>/dev/null | tr -d ' ')
+        [ "${n:-0}" = 77 ] || why+=" ${n:-0} screens taken, not 77;"
+        grep -qx 'vtcases: done' "$norm" || why+=" no 'vtcases: done';"
+        [ -z "$why" ] && say "PASS S1 $id: $n screens screen-ref's pixel for pixel; $vl" || bad "S1 $id:$why"
+        why=$(ends "$norm")
+        [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+        [ -z "$why" ] && say "PASS S4 $id: nothing refused by name; init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "S4 $id:$why"
+
+        # --- yew and pelt from the keyboard: S2, S3 -------------------------------
+        id="$tier $leg session"
+        boot session "$SKEYS" 1500
+        why=
+        [ "$krc" = 0 ] || why+=" the keys: $(tail -n 1 "$out/session.out");"
+        if r=$(python3 "$D/compare.py" ref "$log" 'PAX: the console' "$out" 2>&1); then
+            :
+        else
+            why+=" against screen-ref: $(printf '%s\n' "$r" | command grep -a '^FAIL' | head -n 3 | tr '\n' ' ');"
+        fi
+        printf '%s\n' "$r" > "$out/verdicts.txt"
+        n=$(wc -l < "$out/dumps.txt" 2>/dev/null | tr -d ' ')
+        [ "${n:-0}" = 9 ] || why+=" ${n:-0} screens taken, not 9;"
+        python3 -c '
+import sys
+d = open(sys.argv[1], "rb").read().replace(b"\r", b"")
+sys.exit(0 if b"cat notes.txt\nalpha\nbeta\ngamma\ndelta\n" in d else 1)' "$norm" || why+=" cat notes.txt is not alpha beta gamma delta;"
+        [ -z "$why" ] && say "PASS S2 $id: yew typed at the keyboard; $(printf '%s\n' "$r" | tail -n 1); notes.txt alpha beta gamma delta" || bad "S2 $id:$why"
+        why=
+        asks=$(python3 -c '
+import sys
+d = open(sys.argv[1], "rb").read()
+at = d.find(b"sh -i")
+print(d[at:].count(b"\x1b[6n") if at >= 0 else -1)' "$log")
+        [ "$asks" -ge 2 ] || why+=" the inner pelt asked ESC[6n $asks times (once means its first report never came);"
+        grep -a '^PASS pelt-6n:' <<< "$r" >/dev/null || why+=" the pelt-6n screen is not screen-ref's;"
+        [ -z "$why" ] && say "PASS S3 $id: the inner pelt answered, ESC[6n asked $asks times; its prompt after abc screen-ref's ($(grep -a '^PASS pelt-6n:' <<< "$r" | cut -d: -f2-))" || bad "S3 $id:$why"
+        why=$(ends "$norm")
+        [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+        [ -z "$why" ] && say "PASS S4 $id: nothing refused by name; init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "S4 $id:$why"
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx5-screen: PASS" || say "mpx5-screen: FAIL"
+exit "$fail"
