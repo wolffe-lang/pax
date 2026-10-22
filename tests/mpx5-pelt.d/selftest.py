@@ -22,6 +22,8 @@ with tempfile.TemporaryDirectory(prefix='px61-compare-') as d:
     (d / 'linux/selfcheck-root.tty').write_bytes(b'\x1b[6n$ /bin/selfcheck; echo selfcheck-status=$?\r\r\nselfcheck-status=0\r\n$ exit 0\r\r\n')
     r = run(good)
     assert r.returncode == 0, r.stdout + r.stderr
+    r = run(good.replace('user: frames free', '\nuser: frames free'))
+    assert r.returncode == 1 and 'FAIL F1' in r.stdout
     r = run(good.replace('selfcheck-status=0\n', 'selfcheck-status=1\n'))
     assert r.returncode == 1 and 'FAIL F2 static table checks' in r.stdout
     r = run('run 1: /bin/env\nuser: frames free 20 before, 20 after\n')

@@ -20,7 +20,7 @@ assert len(names) == 26 and len(set(names)) == 26
 out = l / 'verified-final'
 (out / 'linux').mkdir(parents=True, exist_ok=True)
 (out / 'run-names').write_text('\n'.join(names) + '\n')
-compare = l / 'shape-source/tests/mpx5-pelt.d/compare.py'
+compare = Path(sys.argv[2]) if len(sys.argv) > 2 else l / 'shape-source/tests/mpx5-pelt.d/compare.py'
 def norm(path):
     s = path.read_bytes().decode().replace('\r', '')
     for pattern in (r'\x1b\[[0-9;?=<>]*[A-Za-z]', r'\x1b[()][A-Za-z0-9]', r'\x1b[c78DEHM=>]'):

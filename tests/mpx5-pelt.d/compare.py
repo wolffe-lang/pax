@@ -19,7 +19,7 @@ def norm(text):
     text = re.sub(r'\x1b\[[0-9;?=<>]*[A-Za-z]', '', text)
     text = re.sub(r'\x1b[()][A-Za-z0-9]', '', text)
     text = re.sub(r'\x1b[c78DEHM=>]', '', text).replace('\r', '')
-    return re.sub(r'(?m)^(\[\d+\]) \d+$', r'\1 PID', text).strip('\n') + '\n'
+    return re.sub(r'(?m)^(\[\d+\]) \d+$', r'\1 PID', text)
 
 def diff(name, a, b):
     global failed
