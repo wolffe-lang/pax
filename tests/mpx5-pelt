@@ -39,6 +39,22 @@ bad() { say "FAIL $*"; fail=1; }
 linux_side() {
     local d=$1 c role args rc
     mkdir -p "$d/linux"
+    case " $CASES " in *" corpus "*)
+        # A wrong pin can make both sides equally wrong or hang before
+        # the differential comparison. Assert the process row first.
+        printf 'cd /tmp\nsh /usr/share/pelt/fork/diff/env/subshell_is_process.sh\nexit 0\n' > "$d/process.keys"
+        "$PAX_ROOT/tools/linux-tree" --root "$d/root" --keys "$d/process.keys" --prompt '$ ' \
+            --argv0 /bin/env --size 512m --rdev --nsproc --owners "$d/owners" \
+            "$d/linux/process.tty" -- /bin/env HOME=/ /bin/sh -i -m || return 1
+        serial_norm "$d/linux/process.tty" > "$d/linux/process.cmp"
+        while IFS= read -r witness; do
+            if ! grep -qxF "$witness" "$d/linux/process.cmp"; then
+                say "FAIL F2 Linux fork semantic witness: $witness"
+                return 1
+            fi
+        done < "$F/process.expect"
+        say 'PASS F2 Linux fork semantic witness: subshell, substitution, stage, background processes'
+    ;; esac
     for c in $CASES; do
         for role in root pax; do
             args=(/bin/env HOME=/ /bin/sh -i -m)
