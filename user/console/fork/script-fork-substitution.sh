@@ -1,0 +1,9 @@
+x=$(true; true)
+x=$(true; true)
+x=$(true; true)
+x=$(true; true)
+x=$(true; true)
+x=$(true; true)
+x=$(true; true)
+x=$(true; true)
+echo SHAPE:script-fork-substitution:8
