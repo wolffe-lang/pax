@@ -333,6 +333,52 @@ fn control(b: u64) {
     }
 }
 
+// Indexed colours measured through /dev/vcsa1, notes/px59/vt.rows.
+// Packed nibbles are PAX palette indices, not VGA attribute ordering.
+fn indexed(n: u64, bg: bool) -> u64 {
+    let group = n / 16
+    let packed = if bg {
+        match group {
+            0 => 0x7654321076543210,
+            1 => 0x0000440000440000,
+            2 => 0x2266222244000044,
+            3 => 0x4400004400006622,
+            4 => 0x2222440000440000,
+            5 => 0x0044000066222266,
+            6 => 0x4400004400004400,
+            7 => 0x0000662222662222,
+            8 => 0x0044000044000044,
+            9 => 0x6622226622224400,
+            10 => 0x1111551111551111,
+            11 => 0x3377333355111155,
+            12 => 0x5511115511117733,
+            13 => 0x3333551111551111,
+            14 => 0x0000000077333377,
+            _ => 0x7777777777770000,
+        }
+    } else {
+        match group {
+            0 => 0xfedcba9876543210,
+            1 => 0x6622c44462c44440,
+            2 => 0xaae66222e66622c4,
+            3 => 0xc44483c44451eeea,
+            4 => 0x6222e66622c46622,
+            5 => 0x11c45511eeeaaae6,
+            6 => 0xe67733c47833c455,
+            7 => 0x5511eeeaaae66222,
+            8 => 0x33d57733d55511d5,
+            9 => 0xfffbbbf77333f777,
+            10 => 0x5111d55111d55111,
+            11 => 0xbbf77333f77333d5,
+            12 => 0xddd999ddd999fffb,
+            13 => 0xfbbbfffbbbddd999,
+            14 => 0x88888888fffbbbff,
+            _ => 0xfffffff777777777,
+        }
+    }
+    (packed >> ((n % 16) * 4)) & 15
+}
+
 /// SGR with the `n` parameters read.
 fn sgr(n: u64) {
     var k: u64 = 0
@@ -345,8 +391,24 @@ fn sgr(n: u64) {
             put_sv(S_INV, 0)
         } else if p == 1 {
             put_sv(S_BOLD, 1)
+        } else if p == 22 {
+            put_sv(S_BOLD, 0)
+        } else if p == 27 {
+            put_sv(S_INV, 0)
         } else if p == 7 {
             put_sv(S_INV, 1)
+        } else if p == 38 || p == 48 {
+            if k + 2 < n && sv(S_P + k + 1) == 5 {
+                let index = sv(S_P + k + 2)
+                if index < 256 { put_sv(if p == 38 { S_FG } else { S_BG }, indexed(index, p == 48)) }
+                k += 2
+            } else if k + 1 < n && sv(S_P + k + 1) == 2 {
+                k += 4 // truecolour not served; never treat RGB as SGR flags
+            } else {
+                k = n // incomplete or unsupported colour group
+            }
+        } else if p >= 100 && p <= 107 {
+            put_sv(S_BG, p - 100 + 8) // R-px59-1: bright, unlike the VGA VT
         } else if p >= 30 && p <= 37 {
             put_sv(S_FG, p - 30)
         } else if p == 39 {
