@@ -1,0 +1,35 @@
+diff --git a/crates/wolf_mem/src/ubcheck.rs b/crates/wolf_mem/src/ubcheck.rs
+index eafe2b93..bc3b2d5a 100644
+--- a/crates/wolf_mem/src/ubcheck.rs
++++ b/crates/wolf_mem/src/ubcheck.rs
+@@ -14664,9 +14664,12 @@ mod checked_sig {
+                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+             // SAFETY: a locale made from "C", on this thread only for the
+             // read and put back; the text copied before the lock goes.
++            // newlocale(3): with a null base, every category absent from
++            // the mask uses POSIX (equivalent to C). A zero mask therefore
++            // makes the whole C locale without libc-specific mask bindings.
+             unsafe {
+                 let c_locale =
+-                    libc::newlocale(libc::LC_ALL_MASK, c"C".as_ptr(), std::ptr::null_mut());
++                    libc::newlocale(0, c"C".as_ptr(), std::ptr::null_mut());
+                 let before = if c_locale.is_null() {
+                     std::ptr::null_mut()
+                 } else {
+diff --git a/crates/wolf_rt/src/signal.rs b/crates/wolf_rt/src/signal.rs
+index 7b65903f..06503f05 100644
+--- a/crates/wolf_rt/src/signal.rs
++++ b/crates/wolf_rt/src/signal.rs
+@@ -1677,8 +1677,11 @@ mod sys {
+         // SAFETY: a locale made from the name "C" (or none), installed
+         // on this thread only for the read and put back; the text is
+         // copied out before the lock is let go.
++        // newlocale(3): with a null base, every category absent from
++        // the mask uses POSIX (equivalent to C). A zero mask therefore
++        // makes the whole C locale without libc-specific mask bindings.
+         unsafe {
+-            let c_locale = libc::newlocale(libc::LC_ALL_MASK, c"C".as_ptr(), std::ptr::null_mut());
++            let c_locale = libc::newlocale(0, c"C".as_ptr(), std::ptr::null_mut());
+             let before = if c_locale.is_null() {
+                 std::ptr::null_mut()
+             } else {
