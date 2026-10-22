@@ -33,8 +33,8 @@ for k, name in enumerate(names, 1):
             p = line.find('user: ')
             if p == 0:
                 continue
-            part.append(line if p < 0 else line[:p])
-    actual = norm('\n'.join(part))
+            part.append(line + '\n' if p < 0 else line[:p])
+    actual = norm(''.join(part))
     ref = images / 'linux' / (name + '.tty')
     if not ref.is_file():
         print('FAIL F1 missing Linux reference: ' + name); failed = True; continue
