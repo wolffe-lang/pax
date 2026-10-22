@@ -49,7 +49,9 @@ load and wait below 16 where the timing retake requires it.
   Set `PX61_SOURCE` to an immutable archived source directory and
   `PX61_RUN` to a new output name; never replace a live harness file.
 - `guest-replay.sh`: the same inputs under a real Linux kernel, twice;
-  `linux-vm.sh` and `notes/px52/vmjob.c` supply that guest method.
+  `linux-vm.sh` and `notes/px61/vmjob.c` supply that guest method
+  (the px52 driver plus an explicit pause input). Legacy recordings
+  keep the original px52 driver and its default timing.
 - `cost-and-std.sh`: both kernel entry points and compiler tiers, plus
   two independent std manifests.
 - `census.sh` and `init-cost.sh`: syscall names, fork flags and the
@@ -90,3 +92,23 @@ is `boreutils-static.sums`; the std tree's is `std.sha256`.
 stopped in the Linux FIFO fixture. `ci-39801704202-plant-fork.log` is
 the focused semantic witness. Keep both: the first attempt is not a
 substitute for the second assertion.
+
+## Accepted cohort map
+
+`kasumi-verified-final.out` and `kasumi-verified-after-prune.out` are the
+acceptance checks, not the earlier bundle's progress log. They check all
+26 group/role pairs against two real Linux guest recordings. The full
+frozen cohort supplies every group except shapes; the separately frozen
+corrected-shape cohort supplies that group. `replay/` retains each
+accepted normalized PAX transcript beside its real-Linux reference.
+
+`kasumi-replay-v2-first.out` retains the rejected generated `true &;`
+input and its failing counter witness. `kasumi-shapes-corrected.out`
+retains the corrected input's result. The earlier Busybox-ps and
+prompt-delayed Ctrl-Z records are not substitutes for the accepted
+process-group and stopped-job evidence.
+
+The legacy mixed-pipeline key keeps the original Ctrl-Z, jobs and first
+exit, then adds only the next-turn teardown that the correctly stopped
+job requires. Its two guest recordings precede the reference refresh.
+All other legacy recordings remain unchanged.

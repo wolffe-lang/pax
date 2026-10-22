@@ -4,7 +4,7 @@
 set -euo pipefail
 L=$HOME/lanes/px61
 X=${PX61_SOURCE:-$L/pax}
-printf '%s\n' $$ > "$L/suite-$1.pid"
+printf '%s\n' $$ > "$L/suite-${PX61_RUN:-$1}.pid"
 ulimit -c 0
 uptime
 suite=$1
