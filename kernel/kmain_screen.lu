@@ -7,7 +7,7 @@
 // then 400 ended by CR LF (a scroll each once the grid is full), the
 // PIT's ticks around each; then it writes the terminal's test pattern
 // (every SGR it honours, TAB, BS, CR, the deferred wrap, UTF-8, the
-// sequences it ignores) and halts:
+// sequences it ignores, px59's served classes) and halts:
 //
 //     PAX: the screen
 //     paging: limine cr3 0x<A>, pax cr3 0x<B>, <P> table frames
@@ -177,18 +177,59 @@ fn pattern() {
     log.put("x end")
     log.end()
     log.put("ignored:")
-    esc("2J")
-    log.put(" erase")
-    esc("?25l")
+    esc("?2004h")
     log.put(" private")
-    esc("5A")
-    log.put(" up")
+    esc(">21u")
+    log.put(" kitty")
+    esc("2 q")
+    log.put(" shape")
     log.put_byte(27)
     log.put("(B paren")
     log.put_byte(7)
     log.put(" bell")
     log.put_byte(127)
     log.put(" del")
+    log.end()
+    // px59: the classes an editor writes, as a Linux VT draws them
+    // (kernel/screen's header): a save, a move up and back, the
+    // alternate screen entered, written and left, an OSC string, SGR
+    // 22 27 100-107 and the 256 colours, an erase in a background.
+    log.put("served:")
+    log.put_byte(27)
+    log.put("7")
+    esc("3A")
+    esc("4G")
+    log.put("@")
+    log.put_byte(27)
+    log.put("8")
+    log.put(" saved")
+    esc("?1049h")
+    esc("H")
+    log.put("alternate")
+    esc("?1049l")
+    log.put(" back")
+    log.put_byte(27)
+    log.put("]0;not drawn")
+    log.put_byte(7)
+    log.put(" osc ")
+    esc("1m")
+    log.put("b")
+    esc("22m")
+    log.put("n")
+    esc("7m")
+    log.put("i")
+    esc("27m")
+    log.put("o")
+    esc("101m")
+    log.put("B")
+    esc("0;38;5;196m")
+    log.put("R")
+    esc("48;5;46m")
+    log.put("G")
+    esc("0;44m")
+    log.put(" el")
+    esc("K")
+    esc("0m")
     log.end()
 }
 
