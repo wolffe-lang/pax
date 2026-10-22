@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# mkvtcases — build px59's vtcases (user/elf/vtcases.c) alone, a static
+# x86-64 Linux executable: the VT cases tests/mpx5-screen plays on PAX's
+# console. tools/mkas's compiler line (`cc -static -no-pie -O1`, ET_EXEC
+# with no PT_INTERP, checked). Build on a baseline x86-64 glibc (the CI
+# runner's Ubuntu; an Ubuntu container on kasumi), never on kasumi's own
+# (px10).
+#
+#   tools/mkvtcases OUTDIR
+#
+# Prints `vtcases <sha256> <bytes>`. Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkvtcases OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${CC:-cc}
+need "$cc" readelf
+"$cc" -static -no-pie -O1 -Wall -Wextra -Wno-unused-result -Wno-unused-function \
+    -Wl,--build-id=none -Wl,-z,noexecstack -o "$out/vtcases" "$PAX_ROOT/user/elf/vtcases.c" || die "cc: vtcases"
+readelf -hW "$out/vtcases" | grep -Eq 'Type: +EXEC' || die "vtcases is not ET_EXEC"
+! readelf -lW "$out/vtcases" | grep -q INTERP || die "vtcases has a PT_INTERP (not static)"
+printf '%s %s %s\n' vtcases "$(sha256_of "$out/vtcases")" "$(wc -c < "$out/vtcases" | tr -d ' ')"
