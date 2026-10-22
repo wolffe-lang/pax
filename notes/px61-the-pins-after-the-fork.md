@@ -46,6 +46,8 @@ interpreter uses the existing Rust image. The session recipes print
 load and wait below 16 where the timing retake requires it.
 
 - `run-suite.sh SUITE`: container build, live Linux reference, PAX.
+  Set `PX61_SOURCE` to an immutable archived source directory and
+  `PX61_RUN` to a new output name; never replace a live harness file.
 - `guest-replay.sh`: the same inputs under a real Linux kernel, twice;
   `linux-vm.sh` and `notes/px52/vmjob.c` supply that guest method.
 - `cost-and-std.sh`: both kernel entry points and compiler tiers, plus
@@ -59,6 +61,23 @@ load and wait below 16 where the timing retake requires it.
 Long jobs use `setsid -f` and a PID file. Keep the first bundled replay
 logs when rerunning the partitioned harness; they are distinct inputs,
 not replacements for the fresh-boot records.
+
+The session adapter translates in-flight control keys rather than waiting
+for the next prompt: upstream SETTLE=0.6 s is passed to both terminal
+helpers and the guest driver. It preserves the upstream `-i +m` defaults
+and explicit `-m` job-control cases. A serial primer and short cwd setup
+precede the original steps. The mixed pipeline retains its refused exit,
+then receives a separate teardown input. `compare.py` uses exactly the
+repository's canonical serial normalization, before newline decoding.
+Stopped-job and foreground-resume witnesses reject equal but unexercised
+output.
+
+The process-group query helper is `user/elf/pspgid.c`, built by
+`tools/mkpspgid`. It supports only the probe's documented `ps -o pgid= -p
+PID` query, not a distribution `ps`. The unchanged upstream probe scripts
+remain the test inputs. The original Linux RSS controls and dash probes
+run in sh20's read-only `/usr` oracle environment (`dash-side.sh`); PAX's
+bounded shape replays are not claimed as an RSS measurement.
 
 ## Raw evidence
 
