@@ -5,6 +5,8 @@ import sys
 import tempfile
 
 compare = Path(__file__).with_name('compare.py')
+shape_keys = Path(__file__).resolve().parents[2] / 'user/console/fork/shapes.keys'
+subprocess.run(['bash', '-n', str(shape_keys)], check=True)
 with tempfile.TemporaryDirectory(prefix='px61-compare-') as d:
     d = Path(d)
     (d / 'linux').mkdir()
