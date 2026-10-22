@@ -139,7 +139,7 @@ if [ -z "$images" ]; then
     "$PAX_ROOT/tools/fetch-limine" || exit 2
     rm -rf "$work"
     r=$work/root
-    mkdir -p "$r/bin" "$r/etc" "$r/home/pax" "$work/bin"
+    mkdir -p "$r/bin" "$r/etc" "$r/home/pax/child" "$r/projects/proj" "$work/bin"
     why=
     "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" || why+=" tools/mkpelt;"
     "$PAX_ROOT/tools/mklope" "$work/lope" > "$work/lope.txt" || why+=" tools/mklope;"
@@ -156,8 +156,8 @@ if [ -z "$images" ]; then
     done
     cp "$SHRC" "$r/etc/shrc" || why+=" no $SHRC;"
     printf '%s\n' "${RUNS[@]}" > "$r/etc/pax-run"
-    printf '%s\n' '/home/pax 755 1000 1000' > "$work/owners"
-    args=(/home/pax/:755:1000:1000 /etc/shrc="$r/etc/shrc":644 /etc/pax-run="$r/etc/pax-run":644)
+    printf '%s\n' '/home/pax 755 1000 1000' '/home/pax/child 755 1000 1000' '/projects/proj 755 1000 1000' > "$work/owners"
+    args=(/home/pax/:755:1000:1000 /home/pax/child/:755:1000:1000 /projects/proj/:755:1000:1000 /etc/shrc="$r/etc/shrc":644 /etc/pax-run="$r/etc/pax-run":644)
     for f in "$r"/bin/*; do args+=("/bin/${f##*/}=$f:755"); done
     "$PAX_ROOT/tools/mkinitramfs" "$work/lope.cpio" "${args[@]}" > "$work/lope.initramfs.txt" || why+=" tools/mkinitramfs;"
     for tier in $tiers; do
@@ -192,7 +192,7 @@ fi
 lx=$images/linux
 for n in "${NAMES[@]}"; do
     [ -f "$lx/$n.tty" ] || { bad "L0 linux $n: no $lx/$n.tty (build first, and run the Linux side)"; continue; }
-    serial_norm "$lx/$n.tty" > "$lx/$n.cmp"
+    serial_norm "$lx/$n.tty" | sed -E 's/^(\[[0-9]+\]) [0-9]+$/\1 PID/' > "$lx/$n.cmp"
 done
 
 # Run k's transcript: from its `run <k>:` line to the kernel's `user:
@@ -221,6 +221,13 @@ rows() { # kind home -> NAME<TAB>line<TAB>line…, one row a line
         printf '%s\t%s\t%s\n' "true runs" '$ true; echo st=$?' st=0
         printf '%s\t%s\t%s\t%s\n' "no match: pelt's not found, 127" '$ zzqqxx; echo st=$?' 'pelt: line *: zzqqxx: not found' st=127
         printf '%s\t%s\t%s\t%s\n' "the second shell's bin lands in /bin" '$ bin' '$ pwd' /bin
+        printf '%s\t%s\t%s\t%s\n' "autocd relative path" '$ home/pax' '$ pwd' /home/pax
+        printf '%s\t%s\t%s\t%s\n' "autocd child name" '$ child' '$ pwd' /home/pax/child
+        printf '%s\t%s\t%s\t%s\n' "autocd parent" '$ ..' '$ pwd' /home/pax
+        printf '%s\t%s\t%s\t%s\n' "autocd absolute trailing slash" '$ /home/pax/' '$ pwd' /home/pax
+        printf '%s\t%s\t%s\t%s\n' "proj through the store hook" '$ proj' '$ pwd' /projects/proj
+        printf '%s\t%s\n' "background subshell finished" bg-st=0
+        printf '%s\t%s\n' "command substitution finished" cs=forked
     else
         printf '%s\t%s\t%s\t%s\t%s\n' "the store written: both cds recorded" '$ lope list' /bin /etc '$ etc'
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "the store read by a second shell, the first gone" '$ exec sh -i -m' '$ lope list' /etc /bin "$h" '$ bin'
@@ -283,7 +290,7 @@ for leg in $legs; do
             n=${NAMES[$k]} h=${HOMES[$k]}
             out=$PAX_BUILD/mpx5-lope-$tier-$leg-$n.session
             run_part "$norm" $((k + 1)) > "$out"
-            serial_norm "$out" > "$out.cmp"
+            serial_norm "$out" | sed -E 's/^(\[[0-9]+\]) [0-9]+$/\1 PID/' > "$out.cmp"
             # L1: the container's session.
             why=
             if [ -f "$lx/$n.cmp" ]; then
