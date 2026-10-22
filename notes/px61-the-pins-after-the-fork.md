@@ -95,7 +95,7 @@ substitute for the second assertion.
 
 ## Accepted cohort map
 
-`kasumi-verified-final.out` and `kasumi-verified-after-prune.out` are the
+`kasumi-verified-strict.out` and `kasumi-verified-after-prune.out` are the
 acceptance checks, not the earlier bundle's progress log. They check all
 26 group/role pairs against two real Linux guest recordings. The full
 frozen cohort supplies every group except shapes; the separately frozen
@@ -112,3 +112,8 @@ The legacy mixed-pipeline key keeps the original Ctrl-Z, jobs and first
 exit, then adds only the next-turn teardown that the correctly stopped
 job requires. Its two guest recordings precede the reference refresh.
 All other legacy recordings remain unchanged.
+
+The strict check retains boundary newlines; no leading/trailing whitespace
+is elided. `kasumi-corpus-envelope.out` checks the complete corpus session
+with only the explicitly named FIFO row set apart. `iso-digests.out`
+records both host reads and the preserved px59 copy.
