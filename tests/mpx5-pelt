@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# px61: pelt#50's replay, the same static shell and keys on Linux and
+# PAX, root and pax. The FIFO row is measured and named separately
+# (R-px61-1, pax#108), never silently counted as parity.
+# Builds only on baseline Linux, not kasumi's host libc.
+set -uo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+images= only= tiers=both legs=both noboot=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images) images=$2; shift 2 ;;
+        --only) only=$2; shift 2 ;;
+        --tier) tiers=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --no-boot) noboot=1; shift ;;
+        *) die 'usage: mpx5-pelt [--images DIR] [--only build|linux] [--tier native|release|both] [--firmware bios|uefi|both] [--no-boot]' ;;
+    esac
+done
+case $tiers in both) tiers='native release' ;; native|release) ;; *) die 'bad tier' ;; esac
+case $legs in both) legs='bios uefi' ;; bios|uefi) ;; *) die 'bad firmware' ;; esac
+case $only in ''|build|linux) ;; *) die 'bad only' ;; esac
+[ "$only" != linux ] || [ -n "$images" ] || die '--only linux needs --images'
+need python3 readelf
+F=$PAX_ROOT/user/console/fork
+CASES='corpus c_jc_mixed_pipeline jc_subshell_stop jc_subshell_redir_stop jc_background_subshell subshell_jobs autocd_subshell cnf_cd cnf_contexts cnf_redirect shapes probes selfcheck'
+BORE='cat env head sleep true false mkdir rm tr wc tail'
+BB='mkfifo sed yes ps sort'
+work=$PAX_BUILD/mpx5-pelt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+linux_side() {
+    local d=$1 c role args rc
+    mkdir -p "$d/linux"
+    for c in $CASES; do
+        for role in root pax; do
+            args=(/bin/env HOME=/ /bin/sh -i -m)
+            [ "$role" = root ] || args=(/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m)
+            rc=0
+            "$PAX_ROOT/tools/linux-tree" --root "$d/root" --keys "$d/keys/$c.keys" --prompt '$ ' \
+                --argv0 "${args[0]}" --size 512m --rdev --nsproc --owners "$d/owners" \
+                "$d/linux/$c-$role.tty" -- "${args[@]}" || rc=$?
+            [ "$rc" = 0 ] || return "$rc"
+            [ "$(cat "$d/linux/$c-$role.tty.rc")" = 0 ] || return 1
+        done
+    done
+}
+if [ "$only" = linux ]; then
+    linux_side "$images" || { bad 'F0 Linux replay'; exit 1; }
+    say 'PASS F0 Linux: every replay ran, root and pax'
+    exit 0
+fi
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}; need "$wolf"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"; mkdir -p "$work/root" "$work/keys" "$work/bin"
+    r=$work/root
+    mkdir -p "$r/bin" "$r/etc" "$r/tmp" "$r/home/pax" "$r/usr/share/pelt/fork"
+    "$PAX_ROOT/tools/mkpelt" "$work/pelt" || exit 2
+    "$PAX_ROOT/tools/mkpelt" "$work/selfcheck" selfcheck || exit 2
+    "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE || exit 2
+    "$PAX_ROOT/tools/mkas" "$work/bin" || exit 2
+    "$PAX_ROOT/tools/fetch-busybox" "$work/bin" || exit 2
+    cp "$work/pelt/pelt" "$r/bin/sh"
+    cp "$work/selfcheck/selfcheck" "$r/bin/selfcheck"
+    cp "$work/bin/as" "$r/bin/as"
+    for c in $BORE; do cp "$work/bore/$c" "$r/bin/$c"; done
+    # Busybox applets are black-box fixture helpers, not the shell or
+    # a replacement for any tested pelt/boreutils program.
+    for c in $BB; do cp "$work/bin/busybox" "$r/bin/$c"; done
+    cp -R "$F/." "$r/usr/share/pelt/fork/"
+    for c in $CASES; do
+        if [ "$c" = selfcheck ]; then printf '/bin/selfcheck; echo selfcheck-status=$?\nexit 0\n' > "$work/keys/$c.keys"
+        else cp "$F/$c.keys" "$work/keys/$c.keys"; fi
+    done
+    : > "$r/etc/pax-run"; : > "$work/all.keys"; : > "$work/run-names"
+    for c in $CASES; do
+        for role in root pax; do
+            if [ "$role" = root ]; then echo '/bin/env HOME=/ /bin/sh -i -m' >> "$r/etc/pax-run"
+            else echo '/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m' >> "$r/etc/pax-run"; fi
+            echo "$c-$role" >> "$work/run-names"
+            cat "$work/keys/$c.keys" >> "$work/all.keys"
+        done
+    done
+    printf '%s\n' '/tmp 1777 0 0' '/home/pax 755 1000 1000' > "$work/owners"
+    args=(/tmp/:1777 /home/pax/:755:1000:1000)
+    while IFS= read -r -d '' f; do args+=("${f#"$r"}=$f:644"); done < <(find "$r" -type f ! -path "$r/bin/*" -print0)
+    for f in "$r"/bin/*; do
+        readelf -hW "$f" | grep -Eq 'Type: +EXEC' || die "$f not ET_EXEC"
+        ! readelf -lW "$f" | grep -q INTERP || die "$f not static"
+        args+=("/bin/${f##*/}=$f:755")
+        say "program: ${f##*/} $(sha256_of "$f") $(wc -c < "$f")"
+    done
+    "$PAX_ROOT/tools/mkinitramfs" "$work/pelt.cpio" "${args[@]}" > "$work/initramfs.txt" || exit 2
+    for tier in $tiers; do
+        flag=(); [ "$tier" != release ] || flag=(--release)
+        mkdir -p "$work/$tier"
+        elf=$("$PAX_ROOT/tools/build-kernel" "${flag[@]}" --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier") || exit 2
+        "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$work/pelt.cpio" initramfs.cpio "$elf" "$work/$tier/pelt.iso" || exit 2
+    done
+    say 'PASS F0 build: static programs, replay fixtures and images'
+    [ "$only" != build ] || exit 0
+    linux_side "$work" || { bad 'F0 Linux replay'; exit 1; }
+    images=$work
+    [ "$noboot" != 1 ] || exit 0
+fi
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then bad 'UEFI required but missing'; else say 'SKIP uefi: no OVMF'; fi
+        continue
+    fi
+    for tier in $tiers; do
+        log=$PAX_BUILD/mpx5-pelt-$tier-$leg.serial.log
+        rc=0
+        "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 1800 --qemu -m --qemu 1024M \
+            --elf "$images/$tier/kmain_console.elf" --marker 'halt|PANIC .*' --type "$images/all.keys" --prompt '$ ' \
+            "$images/$tier/pelt.iso" > "$log.verdict" 2>&1 || rc=$?
+        ran=$((ran+1))
+        [ "$rc" = 0 ] || bad "F3 $tier $leg: not halted ($rc)"
+        serial_norm "$log" > "$log.norm"
+        python3 -I "$PAX_ROOT/tests/mpx5-pelt.d/compare.py" "$images" "$log.norm" "$log.sessions" || bad "F1/F2 $tier $leg replay"
+        if grep -q '^PANIC ' "$log.norm"; then bad "F3 $tier $leg panic"; fi
+        say "F3 $tier $leg: $(tail -1 "$log.verdict")"
+    done
+done
+[ "$ran" -gt 0 ] || bad 'no boot ran'
+[ "$fail" = 0 ] && say 'mpx5-pelt: PASS' || say 'mpx5-pelt: FAIL'
+exit "$fail"
