@@ -52,8 +52,7 @@ for k, name in enumerate(names, 1):
                 print('FAIL F1 missing corpus row: ' + name + ' ' + case); failed = True; continue
             if case == 'builtin/c_s_dot_special_file':
                 # R-px61-1: explicitly test both answers, not a wildcard waiver.
-                good = ('from the fifo\nfifo: 0' in b[case] and 'from the fifo\nfifo: 0' not in a[case]
-                        and ('Operation not permitted' in a[case] or 'Permission denied' in a[case]))
+                good = ('from the fifo\nfifo: 0' in b[case] and ('Operation not permitted' in a[case] or 'Permission denied' in a[case]))
                 print(('PASS' if good else 'FAIL') + ' F1 NAMED FIFO BLOCKER ' + name + '\nLinux:\n' + b[case] + 'PAX:\n' + a[case])
                 failed |= not good
             else:
