@@ -64,4 +64,12 @@ class Rendition(unittest.TestCase):
                 t=term(f'\33[{48 if bg else 38};5;{i}mX'.encode())
                 self.assertEqual(t.cells[0][0][2 if bg else 1],swap(v>>4 if bg else v&15),(bg,i))
 
+class Osc(unittest.TestCase):
+    def test_bel_and_st(self):
+        for end in (b'\7',b'\33\\'):
+            t=term(b'A\33]52;c;eA=='+end+b'B')
+            self.assertEqual(t.cells[0][:3],[(65,7,0),(66,7,0),(32,7,0)])
+    def test_unterminated(self):
+        t=term(b'A\33]52;ignored\n\33[31mZ'); self.assertEqual((t.cy,t.cx),(0,1))
+
 if __name__=='__main__': unittest.main(verbosity=2)
