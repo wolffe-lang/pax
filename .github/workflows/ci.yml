@@ -92,6 +92,10 @@ on:
         description: "mpx4-ready only (px55, pax#91): its ways, as PAX_READY_WAYS (e.g. 'peer user'); empty: every way"
         type: string
         default: ""
+      wolf_plant:
+        description: "mpx5-wolf only: deliberate glibc or std-root break; empty is the control"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -2813,6 +2817,92 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px60: the patched musl compiler and its checked-machine sessions.
+  mpx5-wolf:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-wolf')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+      PAX_WOLF_PLANT: ${{ inputs.wolf_plant }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+          qemu-system-x86_64 --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+          docker --version
+
+      - name: wolf's Rust (user/wolf.pin's channel, the tree's) and the musl target (rustup)
+        run: |
+          . user/wolf.pin
+          rustup --version
+          rustup toolchain install "$WOLF_SRC_RUST" --profile minimal --target "$WOLF_SRC_TARGET"
+          rustup run "$WOLF_SRC_RUST" rustc --version
+          rustup target list --installed --toolchain "$WOLF_SRC_RUST"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-wolf-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the image the Linux side's container is made from (by digest)
+        run: |
+          docker pull "$PAX_TREE_IMAGE"
+          docker image inspect --format '{{.Id}} {{.RepoDigests}}' "$PAX_TREE_IMAGE"
+        env:
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+      - name: wolf's session against the container, as root and as a user; the plan's legs (all four in the all tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+        run: tests/mpx5-wolf $PAX_LEGS
+
+      - name: keep the programs' sums, the Linux side, the sessions, the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-wolf
+          path: |
+            build/mpx5-wolf/*.txt
+            build/mpx5-wolf/root/etc/shrc
+            build/mpx5-wolf/wolf/sums.txt
+            build/mpx5-wolf/pelt/sums.txt
+            build/mpx5-wolf/bore/sums.txt
+            build/mpx5-wolf/linux/
+            build/mpx5-wolf/*/kmain_console.elf
+            build/mpx5-wolf/*/*.log
+            build/mpx5-wolf-*.session
+            build/mpx5-wolf-*.cmp
+            build/mpx5-wolf-*.log
+            build/mpx5-wolf-*.norm
+            build/mpx5-wolf-*.meta
+            build/mpx5-wolf-*.halt
+            build/mpx5-wolf-*.verdict
+            build/mpx5-wolf-*.typed
+            build/mpx5-wolf-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   # px58: yew (user/yew.pin, tools/mkyew), the modal terminal editor in
   # wolf, on PAX's console: termwolf's rows (user/termwolf: the termios
   # bits, yew's three modes, the timed reads, the output processing, the
@@ -3006,6 +3096,7 @@ jobs:
       - mpx5-lope
       - mpx5-aspen
       - mpx5-lupin
+      - mpx5-wolf
       - mpx5-yew
       - mpx5-screen
     runs-on: ubuntu-latest
