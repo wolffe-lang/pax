@@ -2,6 +2,8 @@
 # Same programs and keys under a real Linux kernel, never its source.
 set -euo pipefail
 L=$HOME/lanes/px61
+X=${PX61_SOURCE:-$L/pax}
+V=${PX61_GUEST_VMJOB:-$L/bin/vmjob-final}
 printf '%s\n' $$ > "$L/guest-replay.pid"
 ulimit -c 0
 uptime
@@ -9,7 +11,7 @@ export PAX_TYPE_PAUSE=${PAX_TYPE_PAUSE:-0.6}
 W=${PX61_GUEST_IMAGES:-$L/build/mpx5-pelt-r2/mpx5-pelt}
 export TMPDIR=$L/tmp
 podman run --rm --network none --ulimit core=0:0 -v "$L:$L:Z" localhost/px13-ubuntu \
-    cc -static -O1 -o "$L/bin/vmjob" "${PX61_SOURCE:-$L/pax}/notes/px61/vmjob.c"
+    cc -static -O1 -o "$V" "$X/notes/px61/vmjob.c"
 for pass in 1 2; do
   O=${PX61_GUEST_OUT:-$L/guest}/pass-$pass
   mkdir -p "$O"
@@ -27,7 +29,7 @@ for pass in 1 2; do
     argv="/bin/env HOME=/ /bin/sh -i $opt"
     [ "$role" = root ] || argv="/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i $opt"
     echo "guest $pass $name begin $(date -Is)"
-    taskset -c 8-11 "$L/pax/notes/px61/linux-vm.sh" "$L/pax" "$L/bin/vmjob" "$W/pelt.cpio" \
+    taskset -c 8-11 "$X/notes/px61/linux-vm.sh" "$X" "$V" "$W/pelt.cpio" \
         "$W/keys/$name.keys" "$argv" "$O" "$name" > "$O/$name.driver.log" 2>&1
     test -s "$O/$name.tty.rc"
     test "$(cat "$O/$name.tty.rc")" = 0
