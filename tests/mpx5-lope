@@ -94,7 +94,7 @@ need readelf python3
 
 KEYS=$PAX_ROOT/user/console/lope.keys
 SHRC=$PAX_ROOT/user/shrc
-BORE="env ls true" # boreutils in the image (user/boreutils.pin)
+BORE="env ls true sleep" # boreutils in the image (user/boreutils.pin)
 RUNS=("/bin/env ENV=/etc/shrc /bin/sh -i -m" "/bin/as 1000 1000 /bin/env HOME=/home/pax ENV=/etc/shrc /bin/sh -i -m")
 NAMES=(lope lope-user)
 HOMES=(/ /home/pax)
@@ -139,7 +139,7 @@ if [ -z "$images" ]; then
     "$PAX_ROOT/tools/fetch-limine" || exit 2
     rm -rf "$work"
     r=$work/root
-    mkdir -p "$r/bin" "$r/etc" "$r/home/pax/child" "$r/projects/proj" "$work/bin"
+    mkdir -p "$r/bin" "$r/etc" "$r/home/pax/child" "$r/work/proj" "$work/bin"
     why=
     "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" || why+=" tools/mkpelt;"
     "$PAX_ROOT/tools/mklope" "$work/lope" > "$work/lope.txt" || why+=" tools/mklope;"
@@ -156,8 +156,8 @@ if [ -z "$images" ]; then
     done
     cp "$SHRC" "$r/etc/shrc" || why+=" no $SHRC;"
     printf '%s\n' "${RUNS[@]}" > "$r/etc/pax-run"
-    printf '%s\n' '/home/pax 755 1000 1000' '/home/pax/child 755 1000 1000' '/projects/proj 755 1000 1000' > "$work/owners"
-    args=(/home/pax/:755:1000:1000 /home/pax/child/:755:1000:1000 /projects/proj/:755:1000:1000 /etc/shrc="$r/etc/shrc":644 /etc/pax-run="$r/etc/pax-run":644)
+    printf '%s\n' '/home/pax 755 1000 1000' '/home/pax/child 755 1000 1000' '/work/proj 755 1000 1000' > "$work/owners"
+    args=(/home/pax/:755:1000:1000 /home/pax/child/:755:1000:1000 /work/proj/:755:1000:1000 /etc/shrc="$r/etc/shrc":644 /etc/pax-run="$r/etc/pax-run":644)
     for f in "$r"/bin/*; do args+=("/bin/${f##*/}=$f:755"); done
     "$PAX_ROOT/tools/mkinitramfs" "$work/lope.cpio" "${args[@]}" > "$work/lope.initramfs.txt" || why+=" tools/mkinitramfs;"
     for tier in $tiers; do
@@ -215,7 +215,7 @@ rows() { # kind home -> NAME<TAB>line<TAB>line…, one row a line
     if [ "$1" = jump ]; then
         printf '%s\t%s\t%s\t%s\n' "etc alone lands in /etc" '$ etc' '$ pwd' /etc
         printf '%s\t%s\t%s\n' "g - prints /bin" '$ g -' /bin
-        printf '%s\t%s\t%s\n' "ls runs bare in /bin" '$ ls' 'as  env  lope  ls  pelt  sh  true'
+        printf '%s\t%s\t%s\n' "ls runs bare in /bin" '$ ls' 'as  env  lope  ls  pelt  sh  sleep  true'
         printf '%s\t%s\t%s\t%s\n' "g alone lands in HOME" '$ g' '$ pwd' "$h"
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "gi's menu, 2 lands in /etc" '$ gi' '1) /bin' '2) /etc' "3) $h" 'lope: which? 2' '$ pwd' /etc
         printf '%s\t%s\t%s\n' "true runs" '$ true; echo st=$?' st=0
@@ -225,7 +225,7 @@ rows() { # kind home -> NAME<TAB>line<TAB>line…, one row a line
         printf '%s\t%s\t%s\t%s\n' "autocd child name" '$ child' '$ pwd' /home/pax/child
         printf '%s\t%s\t%s\t%s\n' "autocd parent" '$ ..' '$ pwd' /home/pax
         printf '%s\t%s\t%s\t%s\n' "autocd absolute trailing slash" '$ /home/pax/' '$ pwd' /home/pax
-        printf '%s\t%s\t%s\t%s\n' "proj through the store hook" '$ proj' '$ pwd' /projects/proj
+        printf '%s\t%s\t%s\t%s\n' "proj through the store hook" '$ proj' '$ pwd' /work/proj
         printf '%s\t%s\n' "background subshell finished" bg-st=0
         printf '%s\t%s\n' "command substitution finished" cs=forked
     else
