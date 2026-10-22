@@ -956,3 +956,20 @@ Permissively licensed kernels: none consulted.
 | Limine 12.9.1's configuration (`resolution:`) | by digest (`boot/limine.pin`) | BSD-2-Clause | run | `boot/limine-vt.conf` |
 | rootless podman on kasumi (`px13-ubuntu`), CI's Docker | — | — | run: the keyboard session on a 50 by 160 pseudo-terminal (`tools/linux-tty --winsize`) | Y6, Y7's reference |
 
+
+## px60: the dev compiler
+
+No kernel or libc source was read. Wolf's own v0.2.34 source was read
+and patched in a separate worktree; the attached patch is the only
+compiler source change used by the dev recipe. No upstream trunk was
+changed. The kernel is unchanged in this lane.
+
+| source | how used |
+|---|---|
+| wolf-lang v0.2.34, `9da7bdcf`; driver, runtime, checked machine and backend manifests | owned source: derive the command/link boundaries, prototype the musl portability fixes |
+| wolf-std `e036bec318ad81ecd5a025612bc2c2adb17527f3` | owned source: stage the compiler's STD-PIN and run a real `std.str` witness |
+| man7 `newlocale(3)`, `pthread_join(3)`, `mremap(2)` | API documentation: a null-base, zero-mask locale uses POSIX/C defaults; joinable thread ownership; the measured allocator resize and its scope boundary |
+| Rust 1.97.1 musl target and Rust 1.99.1 musl-host rust-lld | shipped binaries only: compiler/runtime build inputs and alternative-linker ELF inspection |
+| Alpine 3.20 musl-dev, lld-dev, LLVM 17 packages | shipped binaries and package inventories only: static libc/CRT link feasibility and the packaged linker's dynamic dependencies |
+| LLVM 17.0.6 release source archive | authorized throwaway lld-only build using clang, libc++ and LLVM libunwind; never a source for PAX kernel code |
+| strace 6.8, Linux in a container, PAX under QEMU TCG | black-box runs: commands, syscall union, Linux/PAX transcripts and named linker walls |

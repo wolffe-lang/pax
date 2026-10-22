@@ -149,6 +149,45 @@ every byte (`serial.log`). With `-display none` the screen is drawn
 where nobody sees it, and `-vga none` (`tools/qemu-run --no-screen`)
 boots a machine with no display at all: the console is serial only.
 
+## The dev image (px60)
+
+The dev variant adds a musl-static `wolf` at `/usr/bin/wolf` and its
+pinned standard library at `/usr/share/wolf/std`. It leaves the base
+image unchanged. `tools/mkwolf`, `tools/mkwolf-std` and `tools/mkdev`
+build and stage those additions; `user/wolf.pin` records the source,
+portability patch and recipe, and `user/wolf.sums` records the bytes.
+The shell environment selects the std tree through `WOLF_STD`. The full
+dev ISO also carries static lld 17, a link-only `cc` front end, and musl's
+binary CRT/libc inputs (`user/wolf-link.sums`). It can build and run native
+wolf programs; the link front end is not a C or assembly compiler.
+
+At the dev console, write a program in your home directory and use:
+
+```sh
+wolf fmt hello.lu
+wolf fmt --check hello.lu
+wolf conform-run --json --phase=typecheck hello.lu
+wolf conform-run --json --checked hello.lu
+wolf build hello.lu
+./hello
+```
+
+At 0.2.34 there is no `wolf check` command. `wolf run --checked` is a
+native build, **not** the checked machine; it requires a native link
+step. `wolf build --no-cache --emit=obj hello.lu -o hello.o` emits a
+native object without a linker. The default backend is Cranelift;
+`--release` still needs external clang, which this image does not carry. The dev-image experiments and
+remaining link requirements are recorded under `notes/px60/`.
+
+`tests/mpx5-wolf` holds root and `pax` sessions byte for byte to the same
+binaries on Linux. It also checks independent command/verdict witnesses,
+so agreement on a broken compiler or missing std tree cannot pass. Its
+fast CI root deliberately omits the native link bundle and checks the
+missing-tool errors. `--only native --images DIR` validates the separate
+live native probe's Linux/PAX recordings. The final dev ISO was tested
+with 2 GiB RAM; lld's file-mapping refusals are visible, but its read/write
+fallback links the measured programs successfully.
+
 ## Hosts
 
 | host | build an image | boot one (`qemu-run`, `tests/proof --image`) | gdb (`qemu-gdb`) |

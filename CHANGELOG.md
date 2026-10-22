@@ -7,6 +7,18 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **wolf in a separate dev image (px60).** A patched musl-static wolf
+  0.2.34 runs its checked machine on PAX, with a pinned std tree and
+  root/user sessions compared to Linux. The patch makes locale creation
+  portable and gives opaque pthread handles explicit transfer ownership;
+  the compiler source changes are attached here, not landed upstream.
+  `conform-run --json --checked` is the checked machine; `wolf run
+  --checked` remains native. Native object emission works without a
+  linker. A static LLVM linker and a small link-only cc front end also
+  build hello, loop and signal on PAX as pax, with native output matching
+  Linux; musl's CRT/libc are binary inputs, with debug metadata decompressed.
+  The base image is unchanged.
+
 - **The console for an editor (px59).** PAX's framebuffer console draws
   what an editor writes as a Linux VT draws it: cursor addressing (CUP,
   HVP, CUU/CUD/CUF/CUB, CNL/CPL, CHA/HPA, VPA), ED and EL in the current
