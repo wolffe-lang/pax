@@ -89,7 +89,7 @@ need readelf python3
 KEYS=$PAX_ROOT/user/console/lupin.keys
 BORE="cat env" # boreutils in the image (user/boreutils.pin)
 PROGS="hello loop signal host" # user/lupin/*.lu, the image's /usr/share/lupin
-RUNS=("/bin/sh -i -m" "/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m")
+RUNS=("/bin/env LUPIN_STD=/usr/share/wolf/std /bin/sh -i -m" "/bin/as 1000 1000 /bin/env HOME=/home/pax LUPIN_STD=/usr/share/wolf/std /bin/sh -i -m")
 NAMES=(lupin lupin-user)
 HOMES=(/ /home/pax)
 
@@ -149,12 +149,18 @@ if [ -z "$images" ]; then
         x=$(static_ok "$f") || why+=" $x;"
         say "  program: ${f#"$r"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
     done
+    "$PAX_ROOT/tools/fetch-std" "$work/std" || why+=" tools/fetch-std;"
+    mkdir -p "$r/usr/share/wolf" "$r/usr/share/pax"
+    cp -R "$work/std/std" "$r/usr/share/wolf/std" || why+=" no std tree;"
+    cp "$PAX_ROOT/user/lupin/std.lu" "$r/usr/share/pax/std-check.lu" || why+=" no std probe;"
     # The programs, and pax's home.
     printf '%s\n' "${RUNS[@]}" > "$r/etc/pax-run"
     for p in $PROGS; do cp "$PAX_ROOT/user/lupin/$p.lu" "$r/usr/share/lupin/$p.lu" || why+=" no user/lupin/$p.lu;"; done
     printf '%s\n' '/home/pax 755 1000 1000' > "$work/owners"
     args=(/home/pax/:755:1000:1000 /etc/pax-run="$r/etc/pax-run":644)
     for p in $PROGS; do args+=("/usr/share/lupin/$p.lu=$r/usr/share/lupin/$p.lu:644"); done
+    args+=(/usr/share/pax/std-check.lu="$r/usr/share/pax/std-check.lu":644)
+    while IFS= read -r -d '' f; do args+=("${f#"$r"}=$f:644"); done < <(find "$r/usr/share/wolf/std" -type f -print0)
     for f in "$r"/bin/*; do args+=("/bin/${f##*/}=$f:755"); done
     "$PAX_ROOT/tools/mkinitramfs" "$work/lupin.cpio" "${args[@]}" > "$work/lupin.initramfs.txt" || why+=" tools/mkinitramfs;"
     for tier in $tiers; do
@@ -218,6 +224,7 @@ rows() { # kind home -> NAME<TAB>line<TAB>line…, one row a line
     else
         printf '%s\t%s\t%s\n' "host.lu: the clock, the overlay, x.lu, then /usr/share/lupin refused by name" '$ lupin conform-run --json /usr/share/lupin/host.lu' "$rec"'*"verdict":"unsupported"*"x-unsupported":"`fs_read_dir(\"/usr/share/lupin\")` resolves outside the working directory*'
     fi
+    printf '%s\t%s\t%s\t%s\n' "std.fs and std.str from the installed tree" '$ lupin run /usr/share/pax/std-check.lu; echo std-st=$?' 'std: WOLF, roundtrip true' 'std-st=0'
 }
 held() { # file kind home -> the rows not held, on stdout
     rows "$2" "$3" | python3 -c '
@@ -296,8 +303,8 @@ for leg in $legs; do
         [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
         rf=$(grep -c ': refused: ' "$norm")
         [ "$rf" = 0 ] || why+=" $rf refused lines ($(grep -m1 ': refused: ' "$norm" | cut -c1-160));"
-        grep -qx "PAX: init /bin/sh ended with status 0; nothing left to run" "$norm" \
-            || why+=" no 'PAX: init /bin/sh ended with status 0' ($(grep -m1 '^PAX: init ' "$norm"));"
+        grep -qx "PAX: init /bin/env ended with status 0; nothing left to run" "$norm" \
+            || why+=" no 'PAX: init /bin/env ended with status 0' ($(grep -m1 '^PAX: init ' "$norm"));"
         pn=$(grep -m1 '^PANIC ' "$norm")
         [ -z "$pn" ] || why+=" the kernel panicked: $pn;"
         [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
