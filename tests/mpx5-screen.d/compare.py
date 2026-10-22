@@ -177,7 +177,8 @@ def cmp_vt(log, d):
             continue
         (cr, cc), cells = vtc['vt_grid'](vt[key][0])
         want = {(r, c): (ch, f, b) for r, c, ch, f, b, _blink in cells}
-        why = []
+        # PAX draws no blink: a VT cell with the blink bit is one PAX cannot match
+        why = ['cell %d,%d: the VT\'s blinks' % (r, c) for r, c, _ch, _f, _b, blink in cells if blink]
         for r in range(25):
             for c in range(80):
                 ch, f, b = want.get((r + 1, c + 1), (32, 7, 0))
@@ -208,8 +209,10 @@ def cmp_vt(log, d):
             failed += 1
             print('FAIL %s: %d cells differ; %s' % (name, len(why), why[0]))
     # The answers, printed at the end of the run (one QUERY line each).
-    text = pathlib.Path(log).read_bytes().decode('latin-1').replace('\r', '')
-    got = [l for l in text.split('\n') if l.startswith('QUERY ')]
+    text = pathlib.Path(log).read_bytes().decode('latin-1')
+    # vtcases prints each `QUERY <probe>:<name> …` line after a clear;
+    # the VT's rows name the case without the probe
+    got = [re.sub(r'^QUERY \d:', 'QUERY ', m) for m in re.findall(r'QUERY [^\r\n\x1b]*', text)]
     want = []
     for f in ('vt.rows', 'vt2.rows'):
         want += [l for l in (here / f).read_text().splitlines() if l.startswith('QUERY ')]
