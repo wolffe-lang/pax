@@ -22,9 +22,10 @@ work=$out/vm-work.$$
 mkdir -p "$work"
 trap 'rm -rf "$work"' EXIT
 printf '%s' "$prompt" > "$work/prompt"
+printf '%s' "${PAX_TYPE_PAUSE:-1.5}" > "$work/pause"
 printf '%s\n' $argv > "$work/argv"
 "$pax/tools/mkinitramfs" "$work/init.cpio" "/px46/vmjob=$vmjob:755" "/px46/keys=$keys:644" \
-    "/px46/prompt=$work/prompt:644" "/px46/argv=$work/argv:644" > "$work/init.txt" || exit 2
+    "/px46/prompt=$work/prompt:644" "/px46/pause=$work/pause:644" "/px46/argv=$work/argv:644" > "$work/init.txt" || exit 2
 cat "$image" "$work/init.cpio" > "$work/all.cpio"
 uptime
 timeout "${PX48_TIMEOUT:-1800}" taskset -c 8-11 qemu-system-x86_64 -machine q35,accel=tcg -cpu max -smp 1 -m "${PX48_MEM:-1024}" -nographic -no-reboot -nic none \

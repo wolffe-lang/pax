@@ -23,6 +23,8 @@ case $only in ''|build|linux) ;; *) die 'bad only' ;; esac
 need python3 readelf
 python3 -I "$PAX_ROOT/tests/mpx5-pelt.d/selftest.py" || exit 1
 F=$PAX_ROOT/user/console/fork
+# Match the upstream session harness SETTLE=0.6 for in-flight keys.
+export PAX_TYPE_PAUSE=${PAX_TYPE_PAUSE:-0.6}
 CASES='corpus c_jc_mixed_pipeline jc_subshell_stop jc_subshell_redir_stop jc_background_subshell subshell_jobs autocd_subshell cnf_cd cnf_contexts cnf_redirect shapes probes selfcheck'
 if [ -n "${PAX_PELT_CASES:-}" ]; then
     for c in $PAX_PELT_CASES; do
@@ -36,6 +38,9 @@ BB='mkfifo sed yes sort'
 work=$PAX_BUILD/mpx5-pelt
 fail=0 ran=0
 bad() { say "FAIL $*"; fail=1; }
+shell_mode() {
+    case $1 in c_jc_mixed_pipeline|jc_subshell_stop|jc_subshell_redir_stop|jc_background_subshell|shapes) echo -m ;; *) echo +m ;; esac
+}
 linux_side() {
     local d=$1 c role args rc
     mkdir -p "$d/linux"
@@ -57,8 +62,8 @@ linux_side() {
     ;; esac
     for c in $CASES; do
         for role in root pax; do
-            args=(/bin/env HOME=/ /bin/sh -i -m)
-            [ "$role" = root ] || args=(/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m)
+            args=(/bin/env HOME=/ /bin/sh -i "$(shell_mode "$c")")
+            [ "$role" = root ] || args=(/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i "$(shell_mode "$c")")
             rc=0
             "$PAX_ROOT/tools/linux-tree" --root "$d/root" --keys "$d/keys/$c-$role.keys" --prompt '$ ' \
                 --argv0 "${args[0]}" --size 512m --rdev --nsproc --owners "$d/owners" \
@@ -72,8 +77,8 @@ linux_side() {
 # reference does. Two role images are shared by all cases; no bound or
 # assertion is removed, and no large duplicate ISO per case is needed.
 role_images() { # images tier
-    local d=$1 tier=$2 role f mode
-    [ -f "$d/$tier/pelt-root.iso" ] && [ -f "$d/$tier/pelt-pax.iso" ] && return 0
+    local d=$1 tier=$2 role f mode mon
+    [ -f "$d/$tier/pelt-root-m.iso" ] && [ -f "$d/$tier/pelt-pax-plusm.iso" ] && return 0
     local args=(/tmp/:1777 /home/pax/:755:1000:1000)
     while IFS= read -r -d '' f; do
         [ "$f" != "$d/root/etc/pax-run" ] || continue
@@ -81,13 +86,16 @@ role_images() { # images tier
         args+=("${f#"$d/root"}=$f:$mode")
     done < <(find "$d/root" -type f -print0)
     for role in root pax; do
-        if [ "$role" = root ]; then echo '/bin/env HOME=/ /bin/sh -i -m' > "$d/$role.run"
-        else echo '/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m' > "$d/$role.run"; fi
-        "$PAX_ROOT/tools/mkinitramfs" "$d/pelt-$role.cpio" "${args[@]}" \
-            "/etc/pax-run=$d/$role.run:644" > "$d/$role.initramfs.txt" || return 1
+      for mon in m plusm; do
+        opt=-m; [ "$mon" = m ] || opt=+m
+        if [ "$role" = root ]; then echo "/bin/env HOME=/ /bin/sh -i $opt" > "$d/$role-$mon.run"
+        else echo "/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i $opt" > "$d/$role-$mon.run"; fi
+        "$PAX_ROOT/tools/mkinitramfs" "$d/pelt-$role-$mon.cpio" "${args[@]}" \
+            "/etc/pax-run=$d/$role-$mon.run:644" > "$d/$role-$mon.initramfs.txt" || return 1
         "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
-            --add "$d/pelt-$role.cpio" initramfs.cpio "$d/$tier/kmain_console.elf" "$d/$tier/pelt-$role.iso" || return 1
-        say "role image $tier $role: cpio $(sha256_of "$d/pelt-$role.cpio"), iso $(sha256_of "$d/$tier/pelt-$role.iso")"
+            --add "$d/pelt-$role-$mon.cpio" initramfs.cpio "$d/$tier/kmain_console.elf" "$d/$tier/pelt-$role-$mon.iso" || return 1
+        say "role image $tier $role $mon: cpio $(sha256_of "$d/pelt-$role-$mon.cpio"), iso $(sha256_of "$d/$tier/pelt-$role-$mon.iso")"
+      done
     done
 }
 if [ "$only" = linux ]; then
@@ -119,6 +127,12 @@ if [ -z "$images" ]; then
     for c in $CASES; do
         if [ "$c" = selfcheck ]; then printf '/bin/selfcheck; echo selfcheck-status=$?\nexit 0\n' > "$work/keys/$c.keys"
         else cp "$F/$c.keys" "$work/keys/$c.keys"; fi
+        case $c in c_jc_mixed_pipeline|jc_subshell_stop|jc_subshell_redir_stop)
+            sed -i 's/^\^Z$/^~^Z^./' "$work/keys/$c.keys" ;;
+        esac
+        # Upstream mixed-pipeline intentionally ends alive after refusing
+        # the first exit. Keep that step, then supply only teardown.
+        [ "$c" != c_jc_mixed_pipeline ] || echo 'exit 0' >> "$work/keys/$c.keys"
     done
     : > "$r/etc/pax-run"; : > "$work/all.keys"; : > "$work/run-names"
     for c in $CASES; do
@@ -129,7 +143,7 @@ if [ -z "$images" ]; then
             # Each run gets a distinct writable cwd on both systems:
             # PAX keeps its tree between runs; Linux references are fresh.
             key=$work/keys/$c-$role.keys
-            printf 'mkdir -p /tmp/px61-%s-%s; cd /tmp/px61-%s-%s\n' "$c" "$role" "$c" "$role" > "$key"
+            printf ':\nmkdir -p /tmp/px61-%s-%s\ncd /tmp/px61-%s-%s\n' "$c" "$role" "$c" "$role" > "$key"
             sed "s|^cd /tmp$|cd /tmp/px61-$c-$role|" "$work/keys/$c.keys" >> "$key"
             cat "$key" >> "$work/all.keys"
         done
@@ -166,13 +180,14 @@ for leg in $legs; do
         role_images "$images" "$tier" || { bad "F0 $tier role images"; continue; }
         while IFS= read -r name; do
             role=${name##*-}
+            c=${name%-*}; mon=m; [ "$(shell_mode "$c")" = -m ] || mon=plusm
             log=$PAX_BUILD/mpx5-pelt-$tier-$leg-$name.serial.log
             if command -v uptime >/dev/null 2>&1; then uptime; fi
             say "begin $tier $leg $name (fresh boot, bound 1800 s)"
             rc=0
             "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 1800 --qemu -m --qemu 1024M \
                 --elf "$images/$tier/kmain_console.elf" --marker 'halt|PANIC .*' --type "$images/keys/$name.keys" --prompt '$ ' \
-                "$images/$tier/pelt-$role.iso" > "$log.verdict" 2>&1 || rc=$?
+                "$images/$tier/pelt-$role-$mon.iso" > "$log.verdict" 2>&1 || rc=$?
             ran=$((ran+1))
             [ "$rc" = 0 ] || bad "F3 $tier $leg $name: not halted ($rc)"
             serial_norm "$log" > "$log.norm"
