@@ -1,0 +1,462 @@
+$ :
+$ mkdir -p /tmp/px61-probes-root
+$ cd /tmp/px61-probes-root
+$ cd /tmp/px61-probes-root
+$ echo px61-probes-begin
+px61-probes-begin
+$ echo PROBE:shapes; sh /usr/share/pelt/fork/probe/shapes.sh /bin/sh; echo PROBE
+-STATUS:$?
+PROBE:shapes
+sub-child-parent: another process
+sub-dollar-dollar: the shell's
+sub-assign-kept: 0
+bg-sub-order: b a 
+bg-brace-order: b a 
+bg-sub-pid: a process
+bg-brace-assign-kept: 0
+cmdsub-child-parent: another process
+stage-order: reader-got-one producer-done 
+stage-program-parent: another process
+func-stage-order: reader-got-one f-done 
+stage-assign-kept: 0
+sub-exec: the shell went on
+end
+PROBE-STATUS:0
+$ echo PROBE:childstate; sh /usr/share/pelt/fork/probe/childstate.sh /bin/sh; ec
+ho PROBE-STATUS:$?
+PROBE:childstate
+shell: ign=0000000000000000 the-shell shell-group
+subshell: ign=0000000000000000 a-child shell-group
+cmdsub: ign=0000000000000000 a-child shell-group
+bg-subshell: ign=0000000000000006 a-child shell-group
+bg-brace: ign=0000000000000006 a-child shell-group
+stage-first: ign=0000000000000000 a-child shell-group
+stage-last: ign=0000000000000000 a-child shell-group
+sub-traps: ign=0000000000000001 a-child shell-group
+trap -- '' HUP
+cmdsub-program: ign=0000000000000000
+bg-program: ign=0000000000000006
+bg-trap-int: caught
+bg-trap-int: after
+PROBE-STATUS:0
+$ echo PROBE:corners; sh /usr/share/pelt/fork/probe/corners.sh /bin/sh; echo PRO
+BE-STATUS:$?
+PROBE:corners
+1 set-e: 1
+2 exit: 3
+in
+sub-exit
+3 sub-exit-trap
+4 r=7
+5 cmdsub-exit: 4
+6 nested: 5
+/
+7 cwd kept
+8 umask 0022
+9 in 2
+9 out 1
+10 to-err
+11 a
+12 got x
+13 late
+13 st=0
+14 to3
+15 1
+15 3
+16 deep
+17 nested
+18 [a]
+19 188889
+21 [hi]
+22 after=2
+23 [trap -- '' INT]
+24 visible
+25 g
+26 a
+26 b
+27 x3
+28 0
+28 1
+29 two
+3
+31 b a 
+32 pid kept
+33 fg bg 
+pelt: ended by signal 15 (TERM)
+34 143
+35 end
+PROBE-STATUS:0
+$ echo PROBE:notice; sh /usr/share/pelt/fork/probe/notice.sh /bin/sh; echo PROBE
+-STATUS:$?
+PROBE:notice
+01 ( kill -TERM $(sh -c 'echo $PPID') ) 2>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+02 ( :; kill -TERM $(sh -c 'echo $PPID') ) 2>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+03 ( sh -c 'kill -TERM $$' ) 2>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+04 ( sh -c 'kill -TERM $$'; : ) 2>f
+   out: st=0
+   err: 
+   file: pelt: ended by signal 15 (TERM)|
+05 ( exec sh -c 'kill -TERM $$' ) 2>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+06 { sh -c 'kill -TERM $$'; } 2>f
+   out: st=143
+   err: 
+   file: pelt: ended by signal 15 (TERM)|
+07 sh -c 'kill -TERM $$' 2>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+08 { ( kill -TERM $(sh -c 'echo $PPID') ); } 2>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+09 { ( sh -c 'kill -TERM $$' ); } 2>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+10 f() { ( kill -TERM $(sh -c 'echo $PPID') ); }; f 2>f
+   out: st=143
+   err: 
+   file: pelt: ended by signal 15 (TERM)|
+11 for i in 1; do ( kill -TERM $(sh -c 'echo $PPID') ); done 2>f
+   out: st=143
+   err: 
+   file: pelt: ended by signal 15 (TERM)|
+12 ( ( kill -TERM $(sh -c 'echo $PPID') ) ) 2>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+13 ( ( kill -TERM $(sh -c 'echo $PPID') ) 2>f )
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+14 ( kill -TERM $(sh -c 'echo $PPID') ) 2>f | cat
+   out: st=0
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+15 : | ( kill -TERM $(sh -c 'echo $PPID') ) 2>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+16 x=$( ( kill -TERM $(sh -c 'echo $PPID') ) 2>f ); echo "[$x]"
+   out: []|st=0
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+17 if ( kill -TERM $(sh -c 'echo $PPID') ) 2>f; then :; fi
+   out: st=0
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+18 ( kill -TERM $(sh -c 'echo $PPID') ) 2>f && echo and
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+19 set -m; ( kill -TERM $(sh -c 'echo $PPID') ) 2>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+20 set -m; ( :; kill -TERM $(sh -c 'echo $PPID') ) 2>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+21 set -m; ( sh -c 'kill -TERM $$' ) 2>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+22 set -m; { ( kill -TERM $(sh -c 'echo $PPID') ); } 2>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+23 ( kill -TERM $(sh -c 'echo $PPID') ) 2>f & wait $!
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+PROBE-STATUS:0
+$ echo PROBE:notice2; sh /usr/share/pelt/fork/probe/notice2.sh /bin/sh; echo PRO
+BE-STATUS:$?
+PROBE:notice2
+01 { ( kill -TERM $(sh -c 'echo $PPID') ); :; } 2>f
+   out: st=0
+   err: 
+   file: pelt: ended by signal 15 (TERM)|
+02 { :; ( kill -TERM $(sh -c 'echo $PPID') ); } 2>f
+   out: st=143
+   err: 
+   file: pelt: ended by signal 15 (TERM)|
+03 { { ( kill -TERM $(sh -c 'echo $PPID') ); }; } 2>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+04 { ( kill -TERM $(sh -c 'echo $PPID') ) 2>/dev/null; } 2>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+05 { ( kill -TERM $(sh -c 'echo $PPID') ) && :; } 2>f
+   out: st=143
+   err: 
+   file: pelt: ended by signal 15 (TERM)|
+06 { ! ( kill -TERM $(sh -c 'echo $PPID') ); } 2>f
+   out: st=0
+   err: 
+   file: pelt: ended by signal 15 (TERM)|
+07 { ( kill -TERM $(sh -c 'echo $PPID') ) & wait $!; } 2>f
+   out: st=143
+   err: 
+   file: pelt: ended by signal 15 (TERM)|
+08 while :; do ( kill -TERM $(sh -c 'echo $PPID') ); break; done 2>f
+   out: st=0
+   err: 
+   file: pelt: ended by signal 15 (TERM)|
+09 if :; then ( kill -TERM $(sh -c 'echo $PPID') ); fi 2>f
+   out: st=143
+   err: 
+   file: pelt: ended by signal 15 (TERM)|
+10 case x in x) ( kill -TERM $(sh -c 'echo $PPID') );; esac 2>f
+   out: st=143
+   err: 
+   file: pelt: ended by signal 15 (TERM)|
+11 { sh -c 'kill -TERM $$'; :; } 2>f
+   out: st=0
+   err: 
+   file: pelt: ended by signal 15 (TERM)|
+12 { ( sh -c 'kill -TERM $$' ); :; } 2>f
+   out: st=0
+   err: 
+   file: pelt: ended by signal 15 (TERM)|
+13 { ( kill -TERM $(sh -c 'echo $PPID') ); } 2>f >/dev/null
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+14 { ( kill -TERM $(sh -c 'echo $PPID') ); } 2>&1 | cat
+   out: st=0
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+15 ( kill -TERM $(sh -c 'echo $PPID') ) 2>&1 | cat
+   out: st=0
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+16 { ( kill -TERM $(sh -c 'echo $PPID') ); } 3>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+17 exec 2>f; ( kill -TERM $(sh -c 'echo $PPID') )
+   out: st=143
+   err: 
+   file: pelt: ended by signal 15 (TERM)|
+18 { ( echo in >&2; kill -TERM $(sh -c 'echo $PPID') ); } 2>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: in|
+19 ( echo in >&2; kill -TERM $(sh -c 'echo $PPID') ) 2>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: in|
+20 { ( kill -TERM $(sh -c 'echo $PPID'); ); echo out >&2; } 2>f
+   out: st=0
+   err: 
+   file: pelt: ended by signal 15 (TERM)|out|
+PROBE-STATUS:0
+$ echo PROBE:notice3; sh /usr/share/pelt/fork/probe/notice3.sh /bin/sh; echo PRO
+BE-STATUS:$?
+PROBE:notice3
+01 { ( kill -TERM $(sh -c 'echo $PPID') ); } 2>f | cat
+   out: st=0
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+02 x=$( { ( kill -TERM $(sh -c 'echo $PPID') ); } 2>f ); echo "[$x]"
+   out: []|st=0
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+03 { ( kill -TERM $(sh -c 'echo $PPID') ); } 2>f & wait $!
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+04 ( { ( kill -TERM $(sh -c 'echo $PPID') ); } 2>/dev/null ) 2>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+05 { ( ( kill -TERM $(sh -c 'echo $PPID') ) 2>/dev/null ); } 2>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+06 { ( sh -c 'kill -TERM $$' ); } 2>f | cat
+   out: st=0
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+07 { ( kill -TERM $(sh -c 'echo $PPID'); : ); } 2>f | cat
+   out: st=0
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+08 : | { ( kill -TERM $(sh -c 'echo $PPID') ); } 2>f
+   out: st=143
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+09 { ( kill -TERM $(sh -c 'echo $PPID') ) 2>f; } | cat
+   out: st=0
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+10 { { ( kill -TERM $(sh -c 'echo $PPID') ); } 2>/dev/null; } 2>f | cat
+   out: st=0
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+11 x=$( ( kill -TERM $(sh -c 'echo $PPID') ) 2>f; echo after ); echo "[$x]"
+   out: [after]|st=0
+   err: pelt: ended by signal 15 (TERM)|
+   file: 
+12 x=$( { ( kill -TERM $(sh -c 'echo $PPID') ); :; } 2>f ); echo "[$x]"
+   out: []|st=0
+   err: 
+   file: pelt: ended by signal 15 (TERM)|
+PROBE-STATUS:0
+$ echo PROBE:notice4; sh /usr/share/pelt/fork/probe/notice4.sh /bin/sh; echo PRO
+BE-STATUS:$?
+PROBE:notice4
+01 trap 'echo got' USR1; ( kill -USR1 $$; sleep 0.2; echo in ) >f
+   out: got|st=0
+   err: 
+   file: in|
+02 trap 'echo got' USR1; { ( kill -USR1 $$; sleep 0.2; echo in ); } >f
+   out: got|st=0
+   err: 
+   file: in|
+03 trap 'echo got' USR1; ( sh -c 'kill -USR1 $PPID; sleep 0.2; echo in' ) >f
+   out: got|st=0
+   err: 
+   file: in|
+04 trap 'echo got >&2' USR1; ( kill -USR1 $$; sleep 0.2 ) 2>f
+   out: st=0
+   err: got|
+   file: 
+05 trap 'echo got' USR1; { kill -USR1 $$; sleep 0.2; echo in; } >f
+   out: st=0
+   err: 
+   file: got|in|
+06 trap 'echo got' USR1; ( kill -USR1 $$; sleep 0.2; echo in ) >f | cat
+   out: got|st=0
+   err: 
+   file: in|
+PROBE-STATUS:0
+$ echo PROBE:notice5; sh /usr/share/pelt/fork/probe/notice5.sh /bin/sh; echo PRO
+BE-STATUS:$?
+PROBE:notice5
+01 ( echo hi ) >/nonexistent/f; echo "a $?"
+   out: a 2|st=0
+   err: some
+   file: 
+02 { ( echo hi ); } >/nonexistent/f; echo "a $?"
+   out: a 2|st=0
+   err: some
+   file: 
+03 set -e; ( echo hi ) >/nonexistent/f; echo after
+   out: 
+   err: some
+   file: 
+04 set -e; { ( echo hi ); } >/nonexistent/f; echo after
+   out: 
+   err: some
+   file: 
+05 set -e; ( false ) >f; echo after
+   out: 
+   err: 
+   file: 
+06 set -e; { ( false ); } >f; echo after
+   out: 
+   err: 
+   file: 
+07 set -e; if ( false ) >f; then :; fi; echo after
+   out: after|st=0
+   err: 
+   file: 
+08 set -e; ( false ) >f || echo or; echo after
+   out: or|after|st=0
+   err: 
+   file: 
+09 ( cat ) <<E
+doc
+E
+   out: doc|E; echo "st=0"
+   err: 
+   file: 
+10 { ( cat ); } <<E >f
+doc
+E
+   out: 
+   err: 
+   file: doc|E; echo "st=0"|
+11 x=$( ( echo cap ) 2>f ); echo "[$x]"
+   out: [cap]|st=0
+   err: 
+   file: 
+12 ( echo one; echo two >&2 ) 2>&1 >f
+   out: two|st=0
+   err: 
+   file: one|
+13 exec 3>f; ( echo three >&3 ) 3>&-; exec 3>&-
+   out: st=0
+   err: some
+   file: 
+14 ( exit 3 ) >f; echo "e $?"
+   out: e 3|st=0
+   err: 
+   file: 
+15 set -u; ( echo $nope ) 2>f; echo "u $?"
+   out: u 2|st=0
+   err: 
+   file: pelt: pelt: line 1: nope: parameter not set|
+16 set -C; echo x >f; ( echo y ) >f; echo "C $?"
+   out: C 2|st=0
+   err: some
+   file: x|
+17 ( read v; echo "got $v" ) <f
+   out: st=2
+   err: some
+   file: 
+18 echo in >f; ( read v; echo "got $v" ) <f
+   out: got in|st=0
+   err: 
+   file: in|
+19 trap 'echo exit-trap' EXIT; ( echo sub ) >f
+   out: st=0|exit-trap
+   err: 
+   file: sub|
+20 ( echo a ) >f >&2
+   out: st=0
+   err: some
+   file: 
+PROBE-STATUS:0
+$ echo PROBE:trapwait; sh /usr/share/pelt/fork/probe/trapwait.sh /bin/sh; echo P
+ROBE-STATUS:$?
+PROBE:trapwait
+01 trap "echo got" USR1; ( kill -USR1 $$; sleep 0.2; echo in ); echo st=$?; echo two
+   in got st=0 two 
+02 trap "echo got" USR1; ( kill -USR1 $$; sleep 0.2; echo in ) >/dev/null; echo st=$?; echo two
+   got st=0 two 
+03 trap "echo got" USR1; { ( kill -USR1 $$; sleep 0.2; echo in ); } >/dev/null; echo st=$?; echo two
+   got st=0 two 
+04 trap "echo got" USR1; sh -c "kill -USR1 \$PPID; sleep 0.2" >/dev/null; echo st=$?; echo two
+   got st=0 two 
+05 trap "echo got" USR1; x=$(kill -USR1 $$; sleep 0.2; echo in); echo st=$?; echo two
+   got st=0 two 
+06 trap "echo got" USR1; ( kill -USR1 $$; sleep 0.2 ) | cat; echo st=$?; echo two
+   got st=0 two 
+07 trap "echo got" USR1; ( kill -USR1 $$; sleep 0.2 ) & wait; echo st=$?; echo two
+   got st=138 two 
+08 trap "echo got" USR1; ( sh -c "kill -USR1 \$PPID; sleep 0.2" ) >/dev/null; echo st=$?; echo two
+   got st=0 two 
+09 trap "echo got" USR1; ( kill -USR1 $$; sleep 0.2; echo in ) >/dev/null
+echo st=$?; echo two
+   got st=0 two 
+PROBE-STATUS:0
+$ echo px61-probes-end
+px61-probes-end
+$ exit 0
