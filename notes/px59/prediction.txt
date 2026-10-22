@@ -1,0 +1,50 @@
+px59 — The console for an editor
+
+Contract: wolf/sprints/pax/59-the-console-for-an-editor/px59-the-console-for-an-editor.md.
+Base: origin/px57 0681c57e; trunk ebbef867. This prediction precedes
+any change to the kernel, renderer, probes, suites, and any VT measurement.
+Clean-room: console_codes(4), termios(3), ECMA-48, the Linux VT as a
+black box; PAX's own implementation. No Linux source, no yew edits.
+Builds in px13-ubuntu on kasumi, QEMU taskset -c 0-3, ulimit -c 0.
+
+P1. tools/screen-ref knows text, UTF-8, deferred wrap, CR/LF/BS/TAB,
+SGR 0/1/7/30-37/39/40-47/49/90-97 and an always-visible inverse
+cursor. It knows none of the requested cursor addressing, erase,
+save/restore, visibility/shape, alternate screen, OSC or query classes.
+
+P2. A separate alternate cell buffer at the existing four bytes per
+cell costs 32 frames at the maximum 256x128 grid, eight frames at
+50x160. Metadata fits in a frame. Allocation need not happen while
+parsing an escape. The Linux VT likely ignores ?1049 and DECSCUSR;
+if measured, explicit alternate-screen support is a PAX divergence
+requiring R-px59-1 rather than a claim of VT parity.
+
+P3. Linux VT DA1 answers ESC[?6c; CSI 6n answers its current 1-based
+row and column in ESC[r;cR; kitty and DECRQM 2026 stay unanswered.
+The serial device must not receive a duplicate answer when the host's
+terminal already answers: C_SRC (last input device) must gate replies.
+A query must enter input without changing the last input device.
+
+P4. Function keys F1-F5 give ESC[[A through ESC[[E, F6-F12 give
+ESC[17~ ESC[18~ ESC[19~ ESC[20~ ESC[21~ ESC[23~ ESC[24~.
+Modified arrows probably do not all use CSI 1;m X on the Linux VT;
+measure each modifier before selecting an encoding. Left Alt prefixes
+ESC to printable keys; right Alt may be AltGr and needs its own row.
+
+P5. Cursor addressing and SGR 22/27 will remove yew's first-frame
+smear, but cell-for-cell agreement needs the reference parser changed
+alongside the kernel and keyboard-mode 50x160 input. The Linux VT
+cannot be treated as an xterm: alternate buffers, shape and modified
+keys are the predicted weak points. Native and release, BIOS and UEFI
+must agree; every new assertion needs a CI plant before acceptance.
+
+Plants to define by class after measurements, before implementation:
+restore ignored cursor addressing, SGR 22/27, OSC text leakage,
+missing queries, or missing keyboard classes; each one-leg dispatch
+must cite its exact red row. Existing old dropped-escape rows need
+explicit served/divergent replacements, not removed assertions.
+
+Item 4 input discrepancy: ~/lanes/orch-paxplay does not exist on this
+Mac. px56 records build.sh and assemble.sh on kasumi. No assembly or
+maintainer-session claim until the correct inputs and destination are
+confirmed and their scripts read.
