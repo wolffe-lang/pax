@@ -520,6 +520,11 @@ fn csi(b: u64) {
 /// One byte through the terminal.
 fn feed(b: u64) {
     bump(S_BYTES)
+    if sv(S_ESC) == 3 || sv(S_ESC) == 4 { // OSC, through BEL or ST
+        if b == 7 || (sv(S_ESC) == 4 && b == 92) { put_sv(S_ESC, 0) }
+        else { put_sv(S_ESC, if b == 27 { 4 } else { 3 }) }
+        return
+    }
     if b < 32 || b == 127 {
         if sv(S_UN) != 0 {
             put_sv(S_UN, 0)
@@ -544,6 +549,8 @@ fn feed(b: u64) {
                 put_sv(S_P + i, 0)
                 i += 1
             }
+        } else if b == 93 {
+            put_sv(S_ESC, 3)
         } else {
             put_sv(S_ESC, 0)
         }
