@@ -18,8 +18,9 @@
  *      300 ms pass with nothing more; kept, and printed only at the end
  *      (`QUERY NAME hex...|none`), so the screen holds what the VT's did
  *   c  a query in canonical mode with ECHO and ECHOCTL (the terminal as
- *      found): the bytes, 400 ms, the OSC string; then raw again, one
- *      byte read, the input flushed
+ *      found): the bytes, 400 ms, the input flushed (the echoed answer
+ *      unread), the OSC string; then raw again, one byte read, the input
+ *      flushed
  *   r  the start of the next probe: a fresh VT; the screen's own state is
  *      reset as far as bytes can (ESC[?1049l, ESC[0m, ESC[?25h, ESC[2J,
  *      ESC[H, DECSC at home)
@@ -112,7 +113,7 @@ int main(int argc, char **argv) {
             puts1(CLEAR);
             for (int k = 0; k < 256; k++) {
                 char s[32];
-                snprintf(s, sizeof s, "\033[0;%d;5;%dmX", name[0] == 'B' ? 48 : 38, k);
+                snprintf(s, sizeof s, "\033[0;%d;5;%dmX", strstr(name, "BG") ? 48 : 38, k);
                 puts1(s);
             }
             marker(name);
@@ -138,6 +139,9 @@ int main(int argc, char **argv) {
             tcsetattr(0, TCSANOW, &cooked);
             put(data, len);
             nap(400);
+            /* the answer, echoed, waits unread in the line being edited;
+             * raw mode would hand it to key(): flushed first */
+            tcflush(0, TCIFLUSH);
             marker(name);
             tcsetattr(0, TCSANOW, &raw);
             key();
