@@ -209,8 +209,9 @@ any input, and after COM1's, they are dropped and counted (`C_ANSWERS`,
 (`sched.wake_input`). What the answers do, measured: yew's probe
 reaches its DA1 fence (Y7: its bytes unchanged from Linux's, where no
 answer comes); a pelt started from the keyboard is answered and asks
-before every prompt (S3: three `ESC [ 6 n` where an unanswered pelt asks
-once); the 20 answers of the VT's probes the VT's (S1).
+before every prompt (S3: two `ESC [ 6 n` from the typed `sh -i` on, its
+first prompt's and the one after `printf abc`, where an unanswered pelt
+asks once: plant B); the 20 answers of the VT's probes the VT's (S1).
 
 ## E. The keyboard (`kernel/console`)
 
@@ -234,7 +235,7 @@ key's the VT's.
 | S0 | the build; screen-ref against the VT's rows case by case (vtcheck.py: 80 the VT's, 17 named) and its 29 unit rows (term.py) |
 | S1 | the VT's two probes played on PAX by `user/elf/vtcases.c` (`tools/mkvtcases`), the image booted by `boot/limine-vt.conf` (640×400: 80×25 under the BIOS); each of 77 screens taken after the case's name (an OSC string) reaches the serial log: screen-ref's pixel for pixel; on 80×25, the VT's cells and cursor (the named classes still different); the 20 answers the VT's; on 160×50 (OVMF ignores the resolution) said so loudly and counted, the answers' one grid-dependent row (CPR at the 80th column) by name |
 | S2 | yew typed at the PS/2 keyboard (`user/console/yew-screen.keys`, `tools/ps2-session`): opened, edited, saved, the message expired, C-z, `fg`, quit, the shell, `cat`: 9 screens, each screen-ref's at the moment taken, pixel for pixel and cell for cell; notes.txt alpha beta gamma delta |
-| S3 | `sh -i` typed at the keyboard: the inner pelt answered (it asks `ESC[6n` before every prompt only once answered: 3 times), its prompt after `printf abc` screen-ref's |
+| S3 | `sh -i` typed at the keyboard: the inner pelt answered (it asks `ESC[6n` before every prompt only once answered: 2 from the typed line on; kasumi's `s4` and `r1` counted from the run line, `/bin/sh -i -m`, so 3 with the outer pelt's boot query, fixed in `8fc2c0c3`), its prompt after `printf abc` screen-ref's |
 | S4 | per boot: nothing refused, init's end, halted |
 
 `tests/mpx5-yew` (px58's) extended:
