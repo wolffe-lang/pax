@@ -152,6 +152,25 @@ class Term:
             elif 90 <= p <= 97:
                 self.fg = p - 90 + 8
 
+    def dispatch(self, final):
+        ps = self.params[:self.pi + 1]
+        n = ps[0] or 1
+        x, y = self.cx, self.cy
+        if final == ord('m'):
+            self.sgr(ps)
+            return
+        if final in (ord('H'), ord('f')):
+            y, x = n - 1, (self.params[1] or 1) - 1
+        elif final == ord('A'): y -= n
+        elif final == ord('B'): y += n
+        elif final == ord('C'): x += n
+        elif final == ord('D'): x -= n
+        elif final in (ord('G'), ord('`')): x = n - 1
+        elif final == ord('d'): y = n - 1
+        else: return
+        self.cx, self.cy = min(max(x, 0), self.cols-1), min(max(y, 0), self.rows-1)
+        self.wrap = False
+
     def feed(self, b):
         if b < 32 or b == 127:
             if self.un:
@@ -184,8 +203,8 @@ class Term:
                 self.priv = True
             elif 0x40 <= b <= 0x7E:
                 self.esc = 0
-                if not self.priv and b == 0x6D:
-                    self.sgr(self.params[: self.pi + 1])
+                if not self.priv:
+                    self.dispatch(b)
             else:
                 self.esc = 0
             return
@@ -325,4 +344,5 @@ def main():
         sys.exit(1)
 
 
-main()
+if __name__ == "__main__":
+    main()
