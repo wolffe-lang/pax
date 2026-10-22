@@ -13,7 +13,7 @@ import sys
 here = pathlib.Path(__file__).resolve().parent
 cases = runpy.run_path(str(here / 'vtcases.py'))
 KIND = {'screen': b's', 'emit': b'e', 'palette': b'p', 'answer': b'a', 'echo': b'c'}
-rec, keys = bytearray(), ['prompt 1 vtcases: ready', 'key ret']
+rec, keys = bytearray(), ['#!ps2-session', 'prompt 1 vtcases: ready', 'key ret']
 for n, probe in ((1, cases['PROBE1']), (2, cases['PROBE2'])):
     if n == 2:
         rec += b'r' + b'2\0' + struct.pack('<I', 0)
