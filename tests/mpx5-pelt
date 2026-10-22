@@ -23,6 +23,13 @@ case $only in ''|build|linux) ;; *) die 'bad only' ;; esac
 need python3 readelf
 F=$PAX_ROOT/user/console/fork
 CASES='corpus c_jc_mixed_pipeline jc_subshell_stop jc_subshell_redir_stop jc_background_subshell subshell_jobs autocd_subshell cnf_cd cnf_contexts cnf_redirect shapes probes selfcheck'
+if [ -n "${PAX_PELT_CASES:-}" ]; then
+    for c in $PAX_PELT_CASES; do
+        case " $CASES " in *" $c "*) ;; *) die "unknown replay case: $c" ;; esac
+    done
+    CASES=$PAX_PELT_CASES
+    say "SUBSET: $CASES (empty PAX_PELT_CASES runs every replay)"
+fi
 BORE='cat env head sleep true false mkdir rm tr wc tail'
 BB='mkfifo sed yes ps sort'
 work=$PAX_BUILD/mpx5-pelt
@@ -36,7 +43,7 @@ linux_side() {
             args=(/bin/env HOME=/ /bin/sh -i -m)
             [ "$role" = root ] || args=(/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m)
             rc=0
-            "$PAX_ROOT/tools/linux-tree" --root "$d/root" --keys "$d/keys/$c.keys" --prompt '$ ' \
+            "$PAX_ROOT/tools/linux-tree" --root "$d/root" --keys "$d/keys/$c-$role.keys" --prompt '$ ' \
                 --argv0 "${args[0]}" --size 512m --rdev --nsproc --owners "$d/owners" \
                 "$d/linux/$c-$role.tty" -- "${args[@]}" || rc=$?
             [ "$rc" = 0 ] || return "$rc"
@@ -56,12 +63,12 @@ if [ -z "$images" ]; then
     r=$work/root
     mkdir -p "$r/bin" "$r/etc" "$r/tmp" "$r/home/pax" "$r/usr/share/pelt/fork"
     "$PAX_ROOT/tools/mkpelt" "$work/pelt" || exit 2
-    "$PAX_ROOT/tools/mkpelt" "$work/selfcheck" selfcheck || exit 2
+    case " $CASES " in *" selfcheck "*) "$PAX_ROOT/tools/mkpelt" "$work/selfcheck" selfcheck || exit 2 ;; esac
     "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE || exit 2
     "$PAX_ROOT/tools/mkas" "$work/bin" || exit 2
     "$PAX_ROOT/tools/fetch-busybox" "$work/bin" || exit 2
     cp "$work/pelt/pelt" "$r/bin/sh"
-    cp "$work/selfcheck/selfcheck" "$r/bin/selfcheck"
+    case " $CASES " in *" selfcheck "*) cp "$work/selfcheck/selfcheck" "$r/bin/selfcheck" ;; esac
     cp "$work/bin/as" "$r/bin/as"
     for c in $BORE; do cp "$work/bore/$c" "$r/bin/$c"; done
     # Busybox applets are black-box fixture helpers, not the shell or
@@ -78,7 +85,12 @@ if [ -z "$images" ]; then
             if [ "$role" = root ]; then echo '/bin/env HOME=/ /bin/sh -i -m' >> "$r/etc/pax-run"
             else echo '/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m' >> "$r/etc/pax-run"; fi
             echo "$c-$role" >> "$work/run-names"
-            cat "$work/keys/$c.keys" >> "$work/all.keys"
+            # Each run gets a distinct writable cwd on both systems:
+            # PAX keeps its tree between runs; Linux references are fresh.
+            key=$work/keys/$c-$role.keys
+            printf 'mkdir -p /tmp/px61-%s-%s; cd /tmp/px61-%s-%s\n' "$c" "$role" "$c" "$role" > "$key"
+            sed "s|^cd /tmp$|cd /tmp/px61-$c-$role|" "$work/keys/$c.keys" >> "$key"
+            cat "$key" >> "$work/all.keys"
         done
     done
     printf '%s\n' '/tmp 1777 0 0' '/home/pax 755 1000 1000' > "$work/owners"
