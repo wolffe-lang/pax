@@ -17,8 +17,9 @@ lines=text.splitlines(True)
 guards=[i for i,line in enumerate(lines) if "(set -o autocd)" in line]
 assert len(guards)==1, "guard shape changed; do not guess how to remove it"
 i=guards[0]
-assert "&&" in lines[i], "guard is not one complete conditional line"
-without=lines.copy(); without[i]=":\n"
+assert lines[i].strip()=="if (set -o autocd) 2>/dev/null; then"
+assert [line.strip() for line in lines[i+1:i+3]]==["set -o autocd","fi"]
+without=lines.copy(); without[i:i+3]=[":\n","\n","\n"]
 programs={"guarded":text,"guard-removed":"".join(without)}
 values={k:[] for k in programs}
 for turn in range(33):
