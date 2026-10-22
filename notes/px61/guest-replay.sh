@@ -16,9 +16,15 @@ for pass in 1 2; do
     role=${name##*-}
     argv='/bin/env HOME=/ /bin/sh -i -m'
     [ "$role" = root ] || argv='/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m'
+    if [ -s "$O/$name.tty.rc" ] && [ "$(cat "$O/$name.tty.rc")" = 0 ]; then
+      echo "guest $pass $name already recorded, kept"
+      continue
+    fi
     echo "guest $pass $name begin $(date -Is)"
     taskset -c 8-11 "$L/pax/notes/px61/linux-vm.sh" "$L/pax" "$L/bin/vmjob" "$W/pelt.cpio" \
         "$W/keys/$name.keys" "$argv" "$O" "$name" > "$O/$name.driver.log" 2>&1
+    test -s "$O/$name.tty.rc"
+    test "$(cat "$O/$name.tty.rc")" = 0
     echo "guest $pass $name done $(date -Is): $(cat "$O/$name.tty.rc")"
   done < "$W/run-names"
 done
