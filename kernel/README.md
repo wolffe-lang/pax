@@ -396,10 +396,10 @@ narrating legs and holds both to the same Linux transcript.
   the firmware's own serial output never reached the screen), and
   `tests/mpx3-screen` compares that with QEMU's `screendump` of the
   halted machine, pixel for pixel.
-- Not yet: other SGR parameters (underline, 256 colours), cursor
-  movement and erase sequences (read and ignored), a back buffer (a
-  scroll reads the framebuffer, which is slow through WC on real
-  hardware), the cursor's blink, more than one framebuffer.
+- Not yet: a back buffer (a scroll reads the framebuffer, which is slow
+  through WC on real hardware), the cursor's blink, more than one
+  framebuffer. (px59 served the cursor movement, erase, the alternate
+  screen and the 256 colours: "The console for an editor" below.)
 
 ## The speaker (px18)
 
@@ -856,7 +856,35 @@ for byte over COM1.
   SGR 22 and 27, the bright backgrounds), so yew's frames are a smear on
   the framebuffer while the serial line carries every byte; no answer to
   DA1 or a cursor-position report (a Linux VT answers both); the
-  modifiers on the cursor keys, the function keys, Alt.
+  modifiers on the cursor keys, the function keys, Alt. (px59 serves
+  these: "The console for an editor", below.)
+
+## The console for an editor (px59)
+
+PAX's screen draws what an editor writes as a Linux VT draws it, and
+its keyboard gives what a VT's gives: each class measured black-box on
+kasumi's own kernel's VT under QEMU (`/dev/vcsa1` read after each case;
+`notes/px59-the-console-for-an-editor.md`, `notes/px59/vt.rows` and
+`vt2.rows`, two probes, each run twice), `tools/screen-ref` held to those
+rows case by case and PAX's screen held to `tools/screen-ref` pixel for
+pixel and, on the VT's own 80×25 grid, to the VT's cells directly
+(`tests/mpx5-screen`).
+
+| module | what |
+|---|---|
+| `screen/` | CUP HVP CUU CUD CUF CUB CNL CPL CHA HPA VPA; ED and EL in the current rendition; DECSC/DECRC; `?1049h/l` (the alternate screen in the upper 16 bits of each 32-bit cell: no memory; a scroll moves the active half only; leaving redraws the main screen); `?25l/h`; DECSCUSR recorded (PAX's cursor stays a block); SGR 22 27, 100–107 (bright, R-px59-1), `38;5`/`48;5` by the VT's measured mapping (R-px59-3); OSC to BEL or any ESC, `OSC P` and `OSC R`; BS at the margin clears the wrap and moves left (R-px59-5); a scrolled-in row blank in the current rendition; the answers DA1/`ESC Z` (`ESC [ ? 6 c`), DSR 5 (`ESC [ 0 n`), DSR 6 and `? 6` (`ESC [ r ; c R`) queued for the console (`answer`) |
+| `console/` | the screen's answers typed into the input through the line discipline when the keyboard was the device last typed at, dropped and counted before any input and after COM1's (`answered`, R-px59-4); F1–F12 (`ESC [ [ A`–`E`, `ESC [ 17 ~`–`24 ~`), Shift+F1–F10 the VT's F11–F20, Ctrl+Fn plain, Alt or Shift+Ctrl with Fn nothing; the arrows `ESC [ 1 ; m X` (m = 1 + Shift + 2 Alt + 4 Ctrl; Alt alone on Left/Right nothing); the editing block unmodified (Shift+PgUp/PgDn nothing); left Alt sends ESC before a character key (with Shift: nothing); right Alt adds nothing (R-px59-2) |
+| `user/` | a console `write` hands the screen's answers to the console before it returns (`console.answered`), waking a waiting reader |
+| `../boot/limine-vt.conf` | Limine asked for 640×400, the VT's 80×25 grid (the BIOS gives it; OVMF does not) |
+
+- Dropped, measured (the VT draws them, PAX does not): SGR 2 3 4 5 21
+  (the VGA VT's colours 8, 2, cyan and the blink bit), `38;2`/`48;2`
+  (the VT's nearest of 16), the SGR colon form, ICH DCH ECH IL DL
+  DECSTBM, a CSI of 9 to 16 parameters (the VT acts; PAX ignores more
+  than 8), OSC P's palette, the keypad without NumLock, Alt with the
+  keypad, AltGr's hex entry. None is yew's or pelt's (px58's census).
+- The answers are not typed before anyone types, nor after COM1 input:
+  a serial terminal answers for itself (R-px59-4).
 
 ## Who may name, change and keep (px44)
 

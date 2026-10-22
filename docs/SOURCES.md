@@ -936,3 +936,23 @@ consulted.
 | `strace(1)` 6.8 in `localhost/px13-ubuntu` on kasumi | — | (a program we run) | run on yew's goldens and the typed session, never read | §B, §C |
 | black-box Linux 7.2.8-1-cachyos under QEMU 11.1.1 (kasumi's own kernel image `f4c00d5d…`, a VGA display, the PS/2 keyboard; `notes/px58/vtkeys.c` as pid 1) | — | GPL-2.0 (a program we run) | run, never read: the VT's keys, window and answers, twice, the same rows | §E, `kernel/console`'s keys |
 | rootless podman on kasumi (`px13-ubuntu`), CI's Docker | — | — | run: the probe and the session on a pty (`tools/linux-tree`) | Y1, Y4's reference |
+
+## px59: the console for an editor
+
+No kernel's source was read or searched for, Linux's above all, nor any
+libc's, terminal driver's or terminal emulator's, nor any editor's but
+yew's and pelt's (the maintainer's, read for what they write and ask).
+`kernel/screen`, `kernel/console` and `tools/screen-ref` were written
+from console_codes(4), ECMA-48 and the measurements below; the VT was a
+black box: bytes sent, `/dev/vcsa1` and the input read back.
+Permissively licensed kernels: none consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| man-pages `console_codes(4)`, `vcs(4)`, `console_ioctl(4)` (VT_GETSTATE, VT_ACTIVATE), `termios(3)`, `poll(2)`; ECMA-48 (the control functions' names and syntax) | man-pages 6.x; 5th ed. | documentation | read | the classes' names, what to measure, the probes' calls |
+| black-box Linux 7.2.8-1-cachyos under QEMU 11.1.1 (kasumi's own kernel image `f4c00d5d…`, its VGA display and PS/2 keyboard; `notes/px59/vtprobe.c` and `vtprobe2.c` as pid 1, built static in `px13-ubuntu`) | — | GPL-2.0 (a program we run) | run, never read: each case's cells and cursor, the answers, the keys with their modifiers, each probe twice, the same rows | `notes/px59/vt.rows`, `vt2.rows`; every class of `kernel/screen`, the keys of `kernel/console`, `tests/mpx5-screen.d/vtcheck.py` |
+| yew `77c1083` (the maintainer's): `src/term/tty.lu` (the probe string, DA1 as its fence, the alternate screen's ESC 7 / ESC 8), `runtime/init.fl` (C-z) | the org's own | GPL-3.0 + the wolf Training Data Permission | read and cited, never changed | what yew asks and how it suspends |
+| pelt `90d7c64` (the maintainer's): `src/sh/edit.lu` (`ed_query`: one cursor report before each prompt, 300 ms, never asked again unanswered; the editor's moves) | the org's own | GPL-3.0 + the wolf Training Data Permission | read and cited | R-px59-4, S3 |
+| Limine 12.9.1's configuration (`resolution:`) | by digest (`boot/limine.pin`) | BSD-2-Clause | run | `boot/limine-vt.conf` |
+| rootless podman on kasumi (`px13-ubuntu`), CI's Docker | — | — | run: the keyboard session on a 50 by 160 pseudo-terminal (`tools/linux-tty --winsize`) | Y6, Y7's reference |
+

@@ -7,6 +7,22 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The console for an editor (px59).** PAX's framebuffer console draws
+  what an editor writes as a Linux VT draws it: cursor addressing (CUP,
+  HVP, CUU/CUD/CUF/CUB, CNL/CPL, CHA/HPA, VPA), ED and EL in the current
+  rendition, DECSC/DECRC, the alternate screen (`?1049h/l`, kept in the
+  upper half of each cell: no memory), cursor visibility, SGR 22 and 27,
+  the bright backgrounds and the 256 colours, OSC strings consumed, and
+  the VT's answers to DA1, DECID and the cursor-position report typed
+  into the input once the keyboard is typed at. The keyboard gives the
+  function keys, the modified arrows and left Alt as ESC, as the VT
+  does. Each class measured black-box on kasumi's kernel's VT under QEMU
+  and held there case by case; yew typed at the keyboard draws on the
+  screen exactly as `tools/screen-ref` draws its bytes, and yew suspends
+  and continues byte-identical to Linux. A new suite, `tests/mpx5-screen`;
+  `tests/mpx5-yew` gains Y6 and Y7; `tools/ps2-session` types at the PS/2
+  keyboard and takes screens while a program runs.
+
 - **yew on PAX, the census (px58).** yew, the modal editor in wolf
   (`user/yew.pin`: yew `77c1083`; `tools/mkyew`, `tools/mkpelt`'s shape,
   static `c2daa653…`, 16,101,824 bytes), draws, edits and saves on PAX's
