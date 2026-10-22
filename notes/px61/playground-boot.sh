@@ -15,7 +15,8 @@ python3 -I - "$L/play-session/play.txt" <<'PY'
 from pathlib import Path
 import sys
 s=Path(sys.argv[1]).read_text(errors='replace')
-for row in ('hi', '/home/pax', 'hello, wolf', 'std: WOLF, roundtrip true', 'std-st=0'):
+assert 'hi' in s.splitlines() or '$ hi' in s.splitlines(), 'missing background hi (may follow the prompt)'
+for row in ('/home/pax', 'hello, wolf', 'std: WOLF, roundtrip true', 'std-st=0'):
     assert row in s.splitlines(), 'missing playground row '+row
 assert 'PAX: init /bin/env ended with status 0; nothing left to run' in s
 print('playground maintainer session: PASS')
