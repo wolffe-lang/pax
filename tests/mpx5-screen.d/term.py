@@ -55,7 +55,7 @@ class Rendition(unittest.TestCase):
         t=term(b'\33[38;5;196mR\33[48;5;46mG\33[38;5;244mX')
         self.assertEqual(t.cells[0][:3],[(82,9,0),(71,9,2),(88,7,2)])
     def test_palette(self):
-        rows=(pathlib.Path(__file__).resolve().parents[2]/'notes/px59/vt.rows').read_text().splitlines()
+        rows=(pathlib.Path(__file__).resolve().parent/'vt.rows').read_text().splitlines()
         swap=lambda v: (v&10)|((v&1)<<2)|((v&4)>>2)
         for bg in (False,True):
             line=next(l for l in rows if l.startswith('PALETTE '+('BG' if bg else 'FG')+' '))
@@ -69,8 +69,13 @@ class Osc(unittest.TestCase):
         for end in (b'\7',b'\33\\'):
             t=term(b'A\33]52;c;eA=='+end+b'B')
             self.assertEqual(t.cells[0][:3],[(65,7,0),(66,7,0),(32,7,0)])
-    def test_unterminated(self):
-        t=term(b'A\33]52;ignored\n\33[31mZ'); self.assertEqual((t.cy,t.cx),(0,1))
+    def test_any_esc_ends_it(self):
+        # the VT's OSC-ESC and OSC-C0 rows: a C0 byte inside is consumed,
+        # any ESC ends the string and starts the next sequence
+        t=term(b'A\33]52;ignored\n\33[31mZ')
+        self.assertEqual((t.cy,t.cx),(0,2)); self.assertEqual(t.cells[0][1],(90,1,0))
+    def test_palette_string(self):
+        t=term(b'A\33]P1ff0000B\33]RC'); self.assertEqual(''.join(chr(c[0]) for c in t.cells[0][:3]),'ABC')
 
 class Save(unittest.TestCase):
     def test_position_and_attributes(self):
@@ -97,5 +102,32 @@ class Alternate(unittest.TestCase):
         self.assertEqual(t.cells,saved)
         for b in b'\r\nE': t.feed(b)
         self.assertEqual([row[0][0] for row in t.cells],[67,68,69])
+
+class Cursor2(unittest.TestCase):
+    def test_visibility(self):
+        t=term(b'\33[?25lA'); self.assertFalse(t.visible)
+        for b in b'\33[?25h': t.feed(b)
+        self.assertTrue(t.visible)
+    def test_shape_recorded(self):
+        t=term(b'\33[6 qA'); self.assertEqual(t.shape,6); self.assertEqual(t.cells[0][0],(65,7,0))
+        for b in b'\33[7 q\33[2;3 q': t.feed(b)
+        self.assertEqual(t.shape,6)
+    def test_backspace_at_the_margin(self):
+        t=term(b'\33[1;79HAB\10C',80,25)
+        self.assertEqual([c[0] for c in t.cells[0][78:]],[67,66]); self.assertEqual((t.cx,t.wrap),(79,False))
+    def test_next_previous_line(self):
+        t=term(b'\33[3;5H\33[2EX\33[1FY'); self.assertEqual((t.cells[4][0][0],t.cells[3][0][0]),(88,89))
+
+class Answers(unittest.TestCase):
+    def test_queries(self):
+        t=term(b'\33[c\33Z\33[5n\33[3;5H\33[6n\33[?6n\33[>c')
+        self.assertEqual(bytes(t.answers),b'\33[?6c\33[?6c\33[0n\33[3;5R\33[3;5R')
+    def test_wrap_report(self):
+        t=term(b'\33[1;80HX\33[6n',80,25); self.assertEqual(bytes(t.answers),b'\33[1;80R')
+
+class Scroll(unittest.TestCase):
+    def test_new_row_in_the_background(self):
+        t=term(b'\33[3;1H\33[44mA\r\nB',4,3)
+        self.assertEqual(t.cells[2],[(66,7,4),(32,7,4),(32,7,4),(32,7,4)])
 
 if __name__=='__main__': unittest.main(verbosity=2)
