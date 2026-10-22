@@ -19,8 +19,19 @@ podman run --rm --privileged --cpuset-cpus 8-11 --ulimit core=0:0 -v "$L:$L:Z" \
         tests/"$2" --only build --tier native
     ' px61 "$L/pax" "$suite" > "$B.build.log" 2>&1
 printf 'build %s PASS %s\n' "$suite" "$(date -Is)"
-"tests/$suite" --only linux --images "$B/$suite" > "$B.linux.log" 2>&1
+while ! awk '{exit !($1 < 16)}' /proc/loadavg; do
+    echo "WAIT: load must be below 16 before the session table"
+    uptime
+    sleep 60
+done
+uptime
+taskset -c 8-11 "tests/$suite" --only linux --images "$B/$suite" > "$B.linux.log" 2>&1
 printf 'linux %s PASS %s\n' "$suite" "$(date -Is)"
+while ! awk '{exit !($1 < 16)}' /proc/loadavg; do
+    echo "WAIT: load must be below 16 before the PAX session table"
+    uptime
+    sleep 60
+done
 uptime
 taskset -c 8-11 "tests/$suite" --images "$B/$suite" --tier native --firmware bios > "$B.boot.log" 2>&1
 printf 'boot %s PASS %s\n' "$suite" "$(date -Is)"
