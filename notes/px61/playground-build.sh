@@ -5,7 +5,7 @@
 set -eu
 L=$HOME/lanes/px61
 U="basename cat chgrp chmod chown cp cut dirname echo env expand false fold groups head id kill ln logname ls mkdir mv nl nproc paste printenv printf pwd readlink rm rmdir seq sleep sort stat tac tail tee timeout touch tr true unexpand uniq wc whoami yes"
-podman run --rm --privileged --cpuset-cpus 10-15 -v $L:$L:Z -e PAX_CACHE=$L/cache -e TMPDIR=$L/tmp -e PAX_LOPE_REPO=$L/lope -e U="$U" -e L="$L" localhost/px13-ubuntu bash -c '
+podman run --rm --privileged --cpuset-cpus 8-11 -v $L:$L:Z -e PAX_CACHE=$L/cache -e TMPDIR=$L/tmp -e PAX_LOPE_REPO=$L/lope -e U="$U" -e L="$L" localhost/px13-ubuntu bash -c '
 set -eu; cd $L/pax; W=$L/w; rm -rf $W; mkdir -p $W
 export PAX_WOLF=$(tools/fetch-wolf | tail -n 1); echo "wolf: $PAX_WOLF $($PAX_WOLF --version | head -n 1)"
 tools/fetch-limine >/dev/null; echo "limine rc=$?"
@@ -28,5 +28,5 @@ rc=$?
 # px57: the musl lupin, built in the throwaway Rust image (px13-ubuntu with rustup inside it).
 R=${PAX_RUST_IMAGE:-localhost/px57-rust}
 podman image exists $R || { echo "missing existing Rust image: $R"; exit 2; }
-podman run --rm --cpuset-cpus 10-15 -v $L:$L:Z -e L="$L" $R bash -c 'cd $L/pax && tools/mklupin $L/w/lupin > $L/w/lupin.txt 2>&1; echo "mklupin rc=$?"; ls -la $L/w/lupin'
+podman run --rm --cpuset-cpus 8-11 -v $L:$L:Z -e L="$L" $R bash -c 'cd $L/pax && tools/mklupin $L/w/lupin > $L/w/lupin.txt 2>&1; echo "mklupin rc=$?"; ls -la $L/w/lupin'
 echo "build.sh done rc=$rc"

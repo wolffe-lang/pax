@@ -3,7 +3,7 @@ set -euo pipefail
 L=$HOME/lanes/px61
 printf '%s\n' $$ > "$L/census.pid"
 mkdir -p "$L/census"
-podman run --rm --cap-add SYS_PTRACE --cpuset-cpus 0-3 --ulimit core=0:0 -v "$L:$L:Z" -e L="$L" localhost/px13-ubuntu bash -c '
+podman run --rm --cap-add SYS_PTRACE --cpuset-cpus 8-11 --ulimit core=0:0 -v "$L:$L:Z" -e L="$L" localhost/px13-ubuntu bash -c '
 set -euo pipefail
 export PATH="$L/bin/lope-1:$L/bin/bore-1:$PATH"
 P=$L/bin/pelt-1/pelt

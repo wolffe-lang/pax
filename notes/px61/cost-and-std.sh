@@ -3,9 +3,10 @@ set -euo pipefail
 L=$HOME/lanes/px61
 printf '%s\n' $$ > "$L/cost-and-std.pid"
 ulimit -c 0
+uptime
 mkdir -p "$L/base" "$L/cost"
 tar -xf "$L/base.tar" -C "$L/base"
-podman run --rm --cpuset-cpus 4-7 --ulimit core=0:0 -v "$L:$L:Z" -e L="$L" -e PAX_CACHE="$L/cache" -e TMPDIR="$L/tmp" localhost/px13-ubuntu bash -c '
+podman run --rm --cpuset-cpus 8-11 --ulimit core=0:0 -v "$L:$L:Z" -e L="$L" -e PAX_CACHE="$L/cache" -e TMPDIR="$L/tmp" localhost/px13-ubuntu bash -c '
 set -euo pipefail
 for side in base pax; do
   cd "$L/$side"
