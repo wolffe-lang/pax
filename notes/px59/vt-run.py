@@ -7,6 +7,7 @@ for run in (1, 2):
     log = base / f'out/vt{run}.log'
     sock = base / f'out/vt{run}.sock'
     sock.unlink(missing_ok=True)
+    log.unlink(missing_ok=True)
     cmd = ['taskset','-c','0-3','qemu-system-x86_64','-machine','q35,accel=tcg','-cpu','max','-smp','1','-m','512','-display','none','-no-reboot','-nic','none','-kernel',f'/usr/lib/modules/{os.uname().release}/vmlinuz','-initrd',str(base/'measure/vt.cpio'),'-append','console=ttyS0 quiet loglevel=0 panic=-1 rdinit=/vtprobe','-serial',f'file:{log}','-monitor',f'unix:{sock},server=on,wait=off']
     with (base/f'out/vt{run}.qemu.log').open('wb') as output:
         p = subprocess.Popen(cmd,stdin=subprocess.DEVNULL,stdout=output,stderr=subprocess.STDOUT)
@@ -34,7 +35,7 @@ for run in (1, 2):
 rows=[]
 for run in (1,2):
     raw=(base/f'out/vt{run}.log').read_text()
-    rows.append('\n'.join(line for line in raw.splitlines() if line.startswith(('SCREEN ','QUERY ','KEY '))))
+    rows.append('\n'.join(line for line in raw.splitlines() if line.startswith(('SCREEN ','QUERY ','KEY ','PALETTE '))))
 if rows[0]!=rows[1]: raise RuntimeError('VT runs differ')
 (base/'out/vt.rows').write_text(rows[0]+'\n')
 print('VT twice: identical rows',flush=True)
