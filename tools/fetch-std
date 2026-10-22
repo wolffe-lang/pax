@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# mkstd OUTDIR — stage user/std.pin's std/ subtree and a manifest of
+# fetch-std OUTDIR — stage user/std.pin's std/ subtree and a manifest of
 # every file. No compiler is run; symlinks and non-regular files are
 # refused rather than omitted from the installed tree's digest.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
-[ $# -eq 1 ] || die "usage: mkstd OUTDIR"
+[ $# -eq 1 ] || die "usage: fetch-std OUTDIR"
 need git python3
 . "$PAX_ROOT/user/std.pin"
 mkdir -p "$1"
@@ -26,14 +26,14 @@ files = sorted((out / 'std').rglob('*'))
 rows = []
 for p in files:
     if p.is_symlink() or not (p.is_file() or p.is_dir()):
-        raise SystemExit('mkstd: non-regular entry: ' + str(p))
+        raise SystemExit('fetch-std: non-regular entry: ' + str(p))
     if p.is_file():
         name = p.relative_to(out).as_posix()
         if '\n' in name or '\r' in name or '\\' in name:
-            raise SystemExit('mkstd: unrepresentable manifest name: ' + repr(name))
+            raise SystemExit('fetch-std: unrepresentable manifest name: ' + repr(name))
         rows.append(hashlib.sha256(p.read_bytes()).hexdigest() + '  ' + name + '\n')
 if not rows:
-    raise SystemExit('mkstd: empty std tree')
+    raise SystemExit('fetch-std: empty std tree')
 manifest = ''.join(rows).encode()
 (out / 'std.sha256').write_bytes(manifest)
 line = 'std-manifest %s %d files\n' % (hashlib.sha256(manifest).hexdigest(), len(rows))
