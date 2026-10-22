@@ -1,0 +1,24 @@
+# px60: compiler for the dev image; kernel/wolf.pin is the build-host compiler.
+# tools/mkwolf builds v0.2.34 plus wolf-musl.patch: newlocale(0,"C",NULL)
+# instead of the unavailable LC_ALL_MASK binding, and an ownership wrapper
+# making opaque pthread_t handles Send (musl uses a pointer-shaped handle).
+# No libc source was read; newlocale(3) and pthread_join(3) specify the APIs.
+# The patched tree carries a development stamp, never an unmodified-release
+# stamp. Source revision plus patch digest identify its exact input.
+# Move to a published archive once wolf-lang ships the fix and musl archive.
+#
+# Recipe: pinned Rust/musl target, cargo --release --locked, +crt-static,
+# relocation-model=static (not the targets default static PIE), debug info
+# stripped by rustc, source/registry paths remapped, three packages:
+# wolf_driver, wolf_rt, wolf_cimport. No LLVM library: the LLVM backend emits
+# IR and shells out to clang; the native backend embeds Cranelift. The helper
+# installs nothing. The source/build directory is retained, never auto-deleted.
+WOLF_SRC_REPO=https://github.com/wolffe-lang/wolf-lang
+WOLF_SRC_TAG=v0.2.34
+WOLF_SRC_REV=9da7bdcf2aea9adf48df6570bedc58e16e9ef853
+WOLF_SRC_TARGET=x86_64-unknown-linux-musl
+WOLF_SRC_RUST=1.97.1
+WOLF_SRC_PATCH=user/wolf-musl.patch
+WOLF_SRC_PATCH_SHA256=c71c2cecf5f44f76d908295955eb0ca8e435d7218b8456b13a510cc59bb0db18
+WOLF_SRC_VERSION_LINE="wolf 0.2.34+dev.9da7bdc (wolfgang, pin 9da7bdc)"
+WOLF_STD_REV=e036bec318ad81ecd5a025612bc2c2adb17527f3

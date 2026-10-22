@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Build the dev image wolf; source, patch and rationale in user/wolf.pin.
+# The tool installs and deletes nothing. Retained builds are printed at exit.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkwolf OUTDIR"
+need git cargo rustc rustup readelf
+. "$PAX_ROOT/user/wolf.pin"
+mkdir -p "$1" "$PAX_BUILD"
+out=$(cd "$1" && pwd)
+export RUSTUP_AUTO_INSTALL=0 CARGO_INCREMENTAL=0
+w=$(mktemp -d "$PAX_BUILD/px60-wolf.XXXXXX")
+say "build retained at $w"
+git -C "$w" init -q src
+git -C "$w/src" fetch -q --depth 1 "$WOLF_SRC_REPO" "refs/tags/$WOLF_SRC_TAG:refs/tags/$WOLF_SRC_TAG"
+git -C "$w/src" -c advice.detachedHead=false checkout -q "$WOLF_SRC_TAG"
+[ "$(git -C "$w/src" rev-parse HEAD)" = "$WOLF_SRC_REV" ] || die "wolf source revision differs from pin"
+patch=$PAX_ROOT/$WOLF_SRC_PATCH
+[ "$(sha256_of "$patch")" = "$WOLF_SRC_PATCH_SHA256" ] || die "wolf portability patch digest differs from pin"
+git -C "$w/src" apply --check "$patch"
+git -C "$w/src" apply "$patch"
+cd "$w/src"
+ch=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+[ "$ch" = "$WOLF_SRC_RUST" ] || die "source Rust differs from pin"
+case $(rustc --version) in "rustc $ch "*) ;; *) die "pinned rustc not installed" ;; esac
+rustup target list --installed --toolchain "$ch" | grep -qx "$WOLF_SRC_TARGET" || die "musl target not installed"
+# xtask dist stages only the host target. Reproduce its three-package
+# build with an explicit target. The modified tree never gets WOLF_RELEASE.
+unset WOLF_RELEASE
+export WOLF_COMMIT=${WOLF_SRC_REV:0:7}
+reg=${CARGO_HOME:-$HOME/.cargo}
+CARGO_TARGET_DIR=$w/target \
+RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static -C strip=debuginfo --remap-path-prefix=$w/src=/wolf-lang --remap-path-prefix=$reg=/cargo" \
+    cargo build --release --locked --target "$WOLF_SRC_TARGET" -j "${PAX_WOLF_BUILD_JOBS:-4}" \
+        -p wolf_driver -p wolf_rt -p wolf_cimport >&2
+for f in wolf wolf-cimport-worker libwolf_rt.a; do
+    cp "$w/target/$WOLF_SRC_TARGET/release/$f" "$out/$f"
+done
+for f in wolf wolf-cimport-worker; do
+    readelf -hW "$out/$f" | grep -Eq 'Type: +EXEC' || die "$f is not ET_EXEC"
+    ! readelf -lW "$out/$f" | grep -q INTERP || die "$f has PT_INTERP"
+    readelf -dW "$out/$f" | grep -q "no dynamic section" || die "$f has a dynamic section"
+done
+have=$("$out/wolf" --version | head -n 1)
+[ "$have" = "$WOLF_SRC_VERSION_LINE" ] || die "wolf version differs: $have"
+say "$have"
+: > "$out/sums.txt"
+for f in wolf wolf-cimport-worker libwolf_rt.a; do
+    printf "%s %s %s\n" "$f" "$(sha256_of "$out/$f")" "$(wc -c < "$out/$f" | tr -d " ")" | tee -a "$out/sums.txt"
+done
