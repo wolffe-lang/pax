@@ -4,5 +4,5 @@ import os
 import sys
 os.chroot(sys.argv[1])
 os.chdir("/")
-os.environ.update(PATH="/usr/bin:/bin", HOME="/", WOLF_STD="/usr/share/wolf/std")
+os.environ.update(PATH="/usr/bin:/bin", HOME="/", TERM="linux", WOLF_STD="/usr/share/wolf/std")
 os.execvpe(sys.argv[2], sys.argv[2:], os.environ)
