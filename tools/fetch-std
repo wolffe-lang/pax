@@ -10,14 +10,12 @@ need git python3
 mkdir -p "$1"
 out=$(cd "$1" && pwd)
 [ ! -e "$out/std" ] || die "$out/std already exists (use a fresh OUTDIR)"
-w=$(mktemp -d "${TMPDIR:-/tmp}/pax-std.XXXXXX")
-trap 'rm -rf "$w"' EXIT
-git -C "$w" init -q
-git -C "$w" fetch -q --depth 1 "$STD_REPO" "$STD_REV" || die "cannot fetch wolf-std $STD_REV"
-git -C "$w" checkout -q --detach FETCH_HEAD
-[ "$(git -C "$w" rev-parse HEAD)" = "$STD_REV" ] || die "wolf-std HEAD is not $STD_REV"
-[ -d "$w/std" ] || die "wolf-std $STD_REV has no std/"
-cp -R "$w/std" "$out/std"
+# Reuse px60's stager, retaining its compiler-pin default for dev builds.
+PAX_STD_REV=$STD_REV PAX_STD_REPO=$STD_REPO PAX_STD_SCRATCH_TAG=px61 \
+    "$PAX_ROOT/tools/mkwolf-std" "$out/std"
+[ "$(cat "$out/std/STD-REV")" = "$STD_REV" ] || die "staged std revision differs from base pin"
+# Packaging metadata is not part of the upstream std/ source subtree.
+mv "$out/std/STD-REV" "$out/STD-REV"
 python3 -I - "$out" <<'PY'
 from pathlib import Path
 import hashlib, sys

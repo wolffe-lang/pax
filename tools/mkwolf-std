@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
-# Stage the dev image standard library at the compiler source pin.
+# Shared std source stager. The dev default is the compiler source pin;
+# the base-image wrapper supplies its explicit installed-source revision.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 [ $# -eq 1 ] || die "usage: mkwolf-std OUTDIR"
 . "$PAX_ROOT/user/wolf.pin"
+rev=${PAX_STD_REV:-$WOLF_STD_REV}
+repo=${PAX_STD_REPO:-https://github.com/wolffe-lang/wolf-std}
+tag=${PAX_STD_SCRATCH_TAG:-px60}
 need git
 mkdir -p "$1" "$PAX_BUILD"
 out=$(cd "$1" && pwd)
-w=$(mktemp -d "$PAX_BUILD/px60-std.XXXXXX")
+w=$(mktemp -d "$PAX_BUILD/$tag-std.XXXXXX")
 say "source retained at $w"
 git -C "$w" init -q
-git -C "$w" fetch -q --depth 1 https://github.com/wolffe-lang/wolf-std "$WOLF_STD_REV"
+git -C "$w" fetch -q --depth 1 "$repo" "$rev"
 git -C "$w" checkout -q --detach FETCH_HEAD
-[ "$(git -C "$w" rev-parse HEAD)" = "$WOLF_STD_REV" ] || die "std revision differs from pin"
+[ "$(git -C "$w" rev-parse HEAD)" = "$rev" ] || die "std revision differs from pin"
 cp -R "$w/std/." "$out/"
-printf "%s\n" "$WOLF_STD_REV" > "$out/STD-REV"
+printf "%s\n" "$rev" > "$out/STD-REV"
