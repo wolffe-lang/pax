@@ -12,7 +12,10 @@ import sys
 
 l = Path(sys.argv[1])
 w = l / 'build/final-v2/mpx5-pelt'
-names = (w / 'run-names').read_text().splitlines()
+name_file = w / 'run-names'
+if not name_file.exists():
+    name_file = l / 'verified-final/run-names'
+names = name_file.read_text().splitlines()
 assert len(names) == 26 and len(set(names)) == 26
 out = l / 'verified-final'
 (out / 'linux').mkdir(parents=True, exist_ok=True)
@@ -33,7 +36,10 @@ for name in names:
     for folder in ('pass-1', 'pass-2'):
         assert (guests / folder / (name + '.tty.rc')).read_text().strip() == '0', name
     shutil.copyfile(a, out / 'linux' / (name + '.tty'))
-    base = l / ('build/final-shapes' if shape else 'build/final-v2')
+    suffix = 'final-shapes' if shape else 'final-v2'
+    base = l / 'build' / suffix
+    if not base.exists():
+        base = l / 'evidence-builds' / suffix
     log = base / ('mpx5-pelt-native-bios-' + name + '.serial.log')
     verdict = Path(str(log) + '.verdict').read_text()
     assert any(line.startswith('qemu-halt: HALTED') for line in verdict.splitlines()), name
