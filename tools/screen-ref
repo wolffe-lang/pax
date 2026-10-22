@@ -159,6 +159,20 @@ class Term:
         if final == ord('m'):
             self.sgr(ps)
             return
+        if final in (ord('J'), ord('K')):
+            mode = ps[0]
+            if mode not in (0, 1, 2): return
+            f = self.fg + 8 if self.bold and self.fg < 8 else self.fg
+            bg = self.bg
+            if self.inv: f, bg = bg, f
+            pos = y*self.cols+x
+            start = 0 if final == ord('J') else y*self.cols
+            end = self.rows*self.cols if final == ord('J') else (y+1)*self.cols
+            if mode == 0: start = pos
+            if mode == 1: end = pos+1
+            for i in range(start, end): self.cells[i//self.cols][i%self.cols] = (32, f, bg)
+            self.wrap = False
+            return
         if final in (ord('H'), ord('f')):
             y, x = n - 1, (self.params[1] or 1) - 1
         elif final == ord('A'): y -= n
