@@ -50,7 +50,7 @@ if [ "$only" = linux ]; then
 fi
 if [ -z "$images" ]; then
     [ ! -e "$work/root" ] || die "root already exists; use a fresh PAX_BUILD or --images"
-    mkdir -p "$work/bin" "$work/root/bin" "$work/root/etc" "$work/root/home/pax"
+    mkdir -p "$work/bin" "$work/root/bin" "$work/root/etc" "$work/root/home/pax" "$work/root/tmp"
     r=$work/root
     if [ -n "${PAX_DEV_BASE:-}" ]; then
         base=$PAX_DEV_BASE
@@ -98,9 +98,9 @@ if [ -z "$images" ]; then
         *) die "unknown PAX_WOLF_PLANT" ;;
     esac
     printf "%s\n" "${RUNS[@]}" > "$r/etc/pax-run"
-    printf "%s\n" "/home/pax 755 1000 1000" > "$work/owners"
+    printf "%s\n" "/home/pax 755 1000 1000" "/tmp 1777 0 0" > "$work/owners"
     # Sorted paths and explicit permissions: identical tree on both sides.
-    args=(/home/pax/:755:1000:1000)
+    args=(/home/pax/:755:1000:1000 /tmp/:1777)
     while IFS= read -r f; do
         mode=644; [ -x "$f" ] && mode=755
         args+=("/${f#"$r/"}=$f:$mode")

@@ -8,6 +8,12 @@ text = Path(sys.argv[1]).read_text()
 who = sys.argv[2]
 programs = ("hello", "loop", "signal", "spawn", "exec", "fork", "host", "std")
 errors = []
+for marker in ("typed=0", "object=0", "build=2", "release=2"):
+    if f"\n{marker}\n" not in text:
+        errors.append(f"missing status: {marker}")
+for wall in ("cannot run `cc`", "release tier requires clang >="):
+    if wall not in text:
+        errors.append(f"M2 wall missing: {wall}")
 for program in programs:
     for command, status in (("check", 2), ("typecheck", 0), ("fmt", 0), ("run", 0)):
         if f"\n{command}-{program}={status}\n" not in text:
