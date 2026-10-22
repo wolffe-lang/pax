@@ -11,12 +11,15 @@ if len(sys.argv) == 5:
     if sys.argv[4] not in names:
         raise SystemExit('unknown replay case: ' + sys.argv[4])
     names = [sys.argv[4]]
-lines = log.read_text(errors='replace').splitlines()
+lines = log.read_bytes().decode(errors='replace').splitlines()
 failed = False
 
 def norm(text):
     # Same job-pid mask as tests/mpx5-jobs; no semantic line removed.
-    return re.sub(r'(?m)^(\[\d+\]) \d+$', r'\1 PID', text.replace('\r', '')).strip('\n') + '\n'
+    text = re.sub(r'\x1b\[[0-9;?=<>]*[A-Za-z]', '', text)
+    text = re.sub(r'\x1b[()][A-Za-z0-9]', '', text)
+    text = re.sub(r'\x1b[c78DEHM=>]', '', text).replace('\r', '')
+    return re.sub(r'(?m)^(\[\d+\]) \d+$', r'\1 PID', text).strip('\n') + '\n'
 
 def diff(name, a, b):
     global failed
@@ -42,7 +45,7 @@ for k, name in enumerate(names, 1):
     ref = images / 'linux' / (name + '.tty')
     if not ref.is_file():
         print('FAIL F1 missing Linux reference: ' + name); failed = True; continue
-    expected = norm(ref.read_text(errors='replace'))
+    expected = norm(ref.read_bytes().decode(errors='replace'))
     (out / (name + '.pax')).write_text(actual)
     (out / (name + '.linux')).write_text(expected)
     if name.startswith('corpus-'):
@@ -70,6 +73,12 @@ for k, name in enumerate(names, 1):
         diff(name, expected, actual)
     if not actual.startswith('$ '):
         print('FAIL F2 missing first prompt: ' + name); failed = True
+    if name.startswith(('c_jc_mixed_pipeline-', 'jc_subshell_stop-', 'jc_subshell_redir_stop-')):
+        if not re.search(r'(?m)^\[\d+\].*\bStopped\b', actual):
+            print('FAIL F2 control key did not stop the job: ' + name); failed = True
+    if name.startswith(('jc_subshell_stop-', 'jc_subshell_redir_stop-')):
+        if not all(row in actual.splitlines() for row in ('back', 'st=0')):
+            print('FAIL F2 foreground resume did not complete: ' + name); failed = True
     if name.startswith('probes-') and any(x in actual for x in ('ps: invalid option', 'Usage: ps', 'ps-pgid:')):
         print('FAIL F2 unexercised process-group probe: ' + name); failed = True
     if name.startswith('selfcheck-') and 'selfcheck-status=0' not in actual.splitlines():
