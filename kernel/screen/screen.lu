@@ -365,10 +365,9 @@ fn scroll() {
         pax_fb_fill(va + (rows - 1) * band, pb | (pb << 32), band / 8)
     }
     var i: u64 = 0
-    while i < (rows - 1) * cols {
-        put_cell(i, cell(i + cols)) // never move the inactive screen's half
-        i += 1
-    }
+    // PLANT C (px59, never merged): both halves move, the inactive screen's too
+    // # Safety: inside pax_screen_cells (rows * cols four-byte cells).
+    unsafe { pax_fb_copy(pax_screen_cells as u64, pax_screen_cells as u64 + cols * 4, (rows - 1) * cols * 4) }
     i = 0
     while i < cols {
         put_cell((rows - 1) * cols + i, c)
