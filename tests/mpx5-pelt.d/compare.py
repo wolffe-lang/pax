@@ -52,6 +52,9 @@ for k, name in enumerate(names, 1):
         def cases(text):
             return dict((m.group(1), m.group(2)) for m in re.finditer(r'(?ms)^CASE:([^\n]+)\n(.*?^CASE-STATUS:\d+\n)', text))
         a, b = cases(actual), cases(expected)
+        def envelope(text):
+            return re.sub(r'(?ms)^CASE:builtin/c_s_dot_special_file\n.*?^CASE-STATUS:\d+\n', 'NAMED FIFO ROW\n', text)
+        diff(name + ' complete envelope (named FIFO row apart)', envelope(expected), envelope(actual))
         fixture = Path(__file__).resolve().parents[2] / 'user/console/fork/diff'
         required = sorted(str(p.relative_to(fixture))[:-3] for p in fixture.rglob('*.sh'))
         for case in required:
