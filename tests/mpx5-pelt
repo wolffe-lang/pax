@@ -68,6 +68,28 @@ linux_side() {
         done
     done
 }
+# R-px61-2: each case and role gets a fresh boot, just as its Linux
+# reference does. Two role images are shared by all cases; no bound or
+# assertion is removed, and no large duplicate ISO per case is needed.
+role_images() { # images tier
+    local d=$1 tier=$2 role f mode
+    [ -f "$d/$tier/pelt-root.iso" ] && [ -f "$d/$tier/pelt-pax.iso" ] && return 0
+    local args=(/tmp/:1777 /home/pax/:755:1000:1000)
+    while IFS= read -r -d '' f; do
+        [ "$f" != "$d/root/etc/pax-run" ] || continue
+        mode=644; case "$f" in "$d/root/bin/"*) mode=755 ;; esac
+        args+=("${f#"$d/root"}=$f:$mode")
+    done < <(find "$d/root" -type f -print0)
+    for role in root pax; do
+        if [ "$role" = root ]; then echo '/bin/env HOME=/ /bin/sh -i -m' > "$d/$role.run"
+        else echo '/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m' > "$d/$role.run"; fi
+        "$PAX_ROOT/tools/mkinitramfs" "$d/pelt-$role.cpio" "${args[@]}" \
+            "/etc/pax-run=$d/$role.run:644" > "$d/$role.initramfs.txt" || return 1
+        "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+            --add "$d/pelt-$role.cpio" initramfs.cpio "$d/$tier/kmain_console.elf" "$d/$tier/pelt-$role.iso" || return 1
+        say "role image $tier $role: cpio $(sha256_of "$d/pelt-$role.cpio"), iso $(sha256_of "$d/$tier/pelt-$role.iso")"
+    done
+}
 if [ "$only" = linux ]; then
     linux_side "$images" || { bad 'F0 Linux replay'; exit 1; }
     say 'PASS F0 Linux: every replay ran, root and pax'
@@ -126,6 +148,7 @@ if [ -z "$images" ]; then
         elf=$("$PAX_ROOT/tools/build-kernel" "${flag[@]}" --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier") || exit 2
         "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$work/pelt.cpio" initramfs.cpio "$elf" "$work/$tier/pelt.iso" || exit 2
     done
+    for tier in $tiers; do role_images "$work" "$tier" || exit 2; done
     say 'PASS F0 build: static programs, replay fixtures and images'
     [ "$only" != build ] || exit 0
     linux_side "$work" || { bad 'F0 Linux replay'; exit 1; }
@@ -138,17 +161,24 @@ for leg in $legs; do
         continue
     fi
     for tier in $tiers; do
-        log=$PAX_BUILD/mpx5-pelt-$tier-$leg.serial.log
-        rc=0
-        "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 1800 --qemu -m --qemu 1024M \
-            --elf "$images/$tier/kmain_console.elf" --marker 'halt|PANIC .*' --type "$images/all.keys" --prompt '$ ' \
-            "$images/$tier/pelt.iso" > "$log.verdict" 2>&1 || rc=$?
-        ran=$((ran+1))
-        [ "$rc" = 0 ] || bad "F3 $tier $leg: not halted ($rc)"
-        serial_norm "$log" > "$log.norm"
-        python3 -I "$PAX_ROOT/tests/mpx5-pelt.d/compare.py" "$images" "$log.norm" "$log.sessions" || bad "F1/F2 $tier $leg replay"
-        if grep -q '^PANIC ' "$log.norm"; then bad "F3 $tier $leg panic"; fi
-        say "F3 $tier $leg: $(tail -1 "$log.verdict")"
+        role_images "$images" "$tier" || { bad "F0 $tier role images"; continue; }
+        while IFS= read -r name; do
+            role=${name##*-}
+            log=$PAX_BUILD/mpx5-pelt-$tier-$leg-$name.serial.log
+            say "begin $tier $leg $name (fresh boot, bound 1800 s)"
+            rc=0
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 1800 --qemu -m --qemu 1024M \
+                --elf "$images/$tier/kmain_console.elf" --marker 'halt|PANIC .*' --type "$images/keys/$name.keys" --prompt '$ ' \
+                "$images/$tier/pelt-$role.iso" > "$log.verdict" 2>&1 || rc=$?
+            ran=$((ran+1))
+            [ "$rc" = 0 ] || bad "F3 $tier $leg $name: not halted ($rc)"
+            serial_norm "$log" > "$log.norm"
+            python3 -I "$PAX_ROOT/tests/mpx5-pelt.d/compare.py" "$images" "$log.norm" "$log.sessions" "$name" || bad "F1/F2 $tier $leg $name"
+            init=/bin/env; [ "$role" = root ] || init=/bin/as
+            grep -qx "PAX: init $init ended with status 0; nothing left to run" "$log.norm" || bad "F3 $tier $leg $name: init did not exit zero"
+            if grep -q '^PANIC ' "$log.norm"; then bad "F3 $tier $leg $name panic"; fi
+            say "F3 $tier $leg $name: $(tail -n 1 "$log.verdict")"
+        done < "$images/run-names"
     done
 done
 [ "$ran" -gt 0 ] || bad 'no boot ran'
