@@ -23,25 +23,60 @@
 //!   character first moves to the start of the next line (CR, LF, BS and
 //!   TAB clear a pending wrap);
 //! - LF (0x0a) moves down one row, scrolling the whole grid up when on
-//!   the last row (the new row blank, in the default background); CR
-//!   (0x0d) to column 0; BS (0x08) one column left, or, with a wrap
-//!   pending, only clears it (so the line discipline's `\b \b` erases the
-//!   character in the last column); TAB (0x09) to the next multiple of
+//!   the last row (the new row blank in the current rendition, px59: the
+//!   measured VT's); CR
+//!   (0x0d) to column 0; BS (0x08) one column left, clearing a pending
+//!   wrap too (px59, R-px59-5: the measured VT's; px19 only cleared the
+//!   wrap); TAB (0x09) to the next multiple of
 //!   8, at most the last column; every other C0 byte and DEL do nothing.
 //!   The serial console's CR LF (ONLCR) is what a line end looks like
 //!   here too;
 //! - ESC `[` parameters final: a CSI sequence; with final `m` it is SGR,
 //!   of which 0 (reset), 1 (bold, drawn as the bright colour), 7
-//!   (inverse), 30-37 and 90-97 (foreground), 40-47 (background), 39 and
-//!   49 (default foreground, background) are honoured, every other
-//!   parameter ignored; an empty parameter is 0; at most 8 parameters,
-//!   each at most 9999. A sequence with a private or intermediate byte,
-//!   or another final, is read and ignored. ESC followed by anything but
-//!   `[` is two bytes ignored. A C0 byte inside a sequence ends it and
-//!   is acted on; a byte at or above 0x80 ends it and is dropped.
+//!   (inverse), 22 and 27 (bold off, inverse off), 30-37 and 90-97
+//!   (foreground), 40-47 and 100-107 (background; 100-107 bright,
+//!   R-px59-1), 39 and 49 (default foreground, background), `38;5;n`
+//!   and `48;5;n` (the 256 colours, mapped to the 16 as a Linux VT maps
+//!   them, measured: `indexed`) are honoured; `38;2` and `48;2` are read
+//!   and skipped; every other parameter ignored; an empty parameter is
+//!   0; at most 8 parameters, each at most 9999. A sequence with a
+//!   private or intermediate byte, or another final, is read and
+//!   ignored, but for the ones below. A C0 byte inside a sequence ends it
+//!   and is acted on; a byte at or above 0x80 ends it and is dropped.
+//! - (px59) what an editor writes, as a Linux VT draws it (measured
+//!   black-box: notes/px59-the-console-for-an-editor.md, notes/px59/
+//!   vt.rows and vt2.rows): CUP and HVP (`H`, `f`), CUU CUD CUF CUB
+//!   (`A`-`D`), CNL CPL (`E`, `F`), CHA and HPA (`G`, `` ` ``), VPA
+//!   (`d`), each clamped to the grid and clearing a pending wrap; ED and
+//!   EL (`J`, `K`, 0 1 2, the cursor's cell included) blank in the
+//!   current rendition; `ESC 7` and `ESC 8` (the cursor and the
+//!   rendition, one slot for both screens); `?1049h`, the alternate
+//!   screen, entered with the cursor and rendition kept for the return
+//!   and cleared in the current rendition, the cursor where it was;
+//!   `?1049l` back to the main screen as it was left, cursor and
+//!   rendition restored (a second h or l does nothing); `?25l` and
+//!   `?25h` (DECTCEM, the cursor hidden and shown); DECSCUSR (`CSI n SP
+//!   q`) recorded and not drawn (PAX's cursor is a block whatever the
+//!   shape); OSC (`ESC ]`) consumed to BEL or to any ESC, which then
+//!   starts the next sequence (ST's `ESC \` among them), and `ESC ] P`
+//!   with its seven digits and `ESC ] R` alone (the VT's palette strings,
+//!   not applied); the queries answered as the VT answers them — DA1
+//!   (`CSI c`, `CSI 0 c`) and DECID (`ESC Z`) `ESC [ ? 6 c`, DSR 5 `ESC [
+//!   0 n`, DSR 6 (`CSI 6 n`, `CSI ? 6 n`) `ESC [ row ; column R` — into a
+//!   32-byte queue kernel/console takes from (`answer`) after every
+//!   write. ESC followed by anything else is two bytes ignored.
 //! - the cursor is the cell under it drawn inverse (its colours
 //!   swapped), steady (no blink: a picture of the screen is the same
-//!   whenever it is taken).
+//!   whenever it is taken), unless hidden (DECTCEM).
+//!
+//! **The two screens** (px59): a four-byte cell holds the main screen's
+//! 16-bit cell in bits 0-15 and the alternate screen's in bits 16-31, so
+//! the alternate screen costs no memory (pax_screen_cells stays 128 KiB,
+//! 32 frames; a second grid would have been 32 more at the largest grid,
+//! 8 at 160x50). Only the active half is read or written; a scroll moves
+//! the active half alone, cell by cell (the inactive screen never
+//! moves), and leaving the alternate screen redraws every cell of the
+//! main one.
 //!
 //! The 16 colours are the PC's text-mode palette: 0 black 000000, 1 red
 //! aa0000, 2 green 00aa00, 3 brown aa5500, 4 blue 0000aa, 5 magenta
@@ -67,8 +102,10 @@
 //! Written from the ECMA-48 standard (C0 controls, CSI's syntax, SGR's
 //! parameters), the VT100 user guide's description of the last-column
 //! wrap, the Intel SDM vol. 2 (MOVS, STOS), and the PC's 16-colour text
-//! palette as the VGA documentation gives it. No Linux source; no other
-//! kernel's source.
+//! palette as the VGA documentation gives it; px59 from console_codes(4)
+//! and a Linux VT run black-box under QEMU (kasumi's own kernel image,
+//! its /dev/vcsa1 read after each case: notes/px59). No Linux source; no
+//! other kernel's source.
 
 extern "c" fn pax_irq_save() -> u64
 extern "c" fn pax_irq_restore(flags: u64)
@@ -112,13 +149,17 @@ const S_CURX: u64 = 49
 const S_CURY: u64 = 50
 const S_REPLAYED: u64 = 51 // bytes replayed at attach
 
-const S_VISIBLE: u64 = 52
-const S_SHAPE: u64 = 53
-const S_SAVE: u64 = 54 // cx, cy, fg, bg, bold, inverse: six words
-const S_ALT: u64 = 60
-const S_MAIN_POS: u64 = 61
-const S_MAIN_ATTR: u64 = 62
-const S_REPLY: u64 = 63
+// px59: the classes an editor writes (notes/px59-the-console-for-an-editor.md).
+const S_VISIBLE: u64 = 52 // DECTCEM: 1 while the cursor is shown
+const S_SHAPE: u64 = 53 // DECSCUSR's last parameter (0-6), recorded, not drawn
+const S_SAVE: u64 = 54 // DECSC: the cursor, x | y << 16
+const S_SAVE_ATTR: u64 = 55 // and the rendition, fg | bg << 4 | bold << 8 | inverse << 9
+const S_RQ: u64 = 56 // the answers not yet taken: 32 bytes, words 56-59
+const S_ALT: u64 = 60 // 1 while the alternate screen is shown
+const S_MAIN_POS: u64 = 61 // ?1049h: the main screen's cursor, as S_SAVE
+const S_MAIN_ATTR: u64 = 62 // and its rendition, as S_SAVE_ATTR
+const S_REPLY: u64 = 63 // the answers' ring: its first byte | its count << 8
+const RQ_BYTES: u64 = 32
 
 const MAX_COLS: u64 = 256
 const MAX_ROWS: u64 = 128
@@ -142,6 +183,59 @@ fn bump(i: u64) {
     put_sv(i, sv(i) + 1)
 }
 
+// --- the answers -----------------------------------------------------------
+
+/// Byte `i` (< 32) of the answers' ring.
+fn rq_byte(i: u64) -> u64 {
+    (sv(S_RQ + i / 8) >> ((i % 8) * 8)) & 0xff
+}
+
+fn put_rq_byte(i: u64, b: u64) {
+    let w = S_RQ + i / 8
+    let sh = (i % 8) * 8
+    put_sv(w, (sv(w) & !(0xff << sh)) | ((b & 0xff) << sh))
+}
+
+/// Queue one byte of an answer; a full ring drops it (32 bytes hold
+/// three cursor reports; the console takes them after every write).
+fn answer_byte(b: u64) {
+    let r = sv(S_REPLY)
+    let n = r >> 8
+    if n >= RQ_BYTES {
+        return
+    }
+    put_rq_byte(((r & 0xff) + n) % RQ_BYTES, b)
+    put_sv(S_REPLY, (r & 0xff) | ((n + 1) << 8))
+}
+
+/// `v` in decimal (v < 10000: a row or a column).
+fn answer_dec(v: u64) {
+    if v >= 10 {
+        answer_dec(v / 10)
+    }
+    answer_byte(48 + v % 10)
+}
+
+/// DA1's answer, a Linux VT's: `ESC [ ? 6 c` (notes/px59/vt.rows).
+fn answer_da1() {
+    answer_byte(27)
+    answer_byte(91)
+    answer_byte(63)
+    answer_byte(54)
+    answer_byte(99)
+}
+
+/// The cursor-position report: `ESC [ row ; column R`, 1-based, the
+/// active screen's cursor (the last column itself with a wrap pending).
+fn answer_cpr() {
+    answer_byte(27)
+    answer_byte(91)
+    answer_dec(sv(S_CY) + 1)
+    answer_byte(59)
+    answer_dec(sv(S_CX) + 1)
+    answer_byte(82)
+}
+
 /// Cell `i` (row-major, `cols` a row).
 fn cell(i: u64) -> u64 {
     // # Safety: i < cols * rows <= 256 * 128, inside pax_screen_cells.
@@ -149,13 +243,15 @@ fn cell(i: u64) -> u64 {
     (packed >> (sv(S_ALT) * 16)) & 0xffff
 }
 
+/// Cell `i` of the active screen := `v` (< 2^16). px59: a four-byte
+/// cell holds both screens, the main one in bits 0-15 and the alternate
+/// one (`?1049h`) in bits 16-31; only the active half is written.
 fn put_cell(i: u64, v: u64) {
-    // # Safety: as `cell`. The other half is the independent, inactive screen.
-    let p = (pax_screen_cells as u64 + i * 4) as *u32
-    let old = unsafe { p.read_volatile() as u64 }
-    let packed = if sv(S_ALT) == 0 { (old & 0xffff0000) | (v & 0xffff) }
-        else { (old & 0xffff) | ((v & 0xffff) << 16) }
-    unsafe { p.write_volatile(packed as u32) }
+    // # Safety: i < cols * rows <= 256 * 128, inside pax_screen_cells.
+    let old = unsafe { ((pax_screen_cells as u64 + i * 4) as *u32).read_volatile() as u64 }
+    let packed = if sv(S_ALT) == 0 { (old & 0xffff0000) | (v & 0xffff) } else { (old & 0xffff) | ((v & 0xffff) << 16) }
+    // # Safety: as above.
+    unsafe { ((pax_screen_cells as u64 + i * 4) as *u32).write_volatile(packed as u32) }
 }
 
 /// Row `r` of glyph `g` (g < 256, r < 16).
@@ -239,7 +335,7 @@ fn hide() {
 
 /// Put the cursor on the screen at (cx, cy).
 fn show() {
-    if sv(S_CUR) == 0 {
+    if sv(S_CUR) == 0 && sv(S_VISIBLE) != 0 {
         let x = sv(S_CX)
         let y = sv(S_CY)
         draw(x, y, true)
@@ -256,13 +352,17 @@ fn scroll() {
     let pitch = sv(S_PITCH)
     let va = sv(S_VA)
     let band = GH * pitch // bytes a text row
-    let p0 = pal(0)
+    // px59: the new row is blank in the current rendition, as the
+    // measured VT's (notes/px59/vt2.rows, scroll-background): a space is
+    // its background colour alone.
+    let c = blank()
+    let pb = pal((c >> 12) & 15)
     // # Safety: boot/screen.S's REP MOVSQ/STOSQ inside the framebuffer
     // kernel/fb mapped: rows * band bytes from va, upwards; and inside
     // pax_screen_cells (rows * cols four-byte cells).
     unsafe {
         pax_fb_copy(va, va + band, (rows - 1) * band)
-        pax_fb_fill(va + (rows - 1) * band, p0 | (p0 << 32), band / 8)
+        pax_fb_fill(va + (rows - 1) * band, pb | (pb << 32), band / 8)
     }
     var i: u64 = 0
     while i < (rows - 1) * cols {
@@ -271,7 +371,7 @@ fn scroll() {
     }
     i = 0
     while i < cols {
-        put_cell((rows - 1) * cols + i, BLANK)
+        put_cell((rows - 1) * cols + i, c)
         i += 1
     }
     bump(S_SCROLLS)
@@ -333,10 +433,12 @@ fn control(b: u64) {
         put_sv(S_WRAP, 0)
         put_sv(S_CX, 0)
     } else if b == 8 {
+        // px59 (R-px59-5): one column left, a pending wrap cleared too,
+        // as the measured VT does (notes/px59/vt2.rows, wrap-BS); px19
+        // only cleared the wrap.
         hide()
-        if sv(S_WRAP) != 0 {
-            put_sv(S_WRAP, 0)
-        } else if sv(S_CX) > 0 {
+        put_sv(S_WRAP, 0)
+        if sv(S_CX) > 0 {
             put_sv(S_CX, sv(S_CX) - 1)
         }
     } else if b == 9 {
@@ -507,6 +609,19 @@ fn dispatch(b: u64) {
         move_to(n - 1, y)
     } else if b == 100 { // VPA
         move_to(x, n - 1)
+    } else if b == 69 { // CNL
+        move_to(0, y + n)
+    } else if b == 70 { // CPL
+        move_to(0, if n > y { 0 } else { y - n })
+    } else if b == 99 && sv(S_P) == 0 && sv(S_PI) == 0 { // DA1, CSI c and CSI 0 c
+        answer_da1()
+    } else if b == 110 && sv(S_P) == 6 && sv(S_PI) == 0 { // DSR 6: the cursor's position
+        answer_cpr()
+    } else if b == 110 && sv(S_P) == 5 && sv(S_PI) == 0 { // DSR 5: `ESC [ 0 n`, no malfunction
+        answer_byte(27)
+        answer_byte(91)
+        answer_byte(48)
+        answer_byte(110)
     }
 }
 
@@ -516,19 +631,12 @@ fn alternate(on: bool) {
     if (sv(S_ALT) != 0) == on { return }
     hide()
     if on {
-        put_sv(S_MAIN_POS, sv(S_CX) | (sv(S_CY) << 16))
-        put_sv(S_MAIN_ATTR, sv(S_FG) | (sv(S_BG) << 4) | (sv(S_BOLD) << 8) | (sv(S_INV) << 9))
+        save_to(S_MAIN_POS, S_MAIN_ATTR)
         put_sv(S_ALT, 1)
         erase(0, sv(S_COLS) * sv(S_ROWS))
     } else {
         put_sv(S_ALT, 0)
-        let pos = sv(S_MAIN_POS)
-        let a = sv(S_MAIN_ATTR)
-        move_to(pos & 0xffff, pos >> 16)
-        put_sv(S_FG, a & 15)
-        put_sv(S_BG, (a >> 4) & 15)
-        put_sv(S_BOLD, (a >> 8) & 1)
-        put_sv(S_INV, (a >> 9) & 1)
+        restore_from(S_MAIN_POS, S_MAIN_ATTR)
         var i: u64 = 0
         while i < sv(S_COLS) * sv(S_ROWS) {
             draw(i % sv(S_COLS), i / sv(S_COLS), false)
@@ -537,11 +645,26 @@ fn alternate(on: bool) {
     }
 }
 
+/// `CSI ? Pm h` and `CSI ? Pm l`: 1049 (the alternate screen) and 25
+/// (DECTCEM, the cursor shown or not); every other mode is read and
+/// ignored, as the measured VT ignores paste, mouse, focus and sync.
 fn private_mode(b: u64) {
+    if b == 110 && sv(S_P) == 6 && sv(S_PI) == 0 {
+        answer_cpr() // `CSI ? 6 n`: the measured VT answers it as `CSI 6 n`
+        return
+    }
     if b != 104 && b != 108 { return }
     var i: u64 = 0
     while i <= sv(S_PI) {
-        if sv(S_P + i) == 1049 { alternate(b == 104) }
+        let m = sv(S_P + i)
+        if m == 1049 {
+            alternate(b == 104)
+        } else if m == 25 {
+            if b == 108 {
+                hide()
+            }
+            put_sv(S_VISIBLE, if b == 104 { 1 } else { 0 })
+        }
         i += 1
     }
 }
@@ -560,6 +683,8 @@ fn csi(b: u64) {
         }
     } else if b == 63 && sv(S_PRIV) == 0 && sv(S_PI) == 0 && sv(S_P) == 0 {
         put_sv(S_PRIV, 63)
+    } else if b == 32 && sv(S_PRIV) == 0 {
+        put_sv(S_PRIV, 32) // one space intermediate: DECSCUSR's, if `q` ends it
     } else if (b >= 0x3c && b <= 0x3f) || (b >= 0x20 && b <= 0x2f) || b == 0x3a {
         put_sv(S_PRIV, 1)
     } else if b >= 0x40 && b <= 0x7e {
@@ -568,35 +693,72 @@ fn csi(b: u64) {
             dispatch(b)
         } else if sv(S_PRIV) == 63 {
             private_mode(b)
+        } else if sv(S_PRIV) == 32 && b == 113 && sv(S_PI) == 0 && sv(S_P) <= 6 {
+            put_sv(S_SHAPE, sv(S_P)) // DECSCUSR: recorded; PAX draws a block
         }
     } else {
         put_sv(S_ESC, 0) // 0x80 and above: the sequence ends, the byte is dropped
     }
 }
 
+/// The cursor and the rendition into words `pos` and `attr` (DECSC,
+/// ?1049h).
+fn save_to(pos: u64, attr: u64) {
+    put_sv(pos, sv(S_CX) | (sv(S_CY) << 16))
+    put_sv(attr, sv(S_FG) | (sv(S_BG) << 4) | (sv(S_BOLD) << 8) | (sv(S_INV) << 9))
+}
+
+/// And back (DECRC, ?1049l): the cursor clamped to the grid, the wrap
+/// cleared.
+fn restore_from(pos: u64, attr: u64) {
+    let p = sv(pos)
+    let a = sv(attr)
+    move_to(p & 0xffff, p >> 16)
+    put_sv(S_FG, a & 15)
+    put_sv(S_BG, (a >> 4) & 15)
+    put_sv(S_BOLD, (a >> 8) & 1)
+    put_sv(S_INV, (a >> 9) & 1)
+}
+
 fn save_cursor() {
-    put_sv(S_SAVE, sv(S_CX))
-    put_sv(S_SAVE + 1, sv(S_CY))
-    put_sv(S_SAVE + 2, sv(S_FG))
-    put_sv(S_SAVE + 3, sv(S_BG))
-    put_sv(S_SAVE + 4, sv(S_BOLD))
-    put_sv(S_SAVE + 5, sv(S_INV))
+    save_to(S_SAVE, S_SAVE_ATTR)
 }
 
 fn restore_cursor() {
-    move_to(sv(S_SAVE), sv(S_SAVE + 1))
-    put_sv(S_FG, sv(S_SAVE + 2))
-    put_sv(S_BG, sv(S_SAVE + 3))
-    put_sv(S_BOLD, sv(S_SAVE + 4))
-    put_sv(S_INV, sv(S_SAVE + 5))
+    restore_from(S_SAVE, S_SAVE_ATTR)
 }
 
 /// One byte through the terminal.
 fn feed(b: u64) {
     bump(S_BYTES)
-    if sv(S_ESC) == 3 || sv(S_ESC) == 4 { // OSC, through BEL or ST
-        if b == 7 || (sv(S_ESC) == 4 && b == 92) { put_sv(S_ESC, 0) }
-        else { put_sv(S_ESC, if b == 27 { 4 } else { 3 }) }
+    var st = sv(S_ESC)
+    if st == 3 { // an OSC string's first byte
+        if b == 80 { // `P`: seven hex digits, the VT's palette setting (consumed, not applied)
+            put_sv(S_ESC, 4)
+            put_sv(S_PI, 7)
+            return
+        }
+        if b == 82 { // `R`: the VT's palette reset, nothing more (consumed)
+            put_sv(S_ESC, 0)
+            return
+        }
+        put_sv(S_ESC, 5)
+        st = 5
+    }
+    if st == 4 { // OSC P's digits
+        let left = sv(S_PI) - 1
+        put_sv(S_PI, left)
+        if left == 0 {
+            put_sv(S_ESC, 0)
+        }
+        return
+    }
+    if st == 5 { // an OSC string, to BEL or to any ESC (ST's, or another sequence's)
+        if b == 7 {
+            put_sv(S_ESC, 0)
+        } else if b == 27 {
+            put_sv(S_ESC, 1) // the next byte is an escape's second, as the VT reads it
+        }
         return
     }
     if b < 32 || b == 127 {
@@ -628,6 +790,9 @@ fn feed(b: u64) {
             if b == 55 { save_cursor() } else { restore_cursor() }
         } else if b == 93 {
             put_sv(S_ESC, 3)
+        } else if b == 90 {
+            put_sv(S_ESC, 0)
+            answer_da1() // DECID, `ESC Z`: DA1's answer (measured)
         } else {
             put_sv(S_ESC, 0)
         }
@@ -737,6 +902,9 @@ pub fn attach(va: u64, w: u64, h: u64, pitch: u64, rs: u64, gs: u64, bs: u64) ->
     put_sv(S_UN, 0)
     put_sv(S_CUR, 0)
     put_sv(S_ALT, 0)
+    put_sv(S_VISIBLE, 1)
+    put_sv(S_SHAPE, 0)
+    put_sv(S_REPLY, 0)
     save_cursor()
     let p0 = pal(0)
     // # Safety: boot/screen.S's REP STOSQ over the whole framebuffer
@@ -763,6 +931,30 @@ pub fn attach(va: u64, w: u64, h: u64, pitch: u64, rs: u64, gs: u64, bs: u64) ->
     // # Safety: as `put`.
     unsafe { pax_irq_restore(flags) }
     true
+}
+
+/// px59: the next byte of what the screen answers a program's query
+/// (DA1, the cursor-position report), as a Linux VT puts its answers in
+/// its input; 256 when there is none. kernel/console takes these after
+/// a write and decides whether they are typed (`answered`).
+pub fn answer() -> u64 {
+    // # Safety: as `put`.
+    let flags = unsafe { pax_irq_save() }
+    let r = sv(S_REPLY)
+    var b: u64 = 256
+    if r >> 8 != 0 {
+        b = rq_byte(r & 0xff)
+        put_sv(S_REPLY, (((r & 0xff) + 1) % RQ_BYTES) | (((r >> 8) - 1) << 8))
+    }
+    // # Safety: as `put`.
+    unsafe { pax_irq_restore(flags) }
+    b
+}
+
+/// px59: whether the cursor is shown (DECTCEM) and DECSCUSR's last
+/// shape, `visible | shape << 1`, for kernel/screen's report.
+pub fn cursor_state() -> u64 {
+    sv(S_VISIBLE) | (sv(S_SHAPE) << 1)
 }
 
 /// Whether the screen is attached (the console is drawn).
