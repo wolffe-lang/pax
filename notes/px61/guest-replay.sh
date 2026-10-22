@@ -28,7 +28,7 @@ for pass in 1 2; do
     echo "guest $pass $name done $(date -Is): $(cat "$O/$name.tty.rc")"
   done < "$W/run-names"
 done
-python3 -I - "$L/guest" <<'PY'
+python3 -I - "${PX61_GUEST_OUT:-$L/guest}" <<'PY'
 from pathlib import Path
 import re,sys
 p=Path(sys.argv[1]);bad=False

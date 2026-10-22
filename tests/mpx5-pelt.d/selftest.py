@@ -1,4 +1,4 @@
-"""The replay comparator must reject a missing fork witness or shape."""
+"""Reject missing output, wrong status and identical unusable-helper output."""
 from pathlib import Path
 import subprocess
 import sys
