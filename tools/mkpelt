@@ -2,7 +2,8 @@
 # mkpelt — build pelt, the POSIX shell in wolf, as a fully static x86-64
 # Linux executable, unmodified, from pelt's own tree (px13).
 #
-#   tools/mkpelt OUTDIR
+#   tools/mkpelt OUTDIR [pelt|selfcheck]
+# selfcheck is tools/self-check's program, linked statically for PAX.
 #
 # The tree is user/pelt.pin's commit of wolffe-lang/pelt (public). The
 # toolchain is the one THAT tree pins in its wolf-toolchain.toml: the
@@ -22,7 +23,9 @@
 # a tool error.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
-[ $# -eq 1 ] || die "usage: mkpelt OUTDIR"
+[ $# -ge 1 ] && [ $# -le 2 ] || die "usage: mkpelt OUTDIR [pelt|selfcheck]"
+program=${2:-pelt}
+case $program in pelt|selfcheck) ;; *) die "unknown pelt program: $program" ;; esac
 out=$1
 need git curl tar readelf cc clang
 . "$PAX_ROOT/user/pelt.pin"
@@ -86,9 +89,9 @@ chmod +x "$w/bin/cc"
 
 : > "$out/sums.txt"
 (cd "$w/pelt" && PATH="$w/bin:$PATH" WOLF_STD=$std \
-    "$wolf" build --release --no-cache --deny-warnings src/pelt.lu -o "$out/pelt") >&2 \
-    || die "wolf build of src/pelt.lu"
-readelf -hW "$out/pelt" | grep -Eq 'Type: +EXEC' || die "pelt is not ET_EXEC"
-! readelf -lW "$out/pelt" | grep -q INTERP || die "pelt has a PT_INTERP (not static)"
-printf '%s %s %s\n' pelt "$(sha256_of "$out/pelt")" "$(wc -c < "$out/pelt" | tr -d ' ')" | tee -a "$out/sums.txt"
+    "$wolf" build --release --no-cache --deny-warnings "src/$program.lu" -o "$out/$program") >&2 \
+    || die "wolf build of src/$program.lu"
+readelf -hW "$out/$program" | grep -Eq 'Type: +EXEC' || die "pelt is not ET_EXEC"
+! readelf -lW "$out/$program" | grep -q INTERP || die "pelt has a PT_INTERP (not static)"
+printf '%s %s %s\n' "$program" "$(sha256_of "$out/$program")" "$(wc -c < "$out/$program" | tr -d ' ')" | tee -a "$out/sums.txt"
 printf 'linked against: %s\n' "$("$real" -print-file-name=libc.a)"
