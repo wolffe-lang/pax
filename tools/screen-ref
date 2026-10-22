@@ -96,6 +96,8 @@ class Term:
         self.ucp = 0
         self.scrolls = 0
         self.saved = (0,0,7,0,False,False)
+        self.primary = None
+        self.main_cursor = None
 
     def newline(self):
         if self.cy + 1 < self.rows:
@@ -207,6 +209,23 @@ class Term:
         self.cx, self.cy = min(max(x, 0), self.cols-1), min(max(y, 0), self.rows-1)
         self.wrap = False
 
+    def private_mode(self, b):
+        if b not in (104,108): return
+        for p in self.params[:self.pi+1]:
+            if p == 1049:
+                if b == 104 and self.primary is None:
+                    self.primary = self.cells
+                    self.main_cursor = (self.cx,self.cy,self.fg,self.bg,self.bold,self.inv)
+                    f = self.fg + 8 if self.bold and self.fg < 8 else self.fg
+                    bg = self.bg
+                    if self.inv: f,bg = bg,f
+                    self.cells = [[(32,f,bg)]*self.cols for _ in range(self.rows)]
+                    self.wrap = False
+                elif b == 108 and self.primary is not None:
+                    self.cells, self.primary = self.primary, None
+                    self.cx,self.cy,self.fg,self.bg,self.bold,self.inv = self.main_cursor
+                    self.wrap = False
+
     def feed(self, b):
         if self.esc in (3, 4):
             if b == 7 or (self.esc == 4 and b == 92): self.esc = 0
@@ -247,12 +266,16 @@ class Term:
                     self.pi += 1
                 else:
                     self.priv = True
+            elif b == 63 and not self.priv and self.pi == 0 and self.params[0] == 0:
+                self.priv = 63
             elif 0x3C <= b <= 0x3F or 0x20 <= b <= 0x2F or b == 0x3A:
                 self.priv = True
             elif 0x40 <= b <= 0x7E:
                 self.esc = 0
                 if not self.priv:
                     self.dispatch(b)
+                elif self.priv == 63:
+                    self.private_mode(b)
             else:
                 self.esc = 0
             return

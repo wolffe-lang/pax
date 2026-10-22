@@ -44,6 +44,8 @@ int main(void) {
     screen("EL2","abcde\033[1;3H\033[2K");
     screen("DECSC-DECRC","\033[31m\033[3;5H\0337\033[32m\033[H\0338X");
     screen("1049","MAIN\033[?1049h\033[Halt\033[?1049lX");
+    screen("1049-enter","MAIN\033[?1049hA"); emit("\033[?1049l");
+    screen("1049-nested","MAIN\033[?1049hA\033[?1049hB"); emit("\033[?1049l");
     screen("SGR22","\033[1mA\033[22mB");
     screen("SGR27","\033[7mA\033[27mB");
     screen("bright-background","\033[100m0\033[101m1\033[102m2\033[103m3\033[104m4\033[105m5\033[106m6\033[107m7");
