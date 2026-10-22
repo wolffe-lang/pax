@@ -21,6 +21,7 @@ timeout --foreground "$remaining" taskset -c 0-7 podman run --rm --name px60-lld
  fi
  sha256sum /work/llvm-download/llvm-project-17.0.6.src.tar.xz
  sha256sum /work/llvm-download/llvm-project-17.0.6.src.tar.xz
+ echo "58a8818c60e6627064f312dbf46c02d9949956558340938b71cf731ad8bc0813  /work/llvm-download/llvm-project-17.0.6.src.tar.xz" | sha256sum -c -
  if [ ! -d /work/llvm-download/llvm-project-17.0.6.src ]; then
  tar -xJf /work/llvm-download/llvm-project-17.0.6.src.tar.xz -C /work/llvm-download
  fi
