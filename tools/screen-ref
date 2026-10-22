@@ -23,19 +23,34 @@
 #     malformed sequence's byte, a stray continuation byte and 0xf8-0xff
 #     as `?`; a sequence cut short by a C0 byte or another lead byte
 #     writes `?` first;
-#   - deferred wrap; LF down (scrolling, the new row blank in colour 0),
-#     CR to column 0, BS left or only clears a pending wrap, TAB to the
-#     next multiple of 8 (at most the last column); other C0 and DEL
-#     nothing; CR, LF, BS and TAB clear a pending wrap;
+#   - deferred wrap; LF down (scrolling, the new row blank in the
+#     current rendition, px59), CR to column 0, BS one left (px59: a
+#     pending wrap cleared too), TAB to the next multiple of 8 (at most
+#     the last column); other C0 and DEL nothing; CR, LF, BS and TAB
+#     clear a pending wrap;
 #   - ESC [ … final: SGR for final `m` without private/intermediate bytes
 #     and at most 8 parameters (0 reset, 1 bold = bright foreground for
-#     0-7, 7 inverse, 30-37, 90-97, 40-47, 39, 49; others ignored; each
-#     parameter at most 9999); any other sequence ignored; ESC then not
-#     `[` drops both; a C0 byte inside a sequence ends it and acts; a
-#     byte >= 0x80 inside one ends it and is dropped;
+#     0-7, 7 inverse, 22 and 27 their resets, 30-37, 90-97, 40-47,
+#     100-107 (bright), 39, 49, 38;5;n and 48;5;n by the Linux VT's
+#     measured mapping to the 16, 38;2 and 48;2 skipped; others ignored;
+#     each parameter at most 9999);
+#   - px59, the rest of what a Linux VT draws of an editor's output,
+#     measured (tests/mpx5-screen.d/vtcheck.py holds this terminal to
+#     the VT's rows, case by case): CUP HVP CUU CUD CUF CUB CNL CPL CHA
+#     HPA VPA (clamped, a pending wrap cleared), ED and EL in the current
+#     rendition, ESC 7 / ESC 8, ?1049h/l (a second screen, cleared in the
+#     current rendition on entry, the main one restored with its cursor
+#     and rendition), ?25l/h (the cursor hidden or shown), DECSCUSR
+#     recorded (`shape`), OSC to BEL or to any ESC (which starts the next
+#     sequence), ESC ] P and its seven digits, ESC ] R; the queries' answers
+#     kept in `answers` (DA1 and ESC Z `ESC [ ? 6 c`, DSR 5 `ESC [ 0 n`,
+#     DSR 6 and ? 6 the cursor's row and column); any other sequence
+#     ignored; ESC then another byte drops both; a C0 byte inside a
+#     sequence ends it and acts; a byte >= 0x80 inside one ends it and
+#     is dropped;
 #   - the cell's colours are fixed when it is written (bold and inverse
-#     applied then); the cursor is the cell under it with its colours
-#     swapped;
+#     applied then); the cursor, when shown, is the cell under it with
+#     its colours swapped;
 #   - the PC text palette, 0 000000 … 15 ffffff.
 #
 # --out writes the reference as a binary PPM (P6, 255); --grid writes the
@@ -98,13 +113,25 @@ class Term:
         self.saved = (0,0,7,0,False,False)
         self.primary = None
         self.main_cursor = None
+        self.visible = True  # DECTCEM
+        self.shape = 0  # DECSCUSR's last parameter, recorded (PAX draws a block)
+        self.answers = bytearray()  # what the screen answers queries with (DA1, DSR)
+        self.osc_left = 0
+
+    def blank(self):
+        """A space in the current rendition (ED, EL, a scrolled-in row)."""
+        f = self.fg + 8 if self.bold and self.fg < 8 else self.fg
+        b = self.bg
+        if self.inv:
+            f, b = b, f
+        return (32, f, b)
 
     def newline(self):
         if self.cy + 1 < self.rows:
             self.cy += 1
         else:
             self.cells.pop(0)
-            self.cells.append([(32, 7, 0)] * self.cols)
+            self.cells.append([self.blank()] * self.cols)
             self.scrolls += 1
 
     def glyph(self, cp):
@@ -132,9 +159,8 @@ class Term:
             self.wrap = False
             self.cx = 0
         elif b == 8:
-            if self.wrap:
-                self.wrap = False
-            elif self.cx > 0:
+            self.wrap = False
+            if self.cx > 0:
                 self.cx -= 1
         elif b == 9:
             self.wrap = False
@@ -186,16 +212,21 @@ class Term:
         if final in (ord('J'), ord('K')):
             mode = ps[0]
             if mode not in (0, 1, 2): return
-            f = self.fg + 8 if self.bold and self.fg < 8 else self.fg
-            bg = self.bg
-            if self.inv: f, bg = bg, f
+            c = self.blank()
             pos = y*self.cols+x
             start = 0 if final == ord('J') else y*self.cols
             end = self.rows*self.cols if final == ord('J') else (y+1)*self.cols
             if mode == 0: start = pos
             if mode == 1: end = pos+1
-            for i in range(start, end): self.cells[i//self.cols][i%self.cols] = (32, f, bg)
+            for i in range(start, end):
+                row = list(self.cells[i//self.cols]); row[i%self.cols] = c; self.cells[i//self.cols] = row
             self.wrap = False
+            return
+        if final == ord('c') and ps == [0]:
+            self.answers += b"\x1b[?6c"
+            return
+        if final == ord('n') and len(ps) == 1 and ps[0] in (5, 6):
+            self.answers += b"\x1b[0n" if ps[0] == 5 else b"\x1b[%d;%dR" % (self.cy + 1, self.cx + 1)
             return
         if final in (ord('H'), ord('f')):
             y, x = n - 1, (self.params[1] or 1) - 1
@@ -205,21 +236,25 @@ class Term:
         elif final == ord('D'): x -= n
         elif final in (ord('G'), ord('`')): x = n - 1
         elif final == ord('d'): y = n - 1
+        elif final == ord('E'): x, y = 0, y + n
+        elif final == ord('F'): x, y = 0, y - n
         else: return
         self.cx, self.cy = min(max(x, 0), self.cols-1), min(max(y, 0), self.rows-1)
         self.wrap = False
 
     def private_mode(self, b):
+        if b == ord('n') and self.pi == 0 and self.params[0] == 6:
+            self.answers += b"\x1b[%d;%dR" % (self.cy + 1, self.cx + 1)
+            return
         if b not in (104,108): return
         for p in self.params[:self.pi+1]:
+            if p == 25:
+                self.visible = b == 104
             if p == 1049:
                 if b == 104 and self.primary is None:
                     self.primary = self.cells
                     self.main_cursor = (self.cx,self.cy,self.fg,self.bg,self.bold,self.inv)
-                    f = self.fg + 8 if self.bold and self.fg < 8 else self.fg
-                    bg = self.bg
-                    if self.inv: f,bg = bg,f
-                    self.cells = [[(32,f,bg)]*self.cols for _ in range(self.rows)]
+                    self.cells = [[self.blank()]*self.cols for _ in range(self.rows)]
                     self.wrap = False
                 elif b == 108 and self.primary is not None:
                     self.cells, self.primary = self.primary, None
@@ -227,9 +262,27 @@ class Term:
                     self.wrap = False
 
     def feed(self, b):
-        if self.esc in (3, 4):
-            if b == 7 or (self.esc == 4 and b == 92): self.esc = 0
-            else: self.esc = 4 if b == 27 else 3
+        # OSC (ESC ]): 3 its first byte, 4 OSC P's seven digits, 5 the
+        # string, ended by BEL or by any ESC, whose next byte is then read
+        # as an escape's second (ST's backslash among them).
+        if self.esc == 3:
+            if b == 0x50:
+                self.esc, self.osc_left = 4, 7
+                return
+            if b == 0x52:
+                self.esc = 0
+                return
+            self.esc = 5
+        if self.esc == 4:
+            self.osc_left -= 1
+            if self.osc_left == 0:
+                self.esc = 0
+            return
+        if self.esc == 5:
+            if b == 7:
+                self.esc = 0
+            elif b == 27:
+                self.esc = 1
             return
         if b < 32 or b == 127:
             if self.un:
@@ -255,6 +308,9 @@ class Term:
                     self.wrap = False
             elif b == 93:
                 self.esc = 3
+            elif b == 0x5A:
+                self.esc = 0
+                self.answers += b"\x1b[?6c"  # DECID
             else:
                 self.esc = 0
             return
@@ -268,14 +324,18 @@ class Term:
                     self.priv = True
             elif b == 63 and not self.priv and self.pi == 0 and self.params[0] == 0:
                 self.priv = 63
+            elif b == 0x20 and not self.priv:
+                self.priv = 32
             elif 0x3C <= b <= 0x3F or 0x20 <= b <= 0x2F or b == 0x3A:
-                self.priv = True
+                self.priv = 1
             elif 0x40 <= b <= 0x7E:
                 self.esc = 0
                 if not self.priv:
                     self.dispatch(b)
                 elif self.priv == 63:
                     self.private_mode(b)
+                elif self.priv == 32 and b == ord('q') and self.pi == 0 and self.params[0] <= 6:
+                    self.shape = self.params[0]
             else:
                 self.esc = 0
             return
@@ -306,7 +366,7 @@ def render(term, glyphs, w, h):
     for y in range(term.rows):
         for x in range(term.cols):
             cp, f, b = term.cells[y][x]
-            if y == term.cy and x == term.cx:
+            if term.visible and y == term.cy and x == term.cx:
                 f, b = b, f
             bits = glyphs.get(cp, q) if cp < 256 else q
             fr = PALETTE[f].to_bytes(3, "big")
