@@ -17,6 +17,9 @@ with tempfile.TemporaryDirectory(prefix='px61-compare-') as d:
     good = 'run 1: /bin/env\nuser: sh pid 2 start\n$ user: sh pid 2 syscall 273: -ENOSYS\n/bin/selfcheck; echo selfcheck-status=$?\nselfcheck-status=0\n$ exit 0\nuser: frames free 20 before, 20 after\n'
     r = run(good)
     assert r.returncode == 0, r.stdout + r.stderr
+    (d / 'linux/selfcheck-root.tty').write_bytes(b'\x1b[6n$ /bin/selfcheck; echo selfcheck-status=$?\r\r\nselfcheck-status=0\r\n$ exit 0\r\r\n')
+    r = run(good)
+    assert r.returncode == 0, r.stdout + r.stderr
     r = run(good.replace('selfcheck-status=0\n', 'selfcheck-status=1\n'))
     assert r.returncode == 1 and 'FAIL F2 static table checks' in r.stdout
     r = run('run 1: /bin/env\nuser: frames free 20 before, 20 after\n')

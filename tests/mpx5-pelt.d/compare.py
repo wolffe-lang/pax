@@ -11,7 +11,7 @@ if len(sys.argv) == 5:
     if sys.argv[4] not in names:
         raise SystemExit('unknown replay case: ' + sys.argv[4])
     names = [sys.argv[4]]
-lines = log.read_bytes().decode(errors='replace').splitlines()
+lines = log.read_bytes().decode('utf-8').splitlines()
 failed = False
 
 def norm(text):
@@ -45,7 +45,7 @@ for k, name in enumerate(names, 1):
     ref = images / 'linux' / (name + '.tty')
     if not ref.is_file():
         print('FAIL F1 missing Linux reference: ' + name); failed = True; continue
-    expected = norm(ref.read_bytes().decode(errors='replace'))
+    expected = norm(ref.read_bytes().decode('utf-8'))
     (out / (name + '.pax')).write_text(actual)
     (out / (name + '.linux')).write_text(expected)
     if name.startswith('corpus-'):
@@ -76,6 +76,8 @@ for k, name in enumerate(names, 1):
     if name.startswith(('c_jc_mixed_pipeline-', 'jc_subshell_stop-', 'jc_subshell_redir_stop-')):
         if not re.search(r'(?m)^\[\d+\].*\bStopped\b', actual):
             print('FAIL F2 control key did not stop the job: ' + name); failed = True
+    if name.startswith('c_jc_mixed_pipeline-') and not re.search(r'stopped jobs', actual, re.I):
+        print('FAIL F2 first exit did not refuse the stopped job: ' + name); failed = True
     if name.startswith(('jc_subshell_stop-', 'jc_subshell_redir_stop-')):
         if not all(row in actual.splitlines() for row in ('back', 'st=0')):
             print('FAIL F2 foreground resume did not complete: ' + name); failed = True
