@@ -4,9 +4,13 @@ import difflib
 import re
 import sys
 
-images, log, out = map(Path, sys.argv[1:])
+images, log, out = map(Path, sys.argv[1:4])
 out.mkdir(parents=True, exist_ok=True)
 names = (images / 'run-names').read_text().splitlines()
+if len(sys.argv) == 5:
+    if sys.argv[4] not in names:
+        raise SystemExit('unknown replay case: ' + sys.argv[4])
+    names = [sys.argv[4]]
 lines = log.read_text(errors='replace').splitlines()
 failed = False
 
