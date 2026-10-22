@@ -1,0 +1,293 @@
+#!/usr/bin/env python3
+# ps2-session — type a session into a running PAX machine through its PS/2
+# keyboard, by QEMU's human monitor on a unix socket (`sendkey`), and take
+# its screen at named points (px59). tools/qemu-halt --keyboard ps2 types
+# characters only; an editor needs Esc, the function keys, Alt and the
+# arrows, and its screen read while it runs, not only once halted.
+#
+#   tools/ps2-session --serial LOG --monitor SOCK --keys FILE [--out DIR]
+#                     [--gap SECS] [--timeout SECS]
+#
+# The machine is booted elsewhere (tools/qemu-halt with `--qemu -monitor
+# --qemu unix:SOCK,server=on,wait=off`, a second monitor beside its own);
+# this waits for the socket, then runs FILE. FILE is either tools/
+# qemu-halt's own KEYS format, typed as qemu-halt and tools/linux-tty
+# type it (`--prompt TEXT`: before step k, TEXT shown k times on the
+# serial log after its first `user: exec pid` or `run 1:` line, escapes
+# and CR removed as lib.sh's serial_norm does; `^~` a step typed
+# PAX_TYPE_PAUSE seconds after the one before; `^C` `^D` `^U` `^W` `^\`
+# `^Z` `^?` `^^` and `^.`; Enter after a step but one ending `^D` or `^.`;
+# a raw ESC byte is Esc), so one session's keys drive PAX's keyboard and
+# a Linux pseudo-terminal alike; or, when its first line is
+# `#!ps2-session`, steps a line:
+#
+#   prompt N TEXT   wait until TEXT has been written N times in LOG (raw
+#                   bytes; TEXT takes Python's backslash escapes, \x1b)
+#   quiet SECS      wait until LOG has not grown for SECS seconds
+#   type TEXT       each character as its key on a US layout (a-z, A-Z
+#                   with shift, digits, punctuation, space; TEXT taken
+#                   whole, escapes as `prompt`'s: \x1b is Esc, \r Enter)
+#   key NAME...     each NAME as QEMU's `sendkey` takes it (esc, f1,
+#                   alt-x, shift-up, ctrl-z, ret …)
+#   enter           Enter (ret)
+#   pause SECS      wait SECS seconds
+#   dump NAME [S]   once LOG has been quiet S seconds (default 2), the monitor's
+#                   `screendump DIR/NAME.ppm`, LOG's size read before and
+#                   after (the same, or the dump is taken again), and
+#                   `NAME OFFSET` appended to DIR/dumps.txt: the picture is
+#                   the screen after LOG's first OFFSET bytes
+#   # …             a comment; blank lines are skipped
+#
+# Each key waits GAP seconds (default 0.25) after the one before. A wait
+# that passes the timeout (default 300 s a step) fails the session. DIR
+# (default LOG's directory) gets `NAME.ppm` for each dump and
+# `ps2-session.log`, every key and dump in order. Exit 0 when every step
+# ran, 1 when a wait timed out or the machine went away, 2 on a usage
+# error.
+import codecs
+import os
+import socket
+import sys
+import time
+
+KEYS = {'\x1c': 'ctrl-backslash', ' ': 'spc', '\r': 'ret', '\n': 'ret', '\t': 'tab', '\x1b': 'esc', '\x7f': 'backspace',
+        '-': 'minus', '=': 'equal', '[': 'bracket_left', ']': 'bracket_right', ';': 'semicolon',
+        "'": 'apostrophe', '`': 'grave_accent', '\\': 'backslash', ',': 'comma', '.': 'dot', '/': 'slash',
+        '!': 'shift-1', '@': 'shift-2', '#': 'shift-3', '$': 'shift-4', '%': 'shift-5', '^': 'shift-6',
+        '&': 'shift-7', '*': 'shift-8', '(': 'shift-9', ')': 'shift-0', '_': 'shift-minus', '+': 'shift-equal',
+        '{': 'shift-bracket_left', '}': 'shift-bracket_right', ':': 'shift-semicolon', '"': 'shift-apostrophe',
+        '~': 'shift-grave_accent', '|': 'shift-backslash', '<': 'shift-comma', '>': 'shift-dot', '?': 'shift-slash'}
+
+
+def die(msg, code=2):
+    sys.stderr.write('ps2-session: %s\n' % msg)
+    sys.exit(code)
+
+
+def key_of(c):
+    if 'a' <= c <= 'z' or '0' <= c <= '9':
+        return c
+    if 'A' <= c <= 'Z':
+        return 'shift-' + c.lower()
+    if '\x01' <= c <= '\x1a' and c not in '\t\r\n':
+        return 'ctrl-' + chr(ord(c) + 96)
+    if c in KEYS:
+        return KEYS[c]
+    die('no key for %r' % c)
+
+
+def text(s):
+    return codecs.decode(s, 'unicode_escape')
+
+
+def norm(b):
+    """lib.sh's serial_norm: CSI and the short escapes taken out, CR too."""
+    import re
+    b = re.sub(rb'\x1b\[[0-9;?=<>]*[A-Za-z]', b'', b)
+    b = re.sub(rb'\x1b[()][A-Za-z0-9]', b'', b)
+    b = re.sub(rb'\x1b[c78DEHM=>]', b'', b)
+    return b.replace(b'\r', b'')
+
+
+def halt_steps(lines, prompt):
+    """qemu-halt's KEYS format as this tool's steps (module comment)."""
+    out = []
+    want = 0
+    for line in lines:
+        line = line.rstrip('\n')
+        if line.startswith('^~'):
+            line = line[2:]
+            out.append(('pause', float(os.environ.get('PAX_TYPE_PAUSE', '2'))))
+        else:
+            want += 1
+            out.append(('hprompt', want))
+        b, i, n = [], 0, len(line)
+        while i < n:
+            c = line[i]
+            if c == '^' and i + 1 < n:
+                d = line[i + 1]
+                m = {'C': '\x03', 'D': '\x04', 'U': '\x15', 'W': '\x17', '\\': '\x1c', 'Z': '\x1a',
+                     '?': '\x7f', '^': '^', '.': ''}
+                if d in m:
+                    b.append(m[d])
+                    i += 2
+                    continue
+            b.append(c)
+            i += 1
+        if not (line.endswith('^D') or line.endswith('^.')):
+            b.append('\r')
+        out.append(('chars', ''.join(b)))
+    return out
+
+
+def main():
+    args = sys.argv[1:]
+    opts = {'--serial': None, '--monitor': None, '--keys': None, '--out': None, '--gap': '0.25', '--timeout': '300',
+            '--prompt': None}
+    while args:
+        a = args.pop(0)
+        if a not in opts or not args:
+            die('usage: ps2-session --serial LOG --monitor SOCK --keys FILE [--prompt TEXT] [--out DIR] [--gap SECS] [--timeout SECS]')
+        opts[a] = args.pop(0)
+    log, sockp, keys = opts['--serial'], opts['--monitor'], opts['--keys']
+    if not (log and sockp and keys):
+        die('--serial, --monitor and --keys are needed')
+    out = opts['--out'] or os.path.dirname(os.path.abspath(log))
+    gap, limit = float(opts['--gap']), float(opts['--timeout'])
+    os.makedirs(out, exist_ok=True)
+    trace = open(os.path.join(out, 'ps2-session.log'), 'a')
+    dumps = os.path.join(out, 'dumps.txt')
+
+    def size():
+        try:
+            return os.path.getsize(log)
+        except OSError:
+            return 0
+
+    def failed(why):
+        trace.write('FAILED %s\n' % why)
+        trace.flush()
+        die(why, 1)
+
+    end = time.time() + limit
+    s = None
+    while s is None:
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.connect(sockp)
+        except OSError:
+            s = None
+            if time.time() > end:
+                failed('no monitor at %s' % sockp)
+            time.sleep(0.2)
+    s.settimeout(0.2)
+
+    def drain(want=b'(qemu)', wait=5.0):
+        got, t0 = b'', time.time()
+        while time.time() - t0 < wait:
+            try:
+                d = s.recv(65536)
+                if not d:
+                    failed('the monitor closed')
+                got += d
+                if want in got:
+                    break
+            except (socket.timeout, TimeoutError):
+                if not want:
+                    break
+        return got
+
+    def cmd(c, wait=5.0):
+        try:
+            s.sendall((c + '\n').encode())
+        except OSError:
+            failed('the monitor went away at %r' % c)
+        return drain(b'(qemu)', wait)
+
+    drain(b'(qemu)', 3.0)
+
+    def send(name):
+        cmd('sendkey ' + name)
+        trace.write('key %s\n' % name)
+        time.sleep(gap)
+
+    def quiet(secs):
+        t0 = time.time()
+        n, since = size(), time.time()
+        while time.time() - since < secs:
+            time.sleep(0.1)
+            if size() != n:
+                n, since = size(), time.time()
+            if time.time() - t0 > limit:
+                failed('the log never went quiet for %ss' % secs)
+
+    lines = open(keys, encoding='latin-1').readlines()
+    if not lines or lines[0].rstrip('\n') != '#!ps2-session':
+        if opts['--prompt'] is None:
+            die('a qemu-halt KEYS file needs --prompt')
+        want = opts['--prompt'].encode('latin-1')
+        for no, (kind, v) in enumerate(halt_steps(lines, opts['--prompt']), 1):
+            if kind == 'pause':
+                time.sleep(v)
+            elif kind == 'hprompt':
+                t0 = time.time()
+                while True:
+                    try:
+                        d = norm(open(log, 'rb').read())
+                    except OSError:
+                        d = b''
+                    import re
+                    m = re.search(rb'(?m)^(user: exec pid |run 1: )', d)
+                    have = d[m.start():].split(b'\n', 1)[1].count(want) if m and b'\n' in d[m.start():] else 0
+                    if have >= v:
+                        break
+                    if time.time() - t0 > limit:
+                        failed('prompt %d (%r) did not come in %ss (%d seen)' % (v, opts['--prompt'], limit, have))
+                    time.sleep(0.1)
+                time.sleep(0.2)
+            else:
+                trace.write('step: %r\n' % v)
+                for c in v:
+                    send(key_of(c))
+        trace.write('done\n')
+        trace.close()
+        return
+    for no, line in enumerate(lines, 1):
+        line = line.rstrip('\n')
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        word, _, rest = line.partition(' ')
+        trace.write('step %d: %s\n' % (no, line))
+        trace.flush()
+        if word == 'prompt':
+            n, _, t = rest.partition(' ')
+            want, n, t0 = text(t).encode('latin-1'), int(n), time.time()
+            while True:
+                try:
+                    have = open(log, 'rb').read().count(want)
+                except OSError:
+                    have = 0
+                if have >= n:
+                    break
+                if time.time() - t0 > limit:
+                    failed('step %d: %r seen %d times, not %d, in %ss' % (no, t, have, n, limit))
+                time.sleep(0.1)
+            time.sleep(0.2)
+        elif word == 'quiet':
+            quiet(float(rest))
+        elif word == 'type':
+            for c in text(rest):
+                send(key_of(c))
+        elif word == 'key':
+            for k in rest.split():
+                send(k)
+        elif word == 'enter':
+            send('ret')
+        elif word == 'pause':
+            time.sleep(float(rest))
+        elif word == 'dump':
+            name, _, q = rest.partition(' ')
+            path = os.path.join(out, name + '.ppm')
+            for _ in range(20):
+                quiet(float(q or 2))
+                a = size()
+                cmd('screendump ' + path, 30.0)
+                for _ in range(100):
+                    if os.path.exists(path) and os.path.getsize(path) > 0:
+                        break
+                    time.sleep(0.1)
+                if size() == a:
+                    break
+            else:
+                failed('step %d: the log kept growing around the dump' % no)
+            with open(dumps, 'a') as f:
+                f.write('%s %d\n' % (name, a))
+            trace.write('dump %s at %d\n' % (name, a))
+        else:
+            die('step %d: no such step %r' % (no, word))
+    trace.write('done\n')
+    trace.close()
+
+
+if __name__ == '__main__':
+    main()
