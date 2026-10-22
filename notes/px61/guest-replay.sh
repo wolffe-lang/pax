@@ -5,12 +5,12 @@ L=$HOME/lanes/px61
 printf '%s\n' $$ > "$L/guest-replay.pid"
 ulimit -c 0
 uptime
-W=$L/build/mpx5-pelt-r2/mpx5-pelt
+W=${PX61_GUEST_IMAGES:-$L/build/mpx5-pelt-r2/mpx5-pelt}
 export TMPDIR=$L/tmp
 podman run --rm --network none --ulimit core=0:0 -v "$L:$L:Z" localhost/px13-ubuntu \
     cc -static -O1 -o "$L/bin/vmjob" "$L/pax/notes/px52/vmjob.c"
 for pass in 1 2; do
-  O=$L/guest/pass-$pass
+  O=${PX61_GUEST_OUT:-$L/guest}/pass-$pass
   mkdir -p "$O"
   while read -r name; do
     role=${name##*-}

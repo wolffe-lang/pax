@@ -70,6 +70,8 @@ for k, name in enumerate(names, 1):
         diff(name, expected, actual)
     if not actual.startswith('$ '):
         print('FAIL F2 missing first prompt: ' + name); failed = True
+    if name.startswith('probes-') and any(x in actual for x in ('ps: invalid option', 'Usage: ps', 'ps-pgid:')):
+        print('FAIL F2 unexercised process-group probe: ' + name); failed = True
     if name.startswith('selfcheck-') and 'selfcheck-status=0' not in actual.splitlines():
         print('FAIL F2 static table checks: ' + name); failed = True
     if name.startswith('shapes-') and len(re.findall(r'(?m)^SHAPE:[^\n]+:8$', actual)) != 11:
