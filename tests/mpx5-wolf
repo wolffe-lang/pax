@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# px60: the dev compiler checked machine, root and pax, byte-for-byte
+# against the same binaries/keys in an isolated Linux container.
+# W0 build/static/pinned bytes; W1 differential; W2 named session rows;
+# W3 only the named mremap/robust-list/rseq fallbacks, clean init exit and halt. No native build is
+# called the checked machine: only conform-run --json --checked is one.
+set -uo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+images= only= legs=both tiers=both
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images) images=$2; shift 2 ;;
+        --only) only=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier) tiers=$2; shift 2 ;;
+        *) die "usage: mpx5-wolf [--images DIR] [--only build|linux] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "bad firmware" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "bad tier" ;; esac
+case $only in ""|build|linux) ;; *) die "bad --only" ;; esac
+need readelf python3
+. "$PAX_ROOT/user/wolf.pin"
+KEYS=$PAX_ROOT/user/console/wolf.keys
+RUNS=("/bin/env ENV=/etc/shrc /bin/sh -i -m" "/bin/as 1000 1000 /bin/env HOME=/home/pax ENV=/etc/shrc /bin/sh -i -m")
+NAMES=(root pax)
+work=$PAX_BUILD/mpx5-wolf
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+static_ok() {
+    readelf -hW "$1" | grep -Eq "Type: +EXEC" &&
+        ! readelf -lW "$1" | grep -q INTERP
+}
+linux_side() {
+    local dir=$1 k
+    mkdir -p "$dir/linux"
+    for k in 0 1; do
+        # shellcheck disable=SC2086
+        set -- ${RUNS[$k]}
+        "$PAX_ROOT/tools/linux-tree" --root "$dir/root" --keys "$KEYS" --prompt '$ ' \
+            --argv0 "$1" --size 512m --rdev --nsproc --owners "$dir/owners" \
+            "$dir/linux/${NAMES[$k]}.tty" -- "$@" || return 1
+    done
+}
+if [ "$only" = linux ]; then
+    [ -n "$images" ] || die "--only linux needs --images"
+    linux_side "$images" || exit 1
+    say "PASS W0 Linux: both live sessions ran"
+    exit 0
+fi
+if [ -z "$images" ]; then
+    [ ! -e "$work/root" ] || die "root already exists; use a fresh PAX_BUILD or --images"
+    mkdir -p "$work/bin" "$work/root/bin" "$work/root/etc" "$work/root/home/pax"
+    r=$work/root
+    if [ -n "${PAX_DEV_BASE:-}" ]; then
+        base=$PAX_DEV_BASE
+    else
+        base=$work
+        "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" || exit 2
+        "$PAX_ROOT/tools/mkboreutils" "$work/bore" cat env > "$work/bore.txt" || exit 2
+        "$PAX_ROOT/tools/mkas" "$work/bin" > "$work/as.txt" || exit 2
+    fi
+    cp "$base/pelt/pelt" "$r/bin/sh" || exit 2
+    for f in cat env; do cp "$base/bore/$f" "$r/bin/$f" || exit 2; done
+    cp "$base/bin/as" "$r/bin/as" || exit 2
+    bins=${PAX_DEV_WOLF_DIR:-$work/wolf}
+    if [ -z "${PAX_DEV_WOLF_DIR:-}" ]; then
+        "$PAX_ROOT/tools/mkwolf" "$bins" > "$work/wolf.txt" || exit 2
+    fi
+    std=${PAX_DEV_STD_DIR:-$work/std}
+    if [ -z "${PAX_DEV_STD_DIR:-}" ]; then
+        "$PAX_ROOT/tools/mkwolf-std" "$std" > "$work/std.txt" || exit 2
+    fi
+    "$PAX_ROOT/tools/mkdev" "$r" "$bins" "$std" || exit 2
+    # Keep px57 host.lu unchanged, including its directory witness.
+    mkdir -p "$r/usr/share/lupin"
+    cp "$PAX_ROOT"/user/lupin/*.lu "$r/usr/share/lupin/"
+    for f in "$r/bin/"* "$r/usr/bin/wolf" "$r/usr/bin/wolf-cimport-worker"; do
+        static_ok "$f" || { bad "W0 not static ET_EXEC: $f"; exit 1; }
+    done
+    for f in wolf wolf-cimport-worker; do
+        readelf -dW "$r/usr/bin/$f" | grep -q "no dynamic section" || { bad "W0 dynamic section: $f"; exit 1; }
+    done
+    "$PAX_ROOT/tests/mpx5-wolf.d/verify-bins" "$bins" || exit 1
+    # Plants happen AFTER the build/pin checks: the loader and session
+    # witnesses, not a checksum guard, must see each injected break.
+    case ${PAX_WOLF_PLANT:-} in
+        glibc)
+            cp "${PAX_WOLF:?glibc plant needs the host release compiler}" "$r/usr/bin/wolf" || exit 2
+            say "PLANT glibc: the dynamic release wolf replaces musl after verification"
+            ;;
+        std)
+            sed '/^export WOLF_STD=/d' "$r/etc/shrc" > "$work/shrc.no-std"
+            cp "$work/shrc.no-std" "$r/etc/shrc"
+            say "PLANT std: WOLF_STD is absent from the dev shell environment"
+            ;;
+        "") ;;
+        *) die "unknown PAX_WOLF_PLANT" ;;
+    esac
+    printf "%s\n" "${RUNS[@]}" > "$r/etc/pax-run"
+    printf "%s\n" "/home/pax 755 1000 1000" > "$work/owners"
+    # Sorted paths and explicit permissions: identical tree on both sides.
+    args=(/home/pax/:755:1000:1000)
+    while IFS= read -r f; do
+        mode=644; [ -x "$f" ] && mode=755
+        args+=("/${f#"$r/"}=$f:$mode")
+    done < <(find "$r" -type f | LC_ALL=C sort)
+    "$PAX_ROOT/tools/mkinitramfs" "$work/wolf.cpio" "${args[@]}" > "$work/initramfs.txt" || exit 2
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kernel.log
+        elf=$("$PAX_ROOT/tools/build-kernel" "${flag[@]}" --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log") || { cat "$log" >&2; exit 2; }
+        "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$work/wolf.cpio" initramfs.cpio "$elf" "$work/$tier/wolf.iso" || exit 2
+    done
+    say "PASS W0 build: pinned compiler, static programs, std and images"
+    [ "$only" != build ] || exit 0
+    linux_side "$work" || exit 1
+    images=$work
+fi
+run_part() {
+    awk -v k="$2" '
+      $0 ~ "^run " k ": " { on=1; next }
+      on && /^run [0-9]+: |^run: [0-9]+ commands$|^user: frames free / { exit }
+      on { i=index($0,"user: "); if (i==1) next; if (i>1) { printf "%s",substr($0,1,i-1); next }; print }
+    ' "$1"
+}
+mkdir -p "$PAX_BUILD"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then bad "W3 UEFI firmware missing"; else say "SKIP uefi: firmware missing (1 leg)"; fi
+        continue
+    fi
+    for tier in $tiers; do
+        ran=$((ran+1))
+        log=$PAX_BUILD/mpx5-wolf-$tier-$leg.serial.log
+        iso=$images/$tier/wolf.iso
+        cat "$KEYS" "$KEYS" > "$images/wolf.keys"
+        hrc=0
+        "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 1500 \
+          --qemu -m --qemu 1024M --elf "$images/$tier/kmain_console.elf" \
+          --marker "halt|PANIC .*" --type "$images/wolf.keys" --prompt '$ ' "$iso" > "$log.verdict" 2>&1 || hrc=$?
+        serial_norm "$log" > "$log.norm"
+        for k in 0 1; do
+            n=${NAMES[$k]}
+            out=$PAX_BUILD/mpx5-wolf-$tier-$leg-$n.session
+            run_part "$log.norm" "$((k+1))" > "$out"
+            ref=$images/linux/$n.tty
+            if [ ! -f "$ref" ]; then bad "W1 $tier $leg $n: Linux reference absent"; continue; fi
+            serial_norm "$ref" > "$ref.cmp"
+            serial_norm "$out" > "$out.cmp"
+            if cmp -s "$ref.cmp" "$out.cmp"; then
+                say "PASS W1 $tier $leg $n: byte-identical $(sha256_of "$out.cmp")"
+            else
+                bad "W1 $tier $leg $n: session differs"
+                diff -u "$ref.cmp" "$out.cmp" | head -60 >&2
+            fi
+            "$PAX_ROOT/tests/mpx5-wolf.d/rows.py" "$out.cmp" "$n" || bad "W2 $tier $leg $n"
+        done
+        ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$log.norm" | sort -un | paste -sd" " -)
+        [ "$ns" = "25 273 334" ] || bad "W3 $tier $leg: unserved calls: $ns"
+        if grep -a -q ": refused: \|^PANIC " "$log.norm"; then bad "W3 $tier $leg: refusal or panic"; fi
+        grep -a -qx "PAX: init /bin/env ended with status 0; nothing left to run" "$log.norm" || bad "W3 $tier $leg: init did not end cleanly"
+        [ "$hrc" = 0 ] || bad "W3 $tier $leg: did not halt ($hrc)"
+        say "W3 $tier $leg: halt=$hrc unserved=$ns"
+    done
+done
+[ "$ran" -gt 0 ] || bad "no boot ran"
+[ "$fail" = 0 ] && say "mpx5-wolf: PASS" || say "mpx5-wolf: FAIL"
+exit "$fail"

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+. "$(dirname "$0")/../../tools/lib.sh"
+[ $# -eq 1 ] || die "usage: verify-bins DIR"
+# These are tools/mkwolf bytes from kasumi; CI rebuilds and checks them.
+while read -r name sha bytes; do
+    f=$1/$name
+    [ "$(sha256_of "$f")" = "$sha" ] || die "$name digest differs from recorded musl build"
+    [ "$(wc -c < "$f" | tr -d " ")" = "$bytes" ] || die "$name size differs"
+done < "$PAX_ROOT/user/wolf.sums"
+say "PASS W0: compiler, worker and runtime match the recorded bytes"
