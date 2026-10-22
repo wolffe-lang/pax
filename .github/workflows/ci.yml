@@ -2871,7 +2871,13 @@ jobs:
           PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 
       - name: the independent observation checker rejects broken records
-        run: python3 -I tests/mpx5-wolf.d/test_rows.py
+        run: |
+          python3 -I tests/mpx5-wolf.d/test_rows.py
+          python3 -I tests/mpx5-wolf.d/test_native.py
+          . user/wolf.pin
+          mkdir -p build
+          rustup run "$WOLF_SRC_RUST" rustc --test --edition=2024 --target "$WOLF_SRC_TARGET" -C relocation-model=static notes/px60/cc.rs -o build/px60-cc-test
+          build/px60-cc-test --nocapture
 
       - name: wolf's session against the container, as root and as a user; the plan's legs (all four in the all tier)
         env:
