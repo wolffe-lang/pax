@@ -45,4 +45,23 @@ class Erase(unittest.TestCase):
     def test_invalid_mode(self):
         t=term(b'abc\33[9J\33[9K'); self.assertEqual(t.cells[0][:3],[(97,7,0),(98,7,0),(99,7,0)])
 
+class Rendition(unittest.TestCase):
+    def test_reset_parts(self):
+        t=term(b'\33[1mA\33[22mB\33[7mC\33[27mD')
+        self.assertEqual(t.cells[0][:4],[(65,15,0),(66,7,0),(67,0,7),(68,7,0)])
+    def test_bright_background(self):
+        t=term(b'\33[101mA'); self.assertEqual(t.cells[0][0],(65,7,9))
+    def test_indexed(self):
+        t=term(b'\33[38;5;196mR\33[48;5;46mG\33[38;5;244mX')
+        self.assertEqual(t.cells[0][:3],[(82,9,0),(71,9,2),(88,7,2)])
+    def test_palette(self):
+        rows=(pathlib.Path(__file__).resolve().parents[2]/'notes/px59/vt.rows').read_text().splitlines()
+        swap=lambda v: (v&10)|((v&1)<<2)|((v&4)>>2)
+        for bg in (False,True):
+            line=next(l for l in rows if l.startswith('PALETTE '+('BG' if bg else 'FG')+' '))
+            values=[int(x,16) for x in line.split()[2:]]
+            for i,v in enumerate(values):
+                t=term(f'\33[{48 if bg else 38};5;{i}mX'.encode())
+                self.assertEqual(t.cells[0][0][2 if bg else 1],swap(v>>4 if bg else v&15),(bg,i))
+
 if __name__=='__main__': unittest.main(verbosity=2)
