@@ -53,6 +53,9 @@ It remaps source, generated-target and registry paths. Both executables
 must be ET_EXEC, without PT_INTERP or a dynamic section. The runtime
 archive is staged beside wolf. Nothing is installed by the helper.
 
+The locale-only intermediate patch in `notes/px60/wolf-musl-locale.patch`
+reproduces the second build failure; it is not the active pin patch.
+
 The patched build deliberately has no WOLF_RELEASE stamp:
 `wolf 0.2.34+dev.9da7bdc (wolfgang, pin 9da7bdc)`. The source revision
 and patch digest together identify the build. Move this pin to a
@@ -222,7 +225,7 @@ Final symbol-free runs, at `af5199cf`:
 | run | job | result |
 |---|---:|---|
 | glibc plant `39796041663` | `119883727765` | byte gate passes, then exec is refused on PAX: `ET_DYN: a PIE or shared object (PIE is later)`; W1/W2/W3 red |
-| std plant `39796046313` | `119883750430` | byte gate passes, then W2 rejects the missing std typecheck/run observations for root and pax; W3 also notices mremap is no longer reached |
+| std plant `39796046313` | `119883750430` | byte gate passes, then `E0301: module std has no item named str` names the absent standard library; W2 rejects the missing std observations for root and pax; W3 also notices mremap is no longer reached |
 | control `39796051044` | `119883769940` | bytes reproduce; both live Linux/PAX sessions and all independent witnesses pass |
 
 The extracts are `ci-glibc-39796041663.log`, `ci-std-39796046313.log`,
