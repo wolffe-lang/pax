@@ -242,14 +242,14 @@ green.
 | P1 | `tools/mkyew` builds yew `77c1083` the same bytes twice, 15–30 MB | **`c2daa653e398640e98c627c3b6cfb6bf454b60fa3d6444ed754767e0c8764b67`, 16,101,824 bytes**, two builds in `px13-ubuntu` the same bytes (167 s, 126 s; §A); every suite build since gave the same | right |
 | P2 | the calls by name; ioctls exactly TCGETS, TCSETSW, TIOCGWINSZ; the termios states; no `/dev/tty`; WINCH CONT TSTP CHLD TERM HUP QUIT caught, and SEGV and BUS on an alternate stack; the guard's seven ignored; CUP and SGR dominate, then EL … | **50 calls by name** (§B): every predicted family, and `fcntl(F_DUPFD_CLOEXEC)` (the runtime sets the mode and waits on a duplicate of fd 0), `prctl(PR_SET_NAME, "wolf-signal")`, `recvfrom` (the spawn's handshake), `linkat`, `chmod` (the save) that I did not name; **no `sigaltstack` and no SEGV or BUS handler** (wolf 0.2.33 installs none in yew); ioctls exactly the three; the termios states exactly as predicted (§C); no `/dev/tty`; the seven caught and the guard's seven ignored, and SIGPIPE ignored; CUP and SGR dominate, but **no EL, no ED**: yew's renderer writes spaces | right on the terminal, wrong on the stack guard and on EL |
 | P3 | -ENOSYS 273 and 334 only, no `refused:`; every termios bit round-trips; the initial c_iflag divergent; the raw-mode behaviours served; TIOCGWINSZ 0 by 0 after COM1 input; `/dev/tty`; the screen draws SGR 0 1 7 30–37 39 40–47 49 90–97 and drops the rest; the queries unanswered on both; the cursor keys dropped | -ENOSYS 273 and 334 only, nothing refused, in every boot (Y5); every bit and every c_cc round-trips on PAX, and **Linux's pty refuses four cflag bits** (CS6 CS7 CREAD PARENB: a divergence I did not foresee); **the initial c_iflag is the same** (0x100 on both: the harness clears the pty's IXON, as PAX starts); yew's three modes leave the same termios on both; the timed reads in bounds on both; OCRNL and OLCUC dropped on PAX (Linux converts); the window as predicted (PAX's screen grid before any key, root's rows); `/dev/tty` served; the screen exactly as predicted, SGR 22 and 27 among the dropped (§D) | right but the cflag bits |
-| P4 | the keyboard's cursor and editing keys, in `kernel/console/`, checked against a Linux VT | measured on kasumi's kernel's VT first (§E), then served (`c8ec73d`): Y3 red at the first boot, green after | right |
+| P4 | the keyboard's cursor and editing keys, in `kernel/console/`, checked against a Linux VT | measured on kasumi's kernel's VT first (§E), then served (`e357995`): Y3 red at the first boot, green after | right |
 | P5 | yew draws; the session byte-identical to the container's at 24 by 80; the file alpha beta gamma delta; weak: the pauses | **yew draws, edits and saves on PAX**; byte-identical (3,732 bytes) once both sides' pauses outlast yew's 4 s info message: the first boot parted at byte 3,279 because PAX's 6 s pause let "wrote notes.txt" expire before `:` (an extra statusline frame) where Linux's 1.5 s did not, a timing of the keys and not of PAX (§F); `o` on the last line opened a line after yew's phantom last line, so the keys use `O` | right but the pause (the weak point, in a way I did not foresee) |
 | P6 | the suite's rows; plants A and B red at their rows | §H | (scored there) |
 
 ## A. The static yew (item 1)
 
-- `user/yew.pin` (`7bcfaa2`): yew's repository and `77c1083` (trunk;
-  yw04's PR #19 open, so not its head). `tools/mkyew` (`45fac96`):
+- `user/yew.pin` (`6bf7f30`): yew's repository and `77c1083` (trunk;
+  yw04's PR #19 open, so not its head). `tools/mkyew` (`671828c`):
   `tools/mkpelt`'s shape with yew's names, the tree from `PAX_YEW_REPO`
   when set (yew is public; CI fetches it as pelt), the archive by the
   digest yew's `wolf-toolchain.toml` names and wolf-std at its commit,
@@ -262,7 +262,7 @@ green.
   (`ad8964505189`, Ubuntu 24.04, libc6-dev 2.39), the same bytes
   (`notes/px58/kasumi-bins-yew-twice.out`), and the same in each of the
   suite's builds since (`notes/px58/kasumi-t2/programs.txt`).
-- termwolf (`user/termwolf`, `f2bcb31`): wolf 0.2.33 by digest, std
+- termwolf (`user/termwolf`, `8e34494`): wolf 0.2.33 by digest, std
   `cceda63`, its builder `user/termwolf/build` (`tools/mksigwolf`'s
   shape, the directory a package so `asm: ["tio.S"]` carries the raw
   terminal ioctls); 14,355,784 bytes at the head (`960e7e22…`).
@@ -401,7 +401,7 @@ served with another answer; refused = an errno.
 | TIOCSWINSZ 30 by 100, read back; SIGWINCH; again, none; back, SIGWINCH | 30 by 100, true, false, true | the same (back to 50 by 160 as root) | served |
 | DA1, CSI 6n, kitty `CSI ?u`, DECRQM 2026 | no answer in half a second | the same | served (a Linux VT answers DA1 `ESC [ ? 6 c` and 6n `ESC [ 3 ; 1 R`, §E: **no answer on PAX's screen**, px59's) |
 | keys typed over COM1 in yew's raw mode (`a b ^C ^Z ^\ DEL ESC [ A .`) | `61 62 03 1a 1c 7f 1b 5b 41 2e` | the same | served |
-| the keyboard's arrows, Home, End, PgUp, PgDn, Insert, Delete | a VT: `ESC [ A`…`D`, `ESC [ 1 ~`…`6 ~` (§E) | nothing at trunk; **the VT's sequences** from `c8ec73d` | **closed here** |
+| the keyboard's arrows, Home, End, PgUp, PgDn, Insert, Delete | a VT: `ESC [ A`…`D`, `ESC [ 1 ~`…`6 ~` (§E) | nothing at trunk; **the VT's sequences** from `e357995` | **closed here** |
 | the escape classes' bytes on the serial line (`termwolf screen`) | 890 bytes | the same 890 bytes | served |
 | on the screen: text, CR, LF, SGR 0 1 7 30–37 39 40–47 49 90–97 | (console_codes(4)) | drawn | served |
 | on the screen: CUP, HVP, CUU, CUD, CUF, CUB, CHA, VPA, EL 0 1 2, ECH, ICH, DCH, IL, DL, DECSTBM, DECSC, DECRC, the alternate screen, DECTCEM, DECSCUSR, bracketed paste, mouse 1002/1006, focus, synchronized output, kitty push/pop | (console_codes(4); paste, mouse 1006, focus, sync and kitty are no VT's either) | `<>`: read and dropped | **dropped (px59)** |
@@ -443,7 +443,7 @@ VT P: typed: 1b 5b 41 1b 5b 42 1b 5b 43 1b 5b 44 1b 5b 31 7e 1b 5b 34 7e 1b 5b 3
 terminfo's `linux` entry agrees (`kcuu1=\E[A`, `khome=\E[1~`,
 `kend=\E[4~`, `kich1=\E[2~`, `kdch1=\E[3~`, `kpp=\E[5~`, `knp=\E[6~`).
 
-**Closed here** (`c8ec73d`, `kernel/console/`, `cursor_key`): an
+**Closed here** (`e357995`, `kernel/console/`, `cursor_key`): an
 E0-prefixed set-1 make code of the cursor and editing block puts the
 VT's sequence in the input through the line discipline as if typed
 (so raw mode reads it and canonical mode echoes `^[[A` with ECHOCTL);
@@ -500,7 +500,7 @@ The whole session boot under TCG on kasumi: 96 s (the probe image's:
 
 ## G. The rows (item 6)
 
-`tests/mpx5-yew` (`dbb6f03`, `45364a3`), its own suite (mpx5-lope's
+`tests/mpx5-yew` (`9e681e1`, `22a2423`), its own suite (mpx5-lope's
 shape), two images on `kmain_console`:
 
 | row | what |
@@ -512,10 +512,10 @@ shape), two images on `kmain_console`:
 | Y4 | yew's session byte-identical to the container's; `cat notes.txt` alpha beta gamma delta on both |
 | Y5 | per boot: -ENOSYS 273 and 334 only, nothing refused, init's end, halted |
 
-Wired as every suite (`159e1d3` the job and the tier's needs;
-`9daafd7` `tools/ci-tiers.map`: yew's pin, builder, probe and keys
-mpx5-yew's alone, and mpx5-yew in @user, @console, @asuser; `65fd73f`
-`tests/ci-plan`, 195 PASS). No ISO rebuilt (px57's).
+Wired as every suite (`c706765` the job and the tier's needs;
+`c5f27e7` `tools/ci-tiers.map`: yew's pin, builder, probe and keys
+mpx5-yew's alone, and mpx5-yew in @user, @console, @asuser; `6ffef0f`
+`tests/ci-plan`, 205 PASS on px57's trunk). No ISO rebuilt (px57's).
 
 ## H. The plants (P6)
 
@@ -580,9 +580,62 @@ yew's own behaviour was not checked against the oracle here.
 
 ## K. The four legs on kasumi
 
-`tests/mpx5-yew` at `c8ec73d`'s suite (the kernel fix in), native and
+`tests/mpx5-yew` at `c8ec73d`'s suite (the kernel fix in; before the
+rebase, on `px58-prerebase`, so a kernel at wolf 0.2.33), native and
 release × BIOS and UEFI under `taskset -c 0-3`, TCG
 (`notes/px58/kasumi-t3/t3.boot.log`): **37 PASS, 0 FAIL**, every leg's
 session the same 3,732 bytes (`3ad835bdef3c…`), the probe image's boots
 15.5–17.2 s and the session's 94.6–96.1 s. The UEFI screen is the BIOS
 one's (50 by 160: Y1's named window rows hold on every leg).
+
+Again at the rebased head on the 0.2.34 kernel (§L,
+`notes/px58/kasumi-t4/t4.boot.log`): **37 PASS, 0 FAIL**, the same rows.
+
+## L. The rebase onto px57 (the kernel at wolf 0.2.34)
+
+px57 (pax#110) reached trunk at `0681c57` with the pins at 0.2.34
+(`kernel/wolf.pin`: wolf 0.2.34, lupin 0.1.55; `su` and `sigwolf` at
+0.2.34 with wolf-std `3bacc5f`). The branch was rebased onto it
+(`px58-prerebase` on origin keeps the old head `b8f8abd`, the plants'
+base `45364a3` and every sha cited before the rebase). Six files
+overlapped; each resolution keeps px57's text and adds px58's:
+
+| file | resolution |
+|---|---|
+| `.github/workflows/ci.yml` | px57's file; the `mpx5-yew` job (the same 84 lines) after px57's `mpx5-aspen` and `mpx5-lupin`, before `tier`; `mpx5-yew` after `mpx5-lupin` in the tier's needs |
+| `tools/ci-tiers.map` | `mpx5-yew` in `@user` and `@console` (no conflict), after `mpx5-aspen mpx5-lupin` in `@asuser` and on `tools/mkas`'s line; px58's five lines after px57's edwolf, aspen and lupin blocks |
+| `tests/ci-plan` | `ASUSER` gains `mpx5-yew` after px57's two; 205 PASS (trunk 200, px58's five rows) |
+| `docs/SOURCES.md` | px57's section whole, px58's after it |
+| `CHANGELOG.md` | px58's entry above px57's (newest first) |
+| `kernel/README.md` | merged without a conflict (px58's section after px56's) |
+
+**termwolf stays at wolf 0.2.33.** px57 moved `sigwolf` and `su` to
+0.2.34 with every user program; termwolf is the probe of the terminal
+yew asks for, and yew is built by 0.2.33 (its own
+`wolf-toolchain.toml`), so termwolf is built by 0.2.33 whatever the
+kernel's pin says (`user/termwolf/wolf-toolchain.toml`'s comment). It
+moves with yew when yw05 bumps yew's pin.
+
+**Nothing moved on the 0.2.34 kernel.** `tests/mpx5-yew` at the rebased
+head on kasumi (run t4, four legs, `taskset -c 0-3`, TCG):
+
+- the programs the same bytes: yew `c2daa653…`, termwolf `960e7e22…`,
+  pelt `5448cb27…`, `env` `88faec90…`, `cat` `930e58ac…`; both images'
+  archives the same as t3's (`e9f49f86…`, `cfcf3adc…`);
+- `kmain_console` at 0.2.34 (native `579e26e7…`, release `98b73815…`)
+  against t3's at 0.2.33 (`ba94bf82…`, `e87ba67d…`): `.text`,
+  `.rodata`, `.data` and `.bss` byte-identical on both tiers (px57's
+  finding, held with px58's console change in);
+- the Linux side's four recordings the same sha (`probe-0`, `-1`, `-3`,
+  the session `3ad835bdef3c…`);
+- all 20 PAX raw extracts (the probe's four runs and the session, four
+  legs) byte-identical to t3's; every serial log the same length but
+  native BIOS's session (8,042 bytes against 8,050), and every
+  difference a line the comparison takes out: the kernel's `user: …
+  exit_group 0 after N runs` counts (a scheduling count, ±1 to 4 runs)
+  and, in t3's native BIOS session, an `ESC [ 0 1 ; 0 1 H` (8 bytes)
+  after SeaBIOS's `Booting from DVD/CD...`, before PAX's first line
+  (the firmware's or the boot loader's, not the kernel's).
+
+No recording was re-taken: none moved.
+
