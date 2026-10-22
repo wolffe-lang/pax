@@ -711,8 +711,13 @@ for leg in $legs; do
                 for t in U1 U2 U3 U5; do bad "$t $id: no image"; done
                 continue
             fi
+            # Keep the full soak: 900 s cut this user leg on trunk and
+            # px60, while successful runner samples took about 879 s.
+            # R-px60-2 raises only ident's user soak; every count stays.
+            deadline=900
+            [ "$s" != soak-user ] || deadline=1200
             hrc=0
-            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 900 --qemu -m --qemu 256M \
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout "$deadline" --qemu -m --qemu 256M \
                 --elf "$elf" --marker 'halt|PANIC .*' "$iso" >"$log.verdict" 2>&1 || hrc=$?
             record "$tier" "$leg" "$s" "$hrc"
             norm=$log.norm; serial_norm "$log" > "$norm"

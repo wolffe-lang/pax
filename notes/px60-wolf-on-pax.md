@@ -370,3 +370,47 @@ container-owned files. The two px60 build-image tags were removed; the
 shared px13-ubuntu and px57-rust images were left alone. Canonical binaries,
 link inputs, the ISO, logs and the final probe inputs remain available.
 `prune.log` records the space check. No other lane's files were removed.
+
+## R-px60-2: the credential user-soak deadline
+
+The orchestrator took R-px60-2 after labelled run 39819870030 failed
+`mpx5-users` alone: **1200 seconds for `soak-user` only**, every other
+session still 900 seconds. Both root/user runs retain 100,000 rounds,
+one million id calls and 10,000 children. No guest code or image payload
+was changed by this remedy.
+
+The failed leg was not silent: its retained serial log contains 9,653
+successful child exits and is an exact 464,114-byte prefix of the green
+PR run's log. Only the final summary was absent. The merge base itself
+(`e988ce72`, trunk run 39787335307) already hit the same 900-second cap
+in native BIOS, leaving 9,720 logged successful exits. Its kernel ELF
+and soak-user initramfs match px60's exactly. This credentials image
+contains only as/cred/ident/ident-setid/ids and its accounts/runlist,
+not the dev compiler, std, linker or libc additions.
+
+Successful CI intervals were **879.57 s** for px60's native BIOS PR run
+39817250352 and **878.17 s** for the base's native UEFI leg. These are
+log-boundary wall intervals including harness bookkeeping. The former
+used the exact ISO (`a865de20…`) that the labelled native BIOS run cut
+at 900 s. ISO dates differ between base and head because `mkimage`
+defaults SOURCE_DATE_EPOCH to the commit time, not because payloads moved.
+
+The controlled kasumi comparison rebuilt base and head at identical
+container paths with SOURCE_DATE_EPOCH=0. Kernel, initramfs and complete
+ISO are byte-identical; the ISO SHA256 is
+`863d92da016e15e09a04d47937d42750337dbd877232d29586105bcca2591745`.
+Sequential full-count boots under QEMU 11.1.1 TCG, `taskset -c 0-3`,
+256 MiB, completed in **650.62 s base** and **566.21 s head**. Both
+reported zero wrong answers and MemFree 246980 kB before and at every
+quarter. Head was 84.41 s (12.97%) faster in this pair;
+that is host-time variation, not a code speedup, since the images match.
+There is no measured head slowdown or hang. The 900-second cap was
+inside the runner's observed variance.
+
+Evidence and reproducer: `notes/px60/users-audit/`. The diagnostic
+reproducer uses a 1500-second ceiling to measure completion; the actual
+suite's selected ceiling is 1200. `tests/mpx5-users.d/deadline.py` runs
+the real two-line selection for ten session classes, checks its qemu
+argument and unchanged counts, and rejects the old source. CI runs it
+before the credentials suite. The change is deliberately not a shorter
+soak or a global timeout increase.
