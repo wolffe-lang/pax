@@ -23,8 +23,18 @@
 //! PgDn, Insert, Delete) gives the sequences a Linux virtual terminal
 //! gives (`ESC [ A` to `ESC [ D`, `ESC [ 1 ~` to `ESC [ 6 ~`, measured on
 //! kasumi's kernel's VT: notes/px58-yew-on-pax.md §E), each byte through
-//! the line discipline as if typed; function keys and the rest of the
-//! keypad give nothing. `irq` takes
+//! the line discipline as if typed; (px59, measured the same way:
+//! notes/px59/vt2.rows) an arrow with Shift, left Alt or Ctrl gives `ESC
+//! [ 1 ; m X`, m = 1 + Shift 1 + Alt 2 + Ctrl 4 (left Alt alone on Left
+//! or Right gives nothing: the VT's console switch); the editing block
+//! takes no modifier (Shift with PgUp or PgDn gives nothing: the VT's
+//! scrolling); F1-F12 give `ESC [ [ A` to `ESC [ [ E` and `ESC [ 17 ~` to
+//! `ESC [ 24 ~`, Shift+F1-F10 the VT's F11-F20 (`ESC [ 23 ~` to `ESC [ 34
+//! ~`), Ctrl the same as none, any Alt or Shift with Ctrl nothing; left
+//! Alt with a character key sends ESC before it (with Shift too,
+//! nothing); right Alt is tracked and adds nothing (R-px59-2: the VT's
+//! AltGr enters a character by its code, not served); the keypad's
+//! digits and point give nothing. `irq` takes
 //! both vectors and acknowledges the 8259 (kernel/timer's `eoi`); both
 //! lines are unmasked by `start` (kernel/timer's `unmask`: the master's
 //! mask 0xfe becomes 0xec).
@@ -158,6 +168,8 @@ const C_SIGNALS: u64 = 23 // px26: the signals keys have raised and nobody has t
 const C_SIG_KEYS: u64 = 24 // px28: keys that raised a signal, since boot
 const C_LAST: u64 = 25 // px48: the tick the last byte was queued at (VTIME's timer between bytes, pax#66)
 const C_SRC: u64 = 26 // px48: the device the last input came from: 0 none yet, 1 COM1, 2 the keyboard (pax#68)
+const C_ANSWERS: u64 = 27 // px59: bytes of the screen's answers typed into the input
+const C_UNANSWERED: u64 = 28 // px59: bytes of the screen's answers dropped (input last from COM1, or none yet)
 
 const RING: u64 = 4096
 const LINE_MAX: u64 = 4095 // bytes before the newline
@@ -265,6 +277,8 @@ const K_LCTRL: u64 = 4
 const K_RCTRL: u64 = 8
 const K_CAPS: u64 = 16
 const K_E0: u64 = 32
+const K_LALT: u64 = 64 // px59
+const K_RALT: u64 = 128 // px59: tracked, never applied (R-px59-2)
 
 fn sv(i: u64) -> u64 {
     // # Safety: i < 64, inside boot/console.S's 512-byte pax_con_state.
@@ -345,6 +359,7 @@ pub fn put_kernel(src: u64, n: u64) {
         serial.put(b)
         i += 1
     }
+    let _a = answered()
 }
 
 /// Whether byte `b` echoes as two columns (`^X`).
@@ -528,6 +543,40 @@ pub fn signal_keys() -> u64 {
     sv(C_SIG_KEYS)
 }
 
+/// px59: the screen's answers to a program's queries (kernel/screen's
+/// `answer`: DA1's `ESC [ ? 6 c`, the cursor-position report), typed
+/// into the input through the line discipline as a Linux VT types its
+/// own (so canonical mode echoes `^[[?6c` there as here) — when the
+/// person is at the screen, the keyboard being the device input last
+/// came from (`typed_at`, C_SRC 2). Before any input, and after COM1's,
+/// they are dropped and counted: a serial terminal answers for itself
+/// (two answers would reach the program), and pelt, once answered,
+/// asks before every prompt, so an answer at boot would change every
+/// session typed over COM1 (R-px59-4). kernel/user calls this after
+/// every write to the console; `readable` and `read` too. True when
+/// bytes were typed (a waiting reader to wake).
+pub fn answered() -> bool {
+    var any = false
+    var b = screen.answer()
+    while b < 256 {
+        if sv(C_STARTED) != 0 && sv(C_SRC) == 2 {
+            input(b)
+            bump(C_ANSWERS)
+            any = true
+        } else {
+            bump(C_UNANSWERED)
+        }
+        b = screen.answer()
+    }
+    any
+}
+
+/// px59: the bytes of the screen's answers typed, and dropped, since
+/// boot (`answers <typed> typed, <dropped> dropped`).
+pub fn answers() -> (u64, u64) {
+    (sv(C_ANSWERS), sv(C_UNANSWERED))
+}
+
 /// Whether there is something for a `read` to take: data, or a pending
 /// end of file. px46: not "a read would not wait": with VMIN 0 a read
 /// answers 0 at once, but `poll` and `select` still wait for a byte, as
@@ -537,6 +586,7 @@ pub fn readable() -> bool {
     if sv(C_STARTED) == 0 {
         return true
     }
+    let _a = answered()
     let r = sv(C_R)
     if sv(C_C) > r {
         return true
@@ -555,6 +605,7 @@ pub fn read(pml4: u64, buf: u64, n: u64, nonblock: bool, until: u64) -> (u64, u6
     if sv(C_STARTED) == 0 {
         return (0, 0) // px12: end of file until the console is started
     }
+    let _a = answered()
     let r = sv(C_R)
     let c = sv(C_C)
     if c == r {
@@ -1001,6 +1052,85 @@ fn cursor_key(k: u64) -> u64 {
     }
 }
 
+/// px59: function key `n` (1-20)'s sequence after `ESC [`, as a Linux
+/// VT gives it (notes/px59/vt.rows, vt2.rows; console_codes(4) and
+/// terminfo's `linux` entry agree): F1-F5 `[ A` to `[ E` (0x100 marks the
+/// second `[`), F6-F20 the number then `~`; 0 for none.
+fn fkey(n: u64) -> u64 {
+    match n {
+        1 => 0x100 + 65,
+        2 => 0x100 + 66,
+        3 => 0x100 + 67,
+        4 => 0x100 + 68,
+        5 => 0x100 + 69,
+        6 => 17,
+        7 => 18,
+        8 => 19,
+        9 => 20,
+        10 => 21,
+        11 => 23,
+        12 => 24,
+        13 => 25,
+        14 => 26,
+        15 => 28,
+        16 => 29,
+        17 => 31,
+        18 => 32,
+        19 => 33,
+        20 => 34,
+        _ => 0,
+    }
+}
+
+/// The function key a set-1 make code (no E0) is: F1-F10 0x3b-0x44, F11
+/// 0x57, F12 0x58; 0 for another key.
+fn fkey_number(k: u64) -> u64 {
+    if k >= 0x3b && k <= 0x44 {
+        k - 0x3a
+    } else if k == 0x57 {
+        11
+    } else if k == 0x58 {
+        12
+    } else {
+        0
+    }
+}
+
+/// `v` (< 100) in decimal through the line discipline.
+fn input_dec(v: u64) {
+    if v >= 10 {
+        input(48 + v / 10)
+    }
+    input(48 + v % 10)
+}
+
+/// px59: function key `k` (its make code) with the modifiers held, as
+/// the measured VT gives it: Shift makes F1-F10 the VT's F11-F20 (F11
+/// and F12 stay themselves), Ctrl changes nothing, and any Alt (a VT's
+/// console switch) or Shift with Ctrl gives nothing.
+fn function_key(k: u64, keys: u64) {
+    var n = fkey_number(k)
+    let shift = keys & (K_LSHIFT | K_RSHIFT) != 0
+    let ctrl = keys & (K_LCTRL | K_RCTRL) != 0
+    if keys & (K_LALT | K_RALT) != 0 || (shift && ctrl) {
+        return
+    }
+    if shift && n <= 10 {
+        n += 10
+    }
+    let f = fkey(n)
+    bump(C_RX_KBD)
+    input(27)
+    input(91)
+    if f > 0xff {
+        input(91)
+        input(f & 0xff)
+    } else {
+        input_dec(f)
+        input(126)
+    }
+}
+
 /// One byte from the i8042 (set 1).
 fn scancode(b: u64) {
     bump(C_SCANCODES)
@@ -1022,6 +1152,8 @@ fn scancode(b: u64) {
         bit = K_RSHIFT
     } else if k == 0x1d {
         bit = if ext { K_RCTRL } else { K_LCTRL }
+    } else if k == 0x38 {
+        bit = if ext { K_RALT } else { K_LALT } // px59
     }
     if bit != 0 {
         if brk {
@@ -1058,11 +1190,35 @@ fn scancode(b: u64) {
             // `linux` entry agrees), through the line discipline as if
             // typed, so a program in raw mode reads them and canonical
             // mode echoes `^[[A` as Linux's does.
+            // px59: the arrows take the modifiers as `ESC [ 1 ; m X`, m
+            // 1 + Shift 1 + left Alt 2 + Ctrl 4, but left Alt alone on
+            // Left or Right gives nothing (the VT's console switch); the
+            // editing block takes none, and Shift with PgUp or PgDn gives
+            // nothing (the VT scrolls); right Alt adds nothing (measured:
+            // notes/px59/vt2.rows).
             let f = cursor_key(k)
             if f != 0 {
+                let shift = keys & (K_LSHIFT | K_RSHIFT) != 0
+                let ctrl = keys & (K_LCTRL | K_RCTRL) != 0
+                let alt = keys & K_LALT != 0
+                if f > 0xff && shift && (k == 0x49 || k == 0x51) {
+                    return
+                }
+                var m: u64 = 1
+                if f < 0x100 {
+                    m = 1 + (if shift { 1 } else { 0 }) + (if alt { 2 } else { 0 }) + (if ctrl { 4 } else { 0 })
+                    if m == 3 && (k == 0x4b || k == 0x4d) {
+                        return
+                    }
+                }
                 bump(C_RX_KBD)
                 input(27)
                 input(91)
+                if m > 1 {
+                    input(49)
+                    input(59)
+                    input(48 + m)
+                }
                 input(f & 0xff)
                 if f > 0xff {
                     input(126)
@@ -1072,8 +1228,21 @@ fn scancode(b: u64) {
         }
     } else {
         c = key_base(k)
+        if c == 0 && fkey_number(k) != 0 {
+            function_key(k, keys)
+            return
+        }
     }
     if c == 0 {
+        return
+    }
+    // px59 (R-px59-2): left Alt sends ESC before the key's character, as
+    // the VT's Meta does; with Shift too it gives nothing (measured on
+    // `a` and `1`); the keypad's keys take no prefix (keypad Enter
+    // measured). Right Alt adds nothing (the VT's AltGr enters a
+    // character by its code: not served).
+    let meta = keys & K_LALT != 0 && !ext && k != 0x37 && k != 0x4a && k != 0x4e
+    if meta && keys & (K_LSHIFT | K_RSHIFT) != 0 {
         return
     }
     let shift = keys & (K_LSHIFT | K_RSHIFT) != 0
@@ -1095,6 +1264,9 @@ fn scancode(b: u64) {
         }
     }
     bump(C_RX_KBD)
+    if meta {
+        input(27)
+    }
     input(c)
 }
 
