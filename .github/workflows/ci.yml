@@ -2897,6 +2897,75 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px59: the screen for an editor: the two VT probes' cases played on
+  # PAX's console (user/elf/vtcases) and each screen held to
+  # tools/screen-ref's picture of the same bytes and, on the 80 x 25 grid
+  # Limine gives under the BIOS (boot/limine-vt.conf), to the Linux VT's
+  # own cells and answers (tests/mpx5-screen.d); yew and a second pelt
+  # typed at the PS/2 keyboard (tools/ps2-session), each screen taken
+  # while they run held to screen-ref's.
+  mpx5-screen:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-screen')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+          qemu-system-x86_64 --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-screen-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: screen-ref against the VT, the VT's cases on PAX, yew and pelt at the keyboard; the plan's legs (all four in the all tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx5-screen $PAX_LEGS
+
+      - name: keep the programs' sums, the screens, the verdicts, the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-screen
+          path: |
+            build/mpx5-screen/*.txt
+            build/mpx5-screen/yew/sums.txt
+            build/mpx5-screen/pelt/sums.txt
+            build/mpx5-screen/bore/sums.txt
+            build/mpx5-screen/*/kmain_console.elf
+            build/mpx5-screen/*/*.log
+            build/mpx5-screen-*/
+            build/mpx5-screen-*.log
+            build/mpx5-screen-*.norm
+            build/mpx5-screen-*.meta
+            build/mpx5-screen-*.halt
+            build/mpx5-screen-*.verdict
+            build/mpx5-screen-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   tier:
     name: tier ${{ needs.plan.outputs.tier || 'unplanned' }}
     if: ${{ !cancelled() }}
@@ -2938,6 +3007,7 @@ jobs:
       - mpx5-aspen
       - mpx5-lupin
       - mpx5-yew
+      - mpx5-screen
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # The issue step's token may write issues; nothing else.
