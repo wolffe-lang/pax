@@ -4,7 +4,7 @@
 # whole root a tmpfs inside a THROWAWAY CONTAINER.
 #
 #   tools/linux-tree --root DIR --keys KEYS --prompt TEXT [--argv0 NAME]
-#                    [--size SIZE] [--sys] [--rdev] [--nsproc] [--owners FILE] OUT -- PROG [ARG...]
+#                    [--size SIZE] [--sys] [--rdev] [--nsproc] [--owners FILE] [--winsize RxC] OUT -- PROG [ARG...]
 #   tools/linux-tree --root DIR --runlist LIST [--size SIZE] [--owners FILE] [--net IP/PREFIX,GATEWAY] OUTDIR
 #
 # The programs under test remove and overwrite files (`rm`, `rmdir`,
@@ -34,6 +34,8 @@
 # OUT gets what the terminal showed, OUT.rc the program's exit status,
 # OUT.after the names in the root when the session was over (sorted,
 # `/dev` and `/proc` left out). The staging directory is removed.
+# --winsize RxC (px59): tools/linux-tty's --winsize, the pseudo-terminal's
+# window R rows by C columns.
 # --nsproc (px48): tools/linux-tty's --nsproc, the root's /proc the
 # program's own pid namespace's (/proc/<pid> by the pids it sees).
 # --sys (px34): tools/linux-tty's --sys, a sysfs and a cgroup2 mount in
@@ -82,7 +84,7 @@
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
-root= keys= prompt= argv0= size=64m sys= owners= runlist= net= rdev= nsproc=
+root= keys= prompt= argv0= size=64m sys= owners= runlist= net= rdev= nsproc= winsize=
 while [ $# -gt 0 ]; do
     case $1 in
         --root)   root=$2; shift 2 ;;
@@ -96,6 +98,7 @@ while [ $# -gt 0 ]; do
         --net)    net=$2; shift 2 ;;
         --rdev)   rdev=--rdev; shift ;;
         --nsproc) nsproc=--nsproc; shift ;;
+        --winsize) winsize=$2; shift 2 ;;
         --)       break ;;
         -*)       die "unknown option $1" ;;
         *)        break ;;
@@ -135,6 +138,7 @@ printf '%s' "$argv0" > "$stage/argv0"
 printf '%s' "$sys" > "$stage/sys"
 printf '%s' "$rdev" > "$stage/rdev"
 printf '%s' "$nsproc" > "$stage/nsproc"
+printf '%s' "${winsize:+--winsize $winsize}" > "$stage/winsize"
 printf '%s' "$net" > "$stage/net"
 : > "$stage/owners"
 if [ -n "$owners" ]; then cp "$owners" "$stage/owners" || die "no owners file $owners"; fi
@@ -214,10 +218,11 @@ a0=$(cat /x/argv0)
 sy=$(cat /x/sys)
 rd=$(cat /x/rdev)
 np=$(cat /x/nsproc)
+ws=$(cat /x/winsize)
 if [ -n "$a0" ]; then
-    python3 /x/linux-tty --root /r --pid1 $rd $np $sy --keys /x/keys --prompt "$(cat /x/prompt)" --argv0 "$a0" /x/out -- "$@"
+    python3 /x/linux-tty --root /r --pid1 $rd $np $sy $ws --keys /x/keys --prompt "$(cat /x/prompt)" --argv0 "$a0" /x/out -- "$@"
 else
-    python3 /x/linux-tty --root /r --pid1 $rd $np $sy --keys /x/keys --prompt "$(cat /x/prompt)" /x/out -- "$@"
+    python3 /x/linux-tty --root /r --pid1 $rd $np $sy $ws --keys /x/keys --prompt "$(cat /x/prompt)" /x/out -- "$@"
 fi
 rc=$?
 (cd /r && find . -mindepth 1 \( -path ./dev -o -path ./proc -o -path ./sys \) -prune -o -print | LC_ALL=C sort) > /x/after
