@@ -32,7 +32,7 @@ if [ -n "${PAX_PELT_CASES:-}" ]; then
     say "SUBSET: $CASES (empty PAX_PELT_CASES runs every replay)"
 fi
 BORE='cat env head sleep true false mkdir rm tr wc tail'
-BB='mkfifo sed yes ps sort'
+BB='mkfifo sed yes sort'
 work=$PAX_BUILD/mpx5-pelt
 fail=0 ran=0
 bad() { say "FAIL $*"; fail=1; }
@@ -105,10 +105,12 @@ if [ -z "$images" ]; then
     case " $CASES " in *" selfcheck "*) "$PAX_ROOT/tools/mkpelt" "$work/selfcheck" selfcheck || exit 2 ;; esac
     "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE || exit 2
     "$PAX_ROOT/tools/mkas" "$work/bin" || exit 2
+    "$PAX_ROOT/tools/mkpspgid" "$work/pspgid" || exit 2
     "$PAX_ROOT/tools/fetch-busybox" "$work/bin" || exit 2
     cp "$work/pelt/pelt" "$r/bin/sh"
     case " $CASES " in *" selfcheck "*) cp "$work/selfcheck/selfcheck" "$r/bin/selfcheck" ;; esac
     cp "$work/bin/as" "$r/bin/as"
+    cp "$work/pspgid/ps" "$r/bin/ps"
     for c in $BORE; do cp "$work/bore/$c" "$r/bin/$c"; done
     # Busybox applets are black-box fixture helpers, not the shell or
     # a replacement for any tested pelt/boreutils program.

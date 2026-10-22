@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Build the test-only ps query on baseline Linux, never host glibc on kasumi.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die 'usage: mkpspgid OUTDIR'
+need cc readelf
+mkdir -p "$1"
+out=$(cd "$1" && pwd)
+cc -static -O1 -Wall -Wextra -Werror -o "$out/ps" "$PAX_ROOT/user/elf/pspgid.c"
+readelf -hW "$out/ps" | grep -Eq 'Type: +EXEC' || die 'ps-pgid not ET_EXEC'
+! readelf -lW "$out/ps" | grep -q INTERP || die 'ps-pgid not static'
+printf 'ps-pgid %s %s\n' "$(sha256_of "$out/ps")" "$(wc -c < "$out/ps" | tr -d ' ')" | tee "$out/sums.txt"
