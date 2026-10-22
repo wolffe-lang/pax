@@ -48,3 +48,38 @@ Item 4 input discrepancy: ~/lanes/orch-paxplay does not exist on this
 Mac. px56 records build.sh and assemble.sh on kasumi. No assembly or
 maintainer-session claim until the correct inputs and destination are
 confirmed and their scripts read.
+
+Addendum (px59, the third agent, 2026-10-21; committed before the
+second VT measurement, notes/px59/vtprobe2.c, and before any change to
+kernel/console or kernel/screen's queries):
+
+P6. The arrows take every modifier as CSI 1;m X with m = 1 + Shift 1 +
+Alt 2 + Ctrl 4 (vt.rows has 2, 3, 5, 6 for up), unless the VT's own
+keymap takes the combination first: Alt+Left and Alt+Right may switch
+consoles (no bytes). Home, End, PgUp, PgDn, Insert and Delete keep
+their unmodified CSI n ~ under Shift and Ctrl (no CSI n;m ~); Shift with
+PgUp or PgDn gives nothing (the VT's own scrolling).
+
+P7. Shift+F1 to Shift+F8 give the codes of F11 to F20 (CSI 23~ 24~ 25~
+26~ 28~ 29~ 31~ 32~), Shift+F9 to F12 CSI 33~ 34~ or nothing; Ctrl+Fn
+the unmodified Fn; Alt+F1 nothing (a console switch, to tty1 itself).
+
+P8. Left Alt with a printable key, Enter, Backspace, Tab, Esc and Space
+gives ESC then what the key gives without Alt (so Alt+Shift+a ESC A,
+Ctrl+Alt+a ESC 01, Alt+Backspace ESC 7f, Alt+Enter ESC 0d).
+
+P9. The VT answers ESC Z as DA1 (ESC[?6c), CSI 0 c as CSI c, CSI 5 n
+with ESC[0n, and CSI 6 n with the cursor's row and column, the last
+column itself with a wrap pending, the alternate screen's own position
+on it; DA2 (CSI > c), DECXCPR (CSI ? 6 n) and OSC 11's query get no
+answer; yew's probe string gets DA1's answer alone. In canonical mode
+with ECHO and ECHOCTL the answer is echoed (^[[?6c on the screen), as
+typed bytes are.
+
+P10. SGR 2, 3 and 4 are drawn on the VGA VT as colours (vcsa shows a
+changed attribute), 5 as the blink bit; 38;2 and 48;2 map to the
+nearest of the 16; a ninth CSI parameter does not end CUP on the VT
+(PAX ignores such a sequence: a divergence to name); ICH, DCH, ECH,
+IL, DL and DECSTBM are served by the VT (not yew's: listed, not
+implemented here); ?1049h clears the alternate screen in the current
+background; a scroll on either screen leaves the other as it was.
