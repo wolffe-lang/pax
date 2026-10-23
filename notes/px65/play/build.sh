@@ -1,0 +1,41 @@
+#!/bin/bash
+# px65, kasumi: px63's playground builder (px61's recipe, the
+# orchestrator's orch-paxplay build.sh before it), lane-local: the head's
+# pins (boreutils' 61 utilities, pelt, lope, aspen, yew, lupin, su, play,
+# /bin/reboot), CPUs 12-15, the lane's own container; scent as /bin/grep
+# (tools/mkscent, px64). No boot here.
+set -u
+L=$HOME/lanes/px65/play
+P=${PX65_TREE:-$HOME/lanes/px65/pax}
+LOPE=$HOME/lanes/px65/lope   # the lane's clone of lope (private), read only
+printf '%s\n' $$ > "$L/build.pid"
+U="base32 base64 basename cat chgrp chmod chown comm cp cut dirname echo env expand false fold groups head id join kill link ln logname ls mkdir mkfifo mktemp mv nl nproc paste printenv printf pwd readlink realpath rm rmdir seq shuf sleep sort stat sync tac tail tee timeout touch tr true truncate tsort tty unexpand uniq unlink wc whoami yes"
+mkdir -p "$L/cache" "$L/tmp"
+podman run --rm --cpuset-cpus 12-15 --ulimit core=0:0 -v "$L:$L:Z" -v "$P:$P:Z" -v "$LOPE:$LOPE:ro" \
+    -e PAX_CACHE=$L/cache -e TMPDIR=$L/tmp -e PAX_LOPE_REPO=$LOPE -e CARGO_INCREMENTAL=0 -e U="$U" -e L="$L" -e P="$P" localhost/px65-ubuntu bash -c '
+set -u; cd $P; W=$L/w; rm -rf $W; mkdir -p $W
+export PAX_WOLF=$(tools/fetch-wolf | tail -n 1); echo "wolf: $PAX_WOLF $($PAX_WOLF --version | head -n 1)"
+tools/fetch-limine >/dev/null; echo "limine rc=$?"
+tools/mkpelt $W/pelt > $W/pelt.txt 2>&1; echo "mkpelt rc=$?"
+tools/mklope $W/lope > $W/lope.txt 2>&1; echo "mklope rc=$?"
+tools/mkaspen $W/aspen > $W/aspen.txt 2>&1; echo "mkaspen rc=$?"
+tools/mkscent $W/scent > $W/scent.txt 2>&1; echo "mkscent rc=$?"
+tools/fetch-std $W/std > $W/std.txt 2>&1; echo "std rc=$?"
+tools/mkyew $W/yew > $W/yew.txt 2>&1; echo "mkyew rc=$?"
+tools/mkboreutils $W/bore $U > $W/bore.txt 2>&1; echo "mkboreutils rc=$?"
+tools/mkas $W/bin > $W/as.txt 2>&1; echo "mkas rc=$?"
+tools/mksu $W/su > $W/su.txt 2>&1; echo "mksu rc=$?"
+tools/mkplay $W/play > $W/play.txt 2>&1; echo "mkplay rc=$?"
+tools/mkzone $W/localtime > $W/zone.txt 2>&1; echo "mkzone rc=$?"
+tools/mkdiskprobe $W/probe > $W/probe.txt 2>&1; echo "mkdiskprobe rc=$?"
+mkdir -p $W/native
+elf=$(tools/build-kernel --src kernel/kmain_console.lu $W/native 2>$W/kernel.log); echo "kernel rc=$? elf=$elf"
+echo "$elf" > $W/elf.path
+ls -la $W/pelt $W/lope $W/aspen $W/scent $W/yew $W/bin $W/su $W/play $W/probe | head -60
+'
+rc=$?
+# px57: the musl lupin, built in the throwaway Rust image (px13-ubuntu with rustup inside it).
+R=${PAX_RUST_IMAGE:-localhost/px57-rust}
+podman image exists $R || { echo "missing existing Rust image: $R"; exit 2; }
+podman run --rm --cpuset-cpus 12-15 --ulimit core=0:0 -v "$L:$L:Z" -v "$P:$P:Z" -e L="$L" -e P="$P" -e CARGO_INCREMENTAL=0 $R bash -c 'cd $P && tools/mklupin $L/w/lupin > $L/w/lupin.txt 2>&1; echo "mklupin rc=$?"; ls -la $L/w/lupin'
+echo "build.sh done rc=$rc $(date -Is)"
