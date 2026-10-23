@@ -16,7 +16,7 @@ if grep -q -- '--only linux' "tests/$S" && [ -z "${PX65_NO_LINUX:-}" ]; then
     taskset -c 12-15 "tests/$S" --only linux --images "$W" > "$B.linux.log" 2>&1
     echo "linux $S: $? ($(tail -n 1 "$B.linux.log" | cut -c1-200))"
 fi
-podman run --rm --cpuset-cpus 12-15 --ulimit core=0:0 -v "$L:$L:Z" -e PAX_CACHE -e PAX_BUILD -e TMPDIR \
+podman run --rm --cpuset-cpus 12-15 --ulimit core=0:0 -v "$L:$L:Z" -e PAX_CACHE -e PAX_BUILD -e TMPDIR -e PAX_TASKSET_CPUS=12-15 \
     ${PX65_BOOT_ENV:-} localhost/px65-ubuntu bash -c 'cd "$1"; s=$2; shift 2; taskset -c 12-15 tests/"$s" --images "$PAX_BUILD/$s" "$@"' \
     px65 "$X" "$S" "$@" > "$B.boot.log" 2>&1
 rc=$?
