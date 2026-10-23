@@ -38,7 +38,8 @@
 # table (tools/mkgpt) of three entries,
 #
 #   1  an EFI system partition from LBA 4096 (2 MiB), --esp SIZE
-#      (default 64M): FAT32 made by mkfs.fat at its offset (tools/disktools:
+#      (default 64M): FAT32 of 512-byte clusters made by mkfs.fat at its
+#      offset (tools/disktools:
 #      dosfstools from user/disktools.pin, never the host's), its volume id
 #      derived from the label and SOURCE_DATE_EPOCH, `--invariant` for the
 #      rest, holding Limine's /EFI/BOOT/BOOTX64.EFI, /boot/limine/limine.conf
@@ -221,7 +222,11 @@ def gpt_main(args):
         dt = os.path.join(HERE, "disktools")
         rel = os.path.basename(out)
         env = {"SOURCE_DATE_EPOCH": str(t)}
-        run([dt, work, "mkfs.fat", "-F", "32", "-n", "PAX-ESP", "-i", volid, "--invariant", "--mbr=n", "-S", "512",
+        # One sector a cluster: FAT32 needs at least 65,525 clusters, and
+        # mkfs.fat's own choice for a 192 MiB volume (4 KiB clusters, 49,047
+        # of them) is below it (fsck.fat -n warns; measured): with 512-byte
+        # clusters every ESP of 33 MiB or more clears it.
+        run([dt, work, "mkfs.fat", "-F", "32", "-s", "1", "-n", "PAX-ESP", "-i", volid, "--invariant", "--mbr=n", "-S", "512",
              "-h", str(e0), "--offset", str(e0), rel, str(esp // 1024)], "mkfs.fat", env)
         lim = limine_dir()
         files = [(os.path.join(lim, "BOOTX64.EFI"), "::/EFI/BOOT/BOOTX64.EFI"),
@@ -253,7 +258,9 @@ def gpt_main(args):
         espf = os.path.join(stage, "esp.img")
         copy_range(out, espf, e0 * S, esp)
         fv = run([dt, work, "fsck.fat", "-n", os.path.relpath(espf, work)], "oracle fsck.fat -n")
-        print("mkdisk: fsck.fat -n: " + fv.strip().splitlines()[-1])
+        if "Warning" in fv or "warning" in fv:
+            die("oracle fsck.fat -n: %s" % fv, 1)
+        print("mkdisk: fsck.fat -n: " + [l for l in fv.strip().splitlines() if " files, " in l][-1].strip())
         os.unlink(espf)
         homef = os.path.join(stage, "home.img")
         copy_range(out, homef, h0 * S, (h1 - h0 + 1) * S)
