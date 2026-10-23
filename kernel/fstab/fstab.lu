@@ -11,8 +11,15 @@
 //!
 //!     <spec> <file> <vfstype> <mntops> [<freq> [<passno>]]
 //!
-//! `spec` names a disk as Linux would (`/dev/vda`, or `vda`); `LABEL=`
-//! and `UUID=` are refused by name. `file` is an absolute path to a
+//! `spec` names a disk or a partition as Linux would (`/dev/vda`,
+//! `/dev/vda2`, or `vda2`), or (px66) a volume by the names blkid(8)
+//! prints and fstab(5) takes: `PARTUUID=` (a GPT partition's unique
+//! GUID, or an MBR partition's `ssssssss-nn`: kernel/block's
+//! `by_partuuid`), `PARTLABEL=` (a GPT partition's name), `UUID=` and
+//! `LABEL=` (the ext2 superblock's s_uuid and s_volume_name, asked of
+//! each device in kernel/block's order, the disk first, by kernel/ext2's
+//! `probe`). A UUID's hex digits match in either case, hyphens anywhere;
+//! a label matches byte for byte. `file` is an absolute path to a
 //! directory of the in-memory tree (not `/`). `vfstype` is `ext2` (any
 //! other refused by name). `mntops` is a comma list: `defaults`, `rw`,
 //! `ro`, `sync` (every change written before the system call returns:
@@ -37,6 +44,7 @@
 //!
 //!     fstab: /dev/vda on /home: ext2, read-write, write-through
 //!     ext2: vda: <kernel/ext2's mount line>
+//!     fstab: PARTUUID=<guid> (vda2) on /home: ext2, read-write, write-back
 //!     fstab: /dev/vda for /home: no such disk; /home stays the tree's
 //!
 //! Written from fstab(5) and mount(8)'s option names. No Linux source;
@@ -147,6 +155,54 @@ fn walk(a: u64, n: u64) -> u64 {
         s = e + 1
     }
     d
+}
+
+/// px66: the device a line's `spec` (the `n` bytes at `a`) names, and
+/// whether it named a volume by `PARTUUID=`, `PARTLABEL=`, `UUID=` or
+/// `LABEL=` (else a device name): (block.DEVS when none matches).
+fn spec_device(a: u64, n: u64) -> (u64, bool) {
+    if n > 9 && is(a, 9, "PARTUUID=") {
+        return (block.by_partuuid(a + 9, n - 9), true)
+    }
+    if n > 10 && is(a, 10, "PARTLABEL=") {
+        return (block.by_partlabel(a + 10, n - 10), true)
+    }
+    if n > 5 && is(a, 5, "UUID=") {
+        let (ok, hi, lo) = block.uuid_text(a + 5, n - 5)
+        if !ok {
+            return (block.DEVS, true)
+        }
+        var d: u64 = 0
+        while d < block.count() {
+            let (has, h, l) = ext2.probe(d)
+            if has && h == hi && l == lo {
+                return (d, true)
+            }
+            d += 1
+        }
+        return (block.DEVS, true)
+    }
+    if n > 6 && is(a, 6, "LABEL=") {
+        if n - 6 > 16 {
+            return (block.DEVS, true)
+        }
+        var d: u64 = 0
+        while d < block.count() {
+            let (has, _h, _l) = ext2.probe(d)
+            if has {
+                var k: u64 = 0
+                while k < n - 6 && ext2.probed_label(k) == byte(a + 6 + k) {
+                    k += 1
+                }
+                if k == n - 6 && ext2.probed_label(k) == 0 {
+                    return (d, true)
+                }
+            }
+            d += 1
+        }
+        return (block.DEVS, true)
+    }
+    (block.by_name(a, n), false)
 }
 
 /// Mount what `/etc/fstab` lists (kmain_console, after `user.start` and
@@ -267,14 +323,14 @@ fn mount_line(a: u64, n: u64) -> bool {
         log.end()
         return false
     }
-    let d = block.by_name(fa, fl)
+    let (d, named) = spec_device(fa, fl)
     if d == block.DEVS {
         if opts & O_NOFAIL == 0 {
             log.put("fstab: ")
             put_span(fa, fl)
             log.put(" for ")
             put_span(ga, gl)
-            log.put(if fl > 5 && (is(fa, 5, "LABEL") || is(fa, 4, "UUID")) { ": a disk named by label or UUID is refused by name; " } else { ": no such disk; " })
+            log.put(if named { ": no such volume; " } else { ": no such disk; " })
             put_span(ga, gl)
             log.put(" stays the tree's")
             log.end()
@@ -311,6 +367,11 @@ fn mount_line(a: u64, n: u64) -> bool {
     let v = tree.mounted(m)
     log.put("fstab: ")
     put_span(fa, fl)
+    if named {
+        log.put(" (")
+        block.put_name(d)
+        log.put(")")
+    }
     log.put(" on ")
     put_span(ga, gl)
     log.put(": ext2, ")
