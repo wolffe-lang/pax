@@ -1,16 +1,76 @@
 //! block — the block layer: the devices, a request and its completion,
-//! and the buffer cache (px63).
+//! the partition table (px66) and the buffer cache (px63).
 //!
-//! **The devices.** A table of DEVS (4) records, one per disk a driver
-//! brought up: its driver (kernel/vblk, the only one), its capacity in
-//! 512-byte sectors (the unit every request is in, whatever the disk's
-//! own block size), whether it is read-only and whether it takes a
-//! FLUSH, its name (`vda`, `vdb`, …: Linux's names for virtio disks, so
-//! an `/etc/fstab` line reads as it would there) and Linux's device
-//! numbers for it (254:0, 254:16, …: measured on the Linux guest, where
+//! **The devices.** A table of DEVMAX (129) records, one per disk a
+//! driver brought up and one per partition its table names: the disk's
+//! driver (kernel/vblk, the only one), its capacity in 512-byte sectors
+//! (the unit every request is in, whatever the disk's own block size),
+//! whether it is read-only and whether it takes a FLUSH, its name (`vda`,
+//! `vdb`, …: Linux's names for virtio disks, so an `/etc/fstab` line
+//! reads as it would there; a partition's is its disk's and its number,
+//! `vda2`) and Linux's device numbers for it (254:0, 254:16, … for a
+//! disk, 254:N for its partition N up to 15 and the extended major 259
+//! from 0 up for the rest, in order: measured on the Linux guest, where
 //! virtio_blk's dynamic major is 254 and each disk takes 16 minors).
-//! `start` brings up what is there; a machine with no disk has none,
-//! and nothing is printed.
+//! `start` brings up what is there; a machine with no disk has none, and
+//! nothing is printed.
+//!
+//! **A partition is a window** (px66): its first sector on its disk and
+//! its sectors. Every request to it is bounds-checked against its own
+//! sectors before it is made and then offset by its start, so nothing
+//! outside the window can be read or written through it; a request past
+//! its end is -EIO, counted, one line once a device, as a request past a
+//! disk's capacity is. The disk stays a device of its own (the whole of
+//! it), and the two never mount at once: `claim` refuses a disk while one
+//! of its partitions is mounted and a partition while its disk is, by
+//! name (-EBUSY), because their blocks would be cached twice.
+//!
+//! **The partition table** (px66), read once at `start` from the disk's
+//! first sectors, written from the UEFI Specification 2.10 §5:
+//!
+//! - LBA 0, the MBR: 0x55aa at byte 510 or there is no table (a bare
+//!   file system, a blank disk: nothing is said). Its four records
+//!   (§5.2.1) are each 16 bytes from byte 446; a record whose boot flag
+//!   is neither 0 nor 0x80 means the sector is not a partition table (a
+//!   FAT boot sector, say), and nothing is read. One record of OS type
+//!   0xEE starting at LBA 1 is the protective MBR (§5.2.3): the disk is
+//!   GPT. Otherwise it is an MBR-only disk (R-px66-1, recommended and
+//!   implemented, not decided: read as the Linux guest reads it, its
+//!   primary records only): each record with a type and a size is
+//!   partition 1-4, its PARTUUID the disk signature (byte 440) and its
+//!   number (`5ca1ab1e-01`, as the guest's blkid prints it); an extended
+//!   record (0x05, 0x0f, 0x85) is refused by name, its logical
+//!   partitions not read.
+//! - The primary header at LBA 1 and the backup at the last LBA
+//!   (§5.3.2), each checked in the specification's order, every check a
+//!   named refusal: the signature `EFI PART`; a revision of major 1; the
+//!   header size, 92 to 512; the header's CRC32 over that size with its
+//!   own field zero; MyLBA the LBA it was read from; the usable range
+//!   inside the disk; an entry size of 128 or a larger multiple of 8 (as
+//!   the specification allowed before 2.10 asked for 128 times a power of
+//!   two; at most 4096 here); the entry array (count × size, at most 1 MiB
+//!   here) inside the disk and outside the usable range; the array's
+//!   CRC32. The primary is used when it holds, and a backup that does not
+//!   is said once; when the primary fails and the backup holds, the
+//!   backup is used and said so once (§5.3.2: "software must check the
+//!   last LBA"; measured: Linux 7.2.8 reads the backup only when booted
+//!   with `gpt`, and never reads entries larger than 128 bytes); when
+//!   both fail there are no partitions, said once, and the disk is still
+//!   a device, the whole of it.
+//! - The entries (§5.3.3): an entry whose type GUID is zero is unused;
+//!   any other is partition N (N its index plus one, gaps and all, as
+//!   Linux names them), unless its first LBA is after its last or it
+//!   lies outside the usable range (refused by name, counted). Each keeps
+//!   its type GUID, its unique GUID (the PARTUUID, printed as Appendix A
+//!   writes a GUID: the first three fields little-endian, lower case),
+//!   its first LBA and sectors, its attributes and its name (UTF-16LE,
+//!   36 units, kept as UTF-8: the PARTLABEL). Overlaps are not checked
+//!   (named: the specification forbids them, and nothing here relies on
+//!   their absence).
+//! - A disk whose logical block is not 512 bytes (VIRTIO_BLK_F_BLK_SIZE)
+//!   is refused by name: its table is not read and it stays whole
+//!   (measured: Linux on the same image and device finds no partitions
+//!   either, since its table is at LBA 1 of 512 bytes).
 //!
 //! **A request** is a record of 8 words (kernel/vblk reads and writes
 //! them): its type (IN, OUT, FLUSH), its first sector, its sectors, the
@@ -22,7 +82,9 @@
 //! (polled: kernel/vblk says why) and a request that never comes back is
 //! an I/O error by name, never a hang. A request past the device's
 //! capacity, or a write to a read-only device, is refused before it is
-//! made (-EIO, counted, one line once).
+//! made (-EIO, counted, one line once). A partition's requests are
+//! counted on it and on its disk (the disk's books are every request its
+//! driver was given).
 //!
 //! **The buffer cache.** A file system reads and writes its blocks (1,
 //! 2 or 4 KiB) through `get`, `fresh`, `dirty` and `sync`: up to NB
@@ -49,9 +111,14 @@
 //! takes at `start`, their addresses in module `var`s (scalars).
 //!
 //! Written from the OASIS VIRTIO specification 1.2 §5.2.6 (the request's
-//! unit and FLUSH, through kernel/vblk), `fsync(2)`, `sync(2)`,
-//! `syncfs(2)` and black-box runs of Linux 7.2.8 on QEMU (the device
-//! numbers: `notes/px63/`). No Linux source; no other kernel's source.
+//! unit and FLUSH, through kernel/vblk), the UEFI Specification 2.10 §5
+//! (the MBR, the protective MBR, the GPT header and entry array) and
+//! Appendix A (a GUID's text), `fsync(2)`, `sync(2)`, `syncfs(2)`,
+//! `proc(5)` (/proc/partitions) and black-box runs of Linux 7.2.8 on
+//! QEMU (the device numbers, the names, /proc/partitions' layout, what a
+//! damaged table reads as: `notes/px63/`, `notes/px66/`,
+//! tests/mpx6-part.d/linux/). No Linux source (none of its block layer or
+//! partition code); no other kernel's source; no partitioner's source.
 
 use frames
 use log
@@ -61,8 +128,10 @@ extern "c" fn pax_tree_copy(dst: u64, src: u64, n: u64)
 extern "c" fn pax_tree_zero(dst: u64, n: u64)
 
 const PAGE: u64 = 4096
-/// The most devices.
-pub const DEVS: u64 = 4
+/// The most devices: one disk and its partitions.
+pub const DEVMAX: u64 = 129
+/// No device (by_name's and the lookups' answer when none matches).
+pub const DEVS: u64 = 129
 /// The most buffers.
 pub const NB: u64 = 512
 const HPF: u64 = 128 // buffer headers a frame (4 words each)
@@ -70,6 +139,7 @@ const BUCKETS: u64 = 512
 
 /// errno (uapi asm-generic/errno-base.h).
 const EIO: u64 = 5
+const EBUSY: u64 = 16
 const ENOSPC: u64 = 28
 
 // The state frame's words.
@@ -79,11 +149,73 @@ const S_MADE: u64 = 2 // buffers made
 const S_HAND: u64 = 3 // the clock hand
 const S_HASH: u64 = 4 // the hash frame (physical): BUCKETS heads, a slot + 1 each
 const S_HDRS: u64 = 5 // the header frames (physical), NB / HPF of them, from here
-const S_SAID: u64 = 12 // a refusal said (one line each kind)
 const S_COUNT: u64 = 16 // the cache's counters (K_*), from here
-const S_DEV: u64 = 64 // the device table: DEVS records of 16 words
-const DW: u64 = 16
+const S_DEVF: u64 = 24 // the device table's frames (physical), DEVF of them, from here
+const DEVF: u64 = 17
+const DPF: u64 = 8 // device records a frame
+const S_SCR: u64 = 41 // the table's scratch frame (physical)
+// The partition table read (px66).
+const S_PT_KIND: u64 = 42 // PT_*
+const S_PT_USED: u64 = 43 // the header used: 1 primary, 2 backup
+const S_PT_WHYP: u64 = 44 // why the primary was refused (W_*), 0 it holds
+const S_PT_WHYB: u64 = 45 // the backup's
+const S_PT_VALP: u64 = 46 // a number the primary's refusal names (found), and 47 (wanted)
+const S_PT_VALB: u64 = 48 // the backup's, and 49
+const S_PT_BADN: u64 = 50 // entries refused
+const S_PT_BADK: u64 = 51 // the first refused entry's slot (1-based)
+const S_PT_BADW: u64 = 52 // and why (E_*)
+const S_PT_OVER: u64 = 53 // used entries past DEVMAX
+const S_PT_ALT: u64 = 54 // the primary's AlternateLBA + 1 when it is not the last LBA
+const S_PT_DIFF: u64 = 55 // both hold and disagree
+const S_PT_EXT: u64 = 56 // an extended MBR record refused: slot | type << 8
+const S_PT_SIG: u64 = 57 // the MBR's disk signature
+const S_PT_EXTN: u64 = 58 // the next extended minor (major 259)
+const S_WB: u64 = 59 // the entry array reader's window: first sector, sectors
+const S_WN: u64 = 60
+const S_AELBA: u64 = 61 // the array being read: its LBA, its last sector + 1
+const S_AEND: u64 = 62
+const S_AERR: u64 = 63 // a read of it failed
+// A header's facts (H_P the primary's, H_B the backup's), HX_* words each.
+const H_P: u64 = 64
+const H_B: u64 = 80
+const HX_MY: u64 = 0
+const HX_ALT: u64 = 1
+const HX_FIRST: u64 = 2
+const HX_LAST: u64 = 3
+const HX_GUID: u64 = 4 // two words: the disk GUID's 16 bytes as two le64
+const HX_ELBA: u64 = 6
+const HX_COUNT: u64 = 7
+const HX_ESIZE: u64 = 8
+const HX_ACRC: u64 = 9
+const HX_HCRC: u64 = 10
 const S_REQ: u64 = 128 // the request record (8 words, kernel/vblk's layout)
+
+// What the table read found.
+const PT_NONE: u64 = 0 // no 0x55aa: no table (silent)
+const PT_GPT: u64 = 1
+const PT_MBR: u64 = 2
+const PT_GPTBAD: u64 = 3 // a protective MBR and neither header holds
+const PT_LBS: u64 = 4 // logical blocks not 512 bytes: not read
+const PT_NOTMBR: u64 = 5 // 0x55aa but a boot flag neither 0 nor 0x80 (silent)
+const PT_IO: u64 = 6 // LBA 0 could not be read
+
+// Why a header was refused.
+const W_IO: u64 = 1
+const W_SIG: u64 = 2
+const W_REV: u64 = 3
+const W_HSIZE: u64 = 4
+const W_HCRC: u64 = 5
+const W_MYLBA: u64 = 6
+const W_USABLE: u64 = 7
+const W_ESIZE: u64 = 8
+const W_ASIZE: u64 = 9
+const W_ARRAY: u64 = 10
+const W_ACRC: u64 = 11
+
+// Why an entry was refused.
+const E_ORDER: u64 = 1 // its first LBA after its last
+const E_USABLE: u64 = 2 // outside the usable range
+const E_DISK: u64 = 3 // (MBR) past the disk's end, or at LBA 0
 
 // A device record's words.
 const D_PRESENT: u64 = 0
@@ -97,6 +229,25 @@ const D_ERRORS: u64 = 7
 const D_SIN: u64 = 8 // sectors read, written
 const D_SOUT: u64 = 9
 const D_REFUSED: u64 = 10 // requests refused before they were made
+const D_DISK: u64 = 11 // the disk's device (itself for a disk)
+const D_START: u64 = 12 // the first sector on the disk (0 for a disk)
+const D_PARTNO: u64 = 13 // the partition's number (0 for a disk)
+const D_MAJOR: u64 = 14
+const D_MINOR: u64 = 15
+const D_TYPE: u64 = 16 // GPT: the type GUID (two le64); MBR: the OS type
+const D_UUID: u64 = 18 // GPT: the unique GUID (two le64); MBR: the signature, the number
+const D_ATTR: u64 = 20
+const D_KIND: u64 = 21 // K_DISK, K_GPT, K_MBR
+const D_CLAIM: u64 = 22 // mounted (claim)
+const D_SAID: u64 = 23 // its refusals said (one line each kind)
+const D_NAMELEN: u64 = 24 // the partition's name (GPT), UTF-8, from D_NAME
+const D_NAME: u64 = 25
+const NAME_MAX: u64 = 312 // bytes: the 39 words from D_NAME
+const DW: u64 = 64
+/// Device kinds.
+pub const KIND_DISK: u64 = 0
+pub const KIND_GPT: u64 = 1
+pub const KIND_MBR: u64 = 2
 /// Device flags.
 pub const F_RO: u64 = 1
 pub const F_FLUSH: u64 = 2
@@ -157,12 +308,20 @@ fn hh() -> u64 {
     frames.hhdm()
 }
 
+fn rec(d: u64) -> u64 {
+    st(S_DEVF + d / DPF) + hh() + (d % DPF) * DW * 8
+}
+
 fn dw(d: u64, w: u64) -> u64 {
-    st(S_DEV + d * DW + w)
+    rd(rec(d) + w * 8)
 }
 
 fn put_dw(d: u64, w: u64, v: u64) {
-    put_st(S_DEV + d * DW + w, v)
+    wr(rec(d) + w * 8, v)
+}
+
+fn bump_dw(d: u64, w: u64, by: u64) {
+    put_dw(d, w, dw(d, w) + by)
 }
 
 fn kbump(i: u64, by: u64) {
@@ -186,12 +345,36 @@ fn zeroed() -> u64 {
     pa
 }
 
+fn b8(a: u64) -> u64 {
+    // # Safety: a byte of a frame this module owns (the scratch frame,
+    // a device record), or of the caller's kernel buffer, through the HHDM.
+    let v = unsafe { (a as *u8).read_volatile() }
+    v as u64
+}
+
+fn put_b8(a: u64, v: u64) {
+    // # Safety: as `b8`.
+    unsafe { (a as *u8).write_volatile((v & 0xff) as u8) }
+}
+
+fn le16(a: u64) -> u64 {
+    b8(a) | (b8(a + 1) << 8)
+}
+
+fn le32(a: u64) -> u64 {
+    le16(a) | (le16(a + 2) << 16)
+}
+
+fn le64(a: u64) -> u64 {
+    le32(a) | (le32(a + 4) << 32)
+}
+
 /// Bring up the disks on the paging structures at `pml4` (after
-/// `pci.scan`, IF clear): how many there are. The state frames are
-/// taken only when there is one.
+/// `pci.scan`, IF clear), and read each one's partition table: how many
+/// disks there are. The state frames are taken only when there is one.
 pub fn start(pml4: u64) -> u64 {
     if base() != 0 {
-        return st(S_DEVS)
+        return if st(S_DEVS) != 0 { 1 } else { 0 }
     }
     let r = vblk.start(pml4)
     if r != vblk.UP {
@@ -219,30 +402,86 @@ pub fn start(pml4: u64) -> u64 {
         put_st(S_HDRS + k, f)
         k += 1
     }
+    k = 0
+    while k <= DEVF {
+        let f = zeroed()
+        if f == 0 {
+            log.put("block: no frame for the device table")
+            log.end()
+            return 0
+        }
+        if k == DEVF {
+            put_st(S_SCR, f)
+        } else {
+            put_st(S_DEVF + k, f)
+        }
+        k += 1
+    }
     put_dw(0, D_PRESENT, 1)
     put_dw(0, D_SECTORS, vblk.sectors())
     put_dw(0, D_LBS, vblk.block_size())
     put_dw(0, D_FLAGS, (if vblk.read_only() { F_RO } else { 0 }) | (if vblk.flushes() { F_FLUSH } else { 0 }))
+    put_dw(0, D_DISK, 0)
+    put_dw(0, D_MAJOR, 254)
+    put_dw(0, D_MINOR, 0)
+    put_dw(0, D_KIND, KIND_DISK)
     put_st(S_DEVS, 1)
+    read_table()
     1
 }
 
-/// How many disks there are.
+/// How many devices there are: the disks and their partitions.
 pub fn count() -> u64 {
     if base() == 0 { 0 } else { st(S_DEVS) }
 }
 
-/// Disk `d`'s capacity in 512-byte sectors.
+/// Device `d`'s capacity in 512-byte sectors (a partition's: its window).
 pub fn sectors(d: u64) -> u64 {
     if d >= count() { 0 } else { dw(d, D_SECTORS) }
 }
 
-/// Its flags (F_RO, F_FLUSH).
+/// Its flags (F_RO, F_FLUSH: a partition's are its disk's).
 pub fn flags(d: u64) -> u64 {
     if d >= count() { 0 } else { dw(d, D_FLAGS) }
 }
 
-/// Byte `i` of disk `d`'s name (`vda`: three bytes), 0 past the end.
+/// Its kind: KIND_DISK, KIND_GPT or KIND_MBR (a partition of either table).
+pub fn kind(d: u64) -> u64 {
+    if d >= count() { KIND_DISK } else { dw(d, D_KIND) }
+}
+
+/// The disk device `d` is on (itself for a disk).
+pub fn disk_of(d: u64) -> u64 {
+    if d >= count() { d } else { dw(d, D_DISK) }
+}
+
+/// Its first sector on its disk (0 for a disk).
+pub fn start_of(d: u64) -> u64 {
+    if d >= count() { 0 } else { dw(d, D_START) }
+}
+
+/// Its partition number (0 for a disk).
+pub fn partno(d: u64) -> u64 {
+    if d >= count() { 0 } else { dw(d, D_PARTNO) }
+}
+
+fn digits(v: u64) -> u64 {
+    var n: u64 = 1
+    var x = v
+    while x >= 10 {
+        x = x / 10
+        n += 1
+    }
+    n
+}
+
+/// The length of device `d`'s name (`vda`: 3, `vda12`: 5).
+pub fn name_len(d: u64) -> u64 {
+    let p = partno(d)
+    if p == 0 { 3 } else { 3 + digits(p) }
+}
+
+/// Byte `i` of device `d`'s name (`vda`, `vda2`), 0 past the end.
 pub fn name_byte(d: u64, i: u64) -> u64 {
     if i == 0 {
         return 118 // v
@@ -251,56 +490,97 @@ pub fn name_byte(d: u64, i: u64) -> u64 {
         return 100 // d
     }
     if i == 2 {
-        return 97 + d // a, b, …
+        return 97 + disk_of(d) // a, b, …
     }
-    0
+    let p = partno(d)
+    if p == 0 || i >= name_len(d) {
+        return 0
+    }
+    // The number's digit i - 3 from the left.
+    var x = p
+    var k = name_len(d) - 1
+    while k > i {
+        x = x / 10
+        k -= 1
+    }
+    48 + x % 10
 }
 
-/// The disk whose name is the `n` bytes at `a` (`vda`, or `/dev/vda`),
-/// or DEVS.
+/// Write device `d`'s name to the log.
+pub fn put_name(d: u64) {
+    var i: u64 = 0
+    while i < name_len(d) {
+        log.put_byte(name_byte(d, i) as int)
+        i += 1
+    }
+}
+
+/// The device whose name is the `n` bytes at `a` (`vda`, `vda2`, or
+/// `/dev/vda2`), or DEVS.
 pub fn by_name(a: u64, n: u64) -> u64 {
     var o: u64 = 0
-    if n == 8 && byte(a) == 47 && byte(a + 1) == 100 && byte(a + 2) == 101 && byte(a + 3) == 118 && byte(a + 4) == 47 {
+    if n > 5 && b8(a) == 47 && b8(a + 1) == 100 && b8(a + 2) == 101 && b8(a + 3) == 118 && b8(a + 4) == 47 {
         o = 5
     }
-    if n - o != 3 || byte(a + o) != 118 || byte(a + o + 1) != 100 {
+    if n < o + 3 || b8(a + o) != 118 || b8(a + o + 1) != 100 {
         return DEVS
     }
-    let d = byte(a + o + 2) - 97
-    if d < count() { d } else { DEVS }
+    let letter = b8(a + o + 2)
+    if letter < 97 || letter > 122 {
+        return DEVS
+    }
+    // The number, if any: digits, no leading zero.
+    var p: u64 = 0
+    var k = o + 3
+    while k < n {
+        let c = b8(a + k)
+        if c < 48 || c > 57 || (k == o + 3 && c == 48) || p > 100000 {
+            return DEVS
+        }
+        p = p * 10 + (c - 48)
+        k += 1
+    }
+    var d: u64 = 0
+    while d < count() {
+        if disk_of(d) == letter - 97 && partno(d) == p {
+            return d
+        }
+        d += 1
+    }
+    DEVS
 }
 
-fn byte(a: u64) -> u64 {
-    // # Safety: a byte of the caller's kernel buffer.
-    let v = unsafe { (a as *u8).read_volatile() }
-    v as u64
-}
-
-/// Linux's device numbers for disk `d`: (major, minor).
+/// Linux's device numbers for device `d`: (major, minor).
 pub fn numbers(d: u64) -> (u64, u64) {
-    (254, d * 16)
+    if d >= count() {
+        return (254, d * 16)
+    }
+    (dw(d, D_MAJOR), dw(d, D_MINOR))
 }
 
-fn said(bit: u64) -> bool {
-    let s = st(S_SAID)
-    put_st(S_SAID, s | bit)
+fn said(d: u64, bit: u64) -> bool {
+    let s = dw(d, D_SAID)
+    put_dw(d, D_SAID, s | bit)
     s & bit != 0
 }
 
-/// One request to disk `d`, waited for: type `op` (vblk.T_IN, T_OUT),
-/// `n` sectors from `sector`, the data at physical `pa` (inside one
-/// frame: n <= 8). 0, or -EIO (the device's error, a request that never
-/// came back, or a refusal: past the capacity, a write to a read-only
-/// disk), each counted.
+/// One request to device `d`, waited for: type `op` (vblk.T_IN, T_OUT),
+/// `n` sectors from `sector` (of the device: a partition's from its own
+/// first sector), the data at physical `pa` (inside one frame: n <= 8).
+/// 0, or -EIO (the device's error, a request that never came back, or a
+/// refusal: past the capacity, a write to a read-only disk), each
+/// counted.
 pub fn rw(d: u64, op: u64, sector: u64, n: u64, pa: u64) -> u64 {
     if d >= count() {
         return neg(EIO)
     }
     let cap = dw(d, D_SECTORS)
     if n == 0 || n > 8 || n > cap || sector > cap - n {
-        put_dw(d, D_REFUSED, dw(d, D_REFUSED) + 1)
-        if !said(1) {
-            log.put("block: refused: a request past the end of vda (sector ")
+        bump_dw(d, D_REFUSED, 1)
+        if !said(d, 1) {
+            log.put("block: refused: a request past the end of ")
+            put_name(d)
+            log.put(" (sector ")
             log.dec(sector as int)
             log.put(", ")
             log.dec(n as int)
@@ -312,43 +592,56 @@ pub fn rw(d: u64, op: u64, sector: u64, n: u64, pa: u64) -> u64 {
         return neg(EIO)
     }
     if op == vblk.T_OUT && dw(d, D_FLAGS) & F_RO != 0 {
-        put_dw(d, D_REFUSED, dw(d, D_REFUSED) + 1)
-        if !said(2) {
-            log.put("block: refused: a write to vda, which the device says is read-only (VIRTIO_BLK_F_RO), -EIO")
+        bump_dw(d, D_REFUSED, 1)
+        if !said(d, 2) {
+            log.put("block: refused: a write to ")
+            put_name(d)
+            log.put(", which the device says is read-only (VIRTIO_BLK_F_RO), -EIO")
             log.end()
         }
         return neg(EIO)
     }
+    let disk = dw(d, D_DISK)
     let r = base() + S_REQ * 8
     wr(r, op)
-    wr(r + 8, sector)
+    wr(r + 8, dw(d, D_START) + sector)
     wr(r + 16, n)
     wr(r + 24, pa)
     vblk.submit(r)
     let s = vblk.wait(r)
     wr(r + 40, vblk.RS_FREE)
-    if op == vblk.T_IN {
-        put_dw(d, D_READS, dw(d, D_READS) + 1)
-        put_dw(d, D_SIN, dw(d, D_SIN) + n)
-    } else {
-        put_dw(d, D_WRITES, dw(d, D_WRITES) + 1)
-        put_dw(d, D_SOUT, dw(d, D_SOUT) + n)
+    var x = d
+    while true {
+        if op == vblk.T_IN {
+            bump_dw(x, D_READS, 1)
+            bump_dw(x, D_SIN, n)
+        } else {
+            bump_dw(x, D_WRITES, 1)
+            bump_dw(x, D_SOUT, n)
+        }
+        if s != vblk.S_OK {
+            bump_dw(x, D_ERRORS, 1)
+        }
+        if x == disk {
+            break
+        }
+        x = disk
     }
     if s != vblk.S_OK {
-        put_dw(d, D_ERRORS, dw(d, D_ERRORS) + 1)
         return neg(EIO)
     }
     0
 }
 
-/// A FLUSH to disk `d` (when it takes one: 0 at once when it does not,
-/// its writes are then on the medium when they complete), waited for:
-/// 0 or -EIO.
+/// A FLUSH to device `d`'s disk (when it takes one: 0 at once when it
+/// does not, its writes are then on the medium when they complete),
+/// waited for: 0 or -EIO.
 pub fn flush(d: u64) -> u64 {
     if d >= count() {
         return neg(EIO)
     }
-    if dw(d, D_FLAGS) & F_FLUSH == 0 {
+    let disk = dw(d, D_DISK)
+    if dw(disk, D_FLAGS) & F_FLUSH == 0 {
         return 0
     }
     let r = base() + S_REQ * 8
@@ -359,10 +652,10 @@ pub fn flush(d: u64) -> u64 {
     vblk.submit(r)
     let s = vblk.wait(r)
     wr(r + 40, vblk.RS_FREE)
-    put_dw(d, D_FLUSHES, dw(d, D_FLUSHES) + 1)
+    bump_dw(disk, D_FLUSHES, 1)
     kbump(K_FLUSHES, 1)
     if s != vblk.S_OK {
-        put_dw(d, D_ERRORS, dw(d, D_ERRORS) + 1)
+        bump_dw(disk, D_ERRORS, 1)
         return neg(EIO)
     }
     0
@@ -372,12 +665,692 @@ fn neg(e: u64) -> u64 {
     0xffffffffffffffff - e + 1
 }
 
-/// Device record word `w` of disk `d` (a report's: D_READS and on).
+/// Device record word `w` of device `d` (a report's: D_READS and on).
 pub fn books(d: u64, which: u64) -> u64 {
     if d >= count() {
         return 0
     }
     dw(d, D_READS + which)
+}
+
+// --- mounts: a disk or one of its partitions, never both -------------------------
+
+/// Claim device `d` for a mount (kernel/ext2's): 0, or -EBUSY with one
+/// line, by name, when `d` is a disk one of whose partitions is
+/// mounted, or a partition whose disk is (their blocks would be cached
+/// twice, under two keys). A second claim of `d` itself is kernel/ext2's
+/// own -EBUSY, not said here.
+pub fn claim(d: u64) -> u64 {
+    if d >= count() {
+        return neg(EIO)
+    }
+    let disk = dw(d, D_DISK)
+    var x: u64 = 0
+    while x < count() {
+        if x != d && dw(x, D_DISK) == disk && dw(x, D_CLAIM) != 0 && (x == disk || d == disk) {
+            log.put("block: refused: a mount of ")
+            put_name(d)
+            if d == disk {
+                log.put(" while its partition ")
+                put_name(x)
+                log.put(" is mounted, -EBUSY")
+            } else {
+                log.put(" while ")
+                put_name(x)
+                log.put(", its disk, is mounted, -EBUSY")
+            }
+            log.end()
+            return neg(EBUSY)
+        }
+        x += 1
+    }
+    put_dw(d, D_CLAIM, 1)
+    0
+}
+
+/// Let device `d` go (an unmount).
+pub fn release(d: u64) {
+    if d < count() {
+        put_dw(d, D_CLAIM, 0)
+    }
+}
+
+// --- the partition table (px66) ----------------------------------------------------
+
+fn crc_byte(c: u64, b: u64) -> u64 {
+    var x = c ^ b
+    var k: u64 = 0
+    while k < 8 {
+        if x & 1 != 0 {
+            x = (x >> 1) ^ 0xedb88320
+        } else {
+            x = x >> 1
+        }
+        k += 1
+    }
+    x
+}
+
+fn scr() -> u64 {
+    st(S_SCR) + hh()
+}
+
+/// Read `n` sectors of the disk from `lba` into the scratch frame: 0 or
+/// -EIO. The array reader's window is forgotten.
+fn read_scr(lba: u64, n: u64) -> u64 {
+    put_st(S_WN, 0)
+    rw(0, vblk.T_IN, lba, n, st(S_SCR))
+}
+
+/// Byte `o` of the entry array that starts at S_AELBA, through a window
+/// of up to eight sectors in the scratch frame (S_AERR set on a failed read).
+fn arr_byte(o: u64) -> u64 {
+    let s = st(S_AELBA) + o / 512
+    let wb = st(S_WB)
+    if st(S_WN) == 0 || s < wb || s >= wb + st(S_WN) {
+        var n = st(S_AEND) - s
+        if n > 8 {
+            n = 8
+        }
+        if rw(0, vblk.T_IN, s, n, st(S_SCR)) != 0 {
+            put_st(S_AERR, 1)
+            put_st(S_WN, 0)
+            return 0
+        }
+        put_st(S_WB, s)
+        put_st(S_WN, n)
+    }
+    b8(scr() + (s - st(S_WB)) * 512 + o % 512)
+}
+
+fn arr_le64(o: u64) -> u64 {
+    var v: u64 = 0
+    var k: u64 = 8
+    while k > 0 {
+        k -= 1
+        v = (v << 8) | arr_byte(o + k)
+    }
+    v
+}
+
+fn arr_le32(o: u64) -> u64 {
+    arr_byte(o) | (arr_byte(o + 1) << 8) | (arr_byte(o + 2) << 16) | (arr_byte(o + 3) << 24)
+}
+
+fn arr_open(elba: u64, bytes: u64) {
+    put_st(S_AELBA, elba)
+    put_st(S_AEND, elba + (bytes + 511) / 512)
+    put_st(S_WN, 0)
+    put_st(S_AERR, 0)
+}
+
+fn hx(h: u64, w: u64) -> u64 {
+    st(h + w)
+}
+
+fn put_hx(h: u64, w: u64, v: u64) {
+    put_st(h + w, v)
+}
+
+/// The header at `lba` checked (§5.3.2's tests, in its order) and its
+/// facts kept at `h`: 0 when it holds, else why (W_*), with the numbers
+/// the refusal names at `val` (found, wanted).
+fn check_header(lba: u64, h: u64, val: u64) -> u64 {
+    put_st(val, 0)
+    put_st(val + 1, 0)
+    let last = dw(0, D_SECTORS) - 1
+    if read_scr(lba, 1) != 0 {
+        return W_IO
+    }
+    let p = scr()
+    if le64(p) != 0x5452415020494645 {
+        put_st(val, le64(p))
+        return W_SIG
+    }
+    let rev = le32(p + 8)
+    if rev >> 16 != 1 {
+        put_st(val, rev)
+        return W_REV
+    }
+    let hs = le32(p + 12)
+    if hs < 92 || hs > 512 {
+        put_st(val, hs)
+        return W_HSIZE
+    }
+    var c: u64 = 0xffffffff
+    var k: u64 = 0
+    while k < hs {
+        c = crc_byte(c, if k >= 16 && k < 20 { 0 } else { b8(p + k) })
+        k += 1
+    }
+    c = c ^ 0xffffffff
+    let found = le32(p + 16)
+    put_hx(h, HX_HCRC, found)
+    if c != found {
+        put_st(val, found)
+        put_st(val + 1, c)
+        return W_HCRC
+    }
+    let my = le64(p + 24)
+    if my != lba {
+        put_st(val, my)
+        put_st(val + 1, lba)
+        return W_MYLBA
+    }
+    put_hx(h, HX_MY, my)
+    put_hx(h, HX_ALT, le64(p + 32))
+    let first = le64(p + 40)
+    let lastu = le64(p + 48)
+    put_hx(h, HX_FIRST, first)
+    put_hx(h, HX_LAST, lastu)
+    put_hx(h, HX_GUID, le64(p + 56))
+    put_hx(h, HX_GUID + 1, le64(p + 64))
+    let elba = le64(p + 72)
+    let count = le32(p + 80)
+    let esize = le32(p + 84)
+    let acrc = le32(p + 88)
+    put_hx(h, HX_ELBA, elba)
+    put_hx(h, HX_COUNT, count)
+    put_hx(h, HX_ESIZE, esize)
+    put_hx(h, HX_ACRC, acrc)
+    if first < 2 || first > lastu || lastu >= last {
+        put_st(val, first)
+        put_st(val + 1, lastu)
+        return W_USABLE
+    }
+    if esize < 128 || esize % 8 != 0 || esize > 4096 {
+        put_st(val, esize)
+        return W_ESIZE
+    }
+    if count > 1048576 / esize {
+        put_st(val, count)
+        return W_ASIZE
+    }
+    let bytes = count * esize
+    let asec = (bytes + 511) / 512
+    if elba < 2 || elba > last || asec > last - elba || (elba + asec > first && elba <= lastu) {
+        put_st(val, elba)
+        put_st(val + 1, asec)
+        return W_ARRAY
+    }
+    arr_open(elba, bytes)
+    c = 0xffffffff
+    var o: u64 = 0
+    while o < bytes {
+        c = crc_byte(c, arr_byte(o))
+        o += 1
+    }
+    if st(S_AERR) != 0 {
+        return W_IO
+    }
+    c = c ^ 0xffffffff
+    if c != acrc {
+        put_st(val, acrc)
+        put_st(val + 1, c)
+        return W_ACRC
+    }
+    0
+}
+
+fn add_part(partno: u64, first: u64, n: u64, kind: u64) -> u64 {
+    let d = st(S_DEVS)
+    if d >= DEVMAX {
+        put_st(S_PT_OVER, st(S_PT_OVER) + 1)
+        return DEVS
+    }
+    var w: u64 = 0
+    while w < DW {
+        put_dw(d, w, 0)
+        w += 1
+    }
+    put_dw(d, D_PRESENT, 1)
+    put_dw(d, D_SECTORS, n)
+    put_dw(d, D_FLAGS, dw(0, D_FLAGS))
+    put_dw(d, D_LBS, dw(0, D_LBS))
+    put_dw(d, D_DISK, 0)
+    put_dw(d, D_START, first)
+    put_dw(d, D_PARTNO, partno)
+    put_dw(d, D_KIND, kind)
+    if partno <= 15 {
+        put_dw(d, D_MAJOR, 254)
+        put_dw(d, D_MINOR, partno)
+    } else {
+        put_dw(d, D_MAJOR, 259)
+        put_dw(d, D_MINOR, st(S_PT_EXTN))
+        put_st(S_PT_EXTN, st(S_PT_EXTN) + 1)
+    }
+    put_st(S_DEVS, d + 1)
+    d
+}
+
+fn refuse_entry(slot: u64, why: u64) {
+    if st(S_PT_BADN) == 0 {
+        put_st(S_PT_BADK, slot)
+        put_st(S_PT_BADW, why)
+    }
+    put_st(S_PT_BADN, st(S_PT_BADN) + 1)
+}
+
+/// The UTF-16LE name of the entry at byte `o` of the array (72 bytes),
+/// as UTF-8 into device `d`'s record.
+fn keep_name(d: u64, o: u64) {
+    let a = rec(d) + D_NAME * 8
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < 36 {
+        var u = arr_byte(o + 2 * k) | (arr_byte(o + 2 * k + 1) << 8)
+        if u == 0 {
+            break
+        }
+        k += 1
+        if u >= 0xd800 && u < 0xdc00 && k < 36 {
+            let lo = arr_byte(o + 2 * k) | (arr_byte(o + 2 * k + 1) << 8)
+            if lo >= 0xdc00 && lo < 0xe000 {
+                u = 0x10000 + ((u - 0xd800) << 10) + (lo - 0xdc00)
+                k += 1
+            } else {
+                u = 0xfffd
+            }
+        } else if u >= 0xd800 && u < 0xe000 {
+            u = 0xfffd
+        }
+        if n + 4 > NAME_MAX {
+            break
+        }
+        if u < 0x80 {
+            put_b8(a + n, u)
+            n += 1
+        } else if u < 0x800 {
+            put_b8(a + n, 0xc0 | (u >> 6))
+            put_b8(a + n + 1, 0x80 | (u & 0x3f))
+            n += 2
+        } else if u < 0x10000 {
+            put_b8(a + n, 0xe0 | (u >> 12))
+            put_b8(a + n + 1, 0x80 | ((u >> 6) & 0x3f))
+            put_b8(a + n + 2, 0x80 | (u & 0x3f))
+            n += 3
+        } else {
+            put_b8(a + n, 0xf0 | (u >> 18))
+            put_b8(a + n + 1, 0x80 | ((u >> 12) & 0x3f))
+            put_b8(a + n + 2, 0x80 | ((u >> 6) & 0x3f))
+            put_b8(a + n + 3, 0x80 | (u & 0x3f))
+            n += 4
+        }
+    }
+    put_dw(d, D_NAMELEN, n)
+}
+
+/// The partitions of the header at `h`'s entry array.
+fn read_entries(h: u64) {
+    let count = hx(h, HX_COUNT)
+    let esize = hx(h, HX_ESIZE)
+    let first = hx(h, HX_FIRST)
+    let lastu = hx(h, HX_LAST)
+    arr_open(hx(h, HX_ELBA), count * esize)
+    var k: u64 = 0
+    while k < count {
+        let o = k * esize
+        let t0 = arr_le64(o)
+        let t1 = arr_le64(o + 8)
+        if t0 != 0 || t1 != 0 {
+            let f = arr_le64(o + 32)
+            let l = arr_le64(o + 40)
+            if f > l {
+                refuse_entry(k + 1, E_ORDER)
+            } else if f < first || l > lastu {
+                refuse_entry(k + 1, E_USABLE)
+            } else {
+                let d = add_part(k + 1, f, l - f + 1, KIND_GPT)
+                if d != DEVS {
+                    put_dw(d, D_TYPE, t0)
+                    put_dw(d, D_TYPE + 1, t1)
+                    put_dw(d, D_UUID, arr_le64(o + 16))
+                    put_dw(d, D_UUID + 1, arr_le64(o + 24))
+                    put_dw(d, D_ATTR, arr_le64(o + 48))
+                    keep_name(d, o + 56)
+                }
+            }
+        }
+        k += 1
+    }
+}
+
+fn read_gpt() {
+    let last = dw(0, D_SECTORS) - 1
+    let pw = check_header(1, H_P, S_PT_VALP)
+    let bw = check_header(last, H_B, S_PT_VALB)
+    put_st(S_PT_WHYP, pw)
+    put_st(S_PT_WHYB, bw)
+    if pw != 0 && bw != 0 {
+        put_st(S_PT_KIND, PT_GPTBAD)
+        return
+    }
+    put_st(S_PT_KIND, PT_GPT)
+    let h = if pw == 0 { H_P } else { H_B }
+    put_st(S_PT_USED, if pw == 0 { 1 } else { 2 })
+    if pw == 0 && hx(H_P, HX_ALT) != last {
+        put_st(S_PT_ALT, hx(H_P, HX_ALT) + 1)
+    }
+    if pw == 0 && bw == 0 && (hx(H_P, HX_GUID) != hx(H_B, HX_GUID) || hx(H_P, HX_GUID + 1) != hx(H_B, HX_GUID + 1)
+        || hx(H_P, HX_ACRC) != hx(H_B, HX_ACRC) || hx(H_P, HX_COUNT) != hx(H_B, HX_COUNT) || hx(H_P, HX_ESIZE) != hx(H_B, HX_ESIZE)
+        || hx(H_P, HX_FIRST) != hx(H_B, HX_FIRST) || hx(H_P, HX_LAST) != hx(H_B, HX_LAST)) {
+        put_st(S_PT_DIFF, 1)
+    }
+    read_entries(h)
+}
+
+fn read_mbr() {
+    put_st(S_PT_KIND, PT_MBR)
+    let p = scr()
+    let cap = dw(0, D_SECTORS)
+    put_st(S_PT_SIG, le32(p + 440))
+    var k: u64 = 0
+    while k < 4 {
+        let r = p + 446 + 16 * k
+        let t = b8(r + 4)
+        let f = le32(r + 8)
+        let n = le32(r + 12)
+        if t != 0 && n != 0 {
+            if t == 0x05 || t == 0x0f || t == 0x85 {
+                if st(S_PT_EXT) == 0 {
+                    put_st(S_PT_EXT, (k + 1) | (t << 8))
+                }
+            } else if f == 0 || f > cap || n > cap - f {
+                refuse_entry(k + 1, E_DISK)
+            } else {
+                let d = add_part(k + 1, f, n, KIND_MBR)
+                if d != DEVS {
+                    put_dw(d, D_TYPE, t)
+                    put_dw(d, D_UUID, st(S_PT_SIG))
+                    put_dw(d, D_UUID + 1, k + 1)
+                }
+            }
+        }
+        k += 1
+    }
+}
+
+/// Disk 0's partition table, read once at `start` (the header above);
+/// what it found is said by `report`.
+fn read_table() {
+    put_st(S_PT_KIND, PT_NONE)
+    put_st(S_PT_EXTN, 0)
+    let lbs = dw(0, D_LBS)
+    if lbs != 512 && lbs != 0 {
+        put_st(S_PT_KIND, PT_LBS)
+        return
+    }
+    if dw(0, D_SECTORS) < 3 {
+        return
+    }
+    if read_scr(0, 1) != 0 {
+        put_st(S_PT_KIND, PT_IO)
+        return
+    }
+    let p = scr()
+    if le16(p + 510) != 0xaa55 {
+        return
+    }
+    var prot = false
+    var flags_bad = false
+    var k: u64 = 0
+    while k < 4 {
+        let r = p + 446 + 16 * k
+        let boot = b8(r)
+        if boot != 0 && boot != 0x80 {
+            flags_bad = true
+        }
+        if b8(r + 4) == 0xee && le32(r + 8) == 1 {
+            prot = true
+        }
+        k += 1
+    }
+    if prot {
+        read_gpt()
+    } else if flags_bad {
+        put_st(S_PT_KIND, PT_NOTMBR)
+    } else {
+        read_mbr()
+    }
+}
+
+// --- names: PARTUUID=, PARTLABEL= (kernel/fstab), /proc/partitions -------------
+
+/// A hex digit's value, or 16.
+fn hexval(c: u64) -> u64 {
+    if c >= 48 && c <= 57 { c - 48 } else if c >= 97 && c <= 102 { c - 87 } else if c >= 65 && c <= 70 { c - 55 } else { 16 }
+}
+
+/// The `n` bytes at `a` as a GUID's or UUID's text (32 hex digits,
+/// hyphens anywhere skipped, either case): (ok, the 16 bytes in the
+/// text's order as two big-endian words).
+pub fn uuid_text(a: u64, n: u64) -> (bool, u64, u64) {
+    var hi: u64 = 0
+    var lo: u64 = 0
+    var got: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        let c = b8(a + k)
+        if c != 45 {
+            let v = hexval(c)
+            if v == 16 || got == 32 {
+                return (false, 0, 0)
+            }
+            if got < 16 {
+                hi = (hi << 4) | v
+            } else {
+                lo = (lo << 4) | v
+            }
+            got += 1
+        }
+        k += 1
+    }
+    (got == 32, hi, lo)
+}
+
+/// A GPT GUID kept as two le64 words (its 16 bytes as on the disk), as
+/// the text's two big-endian words (Appendix A: the first three fields
+/// are little-endian on the disk).
+fn guid_as_text(w0: u64, w1: u64) -> (u64, u64) {
+    // Data1, Data2 and Data3 are w0's low 32, next 16 and top 16 bits
+    // (little-endian numbers: their text is their value's hex); Data4's
+    // eight bytes are w1's from its low byte up, in the text's order.
+    var lo: u64 = 0
+    var k: u64 = 0
+    while k < 8 {
+        lo = (lo << 8) | ((w1 >> (8 * k)) & 0xff)
+        k += 1
+    }
+    (((w0 & 0xffffffff) << 32) | (((w0 >> 32) & 0xffff) << 16) | ((w0 >> 48) & 0xffff), lo)
+}
+
+/// Write a GUID (two le64 words as on the disk, or as Limine's
+/// `struct limine_uuid` holds it) as its text.
+pub fn put_guid(w0: u64, w1: u64) {
+    let (hi, lo) = guid_as_text(w0, w1)
+    log.hex_n(hi >> 32, 8)
+    log.put("-")
+    log.hex_n((hi >> 16) & 0xffff, 4)
+    log.put("-")
+    log.hex_n(hi & 0xffff, 4)
+    log.put("-")
+    log.hex_n(lo >> 48, 4)
+    log.put("-")
+    log.hex_n(lo & 0xffffffffffff, 12)
+}
+
+/// Write device `d`'s PARTUUID: a GPT partition's unique GUID, an MBR
+/// partition's `ssssssss-nn` (as the guest's blkid prints them).
+pub fn put_partuuid(d: u64) {
+    if kind(d) == KIND_GPT {
+        put_guid(dw(d, D_UUID), dw(d, D_UUID + 1))
+    } else if kind(d) == KIND_MBR {
+        log.hex_n(dw(d, D_UUID), 8)
+        log.put("-")
+        log.hex_n(dw(d, D_UUID + 1), 2)
+    }
+}
+
+/// The partition whose PARTUUID is the `n` bytes at `a`, or DEVS.
+pub fn by_partuuid(a: u64, n: u64) -> u64 {
+    var d: u64 = 1
+    if n == 11 && b8(a + 8) == 45 {
+        // an MBR partition's: ssssssss-nn
+        var sig: u64 = 0
+        var k: u64 = 0
+        while k < 8 {
+            let v = hexval(b8(a + k))
+            if v == 16 {
+                return DEVS
+            }
+            sig = (sig << 4) | v
+            k += 1
+        }
+        let p1 = hexval(b8(a + 9))
+        let p2 = hexval(b8(a + 10))
+        if p1 == 16 || p2 == 16 {
+            return DEVS
+        }
+        while d < count() {
+            if kind(d) == KIND_MBR && dw(d, D_UUID) == sig && dw(d, D_UUID + 1) == p1 * 16 + p2 {
+                return d
+            }
+            d += 1
+        }
+        return DEVS
+    }
+    let (ok, hi, lo) = uuid_text(a, n)
+    if !ok {
+        return DEVS
+    }
+    while d < count() {
+        if kind(d) == KIND_GPT {
+            let (th, tl) = guid_as_text(dw(d, D_UUID), dw(d, D_UUID + 1))
+            if th == hi && tl == lo {
+                return d
+            }
+        }
+        d += 1
+    }
+    DEVS
+}
+
+/// The GPT partition whose name (PARTLABEL) is the `n` bytes at `a`, or DEVS.
+pub fn by_partlabel(a: u64, n: u64) -> u64 {
+    var d: u64 = 1
+    while d < count() {
+        if kind(d) == KIND_GPT && dw(d, D_NAMELEN) == n {
+            let p = rec(d) + D_NAME * 8
+            var k: u64 = 0
+            while k < n && b8(p + k) == b8(a + k) {
+                k += 1
+            }
+            if k == n {
+                return d
+            }
+        }
+        d += 1
+    }
+    DEVS
+}
+
+// The renderer's sink (state words): every byte the text has is
+// counted, and those in [off, off + n) are written at dst.
+const S_SK_POS: u64 = 100
+const S_SK_OFF: u64 = 101
+const S_SK_N: u64 = 102
+const S_SK_DST: u64 = 103
+
+fn sk(c: u64) {
+    let p = st(S_SK_POS)
+    let off = st(S_SK_OFF)
+    if p >= off && p - off < st(S_SK_N) {
+        put_b8(st(S_SK_DST) + p - off, c)
+    }
+    put_st(S_SK_POS, p + 1)
+}
+
+fn sk_str(s: str) {
+    for c in s.bytes() {
+        sk(c as int as u64)
+    }
+}
+
+/// `v` in decimal, right-aligned in `width` columns.
+fn sk_num(v: u64, width: u64) {
+    var pad = digits(v)
+    while pad < width {
+        sk(32)
+        pad += 1
+    }
+    var p: u64 = 1
+    while v / p >= 10 {
+        p = p * 10
+    }
+    while p > 0 {
+        sk(48 + v / p % 10)
+        p = p / 10
+    }
+}
+
+/// `/proc/partitions`' text, bytes [off, off + n) of it to the kernel
+/// address `dst`: how many were written (n, or fewer at the end). Linux
+/// 7.2.8's layout, measured on the guest (tests/mpx6-part.d/linux/): a
+/// header line and an empty one, then a line a device, the disk first
+/// and its partitions in their table's order: the major in 4 columns,
+/// two blanks, the minor in 7, a blank, the size in KiB (sectors / 2,
+/// rounded down) in 10, a blank, the name. The table does not change
+/// after `start`, so a reader in pieces reads one text; it is made again
+/// for each piece, so it may be longer than a page (128 partitions:
+/// 4,152 bytes).
+pub fn partitions_slice(dst: u64, off: u64, n: u64) -> u64 {
+    if base() == 0 {
+        // No disk: Linux's file then has the header alone.
+        let h = "major minor  #blocks  name\n\n"
+        var k: u64 = 0
+        var w: u64 = 0
+        for c in h.bytes() {
+            if k >= off && w < n {
+                put_b8(dst + w, c as int as u64)
+                w += 1
+            }
+            k += 1
+        }
+        return w
+    }
+    put_st(S_SK_POS, 0)
+    put_st(S_SK_OFF, off)
+    put_st(S_SK_N, n)
+    put_st(S_SK_DST, dst)
+    sk_str("major minor  #blocks  name\n\n")
+    var d: u64 = 0
+    while d < count() {
+        let (ma, mi) = numbers(d)
+        sk_num(ma, 4)
+        sk_str("  ")
+        sk_num(mi, 7)
+        sk(32)
+        sk_num(dw(d, D_SECTORS) / 2, 10)
+        sk(32)
+        var i: u64 = 0
+        while i < name_len(d) {
+            sk(name_byte(d, i))
+            i += 1
+        }
+        sk(10)
+        d += 1
+    }
+    let total = st(S_SK_POS)
+    if total <= off { 0 } else if total - off < n { total - off } else { n }
+}
+
+/// `/proc/partitions`' length in bytes.
+pub fn partitions_len() -> u64 {
+    if base() == 0 {
+        return 28
+    }
+    let _w = partitions_slice(0, 0, 0)
+    st(S_SK_POS)
 }
 
 // --- the buffer cache -------------------------------------------------------------
@@ -657,9 +1630,18 @@ pub fn buffers() -> u64 {
     if base() == 0 { 0 } else { st(S_MADE) }
 }
 
-/// The disk's lines (kernel/vblk's, then the layer's):
+/// The disk's lines (kernel/vblk's, then the layer's), then what its
+/// partition table holds (px66):
 ///
 ///     block: vda: <s> sectors (<b> bytes), 254:0, <rw|read-only>[, flush]
+///     block: vda: GPT, disk <guid>, <n> entries of <e> bytes at LBA <l>, usable LBAs <f>-<u>; <p> partitions
+///     block: vda2: 254:2, sectors <f>-<l> (<n> sectors, <b> bytes), type <guid>, PARTUUID <guid>, name "<name>"
+///     block: vda: MBR, signature <ssssssss>; <p> partitions
+///     block: vda1: 254:1, sectors <f>-<l> (<n> sectors, <b> bytes), type 0x<tt>, PARTUUID <ssssssss>-<nn>
+///
+/// with a line for each refusal and for each header not used (the
+/// module's header says which). A disk with no table (no 0x55aa) has the
+/// first line alone.
 pub fn report() {
     if count() == 0 {
         return
@@ -675,11 +1657,210 @@ pub fn report() {
         log.put(", flush")
     }
     log.end()
+    table_report()
 }
 
-/// The books' line:
+fn put_why(w: u64, val: u64) {
+    if w == W_IO {
+        log.put("could not be read")
+    } else if w == W_SIG {
+        log.put("has no signature (EFI PART)")
+    } else if w == W_REV {
+        log.put("has revision ")
+        log.hex_n(st(val), 8)
+        log.put(" (1.0 is read)")
+    } else if w == W_HSIZE {
+        log.put("has a header size of ")
+        log.dec(st(val) as int)
+        log.put(" (92 to 512)")
+    } else if w == W_HCRC {
+        log.put("fails its CRC32 (")
+        log.hex_n(st(val), 8)
+        log.put(" stored, ")
+        log.hex_n(st(val + 1), 8)
+        log.put(" computed)")
+    } else if w == W_MYLBA {
+        log.put("says it is at LBA ")
+        log.dec(st(val) as int)
+    } else if w == W_USABLE {
+        log.put("has usable LBAs ")
+        log.dec(st(val) as int)
+        log.put("-")
+        log.dec(st(val + 1) as int)
+        log.put(", not inside the disk")
+    } else if w == W_ESIZE {
+        log.put("has entries of ")
+        log.dec(st(val) as int)
+        log.put(" bytes (128 or a larger multiple of 8, at most 4096, are read)")
+    } else if w == W_ASIZE {
+        log.put("has ")
+        log.dec(st(val) as int)
+        log.put(" entries (an array of at most 1 MiB is read)")
+    } else if w == W_ARRAY {
+        log.put("has its entry array at LBA ")
+        log.dec(st(val) as int)
+        log.put(" (")
+        log.dec(st(val + 1) as int)
+        log.put(" sectors), outside the space a table may use")
+    } else {
+        log.put("fails its entry array's CRC32 (")
+        log.hex_n(st(val), 8)
+        log.put(" stored, ")
+        log.hex_n(st(val + 1), 8)
+        log.put(" computed)")
+    }
+}
+
+fn table_report() {
+    let k = st(S_PT_KIND)
+    let last = dw(0, D_SECTORS) - 1
+    if k == PT_NONE || k == PT_NOTMBR {
+        return
+    }
+    if k == PT_IO {
+        log.line("block: vda: the partition table: LBA 0 could not be read; vda is the whole disk")
+        return
+    }
+    if k == PT_LBS {
+        log.put("block: vda: refused: a partition table on logical blocks of ")
+        log.dec(dw(0, D_LBS) as int)
+        log.put(" bytes (PAX reads tables of 512-byte blocks); not read, vda is the whole disk")
+        log.end()
+        return
+    }
+    if k == PT_GPTBAD {
+        log.put("block: vda: refused: no valid GPT: the primary header at LBA 1 ")
+        put_why(st(S_PT_WHYP), S_PT_VALP)
+        log.put(", the backup at LBA ")
+        log.dec(last as int)
+        log.put(" ")
+        put_why(st(S_PT_WHYB), S_PT_VALB)
+        log.put("; no partitions, vda is the whole disk")
+        log.end()
+        return
+    }
+    if k == PT_GPT {
+        let h = if st(S_PT_USED) == 1 { H_P } else { H_B }
+        if st(S_PT_USED) == 2 {
+            log.put("block: vda: the primary GPT header at LBA 1 ")
+            put_why(st(S_PT_WHYP), S_PT_VALP)
+            log.put("; the backup at LBA ")
+            log.dec(last as int)
+            log.put(" is used")
+            log.end()
+        } else if st(S_PT_WHYB) != 0 {
+            log.put("block: vda: the backup GPT header at LBA ")
+            log.dec(last as int)
+            log.put(" ")
+            put_why(st(S_PT_WHYB), S_PT_VALB)
+            log.put("; the primary is used")
+            log.end()
+        }
+        if st(S_PT_ALT) != 0 {
+            log.put("block: vda: the primary GPT header's alternate LBA is ")
+            log.dec((st(S_PT_ALT) - 1) as int)
+            log.put(", not the disk's last, ")
+            log.dec(last as int)
+            log.put("; the backup was read at the last")
+            log.end()
+        }
+        if st(S_PT_DIFF) != 0 {
+            log.line("block: vda: the backup GPT header disagrees with the primary; the primary is used")
+        }
+        log.put("block: vda: GPT, disk ")
+        put_guid(hx(h, HX_GUID), hx(h, HX_GUID + 1))
+        log.put(", ")
+        log.dec(hx(h, HX_COUNT) as int)
+        log.put(" entries of ")
+        log.dec(hx(h, HX_ESIZE) as int)
+        log.put(" bytes at LBA ")
+        log.dec(hx(h, HX_ELBA) as int)
+        log.put(", usable LBAs ")
+        log.dec(hx(h, HX_FIRST) as int)
+        log.put("-")
+        log.dec(hx(h, HX_LAST) as int)
+    } else {
+        log.put("block: vda: MBR, signature ")
+        log.hex_n(st(S_PT_SIG), 8)
+    }
+    log.put("; ")
+    log.dec((count() - 1) as int)
+    log.put(if count() == 2 { " partition" } else { " partitions" })
+    log.end()
+    if st(S_PT_EXT) != 0 {
+        log.put("block: vda: refused: an extended partition (type 0x")
+        log.hex_n(st(S_PT_EXT) >> 8, 2)
+        log.put(") in slot ")
+        log.dec((st(S_PT_EXT) & 0xff) as int)
+        log.put(": its logical partitions are not read")
+        log.end()
+    }
+    if st(S_PT_BADN) != 0 {
+        log.put("block: vda: refused: ")
+        log.dec(st(S_PT_BADN) as int)
+        log.put(if st(S_PT_BADN) == 1 { " entry" } else { " entries" })
+        log.put(", the first slot ")
+        log.dec(st(S_PT_BADK) as int)
+        let w = st(S_PT_BADW)
+        log.put(if w == E_ORDER { ": its first LBA is after its last" } else if w == E_USABLE { ": outside the usable LBAs" } else { ": past the disk's end, or at LBA 0" })
+        log.end()
+    }
+    if st(S_PT_OVER) != 0 {
+        log.put("block: vda: refused: ")
+        log.dec(st(S_PT_OVER) as int)
+        log.put(" partitions past the most PAX keeps (")
+        log.dec((DEVMAX - 1) as int)
+        log.put(")")
+        log.end()
+    }
+    var d: u64 = 1
+    while d < count() {
+        log.put("block: ")
+        put_name(d)
+        log.put(": ")
+        log.dec(dw(d, D_MAJOR) as int)
+        log.put(":")
+        log.dec(dw(d, D_MINOR) as int)
+        log.put(", sectors ")
+        log.dec(dw(d, D_START) as int)
+        log.put("-")
+        log.dec((dw(d, D_START) + dw(d, D_SECTORS) - 1) as int)
+        log.put(" (")
+        log.dec(dw(d, D_SECTORS) as int)
+        log.put(" sectors, ")
+        log.dec((dw(d, D_SECTORS) * 512) as int)
+        log.put(" bytes), type ")
+        if dw(d, D_KIND) == KIND_GPT {
+            put_guid(dw(d, D_TYPE), dw(d, D_TYPE + 1))
+        } else {
+            log.put("0x")
+            log.hex_n(dw(d, D_TYPE), 2)
+        }
+        log.put(", PARTUUID ")
+        put_partuuid(d)
+        if dw(d, D_KIND) == KIND_GPT {
+            log.put(", name ")
+            log.put_byte(34)
+            let p = rec(d) + D_NAME * 8
+            var i: u64 = 0
+            while i < dw(d, D_NAMELEN) {
+                log.put_byte(b8(p + i) as int)
+                i += 1
+            }
+            log.put_byte(34)
+        }
+        log.end()
+        d += 1
+    }
+}
+
+/// The books' line, and one for each partition a request was made to:
 ///
 ///     block: vda: <r> reads (<si> sectors), <w> writes (<so> sectors), <f> flushes, <e> errors, <x> refused; cache <m> buffers, <h> hits, <mi> misses, <ev> taken back, <fr> fresh, <rd> written again while dirty, <dn> dirty, policy write-through|write-back
+///     block: vda2: <r> reads (<si> sectors), <w> writes (<so> sectors), <e> errors, <x> refused
+///
+/// The disk's counts are every request its driver was given, its
+/// partitions' included.
 pub fn summary() {
     if count() == 0 {
         return
@@ -715,6 +1896,28 @@ pub fn summary() {
     log.put(" dirty, policy ")
     log.put(if st(S_POLICY) == WRITE_BACK { "write-back" } else { "write-through" })
     log.end()
+    var d: u64 = 1
+    while d < count() {
+        if dw(d, D_READS) + dw(d, D_WRITES) + dw(d, D_REFUSED) != 0 {
+            log.put("block: ")
+            put_name(d)
+            log.put(": ")
+            log.dec(dw(d, D_READS) as int)
+            log.put(" reads (")
+            log.dec(dw(d, D_SIN) as int)
+            log.put(" sectors), ")
+            log.dec(dw(d, D_WRITES) as int)
+            log.put(" writes (")
+            log.dec(dw(d, D_SOUT) as int)
+            log.put(" sectors), ")
+            log.dec(dw(d, D_ERRORS) as int)
+            log.put(" errors, ")
+            log.dec(dw(d, D_REFUSED) as int)
+            log.put(" refused")
+            log.end()
+        }
+        d += 1
+    }
 }
 
 /// Copy `n` bytes between kernel addresses (a buffer and a caller's
