@@ -4,13 +4,15 @@
 # boot.   build.sh SUITE TAG BUILD-ARGS...   -> ~/lanes/px65/build/TAG/
 # The tree is PX65_TREE (default ~/lanes/px65/pax). lope is private:
 # PAX_LOPE_REPO is the lane's own clone of it, ~/lanes/px65/lope.
+# PX65_BUILD_FLAGS: more podman flags (--privileged for a suite whose
+# build runs its Linux side in a chroot: mpx3-boreutils's tools/linux-run).
 L=$HOME/lanes/px65; X=${PX65_TREE:-$L/pax}
 S=$1 T=$2; shift 2
 B=$L/build/$T
 rm -rf "$B" && mkdir -p "$B" "$L/cache" "$L/tmp"
 cd "$X" || exit 2
 echo "tree: $(git log --oneline -1) $(git status --short | tr '\n' ' ')"
-podman run --rm --cpuset-cpus 12-15 --ulimit core=0:0 -v "$L:$L:Z" -e PAX_CACHE=$L/cache -e TMPDIR=$L/tmp -e PAX_BUILD=$B \
+podman run --rm ${PX65_BUILD_FLAGS:-} --cpuset-cpus 12-15 --ulimit core=0:0 -v "$L:$L:Z" -e PAX_CACHE=$L/cache -e TMPDIR=$L/tmp -e PAX_BUILD=$B \
     -e CARGO_INCREMENTAL=0 -e PAX_LOPE_REPO=$L/lope ${PX65_BUILD_ENV:-} ${PX65_BUILD_IMAGE:-localhost/px65-ubuntu} \
     bash -c "cd $X && export PAX_WOLF=\$(tools/fetch-wolf | tail -n 1) && tests/$S $*" > "$B.build.log" 2>&1
 rc=$?
