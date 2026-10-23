@@ -2,7 +2,14 @@
 # treecmp — two tools/e2tree listings held to each other (px63,
 # tests/mpx6-ext2's E6): every name on both, and every field the same but
 # the times, which are the same or, where a session made them, the same
-# distance from each session's own `~clock:` line within a second.
+# distance from each session's own first `~clock:` line within a second,
+# each session's distances scaled by the length of the other's (its first
+# `~clock:` line to its last): the reference is recorded on kasumi and
+# the PAX side runs where it runs, a CI runner's TCG two or three times
+# slower (measured: a step 0.40 s into Linux's session was 1.51 s into
+# PAX's, plant run 39928403889). A session-made time must also lie inside
+# its own session, the first clock to the last (50 ms either side: a
+# coarse file-system clock lags the probe's).
 #
 #   treecmp PAX-SESSION PAX-TREE LINUX-SESSION LINUX-TREE
 #
@@ -12,12 +19,13 @@ import re
 import sys
 
 
-def clock(path):
+def clocks(path):
+    out = []
     for l in open(path, errors="replace"):
         m = re.match(r"^~clock: (\d+)\.(\d+)", l)
         if m:
-            return int(m.group(1)) + int(m.group(2)) / 1e9
-    return None
+            out.append(int(m.group(1)) + int(m.group(2)) / 1e9)
+    return (out[0], out[-1]) if out else (None, None)
 
 
 def tree(path):
@@ -29,7 +37,10 @@ def tree(path):
     return out
 
 
-cp, cl = clock(sys.argv[1]), clock(sys.argv[3])
+(cp, ep), (cl, el) = clocks(sys.argv[1]), clocks(sys.argv[3])
+SLACK = 0.05
+# the PAX side's distances in the reference's seconds
+scale = (el - cl) / (ep - cp) if cp is not None and cl is not None and ep > cp and el > cl else 1.0
 tp, tl = tree(sys.argv[2]), tree(sys.argv[4])
 bad = []
 for p in sorted(set(tp) | set(tl)):
@@ -47,9 +58,12 @@ for p in sorted(set(tp) | set(tl)):
         x, y = float(a[i]), float(b[i])
         if x == y:
             continue
-        if cp is None or cl is None or abs((x - cp) - (y - cl)) > 1.0:
-            bad.append("%s: %s %s on PAX, %s on Linux (from each clock: %.3f, %.3f)" % (p, name, a[i], b[i],
-                       x - (cp or 0), y - (cl or 0)))
+        if cp is None or cl is None or abs((x - cp) * scale - (y - cl)) > 1.0:
+            bad.append("%s: %s %s on PAX, %s on Linux (from each clock: %.3f, %.3f; PAX's scaled by %.3f)" % (p, name, a[i], b[i],
+                       x - (cp or 0), y - (cl or 0), scale))
+        elif not (cp - SLACK <= x <= ep + SLACK) or not (cl - SLACK <= y <= el + SLACK):
+            bad.append("%s: %s %s on PAX, %s on Linux: outside its session (PAX %.3f to %.3f, Linux %.3f to %.3f)" % (
+                       p, name, a[i], b[i], cp, ep, cl, el))
 print("treecmp: %d names, %d differences" % (len(tp), len(bad)))
 for b in bad[:60]:
     print("  " + b)

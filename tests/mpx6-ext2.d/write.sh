@@ -24,4 +24,5 @@ cat /mnt/pre/kept.txt
 rm /mnt/pre/gone.txt
 mv /mnt/pre/kept.txt /mnt/pre/moved.txt
 ls /mnt /mnt/pre
+/bin/disk clock
 echo write: end
