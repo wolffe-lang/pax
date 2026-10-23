@@ -30,8 +30,12 @@
 //! (see directories), has_journal (the journal is a file this code never
 //! opens; with RECOVER set the volume is refused). A read-write mount
 //! marks the superblock in use (s_state's VALID bit cleared, the mount
-//! count and time moved), and `unmount` marks it clean again when it
-//! was clean at the mount, as ext2's own tools expect of a clean volume.
+//! count and time moved) and writes it to the disk at once, flushed
+//! (px66), and `unmount` writes and flushes every other block first and
+//! then marks it clean again when it was clean at the mount, as ext2's
+//! own tools expect of a clean volume. A volume mounted not clean stays
+//! not clean through a clean unmount (no fsck has looked at it), as
+//! Linux leaves it (measured, px66).
 //!
 //! **Groups.** Block group g has its descriptor in the table that starts
 //! in the block after the superblock's (32 bytes each: the block bitmap's
@@ -626,6 +630,12 @@ fn mount_claimed(v: u64, dev: u64, ro: bool, now: u64) -> u64 {
             w32(s + SB_MTIME, now)
             put_vw(v, V_MNT, r16(s + SB_MNT_COUNT))
             sb_dirty(v)
+            // px66: the mounted state on the disk now, and flushed, before
+            // any other block of the volume is written (write-back would
+            // keep it in the cache until the flusher's first turn, and a
+            // machine switched off before then left `clean` on a volume
+            // that was mounted: tests/mpx6-part P10, seen red).
+            let _w = block.sync(dev)
         }
     }
     v
@@ -657,17 +667,23 @@ pub fn unmount(v: u64, now: u64) -> u64 {
         return neg(EINVAL)
     }
     let dev = vw(v, V_DEV)
+    var r0: u64 = 0
     if vw(v, V_RO) == 0 {
+        // px66: every other block written and flushed first; only then the
+        // clean state, so no moment leaves `clean` on a volume whose
+        // blocks are not all on the disk.
+        r0 = block.sync(dev)
         let s = sb(v)
         if s != 0 {
-            if vw(v, V_CLEAN) == 1 && vw(v, V_ERRS) == 0 {
+            if vw(v, V_CLEAN) == 1 && vw(v, V_ERRS) == 0 && r0 == 0 {
                 w16(s + SB_STATE, r16(s + SB_STATE) | STATE_VALID)
             }
             w32(s + SB_WTIME, now)
             sb_dirty(v)
         }
     }
-    let r = block.sync(dev)
+    let r1 = block.sync(dev)
+    let r = if r0 != 0 { r0 } else { r1 }
     block.forget(dev)
     block.release(dev)
     put_vw(v, V_USED, 0)
