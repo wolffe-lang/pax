@@ -16,12 +16,22 @@
 //! directory of the in-memory tree (not `/`). `vfstype` is `ext2` (any
 //! other refused by name). `mntops` is a comma list: `defaults`, `rw`,
 //! `ro`, `sync` (every change written before the system call returns:
-//! write-through), `async` (written at fsync, sync, unmount, halt or
-//! reboot: write-back), `nofail` (a disk that is not there is not said),
+//! write-through), `async` (the default: write-back, below), `nofail` (a disk that is not there is not said),
 //! `relatime`, `nosuid`, `nodev`, `noexec` (named in the line and not
 //! acted on: PAX honours no set-ID bit and has no device nodes); anything
 //! else is named as ignored. `freq` and `passno` are read and ignored
 //! (PAX runs no fsck: the host's `e2fsck` is the check).
+//!
+//! **Write-back (R-px63-3).** A volume mounted `async` (or by default)
+//! keeps its changed blocks in kernel/block's cache until fsync, sync,
+//! syncfs, the halt or a reboot writes them; and every FLUSH_TICKS (5 s,
+//! Linux's default writeback interval) the flusher thread (`pax_flushd`,
+//! which kmain_console starts when a volume is write-back) writes them
+//! too, so a machine switched off without a halt loses at most the last
+//! five seconds. The flusher writes with interrupts off, as a system call
+//! does, so no system call sees a volume half written. A volume mounted
+//! `sync` is written through: every change on the disk before its system
+//! call returns.
 //!
 //! One line a mount, and one for a line that mounts nothing:
 //!
@@ -36,6 +46,8 @@ use block
 use ext2
 use initramfs
 use log
+use sched
+use sync
 use tree
 
 const PATH: str = "/etc/fstab"
@@ -45,6 +57,43 @@ const O_RO: u64 = 1
 const O_SYNC: u64 = 2
 const O_ASYNC: u64 = 4
 const O_NOFAIL: u64 = 8
+
+/// The flusher's interval, in the timer's ticks (10 ms).
+pub const FLUSH_TICKS: u64 = 500
+
+/// Whether a mount asked for write-back (kmain_console starts the
+/// flusher then), and how many times the flusher found something to
+/// write.
+var write_back: u64 = 0
+var flushed: u64 = 0
+
+/// Whether a volume is mounted write-back.
+pub fn wants_flusher() -> bool {
+    // # Safety: a scalar module var, written at boot.
+    unsafe { write_back != 0 }
+}
+
+/// How many of the flusher's turns wrote something.
+pub fn flushes() -> u64 {
+    // # Safety: a scalar module var, written by the flusher with IF clear.
+    unsafe { flushed }
+}
+
+/// The flusher (a kernel thread): every FLUSH_TICKS, when the cache has
+/// a dirty block, every volume written (kernel/tree's `sync_all`) with
+/// interrupts off.
+export fn pax_flushd(_arg: u64) {
+    while true {
+        let _s = sched.sleep(FLUSH_TICKS)
+        let saved = sync.irq_save()
+        if block.counter(block.K_DIRTY) != 0 {
+            let _e = tree.sync_all()
+            // # Safety: a scalar module var, IF clear.
+            unsafe { flushed = flushed + 1 }
+        }
+        sync.irq_restore(saved)
+    }
+}
 
 fn byte(a: u64) -> u64 {
     // # Safety: a byte of the initramfs's /etc/fstab, mapped read-only in
@@ -242,8 +291,12 @@ fn mount_line(a: u64, n: u64) -> bool {
         log.end()
         return false
     }
-    let wt = opts & O_ASYNC == 0
+    let wt = opts & O_SYNC != 0
     let _old = block.set_policy(if wt { block.WRITE_THROUGH } else { block.WRITE_BACK })
+    if !wt {
+        // # Safety: a scalar module var, written at boot with IF clear.
+        unsafe { write_back = 1 }
+    }
     let m = tree.mount(point, d, opts & O_RO != 0)
     if ext2.failed(m) {
         log.put("fstab: ")
