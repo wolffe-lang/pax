@@ -1,4 +1,5 @@
-"""Compare every replay; name, measure and count the one ruled blocker."""
+"""Compare every replay. px62: the FIFO row px61 named apart (R-px61-1,
+pax#108) is an ordinary parity row: 22 of 22."""
 from pathlib import Path
 import difflib
 import re
@@ -52,26 +53,21 @@ for k, name in enumerate(names, 1):
         def cases(text):
             return dict((m.group(1), m.group(2)) for m in re.finditer(r'(?ms)^CASE:([^\n]+)\n(.*?^CASE-STATUS:\d+\n)', text))
         a, b = cases(actual), cases(expected)
-        def envelope(text):
-            return re.sub(r'(?ms)^CASE:builtin/c_s_dot_special_file\n.*?^CASE-STATUS:\d+\n', 'NAMED FIFO ROW\n', text)
-        diff(name + ' complete envelope (named FIFO row apart)', envelope(expected), envelope(actual))
+        diff(name + ' complete envelope', expected, actual)
         fixture = Path(__file__).resolve().parents[2] / 'user/console/fork/diff'
         required = sorted(str(p.relative_to(fixture))[:-3] for p in fixture.rglob('*.sh'))
         for case in required:
             if case not in a or case not in b:
                 print('FAIL F1 missing corpus row: ' + name + ' ' + case); failed = True; continue
-            if case == 'builtin/c_s_dot_special_file':
-                # R-px61-1: explicitly test both answers, not a wildcard waiver.
-                good = ('from the fifo\nfifo: 0' in b[case] and ('Operation not permitted' in a[case] or 'Permission denied' in a[case]))
-                print(('PASS' if good else 'FAIL') + ' F1 NAMED FIFO BLOCKER ' + name + '\nLinux:\n' + b[case] + 'PAX:\n' + a[case])
-                failed |= not good
-            else:
-                diff(name + ' ' + case, b[case], a[case])
+            diff(name + ' ' + case, b[case], a[case])
+            if case == 'builtin/c_s_dot_special_file' and 'from the fifo\nfifo: 0' not in a[case]:
+                # px62: the row the FIFO served; equal failures are not parity.
+                print('FAIL F1 the FIFO row did not read its FIFO: ' + name); failed = True
         for witness in ('subshell: another process', 'substitution: another process', 'stage: another process',
                         'background subshell: a process', 'background group: a process', 'kept: 0 0', 'replaced'):
             if witness not in actual.splitlines():
                 print('FAIL F2 fork witness ' + name + ': ' + witness); failed = True
-        print('F1 corpus ' + name + ': 21 parity rows required; 1 named FIFO blocker')
+        print('F1 corpus ' + name + ': ' + str(len(required)) + ' parity rows required')
     else:
         diff(name, expected, actual)
     if not actual.startswith('$ '):
