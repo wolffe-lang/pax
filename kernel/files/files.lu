@@ -182,7 +182,13 @@
 //! the rest; st_blksize 4096,
 //! st_blocks eight for every page of a file that holds bytes (px26:
 //! whole pages, as Linux's file systems count a file); st_dev 0:1 for
-//! the tree, 0:5 for `/dev` and what is in it.
+//! the tree, 0:5 for `/dev` and what is in it. px63: a file of an ext2
+//! volume (kernel/tree's second store) answers its own inode number,
+//! its disk's numbers (254:0 for vda, Linux's), `i_blocks` and the
+//! volume's block size as st_blksize; `statfs` and `fstatfs` answer the
+//! volume's counts (EXT2_SUPER_MAGIC) or tmpfs's for the tree; `fsync`,
+//! `fdatasync`, `syncfs` and `sync` write a volume's dirty blocks and
+//! flush its disk; a change to a volume mounted read-only is -EROFS.
 //!
 //! **AF_INET sockets** (px22): a descriptor may name one of kernel/udp's
 //! sockets (kind K_INET, an open file whose node is the socket's
@@ -201,6 +207,7 @@
 //! frames reached through the HHDM (a call that waits gives up its
 //! kernel stack: kernel/sched, "Regions").
 
+use block
 use console
 use cred
 use event
@@ -3981,6 +3988,9 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
     if k == K_FILE && acc != O_RDONLY && running(n) {
         return neg(ETXTBSY) // px56 (pax#95): a running program's file, after the class rule (measured)
     }
+    if k == K_FILE && (acc != O_RDONLY || flags & O_TRUNC != 0) && ty(n) == T_INO && tree.read_only(rf(n)) {
+        return neg(EROFS) // px63: a file of a volume mounted read-only (open(2))
+    }
     if k == K_CONSOLE && ty(n) == T_CONSOLE && rf(n) == TTY && !sched.self_tty() {
         return neg(ENXIO) // px48: /dev/tty is the caller's controlling terminal, and it has none (measured)
     }
@@ -4136,7 +4146,7 @@ fn fdinfo_of(ta: u64, fd: u64) -> (u64, u64) {
 fn mnt_of(n: u64) -> u64 {
     let t = ty(n)
     if t == T_INO {
-        return 21
+        return if tree.on_volume(rf(n)) { 25 + tree.store(rf(n)) } else { 21 } // px63: a volume's mount
     }
     if t == T_SYN {
         return 22 + procfs.fs(rf(n))
@@ -4525,9 +4535,102 @@ pub fn fsync(a: u64, fd: u64) -> u64 {
         return neg(EBADF)
     }
     if k == K_FILE || k == K_DIR {
-        return 0
+        let n = node_of(a, fd)
+        return if ty(n) == T_INO { tree.sync_of(rf(n)) } else { 0 } // px63: a volume's blocks written, its disk flushed
     }
     neg(EINVAL)
+}
+
+/// px63: `syncfs(fd)` (`syncfs(2)`): the file system the descriptor's
+/// file is in written (a volume: every dirty block, then a FLUSH; the
+/// tree: nothing to write): 0, -EBADF, -EIO. Any open descriptor names a
+/// file system (a pipe's, a socket's: 0).
+pub fn syncfs(a: u64, fd: u64) -> u64 {
+    let k = kind(a, fd)
+    if k == K_CLOSED {
+        return neg(EBADF)
+    }
+    let n = node_of(a, fd)
+    if (k == K_FILE || k == K_DIR) && ty(n) == T_INO {
+        return tree.sync_of(rf(n))
+    }
+    0
+}
+
+// px63: statfs's numbers (uapi linux/magic.h; asm-generic/statfs.h's
+// `struct statfs`, 120 bytes on x86-64).
+const EXT2_SUPER_MAGIC: u64 = 0xef53
+const TMPFS_MAGIC: u64 = 0x01021994
+const PROC_SUPER_MAGIC: u64 = 0x9fa0
+const SYSFS_MAGIC: u64 = 0x62656572
+const ST_RDONLY: u64 = 1
+const ST_VALID: u64 = 0x20
+const ST_RELATIME: u64 = 0x1000
+
+/// Write `struct statfs` for node `n` at user `buf`: an ext2 volume's
+/// counts (kernel/ext2's superblock: blocks, free, a user's free, inodes,
+/// free inodes, the UUID as the fsid, names of 255 bytes), the tree's
+/// tmpfs numbers (the frames it may hold, those held, the inodes), or
+/// /proc's and /sys's and /dev's magic with zero counts.
+fn put_statfs(pml4: u64, buf: u64, n: u64) -> u64 {
+    if !uaccess.writable(pml4, buf, 120) {
+        return neg(EFAULT)
+    }
+    uaccess.zero(pml4, buf, 120)
+    var flags = ST_VALID | ST_RELATIME
+    if ty(n) == T_INO && tree.on_volume(rf(n)) {
+        let i = rf(n)
+        uaccess.put(pml4, buf, EXT2_SUPER_MAGIC, 8)
+        uaccess.put(pml4, buf + 8, tree.vol_statfs(i, 0), 8)
+        uaccess.put(pml4, buf + 16, tree.vol_statfs(i, 1), 8)
+        uaccess.put(pml4, buf + 24, tree.vol_statfs(i, 2), 8)
+        uaccess.put(pml4, buf + 32, tree.vol_statfs(i, 3), 8)
+        uaccess.put(pml4, buf + 40, tree.vol_statfs(i, 4), 8)
+        uaccess.put(pml4, buf + 48, tree.vol_statfs(i, 5), 8)
+        uaccess.put(pml4, buf + 56, tree.vol_statfs(i, 6), 4)
+        uaccess.put(pml4, buf + 60, tree.vol_statfs(i, 7), 4)
+        uaccess.put(pml4, buf + 72, tree.vol_statfs(i, 0), 8)
+        if tree.read_only(i) {
+            flags = flags | ST_RDONLY
+        }
+    } else if ty(n) == T_INO {
+        let cap = tree.cap()
+        let held = tree.held()
+        uaccess.put(pml4, buf, TMPFS_MAGIC, 8)
+        uaccess.put(pml4, buf + 8, PAGE, 8)
+        uaccess.put(pml4, buf + 16, cap, 8)
+        uaccess.put(pml4, buf + 24, if cap > held { cap - held } else { 0 }, 8)
+        uaccess.put(pml4, buf + 32, if cap > held { cap - held } else { 0 }, 8)
+        uaccess.put(pml4, buf + 40, tree.MAX_INODES, 8)
+        uaccess.put(pml4, buf + 48, tree.MAX_INODES - tree.live(), 8)
+        uaccess.put(pml4, buf + 72, PAGE, 8)
+    } else {
+        let t = ty(n)
+        uaccess.put(pml4, buf, if t == T_SYN { if procfs.fs(rf(n)) == 0 { PROC_SUPER_MAGIC } else { SYSFS_MAGIC } } else { TMPFS_MAGIC }, 8)
+        uaccess.put(pml4, buf + 8, PAGE, 8)
+        uaccess.put(pml4, buf + 72, PAGE, 8)
+    }
+    uaccess.put(pml4, buf + 64, 255, 8) // f_namelen
+    uaccess.put(pml4, buf + 80, flags, 8)
+    0
+}
+
+/// px63: `statfs(path, buf)` (`statfs(2)`): the path's own errors, then
+/// the file system it is in.
+pub fn statfs(a: u64, pml4: u64, va: u64, buf: u64) -> u64 {
+    let n = resolve(a, pml4, AT_FDCWD, va, false, F_YES)
+    if is_err(n) {
+        return neg(rf(n))
+    }
+    put_statfs(pml4, buf, n)
+}
+
+/// px63: `fstatfs(fd, buf)`.
+pub fn fstatfs(a: u64, pml4: u64, fd: u64, buf: u64) -> u64 {
+    if kind(a, fd) == K_CLOSED {
+        return neg(EBADF)
+    }
+    put_statfs(pml4, buf, stat_node(a, fd))
 }
 
 /// `ioctl(fd, request, arg)`: -EBADF for a closed descriptor; on the
@@ -5418,6 +5521,9 @@ pub fn renameat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, fla
     if (ty(on) != T_INO && !busy_o) || ty(op) != T_INO || ty(np) != T_INO {
         return neg(EXDEV)
     }
+    if tree.store(rf(op)) != tree.store(rf(np)) {
+        return neg(EXDEV) // px63: a name moved between the tree and a volume, or two volumes
+    }
     if is_err(nn) && nt && !busy_o && !tree.is_dir(rf(on)) {
         return neg(ENOTDIR)
     }
@@ -5507,7 +5613,7 @@ fn checked(n: u64) -> bool {
 /// Linux may change them: named drift).
 fn changeable(a: u64, n: u64) -> u64 {
     if ty(n) == T_INO {
-        return 0
+        return if tree.read_only(rf(n)) { neg(EROFS) } else { 0 } // px63
     }
     refuse(a, R_FIXED)
     neg(EROFS)
@@ -5759,8 +5865,8 @@ pub fn linkat(a: u64, pml4: u64, odfd: u64, ova: u64, ndfd: u64, nva: u64, flags
     if nt {
         return neg(ENOENT) // measured: a new name with a trailing slash
     }
-    if ty(on) != T_INO || ty(np) != T_INO {
-        return neg(EXDEV)
+    if ty(on) != T_INO || ty(np) != T_INO || tree.store(rf(on)) != tree.store(rf(np)) {
+        return neg(EXDEV) // px63: and between stores
     }
     // px44: fs.protected_hardlinks (R7), then write and search of the
     // new name's directory (measured in this order: a non-owner's link
@@ -5913,7 +6019,7 @@ fn n_size(n: u64) -> u64 {
 fn n_ino(n: u64) -> u64 {
     let t = ty(n)
     if t == T_INO {
-        return rf(n) + 2 // px27: the root is 2; never 0
+        return tree.number(rf(n)) // px27: the root is 2, never 0; px63: a volume's own number
     }
     if t == T_DEV {
         return 1
@@ -5995,6 +6101,10 @@ fn n_rdev(n: u64, which: int) -> u64 {
 /// look alike).
 fn n_dev(n: u64) -> u64 {
     let t = ty(n)
+    if t == T_INO && tree.on_volume(rf(n)) {
+        let (_ma, mi) = block.numbers(tree.disk_of(rf(n))) // px63
+        return mi
+    }
     if t == T_DEV || t == T_NULL || t == T_STD || t == T_CONSOLE || t == T_DSP {
         return 5
     }
@@ -6002,6 +6112,16 @@ fn n_dev(n: u64) -> u64 {
         return 6 + procfs.fs(rf(n)) // px34: /proc 0:6, /sys 0:7
     }
     1
+}
+
+/// px63: the major number of the device a node's file system is: a
+/// volume's disk's (254, virtio_blk's on Linux), else 0.
+fn n_major(n: u64) -> u64 {
+    if ty(n) == T_INO && tree.on_volume(rf(n)) {
+        let (ma, _mi) = block.numbers(tree.disk_of(rf(n)))
+        return ma
+    }
+    0
 }
 
 /// glibc's dev_t encoding of (major, minor): minor's low byte, major's
@@ -6014,6 +6134,13 @@ fn dev_t(ma: u64, mi: u64) -> u64 {
 /// file systems answer; px27: eight for each page of a file that holds
 /// bytes, kernel/tree's `blocks`, so a hole counts nothing, as on
 /// tmpfs).
+fn n_blksize(n: u64) -> u64 {
+    if ty(n) == T_INO {
+        return tree.io_size(rf(n))
+    }
+    PAGE
+}
+
 fn n_blocks(n: u64) -> u64 {
     if ty(n) == T_INO {
         return tree.blocks(rf(n))
@@ -6108,7 +6235,7 @@ fn put_stat(a: u64, pml4: u64, st: u64, n: u64) -> u64 {
         return neg(EFAULT)
     }
     uaccess.zero(pml4, st, 144)
-    uaccess.put(pml4, st, dev_t(0, n_dev(n)), 8) // st_dev
+    uaccess.put(pml4, st, dev_t(n_major(n), n_dev(n)), 8) // st_dev (px63: a volume's disk)
     uaccess.put(pml4, st + 8, n_ino(n), 8) // st_ino
     uaccess.put(pml4, st + 16, n_nlink(n), 8) // st_nlink
     uaccess.put(pml4, st + 24, n_mode(n), 4) // st_mode
@@ -6116,7 +6243,7 @@ fn put_stat(a: u64, pml4: u64, st: u64, n: u64) -> u64 {
     uaccess.put(pml4, st + 32, n_owner(a, n, 1), 4) // st_gid
     uaccess.put(pml4, st + 40, dev_t(n_rdev(n, 0), n_rdev(n, 1)), 8) // st_rdev
     uaccess.put(pml4, st + 48, n_size(n), 8) // st_size
-    uaccess.put(pml4, st + 56, PAGE, 8) // st_blksize
+    uaccess.put(pml4, st + 56, n_blksize(n), 8) // st_blksize (px63: a volume's block size)
     uaccess.put(pml4, st + 64, n_blocks(n), 8) // st_blocks
     uaccess.put(pml4, st + 72, tsec(n_time(n, 0)), 8) // st_atim (px36: signed)
     uaccess.put(pml4, st + 80, tnsec(n_time(n, 0)), 8)
@@ -6135,7 +6262,7 @@ fn put_statx(a: u64, pml4: u64, sx: u64, n: u64) -> u64 {
     uaccess.zero(pml4, sx, 256)
     // stx_mask: STATX_BASIC_STATS, and STATX_BTIME for an inode (px27).
     uaccess.put(pml4, sx, if ty(n) == T_INO { 0xfff } else { 0x7ff }, 4)
-    uaccess.put(pml4, sx + 4, PAGE, 4) // stx_blksize
+    uaccess.put(pml4, sx + 4, n_blksize(n), 4) // stx_blksize
     uaccess.put(pml4, sx + 16, n_nlink(n), 4) // stx_nlink
     uaccess.put(pml4, sx + 20, n_owner(a, n, 0), 4) // stx_uid (px42)
     uaccess.put(pml4, sx + 24, n_owner(a, n, 1), 4) // stx_gid
@@ -6153,6 +6280,7 @@ fn put_statx(a: u64, pml4: u64, sx: u64, n: u64) -> u64 {
     uaccess.put(pml4, sx + 120, tnsec(n_time(n, 1)), 4)
     uaccess.put(pml4, sx + 128, n_rdev(n, 0), 4) // stx_rdev_major
     uaccess.put(pml4, sx + 132, n_rdev(n, 1), 4) // stx_rdev_minor
+    uaccess.put(pml4, sx + 136, n_major(n), 4) // stx_dev_major (px63: 254 for a volume's disk)
     uaccess.put(pml4, sx + 140, n_dev(n), 4) // stx_dev_minor (0:1, /dev 0:5)
     0
 }
@@ -6347,6 +6475,8 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
         var c = d
         var nl: u64 = 1
         var na: u64 = 0 // an inode's name, in a directory record
+        var dino: u64 = 0 // px63: a tree entry's d_ino and d_type (kernel/tree's `dirent`); 0 for the rest
+        var dtyp: u64 = 0
         var next = p + 1
         if p == 1 {
             c = up(d)
@@ -6381,9 +6511,10 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
         } else if p >= DEV_DONE {
             more = false
         } else if p >= 2 {
-            let (i, addr, l, nx) = tree.entry_at(rf(d), p - 2)
-            if i != tree.NONE {
-                c = ino_node(i)
+            let (di, dt, addr, l, nx) = tree.dirent(rf(d), p - 2) // px63: a volume's entries too
+            if di != 0 {
+                dino = di
+                dtyp = dt
                 na = addr
                 nl = l
                 next = nx + 2
@@ -6405,10 +6536,10 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
             } else {
                 let r = buf + used
                 uaccess.zero(pml4, r, rec)
-                uaccess.put(pml4, r, n_ino(c), 8)
+                uaccess.put(pml4, r, if dino != 0 { dino } else { n_ino(c) }, 8)
                 uaccess.put(pml4, r + 8, next, 8)
                 uaccess.put(pml4, r + 16, rec, 2)
-                uaccess.put(pml4, r + 18, d_type(c), 1)
+                uaccess.put(pml4, r + 18, if dino != 0 { dtyp } else { d_type(c) }, 1)
                 if p == 0 {
                     uaccess.put(pml4, r + 19, 46, 1)
                 } else if p == 1 {
