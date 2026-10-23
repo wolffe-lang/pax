@@ -1032,6 +1032,11 @@ fn balloc(v: u64, ino: u64) -> u64 {
                 }
             }
             if k < n {
+                // PLANT (px63, never merged): the block's bit taken back
+                // out of the bitmap, so the disk's bitmap is stale.
+                let pa = get(v, bm)
+                let byte = r8(pa + k / 8)
+                w8(pa + k / 8, byte & !(1 << (k % 8)))
                 counts(v, g, GD_FREE_BLOCKS, SB_FREE_BLOCKS, false)
                 let b = vw(v, V_FIRST) + g * vw(v, V_BPG) + k
                 put_vw(v, V_CURSOR, b + 1)
