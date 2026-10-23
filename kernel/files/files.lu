@@ -93,6 +93,24 @@
 //! end's `fstat` is a FIFO (S_IFIFO|0600), `lseek` and `pread` -ESPIPE,
 //! `ioctl` -ENOTTY.
 //!
+//! **FIFOs** (px62, pax#108; `fifo(7)`, `mknod(2)`, `mkfifo(3)`,
+//! `open(2)`): `mknodat` makes a FIFO in the tree (kernel/tree's
+//! `mkfifo`; a regular file too), stat and a listing call it one; its
+//! open ends are a pipe's ends over one buffer the FIFO keeps while any
+//! end is open (`fifo_open`, the rules there), so everything above holds
+//! for them; `fstat` of an end answers the FIFO. Written from those pages
+//! and a static probe's answers on Linux (user/elf/fifos.c).
+//!
+//! **flock** (px62; `flock(2)`): an advisory lock belongs to an open file
+//! (a file's, a directory's, a pipe's or a FIFO's end): word O_LOCK, a
+//! conflict found by looking at every other open file on the same node,
+//! a waiting lock run again when a lock goes (`flock`).
+//!
+//! **What `mmap` maps** (px62, `map_target`): a regular file of the tree
+//! (kernel/vm keeps the mapping), /dev/zero (anonymous memory); a file
+//! cut by `ftruncate`, `truncate` or O_TRUNC is unmapped past its new end
+//! in every process first (`resize`, kernel/vm's `cut_maps`).
+//!
 //! **Socketpairs** (px17, `socketpair(2)`, AF_UNIX, SOCK_STREAM or
 //! SOCK_SEQPACKET: what wolf's spawn uses to hear an `execve` fail in
 //! its child): two one-frame buffers, one each way; each end reads one
@@ -195,6 +213,7 @@ use tree
 use uaccess
 use udp
 use unix
+use vm
 
 extern "c" let pax_kbuf: *u8
 extern "c" let pax_ofiles: *u64
@@ -234,6 +253,12 @@ const O_FLAGS: u64 = 4
 const O_TEXT: u64 = 5 // px34: a /proc or /sys file's text: its frame (physical)
 const O_TEXT_LEN: u64 = 6 // and its length
 const O_OWNER: u64 = 7 // px49 (pax#58): an AF_INET or TCP socket's maker's file-system ids (P_OWNER's shape)
+// px62: every other kind's word 7 is its `flock` lock (LK_*; a lock
+// belongs to the open file, flock(2)): a socket's holds its owner, so a
+// socket keeps none.
+const O_LOCK: u64 = 7
+const LK_SH: u64 = 1
+const LK_EX: u64 = 2
 // px50: a file's or a directory's open file uses words 5 and 6 (a /proc
 // file's text's words) for what `/proc/<pid>/fd/N` reads: the directory
 // the file was opened in (its inode + 1, held while the open file lives),
@@ -255,6 +280,7 @@ const P_FRAME: u64 = 8 // the frames' physical addresses, from here (16 at most:
 const P_OWNER: u64 = 24 // px43 (pax#58): a pipe's or a socketpair's maker's file-system user id (low 32 bits) and group id (high 32)
 const P_CPID: u64 = 25 // px45: a socketpair's maker's pid + 1, for SO_PEERCRED (0: a pipe's)
 const P_CIDS: u64 = 26 // px45: and its effective user id (low 32 bits) and group id (high 32)
+const P_FIFO: u64 = 27 // px62: a FIFO's buffer: the FIFO's inode + 1, held while the buffer lives (0: a pipe's or a socket's)
 const PIPE_PAGES: u64 = 16 // 65536 bytes, Linux's default capacity
 const SOCK_PAGES: u64 = 1
 /// PIPE_BUF (`pipe(7)`): a write of at most this many bytes is atomic.
@@ -396,6 +422,14 @@ const S_ISGID: u64 = 0x400
 const S_ISVTX: u64 = 0x200
 const S_IXGRP: u64 = 0x8
 const S_IFCHR: u64 = 0x2000
+const S_IFBLK: u64 = 0x6000 // px62, with the next two
+const S_IFIFO: u64 = 0x1000
+const S_IFSOCK: u64 = 0xc000
+const ENOLCK: u64 = 37 // px62
+const LOCK_SH: u64 = 1 // px62: uapi asm-generic/fcntl.h, with the next three
+const LOCK_EX: u64 = 2
+const LOCK_NB: u64 = 4
+const LOCK_UN: u64 = 8
 const MODE_DIR: u64 = 0x41ed // 040755
 // px45: /dev's modes are devtmpfs's own (no udev), measured on Linux
 // 7.2.8: the memory devices and /dev/tty 0666; the terminals and the
@@ -410,6 +444,7 @@ const MODE_FIFO: u64 = 0x1180 // 010600: a pipe's end (px17, measured)
 const MODE_SOCK: u64 = 0xc1ff // 0140777: a socketpair's end (px17, measured)
 const MODE_ANON: u64 = 0x180 // 0600 and no type: an eventfd, an epoll object (px24, measured)
 const DT_CHR: u64 = 2
+const DT_FIFO: u64 = 1 // px62
 const DT_DIR: u64 = 4
 const DT_REG: u64 = 8
 const DT_SOCK: u64 = 12 // px34
@@ -447,6 +482,8 @@ const R_ATFLAG: u64 = 26
 // 25 was px27's R_EXEC (a program written since boot): px56 loads every file through the tree
 const R_FIXED: u64 = 24 // px36
 // 23 was px36's R_OWNER (an owner that is not root): px42 keeps any id
+const R_SOCKNODE: u64 = 23 // px62
+const R_FLOCK: u64 = 25 // px62
 
 /// -e as %rax carries it.
 pub fn neg(e: u64) -> u64 {
@@ -482,6 +519,12 @@ pub fn why(r: u64) -> str {
     }
     if r == R_FIXED {
         return "a mode, an owner, times or a link of what PAX keeps fixed (/dev, /proc, /sys, a pipe, a socket)"
+    }
+    if r == R_SOCKNODE {
+        return "a socket's name made by mknod (bind makes one)"
+    }
+    if r == R_FLOCK {
+        return "flock of a descriptor PAX keeps no lock for (a socket, the console as a process starts with it, /dev/null, an eventfd, an epoll object)"
     }
     if r == R_RENFLAG {
         return "a renameat2 flag (RENAME_NOREPLACE, RENAME_EXCHANGE, RENAME_WHITEOUT)"
@@ -552,6 +595,7 @@ fn pipe_new(pages: u64) -> u64 {
     put_ppw(p, P_WR, 0)
     put_ppw(p, P_MSG, 0)
     put_ppw(p, P_CPID, 0) // px45: a pipe's, until a socketpair sets it
+    put_ppw(p, P_FIFO, 0) // px62: a pipe's, until a FIFO's open sets it
     put_ppw(p, P_PAGES, pages)
     p
 }
@@ -569,6 +613,14 @@ fn pipe_settle(p: u64) {
         k += 1
     }
     put_ppw(p, P_PAGES, 0)
+    let fi = ppw(p, P_FIFO)
+    if fi != 0 {
+        // px62: a FIFO's buffer goes with its last end (what was in it is
+        // gone, fifo(7)), and its hold on the FIFO.
+        put_ppw(p, P_FIFO, 0)
+        tree.set_fifo_pipe(fi - 1, 0)
+        tree.release(fi - 1)
+    }
 }
 
 /// What an open file of kind `k` on node `n` with access `acc` adds to
@@ -662,6 +714,10 @@ fn of_drop(o: u64) {
     let n = ofw(i, O_NODE)
     let acc = ofw(i, O_FLAGS) & O_ACCMODE
     let exe = ofw(i, O_FLAGS) & O_EXE != 0
+    if locks(k) && ofw(i, O_LOCK) != 0 {
+        put_ofw(i, O_LOCK, 0) // px62: the open file's lock goes with it
+        sched.wake_pipes() // a waiting `flock` may have it now
+    }
     // px24: a registration lasts as long as its open file (epoll(7)).
     if event.forget(o) != 0 {
         sched.wake_pipes()
@@ -1007,6 +1063,12 @@ pub fn close_all(a: u64) {
     let x = get(a, A_EXE)
     put(a, A_EXE, 0)
     of_drop(x) // px56: and its program's file
+    vm.drop_all(a) // px62: and the files its mappings hold
+    var w = sched.take_group_fifo()
+    while w != 0 {
+        abandon(w) // px62: and a FIFO open any of its threads waited in
+        w = sched.take_group_fifo()
+    }
 }
 
 /// px17: `fcntl(fd, cmd, arg)`: F_DUPFD (0), F_DUPFD_CLOEXEC (1030),
@@ -3322,7 +3384,7 @@ fn walk_as(a: u64, who: u64, dirfd: u64, rl0: u64, empty_ok: bool, follow: u64) 
         if kind(a, dirfd) == K_CLOSED {
             return (err(EBADF), err(EBADF), 0, 0, false)
         }
-        return (node_of(a, dirfd), err(EBUSY), LAST_ROOT, 0, false)
+        return (stat_node(a, dirfd), err(EBUSY), LAST_ROOT, 0, false) // px62: a FIFO's end its FIFO
     }
     var cur = root_node()
     if kb(0) != 47 && dirfd == AT_FDCWD {
@@ -3880,6 +3942,14 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
             return neg(EACCES) // px43: the class is asked first (measured: a 0000 one is -EACCES to a user, -ENXIO to root)
         }
         return neg(ENXIO) // px34: a socket's name is not opened (measured)
+    } else if ty(n) == T_INO && tree.is_fifo(rf(n)) {
+        if flags & O_DIRECTORY != 0 {
+            return neg(ENOTDIR)
+        }
+        if !may(a, cred.FS, n, want) {
+            return neg(EACCES)
+        }
+        return fifo_open(a, rf(n), flags) // px62
     } else if ty(n) == T_SYN {
         k = K_SYN // px34: a file of /proc or /sys
     } else if sk == K_PIPE {
@@ -3925,7 +3995,7 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
     }
     if fd < 0x8000000000000000 && k == K_FILE && !made && flags & O_TRUNC != 0 && ty(n) == T_INO {
         if tree.bytes(rf(n)) != 0 {
-            let _t = tree.truncate(rf(n), 0)
+            let _t = resize(rf(n), 0)
         }
         wrote(a, rf(n)) // px44: O_TRUNC takes the set-ID bits, as a write does
     }
@@ -4343,11 +4413,22 @@ pub fn ftruncate(a: u64, fd: u64, len: u64) -> u64 {
         return neg(EINVAL)
     }
     let i = rf(node_of(a, fd))
-    let r = tree.truncate(i, len)
+    let r = resize(i, len)
     if r == 0 {
         wrote(a, i) // px44: to any length, the same one too
     }
     r
+}
+
+/// px62: file `i` made `size` bytes long: when that cuts it, every
+/// mapping of it past the new end is unmapped first, in every process
+/// (kernel/vm's `cut_maps`), so no space keeps a frame the tree gives
+/// back; then the tree cuts or grows it.
+fn resize(i: u64, size: u64) -> u64 {
+    if size < tree.bytes(i) {
+        vm.cut_maps(i, size)
+    }
+    tree.truncate(i, size)
 }
 
 /// px44: `fallocate(fd, mode, offset, len)` (`fallocate(2)`): the file
@@ -4418,8 +4499,8 @@ pub fn truncate(a: u64, pml4: u64, va: u64, len: u64) -> u64 {
     if is_dir_node(n) {
         return neg(EISDIR)
     }
-    if ty(n) != T_INO || len >= 0x8000000000000000 {
-        return neg(EINVAL)
+    if ty(n) != T_INO || !tree.is_regular(rf(n)) || len >= 0x8000000000000000 {
+        return neg(EINVAL) // px62: a FIFO's or a socket's name is no file to cut
     }
     if !may(a, cred.FS, n, MAY_W) {
         return neg(EACCES) // px43: the class's write bit
@@ -4427,7 +4508,7 @@ pub fn truncate(a: u64, pml4: u64, va: u64, len: u64) -> u64 {
     if running(n) {
         return neg(ETXTBSY) // px56 (pax#95): a running program's file (measured)
     }
-    let r = tree.truncate(rf(n), len)
+    let r = resize(rf(n), len)
     if r == 0 {
         wrote(a, rf(n)) // px44
     }
@@ -6081,7 +6162,20 @@ pub fn fstat(a: u64, pml4: u64, fd: u64, st: u64) -> u64 {
     if kind(a, fd) == K_CLOSED {
         return neg(EBADF)
     }
-    put_stat(a, pml4, st, node_of(a, fd))
+    put_stat(a, pml4, st, stat_node(a, fd))
+}
+
+/// px62: the node `stat` answers for descriptor `fd`: a FIFO's end
+/// answers its FIFO (the name's inode, its mode and owner, measured),
+/// not the buffer its ends share; anything else its own node.
+fn stat_node(a: u64, fd: u64) -> u64 {
+    if kind(a, fd) == K_PIPE {
+        let fi = ppw(rf(node_of(a, fd)), P_FIFO)
+        if fi != 0 {
+            return ino_node(fi - 1)
+        }
+    }
+    node_of(a, fd)
 }
 
 /// `newfstatat(dirfd, path, st, flags)` (and `stat`, `lstat` through it).
@@ -6200,6 +6294,9 @@ fn d_type(c: u64) -> u64 {
     }
     if ty(c) == T_INO && tree.is_sock(rf(c)) {
         return DT_SOCK // px34 (measured: 12)
+    }
+    if ty(c) == T_INO && tree.is_fifo(rf(c)) {
+        return DT_FIFO // px62 (measured: 1)
     }
     if ty(c) == T_SYN {
         let (isfd, _n) = procfs.fd_of(rf(c))
@@ -6339,4 +6436,295 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
     }
     set_pos(a, fd, p)
     used
+}
+
+// --- px62: FIFOs, flock, and what a mapping maps -------------------------------------
+
+/// px62: `mknodat(dirfd, path, mode, dev)` (and `mknod`, with AT_FDCWD;
+/// `mknod(2)`): a FIFO (S_IFIFO, kernel/tree's `mkfifo`) or an empty
+/// regular file (S_IFREG, or no type), its permission bits `mode &
+/// ~umask` (the sticky bit kept, as measured), stamped as `openat`
+/// stamps a new file. -EEXIST, -ENOENT, -EACCES, -ENOSPC as `mkdirat`;
+/// -EINVAL for a type that is none. A device node is root's to make
+/// (-EPERM to a user, px45) and is refused by name, -EPERM: PAX makes
+/// none; so is a socket's name (`bind` makes one).
+pub fn mknodat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64) -> u64 {
+    let t = mode & S_IFMT
+    if t == S_IFCHR || t == S_IFBLK {
+        if !cred.privileged(a) {
+            return neg(EPERM)
+        }
+        return refused(a, 0)
+    }
+    if t == S_IFSOCK {
+        refuse(a, R_SOCKNODE)
+        return neg(EPERM)
+    }
+    if t != 0 && t != S_IFREG && t != S_IFIFO {
+        return neg(EINVAL)
+    }
+    let (n, par, ns, nl, _trail) = walk(a, pml4, dirfd, va, false, F_NEVER)
+    if !is_err(n) {
+        return neg(EEXIST)
+    }
+    if rf(n) != ENOENT || is_err(par) {
+        return neg(rf(n))
+    }
+    if ty(par) == T_SYN {
+        return neg(ENOENT)
+    }
+    if !may_make(a, par) {
+        return neg(EACCES)
+    }
+    if ty(par) != T_INO {
+        refuse(a, R_DEVRO)
+        return neg(EROFS)
+    }
+    let (su, sg, _dg) = stamp(a, rf(par))
+    let perm = file_perm(a, mode & !mask_of(a) & 0xfff, sg)
+    let i = if t == S_IFIFO { tree.mkfifo(rf(par), raw() + ns, nl, perm, su, sg) } else { tree.create(rf(par), raw() + ns, nl, perm, su, sg) }
+    if tree.failed(i) {
+        return i
+    }
+    0
+}
+
+/// px62: an open of FIFO `i` (`openat`, the class rule asked), by
+/// fifo(7)'s rules: a reader waits until a writer opens, a writer until
+/// a reader opens; O_NONBLOCK's read end opens at once, its write end at
+/// once with a reader and -ENXIO without; O_RDWR opens at once (Linux's
+/// answer, which POSIX leaves undefined). A waiting open counts as its
+/// end from the start (so the other end's open goes on at once, and a
+/// reader that has gone on reads no end of file while its writer is
+/// still opening, measured), and goes on once the other end's count of
+/// opens has moved (an end opened and closed again while it waited lets
+/// it on too); the thread's `fifo` word says a run is the same call run
+/// again. The ends share one pipe buffer (kernel/files' pipe record, made
+/// at the first open, gone with the last end with what was in it), so
+/// reads, writes, end of file, SIGPIPE, `poll` and F_GETPIPE_SZ are a
+/// pipe's; `fstat` of an end answers the FIFO (`stat_node`). A signal
+/// ends a waiting open as it ends a pipe's waiting read, and takes its
+/// count back (`fifo_abandon`).
+fn fifo_open(a: u64, i: u64, flags: u64) -> u64 {
+    let acc = flags & O_ACCMODE
+    let nb = flags & O_NONBLOCK != 0
+    let mine = (i + 1) | ((acc + 1) << 16)
+    let w = sched.self_fifo()
+    if w != 0 && w & 0xffffffff == mine {
+        // The waiting open, run again: on once the other end is there or
+        // has been opened since.
+        let p = tree.fifo_pipe(i) - 1
+        let present = if acc == O_RDONLY { ppw(p, P_WRITERS) } else { ppw(p, P_READERS) }
+        let now = if acc == O_RDONLY { tree.fifo_opens(i, 1) } else { tree.fifo_opens(i, 0) }
+        if present == 0 && now == w >> 32 {
+            return WAIT
+        }
+        sched.set_self_fifo(0)
+        unpend(p, acc) // its count goes to its open file (`of_new`)
+        let fd = open_new(a, 0, K_PIPE, (T_PIPE << T_SHIFT) | p, flags)
+        if fd >= 0x8000000000000000 {
+            pipe_settle(p)
+        }
+        return fd
+    }
+    let p0 = tree.fifo_pipe(i)
+    let rd = if p0 == 0 { 0 } else { ppw(p0 - 1, P_READERS) }
+    if acc == O_WRONLY && nb && rd == 0 {
+        return neg(ENXIO)
+    }
+    if lowest_free(a, 0) == FDS {
+        return neg(EMFILE)
+    }
+    if !of_room() {
+        return neg(ENFILE)
+    }
+    var p = p0
+    if p == 0 {
+        let q = pipe_new(PIPE_PAGES)
+        if q == PIPES {
+            return neg(ENFILE)
+        }
+        put_ppw(q, P_OWNER, fs_ids(a))
+        put_ppw(q, P_FIFO, i + 1)
+        tree.set_fifo_pipe(i, q + 1)
+        tree.hold(i) // the buffer holds its FIFO (a name removed while an end is open)
+        p = q + 1
+    }
+    p = p - 1
+    if acc != O_WRONLY {
+        tree.fifo_opened(i, 0)
+    }
+    if acc != O_RDONLY {
+        tree.fifo_opened(i, 1)
+    }
+    sched.wake_pipes() // a waiting open of the other end may go on
+    if !nb && acc != O_RDWR {
+        let present = if acc == O_RDONLY { ppw(p, P_WRITERS) } else { ppw(p, P_READERS) }
+        if present == 0 {
+            let seen = if acc == O_RDONLY { tree.fifo_opens(i, 1) } else { tree.fifo_opens(i, 0) }
+            if acc == O_RDONLY {
+                put_ppw(p, P_READERS, ppw(p, P_READERS) + 1)
+            } else {
+                put_ppw(p, P_WRITERS, ppw(p, P_WRITERS) + 1)
+            }
+            sched.set_self_fifo(mine | (seen << 32))
+            return WAIT
+        }
+    }
+    let fd = open_new(a, 0, K_PIPE, (T_PIPE << T_SHIFT) | p, flags)
+    if fd >= 0x8000000000000000 {
+        pipe_settle(p)
+    }
+    fd
+}
+
+/// px62: a waiting open's count on buffer `p` taken back (access `acc`).
+fn unpend(p: u64, acc: u64) {
+    if acc == O_RDONLY {
+        put_ppw(p, P_READERS, ppw(p, P_READERS) - 1)
+    } else {
+        put_ppw(p, P_WRITERS, ppw(p, P_WRITERS) - 1)
+    }
+}
+
+/// px62: the FIFO-open wait word `w` (kernel/sched's) is over without
+/// its open: its count goes back, and the buffer with it when nothing
+/// else holds it (a signal ended the wait, or its process ended).
+fn abandon(w: u64) {
+    if w == 0 {
+        return
+    }
+    let i = (w & 0xffff) - 1
+    let acc = ((w >> 16) & 3) - 1
+    let p1 = tree.fifo_pipe(i)
+    if p1 == 0 {
+        return
+    }
+    unpend(p1 - 1, acc)
+    pipe_settle(p1 - 1)
+    sched.wake_pipes()
+}
+
+/// px62: kernel/signal, as a signal ends (or restarts) a wait: the
+/// running thread's FIFO open, if that is what waited, gives its count
+/// back (a restarted call counts it again from nothing).
+pub fn fifo_abandon() {
+    let w = sched.self_fifo()
+    sched.set_self_fifo(0)
+    abandon(w)
+}
+
+/// px62: whether an open file of kind `k` keeps a `flock` lock (word
+/// O_LOCK): a file's, a directory's, a pipe's or a FIFO's end.
+fn locks(k: u64) -> bool {
+    k == K_FILE || k == K_DIR || k == K_PIPE
+}
+
+/// px62: whether an open file other than `i` on `i`'s node holds a lock
+/// that refuses a lock of kind `want`.
+fn lock_conflict(i: u64, want: u64) -> bool {
+    let n = ofw(i, O_NODE)
+    var j: u64 = 0
+    while j < OFILES {
+        if j != i && ofw(j, O_REFS) != 0 && ofw(j, O_NODE) == n && locks(ofw(j, O_KIND)) {
+            let l = ofw(j, O_LOCK)
+            if l == LK_EX || (l == LK_SH && want == LK_EX) {
+                return true
+            }
+        }
+        j += 1
+    }
+    false
+}
+
+/// px62: `flock(fd, operation)` (`flock(2)`, s254's `[os.fs.lock]`): an
+/// advisory lock on the open file `fd` names, so duplicates and a fork's
+/// copies share it and a second `open` of the same file is another
+/// holder (measured). LOCK_SH with other shared locks, LOCK_EX alone;
+/// LOCK_UN drops it (0 when none is held); a conflicting lock waits,
+/// or with LOCK_NB is -EWOULDBLOCK (-EAGAIN); a signal ends a wait as it
+/// ends a pipe's. A conversion drops the held lock first (`flock(2)`:
+/// not atomic; measured: a LOCK_NB conversion that is refused leaves no
+/// lock). The last close of the open file drops its lock. -EBADF for a
+/// closed descriptor, -EINVAL for an operation that is none. Refused by
+/// name, -ENOLCK: a descriptor PAX keeps no open file or lock word for.
+pub fn flock(a: u64, fd: u64, op: u64) -> u64 {
+    let k = kind(a, fd)
+    if k == K_CLOSED {
+        return neg(EBADF)
+    }
+    let nb = op & LOCK_NB != 0
+    let o = op & !LOCK_NB
+    if o != LOCK_SH && o != LOCK_EX && o != LOCK_UN {
+        return neg(EINVAL)
+    }
+    let of = of_of(a, fd)
+    if of == 0 || !locks(k) {
+        refuse(a, R_FLOCK)
+        return neg(ENOLCK)
+    }
+    let i = of - 1
+    let cur = ofw(i, O_LOCK)
+    if o == LOCK_UN {
+        if cur != 0 {
+            put_ofw(i, O_LOCK, 0)
+            sched.wake_pipes() // a waiting `flock` may have it now
+        }
+        return 0
+    }
+    let want = if o == LOCK_SH { LK_SH } else { LK_EX }
+    if cur == want {
+        return 0
+    }
+    if cur != 0 {
+        put_ofw(i, O_LOCK, 0) // a conversion: the held lock goes first
+        sched.wake_pipes()
+    }
+    if lock_conflict(i, want) {
+        if nb {
+            return neg(EAGAIN)
+        }
+        return WAIT
+    }
+    put_ofw(i, O_LOCK, want)
+    0
+}
+
+/// px62: what `mmap` finds a descriptor names (kernel/user's
+/// `mmap_call`): MT_FILE, a regular file of the tree.
+pub const MT_FILE: u64 = 1
+/// px62: /dev/zero (anonymous memory, private or shared).
+pub const MT_ZERO: u64 = 2
+const MT_ERR: u64 = 0
+
+/// px62: (MT_FILE, the inode, what the descriptor allows a mapping:
+/// kernel/vm's ACC_READ, ACC_WRITE, ACC_APPEND), (MT_ZERO, 0, 0), or
+/// (MT_ERR, -errno, 0): -EBADF for a closed descriptor, -ENODEV for
+/// what cannot be mapped (a directory, a pipe, a FIFO, a socket, the
+/// console, /dev/null, /proc: measured for the first three and
+/// /dev/null).
+pub fn map_target(a: u64, fd: u64) -> (u64, u64, u64) {
+    let k = kind(a, fd)
+    if k == K_CLOSED {
+        return (MT_ERR, neg(EBADF), 0)
+    }
+    let n = node_of(a, fd)
+    if k == K_NULL && ty(n) == T_NULL && rf(n) == ZERO {
+        return (MT_ZERO, 0, 0)
+    }
+    if k == K_FILE && ty(n) == T_INO && tree.is_regular(rf(n)) {
+        let acc = access(a, fd)
+        var m: u64 = 0
+        if acc != O_WRONLY {
+            m = m | vm.ACC_READ
+        }
+        if acc != O_RDONLY {
+            m = m | vm.ACC_WRITE
+        }
+        if status(a, fd) & O_APPEND != 0 {
+            m = m | vm.ACC_APPEND
+        }
+        return (MT_FILE, rf(n), m)
+    }
+    (MT_ERR, neg(ENODEV), 0)
 }
