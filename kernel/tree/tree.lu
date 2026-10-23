@@ -79,6 +79,16 @@
 //! from `link(2)`, `symlink(2)`, `symlink(7)`, `chmod(2)`, `chown(2)`,
 //! `utimensat(2)` and black-box runs on tmpfs (`notes/px36/`).
 //!
+//! **FIFOs, shared memory and the page cache (px62).** A FIFO is an
+//! inode of its own (`mkfifo`) holding no bytes: kernel/files' pipe
+//! buffer carries what is written, and the FIFO keeps which buffer and
+//! how many times each end has been opened. Shared memory that is no
+//! file's is an inode with no name (`anon`), held by its mappings. A
+//! file's frames are the only copy of its bytes, so they are what a
+//! mapping maps (`page`, kernel/vm): a mapping of a page still the
+//! archive's gives that page its frame then, as a first write does.
+//! Written from `fifo(7)`, `mknod(2)`, `mmap(2)` and `tmpfs(5)`.
+//!
 //! One CPU, and a system call runs with interrupts off from entry to
 //! return, so nothing here locks: a `rename` is every check, then the
 //! room for the new name, then the change, with no call between. No
@@ -158,6 +168,7 @@ const S_IFDIR: u64 = 0x4000
 const S_IFREG: u64 = 0x8000
 const S_IFSOCK: u64 = 0xc000 // px34
 const S_IFLNK: u64 = 0xa000 // px36
+const S_IFIFO: u64 = 0x1000 // px62
 const S_ISUID: u64 = 0x800 // px36
 const S_ISGID: u64 = 0x400
 const S_IXGRP: u64 = 0x8
@@ -799,6 +810,37 @@ pub fn bytes(i: u64) -> u64 {
     ig(i, I_SIZE)
 }
 
+/// px62: the frame holding page `pg` of file `i` (a mapping's fault,
+/// kernel/vm: the tree's own frames are the page cache, the only copy
+/// of the file's bytes), made when there is none: the archive's bytes
+/// copied into it, as a first write copies them, or zeros for a hole.
+/// 0 at the cap, or past the largest file.
+pub fn page(i: u64, pg: u64) -> u64 {
+    if pg >= PTRS * PTRS {
+        return 0
+    }
+    frame_for(i, pg)
+}
+
+/// px62: page `pg` of file `i`, all 4096 bytes, copied to the kernel
+/// address `dst` (a frame through the HHDM): a frame's whole page, the
+/// archive's bytes with zeros after them, or zeros (a hole, or past the
+/// end). The copy a private mapping's page becomes when it is written,
+/// or when the tree has no frame to share.
+pub fn read_page(i: u64, pg: u64, dst: u64) {
+    let pa = frame_of(i, pg)
+    if pa != 0 {
+        bcopy(dst, pa + hh(), PAGE)
+        return
+    }
+    zero(dst, PAGE)
+    let bl = ig(i, I_BACKLEN)
+    if pg * PAGE < bl {
+        let n = if bl - pg * PAGE < PAGE { bl - pg * PAGE } else { PAGE }
+        bcopy(dst, ig(i, I_BACK) + pg * PAGE, n)
+    }
+}
+
 /// Copy `n` kernel bytes at `src` into the user range at `dst`, which
 /// the caller has checked writable in `pml4`.
 fn to_user(pml4: u64, dst: u64, src: u64, n: u64) {
@@ -1141,6 +1183,79 @@ pub fn mksock(d: u64, name: u64, len: u64, perm: u64, sock: u64, uid: u64, gid: 
     }
     ip(i, I_MODE, S_IFSOCK | (perm & 0xfff))
     ip(i, I_PARENT, sock + 1)
+    i
+}
+
+/// px62: a FIFO's name [name, name + len) in directory `d` (`mknod(2)`
+/// and `mkfifo(3)`, fifo(7)): mode S_IFIFO with the permission bits
+/// `perm`, size 0, one link, owned `uid`:`gid`; its inode, or -ENOENT
+/// (the directory has been removed), -ENOSPC. It holds no bytes: what
+/// is written to it goes through the pipe buffer its open ends share
+/// (kernel/files'), whose record + 1 is in the word a socket's name
+/// keeps its record in (`fifo_pipe`), and how many times each end has
+/// been opened is in the word a directory counts its entries in
+/// (`fifo_opens`).
+pub fn mkfifo(d: u64, name: u64, len: u64, perm: u64, uid: u64, gid: u64) -> u64 {
+    let i = create(d, name, len, perm, uid, gid)
+    if failed(i) {
+        return i
+    }
+    ip(i, I_MODE, S_IFIFO | (perm & 0xfff))
+    i
+}
+
+/// px62: whether inode `i` is a FIFO.
+pub fn is_fifo(i: u64) -> bool {
+    ig(i, I_MODE) & S_IFMT == S_IFIFO
+}
+
+/// px62: the pipe buffer FIFO `i`'s open ends share (kernel/files'
+/// record + 1), 0 while no end is open.
+pub fn fifo_pipe(i: u64) -> u64 {
+    if !is_fifo(i) {
+        return 0
+    }
+    ig(i, I_PARENT)
+}
+
+pub fn set_fifo_pipe(i: u64, p: u64) {
+    if is_fifo(i) {
+        ip(i, I_PARENT, p)
+    }
+}
+
+/// px62: how many times FIFO `i` has been opened for reading (`which`
+/// 0) or for writing (1) since it was made, 32 bits each: a waiting
+/// open of one end goes on once the other end's count has moved
+/// (fifo(7): it waits for the other end to be opened, not to stay
+/// open).
+pub fn fifo_opens(i: u64, which: int) -> u64 {
+    let w = ig(i, I_ENTRIES)
+    if which == 0 { w & 0xffffffff } else { w >> 32 }
+}
+
+pub fn fifo_opened(i: u64, which: int) {
+    let w = ig(i, I_ENTRIES)
+    let lo = w & 0xffffffff
+    let hi = w >> 32
+    if which == 0 {
+        ip(i, I_ENTRIES, ((lo + 1) & 0xffffffff) | (hi << 32))
+    } else {
+        ip(i, I_ENTRIES, lo | (((hi + 1) & 0xffffffff) << 32))
+    }
+}
+
+/// px62: an inode with no name for shared memory that is no file's
+/// (`mmap(2)`'s MAP_SHARED|MAP_ANONYMOUS, and MAP_SHARED of /dev/zero):
+/// a regular file of `size` bytes, mode 0600, owned `uid`:`gid`, no
+/// link: kernel/vm's mapping holds it (`hold`), and its frames go back
+/// with the last mapping (`release`). Its index, or NONE.
+pub fn anon(size: u64, uid: u64, gid: u64) -> u64 {
+    let i = inode_new(S_IFREG | 0x180, uid, gid)
+    if i == NONE {
+        return NONE
+    }
+    ip(i, I_SIZE, size)
     i
 }
 
