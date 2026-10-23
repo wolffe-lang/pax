@@ -1,0 +1,53 @@
+O=/tmp/$(id -u); mkdir -p $O; cd /usr/share/scent
+s() { "$@" >$O/o 2>$O/e; echo "status $?"; s2; }
+s2() { tr '\0' @ <$O/o; echo '[stderr]'; cat $O/e; }
+for c in grep egrep fgrep scent sh; do command -v $c; done
+ls -l /bin/grep /bin/egrep /bin/fgrep /bin/scent /bin/sh
+readlink /bin/grep
+env | grep -c -e '^LANG=' -e '^LC_'; echo "status $?"
+s ls /usr/lib/locale
+s grep '\(ab\)\1' words.txt
+s grep -E '^[[:digit:]]+|dog' words.txt
+s grep -F 'a.b*[c]' words.txt
+s grep -i -c cat words.txt
+s grep -v -c cat words.txt
+s grep -n -b -o ab words.txt
+s grep -w cat words.txt
+s grep -x cat words.txt
+s grep -n -C1 -e 'line 05' -e 'line 07' -e 'line 12' ctx.txt
+s grep -n -m1 -A2 'line 0' ctx.txt
+s grep -e cat -f pats.txt words.txt
+cat words.txt | s grep -c cat - ctx.txt
+s grep -c 'alpha$' big.txt
+s grep -z b z.dat
+s grep match nul.dat
+s grep -a match nul.dat
+s grep -I match nul.dat
+s grep zzz words.txt
+s grep cat nosuch
+s grep -s cat nosuch
+s grep -P x words.txt
+s grep -E -F x words.txt
+egrep --help >/dev/null
+fgrep --help | head -n 1
+s egrep -F x words.txt
+s fgrep -E x words.txt
+s egrep -c 'cat|dog' words.txt
+s fgrep -c 'a.b*' words.txt
+PATH=/nowhere /bin/egrep -c 'cat|dog' words.txt
+PATH=/nowhere /bin/fgrep -c 'a.b*' words.txt
+PATH=/nowhere /bin/grep -c cat words.txt
+PATH=/nowhere grep -c cat words.txt; echo "status $?"
+s /bin/scent -c cat words.txt
+s grep -c '^^..$' utf8.txt
+s grep -i -c $'\303\251' utf8.txt
+s grep -E -a -o -b -w '.{1,2}' w115.txt
+s grep -E '(A**|.)(a)\1**' a116.txt
+s grep -F -z -f p117.pat i117.dat
+s grep --bad
+s /bin/grep --bad
+s ./ff-arg
+s grep -F x $'\377'
+s grep -r cat .
+grep --version | head -n 1
+exit
