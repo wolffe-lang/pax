@@ -63,9 +63,19 @@ use tree
 use user
 
 extern "c" let pax_user_thread: *u8
+extern "c" let pax_flushd: *u8 // px63: kernel/fstab's flusher
 
 const ENV: str = "HOME=/ TERM=linux PAX=1 PATH=/bin" // px14: PATH, for a shell's commands
 const RUN_LIST: str = "/etc/pax-run"
+
+/// px63: kernel threads this kernel started that never end (the
+/// flusher), which `run` does not wait for.
+var kernel_threads: u64 = 0
+
+fn kthreads() -> u64 {
+    // # Safety: a scalar module var, written once at boot.
+    unsafe { kernel_threads }
+}
 
 /// The body ELF processes run (kernel/user's export).
 fn body() -> u64 {
@@ -102,7 +112,7 @@ fn run(k: u64, a: u64, n: u64) {
     let id = user.exec_line(body(), a, pl, a, n, ENV)
     let during = frames.free_count()
     sync.irq_restore(saved)
-    sched.wait_all()
+    sched.wait_down_to(kthreads()) // px63: the flusher, when there is one, never ends
     let after = frames.free_count()
     if log.quiet() { // px15: the kernel command line said `quiet`
         return
@@ -154,6 +164,13 @@ export fn kmain() {
         block.report()
     }
     let _mounted = fstab.mount_all()
+    if fstab.wants_flusher() {
+        // # Safety: the address of kernel/fstab's export; nothing is read.
+        let fl = unsafe { pax_flushd as u64 }
+        let _t = sched.create(fl, 0) // px63: a write-back volume's blocks written every 5 s
+        // # Safety: a scalar module var, written once at boot with IF clear.
+        unsafe { kernel_threads = 1 }
+    }
     sync.enable()
 
     let e = initramfs.lookup(RUN_LIST)
