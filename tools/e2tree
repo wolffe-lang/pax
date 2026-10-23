@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+# e2tree — list an ext2 image's tree through e2fsprogs' own debugfs
+# (tools/e2fs: the pinned container's), the host's oracle of what a
+# session left on a disk (px63, tests/mpx6-ext2).
+#
+#   tools/e2tree IMAGE
+#
+# One line a name, sorted by path, from the root down (lost+found's
+# contents and the image's reserved inodes left out), its fields
+# separated by tabs (a path may hold a space):
+#
+#   PATH TYPE MODE UID GID LINKS SIZE BLOCKS ATIME MTIME CTIME WHAT
+#
+# TYPE reg, dir, lnk, fifo, sock, chr, blk; MODE the twelve permission
+# bits in octal; the times in seconds and nanoseconds from debugfs's
+# `stat` (the extra word's epoch bits and nanoseconds applied); WHAT a
+# regular file's bytes as sha256 (debugfs `dump`), a link's target (a
+# fast link's from `stat`, a slow one's dumped), a directory's `-`. Exit 0, or 2 on a tool error.
+import hashlib
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+E2FS = os.path.join(HERE, "e2fs")
+
+
+def debugfs(work, img, cmds):
+    cf = os.path.join(work, "cmds")
+    with open(cf, "w") as f:
+        f.write("\n".join(cmds) + "\n")
+    r = subprocess.run([E2FS, os.path.dirname(img), "debugfs", "-f", cf, img], capture_output=True)
+    if r.returncode != 0:
+        sys.stderr.write(r.stderr.decode("utf-8", "replace"))
+        sys.exit(2)
+    return r.stdout.decode("utf-8", "surrogateescape")
+
+
+def quote(p):
+    return '"%s"' % p if " " in p else p
+
+
+def decode(hexsec, hexextra):
+    lo = int(hexsec, 16)
+    ex = int(hexextra, 16) if hexextra else 0
+    s = lo - (1 << 32) if lo & 0x80000000 else lo
+    epoch = ex & 3
+    if epoch and lo & 0x80000000:
+        s = lo + ((epoch - 1) << 32)
+    elif epoch:
+        s = lo + (epoch << 32)
+    return "%d.%09d" % (s, ex >> 2)
+
+
+def main(argv):
+    if len(argv) != 2:
+        sys.stderr.write("usage: e2tree IMAGE\n")
+        return 2
+    img = os.path.abspath(argv[1])
+    work = tempfile.mkdtemp(prefix="e2tree.", dir=os.path.dirname(img))
+    try:
+        # The names, a directory at a time (`ls -p`: /ino/mode/uid/gid/name/size/;
+        # one debugfs a directory: its `-f` echo of each command goes to
+        # stderr, so a batch's answers cannot be told apart).
+        entries = {}  # path -> (ino, mode)
+        todo = ["/"]
+        while todo:
+            cur = todo.pop()
+            r = subprocess.run([E2FS, os.path.dirname(img), "debugfs", "-R", "ls -p %s" % quote(cur), img], capture_output=True)
+            if r.returncode != 0:
+                sys.stderr.write(r.stderr.decode("utf-8", "replace"))
+                return 2
+            for line in r.stdout.decode("utf-8", "surrogateescape").split("\n"):
+                m = re.match(r"^/(\d+)/(\d+)/(\d+)/(\d+)/(.*)/(\d*)/$", line)
+                if not m:
+                    continue
+                ino, mode, name = int(m.group(1)), int(m.group(2), 8), m.group(5)
+                if name in (".", "..") or ino == 0:
+                    continue
+                path = cur.rstrip("/") + "/" + name
+                if path.startswith("/lost+found/"):
+                    continue
+                entries[path] = (ino, mode)
+                if mode & 0o170000 == 0o040000 and path != "/lost+found":
+                    todo.append(path)
+        paths = sorted(entries)
+        # Each inode's stat, and each regular file's bytes.
+        cmds = []
+        for i, p in enumerate(paths):
+            ino, mode = entries[p]
+            cmds.append("stat <%d>" % ino)
+            if mode & 0o170000 in (0o100000, 0o120000):
+                cmds.append("dump <%d> %s" % (ino, os.path.join(work, "f%d" % i)))
+        out = debugfs(work, img, cmds)
+        stats = {}
+        cur = None
+        for line in out.split("\n"):
+            m = re.match(r"^Inode: (\d+)\s+Type:", line)
+            if m:
+                cur = int(m.group(1))
+                stats[cur] = {}
+                continue
+            if cur is None:
+                continue
+            m = re.search(r"Links: (\d+)\s+Blockcount: (\d+)", line)
+            if m:
+                stats[cur]["links"], stats[cur]["blocks"] = m.group(1), m.group(2)
+            m = re.search(r"User:\s+(\d+)\s+Group:\s+(\d+).*Size: (\d+)", line)
+            if m:
+                stats[cur]["uid"], stats[cur]["gid"], stats[cur]["size"] = m.group(1), m.group(2), m.group(3)
+            m = re.match(r"^\s*(ctime|atime|mtime): 0x([0-9a-f]+)(?::([0-9a-f]+))?", line)
+            if m:
+                stats[cur][m.group(1)] = decode(m.group(2), m.group(3))
+            m = re.match(r'^Fast link dest: "(.*)"$', line)
+            if m:
+                stats[cur]["target"] = m.group(1)
+        types = {0o100000: "reg", 0o040000: "dir", 0o120000: "lnk", 0o010000: "fifo", 0o140000: "sock", 0o020000: "chr", 0o060000: "blk"}
+        for i, p in enumerate(paths):
+            ino, mode = entries[p]
+            st = stats.get(ino, {})
+            t = types.get(mode & 0o170000, "?")
+            if t == "reg":
+                fp = os.path.join(work, "f%d" % i)
+                what = hashlib.sha256(open(fp, "rb").read()).hexdigest() if os.path.exists(fp) else "?"
+            elif t == "lnk":
+                fp = os.path.join(work, "f%d" % i)
+                slow = open(fp, "rb").read().decode("utf-8", "replace") if os.path.exists(fp) else ""
+                what = "-> " + st.get("target", slow)
+            else:
+                what = "-"
+            print("%s\t%s\t%04o\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s" % (p, t, mode & 0o7777, st.get("uid", "?"), st.get("gid", "?"),
+                  st.get("links", "?"), st.get("size", "?"), st.get("blocks", "?"), st.get("atime", "?"),
+                  st.get("mtime", "?"), st.get("ctime", "?"), what))
+    finally:
+        subprocess.run(["rm", "-rf", work])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
