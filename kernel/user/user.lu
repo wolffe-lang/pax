@@ -63,7 +63,7 @@
 //! **The Linux calls** (px12, M-PX3: what static glibc programs and
 //! boreutils make, measured by strace on Linux, `notes/px12/`):
 //! - memory (kernel/vm): `brk` (12), `mmap` (9, anonymous private
-//!   only), `munmap` (11), `mprotect` (10);
+//!   only until px62), `munmap` (11), `mprotect` (10);
 //! - TLS: `arch_prctl` (158) ARCH_SET_FS / ARCH_GET_FS, the FS base
 //!   kept per thread (kernel/sched, IA32_FS_BASE at every switch);
 //! - files (kernel/files): `read` (0), `pread64` (17), `open` (2),
@@ -145,7 +145,7 @@
 //!   `openat` create, truncate and open for writing; `write` writes a
 //!   file; `copy_file_range` and `sendfile` copy between files. Refused
 //!   by name: `link`, `linkat`, `symlink`, `symlinkat`, `mknod`,
-//!   `mknodat` (-EPERM) and `chmod`, `fchmod`, `fchmodat`, `fchmodat2`,
+//!   `mknodat` (-EPERM; px62 makes FIFOs and files) and `chmod`, `fchmod`, `fchmodat`, `fchmodat2`,
 //!   `chown`, `fchown`, `lchown`, `fchownat`, `utimensat`, `utimes`,
 //!   `utime` (-EOPNOTSUPP). After a call, kernel/tree's lines: the
 //!   books at every 2500th file removed, and the tree at its cap.
@@ -179,11 +179,21 @@
 //!   (a read or write of it the console refuses with `console.JOB_STOP`
 //!   runs again once the caller's group, which it has just signalled, is
 //!   continued); stops and continues; waits by group.
+//! - mappings, FIFOs and locks (px62, pax#127, #128, #108; kernel/vm,
+//!   kernel/files, kernel/tree): `mmap` of a regular file (private,
+//!   copied at the first write, or shared with the file and every other
+//!   mapping of it) and of shared memory (MAP_SHARED|MAP_ANONYMOUS,
+//!   /dev/zero), `mremap` (25, MREMAP_MAYMOVE; MREMAP_FIXED and
+//!   MREMAP_DONTUNMAP refused by name, -EINVAL), `msync` (26), `flock`
+//!   (73), `mknod` and `mknodat` of a FIFO or a regular file, and a
+//!   FIFO's open rules (`openat`). A page fault on a mapping's page past
+//!   its file's end is SIGBUS (`kill`, U_BUS), and a process that used
+//!   `mremap` says how at its end (`remap_line`).
 //! Every other number is -ENOSYS, logged once per program (`unknown`),
 //! among them `set_robust_list` (273) and `rseq` (334), which glibc
 //! tolerates (px09's hello asks `_sysctl` (156), which Linux answers
-//! -ENOSYS too). A refusal by name (a file-backed or shared mapping, a
-//! hard link, a fork, a signal sent) is a line
+//! -ENOSYS too). A refusal by name (an mremap flag, a device node, a
+//! fork, a signal sent) is a line
 //! `user: <name> pid <pid> syscall <n>: refused: <why>, -<errno>`. User memory is reached through
 //! kernel/uaccess (the process's own tables walked, then the HHDM).
 //!
@@ -310,6 +320,7 @@ const U_SMAP: u64 = 3
 const U_SMEP: u64 = 4
 const U_LAST_EXIT: u64 = 5 // px13: the last exit's status + 1 (0: none yet)
 const U_EPOCH: u64 = 6 // px26: CLOCK_REALTIME at tick 0, in seconds (kernel/rtc)
+const U_BUS: u64 = 7 // px62: 1 when the page fault `fault_in` just answered was a mapping's page past its file's end (SIGBUS), until `kill` takes it
 
 // boot/isr.S's frame, as word indices.
 const W_R10: u64 = 5
@@ -618,12 +629,57 @@ fn readable(buf: u64, len: u64) -> bool {
 /// px34: a page fault in ring 3 at `cr2` with error code `err`: true
 /// when it was a page of a MAP_NORESERVE range not yet backed, now
 /// backed (the faulting instruction runs again), false when it is the
-/// program's to die of (kernel/interrupts).
+/// program's to die of (kernel/interrupts). px62: or a page of a file's
+/// mapping filled, or a private one's page copied at its first write
+/// (kernel/vm's `fault`; error code bit 1 is a write); a page past its
+/// file's end is SIGBUS (U_BUS, for `kill`).
 pub fn fault_in(cr2: u64, err: u64) -> bool {
-    if err & 1 != 0 {
-        return false // a present page: a protection fault, not a missing one
+    let r = vm.fault(area(), paging.live(), cr2 & !(PAGE - 1), err & 2 != 0)
+    if r == vm.F_BUS {
+        put_state(U_BUS, 1)
     }
-    vm.back(area(), paging.live(), cr2 & !(PAGE - 1))
+    r == vm.F_OK
+}
+
+/// px62: `mmap(addr, len, prot, flags, fd, off)`: anonymous memory, or
+/// what descriptor `fd` names (kernel/files' `map_target`): a file of
+/// the tree (kernel/vm's `mmap_file`), /dev/zero (anonymous memory), or
+/// -errno (-EBADF, -ENODEV for what cannot be mapped). An offset off a
+/// page is -EINVAL before the descriptor is looked at (measured).
+fn mmap_call(a: u64, pml4: u64, addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64 {
+    if flags & MAP_ANON_BIT != 0 {
+        return vm.mmap(a, pml4, addr, len, prot, flags)
+    }
+    if off % PAGE != 0 {
+        return NEG_EINVAL
+    }
+    let (what, ino, acc) = files.map_target(a, int32(fd))
+    if what == files.MT_ZERO {
+        return vm.mmap(a, pml4, addr, len, prot, flags | MAP_ANON_BIT)
+    }
+    if what != files.MT_FILE {
+        return ino // -errno
+    }
+    vm.mmap_file(a, pml4, addr, len, prot, flags, ino, off, acc)
+}
+
+/// px62: a process's mremap census, said once at its end when it made
+/// any: `user: <name> pid <n> mremap: <c> served, <g> grown in place,
+/// <m> moved` (kernel/vm's counts; nothing when the console is quiet).
+fn remap_line() {
+    let (c, g, m) = vm.remap_census(area())
+    if c == 0 || log.quiet() {
+        return
+    }
+    who()
+    log.put(" mremap: ")
+    log.dec(c as int)
+    log.put(" served, ")
+    log.dec(g as int)
+    log.put(" grown in place, ")
+    log.dec(m as int)
+    log.put(" moved")
+    log.end()
 }
 
 /// `write(fd, buf, len)`: the result for %rax. The console's descriptors
@@ -792,6 +848,9 @@ const SYS_LSTAT: u64 = 6
 const SYS_LSEEK: u64 = 8
 const SYS_MMAP: u64 = 9
 const SYS_MPROTECT: u64 = 10
+const SYS_MREMAP: u64 = 25 // px62
+const SYS_MSYNC: u64 = 26 // px62
+const MAP_ANON_BIT: u64 = 0x20 // px62: MAP_ANONYMOUS (uapi asm-generic/mman-common.h)
 const SYS_MUNMAP: u64 = 11
 const SYS_BRK: u64 = 12
 const SYS_IOCTL: u64 = 16
@@ -880,6 +939,7 @@ const SYS_COPY_FILE_RANGE: u64 = 326
 const SYS_PWRITE64: u64 = 18
 const SYS_ACCESS: u64 = 21
 const SYS_FSYNC: u64 = 74
+const SYS_FLOCK: u64 = 73 // px62
 const SYS_FDATASYNC: u64 = 75
 const SYS_TRUNCATE: u64 = 76
 const SYS_FTRUNCATE: u64 = 77
@@ -925,9 +985,6 @@ const SYS_REBOOT: u64 = 169
 const SYS_SETHOSTNAME: u64 = 170
 const SYS_SETDOMAINNAME: u64 = 171
 const SYS_CLOCK_SETTIME: u64 = 227
-const S_IFMT: u64 = 0xf000
-const S_IFCHR: u64 = 0x2000
-const S_IFBLK: u64 = 0x6000
 const AT_REMOVEDIR: u64 = 0x200
 // px39: the credentials (kernel/cred): the twelve numbers px38's traces
 // and probes hold.
@@ -1376,6 +1433,7 @@ pub fn syscall(f: u64) -> u64 {
         if sched.self_ppid() == 0 {
             put_state(U_LAST_EXIT, (a0 & 0xff) + 1) // px14: a program the kernel started
         }
+        remap_line() // px62
         files.close_all(area()) // px17: its pipes' ends close now
         let _n = netd.drain() // px23: what its sockets' ends sent to this machine
         // The process ends (`exit` from its last thread ends it too);
@@ -1795,7 +1853,16 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
         return vm.brk(a, pml4, a0)
     }
     if nr == SYS_MMAP {
-        return vm.mmap(a, pml4, a0, a1, a2, a3)
+        return mmap_call(a, pml4, a0, a1, a2, a3, a4, a5) // px62: files and shared memory too
+    }
+    if nr == SYS_MREMAP {
+        return vm.mremap(a, pml4, a0, a1, a2, a3) // px62
+    }
+    if nr == SYS_MSYNC {
+        return vm.msync(a, pml4, a0, a1, a2) // px62
+    }
+    if nr == SYS_FLOCK {
+        return files.flock(a, int32(r0), int32(a1)) // px62
     }
     if nr == SYS_MUNMAP {
         return vm.munmap(a, pml4, a0, a1)
@@ -1951,12 +2018,11 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     if nr == SYS_MKNOD || nr == SYS_MKNODAT {
         // px45: a device node is root's to make (`mknod(2)`, measured:
         // -EPERM to a user); PAX makes none for anyone (refused by name).
-        let m = if nr == SYS_MKNOD { a1 } else { a2 }
-        let t = m & S_IFMT
-        if (t == S_IFCHR || t == S_IFBLK) && !cred.privileged(a) {
-            return NEG_EPERM
+        // px62: a FIFO and a regular file are made (kernel/files).
+        if nr == SYS_MKNOD {
+            return files.mknodat(a, pml4, AT_FDCWD, r0, int32(a1))
         }
-        return files.refused(a, 0)
+        return files.mknodat(a, pml4, int32(r0), a1, int32(a2))
     }
     // px45: priority and the scheduler (kernel/process), and the calls
     // only root may make.
@@ -2099,14 +2165,16 @@ fn ready_calls(nr: u64, a: u64, pml4: u64, a0: u64, a1: u64, a2: u64, a3: u64) -
 /// program is killed by name and the next thread's frame returned.
 pub fn kill(f: u64, what: str) -> u64 {
     let v = word(f, W_VECTOR)
+    let bus = v == 14 && state(U_BUS) == 1 // px62: SIGBUS, not SIGSEGV
+    put_state(U_BUS, 0)
     // px26: a handler for the fault's signal runs instead (kernel/signal).
-    let g = signal.fault(f, v)
+    let g = signal.fault(f, v, bus)
     if g != 0 {
         return g
     }
     who()
     log.put(" killed: ")
-    log.put(what)
+    log.put(if bus { "bus error (a mapping's page past its file's end)" } else { what })
     log.put(" vector ")
     log.dec(v as int)
     log.put(" error ")
@@ -2122,7 +2190,7 @@ pub fn kill(f: u64, what: str) -> u64 {
     log.end()
     files.close_all(area()) // px17
     let _n = netd.drain() // px23
-    sched.end_with(f, process.fault_signal(v)) // px14: the parent reads the signal
+    sched.end_with(f, if bus { 7 } else { process.fault_signal(v) }) // px14: the parent reads the signal
 }
 
 // --- ELF processes (px10; the image moved to kernel/process in px14) ------------
