@@ -138,6 +138,7 @@ const SB_FCOMPAT: u64 = 0x5c
 const SB_FINCOMPAT: u64 = 0x60
 const SB_FROCOMPAT: u64 = 0x64
 const SB_UUID: u64 = 0x68
+const SB_LABEL: u64 = 0x78
 const SB_RESERVED_GDT: u64 = 0xce
 const COMPAT_RESIZE_INODE: u64 = 0x10
 const MAGIC: u64 = 0xef53
@@ -233,6 +234,8 @@ const V_OVERHEAD: u64 = 31 // the blocks no file can have (statfs's: Linux's bsd
 // The module's frame: VOLS records, then the name scratch (256 bytes at
 // SCRATCH), and a second frame of zeros for holes.
 const SCRATCH: u64 = 2048
+/// px66: the last `probe`'s label (16 bytes), after the scratch.
+const PROBED: u64 = 2304
 
 var state: u64 = 0
 var zeros: u64 = 0
@@ -370,7 +373,9 @@ fn corrupt(v: u64, what: str, n: u64) {
     bump(v, V_ERRS)
     if vw(v, V_SAID) == 0 {
         put_vw(v, V_SAID, 1)
-        log.put("ext2: vda: ")
+        log.put("ext2: ")
+        block.put_name(vw(v, V_DEV))
+        log.put(": ")
         log.put(what)
         log.put(" ")
         log.dec(n as int)
@@ -449,8 +454,14 @@ fn idirty(v: u64, ino: u64) {
 
 // --- mounting ------------------------------------------------------------------
 
+/// px66: the device a mount is reading, for its refusals' lines.
+var mounting: u64 = 0
+
 fn refuse(what: str, x: u64) -> u64 {
-    log.put("ext2: refused: vda: ")
+    log.put("ext2: refused: ")
+    // # Safety: a scalar module var, written by `mount` with IF clear.
+    block.put_name(unsafe { mounting })
+    log.put(": ")
     log.put(what)
     log.put(" ")
     log.hex(x)
@@ -483,6 +494,22 @@ pub fn mount(dev: u64, ro: bool, now: u64) -> u64 {
     if v == VOLS {
         return neg(EBUSY)
     }
+    // px66: a disk and its partitions never mount at once (kernel/block
+    // says which, by name); the claim is let go on every refusal below.
+    let c = block.claim(dev)
+    if c != 0 {
+        return c
+    }
+    let r = mount_claimed(v, dev, ro, now)
+    if failed(r) {
+        block.release(dev)
+    }
+    r
+}
+
+fn mount_claimed(v: u64, dev: u64, ro: bool, now: u64) -> u64 {
+    // # Safety: a scalar module var, IF clear.
+    unsafe { mounting = dev }
     // The superblock, through a 1 KiB buffer, forgotten once read (every
     // later read is in the volume's own block size).
     let p = block.get(dev, 1, 1024)
@@ -572,7 +599,9 @@ pub fn mount(dev: u64, ro: bool, now: u64) -> u64 {
         why = 1
     } else if fr & !(RO_SPARSE_SUPER | RO_LARGE_FILE) != 0 {
         why = 2
-        log.put("ext2: vda: read-only: read-only-compatible features this code does not write (s_feature_ro_compat), bits ")
+        log.put("ext2: ")
+        block.put_name(dev)
+        log.put(": read-only: read-only-compatible features this code does not write (s_feature_ro_compat), bits ")
         log.hex(fr & !(RO_SPARSE_SUPER | RO_LARGE_FILE))
         log.end()
     } else if block.flags(dev) & block.F_RO != 0 {
@@ -640,6 +669,7 @@ pub fn unmount(v: u64, now: u64) -> u64 {
     }
     let r = block.sync(dev)
     block.forget(dev)
+    block.release(dev)
     put_vw(v, V_USED, 0)
     r
 }
@@ -651,6 +681,47 @@ pub fn sync(v: u64) -> u64 {
         return 0
     }
     block.sync(vw(v, V_DEV))
+}
+
+/// px66: whether device `dev` holds an ext2 superblock (its magic), and
+/// then its UUID (s_uuid, 16 bytes at 0x68, as two big-endian words in
+/// the order mkfs and blkid print it) and its label (s_volume_name, 16
+/// bytes at 0x78), kept for `probed_label`: kernel/fstab's `UUID=` and
+/// `LABEL=` (blkid(8)'s names for them). The buffer is forgotten again.
+/// A device of fewer than 4 sectors has none (nothing is asked).
+pub fn probe(dev: u64) -> (bool, u64, u64) {
+    if dev >= block.count() || block.sectors(dev) < 4 || !ready() {
+        return (false, 0, 0)
+    }
+    let p = block.get(dev, 1, 1024)
+    if p == 0 {
+        return (false, 0, 0)
+    }
+    if r16(p + SB_MAGIC) != MAGIC {
+        block.forget(dev)
+        return (false, 0, 0)
+    }
+    var hi: u64 = 0
+    var lo: u64 = 0
+    var k: u64 = 0
+    while k < 8 {
+        hi = (hi << 8) | r8(p + SB_UUID + k)
+        lo = (lo << 8) | r8(p + SB_UUID + 8 + k)
+        k += 1
+    }
+    k = 0
+    while k < 16 {
+        w8(base() + PROBED + k, r8(p + SB_LABEL + k))
+        k += 1
+    }
+    block.forget(dev)
+    (true, hi, lo)
+}
+
+/// px66: byte `i` (below 16) of the label the last `probe` found: 0
+/// past its end (the field is NUL-padded).
+pub fn probed_label(i: u64) -> u64 {
+    if i >= 16 { 0 } else { r8(base() + PROBED + i) }
 }
 
 /// Whether volume `v` is mounted.
@@ -1856,7 +1927,9 @@ pub fn max_size(v: u64) -> u64 {
 ///
 ///     ext2: vda: <blocks> blocks of <bs> bytes, <groups> groups, <inodes> inodes of <isize> bytes, features compat 0x<c> incompat 0x<i> ro_compat 0x<r>; <free> blocks and <ifree> inodes free; clean|not cleanly unmounted, mount <n>; read-write|read-only (why)
 pub fn report(v: u64) {
-    log.put("ext2: vda: ")
+    log.put("ext2: ")
+    block.put_name(vw(v, V_DEV))
+    log.put(": ")
     log.dec(vw(v, V_BLOCKS) as int)
     log.put(" blocks of ")
     log.dec(bs(v) as int)
