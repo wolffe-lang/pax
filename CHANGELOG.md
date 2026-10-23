@@ -7,6 +7,23 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Mappings, FIFOs and locks (px62).** `mmap` maps a file of the tree:
+  privately (the file's own frames read-only, a page copied at its first
+  write, so a page not yet written shows a later `write` as Linux's does)
+  or shared (every mapping, a forked child's and the file's `read` and
+  `write` are one set of bytes; `msync` has nothing to write), and shared
+  memory (`MAP_SHARED|MAP_ANONYMOUS`, `/dev/zero`) across `fork`; a page
+  past a file's end is SIGBUS, and a file cut under its mappings is
+  unmapped past its new end in every process. `mremap` with
+  `MREMAP_MAYMOVE` grows in place or moves without copying a byte
+  (`MREMAP_FIXED` and `MREMAP_DONTUNMAP` refused by name), so the musl
+  wolf's allocator grows its blocks on PAX as on Linux. `mkfifo` and
+  `mknodat` make FIFOs, opened by fifo(7)'s rules, and `flock` locks
+  open files. Two static probes print the same lines on PAX and Linux,
+  as root and as a user (`tests/mpx3-maps`), and pelt's FIFO row runs as
+  on Linux: 22 of 22 (`tests/mpx5-pelt`). The process area grows to
+  49,152 bytes for the mapping records.
+
 - **wolf in a separate dev image (px60).** A patched musl-static wolf
   0.2.34 runs its checked machine on PAX, with a pinned std tree and
   root/user sessions compared to Linux. The patch makes locale creation
