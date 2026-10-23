@@ -1,0 +1,418 @@
+#!/usr/bin/env bash
+# tests/mpx6-ext2 — the file system on the disk (px63, M-PX4's storage
+# half): kernel/ext2 read and written through kernel/tree's second store,
+# mounted by kernel/fstab, held to Linux's ext2 (the ext4 driver of
+# Linux 7.2.8, kasumi's, on QEMU: tools/linux-blk) and to e2fsprogs'
+# own `e2fsck -fn` and `debugfs` (tools/e2fs, the pinned container's).
+#
+#   tests/mpx6-ext2 [--images DIR | --no-boot | --only build | --only linux --images DIR [--record]]
+#                   [--rows read|all] [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# The programs, each static and unmodified: pelt (as /bin/sh), boreutils'
+# ls cat stat readlink wc head tail mkdir rm rmdir mv cp ln touch chmod
+# chown, and user/elf/disk.c and reboot.S (tools/mkdiskprobe). Three
+# disks, each made by tools/mkdisk from a fixed tree with
+# SOURCE_DATE_EPOCH=1700000000, so each is the same bytes on every host
+# (tests/mpx6-ext2.d/disks.sha256): the fixture (160 MiB:
+# tests/mpx6-ext2.d/fixture's tree: a 100 MiB file through the
+# double-indirect blocks, fast and slow links, modes, owners past 65535,
+# times past 2038, a two-block directory, a 255-byte name), the write
+# disk (64 MiB, pre/kept.txt and pre/gone.txt), the home disk (32 MiB,
+# pax/ owned 1000:1000). Three images of kmain_console a tier:
+#   read    /etc/fstab mounts the fixture read-only at /mnt; pid 1 runs
+#           tests/mpx6-ext2.d/read.sh;
+#   write   the write disk read-write (write-back, the default) at /mnt;
+#           write.sh (user/elf/disk.c's write session, then the shell's);
+#   reboot  the home disk at /home; reboot.sh writes /home/pax/notes.txt
+#           and runs /bin/reboot on the first boot, reads it back on the
+#           second.
+#
+# The Linux side (`--only linux`, or with the build): tools/linux-blk runs
+# read.sh on a copy of the fixture mounted read-only and write.sh on a
+# copy of the write disk, with the same programs; its session lines and
+# the write disk's tree (tools/e2tree) are the reference. Where this
+# host's kernel cannot be read (the CI runner's is root's) the reference
+# is the one recorded on kasumi (tests/mpx6-ext2.d/linux/, `--record`
+# writes it), said loudly; PAX_LINUX=live insists on a live one.
+#
+# Assertions, per tier and firmware (--rows read, or PAX_EXT2_ROWS=read,
+# CI's pr tier: E0-E3, E8, E9 on the read boot; --rows all, the default
+# and the full and all tiers', every one):
+#   E0 build: every program static; kmain_console built; the images made;
+#      each disk's sha256 the recorded one (reproducible); the Linux side
+#      ran (or its record is there).
+#   E1 the disk and the mount: one `blk: virtio-blk` line; `fstab: /dev/vda
+#      on <dir>: ext2, <read-only|read-write>, …`; kernel/ext2's line
+#      `…; clean, mount <n>; …`; no `ext2: vda:` fault line, no
+#      `refused:` line.
+#   E2 read: the session's lines (kernel/user's `user:` lines cut) are
+#      Linux's byte for byte (`ls -l`, `ls -la`, `stat`, `readlink`,
+#      `cat`, `wc -c`, the probe's every field and sum, statfs); the
+#      fixture's bytes unchanged after the boot.
+#   E3 read: the 100 MiB file: its sum the same on both sides (in E2), and
+#      the host's sha256 of it as debugfs dumps it from the image is the
+#      fixture's own (the image holds the generator's bytes).
+#   E4 write: the session's lines are Linux's (`~` lines apart).
+#   E5 write: `e2fsck -fn` finds PAX's disk clean (exit 0).
+#   E6 write: PAX's disk's tree (tools/e2tree) is Linux's: every name,
+#      type, mode, owner, link count, size, 512-byte block count and byte;
+#      times equal, or the same distance from each session's `~clock:`
+#      within a second.
+#   E7 reboot: the first boot ends by the reset (`reboot(2): the volumes
+#      written and marked clean; restarting`); between the boots
+#      `e2fsck -fn` finds the disk clean and debugfs reads the note; the
+#      second boot, the same disk, prints the note and `reboot: end`, its
+#      mount count one more; clean again after.
+#   E8 the books: `block: vda: … 0 errors …`.
+#   E9 the end: `PAX: init /bin/sh ended …`, halted, no PANIC.
+#
+# The UEFI leg needs OVMF (SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1). Exit 0 when every assertion held, 1 otherwise, 2
+# on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 only= rows=${PAX_EXT2_ROWS:-all} record=0
+usage="usage: tests/mpx6-ext2 [--images DIR | --no-boot | --only build | --only linux --images DIR [--record]] [--rows read|all] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --rows)     rows=$2; shift 2 ;;
+        --record)   record=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+case $rows in read|all) ;; *) die "--rows takes read or all" ;; esac
+[ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
+need readelf python3
+
+D=$PAX_ROOT/tests/mpx6-ext2.d
+REC=$D/linux
+BORE="ls cat stat readlink wc head tail mkdir rm rmdir mv cp ln touch chmod chown"
+EPOCH=1700000000
+work=$PAX_BUILD/mpx6-ext2
+runs=$PAX_BUILD/mpx6-ext2-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+static_ok() {
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+# The three disks, into $1 (each made from its own tree).
+make_disks() { # dir -> reasons
+    local w=$1
+    rm -rf "$w/disktree" && mkdir -p "$w/disktree"
+    if python3 "$D/fixture" "$w/disktree/fixture" > "$w/fixture.txt" \
+        && SOURCE_DATE_EPOCH=$EPOCH "$PAX_ROOT/tools/mkdisk" --from "$w/disktree/fixture" --attrs "$w/disktree/fixture.attrs" \
+            --label pax-fixture 160M "$w/fixture.img" > "$w/fixture.mkdisk.txt"; then :; else printf ' the fixture disk;'; fi
+    mkdir -p "$w/disktree/write/pre" "$w/disktree/home/pax"
+    printf 'kept\n' > "$w/disktree/write/pre/kept.txt"
+    printf 'gone\n' > "$w/disktree/write/pre/gone.txt"
+    SOURCE_DATE_EPOCH=$EPOCH "$PAX_ROOT/tools/mkdisk" --from "$w/disktree/write" --label pax-write 64M "$w/write.img" > "$w/write.mkdisk.txt" \
+        || printf ' the write disk;'
+    printf '/pax 755 1000 1000\n' > "$w/disktree/home.attrs"
+    SOURCE_DATE_EPOCH=$EPOCH "$PAX_ROOT/tools/mkdisk" --from "$w/disktree/home" --attrs "$w/disktree/home.attrs" --label pax-home 32M "$w/home.img" > "$w/home.mkdisk.txt" \
+        || printf ' the home disk;'
+    rm -rf "$w/disktree"
+}
+
+# Each disk in $1 is the bytes recorded (tools/mkdisk is reproducible):
+# checked on every run, made here or handed in by --images.
+check_disks() { # dir -> reasons
+    local w=$1 d got want
+    for d in fixture write home; do
+        got=$(sha256_of "$w/$d.img")
+        want=$(sed -n "s/^$d \([0-9a-f]*\)\$/\\1/p" "$D/disks.sha256")
+        [ "$got" = "$want" ] || printf ' %s.img is %s, recorded %s (tools/mkdisk is not reproducible here);' "$d" "$got" "$want"
+    done
+}
+
+kernel_readable() {
+    local k=${PAX_LINUX_KERNEL:-/usr/lib/modules/$(uname -r)/vmlinuz}
+    [ -r "$k" ] && printf '%s\n' "$k"
+}
+
+# The Linux side, into $1/linux: live (tools/linux-blk) or the record.
+linux_side() { # dir -> reasons
+    local w=$1 k
+    mkdir -p "$w/linux"
+    k=$(kernel_readable || true)
+    if [ -z "$k" ] && [ "${PAX_LINUX:-}" != live ]; then
+        say "LOUD: no readable Linux kernel on this host: the Linux side is the record made on kasumi ($(head -n 1 "$REC/meta"))"
+        cp "$REC/read.session" "$REC/write.session" "$REC/write.tree" "$w/linux/" || printf ' no record in %s;' "$REC"
+        echo recorded > "$w/linux/how"
+        return
+    fi
+    [ -n "$k" ] || { printf ' PAX_LINUX=live and no readable kernel;'; return; }
+    local mods=${PAX_LINUX_MODULES:-/usr/lib/modules/$(uname -r)}
+    local progs=("$w/bin"/*)
+    cp "$w/fixture.img" "$w/linux/read.img"
+    "$PAX_ROOT/tools/linux-blk" --kernel "$k" --modules "$mods" --busybox "$w/busybox" --ro --file "$D/read.sh=/etc/disk/read.sh" \
+        "$w/linux/read" "$w/linux/read.img" "${progs[@]}" -- "/bin/sh /etc/disk/read.sh" || printf ' tools/linux-blk read;'
+    cmp -s "$w/fixture.img" "$w/linux/read.img" || printf ' Linux changed the read-only fixture;'
+    cp "$w/write.img" "$w/linux/write.img"
+    "$PAX_ROOT/tools/linux-blk" --kernel "$k" --modules "$mods" --busybox "$w/busybox" --file "$D/write.sh=/etc/disk/write.sh" \
+        "$w/linux/write" "$w/linux/write.img" "${progs[@]}" -- "/bin/sh /etc/disk/write.sh" || printf ' tools/linux-blk write;'
+    python3 "$D/session" linux "$w/linux/read/serial.log" > "$w/linux/read.session"
+    python3 "$D/session" linux "$w/linux/write/serial.log" > "$w/linux/write.session"
+    "$PAX_ROOT/tools/e2fs" "$w/linux" e2fsck -fn write.img > "$w/linux/write.fsck" 2>&1 || printf ' Linux left the write disk unclean;'
+    "$PAX_ROOT/tools/e2tree" "$w/linux/write.img" > "$w/linux/write.tree" || printf ' tools/e2tree of Linux'"'"'s disk;'
+    echo "live $(uname -r) $k" > "$w/linux/how"
+    if [ "$record" = 1 ]; then
+        mkdir -p "$REC"
+        cp "$w/linux/read.session" "$w/linux/write.session" "$w/linux/write.tree" "$REC/"
+        printf 'Linux %s on QEMU (tools/linux-blk), recorded %s\n' "$(sed -n 's/^linux-blk: uname //p' "$w/linux/read/serial.log" | tr -d '\r')" "$(date -u +%Y-%m-%d)" > "$REC/meta"
+        say "recorded the Linux side in $REC"
+    fi
+}
+
+# The disks are made on the host that boots (tools/e2fs runs a container),
+# not in a build container.
+disks_ready() { # dir -> reasons
+    if [ ! -f "$1/fixture.img" ] || [ ! -f "$1/write.img" ] || [ ! -f "$1/home.img" ]; then
+        make_disks "$1"
+    fi
+    check_disks "$1"
+}
+
+if [ "$only" = linux ]; then
+    why=$(disks_ready "$images")
+    why+=$(linux_side "$images")
+    [ -z "$why" ] && say "PASS E0 (linux): the Linux side ran ($(cat "$images/linux/how"))" || bad "E0 (linux):$why"
+    exit "$fail"
+fi
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/bin"
+    why=
+    "$PAX_ROOT/tools/mkpelt" "$work/peltbin" > "$work/pelt.txt" || why+=" tools/mkpelt;"
+    "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
+    "$PAX_ROOT/tools/mkdiskprobe" "$work/bin" > "$work/probes.txt" || why+=" tools/mkdiskprobe;"
+    "$PAX_ROOT/tools/fetch-busybox" "$work/bb" > /dev/null 2>&1 && cp "$work/bb/busybox" "$work/busybox" 2>/dev/null || true
+    cp "$work/peltbin/pelt" "$work/bin/sh" 2>/dev/null || why+=" no pelt;"
+    for u in $BORE; do cp "$work/bore/$u" "$work/bin/$u" 2>/dev/null || why+=" no $u;"; done
+    for f in "$work"/bin/*; do
+        case ${f##*/} in reboot) continue ;; esac
+        r=$(static_ok "$f") || why+=" $r;"
+    done
+    sed 's/^/  program: /' "$work/probes.txt" >&2
+    for img in read write reboot; do
+        case $img in
+            read)   fs='/dev/vda /mnt ext2 ro 0 0'; script=read.sh ;;
+            write)  fs='/dev/vda /mnt ext2 defaults 0 0'; script=write.sh ;;
+            reboot) fs='/dev/vda /home ext2 defaults 0 2'; script=reboot.sh ;;
+        esac
+        printf '%s\n' "$fs" > "$work/$img.fstab"
+        printf '/bin/sh /etc/disk/%s\n' "$script" > "$work/$img.run"
+        args=()
+        for f in "$work"/bin/*; do args+=("/bin/${f##*/}=$f:755"); done
+        args+=(/mnt/:755 /tmp/:1777 /home/:755 /home/pax/:755:1000:1000 "/etc/disk/$script=$D/$script:644"
+               "/etc/fstab=$work/$img.fstab:644" "/etc/pax-run=$work/$img.run:644")
+        "$PAX_ROOT/tools/mkinitramfs" "$work/$img.cpio" "${args[@]}" > "$work/$img.initramfs.txt" || why+=" tools/mkinitramfs $img;"
+    done
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            for img in read write reboot; do
+                "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$work/$img.cpio" initramfs.cpio \
+                    "$elf" "$work/$tier/ext2-$img.iso" >/dev/null || why+=" $tier $img: mkimage;"
+                say "built $tier ext2-$img: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/ext2-$img.iso")"
+            done
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    if [ "$only" = build ]; then
+        [ -z "$why" ] && say "PASS E0 (build): the programs static, kmain_console built ($tiers), three images a tier (the disks are made where the boots run)" || bad "E0 (build):$why"
+        exit "$fail"
+    fi
+    why+=$(disks_ready "$work")
+    if [ "$(uname -s)" != Linux ]; then
+        why+=" the Linux side needs Linux (this is $(uname -s));"
+    else
+        why+=$(linux_side "$work")
+    fi
+    [ -z "$why" ] && say "PASS E0: the programs static, kmain_console built ($tiers), the images and the three disks (as recorded), the Linux side ($(cat "$work/linux/how"))" || bad "E0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx6-ext2 build (E0): PASS (no boot: --no-boot)" || say "mpx6-ext2 build: FAIL"
+        exit "$fail"
+    fi
+fi
+lx=$images/linux
+[ -d "$lx" ] || die "no $lx (build first, and run the Linux side)"
+why=$(disks_ready "$images")
+[ -z "$why" ] && say "PASS E0 (disks): fixture, write and home as recorded ($(cut -c1-12 <<< "$(sha256_of "$images/fixture.img")")…)" || bad "E0 (disks):$why"
+
+# The boot's log, normalised once into $log.norm and read from the file:
+# `serial_norm | grep -q` under pipefail fails when grep stops early and
+# sed takes a SIGPIPE on a long log (the read boot's, 86 KB).
+norm_log() { serial_norm "$log" > "$log.norm"; }
+sgrep() { command grep -a "$@" "$log.norm"; }
+ssed() { sed "$@" "$log.norm"; }
+
+record_run() { # tier leg what status
+    ran=$((ran + 1))
+    printf '%s kmain_console %s %s status=%s accel=%s elapsed=%s serial=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sed -n 's/^elapsed: //p' "$log.meta" 2>/dev/null)" \
+        "$(sha256_of "$log")" >> "$runs"
+}
+
+halt_boot() { # tier leg what disk-image
+    local rc=0
+    log=$PAX_BUILD/mpx6-ext2-$1-$2-$3.serial.log
+    rm -f "$log" "$log.verdict" "$log.norm"
+    "$PAX_ROOT/tools/qemu-halt" --firmware "$2" --serial "$log" --timeout 600 --qemu -m --qemu 1G \
+        --elf "$images/$1/kmain_console.elf" --marker 'halt|PANIC .*' \
+        --qemu -drive --qemu "file=$4,if=none,id=d0,format=raw" --qemu -device --qemu virtio-blk-pci,drive=d0 \
+        "$images/$1/ext2-$3.iso" >"$log.verdict" 2>&1 || rc=$?
+    norm_log
+    record_run "$1" "$2" "$3" "$rc"
+    return "$rc"
+}
+
+# E1, E8, E9 of the boot whose log is $log.
+the_mount() { # id dir ro|rw
+    local id=$1 why= n
+    n=$(sgrep -Ec '^blk: virtio-blk 1af4:(1001|1042) at ')
+    [ "$n" = 1 ] || why+=" $n blk: lines;"
+    local mode=read-write; [ "$3" = ro ] && mode=read-only
+    sgrep -Eq "^fstab: /dev/vda on $2: ext2, $mode, write-(back|through)\$" || why+=" no fstab line for $2 ($mode);"
+    sgrep -Eq '^ext2: vda: [0-9]+ blocks of 4096 bytes, .*; clean, mount [0-9]+; read-' || why+=" no clean ext2 line;"
+    ! sgrep -q '^ext2: vda: [a-z]' || why+=" $(sgrep -m1 '^ext2: vda: [a-z]');"
+    ! sgrep -q 'refused:' || why+=" $(sgrep -m1 'refused:');"
+    [ -z "$why" ] && say "PASS E1 $id: one virtio-blk disk, mounted at $2 ($mode), clean" || bad "E1 $id:$why"
+}
+
+the_end() { # id status
+    local why=
+    sgrep -Eq '^block: vda: [0-9]+ reads \([0-9]+ sectors\), [0-9]+ writes \([0-9]+ sectors\), [0-9]+ flushes, 0 errors, ' \
+        && say "PASS E8 $1: $(sgrep -m1 '^block: vda: [0-9]* reads' | cut -d';' -f1)" \
+        || bad "E8 $1: $(sgrep -m1 '^block: vda: [0-9]* reads' || echo 'no books line')"
+    sgrep -q '^PAX: init /bin/sh ended with status 0; nothing left to run$' || why+=" no clean end of init;"
+    [ "$2" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+    ! sgrep -q '^PANIC ' || why+=" $(sgrep -m1 '^PANIC ')"
+    [ -z "$why" ] && say "PASS E9 $1: init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "E9 $1:$why"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        # --- read: E1, E2, E3, E8, E9 ------------------------------------------
+        id="$tier $leg read"
+        disk=$PAX_BUILD/mpx6-ext2-$tier-$leg-read.img
+        cp "$images/fixture.img" "$disk"
+        hrc=0; halt_boot "$tier" "$leg" read "$disk" || hrc=$?
+        the_mount "$id" /mnt ro
+        out=$PAX_BUILD/mpx6-ext2-$tier-$leg-read.session
+        python3 "$D/session" pax "$log" > "$out"
+        why=
+        cmp -s "$lx/read.session" "$out" || why+=" the output differs from Linux's: $(diff "$lx/read.session" "$out" | head -n 12 | cut -c1-300 | tr '\n' '|');"
+        grep -qx 'read: end' "$out" || why+=" no 'read: end';"
+        cmp -s "$images/fixture.img" "$disk" || why+=" the fixture changed under a read-only mount;"
+        [ -z "$why" ] && say "PASS E2 $id: $(wc -l < "$out" | tr -d ' ') lines byte-identical to Linux's ($(sha256_of "$out" | cut -c1-12)…), the fixture unchanged" || bad "E2 $id:$why"
+        if [ "$leg $tier" = "$(echo $legs | cut -d' ' -f1) $(echo $tiers | cut -d' ' -f1)" ]; then
+            want=$(sed -n 's/.*big\/hundred.bin [0-9]* bytes sha256 \([0-9a-f]*\)$/\1/p' "$images/fixture.txt")
+            "$PAX_ROOT/tools/e2fs" "$(dirname "$disk")" debugfs -R "dump /big/hundred.bin $disk.big" "$disk" > /dev/null 2>&1
+            got=$(sha256_of "$disk.big" 2>/dev/null); rm -f "$disk.big"
+            psum=$(grep '^/mnt/big/hundred.bin: ' "$out"); lsum=$(grep '^/mnt/big/hundred.bin: ' "$lx/read.session")
+            [ -n "$want" ] && [ "$got" = "$want" ] && [ -n "$psum" ] && [ "$psum" = "$lsum" ] \
+                && say "PASS E3 $id: 100 MiB through the double indirect blocks: '$psum' on both sides; the host's dump sha256 $got, the fixture's" \
+                || bad "E3 $id: the big file: dump $got, fixture $want; PAX '$psum', Linux '$lsum'"
+        fi
+        the_end "$id" "$hrc"
+        rm -f "$disk"
+        [ "$rows" = all ] || continue
+
+        # --- write: E1, E4, E5, E6, E8, E9 -------------------------------------
+        id="$tier $leg write"
+        disk=$PAX_BUILD/mpx6-ext2-$tier-$leg-write.img
+        cp "$images/write.img" "$disk"
+        hrc=0; halt_boot "$tier" "$leg" write "$disk" || hrc=$?
+        the_mount "$id" /mnt rw
+        out=$PAX_BUILD/mpx6-ext2-$tier-$leg-write.session
+        python3 "$D/session" pax "$log" > "$out"
+        why=
+        cmp -s <(grep -v '^~' "$lx/write.session") <(grep -v '^~' "$out") \
+            || why+=" the output differs from Linux's: $(diff <(grep -v '^~' "$lx/write.session") <(grep -v '^~' "$out") | head -n 12 | cut -c1-300 | tr '\n' '|');"
+        grep -qx 'write: end' "$out" || why+=" no 'write: end';"
+        [ -z "$why" ] && say "PASS E4 $id: $(grep -vc '^~' "$out") lines byte-identical to Linux's (\`~\` lines apart)" || bad "E4 $id:$why"
+        if "$PAX_ROOT/tools/e2fs" "$(dirname "$disk")" e2fsck -fn "$disk" > "$disk.fsck" 2>&1; then
+            say "PASS E5 $id: e2fsck -fn: clean, $(tail -n 1 "$disk.fsck")"
+        else
+            bad "E5 $id: e2fsck -fn: $(grep -v '^e2fsck \|^Pass ' "$disk.fsck" | head -n 6 | tr '\n' '|')"
+        fi
+        "$PAX_ROOT/tools/e2tree" "$disk" > "$disk.tree"
+        if t=$(python3 "$D/treecmp" "$out" "$disk.tree" "$lx/write.session" "$lx/write.tree"); then
+            say "PASS E6 $id: ${t#treecmp: }: every name, mode, owner, link count, size, block count and byte Linux's, times within a second"
+        else
+            bad "E6 $id: $(printf '%s' "$t" | head -n 10 | tr '\n' '|')"
+        fi
+        the_end "$id" "$hrc"
+        rm -f "$disk"
+
+        # --- reboot: E1, E7, E8, E9 --------------------------------------------
+        id="$tier $leg reboot"
+        disk=$PAX_BUILD/mpx6-ext2-$tier-$leg-home.img
+        cp "$images/home.img" "$disk"
+        log=$PAX_BUILD/mpx6-ext2-$tier-$leg-reboot1.serial.log
+        rc1=0
+        "$PAX_ROOT/tools/qemu-run" --firmware "$leg" --serial "$log" --timeout 300 "$images/$tier/ext2-reboot.iso" -- \
+            -m 1G -drive "file=$disk,if=none,id=d0,format=raw" -device virtio-blk-pci,drive=d0 > "$log.verdict" 2>&1 || rc1=$?
+        norm_log
+        record_run "$tier" "$leg" reboot1 "$rc1"
+        the_mount "$id (first boot)" /home rw
+        why=
+        [ "$rc1" = 0 ] || why+=" the first boot did not end by the reset (qemu-run $rc1);"
+        sgrep -Eq '^user: reboot pid [0-9]+ reboot\(2\): the volumes written and marked clean; restarting$' || why+=" no reboot(2) line;"
+        m1=$(ssed -n 's/^ext2: vda: .*; clean, mount \([0-9]*\); .*/\1/p')
+        "$PAX_ROOT/tools/e2fs" "$(dirname "$disk")" e2fsck -fn "$disk" > "$disk.fsck1" 2>&1 || why+=" e2fsck -fn after the first boot: $(grep -v '^e2fsck \|^Pass ' "$disk.fsck1" | head -n 4 | tr '\n' '|');"
+        note=$("$PAX_ROOT/tools/e2fs" "$(dirname "$disk")" debugfs -R "cat /pax/notes.txt" "$disk" 2>/dev/null)
+        [ "$note" = "a note that outlives the power going off" ] || why+=" debugfs reads '$note';"
+        hrc=0; halt_boot "$tier" "$leg" reboot "$disk" || hrc=$?
+        out=$PAX_BUILD/mpx6-ext2-$tier-$leg-reboot.session
+        python3 "$D/session" pax "$log" > "$out"
+        grep -qx 'reboot: the second boot' "$out" && grep -qx "a note that outlives the power going off" "$out" && grep -qx 'reboot: end' "$out" \
+            || why+=" the second boot: $(tr '\n' '|' < "$out" | cut -c1-300);"
+        m2=$(ssed -n 's/^ext2: vda: .*; clean, mount \([0-9]*\); .*/\1/p')
+        [ -n "$m1" ] && [ "$m2" = $((m1 + 1)) ] || why+=" mount counts '$m1' then '$m2';"
+        "$PAX_ROOT/tools/e2fs" "$(dirname "$disk")" e2fsck -fn "$disk" > "$disk.fsck2" 2>&1 || why+=" e2fsck -fn after the second boot;"
+        [ -z "$why" ] && say "PASS E7 $id: written, reset by reboot(2), clean between, the note read back by debugfs and by the second boot (mount $m1 then $m2), clean after" || bad "E7 $id:$why"
+        the_mount "$id (second boot)" /home rw
+        the_end "$id" "$hrc"
+        rm -f "$disk" "$disk".fsck*
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx6-ext2: PASS" || say "mpx6-ext2: FAIL"
+exit "$fail"

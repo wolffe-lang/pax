@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+# treecmp — two tools/e2tree listings held to each other (px63,
+# tests/mpx6-ext2's E6): every name on both, and every field the same but
+# the times, which are the same or, where a session made them, the same
+# distance from each session's own `~clock:` line within a second.
+#
+#   treecmp PAX-SESSION PAX-TREE LINUX-SESSION LINUX-TREE
+#
+# Prints `treecmp: <n> names, <d> differences` and each difference;
+# exit 0 when there is none.
+import re
+import sys
+
+
+def clock(path):
+    for l in open(path, errors="replace"):
+        m = re.match(r"^~clock: (\d+)\.(\d+)", l)
+        if m:
+            return int(m.group(1)) + int(m.group(2)) / 1e9
+    return None
+
+
+def tree(path):
+    out = {}
+    for l in open(path, errors="surrogateescape"):
+        w = l.rstrip("\n").split("\t")
+        if len(w) == 12:
+            out[w[0]] = w[1:]
+    return out
+
+
+cp, cl = clock(sys.argv[1]), clock(sys.argv[3])
+tp, tl = tree(sys.argv[2]), tree(sys.argv[4])
+bad = []
+for p in sorted(set(tp) | set(tl)):
+    if p not in tp or p not in tl:
+        bad.append("%s: only on %s" % (p, "PAX" if p in tp else "Linux"))
+        continue
+    a, b = tp[p], tl[p]
+    # type mode uid gid links size blocks atime mtime ctime what
+    for i, name in enumerate(("type", "mode", "uid", "gid", "links", "size", "blocks")):
+        if a[i] != b[i]:
+            bad.append("%s: %s %s on PAX, %s on Linux" % (p, name, a[i], b[i]))
+    if a[-1] != b[-1]:
+        bad.append("%s: bytes %s on PAX, %s on Linux" % (p, a[-1], b[-1]))
+    for i, name in ((7, "atime"), (8, "mtime"), (9, "ctime")):
+        x, y = float(a[i]), float(b[i])
+        if x == y:
+            continue
+        if cp is None or cl is None or abs((x - cp) - (y - cl)) > 1.0:
+            bad.append("%s: %s %s on PAX, %s on Linux (from each clock: %.3f, %.3f)" % (p, name, a[i], b[i],
+                       x - (cp or 0), y - (cl or 0)))
+print("treecmp: %d names, %d differences" % (len(tp), len(bad)))
+for b in bad[:60]:
+    print("  " + b)
+sys.exit(1 if bad else 0)
