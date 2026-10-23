@@ -1,0 +1,59 @@
+px63 prediction, written before the first change (branch px63 from
+origin/px62 97eda050; px62 handed back, not yet merged; pax trunk
+c0d394ee).
+
+Inputs re-derived: kernel/virtio is px20's transport, selectable per
+device since px30 (`use_words`, windows 0-3 the network's, 4-7 the
+sound device's); net is interrupt-driven (INTx, the netd thread wakes
+on a pending word), sound's control queue is polled (SPIN looks at the
+used ring). kernel/tree keeps inodes as 16-word records indexed 0 to
+16,383 (MAX_INODES), and kernel/files names a tree file by that index
+(T_INO's reference; st_ino is the index + 2). px62's page cache is the
+tree's own frames under each inode's index (`page`, `read_page`): no
+second page cache exists and none is to be written. A system call runs
+with interrupts off from entry to return on one CPU, which is the
+tree's whole concurrency story. docs/MAP.md does not exist (px62 said
+so); docs/BOOT.md and kernel/README.md stand in for it. The host's
+e2fsprogs: 1.47.0 on kasumi, and 1.47.0-2.4~exp1ubuntu4.1 in
+px13-ubuntu and in docker.io/library/ubuntu:24.04 (the CI runner's
+release). kasumi's Linux 7.2.8-1-cachyos has virtio_blk and ext4
+built in, ext2 served by ext4 (CONFIG_EXT4_USE_FOR_EXT2=y,
+CONFIG_EXT2_FS unset): the Linux guest mounts ext2 through ext4.
+
+1. Kernel lines virtio-blk needs beside px20's transport: about 450
+   (the driver, kernel/vblk, ~300 with its header; the block layer,
+   kernel/block: the device table, the request and its completion,
+   the buffer cache, ~350), and fewer than 20 changed lines in
+   kernel/virtio (a 32- and a 64-bit read of the device's
+   configuration; the transport already selects per device).
+   Completion is polled, as sound's control queue is, not px20's
+   interrupt: a disk answers only what was asked, inside a system call
+   that runs with IF clear.
+
+2. The tree's inode table cannot hold an ext2 inode number as its
+   index (an ext2 volume numbers its inodes from 1 to s_inodes_count,
+   tens of thousands on a 256 MiB image; the tree's indices are its own,
+   at most 16,384, and kernel/files names files by them). It needs a
+   mapping: a tree record stands for each ext2 inode in use (looked up,
+   open, a working directory, mapped), the ext2 number kept beside it,
+   and a lookup from (volume, number) to record; a record nobody holds
+   can be given back while the volume keeps the inode.
+
+3. The first e2fsck complaint will name the group descriptor's
+   summary counts: pass 5's "Free blocks count wrong for group #0"
+   (the bitmap right, bg_free_blocks_count not moved with it), before
+   any bitmap difference or inode-table problem.
+
+4. The reboot row (a boot that writes /home/pax/notes.txt and halts,
+   then a boot of the same image with the same -drive that reads it
+   back): about 30 s of wall time on kasumi under TCG on CPUs 0-3 (two
+   kmain_console boots of ~12 s each and the image's host checks), and
+   about 60 s on CI's runner.
+
+Also predicted:
+- the 100 MiB file reads back through the double-indirect range in
+  under 20 s under TCG (25,600 4 KiB requests, one at a time);
+- write-through costs about 3x write-back for a session of small
+  writes (R-px63-3), measured by blocks written;
+- the existing suites are unchanged: no disk attached means no device
+  found, no new line on a session's serial.
