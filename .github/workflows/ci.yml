@@ -1327,6 +1327,86 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px62: mappings, FIFOs and locks (pax#127, #128, #108). Two static
+  # glibc probes (user/elf/maps.c, fifos.c; tools/mkmaps) as pid 1 on PAX
+  # and in a throwaway container on Linux, root and 1000:1000:
+  # tests/mpx3-maps: the build (T0), the outputs byte-identical (T1),
+  # PAX's named answers (T2), -ENOSYS and refusals (T3), every frame
+  # back (T4), the mremap census (T5), the end (T6).
+  mpx3-maps:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-maps')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          qemu-system-x86_64 --version
+          clang --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx3-maps-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the image the Linux side's containers are made from (by digest)
+        run: |
+          docker pull "$PAX_TREE_IMAGE"
+          docker image inspect --format '{{.Id}} {{.RepoDigests}}' "$PAX_TREE_IMAGE"
+        env:
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+      - name: mremap, file and shared mappings, FIFOs and flock against Linux, root and a user; the plan's legs (all four in the all tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+        run: tests/mpx3-maps $PAX_LEGS
+
+      - name: keep the programs' sums, the Linux side, the outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx3-maps-linux
+          path: |
+            build/mpx3-maps/probes.txt
+            build/mpx3-maps/bore/sums.txt
+            build/mpx3-maps/linux/
+            build/mpx3-maps/*.initramfs.txt
+            build/mpx3-maps/*/kmain_console.elf
+            build/mpx3-maps/*/*.log
+            build/mpx3-maps-*.session
+            build/mpx3-maps-*.session.linux
+            build/mpx3-maps-*.log
+            build/mpx3-maps-*.norm
+            build/mpx3-maps-*.meta
+            build/mpx3-maps-*.halt
+            build/mpx3-maps-*.verdict
+            build/mpx3-maps-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   # px18: the speaker. pelt as pid 1 runs /bin/play (user/play, wolf),
   # which sounds note files through the console's KIOCSOUND; the kernel
   # drives the 8254's channel 2 and port 0x61 (kernel/speaker). QEMU's
@@ -3163,6 +3243,7 @@ jobs:
       - mpx3-shell
       - mpx3-threads
       - mpx3-tree
+      - mpx3-maps
       - mpx3-speaker
       - mpx3-sound
       - mpx3-orchestra
