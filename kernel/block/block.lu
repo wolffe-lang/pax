@@ -40,7 +40,7 @@
 //! holds every change a system call made before the call returns;
 //! write-back marks it and writes it at `sync` (fsync, syncfs, sync,
 //! unmount, halt, reboot) or when the clock hand takes it. `sync` writes
-//! every dirty buffer of a device, oldest first by slot, then sends the
+//! every dirty buffer of a device, in the order of its slots, then sends the
 //! device a FLUSH when it takes one, so what is written is on the disk's
 //! medium, not in its cache. The counters say what each policy cost.
 //!
@@ -84,7 +84,6 @@ const S_COUNT: u64 = 16 // the cache's counters (K_*), from here
 const S_DEV: u64 = 64 // the device table: DEVS records of 16 words
 const DW: u64 = 16
 const S_REQ: u64 = 128 // the request record (8 words, kernel/vblk's layout)
-const S_TICK: u64 = 136 // a write's stamp, so `sync` writes oldest first
 
 // A device record's words.
 const D_PRESENT: u64 = 0
@@ -297,7 +296,8 @@ pub fn rw(d: u64, op: u64, sector: u64, n: u64, pa: u64) -> u64 {
     if d >= count() {
         return neg(EIO)
     }
-    if n == 0 || n > 8 || sector + n > dw(d, D_SECTORS) || sector + n < sector {
+    let cap = dw(d, D_SECTORS)
+    if n == 0 || n > 8 || n > cap || sector > cap - n {
         put_dw(d, D_REFUSED, dw(d, D_REFUSED) + 1)
         if !said(1) {
             log.put("block: refused: a request past the end of vda (sector ")
@@ -305,7 +305,7 @@ pub fn rw(d: u64, op: u64, sector: u64, n: u64, pa: u64) -> u64 {
             log.put(", ")
             log.dec(n as int)
             log.put(" sectors, capacity ")
-            log.dec(dw(d, D_SECTORS) as int)
+            log.dec(cap as int)
             log.put("), -EIO")
             log.end()
         }
@@ -426,7 +426,9 @@ fn key(d: u64, bsize: u64, blk: u64) -> u64 {
 }
 
 fn bucket(k: u64) -> u64 {
-    let h = (k ^ (k >> 9) ^ (k >> 56)) * 0x9e3779b1
+    // (masked to 32 bits first: wolf traps an overflow, and the hash
+    // wants the low bits mixed, not the product's carries)
+    let h = ((k ^ (k >> 9) ^ (k >> 56)) & 0xffffffff) * 0x9e3779b1
     st(S_HASH) + hh() + ((h >> 7) % BUCKETS) * 8
 }
 
