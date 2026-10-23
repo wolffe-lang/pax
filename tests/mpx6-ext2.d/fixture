@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+# fixture — the read rows' tree (px63, tests/mpx6-ext2): what the image
+# made by tools/mkdisk holds, written to DIR, and its owners, modes and
+# times to DIR.attrs (tools/mkdisk's --attrs).
+#
+#   tests/mpx6-ext2.d/fixture DIR
+#
+# The tree: a file at the root; pax/ owned 1000:1000 with a note, an
+# empty file and a hard link to the note; a 100 MiB file whose 8-byte
+# words are (index * 0x9e3779b97f4a7c15) xor PATTERN, little-endian,
+# through the double-indirect range of 4 KiB blocks (12 direct blocks,
+# 1024 through the single indirect block, the rest through the double);
+# symbolic links: fast (shorter than 60 bytes), slow (longer), dangling;
+# modes (0, 0755, 04755, 01777, 0600); owners 990, 65534 and 70000 (the
+# last needs the high 16 bits); times of 2001, 1980 and 2039 (past 2038:
+# the extra epoch bits); a directory of 300 names (more than one block);
+# a deep path; a 255-byte name and names with a space and UTF-8. Prints
+# the big file's sha256 (the host's check that the image holds these
+# bytes; PAX and Linux are held to each other by user/elf/disk.c's sum).
+# Deterministic: the same tree every run.
+import hashlib
+import os
+import shlex
+import struct
+import sys
+
+PATTERN = 0x7061786469736B31
+MASK = (1 << 64) - 1
+BIG = 100 << 20
+
+
+def big_bytes():
+    out = bytearray()
+    step = 1 << 16  # words a chunk
+    for base in range(0, BIG // 8, step):
+        out += struct.pack("<%dQ" % step, *(((i * 0x9E3779B97F4A7C15) & MASK) ^ PATTERN for i in range(base, base + step)))
+    return bytes(out)
+
+
+def main(argv):
+    if len(argv) != 2:
+        sys.stderr.write("usage: fixture DIR\n")
+        return 2
+    d = argv[1]
+    if os.path.exists(d):
+        sys.stderr.write("fixture: %s exists\n" % d)
+        return 2
+    attrs = []
+
+    def f(path, data, mode=0o644, uid=0, gid=0, mtime=1700000000):
+        p = os.path.join(d, path.lstrip("/"))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as fh:
+            fh.write(data)
+        attrs.append("%s %o %d %d %d" % (shlex.quote(path), mode, uid, gid, mtime))
+
+    def dr(path, mode=0o755, uid=0, gid=0, mtime=1700000000):
+        os.makedirs(os.path.join(d, path.lstrip("/")), exist_ok=True)
+        attrs.append("%s %o %d %d %d" % (shlex.quote(path), mode, uid, gid, mtime))
+
+    def ln(path, target, uid=0, gid=0, mtime=1700000000):
+        p = os.path.join(d, path.lstrip("/"))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        os.symlink(target, p)
+        attrs.append("%s 777 %d %d %d" % (shlex.quote(path), uid, gid, mtime))
+
+    os.makedirs(d)
+    attrs.append("/ 755 0 0 1700000000")
+    f("/hello.txt", b"hello, disk\n")
+    dr("/pax", 0o755, 1000, 1000, 1700000100)
+    f("/pax/notes.txt", b"written on the host\nby mkfs.ext2 and debugfs\nread on PAX\n", 0o640, 1000, 1000, 1700000200)
+    os.link(os.path.join(d, "pax/notes.txt"), os.path.join(d, "pax/notes-link"))
+    f("/pax/empty", b"", 0o600, 1000, 1000, 1700000300)
+    dr("/big")
+    data = big_bytes()
+    f("/big/hundred.bin", data, 0o644, 0, 0, 1700000400)
+    dr("/links")
+    ln("/links/fast", "../hello.txt")
+    ln("/links/slow", "../" + "a-long-way-round/" * 4 + "../hello.txt")
+    ln("/links/dangling", "nowhere/at/all")
+    dr("/modes")
+    f("/modes/none", b"0\n", 0o000)
+    f("/modes/exec", b"#!/bin/sh\necho hi\n", 0o755)
+    f("/modes/setuid", b"s\n", 0o4755)
+    f("/modes/private", b"p\n", 0o600)
+    dr("/modes/sticky", 0o1777)
+    dr("/owners")
+    f("/owners/lobo", b"990\n", 0o644, 990, 990)
+    f("/owners/nobody", b"65534\n", 0o644, 65534, 65534)
+    f("/owners/high", b"70000\n", 0o644, 70000, 70001)
+    dr("/times")
+    f("/times/y2001", b"2001\n", 0o644, 0, 0, 1000000000)
+    f("/times/y1980", b"1980\n", 0o644, 0, 0, 315532800)
+    f("/times/y2039", b"2039\n", 0o644, 0, 0, 2200000000)
+    dr("/many")
+    for i in range(300):
+        f("/many/file-%03d" % i, b"%d\n" % i)
+    dr("/deep/a/b/c/d/e")
+    for p in ("/deep", "/deep/a", "/deep/a/b", "/deep/a/b/c", "/deep/a/b/c/d"):
+        attrs.append("%s 755 0 0 1700000000" % p)
+    f("/deep/a/b/c/d/e/leaf.txt", b"at the bottom\n")
+    dr("/names")
+    f("/names/" + "n" * 255, b"255\n")
+    f("/names/with space", b"sp\n")
+    f("/names/café", "utf-8\n".encode())
+    with open(d + ".attrs", "w") as fh:
+        fh.write("\n".join(attrs) + "\n")
+    print("fixture: %s: big/hundred.bin %d bytes sha256 %s" % (d, len(data), hashlib.sha256(data).hexdigest()))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
