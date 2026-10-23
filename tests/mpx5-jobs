@@ -197,6 +197,16 @@
 #      guest's boot and PAX's; the container's hard limit is
 #      tools/linux-tree's `--ulimit core=0:0`, so that row is left out of
 #      the container's comparisons (named); its witness both rows.
+#      px65: sigwolf built by 0.2.35, whose runtime installs a SEGV and
+#      BUS handler at start (s256's stack-overflow report: `wolf-trap:
+#      stack-overflow`, the fault's pc): the row of a child started
+#      under the fault ignore is `~X:`, PAX's own and left out of both
+#      comparisons by name: on Linux the handler is in place when the
+#      child reads its SigIgn (none ignored); PAX serves no
+#      /proc/<pid>/maps, so glibc's pthread_getattr_np of the main
+#      thread fails, the runtime registers no main-thread guard and
+#      installs the handler only when a runtime thread starts, after the
+#      read (SEGV still ignored); J11 holds the row to each side's answer.
 #   J12 px56 (pax#95, #96): execs and execs-user, xsh and xsh-user (the
 #      typed sessions) byte-identical to real root's recordings
 #      (tests/mpx5-jobs.d/linux/execs*.tty, xsh*.tty: notes/px52/vmjob.c's
@@ -745,7 +755,11 @@ host_rows() { # name file -> the file, the host's rows left out
 # px57: the eds image's `~` lines are PAX's own (J13): left out of every
 # comparison with Linux by name, and held to each side's answer apart.
 pax_own() { # name file -> the file, its `~` rows left out where they are PAX's own
-    case $1 in eds|eds-user|hostq|hostq-user) command grep -v -e '^~N: ' -e '^~H: ' "$2" ;; *) cat "$2" ;; esac
+    case $1 in
+        eds|eds-user|hostq|hostq-user) command grep -v -e '^~N: ' -e '^~H: ' "$2" ;;
+        sigs|sigs-user) command grep -v -e '^~X: ' "$2" ;; # px65: J11's `~X:`
+        *) cat "$2" ;;
+    esac
 }
 # The recordings and the container agree before PAX is held to them.
 for n in $TYPED; do
@@ -919,9 +933,17 @@ for leg in $legs; do
                                          'G: SEGMENT_FAULT to its own group, ignored by the leader: the job signal 11; the leader lives' \
                                          'G: host 34 to its own group, ignored by the leader: the job signal 34; the leader lives' \
                                          'C: exit-segv, wait_status_core: signal 11' 'F: overflow-ignored: exit 134' \
-                                         'L: the core limit, soft: 0' 'L: the core limit, hard: unlimited'; do # px55: the last two
+                                         'L: the core limit, soft: 0' 'L: the core limit, hard: unlimited' \
+                                         'wolf-trap: stack-overflow'; do # px55: the two L rows; px65: 0.2.35's report
                                     grep -qxF "$w" "$out.cmp" || why+=" no '$w';"
-                                done ;;
+                                done
+                                # px65: `~X:`, PAX's own while it serves no /proc/<pid>/maps
+                                # (the runtime's handler not yet in place: SEGV still
+                                # ignored), Linux's the handler's (none ignored).
+                                w='~X: a child started under the fault ignore: SigIgn: 0000000000000400'
+                                grep -qxF "$w" "$out.full" || why+=" PAX's own row '$w' not there ($(grep -m1 '^~X: ' "$out.full"));"
+                                w='~X: a child started under the fault ignore: SigIgn: 0000000000000000'
+                                grep -qxF "$w" "$images/rec-$n.full" || why+=" the recording's row '$w' not there;" ;;
                             gaps-user) grep -qx "gaps: px49's probe, as a user" "$out.cmp" || why+=" not a user's;"
                                        grep -qx "I: TIOCSTI 'q' on its own terminal: EIO; a read then: 0 bytes" "$out.cmp" || why+=" no user's TIOCSTI row;"
                                        grep -qx 'A: R_OK through the link: EACCES' "$out.cmp" || why+=" no user's refused access row;" ;;
