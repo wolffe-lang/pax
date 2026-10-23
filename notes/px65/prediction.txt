@@ -1,0 +1,86 @@
+px65 — the pins at 0.2.35: the prediction, committed before the first
+change and the first measurement (2026-10-23 17:30 EDT, Opus 5.5,
+kasumi CPUs 12-15, branch px65 from pax trunk 68807993).
+
+Inputs read before this (the release API twice each; no download yet):
+wolf v0.2.35 -> cf0c13d3 (release 421613621), linux x86-64 archive
+4cc4045bbbb605c07835bc4f32685953c784eeef4cd3139a48b457dfc90dad1a,
+81,369,914 bytes; lupin v0.1.56 -> 28547b43 (release 421458363), glibc
+archive ad703550ac4787e8e4bb26989d591a731410274d7332f2b4e8b9a64c878822cc
+(3,027,812) and, new at this release, a musl archive
+6303b47a8634e21d30336227022d4e70cf7cc6272946aa523b8edcee205cceb3
+(3,045,794); wolf-std 78b9d3c (sc72); lope e6f623c, aspen 3692cf5,
+pelt 70eec14, lobo 49ed870, boreutils 575dc7b (boreutils#47, bu32,
+OPEN: no checksums), all on wolf 0.2.35 / lupin 0.1.56 / std 2386522e,
+the std the 0.2.35 archive bundles.
+
+1. The kernel's .text at 0.2.35. 0.2.35's changes are the hosted
+   runtime (s256's stack-overflow report: a Unix signal handler), the
+   native enum layout for MIXED payloads (the kernel declares no enum),
+   region rules that admit more programs (s255; nothing the kernel
+   writes was refused), and s251's cross-module closure records.
+   Predicted: 0 bytes of .text move, and no byte of .rodata, .data or
+   .bss, on every one of the 32 kmain*.lu kernels on the native tier;
+   on the release tier 0 bytes for kmain_console and kmain_session
+   (weak: the release tier goes through clang, and a changed IR
+   emission moves bytes with no source change). Weakest: kmain_heap
+   (it is the kernel that makes closures, s251's rows) and the
+   freestanding runtime archive, which every kernel links whole
+   (px21a): if libwolf_rt_none.a moved, every kernel moves by the same
+   count, as 0.2.28's +224 did (px36).
+
+2. The binaries. Every user program rebuilt at 0.2.35 gets a new
+   digest: pelt, lope, aspen, lobo (trunk and release), every boreutils
+   utility, su, sigwolf and edwolf (their own pins moved to 0.2.35 /
+   std 78b9d3c, one commit each, px57's shape); scent stays
+   bd860457… (its pin does not move). lupin from the v0.1.56 tag
+   (tools/mklupin, Rust from the tag's rust-toolchain.toml, musl,
+   relocation-model=static) builds with no source change, ET_EXEC,
+   the same digest twice. The release's NEW musl archive: predicted a
+   static PIE (ET_DYN, Rust's musl default), which kernel/elf refuses
+   by name, so PAX keeps building lupin from the tag (R-px65-1 if it
+   is ET_EXEC after all: pin the archive by digest instead). The dev
+   compiler (user/wolf.pin) at v0.2.35: 0.2.35 carries the musl
+   portability patch (#886), so user/wolf-musl.patch retires; the
+   unmodified tag builds for musl at the first try, and may carry the
+   release stamp `wolf 0.2.35 (wolfgang, pin cf0c13d)` (R-px65-2:
+   grant WOLF_RELEASE when the tree is the tag's, unpatched).
+
+3. Which new boreutils utility PAX cannot run first. Predicted: NONE
+   is blocked by a call. The 14 new since 12de639 (bu30: mkfifo, link,
+   unlink, truncate, sync, mktemp, realpath, tty; bu31: base64,
+   base32, comm, join, tsort, shuf) ask, beside glibc's static
+   start-up (273 and 334 -ENOSYS, which glibc takes) and wolf's
+   runtime: mknodat (S_IFIFO, served since px62), linkat (px36),
+   unlink (EISDIR for a directory, kernel/tree), truncate or ftruncate
+   (px27), openat and fsync or fdatasync (px63), getrandom (px12,
+   RDRAND) for mktemp and shuf, openat O_CREAT|O_EXCL 0600 and mkdir
+   0700 for mktemp, readlink and getcwd for realpath, ioctl(TCGETS),
+   readlink of /proc/self/fd/0 and a stat of the name it gives for
+   tty. The contract's likely four: sync(2) and syncfs(2) are never
+   made (bare `sync` and `sync -f` are refused by boreutils itself, on
+   Linux too, wolf-lang#906), fstatfs is never made, fallocate is not
+   made; getrandom is served. So every one runs on PAX. The first thing
+   a PAX user sees differ is `tty`'s answer: `/dev/ttyS0` (PAX's
+   console is the serial port) where the container's pseudo-terminal
+   says `/dev/pts/0`: the environment's name, not a call, named in the
+   comparison. If a call does block one, my guess is tty (ttyname's
+   checks against the console) and then mktemp.
+
+4. Whether an existing suite's session moves at the new pins. None of
+   the five tool suites' sessions (mpx5-pelt, mpx5-lope, mpx5-aspen,
+   mpx4-lobo, mpx5-scent) moves: lope and aspen moved only their pins
+   since their pins; pelt's sh24 and sh25 (memory, the jobs notices'
+   placement, `cd -e`, `pwd`'s options, printf's invalid operands) are
+   not on those sessions' paths. px57's recordings, redone on real
+   root's guest at the new pins: pjobs, groups, sigs and the exec rows
+   the same bytes as committed (weak: pjobs, where sh24 moved when a
+   job's notice prints). mpx5-wolf's session moves by construction
+   (`wolf --version` prints the new line; held to the container live,
+   so W1 holds; W2's version row moves with user/wolf.pin).
+
+5. Cost and time. Every kernel builds with no source change. The new
+   suite's two sessions (bu30's tools, bu31's tools), root and `pax`,
+   about 60 s each under TCG on kasumi; byte-identical to the
+   container at the first boot but the `tty` line (named), as root and
+   as `pax`, with no kernel change.
