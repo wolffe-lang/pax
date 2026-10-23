@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+# blk-pattern — the host's side of kmain_blk's pattern (px63,
+# tests/mpx6-blk): every 512-byte sector s of a raw disk image holds 64
+# little-endian 8-byte words, word w being (s << 32 | w) xor
+# 0x7061786469736b00 ("paxdisk\0"), kernel/kmain_blk.lu's PATTERN.
+#
+#   tools/blk-pattern IMAGE
+#
+# Prints `IMAGE: <n> sectors, <d> differ[, first at <s>]` and exits 0
+# when none differs, 1 when one does, 2 on a usage error or a size that
+# is no whole number of sectors.
+import struct
+import sys
+
+PATTERN = 0x7061786469736b00
+
+
+def main(argv):
+    if len(argv) != 2:
+        sys.stderr.write("usage: blk-pattern IMAGE\n")
+        return 2
+    data = open(argv[1], "rb").read()
+    if len(data) % 512:
+        sys.stderr.write("blk-pattern: %s is %d bytes, not whole sectors\n" % (argv[1], len(data)))
+        return 2
+    n = len(data) // 512
+    bad = 0
+    first = None
+    for s in range(n):
+        words = struct.unpack_from("<64Q", data, s * 512)
+        want = tuple(((s << 32) | w) ^ PATTERN for w in range(64))
+        if words != want:
+            bad += 1
+            if first is None:
+                first = s
+    tail = "" if first is None else ", first at %d" % first
+    print("%s: %d sectors, %d differ%s" % (argv[1], n, bad, tail))
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+# tests/mpx6-blk — the disk (px63, M-PX4's storage half): kernel/vblk's
+# virtio block device and kernel/block's requests, through kmain_blk's
+# self-test, held to the bytes the host reads back from the image.
+#
+#   tests/mpx6-blk [--images DIR | --no-boot] [--firmware bios|uefi|both]
+#                  [--tier native|release|both]
+#
+# One kernel, kernel/kmain_blk.lu, booted three ways per leg (a tier on a
+# firmware):
+#   rw    with a raw image the test creates (16 MiB and three sectors:
+#         the last request is three sectors long), `-drive
+#         file=IMAGE,if=none,id=d0,format=raw -device
+#         virtio-blk-pci,drive=d0`;
+#   ro    the same image, `readonly=on`: the device offers
+#         VIRTIO_BLK_F_RO;
+#   none  no disk.
+# Assertions, per leg:
+#   K0 build: tools/build-kernel's assertions; the ISO made.
+#   K1 the device: one `blk: virtio-blk 1af4:1001|1042 at …, 1.x
+#      interface, polled` line; the features line takes VERSION_1 and
+#      FLUSH; the capacity line's sector count is the image's size / 512
+#      (QEMU's -drive size), its bytes the image's size; no `refused:`
+#      line but the two the edges ask for.
+#   K2 pattern (rw): `disk: pattern: wrote N sectors in R requests,
+#      flushed, read back N sectors, 0 differ`, R = ceil(N / 8).
+#   K3 the host's view (rw): tools/blk-pattern reads the image after the
+#      run: every one of its N sectors holds kmain_blk's pattern.
+#   K4 read-only (ro): `RO` taken, `block: vda: … read-only`, every
+#      sector read and none differing, the write refused by name
+#      (`block: refused: a write to vda, which the device says is
+#      read-only …`), and the image's bytes unchanged (sha256 before and
+#      after).
+#   K5 edges: the request past the end refused by name before it is
+#      made (`block: refused: a request past the end of vda (sector N-1,
+#      2 sectors, capacity N), -EIO`); rw: the last sector written and
+#      read back.
+#   K6 no disk (none): `disk: no virtio block device among <n> PCI
+#      functions`, n > 0.
+#   K7 the books: the summary line's `0 errors`; rw: R + 1 writes, R + N
+#      reads' worth of sectors read (N + 1), 1 flush; ro: no write.
+#   K8 halted: every boot ends `halt`, held by tools/qemu-halt.
+#
+# --images DIR boots what an earlier run built (DIR/<tier>/kmain_blk.{iso,elf});
+# --no-boot stops after K0. The UEFI leg needs OVMF (SKIPPED LOUDLY
+# without it unless PAX_REQUIRE_UEFI=1). Exit 0 when every assertion
+# held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+
+images= legs=both tiers=both noboot=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "usage: tests/mpx6-blk [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+
+work=$PAX_BUILD/mpx6-blk
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_blk.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_blk.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            if "$PAX_ROOT/tools/mkimage" "$elf" "$work/$tier/kmain_blk.iso" >/dev/null; then
+                say "PASS K0 $tier: build-kernel's assertions; elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/kmain_blk.iso")"
+            else
+                bad "K0 $tier: mkimage"
+            fi
+        else
+            cat "$log" >&2
+            bad "K0 $tier: tools/build-kernel"
+        fi
+    done
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx6-blk build (K0): PASS (no boot: --no-boot)" || say "mpx6-blk build: FAIL"
+        exit "$fail"
+    fi
+fi
+
+SECTORS=32771 # 16 MiB and three sectors
+
+# Boot kmain_blk one way; leaves the log in $log. Status: qemu-halt's.
+boot() { # tier leg way image
+    local tier=$1 leg=$2 way=$3 img=${4:-} rc=0
+    log=$PAX_BUILD/mpx6-blk-$tier-$leg-$way.serial.log
+    local iso=$images/$tier/kmain_blk.iso elf=$images/$tier/kmain_blk.elf
+    rm -f "$log" "$log.verdict"
+    [ -f "$iso" ] && [ -f "$elf" ] || { say "no image or ELF for $tier ($iso)"; : > "$log"; return 2; }
+    local drive=()
+    case $way in
+        rw)   drive=(--qemu -drive --qemu "file=$img,if=none,id=d0,format=raw" --qemu -device --qemu virtio-blk-pci,drive=d0) ;;
+        ro)   drive=(--qemu -drive --qemu "file=$img,if=none,id=d0,format=raw,readonly=on" --qemu -device --qemu virtio-blk-pci,drive=d0) ;;
+    esac
+    "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 300 \
+        --elf "$elf" --marker 'halt|PANIC .*' ${drive[@]+"${drive[@]}"} "$iso" >"$log.verdict" 2>&1 || rc=$?
+    ran=$((ran + 1))
+    printf '%s %s %s halt-status=%s accel=%s elapsed=%s serial=%s\n' "$tier" "$leg" "$way" "$rc" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sed -n 's/^elapsed: //p' "$log.meta" 2>/dev/null)" \
+        "$(sha256_of "$log")" >> "$PAX_BUILD/mpx6-blk-runs.txt"
+    return "$rc"
+}
+
+grab() { serial_norm "$1" | sed -n "s/^$2\$/\\1/p" | tail -n 1; }
+has() { serial_norm "$log" | grep -Eq "^$1\$"; }
+count_of() { serial_norm "$log" | grep -Ec "$1"; }
+
+halted() { # label status
+    if [ "$2" = 0 ]; then
+        say "PASS K8 $1: halted: $(tail -n 1 "$log.verdict")"
+    else
+        bad "K8 $1: not halted (qemu-halt $2): $(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict")"
+    fi
+}
+
+# K1's lines, for a disk of $SECTORS sectors.
+device_lines() { # label
+    local n b
+    n=$(count_of '^blk: virtio-blk 1af4:(1001|1042) at [0-9a-f]{2}:[0-9a-f]{2}\.[0-7], bar[0-9] 0x[0-9a-f]{16}, 1\.x interface, polled$')
+    b=$((SECTORS * 512))
+    if [ "$n" = 1 ] && has 'blk: features offered 0x[0-9a-f]{16}, taken 0x[0-9a-f]{16} \(VERSION_1, FLUSH(, RO)?(, BLK_SIZE)?(, SEG_MAX)?\)' \
+        && has "blk: request queue 0: 64 entries, 16 slots; capacity $SECTORS sectors \\($b bytes\\), block size [0-9]+, seg_max [0-9]+, 3 frames held"; then
+        say "PASS K1 $1: one virtio-blk device, VERSION_1 and FLUSH taken, capacity $SECTORS sectors ($b bytes, the image's)"
+    else
+        bad "K1 $1: the device lines (devices $n; want capacity $SECTORS sectors)"
+    fi
+    local others
+    others=$(serial_norm "$log" | grep 'refused:' | grep -Ev '^block: refused: (a request past the end of vda \(sector [0-9]+, 2 sectors, capacity [0-9]+\), -EIO|a write to vda, which the device says is read-only \(VIRTIO_BLK_F_RO\), -EIO)$' || true)
+    [ -z "$others" ] || bad "K1 $1: a refusal not asked for: $others"
+}
+
+: > "$PAX_BUILD/mpx6-blk-runs.txt"
+mkdir -p "$PAX_BUILD"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        img=$PAX_BUILD/mpx6-blk-$tier-$leg.img
+        rm -f "$img"
+        dd if=/dev/zero of="$img" bs=512 count="$SECTORS" status=none || die "dd $img"
+        R=$(( (SECTORS + 7) / 8 ))
+
+        # --- rw: K1, K2, K3, K5, K7, K8 -------------------------------
+        hrc=0; boot "$tier" "$leg" rw "$img" || hrc=$?
+        device_lines "$tier $leg rw"
+        if has "disk: pattern: wrote $SECTORS sectors in $R requests, flushed, read back $SECTORS sectors, 0 differ"; then
+            say "PASS K2 $tier $leg: $SECTORS sectors written in $R requests, flushed, read back, 0 differ"
+        else
+            bad "K2 $tier $leg: $(serial_norm "$log" | grep '^disk: pattern' || echo 'no pattern line')"
+        fi
+        if hv=$("$PAX_ROOT/tools/blk-pattern" "$img"); then
+            say "PASS K3 $tier $leg: the host reads the image: $hv"
+        else
+            bad "K3 $tier $leg: the host reads the image: $hv"
+        fi
+        last=$((SECTORS - 1))
+        if has "block: refused: a request past the end of vda \\(sector $last, 2 sectors, capacity $SECTORS\\), -EIO" \
+            && has 'disk: edges: past the end -EIO, the last sector written and read back'; then
+            say "PASS K5 $tier $leg rw: past the end refused by name (sector $last, 2 sectors); the last sector written and read back"
+        else
+            bad "K5 $tier $leg rw: $(serial_norm "$log" | grep '^disk: edges' || echo 'no edges line')"
+        fi
+        if has "block: vda: $((R + 1)) reads \\($((SECTORS + 1)) sectors\\), $((R + 1)) writes \\($((SECTORS + 1)) sectors\\), 1 flushes, 0 errors, 1 refused; cache .*"; then
+            say "PASS K7 $tier $leg rw: $((R + 1)) reads and writes ($((SECTORS + 1)) sectors each way), 1 flush, 0 errors, 1 refused"
+        else
+            bad "K7 $tier $leg rw: $(serial_norm "$log" | grep '^block: vda: [0-9]* reads' || echo 'no books line')"
+        fi
+        halted "$tier $leg rw" "$hrc"
+
+        # --- ro: K1, K4, K5, K7, K8 -----------------------------------
+        before=$(sha256_of "$img")
+        hrc=0; boot "$tier" "$leg" ro "$img" || hrc=$?
+        after=$(sha256_of "$img")
+        device_lines "$tier $leg ro"
+        if has 'blk: features offered 0x[0-9a-f]{16}, taken 0x[0-9a-f]{16} \(VERSION_1, FLUSH, RO(, BLK_SIZE)?(, SEG_MAX)?\)' \
+            && has "block: vda: $SECTORS sectors \\($((SECTORS * 512)) bytes\\), 254:0, read-only, flush" \
+            && has 'block: refused: a write to vda, which the device says is read-only \(VIRTIO_BLK_F_RO\), -EIO' \
+            && has "disk: verify: read $SECTORS sectors, 0 differ; a write refused" && [ "$before" = "$after" ]; then
+            say "PASS K4 $tier $leg: RO taken; $SECTORS sectors read, 0 differ; the write refused by name; the image unchanged ($after)"
+        else
+            bad "K4 $tier $leg: ro (image $before -> $after): $(serial_norm "$log" | grep '^disk: verify' || echo 'no verify line')"
+        fi
+        if has "block: refused: a request past the end of vda \\(sector $last, 2 sectors, capacity $SECTORS\\), -EIO" && has 'disk: edges: past the end -EIO'; then
+            say "PASS K5 $tier $leg ro: past the end refused by name"
+        else
+            bad "K5 $tier $leg ro: the edges"
+        fi
+        if has "block: vda: $R reads \\($SECTORS sectors\\), 0 writes \\(0 sectors\\), 0 flushes, 0 errors, 2 refused; cache .*"; then
+            say "PASS K7 $tier $leg ro: $R reads, no write, 0 errors, 2 refused"
+        else
+            bad "K7 $tier $leg ro: $(serial_norm "$log" | grep '^block: vda: [0-9]* reads' || echo 'no books line')"
+        fi
+        halted "$tier $leg ro" "$hrc"
+
+        # --- none: K6, K8 ---------------------------------------------
+        hrc=0; boot "$tier" "$leg" none || hrc=$?
+        n=$(grab "$log" 'disk: no virtio block device among \([0-9]*\) PCI functions')
+        if [ -n "$n" ] && [ "$n" -gt 0 ] && [ "$(count_of '^blk:')" = 0 ]; then
+            say "PASS K6 $tier $leg: no disk: no virtio block device among $n PCI functions, no blk: line"
+        else
+            bad "K6 $tier $leg: no disk ('$n')"
+        fi
+        halted "$tier $leg none" "$hrc"
+        rm -f "$img"
+    done
+done
+cat "$PAX_BUILD/mpx6-blk-runs.txt"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx6-blk: PASS" || say "mpx6-blk: FAIL"
+exit "$fail"
