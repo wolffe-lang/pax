@@ -1,0 +1,39 @@
+px66 — the partition table: the prediction, written before the first change
+(2026-10-23, at pax trunk e5dfad45; Limine's USAGE.md and CONFIG.md for
+v12.9.1 read, no code written, no fixture made, the guest not yet asked).
+
+1. Kernel lines. GPT and the partition window together need about 450
+   lines of wolf, comments included: kernel/block about 330 more (the
+   protective MBR, both headers with their CRC32 and the entry array,
+   the device records for the partitions, the window's offset and
+   bound, /proc/partitions' text, the exclusive-mount check), kernel/
+   fstab about 80 (PARTUUID=, UUID=, and LABEL=/PARTLABEL= if they are
+   the same lookup), kernel/procfs about 25 (one entry). Of that, the
+   window itself (offset and bound in `rw`) under 30.
+
+2. The fixture the guest and my first reading disagree on. I expect to
+   agree with the guest on the bad-primary fixture (both use the backup
+   header). The first disagreement will be the device numbers past the
+   fifteenth partition: Linux gives virtio-blk 16 minors a disk, so a
+   table with more than 15 used entries puts vda16 and on somewhere
+   else (I guess the extended major 259), and my first reading will
+   number them 254:16 and on.
+
+3. Limine's BIOS path on GPT needs a partition of its own: yes, a BIOS
+   boot partition of at least 32 KiB whose number is passed to
+   `limine bios-install` (USAGE.md "BIOS/GPT"). I guess the installer
+   refuses a GPT disk when no partition is named, so R-px66-2 has one
+   layout, not two.
+
+4. Boot time, from QEMU's start to the kernel's first line: the disk
+   within 25% of the ISO under TCG, BIOS and UEFI alike (Limine's
+   load of the kernel and the initramfs is the cost either way, and
+   SeaBIOS's virtio-blk int13 costs about what its AHCI CD-ROM read
+   does); under KVM both under one second.
+
+5. px63's halt already leaves the clean flag set (kernel/ext2's
+   unmount sets VALID when the volume was clean at its mount), so row
+   4 passes on the first run without a fix; QEMU killed mid-session
+   leaves `not clean`, and the volume then stays not clean through
+   later clean halts until e2fsck repairs it, which I expect Linux's
+   guest to do too.
