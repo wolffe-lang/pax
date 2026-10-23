@@ -1,0 +1,85 @@
+umask 022; W=/tmp/w$(id -u); mkdir $W; cd $W
+s() { "$@" >$W/.o 2>$W/.e; echo "status $?"; cat $W/.o; echo '[stderr]'; cat $W/.e; }
+for c in mkfifo link unlink truncate sync mktemp realpath tty; do command -v $c; done
+s mkfifo f1
+s mkfifo -m 600 f2
+s stat -c '%A %F %n' f1 f2
+s mkfifo f1
+s mkfifo nodir/f3
+s mkfifo -Z f4
+echo hello > a
+s link a b
+s stat -c '%h %s %n' a b
+s link a b
+s link nosuch c
+s link a
+s unlink b
+s stat -c '%h %n' a
+s unlink b
+mkdir d
+s unlink d
+s unlink a b
+s truncate -s 10 a
+s stat -c '%s %n' a
+s truncate -s +5 a
+s stat -c %s a
+s truncate -s -3 a
+s stat -c %s a
+s truncate -s %8 a
+s stat -c %s a
+s truncate -s /5 a
+s stat -c %s a
+s truncate -s 1K k1
+s stat -c '%s %n' k1
+s truncate -c -s 4 nonew
+s stat -c %s nonew
+s truncate -r k1 r1
+s truncate -r k1 -s +1 r2
+s stat -c '%s %n' r1 r2
+s truncate -s 0 a
+s stat -c %s a
+s truncate -s 4 f1
+s truncate -o -s 1 a
+s truncate -s 1Q a
+s truncate a
+s truncate -s 4 d
+echo data > s1
+s sync s1
+s sync -d s1
+s sync --data s1 d
+s sync nosuch
+s sync
+s sync -f s1
+t=$(mktemp); echo "status $?"; case $t in /tmp/tmp.??????????) echo shape /tmp/tmp.XXXXXXXXXX;; *) echo "shape $t";; esac
+s stat -c '%A %s %F' $t
+t=$(mktemp -d); echo "status $?"; case $t in /tmp/tmp.??????????) echo shape /tmp/tmp.XXXXXXXXXX;; *) echo "shape $t";; esac
+s stat -c '%A %F' $t
+t=$(mktemp -p $W x.XXXXXX); echo "status $?"; case $t in $W/x.??????) echo shape W/x.XXXXXX;; *) echo "shape $t";; esac
+t=$(mktemp --suffix=.txt -p $W); echo "status $?"; case $t in $W/tmp.??????????.txt) echo shape W/tmp.XXXXXXXXXX.txt;; *) echo "shape $t";; esac
+t=$(mktemp -u -p $W); echo "status $?"; case $t in $W/tmp.??????????) echo shape W/tmp.XXXXXXXXXX;; *) echo "shape $t";; esac
+s stat -c %n $t
+t1=$(mktemp -p $W); t2=$(mktemp -p $W); case $t1 in $t2) echo same;; *) echo distinct;; esac
+s mktemp abc
+s mktemp -p nodir
+s mktemp -q -p nodir
+ln -s a la; ln -s la lla; ln -s nowhere dangle; ln -s d ld; ln -s /etc le
+s realpath .
+s realpath ./d/../a
+s realpath la lla
+s realpath -s la
+s realpath dangle
+s realpath -e dangle
+s realpath -m nowhere/x/../y
+s realpath --relative-to=/tmp a
+s realpath --relative-base=/tmp a /etc
+s realpath -L le/..
+s realpath -P le/..
+s realpath -q -e nosuch
+s tty
+s tty -s
+s tty --silent
+tty < a; echo "status $?"
+tty -s < a; echo "status $?"
+s tty extra
+cd /; rm -r $W; echo "status $?"
+exit
