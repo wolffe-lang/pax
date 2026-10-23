@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# e2fs — run one of e2fsprogs' programs (mkfs.ext2, e2fsck, debugfs,
+# dumpe2fs) on an image, from a container image pinned by digest (px63):
+# the host's own e2fsprogs is never used, so every host (kasumi, the CI
+# runner) runs the same build, and an image's bytes and a listing's text
+# do not move with the host's distribution.
+#
+#   tools/e2fs DIR PROGRAM [ARG...]
+#   tools/e2fs --version
+#
+# DIR is mounted read-write at the same path inside the container and is
+# its working directory; the program's arguments name files in it. The
+# container has no network and runs as root inside its own user
+# namespace (rootless podman) or the engine's (CI's Docker); nothing of
+# the host's but DIR is reachable. E2FSPROGS_FAKE_TIME and
+# SOURCE_DATE_EPOCH are passed through when set (mkfs.ext2's times, for
+# a reproducible image). --version prints the pinned image, the
+# package's version and the sha256 of mke2fs, e2fsck and debugfs.
+#
+# PAX_ENGINE: podman (default when present) or docker. PAX_E2FS_IMAGE:
+# the image (default docker.io/library/ubuntu@sha256:534baea6…, Ubuntu
+# 24.04, e2fsprogs 1.47.0-2.4~exp1ubuntu4.1, the CI runner's release).
+# Black-box: the programs are run, never read (ruling #22). Exit: the
+# program's; 2 on a usage or engine error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+IMAGE=${PAX_E2FS_IMAGE:-docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55}
+engine=${PAX_ENGINE:-}
+if [ -z "$engine" ]; then
+    if command -v podman >/dev/null 2>&1; then engine=podman; else engine=docker; fi
+fi
+need "$engine"
+envs=()
+[ -z "${E2FSPROGS_FAKE_TIME:-}" ] || envs+=(-e "E2FSPROGS_FAKE_TIME=$E2FSPROGS_FAKE_TIME")
+[ -z "${SOURCE_DATE_EPOCH:-}" ] || envs+=(-e "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH")
+if [ "${1:-}" = --version ]; then
+    exec "$engine" run --rm --network none "$IMAGE" bash -c '
+        echo "image: '"$IMAGE"'"
+        dpkg -s e2fsprogs | sed -n "s/^Version: /e2fsprogs: /p"
+        for p in mke2fs e2fsck debugfs; do echo "$p: $(sha256sum /usr/sbin/$p | cut -d" " -f1)"; done'
+fi
+[ $# -ge 2 ] || die "usage: e2fs DIR PROGRAM [ARG...] | e2fs --version"
+dir=$(cd "$1" && pwd); shift
+case $1 in
+    mkfs.ext2|mke2fs|e2fsck|debugfs|dumpe2fs) ;;
+    *) die "not one of mkfs.ext2, mke2fs, e2fsck, debugfs, dumpe2fs: $1" ;;
+esac
+# podman (rootless): the container's root is this user, so what it writes
+# is this user's; docker (rootful, CI): run as this user for the same.
+opts=()
+if [ "$engine" = podman ]; then
+    opts=(--security-opt label=disable)
+else
+    opts=(--user "$(id -u):$(id -g)")
+fi
+exec "$engine" run --rm --network none "${opts[@]}" ${envs[@]+"${envs[@]}"} \
+    -v "$dir:$dir" -w "$dir" "$IMAGE" "$@"
