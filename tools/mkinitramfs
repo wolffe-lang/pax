@@ -6,6 +6,7 @@
 #   tools/mkinitramfs OUT.cpio ARG...
 #       ARG: /PATH=FILE[:MODE[:UID:GID]]   a file
 #            /PATH/[:MODE[:UID:GID]]       a directory (px42)
+#            /PATH->TARGET[:UID:GID]       a symbolic link (px64)
 #
 # A file argument puts FILE's bytes at PATH (a leading `/` is dropped,
 # as cpio writes names); MODE is octal permission bits (default 755
@@ -14,7 +15,12 @@
 # directory argument names it: then it has that MODE (default 755).
 # UID and GID are decimal, the entry's owner and group (px42, pax#48:
 # an image can hold a file that is not root's); without them 0 and 0,
-# and the archive is then the bytes it was before px42. Reproducible:
+# and the archive is then the bytes it was before px42. A link argument
+# (px64: /bin/grep -> scent) writes cpio(5)'s symbolic link, mode
+# 0120777, nlink 1, its data the TARGET's bytes (no NUL; 1 to 4095 of
+# them, as symlink(2) takes, and no `:` in this argument's form), owned
+# root's unless UID and GID are given; the TARGET is never read or
+# checked here (a link may dangle). Reproducible:
 # inodes numbered 1, 2, … in the order written, mtime 0, nlink 1 (2 for
 # a directory), devices 0, check 0 (`070701`), entries sorted by path,
 # the archive ending with `TRAILER!!!`. Prints one line per entry (its
@@ -65,11 +71,24 @@ def clean(path):
 
 def main(argv):
     if len(argv) < 3:
-        die("usage: mkinitramfs OUT.cpio /PATH=FILE[:MODE[:UID:GID]]... /PATH/[:MODE[:UID:GID]]...")
+        die("usage: mkinitramfs OUT.cpio /PATH=FILE[:MODE[:UID:GID]]... /PATH/[:MODE[:UID:GID]]... /PATH->TARGET[:UID:GID]...")
     out = argv[1]
     files = {}
     named = {}
+    links = {}
     for arg in argv[2:]:
+        arrow, eq = arg.find("->"), arg.find("=")
+        if arrow >= 0 and (eq < 0 or arrow < eq):
+            path, target = arg[:arrow], arg[arrow + 2:]
+            target, sep, spec = target.partition(":")
+            if sep and len(spec.split(":")) != 2:
+                die("not /PATH->TARGET[:UID:GID]: %s" % arg)
+            _, uid, gid = attrs("0777:" + spec if sep else "", arg)
+            tb = target.encode()
+            if not 1 <= len(tb) <= 4095 or b"\0" in tb:
+                die("a link's target is 1 to 4095 bytes, no NUL: %s" % arg)
+            links[clean(path)] = (tb, uid, gid)
+            continue
         if "=" not in arg:
             path, sep, spec = arg.partition("/:")
             if not sep and not arg.endswith("/"):
@@ -91,7 +110,7 @@ def main(argv):
             mode = 0o755 if os.access(src, os.X_OK) else 0o644
         files[name] = (data, mode, uid, gid)
     dirs = {}
-    for name in list(files) + [d + "/." for d in named]:
+    for name in list(files) + list(links) + [d + "/." for d in named]:
         parts = name.split("/")[:-1]
         for i in range(1, len(parts) + 1):
             dirs["/".join(parts[:i])] = (0o755, 0, 0)
@@ -99,8 +118,14 @@ def main(argv):
     for d in dirs:
         if d in files:
             die("both a file and a directory: %s" % d)
+        if d in links:
+            die("both a link and a directory: %s" % d)
+    for n in links:
+        if n in files:
+            die("both a file and a link: %s" % n)
     entries = [(d, None, m | 0o040000, u, g) for d, (m, u, g) in dirs.items()]
     entries += [(n, d, m | 0o100000, u, g) for n, (d, m, u, g) in files.items()]
+    entries += [(n, t, 0o120777, u, g) for n, (t, u, g) in links.items()]
     entries.sort(key=lambda e: e[0])
     buf = b""
     ino = 1
@@ -112,7 +137,10 @@ def main(argv):
         if data is not None:
             buf = pad4(buf + data)
         own = "" if (uid, gid) == (0, 0) else " %d:%d" % (uid, gid)
-        print("%s %o %d %s%s" % ("dir " if data is None else "file", mode, size, name, own))
+        if mode & 0o170000 == 0o120000:
+            print("link %o %d %s -> %s%s" % (mode, size, name, data.decode(), own))
+        else:
+            print("%s %o %d %s%s" % ("dir " if data is None else "file", mode, size, name, own))
         ino += 1
     buf = pad4(buf + header(0, 0, 1, 0, b"TRAILER!!!") + b"TRAILER!!!\0")
     with open(out, "wb") as f:
