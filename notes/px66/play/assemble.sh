@@ -9,7 +9,11 @@
 # Limine's BIOS stage in partition 3. Made on the host (tools/mkdisk runs
 # its tools in their pinned containers; the epoch the head commit's, so
 # one commit makes one disk). The binaries are stripped copies (a
-# tinkering image, not a suite's evidence).
+# tinkering image, not a suite's evidence), but for scent, as px64's
+# dev image has it (notes/px64/dev-iso/assemble.sh): /bin/scent the
+# unmodified binary tools/mkscent built, /bin/grep an archive link to it
+# (tools/mkinitramfs' `->`), /bin/egrep and /bin/fgrep scent's wrappers,
+# byte for byte, 0755.
 #
 #   PX66_HEAD=<sha> PX66_EPOCH=<commit time> assemble.sh [SIZE [ESP]]
 set -u
@@ -23,14 +27,16 @@ set -u; cd $P; W=$L/w; S=$W/strip
 rm -rf $S; mkdir -p $S
 for f in $W/bore/*; do case $f in *.txt) continue ;; esac; strip -o $S/${f##*/} $f || echo "strip failed $f"; done
 strip -o $S/pelt $W/pelt/pelt; strip -o $S/lope $W/lope/lope; strip -o $S/aspen $W/aspen/aspen; strip -o $S/yew $W/yew/yew; strip -o $S/lupin $W/lupin/lupin; strip -o $S/su $W/su/su; strip -o $S/play $W/play/play; cp $W/bin/as $S/as; cp $W/probe/reboot $S/reboot
+cp $W/scent/scent $W/scent/egrep $W/scent/fgrep $S/
 printf "root:x:0:0:root:/:/bin/pelt\npax:x:1000:1000:pax:/home/pax:/bin/pelt\nlobo:x:990:990:lobo:/srv/lobo:/bin/false\n" > $W/passwd
 printf "root:x:0:\npax:x:1000:\nlobo:x:990:\n" > $W/group
 cat > $W/motd <<MOTD
 PAX playground: pax px66 $HEAD, wolf 0.2.34, pelt 57ffef9, boreutils 12de639, lope bc38867,
-aspen 476edee, lupin 0.1.55 (static musl). pelt is pid 1 with job control (sh -i -m).
+aspen 476edee, scent b6f63a4, lupin 0.1.55 (static musl). pelt is pid 1 with job control (sh -i -m).
 Try: ls -l /bin, jobs, Ctrl-Z, bg, fg, kill %1, timeout, su pax, play mambo.
 lope jumps (its hook in /etc/shrc): cd /etc, cd /bin, then etc alone, g -, gi.
 aspen is tree(1) in wolf: aspen /, aspen -a -L 2 /home/pax, aspen -J /bin, aspen --du /usr.
+scent is grep(1) in wolf (/bin/grep links to it; egrep, fgrep): grep -n pax /etc/passwd.
 lupin runs wolf programs: cd /usr/share/lupin; lupin run hello.lu (or write one: cat > x.lu).
 yew is the editor (77c1083), on this screen as on a Linux VT: yew notes.txt; i types, Esc, :w saves, :q quits, C-z and fg.
 This machine booted from its disk, pax-disk.img: Limine and the kernel on its partition 1,
@@ -41,7 +47,7 @@ closing QEMU without exit is a power cut (the next boot says "not cleanly unmoun
 MOTD
 { cat user/shrc; printf "\n# px63, the playground: start at home (/home/pax, on the disk).\ncd\n"; } > $W/shrc
 printf "/bin/env HOME=/home/pax ENV=/etc/shrc /bin/sh -i -m\n" > $W/play.run
-args=(/tmp/:1777 /home/pax/:755:1000:1000 /etc/passwd=$W/passwd:644 /etc/group=$W/group:644 /etc/localtime=$W/localtime:644 /etc/motd=$W/motd:644 /etc/shrc=$W/shrc:644 /etc/fstab=user/fstab-disk:644)
+args=(/tmp/:1777 /home/pax/:755:1000:1000 /etc/passwd=$W/passwd:644 /etc/group=$W/group:644 /etc/localtime=$W/localtime:644 /etc/motd=$W/motd:644 /etc/shrc=$W/shrc:644 /etc/fstab=user/fstab-disk:644 /bin/grep-\>scent)
 for f in $S/*; do n=${f##*/}; case $n in pelt) args+=(/bin/pelt=$f:755 /bin/sh=$f:755) ;; *) args+=(/bin/$n=$f:755) ;; esac; done
 while IFS= read -r -d "" f; do args+=(/usr/share/wolf/${f#"$W/std/"}=$f:644); done < <(find $W/std/std -type f -print0)
 for t in user/tunes/*; do args+=(/usr/share/tunes/${t##*/}=$t:644); done

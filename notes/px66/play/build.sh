@@ -1,5 +1,6 @@
 #!/bin/bash
-# px66, kasumi: the playground's programs and kernel, px63's recipe
+# px66, kasumi: the playground's programs and kernel, px63's recipe,
+# plus scent (tools/mkscent, px64: /bin/grep is scent since pax 68807993)
 # (notes/px61/playground-build.sh, the orchestrator's orch-paxplay
 # build.sh before it) made lane-local: the head's pins, CPUs 0-3, plus
 # /bin/reboot (tools/mkdiskprobe). The shared recipes are not edited; no
@@ -19,6 +20,7 @@ tools/fetch-limine >/dev/null; echo "limine rc=$?"
 tools/mkpelt $W/pelt > $W/pelt.txt 2>&1; echo "mkpelt rc=$?"
 tools/mklope $W/lope > $W/lope.txt 2>&1; echo "mklope rc=$?"
 tools/mkaspen $W/aspen > $W/aspen.txt 2>&1; echo "mkaspen rc=$?"
+tools/mkscent $W/scent > $W/scent.txt 2>&1; echo "mkscent rc=$?"
 tools/fetch-std $W/std > $W/std.txt 2>&1; echo "std rc=$?"
 tools/mkyew $W/yew > $W/yew.txt 2>&1; echo "mkyew rc=$?"
 tools/mkboreutils $W/bore $U > $W/bore.txt 2>&1; echo "mkboreutils rc=$?"
