@@ -6,7 +6,10 @@ the machine and the same disk boots again):
 
     qemu-system-x86_64 -machine q35 -cpu max -m 512M -nographic -nic none \
         -drive file=DISK,if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0,bootindex=0
-    [-bios EDK2-CODE.fd]   (uefi: the line the maintainer's Mac runs, its combined code file)
+    [-drive if=pflash,format=raw,unit=0,readonly=on,file=EDK2-CODE.fd]
+        (uefi: Homebrew's edk2-x86_64-code.fd, as the maintainer's Mac has
+        it; `-bios` with that file is refused, "qemu: could not load PC
+        BIOS", measured on kasumi's QEMU 11.1.1 with the Mac's own file)
 
     cd; cat > notes.txt (a line, Ctrl-D); ls -l; reboot;
     then, on the second boot: cat notes.txt; exit
@@ -32,7 +35,7 @@ bios = sys.argv[3] if len(sys.argv) > 3 else None
 cmd = ["taskset", "-c", "0-3", "qemu-system-x86_64", "-machine", "q35", "-cpu", "max", "-m", "512M", "-nographic", "-nic", "none",
        "-drive", "file=%s,if=none,id=d0,format=raw" % disk, "-device", "virtio-blk-pci,drive=d0,bootindex=0"]
 if bios:
-    cmd += ["-bios", bios]
+    cmd += ["-drive", "if=pflash,format=raw,unit=0,readonly=on,file=%s" % bios]
 p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 with open(logp + ".pid", "w") as f:
     f.write("%d\n" % p.pid)
