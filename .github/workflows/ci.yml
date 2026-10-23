@@ -3220,6 +3220,136 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px63: the disk. kernel/vblk's virtio block device and kernel/block's
+  # requests through kmain_blk's self-test: a pattern written across a
+  # raw image the test makes (16 MiB and three sectors), flushed, read
+  # back, and checked from the host's side; the same image read-only
+  # (VIRTIO_BLK_F_RO, the write refused by name); no disk.
+  mpx6-blk:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-blk')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils
+          qemu-system-x86_64 --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx6-blk-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the disk's self-test, the plan's legs (all four in the all tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx6-blk $PAX_LEGS
+
+      - name: keep the kernels, the transcripts and the halt probes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-blk-linux
+          path: |
+            build/mpx6-blk/*/kmain_blk.elf
+            build/mpx6-blk/*/*.log
+            build/mpx6-blk-*.log
+            build/mpx6-blk-*.meta
+            build/mpx6-blk-*.verdict
+            build/mpx6-blk-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
+  # px63: the file system on the disk. kernel/ext2 through kernel/tree's
+  # second store, mounted by kernel/fstab: tests/mpx6-ext2's read rows (a
+  # fixture image made by tools/mkdisk with e2fsprogs from a container
+  # pinned by digest, mounted read-only, every line of the session Linux's,
+  # the 100 MiB file through the double-indirect blocks), and, in the full
+  # and all tiers, the write session (its lines Linux's, `e2fsck -fn`
+  # clean, its tree Linux's by tools/e2tree) and the reboot row (a note
+  # written, the machine reset by reboot(2), the note read back). The
+  # Linux side is the record made on kasumi (tests/mpx6-ext2.d/linux/):
+  # the runner's kernel is root's to read.
+  mpx6-ext2:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-ext2')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+      PAX_EXT2_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'read' || 'all' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          qemu-system-x86_64 --version
+          gcc --version | head -n 1
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx6-ext2-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: e2fsprogs from the image pinned by digest
+        run: |
+          docker pull docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+          PAX_ENGINE=docker tools/e2fs --version
+
+      - name: ext2 read (and, in the full and all tiers, written and rebooted) against Linux's and e2fsprogs'; the plan's legs
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+        run: tests/mpx6-ext2 $PAX_LEGS
+
+      - name: keep the programs' sums, the sessions, the disks' listings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-ext2-linux
+          path: |
+            build/mpx6-ext2/*.txt
+            build/mpx6-ext2/linux/
+            build/mpx6-ext2/*/kmain_console.elf
+            build/mpx6-ext2/*/*.log
+            build/mpx6-ext2-*.session
+            build/mpx6-ext2-*.serial.log
+            build/mpx6-ext2-*.verdict
+            build/mpx6-ext2-*.img.tree
+            build/mpx6-ext2-*.img.fsck*
+            build/mpx6-ext2-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   tier:
     name: tier ${{ needs.plan.outputs.tier || 'unplanned' }}
     if: ${{ !cancelled() }}
@@ -3265,6 +3395,8 @@ jobs:
       - mpx5-wolf
       - mpx5-yew
       - mpx5-screen
+      - mpx6-blk
+      - mpx6-ext2
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # The issue step's token may write issues; nothing else.
