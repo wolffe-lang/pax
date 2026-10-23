@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# mkmaps — build px62's two probes, each a static x86-64 Linux
+# executable: `maps` (user/elf/maps.c: mremap, file-backed private and
+# shared mappings, shared memory, msync, a file cut under its mappings)
+# and `fifos` (user/elf/fifos.c: mkfifo and mknodat, the FIFO's open
+# rules, flock), for tests/mpx3-maps.
+#
+#   tools/mkmaps OUTDIR
+#
+# mkprobes' compiler line (`cc -static -no-pie -O1`, ET_EXEC with no
+# PT_INTERP, checked), its own tool so that a change to these probes
+# reaches only the suite that runs them (the CI map follows the tools a
+# test names). Build on a baseline x86-64 glibc (the CI runner's Ubuntu;
+# an Ubuntu container on kasumi), never on kasumi's own (px10). Prints
+# `<name> <sha256> <bytes>` for each. Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkmaps OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${CC:-cc}
+need "$cc" readelf
+# Each source by its whole name: the CI map reads the paths a tool names.
+for src in "$PAX_ROOT/user/elf/maps.c" "$PAX_ROOT/user/elf/fifos.c"; do
+    p=$(basename "$src" .c)
+    "$cc" -static -no-pie -O1 -Wall -Wextra -Wno-unused-result -Wl,--build-id=none -Wl,-z,noexecstack \
+        -o "$out/$p" "$src" || die "cc: $p"
+    readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
+    ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP (not static)"
+    printf '%s %s %s\n' "$p" "$(sha256_of "$out/$p")" "$(wc -c < "$out/$p" | tr -d ' ')"
+done
