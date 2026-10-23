@@ -47,12 +47,7 @@
 //! frame. A read comes from the archive where no frame has been
 //! written; the first write to a page copies that page into a frame; a
 //! truncation cuts how much of the archive the file still reads. The
-//! archive's pages are Limine's module and are never given back. A
-//! symbolic link of the archive (px64: cpio(5)'s mode 0120000, its data
-//! the target; `/bin/grep -> scent`) is made a link of the tree, as
-//! `symlink(2)` makes one, its target copied into a frame, owned and
-//! timed as the archive says. A device or a FIFO of the archive is
-//! still left out.
+//! archive's pages are Limine's module and are never given back.
 //!
 //! **A directory** is a file of records, none across a page: the
 //! inode's index + 1 (0: a free record) in 4 bytes, the record's
@@ -2631,11 +2626,9 @@ fn make_dir(d: u64, name: u64, len: u64, perm: u64, uid: u64, gid: u64) -> u64 {
 
 /// Archive entry `e` becomes an inode under the root: every directory
 /// on its path made when missing (0755, root's), then the entry itself
-/// — a directory with its mode, a file whose bytes are the archive's
-/// own, or (px64) a symbolic link whose target is the entry's data (1
-/// to 4095 bytes, as `symlink(2)` takes; another length is left out) —
-/// owned as the archive says (px42: the header's uid and gid; pax#48).
-/// Anything else (a device, a FIFO) is left out.
+/// — a directory with its mode, or a file whose bytes are the archive's
+/// own — owned as the archive says (px42: the header's uid and gid;
+/// pax#48). Anything else (a link, a device) is left out.
 fn adopt(e: u64) {
     let a = initramfs.name_addr(e)
     let l = initramfs.name_length(e)
@@ -2693,14 +2686,6 @@ fn adopt(e: u64) {
             ip(i, I_BACK, initramfs.data(e))
             ip(i, I_BACKLEN, size)
             ip(i, I_ENTRIES, e + 1)
-        } else if m & S_IFMT == S_IFLNK && c == NONE {
-            let size = initramfs.size(e)
-            if size >= 1 && size < PAGE {
-                let i = symlink(d, a + s, n, initramfs.data(e), size, eu, eg)
-                if failed(i) {
-                    panic.fail("tree: no room for a link of the initramfs, frames held", st(S_HELD))
-                }
-            }
         }
         s = k + 1
     }
