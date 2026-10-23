@@ -1,11 +1,17 @@
-//! vm — a process's memory beyond its ELF image: the break and anonymous
-//! mappings (px12, M-PX3).
+//! vm — a process's memory beyond its ELF image: the break, anonymous
+//! mappings (px12, M-PX3), and since px62 mappings of files and shared
+//! memory, `mremap` and `msync`.
 //!
 //! Written from man-pages `brk(2)`, `mmap(2)`, `munmap(2)`,
 //! `mprotect(2)`, the uapi `asm-generic/mman-common.h` and
 //! `linux/mman.h` (the PROT_* and MAP_* numbers), and black-box strace
 //! of glibc-static programs on Linux (what they ask for and what Linux
-//! answers). No Linux source; no other kernel's source.
+//! answers); px62: `mremap(2)`, `msync(2)`, `madvise(2)`, `fork(2)`'s
+//! and `execve(2)`'s words on mappings, `truncate(2)`, POSIX.1-2024's
+//! `mmap()`, `msync()` and `munmap()`, the uapi `linux/mman.h`
+//! (MREMAP_*) and `asm-generic/mman-common.h` (MS_*), and a static
+//! probe's answers on Linux (user/elf/maps.c, tests/mpx3-maps). No Linux
+//! source; no other kernel's source.
 //!
 //! **The words** live in the process's area (kernel/sched's
 //! `proc_area`, zero for a fresh process): the break's start and its
@@ -20,7 +26,7 @@
 //! (read-write, no-execute, user) for every page up to `addr`'s, or
 //! unmaps and frees those above, and answers `addr`.
 //!
-//! **mmap** maps anonymous private memory only: a fresh zeroed frame per
+//! **mmap** of anonymous private memory: a fresh zeroed frame per
 //! page, allocated at the call (no demand paging), with the leaf flags
 //! PROT_* asks for (PROT_WRITE adds RW, no PROT_EXEC is NX, PROT_NONE
 //! takes U/S away so ring 3 cannot touch the page while its frame stays
@@ -29,15 +35,86 @@
 //! above which the stack lives), the cursor only ever moving down, so no
 //! address is handed out twice in a process's life and a hint is
 //! ignored; MAP_FIXED replaces whatever is mapped there, and
-//! MAP_FIXED_NOREPLACE answers -EEXIST instead. Refused by name, nothing
-//! mapped: a mapping of a file (-ENODEV, mmap(2)'s "the underlying
-//! filesystem of the specified file does not support memory mapping":
-//! PAX's initramfs is read through `read`), MAP_SHARED (-EINVAL), a
-//! length of 0 or a fixed address off a page (-EINVAL), an address range
-//! outside the user half (-ENOMEM), no frames (-ENOMEM, what was mapped
-//! given back). `munmap` frees every mapped page of a range (holes are
-//! fine, as on Linux); `mprotect` rewrites the leaves of a range every
-//! page of which is mapped (-ENOMEM otherwise).
+//! MAP_FIXED_NOREPLACE answers -EEXIST instead. A length of 0 or a
+//! fixed address off a page is -EINVAL, an address range outside the
+//! user half -ENOMEM, no frames -ENOMEM (what was mapped given back).
+//! `munmap` frees every mapped page of a range (holes are fine, as on
+//! Linux); `mprotect` rewrites the leaves of a range every page of which
+//! is mapped (-ENOMEM otherwise). (Until px62 a mapping of a file was
+//! refused by name, -ENODEV, and MAP_SHARED -EINVAL.)
+//!
+//! **Files and shared memory** (px62, pax#128). PAX has kept no record
+//! of a mapping beyond its page tables and the reservations below; a
+//! mapping of a file needs one, since its pages are filled when they are
+//! touched. A **record** (192 a process, five words each, after the
+//! reservations in the area) holds a range, the file (kernel/tree's
+//! inode, held while the record lives: `tree.hold`), the file offset of
+//! the range's first byte, the protection, whether it is shared, and
+//! whether a shared one may be made writable (its descriptor was open
+//! for writing and not for appending). There is no page cache to write:
+//! kernel/tree keeps a file's bytes in frames of its own and nowhere
+//! else, so those frames are the cache (R-px62-1). A page of a record is
+//! filled at its first touch (`fault`, from kernel/user's page-fault path
+//! and kernel/uaccess before it checks a buffer), never at the call:
+//! - a shared mapping maps the file's frame itself (`tree.page`: a page
+//!   still the initramfs's, or a hole, gets its frame then, as a first
+//!   `write` would give it), read-write when PROT_WRITE asks; so the
+//!   mapping, a second mapping, a forked child's copy and `read` and
+//!   `write` of the file are one set of bytes, and `msync` has nothing
+//!   to write;
+//! - a private mapping maps the file's frame read-only, COW when it may
+//!   be written; the first write copies the page into a frame of the
+//!   process's own (`unshare`), and a write fault on a page not touched
+//!   yet copies at once (`tree.read_page`, no frame made in the tree).
+//!   So a private page not yet written sees a later `write(2)` of the
+//!   file and a written one does not, as on Linux (POSIX leaves it
+//!   unspecified). With the tree at its cap a read fault copies too.
+//! A page whose offset is at or past the file's end is SIGBUS (BUS_ADRERR,
+//! kernel/user and kernel/signal), the bytes after the end in the last
+//! page read zero; a file cut by `truncate` is unmapped past its new end
+//! in every process first (`cut_maps`: copied private pages too, as
+//! Linux unmaps them, measured), so its frames can go back. Such a leaf
+//! carries kernel/paging's BORROWED bit: `munmap`, `free_user` and every
+//! unmap here leave the frame to the file, and a fork's copy maps it
+//! again. MAP_SHARED|MAP_ANONYMOUS, and MAP_SHARED of /dev/zero, is a
+//! record of an inode with no name (`tree.anon`) as long as the mapping,
+//! whose frames go back with its last record; MAP_PRIVATE of /dev/zero is
+//! anonymous private memory. `mprotect` splits a record at the range's
+//! ends and rewrites its pages' leaves (-EACCES for PROT_WRITE on a
+//! shared mapping that may not be made writable); `munmap` and MAP_FIXED
+//! cut records as reservations are cut (-ENOMEM when a cut needs a
+//! record and none is free); MADV_DONTNEED of a record's page unmaps it,
+//! so its next touch reads the file again. A fork's child holds every
+//! record's file again (`inherit`); `execve` and the end of a process let
+//! them go (`drop_all`). Refused by name: a file or shared mapping in a
+//! vfork child (its space is its parent's), and records full (-ENOMEM
+//! each).
+//!
+//! **mremap** (px62, pax#127; `mremap(2)`): the old range must be one
+//! mapping — all of it inside one record, or inside one reservation, or
+//! present anonymous pages with one leaf's flags — else -EFAULT (two
+//! protections, a hole, the end of a mapping crossed). Sizes are rounded
+//! up to pages; the same size answers the old address, a smaller one
+//! unmaps the tail in place. A larger one grows in place when every page
+//! after the old range up to the new size is free (anonymous pages get
+//! zeroed frames, a reservation or a record its range extended), else
+//! with MREMAP_MAYMOVE moves to a range `pick` chooses: the pages' leaves
+//! move (no byte is copied), a reservation or a record moves with them,
+//! and what was the old range is unmapped; without it -ENOMEM. A flag
+//! that is none, an address off a page, a new size of 0, MREMAP_FIXED or
+//! MREMAP_DONTUNMAP without MREMAP_MAYMOVE, and an old size of 0 are
+//! -EINVAL, Linux's own answers. Refused by name with -EINVAL (R-px62-2,
+//! the answer of a kernel that has `mremap` but not the flag; -ENOSYS
+//! would say there is no `mremap` at all): MREMAP_FIXED with
+//! MREMAP_MAYMOVE, MREMAP_DONTUNMAP with it, and an old size of 0 of a
+//! shared mapping (Linux makes a second mapping of the same pages).
+//! The process's served calls, how many grew in place and how many moved
+//! are kept for kernel/user's line at its end.
+//!
+//! **msync** (px62): MS_ASYNC, MS_SYNC and MS_INVALIDATE are 0 on any
+//! range every page of which is mapped (the file's frames are the file);
+//! -EINVAL for a flag that is none, MS_ASYNC with MS_SYNC, or an address
+//! off a page; -ENOMEM for a page that is not mapped; a length of 0 is 0.
 //!
 //! **Reservations** (px26). A mapping made with PROT_NONE takes no
 //! frame: its range is kept in the area (sixteen ranges a process) and
@@ -89,6 +166,8 @@
 
 use frames
 use paging
+use sched
+use tree
 
 const PAGE: u64 = 4096
 const BRK_MAX: u64 = 0x4000000 // 64 MiB
@@ -103,6 +182,37 @@ const A_REFUSAL: u64 = 3
 const A_RESV: u64 = 4608 // px34: 256 reserved ranges, (lo, hi) each, after kernel/files' 1024 descriptors (px26: sixteen at word 222); lo 0 a free entry; hi's bit 0 set for a range backed on touch
 const RESV: u64 = 256
 const LAZY: u64 = 1 // in hi: the range is backed on touch (MAP_NORESERVE)
+// px62: the records of a file's mapping (or shared memory's), after the
+// reservations (kernel/sched's area grew to 49152 bytes for them).
+const A_MAPS: u64 = 5120 // MAPS records of M_WORDS words; lo 0 a free record
+const MAPS: u64 = 192
+const M_WORDS: u64 = 5
+const M_LO: u64 = 0 // the range's first byte
+const M_HI: u64 = 1 // the first byte past it
+const M_INO: u64 = 2 // the file (kernel/tree's inode)
+const M_OFF: u64 = 3 // the file offset of the range's first byte
+const M_FL: u64 = 4 // the protection (PROT_*), M_SHARED, M_MAYWRITE
+const M_SHARED: u64 = 0x100
+const M_MAYWRITE: u64 = 0x200 // a shared mapping that may be made writable
+const A_REMAP: u64 = 6080 // px62: mremap's census: calls served, grown in place, moved
+const ADDR: u64 = 0x000ffffffffff000 // a leaf's frame (kernel/paging's)
+/// px62: `fault`'s answers: the program's to die of (SIGSEGV), backed
+/// (the access runs again), a page past its file's end (SIGBUS).
+pub const F_NO: u64 = 0
+pub const F_OK: u64 = 1
+pub const F_BUS: u64 = 2
+/// px62: what kernel/files says a descriptor allows a mapping (its
+/// `map_target`): read, write, append.
+pub const ACC_READ: u64 = 1
+pub const ACC_WRITE: u64 = 2
+pub const ACC_APPEND: u64 = 4
+const MREMAP_MAYMOVE: u64 = 1
+const MREMAP_FIXED: u64 = 2
+const MREMAP_DONTUNMAP: u64 = 4
+const MS_ASYNC: u64 = 1
+const MS_INVALIDATE: u64 = 2
+const MS_SYNC: u64 = 4
+const MAP_SYNC: u64 = 0x80000
 
 const PROT_WRITE: u64 = 0x2
 const PROT_EXEC: u64 = 0x4
@@ -124,12 +234,20 @@ const NEG_ENOMEM: u64 = 0xfffffffffffffff4 // -12
 const NEG_EEXIST: u64 = 0xffffffffffffffef // -17
 const NEG_ENODEV: u64 = 0xffffffffffffffed // -19
 const NEG_EINVAL: u64 = 0xffffffffffffffea // -22
+const NEG_EFAULT: u64 = 0xfffffffffffffff2 // -14 (px62)
+const NEG_EACCES: u64 = 0xfffffffffffffff3 // -13 (px62)
+const NEG_EOVERFLOW: u64 = 0xffffffffffffffb5 // -75 (px62)
+const NEG_EOPNOTSUPP: u64 = 0xffffffffffffffa1 // -95 (px62)
 
-// Refusal codes (the REFUSAL word), named by `why`.
-const R_FILE: u64 = 1
-const R_SHARED: u64 = 2
+// Refusal codes (the REFUSAL word), named by `why`. 1 and 2 were a
+// file's mapping and MAP_SHARED, refused until px62.
 const R_NO_FRAMES: u64 = 3
 const R_ADVICE: u64 = 4 // px26
+const R_RECORDS: u64 = 5 // px62
+const R_VFORK: u64 = 6 // px62
+const R_REMAP_FIXED: u64 = 7 // px62
+const R_DONTUNMAP: u64 = 8 // px62
+const R_DUP: u64 = 9 // px62
 
 const NEG_EAGAIN: u64 = 0xfffffffffffffff5 // -11
 const PROT_NONE_BITS: u64 = 0x7
@@ -139,7 +257,7 @@ const MADV_GUARD_INSTALL: u64 = 102
 const MADV_GUARD_REMOVE: u64 = 103
 
 fn get(a: u64, i: u64) -> u64 {
-    // # Safety: `a` is a process area (sched.proc_area), 40960 bytes; i < 5120.
+    // # Safety: `a` is a process area (sched.proc_area), 49152 bytes; i < 6144.
     unsafe { ((a + i * 8) as *u64).read_volatile() }
 }
 
@@ -161,11 +279,20 @@ pub fn take_refusal(a: u64) -> u64 {
 
 /// A refusal code's name.
 pub fn why(r: u64) -> str {
-    if r == R_FILE {
-        return "a file-backed mapping (PAX maps anonymous memory only)"
+    if r == R_RECORDS {
+        return "mapping records full (192 a process)"
     }
-    if r == R_SHARED {
-        return "MAP_SHARED (PAX maps private memory only)"
+    if r == R_VFORK {
+        return "a file or shared mapping in a vfork child (its space is its parent's)"
+    }
+    if r == R_REMAP_FIXED {
+        return "MREMAP_FIXED (PAX moves a mapping only to where it chooses)"
+    }
+    if r == R_DONTUNMAP {
+        return "MREMAP_DONTUNMAP (PAX keeps no emptied old range)"
+    }
+    if r == R_DUP {
+        return "mremap of an old size of 0 (a second mapping of shared pages)"
     }
     if r == R_NO_FRAMES {
         return "out of frames"
@@ -179,9 +306,10 @@ pub fn why(r: u64) -> str {
 // --- reservations (px26) -------------------------------------------------------
 
 /// Whether user address `va` lies in a reserved range (PROT_NONE, or
-/// px34's backed on touch).
+/// px34's backed on touch), or (px62) in a record: a fault there is an
+/// access the mapping refuses (SEGV_ACCERR), not a hole.
 pub fn reserved(a: u64, va: u64) -> bool {
-    reserved_from(a, va) != 0
+    reserved_from(a, va) != 0 || map_at(a, va & !(PAGE - 1)) != MAPS
 }
 
 fn hi_of(a: u64, i: u64) -> u64 {
@@ -254,16 +382,18 @@ fn lazy_at(a: u64, pg: u64) -> bool {
 
 /// px34: back user page `pg` of the space at `pml4` with a zeroed
 /// read-write frame when it lies in a range backed on touch and has none
-/// yet: true when it did (kernel/user's page-fault path, kernel/uaccess
-/// before it checks a buffer). False otherwise, or with no frame left.
-pub fn back(a: u64, pml4: u64, pg: u64) -> bool {
+/// yet: true when it did (px62: `fault`'s, for kernel/user's page-fault
+/// path and kernel/uaccess before it checks a buffer). False otherwise,
+/// or with no frame left.
+fn back(a: u64, pml4: u64, pg: u64) -> bool {
     if pg >= paging.USER_TOP || mapped(pml4, pg) != 0 || !lazy_at(a, pg) {
         return false
     }
     map_zero(pml4, pg, paging.RW | paging.NX)
 }
 
-/// Whether user page `pg` is taken: mapped, or reserved.
+/// Whether user page `pg` is taken: mapped, or reserved, or (px62) in
+/// a record.
 fn taken(a: u64, pml4: u64, pg: u64) -> bool {
     mapped(pml4, pg) != 0 || reserved(a, pg)
 }
@@ -295,6 +425,7 @@ pub fn start(a: u64, top: u64) {
         put(a, A_RESV + i, 0) // px26: and with no reservation
         i += 1
     }
+    drop_all(a) // px62: and no record (`execve` lets the old program's files go)
 }
 
 /// The current break (0 before `start`).
@@ -329,15 +460,26 @@ fn map_zero(pml4: u64, va: u64, flags: u64) -> bool {
     true
 }
 
-/// Unmap and free every mapped page of [lo, hi) (page-aligned).
+/// Unmap and free every mapped page of [lo, hi) (page-aligned); px62:
+/// a borrowed page's frame is its file's, unmapped and left.
 fn unmap_range(pml4: u64, lo: u64, hi: u64) {
     var pg = lo
     while pg < hi {
-        let pa = paging.unmap(pml4, pg) else 0
-        if pa != 0 {
-            frames.free(pa)
-        }
+        drop_page(pml4, pg)
         pg += PAGE
+    }
+}
+
+/// px62: unmap user page `pg`, freeing its frame unless it is borrowed
+/// (a file's page).
+fn drop_page(pml4: u64, pg: u64) {
+    let e = paging.leaf(pml4, pg)
+    if e == 0 {
+        return
+    }
+    let pa = paging.unmap(pml4, pg) else 0
+    if pa != 0 && e & paging.BORROWED == 0 {
+        frames.free(pa)
     }
 }
 
@@ -353,7 +495,7 @@ pub fn brk(a: u64, pml4: u64, addr: u64) -> u64 {
     if want > have {
         var pg = have
         while pg < want {
-            if mapped(pml4, pg) != 0 {
+            if taken(a, pml4, pg) { // px62: a reservation or a record too
                 return cur
             }
             pg += PAGE
@@ -405,6 +547,11 @@ fn pick(a: u64, pml4: u64, n: u64) -> u64 {
                 let rl = reserved_from(a, pg) // px26
                 if rl != 0 {
                     clash = rl + 1 // below the whole reservation
+                } else {
+                    let r = map_at(a, pg) // px62: below the whole record
+                    if r != MAPS {
+                        clash = mw(a, r, M_LO) + 1
+                    }
                 }
             }
         }
@@ -417,25 +564,12 @@ fn pick(a: u64, pml4: u64, n: u64) -> u64 {
     0
 }
 
-/// `mmap(addr, len, prot, flags, fd, off)`: the address, or -errno.
-pub fn mmap(a: u64, pml4: u64, addr: u64, len: u64, prot: u64, flags: u64) -> u64 {
-    let kind = flags & MAP_TYPE
-    if kind == MAP_SHARED || kind == MAP_SHARED_VALIDATE {
-        put(a, A_REFUSAL, R_SHARED)
-        return NEG_EINVAL
-    }
-    if kind != MAP_PRIVATE || len == 0 || prot & PROT_BAD != 0 {
-        return NEG_EINVAL
-    }
-    if flags & MAP_ANONYMOUS == 0 {
-        put(a, A_REFUSAL, R_FILE)
-        return NEG_ENODEV
-    }
-    if len > paging.USER_TOP {
-        return NEG_ENOMEM
-    }
-    let n = page_up(len)
-    var va: u64 = 0
+/// px62: where a new mapping of `n` bytes (a page multiple) goes:
+/// MAP_FIXED's address (what was there unmapped first, reservations and
+/// records cut), MAP_FIXED_NOREPLACE's (-EEXIST when anything is there),
+/// else `pick`'s; -errno. `extra` records the caller will make must be
+/// free beside those a cut needs (-ENOMEM, nothing changed).
+fn place(a: u64, pml4: u64, addr: u64, n: u64, flags: u64, extra: u64) -> u64 {
     if flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0 {
         if addr % PAGE != 0 {
             return NEG_EINVAL
@@ -450,14 +584,48 @@ pub fn mmap(a: u64, pml4: u64, addr: u64, len: u64, prot: u64, flags: u64) -> u6
             }
             pg += PAGE
         }
-        unmap_range(pml4, addr, addr + n)
-        unreserve(a, addr, addr + n) // px26
-        va = addr
-    } else {
-        va = pick(a, pml4, n)
-        if va == 0 {
+        if !splits_ok(a, addr, addr + n, extra) {
+            put(a, A_REFUSAL, R_RECORDS)
             return NEG_ENOMEM
         }
+        unmap_range(pml4, addr, addr + n)
+        unreserve(a, addr, addr + n) // px26
+        unmap_records(a, addr, addr + n) // px62
+        return addr
+    }
+    if free_records(a) < extra {
+        put(a, A_REFUSAL, R_RECORDS)
+        return NEG_ENOMEM
+    }
+    let va = pick(a, pml4, n)
+    if va == 0 {
+        return NEG_ENOMEM
+    }
+    va
+}
+
+/// `mmap(addr, len, prot, flags, fd, off)` of anonymous memory (px62:
+/// kernel/user sends a file's here only for /dev/zero, as anonymous):
+/// the address, or -errno. MAP_SHARED is a record of an inode with no
+/// name (px62, `shared_anon`).
+pub fn mmap(a: u64, pml4: u64, addr: u64, len: u64, prot: u64, flags: u64) -> u64 {
+    let kind = flags & MAP_TYPE
+    if (kind != MAP_PRIVATE && kind != MAP_SHARED && kind != MAP_SHARED_VALIDATE) || len == 0 || prot & PROT_BAD != 0 {
+        return NEG_EINVAL
+    }
+    if kind == MAP_SHARED_VALIDATE && flags & MAP_SYNC != 0 {
+        return NEG_EOPNOTSUPP // px62: no file here keeps its bytes in memory a CPU writes straight to (MAP_SYNC's DAX)
+    }
+    if len > paging.USER_TOP {
+        return NEG_ENOMEM
+    }
+    let n = page_up(len)
+    if kind != MAP_PRIVATE {
+        return shared_anon(a, pml4, addr, n, prot, flags)
+    }
+    let va = place(a, pml4, addr, n, flags, 0)
+    if failed(va) {
+        return va
     }
     if prot & PROT_KNOWN == 0 && reserve(a, va, va + n) {
         return va // px26: PROT_NONE takes no frame; `mprotect` backs what is used
@@ -481,6 +649,84 @@ pub fn mmap(a: u64, pml4: u64, addr: u64, len: u64, prot: u64, flags: u64) -> u6
     va
 }
 
+/// Whether `r` is an -errno.
+fn failed(r: u64) -> bool {
+    r >= 0xfffffffffffff001
+}
+
+/// px62: MAP_SHARED|MAP_ANONYMOUS (and MAP_SHARED of /dev/zero) of `n`
+/// bytes: a record of a new inode with no name of `n` bytes
+/// (`tree.anon`), read-write when PROT_WRITE asks, filled at its first
+/// touch with the inode's frames, which a fork's child shares.
+fn shared_anon(a: u64, pml4: u64, addr: u64, n: u64, prot: u64, flags: u64) -> u64 {
+    if !sched.self_owns() {
+        put(a, A_REFUSAL, R_VFORK)
+        return NEG_ENOMEM
+    }
+    let i = tree.anon(n, 0, 0)
+    if i == tree.NONE {
+        return NEG_ENOMEM
+    }
+    let va = place(a, pml4, addr, n, flags, 1)
+    if failed(va) {
+        tree.hold(i)
+        tree.release(i) // its only holder gone: the inode goes
+        return va
+    }
+    let _m = map_new(a, va, va + n, i, 0, (prot & PROT_KNOWN) | M_SHARED | M_MAYWRITE)
+    va
+}
+
+/// px62: `mmap(addr, len, prot, flags, fd, off)` of a file of the tree
+/// (inode `ino`; kernel/files has checked the descriptor and says what
+/// it allows, `access`: ACC_READ, ACC_WRITE, ACC_APPEND; kernel/user has
+/// checked `off` is on a page): the address, or -errno. A record, no
+/// page filled until it is touched (`fault`). -EINVAL for a length of 0,
+/// a protection or a type that is none; -EACCES for a descriptor not
+/// open for reading, and for MAP_SHARED with PROT_WRITE of one not open
+/// for writing, or open for appending; -EOVERFLOW when the offset and
+/// the length pass what a file offset holds.
+pub fn mmap_file(a: u64, pml4: u64, addr: u64, len: u64, prot: u64, flags: u64, ino: u64, off: u64, access: u64) -> u64 {
+    let kind = flags & MAP_TYPE
+    if (kind != MAP_PRIVATE && kind != MAP_SHARED && kind != MAP_SHARED_VALIDATE) || len == 0 || prot & PROT_BAD != 0 {
+        return NEG_EINVAL
+    }
+    if kind == MAP_SHARED_VALIDATE && flags & MAP_SYNC != 0 {
+        return NEG_EOPNOTSUPP
+    }
+    let is_shared = kind != MAP_PRIVATE
+    if access & ACC_READ == 0 {
+        return NEG_EACCES
+    }
+    if is_shared && prot & PROT_WRITE != 0 && (access & ACC_WRITE == 0 || access & ACC_APPEND != 0) {
+        return NEG_EACCES
+    }
+    if len > paging.USER_TOP {
+        return NEG_ENOMEM
+    }
+    let n = page_up(len)
+    if off > 0x7fffffffffffffff - n {
+        return NEG_EOVERFLOW
+    }
+    if !sched.self_owns() {
+        put(a, A_REFUSAL, R_VFORK)
+        return NEG_ENOMEM
+    }
+    let va = place(a, pml4, addr, n, flags, 1)
+    if failed(va) {
+        return va
+    }
+    var fl = prot & PROT_KNOWN
+    if is_shared {
+        fl = fl | M_SHARED
+        if access & ACC_WRITE != 0 && access & ACC_APPEND == 0 {
+            fl = fl | M_MAYWRITE
+        }
+    }
+    let _m = map_new(a, va, va + n, ino, off, fl)
+    va
+}
+
 /// `munmap(addr, len)`: 0 or -EINVAL.
 pub fn munmap(a: u64, pml4: u64, addr: u64, len: u64) -> u64 {
     if addr % PAGE != 0 || len == 0 || addr >= paging.USER_TOP || len > paging.USER_TOP - addr {
@@ -488,8 +734,13 @@ pub fn munmap(a: u64, pml4: u64, addr: u64, len: u64) -> u64 {
     }
     let n = page_up(len)
     let end = if n > paging.USER_TOP - addr { paging.USER_TOP } else { addr + n }
+    if !splits_ok(a, addr, end, 0) {
+        put(a, A_REFUSAL, R_RECORDS) // px62: a record cut in two needs one more
+        return NEG_ENOMEM
+    }
     unmap_range(pml4, addr, end)
     unreserve(a, addr, end) // px26
+    unmap_records(a, addr, end) // px62
     0
 }
 
@@ -510,13 +761,37 @@ pub fn mprotect(a: u64, pml4: u64, addr: u64, len: u64, prot: u64) -> u64 {
     let end = page_up(addr + len)
     var pg = addr
     while pg < end {
-        if mapped(pml4, pg) == 0 {
-            let rl = reserved_from(a, pg)
-            if rl == 0 {
-                return NEG_ENOMEM
-            }
+        if !covered(a, pml4, pg) {
+            return NEG_ENOMEM
         }
         pg += PAGE
+    }
+    // px62: a shared mapping whose descriptor was not open for writing
+    // is not made writable (-EACCES, nothing changed); a record cut at
+    // the range's ends needs a free record for each cut.
+    if prot & PROT_WRITE != 0 {
+        var q: u64 = 0
+        while q < MAPS {
+            let fw = mw(a, q, M_FL)
+            if mw(a, q, M_LO) != 0 && addr < mw(a, q, M_HI) && end > mw(a, q, M_LO) && fw & M_SHARED != 0 && fw & M_MAYWRITE == 0 {
+                return NEG_EACCES
+            }
+            q += 1
+        }
+    }
+    if edges(a, addr, end) > free_records(a) {
+        put(a, A_REFUSAL, R_RECORDS)
+        return NEG_ENOMEM
+    }
+    split_at(a, addr)
+    split_at(a, end)
+    var r: u64 = 0
+    while r < MAPS {
+        let lo = mw(a, r, M_LO)
+        if lo != 0 && lo >= addr && mw(a, r, M_HI) <= end {
+            put_mw(a, r, M_FL, (mw(a, r, M_FL) & !PROT_KNOWN) | (prot & PROT_KNOWN))
+        }
+        r += 1
     }
     var fl = leaf(prot)
     if prot & PROT_KNOWN != 0 {
@@ -538,6 +813,17 @@ pub fn mprotect(a: u64, pml4: u64, addr: u64, len: u64, prot: u64) -> u64 {
     let keep_lazy = any_lazy && prot & PROT_KNOWN == PROT_RW && prot & PROT_EXEC == 0
     pg = addr
     while pg < end {
+        let rec = map_at(a, pg)
+        if rec != MAPS {
+            // px62: a record's page is filled at its touch; a present one
+            // takes the leaf its record's flags give it (`rec_leaf`).
+            let e = paging.leaf(pml4, pg)
+            if e != 0 {
+                let _ok = paging.protect_user(pml4, pg, rec_leaf(mw(a, rec, M_FL), e))
+            }
+            pg += PAGE
+            continue
+        }
         if mapped(pml4, pg) == 0 {
             if prot & PROT_KNOWN != 0 && !(keep_lazy && lazy_at(a, pg)) {
                 if !map_zero(pml4, pg, leaf(prot)) {
@@ -571,7 +857,7 @@ pub fn madvise(a: u64, pml4: u64, addr: u64, len: u64, advice: u64) -> u64 {
     let end = page_up(addr + len)
     var pg = addr
     while pg < end {
-        if mapped(pml4, pg) == 0 && reserved_from(a, pg) == 0 {
+        if !covered(a, pml4, pg) {
             return NEG_ENOMEM
         }
         pg += PAGE
@@ -581,6 +867,26 @@ pub fn madvise(a: u64, pml4: u64, addr: u64, len: u64, advice: u64) -> u64 {
     }
     pg = addr
     while pg < end {
+        let rec = map_at(a, pg)
+        if rec != MAPS {
+            // px62: a record's page is never zeroed in place (it may be
+            // the file's): MADV_DONTNEED unmaps it, so its next touch
+            // reads the file again (a private copy is lost, as on
+            // Linux); a guard takes U/S away from its record's leaf and
+            // gives it back. MADV_FREE is a hint here.
+            let e = paging.leaf(pml4, pg)
+            if e != 0 {
+                if adv == MADV_DONTNEED {
+                    drop_page(pml4, pg)
+                } else if adv == MADV_GUARD_INSTALL {
+                    let _ok = paging.protect_user(pml4, pg, rec_leaf(mw(a, rec, M_FL), e) & !paging.US)
+                } else if adv == MADV_GUARD_REMOVE {
+                    let _ok = paging.protect_user(pml4, pg, rec_leaf(mw(a, rec, M_FL), e))
+                }
+            }
+            pg += PAGE
+            continue
+        }
         let pa = mapped(pml4, pg)
         if pa != 0 && (adv == MADV_DONTNEED || adv == MADV_FREE) && lazy_at(a, pg) {
             // px34: a page of a range backed on touch gives its frame
@@ -604,6 +910,643 @@ pub fn madvise(a: u64, pml4: u64, addr: u64, len: u64, advice: u64) -> u64 {
             } else {
                 let _ok = paging.protect_user(pml4, pg, paging.RW | paging.NX | paging.US)
             }
+        }
+        pg += PAGE
+    }
+    0
+}
+
+// --- px62: the records of files' and shared memory's mappings ---------------------
+
+fn mw(a: u64, r: u64, w: u64) -> u64 {
+    get(a, A_MAPS + r * M_WORDS + w)
+}
+
+fn put_mw(a: u64, r: u64, w: u64, v: u64) {
+    put(a, A_MAPS + r * M_WORDS + w, v)
+}
+
+/// The record user page `pg` lies in, or MAPS.
+fn map_at(a: u64, pg: u64) -> u64 {
+    var r: u64 = 0
+    while r < MAPS {
+        let lo = mw(a, r, M_LO)
+        if lo != 0 && pg >= lo && pg < mw(a, r, M_HI) {
+            return r
+        }
+        r += 1
+    }
+    MAPS
+}
+
+/// How many records are free.
+fn free_records(a: u64) -> u64 {
+    var n: u64 = 0
+    var r: u64 = 0
+    while r < MAPS {
+        if mw(a, r, M_LO) == 0 {
+            n += 1
+        }
+        r += 1
+    }
+    n
+}
+
+/// A record of [lo, hi) mapping inode `ino` from offset `off` with flags
+/// `fl`, holding the inode: false when none is free (the callers have
+/// counted first).
+fn map_new(a: u64, lo: u64, hi: u64, ino: u64, off: u64, fl: u64) -> bool {
+    var r: u64 = 0
+    while r < MAPS {
+        if mw(a, r, M_LO) == 0 {
+            put_mw(a, r, M_LO, lo)
+            put_mw(a, r, M_HI, hi)
+            put_mw(a, r, M_INO, ino)
+            put_mw(a, r, M_OFF, off)
+            put_mw(a, r, M_FL, fl)
+            tree.hold(ino)
+            return true
+        }
+        r += 1
+    }
+    false
+}
+
+/// Record `r` goes, and its hold on its inode (the last hold of one with
+/// no name gives its frames back: `tree.release`).
+fn map_free(a: u64, r: u64) {
+    let i = mw(a, r, M_INO)
+    var w: u64 = 0
+    while w < M_WORDS {
+        put_mw(a, r, w, 0)
+        w += 1
+    }
+    tree.release(i)
+}
+
+/// How many records a cut of [lo, hi) out of every record makes: one for
+/// each record [lo, hi) lies strictly inside.
+fn splits(a: u64, lo: u64, hi: u64) -> u64 {
+    var n: u64 = 0
+    var r: u64 = 0
+    while r < MAPS {
+        let rl = mw(a, r, M_LO)
+        if rl != 0 && rl < lo && mw(a, r, M_HI) > hi {
+            n += 1
+        }
+        r += 1
+    }
+    n
+}
+
+/// Whether the records free cover a cut of [lo, hi) and `extra` more.
+fn splits_ok(a: u64, lo: u64, hi: u64, extra: u64) -> bool {
+    splits(a, lo, hi) + extra <= free_records(a)
+}
+
+/// How many records splitting every record at `lo` and at `hi` makes
+/// (`mprotect`: a record crossing an end is cut there).
+fn edges(a: u64, lo: u64, hi: u64) -> u64 {
+    var n: u64 = 0
+    var r: u64 = 0
+    while r < MAPS {
+        let rl = mw(a, r, M_LO)
+        let rh = mw(a, r, M_HI)
+        if rl != 0 && rl < lo && rh > lo {
+            n += 1
+        }
+        if rl != 0 && rl < hi && rh > hi {
+            n += 1
+        }
+        r += 1
+    }
+    n
+}
+
+/// The record `x` lies strictly inside becomes two, cut at `x` (the
+/// second holding the inode again); nothing when none.
+fn split_at(a: u64, x: u64) {
+    var r: u64 = 0
+    while r < MAPS {
+        let rl = mw(a, r, M_LO)
+        let rh = mw(a, r, M_HI)
+        if rl != 0 && rl < x && rh > x {
+            put_mw(a, r, M_HI, x)
+            let _m = map_new(a, x, rh, mw(a, r, M_INO), mw(a, r, M_OFF) + (x - rl), mw(a, r, M_FL))
+            return
+        }
+        r += 1
+    }
+}
+
+/// Take [lo, hi) out of every record, as `unreserve` does a reservation:
+/// a record inside it goes (its hold too), one over an end is cut back
+/// (its offset moved with its first byte), one around it is split (the
+/// callers have counted a free record for that).
+fn unmap_records(a: u64, lo: u64, hi: u64) {
+    var r: u64 = 0
+    while r < MAPS {
+        let rl = mw(a, r, M_LO)
+        let rh = mw(a, r, M_HI)
+        if rl != 0 && lo < rh && hi > rl {
+            if lo <= rl && hi >= rh {
+                map_free(a, r)
+            } else if lo <= rl {
+                put_mw(a, r, M_OFF, mw(a, r, M_OFF) + (hi - rl))
+                put_mw(a, r, M_LO, hi)
+            } else if hi >= rh {
+                put_mw(a, r, M_HI, lo)
+            } else {
+                put_mw(a, r, M_HI, lo)
+                let _m = map_new(a, hi, rh, mw(a, r, M_INO), mw(a, r, M_OFF) + (hi - rl), mw(a, r, M_FL))
+            }
+        }
+        r += 1
+    }
+}
+
+/// Whether user page `pg` belongs to a mapping: mapped, reserved, or in a
+/// record.
+fn covered(a: u64, pml4: u64, pg: u64) -> bool {
+    mapped(pml4, pg) != 0 || reserved_from(a, pg) != 0 || map_at(a, pg) != MAPS
+}
+
+/// The leaf a present page of a record with flags `fl` takes, given its
+/// leaf `e` now: NX without PROT_EXEC, U/S with any access; a file's
+/// frame stays BORROWED, read-write in a shared mapping that may be
+/// written, read-only and COW in a private one; a private page of its
+/// own read-write when the mapping may be written.
+fn rec_leaf(fl: u64, e: u64) -> u64 {
+    let prot = fl & PROT_KNOWN
+    var f: u64 = if prot & PROT_EXEC == 0 { paging.NX } else { 0 }
+    if prot != 0 {
+        f = f | paging.US
+    }
+    if e & paging.BORROWED != 0 {
+        f = f | paging.BORROWED
+        if prot & PROT_WRITE != 0 {
+            f = f | (if fl & M_SHARED != 0 { paging.RW } else { paging.COW })
+        }
+    } else if prot & PROT_WRITE != 0 {
+        f = f | paging.RW
+    }
+    f
+}
+
+fn put_leaf(pml4: u64, pg: u64, pa: u64, f: u64) -> bool {
+    let r = paging.map_user(pml4, pg, pa, f) else 99
+    r != 99
+}
+
+/// A touch of user page `pg` of the space at `pml4` that faulted (or
+/// that kernel/uaccess is about to make), a write when `write`: F_OK
+/// when the page is backed now (a page of a range backed on touch, px34;
+/// a record's page filled from its file, or a private page copied at
+/// its first write), F_BUS for a record's page at or past its file's
+/// end (or no frame to fill it with), F_NO when it is the program's to
+/// die of (SIGSEGV). The module's header says how a record's page is
+/// filled.
+pub fn fault(a: u64, pml4: u64, pg: u64, write: bool) -> u64 {
+    if pg >= paging.USER_TOP {
+        return F_NO
+    }
+    let e = paging.leaf(pml4, pg)
+    let r = map_at(a, pg)
+    if r == MAPS {
+        if e == 0 && back(a, pml4, pg) {
+            return F_OK
+        }
+        return F_NO
+    }
+    let fl = mw(a, r, M_FL)
+    let prot = fl & PROT_KNOWN
+    if prot == 0 || (write && prot & PROT_WRITE == 0) {
+        return F_NO
+    }
+    if e != 0 {
+        if write && e & paging.COW != 0 {
+            return if unshare(pml4, pg, e) { F_OK } else { F_BUS }
+        }
+        return F_NO // a present page the access is refused: the mapping's protection
+    }
+    let ino = mw(a, r, M_INO)
+    let off = mw(a, r, M_OFF) + (pg - mw(a, r, M_LO))
+    if off >= tree.bytes(ino) {
+        return F_BUS // the page is past the file's end (BUS_ADRERR)
+    }
+    let idx = off / PAGE
+    let nx = if prot & PROT_EXEC == 0 { paging.NX } else { 0 }
+    let is_shared = fl & M_SHARED != 0
+    if is_shared || !write {
+        let pa = tree.page(ino, idx)
+        if pa != 0 {
+            var f = nx | paging.BORROWED
+            if prot & PROT_WRITE != 0 {
+                f = f | (if is_shared { paging.RW } else { paging.COW })
+            }
+            return if put_leaf(pml4, pg, pa, f) { F_OK } else { F_BUS }
+        }
+        if is_shared {
+            return F_BUS // the tree at its cap: no frame for the page (tmpfs's SIGBUS)
+        }
+    }
+    // A private page of its own: the first write, or a read with the
+    // tree at its cap.
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        return F_BUS
+    }
+    tree.read_page(ino, idx, pa + frames.hhdm())
+    let f = nx | (if prot & PROT_WRITE != 0 { paging.RW } else { 0 })
+    if !put_leaf(pml4, pg, pa, f) {
+        frames.free(pa)
+        return F_BUS
+    }
+    F_OK
+}
+
+/// The first write to a private mapping's page shared with its file (a
+/// COW leaf `e`): the page copied into a frame of the process's own,
+/// mapped read-write in its place; the file's frame stays the file's.
+/// False with no frame left.
+fn unshare(pml4: u64, pg: u64, e: u64) -> bool {
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        return false
+    }
+    let h = frames.hhdm()
+    let from = (e & ADDR) + h
+    let to = pa + h
+    var k: u64 = 0
+    while k < PAGE {
+        // # Safety: two frames through the HHDM: the file's page (present
+        // in the caller's space) and the one just taken.
+        unsafe { ((to + k) as *u64).write_volatile(((from + k) as *u64).read_volatile()) }
+        k += 8
+    }
+    let _old = paging.unmap(pml4, pg) else 0
+    if !put_leaf(pml4, pg, pa, (e & paging.NX) | paging.RW) {
+        frames.free(pa)
+        return false
+    }
+    true
+}
+
+/// A fork's child (area `a`, a copy of the parent's) holds every
+/// record's file again; its mremap census starts at nothing.
+pub fn inherit(a: u64) {
+    var r: u64 = 0
+    while r < MAPS {
+        if mw(a, r, M_LO) != 0 {
+            tree.hold(mw(a, r, M_INO))
+        }
+        r += 1
+    }
+    put(a, A_REMAP, 0)
+    put(a, A_REMAP + 1, 0)
+    put(a, A_REMAP + 2, 0)
+}
+
+/// Every record goes, and its hold on its file (`execve`, through
+/// `start`; the end of a process, through kernel/files' `close_all`).
+/// The pages stay mapped until the space itself goes; a borrowed one is
+/// never freed with it (kernel/paging's `free_user`).
+pub fn drop_all(a: u64) {
+    var r: u64 = 0
+    while r < MAPS {
+        if mw(a, r, M_LO) != 0 {
+            map_free(a, r)
+        }
+        r += 1
+    }
+    put(a, A_REMAP, 0)
+    put(a, A_REMAP + 1, 0)
+    put(a, A_REMAP + 2, 0)
+}
+
+/// File `ino` is about to be cut to `size` bytes (kernel/files, before
+/// kernel/tree gives the frames past it back): in every process, every
+/// page of a record of it at or past the new end is unmapped — its own
+/// copy freed, a borrowed frame left to the file — so its next touch is
+/// SIGBUS (measured: private copies too) and no space keeps a frame the
+/// tree has given back.
+pub fn cut_maps(ino: u64, size: u64) {
+    let keep = page_up(size)
+    var s: u64 = 0
+    while s < sched.SLOTS {
+        let (a, pml4) = sched.space_of(s)
+        if a != 0 && pml4 != 0 {
+            var r: u64 = 0
+            while r < MAPS {
+                let lo = mw(a, r, M_LO)
+                if lo != 0 && mw(a, r, M_INO) == ino {
+                    let hi = mw(a, r, M_HI)
+                    let off = mw(a, r, M_OFF)
+                    var pg = lo
+                    while pg < hi {
+                        if off + (pg - lo) >= keep {
+                            drop_page(pml4, pg)
+                        }
+                        pg += PAGE
+                    }
+                }
+                r += 1
+            }
+        }
+        s += 1
+    }
+}
+
+/// mremap's census for kernel/user's line at a process's end: (calls
+/// served, grown in place, moved).
+pub fn remap_census(a: u64) -> (u64, u64, u64) {
+    (get(a, A_REMAP), get(a, A_REMAP + 1), get(a, A_REMAP + 2))
+}
+
+fn count(a: u64, w: u64) {
+    put(a, A_REMAP + w, get(a, A_REMAP + w) + 1)
+}
+
+// --- px62: mremap (pax#127) --------------------------------------------------------
+
+const K_NONE: u64 = 0
+const K_PLAIN: u64 = 1 // present anonymous pages with one leaf's flags
+const K_RESV: u64 = 2 // inside one reservation
+const K_REC: u64 = 3 // inside one record
+
+/// The reservation entry user page `pg` lies in, or RESV.
+fn resv_at(a: u64, pg: u64) -> u64 {
+    var i: u64 = 0
+    while i < RESV {
+        let lo = get(a, A_RESV + i * 2)
+        if lo != 0 && pg >= lo && pg < hi_of(a, i) {
+            return i
+        }
+        i += 1
+    }
+    RESV
+}
+
+fn resv_free(a: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < RESV {
+        if get(a, A_RESV + i * 2) == 0 {
+            n += 1
+        }
+        i += 1
+    }
+    n
+}
+
+/// What mapping [old, old + n) is: (K_REC and the record, K_RESV and the
+/// entry, K_PLAIN and the leaf's flags, or K_NONE: no one mapping).
+fn classify(a: u64, pml4: u64, old: u64, n: u64) -> (u64, u64, u64) {
+    let r = map_at(a, old)
+    if r != MAPS {
+        if old + n <= mw(a, r, M_HI) {
+            return (K_REC, r, 0)
+        }
+        return (K_NONE, 0, 0)
+    }
+    let q = resv_at(a, old)
+    if q != RESV {
+        if old + n <= hi_of(a, q) {
+            return (K_RESV, q, 0)
+        }
+        return (K_NONE, 0, 0)
+    }
+    let e0 = paging.leaf(pml4, old)
+    if e0 == 0 || e0 & paging.BORROWED != 0 {
+        return (K_NONE, 0, 0)
+    }
+    let want = e0 & (paging.RW | paging.US | paging.NX)
+    var pg = old + PAGE
+    while pg < old + n {
+        let e = paging.leaf(pml4, pg)
+        if e == 0 || e & (paging.RW | paging.US | paging.NX | paging.BORROWED) != want || map_at(a, pg) != MAPS || resv_at(a, pg) != RESV {
+            return (K_NONE, 0, 0)
+        }
+        pg += PAGE
+    }
+    (K_PLAIN, 0, want)
+}
+
+/// A zeroed frame at user page `pg` with the leaf flags `lf` (U/S taken
+/// away when `lf` has none: a PROT_NONE page made the old way).
+fn map_like(pml4: u64, pg: u64, lf: u64) -> bool {
+    if !map_zero(pml4, pg, lf & (paging.RW | paging.NX)) {
+        return false
+    }
+    if lf & paging.US == 0 {
+        let _ok = paging.protect_user(pml4, pg, lf)
+    }
+    true
+}
+
+/// Zeroed frames for [lo, hi) with the flags `lf`, all or none.
+fn map_run(pml4: u64, lo: u64, hi: u64, lf: u64) -> bool {
+    var pg = lo
+    while pg < hi {
+        if !map_like(pml4, pg, lf) {
+            unmap_range(pml4, lo, pg)
+            return false
+        }
+        pg += PAGE
+    }
+    true
+}
+
+/// Move every present page of [from, from + n) to [to, to + n): its leaf
+/// moves, no byte is copied. False when a table could not be made (what
+/// moved is put back).
+fn move_pages(pml4: u64, from: u64, to: u64, n: u64) -> bool {
+    var k: u64 = 0
+    while k < n {
+        let e = paging.leaf(pml4, from + k)
+        if e != 0 {
+            let pa = paging.unmap(pml4, from + k) else 0
+            let lf = e & (paging.RW | paging.US | paging.NX | paging.BORROWED | paging.COW)
+            if !put_leaf(pml4, to + k, pa, lf & !paging.US) {
+                let _back = put_leaf(pml4, from + k, pa, lf & !paging.US)
+                let _p = paging.protect_user(pml4, from + k, lf)
+                var j: u64 = 0
+                while j < k {
+                    let ej = paging.leaf(pml4, to + j)
+                    if ej != 0 {
+                        let pj = paging.unmap(pml4, to + j) else 0
+                        let fj = ej & (paging.RW | paging.US | paging.NX | paging.BORROWED | paging.COW)
+                        let _b = put_leaf(pml4, from + j, pj, fj & !paging.US)
+                        let _q = paging.protect_user(pml4, from + j, fj)
+                    }
+                    j += PAGE
+                }
+                return false
+            }
+            let _p = paging.protect_user(pml4, to + k, lf)
+        }
+        k += PAGE
+    }
+    true
+}
+
+/// `mremap(old, old_size, new_size, flags, new_address)`: the mapping's
+/// address, or -errno (the module's header says what is served and what
+/// is refused; new_address is MREMAP_FIXED's alone, and that is refused,
+/// so it is not read).
+pub fn mremap(a: u64, pml4: u64, old: u64, osz: u64, nsz: u64, flags: u64) -> u64 {
+    if flags & !(MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP) != 0 {
+        return NEG_EINVAL
+    }
+    if flags & (MREMAP_FIXED | MREMAP_DONTUNMAP) != 0 && flags & MREMAP_MAYMOVE == 0 {
+        return NEG_EINVAL
+    }
+    if old % PAGE != 0 || nsz == 0 || nsz > paging.USER_TOP || osz > paging.USER_TOP {
+        return NEG_EINVAL
+    }
+    if flags & MREMAP_FIXED != 0 {
+        put(a, A_REFUSAL, R_REMAP_FIXED) // R-px62-2
+        return NEG_EINVAL
+    }
+    if flags & MREMAP_DONTUNMAP != 0 {
+        put(a, A_REFUSAL, R_DONTUNMAP)
+        return NEG_EINVAL
+    }
+    let os = page_up(osz)
+    let ns = page_up(nsz)
+    if old >= paging.USER_TOP {
+        return NEG_EFAULT
+    }
+    if os == 0 {
+        let r0 = map_at(a, old)
+        if r0 != MAPS && mw(a, r0, M_FL) & M_SHARED != 0 && flags & MREMAP_MAYMOVE != 0 {
+            put(a, A_REFUSAL, R_DUP)
+        }
+        return NEG_EINVAL
+    }
+    if os > paging.USER_TOP - old {
+        return NEG_EFAULT
+    }
+    let (kind, which, lf) = classify(a, pml4, old, os)
+    if kind == K_NONE {
+        return NEG_EFAULT
+    }
+    if ns == os {
+        count(a, 0)
+        return old
+    }
+    if ns < os {
+        if !splits_ok(a, old + ns, old + os, 0) {
+            put(a, A_REFUSAL, R_RECORDS)
+            return NEG_ENOMEM
+        }
+        unmap_range(pml4, old + ns, old + os)
+        unreserve(a, old + ns, old + os)
+        unmap_records(a, old + ns, old + os)
+        count(a, 0)
+        return old
+    }
+    // Larger: in place when every page up to the new size is free.
+    var room = ns <= paging.USER_TOP - old
+    var pg = old + os
+    while room && pg < old + ns {
+        if taken(a, pml4, pg) {
+            room = false
+        }
+        pg += PAGE
+    }
+    if room {
+        if kind == K_PLAIN {
+            if !map_run(pml4, old + os, old + ns, lf) {
+                put(a, A_REFUSAL, R_NO_FRAMES)
+                return NEG_ENOMEM
+            }
+        } else if kind == K_RESV {
+            put(a, A_RESV + which * 2 + 1, (old + ns) | lazy_of(a, which))
+        } else {
+            put_mw(a, which, M_HI, old + ns)
+        }
+        count(a, 0)
+        count(a, 1)
+        return old
+    }
+    if flags & MREMAP_MAYMOVE == 0 {
+        return NEG_ENOMEM
+    }
+    // Moved, to where `pick` chooses.
+    if kind == K_REC && !splits_ok(a, old, old + os, 1) {
+        put(a, A_REFUSAL, R_RECORDS)
+        return NEG_ENOMEM
+    }
+    if kind == K_RESV {
+        let rl = get(a, A_RESV + which * 2)
+        let rh = hi_of(a, which)
+        var need: u64 = 1
+        if rl < old && rh > old + os {
+            need = 2
+        } else if rl == old && rh == old + os {
+            need = 0
+        }
+        if resv_free(a) < need {
+            return NEG_ENOMEM
+        }
+    }
+    let va = pick(a, pml4, ns)
+    if va == 0 {
+        return NEG_ENOMEM
+    }
+    if kind == K_PLAIN && !map_run(pml4, va + os, va + ns, lf) {
+        put(a, A_REFUSAL, R_NO_FRAMES)
+        return NEG_ENOMEM
+    }
+    if !move_pages(pml4, old, va, os) {
+        if kind == K_PLAIN {
+            unmap_range(pml4, va + os, va + ns)
+        }
+        put(a, A_REFUSAL, R_NO_FRAMES)
+        return NEG_ENOMEM
+    }
+    if kind == K_RESV {
+        let k = lazy_of(a, which)
+        unreserve(a, old, old + os)
+        let _r = reserve_kind(a, va, va + ns, k)
+    } else if kind == K_REC {
+        let ino = mw(a, which, M_INO)
+        let off = mw(a, which, M_OFF) + (old - mw(a, which, M_LO))
+        let fl = mw(a, which, M_FL)
+        tree.hold(ino) // while the old record is cut
+        unmap_records(a, old, old + os)
+        let _m = map_new(a, va, va + ns, ino, off, fl)
+        tree.release(ino)
+    }
+    count(a, 0)
+    count(a, 2)
+    va
+}
+
+// --- px62: msync -------------------------------------------------------------------
+
+/// `msync(addr, len, flags)`: 0, or -EINVAL, -ENOMEM (the module's
+/// header says why there is nothing to write).
+pub fn msync(a: u64, pml4: u64, addr: u64, len: u64, flags: u64) -> u64 {
+    let fl = flags & 0xffffffff
+    if fl & !(MS_ASYNC | MS_INVALIDATE | MS_SYNC) != 0 || (fl & MS_ASYNC != 0 && fl & MS_SYNC != 0) {
+        return NEG_EINVAL
+    }
+    if addr % PAGE != 0 {
+        return NEG_EINVAL
+    }
+    if len == 0 {
+        return 0
+    }
+    if addr >= paging.USER_TOP || len > paging.USER_TOP - addr {
+        return NEG_ENOMEM
+    }
+    let end = page_up(addr + len)
+    var pg = addr
+    while pg < end {
+        if !covered(a, pml4, pg) {
+            return NEG_ENOMEM
         }
         pg += PAGE
     }
