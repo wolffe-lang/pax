@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the dev image wolf; source, patch and rationale in user/wolf.pin.
+# Build the dev image wolf; source, patch (if any) and rationale in user/wolf.pin.
 # The tool installs and deletes nothing. Retained builds are printed at exit.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
@@ -15,18 +15,29 @@ git -C "$w" init -q src
 git -C "$w/src" fetch -q --depth 1 "$WOLF_SRC_REPO" "refs/tags/$WOLF_SRC_TAG:refs/tags/$WOLF_SRC_TAG"
 git -C "$w/src" -c advice.detachedHead=false checkout -q "$WOLF_SRC_TAG"
 [ "$(git -C "$w/src" rev-parse HEAD)" = "$WOLF_SRC_REV" ] || die "wolf source revision differs from pin"
-patch=$PAX_ROOT/$WOLF_SRC_PATCH
-[ "$(sha256_of "$patch")" = "$WOLF_SRC_PATCH_SHA256" ] || die "wolf portability patch digest differs from pin"
-git -C "$w/src" apply --check "$patch"
-git -C "$w/src" apply "$patch"
+if [ -n "${WOLF_SRC_PATCH:-}" ]; then
+    patch=$PAX_ROOT/$WOLF_SRC_PATCH
+    [ "$(sha256_of "$patch")" = "$WOLF_SRC_PATCH_SHA256" ] || die "wolf portability patch digest differs from pin"
+    git -C "$w/src" apply --check "$patch"
+    git -C "$w/src" apply "$patch"
+    # The modified tree never gets WOLF_RELEASE.
+    unset WOLF_RELEASE
+else
+    # px65 (R-px65-2): no patch, so the tree is the tag's, unmodified; it
+    # gets the stamp wolf-lang's own builder gives a build at the tag
+    # (xtask's tag probe, D57): WOLF_RELEASE=v{version} when that tag
+    # points at HEAD and the tree is clean.
+    [ -z "$(git -C "$w/src" status --porcelain)" ] || die "wolf source tree is not the tag's"
+    git -C "$w/src" tag --points-at HEAD | grep -qx "$WOLF_SRC_TAG" || die "$WOLF_SRC_TAG does not point at HEAD"
+    export WOLF_RELEASE=$WOLF_SRC_TAG
+fi
 cd "$w/src"
 ch=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
 [ "$ch" = "$WOLF_SRC_RUST" ] || die "source Rust differs from pin"
 case $(rustc --version) in "rustc $ch "*) ;; *) die "pinned rustc not installed" ;; esac
 rustup target list --installed --toolchain "$ch" | grep -qx "$WOLF_SRC_TARGET" || die "musl target not installed"
 # xtask dist stages only the host target. Reproduce its three-package
-# build with an explicit target. The modified tree never gets WOLF_RELEASE.
-unset WOLF_RELEASE
+# build with an explicit target.
 export WOLF_COMMIT=${WOLF_SRC_REV:0:7}
 reg=${CARGO_HOME:-$HOME/.cargo}
 CARGO_TARGET_DIR=$w/target \
