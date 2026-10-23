@@ -236,6 +236,7 @@ const CLD_STOPPED: u64 = 5 // px48
 const CLD_CONTINUED: u64 = 6
 const SEGV_MAPERR: u64 = 1
 const SEGV_ACCERR: u64 = 2
+const BUS_ADRERR: u64 = 2 // px62: a mapping's page past its file's end (siginfo.h)
 const ILL_ILLOPN: u64 = 2
 const FPE_INTDIV: u64 = 1
 const FPE_FLTINV: u64 = 7
@@ -633,6 +634,7 @@ fn put_siginfo(pml4: u64, si: u64, sig: u64, code: u64, pid: u64, uid: u64, stat
 /// `self_wait`), make the frame `f` the context a handler returns to:
 /// the call again, or its -EINTR. `restart`: the action has SA_RESTART.
 fn settle_wait(f: u64, restart: bool) {
+    files.fifo_abandon() // px62: a FIFO's waiting open gives its count back (run again, it counts afresh)
     let (w, arg) = sched.self_wait()
     if w == sched.W_NONE || w == sched.W_SUSPEND {
         return // px48: rt_sigsuspend's -EINTR is in the frame already
@@ -1031,9 +1033,11 @@ pub fn sigreturn(f: u64) -> u64 {
 /// block it, the handler runs with the fault's siginfo and `f` is
 /// returned pointing at it; otherwise 0, and kernel/user ends the
 /// process as before px26 (Linux too ends a process whose fault's
-/// signal is blocked or ignored: measured).
-pub fn fault(f: u64, v: u64) -> u64 {
-    let sig = process.fault_signal(v)
+/// signal is blocked or ignored: measured). px62: `bus`, a page fault
+/// on a mapping's page past its file's end (kernel/vm), is SIGBUS with
+/// BUS_ADRERR and the address, as Linux gives it (measured).
+pub fn fault(f: u64, v: u64, bus: bool) -> u64 {
+    let sig = if bus { SIGBUS } else { process.fault_signal(v) }
     let a = area()
     let w = SIG_WORDS + (sig - 1) * 4
     let h = aget(a, w)
@@ -1049,6 +1053,9 @@ pub fn fault(f: u64, v: u64) -> u64 {
         // Nothing at the address is SEGV_MAPERR; a page that is there, or
         // reserved (PROT_NONE), and refuses the access is SEGV_ACCERR.
         code = if err & 1 != 0 || vm.reserved(area(), addr) { SEGV_ACCERR } else { SEGV_MAPERR }
+        if bus {
+            code = BUS_ADRERR
+        }
     } else if v == 0 {
         code = FPE_INTDIV
         addr = word(f, W_RIP)
