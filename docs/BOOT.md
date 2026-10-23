@@ -173,6 +173,84 @@ it with e2fsprogs (`e2fsck -fn`, `debugfs`) and Linux mounts it as
 it is. An image booted with no disk boots as before: no `blk:` line,
 and `/home` the tree's.
 
+## A disk that boots (px66)
+
+The ISO is read-only and needs a disk beside it for anything to last.
+`tools/mkdisk --gpt` makes one disk that is both: QEMU boots it with no
+`-cdrom` at all,
+
+    -drive file=pax-disk.img,if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0,bootindex=0
+
+under SeaBIOS (the default) or a UEFI firmware (`-bios` an edk2 code
+file, or OVMF's pflash). Its GUID partition table (the UEFI
+specification 2.10, chapter 5: a protective MBR, the primary header at
+LBA 1, the backup at the last LBA, 128 entries; every GUID derived from
+the label and SOURCE_DATE_EPOCH) has three entries, numbered as Linux
+numbers them, by slot:
+
+| partition | LBAs | type | holds |
+|---|---|---|---|
+| 3, `vda3` | 2048-4095 (1 MiB), first on the disk | BIOS boot (`21686148-6449-6e6f-744e-656564454649`) | Limine's BIOS stage 2, written by `limine bios-install DISK 3` |
+| 1, `vda1` | from 4096 (2 MiB), `--esp` (default 64 MiB) | EFI system partition (`c12a7328-f81f-11d2-ba4b-00a0c93ec93b`) | FAT32 (pinned dosfstools' `mkfs.fat`, mtools' `mcopy`): `/EFI/BOOT/BOOTX64.EFI`, `/boot/limine/limine.conf`, `/boot/limine/limine-bios.sys`, `/boot/pax` (the kernel), `/boot/initramfs.cpio` |
+| 2, `vda2` | the rest, 1 MiB aligned | Linux file system data (`0fc63daf-8483-4772-8e79-3d69d8477de4`) | ext2, `tools/mkdisk --home`'s: `/home`, `/home/pax` pax's |
+
+**UEFI** finds the ESP by its type and runs `\EFI\BOOT\BOOTX64.EFI`, the
+removable-media path (Limine's USAGE.md "UEFI"; OVMF says `BdsDxe:
+loading Boot0002 "UEFI Misc Device"`). **BIOS** runs the MBR's boot code,
+which `limine bios-install` wrote over the protective MBR's first 440
+bytes (bytes 1-422 measured; the partition records and the 0x55aa are
+left alone), which loads stage 2 from partition 3 (SeaBIOS says
+`Booting from Hard Disk...`). Either way Limine then finds `limine.conf`
+on the boot drive's partitions (CONFIG.md: `/boot/limine/limine.conf` is
+one of the names it tries) and the entry's `boot():` paths resolve to
+the partition the configuration was found on, the ESP. The
+configuration is the ISO's (`boot/limine-initramfs.conf`, or the quiet
+one for the playground): nothing in it knows it is on a disk.
+
+The kernel is entered as from the ISO. kmain_console says where its
+initramfs came from when it was not an optical disc (Limine's
+`struct limine_file`: its media type, partition index and GPT GUIDs):
+
+    boot: /boot/initramfs.cpio from a disk: partition 1, GPT disk <guid>, partition <vda1's PARTUUID>
+
+kernel/block reads the same table (the next section's), the image's
+`/etc/fstab` (`user/fstab-disk`: `/dev/vda2 /home ext2 defaults 0 2`)
+mounts partition 2 at `/home`, and `/` is the initramfs in memory, as
+it is from the ISO (px67 moves `/` onto partition 2). The disk is
+written in place: `reboot` restarts the machine on it, and `exit` writes
+`/home` and marks it clean.
+
+**R-px66-2 (recommended, implemented, not decided): the BIOS layout on
+GPT.** Limine documents one (USAGE.md "BIOS/GPT": a partition "usually of
+BIOS boot type", at least 32 KiB, its number given to `bios-install`),
+and its installer allows no other: measured, on a GPT image with no such
+partition it refuses ("no BIOS boot partition specified or detected")
+and changes nothing, and given none by number it finds one by its type.
+So there is no choice of layout, only of place and size:
+recommendation, partition 3 at 1 MiB, 1 MiB long, first on the disk
+(stage 2 measured at 22.5 KiB, in the 1 MiB before the ESP that
+alignment leaves anyway), numbered after the ESP and `/home` so that
+`/home` is `vda2`.
+
+**R-px66-3 (a report): where the ESP is mounted.** Nowhere, now: PAX
+reads no FAT (FAQ.md argues for the ESP as `/boot`, which is what an
+installer that updates the kernel would want). Reading FAT is a lane of
+its own (a FAT32 reader in kernel/, the ESP at `/boot` by fstab with
+`vfat`); until then a new kernel or initramfs is put on the disk by the
+host (`tools/mkdisk --gpt` again, or mtools on the image). Recommended:
+`/boot`, when P6's installer needs to write it.
+
+**A partition table, in kernel/block.** At `start`, before any mount:
+LBA 0's 0x55aa or no table (a bare file system, the ISO's
+`pax-home.img`: nothing is said); a 0xEE record from LBA 1 for GPT, the
+primary header and its array checked (signature, revision, size, CRC32,
+MyLBA, the usable range, the entry size, the array's place and CRC32),
+the backup at the last LBA checked the same way; else the MBR's four
+primary records (R-px66-1). Each partition is a device whose requests
+are offset by its first sector and refused past its last: the
+specification's rules, the Linux guest's answers on eleven fixture disks
+(`tests/mpx6-part`; `notes/px66-the-partition-table.md`).
+
 ## Measured
 
 The proof's runs, both firmwares, the same ISO on linux and macOS: see
