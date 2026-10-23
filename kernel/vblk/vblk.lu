@@ -1,0 +1,562 @@
+//! vblk — the virtio block device (px63).
+//!
+//! **The device** (VIRTIO 1.2 §5.2, device id 2; PCI `1af4:1001`, the
+//! transitional id, or `1af4:1042`, the 1.x one): `start` finds it in
+//! kernel/pci's table, attaches kernel/virtio's transport to it in
+//! transport words of its own (the first eight words of this driver's
+//! state frame, chosen with `virtio.use_words`; the network device keeps
+//! px20's, the sound device px30's) and windows 8-11 of the device slot,
+//! and brings it up in the specification's order: reset; ACKNOWLEDGE;
+//! DRIVER; the features; FEATURES_OK, read back; the queue; DRIVER_OK.
+//! The driver needs one feature bit and takes four more when they are
+//! offered, each because it is served:
+//!
+//!     VIRTIO_F_VERSION_1     (32)  needed: the 1.x interface
+//!     VIRTIO_BLK_F_FLUSH      (9)  FLUSH requests (kernel/block's `flush`)
+//!     VIRTIO_BLK_F_RO         (5)  the device says it is read-only: every
+//!                                  write is refused by name
+//!     VIRTIO_BLK_F_BLK_SIZE   (6)  the device's logical block size, read
+//!                                  from `blk_size` and reported (the
+//!                                  protocol's unit stays 512 bytes)
+//!     VIRTIO_BLK_F_SEG_MAX    (2)  how many data segments a request may
+//!                                  have (`seg_max`): this driver's are one
+//!
+//! and declines the rest (SIZE_MAX, GEOMETRY, TOPOLOGY, CONFIG_WCE, MQ,
+//! DISCARD, WRITE_ZEROES, the ring's indirect descriptors and event
+//! indices): each is a promise this driver would have to keep. With no
+//! device, or a refusal, nothing is printed (most machines PAX boots have
+//! no disk) or one `blk:` line says which, and the kernel goes on
+//! without a disk; nothing here panics on what a machine lacks.
+//!
+//! **The configuration** (§5.2.4): `capacity`, le64 at 0, in 512-byte
+//! sectors whatever the block size; `seg_max`, le32 at 12; `blk_size`,
+//! le32 at 20. Read at their own widths (kernel/virtio's `device32`,
+//! `device64`).
+//!
+//! **A request** (§5.2.6) is three descriptors: the header
+//!
+//!     le32 type; le32 reserved; le64 sector
+//!
+//! (device-readable), the data (one buffer of `count` × 512 bytes inside
+//! one frame: device-writable for a read, readable for a write), and the
+//! status byte (device-writable: 0 OK, 1 IOERR, 2 UNSUPP). Types: IN 0,
+//! OUT 1, FLUSH 4 (no data; its sector 0, as the specification asks).
+//! The queue (0, the only one: no MQ) is made 64 entries, its three
+//! parts in one frame; SLOTS (16) requests may be with the device at
+//! once, slot k's descriptors 3k, 3k + 1, 3k + 2 and its header and
+//! status in the header frame at 32k. A request is kernel/block's
+//! record (8 words): `submit` takes a free slot, writes the header and
+//! the descriptors, offers the head and notifies; `poll` takes every
+//! request the device has returned, writes its status into its record
+//! and marks it done.
+//!
+//! **Completion is polled.** px20's network device interrupts, because
+//! frames arrive unasked; a disk answers only what was asked, and it is
+//! asked inside a system call that runs with interrupts off on one CPU
+//! (the tree's and the file system's whole concurrency story: nothing
+//! may run between the steps of a change). So the queue asks for no
+//! interrupt (the avail ring's NO_INTERRUPT), the function's INTx is
+//! turned off in its PCI command register (a request left raised on a
+//! line the network or sound device shares would never be withdrawn),
+//! and `wait` looks at the used ring until the request is back, with a
+//! PAUSE between looks and a bound (a device that never answers is an
+//! I/O error, counted, never a hang).
+//!
+//! Every entry runs with IF clear (a system call, or a kernel's own
+//! start before it enables interrupts) or under `sync.irq_save`. No
+//! region, no heap: the state is one frame's words, read and written
+//! volatile, its address in a module `var` (a scalar).
+//!
+//! Written from the OASIS VIRTIO specification 1.2 §5.2 (the block
+//! device: its device id, feature bits, configuration layout, request
+//! layout, types and statuses, the driver's requirements for FLUSH and
+//! for RO), §2.5 and §4.1.3.1 (reading the configuration), §4.1.2 (PCI
+//! discovery: 0x1001 transitional, 0x1040 + 2 for 1.x) and px20's
+//! transport (kernel/virtio). No Linux source; no other kernel's,
+//! firmware's or virtual machine monitor's source; no driver.
+
+use frames
+use log
+use pci
+use sync
+use virtio
+
+extern "c" fn pax_tree_zero(dst: u64, n: u64)
+
+const PAGE: u64 = 4096
+const QSIZE: u64 = 64
+/// Requests the device may hold at once.
+pub const SLOTS: u64 = 16
+const SPIN: u64 = 400000000 // `wait`'s bound, in looks (about 10 s under TCG)
+
+/// Request types (§5.2.6).
+pub const T_IN: u64 = 0
+pub const T_OUT: u64 = 1
+pub const T_FLUSH: u64 = 4
+/// Statuses: the device's three, and this driver's own for a request
+/// that never came back (`wait`'s bound).
+pub const S_OK: u64 = 0
+pub const S_IOERR: u64 = 1
+pub const S_UNSUPP: u64 = 2
+pub const S_LOST: u64 = 0x100
+
+// The feature bits (§5.2.3), and VIRTIO_F_VERSION_1 spelled out (a
+// module `const` cannot be initialised from another module's,
+// wolf-lang#653).
+const F_SEG_MAX: u64 = 0x4
+const F_RO: u64 = 0x20
+const F_BLK_SIZE: u64 = 0x40
+const F_FLUSH: u64 = 0x200
+const F_VERSION_1: u64 = 0x100000000
+
+/// `start`'s answers: the device is up.
+pub const UP: u64 = 0
+/// No virtio block device on the bus.
+pub const ABSENT: u64 = 1
+/// A device that was refused (one line says why).
+pub const REFUSED: u64 = 2
+
+// kernel/block's request record (8 words), which `submit` and `poll`
+// read and write: the type, the first sector, the sectors, the data's
+// physical address, the status, the state (0 free, 1 with the device,
+// 2 done).
+const R_OP: u64 = 0
+const R_SECTOR: u64 = 1
+const R_COUNT: u64 = 2
+const R_PA: u64 = 3
+const R_STATUS: u64 = 4
+const R_STATE: u64 = 5
+/// A request record's states.
+pub const RS_FREE: u64 = 0
+pub const RS_QUEUED: u64 = 1
+pub const RS_DONE: u64 = 2
+
+// The state frame's words (0-7 are kernel/virtio's transport words).
+const W_UP: u64 = 8
+const W_PCI: u64 = 9
+const W_OFFERED: u64 = 10
+const W_TAKEN: u64 = 11
+const W_SECTORS: u64 = 12
+const W_BLKSIZE: u64 = 13
+const W_SEGMAX: u64 = 14
+const W_FRAMES: u64 = 15
+const W_QUEUE: u64 = 16 // the queue's record (kernel/virtio's 8 words)
+const W_HDR: u64 = 24 // the header frame (physical)
+const W_FREE: u64 = 25 // free slots, a bit each
+const W_STATE: u64 = 26 // what `start` answered
+const W_BUSY: u64 = 27 // slots with the device
+const W_SLOT: u64 = 32 // slot k's request record (its kernel address) at W_SLOT + k
+// Counters, from word 64 (the C_* constants).
+const W_COUNT: u64 = 64
+
+/// Counters: requests handed to the device.
+pub const C_REQS: u64 = 0
+/// Of them, reads, writes, flushes.
+pub const C_IN: u64 = 1
+pub const C_OUT: u64 = 2
+pub const C_FLUSH: u64 = 3
+/// Requests the device answered with a status other than OK, or never.
+pub const C_ERR: u64 = 4
+/// Sectors read, written.
+pub const C_SIN: u64 = 5
+pub const C_SOUT: u64 = 6
+/// Looks at the used ring that found nothing (`wait`'s polls).
+pub const C_POLLS: u64 = 7
+/// Times `submit` found every slot with the device and waited for one.
+pub const C_FULL: u64 = 8
+
+/// The state frame, through the HHDM; 0 before `start` found a device.
+var state: u64 = 0
+
+fn base() -> u64 {
+    // # Safety: a scalar module var, read on one CPU with IF clear.
+    unsafe { state }
+}
+
+fn sw(i: u64) -> u64 {
+    // # Safety: i < 512, a word of the state frame this driver owns.
+    unsafe { ((base() + i * 8) as *u64).read_volatile() }
+}
+
+fn put_sw(i: u64, v: u64) {
+    // # Safety: as `sw`.
+    unsafe { ((base() + i * 8) as *u64).write_volatile(v) }
+}
+
+fn rw(a: u64) -> u64 {
+    // # Safety: a word of a request record kernel/block owns, through
+    // the HHDM, 8-aligned.
+    unsafe { (a as *u64).read_volatile() }
+}
+
+fn put_rw(a: u64, v: u64) {
+    // # Safety: as `rw`.
+    unsafe { (a as *u64).write_volatile(v) }
+}
+
+fn w32(a: u64, v: u64) {
+    // # Safety: a header word in the header frame, 4-aligned.
+    unsafe { (a as *u32).write_volatile((v & 0xffffffff) as u32) }
+}
+
+fn w64(a: u64, v: u64) {
+    // # Safety: a header's sector, 8-aligned in the header frame.
+    unsafe { (a as *u64).write_volatile(v) }
+}
+
+fn r8(a: u64) -> u64 {
+    // # Safety: a status byte in the header frame.
+    let v = unsafe { (a as *u8).read_volatile() }
+    v as u64
+}
+
+fn w8(a: u64, v: u64) {
+    // # Safety: as `r8`.
+    unsafe { (a as *u8).write_volatile((v & 0xff) as u8) }
+}
+
+fn bump(i: u64, by: u64) {
+    put_sw(W_COUNT + i, sw(W_COUNT + i) + by)
+}
+
+/// Counter `i` (C_*); 0 with no device.
+pub fn count(i: u64) -> u64 {
+    if base() == 0 {
+        return 0
+    }
+    sw(W_COUNT + i)
+}
+
+/// Whether the device is up.
+pub fn up() -> bool {
+    base() != 0 && sw(W_UP) == 1
+}
+
+/// The device's capacity, in 512-byte sectors.
+pub fn sectors() -> u64 {
+    if !up() { 0 } else { sw(W_SECTORS) }
+}
+
+/// Its logical block size (`blk_size`, 512 when not offered).
+pub fn block_size() -> u64 {
+    if !up() { 512 } else { sw(W_BLKSIZE) }
+}
+
+/// Whether it said it is read-only (VIRTIO_BLK_F_RO).
+pub fn read_only() -> bool {
+    up() && sw(W_TAKEN) & F_RO != 0
+}
+
+/// Whether it takes FLUSH requests (VIRTIO_BLK_F_FLUSH).
+pub fn flushes() -> bool {
+    up() && sw(W_TAKEN) & F_FLUSH != 0
+}
+
+fn zeroed_frame() -> u64 {
+    let pa = frames.alloc() else 0
+    if pa != 0 {
+        // # Safety: the frame just taken, through the HHDM.
+        unsafe { pax_tree_zero(pa + frames.hhdm(), PAGE) }
+    }
+    pa
+}
+
+fn refuse(what: str, v: u64) -> u64 {
+    virtio.add_status(virtio.FAILED)
+    log.put("blk: refused: ")
+    log.put(what)
+    log.put(" ")
+    log.hex(v)
+    log.put("; no disk")
+    log.end()
+    put_sw(W_STATE, REFUSED)
+    REFUSED
+}
+
+/// Find the device, bring it up on the paging structures at `pml4`.
+/// Call after `pci.scan`, IF clear. Answers UP, ABSENT (silent) or
+/// REFUSED (one line says why).
+pub fn start(pml4: u64) -> u64 {
+    var i = pci.find(virtio.VENDOR, 0x1001, 0x1001, 0)
+    if i == pci.MAX {
+        i = pci.find(virtio.VENDOR, 0x1042, 0x1042, 0)
+    }
+    if i == pci.MAX {
+        return ABSENT
+    }
+    let sf = zeroed_frame()
+    if sf == 0 {
+        log.put("blk: refused: no frame for the driver's state, frames free ")
+        log.dec(frames.free_count() as int)
+        log.put("; no disk")
+        log.end()
+        return REFUSED
+    }
+    // # Safety: a scalar module var, written once at boot with IF clear.
+    unsafe { state = sf + frames.hhdm() }
+    put_sw(W_FRAMES, 1)
+    let prev = virtio.use_words(base())
+    let r = bring_up(pml4, i)
+    let _p = virtio.use_words(prev)
+    r
+}
+
+fn bring_up(pml4: u64, i: u64) -> u64 {
+    put_sw(W_PCI, i)
+    let b = pci.bdf(i)
+    // Memory decoding and bus mastering on; INTx off: completion is polled.
+    pci.set_command(b, pci.command(b) | pci.CMD_MEMORY | pci.CMD_MASTER | pci.CMD_INTX_OFF)
+    let a = virtio.attach_at(pml4, i, 8)
+    if a != virtio.OK {
+        log.put("blk: refused: ")
+        log.put(if a == virtio.NO_COMMON { "the device has no virtio 1.x common configuration capability (a legacy-only device)" } else { if a == virtio.NO_MAP { "the device's registers could not be mapped" } else { "the device lacks a virtio 1.x notification, ISR or device capability" } })
+        log.put("; no disk")
+        log.end()
+        put_sw(W_STATE, REFUSED)
+        return REFUSED
+    }
+    if !virtio.reset() {
+        return refuse("the device did not reset, status", virtio.status())
+    }
+    virtio.add_status(virtio.ACKNOWLEDGE)
+    virtio.add_status(virtio.DRIVER)
+    let offered = virtio.device_features()
+    put_sw(W_OFFERED, offered)
+    if offered & F_VERSION_1 == 0 {
+        return refuse("the device lacks VIRTIO_F_VERSION_1 (bit 32), features", offered)
+    }
+    let want = F_VERSION_1 | (offered & (F_FLUSH | F_RO | F_BLK_SIZE | F_SEG_MAX))
+    virtio.set_features(want)
+    virtio.add_status(virtio.FEATURES_OK)
+    if virtio.status() & virtio.FEATURES_OK == 0 {
+        return refuse("the device did not keep FEATURES_OK for features", want)
+    }
+    put_sw(W_TAKEN, want)
+    if virtio.queue_max(0) < QSIZE {
+        return refuse("the request queue is smaller than 64 entries:", virtio.queue_max(0))
+    }
+    let ring = zeroed_frame()
+    let hdr = zeroed_frame()
+    if ring == 0 || hdr == 0 {
+        return refuse("no frame for the queue, frames free", frames.free_count())
+    }
+    put_sw(W_FRAMES, 3)
+    let q = base() + W_QUEUE * 8
+    if !virtio.queue_setup(q, 0, QSIZE, ring) {
+        return refuse("the request queue could not be laid out, used ring at", virtio.queue_word(q, virtio.Q_USED))
+    }
+    put_sw(W_HDR, hdr)
+    // The fixed links: header -> data -> status for every slot.
+    var k: u64 = 0
+    while k < SLOTS {
+        let h = hdr + k * 32
+        virtio.set_desc(q, 3 * k, h, 16, virtio.DESC_NEXT, 3 * k + 1)
+        virtio.set_desc(q, 3 * k + 1, 0, 0, virtio.DESC_NEXT, 3 * k + 2)
+        virtio.set_desc(q, 3 * k + 2, h + 16, 1, virtio.DESC_WRITE, 0)
+        k += 1
+    }
+    put_sw(W_FREE, (1 << SLOTS) - 1)
+    put_sw(W_BUSY, 0)
+    virtio.quiet(q, true)
+    let cap = virtio.device64(0)
+    put_sw(W_SECTORS, cap)
+    put_sw(W_BLKSIZE, if want & F_BLK_SIZE != 0 { virtio.device32(20) } else { 512 })
+    put_sw(W_SEGMAX, if want & F_SEG_MAX != 0 { virtio.device32(12) } else { 0 })
+    if cap == 0 {
+        return refuse("the device's capacity is 0 sectors:", cap)
+    }
+    virtio.add_status(virtio.DRIVER_OK)
+    put_sw(W_UP, 1)
+    put_sw(W_STATE, UP)
+    UP
+}
+
+/// Hand request record `r` (kernel/block's: R_OP, R_SECTOR, R_COUNT,
+/// R_PA filled; the data inside one frame) to the device: a free slot
+/// taken (waiting for one when all are with the device), the header and
+/// the descriptors written, the head offered, the device told. The
+/// record is RS_QUEUED until `poll` sees it back. IF clear.
+pub fn submit(r: u64) {
+    let prev = virtio.use_words(base())
+    if sw(W_FREE) == 0 {
+        bump(C_FULL, 1)
+        var k: u64 = 0
+        while sw(W_FREE) == 0 && k < SPIN {
+            reap()
+            sync.relax()
+            k += 1
+        }
+    }
+    let free = sw(W_FREE)
+    var s: u64 = 0
+    while s < SLOTS && free & (1 << s) == 0 {
+        s += 1
+    }
+    if s == SLOTS {
+        // Every slot still with the device after the bound: lost.
+        put_rw(r + R_STATUS * 8, S_LOST)
+        put_rw(r + R_STATE * 8, RS_DONE)
+        bump(C_ERR, 1)
+        let _q = virtio.use_words(prev)
+        return
+    }
+    put_sw(W_FREE, free & !(1 << s))
+    put_sw(W_BUSY, sw(W_BUSY) + 1)
+    put_sw(W_SLOT + s, r)
+    let q = base() + W_QUEUE * 8
+    let op = rw(r + R_OP * 8)
+    let h = sw(W_HDR) + s * 32 + frames.hhdm()
+    w32(h, op)
+    w32(h + 4, 0)
+    w64(h + 8, if op == T_FLUSH { 0 } else { rw(r + R_SECTOR * 8) })
+    w8(h + 16, 0xff)
+    if op == T_FLUSH {
+        virtio.set_desc_next(q, 3 * s, 3 * s + 2)
+    } else {
+        let n = rw(r + R_COUNT * 8)
+        virtio.set_desc(q, 3 * s + 1, rw(r + R_PA * 8), n * 512, virtio.DESC_NEXT | (if op == T_IN { virtio.DESC_WRITE } else { 0 }), 3 * s + 2)
+        virtio.set_desc_next(q, 3 * s, 3 * s + 1)
+        bump(if op == T_IN { C_SIN } else { C_SOUT }, n)
+    }
+    put_rw(r + R_STATE * 8, RS_QUEUED)
+    put_rw(r + R_STATUS * 8, 0xff)
+    bump(C_REQS, 1)
+    bump(if op == T_IN { C_IN } else { if op == T_OUT { C_OUT } else { C_FLUSH } }, 1)
+    virtio.offer(q, 3 * s)
+    let _told = virtio.notify(q)
+    let _q = virtio.use_words(prev)
+}
+
+/// Take every request the device has returned: its status into its
+/// record, the record done, the slot free. The transport words must be
+/// selected.
+fn reap() {
+    let q = base() + W_QUEUE * 8
+    while virtio.returned(q) {
+        let (head, _len) = virtio.collect(q)
+        let s = (head / 3) % SLOTS
+        let r = sw(W_SLOT + s)
+        let st = r8(sw(W_HDR) + s * 32 + 16 + frames.hhdm())
+        if r != 0 {
+            put_rw(r + R_STATUS * 8, st)
+            put_rw(r + R_STATE * 8, RS_DONE)
+        }
+        if st != S_OK {
+            bump(C_ERR, 1)
+        }
+        put_sw(W_SLOT + s, 0)
+        put_sw(W_FREE, sw(W_FREE) | (1 << s))
+        put_sw(W_BUSY, sw(W_BUSY) - 1)
+    }
+}
+
+/// Take what the device has returned (`reap`), with the transport words
+/// selected for it.
+pub fn poll() {
+    if !up() {
+        return
+    }
+    let prev = virtio.use_words(base())
+    reap()
+    let _p = virtio.use_words(prev)
+}
+
+/// Wait until request record `r` is done: the used ring looked at, a
+/// PAUSE between looks, at most SPIN looks (then the request is lost:
+/// S_LOST, counted). Its status.
+pub fn wait(r: u64) -> u64 {
+    let prev = virtio.use_words(base())
+    var k: u64 = 0
+    while rw(r + R_STATE * 8) != RS_DONE && k < SPIN {
+        reap()
+        if rw(r + R_STATE * 8) != RS_DONE {
+            bump(C_POLLS, 1)
+            sync.relax()
+        }
+        k += 1
+    }
+    if rw(r + R_STATE * 8) != RS_DONE {
+        // Never answered: the slot stays the device's (it may still
+        // write the buffer), the record is given back as lost.
+        var s: u64 = 0
+        while s < SLOTS {
+            if sw(W_SLOT + s) == r {
+                put_sw(W_SLOT + s, 0)
+            }
+            s += 1
+        }
+        put_rw(r + R_STATUS * 8, S_LOST)
+        put_rw(r + R_STATE * 8, RS_DONE)
+        bump(C_ERR, 1)
+    }
+    let _p = virtio.use_words(prev)
+    rw(r + R_STATUS * 8)
+}
+
+/// The device's lines, once it is up:
+///
+///     blk: virtio-blk <vvvv>:<dddd> at <bb>:<dd>.<f>, bar<n> 0x<pa>, 1.x interface, polled
+///     blk: features offered 0x<f>, taken 0x<t> (VERSION_1[, FLUSH][, RO][, BLK_SIZE][, SEG_MAX])
+///     blk: request queue 0: 64 entries, 16 slots; capacity <s> sectors (<b> bytes), block size <k>, seg_max <m>, <n> frames held
+pub fn report() {
+    if !up() {
+        return
+    }
+    let prev = virtio.use_words(base())
+    let i = sw(W_PCI)
+    let b = pci.bdf(i)
+    let (bar, pa) = virtio.bar()
+    log.put("blk: virtio-blk ")
+    log.hex_n(pci.vendor(i), 4)
+    log.put(":")
+    log.hex_n(pci.device(i), 4)
+    log.put(" at ")
+    log.hex_n(b >> 16, 2)
+    log.put(":")
+    log.hex_n((b >> 8) & 0x1f, 2)
+    log.put(".")
+    log.hex_n(b & 7, 1)
+    log.put(", bar")
+    log.dec(bar as int)
+    log.put(" ")
+    log.hex(pa)
+    log.put(", 1.x interface, polled")
+    log.end()
+    let t = sw(W_TAKEN)
+    log.put("blk: features offered ")
+    log.hex(sw(W_OFFERED))
+    log.put(", taken ")
+    log.hex(t)
+    log.put(" (VERSION_1")
+    if t & F_FLUSH != 0 {
+        log.put(", FLUSH")
+    }
+    if t & F_RO != 0 {
+        log.put(", RO")
+    }
+    if t & F_BLK_SIZE != 0 {
+        log.put(", BLK_SIZE")
+    }
+    if t & F_SEG_MAX != 0 {
+        log.put(", SEG_MAX")
+    }
+    log.put(")")
+    log.end()
+    log.put("blk: request queue 0: ")
+    log.dec(QSIZE as int)
+    log.put(" entries, ")
+    log.dec(SLOTS as int)
+    log.put(" slots; capacity ")
+    log.dec(sw(W_SECTORS) as int)
+    log.put(" sectors (")
+    log.dec((sw(W_SECTORS) * 512) as int)
+    log.put(" bytes), block size ")
+    log.dec(sw(W_BLKSIZE) as int)
+    log.put(", seg_max ")
+    log.dec(sw(W_SEGMAX) as int)
+    log.put(", ")
+    log.dec(sw(W_FRAMES) as int)
+    log.put(" frames held")
+    log.end()
+    let _p = virtio.use_words(prev)
+}
