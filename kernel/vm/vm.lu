@@ -1149,6 +1149,9 @@ pub fn fault(a: u64, pml4: u64, pg: u64, write: bool) -> u64 {
             if prot & PROT_WRITE != 0 {
                 f = f | (if is_shared { paging.RW } else { paging.COW })
             }
+            if is_shared && prot & PROT_WRITE != 0 {
+                tree.shared_write(ino) // px63: a volume's file: its pages written at msync, fsync, sync
+            }
             return if put_leaf(pml4, pg, pa, f) { F_OK } else { F_BUS }
         }
         if is_shared {
@@ -1555,6 +1558,27 @@ pub fn msync(a: u64, pml4: u64, addr: u64, len: u64, flags: u64) -> u64 {
             return NEG_ENOMEM
         }
         pg += PAGE
+    }
+    if fl & MS_SYNC != 0 {
+        // px63: a shared mapping of a volume's file: its pages written to
+        // the disk and the disk flushed (kernel/tree's `sync_of`; for the
+        // memory's files there is nothing to write).
+        var p = addr
+        var last = tree.NONE
+        while p < end {
+            let r = map_at(a, p)
+            if r != MAPS && mw(a, r, M_FL) & M_SHARED != 0 {
+                let ino = mw(a, r, M_INO)
+                if ino != last {
+                    let e = tree.sync_of(ino)
+                    if e != 0 {
+                        return e
+                    }
+                    last = ino
+                }
+            }
+            p += PAGE
+        }
     }
     0
 }
