@@ -558,7 +558,13 @@ pub fn switched(f: u64) -> u64 {
 
 /// Map four fresh frames as slot `s`'s stack; record its bounds. px34:
 /// false when the frames are not to be had (none kept), so a `clone`
-/// answers -EAGAIN instead of the kernel panicking.
+/// answers -EAGAIN instead of the kernel panicking. px62: each frame is
+/// zeroed first. Frames come back unzeroed, and a stack writes only the
+/// top of its pages, so a frame's old bytes stayed below it for the
+/// thread's life; under TCG a frame that held a program's code kept that
+/// code's translations, and every push and call into it went through
+/// QEMU's write check for code (measured on kasumi: one slot's every
+/// system call about sixty times slower, `notes/px62-mremap-and-file-mmap.md`).
 fn make_stack(s: u64) -> bool {
     let pml4 = sv(S_PML4)
     let lo = base_of(s) + GUARD
@@ -574,6 +580,13 @@ fn make_stack(s: u64) -> bool {
                 }
             }
             return false
+        }
+        let v = pa + frames.hhdm()
+        var i: u64 = 0
+        while i < PAGE / 8 {
+            // # Safety: the frame just taken, through the HHDM.
+            unsafe { ((v + i * 8) as *u64).write_volatile(0) }
+            i += 1
         }
         let n = paging.map(pml4, lo + k * PAGE, pa, paging.RW | paging.NX) else 99
         if n == 99 {
