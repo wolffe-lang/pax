@@ -276,8 +276,14 @@ else:
         shutil.copy(a.owners, os.path.join(stage, "owners"))
         owners = ("while read -r p m u g; do [ -n \"$p\" ] || continue; chown -h \"$u:$g\" \"$p\" && chmod \"$m\" \"$p\"; "
                   "done < /stage/owners && ")
+    # px65: a tree that carries etc/passwd and etc/group gives the
+    # container those account files (the image's, so the program reads
+    # the same accounts on both sides).
+    accounts = ""
+    if os.path.isfile(os.path.join(stage, "etc", "passwd")):
+        accounts = "cp /stage/etc/passwd /stage/etc/group /etc/ && "
     init = ("set -e; mkdir -p /srv && mount -t tmpfs -o size=512m tmpfs /srv && cp -a /stage/srv/. /srv/ && "
-            "cp /stage/bin/* /usr/local/bin/ && chown -R 0:0 /srv && " + owners + "find /srv -exec touch -h -d @0 {} + && "
+            "cp /stage/bin/* /usr/local/bin/ && " + accounts + "chown -R 0:0 /srv && " + owners + "find /srv -exec touch -h -d @0 {} + && "
             "umask 022 && cd /srv && exec bash")
     cmd = [engine, "run", "--rm", "-i", "--name", cname, "--privileged", "--network", "host",
            "-v", "%s:/stage:ro" % stage, "-e", "PATH=/usr/local/bin:/usr/bin:/bin", a.image, "bash", "-c", init]
