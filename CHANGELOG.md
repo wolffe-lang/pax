@@ -22,7 +22,10 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   open files. Two static probes print the same lines on PAX and Linux,
   as root and as a user (`tests/mpx3-maps`), and pelt's FIFO row runs as
   on Linux: 22 of 22 (`tests/mpx5-pelt`). The process area grows to
-  49,152 bytes for the mapping records.
+  49,152 bytes for the mapping records. A slot's kernel stack is zeroed
+  when it is made: a stack frame that had held a program's code kept
+  QEMU's translations of it under TCG, and that slot's every system call
+  ran about sixty times slower.
 
 - **wolf in a separate dev image (px60).** A patched musl-static wolf
   0.2.34 runs its checked machine on PAX, with a pinned std tree and
