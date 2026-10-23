@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+# mkgpt — write a partition table into a disk image (px66): a GUID
+# partition table as the UEFI specification 2.10 §5 lays it out (a
+# protective MBR, the primary header at LBA 1 and its entry array, the
+# backup array and header at the disk's end), or an MBR-only table (the
+# legacy MBR of §5.2.1), reproducibly.
+#
+#   tools/mkgpt [--size SIZE] [--pattern] [--label NAME] [--entries N]
+#               [--entry-size BYTES] [--break primary|backup|both]...
+#               OUT.img SLOT:TYPE:FIRST:LAST[:NAME]...
+#   tools/mkgpt --mbr SIGNATURE [--size SIZE] [--pattern]
+#               OUT.img SLOT:OSTYPE:FIRST:LAST...
+#   tools/mkgpt --print OUT.img
+#
+# OUT.img is made SIZE bytes (K, M, G: powers of 1024) when --size is
+# given, else the file is used as it is (its other bytes kept: tools/mkdisk
+# writes the file systems first, then the table). --pattern first fills
+# every 512-byte sector s with kmain_part's pattern (8-byte word w of
+# sector s is (s << 32 | w) xor 0x7061786469736b00, little-endian, the
+# one kmain_blk writes), so a read through a partition's window can be
+# held to the sector it should have reached.
+#
+# A GPT: --entries (default 128) entries of --entry-size bytes (default
+# 128; a multiple of 8 and at least 128, as the specification allowed
+# before 2.10 asked for 128 times a power of two) at LBA 2, the backup
+# array at LBA last - 32, so 16 KiB is reserved at each end whatever the
+# array's size (§5.3.1's minimum): the first usable LBA 34, the last
+# usable last - 33. Each partition: SLOT (1-based: the entry's index,
+# which is the name's number, vdaN), TYPE (esp, linux, bios, basic, or a
+# GUID), FIRST and LAST LBA (inclusive), NAME (UTF-16LE, at most 36
+# units). Every GUID is derived from --label and SOURCE_DATE_EPOCH
+# (default: the last commit's time): the disk's from
+# `pax-gpt-disk:LABEL:EPOCH`, partition SLOT's from
+# `pax-gpt-part:LABEL:EPOCH:SLOT` (sha256, its first 16 bytes as the
+# GUID's text), so two runs give the same bytes. --break primary (or
+# backup, or both) then changes one byte of that header inside the
+# CRC's span (the disk GUID's first), so the header fails its CRC check
+# and nothing else.
+#
+# An MBR (--mbr): SIGNATURE (8 hex digits) at byte 440, then up to four
+# records (SLOT 1-4, OSTYPE in hex, FIRST and LAST LBA), CHS fields
+# 0xfeffff (LBA only), no boot flag; 0x55aa at byte 510.
+#
+# --print reads OUT.img's table back and prints it (the writer's own
+# reading, for a human: the oracles are sfdisk and sgdisk).
+#
+# Written from the UEFI Specification 2.10, §5 (GUID Partition Table
+# Disk Layout) and Appendix A (GUID text). No partitioner's source.
+import hashlib
+import os
+import struct
+import subprocess
+import sys
+import zlib
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+SECTOR = 512
+PATTERN = 0x7061786469736B00
+TYPES = {
+    "esp": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",    # UEFI 2.10 table 5.7
+    "linux": "0fc63daf-8483-4772-8e79-3d69d8477de4",  # Linux file system data (sfdisk's L)
+    "bios": "21686148-6449-6e6f-744e-656564454649",   # BIOS boot (Limine's USAGE.md "BIOS/GPT")
+    "basic": "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7",  # basic data
+}
+
+
+def die(msg, code=2):
+    sys.stderr.write("mkgpt: %s\n" % msg)
+    sys.exit(code)
+
+
+def size_of(s):
+    mult = {"K": 1 << 10, "M": 1 << 20, "G": 1 << 30}
+    try:
+        if s[-1:].upper() in mult:
+            return int(s[:-1]) * mult[s[-1:].upper()]
+        return int(s)
+    except ValueError:
+        die("not a size: %s" % s)
+
+
+def epoch():
+    v = os.environ.get("SOURCE_DATE_EPOCH")
+    if v:
+        return int(v)
+    try:
+        out = subprocess.run(["git", "-C", ROOT, "log", "-1", "--format=%ct"], capture_output=True, text=True, check=True)
+        return int(out.stdout.strip())
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return 0
+
+
+def guid_text(tag):
+    h = hashlib.sha256(tag.encode()).hexdigest()
+    return "%s-%s-%s-%s-%s" % (h[0:8], h[8:12], h[12:16], h[16:20], h[20:32])
+
+
+def guid_bytes(text):
+    """Appendix A: the first three fields little-endian, the last two in
+    the text's order."""
+    t = text.replace("-", "")
+    if len(t) != 32:
+        die("not a GUID: %s" % text)
+    b = bytes.fromhex(t)
+    return b[3::-1] + b[5:3:-1] + b[7:5:-1] + b[8:16]
+
+
+def text_of(b):
+    return "%s-%s-%s-%s-%s" % (b[3::-1].hex(), b[5:3:-1].hex(), b[7:5:-1].hex(), b[8:10].hex(), b[10:16].hex())
+
+
+def pattern_sector(s):
+    return struct.pack("<64Q", *[((s << 32) | w) ^ PATTERN for w in range(64)])
+
+
+def fill(f, sectors):
+    f.seek(0)
+    chunk = []
+    for s in range(sectors):
+        chunk.append(pattern_sector(s))
+        if len(chunk) == 2048:
+            f.write(b"".join(chunk))
+            chunk = []
+    f.write(b"".join(chunk))
+
+
+def chs_end(sectors):
+    return b"\xff\xff\xff"
+
+
+def protective_mbr(sectors):
+    rec = struct.pack("<B3sB3sII", 0, b"\x00\x02\x00", 0xEE, chs_end(sectors), 1, min(sectors - 1, 0xFFFFFFFF))
+    return b"\x00" * 446 + rec + b"\x00" * 48 + b"\x55\xaa"
+
+
+def header(my, alt, first, last, disk, alba, count, esize, acrc):
+    h = struct.pack("<8sIII I QQQQ 16s QIII", b"EFI PART", 0x00010000, 92, 0, 0,
+                    my, alt, first, last, disk, alba, count, esize, acrc)
+    crc = zlib.crc32(h) & 0xFFFFFFFF
+    h = h[:16] + struct.pack("<I", crc) + h[20:]
+    return h + b"\x00" * (SECTOR - len(h))
+
+
+def entry(type_guid, uniq, first, last, name, esize):
+    units = name.encode("utf-16-le")
+    if len(units) > 72:
+        die("a name longer than 36 UTF-16 units: %r" % name)
+    e = guid_bytes(type_guid) + guid_bytes(uniq) + struct.pack("<QQQ", first, last, 0) + units + b"\x00" * (72 - len(units))
+    return e + b"\x00" * (esize - 128)
+
+
+def write_gpt(path, sectors, parts, label, count, esize, breaks):
+    if esize < 128 or esize % 8:
+        die("an entry size is a multiple of 8, at least 128: %d" % esize)
+    t = epoch()
+    disk = guid_bytes(guid_text("pax-gpt-disk:%s:%d" % (label, t)))
+    last = sectors - 1
+    arr = bytearray(count * esize)
+    for slot, typ, first, plast, name in parts:
+        if slot < 1 or slot > count:
+            die("slot %d outside the %d entries" % (slot, count))
+        tg = TYPES.get(typ, typ)
+        uniq = guid_text("pax-gpt-part:%s:%d:%d" % (label, t, slot))
+        arr[(slot - 1) * esize:slot * esize] = entry(tg, uniq, first, plast, name, esize)
+    arr = bytes(arr)
+    acrc = zlib.crc32(arr) & 0xFFFFFFFF
+    asec = (len(arr) + SECTOR - 1) // SECTOR
+    if asec > 32:
+        die("an entry array of more than 16 KiB is not laid out here")
+    padded = arr + b"\x00" * (asec * SECTOR - len(arr))
+    first_usable, last_usable = 34, last - 33
+    for slot, typ, first, plast, name in parts:
+        if not first_usable <= first <= plast <= last_usable:
+            die("slot %d (%d-%d) outside the usable LBAs %d-%d" % (slot, first, plast, first_usable, last_usable))
+    balba = last - 32
+    prim = bytearray(header(1, last, first_usable, last_usable, disk, 2, count, esize, acrc))
+    back = bytearray(header(last, 1, first_usable, last_usable, disk, balba, count, esize, acrc))
+    for which, h in (("primary", prim), ("backup", back)):
+        if which in breaks or "both" in breaks:
+            h[56] ^= 0xFF  # the disk GUID's first byte: inside the CRC's span
+    with open(path, "r+b") as f:
+        f.seek(0)
+        f.write(protective_mbr(sectors))
+        f.seek(1 * SECTOR)
+        f.write(bytes(prim))
+        f.seek(2 * SECTOR)
+        f.write(padded)
+        f.seek(balba * SECTOR)
+        f.write(padded)
+        f.seek(last * SECTOR)
+        f.write(bytes(back))
+    return text_of(disk)
+
+
+def write_mbr(path, sectors, sig, parts):
+    recs = b""
+    for k in range(1, 5):
+        p = [x for x in parts if x[0] == k]
+        if not p:
+            recs += b"\x00" * 16
+            continue
+        _, typ, first, last, _ = p[0]
+        if last >= sectors or first > last or first == 0:
+            die("slot %d (%d-%d) outside the disk" % (k, first, last))
+        recs += struct.pack("<B3sB3sII", 0, b"\xfe\xff\xff", int(typ, 16), b"\xfe\xff\xff", first, last - first + 1)
+    mbr = b"\x00" * 440 + struct.pack("<I", int(sig, 16)) + b"\x00\x00" + recs + b"\x55\xaa"
+    with open(path, "r+b") as f:
+        f.seek(0)
+        f.write(mbr)
+
+
+def show(path):
+    with open(path, "rb") as f:
+        lba0 = f.read(SECTOR)
+        h = f.read(SECTOR)
+        if h[:8] != b"EFI PART":
+            sig = struct.unpack_from("<I", lba0, 440)[0]
+            print("mbr signature %08x" % sig)
+            for k in range(4):
+                b, typ, first, n = struct.unpack_from("<B3xB3xII", lba0, 446 + 16 * k)
+                if typ:
+                    print("  %d type 0x%02x %d-%d" % (k + 1, typ, first, first + n - 1))
+            return
+        (my, alt, fu, lu) = struct.unpack_from("<QQQQ", h, 24)
+        disk = h[56:72]
+        alba, count, esize, acrc = struct.unpack_from("<QIII", h, 72)
+        print("gpt disk %s my %d alt %d usable %d-%d entries %d x %d at %d" % (text_of(disk), my, alt, fu, lu, count, esize, alba))
+        f.seek(alba * SECTOR)
+        arr = f.read(count * esize)
+        for k in range(count):
+            e = arr[k * esize:(k + 1) * esize]
+            if e[:16] == b"\x00" * 16:
+                continue
+            first, last = struct.unpack_from("<QQ", e, 32)
+            name = e[56:128].decode("utf-16-le").split("\x00")[0]
+            print("  %d %s %s %d-%d %r" % (k + 1, text_of(e[:16]), text_of(e[16:32]), first, last, name))
+
+
+def main(argv):
+    args = argv[1:]
+    size = None
+    pattern = False
+    label = "pax"
+    count = 128
+    esize = 128
+    breaks = []
+    mbr = None
+    if args[:1] == ["--print"]:
+        if len(args) != 2:
+            die("usage: mkgpt --print OUT.img")
+        show(args[1])
+        return
+    while args and args[0].startswith("--"):
+        k = args.pop(0)
+        if k == "--pattern":
+            pattern = True
+            continue
+        if not args:
+            die("%s takes a value" % k)
+        v = args.pop(0)
+        if k == "--size":
+            size = size_of(v)
+        elif k == "--label":
+            label = v
+        elif k == "--entries":
+            count = int(v)
+        elif k == "--entry-size":
+            esize = int(v)
+        elif k == "--break":
+            if v not in ("primary", "backup", "both"):
+                die("--break takes primary, backup or both")
+            breaks.append(v)
+        elif k == "--mbr":
+            mbr = v
+        else:
+            die("unknown option %s" % k)
+    if len(args) < 1:
+        die("usage: mkgpt [options] OUT.img SLOT:TYPE:FIRST:LAST[:NAME]...")
+    out = args[0]
+    parts = []
+    for spec in args[1:]:
+        w = spec.split(":", 4)
+        if len(w) < 4:
+            die("a partition is SLOT:TYPE:FIRST:LAST[:NAME]: %s" % spec)
+        parts.append((int(w[0]), w[1], int(w[2]), int(w[3]), w[4] if len(w) > 4 else ""))
+    if size is not None:
+        if size % SECTOR:
+            die("the size is a whole number of sectors")
+        with open(out, "wb") as f:
+            f.truncate(size)
+    if not os.path.exists(out):
+        die("no image %s (give --size to make one)" % out)
+    sectors = os.path.getsize(out) // SECTOR
+    if pattern:
+        with open(out, "r+b") as f:
+            fill(f, sectors)
+    if mbr is not None:
+        write_mbr(out, sectors, mbr, parts)
+        print("mkgpt: %s: MBR, signature %s, %d partitions, %d sectors" % (out, mbr.lower(), len(parts), sectors))
+        return
+    disk = write_gpt(out, sectors, parts, label, count, esize, breaks)
+    print("mkgpt: %s: GPT, disk %s, %d entries of %d bytes, %d partitions, %d sectors%s"
+          % (out, disk, count, esize, len(parts), sectors, "".join(", %s broken" % b for b in breaks)))
+
+
+if __name__ == "__main__":
+    main(sys.argv)
