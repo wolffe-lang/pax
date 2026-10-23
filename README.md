@@ -6,6 +6,8 @@ PAX is a clean-room implementation of Linux's userspace ABI. It does not contain
 
 Users (P5, px38 to px47): PAX has accounts, root, `pax` (1000) and the service account `lobo` (990), in its image's `/etc/passwd` and `/etc/group`. There are no passwords yet and the image boots to root's shell; `su`, written in wolf (`user/su`), is root becoming a user, a user's `su` is refused as Linux refuses one who cannot authenticate, and a set-ID bit is not honoured, so privilege only drops. A process has Linux's real, effective, saved and file-system ids and a group list; a file has an owner, a group and a mode; and `open`, `exec`, every path walk, making, removing, renaming and linking a name, changing a mode, an owner or a time, signals, ports below 1024, raw sockets, the speaker, `/dev`'s nodes and `/proc`'s files are checked by Linux's rules, each rule measured against a real Linux (`tests/mpx5-users`, `tests/mpx5-accounts`). Since px47 every suite that runs programs on PAX — the tree, the shell, boreutils, Unix sockets, TCP, UDP, the speaker and lobo — runs them again as a user beside root, each run held byte for byte to the same binaries run as the same user on Linux. These checks are enforced for honest programs; not a boundary against an attacker: the kernel has never been fuzzed or audited, and it loads programs at fixed addresses. `login` waits for job control, and passwords for a memory-hard hash.
 
+grep is scent (px64): `/bin/grep` is scent, grep in wolf (Track 15; `user/scent.pin`, `tools/mkscent`), byte-identical to GNU grep 3.12 (configured `--disable-perl-regexp`) in the C locale on its M1 options (the default syntax, `-E` and `-F` across the whole M1 interface) but for the differences rulings #115 to #117 publish and eight rows blocked upstream. `/bin/scent` is the unmodified static binary, built twice to one digest by scent's own toolchain (wolf 0.2.35, the std its archive bundles); `/bin/grep` is a symbolic link to it, which an image's archive can now carry (`tools/mkinitramfs`' `/PATH->TARGET`, cpio's link entry; the kernel's tree adopts it at boot as `symlink(2)` would make it); `/bin/egrep` and `/bin/fgrep` are scent's own wrappers, byte for byte, shell scripts run by `/bin/sh` (pelt) through the kernel's `#!`, which warn on standard error and run `grep -E` or `grep -F` from their own directory, so they work with `/bin` gone from `PATH`. A typed session of 52 commands (the default syntax with a backreference, `-E` classes and alternation, `-F` punctuation, `-i`, `-v`, `-c`, `-n`, `-b`, `-o`, `-w`, `-x`, merged context, `-m` with context, `-e` with `-f`, standard input and files, `-z`, the binary-file policy, statuses 1 and 2, the `-P` refusal, the wrappers' warnings and conflicts, `PATH` changes, the C locale with no `LANG` and no locale data, the three rulings' witnesses), as root and as `pax`, is byte-identical to the same binaries in a Linux container and holds 49 rows to GNU 3.12's answers, the pinned build's run as a black box (`tests/mpx5-scent`); every call scent makes (27 by name) PAX already served, but `set_robust_list` and `rseq`, -ENOSYS as for every glibc program. What a PAX user sees that GNU's grep would not show: `--help` and `--version` are scent's own prose; a diagnostic says `grep:` whatever name ran it (`/bin/grep --bad` says `grep:` where GNU says `/bin/grep:`; wolf-lang#899, #904); an argument that is not UTF-8 aborts in wolf's runtime with status 134 (wolf-lang#406), which pelt cannot even pass (its `$'\377'` is `?`) but a `#!` line can; `-r` and colour are not yet (scent's M2), refused by name.
+
 The disk (px63): a virtio block device (`kernel/vblk`, on px20's transport), a block layer with a buffer cache (`kernel/block`), and ext2 read and written (`kernel/ext2`: the superblock, the groups, the bitmaps, inodes and their single, double and triple indirect blocks, directories, fast and slow symbolic links, owners past 65535 and times past 2038), mounted by the kernel from `/etc/fstab` (`user/fstab`: the disk at `/home`) as the tree's second store before the first program, write-back with a flusher every 5 seconds, written and marked clean at the halt and by root's `reboot(2)`, which resets the machine. `fsync`, `fdatasync`, `syncfs`, `sync`, `statfs` and `fstatfs` serve it. A host-made `mkfs.ext2` image reads on PAX as on Linux 7.2.8 line for line (`ls -l`, `stat`, `readlink`, `cat`, a 100 MiB file's sum, statfs), a write session leaves the tree Linux's does and `e2fsck -fn` finds it clean, and a note written before a reboot is read after it (`tests/mpx6-blk`, `tests/mpx6-ext2`). `/` is still the in-memory tree.
 
 Mappings, FIFOs and locks (px62): `mmap` of a file of the tree, private (the file's own frames mapped read-only and a page copied at its first write, so a page not yet written shows a later `write(2)` as on Linux) and shared (every mapping, a forked child's and `read` and `write` of the file are one set of bytes, so `msync` has nothing to write), and shared memory (`MAP_SHARED|MAP_ANONYMOUS`, `/dev/zero`) across `fork`, with SIGBUS for a page past a file's end and a file cut under its mappings unmapped past its new end in every process; `mremap` with `MREMAP_MAYMOVE`, grown in place or moved without copying a byte (`MREMAP_FIXED` and `MREMAP_DONTUNMAP` refused by name), so the musl wolf's allocator grows its blocks on PAX as on Linux; FIFOs made by `mkfifo` and `mknodat` and opened by fifo(7)'s rules; and `flock` on open files. Two static probes print the same lines on PAX and on Linux as root and as a user (`tests/mpx3-maps`), and pelt's FIFO row runs as on Linux, 22 of 22 (`tests/mpx5-pelt`).
@@ -55,7 +57,9 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
               tests/mpx4-udp and tests/mpx4-tcp run); lope.pin and
               shrc (px54: lope, preinstalled, and the console shell's
               $ENV file, its hook); fstab (px63: the images' mount
-              table, the disk at /home)
+              table, the disk at /home); scent.pin (px64: the scent
+              tree PAX carries as /bin/scent, /bin/grep a link to it,
+              /bin/egrep and /bin/fgrep)
     tools/    the harness: fetch-limine, fetch-wolf, fetch-lupin,
               build-stub, build-kernel, mkimage, qemu-run, qemu-halt
               (--type: a typed session, px13; --no-screen, px19; --qemu, px18),
@@ -82,13 +86,15 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
               image, empty, a home or a tree; an image's tree as debugfs
               lists it; the host's Linux on QEMU with the image as its
               disk; the disk probe and /bin/reboot; the self-test's
-              pattern read from the host)
+              pattern read from the host), mkscent (px64: scent static,
+              built twice to one digest by its own toolchain, and its
+              two wrappers)
     font/     the screen's font (px19): Spleen 8x16, BSD-2-Clause, with
               its licence
     tests/    scripted QEMU tests: proof, mkw (with M-KW's frozen kernels
               in mkw.d/), mpx1, mpx2-frames, mpx2-paging, mpx2-interrupts,
               mpx2-sched, mpx3-user, mpx3-loader, mpx3-boreutils, mpx3-console,
-              mpx3-screen, mpx3-speaker (px18), mpx3-threads (px26), mpx3-tree (px27), mpx3-sound (px30), mpx4-net (px20, px21), mpx4-udp (px22), mpx4-tcp (px23), mpx5-lope (px54), mpx6-blk and mpx6-ext2 (px63), gdb-attach,
+              mpx3-screen, mpx3-speaker (px18), mpx3-threads (px26), mpx3-tree (px27), mpx3-sound (px30), mpx4-net (px20, px21), mpx4-udp (px22), mpx4-tcp (px23), mpx5-lope (px54), mpx6-blk and mpx6-ext2 (px63), mpx5-scent (px64), gdb-attach,
               expect-serial-selftest
     docs/     BOOT.md (the boot protocol, argued), SOURCES.md (the
               consulted-sources log), ABI notes as they come
@@ -132,6 +138,7 @@ PAX_WOLF=$(tools/fetch-wolf) tests/mpx3-tree   # px27: the writable tree; a stat
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx3-maps   # px62: mremap, file and shared mappings, FIFOs and flock; two static probes against Linux's tmpfs, root and a user (the Linux side in throwaway containers)
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx6-blk    # px63: the virtio block device's self-test: a pattern written, flushed, read back and read from the host; read-only; no disk
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx6-ext2   # px63: ext2 read, written and rebooted, held to Linux 7.2.8 on QEMU (live where the kernel is readable, else the record) and to e2fsck -fn (e2fsprogs in a container: docker or podman)
+PAX_WOLF=$(tools/fetch-wolf) tests/mpx5-scent  # px64: scent as /bin/grep (an archive link), egrep and fgrep through pelt's #!, typed as root and pax, held to the same binaries in a container and to GNU 3.12's answers
 tools/mkdisk --home 128M pax-home.img          # px63: the disk an image mounts at /home (pax/ for the user pax), reproducible under SOURCE_DATE_EPOCH
 tools/gateway-probe --dns dns.google         # px22: what this host's QEMU DNS server answers, with no guest
 tools/qemu-halt --elf K.elf --marker halt --cmd 'info tlb' K.iso   # monitor answers on the halted machine (K.log.cmd1)
@@ -192,7 +199,11 @@ portability patch and recipe, and `user/wolf.sums` records the bytes.
 The shell environment selects the std tree through `WOLF_STD`. The full
 dev ISO also carries static lld 17, a link-only `cc` front end, and musl's
 binary CRT/libc inputs (`user/wolf-link.sums`). It can build and run native
-wolf programs; the link front end is not a C or assembly compiler.
+wolf programs; the link front end is not a C or assembly compiler. Since
+px64 it also carries scent as `/bin/grep` (the unmodified `/bin/scent`,
+the link, `/bin/egrep` and `/bin/fgrep`) and `tests/mpx5-scent`'s
+fixture at `/usr/share/scent` (`cd /usr/share/scent; grep -n -C1 cat
+words.txt`); its recipe is `notes/px64/dev-iso/`.
 
 At the dev console, write a program in your home directory and use:
 
