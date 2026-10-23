@@ -1,0 +1,324 @@
+#!/usr/bin/env bash
+# tests/mpx3-maps — px62: mremap (pax#127), mappings of files and shared
+# memory (pax#128), FIFOs and flock (pax#108). Two static glibc probes run
+# on PAX and on Linux and are compared byte for byte:
+#
+#   - maps (user/elf/maps.c, tools/mkmaps): mremap grown in place into a
+#     hole, shrunk, refused over a neighbour without MREMAP_MAYMOVE,
+#     moved with it, the allocator's own 151552-to-299008 shape (what
+#     px60's census saw wolf's musl ask), a MAP_NORESERVE and a
+#     PROT_NONE range moved, a file mapping grown, the errnos; MAP_PRIVATE
+#     of a file as a linker reads its inputs (sections read, a private
+#     patch written, the file untouched, a later write(2) seen by the
+#     pages not yet copied, SIGBUS past the end, fork, msync, munmap,
+#     what may not be mapped); MAP_SHARED of a file between a parent and
+#     a forked child (a counter both increment in turn, 2,000 times), a
+#     write through the descriptor seen in the mapping, msync,
+#     MAP_SHARED|MAP_ANONYMOUS and /dev/zero across fork, and the file
+#     read back by boreutils' `cat` once the child has ended; a file cut
+#     under its mappings (SIGBUS past the new end, the partial page's
+#     tail zeroed, the pages back when it grows);
+#   - fifos (user/elf/fifos.c): mkfifo and mknodat, stat, fstat and a
+#     listing of a FIFO, fifo(7)'s open rules (a reader waits for its
+#     writer, a writer for its reader, O_NONBLOCK's ends, O_RDWR), a
+#     signal ending a waiting open, 70,000 bytes through one, EPIPE, a
+#     name removed while open, s254's `[os.fs.mkfifo]` rows as their
+#     calls; flock: s254's `[os.fs.lock]` rows as their calls, the
+#     errnos, dup and fork sharing a lock, a lock that waits, a signal
+#     ending it, a conversion LOCK_NB refuses, and FIFOs, directories
+#     and pipes locked.
+#
+# Each runs as root and again as 1000:1000 through px39's `as` (px47: every
+# suite as a user), in /t, which the image gives the user. The Linux side
+# of each is the same binaries as the same user in a throwaway container
+# (tools/linux-tree), so nothing under test runs on the host.
+#
+#   tests/mpx3-maps [--images DIR | --no-boot | --only build | --only linux --images DIR]
+#                   [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# Images, per tier: maps-<session>.iso for the four sessions (maps, fifos,
+# maps-user, fifos-user), one kernel, kmain_console. Assertions, per tier,
+# firmware and session:
+#   T0 build: kmain_console built; every program static; the images built
+#      (digests printed); the Linux side ran every session.
+#   T1 the output, differential: every line the program wrote on PAX (the
+#      kernel's own `user: …` lines left out) is byte-identical to what it
+#      wrote on Linux, `~` lines apart, and the exit status is Linux's.
+#   T2 maps: the `~` lines are PAX's own answers where Linux does
+#      something else, held to their text: MREMAP_FIXED and
+#      MREMAP_DONTUNMAP refused, -22 (R-px62-2).
+#   T3 -ENOSYS only for set_robust_list (273) and rseq (334); the refusal
+#      lines exactly those two mremap flags' (maps) and none (fifos);
+#      nobody killed (every fault is the probe's own handler's).
+#   T4 everything given back: the frames line as many frames free after
+#      init's end as before the first program; the tree's line as many
+#      frames and inodes held as when it was made, but for the frames the
+#      inode table grew by (never given back).
+#   T5 maps: kernel/user's mremap census line for the probe, the counts
+#      the probe's rows make on PAX: 11 served, 2 grown in place, 5 moved
+#      (the allocator's shape among them: the musl grow path served, not
+#      the fallback).
+#   T6 the end: `PAX: init … ended with status <s>; nothing left to run`,
+#      and qemu-halt holds the machine halted.
+# The probes session of the first leg runs first, and the suite stops at
+# its first failure. The UEFI leg needs OVMF: SKIPPED LOUDLY without it
+# unless PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0
+# when every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 only=
+usage="usage: tests/mpx3-maps [--images DIR | --no-boot | --only build | --only linux --images DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+[ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
+need readelf python3
+
+SESSIONS="maps fifos maps-user fifos-user"
+prog_of() { case $1 in maps*) echo maps ;; *) echo fifos ;; esac; }
+user_of() { case $1 in *-user) echo 1 ;; *) echo 0 ;; esac; }
+REFUSE_MAPS='syscall 25: refused: MREMAP_DONTUNMAP (PAX keeps no emptied old range), -22|syscall 25: refused: MREMAP_FIXED (PAX moves a mapping only to where it chooses), -22'
+TILDE_MAPS='~fixed: MREMAP_FIXED to a new address: -22
+~dontunmap: MREMAP_DONTUNMAP: -22'
+REMAP_LINE='mremap: 11 served, 2 grown in place, 5 moved'
+
+work=$PAX_BUILD/mpx3-maps
+runs=$PAX_BUILD/mpx3-maps-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+# The Linux side of every session, each in its own throwaway container.
+linux_side() { # dir -> reasons on stdout
+    local s p own
+    mkdir -p "$1/linux"
+    for s in $SESSIONS; do
+        p=$(prog_of "$s")
+        own=(--owners "$1/$s.owners")
+        args=("/bin/$p")
+        [ "$(user_of "$s")" = 0 ] || args=(/bin/as 1000 1000 "/bin/$p")
+        if "$PAX_ROOT/tools/linux-tree" --root "$1/$s/root" --keys "$1/none.keys" --prompt '$ ' --argv0 "${args[0]}" \
+            --size 64m --rdev "${own[@]}" "$1/linux/$s.tty" -- "${args[@]}"; then
+            say "  linux $s: $(wc -c < "$1/linux/$s.tty" | tr -d ' ') bytes, status $(cat "$1/linux/$s.tty.rc")"
+        else
+            printf ' tools/linux-tree %s;' "$s"
+        fi
+    done
+}
+
+if [ "$only" = linux ]; then
+    why=$(linux_side "$images")
+    [ -z "$why" ] && say "PASS T0 (linux): the Linux side ran every session, each in a throwaway container" || bad "T0 (linux):$why"
+    exit "$fail"
+fi
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/bin"
+    why=
+    "$PAX_ROOT/tools/mkmaps" "$work/bin" > "$work/probes.txt" || why+=" tools/mkmaps;"
+    "$PAX_ROOT/tools/mkas" "$work/bin" >> "$work/probes.txt" || why+=" tools/mkas;"
+    "$PAX_ROOT/tools/mkboreutils" "$work/bore" cat > "$work/bore.txt" || why+=" tools/mkboreutils;"
+    sed 's/^/  program: /' "$work/probes.txt" >&2
+    : > "$work/none.keys"
+    for f in "$work/bin/maps" "$work/bin/fifos" "$work/bin/as" "$work/bore/cat"; do
+        r=$(static_ok "$f") || why+=" $r;"
+    done
+    for s in $SESSIONS; do
+        p=$(prog_of "$s")
+        r=$work/$s/root
+        mkdir -p "$r/bin" "$r/etc" "$r/t"
+        cp "$work/bin/$p" "$r/bin/$p" || why+=" no $p;"
+        cp "$work/bore/cat" "$r/bin/cat" || why+=" no cat;"
+        pairs=("/bin/$p=$r/bin/$p:755" "/bin/cat=$r/bin/cat:755")
+        if [ "$(user_of "$s")" = 1 ]; then
+            cp "$work/bin/as" "$r/bin/as" || why+=" no as;"
+            pairs+=("/bin/as=$r/bin/as:755" "/t/:755:1000:1000")
+            echo "/bin/as 1000 1000 /bin/$p" > "$r/etc/pax-run"
+            printf '/t 755 1000 1000\n' > "$work/$s.owners"
+        else
+            pairs+=("/t/:755:0:0")
+            echo "/bin/$p" > "$r/etc/pax-run"
+            printf '/t 755 0 0\n' > "$work/$s.owners"
+        fi
+        pairs+=("/etc/pax-run=$r/etc/pax-run:644")
+        if "$PAX_ROOT/tools/mkinitramfs" "$work/$s.cpio" "${pairs[@]}" > "$work/$s.initramfs.txt"; then
+            sed "s/^/  initramfs $s: /" "$work/$s.initramfs.txt" >&2
+        else
+            why+=" tools/mkinitramfs $s;"
+        fi
+    done
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            for s in $SESSIONS; do
+                "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                    --add "$work/$s.cpio" initramfs.cpio "$elf" "$work/$tier/maps-$s.iso" >/dev/null \
+                    || why+=" $tier maps-$s: mkimage;"
+                say "built $tier maps-$s: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/maps-$s.iso"), initramfs $(sha256_of "$work/$s.cpio")"
+            done
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    if [ "$only" = build ]; then
+        [ -z "$why" ] && say "PASS T0 (build): kmain_console built ($tiers), every program static, four images a tier" || bad "T0 (build):$why"
+        exit "$fail"
+    fi
+    if [ "$(uname -s)" != Linux ]; then
+        why+=" the Linux side needs Linux (this is $(uname -s)): build on Linux, boot here with --images;"
+    else
+        why+=$(linux_side "$work")
+    fi
+    [ -z "$why" ] && say "PASS T0: kmain_console built ($tiers), every program static, four images a tier, Linux ran four sessions, each in a throwaway container" || bad "T0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx3-maps build (T0): PASS (no boot: --no-boot)" || say "mpx3-maps build: FAIL"
+        exit "$fail"
+    fi
+fi
+lx=$images/linux
+[ -d "$lx" ] || die "no $lx (build first, and run the Linux side)"
+
+record() { # tier leg session status
+    ran=$((ran + 1))
+    printf '%s kmain_console %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" \
+        "$(sha256_of "$iso")" >> "$runs"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+stopped=
+for leg in $legs; do
+    [ -z "$stopped" ] || break
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        [ -z "$stopped" ] || break
+        for s in $SESSIONS; do
+            id="$tier $leg $s"
+            before=$fail
+            p=$(prog_of "$s")
+            log=$PAX_BUILD/mpx3-maps-$tier-$leg-$s.serial.log
+            elf=$images/$tier/kmain_console.elf iso=$images/$tier/maps-$s.iso
+            rm -f "$log" "$log.verdict"
+            if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+                for t in T1 T3 T4 T6; do bad "$t $id: no image"; done
+                continue
+            fi
+            hrc=0
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 600 \
+                --elf "$elf" --marker 'halt|PANIC .*' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+            record "$tier" "$leg" "$s" "$hrc"
+            norm=$log.norm; serial_norm "$log" > "$norm"
+
+            # T1: the program's lines against Linux's (a kernel line that
+            # lands inside a line a process has not finished is cut out).
+            why=
+            out=$PAX_BUILD/mpx3-maps-$tier-$leg-$s.session
+            awk '/^user: exec pid 1 / { on = 1; next } on && /^user: [^ ]+ pid 1 (exit_group|exit) [0-9]+ after / { exit }
+                 on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$norm" > "$out"
+            tr -d '\r' < "$lx/$s.tty" > "$out.linux"
+            grep -v '^~' "$out" > "$out.cmp"
+            grep -v '^~' "$out.linux" > "$out.linux.cmp"
+            if ! cmp -s "$out.linux.cmp" "$out.cmp"; then
+                why+=" the output differs from Linux's: $(diff "$out.linux.cmp" "$out.cmp" | head -n 12 | cut -c1-400 | tr '\n' '|');"
+            fi
+            pst=$(sed -n -E 's/^user: [^ ]+ pid 1 (exit_group|exit) ([0-9]+) after .*/\2/p' "$norm" | head -n 1)
+            lst=$(cat "$lx/$s.tty.rc" 2>/dev/null)
+            [ "$pst" = "$lst" ] || why+=" exit '$pst' on PAX, '$lst' on Linux;"
+            [ "$(wc -l < "$out.cmp" | tr -d ' ')" -gt 20 ] || why+=" fewer than 21 lines;"
+            grep -qx "$p: done" "$out.cmp" || why+=" no '$p: done';"
+            [ -z "$why" ] && say "PASS T1 $id: $(wc -l < "$out.cmp" | tr -d ' ') lines byte-identical to Linux's ($(sha256_of "$out.cmp" | cut -c1-12)…), exit $pst" || bad "T1 $id:$why"
+
+            # T2: what PAX answers by name where Linux does something else.
+            if [ "$p" = maps ]; then
+                g=$(grep '^~' "$out")
+                [ "$g" = "$TILDE_MAPS" ] && say "PASS T2 $id: $(printf '%s' "$g" | tr '\n' '|') (Linux here: $(grep '^~' "$out.linux" | tr '\n' '|'))" || bad "T2 $id: '$(printf '%s' "$g" | tr '\n' '|')'"
+            fi
+
+            # T3: what PAX lacks or refuses, and nobody killed.
+            why=
+            ns=$(sed -n -E 's/^.*user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
+            [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
+            rf=$(grep ': refused: ' "$norm" | sed -E 's/^.*user: [^ ]+ pid [0-9]+ //' | LC_ALL=C sort -u | paste -sd'|' -)
+            wr=; [ "$p" != maps ] || wr=$REFUSE_MAPS
+            [ "$rf" = "$wr" ] || why+=" refusals '$rf', not '$wr';"
+            kl=$(grep -c 'user: [^ ]* pid [0-9]* killed: ' "$norm")
+            [ "$kl" = 0 ] || why+=" $kl killed: $(grep -m2 ' killed: ' "$norm" | tr '\n' '|');"
+            [ -z "$why" ] && say "PASS T3 $id: -ENOSYS only for 273 and 334; refused: ${rf:-nothing}; nobody killed" || bad "T3 $id:$why"
+
+            # T4: every frame back, and the tree as it was made.
+            why=
+            fl=$(grep -m1 '^user: frames free ' "$norm")
+            fa=$(printf '%s\n' "$fl" | sed -n -E 's/^user: frames free ([0-9]+) before, [0-9]+ with [0-9]+ processes, ([0-9]+) after$/\1 \2/p')
+            set -- $fa
+            { [ -n "$fa" ] && [ "$1" = "$2" ]; } || why+=" frames not all back ('$fl');"
+            tl=$(grep -m1 '^tree: frames ' "$norm")
+            set -- $(printf '%s\n' "$tl" | sed -n -E "s/^tree: frames ([0-9]+) \\(([0-9]+) when made\\), ([0-9]+) \\(([0-9]+)\\) of them the inode table's, inodes ([0-9]+) \\(([0-9]+)\\), cap ([0-9]+), refusals [0-9]+\$/\\1 \\2 \\3 \\4 \\5 \\6/p")
+            if [ $# -ne 6 ]; then
+                why+=" no tree line ('$tl');"
+            else
+                [ $(($1 - $2)) = $(($3 - $4)) ] || why+=" the tree holds $(($1 - $2)) frames more than when made, the inode table $(($3 - $4)) ('$tl');"
+                [ "$5" = "$6" ] || why+=" inodes $5, $6 when made ('$tl');"
+            fi
+            [ -z "$why" ] && say "PASS T4 $id: $fl; $tl" || bad "T4 $id:$why"
+
+            # T5: the mremap census.
+            if [ "$p" = maps ]; then
+                ml=$(sed -n -E 's/^user: maps pid 1 (mremap: .*)$/\1/p' "$norm")
+                [ "$ml" = "$REMAP_LINE" ] && say "PASS T5 $id: $ml" || bad "T5 $id: '$ml', not '$REMAP_LINE'"
+            fi
+
+            # T6: the end.
+            why=
+            grep -qx "PAX: init /bin/[a-z]* ended with status $lst; nothing left to run" "$norm" \
+                || why+=" no 'PAX: init … ended with status $lst' ($(grep -m1 '^PAX: init ' "$norm"));"
+            [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+            ! grep -q '^PANIC ' "$norm" || why+=" $(grep -m1 '^PANIC ' "$norm");"
+            [ -z "$why" ] && say "PASS T6 $id: init ended, status $lst; $(tail -n 1 "$log.verdict")" || bad "T6 $id:$why"
+
+            if [ "$before" = 0 ] && [ "$fail" != 0 ]; then
+                stopped="$id"
+                say "FAIL stopped early: $id failed; the later boots would fail the same way and are not run"
+                break
+            fi
+        done
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx3-maps: PASS" || say "mpx3-maps: FAIL"
+exit "$fail"
