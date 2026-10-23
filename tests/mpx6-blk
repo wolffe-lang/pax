@@ -37,8 +37,10 @@
 #      read back.
 #   K6 no disk (none): `disk: no virtio block device among <n> PCI
 #      functions`, n > 0.
-#   K7 the books: the summary line's `0 errors`; rw: R + 1 writes, R + N
-#      reads' worth of sectors read (N + 1), 1 flush; ro: no write.
+#   K7 the books: the summary line's `0 errors`; rw: R + 1 writes, R + 2
+#      reads (N + 2 sectors: px66's partition table read of LBA 0 at
+#      start, which finds no 0x55aa on the blank disk, then the pattern's
+#      R and the edge's one), 1 flush; ro: no write, R + 1 reads.
 #   K8 halted: every boot ends `halt`, held by tools/qemu-halt.
 #
 # --images DIR boots what an earlier run built (DIR/<tier>/kmain_blk.{iso,elf});
@@ -183,8 +185,8 @@ for leg in $legs; do
         else
             bad "K5 $tier $leg rw: $(serial_norm "$log" | grep '^disk: edges' || echo 'no edges line')"
         fi
-        if has "block: vda: $((R + 1)) reads \\($((SECTORS + 1)) sectors\\), $((R + 1)) writes \\($((SECTORS + 1)) sectors\\), 1 flushes, 0 errors, 1 refused; cache .*"; then
-            say "PASS K7 $tier $leg rw: $((R + 1)) reads and writes ($((SECTORS + 1)) sectors each way), 1 flush, 0 errors, 1 refused"
+        if has "block: vda: $((R + 2)) reads \\($((SECTORS + 2)) sectors\\), $((R + 1)) writes \\($((SECTORS + 1)) sectors\\), 1 flushes, 0 errors, 1 refused; cache .*"; then
+            say "PASS K7 $tier $leg rw: $((R + 2)) reads ($((SECTORS + 2)) sectors: LBA 0 for the table), $((R + 1)) writes ($((SECTORS + 1)) sectors), 1 flush, 0 errors, 1 refused"
         else
             bad "K7 $tier $leg rw: $(serial_norm "$log" | grep '^block: vda: [0-9]* reads' || echo 'no books line')"
         fi
@@ -208,8 +210,8 @@ for leg in $legs; do
         else
             bad "K5 $tier $leg ro: the edges"
         fi
-        if has "block: vda: $R reads \\($SECTORS sectors\\), 0 writes \\(0 sectors\\), 0 flushes, 0 errors, 2 refused; cache .*"; then
-            say "PASS K7 $tier $leg ro: $R reads, no write, 0 errors, 2 refused"
+        if has "block: vda: $((R + 1)) reads \\($((SECTORS + 1)) sectors\\), 0 writes \\(0 sectors\\), 0 flushes, 0 errors, 2 refused; cache .*"; then
+            say "PASS K7 $tier $leg ro: $((R + 1)) reads (LBA 0 for the table), no write, 0 errors, 2 refused"
         else
             bad "K7 $tier $leg ro: $(serial_norm "$log" | grep '^block: vda: [0-9]* reads' || echo 'no books line')"
         fi
