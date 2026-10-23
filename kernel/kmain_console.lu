@@ -42,6 +42,7 @@
 // no disk nothing is printed and nothing moves.
 use apic
 use block
+use boot_info
 use console
 use fb
 use fpu
@@ -133,6 +134,42 @@ fn run(k: u64, a: u64, n: u64) {
     sync.release(sync.console(), s2)
 }
 
+/// px66: one line, when the initramfs (the module Limine loaded) came
+/// from a disk rather than an optical disc (an ISO: nothing is said, so
+/// no image's serial moves): its path and where it lay, as Limine's
+/// `struct limine_file` says:
+///
+///     boot: /boot/initramfs.cpio from a disk: partition 1, GPT disk <guid>, partition <guid>
+fn boot_media() {
+    if boot_info.module_count() == 0 || boot_info.module_media(0) == 1 {
+        return
+    }
+    log.put("boot: ")
+    var k: u64 = 0
+    while k < 256 {
+        let b = boot_info.module_path_byte(0, k)
+        if b < 0 {
+            break
+        }
+        log.put_byte(b)
+        k += 1
+    }
+    let m = boot_info.module_media(0)
+    log.put(if m == 2 { " from TFTP" } else { " from a disk" })
+    let p = boot_info.module_partition(0)
+    if p != 0 {
+        log.put(": partition ")
+        log.dec(p as int)
+    }
+    if boot_info.module_guid(0, false, 0) != 0 || boot_info.module_guid(0, false, 1) != 0 {
+        log.put(", GPT disk ")
+        block.put_guid(boot_info.module_guid(0, false, 0), boot_info.module_guid(0, false, 1))
+        log.put(", partition ")
+        block.put_guid(boot_info.module_guid(0, true, 0), boot_info.module_guid(0, true, 1))
+    }
+    log.end()
+}
+
 export fn kmain() {
     serial.init()
     log.line("PAX: the console")
@@ -163,6 +200,7 @@ export fn kmain() {
     if block.start(pml4) != 0 {
         block.report()
     }
+    boot_media() // px66: where Limine found the initramfs, when not on an optical disc
     let _mounted = fstab.mount_all()
     if fstab.wants_flusher() {
         // # Safety: the address of kernel/fstab's export; nothing is read.
