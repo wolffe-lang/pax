@@ -1,0 +1,670 @@
+#!/usr/bin/env bash
+# tests/mpx6-part — the partition table, partitions as disks, and a disk
+# that boots (px66, P4 toward P6): kernel/block's GPT and MBR reading
+# and its windows, held to the Linux guest (Linux 7.2.8 on QEMU, kasumi's:
+# tools/linux-part) on the same images; kernel/fstab's spellings; the
+# ext2 clean flag; and one GPT disk (tools/mkdisk --gpt) booted with no
+# CD-ROM under SeaBIOS and OVMF.
+#
+#   tests/mpx6-part [--images DIR | --no-boot | --only build | --only linux --images DIR [--record]]
+#                   [--rows table|all] [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# The fixtures (tests/mpx6-part.d/fixtures: eleven 8 MiB disks, the same
+# bytes on every host, tests/mpx6-part.d/fixtures.sha256): one, four,
+# wide, full, holes, order, gap, badprimary, badbackup, bothbad, mbr;
+# `fourk` is `four` on a device of 4096-byte logical blocks. kmain_part
+# boots on each, read-only, and on `four` writable once (`four-rw`).
+#
+# The rows. --rows table (or PAX_PART_ROWS=table: CI's pr tier): P0-P5;
+# --rows all (the default; the full and all tiers): every one.
+#   P0 build: kmain_part (and, all rows, kmain_console and the programs:
+#      pelt as /bin/sh, boreutils' cat ls stat, /bin/reboot) built; the
+#      fixtures their recorded sha256s; the oracles agree with what
+#      tools/mkgpt wrote: `sfdisk --dump` of each GPT fixture lists its
+#      partitions (the count), `sgdisk -v` finds no problem with the
+#      128-byte tables and names the broken header of badprimary and
+#      badbackup; the Linux side ran (or its record is there).
+#   P1 the table, per fixture: PAX's partitions (names, device numbers,
+#      starts, sizes, PARTUUIDs, PARTLABELs) are the guest's
+#      (tests/mpx6-part.d/compare): badprimary's are the guest's booted
+#      with `gpt` (without it Linux reads no backup: measured, a named
+#      drift), wide's are sfdisk's (Linux reads no entry larger than 128
+#      bytes: measured, a named drift).
+#   P2 /proc/partitions, per fixture, byte for byte the same reference's.
+#   P3 the refusals, each by name and once: badprimary's primary and
+#      badbackup's backup header (their CRC32, the other header used),
+#      bothbad's table (no partitions, vda whole), fourk's 4096-byte
+#      blocks (not read, vda whole).
+#   P4 the windows: every partition's first and last sector read through
+#      it hold the disk's sectors `start` and `start + size - 1`; a
+#      request past its end is refused by name before it is made
+#      (-EIO), counted on the partition; four-rw: both sectors written
+#      through the window and read back, and the host finds exactly
+#      those eight disk sectors changed, each the marked pattern.
+#   P5 the books: `0 errors` on every boot; halted (tools/qemu-halt).
+#   P6 the fstab spellings (kmain_console, three disks): `PARTUUID=`
+#      (the guest's blkid's) mounts /home from vda2; `/dev/vda2`, `vda2`,
+#      `UUID=`, `LABEL=` and `PARTLABEL=` each name vda2 (busy then);
+#      `/dev/vda` is refused while vda2 is mounted, by name; `/dev/vda9`
+#      and an unknown PARTUUID name nothing. Then `UUID=` first. Then a
+#      whole-disk ext2 with an MBR in its boot block: `/dev/vda` mounts,
+#      `/dev/vda1` is refused while its disk is, by name.
+#   P7 BIOS: QEMU boots the disk tools/mkdisk --gpt made with no
+#      CD-ROM (`-boot` and `media=cdrom` absent from QEMU's command line)
+#      under SeaBIOS (`Booting from Hard Disk`): PAX says the initramfs
+#      came from partition 1 of the GPT disk; /home is /dev/vda2 by the
+#      image's fstab (user/fstab-disk), `/` the initramfs in memory; the
+#      session's /proc/partitions is the guest's on that disk; the note
+#      written; halted.
+#   P8 UEFI: the same disk under OVMF.
+#   P9 the ISO with a bare ext2 disk (tools/mkdisk --home): mounted at
+#      /home from /dev/vda as px63 has it, no table line, no `boot:` line.
+#   P10 the clean flag: after P7's `exit` the host's `dumpe2fs -h` of
+#      partition 2 says `clean`; after `reboot(2)` too, and the second
+#      boot reads the note (mount 2); QEMU killed the moment the session
+#      waits leaves `not clean` (mount 1), the next mount says so once
+#      (`not cleanly unmounted, mount 2`), and its clean halt leaves it
+#      `not clean` still, as Linux leaves it (measured on the guest:
+#      tests/mpx6-part.d/linux/notclean.txt).
+#
+# The Linux side (`--only linux`, or with the build): tools/linux-part on
+# each fixture (badprimary also with `gpt`, fourk with 4096-byte blocks)
+# and on the boot disk. Where this host's kernel cannot be read (the CI
+# runner's is root's) the reference is the record made on kasumi
+# (tests/mpx6-part.d/linux/, `--record` writes it), said loudly;
+# PAX_LINUX=live insists on a live one.
+#
+# The UEFI legs need OVMF (SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1); P8 boots under OVMF whatever --firmware says.
+# Exit 0 when every assertion held, 1 otherwise, 2 on a usage or tool
+# error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 only= rows=${PAX_PART_ROWS:-all} record=0
+usage="usage: tests/mpx6-part [--images DIR | --no-boot | --only build | --only linux --images DIR [--record]] [--rows table|all] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --rows)     rows=$2; shift 2 ;;
+        --record)   record=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+case $rows in table|all) ;; *) die "--rows takes table or all" ;; esac
+[ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
+need python3
+
+D=$PAX_ROOT/tests/mpx6-part.d
+REC=$D/linux
+FIXTURES="one four wide full holes order gap badprimary badbackup bothbad mbr"
+BOOTS="one four wide full holes order gap badprimary badbackup bothbad mbr fourk four-rw"
+BORE="cat ls stat"
+EPOCH=1700000000
+work=$PAX_BUILD/mpx6-part
+runs=$PAX_BUILD/mpx6-part-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+static_ok() {
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+# --- the build ---------------------------------------------------------------------
+
+# The initramfs of a console image: the programs, the session, a table.
+cpio_for() { # name script fstab-file -> reasons
+    local n=$1 s=$2 fs=$3 args=() f
+    for f in "$work"/bin/*; do args+=("/bin/${f##*/}=$f:755"); done
+    printf '/bin/sh /etc/part/%s\n' "$s" > "$work/$n.run"
+    args+=(/tmp/:1777 /home/:755 /mnt/:755 /mnt/a/:755 /mnt/b/:755 /mnt/c/:755 /mnt/d/:755 /mnt/e/:755 /mnt/f/:755
+           /mnt/g/:755 /mnt/h/:755 "/etc/part/$s=$D/$s:644" "/etc/fstab=$fs:644" "/etc/pax-run=$work/$n.run:644")
+    "$PAX_ROOT/tools/mkinitramfs" "$work/$n.cpio" "${args[@]}" > "$work/$n.initramfs.txt" || printf ' mkinitramfs %s;' "$n"
+}
+
+build() {
+    local why= tier flag log elf
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/bin"
+    if [ "$rows" = all ]; then
+        need readelf
+        "$PAX_ROOT/tools/mkpelt" "$work/peltbin" > "$work/pelt.txt" || why+=" tools/mkpelt;"
+        "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
+        "$PAX_ROOT/tools/mkdiskprobe" "$work/probe" > "$work/probes.txt" || why+=" tools/mkdiskprobe;"
+        cp "$work/peltbin/pelt" "$work/bin/sh" 2>/dev/null || why+=" no pelt;"
+        for u in $BORE; do cp "$work/bore/$u" "$work/bin/$u" 2>/dev/null || why+=" no $u;"; done
+        cp "$work/probe/reboot" "$work/bin/reboot" 2>/dev/null || why+=" no reboot;"
+        for f in "$work"/bin/*; do
+            case ${f##*/} in reboot) continue ;; esac
+            r=$(static_ok "$f") || why+=" $r;"
+        done
+        for s in boot reboot kill; do why+=$(cpio_for "$s" "$s.sh" "$PAX_ROOT/user/fstab-disk"); done
+        why+=$(cpio_for iso boot.sh "$PAX_ROOT/user/fstab")
+        # The names' tables are made where the disks are (they hold the
+        # disk's PARTUUID and UUID); their sessions are names.sh.
+    fi
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        for k in kmain_part kmain_console; do
+            [ "$k" = kmain_console ] && [ "$rows" != all ] && continue
+            log=$work/$tier/$k.build-kernel.log
+            if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/$k.lu" "$work/$tier" 2>"$log"); then
+                cat "$log" >&2
+                say "built $tier $k: elf $(sha256_of "$elf")"
+            else
+                cat "$log" >&2
+                why+=" $tier $k: tools/build-kernel;"
+            fi
+        done
+        "$PAX_ROOT/tools/mkimage" "$work/$tier/kmain_part.elf" "$work/$tier/kmain_part.iso" >/dev/null || why+=" $tier kmain_part: mkimage;"
+        if [ "$rows" = all ]; then
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$work/iso.cpio" initramfs.cpio \
+                "$work/$tier/kmain_console.elf" "$work/$tier/part-iso.iso" >/dev/null || why+=" $tier part-iso: mkimage;"
+        fi
+    done
+    printf '%s' "$why"
+}
+
+# --- the disks (made on the host that boots: tools/disktools and tools/e2fs run containers)
+
+fixtures_ready() { # dir -> reasons
+    local w=$1 n got want
+    mkdir -p "$w/fx"
+    if [ ! -f "$w/fx/mbr.img" ]; then
+        "$D/fixtures" "$w/fx" > "$w/fx/fixtures.txt" 2>&1 || { printf ' tests/mpx6-part.d/fixtures;'; return; }
+    fi
+    for n in $FIXTURES; do
+        got=$(sha256_of "$w/fx/$n.img")
+        want=$(sed -n "s/^$n \([0-9a-f]*\)\$/\\1/p" "$D/fixtures.sha256")
+        [ "$got" = "$want" ] || printf ' %s.img is %s, recorded %s (tools/mkgpt is not reproducible here);' "$n" "$got" "$want"
+    done
+}
+
+# The oracles' view of each fixture: sfdisk --dump's partition count, and
+# sgdisk -v's verdict where it reads the table (128-byte entries).
+oracles() { # dir -> reasons
+    local w=$1 n dump cnt want v
+    for n in $FIXTURES; do
+        dump=$("$PAX_ROOT/tools/disktools" "$w/fx" sfdisk --dump "$n.img" 2>/dev/null)
+        printf '%s\n' "$dump" > "$w/fx/$n.sfdisk"
+        cnt=$(printf '%s\n' "$dump" | command grep -c "^$n.img[0-9]* : start=")
+        case $n in
+            one) want=1 ;; four|wide|badprimary|badbackup) want=4 ;; full) want=128 ;; holes) want=4 ;;
+            order|gap) want=3 ;; mbr) want=2 ;;
+            bothbad) want=1 ;; # sfdisk reads the protective MBR as a DOS table of one type-ee entry (measured); Linux and PAX list none
+        esac
+        [ "$cnt" = "$want" ] || printf ' sfdisk --dump %s: %s partitions, mkgpt wrote %s;' "$n" "$cnt" "$want"
+        [ "$n" = wide ] || [ "$n" = mbr ] && continue
+        v=$("$PAX_ROOT/tools/disktools" "$w/fx" sgdisk -v "$n.img" 2>&1)
+        printf '%s\n' "$v" > "$w/fx/$n.sgdisk"
+        case $n in
+            badprimary) printf '%s' "$v" | command grep -q 'Invalid CRC on main header' || printf ' sgdisk -v badprimary: no main-header CRC complaint;' ;;
+            badbackup)  printf '%s' "$v" | command grep -q 'invalid backup GPT header' || printf ' sgdisk -v badbackup: no backup-header complaint;' ;;
+            bothbad)    printf '%s' "$v" | command grep -q 'Creating new GPT entries' || printf ' sgdisk -v bothbad: it found a table;' ;;
+            *)          printf '%s' "$v" | command grep -q 'No problems found' || printf ' sgdisk -v %s: %s;' "$n" "$(printf '%s' "$v" | tail -n 2 | tr '\n' ' ')" ;;
+        esac
+    done
+}
+
+# The console disks of a tier (all rows): tools/mkdisk --gpt with the
+# tier's kernel and each session's initramfs, and the ISO row's bare disk.
+disk_of() { # tier name cpio -> reasons
+    SOURCE_DATE_EPOCH=$EPOCH "$PAX_ROOT/tools/mkdisk" --gpt --kernel "$images/$1/kmain_console.elf" --initramfs "$3" \
+        128M "$images/$1/$2.img" > "$images/$1/$2.mkdisk.txt" 2>&1 || printf ' mkdisk --gpt %s %s: %s;' "$1" "$2" "$(tail -n 1 "$images/$1/$2.mkdisk.txt")"
+}
+
+# --- the Linux side ----------------------------------------------------------------
+
+kernel_readable() {
+    local k=${PAX_LINUX_KERNEL:-/usr/lib/modules/$(uname -r)/vmlinuz}
+    [ -r "$k" ] && printf '%s\n' "$k"
+}
+
+linux_side() { # dir -> reasons
+    local w=$1 k n bb=()
+    mkdir -p "$w/linux"
+    k=$(kernel_readable || true)
+    if [ -z "$k" ] && [ "${PAX_LINUX:-}" != live ]; then
+        say "LOUD: no readable Linux kernel on this host: the Linux side is the record made on kasumi ($(head -n 1 "$REC/meta"))"
+        cp "$REC"/*.txt "$w/linux/" || printf ' no record in %s;' "$REC"
+        echo recorded > "$w/linux/how"
+        return
+    fi
+    [ -n "$k" ] || { printf ' PAX_LINUX=live and no readable kernel;'; return; }
+    [ -f "$w/busybox" ] && bb=(--busybox "$w/busybox")
+    local lp=("$PAX_ROOT/tools/linux-part" --kernel "$k" --modules "${PAX_LINUX_MODULES:-/usr/lib/modules/$(uname -r)}" ${bb[@]+"${bb[@]}"})
+    for n in $FIXTURES; do
+        "${lp[@]}" "$w/linux/$n" "$w/fx/$n.img" > /dev/null 2>&1 || printf ' tools/linux-part %s;' "$n"
+        cp "$w/linux/$n/guest.txt" "$w/linux/$n.txt" 2>/dev/null
+    done
+    "${lp[@]}" --append gpt "$w/linux/badprimary-gpt" "$w/fx/badprimary.img" > /dev/null 2>&1 || printf ' tools/linux-part badprimary gpt;'
+    cp "$w/linux/badprimary-gpt/guest.txt" "$w/linux/badprimary-gpt.txt" 2>/dev/null
+    "${lp[@]}" --device-opts logical_block_size=4096,physical_block_size=4096 "$w/linux/fourk" "$w/fx/four.img" > /dev/null 2>&1 || printf ' tools/linux-part fourk;'
+    cp "$w/linux/fourk/guest.txt" "$w/linux/fourk.txt" 2>/dev/null
+    local t
+    for t in $tiers; do
+        if [ -f "$w/$t/boot.img" ]; then
+            "${lp[@]}" "$w/linux/disk" "$w/$t/boot.img" > /dev/null 2>&1 || printf ' tools/linux-part the boot disk;'
+            cp "$w/linux/disk/guest.txt" "$w/linux/disk.txt" 2>/dev/null
+            break
+        fi
+    done
+    echo "live $(uname -r) $k" > "$w/linux/how"
+    if [ "$record" = 1 ]; then
+        mkdir -p "$REC"
+        cp "$w/linux"/*.txt "$REC/"
+        printf 'Linux %s on QEMU (tools/linux-part), recorded %s\n' "$(sed -n 's/^linux-part: uname //p' "$w/linux/four.txt")" "$(date -u +%Y-%m-%d)" > "$REC/meta"
+        say "recorded the Linux side in $REC"
+    fi
+}
+
+if [ "$only" = linux ]; then
+    why=$(fixtures_ready "$images")
+    for t in $tiers; do
+        [ -f "$images/$t/kmain_console.elf" ] && [ -f "$images/boot.cpio" ] && why+=$(disk_of "$t" boot "$images/boot.cpio")
+    done
+    why+=$(linux_side "$images")
+    [ -z "$why" ] && say "PASS P0 (linux): the Linux side ran ($(cat "$images/linux/how"))" || bad "P0 (linux):$why"
+    exit "$fail"
+fi
+
+if [ -z "$images" ]; then
+    why=$(build)
+    if [ "$only" = build ]; then
+        [ -z "$why" ] && say "PASS P0 (build): kmain_part$([ "$rows" = all ] && echo ', kmain_console and the programs') built ($tiers) (the disks are made where the boots run)" || bad "P0 (build):$why"
+        exit "$fail"
+    fi
+    [ -z "$why" ] || bad "P0 (build):$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx6-part build (P0): PASS (no boot: --no-boot)" || say "mpx6-part build: FAIL"
+        exit "$fail"
+    fi
+fi
+work=$images
+
+# The disks and the oracles, where the boots run.
+why=$(fixtures_ready "$images")
+why+=$(oracles "$images")
+if [ "$rows" = all ]; then
+    for t in $tiers; do
+        for s in boot reboot kill; do why+=$(disk_of "$t" "$s" "$images/$s.cpio"); done
+        SOURCE_DATE_EPOCH=$EPOCH "$PAX_ROOT/tools/mkdisk" --home 32M "$images/$t/home.img" > "$images/$t/home.mkdisk.txt" 2>&1 || why+=" mkdisk --home;"
+    done
+fi
+if [ ! -d "$images/linux" ]; then
+    if [ "$(uname -s)" = Linux ]; then why+=$(linux_side "$images"); else why+=" the Linux side needs Linux;"; fi
+fi
+[ -z "$why" ] && say "PASS P0: the fixtures as recorded ($(cut -c1-12 <<< "$(sha256_of "$images/fx/four.img")")… and ten more), sfdisk --dump and sgdisk -v agree with mkgpt, the Linux side ($(cat "$images/linux/how" 2>/dev/null))$([ "$rows" = all ] && echo ', the boot disks made')" || bad "P0:$why"
+lx=$images/linux
+
+# --- the boots -------------------------------------------------------------------------
+
+norm_log() { serial_norm "$log" > "$log.norm"; }
+sgrep() { command grep -a "$@" "$log.norm"; }
+
+record_run() { # what status
+    ran=$((ran + 1))
+    printf '%s status=%s accel=%s elapsed=%s serial=%s\n' "$1" "$2" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sed -n 's/^elapsed: //p' "$log.meta" 2>/dev/null)" \
+        "$(sha256_of "$log")" >> "$runs"
+}
+
+halted() { # label status
+    if [ "$2" = 0 ]; then
+        say "PASS P5 $1: halted: $(tail -n 1 "$log.verdict")"
+    else
+        bad "P5 $1: not halted (qemu-halt $2): $(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict")"
+    fi
+}
+
+books() { # label
+    if sgrep -Eq '^block: vda: [0-9]+ reads \([0-9]+ sectors\), [0-9]+ writes \([0-9]+ sectors\), [0-9]+ flushes, 0 errors, '; then
+        say "PASS P5 $1: $(sgrep -m1 '^block: vda: [0-9]* reads' | cut -d';' -f1)"
+    else
+        bad "P5 $1: the books: $(sgrep -m1 '^block: vda: [0-9]* reads' || echo 'no books line')"
+    fi
+}
+
+part_boot() { # tier leg fixture
+    local tier=$1 leg=$2 n=$3 rc=0 img opt=,readonly=on dev=
+    case $n in four-rw) img=four; opt= ;; fourk) img=four; dev=,logical_block_size=4096,physical_block_size=4096 ;; *) img=$n ;; esac
+    log=$PAX_BUILD/mpx6-part-$tier-$leg-$n.serial.log
+    rm -f "$log" "$log.verdict" "$log.norm"
+    cp "$images/fx/$img.img" "$PAX_BUILD/mpx6-part-$tier-$leg-$n.img"
+    "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 300 \
+        --elf "$images/$tier/kmain_part.elf" --marker 'halt|PANIC .*' \
+        --qemu -drive --qemu "file=$PAX_BUILD/mpx6-part-$tier-$leg-$n.img,if=none,id=d0,format=raw$opt" \
+        --qemu -device --qemu "virtio-blk-pci,drive=d0$dev" "$images/$tier/kmain_part.iso" >"$log.verdict" 2>&1 || rc=$?
+    norm_log
+    record_run "$tier $leg kmain_part $n" "$rc"
+    return "$rc"
+}
+
+# P4's host side: the four-rw image against its fixture: exactly the
+# eight window-edge sectors changed, each the marked pattern.
+host_window() { # image fixture
+    python3 - "$1" "$2" <<'PY'
+import struct, sys
+a = open(sys.argv[1], "rb").read()
+b = open(sys.argv[2], "rb").read()
+P, M = 0x7061786469736B00, 0x0000000057524954
+want = {34, 2047, 2048, 4095, 4096, 8191, 8192, 16350}
+changed = {s for s in range(len(b) // 512) if a[s * 512:(s + 1) * 512] != b[s * 512:(s + 1) * 512]}
+bad = [s for s in sorted(want) if a[s * 512:(s + 1) * 512] != struct.pack("<64Q", *[((s << 32) | w) ^ P ^ M for w in range(64)])]
+if changed == want and not bad:
+    print("8 sectors changed, each the window's marked pattern: %s" % " ".join(str(s) for s in sorted(want)))
+    sys.exit(0)
+print("changed %s (want %s), not marked %s" % (sorted(changed)[:20], sorted(want), bad))
+sys.exit(1)
+PY
+}
+
+table_rows() { # tier leg
+    local tier=$1 leg=$2 n ref hrc res s np
+    for n in $BOOTS; do
+        hrc=0; part_boot "$tier" "$leg" "$n" || hrc=$?
+        local id="$tier $leg $n"
+        # P1, P2: against the guest (or the named reference).
+        ref=$lx/$n.txt
+        local sf=()
+        case $n in badprimary) ref=$lx/badprimary-gpt.txt ;; wide) sf=(--sfdisk "$images/fx/wide.sfdisk") ;; four-rw) ref=$lx/four.txt ;; esac
+        if [ -f "$ref" ]; then
+            res=$(python3 "$D/compare" "$log.norm" "$ref" ${sf[@]+"${sf[@]}"}); rc=$?
+            while IFS= read -r l; do
+                local w
+                case $l in
+                    "PASS "*) w=${l#PASS }; say "PASS ${w%% *} $id: ${w#* }" ;;
+                    "FAIL "*) w=${l#FAIL }; bad "${w%% *} $id: ${w#* }" ;;
+                    *)        say "  $l" ;;
+                esac
+            done <<< "$res"
+            [ "$rc" = 0 ] || fail=1
+        else
+            bad "P1 $id: no Linux reference $ref"
+        fi
+        # P3: the refusals named once.
+        case $n in
+            badprimary) [ "$(sgrep -c '^block: vda: the primary GPT header at LBA 1 fails its CRC32 ([0-9a-f]* stored, [0-9a-f]* computed); the backup at LBA 16383 is used$')" = 1 ] \
+                            && say "PASS P3 $id: the primary header refused by name (its CRC32), the backup used, said once" || bad "P3 $id: the primary's refusal" ;;
+            badbackup)  [ "$(sgrep -c '^block: vda: the backup GPT header at LBA 16383 fails its CRC32 ([0-9a-f]* stored, [0-9a-f]* computed); the primary is used$')" = 1 ] \
+                            && say "PASS P3 $id: the backup header refused by name (its CRC32), the primary used, said once" || bad "P3 $id: the backup's refusal" ;;
+            bothbad)    [ "$(sgrep -c '^block: vda: refused: no valid GPT: the primary header at LBA 1 fails its CRC32 .*, the backup at LBA 16383 fails its CRC32 .*; no partitions, vda is the whole disk$')" = 1 ] \
+                            && say "PASS P3 $id: no valid GPT, by name, once; vda whole" || bad "P3 $id: the table's refusal" ;;
+            fourk)      [ "$(sgrep -c '^block: vda: refused: a partition table on logical blocks of 4096 bytes .*; not read, vda is the whole disk$')" = 1 ] \
+                            && say "PASS P3 $id: 4096-byte logical blocks refused by name, once; vda whole" || bad "P3 $id: the block size's refusal" ;;
+            *)          [ "$(sgrep -c '^block: vda: refused:')" = 0 ] && say "PASS P3 $id: no table refusal" || bad "P3 $id: a refusal: $(sgrep -m1 '^block: vda: refused:')" ;;
+        esac
+        # P4: the windows.
+        np=$(sgrep -c '^block: vda[0-9]*: [0-9]*:[0-9]*, sectors ')
+        s=$(sgrep -Ec '^part: vda[0-9]+: window [0-9]+\+[0-9]+: first and last read back, 0 differ; past the end -EIO'"$([ "$n" = four-rw ] && echo '; written and read back at [0-9]+ and [0-9]+')"'$')
+        local refused
+        refused=$(sgrep -Ec '^block: refused: a request past the end of vda[0-9]+ \(sector [0-9]+, 2 sectors, capacity [0-9]+\), -EIO$')
+        local counted
+        counted=$(sgrep -Ec '^block: vda[0-9]+: [0-9]+ reads \([0-9]+ sectors\), [0-9]+ writes \([0-9]+ sectors\), 0 errors, 1 refused$')
+        if [ "$s" = "$np" ] && [ "$refused" = "$np" ] && [ "$counted" = "$np" ]; then
+            say "PASS P4 $id: $np windows: first and last sectors the disk's, past the end refused by name and counted ($refused)$([ "$n" = four-rw ] && echo '; written and read back through each')"
+        else
+            bad "P4 $id: windows $s of $np, refusals $refused, counted $counted: $(sgrep -m1 '^part: vda' || echo 'no window line')"
+        fi
+        if [ "$n" = four-rw ]; then
+            if r=$(host_window "$PAX_BUILD/mpx6-part-$tier-$leg-$n.img" "$images/fx/four.img"); then
+                say "PASS P4 $id: the host reads the image: $r"
+            else
+                bad "P4 $id: the host reads the image: $r"
+            fi
+        fi
+        books "$id"
+        halted "$id" "$hrc"
+        rm -f "$PAX_BUILD/mpx6-part-$tier-$leg-$n.img"
+    done
+}
+
+# --- the console boots (all rows) --------------------------------------------------------
+
+state_of() { # disk image -> "clean|not clean <mount count>" of partition 2 (dumpe2fs -h)
+    local d
+    d=$(dirname "$1")
+    dd if="$1" of="$d/p2.img" bs=512 skip=135168 count=126936 status=none
+    "$PAX_ROOT/tools/e2fs" "$d" dumpe2fs -h p2.img 2>/dev/null | awk -F': *' '/^Filesystem state:/ { s = $2 } /^Mount count:/ { c = $2 } END { print s, c }'
+    rm -f "$d/p2.img"
+}
+
+con_boot() { # tier leg what image [--boot-disk]
+    local rc=0 bd=()
+    [ "${5:-}" = --boot-disk ] && bd=(--boot-disk)
+    log=$PAX_BUILD/mpx6-part-$1-$2-$3.serial.log
+    rm -f "$log" "$log.verdict" "$log.norm"
+    if [ ${#bd[@]} = 1 ]; then
+        "$PAX_ROOT/tools/qemu-halt" --firmware "$2" --boot-disk --serial "$log" --timeout 600 --qemu -m --qemu 512M \
+            --elf "$images/$1/kmain_console.elf" --marker 'halt|PANIC .*' "$4" >"$log.verdict" 2>&1 || rc=$?
+    else
+        "$PAX_ROOT/tools/qemu-halt" --firmware "$2" --serial "$log" --timeout 600 --qemu -m --qemu 512M \
+            --elf "$images/$1/kmain_console.elf" --marker 'halt|PANIC .*' \
+            --qemu -drive --qemu "file=$4,if=none,id=d0,format=raw" --qemu -device --qemu virtio-blk-pci,drive=d0 \
+            "$images/$1/part-iso.iso" >"$log.verdict" 2>&1 || rc=$?
+    fi
+    norm_log
+    record_run "$1 $2 kmain_console $3" "$rc"
+    return "$rc"
+}
+
+blkid_of() { # field device -> the guest's blkid value on the boot disk (` UUID=` is not ` PARTUUID=`)
+    sed -n "/^\/dev\/$2: /{s/.* $1=\"\([^\"]*\)\".*/\1/p;}" "$lx/disk.txt" | head -n 1
+}
+
+# The names' disk: the boot disk with names.sh and a table of spellings.
+names_disk() { # tier name fstab-text -> image path (reasons on stderr)
+    local t=$1 n=$2 img=$images/$1/$2.img
+    printf '%s\n' "$3" > "$images/$n.fstab"
+    cpio_for "$n" names.sh "$images/$n.fstab" >&2
+    disk_of "$t" "$n" "$images/$n.cpio" >&2
+    printf '%s\n' "$img"
+}
+
+names_rows() { # tier
+    local t=$1 pu uu lb rc img id
+    pu=$(blkid_of PARTUUID vda2); uu=$(blkid_of UUID vda2); lb=$(blkid_of LABEL vda2)
+    [ -n "$pu" ] && [ -n "$uu" ] && [ -n "$lb" ] || { bad "P6 $t: no PARTUUID, UUID or LABEL for vda2 in the guest's blkid ($lx/disk.txt)"; return; }
+    # A: PARTUUID= first.
+    img=$(names_disk "$t" names-a "PARTUUID=$pu /home ext2 defaults 0 2
+/dev/vda2 /mnt/a ext2 defaults 0 2
+vda2 /mnt/b ext2 defaults 0 2
+UUID=$uu /mnt/c ext2 defaults 0 2
+LABEL=$lb /mnt/d ext2 defaults 0 2
+PARTLABEL=home /mnt/e ext2 defaults 0 2
+/dev/vda /mnt/f ext2 defaults 0 2
+/dev/vda9 /mnt/g ext2 defaults 0 2
+PARTUUID=00000000-0000-0000-0000-000000000000 /mnt/h ext2 defaults 0 2
+UUID=00000000-0000-0000-0000-000000000000 /mnt/h ext2 nofail 0 2")
+    rc=0; con_boot "$t" bios names-a "$img" --boot-disk || rc=$?
+    id="$t bios names-a"
+    local why=
+    sgrep -qx "fstab: PARTUUID=$pu (vda2) on /home: ext2, read-write, write-back" || why+=" PARTUUID= did not mount vda2;"
+    sgrep -qx "fstab: /dev/vda2 on /mnt/a: not mounted, -16" || why+=" /dev/vda2;"
+    sgrep -qx "fstab: vda2 on /mnt/b: not mounted, -16" || why+=" vda2;"
+    sgrep -qx "fstab: UUID=$uu (vda2) on /mnt/c: not mounted, -16" || why+=" UUID=;"
+    sgrep -qx "fstab: LABEL=$lb (vda2) on /mnt/d: not mounted, -16" || why+=" LABEL=;"
+    sgrep -qx "fstab: PARTLABEL=home (vda2) on /mnt/e: not mounted, -16" || why+=" PARTLABEL=;"
+    sgrep -qx "block: refused: a mount of vda while its partition vda2 is mounted, -EBUSY" || why+=" /dev/vda not refused by name;"
+    sgrep -qx "fstab: /dev/vda9 for /mnt/g: no such disk; /mnt/g stays the tree's" || why+=" /dev/vda9;"
+    sgrep -qx "fstab: PARTUUID=00000000-0000-0000-0000-000000000000 for /mnt/h: no such volume; /mnt/h stays the tree's" || why+=" the unknown PARTUUID;"
+    sgrep -q "^fstab: UUID=00000000-0000-0000-0000-000000000000 for /mnt/h" && why+=" nofail said something;"
+    sgrep -qx '/home fe02' || why+=" /home is not 254:2 ($(sgrep '^/home ' | head -n 1));"
+    [ -z "$why" ] && say "PASS P6 $id: PARTUUID=$pu (the guest's blkid) mounts /home from vda2; /dev/vda2, vda2, UUID=, LABEL=, PARTLABEL= each name vda2; /dev/vda refused while vda2 is mounted; /dev/vda9 and an unknown PARTUUID name nothing; nofail silent" || bad "P6 $id:$why"
+    [ "$rc" = 0 ] || bad "P6 $id: not halted ($rc)"
+    # B: UUID= first, LABEL= after it.
+    img=$(names_disk "$t" names-b "UUID=$uu /home ext2 defaults 0 2
+LABEL=$lb /mnt/a ext2 defaults 0 2")
+    rc=0; con_boot "$t" bios names-b "$img" --boot-disk || rc=$?
+    id="$t bios names-b"
+    if sgrep -qx "fstab: UUID=$uu (vda2) on /home: ext2, read-write, write-back" && sgrep -qx "fstab: LABEL=$lb (vda2) on /mnt/a: not mounted, -16" && sgrep -qx '/home fe02' && [ "$rc" = 0 ]; then
+        say "PASS P6 $id: UUID=$uu (the ext2 superblock's, the guest's blkid's) mounts /home from vda2; LABEL=$lb names it"
+    else
+        bad "P6 $id: $(sgrep -m2 '^fstab:' | tr '\n' ' ')"
+    fi
+    # C: a whole-disk ext2 with an MBR in its boot block.
+    img=$images/$t/names-c.img
+    SOURCE_DATE_EPOCH=$EPOCH "$PAX_ROOT/tools/mkdisk" --label pax-whole 32M "$img" > "$images/$t/names-c.mkdisk.txt" 2>&1 || bad "P6 $t: mkdisk names-c"
+    "$PAX_ROOT/tools/mkgpt" --mbr 0c0ffee0 "$img" 1:83:2048:4095 > /dev/null || bad "P6 $t: mkgpt --mbr names-c"
+    local wu
+    wu=$(SOURCE_DATE_EPOCH=$EPOCH "$PAX_ROOT/tools/e2fs" "$images/$t" dumpe2fs -h names-c.img 2>/dev/null | sed -n 's/^Filesystem UUID: *//p')
+    printf '%s\n' "/dev/vda /home ext2 defaults 0 2
+/dev/vda1 /mnt/a ext2 defaults 0 2
+UUID=$wu /mnt/b ext2 defaults 0 2" > "$images/names-c.fstab"
+    cpio_for names-c names.sh "$images/names-c.fstab" >/dev/null
+    "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$images/names-c.cpio" initramfs.cpio \
+        "$images/$t/kmain_console.elf" "$images/$t/names-c.iso" >/dev/null || bad "P6 $t: mkimage names-c"
+    rc=0
+    log=$PAX_BUILD/mpx6-part-$t-bios-names-c.serial.log
+    rm -f "$log" "$log.verdict" "$log.norm"
+    "$PAX_ROOT/tools/qemu-halt" --firmware bios --serial "$log" --timeout 600 --qemu -m --qemu 512M \
+        --elf "$images/$t/kmain_console.elf" --marker 'halt|PANIC .*' \
+        --qemu -drive --qemu "file=$img,if=none,id=d0,format=raw" --qemu -device --qemu virtio-blk-pci,drive=d0 \
+        "$images/$t/names-c.iso" >"$log.verdict" 2>&1 || rc=$?
+    norm_log; record_run "$t bios kmain_console names-c" "$rc"
+    id="$t bios names-c"
+    if sgrep -qx "fstab: /dev/vda on /home: ext2, read-write, write-back" && sgrep -qx "block: refused: a mount of vda1 while vda, its disk, is mounted, -EBUSY" \
+        && sgrep -qx "fstab: UUID=$wu (vda) on /mnt/b: not mounted, -16" && sgrep -qx 'block: vda: MBR, signature 0c0ffee0; 1 partition' && [ "$rc" = 0 ]; then
+        say "PASS P6 $id: a whole-disk ext2 with an MBR: /dev/vda mounts; /dev/vda1 refused while its disk is mounted, by name; UUID=$wu names vda"
+    else
+        bad "P6 $id: $(sgrep -E '^(fstab|block: refused|block: vda: MBR)' | tr '\n' ' ')"
+    fi
+}
+
+disk_rows() { # tier leg
+    local t=$1 leg=$2 rc img id why= st pp
+    img=$images/$t/boot-$leg.img
+    cp "$images/$t/boot.img" "$img"
+    rc=0; con_boot "$t" "$leg" "disk" "$img" --boot-disk || rc=$?
+    id="$t $leg disk"
+    local p=P7; [ "$leg" = uefi ] && p=P8
+    sed -n 's/^cmd: //p' "$log.meta" | command grep -Eq 'media=cdrom|-boot d' && why+=" QEMU had a CD-ROM;"
+    if [ "$leg" = bios ]; then sgrep -q '^Booting from Hard Disk' || why+=" SeaBIOS did not boot the hard disk;"; else sgrep -q 'UEFI Misc Device' || why+=" OVMF did not boot the disk;"; fi
+    pp=$(blkid_of PARTUUID vda1)
+    sgrep -Eqx "boot: /boot/initramfs.cpio from a disk: partition 1, GPT disk [0-9a-f-]+, partition $pp" || why+=" no boot: line naming partition 1 ($pp);"
+    sgrep -qx 'fstab: /dev/vda2 on /home: ext2, read-write, write-back' || why+=" /home not mounted from /dev/vda2;"
+    sgrep -qx '/home fe02 0:0 755' && sgrep -qx '/home/pax fe02 1000:1000 755' || why+=" /home and /home/pax are not vda2's (254:2);"
+    sgrep -qx 'a note on the disk that booted' || why+=" no note;"
+    sgrep -qx 'PAX: init /bin/sh ended with status 0; nothing left to run' || why+=" init did not end;"
+    res=$(python3 "$D/compare" "$log.norm" "$lx/disk.txt")
+    case $res in *FAIL*) why+=" the table or /proc/partitions: $(printf '%s' "$res" | command grep -m1 FAIL);" ;; esac
+    [ -z "$why" ] && [ "$rc" = 0 ] && say "PASS $p $id: booted from the disk with no CD-ROM ($(sed -n 's/^elapsed: //p' "$log.meta")); the initramfs from partition 1 ($pp); /home from /dev/vda2 (254:2) by user/fstab-disk, / in memory; /proc/partitions the guest's; halted" \
+        || bad "$p $id:$why (qemu-halt $rc)"
+    # P10 (a): after exit, clean.
+    st=$(state_of "$img")
+    [ "$st" = "clean 1" ] && say "PASS P10 $id: after exit, dumpe2fs -h: clean (mount count 1)" || bad "P10 $id: after exit: '$st'"
+    rm -f "$img"
+}
+
+iso_row() { # tier
+    local t=$1 rc img id
+    img=$images/$t/home-copy.img
+    cp "$images/$t/home.img" "$img"
+    rc=0; con_boot "$t" bios iso "$img" || rc=$?
+    id="$t bios iso"
+    if sgrep -qx 'fstab: /dev/vda on /home: ext2, read-write, write-back' && ! sgrep -q '^block: vda: \(GPT\|MBR\)' && ! sgrep -q '^boot: ' \
+        && sgrep -qx '/home/pax fe00 1000:1000 755' && sgrep -qx 'a note on the disk that booted' && [ "$rc" = 0 ]; then
+        say "PASS P9 $id: the ISO with a bare ext2 disk: /home from /dev/vda (254:0), no table, no boot: line, the note written, halted"
+    else
+        bad "P9 $id: $(sgrep -E '^(fstab|block: vda: (GPT|MBR)|boot:)' | tr '\n' ' ') (qemu-halt $rc)"
+    fi
+    rm -f "$img"
+}
+
+clean_rows() { # tier
+    local t=$1 rc img st id q i
+    # (b) reboot(2): the first boot ends by the reset (-no-reboot), clean between, the second reads the note.
+    img=$images/$t/reboot-run.img
+    cp "$images/$t/reboot.img" "$img"
+    log=$PAX_BUILD/mpx6-part-$t-bios-reboot1.serial.log
+    rm -f "$log"
+    rc=0; "$PAX_ROOT/tools/qemu-run" --boot-disk --firmware bios --serial "$log" --timeout 300 "$img" -- -m 512M > /dev/null 2>&1 || rc=$?
+    norm_log; record_run "$t bios kmain_console reboot (first)" "$rc"
+    id="$t bios reboot"
+    st=$(state_of "$img")
+    if [ "$rc" = 0 ] && sgrep -q 'reboot(2): the volumes written and marked clean; restarting' && [ "$st" = "clean 1" ]; then
+        say "PASS P10 $id: reboot(2) reset the machine; dumpe2fs -h between the boots: clean (mount count 1)"
+    else
+        bad "P10 $id: the first boot (qemu-run $rc), state '$st'"
+    fi
+    rc=0; con_boot "$t" bios reboot2 "$img" --boot-disk || rc=$?
+    st=$(state_of "$img")
+    if sgrep -qx 'part: the second boot' && sgrep -qx 'written before the reboot' && sgrep -q 'clean, mount 2;' && [ "$st" = "clean 2" ] && [ "$rc" = 0 ]; then
+        say "PASS P10 $id: the second boot reads the note (mount 2) and halts clean"
+    else
+        bad "P10 $id: the second boot: state '$st', $(sgrep -m1 '^ext2: vda2' | sed 's/.*free; //')"
+    fi
+    rm -f "$img"
+    # (c) the power cut: QEMU killed (its qemu-run, by pid) the moment the session waits.
+    img=$images/$t/kill-run.img
+    cp "$images/$t/kill.img" "$img"
+    log=$PAX_BUILD/mpx6-part-$t-bios-kill.serial.log
+    rm -f "$log"
+    "$PAX_ROOT/tools/qemu-run" --boot-disk --firmware bios --serial "$log" --timeout 300 "$img" -- -m 512M > /dev/null 2>&1 &
+    q=$!
+    for i in $(seq 1 3000); do command grep -aq 'part: waiting' "$log" 2>/dev/null && break; sleep 0.1; done
+    kill -TERM "$q" 2>/dev/null; wait "$q"; rc=$?
+    norm_log; record_run "$t bios kmain_console kill" "$rc"
+    id="$t bios kill"
+    st=$(state_of "$img")
+    if sgrep -qx 'part: waiting' && [ "$st" = "not clean 1" ]; then
+        say "PASS P10 $id: QEMU killed while the volume was mounted: dumpe2fs -h: not clean (mount count 1)"
+    else
+        bad "P10 $id: after the kill: '$st' ($(sgrep -c 'part: waiting') waiting lines)"
+    fi
+    # The next boot: the boot session on the killed disk (its ESP is boot.img's).
+    dd if="$images/$t/boot.img" of="$img" bs=512 skip=4096 seek=4096 count=131072 conv=notrunc status=none
+    rc=0; con_boot "$t" bios kill2 "$img" --boot-disk || rc=$?
+    st=$(state_of "$img")
+    if [ "$(sgrep -c '; not cleanly unmounted, mount 2; read-write$')" = 1 ] && [ "$st" = "not clean 2" ] && [ "$rc" = 0 ]; then
+        say "PASS P10 $id: the next mount says so once (not cleanly unmounted, mount 2); its clean halt leaves it not clean, as Linux leaves one ($(head -n 1 "$D/linux/notclean.txt" 2>/dev/null))"
+    else
+        bad "P10 $id: the next boot: state '$st', $(sgrep -m1 '^ext2: vda2' | sed 's/.*free; //')"
+    fi
+    rm -f "$img"
+}
+
+: > "$runs"
+mkdir -p "$PAX_BUILD"
+for tier in $tiers; do
+    for leg in $legs; do
+        if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+            [ "${PAX_REQUIRE_UEFI:-0}" = 1 ] && bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1" || say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+            continue
+        fi
+        table_rows "$tier" "$leg"
+    done
+    if [ "$rows" = all ]; then
+        names_rows "$tier"
+        disk_rows "$tier" bios
+        if [ -n "$(find_ovmf)" ]; then
+            disk_rows "$tier" uefi
+        elif [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "P8 $tier: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP P8 $tier: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        iso_row "$tier"
+        clean_rows "$tier"
+    fi
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx6-part: PASS" || say "mpx6-part: FAIL"
+exit "$fail"
