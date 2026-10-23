@@ -34,9 +34,39 @@
 # pax-home; the playground's pax-home.img and tests/mpx6-ext2's home
 # disk (whose digest it records) are made by it.
 #
+# --gpt (px66) makes a disk that boots, partitioned: a GUID partition
+# table (tools/mkgpt) of three entries,
+#
+#   1  an EFI system partition from LBA 4096 (2 MiB), --esp SIZE
+#      (default 64M): FAT32 made by mkfs.fat at its offset (tools/disktools:
+#      dosfstools from user/disktools.pin, never the host's), its volume id
+#      derived from the label and SOURCE_DATE_EPOCH, `--invariant` for the
+#      rest, holding Limine's /EFI/BOOT/BOOTX64.EFI, /boot/limine/limine.conf
+#      (--conf, default boot/limine-initramfs.conf), /boot/limine/
+#      limine-bios.sys, the kernel at /boot/pax (--kernel) and the
+#      initramfs at /boot/initramfs.cpio (--initramfs), put there by mtools
+#      (mmd, mcopy -m: every time SOURCE_DATE_EPOCH);
+#   2  a Linux file system partition after it, 1 MiB aligned, to the end:
+#      the `--home` ext2 volume above (made by this tool's own path, then
+#      copied in), so /home/pax is pax's;
+#   3  a BIOS boot partition at LBA 2048 (1 MiB), first on the disk, for
+#      Limine's BIOS stage 2: `limine bios-install OUT 3` (Limine's
+#      USAGE.md "BIOS/GPT"; measured: the installer refuses a GPT disk
+#      with none, and writes only the MBR's boot code, bytes 1-422, and
+#      the partition), from the release boot/limine.pin names.
+#
+# Every GUID is derived from --label (default pax-disk) and
+# SOURCE_DATE_EPOCH, so two runs give the same bytes. The oracles run
+# on the result: sfdisk --dump and sgdisk -v (tools/disktools), fsck.fat
+# -n of partition 1 and e2fsck -fn of partition 2 (each copied out);
+# any complaint fails the tool.
+#
+#   tools/mkdisk --gpt --kernel ELF --initramfs CPIO [--conf LIMINE.conf]
+#                [--esp SIZE] [--label NAME] SIZE OUT.img
+#
 # Prints the commands' count, the e2fsck verdict, and
-# `OUT <bytes> bytes sha256 <hex>`. Exit 0, 1 when e2fsck finds a fault,
-# 2 on a usage or tool error.
+# `OUT <bytes> bytes sha256 <hex>`. Exit 0, 1 when e2fsck (or, --gpt,
+# any oracle) finds a fault, 2 on a usage or tool error.
 import hashlib
 import os
 import shlex
@@ -99,6 +129,158 @@ def e2fs(workdir, *args, env=None):
     return r.returncode, r.stdout, r.stderr
 
 
+def run(cmd, what, env=None):
+    e = dict(os.environ)
+    if env:
+        e.update(env)
+    r = subprocess.run(cmd, capture_output=True, text=True, env=e)
+    if r.returncode != 0:
+        die("%s: exit %d: %s%s" % (what, r.returncode, r.stdout[-2000:], r.stderr[-2000:]), 1 if what.startswith("oracle") else 2)
+    return r.stdout + r.stderr
+
+
+def sha_of(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def copy_range(src, dst, off, size, to_off=0):
+    with open(src, "rb") as fi, open(dst, "r+b" if os.path.exists(dst) else "wb") as fo:
+        fi.seek(off)
+        fo.seek(to_off)
+        left = size
+        while left > 0:
+            b = fi.read(min(left, 1 << 20))
+            if not b:
+                break
+            fo.write(b)
+            left -= len(b)
+
+
+def gpt_main(args):
+    kernel = initramfs = None
+    conf = os.path.join(ROOT, "boot", "limine-initramfs.conf")
+    esp = size_of("64M")
+    label = "pax-disk"
+    while args and args[0].startswith("--"):
+        if len(args) < 2:
+            die("%s takes a value" % args[0])
+        k, v = args[0], args[1]
+        args = args[2:]
+        if k == "--kernel":
+            kernel = v
+        elif k == "--initramfs":
+            initramfs = v
+        elif k == "--conf":
+            conf = v
+        elif k == "--esp":
+            esp = size_of(v)
+        elif k == "--label":
+            label = v
+        else:
+            die("unknown option %s" % k)
+    if len(args) != 2 or not kernel or not initramfs:
+        die("usage: mkdisk --gpt --kernel ELF --initramfs CPIO [--conf LIMINE.conf] [--esp SIZE] [--label NAME] SIZE OUT.img")
+    for f in (kernel, initramfs, conf):
+        if not os.path.isfile(f):
+            die("no file %s" % f)
+    size = size_of(args[0])
+    out = os.path.abspath(args[1])
+    S = 512
+    if size % (1 << 20) or esp % (1 << 20) or esp < (33 << 20):
+        die("the size and --esp are whole MiB, the ESP at least 33 MiB (FAT32's least)")
+    sectors = size // S
+    bios = (2048, 4095)
+    e0 = 4096
+    e1 = e0 + esp // S - 1
+    h0 = e1 + 1
+    last_usable = sectors - 34
+    h1 = ((last_usable + 1) // 8) * 8 - 1  # ext2's 4 KiB blocks: a whole number of them
+    if h1 - h0 + 1 < (8 << 20) // S:
+        die("no room for the home partition (at least 8 MiB after the ESP)")
+    t = epoch()
+    work = os.path.dirname(out)
+    os.makedirs(work, exist_ok=True)
+    stage = out + ".stage"
+    shutil.rmtree(stage, ignore_errors=True)
+    os.makedirs(stage)
+    try:
+        with open(out, "wb") as f:
+            f.truncate(size)
+        # Partition 2: the --home volume, made by this tool's own path and copied in.
+        home = os.path.join(stage, "home.img")
+        print(run([sys.executable, os.path.abspath(__file__), "--home", str((h1 - h0 + 1) * S), home], "mkdisk --home",
+                  env={"SOURCE_DATE_EPOCH": str(t)}).strip().splitlines()[0])
+        copy_range(home, out, 0, (h1 - h0 + 1) * S, h0 * S)
+        os.unlink(home)
+        # Partition 1: FAT32 at its offset, then Limine's files and the kernel's.
+        volid = hashlib.sha256(("pax-esp:%s:%d" % (label, t)).encode()).hexdigest()[:8]
+        dt = os.path.join(HERE, "disktools")
+        rel = os.path.basename(out)
+        env = {"SOURCE_DATE_EPOCH": str(t)}
+        run([dt, work, "mkfs.fat", "-F", "32", "-n", "PAX-ESP", "-i", volid, "--invariant", "--mbr=n", "-S", "512",
+             "-h", str(e0), "--offset", str(e0), rel, str(esp // 1024)], "mkfs.fat", env)
+        lim = limine_dir()
+        files = [(os.path.join(lim, "BOOTX64.EFI"), "::/EFI/BOOT/BOOTX64.EFI"),
+                 (conf, "::/boot/limine/limine.conf"),
+                 (os.path.join(lim, "limine-bios.sys"), "::/boot/limine/limine-bios.sys"),
+                 (kernel, "::/boot/pax"),
+                 (initramfs, "::/boot/initramfs.cpio")]
+        img = "%s@@%d" % (rel, e0 * S)
+        run([dt, work, "mmd", "-i", img, "::/EFI", "::/EFI/BOOT", "::/boot", "::/boot/limine"], "mmd", env)
+        for k, (src, dst) in enumerate(files):
+            sp = os.path.join(stage, "f%d" % k)
+            shutil.copyfile(src, sp)
+            os.utime(sp, (t, t))
+            run([dt, work, "mcopy", "-m", "-i", img, os.path.relpath(sp, work), dst], "mcopy %s" % dst, env)
+        # The table, then Limine's BIOS stages into partition 3.
+        print(run([os.path.join(HERE, "mkgpt"), "--label", label, out,
+                   "1:esp:%d:%d:esp" % (e0, e1), "2:linux:%d:%d:home" % (h0, h1), "3:bios:%d:%d:bios" % bios],
+                  "mkgpt", env).strip())
+        r = subprocess.run([os.path.join(lim, "limine"), "bios-install", out, "3"], capture_output=True, text=True)
+        if r.returncode != 0 or "installed successfully" not in r.stdout + r.stderr:
+            die("limine bios-install: %s%s" % (r.stdout, r.stderr))
+        # The oracles.
+        dump = run([dt, work, "sfdisk", "--dump", rel], "oracle sfdisk --dump")
+        print("mkdisk: sfdisk --dump:\n" + "\n".join("  " + l for l in dump.strip().splitlines()))
+        v = run([dt, work, "sgdisk", "-v", rel], "oracle sgdisk -v")
+        if "No problems found" not in v:
+            die("oracle sgdisk -v: %s" % v, 1)
+        print("mkdisk: sgdisk -v: " + [l for l in v.splitlines() if "No problems found" in l][0].strip())
+        espf = os.path.join(stage, "esp.img")
+        copy_range(out, espf, e0 * S, esp)
+        fv = run([dt, work, "fsck.fat", "-n", os.path.relpath(espf, work)], "oracle fsck.fat -n")
+        print("mkdisk: fsck.fat -n: " + fv.strip().splitlines()[-1])
+        os.unlink(espf)
+        homef = os.path.join(stage, "home.img")
+        copy_range(out, homef, h0 * S, (h1 - h0 + 1) * S)
+        rc, so, se = e2fs(work, "e2fsck", "-fn", os.path.relpath(homef, work))
+        if rc != 0:
+            die("oracle e2fsck -fn: %s%s" % (so, se), 1)
+        print("mkdisk: e2fsck -fn of partition 2: " + so.strip().splitlines()[-1])
+        os.unlink(homef)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+    print("%s %d bytes sha256 %s" % (out, size, sha_of(out)))
+
+
+def limine_dir():
+    pin = {}
+    for line in open(os.path.join(ROOT, "boot", "limine.pin")):
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            pin[k] = v
+    cache = os.environ.get("PAX_CACHE") or os.path.join(ROOT, ".pax-cache")
+    d = os.path.join(cache, "limine-%s" % pin.get("LIMINE_VERSION", "?"))
+    if not os.access(os.path.join(d, "limine"), os.X_OK):
+        die("Limine %s is not staged in %s; run tools/fetch-limine" % (pin.get("LIMINE_VERSION", "?"), d))
+    return d
+
+
 def main(argv):
     src = attrs = None
     label = "pax"
@@ -106,6 +288,9 @@ def main(argv):
     inodes = None
     args = argv[1:]
     home = None
+    if args and args[0] == "--gpt":
+        gpt_main(args[1:])
+        return
     if args and args[0] == "--home":
         args = args[1:]
         home = tempfile.mkdtemp(prefix="pax-home.")
