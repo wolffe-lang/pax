@@ -31,10 +31,15 @@
 # merge gate (`tier full`, the label) runs all of them on native BIOS,
 # and every trunk push and nightly (`tier all`) on every leg (tl29).
 
-@user    = mpx3-user mpx3-loader mpx3-boreutils mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-maps mpx3-speaker mpx3-sound mpx3-orchestra mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix mpx4-lobo mpx5-users mpx5-accounts mpx5-jobs mpx5-yew mpx5-screen mpx5-wolf mpx6-ext2
+@user    = mpx3-user mpx3-loader mpx3-boreutils mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-maps mpx3-speaker mpx3-sound mpx3-orchestra mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix mpx4-lobo mpx5-users mpx5-accounts mpx5-jobs mpx5-yew mpx5-screen mpx5-wolf mpx6-ext2 mpx5-scent
 @net     = mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix mpx4-lobo mpx5-jobs
 @music   = mpx3-speaker mpx3-sound mpx3-orchestra mpx4-session
 @console = mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-speaker mpx3-sound mpx3-orchestra mpx4-unix mpx4-session mpx5-accounts mpx5-jobs tour mpx5-yew mpx5-screen mpx5-wolf
+# px64: mpx5-scent is in @user: its image is the one whose archive holds
+# a symbolic link (/bin/grep -> scent, tools/mkinitramfs' `->`), which
+# kernel/tree adopts and kernel/files and kernel/process follow (exec
+# through the link, a `#!` line's interpreter), and its user session runs
+# through `as` (@asuser).
 # px62: mpx3-maps (mappings, FIFOs, flock) is in @user (it runs programs
 # over kernel/vm, kernel/tree and kernel/files) and @asuser (its user
 # runs go through `as`); its probes and their builder (tools/mkmaps,
@@ -49,7 +54,7 @@
 # the tree, the processes, the signals and the console a user's program
 # reaches) and @console (its screen rows). px59: mpx5-screen too (its
 # session is a user's; the console and the screen are what it holds).
-@asuser  = mpx3-tree mpx3-maps mpx3-shell mpx3-boreutils mpx4-unix mpx4-tcp mpx4-udp mpx5-users mpx5-jobs mpx5-lope mpx5-aspen mpx5-lupin mpx5-yew mpx5-screen mpx5-wolf
+@asuser  = mpx3-tree mpx3-maps mpx3-shell mpx3-boreutils mpx4-unix mpx4-tcp mpx4-udp mpx5-users mpx5-jobs mpx5-lope mpx5-aspen mpx5-lupin mpx5-yew mpx5-screen mpx5-wolf mpx5-scent
 @suuser  = mpx3-tree mpx3-shell mpx3-speaker mpx4-lobo mpx5-accounts
 # px63: the disk's two suites (the block device, the file system on it).
 @disk    = mpx6-blk mpx6-ext2
@@ -134,7 +139,7 @@ tools/mkinitramfs               @user
 # looks). Each user run's keys, run list, steps and recordings are its
 # suite's own, by the same derivation.
 user/elf/as.c                   @asuser
-tools/mkas                      mpx3-tree mpx3-maps mpx3-shell mpx3-boreutils mpx4-unix mpx4-tcp mpx4-udp mpx5-jobs mpx5-lope mpx5-aspen mpx5-lupin mpx5-yew mpx5-screen
+tools/mkas                      mpx3-tree mpx3-maps mpx3-shell mpx3-boreutils mpx4-unix mpx4-tcp mpx4-udp mpx5-jobs mpx5-lope mpx5-aspen mpx5-lupin mpx5-yew mpx5-screen mpx5-scent
 user/su/*                       @suuser
 tools/mksu                      @suuser
 user/mpx3-boreutils-user.run    mpx3-boreutils
@@ -158,6 +163,12 @@ user/elf/hostq.c                mpx5-jobs
 user/aspen.pin                  mpx5-aspen
 tools/mkaspen                   mpx5-aspen
 user/console/aspen.keys         mpx5-aspen
+# px64: scent on PAX: its pin, its builder and the typed session are
+# mpx5-scent's alone (its fixture and rows, tests/mpx5-scent.d/, by the
+# derivation).
+user/scent.pin                  mpx5-scent
+tools/mkscent                   mpx5-scent
+user/console/scent.keys         mpx5-scent
 # px57 (ruling #110): the musl lupin on PAX: its pin, its builder, the
 # image's programs and the typed session are mpx5-lupin's alone.
 user/lupin.pin                  mpx5-lupin
