@@ -973,3 +973,23 @@ changed. The kernel is unchanged in this lane.
 | Alpine 3.20 musl-dev, lld-dev, LLVM 17 packages | shipped binaries and package inventories only: static libc/CRT link feasibility and the packaged linker's dynamic dependencies |
 | LLVM 17.0.6 release source archive | authorized throwaway lld-only build using clang, libc++ and LLVM libunwind; never a source for PAX kernel code |
 | strace 6.8, Linux in a container, PAX under QEMU TCG | black-box runs: commands, syscall union, Linux/PAX transcripts and named linker walls |
+
+## px62: mappings, FIFOs and locks (pax#127, #128, #108)
+
+No Linux kernel source, no other kernel's, no musl's or glibc's source
+was read. Every rule is a man page's or POSIX's, a number is a uapi
+header's or the syscall table's, and every answer the kernel gives was
+measured black-box on Linux with the two probes before the kernel was
+written (kasumi's 7.2.8 in a `px13-ubuntu` container, then CI's
+runner kernel through `tools/linux-tree`). Permissively licensed
+kernels: none consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| man-pages `mmap(2)` (munmap and its ENOMEM split), `mremap(2)`, `msync(2)`, `mprotect(2)`, `madvise(2)`, `fork(2)`, `execve(2)`, `truncate(2)`, `flock(2)`, `fifo(7)`, `pipe(7)`, `mknod(2)`, `mkfifo(3)`, `open(2)`, `sigaction(2)` (si_code), `tmpfs(5)` | man-pages 6.x | documentation | read | what each call does and answers; what the probes ask |
+| POSIX.1-2024: `mmap()`, `msync()`, `munmap()`, `mkfifo()`, `open()` (FIFOs) | 2024 edition | documentation | read | what is specified and what is left to the system (a private page's view of a later write; O_RDWR of a FIFO) |
+| uapi `linux/mman.h` (MREMAP_MAYMOVE, MREMAP_FIXED, MREMAP_DONTUNMAP, MAP_SHARED_VALIDATE), `asm-generic/mman-common.h` (MS_ASYNC, MS_INVALIDATE, MS_SYNC, MAP_SYNC), `asm-generic/fcntl.h` (LOCK_SH, LOCK_EX, LOCK_NB, LOCK_UN), `linux/stat.h` (S_IFIFO, S_IFSOCK, S_IFBLK), `asm-generic/siginfo.h` (BUS_ADRERR, SEGV_ACCERR), `asm-generic/errno.h` (ENOLCK, EOVERFLOW, EOPNOTSUPP); `syscall_64.tbl` (25 mremap, 26 msync, 73 flock, 133 mknod, 259 mknodat) | the refs clone (`wolf/refs/repos/linux`, sparse to the allowed paths) | GPL-2.0 WITH Linux-syscall-note | read, numbers only | the constants in kernel/vm, kernel/files, kernel/signal, kernel/user |
+| Intel SDM vol. 3A §4.5 (table 4-20: a 4 KiB PTE's bits 11:9 ignored), AMD64 APM vol. 2 §5.4.1 (AVL) | current editions | documentation | read | kernel/paging's BORROWED and COW bits |
+| black-box Linux: `user/elf/maps.c` and `user/elf/fifos.c` as pid 1, root and 1000:1000, in a container whose root is a tmpfs (kasumi 7.2.8-1-cachyos, podman; CI's runner kernel, Docker) | — | GPL-2.0 (a program we run) | run, never read | every expected line of `tests/mpx3-maps`; the decisions measured, not guessed: a failed LOCK_NB conversion leaves no lock, a truncation unmaps copied private pages too (SIGBUS), a waiting FIFO open counts as its end, mmap of a pipe, a directory and /dev/null -ENODEV |
+| pelt `57ffef9` (the maintainer's): `user/console/fork/diff/builtin/c_s_dot_special_file.sh` (pax's copy of pelt's fixture) | the org's own | GPL-3.0 + the wolf Training Data Permission | read and run | the corpus row px61 left at 21/22 |
+| wolf-lang `3c7ac0e6` (the maintainer's): `crates/wolf_driver/tests/fixtures/fs_gaps/lock_rows.lu`, `fifo_rows.lu` (s254) | the org's own | GPL-3.0 + the wolf Training Data Permission | read and cited, never changed | the system calls `fifos.c`'s s254 rows make |
