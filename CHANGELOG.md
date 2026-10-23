@@ -7,6 +7,33 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The partition table, and a disk that boots (px66).** `kernel/block`
+  reads a GUID partition table as the UEFI specification 2.10 lays it
+  out (the protective MBR, both headers with their CRC32s and the
+  entry array's, entries of 128 bytes or a larger multiple of 8), and
+  an MBR-only disk's four primary records (R-px66-1), every check a
+  named refusal said once; a primary that fails is replaced by a good
+  backup, said once. Each partition is a device of its own (`vda1` …,
+  Linux's names and numbers: 254:N to 15, then 259 from 0), a window of
+  sectors over its disk: every request offset by its start and refused
+  past its end, by name, before it is made. A disk and its partitions
+  never mount at once. `/proc/partitions` serves them in Linux's layout,
+  and `/etc/fstab` names a volume by `/dev/vdaN`, `PARTUUID=`,
+  `PARTLABEL=`, `UUID=` or `LABEL=`. A read-write mount now writes the
+  mounted state to the disk at once, and a halt writes the clean state
+  only after every other block is flushed, so a power cut at any moment
+  leaves `not clean` (a fix: px63's write-back left `clean` until the
+  flusher's first turn). `tools/mkdisk --gpt` makes one reproducible
+  disk with an EFI system partition (Limine, the kernel, the
+  initramfs; FAT32 by pinned dosfstools), the ext2 `/home` and a BIOS
+  boot partition with Limine's stage 2, and QEMU boots it with no
+  CD-ROM under SeaBIOS and OVMF (`tools/qemu-run --boot-disk`). PAX's
+  answers equal the Linux 7.2.8 guest's on eleven fixtures but two named
+  drifts where Linux departs from the specification (it reads a backup
+  header only when booted with `gpt`, and no entry larger than 128
+  bytes) (`tests/mpx6-part`). The playground is one file,
+  `pax-disk.img`. `/` is still the initramfs in memory (px67).
+
 - **grep is scent (px64).** `/bin/scent` is scent at `b6f63a4` (grep in
   wolf, M1: byte-identical to GNU grep 3.12 in the C locale on its M1
   options but for rulings #115 to #117 and eight rows blocked upstream),
