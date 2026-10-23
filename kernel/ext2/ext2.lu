@@ -1,0 +1,1887 @@
+//! ext2 — the second extended file system on a disk of kernel/block's
+//! (px63, M-PX4's storage half): a volume, its inodes by number, their
+//! bytes and their directories, read and written. kernel/tree is the
+//! only caller: it keeps a record for each inode in use and asks here
+//! for everything the disk holds (the tree over two stores).
+//!
+//! Written from the published layout only: Linux's
+//! `Documentation/filesystems/ext2.rst` and the ext4 disk-layout
+//! documentation (`Documentation/filesystems/ext4/`: super.rst,
+//! group_descr.rst, inodes.rst, blockmap.rst, directory.rst,
+//! special_inodes.rst, dynamic.rst), allowed as documentation, and
+//! black-box runs of e2fsprogs 1.47.0 (`mkfs.ext2`, `e2fsck -fn`,
+//! `debugfs`) and of Linux 7.2.8's ext4 driver mounting ext2 on QEMU
+//! (`notes/px63/`). Clean-room (ruling #22): no e2fsprogs source, no
+//! kernel's `fs/ext2` or `fs/ext4`, no other file system's source.
+//!
+//! **The volume** (`mount`): the superblock at byte 1024 (block 1 of a
+//! 1 KiB-block volume, the second KiB of block 0 otherwise), little-
+//! endian like every structure here; its magic 0xEF53; revision 0 (128-
+//! byte inodes, the first free inode 11) or 1 (its own `s_inode_size`
+//! and `s_first_ino`, and feature words). Blocks of 1, 2 or 4 KiB (8 KiB
+//! is refused by name: larger than a page). A volume is mounted only
+//! when every INCOMPAT feature it has is FILETYPE (the directory entry's
+//! type byte, which is read and written); anything else (EXTENTS, 64BIT,
+//! FLEX_BG, META_BG, RECOVER, …) is refused by name. An RO_COMPAT
+//! feature other than SPARSE_SUPER and LARGE_FILE makes the mount
+//! read-only, by name. A COMPAT feature changes nothing here: ext_attr
+//! (no extended attribute is made or read), resize_inode (inode 7 and
+//! the reserved descriptor blocks are already marked used), dir_index
+//! (see directories), has_journal (the journal is a file this code never
+//! opens; with RECOVER set the volume is refused). A read-write mount
+//! marks the superblock in use (s_state's VALID bit cleared, the mount
+//! count and time moved), and `unmount` marks it clean again when it
+//! was clean at the mount, as ext2's own tools expect of a clean volume.
+//!
+//! **Groups.** Block group g has its descriptor in the table that starts
+//! in the block after the superblock's (32 bytes each: the block bitmap's
+//! block, the inode bitmap's, the inode table's, the free blocks, free
+//! inodes and directories counts); its block bitmap's bit k is block
+//! `s_first_data_block + g × s_blocks_per_group + k`, its inode bitmap's
+//! bit k inode `g × s_inodes_per_group + k + 1`. Every allocation and
+//! every free moves the bit, the group's count and the superblock's
+//! count together, so `e2fsck -fn` finds them agreeing.
+//!
+//! **Inodes** are `s_inode_size` bytes in their group's table: the
+//! 128-byte core (mode, the owner's low 16 bits, size, the four times in
+//! seconds, the group's low 16 bits, links, 512-byte blocks, flags, the
+//! fifteen block pointers, the generation, the high 32 bits of a regular
+//! file's size, and the owner's and group's high 16 bits) and, when
+//! `i_extra_isize` covers them, the times' extra words (two epoch bits
+//! and 30 bits of nanoseconds) and the creation time. A new inode gets
+//! `i_extra_isize` 32 when the inode is at least 160 bytes, as the volume
+//! is made, so its times keep their nanoseconds; an inode without the
+//! room keeps seconds.
+//!
+//! **A file's blocks** (blockmap.rst): `i_block[0..11]` direct, `[12]`
+//! one indirect block of `block size / 4` pointers, `[13]` a double and
+//! `[14]` a triple indirect; a pointer of 0 is a hole (reads zeros). A
+//! write allocates the data block and every missing indirect block on
+//! the way (an indirect block is written zeroed first), counting each in
+//! `i_blocks` (512-byte units); a truncation gives back every block past
+//! the new size, an indirect block with its last pointer, and zeroes the
+//! tail of the block that stays.
+//!
+//! **Directories** (directory.rst) are files of entries — inode (le32),
+//! record length (le16, a multiple of 4), name length and type (a byte
+//! each: FILETYPE), the name — none across a block, the last of a block
+//! reaching its end, an unused record's inode 0. A name is added in the
+//! first record with room for it (a free record, or the slack after a
+//! used one's name), else in a new block; a name removed is merged into
+//! the record before it (or, first in its block, made unused). A
+//! directory with the htree index flag (EXT2_INDEX_FL, 0x1000; dir_index)
+//! reads as the linear directory the format keeps it (its index blocks
+//! are records of inode 0), and the flag is cleared when this code
+//! changes the directory: the index would no longer be true.
+//!
+//! **Symbolic links**: a target shorter than 60 bytes lives in
+//! `i_block`'s 60 bytes (no block: `i_blocks` 0), a longer one in one
+//! block (at most the block size less one).
+//!
+//! **Buffers.** Every structure is read and written in kernel/block's
+//! buffer cache, whose rule this code keeps throughout: an address it
+//! returns is good until the next `get` or `fresh`, so each function
+//! reads what it needs, or writes and marks the buffer dirty, before it
+//! asks for another block.
+//!
+//! One CPU, IF clear for the whole of every call (a system call), no
+//! region, no heap: the volume table is one frame's words, its address
+//! in a module `var`.
+
+use block
+use frames
+use log
+
+extern "c" fn pax_tree_copy(dst: u64, src: u64, n: u64)
+extern "c" fn pax_tree_zero(dst: u64, n: u64)
+
+const PAGE: u64 = 4096
+/// The most volumes mounted at once.
+pub const VOLS: u64 = 4
+const VW: u64 = 64 // a volume record's words
+/// The root directory's inode number.
+pub const ROOT_INO: u64 = 2
+/// `bmap`'s answer when a block could not be had.
+const BAD: u64 = 0xffffffffffffffff
+const NS: u64 = 1000000000
+
+// errnos (uapi asm-generic/errno-base.h, errno.h)
+const EIO: u64 = 5
+const EINVAL: u64 = 22
+const EFBIG: u64 = 27
+const ENOSPC: u64 = 28
+const EROFS: u64 = 30
+const EMLINK: u64 = 31
+const ENAMETOOLONG: u64 = 36
+const EBUSY: u64 = 16
+const ENODEV: u64 = 19
+
+// Superblock (super.rst).
+const SB_INODES: u64 = 0x00
+const SB_BLOCKS: u64 = 0x04
+const SB_RBLOCKS: u64 = 0x08
+const SB_FREE_BLOCKS: u64 = 0x0c
+const SB_FREE_INODES: u64 = 0x10
+const SB_FIRST: u64 = 0x14
+const SB_LOG_BS: u64 = 0x18
+const SB_BPG: u64 = 0x20
+const SB_IPG: u64 = 0x28
+const SB_MTIME: u64 = 0x2c
+const SB_WTIME: u64 = 0x30
+const SB_MNT_COUNT: u64 = 0x34
+const SB_MAGIC: u64 = 0x38
+const SB_STATE: u64 = 0x3a
+const SB_REV: u64 = 0x4c
+const SB_FIRST_INO: u64 = 0x54
+const SB_INODE_SIZE: u64 = 0x58
+const SB_FCOMPAT: u64 = 0x5c
+const SB_FINCOMPAT: u64 = 0x60
+const SB_FROCOMPAT: u64 = 0x64
+const SB_UUID: u64 = 0x68
+const SB_RESERVED_GDT: u64 = 0xce
+const COMPAT_RESIZE_INODE: u64 = 0x10
+const MAGIC: u64 = 0xef53
+const STATE_VALID: u64 = 1
+const STATE_ERROR: u64 = 2
+// Features.
+const INCOMPAT_FILETYPE: u64 = 0x2
+const RO_SPARSE_SUPER: u64 = 0x1
+const RO_LARGE_FILE: u64 = 0x2
+
+// Group descriptor (group_descr.rst), 32 bytes.
+const GD_BBITMAP: u64 = 0x00
+const GD_IBITMAP: u64 = 0x04
+const GD_ITABLE: u64 = 0x08
+const GD_FREE_BLOCKS: u64 = 0x0c
+const GD_FREE_INODES: u64 = 0x0e
+const GD_DIRS: u64 = 0x10
+const GD_SIZE: u64 = 32
+
+// Inode (inodes.rst).
+const I_MODE: u64 = 0x00
+const I_UID: u64 = 0x02
+const I_SIZE: u64 = 0x04
+const I_ATIME: u64 = 0x08
+const I_CTIME: u64 = 0x0c
+const I_MTIME: u64 = 0x10
+const I_DTIME: u64 = 0x14
+const I_GID: u64 = 0x18
+const I_LINKS: u64 = 0x1a
+const I_BLOCKS: u64 = 0x1c
+const I_FLAGS: u64 = 0x20
+const I_BLOCK: u64 = 0x28
+const I_GENERATION: u64 = 0x64
+const I_FILE_ACL: u64 = 0x68
+const I_SIZE_HIGH: u64 = 0x6c
+const I_UID_HIGH: u64 = 0x78
+const I_GID_HIGH: u64 = 0x7a
+const I_EXTRA_ISIZE: u64 = 0x80
+const I_CTIME_EXTRA: u64 = 0x84
+const I_MTIME_EXTRA: u64 = 0x88
+const I_ATIME_EXTRA: u64 = 0x8c
+const I_CRTIME: u64 = 0x90
+const I_CRTIME_EXTRA: u64 = 0x94
+/// EXT2_INDEX_FL: the directory has an htree index.
+const INDEX_FL: u64 = 0x1000
+
+// Modes and directory entry types.
+const S_IFMT: u64 = 0xf000
+const S_IFDIR: u64 = 0x4000
+const S_IFREG: u64 = 0x8000
+const S_IFLNK: u64 = 0xa000
+
+/// Times `touch` sets: bits of `which`.
+pub const T_ATIME: u64 = 1
+pub const T_MTIME: u64 = 2
+pub const T_CTIME: u64 = 4
+pub const T_CRTIME: u64 = 8
+
+// A volume record's words.
+const V_USED: u64 = 0
+const V_DEV: u64 = 1
+const V_RO: u64 = 2 // 0 read-write; else why read-only (1 asked, 2 a feature)
+const V_BS: u64 = 3
+const V_FIRST: u64 = 4
+const V_BPG: u64 = 5
+const V_IPG: u64 = 6
+const V_GROUPS: u64 = 7
+const V_ISIZE: u64 = 8
+const V_INODES: u64 = 9
+const V_BLOCKS: u64 = 10
+const V_FIRSTINO: u64 = 11
+const V_GDT: u64 = 12
+const V_SBBLK: u64 = 13
+const V_SBOFF: u64 = 14
+const V_PTRS: u64 = 15
+const V_GEN: u64 = 16 // the next inode's generation
+const V_FC: u64 = 17
+const V_FI: u64 = 18
+const V_FR: u64 = 19
+const V_CLEAN: u64 = 20 // 1: the volume was clean when mounted
+const V_BALLOC: u64 = 21 // books: blocks allocated, freed, inodes made, freed
+const V_BFREE: u64 = 22
+const V_IALLOC: u64 = 23
+const V_IFREE: u64 = 24
+const V_ERRS: u64 = 25 // structures found wrong (a block out of range, a free block freed)
+const V_CURSOR: u64 = 26 // the block after the last allocated
+const V_RBLOCKS: u64 = 27
+const V_STATE: u64 = 28 // s_state as found
+const V_MNT: u64 = 29 // s_mnt_count after this mount
+const V_SAID: u64 = 30 // an error said (one line a volume)
+const V_OVERHEAD: u64 = 31 // the blocks no file can have (statfs's: Linux's bsddf, measured)
+
+// The module's frame: VOLS records, then the name scratch (256 bytes at
+// SCRATCH), and a second frame of zeros for holes.
+const SCRATCH: u64 = 2048
+
+var state: u64 = 0
+var zeros: u64 = 0
+
+fn base() -> u64 {
+    // # Safety: a scalar module var, read on one CPU with IF clear.
+    unsafe { state }
+}
+
+fn vw(v: u64, w: u64) -> u64 {
+    // # Safety: v < VOLS, w < VW: a word of the module's frame.
+    unsafe { ((base() + (v * VW + w) * 8) as *u64).read_volatile() }
+}
+
+fn put_vw(v: u64, w: u64, x: u64) {
+    // # Safety: as `vw`.
+    unsafe { ((base() + (v * VW + w) * 8) as *u64).write_volatile(x) }
+}
+
+fn bump(v: u64, w: u64) {
+    put_vw(v, w, vw(v, w) + 1)
+}
+
+fn r8(a: u64) -> u64 {
+    // # Safety: a byte of a buffer of kernel/block's (the rule in the
+    // header), of the module's frame, or of the caller's kernel buffer.
+    let x = unsafe { (a as *u8).read_volatile() }
+    x as u64
+}
+
+fn w8(a: u64, x: u64) {
+    // # Safety: as `r8`.
+    unsafe { (a as *u8).write_volatile((x & 0xff) as u8) }
+}
+
+fn r16(a: u64) -> u64 {
+    // # Safety: as `r8`; every 16-bit field here is 2-aligned in its block.
+    let x = unsafe { (a as *u16).read_volatile() }
+    x as u64
+}
+
+fn w16(a: u64, x: u64) {
+    // # Safety: as `r16`.
+    unsafe { (a as *u16).write_volatile((x & 0xffff) as u16) }
+}
+
+fn r32(a: u64) -> u64 {
+    // # Safety: as `r8`; every 32-bit field here is 4-aligned in its block.
+    let x = unsafe { (a as *u32).read_volatile() }
+    x as u64
+}
+
+fn w32(a: u64, x: u64) {
+    // # Safety: as `r32`.
+    unsafe { (a as *u32).write_volatile((x & 0xffffffff) as u32) }
+}
+
+fn neg(e: u64) -> u64 {
+    0xffffffffffffffff - e + 1
+}
+
+/// Whether `r` is an -errno.
+pub fn failed(r: u64) -> bool {
+    r >= 0xfffffffffffff001
+}
+
+fn zero_bytes(dst: u64, n: u64) {
+    // # Safety: [dst, dst + n) inside a buffer or a frame of the caller's.
+    unsafe { pax_tree_zero(dst, n) }
+}
+
+fn copy_bytes(dst: u64, src: u64, n: u64) {
+    // # Safety: both ranges inside buffers or kernel memory the callers
+    // own, not overlapping.
+    unsafe { pax_tree_copy(dst, src, n) }
+}
+
+fn frame() -> u64 {
+    let pa = frames.alloc() else 0
+    if pa != 0 {
+        zero_bytes(pa + frames.hhdm(), PAGE)
+    }
+    pa
+}
+
+fn ready() -> bool {
+    if base() != 0 {
+        return true
+    }
+    let s = frame()
+    let z = frame()
+    if s == 0 || z == 0 {
+        return false
+    }
+    // # Safety: scalar module vars, written once with IF clear.
+    unsafe {
+        state = s + frames.hhdm()
+        zeros = z + frames.hhdm()
+    }
+    true
+}
+
+/// A page of zeros (a hole's bytes), through the HHDM.
+pub fn zero_page() -> u64 {
+    // # Safety: a scalar module var.
+    unsafe { zeros }
+}
+
+// --- the volume's structures --------------------------------------------------
+
+fn bs(v: u64) -> u64 {
+    vw(v, V_BS)
+}
+
+fn get(v: u64, blk: u64) -> u64 {
+    if blk >= vw(v, V_BLOCKS) && blk != 0 {
+        corrupt(v, "a block past the volume's end:", blk)
+        return 0
+    }
+    let a = block.get(vw(v, V_DEV), blk, bs(v))
+    if a == 0 {
+        corrupt(v, "an I/O error reading block", blk)
+    }
+    a
+}
+
+fn dirty(v: u64, blk: u64) {
+    let r = block.dirty(vw(v, V_DEV), blk, bs(v))
+    if r != 0 {
+        corrupt(v, "an I/O error writing block", blk)
+    }
+}
+
+fn corrupt(v: u64, what: str, n: u64) {
+    bump(v, V_ERRS)
+    if vw(v, V_SAID) == 0 {
+        put_vw(v, V_SAID, 1)
+        log.put("ext2: vda: ")
+        log.put(what)
+        log.put(" ")
+        log.dec(n as int)
+        log.put(" (said once; the books count every one)")
+        log.end()
+    }
+}
+
+/// The superblock's bytes (valid until the next block is asked for).
+fn sb(v: u64) -> u64 {
+    let a = get(v, vw(v, V_SBBLK))
+    if a == 0 { 0 } else { a + vw(v, V_SBOFF) }
+}
+
+fn sb_dirty(v: u64) {
+    dirty(v, vw(v, V_SBBLK))
+}
+
+fn gd_block(v: u64, g: u64) -> u64 {
+    vw(v, V_GDT) + (g * GD_SIZE) / bs(v)
+}
+
+fn gd(v: u64, g: u64) -> u64 {
+    let a = get(v, gd_block(v, g))
+    if a == 0 { 0 } else { a + (g * GD_SIZE) % bs(v) }
+}
+
+fn gd_word(v: u64, g: u64, off: u64) -> u64 {
+    let a = gd(v, g)
+    if a == 0 { 0 } else { r32(a + off) }
+}
+
+/// Move group g's 16-bit count at `off` and the superblock's 32-bit
+/// count at `sboff` (none when 0) by `delta` (+1 or -1, as a u64).
+fn counts(v: u64, g: u64, off: u64, sboff: u64, up: bool) {
+    let a = gd(v, g)
+    if a != 0 {
+        let c = r16(a + off)
+        w16(a + off, if up { c + 1 } else if c > 0 { c - 1 } else { 0 })
+        dirty(v, gd_block(v, g))
+    }
+    if sboff != 0 {
+        let s = sb(v)
+        if s != 0 {
+            let c = r32(s + sboff)
+            w32(s + sboff, if up { c + 1 } else if c > 0 { c - 1 } else { 0 })
+            sb_dirty(v)
+        }
+    }
+}
+
+fn iloc(v: u64, ino: u64) -> (u64, u64) {
+    let g = (ino - 1) / vw(v, V_IPG)
+    let k = (ino - 1) % vw(v, V_IPG)
+    let t = gd_word(v, g, GD_ITABLE)
+    let byte = k * vw(v, V_ISIZE)
+    (t + byte / bs(v), byte % bs(v))
+}
+
+/// Inode `ino`'s bytes (valid until the next block is asked for), 0 on
+/// an I/O error or a number out of range.
+fn inode(v: u64, ino: u64) -> u64 {
+    if ino == 0 || ino > vw(v, V_INODES) {
+        corrupt(v, "an inode number out of range:", ino)
+        return 0
+    }
+    let (b, o) = iloc(v, ino)
+    let a = get(v, b)
+    if a == 0 { 0 } else { a + o }
+}
+
+fn idirty(v: u64, ino: u64) {
+    let (b, _o) = iloc(v, ino)
+    dirty(v, b)
+}
+
+// --- mounting ------------------------------------------------------------------
+
+fn refuse(what: str, x: u64) -> u64 {
+    log.put("ext2: refused: vda: ")
+    log.put(what)
+    log.put(" ")
+    log.hex(x)
+    log.end()
+    neg(EINVAL)
+}
+
+/// Mount the ext2 volume on disk `dev` (read-only when `ro`): its
+/// volume number, or -ENODEV (no disk), -EBUSY (mounted already),
+/// -EINVAL (no ext2 volume there, or one refused by name), -EIO. `now`:
+/// the wall clock, seconds since the epoch (the mount time).
+pub fn mount(dev: u64, ro: bool, now: u64) -> u64 {
+    if dev >= block.count() {
+        return neg(ENODEV)
+    }
+    if !ready() {
+        return neg(EIO)
+    }
+    var v = VOLS
+    var k: u64 = 0
+    while k < VOLS {
+        if vw(k, V_USED) != 0 && vw(k, V_DEV) == dev {
+            return neg(EBUSY)
+        }
+        if vw(k, V_USED) == 0 && v == VOLS {
+            v = k
+        }
+        k += 1
+    }
+    if v == VOLS {
+        return neg(EBUSY)
+    }
+    // The superblock, through a 1 KiB buffer, forgotten once read (every
+    // later read is in the volume's own block size).
+    let p = block.get(dev, 1, 1024)
+    if p == 0 {
+        return neg(EIO)
+    }
+    if r16(p + SB_MAGIC) != MAGIC {
+        block.forget(dev)
+        return refuse("no ext2 superblock (magic at byte 1080 is not 0xef53):", r16(p + SB_MAGIC))
+    }
+    let rev = r32(p + SB_REV)
+    let lbs = r32(p + SB_LOG_BS)
+    let fc = if rev >= 1 { r32(p + SB_FCOMPAT) } else { 0 }
+    let fi = if rev >= 1 { r32(p + SB_FINCOMPAT) } else { 0 }
+    let fr = if rev >= 1 { r32(p + SB_FROCOMPAT) } else { 0 }
+    let isize = if rev >= 1 { r16(p + SB_INODE_SIZE) } else { 128 }
+    let first_ino = if rev >= 1 { r32(p + SB_FIRST_INO) } else { 11 }
+    let inodes = r32(p + SB_INODES)
+    let blocks = r32(p + SB_BLOCKS)
+    let first = r32(p + SB_FIRST)
+    let bpg = r32(p + SB_BPG)
+    let ipg = r32(p + SB_IPG)
+    let st = r16(p + SB_STATE)
+    let rblocks = r32(p + SB_RBLOCKS)
+    let rgdt = if fc & COMPAT_RESIZE_INODE != 0 { r16(p + SB_RESERVED_GDT) } else { 0 }
+    block.forget(dev)
+    if rev > 1 {
+        return refuse("a revision this code does not know:", rev)
+    }
+    if lbs > 2 {
+        return refuse("a block size larger than a page (s_log_block_size):", lbs)
+    }
+    if fi & !INCOMPAT_FILETYPE != 0 {
+        return refuse("incompatible features this code does not serve (s_feature_incompat; FILETYPE alone is), bits", fi & !INCOMPAT_FILETYPE)
+    }
+    let bsz = 1024 << lbs
+    if isize < 128 || isize > bsz || isize & (isize - 1) != 0 || bpg == 0 || ipg == 0 || bpg > bsz * 8 || blocks <= first || inodes == 0 || first_ino <= ROOT_INO || first_ino > inodes {
+        return refuse("a superblock whose geometry is not ext2's, inode size", isize)
+    }
+    let groups = (blocks - first + bpg - 1) / bpg
+    put_vw(v, V_DEV, dev)
+    put_vw(v, V_BS, bsz)
+    put_vw(v, V_FIRST, first)
+    put_vw(v, V_BPG, bpg)
+    put_vw(v, V_IPG, ipg)
+    put_vw(v, V_GROUPS, groups)
+    put_vw(v, V_ISIZE, isize)
+    put_vw(v, V_INODES, inodes)
+    put_vw(v, V_BLOCKS, blocks)
+    put_vw(v, V_FIRSTINO, first_ino)
+    put_vw(v, V_GDT, first + 1)
+    put_vw(v, V_SBBLK, if bsz == 1024 { 1 } else { 0 })
+    put_vw(v, V_SBOFF, if bsz == 1024 { 0 } else { 1024 })
+    put_vw(v, V_PTRS, bsz / 4)
+    put_vw(v, V_FC, fc)
+    put_vw(v, V_FI, fi)
+    put_vw(v, V_FR, fr)
+    put_vw(v, V_STATE, st)
+    put_vw(v, V_RBLOCKS, rblocks)
+    put_vw(v, V_GEN, now)
+    put_vw(v, V_CURSOR, 0)
+    put_vw(v, V_BALLOC, 0)
+    put_vw(v, V_BFREE, 0)
+    put_vw(v, V_IALLOC, 0)
+    put_vw(v, V_IFREE, 0)
+    put_vw(v, V_ERRS, 0)
+    put_vw(v, V_SAID, 0)
+    put_vw(v, V_CLEAN, if st & STATE_VALID != 0 && st & STATE_ERROR == 0 { 1 } else { 0 })
+    // statfs's f_blocks leave out what no file can have (the superblock
+    // and descriptor copies with their reserved blocks, the bitmaps and
+    // the inode tables: Linux's default `bsddf`, measured on its ext2
+    // mount: 40960 blocks, 38374 answered).
+    let gdtb = (groups * GD_SIZE + bsz - 1) / bsz
+    let itb = (ipg * isize + bsz - 1) / bsz
+    var over = first
+    var g: u64 = 0
+    while g < groups {
+        if has_super(g, fr) {
+            over = over + 1 + gdtb + rgdt
+        }
+        over = over + 2 + itb
+        g += 1
+    }
+    put_vw(v, V_OVERHEAD, over)
+    var why: u64 = 0
+    if ro {
+        why = 1
+    } else if fr & !(RO_SPARSE_SUPER | RO_LARGE_FILE) != 0 {
+        why = 2
+        log.put("ext2: vda: read-only: read-only-compatible features this code does not write (s_feature_ro_compat), bits ")
+        log.hex(fr & !(RO_SPARSE_SUPER | RO_LARGE_FILE))
+        log.end()
+    } else if block.flags(dev) & block.F_RO != 0 {
+        why = 3
+    }
+    put_vw(v, V_RO, why)
+    put_vw(v, V_USED, 1)
+    if gd_block(v, groups - 1) >= blocks || gd_word(v, 0, GD_ITABLE) == 0 {
+        put_vw(v, V_USED, 0)
+        return refuse("a group descriptor table past the volume's end, groups", groups)
+    }
+    let root = inode(v, ROOT_INO)
+    if root == 0 || r16(root + I_MODE) & S_IFMT != S_IFDIR {
+        put_vw(v, V_USED, 0)
+        return refuse("inode 2 is no directory, mode", if root == 0 { 0 } else { r16(root + I_MODE) })
+    }
+    if why == 0 {
+        let s = sb(v)
+        if s != 0 {
+            w16(s + SB_STATE, r16(s + SB_STATE) & !STATE_VALID)
+            w16(s + SB_MNT_COUNT, r16(s + SB_MNT_COUNT) + 1)
+            w32(s + SB_MTIME, now)
+            put_vw(v, V_MNT, r16(s + SB_MNT_COUNT))
+            sb_dirty(v)
+        }
+    }
+    v
+}
+
+/// Whether group `g` holds a copy of the superblock and the descriptors:
+/// every group, or with SPARSE_SUPER groups 0, 1 and the powers of 3, 5
+/// and 7 (ext2.rst).
+fn has_super(g: u64, fr: u64) -> bool {
+    if fr & RO_SPARSE_SUPER == 0 || g <= 1 {
+        return true
+    }
+    power_of(g, 3) || power_of(g, 5) || power_of(g, 7)
+}
+
+fn power_of(g: u64, b: u64) -> bool {
+    var x = g
+    while x % b == 0 {
+        x = x / b
+    }
+    x == 1
+}
+
+/// Write the volume's dirty blocks, mark it clean (when it was clean at
+/// the mount and nothing was found wrong since) and let it go: 0 or
+/// -EIO. `now`: the write time.
+pub fn unmount(v: u64, now: u64) -> u64 {
+    if v >= VOLS || vw(v, V_USED) == 0 {
+        return neg(EINVAL)
+    }
+    let dev = vw(v, V_DEV)
+    if vw(v, V_RO) == 0 {
+        let s = sb(v)
+        if s != 0 {
+            if vw(v, V_CLEAN) == 1 && vw(v, V_ERRS) == 0 {
+                w16(s + SB_STATE, r16(s + SB_STATE) | STATE_VALID)
+            }
+            w32(s + SB_WTIME, now)
+            sb_dirty(v)
+        }
+    }
+    let r = block.sync(dev)
+    block.forget(dev)
+    put_vw(v, V_USED, 0)
+    r
+}
+
+/// Write every dirty block of volume `v`'s disk and FLUSH it (fsync,
+/// syncfs, sync): 0 or -EIO.
+pub fn sync(v: u64) -> u64 {
+    if v >= VOLS || vw(v, V_USED) == 0 {
+        return 0
+    }
+    block.sync(vw(v, V_DEV))
+}
+
+/// Whether volume `v` is mounted.
+pub fn mounted(v: u64) -> bool {
+    base() != 0 && v < VOLS && vw(v, V_USED) != 0
+}
+
+/// Why volume `v` is read-only: 0 it is not; 1 the mount asked; 2 a
+/// feature; 3 the disk is.
+pub fn read_only(v: u64) -> u64 {
+    vw(v, V_RO)
+}
+
+/// Its block size.
+pub fn block_size(v: u64) -> u64 {
+    bs(v)
+}
+
+/// Its disk (kernel/block's number).
+pub fn dev_of(v: u64) -> u64 {
+    vw(v, V_DEV)
+}
+
+/// Word `w` of the books: 0 blocks allocated, 1 freed, 2 inodes made, 3
+/// freed, 4 structures found wrong; 5 the volume was clean when mounted;
+/// 6 its mount count; 7 the groups.
+pub fn books(v: u64, w: u64) -> u64 {
+    if w == 5 {
+        return vw(v, V_CLEAN)
+    }
+    if w == 6 {
+        return vw(v, V_MNT)
+    }
+    if w == 7 {
+        return vw(v, V_GROUPS)
+    }
+    vw(v, V_BALLOC + w)
+}
+
+/// `statfs`'s numbers for volume `v`: field `w`: 0 the block size, 1
+/// blocks (less the overhead no file can have), 2 free blocks, 3 those a user may have (the reserved blocks
+/// kept back), 4 inodes, 5 free inodes, 6 and 7 the fsid's two words
+/// (the UUID's first eight bytes, as two le32).
+pub fn statfs(v: u64, w: u64) -> u64 {
+    if w == 0 {
+        return bs(v)
+    }
+    let s = sb(v)
+    if s == 0 {
+        return 0
+    }
+    if w == 1 {
+        let b = r32(s + SB_BLOCKS)
+        return if b > vw(v, V_OVERHEAD) { b - vw(v, V_OVERHEAD) } else { 0 }
+    }
+    if w == 2 {
+        return r32(s + SB_FREE_BLOCKS)
+    }
+    if w == 3 {
+        let f = r32(s + SB_FREE_BLOCKS)
+        let r = r32(s + SB_RBLOCKS)
+        return if f > r { f - r } else { 0 }
+    }
+    if w == 4 {
+        return r32(s + SB_INODES)
+    }
+    if w == 5 {
+        return r32(s + SB_FREE_INODES)
+    }
+    if w == 6 {
+        return r32(s + SB_UUID) ^ r32(s + SB_UUID + 8)
+    }
+    r32(s + SB_UUID + 4) ^ r32(s + SB_UUID + 12)
+}
+
+// --- an inode's fields ------------------------------------------------------------
+
+/// Inode `ino`'s mode (type and permission bits); 0 when unreadable.
+pub fn mode(v: u64, ino: u64) -> u64 {
+    let a = inode(v, ino)
+    if a == 0 { 0 } else { r16(a + I_MODE) }
+}
+
+/// Its link count.
+pub fn nlink(v: u64, ino: u64) -> u64 {
+    let a = inode(v, ino)
+    if a == 0 { 0 } else { r16(a + I_LINKS) }
+}
+
+/// Its size in bytes (a regular file's high 32 bits from i_size_high).
+pub fn size(v: u64, ino: u64) -> u64 {
+    let a = inode(v, ino)
+    if a == 0 {
+        return 0
+    }
+    let lo = r32(a + I_SIZE)
+    if r16(a + I_MODE) & S_IFMT == S_IFREG {
+        return lo | (r32(a + I_SIZE_HIGH) << 32)
+    }
+    lo
+}
+
+/// Its owner's user id and group id (low 16 bits and the Linux high 16).
+pub fn owner(v: u64, ino: u64) -> (u64, u64) {
+    let a = inode(v, ino)
+    if a == 0 {
+        return (0, 0)
+    }
+    (r16(a + I_UID) | (r16(a + I_UID_HIGH) << 16), r16(a + I_GID) | (r16(a + I_GID_HIGH) << 16))
+}
+
+/// Its 512-byte blocks (`i_blocks`, what `st_blocks` answers).
+pub fn blocks512(v: u64, ino: u64) -> u64 {
+    let a = inode(v, ino)
+    if a == 0 { 0 } else { r32(a + I_BLOCKS) }
+}
+
+/// Its flags word.
+pub fn flags(v: u64, ino: u64) -> u64 {
+    let a = inode(v, ino)
+    if a == 0 { 0 } else { r32(a + I_FLAGS) }
+}
+
+/// Its generation (`i_generation`).
+pub fn generation(v: u64, ino: u64) -> u64 {
+    let a = inode(v, ino)
+    if a == 0 { 0 } else { r32(a + I_GENERATION) }
+}
+
+fn extra(a: u64) -> u64 {
+    // the inode's i_extra_isize, when the inode is larger than 128
+    // bytes (the caller checked the volume's inode size)
+    r16(a + I_EXTRA_ISIZE)
+}
+
+/// A time as the inode keeps it (32 signed bits of seconds; in `ex`, the
+/// extra word: two epoch bits and the nanoseconds above them) in signed
+/// nanoseconds since the epoch, held in a u64 (wolf traps an overflow,
+/// so the negative case is spelled apart; a time past 2262 is the
+/// largest the tree holds).
+fn decode(lo: u64, ex: u64) -> u64 {
+    let epoch = ex & 3
+    let nsec = (ex >> 2) % NS
+    var secs: u64 = 0
+    if lo & 0x80000000 != 0 {
+        if epoch == 0 {
+            // before 1970: -(2^32 - lo) seconds, then the nanoseconds
+            let m = 0x100000000 - lo
+            let back = m * NS - nsec
+            return if back == 0 { 0 } else { !back + 1 }
+        }
+        secs = lo + ((epoch - 1) << 32)
+    } else {
+        secs = lo + (epoch << 32)
+    }
+    if secs >= 9223372036 {
+        return 0x7fffffffffffffff
+    }
+    secs * NS + nsec
+}
+
+/// Signed nanoseconds as (the low 32 bits of the seconds, the extra word).
+fn encode(t: u64) -> (u64, u64) {
+    if t >= 0x8000000000000000 {
+        let m = !t + 1
+        let q = if m % NS == 0 { m / NS } else { m / NS + 1 }
+        let n = q * NS - m
+        let s = !q + 1
+        return (s & 0xffffffff, n << 2)
+    }
+    let s = t / NS
+    let n = t % NS
+    let lo = s & 0xffffffff
+    let epoch = if lo & 0x80000000 != 0 { ((s >> 32) + 1) & 3 } else { (s >> 32) & 3 }
+    (lo, epoch | (n << 2))
+}
+
+/// Inode `ino`'s time `which` (0 access, 1 modification, 2 change, 3
+/// creation) in signed nanoseconds; the nanoseconds 0 where the inode
+/// keeps none, and the creation time 0 where it keeps none.
+pub fn time(v: u64, ino: u64, which: int) -> u64 {
+    let a = inode(v, ino)
+    if a == 0 {
+        return 0
+    }
+    let big = vw(v, V_ISIZE) > 128
+    let ex = if big { extra(a) } else { 0 }
+    if which == 3 {
+        if !big || ex < 24 {
+            return 0
+        }
+        return decode(r32(a + I_CRTIME), r32(a + I_CRTIME_EXTRA))
+    }
+    let lo_off = if which == 0 { I_ATIME } else if which == 1 { I_MTIME } else { I_CTIME }
+    let ex_off = if which == 0 { I_ATIME_EXTRA } else if which == 1 { I_MTIME_EXTRA } else { I_CTIME_EXTRA }
+    let room = ex_off - 0x80 + 4
+    decode(r32(a + lo_off), if big && ex >= room { r32(a + ex_off) } else { 0 })
+}
+
+fn put_time(v: u64, a: u64, lo_off: u64, ex_off: u64, t: u64) {
+    let (lo, ex) = encode(t)
+    w32(a + lo_off, lo)
+    let room = ex_off - 0x80 + 4
+    if vw(v, V_ISIZE) > 128 && extra(a) >= room {
+        w32(a + ex_off, ex)
+    }
+}
+
+/// Set the times `which` names (T_* bits) of inode `ino` to `t` (signed
+/// nanoseconds), one write.
+pub fn touch(v: u64, ino: u64, which: u64, t: u64) {
+    let a = inode(v, ino)
+    if a == 0 {
+        return
+    }
+    if which & T_ATIME != 0 {
+        put_time(v, a, I_ATIME, I_ATIME_EXTRA, t)
+    }
+    if which & T_MTIME != 0 {
+        put_time(v, a, I_MTIME, I_MTIME_EXTRA, t)
+    }
+    if which & T_CTIME != 0 {
+        put_time(v, a, I_CTIME, I_CTIME_EXTRA, t)
+    }
+    if which & T_CRTIME != 0 {
+        put_time(v, a, I_CRTIME, I_CRTIME_EXTRA, t)
+    }
+    idirty(v, ino)
+}
+
+/// Set inode `ino`'s access time to `at` and its modification time to
+/// `mt` when `which` has bit 0 and bit 1 (utimensat), and its change
+/// time to `ct` when either does: one write.
+pub fn set_times(v: u64, ino: u64, at: u64, mt: u64, ct: u64, which: u64) {
+    let a = inode(v, ino)
+    if a == 0 {
+        return
+    }
+    if which & 1 != 0 {
+        put_time(v, a, I_ATIME, I_ATIME_EXTRA, at)
+    }
+    if which & 2 != 0 {
+        put_time(v, a, I_MTIME, I_MTIME_EXTRA, mt)
+    }
+    if which != 0 {
+        put_time(v, a, I_CTIME, I_CTIME_EXTRA, ct)
+    }
+    idirty(v, ino)
+}
+
+/// Set inode `ino`'s mode word (its type kept by the caller).
+pub fn set_mode(v: u64, ino: u64, m: u64) {
+    let a = inode(v, ino)
+    if a != 0 {
+        w16(a + I_MODE, m)
+        idirty(v, ino)
+    }
+}
+
+/// Set its link count.
+pub fn set_nlink(v: u64, ino: u64, n: u64) {
+    let a = inode(v, ino)
+    if a != 0 {
+        w16(a + I_LINKS, n)
+        idirty(v, ino)
+    }
+}
+
+/// Set its owner and group (32-bit ids: the low 16 bits in the core,
+/// the high 16 in Linux's osd2 words).
+pub fn set_owner(v: u64, ino: u64, uid: u64, gid: u64) {
+    let a = inode(v, ino)
+    if a != 0 {
+        w16(a + I_UID, uid & 0xffff)
+        w16(a + I_UID_HIGH, (uid >> 16) & 0xffff)
+        w16(a + I_GID, gid & 0xffff)
+        w16(a + I_GID_HIGH, (gid >> 16) & 0xffff)
+        idirty(v, ino)
+    }
+}
+
+/// Set its size; a regular file of 2 GiB or more needs LARGE_FILE, set
+/// in the superblock the first time.
+pub fn set_size(v: u64, ino: u64, n: u64) {
+    let a = inode(v, ino)
+    if a == 0 {
+        return
+    }
+    let reg = r16(a + I_MODE) & S_IFMT == S_IFREG
+    w32(a + I_SIZE, n & 0xffffffff)
+    if reg {
+        w32(a + I_SIZE_HIGH, n >> 32)
+    }
+    idirty(v, ino)
+    if reg && n >= 0x80000000 && vw(v, V_FR) & RO_LARGE_FILE == 0 {
+        let s = sb(v)
+        if s != 0 {
+            w32(s + SB_FROCOMPAT, r32(s + SB_FROCOMPAT) | RO_LARGE_FILE)
+            put_vw(v, V_FR, vw(v, V_FR) | RO_LARGE_FILE)
+            sb_dirty(v)
+        }
+    }
+}
+
+fn add_blocks(v: u64, ino: u64, up: bool) {
+    let a = inode(v, ino)
+    if a != 0 {
+        let n = r32(a + I_BLOCKS)
+        let per = bs(v) / 512
+        w32(a + I_BLOCKS, if up { n + per } else { if n >= per { n - per } else { 0 } })
+        idirty(v, ino)
+    }
+}
+
+/// Clear a directory's htree flag (it is about to change, and this code
+/// keeps no index).
+fn unindex(v: u64, ino: u64) {
+    let a = inode(v, ino)
+    if a != 0 && r32(a + I_FLAGS) & INDEX_FL != 0 {
+        w32(a + I_FLAGS, r32(a + I_FLAGS) & !INDEX_FL)
+        idirty(v, ino)
+    }
+}
+
+// --- blocks and inodes made and given back ----------------------------------------
+
+fn group_blocks(v: u64, g: u64) -> u64 {
+    let start = vw(v, V_FIRST) + g * vw(v, V_BPG)
+    let left = vw(v, V_BLOCKS) - start
+    if left < vw(v, V_BPG) { left } else { vw(v, V_BPG) }
+}
+
+/// The first clear bit of the `n` bits of bitmap block `bm`, from bit
+/// `from`, set: its index, or n.
+fn take_bit(v: u64, bm: u64, from: u64, n: u64) -> u64 {
+    let a = get(v, bm)
+    if a == 0 {
+        return n
+    }
+    var k = from
+    while k < n {
+        let byte = r8(a + k / 8)
+        if byte == 0xff && k % 8 == 0 {
+            k += 8
+            continue
+        }
+        if byte & (1 << (k % 8)) == 0 {
+            w8(a + k / 8, byte | (1 << (k % 8)))
+            dirty(v, bm)
+            return k
+        }
+        k += 1
+    }
+    n
+}
+
+/// A free block, near the group of inode `ino` (the cursor first): its
+/// number, or 0 when the volume is full.
+fn balloc(v: u64, ino: u64) -> u64 {
+    let groups = vw(v, V_GROUPS)
+    let cur = vw(v, V_CURSOR)
+    var g = (ino - 1) / vw(v, V_IPG)
+    var from: u64 = 0
+    if cur > vw(v, V_FIRST) && cur < vw(v, V_BLOCKS) {
+        g = (cur - vw(v, V_FIRST)) / vw(v, V_BPG)
+        from = (cur - vw(v, V_FIRST)) % vw(v, V_BPG)
+    }
+    var tried: u64 = 0
+    while tried <= groups {
+        let a = gd(v, g)
+        if a != 0 && r16(a + GD_FREE_BLOCKS) > 0 {
+            let bm = r32(a + GD_BBITMAP)
+            let n = group_blocks(v, g)
+            var k = take_bit(v, bm, from, n)
+            if k == n && from > 0 {
+                k = take_bit(v, bm, 0, from)
+                if k == from {
+                    k = n
+                }
+            }
+            if k < n {
+                counts(v, g, GD_FREE_BLOCKS, SB_FREE_BLOCKS, false)
+                let b = vw(v, V_FIRST) + g * vw(v, V_BPG) + k
+                put_vw(v, V_CURSOR, b + 1)
+                bump(v, V_BALLOC)
+                return b
+            }
+        }
+        g = (g + 1) % groups
+        from = 0
+        tried += 1
+    }
+    0
+}
+
+/// Give block `b` back: its bit cleared, the counts moved. A block out
+/// of range, or one already free, is counted and left alone.
+fn bfree(v: u64, b: u64) {
+    if b < vw(v, V_FIRST) || b >= vw(v, V_BLOCKS) {
+        corrupt(v, "a block to free out of range:", b)
+        return
+    }
+    let g = (b - vw(v, V_FIRST)) / vw(v, V_BPG)
+    let k = (b - vw(v, V_FIRST)) % vw(v, V_BPG)
+    let bm = gd_word(v, g, GD_BBITMAP)
+    let a = get(v, bm)
+    if a == 0 {
+        return
+    }
+    let byte = r8(a + k / 8)
+    if byte & (1 << (k % 8)) == 0 {
+        corrupt(v, "a block freed that was free:", b)
+        return
+    }
+    w8(a + k / 8, byte & !(1 << (k % 8)))
+    dirty(v, bm)
+    counts(v, g, GD_FREE_BLOCKS, SB_FREE_BLOCKS, true)
+    bump(v, V_BFREE)
+}
+
+/// A new inode of `m` (type and permission bits), owned `uid`:`gid`,
+/// near directory `dir`'s group, every time `t`, no link yet: its number,
+/// or -ENOSPC, -EROFS.
+pub fn ialloc(v: u64, dir: u64, m: u64, uid: u64, gid: u64, t: u64) -> u64 {
+    if vw(v, V_RO) != 0 {
+        return neg(EROFS)
+    }
+    let groups = vw(v, V_GROUPS)
+    let ipg = vw(v, V_IPG)
+    var g = if dir == 0 { 0 } else { (dir - 1) / ipg }
+    var tried: u64 = 0
+    while tried < groups {
+        let a = gd(v, g)
+        if a != 0 && r16(a + GD_FREE_INODES) > 0 {
+            let bm = r32(a + GD_IBITMAP)
+            let from = if g == 0 { vw(v, V_FIRSTINO) - 1 } else { 0 }
+            let k = take_bit(v, bm, from, ipg)
+            if k < ipg {
+                counts(v, g, GD_FREE_INODES, SB_FREE_INODES, false)
+                if m & S_IFMT == S_IFDIR {
+                    counts(v, g, GD_DIRS, 0, true)
+                }
+                let ino = g * ipg + k + 1
+                let p = inode(v, ino)
+                if p == 0 {
+                    return neg(EIO)
+                }
+                zero_bytes(p, vw(v, V_ISIZE))
+                w16(p + I_MODE, m)
+                w16(p + I_UID, uid & 0xffff)
+                w16(p + I_UID_HIGH, (uid >> 16) & 0xffff)
+                w16(p + I_GID, gid & 0xffff)
+                w16(p + I_GID_HIGH, (gid >> 16) & 0xffff)
+                let gen = vw(v, V_GEN)
+                put_vw(v, V_GEN, gen + 1)
+                w32(p + I_GENERATION, gen)
+                if vw(v, V_ISIZE) >= 160 {
+                    w16(p + I_EXTRA_ISIZE, 32)
+                }
+                put_time(v, p, I_ATIME, I_ATIME_EXTRA, t)
+                put_time(v, p, I_MTIME, I_MTIME_EXTRA, t)
+                put_time(v, p, I_CTIME, I_CTIME_EXTRA, t)
+                put_time(v, p, I_CRTIME, I_CRTIME_EXTRA, t)
+                idirty(v, ino)
+                bump(v, V_IALLOC)
+                return ino
+            }
+        }
+        g = (g + 1) % groups
+        tried += 1
+    }
+    neg(ENOSPC)
+}
+
+/// Inode `ino` (its last name and last holder gone) given back: its
+/// blocks freed, `i_dtime` set to `t` (seconds), its bit cleared and the
+/// counts moved.
+pub fn ifree(v: u64, ino: u64, t: u64) {
+    if vw(v, V_RO) != 0 {
+        return
+    }
+    let m = mode(v, ino)
+    if !fast_link(v, ino) {
+        let _c = truncate(v, ino, 0)
+    }
+    let a = inode(v, ino)
+    if a != 0 {
+        w16(a + I_LINKS, 0)
+        w32(a + I_DTIME, t)
+        idirty(v, ino)
+    }
+    let g = (ino - 1) / vw(v, V_IPG)
+    let k = (ino - 1) % vw(v, V_IPG)
+    let bm = gd_word(v, g, GD_IBITMAP)
+    let b = get(v, bm)
+    if b == 0 {
+        return
+    }
+    let byte = r8(b + k / 8)
+    if byte & (1 << (k % 8)) == 0 {
+        corrupt(v, "an inode freed that was free:", ino)
+        return
+    }
+    w8(b + k / 8, byte & !(1 << (k % 8)))
+    dirty(v, bm)
+    counts(v, g, GD_FREE_INODES, SB_FREE_INODES, true)
+    if m & S_IFMT == S_IFDIR {
+        counts(v, g, GD_DIRS, 0, false)
+    }
+    bump(v, V_IFREE)
+}
+
+// --- a file's blocks -----------------------------------------------------------------
+
+/// A new block for inode `ino`, counted in its `i_blocks`; an indirect
+/// block (`meta`) is written zeroed first. 0 when the volume is full.
+fn new_block(v: u64, ino: u64, meta: bool) -> u64 {
+    let b = balloc(v, ino)
+    if b == 0 {
+        return 0
+    }
+    if meta {
+        let a = block.fresh(vw(v, V_DEV), b, bs(v))
+        if a == 0 {
+            return 0
+        }
+        dirty(v, b)
+    }
+    add_blocks(v, ino, true)
+    b
+}
+
+/// The block holding block `fb` of inode `ino`'s bytes: (its number, 0
+/// for a hole; whether it was just made), made with every indirect block
+/// on its way when `alloc` and it is missing. (BAD, false) when it could
+/// not be had: the volume full, an I/O error, or past what three levels
+/// hold.
+fn bmap(v: u64, ino: u64, fb: u64, alloc: bool) -> (u64, bool) {
+    let p = vw(v, V_PTRS)
+    var levels: u64 = 0
+    var top: u64 = 0
+    var i1: u64 = 0
+    var i2: u64 = 0
+    var i3: u64 = 0
+    var f = fb
+    if f < 12 {
+        top = f
+    } else {
+        f = f - 12
+        if f < p {
+            levels = 1
+            top = 12
+            i1 = f
+        } else {
+            f = f - p
+            if f < p * p {
+                levels = 2
+                top = 13
+                i1 = f / p
+                i2 = f % p
+            } else {
+                f = f - p * p
+                if f >= p * p * p {
+                    return (BAD, false)
+                }
+                levels = 3
+                top = 14
+                i1 = f / (p * p)
+                i2 = (f / p) % p
+                i3 = f % p
+            }
+        }
+    }
+    let a = inode(v, ino)
+    if a == 0 {
+        return (BAD, false)
+    }
+    var b = r32(a + I_BLOCK + top * 4)
+    if b == 0 {
+        if !alloc {
+            return (0, false)
+        }
+        b = new_block(v, ino, levels > 0)
+        if b == 0 {
+            return (BAD, false)
+        }
+        let a2 = inode(v, ino)
+        if a2 == 0 {
+            return (BAD, false)
+        }
+        w32(a2 + I_BLOCK + top * 4, b)
+        idirty(v, ino)
+        if levels == 0 {
+            return (b, true)
+        }
+    }
+    var k: u64 = 1
+    while k <= levels {
+        let idx = if k == 1 { i1 } else if k == 2 { i2 } else { i3 }
+        let t = get(v, b)
+        if t == 0 {
+            return (BAD, false)
+        }
+        var e = r32(t + idx * 4)
+        if e != 0 && (e < vw(v, V_FIRST) || e >= vw(v, V_BLOCKS)) {
+            corrupt(v, "a block pointer out of range in block", b)
+            return (BAD, false)
+        }
+        if e == 0 {
+            if !alloc {
+                return (0, false)
+            }
+            e = new_block(v, ino, k < levels)
+            if e == 0 {
+                return (BAD, false)
+            }
+            let t2 = get(v, b)
+            if t2 == 0 {
+                return (BAD, false)
+            }
+            w32(t2 + idx * 4, e)
+            dirty(v, b)
+            if k == levels {
+                return (e, true)
+            }
+        }
+        b = e
+        k += 1
+    }
+    (b, false)
+}
+
+/// Where up to `want` bytes of inode `ino` at `off` are, in kernel
+/// memory (a block's buffer, or the page of zeros for a hole): (the
+/// address, how many), never past a block; (0, 0) on an I/O error. The
+/// address is good until the next block is asked for.
+pub fn rspan(v: u64, ino: u64, off: u64, want: u64) -> (u64, u64) {
+    let b = bs(v)
+    let o = off % b
+    let n = if want < b - o { want } else { b - o }
+    let (blk, _fresh) = bmap(v, ino, off / b, false)
+    if blk == BAD {
+        return (0, 0)
+    }
+    if blk == 0 {
+        return (zero_page() + o, n)
+    }
+    let a = get(v, blk)
+    if a == 0 {
+        return (0, 0)
+    }
+    (a + o, n)
+}
+
+/// Where up to `want` bytes written to inode `ino` at `off` go: (the
+/// address in the block's buffer, how many, the block), the block and
+/// its indirect blocks made when missing; a whole block or a new one is
+/// not read first. The caller copies the bytes in and calls `wrote`.
+/// (0, 0, 0) when no block could be had (-ENOSPC or -EIO: `full` says).
+pub fn wspan(v: u64, ino: u64, off: u64, want: u64) -> (u64, u64, u64) {
+    let b = bs(v)
+    let o = off % b
+    let n = if want < b - o { want } else { b - o }
+    let (blk, made) = bmap(v, ino, off / b, true)
+    if blk == BAD || blk == 0 {
+        return (0, 0, 0)
+    }
+    let a = if made || (o == 0 && n == b) { block.fresh(vw(v, V_DEV), blk, b) } else { get(v, blk) }
+    if a == 0 {
+        return (0, 0, 0)
+    }
+    (a + o, n, blk)
+}
+
+/// The bytes `wspan` gave the address of are written: the block dirty.
+pub fn wrote(v: u64, blk: u64) {
+    dirty(v, blk)
+}
+
+/// Whether volume `v` has no free block left (why `wspan` answered
+/// nothing).
+pub fn full(v: u64) -> bool {
+    statfs(v, 2) == 0
+}
+
+/// Free the pointers from slot `from` on of the indirect block `blk` at
+/// level `lvl` (1: its pointers are data blocks), each with what it
+/// points to; the indirect block itself goes when `from` is 0.
+fn free_tree(v: u64, ino: u64, blk: u64, lvl: u64, from: u64) {
+    let p = vw(v, V_PTRS)
+    var k = from
+    while k < p {
+        let t = get(v, blk)
+        if t == 0 {
+            return
+        }
+        let e = r32(t + k * 4)
+        if e != 0 {
+            w32(t + k * 4, 0)
+            dirty(v, blk)
+            if lvl > 1 {
+                free_tree(v, ino, e, lvl - 1, 0)
+            } else {
+                bfree(v, e)
+                add_blocks(v, ino, false)
+            }
+        }
+        k += 1
+    }
+    if from == 0 {
+        bfree(v, blk)
+        add_blocks(v, ino, false)
+    }
+}
+
+/// Free the blocks of the indirect tree under `blk` (at level `lvl`)
+/// that hold file blocks `keep` and on, where the tree's first file
+/// block is `first` and each of its slots covers `span` file blocks.
+fn cut_tree(v: u64, ino: u64, blk: u64, lvl: u64, first: u64, span: u64, keep: u64) {
+    if keep <= first {
+        free_tree(v, ino, blk, lvl, 0)
+        return
+    }
+    let p = vw(v, V_PTRS)
+    let slot = (keep - first) / span
+    if slot >= p {
+        return
+    }
+    if lvl > 1 && (keep - first) % span != 0 {
+        // The slot `keep` falls inside keeps its first blocks.
+        let t = get(v, blk)
+        if t == 0 {
+            return
+        }
+        let e = r32(t + slot * 4)
+        if e != 0 {
+            cut_tree(v, ino, e, lvl - 1, first + slot * span, span / p, keep)
+        }
+        free_tree(v, ino, blk, lvl, slot + 1)
+        return
+    }
+    free_tree(v, ino, blk, lvl, slot)
+}
+
+/// Inode `ino` keeps only its first `n` bytes: every block past them
+/// given back, an indirect block with its last pointer, the tail of the
+/// block that stays zeroed; its size set. 0, or -EIO.
+pub fn truncate(v: u64, ino: u64, n: u64) -> u64 {
+    if vw(v, V_RO) != 0 {
+        return neg(EROFS)
+    }
+    let b = bs(v)
+    let p = vw(v, V_PTRS)
+    let keep = (n + b - 1) / b
+    // the direct blocks
+    var k = keep
+    while k < 12 {
+        let a = inode(v, ino)
+        if a == 0 {
+            return neg(EIO)
+        }
+        let e = r32(a + I_BLOCK + k * 4)
+        if e != 0 {
+            w32(a + I_BLOCK + k * 4, 0)
+            idirty(v, ino)
+            bfree(v, e)
+            add_blocks(v, ino, false)
+        }
+        k += 1
+    }
+    // the three indirect trees: their first file block and the file
+    // blocks a slot of their top block covers
+    var lvl: u64 = 1
+    var first: u64 = 12
+    var span: u64 = 1
+    while lvl <= 3 {
+        let a = inode(v, ino)
+        if a == 0 {
+            return neg(EIO)
+        }
+        let top = r32(a + I_BLOCK + (11 + lvl) * 4)
+        let covers = span * p
+        if top != 0 && keep < first + covers {
+            cut_tree(v, ino, top, lvl, first, span, keep)
+            if keep <= first {
+                let a2 = inode(v, ino)
+                if a2 != 0 {
+                    w32(a2 + I_BLOCK + (11 + lvl) * 4, 0)
+                    idirty(v, ino)
+                }
+            }
+        }
+        first = first + covers
+        span = covers
+        lvl += 1
+    }
+    if n % b != 0 {
+        let (blk, _m) = bmap(v, ino, n / b, false)
+        if blk != 0 && blk != BAD {
+            let a = get(v, blk)
+            if a != 0 {
+                zero_bytes(a + n % b, b - n % b)
+                dirty(v, blk)
+            }
+        }
+    }
+    set_size(v, ino, n)
+    0
+}
+
+/// The `n` bytes of inode `ino` from `off` read as zeros: zeroed in the
+/// blocks that hold them, holes left holes (fallocate's
+/// FALLOC_FL_PUNCH_HOLE: the blocks are kept, as kernel/tree keeps a
+/// frame).
+pub fn zero_range(v: u64, ino: u64, off: u64, n: u64) {
+    if vw(v, V_RO) != 0 {
+        return
+    }
+    let b = bs(v)
+    var p = off
+    let end = off + n
+    while p < end {
+        let o = p % b
+        let c = if end - p < b - o { end - p } else { b - o }
+        let (blk, _m) = bmap(v, ino, p / b, false)
+        if blk != 0 && blk != BAD {
+            let a = get(v, blk)
+            if a != 0 {
+                zero_bytes(a + o, c)
+                dirty(v, blk)
+            }
+        }
+        p += c
+    }
+}
+
+// --- symbolic links ----------------------------------------------------------------
+
+/// Whether inode `ino` is a symbolic link whose target is in `i_block`
+/// (shorter than 60 bytes, no block of its own but an attribute block).
+pub fn fast_link(v: u64, ino: u64) -> bool {
+    let a = inode(v, ino)
+    if a == 0 || r16(a + I_MODE) & S_IFMT != S_IFLNK {
+        return false
+    }
+    let acl = if r32(a + I_FILE_ACL) != 0 { bs(v) / 512 } else { 0 }
+    r32(a + I_SIZE) < 60 && r32(a + I_BLOCKS) <= acl
+}
+
+/// Copy at most `n` bytes of link `ino`'s target to kernel `dst`: how
+/// many.
+pub fn target(v: u64, ino: u64, dst: u64, n: u64) -> u64 {
+    let sz = size(v, ino)
+    let k = if n < sz { n } else { sz }
+    if fast_link(v, ino) {
+        let a = inode(v, ino)
+        if a == 0 {
+            return 0
+        }
+        copy_bytes(dst, a + I_BLOCK, k)
+        return k
+    }
+    var done: u64 = 0
+    while done < k {
+        let (src, c) = rspan(v, ino, done, k - done)
+        if c == 0 {
+            return done
+        }
+        copy_bytes(dst + done, src, c)
+        done += c
+    }
+    k
+}
+
+/// Make link `ino`'s target the `n` kernel bytes at `src` (1 to the block
+/// size less one): in `i_block` when shorter than 60 bytes, else in a
+/// block. 0, -ENAMETOOLONG, -ENOSPC.
+pub fn set_target(v: u64, ino: u64, src: u64, n: u64) -> u64 {
+    if n + 1 > bs(v) {
+        return neg(ENAMETOOLONG)
+    }
+    if n < 60 {
+        let a = inode(v, ino)
+        if a == 0 {
+            return neg(EIO)
+        }
+        zero_bytes(a + I_BLOCK, 60)
+        copy_bytes(a + I_BLOCK, src, n)
+        w32(a + I_SIZE, n)
+        idirty(v, ino)
+        return 0
+    }
+    let (dst, c, blk) = wspan(v, ino, 0, n)
+    if c == 0 {
+        return neg(ENOSPC)
+    }
+    copy_bytes(dst, src, c)
+    wrote(v, blk)
+    set_size(v, ino, n)
+    0
+}
+
+// --- directories --------------------------------------------------------------------
+
+fn need(len: u64) -> u64 {
+    (8 + len + 3) & !3
+}
+
+fn same(a: u64, b: u64, n: u64) -> bool {
+    var k: u64 = 0
+    while k < n {
+        if r8(a + k) != r8(b + k) {
+            return false
+        }
+        k += 1
+    }
+    true
+}
+
+fn is_dot(e: u64) -> bool {
+    let nl = r8(e + 6)
+    (nl == 1 && r8(e + 8) == 46) || (nl == 2 && r8(e + 8) == 46 && r8(e + 9) == 46)
+}
+
+/// The type byte a directory entry gives mode `m` (directory.rst).
+pub fn ftype(m: u64) -> u64 {
+    let t = m & S_IFMT
+    if t == S_IFREG { 1 } else if t == S_IFDIR { 2 } else if t == 0x2000 { 3 } else if t == 0x6000 { 4 } else if t == 0x1000 { 5 } else if t == 0xc000 { 6 } else if t == S_IFLNK { 7 } else { 0 }
+}
+
+/// Find the name [name, name + len) in directory `d`: (the block of the
+/// directory it is in, its offset there, the offset of the entry before
+/// it in that block or the block size when it is first, its inode), or
+/// a block of BAD when it is not there.
+fn find(v: u64, d: u64, name: u64, len: u64) -> (u64, u64, u64, u64) {
+    let b = bs(v)
+    let nb = size(v, d) / b
+    var fb: u64 = 0
+    while fb < nb {
+        let (blk, _m) = bmap(v, d, fb, false)
+        if blk != 0 && blk != BAD {
+            let a = get(v, blk)
+            if a == 0 {
+                return (BAD, 0, 0, 0)
+            }
+            var o: u64 = 0
+            var prev = b
+            while o + 8 <= b {
+                let rl = r16(a + o + 4)
+                if rl < 8 || o + rl > b {
+                    corrupt(v, "a directory entry's record length is wrong in block", blk)
+                    break
+                }
+                let ino = r32(a + o)
+                if ino != 0 && r8(a + o + 6) == len && same(a + o + 8, name, len) {
+                    return (blk, o, prev, ino)
+                }
+                prev = o
+                o += rl
+            }
+        }
+        fb += 1
+    }
+    (BAD, 0, 0, 0)
+}
+
+/// The inode the name [name, name + len) leads to in directory `d`, or 0.
+pub fn lookup(v: u64, d: u64, name: u64, len: u64) -> u64 {
+    let (blk, _o, _p, ino) = find(v, d, name, len)
+    if blk == BAD { 0 } else { ino }
+}
+
+/// The first entry of directory `d` at or after byte `pos` that is not
+/// `.` or `..`: (its inode, 0 at the end; its type byte; its name, copied
+/// to the module's scratch; the name's length; the position after it).
+pub fn entry_at(v: u64, d: u64, pos: u64) -> (u64, u64, u64, u64, u64) {
+    let b = bs(v)
+    let sz = size(v, d)
+    var fb = pos / b
+    var want = pos % b
+    while fb * b < sz {
+        let (blk, _m) = bmap(v, d, fb, false)
+        if blk != 0 && blk != BAD {
+            let a = get(v, blk)
+            if a == 0 {
+                return (0, 0, 0, 0, sz)
+            }
+            var o: u64 = 0
+            while o + 8 <= b {
+                let rl = r16(a + o + 4)
+                if rl < 8 || o + rl > b {
+                    corrupt(v, "a directory entry's record length is wrong in block", blk)
+                    break
+                }
+                if o >= want && r32(a + o) != 0 && !is_dot(a + o) {
+                    let nl = r8(a + o + 6)
+                    let s = base() + SCRATCH
+                    copy_bytes(s, a + o + 8, nl)
+                    return (r32(a + o), r8(a + o + 7), s, nl, fb * b + o + rl)
+                }
+                o += rl
+            }
+        }
+        fb += 1
+        want = 0
+    }
+    (0, 0, 0, 0, sz)
+}
+
+/// The name directory `d` gives inode `c`, copied to the module's
+/// scratch: (its address, its length), or (0, 0).
+pub fn name_of(v: u64, d: u64, c: u64) -> (u64, u64) {
+    var pos: u64 = 0
+    var guard: u64 = 0
+    while guard < 1000000 {
+        let (i, _t, a, l, nx) = entry_at(v, d, pos)
+        if i == 0 {
+            return (0, 0)
+        }
+        if i == c {
+            return (a, l)
+        }
+        pos = nx
+        guard += 1
+    }
+    (0, 0)
+}
+
+/// Whether directory `d` has no entry but `.` and `..`.
+pub fn empty(v: u64, d: u64) -> bool {
+    let (i, _t, _a, _l, _n) = entry_at(v, d, 0)
+    i == 0
+}
+
+/// Add the name [name, name + len) to directory `d`, leading to inode
+/// `ino` of type byte `ft`: in the first record with room, else in a new
+/// block. 0, or -ENOSPC, -EIO.
+pub fn add(v: u64, d: u64, name: u64, len: u64, ino: u64, ft: u64) -> u64 {
+    let b = bs(v)
+    let nd = need(len)
+    let nb = size(v, d) / b
+    unindex(v, d)
+    var fb: u64 = 0
+    while fb < nb {
+        let (blk, _m) = bmap(v, d, fb, false)
+        if blk != 0 && blk != BAD {
+            let a = get(v, blk)
+            if a == 0 {
+                return neg(EIO)
+            }
+            var o: u64 = 0
+            while o + 8 <= b {
+                let rl = r16(a + o + 4)
+                if rl < 8 || o + rl > b {
+                    break
+                }
+                let used = if r32(a + o) == 0 { 0 } else { need(r8(a + o + 6)) }
+                if rl >= used && rl - used >= nd {
+                    var at = o
+                    var room = rl
+                    if used != 0 {
+                        w16(a + o + 4, used)
+                        at = o + used
+                        room = rl - used
+                    }
+                    w32(a + at, ino)
+                    w16(a + at + 4, room)
+                    w8(a + at + 6, len)
+                    w8(a + at + 7, ft)
+                    copy_bytes(a + at + 8, name, len)
+                    dirty(v, blk)
+                    return 0
+                }
+                o += rl
+            }
+        }
+        fb += 1
+    }
+    let (dst, c, blk) = wspan(v, d, nb * b, b)
+    if c == 0 {
+        return neg(ENOSPC)
+    }
+    zero_bytes(dst, b)
+    w32(dst, ino)
+    w16(dst + 4, b)
+    w8(dst + 6, len)
+    w8(dst + 7, ft)
+    copy_bytes(dst + 8, name, len)
+    wrote(v, blk)
+    set_size(v, d, (nb + 1) * b)
+    0
+}
+
+/// Remove the name [name, name + len) from directory `d`: its record
+/// merged into the one before it, or unused when first in its block. The
+/// inode it led to, or 0 when it is not there.
+pub fn remove(v: u64, d: u64, name: u64, len: u64) -> u64 {
+    let (blk, o, prev, ino) = find(v, d, name, len)
+    if blk == BAD {
+        return 0
+    }
+    unindex(v, d)
+    let a = get(v, blk)
+    if a == 0 {
+        return 0
+    }
+    if prev == bs(v) {
+        w32(a + o, 0)
+    } else {
+        w16(a + prev + 4, r16(a + prev + 4) + r16(a + o + 4))
+    }
+    dirty(v, blk)
+    ino
+}
+
+/// The name [name, name + len) in directory `d` leads to inode `ino` of
+/// type `ft` from now on (a rename over it). 0, or -ENOENT as 0's
+/// absence: false when the name is not there.
+pub fn relink(v: u64, d: u64, name: u64, len: u64, ino: u64, ft: u64) -> bool {
+    let (blk, o, _p, _i) = find(v, d, name, len)
+    if blk == BAD {
+        return false
+    }
+    unindex(v, d)
+    let a = get(v, blk)
+    if a == 0 {
+        return false
+    }
+    w32(a + o, ino)
+    w8(a + o + 7, ft)
+    dirty(v, blk)
+    true
+}
+
+/// Directory `d`'s `..` leads to `parent` from now on (a directory moved).
+pub fn set_dotdot(v: u64, d: u64, parent: u64) {
+    let (blk, _m) = bmap(v, d, 0, false)
+    if blk == 0 || blk == BAD {
+        return
+    }
+    let a = get(v, blk)
+    if a == 0 {
+        return
+    }
+    let rl = r16(a + 4)
+    if rl + 12 <= bs(v) && r8(a + rl + 6) == 2 {
+        w32(a + rl, parent)
+        dirty(v, blk)
+    }
+}
+
+/// A new directory's first block: `.` (itself) and `..` (`parent`), the
+/// rest of the block the second record's. 0, or -ENOSPC.
+pub fn make_dir(v: u64, d: u64, parent: u64) -> u64 {
+    let b = bs(v)
+    let (dst, c, blk) = wspan(v, d, 0, b)
+    if c == 0 {
+        return neg(ENOSPC)
+    }
+    zero_bytes(dst, b)
+    w32(dst, d)
+    w16(dst + 4, 12)
+    w8(dst + 6, 1)
+    w8(dst + 7, 2)
+    w8(dst + 8, 46)
+    w32(dst + 12, parent)
+    w16(dst + 16, b - 12)
+    w8(dst + 18, 2)
+    w8(dst + 19, 2)
+    w8(dst + 20, 46)
+    w8(dst + 21, 46)
+    wrote(v, blk)
+    set_size(v, d, b)
+    0
+}
+
+/// The most links an inode may have (ext2's 16-bit count; Linux refuses
+/// at 65000 for a directory's subdirectories).
+pub const LINK_MAX: u64 = 65000
+
+/// -EMLINK, as a caller refuses a name past LINK_MAX.
+pub fn emlink() -> u64 {
+    neg(EMLINK)
+}
+
+/// -EFBIG, as a caller refuses a write past what three levels hold.
+pub fn efbig() -> u64 {
+    neg(EFBIG)
+}
+
+/// The most bytes a file of volume `v` may hold: what twelve direct
+/// blocks and three levels of indirect blocks reach, and what `i_blocks`
+/// (32 bits of 512-byte units) can count.
+pub fn max_size(v: u64) -> u64 {
+    let b = bs(v)
+    let p = b / 4
+    let reach = (12 + p + p * p + p * p * p) * b
+    let count: u64 = 0xffffffff * 512
+    if reach < count { reach } else { count }
+}
+
+/// The mount's line:
+///
+///     ext2: vda: <blocks> blocks of <bs> bytes, <groups> groups, <inodes> inodes of <isize> bytes, features compat 0x<c> incompat 0x<i> ro_compat 0x<r>; <free> blocks and <ifree> inodes free; clean|not cleanly unmounted, mount <n>; read-write|read-only (why)
+pub fn report(v: u64) {
+    log.put("ext2: vda: ")
+    log.dec(vw(v, V_BLOCKS) as int)
+    log.put(" blocks of ")
+    log.dec(bs(v) as int)
+    log.put(" bytes, ")
+    log.dec(vw(v, V_GROUPS) as int)
+    log.put(" groups, ")
+    log.dec(vw(v, V_INODES) as int)
+    log.put(" inodes of ")
+    log.dec(vw(v, V_ISIZE) as int)
+    log.put(" bytes, features compat ")
+    log.hex_n(vw(v, V_FC), 4)
+    log.put(" incompat ")
+    log.hex_n(vw(v, V_FI), 4)
+    log.put(" ro_compat ")
+    log.hex_n(vw(v, V_FR), 4)
+    log.put("; ")
+    log.dec(statfs(v, 2) as int)
+    log.put(" blocks and ")
+    log.dec(statfs(v, 5) as int)
+    log.put(" inodes free; ")
+    log.put(if vw(v, V_CLEAN) == 1 { "clean" } else { "not cleanly unmounted" })
+    log.put(", mount ")
+    log.dec(vw(v, V_MNT) as int)
+    log.put("; ")
+    let ro = vw(v, V_RO)
+    log.put(if ro == 0 { "read-write" } else if ro == 1 { "read-only (asked)" } else if ro == 2 { "read-only (a feature)" } else { "read-only (the disk is)" })
+    log.end()
+}
