@@ -390,6 +390,33 @@ pub fn device8(off: u64) -> u64 {
     r8(tw(T_DEVICE) + off)
 }
 
+/// px63: the le32 at `off` (4-aligned) of the device-specific
+/// configuration, read as one 32-bit access (§4.1.3.1: a 32-bit field
+/// is read at its own width).
+pub fn device32(off: u64) -> u64 {
+    r32(tw(T_DEVICE) + off)
+}
+
+/// px63: the le64 at `off` (8-aligned) of the device-specific
+/// configuration: two 32-bit reads, taken again while the device's
+/// `config_generation` (common configuration 0x15) moves between them
+/// (§2.5.1, §4.1.3.1: a 64-bit field is read 32 bits at a time and the
+/// generation tells a torn read).
+pub fn device64(off: u64) -> u64 {
+    let c = tw(T_COMMON)
+    var k: u64 = 0
+    while k < 16 {
+        let g = r8(c + 0x15)
+        let lo = r32(tw(T_DEVICE) + off)
+        let hi = r32(tw(T_DEVICE) + off + 4)
+        if r8(c + 0x15) == g {
+            return hi << 32 | lo
+        }
+        k += 1
+    }
+    0
+}
+
 /// Where a queue of `size` keeps its parts in one frame: the avail
 /// ring's offset, the used ring's, and the bytes used in all.
 pub fn layout(size: u64) -> (u64, u64, u64) {
