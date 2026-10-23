@@ -4178,7 +4178,21 @@ fn syn_read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
         }
         return 0
     }
-    let k = if n < len - off { n } else { len - off }
+    var k = if n < len - off { n } else { len - off }
+    if procfs.entry(r) == procfs.PARTITIONS {
+        // px66: /proc/partitions' bytes [off, off + k) made into the
+        // file's frame for this read (a page at most: a shorter read).
+        if k > 4096 {
+            k = 4096
+        }
+        let va = ofw(o - 1, O_TEXT) + frames.hhdm()
+        let w = block.partitions_slice(va, off, k)
+        if !uaccess.copy_out(pml4, buf, va, w) {
+            return neg(EFAULT)
+        }
+        put_ofw(o - 1, O_POS, off + w)
+        return w
+    }
     if !uaccess.copy_out(pml4, buf, ofw(o - 1, O_TEXT) + frames.hhdm() + off, k) {
         return neg(EFAULT)
     }
