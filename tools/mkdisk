@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+# mkdisk — make an ext2 disk image for PAX (px63): empty, or holding a
+# tree from the host, reproducibly.
+#
+#   tools/mkdisk [--from DIR] [--attrs FILE] [--label NAME] [--block BYTES]
+#                [--inodes N] SIZE OUT.img
+#
+# SIZE is bytes, or a number with K, M or G (powers of 1024). The image
+# is made by e2fsprogs' own `mkfs.ext2` (tools/e2fs: the container image
+# pinned by digest, never the host's), with every input that would vary
+# fixed: the UUID and the directory hash seed derived from the label and
+# SOURCE_DATE_EPOCH (default: the last commit's time), every time mkfs
+# writes faked to SOURCE_DATE_EPOCH (E2FSPROGS_FAKE_TIME), the root
+# 0:0. Two runs with the same inputs give the same bytes.
+#
+# --from DIR fills it: DIR's tree, walked in sorted order, made with
+# `debugfs -w` commands (`mkdir`, `write`, `symlink`, and `ln` with the
+# link count set for a hard link), never with mkfs's -d (whose order
+# would be the host directory's). Every inode then gets, by `sif`, its
+# mode (DIR's permission bits), owner 0:0 and every time (access,
+# modification, change, creation; nanoseconds 0) SOURCE_DATE_EPOCH,
+# unless --attrs FILE says otherwise: one line a path,
+#
+#   PATH MODE UID GID [MTIME [ATIME [CTIME]]]
+#
+# (PATH from the image's root, `/` itself included; MODE octal
+# permission bits; times in seconds since the epoch, the access and
+# change times the modification time's when left out). `#` lines and
+# empty ones are skipped. Then `e2fsck -fn` must find the image clean.
+#
+# Prints the commands' count, the e2fsck verdict, and
+# `OUT <bytes> bytes sha256 <hex>`. Exit 0, 1 when e2fsck finds a fault,
+# 2 on a usage or tool error.
+import hashlib
+import os
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+E2FS = os.path.join(HERE, "e2fs")
+
+
+def die(msg, code=2):
+    sys.stderr.write("mkdisk: %s\n" % msg)
+    sys.exit(code)
+
+
+def size_of(s):
+    mult = {"K": 1 << 10, "M": 1 << 20, "G": 1 << 30}
+    try:
+        if s[-1:].upper() in mult:
+            return int(s[:-1]) * mult[s[-1:].upper()]
+        return int(s)
+    except ValueError:
+        die("not a size: %s" % s)
+
+
+def uuid_of(tag):
+    h = hashlib.sha256(tag.encode()).hexdigest()
+    return "%s-%s-%s-%s-%s" % (h[0:8], h[8:12], h[12:16], h[16:20], h[20:32])
+
+
+def epoch():
+    v = os.environ.get("SOURCE_DATE_EPOCH")
+    if v:
+        return int(v)
+    try:
+        out = subprocess.run(["git", "-C", ROOT, "log", "-1", "--format=%ct"], capture_output=True, text=True, check=True)
+        return int(out.stdout.strip())
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return 0
+
+
+def quote(p):
+    # debugfs reads a command line with its own quoting: double quotes
+    # around a name that has a space; a name with a double quote is
+    # refused (none of PAX's fixtures has one).
+    if '"' in p or "\n" in p:
+        die("a path debugfs cannot quote: %r" % p)
+    return '"%s"' % p if (" " in p or "\t" in p) else p
+
+
+def e2fs(workdir, *args, env=None):
+    e = dict(os.environ)
+    if env:
+        e.update(env)
+    r = subprocess.run([E2FS, workdir] + list(args), capture_output=True, text=True, env=e)
+    return r.returncode, r.stdout, r.stderr
+
+
+def main(argv):
+    src = attrs = None
+    label = "pax"
+    bs = 4096
+    inodes = None
+    args = argv[1:]
+    while args and args[0].startswith("--"):
+        if len(args) < 2:
+            die("%s takes a value" % args[0])
+        k, v = args[0], args[1]
+        args = args[2:]
+        if k == "--from":
+            src = v
+        elif k == "--attrs":
+            attrs = v
+        elif k == "--label":
+            label = v
+        elif k == "--block":
+            bs = int(v)
+        elif k == "--inodes":
+            inodes = int(v)
+        else:
+            die("unknown option %s" % k)
+    if len(args) != 2:
+        die("usage: mkdisk [--from DIR] [--attrs FILE] [--label NAME] [--block BYTES] [--inodes N] SIZE OUT.img")
+    size = size_of(args[0])
+    out = os.path.abspath(args[1])
+    if bs not in (1024, 2048, 4096) or size % bs:
+        die("the block size is 1024, 2048 or 4096 and divides the size")
+    t = epoch()
+    work = os.path.dirname(out)
+    os.makedirs(work, exist_ok=True)
+    with open(out, "wb") as f:
+        f.truncate(size)
+    mk = ["mkfs.ext2", "-q", "-F", "-t", "ext2", "-b", str(bs), "-L", label,
+          "-U", uuid_of("pax-disk:%s:%d" % (label, t)),
+          "-E", "hash_seed=%s,root_owner=0:0" % uuid_of("pax-hash:%s:%d" % (label, t))]
+    if inodes:
+        mk += ["-N", str(inodes)]
+    rc, so, se = e2fs(work, *(mk + [out]), env={"E2FSPROGS_FAKE_TIME": str(t)})
+    if rc != 0:
+        die("mkfs.ext2: %s%s" % (so, se))
+    # The attributes asked for, by path.
+    want = {}
+    if attrs:
+        for line in open(attrs):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            w = shlex.split(line)
+            if len(w) < 4:
+                die("an attrs line needs PATH MODE UID GID: %s" % line)
+            mt = int(w[4]) if len(w) > 4 else t
+            at = int(w[5]) if len(w) > 5 else mt
+            ct = int(w[6]) if len(w) > 6 else mt
+            want[w[0]] = (int(w[1], 8), int(w[2]), int(w[3]), mt, at, ct)
+    cmds = []
+    seen = {}
+    paths = [("/", None)]
+    stage = out + ".stage"
+    if src:
+        shutil.rmtree(stage, ignore_errors=True)
+        os.makedirs(stage)
+        n = 0
+        for dirpath, dirnames, filenames in os.walk(src):
+            dirnames.sort()
+            rel = os.path.relpath(dirpath, src)
+            base = "/" if rel == "." else "/" + rel
+            for name in sorted(dirnames + filenames):
+                hp = os.path.join(dirpath, name)
+                ip = (base.rstrip("/") + "/" + name)
+                st = os.lstat(hp)
+                if stat.S_ISLNK(st.st_mode):
+                    cmds.append("symlink %s %s" % (quote(ip), quote(os.readlink(hp))))
+                elif stat.S_ISDIR(st.st_mode):
+                    cmds.append("mkdir %s" % quote(ip))
+                elif stat.S_ISREG(st.st_mode):
+                    key = (st.st_dev, st.st_ino)
+                    if st.st_nlink > 1 and key in seen:
+                        first = seen[key]
+                        cmds.append("ln %s %s" % (quote(first), quote(ip)))
+                        cmds.append("sif %s links_count %d" % (quote(first), st.st_nlink))
+                        # One inode: its attributes are the first name's,
+                        # or this name's when --attrs lists it.
+                        if ip in want and first not in want:
+                            want[first] = want[ip]
+                        continue
+                    seen[key] = ip
+                    n += 1
+                    sp = os.path.join(stage, "f%06d" % n)
+                    shutil.copyfile(hp, sp)
+                    cmds.append("write %s %s" % (quote(sp), quote(ip)))
+                else:
+                    die("not a file, a directory or a link: %s" % hp)
+                paths.append((ip, st))
+    paths.append(("/lost+found", None))
+    for ip, st in paths:
+        if st is not None and stat.S_ISREG(st.st_mode) and st.st_nlink > 1 and seen.get((st.st_dev, st.st_ino)) != ip:
+            continue  # a second name: the first name's inode has its attributes
+        if ip in want:
+            mode, uid, gid, mt, at, ct = want[ip]
+        else:
+            mode = stat.S_IMODE(st.st_mode) if st is not None else (0o700 if ip == "/lost+found" else 0o755)
+            uid = gid = 0
+            mt = at = ct = t
+        if st is not None and stat.S_ISLNK(st.st_mode):
+            full = 0o120777
+        elif st is None or stat.S_ISDIR(st.st_mode):
+            full = 0o040000 | mode
+        else:
+            full = 0o100000 | mode
+        q = quote(ip)
+        cmds.append("sif %s mode 0%o" % (q, full))
+        cmds.append("sif %s uid %d" % (q, uid))
+        cmds.append("sif %s gid %d" % (q, gid))
+        for field, v in (("atime", at), ("mtime", mt), ("ctime", ct), ("crtime", mt)):
+            # debugfs keeps the low 32 bits of the seconds (measured: @2200000000
+            # reads back as 1903 with no extra word); the extra word gets the
+            # two epoch bits that make it 2040 again (inodes.rst), no
+            # nanoseconds.
+            lo = v & 0xFFFFFFFF
+            sx = lo - (1 << 32) if lo & 0x80000000 else lo
+            cmds.append("sif %s %s @%d" % (q, field, v))
+            cmds.append("sif %s %s_extra %d" % (q, field, ((v - sx) >> 32) & 3))
+    cf = out + ".debugfs"
+    with open(cf, "w") as f:
+        f.write("\n".join(cmds) + "\n")
+    rc, so, se = e2fs(work, "debugfs", "-w", "-f", cf, out)
+    # debugfs echoes each command as `debugfs: <command>` and prints its
+    # banner (`debugfs 1.47.0 …`); anything else is an answer, an error.
+    # `write` says `Allocated inode: <n>`.
+    bad = [l for l in (so + se).splitlines() if l and not l.startswith("debugfs: ") and not l.startswith("debugfs 1.")
+           and not l.startswith("Allocated inode: ")]
+    if rc != 0 or bad:
+        die("debugfs: %s" % "\n".join(bad[:20]))
+    shutil.rmtree(stage, ignore_errors=True)
+    rc, so, se = e2fs(work, "e2fsck", "-fn", out)
+    verdict = so.strip().splitlines()
+    print("mkdisk: %d debugfs commands; e2fsck -fn: %s" % (len(cmds), verdict[-1] if verdict else "?"))
+    if rc != 0:
+        sys.stderr.write(so + se)
+        die("e2fsck -fn found %s faulty (exit %d)" % (out, rc), 1)
+    h = hashlib.sha256()
+    with open(out, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    print("%s %d bytes sha256 %s" % (out, size, h.hexdigest()))
+
+
+if __name__ == "__main__":
+    main(sys.argv)
