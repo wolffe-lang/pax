@@ -1,0 +1,48 @@
+px62, kasumi (7.2.8-1-cachyos, QEMU 11.1.1, TCG, CPUs 0-3), 2026-10-22/23.
+tests/mpx5-lope's boot (native, BIOS) of lope1's images with another
+kernel (notes/px62/lope-kernels.sh); the menu's digit typed
+PAX_TYPE_PAUSE (2 s) after `gi`.
+
+-- the suite, by kernel (lk.out)
+base 394129f92564eb79 rc=0
+mpx5-lope: PASS L1 native bios lope lope: 59 lines byte-identical to the container's (a9a5306ee171…)
+mpx5-lope: PASS L1 native bios lope lope-user: 59 lines byte-identical to the container's (3c676e951da3…)
+head 9592a3b150388347 rc=1
+mpx5-lope: PASS L1 native bios lope lope: 59 lines byte-identical to the container's (a9a5306ee171…)
+mpx5-lope: FAIL L1 native bios lope lope-user: the session differs from the container's: 16a17|> 2|20,21c21|< lope: which? 2|< $ pwd|---|> lope: which? $ pwd|;
+fix 326dafde44d6e643 rc=1
+mpx5-lope: FAIL L1 native bios lope lope-user: (the same)
+fix with PAX_TYPE_PAUSE=6: rc=0, both sessions byte-identical
+
+-- where the time went (qemu-wrap + sample.py + window.py, the head
+-- kernel 326dafde): 141 RIP samples between the user's `$ gi` and its
+-- menu, 2.84 s
+83 paging.copy_user, 15 paging.descend_as, 13 pax_idle, 3 user, ...
+-- each fork of the `$(__lope_menu)` subshell (pid 74) copied 1277
+-- frames, as every fork of the session's shell (pid 58) did, but took
+-- 1908-2188 TSC/1e6 against 34-126 (debug-patch.py's `dbg clone`)
+
+-- QEMU's own time in that window (qemu-perf): g_tree_lookup_node 559,
+-- g_tree_lookup 280, malloc 129, cfree 111, bitmap_set_atomic 110,
+-- find_next_bit 85, physical_memory_set_dirty_range 68,
+-- tb_invalidate_phys_range_fast 34 (of 5190 samples): its write-to-code
+-- path
+
+-- which pages (qemu-trace + notdirty-pages.py): kasumi-notdirty.out
+-- (frame 0x198d000, 17,126,406 writes at 0xffffd0000004fed0: slot 4's
+-- kernel stack, its top page)
+
+-- bisect: the same debug patch on each tree, slow = pid 74's every
+-- system call ~430-600 TSC/1e6
+c0d394ee (base)                               fast
+61ad542e (paging, tree)                       fast
+ce3a1133 (+ sched: area 49152, Thread.fifo)   slow
+61ad542e + PROC_AREA 49152 only               slow
+61ad542e + PROC_AREA 45056                    fast
+61ad542e + PROC_AREA 57344                    fast
+61ad542e + PROC_AREA 49152, 4 KiB pad after   slow
+
+-- the fix (23231b6d, make_stack zeroes each frame): cec74b3f
+stack cec74b3f0a29b894 rc=0
+mpx5-lope: PASS L1 native bios lope lope: 59 lines byte-identical to the container's (a9a5306ee171…)
+mpx5-lope: PASS L1 native bios lope lope-user: 59 lines byte-identical to the container's (3c676e951da3…)
