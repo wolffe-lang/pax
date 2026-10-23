@@ -27,7 +27,11 @@
 //!     size (16), path (24), string (32), …}; the address is virtual
 //!     (the HHDM) at base revision 6, 4 KiB aligned, and every 4 KiB
 //!     the file covers is its own. No response when no module was
-//!     loaded.
+//!     loaded. px66: where it was loaded from, the same structure's
+//!     media_type (40, u32: 0 generic, 1 optical, 2 TFTP),
+//!     partition_index (56, u32, 1-based, 0 unpartitioned), mbr_disk_id
+//!     (60, u32) and gpt_disk_uuid (64) and gpt_part_uuid (80), each a
+//!     `struct limine_uuid` of 16 bytes (a GPT GUID's own layout).
 //!   executable command line (px15): revision, cmdline (8): a C
 //!     string, the configuration's `cmdline` (empty without one).
 //!   framebuffer (px19): revision, framebuffer_count (8), framebuffers
@@ -371,6 +375,37 @@ pub fn module_path_byte(i: u64, k: u64) -> int {
         j += 1
     }
     -1
+}
+
+/// px66: module `i`'s media type (0 generic: a disk; 1 optical; 2
+/// TFTP), or 1 out of range (nothing new is said for it).
+pub fn module_media(i: u64) -> u64 {
+    let f = module_file(i)
+    if f == 0 {
+        return 1
+    }
+    word(f + 40) & 0xffffffff
+}
+
+/// px66: module `i`'s partition index (1-based; 0 unpartitioned or out
+/// of range).
+pub fn module_partition(i: u64) -> u64 {
+    let f = module_file(i)
+    if f == 0 {
+        return 0
+    }
+    word(f + 56) & 0xffffffff
+}
+
+/// px66: word `w` (0 or 1) of module `i`'s GPT disk GUID (`part`
+/// false) or GPT partition GUID (`part` true), as its 16 bytes read as
+/// two little-endian words; 0 out of range.
+pub fn module_guid(i: u64, part: bool, w: u64) -> u64 {
+    let f = module_file(i)
+    if f == 0 || w > 1 {
+        return 0
+    }
+    word(f + (if part { 80 } else { 64 }) + w * 8)
 }
 
 /// How many framebuffers Limine handed over (px19): 0 without a
