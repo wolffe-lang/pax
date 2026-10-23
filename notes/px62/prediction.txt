@@ -1,0 +1,53 @@
+px62 prediction, written before the first change (pax trunk c0d394ee).
+
+Inputs re-derived: pax origin/trunk is c0d394ee (px61). docs/MAP.md does not
+exist (no file of that name at any commit); the VM and the writable tree are
+described in kernel/vm/vm.lu's and kernel/tree/tree.lu's headers, which
+stand in for it. s254's fs_lock/fs_mkfifo rows (wolf-lang 3c7ac0e6,
+crates/wolf_driver/tests/fixtures/fs_gaps/{lock,fifo}_rows.lu) are NOT in
+v0.2.34 (the newest tag, the pin every PAX builder uses): no released wolf
+can build them yet.
+
+1. The page cache. It exists, and mappings reuse it rather than a new one
+   being written: kernel/tree keeps every file's bytes in 4096-byte frames
+   under a per-file index (tmpfs's shape), and those frames are the only
+   copy of the file. A MAP_SHARED mapping maps them; a MAP_PRIVATE mapping
+   maps them read-only and copies on the first write. What has to be
+   written is the rest: per-process mapping records (PAX has no VMAs:
+   anonymous memory is page tables plus px26/px34's reservations), a
+   fault path that fills a page from a record, a page-table bit for a
+   frame the process does not own, and the truncate/fork/exit/exec edges.
+   Pages still in the initramfs (never written) have no frame: they are
+   copied into one at the first fault, as a first write does now.
+   R-px62-1 recommendation: read-at-fault into those page-cache frames
+   (not a whole-file read at mmap time: a sparse file mapped shared would
+   take every frame at the call).
+
+2. Which of the four calls the static wolf's own census reaches first:
+   mremap, in the musl allocator's grow path (151552 -> 299008 bytes,
+   MREMAP_MAYMOVE), first at `conform-run --phase=typecheck` of
+   /usr/share/wolf/spawn.lu, the 18th command of user/console/wolf.keys.
+   wolf itself never asks for a file mapping, MAP_SHARED, flock or a
+   FIFO in that session; the file-backed and shared mappings px60 saw
+   are ld.lld's (the native link), and flock/mkfifo only come from
+   s254's rows and pelt's corpus.
+
+3. The pelt row at 21/22: the FIFO, builtin/c_s_dot_special_file
+   (busybox mkfifo, a background subshell writing into it, `.` reading
+   it). This is read from px61's note and compare.py, not predicted.
+   The prediction to score: serving mknodat(S_IFIFO) and the FIFO's open
+   rules alone takes it to 22/22, with no flock and no other change.
+
+Measurements predicted:
+- mremap on PAX moves the wolf allocator's mapping (Linux moved it too, to
+  just below the old one); in place only when the pages above are free.
+- R-px62-2 recommendation: MREMAP_FIXED (with MAYMOVE) refused by name
+  with EINVAL, the answer of a kernel that has mremap but not the flag;
+  ENOSYS would claim the whole call is missing.
+- flock: a failed LOCK_NB conversion on Linux drops the lock the open
+  file held (flock(2): "the existing lock is first removed").
+- kmain_console's .text grows by about 30 KiB native (15 to 60).
+- Existing suites unchanged but for mpx5-wolf's W3 (the unserved set
+  goes from "25 273 334" to "273 334") and mpx5-pelt (the FIFO row
+  becomes an ordinary parity row); ld.lld's two refusal lines leave the
+  native M2 session.
