@@ -273,6 +273,7 @@ extern "c" fn pax_cpuid7_ebx() -> u64
 extern "c" fn pax_enter_user(rip: u64, rsp: u64)
 extern "c" fn pax_peek_user(va: u64, smap: u64) -> u64
 extern "c" fn pax_cr2() -> u64
+extern "c" fn pax_outb(port: u16, v: u8)
 
 extern "c" let pax_syscall_entry: *u8
 extern "c" let pax_syscall_state: *u64
@@ -982,6 +983,22 @@ const SYS_SETTIMEOFDAY: u64 = 164
 const SYS_MOUNT: u64 = 165
 const SYS_UMOUNT2: u64 = 166
 const SYS_REBOOT: u64 = 169
+// px63: the disk's calls.
+const SYS_STATFS: u64 = 137
+const SYS_FSTATFS: u64 = 138
+const SYS_SYNC: u64 = 162
+const SYS_SYNCFS: u64 = 306
+// px63: reboot(2)'s magic and commands (uapi linux/reboot.h).
+const REBOOT_MAGIC1: u64 = 0xfee1dead
+const REBOOT_MAGIC2: u64 = 672274793
+const REBOOT_MAGIC2A: u64 = 85072278
+const REBOOT_MAGIC2B: u64 = 369367448
+const REBOOT_MAGIC2C: u64 = 537993216
+const CMD_RESTART: u64 = 0x01234567
+const CMD_HALT: u64 = 0xcdef0123
+const CMD_POWER_OFF: u64 = 0x4321fedc
+const CMD_CAD_ON: u64 = 0x89abcdef
+const CMD_CAD_OFF: u64 = 0
 const SYS_SETHOSTNAME: u64 = 170
 const SYS_SETDOMAINNAME: u64 = 171
 const SYS_CLOCK_SETTIME: u64 = 227
@@ -1401,6 +1418,7 @@ pub fn syscall(f: u64) -> u64 {
     let a3 = word(f, W_R10)
     let a4 = word(f, W_R8)
     sched.syscall_begins() // px26: whatever wait the last call was in is over
+    tree.tick() // px63: a volume's record looked up before this call may be given back
     if nr == SYS_EXIT && sched.self_threads() > 1 {
         // px26: `exit` ends the calling thread alone while its process
         // has others: the clear-child-tid word zeroed and its futex
@@ -1686,6 +1704,53 @@ pub fn tree_report() {
 /// AT_FDCWD as 0x00000000ffffff9c (measured, px12): Linux reads the int.
 fn int32(x: u64) -> u64 {
     x & 0xffffffff
+}
+
+fn outb(port: u64, v: u64) {
+    // # Safety: io.S's `outb`, to the reset ports `reboot` names.
+    unsafe { pax_outb(port as u16, (v & 0xff) as u8) }
+}
+
+/// px63: `reboot(2)` for root, the magic checked (`reboot(2)`; uapi
+/// linux/reboot.h): LINUX_REBOOT_CMD_RESTART writes every mounted
+/// volume (its dirty blocks, marked clean, the disk flushed: the
+/// tree's `halt_volumes`) and resets the machine — the reset control
+/// register (port 0xcf9: 0x02 then 0x06, a hard reset, Intel's ICH9
+/// datasheet §13.7.5, q35's), then the keyboard controller's reset line
+/// (port 0x64, 0xfe), then a triple fault; CMD_HALT and CMD_POWER_OFF
+/// write the volumes the same way and halt as kmain_console's end does
+/// (`halt`: PAX has no ACPI, so QEMU is not powered off); CAD_ON and
+/// CAD_OFF answer 0 and change nothing (no Ctrl-Alt-Del is seen); any
+/// other command -EINVAL. A user is -EPERM and a bad magic -EINVAL first
+/// (kernel/process's `root_call`, px45's rows).
+fn reboot(cmd: u64) -> u64 {
+    if cmd == CMD_CAD_ON || cmd == CMD_CAD_OFF {
+        return 0
+    }
+    if cmd != CMD_RESTART && cmd != CMD_HALT && cmd != CMD_POWER_OFF {
+        return NEG_EINVAL
+    }
+    let e = tree.halt_volumes()
+    who()
+    log.put(" reboot(2): the volumes written and marked clean")
+    if e != 0 {
+        log.put(" (an I/O error: ")
+        log.dec((!e + 1) as int)
+        log.put(")")
+    }
+    log.put(if cmd == CMD_RESTART { "; restarting" } else { "; halting" })
+    log.end()
+    if cmd != CMD_RESTART {
+        timer.stop()
+        log.line("halt")
+        panic.halt()
+    }
+    outb(0xcf9, 0x02)
+    outb(0xcf9, 0x06)
+    outb(0x64, 0xfe)
+    // Neither reset the machine: a triple fault does (an interrupt with
+    // no descriptor table to take it).
+    panic.fail("reboot: the machine did not reset, by port", 0xcf9)
 }
 
 /// Every call that answers in place: the result for %rax.
@@ -2003,6 +2068,19 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     if nr == SYS_FSYNC || nr == SYS_FDATASYNC {
         return files.fsync(a, int32(r0))
     }
+    if nr == SYS_SYNCFS {
+        return files.syncfs(a, int32(r0)) // px63
+    }
+    if nr == SYS_SYNC {
+        let _e = tree.sync_all() // px63: sync(2) answers nothing
+        return 0
+    }
+    if nr == SYS_STATFS {
+        return files.statfs(a, pml4, r0, a1) // px63
+    }
+    if nr == SYS_FSTATFS {
+        return files.fstatfs(a, pml4, int32(r0), a1)
+    }
     if nr == SYS_UMASK {
         return files.umask(a, int32(r0))
     }
@@ -2037,6 +2115,12 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     }
     if nr == SYS_SCHED_GETSCHEDULER {
         return process.sched_getscheduler(r0)
+    }
+    if nr == SYS_REBOOT && cred.privileged(a) {
+        let m2 = a1 & 0xffffffff
+        if r0 & 0xffffffff == REBOOT_MAGIC1 && (m2 == REBOOT_MAGIC2 || m2 == REBOOT_MAGIC2A || m2 == REBOOT_MAGIC2B || m2 == REBOOT_MAGIC2C) {
+            return reboot(a2 & 0xffffffff) // px63: served for root
+        }
     }
     if nr == SYS_CHROOT || nr == SYS_SETTIMEOFDAY || nr == SYS_MOUNT || nr == SYS_UMOUNT2 || nr == SYS_REBOOT || nr == SYS_SETHOSTNAME || nr == SYS_SETDOMAINNAME || nr == SYS_CLOCK_SETTIME {
         return process.root_call(nr, r0, a1, a2)
