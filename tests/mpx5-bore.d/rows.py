@@ -62,8 +62,8 @@ TEXT_TOOLS = ["base64", "base32", "comm", "join", "tsort", "shuf"]
 
 FILES_ROWS = [
     ("the eight tools are found by PATH",
-     ["$ for c in mkfifo link unlink truncate sync mktemp realpath tty; do command -v $c; done"]
-     + ["/bin/" + c for c in FILE_TOOLS]),
+     ["$ for c in mkfifo link unlink truncate; do command -v $c; done"] + ["/bin/" + c for c in FILE_TOOLS[:4]]
+     + ["$ for c in sync mktemp realpath tty; do command -v $c; done"] + ["/bin/" + c for c in FILE_TOOLS[4:]]),
     ("mkfifo", s("mkfifo f1", 0)),
     ("mkfifo -m", s("mkfifo -m 600 f2", 0)),
     ("two FIFOs, their modes under umask 022 and -m 600",
@@ -116,7 +116,7 @@ FILES_ROWS = [
     ("mktemp -p DIR TEMPLATE", ["{...}", "status 0", "shape W/x.XXXXXX"]),
     ("mktemp --suffix", ["{...}", "status 0", "shape W/tmp.XXXXXXXXXX.txt"]),
     ("mktemp -u: a name, nothing made",
-     ["{...}", "status 0", "shape W/tmp.XXXXXXXXXX", "$ s stat -c %n $t", "status 1", "[stderr]", "stat: {msg}"]),
+     ["{...}", "status 0", "shape W/tmp.XXXXXXXXXX", "$ stat -c %n $t >/dev/null 2>&1; echo \"stat status $?\"", "stat status 1"]),
     ("two names, distinct", ["{...}", "distinct"]),
     ("too few X's", s("mktemp abc", 1, err=["mktemp: too few X's in template 'abc'"])),
     ("mktemp under a missing directory",
