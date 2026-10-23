@@ -7,6 +7,20 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **grep is scent (px64).** `/bin/scent` is scent at `b6f63a4` (grep in
+  wolf, M1: byte-identical to GNU grep 3.12 in the C locale on its M1
+  options but for rulings #115 to #117 and eight rows blocked upstream),
+  the unmodified static binary `tools/mkscent` builds twice to one digest
+  by scent's own toolchain (`user/scent.pin`); `/bin/grep` is a symbolic
+  link to it and `/bin/egrep` and `/bin/fgrep` its wrappers, run by
+  `/bin/sh` (pelt) through `#!`. An image's archive can carry a symbolic
+  link now: `tools/mkinitramfs` writes cpio's link entry for
+  `/PATH->TARGET` and the kernel's tree adopts it at boot (R-px64-1). A
+  typed session as root and as `pax` is byte-identical to the same
+  binaries in a Linux container and holds 49 rows to GNU 3.12's answers
+  (`tests/mpx5-scent`); no kernel change but the archive's links. The dev ISO carries
+  scent too (`notes/px64/dev-iso/`).
+
 - **A disk (px63).** A virtio block device (`kernel/vblk`, polled, on
   px20's transport), a block layer with a 512-buffer cache
   (`kernel/block`), and ext2 read and written (`kernel/ext2`: groups,
