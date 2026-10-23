@@ -6,7 +6,6 @@ L=$HOME/lanes/px65/dev
 C=$1
 printf '%s\n' $$ > "$HOME/lanes/px65/dev-all.pid"
 mkdir -p "$L"
-git -C $HOME/lanes/px65/pax update-ref -d refs/original/refs/heads/px65 2>/dev/null || true
 rm -rf "$L/pax"; git clone -q $HOME/lanes/px65/pax "$L/pax" && git -C "$L/pax" checkout -q --detach "$C" || exit 2
 echo "tree $(git -C "$L/pax" rev-parse HEAD) $(git -C "$L/pax" log -1 --format=%ct)"
 for s in verify build assemble boot; do
