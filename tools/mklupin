@@ -5,6 +5,10 @@
 #
 #   tools/mklupin OUTDIR
 #
+# px65 (R-px65-1): with user/lupin.pin's LUPIN_FROM=release it takes the
+# release's static musl archive by digest instead (below), the binary
+# lupin's own release workflow built and checked for PAX's loader.
+#
 # The tree is user/lupin.pin's tag of wolffe-lang/wolf-interp, fetched
 # with the tag itself so build.rs sees it at HEAD and grants D57's stamp
 # (`--version` the release's line, never `+dev.<commit>`); the commit
@@ -30,10 +34,48 @@ set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 [ $# -eq 1 ] || die "usage: mklupin OUTDIR"
 out=$1
-need git cargo rustc rustup readelf
 . "$PAX_ROOT/user/lupin.pin"
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
+
+check_bin() { # the binary PAX's loader takes, its version line, its sums
+    readelf -hW "$out/lupin" | grep -Eq 'Type: +EXEC' || die "lupin is not ET_EXEC ($(readelf -hW "$out/lupin" | sed -n 's/^ *Type: *//p'))"
+    ! readelf -lW "$out/lupin" | grep -q INTERP || die "lupin has a PT_INTERP (not static)"
+    readelf -dW "$out/lupin" | grep -q 'no dynamic section' || die "lupin has a dynamic section"
+    have=$("$out/lupin" --version | head -n 1)
+    [ "$have" = "$LUPIN_SRC_VERSION_LINE" ] || die "lupin --version says '$have'; the pin names '$LUPIN_SRC_VERSION_LINE'"
+    say "$have"
+    : > "$out/sums.txt"
+    printf '%s %s %s\n' lupin "$(sha256_of "$out/lupin")" "$(wc -c < "$out/lupin" | tr -d ' ')" | tee -a "$out/sums.txt"
+}
+
+# px65 (R-px65-1): LUPIN_FROM=release takes the release's own static musl
+# archive BY DIGEST (refused on a mismatch of the archive or of the
+# binary in it) and builds nothing; LUPIN_FROM=tag (or unset) builds it
+# from the tag, below.
+if [ "${LUPIN_FROM:-tag}" = release ]; then
+    need curl tar readelf
+    mkdir -p "$PAX_CACHE"
+    arc=$PAX_CACHE/${LUPIN_MUSL_URL##*/}
+    if [ ! -f "$arc" ] || [ "$(sha256_of "$arc")" != "$LUPIN_MUSL_SHA256" ]; then
+        curl -sSfL --retry 3 -o "$arc.part" "$LUPIN_MUSL_URL" || die "cannot download $LUPIN_MUSL_URL"
+        mv "$arc.part" "$arc"
+    fi
+    [ "$(sha256_of "$arc")" = "$LUPIN_MUSL_SHA256" ] || die "lupin's musl archive: sha256 $(sha256_of "$arc"), the pin names $LUPIN_MUSL_SHA256"
+    x=$(mktemp -d "${TMPDIR:-/tmp}/pax-mklupin-x.XXXXXX")
+    trap 'rm -rf "$x"' EXIT
+    tar -xzf "$arc" -C "$x"
+    b=$(find "$x" -name lupin -type f | head -n 1)
+    [ -n "$b" ] || die "no lupin in $arc"
+    cp "$b" "$out/lupin"
+    chmod 755 "$out/lupin"
+    [ "$(sha256_of "$out/lupin")" = "$LUPIN_MUSL_BIN_SHA256" ] || die "the archive's lupin is $(sha256_of "$out/lupin"); the pin names $LUPIN_MUSL_BIN_SHA256"
+    say "lupin from the $LUPIN_SRC_TAG release's musl archive (${LUPIN_MUSL_SHA256:0:8}…), its binary ${LUPIN_MUSL_BIN_SHA256:0:8}…"
+    check_bin
+    exit 0
+fi
+
+need git cargo rustc rustup readelf
 export RUSTUP_AUTO_INSTALL=0
 
 # The build directory: one fixed name, so the paths a build records are
@@ -70,11 +112,4 @@ RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static --remap-path
     || die "cargo build --release --locked --target $LUPIN_SRC_TARGET"
 bin=$w/target/$LUPIN_SRC_TARGET/release/lupin
 cp "$bin" "$out/lupin"
-readelf -hW "$out/lupin" | grep -Eq 'Type: +EXEC' || die "lupin is not ET_EXEC ($(readelf -hW "$out/lupin" | sed -n 's/^ *Type: *//p'))"
-! readelf -lW "$out/lupin" | grep -q INTERP || die "lupin has a PT_INTERP (not static)"
-readelf -dW "$out/lupin" | grep -q 'no dynamic section' || die "lupin has a dynamic section"
-have=$("$out/lupin" --version | head -n 1)
-[ "$have" = "$LUPIN_SRC_VERSION_LINE" ] || die "lupin --version says '$have'; the pin names '$LUPIN_SRC_VERSION_LINE'"
-say "$have"
-: > "$out/sums.txt"
-printf '%s %s %s\n' lupin "$(sha256_of "$out/lupin")" "$(wc -c < "$out/lupin" | tr -d ' ')" | tee -a "$out/sums.txt"
+check_bin
