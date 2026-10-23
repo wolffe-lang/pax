@@ -47,14 +47,17 @@
 //! it (`clone(CLONE_CHILD_SETTID|CLONE_CHILD_CLEARTID|SIGCHLD)`, measured:
 //! wolf 0.2.26's spawn, which pelt `3e7516c` uses, forks) — gives the
 //! child a copy of the caller's address space (kernel/paging's
-//! `copy_user`: every user page copied, nothing shared), its own; the
+//! `copy_user`: every user page copied but a file's, px62, which the
+//! copy maps again: a shared mapping stays shared, a private one is
+//! copied at its first write), its own; the
 //! child resumes after the `syscall` with %rax 0 on the stack the call
 //! names (or the copy of the caller's), the caller at once with the
 //! child's pid. CLONE_CHILD_SETTID writes the child's pid into the
 //! child's copy, CLONE_PARENT_SETTID into the caller's; CLONE_CHILD_
 //! CLEARTID is taken and not kept (nothing in PAX waits on that word:
 //! no futex, no threads). Both kinds of child take their own references
-//! to the open files they inherit (kernel/files' `inherit`). Refused by
+//! to the open files they inherit (kernel/files' `inherit`), and (px62)
+//! to the files their mapping records name (kernel/vm's `inherit`). Refused by
 //! name: CLONE_VM without CLONE_VFORK (a thread or a process sharing
 //! memory while both run and is not a thread, -ENOSYS), any other flag
 //! (-EINVAL), no free slot or (px34) no frame for its kernel stack
@@ -1360,6 +1363,7 @@ pub fn clone(f: u64, nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u6
         return f
     }
     files.inherit(sched.proc_area(s)) // px17: shared open files
+    vm.inherit(sched.proc_area(s)) // px62: its copy of the mapping records holds their files too
     if flags & CLONE_CLEAR_SIGHAND != 0 {
         reset_handlers(sched.proc_area(s))
     }
@@ -1393,6 +1397,7 @@ fn fork(f: u64, flags: u64, usp: u64, ptid: u64, ctid: u64) -> u64 {
     }
     let a = sched.proc_area(s)
     files.inherit(a)
+    vm.inherit(a) // px62: the child's mapping records hold their files (its space maps the same file frames, kernel/paging's `copy_user`)
     if flags & CLONE_CLEAR_SIGHAND != 0 {
         reset_handlers(a)
     }
