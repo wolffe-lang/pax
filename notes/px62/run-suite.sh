@@ -15,7 +15,7 @@ export PAX_CACHE=$L/cache PAX_BUILD=$B PAX_ENGINE=podman PAX_TREE_IMAGE=localhos
 cd "$L/pax"
 if grep -q fetch-busybox "tests/$suite"; then tools/fetch-busybox "$L/bin" > /dev/null; fi
 podman run --rm --privileged --cpuset-cpus 0-3 --ulimit core=0:0 -v "$L:$L:Z" \
-    -e PAX_CACHE -e PAX_BUILD -e TMPDIR -e CARGO_INCREMENTAL=0 localhost/px13-ubuntu bash -c '
+    -e PAX_CACHE -e PAX_BUILD -e TMPDIR -e CARGO_INCREMENTAL=0 -e PAX_PELT_CASES localhost/px13-ubuntu bash -c '
         set -euo pipefail; cd "$1"; export PAX_WOLF=$(tools/fetch-wolf | tail -1)
         tests/"$2" --only build --tier native
     ' px62 "$L/pax" "$suite" > "$B.build.log" 2>&1
