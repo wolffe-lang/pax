@@ -1,10 +1,11 @@
 # px66 — the partition table: GPT, partitions as disks, and a disk that boots without the ISO
 
 Crawl 54, Opus 5.5. Contract `sprints/pax/66-the-partition-table`
-(pax#134). The prediction was committed first, `2790b7ac`
+(pax#134). The prediction was committed first, `c885e39f`
 (`notes/px66/prediction.txt`). Branch `px66` from `origin/trunk`
 `e5dfad45` (px63's merge), rebased onto `68807993` (px64's merge: scent
-on PAX) before the merge; §6 ends with the gates rerun there.
+on PAX) before the merge; §6 ends with the gates rerun there. Commit
+hashes here are the rebased ones.
 
 ## 1. Forbidden, and what was read
 
@@ -48,7 +49,7 @@ filed or closed; no filming words.
 | the guest and I agree on badprimary; we disagree first on the numbers past vda15 (I guessed 259) | the numbers past 15 are 259:0 on in order (vda16 259:0 … vda128 259:112; holes' vda64 259:0, vda128 259:1), and PAX had them right at its first boot, because the guest was asked before the kernel was written. The disagreements are badprimary (Linux reads no backup header unless booted with `gpt`: "Primary GPT is invalid, using alternate GPT" only then) and wide (Linux reads no entry larger than 128 bytes, with or without `gpt`): both where the contract asks for the specification's reading, so both are named drifts (R-px66-4) | wrong on both counts |
 | Limine's BIOS path on GPT needs a partition of its own; the installer refuses GPT without one | so: `limine bios-install` on a GPT image with no BIOS boot partition says "no BIOS boot partition specified or detected" and changes nothing; with one it detects it by its type when no number is given; it writes the MBR's boot code (bytes 1-422) and stage 2 from the partition's first sector (45 sectors, 22.5 KiB) | right |
 | boot time: the disk within 25% of the ISO under TCG, both firmwares; under KVM both under a second | QEMU's start to the kernel's first line, the same kernel and initramfs, medians of five on kasumi under TCG: SeaBIOS 0.868 s from the ISO, 1.183 s from the disk (+36%); OVMF 1.764 s from the ISO, 1.424 s from the disk (−19%). KVM not measured: kasumi has no `/dev/kvm` | half right: UEFI inside 25%, BIOS outside it (SeaBIOS reads the 59 MB initramfs through virtio-blk's int13 more slowly than the CD-ROM's); KVM unscored |
-| px63's halt leaves the clean flag set; a kill leaves `not clean`; the volume then stays not clean through clean halts, as Linux does | exit and reboot(2) left `clean` with px63's code (the rows passed unchanged); a kill did **not** leave `not clean`: the mount's state sat in the write-back cache until the flusher's first turn, so QEMU killed within 5 s of the mount left `clean, mount count 0` (`notes/px66/kill-before.out`); fixed (`0404c429`): the mounted state is written and flushed at the mount, and the clean state only after every other block is flushed. A not-clean volume stays not clean through a clean halt on PAX and on Linux (measured: mount count 2 to 3, `not clean` both times) | half right: the halts right, the kill wrong |
+| px63's halt leaves the clean flag set; a kill leaves `not clean`; the volume then stays not clean through clean halts, as Linux does | exit and reboot(2) left `clean` with px63's code (the rows passed unchanged); a kill did **not** leave `not clean`: the mount's state sat in the write-back cache until the flusher's first turn, so QEMU killed within 5 s of the mount left `clean, mount count 0` (`notes/px66/kill-before.out`); fixed (`074cd4d8`): the mounted state is written and flushed at the mount, and the clean state only after every other block is flushed. A not-clean volume stays not clean through a clean halt on PAX and on Linux (measured: mount count 2 to 3, `not clean` both times) | half right: the halts right, the kill wrong |
 
 ## 4. What was built
 
@@ -208,7 +209,7 @@ P6-P10 once): 172 PASS lines, `mpx6-part: PASS`, 117 s for the boots
 **The kill row, seen red** before the fix (`notes/px66/kill-before.out`,
 kasumi, px63's ext2 at this lane's kernel b2): after the kill
 `Filesystem state: clean; Mount count: 0`, the next boot `clean, mount
-1`. After `0404c429`: `not clean; Mount count: 1`, then `not cleanly
+1`. After `074cd4d8`: `not clean; Mount count: 1`, then `not cleanly
 unmounted, mount 2`, then `not clean; Mount count: 2`.
 
 **Linux on a not-clean ext2** (`tests/mpx6-part.d/linux/notclean.txt`):
