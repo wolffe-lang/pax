@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # mkdiskprobe — build px63's probe of a file system on a disk, `disk`
 # (user/elf/disk.c: a tree read through getdents64 and lstat with every
-# field, files' sums, statfs, and the write session's system calls), a
-# static x86-64 Linux executable, for tests/mpx6-ext2.
+# field, files' sums, statfs, and the write session's system calls), and
+# PAX's `reboot` (user/elf/reboot.S: sync, then reboot(2)), static x86-64
+# Linux executables, for tests/mpx6-ext2 and the playground.
 #
 #   tools/mkdiskprobe OUTDIR
 #
@@ -11,7 +12,7 @@
 # reaches only the suite that runs it (the CI map follows the tools a
 # test names). Build on a baseline x86-64 glibc (the CI runner's Ubuntu;
 # an Ubuntu container on kasumi), never on kasumi's own (px10). Prints
-# `disk <sha256> <bytes>`. Exit 0, or 2 on a tool error.
+# `<name> <sha256> <bytes>` for each. Exit 0, or 2 on a tool error.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 [ $# -eq 1 ] || die "usage: mkdiskprobe OUTDIR"
@@ -25,4 +26,9 @@ src=$PAX_ROOT/user/elf/disk.c
     -o "$out/disk" "$src" || die "cc: disk"
 readelf -hW "$out/disk" | grep -Eq 'Type: +EXEC' || die "disk is not ET_EXEC"
 ! readelf -lW "$out/disk" | grep -q INTERP || die "disk has a PT_INTERP (not static)"
-printf '%s %s %s\n' disk "$(sha256_of "$out/disk")" "$(wc -c < "$out/disk" | tr -d ' ')"
+"$cc" -nostdlib -static -no-pie -Wl,--build-id=none -Wl,-z,noexecstack \
+    -o "$out/reboot" "$PAX_ROOT/user/elf/reboot.S" || die "cc: reboot"
+readelf -hW "$out/reboot" | grep -Eq 'Type: +EXEC' || die "reboot is not ET_EXEC"
+for p in disk reboot; do
+    printf '%s %s %s\n' "$p" "$(sha256_of "$out/$p")" "$(wc -c < "$out/$p" | tr -d ' ')"
+done
