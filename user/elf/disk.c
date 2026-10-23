@@ -11,6 +11,8 @@
                         times to the nanosecond), a link's target, and a
                         regular file's bytes as their FNV-1a 64 and their
                         count; then statfs of DIR
+     disk clock         `~clock: <seconds>.<nanoseconds>`, CLOCK_REALTIME (a
+                        `~` line: not compared; the tree comparison's zero)
      disk sum FILE...   each file's size and FNV-1a 64, read 64 KiB at a
                         time (the host computes the same sum of the bytes
                         it put there)
@@ -341,6 +343,12 @@ int main(int argc, char **argv) {
             long n = sum(argv[i], &h);
             say("%s: %ld bytes fnv %016llx\n", argv[i], n, (unsigned long long)h);
         }
+        return 0;
+    }
+    if (argc >= 2 && !strcmp(argv[1], "clock")) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        say("~clock: %ld.%09ld\n", (long)ts.tv_sec, ts.tv_nsec);
         return 0;
     }
     if (argc >= 3 && !strcmp(argv[1], "write")) {
