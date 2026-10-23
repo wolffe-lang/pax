@@ -688,6 +688,74 @@ px45 left them: -EPERM for a user, refused by name for root
 (-EOPNOTSUPP): the mounts are the kernel's, from `/etc/fstab`
 (R-px63-1).
 
+## Served since px04: boreutils' new utilities (px65)
+
+boreutils at `575dc7b` (bu30's small file tools, bu31's text tools,
+fourteen utilities, each built by wolf 0.2.35) traced on Linux, strace
+6.8 in the lane's Ubuntu 24.04 container, over a short session of each
+one's common options (`notes/px65/census.sh`; the calls by name and
+count, the failures, per utility, in `notes/px65/census/`): **34 calls**
+in all, every one but `set_robust_list` and `rseq` with a handler in
+PAX (a `SYS_` name in `kernel/`), and those two -ENOSYS, which glibc's
+static start-up takes, as for every glibc program on PAX. Two calls the
+px04 union did not reach: `mknodat` (mkfifo's FIFO, served since px62)
+and `linkat` (link, px36). The contract's likely four were not asked: no `sync(2)`
+and no `syncfs(2)` (bare `sync` and `sync -f` are refused by
+boreutils itself, on Linux too: wolf-lang#906), no `fstatfs`, no
+`fallocate`; `getrandom` is served (RDRAND, px12). `tests/mpx5-bore`'s
+B3 holds it on PAX: -ENOSYS only for 273 and 334, nothing refused, in
+both sessions, as root and as `pax`.
+
+| nr | call | made by | failures seen on Linux | a PAX handler |
+|---:|---|---|---|---|
+| 0 | `read` | all fourteen |  | yes |
+| 1 | `write` | all fourteen |  | yes |
+| 3 | `close` | all fourteen |  | yes |
+| 5 | `fstat` | all fourteen |  | yes |
+| 9 | `mmap` | all fourteen |  | yes |
+| 10 | `mprotect` | all fourteen |  | yes |
+| 12 | `brk` | all fourteen |  | yes |
+| 13 | `rt_sigaction` | all fourteen |  | yes |
+| 16 | `ioctl` | tty | ENOTTY (tty) | yes |
+| 59 | `execve` | all fourteen |  | yes |
+| 63 | `uname` | link |  | yes |
+| 72 | `fcntl` | sync |  | yes |
+| 74 | `fsync` | sync |  | yes |
+| 77 | `ftruncate` | truncate |  | yes |
+| 79 | `getcwd` | realpath |  | yes |
+| 83 | `mkdir` | mktemp |  | yes |
+| 87 | `unlink` | unlink | EISDIR (unlink) | yes |
+| 89 | `readlink` | realpath tty | EINVAL (realpath), ENOENT (realpath) | yes |
+| 95 | `umask` | mkfifo |  | yes |
+| 131 | `sigaltstack` | all fourteen |  | yes |
+| 158 | `arch_prctl` | all fourteen |  | yes |
+| 204 | `sched_getaffinity` | all fourteen |  | yes |
+| 218 | `set_tid_address` | all fourteen |  | yes |
+| 231 | `exit_group` | all fourteen |  | yes |
+| 257 | `openat` | all fourteen | EISDIR (truncate), ENOENT (base64), ENOENT (join), ENOENT (mktemp) | yes |
+| 259 | `mknodat` | mkfifo | EEXIST (mkfifo), ENOENT (mkfifo) | yes |
+| 265 | `linkat` | link | EEXIST (link), ENOENT (link) | yes |
+| 267 | `readlinkat` | all fourteen |  | yes |
+| 273 | `set_robust_list` | all fourteen |  | **no** |
+| 302 | `prlimit64` | all fourteen |  | yes |
+| 318 | `getrandom` | all fourteen |  | yes |
+| 332 | `statx` | all fourteen | ENOENT (mktemp), ENOENT (realpath), ENOENT (sync), ENOENT (truncate), ENOENT (unlink) | yes |
+| 334 | `rseq` | all fourteen |  | **no** |
+| 439 | `faccessat2` | realpath |  | yes |
+
+One file every one of them asks for at start PAX does not serve:
+**`/proc/self/maps`**, which glibc's `pthread_getattr_np` reads for the
+main thread's stack (wolf 0.2.35's runtime asks it for the main thread's
+guard, s256: the stack-overflow report). On PAX the open is -ENOENT, the
+call fails, and the runtime goes on without a main-thread guard: no row
+of the new utilities' sessions depends on it, but a wolf program's
+main-thread stack overflow on PAX ends by SIGSEGV where Linux prints
+`wolf-trap: stack-overflow` (task threads' overflows are reported on
+both), and a program started with SIGSEGV ignored reads its SigIgn
+before the runtime's handler is in place (`tests/mpx5-jobs`' `~X:`;
+`notes/px65/probes/`: `pthread_getattr_np` of the main thread answers
+ENOENT on PAX, 0 on Linux). Listed to file (R-px65-5).
+
 ## Reproduce
 
 On a Linux host with rootless podman (kasumi, 2026-10-04; podman's
