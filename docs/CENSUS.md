@@ -652,6 +652,42 @@ to Linux by a static probe as root and as a user (`tests/mpx3-maps`:
 | 133, 259 | `mknod`, `mknodat` | S_IFIFO, S_IFREG and no type; -EEXIST, -ENOENT, -EINVAL for a type that is none | a device node (root; a user -EPERM as on Linux), a socket's name (-EPERM) |
 | 2, 257 | `open`, `openat` of a FIFO | fifo(7): a reader waits for a writer and a writer for a reader, O_NONBLOCK's read end at once and write end -ENXIO without a reader, O_RDWR at once, a signal's -EINTR | |
 
+## Served since px04: the disk (px63)
+
+px04's union reached `fsync`, `fdatasync` and `fstatfs` (pacman, sshd)
+before PAX had anything to write them to; px63 gives the tree a second
+store, an ext2 volume on a virtio block device (kernel/vblk,
+kernel/block, kernel/ext2), and serves the calls that write a volume or
+ask what it is. Each row is held to Linux 7.2.8's ext2 (through its ext4
+driver) by `tests/mpx6-ext2`'s probe, `user/elf/disk.c` (the statfs
+fields, the write session's calls), and to `e2fsck -fn`.
+
+| nr | call | served | refused by name |
+|---:|---|---|---|
+| 74, 75 | `fsync`, `fdatasync` | a volume's file or directory: every dirty block of the volume written, then a FLUSH (the whole volume, not the one file: a superset of what the call promises); a file of the in-memory tree: 0 at once; -EBADF; -EINVAL for a descriptor that is not a file or directory (a pipe, a socket), as Linux answers; -EIO when the disk answers an error | |
+| 306 | `syncfs` | the descriptor's file system: a volume written and flushed, the tree 0; -EBADF; -EIO | |
+| 162 | `sync` | every mounted volume written and flushed; returns nothing (0) | |
+| 137, 138 | `statfs`, `fstatfs` | ext2: EXT2_SUPER_MAGIC, the block size, the blocks less the metadata overhead (Linux's bsddf: the superblocks and group descriptors kept, the bitmaps and inode tables), the free blocks, a user's free blocks (the reserved ones out), the inodes, the free inodes, the fsid (the UUID's 32-bit words folded as Linux folds them), 255 for a name, ST_VALID, ST_RELATIME and ST_RDONLY for a read-only mount; the in-memory tree: TMPFS_MAGIC, the frames it may hold and holds, its inodes; /proc and /sys their magic numbers with zero counts; -ENOENT, -ENOTDIR, -EFAULT, -EBADF | |
+| 169 | `reboot` | root, with the magic numbers checked: LINUX_REBOOT_CMD_RESTART writes every volume, marks it clean and resets the machine (the reset control register at 0xcf9, then the keyboard controller); CMD_HALT and CMD_POWER_OFF write them and halt; CMD_CAD_ON and CMD_CAD_OFF 0; -EINVAL for another command | a user (-EPERM, as before px63); a wrong magic (-EINVAL); LINUX_REBOOT_CMD_KEXEC, CMD_SW_SUSPEND, CMD_RESTART2 (-EINVAL) |
+
+The calls a volume's files already answered through the tree (`open`,
+`read`, `write`, `pread64`, `pwrite64`, `lseek`, `ftruncate`,
+`truncate`, `getdents64`, `stat` and its
+family, `statx`, `readlink`, `mkdir`, `rmdir`, `unlink`, `rename` and
+`renameat2` without flags, `link`, `symlink`, `chmod`, `chown`,
+`utimensat`, `mmap` of a file, `msync`) answer on a volume too; each
+Linux answer that differs on a disk is served as Linux gives it: EXDEV
+for a rename or link between the two stores, EBUSY for a rename or
+rmdir of a mount point, EROFS for a change on a read-only mount, EMLINK
+past 65,000 links, EFBIG past ext2's largest file, ENOSPC when the
+volume's blocks or inodes run out. `fallocate(2)` on a volume's file
+answers as the tree does (a punched range's blocks zeroed in place and
+kept); what Linux's ext2 answers there was not measured (the note's
+limits). `mount(2)` and `umount2(2)` stay as
+px45 left them: -EPERM for a user, refused by name for root
+(-EOPNOTSUPP): the mounts are the kernel's, from `/etc/fstab`
+(R-px63-1).
+
 ## Reproduce
 
 On a Linux host with rootless podman (kasumi, 2026-10-04; podman's
