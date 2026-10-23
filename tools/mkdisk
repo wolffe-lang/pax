@@ -219,7 +219,10 @@ def main(argv):
     cf = out + ".debugfs"
     with open(cf, "w") as f:
         f.write("\n".join(cmds) + "\n")
-    rc, so, se = e2fs(work, "debugfs", "-w", "-f", cf, out)
+    # debugfs writes the superblock's write time at its close: the clock's,
+    # unless E2FSPROGS_FAKE_TIME says otherwise (measured: without it two
+    # runs differ in s_wtime alone).
+    rc, so, se = e2fs(work, "debugfs", "-w", "-f", cf, out, env={"E2FSPROGS_FAKE_TIME": str(t)})
     # debugfs echoes each command as `debugfs: <command>` and prints its
     # banner (`debugfs 1.47.0 …`); anything else is an answer, an error.
     # `write` says `Allocated inode: <n>`.
