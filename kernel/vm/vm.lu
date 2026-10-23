@@ -195,6 +195,7 @@ const M_FL: u64 = 4 // the protection (PROT_*), M_SHARED, M_MAYWRITE
 const M_SHARED: u64 = 0x100
 const M_MAYWRITE: u64 = 0x200 // a shared mapping that may be made writable
 const A_REMAP: u64 = 6080 // px62: mremap's census: calls served, grown in place, moved
+const A_MAPS_TOP: u64 = 6083 // px62: one past the highest record made since the last `drop_all` (0: none), so a process with no record pays nothing per page
 const ADDR: u64 = 0x000ffffffffff000 // a leaf's frame (kernel/paging's)
 /// px62: `fault`'s answers: the program's to die of (SIGSEGV), backed
 /// (the access runs again), a page past its file's end (SIGBUS).
@@ -928,8 +929,9 @@ fn put_mw(a: u64, r: u64, w: u64, v: u64) {
 
 /// The record user page `pg` lies in, or MAPS.
 fn map_at(a: u64, pg: u64) -> u64 {
+    let top = get(a, A_MAPS_TOP)
     var r: u64 = 0
-    while r < MAPS {
+    while r < top {
         let lo = mw(a, r, M_LO)
         if lo != 0 && pg >= lo && pg < mw(a, r, M_HI) {
             return r
@@ -965,6 +967,9 @@ fn map_new(a: u64, lo: u64, hi: u64, ino: u64, off: u64, fl: u64) -> bool {
             put_mw(a, r, M_OFF, off)
             put_mw(a, r, M_FL, fl)
             tree.hold(ino)
+            if r + 1 > get(a, A_MAPS_TOP) {
+                put(a, A_MAPS_TOP, r + 1)
+            }
             return true
         }
         r += 1
@@ -1219,6 +1224,7 @@ pub fn drop_all(a: u64) {
         }
         r += 1
     }
+    put(a, A_MAPS_TOP, 0)
     put(a, A_REMAP, 0)
     put(a, A_REMAP + 1, 0)
     put(a, A_REMAP + 2, 0)
