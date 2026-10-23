@@ -16,9 +16,12 @@
 //! a page between the check and the copy.
 //!
 //! px34: a page of a MAP_NORESERVE range the program has not touched
-//! yet is backed (kernel/vm's `back`) before it is checked, in the live
+//! yet is backed (kernel/vm's `fault`) before it is checked, in the live
 //! space only, as Linux's copy faults it in: a `read` into a fresh task
-//! stack works.
+//! stack works. px62: so is a page of a file's mapping (filled from the
+//! file; a write to a private one's page shared with the file copies it
+//! first); one past the file's end is refused, -EFAULT, as Linux's copy
+//! answers.
 //!
 //! Lengths come from ring 3 and may be anything: every sum is checked
 //! against the user half's top before it is formed (wolf's arithmetic
@@ -35,13 +38,14 @@ const PAGE: u64 = 4096
 /// px34: whether user page `pg` is present and user-accessible
 /// (`write`: and writable) in the structures at `pml4`, backing it first
 /// when it is an untouched page of a MAP_NORESERVE range of the running
-/// process (the live space only).
+/// process (the live space only); px62: or a page of a file's mapping
+/// (kernel/vm's `fault`).
 fn page_ok(pml4: u64, pg: u64, write: bool) -> bool {
     let ok = if write { paging.user_ok_write(pml4, pg) } else { paging.user_ok(pml4, pg) }
     if ok {
         return true
     }
-    if pml4 != paging.live() || !vm.back(sched.proc_area(sched.self_slot()), pml4, pg) {
+    if pml4 != paging.live() || vm.fault(sched.proc_area(sched.self_slot()), pml4, pg, write) != vm.F_OK {
         return false
     }
     if write { paging.user_ok_write(pml4, pg) } else { paging.user_ok(pml4, pg) }
