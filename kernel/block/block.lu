@@ -1,0 +1,724 @@
+//! block — the block layer: the devices, a request and its completion,
+//! and the buffer cache (px63).
+//!
+//! **The devices.** A table of DEVS (4) records, one per disk a driver
+//! brought up: its driver (kernel/vblk, the only one), its capacity in
+//! 512-byte sectors (the unit every request is in, whatever the disk's
+//! own block size), whether it is read-only and whether it takes a
+//! FLUSH, its name (`vda`, `vdb`, …: Linux's names for virtio disks, so
+//! an `/etc/fstab` line reads as it would there) and Linux's device
+//! numbers for it (254:0, 254:16, …: measured on the Linux guest, where
+//! virtio_blk's dynamic major is 254 and each disk takes 16 minors).
+//! `start` brings up what is there; a machine with no disk has none,
+//! and nothing is printed.
+//!
+//! **A request** is a record of 8 words (kernel/vblk reads and writes
+//! them): its type (IN, OUT, FLUSH), its first sector, its sectors, the
+//! data's physical address (inside one frame), the status the device
+//! wrote, and its state: free, with the device, done. `rw` and `flush`
+//! fill one, hand it to the driver and wait for its completion. The
+//! completion is the record's state word, written by the driver when it
+//! takes the request back from the used ring; the wait looks for it
+//! (polled: kernel/vblk says why) and a request that never comes back is
+//! an I/O error by name, never a hang. A request past the device's
+//! capacity, or a write to a read-only device, is refused before it is
+//! made (-EIO, counted, one line once).
+//!
+//! **The buffer cache.** A file system reads and writes its blocks (1,
+//! 2 or 4 KiB) through `get`, `fresh`, `dirty` and `sync`: up to NB
+//! (512) buffers, a frame each, taken as they are first needed and
+//! never given back; a buffer is (device, block size, block number),
+//! found through a hash of 512 chains. A miss takes a free buffer or,
+//! when all are made, the clock hand's next one not looked at since it
+//! last passed (second chance), writing it first when it is dirty.
+//! **A buffer's address is good until the next `get` or `fresh`**: the
+//! callers (kernel/ext2) copy out what they need, or write and mark the
+//! buffer dirty, before asking for another; nothing is pinned.
+//!
+//! **Writing (R-px63-3).** The policy is a word: write-through (the
+//! default) writes a buffer the moment it is marked dirty, so the disk
+//! holds every change a system call made before the call returns;
+//! write-back marks it and writes it at `sync` (fsync, syncfs, sync,
+//! unmount, halt, reboot) or when the clock hand takes it. `sync` writes
+//! every dirty buffer of a device, oldest first by slot, then sends the
+//! device a FLUSH when it takes one, so what is written is on the disk's
+//! medium, not in its cache. The counters say what each policy cost.
+//!
+//! Every entry runs with IF clear on one CPU (a system call, or a
+//! kernel's start). No region, no heap: the state is frames this module
+//! takes at `start`, their addresses in module `var`s (scalars).
+//!
+//! Written from the OASIS VIRTIO specification 1.2 §5.2.6 (the request's
+//! unit and FLUSH, through kernel/vblk), `fsync(2)`, `sync(2)`,
+//! `syncfs(2)` and black-box runs of Linux 7.2.8 on QEMU (the device
+//! numbers: `notes/px63/`). No Linux source; no other kernel's source.
+
+use frames
+use log
+use vblk
+
+extern "c" fn pax_tree_copy(dst: u64, src: u64, n: u64)
+extern "c" fn pax_tree_zero(dst: u64, n: u64)
+
+const PAGE: u64 = 4096
+/// The most devices.
+pub const DEVS: u64 = 4
+/// The most buffers.
+pub const NB: u64 = 512
+const HPF: u64 = 128 // buffer headers a frame (4 words each)
+const BUCKETS: u64 = 512
+
+/// errno (uapi asm-generic/errno-base.h).
+const EIO: u64 = 5
+const ENOSPC: u64 = 28
+
+// The state frame's words.
+const S_DEVS: u64 = 0 // devices in the table
+const S_POLICY: u64 = 1 // 0 write-through, 1 write-back
+const S_MADE: u64 = 2 // buffers made
+const S_HAND: u64 = 3 // the clock hand
+const S_HASH: u64 = 4 // the hash frame (physical): BUCKETS heads, a slot + 1 each
+const S_HDRS: u64 = 5 // the header frames (physical), NB / HPF of them, from here
+const S_SAID: u64 = 12 // a refusal said (one line each kind)
+const S_COUNT: u64 = 16 // the cache's counters (K_*), from here
+const S_DEV: u64 = 64 // the device table: DEVS records of 16 words
+const DW: u64 = 16
+const S_REQ: u64 = 128 // the request record (8 words, kernel/vblk's layout)
+const S_TICK: u64 = 136 // a write's stamp, so `sync` writes oldest first
+
+// A device record's words.
+const D_PRESENT: u64 = 0
+const D_SECTORS: u64 = 1
+const D_FLAGS: u64 = 2 // F_RO, F_FLUSH
+const D_LBS: u64 = 3 // the device's logical block size
+const D_READS: u64 = 4 // requests read, written, flushed, failed
+const D_WRITES: u64 = 5
+const D_FLUSHES: u64 = 6
+const D_ERRORS: u64 = 7
+const D_SIN: u64 = 8 // sectors read, written
+const D_SOUT: u64 = 9
+const D_REFUSED: u64 = 10 // requests refused before they were made
+/// Device flags.
+pub const F_RO: u64 = 1
+pub const F_FLUSH: u64 = 2
+
+// A buffer header's words.
+const H_KEY: u64 = 0 // (dev + 1) << 56 | shift << 48 | block; 0 none
+const H_PA: u64 = 1 // its frame
+const H_FLAGS: u64 = 2
+const H_NEXT: u64 = 3 // the hash chain: a slot + 1, 0 the end
+const B_VALID: u64 = 1
+const B_DIRTY: u64 = 2
+const B_REF: u64 = 4
+
+/// The cache's counters: buffers found, read from the disk, taken by
+/// the hand, written (marked dirty, then written), marked dirty while
+/// dirty already (write-back's saving), FLUSH requests.
+pub const K_HITS: u64 = 0
+pub const K_MISSES: u64 = 1
+pub const K_EVICTS: u64 = 2
+pub const K_WRITES: u64 = 3
+pub const K_REDIRTY: u64 = 4
+pub const K_FLUSHES: u64 = 5
+pub const K_DIRTY: u64 = 6 // dirty now
+pub const K_FRESH: u64 = 7 // buffers made without a read (a new block)
+
+/// Policies (R-px63-3).
+pub const WRITE_THROUGH: u64 = 0
+pub const WRITE_BACK: u64 = 1
+
+var state: u64 = 0
+
+fn base() -> u64 {
+    // # Safety: a scalar module var, read on one CPU with IF clear.
+    unsafe { state }
+}
+
+fn st(i: u64) -> u64 {
+    // # Safety: i < 512, a word of the state frame this module owns.
+    unsafe { ((base() + i * 8) as *u64).read_volatile() }
+}
+
+fn put_st(i: u64, v: u64) {
+    // # Safety: as `st`.
+    unsafe { ((base() + i * 8) as *u64).write_volatile(v) }
+}
+
+fn rd(a: u64) -> u64 {
+    // # Safety: a word of a frame this module owns, through the HHDM.
+    unsafe { (a as *u64).read_volatile() }
+}
+
+fn wr(a: u64, v: u64) {
+    // # Safety: as `rd`.
+    unsafe { (a as *u64).write_volatile(v) }
+}
+
+fn hh() -> u64 {
+    frames.hhdm()
+}
+
+fn dw(d: u64, w: u64) -> u64 {
+    st(S_DEV + d * DW + w)
+}
+
+fn put_dw(d: u64, w: u64, v: u64) {
+    put_st(S_DEV + d * DW + w, v)
+}
+
+fn kbump(i: u64, by: u64) {
+    put_st(S_COUNT + i, st(S_COUNT + i) + by)
+}
+
+/// Cache counter `i` (K_*).
+pub fn counter(i: u64) -> u64 {
+    if base() == 0 {
+        return 0
+    }
+    st(S_COUNT + i)
+}
+
+fn zeroed() -> u64 {
+    let pa = frames.alloc() else 0
+    if pa != 0 {
+        // # Safety: the frame just taken, through the HHDM.
+        unsafe { pax_tree_zero(pa + hh(), PAGE) }
+    }
+    pa
+}
+
+/// Bring up the disks on the paging structures at `pml4` (after
+/// `pci.scan`, IF clear): how many there are. The state frames are
+/// taken only when there is one.
+pub fn start(pml4: u64) -> u64 {
+    if base() != 0 {
+        return st(S_DEVS)
+    }
+    let r = vblk.start(pml4)
+    if r != vblk.UP {
+        return 0
+    }
+    let sf = zeroed()
+    let hf = zeroed()
+    if sf == 0 || hf == 0 {
+        log.put("block: no frame for the block layer's state, frames free ")
+        log.dec(frames.free_count() as int)
+        log.end()
+        return 0
+    }
+    // # Safety: a scalar module var, written once at boot with IF clear.
+    unsafe { state = sf + hh() }
+    put_st(S_HASH, hf)
+    var k: u64 = 0
+    while k < NB / HPF {
+        let f = zeroed()
+        if f == 0 {
+            log.put("block: no frame for the buffer headers")
+            log.end()
+            return 0
+        }
+        put_st(S_HDRS + k, f)
+        k += 1
+    }
+    put_dw(0, D_PRESENT, 1)
+    put_dw(0, D_SECTORS, vblk.sectors())
+    put_dw(0, D_LBS, vblk.block_size())
+    put_dw(0, D_FLAGS, (if vblk.read_only() { F_RO } else { 0 }) | (if vblk.flushes() { F_FLUSH } else { 0 }))
+    put_st(S_DEVS, 1)
+    1
+}
+
+/// How many disks there are.
+pub fn count() -> u64 {
+    if base() == 0 { 0 } else { st(S_DEVS) }
+}
+
+/// Disk `d`'s capacity in 512-byte sectors.
+pub fn sectors(d: u64) -> u64 {
+    if d >= count() { 0 } else { dw(d, D_SECTORS) }
+}
+
+/// Its flags (F_RO, F_FLUSH).
+pub fn flags(d: u64) -> u64 {
+    if d >= count() { 0 } else { dw(d, D_FLAGS) }
+}
+
+/// Byte `i` of disk `d`'s name (`vda`: three bytes), 0 past the end.
+pub fn name_byte(d: u64, i: u64) -> u64 {
+    if i == 0 {
+        return 118 // v
+    }
+    if i == 1 {
+        return 100 // d
+    }
+    if i == 2 {
+        return 97 + d // a, b, …
+    }
+    0
+}
+
+/// The disk whose name is the `n` bytes at `a` (`vda`, or `/dev/vda`),
+/// or DEVS.
+pub fn by_name(a: u64, n: u64) -> u64 {
+    var o: u64 = 0
+    if n == 8 && byte(a) == 47 && byte(a + 1) == 100 && byte(a + 2) == 101 && byte(a + 3) == 118 && byte(a + 4) == 47 {
+        o = 5
+    }
+    if n - o != 3 || byte(a + o) != 118 || byte(a + o + 1) != 100 {
+        return DEVS
+    }
+    let d = byte(a + o + 2) - 97
+    if d < count() { d } else { DEVS }
+}
+
+fn byte(a: u64) -> u64 {
+    // # Safety: a byte of the caller's kernel buffer.
+    let v = unsafe { (a as *u8).read_volatile() }
+    v as u64
+}
+
+/// Linux's device numbers for disk `d`: (major, minor).
+pub fn numbers(d: u64) -> (u64, u64) {
+    (254, d * 16)
+}
+
+fn said(bit: u64) -> bool {
+    let s = st(S_SAID)
+    put_st(S_SAID, s | bit)
+    s & bit != 0
+}
+
+/// One request to disk `d`, waited for: type `op` (vblk.T_IN, T_OUT),
+/// `n` sectors from `sector`, the data at physical `pa` (inside one
+/// frame: n <= 8). 0, or -EIO (the device's error, a request that never
+/// came back, or a refusal: past the capacity, a write to a read-only
+/// disk), each counted.
+pub fn rw(d: u64, op: u64, sector: u64, n: u64, pa: u64) -> u64 {
+    if d >= count() {
+        return neg(EIO)
+    }
+    if n == 0 || n > 8 || sector + n > dw(d, D_SECTORS) || sector + n < sector {
+        put_dw(d, D_REFUSED, dw(d, D_REFUSED) + 1)
+        if !said(1) {
+            log.put("block: refused: a request past the end of vda (sector ")
+            log.dec(sector as int)
+            log.put(", ")
+            log.dec(n as int)
+            log.put(" sectors, capacity ")
+            log.dec(dw(d, D_SECTORS) as int)
+            log.put("), -EIO")
+            log.end()
+        }
+        return neg(EIO)
+    }
+    if op == vblk.T_OUT && dw(d, D_FLAGS) & F_RO != 0 {
+        put_dw(d, D_REFUSED, dw(d, D_REFUSED) + 1)
+        if !said(2) {
+            log.put("block: refused: a write to vda, which the device says is read-only (VIRTIO_BLK_F_RO), -EIO")
+            log.end()
+        }
+        return neg(EIO)
+    }
+    let r = base() + S_REQ * 8
+    wr(r, op)
+    wr(r + 8, sector)
+    wr(r + 16, n)
+    wr(r + 24, pa)
+    vblk.submit(r)
+    let s = vblk.wait(r)
+    wr(r + 40, vblk.RS_FREE)
+    if op == vblk.T_IN {
+        put_dw(d, D_READS, dw(d, D_READS) + 1)
+        put_dw(d, D_SIN, dw(d, D_SIN) + n)
+    } else {
+        put_dw(d, D_WRITES, dw(d, D_WRITES) + 1)
+        put_dw(d, D_SOUT, dw(d, D_SOUT) + n)
+    }
+    if s != vblk.S_OK {
+        put_dw(d, D_ERRORS, dw(d, D_ERRORS) + 1)
+        return neg(EIO)
+    }
+    0
+}
+
+/// A FLUSH to disk `d` (when it takes one: 0 at once when it does not,
+/// its writes are then on the medium when they complete), waited for:
+/// 0 or -EIO.
+pub fn flush(d: u64) -> u64 {
+    if d >= count() {
+        return neg(EIO)
+    }
+    if dw(d, D_FLAGS) & F_FLUSH == 0 {
+        return 0
+    }
+    let r = base() + S_REQ * 8
+    wr(r, vblk.T_FLUSH)
+    wr(r + 8, 0)
+    wr(r + 16, 0)
+    wr(r + 24, 0)
+    vblk.submit(r)
+    let s = vblk.wait(r)
+    wr(r + 40, vblk.RS_FREE)
+    put_dw(d, D_FLUSHES, dw(d, D_FLUSHES) + 1)
+    kbump(K_FLUSHES, 1)
+    if s != vblk.S_OK {
+        put_dw(d, D_ERRORS, dw(d, D_ERRORS) + 1)
+        return neg(EIO)
+    }
+    0
+}
+
+fn neg(e: u64) -> u64 {
+    0xffffffffffffffff - e + 1
+}
+
+/// Device record word `w` of disk `d` (a report's: D_READS and on).
+pub fn books(d: u64, which: u64) -> u64 {
+    if d >= count() {
+        return 0
+    }
+    dw(d, D_READS + which)
+}
+
+// --- the buffer cache -------------------------------------------------------------
+
+/// The write policy (R-px63-3): WRITE_THROUGH or WRITE_BACK.
+pub fn policy() -> u64 {
+    if base() == 0 { WRITE_THROUGH } else { st(S_POLICY) }
+}
+
+/// Set it (a mount's option, kernel/user's fstab): the old one. Going
+/// to write-through writes what is dirty first.
+pub fn set_policy(p: u64) -> u64 {
+    if base() == 0 {
+        return WRITE_THROUGH
+    }
+    let old = st(S_POLICY)
+    if p == WRITE_THROUGH && old == WRITE_BACK {
+        var d: u64 = 0
+        while d < count() {
+            let _s = sync(d)
+            d += 1
+        }
+    }
+    put_st(S_POLICY, p)
+    old
+}
+
+fn hdr(s: u64) -> u64 {
+    st(S_HDRS + s / HPF) + hh() + (s % HPF) * 32
+}
+
+fn hw(s: u64, w: u64) -> u64 {
+    rd(hdr(s) + w * 8)
+}
+
+fn put_hw(s: u64, w: u64, v: u64) {
+    wr(hdr(s) + w * 8, v)
+}
+
+fn shift_of(bsize: u64) -> u64 {
+    if bsize == 1024 { 1 } else if bsize == 2048 { 2 } else if bsize == 4096 { 3 } else { 0 }
+}
+
+fn key(d: u64, bsize: u64, blk: u64) -> u64 {
+    ((d + 1) << 56) | (shift_of(bsize) << 48) | (blk & 0xffffffffffff)
+}
+
+fn bucket(k: u64) -> u64 {
+    let h = (k ^ (k >> 9) ^ (k >> 56)) * 0x9e3779b1
+    st(S_HASH) + hh() + ((h >> 7) % BUCKETS) * 8
+}
+
+/// The slot holding key `k`, or NB.
+fn find(k: u64) -> u64 {
+    var s = rd(bucket(k))
+    var guard: u64 = 0
+    while s != 0 && guard <= NB {
+        if hw(s - 1, H_KEY) == k {
+            return s - 1
+        }
+        s = hw(s - 1, H_NEXT)
+        guard += 1
+    }
+    NB
+}
+
+fn unhash(s: u64) {
+    let k = hw(s, H_KEY)
+    if k == 0 {
+        return
+    }
+    let b = bucket(k)
+    var p = rd(b)
+    if p == s + 1 {
+        wr(b, hw(s, H_NEXT))
+    } else {
+        var guard: u64 = 0
+        while p != 0 && guard <= NB {
+            let nx = hw(p - 1, H_NEXT)
+            if nx == s + 1 {
+                put_hw(p - 1, H_NEXT, hw(s, H_NEXT))
+                p = 0
+            } else {
+                p = nx
+            }
+            guard += 1
+        }
+    }
+    put_hw(s, H_KEY, 0)
+    put_hw(s, H_NEXT, 0)
+}
+
+fn rehash(s: u64, k: u64) {
+    let b = bucket(k)
+    put_hw(s, H_KEY, k)
+    put_hw(s, H_NEXT, rd(b))
+    wr(b, s + 1)
+}
+
+/// The device, the block and the block size of slot `s`'s key.
+fn parts(s: u64) -> (u64, u64, u64) {
+    let k = hw(s, H_KEY)
+    ((k >> 56) - 1, k & 0xffffffffffff, 512 << ((k >> 48) & 0xff))
+}
+
+/// Write slot `s` to its disk: 0 or -EIO.
+fn write_slot(s: u64) -> u64 {
+    let (d, blk, bsize) = parts(s)
+    let per = bsize / 512
+    let r = rw(d, vblk.T_OUT, blk * per, per, hw(s, H_PA))
+    kbump(K_WRITES, 1)
+    if hw(s, H_FLAGS) & B_DIRTY != 0 {
+        put_hw(s, H_FLAGS, hw(s, H_FLAGS) & !B_DIRTY)
+        put_st(S_COUNT + K_DIRTY, st(S_COUNT + K_DIRTY) - 1)
+    }
+    r
+}
+
+/// A slot for a new key: one never made, else the clock hand's next
+/// not looked at since it last passed, written first when dirty. NB when
+/// no frame can be had for a new one and every made one failed to write.
+fn victim() -> u64 {
+    if st(S_MADE) < NB {
+        let pa = frames.alloc() else 0
+        if pa != 0 {
+            let s = st(S_MADE)
+            put_st(S_MADE, s + 1)
+            put_hw(s, H_PA, pa)
+            put_hw(s, H_FLAGS, 0)
+            put_hw(s, H_KEY, 0)
+            put_hw(s, H_NEXT, 0)
+            return s
+        }
+    }
+    let made = st(S_MADE)
+    if made == 0 {
+        return NB
+    }
+    var n: u64 = 0
+    while n < 3 * made {
+        let s = st(S_HAND) % made
+        put_st(S_HAND, s + 1)
+        let f = hw(s, H_FLAGS)
+        if f & B_REF != 0 {
+            put_hw(s, H_FLAGS, f & !B_REF)
+        } else {
+            if f & B_DIRTY != 0 {
+                let w = write_slot(s)
+                if w != 0 {
+                    n += 1
+                    continue
+                }
+            }
+            unhash(s)
+            put_hw(s, H_FLAGS, 0)
+            kbump(K_EVICTS, 1)
+            return s
+        }
+        n += 1
+    }
+    NB
+}
+
+/// Block `blk` (of `bsize` bytes) of disk `d`, read when the cache does
+/// not hold it: its address (through the HHDM), good until the next
+/// `get` or `fresh`; 0 on an I/O error, past the disk, or with no
+/// buffer to be had.
+pub fn get(d: u64, blk: u64, bsize: u64) -> u64 {
+    if d >= count() || shift_of(bsize) == 0 {
+        return 0
+    }
+    let k = key(d, bsize, blk)
+    let s = find(k)
+    if s != NB {
+        kbump(K_HITS, 1)
+        put_hw(s, H_FLAGS, hw(s, H_FLAGS) | B_REF)
+        return hw(s, H_PA) + hh()
+    }
+    let v = victim()
+    if v == NB {
+        return 0
+    }
+    let per = bsize / 512
+    let r = rw(d, vblk.T_IN, blk * per, per, hw(v, H_PA))
+    kbump(K_MISSES, 1)
+    if r != 0 {
+        return 0
+    }
+    rehash(v, k)
+    put_hw(v, H_FLAGS, B_VALID | B_REF)
+    hw(v, H_PA) + hh()
+}
+
+/// Block `blk` of disk `d` as a new block: its buffer zeroed, not read
+/// (a block just allocated, all of which the caller will write): its
+/// address, as `get`'s; 0 with no buffer.
+pub fn fresh(d: u64, blk: u64, bsize: u64) -> u64 {
+    if d >= count() || shift_of(bsize) == 0 {
+        return 0
+    }
+    let k = key(d, bsize, blk)
+    var s = find(k)
+    if s == NB {
+        s = victim()
+        if s == NB {
+            return 0
+        }
+        rehash(s, k)
+    }
+    let va = hw(s, H_PA) + hh()
+    // # Safety: the buffer's frame, through the HHDM.
+    unsafe { pax_tree_zero(va, bsize) }
+    put_hw(s, H_FLAGS, (hw(s, H_FLAGS) & B_DIRTY) | B_VALID | B_REF)
+    kbump(K_FRESH, 1)
+    va
+}
+
+/// Block `blk` of disk `d` has been changed in its buffer: written now
+/// (write-through) or marked (write-back). 0, -EIO, or -ENOSPC when the
+/// block is not in the cache (a caller that broke the rule above).
+pub fn dirty(d: u64, blk: u64, bsize: u64) -> u64 {
+    let s = find(key(d, bsize, blk))
+    if s == NB {
+        return neg(ENOSPC)
+    }
+    if st(S_POLICY) == WRITE_THROUGH {
+        return write_slot(s)
+    }
+    let f = hw(s, H_FLAGS)
+    if f & B_DIRTY != 0 {
+        kbump(K_REDIRTY, 1)
+        return 0
+    }
+    put_hw(s, H_FLAGS, f | B_DIRTY)
+    put_st(S_COUNT + K_DIRTY, st(S_COUNT + K_DIRTY) + 1)
+    0
+}
+
+/// Write every dirty buffer of disk `d`, then FLUSH it: 0 or -EIO (the
+/// first error; the rest are still tried).
+pub fn sync(d: u64) -> u64 {
+    if d >= count() {
+        return 0
+    }
+    var err: u64 = 0
+    var s: u64 = 0
+    while s < st(S_MADE) {
+        if hw(s, H_FLAGS) & B_DIRTY != 0 && hw(s, H_KEY) >> 56 == d + 1 {
+            let w = write_slot(s)
+            if w != 0 && err == 0 {
+                err = w
+            }
+        }
+        s += 1
+    }
+    let f = flush(d)
+    if err != 0 { err } else { f }
+}
+
+/// Forget every buffer of disk `d` (after `sync`, at an unmount): a
+/// later `get` reads the disk again.
+pub fn forget(d: u64) {
+    var s: u64 = 0
+    while s < st(S_MADE) {
+        if hw(s, H_KEY) >> 56 == d + 1 && hw(s, H_FLAGS) & B_DIRTY == 0 {
+            unhash(s)
+            put_hw(s, H_FLAGS, 0)
+        }
+        s += 1
+    }
+}
+
+/// Buffers made (frames held by the cache).
+pub fn buffers() -> u64 {
+    if base() == 0 { 0 } else { st(S_MADE) }
+}
+
+/// The disk's lines (kernel/vblk's, then the layer's):
+///
+///     block: vda: <s> sectors (<b> bytes), 254:0, <rw|read-only>[, flush]
+pub fn report() {
+    if count() == 0 {
+        return
+    }
+    vblk.report()
+    log.put("block: vda: ")
+    log.dec(dw(0, D_SECTORS) as int)
+    log.put(" sectors (")
+    log.dec((dw(0, D_SECTORS) * 512) as int)
+    log.put(" bytes), 254:0, ")
+    log.put(if dw(0, D_FLAGS) & F_RO != 0 { "read-only" } else { "read-write" })
+    if dw(0, D_FLAGS) & F_FLUSH != 0 {
+        log.put(", flush")
+    }
+    log.end()
+}
+
+/// The books' line:
+///
+///     block: vda: <r> reads (<si> sectors), <w> writes (<so> sectors), <f> flushes, <e> errors, <x> refused; cache <m> buffers, <h> hits, <mi> misses, <ev> taken back, <fr> fresh, <rd> written again while dirty, <dn> dirty, policy write-through|write-back
+pub fn summary() {
+    if count() == 0 {
+        return
+    }
+    log.put("block: vda: ")
+    log.dec(dw(0, D_READS) as int)
+    log.put(" reads (")
+    log.dec(dw(0, D_SIN) as int)
+    log.put(" sectors), ")
+    log.dec(dw(0, D_WRITES) as int)
+    log.put(" writes (")
+    log.dec(dw(0, D_SOUT) as int)
+    log.put(" sectors), ")
+    log.dec(dw(0, D_FLUSHES) as int)
+    log.put(" flushes, ")
+    log.dec(dw(0, D_ERRORS) as int)
+    log.put(" errors, ")
+    log.dec(dw(0, D_REFUSED) as int)
+    log.put(" refused; cache ")
+    log.dec(st(S_MADE) as int)
+    log.put(" buffers, ")
+    log.dec(st(S_COUNT + K_HITS) as int)
+    log.put(" hits, ")
+    log.dec(st(S_COUNT + K_MISSES) as int)
+    log.put(" misses, ")
+    log.dec(st(S_COUNT + K_EVICTS) as int)
+    log.put(" taken back, ")
+    log.dec(st(S_COUNT + K_FRESH) as int)
+    log.put(" fresh, ")
+    log.dec(st(S_COUNT + K_REDIRTY) as int)
+    log.put(" written again while dirty, ")
+    log.dec(st(S_COUNT + K_DIRTY) as int)
+    log.put(" dirty, policy ")
+    log.put(if st(S_POLICY) == WRITE_BACK { "write-back" } else { "write-through" })
+    log.end()
+}
+
+/// Copy `n` bytes between kernel addresses (a buffer and a caller's
+/// frame): kernel/ext2's and kmain_blk's.
+pub fn copy_bytes(dst: u64, src: u64, n: u64) {
+    // # Safety: both ranges inside frames the callers hold, through the
+    // HHDM; they do not overlap.
+    unsafe { pax_tree_copy(dst, src, n) }
+}
