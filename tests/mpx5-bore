@@ -1,0 +1,310 @@
+#!/usr/bin/env bash
+# tests/mpx5-bore — px65: boreutils' new utilities (user/boreutils.pin at
+# 575dc7b: bu30's small file tools, bu31's text tools), preinstalled on
+# PAX in /bin, typed at the console's shell, held byte for byte to the
+# same binaries on Linux, as root and as `pax`, a typed session per
+# utility group.
+#
+#   tests/mpx5-bore [--images DIR | --no-boot | --only build | --only linux --images DIR]
+#                   [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# Two images, each kmain_console with an archive of its own: pelt as
+# /bin/sh, /bin/as, the group's new utilities and the few boreutils the
+# session reads its answers with, all unmodified and static
+# (user/boreutils.pin); /etc (hostname, motd, pax-run), /tmp (1777),
+# /home/pax (0755, 1000:1000):
+#   files  bu30: mkfifo link unlink truncate sync mktemp realpath tty,
+#          with cat env id ln mkdir rm stat;
+#          user/console/bore-files.keys;
+#   text   bu31: base64 base32 comm join tsort shuf, with cat env id
+#          mkdir rm sort wc, and the generated fixture at /usr/share/bore
+#          (tests/mpx5-bore.d/fixture.py); user/console/bore-text.keys.
+# Each image's run list, its group's keys typed twice, prompt `$ `:
+#   GROUP       `/bin/env HOME=/ /bin/sh -i -m` (root);
+#   GROUP-user  `/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m`
+#               (`pax`, the home `su pax` gives).
+# The keys define `s`, which runs a command with its standard output and
+# standard error to two files, then prints `status N`, the output,
+# `[stderr]` and the error, so each row's status and streams are held
+# apart; the files session works in /tmp/w<uid>, the text session's
+# scratch is /tmp/t<uid>.
+#
+# **The Linux side** is the same binaries typed the same keys in a
+# throwaway container (tools/linux-tree: the tree a tmpfs, the shell on a
+# pseudo-terminal as pid 1 of a fresh pid namespace, PAX's environment),
+# as root and through `as 1000 1000`, run live.
+#
+# What is compared, by rule: each run's transcript, from its `run <k>:`
+# line to the kernel's `user: frames free` line after it, normalised as a
+# serial log is (tools/lib.sh's serial_norm), the kernel's own `user: …`
+# lines out, and the console's name in tty's line typed as `{tty}`: a
+# line `/dev/ttyS0` (PAX's console is the serial port; kernel/files) or
+# `/dev/pts/N` (the container's pseudo-terminal) — the one field of the
+# sessions that is the machine's, not the program's; the container's
+# whole transcript, normalised the same way.
+#
+# Assertions, per tier, firmware, image and session:
+#   B0 build: kmain_console built; pelt, the boreutils and as static
+#      (ET_EXEC, no PT_INTERP); every new utility of the group in the
+#      root's /bin; the images built; the container's sessions ran, and
+#      the container's tty line is a pseudo-terminal's.
+#   B1 each session byte-identical to the container's, and its status.
+#   B2 the session's own witness (tests/mpx5-bore.d/rows.py): POSIX's and
+#      the man pages' answers, RFC 4648's encodings computed from the
+#      fixture, the diagnostics' shape; and on PAX tty's line is
+#      `/dev/ttyS0`, the console.
+#   B3 -ENOSYS only for set_robust_list (273) and rseq (334); no
+#      `refused:` line; `PAX: init /bin/env ended with status 0; nothing
+#      left to run`, `halt`, held halted.
+# B2 is each run's own witness: the container runs the same binaries, so
+# a break of both sides leaves B1 green and turns B2; a kernel break of
+# PAX's alone (a call answered otherwise, a utility left out of the
+# image) turns B1.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 only=
+usage="usage: tests/mpx5-bore [--images DIR | --no-boot | --only build | --only linux --images DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+[ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
+need readelf python3
+
+GROUPS_=(files text)
+NEW_files="mkfifo link unlink truncate sync mktemp realpath tty" # bu30
+NEW_text="base64 base32 comm join tsort shuf"                     # bu31
+HELP_files="cat env id ln mkdir rm stat"
+HELP_text="cat env id mkdir rm sort wc"
+RUNS=("/bin/env HOME=/ /bin/sh -i -m" "/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m")
+ROWS=$here/mpx5-bore.d/rows.py
+
+work=$PAX_BUILD/mpx5-bore
+runs=$PAX_BUILD/mpx5-bore-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+keys_of() { echo "$PAX_ROOT/user/console/bore-$1.keys"; }
+new_of() { local v=NEW_$1; echo "${!v}"; }
+help_of() { local v=HELP_$1; echo "${!v}"; }
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+# The console's name in tty's line, typed (the one machine field).
+tty_norm() { LC_ALL=C sed -E 's#^(/dev/ttyS0|/dev/pts/[0-9]+)$#{tty}#' "$1"; }
+
+# A group's two container sessions, root's and the user's.
+linux_side() { # dir -> reasons on stdout
+    local d=$1 g k a0
+    for g in "${GROUPS_[@]}"; do
+        mkdir -p "$d/$g/linux"
+        for k in 0 1; do
+            n=$g; [ "$k" = 1 ] && n=$g-user
+            # shellcheck disable=SC2086 # the run line's words, as the kernel splits them
+            set -- ${RUNS[$k]}
+            a0=$1
+            if "$PAX_ROOT/tools/linux-tree" --root "$d/$g/root" --keys "$(keys_of "$g")" --prompt '$ ' --argv0 "$a0" --size 512m --rdev --nsproc \
+                --owners "$d/owners" "$d/$g/linux/$n.tty" -- "$@"; then
+                say "  linux $n: $(wc -c < "$d/$g/linux/$n.tty" | tr -d ' ') bytes, status $(cat "$d/$g/linux/$n.tty.rc")"
+            else
+                printf ' tools/linux-tree %s;' "$n"
+            fi
+        done
+    done
+}
+
+if [ "$only" = linux ]; then
+    why=$(linux_side "$images")
+    [ -z "$why" ] && say "PASS B0 (linux): the Linux side ran in a throwaway container" || bad "B0 (linux):$why"
+    exit "$fail"
+fi
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/bin"
+    why=
+    all=$(printf '%s\n' $NEW_files $NEW_text $HELP_files $HELP_text | LC_ALL=C sort -u | tr '\n' ' ')
+    "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" || why+=" tools/mkpelt;"
+    # shellcheck disable=SC2086 # the utilities' names
+    "$PAX_ROOT/tools/mkboreutils" "$work/bore" $all > "$work/bore.txt" || why+=" tools/mkboreutils;"
+    "$PAX_ROOT/tools/mkas" "$work/bin" > "$work/as.txt" || why+=" tools/mkas;"
+    printf '%s\n' '/tmp 1777 0 0' '/home/pax 755 1000 1000' > "$work/owners"
+    for g in "${GROUPS_[@]}"; do
+        r=$work/$g/root
+        mkdir -p "$r/bin" "$r/etc" "$r/home/pax" "$r/tmp"
+        cp "$work/pelt/pelt" "$r/bin/sh" 2>/dev/null || why+=" no pelt;"
+        cp "$work/bin/as" "$r/bin/as" 2>/dev/null || why+=" no as;"
+        for u in $(new_of "$g") $(help_of "$g"); do
+            cp "$work/bore/$u" "$r/bin/$u" 2>/dev/null || why+=" no $u;"
+        done
+        if [ "$g" = text ]; then
+            python3 "$here/mpx5-bore.d/fixture.py" "$r/usr/share/bore" > "$work/fixture.txt" || why+=" the fixture;"
+        fi
+        for f in "$r"/bin/*; do
+            x=$(static_ok "$f") || why+=" $x;"
+            say "  program ($g): ${f#"$r"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+        done
+        for u in $(new_of "$g"); do [ -x "$r/bin/$u" ] || why+=" $g: no /bin/$u in the root;"; done
+        printf '%s\n' "${RUNS[@]}" > "$r/etc/pax-run"
+        printf 'pax\n' > "$r/etc/hostname"
+        printf 'PAX: boreutils at the console (px65)\n' > "$r/etc/motd"
+        args=(/tmp/:1777 /home/pax/:755:1000:1000
+            /etc/pax-run="$r/etc/pax-run":644 /etc/hostname="$r/etc/hostname":644 /etc/motd="$r/etc/motd":644)
+        for f in "$r"/bin/*; do args+=("/bin/${f##*/}=$f:755"); done
+        if [ -d "$r/usr/share/bore" ]; then
+            for f in "$r"/usr/share/bore/*; do args+=("/usr/share/bore/${f##*/}=$f:644"); done
+        fi
+        "$PAX_ROOT/tools/mkinitramfs" "$work/$g.cpio" "${args[@]}" > "$work/$g.initramfs.txt" || why+=" $g: tools/mkinitramfs;"
+    done
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            for g in "${GROUPS_[@]}"; do
+                "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                    --add "$work/$g.cpio" initramfs.cpio "$elf" "$work/$tier/$g.iso" >/dev/null || why+=" $tier $g: mkimage;"
+                say "built $tier $g: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/$g.iso"), initramfs $(sha256_of "$work/$g.cpio")"
+            done
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    if [ "$only" = build ]; then
+        [ -z "$why" ] && say "PASS B0 (build): kmain_console built ($tiers), every program static, every new utility in its image, the images built" || bad "B0 (build):$why"
+        exit "$fail"
+    fi
+    if [ "$(uname -s)" != Linux ]; then
+        why+=" the Linux side needs Linux (this is $(uname -s)): build on Linux, boot here with --images;"
+    else
+        why+=$(linux_side "$work")
+    fi
+    [ -z "$why" ] && say "PASS B0: kmain_console built ($tiers), every program static, every new utility in its image, the images built, the Linux side ran in a throwaway container" || bad "B0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx5-bore build (B0): PASS (no boot: --no-boot)" || say "mpx5-bore build: FAIL"
+        exit "$fail"
+    fi
+fi
+for g in "${GROUPS_[@]}"; do
+    lx=$images/$g/linux
+    for n in "$g" "$g-user"; do
+        [ -f "$lx/$n.tty" ] || { bad "B0 linux $n: no $lx/$n.tty (build first, and run the Linux side)"; continue; }
+        serial_norm "$lx/$n.tty" > "$lx/$n.norm"
+        tty_norm "$lx/$n.norm" > "$lx/$n.cmp"
+        if [ "$g" = files ]; then
+            t=$(awk '/^\$ s tty$/ { getline; getline; print; exit }' "$lx/$n.norm")
+            case $t in /dev/pts/[0-9]*) ;; *) bad "B0 linux $n: the container's tty line is '$t', not a pseudo-terminal's" ;; esac
+        fi
+    done
+done
+
+# Run k's transcript: from its `run <k>:` line to the kernel's `user:
+# frames free …` line after it, the kernel's own lines left out
+# (tests/mpx5-jobs' rule).
+run_part() { # norm k
+    awk -v k="$2" '
+        $0 ~ "^run " k ": " { on = 1; next }
+        on && /^run [0-9]+: |^run: [0-9]+ commands$|^user: frames free / { exit }
+        on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$1"
+}
+
+record() { # tier leg group status
+    ran=$((ran + 1))
+    printf '%s kmain_console %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        for g in "${GROUPS_[@]}"; do
+            id="$tier $leg $g"
+            log=$PAX_BUILD/mpx5-bore-$tier-$leg-$g.serial.log
+            elf=$images/$tier/kmain_console.elf iso=$images/$tier/$g.iso
+            lx=$images/$g/linux
+            rm -f "$log" "$log.verdict" "$log.typed"
+            if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+                bad "B3 $id: no image"
+                continue
+            fi
+            cat "$(keys_of "$g")" "$(keys_of "$g")" > "$images/$g.keys"
+            hrc=0
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 900 --qemu -m --qemu 1536M \
+                --elf "$elf" --marker 'halt|PANIC .*' --type "$images/$g.keys" --prompt '$ ' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+            record "$tier" "$leg" "$g" "$hrc"
+            norm=$log.norm; serial_norm "$log" > "$norm"
+            for k in 0 1; do
+                n=$g; who=root; [ "$k" = 1 ] && { n=$g-user; who=pax; }
+                out=$PAX_BUILD/mpx5-bore-$tier-$leg-$n.session
+                run_part "$norm" $((k + 1)) > "$out"
+                serial_norm "$out" > "$out.norm"
+                tty_norm "$out.norm" > "$out.cmp"
+                # B1: the container's session.
+                why=
+                if [ -f "$lx/$n.cmp" ]; then
+                    cmp -s "$lx/$n.cmp" "$out.cmp" || why+=" the session differs from the container's: $(diff "$lx/$n.cmp" "$out.cmp" | head -n 14 | cut -c1-300 | tr '\n' '|');"
+                else
+                    why+=" no container session;"
+                fi
+                [ "$(wc -l < "$out.cmp" | tr -d ' ')" -gt 60 ] || why+=" a short session;"
+                [ -z "$why" ] && say "PASS B1 $id $n: $(wc -l < "$out.cmp" | tr -d ' ') lines byte-identical to the container's ($(sha256_of "$out.cmp" | cut -c1-12)…)" || bad "B1 $id $n:$why"
+                # B2: the session's own witness, and the console's name.
+                why=$(python3 -B "$ROWS" "$out.cmp" "$g" "$who")
+                if [ "$g" = files ]; then
+                    t=$(awk '/^\$ s tty$/ { getline; getline; print; exit }' "$out.norm")
+                    [ "$t" = /dev/ttyS0 ] || why+=" tty's line on PAX is '$t', not /dev/ttyS0;"
+                fi
+                [ -z "$why" ] && say "PASS B2 $id $n: the $(python3 -B -c 'import sys; sys.path.insert(0, sys.argv[1]); import rows; print(rows.count(sys.argv[2]))' "$here/mpx5-bore.d" "$g") rows (POSIX's answers, RFC 4648's encodings, the diagnostics' shape$([ "$g" = files ] && echo ', the console /dev/ttyS0'))" || bad "B2 $id $n:$why"
+            done
+            # B3: what PAX lacks; nothing refused; the end.
+            why=
+            ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
+            [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
+            rf=$(grep -c ': refused: ' "$norm")
+            [ "$rf" = 0 ] || why+=" $rf refused lines ($(grep -m1 ': refused: ' "$norm" | cut -c1-160));"
+            grep -qx "PAX: init /bin/env ended with status 0; nothing left to run" "$norm" \
+                || why+=" no 'PAX: init /bin/env ended with status 0' ($(grep -m1 '^PAX: init ' "$norm"));"
+            pn=$(grep -m1 '^PANIC ' "$norm")
+            [ -z "$pn" ] || why+=" the kernel panicked: $pn;"
+            [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+            [ -z "$why" ] && say "PASS B3 $id: -ENOSYS only for 273 and 334; nothing refused by name; init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "B3 $id:$why"
+        done
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx5-bore: PASS" || say "mpx5-bore: FAIL"
+exit "$fail"
