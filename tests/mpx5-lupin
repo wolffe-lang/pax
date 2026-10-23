@@ -214,7 +214,12 @@ run_part() { # norm k
 # session's home: root's host.lu record lists /usr/share/lupin (inside
 # its working directory `/`), `pax`'s is refused there by name.
 rows() { # kind home -> NAME<TAB>line<TAB>line…, one row a line
-    local h=$2 rec='{"protocol":1,"impl":"lupin","impl_version":"0.1.55","commit":"e642f26",'
+    # px65: the record's identity is the pin's (user/lupin.pin): its tag's
+    # version and its commit's first seven, as lupin's D57 stamp says.
+    local h=$2 rec v c
+    v=$(. "$PAX_ROOT/user/lupin.pin"; echo "${LUPIN_SRC_TAG#v}")
+    c=$(. "$PAX_ROOT/user/lupin.pin"; echo "${LUPIN_SRC_REV:0:7}")
+    rec='{"protocol":1,"impl":"lupin","impl_version":"'"$v"'","commit":"'"$c"'",'
     printf '%s\t%s\t%s\n' "hello" '$ lupin run /usr/share/lupin/hello.lu' 'hello, wolf'
     printf '%s\t%s\t%s\t%s\n' "the typed program run" '$ lupin run x.lu; echo st=$?' "typed at PAX's console, run by lupin" 'st=0'
     printf '%s\t%s\t%s\n' "loop's record" '$ lupin conform-run --json /usr/share/lupin/loop.lu' "$rec"'*"verdict":"exit(0)"*"stdout_inline":"1 squared is 1\n*the sum of the squares: 385\n"}'
