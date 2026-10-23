@@ -263,6 +263,7 @@ struct Thread {
     ssold: u64, // px48: the mask `rt_sigsuspend` replaced, while the thread is suspended in it
     xname0: u64, // px56: the program's name when `name` is 0: the last component of the path it was run by, 15 bytes at most (Linux's comm), NUL-padded
     xname1: u64,
+    fifo: u64, // px62: an open of a FIFO that waits for the other end (kernel/files' word: the inode + 1, the end, the other end's count seen); 0 none
 }
 
 /// How many slots there are (px14: `clone_current` and `child_ended`
@@ -315,7 +316,7 @@ const GUARD: u64 = 49152 // its low part, never mapped
 const STACK: u64 = 16384 // its high part, mapped
 const PAGE: u64 = 4096
 const PAGES: u64 = 4
-const PROC_AREA: u64 = 40960 // px12: each slot's bytes of boot/sched.S's pax_procs (px34: 1024 descriptors and 256 reservations; 8192 before, 4096 before px24, 2048 before px14)
+const PROC_AREA: u64 = 49152 // px12: each slot's bytes of boot/sched.S's pax_procs (px62: 192 mapping records and mremap's census after px34's words; 40960 since px34's 1024 descriptors and 256 reservations, 8192 before, 4096 before px24, 2048 before px14)
 const FS_BASE: u64 = 0xc0000100 // px12: IA32_FS_BASE (Intel SDM vol. 4)
 
 const QUANTUM: u64 = 2 // ticks
@@ -687,6 +688,7 @@ fn clear(s: u64) {
     put_field(s, offset_of(Thread, wstop), 0)
     put_field(s, offset_of(Thread, wcont), 0)
     put_field(s, offset_of(Thread, ssold), 0)
+    put_field(s, offset_of(Thread, fifo), 0) // px62
     let a = own_area(s)
     var i: u64 = 0
     while i < PROC_AREA / 8 {
@@ -2156,6 +2158,57 @@ pub fn self_wait() -> (u64, u64) {
     put_field(c, offset_of(Thread, rst), W_NONE)
     put_field(c, offset_of(Thread, rarg), 0)
     r
+}
+
+/// px62: the running thread's FIFO-open wait (kernel/files' word; 0
+/// when its last call was no such wait, or a signal ended it).
+pub fn self_fifo() -> u64 {
+    field(cur(), offset_of(Thread, fifo))
+}
+
+/// px62: set the running thread's FIFO-open wait word (kernel/files).
+pub fn set_self_fifo(v: u64) {
+    put_field(cur(), offset_of(Thread, fifo), v)
+}
+
+/// px62: one FIFO-open wait word of a thread of the running thread's
+/// process, taken (cleared), or 0 when none is left: kernel/files gives
+/// each one's count back as the process ends.
+pub fn take_group_fifo() -> u64 {
+    let l = field(cur(), offset_of(Thread, lead))
+    var s: u64 = FIRST
+    while s < SLOTS {
+        if field(s, offset_of(Thread, state)) != FREE && field(s, offset_of(Thread, lead)) == l {
+            let w = field(s, offset_of(Thread, fifo))
+            if w != 0 {
+                put_field(s, offset_of(Thread, fifo), 0)
+                return w
+            }
+        }
+        s += 1
+    }
+    0
+}
+
+/// px62: whether the running thread's process owns its address space (a
+/// vfork child borrows its parent's: kernel/vm keeps no record there).
+pub fn self_owns() -> bool {
+    field(field(cur(), offset_of(Thread, lead)), offset_of(Thread, owns)) == 1
+}
+
+/// px62: slot `s`'s process area and address space (its PML4) when `s`
+/// is a live user process's leader, else (0, 0): kernel/vm walks every
+/// space's records when a file is cut.
+pub fn space_of(s: u64) -> (u64, u64) {
+    if s >= SLOTS || field(s, offset_of(Thread, lead)) != s || field(s, offset_of(Thread, prog)) == 0 {
+        return (0, 0)
+    }
+    let st = field(s, offset_of(Thread, state))
+    let c = field(s, offset_of(Thread, cr3))
+    if st == FREE || st == ZOMBIE || c == 0 {
+        return (0, 0)
+    }
+    (own_area(s), c)
 }
 
 /// The tick the running thread's last timed wait was to end at (a sleep

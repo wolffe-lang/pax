@@ -75,7 +75,8 @@
 
    Storage (.bss, zero until kernel/sched writes it):
      pax_threads       64 thread slots (16 before px24), 512 bytes each (kernel/sched's
-                       #[repr(c)] Thread, 416 bytes of it since px56's
+                       #[repr(c)] Thread, 424 bytes of it since px62's
+                       FIFO word, 416 since px56's
                        two name words, 400 since px48's eight
                        job-control words, 336 before; 72 before
                        px09's cr3 and prog, 88 before px10's entry, usp,
@@ -84,7 +85,8 @@
                        vparent, zombie and sigmask; 256-byte slots
                        before px26's fifteen words for threads, futexes
                        and signals)
-     pax_procs         64 process areas, 40960 bytes each (px34: 1024
+     pax_procs         64 process areas, 49152 bytes each (px62: 192
+                       mapping records after px34's 40960: 1024
                        descriptors and 256 reservations; 8192 before, 2048 before
                        px14, 4096 before px24's 128 descriptors), one
                        per slot (px12): the words kernel/vm,
@@ -185,7 +187,7 @@ pax_threads:
         .p2align 6
         .globl pax_procs
 pax_procs:
-        .zero 64 * 40960
+        .zero 64 * 49152
         .p2align 6
         .globl pax_siginfo
 pax_siginfo:
