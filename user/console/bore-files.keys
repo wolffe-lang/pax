@@ -1,6 +1,7 @@
 umask 022; W=/tmp/w$(id -u); mkdir $W; cd $W
 s() { "$@" >$W/.o 2>$W/.e; echo "status $?"; cat $W/.o; echo '[stderr]'; cat $W/.e; }
-for c in mkfifo link unlink truncate sync mktemp realpath tty; do command -v $c; done
+for c in mkfifo link unlink truncate; do command -v $c; done
+for c in sync mktemp realpath tty; do command -v $c; done
 s mkfifo f1
 s mkfifo -m 600 f2
 s stat -c '%A %F %n' f1 f2
@@ -57,7 +58,7 @@ s stat -c '%A %F' $t
 t=$(mktemp -p $W x.XXXXXX); echo "status $?"; case $t in $W/x.??????) echo shape W/x.XXXXXX;; *) echo "shape $t";; esac
 t=$(mktemp --suffix=.txt -p $W); echo "status $?"; case $t in $W/tmp.??????????.txt) echo shape W/tmp.XXXXXXXXXX.txt;; *) echo "shape $t";; esac
 t=$(mktemp -u -p $W); echo "status $?"; case $t in $W/tmp.??????????) echo shape W/tmp.XXXXXXXXXX;; *) echo "shape $t";; esac
-s stat -c %n $t
+stat -c %n $t >/dev/null 2>&1; echo "stat status $?"
 t1=$(mktemp -p $W); t2=$(mktemp -p $W); case $t1 in $t2) echo same;; *) echo distinct;; esac
 s mktemp abc
 s mktemp -p nodir
