@@ -181,8 +181,9 @@ The ISO is read-only and needs a disk beside it for anything to last.
 
     -drive file=pax-disk.img,if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0,bootindex=0
 
-under SeaBIOS (the default) or a UEFI firmware (`-bios` an edk2 code
-file, or OVMF's pflash). Its GUID partition table (the UEFI
+under SeaBIOS (the default) or a UEFI firmware (an edk2 or OVMF code
+file as a read-only pflash, `-drive if=pflash,format=raw,unit=0,readonly=on,file=…`;
+Homebrew's `edk2-x86_64-code.fd` as `-bios` is refused by QEMU, measured). Its GUID partition table (the UEFI
 specification 2.10, chapter 5: a protective MBR, the primary header at
 LBA 1, the backup at the last LBA, 128 entries; every GUID derived from
 the label and SOURCE_DATE_EPOCH) has three entries, numbered as Linux

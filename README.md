@@ -213,11 +213,13 @@ qemu-system-x86_64 -machine q35 -cpu max -m 512M -nographic -nic none \
     -drive file=pax-disk.img,if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0,bootindex=0
 ```
 
-and under UEFI, with the edk2 firmware Homebrew's QEMU ships:
+and under UEFI, with the edk2 firmware Homebrew's QEMU ships, as a
+read-only flash (`-bios` with this file is refused: `qemu: could not
+load PC BIOS`):
 
 ```sh
 qemu-system-x86_64 -machine q35 -cpu max -m 512M -nographic -nic none \
-    -bios /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
+    -drive if=pflash,format=raw,unit=0,readonly=on,file=/opt/homebrew/share/qemu/edk2-x86_64-code.fd \
     -drive file=pax-disk.img,if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0,bootindex=0
 ```
 
