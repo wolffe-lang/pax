@@ -6,6 +6,12 @@ from pathlib import Path
 
 text = Path(sys.argv[1]).read_text()
 who = sys.argv[2]
+# px65: the compiler's identity is the pin's (user/wolf.pin's version
+# line), so a pin move moves the witness with it, never a stale literal.
+pin = (Path(__file__).resolve().parent / "../../user/wolf.pin").read_text()
+VERSION_LINE = next(l.split("=", 1)[1].strip().strip('"') for l in pin.splitlines()
+                    if l.startswith("WOLF_SRC_VERSION_LINE="))
+IMPL_VERSION = VERSION_LINE.split()[1]
 programs = ("hello", "loop", "signal", "spawn", "exec", "fork", "host", "std")
 errors = []
 for marker in ("typed=0", "object=0", "build=2", "release=2"):
@@ -20,7 +26,7 @@ for program in programs:
             errors.append(f"{command}-{program} did not return {status}")
 if "wolf: `check` is not a wolf command." not in text:
     errors.append("missing check-command refusal")
-if "wolf 0.2.34+dev.9da7bdc (wolfgang, pin 9da7bdc)" not in text:
+if VERSION_LINE not in text:
     errors.append("version missing")
 records = {}
 for line in text.splitlines():
@@ -30,7 +36,7 @@ for line in text.splitlines():
     if r.get("protocol") != 1:
         errors.append("wrong protocol")
     records[(Path(r["file"]).stem, r["phase_reached"])] = r
-    if r.get("impl") != "wolfgang" or r.get("impl_version") != "0.2.34+dev.9da7bdc":
+    if r.get("impl") != "wolfgang" or r.get("impl_version") != IMPL_VERSION:
         errors.append("wrong checked-machine identity")
 for program in programs:
     if records.get((program, "typecheck"), {}).get("verdict") != "pass":
