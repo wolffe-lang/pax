@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# disktools — run one of the partition and FAT tools (sfdisk, sgdisk,
+# mkfs.fat, fsck.fat, mcopy, mmd, mdir, blkid) on an image, from the
+# container image tools/e2fs pins, with user/disktools.pin's packages
+# (px66): the host's own tools are never used, so every host (kasumi,
+# the CI runner) runs the same builds and an image's bytes and a dump's
+# text do not move with the host.
+#
+#   tools/disktools DIR PROGRAM [ARG...]
+#   tools/disktools --version
+#
+# DIR is mounted read-write at the same path inside the container and is
+# its working directory; the program's arguments name files in it. The
+# packages are fetched once by digest into $PAX_CACHE (archive.ubuntu.com,
+# then Launchpad's librarian), unpacked by the image's own dpkg-deb into
+# $PAX_CACHE/disktools-<digest of the pin>/root (no package script runs:
+# `dpkg-deb -x` only), and mounted read-only at /opt/pax-disktools, with
+# PATH and LD_LIBRARY_PATH pointing there first; blkid is the image's
+# own util-linux. The container has no network (but for the one fetch
+# run, which uses curl on the host) and runs as root inside its own user
+# namespace (rootless podman) or as the caller (CI's Docker).
+# SOURCE_DATE_EPOCH is passed through (mkfs.fat's --invariant and
+# mtools' times read it), TZ is UTC (FAT keeps local times). --version
+# prints the image, each package's version and its programs' sha256.
+#
+# PAX_ENGINE, PAX_E2FS_IMAGE: as tools/e2fs. Black-box: the programs are
+# run, never read (ruling #22). Exit: the program's; 2 on a usage,
+# fetch or engine error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+IMAGE=${PAX_E2FS_IMAGE:-docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55}
+engine=${PAX_ENGINE:-}
+if [ -z "$engine" ]; then
+    if command -v podman >/dev/null 2>&1; then engine=podman; else engine=docker; fi
+fi
+need "$engine"
+pin=$PAX_ROOT/user/disktools.pin
+. "$pin"
+key=$(sha256_of "$pin" | cut -c1-16)
+store=$PAX_CACHE/disktools-$key
+opts=()
+if [ "$engine" = podman ]; then
+    opts=(--security-opt label=disable)
+else
+    opts=(--user "$(id -u):$(id -g)")
+fi
+
+# The packages, fetched and unpacked once.
+if [ ! -f "$store/.unpacked" ]; then
+    need curl
+    mkdir -p "$store/debs" "$PAX_CACHE"
+    for p in $DISKTOOLS_DEBS; do
+        f_var=${p}_FILE; pool_var=${p}_POOL; sum_var=${p}_SHA256
+        f=${!f_var}; pool=${!pool_var}; sum=${!sum_var}
+        deb=$store/debs/$f
+        if [ ! -f "$deb" ] || [ "$(sha256_of "$deb")" != "$sum" ]; then
+            enc=${f//+/%2b}
+            curl -sSfL -o "$deb.part" "http://archive.ubuntu.com/ubuntu/pool/$pool/$enc" \
+                || curl -sSfL -o "$deb.part" "https://launchpad.net/ubuntu/+archive/primary/+files/$enc" \
+                || die "cannot fetch $f"
+            mv "$deb.part" "$deb"
+        fi
+        [ "$(sha256_of "$deb")" = "$sum" ] || die "$f: sha256 $(sha256_of "$deb"), the pin says $sum"
+    done
+    rm -rf "$store/root"
+    mkdir -p "$store/root"
+    "$engine" run --rm --network none "${opts[@]}" -v "$store:$store" "$IMAGE" \
+        bash -c 'set -e; for d in "$1"/debs/*.deb; do dpkg-deb -x "$d" "$1/root"; done' disktools "$store" \
+        || die "dpkg-deb -x in $IMAGE"
+    : > "$store/.unpacked"
+fi
+
+O=/opt/pax-disktools
+run=("$engine" run --rm --network none "${opts[@]}" -v "$store/root:$O:ro"
+     -e "PATH=$O/usr/sbin:$O/usr/bin:$O/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+     -e "LD_LIBRARY_PATH=$O/usr/lib/x86_64-linux-gnu:$O/lib/x86_64-linux-gnu"
+     -e TZ=UTC -e MTOOLS_SKIP_CHECK=1)
+[ -z "${SOURCE_DATE_EPOCH:-}" ] || run+=(-e "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH")
+
+if [ "${1:-}" = --version ]; then
+    echo "image: $IMAGE"
+    for p in $DISKTOOLS_DEBS; do f_var=${p}_FILE; sum_var=${p}_SHA256; echo "$p: ${!f_var} ${!sum_var}"; done
+    exec "${run[@]}" "$IMAGE" bash -c 'for b in sfdisk sgdisk mkfs.fat fsck.fat mcopy blkid; do echo "$b: $(sha256sum "$(command -v $b)" | cut -d" " -f1) $(command -v $b)"; done'
+fi
+[ $# -ge 2 ] || die "usage: disktools DIR PROGRAM [ARG...] | disktools --version"
+dir=$(cd "$1" && pwd); shift
+case $1 in
+    sfdisk|sgdisk|mkfs.fat|fsck.fat|mcopy|mmd|mdir|minfo|blkid) ;;
+    *) die "not one of sfdisk, sgdisk, mkfs.fat, fsck.fat, mcopy, mmd, mdir, minfo, blkid: $1" ;;
+esac
+exec "${run[@]}" -v "$dir:$dir" -w "$dir" "$IMAGE" "$@"
