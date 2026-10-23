@@ -1,0 +1,39 @@
+px64 — scent on PAX: the prediction, committed before the first change
+(2026-10-23, Opus 5.5, kasumi CPUs 12-15).
+
+1. The static size. tools/mkscent builds scent b6f63a4 with its own
+   toolchain (wolf 0.2.35, the archive's bundled std 2386522e) in a
+   baseline ubuntu:24.04 container (534baea6…, libc6-dev 2.39-0ubuntu8.9,
+   the libc.a ct02 linked), twice. Predicted: 14,846,984 bytes, ET_EXEC,
+   no PT_INTERP, and the SAME sha256 both times and as ct02's record
+   (bd860457f2ff97591b7525da5f46c186feee4b8266d3f51b121866b001135d89);
+   stripped 1,362,232 bytes (recorded, not installed: /bin/scent is the
+   unmodified binary).
+
+2. The ABI gap: none. scent asks for what aspen and lope already ask
+   (the wolf runtime's start-up, openat, read, fstat or statx, lseek,
+   mmap/brk, write, close, exit_group, the signal set-up): -ENOSYS only
+   for 273 (set_robust_list) and 334 (rseq), which glibc tolerates, and
+   no `refused:` line. Not a syscall gap but a runtime row: the two
+   invalid-UTF-8 argv rows abort on PAX as on Linux (the runtime's
+   panic text, the PID digits apart; SIGABRT; pelt's status 134).
+   Predicted to differ, if anywhere: the core bit (Linux's pipe
+   core_pattern sets WCOREDUMP even under a core limit of 0; PAX has no
+   cores), visible only if pelt words it.
+
+3. The image. tools/mkinitramfs has no symbolic link (a file or a
+   directory only) and kernel/tree's `adopt` leaves an archive's links
+   out, so /bin/grep -> scent needs both: a link argument in the writer
+   (cpio(5)'s newc: mode 0120777, the target as the data) and the tree
+   making a link from such an entry. About 40 lines between them.
+   /bin/sh is pelt in every image that carries the wrappers; the
+   wrappers run through PAX's `#!` (px56) unmodified.
+
+4. The time from the first prompt to the last typed grep command: about
+   90 s a session (root's, then pax's) under TCG on kasumi; about 180 s on
+   CI's runner. The whole suite's boot, two sessions typed: under 5 min
+   on kasumi.
+
+5. The dev ISO grows by scent's unmodified 14.8 MB and the two
+   240-byte wrappers: about 239 MB from 223,815,680 bytes; it boots and
+   the session replays there as in the suite.
