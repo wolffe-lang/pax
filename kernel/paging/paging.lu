@@ -129,6 +129,16 @@ const ADDR_2M: u64 = 0x000fffffffe00000 // bits 51:21: a 2 MiB page's address
 const TABLE: u64 = P | RW // an upper-level entry: present, writable, supervisor; the leaf decides
 /// U/S: user-accessible (bit 2, px09).
 pub const US: u64 = 0x4
+/// px62: a user leaf's frame is not its space's own but a file's page
+/// (kernel/tree's: a mapping of a file, or of shared memory, kernel/vm):
+/// `free_user` leaves it, `copy_user` maps the same frame in the copy.
+/// Bit 9, one of the three a 4 KiB leaf leaves to software (SDM vol. 3A
+/// §4.5, table 4-20: bits 11:9 ignored; APM vol. 2 §5.4.1, AVL).
+pub const BORROWED: u64 = 0x200
+/// px62: a borrowed leaf of a private mapping that may be written: the
+/// leaf is read-only, and the first write copies the page (kernel/vm).
+/// Bit 10, the second of the three.
+pub const COW: u64 = 0x400
 const USER_TABLE: u64 = P | RW | US // an upper-level entry in the user half
 /// The first address past the user half (PML4 slots 0-255, px09).
 pub const USER_TOP: u64 = 0x0000800000000000
@@ -397,6 +407,32 @@ pub fn translate(pml4: u64, va: u64) -> u64 ! MapError {
     (e1 & ADDR) + va % PAGE
 }
 
+/// px62: the leaf entry of the 4 KiB user page at `va` in the structures
+/// at `pml4` (its frame, its flags and its software bits), or 0 when no
+/// page is mapped there. Only read, through the HHDM.
+pub fn leaf(pml4: u64, va: u64) -> u64 {
+    if va >= USER_TOP {
+        return 0
+    }
+    let e4 = entry(pml4, index(va, 4))
+    if e4 & P == 0 {
+        return 0
+    }
+    let e3 = entry(e4 & ADDR, index(va, 3))
+    if e3 & P == 0 || e3 & PS != 0 {
+        return 0
+    }
+    let e2 = entry(e3 & ADDR, index(va, 2))
+    if e2 & P == 0 || e2 & PS != 0 {
+        return 0
+    }
+    let e1 = entry(e2 & ADDR, index(va, 1))
+    if e1 & P == 0 {
+        return 0
+    }
+    e1
+}
+
 /// Unmap the 4 KiB page at `va`: clear its entry and, when `pml4` is
 /// the live structure or `va` is in the kernel half (whose tables every
 /// space shares, px14), INVLPG it, so no stale translation survives.
@@ -608,7 +644,8 @@ pub fn protect_user(pml4: u64, va: u64, flags: u64) -> bool {
 /// Give back everything in the user half of the structures at `pml4`
 /// (every page's frame, every table) and the PML4 itself. The kernel
 /// half is shared and left alone. `pml4` must not be live. Returns the
-/// frames freed.
+/// frames freed. px62: a BORROWED leaf's frame is a file's page and is
+/// left to the file (kernel/tree gives it back).
 pub fn free_user(pml4: u64) -> u64 {
     if live() == pml4 {
         panic.fail("paging: free_user of the live PML4", pml4)
@@ -632,8 +669,8 @@ pub fn free_user(pml4: u64) -> u64 {
                             var i1: u64 = 0
                             while i1 < ENTRIES {
                                 let e1 = entry(pt, i1)
-                                if e1 & P != 0 {
-                                    frames.free(e1 & ADDR)
+                                if e1 & P != 0 && e1 & BORROWED == 0 {
+                                    frames.free(e1 & ADDR) // px62: a borrowed frame is its file's
                                     n += 1
                                 }
                                 i1 += 1
@@ -739,7 +776,9 @@ fn pdpt_pages(pdpt: u64) -> u64 {
 /// A copy of the user half of the structures at `src` (px17, a fork's
 /// child): a new PML4 (`new_space(kernel)`) and, for every present user
 /// page, a fresh frame holding the same 4096 bytes, mapped at the same
-/// address with the same leaf permissions (RW, U/S, NX). Returns the new
+/// address with the same leaf permissions (RW, U/S, NX); px62: a
+/// BORROWED leaf (a file's page) maps the same frame, with the same
+/// leaf (BORROWED and COW kept). Returns the new
 /// PML4's physical address; 0 when the frames ran out, everything built
 /// so far given back. `src` may be live: it is only read, through the
 /// HHDM.
@@ -764,7 +803,18 @@ pub fn copy_user(src: u64, kernel: u64) -> u64 {
                             var i1: u64 = 0
                             while i1 < ENTRIES {
                                 let e1 = entry(e2 & ADDR, i1)
-                                if e1 & P != 0 {
+                                if e1 & P != 0 && e1 & BORROWED != 0 {
+                                    // px62: a file's page, mapped again (shared with
+                                    // the file and the parent, copy-on-write or not
+                                    // as the leaf says).
+                                    let va = (i4 << 39) | (i3 << 30) | (i2 << 21) | (i1 << PAGE_SHIFT)
+                                    let r = map_user(dst, va, e1 & ADDR, 0) else 0xffff
+                                    if r == 0xffff {
+                                        let _f = free_user(dst)
+                                        return 0
+                                    }
+                                    let _p = protect_user(dst, va, e1 & (RW | US | NX | BORROWED | COW))
+                                } else if e1 & P != 0 {
                                     let va = (i4 << 39) | (i3 << 30) | (i2 << 21) | (i1 << PAGE_SHIFT)
                                     let pa = frames.alloc() else 0
                                     if pa == 0 {
