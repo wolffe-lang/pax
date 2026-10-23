@@ -32,11 +32,21 @@
 //     console: <n> bytes from com1, <k> keys (<s> scancodes) from the keyboard, …
 //     PAX: init /bin/pelt ended with status 0; nothing left to run
 //     halt
+//
+// px63: with a disk (`-drive … -device virtio-blk-pci`), kernel/block
+// brings it up after the sound device and kernel/fstab mounts what the
+// initramfs's /etc/fstab lists before the first command (the device's
+// lines, a `fstab:` line and kernel/ext2's mount line); at the end every
+// volume is written, marked clean and flushed before `halt`
+// (kernel/tree's `halt_volumes`), and the disk's books are printed. With
+// no disk nothing is printed and nothing moves.
 use apic
+use block
 use console
 use fb
 use fpu
 use frames
+use fstab
 use initramfs
 use interrupts
 use log
@@ -49,6 +59,7 @@ use sound
 use speaker
 use sync
 use timer
+use tree
 use user
 
 extern "c" let pax_user_thread: *u8
@@ -138,6 +149,11 @@ export fn kmain() {
     // silent when it has none, so no existing session's serial moves.
     let _pci = pci.scan()
     let _snd = sound.start(pml4)
+    // px63: the disk, when the machine has one, and what /etc/fstab mounts.
+    if block.start(pml4) != 0 {
+        block.report()
+    }
+    let _mounted = fstab.mount_all()
     sync.enable()
 
     let e = initramfs.lookup(RUN_LIST)
@@ -194,6 +210,16 @@ export fn kmain() {
     sync.release(sync.console(), s)
 
     let _off = sync.irq_save()
+    // px63: every volume written, marked clean and flushed; the disk's books.
+    if block.count() != 0 {
+        let e = tree.halt_volumes()
+        if e != 0 {
+            log.put("PAX: writing the volumes at the end: an I/O error, -")
+            log.dec((!e + 1) as int)
+            log.end()
+        }
+        block.summary()
+    }
     timer.stop()
     log.line("halt")
     panic.halt()
