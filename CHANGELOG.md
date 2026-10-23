@@ -7,6 +7,25 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The pins at 0.2.35, and boreutils' new utilities (px65).** The
+  kernel is built from wolf 0.2.35 and lupin 0.1.56 with no source
+  change: every kernel's `.text` is 80 bytes longer, the freestanding
+  runtime's new `__wolf_rt_list_reserve`, and no other section moved.
+  pelt, lope, aspen, lobo and boreutils at their 0.2.35 trunks (lobo's
+  release image at v0.1.5, which pins its own wolf: `user/lobo.pin`
+  names two digests, R-px65-3; its Linux side reads the image's account
+  files, R-px65-4); `su`, `sigwolf` and `edwolf` at 0.2.35 and wolf-std
+  `78b9d3c`, the base image's std at `78b9d3c`; lupin from the v0.1.56
+  release's own static musl archive by digest (R-px65-1); the dev
+  compiler the v0.2.35 tag built for musl with no patch, its release
+  line (R-px65-2). boreutils' fourteen new utilities (bu30's small file
+  tools, bu31's text tools) are in `/bin`, every call they make served
+  but glibc's 273 and 334, and a typed session per group as root and as
+  `pax` is byte-identical to the container's but for the console's name
+  (`tests/mpx5-bore`). Found: PAX serves no `/proc/<pid>/maps`, which
+  0.2.35's runtime reads at start through glibc for the main thread's
+  stack guard (sigwolf's `~X:` row, R-px65-5).
+
 - **The partition table, and a disk that boots (px66).** `kernel/block`
   reads a GUID partition table as the UEFI specification 2.10 lays it
   out (the protective MBR, both headers with their CRC32s and the
