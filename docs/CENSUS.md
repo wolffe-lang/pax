@@ -628,6 +628,30 @@ union.
 - **Timing under ptrace.** strace slows every call; the counts of
   `EAGAIN`, `ETIMEDOUT` and `poll` are those of a traced program.
 
+## Served since px04: mappings, FIFOs and locks (px62)
+
+px04's union did not reach these calls; later workloads did. px60's
+census of the musl wolf found `mremap` (MREMAP_MAYMOVE, 151552 to
+299008 bytes, the allocator's grow path) answered ENOSYS, and ld.lld's
+file-backed and MAP_SHARED mappings refused; wolf-lang s254's
+`fs_lock` and `fs_mkfifo` (and pelt's corpus row
+`builtin/c_s_dot_special_file`) found `flock` ENOSYS and a FIFO's
+`mknodat` EPERM (pax#127, #128, #108). px62 serves them, each row held
+to Linux by a static probe as root and as a user (`tests/mpx3-maps`:
+`user/elf/maps.c`, `user/elf/fifos.c`).
+
+| nr | call | served | refused by name |
+|---:|---|---|---|
+| 9 | `mmap` | anonymous private (px12, px26, px34); MAP_SHARED and MAP_SHARED_VALIDATE of anonymous memory and of `/dev/zero`; MAP_PRIVATE of `/dev/zero`; MAP_PRIVATE of a regular file (the file's frames read-only, a page copied at its first write) and MAP_SHARED of one (the file's frames read-write); MAP_FIXED, MAP_FIXED_NOREPLACE; an offset off a page -EINVAL, a descriptor not open for reading -EACCES, MAP_SHARED with PROT_WRITE of one not open for writing or open for appending -EACCES, a directory, a pipe, a FIFO, a socket, `/dev/null` -ENODEV, MAP_SYNC with MAP_SHARED_VALIDATE -EOPNOTSUPP; a page past the file's end SIGBUS (BUS_ADRERR) | a file or shared mapping in a vfork child; more than 192 mapping records (-ENOMEM each) |
+| 10 | `mprotect` | records split at the range's ends; -EACCES for PROT_WRITE on a shared mapping that may not be written | |
+| 11 | `munmap` | records cut (a cut in two -ENOMEM when no record is free) | |
+| 25 | `mremap` | MREMAP_MAYMOVE; the same size, shrunk in place, grown in place into free pages, moved (leaves moved, no byte copied) for anonymous pages, PROT_NONE and MAP_NORESERVE reservations, file and shared records; -EINVAL for a flag that is none, an address off a page, a new size of 0, an old size of 0, MREMAP_FIXED or MREMAP_DONTUNMAP alone; -EFAULT for an old range that is no one mapping; -ENOMEM without MREMAP_MAYMOVE when it cannot grow in place | MREMAP_FIXED and MREMAP_DONTUNMAP with MREMAP_MAYMOVE (-EINVAL, R-px62-2); an old size of 0 of a shared mapping (-EINVAL) |
+| 26 | `msync` | MS_ASYNC, MS_SYNC, MS_INVALIDATE: 0 (the tree's frames are the file); -EINVAL for a flag that is none, MS_ASYNC with MS_SYNC, an address off a page; -ENOMEM for a page not mapped | |
+| 28 | `madvise` | MADV_DONTNEED of a file's page unmaps it (its next touch reads the file) | |
+| 73 | `flock` | LOCK_SH, LOCK_EX, LOCK_UN, LOCK_NB on a file's, a directory's, a pipe's or a FIFO's open file; the lock the open file's (dup and fork share it, a second `open` conflicts); a conversion drops the held lock first; -EWOULDBLOCK, -EINVAL, -EBADF, a signal's -EINTR | a socket, an eventfd, an epoll object, `/dev/null`, the console as a process starts with it (-ENOLCK) |
+| 133, 259 | `mknod`, `mknodat` | S_IFIFO, S_IFREG and no type; -EEXIST, -ENOENT, -EINVAL for a type that is none | a device node (root; a user -EPERM as on Linux), a socket's name (-EPERM) |
+| 2, 257 | `open`, `openat` of a FIFO | fifo(7): a reader waits for a writer and a writer for a reader, O_NONBLOCK's read end at once and write end -ENXIO without a reader, O_RDWR at once, a signal's -EINTR | |
+
 ## Reproduce
 
 On a Linux host with rootless podman (kasumi, 2026-10-04; podman's
