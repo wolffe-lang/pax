@@ -2,7 +2,9 @@
 # px60: the dev compiler checked machine, root and pax, byte-for-byte
 # against the same binaries/keys in an isolated Linux container.
 # W0 build/static/pinned bytes; W1 differential; W2 named session rows;
-# W3 only the named mremap/robust-list/rseq fallbacks, clean init exit and halt. No native build is
+# W3 only the named robust-list/rseq fallbacks (px62: mremap served, the
+# kernel's census line says how often, so the musl allocator's grow path
+# no longer falls back), clean init exit and halt. No native build is
 # called the checked machine: only conform-run --json --checked is one.
 set -uo pipefail
 . "$(dirname "$0")/../tools/lib.sh"
@@ -165,11 +167,20 @@ for leg in $legs; do
             "$PAX_ROOT/tests/mpx5-wolf.d/rows.py" "$out.cmp" "$n" || bad "W2 $tier $leg $n"
         done
         ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$log.norm" | sort -un | paste -sd" " -)
-        [ "$ns" = "25 273 334" ] || bad "W3 $tier $leg: unserved calls: $ns"
+        [ "$ns" = "273 334" ] || bad "W3 $tier $leg: unserved calls: $ns"
+        # px62 (pax#127): mremap is served, and wolf's allocator asks it
+        # (px60's census: 151552 to 299008 bytes, MREMAP_MAYMOVE, in the
+        # spawn and std typechecks and checked runs).
+        mr=$(sed -n -E 's/^user: wolf pid [0-9]+ mremap: ([0-9]+) served, [0-9]+ grown in place, ([0-9]+) moved$/ /p' "$log.norm")
+        mn=$(printf '%s
+' "$mr" | grep -c .)
+        ms=$(printf '%s
+' "$mr" | awk '{ s += $1 } END { print s + 0 }')
+        [ "$mn" -ge 4 ] && [ "$ms" -ge 4 ] || bad "W3 $tier $leg: wolf's mremap census: $mn lines, $ms served"
         if grep -a -q ": refused: \|^PANIC " "$log.norm"; then bad "W3 $tier $leg: refusal or panic"; fi
         grep -a -qx "PAX: init /bin/env ended with status 0; nothing left to run" "$log.norm" || bad "W3 $tier $leg: init did not end cleanly"
         [ "$hrc" = 0 ] || bad "W3 $tier $leg: did not halt ($hrc)"
-        say "W3 $tier $leg: halt=$hrc unserved=$ns"
+        say "W3 $tier $leg: halt=$hrc unserved=$ns mremap: $mn wolf processes, $ms calls served"
     done
 done
 [ "$ran" -gt 0 ] || bad "no boot ran"
