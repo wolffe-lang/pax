@@ -1,0 +1,206 @@
+//! member: false
+// kmain_part.lu — the partition table's self-test kernel (px66,
+// tests/mpx6-part). It brings up frames, paging and the interrupts (so
+// a fault panics by name), scans the PCI bus and starts kernel/block,
+// which brings up kernel/vblk's virtio block device and reads its
+// partition table. Then it prints what kernel/block found (its report:
+// the disk, the table, each partition), `/proc/partitions` as
+// kernel/procfs serves it (the same function, whole, a line at a time
+// behind `part: | `), and for each partition its window:
+//
+//   first    the partition's sector 0, read through it: it must hold the
+//            pattern of the disk's sector `start` (8-byte word w of disk
+//            sector s is (s << 32 | w) xor PATTERN, little-endian: the
+//            pattern tools/mkgpt --pattern writes, kmain_blk's);
+//   last     its last sector: the disk's `start + sectors - 1`;
+//   past     a request of its last sector and one more: refused by name
+//            before it is made, -EIO (the window's bound);
+//   written  on a writable disk only: its first and last sectors written
+//            through the window with the pattern xor MARK and read back;
+//            tests/mpx6-part reads the image afterwards and finds those
+//            two disk sectors changed and no other.
+//
+// One line a partition, the books, then `halt`:
+//
+//     PAX: the partitions
+//     blk: …
+//     block: vda: … ; block: vda: GPT, …; block: vda1: 254:1, sectors …
+//     part: /proc/partitions, <n> bytes
+//     part: | major minor  #blocks  name
+//     part: | …
+//     part: vda1: window <start>+<sectors>: first and last read back, 0 differ; past the end -EIO[; written and read back at <start> and <end>]
+//     block: vda: … reads, …; block: vda1: … refused
+//     halt
+//
+// With no disk: `part: no disk`, then `halt`. Nothing here allocates
+// from the heap.
+use frames
+use interrupts
+use log
+use paging
+use panic
+use pci
+use serial
+use block
+use vblk
+
+extern "c" fn pax_tree_zero(dst: u64, n: u64)
+
+const PATTERN: u64 = 0x7061786469736b00 // "paxdisk\0"
+const MARK: u64 = 0x0000000057524954 // "TIRW": what a write through a window leaves
+const PAGE: u64 = 4096
+
+fn word_of(s: u64, w: u64) -> u64 {
+    ((s << 32) | w) ^ PATTERN
+}
+
+fn rd(a: u64) -> u64 {
+    // # Safety: a word of a frame this kernel took, through the HHDM.
+    unsafe { (a as *u64).read_volatile() }
+}
+
+fn wr(a: u64, v: u64) {
+    // # Safety: as `rd`.
+    unsafe { (a as *u64).write_volatile(v) }
+}
+
+fn b8(a: u64) -> u64 {
+    // # Safety: a byte of a frame this kernel took, through the HHDM.
+    let v = unsafe { (a as *u8).read_volatile() }
+    v as u64
+}
+
+/// Whether the sector in the frame at `va` is disk sector `s`'s pattern
+/// (xor `mark`).
+fn same(va: u64, s: u64, mark: u64) -> bool {
+    var w: u64 = 0
+    while w < 64 {
+        if rd(va + w * 8) != word_of(s, w) ^ mark {
+            return false
+        }
+        w += 1
+    }
+    true
+}
+
+fn frame() -> u64 {
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        panic.fail("part: no frame for the test's buffers, frames free", frames.free_count())
+    }
+    // # Safety: the frame just taken, through the HHDM.
+    unsafe { pax_tree_zero(pa + frames.hhdm(), PAGE) }
+    pa
+}
+
+/// Read sector `k` of device `d` into the frame at `pa` and compare it
+/// with disk sector `s`'s pattern (xor `mark`): 0 the same, 1 not (or
+/// the read failed).
+fn check(d: u64, k: u64, pa: u64, s: u64, mark: u64) -> u64 {
+    if block.rw(d, vblk.T_IN, k, 1, pa) != 0 {
+        return 1
+    }
+    if same(pa + frames.hhdm(), s, mark) { 0 } else { 1 }
+}
+
+/// `/proc/partitions` as kernel/procfs serves it, a line at a time.
+fn show_partitions(pa: u64) {
+    let va = pa + frames.hhdm()
+    let total = block.partitions_len()
+    log.put("part: /proc/partitions, ")
+    log.dec(total as int)
+    log.put(" bytes")
+    log.end()
+    var off: u64 = 0
+    var at_start = true
+    while off < total {
+        let n = block.partitions_slice(va, off, PAGE)
+        var i: u64 = 0
+        while i < n {
+            if at_start {
+                log.put("part: | ")
+                at_start = false
+            }
+            let c = b8(va + i)
+            if c == 10 {
+                log.end()
+                at_start = true
+            } else {
+                log.put_byte(c as int)
+            }
+            i += 1
+        }
+        if n == 0 {
+            break
+        }
+        off += n
+    }
+}
+
+export fn kmain() {
+    serial.init()
+    interrupts.start()
+    log.line("PAX: the partitions")
+    frames.start()
+    let pml4 = paging.start()
+    let found = pci.scan()
+    let disks = block.start(pml4)
+    if disks == 0 {
+        log.put("part: no disk among ")
+        log.dec(found as int)
+        log.put(" PCI functions")
+        log.end()
+        log.line("halt")
+        panic.halt()
+    }
+    block.report()
+    let a = frame()
+    let b = frame()
+    show_partitions(a)
+    let ro = block.flags(0) & block.F_RO != 0
+    let hh = frames.hhdm()
+    var d: u64 = 1
+    while d < block.count() {
+        let st = block.start_of(d)
+        let n = block.sectors(d)
+        let bad = check(d, 0, b, st, 0) + check(d, n - 1, b, st + n - 1, 0)
+        let past = block.rw(d, vblk.T_IN, n - 1, 2, b)
+        log.put("part: ")
+        block.put_name(d)
+        log.put(": window ")
+        log.dec(st as int)
+        log.put("+")
+        log.dec(n as int)
+        log.put(": first and last read back, ")
+        log.dec(bad as int)
+        log.put(" differ; past the end ")
+        log.put(if past != 0 { "-EIO" } else { "ACCEPTED" })
+        if !ro {
+            var w: u64 = 0
+            while w < 64 {
+                wr(a + hh + w * 8, word_of(st, w) ^ MARK)
+                w += 1
+            }
+            let w1 = block.rw(d, vblk.T_OUT, 0, 1, a)
+            w = 0
+            while w < 64 {
+                wr(a + hh + w * 8, word_of(st + n - 1, w) ^ MARK)
+                w += 1
+            }
+            let w2 = block.rw(d, vblk.T_OUT, n - 1, 1, a)
+            let back = check(d, 0, b, st, MARK) + check(d, n - 1, b, st + n - 1, MARK)
+            log.put(if w1 == 0 && w2 == 0 && back == 0 { "; written and read back at " } else { "; the writes DIFFER at " })
+            log.dec(st as int)
+            log.put(" and ")
+            log.dec((st + n - 1) as int)
+        }
+        log.end()
+        d += 1
+    }
+    if !ro {
+        let _f = block.flush(0)
+    }
+    block.summary()
+    log.line("halt")
+    panic.halt()
+}
