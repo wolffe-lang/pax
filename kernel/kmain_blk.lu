@@ -1,0 +1,208 @@
+//! member: false
+// kmain_blk.lu — the disk's self-test kernel (px63, tests/mpx6-blk).
+// It brings up frames, paging and the interrupts (so a fault panics by
+// name), scans the PCI bus and starts kernel/block, which brings up
+// kernel/vblk's virtio block device when QEMU has one
+// (`-drive file=…,if=none,id=d0 -device virtio-blk-pci,drive=d0`).
+// Then:
+//
+//   pattern  on a writable disk: every sector written with its own
+//            pattern (8-byte word w of sector s is (s << 32 | w) xor
+//            PATTERN, little-endian: tests/mpx6-blk checks the image's
+//            bytes against the same formula from the host), eight
+//            sectors a request, the last request as short as the disk
+//            ends; a FLUSH; every sector read back and compared;
+//   verify   on a read-only disk (`readonly=on`: the device offers
+//            VIRTIO_BLK_F_RO): every sector read and compared with the
+//            pattern a writable boot left, then one write, which is
+//            refused by name;
+//   edges    a request past the end (the last sector and one more),
+//            refused by name before it is made; a one-sector write and
+//            read at the last sector (writable only).
+//
+// One line each, the books, then `halt`:
+//
+//     PAX: the disk
+//     blk: virtio-blk 1af4:<dddd> at …, 1.x interface, polled
+//     blk: features offered 0x…, taken 0x… (VERSION_1, FLUSH, BLK_SIZE, SEG_MAX)
+//     blk: request queue 0: 64 entries, 16 slots; capacity <s> sectors (<b> bytes), block size 512, seg_max <m>, 3 frames held
+//     block: vda: <s> sectors (<b> bytes), 254:0, read-write, flush
+//     disk: pattern: wrote <s> sectors in <r> requests, flushed, read back <s> sectors, <d> differ
+//     disk: edges: past the end -EIO, the last sector written and read back
+//     block: vda: … reads, … writes, … flushes, 0 errors, 1 refused; cache …
+//     halt
+//
+// With no disk: `disk: no virtio block device among <n> PCI functions`,
+// then `halt`. Nothing here allocates from the heap.
+use frames
+use interrupts
+use log
+use paging
+use panic
+use pci
+use serial
+use block
+use vblk
+
+extern "c" fn pax_tree_zero(dst: u64, n: u64)
+
+const PATTERN: u64 = 0x7061786469736b00 // "paxdisk\0"
+const PAGE: u64 = 4096
+
+fn word_of(s: u64, w: u64) -> u64 {
+    ((s << 32) | w) ^ PATTERN
+}
+
+fn rd(a: u64) -> u64 {
+    // # Safety: a word of a frame this kernel took, through the HHDM.
+    unsafe { (a as *u64).read_volatile() }
+}
+
+fn wr(a: u64, v: u64) {
+    // # Safety: as `rd`.
+    unsafe { (a as *u64).write_volatile(v) }
+}
+
+/// Fill the frame at `va` with the pattern of `n` sectors from `s`.
+fn fill(va: u64, s: u64, n: u64) {
+    var k: u64 = 0
+    while k < n * 64 {
+        wr(va + k * 8, word_of(s + k / 64, k % 64))
+        k += 1
+    }
+}
+
+/// How many of the `n` sectors from `s` in the frame at `va` differ
+/// from the pattern.
+fn differ(va: u64, s: u64, n: u64) -> u64 {
+    var bad: u64 = 0
+    var j: u64 = 0
+    while j < n {
+        var same = true
+        var w: u64 = 0
+        while w < 64 && same {
+            if rd(va + j * 512 + w * 8) != word_of(s + j, w) {
+                same = false
+            }
+            w += 1
+        }
+        if !same {
+            bad += 1
+        }
+        j += 1
+    }
+    bad
+}
+
+fn frame() -> u64 {
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        panic.fail("disk: no frame for the test's buffers, frames free", frames.free_count())
+    }
+    // # Safety: the frame just taken, through the HHDM.
+    unsafe { pax_tree_zero(pa + frames.hhdm(), PAGE) }
+    pa
+}
+
+/// Read every sector back into the frame at `pa` and compare: how many
+/// differ (a failed read counts its sectors).
+fn verify(pa: u64, cap: u64) -> u64 {
+    var bad: u64 = 0
+    var s: u64 = 0
+    while s < cap {
+        let n = if cap - s < 8 { cap - s } else { 8 }
+        let r = block.rw(0, vblk.T_IN, s, n, pa)
+        if r != 0 {
+            bad += n
+        } else {
+            bad += differ(pa + frames.hhdm(), s, n)
+        }
+        s += n
+    }
+    bad
+}
+
+export fn kmain() {
+    serial.init()
+    interrupts.start()
+    log.line("PAX: the disk")
+    frames.start()
+    let pml4 = paging.start()
+    let found = pci.scan()
+    let disks = block.start(pml4)
+    if disks == 0 {
+        log.put("disk: no virtio block device among ")
+        log.dec(found as int)
+        log.put(" PCI functions")
+        log.end()
+        log.line("halt")
+        panic.halt()
+    }
+    block.report()
+    let cap = block.sectors(0)
+    let ro = block.flags(0) & block.F_RO != 0
+    let a = frame()
+    let b = frame()
+    let hh = frames.hhdm()
+    if !ro {
+        var s: u64 = 0
+        var reqs: u64 = 0
+        var failed: u64 = 0
+        while s < cap {
+            let n = if cap - s < 8 { cap - s } else { 8 }
+            fill(a + hh, s, n)
+            if block.rw(0, vblk.T_OUT, s, n, a) != 0 {
+                failed += 1
+            }
+            reqs += 1
+            s += n
+        }
+        let f = block.flush(0)
+        let bad = verify(b, cap)
+        log.put("disk: pattern: wrote ")
+        log.dec(cap as int)
+        log.put(" sectors in ")
+        log.dec(reqs as int)
+        log.put(" requests")
+        if failed != 0 {
+            log.put(" (")
+            log.dec(failed as int)
+            log.put(" failed)")
+        }
+        log.put(if f == 0 { ", flushed" } else { ", the flush failed" })
+        log.put(", read back ")
+        log.dec(cap as int)
+        log.put(" sectors, ")
+        log.dec(bad as int)
+        log.put(" differ")
+        log.end()
+    } else {
+        let bad = verify(b, cap)
+        fill(a + hh, 0, 1)
+        let w = block.rw(0, vblk.T_OUT, 0, 1, a)
+        log.put("disk: verify: read ")
+        log.dec(cap as int)
+        log.put(" sectors, ")
+        log.dec(bad as int)
+        log.put(" differ; a write ")
+        log.put(if w != 0 { "refused" } else { "ACCEPTED" })
+        log.end()
+    }
+    // The edges: past the end, refused before it is made; the last sector.
+    let past = block.rw(0, vblk.T_IN, cap - 1, 2, b)
+    log.put("disk: edges: past the end ")
+    log.put(if past != 0 { "-EIO" } else { "ACCEPTED" })
+    if !ro {
+        fill(a + hh, cap - 1, 1)
+        let w = block.rw(0, vblk.T_OUT, cap - 1, 1, a)
+        // # Safety: the frame b, through the HHDM.
+        unsafe { pax_tree_zero(b + hh, PAGE) }
+        let r = block.rw(0, vblk.T_IN, cap - 1, 1, b)
+        let d = if w == 0 && r == 0 { differ(b + hh, cap - 1, 1) } else { 1 }
+        log.put(if d == 0 { ", the last sector written and read back" } else { ", the last sector DIFFERS" })
+    }
+    log.end()
+    block.summary()
+    log.line("halt")
+    panic.halt()
+}
