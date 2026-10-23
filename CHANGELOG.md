@@ -7,6 +7,23 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **A disk (px63).** A virtio block device (`kernel/vblk`, polled, on
+  px20's transport), a block layer with a 512-buffer cache
+  (`kernel/block`), and ext2 read and written (`kernel/ext2`: groups,
+  bitmaps, inodes and their indirect blocks, linear directories, fast
+  and slow symbolic links, owners past 65535, times past 2038) as the
+  tree's second store: a volume's inodes behind the same operations,
+  mounted on a directory of the memory. The kernel mounts what the
+  image's `/etc/fstab` lists before the first program (`user/fstab`: the
+  disk at `/home`, R-px63-1), write-back with a flusher every 5 seconds
+  (R-px63-3), and writes every volume clean at the halt and at root's
+  `reboot(2)`, which resets the machine. `fsync`, `fdatasync`,
+  `syncfs`, `sync`, `statfs` and `fstatfs` serve it. A host-made image
+  reads on PAX as on Linux 7.2.8 line for line, a write session leaves
+  Linux's tree and an `e2fsck -fn`-clean disk, and a note outlives a
+  reboot (`tests/mpx6-blk`, `tests/mpx6-ext2`). `tools/mkdisk` makes
+  reproducible images with e2fsprogs from a container pinned by digest.
+
 - **Mappings, FIFOs and locks (px62).** `mmap` maps a file of the tree:
   privately (the file's own frames read-only, a page copied at its first
   write, so a page not yet written shows a later `write` as Linux's does)
