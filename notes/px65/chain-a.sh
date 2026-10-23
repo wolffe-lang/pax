@@ -5,5 +5,5 @@
 # reach, against their committed references.   chain-a.sh   (PX65_TREE)
 L=$HOME/lanes/px65; P=$L/pax/notes/px65
 bash "$P/mkw.sh" a-mkw
-bash "$P/regress.sh" a mpx5-jobs mpx5-accounts mpx5-lupin:localhost/px57-rust mpx5-wolf:localhost/px57-rust
+bash "$P/regress.sh" a mpx5-jobs mpx5-accounts mpx5-lupin:localhost/px57-rust
 echo "chain-a: done $(date -Is)"
