@@ -1,0 +1,49 @@
+O=/tmp/t$(id -u); mkdir $O; cd /usr/share/bore
+s() { "$@" >$O/o 2>$O/e; echo "status $?"; cat $O/o; echo '[stderr]'; cat $O/e; }
+for c in base64 base32 comm join tsort shuf; do command -v $c; done
+s base64 hello.txt
+s base64 bytes.dat
+s base64 -w 16 b64.txt
+s base64 hello.txt b64.txt
+s base64 -w 0 hello.txt
+base64 bytes.dat | base64 -d | wc -c
+s base64 -d b64.txt
+s base64 -d bad.txt
+s base64 -d -i bad.txt
+echo aGVsbG8K | s base64 -d
+s base64 nosuch
+s base64 -w x hello.txt
+s base32 hello.txt
+s base32 -d b32.txt
+base32 bytes.dat | base32 -d | wc -c
+s base32 -d bad.txt
+s comm c1.txt c2.txt
+s comm -12 c1.txt c2.txt
+s comm -3 c1.txt c2.txt
+s comm --total c1.txt c2.txt
+s comm --output-delimiter=: c1.txt c2.txt
+s comm cu.txt c2.txt
+s comm --nocheck-order cu.txt c2.txt
+s join j1.txt j2.txt
+s join -a 1 j1.txt j2.txt
+s join -v 2 j1.txt j2.txt
+s join -a 1 -a 2 -e NONE -o 0,1.2,2.2 j1.txt j2.txt
+s join -t : -1 2 -2 1 p1.txt p2.txt
+s join -i u1.txt u2.txt
+s join --header h1.txt h2.txt
+s join j1.txt nosuch
+s tsort ts.txt
+s tsort tcyc.txt
+s tsort todd.txt
+s shuf -i 1-1
+shuf -i 1-10 | sort -n
+shuf -e a b c d | sort
+shuf lines.txt | sort -n
+shuf -n 3 -i 1-100 | wc -l
+s shuf -r -n 4 -e x
+s shuf -n 0 -i 1-3
+s shuf -i 5-1
+s shuf --random-source=lines.txt -i 1-3
+s shuf -i 1-3 -e a
+cd /; rm -r $O; echo "status $?"
+exit
