@@ -147,6 +147,15 @@ if [ -z "$images" ]; then
         # Linux: the same tree with the configs as templates, lobo and kill.
         cp -R "$r/srv" "$l/srv"
         cp "$r/bin/lobo" "$r/bin/kill" "$l/bin/"
+        # px65 (R-px65-4): and the image's account files, which the
+        # container takes over its own, so lobo reads the same accounts on
+        # both sides: since lobo's ws68 a root lobo with no `user` line
+        # drops its hands to nginx's default, the account `nobody`, when
+        # the account files name it (a master and one hand even with
+        # `worker_processes 1`), and keeps root as one process, with its
+        # warning, where they do not, as PAX's image's do not.
+        mkdir -p "$l/etc"
+        cp "$r/etc/passwd" "$r/etc/group" "$l/etc/"
         for c in "$r"/srv/conf/*.conf; do render_pax "$PAX_ROOT/user/lobo/srv/conf/${c##*/}" "$c"; done
         for c in "$r"/srv/lobo/conf/*.conf; do render_pax "$PAX_ROOT/user/lobo/srv/lobo/conf/${c##*/}" "$c"; done # px47
         pairs=()
