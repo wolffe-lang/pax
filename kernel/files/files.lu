@@ -6468,6 +6468,9 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
     if ty(d) == T_INO && tree.nlink(rf(d)) == 0 {
         return neg(ENOENT)
     }
+    if ty(d) == T_INO && tree.on_volume(rf(d)) {
+        tree.touch_read(rf(d)) // px63: a volume's directory read moves its atime, relatime's rule (measured on Linux's ext2 mount)
+    }
     var p = pos(a, fd)
     var used: u64 = 0
     var more = true
