@@ -221,9 +221,26 @@ expect("P2 the container's Linux side reaches every suite that uses it (px47)", 
 expect("P2 the accounts' keys reach mpx5-accounts (and the suites that read user/console)",
        plan(["user/console/accounts.keys"], **pr), "pr", has=["mpx5-accounts"], lacks=["mpx2-heap", "mpx4-tcp"])
 # px48: job control's own files reach mpx5-jobs and nothing they do not run.
-expect("P2 the job-control tools, busybox and the recordings are mpx5-jobs' and the fork replay's (px61)",
+expect("P2 the job-control tools, busybox and the recordings are mpx5-jobs' and the fork replay's (px61), and busybox the disk's Linux guest's (px63)",
        plan(["tools/mkjobs", "user/busybox.pin", "tools/fetch-busybox",
-             "tests/mpx5-jobs.d/linux/probe.tty", "tests/mpx5-jobs.d/linux/shell-user.tty"], **pr), "pr", ["mpx5-jobs", "mpx5-pelt"])
+             "tests/mpx5-jobs.d/linux/probe.tty", "tests/mpx5-jobs.d/linux/shell-user.tty"], **pr), "pr", ["mpx5-jobs", "mpx5-pelt", "mpx6-ext2"])
+# px63: the disk. The block device and the block layer reach its two
+# suites; the file system and the mount reach mpx6-ext2 and the user
+# suites; its tools, probes, fixture and recordings are mpx6-ext2's (the
+# probes mpx5-users' too: it reads user/elf).
+expect("P2 the block device and the block layer reach the disk's two suites (px63)",
+       plan(["kernel/vblk/vblk.lu", "kernel/block/block.lu"], **pr), "pr", ["mpx6-blk", "mpx6-ext2"])
+expect("P2 the self-test kernel and its host check are mpx6-blk's (px63)",
+       plan(["kernel/kmain_blk.lu", "tools/blk-pattern", "tests/mpx6-blk"], **pr), "pr", ["mpx6-blk"])
+expect("P2 ext2 and the mount reach mpx6-ext2 and the user suites (px63)",
+       plan(["kernel/ext2/ext2.lu", "kernel/fstab/fstab.lu"], **pr), "pr", has=["mpx6-ext2", "mpx3-tree", "mpx5-users"], lacks=["mpx6-blk", "mpx2-heap"])
+expect("P2 the disk's tools and recordings are mpx6-ext2's (px63)",
+       plan(["tools/e2fs", "tools/mkdisk", "tools/e2tree", "tools/linux-blk", "tools/mkdiskprobe",
+             "tests/mpx6-ext2.d/fixture", "tests/mpx6-ext2.d/linux/read.session", "tests/mpx6-ext2.d/disks.sha256"], **pr), "pr", ["mpx6-ext2"])
+expect("P2 the disk's probes reach mpx6-ext2 (and mpx5-users, which reads user/elf) (px63)",
+       plan(["user/elf/disk.c", "user/elf/reboot.S"], **pr), "pr", ["mpx5-users", "mpx6-ext2"])
+expect("P2 the virtio transport reaches the disk too (px63)", plan(["kernel/virtio/virtio.lu"], **pr), "pr",
+       has=["mpx6-blk", "mpx6-ext2", "mpx4-net", "mpx3-sound"], lacks=["mpx2-heap"])
 expect("P2 the job-control probe reaches mpx5-jobs (and mpx5-users, which reads user/elf)",
        plan(["user/elf/jobs.c"], **pr), "pr", ["mpx5-jobs", "mpx5-users"])
 expect("P2 the job-control keys reach mpx5-jobs (and the suites that read user/console)",
