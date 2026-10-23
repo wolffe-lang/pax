@@ -108,7 +108,13 @@ fn masks() -> !int {
     for line in text.split("\n") {
         if line.starts_with("SigIgn:") {
             let l = line.replace("\t", " ")
-            print("X: a child started under the fault ignore: {l}")
+            // px65: `~X:`, PAX's own row while PAX serves no
+            // /proc/<pid>/maps: glibc's pthread_getattr_np of the main
+            // thread reads it, so at 0.2.35 the runtime registers no
+            // main-thread guard there and installs its SEGV/BUS handler
+            // only when a runtime thread starts, after this read; on
+            // Linux the handler is in place first (SigIgn without SEGV).
+            print("~X: a child started under the fault ignore: {l}")
         }
     }
     0
