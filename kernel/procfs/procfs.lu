@@ -106,11 +106,19 @@
 //!   default, measured: PAX writes no core, pax#93), root's 0644, in a
 //!   `/proc/sys/kernel` that has nothing else (named: Linux's has many).
 //!
+//! - px66: `/proc/partitions` (`proc(5)`): kernel/block's devices, the
+//!   disk and its partitions, in Linux 7.2.8's layout (measured on the
+//!   guest: tests/mpx6-part.d/linux/); root's, 0444. Its text is made
+//!   again for each read from kernel/block (`partitions_slice`: the table
+//!   does not change after boot), so a table of 128 partitions, longer
+//!   than a page, reads whole.
+//!
 //! No region, no heap. Written from proc(5), proc_pid_status(5),
 //! cgroups(7), sysfs(5), px50's proc_pid_fd(5) and proc_pid_fdinfo(5),
 //! and black-box reads of the files on Linux. No Linux source (none of
 //! its procfs); no other kernel's source.
 
+use block
 use cred
 use frames
 use paging
@@ -123,9 +131,9 @@ use unix
 const PAGE: u64 = 4096
 
 /// How many entries there are; also `NONE`'s value.
-pub const ENTRIES: u64 = 44
+pub const ENTRIES: u64 = 45
 /// No entry.
-pub const NONE: u64 = 44
+pub const NONE: u64 = 45
 /// px44: entries 22 to 25 are `/proc/sys/fs/protected_hardlinks`,
 /// `_symlinks`, `_regular` and `_fifos` (ruling #75 R7: on, fixed).
 const PROTECTED: u64 = 22
@@ -159,6 +167,8 @@ const KERNEL: u64 = 40
 const CORE_PATTERN: u64 = 41
 const SLIMITS: u64 = 42
 const PLIMITS: u64 = 43
+/// px66: `/proc/partitions` (kernel/files makes its text at each read).
+pub const PARTITIONS: u64 = 44
 pub const FDENT: u64 = 0x1000
 pub const FIENT: u64 = 0x1400
 const FDS_MAX: u64 = 1024 // kernel/files' FDS
@@ -194,6 +204,7 @@ const G_STAT: u64 = 16 // px48
 const G_FDINFO: u64 = 17 // px50: made by kernel/files (`fdinfo`), not by `make`
 const G_CORE_PATTERN: u64 = 18 // px55
 const G_LIMITS: u64 = 19
+const G_PARTITIONS: u64 = 20 // px66
 
 // px55: the resource limits (uapi asm-generic/resource.h).
 const RLIMIT_STACK: u64 = 3
@@ -263,7 +274,7 @@ fn limit_units(res: u64) -> str {
 /// a listing lists): those below PIDDIR, and px55's `/proc/sys/kernel`
 /// and its `core_pattern`.
 pub fn fixed(e: u64) -> bool {
-    e < PIDDIR || e == KERNEL || e == CORE_PATTERN
+    e < PIDDIR || e == KERNEL || e == CORE_PATTERN || e == PARTITIONS
 }
 
 /// px55: `/proc/self/limits`'s entry (kernel/files finds it by name, as
@@ -395,6 +406,7 @@ pub fn name(e: u64) -> str {
     if e == PROTECTED + 1 { return "protected_symlinks" }
     if e == PROTECTED + 2 { return "protected_regular" }
     if e == PROTECTED + 3 { return "protected_fifos" }
+    if e == PARTITIONS { return "partitions" } // px66
     "online"
 }
 
@@ -452,7 +464,7 @@ pub fn name_byte(r: u64, i: u64) -> u64 {
 pub fn parent(r: u64) -> u64 {
     let e = entry(r)
     if e == 0 || e == 7 { return ROOT }
-    if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR { return 0 }
+    if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR || e == PARTITIONS { return 0 }
     if e == 2 || e == 3 || e == 21 || e == SCMDLINE || e == SENVIRON || e == SSTAT || e == SLIMITS { return 1 }
     if e == KERNEL { return 4 } // px55
     if e == CORE_PATTERN { return KERNEL }
@@ -492,6 +504,7 @@ fn gen(r: u64) -> u64 {
     if e == SSTAT || e == PSTAT { return G_STAT }
     if e == CORE_PATTERN { return G_CORE_PATTERN } // px55
     if e == SLIMITS || e == PLIMITS { return G_LIMITS }
+    if e == PARTITIONS { return G_PARTITIONS } // px66
     let (isfd, _n) = fd_of(r)
     if isfd { return G_CMDLINE } // px45: not a directory (px50: a link kernel/files follows; never opened itself)
     let (isfi, _m) = fi_of(r)
@@ -1183,6 +1196,10 @@ pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64)
         n = strings(base, area, if g == G_CMDLINE { 0 } else { 1 }, if slot == sched.SLOTS { paging.live() } else { sched.proc_word(slot, 3) })
     } else if g == G_LIMITS {
         n = limits(base, fds) // px55: every process's are PAX's one table
+    } else if g == G_PARTITIONS {
+        // px66: the length only; kernel/files makes each read's bytes
+        // (`block.partitions_slice`) in this frame.
+        n = block.partitions_len()
     } else if g == G_CORE_PATTERN {
         n = put_s(base, 0, "core\n") // px55: Linux's boot default; PAX writes no core
     } else if g == G_CONTROLLERS {
