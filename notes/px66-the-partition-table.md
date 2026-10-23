@@ -3,7 +3,8 @@
 Crawl 54, Opus 5.5. Contract `sprints/pax/66-the-partition-table`
 (pax#134). The prediction was committed first, `2790b7ac`
 (`notes/px66/prediction.txt`). Branch `px66` from `origin/trunk`
-`e5dfad45` (px63's merge).
+`e5dfad45` (px63's merge), rebased onto `68807993` (px64's merge: scent
+on PAX) before the merge; §6 ends with the gates rerun there.
 
 ## 1. Forbidden, and what was read
 
@@ -31,7 +32,7 @@ filed or closed; no filming words.
 
 | input | found |
 |---|---|
-| pax trunk | `e5dfad45` (px63); px64 (scent on PAX) open as a PR while this lane ran, px65 not yet |
+| pax trunk | `e5dfad45` (px63); px64 (scent on PAX) open as a PR while this lane ran, merged as `68807993` near its end (the rebase), px65 not yet |
 | `kernel/block` | px63's: a table of 4 device records, one disk (`vda`, 254:0, by vblk), the buffer cache keyed by (device, block size, block); `rw` refuses past the capacity by name |
 | `kernel/ext2` | mounts mark the volume in use in the cache (write-back: written at the flusher's first turn); unmount marks it clean when it was clean at the mount |
 | `kernel/fstab` | `/dev/vda` or `vda`; `LABEL=` and `UUID=` refused by name |
@@ -224,22 +225,34 @@ to `PAX: the console`, the same kernel and initramfs, five boots each):
 | OVMF | the ISO | 1.789 1.774 1.764 1.751 1.764 | 1.764 s |
 | OVMF | the GPT disk alone | 1.424 1.443 1.435 1.411 1.422 | 1.424 s |
 
+**At the rebased head** (`353bc5d1`, on `68807993`: px64 changed
+tools/mkinitramfs, kernel/tree, user/scent.pin and the docs), kasumi,
+native, BIOS, TCG, CPUs 0-3: tests/ci-plan 243 PASS; mpx6-part 92 rows
+PASS, none failed or skipped (the same 92 as before the rebase, P8 under
+OVMF too); mpx6-blk PASS (K1-K8); mpx6-ext2 PASS; mpx3-tree 64 rows
+PASS; mpx5-scent PASS (A1-A3 for scent and scent-user). The conflicts
+were the docs' (SOURCES.md, CHANGELOG.md, README.md), each kept both
+sides; ci.yml merged by itself with both suites' jobs.
+
 ## 7. The playground
 
 `notes/px66/play/`: px63's recipe (`build.sh` unchanged but for the
 lane's paths; `assemble.sh` with the disk's `/etc/fstab`, a motd that
 says what the disk is, and `tools/mkdisk --gpt` in place of the ISO and
 `pax-home.img`; `session.py` on the maintainer's own QEMU line, no
-CD-ROM; `boot.sh` checking both boots and the host's view).
+CD-ROM; `boot.sh` checking both boots and the host's view). Rebuilt at
+the rebased head: since px64 the image has scent as `/bin/scent`, the
+unmodified binary, with `/bin/grep` an archive link to it and scent's
+`egrep` and `fgrep` wrappers, and the motd says so.
 
 | | |
 |---|---|
-| tree | `9892044c`'s kernel and recipe (`kernel/` unchanged since `0404c429`) |
-| `pax-disk.img` | `1e4d7e97abe78e1f22d6410c0318f464eb8156077572e725d3994846bdc4daf0`, 536,870,912 bytes (512 MiB: BIOS boot 1 MiB at 1 MiB, ESP 192 MiB FAT32 of 387,101 clusters, /home 318 MiB ext2), SOURCE_DATE_EPOCH 1792787283 (`9892044c`'s time); read twice on kasumi and twice on nomad-1 after the copy (`notes/px66/play/digests.out`); a second `tools/mkdisk --gpt` with the same inputs byte-identical |
-| the oracles | sfdisk --dump (three partitions), sgdisk -v `No problems found`, fsck.fat -n `10 files, 158797/387101 clusters`, e2fsck -fn `12/81408 files` (`kasumi-assemble.out`) |
-| the copy | `rsync -S -z` to `~/pax-playground/pax-disk.img`; `pax-home.img` (`49f110e2…`, the maintainer's own writes since px63) and `pax-playground.iso` (`d51e473f…`) read before and after, unchanged |
-| the session, SeaBIOS | PASS (`kasumi-session-bios.out`): the first prompt 2.8 s after QEMU started, reboot(2) at 7.6 s, the second boot's prompt at 10.8 s, halted at 11.6 s; both boots `boot: … from a disk: partition 1` and `fstab: /dev/vda2 on /home`, mount 1 then 2; `ls -l` shows `-rw-r--r-- 1 root root 34 … notes.txt`; the second boot's `cat` prints the note; the host's `dumpe2fs -h`: `Filesystem state: clean`, mount count 2; e2fsck -fn clean; debugfs reads the note |
-| the session, UEFI | PASS (`kasumi-session-uefi.out`), Homebrew's own `edk2-x86_64-code.fd` (`33090cc0…`, copied from nomad-1) as a read-only pflash: the first prompt at 3.2 s, halted at 12.4 s, the same checks |
+| tree | `353bc5d1`'s kernel and recipe (px66 on trunk `68807993`) |
+| `pax-disk.img` | `bad23dd4933e7657a04ac285f96f5d877d73c58259ab49bdd0f6bb22bd3b8b3a`, 536,870,912 bytes (512 MiB: BIOS boot 1 MiB at 1 MiB, ESP 192 MiB FAT32 of 387,101 clusters, /home 318 MiB ext2), SOURCE_DATE_EPOCH 1792790871 (`353bc5d1`'s time); read twice on kasumi and twice on nomad-1 after the copy (`notes/px66/play/digests.out`); a second `tools/mkdisk --gpt` with the same inputs byte-identical |
+| the oracles | sfdisk --dump (three partitions), sgdisk -v `No problems found`, fsck.fat -n `10 files, 187805/387101 clusters`, e2fsck -fn `12/81408 files` (`kasumi-assemble.out`) |
+| the copy | `rsync -S -z` to `~/pax-playground/pax-disk.img`; `pax-home.img` (`49f110e2…`, the maintainer's own writes since px63) and `pax-playground.iso` (`d51e473f…`) read before and after, unchanged; the copy it replaced, the pre-rebase disk (`1e4d7e97…`), read the same just before, so nothing had written to it |
+| the session, SeaBIOS | PASS (`kasumi-session-bios.out`): the first prompt 3.0 s after QEMU started, reboot(2) at 7.8 s, the second boot's prompt at 11.3 s, halted at 12.0 s; both boots `boot: … from a disk: partition 1` and `fstab: /dev/vda2 on /home`, mount 1 then 2; `ls -l` shows `-rw-r--r-- 1 root root 34 … notes.txt`; the second boot's `cat` prints the note; the host's `dumpe2fs -h`: `Filesystem state: clean`, mount count 2; e2fsck -fn clean; debugfs reads the note |
+| the session, UEFI | PASS (`kasumi-session-uefi.out`), Homebrew's own `edk2-x86_64-code.fd` (`33090cc0…`, copied from nomad-1) as a read-only pflash: the first prompt at 3.2 s, halted at 12.6 s, the same checks |
 
 The maintainer's lines (the README's "A disk that boots"), in a terminal:
 
