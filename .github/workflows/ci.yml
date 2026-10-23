@@ -2961,6 +2961,84 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px65: boreutils' new utilities (user/boreutils.pin at 575dc7b: bu30's
+  # small file tools, bu31's text tools) in /bin, a typed session per
+  # group as root and as a user, against the same binaries in a throwaway
+  # container (tests/mpx5-bore).
+  mpx5-bore:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-bore')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+          qemu-system-x86_64 --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-bore-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the image the Linux side's container is made from (by digest)
+        run: |
+          docker pull "$PAX_TREE_IMAGE"
+          docker image inspect --format '{{.Id}} {{.RepoDigests}}' "$PAX_TREE_IMAGE"
+        env:
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+      - name: the two groups' sessions against the container, as root and as a user; the plan's legs (all four in the all tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+        run: tests/mpx5-bore $PAX_LEGS
+
+      - name: keep the programs' sums, the Linux side, the sessions, the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-bore
+          path: |
+            build/mpx5-bore/*.txt
+            build/mpx5-bore/pelt/sums.txt
+            build/mpx5-bore/bore/sums.txt
+            build/mpx5-bore/*/linux/
+            build/mpx5-bore/*/kmain_console.elf
+            build/mpx5-bore/*/*.log
+            build/mpx5-bore-*.session
+            build/mpx5-bore-*.cmp
+            build/mpx5-bore-*.log
+            build/mpx5-bore-*.norm
+            build/mpx5-bore-*.meta
+            build/mpx5-bore-*.halt
+            build/mpx5-bore-*.verdict
+            build/mpx5-bore-*.typed
+            build/mpx5-bore-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   # px57 (item 3; ruling #110): lupin (user/lupin.pin, tools/mklupin),
   # the reference interpreter, built static for x86_64-unknown-linux-musl
   # from its release tag and preinstalled on PAX as /bin/lupin with four
@@ -3547,6 +3625,7 @@ jobs:
       - mpx5-pelt
       - mpx5-aspen
       - mpx5-scent
+      - mpx5-bore
       - mpx5-lupin
       - mpx5-wolf
       - mpx5-yew
