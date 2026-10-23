@@ -6,6 +6,8 @@ PAX is a clean-room implementation of Linux's userspace ABI. It does not contain
 
 Users (P5, px38 to px47): PAX has accounts, root, `pax` (1000) and the service account `lobo` (990), in its image's `/etc/passwd` and `/etc/group`. There are no passwords yet and the image boots to root's shell; `su`, written in wolf (`user/su`), is root becoming a user, a user's `su` is refused as Linux refuses one who cannot authenticate, and a set-ID bit is not honoured, so privilege only drops. A process has Linux's real, effective, saved and file-system ids and a group list; a file has an owner, a group and a mode; and `open`, `exec`, every path walk, making, removing, renaming and linking a name, changing a mode, an owner or a time, signals, ports below 1024, raw sockets, the speaker, `/dev`'s nodes and `/proc`'s files are checked by Linux's rules, each rule measured against a real Linux (`tests/mpx5-users`, `tests/mpx5-accounts`). Since px47 every suite that runs programs on PAX — the tree, the shell, boreutils, Unix sockets, TCP, UDP, the speaker and lobo — runs them again as a user beside root, each run held byte for byte to the same binaries run as the same user on Linux. These checks are enforced for honest programs; not a boundary against an attacker: the kernel has never been fuzzed or audited, and it loads programs at fixed addresses. `login` waits for job control, and passwords for a memory-hard hash.
 
+The disk (px63): a virtio block device (`kernel/vblk`, on px20's transport), a block layer with a buffer cache (`kernel/block`), and ext2 read and written (`kernel/ext2`: the superblock, the groups, the bitmaps, inodes and their single, double and triple indirect blocks, directories, fast and slow symbolic links, owners past 65535 and times past 2038), mounted by the kernel from `/etc/fstab` (`user/fstab`: the disk at `/home`) as the tree's second store before the first program, write-back with a flusher every 5 seconds, written and marked clean at the halt and by root's `reboot(2)`, which resets the machine. `fsync`, `fdatasync`, `syncfs`, `sync`, `statfs` and `fstatfs` serve it. A host-made `mkfs.ext2` image reads on PAX as on Linux 7.2.8 line for line (`ls -l`, `stat`, `readlink`, `cat`, a 100 MiB file's sum, statfs), a write session leaves the tree Linux's does and `e2fsck -fn` finds it clean, and a note written before a reboot is read after it (`tests/mpx6-blk`, `tests/mpx6-ext2`). `/` is still the in-memory tree.
+
 Mappings, FIFOs and locks (px62): `mmap` of a file of the tree, private (the file's own frames mapped read-only and a page copied at its first write, so a page not yet written shows a later `write(2)` as on Linux) and shared (every mapping, a forked child's and `read` and `write` of the file are one set of bytes, so `msync` has nothing to write), and shared memory (`MAP_SHARED|MAP_ANONYMOUS`, `/dev/zero`) across `fork`, with SIGBUS for a page past a file's end and a file cut under its mappings unmapped past its new end in every process; `mremap` with `MREMAP_MAYMOVE`, grown in place or moved without copying a byte (`MREMAP_FIXED` and `MREMAP_DONTUNMAP` refused by name), so the musl wolf's allocator grows its blocks on PAX as on Linux; FIFOs made by `mkfifo` and `mknodat` and opened by fifo(7)'s rules; and `flock` on open files. Two static probes print the same lines on PAX and on Linux as root and as a user (`tests/mpx3-maps`), and pelt's FIFO row runs as on Linux, 22 of 22 (`tests/mpx5-pelt`).
 
 Job control (px48): process groups and sessions, the console as a controlling terminal (`TIOCSCTTY`, `TIOCNOTTY`, `TIOCGPGRP`, `TIOCSPGRP`, `TIOCGSID`), `kill` to a group, stops and continues and the waits that report them, Ctrl-C, Ctrl-\\ and Ctrl-Z for the console's foreground group only, the background rules (`SIGTTIN`, `TOSTOP`'s `SIGTTOU`), hangup and the orphaned group, and `/proc/<pid>/stat`, each measured against real Linux as root and as a user; a distribution's static Almquist shell (Ubuntu's `busybox-static`, `sh -i`) runs `sleep 100 &`, `jobs`, Ctrl-Z, `bg`, `fg`, `kill %2` and `wait` on PAX's console byte for byte as on Linux (`tests/mpx5-jobs`). The image's shell, pid 1, leads its session with the console as its terminal, as a getty would give it on Linux.
@@ -52,7 +54,8 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
               wolf) and mpx4-udp*.run, mpx4-tcp*.run (the commands
               tests/mpx4-udp and tests/mpx4-tcp run); lope.pin and
               shrc (px54: lope, preinstalled, and the console shell's
-              $ENV file, its hook)
+              $ENV file, its hook); fstab (px63: the images' mount
+              table, the disk at /home)
     tools/    the harness: fetch-limine, fetch-wolf, fetch-lupin,
               build-stub, build-kernel, mkimage, qemu-run, qemu-halt
               (--type: a typed session, px13; --no-screen, px19; --qemu, px18),
@@ -73,13 +76,19 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
               static C probes), linux-tree (px27: a session's Linux
               side in a throwaway container, its root a tmpfs: for
               programs that remove files), mklope (px54: lope static,
-              from a clone of its private tree)
+              from a clone of its private tree), e2fs, mkdisk, e2tree,
+              linux-blk, mkdiskprobe and blk-pattern (px63: e2fsprogs
+              from a container pinned by digest; a reproducible ext2
+              image, empty, a home or a tree; an image's tree as debugfs
+              lists it; the host's Linux on QEMU with the image as its
+              disk; the disk probe and /bin/reboot; the self-test's
+              pattern read from the host)
     font/     the screen's font (px19): Spleen 8x16, BSD-2-Clause, with
               its licence
     tests/    scripted QEMU tests: proof, mkw (with M-KW's frozen kernels
               in mkw.d/), mpx1, mpx2-frames, mpx2-paging, mpx2-interrupts,
               mpx2-sched, mpx3-user, mpx3-loader, mpx3-boreutils, mpx3-console,
-              mpx3-screen, mpx3-speaker (px18), mpx3-threads (px26), mpx3-tree (px27), mpx3-sound (px30), mpx4-net (px20, px21), mpx4-udp (px22), mpx4-tcp (px23), mpx5-lope (px54), gdb-attach,
+              mpx3-screen, mpx3-speaker (px18), mpx3-threads (px26), mpx3-tree (px27), mpx3-sound (px30), mpx4-net (px20, px21), mpx4-udp (px22), mpx4-tcp (px23), mpx5-lope (px54), mpx6-blk and mpx6-ext2 (px63), gdb-attach,
               expect-serial-selftest
     docs/     BOOT.md (the boot protocol, argued), SOURCES.md (the
               consulted-sources log), ABI notes as they come
@@ -121,6 +130,9 @@ PAX_WOLF=$(tools/fetch-wolf) tests/mpx4-tcp   # px23: TCP; ten witnesses against
 tests/mpx4-tcp --images build/mpx4-tcp --accel kvm   # boot them elsewhere (hasu under KVM)
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx3-tree   # px27: the writable tree; a static probe and a typed session against Linux's tmpfs, a soak and a fill (the Linux side runs in a throwaway container: docker or podman; nothing under test runs on the host)
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx3-maps   # px62: mremap, file and shared mappings, FIFOs and flock; two static probes against Linux's tmpfs, root and a user (the Linux side in throwaway containers)
+PAX_WOLF=$(tools/fetch-wolf) tests/mpx6-blk    # px63: the virtio block device's self-test: a pattern written, flushed, read back and read from the host; read-only; no disk
+PAX_WOLF=$(tools/fetch-wolf) tests/mpx6-ext2   # px63: ext2 read, written and rebooted, held to Linux 7.2.8 on QEMU (live where the kernel is readable, else the record) and to e2fsck -fn (e2fsprogs in a container: docker or podman)
+tools/mkdisk --home 128M pax-home.img          # px63: the disk an image mounts at /home (pax/ for the user pax), reproducible under SOURCE_DATE_EPOCH
 tools/gateway-probe --dns dns.google         # px22: what this host's QEMU DNS server answers, with no guest
 tools/qemu-halt --elf K.elf --marker halt --cmd 'info tlb' K.iso   # monitor answers on the halted machine (K.log.cmd1)
 tools/qemu-fault --marker 'write: .*' K.iso                        # a kernel that must fault: CR2 from the stopped machine
@@ -151,6 +163,24 @@ image (`tests/mpx3-console`'s `console-pelt.iso`, `tests/mpx3-shell`'s
 every byte (`serial.log`). With `-display none` the screen is drawn
 where nobody sees it, and `-vga none` (`tools/qemu-run --no-screen`)
 boots a machine with no display at all: the console is serial only.
+
+## A disk that outlives the boot (px63)
+
+Everything an image holds is in memory and gone at the next boot, but
+for a disk: give QEMU an ext2 image as a virtio block device and the
+kernel mounts it where the image's `/etc/fstab` says (`user/fstab`,
+the playground's: `/home`):
+
+```sh
+tools/mkdisk --home 128M pax-home.img
+qemu-system-x86_64 -machine q35 -cpu max -m 512M -display cocoa \
+    -serial file:serial.log -nic none -cdrom IMAGE.iso \
+    -drive file=pax-home.img,if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0
+```
+
+Without `-no-reboot`, root's `reboot` restarts the machine and the same
+disk boots again; `e2fsck -fn pax-home.img` and `debugfs` read it on the
+host between boots (the file is the file system: no partition table).
 
 ## The dev image (px60)
 
