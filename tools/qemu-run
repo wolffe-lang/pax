@@ -3,7 +3,7 @@
 #
 #   tools/qemu-run [--firmware bios|uefi] [--serial FILE] [--serial-input FIFO]
 #                  [--timeout SECS] [--accel auto|kvm|tcg] [--gdb PORT]
-#                  [--no-screen] IMAGE.iso [-- QEMU-ARGS...]
+#                  [--no-screen] [--boot-disk] IMAGE [-- QEMU-ARGS...]
 #
 # The machine: q35, 256 MiB, no NIC, `-nographic`, COM1 to FILE (default
 # build/serial.log), `-no-reboot` (a triple fault ends the run instead of
@@ -15,6 +15,14 @@
 # --no-screen (px19) boots the machine with no display device at all
 # (`-vga none`): Limine hands the kernel no framebuffer, so the console
 # is serial only, as on a machine with no screen.
+#
+# --boot-disk (px66) gives QEMU the IMAGE as a disk, not a CD-ROM: a
+# raw image on a virtio block device that the firmware boots first
+# (`-drive file=IMAGE,if=none,id=d0,format=raw -device
+# virtio-blk-pci,drive=d0,bootindex=0`), with no `-cdrom` and no
+# `-boot d`: a GPT disk made by tools/mkdisk --gpt, Limine on its EFI
+# system partition and in its BIOS boot partition. The disk is written
+# in place (the kernel's `vda`): give a copy.
 #
 # --serial-input FIFO (px13) also gives COM1 an input: QEMU's file
 # character device with `input-path`, so what is written to FIFO is what
@@ -41,7 +49,7 @@
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
-firmware=bios serial=$PAX_BUILD/serial.log serial_in= timeout=30 accel=auto gdb_port= image= noscreen=0
+firmware=bios serial=$PAX_BUILD/serial.log serial_in= timeout=30 accel=auto gdb_port= image= noscreen=0 bootdisk=0
 while [ $# -gt 0 ]; do
     case $1 in
         --firmware) firmware=$2; shift 2 ;;
@@ -51,13 +59,14 @@ while [ $# -gt 0 ]; do
         --accel)    accel=$2; shift 2 ;;
         --gdb)      gdb_port=$2; shift 2 ;;
         --no-screen) noscreen=1; shift ;;
+        --boot-disk) bootdisk=1; shift ;;
         --)         shift; break ;;
         -h|--help)  sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
         -*)         die "unknown option: $1" ;;
         *)          [ -z "$image" ] || die "one image only"; image=$1; shift ;;
     esac
 done
-[ -n "$image" ] || die "usage: qemu-run [options] IMAGE.iso [-- QEMU-ARGS...]"
+[ -n "$image" ] || die "usage: qemu-run [options] IMAGE [-- QEMU-ARGS...]"
 [ -f "$image" ] || die "no image: $image"
 case $timeout in ''|*[!0-9]*) die "--timeout takes whole seconds" ;; esac
 qemu=${PAX_QEMU:-qemu-system-x86_64}
@@ -77,9 +86,12 @@ cmd=("$qemu"
      -machine q35 -cpu max -m 256M -accel "$accel"
      -nographic -monitor none -parallel none -nic none
      -no-reboot
-     -device isa-debug-exit,iobase=0xf4,iosize=0x04
-     -drive "file=$image,format=raw,media=cdrom,readonly=on"
-     -boot d)
+     -device isa-debug-exit,iobase=0xf4,iosize=0x04)
+if [ "$bootdisk" = 1 ]; then
+    cmd+=(-drive "file=$image,if=none,id=d0,format=raw" -device virtio-blk-pci,drive=d0,bootindex=0)
+else
+    cmd+=(-drive "file=$image,format=raw,media=cdrom,readonly=on" -boot d)
+fi
 [ "$noscreen" = 0 ] || cmd+=(-vga none)
 
 if [ -n "$serial_in" ]; then
