@@ -4,6 +4,7 @@
 #
 #   tools/mkdisk [--from DIR] [--attrs FILE] [--label NAME] [--block BYTES]
 #                [--inodes N] SIZE OUT.img
+#   tools/mkdisk --home SIZE OUT.img
 #
 # SIZE is bytes, or a number with K, M or G (powers of 1024). The image
 # is made by e2fsprogs' own `mkfs.ext2` (tools/e2fs: the container image
@@ -28,6 +29,11 @@
 # change times the modification time's when left out). `#` lines and
 # empty ones are skipped. Then `e2fsck -fn` must find the image clean.
 #
+# --home (px63) is the disk a PAX image mounts at /home (user/fstab): one
+# directory, pax/ (the images' user's home: 0755, 1000:1000), labelled
+# pax-home; the playground's pax-home.img and tests/mpx6-ext2's home
+# disk (whose digest it records) are made by it.
+#
 # Prints the commands' count, the e2fsck verdict, and
 # `OUT <bytes> bytes sha256 <hex>`. Exit 0, 1 when e2fsck finds a fault,
 # 2 on a usage or tool error.
@@ -38,6 +44,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -98,6 +105,14 @@ def main(argv):
     bs = 4096
     inodes = None
     args = argv[1:]
+    home = None
+    if args and args[0] == "--home":
+        args = args[1:]
+        home = tempfile.mkdtemp(prefix="pax-home.")
+        os.makedirs(os.path.join(home, "tree", "pax"))
+        with open(os.path.join(home, "attrs"), "w") as f:
+            f.write("/pax 755 1000 1000\n")
+        src, attrs, label = os.path.join(home, "tree"), os.path.join(home, "attrs"), "pax-home"
     while args and args[0].startswith("--"):
         if len(args) < 2:
             die("%s takes a value" % args[0])
@@ -115,8 +130,8 @@ def main(argv):
             inodes = int(v)
         else:
             die("unknown option %s" % k)
-    if len(args) != 2:
-        die("usage: mkdisk [--from DIR] [--attrs FILE] [--label NAME] [--block BYTES] [--inodes N] SIZE OUT.img")
+    if len(args) != 2 or (home and (args[0].startswith("--") or len(argv) != 4)):
+        die("usage: mkdisk [--from DIR] [--attrs FILE] [--label NAME] [--block BYTES] [--inodes N] SIZE OUT.img | mkdisk --home SIZE OUT.img")
     size = size_of(args[0])
     out = os.path.abspath(args[1])
     if bs not in (1024, 2048, 4096) or size % bs:
@@ -242,6 +257,9 @@ def main(argv):
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     print("%s %d bytes sha256 %s" % (out, size, h.hexdigest()))
+    os.unlink(cf)
+    if home:
+        shutil.rmtree(home, ignore_errors=True)
 
 
 if __name__ == "__main__":

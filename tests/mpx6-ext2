@@ -23,8 +23,9 @@
 #           tests/mpx6-ext2.d/read.sh;
 #   write   the write disk read-write (write-back, the default) at /mnt;
 #           write.sh (user/elf/disk.c's write session, then the shell's);
-#   reboot  the home disk at /home; reboot.sh writes /home/pax/notes.txt
-#           and runs /bin/reboot on the first boot, reads it back on the
+#   reboot  the home disk at /home (user/fstab, the table the images
+#           with a disk carry); reboot.sh writes /home/pax/notes.txt and
+#           runs /bin/reboot on the first boot, reads it back on the
 #           second.
 #
 # The Linux side (`--only linux`, or with the build): tools/linux-blk runs
@@ -39,8 +40,9 @@
 # CI's pr tier: E0-E3, E8, E9 on the read boot; --rows all, the default
 # and the full and all tiers', every one):
 #   E0 build: every program static; kmain_console built; the images made;
-#      each disk's sha256 the recorded one (reproducible); the Linux side
-#      ran (or its record is there).
+#      each disk's sha256 the recorded one (reproducible), checked on
+#      every run (the home disk is `tools/mkdisk --home`'s, the disk the
+#      playground is given); the Linux side ran (or its record is there).
 #   E1 the disk and the mount: one `blk: virtio-blk` line; `fstab: /dev/vda
 #      on <dir>: ext2, <read-only|read-write>, …`; kernel/ext2's line
 #      `…; clean, mount <n>; …`; no `ext2: vda:` fault line, no
@@ -116,13 +118,12 @@ make_disks() { # dir -> reasons
     if python3 "$D/fixture" "$w/disktree/fixture" > "$w/fixture.txt" \
         && SOURCE_DATE_EPOCH=$EPOCH "$PAX_ROOT/tools/mkdisk" --from "$w/disktree/fixture" --attrs "$w/disktree/fixture.attrs" \
             --label pax-fixture 160M "$w/fixture.img" > "$w/fixture.mkdisk.txt"; then :; else printf ' the fixture disk;'; fi
-    mkdir -p "$w/disktree/write/pre" "$w/disktree/home/pax"
+    mkdir -p "$w/disktree/write/pre"
     printf 'kept\n' > "$w/disktree/write/pre/kept.txt"
     printf 'gone\n' > "$w/disktree/write/pre/gone.txt"
     SOURCE_DATE_EPOCH=$EPOCH "$PAX_ROOT/tools/mkdisk" --from "$w/disktree/write" --label pax-write 64M "$w/write.img" > "$w/write.mkdisk.txt" \
         || printf ' the write disk;'
-    printf '/pax 755 1000 1000\n' > "$w/disktree/home.attrs"
-    SOURCE_DATE_EPOCH=$EPOCH "$PAX_ROOT/tools/mkdisk" --from "$w/disktree/home" --attrs "$w/disktree/home.attrs" --label pax-home 32M "$w/home.img" > "$w/home.mkdisk.txt" \
+    SOURCE_DATE_EPOCH=$EPOCH "$PAX_ROOT/tools/mkdisk" --home 32M "$w/home.img" > "$w/home.mkdisk.txt" \
         || printf ' the home disk;'
     rm -rf "$w/disktree"
 }
@@ -216,9 +217,11 @@ if [ -z "$images" ]; then
         case $img in
             read)   fs='/dev/vda /mnt ext2 ro 0 0'; script=read.sh ;;
             write)  fs='/dev/vda /mnt ext2 defaults 0 0'; script=write.sh ;;
-            reboot) fs='/dev/vda /home ext2 defaults 0 2'; script=reboot.sh ;;
+            reboot) fs=; script=reboot.sh ;;
         esac
-        printf '%s\n' "$fs" > "$work/$img.fstab"
+        # The reboot image's table is the repository's own, user/fstab
+        # (the disk at /home, comments and tabs and all).
+        if [ -n "$fs" ]; then printf '%s\n' "$fs" > "$work/$img.fstab"; else cp "$PAX_ROOT/user/fstab" "$work/$img.fstab"; fi
         printf '/bin/sh /etc/disk/%s\n' "$script" > "$work/$img.run"
         args=()
         for f in "$work"/bin/*; do args+=("/bin/${f##*/}=$f:755"); done
