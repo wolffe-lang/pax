@@ -97,7 +97,10 @@ FILES_ROWS = [
     ("truncate -s 0", s("truncate -s 0 a", 0) + s("stat -c %s a", 0, ["0"])),
     ("truncate of a FIFO: refused by name", ["$ s truncate -s 4 f1", "{msg}", "[stderr]", "truncate: {msg}"]),
     ("truncate -o: refused by name", ["$ s truncate -o -s 1 a", "{msg}", "[stderr]", "truncate: {msg}"]),
-    ("an invalid size", s("truncate -s 1Q a", 1, err=["truncate: invalid number: '1Q'"])),
+    # px65: Q is a suffix since GNU 9.1 (quetta: 1Q is 2^100), so the row
+    # is the overflow's, the reason the C library's strerror(EOVERFLOW).
+    ("a size past 2^63 (1Q, 2^100)",
+     s("truncate -s 1Q a", 1, err=["truncate: Invalid number: '1Q': Value too large for defined data type"])),
     ("no size and no reference",
      s("truncate a", 1, err=usage("truncate", "truncate: you must specify either '--size' or '--reference'"))),
     ("truncate of a directory", s("truncate -s 4 d", 1, err=["truncate: cannot open 'd' for writing: Is a directory"])),
