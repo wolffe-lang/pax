@@ -886,6 +886,23 @@ pixel and, on the VT's own 80×25 grid, to the VT's cells directly
 - The answers are not typed before anyone types, nor after COM1 input:
   a serial terminal answers for itself (R-px59-4).
 
+## grep is scent: the archive's links (px64)
+
+scent, grep in wolf (`user/scent.pin`, `tools/mkscent`), runs as
+`/bin/grep`, a symbolic link the image's archive carries
+(`notes/px64-scent-on-pax.md`, `tests/mpx5-scent`). The 27 calls it makes
+by name on Linux (`notes/px64/census.out`, strace) are all served, but
+`set_robust_list` and `rseq` (-ENOSYS, as for every glibc program); the
+one kernel change is the link.
+
+| module | what |
+|---|---|
+| `tree/` | `adopt` makes an archive entry of cpio's link type (mode 0120000, the target its data, 1 to 4095 bytes) a link of the tree as `symlink` makes one (`S_IFLNK|0777`, the target copied into a frame, the entry's owner and time); another length is left out, as a device or a FIFO still is |
+
+- What is not there: an archive's hard links (an entry with a link
+  count over one is still a file of its own, as before); its devices and
+  FIFOs.
+
 ## Who may name, change and keep (px44)
 
 The fourth lane of the users campaign (`notes/px44-the-names.md`). The
