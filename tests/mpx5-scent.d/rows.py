@@ -109,8 +109,11 @@ ROWS = [
     ("the argv0 seam (wolf-lang#899, #904): /bin/grep's diagnostic says grep: (GNU's says /bin/grep:)",
      s("/bin/grep --bad", 2, err=["grep: unrecognized option '--bad'", "Usage: grep [OPTION]... PATTERNS [FILE]...",
                                   "Try 'grep --help' for more information."])),
+    # px65: pelt 70eec14 (sh24) says a simple command's end by a signal
+    # through the command's own redirected standard error, so the line is
+    # the error file's last, after the runtime's panic text.
     ("an argument that is not UTF-8, from a #! line (wolf-lang#406, #904): the runtime aborts",
-     ["$ s ./ff-arg", "pelt: ended by signal 6 (ABRT)", "status 134", "[stderr]"] + PANIC),
+     ["$ s ./ff-arg", "status 134", "[stderr]"] + PANIC + ["pelt: ended by signal 6 (ABRT)"]),
     ("pelt cannot pass byte FF: its $'\\377' is ?", s("grep -F x $'\\377'", 2, err=["grep: ?: No such file or directory"])),
     ("-r is M2: refused by name", s("grep -r cat .", 2, err=["scent: not yet implemented: r (M2)"])),
     ("--version is scent's own", ["$ grep --version | head -n 1", "scent 0.1.0"]),
