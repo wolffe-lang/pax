@@ -1,0 +1,278 @@
+//! fstab — the volumes the kernel mounts before the first program
+//! (px63; R-px63-1, recommended and implemented, not decided).
+//!
+//! **The table** is the initramfs's `/etc/fstab` (the repository's
+//! `user/fstab`), read once by kmain_console after the tree is made and
+//! the disks are up, before `/etc/pax-run`'s first command: PAX's init is
+//! the kernel's run list, and no program of PAX's mounts anything, so the
+//! kernel does what a distribution's init does with the same file. A
+//! line is fstab(5)'s, its fields separated by spaces or tabs, `#` a
+//! comment:
+//!
+//!     <spec> <file> <vfstype> <mntops> [<freq> [<passno>]]
+//!
+//! `spec` names a disk as Linux would (`/dev/vda`, or `vda`); `LABEL=`
+//! and `UUID=` are refused by name. `file` is an absolute path to a
+//! directory of the in-memory tree (not `/`). `vfstype` is `ext2` (any
+//! other refused by name). `mntops` is a comma list: `defaults`, `rw`,
+//! `ro`, `sync` (every change written before the system call returns:
+//! write-through), `async` (written at fsync, sync, unmount, halt or
+//! reboot: write-back), `nofail` (a disk that is not there is not said),
+//! `relatime`, `nosuid`, `nodev`, `noexec` (named in the line and not
+//! acted on: PAX honours no set-ID bit and has no device nodes); anything
+//! else is named as ignored. `freq` and `passno` are read and ignored
+//! (PAX runs no fsck: the host's `e2fsck` is the check).
+//!
+//! One line a mount, and one for a line that mounts nothing:
+//!
+//!     fstab: /dev/vda on /home: ext2, read-write, write-through
+//!     ext2: vda: <kernel/ext2's mount line>
+//!     fstab: /dev/vda for /home: no such disk; /home stays the tree's
+//!
+//! Written from fstab(5) and mount(8)'s option names. No Linux source;
+//! no other system's init or mount source.
+
+use block
+use ext2
+use initramfs
+use log
+use tree
+
+const PATH: str = "/etc/fstab"
+
+/// The options a line asks for.
+const O_RO: u64 = 1
+const O_SYNC: u64 = 2
+const O_ASYNC: u64 = 4
+const O_NOFAIL: u64 = 8
+
+fn byte(a: u64) -> u64 {
+    // # Safety: a byte of the initramfs's /etc/fstab, mapped read-only in
+    // the HHDM for the kernel's life.
+    let v = unsafe { (a as *u8).read_volatile() }
+    v as u64
+}
+
+fn blank(b: u64) -> bool {
+    b == 32 || b == 9
+}
+
+fn is(a: u64, n: u64, s: str) -> bool {
+    var k: u64 = 0
+    for c in s.bytes() {
+        if k >= n || byte(a + k) != c as int as u64 {
+            return false
+        }
+        k += 1
+    }
+    k == n
+}
+
+fn put_span(a: u64, n: u64) {
+    var k: u64 = 0
+    while k < n {
+        log.put_byte(byte(a + k) as int)
+        k += 1
+    }
+}
+
+/// The memory directory the absolute path [a, a + n) names, or NONE.
+fn walk(a: u64, n: u64) -> u64 {
+    if n == 0 || byte(a) != 47 {
+        return tree.NONE
+    }
+    var d = tree.ROOT
+    var s: u64 = 1
+    while s < n {
+        var e = s
+        while e < n && byte(a + e) != 47 {
+            e += 1
+        }
+        if e > s {
+            let c = tree.lookup(d, a + s, e - s)
+            if c == tree.NONE || !tree.is_dir(c) {
+                return tree.NONE
+            }
+            d = c
+        }
+        s = e + 1
+    }
+    d
+}
+
+/// Mount what `/etc/fstab` lists (kmain_console, after `user.start` and
+/// `block.start`, before the first program): how many were mounted.
+pub fn mount_all() -> u64 {
+    let e = initramfs.lookup(PATH)
+    if e == initramfs.END {
+        return 0
+    }
+    let base = initramfs.data(e)
+    let size = initramfs.size(e)
+    var mounted: u64 = 0
+    var i: u64 = 0
+    while i < size {
+        var j = i
+        while j < size && byte(base + j) != 10 {
+            j += 1
+        }
+        if mount_line(base + i, j - i) {
+            mounted += 1
+        }
+        i = j + 1
+    }
+    mounted
+}
+
+/// One line of the table: whether it mounted a volume.
+fn mount_line(a: u64, n: u64) -> bool {
+    // The fields' starts and lengths: up to four are read.
+    var fa: u64 = 0
+    var fl: u64 = 0
+    var ga: u64 = 0
+    var gl: u64 = 0
+    var ta: u64 = 0
+    var tl: u64 = 0
+    var oa: u64 = 0
+    var ol: u64 = 0
+    var k: u64 = 0
+    var field: u64 = 0
+    while k < n {
+        while k < n && blank(byte(a + k)) {
+            k += 1
+        }
+        if k >= n {
+            break
+        }
+        if field == 0 && byte(a + k) == 35 {
+            return false // a comment
+        }
+        let s = k
+        while k < n && !blank(byte(a + k)) {
+            k += 1
+        }
+        if field == 0 {
+            fa = a + s
+            fl = k - s
+        } else if field == 1 {
+            ga = a + s
+            gl = k - s
+        } else if field == 2 {
+            ta = a + s
+            tl = k - s
+        } else if field == 3 {
+            oa = a + s
+            ol = k - s
+        }
+        field += 1
+    }
+    if field == 0 {
+        return false
+    }
+    if field < 3 {
+        log.put("fstab: refused: a line of fewer than three fields: ")
+        put_span(a, n)
+        log.end()
+        return false
+    }
+    // The options.
+    var opts: u64 = 0
+    var p: u64 = 0
+    var ignored: u64 = 0
+    var ia: u64 = 0
+    var il: u64 = 0
+    while p < ol {
+        var q = p
+        while q < ol && byte(oa + q) != 44 {
+            q += 1
+        }
+        let w = oa + p
+        let wl = q - p
+        if is(w, wl, "ro") {
+            opts = opts | O_RO
+        } else if is(w, wl, "rw") {
+            opts = opts & !O_RO
+        } else if is(w, wl, "sync") {
+            opts = (opts | O_SYNC) & !O_ASYNC
+        } else if is(w, wl, "async") {
+            opts = (opts | O_ASYNC) & !O_SYNC
+        } else if is(w, wl, "nofail") {
+            opts = opts | O_NOFAIL
+        } else if !(is(w, wl, "defaults") || is(w, wl, "relatime") || is(w, wl, "nosuid") || is(w, wl, "nodev") || is(w, wl, "noexec") || wl == 0) {
+            if ignored == 0 {
+                ia = w
+                il = wl
+            }
+            ignored += 1
+        }
+        p = q + 1
+    }
+    if !is(ta, tl, "ext2") {
+        log.put("fstab: refused: ")
+        put_span(fa, fl)
+        log.put(" on ")
+        put_span(ga, gl)
+        log.put(": a file system type PAX does not mount (")
+        put_span(ta, tl)
+        log.put("; ext2 is the one)")
+        log.end()
+        return false
+    }
+    let d = block.by_name(fa, fl)
+    if d == block.DEVS {
+        if opts & O_NOFAIL == 0 {
+            log.put("fstab: ")
+            put_span(fa, fl)
+            log.put(" for ")
+            put_span(ga, gl)
+            log.put(if fl > 5 && (is(fa, 5, "LABEL") || is(fa, 4, "UUID")) { ": a disk named by label or UUID is refused by name; " } else { ": no such disk; " })
+            put_span(ga, gl)
+            log.put(" stays the tree's")
+            log.end()
+        }
+        return false
+    }
+    let point = walk(ga, gl)
+    if point == tree.NONE {
+        log.put("fstab: ")
+        put_span(fa, fl)
+        log.put(" for ")
+        put_span(ga, gl)
+        log.put(": no such directory in the tree; not mounted")
+        log.end()
+        return false
+    }
+    let wt = opts & O_ASYNC == 0
+    let _old = block.set_policy(if wt { block.WRITE_THROUGH } else { block.WRITE_BACK })
+    let m = tree.mount(point, d, opts & O_RO != 0)
+    if ext2.failed(m) {
+        log.put("fstab: ")
+        put_span(fa, fl)
+        log.put(" on ")
+        put_span(ga, gl)
+        log.put(": not mounted, -")
+        log.dec((!m + 1) as int)
+        log.end()
+        return false
+    }
+    let v = tree.mounted(m)
+    log.put("fstab: ")
+    put_span(fa, fl)
+    log.put(" on ")
+    put_span(ga, gl)
+    log.put(": ext2, ")
+    log.put(if ext2.read_only(v) != 0 { "read-only" } else { "read-write" })
+    log.put(if wt { ", write-through" } else { ", write-back" })
+    if ignored != 0 {
+        log.put(", ignored: ")
+        put_span(ia, il)
+        if ignored > 1 {
+            log.put(" and ")
+            log.dec((ignored - 1) as int)
+            log.put(" more")
+        }
+    }
+    log.end()
+    ext2.report(v)
+    true
+}
