@@ -2880,6 +2880,87 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px64: scent (user/scent.pin, tools/mkscent), grep in wolf, preinstalled
+  # on PAX as /bin/scent with /bin/grep an archive link to it and its
+  # egrep/fgrep wrappers run by /bin/sh (pelt), typed at pelt: a session as
+  # root and as a user against the same binaries in a throwaway container
+  # (tools/linux-tree) and GNU grep 3.12's answers. scent is public:
+  # tools/mkscent fetches it.
+  mpx5-scent:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-scent')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+          qemu-system-x86_64 --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-scent-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the image the Linux side's container is made from (by digest)
+        run: |
+          docker pull "$PAX_TREE_IMAGE"
+          docker image inspect --format '{{.Id}} {{.RepoDigests}}' "$PAX_TREE_IMAGE"
+        env:
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+      - name: scent's session against the container, as root and as a user; the plan's legs (all four in the all tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+        run: tests/mpx5-scent $PAX_LEGS
+
+      - name: keep the programs' sums, the Linux side, the sessions, the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-scent
+          path: |
+            build/mpx5-scent/*.txt
+            build/mpx5-scent/scent/sums.txt
+            build/mpx5-scent/pelt/sums.txt
+            build/mpx5-scent/bore/sums.txt
+            build/mpx5-scent/linux/
+            build/mpx5-scent/*/kmain_console.elf
+            build/mpx5-scent/*/*.log
+            build/mpx5-scent-*.session
+            build/mpx5-scent-*.cmp
+            build/mpx5-scent-*.log
+            build/mpx5-scent-*.norm
+            build/mpx5-scent-*.meta
+            build/mpx5-scent-*.halt
+            build/mpx5-scent-*.verdict
+            build/mpx5-scent-*.typed
+            build/mpx5-scent-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   # px57 (item 3; ruling #110): lupin (user/lupin.pin, tools/mklupin),
   # the reference interpreter, built static for x86_64-unknown-linux-musl
   # from its release tag and preinstalled on PAX as /bin/lupin with four
@@ -3391,6 +3472,7 @@ jobs:
       - mpx5-lope
       - mpx5-pelt
       - mpx5-aspen
+      - mpx5-scent
       - mpx5-lupin
       - mpx5-wolf
       - mpx5-yew
