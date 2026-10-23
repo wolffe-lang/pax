@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# linux-part — ask this host's Linux kernel, booted under QEMU with a
+# disk image on a virtio block device, what partitions it finds there
+# (px66): the reference side of tests/mpx6-part, black-box.
+#
+#   tools/linux-part [--kernel VMLINUZ] [--modules DIR] [--busybox FILE]
+#                    [--accel tcg|kvm] [--device-opts OPTS] [--append ARGS]
+#                    OUTDIR IMAGE
+#
+# Builds an initramfs in OUTDIR from a static busybox (the px13-ubuntu
+# container's by default), util-linux's lsblk and blkid with the
+# libraries they link (from tools/e2fs's pinned image, the CI runner's
+# release: `ldd` there names them), and the disk's module when the
+# kernel does not have it built in (virtio_blk, modules.builtin); boots
+# VMLINUZ on q35 with `-drive file=IMAGE,if=none,id=d0,format=raw,
+# readonly=on -device virtio-blk-pci,drive=d0[,OPTS]` (OPTS: e.g.
+# `logical_block_size=4096,physical_block_size=4096`; --append ARGS adds
+# to the kernel's command line, e.g. `gpt`, which makes Linux read the
+# backup GPT header when the primary is not valid: measured), and prints on the
+# guest's serial console (OUTDIR/serial.log), each between `linux-part:
+# begin <what>` and `linux-part: end <what>`:
+#   partitions  /proc/partitions, as it is;
+#   sysfs       for vda and each /sys/block/vda/vda*: its name, `dev`,
+#               `start` (a partition's), `size`, `partition`, `ro`;
+#   lsblk       `lsblk -b -o NAME,START,SIZE,PARTUUID` (the contract's
+#               columns) and `lsblk -b -n -l -o NAME,MAJ:MIN,PARTLABEL,
+#               PARTTYPE,PARTUUID,UUID,LABEL`;
+#   blkid       `blkid -p -o export` of vda and each partition, then
+#               `blkid -c /dev/null` of them all (the spellings an
+#               fstab line names a volume by: PARTUUID=, UUID=, LABEL=,
+#               PARTLABEL=; lsblk's PARTUUID column is empty in a guest
+#               with no udev, measured, so blkid's is the answer);
+#   dmesg       the kernel's own lines that name the disk or its table
+#               (`GPT`, `vda`, `partition`, `Alternate`, `Primary`).
+# Then it powers off. OUTDIR/guest.txt is those sections, carriage
+# returns removed. Exit 0 when the guest ran to its end line, 1 when not,
+# 2 on a usage or tool error. Black-box only: the kernel, its modules
+# and the programs are run, never read.
+set -euo pipefail
+die() { echo "linux-part: $*" >&2; exit 2; }
+kernel=/usr/lib/modules/$(uname -r)/vmlinuz
+modules=/usr/lib/modules/$(uname -r)
+busybox=
+accel=tcg
+devopts=
+append=
+image=${PAX_E2FS_IMAGE:-docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55}
+engine=${PAX_ENGINE:-}
+if [ -z "$engine" ]; then
+    if command -v podman >/dev/null 2>&1; then engine=podman; else engine=docker; fi
+fi
+while [ $# -gt 0 ]; do
+    case $1 in
+        --kernel) kernel=$2; shift 2 ;;
+        --modules) modules=$2; shift 2 ;;
+        --busybox) busybox=$2; shift 2 ;;
+        --accel) accel=$2; shift 2 ;;
+        --device-opts) devopts=,$2; shift 2 ;;
+        --append) append=" $2"; shift 2 ;;
+        -*) die "unknown option $1" ;;
+        *) break ;;
+    esac
+done
+[ $# -eq 2 ] || die "usage: linux-part [opts] OUTDIR IMAGE"
+out=$1; img=$2
+[ -f "$img" ] || die "no image $img"
+[ -r "$kernel" ] || die "cannot read the kernel $kernel"
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+root=$out/root
+rm -rf "$root"
+mkdir -p "$root"/{bin,dev,proc,sys,lib/modules,tmp,etc,run}
+
+if [ -z "$busybox" ]; then
+    podman run --rm -v "$root/bin:/o" px13-ubuntu cp /usr/bin/busybox /o/busybox >/dev/null \
+        || die "busybox from px13-ubuntu"
+else
+    cp "$busybox" "$root/bin/busybox"
+fi
+# lsblk and blkid with their libraries, at their own paths.
+opts=()
+[ "$engine" = podman ] && opts=(--security-opt label=disable) || opts=(--user "$(id -u):$(id -g)")
+"$engine" run --rm --network none "${opts[@]}" -v "$root:/o" "$image" bash -c '
+    set -e
+    for p in /usr/bin/lsblk /usr/sbin/blkid; do
+        mkdir -p "/o$(dirname "$p")"; cp "$p" "/o$p"
+        for l in $(ldd "$p" | sed -n "s/.*=> \(\/[^ ]*\) .*/\1/p; s/^[[:space:]]*\(\/[^ ]*\) .*/\1/p"); do
+            r=$(readlink -f "$l"); mkdir -p "/o$(dirname "$l")"; cp "$r" "/o$l"
+        done
+    done' || die "lsblk and blkid from $image"
+
+# The disk's module, when it is not built in.
+if ! grep -Eq '/virtio[-_]blk\.ko$' "$modules/modules.builtin" 2>/dev/null; then
+    line=$(grep -E '/virtio[-_]blk\.ko(\.zst|\.xz|\.gz)?:' "$modules/modules.dep" | head -n 1)
+    [ -n "$line" ] || die "virtio_blk neither built in nor in modules.dep"
+    path=${line%%:*}
+    case $path in
+        *.zst) zstd -q -d -c "$modules/$path" > "$root/lib/modules/virtio_blk.ko" ;;
+        *.xz) xz -d -c "$modules/$path" > "$root/lib/modules/virtio_blk.ko" ;;
+        *.gz) gzip -d -c "$modules/$path" > "$root/lib/modules/virtio_blk.ko" ;;
+        *) cp "$modules/$path" "$root/lib/modules/virtio_blk.ko" ;;
+    esac
+fi
+
+cat > "$root/init" <<'INIT'
+#!/bin/busybox sh
+/bin/busybox mkdir -p /usr/bin /sbin /usr/sbin
+/bin/busybox --install -s /bin
+export PATH=/usr/sbin:/usr/bin:/bin
+mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev
+[ -f /lib/modules/virtio_blk.ko ] && insmod /lib/modules/virtio_blk.ko
+n=0; while [ ! -b /dev/vda ] && [ $n -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
+sleep 0.5
+echo "linux-part: uname $(uname -r)"
+echo "linux-part: begin partitions"; cat /proc/partitions; echo "linux-part: end partitions"
+echo "linux-part: begin sysfs"
+for d in /sys/block/vda /sys/block/vda/vda*; do
+    [ -e "$d/dev" ] || continue
+    n=${d##*/}
+    printf '%s dev %s start %s size %s partition %s ro %s\n' "$n" "$(cat $d/dev)" "$(cat $d/start 2>/dev/null || echo -)" \
+        "$(cat $d/size)" "$(cat $d/partition 2>/dev/null || echo -)" "$(cat $d/ro)"
+done | sort -V
+echo "linux-part: end sysfs"
+echo "linux-part: begin lsblk"
+/usr/bin/lsblk -b -o NAME,START,SIZE,PARTUUID /dev/vda
+/usr/bin/lsblk -b -n -l -o NAME,MAJ:MIN,PARTLABEL,PARTTYPE,PARTUUID,UUID,LABEL /dev/vda
+echo "linux-part: end lsblk"
+echo "linux-part: begin blkid"
+for b in /dev/vda /dev/vda[0-9]*; do [ -b "$b" ] || continue; echo "== $b"; /usr/sbin/blkid -p -o export "$b"; echo "status $?"; done
+/usr/sbin/blkid -c /dev/null /dev/vda /dev/vda[0-9]* | sort -V
+echo "linux-part: end blkid"
+echo "linux-part: begin dmesg"
+dmesg | sed 's/^\[[ 0-9.]*\] //' | grep -E 'GPT|vda|[Pp]artition|Alternate|Primary|EFI'
+echo "linux-part: end dmesg"
+echo "linux-part: end"
+poweroff -f
+INIT
+chmod +x "$root/init"
+(cd "$root" && find . | cpio -o -H newc --quiet) > "$out/initramfs.cpio"
+
+acc=(-accel tcg -cpu max)
+[ "$accel" = kvm ] && acc=(-accel kvm -cpu host)
+set +e
+timeout 600 qemu-system-x86_64 -machine q35 "${acc[@]}" -m 1G -nographic -no-reboot \
+    -kernel "$kernel" -initrd "$out/initramfs.cpio" \
+    -append "console=ttyS0 quiet loglevel=1 panic=-1$append" \
+    -drive "file=$img,if=none,id=d0,format=raw,readonly=on" -device "virtio-blk-pci,drive=d0$devopts" \
+    -nic none > "$out/serial.log" 2>&1 < /dev/null
+rc=$?
+set -e
+echo "linux-part: qemu exit $rc" >> "$out/serial.log"
+tr -d '\r' < "$out/serial.log" | sed -n 's/^.*\(linux-part: uname\)/\1/; /^linux-part: uname/,/^linux-part: end$/p' > "$out/guest.txt"
+grep -q '^linux-part: end$' "$out/guest.txt" || exit 1
+exit 0
