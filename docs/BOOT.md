@@ -140,6 +140,39 @@ then runs `xorriso -as mkisofs` with Limine's documented hybrid flags and
 under SeaBIOS, from a cdrom under OVMF, and (later) written raw to a USB
 stick.
 
+## The disk beside the image (px63)
+
+The ISO is read-only and its initramfs lives in memory, so nothing
+written survives a boot. A second file, a raw disk image, does: QEMU
+gives it to PAX as a virtio block device,
+
+    -drive file=pax-home.img,if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0
+
+and the boot goes on as before up to the first program, with three
+steps added in `kernel/kmain_console`:
+
+1. `kernel/block` finds the disks: `kernel/vblk` brings up each virtio
+   block device on the PCI transport (`blk: virtio-blk 1af4:1042 at …`),
+   one queue, polled requests, and the block layer names it `vda`
+   (device 254:0, as Linux numbers it).
+2. `kernel/fstab` reads the initramfs's `/etc/fstab` (the repository's
+   `user/fstab`: `/dev/vda /home ext2 defaults 0 2`, R-px63-1) and
+   mounts each line through `kernel/ext2` onto a directory of the
+   in-memory tree, the tree's second store (`fstab: /dev/vda on /home:
+   ext2, read-write, write-back`). A disk that is not there leaves the
+   directory the tree's, said once. Root stays the in-memory tree
+   (R-px63-2 reports what a disk at `/` would take).
+3. When a volume is write-back (the default, R-px63-3), a kernel thread
+   writes its changed blocks every 5 seconds.
+
+At the end (init's last program ends, or root's `reboot(2)`), every
+volume is written, flushed and marked clean before the halt or the
+reset. The disk is ext2 as `mkfs.ext2` makes it (`tools/mkdisk`; the
+playground's by `tools/mkdisk --home`), so the host reads and checks
+it with e2fsprogs (`e2fsck -fn`, `debugfs`) and Linux mounts it as
+it is. An image booted with no disk boots as before: no `blk:` line,
+and `/home` the tree's.
+
 ## Measured
 
 The proof's runs, both firmwares, the same ISO on linux and macOS: see
