@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+# tests/mpx6-part.d/compare — hold what PAX found on a disk to what the
+# Linux guest found on the same image (px66, tests/mpx6-part P1, P2).
+#
+#   compare PAX.serial GUEST.txt [--sfdisk DUMP]
+#
+# PAX.serial: a kmain_part (or kmain_console) boot's serial log, carriage
+# returns removed. Its partitions are kernel/block's report lines,
+#   block: vdaN: MAJ:MIN, sectors F-L (N sectors, B bytes), type T, PARTUUID U[, name "X"]
+# and its /proc/partitions the `part: | ` lines (kmain_part) or the
+# lines between `part: begin partitions` and `part: end partitions`
+# (a session's `cat /proc/partitions`).
+#
+# GUEST.txt: tools/linux-part's guest.txt: the sysfs lines (name, dev,
+# start, size), blkid's PARTUUID= and PARTLABEL=, /proc/partitions.
+# With --sfdisk DUMP (sfdisk --dump of the image), the reference is the
+# dump instead (a table the guest does not read: entries larger than 128
+# bytes), its device numbers by the guest's rule (254:N to 15, then 259
+# from 0 in order) and its /proc/partitions made from the dump in the
+# guest's layout.
+#
+# Prints `PASS P1 …`/`FAIL P1 …` and `PASS P2 …`/`FAIL P2 …`, the
+# differences under a FAIL; exit 0 when both hold, 1 otherwise.
+import re
+import sys
+
+
+def parse_pax(text):
+    parts = {}
+    for m in re.finditer(r'^block: (vda\d+): (\d+):(\d+), sectors (\d+)-(\d+) \((\d+) sectors, \d+ bytes\), type (\S+), PARTUUID ([0-9a-f-]+)(?:, name "(.*)")?$', text, re.M):
+        name, ma, mi, f, l, n, typ, pu, pl = m.groups()
+        parts[name] = {"dev": "%s:%s" % (ma, mi), "start": int(f), "size": int(n), "partuuid": pu, "partlabel": pl}
+    proc = [l[len("part: | "):] if l != "part: |" else "" for l in text.split("\n") if l.startswith("part: |")]
+    if not proc:
+        m = re.search(r'^part: begin partitions\n(.*?)^part: end partitions$', text, re.M | re.S)
+        if m:
+            proc = m.group(1).rstrip("\n").split("\n")
+    return parts, "\n".join(proc)
+
+
+def section(text, what):
+    m = re.search(r'^linux-part: begin %s\n(.*?)^linux-part: end %s$' % (what, what), text, re.M | re.S)
+    return m.group(1) if m else ""
+
+
+def parse_guest(text):
+    parts = {}
+    for l in section(text, "sysfs").splitlines():
+        w = l.split()
+        if len(w) >= 7 and w[0] != "vda":
+            parts[w[0]] = {"dev": w[2], "start": int(w[4]), "size": int(w[6]), "partuuid": None, "partlabel": None}
+    for l in section(text, "blkid").splitlines():
+        m = re.match(r'^/dev/(vda\d+): (.*)$', l)
+        if m and m.group(1) in parts:
+            kv = dict(re.findall(r'(\w+)="([^"]*)"', m.group(2)))
+            parts[m.group(1)]["partuuid"] = kv.get("PARTUUID")
+            parts[m.group(1)]["partlabel"] = kv.get("PARTLABEL")
+    return parts, section(text, "partitions").rstrip("\n")
+
+
+def parse_sfdisk(dump, disk_sectors):
+    parts = {}
+    order = []
+    for l in dump.splitlines():
+        m = re.match(r'^\S+?(\d+) : start=\s*(\d+), size=\s*(\d+), type=([0-9A-Fa-f-]+)(?:, uuid=([0-9A-Fa-f-]+))?(?:, name="(.*)")?', l)
+        if m:
+            k, s, n, _t, u, nm = m.groups()
+            order.append(int(k))
+            parts["vda%s" % k] = {"start": int(s), "size": int(n), "partuuid": u.lower() if u else None, "partlabel": nm}
+    ext = 0
+    for k in sorted(order):
+        p = parts["vda%d" % k]
+        if k <= 15:
+            p["dev"] = "254:%d" % k
+        else:
+            p["dev"] = "259:%d" % ext
+            ext += 1
+    lines = ["major minor  #blocks  name", "", "%4d  %7d %10d %s" % (254, 0, disk_sectors // 2, "vda")]
+    for k in sorted(order):
+        p = parts["vda%d" % k]
+        ma, mi = p["dev"].split(":")
+        lines.append("%4d  %7d %10d %s" % (int(ma), int(mi), p["size"] // 2, "vda%d" % k))
+    return parts, "\n".join(lines)
+
+
+def main(argv):
+    if len(argv) not in (3, 5):
+        sys.stderr.write("usage: compare PAX.serial GUEST.txt [--sfdisk DUMP]\n")
+        return 2
+    pax = open(argv[1], errors="replace").read().replace("\r", "")
+    guest = open(argv[2], errors="replace").read().replace("\r", "")
+    pp, pproc = parse_pax(pax)
+    if len(argv) == 5:
+        m = re.search(r'^\s*254\s+0\s+(\d+) vda$', guest, re.M)
+        sectors = int(m.group(1)) * 2 if m else 0
+        gp, gproc = parse_sfdisk(open(argv[4]).read(), sectors)
+        ref, refs = "sfdisk's dump", "sfdisk's dump (the guest reads none here)"
+    else:
+        gp, gproc = parse_guest(guest)
+        ref, refs = "the guest", "the guest's"
+    ok = True
+    diffs = []
+    for name in sorted(set(pp) | set(gp), key=lambda n: int(n[3:])):
+        a, b = pp.get(name), gp.get(name)
+        if a is None or b is None:
+            diffs.append("  %s: PAX %s, %s %s" % (name, "has it" if a else "has none", ref, "has it" if b else "has none"))
+            continue
+        for k in ("dev", "start", "size", "partuuid", "partlabel"):
+            if b.get(k) is not None and a.get(k) != b.get(k):
+                diffs.append("  %s %s: PAX %r, %s %r" % (name, k, a.get(k), ref, b.get(k)))
+    if diffs:
+        ok = False
+        print("FAIL P1 the table: %d partitions on PAX, %d by %s" % (len(pp), len(gp), ref))
+        print("\n".join(diffs[:40]))
+    else:
+        print("PASS P1 the table: %d partitions, each its name, numbers, start, size, PARTUUID and PARTLABEL as %s" % (len(pp), refs))
+    if pproc == gproc and gproc:
+        print("PASS P2 /proc/partitions: %d lines, byte for byte %s" % (len(gproc.split("\n")), refs))
+    else:
+        ok = False
+        print("FAIL P2 /proc/partitions differs from %s" % refs)
+        a, b = pproc.split("\n"), gproc.split("\n")
+        for i in range(max(len(a), len(b))):
+            x = a[i] if i < len(a) else "<none>"
+            y = b[i] if i < len(b) else "<none>"
+            if x != y:
+                print("  line %d: PAX %r, %s %r" % (i + 1, x, ref, y))
+                break
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
