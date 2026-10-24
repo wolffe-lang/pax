@@ -44,7 +44,7 @@ for d in "$img"/*.img; do
     [ -f "$d" ] && cmp -s -n 4096 "$d" /dev/zero && rm -f "$d"
 done
 rc=0
-taskset -c 0-3 "tests/$suite" --images "$img" --tier native --firmware bios > "$B.boot.log" 2>&1 || rc=$?
+env -u PAX_ROOTDISK taskset -c 0-3 "tests/$suite" --images "$img" --tier native --firmware bios > "$B.boot.log" 2>&1 || rc=$?
 drc=-
 if [ "${PAX_ROOTDISK:-0}" = 1 ]; then
     # the CI step's own tool: the same images booted again with / on a disk
