@@ -71,12 +71,12 @@
 //!   swapped), steady (no blink: a picture of the screen is the same
 //!   whenever it is taken), unless hidden (DECTCEM).
 //!
-//! **The two screens** (px70): each eight-byte pair holds the main
-//! screen's 32-bit cell in bits 0-31 and the alternate's in bits 32-63.
-//! Each cell has glyph bits 0-7, foreground 8-11, background 12-15 and
-//! the recorded blink bit 16. Storage is 256 KiB (64 frames), up from
-//! px59's 128 KiB; a scroll still moves only the active half. Item 7
-//! measures a separate-buffer layout after the attributes settle.
+//! **The two screens** (px70): two independent 32-bit-cell grids,
+//! each MAX_COLS * MAX_ROWS cells. A cell has glyph bits 0-7, foreground
+//! 8-11, background 12-15 and recorded blink bit 16. Together 256 KiB
+//! (64 frames), the same as the packed32+32 layout required by blink.
+//! The alternate grid follows the main grid; scrolling uses a bulk copy
+//! confined to the active grid. Paired TCG measurements decide item 7.
 //!
 //! The 16 colours are the PC's text-mode palette: 0 black 000000, 1 red
 //! aa0000, 2 green 00aa00, 3 brown aa5500, 4 blue 0000aa, 5 magenta
@@ -113,7 +113,7 @@ extern "c" fn pax_fb_copy(dst: u64, src: u64, bytes: u64)
 extern "c" fn pax_fb_fill(dst: u64, v: u64, qwords: u64)
 
 extern "c" let pax_screen_state: *u64
-extern "c" let pax_screen_cells: *u64
+extern "c" let pax_screen_cells: *u32
 extern "c" let pax_screen_early: *u8
 extern "c" let pax_font: *u8
 
@@ -239,21 +239,21 @@ fn answer_cpr() {
     answer_byte(82)
 }
 
-/// Cell `i`: one 32-bit half of a pair. Bit 16 records blink; it is
-/// deliberately drawn steady until the timer hook (px71) exists.
+/// Two independent 32-bit-cell buffers, main then alternate. Bit 16
+/// records blink; it remains steady until the timer hook (px71) exists.
+fn cells_base() -> u64 {
+    // # Safety: assembly-owned storage for two MAX_COLS * MAX_ROWS grids.
+    unsafe { pax_screen_cells as u64 + sv(S_ALT) * MAX_COLS * MAX_ROWS * 4 }
+}
+
 fn cell(i: u64) -> u64 {
-    // # Safety: i < cols * rows <= 256 * 128, inside pax_screen_cells.
-    let packed = unsafe { ((pax_screen_cells as u64 + i * 8) as *u64).read_volatile() }
-    (packed >> (sv(S_ALT) * 32)) & 0xffffffff
+    // # Safety: i < cols * rows <= MAX_COLS * MAX_ROWS.
+    unsafe { ((cells_base() + i * 4) as *u32).read_volatile() as u64 }
 }
 
 fn put_cell(i: u64, v: u64) {
-    // # Safety: as `cell`; only the active screen's half changes.
-    let p = unsafe { (pax_screen_cells as u64 + i * 8) as *u64 }
-    let old = unsafe { p.read_volatile() }
-    let packed = if sv(S_ALT) == 0 { (old & 0xffffffff00000000) | (v & 0xffffffff) }
-        else { (old & 0xffffffff) | ((v & 0xffffffff) << 32) }
-    unsafe { p.write_volatile(packed) }
+    // # Safety: as cell; the inactive grid is at a different base.
+    unsafe { ((cells_base() + i * 4) as *u32).write_volatile(v as u32) }
 }
 
 /// Row `r` of glyph `g` (g < 256, r < 16).
@@ -405,12 +405,11 @@ fn scroll() {
         pax_fb_copy(va, va + band, (rows - 1) * band)
         pax_fb_fill(va + (rows - 1) * band, pb | (pb << 32), band / 8)
     }
+    // # Safety: overlapping upward copy within the active grid only.
+    // MOVSQ permits unaligned addresses; the helper copies a byte remainder.
+    let grid = cells_base() + base * 4
+    unsafe { pax_fb_copy(grid, grid + cols * 4, (rows - 1) * cols * 4) }
     var i: u64 = 0
-    while i < (rows - 1) * cols {
-        put_cell(base + i, cell(base + i + cols)) // active region and screen only
-        i += 1
-    }
-    i = 0
     while i < cols {
         put_cell(base + (rows - 1) * cols + i, c)
         i += 1
@@ -780,7 +779,7 @@ fn dispatch(b: u64) {
     }
 }
 
-/// Entry clears the alternate half but keeps the cursor, as the measured VT.
+/// Entry clears the alternate grid but keeps the cursor, as the measured VT.
 fn alternate(on: bool) {
     if (sv(S_ALT) != 0) == on { return }
     hide()

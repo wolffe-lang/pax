@@ -11,11 +11,11 @@
                        pending wrap, the colours, the escape parser,
                        the UTF-8 decoder, the palette's 16 pixel values,
                        the counters kernel/screen reports
-     pax_screen_cells  256 x 128 eight-byte pairs, the text grid (the
+     pax_screen_cells  two 256 x 128 four-byte grids, main then alternate (the
                        glyph's code point in bits 0-7, the foreground
                        colour in bits 8-11, the background in 12-15),
-                       bit 16 records blink, main in bits 0-31 and alternate
-                       in bits 32-63; row by row, `cols` pairs a row
+                       bit 16 records blink; each grid is row-major,
+                       `cols` cells a row
      pax_screen_early  16384 bytes: what the kernel wrote before the
                        screen was attached, replayed onto it at attach
 
@@ -63,7 +63,7 @@ pax_screen_state:
         .p2align 12
         .globl pax_screen_cells
 pax_screen_cells:
-        .zero 256 * 128 * 8
+        .zero 2 * 256 * 128 * 4
         .p2align 12
         .globl pax_screen_early
 pax_screen_early:
