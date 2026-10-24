@@ -2122,6 +2122,14 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
             return reboot(a2 & 0xffffffff) // px63: served for root
         }
     }
+    // px67: mount(2) and umount2(2) served for root (kernel/files); a
+    // user's still kernel/process's (-EPERM, umount2's path first).
+    if nr == SYS_MOUNT && cred.privileged(a) {
+        return files.mount_call(a, pml4, r0, a1, a2, a3, a4)
+    }
+    if nr == SYS_UMOUNT2 && cred.privileged(a) {
+        return files.umount_call(a, pml4, r0, a1)
+    }
     if nr == SYS_CHROOT || nr == SYS_SETTIMEOFDAY || nr == SYS_MOUNT || nr == SYS_UMOUNT2 || nr == SYS_REBOOT || nr == SYS_SETHOSTNAME || nr == SYS_SETDOMAINNAME || nr == SYS_CLOCK_SETTIME {
         return process.root_call(nr, r0, a1, a2)
     }
