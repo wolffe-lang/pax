@@ -29,6 +29,15 @@
                         EPERM, the path's errors first
      mounts end         `/` remounted read-only and sync(2), as an init
                         does before reboot(2)
+     mounts linger [halt|restart]
+                        two children left running when it returns, for
+                        the end's rows, each in a session of its own
+                        (setsid: a daemon, which no terminal's hang-up
+                        reaches): one waits in pause(2) (SIGTERM's
+                        default ends it), one ignores SIGTERM (only
+                        SIGKILL ends it); each says it has started;
+                        with `halt` or `restart` it then asks reboot(2)
+                        for that itself (sync(2) first, as reboot(8) does)
 
    Every call is printed with its answer (`= 0` or `= -1 ENAME`). Lines
    that begin `~` hold what is the kernel's own to choose (mount ids,
@@ -52,6 +61,7 @@
 #include <sys/statvfs.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -291,6 +301,27 @@ static void user(int uid, const char *dev, const char *dir) {
     say("user %d: end, status %d\n", uid, WIFEXITED(st) ? WEXITSTATUS(st) : -1);
 }
 
+static void linger(const char *then) {
+    for (int k = 0; k < 2; k++) {
+        pid_t p = fork();
+        if (p == 0) {
+            setsid();
+            if (k == 1)
+                signal(SIGTERM, SIG_IGN);
+            say("linger %d: pid %d, SIGTERM %s\n", k, (int)getpid(), k == 1 ? "ignored" : "default");
+            for (;;)
+                pause();
+        }
+    }
+    sleep(1); /* both have said so before the parent returns */
+    if (then) {
+        sync();
+        errno = 0;
+        long r = reboot(strcmp(then, "restart") == 0 ? RB_AUTOBOOT : RB_HALT_SYSTEM);
+        say("reboot(%s) %s\n", then, ans(r));
+    }
+}
+
 static void end(void) {
     mnt("none", "/", NULL, MS_REMOUNT | MS_RDONLY, NULL);
     sync();
@@ -308,6 +339,10 @@ int main(int argc, char **argv) {
     }
     if (argc >= 5 && strcmp(argv[1], "user") == 0) {
         user(atoi(argv[2]), argv[3], argv[4]);
+        return 0;
+    }
+    if (argc >= 2 && strcmp(argv[1], "linger") == 0) {
+        linger(argc >= 3 ? argv[2] : NULL);
         return 0;
     }
     if (argc >= 2 && strcmp(argv[1], "end") == 0) {
@@ -335,6 +370,6 @@ int main(int argc, char **argv) {
         for (;;)
             pause();
     }
-    say("usage: mounts table | calls DEV DIR | user UID DEV DIR | end | init [DEV DIR [disk-tmp [no-end]]]\n");
+    say("usage: mounts table | calls DEV DIR | user UID DEV DIR | end | linger [halt|restart] | init [DEV DIR [disk-tmp [no-end]]]\n");
     return 2;
 }
