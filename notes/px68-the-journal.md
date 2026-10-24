@@ -3,9 +3,9 @@
 Crawl 54, Opus 5.5. Contract `sprints/pax/68-the-journal/px68-the-journal.md`
 (pax#150). The prediction was committed first (`a594343c`,
 `notes/px68/prediction.txt`). Branch `px68` from `origin/trunk`
-`54570380` (px67's merge). **This is the note's first version** (the
-lane's mid-point hand-back): §6's suite runs on kasumi, §8's CI, §9's
-plants and §7's playground are still running or not yet run, and say so.
+`54570380` (px67's merge). The final head, its `tier pr` run and the
+lane-audit line are the PR's; this note is the lane's record of what was
+built, measured and seen red.
 
 ## 1. Forbidden, and what was read
 
@@ -53,7 +53,7 @@ any init system or mount tool, of e2fsprogs, dosfstools or Limine.
 | about 1,300 kernel lines: kernel/journal ~900, ext2 ~200, block ~120, tree/fstab/user ~40, kmain ~30 | 1,863 inserted, 67 deleted at the first hand-back: kernel/journal 1,213 (with its header), ext2 +466/-~50, block +143, fstab +56, files +20, kmain_console +23, tree +9 | wrong: 1.4 times; the journal module 1.35 times, ext2 twice (the features' names, the journal's opening and its refusals) |
 | the crash row: counts 0, orphans 0, worse 0 on all 24; lost writes on ~20, none on the rest | 24 kills, 0 counts, 0 orphans, 0 worse; every disk within the last commit's bound and its tree e2fsck -fy's; the torn row held (notes/px68/crash/c1-journal.txt; the first run's classes put a kill before any commit under `none`, 9 of them: since fixed, a kill's class is against the operations done, so those are lost writes: the final row in §6) | right on the gate |
 | the session's cost within 10% of px67's (1.05 times) | 30.11, 30.09, 30.14 s against the same kernel's ext2 30.08, 30.05, 30.07 s (and px67's 30.09): 1.001 times; the halt 0.061 s against 0.041 to 0.061 s | right, and closer than guessed |
-| replay at boot not visible, under 50 ms | (§6: the serial's clock across the recovery line) | pending |
+| replay at boot not visible, under 50 ms | PENDING-rt (§6: QEMU's timestamped trace, the journal superblock's read to the FLUSH after its rewrite) | PENDING-rt |
 | the first oracle row to disagree: e2fsck -fn on PAX's first clean unmount, about the journal superblock or needs_recovery | none disagreed: the first smoke boots' e2fsck -fn and e2fsck -fy found nothing on PAX's disks; the first red was the crash tool's own classification (above) | wrong |
 
 ## 4. What was built
@@ -112,11 +112,14 @@ torn row, `--check`); `tools/linux-root --fstype`. The probe
 (`user/elf/mounts.c`): churn prints the realtime clock after each
 operation and takes a sync interval; `revoke`.
 
-**Tests.** `tests/mpx6-journal` (J0-J9: the format; the session's
+**Tests.** `tests/mpx6-journal` (J0-J10: the format; the session's
 commits in order by QEMU's trace; a power cut and the next boot; the
 replay against e2fsck's on 13 crafted journals and in order; the
 refusals; the guest's lines; the crash row gated; the books; PAX's own
-revocation). `tests/mpx6-root` on the journalled root, its guest an
+revocation; a replay cut short by a failed write (QEMU's blkdebug,
+`-set drive.d0.file=blkdebug:…`) and the boot after, which is the row
+that holds "the log is emptied only after the blocks are home" to
+e2fsck). `tests/mpx6-root` on the journalled root, its guest an
 ext3 root (R8 the journal's power cut; R8e px67's on ext2). CI job
 `mpx6-journal`; `tools/ci-tiers.map` and `tests/ci-plan`.
 
@@ -184,58 +187,121 @@ list (s_last_orphan, super.rst), processed at the mount. Recommended:
 **(A) its own lane**, before or with fsck (px72, §11's draft), with a
 probe that unlinks an open file and a cut; not implemented here.
 
-## 6. Witnesses and measurements (first pass)
+## 6. Witnesses and measurements
 
 **The crash row**, `tools/root-crash --n 24 --seed 67 --ops 1500 --times
-3 --torn --check`, kasumi, SeaBIOS, kmain_console built from `660656e3`'s
-tree, then the same kernel with `--no-journal` (`notes/px68/crash.sh`,
-`notes/px68/crash/`):
+3 --torn --check`, kasumi, SeaBIOS, then the same kernel and probe with
+`--no-journal` (`notes/px68/crash.sh`). Two runs: c1 with
+`660656e3`'s kernel and the first classification (a kill before any
+commit counted `none`), c2 with the head's kernel and probe and the
+fixed classification (a kill's class against the operations done, the
+bound apart), `notes/px68/crash/c{1,2}-{journal,ext2}.txt`:
 
-| class | px67 (ext2, its kernel) | this kernel, ext2 | this kernel, ext3 |
-|---|---|---|---|
-| none | 0 | 0 | 9 (kills before the first commit: lost writes by the fixed class) |
-| lost writes | 20 | 20 | 15 |
-| counts | 4 | 4 (kill 11 `Free blocks count wrong for group #0`, kills 22-24 `-1942 -1973`) | **0** |
-| orphans | 0 | 0 | **0** |
-| worse | 0 | 0 | **0** |
-| the torn row | — | — | commit 2 of the kill at 12.07 s torn: the tree is commit 1's (operations to 248-249), and e2fsck -fy's the same |
+| class | px67 (ext2, its kernel) | c2: the head's kernel, ext2 | c1: ext3 | c2: the head's kernel, ext3 |
+|---|---|---|---|---|
+| none | 0 | PENDING-c2 | 9 (before the first commit) | PENDING-c2 |
+| lost writes | 20 | PENDING-c2 | 15 | PENDING-c2 |
+| counts | 4 | PENDING-c2 | **0** | PENDING-c2 |
+| orphans | 0 | PENDING-c2 | **0** | PENDING-c2 |
+| worse | 0 | PENDING-c2 | **0** | PENDING-c2 |
+| the torn row | — | — | commit 2 of the kill at 12.07 s torn: the tree is commit 1's | PENDING-c2 |
+
+c1's ext2 at the same kernel was px67's row exactly: 20 lost writes, 4
+counts (kill 11 `Free blocks count wrong for group #0`, kills 22-24
+`Block bitmap differences: -1942 -1973`), 0, 0.
 
 Every journalled disk: `clean, needs_recovery` after the kill, `clean`
 after PAX's replay and halt; its tree within the last commit's bound
 (the operations up to the last whose clock read came before the commit's
 time, or the next); e2fsck -fy of a copy replayed the same journal and
 fixed nothing else, its /churn the same as PAX's field for field. The
-replays: 0 to 5 transactions, 50 to 335 blocks, 0 revoked (the churn
+replays: 0 to 5 transactions, 35 to 335 blocks, 0 revoked (the churn
 frees no logged block: J9 is the row that does). Lost after the last
 commit: 17 to 231 operations (the flusher's 5 s).
 
 **Cost** (`--times 3`, the uncut session `churn: begin` to `churn: end`,
-then to `halt`, the host's clock): ext3 30.11, 30.09, 30.14 s and 0.061,
-0.061, 0.062 s; ext2 (same kernel) 30.08, 30.05, 30.07 s and 0.041,
-0.061, 0.061 s; px67's 30.09 s.
+then to `halt`, the host's clock):
 
-Pending at this hand-back (batch b1 on kasumi): `tests/mpx6-journal` with
-its Linux side recorded, `tests/mpx6-root` with its Linux side re-recorded
-(ext3, 7.3.0), mpx6-ext2, mpx6-part, mpx6-blk; then the playground
-(batch b2); then the final crash row at the final head, the plants, CI.
+| | session (s) | halt (s) |
+|---|---|---|
+| px67 (ext2, its kernel) | 30.09 | — |
+| c1: ext2, `660656e3` | 30.08, 30.05, 30.07 | 0.041, 0.061, 0.061 |
+| c1: ext3, `660656e3` | 30.11, 30.09, 30.14 | 0.061, 0.061, 0.062 |
+| c2: ext2, the head | PENDING-c2 | PENDING-c2 |
+| c2: ext3, the head | PENDING-c2 | PENDING-c2 |
+
+**The replay's time** (`notes/px68/replay-time.sh`: a journal-suite cut
+disk killed 7, 15 and 25 s into `mounts churn 1500`, booted again under
+QEMU's trace with `-msg timestamp=on`; TCG, the host's clock):
+PENDING-rt
+
+**The suites on kasumi** (`notes/px68/run-suite.sh`, the build in
+`px13-ubuntu`, the boots native SeaBIOS, `notes/px68/batch.sh`):
+
+| batch | suite | tree | result |
+|---|---|---|---|
+| b1 | mpx6-journal (Linux side recorded) | `e15979b9` | 20 PASS, 0 FAIL, 1,283 s (J7 the 12-kill row with the torn one: 12 lost writes, 0 counts, 0 orphans, 0 worse) |
+| b1 | mpx6-root (Linux side re-recorded) | `e15979b9` | 27 PASS, 2 rows red: R6 (the guest's ext3 remount prints `EXT4-fs (vda2): re-mounted <uuid> r/w.` on the console in the middle of the probe's `mount(…) = 0` line, which ext2 under 7.2.8 never did: `ba9fdaf4` takes such a message out of the probe's lines) and R8 (its recovery-line count was a basic expression with `+` and `?`: `90147bc9`) |
+| b1 | mpx6-ext2, mpx6-part, mpx6-blk | `e15979b9` | 18, 93 and 14 PASS, 0 FAIL |
+| b3 | mpx6-root (Linux side re-recorded again) | PENDING-b3 | PENDING-b3 |
+
+**The guest's records.** `tests/mpx6-journal.d/linux/` (new: Linux
+7.3.0-4 with an ext3 root: the mount's lines, the table's `/`, a power
+cut's needs_recovery and `clean`, `recovery complete` at the next boot,
+the refusal of bit 0x80000000). `tests/mpx6-root.d/linux/` re-recorded
+by the suite's own `--record` (R-px68-5), never edited; its diff against
+px67's 7.2.8 ext2 record: PENDING-b3
 
 ## 7. The playground
 
-Pending (batch b2: px67's recipe, `notes/px68/play/`).
+PENDING-b2
 
 ## 8. CI
 
-Pending: the control dispatch, the plants, the PR's `tier pr`.
+Dispatches `-f tier=pr -f suites=mpx6-journal` (a partial run: the
+`all` rows, 12 kills of 1,500 operations and the torn row):
+
+| run | job | head | what |
+|---|---|---|---|
+| 40135485369 | — | `6868cbfe` | control before J10: green (CI's QEMU 8.2.2 traces the disk; the record read) |
+| 40135993221 | 120997734110 | `39775f58` | control with J10: green, every row J0-J10, the job 13.5 min |
+| 40135994966 | 120997741217 | `91d3de3f` | px68-plant-order: red (§9) |
+| 40135996743 | 120997736687 | `26f5f020` | px68-plant-revoke: red (§9) |
+| 40135998828 | 120997712108 | `dd789a85` | px68-plant-clean: red (§9) |
+
+The PR's `tier pr` (its run id in the PR) runs every suite on native
+BIOS, since kernel/ext2 and kernel/block are ALL paths, with J7's pr
+rows (4 kills of 600 operations).
 
 ## 9. Seen red
 
-Pending. The three plants are written (`px68-plant-order`
-`f9b8b57a`: the commit block written before its log blocks, J2 red by
-QEMU's trace; `px68-plant-revoke` `1f9ddcc7`: the replay passes over every
-revocation, J4's revoked cases and J9 red; `px68-plant-clean`
-`696ef1cd`: the log emptied before the replay writes home, J4's order red),
-each compiles (kcheck on kasumi), and will be rebased onto the final head
-before their dispatches.
+Each plant is one commit on the head of its run (`39775f58`), on a
+`px68-plant-*` branch, never merged. In every run the other rows stayed
+green, J7's crash row among them: none of the three faults opens a
+window a kill at the crash row's points lands in, which is why the order
+is read from QEMU's trace and why J10 cuts a replay on purpose.
+
+- **px68-plant-order** (`91d3de3f`: the commit block written at its
+  place before the transaction's log blocks), run 40135994966 job
+  120997741217: **J2 red**, `jorder: 7 commits, OUT OF ORDER: 1 2 3 4 5 6
+  7`; J1, J3-J10 green.
+- **px68-plant-revoke** (`26f5f020`: the replay finds no revocation),
+  run 40135996743 job 120997736687: **J4 red** on exactly the revoked
+  cases (B, Bnf, C, C2: PAX `b1b1b1b1` where e2fsck leaves `00000000`)
+  and **J9 red** (`2 transactions …, 15 blocks written home, 0 revoked`;
+  block 2284 PAX `ed080000`, e2fsck -fy `00000000`).
+- **px68-plant-clean** (`dd789a85`: the log emptied, flushed, before the
+  replay writes home), run 40135998828 job 120997712108: **J10 red**, the
+  e2fsck row: `the replay that stopped short left the log emptied (start
+  0); e2fsck -fn: Entry 'f196' in /churn (23) has deleted/unused inode
+  68 … has an incorrect filetype …; PAX's tree is not e2fsck -fy's (67
+  lines)`; and **J4 red** on every case with a block to replay (A, D, D2,
+  E, F, H, I: `jorder: replay: OUT OF ORDER: the log emptied before …`).
+  The contract names the e2fsck row; a replay that runs to its end
+  leaves the same disk whatever its order, so J3's e2fsck stays green
+  under this plant, and J10 was added (`39775f58`) to make the row the
+  contract names: a replay cut part-way by QEMU's blkdebug failing one
+  block's write, then e2fsck -fn and the tree after the next boot.
 
 ## 10. Limits named
 
@@ -261,17 +327,26 @@ before their dispatches.
 
 ## 11. Issues, fsck's lane, and what to prune
 
-Issues to close: pax#150 (when merged). To file (none filed here: RULES
-§3): the orphan list (R-px68-6); the `sync` option's metadata on a
-journalled volume (§10). Others at the final hand-back.
+Issues to close: pax#150 (at the merge). To file (none filed here: RULES
+§3):
+- **the orphan list** (R-px68-6): a file unlinked while open and a power
+  cut before its last close leave an inode with no name; ext3 keeps
+  s_last_orphan for it, PAX keeps none;
+- **the `sync` option's metadata on a journalled volume** (§10): data
+  written through, metadata at the journal's next commit;
+- **one call's transaction past the cache** (§10): a `write(2)` of more
+  than about 1.5 GiB of new blocks fails with -EIO rather than committing
+  part-way.
 
 fsck's lane (px72, pax#151): drafted in full in §12.
 
 Prune (at the merge): kasumi `~/lanes/px68/` (the clone, `kb/`, `kc/`,
-`smoke/`, `crash/`, `guest/`, `oracle/`, `build/`, `snap/`, `play/` but
-the shipped disk, `lope/`, `logs/`, the plant worktrees); the branches
-`px68-plant-order`, `-revoke`, `-clean` on origin; this Mac's worktrees
-`/Users/mfwolffe/lanes/px68/pax` and `plant-*`.
+`kfinal/`, `rec-b1/`, `rt/`, `smoke/`, `crash/`, `guest/`, `oracle/`,
+`measure/`, `build/`, `cache/`, `tmp/`, `snap/`, `play/` but the shipped
+disk, `lope/`, `logs/`, the plant worktrees `plant-order`, `plant-revoke`,
+`plant-clean`, `b1.sh`, `b3.sh`); the branches `px68-plant-order`,
+`-revoke`, `-clean` on origin; this Mac's worktrees
+`/Users/mfwolffe/lanes/px68/pax` and `/Users/mfwolffe/lanes/px68/plant-*`.
 
 ## 12. fsck's lane, drafted (px72, pax#151)
 
