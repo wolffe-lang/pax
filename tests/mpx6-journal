@@ -70,6 +70,14 @@
 #       that revokes it (tools/mkjournal --dump); the next boot's replay
 #       says it passed over the revoked tag and leaves that block what
 #       e2fsck -fy's replay of a copy leaves; e2fsck -fn clean.
+#   J10 a replay cut short: J3's killed disk booted with the replay's
+#       write of one block (the middle of the first transaction) failing,
+#       QEMU's own blkdebug driver (an EIO for every write to its sector):
+#       the replay says it stopped, the volume is refused and the log is
+#       left as it was (start not 0); the boot after replays it whole,
+#       halts, clean, e2fsck -fn clean, the tree e2fsck -fy's replay of
+#       the killed disk gives. A replay that empties the log before its
+#       blocks are home leaves half a replay that nothing will finish.
 #
 # The UEFI leg needs OVMF (SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1). QEMU's trace needs its log backend (Ubuntu's and
@@ -416,6 +424,7 @@ for leg in $legs; do
         printf '%s\n' "$hk" | grep -q '^Filesystem features:.*needs_recovery' || why+=" killed: no needs_recovery;"
         grep -qx 'needs_recovery: yes' "$lx/guest.txt" || why+=" the guest's cut left no needs_recovery;"
         with_init "$disk" || why+=" mcopy (init=);"
+        cp --sparse=always "$disk" "$w/cutr.img"
         hrc=0; halt_boot "$tier" "$leg" cut2 "$disk" || hrc=$?
         books "$id cut2"; halted "$id cut2" "$hrc"
         rl=$(sgrep -c '^ext2: vda2: recovering the journal: ')
@@ -433,6 +442,62 @@ for leg in $legs; do
         grep -q '^/churn/' "$w/c1.tree" || why+=" no /churn after the replay;"
         [ -z "$why" ] && say "PASS J3 $id: killed 7 s in (after op $lastop): clean with needs_recovery (the guest's too); the next boot: '${rline#ext2: vda2: }', halted, clean, e2fsck -fn clean; /churn ($(grep -c '^/churn/' "$w/c1.tree") names) every field as e2fsck -fy's replay of a copy" || bad "J3 $id:$why"
         rm -f "$w/c1.p2" "$w/c1.p2.fsck" "$disk"
+
+        # --- J10: a replay cut short, the boot after ------------------------------------
+        # The killed disk again; the replay's home write of the middle block of
+        # its first transaction fails (QEMU's blkdebug: an EIO for every write
+        # to that sector), so the replay stops part-way, its earlier blocks home.
+        disk=$w/cutr.img
+        why=
+        part_out "$disk" "$w/r0.p2"
+        pick=$(python3 "$PAX_ROOT/tools/mkjournal" "$w/r0.p2" --dump | python3 -c '
+import re, sys
+txs = [l for l in sys.stdin if re.match(r"tx \d+: \d+ tags \[", l)]
+rev = set()
+for l in txs:
+    rev |= set(re.search(r"revoked \[([^]]*)\]", l).group(1).split())
+if txs and "commit at" in txs[0]:
+    tags = [t.rstrip("e") for t in re.search(r"tags \[([^]]*)\]", txs[0]).group(1).split()]
+    ok = [t for t in tags if t not in rev]
+    if len(ok) >= 2:
+        print(txs[0].split(":")[0][3:], len(tags), ok[len(ok) // 2])
+')
+        rm -f "$w/r0.p2"
+        set -- $pick
+        ctx=${1:-} cn=${2:-} cb=${3:-}
+        if [ -z "$cb" ]; then
+            bad "J10 $id: the killed disk's log has no committed transaction of two blocks or more to cut"
+        else
+            read -r s _c < <(p2_of "$disk")
+            printf '[inject-error]\nevent = "write_aio"\niotype = "write"\nerrno = "5"\nsector = "%s"\nonce = "off"\nimmediately = "off"\n' $((s + cb * 8)) > "$w/cutr.cfg"
+            hrc=0; halt_boot "$tier" "$leg" cutr "$disk" --qemu -set --qemu "drive.d0.file=blkdebug:$w/cutr.cfg:$disk" || hrc=$?
+            sline=$(sgrep -m1 '^ext2: vda2: recovering the journal')
+            case $sline in
+                *' stopped at sequence '*': an I/O error; the volume is refused, -EIO') ;;
+                '') why+=" the cut replay: no recovery line ($(tail -n 1 "$log.verdict"));" ;;
+                *) why+=" the cut replay: '$sline';" ;;
+            esac
+            part_out "$disk" "$w/r1.p2"
+            st=$(python3 "$PAX_ROOT/tools/mkjournal" "$w/r1.p2" --dump | sed -n '1s/.*, start \([0-9]*\), .*/\1/p')
+            rm -f "$w/r1.p2"
+            [ "${st:-0}" != 0 ] || why+=" the replay that stopped short left the log emptied (start 0);"
+            hrc=0; halt_boot "$tier" "$leg" cutr2 "$disk" || hrc=$?
+            books "$id cutr2"; halted "$id cutr2" "$hrc"
+            rl=$(sgrep -c '^ext2: vda2: recovering the journal: ')
+            rline=$(sgrep -m1 '^ext2: vda2: recovering the journal: ')
+            [ "$rl" = 1 ] || why+=" the boot after: $rl recovery lines;"
+            part_out "$disk" "$w/r2.p2"
+            h3=$(hdr_of "$w/r2.p2")
+            frc=0; fsck_n "$w/r2.p2" || frc=$?
+            "$PAX_ROOT/tools/e2tree" "$w/r2.p2" > "$w/r2.tree"
+            printf '%s\n' "$h3" | grep -Eq '^Filesystem state: +clean$' || why+=" after: $(printf '%s\n' "$h3" | grep '^Filesystem state');"
+            ! printf '%s\n' "$h3" | grep -q needs_recovery || why+=" needs_recovery after the clean halt;"
+            [ "$frc" = 0 ] || why+=" e2fsck -fn: $(grep -v '^e2fsck \|^Pass \|^$' "$w/r2.p2.fsck" | head -n 3 | tr '\n' '|');"
+            cmp -s <(grep '^/churn' "$w/c0h.tree") <(grep '^/churn' "$w/r2.tree") || why+=" PAX's tree is not e2fsck -fy's ($(diff <(grep '^/churn' "$w/c0h.tree") <(grep '^/churn' "$w/r2.tree") | wc -l) lines);"
+            [ -z "$why" ] && say "PASS J10 $id: the replay's write of block $cb (the middle of transaction $ctx's $cn) failed (QEMU's blkdebug): '${sline#ext2: vda2: }', the log left (start $st); the next boot: '${rline#ext2: vda2: recovering the journal: }', halted, clean, e2fsck -fn clean, /churn as e2fsck -fy's replay of the killed disk" || bad "J10 $id:$why"
+            rm -f "$w/r2.p2" "$w/r2.p2.fsck"
+        fi
+        rm -f "$disk" "$w/cutr.cfg"
 
         # --- J9: PAX's own revocation -------------------------------------------------
         disk=$w/revoke.img
