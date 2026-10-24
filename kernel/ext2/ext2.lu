@@ -27,15 +27,38 @@
 //! read-only, by name. A COMPAT feature changes nothing here: ext_attr
 //! (no extended attribute is made or read), resize_inode (inode 7 and
 //! the reserved descriptor blocks are already marked used), dir_index
-//! (see directories), has_journal (the journal is a file this code never
-//! opens; with RECOVER set the volume is refused). A read-write mount
-//! marks the superblock in use (s_state's VALID bit cleared, the mount
-//! count and time moved) and writes it to the disk at once, flushed
-//! (px66), and `unmount` writes and flushes every other block first and
-//! then marks it clean again when it was clean at the mount, as ext2's
-//! own tools expect of a clean volume. A volume mounted not clean stays
-//! not clean through a clean unmount (no fsck has looked at it), as
-//! Linux leaves it (measured, px66).
+//! (see directories). A read-write mount marks the superblock in use
+//! (s_state's VALID bit cleared, the mount count and time moved) and
+//! writes it to the disk at once, flushed (px66), and `unmount` writes
+//! and flushes every other block first and then marks it clean again
+//! when it was clean at the mount, as ext2's own tools expect of a clean
+//! volume. A volume mounted not clean stays not clean through a clean
+//! unmount (no fsck has looked at it), as Linux leaves it (measured,
+//! px66). An INCOMPAT or RO_COMPAT feature this code does not serve is
+//! named in its line (super.rst's names; Linux 7.3.0's shape,
+//! `Couldn't mount because of unsupported optional features (80000000)`,
+//! measured with a bit set by debugfs: notes/px68/guest.sh g6, g7).
+//!
+//! **The journal (px68, ext3).** A volume with has_journal (COMPAT 0x4)
+//! and its journal in an inode (s_journal_inum, 8 by mke2fs) is ext3's:
+//! its inode's blocks are handed to kernel/journal as runs, the journal's
+//! superblock checked, and a log with transactions in it (s_start not 0)
+//! replayed before anything else of the volume is read, with one line
+//! (below); needs_recovery (INCOMPAT 0x4) is then served. A read-write
+//! mount sets needs_recovery and leaves s_state alone (Linux 7.3.0 keeps
+//! a journalled volume `clean` while it is mounted and after a power cut,
+//! measured), and from then on every change to metadata goes through the
+//! running transaction (`dirty`; file data, `wrote`, does not: data=
+//! ordered, R-px68-1); `sync` commits, and `boundary` commits at a call's
+//! start when the transaction is large; the unmount commits, checkpoints,
+//! empties the log and clears needs_recovery. A block freed by the
+//! running transaction is revoked when it was logged since the last
+//! checkpoint, and is not allocated again until the transaction commits
+//! (kernel/journal's `guard`). A volume whose journal is elsewhere (an
+//! external journal) or carries a feature kernel/journal does not serve
+//! is refused by name. The recovery's line:
+//!
+//!     ext2: vda2: recovering the journal: <n> transactions (sequence <a> to <b>), <k> blocks written home, <r> revoked; recovery complete
 //!
 //! **Groups.** Block group g has its descriptor in the table that starts
 //! in the block after the superblock's (32 bytes each: the block bitmap's
@@ -94,6 +117,7 @@
 
 use block
 use frames
+use journal
 use log
 
 extern "c" fn pax_tree_copy(dst: u64, src: u64, n: u64)
@@ -145,11 +169,16 @@ const SB_UUID: u64 = 0x68
 const SB_LABEL: u64 = 0x78
 const SB_RESERVED_GDT: u64 = 0xce
 const COMPAT_RESIZE_INODE: u64 = 0x10
+const COMPAT_HAS_JOURNAL: u64 = 0x4 // px68
+const SB_JNL_INUM: u64 = 0xe0 // px68: s_journal_inum
+const SB_LAST_ORPHAN: u64 = 0xe8
 const MAGIC: u64 = 0xef53
 const STATE_VALID: u64 = 1
 const STATE_ERROR: u64 = 2
 // Features.
 const INCOMPAT_FILETYPE: u64 = 0x2
+const INCOMPAT_RECOVER: u64 = 0x4 // px68: needs_recovery
+const INCOMPAT_JOURNAL_DEV: u64 = 0x8 // px68: the volume is an external journal
 const RO_SPARSE_SUPER: u64 = 0x1
 const RO_LARGE_FILE: u64 = 0x2
 
@@ -234,6 +263,10 @@ const V_STATE: u64 = 28 // s_state as found
 const V_MNT: u64 = 29 // s_mnt_count after this mount
 const V_SAID: u64 = 30 // an error said (one line a volume)
 const V_OVERHEAD: u64 = 31 // the blocks no file can have (statfs's: Linux's bsddf, measured)
+const V_JNL: u64 = 32 // px68: 1 the volume has a journal kernel/journal loaded
+const V_ASKED: u64 = 33 // px68: the type the mount asked for (0 none, 2 ext2, 3 ext3)
+const V_REC: u64 = 34 // px68: 1 + the transactions the mount replayed (0: no recovery)
+const V_NOSPACE: u64 = 35 // px68: the last allocation found only blocks the running transaction freed
 
 // The module's frame: VOLS records, then the name scratch (256 bytes at
 // SCRATCH), and a second frame of zeros for holes.
@@ -366,7 +399,19 @@ fn get(v: u64, blk: u64) -> u64 {
     a
 }
 
+/// Metadata block `blk` of volume `v` changed in its buffer: the running
+/// transaction's when the volume writes through its journal (px68), else
+/// written or marked as kernel/block's policy says.
 fn dirty(v: u64, blk: u64) {
+    let r = if journal.active(v) { journal.meta(v, blk) } else { block.dirty(vw(v, V_DEV), blk, bs(v)) }
+    if r != 0 {
+        corrupt(v, "an I/O error writing block", blk)
+    }
+}
+
+/// px68: a file's data block changed in its buffer: never journalled
+/// (data=ordered: written before the commit that names it).
+fn ddirty(v: u64, blk: u64) {
     let r = block.dirty(vw(v, V_DEV), blk, bs(v))
     if r != 0 {
         corrupt(v, "an I/O error writing block", blk)
@@ -539,6 +584,7 @@ fn mount_claimed(v: u64, dev: u64, ro: bool, now: u64) -> u64 {
     let st = r16(p + SB_STATE)
     let rblocks = r32(p + SB_RBLOCKS)
     let rgdt = if fc & COMPAT_RESIZE_INODE != 0 { r16(p + SB_RESERVED_GDT) } else { 0 }
+    let jino = if rev >= 1 { r32(p + SB_JNL_INUM) } else { 0 }
     block.forget(dev)
     if rev > 1 {
         return refuse("a revision this code does not know:", rev)
@@ -546,8 +592,15 @@ fn mount_claimed(v: u64, dev: u64, ro: bool, now: u64) -> u64 {
     if lbs > 2 {
         return refuse("a block size larger than a page (s_log_block_size):", lbs)
     }
-    if fi & !INCOMPAT_FILETYPE != 0 {
-        return refuse("incompatible features this code does not serve (s_feature_incompat; FILETYPE alone is), bits", fi & !INCOMPAT_FILETYPE)
+    // px68: FILETYPE is served, and needs_recovery when the journal is the
+    // volume's own (kernel/journal replays it); anything else is named.
+    let has_j = fc & COMPAT_HAS_JOURNAL != 0
+    let served = INCOMPAT_FILETYPE | (if has_j && jino != 0 { INCOMPAT_RECOVER } else { 0 })
+    if fi & !served != 0 {
+        return refuse_features(fi & !served)
+    }
+    if has_j && jino == 0 {
+        return refuse("an external journal (has_journal with s_journal_inum 0), which this code does not open: s_feature_compat", fc)
     }
     let bsz = 1024 << lbs
     if isize < 128 || isize > bsz || isize & (isize - 1) != 0 || bpg == 0 || ipg == 0 || bpg > bsz * 8 || blocks <= first || inodes == 0 || first_ino <= ROOT_INO || first_ino > inodes {
@@ -581,6 +634,10 @@ fn mount_claimed(v: u64, dev: u64, ro: bool, now: u64) -> u64 {
     put_vw(v, V_IFREE, 0)
     put_vw(v, V_ERRS, 0)
     put_vw(v, V_SAID, 0)
+    put_vw(v, V_JNL, 0)
+    put_vw(v, V_ASKED, 0)
+    put_vw(v, V_REC, 0)
+    put_vw(v, V_NOSPACE, 0)
     put_vw(v, V_CLEAN, if st & STATE_VALID != 0 && st & STATE_ERROR == 0 { 1 } else { 0 })
     // statfs's f_blocks leave out what no file can have (the superblock
     // and descriptor copies with their reserved blocks, the bitmaps and
@@ -607,6 +664,8 @@ fn mount_claimed(v: u64, dev: u64, ro: bool, now: u64) -> u64 {
         block.put_name(dev)
         log.put(": read-only: read-only-compatible features this code does not write (s_feature_ro_compat), bits ")
         log.hex(fr & !(RO_SPARSE_SUPER | RO_LARGE_FILE))
+        log.put(": ") // px68: by name
+        put_bits(fr & !(RO_SPARSE_SUPER | RO_LARGE_FILE), true)
         log.end()
     } else if block.flags(dev) & block.F_RO != 0 {
         why = 3
@@ -622,10 +681,26 @@ fn mount_claimed(v: u64, dev: u64, ro: bool, now: u64) -> u64 {
         put_vw(v, V_USED, 0)
         return refuse("inode 2 is no directory, mode", if root == 0 { 0 } else { r16(root + I_MODE) })
     }
+    if has_j {
+        // px68: the journal found, checked and replayed before the volume
+        // is used (a refusal said by name).
+        let jr = open_journal(v, dev, jino, fi)
+        if failed(jr) {
+            put_vw(v, V_USED, 0)
+            return jr
+        }
+    }
     if why == 0 {
         let s = sb(v)
         if s != 0 {
-            w16(s + SB_STATE, r16(s + SB_STATE) & !STATE_VALID)
+            if vw(v, V_JNL) != 0 {
+                // px68: a journalled volume is in use by needs_recovery,
+                // its state left as it is (Linux 7.3.0 keeps it clean).
+                w32(s + SB_FINCOMPAT, r32(s + SB_FINCOMPAT) | INCOMPAT_RECOVER)
+                put_vw(v, V_FI, r32(s + SB_FINCOMPAT))
+            } else {
+                w16(s + SB_STATE, r16(s + SB_STATE) & !STATE_VALID)
+            }
             w16(s + SB_MNT_COUNT, r16(s + SB_MNT_COUNT) + 1)
             w32(s + SB_MTIME, now)
             put_vw(v, V_MNT, r16(s + SB_MNT_COUNT))
@@ -634,11 +709,181 @@ fn mount_claimed(v: u64, dev: u64, ro: bool, now: u64) -> u64 {
             // any other block of the volume is written (write-back would
             // keep it in the cache until the flusher's first turn, and a
             // machine switched off before then left `clean` on a volume
-            // that was mounted: tests/mpx6-part P10, seen red).
+            // that was mounted: tests/mpx6-part P10, seen red). px68: the
+            // journal's log is empty here (replayed, or clean), so the
+            // superblock goes home directly, and the journal begins after.
             let _w = block.sync(dev)
         }
+        if vw(v, V_JNL) != 0 {
+            journal.begin(v)
+        }
+    } else if vw(v, V_JNL) != 0 {
+        put_vw(v, V_MNT, r16(sb(v) + SB_MNT_COUNT))
     }
     v
+}
+
+/// px68: names of s_feature_incompat's bits (super.rst), one or the hex
+/// of a bit it does not name.
+fn put_incompat(b: u64) {
+    log.put(if b == 0x1 { "compression" } else if b == 0x2 { "filetype" } else if b == 0x4 { "needs_recovery" } else if b == 0x8 { "journal_dev" } else if b == 0x10 { "meta_bg" } else if b == 0x40 { "extent" } else if b == 0x80 { "64bit" } else if b == 0x100 { "mmp" } else if b == 0x200 { "flex_bg" } else if b == 0x400 { "ea_inode" } else if b == 0x1000 { "dirdata" } else if b == 0x2000 { "metadata_csum_seed" } else if b == 0x4000 { "large_dir" } else if b == 0x8000 { "inline_data" } else if b == 0x10000 { "encrypt" } else if b == 0x20000 { "casefold" } else { "" })
+    let named = b == 0x1 || b == 0x2 || b == 0x4 || b == 0x8 || b == 0x10 || b == 0x40 || b == 0x80 || b == 0x100 || b == 0x200 || b == 0x400 || (b >= 0x1000 && b <= 0x20000)
+    if !named {
+        log.put("an unknown bit ")
+        log.hex(b)
+    }
+}
+
+/// px68: s_feature_ro_compat's (super.rst).
+fn put_rocompat(b: u64) {
+    log.put(if b == 0x1 { "sparse_super" } else if b == 0x2 { "large_file" } else if b == 0x4 { "btree_dir" } else if b == 0x8 { "huge_file" } else if b == 0x10 { "gdt_csum" } else if b == 0x20 { "dir_nlink" } else if b == 0x40 { "extra_isize" } else if b == 0x100 { "quota" } else if b == 0x200 { "bigalloc" } else if b == 0x400 { "metadata_csum" } else if b == 0x1000 { "readonly" } else if b == 0x2000 { "project" } else if b == 0x8000 { "verity" } else if b == 0x10000 { "orphan_present" } else { "" })
+    let named = b <= 0x40 || b == 0x100 || b == 0x200 || b == 0x400 || b == 0x1000 || b == 0x2000 || b == 0x8000 || b == 0x10000
+    if !named {
+        log.put("an unknown bit ")
+        log.hex(b)
+    }
+}
+
+/// The bits of `bits` by name, comma-separated (`put` a name each).
+fn put_bits(bits: u64, ro: bool) {
+    var b: u64 = 1
+    var first = true
+    while b != 0 && b <= bits {
+        if bits & b != 0 {
+            if !first {
+                log.put(", ")
+            }
+            first = false
+            if ro { put_rocompat(b) } else { put_incompat(b) }
+        }
+        b = if b >= 0x80000000 { 0 } else { b << 1 }
+    }
+}
+
+/// px68: an incompatible feature refused, in Linux's words (`Couldn't
+/// mount because of unsupported optional features (80000000)`, measured)
+/// and by name:
+///
+///     ext2: refused: vda2: unsupported optional features (80000000): s_feature_incompat an unknown bit 0x80000000
+fn refuse_features(bits: u64) -> u64 {
+    log.put("ext2: refused: ")
+    // # Safety: a scalar module var, written by `mount` with IF clear.
+    block.put_name(unsafe { mounting })
+    log.put(": unsupported optional features (")
+    var nd: u64 = 1
+    while nd < 16 && bits >> (nd * 4) != 0 {
+        nd += 1
+    }
+    log.hex_n(bits, nd)
+    log.put("): s_feature_incompat ")
+    put_bits(bits, false)
+    log.end()
+    neg(EINVAL)
+}
+
+/// px68: volume `v`'s journal (inode `jino`) mapped, its superblock
+/// checked and its log replayed when it has transactions (`fi`, the
+/// incompatible features found, says whether needs_recovery was set): 0,
+/// or a refusal (-EINVAL, -EROFS, -EIO) said by name.
+fn open_journal(v: u64, dev: u64, jino: u64, fi: u64) -> u64 {
+    journal.reset(v)
+    let b = bs(v)
+    let n = size(v, jino) / b
+    if n == 0 || mode(v, jino) & S_IFMT != S_IFREG {
+        return refuse("a journal inode that is not a regular file of blocks: inode", jino)
+    }
+    var rl: u64 = 0
+    var rp: u64 = 0
+    var rn: u64 = 0
+    var j: u64 = 0
+    while j <= n {
+        var pb: u64 = 0
+        if j < n {
+            let (x, _m) = bmap(v, jino, j, false)
+            if x == 0 || x == BAD {
+                return refuse("a journal block with no place on the volume: journal block", j)
+            }
+            pb = x
+        }
+        if j < n && rn > 0 && pb == rp + rn {
+            rn += 1
+        } else {
+            if rn > 0 && !journal.add_run(v, rl, rp, rn) {
+                return refuse("a journal in more pieces than kernel/journal keeps (64), at journal block", rl)
+            }
+            rl = j
+            rp = pb
+            rn = 1
+        }
+        j += 1
+    }
+    let r = journal.load(v, dev, b, n)
+    if r != journal.R_OK {
+        if r == journal.R_FEAT {
+            log.put("ext2: refused: ")
+            block.put_name(dev)
+            log.put(": the journal's incompatible features (s_feature_incompat ")
+            log.hex(journal.refused_bits(v))
+            log.put(": a checksum, 64-bit tags, an asynchronous commit or fast commits), which kernel/journal does not serve")
+            log.end()
+            return neg(EINVAL)
+        }
+        return refuse(if r == journal.R_IO { "the journal's superblock could not be read: inode" } else if r == journal.R_MAGIC { "no journal superblock (jbd2's magic) at the journal's first block: inode" } else if r == journal.R_BSIZE { "a journal whose block size is not the volume's: inode" } else if r == journal.R_LEN { "a journal whose s_maxlen or s_first is out of its inode's blocks: inode" } else if r == journal.R_SMALL { "a journal smaller than the largest transaction (the cache's 512 buffers and their descriptors): inode" } else { "no frame for the journal's state: inode" }, jino)
+    }
+    if journal.start_found(v) != 0 || fi & INCOMPAT_RECOVER != 0 {
+        if journal.start_found(v) != 0 && block.flags(dev) & block.F_RO != 0 {
+            log.put("ext2: refused: ")
+            block.put_name(dev)
+            log.put(": the journal needs recovery and the disk is read-only (VIRTIO_BLK_F_RO), -EROFS")
+            log.end()
+            return neg(EROFS)
+        }
+        let e = journal.replay(v, vw(v, V_BLOCKS))
+        block.forget(dev) // what was read before the replay may be older than the disk now
+        log.put("ext2: ")
+        block.put_name(dev)
+        if failed(e) {
+            let why = journal.replay_book(v, 6)
+            log.put(": recovering the journal stopped at sequence ")
+            log.dec(journal.replay_book(v, 4) as int)
+            log.put(if why == journal.RP_TAG { ": a tag names a block past the volume's end" } else if why == journal.RP_REVOKES { ": more revocations than kernel/journal's table holds" } else if why == journal.RP_REVBLOCK { ": a revocation block's count is wrong" } else { ": an I/O error" })
+            log.put("; the volume is refused, -EIO")
+            log.end()
+            return neg(EIO)
+        }
+        let tx = journal.replay_book(v, 0)
+        log.put(": recovering the journal: ")
+        log.dec(tx as int)
+        log.put(if tx == 1 { " transaction" } else { " transactions" })
+        if tx > 0 {
+            log.put(" (sequence ")
+            log.dec(journal.replay_book(v, 3) as int)
+            log.put(" to ")
+            log.dec((journal.replay_book(v, 4) - 1) as int)
+            log.put(")")
+        }
+        log.put(", ")
+        log.dec(journal.replay_book(v, 1) as int)
+        log.put(" blocks written home, ")
+        log.dec(journal.replay_book(v, 2) as int)
+        log.put(" revoked; recovery complete")
+        log.end()
+        put_vw(v, V_REC, tx + 1)
+        // The superblock as the replay left it.
+        let s = sb(v)
+        if s == 0 {
+            return neg(EIO)
+        }
+        put_vw(v, V_FC, r32(s + SB_FCOMPAT))
+        put_vw(v, V_FI, r32(s + SB_FINCOMPAT))
+        put_vw(v, V_FR, r32(s + SB_FROCOMPAT))
+        let st = r16(s + SB_STATE)
+        put_vw(v, V_STATE, st)
+        put_vw(v, V_RBLOCKS, r32(s + SB_RBLOCKS))
+        put_vw(v, V_CLEAN, if st & STATE_VALID != 0 && st & STATE_ERROR == 0 { 1 } else { 0 })
+    }
+    put_vw(v, V_JNL, 1)
+    0
 }
 
 /// Whether group `g` holds a copy of the superblock and the descriptors:
@@ -671,12 +916,18 @@ pub fn unmount(v: u64, now: u64) -> u64 {
     if vw(v, V_RO) == 0 {
         // px66: every other block written and flushed first; only then the
         // clean state, so no moment leaves `clean` on a volume whose
-        // blocks are not all on the disk.
-        r0 = block.sync(dev)
+        // blocks are not all on the disk. px68: a journalled volume's
+        // last commit, its checkpoint and the log emptied first, then
+        // needs_recovery cleared.
+        r0 = close_journal(v, now)
         let s = sb(v)
         if s != 0 {
             if vw(v, V_CLEAN) == 1 && vw(v, V_ERRS) == 0 && r0 == 0 {
                 w16(s + SB_STATE, r16(s + SB_STATE) | STATE_VALID)
+            }
+            if vw(v, V_JNL) != 0 && r0 == 0 {
+                w32(s + SB_FINCOMPAT, r32(s + SB_FINCOMPAT) & !INCOMPAT_RECOVER)
+                put_vw(v, V_FI, r32(s + SB_FINCOMPAT))
             }
             w32(s + SB_WTIME, now)
             sb_dirty(v)
@@ -687,6 +938,24 @@ pub fn unmount(v: u64, now: u64) -> u64 {
     block.forget(dev)
     block.release(dev)
     put_vw(v, V_USED, 0)
+    r
+}
+
+/// px68: what the unmount and a remount read-only do first: a journalled
+/// volume's journal closed (the last commit, its checkpoint, the log
+/// emptied on the disk) and its line; else every dirty block written and
+/// flushed. 0 or -EIO.
+fn close_journal(v: u64, now: u64) -> u64 {
+    let dev = vw(v, V_DEV)
+    if !journal.active(v) {
+        return block.sync(dev)
+    }
+    let r = journal.close(v, now * NS)
+    log.put("journal: ")
+    block.put_name(dev)
+    log.put(": ")
+    journal.report(v)
+    log.end()
     r
 }
 
@@ -711,11 +980,15 @@ pub fn remount(v: u64, ro: bool, now: u64) -> u64 {
         if was != 0 {
             return 0
         }
-        let r0 = block.sync(dev)
+        let r0 = close_journal(v, now)
         let s = sb(v)
         if s != 0 {
             if vw(v, V_CLEAN) == 1 && vw(v, V_ERRS) == 0 && r0 == 0 {
                 w16(s + SB_STATE, r16(s + SB_STATE) | STATE_VALID)
+            }
+            if vw(v, V_JNL) != 0 && r0 == 0 {
+                w32(s + SB_FINCOMPAT, r32(s + SB_FINCOMPAT) & !INCOMPAT_RECOVER)
+                put_vw(v, V_FI, r32(s + SB_FINCOMPAT))
             }
             w32(s + SB_WTIME, now)
             sb_dirty(v)
@@ -734,22 +1007,90 @@ pub fn remount(v: u64, ro: bool, now: u64) -> u64 {
     if s == 0 {
         return neg(EIO)
     }
-    w16(s + SB_STATE, r16(s + SB_STATE) & !STATE_VALID)
+    if vw(v, V_JNL) != 0 {
+        w32(s + SB_FINCOMPAT, r32(s + SB_FINCOMPAT) | INCOMPAT_RECOVER) // px68
+        put_vw(v, V_FI, r32(s + SB_FINCOMPAT))
+    } else {
+        w16(s + SB_STATE, r16(s + SB_STATE) & !STATE_VALID)
+    }
     w16(s + SB_MNT_COUNT, r16(s + SB_MNT_COUNT) + 1)
     w32(s + SB_MTIME, now)
     put_vw(v, V_MNT, r16(s + SB_MNT_COUNT))
     sb_dirty(v)
     put_vw(v, V_RO, 0)
-    block.sync(dev)
+    let r = block.sync(dev)
+    if vw(v, V_JNL) != 0 {
+        journal.begin(v)
+    }
+    r
 }
 
 /// Write every dirty block of volume `v`'s disk and FLUSH it (fsync,
-/// syncfs, sync): 0 or -EIO.
-pub fn sync(v: u64) -> u64 {
+/// syncfs, sync, the flusher): 0 or -EIO. px68: a journalled volume's
+/// running transaction committed instead (its data first: ordered), `now`
+/// the wall clock in nanoseconds, the commit block's time.
+pub fn sync(v: u64, now: u64) -> u64 {
     if v >= VOLS || vw(v, V_USED) == 0 {
         return 0
     }
+    if journal.active(v) {
+        return journal.commit(v, now)
+    }
     block.sync(vw(v, V_DEV))
+}
+
+/// px68: whether a journalled volume's running transaction is large
+/// enough that the next call's start should commit it (`boundary`).
+pub fn wants_boundary() -> bool {
+    if base() == 0 {
+        return false
+    }
+    var v: u64 = 0
+    while v < VOLS {
+        if vw(v, V_USED) != 0 && journal.active(v) && journal.running(v) >= journal.HIGH {
+            return true
+        }
+        v += 1
+    }
+    false
+}
+
+/// px68: a call's start (kernel/tree's `tick`): each journalled volume's
+/// large running transaction committed, between two calls, so it never
+/// holds the whole cache.
+pub fn boundary(now: u64) {
+    var v: u64 = 0
+    while v < VOLS {
+        if vw(v, V_USED) != 0 {
+            journal.boundary(v, now)
+        }
+        v += 1
+    }
+}
+
+/// px68: whether volume `v` has a journal (ext3), and writes through it.
+pub fn journalled(v: u64) -> bool {
+    mounted(v) && vw(v, V_JNL) != 0
+}
+
+/// px68: the type a mount names volume `v` by (/proc/self/mounts, the
+/// mount lines): 3 for a journalled volume unless the mount asked for
+/// ext2 (Linux 7.3.0 names an ext3 root `ext2` when `rootfstype=ext2`
+/// asked for it, its journal still used: measured), else 2.
+pub fn fstype(v: u64) -> u64 {
+    if vw(v, V_JNL) != 0 && vw(v, V_ASKED) != 2 { 3 } else { 2 }
+}
+
+/// px68: the type the mount asked for (2 ext2, 3 ext3, 0 neither).
+pub fn ask_type(v: u64, t: u64) {
+    if v < VOLS {
+        put_vw(v, V_ASKED, t)
+    }
+}
+
+/// px68: the transactions the mount replayed, + 1 (0: no recovery).
+pub fn recovered(v: u64) -> u64 {
+    vw(v, V_REC)
 }
 
 /// px66: whether device `dev` holds an ext2 superblock (its magic), and
@@ -785,6 +1126,21 @@ pub fn probe(dev: u64) -> (bool, u64, u64) {
     }
     block.forget(dev)
     (true, hi, lo)
+}
+
+/// px68: whether device `dev` holds an ext2 superblock with has_journal
+/// (an ext3 volume): the buffer forgotten again.
+pub fn has_journal(dev: u64) -> bool {
+    if dev >= block.count() || block.sectors(dev) < 4 || !ready() {
+        return false
+    }
+    let p = block.get(dev, 1, 1024)
+    if p == 0 {
+        return false
+    }
+    let j = r16(p + SB_MAGIC) == MAGIC && r32(p + SB_REV) >= 1 && r32(p + SB_FCOMPAT) & COMPAT_HAS_JOURNAL != 0
+    block.forget(dev)
+    j
 }
 
 /// px66: byte `i` (below 16) of the label the last `probe` found: 0
@@ -1124,8 +1480,11 @@ fn group_blocks(v: u64, g: u64) -> u64 {
 }
 
 /// The first clear bit of the `n` bits of bitmap block `bm`, from bit
-/// `from`, set: its index, or n.
-fn take_bit(v: u64, bm: u64, from: u64, n: u64) -> u64 {
+/// `from`, set: its index, or n. px68: `guard` (0 none) is kernel/journal's
+/// copy of the group's bitmap from before the running transaction's first
+/// free there; a bit set in it is not taken either (a block freed by the
+/// transaction is not reused before it commits).
+fn take_bit(v: u64, bm: u64, from: u64, n: u64, guard: u64) -> u64 {
     let a = get(v, bm)
     if a == 0 {
         return n
@@ -1133,11 +1492,12 @@ fn take_bit(v: u64, bm: u64, from: u64, n: u64) -> u64 {
     var k = from
     while k < n {
         let byte = r8(a + k / 8)
-        if byte == 0xff && k % 8 == 0 {
+        let both = if guard != 0 { byte | r8(guard + k / 8) } else { byte }
+        if both == 0xff && k % 8 == 0 {
             k += 8
             continue
         }
-        if byte & (1 << (k % 8)) == 0 {
+        if both & (1 << (k % 8)) == 0 {
             w8(a + k / 8, byte | (1 << (k % 8)))
             dirty(v, bm)
             return k
@@ -1164,9 +1524,10 @@ fn balloc(v: u64, ino: u64) -> u64 {
         if a != 0 && r16(a + GD_FREE_BLOCKS) > 0 {
             let bm = r32(a + GD_BBITMAP)
             let n = group_blocks(v, g)
-            var k = take_bit(v, bm, from, n)
+            let gu = journal.guard(v, g) // px68
+            var k = take_bit(v, bm, from, n, gu)
             if k == n && from > 0 {
-                k = take_bit(v, bm, 0, from)
+                k = take_bit(v, bm, 0, from, gu)
                 if k == from {
                     k = n
                 }
@@ -1175,6 +1536,7 @@ fn balloc(v: u64, ino: u64) -> u64 {
                 counts(v, g, GD_FREE_BLOCKS, SB_FREE_BLOCKS, false)
                 let b = vw(v, V_FIRST) + g * vw(v, V_BPG) + k
                 put_vw(v, V_CURSOR, b + 1)
+                put_vw(v, V_NOSPACE, 0)
                 bump(v, V_BALLOC)
                 return b
             }
@@ -1183,6 +1545,7 @@ fn balloc(v: u64, ino: u64) -> u64 {
         from = 0
         tried += 1
     }
+    put_vw(v, V_NOSPACE, 1) // px68: full, or what is free was freed by the running transaction
     0
 }
 
@@ -1204,6 +1567,13 @@ fn bfree(v: u64, b: u64) {
     if byte & (1 << (k % 8)) == 0 {
         corrupt(v, "a block freed that was free:", b)
         return
+    }
+    if journal.active(v) {
+        // px68: the group's bitmap as it was, kept until the commit (no
+        // reuse before it), and the block out of the running transaction
+        // and revoked when it was logged since the last checkpoint.
+        journal.protect(v, g, a)
+        journal.freed(v, b)
     }
     w8(a + k / 8, byte & !(1 << (k % 8)))
     dirty(v, bm)
@@ -1227,7 +1597,7 @@ pub fn ialloc(v: u64, dir: u64, m: u64, uid: u64, gid: u64, t: u64) -> u64 {
         if a != 0 && r16(a + GD_FREE_INODES) > 0 {
             let bm = r32(a + GD_IBITMAP)
             let from = if g == 0 { vw(v, V_FIRSTINO) - 1 } else { 0 }
-            let k = take_bit(v, bm, from, ipg)
+            let k = take_bit(v, bm, from, ipg, 0)
             if k < ipg {
                 counts(v, g, GD_FREE_INODES, SB_FREE_INODES, false)
                 if m & S_IFMT == S_IFDIR {
@@ -1465,15 +1835,16 @@ pub fn wspan(v: u64, ino: u64, off: u64, want: u64) -> (u64, u64, u64) {
     (a + o, n, blk)
 }
 
-/// The bytes `wspan` gave the address of are written: the block dirty.
+/// The bytes `wspan` gave the address of are written: the block dirty
+/// (a file's data: px68, never journalled).
 pub fn wrote(v: u64, blk: u64) {
-    dirty(v, blk)
+    ddirty(v, blk)
 }
 
 /// Whether volume `v` has no free block left (why `wspan` answered
-/// nothing).
+/// nothing). px68: or none but what the running transaction freed.
 pub fn full(v: u64) -> bool {
-    statfs(v, 2) == 0
+    statfs(v, 2) == 0 || vw(v, V_NOSPACE) != 0
 }
 
 /// Free the pointers from slot `from` on of the indirect block `blk` at
@@ -1481,6 +1852,11 @@ pub fn full(v: u64) -> bool {
 /// points to; the indirect block itself goes when `from` is 0.
 fn free_tree(v: u64, ino: u64, blk: u64, lvl: u64, from: u64) {
     let p = vw(v, V_PTRS)
+    // px68: an indirect block freed whole keeps its pointers on a
+    // journalled volume (it is free: nothing reads them), so freeing a
+    // large file does not hold each of its indirect blocks in the running
+    // transaction.
+    let whole = from == 0 && journal.active(v)
     var k = from
     while k < p {
         let t = get(v, blk)
@@ -1489,8 +1865,10 @@ fn free_tree(v: u64, ino: u64, blk: u64, lvl: u64, from: u64) {
         }
         let e = r32(t + k * 4)
         if e != 0 {
-            w32(t + k * 4, 0)
-            dirty(v, blk)
+            if !whole {
+                w32(t + k * 4, 0)
+                dirty(v, blk)
+            }
             if lvl > 1 {
                 free_tree(v, ino, e, lvl - 1, 0)
             } else {
@@ -1593,7 +1971,7 @@ pub fn truncate(v: u64, ino: u64, n: u64) -> u64 {
             let a = get(v, blk)
             if a != 0 {
                 zero_bytes(a + n % b, b - n % b)
-                dirty(v, blk)
+                ddirty(v, blk) // px68: a regular file's last block: data
             }
         }
     }
@@ -1620,7 +1998,7 @@ pub fn zero_range(v: u64, ino: u64, off: u64, n: u64) {
             let a = get(v, blk)
             if a != 0 {
                 zero_bytes(a + o, c)
-                dirty(v, blk)
+                ddirty(v, blk) // px68: data
             }
         }
         p += c
@@ -1688,7 +2066,7 @@ pub fn set_target(v: u64, ino: u64, src: u64, n: u64) -> u64 {
         return neg(ENOSPC)
     }
     copy_bytes(dst, src, c)
-    wrote(v, blk)
+    dirty(v, blk) // px68: a link's block is metadata (journalled)
     set_size(v, ino, n)
     0
 }
@@ -1879,7 +2257,7 @@ pub fn add(v: u64, d: u64, name: u64, len: u64, ino: u64, ft: u64) -> u64 {
     w8(dst + 6, len)
     w8(dst + 7, ft)
     copy_bytes(dst + 8, name, len)
-    wrote(v, blk)
+    dirty(v, blk) // px68: a directory's block is metadata (journalled)
     set_size(v, d, (nb + 1) * b)
     0
 }
@@ -1962,7 +2340,7 @@ pub fn make_dir(v: u64, d: u64, parent: u64) -> u64 {
     w8(dst + 19, 2)
     w8(dst + 20, 46)
     w8(dst + 21, 46)
-    wrote(v, blk)
+    dirty(v, blk) // px68: metadata
     set_size(v, d, b)
     0
 }
@@ -2025,5 +2403,13 @@ pub fn report(v: u64) {
     log.put("; ")
     let ro = vw(v, V_RO)
     log.put(if ro == 0 { "read-write" } else if ro == 1 { "read-only (asked)" } else if ro == 2 { "read-only (a feature)" } else { "read-only (the disk is)" })
+    if vw(v, V_JNL) != 0 {
+        // px68: Linux's `with ordered data mode`
+        log.put("; journal of ")
+        log.dec(journal.size(v) as int)
+        log.put(" blocks in ")
+        log.dec(journal.runs(v) as int)
+        log.put(if ro == 0 { " runs, data=ordered" } else { " runs, not written while read-only" })
+    }
     log.end()
 }
