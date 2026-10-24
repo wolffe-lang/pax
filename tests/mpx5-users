@@ -811,6 +811,7 @@ for leg in $legs; do
                 *)
                     grep -v '^~' "$ref/$s.txt" > "$out.want"
                     grep -v '^~' "$out" > "$out.cmp"
+                    masked=
                     case $s in ls*) if [ "${PAX_ROOTDISK:-0}" = 1 ]; then
                         # px67 (R-px67-6): the root-on-disk leg. ext2's
                         # directory is 4096 bytes and `total` counts its
@@ -826,6 +827,7 @@ for leg in $legs; do
                                  { print }' "$f" > "$f.folded" && mv "$f.folded" "$f"
                         done
                         say "SKIP U1 $id sizes: ext2's directory sizes and block totals masked on both sides (rootdisk)"
+                        masked=", ext2's directory sizes and totals masked"
                     fi ;; esac
                     cmp -s "$out.want" "$out.cmp" || why+=" the session differs: $(diff "$out.want" "$out.cmp" | head -n 10 | cut -c1-400 | tr '\n' '|');"
                     [ "$(wc -l < "$ref/$s.txt" | tr -d ' ')" = "$n" ] || why+=" $n lines, the recording has $(wc -l < "$ref/$s.txt" | tr -d ' ');"
@@ -840,7 +842,7 @@ for leg in $legs; do
                         ls*) who="the same ls on a Linux that unpacked the same archive as its root (vm)" ;;
                         *) who="real root's (vm)" ;;
                     esac
-                    note="$((n - t)) of $n lines byte-identical to $who, $t '~' lines by rule"
+                    note="$((n - t)) of $n lines byte-identical to $who, $t '~' lines by rule$masked"
                     ;;
             esac
             pst=$(sed -n -E "s/^user: [^ ]+ pid 1 (exit_group|exit) ([0-9]+) after .*/\\2/p" "$norm" | head -n 1)
