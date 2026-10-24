@@ -21,7 +21,8 @@
 #   start SEQ POS          the log begins at journal block POS with
 #                          transaction SEQ (s_start, s_sequence)
 #   feature revoke         set JBD2_FEATURE_INCOMPAT_REVOKE in the
-#                          journal superblock
+#                          journal superblock (`feature csum3`: CSUM_V3,
+#                          the flag alone, for a refusal's row)
 #   tx                     a transaction begins (the next sequence)
 #   write BLOCK FILL       a tagged block for volume block BLOCK: every
 #                          byte FILL (hex), or `magic` (the block begins
@@ -232,6 +233,8 @@ def write(v, spec):
             struct.pack_into(">II", b, 0x18, seq, pos)
         elif op == "feature" and w[1:] == ["revoke"]:
             struct.pack_into(">I", b, 0x28, struct.unpack_from(">I", b, 0x28)[0] | 0x1)
+        elif op == "feature" and w[1:] == ["csum3"]:
+            struct.pack_into(">I", b, 0x28, struct.unpack_from(">I", b, 0x28)[0] | 0x10)
         elif op == "recover":
             sbb = bytearray(v.read_at(1024, 1024))
             struct.pack_into("<I", sbb, 0x60, struct.unpack_from("<I", sbb, 0x60)[0] | 0x4)
