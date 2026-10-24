@@ -366,6 +366,8 @@ const S_SIGNALS: u64 = 13 // px26: signals delivered to a handler since boot
 const S_TTY_ON: u64 = 14 // px48: 1 once the console is a terminal (kernel/console's `start`)
 const S_TTY_SID: u64 = 15 // px48: the session the console is the controlling terminal of; 0 none
 const S_TTY_PGRP: u64 = 16 // px48: the console's foreground process group; 0 none
+const S_WAITPID: u64 = 17 // px67: the pid whose end also readies the waiter (`wait_pid_or_down`); 0 none
+const S_ENDING: u64 = 18 // px67: 1 once the end has begun (kmain_console): pid 1 takes signals as any process does
 
 const W_RAX_OFF: u64 = 112 // the frame's %rax (word 14)
 const NEG_ETIMEDOUT: u64 = 0xffffffffffffff92 // -110
@@ -1040,6 +1042,37 @@ pub fn wait_down_to(n: u64) {
     sync.irq_restore(saved)
 }
 
+/// px67: `wait_down_to`, ended also by the end of process `pid` (the
+/// run list's last command, init: kmain_console's halt then ends the
+/// processes it left) or by `wake_kmain` (root's reboot(2)).
+pub fn wait_pid_or_down(pid: u64, n: u64) {
+    let saved = sync.irq_save()
+    if live_count() > n && proc_slot(pid) != SLOTS && proc_word(proc_slot(pid), 8) != 1 {
+        let c = cur()
+        put_sv(S_FLOOR, n)
+        put_sv(S_WAITPID, pid)
+        put_sv(S_WAITER, c + 1)
+        put_field(c, offset_of(Thread, state), BLOCKED)
+        // # Safety: as `yield`.
+        unsafe { pax_switch() }
+        put_sv(S_WAITPID, 0)
+    }
+    reap()
+    sync.irq_restore(saved)
+}
+
+/// px67: the thread in `wait_down_to` or `wait_pid_or_down` (kmain's)
+/// readied now, whatever it waits for (kernel/user, root's reboot(2):
+/// the end is asked). IF clear.
+pub fn wake_kmain() {
+    let w = sv(S_WAITER)
+    if w != 0 {
+        put_field(w - 1, offset_of(Thread, state), READY)
+        enqueue(w - 1)
+        put_sv(S_WAITER, 0)
+    }
+}
+
 /// End the running thread. Its stack is reclaimed by the next `create` or
 /// `wait_all`. Never returns.
 pub fn exit() {
@@ -1076,6 +1109,9 @@ fn process_ends(l: u64, st: u64) {
     put_field(l, offset_of(Thread, gpend), 0)
     release_vfork(l)
     let me = field(l, offset_of(Thread, tgid))
+    if me != 0 && sv(S_WAITPID) == me {
+        wake_kmain() // px67: the run list's last command (init) has ended
+    }
     if me != 0 {
         // px48: a controlling process's end hangs its terminal up: the
         // foreground group is sent SIGHUP (measured: not SIGCONT) and the
@@ -2401,9 +2437,12 @@ fn handler_of(l: u64, sig: u64) -> u64 {
 /// default is not inert: it stops the process (`job_signal` when it is
 /// sent, kernel/signal when a blocked one is taken).
 fn inert(l: u64, sig: u64) -> bool {
+    // px67: pid 1 is spared until the end, which ends it too (the
+    // kernel's init is kmain's run list: `ending`).
+    let init = field(l, offset_of(Thread, tgid)) == 1 && sv(S_ENDING) == 0
     let h = handler_of(l, sig)
     if sig == SIGKILL || sig == SIGSTOP {
-        return field(l, offset_of(Thread, tgid)) == 1
+        return init
     }
     if h == SIG_IGN {
         return true
@@ -2411,7 +2450,21 @@ fn inert(l: u64, sig: u64) -> bool {
     if h != SIG_DFL {
         return false
     }
-    field(l, offset_of(Thread, tgid)) == 1 || sig == SIGCHLD || sig == SIGURG || sig == SIGWINCH || sig == SIGCONT
+    init || sig == SIGCHLD || sig == SIGURG || sig == SIGWINCH || sig == SIGCONT
+}
+
+/// px67: the end has begun (kmain_console, before it ends every
+/// process): from now on pid 1 takes SIGTERM at its default and SIGKILL
+/// as any process does (Linux spares init; PAX's init is the kernel's
+/// run list, whose end this is).
+pub fn ending() {
+    put_sv(S_ENDING, 1)
+}
+
+/// px67: whether the end has begun (kernel/signal: pid 1's default
+/// action is then taken).
+pub fn is_ending() -> bool {
+    sv(S_ENDING) != 0
 }
 
 /// Whether slot `t` is a thread that can still take a signal.
