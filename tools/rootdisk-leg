@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# rootdisk-leg — a suite's root-on-disk leg (px67): the ISOs the suite's
+# own run built into $PAX_BUILD/SUITE booted again, each from a disk
+# with `/` on its partition 2 (tools/qemu-rootdisk as PAX_QEMU: the
+# ISO's kernel and initramfs made into a disk by tools/mkdisk --gpt
+# --root), the suite's every row held as before:
+#
+#   tools/rootdisk-leg SUITE [SUITE's ARGS...]
+#
+# Run after `tests/SUITE` itself (CI: the step after the suite's). The
+# disks are made first (`qemu-rootdisk --prepare`, so no boot's timeout
+# pays for tools/mkdisk's containers), cached in $PAX_BUILD/rootdisk; the
+# leg's own logs go to $PAX_BUILD/disk (the ISO run's stay where they
+# are). One line at the end counts the boots that went through a disk
+# and those left as they were (a run that brings its own virtio disk, an
+# ISO with no initramfs); a leg in which no boot went through a disk
+# fails, so a suite cannot pass it by booting nothing from one. Exit:
+# the suite's, or 1 for that, or 2 on a usage or tool error.
+set -uo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -ge 1 ] || die "usage: rootdisk-leg SUITE [ARGS...]"
+suite=$1; shift
+images=$PAX_BUILD/$suite
+[ -x "$PAX_ROOT/tests/$suite" ] || die "no suite tests/$suite"
+[ -d "$images" ] || die "no $images: run tests/$suite first"
+export PAX_ROOTDISK_CACHE=${PAX_ROOTDISK_CACHE:-$PAX_BUILD/rootdisk}
+mapfile -t isos < <(find "$images" -name '*.iso' | sort)
+[ ${#isos[@]} -gt 0 ] || die "no ISO under $images"
+"$PAX_ROOT/tools/qemu-rootdisk" --prepare "${isos[@]}" || die "tools/qemu-rootdisk --prepare failed"
+leg=$PAX_BUILD/disk
+rm -rf "$leg"; mkdir -p "$leg"
+rc=0
+PAX_QEMU=$PAX_ROOT/tools/qemu-rootdisk PAX_BUILD=$leg "$PAX_ROOT/tests/$suite" --images "$images" "$@" || rc=$?
+q=$(find "$leg" -name '*.qemu.log' -exec cat {} + 2>/dev/null)
+n=$(printf '%s\n' "$q" | grep -c 'as a disk with / on partition 2')
+m=$(printf '%s\n' "$q" | grep -c 'left as it is')
+say "$suite with / on a disk: $n boots through tools/qemu-rootdisk, $m left as they were; the suite's exit $rc"
+[ "$n" -gt 0 ] || { say "no boot of $suite went through a disk"; exit 1; }
+exit "$rc"
