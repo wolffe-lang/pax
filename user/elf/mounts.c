@@ -2,7 +2,7 @@
    static glibc program run unmodified on Linux (the Linux guest booted
    with `root=` on an ext2 partition, this program its init:
    tools/linux-root) and on PAX (the root on the disk that boots), the
-   two outputs compared line by line (tests/mpx6-root).
+   two outputs compared line by line (the root suite, mpx6-root).
 
      mounts init        (the guest's pid 1 only) mount /proc, /sys, /dev
                         and /tmp as a distribution's init does (the
@@ -40,7 +40,7 @@
                         reboot(2) to restart; with it (the second boot)
                         it prints /etc/motd and /root/px67-note and
                         stats /tmp/px67-tmp (a tmpfs /tmp: gone)
-     mounts churn N     the crash row's write session (tools/root-crash):
+     mounts churn N [S] the crash row's write session (tools/root-crash):
                         N operations in /churn chosen by a fixed
                         generator (xorshift64, seed 0x9e3779b97f4a7c15):
                         make a file of 1 to 16 KiB, append 4 KiB, rename,
@@ -51,7 +51,9 @@
                         are held to), 10 ms apart, no fsync (the
                         flusher's 5 s are what reaches the disk);
                         tools/root-crash replays the same operations to
-                        know what the disk should hold
+                        know what the disk should hold; px68: with S,
+                        sync(2) after every S-th operation (`churn:
+                        synced K`: a commit each, the journal suite's J2)
      mounts end         `/` remounted read-only and sync(2), as an init
                         does before reboot(2)
      mounts term WAIT PROG [ARG...]
@@ -553,7 +555,7 @@ static void churn_fill(int fd, unsigned long n, unsigned long tag) {
 static char churn_names[4096][24];
 static int churn_count = 0;
 
-static void churn(int n) {
+static void churn(int n, int every) {
     mkdir("/churn", 0755);
     say("churn: begin\n");
     for (int k = 0; k < n; k++) {
@@ -611,6 +613,10 @@ static void churn(int n) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
         say("churn: %d %lld.%09ld\n", k, (long long)ts.tv_sec, ts.tv_nsec);
+        if (every > 0 && k % every == every - 1) {
+            sync();
+            say("churn: synced %d\n", k);
+        }
         usleep(10000);
     }
     say("churn: end\n");
@@ -644,7 +650,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (argc >= 3 && strcmp(argv[1], "churn") == 0) {
-        churn(atoi(argv[2]));
+        churn(atoi(argv[2]), argc >= 4 ? atoi(argv[3]) : 0);
         return 0;
     }
     if (argc >= 2 && strcmp(argv[1], "linger") == 0) {
@@ -681,6 +687,6 @@ int main(int argc, char **argv) {
         for (;;)
             pause();
     }
-    say("usage: mounts table | calls DEV DIR | user UID DEV DIR | root | twice MARKER | churn N | term WAIT PROG [ARG...] | end | linger [halt|restart] | init [DEV DIR [disk-tmp [no-end]]]\n");
+    say("usage: mounts table | calls DEV DIR | user UID DEV DIR | root | twice MARKER | churn N [S] | term WAIT PROG [ARG...] | end | linger [halt|restart] | init [DEV DIR [disk-tmp [no-end]]]\n");
     return 2;
 }
