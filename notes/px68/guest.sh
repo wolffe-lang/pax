@@ -17,7 +17,13 @@ if [ ! -x "$G/probe/mounts" ]; then
 fi
 P=$G/probe/mounts
 S=512
-lr() { taskset -c 0-3 tools/linux-root "$@"; }
+# The guest's kernel: the running one's image when it is there (kasumi ran
+# 7.2.8 with its modules directory gone after the 2026-10-24 upgrade to
+# 7.3.0-4, so the installed 7.3.0-4 image is the guest then).
+K=${PAX_LINUX_KERNEL:-/usr/lib/modules/$(uname -r)/vmlinuz}
+[ -r "$K" ] || K=$(command ls -1 /usr/lib/modules/*/vmlinuz | grep -v lts | tail -n 1)
+echo "guest kernel: $K ($(file -b "$K" | sed -n 's/.*version \([^ ]*\).*/\1/p'))"
+lr() { taskset -c 0-3 tools/linux-root --kernel "$K" "$@"; }
 p2() { dd if="$1" of="$2" bs=$S skip=20480 count=49152 status=none; }
 put2() { dd if="$2" of="$1" bs=$S seek=20480 conv=notrunc status=none; }
 p4() { dd if="$1" of="$2" bs=$S skip=69632 count=16384 status=none; }
