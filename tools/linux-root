@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# linux-root — this host's Linux kernel booted under QEMU with its root
+# file system on an ext2 partition of a GPT disk and px67's probe as its
+# init (px67): the reference side of tests/mpx6-root, black-box.
+#
+#   tools/linux-root [--kernel VMLINUZ] [--accel tcg|kvm] [--root SPEC]
+#                    [--opts "rw|ro ..."] [--init-args "ARGS"] [--disk IMAGE]
+#                    [--kill ERE] [--timeout S] [--append ARGS]
+#                    [--initrd] OUTDIR PROBE
+#
+# Without --disk it makes OUTDIR/disk.img (64 MiB), laid out as PAX's
+# disk that boots (tools/mkdisk --gpt) with one more partition for the
+# mount rows: 1 an EFI system partition (left empty: the kernel is given
+# to QEMU directly, `-kernel`), 2 the root, ext2 (tools/mkdisk --from:
+# /sbin/init is PROBE, /etc/motd, /etc/mtab a link to ../proc/self/mounts,
+# kasumi's own spelling, and the empty directories /proc, /sys, /dev,
+# /tmp and /mnt a distribution's init mounts over), 3 a BIOS boot
+# partition (empty), 4 a second ext2 volume of 8 MiB (`px67-vol`). The
+# guest boots `root=SPEC` (default /dev/vda2) `rootfstype=ext2`, OPTS
+# (default `rw`), `init=/sbin/init`, and everything after `--` is PROBE's
+# arguments (default `init /dev/vda4 /mnt`). With --disk IMAGE the
+# image is used as it is (its state carried from an earlier boot).
+# --kill ERE: QEMU is killed (SIGKILL, by its recorded pid) as soon as
+# the guest's serial log matches ERE: a power cut. Then, on the host:
+# partition 2's and 4's superblock state and mount count (`dumpe2fs -h`)
+# and `e2fsck -fn` (tools/e2fs, the pinned e2fsprogs), each in
+# OUTDIR/host.txt. The serial log is OUTDIR/serial.log (carriage returns
+# removed); --append ARGS adds to the kernel's command line (e.g.
+# `loglevel=7`, so the root mount's own lines reach the console).
+# --initrd boots with no `root=` at all: the root is an initramfs
+# (tools/mkinitramfs) holding the same tree, PROBE as `/init`, the
+# disk still given (the shape of PAX's ISO path). Exit 0 when the guest said `mounts: init done` (or, with
+# --kill, when it was killed), 1 otherwise, 2 on a usage or tool error.
+# Black-box only: the kernel and the probe are run, never read.
+set -euo pipefail
+die() { echo "linux-root: $*" >&2; exit 2; }
+here=$(cd "$(dirname "$0")" && pwd)
+kernel=/usr/lib/modules/$(uname -r)/vmlinuz
+accel=tcg
+root=/dev/vda2
+opts=rw
+iargs="init /dev/vda4 /mnt"
+disk=
+kill_ere=
+tmo=300
+append=
+initrd=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --kernel) kernel=$2; shift 2 ;;
+        --accel) accel=$2; shift 2 ;;
+        --root) root=$2; shift 2 ;;
+        --opts) opts=$2; shift 2 ;;
+        --init-args) iargs=$2; shift 2 ;;
+        --disk) disk=$2; shift 2 ;;
+        --kill) kill_ere=$2; shift 2 ;;
+        --timeout) tmo=$2; shift 2 ;;
+        --append) append=" $2"; shift 2 ;;
+        --initrd) initrd=1; shift ;;
+        -*) die "unknown option $1" ;;
+        *) break ;;
+    esac
+done
+[ $# -eq 2 ] || die "usage: linux-root [opts] OUTDIR PROBE"
+out=$1; probe=$2
+[ -r "$kernel" ] || die "cannot read the kernel $kernel"
+[ -f "$probe" ] || die "no probe $probe"
+command -v qemu-system-x86_64 >/dev/null || die "no qemu-system-x86_64"
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+S=512
+if [ -z "$disk" ]; then
+    disk=$out/disk.img
+    st=$out/stage
+    rm -rf "$st"; mkdir -p "$st/tree/sbin" "$st/tree/etc" "$st/tree/proc" "$st/tree/sys" "$st/tree/dev" "$st/tree/tmp" "$st/tree/mnt"
+    cp "$probe" "$st/tree/sbin/init"; chmod 755 "$st/tree/sbin/init"
+    printf 'px67: the Linux guest, its root on vda2\n' > "$st/tree/etc/motd"
+    ln -s ../proc/self/mounts "$st/tree/etc/mtab"
+    printf '/ 755 0 0\n/sbin/init 755 0 0\n/tmp 1777 0 0\n' > "$st/attrs"
+    # 1: LBA 2048.. (8 MiB) ESP-typed, 2: root 24 MiB, 3: BIOS 1 MiB, 4: 8 MiB ext2.
+    p1=(4096 20479); p2=(20480 69631); p3=(2048 4095); p4=(69632 86015)
+    "$here/mkdisk" --from "$st/tree" --attrs "$st/attrs" --label px67-root $(( (p2[1] - p2[0] + 1) * S )) "$st/root.img" > "$st/mkdisk-root.txt"
+    "$here/mkdisk" --label px67-vol $(( (p4[1] - p4[0] + 1) * S )) "$st/vol.img" > "$st/mkdisk-vol.txt"
+    rm -f "$disk"; truncate -s 64M "$disk"
+    dd if="$st/root.img" of="$disk" bs=$S seek=${p2[0]} conv=notrunc status=none
+    dd if="$st/vol.img" of="$disk" bs=$S seek=${p4[0]} conv=notrunc status=none
+    "$here/mkgpt" --label px67-guest "$disk" "1:esp:${p1[0]}:${p1[1]}:esp" "2:linux:${p2[0]}:${p2[1]}:root" \
+        "3:bios:${p3[0]}:${p3[1]}:bios" "4:linux:${p4[0]}:${p4[1]}:vol" > "$st/mkgpt.txt"
+fi
+acc=(-accel tcg)
+[ "$accel" = kvm ] && acc=(-accel kvm -cpu host)
+[ "$accel" = tcg ] && acc+=(-cpu max)
+log=$out/serial.raw
+rm -f "$log" "$out/qemu.pid"
+kargs="console=ttyS0 root=$root rootfstype=ext2 $opts init=/sbin/init panic=-1$append -- $iargs"
+rd=()
+if [ $initrd = 1 ]; then
+    python3 "$here/mkinitramfs" "$out/initrd.cpio" /init="$probe":755 /proc/:555 /sys/:555 /dev/:755 /tmp/:1777 /mnt/ \
+        /etc/motd=<(printf 'px67: the Linux guest, its root the initramfs\n'):644 /etc/mtab-\>../proc/self/mounts > "$out/initrd.txt"
+    rd=(-initrd "$out/initrd.cpio")
+    kargs="console=ttyS0 rdinit=/init panic=-1$append -- $iargs"
+fi
+qemu-system-x86_64 -machine q35 "${acc[@]}" -m 512M -display none -no-reboot -nic none \
+    -serial file:"$log" -kernel "$kernel" ${rd[@]+"${rd[@]}"} \
+    -append "$kargs" \
+    -drive file="$disk",if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0 \
+    -pidfile "$out/qemu.pid" &
+qp=$!
+killed=0
+t0=$(date +%s)
+while kill -0 $qp 2>/dev/null; do
+    if [ -n "$kill_ere" ] && [ -f "$log" ] && tr -d '\r' < "$log" | grep -Eq "$kill_ere"; then
+        kill -9 $qp 2>/dev/null || true
+        killed=1
+        break
+    fi
+    if [ $(( $(date +%s) - t0 )) -gt "$tmo" ]; then
+        kill -9 $qp 2>/dev/null || true
+        echo "linux-root: timeout after ${tmo}s" >&2
+        break
+    fi
+    sleep 0.2
+done
+wait $qp 2>/dev/null || true
+tr -d '\r' < "$log" > "$out/serial.log"
+[ $killed = 1 ] && echo "linux-root: killed at /$kill_ere/" >> "$out/serial.log"
+# The volumes as the host reads them (the layout above: 2 at LBA 20480,
+# 49152 sectors; 4 at LBA 69632, 16384 sectors).
+{
+    for p in 2 4; do
+        if [ $p = 2 ]; then first=20480; cnt=49152; else first=69632; cnt=16384; fi
+        dd if="$disk" of="$out/part$p.img" bs=$S skip="$first" count="$cnt" status=none
+        echo "partition $p (LBA $first):"
+        "$here/e2fs" "$out" dumpe2fs -h "part$p.img" 2>/dev/null | grep -E '^(Filesystem state|Mount count|Last mount time|Last write time):' | sed 's/^/  /' || true
+        rc=0
+        "$here/e2fs" "$out" e2fsck -fn "part$p.img" > "$out/e2fsck$p.txt" 2>&1 || rc=$?
+        echo "  e2fsck -fn: exit $rc: $(tail -n 1 "$out/e2fsck$p.txt")"
+        rm -f "$out/part$p.img"
+    done
+} > "$out/host.txt"
+cat "$out/host.txt"
+if [ $killed = 1 ] || grep -q 'mounts: init done' "$out/serial.log"; then exit 0; fi
+exit 1
