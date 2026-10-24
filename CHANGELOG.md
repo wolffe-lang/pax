@@ -22,7 +22,8 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   kernel/ext2 serves has_journal and needs_recovery (set while mounted,
   the state left clean, as Linux 7.3.0 leaves it), replays a log with
   transactions before the volume is used, in e2fsck's rules (measured on
-  journals `tools/mkjournal` writes), with one line; names every
+  journals `tools/mkjournal` writes), with one line, the log left for
+  the next boot when a replay stops short; names every
   incompatible and read-only-compatible feature it refuses, in Linux's
   words; statfs leaves the journal out. The root's line says `ext3,
   read-write, data=ordered`, the mount tables `ext3`; `rootfstype=ext3`,
