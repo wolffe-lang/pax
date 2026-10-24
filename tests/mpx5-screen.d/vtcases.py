@@ -244,3 +244,26 @@ PROBE3 += [
     ('screen', 'region-scroll', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[Houtside\x1b[2;4r\x1b[4;1Hone\r\ntwo\r\nthree\x1b[r\x1b[?25h'),
     ('screen', 'region-outside-lf', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[2;3r\x1b[25;1HA\nB\x1b[r\x1b[?25h'),
 ]
+
+# px70: per-console palette, applied to cells already displayed.
+PROBE3 += [
+    ('screen', 'palette-set', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[31mAA\x1b]P1123456\x1b[H\x1b[?25h'),
+    ('screen', 'palette-reset', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[31mAA\x1b]P1123456\x1b]R\x1b[H\x1b[?25h'),
+    ('screen', 'palette-entry-0', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[30;41mA\x1b]P0102030\x1b[?25h'),
+    ('screen', 'palette-entry-1', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[31;42mA\x1b]P11b2937\x1b[?25h'),
+    ('screen', 'palette-entry-2', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[32;43mA\x1b]P226323e\x1b[?25h'),
+    ('screen', 'palette-entry-3', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[33;44mA\x1b]P3313b45\x1b[?25h'),
+    ('screen', 'palette-entry-4', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[34;45mA\x1b]P43c444c\x1b[?25h'),
+    ('screen', 'palette-entry-5', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[35;46mA\x1b]P5474d53\x1b[?25h'),
+    ('screen', 'palette-entry-6', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[36;47mA\x1b]P652565a\x1b[?25h'),
+    ('screen', 'palette-entry-7', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[37;40mA\x1b]P75d5f61\x1b[?25h'),
+    ('screen', 'palette-entry-8', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[90;41mA\x1b]P8686868\x1b[?25h'),
+    ('screen', 'palette-entry-9', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[91;42mA\x1b]P973716f\x1b[?25h'),
+    ('screen', 'palette-entry-10', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[92;43mA\x1b]Pa7e7a76\x1b[?25h'),
+    ('screen', 'palette-entry-11', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[93;44mA\x1b]Pb89837d\x1b[?25h'),
+    ('screen', 'palette-entry-12', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[94;45mA\x1b]Pc948c84\x1b[?25h'),
+    ('screen', 'palette-entry-13', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[95;46mA\x1b]Pd9f958b\x1b[?25h'),
+    ('screen', 'palette-entry-14', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[96;47mA\x1b]Peaa9e92\x1b[?25h'),
+    ('screen', 'palette-entry-15', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[97;40mA\x1b]Pfb5a799\x1b[?25h'),
+    ('screen', 'palette-all-reset', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b]P0102030\x1b]P11b2937\x1b]P226323e\x1b]P3313b45\x1b]P43c444c\x1b]P5474d53\x1b]P652565a\x1b]P75d5f61\x1b]P8686868\x1b]P973716f\x1b]Pa7e7a76\x1b]Pb89837d\x1b]Pc948c84\x1b]Pd9f958b\x1b]Peaa9e92\x1b]Pfb5a799\x1b]R\x1b[30mA\x1b[31mA\x1b[32mA\x1b[33mA\x1b[34mA\x1b[35mA\x1b[36mA\x1b[37mA\x1b[90mA\x1b[91mA\x1b[92mA\x1b[93mA\x1b[94mA\x1b[95mA\x1b[96mA\x1b[97mA\x1b[?25h'),
+]

@@ -83,6 +83,22 @@ class Truecolour(unittest.TestCase):
             self.assertEqual((t.cells[0][0][1],t.cells[0][1][2]),
                              (swap(int(fg,16)&15),swap((int(bg,16)>>4)&7)),line)
 
+class Palette(unittest.TestCase):
+    def test_every_entry_and_reset(self):
+        default=term(b'').palette
+        for n in range(16):
+            value=0x102030+n*0x0b0907
+            t=term(('A\33]P%x%06x' % (n,value)).encode())
+            self.assertEqual(t.palette[n],value)
+            self.assertEqual(t.cells[0][0],(65,7,0))
+            self.assertEqual([c for i,c in enumerate(t.palette) if i!=n],
+                             [c for i,c in enumerate(default) if i!=n])
+            for b in b'\33]R': t.feed(b)
+            self.assertEqual(t.palette,default)
+    def test_palette_is_shared_across_screens(self):
+        t=term(b'\33]P1123456\33[?1049h\33]P2654321\33[?1049l')
+        self.assertEqual(t.palette[1:3],[0x123456,0x654321])
+
 class Editing(unittest.TestCase):
     def test_character_edits_clamp_and_keep_cursor(self):
         for op,want in [('@','ab  c'),('P','abe  '),('X','ab  e')]:

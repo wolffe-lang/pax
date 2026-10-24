@@ -134,6 +134,8 @@ class Term:
         self.shape = 0  # DECSCUSR's last parameter, recorded (PAX draws a block)
         self.answers = bytearray()  # what the screen answers queries with (DA1, DSR)
         self.osc_left = 0
+        self.osc_digits = bytearray()
+        self.palette = list(PALETTE)
 
     def blank(self):
         """A space in the current rendition (ED, EL, a scrolled-in row)."""
@@ -328,15 +330,21 @@ class Term:
         if self.esc == 3:
             if b == 0x50:
                 self.esc, self.osc_left = 4, 7
+                self.osc_digits = bytearray()
                 return
             if b == 0x52:
                 self.esc = 0
+                self.palette = list(PALETTE)
                 return
             self.esc = 5
         if self.esc == 4:
+            self.osc_digits.append(b)
             self.osc_left -= 1
             if self.osc_left == 0:
                 self.esc = 0
+                if all(c in b'0123456789abcdefABCDEF' for c in self.osc_digits):
+                    value = int(self.osc_digits,16)
+                    self.palette[value >> 24] = value & 0xffffff
             return
         if self.esc == 5:
             if b == 7:
@@ -430,8 +438,8 @@ def render(term, glyphs, w, h):
             if term.visible and y == term.cy and x == term.cx:
                 f, b = b, f
             bits = glyphs.get(cp, q) if cp < 256 else q
-            fr = PALETTE[f].to_bytes(3, "big")
-            br = PALETTE[b].to_bytes(3, "big")
+            fr = term.palette[f].to_bytes(3, "big")
+            br = term.palette[b].to_bytes(3, "big")
             for r in range(16):
                 o = ((y * 16 + r) * w + x * 8) * 3
                 row = bits[r]

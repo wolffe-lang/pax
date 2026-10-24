@@ -99,10 +99,10 @@ def font():
     return glyphs
 
 
-def read_cells(w, h, px, glyphs):
+def read_cells(w, h, px, glyphs, palette=PALETTE):
     """The screen as (code point, fg, bg) a cell, colours as palette
     indices; a uniform cell is a space, its foreground unknown (None)."""
-    idx = {v: i for i, v in enumerate(PALETTE)}
+    idx = {v: i for i, v in enumerate(palette)}
     out = []
     for r in range(h // 16):
         row = []
@@ -148,6 +148,15 @@ def cmp_vt(log, d):
     for f, p in (('vt.rows', 1), ('vt2.rows', 2), ('vt70.rows', 3)):
         for k, v in vtc['rows'](f).items():
             vt[(p,) + k] = v
+    # VT comparison normalizes glyphs and palette indices, not VGA DAC
+    # quantization (the VT uses a 9x16 ROM font and 6-bit DAC). Derive the
+    # requested palette from the measured input stream; ref checks pixels.
+    palettes = {}
+    for number in (1, 2, 3):
+        t = ref['Term'](80,25)
+        for kind, name, data in vtc['cases']['PROBE%d' % number]:
+            for b in data: t.feed(b)
+            if name is not None: palettes[(number,name)] = list(t.palette)
     held = named = pending = failed = other = 0
     for name, _off in dumps(d):
         m = re.match(r'vt-(\d)-(.*)$', name)
@@ -158,7 +167,7 @@ def cmp_vt(log, d):
         if (w // 8, h // 16) != (80, 25):
             other += 1
             continue
-        got = read_cells(w, h, px, glyphs)
+        got = read_cells(w, h, px, glyphs, palettes.get((p,case),PALETTE))
         key = next((k for k in ((p, 'SCREEN', case), (p, 'ECHO', case)) if k in vt), None)
         if case in ('FG', 'BG'):
             want = [vtc['vga']((int(x, 16) >> (0 if case == 'FG' else 4)) & 15) for x in vt[(p, 'PALETTE', case)][0].split()]

@@ -62,7 +62,7 @@
 //!   shape); OSC (`ESC ]`) consumed to BEL or to any ESC, which then
 //!   starts the next sequence (ST's `ESC \` among them), and `ESC ] P`
 //!   with its seven digits and `ESC ] R` alone (the VT's palette strings,
-//!   not applied); the queries answered as the VT answers them — DA1
+//!   applied to existing and future cells); the queries answered as the VT answers them — DA1
 //!   (`CSI c`, `CSI 0 c`) and DECID (`ESC Z`) `ESC [ ? 6 c`, DSR 5 `ESC [
 //!   0 n`, DSR 6 (`CSI 6 n`, `CSI ? 6 n`) `ESC [ row ; column R` — into a
 //!   32-byte queue kernel/console takes from (`answer`) after every
@@ -161,6 +161,7 @@ const S_MAIN_ATTR: u64 = 62 // and its rendition, as S_SAVE_ATTR
 const S_REPLY: u64 = 63 // the answers' ring: its first byte | its count << 8
 const S_TOP: u64 = 64 // inclusive scroll-region first row
 const S_END: u64 = 65 // exclusive scroll-region last row
+const S_FORMAT: u64 = 66 // framebuffer channel shifts: red | green<<8 | blue<<16
 const RQ_BYTES: u64 = 32
 
 const MAX_COLS: u64 = 256
@@ -172,7 +173,7 @@ const BLANK: u64 = 0x0720 // a space, foreground 7, background 0
 const QUESTION: u64 = 63
 
 fn sv(i: u64) -> u64 {
-    // # Safety: i < 66, inside boot/screen.S's 528-byte pax_screen_state.
+    // # Safety: i < 67, inside boot/screen.S's 536-byte pax_screen_state.
     unsafe { ((pax_screen_state as u64 + i * 8) as *u64).read_volatile() }
 }
 
@@ -292,6 +293,43 @@ fn rgb(i: u64) -> u64 {
 
 fn pal(i: u64) -> u64 {
     sv(S_PAL + (i & 15))
+}
+
+fn pixel(c: u64) -> u64 {
+    let fmt = sv(S_FORMAT)
+    (((c >> 16) & 255) << (fmt & 255)) | (((c >> 8) & 255) << ((fmt >> 8) & 255)) | ((c & 255) << ((fmt >> 16) & 255))
+}
+
+/// Palette changes also recolour cells written before the OSC, as on the VT.
+fn repaint_palette() {
+    hide()
+    let p = pal(0)
+    // # Safety: the attached framebuffer, pitch * height bytes, as attach.
+    unsafe { pax_fb_fill(sv(S_VA), p | (p << 32), sv(S_PITCH) * sv(S_H) / 8) }
+    var i: u64 = 0
+    while i < sv(S_COLS) * sv(S_ROWS) {
+        draw(i % sv(S_COLS), i / sv(S_COLS), false)
+        i += 1
+    }
+}
+
+fn reset_palette() {
+    var changed = false
+    var i: u64 = 0
+    while i < 16 {
+        let p = pixel(rgb(i))
+        if pal(i) != p { changed = true }
+        put_sv(S_PAL + i, p)
+        i += 1
+    }
+    if changed { repaint_palette() }
+}
+
+fn hex_digit(b: u64) -> u64 {
+    if b >= 48 && b <= 57 { b - 48 }
+    else if b >= 65 && b <= 70 { b - 65 + 10 }
+    else if b >= 97 && b <= 102 { b - 97 + 10 }
+    else { 16 }
 }
 
 // --- drawing ---------------------------------------------------------------
@@ -849,23 +887,38 @@ fn feed(b: u64) {
     bump(S_BYTES)
     var st = sv(S_ESC)
     if st == 3 { // an OSC string's first byte
-        if b == 80 { // `P`: seven hex digits, the VT's palette setting (consumed, not applied)
+        if b == 80 { // `P`: nrrggbb, the VT's per-console palette
             put_sv(S_ESC, 4)
             put_sv(S_PI, 7)
+            put_sv(S_P, 0)
+            put_sv(S_PRIV, 0)
             return
         }
-        if b == 82 { // `R`: the VT's palette reset, nothing more (consumed)
+        if b == 82 { // `R`: reset all sixteen entries
             put_sv(S_ESC, 0)
+            reset_palette()
             return
         }
         put_sv(S_ESC, 5)
         st = 5
     }
-    if st == 4 { // OSC P's digits
+    if st == 4 { // OSC P's seven digits; invalid input cannot index the palette
+        let digit = hex_digit(b)
+        if digit == 16 { put_sv(S_PRIV, 1) }
+        put_sv(S_P, (sv(S_P) << 4) | (digit & 15))
         let left = sv(S_PI) - 1
         put_sv(S_PI, left)
         if left == 0 {
             put_sv(S_ESC, 0)
+            if sv(S_PRIV) == 0 {
+                let value = sv(S_P)
+                let index = (value >> 24) & 15
+                let p = pixel(value & 0xffffff)
+                if pal(index) != p {
+                    put_sv(S_PAL + index, p)
+                    repaint_palette()
+                }
+            }
         }
         return
     }
@@ -999,6 +1052,7 @@ pub fn attach(va: u64, w: u64, h: u64, pitch: u64, rs: u64, gs: u64, bs: u64) ->
     put_sv(S_W, w)
     put_sv(S_H, h)
     put_sv(S_PITCH, pitch)
+    put_sv(S_FORMAT, rs | (gs << 8) | (bs << 16))
     put_sv(S_COLS, cols)
     put_sv(S_ROWS, rows)
     put_sv(S_TOP, 0)

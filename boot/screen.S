@@ -6,7 +6,7 @@
    wolf-lang#598's shape), so its state is bytes here, named by
    kernel/screen with `extern "c" let` and read and written volatile:
 
-     pax_screen_state  66 eight-byte words: the framebuffer's address
+     pax_screen_state  67 eight-byte words: the framebuffer's address
                        and geometry, the grid's size, the cursor, the
                        pending wrap, the colours, the escape parser,
                        the UTF-8 decoder, the palette's 16 pixel values,
@@ -59,7 +59,7 @@ pax_fb_fill:
         .p2align 6
         .globl pax_screen_state
 pax_screen_state:
-        .zero 528
+        .zero 536
         .p2align 12
         .globl pax_screen_cells
 pax_screen_cells:
