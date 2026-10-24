@@ -66,12 +66,17 @@ disk_for() {
         note "left as it is: no $mod in $iso"
         return 2
     fi
-    # The disk: the archive's tree and some room (half again, then 64 MiB
-    # for what a session writes), the ESP's 64 MiB and Limine's 1 MiB.
+    # The disk: the ESP holds the kernel and the archive (the module kept)
+    # with a fifth again and 16 MiB to spare, 64 MiB at least; the root
+    # the archive's tree and some room (half again, then 64 MiB for what
+    # a session writes); Limine's 1 MiB and the alignment's.
     bytes=$(wc -c < "$x/initramfs.cpio" | tr -d ' ')
-    mib=$(( (bytes * 3 / 2) / 1048576 + 64 + 64 + 4 ))
+    kb=$(wc -c < "$x/pax" | tr -d ' ')
+    esp=$(( ((bytes + kb) * 6 / 5) / 1048576 + 16 ))
+    [ "$esp" -ge 64 ] || esp=64
+    mib=$(( esp + (bytes * 3 / 2) / 1048576 + 64 + 4 ))
     if ! SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-1700000000} "$here/mkdisk" --gpt --kernel "$x/pax" --root "$x/initramfs.cpio" \
-        --initramfs "$x/initramfs.cpio" --conf "$x/limine.conf" --label pax-rootdisk "${mib}M" "$disk.part" > "$x/mkdisk.log" 2>&1; then
+        --initramfs "$x/initramfs.cpio" --conf "$x/limine.conf" --esp "${esp}M" --label pax-rootdisk "${mib}M" "$disk.part" > "$x/mkdisk.log" 2>&1; then
         note "tools/mkdisk --root failed for $iso: $(tail -n 2 "$x/mkdisk.log" | tr '\n' ' ')"
         rm -f "$disk.part"
         return 1
