@@ -1897,6 +1897,11 @@ pub fn io_size(i: u64) -> u64 {
 /// record looked up in an earlier one may be given back.
 pub fn tick() {
     put_st(S_GEN, st(S_GEN) + 1)
+    // px68: between two calls, a journalled volume's large running
+    // transaction is committed (kernel/ext2's `boundary`).
+    if ext2.wants_boundary() {
+        ext2.boundary(now())
+    }
 }
 
 fn stamp(i: u64) {
@@ -2884,7 +2889,7 @@ pub fn sync_all() -> u64 {
         let v = mounted(m)
         if v != NONE {
             writeback_vol(v)
-            let r = ext2.sync(v)
+            let r = ext2.sync(v, now()) // px68: a journalled volume's commit, at this time
             if r != 0 && err == 0 {
                 err = r
             }
@@ -2902,7 +2907,7 @@ pub fn sync_of(i: u64) -> u64 {
         return 0
     }
     writeback(i)
-    ext2.sync(vol(i))
+    ext2.sync(vol(i), now())
 }
 
 /// px63: the end (a halt, a reboot): every volume's shared pages and
