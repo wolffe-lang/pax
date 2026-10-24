@@ -242,8 +242,10 @@ host repairs it: `e2fsck -fy` of partition 2, which starts at
 The dev variant adds a musl-static `wolf` at `/usr/bin/wolf` and its
 pinned standard library at `/usr/share/wolf/std`. It leaves the base
 image unchanged. `tools/mkwolf`, `tools/mkwolf-std` and `tools/mkdev`
-build and stage those additions; `user/wolf.pin` records the source,
-portability patch and recipe, and `user/wolf.sums` records the bytes.
+build and stage those additions; `user/wolf.pin` records the source
+and recipe (since px65 the v0.2.35 tag unpatched: the release carries
+the musl fix px60's patch made, so the binary says the release's own
+line), and `user/wolf.sums` records the bytes.
 The shell environment selects the std tree through `WOLF_STD`. The full
 dev ISO also carries static lld 17, a link-only `cc` front end, and musl's
 binary CRT/libc inputs (`user/wolf-link.sums`). It can build and run native
@@ -264,7 +266,7 @@ wolf build hello.lu
 ./hello
 ```
 
-At 0.2.34 there is no `wolf check` command. `wolf run --checked` is a
+At 0.2.35, as at 0.2.34, there is no `wolf check` command. `wolf run --checked` is a
 native build, **not** the checked machine; it requires a native link
 step. `wolf build --no-cache --emit=obj hello.lu -o hello.o` emits a
 native object without a linker. The default backend is Cranelift;
