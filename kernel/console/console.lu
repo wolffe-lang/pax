@@ -171,6 +171,8 @@ const C_SRC: u64 = 26 // px48: the device the last input came from: 0 none yet, 
 const C_ANSWERS: u64 = 27 // px59: bytes of the screen's answers typed into the input
 const C_UNANSWERED: u64 = 28 // px59: bytes of the screen's answers dropped (input last from COM1, or none yet)
 
+const C_ENTRY: u64 = 29 // Alt decimal/AltGr hex: bit32 pending, low32 accumulator
+
 const RING: u64 = 4096
 const LINE_MAX: u64 = 4095 // bytes before the newline
 
@@ -278,7 +280,8 @@ const K_RCTRL: u64 = 8
 const K_CAPS: u64 = 16
 const K_E0: u64 = 32
 const K_LALT: u64 = 64 // px59
-const K_RALT: u64 = 128 // px59: tracked, never applied (R-px59-2)
+const K_RALT: u64 = 128 // AltGr: hexadecimal entry and measured symbol keys
+const K_NUM: u64 = 256 // NumLock, initially off as on the measured VT
 
 fn sv(i: u64) -> u64 {
     // # Safety: i < 64, inside boot/console.S's 512-byte pax_con_state.
@@ -1038,6 +1041,7 @@ fn is_lower(c: u64) -> bool {
 /// change none of them (named).
 fn cursor_key(k: u64) -> u64 {
     match k {
+        0x4c => 71, // keypad centre: CSI G
         0x48 => 65, // up
         0x50 => 66, // down
         0x4d => 67, // right
@@ -1131,6 +1135,61 @@ fn function_key(k: u64, keys: u64) {
     }
 }
 
+/// The numeric keypad's digit; 16 marks a non-digit scan code.
+fn keypad_digit(k: u64) -> u64 {
+    match k {
+        0x52 => 0, 0x4f => 1, 0x50 => 2, 0x51 => 3, 0x4b => 4,
+        0x4c => 5, 0x4d => 6, 0x47 => 7, 0x48 => 8, 0x49 => 9,
+        _ => 16,
+    }
+}
+
+/// Character entry is completed on Alt release, not on a digit's make.
+/// A bounded 32-bit accumulator cannot overflow the kernel's arithmetic.
+fn entry_digit(digit: u64, base: u64) {
+    let value = ((sv(C_ENTRY) & 0xffffffff) * base + digit) & 0xffffffff
+    put_sv(C_ENTRY, value | 0x100000000)
+}
+
+fn finish_entry() {
+    let pending = sv(C_ENTRY)
+    put_sv(C_ENTRY, 0)
+    if pending & 0x100000000 == 0 { return }
+    let cp = pending & 0xffffffff
+    if cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff) { return }
+    bump(C_RX_KBD)
+    if cp < 0x80 { input(cp) }
+    else if cp < 0x800 {
+        input(0xc0 | (cp >> 6)); input(0x80 | (cp & 63))
+    } else if cp < 0x10000 {
+        input(0xe0 | (cp >> 12)); input(0x80 | ((cp >> 6) & 63)); input(0x80 | (cp & 63))
+    } else {
+        input(0xf0 | (cp >> 18)); input(0x80 | ((cp >> 12) & 63))
+        input(0x80 | ((cp >> 6) & 63)); input(0x80 | (cp & 63))
+    }
+}
+
+/// Shared navigation mapping. Shift+PgUp/PgDn is suppressed only for the
+/// extended editing block, not for the keypad (measured in keys-hex.rows).
+fn navigation_key(k: u64, keys: u64, keypad: bool) {
+    let f = cursor_key(k)
+    if f == 0 { return }
+    let shift = keys & (K_LSHIFT | K_RSHIFT) != 0
+    let ctrl = keys & (K_LCTRL | K_RCTRL) != 0
+    let alt = keys & K_LALT != 0
+    if !keypad && f > 0xff && shift && (k == 0x49 || k == 0x51) { return }
+    var m: u64 = 1
+    if f >= 65 && f <= 68 {
+        m = 1 + (if shift { 1 } else { 0 }) + (if alt { 2 } else { 0 }) + (if ctrl { 4 } else { 0 })
+        if m == 3 && (k == 0x4b || k == 0x4d) { return }
+    }
+    bump(C_RX_KBD)
+    input(27); input(91)
+    if m > 1 { input(49); input(59); input(48 + m) }
+    input(f & 0xff)
+    if f > 0xff { input(126) }
+}
+
 /// One byte from the i8042 (set 1).
 fn scancode(b: u64) {
     bump(C_SCANCODES)
@@ -1164,6 +1223,12 @@ fn scancode(b: u64) {
             keys = keys | bit
         }
         put_sv(C_KEYS, keys)
+        if brk && (bit == K_LALT || bit == K_RALT) { finish_entry() }
+        return
+    }
+    if k == 0x45 && !ext {
+        if !brk { keys ^= K_NUM }
+        put_sv(C_KEYS, keys)
         return
     }
     if k == 0x3a && !ext {
@@ -1184,50 +1249,36 @@ fn scancode(b: u64) {
         } else if k == 0x35 {
             c = 47 // keypad /
         } else {
-            // px58: the cursor and editing block give the sequences a
-            // Linux virtual terminal gives them (measured: notes/px58 §E,
-            // the same keys sent to kasumi's kernel's VT; terminfo's
-            // `linux` entry agrees), through the line discipline as if
-            // typed, so a program in raw mode reads them and canonical
-            // mode echoes `^[[A` as Linux's does.
-            // px59: the arrows take the modifiers as `ESC [ 1 ; m X`, m
-            // 1 + Shift 1 + left Alt 2 + Ctrl 4, but left Alt alone on
-            // Left or Right gives nothing (the VT's console switch); the
-            // editing block takes none, and Shift with PgUp or PgDn gives
-            // nothing (the VT scrolls); right Alt adds nothing (measured:
-            // notes/px59/vt2.rows).
-            let f = cursor_key(k)
-            if f != 0 {
-                let shift = keys & (K_LSHIFT | K_RSHIFT) != 0
-                let ctrl = keys & (K_LCTRL | K_RCTRL) != 0
-                let alt = keys & K_LALT != 0
-                if f > 0xff && shift && (k == 0x49 || k == 0x51) {
-                    return
-                }
-                var m: u64 = 1
-                if f < 0x100 {
-                    m = 1 + (if shift { 1 } else { 0 }) + (if alt { 2 } else { 0 }) + (if ctrl { 4 } else { 0 })
-                    if m == 3 && (k == 0x4b || k == 0x4d) {
-                        return
-                    }
-                }
-                bump(C_RX_KBD)
-                input(27)
-                input(91)
-                if m > 1 {
-                    input(49)
-                    input(59)
-                    input(48 + m)
-                }
-                input(f & 0xff)
-                if f > 0xff {
-                    input(126)
-                }
-            }
+            navigation_key(k, keys, false)
             return
         }
     } else {
+        let digit = keypad_digit(k)
+        let alt = keys & (K_LALT | K_RALT) != 0
+        let modified = keys & (K_LSHIFT | K_RSHIFT | K_LCTRL | K_RCTRL) != 0
+        if digit < 10 && alt {
+            if !modified { entry_digit(digit, if keys & K_RALT != 0 { 16 } else { 10 }) }
+            return
+        }
+        if digit < 10 || k == 0x53 {
+            if keys & K_NUM == 0 { navigation_key(k, keys, true) }
+            else { bump(C_RX_KBD); input(if k == 0x53 { 46 } else { 48 + digit }) }
+            return
+        }
         c = key_base(k)
+        if keys & K_RALT != 0 {
+            if c >= 97 && c <= 102 {
+                if !modified { entry_digit(c - 97 + 10, 16) }
+                return
+            }
+            if c >= 48 && c <= 57 {
+                if modified { return }
+                c = match c {
+                    48 => 125, 50 => 64, 52 => 36, 55 => 123, 56 => 91, 57 => 93,
+                    _ => 0,
+                }
+            }
+        }
         if c == 0 && fkey_number(k) != 0 {
             function_key(k, keys)
             return
@@ -1239,8 +1290,8 @@ fn scancode(b: u64) {
     // px59 (R-px59-2): left Alt sends ESC before the key's character, as
     // the VT's Meta does; with Shift too it gives nothing (measured on
     // `a` and `1`); the keypad's keys take no prefix (keypad Enter
-    // measured). Right Alt adds nothing (the VT's AltGr enters a
-    // character by its code: not served).
+    // measured). Right Alt's hexadecimal entry and symbols were handled
+    // above; other character keys retain their measured normal mapping.
     let meta = keys & K_LALT != 0 && !ext && k != 0x37 && k != 0x4a && k != 0x4e
     if meta && keys & (K_LSHIFT | K_RSHIFT) != 0 {
         return
