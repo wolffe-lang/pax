@@ -10,7 +10,9 @@ import time
 
 base = Path(sys.argv[1]).resolve()
 pax = base / 'pax'
-kernel = f'/usr/lib/modules/{os.uname().release}/vmlinuz'
+kernel = os.environ['PAX_VT_KERNEL']
+if not Path(kernel).is_file():
+    raise SystemExit(f'no guest kernel: {kernel}')
 for suffix, prefixes in [('', ('SCREEN ', 'QUERY ', 'KEY ', 'PALETTE ')),
                          ('2', ('STATE ', 'SCREEN ', 'QUERY ', 'ECHO ', 'KEY '))]:
     source = (pax / f'notes/px59/vtprobe{suffix}.c').read_text()

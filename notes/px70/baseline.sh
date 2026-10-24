@@ -15,6 +15,9 @@ git log -1 --format='%H %s'
 [ "$(git rev-parse HEAD:kernel/screen/screen.lu)" = "$(git rev-parse 54570380:kernel/screen/screen.lu)" ]
 export PAX_CACHE="$L/cache" PAX_BUILD="$L/build/baseline" TMPDIR="$L/tmp"
 export PAX_ENGINE=podman PAX_TREE_IMAGE=localhost/px13-ubuntu
+# The running 7.2.8 kernel package has been removed; use the installed image.
+export PAX_VT_KERNEL=/usr/lib/modules/7.3.0-4-cachyos/vmlinuz
+[ -r "$PAX_VT_KERNEL" ]
 step() {
     local name=$1; shift
     echo "$(date -Is) START $name"
@@ -43,7 +46,8 @@ step vt-build podman run --rm --name px70-vt-build --cpuset-cpus 4-7 --ulimit co
 for suffix in '' 2; do
     tools/mkinitramfs "$L/measure/vt$suffix.cpio" "/vtprobe$suffix=$L/measure/vtprobe$suffix:755"
 done
-sha256sum "/usr/lib/modules/$(uname -r)/vmlinuz"
+printf "Linux guest image: %s\n" "$PAX_VT_KERNEL"
+sha256sum "$PAX_VT_KERNEL" "$PAX_VT_KERNEL"
 qemu-system-x86_64 --version
 step vt-measure python3 notes/px70/vt-baseline.py "$L"
 for suite in mpx5-screen mpx3-screen mpx5-yew; do
@@ -54,7 +58,11 @@ for suite in mpx5-screen mpx3-screen mpx5-yew; do
         set -euo pipefail
         cd "$L/pax"
         export PAX_WOLF=$(tools/fetch-wolf)
-        tests/"$SUITE" --no-boot --tier native'
+        if grep -q -- "--only build" tests/"$SUITE"; then
+            tests/"$SUITE" --only build --tier native
+        else
+            tests/"$SUITE" --no-boot --tier native
+        fi'
     if [ "$suite" = mpx5-yew ]; then
         step "$suite-linux" taskset -c 4-7 tests/"$suite" --only linux --images "$PAX_BUILD/$suite"
     fi
