@@ -580,8 +580,9 @@ To prune once this merges:
 
 - kasumi `~/lanes/px67/` (the clone and its worktrees `plant-dotdot`,
   `plant-clean`, `plant-attrs`; `build/`, `snap/`, `play/` but for what
-  §7 keeps, `kb/`, `smoke/`, `guest/`, `probe/`, `cache/`, `tmp/`, the
-  batch logs): about 6 GB at the end;
+  §7 keeps, `kb/`, `guest/`, `probe/`, `cache/`, `tmp/`, the batch
+  logs): 3.0 GB at the hand-back, the build products already pruned
+  (`tmp/` holds a container's read-only files: `podman unshare rm -rf`);
 - the branches `px67-plant-dotdot`, `px67-plant-clean`,
   `px67-plant-attrs` on origin (and `px67` after the merge);
 - this Mac's worktree `/Users/mfwolffe/lanes/px67/pax`;
