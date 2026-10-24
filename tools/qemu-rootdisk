@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# qemu-rootdisk — a stand-in for qemu-system-x86_64 that boots a suite's
+# ISO with `/` on a disk instead (px67): the root-on-disk leg of any suite
+# that boots through tools/qemu-run (and so tools/qemu-halt), unchanged:
+#
+#   PAX_QEMU=tools/qemu-rootdisk tests/SUITE --images DIR ...
+#
+# tools/qemu-run gives QEMU the image as `-drive file=ISO,format=raw,
+# media=cdrom,readonly=on -boot d`. This takes the ISO apart (xorriso
+# -osirrox: /boot/pax, /boot/limine/limine.conf and the module its entry
+# names, the initramfs), makes the disk tools/mkdisk --gpt --root makes
+# of them (the archive's tree as partition 2, the kernel and Limine on
+# the ESP, `root=PARTUUID=… rw` on the entry's command line, and the
+# archive kept as its module, R-px67-2's other way: a kernel that does not
+# read `root=`, kmain_loader's or kmain_boreutils', boots from the disk as
+# it did from the ISO, its tree in memory), once an ISO (a cache keyed by
+# its sha256, PAX_ROOTDISK_CACHE, default $PAX_BUILD/rootdisk), and runs
+# the real QEMU (PAX_QEMU_REAL, default qemu-system-x86_64 on PATH) on a
+# copy of it as a virtio disk the firmware boots first (`-drive
+# file=COPY,if=none,id=rd0,format=raw -device virtio-blk-pci,drive=rd0,
+# bootindex=0`), in place of the CD-ROM: `exec`, so the pid qemu-run
+# waits for and kills is QEMU's. Each copy is the disk one boot writes;
+# copies left by QEMUs that have ended are removed at the next start.
+#
+# Left as they are (the real QEMU on the same arguments, one line on
+# stderr, which qemu-run keeps in FILE.qemu.log): a run with no CD-ROM,
+# one that gives QEMU a virtio disk of its own (PAX drives one disk:
+# mpx6-blk, mpx6-ext2, mpx6-part bring theirs), and an ISO whose entry
+# loads no module. --version and every other call that boots nothing pass
+# straight through.
+#
+#   tools/qemu-rootdisk --prepare ISO...
+#
+# makes each ISO's disk into the cache and boots nothing: a suite's
+# first boot of an ISO would otherwise spend tools/mkdisk's time (its
+# containers) inside tools/qemu-run's timeout. Exit 0 when every ISO
+# has a disk or is one this leaves as it is, 1 when tools/mkdisk failed.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+real=${PAX_QEMU_REAL:-qemu-system-x86_64}
+note() { printf 'qemu-rootdisk: %s\n' "$*" >&2; }
+
+cache=${PAX_ROOTDISK_CACHE:-${PAX_BUILD:-$here/../build}/rootdisk}
+
+# The disk for ISO $1 into $disk: 0 made or cached, 1 tools/mkdisk
+# failed, 2 an ISO this leaves as it is (the reason on stderr).
+disk_for() {
+    local iso=$1 key x mod bytes mib
+    key=$(sha256sum "$iso" 2>/dev/null | cut -c1-16)
+    [ -n "$key" ] || { note "cannot read $iso"; return 2; }
+    disk=$cache/$key.img
+    [ -f "$disk" ] && return 0
+    mkdir -p "$cache"
+    x=$cache/$key.x
+    rm -rf "$x"; mkdir -p "$x"
+    if ! xorriso -osirrox on -indev "$iso" -extract /boot/pax "$x/pax" -extract /boot/limine/limine.conf "$x/limine.conf" > "$x/xorriso.log" 2>&1; then
+        note "left as it is: xorriso could not take $iso apart ($(tail -n 1 "$x/xorriso.log"))"
+        return 2
+    fi
+    mod=$(sed -n 's/^[[:space:]]*module_path:[[:space:]]*boot():\(.*\)$/\1/p' "$x/limine.conf" | head -n 1)
+    if [ -z "$mod" ]; then
+        note "left as it is: $iso's entry loads no module (no initramfs to install)"
+        return 2
+    fi
+    if ! xorriso -osirrox on -indev "$iso" -extract "$mod" "$x/initramfs.cpio" >> "$x/xorriso.log" 2>&1; then
+        note "left as it is: no $mod in $iso"
+        return 2
+    fi
+    # The disk: the archive's tree and some room (half again, then 64 MiB
+    # for what a session writes), the ESP's 64 MiB and Limine's 1 MiB.
+    bytes=$(wc -c < "$x/initramfs.cpio" | tr -d ' ')
+    mib=$(( (bytes * 3 / 2) / 1048576 + 64 + 64 + 4 ))
+    if ! SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-1700000000} "$here/mkdisk" --gpt --kernel "$x/pax" --root "$x/initramfs.cpio" \
+        --initramfs "$x/initramfs.cpio" --conf "$x/limine.conf" --label pax-rootdisk "${mib}M" "$disk.part" > "$x/mkdisk.log" 2>&1; then
+        note "tools/mkdisk --root failed for $iso: $(tail -n 2 "$x/mkdisk.log" | tr '\n' ' ')"
+        rm -f "$disk.part"
+        return 1
+    fi
+    mv "$disk.part" "$disk"
+    cp "$x/mkdisk.log" "$disk.mkdisk.log"
+    rm -rf "$x"
+    return 0
+}
+
+if [ "${1:-}" = --prepare ]; then
+    shift
+    rc=0
+    for iso in "$@"; do
+        disk_for "$iso"
+        case $? in
+            0) note "$iso: $disk ($(sed -n 's/^mkdisk: root=//p' "$disk.mkdisk.log"))" ;;
+            1) rc=1 ;;
+        esac
+    done
+    exit $rc
+fi
+
+args=("$@")
+iso= di=-1 bi=-1 own=0
+for i in "${!args[@]}"; do
+    a=${args[i]}
+    case $a in
+        file=*,format=raw,media=cdrom,readonly=on)
+            iso=${a#file=}; iso=${iso%,format=raw,media=cdrom,readonly=on}; di=$i ;;
+        -boot) bi=$i ;;
+        virtio-blk-pci*) own=1 ;;
+    esac
+done
+if [ -z "$iso" ]; then
+    exec "$real" "$@"
+fi
+if [ "$own" = 1 ]; then
+    note "left as it is: the run gives QEMU a virtio disk of its own (PAX drives one)"
+    exec "$real" "$@"
+fi
+mkdir -p "$cache"
+for c in "$cache"/boot-*.img; do
+    [ -f "$c" ] || continue
+    p=${c##*/boot-}; p=${p%.img}
+    kill -0 "$p" 2>/dev/null || rm -f "$c"
+done
+disk_for "$iso"
+case $? in
+    0) ;;
+    1) note "left as it is: no disk for $iso"; exec "$real" "$@" ;;
+    *) exec "$real" "$@" ;;
+esac
+copy=$cache/boot-$$.img
+cp --sparse=always "$disk" "$copy" || { note "no room for a copy of $disk"; exec "$real" "$@"; }
+new=()
+for i in "${!args[@]}"; do
+    if [ "$i" = "$((di - 1))" ] && [ "${args[i]}" = -drive ]; then
+        continue
+    fi
+    if [ "$i" = "$di" ]; then
+        new+=(-drive "file=$copy,if=none,id=rd0,format=raw" -device "virtio-blk-pci,drive=rd0,bootindex=0")
+        continue
+    fi
+    if [ "$i" = "$bi" ] || [ "$i" = "$((bi + 1))" ]; then
+        [ "$bi" -ge 0 ] && continue
+    fi
+    new+=("${args[i]}")
+done
+note "$iso as a disk with / on partition 2 ($(sed -n 's/^mkdisk: root=//p' "$disk.mkdisk.log")): $copy"
+exec "$real" "${new[@]}"
