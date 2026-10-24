@@ -4,6 +4,7 @@ set -euo pipefail
 L=$HOME/lanes/px70
 export PAX_CACHE="$L/cache" TMPDIR="$L/tmp"
 mkdir -p "$L/build/timing" "$L/out/timing"
+if [ "${1:-}" != --summarize ]; then
 for kind in trunk packed final; do
     if [ "$kind" = final ]; then tree="$L/pax"; else tree="$L/timing-$kind"; fi
     podman run --rm --name "px70-timing-$kind" --cpuset-cpus 12-15 --ulimit core=0:0 \
@@ -29,6 +30,7 @@ for repeat in 1 2 3; do
         grep -a '^scroll:' "$L/out/timing/$kind-$repeat.serial.log"
     done
 done
+fi
 python3 - "$L" <<'PY'
 from pathlib import Path
 import re,sys,statistics
@@ -36,7 +38,7 @@ L=Path(sys.argv[1]); values={}
 for kind in ('trunk','packed','final'):
     values[kind]=[]
     for run in (1,2,3):
-        text=(L/f'out/timing/{kind}-{run}.serial.log').read_text()
+        text=(L/f'out/timing/{kind}-{run}.serial.log').read_text(encoding="latin-1")
         assert 'PANIC' not in text
         a,b,n=map(int,re.search(r'scroll: 400 lines in (\d+) ticks without scrolling, 400 in (\d+) with (\d+) scrolls',text).groups())
         assert 0<n<=400 and b>=a
