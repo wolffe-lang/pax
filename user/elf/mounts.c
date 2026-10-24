@@ -45,11 +45,13 @@
                         generator (xorshift64, seed 0x9e3779b97f4a7c15):
                         make a file of 1 to 16 KiB, append 4 KiB, rename,
                         unlink, make a directory with a file in it, cut a
-                        file to half; `churn: K` after operation K is
-                        done, 10 ms apart, no fsync (the flusher's 5 s
-                        are what reaches the disk); tools/root-crash
-                        replays the same operations to know what the
-                        disk should hold
+                        file to half; `churn: K S.N` after operation K
+                        is done (px68: S.N the realtime clock read when
+                        it returned, which the journal's commit blocks
+                        are held to), 10 ms apart, no fsync (the
+                        flusher's 5 s are what reaches the disk);
+                        tools/root-crash replays the same operations to
+                        know what the disk should hold
      mounts end         `/` remounted read-only and sync(2), as an init
                         does before reboot(2)
      mounts term WAIT PROG [ARG...]
@@ -606,7 +608,9 @@ static void churn(int n) {
             if (stat(path, &st) == 0)
                 truncate(path, st.st_size / 2);
         }
-        say("churn: %d\n", k);
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        say("churn: %d %lld.%09ld\n", k, (long long)ts.tv_sec, ts.tv_nsec);
         usleep(10000);
     }
     say("churn: end\n");
