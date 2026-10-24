@@ -373,15 +373,13 @@ def main(argv):
         got = tree_of(lst)
         why2 = []
         if b is None:
-            want = replay(-1)
-            ok_bound = got == want
+            ok_bound = got == replay(-1)
             span = "no commit"
         else:
-            cands = [replay(m) for m in range(b[0], b[1] + 1)]
-            ok_bound = any(got == w for w in cands)
-            want = cands[-1]
+            ok_bound = any(got == replay(m) for m in range(b[0], b[1] + 1))
             span = "ops to %d-%d at commit %d (%.3f)" % (b[0], b[1], cs[-1][0], b[2])
-        cls, why = classify(rc, fo, want, got)
+        # The class against what the operations did (px67's), the bound apart.
+        cls, why = classify(rc, fo, replay(last), got)
         if cls in ("none", "lost writes") and not ok_bound:
             cls, why = "worse", "the tree is outside the last commit's bound (%s)" % span
         if churn_lines(hlst) != churn_lines(lst):
