@@ -818,6 +818,24 @@ pub fn commit(v: u64, now: u64) -> u64 {
     let esc = jw(v, J_FR_ESC)
     let tp = tags_per(bs)
     let n = jw(v, J_NLIST)
+    // PLANT (px68-plant-order): the commit block written first, at its
+    // place after the log, before the descriptors and the logged blocks.
+    let pnr = jw(v, J_NREV)
+    let pnb = (n + tp - 1) / tp + n + (pnr + revs_per(bs) - 1) / revs_per(bs)
+    var pc = pos
+    var pq: u64 = 0
+    while pq < pnb {
+        pc = next(v, pc)
+        pq += 1
+    }
+    let pcb = esc + hh()
+    zero(pcb, bs)
+    header(pcb, T_COMMIT, seq)
+    put_be32(pcb + 0x30, (now / 1000000000) >> 32)
+    put_be32(pcb + 0x34, now / 1000000000)
+    put_be32(pcb + 0x38, now % 1000000000)
+    let pe = io(v, vblk.T_OUT, pc, esc)
+    if err == 0 { err = pe }
     var i: u64 = 0
     while i < n {
         // A descriptor for the next tp blocks, then the blocks.
@@ -895,15 +913,7 @@ pub fn commit(v: u64, now: u64) -> u64 {
     }
     let f1 = flush(v) // the data, the log and the superblock on the medium before the commit
     if err == 0 { err = f1 }
-    let c = scr + hh()
-    zero(c, bs)
-    header(c, T_COMMIT, seq)
-    put_be32(c + 0x30, (now / 1000000000) >> 32)
-    put_be32(c + 0x34, now / 1000000000)
-    put_be32(c + 0x38, now % 1000000000)
-    let e1 = io(v, vblk.T_OUT, pos, scr)
-    if err == 0 { err = e1 }
-    pos = next(v, pos)
+    pos = next(v, pos) // PLANT: the commit block was written first
     let f2 = flush(v)
     if err == 0 { err = f2 }
     // Committed: the blocks await their checkpoint; the set learns them.
