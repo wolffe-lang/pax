@@ -882,6 +882,10 @@ fn open_journal(v: u64, dev: u64, jino: u64, fi: u64) -> u64 {
         put_vw(v, V_RBLOCKS, r32(s + SB_RBLOCKS))
         put_vw(v, V_CLEAN, if st & STATE_VALID != 0 && st & STATE_ERROR == 0 { 1 } else { 0 })
     }
+    // statfs's f_blocks leave out the journal too: a reserved inode's
+    // blocks no file can have (Linux 7.3.0's answer on its ext3 root,
+    // measured: 4731 of 6144 blocks, the journal's 1025 among the 1413).
+    put_vw(v, V_OVERHEAD, vw(v, V_OVERHEAD) + blocks512(v, jino) / (b / 512))
     put_vw(v, V_JNL, 1)
     0
 }
