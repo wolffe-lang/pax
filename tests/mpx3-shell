@@ -147,6 +147,10 @@
 # DIR and --bore DIR take pelt and the boreutils from DIR instead of
 # building them.
 #
+# px67: with PAX_ROOTDISK=1 (tools/rootdisk-leg: the images booted
+# again with / on a disk) two rows change, each said by name: S1's frames (the memory tree's census: SKIP) and S2's block counts (ext2's
+# indirect blocks in `ls -l`'s total and stat's %b, folded on both sides).
+#
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
 # every assertion held, 1 otherwise, 2 on a usage or tool error.
@@ -469,7 +473,12 @@ for leg in $legs; do
             # px46: a typed session leaves pelt's history file, /.sh_history
             # (sh12; root's HOME is /), and its one page; procs types nothing.
             keep=0; [ "$i" = pelt ] && keep=1
-            if [ "$s" = shell-user ]; then
+            if [ "${PAX_ROOTDISK:-0}" = 1 ]; then
+                # px67: the root-on-disk leg (tools/rootdisk-leg): the
+                # frames a session gives back are the memory tree's; with /
+                # on a disk the block layer's cache keeps what it read.
+                say "SKIP S1 $id frames: the memory tree's census; / is on a disk, whose cache keeps frames (rootdisk): '$fl'"
+            elif [ "$s" = shell-user ]; then
                 # px47: a user's shell keeps its own, /home/pax/.sh_history,
                 # in a directory that had no entry, so the tree holds two
                 # history pages, the home's first page of entries and what
@@ -506,6 +515,16 @@ for leg in $legs; do
             fi
             serial_norm "$lx/$ls.tty" > "$out.linux" # px46: as the serial log is (pelt's ESC [ 6 n)
             [ -z "$(tail -c 1 "$out.linux")" ] || printf '\n' >> "$out.linux"
+            if [ "${PAX_ROOTDISK:-0}" = 1 ]; then
+                # px67: the root-on-disk leg: ext2 counts a file's indirect
+                # blocks in st_blocks where Linux's tmpfs (the reference)
+                # counts none, so `ls -l`'s total and stat's %b are folded
+                # on both sides, and said.
+                for f in "$out" "$out.linux"; do
+                    sed -E -i.unfolded 's/^total [0-9]+$/total ~/; s/^(\/[^ ]+ [0-9]+ [0-7]+ [^ ]+ [0-9]+ [^ ]+ [0-9]+ [^ ]+ [0-9]+) [0-9]+ (regular file|directory|symbolic link)/\1 ~ \2/' "$f"
+                done
+                cmp -s "$out" "$out.unfolded" || say "SKIP S2 $id blocks: ext2's block counts folded ($(diff "$out.unfolded" "$out" | grep -c '^>') lines, rootdisk)"
+            fi
             if ! cmp -s "$out.linux" "$out"; then
                 why+=" the session differs from Linux's: $(diff "$out.linux" "$out" | head -n 12 | tr '\n' '|');"
             fi
