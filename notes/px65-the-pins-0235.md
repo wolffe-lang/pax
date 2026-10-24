@@ -326,6 +326,14 @@ live) and was renamed, not copied: the session keeps its open file and
 goes on writing to `pax-disk.img.px66` (lsof: the same inode); the next
 boot by the README's line takes the new disk.
 
+`~/pax-playground/pax-disk.img` (`edb02ddf…`) is the 0.2.35 candidate:
+px65's disk, unmerged. By the orchestrator's naming rule (given after
+the copy), an unmerged lane's disk ships as `pax-disk.img.<lane>`, no
+lane moves or replaces another lane's file, and the merged lane's disk
+is put at `pax-disk.img` at its merge by the orchestrator; this one was
+already in place, so it is left there, and a rebuild by this lane would
+be written to `pax-disk.img.px65`.
+
 kasumi crashed a second time at 22:01 (a hard stop) during the first
 playground build: its half-built `play/w` was discarded and play-all run
 again from the start (`notes/px65/play-out/kasumi-play-all.out`); the
