@@ -1,0 +1,529 @@
+#!/usr/bin/env bash
+# tests/mpx6-root — `/` on the disk (px67): `root=` on Limine's command
+# line, the system installed onto the ext2 partition, the kernel's own
+# trees mounted over it, mount(2) and umount2(2), and an end that
+# leaves it clean; held to the Linux 7.2.8 guest booted with its root on
+# an ext2 partition (tools/linux-root: the same probe as its init) and
+# to e2fsprogs' own `e2fsck -fn`, `dumpe2fs -h` and `debugfs` (tools/e2fs).
+#
+#   tests/mpx6-root [--images DIR | --no-boot | --only build | --only linux --images DIR [--record]]
+#                   [--rows pr|all] [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# The programs, static and unmodified: user/elf/mounts.c (the probe:
+# tools/mkrootprobe) and user/elf/reboot.S (/bin/reboot,
+# tools/mkdiskprobe). Four archives (tools/mkinitramfs; /etc/fstab
+# names `/` and a tmpfs /tmp: tests/mpx6-root.d/fstab), each installed
+# as partition 2 of a GPT disk of its own by `tools/mkdisk --gpt --root`
+# (128 MiB: the ESP with Limine and the kernel and no initramfs,
+# R-px67-2; the root; Limine's BIOS stage; a 16 MiB partition 4, the
+# `--home-size` volume, for the mount rows), made on the host that
+# boots, every byte reproducible from SOURCE_DATE_EPOCH:
+#   main    the probe's `table`, `root`, `calls /dev/vda4 /mnt`, `user
+#           1000 /dev/vda4 /mnt`, `table`;
+#   twice   `twice /etc/px67-booted`: /etc/motd edited, /root and /tmp
+#           written, reboot(2) to restart; the second boot reads them;
+#   linger  `linger`: two daemons left when init ends (one ignoring
+#           SIGTERM); and `linger restart`, the same with reboot(2);
+#   cut     `table`, then `linger`: QEMU is killed after the table.
+#
+# Rows, per tier and firmware (--rows pr, CI's pr tier, PAX_ROOT_ROWS:
+# R0-R4, R6, R7, R9's halt and R11 on the first leg; --rows all, the
+# default and the full and all tiers', every one):
+#   R0  build: the programs static; kmain_console built; the archives;
+#       the Linux side ran (or its record is there: tests/mpx6-root.d/linux/).
+#   R1  the root record: `root=` as /dev/vda2, vda2 with rootfstype=ext2,
+#       the device's numbers (`0xfe02`, `254:2`: bootparam(7)'s, each
+#       measured on the guest), PARTUUID= in either case, UUID= (a named drift: the kernel alone
+#       on Linux refuses it, an initramfs serves it), and `ro` (then the
+#       table's / line remounts it read-write): the `root:` line names
+#       partition 2, mountinfo's first line is the guest's; a root= that
+#       names nothing panics by name with no initramfs, and with the
+#       initramfs kept (R-px67-2's rescue) leaves `/` the initramfs's.
+#   R2  `..` at the root: the probe's `dotdot:` lines are the guest's.
+#   R3  the mounts over the disk: /proc/self/mounts, mountinfo, the
+#       /proc/mounts and /etc/mtab links and statfs of / are the guest's
+#       (tests/mpx6-root.d/session's named drifts folded).
+#   R4  the tree on the disk: the archive's every entry and partition 2's
+#       as the host's debugfs lists it (tools/e2tree) are one tree but
+#       the kernel's mount points (tests/mpx6-root.d/treediff).
+#   R5  /etc across a reboot: the first boot ends by the reset; between
+#       the boots debugfs reads the edited /etc/motd and e2fsck finds it
+#       clean; the second boot reads it and /root's note, /tmp's file is
+#       gone (the memory's).
+#   R6  mount(2) and umount2(2): `calls` and `user`'s lines are the guest's.
+#   R7  the halt's clean flag: after the main boot `dumpe2fs -h` says
+#       partition 2 is clean, its mount count 3 (a boot and two remounts
+#       read-write, as the guest counts them), and partition 4 clean.
+#   R8  a power cut: QEMU killed after the table leaves `/` not clean;
+#       the next boot mounts it read-write saying `not cleanly
+#       unmounted` once (R-px67-5, as Linux does: measured), and its
+#       clean end leaves it not clean still.
+#   R9  the end: init ended, its daemons are sent SIGTERM, one ends, the
+#       other is sent SIGKILL after the grace (R-px67-4); halted, clean;
+#       and with reboot(2) (`linger restart`): every process ended, the
+#       reboot(2) line, the reset, clean between.
+#   R10 the ISO way: the main archive on an ISO with no `root=` and the
+#       same disk beside it: no `root:` line, `/` the initramfs's
+#       (`rootfs` in the table), the volume at /mnt by mount(2).
+#   R11 each boot: `block: vda: … 0 errors`, halted or reset as it
+#       should, no PANIC.
+#
+# The UEFI leg needs OVMF (SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1). Exit 0 when every row held, 1 otherwise, 2 on a
+# usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 only= rows=${PAX_ROOT_ROWS:-all} record=0
+usage="usage: tests/mpx6-root [--images DIR | --no-boot | --only build | --only linux --images DIR [--record]] [--rows pr|all] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --rows)     rows=$2; shift 2 ;;
+        --record)   record=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+case $rows in pr|all) ;; *) die "--rows takes pr or all" ;; esac
+[ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
+need readelf python3
+
+D=$PAX_ROOT/tests/mpx6-root.d
+REC=$D/linux
+EPOCH=1700000000
+SIZE=128M
+work=$PAX_BUILD/mpx6-root
+runs=$PAX_BUILD/mpx6-root-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+static_ok() {
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+kernel_readable() {
+    local k=${PAX_LINUX_KERNEL:-/usr/lib/modules/$(uname -r)/vmlinuz}
+    [ -r "$k" ] && printf '%s\n' "$k"
+}
+
+# The guest's session: its probe's lines from `table: begin` to the user
+# run's end (its init's own mounts before, and its `end`, after, are an
+# init's, which PAX's kernel is).
+guest_cut() { sed -n '/^table: begin$/,/^user 1000: end, status 0$/p' "$1"; }
+
+# The Linux side, into $1/linux: live (tools/linux-root) or the record.
+linux_side() { # dir -> reasons
+    local w=$1 k
+    mkdir -p "$w/linux"
+    k=$(kernel_readable || true)
+    if [ -z "$k" ] && [ "${PAX_LINUX:-}" != live ]; then
+        say "LOUD: no readable Linux kernel on this host: the Linux side is the record made on kasumi ($(head -n 1 "$REC/meta"))"
+        cp "$REC/guest.session" "$REC/guest.kernel" "$REC/notclean.txt" "$w/linux/" || printf ' no record in %s;' "$REC"
+        echo recorded > "$w/linux/how"
+        return
+    fi
+    [ -n "$k" ] || { printf ' PAX_LINUX=live and no readable kernel;'; return; }
+    "$PAX_ROOT/tools/linux-root" --kernel "$k" --append loglevel=7 "$w/linux/g" "$w/bin/mounts" > "$w/linux/g.txt" 2>&1 \
+        || printf ' tools/linux-root;'
+    python3 "$D/session" linux "$w/linux/g/serial.log" > "$w/linux/g.all"
+    guest_cut "$w/linux/g.all" > "$w/linux/guest.session"
+    grep -E 'EXT4-fs \(vda2\)|VFS: (Mounted|Cannot)|Kernel panic' "$w/linux/g/serial.log" | sed 's/^\[ *[0-9.]*\] //' > "$w/linux/guest.kernel"
+    # A root the guest mounts unclean: a boot that powers off without
+    # remounting `/` read-only, then a second boot on that disk.
+    "$PAX_ROOT/tools/linux-root" --kernel "$k" --append loglevel=7 --init-args "init /dev/vda4 /mnt tmpfs no-end" \
+        "$w/linux/n1" "$w/bin/mounts" > "$w/linux/n1.txt" 2>&1 || printf ' tools/linux-root (no end);'
+    "$PAX_ROOT/tools/linux-root" --kernel "$k" --append loglevel=7 --disk "$w/linux/n1/disk.img" \
+        "$w/linux/n2" "$w/bin/mounts" > "$w/linux/n2.txt" 2>&1 || printf ' tools/linux-root (after);'
+    {
+        echo "after a power-off with / read-write:"
+        sed -n '/^partition 2/,/^partition 4/p' "$w/linux/n1/host.txt" | grep -E 'state|Mount count'
+        echo "the next boot's root mount:"
+        grep -E 'EXT4-fs \(vda2\)' "$w/linux/n2/serial.log" | sed 's/^\[ *[0-9.]*\] //' | head -n 3
+        echo "after its clean end (/ remounted read-only, powered off):"
+        sed -n '/^partition 2/,/^partition 4/p' "$w/linux/n2/host.txt" | grep -E 'state|Mount count'
+    } > "$w/linux/notclean.txt"
+    echo "live $(uname -r) $k" > "$w/linux/how"
+    if [ "$record" = 1 ]; then
+        mkdir -p "$REC"
+        cp "$w/linux/guest.session" "$w/linux/guest.kernel" "$w/linux/notclean.txt" "$REC/"
+        printf 'Linux %s on QEMU (tools/linux-root), recorded %s\n' "$(uname -r)" "$(date -u +%Y-%m-%d)" > "$REC/meta"
+        say "recorded the Linux side in $REC"
+    fi
+}
+
+# The disks, made on the host that boots (tools/mkdisk runs its tools in
+# their pinned containers): one an archive a tier, and R1's spellings on
+# the first tier's main archive.
+make_disk() { # out archive conf label [more mkdisk args]
+    local out=$1 cpio=$2 conf=$3 label=$4; shift 4
+    SOURCE_DATE_EPOCH=$EPOCH "$PAX_ROOT/tools/mkdisk" --gpt --kernel "$elf" --root "$cpio" --home-size 16M --conf "$conf" \
+        --label "$label" "$@" "$SIZE" "$out" > "$out.mkdisk.txt" 2>&1
+}
+
+if [ "$only" = linux ]; then
+    why=$(linux_side "$images")
+    [ -z "$why" ] && say "PASS R0 (linux): the Linux side ran ($(cat "$images/linux/how"))" || bad "R0 (linux):$why"
+    exit "$fail"
+fi
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/bin" "$work/probe"
+    why=
+    "$PAX_ROOT/tools/mkrootprobe" "$work/bin" > "$work/probes.txt" || why+=" tools/mkrootprobe;"
+    "$PAX_ROOT/tools/mkdiskprobe" "$work/probe" >> "$work/probes.txt" || why+=" tools/mkdiskprobe;"
+    cp "$work/probe/reboot" "$work/bin/reboot" 2>/dev/null || why+=" no reboot;"
+    r=$(static_ok "$work/bin/mounts") || why+=" $r;"
+    sed 's/^/  program: /' "$work/probes.txt" >&2
+    printf 'px67: /etc/motd as the archive made it\n' > "$work/motd"
+    for img in main twice linger lingerboot cut; do
+        case $img in
+            main)       printf '/bin/mounts table\n/bin/mounts root\n/bin/mounts calls /dev/vda4 /mnt\n/bin/mounts user 1000 /dev/vda4 /mnt\n/bin/mounts table\n' ;;
+            twice)      printf '/bin/mounts twice /etc/px67-booted\n' ;;
+            linger)     printf '/bin/mounts linger\n' ;;
+            lingerboot) printf '/bin/mounts linger restart\n' ;;
+            cut)        printf '/bin/mounts table\n/bin/mounts linger\n' ;;
+        esac > "$work/$img.run"
+        "$PAX_ROOT/tools/mkinitramfs" "$work/$img.cpio" /bin/mounts="$work/bin/mounts":755 /bin/reboot="$work/bin/reboot":755 \
+            /etc/motd="$work/motd":644 /etc/fstab="$D/fstab":644 /etc/pax-run="$work/$img.run":644 /etc/mtab-\>../proc/self/mounts \
+            /mnt/:755 /tmp/:1777 > "$work/$img.initramfs.txt" || why+=" tools/mkinitramfs $img;"
+    done
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$work/main.cpio" initramfs.cpio \
+                "$elf" "$work/$tier/root-iso.iso" >/dev/null || why+=" $tier: mkimage;"
+            say "built $tier kmain_console: elf $(sha256_of "$elf"), the ISO way's iso $(sha256_of "$work/$tier/root-iso.iso")"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    if [ "$only" = build ]; then
+        [ -z "$why" ] && say "PASS R0 (build): the probe static, kmain_console built ($tiers), five archives (the disks are made where the boots run)" || bad "R0 (build):$why"
+        exit "$fail"
+    fi
+    if [ "$(uname -s)" != Linux ]; then
+        why+=" the Linux side needs Linux (this is $(uname -s));"
+    else
+        why+=$(linux_side "$work")
+    fi
+    [ -z "$why" ] && say "PASS R0: the probe static, kmain_console built ($tiers), the archives, the Linux side ($(cat "$work/linux/how"))" || bad "R0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx6-root build (R0): PASS (no boot: --no-boot)" || say "mpx6-root build: FAIL"
+        exit "$fail"
+    fi
+fi
+lx=$images/linux
+[ -d "$lx" ] || die "no $lx (build first, and run the Linux side)"
+
+norm_log() { serial_norm "$log" > "$log.norm"; }
+sgrep() { command grep -a "$@" "$log.norm"; }
+ssed() { sed "$@" "$log.norm"; }
+
+record_run() { # tier leg what status
+    ran=$((ran + 1))
+    printf '%s kmain_console %s %s status=%s accel=%s elapsed=%s serial=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sed -n 's/^elapsed: //p' "$log.meta" 2>/dev/null)" \
+        "$(sha256_of "$log")" >> "$runs"
+}
+
+# A boot of disk $4 to the halt (qemu-halt), its log $log.
+halt_boot() { # tier leg what disk [qemu-halt args]
+    local rc=0 t=$1 l=$2 w=$3 dk=$4; shift 4
+    log=$PAX_BUILD/mpx6-root-$t-$l-$w.serial.log
+    rm -f "$log" "$log.verdict" "$log.norm"
+    "$PAX_ROOT/tools/qemu-halt" --firmware "$l" --serial "$log" --timeout 300 --qemu -m --qemu 512M \
+        --elf "$images/$t/kmain_console.elf" --marker 'halt|PANIC .*' --boot-disk "$@" "$dk" >"$log.verdict" 2>&1 || rc=$?
+    norm_log
+    record_run "$t" "$l" "$w" "$rc"
+    return "$rc"
+}
+
+# A boot that ends by the reset (qemu-run, -no-reboot: QEMU's status 0).
+reset_boot() { # tier leg what disk
+    local rc=0
+    log=$PAX_BUILD/mpx6-root-$1-$2-$3.serial.log
+    rm -f "$log" "$log.verdict" "$log.norm"
+    "$PAX_ROOT/tools/qemu-run" --firmware "$2" --serial "$log" --timeout 300 --boot-disk "$4" -- -m 512M > "$log.verdict" 2>&1 || rc=$?
+    norm_log
+    record_run "$1" "$2" "$3" "$rc"
+    return "$rc"
+}
+
+# Partition $2 of disk $1 copied out, for the host's tools (the windows
+# tools/mkdisk lays out for 128 MiB with --home-size 16M and a 64 MiB ESP).
+part_of() { # disk n out
+    local s c
+    case $2 in 2) s=135168; c=92160 ;; 4) s=227328; c=32768 ;; esac
+    dd if="$1" of="$3" bs=512 skip=$s count=$c status=none
+}
+
+state_of() { # disk n -> "STATE COUNT" (dumpe2fs -h of partition n)
+    local p=$1.p$2
+    part_of "$1" "$2" "$p"
+    "$PAX_ROOT/tools/e2fs" "$(dirname "$p")" dumpe2fs -h "$p" 2>/dev/null \
+        | sed -n 's/^Filesystem state: *//p; s/^Mount count: *//p' | tr '\n' ' ' | sed 's/ $//'
+    rm -f "$p"
+}
+
+fsck_ok() { # disk n
+    local p=$1.p$2 rc=0
+    part_of "$1" "$2" "$p"
+    "$PAX_ROOT/tools/e2fs" "$(dirname "$p")" e2fsck -fn "$p" > "$p.fsck" 2>&1 || rc=$?
+    rm -f "$p"
+    return "$rc"
+}
+
+books() { # id: R11 of $log
+    local why=
+    sgrep -Eq '^block: vda: [0-9]+ reads \([0-9]+ sectors\), [0-9]+ writes \([0-9]+ sectors\), [0-9]+ flushes, 0 errors, ' || why+=" $(sgrep -m1 '^block: vda: [0-9]* reads' || echo 'no books line');"
+    ! sgrep -q '^PANIC ' || why+=" $(sgrep -m1 '^PANIC ');"
+    [ -z "$why" ] && say "PASS R11 $1: $(sgrep -m1 '^block: vda: [0-9]* reads' | cut -d';' -f1)" || bad "R11 $1:$why"
+}
+
+halted() { # id rc
+    [ "$2" = 0 ] && say "PASS R11 $1: $(tail -n 1 "$log.verdict")" || bad "R11 $1: not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"))"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+first=1
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        elf=$images/$tier/kmain_console.elf
+        [ -f "$elf" ] || { bad "R0 $tier: no $elf"; continue; }
+        dk=$images/$tier/disks
+        mkdir -p "$dk"
+        why=
+        for img in main twice linger lingerboot cut; do
+            [ -f "$dk/$img.img" ] || make_disk "$dk/$img.img" "$images/$img.cpio" "$PAX_ROOT/boot/limine-initramfs.conf" "px67-$img" \
+                || why+=" mkdisk $img: $(tail -n 2 "$dk/$img.img.mkdisk.txt" | tr '\n' '|');"
+        done
+        [ -z "$why" ] && say "PASS R0 $tier disks: five, each $(sed -n 's/^mkdisk: \(root=PARTUUID=\).*/\1…/p' "$dk/main.img.mkdisk.txt") ($(sha256_of "$dk/main.img" | cut -c1-12)… the main one)" || { bad "R0 $tier disks:$why"; continue; }
+        id="$tier $leg"
+
+        # --- the main boot: R1 (its spelling), R2, R3, R6, R7, R11 ------------------
+        disk=$PAX_BUILD/mpx6-root-$tier-$leg-main.img
+        cp --sparse=always "$dk/main.img" "$disk"
+        hrc=0; halt_boot "$tier" "$leg" main "$disk" || hrc=$?
+        g=$(sed -n 's/^mkdisk: root=//p' "$dk/main.img.mkdisk.txt")
+        why=
+        sgrep -Eq "^root: $g \\(vda2\\) on /: ext2, read-write, write-back\$" || why+=" no root: line for $g;"
+        sgrep -Eq '^ext2: vda2: .*; clean, mount 1; read-write$' || why+=" no clean ext2 line for vda2;"
+        sgrep -Eq '^fstab: /dev/vda2 is /: ext2, read-write, write-back$' || why+=" no fstab line for /;"
+        sgrep -Eq '^fstab: tmpfs on /tmp: the memory'"'"'s, mode 1777$' || why+=" no tmpfs line;"
+        ! sgrep -q 'refused:' || why+=" $(sgrep -m1 'refused:');"
+        [ -z "$why" ] && say "PASS R1 $id: root=$g mounted vda2 as / (read-write, clean, mount 1); /etc/fstab's / line and tmpfs /tmp" || bad "R1 $id:$why"
+        out=$PAX_BUILD/mpx6-root-$tier-$leg-main.session
+        python3 "$D/session" pax "$log" > "$out.all"
+        sed -n '/^table: begin$/,/^user 1000: end, status 0$/p' "$out.all" > "$out"
+        # R2: the dotdot lines.
+        cmp -s <(grep '^dotdot: ' "$lx/guest.session") <(grep '^dotdot: ' "$out") \
+            && say "PASS R2 $id: $(grep -c '^dotdot: ' "$out") lines of \`..\` at the root byte-identical to the guest's ($(grep '^dotdot: / and /.. one' "$out" | cut -d' ' -f2-))" \
+            || bad "R2 $id: $(diff <(grep '^dotdot: ' "$lx/guest.session") <(grep '^dotdot: ' "$out") | head -n 8 | tr '\n' '|')"
+        # R3: the table (the first one), folded.
+        tab() { sed -n '1,/^table: end$/p' "$1" > "$1.tab"; python3 "$D/session" norm "$1.tab"; }
+        cmp -s <(tab "$lx/guest.session") <(tab "$out") \
+            && say "PASS R3 $id: the mount table, the links and statfs of / are the guest's ($(tab "$out" | grep -c '^mounts: ') mounts, mountinfo folded: sizes, ids, anonymous devices)" \
+            || bad "R3 $id: $(diff <(tab "$lx/guest.session") <(tab "$out") | head -n 12 | tr '\n' '|')"
+        # R6: the calls and the user's.
+        calls() { sed -n '/^calls: begin$/,/^user 1000: end, status 0$/p' "$1" > "$1.calls"; python3 "$D/session" norm "$1.calls"; }
+        cmp -s <(calls "$lx/guest.session") <(calls "$out") \
+            && say "PASS R6 $id: $(calls "$out" | grep -cE '^(u?mount|umount2)') mount(2) and umount2(2) calls, as root and as 1000, byte-identical to the guest's (remount both ways, EBUSY, EROFS, a volume at /mnt and its unmount, the errors)" \
+            || bad "R6 $id: $(diff <(calls "$lx/guest.session") <(calls "$out") | head -n 12 | tr '\n' '|')"
+        # R7: the halt's clean flag.
+        st2=$(state_of "$disk" 2); st4=$(state_of "$disk" 4)
+        why=
+        [ "$hrc" = 0 ] || why+=" not halted;"
+        [ "$st2" = "clean 3" ] || why+=" partition 2: '$st2' (want 'clean 3');"
+        [ "${st4%% *}" = clean ] || why+=" partition 4: '$st4';"
+        fsck_ok "$disk" 2 || why+=" e2fsck -fn of partition 2: $(grep -v '^e2fsck \|^Pass ' "$disk.p2.fsck" | head -n 3 | tr '\n' '|');"
+        [ -z "$why" ] && say "PASS R7 $id: the halt left / clean (dumpe2fs -h: clean, mount count 3: the boot and two remounts read-write, as the guest counts them), /dev/vda4 clean, e2fsck -fn clean" || bad "R7 $id:$why"
+        books "$id main"
+        halted "$id main" "$hrc"
+        # R4: the tree on the disk (once a tier: the disk as mkdisk made it).
+        if [ "$leg" = "${legs%% *}" ]; then
+            part_of "$dk/main.img" 2 "$dk/main.p2"
+            if "$PAX_ROOT/tools/e2tree" "$dk/main.p2" > "$dk/main.p2.tree" 2>"$dk/main.p2.tree.err" \
+                && t=$(python3 "$D/treediff" "$images/main.cpio" "$dk/main.p2.tree" "$dk/main.diff"); then
+                say "PASS R4 $tier: ${t#treediff: } (the archive's tree as tools/mkinitramfs wrote it, partition 2's as debugfs lists it: $dk/main.diff.archive, .volume)"
+            else
+                bad "R4 $tier: $(printf '%s' "$t" | head -n 12 | tr '\n' '|') $(head -c 300 "$dk/main.p2.tree.err")"
+            fi
+            rm -f "$dk/main.p2"
+        fi
+        rm -f "$disk"
+
+        # --- R1's spellings (the first tier and leg) ---------------------------------
+        if [ "$first" = 1 ]; then
+            for v in dev name hex pair upper uuid ro; do
+                vd=$dk/root-$v.img
+                [ -f "$vd" ] || make_disk "$vd" "$images/main.cpio" "$D/root-$v.conf" px67-main
+                cp --sparse=always "$vd" "$disk"
+                hrc=0; halt_boot "$tier" "$leg" "root-$v" "$disk" || hrc=$?
+                spec=$(ssed -n 's/^root: \(.*\) (vda2) on \/: .*/\1/p' | head -n 1)
+                mi=$(python3 "$D/session" pax "$log" | sed -n 's/^~mountinfo: [0-9]* [0-9]* //p' | head -n 1)
+                gm=$(sed -n 's/^~mountinfo: [0-9]* [0-9]* //p' "$lx/guest.session" | head -n 1)
+                why=
+                [ -n "$spec" ] || why+=" no root: line ($(sgrep -m1 '^root: ' || echo none));"
+                if [ "$v" = ro ]; then
+                    sgrep -Eq '^root: .* on /: ext2, read-only, write-back$' || why+=" not mounted read-only;"
+                    sgrep -Eq '^fstab: /dev/vda2 is /: ext2, read-write, write-back$' || why+=" the / line did not remount it read-write;"
+                fi
+                [ "$mi" = "$gm" ] || why+=" mountinfo's first line '$mi', the guest's '$gm';"
+                [ "$hrc" = 0 ] || why+=" not halted;"
+                [ -z "$why" ] && say "PASS R1 $id root-$v: root=$spec mounted vda2 as / ($(sgrep -m1 '^root: ' | sed 's/.* on \/: //')); mountinfo's / line the guest's" || bad "R1 $id root-$v:$why"
+            done
+            # No such root: with no initramfs a panic by name; with one, the rescue.
+            vd=$dk/root-nosuch.img
+            [ -f "$vd" ] || make_disk "$vd" "$images/main.cpio" "$D/root-nosuch.conf" px67-main
+            cp --sparse=always "$vd" "$disk"
+            hrc=0; halt_boot "$tier" "$leg" root-nosuch "$disk" --symbol pax_halt || hrc=$?
+            if sgrep -q '^root: /dev/vda9: no such disk; no initramfs to stay on$' && sgrep -q '^PANIC root: no root file system'; then
+                say "PASS R1 $id root-nosuch: root=/dev/vda9, no initramfs: '$(sgrep -m1 '^root: ')', then '$(sgrep -m1 '^PANIC ' | cut -c1-80)'"
+            else
+                bad "R1 $id root-nosuch: $(sgrep -E '^(root|PANIC)' | head -n 3 | tr '\n' '|')"
+            fi
+            vd=$dk/root-rescue.img
+            [ -f "$vd" ] || make_disk "$vd" "$images/main.cpio" "$D/root-nosuch.conf" px67-main --initramfs "$images/main.cpio"
+            cp --sparse=always "$vd" "$disk"
+            hrc=0; halt_boot "$tier" "$leg" root-rescue "$disk" || hrc=$?
+            s1=$(python3 "$D/session" pax "$log" | grep -m1 '^mounts: ')
+            if sgrep -q '^root: /dev/vda9: no such disk; / stays the initramfs in memory$' && [ "${s1#mounts: }" != "${s1#mounts: rootfs / rootfs }" ] && [ "$hrc" = 0 ]; then
+                say "PASS R1 $id root-rescue: root=/dev/vda9 with the initramfs kept (R-px67-2): '$(sgrep -m1 '^root: ')'; the table's first line '${s1#mounts: }'"
+            else
+                bad "R1 $id root-rescue: $(sgrep -m1 '^root: ' || echo 'no root: line'); '$s1'; halt $hrc"
+            fi
+            rm -f "$disk"
+        fi
+
+        # --- R9: the end at init's end (pr and all) -----------------------------------
+        disk=$PAX_BUILD/mpx6-root-$tier-$leg-linger.img
+        cp --sparse=always "$dk/linger.img" "$disk"
+        hrc=0; halt_boot "$tier" "$leg" linger "$disk" || hrc=$?
+        why=
+        sgrep -Eq '^user: mounts pid [0-9]+ killed: SIGTERM after [0-9]+ runs$' || why+=" no daemon ended by SIGTERM;"
+        sgrep -Eq '^user: mounts pid [0-9]+ killed: SIGKILL after [0-9]+ runs$' || why+=" no daemon ended by SIGKILL;"
+        sgrep -Eq '^PAX: the end: SIGTERM to 2 processes, 1 ended within [0-9]+ ms; SIGKILL to 1 after the 2000 ms grace$' || why+=" $(sgrep -m1 '^PAX: the end' || echo 'no end line');"
+        [ "$(state_of "$disk" 2)" = "clean 1" ] || why+=" partition 2 '$(state_of "$disk" 2)';"
+        [ -z "$why" ] && say "PASS R9 $id: init ended; '$(sgrep -m1 '^PAX: the end')'; halted, / clean" || bad "R9 $id:$why"
+        halted "$id linger" "$hrc"
+        rm -f "$disk"
+        [ "$rows" = all ] || { first=0; continue; }
+
+        # --- R9 with reboot(2) --------------------------------------------------------
+        disk=$PAX_BUILD/mpx6-root-$tier-$leg-lingerboot.img
+        cp --sparse=always "$dk/lingerboot.img" "$disk"
+        rrc=0; reset_boot "$tier" "$leg" lingerboot "$disk" || rrc=$?
+        why=
+        [ "$rrc" = 0 ] || why+=" no reset (qemu-run $rrc);"
+        sgrep -Eq '^PAX: the end: SIGTERM to 3 processes, 2 ended within [0-9]+ ms; SIGKILL to 1 after the 2000 ms grace$' || why+=" $(sgrep -m1 '^PAX: the end' || echo 'no end line');"
+        sgrep -Eq '^user: mounts pid 1 reboot\(2\): the volumes written and marked clean; restarting$' || why+=" no reboot(2) line;"
+        [ "$(state_of "$disk" 2)" = "clean 1" ] || why+=" partition 2 '$(state_of "$disk" 2)';"
+        [ -z "$why" ] && say "PASS R9 $id reboot(2): '$(sgrep -m1 '^PAX: the end')', the reboot(2) line, the reset; / clean" || bad "R9 $id reboot(2):$why"
+        books "$id lingerboot"
+        rm -f "$disk"
+
+        # --- R5: /etc across a reboot -------------------------------------------------
+        disk=$PAX_BUILD/mpx6-root-$tier-$leg-twice.img
+        cp --sparse=always "$dk/twice.img" "$disk"
+        rrc=0; reset_boot "$tier" "$leg" twice1 "$disk" || rrc=$?
+        why=
+        [ "$rrc" = 0 ] || why+=" the first boot did not end by the reset (qemu-run $rrc);"
+        sgrep -Eq '^user: mounts pid 1 reboot\(2\): the volumes written and marked clean; restarting$' || why+=" no reboot(2) line;"
+        fsck_ok "$disk" 2 || why+=" e2fsck -fn between the boots;"
+        part_of "$disk" 2 "$disk.p2"
+        m=$("$PAX_ROOT/tools/e2fs" "$(dirname "$disk")" debugfs -R "cat /etc/motd" "$disk.p2" 2>/dev/null)
+        rm -f "$disk.p2"
+        [ "$m" = "px67: /etc/motd, edited before the reboot" ] || why+=" debugfs reads /etc/motd '$m';"
+        hrc=0; halt_boot "$tier" "$leg" twice2 "$disk" || hrc=$?
+        o=$(python3 "$D/session" pax "$log" | grep '^twice: ')
+        printf '%s\n' "$o" | grep -qx 'twice: /etc/motd: px67: /etc/motd, edited before the reboot' || why+=" the second boot's /etc/motd: $(printf '%s' "$o" | tr '\n' '|');"
+        printf '%s\n' "$o" | grep -qx 'twice: /root/px67-note: px67: a note in /root' || why+=" no /root note;"
+        printf '%s\n' "$o" | grep -qx 'twice: stat(/tmp/px67-tmp) = -1 ENOENT' || why+=" /tmp's file is there still;"
+        [ "$(state_of "$disk" 2)" = "clean 2" ] || why+=" partition 2 '$(state_of "$disk" 2)' after the second boot;"
+        [ -z "$why" ] && say "PASS R5 $id: /etc/motd edited, reboot(2), debugfs reads it between the boots (clean), the second boot reads it and /root's note, /tmp's file gone; clean, mount count 2" || bad "R5 $id:$why"
+        halted "$id twice2" "$hrc"
+        rm -f "$disk"
+
+        # --- R8: a power cut ----------------------------------------------------------
+        disk=$PAX_BUILD/mpx6-root-$tier-$leg-cut.img
+        cp --sparse=always "$dk/cut.img" "$disk"
+        log=$PAX_BUILD/mpx6-root-$tier-$leg-cut1.serial.log
+        rm -f "$log"
+        rm -f "$log.qpid"
+        "$PAX_ROOT/tools/qemu-run" --firmware "$leg" --serial "$log" --timeout 120 --boot-disk "$disk" -- -m 512M -pidfile "$log.qpid" > "$log.verdict" 2>&1 &
+        qp=$!
+        n=0
+        until grep -q '^table: end' "$log" 2>/dev/null || [ $n -ge 1200 ] || ! kill -0 $qp 2>/dev/null; do sleep 0.1; n=$((n + 1)); done
+        [ -s "$log.qpid" ] && kill -9 "$(cat "$log.qpid")" 2>/dev/null # QEMU itself, by the pid it wrote: the power cut
+        wait "$qp" 2>/dev/null
+        norm_log; record_run "$tier" "$leg" cut1 killed
+        s1=$(state_of "$disk" 2)
+        hrc=0; halt_boot "$tier" "$leg" cut2 "$disk" || hrc=$?
+        nc=$(sgrep -c '^ext2: vda2: .*; not cleanly unmounted, mount 2; read-write$')
+        s2=$(state_of "$disk" 2)
+        gw=$(sed -n '/^the next boot/,/^after its clean/p' "$lx/notclean.txt" | grep -c 'warning: mounting unchecked fs')
+        why=
+        [ "$s1" = "not clean 1" ] || why+=" after the cut '$s1' (want 'not clean 1');"
+        [ "$nc" = 1 ] || why+=" $nc 'not cleanly unmounted' lines on the next boot (want one);"
+        sgrep -Eq '^root: .* on /: ext2, read-write, write-back$' || why+=" not mounted read-write;"
+        [ "$s2" = "not clean 2" ] || why+=" after its clean end '$s2' (want 'not clean 2', as the guest leaves it);"
+        [ "$gw" = 1 ] || why+=" the guest's record has $gw warnings;"
+        [ -z "$why" ] && say "PASS R8 $id: killed after the table: not clean, mount 1; the next boot mounted / read-write saying 'not cleanly unmounted' once (the guest: one 'warning: mounting unchecked fs'), halted, still not clean (mount 2), as the guest leaves it (R-px67-5)" || bad "R8 $id:$why"
+        halted "$id cut2" "$hrc"
+        rm -f "$disk"
+
+        # --- R10: the ISO way ---------------------------------------------------------
+        disk=$PAX_BUILD/mpx6-root-$tier-$leg-iso.img
+        cp --sparse=always "$dk/main.img" "$disk"
+        log=$PAX_BUILD/mpx6-root-$tier-$leg-iso.serial.log
+        rm -f "$log" "$log.norm"
+        hrc=0
+        "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 300 --qemu -m --qemu 512M \
+            --elf "$elf" --marker 'halt|PANIC .*' --qemu -drive --qemu "file=$disk,if=none,id=d0,format=raw" --qemu -device --qemu virtio-blk-pci,drive=d0 \
+            "$images/$tier/root-iso.iso" > "$log.verdict" 2>&1 || hrc=$?
+        norm_log; record_run "$tier" "$leg" iso "$hrc"
+        o=$(python3 "$D/session" pax "$log")
+        why=
+        ! sgrep -q '^root: ' || why+=" a root: line;"
+        printf '%s\n' "$o" | grep -m1 '^mounts: ' | grep -Eq '^mounts: rootfs / rootfs rw,size=[0-9]+k,nr_inodes=16384 0 0$' || why+=" the table's first line: $(printf '%s\n' "$o" | grep -m1 '^mounts: ');"
+        printf '%s\n' "$o" | grep -qx 'mount(/dev/vda4, /mnt, ext2, 0x0, NULL) = 0' || why+=" no volume at /mnt;"
+        sgrep -q '^fstab: /dev/vda2 for /: / is the initramfs in memory; not mounted$' || why+=" no fstab line for the ISO's /;"
+        [ "$hrc" = 0 ] || why+=" not halted;"
+        [ -z "$why" ] && say "PASS R10 $id: no root=: / the initramfs (rootfs), the / line said so, /dev/vda4 mounted at /mnt by mount(2); halted" || bad "R10 $id:$why"
+        rm -f "$disk"
+        first=0
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx6-root: PASS" || say "mpx6-root: FAIL"
+exit "$fail"
