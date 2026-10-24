@@ -1295,6 +1295,9 @@ pub fn name_of(d: u64, c: u64) -> (u64, u64) {
     (ra, rl)
 }
 
+/// PLANT px67-plant-leak's count.
+var plant_leak: u64 = 0
+
 /// A new file named [name, name + len) in directory `d`, with the
 /// permission bits `perm`, owned `uid`:`gid` (px42): its inode, or
 /// -ENOENT (the directory has been removed), -ENOSPC.
@@ -1307,6 +1310,16 @@ pub fn create(d: u64, name: u64, len: u64, perm: u64, uid: u64, gid: u64) -> u64
 /// from the start.
 fn make(d: u64, name: u64, len: u64, m: u64, uid: u64, gid: u64) -> u64 {
     if on_volume(d) {
+        // PLANT px67-plant-leak: a frame every 1000th file made on a volume, never given back.
+        var n: u64 = 0
+        // # Safety: a scalar module var.
+        unsafe {
+            plant_leak += 1
+            n = plant_leak
+        }
+        if n % 1000 == 0 {
+            let _f = frames.alloc() else 0
+        }
         return vmake(d, name, len, m, uid, gid)
     }
     if ig(d, I_NLINK) == 0 {
