@@ -515,18 +515,20 @@ for leg in $legs; do
             fi
             serial_norm "$lx/$ls.tty" > "$out.linux" # px46: as the serial log is (pelt's ESC [ 6 n)
             [ -z "$(tail -c 1 "$out.linux")" ] || printf '\n' >> "$out.linux"
+            sa=$out.linux sb=$out
             if [ "${PAX_ROOTDISK:-0}" = 1 ]; then
                 # px67: the root-on-disk leg: ext2 counts a file's indirect
                 # blocks in st_blocks where Linux's tmpfs (the reference)
                 # counts none, so `ls -l`'s total and stat's %b are folded
-                # on both sides, and said.
+                # in copies of both sides (S6 reads the originals), and said.
                 for f in "$out" "$out.linux"; do
-                    sed -E -i.unfolded 's/^total [0-9]+$/total ~/; s/^(\/[^ ]+ [0-9]+ [0-7]+ [^ ]+ [0-9]+ [^ ]+ [0-9]+ [^ ]+ [0-9]+) [0-9]+ (regular file|directory|symbolic link)/\1 ~ \2/' "$f"
+                    sed -E 's/^total [0-9]+$/total ~/; s/^(\/[^ ]+ [0-9]+ [0-7]+ [^ ]+ [0-9]+ [^ ]+ [0-9]+ [^ ]+ [0-9]+) [0-9]+ (regular file|directory|symbolic link)/\1 ~ \2/' "$f" > "$f.folded"
                 done
-                cmp -s "$out" "$out.unfolded" || say "SKIP S2 $id blocks: ext2's block counts folded ($(diff "$out.unfolded" "$out" | grep -c '^>') lines, rootdisk)"
+                sa=$out.linux.folded sb=$out.folded
+                cmp -s "$out" "$out.folded" || say "SKIP S2 $id blocks: ext2's block counts folded ($(diff "$out" "$out.folded" | grep -c '^>') lines, rootdisk)"
             fi
-            if ! cmp -s "$out.linux" "$out"; then
-                why+=" the session differs from Linux's: $(diff "$out.linux" "$out" | head -n 12 | tr '\n' '|');"
+            if ! cmp -s "$sa" "$sb"; then
+                why+=" the session differs from Linux's: $(diff "$sa" "$sb" | head -n 12 | tr '\n' '|');"
             fi
             if [ "$q" = 1 ]; then
                 pst=$(sed -n -E "s/^PAX: init \/bin\/$i ended with status ([0-9]+); .*/\\1/p" "$norm" | head -n 1)
