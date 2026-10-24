@@ -251,6 +251,10 @@
 # of own, perm, chk, setid or rights: `stopped early`. A boot ends at the kernel's `halt`
 # or at a `PANIC` line, whichever comes.
 #
+# px67: with PAX_ROOTDISK=1 (tools/rootdisk-leg: the images booted
+# again with / on a disk) U3, the memory tree's frames census, says SKIP
+# by name: the block layer's cache keeps the frames a session read.
+#
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
 # every assertion held, 1 otherwise, 2 on a usage or tool error.
@@ -859,7 +863,14 @@ for leg in $legs; do
             fb=${1:-} fa=${2:-}
             set -- $(printf '%s\n' "$trl" | sed -n -E "s/^tree: frames ([0-9]+) \\(([0-9]+) when made\\), ([0-9]+) \\(([0-9]+)\\) of them the inode table's, inodes ([0-9]+) \\(([0-9]+)\\), cap ([0-9]+), refusals [0-9]+\$/\\1 \\2 \\3 \\4 \\5 \\6/p")
             th=${1:-} tb=${2:-} tt=${3:-} ttb=${4:-} ti=${5:-} tib=${6:-}
-            if [ -z "$fb" ] || [ -z "$th" ]; then
+            u3skip=0
+            if [ "${PAX_ROOTDISK:-0}" = 1 ]; then
+                # px67: the root-on-disk leg (tools/rootdisk-leg): the
+                # census is the memory tree's, and the block layer's cache
+                # keeps the frames a session read from the disk.
+                u3skip=1
+                say "SKIP U3 $id: the memory tree's census; / is on a disk, whose cache keeps frames (rootdisk): $fl; $trl"
+            elif [ -z "$fb" ] || [ -z "$th" ]; then
                 why+=" no frames line or no tree line ('$fl' / '$trl');"
             else
                 grew=$((tt - ttb)) # the inode table's frames are never given back
@@ -876,7 +887,7 @@ for leg in $legs; do
                     [ "$ti" = "$tib" ] || why+=" the tree has $ti inodes, $tib when made;"
                 fi
             fi
-            [ -z "$why" ] && say "PASS U3 $id: $fl; $trl" || bad "U3 $id:$why"
+            [ "$u3skip" = 1 ] || { [ -z "$why" ] && say "PASS U3 $id: $fl; $trl" || bad "U3 $id:$why"; }
 
             # U4: the soak.
             case $s in soak|soak-user|own-soak|own-soak-user|chk-soak|chk-soak-user|rights-soak|rights-soak-user)
