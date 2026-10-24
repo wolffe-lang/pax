@@ -104,10 +104,11 @@
 #                [--conf LIMINE.conf] [--esp SIZE] [--home-size SIZE]
 #                [--journal | --no-journal] [--label NAME] SIZE OUT.img
 #
-# px68: --journal makes the root partition ext3 (the plain --journal
-# above); --no-journal keeps px67's ext2, the default for now. The /home
-# volumes (--home, --home-size, and --gpt without --root) stay ext2, as
-# their suites' recordings are.
+# px68 (R-px68-3, recommended and implemented, not decided): the root
+# partition is journalled, ext3 (the plain path's --journal above),
+# unless --no-journal keeps px67's ext2. The /home volumes (--home,
+# --home-size, and --gpt without --root) stay ext2, as their suites'
+# recordings are.
 #
 # Prints the commands' count, the e2fsck verdict, and
 # `OUT <bytes> bytes sha256 <hex>`. Exit 0, 1 when e2fsck (or, --gpt,
@@ -336,7 +337,7 @@ def gpt_main(args):
         else:
             die("unknown option %s" % k)
     if journal is None:
-        journal = False
+        journal = root_cpio is not None  # px68 (R-px68-3): the root is journalled unless --no-journal
     if journal and not root_cpio:
         die("--journal is the root's (--root); the /home volume stays ext2")
     if len(args) != 2 or not kernel or not (initramfs or root_cpio) or (home_size and not root_cpio):
