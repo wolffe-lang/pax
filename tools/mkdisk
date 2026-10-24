@@ -3,7 +3,7 @@
 # tree from the host, reproducibly.
 #
 #   tools/mkdisk [--from DIR] [--attrs FILE] [--label NAME] [--block BYTES]
-#                [--inodes N] SIZE OUT.img
+#                [--inodes N] [--journal] SIZE OUT.img
 #   tools/mkdisk --home SIZE OUT.img
 #
 # SIZE is bytes, or a number with K, M or G (powers of 1024). The image
@@ -13,6 +13,17 @@
 # SOURCE_DATE_EPOCH (default: the last commit's time), every time mkfs
 # writes faked to SOURCE_DATE_EPOCH (E2FSPROGS_FAKE_TIME), the root
 # 0:0. Two runs with the same inputs give the same bytes.
+#
+# --journal (px68) makes it ext3 instead: the same mke2fs with `-t
+# ext3`, so the volume has what that type has by default in the pinned
+# e2fsprogs (measured: has_journal beside ext2's ext_attr, resize_inode,
+# dir_index, filetype, sparse_super and large_file; the journal inode 8,
+# mke2fs's default size for the volume's blocks, e.g. 4096 blocks of 4
+# KiB for 448 MiB; a v2 journal superblock with no journal feature, its
+# sequence 1 and start 0: empty). The journal's size is printed
+# (`mkdisk: ext3: a journal of N blocks (M MiB) at inode 8`), read back
+# from dumpe2fs -h. debugfs writes the tree past the journal, which
+# stays empty.
 #
 # --from DIR fills it: DIR's tree, walked in sorted order, made with
 # `debugfs -w` commands (`mkdir`, `write`, `symlink`, and `ln` with the
@@ -91,7 +102,12 @@
 #
 #   tools/mkdisk --gpt --kernel ELF --root CPIO [--initramfs CPIO]
 #                [--conf LIMINE.conf] [--esp SIZE] [--home-size SIZE]
-#                [--label NAME] SIZE OUT.img
+#                [--journal | --no-journal] [--label NAME] SIZE OUT.img
+#
+# px68: --journal makes the root partition ext3 (the plain --journal
+# above); --no-journal keeps px67's ext2, the default for now. The /home
+# volumes (--home, --home-size, and --gpt without --root) stay ext2, as
+# their suites' recordings are.
 #
 # Prints the commands' count, the e2fsck verdict, and
 # `OUT <bytes> bytes sha256 <hex>`. Exit 0, 1 when e2fsck (or, --gpt,
@@ -293,7 +309,12 @@ def gpt_main(args):
     conf = os.path.join(ROOT, "boot", "limine-initramfs.conf")
     esp = size_of("64M")
     label = "pax-disk"
+    journal = None
     while args and args[0].startswith("--"):
+        if args[0] in ("--journal", "--no-journal"):
+            journal = args[0] == "--journal"
+            args = args[1:]
+            continue
         if len(args) < 2:
             die("%s takes a value" % args[0])
         k, v = args[0], args[1]
@@ -314,6 +335,10 @@ def gpt_main(args):
             home_size = size_of(v)
         else:
             die("unknown option %s" % k)
+    if journal is None:
+        journal = False
+    if journal and not root_cpio:
+        die("--journal is the root's (--root); the /home volume stays ext2")
     if len(args) != 2 or not kernel or not (initramfs or root_cpio) or (home_size and not root_cpio):
         die("usage: mkdisk --gpt --kernel ELF (--initramfs CPIO | --root CPIO [--initramfs CPIO] [--home-size SIZE]) [--conf LIMINE.conf] [--esp SIZE] [--label NAME] SIZE OUT.img")
     for f in [kernel, conf] + [x for x in (initramfs, root_cpio) if x]:
@@ -364,8 +389,13 @@ def gpt_main(args):
             # Partition 2: the root, the archive's tree by this tool's --from path.
             tree, attrs, n = root_tree(root_cpio, stage)
             rootimg = os.path.join(stage, "root.img")
-            print(run([sys.executable, os.path.abspath(__file__), "--from", tree, "--attrs", attrs, "--label", "pax-root",
-                       "--inodes", str(max(16384, 4 * n)), str((h1 - h0 + 1) * S), rootimg], "mkdisk --from", env).strip().splitlines()[0])
+            sub = run([sys.executable, os.path.abspath(__file__), "--from", tree, "--attrs", attrs, "--label", "pax-root",
+                       "--inodes", str(max(16384, 4 * n))] + (["--journal"] if journal else []) + [str((h1 - h0 + 1) * S), rootimg],
+                      "mkdisk --from", env).strip().splitlines()
+            print(sub[0])
+            for l in sub:
+                if l.startswith("mkdisk: ext3: "):
+                    print(l)
             copy_range(rootimg, out, 0, (h1 - h0 + 1) * S, h0 * S)
             os.unlink(rootimg)
             shutil.copyfile(attrs, out + ".root-attrs")
@@ -461,6 +491,7 @@ def main(argv):
     label = "pax"
     bs = 4096
     inodes = None
+    journal = False
     args = argv[1:]
     home = None
     if args and args[0] == "--gpt":
@@ -474,6 +505,10 @@ def main(argv):
             f.write("/pax 755 1000 1000\n")
         src, attrs, label = os.path.join(home, "tree"), os.path.join(home, "attrs"), "pax-home"
     while args and args[0].startswith("--"):
+        if args[0] == "--journal" and not home:
+            journal = True
+            args = args[1:]
+            continue
         if len(args) < 2:
             die("%s takes a value" % args[0])
         k, v = args[0], args[1]
@@ -491,7 +526,7 @@ def main(argv):
         else:
             die("unknown option %s" % k)
     if len(args) != 2 or (home and (args[0].startswith("--") or len(argv) != 4)):
-        die("usage: mkdisk [--from DIR] [--attrs FILE] [--label NAME] [--block BYTES] [--inodes N] SIZE OUT.img | mkdisk --home SIZE OUT.img")
+        die("usage: mkdisk [--from DIR] [--attrs FILE] [--label NAME] [--block BYTES] [--inodes N] [--journal] SIZE OUT.img | mkdisk --home SIZE OUT.img")
     size = size_of(args[0])
     out = os.path.abspath(args[1])
     if bs not in (1024, 2048, 4096) or size % bs:
@@ -501,7 +536,7 @@ def main(argv):
     os.makedirs(work, exist_ok=True)
     with open(out, "wb") as f:
         f.truncate(size)
-    mk = ["mkfs.ext2", "-q", "-F", "-t", "ext2", "-b", str(bs), "-L", label,
+    mk = ["mke2fs" if journal else "mkfs.ext2", "-q", "-F", "-t", "ext3" if journal else "ext2", "-b", str(bs), "-L", label,
           "-U", uuid_of("pax-disk:%s:%d" % (label, t)),
           "-E", "hash_seed=%s,root_owner=0:0" % uuid_of("pax-hash:%s:%d" % (label, t))]
     if inodes:
@@ -509,6 +544,14 @@ def main(argv):
     rc, so, se = e2fs(work, *(mk + [out]), env={"E2FSPROGS_FAKE_TIME": str(t)})
     if rc != 0:
         die("mkfs.ext2: %s%s" % (so, se))
+    if journal:
+        # px68: the journal mke2fs made, as dumpe2fs reads it back.
+        rc, so, se = e2fs(work, "dumpe2fs", "-h", out)
+        jb = re.search(r"(?m)^Total journal blocks:\s*(\d+)", so)
+        ji = re.search(r"(?m)^Journal inode:\s*(\d+)", so)
+        if rc != 0 or not jb or not ji or "has_journal" not in so:
+            die("mke2fs -t ext3 made no journal: %s%s" % (so[-800:], se[-400:]))
+        print("mkdisk: ext3: a journal of %s blocks (%d MiB) at inode %s" % (jb.group(1), int(jb.group(1)) * bs >> 20, ji.group(1)))
     # The attributes asked for, by path.
     want = {}
     if attrs:
