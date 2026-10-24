@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # tests/mpx6-root — `/` on the disk (px67): `root=` on Limine's command
-# line, the system installed onto the ext2 partition, the kernel's own
+# line, the system installed onto the root partition, the kernel's own
 # trees mounted over it, mount(2) and umount2(2), and an end that
-# leaves it clean; held to the Linux 7.2.8 guest booted with its root on
-# an ext2 partition (tools/linux-root: the same probe as its init) and
-# to e2fsprogs' own `e2fsck -fn`, `dumpe2fs -h` and `debugfs` (tools/e2fs).
+# leaves it clean; held to the Linux guest booted with its root on a
+# partition of the same kind (tools/linux-root: the same probe as its
+# init) and to e2fsprogs' own `e2fsck -fn`, `dumpe2fs -h` and `debugfs`
+# (tools/e2fs). px68: the root is journalled (ext3, tools/mkdisk's
+# default for --root, R-px68-3), so the guest's record is Linux 7.3.0's
+# with an ext3 root (`--fstype ext3`), and R8's power cut is the
+# journal's: `/` stays clean with needs_recovery and the next boot
+# recovers it; R8e keeps px67's ext2 power cut on a --no-journal disk.
 #
 #   tests/mpx6-root [--images DIR | --no-boot | --only build | --only linux --images DIR [--record]]
 #                   [--rows pr|all] [--firmware bios|uefi|both] [--tier native|release|both]
@@ -31,7 +36,7 @@
 # default and the full and all tiers', every one):
 #   R0  build: the programs static; kmain_console built; the archives;
 #       the Linux side ran (or its record is there: tests/mpx6-root.d/linux/).
-#   R1  the root record: `root=` as /dev/vda2, vda2 with rootfstype=ext2,
+#   R1  the root record: `root=` as /dev/vda2, vda2 with rootfstype=ext3,
 #       the device's numbers (`0xfe02`, `254:2`: bootparam(7)'s, each
 #       measured on the guest), PARTUUID= in either case, UUID= (a named drift: the kernel alone
 #       on Linux refuses it, an initramfs serves it), and `ro` (then the
@@ -53,11 +58,17 @@
 #   R6  mount(2) and umount2(2): `calls` and `user`'s lines are the guest's.
 #   R7  the halt's clean flag: after the main boot `dumpe2fs -h` says
 #       partition 2 is clean, its mount count 3 (a boot and two remounts
-#       read-write, as the guest counts them), and partition 4 clean.
-#   R8  a power cut: QEMU killed after the table leaves `/` not clean;
-#       the next boot mounts it read-write saying `not cleanly
-#       unmounted` once (R-px67-5, as Linux does: measured), and its
-#       clean end leaves it not clean still.
+#       read-write, as the guest counts them), needs_recovery clear, and
+#       partition 4 clean.
+#   R8  a power cut (px68, the journal): QEMU killed after the table
+#       leaves `/` clean with needs_recovery (as the guest's power-off
+#       leaves its ext3 root); the next boot says it recovered the
+#       journal once, mounts it read-write, and its clean end leaves it
+#       clean, needs_recovery clear.
+#   R8e the same on an ext2 root (--no-journal, px67's): not clean; the
+#       next boot mounts it read-write saying `not cleanly unmounted`
+#       once (R-px67-5, as Linux does: measured), and its clean end
+#       leaves it not clean still.
 #   R9  the end: init ended, its daemons are sent SIGTERM, one ends, the
 #       other is sent SIGKILL after the grace (R-px67-4); halted, clean;
 #       and with reboot(2) (`linger restart`): every process ended, the
@@ -113,7 +124,9 @@ static_ok() {
 
 kernel_readable() {
     local k=${PAX_LINUX_KERNEL:-/usr/lib/modules/$(uname -r)/vmlinuz}
-    [ -r "$k" ] && printf '%s\n' "$k"
+    # px68: the installed image when the running kernel's is gone (an upgrade)
+    [ -r "$k" ] || k=$(command ls -1 /usr/lib/modules/*/vmlinuz 2>/dev/null | command grep -v lts | tail -n 1)
+    [ -n "$k" ] && [ -r "$k" ] && printf '%s\n' "$k"
 }
 
 # The guest's session: its probe's lines from `table: begin` to the user
@@ -128,35 +141,45 @@ linux_side() { # dir -> reasons
     k=$(kernel_readable || true)
     if [ -z "$k" ] && [ "${PAX_LINUX:-}" != live ]; then
         say "LOUD: no readable Linux kernel on this host: the Linux side is the record made on kasumi ($(head -n 1 "$REC/meta"))"
-        cp "$REC/guest.session" "$REC/guest.kernel" "$REC/notclean.txt" "$w/linux/" || printf ' no record in %s;' "$REC"
+        cp "$REC/guest.session" "$REC/guest.kernel" "$REC/notclean.txt" "$REC/notclean-ext2.txt" "$w/linux/" || printf ' no record in %s;' "$REC"
         echo recorded > "$w/linux/how"
         return
     fi
     [ -n "$k" ] || { printf ' PAX_LINUX=live and no readable kernel;'; return; }
-    "$PAX_ROOT/tools/linux-root" --kernel "$k" --append loglevel=7 "$w/linux/g" "$w/bin/mounts" > "$w/linux/g.txt" 2>&1 \
+    "$PAX_ROOT/tools/linux-root" --kernel "$k" --fstype ext3 --append loglevel=7 "$w/linux/g" "$w/bin/mounts" > "$w/linux/g.txt" 2>&1 \
         || printf ' tools/linux-root;'
     python3 "$D/session" linux "$w/linux/g/serial.log" > "$w/linux/g.all"
     guest_cut "$w/linux/g.all" > "$w/linux/guest.session"
     grep -E 'EXT4-fs \(vda2\)|VFS: (Mounted|Cannot)|Kernel panic' "$w/linux/g/serial.log" | sed 's/^\[ *[0-9.]*\] //' > "$w/linux/guest.kernel"
     # A root the guest mounts unclean: a boot that powers off without
     # remounting `/` read-only, then a second boot on that disk.
-    "$PAX_ROOT/tools/linux-root" --kernel "$k" --append loglevel=7 --init-args "init /dev/vda4 /mnt tmpfs no-end" \
-        "$w/linux/n1" "$w/bin/mounts" > "$w/linux/n1.txt" 2>&1 || printf ' tools/linux-root (no end);'
-    "$PAX_ROOT/tools/linux-root" --kernel "$k" --append loglevel=7 --disk "$w/linux/n1/disk.img" \
-        "$w/linux/n2" "$w/bin/mounts" > "$w/linux/n2.txt" 2>&1 || printf ' tools/linux-root (after);'
-    {
-        echo "after a power-off with / read-write:"
-        sed -n '/^partition 2/,/^partition 4/p' "$w/linux/n1/host.txt" | grep -E 'state|Mount count'
-        echo "the next boot's root mount:"
-        grep -E 'EXT4-fs \(vda2\)' "$w/linux/n2/serial.log" | sed 's/^\[ *[0-9.]*\] //' | head -n 3
-        echo "after its clean end (/ remounted read-only, powered off):"
-        sed -n '/^partition 2/,/^partition 4/p' "$w/linux/n2/host.txt" | grep -E 'state|Mount count'
-    } > "$w/linux/notclean.txt"
+    # px68: the journalled root (ext3, as PAX's disks are) and, for R8e,
+    # px67's ext2 root: a boot that powers off without remounting `/`
+    # read-only, then a second boot on that disk, each.
+    local fs nc
+    for fs in ext3 ext2; do
+        nc=$w/linux/notclean.txt
+        [ "$fs" = ext2 ] && nc=$w/linux/notclean-ext2.txt
+        "$PAX_ROOT/tools/linux-root" --kernel "$k" --fstype "$fs" --append loglevel=7 --init-args "init /dev/vda4 /mnt tmpfs no-end" \
+            "$w/linux/n1-$fs" "$w/bin/mounts" > "$w/linux/n1-$fs.txt" 2>&1 || printf ' tools/linux-root (no end, %s);' "$fs"
+        "$PAX_ROOT/tools/linux-root" --kernel "$k" --fstype "$fs" --append loglevel=7 --disk "$w/linux/n1-$fs/disk.img" \
+            "$w/linux/n2-$fs" "$w/bin/mounts" > "$w/linux/n2-$fs.txt" 2>&1 || printf ' tools/linux-root (after, %s);' "$fs"
+        {
+            echo "after a power-off with / read-write:"
+            sed -n '/^partition 2/,/^partition 4/p' "$w/linux/n1-$fs/host.txt" | grep -E 'state|Mount count|needs_recovery' \
+                | sed 's/^ *Filesystem features:.*needs_recovery.*/  needs_recovery: yes/'
+            echo "the next boot's root mount:"
+            grep -E 'EXT4-fs \(vda2\)' "$w/linux/n2-$fs/serial.log" | sed 's/^\[ *[0-9.]*\] //' | head -n 3
+            echo "after its clean end (/ remounted read-only, powered off):"
+            sed -n '/^partition 2/,/^partition 4/p' "$w/linux/n2-$fs/host.txt" | grep -E 'state|Mount count|needs_recovery' \
+                | sed 's/^ *Filesystem features:.*needs_recovery.*/  needs_recovery: yes/'
+        } > "$nc"
+    done
     echo "live $(uname -r) $k" > "$w/linux/how"
     if [ "$record" = 1 ]; then
         mkdir -p "$REC"
-        cp "$w/linux/guest.session" "$w/linux/guest.kernel" "$w/linux/notclean.txt" "$REC/"
-        printf 'Linux %s on QEMU (tools/linux-root), recorded %s\n' "$(uname -r)" "$(date -u +%Y-%m-%d)" > "$REC/meta"
+        cp "$w/linux/guest.session" "$w/linux/guest.kernel" "$w/linux/notclean.txt" "$w/linux/notclean-ext2.txt" "$REC/"
+        printf 'Linux %s on QEMU (tools/linux-root --fstype ext3; notclean-ext2.txt: --fstype ext2), recorded %s\n' "$(file -b "$k" | sed -n 's/.*version \([^ ]*\).*/\1/p')" "$(date -u +%Y-%m-%d)" > "$REC/meta"
         say "recorded the Linux side in $REC"
     fi
 }
@@ -285,6 +308,15 @@ state_of() { # disk n -> "STATE COUNT" (dumpe2fs -h of partition n)
     rm -f "$p"
 }
 
+recovering() { # disk: whether partition 2 says needs_recovery (px68)
+    local p=$1.p2r
+    part_of "$1" 2 "$p"
+    "$PAX_ROOT/tools/e2fs" "$(dirname "$p")" dumpe2fs -h "$p" 2>/dev/null | command grep -q '^Filesystem features:.*needs_recovery'
+    local r=$?
+    rm -f "$p"
+    return "$r"
+}
+
 fsck_ok() { # disk n
     local p=$1.p$2 rc=0
     part_of "$1" "$2" "$p"
@@ -335,12 +367,12 @@ for leg in $legs; do
         hrc=0; halt_boot "$tier" "$leg" main "$disk" || hrc=$?
         g=$(sed -n 's/^mkdisk: root=//p' "$dk/main.img.mkdisk.txt")
         why=
-        sgrep -Eq "^root: $g \\(vda2\\) on /: ext2, read-write, write-back\$" || why+=" no root: line for $g;"
-        sgrep -Eq '^ext2: vda2: .*; clean, mount 1; read-write$' || why+=" no clean ext2 line for vda2;"
-        sgrep -Eq '^fstab: /dev/vda2 is /: ext2, read-write, write-back$' || why+=" no fstab line for /;"
+        sgrep -Eq "^root: $g \\(vda2\\) on /: ext3, read-write, data=ordered\$" || why+=" no root: line for $g;"
+        sgrep -Eq '^ext2: vda2: .*; clean, mount 1; read-write; journal of [0-9]+ blocks in [0-9]+ runs, data=ordered$' || why+=" no clean ext3 line for vda2;"
+        sgrep -Eq '^fstab: /dev/vda2 is /: ext3, read-write, data=ordered$' || why+=" no fstab line for /;"
         sgrep -Eq '^fstab: tmpfs on /tmp: the memory'"'"'s, mode 1777$' || why+=" no tmpfs line;"
         ! sgrep -q 'refused:' || why+=" $(sgrep -m1 'refused:');"
-        [ -z "$why" ] && say "PASS R1 $id: root=$g mounted vda2 as / (read-write, clean, mount 1); /etc/fstab's / line and tmpfs /tmp" || bad "R1 $id:$why"
+        [ -z "$why" ] && say "PASS R1 $id: root=$g mounted vda2 as / (ext3, read-write, data=ordered, clean, mount 1); /etc/fstab's / line and tmpfs /tmp" || bad "R1 $id:$why"
         out=$PAX_BUILD/mpx6-root-$tier-$leg-main.session
         python3 "$D/session" pax "$log" > "$out.all"
         sed -n '/^table: begin$/,/^user 1000: end, status 0$/p' "$out.all" > "$out"
@@ -363,9 +395,10 @@ for leg in $legs; do
         why=
         [ "$hrc" = 0 ] || why+=" not halted;"
         [ "$st2" = "clean 3" ] || why+=" partition 2: '$st2' (want 'clean 3');"
+        ! recovering "$disk" || why+=" partition 2 needs_recovery after the halt;"
         [ "${st4%% *}" = clean ] || why+=" partition 4: '$st4';"
         fsck_ok "$disk" 2 || why+=" e2fsck -fn of partition 2: $(grep -v '^e2fsck \|^Pass ' "$disk.p2.fsck" | head -n 3 | tr '\n' '|');"
-        [ -z "$why" ] && say "PASS R7 $id: the halt left / clean (dumpe2fs -h: clean, mount count 3: the boot and two remounts read-write, as the guest counts them), /dev/vda4 clean, e2fsck -fn clean" || bad "R7 $id:$why"
+        [ -z "$why" ] && say "PASS R7 $id: the halt left / clean (dumpe2fs -h: clean, mount count 3: the boot and two remounts read-write, as the guest counts them; needs_recovery clear), /dev/vda4 clean, e2fsck -fn clean" || bad "R7 $id:$why"
         books "$id main"
         halted "$id main" "$hrc"
         # R4: the tree on the disk (once a tier: the disk as mkdisk made it).
@@ -394,8 +427,8 @@ for leg in $legs; do
                 why=
                 [ -n "$spec" ] || why+=" no root: line ($(sgrep -m1 '^root: ' || echo none));"
                 if [ "$v" = ro ]; then
-                    sgrep -Eq '^root: .* on /: ext2, read-only, write-back$' || why+=" not mounted read-only;"
-                    sgrep -Eq '^fstab: /dev/vda2 is /: ext2, read-write, write-back$' || why+=" the / line did not remount it read-write;"
+                    sgrep -Eq '^root: .* on /: ext3, read-only, data=ordered$' || why+=" not mounted read-only;"
+                    sgrep -Eq '^fstab: /dev/vda2 is /: ext3, read-write, data=ordered$' || why+=" the / line did not remount it read-write;"
                 fi
                 [ "$mi" = "$gm" ] || why+=" mountinfo's first line '$mi', the guest's '$gm';"
                 [ "$hrc" = 0 ] || why+=" not halted;"
@@ -487,18 +520,54 @@ for leg in $legs; do
         wait "$qp" 2>/dev/null
         norm_log; record_run "$tier" "$leg" cut1 killed
         s1=$(state_of "$disk" 2)
+        r1=no; recovering "$disk" && r1=yes
         hrc=0; halt_boot "$tier" "$leg" cut2 "$disk" || hrc=$?
+        nr=$(sgrep -c '^ext2: vda2: recovering the journal: [0-9]+ transactions?.*; recovery complete$')
+        nc=$(sgrep -c '^ext2: vda2: .*; not cleanly unmounted, mount 2; ')
+        s2=$(state_of "$disk" 2)
+        r2=no; recovering "$disk" && r2=yes
+        gs=$(sed -n '/^after a power-off/,/^the next boot/p' "$lx/notclean.txt" | sed -n 's/^ *Filesystem state: *//p')
+        gr=$(sed -n '/^after a power-off/,/^the next boot/p' "$lx/notclean.txt" | grep -c 'needs_recovery: yes')
+        ge=$(sed -n '/^after its clean/,$p' "$lx/notclean.txt" | sed -n 's/^ *Filesystem state: *//p')
+        why=
+        [ "$s1" = "clean 1" ] && [ "$r1" = yes ] || why+=" after the cut '$s1', needs_recovery $r1 (want 'clean 1', yes);"
+        [ "$gs" = clean ] && [ "$gr" = 1 ] || why+=" the guest's power-off left '$gs', needs_recovery $gr;"
+        [ "$nr" = 1 ] || why+=" $nr recovery lines on the next boot (want one);"
+        [ "$nc" = 0 ] || why+=" 'not cleanly unmounted' on a journalled root;"
+        sgrep -Eq '^root: .* on /: ext3, read-write, data=ordered$' || why+=" not mounted read-write;"
+        [ "$s2" = "clean 2" ] && [ "$r2" = no ] || why+=" after its clean end '$s2', needs_recovery $r2 (want 'clean 2', no);"
+        [ "$ge" = clean ] || why+=" the guest's clean end left '$ge';"
+        [ -z "$why" ] && say "PASS R8 $id: killed after the table: clean with needs_recovery, mount 1 (the guest's power-off: clean, needs_recovery); the next boot: '$(sgrep -m1 '^ext2: vda2: recovering' | sed 's/^ext2: vda2: //')', read-write; its clean end: clean, mount 2, needs_recovery clear" || bad "R8 $id:$why"
+        halted "$id cut2" "$hrc"
+        rm -f "$disk"
+
+        # --- R8e: px67's power cut on an ext2 root (--no-journal) ----------------------
+        vd=$dk/cut-ext2.img
+        [ -f "$vd" ] || make_disk "$vd" "$images/cut.cpio" "$PAX_ROOT/boot/limine-initramfs.conf" px67-cut --no-journal
+        disk=$PAX_BUILD/mpx6-root-$tier-$leg-cute.img
+        cp --sparse=always "$vd" "$disk"
+        log=$PAX_BUILD/mpx6-root-$tier-$leg-cute1.serial.log
+        rm -f "$log" "$log.qpid"
+        "$PAX_ROOT/tools/qemu-run" --firmware "$leg" --serial "$log" --timeout 120 --boot-disk "$disk" -- -m 512M -pidfile "$log.qpid" > "$log.verdict" 2>&1 &
+        qp=$!
+        n=0
+        until grep -q '^table: end' "$log" 2>/dev/null || [ $n -ge 1200 ] || ! kill -0 $qp 2>/dev/null; do sleep 0.1; n=$((n + 1)); done
+        [ -s "$log.qpid" ] && kill -9 "$(cat "$log.qpid")" 2>/dev/null
+        wait "$qp" 2>/dev/null
+        norm_log; record_run "$tier" "$leg" cute1 killed
+        s1=$(state_of "$disk" 2)
+        hrc=0; halt_boot "$tier" "$leg" cute2 "$disk" || hrc=$?
         nc=$(sgrep -c '^ext2: vda2: .*; not cleanly unmounted, mount 2; read-write$')
         s2=$(state_of "$disk" 2)
-        gw=$(sed -n '/^the next boot/,/^after its clean/p' "$lx/notclean.txt" | grep -c 'warning: mounting unchecked fs')
+        gw=$(sed -n '/^the next boot/,/^after its clean/p' "$lx/notclean-ext2.txt" | grep -c 'warning: mounting unchecked fs')
         why=
         [ "$s1" = "not clean 1" ] || why+=" after the cut '$s1' (want 'not clean 1');"
         [ "$nc" = 1 ] || why+=" $nc 'not cleanly unmounted' lines on the next boot (want one);"
         sgrep -Eq '^root: .* on /: ext2, read-write, write-back$' || why+=" not mounted read-write;"
         [ "$s2" = "not clean 2" ] || why+=" after its clean end '$s2' (want 'not clean 2', as the guest leaves it);"
         [ "$gw" = 1 ] || why+=" the guest's record has $gw warnings;"
-        [ -z "$why" ] && say "PASS R8 $id: killed after the table: not clean, mount 1; the next boot mounted / read-write saying 'not cleanly unmounted' once (the guest: one 'warning: mounting unchecked fs'), halted, still not clean (mount 2), as the guest leaves it (R-px67-5)" || bad "R8 $id:$why"
-        halted "$id cut2" "$hrc"
+        [ -z "$why" ] && say "PASS R8e $id: an ext2 root killed after the table: not clean, mount 1; the next boot mounted / read-write saying 'not cleanly unmounted' once (the guest: one 'warning: mounting unchecked fs'), halted, still not clean (mount 2), as the guest leaves it (R-px67-5)" || bad "R8e $id:$why"
+        halted "$id cute2" "$hrc"
         rm -f "$disk"
 
         # --- R10: the ISO way ---------------------------------------------------------
