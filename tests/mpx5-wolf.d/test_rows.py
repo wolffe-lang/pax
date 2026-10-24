@@ -9,6 +9,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 CHECK = ROOT / "tests/mpx5-wolf.d/rows.py"
 
+# px65: the sessions are the PAX side of kasumi's mpx5-wolf run at the
+# 0.2.35 pin (the version line the witness reads from user/wolf.pin).
 class Rows(unittest.TestCase):
     def run_case(self, text, user="root"):
         with tempfile.TemporaryDirectory(prefix="px60-rows-") as d:
@@ -18,13 +20,13 @@ class Rows(unittest.TestCase):
                                   text=True, capture_output=True)
 
     def test_live_root_and_user_recordings(self):
-        for user, filename in (("root", "notes/px60/pax-root.tty"),
-                               ("pax", "notes/px60/pax-user.tty")):
+        for user, filename in (("root", "notes/px65/wolf-pax-root.tty"),
+                               ("pax", "notes/px65/wolf-pax-user.tty")):
             result = self.run_case((ROOT / filename).read_text(), user)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_broken_witnesses_fail_even_if_a_linux_twin_agrees(self):
-        text = (ROOT / "notes/px60/pax-root.tty").read_text()
+        text = (ROOT / "notes/px65/wolf-pax-root.tty").read_text()
         for before, after, named in (
             ("typecheck-std=0", "typecheck-std=2", "typecheck-std"),
             ("fmt-hello=0", "fmt-hello=1", "fmt-hello"),
