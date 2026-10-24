@@ -288,11 +288,12 @@ name, unless the entry also loads the initramfs (`mkdisk --initramfs`,
 R-px67-2's other way), which stays `/`. Without `root=` the ISO boots
 as before, `/` the initramfs in memory (`rootfs` in the table).
 
-**The end.** When init's last program ends, or root calls `reboot(2)`,
-every process is sent SIGTERM; those still there after a grace of 2 s
-(R-px67-4) are sent SIGKILL; then each volume is written and unmounted
+**The end.** When init's last program ends (after up to a second for
+what it left to end of itself: a shell's stopped jobs, hung up when it
+exits), or root calls `reboot(2)`, every process left is sent SIGTERM;
+those still there after a grace of 2 s (R-px67-4) are sent SIGKILL; then each volume is written and unmounted
 in the reverse of its mount order, `/` last: flushed, its clean flag
-written:
+written; the disk's books, then init's line, then `halt`:
 
     PAX: the end: SIGTERM to 2 processes, 1 ended within 10 ms; SIGKILL to 1 after the 2000 ms grace
 
