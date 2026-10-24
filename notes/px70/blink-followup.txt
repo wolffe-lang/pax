@@ -1,0 +1,43 @@
+px71 follow-on proposal: animate the recorded blink attributes and cursor.
+
+Measured: Linux VGA VT SGR5 has two pixel phases in both captures; DECSCUSR
+0-6 all leave the same blinking underline. Snapshot manifests and raw frames:
+/home/mfwolffe/lanes/px70/out/measure-1
+/home/mfwolffe/lanes/px70/out/measure-2
+
+PAX is drawing CPU-written pixels into a linear framebuffer (kernel/fb and
+kernel/screen), not programming VGA text cells. Its glyph attribute bits are
+software metadata; the display hardware does not interpret them. The current
+screen path runs on console output, attach, or input-triggered echo. No timer
+calls screen, so no existing path can animate while input/output is idle.
+A byte-triggered blink would freeze while idle and is not parity.
+
+Proposed hook: a bounded screen.tick(now) from kernel/interrupts vector 32,
+next to timer.tick() / speaker.tick(timer.ticks()). Keep it allocation-free,
+IF-clear and guarded against re-entry. Track a half-second phase, redraw only
+recorded blinking cells, and restore/hide the software cursor correctly.
+Measure the cursor and text blink periods separately before choosing cadence.
+Handle active/alternate buffers, hidden cursor, scroll, palette changes, and
+output arriving at a phase boundary. Do not implement emulator shape switching:
+DECSCUSR does not change the measured VT's cursor.
+
+Touches kernel/interrupts, kernel/screen, the timer contract if needed,
+boot/screen.S state, tools/screen-ref's explicit phase, timed QEMU capture
+harness and mpx5-screen rows. Footprint: cross-cutting (interrupt core hook).
+Tests: two phases under idle output, glyph restored exactly after blink;
+DECTCEM hidden remains absent; alternating screens preserve blink metadata;
+scroll/erase do not retain stale blinking glyphs; timer/work cost bounded;
+plant the hook absent and prove the idle two-phase row red in CI.
+
+px70 records cell blink in bit 16 but draws steady. Its counted not-yet rows
+say "needs the timer hook, px71"; they are not declared deliberate divergences.
+#118 cannot be called fully complete without explicitly retaining this item.
+
+Correction text for pax#123:
+Fresh black-box measurements on Linux 7.3.0-4-cachyos under QEMU 11.1.2
+show that CSI Ps SP q, Ps=0..6, does not change the VGA VT cursor. All seven
+produce exactly the same two pixel phases (blinking underline), in two runs
+of twelve timed screenshots each. The issue's premise that the VT draws
+block/underline/bar by DECSCUSR was incorrect. PAX may keep recording the
+sequence without implementing emulator shapes. General cursor animation and
+its baseline underline rendering belong with the timer-backed blink follow-on.
