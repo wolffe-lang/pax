@@ -85,8 +85,9 @@ fn body() -> u64 {
 }
 
 fn byte_at(a: u64) -> u64 {
-    // # Safety: a byte of the run list, inside the initramfs's pages
-    // (mapped read-only in the HHDM for the kernel's life).
+    // # Safety: a byte of the run list, inside the frame kernel/tree's
+    // `small_file` read it into (px67; the initramfs's pages before),
+    // never given back.
     unsafe { (a as *u8).read_volatile() as u64 }
 }
 
@@ -179,8 +180,12 @@ export fn kmain() {
     let pml4 = paging.start()
     paging.report(limine, before)
     let _screen = fb.start(pml4) // px19: the screen, when there is one (no line: serial unchanged)
-    initramfs.report()
-    initramfs.require()
+    if initramfs.bytes() != 0 || !fstab.root_asked() {
+        initramfs.report() // px67: with `root=` and no module, nothing to say
+    }
+    if !fstab.root_asked() {
+        initramfs.require() // px67: with `root=` the programs may all be on the disk
+    }
     interrupts.start()
     apic.start(pml4)
     timer.start()
@@ -201,6 +206,7 @@ export fn kmain() {
         block.report()
     }
     boot_media() // px66: where Limine found the initramfs, when not on an optical disc
+    let _root = fstab.mount_root() // px67: `/` on the disk, when the command line says `root=`
     let _mounted = fstab.mount_all()
     if fstab.wants_flusher() {
         // # Safety: the address of kernel/fstab's export; nothing is read.
@@ -211,12 +217,12 @@ export fn kmain() {
     }
     sync.enable()
 
-    let e = initramfs.lookup(RUN_LIST)
-    if e == initramfs.END {
-        panic.fail("console: no /etc/pax-run in the initramfs, bytes", initramfs.bytes())
+    // px67: the run list is the tree's (`/` on the disk when it is there,
+    // else the initramfs's), read whole into a frame of its own.
+    let (d, size, why) = tree.small_file(RUN_LIST)
+    if why != 0 {
+        panic.fail("console: no /etc/pax-run under / (a regular file of a page at most), why", why)
     }
-    let d = initramfs.data(e)
-    let size = initramfs.size(e)
     var k: u64 = 0
     var i: u64 = 0
     var init_at: u64 = 0
