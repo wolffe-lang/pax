@@ -30,12 +30,22 @@
 //     network: tcp connections <e> accepted, <f> made, <g> open
 //     PAX: init /bin/pelt ended with status 0; nothing left to run
 //     halt
+//
+// px67: with a disk, as kmain_console has it (px63, px66, px67): the
+// disk after the network, `/` on it when the command line says `root=`
+// (kernel/fstab's `mount_root`), what /etc/fstab lists, the run list
+// read from the tree, the flusher for a write-back volume; the last
+// command (init) waited for itself and what it left ended at the halt,
+// and root's reboot(2) the end (kernel/user's `end_processes`,
+// `the_end`); every volume written and marked clean before `halt`.
 use apic
 use arp
+use block
 use console
 use fb
 use fpu
 use frames
+use fstab
 use heap
 use icmp
 use initramfs
@@ -54,10 +64,12 @@ use speaker
 use sync
 use tcp
 use timer
+use tree
 use udp
 use user
 
 extern "c" let pax_user_thread: *u8
+extern "c" let pax_flushd: *u8 // px67: kernel/fstab's flusher
 extern "c" let pax_netd: *u8
 extern "c" let pax_net_clock: *u8
 
@@ -74,8 +86,9 @@ fn body() -> u64 {
 }
 
 fn byte_at(a: u64) -> u64 {
-    // # Safety: a byte of the run list, inside the initramfs's pages
-    // (mapped read-only in the HHDM for the kernel's life).
+    // # Safety: a byte of the run list, inside the frame kernel/tree's
+    // `small_file` read it into (px67; the initramfs's pages before),
+    // never given back.
     unsafe { (a as *u8).read_volatile() as u64 }
 }
 
@@ -95,8 +108,10 @@ fn ping_self(dst: u64, seq: u64) -> bool {
 
 /// Run line number `k`, the `n` bytes at `a`: one command, waited for
 /// with every process it makes (`floor`: the threads live before it,
-/// the network's own); then, unless quiet, the frames line.
-fn run(k: u64, a: u64, n: u64, floor: u64) {
+/// the network's own); then, unless quiet, the frames line. px67: the
+/// last command (`last`) waited for itself, then what it left ended
+/// (kernel/user's `end_processes`); root's reboot(2) ends any wait.
+fn run(k: u64, a: u64, n: u64, floor: u64, last: bool) {
     let s = sync.acquire(sync.console())
     log.put("run ")
     log.dec(k as int)
@@ -117,7 +132,18 @@ fn run(k: u64, a: u64, n: u64, floor: u64) {
     let id = user.exec_line(body(), a, pl, a, n, ENV)
     let during = frames.free_count()
     sync.irq_restore(saved)
-    sched.wait_down_to(floor)
+    if last && id != 0 && user.end_asked() == 0 {
+        sched.wait_pid_or_down(sched.pid_of(id), floor)
+        if user.end_asked() == 0 {
+            user.end_processes() // px67: the halt: init has ended; what it left ends too
+        }
+    }
+    if user.end_asked() == 0 {
+        sched.wait_down_to(floor)
+    }
+    if user.end_asked() != 0 {
+        return // px67: reboot(2): the end is the kernel's
+    }
     // A connection its process closed may still be saying goodbye (a
     // FIN to be acknowledged): up to thirty seconds for that, so the
     // lines below are the session's and not the middle of it.
@@ -176,8 +202,12 @@ export fn kmain() {
     let pml4 = paging.start()
     paging.report(limine, before)
     let _screen = fb.start(pml4) // the screen, when there is one (no line: serial unchanged)
-    initramfs.report()
-    initramfs.require()
+    if initramfs.bytes() != 0 || !fstab.root_asked() {
+        initramfs.report() // px67: with `root=` and no module, nothing to say
+    }
+    if !fstab.root_asked() {
+        initramfs.require() // px67: with `root=` the programs may all be on the disk
+    }
     interrupts.start()
     apic.start(pml4)
     timer.start()
@@ -212,6 +242,19 @@ export fn kmain() {
         floor = 2
     }
     sched.create(clock, 0)
+    // px67: the disk, when the machine has one, `/` on it when `root=`
+    // says so, and what /etc/fstab mounts; a write-back volume's flusher.
+    if block.start(pml4) != 0 {
+        block.report()
+    }
+    let _root = fstab.mount_root()
+    let _mounted = fstab.mount_all()
+    if fstab.wants_flusher() {
+        // # Safety: the address of kernel/fstab's export; nothing is read.
+        let fl = unsafe { pax_flushd as u64 }
+        let _t = sched.create(fl, 0)
+        floor += 1
+    }
     console.start()
     console.report()
     sync.enable()
@@ -228,25 +271,37 @@ export fn kmain() {
     log.end()
     sync.release(sync.console(), sl)
 
-    let e = initramfs.lookup(RUN_LIST)
-    if e == initramfs.END {
-        panic.fail("session: no /etc/pax-run in the initramfs, bytes", initramfs.bytes())
+    // px67: the run list is the tree's (`/` on the disk when it is there,
+    // else the initramfs's), read whole into a frame of its own.
+    let (d, size, why) = tree.small_file(RUN_LIST)
+    if why != 0 {
+        panic.fail("session: no /etc/pax-run under / (a regular file of a page at most), why", why)
     }
-    let d = initramfs.data(e)
-    let size = initramfs.size(e)
+    var total: u64 = 0 // px67: the commands, so the last is known
+    var c: u64 = 0
+    while c < size {
+        var j = c
+        while j < size && byte_at(d + j) != 10 {
+            j += 1
+        }
+        if j > c && byte_at(d + c) != 35 {
+            total += 1
+        }
+        c = j + 1
+    }
     var k: u64 = 0
     var i: u64 = 0
     var init_at: u64 = 0
     var init_len: u64 = 0
     var init_status: u64 = 0
-    while i < size {
+    while i < size && user.end_asked() == 0 {
         var j = i
         while j < size && byte_at(d + j) != 10 {
             j += 1
         }
         if j > i && byte_at(d + i) != 35 {
             k += 1
-            run(k, d + i, j - i, floor)
+            run(k, d + i, j - i, floor, k == total)
             if k == 1 {
                 init_at = d + i
                 init_len = j - i
@@ -254,6 +309,9 @@ export fn kmain() {
             }
         }
         i = j + 1
+    }
+    if user.end_asked() != 0 {
+        user.the_end() // px67: root's reboot(2)
     }
 
     let s = sync.acquire(sync.console())
@@ -286,6 +344,16 @@ export fn kmain() {
     sync.release(sync.console(), s)
 
     let _off = sync.irq_save()
+    // px67: every volume written, marked clean and flushed; the disk's books.
+    if block.count() != 0 {
+        let e = tree.halt_volumes()
+        if e != 0 {
+            log.put("PAX: writing the volumes at the end: an I/O error, -")
+            log.dec((!e + 1) as int)
+            log.end()
+        }
+        block.summary()
+    }
     timer.stop()
     log.line("halt")
     panic.halt()
