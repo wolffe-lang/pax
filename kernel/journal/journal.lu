@@ -1,0 +1,1213 @@
+//! journal — ext3's journal for a volume of kernel/ext2's (px68,
+//! pax#150): what a power cut leaves is replayed to the last commit, so
+//! the tree is always one a commit wrote, whole.
+//!
+//! Written from the published layout only: the ext4 disk-layout
+//! documentation's journal page (`Documentation/filesystems/ext4/
+//! journal.rst`: the block header, the v2 superblock, descriptor blocks
+//! and their 8-byte tags, data blocks and the escape rule, revocation
+//! blocks, commit blocks) and super.rst (has_journal, needs_recovery,
+//! s_journal_inum), and black-box runs of e2fsprogs 1.47.0 (`mke2fs -t
+//! ext3`, `debugfs logdump`, `e2fsck -fy`'s replay of journals
+//! tools/mkjournal wrote: notes/px68/oracle.sh) and of Linux 7.3.0's ext4
+//! driver mounting ext3 on QEMU (notes/px68/guest.sh). Clean-room
+//! (ruling #22): no jbd2, ext3, ext4 or e2fsprogs source, no other
+//! kernel's or file system's.
+//!
+//! **The format** (what `mke2fs -t ext3` of the pinned e2fsprogs makes,
+//! measured: a v2 superblock with no journal feature, so tags are 8 bytes
+//! and nothing is checksummed). The journal is inode 8's blocks,
+//! numbered from 0 here (kernel/ext2 hands over its block map as runs:
+//! `add_run`); journal block 0 is the superblock: every field big-endian,
+//! the header (magic 0xC03B3998, type 3 or 4, sequence), s_blocksize (the
+//! volume's), s_maxlen (the journal's blocks), s_first (the first log
+//! block), s_sequence (the transaction expected first), s_start (the log
+//! block it begins at; 0: nothing to replay), the feature words and the
+//! UUID the tags carry. A transaction is, from its log block on:
+//! descriptor blocks (header type 1, then tags: the home block's number,
+//! a 16-bit checksum (0 here), 16-bit flags; the first tag of a
+//! descriptor is followed by the 16-byte UUID, the others say SAME_UUID;
+//! the last says LAST_TAG), each followed by the data blocks its tags
+//! name in order (a block whose first four bytes are the magic is logged
+//! with them zeroed and the tag's ESCAPE flag); revocation blocks (type
+//! 5: r_count, the bytes used, then 32-bit block numbers); and the
+//! commit block (type 2; h_commit_sec and h_commit_nsec, the moment the
+//! transaction closed). The log wraps from s_maxlen to s_first.
+//!
+//! **Writing (data=ordered, R-px68-1).** Every change kernel/ext2 makes
+//! to metadata (the superblock, the group descriptors, both bitmaps, the
+//! inode tables, indirect blocks, directory blocks, a slow link's block)
+//! joins the running transaction (`meta`: kernel/block's `jdirty`, the
+//! block kept on a list); none reaches its home before its commit
+//! block is on the disk. File data is not journalled. A commit
+//! (`commit`, at the flusher's turn, at a call's start when the
+//! transaction holds HIGH blocks, at sync, fsync, fdatasync, syncfs,
+//! msync, a remount read-only, the unmount and the halt) is, in order:
+//! every dirty data block of the disk written home (ordered: before the
+//! commit that names it); when the log is empty, the superblock written
+//! with s_start at the transaction's first block; the descriptors, the
+//! logged blocks and the revocation blocks; a FLUSH (px63's
+//! VIRTIO_BLK_T_FLUSH: everything before it on the medium); the commit
+//! block; a FLUSH. Then the blocks are committed, awaiting their
+//! checkpoint (kernel/block's B_JMETA), and may go home at any time. The
+//! checkpoint (`checkpoint`, after a commit that leaves fewer free log
+//! blocks than the largest transaction needs, or more than LIVE logged
+//! since the last, and at the unmount) writes every committed block home,
+//! FLUSHes, and writes the superblock with s_start 0 (empty), FLUSHed:
+//! the next transaction goes on where the log left off, so the log wraps.
+//! A full journal can never be met: the checkpoint keeps room for the
+//! largest transaction the cache can hold (NB buffers; RESERVE).
+//!
+//! **Revocation.** A block logged since the last checkpoint, freed by the
+//! running transaction (and so free to become a file's data, which is
+//! not journalled), gets a revocation record in it, so no replay writes
+//! its old contents over what the file put there; a block logged again
+//! loses its pending record. A block freed in the running transaction is
+//! not allocated again before it commits (`protect` and `guard`: the
+//! group's bitmap as the first free in it found it, which allocation
+//! honours beside the live one), so a power cut never leaves a file of
+//! the last commit holding another file's data.
+//!
+//! **Replay** (`replay`, before the volume is used, when s_start is not
+//! 0): three walks from s_start, each expecting s_sequence and stopping at
+//! the first block whose header is not the magic and the expected
+//! sequence: the scan (the first sequence with no commit block: the end;
+//! a torn or absent commit drops its transaction whole), the revocations
+//! of the transactions before the end (a block and the highest sequence
+//! that revoked it), and the replay: each tagged block of a transaction
+//! before the end written to its home unless a revocation of a sequence
+//! at or after the tag's names it (e2fsck's rule, measured: a block
+//! revoked in its own transaction is not replayed either), unescaped.
+//! Then a FLUSH, and the superblock with s_start 0 and s_sequence one past
+//! the end's (as e2fsck leaves it), FLUSHed.
+//!
+//! One CPU, IF clear for the whole of every call; no region, no heap: the
+//! records are one frame's words, the rest frames this module takes once
+//! a volume and keeps.
+
+use block
+use frames
+use log
+use vblk
+
+extern "c" fn pax_tree_copy(dst: u64, src: u64, n: u64)
+extern "c" fn pax_tree_zero(dst: u64, n: u64)
+
+const PAGE: u64 = 4096
+/// The volumes (kernel/ext2's VOLS).
+pub const JVOLS: u64 = 4
+const JW: u64 = 128 // a record's words: four records a frame
+
+/// The running transaction's blocks a call's start commits at.
+pub const HIGH: u64 = 128
+/// Distinct blocks logged since the last checkpoint before one is made
+/// (the set's room is twice this).
+const LIVE: u64 = 4096
+const SETN: u64 = 8192 // the logged set's slots (u32: block + 1), 8 frames
+const SETF: u64 = 8
+const LISTN: u64 = 1024 // the running list's slots (u64), 2 frames
+const REVN: u64 = 4096 // revocations a transaction (u32), 4 frames
+const RUNMAX: u64 = 64 // the journal inode's runs (3 words each)
+const COPIES: u64 = 512 // groups a copy may be kept for
+
+const MAGIC: u64 = 0xc03b3998
+const T_DESC: u64 = 1
+const T_COMMIT: u64 = 2
+const T_SB1: u64 = 3
+const T_SB2: u64 = 4
+const T_REVOKE: u64 = 5
+const F_ESCAPE: u64 = 1
+const F_SAME: u64 = 2
+const F_LAST: u64 = 8
+const INCOMPAT_REVOKE: u64 = 1
+
+const EIO: u64 = 5
+const ENOSPC: u64 = 28
+
+/// `load`'s answers (kernel/ext2 names the refusals): the journal holds.
+pub const R_OK: u64 = 0
+/// Block 0 could not be read.
+pub const R_IO: u64 = 1
+/// No journal superblock.
+pub const R_MAGIC: u64 = 2
+/// `s_blocksize` is not the volume's.
+pub const R_BSIZE: u64 = 3
+/// `s_maxlen` or `s_first` out of the inode's blocks.
+pub const R_LEN: u64 = 4
+/// An incompatible journal feature (bits: `refused_bits`).
+pub const R_FEAT: u64 = 5
+/// Too small for the largest transaction.
+pub const R_SMALL: u64 = 6
+/// No frame for the journal's state.
+pub const R_FRAMES: u64 = 7
+
+// A record's words.
+const J_USED: u64 = 0
+const J_DEV: u64 = 1
+const J_BS: u64 = 2
+const J_MAXLEN: u64 = 3
+const J_FIRST: u64 = 4
+const J_SEQ: u64 = 5 // the running transaction's sequence
+const J_HEAD: u64 = 6 // the next log block to write
+const J_TAIL: u64 = 7 // s_start on the disk (0: empty)
+const J_TAILSEQ: u64 = 8
+const J_RUN: u64 = 9 // blocks in the running transaction
+const J_NLIST: u64 = 10 // the running list's slots used (0 entries: removed)
+const J_NREV: u64 = 11
+const J_FEAT: u64 = 12 // s_feature_incompat as found (and as written)
+const J_ACTIVE: u64 = 13 // writing through the journal (a read-write mount)
+const J_NRUNS: u64 = 14
+const J_NSET: u64 = 15 // distinct blocks in the logged set
+const J_FULL: u64 = 16 // a set or a revocation list overflowed: checkpoint after the commit
+const J_START: u64 = 17 // s_start as found at the mount
+const J_FOUNDSEQ: u64 = 18 // s_sequence as found
+const J_UUID: u64 = 19 // 2 words: s_uuid's 16 bytes
+const J_BAD: u64 = 21 // the refused feature bits
+const J_FR_SB: u64 = 24 // frames (physical): the superblock's copy
+const J_FR_SCR: u64 = 25 // the descriptor, revocation and commit blocks made here
+const J_FR_ESC: u64 = 26 // an escaped block's copy; the replay's reads
+const J_FR_RUNS: u64 = 27
+const J_FR_COPIES: u64 = 28 // per group: a copy's frame | 1 while valid in the running transaction
+const J_FR_LIST: u64 = 29 // 2 frames
+const J_FR_REV: u64 = 31 // 4 frames
+const J_FR_SET: u64 = 35 // 8 frames
+// The books.
+const J_COMMITS: u64 = 48
+const J_LOGGED: u64 = 49 // blocks logged
+const J_REVOKES: u64 = 50 // revocation records written
+const J_CKPTS: u64 = 51
+const J_ESCAPED: u64 = 52
+const J_DESCS: u64 = 53
+const J_FLUSHES: u64 = 54
+const J_DATA: u64 = 55 // commits that wrote data first (ordered)
+const J_EMPTY: u64 = 56 // commits with nothing to log (data and a FLUSH only)
+const J_LAST_NS: u64 = 57 // the last commit's time
+const J_LAST_SEQ: u64 = 58
+const J_RP_TX: u64 = 60 // the replay: transactions, blocks, revoked, the first and last sequence
+const J_RP_BLOCKS: u64 = 61
+const J_RP_REVOKED: u64 = 62
+const J_RP_FIRST: u64 = 63
+const J_RP_END: u64 = 64
+const J_RP_RECORDS: u64 = 65 // revocation records read
+const J_RP_ERR: u64 = 66 // why the replay stopped short (0: it did not)
+const J_MAXRUN: u64 = 67 // the most blocks a transaction logged
+const J_ERRS: u64 = 68 // write errors
+
+var state: u64 = 0
+
+fn base() -> u64 {
+    // # Safety: a scalar module var, read on one CPU with IF clear.
+    unsafe { state }
+}
+
+fn hh() -> u64 {
+    frames.hhdm()
+}
+
+fn rd(a: u64) -> u64 {
+    // # Safety: a word of a frame this module owns, through the HHDM.
+    unsafe { (a as *u64).read_volatile() }
+}
+
+fn wr(a: u64, x: u64) {
+    // # Safety: as `rd`.
+    unsafe { (a as *u64).write_volatile(x) }
+}
+
+fn r8(a: u64) -> u64 {
+    // # Safety: a byte of a frame this module owns or of a buffer of
+    // kernel/block's (held for the running transaction, never evicted).
+    let x = unsafe { (a as *u8).read_volatile() }
+    x as u64
+}
+
+fn w8(a: u64, x: u64) {
+    // # Safety: as `r8`, a frame this module owns.
+    unsafe { (a as *u8).write_volatile((x & 0xff) as u8) }
+}
+
+fn r32(a: u64) -> u64 {
+    // # Safety: as `r8`; 4-aligned in its frame.
+    let x = unsafe { (a as *u32).read_volatile() }
+    x as u64
+}
+
+fn w32(a: u64, x: u64) {
+    // # Safety: as `w8`; 4-aligned.
+    unsafe { (a as *u32).write_volatile((x & 0xffffffff) as u32) }
+}
+
+/// A big-endian 32-bit field (jbd2's order).
+fn be32(a: u64) -> u64 {
+    (r8(a) << 24) | (r8(a + 1) << 16) | (r8(a + 2) << 8) | r8(a + 3)
+}
+
+fn put_be32(a: u64, x: u64) {
+    w8(a, x >> 24)
+    w8(a + 1, x >> 16)
+    w8(a + 2, x >> 8)
+    w8(a + 3, x)
+}
+
+fn be16(a: u64) -> u64 {
+    (r8(a) << 8) | r8(a + 1)
+}
+
+fn put_be16(a: u64, x: u64) {
+    w8(a, x >> 8)
+    w8(a + 1, x)
+}
+
+fn zero(dst: u64, n: u64) {
+    // # Safety: [dst, dst + n) inside a frame this module owns.
+    unsafe { pax_tree_zero(dst, n) }
+}
+
+fn copy_bytes(dst: u64, src: u64, n: u64) {
+    // # Safety: a frame this module owns and a buffer or frame of n bytes.
+    unsafe { pax_tree_copy(dst, src, n) }
+}
+
+fn neg(e: u64) -> u64 {
+    0xffffffffffffffff - e + 1
+}
+
+fn rec(v: u64) -> u64 {
+    base() + v * JW * 8
+}
+
+fn jw(v: u64, w: u64) -> u64 {
+    rd(rec(v) + w * 8)
+}
+
+fn put_jw(v: u64, w: u64, x: u64) {
+    wr(rec(v) + w * 8, x)
+}
+
+fn bump(v: u64, w: u64, by: u64) {
+    put_jw(v, w, jw(v, w) + by)
+}
+
+fn zeroed() -> u64 {
+    let pa = frames.alloc() else 0
+    if pa != 0 {
+        zero(pa + hh(), PAGE)
+    }
+    pa
+}
+
+fn ready() -> bool {
+    if base() != 0 {
+        return true
+    }
+    let f = zeroed()
+    if f == 0 {
+        return false
+    }
+    // # Safety: a scalar module var, written once with IF clear.
+    unsafe { state = f + hh() }
+    true
+}
+
+/// A frame word of the record: taken (zeroed) the first time it is
+/// asked for and kept for the volume's later mounts.
+fn frame_at(v: u64, w: u64) -> u64 {
+    var f = jw(v, w)
+    if f == 0 {
+        f = zeroed()
+        put_jw(v, w, f)
+    }
+    f
+}
+
+fn frames_ready(v: u64) -> bool {
+    var ok = frame_at(v, J_FR_SB) != 0 && frame_at(v, J_FR_SCR) != 0 && frame_at(v, J_FR_ESC) != 0
+    ok = ok && frame_at(v, J_FR_RUNS) != 0 && frame_at(v, J_FR_COPIES) != 0
+    var k: u64 = 0
+    while k < 2 {
+        ok = ok && frame_at(v, J_FR_LIST + k) != 0
+        k += 1
+    }
+    k = 0
+    while k < 4 {
+        ok = ok && frame_at(v, J_FR_REV + k) != 0
+        k += 1
+    }
+    k = 0
+    while k < SETF {
+        ok = ok && frame_at(v, J_FR_SET + k) != 0
+        k += 1
+    }
+    ok
+}
+
+// --- the journal's place: inode 8's blocks as runs ------------------------------------
+
+/// Forget volume `v`'s journal (a mount begins, or the volume is not
+/// journalled): its frames are kept.
+pub fn reset(v: u64) {
+    if !ready() || v >= JVOLS {
+        return
+    }
+    var w: u64 = 0
+    while w < JW {
+        if w < J_FR_SB || w >= J_FR_SET + SETF {
+            put_jw(v, w, 0)
+        }
+        w += 1
+    }
+}
+
+/// Journal blocks [l, l + n) are volume blocks [p, p + n): false when
+/// the run table is full (more than RUNMAX runs).
+pub fn add_run(v: u64, l: u64, p: u64, n: u64) -> bool {
+    if !ready() || v >= JVOLS || frame_at(v, J_FR_RUNS) == 0 {
+        return false
+    }
+    let k = jw(v, J_NRUNS)
+    let t = jw(v, J_FR_RUNS) + hh()
+    if k > 0 {
+        let a = t + (k - 1) * 24
+        if rd(a) + rd(a + 16) == l && rd(a + 8) + rd(a + 16) == p {
+            wr(a + 16, rd(a + 16) + n)
+            return true
+        }
+    }
+    if k >= RUNMAX {
+        return false
+    }
+    let a = t + k * 24
+    wr(a, l)
+    wr(a + 8, p)
+    wr(a + 16, n)
+    put_jw(v, J_NRUNS, k + 1)
+    true
+}
+
+/// The runs the journal is in.
+pub fn runs(v: u64) -> u64 {
+    jw(v, J_NRUNS)
+}
+
+/// The volume block journal block `j` is, 0 when none.
+fn phys(v: u64, j: u64) -> u64 {
+    let t = jw(v, J_FR_RUNS) + hh()
+    var k: u64 = 0
+    while k < jw(v, J_NRUNS) {
+        let a = t + k * 24
+        if j >= rd(a) && j < rd(a) + rd(a + 16) {
+            return rd(a + 8) + (j - rd(a))
+        }
+        k += 1
+    }
+    0
+}
+
+fn blocks_mapped(v: u64) -> u64 {
+    let t = jw(v, J_FR_RUNS) + hh()
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < jw(v, J_NRUNS) {
+        n += rd(t + k * 24 + 16)
+        k += 1
+    }
+    n
+}
+
+/// One block of the journal read into or written from physical `pa`: 0
+/// or -EIO.
+fn io(v: u64, op: u64, j: u64, pa: u64) -> u64 {
+    let p = phys(v, j)
+    if p == 0 {
+        return neg(EIO)
+    }
+    let per = jw(v, J_BS) / 512
+    let r = block.rw(jw(v, J_DEV), op, p * per, per, pa)
+    if r != 0 {
+        bump(v, J_ERRS, 1)
+    }
+    r
+}
+
+/// A home block of the volume written from physical `pa` (the replay's).
+fn home(v: u64, b: u64, pa: u64) -> u64 {
+    let per = jw(v, J_BS) / 512
+    let r = block.rw(jw(v, J_DEV), vblk.T_OUT, b * per, per, pa)
+    if r != 0 {
+        bump(v, J_ERRS, 1)
+    }
+    r
+}
+
+fn flush(v: u64) -> u64 {
+    bump(v, J_FLUSHES, 1)
+    block.flush(jw(v, J_DEV))
+}
+
+fn next(v: u64, p: u64) -> u64 {
+    if p + 1 >= jw(v, J_MAXLEN) { jw(v, J_FIRST) } else { p + 1 }
+}
+
+fn span(v: u64) -> u64 {
+    jw(v, J_MAXLEN) - jw(v, J_FIRST)
+}
+
+/// Log blocks held by transactions not yet checkpointed.
+pub fn used(v: u64) -> u64 {
+    let t = jw(v, J_TAIL)
+    if t == 0 {
+        return 0
+    }
+    let h = jw(v, J_HEAD)
+    if h >= t { h - t } else { span(v) - (t - h) }
+}
+
+fn tags_per(bs: u64) -> u64 {
+    (bs - 12 - 16) / 8
+}
+
+fn revs_per(bs: u64) -> u64 {
+    (bs - 16) / 4
+}
+
+/// The log blocks the largest transaction needs: the cache's every
+/// buffer logged, their descriptors, a full revocation list, the commit.
+fn reserve(bs: u64) -> u64 {
+    let t = tags_per(bs)
+    let r = revs_per(bs)
+    block.NB + (block.NB + t - 1) / t + (REVN + r - 1) / r + 1
+}
+
+// --- the superblock -----------------------------------------------------------------
+
+/// Read the journal's superblock and check it (the volume's device
+/// `dev`, its block size `bs`, the journal inode's blocks `nblocks`,
+/// mapped already by `add_run`): R_OK or why not.
+pub fn load(v: u64, dev: u64, bs: u64, nblocks: u64) -> u64 {
+    if !ready() || v >= JVOLS || !frames_ready(v) {
+        return R_FRAMES
+    }
+    put_jw(v, J_DEV, dev)
+    put_jw(v, J_BS, bs)
+    let sb = jw(v, J_FR_SB)
+    if blocks_mapped(v) != nblocks || io(v, vblk.T_IN, 0, sb) != 0 {
+        return R_IO
+    }
+    let a = sb + hh()
+    let t = be32(a + 4)
+    if be32(a) != MAGIC || (t != T_SB1 && t != T_SB2) {
+        return R_MAGIC
+    }
+    if be32(a + 0xc) != bs {
+        return R_BSIZE
+    }
+    let maxlen = be32(a + 0x10)
+    let first = be32(a + 0x14)
+    if maxlen > nblocks || first == 0 || first >= maxlen {
+        return R_LEN
+    }
+    let feat = if t == T_SB2 { be32(a + 0x28) } else { 0 }
+    if feat & !INCOMPAT_REVOKE != 0 {
+        put_jw(v, J_BAD, feat & !INCOMPAT_REVOKE)
+        return R_FEAT
+    }
+    if maxlen - first < reserve(bs) + 1 {
+        return R_SMALL
+    }
+    put_jw(v, J_MAXLEN, maxlen)
+    put_jw(v, J_FIRST, first)
+    put_jw(v, J_FOUNDSEQ, be32(a + 0x18))
+    put_jw(v, J_START, be32(a + 0x1c))
+    put_jw(v, J_SEQ, be32(a + 0x18))
+    put_jw(v, J_FEAT, feat)
+    put_jw(v, J_UUID, rd(a + 0x30))
+    put_jw(v, J_UUID + 1, rd(a + 0x38))
+    put_jw(v, J_USED, 1)
+    R_OK
+}
+
+/// The feature bits `load` refused.
+pub fn refused_bits(v: u64) -> u64 {
+    jw(v, J_BAD)
+}
+
+/// s_start as the mount found it (0: nothing to replay).
+pub fn start_found(v: u64) -> u64 {
+    jw(v, J_START)
+}
+
+/// The journal's blocks (s_maxlen).
+pub fn size(v: u64) -> u64 {
+    jw(v, J_MAXLEN)
+}
+
+/// Write the superblock: s_sequence, s_start and the features from the
+/// record. 0 or -EIO.
+fn write_sb(v: u64, seq: u64, start: u64) -> u64 {
+    let a = jw(v, J_FR_SB) + hh()
+    put_be32(a + 0x18, seq)
+    put_be32(a + 0x1c, start)
+    if be32(a + 4) == T_SB2 {
+        put_be32(a + 0x28, jw(v, J_FEAT))
+    }
+    io(v, vblk.T_OUT, 0, jw(v, J_FR_SB))
+}
+
+// --- the logged set: blocks logged since the last checkpoint ----------------------
+
+fn set_slot(v: u64, i: u64) -> u64 {
+    jw(v, J_FR_SET + i / 1024) + hh() + (i % 1024) * 4
+}
+
+fn hash(b: u64) -> u64 {
+    ((b & 0xffffffff) * 0x9e3779b1) & 0xffffffff
+}
+
+/// Whether block `b` was logged since the last checkpoint.
+fn logged(v: u64, b: u64) -> bool {
+    var i = hash(b) % SETN
+    var n: u64 = 0
+    while n < SETN {
+        let x = r32(set_slot(v, i))
+        if x == 0 {
+            return false
+        }
+        if x == b + 1 {
+            return true
+        }
+        i = (i + 1) % SETN
+        n += 1
+    }
+    false
+}
+
+fn set_add(v: u64, b: u64) {
+    if jw(v, J_NSET) >= SETN / 2 {
+        put_jw(v, J_FULL, 1)
+        return
+    }
+    var i = hash(b) % SETN
+    while true {
+        let x = r32(set_slot(v, i))
+        if x == b + 1 {
+            return
+        }
+        if x == 0 {
+            w32(set_slot(v, i), b + 1)
+            bump(v, J_NSET, 1)
+            return
+        }
+        i = (i + 1) % SETN
+    }
+}
+
+fn set_clear(v: u64) {
+    var k: u64 = 0
+    while k < SETF {
+        zero(jw(v, J_FR_SET + k) + hh(), PAGE)
+        k += 1
+    }
+    put_jw(v, J_NSET, 0)
+}
+
+// --- the running transaction ---------------------------------------------------------
+
+fn list_slot(v: u64, i: u64) -> u64 {
+    jw(v, J_FR_LIST + i / 512) + hh() + (i % 512) * 8
+}
+
+fn rev_slot(v: u64, i: u64) -> u64 {
+    jw(v, J_FR_REV + i / 1024) + hh() + (i % 1024) * 4
+}
+
+/// Begin writing through the journal (a read-write mount, after any
+/// replay): the log empty, the next transaction s_sequence's at s_first.
+pub fn begin(v: u64) {
+    if v >= JVOLS || jw(v, J_USED) == 0 {
+        return
+    }
+    put_jw(v, J_HEAD, jw(v, J_FIRST))
+    put_jw(v, J_TAIL, 0)
+    put_jw(v, J_TAILSEQ, jw(v, J_SEQ))
+    put_jw(v, J_RUN, 0)
+    put_jw(v, J_NLIST, 0)
+    put_jw(v, J_NREV, 0)
+    put_jw(v, J_FULL, 0)
+    set_clear(v)
+    zero(jw(v, J_FR_COPIES) + hh(), PAGE)
+    put_jw(v, J_ACTIVE, 1)
+}
+
+/// Whether volume `v` writes through its journal.
+pub fn active(v: u64) -> bool {
+    base() != 0 && v < JVOLS && jw(v, J_ACTIVE) != 0
+}
+
+/// Blocks in the running transaction.
+pub fn running(v: u64) -> u64 {
+    jw(v, J_RUN)
+}
+
+fn compact(v: u64) {
+    var i: u64 = 0
+    var o: u64 = 0
+    while i < jw(v, J_NLIST) {
+        let b = rd(list_slot(v, i))
+        if b != 0 {
+            wr(list_slot(v, o), b)
+            o += 1
+        }
+        i += 1
+    }
+    put_jw(v, J_NLIST, o)
+}
+
+fn unrevoke(v: u64, b: u64) {
+    var i: u64 = 0
+    while i < jw(v, J_NREV) {
+        if r32(rev_slot(v, i)) == b {
+            let last = jw(v, J_NREV) - 1
+            w32(rev_slot(v, i), r32(rev_slot(v, last)))
+            put_jw(v, J_NREV, last)
+            return
+        }
+        i += 1
+    }
+}
+
+/// Block `b` of the volume (in kernel/block's cache, changed just now) is
+/// metadata the running transaction holds: 0, or -ENOSPC when the cache
+/// does not hold it (a caller that broke the buffer rule).
+pub fn meta(v: u64, b: u64) -> u64 {
+    let r = block.jdirty(jw(v, J_DEV), b, jw(v, J_BS))
+    if r != 1 {
+        return if r == 0 { 0 } else { r }
+    }
+    if jw(v, J_NLIST) >= LISTN {
+        compact(v)
+    }
+    // The list has room: B_JRUN buffers are at most block.NB < LISTN.
+    wr(list_slot(v, jw(v, J_NLIST)), b + 1)
+    bump(v, J_NLIST, 1)
+    bump(v, J_RUN, 1)
+    if jw(v, J_NREV) != 0 {
+        unrevoke(v, b) // journal.rst: a block added to a transaction loses its revocation records
+    }
+    0
+}
+
+/// Block `b` is freed by the running transaction: out of it when it was
+/// in it, and revoked when it was logged since the last checkpoint.
+pub fn freed(v: u64, b: u64) {
+    if block.jforget(jw(v, J_DEV), b, jw(v, J_BS)) {
+        var i: u64 = 0
+        while i < jw(v, J_NLIST) {
+            if rd(list_slot(v, i)) == b + 1 {
+                wr(list_slot(v, i), 0)
+                i = jw(v, J_NLIST)
+            }
+            i += 1
+        }
+        put_jw(v, J_RUN, jw(v, J_RUN) - 1)
+    }
+    if logged(v, b) {
+        let n = jw(v, J_NREV)
+        if n >= REVN {
+            put_jw(v, J_FULL, 1) // the checkpoint right after the commit stands in for it
+            return
+        }
+        w32(rev_slot(v, n), b)
+        put_jw(v, J_NREV, n + 1)
+    }
+}
+
+/// Group `g`'s block bitmap, at buffer address `bm` (before the running
+/// transaction's first free in it changes it): kept, so allocation
+/// passes over what this transaction freed until it commits.
+pub fn protect(v: u64, g: u64, bm: u64) {
+    if g >= COPIES {
+        return
+    }
+    let t = jw(v, J_FR_COPIES) + hh() + g * 8
+    let c = rd(t)
+    if c & 1 != 0 {
+        return
+    }
+    var f = c & !1
+    if f == 0 {
+        f = zeroed()
+        if f == 0 {
+            return
+        }
+    }
+    copy_bytes(f + hh(), bm, jw(v, J_BS))
+    wr(t, f | 1)
+}
+
+/// The kept bitmap of group `g` (its address, through the HHDM) while the
+/// running transaction has freed blocks there, else 0.
+pub fn guard(v: u64, g: u64) -> u64 {
+    if g >= COPIES || !active(v) {
+        return 0
+    }
+    let c = rd(jw(v, J_FR_COPIES) + hh() + g * 8)
+    if c & 1 == 0 { 0 } else { (c & !1) + hh() }
+}
+
+fn unguard(v: u64) {
+    let t = jw(v, J_FR_COPIES) + hh()
+    var g: u64 = 0
+    while g < COPIES {
+        let c = rd(t + g * 8)
+        if c & 1 != 0 {
+            wr(t + g * 8, c & !1)
+        }
+        g += 1
+    }
+}
+
+// --- commit and checkpoint -------------------------------------------------------------
+
+fn header(a: u64, t: u64, seq: u64) {
+    put_be32(a, MAGIC)
+    put_be32(a + 4, t)
+    put_be32(a + 8, seq)
+}
+
+/// Commit the running transaction (`now`: the wall clock in nanoseconds,
+/// the commit block's time): the ordered data, the log, its commit block,
+/// each behind a FLUSH; then the checkpoint when it is due. 0 or the
+/// first -EIO.
+pub fn commit(v: u64, now: u64) -> u64 {
+    if !active(v) {
+        return 0
+    }
+    let dev = jw(v, J_DEV)
+    let bs = jw(v, J_BS)
+    let w0 = block.counter(block.K_WRITES)
+    var err = block.write_data(dev)
+    if jw(v, J_RUN) == 0 && jw(v, J_NREV) == 0 {
+        put_jw(v, J_NLIST, 0)
+        unguard(v)
+        bump(v, J_EMPTY, 1)
+        if block.counter(block.K_WRITES) == w0 {
+            return err // nothing written: nothing to FLUSH
+        }
+        let f = flush(v)
+        return if err != 0 { err } else { f }
+    }
+    bump(v, J_DATA, 1)
+    let seq = jw(v, J_SEQ)
+    if jw(v, J_NREV) != 0 && jw(v, J_FEAT) & INCOMPAT_REVOKE == 0 {
+        put_jw(v, J_FEAT, jw(v, J_FEAT) | INCOMPAT_REVOKE)
+        if jw(v, J_TAIL) != 0 {
+            let e = write_sb(v, jw(v, J_TAILSEQ), jw(v, J_TAIL))
+            if err == 0 { err = e }
+        }
+    }
+    if jw(v, J_TAIL) == 0 {
+        // The log was empty: it begins here, with this transaction.
+        put_jw(v, J_TAIL, jw(v, J_HEAD))
+        put_jw(v, J_TAILSEQ, seq)
+        let e = write_sb(v, seq, jw(v, J_HEAD))
+        if err == 0 { err = e }
+    }
+    compact(v)
+    var pos = jw(v, J_HEAD)
+    let scr = jw(v, J_FR_SCR)
+    let esc = jw(v, J_FR_ESC)
+    let tp = tags_per(bs)
+    let n = jw(v, J_NLIST)
+    var i: u64 = 0
+    while i < n {
+        // A descriptor for the next tp blocks, then the blocks.
+        let k = if n - i < tp { n - i } else { tp }
+        let d = scr + hh()
+        zero(d, bs)
+        header(d, T_DESC, seq)
+        var o: u64 = 12
+        var t: u64 = 0
+        while t < k {
+            let b = rd(list_slot(v, i + t)) - 1
+            let pa = block.buffer_pa(dev, b, bs)
+            var fl: u64 = if t == 0 { 0 } else { F_SAME }
+            if pa != 0 && be32(pa + hh()) == MAGIC {
+                fl = fl | F_ESCAPE
+            }
+            if t == k - 1 {
+                fl = fl | F_LAST
+            }
+            put_be32(d + o, b)
+            put_be16(d + o + 4, 0)
+            put_be16(d + o + 6, fl)
+            o += 8
+            if t == 0 {
+                wr(d + o, jw(v, J_UUID))
+                wr(d + o + 8, jw(v, J_UUID + 1))
+                o += 16
+            }
+            t += 1
+        }
+        let e0 = io(v, vblk.T_OUT, pos, scr)
+        if err == 0 { err = e0 }
+        bump(v, J_DESCS, 1)
+        pos = next(v, pos)
+        t = 0
+        while t < k {
+            let b = rd(list_slot(v, i + t)) - 1
+            let pa = block.buffer_pa(dev, b, bs)
+            var e: u64 = 0
+            if pa == 0 {
+                e = neg(EIO)
+            } else if be32(pa + hh()) == MAGIC {
+                copy_bytes(esc + hh(), pa + hh(), bs)
+                put_be32(esc + hh(), 0)
+                e = io(v, vblk.T_OUT, pos, esc)
+                bump(v, J_ESCAPED, 1)
+            } else {
+                e = io(v, vblk.T_OUT, pos, pa)
+            }
+            if err == 0 { err = e }
+            pos = next(v, pos)
+            t += 1
+        }
+        i += k
+    }
+    // The revocation blocks.
+    let rp = revs_per(bs)
+    let nr = jw(v, J_NREV)
+    i = 0
+    while i < nr {
+        let k = if nr - i < rp { nr - i } else { rp }
+        let d = scr + hh()
+        zero(d, bs)
+        header(d, T_REVOKE, seq)
+        put_be32(d + 12, 16 + 4 * k)
+        var t: u64 = 0
+        while t < k {
+            put_be32(d + 16 + 4 * t, r32(rev_slot(v, i + t)))
+            t += 1
+        }
+        let e = io(v, vblk.T_OUT, pos, scr)
+        if err == 0 { err = e }
+        pos = next(v, pos)
+        i += k
+    }
+    let f1 = flush(v) // the data, the log and the superblock on the medium before the commit
+    if err == 0 { err = f1 }
+    let c = scr + hh()
+    zero(c, bs)
+    header(c, T_COMMIT, seq)
+    put_be32(c + 0x30, (now / 1000000000) >> 32)
+    put_be32(c + 0x34, now / 1000000000)
+    put_be32(c + 0x38, now % 1000000000)
+    let e1 = io(v, vblk.T_OUT, pos, scr)
+    if err == 0 { err = e1 }
+    pos = next(v, pos)
+    let f2 = flush(v)
+    if err == 0 { err = f2 }
+    // Committed: the blocks await their checkpoint; the set learns them.
+    i = 0
+    while i < n {
+        let b = rd(list_slot(v, i)) - 1
+        block.jdone(dev, b, bs)
+        set_add(v, b)
+        i += 1
+    }
+    if n > jw(v, J_MAXRUN) {
+        put_jw(v, J_MAXRUN, n)
+    }
+    bump(v, J_COMMITS, 1)
+    bump(v, J_LOGGED, n)
+    bump(v, J_REVOKES, nr)
+    put_jw(v, J_LAST_NS, now)
+    put_jw(v, J_LAST_SEQ, seq)
+    put_jw(v, J_HEAD, pos)
+    put_jw(v, J_SEQ, seq + 1)
+    put_jw(v, J_RUN, 0)
+    put_jw(v, J_NLIST, 0)
+    put_jw(v, J_NREV, 0)
+    unguard(v)
+    if jw(v, J_FULL) != 0 || used(v) + reserve(bs) > span(v) || jw(v, J_NSET) > LIVE {
+        let e = checkpoint(v)
+        if err == 0 { err = e }
+    }
+    err
+}
+
+/// Every committed block written home, FLUSHed, the log emptied (the
+/// superblock's s_start 0), FLUSHed. Only between transactions (none
+/// running). 0 or the first -EIO.
+fn checkpoint(v: u64) -> u64 {
+    var err = block.checkpoint(jw(v, J_DEV))
+    let f = flush(v)
+    if err == 0 { err = f }
+    put_jw(v, J_TAIL, 0)
+    put_jw(v, J_TAILSEQ, jw(v, J_SEQ))
+    let e = write_sb(v, jw(v, J_SEQ), 0)
+    if err == 0 { err = e }
+    let f2 = flush(v)
+    if err == 0 { err = f2 }
+    set_clear(v)
+    put_jw(v, J_FULL, 0)
+    bump(v, J_CKPTS, 1)
+    err
+}
+
+/// A call's start (kernel/tree's `tick`): commit when the running
+/// transaction holds HIGH blocks, so it never holds the whole cache.
+pub fn boundary(v: u64, now: u64) {
+    if active(v) && jw(v, J_RUN) >= HIGH {
+        let _e = commit(v, now)
+    }
+}
+
+/// The volume stops writing through its journal (its unmount, a remount
+/// read-only): the last commit, the checkpoint, the log empty on the
+/// disk. 0 or the first -EIO.
+pub fn close(v: u64, now: u64) -> u64 {
+    if !active(v) {
+        return 0
+    }
+    var err = commit(v, now)
+    let e = checkpoint(v)
+    if err == 0 { err = e }
+    put_jw(v, J_ACTIVE, 0)
+    err
+}
+
+// --- the replay --------------------------------------------------------------------------
+
+fn rv_slot(v: u64, i: u64) -> u64 {
+    // the replay's revocations: (block + 1, sequence) pairs of u32 in the set's frames
+    jw(v, J_FR_SET + i / 512) + hh() + (i % 512) * 8
+}
+
+const RVN: u64 = 4096
+
+fn rv_put(v: u64, b: u64, seq: u64) -> bool {
+    var i = hash(b) % RVN
+    var n: u64 = 0
+    while n < RVN {
+        let a = rv_slot(v, i)
+        let x = r32(a)
+        if x == b + 1 {
+            if seq > r32(a + 4) {
+                w32(a + 4, seq)
+            }
+            return true
+        }
+        if x == 0 {
+            w32(a, b + 1)
+            w32(a + 4, seq)
+            return true
+        }
+        i = (i + 1) % RVN
+        n += 1
+    }
+    false
+}
+
+/// Whether block `b` is revoked for a tag of transaction `seq`: a
+/// revocation of `seq` or later names it.
+fn rv_has(v: u64, b: u64, seq: u64) -> bool {
+    var i = hash(b) % RVN
+    var n: u64 = 0
+    while n < RVN {
+        let a = rv_slot(v, i)
+        let x = r32(a)
+        if x == 0 {
+            return false
+        }
+        if x == b + 1 {
+            return r32(a + 4) >= seq
+        }
+        i = (i + 1) % RVN
+        n += 1
+    }
+    false
+}
+
+const W_SCAN: u64 = 0
+const W_REVOKE: u64 = 1
+const W_REPLAY: u64 = 2
+
+/// Replay's reasons for stopping short (J_RP_ERR).
+/// A journal block could not be read or a home block written.
+pub const RP_IO: u64 = 1
+/// A tag names a block past the volume's end.
+pub const RP_TAG: u64 = 2
+/// More revocations than the table holds.
+pub const RP_REVOKES: u64 = 3
+/// A revocation block's count is wrong.
+pub const RP_REVBLOCK: u64 = 4
+
+/// One walk of the log from s_start; the scan's answer is the first
+/// sequence with no commit block (the end).
+fn walk(v: u64, mode: u64, end: u64, vblocks: u64) -> u64 {
+    let bs = jw(v, J_BS)
+    let scr = jw(v, J_FR_SCR)
+    let esc = jw(v, J_FR_ESC)
+    var pos = jw(v, J_START)
+    var seq = jw(v, J_FOUNDSEQ)
+    var steps: u64 = 0
+    let lim = span(v)
+    while steps < lim {
+        if io(v, vblk.T_IN, pos, scr) != 0 {
+            put_jw(v, J_RP_ERR, RP_IO)
+            return seq
+        }
+        let a = scr + hh()
+        if be32(a) != MAGIC || be32(a + 8) != seq {
+            return seq
+        }
+        let t = be32(a + 4)
+        if t == T_DESC {
+            var o: u64 = 12
+            var last = false
+            while !last && o + 8 <= bs {
+                // `scr` holds the descriptor throughout: the data blocks are read into `esc`.
+                let b = be32(scr + hh() + o)
+                let fl = be16(scr + hh() + o + 6)
+                o += 8
+                if fl & F_SAME == 0 {
+                    o += 16
+                }
+                last = fl & F_LAST != 0
+                pos = next(v, pos)
+                steps += 1
+                if mode == W_REPLAY && seq < end {
+                    if b >= vblocks {
+                        put_jw(v, J_RP_ERR, RP_TAG)
+                        return seq
+                    }
+                    if rv_has(v, b, seq) {
+                        bump(v, J_RP_REVOKED, 1)
+                    } else {
+                        if io(v, vblk.T_IN, pos, esc) != 0 {
+                            put_jw(v, J_RP_ERR, RP_IO)
+                            return seq
+                        }
+                        if fl & F_ESCAPE != 0 {
+                            put_be32(esc + hh(), MAGIC)
+                        }
+                        if home(v, b, esc) != 0 {
+                            put_jw(v, J_RP_ERR, RP_IO)
+                            return seq
+                        }
+                        bump(v, J_RP_BLOCKS, 1)
+                    }
+                }
+            }
+        } else if t == T_REVOKE {
+            if mode == W_REVOKE && seq < end {
+                let cnt = be32(a + 12)
+                if cnt < 16 || cnt > bs || (cnt - 16) % 4 != 0 {
+                    put_jw(v, J_RP_ERR, RP_REVBLOCK)
+                    return seq
+                }
+                var o: u64 = 16
+                while o < cnt {
+                    if !rv_put(v, be32(a + o), seq) {
+                        put_jw(v, J_RP_ERR, RP_REVOKES)
+                        return seq
+                    }
+                    bump(v, J_RP_RECORDS, 1)
+                    o += 4
+                }
+            }
+        } else if t == T_COMMIT {
+            seq += 1
+        } else {
+            return seq
+        }
+        pos = next(v, pos)
+        steps += 1
+    }
+    seq
+}
+
+/// Replay the log, when s_start is not 0, onto the volume's home blocks
+/// (`vblocks` of them), with the cache left alone (the caller forgets the
+/// disk's buffers after): 0, or -EIO when the replay stopped short (why:
+/// `replay_book(v, 6)`), the log then left as it was.
+pub fn replay(v: u64, vblocks: u64) -> u64 {
+    if v >= JVOLS || jw(v, J_USED) == 0 || jw(v, J_START) == 0 {
+        return 0
+    }
+    set_clear(v)
+    let first = jw(v, J_FOUNDSEQ)
+    let end = walk(v, W_SCAN, 0, vblocks)
+    put_jw(v, J_RP_FIRST, first)
+    put_jw(v, J_RP_END, end)
+    put_jw(v, J_RP_TX, end - first)
+    if jw(v, J_RP_ERR) == 0 {
+        let _r = walk(v, W_REVOKE, end, vblocks)
+    }
+    if jw(v, J_RP_ERR) == 0 {
+        let _p = walk(v, W_REPLAY, end, vblocks)
+    }
+    set_clear(v)
+    if jw(v, J_RP_ERR) != 0 {
+        return neg(EIO)
+    }
+    var err = flush(v)
+    // As e2fsck leaves a log it replayed (measured): s_start 0, s_sequence
+    // one past the end's.
+    put_jw(v, J_SEQ, end + 1)
+    let e = write_sb(v, end + 1, 0)
+    if err == 0 { err = e }
+    let f = flush(v)
+    if err == 0 { err = f }
+    put_jw(v, J_START, 0)
+    err
+}
+
+/// The replay's books: 0 transactions, 1 blocks written home, 2 tags
+/// passed over (revoked), 3 the first sequence, 4 the end (the first not
+/// committed), 5 revocation records read, 6 why it stopped short (RP_*).
+pub fn replay_book(v: u64, w: u64) -> u64 {
+    jw(v, J_RP_TX + w)
+}
+
+/// The writing books: 0 commits, 1 blocks logged, 2 revocations written,
+/// 3 checkpoints, 4 blocks escaped, 5 descriptors, 6 FLUSHes, 7 commits
+/// with blocks (ordered data first), 8 commits with nothing to log, 9 the
+/// last commit's time (ns), 10 its sequence, 11 the most blocks one
+/// transaction logged, 12 write errors.
+pub fn book(v: u64, w: u64) -> u64 {
+    if w <= 10 {
+        return jw(v, J_COMMITS + w)
+    }
+    if w == 11 {
+        return jw(v, J_MAXRUN)
+    }
+    jw(v, J_ERRS)
+}
+
+/// The volume's journal line at its unmount or the halt:
+///
+///     <c> commits (<d> with nothing to log), <b> blocks logged in <p> descriptors, the most <m>; <r> revoked, <e> escaped, <k> checkpoints, <f> flushes; next sequence <s>
+///
+/// (kernel/ext2 puts `journal: <dev>: ` before it and ends the line).
+pub fn report(v: u64) {
+    log.dec(jw(v, J_COMMITS) as int)
+    log.put(" commits (")
+    log.dec(jw(v, J_EMPTY) as int)
+    log.put(" with nothing to log), ")
+    log.dec(jw(v, J_LOGGED) as int)
+    log.put(" blocks logged in ")
+    log.dec(jw(v, J_DESCS) as int)
+    log.put(" descriptors, the most ")
+    log.dec(jw(v, J_MAXRUN) as int)
+    log.put("; ")
+    log.dec(jw(v, J_REVOKES) as int)
+    log.put(" revoked, ")
+    log.dec(jw(v, J_ESCAPED) as int)
+    log.put(" escaped, ")
+    log.dec(jw(v, J_CKPTS) as int)
+    log.put(" checkpoints, ")
+    log.dec(jw(v, J_FLUSHES) as int)
+    log.put(" flushes; next sequence ")
+    log.dec(jw(v, J_SEQ) as int)
+}
