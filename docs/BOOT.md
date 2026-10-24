@@ -269,7 +269,7 @@ The kernel reads `root=` from Limine's command line (kernel/boot_info)
 in Linux's spellings (bootparam(7), each measured on Linux 7.2.8 under
 QEMU): `/dev/vda2` or `vda2`, the device's numbers (`0xfe02`, `fe02`,
 `254:2`), `PARTUUID=` in either case, `UUID=` (a named drift: Linux's
-kernel alone refuses it), `rootfstype=ext2`, and `ro` or `rw`, read-only
+kernel alone refuses it), `rootfstype=ext2` (px68: or `ext3`), and `ro` or `rw`, read-only
 when neither is given (Linux's answer, where bootparam(7) says `rw`).
 Before the first program, kernel/fstab mounts that partition as `/`:
 
@@ -297,11 +297,64 @@ written; the disk's books, then init's line, then `halt`:
 
     PAX: the end: SIGTERM to 2 processes, 1 ended within 10 ms; SIGKILL to 1 after the 2000 ms grace
 
-A power cut (QEMU closed without `exit` or `reboot`) leaves `/` not
-clean; the next boot mounts it read-write, says `not cleanly
-unmounted` once, and leaves it not clean through its own clean end, as
-Linux's ext2 does (R-px67-5). PAX has no fsck: `e2fsck -fy` of
-partition 2 on the host repairs it.
+On an ext2 root (px67's; since px68 `--no-journal`, the journal's
+section below says what a journalled root does) a power cut (QEMU
+closed without `exit` or `reboot`) leaves `/` not clean; the next boot
+mounts it read-write, says `not cleanly unmounted` once, and leaves it
+not clean through its own clean end, as Linux's ext2 does (R-px67-5).
+PAX has no fsck: `e2fsck -fy` of partition 2 on the host repairs it.
+
+## The journal (px68)
+
+The root is ext3 since px68: `tools/mkdisk --gpt --root` makes partition
+2 with the pinned `mke2fs -t ext3` (has_journal beside ext2's features,
+the journal inode 8, mke2fs's default size: 1024 blocks of 4 KiB for a
+root under 128 MiB, 4096 for 448 MiB; `--no-journal` keeps px67's ext2,
+R-px68-3). kernel/ext2 finds the journal's blocks through inode 8 and
+hands them to kernel/journal, which checks the journal's superblock
+(jbd2's v2 layout, big-endian; no journal feature but revocation is
+served, anything else refused by name) and, when its log holds
+transactions, replays them before anything else of the volume is read,
+in e2fsck's rules (measured on journals tools/mkjournal writes): a
+transaction with no commit block, or a torn one, is dropped whole; a
+revocation in the tag's own transaction or a later one suppresses it;
+an escaped block's magic is restored. One line says what it did:
+
+    ext2: vda2: recovering the journal: 2 transactions (sequence 1 to 2), 116 blocks written home, 0 revoked; recovery complete
+
+A read-write mount sets needs_recovery and leaves the state `clean`
+(Linux 7.3.0 keeps a journalled root clean while it is mounted and after
+a power cut, measured), and the root's line says how it writes:
+
+    root: PARTUUID=… (vda2) on /: ext3, read-write, data=ordered
+
+From then on every change to metadata (the superblock, the group
+descriptors, both bitmaps, the inode tables, indirect blocks, directory
+blocks, a slow link's block) goes into the running transaction and
+never reaches its home before that transaction's commit block is on the
+disk; a file's data is not journalled (data=ordered, R-px68-1: written
+before the commit that names it). A commit (at the flusher's 5 s turn,
+at `sync`, `fsync`, `fdatasync`, `syncfs`, `msync`, a remount read-only,
+the unmount and the halt, and at a call's start when the transaction
+holds 128 blocks: R-px68-2) writes the data, the descriptors, the logged
+blocks and any revocation blocks, a FLUSH, the commit block, a FLUSH.
+The log wraps; a checkpoint writes the committed blocks home when the
+log could not hold the largest transaction the cache can, and at the
+unmount, which then empties the log and clears needs_recovery. A block
+logged since the last checkpoint and freed is revoked, and a block
+freed by the running transaction is not allocated again before it
+commits. The halt's line is the journal's books:
+
+    journal: vda2: 7 commits (0 with nothing to log), 191 blocks logged in 7 descriptors, the most 50; 0 revoked, 0 escaped, 1 checkpoints, 16 flushes; next sequence 8
+
+So a power cut (QEMU closed without `exit` or `reboot`) leaves `/` clean
+with needs_recovery, and the next boot replays the journal to the last
+commit: nothing a commit wrote is lost, and what the last 5 seconds
+wrote before it is (`sync` first keeps it). `init=PATH` on Limine's
+command line runs PATH alone as init (bootparam(7)'s), which the crash
+row uses to boot a killed disk once for its replay. An ext2 root
+(`--no-journal`) behaves as px67 measured: not clean after a cut, said
+once by the next boot, left for the host's `e2fsck -fy`.
 
 ## Measured
 
