@@ -68,6 +68,10 @@
 # side needs root for chroot and the pid namespace: sudo -n when not
 # root); --no-boot stops after T0.
 #
+# px67: with PAX_ROOTDISK=1 (tools/rootdisk-leg: the images booted
+# again with / on a disk) T4, the memory tree's frames census, says SKIP by name: the
+# block layer's cache keeps the frames a session read from the disk.
+#
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
 # every assertion held, 1 otherwise, 2 on a usage or tool error.
@@ -249,7 +253,11 @@ for leg in $legs; do
             fl=$(grep -m1 '^user: frames free ' "$norm")
             fa=$(printf '%s\n' "$fl" | sed -n -E 's/^user: frames free ([0-9]+) before, [0-9]+ with 1 processes, ([0-9]+) after$/\1 \2/p')
             set -- $fa
+            if [ "${PAX_ROOTDISK:-0}" = 1 ]; then
+                say "SKIP T4 $id: the memory tree's census; / is on a disk, whose cache keeps frames (rootdisk): $fl" # px67: the root-on-disk leg
+            else
             [ -n "$fa" ] && [ "$1" = "$2" ] && say "PASS T4 $id: $fl" || bad "T4 $id: frames not all back ('$fl')"
+            fi
 
             # T5: the soak's census.
             if [ "$s" = soak ]; then
