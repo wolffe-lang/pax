@@ -253,7 +253,8 @@
 #
 # px67: with PAX_ROOTDISK=1 (tools/rootdisk-leg: the images booted
 # again with / on a disk) U3, the memory tree's frames census, says SKIP
-# by name: the block layer's cache keeps the frames a session read.
+# by name: the block layer's cache keeps the frames a session read; and
+# setid's first line expects `/`'s options as the volume's, `rw,relatime`.
 #
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
@@ -763,7 +764,15 @@ for leg in $legs; do
                 setid)
                     # px44: every line PAX writes is held to setid.pax; its 50
                     # `bits:` lines are the vm-protected recording's, to the byte.
-                    cmp -s "$here/mpx5-users.d/setid.pax" "$out" || why+=" the session differs from tests/mpx5-users.d/setid.pax: $(diff "$here/mpx5-users.d/setid.pax" "$out" | head -n 10 | cut -c1-400 | tr '\n' '|');"
+                    sx=$here/mpx5-users.d/setid.pax
+                    if [ "${PAX_ROOTDISK:-0}" = 1 ]; then
+                        # px67: the root-on-disk leg: `/` is ext2, read-write with
+                        # relatime (the ISO's rootfs says `rw`), so the first line's
+                        # options are the volume's; said.
+                        sed '1s/^\(mount: \/t\/setid is on \/, mounted\) rw$/\1 rw,relatime/' "$sx" > "$out.expect"; sx=$out.expect
+                        say "SKIP U1 $id mount line: / is the disk's ext2, rw,relatime (rootdisk)"
+                    fi
+                    cmp -s "$sx" "$out" || why+=" the session differs from tests/mpx5-users.d/setid.pax: $(diff "$sx" "$out" | head -n 10 | cut -c1-400 | tr '\n' '|');"
                     grep '^bits: ' "$ref/$s.txt" > "$out.want"
                     grep '^bits: ' "$out" > "$out.cmp"
                     cmp -s "$out.want" "$out.cmp" || why+=" the bits: lines differ: $(diff "$out.want" "$out.cmp" | head -n 10 | cut -c1-400 | tr '\n' '|');"
