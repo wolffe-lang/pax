@@ -36,6 +36,7 @@ New: mkfifo link unlink truncate sync mktemp realpath tty base64 base32 comm joi
 Try: ls -l /bin, jobs, Ctrl-Z, bg, fg, kill %1, timeout, su pax, play mambo.
 lope jumps (its hook in /etc/shrc): cd /etc, cd /bin, then etc alone, g -, gi.
 aspen is tree(1) in wolf: aspen /, aspen -a -L 2 /home/pax, aspen -J /bin, aspen --du /usr.
+scent is grep(1) in wolf (/bin/grep links to it; egrep, fgrep): grep -n pax /etc/passwd.
 lupin runs wolf programs: cd /usr/share/lupin; lupin run hello.lu (or write one: cat > x.lu).
 yew is the editor (77c1083), on this screen as on a Linux VT: yew notes.txt; i types, Esc, :w saves, :q quits, C-z and fg.
 /home is the disk when QEMU is given pax-home.img (ext2, /etc/fstab): the shell starts there.
