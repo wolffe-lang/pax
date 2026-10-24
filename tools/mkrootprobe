@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# mkrootprobe — build px67's probe of the mount table and the mount
+# calls, `mounts` (user/elf/mounts.c), a static x86-64 Linux executable,
+# for tests/mpx6-root and its Linux side (tools/linux-root, where it is
+# the guest's init).
+#
+#   tools/mkrootprobe OUTDIR
+#
+# mkprobes' compiler line (`cc -static -no-pie -O1`, ET_EXEC with no
+# PT_INTERP, checked), its own tool so that a change to the probe
+# reaches only the suite that runs it. Build on a baseline x86-64 glibc
+# (the CI runner's Ubuntu; an Ubuntu container on kasumi), never on
+# kasumi's own (px10). Prints `mounts <sha256> <bytes>`. Exit 0, or 2 on
+# a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkrootprobe OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${CC:-cc}
+need "$cc" readelf
+"$cc" -static -no-pie -O1 -Wall -Wextra -Wno-unused-result -Wl,--build-id=none -Wl,-z,noexecstack \
+    -o "$out/mounts" "$PAX_ROOT/user/elf/mounts.c" || die "cc: mounts"
+readelf -hW "$out/mounts" | grep -Eq 'Type: +EXEC' || die "mounts is not ET_EXEC"
+! readelf -lW "$out/mounts" | grep -q INTERP || die "mounts has a PT_INTERP (not static)"
+printf 'mounts %s %s\n' "$(sha256_of "$out/mounts")" "$(wc -c < "$out/mounts" | tr -d ' ')"
