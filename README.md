@@ -192,6 +192,16 @@ every byte (`serial.log`). With `-display none` the screen is drawn
 where nobody sees it, and `-vga none` (`tools/qemu-run --no-screen`)
 boots a machine with no display at all: the console is serial only.
 
+The framebuffer console supports character and line insertion/deletion,
+erasing, scroll margins, sixteen CSI parameters, and the Linux VT's colour
+renditions: dim, italic, underline and RGB mapped to its small palette. OSC P
+changes any of the sixteen palette entries, including text already displayed;
+OSC R restores the defaults. The keypad supplies navigation with NumLock off,
+digits with it on, and decimal entry with Alt or hexadecimal entry with AltGr.
+Blink attributes are recorded but displayed steadily until timer-driven drawing
+is available. DECSCUSR is consumed without switching shapes, as on the measured
+Linux VT; PAX's existing cursor remains a steady block.
+
 ## A disk that outlives the boot (px63)
 
 Everything an image holds is in memory and gone at the next boot, but
