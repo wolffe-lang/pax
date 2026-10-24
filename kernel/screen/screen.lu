@@ -22,8 +22,8 @@
 //!   leaves the cursor there with a wrap pending, and the next printable
 //!   character first moves to the start of the next line (CR, LF, BS and
 //!   TAB clear a pending wrap);
-//! - LF (0x0a) moves down one row, scrolling the whole grid up when on
-//!   the last row (the new row blank in the current rendition, px59: the
+//! - LF (0x0a) moves down one row, scrolling only the selected region
+//!   when on its last row (the new row blank in the current rendition, px59: the
 //!   measured VT's); CR
 //!   (0x0d) to column 0; BS (0x08) one column left, clearing a pending
 //!   wrap too (px59, R-px59-5: the measured VT's; px19 only cleared the
@@ -41,7 +41,8 @@
 //!   SGR 2/3/4/21 select dim/italic/underline colour substitutions; 5
 //!   records blink but draws steady (needs the timer hook, px71).
 //!   Colon is a parameter separator exactly like semicolon on this VT; an empty parameter is
-//!   0; at most 16 parameters, each at most 9999. A sequence with a
+//!   0; at most 16 parameters, each at most 9999. A seventeenth rejects
+//!   the whole sequence, not just its trailing parameters. A sequence with a
 //!   private or intermediate byte, or another final, is read and
 //!   ignored, but for the ones below. A C0 byte inside a sequence ends it
 //!   and is acted on; a byte at or above 0x80 ends it and is dropped.
@@ -51,15 +52,17 @@
 //!   (`A`-`D`), CNL CPL (`E`, `F`), CHA and HPA (`G`, `` ` ``), VPA
 //!   (`d`), each clamped to the grid and clearing a pending wrap; ED and
 //!   EL (`J`, `K`, 0 1 2, the cursor's cell included) blank in the
-//!   current rendition; `ESC 7` and `ESC 8` (the cursor and the
+//!   current rendition; ICH/DCH/ECH and IL/DL edit bounded cells or
+//!   lines; DECSTBM sets the scrolling region (one-line and out-of-screen
+//!   margins rejected, valid margins home the cursor); `ESC 7` and `ESC 8` (the cursor and the
 //!   rendition, one slot for both screens); `?1049h`, the alternate
 //!   screen, entered with the cursor and rendition kept for the return
 //!   and cleared in the current rendition, the cursor where it was;
 //!   `?1049l` back to the main screen as it was left, cursor and
 //!   rendition restored (a second h or l does nothing); `?25l` and
 //!   `?25h` (DECTCEM, the cursor hidden and shown); DECSCUSR (`CSI n SP
-//!   q`) recorded and not drawn (PAX's cursor is a block whatever the
-//!   shape); OSC (`ESC ]`) consumed to BEL or to any ESC, which then
+//!   q`) recorded without shape switching, as on the measured VT
+//!   (PAX keeps its steady block; timer-backed cursor drawing is not-yet); OSC (`ESC ]`) consumed to BEL or to any ESC, which then
 //!   starts the next sequence (ST's `ESC \` among them), and `ESC ] P`
 //!   with its seven digits and `ESC ] R` alone (the VT's palette strings,
 //!   applied to existing and future cells); the queries answered as the VT answers them — DA1

@@ -1102,3 +1102,20 @@ black boxes. Permissively licensed kernels: none consulted.
 | black-box Linux: kasumi's 7.2.8-1-cachyos on QEMU (q35, TCG, no initramfs) with its root on an ext2 partition of a GPT disk and `user/elf/mounts.c` as its init (`tools/linux-root`), and once with an initramfs as its root (`--initrd`) | — | GPL-2.0 (a program we run) | run, never read | every expected answer of `tests/mpx6-root` (recorded in `tests/mpx6-root.d/linux/`); measured, not guessed: the root's source reads `/dev/root`; the kernel mounts devtmpfs at /dev itself (`rw,nosuid,noexec,relatime`); /proc/mounts is a link to `self/mounts` (11 bytes) and Arch's /etc/mtab `../proc/self/mounts`; a remount read-only refused EBUSY while a file is open for writing, EINVAL on a directory that is no mount's root; a volume's unmount EBUSY with a working directory or an open file in it, then 0, then EINVAL; a target that is a file ENOTDIR, a missing one ENOENT, a source that is no block device ENOTBLK, an unknown type ENODEV; a flag outside umount2's four EINVAL; root's `umount2("/")` answers 0 and remounts `/` read-only; a user's mount, remount and umount2 EPERM, umount2's missing path ENOENT first; a remount read-write counts as a mount; `root=PARTUUID=` in either case, `root=UUID=` refused by the kernel alone (a panic), a root mounted not clean read-write with `warning: mounting unchecked fs, running e2fsck is recommended` and left not clean by its clean unmount; with an initramfs the root reads `rootfs / rootfs rw,size=…,nr_inodes=…`; with neither `ro` nor `rw` on the command line the root is mounted read-only (`VFS: Mounted root (ext2 filesystem) readonly`, `ro,relatime`), where bootparam(7) says `rw` is the default (the kernel's answer is the one served); `root=0xfe02`, `root=fe02` and `root=254:2` each mount vda2 (254:2) |
 | kasumi's own `/proc/self/mountinfo` and `/proc/self/mounts` (CachyOS, systemd) | — | — | read (a running system's tables) | the flags a distribution's init gives /proc, /sys, /dev and /tmp |
 | e2fsprogs 1.47.0 (`e2fsck -fn`, `dumpe2fs -h`, `debugfs`), from the image tools/e2fs pins | as px63 | GPL-2.0 (programs we run) | run, never read | R4, R5, R7, R8, the crash row's classes |
+
+## px70: framebuffer renditions, editing, palette and keypad
+
+No kernel or terminal-emulator source was read. The references are public
+interfaces, this repository's existing probes, and repeated black-box runs.
+
+| source | version | how | used for |
+|---|---|---|---|
+| `console_codes(4)` on kasumi, read 2026-10-24 | installed man-pages | documentation | CSI capacity, editing controls, SGR/reset names, OSC P/R syntax |
+| Linux VT under QEMU, `/dev/tty1` and `/dev/vcsa1`, public `linux/vt.h` and `linux/kd.h` ioctl interfaces | 7.3.0-4-cachyos, image SHA256 `bd5b90c3ba79ce78839b77a0f5b4f798738d62dbc06f8b1be3e0eaf83e1a92fe`; QEMU 11.1.2 | run, never implementation source | two repeats of px59's probes; fresh rendition, editing and 19,683 RGB samples; timed pixels for blink, cursor and all sixteen palette entries; 87 keyboard cases including Alt decimal and AltGr Unicode entry; evidence in `notes/px70/` |
+| PAX's own px58/px59 probes, renderer, keyboard and comparison harness | trunk `54570380` | read and extended | unchanged baseline and new differential rows |
+
+VCSA comparisons normalize the font and palette indices; exact pixel
+comparisons use the independent `tools/screen-ref` renderer. The measured VGA
+VT's 9x16 ROM font and DAC conversion are not PAX's 8x16 framebuffer font and
+24-bit pixels. `GIO_CMAP` returned the default global palette even after OSC P;
+the per-console change was verified by timed screenshots, not that ioctl.
