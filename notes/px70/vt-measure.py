@@ -18,9 +18,10 @@ if len(sys.argv) > 2 and sys.argv[2] == 'header':
     (L / 'measure/cases70.h').write_text(header + '};\n')
     raise SystemExit(0)
 kernel = os.environ['PAX_VT_KERNEL']
+tag = os.environ.get('PAX_MEASURE_TAG', 'measure')
 rows = []
 for run in (1,2):
-    base = L / f'out/measure-{run}'
+    base = L / f'out/{tag}-{run}'
     base.mkdir(exist_ok=False)
     log = base / 'serial.log'
     sock = base / 'qemu.sock'
@@ -72,5 +73,5 @@ for run in (1,2):
                 proc.terminate(); proc.wait(timeout=10)
     rows.append('\n'.join(l for l in log.read_text().splitlines() if l.startswith(('SCREEN ','CMAP ','RGB ')))+'\n')
 if rows[0] != rows[1]: raise RuntimeError('repeated rows differ')
-(L/'out/measure.rows').write_text(rows[0])
+(L/f'out/{tag}.rows').write_text(rows[0])
 print(f'Two VT repeats identical: {len(rows[0].splitlines())} rows',flush=True)

@@ -31,7 +31,7 @@ int main(void) {
         }
     }
     /* An independently sampled RGB cube, not the indexed-colour table. */
-    static const unsigned v[] = {0, 31, 63, 85, 95, 127, 128, 135, 159, 170, 175, 191, 215, 223, 255};
+    static const unsigned v[] = {0, 1, 2, 3, 31, 42, 43, 63, 84, 85, 86, 87, 95, 127, 128, 135, 159, 169, 170, 171, 172, 175, 191, 215, 223, 254, 255};
     int vcsa = open("/dev/vcsa1", O_RDONLY);
     if (vcsa < 0) return 6;
     emit("\033[0m\033[r\033[?25l\033]R\033[2J\033[H");
