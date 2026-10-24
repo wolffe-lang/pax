@@ -160,10 +160,6 @@
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
 # every assertion held, 1 otherwise, 2 on a usage or tool error.
-# px67: with PAX_ROOTDISK=1 (tools/rootdisk-leg: the images booted
-# again with / on a disk) T4 and T5, the memory tree's frames census,
-# its cap and its fill, say SKIP by name: the block layer's cache keeps
-# the frames a session read, and the files are the disk's.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
@@ -524,12 +520,7 @@ for leg in $legs; do
             # had no entry, so the home's first page of entries too; a
             # user changes nothing of root's.
             [ "$p" != shell-user ] || { left=$((left + 3)); hist=2; }
-            t4skip=0
-            if [ "${PAX_ROOTDISK:-0}" = 1 ]; then
-                # px67: the root-on-disk leg (tools/rootdisk-leg)
-                t4skip=1
-                say "SKIP T4 $id: the memory tree's census; / is on a disk, whose cache keeps frames (rootdisk): $fl; $tl"
-            elif [ -z "$fb" ] || [ -z "$th" ]; then
+            if [ -z "$fb" ] || [ -z "$th" ]; then
                 why+=" no frames line or no tree line ('$fl' / '$tl');"
             else
                 grew=$((tt - ttb)) # the inode table's frames are never given back
@@ -537,14 +528,10 @@ for leg in $legs; do
                 [ $((th - tb)) = $((left + grew)) ] || why+=" the tree holds $((th - tb)) frames more than when made, not $left and the inode table's $grew ('$tl');"
                 [ "$ti" = $((tib + hist)) ] || why+=" the tree has $ti inodes, $tib when made$( [ "$hist" != 0 ] && echo " and $hist history files");"
             fi
-            [ "$t4skip" = 1 ] || { [ -z "$why" ] && say "PASS T4 $id: $fl; $tl" || bad "T4 $id:$why"; }
+            [ -z "$why" ] && say "PASS T4 $id: $fl; $tl" || bad "T4 $id:$why"
 
-            # T5: the soak's census and the fill (px67: the root-on-disk
-            # leg skips it by name: the census and the cap are the memory
-            # tree's, and the fill there fills the disk).
-            if [ "${PAX_ROOTDISK:-0}" = 1 ] && { [ "$s" = soak ] || [ "$s" = soak-user ]; }; then
-                say "SKIP T5 $id: the memory tree's census and cap; / is on a disk (rootdisk): $(grep -m1 'tree: full:' "$norm" | sed 's/^.*tree: full: //')"
-            elif [ "$s" = soak ] || [ "$s" = soak-user ]; then
+            # T5: the soak's census and the fill.
+            if [ "$s" = soak ] || [ "$s" = soak-user ]; then
                 why=
                 cl=$(grep -c '^user: tree pid 1 tree: [0-9]* files removed since boot' "$norm")
                 [ "$cl" = 4 ] || why+=" $cl census lines, not 4;"
