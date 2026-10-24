@@ -515,6 +515,22 @@ pub fn put_name(d: u64) {
     }
 }
 
+/// px67: device `d`'s name written at `base + at` (at most `cap` bytes
+/// in all): the end (kernel/files' mount table).
+pub fn name_into(d: u64, base: u64, at: u64, cap: u64) -> u64 {
+    var k = at
+    var i: u64 = 0
+    while i < name_len(d) {
+        if k < cap {
+            // # Safety: the caller's frame through the HHDM, `cap` bytes; k < cap.
+            unsafe { ((base + k) as *u8).write_volatile((name_byte(d, i) & 0xff) as u8) }
+        }
+        k += 1
+        i += 1
+    }
+    k
+}
+
 /// The device whose name is the `n` bytes at `a` (`vda`, `vda2`, or
 /// `/dev/vda2`), or DEVS.
 pub fn by_name(a: u64, n: u64) -> u64 {
