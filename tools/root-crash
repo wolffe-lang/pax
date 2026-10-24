@@ -1,40 +1,76 @@
 #!/usr/bin/env python3
-# root-crash — the crash row (px67): a write session on `/` on the disk,
-# QEMU killed at N seeded points in it, and each disk read on the host;
-# reported, never gated (the journal lane's numbers).
+# root-crash — the crash row (px67, gated since px68): a write session on
+# `/` on the disk, QEMU killed at N seeded points in it, and each disk read
+# on the host; px68: the root journalled (ext3), each killed disk booted
+# again by PAX (its journal replayed, then halted clean) before the host
+# reads it, and repaired by the host's e2fsck instead for the comparison.
 #
 #   tools/root-crash --kernel ELF --probe MOUNTS [--n N] [--seed S]
-#                    [--ops K] [--firmware bios|uefi] OUTDIR
+#                    [--ops K] [--firmware bios|uefi] [--no-journal]
+#                    [--times R] [--check] [--torn] OUTDIR
 #
 # The archive: the probe (user/elf/mounts.c) as /bin/mounts, its run list
 # `/bin/mounts churn K` (default 1500 operations, 10 ms apart), installed
-# as partition 2 by tools/mkdisk --gpt --root (64 MiB: the ESP, the root,
-# Limine's BIOS stage), SOURCE_DATE_EPOCH 1700000000. One boot uncut
-# first, to the halt, times the session (`churn: begin` to `churn: end`,
-# the host's clock); then for each of N points (random.Random(S),
-# uniform over that session) a fresh copy of the disk boots
-# (tools/qemu-run, QEMU's own -pidfile) and QEMU is killed (SIGKILL, by
-# that pid) that long after `churn: begin` appears. Each disk's
-# partition 2, on the host:
-#   - `e2fsck -fn` (tools/e2fs, the pinned e2fsprogs): its exit and
-#     every complaint;
-#   - tools/e2tree's /churn, held to the tree the operations up to the
-#     last `churn: K` the serial log printed leave (this tool replays the
-#     probe's generator: the same xorshift64, the same choices).
-# The class, the worst that applies:
+# as partition 2 by tools/mkdisk --gpt --root (96 MiB: the ESP, the root,
+# Limine's BIOS stage), journalled unless --no-journal (px67's ext2),
+# SOURCE_DATE_EPOCH 1700000000. One boot uncut first, to the halt, times
+# the session (`churn: begin` to `churn: end`, the host's clock) and the
+# halt (`churn: end` to `halt`); --times R boots it R times (the cost
+# rows) and the first one's length places the points. Then for each of N
+# points (random.Random(S), uniform over that session) a fresh copy of
+# the disk boots (tools/qemu-run, QEMU's own -pidfile) and QEMU is killed
+# (SIGKILL, by that pid) that long after `churn: begin` appears.
+#
+# Each killed disk, without a journal (px67's row): partition 2 on the
+# host, `e2fsck -fn` and tools/e2tree's /churn held to the tree the
+# operations up to the last `churn: K` printed leave (this tool replays
+# the probe's generator: the same xorshift64, the same choices).
+#
+# With a journal (px68):
+#   - the last commit on the disk: the highest sequence among the
+#     journal's commit blocks (tools/mkjournal --commits, read before
+#     anything replays it), and its time T (h_commit_sec, h_commit_nsec:
+#     the transaction's close on PAX's wall clock, the clock each `churn: K
+#     S.N` line reads after operation K);
+#   - the host's repair: a copy of the killed disk's partition 2 given to
+#     `e2fsck -fy` (its own replay, then its checks: anything it fixes
+#     beyond the replay is a finding);
+#   - PAX's replay: the disk's ESP gets `init=/bin/mounts` on its
+#     Limine command line (mtools through tools/disktools; partition 2 is
+#     not touched), and PAX boots it: the replay's line, init's end, the
+#     halt; then partition 2 on the host: `e2fsck -fn` and tools/e2tree;
+#   - the bound: the tree must be the operations 0..M's for an M with
+#     every operation that printed a time before T inside it and none
+#     whose predecessor printed one at or after T (an operation's clock is
+#     read after it returns, so one that ended before the close may print
+#     a later time); a disk killed before any commit holds no /churn;
+#   - the host's repair's /churn the same as PAX's, every field of
+#     tools/e2tree's.
+# The class, the worst that applies (with a journal, of PAX's replayed disk):
 #   none          e2fsck clean and the tree what the operations left;
-#   lost writes   e2fsck clean, the tree short of what they left (the
-#                 flusher's last turn came before the kill);
+#   lost writes   e2fsck clean, the tree short of what they left (with a
+#                 journal: within the bound, else `worse`);
 #   counts        e2fsck: bitmap differences, a free count, a link count
 #                 or a directory count wrong, and nothing worse;
 #   orphans       e2fsck: an inode with no name (unattached, for
 #                 /lost+found), and nothing worse;
 #   worse         anything else e2fsck says (a name for a freed inode, a
-#                 block twice or out of range, a size, a type).
+#                 block twice or out of range, a size, a type); with a
+#                 journal also: the tree outside the bound, the host's
+#                 repair a different tree or fixing more than its replay,
+#                 PAX's second boot not halting clean or not saying it
+#                 recovered.
+# --torn (with a journal): for the first kill whose log holds two commits
+# or more, the same kill again on a fresh copy, its last commit block
+# torn (tools/mkjournal --tear: its first sector zeroed, a commit whose
+# write never reached the disk): PAX's replay must give the tree of the
+# commit before it (the bound at that commit's time), and e2fsck -fy the
+# same tree.
 # Prints a row a point and the table; writes OUTDIR/crash.txt the same.
-# Exit 0 when every boot ran (whatever the classes), 2 on a tool error.
+# Exit 0 when every boot ran (and, with --check, every gate held: counts,
+# orphans and worse 0 on every disk, the torn row held), 1 when a gate
+# failed under --check, 2 on a tool error.
 import argparse
-import hashlib
 import os
 import random
 import re
@@ -117,9 +153,14 @@ def tree_of(listing):
     return got
 
 
+def churn_lines(listing):
+    """tools/e2tree's /churn lines, every field (the host-repair comparison)."""
+    return sorted(l for l in listing.splitlines() if l.startswith("/churn/") or l.startswith("/churn\t"))
+
+
 COUNTS = re.compile(r"bitmap differences|count wrong|ref count is|Padding at end of|Fix\? no$|^\s*[-+]\(?\d")
 ORPHAN = re.compile(r"Unattached (zero-length )?inode|Connect to /lost\+found|orphaned inode list")
-NOISE = re.compile(r"^(e2fsck \d|Pass \d|\S+: \d+/\d+ files|\S+ was not cleanly unmounted|\s*$|\S+: \*\*\*\*\*|Warning: skipping journal)")
+NOISE = re.compile(r"^(e2fsck \d|Pass \d|\S+: \d+/\d+ files|\S+ was not cleanly unmounted|\s*$|\S+: \*\*\*\*\*|Warning: skipping journal|\S+: recovering journal)")
 
 
 def classify(rc, out, want, got):
@@ -147,8 +188,13 @@ def main(argv):
     ap.add_argument("--seed", type=int, default=67)
     ap.add_argument("--ops", type=int, default=1500)
     ap.add_argument("--firmware", default="bios")
+    ap.add_argument("--no-journal", action="store_true")
+    ap.add_argument("--times", type=int, default=1)
+    ap.add_argument("--check", action="store_true")
+    ap.add_argument("--torn", action="store_true")
     ap.add_argument("out")
     a = ap.parse_args(argv[1:])
+    journal = not a.no_journal
     out = os.path.abspath(a.out)
     os.makedirs(out, exist_ok=True)
     env = dict(os.environ, SOURCE_DATE_EPOCH="1700000000")
@@ -161,12 +207,16 @@ def main(argv):
     disk = os.path.join(out, "churn.img")
     if not os.path.exists(disk):
         r = run([os.path.join(HERE, "mkdisk"), "--gpt", "--kernel", a.kernel, "--root", cpio, "--conf",
-                 os.path.join(ROOT, "boot", "limine-initramfs.conf"), "--label", "px67-churn", "96M", disk], env=env)
+                 os.path.join(ROOT, "boot", "limine-initramfs.conf"), "--journal" if journal else "--no-journal",
+                 "--label", "px67-churn", "96M", disk], env=env)
         if r.returncode:
             die("mkdisk: %s%s" % (r.stdout[-800:], r.stderr[-800:]))
+        open(disk + ".mkdisk.txt", "w").write(r.stdout)
     pr = run([os.path.join(HERE, "mkgpt"), "--print", disk]).stdout
+    p1 = [l.split() for l in pr.splitlines() if l.split()[:1] == ["1"]][0][3]
     p2 = [l.split() for l in pr.splitlines() if l.split()[:1] == ["2"]][0][3]
     lo, hi = (int(v) for v in p2.split("-"))
+    esp0 = int(p1.split("-")[0])
 
     def boot(copy, log, kill_after):
         for f in (log, log + ".qpid"):
@@ -175,8 +225,7 @@ def main(argv):
         q = subprocess.Popen([os.path.join(HERE, "qemu-run"), "--firmware", a.firmware, "--serial", log, "--timeout", "300",
                               "--boot-disk", copy, "--", "-m", "256M", "-pidfile", log + ".qpid"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        t0 = None
-        tb = te = None
+        tb = te = th = None
         while q.poll() is None:
             try:
                 text = open(log, "rb").read().decode("utf-8", "replace")
@@ -195,6 +244,7 @@ def main(argv):
                 q.wait()
                 break
             if kill_after is None and re.search(r"(?m)^halt\r?$", text):
+                th = now
                 try:
                     os.kill(int(open(log + ".qpid").read().strip()), signal.SIGKILL)
                 except (OSError, ValueError):
@@ -203,10 +253,11 @@ def main(argv):
                 break
             time.sleep(0.02)
         text = open(log, "rb").read().decode("utf-8", "replace").replace("\r", "")
-        ks = [int(m) for m in re.findall(r"(?m)^churn: (\d+)(?: \d+\.\d+)?$", text)]
-        return text, (ks[-1] if ks else -1), tb, te
+        ks = [(int(m.group(1)), float(m.group(2)) if m.group(2) else None)
+              for m in re.finditer(r"(?m)^churn: (\d+)(?: (\d+\.\d+))?$", text)]
+        return text, ks, tb, te, th
 
-    def read_part(copy, tag):
+    def part_out(copy, tag):
         part = os.path.join(out, "%s.p2" % tag)
         with open(copy, "rb") as fi, open(part, "wb") as fo:
             fi.seek(lo * S)
@@ -215,48 +266,192 @@ def main(argv):
                 b = fi.read(min(left, 1 << 20))
                 fo.write(b)
                 left -= len(b)
-        r = run([os.path.join(HERE, "e2fs"), out, "e2fsck", "-fn", os.path.basename(part)])
+        return part
+
+    def read_part(copy, tag, fsck="-fn"):
+        part = part_out(copy, tag)
+        r = run([os.path.join(HERE, "e2fs"), out, "e2fsck", fsck, os.path.basename(part)])
         t = run([os.path.join(HERE, "e2tree"), part])
         st = run([os.path.join(HERE, "e2fs"), out, "dumpe2fs", "-h", os.path.basename(part)]).stdout
         state = re.search(r"Filesystem state:\s*(.*)", st)
+        feats = re.search(r"Filesystem features:\s*(.*)", st)
         os.unlink(part)
-        return r.returncode, r.stdout + r.stderr, tree_of(t.stdout), state.group(1).strip() if state else "?"
+        s = state.group(1).strip() if state else "?"
+        if feats and "needs_recovery" in feats.group(1):
+            s += ", needs_recovery"
+        return r.returncode, r.stdout + r.stderr, t.stdout, s
+
+    def last_commit(copy, tag):
+        part = part_out(copy, tag + "-j")
+        r = run([sys.executable, os.path.join(HERE, "mkjournal"), part, "--commits"])
+        os.unlink(part)
+        cs = []
+        for l in r.stdout.splitlines():
+            m = re.match(r"commit (\d+) at (\d+) time (\d+)\.(\d+)", l)
+            if m:
+                cs.append((int(m.group(1)), int(m.group(3)) + int(m.group(4)) / 1e9))
+        return sorted(cs)
+
+    def second_boot(copy, tag):
+        """PAX boots the killed disk once with init=/bin/mounts: its replay and a clean halt."""
+        conf = os.path.join(out, "%s.conf" % tag)
+        img = "%s@@%d" % (os.path.basename(copy), esp0 * S)
+        dt = os.path.join(HERE, "disktools")
+        r = run([dt, out, "mcopy", "-n", "-i", img, "::/boot/limine/limine.conf", os.path.basename(conf)], env=env)
+        if r.returncode:
+            die("mcopy out: %s%s" % (r.stdout, r.stderr))
+        text = open(conf).read()
+        text = re.sub(r"(?m)^(\s*(?:kernel_)?cmdline:.*)$", lambda m: m.group(1) + " init=/bin/mounts", text)
+        open(conf, "w").write(text)
+        r = run([dt, out, "mcopy", "-o", "-m", "-i", img, os.path.basename(conf), "::/boot/limine/limine.conf"], env=env)
+        if r.returncode:
+            die("mcopy in: %s%s" % (r.stdout, r.stderr))
+        os.unlink(conf)
+        text, _ks, _tb, _te, th = boot(copy, os.path.join(out, "%s-replay.log" % tag), None)
+        rec = re.search(r"(?m)^ext2: vda2: recovering the journal: .*$", text)
+        halted = th is not None and "PAX: init /bin/mounts ended" in text and "PANIC" not in text
+        return (rec.group(0) if rec else ""), halted
+
+    def bound(ks, cs):
+        """What the last commit holds: (lo, hi, its time) for M, or None with no commit."""
+        if not cs:
+            return None
+        tc = cs[-1][1]
+        before = [k for k, t in ks if t is not None and t < tc]
+        k1 = max(before) if before else -1
+        after = [k for k, t in ks if t is not None and t >= tc]
+        kx = min(after) if after else (ks[-1][0] if ks else -1)
+        return (k1, max(k1, kx), tc)
 
     rows = []
+    costs = []
     ref = os.path.join(out, "ref.img")
-    shutil.copyfile(disk, ref)
-    text, last, tb, te = boot(ref, os.path.join(out, "ref.log"), None)
-    if tb is None or te is None or last != a.ops - 1:
-        die("the uncut session did not run to its end (last %d, begin %s, end %s)" % (last, tb, te))
-    dur = te - tb
-    rc, fo, got, state = read_part(ref, "ref")
-    cls, why = classify(rc, fo, replay(last), got)
-    rows.append(("uncut", "%.2f" % dur, last, state, cls, why))
+    dur = 0.0
+    for rep in range(max(1, a.times)):
+        shutil.copyfile(disk, ref)
+        _text, ks, tb, te, th = boot(ref, os.path.join(out, "ref%d.log" % rep if rep else "ref.log"), None)
+        last = ks[-1][0] if ks else -1
+        if tb is None or te is None or last != a.ops - 1:
+            die("the uncut session did not run to its end (last %d, begin %s, end %s)" % (last, tb, te))
+        costs.append((te - tb, (th - te) if th else None))
+        if rep == 0:
+            dur = te - tb
+            rc, fo, lst, state = read_part(ref, "ref")
+            cls, why = classify(rc, fo, replay(last), tree_of(lst))
+            rows.append(("uncut", "%.2f" % dur, last, state, cls, why, ""))
     rng = random.Random(a.seed)
     points = sorted(rng.uniform(0.0, dur) for _ in range(a.n))
+    failed = []
+    torn_done = not (a.torn and journal)
     for i, t in enumerate(points):
         copy = os.path.join(out, "cut.img")
         shutil.copyfile(disk, copy)
-        _text, last, _tb, _te = boot(copy, os.path.join(out, "cut%02d.log" % i), t)
-        rc, fo, got, state = read_part(copy, "cut%02d" % i)
+        _text, ks, _tb, _te, _th = boot(copy, os.path.join(out, "cut%02d.log" % i), t)
+        last = ks[-1][0] if ks else -1
+        if not journal:
+            rc, fo, lst, state = read_part(copy, "cut%02d" % i)
+            open(os.path.join(out, "cut%02d.fsck" % i), "w").write(fo)
+            cls, why = classify(rc, fo, replay(last), tree_of(lst))
+            rows.append(("%d" % (i + 1), "%.2f" % t, last, state, cls, why, ""))
+            print("root-crash: kill %2d at %6.2f s, after op %4d: %-11s %s; %s" % (i + 1, t, last, cls, state, why[:120]), flush=True)
+            os.unlink(copy)
+            continue
+        cs = last_commit(copy, "cut%02d" % i)
+        b = bound(ks, cs)
+        _krc, _kfo, _klst, kstate = read_part(copy, "cut%02d-killed" % i)
+        # The host's repair, of a copy, before PAX touches the disk.
+        hcopy = os.path.join(out, "host.img")
+        shutil.copyfile(copy, hcopy)
+        _hrc, hfo, hlst, _hs = read_part(hcopy, "cut%02d-host" % i, "-fy")
+        os.unlink(hcopy)
+        open(os.path.join(out, "cut%02d.host-fsck" % i), "w").write(hfo)
+        hfix = [l for l in hfo.splitlines() if re.search(r"\? yes$", l)]
+        # PAX's replay.
+        recl, halted = second_boot(copy, "cut%02d" % i)
+        rc, fo, lst, state = read_part(copy, "cut%02d" % i)
         open(os.path.join(out, "cut%02d.fsck" % i), "w").write(fo)
-        cls, why = classify(rc, fo, replay(last), got)
-        rows.append(("%d" % (i + 1), "%.2f" % t, last, state, cls, why))
+        got = tree_of(lst)
+        why2 = []
+        if b is None:
+            want = replay(-1)
+            ok_bound = got == want
+            span = "no commit"
+        else:
+            cands = [replay(m) for m in range(b[0], b[1] + 1)]
+            ok_bound = any(got == w for w in cands)
+            want = cands[-1]
+            span = "ops to %d-%d at commit %d (%.3f)" % (b[0], b[1], cs[-1][0], b[2])
+        cls, why = classify(rc, fo, want, got)
+        if cls in ("none", "lost writes") and not ok_bound:
+            cls, why = "worse", "the tree is outside the last commit's bound (%s)" % span
+        if churn_lines(hlst) != churn_lines(lst):
+            why2.append("the host's repair gives another tree")
+        if hfix:
+            why2.append("the host's repair fixed more than its replay: %s" % hfix[0].strip())
+        if not halted:
+            why2.append("PAX's second boot did not halt clean")
+        if not recl:
+            why2.append("no recovery line")
+        if why2 and cls != "worse":
+            cls, why = "worse", "; ".join(why2)
+        if cls in ("counts", "orphans", "worse"):
+            failed.append(i + 1)
+        lost = (last - b[1]) if b else last + 1
+        rows.append(("%d" % (i + 1), "%.2f" % t, last, kstate + " -> " + state, cls, why,
+                     "%s; %d ops after it lost; %s" % (span, lost, recl.split(": ", 2)[-1] if recl else "-")))
+        print("root-crash: kill %2d at %6.2f s, after op %4d: %-11s %s; %s; %s; %s" % (i + 1, t, last, cls, state, why[:100], span, recl[-90:]), flush=True)
+        if not torn_done and len(cs) >= 2:
+            torn_done = True
+            tcopy = os.path.join(out, "torn.img")
+            shutil.copyfile(disk, tcopy)
+            # The kill again on a fresh copy (this one's was replayed).
+            _tx, tks, _a, _b, _c = boot(tcopy, os.path.join(out, "torn-cut.log"), t)
+            tcs = last_commit(tcopy, "torn")
+            if len(tcs) >= 2:
+                part = part_out(tcopy, "torn-j")
+                tr = run([sys.executable, os.path.join(HERE, "mkjournal"), part, "--tear=%d" % tcs[-1][0]])
+                with open(part, "rb") as fi, open(tcopy, "r+b") as fo2:
+                    fo2.seek(lo * S)
+                    fo2.write(fi.read())
+                os.unlink(part)
+                tb2 = bound(tks, tcs[:-1])
+                hcopy = os.path.join(out, "torn-host.img")
+                shutil.copyfile(tcopy, hcopy)
+                _r3, _hfo3, hlst3, _s3 = read_part(hcopy, "torn-host", "-fy")
+                os.unlink(hcopy)
+                recl3, halted3 = second_boot(tcopy, "torn")
+                rc3, fo3, lst3, state3 = read_part(tcopy, "torn")
+                got3 = tree_of(lst3)
+                ok3 = any(got3 == replay(m) for m in range(tb2[0], tb2[1] + 1))
+                same3 = churn_lines(hlst3) == churn_lines(lst3)
+                c3, _w3 = classify(rc3, fo3, replay(tb2[1]), got3)
+                held = ok3 and same3 and halted3 and c3 in ("none", "lost writes")
+                if not held:
+                    failed.append("torn")
+                rows.append(("torn", "%.2f" % t, tks[-1][0] if tks else -1, state3, c3 if held else "worse",
+                             "%s; the tree is commit %d's (ops to %d-%d): %s; e2fsck -fy's the same: %s" % (
+                                 tr.stdout.strip(), tcs[-2][0], tb2[0], tb2[1], "yes" if ok3 else "no", "yes" if same3 else "no"),
+                             recl3.split(": ", 2)[-1] if recl3 else "-"))
+                print("root-crash: torn: %s" % rows[-1][5], flush=True)
+            os.unlink(tcopy)
         os.unlink(copy)
-        print("root-crash: kill %2d at %6.2f s, after op %4d: %-11s %s; %s" % (i + 1, t, last, cls, state, why[:120]), flush=True)
     os.unlink(ref)
     classes = ["none", "lost writes", "counts", "orphans", "worse"]
-    tally = {c: sum(1 for r in rows[1:] if r[4] == c) for c in classes}
+    tally = {c: sum(1 for r in rows[1:] if r[4] == c and r[0] != "torn") for c in classes}
     with open(os.path.join(out, "crash.txt"), "w") as f:
-        f.write("root-crash: %d kills (seed %d) in a %d-operation session of %.2f s (tools/root-crash, %s)\n" % (a.n, a.seed, a.ops, dur, a.firmware))
-        f.write("| kill | at (s) | last op | state | class | first finding |\n|---|---|---|---|---|---|\n")
+        f.write("root-crash: %d kills (seed %d) in a %d-operation session of %.2f s (tools/root-crash, %s, %s)\n" % (
+            a.n, a.seed, a.ops, dur, a.firmware, "ext3: PAX replays each disk, e2fsck -fy repairs a copy" if journal else "ext2"))
+        f.write("cost: %s\n" % "; ".join("session %.2f s, halt %s" % (c[0], "%.3f s" % c[1] if c[1] is not None else "?") for c in costs))
+        f.write("| kill | at (s) | last op | state | class | first finding | the bound, the replay |\n|---|---|---|---|---|---|---|\n")
         for r in rows:
-            f.write("| %s | %s | %s | %s | %s | %s |\n" % (r[0], r[1], r[2], r[3], r[4], r[5].replace("|", "/")[:160]))
+            f.write("| %s | %s | %s | %s | %s | %s | %s |\n" % (r[0], r[1], r[2], r[3], r[4], r[5].replace("|", "/")[:200], r[6].replace("|", "/")[:200]))
         f.write("\n| class | kills |\n|---|---|\n")
         for c in classes:
             f.write("| %s | %d |\n" % (c, tally[c]))
+        if a.check:
+            f.write("\ngate (--check): %s\n" % ("held: counts, orphans and worse 0 on every disk" if not failed else "FAILED at %s" % " ".join(str(x) for x in failed)))
     sys.stdout.write(open(os.path.join(out, "crash.txt")).read())
-    return 0
+    return 1 if a.check and failed else 0
 
 
 if __name__ == "__main__":
