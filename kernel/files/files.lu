@@ -2879,8 +2879,10 @@ fn ino_node(i: u64) -> u64 {
     (T_INO << T_SHIFT) | i
 }
 
+/// `/`'s node: the memory's ROOT, or (px67) the root volume's root
+/// when `/` is on a disk (kernel/tree's `top`).
 fn root_node() -> u64 {
-    ino_node(tree.ROOT)
+    ino_node(tree.top())
 }
 
 /// A refusal by name: the area's word for kernel/user's line, and
@@ -3228,10 +3230,14 @@ fn child_named(d: u64, s: u64, n: u64) -> u64 {
     if ty(d) == T_SYN {
         return syn_child(rf(d), s, n) // px34
     }
-    if rf(d) == tree.ROOT && comp_is(s, n, "dev") {
+    // px67: at `/`, whichever store it is in: with `/` on a disk these
+    // are the memory's trees mounted over the disk's directories of the
+    // same names, as a distribution's init mounts them (kernel/fstab
+    // says once at boot when the disk has no such directory).
+    if ty(d) == T_INO && rf(d) == tree.top() && comp_is(s, n, "dev") {
         return T_DEV << T_SHIFT
     }
-    if rf(d) == tree.ROOT && (comp_is(s, n, "proc") || comp_is(s, n, "sys")) {
+    if ty(d) == T_INO && rf(d) == tree.top() && (comp_is(s, n, "proc") || comp_is(s, n, "sys")) {
         return syn_child(procfs.ROOT, s, n) // px34
     }
     let i = tree.lookup(rf(d), raw() + s, n)
@@ -4835,7 +4841,7 @@ pub fn exec_drop(o: u64) {
 /// followed. Its open file as `exec_open` makes one: (the open file +
 /// 1, 0), or (0, 1) for a path that is not a regular file of the tree.
 pub fn exec_kernel(pa: u64, pl: u64) -> (u64, u64) {
-    var d = tree.ROOT
+    var d = tree.top() // px67: `/`, on the disk when it is there
     var i: u64 = 0
     var found = tree.NONE
     while i < pl {
@@ -4925,10 +4931,11 @@ pub fn getcwd(a: u64, pml4: u64, buf: u64, size: u64) -> u64 {
         if tree.nlink(d) == 0 {
             return neg(ENOENT)
         }
-        while d != tree.ROOT {
+        let top = tree.top() // px67: `/`, on the disk when it is there
+        while d != top {
             let p = tree.parent(d)
             let (na, nl) = tree.name_of(p, d)
-            if na == 0 || at < NORM + nl + 1 {
+            if na == 0 || p == d || at < NORM + nl + 1 {
                 return neg(ENOENT)
             }
             at -= nl
@@ -5157,13 +5164,14 @@ fn tdec(base: u64, at: u64, cap: u64, v: u64) -> u64 {
 /// Found by walking up, as `getcwd` does (each directory knows its
 /// parent, and the parent the name it gives it).
 fn tpath(base: u64, at: u64, cap: u64, d: u64) -> u64 {
-    if d == tree.ROOT {
+    let top = tree.top() // px67
+    if d == top {
         return tput(base, at, cap, 47)
     }
     var len: u64 = 0
     var x = d
     var up: u64 = 0
-    while x != tree.ROOT && up < 2048 {
+    while x != top && up < 2048 {
         let p = tree.parent(x)
         let (_na, nl) = tree.name_of(p, x)
         len += 1 + nl
@@ -5174,7 +5182,7 @@ fn tpath(base: u64, at: u64, cap: u64, d: u64) -> u64 {
     var k = end
     x = d
     up = 0
-    while x != tree.ROOT && k > at && up < 2048 {
+    while x != top && k > at && up < 2048 {
         let p = tree.parent(x)
         let (na, nl) = tree.name_of(p, x)
         k -= nl
@@ -5286,7 +5294,7 @@ fn ino_text(o: u64, i: u64, base: u64, cap: u64) -> u64 {
         return tput(base, 0, cap, 47) // named: a file whose directory was not kept (none is opened so)
     }
     var k: u64 = 0
-    if di - 1 != tree.ROOT {
+    if di - 1 != tree.top() {
         k = tpath(base, 0, cap, di - 1)
     }
     k = tput(base, k, cap, 47)
@@ -5317,7 +5325,7 @@ fn mark_gone(par: u64, child: u64, na: u64, nl: u64) {
                 let base = f + frames.hhdm() + 8
                 let cap = PAGE - 8
                 var t: u64 = 0
-                if par != tree.ROOT {
+                if par != tree.top() {
                     t = tpath(base, 0, cap, par)
                 }
                 t = tput(base, t, cap, 47)
@@ -5481,8 +5489,10 @@ pub fn unlinkat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64) -> u64 {
 /// px50: whether node `n` is a file system's root that is a name in `/`
 /// (`/dev`, `/proc`, `/sys`): removed or renamed, -EBUSY after `/`'s
 /// write and search (px47's rule for /dev; pax#80 for the other two).
+/// px67: and any mount's root in the tree (`/home`, `/tmp`, a volume
+/// mount(2) put at a directory), wherever it is.
 fn mount_root(n: u64) -> bool {
-    !is_err(n) && (ty(n) == T_DEV || (ty(n) == T_SYN && procfs.parent(rf(n)) == procfs.ROOT))
+    !is_err(n) && (ty(n) == T_DEV || (ty(n) == T_SYN && procfs.parent(rf(n)) == procfs.ROOT) || (ty(n) == T_INO && tree.is_mount_root(rf(n))))
 }
 
 /// `renameat2(olddirfd, old, newdirfd, new, flags)` (and `rename`,
