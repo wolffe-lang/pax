@@ -17,7 +17,8 @@
 # name there, counted, and every other row is held as on the ISO.
 # One line at the end counts the boots that went through a disk
 # and those left as they were (a run that brings its own virtio disk, an
-# ISO with no initramfs); a leg in which no boot went through a disk
+# ISO with no initramfs), as tools/qemu-rootdisk books them in the
+# cache's boots.log; a leg in which no boot went through a disk
 # fails, so a suite cannot pass it by booting nothing from one. Exit:
 # the suite's, or 1 for that, or 2 on a usage or tool error.
 set -uo pipefail
@@ -33,11 +34,11 @@ mapfile -t isos < <(find "$images" -name '*.iso' | sort)
 "$PAX_ROOT/tools/qemu-rootdisk" --prepare "${isos[@]}" || die "tools/qemu-rootdisk --prepare failed"
 leg=$PAX_BUILD/disk
 rm -rf "$leg"; mkdir -p "$leg"
+: > "$PAX_ROOTDISK_CACHE/boots.log"
 PAX_ROOTDISK=1 PAX_QEMU=$PAX_ROOT/tools/qemu-rootdisk PAX_BUILD=$leg "$PAX_ROOT/tests/$suite" --images "$images" "$@" 2>&1 | tee "$leg/$suite.out"
 rc=${PIPESTATUS[0]}
-q=$(find "$leg" -name '*.qemu.log' -exec cat {} + 2>/dev/null)
-n=$(printf '%s\n' "$q" | grep -c 'as a disk with / on partition 2')
-m=$(printf '%s\n' "$q" | grep -c 'left as it is')
+n=$(grep -c '^disk' "$PAX_ROOTDISK_CACHE/boots.log")
+m=$(grep -c '^left' "$PAX_ROOTDISK_CACHE/boots.log")
 k=$(grep -c "^$suite: SKIP .*rootdisk" "$leg/$suite.out")
 say "$suite with / on a disk: $n boots through tools/qemu-rootdisk, $m left as they were, $k rows said SKIP for the disk; the suite's exit $rc"
 [ "$n" -gt 0 ] || { say "no boot of $suite went through a disk"; exit 1; }
