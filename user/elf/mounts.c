@@ -54,6 +54,13 @@
                         know what the disk should hold; px68: with S,
                         sync(2) after every S-th operation (`churn:
                         synced K`: a commit each, the journal suite's J2)
+     mounts revoke      px68: a block logged and then freed: /r/big
+                        (200 KiB: twelve direct blocks and an indirect
+                        one) written and sync(2)'d, then unlinked and
+                        sync(2)'d (`revoke: synced N` after each), then
+                        pause(2) for ever: the journal's revocation of the
+                        indirect block, which the power cut that follows
+                        leaves in the log (the journal suite's J9)
      mounts end         `/` remounted read-only and sync(2), as an init
                         does before reboot(2)
      mounts term WAIT PROG [ARG...]
@@ -622,6 +629,22 @@ static void churn(int n, int every) {
     say("churn: end\n");
 }
 
+static void revoke_run(void) {
+    mkdir("/r", 0755);
+    int fd = open("/r/big", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        churn_fill(fd, 200 * 1024, 7);
+        close(fd);
+    }
+    sync();
+    say("revoke: synced 1\n");
+    say("revoke: unlink(/r/big) %s\n", ans(unlink("/r/big")));
+    sync();
+    say("revoke: synced 2\n");
+    for (;;)
+        pause();
+}
+
 static void end(void) {
     mnt("none", "/", NULL, MS_REMOUNT | MS_RDONLY, NULL);
     sync();
@@ -665,6 +688,10 @@ int main(int argc, char **argv) {
         end();
         return 0;
     }
+    if (argc >= 2 && strcmp(argv[1], "revoke") == 0) {
+        revoke_run();
+        return 0;
+    }
     if (argc >= 2 && strcmp(argv[1], "init") == 0) {
         /* The guest: a distribution's init's mounts, then the rows. */
         say("mounts: init pid %d\n", (int)getpid());
@@ -687,6 +714,6 @@ int main(int argc, char **argv) {
         for (;;)
             pause();
     }
-    say("usage: mounts table | calls DEV DIR | user UID DEV DIR | root | twice MARKER | churn N [S] | term WAIT PROG [ARG...] | end | linger [halt|restart] | init [DEV DIR [disk-tmp [no-end]]]\n");
+    say("usage: mounts table | calls DEV DIR | user UID DEV DIR | root | twice MARKER | churn N [S] | revoke | term WAIT PROG [ARG...] | end | linger [halt|restart] | init [DEV DIR [disk-tmp [no-end]]]\n");
     return 2;
 }
