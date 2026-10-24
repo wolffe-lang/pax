@@ -1,0 +1,274 @@
+# px68 — the journal: `/` survives a power cut (pax#150)
+
+Crawl 54, Opus 5.5. Contract `sprints/pax/68-the-journal/px68-the-journal.md`
+(pax#150). The prediction was committed first (`a594343c`,
+`notes/px68/prediction.txt`). Branch `px68` from `origin/trunk`
+`54570380` (px67's merge). **This is the note's first version** (the
+lane's mid-point hand-back): §6's suite runs on kasumi, §8's CI, §9's
+plants and §7's playground are still running or not yet run, and say so.
+
+## 1. Forbidden, and what was read
+
+No kernel's source: none of Linux's `fs/jbd2`, `fs/ext3`, `fs/ext4` or
+`fs/ext2`, no other kernel's journal or file-system code, and no
+e2fsprogs source (`lib/ext2fs`, `e2fsck/`, `debugfs/`, `misc/`).
+`Documentation/filesystems/journalling.rst` (jbd2's in-kernel API) and
+`ext3.rst` were not opened: the on-disk layout's pages only. What was
+read is in `docs/SOURCES.md` (px68): `Documentation/filesystems/ext4/
+journal.rst` (the journal's whole layout), `super.rst` (has_journal,
+needs_recovery, journal_dev, s_journal_inum, every INCOMPAT and RO_COMPAT
+bit's name), `special_inodes.rst`, `inodes.rst` and `blockmap.rst` (inode
+8's blocks), the man pages mke2fs(8), debugfs(8), e2fsck(8), dumpe2fs(8),
+and the VIRTIO 1.2 specification's FLUSH. e2fsprogs 1.47.0 (the image
+tools/e2fs pins), QEMU 11.1.2 (and its trace events' names, read from
+`-trace help`) and kasumi's Linux 7.3.0 on QEMU ran as black boxes.
+Builds in `px13-ubuntu` on kasumi CPUs 0-3 under `flock
+~/lanes/kasumi-cores-0-3.lock`; QEMU under `taskset -c 0-3`, `ulimit -c
+0`; long jobs by `setsid -f` with pid files; nothing installed on any
+host (Ubuntu 24.04's qemu-system-x86 package was downloaded once into a
+throwaway container, unpacked and grepped for its trace events' names,
+never installed); nothing built on nomad. No merge, tag, label, issue
+filed or closed. Clean-room paragraph, px67's word for word: no Linux
+source, no other kernel's mount, boot or file-system code, no source of
+any init system or mount tool, of e2fsprogs, dosfstools or Limine.
+
+## 2. Inputs, re-derived
+
+| input | found |
+|---|---|
+| pax trunk | `54570380` (px67's merge, its `tier full` 40119925479) |
+| `kernel/ext2` | px63's: INCOMPAT FILETYPE only, anything else refused (RECOVER among them); has_journal a COMPAT feature changing nothing (the journal a file never opened); a read-write mount clears VALID and writes the superblock at once (px66), the unmount writes the clean state last |
+| `kernel/block` | px63's buffer cache: 512 buffers of a frame each, write-back or write-through (a global word), `sync` writes every dirty buffer of a device in slot order then FLUSHes; the clock hand writes a dirty buffer it takes. FLUSH is VIRTIO_BLK_T_FLUSH when the device offers it (QEMU's does: the books count it) |
+| the flusher | kernel/fstab's `pax_flushd`: every 500 ticks (5 s, measured by the crash row's commits, §6: one each 250 operations of 20 ms), with IF clear, `tree.sync_all` when the cache has a dirty block |
+| px67's crash row | 20 lost writes, 4 counts (kill 11 a free-blocks count; kills 22-24 `Block bitmap differences: -1942 -1973`), 0 orphans, 0 worse: the counts from the clock hand writing a bitmap or a descriptor between two steps of one call, and the flusher writing what a call left half done |
+| e2fsprogs 1.47.0 `mke2fs -t ext3` (measured, notes/px68/guest.sh and `tools/mkdisk --journal`) | `has_journal ext_attr resize_inode dir_index filetype sparse_super large_file`; inode 8 the journal; 1024 blocks of 4 KiB under 32768 blocks, 4096 for 448 MiB; a v2 superblock, no journal feature (8-byte tags, no checksums), sequence 1, start 0, s_uuid the volume's; the journal in 2 to 5 runs, its indirect blocks between |
+| e2fsck's replay (notes/px68/oracle.sh, journals tools/mkjournal wrote) | a revocation suppresses a tag of its own transaction or an earlier one (`>=`), with or without the revoke feature flag; a later tag of the block is replayed; an escaped block's magic restored; a torn commit (its first sector zero) and an open transaction dropped whole; a wrapped log followed; after the replay `s_start 0`, `s_sequence` one past the first sequence not committed; needs_recovery with `s_start 0` replays nothing |
+| the Linux guest | kasumi's running kernel is 7.2.8, but its modules directory was removed by the 2026-10-24 upgrade to 7.3.0-4 (`/usr/lib/modules/7.2.8-1-cachyos` gone): the guest is the installed 7.3.0-4-cachyos image (ext4, jbd2, virtio_blk built in). It mounts an ext3 root `using the ext4 subsystem … r/w with ordered data mode`, names it `ext3` (and `ext2` when `rootfstype=ext2` asks, the journal still used), keeps it `clean` with needs_recovery while mounted and after a power cut, says `recovery complete` once at the next boot, refuses an unknown incompatible bit with `Couldn't mount because of unsupported optional features (80000000)` |
+| QEMU | 11.1.2 on kasumi; 8.2.2 on the CI runner; both have the trace events `virtio_blk_handle_write`, `_read` and `virtio_blk_req_complete` |
+
+## 3. Prediction, scored (first pass: the kernel's lines and the crash row are in; the oracle row's order is §6's)
+
+| predicted | measured | score |
+|---|---|---|
+| about 1,300 kernel lines: kernel/journal ~900, ext2 ~200, block ~120, tree/fstab/user ~40, kmain ~30 | 1,863 inserted, 67 deleted at the first hand-back: kernel/journal 1,213 (with its header), ext2 +466/-~50, block +143, fstab +56, files +20, kmain_console +23, tree +9 | wrong: 1.4 times; the journal module 1.35 times, ext2 twice (the features' names, the journal's opening and its refusals) |
+| the crash row: counts 0, orphans 0, worse 0 on all 24; lost writes on ~20, none on the rest | 24 kills, 0 counts, 0 orphans, 0 worse; every disk within the last commit's bound and its tree e2fsck -fy's; the torn row held (notes/px68/crash/c1-journal.txt; the first run's classes put a kill before any commit under `none`, 9 of them: since fixed, a kill's class is against the operations done, so those are lost writes: the final row in §6) | right on the gate |
+| the session's cost within 10% of px67's (1.05 times) | 30.11, 30.09, 30.14 s against the same kernel's ext2 30.08, 30.05, 30.07 s (and px67's 30.09): 1.001 times; the halt 0.061 s against 0.041 to 0.061 s | right, and closer than guessed |
+| replay at boot not visible, under 50 ms | (§6: the serial's clock across the recovery line) | pending |
+| the first oracle row to disagree: e2fsck -fn on PAX's first clean unmount, about the journal superblock or needs_recovery | none disagreed: the first smoke boots' e2fsck -fn and e2fsck -fy found nothing on PAX's disks; the first red was the crash tool's own classification (above) | wrong |
+
+## 4. What was built
+
+**kernel/journal** (new): the journal of a volume of kernel/ext2's, its
+header the design in full. The format as §2 measured it; the running
+transaction (a list of the metadata blocks kernel/block holds for it,
+B_JRUN: never written home or evicted); the commit (ordered data first,
+then, when the log is empty, the superblock with s_start, the
+descriptors, the logged blocks (escaped where they begin with the
+magic), the revocation blocks, a FLUSH, the commit block with the close's
+wall-clock time, a FLUSH); the checkpoint (committed blocks home, FLUSH,
+s_start 0, FLUSH) after a commit that leaves less room than the largest
+transaction the cache can hold (RESERVE: 512 buffers, their descriptors,
+a full revocation list, the commit), or 4,096 distinct blocks logged, or
+an overflow, and at every unmount; revocation (a block logged since the
+last checkpoint and freed gets a record; a block logged again loses its
+pending one); a freed block is not reallocated before its transaction
+commits (the group's bitmap kept from before its first free, honoured by
+allocation); the replay (scan, revocations, replay; e2fsck's rules).
+
+**kernel/block**: B_JRUN and B_JMETA; `jdirty`, `jforget`, `jdone`,
+`buffer_pa`, `write_data` (ordered data), `checkpoint`; the clock hand
+passes over B_JRUN; `sync` and write-through leave them to the journal;
+a miss with every buffer held is said once.
+
+**kernel/ext2**: has_journal with its inode is ext3's: the inode's
+blocks as runs, the journal's superblock checked, a log with
+transactions replayed before the volume is used (one line), the
+superblock re-read; needs_recovery served (set at a read-write mount,
+cleared at the unmount once the log is empty; the state's VALID bit left
+alone, as Linux leaves it); metadata through the journal (`dirty`), data
+not (`ddirty`, `wrote`); a directory's new block and a slow link's block
+are metadata; an indirect block freed whole keeps its pointers (so a
+large delete holds none of them); statfs leaves the journal out of
+f_blocks; the mount line's `journal of N blocks in R runs,
+data=ordered`; the incompatible and read-only-compatible features named
+(super.rst), refused in Linux's words; an external journal refused.
+
+**kernel/fstab, kernel/files**: `ext3, read-write, data=ordered` in the
+root's and the table's lines; `rootfstype=ext3` and fstab's `ext3`
+(refused for a volume with no journal, as Linux refuses it); the mount
+tables name a journalled volume `ext3` (`ext2` when asked); mount(2)
+takes `ext3`. **kernel/tree**: a call's start commits a transaction of
+128 blocks or more; the syncs pass the wall clock. **kernel/kmain_console**:
+`init=PATH` (bootparam(7)) runs one command in place of the run list.
+
+**Tools.** `tools/mkdisk --journal` (and `--gpt --root` journalled by
+default, `--no-journal` for ext2: R-px68-3); `tools/mkjournal` (writes
+transactions into an ext3 journal from the documented layout, dumps a
+journal as a replay's scan reads it, lists every commit block, tears
+one); `tools/jorder` (the order a journal's writes and FLUSHes reached
+the disk, from QEMU's trace); `tools/root-crash` gated (PAX replays each
+killed disk, e2fsck -fy repairs a copy, the last commit's bound, the
+torn row, `--check`); `tools/linux-root --fstype`. The probe
+(`user/elf/mounts.c`): churn prints the realtime clock after each
+operation and takes a sync interval; `revoke`.
+
+**Tests.** `tests/mpx6-journal` (J0-J9: the format; the session's
+commits in order by QEMU's trace; a power cut and the next boot; the
+replay against e2fsck's on 13 crafted journals and in order; the
+refusals; the guest's lines; the crash row gated; the books; PAX's own
+revocation). `tests/mpx6-root` on the journalled root, its guest an
+ext3 root (R8 the journal's power cut; R8e px67's on ext2). CI job
+`mpx6-journal`; `tools/ci-tiers.map` and `tests/ci-plan`.
+
+## 5. Rulings asked (recommended, implemented, not decided)
+
+**R-px68-1: the data mode.** Recommended, implemented: **(A) ordered**:
+a file's data is not journalled, and every dirty data block of the disk
+is written before the log blocks of the commit that names it (a superset
+of "the blocks that transaction names": the whole disk's dirty data, the
+simple rule). Linux's ext3 default (its mount line `with ordered data
+mode`, measured). What it rewards, measured: the crash row's lost
+writes are bounded by the last commit (§6), no file the last commit
+names holds another file's old data (a block freed by a transaction is
+not reused before it commits). (B) writeback would skip the data's
+write before the commit (faster at each commit; a file the commit names
+may then hold stale or another file's bytes after a cut); (C) journal
+would log the data too (twice the writes). Reversible: one call in
+kernel/journal's `commit`.
+
+**R-px68-2: the commit interval.** Recommended, implemented: **(A) the
+flusher's 5 s** (px63's FLUSH_TICKS 500, measured: one commit per 250
+operations of the 20 ms churn), plus every sync point (`sync`, `fsync`,
+`fdatasync`, `syncfs`, `msync`, a remount read-only, the unmount, the
+halt) and, so a transaction never holds the cache, a call's start when it
+holds 128 blocks. Measured cost: none visible (30.11 s against 30.08 s
+for the same session on ext2, §6); what a cut loses: up to the last 5 s
+(17 to 231 operations of the churn, §6). (B) a shorter interval would
+bound the loss lower at the price of more commits (each 2 FLUSHes and the
+journal's superblock when the log was empty); not measured, as (A) costs
+nothing to measure against.
+
+**R-px68-3: the playground's disk.** Recommended, implemented: **(A)
+journalled by default** (`tools/mkdisk --gpt --root` makes ext3,
+`--no-journal` px67's ext2); this lane ships
+`~/pax-playground/pax-disk.img.px68` (§7), and at the merge the
+maintainer's current `pax-disk.img` (px67's ext2) would become
+`pax-disk.img.ext2` for a session (the orchestrator's step: this lane
+touches no file of the maintainer's). (B) both built: an ext2 disk beside
+it, which nothing in the playground needs.
+
+**R-px68-4 (new): the plain `tools/mkdisk`'s default.** The contract says
+"the default disk becomes journalled". Recommended, implemented: **(A)
+the root's** (`--gpt --root`, the playground's and the suites' root
+disks) journalled by default; the plain path (`mkdisk [--from DIR]`,
+`--home`, `--gpt` without `--root`) stays ext2, because mpx6-ext2's and
+mpx6-part's fixtures and recordings are ext2's (their disks' digests are
+recorded: changing the type would be editing their goldens); `--journal`
+makes any of them ext3. (B) every default journalled, those suites'
+fixtures re-made and their recordings re-taken from the guest.
+
+**R-px68-5 (new): the guest's version.** kasumi's 7.2.8 image is gone
+(its modules directory removed by the 2026-10-24 upgrade; the running
+kernel is still 7.2.8). Recommended, implemented: **(A) the installed
+7.3.0-4 image is the guest** for this lane's records (`tests/mpx6-journal.d/linux/`,
+and `tests/mpx6-root.d/linux/` re-recorded by its own `--record` with an
+ext3 root, the record's diff in §6), named in each record's meta. (B)
+wait for a 7.2.8 image (none is on any host; it would need a package).
+
+**R-px68-6 (new): the orphan list.** A file unlinked while it is open
+lives until its last close (px27); a power cut in between leaves an
+inode with no name and no links, which e2fsck calls an orphan (none of
+the crash row's operations does that, so its orphans are 0 by the
+workload, not by a mechanism). ext3's answer is the superblock's orphan
+list (s_last_orphan, super.rst), processed at the mount. Recommended:
+**(A) its own lane**, before or with fsck (px72, §11's draft), with a
+probe that unlinks an open file and a cut; not implemented here.
+
+## 6. Witnesses and measurements (first pass)
+
+**The crash row**, `tools/root-crash --n 24 --seed 67 --ops 1500 --times
+3 --torn --check`, kasumi, SeaBIOS, kmain_console built from `660656e3`'s
+tree, then the same kernel with `--no-journal` (`notes/px68/crash.sh`,
+`notes/px68/crash/`):
+
+| class | px67 (ext2, its kernel) | this kernel, ext2 | this kernel, ext3 |
+|---|---|---|---|
+| none | 0 | 0 | 9 (kills before the first commit: lost writes by the fixed class) |
+| lost writes | 20 | 20 | 15 |
+| counts | 4 | 4 (kill 11 `Free blocks count wrong for group #0`, kills 22-24 `-1942 -1973`) | **0** |
+| orphans | 0 | 0 | **0** |
+| worse | 0 | 0 | **0** |
+| the torn row | — | — | commit 2 of the kill at 12.07 s torn: the tree is commit 1's (operations to 248-249), and e2fsck -fy's the same |
+
+Every journalled disk: `clean, needs_recovery` after the kill, `clean`
+after PAX's replay and halt; its tree within the last commit's bound
+(the operations up to the last whose clock read came before the commit's
+time, or the next); e2fsck -fy of a copy replayed the same journal and
+fixed nothing else, its /churn the same as PAX's field for field. The
+replays: 0 to 5 transactions, 50 to 335 blocks, 0 revoked (the churn
+frees no logged block: J9 is the row that does). Lost after the last
+commit: 17 to 231 operations (the flusher's 5 s).
+
+**Cost** (`--times 3`, the uncut session `churn: begin` to `churn: end`,
+then to `halt`, the host's clock): ext3 30.11, 30.09, 30.14 s and 0.061,
+0.061, 0.062 s; ext2 (same kernel) 30.08, 30.05, 30.07 s and 0.041,
+0.061, 0.061 s; px67's 30.09 s.
+
+Pending at this hand-back (batch b1 on kasumi): `tests/mpx6-journal` with
+its Linux side recorded, `tests/mpx6-root` with its Linux side re-recorded
+(ext3, 7.3.0), mpx6-ext2, mpx6-part, mpx6-blk; then the playground
+(batch b2); then the final crash row at the final head, the plants, CI.
+
+## 7. The playground
+
+Pending (batch b2: px67's recipe, `notes/px68/play/`).
+
+## 8. CI
+
+Pending: the control dispatch, the plants, the PR's `tier pr`.
+
+## 9. Seen red
+
+Pending. The three plants are written (`px68-plant-order`
+`f9b8b57a`: the commit block written before its log blocks, J2 red by
+QEMU's trace; `px68-plant-revoke` `1f9ddcc7`: the replay passes over every
+revocation, J4's revoked cases and J9 red; `px68-plant-clean`
+`696ef1cd`: the log emptied before the replay writes home, J4's order red),
+each compiles (kcheck on kasumi), and will be rebased onto the final head
+before their dispatches.
+
+## 10. Limits named
+
+- **`sync` on a journalled volume** (fstab's option, write-through):
+  its file data is written through; its metadata reaches the disk at the
+  journal's commits (the flusher's turn, the syncs, a call's start at 128
+  blocks), not before each call returns.
+- **One call's transaction** holds at most what the cache can (512
+  buffers): a single call that changes more than about 380 metadata
+  blocks (a write of more than about 1.5 GiB of new blocks in one
+  `write(2)`) finds no buffer to take, said once (`block: no buffer to be
+  had`), and fails with -EIO. Freeing is not such a call (a freed
+  indirect block is not changed).
+- **The orphan list** (R-px68-6) is not kept.
+- **The journal's features**: v2 with no feature but revocation; 64-bit
+  tags, checksums (v1, v2, v3), asynchronous commits and fast commits are
+  refused by name (the volume does not mount), as is an external journal.
+- **Volumes past 512 groups** (64 GiB of 4 KiB blocks) keep no freed-block
+  guard for the groups past the 512th (`COPIES`).
+- **Lazy free counts**: the superblock's counts are journalled with every
+  allocation (so e2fsck -fy finds nothing to fix after PAX's replay, where
+  Linux's own leaves its free counts for e2fsck: measured, notes/px68/guest.sh g5).
+
+## 11. Issues, fsck's lane, and what to prune
+
+Issues to close: pax#150 (when merged). To file (none filed here: RULES
+§3): the orphan list (R-px68-6); the `sync` option's metadata on a
+journalled volume (§10). Others at the final hand-back.
+
+fsck's lane (px72, pax#151): drafted in the final note.
+
+Prune (at the merge): kasumi `~/lanes/px68/` (the clone, `kb/`, `kc/`,
+`smoke/`, `crash/`, `guest/`, `oracle/`, `build/`, `snap/`, `play/` but
+the shipped disk, `lope/`, `logs/`, the plant worktrees); the branches
+`px68-plant-order`, `-revoke`, `-clean` on origin; this Mac's worktrees
+`/Users/mfwolffe/lanes/px68/pax` and `plant-*`.
