@@ -65,11 +65,36 @@
 #   tools/mkdisk --gpt --kernel ELF --initramfs CPIO [--conf LIMINE.conf]
 #                [--esp SIZE] [--label NAME] SIZE OUT.img
 #
+# --root CPIO (px67) makes partition 2 the root file system instead of
+# /home: an ext2 volume holding the archive's whole tree (tools/
+# mkinitramfs' output: every directory, file and symbolic link, read
+# from its newc headers), made by this tool's own --from path, sorted,
+# with an --attrs file generated from the same headers (each entry's
+# mode, owner and modification time, the access and change times the
+# same, as the kernel's tree adopts them), never written by hand: it is
+# kept as OUT.img.root-attrs. The kernel's own mount points are added
+# where the archive has none (/proc and /sys 0555, /dev 0755, /tmp
+# 1777, root's, every time 0: a distribution's empty directories), and
+# /lost+found as mkfs makes it. The Limine configuration is --conf's
+# with `root=PARTUUID=<partition 2's GUID> rw` added to every entry's
+# `cmdline` (a `cmdline:` line made when an entry has none), and its
+# `module_path:` lines dropped (R-px67-2: Limine loads no initramfs)
+# unless --initramfs is given too, which keeps the archive on the ESP as
+# the entry's module (R-px67-2's other way: the kernel falls back to it
+# when the root does not mount). --home-size SIZE (R-px67-3's other
+# way) puts /home on a partition 4 of its own, after the root (the
+# --home volume), so the root is the rest less it.
+#
+#   tools/mkdisk --gpt --kernel ELF --root CPIO [--initramfs CPIO]
+#                [--conf LIMINE.conf] [--esp SIZE] [--home-size SIZE]
+#                [--label NAME] SIZE OUT.img
+#
 # Prints the commands' count, the e2fsck verdict, and
 # `OUT <bytes> bytes sha256 <hex>`. Exit 0, 1 when e2fsck (or, --gpt,
 # any oracle) finds a fault, 2 on a usage or tool error.
 import hashlib
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -161,8 +186,102 @@ def copy_range(src, dst, off, size, to_off=0):
             left -= len(b)
 
 
+def cpio_entries(path):
+    """The newc archive's entries: (name, mode, uid, gid, mtime, data)."""
+    b = open(path, "rb").read()
+    o = 0
+    out = []
+    while o + 110 <= len(b):
+        if b[o:o + 6] != b"070701":
+            die("%s: not a newc archive at byte %d" % (path, o))
+        f = [int(b[o + 6 + 8 * k:o + 14 + 8 * k], 16) for k in range(13)]
+        mode, uid, gid, mtime, size, namesize = f[1], f[2], f[3], f[5], f[6], f[11]
+        name = b[o + 110:o + 110 + namesize - 1].decode()
+        o = (o + 110 + namesize + 3) & ~3
+        data = b[o:o + size]
+        o = (o + size + 3) & ~3
+        if name == "TRAILER!!!":
+            break
+        out.append((name, mode, uid, gid, mtime, data))
+    return out
+
+
+# px67: the directories the kernel mounts its own trees over (and /tmp,
+# R-px67-1's), added to a root volume where the archive has none.
+MOUNT_POINTS = (("dev", 0o755), ("proc", 0o555), ("sys", 0o555), ("tmp", 0o1777))
+
+
+def root_tree(cpio, stage):
+    """Unpack the archive into stage/tree and write stage/attrs from its
+    headers: (tree, attrs, the entries' count)."""
+    tree = os.path.join(stage, "tree")
+    os.makedirs(tree)
+    lines = ["/ 755 0 0 0"]
+    names = set()
+    ents = cpio_entries(cpio)
+    for name, mode, uid, gid, mtime, data in sorted(ents, key=lambda e: e[0]):
+        clean = name.strip("/")
+        if not clean or clean == "." or ".." in clean.split("/"):
+            continue
+        hp = os.path.join(tree, clean)
+        os.makedirs(os.path.dirname(hp), exist_ok=True)
+        t = mode & 0o170000
+        if t == 0o040000:
+            os.makedirs(hp, exist_ok=True)
+        elif t == 0o100000:
+            with open(hp, "wb") as f:
+                f.write(data)
+        elif t == 0o120000:
+            os.symlink(data.decode(), hp)
+        else:
+            continue  # a device or a FIFO: the kernel's tree leaves them out too
+        names.add(clean)
+        if t != 0o120000:
+            lines.append("/%s %o %d %d %d" % (clean, mode & 0o7777, uid, gid, mtime))
+        else:
+            lines.append("/%s 777 %d %d %d" % (clean, uid, gid, mtime))
+    for d, m in MOUNT_POINTS:
+        if d not in names:
+            os.makedirs(os.path.join(tree, d), exist_ok=True)
+            lines.append("/%s %o 0 0 0" % (d, m))
+    attrs = os.path.join(stage, "attrs")
+    with open(attrs, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    return tree, attrs, len(ents)
+
+
+def root_conf(conf, partuuid, keep_module):
+    """--conf's text with `root=PARTUUID=... rw` on every entry's cmdline
+    and its module_path lines dropped unless the initramfs is kept."""
+    out = []
+    entry = False
+    has_cmd = False
+
+    def close():
+        if entry and not has_cmd:
+            out.append("    cmdline: root=PARTUUID=%s rw" % partuuid)
+    for line in open(conf).read().splitlines():
+        st = line.strip()
+        if st.startswith("/"):
+            close()
+            entry, has_cmd = True, False
+            out.append(line)
+            continue
+        if entry and re.match(r"(kernel_)?cmdline:", st):
+            has_cmd = True
+            out.append(line.rstrip() + " root=PARTUUID=%s rw" % partuuid)
+            continue
+        if entry and st.startswith("module_path:") and not keep_module:
+            continue
+        out.append(line)
+    close()
+    return "\n".join(out) + "\n"
+
+
 def gpt_main(args):
     kernel = initramfs = None
+    root_cpio = None
+    home_size = 0
     conf = os.path.join(ROOT, "boot", "limine-initramfs.conf")
     esp = size_of("64M")
     label = "pax-disk"
@@ -181,11 +300,15 @@ def gpt_main(args):
             esp = size_of(v)
         elif k == "--label":
             label = v
+        elif k == "--root":
+            root_cpio = v
+        elif k == "--home-size":
+            home_size = size_of(v)
         else:
             die("unknown option %s" % k)
-    if len(args) != 2 or not kernel or not initramfs:
-        die("usage: mkdisk --gpt --kernel ELF --initramfs CPIO [--conf LIMINE.conf] [--esp SIZE] [--label NAME] SIZE OUT.img")
-    for f in (kernel, initramfs, conf):
+    if len(args) != 2 or not kernel or not (initramfs or root_cpio) or (home_size and not root_cpio):
+        die("usage: mkdisk --gpt --kernel ELF (--initramfs CPIO | --root CPIO [--initramfs CPIO] [--home-size SIZE]) [--conf LIMINE.conf] [--esp SIZE] [--label NAME] SIZE OUT.img")
+    for f in [kernel, conf] + [x for x in (initramfs, root_cpio) if x]:
         if not os.path.isfile(f):
             die("no file %s" % f)
     size = size_of(args[0])
@@ -200,8 +323,18 @@ def gpt_main(args):
     h0 = e1 + 1
     last_usable = sectors - 34
     h1 = ((last_usable + 1) // 8) * 8 - 1  # ext2's 4 KiB blocks: a whole number of them
+    hm = None
+    if home_size:
+        # px67: /home on partition 4, the end of the disk, 1 MiB aligned.
+        if home_size % (1 << 20):
+            die("--home-size is whole MiB")
+        hm0 = (((last_usable + 1) - home_size // S) // 2048) * 2048
+        hm = (hm0, hm0 + home_size // S - 1)
+        if hm[1] > last_usable:
+            hm = (hm0 - 2048, hm0 - 2048 + home_size // S - 1)
+        h1 = hm[0] - 1
     if h1 - h0 + 1 < (8 << 20) // S:
-        die("no room for the home partition (at least 8 MiB after the ESP)")
+        die("no room for partition 2 (at least 8 MiB after the ESP)")
     t = epoch()
     work = os.path.dirname(out)
     os.makedirs(work, exist_ok=True)
@@ -211,17 +344,45 @@ def gpt_main(args):
     try:
         with open(out, "wb") as f:
             f.truncate(size)
-        # Partition 2: the --home volume, made by this tool's own path and copied in.
-        home = os.path.join(stage, "home.img")
-        print(run([sys.executable, os.path.abspath(__file__), "--home", str((h1 - h0 + 1) * S), home], "mkdisk --home",
-                  env={"SOURCE_DATE_EPOCH": str(t)}).strip().splitlines()[0])
-        copy_range(home, out, 0, (h1 - h0 + 1) * S, h0 * S)
-        os.unlink(home)
+        env = {"SOURCE_DATE_EPOCH": str(t)}
+        # px67: the table first, so the root's PARTUUID is read back for the
+        # configuration (the file systems are written into its windows after).
+        parts = ["1:esp:%d:%d:esp" % (e0, e1), "2:linux:%d:%d:%s" % (h0, h1, "root" if root_cpio else "home"),
+                 "3:bios:%d:%d:bios" % bios]
+        if hm:
+            parts.append("4:linux:%d:%d:home" % hm)
+        print(run([os.path.join(HERE, "mkgpt"), "--label", label, out] + parts, "mkgpt", env).strip())
+        if root_cpio:
+            # Partition 2: the root, the archive's tree by this tool's --from path.
+            tree, attrs, n = root_tree(root_cpio, stage)
+            rootimg = os.path.join(stage, "root.img")
+            print(run([sys.executable, os.path.abspath(__file__), "--from", tree, "--attrs", attrs, "--label", "pax-root",
+                       "--inodes", str(max(16384, 4 * n)), str((h1 - h0 + 1) * S), rootimg], "mkdisk --from", env).strip().splitlines()[0])
+            copy_range(rootimg, out, 0, (h1 - h0 + 1) * S, h0 * S)
+            os.unlink(rootimg)
+            shutil.copyfile(attrs, out + ".root-attrs")
+            print("mkdisk: the root: %d archive entries, the attrs in %s" % (n, out + ".root-attrs"))
+            pr = run([os.path.join(HERE, "mkgpt"), "--print", out], "mkgpt --print")
+            uniq = [l.split()[2] for l in pr.splitlines() if l.split()[:1] == ["2"]]
+            if not uniq:
+                die("mkgpt --print: no partition 2")
+            confp = os.path.join(stage, "limine.conf")
+            with open(confp, "w") as f:
+                f.write(root_conf(conf, uniq[0], initramfs is not None))
+            conf = confp
+            print("mkdisk: root=PARTUUID=%s" % uniq[0])
+        if not root_cpio or hm:
+            # Partition 2 (or 4, px67's --home-size): the --home volume, made by this tool's own path and copied in.
+            lo, hi = hm if hm else (h0, h1)
+            home = os.path.join(stage, "home.img")
+            print(run([sys.executable, os.path.abspath(__file__), "--home", str((hi - lo + 1) * S), home], "mkdisk --home",
+                      env=env).strip().splitlines()[0])
+            copy_range(home, out, 0, (hi - lo + 1) * S, lo * S)
+            os.unlink(home)
         # Partition 1: FAT32 at its offset, then Limine's files and the kernel's.
         volid = hashlib.sha256(("pax-esp:%s:%d" % (label, t)).encode()).hexdigest()[:8]
         dt = os.path.join(HERE, "disktools")
         rel = os.path.basename(out)
-        env = {"SOURCE_DATE_EPOCH": str(t)}
         # One sector a cluster: FAT32 needs at least 65,525 clusters, and
         # mkfs.fat's own choice for a 192 MiB volume (4 KiB clusters, 49,047
         # of them) is below it (fsck.fat -n warns; measured): with 512-byte
@@ -232,8 +393,9 @@ def gpt_main(args):
         files = [(os.path.join(lim, "BOOTX64.EFI"), "::/EFI/BOOT/BOOTX64.EFI"),
                  (conf, "::/boot/limine/limine.conf"),
                  (os.path.join(lim, "limine-bios.sys"), "::/boot/limine/limine-bios.sys"),
-                 (kernel, "::/boot/pax"),
-                 (initramfs, "::/boot/initramfs.cpio")]
+                 (kernel, "::/boot/pax")]
+        if initramfs:
+            files.append((initramfs, "::/boot/initramfs.cpio"))
         img = "%s@@%d" % (rel, e0 * S)
         run([dt, work, "mmd", "-i", img, "::/EFI", "::/EFI/BOOT", "::/boot", "::/boot/limine"], "mmd", env)
         for k, (src, dst) in enumerate(files):
@@ -241,10 +403,7 @@ def gpt_main(args):
             shutil.copyfile(src, sp)
             os.utime(sp, (t, t))
             run([dt, work, "mcopy", "-m", "-i", img, os.path.relpath(sp, work), dst], "mcopy %s" % dst, env)
-        # The table, then Limine's BIOS stages into partition 3.
-        print(run([os.path.join(HERE, "mkgpt"), "--label", label, out,
-                   "1:esp:%d:%d:esp" % (e0, e1), "2:linux:%d:%d:home" % (h0, h1), "3:bios:%d:%d:bios" % bios],
-                  "mkgpt", env).strip())
+        # Limine's BIOS stages into partition 3 (the table is written above).
         r = subprocess.run([os.path.join(lim, "limine"), "bios-install", out, "3"], capture_output=True, text=True)
         if r.returncode != 0 or "installed successfully" not in r.stdout + r.stderr:
             die("limine bios-install: %s%s" % (r.stdout, r.stderr))
@@ -262,13 +421,14 @@ def gpt_main(args):
             die("oracle fsck.fat -n: %s" % fv, 1)
         print("mkdisk: fsck.fat -n: " + [l for l in fv.strip().splitlines() if " files, " in l][-1].strip())
         os.unlink(espf)
-        homef = os.path.join(stage, "home.img")
-        copy_range(out, homef, h0 * S, (h1 - h0 + 1) * S)
-        rc, so, se = e2fs(work, "e2fsck", "-fn", os.path.relpath(homef, work))
-        if rc != 0:
-            die("oracle e2fsck -fn: %s%s" % (so, se), 1)
-        print("mkdisk: e2fsck -fn of partition 2: " + so.strip().splitlines()[-1])
-        os.unlink(homef)
+        for pn, (lo, hi) in [(2, (h0, h1))] + ([(4, hm)] if hm else []):
+            homef = os.path.join(stage, "p%d.img" % pn)
+            copy_range(out, homef, lo * S, (hi - lo + 1) * S)
+            rc, so, se = e2fs(work, "e2fsck", "-fn", os.path.relpath(homef, work))
+            if rc != 0:
+                die("oracle e2fsck -fn: %s%s" % (so, se), 1)
+            print("mkdisk: e2fsck -fn of partition %d: " % pn + so.strip().splitlines()[-1])
+            os.unlink(homef)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
     print("%s %d bytes sha256 %s" % (out, size, sha_of(out)))
