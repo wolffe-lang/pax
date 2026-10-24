@@ -19,7 +19,9 @@
 #           commits and the unmount's), then `mounts table`;
 #   cut     `mounts churn 1500`: QEMU is killed 7 s into it;
 #   replay  `mounts table` (the crafted journals' disk; with the archive
-#           kept as Limine's module too, R-px67-2's rescue, for J5).
+#           kept as Limine's module too, R-px67-2's rescue, for J5);
+#   revoke  `mounts revoke`: a 200 KiB file written and synced, unlinked
+#           and synced, then a pause: QEMU is killed there.
 #
 # Rows, per tier and firmware (--rows pr, CI's pr tier, PAX_JOURNAL_ROWS:
 # J7 with 4 kills of 600 operations; --rows all, the full and all tiers'
@@ -63,6 +65,11 @@
 #       e2fsck -fy's repair; with --rows all the torn row.
 #   J8  each boot: `block: vda: … 0 errors`, halted, no PANIC (J5's
 #       refusals are not a panic: / stays the initramfs's).
+#   J9  PAX's own revocation: killed after the unlink's sync, the log holds
+#       a transaction that tags the file's indirect block and a later one
+#       that revokes it (tools/mkjournal --dump); the next boot's replay
+#       says it passed over the revoked tag and leaves that block what
+#       e2fsck -fy's replay of a copy leaves; e2fsck -fn clean.
 #
 # The UEFI leg needs OVMF (SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1). QEMU's trace needs its log backend (Ubuntu's and
@@ -189,11 +196,12 @@ if [ -z "$images" ]; then
     r=$(static_ok "$work/bin/mounts") || why+=" $r;"
     sed 's/^/  program: /' "$work/probes.txt" >&2
     printf 'px68: /etc/motd on a journalled root\n' > "$work/motd"
-    for img in session cut replay; do
+    for img in session cut replay revoke; do
         case $img in
             session) printf '/bin/mounts churn 120 20\n/bin/mounts table\n' ;;
             cut)     printf '/bin/mounts churn 1500\n' ;;
             replay)  printf '/bin/mounts table\n' ;;
+            revoke)  printf '/bin/mounts revoke\n' ;;
         esac > "$work/$img.run"
         "$PAX_ROOT/tools/mkinitramfs" "$work/$img.cpio" /bin/mounts="$work/bin/mounts":755 /etc/motd="$work/motd":644 \
             /etc/fstab="$PAX_ROOT/user/fstab-root":644 /etc/pax-run="$work/$img.run":644 /etc/mtab-\>../proc/self/mounts \
@@ -212,7 +220,7 @@ if [ -z "$images" ]; then
         fi
     done
     if [ "$only" = build ]; then
-        [ -z "$why" ] && say "PASS J0 (build): the probe static, kmain_console built ($tiers), three archives (the disks are made where the boots run)" || bad "J0 (build):$why"
+        [ -z "$why" ] && say "PASS J0 (build): the probe static, kmain_console built ($tiers), four archives (the disks are made where the boots run)" || bad "J0 (build):$why"
         exit "$fail"
     fi
     if [ "$(uname -s)" != Linux ]; then
@@ -315,13 +323,13 @@ for leg in $legs; do
         dk=$images/$tier/disks
         mkdir -p "$dk"
         why=
-        for img in session cut replay; do
+        for img in session cut replay revoke; do
             more=()
             [ "$img" = replay ] && more=(--initramfs "$images/replay.cpio")
             [ -f "$dk/$img.img" ] || make_disk "$dk/$img.img" "$images/$img.cpio" "px68-$img" ${more[@]+"${more[@]}"} \
                 || why+=" mkdisk $img: $(tail -n 2 "$dk/$img.img.mkdisk.txt" | tr '\n' '|');"
         done
-        [ -z "$why" ] && say "PASS J0 $tier disks: three, $(sed -n 's/^mkdisk: ext3: //p' "$dk/session.img.mkdisk.txt")" || { bad "J0 $tier disks:$why"; continue; }
+        [ -z "$why" ] && say "PASS J0 $tier disks: four, $(sed -n 's/^mkdisk: ext3: //p' "$dk/session.img.mkdisk.txt")" || { bad "J0 $tier disks:$why"; continue; }
         id="$tier $leg"
         w=$PAX_BUILD/mpx6-journal-$tier-$leg
         rm -rf "$w"; mkdir -p "$w"
@@ -425,6 +433,52 @@ for leg in $legs; do
         grep -q '^/churn/' "$w/c1.tree" || why+=" no /churn after the replay;"
         [ -z "$why" ] && say "PASS J3 $id: killed 7 s in (after op $lastop): clean with needs_recovery (the guest's too); the next boot: '${rline#ext2: vda2: }', halted, clean, e2fsck -fn clean; /churn ($(grep -c '^/churn/' "$w/c1.tree") names) every field as e2fsck -fy's replay of a copy" || bad "J3 $id:$why"
         rm -f "$w/c1.p2" "$w/c1.p2.fsck" "$disk"
+
+        # --- J9: PAX's own revocation -------------------------------------------------
+        disk=$w/revoke.img
+        cp --sparse=always "$dk/revoke.img" "$disk"
+        log=$PAX_BUILD/mpx6-journal-$tier-$leg-revoke.serial.log
+        rm -f "$log" "$log.norm" "$log.qpid"
+        "$PAX_ROOT/tools/qemu-run" --firmware "$leg" --serial "$log" --timeout 300 --boot-disk "$disk" -- -m 512M -pidfile "$log.qpid" \
+            > "$log.verdict" 2>&1 &
+        qp=$!
+        for _ in $(seq 1 3000); do
+            grep -q 'revoke: synced 2' "$log" 2>/dev/null && break
+            kill -0 "$qp" 2>/dev/null || break
+            sleep 0.05
+        done
+        kill -9 "$(cat "$log.qpid" 2>/dev/null)" 2>/dev/null || true
+        wait "$qp" 2>/dev/null || true
+        norm_log; record_run "$tier" "$leg" revoke killed
+        why=
+        sgrep -q '^revoke: unlink(/r/big) = 0$' || why+=" the unlink: $(sgrep -m1 '^revoke: unlink' || echo none);"
+        part_out "$disk" "$w/v0.p2"
+        vd=$(python3 "$PAX_ROOT/tools/mkjournal" "$w/v0.p2" --dump)
+        printf '%s\n' "$vd" > "$w/revoke.dump"
+        rb=$(printf '%s\n' "$vd" | sed -n 's/^tx [0-9]*: [0-9]* tags \[.*\], [1-9][0-9]* revoked \[\([0-9 ]*\)\].*/\1/p' | head -n 1 | cut -d' ' -f1)
+        if [ -z "$rb" ]; then
+            why+=" no revocation in the log ($(printf '%s\n' "$vd" | tr '\n' '|' | cut -c1-200));"
+        else
+            printf '%s\n' "$vd" | grep -E "^tx [0-9]+: [0-9]+ tags \[([0-9e]+ )*${rb}e? " > /dev/null \
+                || printf '%s\n' "$vd" | grep -E "^tx [0-9]+: [0-9]+ tags \[([0-9e]+ )*${rb}e?\]" > /dev/null || why+=" no earlier tag of block $rb;"
+            cp "$w/v0.p2" "$w/v0h.p2"
+            "$PAX_ROOT/tools/e2fs" "$w" e2fsck -fy v0h.p2 > "$w/v0h.fsck" 2>&1 || true
+            want=$(peek "$w/v0h.p2" "$rb")
+            rm -f "$w/v0h.p2"
+            with_init "$disk" || why+=" mcopy (init=);"
+            hrc=0; halt_boot "$tier" "$leg" revoke2 "$disk" || hrc=$?
+            books "$id revoke2"; halted "$id revoke2" "$hrc"
+            rline=$(sgrep -m1 '^ext2: vda2: recovering the journal: ')
+            printf '%s\n' "$rline" | grep -Eq ', [1-9][0-9]* revoked; recovery complete$' || why+=" '$rline';"
+            part_out "$disk" "$w/v1.p2"
+            got=$(peek "$w/v1.p2" "$rb")
+            frc=0; fsck_n "$w/v1.p2" || frc=$?
+            [ "$got" = "$want" ] || why+=" block $rb: PAX '$got', e2fsck -fy '$want';"
+            [ "$frc" = 0 ] || why+=" e2fsck -fn: $(tail -n 3 "$w/v1.p2.fsck" | tr '\n' '|');"
+            rm -f "$w/v1.p2" "$w/v1.p2.fsck"
+        fi
+        rm -f "$w/v0.p2" "$disk"
+        [ -z "$why" ] && say "PASS J9 $id: PAX revoked the freed indirect block $rb in the log, after a transaction that tagged it; the replay: '${rline#ext2: vda2: recovering the journal: }', block $rb as e2fsck -fy's replay leaves it ($got); e2fsck -fn clean" || bad "J9 $id:$why"
 
         # --- J4: the replay is e2fsck's ---------------------------------------------
         part_out "$dk/replay.img" "$w/r.p2"
