@@ -39,7 +39,8 @@
 // lines, a `fstab:` line and kernel/ext2's mount line); at the end every
 // volume is written, marked clean and flushed before `halt`
 // (kernel/tree's `halt_volumes`), and the disk's books are printed. With
-// no disk nothing is printed and nothing moves.
+// no disk nothing is printed and nothing moves. px67: the books come
+// before init's line, so every log ends with that line and `halt`.
 use apic
 use block
 use boot_info
@@ -285,6 +286,22 @@ export fn kmain() {
     console.summary()
     speaker.summary() // px18: only when a tone was started
     sound.summary() // px30: only when /dev/dsp was opened
+    sync.release(sync.console(), s)
+
+    let _off = sync.irq_save()
+    // px63: every volume written, marked clean and flushed; the disk's books.
+    if block.count() != 0 {
+        let e = tree.halt_volumes()
+        if e != 0 {
+            log.put("PAX: writing the volumes at the end: an I/O error, -")
+            log.dec((!e + 1) as int)
+            log.end()
+        }
+        block.summary()
+    }
+    // px67: init's line the last before `halt`, a disk or none, so a
+    // log ends the same way from the ISO and from a disk (the volumes
+    // and their books above it).
     log.put("PAX: init ")
     var p: u64 = 0
     while p < init_len && byte_at(init_at + p) != 32 {
@@ -300,19 +317,6 @@ export fn kmain() {
     }
     log.put("; nothing left to run")
     log.end()
-    sync.release(sync.console(), s)
-
-    let _off = sync.irq_save()
-    // px63: every volume written, marked clean and flushed; the disk's books.
-    if block.count() != 0 {
-        let e = tree.halt_volumes()
-        if e != 0 {
-            log.put("PAX: writing the volumes at the end: an I/O error, -")
-            log.dec((!e + 1) as int)
-            log.end()
-        }
-        block.summary()
-    }
     timer.stop()
     log.line("halt")
     panic.halt()

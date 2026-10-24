@@ -37,7 +37,8 @@
 // read from the tree, the flusher for a write-back volume; the last
 // command (init) waited for itself and what it left ended at the halt,
 // and root's reboot(2) the end (kernel/user's `end_processes`,
-// `the_end`); every volume written and marked clean before `halt`.
+// `the_end`); every volume written and marked clean, and the disk's
+// books printed, before init's line and `halt`.
 use apic
 use arp
 use block
@@ -326,6 +327,22 @@ export fn kmain() {
     log.end()
     speaker.summary() // only when a tone was started
     network_lines()
+    sync.release(sync.console(), s)
+
+    let _off = sync.irq_save()
+    // px67: every volume written, marked clean and flushed; the disk's books.
+    if block.count() != 0 {
+        let e = tree.halt_volumes()
+        if e != 0 {
+            log.put("PAX: writing the volumes at the end: an I/O error, -")
+            log.dec((!e + 1) as int)
+            log.end()
+        }
+        block.summary()
+    }
+    // px67: init's line the last before `halt`, a disk or none, so a
+    // log ends the same way from the ISO and from a disk (the volumes
+    // and their books above it).
     log.put("PAX: init ")
     var p: u64 = 0
     while p < init_len && byte_at(init_at + p) != 32 {
@@ -341,19 +358,6 @@ export fn kmain() {
     }
     log.put("; nothing left to run")
     log.end()
-    sync.release(sync.console(), s)
-
-    let _off = sync.irq_save()
-    // px67: every volume written, marked clean and flushed; the disk's books.
-    if block.count() != 0 {
-        let e = tree.halt_volumes()
-        if e != 0 {
-            log.put("PAX: writing the volumes at the end: an I/O error, -")
-            log.dec((!e + 1) as int)
-            log.end()
-        }
-        block.summary()
-    }
     timer.stop()
     log.line("halt")
     panic.halt()
