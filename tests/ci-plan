@@ -228,20 +228,22 @@ expect("P2 the job-control tools, busybox and the recordings are mpx5-jobs' and 
 # suites; the file system and the mount reach mpx6-ext2 and the user
 # suites; its tools, probes, fixture and recordings are mpx6-ext2's (the
 # probes mpx5-users' too: it reads user/elf).
-expect("P2 the block device and the block layer reach the disk's three suites (px63; px66: the partition table's)",
-       plan(["kernel/vblk/vblk.lu", "kernel/block/block.lu"], **pr), "pr", ["mpx6-blk", "mpx6-ext2", "mpx6-part"])
+expect("P2 the block device and the block layer reach the disk's four suites (px63; px66: the partition table's; px67: the root's)",
+       plan(["kernel/vblk/vblk.lu", "kernel/block/block.lu"], **pr), "pr", ["mpx6-blk", "mpx6-ext2", "mpx6-part", "mpx6-root"])
 expect("P2 the self-test kernel and its host check are mpx6-blk's (px63)",
        plan(["kernel/kmain_blk.lu", "tools/blk-pattern", "tests/mpx6-blk"], **pr), "pr", ["mpx6-blk"])
 expect("P2 ext2 and the mount reach mpx6-ext2 and the user suites (px63)",
        plan(["kernel/ext2/ext2.lu", "kernel/fstab/fstab.lu"], **pr), "pr", has=["mpx6-ext2", "mpx3-tree", "mpx5-users"], lacks=["mpx6-blk", "mpx2-heap"])
-expect("P2 the disk's tools and recordings are mpx6-ext2's (px63; px66: mpx6-part reads mkdisk, e2fs, mkdiskprobe and user/fstab too)",
+expect("P2 the disk's tools and recordings are mpx6-ext2's (px63; px66: mpx6-part reads mkdisk, e2fs, mkdiskprobe and user/fstab too; px67: mpx6-root all but user/fstab)",
        plan(["tools/e2fs", "tools/mkdisk", "tools/e2tree", "tools/linux-blk", "tools/mkdiskprobe",
              "tests/mpx6-ext2.d/fixture", "tests/mpx6-ext2.d/linux/read.session", "tests/mpx6-ext2.d/disks.sha256",
-             "user/fstab"], **pr), "pr", ["mpx6-ext2", "mpx6-part"])
-expect("P2 ext2's own tools and recordings are mpx6-ext2's alone (px63, px66)",
-       plan(["tools/e2tree", "tools/linux-blk", "tests/mpx6-ext2.d/fixture", "tests/mpx6-ext2.d/linux/read.session"], **pr), "pr", ["mpx6-ext2"])
-expect("P2 the disk's probes reach mpx6-ext2 (and mpx5-users, which reads user/elf; px66: mpx6-part, which builds /bin/reboot) (px63)",
-       plan(["user/elf/disk.c", "user/elf/reboot.S"], **pr), "pr", ["mpx5-users", "mpx6-ext2", "mpx6-part"])
+             "user/fstab"], **pr), "pr", ["mpx6-ext2", "mpx6-part", "mpx6-root"])
+expect("P2 ext2's own tool and recordings are mpx6-ext2's alone (px63, px66)",
+       plan(["tools/linux-blk", "tests/mpx6-ext2.d/fixture", "tests/mpx6-ext2.d/linux/read.session"], **pr), "pr", ["mpx6-ext2"])
+expect("P2 the tree lister is the file-system suites' (px63; px67: mpx6-root's tree diff)",
+       plan(["tools/e2tree"], **pr), "pr", ["mpx6-ext2", "mpx6-root"])
+expect("P2 the disk's probes reach mpx6-ext2 (and mpx5-users, which reads user/elf; px66: mpx6-part, which builds /bin/reboot; px67: mpx6-root, likewise) (px63)",
+       plan(["user/elf/disk.c", "user/elf/reboot.S"], **pr), "pr", ["mpx5-users", "mpx6-ext2", "mpx6-part", "mpx6-root"])
 # px66: the partition table. Its self-test kernel, the guest's questions,
 # its fixtures, recordings and the boot disk's table are mpx6-part's; the
 # GPT writer and the disk tools are mkdisk's, so mpx6-ext2's as well;
@@ -249,8 +251,20 @@ expect("P2 the disk's probes reach mpx6-ext2 (and mpx5-users, which reads user/e
 expect("P2 the partition table's self-test, tools and recordings are mpx6-part's (px66)",
        plan(["kernel/kmain_part.lu", "tools/linux-part", "tests/mpx6-part", "tests/mpx6-part.d/fixtures",
              "tests/mpx6-part.d/linux/four.txt", "tests/mpx6-part.d/compare", "user/fstab-disk"], **pr), "pr", ["mpx6-part"])
-expect("P2 the GPT writer and the disk tools reach both file-system suites, through tools/mkdisk (px66)",
-       plan(["tools/mkgpt", "tools/disktools", "user/disktools.pin"], **pr), "pr", ["mpx6-ext2", "mpx6-part"])
+expect("P2 the GPT writer and the disk tools reach the file-system suites, through tools/mkdisk (px66, px67)",
+       plan(["tools/mkgpt", "tools/disktools", "user/disktools.pin"], **pr), "pr", ["mpx6-ext2", "mpx6-part", "mpx6-root"])
+# px67: `/` on the disk. The suite, its probe and its builder, the Linux
+# guest's tool and its record are mpx6-root's (the probe mpx5-users' too:
+# it reads user/elf); the mount table's files reach it through
+# kernel/procfs; the crash row is run by hand, by no job.
+expect("P2 / on the disk: the suite, its probe, the guest's tool and its record are mpx6-root's (px67)",
+       plan(["tests/mpx6-root", "tests/mpx6-root.d/linux/guest.session", "tests/mpx6-root.d/treediff",
+             "tools/linux-root", "tools/mkrootprobe"], **pr), "pr", ["mpx6-root"])
+expect("P2 the root's probe reaches mpx6-root and mpx5-users, which reads user/elf (px67)",
+       plan(["user/elf/mounts.c"], **pr), "pr", ["mpx5-users", "mpx6-root"])
+expect("P2 kernel/procfs reaches the root's suite too (px67)",
+       plan(["kernel/procfs/procfs.lu"], **pr), "pr", has=["mpx6-part", "mpx6-root"])
+expect("P2 the crash row runs in no job (px67)", plan(["tools/root-crash"], **pr), "pr", [])
 expect("P2 kernel/procfs reaches /proc/partitions' suite and the user suites (px66)",
        plan(["kernel/procfs/procfs.lu"], **pr), "pr", has=["mpx6-part", "mpx3-tree", "mpx5-users"], lacks=["mpx6-blk", "mpx2-heap"])
 expect("P2 the virtio transport reaches the disk too (px63)", plan(["kernel/virtio/virtio.lu"], **pr), "pr",
