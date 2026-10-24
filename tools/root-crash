@@ -268,10 +268,10 @@ def main(argv):
                 left -= len(b)
         return part
 
-    def read_part(copy, tag, fsck="-fn"):
+    def read_part(copy, tag, fsck="-fn", tree=True):
         part = part_out(copy, tag)
         r = run([os.path.join(HERE, "e2fs"), out, "e2fsck", fsck, os.path.basename(part)])
-        t = run([os.path.join(HERE, "e2tree"), part])
+        t = run([os.path.join(HERE, "e2tree"), part]) if tree else subprocess.CompletedProcess([], 0, "", "")
         st = run([os.path.join(HERE, "e2fs"), out, "dumpe2fs", "-h", os.path.basename(part)]).stdout
         state = re.search(r"Filesystem state:\s*(.*)", st)
         feats = re.search(r"Filesystem features:\s*(.*)", st)
@@ -358,7 +358,7 @@ def main(argv):
             continue
         cs = last_commit(copy, "cut%02d" % i)
         b = bound(ks, cs)
-        _krc, _kfo, _klst, kstate = read_part(copy, "cut%02d-killed" % i)
+        _krc, _kfo, _klst, kstate = read_part(copy, "cut%02d-killed" % i, tree=False)
         # The host's repair, of a copy, before PAX touches the disk.
         hcopy = os.path.join(out, "host.img")
         shutil.copyfile(copy, hcopy)
