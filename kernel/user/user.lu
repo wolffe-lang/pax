@@ -1791,6 +1791,10 @@ fn ask_end(cmd: u64) {
 const GRACE_TICKS: u64 = 200
 /// How long the end waits for SIGKILL's work before it goes on and says so.
 const KILL_TICKS: u64 = 500
+/// px67: at init's end, how long the end first waits for what is left
+/// to end of itself (a stopped job hung up when its shell exits: an
+/// orphaned group's SIGHUP and SIGCONT, px48) before it signals anything.
+const SETTLE_TICKS: u64 = 100
 const SIGKILL: u64 = 9
 const SIGTERM: u64 = 15
 const SIGCONT: u64 = 18
@@ -1822,10 +1826,18 @@ fn signal_all(sig: u64) {
 /// kmain_session's halt, once init has ended; root's reboot(2)), as a distribution's init does before it
 /// unmounts: SIGTERM and SIGCONT to each (a stopped one too), then up to
 /// GRACE_TICKS for them to end (R-px67-4), then SIGKILL to those left,
-/// up to KILL_TICKS. One line when there were any:
+/// up to KILL_TICKS. With `settle` (init's end, not reboot(2)), first up
+/// to SETTLE_TICKS for them to end of themselves, so what was ending
+/// anyway is not signalled. One line when any was signalled:
 ///
 ///     PAX: the end: SIGTERM to 3 processes, 2 ended within 40 ms; SIGKILL to 1 after the 2000 ms grace
-pub fn end_processes() {
+pub fn end_processes(settle: bool) {
+    if settle {
+        let t = timer.ticks()
+        while procs_left() != 0 && timer.ticks() - t < SETTLE_TICKS {
+            let _s = sched.sleep(1)
+        }
+    }
     let n = procs_left()
     if n == 0 {
         return
@@ -1882,7 +1894,7 @@ pub fn end_processes() {
 /// marked clean, px63's line, the disk's books, then the reset or the
 /// halt.
 pub fn the_end() -> never {
-    end_processes()
+    end_processes(false)
     let _off = sync.irq_save()
     var e: u64 = 0
     if block.count() != 0 {
