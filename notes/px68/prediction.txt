@@ -1,0 +1,39 @@
+px68 — the journal: the prediction, written before the first change
+(2026-10-24, at pax trunk 54570380, px67's merge).
+
+1. Kernel lines the journal takes. A module of its own (kernel/journal:
+   the journal superblock, the log's runs over inode 8's blocks, the
+   running transaction, the commit with its ordering and flushes, the
+   checkpoint, revoke records, the replay's three passes): about 900
+   lines with its header. kernel/ext2 about 200 more (has_journal and
+   RECOVER at the mount, metadata marked apart from data, the unmount's
+   order, the feature names), kernel/block about 120 (a buffer the
+   running transaction holds is never written home or evicted; sync
+   leaves it to the journal), kernel/tree, fstab and user about 40 (the
+   flusher's turn and the call boundary commit), kmain about 30 (`init=`
+   for the crash row's second boot). About 1,300 inserted in all.
+
+2. The crash row after it (seed 67, 1,500 operations, 24 kills, each
+   image booted by PAX and halted before the host reads it): counts 0,
+   orphans 0, worse 0 on all 24; lost writes on about 20 (every kill
+   that falls between two commits loses what came after the last one:
+   up to the flusher's 5 s, tens to a few hundred operations), "none"
+   on the rest (a kill just after a commit, or before the first
+   operation reached the disk). No operation completed before the last
+   commit block on the disk is lost, on any image.
+
+3. The write session's cost with the journal: within 10% of px67's
+   (30.09 s uncut on kasumi, TCG): each 5 s commit logs a few dozen
+   metadata blocks (the directory's, the inode tables', two bitmaps, a
+   descriptor, the superblock) and writes them home at the checkpoint,
+   with three flushes a commit; about 1.05 times px67's. The halt about
+   50 ms longer (the last commit and the checkpoint).
+
+4. Replay time at boot: not visible to a person; under 50 ms of TCG on
+   kasumi for the transactions a 5 s interval leaves (one to a few, a
+   few dozen blocks each), measured from the serial's timestamps.
+
+5. The oracle row that disagrees first: e2fsck -fn on PAX's first clean
+   unmount of a journalled volume, about the journal superblock or the
+   needs_recovery flag (a sequence, a start, or the flag left as e2fsck
+   does not expect), before any replay row.
