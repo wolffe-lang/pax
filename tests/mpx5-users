@@ -253,8 +253,12 @@
 #
 # px67: with PAX_ROOTDISK=1 (tools/rootdisk-leg: the images booted
 # again with / on a disk) U3, the memory tree's frames census, says SKIP
-# by name: the block layer's cache keeps the frames a session read; and
-# setid's first line expects `/`'s options as the volume's, `rw,relatime`.
+# by name: the block layer's cache keeps the frames a session read;
+# setid's first line expects `/`'s options as the volume's, `rw,relatime`;
+# the ls sessions' `total` lines and directory sizes (ext2's 4096 and its
+# blocks) are masked on both sides, said; and U4 holds the soak's four
+# quarters to one another, its `before` taken before the disk's cache
+# filled (R-px67-6).
 #
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
@@ -807,6 +811,22 @@ for leg in $legs; do
                 *)
                     grep -v '^~' "$ref/$s.txt" > "$out.want"
                     grep -v '^~' "$out" > "$out.cmp"
+                    case $s in ls*) if [ "${PAX_ROOTDISK:-0}" = 1 ]; then
+                        # px67 (R-px67-6): the root-on-disk leg. ext2's
+                        # directory is 4096 bytes and `total` counts its
+                        # blocks, where the recording's tree (Linux's
+                        # tmpfs) says 40 + 20 an entry and 0: both sides'
+                        # `total` lines and a directory's size are masked,
+                        # the columns' padding with them; every name,
+                        # mode, link count, owner, file size and date is
+                        # still held.
+                        for f in "$out.want" "$out.cmp"; do
+                            awk '/^total [0-9]+$/ { print "total ~"; next }
+                                 /^[-dlcbps][-rwxsStT][-rwxsStT][-rwxsStT][-rwxsStT][-rwxsStT][-rwxsStT][-rwxsStT][-rwxsStT][-rwxsStT] / { gsub(/ +/, " "); if (substr($0, 1, 1) == "d") { n = split($0, w, " "); w[5] = "~"; l = w[1]; for (k = 2; k <= n; k++) l = l " " w[k]; print l; next } }
+                                 { print }' "$f" > "$f.folded" && mv "$f.folded" "$f"
+                        done
+                        say "SKIP U1 $id sizes: ext2's directory sizes and block totals masked on both sides (rootdisk)"
+                    fi ;; esac
                     cmp -s "$out.want" "$out.cmp" || why+=" the session differs: $(diff "$out.want" "$out.cmp" | head -n 10 | cut -c1-400 | tr '\n' '|');"
                     [ "$(wc -l < "$ref/$s.txt" | tr -d ' ')" = "$n" ] || why+=" $n lines, the recording has $(wc -l < "$ref/$s.txt" | tr -d ' ');"
                     t=$(grep -c '^~' "$out")
@@ -910,12 +930,20 @@ for leg in $legs; do
                 esac
                 ml=$(grep -m1 '^~soak: ' "$out")
                 set -- $(printf '%s\n' "$ml" | sed -n -E 's/^~soak: MemFree before ([0-9]+) kB, at each quarter ([0-9]+) ([0-9]+) ([0-9]+) ([0-9]+) kB$/\1 \2 \3 \4 \5/p')
+                held=
                 if [ $# != 5 ]; then
                     why+=" no free-memory line ('$ml');"
+                elif [ "${PAX_ROOTDISK:-0}" = 1 ]; then
+                    # px67 (R-px67-6): the root-on-disk leg. The `before`
+                    # reading is taken before the disk's cache has filled
+                    # (its first files' blocks), so the four quarters are
+                    # held to one another: a leak still moves them.
+                    for v in "$3" "$4" "$5"; do [ "$v" = "$2" ] || why+=" free memory moved between the quarters: '$ml';"; done
+                    held=" (the root-on-disk leg: the four quarters held to one another, the first $(( $1 - $2 )) kB the disk's cache filling)"
                 else
                     for v in "$2" "$3" "$4" "$5"; do [ "$v" = "$1" ] || why+=" free memory moved: '$ml';"; done
                 fi
-                [ -z "$why" ] && say "PASS U4 $id: $sk; $ml (Linux here: $(grep -m1 '^~soak: ' "$ref/$s.txt"))" || bad "U4 $id:$why"
+                [ -z "$why" ] && say "PASS U4 $id: $sk; $ml$held (Linux here: $(grep -m1 '^~soak: ' "$ref/$s.txt"))" || bad "U4 $id:$why"
                 ;;
             esac
 
