@@ -46,14 +46,14 @@ any init system or mount tool, of e2fsprogs, dosfstools or Limine.
 | the Linux guest | kasumi's running kernel is 7.2.8, but its modules directory was removed by the 2026-10-24 upgrade to 7.3.0-4 (`/usr/lib/modules/7.2.8-1-cachyos` gone): the guest is the installed 7.3.0-4-cachyos image (ext4, jbd2, virtio_blk built in). It mounts an ext3 root `using the ext4 subsystem … r/w with ordered data mode`, names it `ext3` (and `ext2` when `rootfstype=ext2` asks, the journal still used), keeps it `clean` with needs_recovery while mounted and after a power cut, says `recovery complete` once at the next boot, refuses an unknown incompatible bit with `Couldn't mount because of unsupported optional features (80000000)` |
 | QEMU | 11.1.2 on kasumi; 8.2.2 on the CI runner; both have the trace events `virtio_blk_handle_write`, `_read` and `virtio_blk_req_complete` |
 
-## 3. Prediction, scored (first pass: the kernel's lines and the crash row are in; the oracle row's order is §6's)
+## 3. Prediction, scored
 
 | predicted | measured | score |
 |---|---|---|
-| about 1,300 kernel lines: kernel/journal ~900, ext2 ~200, block ~120, tree/fstab/user ~40, kmain ~30 | 1,863 inserted, 67 deleted at the first hand-back: kernel/journal 1,213 (with its header), ext2 +466/-~50, block +143, fstab +56, files +20, kmain_console +23, tree +9 | wrong: 1.4 times; the journal module 1.35 times, ext2 twice (the features' names, the journal's opening and its refusals) |
-| the crash row: counts 0, orphans 0, worse 0 on all 24; lost writes on ~20, none on the rest | 24 kills, 0 counts, 0 orphans, 0 worse; every disk within the last commit's bound and its tree e2fsck -fy's; the torn row held (notes/px68/crash/c1-journal.txt; the first run's classes put a kill before any commit under `none`, 9 of them: since fixed, a kill's class is against the operations done, so those are lost writes: the final row in §6) | right on the gate |
-| the session's cost within 10% of px67's (1.05 times) | 30.11, 30.09, 30.14 s against the same kernel's ext2 30.08, 30.05, 30.07 s (and px67's 30.09): 1.001 times; the halt 0.061 s against 0.041 to 0.061 s | right, and closer than guessed |
-| replay at boot not visible, under 50 ms | PENDING-rt (§6: QEMU's timestamped trace, the journal superblock's read to the FLUSH after its rewrite) | PENDING-rt |
+| about 1,300 kernel lines: kernel/journal ~900, ext2 ~200, block ~120, tree/fstab/user ~40, kmain ~30 | 1,863 inserted, 67 deleted (unchanged since the first hand-back): kernel/journal 1,213 (with its header), ext2 +466/-~50, block +143, fstab +56, files +20, kmain_console +23, tree +9 | wrong: 1.4 times; the journal module 1.35 times, ext2 twice (the features' names, the journal's opening and its refusals) |
+| the crash row: counts 0, orphans 0, worse 0 on all 24; lost writes on ~20, none on the rest | 24 kills, 0 counts, 0 orphans, 0 worse; every disk within the last commit's bound and its tree e2fsck -fy's; the torn row held (c1 and c2, §6; c1's classes put the 9 kills before any commit under `none`, c2's fixed classes call all 24 lost writes) | right on the gate; wrong on `none` (no kill loses nothing: 8 of c2's 24 come before the first commit) |
+| the session's cost within 10% of px67's (1.05 times) | c1: 30.11, 30.09, 30.14 s against the same kernel's ext2 30.08, 30.05, 30.07 s (and px67's 30.09): 1.001 times; c2 at the head: 30.13, 30.53, 30.24 s (1.004 to 1.016 times c1's ext2); the halt 0.061 s against 0.041 to 0.061 s | right, and closer than guessed |
+| replay at boot not visible, under 50 ms | not visible at the boot's scale: whole boots (Limine to the halt, `init=/bin/mounts`) replaying 44, 91 and 193 blocks took 1.73, 1.84 and 1.84 s under TCG, J3's 50-block one 1.71 s, J4's boot of an empty log 1.91 s; the replay's own span was not measured (§6) | half: not visible, right; the milliseconds unscored |
 | the first oracle row to disagree: e2fsck -fn on PAX's first clean unmount, about the journal superblock or needs_recovery | none disagreed: the first smoke boots' e2fsck -fn and e2fsck -fy found nothing on PAX's disks; the first red was the crash tool's own classification (above) | wrong |
 
 ## 4. What was built
@@ -123,7 +123,7 @@ e2fsck). `tests/mpx6-root` on the journalled root, its guest an
 ext3 root (R8 the journal's power cut; R8e px67's on ext2). CI job
 `mpx6-journal`; `tools/ci-tiers.map` and `tests/ci-plan`.
 
-## 5. Rulings asked (recommended, implemented, not decided)
+## 5. Rulings (recommended and implemented; the orchestrator adopted R-px68-1 to -6 as recommended, 2026-10-24)
 
 **R-px68-1: the data mode.** Recommended, implemented: **(A) ordered**:
 a file's data is not journalled, and every dirty data block of the disk
@@ -199,12 +199,12 @@ bound apart), `notes/px68/crash/c{1,2}-{journal,ext2}.txt`:
 
 | class | px67 (ext2, its kernel) | c2: the head's kernel, ext2 | c1: ext3 | c2: the head's kernel, ext3 |
 |---|---|---|---|---|
-| none | 0 | PENDING-c2 | 9 (before the first commit) | PENDING-c2 |
-| lost writes | 20 | PENDING-c2 | 15 | PENDING-c2 |
-| counts | 4 | PENDING-c2 | **0** | PENDING-c2 |
-| orphans | 0 | PENDING-c2 | **0** | PENDING-c2 |
-| worse | 0 | PENDING-c2 | **0** | PENDING-c2 |
-| the torn row | — | — | commit 2 of the kill at 12.07 s torn: the tree is commit 1's | PENDING-c2 |
+| none | 0 | 3 (kills 20, 22, 23: after the slowed session's end, §6's cost) | 9 (before the first commit) | 0 |
+| lost writes | 20 | 17 | 15 | 24 (8 before the first commit) |
+| counts | 4 | 4 (kills 9, 10 `Free blocks count wrong for group #0`; 18, 19 `Block bitmap differences: -1942 -1973`, 19 with `-1684`) | **0** | **0** |
+| orphans | 0 | 0 | **0** | **0** |
+| worse | 0 | 0 | **0** | **0** |
+| the torn row | — | — | commit 2 of the kill at 12.07 s torn: the tree is commit 1's | the same: commit 2 torn, the tree commit 1's (operations to 248-249), e2fsck -fy's the same |
 
 c1's ext2 at the same kernel was px67's row exactly: 20 lost writes, 4
 counts (kill 11 `Free blocks count wrong for group #0`, kills 22-24
@@ -215,9 +215,10 @@ after PAX's replay and halt; its tree within the last commit's bound
 (the operations up to the last whose clock read came before the commit's
 time, or the next); e2fsck -fy of a copy replayed the same journal and
 fixed nothing else, its /churn the same as PAX's field for field. The
-replays: 0 to 5 transactions, 35 to 335 blocks, 0 revoked (the churn
-frees no logged block: J9 is the row that does). Lost after the last
-commit: 17 to 231 operations (the flusher's 5 s).
+replays (c2): 0 to 5 transactions, 41 to 335 blocks, 0 revoked (the
+churn frees no logged block: J9 is the row that does). Lost after the
+last commit: 17 to 228 operations; a kill before the first commit (the
+first 5 s) loses all of the 21 to 244 done (R-px68-2's price).
 
 **Cost** (`--times 3`, the uncut session `churn: begin` to `churn: end`,
 then to `halt`, the host's clock):
@@ -227,13 +228,20 @@ then to `halt`, the host's clock):
 | px67 (ext2, its kernel) | 30.09 | — |
 | c1: ext2, `660656e3` | 30.08, 30.05, 30.07 | 0.041, 0.061, 0.061 |
 | c1: ext3, `660656e3` | 30.11, 30.09, 30.14 | 0.061, 0.061, 0.062 |
-| c2: ext2, the head | PENDING-c2 | PENDING-c2 |
-| c2: ext3, the head | PENDING-c2 | PENDING-c2 |
+| c2: ext2, the head | 38.90, 35.48, 44.19 (the host loaded: kasumi's load average was 11.9 after it; the session is 1,500 operations of 20 ms, 30 s unstarved) | 0.041, 0.041, 0.041 |
+| c2: ext3, the head | 30.13, 30.53, 30.24 | 0.061, 0.061, 0.061 |
 
 **The replay's time** (`notes/px68/replay-time.sh`: a journal-suite cut
 disk killed 7, 15 and 25 s into `mounts churn 1500`, booted again under
-QEMU's trace with `-msg timestamp=on`; TCG, the host's clock):
-PENDING-rt
+QEMU's trace with `-msg timestamp=on`; TCG, the host's clock): the three
+boots replayed 1 transaction of 44 blocks, 2 of 91 and 4 of 193, and each
+halted; `replay-time.py` found no line of the shape it reads (`PID@SEC.USEC:event`)
+in QEMU 11.1.2's trace, and the script had deleted each trace after
+reading it, so the span is not measured (`6116e79b` keeps an unread
+trace and prints its first line: a re-run is a local job to schedule).
+The boots' own times, from qemu-halt's records: 1.73, 1.84 and 1.84 s
+from QEMU's start to the halt, against 1.71 s for J3's 50-block replay
+and 1.91 s for J4's boot of the replay disk with an empty log (b1).
 
 **The suites on kasumi** (`notes/px68/run-suite.sh`, the build in
 `px13-ubuntu`, the boots native SeaBIOS, `notes/px68/batch.sh`):
@@ -243,18 +251,54 @@ PENDING-rt
 | b1 | mpx6-journal (Linux side recorded) | `e15979b9` | 20 PASS, 0 FAIL, 1,283 s (J7 the 12-kill row with the torn one: 12 lost writes, 0 counts, 0 orphans, 0 worse) |
 | b1 | mpx6-root (Linux side re-recorded) | `e15979b9` | 27 PASS, 2 rows red: R6 (the guest's ext3 remount prints `EXT4-fs (vda2): re-mounted <uuid> r/w.` on the console in the middle of the probe's `mount(…) = 0` line, which ext2 under 7.2.8 never did: `ba9fdaf4` takes such a message out of the probe's lines) and R8 (its recovery-line count was a basic expression with `+` and `?`: `90147bc9`) |
 | b1 | mpx6-ext2, mpx6-part, mpx6-blk | `e15979b9` | 18, 93 and 14 PASS, 0 FAIL |
-| b3 | mpx6-root (Linux side re-recorded again) | PENDING-b3 | PENDING-b3 |
+| b3 | mpx6-root (Linux side re-recorded again) | `ee3f153f` | 30 PASS, 0 FAIL, 199 s |
 
 **The guest's records.** `tests/mpx6-journal.d/linux/` (new: Linux
 7.3.0-4 with an ext3 root: the mount's lines, the table's `/`, a power
 cut's needs_recovery and `clean`, `recovery complete` at the next boot,
 the refusal of bit 0x80000000). `tests/mpx6-root.d/linux/` re-recorded
 by the suite's own `--record` (R-px68-5), never edited; its diff against
-px67's 7.2.8 ext2 record: PENDING-b3
+px67's 7.2.8 ext2 record (`fbc8a057`):
+- `meta`: `Linux 7.3.0-4-cachyos on QEMU (tools/linux-root --fstype ext3;
+  notclean-ext2.txt: --fstype ext2)`;
+- `guest.session`: `/` is `ext3` in every table (mountinfo, mounts,
+  mtab, the read-only and read-write turns); statfs `/` 4731 blocks, 4516
+  free, 4209 available, against ext2's 5755, 5542, 5235 (the journal's
+  1,024 blocks out of f_blocks, as `44152b95` makes PAX's); mount ids
+  and anonymous devices renumbered; devtmpfs' size 224412k; every
+  call's answer the same;
+- `guest.kernel`: `mounting ext3 file system using the ext4 subsystem`,
+  `r/w with ordered data mode`, `Mounted root (ext3 filesystem)`, the
+  same five remounts. Taken from b3's guest serial by the suite's line
+  153 after `47d69b50` (a message inside a probe line taken from its
+  stamp); the line before it gave the record's first bytes from the same
+  serial (sha `53c47ec8…`, two remount lines with the probe's text in
+  front), and the session script gives `guest.session` byte for byte
+  (`98ea8044…`);
+- `notclean.txt`: after a power-off `needs_recovery: yes`, `clean`, mount
+  3; the next boot `recovery complete`; its clean end `clean`, mount 6
+  (ext2's: `not clean`, `mounting unchecked fs`, `not clean`);
+- `notclean-ext2.txt` (new, R8e's): px67's ext2 power cut on the 7.3.0
+  guest, the same three findings as the 7.2.8 record had.
 
 ## 7. The playground
 
-PENDING-b2
+`~/pax-playground/pax-disk.img.px68` on nomad (`notes/px68/play/`,
+px67's recipe on a snapshot of `e15979b9`, whose kernel and user tree
+are the head's): a 512 MiB GPT disk, the root partition ext3 with mke2fs's
+4,096-block (16 MiB) journal, 221 archive entries, no initramfs. sha256
+`b7e98b83678462e0ec36daf5cc1a6d60f9cdb01f2edbcfd3fffbda859f7815e1`,
+read six times on kasumi (at the assembly, twice after it, once after
+the boots, twice before the copy) and twice on nomad after the copy; `pax-disk.img` and the other
+lanes' disks untouched. The session (`notes/px68/play/session.py`) under
+SeaBIOS and UEFI, each on a copy: `/etc/motd` edited, a `lope add`, notes
+in /home/pax and /root, reboot(2), the second boot reads all four,
+`/proc/self/mounts` names `/` ext3, `exit` halts; no recovery line in
+either boot (reboot(2) and exit leave the log empty); after it the host
+reads `clean`, mount count 2, journal start 0 at sequence 13, e2fsck -fn
+clean, and debugfs reads the four files. At the merge the maintainer's
+`pax-disk.img` (px67's ext2) would become `pax-disk.img.ext2` and this one
+`pax-disk.img` (R-px68-3, adopted; the orchestrator's step).
 
 ## 8. CI
 
