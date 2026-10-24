@@ -49,13 +49,16 @@
 //!
 //! **The root (px67).** Before the table, `root=` on the kernel command
 //! line (Limine's `cmdline`, kernel/boot_info) names the volume `/` is,
-//! in bootparam(7)'s spellings: `/dev/vda2` or `vda2`, `PARTUUID=…` (in
+//! in bootparam(7)'s spellings: `/dev/vda2` or `vda2`, a device's numbers
+//! (`0xfe02` or `fe02`, the major in the high byte, or `254:2`: each
+//! measured on Linux 7.2.8), `PARTUUID=…` (in
 //! either case, as Linux reads it), and `UUID=…` and `LABEL=…`, which
 //! the Linux kernel alone refuses (measured: `VFS: Cannot open root
 //! device "UUID=…"`, a panic: an initramfs serves them there) and PAX
 //! serves as this table does (a named drift). `rootfstype=` is `ext2` or
-//! absent; `rw` mounts it read-write, else it is read-only (Linux's
-//! default, measured). The volume is mounted over the memory's root
+//! absent; `rw` mounts it read-write, else it is read-only (Linux 7.2.8's
+//! answer with neither word, measured, where bootparam(7) says `rw` is
+//! the default). The volume is mounted over the memory's root
 //! (kernel/tree's `mount_root`) and every path starts there; /proc, /sys
 //! and /dev are the kernel's, over the disk's directories of those names
 //! (kernel/files; one line when the disk has none), and the table below
@@ -295,7 +298,10 @@ pub fn mount_root() -> u64 {
         return no_root(ra, rl, "rootfstype= names a file system PAX does not mount (ext2 is the one)")
     }
     let ro = !boot_info.cmdline_has("rw")
-    let (d, named) = spec_device(ra, rl)
+    var (d, named) = spec_device(ra, rl)
+    if d == block.DEVS {
+        d = by_numbers(ra, rl) // px67: bootparam(7)'s numeric root=
+    }
     if d == block.DEVS {
         return no_root(ra, rl, if named { "no such volume" } else { "no such disk" })
     }
@@ -347,6 +353,70 @@ fn covers() {
     }
     log.put("; the kernel's trees are mounted at those names all the same")
     log.end()
+}
+
+/// px67: the device a numeric `root=` names (bootparam(7)): `MMmm` in
+/// hex, `0x` before it or not, the major in the bits above the low byte
+/// (`fe02`: 254, 2), or `major:minor` in decimal (`254:2`); block.DEVS
+/// when it is neither or no device has those numbers.
+fn by_numbers(a: u64, n: u64) -> u64 {
+    var ma: u64 = 0
+    var mi: u64 = 0
+    var colon = false
+    var k: u64 = 0
+    while k < n && byte(a + k) != 58 {
+        k += 1
+    }
+    if k < n {
+        // major:minor, decimal
+        var i: u64 = 0
+        while i < n {
+            let c = byte(a + i)
+            if c == 58 {
+                if colon || i == 0 || i + 1 == n {
+                    return block.DEVS
+                }
+                colon = true
+            } else if c >= 48 && c <= 57 {
+                if colon { mi = mi * 10 + (c - 48) } else { ma = ma * 10 + (c - 48) }
+                if ma > 4095 || mi > 1048575 {
+                    return block.DEVS
+                }
+            } else {
+                return block.DEVS
+            }
+            i += 1
+        }
+    } else {
+        var i: u64 = 0
+        if n > 2 && byte(a) == 48 && (byte(a + 1) == 120 || byte(a + 1) == 88) {
+            i = 2
+        }
+        if i >= n || n - i > 8 {
+            return block.DEVS
+        }
+        var v: u64 = 0
+        while i < n {
+            let c = byte(a + i)
+            let h = if c >= 48 && c <= 57 { c - 48 } else if c >= 97 && c <= 102 { c - 87 } else if c >= 65 && c <= 70 { c - 55 } else { 16 }
+            if h == 16 {
+                return block.DEVS
+            }
+            v = v * 16 + h
+            i += 1
+        }
+        ma = v >> 8
+        mi = v & 0xff
+    }
+    var d: u64 = 0
+    while d < block.count() {
+        let (x, y) = block.numbers(d)
+        if x == ma && y == mi {
+            return d
+        }
+        d += 1
+    }
+    block.DEVS
 }
 
 /// px67: a root asked and not had: the initramfs stays `/` when Limine
