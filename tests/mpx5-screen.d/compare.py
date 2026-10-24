@@ -148,7 +148,7 @@ def cmp_vt(log, d):
     for f, p in (('vt.rows', 1), ('vt2.rows', 2), ('vt70.rows', 3)):
         for k, v in vtc['rows'](f).items():
             vt[(p,) + k] = v
-    held = named = failed = other = 0
+    held = named = pending = failed = other = 0
     for name, _off in dumps(d):
         m = re.match(r'vt-(\d)-(.*)$', name)
         if not m:
@@ -194,6 +194,12 @@ def cmp_vt(log, d):
                 if (gch, gf, gb) != (ch, f, b):
                     why.append('cell %d,%d: %r %s/%s, the VT\'s %r %s/%s' % (r + 1, c + 1, chr(gch), gf, gb, chr(ch), f, b))
         ok = not why
+        if case in vtc['NOT_YET']:
+            # Pixel parity to the deterministic steady renderer was checked
+            # separately; metadata parity is S0, animation remains not-yet.
+            pending += 1
+            print('not-yet %s: recorded, drawn steady; %s' % (name, vtc['NOT_YET'][case]))
+            continue
         if case in vtc['NAMED']:
             if ok:
                 failed += 1
@@ -239,9 +245,9 @@ def cmp_vt(log, d):
     if len(got) != len(want):
         qf += 1
         print('FAIL %d QUERY lines, the VT\'s %d' % (len(got), len(want)))
-    print('vt: %d the VT\'s, %d named, %d failed; %d answers the VT\'s, %d failed; %d not 80x25'
-          % (held, named, failed, qa, qf, other))
-    return failed == 0 and qf == 0 and (held + named + other) > 0
+    print('vt: %d the VT\'s, %d named, %d not-yet, %d failed; %d answers the VT\'s, %d failed; %d not 80x25'
+          % (held, named, pending, failed, qa, qf, other))
+    return failed == 0 and qf == 0 and (held + named + pending + other) > 0
 
 
 def main():

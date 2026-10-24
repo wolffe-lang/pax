@@ -33,7 +33,8 @@
 #     and at most 16 parameters (0 reset, 1 bold = bright foreground for
 #     0-7, 7 inverse, 22 and 27 their resets, 30-37, 90-97, 40-47,
 #     100-107 (bright), 39, 49, 38;5;n and 48;5;n by the Linux VT's
-#     measured mapping to the 16, 38;2 and 48;2 skipped; others ignored;
+#     measured mapping to the 16, 38;2 and 48;2 mapped from RGB; SGR 2/3/4/21 mapped to the VT
+#     colours, 5 recorded but steady (needs the timer hook, px71);
 #     each parameter at most 9999);
 #   - px59, the rest of what a Linux VT draws of an editor's output,
 #     measured (tests/mpx5-screen.d/vtcheck.py holds this terminal to
@@ -100,13 +101,24 @@ def read_bdf(path):
     return glyphs
 
 
+def truecolour(red, green, blue, background=False):
+    # Inferred from the VT, checked against 19683 RGB samples twice.
+    r, g, b = red & 255, green & 255, blue & 255
+    if background:
+        return int(r >= 128) | (int(g >= 128) << 1) | (int(b >= 128) << 2)
+    high = max(r, g, b)
+    c = int(r > high // 2) | (int(g > high // 2) << 1) | (int(b > high // 2) << 2)
+    return 8 if c == 7 and high <= 85 else c | (8 if high > 170 else 0)
+
+
 class Term:
     def __init__(self, cols, rows):
         self.cols, self.rows = cols, rows
         self.cells = [[(32, 7, 0)] * cols for _ in range(rows)]
         self.cx = self.cy = 0
         self.wrap = False
-        self.fg, self.bg, self.bold, self.inv = 7, 0, False, False
+        self.fg, self.bg, self.bold, self.inv = 7, 0, 0, False
+        self.italic = self.underline = self.blink = False
         self.esc = 0
         self.params = [0] * 16
         self.pi = 0
@@ -114,7 +126,7 @@ class Term:
         self.un = 0
         self.ucp = 0
         self.scrolls = 0
-        self.saved = (0,0,7,0,False,False)
+        self.saved = (0,0,7,0,0,False,False,False,False)
         self.primary = None
         self.main_cursor = None
         self.visible = True  # DECTCEM
@@ -124,11 +136,14 @@ class Term:
 
     def blank(self):
         """A space in the current rendition (ED, EL, a scrolled-in row)."""
-        f = self.fg + 8 if self.bold and self.fg < 8 else self.fg
+        f = 2 if self.italic else 6 if self.underline else 8 if self.bold == 2 else self.fg
         b = self.bg
         if self.inv:
-            f, b = b, f
-        return (32, f, b)
+            f, b = (b & 7) | (f & 8), (f & 7) | (b & 8)
+        if self.bold == 1:
+            f |= 8
+        # Bit 4 of the background records the not-yet blinking attribute.
+        return (32, f, b | (16 if self.blink else 0))
 
     def newline(self):
         if self.cy + 1 < self.rows:
@@ -143,10 +158,7 @@ class Term:
             self.wrap = False
             self.cx = 0
             self.newline()
-        f = self.fg + 8 if self.bold and self.fg < 8 else self.fg
-        b = self.bg
-        if self.inv:
-            f, b = b, f
+        _, f, b = self.blank()
         row = list(self.cells[self.cy])
         row[self.cx] = (cp, f, b)
         self.cells[self.cy] = row
@@ -176,11 +188,26 @@ class Term:
             p = ps[k]
             k += 1
             if p == 0:
-                self.fg, self.bg, self.bold, self.inv = 7, 0, False, False
+                self.fg, self.bg, self.bold, self.inv = 7, 0, 0, False
+                self.italic = self.underline = self.blink = False
             elif p == 1:
-                self.bold = True
+                self.bold = 1
+            elif p == 2:
+                self.bold = 2
             elif p == 22:
-                self.bold = False
+                self.bold = 0
+            elif p == 3:
+                self.italic = True
+            elif p == 23:
+                self.italic = False
+            elif p in (4, 21):
+                self.underline = True
+            elif p == 24:
+                self.underline = False
+            elif p == 5:
+                self.blink = True
+            elif p == 25:
+                self.blink = False
             elif p == 27:
                 self.inv = False
             elif p == 7:
@@ -191,7 +218,12 @@ class Term:
                         if p == 38: self.fg = INDEXED_FG[ps[k+1]]
                         else: self.bg = INDEXED_BG[ps[k+1]]
                     k += 2
-                elif k < len(ps) and ps[k] == 2: k += 4
+                elif k < len(ps) and ps[k] == 2:
+                    if k + 3 < len(ps):
+                        c = truecolour(*ps[k+1:k+4], background=p == 48)
+                        if p == 38: self.fg, self.bold = c & 7, c >> 3
+                        else: self.bg = c
+                    k += 4
                 else: break
             elif 100 <= p <= 107:
                 self.bg = p-100+8
@@ -257,12 +289,12 @@ class Term:
             if p == 1049:
                 if b == 104 and self.primary is None:
                     self.primary = self.cells
-                    self.main_cursor = (self.cx,self.cy,self.fg,self.bg,self.bold,self.inv)
+                    self.main_cursor = (self.cx,self.cy,self.fg,self.bg,self.bold,self.inv,self.italic,self.underline,self.blink)
                     self.cells = [[self.blank()]*self.cols for _ in range(self.rows)]
                     self.wrap = False
                 elif b == 108 and self.primary is not None:
                     self.cells, self.primary = self.primary, None
-                    self.cx,self.cy,self.fg,self.bg,self.bold,self.inv = self.main_cursor
+                    self.cx,self.cy,self.fg,self.bg,self.bold,self.inv,self.italic,self.underline,self.blink = self.main_cursor
                     self.wrap = False
 
     def feed(self, b):
@@ -306,9 +338,9 @@ class Term:
                 self.priv = False
             elif b in (55,56):
                 self.esc = 0
-                if b == 55: self.saved = (self.cx,self.cy,self.fg,self.bg,self.bold,self.inv)
+                if b == 55: self.saved = (self.cx,self.cy,self.fg,self.bg,self.bold,self.inv,self.italic,self.underline,self.blink)
                 else:
-                    self.cx,self.cy,self.fg,self.bg,self.bold,self.inv = self.saved
+                    self.cx,self.cy,self.fg,self.bg,self.bold,self.inv,self.italic,self.underline,self.blink = self.saved
                     self.wrap = False
             elif b == 93:
                 self.esc = 3
@@ -321,7 +353,7 @@ class Term:
         if self.esc == 2:
             if 0x30 <= b <= 0x39:
                 self.params[self.pi] = min(self.params[self.pi] * 10 + b - 0x30, 9999)
-            elif b == 0x3B:
+            elif b in (0x3B, 0x3A):
                 if self.pi < 15:
                     self.pi += 1
                 else:
@@ -330,7 +362,7 @@ class Term:
                 self.priv = 63
             elif b == 0x20 and not self.priv:
                 self.priv = 32
-            elif 0x3C <= b <= 0x3F or 0x20 <= b <= 0x2F or b == 0x3A:
+            elif 0x3C <= b <= 0x3F or 0x20 <= b <= 0x2F:
                 self.priv = 1
             elif 0x40 <= b <= 0x7E:
                 self.esc = 0
@@ -370,6 +402,7 @@ def render(term, glyphs, w, h):
     for y in range(term.rows):
         for x in range(term.cols):
             cp, f, b = term.cells[y][x]
+            b &= 15  # blink recorded, drawn steady: needs the timer hook, px71
             if term.visible and y == term.cy and x == term.cx:
                 f, b = b, f
             bits = glyphs.get(cp, q) if cp < 256 else q

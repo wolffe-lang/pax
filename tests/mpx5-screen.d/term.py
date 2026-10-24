@@ -72,6 +72,31 @@ class Rendition(unittest.TestCase):
                 t=term(f'\33[{48 if bg else 38};5;{i}mX'.encode())
                 self.assertEqual(t.cells[0][0][2 if bg else 1],swap(v>>4 if bg else v&15),(bg,i))
 
+class Truecolour(unittest.TestCase):
+    def test_measured_rgb_cube(self):
+        rows=(pathlib.Path(__file__).resolve().parent/'rgb70.rows').read_text().splitlines()
+        self.assertEqual(len(rows), 19683)
+        swap=lambda v: (v&10)|((v&1)<<2)|((v&4)>>2)
+        for line in rows:
+            _,r,g,b,fg,bg=line.split()
+            t=term(('\33[38;2;%s;%s;%smX\33[0;48;2;%s;%s;%smX' % (r,g,b,r,g,b)).encode())
+            self.assertEqual((t.cells[0][0][1],t.cells[0][1][2]),
+                             (swap(int(fg,16)&15),swap((int(bg,16)>>4)&7)),line)
+
+class Attributes(unittest.TestCase):
+    def test_precedence_and_inverse(self):
+        t=term(b'\33[31;44;1;7mA\33[0;31;44;2;7mB')
+        self.assertEqual(t.cells[0][:2],[(65,12,1),(66,12,0)])
+    def test_record_blink_without_animation(self):
+        t=term(b'\33[5mA\33[25mB')
+        self.assertEqual(t.cells[0][:2],[(65,7,16),(66,7,0)])
+    def test_truecolour_intensity_survives_foreground(self):
+        t=term(b'\33[38:2::10:200:30mA')
+        self.assertEqual(t.cells[0][0],(65,8,0))
+    def test_save_rendition_flags(self):
+        t=term(b'\33[31;2;3;4;5m\33' b'7\33[0m\33' b'8A')
+        self.assertEqual(t.cells[0][0],(65,2,16))
+
 class Osc(unittest.TestCase):
     def test_bel_and_st(self):
         for end in (b'\7',b'\33\\'):

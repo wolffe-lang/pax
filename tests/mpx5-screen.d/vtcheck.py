@@ -24,15 +24,6 @@ cases = runpy.run_path(str(here / 'vtcases.py'))
 # drawn as the VT draws it; `divergent`: drawn otherwise, by choice).
 NAMED = {
     'bright-background': 'divergent (R-px59-1): 100-107 drawn bright; the VGA VT draws them without brightness',
-    'SGR2': 'dropped: the VT draws dim as colour 8; PAX plain',
-    'SGR3': 'dropped: the VT draws italic as colour 2 (green); PAX plain',
-    'SGR4': 'dropped: the VT draws underline as colour 6 (cyan); PAX plain',
-    'SGR5': 'dropped: the VT sets the blink bit; PAX draws no blink (a picture is the same whenever taken)',
-    'SGR21': 'dropped: the VT takes 21 as underline (console_codes(4) since Linux 4.17); PAX ignores it',
-    'SGR2-colour': 'dropped: dim as colour 8 over the colour set; PAX plain',
-    'SGR4-colour': 'dropped: underline as colour 6 over the colour set; PAX plain',
-    'SGR-truecolour': 'dropped: the VT maps 38;2 and 48;2 to the nearest of its 16; PAX ignores them',
-    'SGR-colon': 'dropped: the VT reads `:` as `;`; PAX ignores a sequence with `:` (ECMA-48 sub-parameters)',
     'ICH': 'dropped: not yew\'s or pelt\'s (px58 census); the VT inserts',
     'DCH': 'dropped: not yew\'s or pelt\'s; the VT deletes',
     'ECH': 'dropped: not yew\'s or pelt\'s; the VT erases',
@@ -40,6 +31,12 @@ NAMED = {
     'DL': 'dropped: not yew\'s or pelt\'s; the VT deletes a line',
     'DECSTBM': 'dropped: not yew\'s or pelt\'s; the VT keeps a scrolling region',
 }
+
+
+NOT_YET = {name: 'needs the timer hook, px71' for name in (
+    'SGR5', 'attr-5', 'combined-5-7', 'combined-1-5-7',
+    'combined-2-5-7', 'combined-3-5-7', 'save-attributes',
+)}
 
 
 def vga(v):
@@ -64,7 +61,7 @@ def grid(t):
         for c in range(t.cols):
             cp, f, b = t.cells[r][c]
             if (cp, f, b) != (32, 7, 0):
-                cells.append((r + 1, c + 1, cp, f, b, 0))
+                cells.append((r + 1, c + 1, cp, f, b & 15, b >> 4))
     return (t.cy + 1, t.cx + 1), cells
 
 
@@ -145,12 +142,20 @@ def replay(probe, rowfile, report):
 
 
 def main():
-    held = named = 0
+    held = named = pending = 0
     bad = []
 
     def report(case, same, detail):
-        nonlocal held, named
+        nonlocal held, named, pending
         name = case.split(' ', 1)[1]
+        if name in NOT_YET and case.startswith('SCREEN'):
+            if not same:
+                bad.append(case)
+                print('FAIL %s: recorded attributes differ: %s' % (case, detail))
+            else:
+                pending += 1
+                print('not-yet %s: recorded, drawn steady; %s' % (case, NOT_YET[name]))
+            return
         if name in NAMED and case.startswith('SCREEN'):
             if same:
                 bad.append(case)
@@ -169,7 +174,7 @@ def main():
     replay(cases['PROBE1'], 'vt.rows', report)
     replay(cases['PROBE2'], 'vt2.rows', report)
     replay(cases['PROBE3'], 'vt70.rows', report)
-    print('vtcheck: %d cases the VT\'s, %d named, %d failed' % (held, named, len(bad)))
+    print('vtcheck: %d cases the VT\'s, %d named, %d not-yet, %d failed' % (held, named, pending, len(bad)))
     sys.exit(1 if bad else 0)
 
 
