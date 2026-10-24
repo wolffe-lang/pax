@@ -3586,6 +3586,81 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px67: `/` on the disk. kmain_console booted from GPT disks made by
+  # tools/mkdisk --gpt --root (the system installed onto partition 2, no
+  # initramfs), `root=` in Linux's spellings: the mount table over the
+  # disk, `..` at the root, mount(2) and umount2(2), the tree on the disk
+  # against the archive's (tools/e2tree, debugfs), the end (SIGTERM, the
+  # grace, SIGKILL) and the clean flag after it, held to the Linux guest
+  # recorded on kasumi (tests/mpx6-root.d/linux/: the runner's kernel is
+  # root's to read); and, in the full and all tiers, the other spellings,
+  # /etc across a reboot, a power cut and the next boot, the ISO way.
+  mpx6-root:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-root')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+      PAX_ROOT_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          qemu-system-x86_64 --version
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx6-root-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: e2fsprogs, and the partition and FAT tools, from the image and the packages pinned by digest
+        run: |
+          docker pull docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+          PAX_ENGINE=docker tools/e2fs --version
+          PAX_ENGINE=docker tools/disktools --version
+
+      - name: / on the disk against the guest's and e2fsprogs' (and, in the full and all tiers, every spelling, the reboot, the power cut, the ISO way); the plan's legs
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+        run: tests/mpx6-root $PAX_LEGS
+
+      - name: keep the sessions, the halt probes and the disks' listings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-root-linux
+          path: |
+            build/mpx6-root/*/kmain_console.elf
+            build/mpx6-root/*/*.log
+            build/mpx6-root/*/disks/*.mkdisk.txt
+            build/mpx6-root/*/disks/*.root-attrs
+            build/mpx6-root/*/disks/main.diff.*
+            build/mpx6-root/linux/how
+            build/mpx6-root-*.serial.log
+            build/mpx6-root-*.session
+            build/mpx6-root-*.meta
+            build/mpx6-root-*.verdict
+            build/mpx6-root-*.fsck
+            build/mpx6-root-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   tier:
     name: tier ${{ needs.plan.outputs.tier || 'unplanned' }}
     if: ${{ !cancelled() }}
@@ -3636,6 +3711,7 @@ jobs:
       - mpx6-blk
       - mpx6-ext2
       - mpx6-part
+      - mpx6-root
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # The issue step's token may write issues; nothing else.
