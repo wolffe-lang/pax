@@ -27,6 +27,28 @@
      mounts user UID DEV DIR
                         the same calls after setresgid/setresuid(UID):
                         EPERM, the path's errors first
+     mounts root        `..` at the root: `/` and `/..` one directory
+                        (its device and inode), getcwd after chdir("/..")
+                        and through `..` from below, a path through
+                        `/..`, a listing of `/..` and of `/`, openat of
+                        `../..` from a directory, chroot("/")
+     mounts twice MARKER
+                        `/etc` across a reboot: without MARKER, it edits
+                        /etc/motd, writes /root/px67-note and
+                        /tmp/px67-tmp, makes MARKER, syncs and asks
+                        reboot(2) to restart; with it (the second boot)
+                        it prints /etc/motd and /root/px67-note and
+                        stats /tmp/px67-tmp (a tmpfs /tmp: gone)
+     mounts churn N     the crash row's write session (tools/root-crash):
+                        N operations in /churn chosen by a fixed
+                        generator (xorshift64, seed 0x9e3779b97f4a7c15):
+                        make a file of 1 to 16 KiB, append 4 KiB, rename,
+                        unlink, make a directory with a file in it, cut a
+                        file to half; `churn: K` after operation K is
+                        done, 10 ms apart, no fsync (the flusher's 5 s
+                        are what reaches the disk); tools/root-crash
+                        replays the same operations to know what the
+                        disk should hold
      mounts end         `/` remounted read-only and sync(2), as an init
                         does before reboot(2)
      mounts linger [halt|restart]
@@ -48,9 +70,11 @@
    numbers; nothing here reads a kernel's, a libc's or a mount tool's
    source. */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -180,17 +204,16 @@ static void fs_of(const char *path) {
         say("statfs %s = -1 %s\n", path, ename(errno));
         return;
     }
-    say("statfs %s: type 0x%lx bsize %ld frsize %ld namelen %ld flags 0x%lx blocks %lu files %lu\n", path,
-        (unsigned long)f.f_type, (long)f.f_bsize, (long)f.f_frsize, (long)f.f_namelen, (unsigned long)f.f_flags,
-        (unsigned long)f.f_blocks, (unsigned long)f.f_files);
-    say("~statfs %s: bfree %lu bavail %lu ffree %lu fsid %08x%08x\n", path, (unsigned long)f.f_bfree,
-        (unsigned long)f.f_bavail, (unsigned long)f.f_ffree, (unsigned)f.f_fsid.__val[0], (unsigned)f.f_fsid.__val[1]);
+    say("statfs %s: type 0x%lx bsize %ld frsize %ld namelen %ld flags 0x%lx\n", path,
+        (unsigned long)f.f_type, (long)f.f_bsize, (long)f.f_frsize, (long)f.f_namelen, (unsigned long)f.f_flags);
+    say("~statfs %s: blocks %lu files %lu bfree %lu bavail %lu ffree %lu fsid %08x%08x\n", path, (unsigned long)f.f_blocks,
+        (unsigned long)f.f_files, (unsigned long)f.f_bfree, (unsigned long)f.f_bavail, (unsigned long)f.f_ffree,
+        (unsigned)f.f_fsid.__val[0], (unsigned)f.f_fsid.__val[1]);
     if (statvfs(path, &v) < 0) {
         say("statvfs %s = -1 %s\n", path, ename(errno));
         return;
     }
-    say("statvfs %s: bsize %lu frsize %lu namemax %lu flag 0x%lx blocks %lu files %lu\n", path, v.f_bsize, v.f_frsize,
-        v.f_namemax, v.f_flag, (unsigned long)v.f_blocks, (unsigned long)v.f_files);
+    say("statvfs %s: bsize %lu frsize %lu namemax %lu flag 0x%lx\n", path, v.f_bsize, v.f_frsize, v.f_namemax, v.f_flag);
 }
 
 static void table(void) {
@@ -322,6 +345,223 @@ static void linger(const char *then) {
     }
 }
 
+/* The sorted names of directory `d` (getdents through readdir), as one
+   line's text: their count and an FNV-1a 64 of them, so two listings
+   compare without printing a root's every name. */
+static int namecmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static void listing(const char *d, unsigned *count, uint64_t *sum) {
+    DIR *x = opendir(d);
+    *count = 0;
+    *sum = 1469598103934665603ULL;
+    if (!x)
+        return;
+    char *names[4096];
+    unsigned n = 0;
+    struct dirent *e;
+    while ((e = readdir(x)) && n < 4096)
+        names[n++] = strdup(e->d_name);
+    closedir(x);
+    qsort(names, n, sizeof names[0], namecmp);
+    for (unsigned i = 0; i < n; i++) {
+        for (const char *p = names[i]; *p; p++) {
+            *sum ^= (unsigned char)*p;
+            *sum *= 1099511628211ULL;
+        }
+        *sum ^= 10;
+        *sum *= 1099511628211ULL;
+        free(names[i]);
+    }
+    *count = n;
+}
+
+static void cwd_line(const char *what) {
+    char b[512];
+    errno = 0;
+    if (getcwd(b, sizeof b))
+        say("dotdot: getcwd after %s: %s\n", what, b);
+    else
+        say("dotdot: getcwd after %s = -1 %s\n", what, ename(errno));
+}
+
+static void root(void) {
+    say("dotdot: begin\n");
+    struct stat a, b;
+    int sa = stat("/", &a), sb = stat("/..", &b);
+    say("~dotdot: / dev %u:%u ino %lu, /.. dev %u:%u ino %lu\n", major(a.st_dev), minor(a.st_dev), (unsigned long)a.st_ino,
+        major(b.st_dev), minor(b.st_dev), (unsigned long)b.st_ino);
+    say("dotdot: / and /.. one directory: %s\n", sa == 0 && sb == 0 && a.st_dev == b.st_dev && a.st_ino == b.st_ino ? "yes" : "no");
+    errno = 0;
+    say("dotdot: chdir(/..) %s\n", ans(chdir("/..")));
+    cwd_line("chdir(/..)");
+    errno = 0;
+    say("dotdot: chdir(/etc) %s\n", ans(chdir("/etc")));
+    errno = 0;
+    say("dotdot: chdir(../../..) %s\n", ans(chdir("../../..")));
+    cwd_line("chdir(../../..) from /etc");
+    struct stat c;
+    say("dotdot: . is /: %s\n", stat(".", &c) == 0 && c.st_dev == a.st_dev && c.st_ino == a.st_ino ? "yes" : "no");
+    errno = 0;
+    int fd = open("/../etc/../etc/motd", O_RDONLY);
+    say("dotdot: open(/../etc/../etc/motd) %s\n", ans(fd));
+    if (fd >= 0)
+        close(fd);
+    unsigned n1, n2;
+    uint64_t s1, s2;
+    listing("/", &n1, &s1);
+    listing("/..", &n2, &s2);
+    say("~dotdot: / lists %u names (%016llx), /.. %u (%016llx)\n", n1, (unsigned long long)s1, n2, (unsigned long long)s2);
+    say("dotdot: /.. lists what / lists: %s\n", n1 > 0 && n1 == n2 && s1 == s2 ? "yes" : "no");
+    int e = open("/etc", O_RDONLY | O_DIRECTORY);
+    errno = 0;
+    int up = openat(e, "../..", O_RDONLY | O_DIRECTORY);
+    say("dotdot: openat(/etc, ../..) %s\n", up >= 0 ? "= a descriptor" : ans(up));
+    struct stat u;
+    say("dotdot: it is /: %s\n", up >= 0 && fstat(up, &u) == 0 && u.st_dev == a.st_dev && u.st_ino == a.st_ino ? "yes" : "no");
+    if (up >= 0)
+        close(up);
+    if (e >= 0)
+        close(e);
+    errno = 0;
+    say("dotdot: chroot(/) %s\n", ans(chroot("/")));
+    cwd_line("chroot(/)");
+    say("dotdot: end\n");
+}
+
+static void put(const char *path, const char *text) {
+    errno = 0;
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        say("twice: open(%s) = -1 %s\n", path, ename(errno));
+        return;
+    }
+    ssize_t w = write(fd, text, strlen(text));
+    close(fd);
+    say("twice: wrote %s (%ld bytes)\n", path, (long)w);
+}
+
+static void show(const char *path) {
+    char b[256];
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        say("twice: %s = -1 %s\n", path, ename(errno));
+        return;
+    }
+    ssize_t n = read(fd, b, sizeof b - 1);
+    close(fd);
+    b[n > 0 ? n : 0] = 0;
+    if (n > 0 && b[n - 1] == '\n')
+        b[n - 1] = 0;
+    say("twice: %s: %s\n", path, b);
+}
+
+static void twice(const char *marker) {
+    if (access(marker, F_OK) != 0) {
+        say("twice: the first boot\n");
+        put("/etc/motd", "px67: /etc/motd, edited before the reboot\n");
+        mkdir("/root", 0700);
+        put("/root/px67-note", "px67: a note in /root\n");
+        put("/tmp/px67-tmp", "px67: in /tmp, the memory's\n");
+        put(marker, "1\n");
+        sync();
+        errno = 0;
+        long r = reboot(RB_AUTOBOOT);
+        say("twice: reboot = %s\n", ans(r));
+        return;
+    }
+    say("twice: the second boot\n");
+    show("/etc/motd");
+    show("/root/px67-note");
+    struct stat s;
+    errno = 0;
+    say("twice: stat(/tmp/px67-tmp) %s\n", ans(stat("/tmp/px67-tmp", &s)));
+    say("twice: end\n");
+}
+
+static uint64_t churn_x = 0x9e3779b97f4a7c15ULL;
+static uint64_t churn_next(void) {
+    churn_x ^= churn_x << 13;
+    churn_x ^= churn_x >> 7;
+    churn_x ^= churn_x << 17;
+    return churn_x;
+}
+
+static void churn_fill(int fd, unsigned long n, unsigned long tag) {
+    char b[4096];
+    for (unsigned long i = 0; i < sizeof b; i++)
+        b[i] = (char)('a' + (i + tag) % 26);
+    while (n > 0) {
+        unsigned long k = n < sizeof b ? n : sizeof b;
+        if (write(fd, b, k) != (ssize_t)k)
+            return;
+        n -= k;
+    }
+}
+
+/* The names alive, as the generator picks among them: f<k>, r<k>, d<k>/f. */
+static char churn_names[4096][24];
+static int churn_count = 0;
+
+static void churn(int n) {
+    mkdir("/churn", 0755);
+    say("churn: begin\n");
+    for (int k = 0; k < n; k++) {
+        uint64_t r = churn_next();
+        int op = (int)(r % 6);
+        int pick = churn_count > 0 ? (int)((r >> 8) % (uint64_t)churn_count) : -1;
+        char path[64];
+        if (op == 0 || pick < 0) {
+            snprintf(path, sizeof path, "/churn/f%d", k);
+            int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) {
+                churn_fill(fd, 1024 * (1 + (r >> 20) % 16), (unsigned long)k);
+                close(fd);
+                if (churn_count < 4096)
+                    snprintf(churn_names[churn_count++], 24, "f%d", k);
+            }
+        } else if (op == 1) {
+            snprintf(path, sizeof path, "/churn/%s", churn_names[pick]);
+            int fd = open(path, O_WRONLY | O_APPEND);
+            if (fd >= 0) {
+                churn_fill(fd, 4096, (unsigned long)k);
+                close(fd);
+            }
+        } else if (op == 2 && strchr(churn_names[pick], '/') == NULL) {
+            char to[64];
+            snprintf(path, sizeof path, "/churn/%s", churn_names[pick]);
+            snprintf(to, sizeof to, "/churn/r%d", k);
+            if (rename(path, to) == 0)
+                snprintf(churn_names[pick], 24, "r%d", k);
+        } else if (op == 3) {
+            snprintf(path, sizeof path, "/churn/%s", churn_names[pick]);
+            if (unlink(path) == 0) {
+                memcpy(churn_names[pick], churn_names[churn_count - 1], 24);
+                churn_count--;
+            }
+        } else if (op == 4) {
+            snprintf(path, sizeof path, "/churn/d%d", k);
+            if (mkdir(path, 0755) == 0) {
+                char f[80];
+                snprintf(f, sizeof f, "%s/f", path);
+                int fd = open(f, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd >= 0) {
+                    churn_fill(fd, 2048, (unsigned long)k);
+                    close(fd);
+                    if (churn_count < 4096)
+                        snprintf(churn_names[churn_count++], 24, "d%d/f", k);
+                }
+            }
+        } else if (op == 5) {
+            snprintf(path, sizeof path, "/churn/%s", churn_names[pick]);
+            struct stat st;
+            if (stat(path, &st) == 0)
+                truncate(path, st.st_size / 2);
+        }
+        say("churn: %d\n", k);
+        usleep(10000);
+    }
+    say("churn: end\n");
+}
+
 static void end(void) {
     mnt("none", "/", NULL, MS_REMOUNT | MS_RDONLY, NULL);
     sync();
@@ -339,6 +579,18 @@ int main(int argc, char **argv) {
     }
     if (argc >= 5 && strcmp(argv[1], "user") == 0) {
         user(atoi(argv[2]), argv[3], argv[4]);
+        return 0;
+    }
+    if (argc >= 2 && strcmp(argv[1], "root") == 0) {
+        root();
+        return 0;
+    }
+    if (argc >= 3 && strcmp(argv[1], "twice") == 0) {
+        twice(argv[2]);
+        return 0;
+    }
+    if (argc >= 3 && strcmp(argv[1], "churn") == 0) {
+        churn(atoi(argv[2]));
         return 0;
     }
     if (argc >= 2 && strcmp(argv[1], "linger") == 0) {
@@ -360,6 +612,7 @@ int main(int argc, char **argv) {
         if (argc < 5 || strcmp(argv[4], "disk-tmp") != 0)
             mnt("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777");
         table();
+        root();
         calls(dev, dir);
         user(1000, dev, dir);
         if (argc < 6 || strcmp(argv[5], "no-end") != 0)
@@ -370,6 +623,6 @@ int main(int argc, char **argv) {
         for (;;)
             pause();
     }
-    say("usage: mounts table | calls DEV DIR | user UID DEV DIR | end | linger [halt|restart] | init [DEV DIR [disk-tmp [no-end]]]\n");
+    say("usage: mounts table | calls DEV DIR | user UID DEV DIR | root | twice MARKER | churn N | end | linger [halt|restart] | init [DEV DIR [disk-tmp [no-end]]]\n");
     return 2;
 }
