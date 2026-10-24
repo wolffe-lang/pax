@@ -39,6 +39,10 @@ set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 real=${PAX_QEMU_REAL:-qemu-system-x86_64}
 note() { printf 'qemu-rootdisk: %s\n' "$*" >&2; }
+# Each boot it takes or leaves, one line in the cache's boots.log
+# (tools/rootdisk-leg counts them: a suite's QEMU logs live where the
+# suite puts them).
+booked() { mkdir -p "$cache" && printf '%s\t%s\n' "$1" "$2" >> "$cache/boots.log"; }
 
 cache=${PAX_ROOTDISK_CACHE:-${PAX_BUILD:-$here/../build}/rootdisk}
 
@@ -116,6 +120,7 @@ if [ -z "$iso" ]; then
 fi
 if [ "$own" = 1 ]; then
     note "left as it is: the run gives QEMU a virtio disk of its own (PAX drives one)"
+    booked left "$iso: a virtio disk of its own"
     exec "$real" "$@"
 fi
 mkdir -p "$cache"
@@ -127,8 +132,8 @@ done
 disk_for "$iso"
 case $? in
     0) ;;
-    1) note "left as it is: no disk for $iso"; exec "$real" "$@" ;;
-    *) exec "$real" "$@" ;;
+    1) note "left as it is: no disk for $iso"; booked left "$iso: tools/mkdisk failed"; exec "$real" "$@" ;;
+    *) booked left "$iso: no initramfs to install"; exec "$real" "$@" ;;
 esac
 copy=$cache/boot-$$.img
 cp --sparse=always "$disk" "$copy" || { note "no room for a copy of $disk"; exec "$real" "$@"; }
@@ -146,5 +151,6 @@ for i in "${!args[@]}"; do
     fi
     new+=("${args[i]}")
 done
+booked disk "$iso $copy"
 note "$iso as a disk with / on partition 2 ($(sed -n 's/^mkdisk: root=//p' "$disk.mkdisk.log")): $copy"
 exec "$real" "${new[@]}"
