@@ -185,8 +185,10 @@ def cmp_vt(log, d):
                 if (r + 1, c + 1) == (cr, cc):
                     f, b = b, f  # PAX's cursor: the cell inverted
                 gch, gf, gb = got[r][c]
-                if ch == 32:
-                    # a blank shows its background alone (the cursor's
+                if ch == 32 or f == b:
+                    # Equal foreground/background hides any glyph; pixels
+                    # cannot recover its code point (S0 checks that metadata).
+                    # A blank shows its background alone (the cursor's
                     # inverted blank its foreground, swapped above)
                     if gch != 32 or gb != b:
                         why.append('cell %d,%d: %r %s/%s, the VT\'s a blank in %s' % (r + 1, c + 1, chr(gch), gf, gb, b))
