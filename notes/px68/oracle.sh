@@ -49,4 +49,4 @@ run_case F   "start 1 1" "tx" "write $B1 f1" "commit" "tx" "write $B1 f2" "write
 run_case G   "start 1 1" "tx" "write $B1 61" "write $B2 62" "end" "recover"
 run_case H   "start 5 $((max - 2))" "tx" "write $B1 71" "write $B2 72" "write $B3 73" "commit" "recover"
 run_case I   "start 9 1" "tx" "write $B1 81" "commit" "tx" "write $B2 82" "commit" "tx" "write $B3 83" "end" "recover"
-run_case Z   "start 0 0" "recover"
+run_case Z   "start 1 0" "recover"
