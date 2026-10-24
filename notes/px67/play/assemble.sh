@@ -32,8 +32,8 @@ cp $W/scent/scent $W/scent/egrep $W/scent/fgrep $S/
 printf "root:x:0:0:root:/:/bin/pelt\npax:x:1000:1000:pax:/home/pax:/bin/pelt\nlobo:x:990:990:lobo:/srv/lobo:/bin/false\n" > $W/passwd
 printf "root:x:0:\npax:x:1000:\nlobo:x:990:\n" > $W/group
 cat > $W/motd <<MOTD
-PAX playground: pax px67 $HEAD, wolf 0.2.34, pelt 57ffef9, boreutils 12de639, lope bc38867,
-aspen 476edee, scent b6f63a4, lupin 0.1.55 (static musl). pelt is pid 1 with job control (sh -i -m).
+PAX playground: pax px67 $HEAD, wolf 0.2.35, pelt 70eec14, boreutils 575dc7b (61 tools), lope e6f623c,
+aspen 3692cf5, scent b6f63a4 (grep), lupin 0.1.56 (static musl). pelt is pid 1 with job control (sh -i -m).
 Try: ls -l /bin, jobs, Ctrl-Z, bg, fg, kill %1, timeout, su pax, play mambo.
 lope jumps (its hook in /etc/shrc): cd /etc, cd /bin, then etc alone, g -, gi; lope add DIR, lope list.
 aspen is tree(1) in wolf: aspen /, aspen -a -L 2 /home/pax, aspen -J /bin, aspen --du /usr.

@@ -2,17 +2,18 @@
 # px67, kasumi: the playground's programs and kernel: px66's
 # notes/px66/play/build.sh (px63's recipe, the orchestrator's
 # ~/lanes/orch-paxplay build.sh before it) made lane-local again: this
-# lane's tree (P, a snapshot or the clone), CPUs 0-3, the same programs
-# at the same pins (pelt, lope, aspen, scent, the std, yew, boreutils'
-# utilities, as, su, play, the zone, /bin/reboot) and kmain_console from
-# this lane's kernel. The shared recipes are not edited; no boot here.
+# lane's tree (P, a snapshot or the clone), CPUs 0-3, the programs at
+# the head's pins (since px65's merge, 0.2.35's: pelt, lope, aspen,
+# scent, the std, yew, boreutils' 61 utilities as px65's recipe lists
+# them, as, su, play, the zone, /bin/reboot) and kmain_console from this
+# lane's kernel. The shared recipes are not edited; no boot here.
 #   P=<tree> build.sh      (under flock ~/lanes/kasumi-cores-0-3.lock)
 set -u
 L=$HOME/lanes/px67/play
 P=${P:-$HOME/lanes/px67/pax}
-LOPE=$HOME/lanes/px61/lope   # a clone holding user/lope.pin's commit (lope is private), read only
+LOPE=$HOME/lanes/px67/lope   # the lane's clone of lope (private) at user/lope.pin's commit, read only
 printf '%s\n' $$ > "$L/build.pid"
-U="basename cat chgrp chmod chown cp cut dirname echo env expand false fold groups head id kill ln logname ls mkdir mv nl nproc paste printenv printf pwd readlink rm rmdir seq sleep sort stat tac tail tee timeout touch tr true unexpand uniq wc whoami yes"
+U="base32 base64 basename cat chgrp chmod chown comm cp cut dirname echo env expand false fold groups head id join kill link ln logname ls mkdir mkfifo mktemp mv nl nproc paste printenv printf pwd readlink realpath rm rmdir seq shuf sleep sort stat sync tac tail tee timeout touch tr true truncate tsort tty unexpand uniq unlink wc whoami yes"
 mkdir -p "$L/cache" "$L/tmp"
 podman run --rm --privileged --cpuset-cpus 0-3 --ulimit core=0:0 -v "$L:$L:Z" -v "$P:$P:Z" -v "$LOPE:$LOPE:ro" \
     -e PAX_CACHE=$L/cache -e TMPDIR=$L/tmp -e PAX_LOPE_REPO=$LOPE -e CARGO_INCREMENTAL=0 -e U="$U" -e L="$L" -e P="$P" localhost/px13-ubuntu bash -c '
