@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+# root-crash — the crash row (px67): a write session on `/` on the disk,
+# QEMU killed at N seeded points in it, and each disk read on the host;
+# reported, never gated (the journal lane's numbers).
+#
+#   tools/root-crash --kernel ELF --probe MOUNTS [--n N] [--seed S]
+#                    [--ops K] [--firmware bios|uefi] OUTDIR
+#
+# The archive: the probe (user/elf/mounts.c) as /bin/mounts, its run list
+# `/bin/mounts churn K` (default 1500 operations, 10 ms apart), installed
+# as partition 2 by tools/mkdisk --gpt --root (64 MiB: the ESP, the root,
+# Limine's BIOS stage), SOURCE_DATE_EPOCH 1700000000. One boot uncut
+# first, to the halt, times the session (`churn: begin` to `churn: end`,
+# the host's clock); then for each of N points (random.Random(S),
+# uniform over that session) a fresh copy of the disk boots
+# (tools/qemu-run, QEMU's own -pidfile) and QEMU is killed (SIGKILL, by
+# that pid) that long after `churn: begin` appears. Each disk's
+# partition 2, on the host:
+#   - `e2fsck -fn` (tools/e2fs, the pinned e2fsprogs): its exit and
+#     every complaint;
+#   - tools/e2tree's /churn, held to the tree the operations up to the
+#     last `churn: K` the serial log printed leave (this tool replays the
+#     probe's generator: the same xorshift64, the same choices).
+# The class, the worst that applies:
+#   none          e2fsck clean and the tree what the operations left;
+#   lost writes   e2fsck clean, the tree short of what they left (the
+#                 flusher's last turn came before the kill);
+#   counts        e2fsck: bitmap differences, a free count, a link count
+#                 or a directory count wrong, and nothing worse;
+#   orphans       e2fsck: an inode with no name (unattached, for
+#                 /lost+found), and nothing worse;
+#   worse         anything else e2fsck says (a name for a freed inode, a
+#                 block twice or out of range, a size, a type).
+# Prints a row a point and the table; writes OUTDIR/crash.txt the same.
+# Exit 0 when every boot ran (whatever the classes), 2 on a tool error.
+import argparse
+import hashlib
+import os
+import random
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+S = 512
+
+
+def die(m):
+    sys.stderr.write("root-crash: %s\n" % m)
+    sys.exit(2)
+
+
+def run(cmd, **kw):
+    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def replay(last):
+    """The names under /churn and their sizes after operations 0..last."""
+    x = 0x9e3779b97f4a7c15
+    M = (1 << 64) - 1
+    names = []
+    files = {}
+    dirs = set()
+    for k in range(last + 1):
+        x ^= (x << 13) & M
+        x ^= x >> 7
+        x ^= (x << 17) & M
+        r = x
+        op = r % 6
+        pick = (r >> 8) % len(names) if names else -1
+        if op == 0 or pick < 0:
+            n = "f%d" % k
+            files[n] = 1024 * (1 + (r >> 20) % 16)
+            if len(names) < 4096:
+                names.append(n)
+        elif op == 1:
+            n = names[pick]
+            if n in files:
+                files[n] += 4096
+        elif op == 2 and "/" not in names[pick]:
+            n = names[pick]
+            to = "r%d" % k
+            files[to] = files.pop(n)
+            names[pick] = to
+        elif op == 3:
+            n = names[pick]
+            files.pop(n, None)
+            names[pick] = names[-1]
+            names.pop()
+        elif op == 4:
+            d = "d%d" % k
+            dirs.add(d)
+            files[d + "/f"] = 2048
+            if len(names) < 4096:
+                names.append(d + "/f")
+        elif op == 5:
+            n = names[pick]
+            if n in files:
+                files[n] //= 2
+    want = {("/churn/" + n): ("reg", s) for n, s in files.items()}
+    for d in dirs:
+        want["/churn/" + d] = ("dir", None)
+    return want
+
+
+def tree_of(listing):
+    got = {}
+    for line in listing.splitlines():
+        f = line.split("\t")
+        if len(f) < 12 or not f[0].startswith("/churn/"):
+            continue
+        got[f[0]] = (f[1], int(f[6]) if f[1] == "reg" else None)
+    return got
+
+
+COUNTS = re.compile(r"bitmap differences|count wrong|ref count is|Padding at end of|Fix\? no$|^\s*[-+]\(?\d")
+ORPHAN = re.compile(r"Unattached (zero-length )?inode|Connect to /lost\+found|orphaned inode list")
+NOISE = re.compile(r"^(e2fsck \d|Pass \d|\S+: \d+/\d+ files|\S+ was not cleanly unmounted|\s*$|\S+: \*\*\*\*\*|Warning: skipping journal)")
+
+
+def classify(rc, out, want, got):
+    lines = [l for l in out.splitlines() if not NOISE.match(l)]
+    worse = [l for l in lines if not COUNTS.search(l) and not ORPHAN.search(l)]
+    orph = [l for l in lines if ORPHAN.search(l)]
+    cnt = [l for l in lines if COUNTS.search(l)]
+    if worse:
+        return "worse", worse[0]
+    if orph:
+        return "orphans", orph[0]
+    if cnt or rc != 0:
+        return "counts", (cnt[0] if cnt else "e2fsck exit %d" % rc)
+    if want == got:
+        return "none", ""
+    short = sorted(set(want) - set(got)) + sorted(p for p in want if p in got and want[p] != got[p])
+    return "lost writes", "%d names short or different (%s)" % (len(short), " ".join(short[:4]))
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="root-crash")
+    ap.add_argument("--kernel", required=True)
+    ap.add_argument("--probe", required=True)
+    ap.add_argument("--n", type=int, default=24)
+    ap.add_argument("--seed", type=int, default=67)
+    ap.add_argument("--ops", type=int, default=1500)
+    ap.add_argument("--firmware", default="bios")
+    ap.add_argument("out")
+    a = ap.parse_args(argv[1:])
+    out = os.path.abspath(a.out)
+    os.makedirs(out, exist_ok=True)
+    env = dict(os.environ, SOURCE_DATE_EPOCH="1700000000")
+    runl = os.path.join(out, "run")
+    open(runl, "w").write("/bin/mounts churn %d\n" % a.ops)
+    cpio = os.path.join(out, "churn.cpio")
+    r = run([sys.executable, os.path.join(HERE, "mkinitramfs"), cpio, "/bin/mounts=%s:755" % a.probe, "/etc/pax-run=%s:644" % runl])
+    if r.returncode:
+        die("mkinitramfs: %s" % r.stderr)
+    disk = os.path.join(out, "churn.img")
+    if not os.path.exists(disk):
+        r = run([os.path.join(HERE, "mkdisk"), "--gpt", "--kernel", a.kernel, "--root", cpio, "--conf",
+                 os.path.join(ROOT, "boot", "limine-initramfs.conf"), "--label", "px67-churn", "96M", disk], env=env)
+        if r.returncode:
+            die("mkdisk: %s%s" % (r.stdout[-800:], r.stderr[-800:]))
+    pr = run([os.path.join(HERE, "mkgpt"), "--print", disk]).stdout
+    p2 = [l.split() for l in pr.splitlines() if l.split()[:1] == ["2"]][0][3]
+    lo, hi = (int(v) for v in p2.split("-"))
+
+    def boot(copy, log, kill_after):
+        for f in (log, log + ".qpid"):
+            if os.path.exists(f):
+                os.unlink(f)
+        q = subprocess.Popen([os.path.join(HERE, "qemu-run"), "--firmware", a.firmware, "--serial", log, "--timeout", "300",
+                              "--boot-disk", copy, "--", "-m", "256M", "-pidfile", log + ".qpid"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        t0 = None
+        tb = te = None
+        while q.poll() is None:
+            try:
+                text = open(log, "rb").read().decode("utf-8", "replace")
+            except OSError:
+                text = ""
+            now = time.time()
+            if tb is None and "churn: begin" in text:
+                tb = now
+            if tb is not None and te is None and "churn: end" in text:
+                te = now
+            if kill_after is not None and tb is not None and now - tb >= kill_after:
+                try:
+                    os.kill(int(open(log + ".qpid").read().strip()), signal.SIGKILL)
+                except (OSError, ValueError):
+                    pass
+                q.wait()
+                break
+            if kill_after is None and re.search(r"(?m)^halt\r?$", text):
+                try:
+                    os.kill(int(open(log + ".qpid").read().strip()), signal.SIGKILL)
+                except (OSError, ValueError):
+                    pass
+                q.wait()
+                break
+            time.sleep(0.02)
+        text = open(log, "rb").read().decode("utf-8", "replace").replace("\r", "")
+        ks = [int(m) for m in re.findall(r"(?m)^churn: (\d+)$", text)]
+        return text, (ks[-1] if ks else -1), tb, te
+
+    def read_part(copy, tag):
+        part = os.path.join(out, "%s.p2" % tag)
+        with open(copy, "rb") as fi, open(part, "wb") as fo:
+            fi.seek(lo * S)
+            left = (hi - lo + 1) * S
+            while left > 0:
+                b = fi.read(min(left, 1 << 20))
+                fo.write(b)
+                left -= len(b)
+        r = run([os.path.join(HERE, "e2fs"), out, "e2fsck", "-fn", os.path.basename(part)])
+        t = run([os.path.join(HERE, "e2tree"), part])
+        st = run([os.path.join(HERE, "e2fs"), out, "dumpe2fs", "-h", os.path.basename(part)]).stdout
+        state = re.search(r"Filesystem state:\s*(.*)", st)
+        os.unlink(part)
+        return r.returncode, r.stdout + r.stderr, tree_of(t.stdout), state.group(1).strip() if state else "?"
+
+    rows = []
+    ref = os.path.join(out, "ref.img")
+    shutil.copyfile(disk, ref)
+    text, last, tb, te = boot(ref, os.path.join(out, "ref.log"), None)
+    if tb is None or te is None or last != a.ops - 1:
+        die("the uncut session did not run to its end (last %d, begin %s, end %s)" % (last, tb, te))
+    dur = te - tb
+    rc, fo, got, state = read_part(ref, "ref")
+    cls, why = classify(rc, fo, replay(last), got)
+    rows.append(("uncut", "%.2f" % dur, last, state, cls, why))
+    rng = random.Random(a.seed)
+    points = sorted(rng.uniform(0.0, dur) for _ in range(a.n))
+    for i, t in enumerate(points):
+        copy = os.path.join(out, "cut.img")
+        shutil.copyfile(disk, copy)
+        _text, last, _tb, _te = boot(copy, os.path.join(out, "cut%02d.log" % i), t)
+        rc, fo, got, state = read_part(copy, "cut%02d" % i)
+        open(os.path.join(out, "cut%02d.fsck" % i), "w").write(fo)
+        cls, why = classify(rc, fo, replay(last), got)
+        rows.append(("%d" % (i + 1), "%.2f" % t, last, state, cls, why))
+        os.unlink(copy)
+        print("root-crash: kill %2d at %6.2f s, after op %4d: %-11s %s; %s" % (i + 1, t, last, cls, state, why[:120]), flush=True)
+    os.unlink(ref)
+    classes = ["none", "lost writes", "counts", "orphans", "worse"]
+    tally = {c: sum(1 for r in rows[1:] if r[4] == c) for c in classes}
+    with open(os.path.join(out, "crash.txt"), "w") as f:
+        f.write("root-crash: %d kills (seed %d) in a %d-operation session of %.2f s (tools/root-crash, %s)\n" % (a.n, a.seed, a.ops, dur, a.firmware))
+        f.write("| kill | at (s) | last op | state | class | first finding |\n|---|---|---|---|---|---|\n")
+        for r in rows:
+            f.write("| %s | %s | %s | %s | %s | %s |\n" % (r[0], r[1], r[2], r[3], r[4], r[5].replace("|", "/")[:160]))
+        f.write("\n| class | kills |\n|---|---|\n")
+        for c in classes:
+            f.write("| %s | %d |\n" % (c, tally[c]))
+    sys.stdout.write(open(os.path.join(out, "crash.txt")).read())
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
