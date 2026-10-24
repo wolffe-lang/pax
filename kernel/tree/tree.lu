@@ -172,6 +172,7 @@ const S_GEN: u64 = 18 // px63: system calls since boot (`tick`): a volume record
 const S_VLIVE: u64 = 19 // px63: records standing for a volume's inodes (not in S_LIVE)
 const S_VEVICT: u64 = 20 // px63: of them, given back while their inode lives
 const S_VSIDE: u64 = 21 // px63: frames of the side table and the hash
+const S_ROOTM: u64 = 22 // px67: the root mount + 1 (`/` on a volume, kernel/fstab's `root=`); 0: `/` is the memory's ROOT
 
 // An inode's words.
 const I_MODE: u64 = 0
@@ -558,8 +559,15 @@ pub fn size(i: u64) -> u64 {
 
 /// A directory's parent (the root's is the root).
 pub fn parent(i: u64) -> u64 {
-    if is_vroot(i) {
-        return parent(ig(i, I_PARENT)) // px63: a volume's root: the covered directory's parent
+    let m = root_of(i)
+    if m != MOUNTS {
+        // px63: a mount's root: the covered directory's parent; px67: the
+        // root mount's root is `/`, whose parent is itself, never the
+        // memory's ROOT it covers (tests/mpx6-root's `cd /..`).
+        if st(S_ROOTM) == m + 1 {
+            return i
+        }
+        return parent(mw(m, M_POINT) - 1)
     }
     ig(i, I_PARENT)
 }
@@ -1258,8 +1266,9 @@ pub fn entry_at(d: u64, pos: u64) -> (u64, u64, u64, u64) {
 /// its length), or (0, 0) when `c` has no name there (a removed
 /// directory).
 pub fn name_of(d: u64, c: u64) -> (u64, u64) {
-    if is_vroot(c) {
-        return name_of(d, ig(c, I_PARENT)) // px63: the covered directory's name
+    let m = root_of(c)
+    if m != MOUNTS {
+        return name_of(d, mw(m, M_POINT) - 1) // px63: a mount's root: the covered directory's name
     }
     if on_volume(d) {
         if !on_volume(c) || vol(c) != vol(d) {
@@ -1756,19 +1765,31 @@ pub fn rename(od: u64, on: u64, ol: u64, nd: u64, nn: u64, nl: u64) -> u64 {
 // The volumes' frame (S_VOLF), words: the mount table, the side
 // table's frames, the hash's frames, the eviction cursor.
 const VF_MOUNT: u64 = 0 // MOUNTS records of MW words
-/// The most volumes mounted at once.
-pub const MOUNTS: u64 = 4
-const MW: u64 = 4
+/// The most mounts at once (px67: 8; px63's 4): a volume's, or (px67)
+/// a directory of the memory's mounted over a volume's (`/tmp`).
+pub const MOUNTS: u64 = 8
+const MW: u64 = 8
 const M_POINT: u64 = 0 // the covered directory + 1; 0 a free record
-const M_ROOT: u64 = 1 // the volume root's record
-const M_VOL: u64 = 2 // kernel/ext2's volume
-const M_DEV: u64 = 3 // kernel/block's disk
-const VF_SIDE: u64 = 16 // the side table's frames, SIDE_FRAMES of them
+const M_ROOT: u64 = 1 // the mount's root's record: the volume's root, or the memory's directory
+const M_VOL: u64 = 2 // kernel/ext2's volume; px67: NONE, the memory's
+const M_DEV: u64 = 3 // kernel/block's disk (a volume's)
+const M_SEQ: u64 = 4 // px67: the order it was mounted in (1, 2, …): the halt's reverse order, /proc/self/mounts' order
+const M_HOW: u64 = 5 // px67: what kernel/fstab or mount(2) asked (MH_*), for /proc/self/mounts
+const VF_SIDE: u64 = 64 // the side table's frames, SIDE_FRAMES of them
 const SIDE_FRAMES: u64 = 32 // MAX_INODES / 512
 const SIDE_PER: u64 = 512
-const VF_HASH: u64 = 48 // the hash's two frames: BUCKETS chain heads (a record + 1)
+const VF_HASH: u64 = 96 // the hash's two frames: BUCKETS chain heads (a record + 1)
 const BUCKETS: u64 = 1024
-const VF_CURSOR: u64 = 50
+const VF_CURSOR: u64 = 98
+const VF_SEQ: u64 = 99 // px67: the last mount's M_SEQ
+/// px67: M_HOW's bits: the volume is written through (`sync`); it was
+/// mounted by `root=` (its source reads `/dev/root`, as Linux names it).
+pub const MH_SYNC: u64 = 1
+pub const MH_ROOT: u64 = 2
+pub const MH_NOSUID: u64 = 4
+pub const MH_NODEV: u64 = 8
+pub const MH_NOEXEC: u64 = 16
+const M_MODE: u64 = 6 // px67: a memory mount's directory's mode as asked (`mode=`), for /proc/self/mounts
 /// Records of a volume's inodes kept while nobody holds them before the
 /// oldest are given back.
 pub const VOL_KEEP: u64 = 2048
@@ -1777,7 +1798,8 @@ pub const VOL_KEEP: u64 = 2048
 // 32-35; 0: a record of the memory), a shared writable mapping has had
 // its pages (bit 36), the record is a mount point (bit 37) and which
 // (bits 38-39), the system call it was last looked up in modulo 128
-// (bits 41-47), the hash chain's next record + 1 (bits 48-63).
+// (bits 41-47), the hash chain's next record + 1 (bits 48-63). px67:
+// which mount, bits 38-40 (MOUNTS is 8).
 const SD_VOL_SHIFT: u64 = 32
 const SD_SHARED: u64 = 0x1000000000
 const SD_POINT: u64 = 0x2000000000
@@ -1837,7 +1859,7 @@ fn is_point(i: u64) -> bool {
 }
 
 fn point_mount(i: u64) -> u64 {
-    (side(i) >> SD_MOUNT_SHIFT) & 3
+    (side(i) >> SD_MOUNT_SHIFT) & 7
 }
 
 fn is_vroot(i: u64) -> bool {
@@ -2353,6 +2375,9 @@ fn vrmdir(d: u64, name: u64, len: u64) -> u64 {
     if !is_dir(i) {
         return neg(ENOTDIR)
     }
+    if is_point(i) {
+        return neg(EBUSY) // px67: a mount covers it
+    }
     if !ext2.empty(v, n) {
         return neg(ENOTEMPTY)
     }
@@ -2384,6 +2409,9 @@ fn vrename(od: u64, on: u64, ol: u64, nd: u64, nn: u64, nl: u64) -> u64 {
         return neg(EIO)
     }
     let dir = is_dir(i)
+    if is_point(i) {
+        return neg(EBUSY) // px67: a mount covers it
+    }
     if dir && below(nd, i) {
         return neg(EINVAL)
     }
@@ -2396,6 +2424,9 @@ fn vrename(od: u64, on: u64, ol: u64, nd: u64, nn: u64, nl: u64) -> u64 {
         }
         if j == i {
             return 0
+        }
+        if is_point(j) {
+            return neg(EBUSY) // px67
         }
         if dir && !is_dir(j) {
             return neg(ENOTDIR)
@@ -2469,41 +2500,65 @@ fn dt_of(ft: u64) -> u64 {
     if ft == 1 { 8 } else if ft == 2 { 4 } else if ft == 3 { 2 } else if ft == 4 { 6 } else if ft == 5 { 1 } else if ft == 6 { 12 } else if ft == 7 { 10 } else { 0 }
 }
 
-/// px63: mount kernel/ext2's volume on disk `dev` at directory `point`
-/// (one of the memory's, not the root, not covered already), read-only
-/// when `ro`: its mount's number, or -errno (-ENOTDIR, -EBUSY, -ENOMEM,
-/// ext2's own).
-pub fn mount(point: u64, dev: u64, ro: bool) -> u64 {
-    if !is_dir(point) {
-        return neg(ENOTDIR)
+/// px67: the record `/` is: the root mount's root when `/` is on a
+/// volume (`root=`, kernel/fstab's `mount_root`), else the memory's ROOT.
+/// kernel/files starts every absolute path here.
+pub fn top() -> u64 {
+    let r = st(S_ROOTM)
+    if r == 0 { ROOT } else { mw(r - 1, M_ROOT) }
+}
+
+/// px67: whether `/` is on a volume.
+pub fn root_on_volume() -> bool {
+    st(S_ROOTM) != 0
+}
+
+/// px67: the mount whose root record `i` is (a volume's root, or the
+/// memory's directory a memory mount puts over a volume's), or MOUNTS.
+fn root_of(i: u64) -> u64 {
+    if st(S_VOLF) == 0 {
+        return MOUNTS
     }
-    if !vol_ready() {
-        return neg(ENOMEM)
-    }
-    if point == ROOT || on_volume(point) || is_point(point) {
-        return neg(EBUSY)
-    }
-    var m = MOUNTS
     var k: u64 = 0
     while k < MOUNTS {
-        if mw(k, M_POINT) == 0 && m == MOUNTS {
-            m = k
+        if mw(k, M_POINT) != 0 && mw(k, M_ROOT) == i {
+            return k
         }
         k += 1
     }
-    if m == MOUNTS {
-        return neg(EBUSY)
+    MOUNTS
+}
+
+/// px67: whether record `i` is a mount's root (kernel/files: removing or
+/// renaming it is -EBUSY).
+pub fn is_mount_root(i: u64) -> bool {
+    root_of(i) != MOUNTS
+}
+
+/// px67: the mount record `i` is the root of, or NONE.
+pub fn mount_of_root(i: u64) -> u64 {
+    let m = root_of(i)
+    if m == MOUNTS { NONE } else { m }
+}
+
+fn free_mount() -> u64 {
+    var k: u64 = 0
+    while k < MOUNTS {
+        if mw(k, M_POINT) == 0 {
+            return k
+        }
+        k += 1
     }
-    let v = ext2.mount(dev, ro, now_s())
-    if failed(v) {
-        return v
-    }
+    MOUNTS
+}
+
+/// The record standing for volume `v`'s root, made for its mount.
+fn vroot_new(v: u64) -> u64 {
     let md = ext2.mode(v, ext2.ROOT_INO)
     let (u, g) = ext2.owner(v, ext2.ROOT_INO)
     let r = inode_new(md, u, g)
     if r == NONE {
-        let _u = ext2.unmount(v, now_s())
-        return neg(ENOMEM)
+        return NONE
     }
     put_st(S_LIVE, st(S_LIVE) - 1)
     put_st(S_VLIVE, st(S_VLIVE) + 1)
@@ -2511,6 +2566,13 @@ pub fn mount(point: u64, dev: u64, ro: bool) -> u64 {
     ip(r, I_NLINK, ext2.nlink(v, ext2.ROOT_INO))
     put_side(r, ext2.ROOT_INO | ((v + 1) << SD_VOL_SHIFT) | (rd(b) << SD_NEXT_SHIFT))
     wr(b, r + 1)
+    r
+}
+
+/// Mount `m` takes root record `r` over directory `point`: the point is
+/// held and marked, the root held by the mount (px63's rule), the order
+/// it came in kept (px67).
+fn attach(m: u64, point: u64, r: u64, v: u64, dev: u64, how: u64) -> u64 {
     ip(r, I_PARENT, point)
     hold(r) // the mount's
     hold(point)
@@ -2519,18 +2581,287 @@ pub fn mount(point: u64, dev: u64, ro: bool) -> u64 {
     put_mw(m, M_ROOT, r)
     put_mw(m, M_VOL, v)
     put_mw(m, M_DEV, dev)
+    put_vf(VF_SEQ, vf(VF_SEQ) + 1)
+    put_mw(m, M_SEQ, vf(VF_SEQ))
+    put_mw(m, M_HOW, how)
+    put_mw(m, M_MODE, 0)
     m
 }
 
+/// Whether directory `point` may be covered: a directory, not covered
+/// already, not a mount's root itself (px67: no mount is stacked on
+/// another's root), and the volumes' frame there: 0 or -errno.
+fn coverable(point: u64) -> u64 {
+    if !is_dir(point) {
+        return neg(ENOTDIR)
+    }
+    if !vol_ready() {
+        return neg(ENOMEM)
+    }
+    if point == ROOT || is_point(point) || is_mount_root(point) {
+        return neg(EBUSY)
+    }
+    0
+}
+
+/// px63: mount kernel/ext2's volume on disk `dev` at directory `point`
+/// (px67: the memory's or a volume's, not `/`, not covered already, not
+/// a mount's root), read-only when `ro`, written through when `how` has
+/// MH_SYNC: its mount's number, or -errno (-ENOTDIR, -EBUSY, -ENOMEM,
+/// ext2's own).
+pub fn mount(point: u64, dev: u64, ro: bool, how: u64) -> u64 {
+    let c = coverable(point)
+    if c != 0 {
+        return c
+    }
+    let m = free_mount()
+    if m == MOUNTS {
+        return neg(EBUSY)
+    }
+    let v = ext2.mount(dev, ro, now_s())
+    if failed(v) {
+        return v
+    }
+    let r = vroot_new(v)
+    if r == NONE {
+        let _u = ext2.unmount(v, now_s())
+        return neg(ENOMEM)
+    }
+    attach(m, point, r, v, dev, how)
+}
+
+/// px67: `/` on volume `dev` (kernel/fstab's `root=`, before the first
+/// program): the volume's root covers the memory's ROOT, and every path
+/// starts there from now on (`top`). Once, at boot: -EBUSY after.
+pub fn mount_root(dev: u64, ro: bool, how: u64) -> u64 {
+    if st(S_ROOTM) != 0 || !ready() {
+        return neg(EBUSY)
+    }
+    if !vol_ready() {
+        return neg(ENOMEM)
+    }
+    let m = free_mount()
+    if m == MOUNTS {
+        return neg(EBUSY)
+    }
+    let v = ext2.mount(dev, ro, now_s())
+    if failed(v) {
+        return v
+    }
+    let r = vroot_new(v)
+    if r == NONE {
+        let _u = ext2.unmount(v, now_s())
+        return neg(ENOMEM)
+    }
+    let k = attach(m, ROOT, r, v, dev, how | MH_ROOT)
+    put_st(S_ROOTM, k + 1)
+    k
+}
+
+/// px67 (R-px67-1): a directory of the memory's mounted over directory
+/// `point` of a volume (`/tmp`, as a distribution's tmpfs), mode `perm`,
+/// root's: its mount's number, or -errno. Its files are the memory's:
+/// gone at the next boot.
+pub fn mount_mem(point: u64, perm: u64) -> u64 {
+    let c = coverable(point)
+    if c != 0 {
+        return c
+    }
+    let m = free_mount()
+    if m == MOUNTS {
+        return neg(EBUSY)
+    }
+    let r = inode_new(S_IFDIR | (perm & 0xfff), 0, 0)
+    if r == NONE {
+        return neg(ENOMEM)
+    }
+    ip(r, I_NLINK, 2)
+    attach(m, point, r, NONE, NONE, 0)
+}
+
 /// px63: mount `m`'s volume (kernel/ext2's number), or NONE when the
-/// mount is free.
+/// mount is free or (px67) the memory's.
 pub fn mounted(m: u64) -> u64 {
     if st(S_VOLF) == 0 || m >= MOUNTS || mw(m, M_POINT) == 0 { NONE } else { mw(m, M_VOL) }
+}
+
+/// px67: whether mount `m` is in use (a volume's or the memory's).
+pub fn in_use(m: u64) -> bool {
+    st(S_VOLF) != 0 && m < MOUNTS && mw(m, M_POINT) != 0
 }
 
 /// px63: mount `m`'s covered directory.
 pub fn mount_point(m: u64) -> u64 {
     mw(m, M_POINT) - 1
+}
+
+/// px67: mount `m`'s root record, its disk (NONE for the memory's), its
+/// order and what it was asked (MH_*).
+pub fn mount_root_rec(m: u64) -> u64 {
+    mw(m, M_ROOT)
+}
+
+pub fn mount_dev(m: u64) -> u64 {
+    mw(m, M_DEV)
+}
+
+pub fn mount_seq(m: u64) -> u64 {
+    mw(m, M_SEQ)
+}
+
+pub fn mount_how(m: u64) -> u64 {
+    mw(m, M_HOW)
+}
+
+/// px67: what mount `m`'s line says it was asked (MH_*), kernel/fstab's
+/// `/` and `tmpfs` lines and mount(2) setting it after the mount.
+pub fn set_how(m: u64, how: u64) {
+    if in_use(m) {
+        put_mw(m, M_HOW, how | (mw(m, M_HOW) & MH_ROOT))
+    }
+}
+
+/// px67: a memory mount's mode as asked, and the one it was given.
+pub fn set_mode_of(m: u64, mode: u64) {
+    if in_use(m) {
+        put_mw(m, M_MODE, mode)
+    }
+}
+
+pub fn mode_of(m: u64) -> u64 {
+    mw(m, M_MODE)
+}
+
+/// px67: whether `/` (`top`) has a directory named `name`: the disk's
+/// /dev, /proc and /sys the kernel's own trees are mounted over.
+pub fn top_has(name: str) -> bool {
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        return false
+    }
+    let b = pa + hh()
+    var n: u64 = 0
+    for c in name.bytes() {
+        if n < 64 {
+            // # Safety: a byte of the frame just taken, through the HHDM.
+            unsafe { ((b + n) as *u8).write_volatile((c as int) as u8) }
+        }
+        n += 1
+    }
+    let c = lookup(top(), b, n)
+    frames.free(pa)
+    c != NONE && is_dir(c)
+}
+
+/// px67: whether mount `m` is `/`'s.
+pub fn is_root_mount(m: u64) -> bool {
+    st(S_ROOTM) == m + 1
+}
+
+/// px67: the mount in use with the least order above `after` (0: the
+/// first), or MOUNTS: /proc/self/mounts' lines in the order they came.
+pub fn mount_after(after: u64) -> u64 {
+    var best = MOUNTS
+    var k: u64 = 0
+    while k < MOUNTS {
+        if in_use(k) && mw(k, M_SEQ) > after && (best == MOUNTS || mw(k, M_SEQ) < mw(best, M_SEQ)) {
+            best = k
+        }
+        k += 1
+    }
+    best
+}
+
+/// px67: let go of every record of volume `v` nobody holds, again and
+/// again (a directory's record holds its parent's), but its root `r`:
+/// whether any other is left (something holds it: an open file, a
+/// working directory, a program running from it, a mount on it).
+fn shed(v: u64, r: u64) -> bool {
+    var more = true
+    var guard: u64 = 0
+    while more && guard < 64 {
+        more = false
+        var i: u64 = 0
+        while i < st(S_NEXT) {
+            let sd = side(i)
+            if i != r && (sd >> SD_VOL_SHIFT) & 0xf == v + 1 && ig(i, I_MODE) != 0 && ig(i, I_REFS) == 0 && sd & SD_POINT == 0 {
+                vdrop(i)
+                more = true
+            }
+            i += 1
+        }
+        guard += 1
+    }
+    var i: u64 = 0
+    while i < st(S_NEXT) {
+        if i != r && (side(i) >> SD_VOL_SHIFT) & 0xf == v + 1 && ig(i, I_MODE) != 0 {
+            return true
+        }
+        i += 1
+    }
+    false
+}
+
+/// px67: `umount2(2)` of mount `m` (not `/`'s: kernel/files remounts it
+/// read-only instead, as Linux answers): -EBUSY while anything of it is
+/// held (beyond the mount's own hold of its root) or, for the memory's,
+/// while its directory has an entry; else the volume written, marked
+/// clean when it was clean at the mount, and let go: 0 or -EIO.
+pub fn unmount(m: u64) -> u64 {
+    if !in_use(m) {
+        return neg(EINVAL)
+    }
+    if is_root_mount(m) {
+        return neg(EBUSY)
+    }
+    let r = mw(m, M_ROOT)
+    let point = mw(m, M_POINT) - 1
+    let v = mw(m, M_VOL)
+    var e: u64 = 0
+    if v == NONE {
+        if ig(r, I_REFS) > 1 || ig(r, I_ENTRIES) != 0 {
+            return neg(EBUSY)
+        }
+        ip(r, I_REFS, 0)
+        ip(r, I_NLINK, 0)
+        ip(r, I_PARENT, r) // the point is let go below, once
+        put_mw(m, M_POINT, 0)
+        inode_free(r)
+    } else {
+        if shed(v, r) || ig(r, I_REFS) > 1 {
+            return neg(EBUSY)
+        }
+        writeback(r)
+        cut(r, 0)
+        e = ext2.unmount(v, now_s())
+        unhash(r)
+        put_side(r, 0)
+        ip(r, I_MODE, 0)
+        ip(r, I_REFS, 0)
+        ip(r, I_NEXT, st(S_FREE))
+        put_st(S_FREE, r + 1)
+        put_st(S_VLIVE, st(S_VLIVE) - 1)
+        put_mw(m, M_POINT, 0)
+    }
+    put_side(point, side(point) & !(SD_POINT | (7 << SD_MOUNT_SHIFT)))
+    release(point)
+    e
+}
+
+/// px67: `mount(2)`'s MS_REMOUNT of mount `m`'s volume, read-only when
+/// `ro` (kernel/files refuses it -EBUSY first while a file of it is open
+/// for writing, as Linux does): every shared page written, then
+/// kernel/ext2's `remount`. 0 or -errno; -EINVAL for the memory's.
+pub fn remount(m: u64, ro: bool) -> u64 {
+    if !in_use(m) {
+        return neg(EINVAL)
+    }
+    let v = mw(m, M_VOL)
+    if v == NONE {
+        return if ro { neg(EINVAL) } else { 0 }
+    }
+    writeback_vol(v)
+    ext2.remount(v, ro, now_s())
 }
 
 fn writeback_vol(v: u64) {
@@ -2576,23 +2907,99 @@ pub fn sync_of(i: u64) -> u64 {
 
 /// px63: the end (a halt, a reboot): every volume's shared pages and
 /// dirty blocks written, marked clean, flushed and let go: 0 or the
-/// first -EIO. The records stay: nothing runs after.
+/// first -EIO. The records stay: nothing runs after. px67: in the
+/// reverse of the order they were mounted, `/` last (the root's is the
+/// first mount): each written, then marked clean, then flushed, as a
+/// remount read-only would leave it, so a volume another is mounted on
+/// is let go after it.
 pub fn halt_volumes() -> u64 {
     var err: u64 = 0
-    var m: u64 = 0
-    while m < MOUNTS {
-        let v = mounted(m)
+    var guard: u64 = 0
+    while guard <= MOUNTS {
+        var last = MOUNTS
+        var k: u64 = 0
+        while k < MOUNTS {
+            if in_use(k) && (last == MOUNTS || mw(k, M_SEQ) > mw(last, M_SEQ)) {
+                last = k
+            }
+            k += 1
+        }
+        if last == MOUNTS {
+            break
+        }
+        let v = mw(last, M_VOL)
         if v != NONE {
             writeback_vol(v)
             let r = ext2.unmount(v, now_s())
             if r != 0 && err == 0 {
                 err = r
             }
-            put_mw(m, M_POINT, 0)
         }
-        m += 1
+        put_mw(last, M_POINT, 0)
+        guard += 1
     }
     err
+}
+
+/// px67: the regular file at the absolute path `path` (from `/`, `top`:
+/// on the disk when `/` is; through mounts, no link followed) read whole
+/// into a frame of its own, for the tables the kernel reads before the
+/// first program (kmain_console's /etc/pax-run, kernel/fstab's
+/// /etc/fstab): (its kernel address, its length, 0); the third word says
+/// why there is none: 1 no such regular file, 2 longer than a page (the
+/// length then its size), 3 no frame. The frame is never given back.
+pub fn small_file(path: str) -> (u64, u64, u64) {
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        return (0, 0, 3)
+    }
+    let b = pa + hh()
+    var n: u64 = 0
+    for c in path.bytes() {
+        if n < PAGE {
+            // # Safety: a byte of the frame just taken, through the HHDM.
+            unsafe { ((b + n) as *u8).write_volatile((c as int) as u8) }
+        }
+        n += 1
+    }
+    var d = top()
+    var i: u64 = 0
+    var f = NONE
+    var gone = false
+    while i < n && !gone {
+        while i < n && rd8(b + i) == 47 {
+            i += 1
+        }
+        if i >= n {
+            break
+        }
+        let s0 = i
+        while i < n && rd8(b + i) != 47 {
+            i += 1
+        }
+        if !is_dir(d) {
+            gone = true
+        } else {
+            let c = lookup(d, b + s0, i - s0)
+            if c == NONE {
+                gone = true
+            } else {
+                f = c
+                d = c
+            }
+        }
+    }
+    if gone || f == NONE || !is_regular(f) {
+        frames.free(pa)
+        return (0, 0, 1)
+    }
+    let sz = bytes(f)
+    if sz > PAGE {
+        frames.free(pa)
+        return (0, sz, 2)
+    }
+    read_page(f, 0, b)
+    (b, sz, 0)
 }
 
 /// px63: `statfs`'s field `w` (kernel/ext2's `statfs` numbering) for the
