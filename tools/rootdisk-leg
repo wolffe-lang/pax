@@ -33,11 +33,12 @@ mapfile -t isos < <(find "$images" -name '*.iso' | sort)
 "$PAX_ROOT/tools/qemu-rootdisk" --prepare "${isos[@]}" || die "tools/qemu-rootdisk --prepare failed"
 leg=$PAX_BUILD/disk
 rm -rf "$leg"; mkdir -p "$leg"
-rc=0
-PAX_ROOTDISK=1 PAX_QEMU=$PAX_ROOT/tools/qemu-rootdisk PAX_BUILD=$leg "$PAX_ROOT/tests/$suite" --images "$images" "$@" || rc=$?
+PAX_ROOTDISK=1 PAX_QEMU=$PAX_ROOT/tools/qemu-rootdisk PAX_BUILD=$leg "$PAX_ROOT/tests/$suite" --images "$images" "$@" 2>&1 | tee "$leg/$suite.out"
+rc=${PIPESTATUS[0]}
 q=$(find "$leg" -name '*.qemu.log' -exec cat {} + 2>/dev/null)
 n=$(printf '%s\n' "$q" | grep -c 'as a disk with / on partition 2')
 m=$(printf '%s\n' "$q" | grep -c 'left as it is')
-say "$suite with / on a disk: $n boots through tools/qemu-rootdisk, $m left as they were; the suite's exit $rc"
+k=$(grep -c "^$suite: SKIP .*rootdisk" "$leg/$suite.out")
+say "$suite with / on a disk: $n boots through tools/qemu-rootdisk, $m left as they were, $k rows said SKIP for the disk; the suite's exit $rc"
 [ "$n" -gt 0 ] || { say "no boot of $suite went through a disk"; exit 1; }
 exit "$rc"
