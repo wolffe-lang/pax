@@ -6,7 +6,7 @@
 #   tools/linux-root [--kernel VMLINUZ] [--accel tcg|kvm] [--root SPEC]
 #                    [--opts "rw|ro ..."] [--init-args "ARGS"] [--disk IMAGE]
 #                    [--kill ERE] [--timeout S] [--append ARGS]
-#                    [--initrd] OUTDIR PROBE
+#                    [--fstype ext2|ext3|none] [--initrd] OUTDIR PROBE
 #
 # Without --disk it makes OUTDIR/disk.img (64 MiB), laid out as PAX's
 # disk that boots (tools/mkdisk --gpt) with one more partition for the
@@ -27,6 +27,11 @@
 # OUTDIR/host.txt. The serial log is OUTDIR/serial.log (carriage returns
 # removed); --append ARGS adds to the kernel's command line (e.g.
 # `loglevel=7`, so the root mount's own lines reach the console).
+# --fstype (px68): the root's type, `rootfstype=` on the command line
+# (default ext2; `none` leaves the word out, so the kernel tries its own
+# list); ext3 makes the stage's root volume with a journal (tools/mkdisk
+# --journal), and the host's lines then name the journal's state too
+# (needs_recovery, the journal's sequence and start).
 # --initrd boots with no `root=` at all: the root is an initramfs
 # (tools/mkinitramfs) holding the same tree, PROBE as `/init`, the
 # disk still given (the shape of PAX's ISO path). Exit 0 when the guest said `mounts: init done` (or, with
@@ -45,6 +50,7 @@ kill_ere=
 tmo=300
 append=
 initrd=0
+fstype=ext2
 while [ $# -gt 0 ]; do
     case $1 in
         --kernel) kernel=$2; shift 2 ;;
@@ -57,6 +63,7 @@ while [ $# -gt 0 ]; do
         --timeout) tmo=$2; shift 2 ;;
         --append) append=" $2"; shift 2 ;;
         --initrd) initrd=1; shift ;;
+        --fstype) fstype=$2; shift 2 ;;
         -*) die "unknown option $1" ;;
         *) break ;;
     esac
@@ -79,7 +86,9 @@ if [ -z "$disk" ]; then
     printf '/ 755 0 0\n/sbin/init 755 0 0\n/tmp 1777 0 0\n' > "$st/attrs"
     # 1: LBA 2048.. (8 MiB) ESP-typed, 2: root 24 MiB, 3: BIOS 1 MiB, 4: 8 MiB ext2.
     p1=(4096 20479); p2=(20480 69631); p3=(2048 4095); p4=(69632 86015)
-    "$here/mkdisk" --from "$st/tree" --attrs "$st/attrs" --label px67-root $(( (p2[1] - p2[0] + 1) * S )) "$st/root.img" > "$st/mkdisk-root.txt"
+    jn=()
+    [ "$fstype" = ext3 ] && jn=(--journal)
+    "$here/mkdisk" --from "$st/tree" --attrs "$st/attrs" --label px67-root ${jn[@]+"${jn[@]}"} $(( (p2[1] - p2[0] + 1) * S )) "$st/root.img" > "$st/mkdisk-root.txt"
     "$here/mkdisk" --label px67-vol $(( (p4[1] - p4[0] + 1) * S )) "$st/vol.img" > "$st/mkdisk-vol.txt"
     rm -f "$disk"; truncate -s 64M "$disk"
     dd if="$st/root.img" of="$disk" bs=$S seek=${p2[0]} conv=notrunc status=none
@@ -92,7 +101,8 @@ acc=(-accel tcg)
 [ "$accel" = tcg ] && acc+=(-cpu max)
 log=$out/serial.raw
 rm -f "$log" "$out/qemu.pid"
-kargs="console=ttyS0 root=$root rootfstype=ext2 $opts init=/sbin/init panic=-1$append -- $iargs"
+case $fstype in ext2|ext3) rft=" rootfstype=$fstype" ;; none) rft= ;; *) die "--fstype takes ext2, ext3 or none" ;; esac
+kargs="console=ttyS0 root=$root$rft $opts init=/sbin/init panic=-1$append -- $iargs"
 rd=()
 if [ $initrd = 1 ]; then
     python3 "$here/mkinitramfs" "$out/initrd.cpio" /init="$probe":755 /proc/:555 /sys/:555 /dev/:755 /tmp/:1777 /mnt/ \
@@ -131,7 +141,9 @@ tr -d '\r' < "$log" > "$out/serial.log"
         if [ $p = 2 ]; then first=20480; cnt=49152; else first=69632; cnt=16384; fi
         dd if="$disk" of="$out/part$p.img" bs=$S skip="$first" count="$cnt" status=none
         echo "partition $p (LBA $first):"
-        "$here/e2fs" "$out" dumpe2fs -h "part$p.img" 2>/dev/null | grep -E '^(Filesystem state|Mount count|Last mount time|Last write time):' | sed 's/^/  /' || true
+        hdr='Filesystem state|Mount count|Last mount time|Last write time'
+        [ "$fstype" = ext3 ] && hdr="$hdr|Filesystem features|Journal sequence|Journal start"
+        "$here/e2fs" "$out" dumpe2fs -h "part$p.img" 2>/dev/null | grep -E "^($hdr):" | sed 's/^/  /' || true
         rc=0
         "$here/e2fs" "$out" e2fsck -fn "part$p.img" > "$out/e2fsck$p.txt" 2>&1 || rc=$?
         echo "  e2fsck -fn: exit $rc: $(tail -n 1 "$out/e2fsck$p.txt")"
