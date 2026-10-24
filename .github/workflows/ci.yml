@@ -3762,6 +3762,77 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px68: the journal for `/` (ext3): kernel/journal's commits in the
+  # order QEMU's own trace of the disk records, its replay held to
+  # e2fsck -fy's on journals tools/mkjournal writes and on a power cut's,
+  # the refusals by name, and a crash row gated (4 kills of 600
+  # operations in tier pr, 12 of 1,500 and the torn row in the full and
+  # all tiers); the Linux side is the record made on kasumi
+  # (tests/mpx6-journal.d/linux/, Linux 7.3.0 with an ext3 root).
+  mpx6-journal:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-journal')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+      PAX_JOURNAL_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          qemu-system-x86_64 --version
+          qemu-system-x86_64 -trace help | grep -c virtio_blk
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx6-journal-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: e2fsprogs, and the partition and FAT tools, from the image and the packages pinned by digest
+        run: |
+          docker pull docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+          PAX_ENGINE=docker tools/e2fs --version
+          PAX_ENGINE=docker tools/disktools --version
+
+      - name: the journal against e2fsprogs', QEMU's trace and the guest's; the plan's legs
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+        run: tests/mpx6-journal $PAX_LEGS
+
+      - name: keep the sessions, the traces' verdicts, the crash rows
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-journal
+          path: |
+            build/mpx6-journal/*/kmain_console.elf
+            build/mpx6-journal/*/*.log
+            build/mpx6-journal/*/disks/*.mkdisk.txt
+            build/mpx6-journal/linux/how
+            build/mpx6-journal-*/*.jorder
+            build/mpx6-journal-*/*.spec
+            build/mpx6-journal-*/crash/crash.txt
+            build/mpx6-journal-*-crash.txt
+            build/mpx6-journal-*.serial.log
+            build/mpx6-journal-*.verdict
+            build/mpx6-journal-runs.txt
+
   tier:
     name: tier ${{ needs.plan.outputs.tier || 'unplanned' }}
     if: ${{ !cancelled() }}
@@ -3813,6 +3884,7 @@ jobs:
       - mpx6-ext2
       - mpx6-part
       - mpx6-root
+      - mpx6-journal
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # The issue step's token may write issues; nothing else.
