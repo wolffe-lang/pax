@@ -28,9 +28,10 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   remounted read-only and read-write, a volume or a tmpfs mounted at a
   directory and unmounted, Linux's errors, EPERM for users, MNT_DETACH
   refused by name (no program asks: the census). The end now ends
-  every process: SIGTERM, a grace of 2 s, SIGKILL (R-px67-4), init
-  included, then every volume unmounted in reverse mount order, `/`
-  last and marked clean; kmain_session gains the disk and the end as
+  every process left (at init's end, after a second for what ends of
+  itself): SIGTERM, a grace of 2 s, SIGKILL (R-px67-4), init included,
+  then every volume unmounted in reverse mount order, `/` last and
+  marked clean, and the disk's books before init's line; kmain_session gains the disk and the end as
   kmain_console has them. A power cut leaves `/` not clean and the next
   boot mounts it read-write saying so once (R-px67-5). `tests/mpx6-root`
   holds it to Linux booted the same way under QEMU and to e2fsprogs;
