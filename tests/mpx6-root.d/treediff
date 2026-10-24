@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+# tests/mpx6-root.d/treediff — the two trees of R4 (px67): what the
+# initramfs holds, read from its newc headers (tools/mkinitramfs' own
+# list: each entry's type, mode, owner, modification time, size and
+# bytes), and what partition 2 holds, as the host's debugfs reads it
+# (tools/e2tree's listing). Both written out, one line a name:
+#
+#   PATH TYPE MODE UID GID MTIME SIZE WHAT
+#
+# (WHAT a file's sha256, a link's `-> target` (e2tree's spelling), a directory's `-`; a
+# directory's size is each store's own and is left out, `-`), then
+# compared. The volume holds five names more where the archive has
+# none: the directories the kernel mounts its own trees over (/dev,
+# /proc, /sys) and /tmp's (tools/mkdisk --root's MOUNT_POINTS), and
+# /lost+found, mkfs's (a directory, 700, root's).
+#
+#   treediff CPIO E2TREE-LISTING OUT-PREFIX
+#
+# Writes OUT-PREFIX.archive and OUT-PREFIX.volume; prints `treediff: N
+# names, 0 differences` or each difference; exit 0 when equal, 1 not.
+import hashlib
+import sys
+
+MOUNT_POINTS = {"/dev": "755", "/proc": "555", "/sys": "555", "/tmp": "1777", "/lost+found": "700"}
+
+
+def archive(path):
+    b = open(path, "rb").read()
+    o = 0
+    out = {}
+    while o + 110 <= len(b):
+        f = [int(b[o + 6 + 8 * k:o + 14 + 8 * k], 16) for k in range(13)]
+        mode, uid, gid, mtime, size, ns = f[1], f[2], f[3], f[5], f[6], f[11]
+        name = b[o + 110:o + 110 + ns - 1].decode()
+        o = (o + 110 + ns + 3) & ~3
+        data = b[o:o + size]
+        o = (o + size + 3) & ~3
+        if name == "TRAILER!!!":
+            break
+        p = "/" + name.strip("/")
+        t = mode & 0o170000
+        if t == 0o040000:
+            out[p] = ("dir", "%o" % (mode & 0o7777), uid, gid, mtime, "-", "-")
+        elif t == 0o100000:
+            out[p] = ("reg", "%o" % (mode & 0o7777), uid, gid, mtime, str(size), hashlib.sha256(data).hexdigest())
+        elif t == 0o120000:
+            out[p] = ("lnk", "777", uid, gid, mtime, str(size), "-> " + data.decode())
+    return out
+
+
+def volume(path):
+    out = {}
+    for line in open(path).read().splitlines():
+        f = line.split("\t")
+        if len(f) < 12:
+            continue
+        p, t, mode, uid, gid, _links, size, _blocks, _at, mt, _ct, what = f[:12]
+        sec = int(float(mt.split(".")[0])) if mt else 0
+        out[p] = (t, mode.lstrip("0") or "0", int(uid), int(gid), sec, "-" if t == "dir" else size, what)
+    return out
+
+
+def main(argv):
+    if len(argv) != 4:
+        sys.stderr.write("usage: treediff CPIO E2TREE-LISTING OUT-PREFIX\n")
+        return 2
+    a = archive(argv[1])
+    v = volume(argv[2])
+    a.pop("/", None)
+    v.pop("/", None)
+    with open(argv[3] + ".archive", "w") as f:
+        for p in sorted(a):
+            f.write("%s %s %s %d %d %d %s %s\n" % ((p,) + a[p]))
+    with open(argv[3] + ".volume", "w") as f:
+        for p in sorted(v):
+            f.write("%s %s %s %d %d %d %s %s\n" % ((p,) + v[p]))
+    diffs = []
+    for p in sorted(set(a) | set(v)):
+        if p not in v:
+            diffs.append("%s: in the archive only" % p)
+        elif p not in a:
+            if p in MOUNT_POINTS and v[p][0] == "dir" and v[p][1] == MOUNT_POINTS[p]:
+                continue  # the volume's own mount point
+            diffs.append("%s: on the volume only" % p)
+        else:
+            x, y = a[p], v[p]
+            for k, what in enumerate(("type", "mode", "uid", "gid", "mtime", "size", "bytes")):
+                if str(x[k]).lstrip("0") != str(y[k]).lstrip("0") and not (what == "mode" and x[k] == y[k]):
+                    diffs.append("%s: %s %s in the archive, %s on the volume" % (p, what, x[k], y[k]))
+    extra = sorted(p for p in v if p not in a)
+    if diffs:
+        for d in diffs[:40]:
+            print("treediff: " + d)
+        print("treediff: %d names, %d differences" % (len(a), len(diffs)))
+        return 1
+    print("treediff: %d names, 0 differences; the volume's own: %s" % (len(a), " ".join(extra) or "none"))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

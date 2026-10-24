@@ -683,10 +683,42 @@ past 65,000 links, EFBIG past ext2's largest file, ENOSPC when the
 volume's blocks or inodes run out. `fallocate(2)` on a volume's file
 answers as the tree does (a punched range's blocks zeroed in place and
 kept); what Linux's ext2 answers there was not measured (the note's
-limits). `mount(2)` and `umount2(2)` stay as
+limits). `mount(2)` and `umount2(2)` stayed as
 px45 left them: -EPERM for a user, refused by name for root
 (-EOPNOTSUPP): the mounts are the kernel's, from `/etc/fstab`
-(R-px63-1).
+(R-px63-1). px67 serves them (the next section).
+
+## Served since px04: root on the disk (px67)
+
+The census first: no program PAX carries asks for `mount(2)` or
+`umount2(2)`. Searched at their pins: boreutils (`12de639`), pelt
+(`57ffef9`), lope (`bc38867`), aspen, scent, yew, wolf-std and the mpx5
+suites' probes; px04's 127-call union has neither (its one file-system
+query is sshd's `fstatfs`). boreutils has no `df` at its pin (an issue
+for boreutils: `statfs` and `statvfs` below are what one would ask). So
+px67 serves what a distribution's boot and its operator ask: remounting
+`/` read-only and read-write, a volume mounted at a directory and
+unmounted; MNT_DETACH, which nothing asks for, is refused by name. Each
+row is held to Linux 7.2.8 booted with its root on an ext2 partition
+and px67's probe as init (`tests/mpx6-root`, `user/elf/mounts.c`,
+`tools/linux-root`), as root and as a user.
+
+| nr | call | served | refused by name |
+|---:|---|---|---|
+| 165 | `mount` | root: MS_REMOUNT of `/` or of a volume's root, read-only (every block written and flushed first; -EBUSY while a file of it is open for writing; the clean flag written) and read-write (a mount counted, as Linux counts it); a block device (`/dev/vda4`) of ext2 at a directory, and a tmpfs at one; MS_RDONLY, MS_NOSUID, MS_NODEV and MS_NOEXEC kept for the tables; the old magic number in the flags' top half ignored, as Linux ignores it; -EBUSY for a device already mounted or a directory already covered, -EINVAL for MS_REMOUNT of a directory that is no mount's root, -ENOTDIR for a target that is a file, -ENOENT for a missing one, -ENOTBLK for a source that is no block device, -ENODEV for an unknown type, -EFAULT, -EROFS for a change on a read-only mount afterwards; a user -EPERM | MS_BIND, MS_MOVE and the propagation flags (-EINVAL); proc, sysfs and devtmpfs by mount(2), and any mount inside the kernel's own trees (-EINVAL): they are the kernel's |
+| 166 | `umount2` | root: a volume's or a tmpfs's mount point: every block written and flushed, the clean flag written, the directory uncovered; -EBUSY while a working directory or an open file is in it, and for a tmpfs that still holds entries (a limit: Linux unmounts it and drops them); -EINVAL for a directory that is no mount's root and for a flag outside MNT_FORCE, MNT_DETACH, MNT_EXPIRE and UMOUNT_NOFOLLOW (before the path, as measured); -ENOENT for a missing path (before -EPERM, as Linux checks); `umount2("/")` remounts `/` read-only and answers 0, as Linux's does; MNT_FORCE and MNT_EXPIRE taken as a plain unmount (not measured on the guest: a limit); a user -EPERM | MNT_DETACH (-EINVAL: nothing asks for it); /dev, /proc and /sys (-EBUSY: the kernel's) |
+| 169 | `reboot` | px63's, and since px67 the end: every process sent SIGTERM, then SIGKILL after a grace of 2 s (R-px67-4), then every volume written and unmounted in the reverse of its mount order, `/` last, marked clean | as px63 |
+
+And the files that answer for them, each in Linux's shape:
+`/proc/self/mounts` and `/proc/<pid>/mounts` (`/dev/root / ext2
+rw,relatime 0 0`, then devtmpfs, proc, sysfs, the tmpfs and each
+volume; `rootfs / rootfs rw,…` when `/` is the initramfs),
+`/proc/self/mountinfo` (ids, parents, the device's numbers, the root,
+the point, the options, `-`, the type, the source, the super options;
+a space, a tab, a newline and a backslash escaped as octal),
+`/proc/mounts` a link to `self/mounts` and `/etc/mtab` the image's link
+to `../proc/self/mounts`; and `statfs`, `fstatfs` and `statvfs` of `/`
+the volume's (px63's fields, ST_RDONLY after a remount read-only).
 
 ## Served since px04: boreutils' new utilities (px65)
 

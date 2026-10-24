@@ -64,6 +64,9 @@
 # its first failure. The UEFI leg needs OVMF: SKIPPED LOUDLY without it
 # unless PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0
 # when every assertion held, 1 otherwise, 2 on a usage or tool error.
+# px67: with PAX_ROOTDISK=1 (tools/rootdisk-leg: the images booted
+# again with / on a disk) T4, the memory tree's frames census, says SKIP
+# by name: the block layer's cache keeps the frames a session read.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
@@ -280,9 +283,13 @@ for leg in $legs; do
             [ "$kl" = 0 ] || why+=" $kl killed: $(grep -m2 ' killed: ' "$norm" | tr '\n' '|');"
             [ -z "$why" ] && say "PASS T3 $id: -ENOSYS only for 273 and 334; refused: ${rf:-nothing}; nobody killed" || bad "T3 $id:$why"
 
-            # T4: every frame back, and the tree as it was made.
+            # T4: every frame back, and the tree as it was made (px67: the
+            # root-on-disk leg skips it by name: the memory tree's census).
             why=
             fl=$(grep -m1 '^user: frames free ' "$norm")
+            if [ "${PAX_ROOTDISK:-0}" = 1 ]; then
+                say "SKIP T4 $id: the memory tree's census; / is on a disk, whose cache keeps frames (rootdisk): $fl"
+            else
             fa=$(printf '%s\n' "$fl" | sed -n -E 's/^user: frames free ([0-9]+) before, [0-9]+ with [0-9]+ processes, ([0-9]+) after$/\1 \2/p')
             set -- $fa
             { [ -n "$fa" ] && [ "$1" = "$2" ]; } || why+=" frames not all back ('$fl');"
@@ -295,6 +302,7 @@ for leg in $legs; do
                 [ "$5" = "$6" ] || why+=" inodes $5, $6 when made ('$tl');"
             fi
             [ -z "$why" ] && say "PASS T4 $id: $fl; $tl" || bad "T4 $id:$why"
+            fi
 
             # T5: the mremap census.
             if [ "$p" = maps ]; then

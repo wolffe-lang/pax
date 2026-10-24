@@ -217,7 +217,7 @@ initramfs came from when it was not an optical disc (Limine's
 kernel/block reads the same table (the next section's), the image's
 `/etc/fstab` (`user/fstab-disk`: `/dev/vda2 /home ext2 defaults 0 2`)
 mounts partition 2 at `/home`, and `/` is the initramfs in memory, as
-it is from the ISO (px67 moves `/` onto partition 2). The disk is
+it is from the ISO (px67 moves `/` onto partition 2: the next section). The disk is
 written in place: `reboot` restarts the machine on it, and `exit` writes
 `/home` and marks it clean.
 
@@ -251,6 +251,57 @@ primary records (R-px66-1). Each partition is a device whose requests
 are offset by its first sector and refused past its last: the
 specification's rules, the Linux guest's answers on eleven fixture disks
 (`tests/mpx6-part`; `notes/px66-the-partition-table.md`).
+
+## `/` on the disk (px67)
+
+`tools/mkdisk --gpt --root ARCHIVE` makes the disk whose partition 2 is
+`/`: the archive an ISO would carry as its initramfs (tools/mkinitramfs'
+newc) is unpacked and installed onto the ext2 partition at build time by
+`mkdisk --from` (px63's sorted, reproducible debugfs path), with an
+`--attrs` file generated from the archive's own headers (every entry's
+mode, owner and modification time; kept beside the image as
+`OUT.root-attrs`), and the kernel's mount points added as empty
+directories (`/dev` 755, `/proc` and `/sys` 555, `/tmp` 1777). The ESP
+holds Limine and the kernel and no initramfs (R-px67-2), and every
+entry's `cmdline` gains `root=PARTUUID=<partition 2's GUID> rw`.
+
+The kernel reads `root=` from Limine's command line (kernel/boot_info)
+in Linux's spellings (bootparam(7), each measured on Linux 7.2.8 under
+QEMU): `/dev/vda2` or `vda2`, the device's numbers (`0xfe02`, `fe02`,
+`254:2`), `PARTUUID=` in either case, `UUID=` (a named drift: Linux's
+kernel alone refuses it), `rootfstype=ext2`, and `ro` or `rw`, read-only
+when neither is given (Linux's answer, where bootparam(7) says `rw`).
+Before the first program, kernel/fstab mounts that partition as `/`:
+
+    root: PARTUUID=… (vda2) on /: ext2, read-write, write-back
+
+every lookup, `..` at the root (the root mount's root is its own
+parent), getcwd, chroot's root check and every absolute path then
+resolve on the volume, and programs are exec'd from it. The kernel's
+own trees are mounted over the disk's directories: /dev (devtmpfs, the
+kernel's), /proc and /sys, as Linux's tables show them, and the
+image's `/etc/fstab` (`user/fstab-root`) names `/` on its first line
+and mounts a tmpfs at /tmp, the memory's (R-px67-1). `/home` is a
+directory of `/` (R-px67-3); `/etc/mtab` is a link to
+`../proc/self/mounts`. A `root=` that names no partition panics by
+name, unless the entry also loads the initramfs (`mkdisk --initramfs`,
+R-px67-2's other way), which stays `/`. Without `root=` the ISO boots
+as before, `/` the initramfs in memory (`rootfs` in the table).
+
+**The end.** When init's last program ends (after up to a second for
+what it left to end of itself: a shell's stopped jobs, hung up when it
+exits), or root calls `reboot(2)`, every process left is sent SIGTERM;
+those still there after a grace of 2 s (R-px67-4) are sent SIGKILL; then each volume is written and unmounted
+in the reverse of its mount order, `/` last: flushed, its clean flag
+written; the disk's books, then init's line, then `halt`:
+
+    PAX: the end: SIGTERM to 2 processes, 1 ended within 10 ms; SIGKILL to 1 after the 2000 ms grace
+
+A power cut (QEMU closed without `exit` or `reboot`) leaves `/` not
+clean; the next boot mounts it read-write, says `not cleanly
+unmounted` once, and leaves it not clean through its own clean end, as
+Linux's ext2 does (R-px67-5). PAX has no fsck: `e2fsck -fy` of
+partition 2 on the host repairs it.
 
 ## Measured
 

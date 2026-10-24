@@ -7,6 +7,38 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Root on the disk (px67).** `/` can be the ext2 partition of the
+  disk that boots. `tools/mkdisk --gpt --root ARCHIVE` installs an
+  image's archive onto partition 2 at build time (`mkdisk --from` with
+  an `--attrs` file generated from the archive's own headers, the
+  kernel's mount points added), leaves the initramfs off the ESP
+  (R-px67-2) and puts `root=PARTUUID=<partition 2> rw` on Limine's
+  command line. The kernel reads `root=` in Linux's spellings
+  (`/dev/vda2`, `vda2`, `0xfe02`, `fe02`, `254:2`, `PARTUUID=` in either
+  case, `UUID=`, `rootfstype=ext2`, `ro`, `rw`; read-only when neither
+  is given, as Linux 7.2.8 answers) and mounts the volume as `/` before
+  the first program: kernel/tree's root becomes the volume's, `..` at
+  the root is the root, getcwd, chroot and absolute paths resolve on
+  it, and programs are exec'd from it; /dev, /proc and /sys are the
+  kernel's over the disk's directories; `/etc/fstab`
+  (`user/fstab-root`) names `/` first and mounts a tmpfs at /tmp
+  (R-px67-1). `/proc/self/mounts`, `/proc/<pid>/mountinfo`,
+  `/proc/mounts` (a link) and `/etc/mtab` (the image's link) read as
+  Linux's do. `mount(2)` and `umount2(2)` are served for root: `/`
+  remounted read-only and read-write, a volume or a tmpfs mounted at a
+  directory and unmounted, Linux's errors, EPERM for users, MNT_DETACH
+  refused by name (no program asks: the census). The end now ends
+  every process left (at init's end, after a second for what ends of
+  itself): SIGTERM, a grace of 2 s, SIGKILL (R-px67-4), init included,
+  then every volume unmounted in reverse mount order, `/` last and
+  marked clean, and the disk's books before init's line; kmain_session gains the disk and the end as
+  kmain_console has them. A power cut leaves `/` not clean and the next
+  boot mounts it read-write saying so once (R-px67-5). `tests/mpx6-root`
+  holds it to Linux booted the same way under QEMU and to e2fsprogs;
+  `tools/qemu-rootdisk` boots any suite's ISO again from a disk with `/`
+  on it; `tools/root-crash` counts what a power cut at random points
+  leaves (reported, not gated).
+
 - **The pins at 0.2.35, and boreutils' new utilities (px65).** The
   kernel is built from wolf 0.2.35 and lupin 0.1.56 with no source
   change: every kernel's `.text` is 80 bytes longer, the freestanding

@@ -31,7 +31,7 @@
 # merge gate (`tier full`, the label) runs all of them on native BIOS,
 # and every trunk push and nightly (`tier all`) on every leg (tl29).
 
-@user    = mpx3-user mpx3-loader mpx3-boreutils mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-maps mpx3-speaker mpx3-sound mpx3-orchestra mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix mpx4-lobo mpx5-users mpx5-accounts mpx5-jobs mpx5-yew mpx5-screen mpx5-wolf mpx6-ext2 mpx5-scent mpx5-bore
+@user    = mpx3-user mpx3-loader mpx3-boreutils mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-maps mpx3-speaker mpx3-sound mpx3-orchestra mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix mpx4-lobo mpx5-users mpx5-accounts mpx5-jobs mpx5-yew mpx5-screen mpx5-wolf mpx6-ext2 mpx5-scent mpx5-bore mpx6-root
 @net     = mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix mpx4-lobo mpx5-jobs
 @music   = mpx3-speaker mpx3-sound mpx3-orchestra mpx4-session
 @console = mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-speaker mpx3-sound mpx3-orchestra mpx4-unix mpx4-session mpx5-accounts mpx5-jobs tour mpx5-yew mpx5-screen mpx5-wolf
@@ -60,8 +60,12 @@
 @asuser  = mpx3-tree mpx3-maps mpx3-shell mpx3-boreutils mpx4-unix mpx4-tcp mpx4-udp mpx5-users mpx5-jobs mpx5-lope mpx5-aspen mpx5-lupin mpx5-yew mpx5-screen mpx5-wolf mpx5-scent mpx5-bore
 @suuser  = mpx3-tree mpx3-shell mpx3-speaker mpx4-lobo mpx5-accounts
 # px63: the disk's two suites (the block device, the file system on it);
-# px66: and its partition table's (the windows, the names, a disk that boots).
-@disk    = mpx6-blk mpx6-ext2 mpx6-part
+# px66: and its partition table's (the windows, the names, a disk that boots);
+# px67: and `/` on it (the root record, the tree installed, the mounts
+# over it, mount(2), the end that leaves it clean). mpx6-root is in
+# @user too: every program it runs is exec'd from the disk through
+# kernel/tree's second store, kernel/files and kernel/process.
+@disk    = mpx6-blk mpx6-ext2 mpx6-part mpx6-root
 
 # --- the toolchain pins, and how the kernel is entered, linked, loaded: FULL --
 kernel/wolf.pin                 FULL
@@ -240,8 +244,8 @@ kernel/virtio/*                 @net mpx3-sound mpx3-orchestra @disk
 # which reads user/elf. (@disk is defined with the groups above.)
 kernel/vblk/*                   @disk
 kernel/block/*                  @disk
-kernel/ext2/*                   mpx6-ext2 mpx6-part @user
-kernel/fstab/*                  mpx6-ext2 mpx6-part @user
+kernel/ext2/*                   mpx6-ext2 mpx6-part mpx6-root @user
+kernel/fstab/*                  mpx6-ext2 mpx6-part mpx6-root @user
 tools/blk-pattern               mpx6-blk
 tools/e2fs                      mpx6-ext2
 tools/mkdisk                    mpx6-ext2
@@ -255,12 +259,32 @@ user/elf/reboot.S               mpx6-ext2
 # rows); the table's tools, the guest's questions and the disk that boots
 # are mpx6-part's (by the derivation too: tests/mpx6-part names them);
 # tools/mkdisk and its tools are mpx6-ext2's as well (it names them).
-kernel/procfs/*                 mpx6-part
+kernel/procfs/*                 mpx6-part mpx6-root
 tools/mkgpt                     mpx6-part
 tools/disktools                 mpx6-part
 tools/linux-part                mpx6-part
 user/disktools.pin              mpx6-part
 user/fstab-disk                 mpx6-part
+# px67: `/` on the disk. The suite's probe, its builder and the Linux
+# guest's tool are mpx6-root's by the derivation (tests/mpx6-root names
+# them); /proc/self/mounts and mountinfo are kernel/procfs' (above). The
+# crash row is reported, never gated: run by hand on kasumi
+# (notes/px67-root-on-the-disk.md), by no CI job.
+tools/root-crash                NONE
+# px67: the root-on-disk legs. Ten suites' jobs boot their ISOs a second
+# time with `/` on a disk (tools/rootdisk-leg, through
+# tools/qemu-rootdisk, after the suite's own step): mpx3-boreutils,
+# -console, -shell, -threads, -maps and mpx5-users whenever they
+# run; mpx5-pelt, mpx4-lobo and mpx5-jobs, the contract's long ones, only
+# outside `tier pr` (the job's own `if`). Both tools, and tools/mkdisk's own, reach those nine by the
+# derivation (each job's block names tools/rootdisk-leg). The other
+# suites have no such leg: mpx3-tree's stores are the memory tree's
+# (its probes on a disk root measure ext2 against Linux's tmpfs: a
+# directory's 4096 bytes and 8 blocks for tmpfs's 40 and 0, the limits,
+# the census; CI run 40059322645), mpx3-user and mpx3-loader boot kernels with
+# no tree on a disk to read, the screen and sound suites' rows are their
+# devices', and the disk suites (mpx6-*) bring their own disks or are
+# the root's own (mpx6-root).
 
 # --- sound: the speaker, the sound device, play -------------------------------
 kernel/speaker/*                @music

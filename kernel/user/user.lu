@@ -240,6 +240,7 @@
 //! region open there would never be left (kernel/sched, "Regions"). No
 //! Linux source; no other kernel's source.
 
+use block
 use boot_info
 use console
 use cred
@@ -260,6 +261,7 @@ use signal
 use socket
 use sound
 use speaker
+use sync
 use timer
 use tree
 use uaccess
@@ -1473,6 +1475,17 @@ pub fn syscall(f: u64) -> u64 {
         put_word(f, W_RAX, 0)
         return sched.yield_current(f)
     }
+    if nr == SYS_REBOOT && cred.privileged(area()) {
+        // px67: root's end (a restart, a halt): asked of kmain_console,
+        // which ends every process, this caller with them (it waits here,
+        // as in pause(2), until a signal ends it), then the volumes.
+        let m2 = a1 & 0xffffffff
+        let cmd = a2 & 0xffffffff
+        if a0 & 0xffffffff == REBOOT_MAGIC1 && (m2 == REBOOT_MAGIC2 || m2 == REBOOT_MAGIC2A || m2 == REBOOT_MAGIC2B || m2 == REBOOT_MAGIC2C) && (cmd == CMD_RESTART || cmd == CMD_HALT || cmd == CMD_POWER_OFF) {
+            ask_end(cmd)
+            return sched.suspend_current(f, sched.self_sigmask())
+        }
+    }
     if nr == SYS_PAUSE {
         // px49 (pax#73): pause(2) is a wait with the caller's own mask
         // until a signal runs a handler (-EINTR) or ends the process.
@@ -1712,39 +1725,235 @@ fn outb(port: u64, v: u64) {
 }
 
 /// px63: `reboot(2)` for root, the magic checked (`reboot(2)`; uapi
-/// linux/reboot.h): LINUX_REBOOT_CMD_RESTART writes every mounted
-/// volume (its dirty blocks, marked clean, the disk flushed: the
-/// tree's `halt_volumes`) and resets the machine — the reset control
-/// register (port 0xcf9: 0x02 then 0x06, a hard reset, Intel's ICH9
-/// datasheet §13.7.5, q35's), then the keyboard controller's reset line
-/// (port 0x64, 0xfe), then a triple fault; CMD_HALT and CMD_POWER_OFF
-/// write the volumes the same way and halt as kmain_console's end does
-/// (`halt`: PAX has no ACPI, so QEMU is not powered off); CAD_ON and
-/// CAD_OFF answer 0 and change nothing (no Ctrl-Alt-Del is seen); any
-/// other command -EINVAL. A user is -EPERM and a bad magic -EINVAL first
-/// (kernel/process's `root_call`, px45's rows).
+/// linux/reboot.h). px67: LINUX_REBOOT_CMD_RESTART, CMD_HALT and
+/// CMD_POWER_OFF are the end, asked here (`syscall`'s `ask_end`) and
+/// made by kmain_console: every process ended (SIGTERM, a grace,
+/// SIGKILL: R-px67-4), the volumes written, marked clean and flushed in
+/// the reverse of the order they were mounted, `/` last (kernel/tree's
+/// `halt_volumes`), this module's `end_line`, and the reset
+/// (`end_reset`) or the halt (PAX has no ACPI, so QEMU is not powered
+/// off). CAD_ON and CAD_OFF answer 0 and change nothing (no
+/// Ctrl-Alt-Del is seen); any other command -EINVAL. A user is -EPERM
+/// and a bad magic -EINVAL first (kernel/process's `root_call`, px45's
+/// rows).
 fn reboot(cmd: u64) -> u64 {
     if cmd == CMD_CAD_ON || cmd == CMD_CAD_OFF {
         return 0
     }
-    if cmd != CMD_RESTART && cmd != CMD_HALT && cmd != CMD_POWER_OFF {
-        return NEG_EINVAL
+    NEG_EINVAL
+}
+
+/// px67: the end root's reboot(2) asked for (CMD_RESTART, CMD_HALT or
+/// CMD_POWER_OFF; 0 none yet), and who asked: the caller's pid and its
+/// name, copied at the call into a frame (the caller is ended with the
+/// rest before the line is said).
+var end_cmd: u64 = 0
+var end_pid: u64 = 0
+var end_name: u64 = 0
+var end_len: u64 = 0
+
+/// px67: the first reboot(2) of root's with a good magic and an end
+/// command: recorded, and kmain_console's thread woken (it waits for
+/// its run list's command, `sched.wait_pid_or_down`). IF clear.
+fn ask_end(cmd: u64) {
+    // # Safety: scalar module vars, written with IF clear on one CPU.
+    unsafe {
+        if end_cmd != 0 {
+            return
+        }
+        end_cmd = cmd
+        end_pid = sched.self_pid()
     }
-    let e = tree.halt_volumes()
-    who()
+    let fr = frames.alloc() else 0
+    if fr != 0 && sched.self_prog() == sched.ELF_PROG {
+        let base = fr + frames.hhdm()
+        let src = sched.self_exec(2)
+        let n = if sched.self_exec(3) < 64 { sched.self_exec(3) } else { 64 }
+        var i: u64 = 0
+        while i < n {
+            // # Safety: the caller's name (kernel/sched's, a kernel
+            // address) and the frame just taken.
+            unsafe { ((base + i) as *u8).write_volatile(((src + i) as *u8).read_volatile()) }
+            i += 1
+        }
+        // # Safety: as above.
+        unsafe {
+            end_name = base
+            end_len = n
+        }
+    }
+    sched.wake_kmain()
+}
+
+/// px67 (R-px67-4, recommended, not decided): the end's grace, in the
+/// timer's ticks (10 ms): how long the processes left at the end have
+/// after SIGTERM before SIGKILL. The wait ends as soon as none is left.
+const GRACE_TICKS: u64 = 200
+/// How long the end waits for SIGKILL's work before it goes on and says so.
+const KILL_TICKS: u64 = 500
+/// px67: at init's end, how long the end first waits for what is left
+/// to end of itself (a stopped job hung up when its shell exits: an
+/// orphaned group's SIGHUP and SIGCONT, px48) before it signals anything.
+const SETTLE_TICKS: u64 = 100
+const SIGKILL: u64 = 9
+const SIGTERM: u64 = 15
+const SIGCONT: u64 = 18
+
+/// px67: processes not yet ended (a zombie is not counted).
+fn procs_left() -> u64 {
+    var n: u64 = 0
+    var q = sched.proc_after(0)
+    while q != 0 {
+        let sl = sched.proc_slot(q)
+        if sl != sched.SLOTS && sched.proc_word(sl, 8) != 1 {
+            n += 1
+        }
+        q = sched.proc_after(q)
+    }
+    n
+}
+
+fn signal_all(sig: u64) {
+    let info = sched.sig_info(sched.I_KERNEL, 0, 0, 0)
+    var q = sched.proc_after(0)
+    while q != 0 {
+        let _live = sched.raise_pid(q, sig, info)
+        q = sched.proc_after(q)
+    }
+}
+
+/// px67: the end ends every process left (kmain_console's and
+/// kmain_session's halt, once init has ended; root's reboot(2)), as a distribution's init does before it
+/// unmounts: SIGTERM and SIGCONT to each (a stopped one too), then up to
+/// GRACE_TICKS for them to end (R-px67-4), then SIGKILL to those left,
+/// up to KILL_TICKS. With `settle` (init's end, not reboot(2)), first up
+/// to SETTLE_TICKS for them to end of themselves, so what was ending
+/// anyway is not signalled. One line when any was signalled:
+///
+///     PAX: the end: SIGTERM to 3 processes, 2 ended within 40 ms; SIGKILL to 1 after the 2000 ms grace
+pub fn end_processes(settle: bool) {
+    if settle {
+        let t = timer.ticks()
+        while procs_left() != 0 && timer.ticks() - t < SETTLE_TICKS {
+            let _s = sched.sleep(1)
+        }
+    }
+    let n = procs_left()
+    if n == 0 {
+        return
+    }
+    sched.ending() // px67: pid 1 is ended too
+    let t0 = timer.ticks()
+    signal_all(SIGTERM)
+    signal_all(SIGCONT)
+    var was = n
+    var took: u64 = 0
+    while procs_left() != 0 && timer.ticks() - t0 < GRACE_TICKS {
+        let _s = sched.sleep(1)
+        let now = procs_left()
+        if now < was {
+            was = now
+            took = timer.ticks() - t0 // the last one SIGTERM ended
+        }
+    }
+    let left = procs_left()
+    if left != 0 {
+        signal_all(SIGKILL)
+        let t1 = timer.ticks()
+        while procs_left() != 0 && timer.ticks() - t1 < KILL_TICKS {
+            let _s = sched.sleep(1)
+        }
+    }
+    let s = sync.acquire(sync.console())
+    log.put("PAX: the end: SIGTERM to ")
+    log.dec(n as int)
+    log.put(if n == 1 { " process, " } else { " processes, " })
+    log.dec((n - left) as int)
+    log.put(" ended within ")
+    log.dec((took * 10) as int)
+    log.put(" ms")
+    if left != 0 {
+        log.put("; SIGKILL to ")
+        log.dec(left as int)
+        log.put(" after the ")
+        log.dec((GRACE_TICKS * 10) as int)
+        log.put(" ms grace")
+        if procs_left() != 0 {
+            log.put(", ")
+            log.dec(procs_left() as int)
+            log.put(" still there")
+        }
+    }
+    log.end()
+    sync.release(sync.console(), s)
+}
+
+/// px67: the end root's reboot(2) asked (kmain_console's and
+/// kmain_session's, when `end_asked` says so): every process ended, the
+/// volumes written in the reverse of their mounting (`/` last) and
+/// marked clean, px63's line, the disk's books, then the reset or the
+/// halt.
+pub fn the_end() -> never {
+    end_processes(false)
+    let _off = sync.irq_save()
+    var e: u64 = 0
+    if block.count() != 0 {
+        e = tree.halt_volumes()
+    }
+    end_line(e)
+    if block.count() != 0 {
+        block.summary()
+    }
+    if end_asked() == 1 {
+        end_reset()
+    }
+    timer.stop()
+    log.line("halt")
+    panic.halt()
+}
+
+/// px67: which end root's reboot(2) asked for: 0 none, 1 a restart, 2 a
+/// halt (CMD_HALT or CMD_POWER_OFF).
+pub fn end_asked() -> u64 {
+    // # Safety: a scalar module var.
+    let c = unsafe { end_cmd }
+    if c == 0 { 0 } else if c == CMD_RESTART { 1 } else { 2 }
+}
+
+/// px67: px63's line for the end reboot(2) asked, once the volumes are
+/// written (`e` the first error, 0 none):
+///
+///     user: reboot pid 7 reboot(2): the volumes written and marked clean; restarting
+pub fn end_line(e: u64) {
+    log.put("user: ")
+    // # Safety: scalar module vars; the frame `ask_end` filled.
+    unsafe {
+        if end_len == 0 {
+            log.put("kernel")
+        }
+        var i: u64 = 0
+        while i < end_len {
+            log.put_byte(((end_name + i) as *u8).read_volatile() as int)
+            i += 1
+        }
+        log.put(" pid ")
+        log.dec(end_pid as int)
+    }
     log.put(" reboot(2): the volumes written and marked clean")
     if e != 0 {
         log.put(" (an I/O error: ")
         log.dec((!e + 1) as int)
         log.put(")")
     }
-    log.put(if cmd == CMD_RESTART { "; restarting" } else { "; halting" })
+    log.put(if end_asked() == 1 { "; restarting" } else { "; halting" })
     log.end()
-    if cmd != CMD_RESTART {
-        timer.stop()
-        log.line("halt")
-        panic.halt()
-    }
+}
+
+/// px63: the reset reboot(2) asks (px67: kmain_console's, at the end):
+/// the reset control register (port 0xcf9: 0x02 then 0x06, a hard reset,
+/// Intel's ICH9 datasheet §13.7.5, q35's), then the keyboard
+/// controller's reset line (port 0x64, 0xfe), then a triple fault.
+pub fn end_reset() -> never {
     outb(0xcf9, 0x02)
     outb(0xcf9, 0x06)
     outb(0x64, 0xfe)
@@ -2121,6 +2330,14 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
         if r0 & 0xffffffff == REBOOT_MAGIC1 && (m2 == REBOOT_MAGIC2 || m2 == REBOOT_MAGIC2A || m2 == REBOOT_MAGIC2B || m2 == REBOOT_MAGIC2C) {
             return reboot(a2 & 0xffffffff) // px63: served for root
         }
+    }
+    // px67: mount(2) and umount2(2) served for root (kernel/files); a
+    // user's still kernel/process's (-EPERM, umount2's path first).
+    if nr == SYS_MOUNT && cred.privileged(a) {
+        return files.mount_call(a, pml4, r0, a1, a2, a3, a4)
+    }
+    if nr == SYS_UMOUNT2 && cred.privileged(a) {
+        return files.umount_call(a, pml4, r0, a1)
     }
     if nr == SYS_CHROOT || nr == SYS_SETTIMEOFDAY || nr == SYS_MOUNT || nr == SYS_UMOUNT2 || nr == SYS_REBOOT || nr == SYS_SETHOSTNAME || nr == SYS_SETDOMAINNAME || nr == SYS_CLOCK_SETTIME {
         return process.root_call(nr, r0, a1, a2)

@@ -104,7 +104,8 @@
 #     vm-protected recording's (px38's), every line PAX writes held to
 #     tests/mpx5-users.d/setid.pax (its execve rows are PAX's: R5, px27;
 #     px56: the copies run, and only the rows that ask a set-ID bit are
-#     PAX's: R5).
+#     PAX's: R5; px67: its first line names the mount /proc/self/mountinfo
+#     now lists, `/` read-write, where it found no table and named none).
 #
 # And perm's reference becomes px38's vm-protected recording (its
 # settings line and four `protected` rows differ from vm's): 337 of 382
@@ -137,7 +138,8 @@
 #     Linux's (SIG_LINUX_ROWS), the three left the set-ID target's whose
 #     sender matches only the copy's owner (R5; px56: the copy runs, px27
 #     refused it), the whole held to
-#     tests/mpx5-users.d/sig.pax;
+#     tests/mpx5-users.d/sig.pax (px67: its first line the /proc mount
+#     /proc/self/mountinfo now lists, where it found none: `? (?)`);
 #   - priv (px38's, byte for byte): PRIV_LINUX_LINES (19) of its 30
 #     lines Linux's, the whole held to tests/mpx5-users.d/priv.pax.
 # And ids' SO_PEERCRED line is Linux's: 61 of its 71 (IDS_LINUX_LINES).
@@ -248,6 +250,15 @@
 # of the first leg run first, and the suite stops at the first failure
 # of own, perm, chk, setid or rights: `stopped early`. A boot ends at the kernel's `halt`
 # or at a `PANIC` line, whichever comes.
+#
+# px67: with PAX_ROOTDISK=1 (tools/rootdisk-leg: the images booted
+# again with / on a disk) U3, the memory tree's frames census, says SKIP
+# by name: the block layer's cache keeps the frames a session read;
+# setid's first line expects `/`'s options as the volume's, `rw,relatime`;
+# the ls sessions' `total` lines and directory sizes (ext2's 4096 and its
+# blocks) are masked on both sides, said; and U4 holds the soak's four
+# quarters to one another, its `before` taken before the disk's cache
+# filled (R-px67-6).
 #
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
@@ -757,7 +768,15 @@ for leg in $legs; do
                 setid)
                     # px44: every line PAX writes is held to setid.pax; its 50
                     # `bits:` lines are the vm-protected recording's, to the byte.
-                    cmp -s "$here/mpx5-users.d/setid.pax" "$out" || why+=" the session differs from tests/mpx5-users.d/setid.pax: $(diff "$here/mpx5-users.d/setid.pax" "$out" | head -n 10 | cut -c1-400 | tr '\n' '|');"
+                    sx=$here/mpx5-users.d/setid.pax
+                    if [ "${PAX_ROOTDISK:-0}" = 1 ]; then
+                        # px67: the root-on-disk leg: `/` is ext2, read-write with
+                        # relatime (the ISO's rootfs says `rw`), so the first line's
+                        # options are the volume's; said.
+                        sed '1s/^\(mount: \/t\/setid is on \/, mounted\) rw$/\1 rw,relatime/' "$sx" > "$out.expect"; sx=$out.expect
+                        say "SKIP U1 $id mount line: / is the disk's ext2, rw,relatime (rootdisk)"
+                    fi
+                    cmp -s "$sx" "$out" || why+=" the session differs from tests/mpx5-users.d/setid.pax: $(diff "$sx" "$out" | head -n 10 | cut -c1-400 | tr '\n' '|');"
                     grep '^bits: ' "$ref/$s.txt" > "$out.want"
                     grep '^bits: ' "$out" > "$out.cmp"
                     cmp -s "$out.want" "$out.cmp" || why+=" the bits: lines differ: $(diff "$out.want" "$out.cmp" | head -n 10 | cut -c1-400 | tr '\n' '|');"
@@ -792,6 +811,24 @@ for leg in $legs; do
                 *)
                     grep -v '^~' "$ref/$s.txt" > "$out.want"
                     grep -v '^~' "$out" > "$out.cmp"
+                    masked=
+                    case $s in ls*) if [ "${PAX_ROOTDISK:-0}" = 1 ]; then
+                        # px67 (R-px67-6): the root-on-disk leg. ext2's
+                        # directory is 4096 bytes and `total` counts its
+                        # blocks, where the recording's tree (Linux's
+                        # tmpfs) says 40 + 20 an entry and 0: both sides'
+                        # `total` lines and a directory's size are masked,
+                        # the columns' padding with them; every name,
+                        # mode, link count, owner, file size and date is
+                        # still held.
+                        for f in "$out.want" "$out.cmp"; do
+                            awk '/^total [0-9]+$/ { print "total ~"; next }
+                                 /^[-dlcbps][-rwxsStT][-rwxsStT][-rwxsStT][-rwxsStT][-rwxsStT][-rwxsStT][-rwxsStT][-rwxsStT][-rwxsStT] / { gsub(/ +/, " "); if (substr($0, 1, 1) == "d") { n = split($0, w, " "); w[5] = "~"; l = w[1]; for (k = 2; k <= n; k++) l = l " " w[k]; print l; next } }
+                                 { print }' "$f" > "$f.folded" && mv "$f.folded" "$f"
+                        done
+                        say "SKIP U1 $id sizes: ext2's directory sizes and block totals masked on both sides (rootdisk)"
+                        masked=", ext2's directory sizes and totals masked"
+                    fi ;; esac
                     cmp -s "$out.want" "$out.cmp" || why+=" the session differs: $(diff "$out.want" "$out.cmp" | head -n 10 | cut -c1-400 | tr '\n' '|');"
                     [ "$(wc -l < "$ref/$s.txt" | tr -d ' ')" = "$n" ] || why+=" $n lines, the recording has $(wc -l < "$ref/$s.txt" | tr -d ' ');"
                     t=$(grep -c '^~' "$out")
@@ -805,7 +842,7 @@ for leg in $legs; do
                         ls*) who="the same ls on a Linux that unpacked the same archive as its root (vm)" ;;
                         *) who="real root's (vm)" ;;
                     esac
-                    note="$((n - t)) of $n lines byte-identical to $who, $t '~' lines by rule"
+                    note="$((n - t)) of $n lines byte-identical to $who, $t '~' lines by rule$masked"
                     ;;
             esac
             pst=$(sed -n -E "s/^user: [^ ]+ pid 1 (exit_group|exit) ([0-9]+) after .*/\\2/p" "$norm" | head -n 1)
@@ -857,7 +894,14 @@ for leg in $legs; do
             fb=${1:-} fa=${2:-}
             set -- $(printf '%s\n' "$trl" | sed -n -E "s/^tree: frames ([0-9]+) \\(([0-9]+) when made\\), ([0-9]+) \\(([0-9]+)\\) of them the inode table's, inodes ([0-9]+) \\(([0-9]+)\\), cap ([0-9]+), refusals [0-9]+\$/\\1 \\2 \\3 \\4 \\5 \\6/p")
             th=${1:-} tb=${2:-} tt=${3:-} ttb=${4:-} ti=${5:-} tib=${6:-}
-            if [ -z "$fb" ] || [ -z "$th" ]; then
+            u3skip=0
+            if [ "${PAX_ROOTDISK:-0}" = 1 ]; then
+                # px67: the root-on-disk leg (tools/rootdisk-leg): the
+                # census is the memory tree's, and the block layer's cache
+                # keeps the frames a session read from the disk.
+                u3skip=1
+                say "SKIP U3 $id: the memory tree's census; / is on a disk, whose cache keeps frames (rootdisk): $fl; $trl"
+            elif [ -z "$fb" ] || [ -z "$th" ]; then
                 why+=" no frames line or no tree line ('$fl' / '$trl');"
             else
                 grew=$((tt - ttb)) # the inode table's frames are never given back
@@ -874,7 +918,7 @@ for leg in $legs; do
                     [ "$ti" = "$tib" ] || why+=" the tree has $ti inodes, $tib when made;"
                 fi
             fi
-            [ -z "$why" ] && say "PASS U3 $id: $fl; $trl" || bad "U3 $id:$why"
+            [ "$u3skip" = 1 ] || { [ -z "$why" ] && say "PASS U3 $id: $fl; $trl" || bad "U3 $id:$why"; }
 
             # U4: the soak.
             case $s in soak|soak-user|own-soak|own-soak-user|chk-soak|chk-soak-user|rights-soak|rights-soak-user)
@@ -888,12 +932,20 @@ for leg in $legs; do
                 esac
                 ml=$(grep -m1 '^~soak: ' "$out")
                 set -- $(printf '%s\n' "$ml" | sed -n -E 's/^~soak: MemFree before ([0-9]+) kB, at each quarter ([0-9]+) ([0-9]+) ([0-9]+) ([0-9]+) kB$/\1 \2 \3 \4 \5/p')
+                held=
                 if [ $# != 5 ]; then
                     why+=" no free-memory line ('$ml');"
+                elif [ "${PAX_ROOTDISK:-0}" = 1 ]; then
+                    # px67 (R-px67-6): the root-on-disk leg. The `before`
+                    # reading is taken before the disk's cache has filled
+                    # (its first files' blocks), so the four quarters are
+                    # held to one another: a leak still moves them.
+                    for v in "$3" "$4" "$5"; do [ "$v" = "$2" ] || why+=" free memory moved between the quarters: '$ml';"; done
+                    held=" (the root-on-disk leg: the four quarters held to one another, the first $(( $1 - $2 )) kB the disk's cache filling)"
                 else
                     for v in "$2" "$3" "$4" "$5"; do [ "$v" = "$1" ] || why+=" free memory moved: '$ml';"; done
                 fi
-                [ -z "$why" ] && say "PASS U4 $id: $sk; $ml (Linux here: $(grep -m1 '^~soak: ' "$ref/$s.txt"))" || bad "U4 $id:$why"
+                [ -z "$why" ] && say "PASS U4 $id: $sk; $ml$held (Linux here: $(grep -m1 '^~soak: ' "$ref/$s.txt"))" || bad "U4 $id:$why"
                 ;;
             esac
 

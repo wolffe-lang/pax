@@ -356,7 +356,7 @@ pub fn why(r: u64) -> str {
         return "the time of day set (PAX reads the clock at boot and counts its ticks)"
     }
     if r == R_MOUNT {
-        return "a mount or an unmount (PAX's file systems are fixed)"
+        return "a mount PAX does not make (px67: a bind, a move or a propagation change, MNT_DETACH, another of the kernel's own trees, a read-only memory tree)"
     }
     ""
 }
@@ -1923,8 +1923,9 @@ const CLOCK_REALTIME: u64 = 0
 /// - `clock_settime` (227): a clock that cannot be set is -EINVAL first
 ///   (measured: CLOCK_MONOTONIC to a user too); CLOCK_REALTIME -EPERM,
 ///   root refused by name; `settimeofday` (164) the same;
-/// - `mount` (165): -EPERM; root refused by name; `umount2` (166): the
-///   path first, then -EPERM, root refused by name.
+/// - `mount` (165): -EPERM; `umount2` (166): the path first, then
+///   -EPERM; px67: root's are kernel/files' (`mount_call`,
+///   `umount_call`), kernel/user calls them before this.
 pub fn root_call(nr: u64, a0: u64, a1: u64, a2: u64) -> u64 {
     let a = area()
     let pml4 = paging.live()

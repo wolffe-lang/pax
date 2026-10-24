@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+# tests/mpx6-root.d/session — the probe's own lines out of a serial log
+# (px67): `session pax LOG` or `session linux LOG` prints the lines
+# user/elf/mounts.c wrote, carriage returns removed, every line of the
+# kernel's (PAX's `user:`, `run`, `root:` …; Linux's `[    1.23] …`)
+# left out. `session norm FILE` prints FILE with the named drifts
+# folded (tests/mpx6-root's R3), so PAX's and the guest's compare:
+#   - a devtmpfs, tmpfs or rootfs line's sizes and kernel defaults
+#     (`size=`, `nr_inodes=`, `inode64`, `huge=`): PAX's /dev holds
+#     nothing and its tmpfs is the tree's cap (kernel/files' mounts_of);
+#   - mountinfo's mount ids, its parent ids and an anonymous device's
+#     numbers (0:N: each kernel numbers its own);
+#   - a `~` line is the kernel's to choose: left out.
+import re
+import sys
+
+PREFIXES = ("table: ", "mounts: ", "/proc/mounts: ", "/etc/mtab: ", "mtab: ", "statfs ", "statvfs ", "lstat ",
+            "open(", "write ", "mount(", "umount2(", "unlink(", "mkdir(", "chdir(", "calls: ", "user 1", "setresuid(",
+            "dotdot: ", "end: ", "twice: ", "linger ", "reboot(", "reboot ", "~")
+
+
+def probe_lines(path):
+    out = []
+    for raw in open(path, "rb").read().decode("utf-8", "replace").replace("\r", "").split("\n"):
+        line = raw.rstrip("\n")
+        if line.startswith(PREFIXES):
+            out.append(line)
+    return out
+
+
+OPTS = re.compile(r",(size=[0-9]+k|nr_inodes=[0-9]+|inode64|huge=[a-z]+)")
+
+
+def norm(line):
+    if line.startswith("~mountinfo: "):
+        f = line[len("~mountinfo: "):].split(" ")
+        if len(f) > 3:
+            dev = f[2] if not f[2].startswith("0:") else "0:N"
+            return "mountinfo: " + OPTS.sub("", " ".join([dev] + f[3:]))
+        return line
+    if line.startswith("~"):
+        return None
+    return OPTS.sub("", line)
+
+
+def main(argv):
+    if len(argv) == 3 and argv[1] in ("pax", "linux"):
+        for l in probe_lines(argv[2]):
+            print(l)
+        return 0
+    if len(argv) == 3 and argv[1] == "norm":
+        for l in open(argv[2]).read().splitlines():
+            n = norm(l)
+            if n is not None:
+                print(n)
+        return 0
+    sys.stderr.write("usage: session pax|linux LOG | session norm FILE\n")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
