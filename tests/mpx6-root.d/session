@@ -3,7 +3,10 @@
 # (px67): `session pax LOG` or `session linux LOG` prints the lines
 # user/elf/mounts.c wrote, carriage returns removed, every line of the
 # kernel's (PAX's `user:`, `run`, `root:` …; Linux's `[    1.23] …`)
-# left out. `session norm FILE` prints FILE with the named drifts
+# left out, and a Linux console message that came in the middle of one of
+# the probe's lines (`mount(…) = 0[    2.42] EXT4-fs (vda2): re-mounted …`,
+# the probe's own newline after it: px68's ext3 guest) taken out of it.
+# `session norm FILE` prints FILE with the named drifts
 # folded (tests/mpx6-root's R3), so PAX's and the guest's compare:
 #   - a devtmpfs, tmpfs or rootfs line's sizes and kernel defaults
 #     (`size=`, `nr_inodes=`, `inode64`, `huge=`): PAX's /dev holds
@@ -19,9 +22,15 @@ PREFIXES = ("table: ", "mounts: ", "/proc/mounts: ", "/etc/mtab: ", "mtab: ", "s
             "dotdot: ", "end: ", "twice: ", "linger ", "reboot(", "reboot ", "~")
 
 
+# A console message of Linux's that began after a line's start: the
+# message and its newline (the line's own end follows it).
+MIDLINE = re.compile(r"(?<=[^\n])\[ *[0-9]+\.[0-9]+\] [^\n]*\n")
+
+
 def probe_lines(path):
     out = []
-    for raw in open(path, "rb").read().decode("utf-8", "replace").replace("\r", "").split("\n"):
+    text = open(path, "rb").read().decode("utf-8", "replace").replace("\r", "")
+    for raw in MIDLINE.sub("", text).split("\n"):
         line = raw.rstrip("\n")
         if line.startswith(PREFIXES):
             out.append(line)
