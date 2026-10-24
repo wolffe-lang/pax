@@ -5,8 +5,9 @@
 #   run-suite.sh SUITE [OUTNAME]
 # PAX_TREE: the tree to build and boot from (default the lane's clone;
 # the batches give a snapshot taken at their start). PAX_ROOTDISK=1:
-# the boots go through tools/qemu-rootdisk (PAX_QEMU), `/` on a disk
-# made of each ISO's initramfs, the cache under the run's directory.
+# after the boots, tools/rootdisk-leg (CI's step) boots the same images
+# again through tools/qemu-rootdisk, `/` on a disk made of each ISO's
+# initramfs ($B.disk.log).
 set -uo pipefail
 L=$HOME/lanes/px67
 T=${PAX_TREE:-$L/pax}
@@ -43,14 +44,13 @@ for d in "$img"/*.img; do
     [ -f "$d" ] && cmp -s -n 4096 "$d" /dev/zero && rm -f "$d"
 done
 rc=0
-if [ "${PAX_ROOTDISK:-0}" = 1 ]; then
-    export PAX_QEMU=$T/tools/qemu-rootdisk PAX_ROOTDISK_CACHE=$B/rootdisk
-    find "$img" -name '*.iso' -print0 | xargs -0 -r "$T/tools/qemu-rootdisk" --prepare > "$B.prepare.log" 2>&1
-fi
 taskset -c 0-3 "tests/$suite" --images "$img" --tier native --firmware bios > "$B.boot.log" 2>&1 || rc=$?
+drc=-
 if [ "${PAX_ROOTDISK:-0}" = 1 ]; then
-    q=$(find "$B" -name '*.qemu.log' -print0 | xargs -0 cat 2>/dev/null)
-    printf '%s: %s boots through qemu-rootdisk with / on the disk, %s left as they were\n' "$run" \
-        "$(printf '%s\n' "$q" | grep -c 'as a disk with / on partition 2')" "$(printf '%s\n' "$q" | grep -c 'left as it is')"
+    # the CI step's own tool: the same images booted again with / on a disk
+    drc=0
+    PAX_BUILD=$B taskset -c 0-3 tools/rootdisk-leg "$suite" --tier native --firmware bios > "$B.disk.log" 2>&1 || drc=$?
+    printf '%s disk leg rc=%s: %s; pass %s fail %s\n' "$suite" "$drc" "$(grep -a 'with / on a disk:' "$B.disk.log" | tail -n 1 | sed 's/^[^:]*: //')" \
+        "$(grep -c 'PASS' "$B.disk.log")" "$(grep -c -E 'FAIL|NOT HALTED' "$B.disk.log")"
 fi
 printf '%s build rc=%s linux rc=%s boot rc=%s %ss pass %s fail %s\n' "$suite" "$brc" "$lrc" "$rc" $(( $(date +%s) - t0 )) "$(grep -c 'PASS' "$B.boot.log")" "$(grep -c -E 'FAIL|NOT HALTED' "$B.boot.log")"
