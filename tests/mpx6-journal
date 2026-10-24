@@ -1,0 +1,518 @@
+#!/usr/bin/env bash
+# tests/mpx6-journal — the journal for `/` (px68, pax#150): an ext3 root
+# (tools/mkdisk --gpt --root --journal, the pinned mke2fs's format) that
+# kernel/journal writes through and replays, held to e2fsprogs' own
+# e2fsck, dumpe2fs and debugfs (tools/e2fs), to QEMU's own trace of the
+# disk's requests (the order a commit needs), and to the Linux 7.3.0
+# guest booted with its root on an ext3 partition (tools/linux-root
+# --fstype ext3: the same probe as its init).
+#
+#   tests/mpx6-journal [--images DIR | --no-boot | --only build | --only linux --images DIR [--record]]
+#                      [--rows pr|all] [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# The programs, static and unmodified: user/elf/mounts.c (the probe:
+# tools/mkrootprobe). Three archives (tools/mkinitramfs; /etc/fstab
+# user/fstab-root's), each installed as partition 2 of a 128 MiB GPT
+# disk by `tools/mkdisk --gpt --root --journal`, made on the host that
+# boots, every byte from SOURCE_DATE_EPOCH:
+#   session `mounts churn 120 20` (a sync(2) every 20 operations: six
+#           commits and the unmount's), then `mounts table`;
+#   cut     `mounts churn 1500`: QEMU is killed 7 s into it;
+#   replay  `mounts table` (the crafted journals' disk; with the archive
+#           kept as Limine's module too, R-px67-2's rescue, for J5).
+#
+# Rows, per tier and firmware (--rows pr, CI's pr tier, PAX_JOURNAL_ROWS:
+# J7 with 4 kills of 600 operations; --rows all, the full and all tiers'
+# and the default: 12 kills of 1,500 and the torn row):
+#   J0  build: the probe static, kmain_console built, the archives, the
+#       Linux side (or its record: tests/mpx6-journal.d/linux/).
+#   J1  the format: the disk mke2fs -t ext3 makes (has_journal beside
+#       ext2's features, the journal inode 8, a v2 superblock with no
+#       journal feature, sequence 1, start 0); after the session and a
+#       clean halt: the log empty (start 0) at a later sequence,
+#       needs_recovery clear, `clean`, e2fsck -fn clean, debugfs logdump
+#       reading the same sequence.
+#   J2  the session's commits in order: every commit block written after
+#       its transaction's every log block and a FLUSH, a FLUSH after it,
+#       no home block between its first log block and it (tools/jorder over
+#       QEMU's trace); at least the six syncs' commits.
+#   J3  a power cut while mounted: `clean` with needs_recovery, as the
+#       guest leaves its own; the next boot (`init=/bin/mounts`) says it
+#       recovered N transactions once, halts, leaves needs_recovery clear
+#       and e2fsck -fn clean; the tree (tools/e2tree, every field) is the
+#       one e2fsck -fy's own replay of a copy gives.
+#   J4  the replay is e2fsck's, on journals tools/mkjournal writes (the
+#       cases of notes/px68/oracle.sh: committed; revoked, with and
+#       without the revoke feature; revoked in its own transaction;
+#       revoked and logged again; escaped; a torn commit; never committed;
+#       a log that wraps; two committed and one open; empty): the blocks
+#       they name hold, after PAX's replay, what e2fsck -fy leaves; e2fsck
+#       -fn clean after; the replay's home writes before the log is
+#       emptied, a FLUSH between (tools/jorder --replay).
+#   J5  the refusals by name: an incompatible feature bit 0x80000000 on
+#       the root (debugfs's ssv) is refused in Linux's words, `unsupported
+#       optional features (80000000)`, and `/` stays the initramfs's (the
+#       archive kept); a journal with a feature kernel/journal does not
+#       serve (CSUM_V3) likewise.
+#   J6  the guest's: Linux 7.3.0 mounts its ext3 root `with ordered data
+#       mode` and names it ext3 in /proc/mounts, a power cut leaves it
+#       clean with needs_recovery, the next boot recovers it; PAX's root
+#       line and table say ext3, data=ordered.
+#   J7  the crash row (tools/root-crash --check): counts, orphans and worse
+#       0 on every disk, each held to the last commit's bound and to
+#       e2fsck -fy's repair; with --rows all the torn row.
+#   J8  each boot: `block: vda: … 0 errors`, halted, no PANIC (J5's
+#       refusals are not a panic: / stays the initramfs's).
+#
+# The UEFI leg needs OVMF (SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1). QEMU's trace needs its log backend (Ubuntu's and
+# kasumi's QEMU have it); a QEMU without one fails J2 and J4 by name.
+# Exit 0 when every row held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 only= rows=${PAX_JOURNAL_ROWS:-all} record=0
+usage="usage: tests/mpx6-journal [--images DIR | --no-boot | --only build | --only linux --images DIR [--record]] [--rows pr|all] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --rows)     rows=$2; shift 2 ;;
+        --record)   record=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+case $rows in pr|all) ;; *) die "--rows takes pr or all" ;; esac
+[ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
+need readelf python3
+
+D=$PAX_ROOT/tests/mpx6-journal.d
+REC=$D/linux
+EPOCH=1700000000
+SIZE=128M
+work=$PAX_BUILD/mpx6-journal
+runs=$PAX_BUILD/mpx6-journal-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+static_ok() {
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+kernel_readable() {
+    local k=${PAX_LINUX_KERNEL:-/usr/lib/modules/$(uname -r)/vmlinuz}
+    [ -r "$k" ] || k=$(command ls -1 /usr/lib/modules/*/vmlinuz 2>/dev/null | command grep -v lts | tail -n 1)
+    [ -n "$k" ] && [ -r "$k" ] && printf '%s\n' "$k"
+}
+
+# The Linux side, into $1/linux: live (tools/linux-root --fstype ext3) or
+# the record: its kernel's lines for the mount, a power cut's state, the
+# next boot's recovery and the unknown feature, and its mount table's /.
+linux_side() { # dir -> reasons
+    local w=$1 k
+    mkdir -p "$w/linux"
+    k=$(kernel_readable || true)
+    if [ -z "$k" ] && [ "${PAX_LINUX:-}" != live ]; then
+        say "LOUD: no readable Linux kernel on this host: the Linux side is the record made on kasumi ($(head -n 1 "$REC/meta"))"
+        cp "$REC/guest.txt" "$w/linux/" || printf ' no record in %s;' "$REC"
+        echo recorded > "$w/linux/how"
+        return
+    fi
+    [ -n "$k" ] || { printf ' PAX_LINUX=live and no readable kernel;'; return; }
+    local lr="$PAX_ROOT/tools/linux-root"
+    "$lr" --kernel "$k" --fstype ext3 --append loglevel=7 "$w/linux/g1" "$w/bin/mounts" > "$w/linux/g1.txt" 2>&1 || printf ' linux-root g1;'
+    "$lr" --kernel "$k" --fstype ext3 --append loglevel=7 --init-args "churn 1200" --kill 'churn: 900 ' "$w/linux/g3" "$w/bin/mounts" \
+        > "$w/linux/g3.txt" 2>&1 || printf ' linux-root g3;'
+    cp --sparse=always "$w/linux/g3/disk.img" "$w/linux/g4.img"
+    "$lr" --kernel "$k" --fstype ext3 --append loglevel=7 --disk "$w/linux/g4.img" "$w/linux/g4" "$w/bin/mounts" > "$w/linux/g4.txt" 2>&1 \
+        || printf ' linux-root g4;'
+    cp --sparse=always "$w/linux/g1/disk.img" "$w/linux/g6.img"
+    dd if="$w/linux/g6.img" of="$w/linux/g6.p2" bs=512 skip=20480 count=49152 status=none
+    "$PAX_ROOT/tools/e2fs" "$w/linux" debugfs -w -R "ssv feature_incompat 0x80000002" g6.p2 > /dev/null 2>&1 || printf ' debugfs ssv;'
+    dd if="$w/linux/g6.p2" of="$w/linux/g6.img" bs=512 seek=20480 conv=notrunc status=none
+    "$lr" --kernel "$k" --fstype none --append loglevel=7 --timeout 60 --disk "$w/linux/g6.img" "$w/linux/g6" "$w/bin/mounts" > "$w/linux/g6.txt" 2>&1 || true
+    {
+        echo "the mount:"
+        grep -E 'EXT4-fs \(vda2\)|VFS: Mounted' "$w/linux/g1/serial.log" | sed 's/^\[ *[0-9.]*\] //; s/filesystem [0-9a-f-]* /filesystem <uuid> /' | head -n 3
+        echo "the table's /:"
+        grep -m1 '^mounts: /dev/root ' "$w/linux/g1/serial.log"
+        echo "after a power cut in a write session:"
+        sed -n '/^partition 2/,/^partition 4/p' "$w/linux/g3/host.txt" | grep -E 'Filesystem state|needs_recovery|Journal start' | sed 's/^ *//; s/  */ /g; s/^Filesystem features: .*needs_recovery.*/needs_recovery: yes/'
+        echo "the next boot's root mount:"
+        grep -E 'EXT4-fs \(vda2\)' "$w/linux/g4/serial.log" | sed 's/^\[ *[0-9.]*\] //; s/filesystem [0-9a-f-]* /filesystem <uuid> /' | head -n 3
+        echo "after its clean end:"
+        sed -n '/^partition 2/,/^partition 4/p' "$w/linux/g4/host.txt" | grep -E 'Filesystem state|Journal start' | sed 's/^ *//; s/  */ /g'
+        sed -n '/^partition 2/,/^partition 4/p' "$w/linux/g4/host.txt" | grep -q needs_recovery && echo "needs_recovery: yes" || echo "needs_recovery: no"
+        echo "an incompatible feature it does not know (0x80000000):"
+        grep -m1 -E 'Couldn.t mount because of unsupported optional features' "$w/linux/g6/serial.log" | sed 's/^\[ *[0-9.]*\] //'
+    } > "$w/linux/guest.txt"
+    echo "live $(uname -r) $k" > "$w/linux/how"
+    rm -f "$w/linux/g4.img" "$w/linux/g6.img" "$w/linux/g6.p2" "$w/linux"/g*/disk.img
+    if [ "$record" = 1 ]; then
+        mkdir -p "$REC"
+        cp "$w/linux/guest.txt" "$REC/"
+        printf 'Linux %s on QEMU (tools/linux-root --fstype ext3), recorded %s\n' "$(file -b "$k" | sed -n 's/.*version \([^ ]*\).*/\1/p')" "$(date -u +%Y-%m-%d)" > "$REC/meta"
+        say "recorded the Linux side in $REC"
+    fi
+}
+
+make_disk() { # out archive label [more mkdisk args]
+    local out=$1 cpio=$2 label=$3; shift 3
+    SOURCE_DATE_EPOCH=$EPOCH "$PAX_ROOT/tools/mkdisk" --gpt --kernel "$elf" --root "$cpio" --journal \
+        --conf "$PAX_ROOT/boot/limine-initramfs.conf" --label "$label" "$@" "$SIZE" "$out" > "$out.mkdisk.txt" 2>&1
+}
+
+if [ "$only" = linux ]; then
+    why=$(linux_side "$images")
+    [ -z "$why" ] && say "PASS J0 (linux): the Linux side ran ($(cat "$images/linux/how"))" || bad "J0 (linux):$why"
+    exit "$fail"
+fi
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/bin"
+    why=
+    "$PAX_ROOT/tools/mkrootprobe" "$work/bin" > "$work/probes.txt" || why+=" tools/mkrootprobe;"
+    r=$(static_ok "$work/bin/mounts") || why+=" $r;"
+    sed 's/^/  program: /' "$work/probes.txt" >&2
+    printf 'px68: /etc/motd on a journalled root\n' > "$work/motd"
+    for img in session cut replay; do
+        case $img in
+            session) printf '/bin/mounts churn 120 20\n/bin/mounts table\n' ;;
+            cut)     printf '/bin/mounts churn 1500\n' ;;
+            replay)  printf '/bin/mounts table\n' ;;
+        esac > "$work/$img.run"
+        "$PAX_ROOT/tools/mkinitramfs" "$work/$img.cpio" /bin/mounts="$work/bin/mounts":755 /etc/motd="$work/motd":644 \
+            /etc/fstab="$PAX_ROOT/user/fstab-root":644 /etc/pax-run="$work/$img.run":644 /etc/mtab-\>../proc/self/mounts \
+            /tmp/:1777 > "$work/$img.initramfs.txt" || why+=" tools/mkinitramfs $img;"
+    done
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            say "built $tier kmain_console: elf $(sha256_of "$elf")"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    if [ "$only" = build ]; then
+        [ -z "$why" ] && say "PASS J0 (build): the probe static, kmain_console built ($tiers), three archives (the disks are made where the boots run)" || bad "J0 (build):$why"
+        exit "$fail"
+    fi
+    if [ "$(uname -s)" != Linux ]; then
+        why+=" the Linux side needs Linux (this is $(uname -s));"
+    else
+        why+=$(linux_side "$work")
+    fi
+    [ -z "$why" ] && say "PASS J0: the probe static, kmain_console built ($tiers), the archives, the Linux side ($(cat "$work/linux/how"))" || bad "J0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx6-journal build (J0): PASS (no boot: --no-boot)" || say "mpx6-journal build: FAIL"
+        exit "$fail"
+    fi
+fi
+lx=$images/linux
+[ -f "$lx/guest.txt" ] || die "no $lx/guest.txt (build first, and run the Linux side)"
+
+norm_log() { serial_norm "$log" > "$log.norm"; }
+sgrep() { command grep -a "$@" "$log.norm"; }
+
+record_run() { # tier leg what status
+    ran=$((ran + 1))
+    printf '%s kmain_console %s %s status=%s accel=%s elapsed=%s serial=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sed -n 's/^elapsed: //p' "$log.meta" 2>/dev/null)" \
+        "$(sha256_of "$log")" >> "$runs"
+}
+
+# A boot of disk $4 to the halt (qemu-halt), its log $log; more qemu-halt
+# arguments after (`--qemu -trace …`).
+halt_boot() { # tier leg what disk [qemu-halt args]
+    local rc=0 t=$1 l=$2 w=$3 dk=$4; shift 4
+    log=$PAX_BUILD/mpx6-journal-$t-$l-$w.serial.log
+    rm -f "$log" "$log.verdict" "$log.norm"
+    "$PAX_ROOT/tools/qemu-halt" --firmware "$l" --serial "$log" --timeout 300 --qemu -m --qemu 512M \
+        --elf "$images/$t/kmain_console.elf" --marker 'halt|PANIC .*' --boot-disk "$@" "$dk" >"$log.verdict" 2>&1 || rc=$?
+    norm_log
+    record_run "$t" "$l" "$w" "$rc"
+    return "$rc"
+}
+
+# QEMU's trace of the disk's requests into $1.
+trace_args() { printf -- '--qemu -trace --qemu virtio_blk_handle_write --qemu -trace --qemu virtio_blk_handle_read --qemu -trace --qemu virtio_blk_req_complete --qemu -D --qemu %s' "$1"; }
+
+# Partition 2's first sector and its count, from the disk's own table.
+p2_of() { "$PAX_ROOT/tools/mkgpt" --print "$1" | awk '$1 == 2 { split($4, r, "-"); print r[1], r[2] - r[1] + 1 }'; }
+p1_of() { "$PAX_ROOT/tools/mkgpt" --print "$1" | awk '$1 == 1 { split($4, r, "-"); print r[1] }'; }
+part_out() { # disk out
+    local s c
+    read -r s c < <(p2_of "$1")
+    dd if="$1" of="$2" bs=512 skip="$s" count="$c" status=none
+}
+part_in() { # disk part
+    local s c
+    read -r s c < <(p2_of "$1")
+    dd if="$2" of="$1" bs=512 seek="$s" conv=notrunc status=none
+}
+hdr_of() { # part -> dumpe2fs -h's fields, one a line
+    "$PAX_ROOT/tools/e2fs" "$(dirname "$1")" dumpe2fs -h "$(basename "$1")" 2>/dev/null
+}
+fsck_n() { # part -> exit; its text in part.fsck
+    local rc=0
+    "$PAX_ROOT/tools/e2fs" "$(dirname "$1")" e2fsck -fn "$(basename "$1")" > "$1.fsck" 2>&1 || rc=$?
+    return "$rc"
+}
+# init=/bin/mounts on the ESP's Limine command line (mtools; partition 2 untouched).
+with_init() { # disk
+    local d=$1 c img
+    c=$(dirname "$d")/$(basename "$d").conf
+    img="$(basename "$d")@@$(( $(p1_of "$d") * 512 ))"
+    SOURCE_DATE_EPOCH=$EPOCH "$PAX_ROOT/tools/disktools" "$(dirname "$d")" mcopy -n -i "$img" ::/boot/limine/limine.conf "$(basename "$c")" > /dev/null 2>&1 || return 1
+    sed -i -E 's/^(\s*(kernel_)?cmdline:.*)$/\1 init=\/bin\/mounts/' "$c"
+    SOURCE_DATE_EPOCH=$EPOCH "$PAX_ROOT/tools/disktools" "$(dirname "$d")" mcopy -o -m -i "$img" "$(basename "$c")" ::/boot/limine/limine.conf > /dev/null 2>&1 || return 1
+    rm -f "$c"
+}
+books() { # id
+    local why=
+    sgrep -Eq '^block: vda: [0-9]+ reads \([0-9]+ sectors\), [0-9]+ writes \([0-9]+ sectors\), [0-9]+ flushes, 0 errors, ' || why+=" $(sgrep -m1 '^block: vda: [0-9]* reads' || echo 'no books line');"
+    ! sgrep -q '^PANIC ' || why+=" $(sgrep -m1 '^PANIC ');"
+    [ -z "$why" ] && say "PASS J8 $1: $(sgrep -m1 '^block: vda: [0-9]* reads' | cut -d';' -f1)" || bad "J8 $1:$why"
+}
+halted() { # id rc
+    [ "$2" = 0 ] && say "PASS J8 $1: $(tail -n 1 "$log.verdict")" || bad "J8 $1: not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"))"
+}
+peek() { dd if="$1" bs=4096 skip="$2" count=1 status=none | head -c 4 | od -An -tx1 | tr -d ' \n'; }
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        elf=$images/$tier/kmain_console.elf
+        [ -f "$elf" ] || { bad "J0 $tier: no $elf"; continue; }
+        dk=$images/$tier/disks
+        mkdir -p "$dk"
+        why=
+        for img in session cut replay; do
+            more=()
+            [ "$img" = replay ] && more=(--initramfs "$images/replay.cpio")
+            [ -f "$dk/$img.img" ] || make_disk "$dk/$img.img" "$images/$img.cpio" "px68-$img" ${more[@]+"${more[@]}"} \
+                || why+=" mkdisk $img: $(tail -n 2 "$dk/$img.img.mkdisk.txt" | tr '\n' '|');"
+        done
+        [ -z "$why" ] && say "PASS J0 $tier disks: three, $(sed -n 's/^mkdisk: ext3: //p' "$dk/session.img.mkdisk.txt")" || { bad "J0 $tier disks:$why"; continue; }
+        id="$tier $leg"
+        w=$PAX_BUILD/mpx6-journal-$tier-$leg
+        rm -rf "$w"; mkdir -p "$w"
+
+        # --- J1, J2, J6: the session ------------------------------------------------
+        disk=$w/session.img
+        cp --sparse=always "$dk/session.img" "$disk"
+        part_out "$disk" "$w/s0.p2"
+        h0=$(hdr_of "$w/s0.p2")
+        d0=$(python3 "$PAX_ROOT/tools/mkjournal" "$w/s0.p2" --dump)
+        why=
+        printf '%s\n' "$h0" | grep -Eq '^Filesystem features: +has_journal ext_attr resize_inode dir_index filetype sparse_super large_file$' || why+=" features: $(printf '%s\n' "$h0" | grep '^Filesystem features');"
+        printf '%s\n' "$h0" | grep -Eq '^Journal inode: +8$' || why+=" no journal inode 8;"
+        printf '%s\n' "$d0" | grep -Eq '^journal: inode 8, [0-9]+ blocks of 4096 mapped .*, v2, maxlen [0-9]+, first 1, sequence 1, start 0, compat 0x0 incompat 0x0 ro 0x0$' || why+=" the journal: $(printf '%s\n' "$d0" | head -n 1);"
+        jb=$(printf '%s\n' "$d0" | sed -n 's/^journal: inode 8, \([0-9]*\) blocks.*/\1/p')
+        rm -f "$w/s0.p2"
+        trace=$w/session.trace
+        hrc=0; halt_boot "$tier" "$leg" session "$disk" $(trace_args "$trace") || hrc=$?
+        books "$id session"; halted "$id session" "$hrc"
+        part_out "$disk" "$w/s1.p2"
+        h1=$(hdr_of "$w/s1.p2")
+        d1=$(python3 "$PAX_ROOT/tools/mkjournal" "$w/s1.p2" --dump)
+        frc=0; fsck_n "$w/s1.p2" || frc=$?
+        ld=$("$PAX_ROOT/tools/e2fs" "$w" debugfs -R logdump s1.p2 2>/dev/null | grep -m1 '^Journal starts')
+        seq1=$(printf '%s\n' "$d1" | sed -n 's/.*sequence \([0-9]*\), start \([0-9]*\).*/\1 \2/p')
+        printf '%s\n' "$h1" | grep -Eq '^Filesystem state: +clean$' || why+=" state: $(printf '%s\n' "$h1" | grep '^Filesystem state');"
+        ! printf '%s\n' "$h1" | grep -q needs_recovery || why+=" needs_recovery after a clean halt;"
+        [ "$frc" = 0 ] || why+=" e2fsck -fn: $(tail -n 3 "$w/s1.p2.fsck" | tr '\n' '|');"
+        set -- $seq1
+        [ "${2:-x}" = 0 ] && [ "${1:-1}" -gt 1 ] || why+=" the log after the halt: sequence ${1:-?} start ${2:-?};"
+        [ "$ld" = "Journal starts at block 0, transaction ${1:-?}" ] || why+=" logdump: '$ld';"
+        sgrep -Eq "^ext2: vda2: .*; journal of $jb blocks in [0-9]+ runs, data=ordered\$" || why+=" no journal clause in the mount line;"
+        sgrep -Eq '^journal: vda2: [0-9]+ commits ' || why+=" no journal line at the halt;"
+        [ -z "$why" ] && say "PASS J1 $id: mke2fs's ext3 ($jb journal blocks, v2, no journal feature, sequence 1, start 0); after the session: clean, needs_recovery clear, the log empty at sequence ${1:-?} (logdump: the same), e2fsck -fn clean; $(sgrep -m1 '^journal: vda2: ' | cut -d';' -f1)" || bad "J1 $id:$why"
+        why=
+        if [ ! -s "$trace" ] || ! grep -q virtio_blk_handle_write "$trace"; then
+            why+=" QEMU wrote no trace of the disk ($trace: its log backend?);"
+        else
+            s=$(p2_of "$disk" | cut -d' ' -f1)
+            jo=$(python3 "$PAX_ROOT/tools/jorder" "$trace" "$disk" --offset $((s * 512)) 2>&1); jrc=$?
+            printf '%s\n' "$jo" > "$w/session.jorder"
+            [ "$jrc" = 0 ] || why+=" $(printf '%s\n' "$jo" | tail -n 1);"
+            n=$(printf '%s\n' "$jo" | sed -n 's/^jorder: \([0-9]*\) commits.*/\1/p')
+            [ "${n:-0}" -ge 6 ] || why+=" ${n:-0} commits, not the six syncs' and more;"
+        fi
+        [ -z "$why" ] && say "PASS J2 $id: $(printf '%s\n' "$jo" | tail -n 1) (each after its log and a FLUSH, a FLUSH after it, no home write inside it: QEMU's trace)" || bad "J2 $id:$why"
+        why=
+        sgrep -Eq '^root: PARTUUID=[0-9a-f-]+ \(vda2\) on /: ext3, read-write, data=ordered$' || why+=" root line: $(sgrep -m1 '^root: ');"
+        sgrep -qx 'mounts: /dev/root / ext3 rw,relatime 0 0' || why+=" the table's /: $(sgrep -m1 '^mounts: /dev/root ');"
+        grep -qx 'mounts: /dev/root / ext3 rw,relatime 0 0' "$lx/guest.txt" || why+=" the guest's table: $(grep -m1 '^mounts: /dev/root' "$lx/guest.txt");"
+        grep -q 'mounted filesystem <uuid> r/w with ordered data mode' "$lx/guest.txt" || why+=" the guest's mount is not ordered;"
+        [ -z "$why" ] && say "PASS J6 $id: / is ext3, data=ordered, and /proc/self/mounts says '/dev/root / ext3 rw,relatime', as the guest mounts and names its own" || bad "J6 $id:$why"
+        rm -f "$w/s1.p2" "$w/s1.p2.fsck" "$disk"
+
+        # --- J3: a power cut, the next boot ------------------------------------------
+        disk=$w/cut.img
+        cp --sparse=always "$dk/cut.img" "$disk"
+        log=$PAX_BUILD/mpx6-journal-$tier-$leg-cut.serial.log
+        rm -f "$log" "$log.norm" "$log.qpid"
+        "$PAX_ROOT/tools/qemu-run" --firmware "$leg" --serial "$log" --timeout 300 --boot-disk "$disk" -- -m 512M -pidfile "$log.qpid" \
+            > "$log.verdict" 2>&1 &
+        qp=$!
+        t0=
+        for _ in $(seq 1 6000); do
+            if [ -z "$t0" ] && grep -q 'churn: begin' "$log" 2>/dev/null; then t0=$(date +%s%N); fi
+            if [ -n "$t0" ] && [ $(( $(date +%s%N) - t0 )) -ge 7000000000 ]; then
+                kill -9 "$(cat "$log.qpid")" 2>/dev/null || true
+                break
+            fi
+            kill -0 "$qp" 2>/dev/null || break
+            sleep 0.05
+        done
+        wait "$qp" 2>/dev/null || true
+        norm_log; record_run "$tier" "$leg" cut killed
+        lastop=$(sgrep -E '^churn: [0-9]+ ' | tail -n 1 | cut -d' ' -f2)
+        part_out "$disk" "$w/c0.p2"
+        hk=$(hdr_of "$w/c0.p2")
+        cp "$w/c0.p2" "$w/c0h.p2"
+        "$PAX_ROOT/tools/e2fs" "$w" e2fsck -fy c0h.p2 > "$w/c0h.fsck" 2>&1 || true
+        "$PAX_ROOT/tools/e2tree" "$w/c0h.p2" > "$w/c0h.tree"
+        rm -f "$w/c0.p2" "$w/c0h.p2"
+        why=
+        printf '%s\n' "$hk" | grep -Eq '^Filesystem state: +clean$' || why+=" killed: $(printf '%s\n' "$hk" | grep '^Filesystem state');"
+        printf '%s\n' "$hk" | grep -q '^Filesystem features:.*needs_recovery' || why+=" killed: no needs_recovery;"
+        grep -qx 'needs_recovery: yes' "$lx/guest.txt" || why+=" the guest's cut left no needs_recovery;"
+        with_init "$disk" || why+=" mcopy (init=);"
+        hrc=0; halt_boot "$tier" "$leg" cut2 "$disk" || hrc=$?
+        books "$id cut2"; halted "$id cut2" "$hrc"
+        rl=$(sgrep -c '^ext2: vda2: recovering the journal: ')
+        rline=$(sgrep -m1 '^ext2: vda2: recovering the journal: ')
+        [ "$rl" = 1 ] || why+=" $rl recovery lines;"
+        printf '%s\n' "$rline" | grep -Eq '^ext2: vda2: recovering the journal: [1-9][0-9]* transactions? \(sequence [0-9]+ to [0-9]+\), [0-9]+ blocks written home, [0-9]+ revoked; recovery complete$' || why+=" '$rline';"
+        part_out "$disk" "$w/c1.p2"
+        h2=$(hdr_of "$w/c1.p2")
+        frc=0; fsck_n "$w/c1.p2" || frc=$?
+        "$PAX_ROOT/tools/e2tree" "$w/c1.p2" > "$w/c1.tree"
+        printf '%s\n' "$h2" | grep -Eq '^Filesystem state: +clean$' || why+=" after: $(printf '%s\n' "$h2" | grep '^Filesystem state');"
+        ! printf '%s\n' "$h2" | grep -q needs_recovery || why+=" needs_recovery after the clean halt;"
+        [ "$frc" = 0 ] || why+=" e2fsck -fn: $(tail -n 3 "$w/c1.p2.fsck" | tr '\n' '|');"
+        cmp -s <(grep '^/churn' "$w/c0h.tree") <(grep '^/churn' "$w/c1.tree") || why+=" PAX's tree is not e2fsck -fy's ($(diff <(grep '^/churn' "$w/c0h.tree") <(grep '^/churn' "$w/c1.tree") | wc -l) lines);"
+        grep -q '^/churn/' "$w/c1.tree" || why+=" no /churn after the replay;"
+        [ -z "$why" ] && say "PASS J3 $id: killed 7 s in (after op $lastop): clean with needs_recovery (the guest's too); the next boot: '${rline#ext2: vda2: }', halted, clean, e2fsck -fn clean; /churn ($(grep -c '^/churn/' "$w/c1.tree") names) every field as e2fsck -fy's replay of a copy" || bad "J3 $id:$why"
+        rm -f "$w/c1.p2" "$w/c1.p2.fsck" "$disk"
+
+        # --- J4: the replay is e2fsck's ---------------------------------------------
+        part_out "$dk/replay.img" "$w/r.p2"
+        fb=$("$PAX_ROOT/tools/e2fs" "$w" debugfs -R "ffb 3 4000" r.p2 2>/dev/null | sed -n 's/^Free blocks found: //p')
+        set -- $fb
+        B1=${1:-0} B2=${2:-0} B3=${3:-0}
+        max=$(python3 "$PAX_ROOT/tools/mkjournal" "$w/r.p2" --dump | sed -n 's/.*maxlen \([0-9]*\),.*/\1/p')
+        rm -f "$w/r.p2"
+        jw=
+        jok=0 jn=0
+        mapfile -t cases < <(command grep -v '^#' "$D/replays")
+        for c in "${cases[@]}"; do
+            name=${c%%|*} spec=${c#*|}
+            [ -n "$name" ] || continue
+            jn=$((jn + 1))
+            disk=$w/j-$name.img
+            cp --sparse=always "$dk/replay.img" "$disk"
+            part_out "$disk" "$w/j.p2"
+            printf '%s\n' $spec | sed "s/@B1/$B1/g; s/@B2/$B2/g; s/@B3/$B3/g; s/@MAX2/$((max - 2))/g; s/_/ /g" > "$w/j-$name.spec"
+            python3 "$PAX_ROOT/tools/mkjournal" "$w/j.p2" "$w/j-$name.spec" > /dev/null || { jw+=" $name: mkjournal;"; rm -f "$w/j.p2" "$disk"; continue; }
+            part_in "$disk" "$w/j.p2"
+            cp "$w/j.p2" "$w/jh.p2"
+            "$PAX_ROOT/tools/e2fs" "$w" e2fsck -fy jh.p2 > "$w/j-$name.host" 2>&1 || true
+            want="$(peek "$w/jh.p2" "$B1") $(peek "$w/jh.p2" "$B2") $(peek "$w/jh.p2" "$B3")"
+            rm -f "$w/jh.p2" "$w/j.p2"
+            trace=$w/j-$name.trace
+            hrc=0; halt_boot "$tier" "$leg" "j-$name" "$disk" $(trace_args "$trace") < /dev/null || hrc=$?
+            books "$id j-$name" > /dev/null 2>&1 || true
+            [ "$hrc" = 0 ] || { jw+=" $name: not halted;"; rm -f "$disk"; continue; }
+            nrep=$(sgrep -m1 '^ext2: vda2: recovering the journal: ' | sed -n 's/.*, \([0-9]*\) blocks written home.*/\1/p')
+            part_out "$disk" "$w/j.p2"
+            got="$(peek "$w/j.p2" "$B1") $(peek "$w/j.p2" "$B2") $(peek "$w/j.p2" "$B3")"
+            frc=0; fsck_n "$w/j.p2" || frc=$?
+            s=$(p2_of "$disk" | cut -d' ' -f1)
+            jo=$(python3 "$PAX_ROOT/tools/jorder" "$trace" "$disk" --offset $((s * 512)) --replay="${nrep:-0}" 2>&1); jrc=$?
+            rm -f "$w/j.p2" "$w/j.p2.fsck" "$disk"
+            if [ "$want" = "$got" ] && [ "$frc" = 0 ] && [ "$jrc" = 0 ] && [ -n "$nrep" ]; then
+                jok=$((jok + 1))
+                say "  J4 $id $name: $got as e2fsck -fy's; ${nrep} blocks replayed; $(printf '%s\n' "$jo" | tail -n 1 | sed 's/^jorder: //')"
+            else
+                jw+=" $name: PAX '$got' e2fsck '$want', e2fsck -fn $frc, $(printf '%s\n' "$jo" | tail -n 1), recovery '${nrep:-none}';"
+            fi
+        done
+        [ -z "$jw" ] && [ "$jn" -gt 0 ] && say "PASS J4 $id: $jok of $jn crafted journals replayed as e2fsck -fy replays them (blocks $B1 $B2 $B3), e2fsck -fn clean after, each replay's home writes before the log emptied, a FLUSH between" || bad "J4 $id:$jw"
+
+        # --- J5: the refusals ---------------------------------------------------------
+        why=
+        disk=$w/feat.img
+        cp --sparse=always "$dk/replay.img" "$disk"
+        part_out "$disk" "$w/f.p2"
+        "$PAX_ROOT/tools/e2fs" "$w" debugfs -w -R "ssv feature_incompat 0x80000002" f.p2 > /dev/null 2>&1 || why+=" debugfs ssv;"
+        part_in "$disk" "$w/f.p2"; rm -f "$w/f.p2"
+        hrc=0; halt_boot "$tier" "$leg" feat "$disk" || hrc=$?
+        books "$id feat"; halted "$id feat" "$hrc"
+        sgrep -qx 'ext2: refused: vda2: unsupported optional features (80000000): s_feature_incompat an unknown bit 0x0000000080000000' || why+=" the refusal: $(sgrep -m1 '^ext2: refused: ');"
+        grep -q 'Couldn.t mount because of unsupported optional features (80000000)' "$lx/guest.txt" || why+=" the guest's words not recorded;"
+        sgrep -q '/ stays the initramfs in memory' || why+=" / did not stay the initramfs's;"
+        rm -f "$disk"
+        disk=$w/jfeat.img
+        cp --sparse=always "$dk/replay.img" "$disk"
+        part_out "$disk" "$w/f.p2"
+        printf 'start 1 1\nfeature csum3\ntx\nwrite %s a1\ncommit\nrecover\n' "$B1" > "$w/jfeat.spec"
+        python3 "$PAX_ROOT/tools/mkjournal" "$w/f.p2" "$w/jfeat.spec" > /dev/null || why+=" mkjournal csum3;"
+        part_in "$disk" "$w/f.p2"; rm -f "$w/f.p2"
+        hrc=0; halt_boot "$tier" "$leg" jfeat "$disk" || hrc=$?
+        books "$id jfeat"; halted "$id jfeat" "$hrc"
+        sgrep -Eq "^ext2: refused: vda2: the journal's incompatible features \(s_feature_incompat 0x0*10: " || why+=" the journal's refusal: $(sgrep -m1 '^ext2: refused: ');"
+        sgrep -q '/ stays the initramfs in memory' || why+=" / did not stay the initramfs's (journal feature);"
+        rm -f "$disk"
+        [ -z "$why" ] && say "PASS J5 $id: 'unsupported optional features (80000000)' (the guest's words) and an unknown journal feature (CSUM_V3) refused by name; / the initramfs's both times" || bad "J5 $id:$why"
+
+        # --- J7: the crash row -------------------------------------------------------------
+        why=
+        if [ "$rows" = pr ]; then cr=(--n 4 --ops 600); else cr=(--n 12 --ops 1500 --torn); fi
+        rcr=0
+        SOURCE_DATE_EPOCH=$EPOCH python3 "$PAX_ROOT/tools/root-crash" --kernel "$elf" --probe "$images/bin/mounts" --firmware "$leg" \
+            "${cr[@]}" --check "$w/crash" > "$w/crash.out" 2>&1 || rcr=$?
+        cp "$w/crash/crash.txt" "$PAX_BUILD/mpx6-journal-$tier-$leg-crash.txt" 2>/dev/null || true
+        tally=$(sed -n '/^| class | kills |/,$p' "$w/crash/crash.txt" 2>/dev/null | grep -E '^\| (none|lost writes|counts|orphans|worse) ' | sed 's/^| \(.*\) | \([0-9]*\) |$/\1 \2/' | tr '\n' ',' | sed 's/,$//')
+        [ "$rcr" = 0 ] || why+=" root-crash exit $rcr: $(grep -m1 'gate (--check)' "$w/crash/crash.txt" 2>/dev/null || tail -n 2 "$w/crash.out" | tr '\n' '|');"
+        if [ "$rows" = all ]; then
+            grep -q '^| torn | .* | \(none\|lost writes\) |' "$w/crash/crash.txt" 2>/dev/null || why+=" no torn row held;"
+        fi
+        [ -z "$why" ] && say "PASS J7 $id: the crash row (${cr[*]}): $tally; every disk within the last commit's bound and e2fsck -fy's tree" || bad "J7 $id:$why"
+        rm -rf "$w/crash/"*.img "$w/crash/"*.p2
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx6-journal: PASS" || say "mpx6-journal: FAIL"
+exit "$fail"
