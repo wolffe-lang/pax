@@ -1,0 +1,33 @@
+px67 — root on the disk: the prediction, written before the first change
+(2026-10-23, at pax trunk f0617320, px66's merge).
+
+1. Kernel lines the root switch takes. The root record alone (kernel/tree
+   answering which record is `/`, the walk's start, `..` at the top,
+   getcwd's and /proc's path ends, chroot's root check, the run list and
+   /etc/fstab read from the tree, `root=` read from Limine's cmdline and
+   mounted before the first program): about 220 lines (tree ~60, files
+   ~40, fstab and boot_info ~100, kmain_console ~20). With mount(2),
+   umount2(2), the remount both ways, /proc/self/mounts and mountinfo,
+   and a halt that ends every process before it unmounts: about 800 in
+   all.
+
+2. The suite that fails first with `/` on the disk: mpx3-boreutils. Its
+   rows print `ls -l` and `stat` of directories, and a directory on ext2
+   is 4096 bytes on device 254:2 with ext2's inode numbers, where the
+   reference (Linux's tmpfs, and PAX's memory tree) says 40 + 20 an
+   entry on 0:1. Anything run in /tmp keeps tmpfs's shapes only if /tmp
+   stays in memory (R-px67-1).
+
+3. Boot time, QEMU's start to the kernel's first line, the same kernel:
+   under TCG with SeaBIOS, about 0.8 s with `/` on the disk (Limine
+   loads no initramfs: R-px67-2, none) against px66's 1.18 s from the
+   disk with the initramfs; to the first prompt about the same as the
+   initramfs's (within 10%: pelt's pages now come through virtio-blk,
+   polled). Under KVM both under 0.6 s to the prompt, the disk's
+   faster.
+
+4. The crash row's commonest damage class: lost writes only. The flusher
+   writes every dirty block at once every 5 s with interrupts off, so a
+   kill between two turns leaves the last turn's whole state; second,
+   bitmap and count differences, from a kill inside a turn or a buffer
+   evicted between turns. Orphaned inodes rare; nothing worse.
