@@ -265,10 +265,146 @@ Issues to close: pax#150 (when merged). To file (none filed here: RULES
 §3): the orphan list (R-px68-6); the `sync` option's metadata on a
 journalled volume (§10). Others at the final hand-back.
 
-fsck's lane (px72, pax#151): drafted in the final note.
+fsck's lane (px72, pax#151): drafted in full in §12.
 
 Prune (at the merge): kasumi `~/lanes/px68/` (the clone, `kb/`, `kc/`,
 `smoke/`, `crash/`, `guest/`, `oracle/`, `build/`, `snap/`, `play/` but
 the shipped disk, `lope/`, `logs/`, the plant worktrees); the branches
 `px68-plant-order`, `-revoke`, `-clean` on origin; this Mac's worktrees
 `/Users/mfwolffe/lanes/px68/pax` and `plant-*`.
+
+## 12. fsck's lane, drafted (px72, pax#151)
+
+A draft for the orchestrator to edit into `sprints/pax/72-fsck/`; nothing
+in it is decided.
+
+### px72 — fsck: check and repair an ext2 or ext3 volume on PAX (pax#151)
+
+**Model: the orchestrator's (a user-space program; the boot hook is a
+few lines of kernel/fstab, item 4). Launches on px68's merge, kasumi
+cores 0–3.** px67 measured what a power cut costs an ext2 root (24 kills:
+20 lost writes, 4 counts) and px68 gave `/` a journal: on ext3 the same
+24 kills give 0 counts, 0 orphans, 0 worse, the replay is e2fsck's, and
+a host's `e2fsck -fy` after PAX's replay fixes nothing
+(`notes/px68-the-journal.md` §6). So the journal leaves fsck less to do
+than pax#151 named: not the crash row on `/`, but everything a replay
+cannot mend: an ext2 volume (`tools/mkdisk`'s plain path, `--home`,
+`--no-journal`, mpx6-ext2's and mpx6-part's disks), an orphan (an
+inode unlinked while open when the power went: R-px68-6, no orphan list
+kept), a journal the kernel refuses (a tag past the volume's end, a
+revocation block's count wrong, a feature it does not serve: the volume
+does not mount, §10), and damage no crash makes (a bad disk, a bug).
+PAX has no fsck: a damaged volume stays damaged until a host runs
+e2fsck on the image.
+
+#### Launch facts
+- **Host:** kasumi CPUs 0–3 under `flock ~/lanes/kasumi-cores-0-3.lock`,
+  the lane's own `px13-ubuntu` container, QEMU under `taskset -c 0-3`
+  with `ulimit -c 0`, long jobs `setsid -f` with a pid file.
+- **Branch** `px72` from pax trunk at px68's merge.
+- **Read before editing:** px63's, px67's and px68's notes; `kernel/ext2`
+  (what PAX serves: rev 1, FILETYPE, sparse_super, large_file,
+  resize_inode, dir_index read linear and cleared on a change, ext_attr
+  blocks left alone, has_journal with needs_recovery); `tools/e2fs`,
+  `tools/e2tree`, `tools/root-crash`, `tools/mkjournal`; `user/su` (a
+  wolf program in PAX's tree, built by the pin).
+
+#### Items
+1. **The checks, from the manual and the layout.** e2fsck(8)'s passes
+   as its prose describes them (inodes and their blocks; the directory
+   structure; connectivity; reference counts; the group summaries), for
+   the format kernel/ext2 serves and nothing past it (a volume with a
+   feature kernel/ext2 refuses is refused by name, as the kernel words
+   it). `fsck.ext2 [-n|-y|-p] [-f] DEVICE`, e2fsck's exit codes (0, 1,
+   2, 4, 8, 16: e2fsck(8)), one line a problem, a summary line.
+2. **The repairs, held to e2fsck -fy.** Every fixture (item 3) repaired
+   by PAX's `fsck.ext2 -fy` on PAX and by the host's `e2fsck -fy` on a
+   copy: the trees equal field for field (`tools/e2tree`), the host's
+   `e2fsck -fn` clean after PAX's repair, PAX's exit code e2fsck's. A
+   repair e2fsck makes that PAX's does not (or the other way) is a row
+   red with the diff, never a golden edited.
+3. **The fixtures.** (a) The ext2 crash disks: `tools/root-crash
+   --no-journal --seed 67 --n 24 --ops 1500` gives px67's four counts
+   kills again (kill 11 `Free blocks count wrong for group #0`, kills
+   22–24 `Block bitmap differences: -1942 -1973`: px68's c1-ext2, the
+   same as px67's), and its 20 lost-writes disks, which fsck must leave
+   as they are; (b) damage made by `debugfs -w` on a clean disk, one a
+   class: a block bitmap bit set and one cleared, a free count, an inode
+   bitmap bit, a link count, a directory entry naming a freed inode, a
+   block claimed by two files, a directory's size, an inode with no
+   name (to lost+found), an orphan (links 0, dtime 0); (c) the journal's
+   (tools/mkjournal): a log the kernel refuses (a tag past the end, a
+   revocation block's count wrong, CSUM_V3), and a log with transactions
+   (fsck on a volume needing recovery: R-px72-2).
+4. **At boot** (R-px72-1): the root's not-clean path (R-px67-5's warning
+   today) runs `fsck.ext2 -p` before the root is written, one console line
+   for its verdict; then the crash row with `--no-journal`, gated: counts
+   0, orphans 0, worse 0 after PAX's own fsck, as px68 gated the
+   journal's.
+5. **Cost:** the check's time on the 128 MiB suite disk and on the
+   playground's 448 MiB root, thrice; the boot's time with and without a
+   check.
+6. **Docs, rows, plants:** `docs/SOURCES.md` (e2fsck(8), the layout
+   pages); `docs/BOOT.md` and the README; `tests/mpx6-fsck` (or the name
+   ci-tiers.map wants), in `tier pr` if it fits. Plants: pass 5 skipped
+   (the counts fixtures red); an orphan's blocks freed but its inode left
+   (e2fsck -fn red after the repair); a duplicate block given to both
+   files (the tree row red). The note; the PR with pax#126's five
+   headings and its Footprint line; lane-audit's last line quoted.
+
+#### Rulings (recommend in the note, the orchestrator decides)
+- **R-px72-1 where fsck runs at boot:** (A) Linux's classic order: the
+  kernel mounts a not-clean root read-only (px67's `ro`), the run list's
+  first command is `fsck.ext2 -p /dev/vda2`, then `mount -o remount,rw /`
+  (px67's remount), the kernel forgetting the device's cached blocks at
+  that remount as px68's replay does (recommended: no archive needed on
+  the disk, and every piece but fsck is there); (B) pax#151's words: the
+  kernel leaves a not-clean root unmounted when Limine loaded the rescue
+  archive (R-px67-2), the archive's run list checks `/dev/vda2`, then
+  reboot(2) (every disk then carries the archive).
+- **R-px72-2 a journal at fsck's time:** (A) fsck replays nothing: on a
+  volume whose log holds transactions it says so and exits 4 ("mount it:
+  the kernel replays"), since with R-px72-1 (A) the kernel has replayed
+  before fsck runs; a log the kernel refused is cleared with the user's
+  yes (`-y`), the journal re-made empty as mke2fs makes it, has_journal
+  kept (recommended: one replay, the kernel's, already held to e2fsck's);
+  (B) fsck replays too, e2fsck's way (a second implementation of px68's
+  rules in user space, J4's thirteen journals its fixtures).
+- **R-px72-3 the orphan list:** (A) px72 clears orphans as e2fsck -fy
+  does (the blocks freed, the inode cleared), and the orphan list itself
+  (s_last_orphan, kept by the kernel at unlink-while-open and processed at
+  mount) stays R-px68-6's own lane (recommended); (B) both here.
+- **R-px72-4 where it lives:** (A) `user/fsck` in pax's tree, built by
+  the pinned wolf like `user/su` (recommended: it reads the volume
+  kernel/ext2 writes, and both move together); (B) a repo of its own
+  like boreutils.
+
+#### Forbidden / rules
+**Clean-room (ruling #22)**, as px68's: never e2fsprogs' source
+(`e2fsck/`, `lib/ext2fs`, `debugfs/`, `misc/`), never any kernel's or
+other file system's source, never another fsck's (BSD's fsck_ffs,
+Minix's, busybox's). Allowed: e2fsck(8), mke2fs(8), debugfs(8),
+dumpe2fs(8), the ext4 layout documentation's prose
+(`Documentation/filesystems/ext4/`), and the pinned e2fsprogs binaries as
+oracles (`tools/e2fs`). No golden edited: a disagreement with e2fsck is a
+STOP with the diff. RULES §1–§10.
+
+#### Inputs (re-derive)
+px68's note §6 and §10 (what the journal mends and what it leaves);
+`notes/px68/crash/c1-ext2.txt` (the ext2 fixtures' kills); px67's crash
+row; `kernel/ext2`'s served features at trunk; the pinned e2fsprogs's
+messages for each fixture (`e2fsck -fn`, measured, never read from its
+source).
+
+#### Prediction (write before the first change)
+How many lines of wolf; which pass's repair first disagrees with
+e2fsck -fy, and on which fixture; the check's time on 448 MiB; whether
+any of the 20 lost-writes ext2 disks is not clean to e2fsck -fn after the
+fsck (none, if the counts are the only damage a cut leaves).
+
+#### Done-when
+Items 1–6 with their rows; every fixture repaired as e2fsck -fy repairs
+it; the ext2 crash row gated green after PAX's own fsck; plants red by
+run id; CI green at the head (`tier pr`); the note and the PR as RULES
+§6; hand back with the run id, the issues to close (pax#151) and to file,
+the prune list.
