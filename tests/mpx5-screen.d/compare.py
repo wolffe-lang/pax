@@ -145,7 +145,7 @@ def read_cells(w, h, px, glyphs):
 def cmp_vt(log, d):
     glyphs = font()
     vt = {}
-    for f, p in (('vt.rows', 1), ('vt2.rows', 2)):
+    for f, p in (('vt.rows', 1), ('vt2.rows', 2), ('vt70.rows', 3)):
         for k, v in vtc['rows'](f).items():
             vt[(p,) + k] = v
     held = named = failed = other = 0

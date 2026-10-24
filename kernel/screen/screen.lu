@@ -39,7 +39,7 @@
 //!   and `48;5;n` (the 256 colours, mapped to the 16 as a Linux VT maps
 //!   them, measured: `indexed`) are honoured; `38;2` and `48;2` are read
 //!   and skipped; every other parameter ignored; an empty parameter is
-//!   0; at most 8 parameters, each at most 9999. A sequence with a
+//!   0; at most 16 parameters, each at most 9999. A sequence with a
 //!   private or intermediate byte, or another final, is read and
 //!   ignored, but for the ones below. A C0 byte inside a sequence ends it
 //!   and is acted on; a byte at or above 0x80 ends it and is dropped.
@@ -133,8 +133,8 @@ const S_BG: u64 = 11
 const S_BOLD: u64 = 12
 const S_INV: u64 = 13
 const S_ESC: u64 = 14 // 0 ground, 1 after ESC, 2 in a CSI sequence
-const S_PI: u64 = 15 // the CSI parameter being read (0-7)
-const S_P: u64 = 16 // eight parameters, words 16-23
+const S_PI: u64 = 15 // the CSI parameter being read (0-15)
+const S_P: u64 = 16 // sixteen 32-bit parameters packed in words 16-23
 const S_PRIV: u64 = 24 // the sequence has a private or intermediate byte
 const S_UN: u64 = 25 // UTF-8 continuation bytes still wanted
 const S_UCP: u64 = 26 // the code point so far
@@ -498,11 +498,23 @@ fn indexed(n: u64, bg: bool) -> u64 {
     (packed >> ((n % 16) * 4)) & 15
 }
 
+/// The sixteen CSI parameters fit the original eight state words.
+/// Each value is bounded to 9999; the unused upper bits stay zero.
+fn ps(i: u64) -> u64 {
+    (sv(S_P + i / 2) >> ((i % 2) * 32)) & 0xffffffff
+}
+
+fn put_ps(i: u64, v: u64) {
+    let w = S_P + i / 2
+    let shift = (i % 2) * 32
+    put_sv(w, (sv(w) & !(0xffffffff << shift)) | (v << shift))
+}
+
 /// SGR with the `n` parameters read.
 fn sgr(n: u64) {
     var k: u64 = 0
     while k < n {
-        let p = sv(S_P + k)
+        let p = ps(k)
         if p == 0 {
             put_sv(S_FG, 7)
             put_sv(S_BG, 0)
@@ -517,11 +529,11 @@ fn sgr(n: u64) {
         } else if p == 7 {
             put_sv(S_INV, 1)
         } else if p == 38 || p == 48 {
-            if k + 2 < n && sv(S_P + k + 1) == 5 {
-                let index = sv(S_P + k + 2)
+            if k + 2 < n && ps(k + 1) == 5 {
+                let index = ps(k + 2)
                 if index < 256 { put_sv(if p == 38 { S_FG } else { S_BG }, indexed(index, p == 48)) }
                 k += 2
-            } else if k + 1 < n && sv(S_P + k + 1) == 2 {
+            } else if k + 1 < n && ps(k + 1) == 2 {
                 k += 4 // truecolour not served; never treat RGB as SGR flags
             } else {
                 k = n // incomplete or unsupported colour group
@@ -577,7 +589,7 @@ fn move_to(x: u64, y: u64) {
 }
 
 fn param(i: u64) -> u64 {
-    let p = sv(S_P + i)
+    let p = ps(i)
     if p == 0 { 1 } else { p }
 }
 
@@ -588,7 +600,7 @@ fn dispatch(b: u64) {
     if b == 109 {
         sgr(sv(S_PI) + 1)
     } else if b == 74 || b == 75 { // ED, EL (inclusive at the cursor)
-        let p = sv(S_P)
+        let p = ps(0)
         let pos = y * sv(S_COLS) + x
         let first = if b == 74 { 0 } else { y * sv(S_COLS) }
         let end = if b == 74 { sv(S_COLS) * sv(S_ROWS) } else { (y + 1) * sv(S_COLS) }
@@ -613,11 +625,11 @@ fn dispatch(b: u64) {
         move_to(0, y + n)
     } else if b == 70 { // CPL
         move_to(0, if n > y { 0 } else { y - n })
-    } else if b == 99 && sv(S_P) == 0 && sv(S_PI) == 0 { // DA1, CSI c and CSI 0 c
+    } else if b == 99 && ps(0) == 0 && sv(S_PI) == 0 { // DA1, CSI c and CSI 0 c
         answer_da1()
-    } else if b == 110 && sv(S_P) == 6 && sv(S_PI) == 0 { // DSR 6: the cursor's position
+    } else if b == 110 && ps(0) == 6 && sv(S_PI) == 0 { // DSR 6: the cursor's position
         answer_cpr()
-    } else if b == 110 && sv(S_P) == 5 && sv(S_PI) == 0 { // DSR 5: `ESC [ 0 n`, no malfunction
+    } else if b == 110 && ps(0) == 5 && sv(S_PI) == 0 { // DSR 5: `ESC [ 0 n`, no malfunction
         answer_byte(27)
         answer_byte(91)
         answer_byte(48)
@@ -649,14 +661,14 @@ fn alternate(on: bool) {
 /// (DECTCEM, the cursor shown or not); every other mode is read and
 /// ignored, as the measured VT ignores paste, mouse, focus and sync.
 fn private_mode(b: u64) {
-    if b == 110 && sv(S_P) == 6 && sv(S_PI) == 0 {
+    if b == 110 && ps(0) == 6 && sv(S_PI) == 0 {
         answer_cpr() // `CSI ? 6 n`: the measured VT answers it as `CSI 6 n`
         return
     }
     if b != 104 && b != 108 { return }
     var i: u64 = 0
     while i <= sv(S_PI) {
-        let m = sv(S_P + i)
+        let m = ps(i)
         if m == 1049 {
             alternate(b == 104)
         } else if m == 25 {
@@ -672,16 +684,16 @@ fn private_mode(b: u64) {
 /// One byte inside a CSI sequence.
 fn csi(b: u64) {
     if b >= 48 && b <= 57 {
-        let i = S_P + sv(S_PI)
-        let v = sv(i) * 10 + (b - 48)
-        put_sv(i, if v > 9999 { 9999 } else { v })
+        let i = sv(S_PI)
+        let v = ps(i) * 10 + (b - 48)
+        put_ps(i, if v > 9999 { 9999 } else { v })
     } else if b == 59 {
-        if sv(S_PI) < 7 {
+        if sv(S_PI) < 15 {
             put_sv(S_PI, sv(S_PI) + 1)
         } else {
-            put_sv(S_PRIV, 1) // a ninth parameter: the sequence is ignored
+            put_sv(S_PRIV, 1) // the seventeenth rejects the whole CSI, as measured on the VT
         }
-    } else if b == 63 && sv(S_PRIV) == 0 && sv(S_PI) == 0 && sv(S_P) == 0 {
+    } else if b == 63 && sv(S_PRIV) == 0 && sv(S_PI) == 0 && ps(0) == 0 {
         put_sv(S_PRIV, 63)
     } else if b == 32 && sv(S_PRIV) == 0 {
         put_sv(S_PRIV, 32) // one space intermediate: DECSCUSR's, if `q` ends it
@@ -693,8 +705,8 @@ fn csi(b: u64) {
             dispatch(b)
         } else if sv(S_PRIV) == 63 {
             private_mode(b)
-        } else if sv(S_PRIV) == 32 && b == 113 && sv(S_PI) == 0 && sv(S_P) <= 6 {
-            put_sv(S_SHAPE, sv(S_P)) // DECSCUSR: recorded; PAX draws a block
+        } else if sv(S_PRIV) == 32 && b == 113 && sv(S_PI) == 0 && ps(0) <= 6 {
+            put_sv(S_SHAPE, ps(0)) // DECSCUSR: recorded; PAX draws a block
         }
     } else {
         put_sv(S_ESC, 0) // 0x80 and above: the sequence ends, the byte is dropped

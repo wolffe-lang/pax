@@ -33,7 +33,6 @@ NAMED = {
     'SGR4-colour': 'dropped: underline as colour 6 over the colour set; PAX plain',
     'SGR-truecolour': 'dropped: the VT maps 38;2 and 48;2 to the nearest of its 16; PAX ignores them',
     'SGR-colon': 'dropped: the VT reads `:` as `;`; PAX ignores a sequence with `:` (ECMA-48 sub-parameters)',
-    'CUP-nine': 'divergent: the VT acts on a sequence of 9 to 16 parameters; PAX ignores one of more than 8',
     'ICH': 'dropped: not yew\'s or pelt\'s (px58 census); the VT inserts',
     'DCH': 'dropped: not yew\'s or pelt\'s; the VT deletes',
     'ECH': 'dropped: not yew\'s or pelt\'s; the VT erases',
@@ -169,6 +168,7 @@ def main():
 
     replay(cases['PROBE1'], 'vt.rows', report)
     replay(cases['PROBE2'], 'vt2.rows', report)
+    replay(cases['PROBE3'], 'vt70.rows', report)
     print('vtcheck: %d cases the VT\'s, %d named, %d failed' % (held, named, len(bad)))
     sys.exit(1 if bad else 0)
 

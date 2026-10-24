@@ -111,3 +111,22 @@ PROBE2 = [
     ('echo', 'CPR-canonical', b'\x1b[0m\x1b[2J\x1b[H\x1b[3;5H\x1b[6n'),
     ('emit', None, b'\x1b[0m\x1b[2J\x1b[H'),
 ]
+
+# px70: fresh Linux 7.3.0 VT measurements (notes/px70/measure.rows).
+# VCSA has no cursor visibility; show it for the pixel comparison.
+PROBE3 = [
+    ('screen', 'cup-8', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[3;4;0;0;0;0;0;0HX\x1b[?25h'),
+    ('screen', 'sgr-8', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[0;0;0;0;0;0;0;31mX\x1b[?25h'),
+    ('screen', 'cup-9', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[3;4;0;0;0;0;0;0;0HX\x1b[?25h'),
+    ('screen', 'sgr-9', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[0;0;0;0;0;0;0;0;31mX\x1b[?25h'),
+    ('screen', 'cup-15', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[3;4;0;0;0;0;0;0;0;0;0;0;0;0;0HX\x1b[?25h'),
+    ('screen', 'sgr-15', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[0;0;0;0;0;0;0;0;0;0;0;0;0;0;31mX\x1b[?25h'),
+    ('screen', 'cup-16', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[3;4;0;0;0;0;0;0;0;0;0;0;0;0;0;0HX\x1b[?25h'),
+    ('screen', 'sgr-16', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;31mX\x1b[?25h'),
+    ('screen', 'cup-17', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[3;4;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0HX\x1b[?25h'),
+    ('screen', 'sgr-17', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;31mX\x1b[?25h'),
+    ('screen', 'cup-18', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[3;4;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0HX\x1b[?25h'),
+    ('screen', 'sgr-18', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;31mX\x1b[?25h'),
+    ('screen', 'cup-32', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[3;4;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0HX\x1b[?25h'),
+    ('screen', 'sgr-32', b'\x1b[0m\x1b[r\x1b[?25l\x1b]R\x1b[2J\x1b[H\x1b[0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;31mX\x1b[?25h'),
+]

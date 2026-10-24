@@ -14,9 +14,9 @@ here = pathlib.Path(__file__).resolve().parent
 cases = runpy.run_path(str(here / 'vtcases.py'))
 KIND = {'screen': b's', 'emit': b'e', 'palette': b'p', 'answer': b'a', 'echo': b'c'}
 rec, keys = bytearray(), ['#!ps2-session', 'prompt 1 vtcases: ready', 'key ret']
-for n, probe in ((1, cases['PROBE1']), (2, cases['PROBE2'])):
-    if n == 2:
-        rec += b'r' + b'2\0' + struct.pack('<I', 0)
+for n, probe in ((1, cases['PROBE1']), (2, cases['PROBE2']), (3, cases['PROBE3'])):
+    if n > 1:
+        rec += b'r' + str(n).encode() + b'\0' + struct.pack('<I', 0)
     for kind, name, data in probe:
         label = '' if name is None else '%d:%s' % (n, name)
         rec += KIND[kind] + label.encode() + b'\0' + struct.pack('<I', len(data)) + data

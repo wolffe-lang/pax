@@ -30,7 +30,7 @@
 #     the last column); other C0 and DEL nothing; CR, LF, BS and TAB
 #     clear a pending wrap;
 #   - ESC [ … final: SGR for final `m` without private/intermediate bytes
-#     and at most 8 parameters (0 reset, 1 bold = bright foreground for
+#     and at most 16 parameters (0 reset, 1 bold = bright foreground for
 #     0-7, 7 inverse, 22 and 27 their resets, 30-37, 90-97, 40-47,
 #     100-107 (bright), 39, 49, 38;5;n and 48;5;n by the Linux VT's
 #     measured mapping to the 16, 38;2 and 48;2 skipped; others ignored;
@@ -108,7 +108,7 @@ class Term:
         self.wrap = False
         self.fg, self.bg, self.bold, self.inv = 7, 0, False, False
         self.esc = 0
-        self.params = [0] * 8
+        self.params = [0] * 16
         self.pi = 0
         self.priv = False
         self.un = 0
@@ -301,7 +301,7 @@ class Term:
         if self.esc == 1:
             if b == 0x5B:
                 self.esc = 2
-                self.params = [0] * 8
+                self.params = [0] * 16
                 self.pi = 0
                 self.priv = False
             elif b in (55,56):
@@ -322,7 +322,7 @@ class Term:
             if 0x30 <= b <= 0x39:
                 self.params[self.pi] = min(self.params[self.pi] * 10 + b - 0x30, 9999)
             elif b == 0x3B:
-                if self.pi < 7:
+                if self.pi < 15:
                     self.pi += 1
                 else:
                     self.priv = True

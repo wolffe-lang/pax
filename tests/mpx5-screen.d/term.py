@@ -28,8 +28,16 @@ class Cursor(unittest.TestCase):
         t=term(b'\33[999A\33[999DX'); self.assertEqual(t.cells[0][0],(88,7,0))
     def test_private_is_not_cup(self):
         t=term(b'\33[?5;5HX'); self.assertEqual(t.cells[0][0],(88,7,0))
+    def test_parameter_capacity(self):
+        for n in (8, 9, 15, 16):
+            with self.subTest(n=n):
+                t=term(('\33[3;4' + ';0'*(n-2) + 'HX').encode())
+                self.assertEqual(t.cells[2][3],(88,7,0))
     def test_parameter_overflow_is_ignored(self):
-        t=term(b'\33[3;4;0;0;0;0;0;0;0HX'); self.assertEqual(t.cells[0][0],(88,7,0))
+        for n in (17, 18, 32):
+            with self.subTest(n=n):
+                t=term(('\33[3;4' + ';0'*(n-2) + 'HX').encode())
+                self.assertEqual(t.cells[0][0],(88,7,0))
 
 class Erase(unittest.TestCase):
     def test_ed(self):
