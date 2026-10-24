@@ -47,3 +47,11 @@ for seq in ('31;44;1;7', '31;44;2;7', '31;44;3;7', '31;44;4;7',
             '2;5;7', '3;5;7', '31;44;2', '31;44;1'):
     case('combined-' + seq.replace(';', '-'), ('\33[%smA' % seq).encode())
 case('save-attributes', b'\33[31;2;3;4;5m\33\x37\33[0m\33\x38A')
+for n in range(16):
+    value = 0x102030 + n * 0x0b0907
+    foreground = 30+n if n < 8 else 90+n-8
+    case('palette-entry-%d' % n,
+         ('\33[%d;%dmA\33]P%x%06x' % (foreground,40+(n+1)%8,n,value)).encode(), True)
+case('palette-all-reset',
+     ''.join('\33]P%x%06x' % (n,0x102030+n*0x0b0907) for n in range(16)).encode()+
+     b'\33]R'+b''.join(('\33[%dmA' % (30+n if n<8 else 90+n-8)).encode() for n in range(16)), True)

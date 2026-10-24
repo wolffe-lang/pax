@@ -10,6 +10,8 @@ import sys
 import time
 L = Path(sys.argv[1]).resolve()
 cases = runpy.run_path(str(L / 'pax/notes/px70/cases.py'))['CASES']
+if os.environ.get('PAX_MEASURE_ONLY'):
+    cases = [c for c in cases if c[0].startswith(os.environ['PAX_MEASURE_ONLY'])]
 if len(sys.argv) > 2 and sys.argv[2] == 'header':
     def cstring(b):
         return '"' + ''.join('\\%03o' % x for x in b) + '"'
@@ -25,7 +27,7 @@ for run in (1,2):
     base.mkdir(exist_ok=False)
     log = base / 'serial.log'
     sock = base / 'qemu.sock'
-    args = ['taskset','-c','0-3','qemu-system-x86_64','-machine','q35,accel=tcg',
+    args = ['taskset','-c','12-15','qemu-system-x86_64','-machine','q35,accel=tcg',
             '-cpu','max','-smp','1','-m','512','-display','none','-no-reboot','-nic','none',
             '-kernel',kernel,'-initrd',str(L/'measure/px70.cpio'),'-append',
             'console=ttyS0 quiet loglevel=0 panic=-1 rdinit=/vtprobe',

@@ -30,6 +30,7 @@ int main(void) {
             if (read(vt, &ack, 1) != 1) return 5;
         }
     }
+#ifndef PX70_NO_RGB
     /* An independently sampled RGB cube, not the indexed-colour table. */
     static const unsigned v[] = {0, 1, 2, 3, 31, 42, 43, 63, 84, 85, 86, 87, 95, 127, 128, 135, 159, 169, 170, 171, 172, 175, 191, 215, 223, 254, 255};
     int vcsa = open("/dev/vcsa1", O_RDONLY);
@@ -46,6 +47,7 @@ int main(void) {
                 dprintf(out, "RGB %u %u %u %02x %02x\n", v[r], v[g], v[b], fg[5], bg[5]);
             }
     close(vcsa);
+#endif
     dprintf(out, "DONE px70\n");
     sync(); reboot(RB_POWER_OFF); return 0;
 }
