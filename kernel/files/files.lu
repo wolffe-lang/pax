@@ -375,6 +375,7 @@ const ENAMETOOLONG: u64 = 36
 const EACCES: u64 = 13 // px14: execve of what is not an executable file
 const EPERM: u64 = 1 // px27
 const EBUSY: u64 = 16
+const ENOTBLK: u64 = 15 // px67: a mount's source that is no block device
 const EXDEV: u64 = 18
 const ELOOP: u64 = 40
 const ENOTEMPTY: u64 = 39
@@ -3018,6 +3019,12 @@ fn syn_child(d: u64, s: u64, n: u64) -> u64 {
         if comp_is(s, n, "limits") {
             return (T_SYN << T_SHIFT) | procfs.child_at(d, 7) // px55
         }
+        if comp_is(s, n, "mounts") {
+            return (T_SYN << T_SHIFT) | procfs.child_at(d, 8) // px67
+        }
+        if comp_is(s, n, "mountinfo") {
+            return (T_SYN << T_SHIFT) | procfs.child_at(d, 9)
+        }
         return err(ENOENT)
     }
     if d == 1 && comp_is(s, n, "stat") {
@@ -3025,6 +3032,9 @@ fn syn_child(d: u64, s: u64, n: u64) -> u64 {
     }
     if d == 1 && comp_is(s, n, "limits") {
         return (T_SYN << T_SHIFT) | procfs.self_limits() // px55: /proc/self/limits
+    }
+    if d == 1 && (comp_is(s, n, "mounts") || comp_is(s, n, "mountinfo")) {
+        return (T_SYN << T_SHIFT) | procfs.self_mounts(n == 9) // px67
     }
     // px50: /proc/self/fd and /proc/self/fdinfo are the reader's own
     // (`/proc/<pid>`'s, its process's number in the reference).
@@ -3309,12 +3319,20 @@ fn walk_who(a: u64, who: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool, fo
 /// `/dev/stdin`, `stdout`, `stderr` (pax#83); px55: and `/dev/fd`
 /// (pax#88).
 fn is_link_node(c: u64) -> bool {
-    !is_err(c) && ((ty(c) == T_INO && tree.is_link(rf(c))) || ty(c) == T_STD)
+    !is_err(c) && ((ty(c) == T_INO && tree.is_link(rf(c))) || ty(c) == T_STD || is_mounts_link(c))
+}
+
+/// px67: whether node `c` is `/proc/mounts`, a link to `self/mounts`.
+fn is_mounts_link(c: u64) -> bool {
+    ty(c) == T_SYN && procfs.entry(rf(c)) == procfs.MOUNTSLINK
 }
 
 /// px52: the length of link `c`'s target: the tree's, or 15 for
 /// `/proc/self/fd/N`; px55: 13 for `/dev/fd`'s `/proc/self/fd`.
 fn link_bytes(c: u64) -> u64 {
+    if is_mounts_link(c) {
+        return 11 // px67: `self/mounts`
+    }
     if ty(c) == T_STD {
         return if rf(c) == FD_LINK { 13 } else { 15 }
     }
@@ -3325,6 +3343,17 @@ fn link_bytes(c: u64) -> u64 {
 /// (px55: `/dev/fd`'s `k` is at most its 13, so neither the last `/` nor
 /// a digit is written).
 fn link_target(c: u64, dst: u64, k: u64) {
+    if is_mounts_link(c) {
+        var i: u64 = 0
+        for b in "self/mounts".bytes() {
+            if i < k {
+                // # Safety: dst is pax_kbuf's (or its second half), at least k bytes.
+                unsafe { ((dst + i) as *u8).write_volatile((b as int) as u8) }
+            }
+            i += 1
+        }
+        return
+    }
     if ty(c) != T_STD {
         let _n = tree.target(rf(c), dst, k)
         return
@@ -4088,7 +4117,17 @@ fn syn_open(a: u64, n: u64, flags: u64) -> u64 {
     var pa: u64 = 0
     var len: u64 = 0
     let (isfi, dn) = procfs.fi_of(rf(n))
-    if isfi {
+    let mt = procfs.mount_text(rf(n))
+    if mt != 0 {
+        // px67: the mount table, made here (kernel/tree's mounts, the
+        // kernel's own trees' fixed lines)
+        let (p3, l3) = mounts_of(mt == 2)
+        if p3 == 0 {
+            return neg(ENOMEM)
+        }
+        pa = p3
+        len = l3
+    } else if isfi {
         // px50: fdinfo/N, made here from the descriptor (kernel/procfs
         // writes the lines)
         let fa = pid_area(tp)
@@ -4118,6 +4157,243 @@ fn syn_open(a: u64, n: u64, flags: u64) -> u64 {
     put_ofw(o - 1, O_TEXT, pa)
     put_ofw(o - 1, O_TEXT_LEN, len)
     fd
+}
+
+// --- px67: the mount table (/proc/self/mounts, mountinfo) -----------------------
+
+/// A path in a mount table line, `proc(5)`'s escapes: a space, a tab, a
+/// newline and a backslash as `\040`, `\011`, `\012`, `\134`. The
+/// path of directory record `d` (`tpath`'s) is written first at `base +
+/// at` and escaped in place, moving the rest right.
+fn tpath_esc(base: u64, at: u64, cap: u64, d: u64) -> u64 {
+    let end = tpath(base, at, cap, d)
+    var k = at
+    var e = if end < cap { end } else { cap }
+    while k < e {
+        // # Safety: a byte of the frame `mounts_of` writes, below cap.
+        let b = unsafe { ((base + k) as *u8).read_volatile() as u64 }
+        if b == 32 || b == 9 || b == 10 || b == 92 {
+            if e + 3 > cap {
+                return cap
+            }
+            var j = e
+            while j > k + 1 {
+                j -= 1
+                // # Safety: as above; j + 3 < cap.
+                let c = unsafe { ((base + j) as *u8).read_volatile() }
+                unsafe { ((base + j + 3) as *u8).write_volatile(c) }
+            }
+            let _a = tput(base, k, cap, 92)
+            let _b = tput(base, k + 1, cap, 48 + (b >> 6))
+            let _c = tput(base, k + 2, cap, 48 + ((b >> 3) & 7))
+            let _d = tput(base, k + 3, cap, 48 + (b & 7))
+            k += 4
+            e += 3
+        } else {
+            k += 1
+        }
+    }
+    e
+}
+
+/// The options a mount's line says: `rw` or `ro`, then the flags kept
+/// (MH_NOSUID, MH_NODEV, MH_NOEXEC), then `relatime` (PAX moves atimes
+/// by relatime's rule everywhere, px36).
+fn mount_opts(base: u64, at: u64, cap: u64, ro: bool, how: u64) -> u64 {
+    var k = tstr(base, at, cap, if ro { "ro" } else { "rw" })
+    if how & tree.MH_NOSUID != 0 {
+        k = tstr(base, k, cap, ",nosuid")
+    }
+    if how & tree.MH_NODEV != 0 {
+        k = tstr(base, k, cap, ",nodev")
+    }
+    if how & tree.MH_NOEXEC != 0 {
+        k = tstr(base, k, cap, ",noexec")
+    }
+    tstr(base, k, cap, ",relatime")
+}
+
+/// A mount's id in mountinfo (and fdinfo's mnt_id, `mnt_of`): the
+/// memory's tree 21 (`/` on the ISO way, or `/tmp`'s directory when `/`
+/// is on a disk), /proc 22, /sys 23, /dev 24, volume v 26 + v; a second
+/// memory mount 30 + its number.
+fn mount_id(m: u64) -> u64 {
+    let v = tree.mounted(m)
+    if v != tree.NONE {
+        return 26 + v
+    }
+    if tree.root_on_volume() { 21 } else { 30 + m }
+}
+
+/// The id of the mount directory record `d` lies in (the parent field
+/// of a mount on it).
+fn id_at(d: u64) -> u64 {
+    mnt_of(ino_node(d))
+}
+
+/// px67: `/proc/self/mounts` (`info` false) or `mountinfo` (true), as
+/// `proc(5)` describes them and Linux 7.2.8 writes them (measured on the
+/// guest with `root=` on ext2 and with an initramfs:
+/// tests/mpx6-root.d/linux/): `/` first — `/dev/root / ext2 rw,relatime
+/// 0 0` when it is a volume (Linux names the root `root=` mounted
+/// `/dev/root`), `rootfs / rootfs rw,size=…k,nr_inodes=… 0 0` when it is
+/// the memory's — then the kernel's own trees, /dev, /proc and /sys,
+/// with the flags a distribution's init gives them (measured; /dev's as
+/// the kernel's own mount of devtmpfs has them), then kernel/tree's
+/// mounts in the order they were made (`/tmp`'s memory, `/home`, a
+/// mount(2)'s volume: its disk's `/dev/` name, the name Linux's mount(8)
+/// passes). mountinfo's line: the mount's id, its parent's, the device's
+/// numbers, `/`, the point, the options, `-`, the type, the source, the
+/// super options (`rw` or `ro`; tmpfs's `size=`, devtmpfs' `mode=755`).
+/// Named drifts: devtmpfs' and tmpfs' `size=`, `nr_inodes=`, `inode64`
+/// and `huge=` (PAX's /dev holds nothing, its tmpfs is the tree's cap),
+/// and on the ISO way the kernel's trees listed after `/` in that fixed
+/// order. (the frame, its length)
+fn mounts_of(info: bool) -> (u64, u64) {
+    let f = frames.alloc() else 0
+    if f == 0 {
+        return (0, 0)
+    }
+    let base = f + frames.hhdm()
+    let cap = PAGE
+    var k: u64 = 0
+    // `/`.
+    var rm = tree.MOUNTS
+    var m: u64 = 0
+    while m < tree.MOUNTS {
+        if tree.in_use(m) && tree.is_root_mount(m) {
+            rm = m
+        }
+        m += 1
+    }
+    let top = tree.top()
+    let rid = if rm != tree.MOUNTS { mount_id(rm) } else { 21 }
+    if rm != tree.MOUNTS {
+        let v = tree.mounted(rm)
+        let ro = tree.read_only(top)
+        let (ma, mi) = block.numbers(tree.mount_dev(rm))
+        if info {
+            k = tdec(base, k, cap, rid)
+            k = tstr(base, k, cap, " 1 ")
+            k = tdec(base, k, cap, ma)
+            k = tput(base, k, cap, 58)
+            k = tdec(base, k, cap, mi)
+            k = tstr(base, k, cap, " / / ")
+            k = mount_opts(base, k, cap, ro, tree.mount_how(rm))
+            k = tstr(base, k, cap, " - ext2 /dev/root ")
+            k = tstr(base, k, cap, if ro { "ro" } else { "rw" })
+        } else {
+            k = tstr(base, k, cap, "/dev/root / ext2 ")
+            k = mount_opts(base, k, cap, ro, tree.mount_how(rm))
+            k = tstr(base, k, cap, " 0 0")
+        }
+        let _v = v
+    } else {
+        if info {
+            k = tstr(base, k, cap, "21 1 0:1 / / rw - rootfs rootfs rw,size=")
+        } else {
+            k = tstr(base, k, cap, "rootfs / rootfs rw,size=")
+        }
+        k = tdec(base, k, cap, tree.cap() * 4)
+        k = tstr(base, k, cap, "k,nr_inodes=")
+        k = tdec(base, k, cap, tree.MAX_INODES)
+        if !info {
+            k = tstr(base, k, cap, " 0 0")
+        }
+    }
+    k = tput(base, k, cap, 10)
+    // The kernel's own trees, over `/`'s directories of their names.
+    if info {
+        k = tstr(base, k, cap, "24 ")
+        k = tdec(base, k, cap, rid)
+        k = tstr(base, k, cap, " 0:5 / /dev rw,nosuid,noexec,relatime - devtmpfs devtmpfs rw,mode=755\n22 ")
+        k = tdec(base, k, cap, rid)
+        k = tstr(base, k, cap, " 0:6 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n23 ")
+        k = tdec(base, k, cap, rid)
+        k = tstr(base, k, cap, " 0:7 / /sys rw,nosuid,nodev,noexec,relatime - sysfs sysfs rw\n")
+    } else {
+        k = tstr(base, k, cap, "devtmpfs /dev devtmpfs rw,nosuid,noexec,relatime,mode=755 0 0\nproc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\nsysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0\n")
+    }
+    // The tree's, in the order they were made.
+    var seq: u64 = 0
+    var guard: u64 = 0
+    while guard < tree.MOUNTS {
+        let n = tree.mount_after(seq)
+        if n == tree.MOUNTS {
+            break
+        }
+        seq = tree.mount_seq(n)
+        guard += 1
+        if n == rm {
+            continue
+        }
+        let v = tree.mounted(n)
+        let r = tree.mount_root_rec(n)
+        let pt = tree.mount_point(n)
+        let ro = v != tree.NONE && tree.read_only(r)
+        let how = tree.mount_how(n)
+        if info {
+            k = tdec(base, k, cap, mount_id(n))
+            k = tput(base, k, cap, 32)
+            k = tdec(base, k, cap, id_at(pt))
+            k = tput(base, k, cap, 32)
+            if v != tree.NONE {
+                let (ma, mi) = block.numbers(tree.mount_dev(n))
+                k = tdec(base, k, cap, ma)
+                k = tput(base, k, cap, 58)
+                k = tdec(base, k, cap, mi)
+            } else {
+                k = tstr(base, k, cap, "0:1")
+            }
+            k = tstr(base, k, cap, " / ")
+            k = tpath_esc(base, k, cap, pt)
+            k = tput(base, k, cap, 32)
+            k = mount_opts(base, k, cap, ro, how)
+            if v != tree.NONE {
+                k = tstr(base, k, cap, " - ext2 /dev/")
+                k = block.name_into(tree.mount_dev(n), base, k, cap)
+                k = tput(base, k, cap, 32)
+                k = tstr(base, k, cap, if ro { "ro" } else { "rw" })
+            } else {
+                k = tstr(base, k, cap, " - tmpfs tmpfs rw")
+                k = tmode(base, k, cap, n)
+            }
+        } else {
+            if v != tree.NONE {
+                k = tstr(base, k, cap, "/dev/")
+                k = block.name_into(tree.mount_dev(n), base, k, cap)
+                k = tput(base, k, cap, 32)
+                k = tpath_esc(base, k, cap, pt)
+                k = tstr(base, k, cap, " ext2 ")
+                k = mount_opts(base, k, cap, ro, how)
+            } else {
+                k = tstr(base, k, cap, "tmpfs ")
+                k = tpath_esc(base, k, cap, pt)
+                k = tstr(base, k, cap, " tmpfs ")
+                k = mount_opts(base, k, cap, false, how)
+                k = tmode(base, k, cap, n)
+            }
+            k = tstr(base, k, cap, " 0 0")
+        }
+        k = tput(base, k, cap, 10)
+    }
+    (f, if k < cap { k } else { cap })
+}
+
+/// A memory mount's `,mode=NNNN` when it is not tmpfs's 1777 (proc(5):
+/// the options as mounted; measured: `mode=1777` is not shown).
+fn tmode(base: u64, at: u64, cap: u64, m: u64) -> u64 {
+    let md = tree.mode_of(m)
+    if md == 0 || md == 0x3ff {
+        return at
+    }
+    var k = tstr(base, at, cap, ",mode=")
+    if md >= 0x200 {
+        k = tput(base, k, cap, 48 + (md >> 9))
+    }
+    k = tput(base, k, cap, 48 + ((md >> 6) & 7))
+    k = tput(base, k, cap, 48 + ((md >> 3) & 7))
+    tput(base, k, cap, 48 + (md & 7))
 }
 
 /// px50: `fdinfo/<fd>` of process `ta` (`proc_pid_fdinfo(5)`, measured):
@@ -5002,6 +5278,238 @@ pub fn chroot_dir(a: u64, pml4: u64, va: u64) -> (u64, bool) {
         return (neg(EACCES), false)
     }
     (0, n == root_node())
+}
+
+// px67: mount(2) and umount2(2) for root (uapi linux/mount.h's numbers;
+// mount(2), umount2(2)). A user is -EPERM first (kernel/process's
+// `root_call`, px45's rows), and umount2's path before that.
+const MS_RDONLY: u64 = 1
+const MS_NOSUID: u64 = 2
+const MS_NODEV: u64 = 4
+const MS_NOEXEC: u64 = 8
+const MS_REMOUNT: u64 = 32
+const MS_BIND: u64 = 4096
+const MS_MOVE: u64 = 8192
+const MS_PROPAGATION: u64 = 0x1e0000 // MS_UNBINDABLE, MS_PRIVATE, MS_SLAVE, MS_SHARED
+const MS_MGC_VAL: u64 = 0xc0ed0000
+const MNT_FLAGS: u64 = 15 // MNT_FORCE, MNT_DETACH, MNT_EXPIRE, UMOUNT_NOFOLLOW
+const MNT_DETACH: u64 = 2
+const UMOUNT_NOFOLLOW: u64 = 8
+/// kernel/process's R_MOUNT (its text): a mount PAX does not make.
+const R_MOUNT: u64 = 48
+
+fn mh_of(fl: u64) -> u64 {
+    var h: u64 = 0
+    if fl & MS_NOSUID != 0 {
+        h = h | tree.MH_NOSUID
+    }
+    if fl & MS_NODEV != 0 {
+        h = h | tree.MH_NODEV
+    }
+    if fl & MS_NOEXEC != 0 {
+        h = h | tree.MH_NOEXEC
+    }
+    h
+}
+
+/// px67: whether an open file of a volume (its store, kernel/tree's
+/// `store`) is open for writing: a remount read-only is -EBUSY then
+/// (measured on Linux 7.2.8: tests/mpx6-root.d/linux/).
+fn writer_on(store: u64) -> bool {
+    var i: u64 = 0
+    while i < OFILES {
+        let n = ofw(i, O_NODE)
+        if ofw(i, O_REFS) != 0 && ofw(i, O_KIND) == K_FILE && ty(n) == T_INO && tree.store(rf(n)) == store && ofw(i, O_FLAGS) & O_ACCMODE != O_RDONLY {
+            return true
+        }
+        i += 1
+    }
+    false
+}
+
+/// px67: the mount node `t` is the root of (a node of the tree's), or
+/// tree.NONE.
+fn mount_at(t: u64) -> u64 {
+    if ty(t) != T_INO {
+        return tree.NONE
+    }
+    tree.mount_of_root(rf(t))
+}
+
+/// px67: MS_REMOUNT of the mount whose root node `t` is: -EINVAL for a
+/// directory that is no mount's root (measured: `/etc`); read-only while
+/// a file of the volume is open for writing -EBUSY (measured); else
+/// kernel/tree's `remount`, the flags MS_NOSUID, MS_NODEV, MS_NOEXEC
+/// kept for /proc/self/mounts' line. The kernel's own trees (/dev,
+/// /proc, /sys) and the memory's root on the ISO way have no read-only
+/// form here: refused by name, -EINVAL.
+fn remount_at(a: u64, t: u64, fl: u64) -> u64 {
+    let m = mount_at(t)
+    if m == tree.NONE {
+        if mount_root(t) || (ty(t) == T_INO && rf(t) == tree.top()) {
+            refuse(a, R_MOUNT)
+        }
+        return neg(EINVAL)
+    }
+    let ro = fl & MS_RDONLY != 0
+    let v = tree.mounted(m)
+    if v == tree.NONE {
+        if ro {
+            refuse(a, R_MOUNT)
+            return neg(EINVAL)
+        }
+        return 0
+    }
+    if ro && writer_on(v + 1) {
+        return neg(EBUSY)
+    }
+    let e = tree.remount(m, ro)
+    if e != 0 {
+        return e
+    }
+    tree.set_how(m, mh_of(fl) | (tree.mount_how(m) & tree.MH_SYNC))
+    0
+}
+
+/// px67: whether the `n` bytes at kernel address `p` are `s`.
+fn bytes_are(p: u64, n: u64, s: str) -> bool {
+    var k: u64 = 0
+    for b in s.bytes() {
+        // # Safety: a byte of the frame `mount_call` read the string into.
+        if k >= n || unsafe { ((p + k) as *u8).read_volatile() as u64 } != b as int as u64 {
+            return false
+        }
+        k += 1
+    }
+    k == n
+}
+
+/// px67: `mount(source, target, filesystemtype, mountflags, data)` for
+/// root (`mount(2)`), the answers the Linux guest gave
+/// (tests/mpx6-root.d/linux/): the target first (its walk's errors);
+/// MS_REMOUNT then remounts it (`remount_at`); a bind, a move or a
+/// propagation change is refused by name, -EINVAL; a target that is no
+/// directory -ENOTDIR; the type `ext2` (a volume) or `tmpfs` (a
+/// directory of the memory's, R-px67-1), any other -ENODEV (`proc`,
+/// `sysfs` and `devtmpfs`, mounted once at boot here, refused by name,
+/// -EINVAL); the source of an ext2 mount names a disk or a partition as
+/// kernel/fstab's lines do, `/dev/vda4` by its name (named drift: PAX's
+/// /dev has no block device nodes; Linux opens the node), else the path
+/// is walked: -ENOTBLK for what is there, its walk's error (-ENOENT) for
+/// what is not; then kernel/tree's `mount` (-EBUSY on a mount's root, a
+/// volume mounted already, a covered directory). MS_RDONLY mounts it
+/// read-only; MS_NOSUID, MS_NODEV, MS_NOEXEC are kept for its line, not
+/// acted on (as kernel/fstab's). `data` is not read.
+pub fn mount_call(a: u64, pml4: u64, src: u64, tgt: u64, typ: u64, flags: u64, data: u64) -> u64 {
+    let _unused = data
+    var fl = flags & 0xffffffff
+    if fl & 0xffff0000 == MS_MGC_VAL {
+        fl = fl & 0xffff // mount(2): the old magic in the top half, ignored
+    }
+    let t = resolve(a, pml4, AT_FDCWD, tgt, false, F_YES)
+    if is_err(t) {
+        return neg(rf(t))
+    }
+    if fl & MS_REMOUNT != 0 {
+        return remount_at(a, t, fl)
+    }
+    if fl & (MS_BIND | MS_MOVE | MS_PROPAGATION) != 0 {
+        refuse(a, R_MOUNT)
+        return neg(EINVAL)
+    }
+    if !is_dir_node(t) {
+        return neg(ENOTDIR)
+    }
+    let f = frames.alloc() else 0
+    if f == 0 {
+        return neg(ENOMEM)
+    }
+    let fb = f + frames.hhdm()
+    let tl = uaccess.string_in(pml4, typ, fb, 63)
+    var r: u64 = 0
+    if tl >= 64 {
+        r = neg(if tl == 65 { EFAULT } else { ENODEV })
+    } else if bytes_are(fb, tl, "tmpfs") {
+        if ty(t) != T_INO {
+            refuse(a, R_MOUNT)
+            r = neg(EINVAL)
+        } else {
+            let m = tree.mount_mem(rf(t), 0x3ff)
+            if tree.failed(m) {
+                r = m
+            } else {
+                tree.set_how(m, mh_of(fl))
+                tree.set_mode_of(m, 0x3ff)
+            }
+        }
+    } else if bytes_are(fb, tl, "proc") || bytes_are(fb, tl, "sysfs") || bytes_are(fb, tl, "devtmpfs") {
+        refuse(a, R_MOUNT)
+        r = neg(EINVAL)
+    } else if !bytes_are(fb, tl, "ext2") {
+        r = neg(ENODEV)
+    } else {
+        let sb = fb + 128
+        let sl = uaccess.string_in(pml4, src, sb, PATH_MAX)
+        if sl > PATH_MAX {
+            r = neg(if sl == PATH_MAX + 2 { EFAULT } else { ENAMETOOLONG })
+        } else {
+            let dev = block.by_name(sb, sl)
+            if dev == block.DEVS {
+                let sn = resolve(a, pml4, AT_FDCWD, src, false, F_YES)
+                r = if is_err(sn) { neg(rf(sn)) } else { neg(ENOTBLK) }
+            } else if ty(t) != T_INO {
+                refuse(a, R_MOUNT)
+                r = neg(EINVAL)
+            } else {
+                let m = tree.mount(rf(t), dev, fl & MS_RDONLY != 0, mh_of(fl))
+                if tree.failed(m) {
+                    r = m
+                }
+            }
+        }
+    }
+    frames.free(f)
+    r
+}
+
+/// px67: `umount2(target, flags)` for root (`umount2(2)`), the guest's
+/// answers: a flag outside MNT_FORCE, MNT_DETACH, MNT_EXPIRE and
+/// UMOUNT_NOFOLLOW -EINVAL (measured, before the path); the target's
+/// walk's errors (UMOUNT_NOFOLLOW: its last link not followed); a
+/// directory that is no mount's root -EINVAL (measured: `/etc`); `/`
+/// remounted read-only and 0, as Linux answers an unmount of the root
+/// (measured: `re-mounted ro`, then the table says `ro`); MNT_DETACH
+/// refused by name (-EINVAL: nothing PAX runs asks for it, px67's
+/// census); the kernel's own trees refused by name, -EBUSY; else
+/// kernel/tree's `unmount` (-EBUSY while anything of it is held).
+pub fn umount_call(a: u64, pml4: u64, tgt: u64, flags: u64) -> u64 {
+    let fl = flags & 0xffffffff
+    if fl & !MNT_FLAGS != 0 {
+        return neg(EINVAL)
+    }
+    let t = resolve(a, pml4, AT_FDCWD, tgt, false, if fl & UMOUNT_NOFOLLOW != 0 { F_NO } else { F_YES })
+    if is_err(t) {
+        return neg(rf(t))
+    }
+    if mount_root(t) && ty(t) != T_INO {
+        refuse(a, R_MOUNT)
+        return neg(EBUSY)
+    }
+    let m = mount_at(t)
+    if m == tree.NONE {
+        if ty(t) == T_INO && rf(t) == tree.top() {
+            return remount_at(a, t, MS_REMOUNT | MS_RDONLY) // the ISO's `/`: refused by name there
+        }
+        return neg(EINVAL)
+    }
+    if tree.is_root_mount(m) {
+        return remount_at(a, t, MS_REMOUNT | MS_RDONLY)
+    }
+    if fl & MNT_DETACH != 0 {
+        refuse(a, R_MOUNT)
+        return neg(EINVAL)
+    }
+    tree.unmount(m)
 }
 
 /// px45: whether a path resolves (`umount2(2)` asks it before who the
