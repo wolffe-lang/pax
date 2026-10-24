@@ -6,10 +6,11 @@
 
      mounts init        (the guest's pid 1 only) mount /proc, /sys, /dev
                         and /tmp as a distribution's init does (the
-                        flags kasumi's systemd gives them, measured:
-                        proc and sysfs nosuid,nodev,noexec,relatime;
-                        devtmpfs nosuid, mode=755; tmpfs nosuid,nodev,
-                        mode=1777), then `table`, `calls`, `user` and
+                        flags kasumi's systemd gives them, measured in
+                        its mountinfo: proc and sysfs
+                        nosuid,nodev,noexec,relatime; devtmpfs nosuid,
+                        mode=755; a tmpfs nosuid,nodev, as its /run and
+                        /dev/shm, mode=1777), then `table`, `calls`, `user` and
                         `end` below, then reboot(2)
      mounts table       /proc/self/mountinfo, /proc/self/mounts, the
                         links /proc/mounts and /etc/mtab (lstat, target,
@@ -51,6 +52,13 @@
                         disk should hold
      mounts end         `/` remounted read-only and sync(2), as an init
                         does before reboot(2)
+     mounts term WAIT PROG [ARG...]
+                        R-px67-4's measurement: PROG started as a child
+                        (the console its descriptors), WAIT seconds later
+                        sent SIGTERM, its end waited for up to 10 s
+                        (waitpid WNOHANG every millisecond, the
+                        monotonic clock), then SIGKILL; one `~term:` line
+                        with the milliseconds and how it ended
      mounts linger [halt|restart]
                         two children left running when it returns, for
                         the end's rows, each in a session of its own
@@ -87,6 +95,7 @@
 #include <sys/types.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static void say(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -345,6 +354,47 @@ static void linger(const char *then) {
     }
 }
 
+static const char *how(int st) {
+    static char b[64];
+    if (WIFEXITED(st))
+        snprintf(b, sizeof b, "exit %d", WEXITSTATUS(st));
+    else if (WIFSIGNALED(st))
+        snprintf(b, sizeof b, "signal %d", WTERMSIG(st));
+    else
+        snprintf(b, sizeof b, "status 0x%x", st);
+    return b;
+}
+
+static void term(int wait, char **argv) {
+    pid_t p = fork();
+    if (p == 0) {
+        execv(argv[0], argv);
+        say("term: exec %s = -1 %s\n", argv[0], ename(errno));
+        _exit(127);
+    }
+    sleep(wait);
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    kill(p, SIGTERM);
+    int st = 0;
+    long ms = -1;
+    for (int i = 0; i < 10000; i++) {
+        if (waitpid(p, &st, WNOHANG) == p) {
+            clock_gettime(CLOCK_MONOTONIC, &b);
+            ms = (b.tv_sec - a.tv_sec) * 1000 + (b.tv_nsec - a.tv_nsec) / 1000000;
+            break;
+        }
+        usleep(1000);
+    }
+    if (ms < 0) {
+        kill(p, SIGKILL);
+        waitpid(p, &st, 0);
+        say("~term: %s still there 10000 ms after SIGTERM; SIGKILL: %s\n", argv[0], how(st));
+    } else {
+        say("~term: %s ended %ld ms after SIGTERM: %s\n", argv[0], ms, how(st));
+    }
+}
+
 /* The sorted names of directory `d` (getdents through readdir), as one
    line's text: their count and an FNV-1a 64 of them, so two listings
    compare without printing a root's every name. */
@@ -597,6 +647,10 @@ int main(int argc, char **argv) {
         linger(argc >= 3 ? argv[2] : NULL);
         return 0;
     }
+    if (argc >= 4 && strcmp(argv[1], "term") == 0) {
+        term(atoi(argv[2]), argv + 3);
+        return 0;
+    }
     if (argc >= 2 && strcmp(argv[1], "end") == 0) {
         end();
         return 0;
@@ -623,6 +677,6 @@ int main(int argc, char **argv) {
         for (;;)
             pause();
     }
-    say("usage: mounts table | calls DEV DIR | user UID DEV DIR | root | twice MARKER | churn N | end | linger [halt|restart] | init [DEV DIR [disk-tmp [no-end]]]\n");
+    say("usage: mounts table | calls DEV DIR | user UID DEV DIR | root | twice MARKER | churn N | term WAIT PROG [ARG...] | end | linger [halt|restart] | init [DEV DIR [disk-tmp [no-end]]]\n");
     return 2;
 }
