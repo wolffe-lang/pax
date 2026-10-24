@@ -322,6 +322,16 @@ an escaped block's magic is restored. One line says what it did:
 
     ext2: vda2: recovering the journal: 2 transactions (sequence 1 to 2), 116 blocks written home, 0 revoked; recovery complete
 
+The log is emptied (s_start 0, s_sequence one past the last commit's, as
+e2fsck leaves it) only after every replayed block is home and a FLUSH
+has returned. A replay that cannot finish (a read or a write the disk
+fails, a tag past the volume's end, a revocation block whose count is
+wrong) says where it stopped, leaves the log as it was and refuses the
+volume (-EIO), so the next boot replays it whole
+(`tests/mpx6-journal` J10 fails one block's write with QEMU's blkdebug):
+
+    ext2: vda2: recovering the journal stopped at sequence 2: an I/O error; the volume is refused, -EIO
+
 A read-write mount sets needs_recovery and leaves the state `clean`
 (Linux 7.3.0 keeps a journalled root clean while it is mounted and after
 a power cut, measured), and the root's line says how it writes:
