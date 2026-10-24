@@ -31,7 +31,7 @@
 # merge gate (`tier full`, the label) runs all of them on native BIOS,
 # and every trunk push and nightly (`tier all`) on every leg (tl29).
 
-@user    = mpx3-user mpx3-loader mpx3-boreutils mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-maps mpx3-speaker mpx3-sound mpx3-orchestra mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix mpx4-lobo mpx5-users mpx5-accounts mpx5-jobs mpx5-yew mpx5-screen mpx5-wolf mpx6-ext2 mpx5-scent
+@user    = mpx3-user mpx3-loader mpx3-boreutils mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-maps mpx3-speaker mpx3-sound mpx3-orchestra mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix mpx4-lobo mpx5-users mpx5-accounts mpx5-jobs mpx5-yew mpx5-screen mpx5-wolf mpx6-ext2 mpx5-scent mpx6-root
 @net     = mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix mpx4-lobo mpx5-jobs
 @music   = mpx3-speaker mpx3-sound mpx3-orchestra mpx4-session
 @console = mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-speaker mpx3-sound mpx3-orchestra mpx4-unix mpx4-session mpx5-accounts mpx5-jobs tour mpx5-yew mpx5-screen mpx5-wolf
@@ -57,8 +57,12 @@
 @asuser  = mpx3-tree mpx3-maps mpx3-shell mpx3-boreutils mpx4-unix mpx4-tcp mpx4-udp mpx5-users mpx5-jobs mpx5-lope mpx5-aspen mpx5-lupin mpx5-yew mpx5-screen mpx5-wolf mpx5-scent
 @suuser  = mpx3-tree mpx3-shell mpx3-speaker mpx4-lobo mpx5-accounts
 # px63: the disk's two suites (the block device, the file system on it);
-# px66: and its partition table's (the windows, the names, a disk that boots).
-@disk    = mpx6-blk mpx6-ext2 mpx6-part
+# px66: and its partition table's (the windows, the names, a disk that boots);
+# px67: and `/` on it (the root record, the tree installed, the mounts
+# over it, mount(2), the end that leaves it clean). mpx6-root is in
+# @user too: every program it runs is exec'd from the disk through
+# kernel/tree's second store, kernel/files and kernel/process.
+@disk    = mpx6-blk mpx6-ext2 mpx6-part mpx6-root
 
 # --- the toolchain pins, and how the kernel is entered, linked, loaded: FULL --
 kernel/wolf.pin                 FULL
@@ -232,8 +236,8 @@ kernel/virtio/*                 @net mpx3-sound mpx3-orchestra @disk
 # which reads user/elf. (@disk is defined with the groups above.)
 kernel/vblk/*                   @disk
 kernel/block/*                  @disk
-kernel/ext2/*                   mpx6-ext2 mpx6-part @user
-kernel/fstab/*                  mpx6-ext2 mpx6-part @user
+kernel/ext2/*                   mpx6-ext2 mpx6-part mpx6-root @user
+kernel/fstab/*                  mpx6-ext2 mpx6-part mpx6-root @user
 tools/blk-pattern               mpx6-blk
 tools/e2fs                      mpx6-ext2
 tools/mkdisk                    mpx6-ext2
@@ -247,12 +251,18 @@ user/elf/reboot.S               mpx6-ext2
 # rows); the table's tools, the guest's questions and the disk that boots
 # are mpx6-part's (by the derivation too: tests/mpx6-part names them);
 # tools/mkdisk and its tools are mpx6-ext2's as well (it names them).
-kernel/procfs/*                 mpx6-part
+kernel/procfs/*                 mpx6-part mpx6-root
 tools/mkgpt                     mpx6-part
 tools/disktools                 mpx6-part
 tools/linux-part                mpx6-part
 user/disktools.pin              mpx6-part
 user/fstab-disk                 mpx6-part
+# px67: `/` on the disk. The suite's probe, its builder and the Linux
+# guest's tool are mpx6-root's by the derivation (tests/mpx6-root names
+# them); /proc/self/mounts and mountinfo are kernel/procfs' (above). The
+# crash row is reported, never gated: run by hand on kasumi
+# (notes/px67-root-on-the-disk.md), by no CI job.
+tools/root-crash                NONE
 
 # --- sound: the speaker, the sound device, play -------------------------------
 kernel/speaker/*                @music
