@@ -7,6 +7,33 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The journal for `/` (px68, pax#150).** The root is ext3: `tools/mkdisk
+  --gpt --root` makes it with the pinned `mke2fs -t ext3` (`--no-journal`
+  for ext2; `--journal` for the plain path), and kernel/journal (new)
+  writes its metadata through the journal in jbd2's documented v2
+  layout: descriptor blocks of 8-byte tags, escaped blocks, revocation
+  blocks, commit blocks with the close's time; each commit's data first
+  (data=ordered), then the log, a FLUSH, the commit block, a FLUSH;
+  commits at the flusher's 5 s turn, the syncs, a remount read-only, the
+  unmount, the halt, and a call's start at 128 blocks; a checkpoint
+  before the log could not hold the largest transaction, and at every
+  unmount, which empties the log. A block logged and then freed is
+  revoked; a freed block is not reused before its transaction commits.
+  kernel/ext2 serves has_journal and needs_recovery (set while mounted,
+  the state left clean, as Linux 7.3.0 leaves it), replays a log with
+  transactions before the volume is used, in e2fsck's rules (measured on
+  journals `tools/mkjournal` writes), with one line; names every
+  incompatible and read-only-compatible feature it refuses, in Linux's
+  words; statfs leaves the journal out. The root's line says `ext3,
+  read-write, data=ordered`, the mount tables `ext3`; `rootfstype=ext3`,
+  fstab's and mount(2)'s `ext3`. kmain_console takes `init=PATH`.
+  `tools/root-crash` is gated: each killed disk replayed by PAX and by the
+  host's `e2fsck -fy`, held to the last commit's bound; 24 kills give 0
+  counts, 0 orphans, 0 worse (ext2: 4 counts), and a torn commit drops
+  its transaction. `tools/jorder` reads a commit's order from QEMU's trace.
+  `tests/mpx6-journal` (new); `tests/mpx6-root` on the journalled root
+  against an ext3 guest (Linux 7.3.0), R8e keeping px67's ext2 power cut.
+
 - **Root on the disk (px67).** `/` can be the ext2 partition of the
   disk that boots. `tools/mkdisk --gpt --root ARCHIVE` installs an
   image's archive onto partition 2 at build time (`mkdisk --from` with
