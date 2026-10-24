@@ -106,6 +106,19 @@
 //! device a FLUSH when it takes one, so what is written is on the disk's
 //! medium, not in its cache. The counters say what each policy cost.
 //!
+//! **The journal's buffers (px68).** kernel/journal marks a metadata
+//! block it holds for the running transaction (`jdirty`: B_JRUN, and
+//! B_JMETA with it): such a buffer is never written to its home, by
+//! `sync`, by write-through or by the clock hand, and never evicted,
+//! until the journal has logged it and its commit block is on the disk
+//! (`jdone`); it is then a committed block awaiting its checkpoint
+//! (B_JMETA alone), which the clock hand and `checkpoint` may write
+//! home. `write_data` writes the dirty buffers that are neither (a
+//! journalled volume's file data: data=ordered, written before the
+//! commit that names it). `jforget` takes a block freed in the running
+//! transaction back out of it, its changes dropped (the block is free;
+//! what the disk holds is what the last commit left).
+//!
 //! Every entry runs with IF clear on one CPU (a system call, or a
 //! kernel's start). No region, no heap: the state is frames this module
 //! takes at `start`, their addresses in module `var`s (scalars).
@@ -188,6 +201,7 @@ const HX_COUNT: u64 = 7
 const HX_ESIZE: u64 = 8
 const HX_ACRC: u64 = 9
 const HX_HCRC: u64 = 10
+const S_PINNED: u64 = 104 // px68: misses that found every buffer held by a running transaction
 const S_REQ: u64 = 128 // the request record (8 words, kernel/vblk's layout)
 
 // What the table read found.
@@ -260,6 +274,8 @@ const H_NEXT: u64 = 3 // the hash chain: a slot + 1, 0 the end
 const B_VALID: u64 = 1
 const B_DIRTY: u64 = 2
 const B_REF: u64 = 4
+const B_JRUN: u64 = 8 // px68: in the running transaction: never written home or evicted
+const B_JMETA: u64 = 16 // px68: a journalled volume's metadata (logged, awaiting its checkpoint)
 
 /// The cache's counters: buffers found, read from the disk, taken by
 /// the hand, written (marked dirty, then written), marked dirty while
@@ -1481,7 +1497,8 @@ fn write_slot(s: u64) -> u64 {
     let r = rw(d, vblk.T_OUT, blk * per, per, hw(s, H_PA))
     kbump(K_WRITES, 1)
     if hw(s, H_FLAGS) & B_DIRTY != 0 {
-        put_hw(s, H_FLAGS, hw(s, H_FLAGS) & !B_DIRTY)
+        // px68: a committed block written home has had its checkpoint
+        put_hw(s, H_FLAGS, hw(s, H_FLAGS) & !(B_DIRTY | B_JMETA))
         put_st(S_COUNT + K_DIRTY, st(S_COUNT + K_DIRTY) - 1)
     }
     r
@@ -1512,6 +1529,10 @@ fn victim() -> u64 {
         let s = st(S_HAND) % made
         put_st(S_HAND, s + 1)
         let f = hw(s, H_FLAGS)
+        if f & B_JRUN != 0 {
+            n += 1 // px68: the running transaction's: not written home, not taken
+            continue
+        }
         if f & B_REF != 0 {
             put_hw(s, H_FLAGS, f & !B_REF)
         } else {
@@ -1528,6 +1549,13 @@ fn victim() -> u64 {
             return s
         }
         n += 1
+    }
+    put_st(S_PINNED, st(S_PINNED) + 1)
+    if !said(0, 8) {
+        log.put("block: no buffer to be had: every one of the ")
+        log.dec(made as int)
+        log.put(" is held by a running transaction or would not write")
+        log.end()
     }
     NB
 }
@@ -1581,7 +1609,10 @@ pub fn fresh(d: u64, blk: u64, bsize: u64) -> u64 {
     let va = hw(s, H_PA) + hh()
     // # Safety: the buffer's frame, through the HHDM.
     unsafe { pax_tree_zero(va, bsize) }
-    put_hw(s, H_FLAGS, (hw(s, H_FLAGS) & B_DIRTY) | B_VALID | B_REF)
+    // px68: a block in the running transaction stays in it (a new
+    // indirect block made again); a committed one's old contents are no
+    // longer what it holds, so it is no longer awaiting a checkpoint.
+    put_hw(s, H_FLAGS, (hw(s, H_FLAGS) & (B_DIRTY | B_JRUN)) | B_VALID | B_REF)
     kbump(K_FRESH, 1)
     va
 }
@@ -1594,7 +1625,7 @@ pub fn dirty(d: u64, blk: u64, bsize: u64) -> u64 {
     if s == NB {
         return neg(ENOSPC)
     }
-    if st(S_POLICY) == WRITE_THROUGH {
+    if st(S_POLICY) == WRITE_THROUGH && hw(s, H_FLAGS) & B_JRUN == 0 {
         return write_slot(s)
     }
     let f = hw(s, H_FLAGS)
@@ -1616,7 +1647,8 @@ pub fn sync(d: u64) -> u64 {
     var err: u64 = 0
     var s: u64 = 0
     while s < st(S_MADE) {
-        if hw(s, H_FLAGS) & B_DIRTY != 0 && hw(s, H_KEY) >> 56 == d + 1 {
+        // px68: a running transaction's buffer is the journal's to write
+        if hw(s, H_FLAGS) & (B_DIRTY | B_JRUN) == B_DIRTY && hw(s, H_KEY) >> 56 == d + 1 {
             let w = write_slot(s)
             if w != 0 && err == 0 {
                 err = w
@@ -1626,6 +1658,103 @@ pub fn sync(d: u64) -> u64 {
     }
     let f = flush(d)
     if err != 0 { err } else { f }
+}
+
+// --- px68: the journal's side of the cache ----------------------------------------
+
+/// Block `blk` of disk `d`, in the cache (the caller changed it just
+/// now), joins the running transaction: marked dirty, B_JRUN and B_JMETA,
+/// never written through. 1 when it was not in the transaction before,
+/// 0 when it was, -ENOSPC when it is not in the cache.
+pub fn jdirty(d: u64, blk: u64, bsize: u64) -> u64 {
+    let s = find(key(d, bsize, blk))
+    if s == NB {
+        return neg(ENOSPC)
+    }
+    let f = hw(s, H_FLAGS)
+    if f & B_DIRTY == 0 {
+        put_st(S_COUNT + K_DIRTY, st(S_COUNT + K_DIRTY) + 1)
+    } else {
+        kbump(K_REDIRTY, 1)
+    }
+    put_hw(s, H_FLAGS, f | B_DIRTY | B_JRUN | B_JMETA)
+    if f & B_JRUN == 0 { 1 } else { 0 }
+}
+
+/// Block `blk` of disk `d`, freed in the running transaction, leaves it:
+/// whether it was in it. Its buffer is no longer dirty (what it holds now
+/// was never committed, and the block is free: the disk keeps what the
+/// last commit left there).
+pub fn jforget(d: u64, blk: u64, bsize: u64) -> bool {
+    let s = find(key(d, bsize, blk))
+    if s == NB {
+        return false
+    }
+    let f = hw(s, H_FLAGS)
+    if f & B_JRUN == 0 {
+        return false
+    }
+    if f & B_DIRTY != 0 {
+        put_st(S_COUNT + K_DIRTY, st(S_COUNT + K_DIRTY) - 1)
+    }
+    put_hw(s, H_FLAGS, f & !(B_DIRTY | B_JRUN | B_JMETA))
+    true
+}
+
+/// The physical address of block `blk`'s buffer (the journal writes it
+/// to the log from there), 0 when the cache does not hold it.
+pub fn buffer_pa(d: u64, blk: u64, bsize: u64) -> u64 {
+    let s = find(key(d, bsize, blk))
+    if s == NB { 0 } else { hw(s, H_PA) }
+}
+
+/// Block `blk`'s commit block is on the disk: its buffer leaves the
+/// running transaction, a committed block awaiting its checkpoint.
+pub fn jdone(d: u64, blk: u64, bsize: u64) {
+    let s = find(key(d, bsize, blk))
+    if s != NB {
+        put_hw(s, H_FLAGS, (hw(s, H_FLAGS) & !B_JRUN) | B_JMETA)
+    }
+}
+
+/// data=ordered (px68): every dirty buffer of disk `d` that is neither in
+/// a running transaction nor journalled metadata (a file's data) written
+/// home; no FLUSH (the journal's own comes after its log blocks). 0 or
+/// the first -EIO.
+pub fn write_data(d: u64) -> u64 {
+    var err: u64 = 0
+    var s: u64 = 0
+    while s < st(S_MADE) {
+        if hw(s, H_FLAGS) & (B_DIRTY | B_JRUN | B_JMETA) == B_DIRTY && hw(s, H_KEY) >> 56 == d + 1 {
+            let w = write_slot(s)
+            if w != 0 && err == 0 {
+                err = w
+            }
+        }
+        s += 1
+    }
+    err
+}
+
+/// The checkpoint (px68): every committed block of disk `d` awaiting it
+/// written home (none of a running transaction's: the journal asks only
+/// when none is open); no FLUSH. 0 or the first -EIO.
+pub fn checkpoint(d: u64) -> u64 {
+    var err: u64 = 0
+    var s: u64 = 0
+    while s < st(S_MADE) {
+        let f = hw(s, H_FLAGS)
+        if f & (B_DIRTY | B_JRUN | B_JMETA) == (B_DIRTY | B_JMETA) && hw(s, H_KEY) >> 56 == d + 1 {
+            let w = write_slot(s)
+            if w != 0 && err == 0 {
+                err = w
+            }
+        } else if f & (B_DIRTY | B_JMETA) == B_JMETA && hw(s, H_KEY) >> 56 == d + 1 {
+            put_hw(s, H_FLAGS, f & !B_JMETA)
+        }
+        s += 1
+    }
+    err
 }
 
 /// Forget every buffer of disk `d` (after `sync`, at an unmount): a
@@ -1639,6 +1768,12 @@ pub fn forget(d: u64) {
         }
         s += 1
     }
+}
+
+/// px68: misses that found no buffer to take (every one held by a
+/// running transaction, or failing to write).
+pub fn pinned() -> u64 {
+    if base() == 0 { 0 } else { st(S_PINNED) }
 }
 
 /// Buffers made (frames held by the cache).
