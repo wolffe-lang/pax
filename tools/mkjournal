@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+# mkjournal — write transactions into an ext3 volume's journal (px68),
+# from the documented layout only (Documentation/filesystems/ext4/
+# journal.rst: the jbd2 v2 superblock, descriptor blocks of 8-byte tags,
+# data blocks, revocation blocks, commit blocks, every field big-endian),
+# so a replay can be held to e2fsck's own (tools/e2fs) on journals PAX
+# never wrote: a revoke, an escaped block, a log that wraps, a torn
+# commit. Nothing here reads jbd2's or e2fsprogs' source.
+#
+#   tools/mkjournal IMAGE [--offset BYTES] SPEC     write SPEC's transactions
+#   tools/mkjournal IMAGE [--offset BYTES] --dump   print the journal as read
+#
+# IMAGE holds an ext3 volume at --offset (default 0: the image is the
+# volume; a GPT disk's partition 2 from tools/mkgpt --print otherwise).
+# The journal inode's blocks are read from the volume itself (inode 8's
+# i_block and its indirect blocks: inodes.rst, blockmap.rst), not from a
+# tool. SPEC is a file of lines (`#` comments):
+#
+#   start SEQ POS          the log begins at journal block POS with
+#                          transaction SEQ (s_start, s_sequence)
+#   feature revoke         set JBD2_FEATURE_INCOMPAT_REVOKE in the
+#                          journal superblock
+#   tx                     a transaction begins (the next sequence)
+#   write BLOCK FILL       a tagged block for volume block BLOCK: every
+#                          byte FILL (hex), or `magic` (the block begins
+#                          with the jbd2 magic, so it is escaped)
+#   revoke BLOCK...        a revocation block naming them
+#   commit [SEC]           the commit block (h_commit_sec SEC, default 0)
+#   torn                   the commit block's first sector left zero (a
+#                          commit whose write never reached the disk)
+#   end                    nothing after: no commit (the transaction is
+#                          open when the machine stops)
+#   recover                set needs_recovery (INCOMPAT_RECOVER) in the
+#                          ext2 superblock
+#
+# The block after the last one written is zeroed, so a replay stops
+# there. --dump prints the superblock's fields and each transaction found
+# from s_start (`tx SEQ at POS: N tags [blocks], R revoked, commit|none`)
+# the way a replay's scan would read them. Exit 0, 2 on a usage or format
+# error.
+import os
+import struct
+import sys
+
+MAGIC = 0xC03B3998
+T_DESC, T_COMMIT, T_SB1, T_SB2, T_REVOKE = 1, 2, 3, 4, 5
+F_ESCAPE, F_SAME, F_DELETED, F_LAST = 1, 2, 4, 8
+
+
+def die(m):
+    sys.stderr.write("mkjournal: %s\n" % m)
+    sys.exit(2)
+
+
+class Vol:
+    def __init__(self, path, off):
+        self.f = open(path, "r+b")
+        self.off = off
+        sb = self.read_at(1024, 1024)
+        if struct.unpack_from("<H", sb, 0x38)[0] != 0xEF53:
+            die("no ext2 superblock at offset %d" % off)
+        self.sb = sb
+        self.bs = 1024 << struct.unpack_from("<I", sb, 0x18)[0]
+        self.first = struct.unpack_from("<I", sb, 0x14)[0]
+        self.ipg = struct.unpack_from("<I", sb, 0x28)[0]
+        rev = struct.unpack_from("<I", sb, 0x4C)[0]
+        self.isize = struct.unpack_from("<H", sb, 0x58)[0] if rev >= 1 else 128
+        compat = struct.unpack_from("<I", sb, 0x5C)[0]
+        self.jino = struct.unpack_from("<I", sb, 0xE0)[0]
+        if not compat & 0x4 or self.jino == 0:
+            die("the volume has no journal (has_journal, s_journal_inum)")
+        self.map = self.inode_blocks(self.jino)
+
+    def read_at(self, pos, n):
+        self.f.seek(self.off + pos)
+        return self.f.read(n)
+
+    def write_at(self, pos, b):
+        self.f.seek(self.off + pos)
+        self.f.write(b)
+
+    def block(self, b):
+        return self.read_at(b * self.bs, self.bs)
+
+    def put(self, b, data):
+        assert len(data) == self.bs
+        self.write_at(b * self.bs, data)
+
+    def inode(self, ino):
+        g = (ino - 1) // self.ipg
+        k = (ino - 1) % self.ipg
+        gdb = self.first + 1
+        gd = self.block(gdb + (g * 32) // self.bs)
+        itable = struct.unpack_from("<I", gd, (g * 32) % self.bs + 8)[0]
+        byte = k * self.isize
+        blk = self.block(itable + byte // self.bs)
+        return blk[byte % self.bs:byte % self.bs + self.isize]
+
+    def inode_blocks(self, ino):
+        ii = self.inode(ino)
+        size = struct.unpack_from("<I", ii, 4)[0] | (struct.unpack_from("<I", ii, 0x6C)[0] << 32)
+        n = (size + self.bs - 1) // self.bs
+        ptrs = list(struct.unpack_from("<15I", ii, 0x28))
+        p = self.bs // 4
+        out = []
+
+        def walk(b, lvl):
+            if len(out) >= n:
+                return
+            if lvl == 0:
+                out.append(b)
+                return
+            ent = struct.unpack("<%dI" % p, self.block(b))
+            for e in ent:
+                if len(out) >= n:
+                    return
+                walk(e, lvl - 1)
+        for k in range(12):
+            if len(out) < n:
+                out.append(ptrs[k])
+        for lvl, k in ((1, 12), (2, 13), (3, 14)):
+            if len(out) < n and ptrs[k]:
+                walk(ptrs[k], lvl)
+        if len(out) != n or 0 in out:
+            die("journal inode %d: %d of %d blocks mapped" % (ino, len([x for x in out if x]), n))
+        return out
+
+    def jblock(self, j):
+        return self.block(self.map[j])
+
+    def jput(self, j, data):
+        self.put(self.map[j], data)
+
+
+def header(t, seq):
+    return struct.pack(">III", MAGIC, t, seq)
+
+
+def jsb_fields(b):
+    m, t, _s = struct.unpack_from(">III", b, 0)
+    if m != MAGIC or t not in (T_SB1, T_SB2):
+        die("block 0 of the journal is no journal superblock")
+    bsz, maxlen, first, seq, start = struct.unpack_from(">IIIII", b, 0xC)
+    compat, incompat, ro = struct.unpack_from(">III", b, 0x24) if t == T_SB2 else (0, 0, 0)
+    return dict(type=t, bs=bsz, maxlen=maxlen, first=first, seq=seq, start=start, compat=compat, incompat=incompat, ro=ro, uuid=b[0x30:0x40])
+
+
+def dump(v):
+    b = v.jblock(0)
+    s = jsb_fields(b)
+    print("journal: inode %d, %d blocks of %d mapped (%d to %d), v%d, maxlen %d, first %d, sequence %d, start %d, compat 0x%x incompat 0x%x ro 0x%x" % (
+        v.jino, len(v.map), v.bs, v.map[0], v.map[-1], 1 if s["type"] == T_SB1 else 2, s["maxlen"], s["first"], s["seq"], s["start"],
+        s["compat"], s["incompat"], s["ro"]))
+    rec = struct.unpack_from("<I", v.sb, 0x60)[0] & 0x4
+    print("needs_recovery: %s" % ("yes" if rec else "no"))
+    if s["start"] == 0:
+        print("log: empty")
+        return
+    pos, seq = s["start"], s["seq"]
+    span = s["maxlen"] - s["first"]
+    seen = 0
+    tags = []
+    revs = []
+
+    def nxt(p):
+        p += 1
+        return s["first"] if p >= s["maxlen"] else p
+    while seen <= span:
+        blk = v.jblock(pos)
+        m, t, sq = struct.unpack_from(">III", blk, 0)
+        if m != MAGIC or sq != seq:
+            print("end at %d (%s)" % (pos, "no magic" if m != MAGIC else "sequence %d, expected %d" % (sq, seq)))
+            break
+        if t == T_DESC:
+            o = 12
+            here = []
+            while o + 8 <= v.bs:
+                bn, _ck, fl = struct.unpack_from(">IHH", blk, o)
+                here.append((bn, fl))
+                o += 8
+                if not fl & F_SAME:
+                    o += 16
+                if fl & F_LAST:
+                    break
+            for bn, fl in here:
+                pos = nxt(pos)
+                seen += 1
+                tags.append("%d%s" % (bn, "e" if fl & F_ESCAPE else ""))
+        elif t == T_REVOKE:
+            cnt = struct.unpack_from(">I", blk, 12)[0]
+            revs += [str(x) for x in struct.unpack_from(">%dI" % ((cnt - 16) // 4), blk, 16)]
+        elif t == T_COMMIT:
+            sec = struct.unpack_from(">Q", blk, 0x30)[0]
+            nsec = struct.unpack_from(">I", blk, 0x38)[0]
+            print("tx %d: %d tags [%s], %d revoked [%s], commit at %d.%09d" % (seq, len(tags), " ".join(tags), len(revs), " ".join(revs), sec, nsec))
+            tags, revs = [], []
+            seq += 1
+        else:
+            print("end at %d (block type %d)" % (pos, t))
+            break
+        pos = nxt(pos)
+        seen += 1
+    if tags or revs:
+        print("tx %d: %d tags [%s], %d revoked [%s], no commit" % (seq, len(tags), " ".join(tags), len(revs), " ".join(revs)))
+
+
+def write(v, spec):
+    b = bytearray(v.jblock(0))
+    s = jsb_fields(b)
+    uuid = bytes(b[0x30:0x40])
+    pos = seq = None
+    first, maxlen = s["first"], s["maxlen"]
+
+    def nxt(p):
+        p += 1
+        return first if p >= maxlen else p
+    tx = None
+    for ln, line in enumerate(open(spec).read().splitlines(), 1):
+        w = line.split("#")[0].split()
+        if not w:
+            continue
+        op = w[0]
+        if op == "start":
+            seq, pos = int(w[1]), int(w[2])
+            struct.pack_into(">II", b, 0x18, seq, pos)
+        elif op == "feature" and w[1:] == ["revoke"]:
+            struct.pack_into(">I", b, 0x28, struct.unpack_from(">I", b, 0x28)[0] | 0x1)
+        elif op == "recover":
+            sbb = bytearray(v.read_at(1024, 1024))
+            struct.pack_into("<I", sbb, 0x60, struct.unpack_from("<I", sbb, 0x60)[0] | 0x4)
+            v.write_at(1024, bytes(sbb))
+        elif op == "tx":
+            if pos is None:
+                die("line %d: tx before start" % ln)
+            tx = {"seq": seq, "writes": [], "revokes": []}
+        elif op == "write":
+            fill = w[2]
+            if fill == "magic":
+                data = struct.pack(">I", MAGIC) + bytes([0x5a]) * (v.bs - 4)
+            else:
+                data = bytes([int(fill, 16)]) * v.bs
+            tx["writes"].append((int(w[1]), data))
+        elif op == "revoke":
+            tx["revokes"] += [int(x) for x in w[1:]]
+        elif op in ("commit", "torn", "end"):
+            if tx["writes"]:
+                per = (v.bs - 12 - 16) // 8
+                ws = tx["writes"]
+                for c in range(0, len(ws), per):
+                    chunk = ws[c:c + per]
+                    d = bytearray(v.bs)
+                    d[0:12] = header(T_DESC, seq)
+                    o = 12
+                    for i, (bn, data) in enumerate(chunk):
+                        fl = 0 if i == 0 else F_SAME
+                        if data[:4] == struct.pack(">I", MAGIC):
+                            fl |= F_ESCAPE
+                        if i == len(chunk) - 1:
+                            fl |= F_LAST
+                        struct.pack_into(">IHH", d, o, bn, 0, fl)
+                        o += 8
+                        if i == 0:
+                            d[o:o + 16] = uuid
+                            o += 16
+                    v.jput(pos, bytes(d))
+                    pos = nxt(pos)
+                    for bn, data in chunk:
+                        if data[:4] == struct.pack(">I", MAGIC):
+                            data = bytes(4) + data[4:]
+                        v.jput(pos, data)
+                        pos = nxt(pos)
+            if tx["revokes"]:
+                r = bytearray(v.bs)
+                r[0:12] = header(T_REVOKE, seq)
+                struct.pack_into(">I", r, 12, 16 + 4 * len(tx["revokes"]))
+                for i, bn in enumerate(tx["revokes"]):
+                    struct.pack_into(">I", r, 16 + 4 * i, bn)
+                v.jput(pos, bytes(r))
+                pos = nxt(pos)
+            if op in ("commit", "torn"):
+                cb = bytearray(v.bs)
+                cb[0:12] = header(T_COMMIT, seq)
+                sec = int(w[1]) if op == "commit" and len(w) > 1 else 0
+                struct.pack_into(">QI", cb, 0x30, sec, 0)
+                if op == "torn":
+                    cb[0:512] = bytes(512)
+                v.jput(pos, bytes(cb))
+                pos = nxt(pos)
+            seq += 1
+            tx = None
+        else:
+            die("line %d: %s" % (ln, line))
+    if pos is not None:
+        v.jput(pos, bytes(v.bs))
+    v.jput(0, bytes(b))
+
+
+def main(argv):
+    args = argv[1:]
+    off = 0
+    if len(args) >= 3 and args[1] == "--offset":
+        off = int(args[2])
+        args = [args[0]] + args[3:]
+    if len(args) != 2:
+        die("usage: mkjournal IMAGE [--offset BYTES] (SPEC | --dump)")
+    v = Vol(args[0], off)
+    if args[1] == "--dump":
+        dump(v)
+    else:
+        write(v, args[1])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
