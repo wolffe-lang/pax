@@ -31,7 +31,7 @@
 # merge gate (`tier full`, the label) runs all of them on native BIOS,
 # and every trunk push and nightly (`tier all`) on every leg (tl29).
 
-@user    = mpx3-user mpx3-loader mpx3-boreutils mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-maps mpx3-speaker mpx3-sound mpx3-orchestra mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix mpx4-lobo mpx5-users mpx5-accounts mpx5-jobs mpx5-yew mpx5-screen mpx5-wolf mpx6-ext2 mpx5-scent mpx5-bore mpx6-root
+@user    = mpx3-user mpx3-loader mpx3-boreutils mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-maps mpx3-speaker mpx3-sound mpx3-orchestra mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix mpx4-lobo mpx5-users mpx5-accounts mpx5-jobs mpx5-yew mpx5-screen mpx5-wolf mpx6-ext2 mpx5-scent mpx5-bore mpx6-root mpx6-journal
 @net     = mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix mpx4-lobo mpx5-jobs
 @music   = mpx3-speaker mpx3-sound mpx3-orchestra mpx4-session
 @console = mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-speaker mpx3-sound mpx3-orchestra mpx4-unix mpx4-session mpx5-accounts mpx5-jobs tour mpx5-yew mpx5-screen mpx5-wolf
@@ -65,7 +65,9 @@
 # over it, mount(2), the end that leaves it clean). mpx6-root is in
 # @user too: every program it runs is exec'd from the disk through
 # kernel/tree's second store, kernel/files and kernel/process.
-@disk    = mpx6-blk mpx6-ext2 mpx6-part mpx6-root
+# px68: and its journal (the commits' order, the replay, the crash row
+# gated); in @user too, for the same reason as mpx6-root.
+@disk    = mpx6-blk mpx6-ext2 mpx6-part mpx6-root mpx6-journal
 
 # --- the toolchain pins, and how the kernel is entered, linked, loaded: FULL --
 kernel/wolf.pin                 FULL
@@ -244,8 +246,10 @@ kernel/virtio/*                 @net mpx3-sound mpx3-orchestra @disk
 # which reads user/elf. (@disk is defined with the groups above.)
 kernel/vblk/*                   @disk
 kernel/block/*                  @disk
-kernel/ext2/*                   mpx6-ext2 mpx6-part mpx6-root @user
-kernel/fstab/*                  mpx6-ext2 mpx6-part mpx6-root @user
+kernel/ext2/*                   mpx6-ext2 mpx6-part mpx6-root mpx6-journal @user
+kernel/fstab/*                  mpx6-ext2 mpx6-part mpx6-root mpx6-journal @user
+# px68: the journal is kernel/ext2's, and reaches what ext2 reaches.
+kernel/journal/*                mpx6-ext2 mpx6-part mpx6-root mpx6-journal @user
 tools/blk-pattern               mpx6-blk
 tools/e2fs                      mpx6-ext2
 tools/mkdisk                    mpx6-ext2
@@ -268,9 +272,10 @@ user/fstab-disk                 mpx6-part
 # px67: `/` on the disk. The suite's probe, its builder and the Linux
 # guest's tool are mpx6-root's by the derivation (tests/mpx6-root names
 # them); /proc/self/mounts and mountinfo are kernel/procfs' (above). The
-# crash row is reported, never gated: run by hand on kasumi
-# (notes/px67-root-on-the-disk.md), by no CI job.
-tools/root-crash                NONE
+# crash row was reported, never gated (px67); px68 gates it in
+# tests/mpx6-journal's J7, whose script names it (and its tools,
+# tools/mkjournal and tools/jorder, by the derivation).
+tools/root-crash                mpx6-journal
 # px67: the root-on-disk legs. Ten suites' jobs boot their ISOs a second
 # time with `/` on a disk (tools/rootdisk-leg, through
 # tools/qemu-rootdisk, after the suite's own step): mpx3-boreutils,
