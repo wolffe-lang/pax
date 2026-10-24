@@ -11,7 +11,11 @@
 # disks are made first (`qemu-rootdisk --prepare`, so no boot's timeout
 # pays for tools/mkdisk's containers), cached in $PAX_BUILD/rootdisk; the
 # leg's own logs go to $PAX_BUILD/disk (the ISO run's stay where they
-# are). One line at the end counts the boots that went through a disk
+# are). The suite runs with PAX_ROOTDISK=1: a row that measures the
+# memory tree itself (the frames a session gives back, which the block
+# layer's cache now keeps; a block count that is tmpfs's) says SKIP by
+# name there, counted, and every other row is held as on the ISO.
+# One line at the end counts the boots that went through a disk
 # and those left as they were (a run that brings its own virtio disk, an
 # ISO with no initramfs); a leg in which no boot went through a disk
 # fails, so a suite cannot pass it by booting nothing from one. Exit:
@@ -30,7 +34,7 @@ mapfile -t isos < <(find "$images" -name '*.iso' | sort)
 leg=$PAX_BUILD/disk
 rm -rf "$leg"; mkdir -p "$leg"
 rc=0
-PAX_QEMU=$PAX_ROOT/tools/qemu-rootdisk PAX_BUILD=$leg "$PAX_ROOT/tests/$suite" --images "$images" "$@" || rc=$?
+PAX_ROOTDISK=1 PAX_QEMU=$PAX_ROOT/tools/qemu-rootdisk PAX_BUILD=$leg "$PAX_ROOT/tests/$suite" --images "$images" "$@" || rc=$?
 q=$(find "$leg" -name '*.qemu.log' -exec cat {} + 2>/dev/null)
 n=$(printf '%s\n' "$q" | grep -c 'as a disk with / on partition 2')
 m=$(printf '%s\n' "$q" | grep -c 'left as it is')
