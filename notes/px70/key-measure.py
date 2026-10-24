@@ -6,9 +6,10 @@ keys=runpy.run_path(str(L/'pax/notes/px70/keys.py'))['KEYS']
 if len(sys.argv)>2:
     (L/'measure/keys70.h').write_text('static const char *labels[]={'+','.join(json.dumps(n) for n,_ in keys)+'};\n')
     raise SystemExit(0)
+tag=os.environ.get('PAX_KEYS_TAG','keys')
 rows=[]
 for run in (1,2):
-    base=L/f'out/keys-{run}'; base.mkdir(exist_ok=False)
+    base=L/f'out/{tag}-{run}'; base.mkdir(exist_ok=False)
     log=base/'serial.log'; sock=base/'monitor.sock'
     args=['taskset','-c','12-15','qemu-system-x86_64','-machine','q35,accel=tcg','-cpu','max',
           '-smp','1','-m','512','-display','none','-no-reboot','-nic','none',
@@ -40,4 +41,4 @@ for run in (1,2):
             if proc.poll() is None: proc.terminate(); proc.wait(timeout=10)
     rows.append('\n'.join(l for l in log.read_text().splitlines() if l.startswith('KEY '))+'\n')
 if rows[0]!=rows[1]: raise RuntimeError('key repeats differ')
-(L/'out/keys.rows').write_text(rows[0]); print(f'keys twice identical: {len(rows[0].splitlines())}',flush=True)
+(L/f'out/{tag}.rows').write_text(rows[0]); print(f'keys twice identical: {len(rows[0].splitlines())}',flush=True)

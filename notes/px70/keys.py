@@ -12,3 +12,5 @@ KEYS += [('altgr-41','alt_r-4-1'),('altgr-80','alt_r-8-0'),
          ('altgr-shift-a','alt_r-shift-a'),('altgr-ctrl-a','alt_r-ctrl-a')]
 KEYS += [('num-on','num_lock')] + [(f'on-{n}',f'kp_{n}') for n in range(10)]
 KEYS += [('on-shift-1','shift-kp_1'),('on-alt65','alt-kp_6-kp_5'),('num-off','num_lock')]
+KEYS += [('hex-41','alt_r-kp_4-kp_1'),('hex-euro','alt_r-kp_2-kp_0-a-c'),
+         ('hex-emoji','alt_r-kp_1-f-kp_6-kp_4-kp_2'),('hex-a1b','alt_r-a-kp_1-b')]
