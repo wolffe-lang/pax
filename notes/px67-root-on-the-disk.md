@@ -261,6 +261,24 @@ read-only until the host repairs it (safer for what is on it, but the
 playground then has no writable `/` and every session after a power
 cut starts with the host's e2fsck). PAX has no fsck (an issue: §11).
 
+**R-px67-6 (asked after the final head's first `tier pr`): what
+mpx5-users' rows hold on the root-on-disk leg.** That leg was never seen
+green before pax#149's run 40065002008 (the kasumi runs were the ISO's;
+the dispatches before it never reached it), and there two row classes
+failed that the leg's skips did not cover: U1's `ls` and `ls-names`
+(`total 0` against `total 4`, a directory 120 bytes against 4096: the
+recording is Linux's tmpfs, the disk is ext2) and U4's four soaks
+(`MemFree before 232176 kB, at each quarter 230896 230896 230896 230896`:
+one drop before the first quarter, then flat: the disk's cache filling
+on the first files, not a leak). Recommended (the orchestrator's,
+taken), implemented: on the disk leg the `ls` sessions mask both sides'
+`total` lines and a directory's size, the columns' padding with them,
+and say so by name (every name, mode, link count, owner, file size and
+date still held); U4 holds the four quarters to one another (a leak
+still moves them) and says so in its row. The other way: SKIP both
+rows on the disk leg by name, which would hold nothing there. Each is
+planted (§9).
+
 ## 6. Witnesses and measurements
 
 **tests/mpx6-root on kasumi** (native BIOS, every row, the Linux side
@@ -323,7 +341,7 @@ rebase, and kasumi):
 | mpx3-threads | 1 | T4, the frames census: the block layer's cache keeps what it read (CI 40059322645) | T4 says SKIP by name; PASS (CI 40060313107) |
 | mpx3-maps | 1 | T4 likewise (CI 40059322645) | likewise; PASS (CI 40060313107) |
 | mpx3-shell | 12 | S5 every boot: the log ended with the disk's books, not init's line and `halt` (kasumi r4/c1); S1 the frames census; S2 shell-long: `ls -l /bin`'s total and stat's `%b` (ext2 counts a file's indirect blocks: 28424 sectors for /bin/ls where tmpfs says 28384) | S5 fixed in the kernel (`9434d97f`: the books before init's line); S1 SKIP; S2 folds the two block counts in copies of both sides, said (12 SKIP lines, CI 40060313107 then S6 read the folded copy: fixed, `92ae6107`) |
-| mpx5-users | 4 | U3, the census; then setid's first line: `/` is ext2 `rw,relatime` where the ISO's rootfs says `rw` (CI 40060313107) | U3 SKIP; setid's line expected with the volume's options |
+| mpx5-users | 25 | U3, the census; setid's first line, `/` ext2 `rw,relatime` where the ISO's rootfs says `rw` (CI 40060313107, which stopped there); then, at the final head (pax#149's 40065002008), the `ls` sessions' totals and directory sizes and U4's `before` against the quarters | U3 SKIP; setid's line expected with the volume's options; R-px67-6 (above): the `ls` masks and U4's quarters; on kasumi the leg is green (25 boots through a disk, 84 rows PASS, 28 SKIP by name, the suite's line PASS, exit 0: `notes/px67/kasumi-mpx5-users-disk.out`, chain c6) |
 | mpx3-tree | 1 | T1: a directory's size and blocks (4096 and 8, Linux's tmpfs 40 and 0); T2 the limits; T4 the census (CI 40059322645) | **no leg**: its stores are the memory tree's; on a disk its probes measure ext2 against Linux's tmpfs, and mpx6-ext2 holds ext2 to Linux's ext2 |
 | mpx4-lobo | 2 | every row; the leg's own count read no boot (lobo-session keeps QEMU's output as `qemu.log`, not `*.qemu.log`) (CI 40060313107) | qemu-rootdisk books each boot in its cache, and the leg counts that (`971e3bd7`) |
 | mpx5-pelt | — | the ISO run itself: `c_jc_mixed_pipeline`'s session ends with `PAX: the end: SIGTERM to 2 processes, 2 ended within 10 ms`, which Linux's does not print: pelt exits with two stopped jobs, which its exit hangs up as an orphaned group, and the end signalled them first (CI 40060313107) | the end now waits up to a second for what is ending of itself (`f0fab7f7`) |
@@ -479,7 +497,9 @@ measured: kasumi has no `/dev/kvm`):
 
 Each plant is px67's head before the rebase, `2a07bde2` (rebased `20d74a5a`), plus one commit on a branch of its
 own, dispatched `-f tier=pr -f suites=mpx6-root` (a partial run, every
-row of the suite on native BIOS), never merged; the control is the same
+row of the suite on native BIOS), never merged (R-px67-6's two: on
+`2294f97b`, dispatched `-f suites=mpx5-users`, whose job runs the suite
+and then its root-on-disk leg); the control is the same
 dispatch on `px67` itself at that head, green (run 40053057349). Extracts in
 `notes/px67/ci-<run>-plant-<name>.log`.
 
@@ -487,6 +507,8 @@ dispatch on `px67` itself at that head, green (run 40053057349). Extracts in
 |---|---|---|---|---|
 | `px67-plant-dotdot` `289df3a8` | kernel/tree's `parent`: the root mount's root no longer its own parent, so `..` at `/` falls through to the covered directory's parent, the memory's ROOT | 40053029963 | **R2**: `dotdot: / and /.. one directory: no` where the guest says `yes`, and `getcwd after chdir(/..) = -1 ENOENT` where it says `/` | 27 rows PASS |
 | `px67-plant-clean` `966558b7` | kernel/tree's `halt_volumes`: `/` written back but its unmount (the clean flag) skipped | 40053032136 | **R7**: `partition 2: 'not clean 3' (want 'clean 3')`; and every other row that reads the flag after an end: R9 (`not clean 1`), R9 reboot(2), R5 (`not clean 2`) | 24 rows PASS |
+| `px67-plant-ls` `940912cd` (on `2294f97b`, after the rebase) | tools/mkdisk's `root_tree`: the installed `/home/pax/hello.txt` loses its owner (0:0) | 40071200117 | **U1** `ls` and `ls-names` in the root-on-disk leg only: `-rw-r--r-- 1 0 0 15 … hello.txt` where the recording says `1000 1000` (and `root root` for `pax pax`) | the ISO run 109 rows PASS; the leg 82 rows PASS, 28 SKIP |
+| `px67-plant-leak` `28d494e7` (on `2294f97b`) | kernel/tree's `make`: a frame every 1000th file made on a volume, never given back | 40071201740 | **U4** `own-soak`, `own-soak-user`, `chk-soak`, `chk-soak-user` in the leg only: `free memory moved between the quarters` (`at each quarter 230796 230696 230596 230496 kB`: 100 kB a quarter) | the ISO run 109 rows PASS (its `/` is the memory tree, no volume); the leg 80 rows PASS, 28 SKIP |
 | `px67-plant-attrs` `d5f17b2f` | tools/mkdisk's `root_tree`: the generated `--attrs` file loses `/etc/motd`'s line | 40053034315 | **R4**: `treediff: /etc/motd: mtime 0 in the archive, 1700000000 on the volume` (mkdisk's default time for a path the attrs do not list) | 27 rows PASS |
 
 ### Environment events
@@ -584,7 +606,8 @@ To prune once this merges:
   logs): 3.0 GB at the hand-back, the build products already pruned
   (`tmp/` holds a container's read-only files: `podman unshare rm -rf`);
 - the branches `px67-plant-dotdot`, `px67-plant-clean`,
-  `px67-plant-attrs` on origin (and `px67` after the merge);
+  `px67-plant-attrs`, `px67-plant-ls`, `px67-plant-leak` on origin (and
+  `px67` after the merge), and their kasumi worktrees;
 - this Mac's worktree `/Users/mfwolffe/lanes/px67/pax`;
 - nothing on nomad-1 but the playground files the maintainer keeps
   (`~/pax-playground/pax-disk.img`, `pax-disk.img.px66`).
