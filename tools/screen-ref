@@ -114,6 +114,7 @@ def truecolour(red, green, blue, background=False):
 class Term:
     def __init__(self, cols, rows):
         self.cols, self.rows = cols, rows
+        self.top, self.end = 0, rows
         self.cells = [[(32, 7, 0)] * cols for _ in range(rows)]
         self.cx = self.cy = 0
         self.wrap = False
@@ -146,12 +147,11 @@ class Term:
         return (32, f, b | (16 if self.blink else 0))
 
     def newline(self):
-        if self.cy + 1 < self.rows:
-            self.cy += 1
-        else:
-            self.cells.pop(0)
-            self.cells.append([self.blank()] * self.cols)
+        if self.cy + 1 == self.end:
+            self.cells[self.top:self.end] = self.cells[self.top+1:self.end] + [[self.blank()] * self.cols]
             self.scrolls += 1
+        elif self.cy + 1 < self.rows:
+            self.cy += 1
 
     def glyph(self, cp):
         if self.wrap:
@@ -244,6 +244,30 @@ class Term:
         x, y = self.cx, self.cy
         if final == ord('m'):
             self.sgr(ps)
+            return
+        if final in (ord('@'), ord('P'), ord('X')):
+            n = min(n, self.cols-x)
+            row = list(self.cells[y])
+            if final == ord('@'): row[x:] = [self.blank()]*n + row[x:self.cols-n]
+            elif final == ord('P'): row[x:] = row[x+n:] + [self.blank()]*n
+            else: row[x:x+n] = [self.blank()]*n
+            self.cells[y] = row
+            self.wrap = False
+            return
+        if final in (ord('L'), ord('M')):
+            if y+1 >= self.end: return
+            n = min(n, self.end-y-1)
+            blank = [[self.blank()]*self.cols for _ in range(n)]
+            region = self.cells[y:self.end]
+            self.cells[y:self.end] = blank + region[:-n] if final == ord('L') else region[n:] + blank
+            self.wrap = False
+            return
+        if final == ord('r'):
+            end = self.params[1] or self.rows
+            if n < end <= self.rows:
+                self.top, self.end = n-1, end
+                self.cx = self.cy = 0
+                self.wrap = False
             return
         if final in (ord('J'), ord('K')):
             mode = ps[0]

@@ -24,12 +24,6 @@ cases = runpy.run_path(str(here / 'vtcases.py'))
 # drawn as the VT draws it; `divergent`: drawn otherwise, by choice).
 NAMED = {
     'bright-background': 'divergent (R-px59-1): 100-107 drawn bright; the VGA VT draws them without brightness',
-    'ICH': 'dropped: not yew\'s or pelt\'s (px58 census); the VT inserts',
-    'DCH': 'dropped: not yew\'s or pelt\'s; the VT deletes',
-    'ECH': 'dropped: not yew\'s or pelt\'s; the VT erases',
-    'IL': 'dropped: not yew\'s or pelt\'s; the VT inserts a line',
-    'DL': 'dropped: not yew\'s or pelt\'s; the VT deletes a line',
-    'DECSTBM': 'dropped: not yew\'s or pelt\'s; the VT keeps a scrolling region',
 }
 
 

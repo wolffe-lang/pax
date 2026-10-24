@@ -83,6 +83,26 @@ class Truecolour(unittest.TestCase):
             self.assertEqual((t.cells[0][0][1],t.cells[0][1][2]),
                              (swap(int(fg,16)&15),swap((int(bg,16)>>4)&7)),line)
 
+class Editing(unittest.TestCase):
+    def test_character_edits_clamp_and_keep_cursor(self):
+        for op,want in [('@','ab  c'),('P','abe  '),('X','ab  e')]:
+            t=term(('abcde\33[1;3H\33[2'+op).encode(),5,3)
+            self.assertEqual(''.join(chr(c[0]) for c in t.cells[0]),want)
+            self.assertEqual((t.cx,t.cy),(2,0))
+    def test_region_rejects_one_line_and_out_of_range(self):
+        for margin in ('2;2','2;999','3;2'):
+            t=term(('\33[3;4H\33['+margin+'r').encode(),8,5)
+            self.assertEqual((t.top,t.end,t.cx,t.cy),(0,5,3,2))
+    def test_region_scroll_keeps_surroundings(self):
+        t=term(b'a\r\nb\r\nc\r\nd\33[2;3r\33[3;1HX\nY',4,4)
+        self.assertEqual([r[0][0] for r in t.cells],[97,88,32,100])
+        self.assertEqual(t.cells[2][1][0],89)
+    def test_line_edit_above_top_and_at_bottom(self):
+        t=term(b'a\r\nb\r\nc\r\nd\33[2;3r\33[1;2H\33[2L',4,4)
+        self.assertEqual([r[0][0] for r in t.cells],[32,32,97,100])
+        t=term(b'a\r\nb\r\nc\33[2;3r\33[3;2H\33[M',4,4)
+        self.assertEqual([r[0][0] for r in t.cells],[97,98,99,32])
+
 class Attributes(unittest.TestCase):
     def test_precedence_and_inverse(self):
         t=term(b'\33[31;44;1;7mA\33[0;31;44;2;7mB')
