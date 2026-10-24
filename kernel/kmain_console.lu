@@ -41,6 +41,10 @@
 // (kernel/tree's `halt_volumes`), and the disk's books are printed. With
 // no disk nothing is printed and nothing moves. px67: the books come
 // before init's line, so every log ends with that line and `halt`.
+// px68: `init=PATH` on the command line (bootparam(7)'s) runs PATH alone
+// as init in place of the run list, its only argument its own path (a
+// journalled disk booted again after a power cut, its replay the point,
+// not its session: tools/root-crash).
 use apic
 use block
 use boot_info
@@ -90,7 +94,8 @@ fn body() -> u64 {
 fn byte_at(a: u64) -> u64 {
     // # Safety: a byte of the run list, inside the frame kernel/tree's
     // `small_file` read it into (px67; the initramfs's pages before),
-    // never given back.
+    // never given back; or (px68) of `init=`'s value in Limine's command
+    // line (bootloader-reclaimable memory the kernel keeps mapped).
     unsafe { (a as *u8).read_volatile() as u64 }
 }
 
@@ -236,10 +241,18 @@ export fn kmain() {
     sync.enable()
 
     // px67: the run list is the tree's (`/` on the disk when it is there,
-    // else the initramfs's), read whole into a frame of its own.
-    let (d, size, why) = tree.small_file(RUN_LIST)
-    if why != 0 {
-        panic.fail("console: no /etc/pax-run under / (a regular file of a page at most), why", why)
+    // else the initramfs's), read whole into a frame of its own. px68:
+    // `init=` names the one command instead.
+    let (ia, il) = boot_info.cmdline_value("init")
+    var d: u64 = ia
+    var size: u64 = il
+    if il == 0 {
+        let (fd, fsize, why) = tree.small_file(RUN_LIST)
+        if why != 0 {
+            panic.fail("console: no /etc/pax-run under / (a regular file of a page at most), why", why)
+        }
+        d = fd
+        size = fsize
     }
     var total: u64 = 0 // px67: the commands, so the last is known
     var c: u64 = 0
