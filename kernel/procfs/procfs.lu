@@ -131,9 +131,9 @@ use unix
 const PAGE: u64 = 4096
 
 /// How many entries there are; also `NONE`'s value.
-pub const ENTRIES: u64 = 45
+pub const ENTRIES: u64 = 50
 /// No entry.
-pub const NONE: u64 = 45
+pub const NONE: u64 = 50
 /// px44: entries 22 to 25 are `/proc/sys/fs/protected_hardlinks`,
 /// `_symlinks`, `_regular` and `_fifos` (ruling #75 R7: on, fixed).
 const PROTECTED: u64 = 22
@@ -169,6 +169,15 @@ const SLIMITS: u64 = 42
 const PLIMITS: u64 = 43
 /// px66: `/proc/partitions` (kernel/files makes its text at each read).
 pub const PARTITIONS: u64 = 44
+/// px67: `/proc/self/mounts` and `mountinfo` (found by name, as `stat`
+/// is), `/proc/<pid>/mounts` and `mountinfo` (kernel/files makes their
+/// text at open: `proc(5)`'s formats, Linux 7.2.8's measured), and
+/// `/proc/mounts`, a link to `self/mounts` (measured: 0777, 11 bytes).
+const SMOUNTS: u64 = 45
+const SMOUNTINFO: u64 = 46
+const PMOUNTS: u64 = 47
+const PMOUNTINFO: u64 = 48
+pub const MOUNTSLINK: u64 = 49
 pub const FDENT: u64 = 0x1000
 pub const FIENT: u64 = 0x1400
 const FDS_MAX: u64 = 1024 // kernel/files' FDS
@@ -205,6 +214,9 @@ const G_FDINFO: u64 = 17 // px50: made by kernel/files (`fdinfo`), not by `make`
 const G_CORE_PATTERN: u64 = 18 // px55
 const G_LIMITS: u64 = 19
 const G_PARTITIONS: u64 = 20 // px66
+const G_MOUNTS: u64 = 21 // px67: made by kernel/files (`mounts_of`), not by `make`
+const G_MOUNTINFO: u64 = 22
+const G_LINK: u64 = 23 // px67: /proc/mounts, a link kernel/files reads and follows
 
 // px55: the resource limits (uapi asm-generic/resource.h).
 const RLIMIT_STACK: u64 = 3
@@ -274,7 +286,20 @@ fn limit_units(res: u64) -> str {
 /// a listing lists): those below PIDDIR, and px55's `/proc/sys/kernel`
 /// and its `core_pattern`.
 pub fn fixed(e: u64) -> bool {
-    e < PIDDIR || e == KERNEL || e == CORE_PATTERN || e == PARTITIONS
+    e < PIDDIR || e == KERNEL || e == CORE_PATTERN || e == PARTITIONS || e == MOUNTSLINK
+}
+
+/// px67: `/proc/self/mounts`' entry and `mountinfo`'s (kernel/files
+/// finds them by name, as `stat`'s).
+pub fn self_mounts(info: bool) -> u64 {
+    if info { SMOUNTINFO } else { SMOUNTS }
+}
+
+/// px67: which mount table reference `r`'s text is: 0 none, 1 mounts, 2
+/// mountinfo (kernel/files makes it).
+pub fn mount_text(r: u64) -> u64 {
+    let g = gen(r)
+    if g == G_MOUNTS { 1 } else if g == G_MOUNTINFO { 2 } else { 0 }
 }
 
 /// px55: `/proc/self/limits`'s entry (kernel/files finds it by name, as
@@ -407,6 +432,8 @@ pub fn name(e: u64) -> str {
     if e == PROTECTED + 2 { return "protected_regular" }
     if e == PROTECTED + 3 { return "protected_fifos" }
     if e == PARTITIONS { return "partitions" } // px66
+    if e == SMOUNTS || e == PMOUNTS || e == MOUNTSLINK { return "mounts" } // px67
+    if e == SMOUNTINFO || e == PMOUNTINFO { return "mountinfo" }
     "online"
 }
 
@@ -464,8 +491,8 @@ pub fn name_byte(r: u64, i: u64) -> u64 {
 pub fn parent(r: u64) -> u64 {
     let e = entry(r)
     if e == 0 || e == 7 { return ROOT }
-    if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR || e == PARTITIONS { return 0 }
-    if e == 2 || e == 3 || e == 21 || e == SCMDLINE || e == SENVIRON || e == SSTAT || e == SLIMITS { return 1 }
+    if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR || e == PARTITIONS || e == MOUNTSLINK { return 0 }
+    if e == 2 || e == 3 || e == 21 || e == SCMDLINE || e == SENVIRON || e == SSTAT || e == SLIMITS || e == SMOUNTS || e == SMOUNTINFO { return 1 }
     if e == KERNEL { return 4 } // px55
     if e == CORE_PATTERN { return KERNEL }
     if e == NET { return 4 }
@@ -475,7 +502,7 @@ pub fn parent(r: u64) -> u64 {
     if isfd { return (pid_of(r) << 16) | PFD }
     let (isfi, _m) = fi_of(r)
     if isfi { return (pid_of(r) << 16) | PFDINFO } // px50
-    if e == PCMDLINE || e == PENVIRON || e == PFD || e == PFDINFO || e == PSTAT || e == PLIMITS { return pid_dir(pid_of(r)) }
+    if e == PCMDLINE || e == PENVIRON || e == PFD || e == PFDINFO || e == PSTAT || e == PLIMITS || e == PMOUNTS || e == PMOUNTINFO { return pid_dir(pid_of(r)) }
     if e == 5 || e == 17 { return 4 }
     if e == 6 { return 5 }
     if e == 18 || (e >= PROTECTED && e < PROTECTED + 4) { return 17 }
@@ -505,6 +532,9 @@ fn gen(r: u64) -> u64 {
     if e == CORE_PATTERN { return G_CORE_PATTERN } // px55
     if e == SLIMITS || e == PLIMITS { return G_LIMITS }
     if e == PARTITIONS { return G_PARTITIONS } // px66
+    if e == SMOUNTS || e == PMOUNTS { return G_MOUNTS } // px67
+    if e == SMOUNTINFO || e == PMOUNTINFO { return G_MOUNTINFO }
+    if e == MOUNTSLINK { return G_LINK }
     let (isfd, _n) = fd_of(r)
     if isfd { return G_CMDLINE } // px45: not a directory (px50: a link kernel/files follows; never opened itself)
     let (isfi, _m) = fi_of(r)
@@ -528,6 +558,9 @@ pub fn mode(r: u64) -> u64 {
     let (isfd, _n) = fd_of(r)
     if isfd {
         return 0xa000 | 0x1c0 // px45: S_IFLNK 0700, as Linux lists a descriptor
+    }
+    if e == MOUNTSLINK {
+        return 0xa000 | 0x1ff // px67: /proc/mounts, S_IFLNK 0777 (measured)
     }
     if is_dir(r) {
         if e == PFD {
@@ -562,7 +595,7 @@ pub fn mode(r: u64) -> u64 {
 pub fn owner(r: u64, area: u64, which: int) -> u64 {
     let e = entry(r)
     let isfd = desc_of(r) != FDS_MAX
-    let per = e == 2 || e == 3 || e == 21 || e == PSTATUS || e == PSETGROUPS || e == SCMDLINE || e == SENVIRON || e == PCMDLINE || e == PENVIRON || e == PFD || e == SSTAT || e == PSTAT || e == SLIMITS || e == PLIMITS || isfd
+    let per = e == 2 || e == 3 || e == 21 || e == PSTATUS || e == PSETGROUPS || e == SCMDLINE || e == SENVIRON || e == PCMDLINE || e == PENVIRON || e == PFD || e == SSTAT || e == PSTAT || e == SLIMITS || e == PLIMITS || e == SMOUNTS || e == SMOUNTINFO || e == PMOUNTS || e == PMOUNTINFO || isfd
     if e != 1 && e != PIDDIR && e != PFDINFO && !per {
         return 0
     }
@@ -593,6 +626,9 @@ pub fn gone(r: u64) -> bool {
 /// The size `stat` answers: 4096 for a sysfs attribute, 0 for procfs's
 /// and cgroupfs's files (measured), 0 for a directory.
 pub fn size(r: u64) -> u64 {
+    if entry(r) == MOUNTSLINK {
+        return 11 // px67: `self/mounts`, a link's target's length (measured)
+    }
     if entry(r) == 15 { 4096 } else { 0 }
 }
 
@@ -610,7 +646,7 @@ pub fn child_at(d: u64, k: u64) -> u64 {
     var seen: u64 = 0
     if d != ROOT && entry(d) == PIDDIR {
         // px45: status, setgroups, cmdline, environ, fd (kernel/files lists fd's own); px48: stat; px50: fdinfo; px55: limits
-        let e = if k == 0 { PSTATUS } else if k == 1 { PSETGROUPS } else if k == 2 { PCMDLINE } else if k == 3 { PENVIRON } else if k == 4 { PFD } else if k == 5 { PSTAT } else if k == 6 { PFDINFO } else if k == 7 { PLIMITS } else { NONE }
+        let e = if k == 0 { PSTATUS } else if k == 1 { PSETGROUPS } else if k == 2 { PCMDLINE } else if k == 3 { PENVIRON } else if k == 4 { PFD } else if k == 5 { PSTAT } else if k == 6 { PFDINFO } else if k == 7 { PLIMITS } else if k == 8 { PMOUNTS } else if k == 9 { PMOUNTINFO } else { NONE }
         return if e == NONE { NONE } else { (pid_of(d) << 16) | e }
     }
     var e: u64 = 0
@@ -630,6 +666,8 @@ pub fn child_at(d: u64, k: u64) -> u64 {
         if seen + 1 == k { return fd_dir(sched.self_pid(), 0) }
         if seen + 2 == k { return fd_dir(sched.self_pid(), 1) }
         if seen + 3 == k { return SLIMITS }
+        if seen + 4 == k { return SMOUNTS } // px67
+        if seen + 5 == k { return SMOUNTINFO }
         return NONE
     }
     if d != 0 {
