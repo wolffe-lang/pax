@@ -1,0 +1,55 @@
+Final code validation, kasumi12-15 under flock, native BIOS, QEMU11.1.2 TCG.
+All four suites green: mpx5-screen, mpx3-screen, mpx5-yew, mpx3-console.
+The initial combined script stopped at Y3; the cause and measured replacement
+are in y3-mode.txt. resume-inputs completed0 after Y3 and console reruns.
+No kernel change was needed: one incorrectly chosen raw-mode oracle byte.
+The timing boots all succeeded; summary parsing first failed on intentionally
+malformed UTF-8 in kmain_screen's output. Reparsed the same bytes as Latin-1,
+not rerun/reselected measurements. scroll-cost-summary.exit0.
+
+The final-mpx5-screen and final-mpx3-console kernels have identical SHA256
+8bb580ef1d065013063835c5e0ffdbbd335d285873fb5070a2dfae1e57441b24.
+Kernel/boot source unchanged since the first final build (only later evidence,
+measurement scripts, and Y3's freshly measured expected byte changed).
+
+Before/after screen compare:
+S1 reference:77/77screens154000cells ->215/215screens430000cells.
+S1 VT:60matching17named0failed ->207matching1named7not-yet0failed.
+S1 answers:20/20 ->20/20. Non80x25 skips:0 ->0 (BIOS).
+S2:9/9screens72000cells ->same. S3:8000cells ->same.
+V2/V5/V6:8000cells each ->same. Y2:8000cells ->same.
+S0:41unit tests; measured RGB cube19683samples; VT replay227matching,
+1named,7not-yet,0failed. Y3:138keys377bytes, exactly measured VT's bytes
+under termwolf mode; old51key prefix preserved.
+The one named divergence is retained bright backgrounds (R-px59-1).
+The7not-yet rows all concern recorded-but-steady blink, needs timer hookpx71.
+
+Fresh paired scroll, rotated arm order,3runs each on12-15:
+trunk54570380:1.910112,1.966292,1.994382ms; mean1.956929ms.
+packed b2f517ff:1.938202,1.966292,2.078652ms; mean1.994382ms.
+separate final:1.264045,1.376404,1.207865ms; mean1.282772ms.
+Paired final/trunk ratios0.661765,0.700000,0.605634, all below1.2.
+Mean ratio0.655502. R-px70-3 recommendation: retain separate buffers.
+This is the measured TCG workload, not a universal timing guarantee.
+Historical px59:pre-change1.83ms; packed halves2.92/3.57ms. Initial px70
+4-7 baseline1.60/1.60/1.54ms. No ratio inferred across those environments.
+
+All three local plants fail the intended S1 rows and halt successfully.
+CI log checks confirm intended rows, not merely red jobs:
+ECH40135577887 mpx5-screen vt-2-ECH; PR159 closed unmerged.
+Region40135582707 mpx5-screen vt-2-DECSTBM; mpx5-yew Y2 also red; PR160 closed.
+Palette40136773660 mpx5-screen vt-3-palette-set/entry-*; PR161 closed.
+Palette's mpx5-yew Y3 failure was the unrelated pre-fix mode-oracle mismatch;
+only its intended S1 failure is claimed as the palette proof.
+
+README refreshed; docs/SOURCES.md records only allowed sources;
+docs/CENSUS.md and the pre-existing vt.rows/vt2.rows goldens unchanged.
+Footprint must be cross-cutting: lane-audit classifies all boot/* as the boot
+path, even though ci-tiers.map assigns boot/screen.S to @console, not ALL.
+Session instructions prohibit report.md files: the five-section report will
+be the PR body; evidence remains under notes/px70/.
+
+To close after final gates:119,120,121,122;123 by its premise correction;
+124 if the orchestrator accepts the measured buffer recommendation.
+118's attributes/RGB are served, but blink needs a tracked px71 follow-on
+before118 can be considered fully resolved. No issue filed or closed here.
