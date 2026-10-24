@@ -690,6 +690,59 @@ pub fn unmount(v: u64, now: u64) -> u64 {
     r
 }
 
+/// px67: mount(2)'s MS_REMOUNT of volume `v` (kernel/tree's `remount`),
+/// `now` the time written. Read-only: every other block written and
+/// flushed first, then the clean state (when the volume was clean at the
+/// mount and nothing was found wrong since) and the write time, flushed:
+/// what `unmount` leaves on the disk, the volume still mounted, every
+/// change after it -EROFS. Read-write: the mounted state written at once
+/// with the mount count moved and the mount time, flushed, as a
+/// read-write mount writes them (Linux 7.2.8's ext4 driver counts a
+/// remount read-write as a mount: measured, tests/mpx6-root.d/linux/).
+/// A volume read-only by a feature or because its disk is stays so:
+/// -EROFS. 0 or -EIO.
+pub fn remount(v: u64, ro: bool, now: u64) -> u64 {
+    if v >= VOLS || vw(v, V_USED) == 0 {
+        return neg(EINVAL)
+    }
+    let dev = vw(v, V_DEV)
+    let was = vw(v, V_RO)
+    if ro {
+        if was != 0 {
+            return 0
+        }
+        let r0 = block.sync(dev)
+        let s = sb(v)
+        if s != 0 {
+            if vw(v, V_CLEAN) == 1 && vw(v, V_ERRS) == 0 && r0 == 0 {
+                w16(s + SB_STATE, r16(s + SB_STATE) | STATE_VALID)
+            }
+            w32(s + SB_WTIME, now)
+            sb_dirty(v)
+        }
+        let r1 = block.sync(dev)
+        put_vw(v, V_RO, 1)
+        return if r0 != 0 { r0 } else { r1 }
+    }
+    if was == 0 {
+        return 0
+    }
+    if was >= 2 || block.flags(dev) & block.F_RO != 0 {
+        return neg(EROFS)
+    }
+    let s = sb(v)
+    if s == 0 {
+        return neg(EIO)
+    }
+    w16(s + SB_STATE, r16(s + SB_STATE) & !STATE_VALID)
+    w16(s + SB_MNT_COUNT, r16(s + SB_MNT_COUNT) + 1)
+    w32(s + SB_MTIME, now)
+    put_vw(v, V_MNT, r16(s + SB_MNT_COUNT))
+    sb_dirty(v)
+    put_vw(v, V_RO, 0)
+    block.sync(dev)
+}
+
 /// Write every dirty block of volume `v`'s disk and FLUSH it (fsync,
 /// syncfs, sync): 0 or -EIO.
 pub fn sync(v: u64) -> u64 {
