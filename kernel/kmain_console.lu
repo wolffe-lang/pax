@@ -69,15 +69,7 @@ extern "c" let pax_flushd: *u8 // px63: kernel/fstab's flusher
 const ENV: str = "HOME=/ TERM=linux PAX=1 PATH=/bin" // px14: PATH, for a shell's commands
 const RUN_LIST: str = "/etc/pax-run"
 
-/// px67 (R-px67-4, recommended, not decided): the end's grace, in the
-/// timer's ticks (10 ms): how long the processes left at the end have
-/// after SIGTERM before SIGKILL. The wait ends as soon as none is left.
-const GRACE_TICKS: u64 = 200
-/// How long the end waits for SIGKILL's work before it goes on and says so.
-const KILL_TICKS: u64 = 500
-const SIGKILL: u64 = 9
-const SIGTERM: u64 = 15
-const SIGCONT: u64 = 18
+
 
 /// px63: kernel threads this kernel started that never end (the
 /// flusher), which `run` does not wait for.
@@ -101,91 +93,10 @@ fn byte_at(a: u64) -> u64 {
     unsafe { (a as *u8).read_volatile() as u64 }
 }
 
-/// px67: processes not yet ended (a zombie is not counted).
-fn procs_left() -> u64 {
-    var n: u64 = 0
-    var q = sched.proc_after(0)
-    while q != 0 {
-        let sl = sched.proc_slot(q)
-        if sl != sched.SLOTS && sched.proc_word(sl, 8) != 1 {
-            n += 1
-        }
-        q = sched.proc_after(q)
-    }
-    n
-}
-
-fn signal_all(sig: u64) {
-    let info = sched.sig_info(sched.I_KERNEL, 0, 0, 0)
-    var q = sched.proc_after(0)
-    while q != 0 {
-        let _live = sched.raise_pid(q, sig, info)
-        q = sched.proc_after(q)
-    }
-}
-
-/// px67: the end ends every process left (the halt, once init has
-/// ended; root's reboot(2)), as a distribution's init does before it
-/// unmounts: SIGTERM and SIGCONT to each (a stopped one too), then up to
-/// GRACE_TICKS for them to end (R-px67-4), then SIGKILL to those left,
-/// up to KILL_TICKS. One line when there were any:
-///
-///     PAX: the end: SIGTERM to 3 processes, 2 ended within 40 ms; SIGKILL to 1 after the 2000 ms grace
-fn end_processes() {
-    let n = procs_left()
-    if n == 0 {
-        return
-    }
-    sched.ending() // px67: pid 1 is ended too
-    let t0 = timer.ticks()
-    signal_all(SIGTERM)
-    signal_all(SIGCONT)
-    var was = n
-    var took: u64 = 0
-    while procs_left() != 0 && timer.ticks() - t0 < GRACE_TICKS {
-        let _s = sched.sleep(1)
-        let now = procs_left()
-        if now < was {
-            was = now
-            took = timer.ticks() - t0 // the last one SIGTERM ended
-        }
-    }
-    let left = procs_left()
-    if left != 0 {
-        signal_all(SIGKILL)
-        let t1 = timer.ticks()
-        while procs_left() != 0 && timer.ticks() - t1 < KILL_TICKS {
-            let _s = sched.sleep(1)
-        }
-    }
-    let s = sync.acquire(sync.console())
-    log.put("PAX: the end: SIGTERM to ")
-    log.dec(n as int)
-    log.put(if n == 1 { " process, " } else { " processes, " })
-    log.dec((n - left) as int)
-    log.put(" ended within ")
-    log.dec((took * 10) as int)
-    log.put(" ms")
-    if left != 0 {
-        log.put("; SIGKILL to ")
-        log.dec(left as int)
-        log.put(" after the ")
-        log.dec((GRACE_TICKS * 10) as int)
-        log.put(" ms grace")
-        if procs_left() != 0 {
-            log.put(", ")
-            log.dec(procs_left() as int)
-            log.put(" still there")
-        }
-    }
-    log.end()
-    sync.release(sync.console(), s)
-}
-
 /// Run line number `k`, the `n` bytes at `a`: one command, waited for;
 /// the frames line. px67: the last command (`last`, init when it is the
 /// only one) is waited for itself, and when it has ended, what it left
-/// is ended (`end_processes`) before the wait for the rest; root's
+/// is ended (kernel/user's `end_processes`) before the wait for the rest; root's
 /// reboot(2) ends any wait at once (kernel/user's `end_asked`: the end
 /// is kmain's then).
 fn run(k: u64, a: u64, n: u64, last: bool) {
@@ -212,7 +123,7 @@ fn run(k: u64, a: u64, n: u64, last: bool) {
     if last && id != 0 && user.end_asked() == 0 {
         sched.wait_pid_or_down(sched.pid_of(id), kthreads())
         if user.end_asked() == 0 {
-            end_processes() // px67: the halt: init has ended; what it left ends too
+            user.end_processes() // px67: the halt: init has ended; what it left ends too
         }
     }
     if user.end_asked() == 0 {
@@ -363,7 +274,7 @@ export fn kmain() {
         i = j + 1
     }
     if user.end_asked() != 0 {
-        the_end() // px67: root's reboot(2)
+        user.the_end() // px67: root's reboot(2)
     }
 
     let s = sync.acquire(sync.console())
@@ -401,29 +312,6 @@ export fn kmain() {
             log.end()
         }
         block.summary()
-    }
-    timer.stop()
-    log.line("halt")
-    panic.halt()
-}
-
-/// px67: the end root's reboot(2) asked: every process ended, the
-/// volumes written in the reverse of their mounting (`/` last) and
-/// marked clean, px63's line, the disk's books, then the reset or the
-/// halt.
-fn the_end() -> never {
-    end_processes()
-    let _off = sync.irq_save()
-    var e: u64 = 0
-    if block.count() != 0 {
-        e = tree.halt_volumes()
-    }
-    user.end_line(e)
-    if block.count() != 0 {
-        block.summary()
-    }
-    if user.end_asked() == 1 {
-        user.end_reset()
     }
     timer.stop()
     log.line("halt")
