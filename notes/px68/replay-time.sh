@@ -44,6 +44,8 @@ for s in "$@"; do
         --qemu -trace --qemu virtio_blk_handle_write --qemu -trace --qemu virtio_blk_handle_read \
         --qemu -trace --qemu virtio_blk_req_complete --qemu -D --qemu "$out/rt$s.trace" "$d" > "$log.verdict" 2>&1
     echo "killed $s s in, after op $(grep -a '^churn: [0-9]' "$out/rt$s-cut.serial.log" | tail -n 1 | cut -d' ' -f2): $(grep -a -m1 'recovering the journal' "$log" | tr -d '\r')"
-    python3 notes/px68/replay-time.py "$out/rt$s.trace" "$d" $((p2 * 512))
-    rm -f "$d" "$out/rt$s.trace"
+    # The trace is kept when it could not be read (2026-10-24's run lost
+    # QEMU 11.1.2's lines by deleting them).
+    python3 notes/px68/replay-time.py "$out/rt$s.trace" "$d" $((p2 * 512)) && rm -f "$out/rt$s.trace"
+    rm -f "$d"
 done

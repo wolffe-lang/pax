@@ -38,7 +38,8 @@ for line in open(trace, errors="replace"):
         r = pend.pop(req, None)
         ev.append((r[0], t, r[1], r[2]) if r else (t, t, "F", None))
 if not ev:
-    sys.exit("replay-time: no timestamped virtio_blk events in %s (-msg timestamp=on?)" % trace)
+    head = open(trace, errors="replace").readline().rstrip("\n")
+    sys.exit("replay-time: no timestamped virtio_blk events in %s; its first line: %r" % (trace, head[:200]))
 i0 = next((i for i, e in enumerate(ev) if e[2] == "R" and e[3] in jsb), None)
 iw = next((i for i, e in enumerate(ev) if i0 is not None and i > i0 and e[2] == "W" and e[3] in jsb), None)
 i1 = next((i for i, e in enumerate(ev) if iw is not None and i > iw and e[2] == "F"), None)
