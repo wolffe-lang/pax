@@ -77,7 +77,11 @@
 # 1777, root's, every time 0: a distribution's empty directories), and
 # /lost+found as mkfs makes it. The Limine configuration is --conf's
 # with `root=PARTUUID=<partition 2's GUID> rw` added to every entry's
-# `cmdline` (a `cmdline:` line made when an entry has none), and its
+# `cmdline` (a `cmdline:` line made when an entry has none; an entry
+# whose `cmdline` names a root already keeps it, `@PARTUUID@` (or
+# `@PARTUUID-UPPER@`, in capitals) and `@UUID@` in it replaced by
+# partition 2's GUID and its ext2 UUID: the spellings tests/mpx6-root
+# boots), and its
 # `module_path:` lines dropped (R-px67-2: Limine loads no initramfs)
 # unless --initramfs is given too, which keeps the archive on the ESP as
 # the entry's module (R-px67-2's other way: the kernel falls back to it
@@ -250,9 +254,10 @@ def root_tree(cpio, stage):
     return tree, attrs, len(ents)
 
 
-def root_conf(conf, partuuid, keep_module):
+def root_conf(conf, partuuid, fsuuid, keep_module):
     """--conf's text with `root=PARTUUID=... rw` on every entry's cmdline
-    and its module_path lines dropped unless the initramfs is kept."""
+    (unless it names a root: then its placeholders filled) and its
+    module_path lines dropped unless the initramfs is kept."""
     out = []
     entry = False
     has_cmd = False
@@ -269,7 +274,10 @@ def root_conf(conf, partuuid, keep_module):
             continue
         if entry and re.match(r"(kernel_)?cmdline:", st):
             has_cmd = True
-            out.append(line.rstrip() + " root=PARTUUID=%s rw" % partuuid)
+            if re.search(r"(^|\s)root=", st.split(":", 1)[1]):
+                out.append(line.replace("@PARTUUID-UPPER@", partuuid.upper()).replace("@PARTUUID@", partuuid).replace("@UUID@", fsuuid))
+            else:
+                out.append(line.rstrip() + " root=PARTUUID=%s rw" % partuuid)
             continue
         if entry and st.startswith("module_path:") and not keep_module:
             continue
@@ -368,7 +376,7 @@ def gpt_main(args):
                 die("mkgpt --print: no partition 2")
             confp = os.path.join(stage, "limine.conf")
             with open(confp, "w") as f:
-                f.write(root_conf(conf, uniq[0], initramfs is not None))
+                f.write(root_conf(conf, uniq[0], uuid_of("pax-disk:pax-root:%d" % t), initramfs is not None))
             conf = confp
             print("mkdisk: root=PARTUUID=%s" % uniq[0])
         if not root_cpio or hm:
