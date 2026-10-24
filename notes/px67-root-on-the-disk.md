@@ -56,8 +56,9 @@ filming words.
 |---|---|---|
 | about 220 kernel lines for the root switch (tree ~60, files ~40, fstab and boot_info ~100, kmain_console ~20); about 800 in all, with mount(2), umount2(2), the remounts, the tables and the end | the root switch's commits insert 922 kernel lines, comments included (kernel/tree's root record and mount table 453, kernel/fstab's `root=` 308 and its numbers 74, boot_info 50, files' walk 22, kmain_console 15); the lane's kernel diff against trunk is 1,986 inserted, 155 deleted, over 13 files (files 532, tree 453, fstab 378, user 238, kmain_session 89) | wrong: four times the guess for the switch, two and a half for the whole; the shares (tree and fstab the largest) right |
 | the suite that fails first with `/` on the disk: mpx3-boreutils, on directory sizes and device numbers (ext2's 4096-byte directories on 254:2 where the tmpfs reference says 40 and 0:1) | mpx3-boreutils passes on the disk, every row, both boots (CI 40059322645); the first to fail was mpx3-shell (§6): its log's end (the disk's books printed after init's line, which a suite holds last: fixed in the kernel, `9434d97f`), its frames census, and ext2's indirect blocks in `ls -l`'s total and stat's `%b`. The predicted kind appeared in mpx3-tree, whose probe prints a directory's size and blocks (4096 and 8 on the disk, 40 and 0 on Linux's tmpfs): why it has no disk leg | wrong on the suite, right on the kind; the end's order unforeseen |
-| @@P3@@ | @@M3@@ | @@S3@@ |
+| boot time, QEMU's start to the kernel's first line, the same kernel, TCG, SeaBIOS: about 0.8 s with `/` on the disk (no initramfs) against px66's 1.18 s; to the first prompt about the same as the initramfs's (within 10%); under KVM both under 0.6 s to the prompt | the playground's kernel and system both ways, medians of five on kasumi (§7): SeaBIOS 0.342 s to the console line from px67's disk, 2.138 s from px66's (its ESP holding this 117 MB archive; px66's 1.18 s was a smaller one), the prompt 1.445 s against 3.746 s; OVMF 1.328 s against 1.855 s, the prompt 2.413 s against 3.383 s. The disk's whole session read 16,269 sectors (8 MB). KVM: kasumi has none | half right: the first line faster than guessed, the prompt wrong (2.6 times sooner, not within 10%: the firmware's read of the whole archive was most of the boot, and the disk gives only the pages programs ask for); KVM unscored |
 | the crash row's commonest class: lost writes only; second, bitmap and count differences; orphans rare; nothing worse | 24 kills: 20 lost writes, 4 counts (a free-blocks count, and the same two blocks marked in use three times after one flusher turn), 0 orphans, 0 worse, 0 none (§6) | right |
+
 ## 4. What was built
 
 **The root record** (`kernel/fstab`'s `mount_root`, `kernel/boot_info`'s
@@ -212,10 +213,10 @@ kept across boots. Reversible by the fstab line.
 **R-px67-2: the initramfs when `root=` is given.** Recommended,
 implemented: **none**. Limine loads no module; the kernel has its block
 and ext2 drivers built in (as kasumi's Linux has virtio_blk and ext4),
-so an initramfs would only be a second copy of the system (59 MB for
-the playground) read through the firmware at every boot (px66 measured
-that read as SeaBIOS's slow path: +36% to the first line from the disk
-against the ISO). The other way, built and tested: `tools/mkdisk
+so an initramfs would only be a second copy of the system (117 MB for
+the playground) read through the firmware at every boot: measured (§7),
+SeaBIOS reaches the console line in 2.138 s with it on the ESP and in
+0.342 s without, the prompt in 3.746 s against 1.445 s. The other way, built and tested: `tools/mkdisk
 --initramfs` keeps the archive as the entry's module, and a `root=` that
 names nothing then leaves `/` the initramfs instead of a panic (R1
 root-rescue). A rescue entry is reachable only through Limine's menu,
@@ -236,7 +237,7 @@ its files over).
 
 **R-px67-4: the grace between SIGTERM and SIGKILL.** Recommended,
 implemented: **2 s, ended early** when every process has ended
-(`GRACE_TICKS` 200), after the settle (above). Measured on PAX (§6,
+(`GRACE_TICKS` 200), after the settle (§4). Measured on PAX (§6,
 the probe's `term`): `sleep`, pelt running a script and yew each end
 20 ms after SIGTERM (two timer ticks: the signal's default action);
 an interactive pelt ignores it, as POSIX asks, and is still there after
@@ -246,7 +247,7 @@ has such a process. systemd's
 90 s (`DefaultTimeoutStopSec=`, systemd-system.conf(5)) is for services
 with stop logic of their own, which nothing on PAX has yet. Reversible
 by the constant; lobo, the one program with a stop path of its own, is
-not measured here (§10).
+not measured here (§11).
 
 **R-px67-5: an unclean root at boot.** Recommended, implemented:
 **mount it read-write with one warning**, as the guest's ext2 does
@@ -263,13 +264,15 @@ cut starts with the host's e2fsck). PAX has no fsck (an issue: §11).
 ## 6. Witnesses and measurements
 
 **tests/mpx6-root on kasumi** (native BIOS, every row, the Linux side
-live and then recorded): 28 rows PASS (batch r3, at `a1a2fd72` with
-the CI wiring then uncommitted). The first run (r2) had 25 PASS and 3
+live and then recorded): 28 rows PASS before the rebase (batch r3, the
+tree of `a1a2fd72`, rebased `23d426c1`), and 28 again after it at the
+0.2.35 pins (chain c3, `9b0970f2`'s tree: wolf 0.2.35 builds the kernel
+and the probe's archives). The first run (r2) had 25 PASS and 3
 FAIL: R6's `mounts:` lines inside `calls` were compared unfolded (the
 fold `tab` used was not applied to them), and R4's tree diff read a
 link's target as bytes and counted mkfs's `/lost+found`; both fixed in
 the suite before it was committed. In CI, the control dispatch at
-`2a07bde2` (run 40053057349) is green.
+`2a07bde2` before the rebase (run 40053057349) is green.
 
 **The guest, measured** (tools/linux-root, kasumi's 7.2.8-1-cachyos):
 the root's source reads `/dev/root`; the kernel mounts devtmpfs at /dev
@@ -283,7 +286,7 @@ a clean unmount (mount count 3 to 6 over the two boots:
 `tests/mpx6-root.d/linux/notclean.txt`); an initramfs root reads
 `rootfs / rootfs rw,size=…,nr_inodes=…`.
 
-**The other suites, ISO path, this lane's kernel** (kasumi, native BIOS,
+**The other suites, ISO path, this lane's kernel, before the rebase** (kasumi, native BIOS,
 `notes/px67/run-suite.sh`: the build in `px13-ubuntu`, the Linux side on
 the host, the boots under TCG on CPUs 0-3):
 
@@ -306,7 +309,8 @@ artifacts, not the kernel's: the runner then ran the suites' Linux side
 inside the build container, which has no container engine and no
 busybox (S0/J0: `tools/linux-tree …`, `no busybox`); the runner now
 builds with `--only build`, runs `--only linux` on the host (px62's
-order) and boots, and r4's runs are those.
+order) and boots, and r4's runs are those. After the rebase every suite
+runs again in the final head's `tier pr` (§8).
 
 **The root-on-disk legs** (tools/rootdisk-leg, every suite's ISOs
 booted again with `/` on a disk; CI dispatches on the branch before the
@@ -318,11 +322,11 @@ rebase, and kasumi):
 | mpx3-console | 5 | every row (CI 40059322645) | PASS |
 | mpx3-threads | 1 | T4, the frames census: the block layer's cache keeps what it read (CI 40059322645) | T4 says SKIP by name; PASS (CI 40060313107) |
 | mpx3-maps | 1 | T4 likewise (CI 40059322645) | likewise; PASS (CI 40060313107) |
-| mpx3-shell | 12 | S5 every boot: the log ended with the disk's books, not init's line and `halt` (kasumi r4/c1); S1 the frames census; S2 shell-long: `ls -l /bin`'s total and stat's `%b` (ext2 counts a file's indirect blocks: 28424 sectors for /bin/ls where tmpfs says 28384) | S5 fixed in the kernel (`9434d97f`: the books before init's line); S1 SKIP; S2 folds the two block counts in copies of both sides, said (12 SKIP lines, CI 40060313107 then S6 read the folded copy: fixed, `81456932`) |
+| mpx3-shell | 12 | S5 every boot: the log ended with the disk's books, not init's line and `halt` (kasumi r4/c1); S1 the frames census; S2 shell-long: `ls -l /bin`'s total and stat's `%b` (ext2 counts a file's indirect blocks: 28424 sectors for /bin/ls where tmpfs says 28384) | S5 fixed in the kernel (`9434d97f`: the books before init's line); S1 SKIP; S2 folds the two block counts in copies of both sides, said (12 SKIP lines, CI 40060313107 then S6 read the folded copy: fixed, `92ae6107`) |
 | mpx5-users | 4 | U3, the census; then setid's first line: `/` is ext2 `rw,relatime` where the ISO's rootfs says `rw` (CI 40060313107) | U3 SKIP; setid's line expected with the volume's options |
 | mpx3-tree | 1 | T1: a directory's size and blocks (4096 and 8, Linux's tmpfs 40 and 0); T2 the limits; T4 the census (CI 40059322645) | **no leg**: its stores are the memory tree's; on a disk its probes measure ext2 against Linux's tmpfs, and mpx6-ext2 holds ext2 to Linux's ext2 |
-| mpx4-lobo | 2 | every row; the leg's own count read no boot (lobo-session keeps QEMU's output as `qemu.log`, not `*.qemu.log`) (CI 40060313107) | qemu-rootdisk books each boot in its cache, and the leg counts that (`f9c043e7`) |
-| mpx5-pelt | — | the ISO run itself: `c_jc_mixed_pipeline`'s session ends with `PAX: the end: SIGTERM to 2 processes, 2 ended within 10 ms`, which Linux's does not print: pelt exits with two stopped jobs, which its exit hangs up as an orphaned group, and the end signalled them first (CI 40060313107) | the end now waits up to a second for what is ending of itself (`a349d930`) |
+| mpx4-lobo | 2 | every row; the leg's own count read no boot (lobo-session keeps QEMU's output as `qemu.log`, not `*.qemu.log`) (CI 40060313107) | qemu-rootdisk books each boot in its cache, and the leg counts that (`971e3bd7`) |
+| mpx5-pelt | — | the ISO run itself: `c_jc_mixed_pipeline`'s session ends with `PAX: the end: SIGTERM to 2 processes, 2 ended within 10 ms`, which Linux's does not print: pelt exits with two stopped jobs, which its exit hangs up as an orphaned group, and the end signalled them first (CI 40060313107) | the end now waits up to a second for what is ending of itself (`f0fab7f7`) |
 | mpx5-jobs | 12 | every row, ISO and disk (CI 40060313107: 477 PASS lines over both runs) | PASS |
 
 The legs' skips are counted on the leg's last line (`… N rows said SKIP
@@ -330,7 +334,7 @@ for the disk`) and each names its row and `rootdisk`. The final head's
 `tier pr` runs every leg but the long three (§8).
 
 **R-px67-4, measured** (the probe's `term WAIT PROG`, kmain_console from
-the playground's build, its programs; notes/px67/play/kasumi-repro-term.out):
+the playground's build at the 0.2.35 pins, its programs; notes/px67/play/kasumi-play.out):
 
 | program | SIGTERM to its end | how |
 |---|---|---|
@@ -368,8 +372,57 @@ merged one is put at `pax-disk.img` at its merge). When this lane built
 it, `pax-disk.img` was px65's candidate (the 0.2.35 pins, px66's layout,
 sha `edb02ddf…`, open PR) and `pax-disk.img.px66` px66's, open and
 being written by the maintainer's own QEMU (pid 39991, lsof): both left
-exactly as they were. Built at the 0.2.34 pins, trunk's while px65 is
-unmerged.
+exactly as they were. First built at the 0.2.34 pins (sha256
+`43d86aaf…`, superseded), then, after px65 merged and the branch was
+rebased, rebuilt at the 0.2.35 pins; the file on both hosts is the
+rebuilt one.
+
+`notes/px67/play/`: px66's recipe made lane-local again (`build.sh`
+with the head's pins, boreutils' 61 utilities as px65's recipe lists
+them, lope's own clone at its pin; `assemble.sh` with
+`user/fstab-root`, `/root` 0700, `/etc/mtab` a link, a motd that says
+`/` is the disk, and `tools/mkdisk --gpt --root` with no initramfs;
+`session.py` on the maintainer's own QEMU line; `boot.sh` checking both
+boots, the transcript and the host's view; `run.sh` the job that ran
+them, the timing, the term rows and the crash row under the lock).
+
+| | |
+|---|---|
+| tree | `9b0970f2`'s (rebased onto `8dd80667`; the kernel's sources the head's): kmain_console from wolf 0.2.35, pelt `70eec14`, lope `e6f623c`, aspen `3692cf5`, boreutils `575dc7b` (61 utilities), scent `b6f63a4`, yew, lupin 0.1.56, su, play, /bin/reboot |
+| `pax-disk.img.px67` | sha256 `c0636c63e8075984ea3ae818aa65f8075194895ca278778db4b2284335f6e021`, 536,870,912 bytes (512 MiB: Limine's BIOS stage 1 MiB, the ESP 64 MiB with Limine and the kernel only, `/` the rest, ext2, 114,171 blocks of 4 KiB, 29,961 in use, 235 files), SOURCE_DATE_EPOCH the commit's; read three times on kasumi (twice by `assemble.sh`, once after the sessions) and twice on nomad-1 after the copy (`rsync -S -z`); a second `assemble.sh` byte-identical (`cmp`, `kasumi-repro.out`) |
+| the session, SeaBIOS | PASS (`kasumi-play.out`): `echo hello > /etc/motd`, `lope add /usr/share/tunes`, `cat > notes.txt` in /home/pax, a line to `/root/note`, `reboot`; the second boot reads all four (`cat /etc/motd` says hello, `lope list` lists /usr/share/tunes, both notes), `cat /proc/self/mounts` shows `/dev/root / ext2 rw,relatime` and the tmpfs at /tmp; both boots `root: PARTUUID=… (vda2) on /: ext2, read-write, write-back`, mount 1 then 2, no initramfs loaded; `exit` halts; the host's `dumpe2fs -h`: `Filesystem state: clean`, mount count 2; `e2fsck -fn` clean; debugfs reads the motd, both notes and lope's store |
+| the session, UEFI | PASS: Homebrew's own `edk2-x86_64-code.fd` (`33090cc0…`, copied from nomad-1) as a read-only pflash, the same checks |
+| the copy | `~/pax-playground/pax-disk.img.px67` only; `pax-disk.img` (px65's `edb02ddf…`) read before and after, unchanged; `pax-disk.img.px66` not opened (the maintainer's QEMU has it) |
+
+The maintainer's line is px66's, unchanged, with the file's name:
+
+```sh
+cd ~/pax-playground
+qemu-system-x86_64 -machine q35 -cpu max -m 512M -nographic -nic none \
+    -drive file=pax-disk.img.px67,if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0,bootindex=0
+```
+
+(and under UEFI with the pflash line px66's README gives). Then, at the
+prompt: `echo hello > /etc/motd`, `lope add /usr/share/tunes`, `cat >
+notes.txt` (a line, Ctrl-D), `reboot`, and on the second boot `cat
+/etc/motd`, `lope list`, `cat notes.txt`, then `exit`. **Closing QEMU
+without `exit` is a power cut**: what the last five seconds wrote may be
+lost and `/` is left not clean; the next boot says `not cleanly
+unmounted` until the host's `e2fsck -fy` of partition 2 repairs it.
+The files px66's disk held in its `/home` (partition 2 there) are not
+carried over: `pax-disk.img.px66` keeps them, and debugfs reads them
+out (`rdump /pax DIR` on its partition 2).
+
+**Boot time** (`notes/px67/timing.sh`, the same kernel and the same
+system both ways, five boots each, kasumi TCG on CPUs 0-3; KVM not
+measured: kasumi has no `/dev/kvm`):
+
+| firmware | disk | `PAX: the console` (median) | the first prompt (median) |
+|---|---|---|---|
+| SeaBIOS | px66's (`--gpt --initramfs`: the 117 MB archive on the ESP, `/` in memory) | 2.138 s | 3.746 s |
+| SeaBIOS | px67's (`--gpt --root`) | 0.342 s | 1.445 s |
+| OVMF | px66's | 1.855 s | 3.383 s |
+| OVMF | px67's | 1.328 s | 2.413 s |
 
 ## 8. CI
 
@@ -412,10 +465,10 @@ unmerged.
   suites read every path. Both now in prose. A third: a step's name
   with a colon and a space made ci.yml no YAML at all (GitHub then saw
   no `workflow_dispatch`, and refused a dispatch: 422); tests/ci-plan's
-  own reader did not notice. Fixed (`f47042a5` before the rebase); the
+  own reader did not notice. Fixed (`395dbf68`); the
   workflow now checked with a YAML parser before each push.
 - **Dispatches on the branch before the rebase:** the control,
-  mpx6-root at `2a07bde2`, green (40053057349); the three plants (§9);
+  mpx6-root at `2a07bde2` (rebased `20d74a5a`), green (40053057349); the three plants (§9);
   five fast suites with their legs (40059322645: boreutils and console
   green, threads, maps and tree red on the census and tree's rows); the
   long three and four fixed ones (40060313107: threads, maps and jobs
@@ -424,10 +477,10 @@ unmerged.
 
 ### The plants
 
-Each plant is px67's head `2a07bde2` plus one commit on a branch of its
+Each plant is px67's head before the rebase, `2a07bde2` (rebased `20d74a5a`), plus one commit on a branch of its
 own, dispatched `-f tier=pr -f suites=mpx6-root` (a partial run, every
 row of the suite on native BIOS), never merged; the control is the same
-dispatch on `px67` itself, green (run 40053057349). Extracts in
+dispatch on `px67` itself at that head, green (run 40053057349). Extracts in
 `notes/px67/ci-<run>-plant-<name>.log`.
 
 | plant | the break | run | red | the rest |
@@ -448,7 +501,7 @@ containers or QEMUs (one QEMU of 256 MiB to 512 MiB at a time, /home at
 | reset | the journal's last line (read after the reboot) | rebooted | running then | lost, and what was done |
 |---|---|---|---|---|
 | 1 | 21:40:05, the kernel's overlayfs lines for this lane's e2fsck and debugfs containers (`journalctl -b -1 --since 21:36`, read at 21:45) | 21:41:17 | batch r1 (mpx6-ext2 rerun, mpx3-shell, then mpx3-tree, ...) and root1 (mpx6-root's first run), one after the other under the lock: mkdisk's containers for mpx6-root's disks | mpx3-shell's first result (its boot log stops at 21:39, no verdict line): **absent, not red**; root1 and the rest of r1 never ran. Both restarted as one batch (r2) from a snapshot at 21:56 |
-| 2 | 22:00:32, systemd-logind removing a session (`sudo journalctl -b -1`, read at 22:05) | 22:01:54 | batch r2: mpx6-root had finished (25 PASS, 3 FAIL: fixed in the suite before its commit, §8), mpx6-ext2 half run | mpx6-ext2's half run deleted with its snapshot, the rest of r2 never ran; restarted as r3 at 22:05. The reset also emptied 25 loose objects of the kasumi clone's `.git` written in the seconds before it (the commits `dacfb98e` and `a1a2fd72`, both already pushed): the `.git` was replaced by a fresh clone of `origin/px67`, nothing lost; commits there are followed by `sync` since |
+| 2 | 22:00:32, systemd-logind removing a session (`sudo journalctl -b -1`, read at 22:05) | 22:01:54 | batch r2: mpx6-root had finished (25 PASS, 3 FAIL: fixed in the suite before its commit, §6), mpx6-ext2 half run | mpx6-ext2's half run deleted with its snapshot, the rest of r2 never ran; restarted as r3 at 22:05. The reset also emptied 25 loose objects of the kasumi clone's `.git` written in the seconds before it (the commits `dacfb98e` and `a1a2fd72`, before the rebase, both already pushed): the `.git` was replaced by a fresh clone of `origin/px67`, nothing lost; commits there are followed by `sync` since |
 
 The journal's index, read again at 22:07, no longer lists either ended
 boot (the resets left its files unclosed): the timestamps above are the
