@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+# jorder — the order a journal's writes reached the disk (px68), read
+# from QEMU's own trace of the virtio block device (`-trace
+# virtio_blk_handle_write`, `virtio_blk_handle_read`,
+# `virtio_blk_req_complete`, log backend, `-D FILE`), held to the order a
+# commit needs (Documentation/filesystems/ext4/journal.rst: the commit
+# block "signifies the completion of a transaction"; data=ordered: data
+# before the commit that names it).
+#
+#   tools/jorder TRACE IMAGE --offset BYTES            a session's commits
+#   tools/jorder TRACE IMAGE --offset BYTES --replay=N a boot's replay of N blocks
+#
+# IMAGE is the disk after the boot that TRACE records, its ext3 volume at
+# --offset (partition 2's first byte); the journal's place is read from
+# the volume (inode 8: tools/mkjournal's reader), and each traced write is
+# a journal block's or a home block's by its sector. A request whose
+# completion has no handle event before it is a FLUSH (PAX asks for IN,
+# OUT and FLUSH only, one at a time). Each journal block written is
+# classed by what the image holds there now (a descriptor, a revocation
+# block, a commit block with its sequence, or a data block of the
+# descriptor before it); a session whose log reused a block is not judged.
+#
+# A session, each commit block C of sequence S:
+#   - written after every log block of its transaction (the descriptors,
+#     their data blocks, the revocation blocks between S's first block and
+#     C in the log), with a FLUSH between the last of them and C;
+#   - a FLUSH after C before any other write;
+#   - no home block written between S's first log block and C (ordered:
+#     the data went before the log).
+# A replay (--replay=N, N the blocks its line says it wrote home): the
+# boot's first N home writes (the replay's: nothing else writes before
+# it) all before the journal superblock's first write (journal block 0:
+# s_start 0, the log emptied), with a FLUSH between the last of them and
+# it; nothing to judge when N is 0.
+# Prints a line a commit (or the replay's), then `jorder: …`. Exit 0 when
+# every rule held, 1 when one did not, 2 on a usage or reading error.
+import importlib.machinery
+import os
+import re
+import struct
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+MAGIC = 0xC03B3998
+
+
+def die(m):
+    sys.stderr.write("jorder: %s\n" % m)
+    sys.exit(2)
+
+
+def load_mkjournal():
+    loader = importlib.machinery.SourceFileLoader("mkjournal", os.path.join(HERE, "mkjournal"))
+    import types
+    mod = types.ModuleType(loader.name)
+    loader.exec_module(mod)
+    return mod
+
+
+def events(trace):
+    """(kind, sector, nsectors) in order: W, R, F."""
+    pend = {}
+    out = []
+    pat_rw = re.compile(r"virtio_blk_handle_(write|read) vdev (0x[0-9a-f]+|\(nil\)) req (0x[0-9a-f]+) sector (\d+) nsectors (\d+)")
+    pat_c = re.compile(r"virtio_blk_req_complete vdev (0x[0-9a-f]+|\(nil\)) req (0x[0-9a-f]+) status (\d+)")
+    for line in open(trace, errors="replace"):
+        m = pat_rw.search(line)
+        if m:
+            pend[m.group(3)] = ("W" if m.group(1) == "write" else "R", int(m.group(4)), int(m.group(5)))
+            continue
+        m = pat_c.search(line)
+        if m:
+            r = pend.pop(m.group(2), None)
+            out.append(r if r else ("F", 0, 0))
+    return out
+
+
+def main(argv):
+    args = argv[1:]
+    rn = [x for x in args if x.startswith("--replay=")]
+    replay = bool(rn)
+    nrep = int(rn[0].split("=", 1)[1]) if rn else 0
+    args = [x for x in args if not x.startswith("--replay=")]
+    if len(args) != 4 or args[2] != "--offset":
+        die("usage: jorder TRACE IMAGE --offset BYTES [--replay=N]")
+    trace, image, off = args[0], args[1], int(args[3])
+    mj = load_mkjournal()
+    v = mj.Vol(image, off)
+    per = v.bs // 512
+    base = off // 512
+    where = {}  # sector -> journal block
+    for j, p in enumerate(v.map):
+        for k in range(per):
+            where[base + p * per + k] = j
+    ev = events(trace)
+    if not ev:
+        die("no virtio_blk events in %s (QEMU's trace: -trace virtio_blk_handle_write …)" % trace)
+    seq = []  # (index, kind, journal block or None)
+    for i, (k, sec, n) in enumerate(ev):
+        if k == "W":
+            seq.append((i, "W", where.get(sec)))
+        elif k == "F":
+            seq.append((i, "F", None))
+    writes_j = [(i, j) for i, k, j in seq if k == "W" and j is not None]
+    bad = []
+    if replay:
+        home = [i for i, k, j in seq if k == "W" and j is None][:nrep]
+        sbw = [i for i, j in writes_j if j == 0]
+        if nrep == 0:
+            print("jorder: replay: no block written home, nothing to judge")
+            return 0
+        if not sbw:
+            bad.append("no write to the journal's superblock")
+        elif len(home) < nrep:
+            bad.append("%d home writes traced, %d replayed" % (len(home), nrep))
+        else:
+            s0 = sbw[0]
+            late = [i for i in home if i > s0]
+            flush_between = any(k == "F" and home[-1] < i < s0 for i, k, _j in seq)
+            print("replay: %d home writes, %d of them after the log was emptied; a FLUSH between them and it: %s" % (
+                nrep, len(late), "yes" if flush_between else "no"))
+            if late:
+                bad.append("the log emptied before %d of the replay's %d home writes" % (len(late), nrep))
+            elif not flush_between:
+                bad.append("no FLUSH between the replay's home writes and the emptied log")
+        print("jorder: replay: %s" % ("in order" if not bad else "OUT OF ORDER: " + "; ".join(bad)))
+        return 1 if bad else 0
+    # A session: what each journal block is now.
+    count = {}
+    for _i, j in writes_j:
+        if j != 0:
+            count[j] = count.get(j, 0) + 1
+    if any(c > 1 for c in count.values()):
+        print("jorder: the log reused a block (%d written twice): not judged" % sum(1 for c in count.values() if c > 1))
+        return 1
+    kinds = {}
+    tx_of = {}
+    cur = None
+    for j in sorted(count):
+        blk = v.jblock(j)
+        m, t, sq = struct.unpack_from(">III", blk, 0)
+        if m == MAGIC and t in (1, 2, 5):
+            kinds[j] = {1: "desc", 2: "commit", 5: "revoke"}[t]
+            tx_of[j] = sq
+            cur = sq
+        else:
+            kinds[j] = "data"
+            tx_of[j] = cur
+    commits = [(i, j) for i, j in writes_j if kinds.get(j) == "commit"]
+    if not commits:
+        print("jorder: no commit block written")
+        return 1
+    for ci, cj in commits:
+        s = tx_of[cj]
+        mine = [(i, j) for i, j in writes_j if j != 0 and tx_of.get(j) == s and kinds.get(j) != "commit"]
+        why = []
+        late = [j for i, j in mine if i > ci]
+        if late:
+            why.append("%d of its log blocks written after it" % len(late))
+        last = max([i for i, _j in mine], default=None)
+        first = min([i for i, _j in mine], default=ci)
+        if last is not None and not any(k == "F" and last < i < ci for i, k, _j in seq):
+            why.append("no FLUSH between its log and it")
+        nxt = [(i, k) for i, k, _j in seq if i > ci]
+        if nxt and nxt[0][1] != "F":
+            why.append("a write after it before a FLUSH")
+        homes = [i for i, k, j in seq if k == "W" and j is None and first <= i < ci]
+        if homes:
+            why.append("%d home writes between its first log block and it" % len(homes))
+        print("commit %d: %d log blocks then a FLUSH, the commit, a FLUSH: %s" % (s, len(mine), "in order" if not why else "; ".join(why)))
+        if why:
+            bad.append(s)
+    print("jorder: %d commits, %s" % (len(commits), "every one in order" if not bad else "OUT OF ORDER: %s" % " ".join(str(x) for x in bad)))
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
