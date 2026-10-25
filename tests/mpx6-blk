@@ -137,7 +137,7 @@ device_lines() { # label
     local n b
     n=$(count_of '^blk: virtio-blk 1af4:(1001|1042) at [0-9a-f]{2}:[0-9a-f]{2}\.[0-7], bar[0-9] 0x[0-9a-f]{16}, 1\.x interface, polled$')
     b=$((SECTORS * 512))
-    if [ "$n" = 1 ] && has 'blk: features offered 0x[0-9a-f]{16}, taken 0x[0-9a-f]{16} \(VERSION_1, FLUSH(, RO)?(, BLK_SIZE)?(, SEG_MAX)?\)' \
+    if [ "$n" = 1 ] && has 'blk: features offered 0x[0-9a-f]{16}, taken 0x[0-9a-f]{16} \(VERSION_1, FLUSH(, RO)?(, BLK_SIZE)?(, SEG_MAX)?(, GEOMETRY)?\)' \
         && has "blk: request queue 0: 64 entries, 16 slots; capacity $SECTORS sectors \\($b bytes\\), block size [0-9]+, seg_max [0-9]+, 3 frames held"; then
         say "PASS K1 $1: one virtio-blk device, VERSION_1 and FLUSH taken, capacity $SECTORS sectors ($b bytes, the image's)"
     else
@@ -197,7 +197,7 @@ for leg in $legs; do
         hrc=0; boot "$tier" "$leg" ro "$img" || hrc=$?
         after=$(sha256_of "$img")
         device_lines "$tier $leg ro"
-        if has 'blk: features offered 0x[0-9a-f]{16}, taken 0x[0-9a-f]{16} \(VERSION_1, FLUSH, RO(, BLK_SIZE)?(, SEG_MAX)?\)' \
+        if has 'blk: features offered 0x[0-9a-f]{16}, taken 0x[0-9a-f]{16} \(VERSION_1, FLUSH, RO(, BLK_SIZE)?(, SEG_MAX)?(, GEOMETRY)?\)' \
             && has "block: vda: $SECTORS sectors \\($((SECTORS * 512)) bytes\\), 254:0, read-only, flush" \
             && has 'block: refused: a write to vda, which the device says is read-only \(VIRTIO_BLK_F_RO\), -EIO' \
             && has "disk: verify: read $SECTORS sectors, 0 differ; a write refused" && [ "$before" = "$after" ]; then
