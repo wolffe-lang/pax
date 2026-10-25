@@ -17,7 +17,10 @@
 //! - printable bytes: ASCII, and UTF-8 decoded to one cell a code
 //!   point; a code point below 256 is drawn from the font's table
 //!   (boot/font.S, Spleen 8x16; one the font lacks is drawn as `?`), one
-//!   at or above 256 and a malformed sequence's byte as `?`;
+//!   at or above 256 from the table's rows above U+00FF where its ranges
+//!   hold it (gm01: font/extent.txt — the braille block, the block
+//!   elements and the other code points the wolf games draw), any other
+//!   and a malformed sequence's byte as `?`;
 //! - wrapping is deferred: a character written in the last column
 //!   leaves the cursor there with a wrap pending, and the next printable
 //!   character first moves to the start of the next line (CR, LF, BS and
@@ -76,7 +79,9 @@
 //!
 //! **The two screens** (px70): two independent 32-bit-cell grids,
 //! each MAX_COLS * MAX_ROWS cells. A cell has glyph bits 0-7, foreground
-//! 8-11, background 12-15 and recorded blink bit 16. Together 256 KiB
+//! 8-11, background 12-15, recorded blink bit 16 and (gm01) the glyph
+//! number's high byte in bits 20-27, for the font's rows above U+00FF
+//! (glyph numbers 256 and up). Together 256 KiB
 //! (64 frames), the same as the packed32+32 layout required by blink.
 //! The alternate grid follows the main grid; scrolling uses a bulk copy
 //! confined to the active grid. Paired TCG measurements decide item 7.
@@ -119,6 +124,8 @@ extern "c" let pax_screen_state: *u64
 extern "c" let pax_screen_cells: *u32
 extern "c" let pax_screen_early: *u8
 extern "c" let pax_font: *u8
+extern "c" let pax_font_ranges: *u32
+extern "c" let pax_font_glyphs: *u32
 
 // The state's words.
 const S_ON: u64 = 0 // 1 once attached
@@ -259,10 +266,43 @@ fn put_cell(i: u64, v: u64) {
     unsafe { ((cells_base() + i * 4) as *u32).write_volatile(v as u32) }
 }
 
-/// Row `r` of glyph `g` (g < 256, r < 16).
+/// Row `r` of glyph `g` (g < pax_font_glyphs, r < 16).
 fn font_row(g: u64, r: u64) -> u64 {
-    // # Safety: g * 16 + r < 4096, inside boot/font.S's pax_font.
+    // # Safety: g comes from `glyph_of` (below 256, or a range's glyph,
+    // below pax_font_glyphs: tools/mkfont writes both), so g * 16 + r <
+    // 16 * pax_font_glyphs, inside boot/font.S's pax_font.
     unsafe { ((pax_font as u64 + g * GH + r) as *u8).read_volatile() as u64 }
+}
+
+/// The glyph code point `cp` is drawn with (gm01): itself below 256; at
+/// or above, its glyph in boot/font.S's ranges (pairs of 32-bit words:
+/// a run's first code point, then `count | first glyph << 16`, ended by
+/// a zero second word), or `?` when no range holds it. A glyph number
+/// past the table's end, which tools/mkfont never writes, is `?` too.
+fn glyph_of(cp: u64) -> u64 {
+    if cp < 256 {
+        return cp
+    }
+    // # Safety: one 32-bit word, boot/font.S's.
+    let total = unsafe { (pax_font_glyphs as *u32).read_volatile() as u64 }
+    var g = QUESTION
+    var i: u64 = 0
+    var more = true
+    while more {
+        // # Safety: pair i lies inside pax_font_ranges: the scan stops at
+        // the pair whose second word is zero, the table's last.
+        let first = unsafe { ((pax_font_ranges as u64 + i * 8) as *u32).read_volatile() as u64 }
+        let w = unsafe { ((pax_font_ranges as u64 + i * 8 + 4) as *u32).read_volatile() as u64 }
+        let n = w & 0xffff
+        if n == 0 {
+            more = false
+        } else if cp >= first && cp < first + n {
+            g = (w >> 16) + (cp - first)
+            more = false
+        }
+        i += 1
+    }
+    if g < total { g } else { QUESTION }
 }
 
 /// Store the 64-bit `v` at framebuffer address `a` (8-aligned).
@@ -340,7 +380,7 @@ fn hex_digit(b: u64) -> u64 {
 /// Draw cell (x, y) from the grid; `cursor` swaps its colours.
 fn draw(x: u64, y: u64, cursor: bool) {
     let c = cell(y * sv(S_COLS) + x)
-    let g = c & 0xff
+    let g = (c & 0xff) | ((c >> 12) & 0xff00) // bits 0-7 and 20-27 (gm01)
     var f = (c >> 8) & 15
     var b = (c >> 12) & 15
     if cursor {
@@ -432,7 +472,7 @@ fn newline() {
 
 /// Write code point `cp` at the cursor and move on.
 fn glyph(cp: u64) {
-    let g = if cp < 256 { cp } else { QUESTION }
+    let g = glyph_of(cp)
     if sv(S_WRAP) != 0 {
         hide()
         put_sv(S_WRAP, 0)
@@ -446,7 +486,7 @@ fn glyph(cp: u64) {
     } else {
         hide()
     }
-    put_cell(y * sv(S_COLS) + x, (blank() & !0xff) | g)
+    put_cell(y * sv(S_COLS) + x, (blank() & !0xff) | (g & 0xff) | ((g >> 8) << 20))
     draw(x, y, false)
     if x + 1 == sv(S_COLS) {
         put_sv(S_WRAP, 1)
