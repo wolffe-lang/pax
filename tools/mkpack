@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Stage pack for the installer; no fetch occurs on the installed system.
-# Uses wolf 0.2.35's entire verified archive and its bundled std. Requires
-# an existing musl-gcc; installs nothing. No game or libc source is patched.
+# Uses wolf 0.2.35's entire verified archive and its bundled std. Like
+# mkboreutils: static, glibc, Ubuntu 24.04 baseline. Never link against
+# CachyOS glibc. Installs nothing; no game or libc source is patched.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 [ $# -eq 1 ] || die 'usage: mkpack OUTDIR'
-need curl tar readelf file musl-gcc clang
+need curl tar readelf file cc clang
 out=$1
 mkdir -p "$out" "$PAX_CACHE"
 out=$(cd "$out" && pwd)
@@ -29,7 +30,7 @@ w=$(mktemp -d "${TMPDIR:-/tmp}/pax-pack.XXXXXX")
 # Keep a failed build for diagnosis; remove only this unique directory on success.
 mkdir "$w/src" "$w/bin"
 tar -xzf "$arc" -C "$w/src" --strip-components=1
-printf '#!/bin/bash\nexec %q -static -no-pie "$@"\n' "$(command -v musl-gcc)" > "$w/bin/cc"
+printf '#!/bin/bash\nexec %q -static "$@"\n' "$(command -v cc)" > "$w/bin/cc"
 chmod 755 "$w/bin/cc"
 # pack's own tools/build disables the 0.2.35 mid-end for live input.
 PATH="$w/bin:$PATH" WOLF_STD="$std" WOLF_MIDEND=0 "$wolf" build --release --no-cache --deny-warnings \
@@ -42,6 +43,13 @@ chmod 755 "$out/pack"
 sha=$(sha256_of "$out/pack")
 [ "$(sha256_of "$out/pack")" = "$sha" ] || die 'pack changed during readback'
 printf '%s  pack\n' "$sha" > "$out/games.sha256"
-printf 'pack %s %s %s musl-static\n' "$rev" "$sha" "$(wc -c < "$out/pack" | tr -d ' ')" > "$out/sums.txt"
+printf 'pack %s %s %s static-glibc-ubuntu-24.04\n' "$rev" "$sha" "$(wc -c < "$out/pack" | tr -d ' ')" > "$out/sums.txt"
 cat "$out/sums.txt"
+{
+    printf 'static, glibc, Ubuntu 24.04 baseline\n'
+    printf 'compiler: %s\n' "$(command -v cc)"
+    cc --version | head -1
+    printf 'libc.a: %s\n' "$(cc -print-file-name=libc.a)"
+    sha256_of "$(cc -print-file-name=libc.a)"
+} > "$out/link-provenance.txt"
 rm -rf "$w"
