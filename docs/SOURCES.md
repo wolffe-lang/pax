@@ -1207,3 +1207,22 @@ kernels: none consulted.
   -printf` returns 238 identical rows. No GNU or kernel implementation
   source was read. Linux strace records the formatters and the static
   Limine installer's calls; evidence is under `notes/px69/`.
+
+## Offline ext2/ext3 checker
+
+- Dave Poirier, *The Second Extended File System: Internal Layout*,
+  https://www.nongnu.org/ext2-doc/ext2.html — superblock, group descriptor,
+  inode, bitmap and directory-entry layouts (chapters 3–4).
+- e2fsck(8), https://man7.org/linux/man-pages/man8/e2fsck.8.html — offline
+  operation, report-only/preen/yes modes and exit statuses. e2fsprogs
+  1.47.0 binaries are the black-box repair oracle; the corpus retains
+  each prompt and finding rather than editing a golden answer.
+- The published JBD2 on-disk journal layout, already recorded for the
+  kernel journal above; PAX's own `kernel/journal/journal.lu` and the
+  unchanged thirteen-case replay corpus are the replay reference.
+- open(2)'s Linux `O_EXCL`-without-`O_CREAT` block-device rule, and the
+  Linux x86-64 syscall ABI, for exclusive offline access. No libc source.
+
+No Linux kernel, e2fsprogs, util-linux, busybox or other filesystem-tool
+implementation source was consulted. Malformed-directory salvage remains
+an explicit unsupported row, not an inferred or copied algorithm.

@@ -876,3 +876,24 @@ python3 tools/census/report.py tools/census/out docs/CENSUS.md
 The two set runs above are
 `tools/census/census inject static set keep-mmap brk,munmap,…` and
 `… set keep-brk mmap,munmap,…`, then `tools/census/census inject static summary`.
+
+## Offline filesystem checker
+
+`fsck.ext2` uses raw Linux `open(2)` with `O_EXCL` (without `O_CREAT`) to
+hold an unmounted block device, then opens `/proc/self/fd/N` through Wolf's
+filesystem API. Native descriptors and Wolf runtime handles are distinct;
+the exclusive descriptor remains open until the runtime handle is closed.
+The small assembly boundary contains only pathname-buffer writes and
+`open`/`close` system calls. Filesystem parsing and repair are Wolf.
+
+A Linux container trace of the report-only checker records 26 distinct
+calls: `arch_prctl`, `brk`, `close`, `execve`, `exit_group`, `flock`,
+`fstat`, `getrandom`, `lseek`, `mmap`, `mprotect`, `munmap`, `open`,
+`openat`, `pread64`, `prlimit64`, `read`, `readlinkat`, `rseq`,
+`rt_sigaction`, `sched_getaffinity`, `set_robust_list`, `set_tid_address`,
+`sigaltstack`, `statx` and `write`. Repair also uses `fsync` to order
+metadata and the clean flag. The PAX rescue witness reports only the
+existing static-glibc fallbacks `set_robust_list` (273) and `rseq` (334)
+as ENOSYS. It repairs `/dev/vda2` while that partition is unmounted;
+the later root boot explicitly verifies that `-y` on the mounted root is
+refused. No new kernel syscall handler is required.
