@@ -3833,6 +3833,81 @@ jobs:
             build/mpx6-journal-*.verdict
             build/mpx6-journal-runs.txt
 
+  # px69: three filesystem-format differentials and a disk built on PAX.
+  mpx6-disktools:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-disktools')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+      PAX_ROOT_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: qemu, firmware, compiler and tracing tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make strace
+      - name: lope's pin
+        id: lope
+        run: |
+          . user/lope.pin
+          echo "rev=$LOPE_REV" >> "$GITHUB_OUTPUT"
+      - name: require the private lope checkout token
+        env:
+          TOKEN: ${{ secrets.WOLF_CI_TOKEN }}
+        run: |
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::error::WOLF_CI_TOKEN is required for the playground's lope binary"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          repository: wolffe-lang/lope
+          ref: ${{ steps.lope.outputs.rev }}
+          token: ${{ secrets.WOLF_CI_TOKEN }}
+          path: .lope
+          persist-credentials: false
+      - name: pinned compiler and oracles
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          docker pull docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+          PAX_ENGINE=docker tools/e2fs --version
+          PAX_ENGINE=docker tools/disktools --version
+      - name: disk tools against Linux and then on PAX; the plan's legs
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_LOPE_REPO: ${{ github.workspace }}/.lope
+        run: tests/mpx6-disktools $PAX_LEGS
+      - name: explicit ext2 root leg with the Wolf writer
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+        run: |
+          PAX_EXT2_WRITER="$PWD/build/mpx6-disktools/bin/paxext2" tests/mpx6-root --fstype ext2 $PAX_LEGS
+      - name: keep formatters, oracle verdicts and boot evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-disktools
+          path: |
+            build/mpx6-disktools/**/*.log
+            build/mpx6-disktools/**/*.serial
+            build/mpx6-disktools/**/*.compare
+            build/mpx6-disktools/**/*.session
+            build/mpx6-disktools/**/*.tree
+            build/mpx6-disktools/**/*.fsck
+            build/mpx6-disktools/**/*.red
+            build/mpx6-disktools/**/sums.txt
+            build/mpx6-root-*.serial.log
+            build/mpx6-root-*.session
+            build/mpx6-root-*.verdict
+            build/mpx6-root-runs.txt
+          retention-days: 14
+          if-no-files-found: error
+
   tier:
     name: tier ${{ needs.plan.outputs.tier || 'unplanned' }}
     if: ${{ !cancelled() }}
@@ -3885,6 +3960,7 @@ jobs:
       - mpx6-part
       - mpx6-root
       - mpx6-journal
+      - mpx6-disktools
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # The issue step's token may write issues; nothing else.
