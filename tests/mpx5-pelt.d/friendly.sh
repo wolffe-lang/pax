@@ -38,5 +38,10 @@ friendly_boot() {
     if [ -n "$kp" ]; then wait "$kp" || krc=$?; fi
     python3 -I "$PAX_ROOT/tests/mpx5-pelt.d/friendly.py" check "$log" "$console" > "$out/check.log" || rc=1
     cat "$out/check.log"
+    if [ "$console" = framebuffer ]; then
+        python3 -I "$PAX_ROOT/tests/mpx5-screen.d/compare.py" ref "$log" 'PAX: the console' "$out" \
+            > "$out/screen-check.log" 2>&1 || rc=1
+        cat "$out/screen-check.log"
+    fi
     [ "$rc" = 0 ] && [ "$krc" = 0 ]
 }

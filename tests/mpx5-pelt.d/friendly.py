@@ -80,6 +80,7 @@ def check(raw, mode):
         'default shadow SGR90': has(b'_suffix', 90, False),
         'configured shadow SGR2': has(b'_suffix', 90, True),
         'shadow erased': b'\x1b[K' in raw[raw.find(b'_suffix') + len(b'_suffix'):],
+        'default resolving command foreground': has(b'echo', 39),
         'configured resolving command green': has(b'echo', 32),
         'unknown command red': has(b'px81_missing', 91),
         'open quote red': has(b"'", 91),

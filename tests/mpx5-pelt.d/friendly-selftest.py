@@ -7,7 +7,7 @@ from pathlib import Path
 spec = importlib.util.spec_from_file_location('friendly', Path(__file__).with_name('friendly.py'))
 friendly = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(friendly)
-raw = (b'\r\n50 160\r\n\x1b[90m_suffix\x1b[0m\x1b[K'
+raw = (b'\x1b[0mecho\r\n50 160\r\n\x1b[90m_suffix\x1b[0m\x1b[K'
        b'\x1b[90;2m_suffix\x1b[0m\x1b[K\x1b[32mecho\x1b[0m'
        b'\x1b[91mpx81_missing\x1b[0m\x1b[91m\'\x1b[0m'
        b'\r\nPX81-ABBR\r\n' + b'\r\nPX81-EVENT\r\n' * 4 +
