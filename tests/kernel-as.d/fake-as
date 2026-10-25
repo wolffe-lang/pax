@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# fake-as — a deliberately wrong assembler for tests/kernel-as's refusal
+# rows (as02b), selected through WOLF_AS (by way of the trace). KAS_FAKE:
+#   fail          print a line and exit 3 on any source (K6);
+#   start-garbage boot/start.S: write text, not an object, exit 0 (K8);
+#   start-none    boot/start.S: write nothing, exit 0 (K9);
+# every other source, in the last two, goes to the real GNU as
+# (KAS_FAKE_AS), argv unchanged, so only build-kernel's own branch meets
+# the wrong answer.
+set -uo pipefail
+src= out=
+args=("$@")
+while [ $# -gt 0 ]; do
+    case $1 in -o) out=${2:-}; shift 2 ;; *.S|*.s) src=$1; shift ;; *) shift ;; esac
+done
+case ${KAS_FAKE:?} in
+    fail) printf 'fake-as: the planted failure (%s)\n' "$src" >&2; exit 3 ;;
+    start-garbage|start-none)
+        case $src in
+            */boot/start.S)
+                [ "$KAS_FAKE" = start-garbage ] && printf 'not an object\n' > "$out"
+                exit 0 ;;
+        esac
+        exec "${KAS_FAKE_AS:?}" "${args[@]}" ;;
+    *) printf 'fake-as: unknown KAS_FAKE %s\n' "$KAS_FAKE" >&2; exit 2 ;;
+esac
