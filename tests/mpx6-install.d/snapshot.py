@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 program, work = map(Path, sys.argv[1:])
 work.mkdir(parents=True, exist_ok=True)
@@ -21,19 +22,25 @@ with tempfile.TemporaryDirectory(dir=work, prefix='snapshot-') as tmp:
     os.link(src/'bin/tool', src/"a ' directory/hard link")
     os.symlink('../bin/tool', src/"a ' directory/symlink")
     (src/'empty').touch()
-    for p in [src, *src.rglob('*')]: os.utime(p, ns=(1700000000123456789,1700000001987654321),follow_symlinks=False)
+    # The oracle compares one pre-walk metadata set. Under relatime, an old
+    # atime would advance when the earlier hard-link alias is hashed, before
+    # the later alias is lstat'ed. Keep atime newer than mtime AND ctime so
+    # our reads do not mutate the fixture (works on relatime and noatime).
+    atime_ns=(time.time_ns()//1_000_000_000+86400)*1_000_000_000+123456789
+    for p in [src, *src.rglob('*')]: os.utime(p, ns=(atime_ns,1700000001987654321),follow_symlinks=False)
     expected={}
     for p in [src, *sorted(src.rglob('*'))]:
         rel='/' if p==src else '/'+p.relative_to(src).as_posix()
         if any(rel.startswith('/'+x+'/') for x in ['dev','proc','sys','tmp']): continue
         st=p.lstat()
-        expected[rel]=(st.st_mode&0o7777,st.st_uid,st.st_gid,int(st.st_mtime),int(st.st_atime),int(st.st_ctime))
+        expected[rel]=(st.st_mode&0o7777,st.st_uid,st.st_gid,st.st_mtime_ns//1_000_000_000,st.st_atime_ns//1_000_000_000,st.st_ctime_ns//1_000_000_000)
     out=subprocess.run([program,src,w/'copy',w/'attrs'],capture_output=True,text=True)
     assert out.returncode==0,(out.stdout,out.stderr)
     actual={}
     for line in (w/'attrs').read_text().splitlines():
         row=shlex.split(line)
         actual[row[0]]=(int(row[1],8), *map(int,row[2:]))
+    assert (src/'bin/tool').stat().st_atime_ns==atime_ns,'fixture reads changed the shared inode atime'
     assert actual==expected,(actual,expected)
     assert (w/'copy/bin/tool').read_bytes()==(src/'bin/tool').read_bytes()
     assert (w/'copy/bin/tool').stat().st_ino==(w/"copy/a ' directory/hard link").stat().st_ino
