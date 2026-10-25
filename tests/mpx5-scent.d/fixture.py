@@ -33,7 +33,7 @@ FILES = {
     "i117.dat": b"x\0y\0",
     # the runtime's abort on an argument that is not UTF-8 (scent's
     # not-yet-argv-bytes rows, wolf-lang#406/#904): pelt, a wolf program,
-    # cannot pass byte FF (its $'\377' is `?`), so the kernel does, from
+    # refuses byte FF in ANSI-C quoting (pelt#65), so the kernel passes it from
     # this script's `#!` line (px56): scent is run with `-F<FF>`.
     "ff-arg": b"#!/bin/scent -F\xff\n",
     # a generated file: 5,000 rows, every third alpha.

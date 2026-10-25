@@ -21,7 +21,7 @@ What a row holds, and from where (no row is read from scent's output):
   - the eight upstream-blocked rows' shapes (scent's README): the argv0
     seam (`grep:` whatever the invocation's name), and the runtime's abort
     on an argument that is not UTF-8, here passed by the kernel from a
-    `#!` line (pelt cannot pass the byte: its $'\\377' is `?`);
+    `#!` line (pelt refuses the byte in ANSI-C quoting before invoking scent);
   - scent's own prose where GNU's is not asked for (--help's first line,
     --version, the M2 refusal of -r), and what PAX and the image are:
     the link, the wrappers' warnings, /bin/sh, no locale, pelt's words.
@@ -114,7 +114,9 @@ ROWS = [
     # the error file's last, after the runtime's panic text.
     ("an argument that is not UTF-8, from a #! line (wolf-lang#406, #904): the runtime aborts",
      ["$ s ./ff-arg", "status 134", "[stderr]"] + PANIC + ["pelt: ended by signal 6 (ABRT)"]),
-    ("pelt cannot pass byte FF: its $'\\377' is ?", s("grep -F x $'\\377'", 2, err=["grep: ?: No such file or directory"])),
+    ("pelt refuses byte FF before invoking scent (pelt#65)",
+     ["$ s grep -F x $'\\377'",
+      "pelt: line 50: $'\\377': a byte that is not UTF-8 cannot be carried yet (pelt#65)"]),
     ("-r is M2: refused by name", s("grep -r cat .", 2, err=["scent: not yet implemented: r (M2)"])),
     ("--version is scent's own", ["$ grep --version | head -n 1", "scent 0.1.0"]),
 ]
