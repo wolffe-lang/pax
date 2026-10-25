@@ -14,15 +14,16 @@ while [ $# -gt 0 ]; do
         --tier) tiers=$2; shift 2 ;;
         --firmware) legs=$2; shift 2 ;;
         --no-boot) noboot=1; shift ;;
-        *) die 'usage: mpx5-pelt [--images DIR] [--only build|linux] [--tier native|release|both] [--firmware bios|uefi|both] [--no-boot]' ;;
+        *) die 'usage: mpx5-pelt [--images DIR] [--only build|linux|friendly] [--tier native|release|both] [--firmware bios|uefi|both] [--no-boot]' ;;
     esac
 done
 case $tiers in both) tiers='native release' ;; native|release) ;; *) die 'bad tier' ;; esac
 case $legs in both) legs='bios uefi' ;; bios|uefi) ;; *) die 'bad firmware' ;; esac
-case $only in ''|build|linux) ;; *) die 'bad only' ;; esac
+case $only in ''|build|linux|friendly) ;; *) die 'bad only' ;; esac
 [ "$only" != linux ] || [ -n "$images" ] || die '--only linux needs --images'
 need python3 readelf
 python3 -I "$PAX_ROOT/tests/mpx5-pelt.d/selftest.py" || exit 1
+. "$PAX_ROOT/tests/mpx5-pelt.d/friendly.sh"
 F=$PAX_ROOT/user/console/fork
 # Match the upstream session harness SETTLE=0.6 for in-flight keys.
 export PAX_TYPE_PAUSE=${PAX_TYPE_PAUSE:-0.6}
@@ -179,6 +180,12 @@ for leg in $legs; do
     fi
     for tier in $tiers; do
         role_images "$images" "$tier" || { bad "F0 $tier role images"; continue; }
+        friendly_image "$images" "$tier" || { bad "F4 $tier friendly image"; continue; }
+        for console in framebuffer serial-zero serial-sized; do
+            friendly_boot "$images" "$tier" "$leg" "$console" || bad "F4 $tier $leg $console"
+            ran=$((ran+1))
+        done
+        [ "$only" != friendly ] || continue
         while IFS= read -r name; do
             role=${name##*-}
             c=${name%-*}; mon=m; [ "$(shell_mode "$c")" = -m ] || mon=plusm
