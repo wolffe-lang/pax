@@ -1,0 +1,572 @@
+#!/usr/bin/env bash
+# tests/mpx6-nodes — block device nodes, the block ioctls and a second
+# disk (px79, P6; pax#144): /dev's nodes for every disk and partition
+# kernel/block knows, raw I/O through them, the ioctls, BLKRRPART and
+# BLKPG, /proc/partitions and /sys's block files, mount(2) and
+# /etc/fstab by node, and up to three disks named vda, vdb, vdc in PCI
+# slot order, each held to the Linux guest (Linux 7.3.0 on QEMU,
+# kasumi's installed kernel: tools/linux-nodes) running the same
+# programs on the same disks.
+#
+#   tests/mpx6-nodes [--images DIR | --no-boot | --only build | --only linux --images DIR [--record]]
+#                    [--rows pr|all] [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# The programs, each static and unmodified: pelt (as /bin/sh), boreutils'
+# ls, and user/elf/nodes.c (tools/mknodes). The disks, made where the
+# boots run with SOURCE_DATE_EPOCH=1700000000 (the same bytes on every
+# host: tests/mpx6-nodes.d/disks.sha256):
+#   a.img      64 MiB, GPT (tools/mkgpt, label px79a): partition 1 LBA
+#              2048-34815 (16 MiB, no file system), partition 2 LBA
+#              34816-100351 (32 MiB, `tools/mkdisk --home 32M`'s ext2);
+#   gpt.img    16 MiB, GPT (label px79b): an ESP at 2048-10239, a Linux
+#              partition at 10240-26623; its first 34 sectors and last
+#              33 (gpt-head.bin, gpt-tail.bin) are in the images, which
+#              write them to a blank disk through its node;
+#   home.img   8 MiB, `tools/mkdisk --home 8M`'s ext2, the gpt session's
+#              fourth disk, copied into the blank disk's partition 2
+#              through both nodes;
+#   b2.img     gpt.img with home.img in partition 2 (the fstab boot's
+#              vdb, made on the host);
+#   full.img   tests/mpx6-part's `full` fixture (128 partitions).
+# Four images of kmain_console a tier, each pid 1 a session of
+# tests/mpx6-nodes.d/ run by pelt, booted with its disks by
+# tools/qemu-halt --drive (in that order: vda, vdb, vdc):
+#   nodes    a.img, a blank 16 MiB, a blank 4 MiB read-only with QEMU's
+#            geometry cyls=100,heads=4,secs=17: nodes.sh;
+#   gpt      a.img, a blank 16 MiB, a blank 16 MiB, home.img read-only:
+#            gpt.sh;
+#   numbers  full.img twice: numbers.sh;
+#   fstab    a.img, b2.img; /etc/fstab `/dev/vdb2 /mnt ext2 defaults 0 2`:
+#            fstab.sh.
+#
+# The Linux side (`--only linux`, or with the build): tools/linux-nodes
+# runs each session on copies of the same disks with the same programs
+# (the fstab session after a mount(2) of /dev/vdb2 at /mnt, the guest's
+# init being a shell, not PAX's kernel); its lines are the reference.
+# Where this host's kernel cannot be read (the CI runner's is root's) the
+# reference is the one recorded on kasumi (tests/mpx6-nodes.d/linux/,
+# `--record` writes it), said loudly; PAX_LINUX=live insists on a live
+# one.
+#
+# Rows (--rows pr, or PAX_NODES_ROWS=pr, CI's pr tier: N0-N10 and N13 on
+# the nodes and gpt boots; --rows all, the default and the full and all
+# tiers: every one):
+#   N0 build: the programs static, kmain_console built, the images made,
+#      the disks their recorded sha256s, the Linux side ran (or its
+#      record is there).
+#   N1 the nodes: `stat`'s fields, boreutils' `ls -l` (the date folded:
+#      tests/mpx6-nodes.d/compare) and /dev's block devices are the
+#      guest's (`brw-------` 0:0, 254:0, 254:1, 254:2, 254:16, 254:32;
+#      R-px79-1); no vda3, vdd or vda0.
+#   N2 /proc/partitions, /sys/block/<disk>/{dev,size,ro,removable},
+#      /sys/block/<disk>/<part>/{dev,start,size,partition,ro} and
+#      /sys/class/block/<name>/dev are the guest's, for three disks.
+#   N3 the ioctls on a disk, a partition, the second disk and the
+#      read-only third are the guest's, value and width (the buffer's
+#      bytes), but BLKSECTGET, BLKRAGET and BLKFRAGET, refused by name
+#      (-ENOTTY, the buffer untouched); requests no block device serves
+#      -ENOTTY on both.
+#   N4 raw reads: lseek's ways and bounds, a 100-byte read at offset 3, a
+#      read across and at the end, pread at an odd offset, O_DIRECT, the
+#      open flags (R-px79-4): the guest's answers and bytes.
+#   N5 raw writes: odd lengths and offsets read back, across the end
+#      short, at and past it -ENOSPC, a partition's window, a read-only
+#      disk -EPERM: the guest's; vdb's and vdc's images unchanged after
+#      (every byte written was put back).
+#   N6 holds: BLKRRPART -EBUSY with a partition open or mounted, 0 with
+#      the disk open, -EINVAL on a partition; O_EXCL against O_EXCL and
+#      against a mount both ways (R-px79-3); a raw write to vda while
+#      vda2 is mounted allowed; the guest's answers; e2fsck -fn of vda2
+#      clean after.
+#   N7 BLKPG: ADD_PARTITION and DEL_PARTITION, their refusals (a number in
+#      use, an overlap, past the end, a partition's node, a number no
+#      partition has, an open one) and the table read again: the guest's.
+#   N8 the second disk: a pattern written to every sector of a third
+#      disk through its node and read back (the guest's lines), and the
+#      host reads it from the image: every sector the pattern
+#      (tools/blk-pattern).
+#   N9 the table: tools/mkgpt's bytes written to a blank vdb through its
+#      node, BLKRRPART, vdb1 and vdb2 there with /sys's sizes the table's:
+#      the guest's; the host finds the image's first 34 and last 33
+#      sectors the table's bytes.
+#   N10 mount by node: an ext2 copied from /dev/vdd into /dev/vdb2
+#      and mounted by mount(2) from `/dev/vdb2`; /proc/mounts names the
+#      node; the refusals (-EINVAL with no file system, -ENOTBLK for
+#      /dev/null, -ENOENT for /dev/vdz and a bare `vdb2`): the guest's;
+#      e2fsck -fn of the image's partition 2 clean after.
+#   N11 numbers past 15 on two disks: vda16 259:0 … vda128 259:112, vdb16
+#      259:113 …, and after a rescan the lowest free again: the guest's.
+#   N12 /etc/fstab by node: `/dev/vdb2 /mnt ext2 defaults 0 2` mounts it
+#      (`fstab: /dev/vdb2 on /mnt: ext2, …`), and /proc/mounts' line and
+#      the tree are the guest's mount(2) of the same node.
+#   N13 the books (`0 errors` on every disk), init ended, halted.
+#   N14 the crash row with a raw write (native BIOS, the all rows): `/`
+#      on a journalled vda2 (tools/mkdisk --gpt --root of the crash
+#      image's archive), tests/mpx6-nodes.d/crash.sh as init: files
+#      written, the GPT's first 34 sectors written back through /dev/vda
+#      and a pattern sector put at LBA 100 (in no partition) while `/`
+#      holds changes not yet committed, QEMU killed while the session
+#      waits; the host finds the table's bytes as they were and the
+#      sector the pattern; the next boot replays the journal, reads the
+#      sector back, lists every file the sync committed, halts clean; then
+#      `e2fsck -fn` of vda2 clean: no disagreement between the raw write,
+#      the cache and the journal (the prediction's question).
+#
+# The UEFI legs need OVMF (SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1). Exit 0 when every assertion held, 1 otherwise, 2
+# on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 only= rows=${PAX_NODES_ROWS:-all} record=0
+usage="usage: tests/mpx6-nodes [--images DIR | --no-boot | --only build | --only linux --images DIR [--record]] [--rows pr|all] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --rows)     rows=$2; shift 2 ;;
+        --record)   record=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+case $rows in pr|all) ;; *) die "--rows takes pr or all" ;; esac
+[ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
+need readelf python3
+
+D=$PAX_ROOT/tests/mpx6-nodes.d
+REC=$D/linux
+BORE="ls mkdir"
+EPOCH=1700000000
+SESSIONS="nodes gpt numbers fstab"
+CRASH_SEED=0x7078373963726173
+work=$PAX_BUILD/mpx6-nodes
+runs=$PAX_BUILD/mpx6-nodes-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+static_ok() {
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+# --- the disks (made on the host that boots: tools/mkdisk runs a container) ---
+
+# The table the gpt session writes (tools/mkgpt alone: python, so the
+# build container makes it too), into $1/disks.
+make_table() { # dir -> reasons
+    mkdir -p "$1/disks"
+    (
+        export SOURCE_DATE_EPOCH=$EPOCH
+        cd "$1/disks" || exit 1
+        rm -f gpt.img gpt-head.bin gpt-tail.bin
+        "$PAX_ROOT/tools/mkgpt" --size 16M --label px79b gpt.img 1:esp:2048:10239:esp 2:linux:10240:26623:root > /dev/null || printf ' mkgpt gpt.img;'
+        dd if=gpt.img of=gpt-head.bin bs=512 count=34 status=none
+        dd if=gpt.img of=gpt-tail.bin bs=512 skip=32735 count=33 status=none
+    )
+}
+
+make_disks() { # dir -> reasons
+    local w=$1
+    mkdir -p "$w/disks"
+    [ -f "$w/disks/gpt.img" ] || make_table "$w"
+    (
+        export SOURCE_DATE_EPOCH=$EPOCH
+        cd "$w/disks" || exit 1
+        rm -f a.img a2.img home.img b2.img full.img
+        "$PAX_ROOT/tools/mkdisk" --home 32M a2.img > a2.mkdisk.txt || { printf ' the ext2 of a.img;'; exit 0; }
+        truncate -s 64M a.img
+        dd if=a2.img of=a.img bs=512 seek=34816 conv=notrunc status=none
+        rm -f a2.img
+        "$PAX_ROOT/tools/mkgpt" --label px79a a.img 1:linux:2048:34815:one 2:linux:34816:100351:home > /dev/null || printf ' mkgpt a.img;'
+        "$PAX_ROOT/tools/mkdisk" --home 8M home.img > home.mkdisk.txt || printf ' home.img;'
+        cp gpt.img b2.img
+        dd if=home.img of=b2.img bs=512 seek=10240 conv=notrunc status=none
+        "$PAX_ROOT/tests/mpx6-part.d/fixtures" "$w/disks/fx" full > /dev/null 2>&1 && mv "$w/disks/fx/full.img" full.img || printf ' the full fixture;'
+        rm -rf "$w/disks/fx"
+    )
+}
+
+check_disks() { # dir -> reasons
+    local w=$1 d got want
+    for d in a gpt home b2 full; do
+        got=$(sha256_of "$w/disks/$d.img")
+        want=$(sed -n "s/^$d \([0-9a-f]*\)\$/\\1/p" "$D/disks.sha256")
+        [ "$got" = "$want" ] || printf ' %s.img is %s, recorded %s (the disk tools are not reproducible here);' "$d" "$got" "$want"
+    done
+}
+
+disks_ready() { # dir -> reasons
+    [ -f "$1/disks/full.img" ] && [ -f "$1/disks/a.img" ] || make_disks "$1"
+    check_disks "$1"
+}
+
+blank() { rm -f "$1"; truncate -s "$2" "$1"; }
+
+# Each session's disks (fresh copies into $2), as `--drive` specs on stdout.
+drives_of() { # session dir
+    local s=$1 w=$2 dk=$images/disks
+    mkdir -p "$w"
+    case $s in
+        nodes)   cp "$dk/a.img" "$w/a.img"; blank "$w/b.img" 16M; blank "$w/c.img" 4M
+                 printf '%s\n' "$w/a.img" "$w/b.img" "$w/c.img,ro;cyls=100,heads=4,secs=17" ;;
+        gpt)     cp "$dk/a.img" "$w/a.img"; blank "$w/b.img" 16M; blank "$w/c.img" 16M; cp "$dk/home.img" "$w/d.img"
+                 printf '%s\n' "$w/a.img" "$w/b.img" "$w/c.img" "$w/d.img,ro" ;;
+        numbers) cp "$dk/full.img" "$w/a.img"; cp "$dk/full.img" "$w/b.img"
+                 printf '%s\n' "$w/a.img" "$w/b.img" ;;
+        fstab)   cp "$dk/a.img" "$w/a.img"; cp "$dk/b2.img" "$w/b.img"
+                 printf '%s\n' "$w/a.img" "$w/b.img" ;;
+    esac
+}
+
+# --- the Linux side -------------------------------------------------------------
+
+kernel_readable() {
+    local k=${PAX_LINUX_KERNEL:-}
+    if [ -z "$k" ]; then
+        k=/usr/lib/modules/$(uname -r)/vmlinuz
+        [ -r "$k" ] || k=$(command ls -1 /usr/lib/modules/*/vmlinuz 2>/dev/null | grep -v lts | tail -n 1)
+    fi
+    [ -n "$k" ] && [ -r "$k" ] && printf '%s\n' "$k"
+}
+
+linux_side() { # dir -> reasons
+    local w=$1 k s
+    mkdir -p "$w/linux"
+    k=$(kernel_readable || true)
+    if [ -z "$k" ] && [ "${PAX_LINUX:-}" != live ]; then
+        say "LOUD: no readable Linux kernel on this host: the Linux side is the record made on kasumi ($(head -n 1 "$REC/meta"))"
+        for s in $SESSIONS; do cp "$REC/$s.session" "$w/linux/" || printf ' no %s record in %s;' "$s" "$REC"; done
+        echo recorded > "$w/linux/how"
+        return
+    fi
+    [ -n "$k" ] || { printf ' PAX_LINUX=live and no readable kernel;'; return; }
+    local progs=("$w/bin"/*) files=(--file "$w/disks/gpt-head.bin=/etc/nodes/gpt-head.bin" --file "$w/disks/gpt-tail.bin=/etc/nodes/gpt-tail.bin")
+    for s in $SESSIONS; do
+        local g=$w/linux/$s dv=() first=() run=1
+        mapfile -t specs < <(images=$w drives_of "$s" "$g/disks")
+        for d in "${specs[@]}"; do dv+=(--drive "$d"); done
+        if [ "$s" = fstab ]; then first=("/bin/nodes mount /dev/vdb2 /mnt"); run=2; fi
+        "$PAX_ROOT/tools/linux-nodes" --kernel "$k" "${dv[@]}" "${files[@]}" --file "$D/$s.sh=/etc/nodes/$s.sh" \
+            "$g" "${progs[@]}" -- ${first[@]+"${first[@]}"} "/bin/sh /etc/nodes/$s.sh" || printf ' tools/linux-nodes %s;' "$s"
+        python3 "$D/session" linux "$g/serial.log" "$run" > "$w/linux/$s.session"
+        grep -qx '== end' "$w/linux/$s.session" || printf ' the guest'"'"'s %s session did not end;' "$s"
+        rm -rf "$g/root" "$g/initramfs.cpio"
+    done
+    echo "live $(file -b "$k" | sed -n 's/.*version \([^ ]*\).*/\1/p') $k" > "$w/linux/how"
+    if [ "$record" = 1 ]; then
+        mkdir -p "$REC"
+        for s in $SESSIONS; do cp "$w/linux/$s.session" "$REC/"; done
+        printf 'Linux %s on QEMU (tools/linux-nodes), recorded %s\n' "$(sed -n 's/.*linux-nodes: uname //p' "$w/linux/nodes/serial.log" | tr -d '\r' | head -n 1)" "$(date -u +%Y-%m-%d)" > "$REC/meta"
+        say "recorded the Linux side in $REC"
+    fi
+}
+
+if [ "$only" = linux ]; then
+    why=$(disks_ready "$images")
+    why+=$(linux_side "$images")
+    [ -z "$why" ] && say "PASS N0 (linux): the Linux side ran ($(cat "$images/linux/how"))" || bad "N0 (linux):$why"
+    exit "$fail"
+fi
+
+# --- the build ----------------------------------------------------------------------
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/bin"
+    why=
+    "$PAX_ROOT/tools/mkpelt" "$work/peltbin" > "$work/pelt.txt" || why+=" tools/mkpelt;"
+    "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
+    "$PAX_ROOT/tools/mknodes" "$work/bin" > "$work/probes.txt" || why+=" tools/mknodes;"
+    cp "$work/peltbin/pelt" "$work/bin/sh" 2>/dev/null || why+=" no pelt;"
+    for u in $BORE; do cp "$work/bore/$u" "$work/bin/$u" 2>/dev/null || why+=" no $u;"; done
+    for f in "$work"/bin/*; do
+        r=$(static_ok "$f") || why+=" $r;"
+    done
+    sed 's/^/  program: /' "$work/probes.txt" >&2
+    why+=$(make_table "$work")
+    for s in $SESSIONS; do
+        printf '/bin/sh /etc/nodes/%s.sh\n' "$s" > "$work/$s.run"
+        args=()
+        for f in "$work"/bin/*; do args+=("/bin/${f##*/}=$f:755"); done
+        args+=(/mnt/:755 /tmp/:1777 "/etc/nodes/$s.sh=$D/$s.sh:644" "/etc/pax-run=$work/$s.run:644")
+        if [ "$s" = gpt ]; then
+            args+=("/etc/nodes/gpt-head.bin=$work/disks/gpt-head.bin:644" "/etc/nodes/gpt-tail.bin=$work/disks/gpt-tail.bin:644")
+        fi
+        if [ "$s" = fstab ]; then
+            printf '/dev/vdb2 /mnt ext2 defaults 0 2\n' > "$work/fstab.fstab"
+            args+=("/etc/fstab=$work/fstab.fstab:644")
+        fi
+        "$PAX_ROOT/tools/mkinitramfs" "$work/$s.cpio" "${args[@]}" > "$work/$s.initramfs.txt" || why+=" tools/mkinitramfs $s;"
+    done
+    # N14's archive: installed as `/` on a disk where the boots run.
+    printf '/bin/sh /etc/nodes/crash.sh\n' > "$work/crash.run"
+    args=()
+    for f in "$work"/bin/*; do args+=("/bin/${f##*/}=$f:755"); done
+    args+=(/tmp/:1777 /dev/:755 /proc/:555 /sys/:555 "/etc/nodes/crash.sh=$D/crash.sh:644" "/etc/pax-run=$work/crash.run:644")
+    "$PAX_ROOT/tools/mkinitramfs" "$work/crash.cpio" "${args[@]}" > "$work/crash.initramfs.txt" || why+=" tools/mkinitramfs crash;"
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            for s in $SESSIONS; do
+                "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$work/$s.cpio" initramfs.cpio \
+                    "$elf" "$work/$tier/nodes-$s.iso" >/dev/null || why+=" $tier $s: mkimage;"
+            done
+            say "built $tier kmain_console: elf $(sha256_of "$elf")"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    if [ "$only" = build ]; then
+        [ -z "$why" ] && say "PASS N0 (build): the programs static, kmain_console built ($tiers), four images a tier" || bad "N0 (build):$why"
+        exit "$fail"
+    fi
+    why+=$(disks_ready "$work")
+    if [ "$(uname -s)" != Linux ]; then
+        why+=" the Linux side needs Linux (this is $(uname -s));"
+    else
+        why+=$(images=$work linux_side "$work")
+    fi
+    [ -z "$why" ] && say "PASS N0: the programs static, kmain_console built ($tiers), the images and the disks (as recorded), the Linux side ($(cat "$work/linux/how"))" || bad "N0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx6-nodes build (N0): PASS (no boot: --no-boot)" || say "mpx6-nodes build: FAIL"
+        exit "$fail"
+    fi
+fi
+lx=$images/linux
+[ -d "$lx" ] || die "no $lx (build first, and run the Linux side)"
+why=$(disks_ready "$images")
+[ -z "$why" ] && say "PASS N0 (disks): a, gpt, home, b2 and full as recorded" || bad "N0 (disks):$why"
+
+# --- the boots ------------------------------------------------------------------------
+
+record_run() { # tier leg what status
+    ran=$((ran + 1))
+    printf '%s kmain_console %s %s status=%s accel=%s elapsed=%s serial=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sed -n 's/^elapsed: //p' "$log.meta" 2>/dev/null)" \
+        "$(sha256_of "$log")" >> "$runs"
+}
+
+# Boot session $3's image with its disks (fresh copies in $dw); the
+# session's lines into $out; the log normalised once into $log.norm.
+boot_session() { # tier leg session
+    local rc=0 dv=() d
+    dw=$PAX_BUILD/mpx6-nodes-$1-$2-$3
+    rm -rf "$dw"; mkdir -p "$dw"
+    mapfile -t specs < <(drives_of "$3" "$dw")
+    for d in "${specs[@]}"; do dv+=(--drive "$d"); done
+    log=$dw.serial.log
+    rm -f "$log" "$log.verdict" "$log.norm"
+    "$PAX_ROOT/tools/qemu-halt" --firmware "$2" --serial "$log" --timeout 600 --qemu -m --qemu 1G \
+        --elf "$images/$1/kmain_console.elf" --marker 'halt|PANIC .*' "${dv[@]}" \
+        "$images/$1/nodes-$3.iso" >"$log.verdict" 2>&1 || rc=$?
+    serial_norm "$log" > "$log.norm"
+    record_run "$1" "$2" "$3" "$rc"
+    out=$dw.session
+    python3 "$D/session" pax "$log" > "$out"
+    return "$rc"
+}
+
+sgrep() { command grep -a "$@" "$log.norm"; }
+
+# Hold sections $3… of the session to the guest's: one row.
+held() { # row id session section...
+    local row=$1 id=$2 s=$3; shift 3
+    local r
+    if r=$(python3 "$D/compare" "$out" "$lx/$s.session" "$@"); then
+        say "PASS $row $id: $(printf '%s' "$r" | sed 's/^PASS //' | tr '\n' ';' | sed 's/;$//')"
+    else
+        bad "$row $id: $(printf '%s' "$r" | grep -v '^PASS' | tr '\n' '|' | cut -c1-900)"
+    fi
+}
+
+the_end() { # id status session
+    local why= n k
+    n=$(sgrep -Ec '^blk: virtio-blk 1af4:(1001|1042) at ')
+    k=$(sgrep -Ec '^block: vd[a-d]: [0-9]+ reads \([0-9]+ sectors\), [0-9]+ writes \([0-9]+ sectors\), [0-9]+ flushes, 0 errors, ')
+    [ "$k" = "$n" ] && [ "$n" -gt 0 ] || why+=" $k books lines with 0 errors for $n disks;"
+    sgrep -q '^PAX: init /bin/sh ended with status 0; nothing left to run$' || why+=" no clean end of init;"
+    [ "$2" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+    ! sgrep -q '^PANIC ' || why+=" $(sgrep -m1 '^PANIC ')"
+    grep -qx '== end' "$out" || why+=" the session did not end;"
+    [ -z "$why" ] && say "PASS N13 $1: $n disks, each 0 errors; init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "N13 $1:$why"
+}
+
+e2clean() { # image first-sector sectors -> 0 clean
+    local img=$1 p=$1.part
+    dd if="$img" of="$p" bs=512 skip="$2" count="$3" status=none
+    "$PAX_ROOT/tools/e2fs" "$(dirname "$img")" e2fsck -fn "$p" > "$p.fsck" 2>&1
+    local rc=$?
+    rm -f "$p"
+    return $rc
+}
+
+# N14: the crash row (the header says what it holds).
+crash_row() {
+    local id="native bios crash" why= cw=$PAX_BUILD/mpx6-nodes-crash img first n rc q i got
+    rm -rf "$cw"; mkdir -p "$cw"
+    img=$cw/crash.img
+    if ! SOURCE_DATE_EPOCH=$EPOCH "$PAX_ROOT/tools/mkdisk" --gpt --kernel "$images/native/kmain_console.elf" --root "$images/crash.cpio" \
+        --label px79-crash 128M "$img" > "$cw/mkdisk.txt" 2>&1; then
+        bad "N14 $id: tools/mkdisk --gpt --root: $(tail -n 2 "$cw/mkdisk.txt" | tr '\n' ' ')"
+        return
+    fi
+    # partition 2 (the root) from sfdisk --dump's line in mkdisk's report
+    first=$(sed -n 's/^ *[^ ]*2 : start= *\([0-9]*\), size= *\([0-9]*\),.*/\1/p' "$cw/mkdisk.txt" | head -n 1)
+    n=$(sed -n 's/^ *[^ ]*2 : start= *\([0-9]*\), size= *\([0-9]*\),.*/\2/p' "$cw/mkdisk.txt" | head -n 1)
+    [ -n "$first" ] && [ -n "$n" ] || { bad "N14 $id: no partition 2 in mkdisk's sfdisk --dump"; return; }
+    dd if="$img" of="$cw/head.before" bs=512 count=34 status=none
+    dd if="$img" of="$cw/tail.before" bs=512 skip=$(( $(stat -c %s "$img") / 512 - 33 )) count=33 status=none
+    log=$cw/boot1.serial.log
+    "$PAX_ROOT/tools/qemu-run" --boot-disk --firmware bios --serial "$log" --timeout 600 "$img" -- -m 512M > /dev/null 2>&1 &
+    q=$!
+    for i in $(seq 1 6000); do command grep -aq 'crash: waiting' "$log" 2>/dev/null && break; sleep 0.1; done
+    kill -TERM "$q" 2>/dev/null; wait "$q"; rc=$?
+    serial_norm "$log" > "$log.norm"
+    record_run native bios crash1 "$rc"
+    sgrep -qx 'crash: waiting' || why+=" the session never waited;"
+    sgrep -Eq '^rewrite /dev/vda: 17408 bytes at 0: written back, fsync 0$' || why+=" $(sgrep -m1 '^rewrite ' || echo 'no rewrite line');"
+    sgrep -Eq '^mark /dev/vda: sector 100: 512, fsync 0$' || why+=" $(sgrep -m1 '^mark ' || echo 'no mark line');"
+    cmp -s "$cw/head.before" <(dd if="$img" bs=512 count=34 status=none) || why+=" the table's first 34 sectors changed;"
+    cmp -s "$cw/tail.before" <(dd if="$img" bs=512 skip=$(( $(stat -c %s "$img") / 512 - 33 )) count=33 status=none) || why+=" the table's last 33 sectors changed;"
+    got=$(python3 - "$img" "$CRASH_SEED" <<'PY'
+import struct, sys
+d = open(sys.argv[1], "rb").read()[100 * 512:101 * 512]
+seed = int(sys.argv[2], 0)
+w = struct.unpack("<64Q", d)
+print("the pattern" if all(w[j] == ((100 << 32) | j) ^ seed for j in range(64)) else "not the pattern")
+PY
+)
+    [ "$got" = "the pattern" ] || why+=" LBA 100 is $got;"
+    [ -z "$why" ] && say "PASS N14 $id (the kill): QEMU killed while init waited; the table's bytes as they were, LBA 100 the pattern" || bad "N14 $id (the kill):$why"
+    why=
+    log=$cw/boot2.serial.log
+    rc=0
+    "$PAX_ROOT/tools/qemu-halt" --firmware bios --serial "$log" --timeout 600 --qemu -m --qemu 512M --boot-disk \
+        --elf "$images/native/kmain_console.elf" --marker 'halt|PANIC .*' "$img" > "$log.verdict" 2>&1 || rc=$?
+    serial_norm "$log" > "$log.norm"
+    record_run native bios crash2 "$rc"
+    sgrep -qx 'crash: the second boot' && sgrep -qx 'crash: end' || why+=" the second session did not run;"
+    sgrep -Eq '^ext2: vda2: recovering the journal: [1-9][0-9]* transactions? .*; recovery complete$' || why+=" no replay line ($(sgrep -m1 '^ext2: vda2: ' || echo none));"
+    want=$(python3 - "$CRASH_SEED" <<'PY'
+import struct, sys
+seed = int(sys.argv[1], 0)
+b = struct.pack("<64Q", *[((100 << 32) | j) ^ seed for j in range(64)])
+h = 0xcbf29ce484222325
+for c in b:
+    h = ((h ^ c) * 0x100000001b3) & 0xffffffffffffffff
+print("%016x" % h)
+PY
+)
+    sgrep -Eq "^rd /dev/vda: 512 at 51200: 512 fnv $want\$" || why+=" the sector read back: $(sgrep -m1 '^rd /dev/vda' || echo none) (want fnv $want);"
+    [ "$rc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+    if e2clean "$img" "$first" "$n"; then :; else why+=" e2fsck -fn: $(grep -v '^e2fsck \|^Pass ' "$img.part.fsck" | head -n 4 | tr '\n' '|');"; fi
+    [ -z "$why" ] && say "PASS N14 $id (the next boot): the journal replayed ($(sgrep -m1 'recovering the journal' | sed 's/^ext2: vda2: recovering the journal: //; s/; recovery complete$//')), LBA 100 read back the pattern, halted; e2fsck -fn of vda2 clean: $(tail -n 1 "$img.part.fsck")" || bad "N14 $id (the next boot):$why"
+    rm -rf "$cw"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        # --- nodes: N1-N7, N13 ---------------------------------------------------
+        id="$tier $leg nodes"
+        hrc=0; boot_session "$tier" "$leg" nodes || hrc=$?
+        n=$(sgrep -Ec '^blk: virtio-blk 1af4:(1001|1042) at ')
+        order=$(sgrep -E '^block: vd[a-d]: [0-9]+ sectors ' | sed 's/^block: \(vd[a-d]\): \([0-9]*\) sectors.*/\1:\2/' | tr '\n' ' ')
+        [ "$n" = 3 ] && [ "$order" = "vda:131072 vdb:32768 vdc:8192 " ] \
+            && say "PASS N1 $id (the disks): three virtio-blk disks named in slot order: $order" \
+            || bad "N1 $id (the disks): $n blk: lines; '$order' (want vda:131072 vdb:32768 vdc:8192)"
+        held N1 "$id" nodes stat ls dev
+        held N2 "$id" nodes sys
+        held N3 "$id" nodes ioctl
+        held N4 "$id" nodes io
+        held N5 "$id" nodes wio
+        why=
+        cmp -s "$dw/b.img" <(head -c 16777216 /dev/zero) || why+=" vdb's image changed;"
+        cmp -s "$dw/c.img" <(head -c 4194304 /dev/zero) || why+=" vdc's (read-only) image changed;"
+        [ -z "$why" ] && say "PASS N5 $id (the images): vdb and vdc every byte as before (wio put back what it wrote; vdc refused it)" || bad "N5 $id (the images):$why"
+        held N6 "$id" nodes holds mounted
+        if e2clean "$dw/a.img" 34816 65536; then
+            say "PASS N6 $id (e2fsck): vda2 clean after the raw writes to vda while it was mounted: $(tail -n 1 "$dw/a.img.part.fsck")"
+        else
+            bad "N6 $id (e2fsck): $(grep -v '^e2fsck \|^Pass ' "$dw/a.img.part.fsck" | head -n 5 | tr '\n' '|')"
+        fi
+        held N7 "$id" nodes blkpg
+        the_end "$id" "$hrc" nodes
+
+        # --- gpt: N8-N10, N13 ------------------------------------------------------
+        id="$tier $leg gpt"
+        hrc=0; boot_session "$tier" "$leg" gpt || hrc=$?
+        held N8 "$id" gpt pattern
+        if hv=$("$PAX_ROOT/tools/blk-pattern" "$dw/c.img"); then
+            say "PASS N8 $id (the host): ${hv#$dw/}"
+        else
+            bad "N8 $id (the host): $hv"
+        fi
+        held N9 "$id" gpt table
+        why=
+        cmp -s "$images/disks/gpt-head.bin" <(dd if="$dw/b.img" bs=512 count=34 status=none) || why+=" the first 34 sectors are not the table's;"
+        cmp -s "$images/disks/gpt-tail.bin" <(dd if="$dw/b.img" bs=512 skip=32735 count=33 status=none) || why+=" the last 33 are not the table's;"
+        [ -z "$why" ] && say "PASS N9 $id (the host): vdb's first 34 and last 33 sectors are tools/mkgpt's" || bad "N9 $id (the host):$why"
+        held N10 "$id" gpt mount
+        if e2clean "$dw/b.img" 10240 16384; then
+            say "PASS N10 $id (e2fsck): vdb2 clean after its mount by node: $(tail -n 1 "$dw/b.img.part.fsck")"
+        else
+            bad "N10 $id (e2fsck): $(grep -v '^e2fsck \|^Pass ' "$dw/b.img.part.fsck" | head -n 5 | tr '\n' '|')"
+        fi
+        the_end "$id" "$hrc" gpt
+        rm -rf "$dw"
+        [ "$rows" = all ] || continue
+
+        # --- numbers: N11, N13 ------------------------------------------------------
+        id="$tier $leg numbers"
+        hrc=0; boot_session "$tier" "$leg" numbers || hrc=$?
+        held N11 "$id" numbers sys stat rescan
+        the_end "$id" "$hrc" numbers
+        rm -rf "$dw"
+
+        # --- fstab: N12, N13 --------------------------------------------------------
+        id="$tier $leg fstab"
+        hrc=0; boot_session "$tier" "$leg" fstab || hrc=$?
+        if sgrep -Eq '^fstab: /dev/vdb2 on /mnt: ext2, read-write, write-(back|through)$'; then
+            held N12 "$id" fstab mount
+        else
+            bad "N12 $id: no fstab line for /dev/vdb2: $(sgrep -m1 '^fstab: ' || echo none)"
+        fi
+        the_end "$id" "$hrc" fstab
+        rm -rf "$dw"
+
+        # --- crash: N14 (native BIOS) -----------------------------------------------
+        [ "$tier $leg" = "native bios" ] || continue
+        crash_row
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx6-nodes: PASS" || say "mpx6-nodes: FAIL"
+exit "$fail"
