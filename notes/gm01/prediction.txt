@@ -1,0 +1,50 @@
+gm01 prediction, committed before the first change (2026-10-25 19:40 EDT)
+
+Base: pax trunk 77d7b00c (px80 merged). Inputs read, not predicted:
+the three docs/GLYPHS.md at their pins (pack e10835f2, cub 6153d975,
+trail 6dbe253f) list 18, 152 and 8 code points; their union is 161
+code points (2 below U+0100, 142 braille, 10 block elements, 3 box
+drawing, U+2024, U+2248, U+25AA, U+25C6). font/spleen-8x16.bdf (Spleen
+2.2.0, 978 glyphs) already carries 159 of the 161: every braille
+pattern, all 32 block elements, the box drawing and U+2248/U+25C6; it
+lacks U+2024 ONE DOT LEADER and U+25AA BLACK SMALL SQUARE. PAX draws
+`?` for all 159 only because tools/mkfont keeps code points 0-255.
+
+P1. The loader does NOT take merged rows without a format change:
+    tools/mkfont emits a 256-entry table indexed by code point and
+    kernel/screen keeps 8 glyph bits a cell (bits 0-7), so a glyph above
+    U+00FF needs a code-point map in boot/font.S and a wider glyph field
+    in the cell (bits 17-31 are free). The BDF format itself needs
+    nothing: pax-extra.bdf rows are the same BBX 8 16 0 -4 shape.
+P2. A braille generator with 2x2-pixel dots in columns 1-2 and 5-6 and
+    rows 4k+1..4k+2 reproduces Spleen's 256 braille glyphs bit for bit,
+    and plain rectangles reproduce Spleen's 29 non-shade block elements;
+    Spleen's three shades are 25/50/75 % dithers but not one nested
+    ordered-dither matrix.
+P3. Keys through PAX's PS/2 driver: every one the games bind arrives as
+    the games' decoders expect -- arrows ESC [ A-D, Shift+arrows
+    ESC [ 1 ; 2 A-D (pack's parry on Shift+Down), Space 20, Enter 0D, q
+    71, Esc 1B alone -- because kernel/console's header already serves
+    the measured VT's modified arrows (px59, vt2.rows). Falsified by any
+    key the games' --record files do not name as typed.
+P4. Binary sizes, static glibc, release tier with the mid-end off (the
+    engine's tools/build --release): pack about 15.5 MB (px71's
+    91d93ac build was 15,375,208 bytes), cub about 17 MB (the largest:
+    journey, coast, combat), trail about 13 MB. Within 20 % each.
+P5. All three games start on PAX's console unmodified, as yew does
+    (raw mode, the alternate screen, SIGWINCH, the engine's timed
+    wait); the first gap found, if any, is in a syscall the engine's
+    clock or signal wait makes, not in the screen.
+P6. The tier: lair's tier.detect (src/tier/tier.lu at both lair pins)
+    answers plain for TERM=linux whatever the locale, and PAX's console
+    environment is TERM=linux with no LANG (kernel/kmain_console.lu's
+    ENV), so a bare start picks the plain tier on PAX with or without
+    the font row: R-gm01-3 A as written ("rich detected the way the
+    games detect any terminal") cannot hold at these pins without a
+    change to PAX's TERM or to lair. To be asked as a new ruling.
+P7. Screen compare: with the font row, every cell of each game's rich
+    title card and replayed scene is the container's golden glyph; the
+    colours are the golden's 256-colour indices through the Linux VT's
+    measured 256-to-16 mapping (kernel/screen's `indexed`), not equal
+    indices. With the row withheld, the same frames differ at exactly
+    the cells whose golden glyph is above U+00FF (drawn `?`).
