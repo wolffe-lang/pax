@@ -3,7 +3,7 @@
 #
 #   tools/qemu-run [--firmware bios|uefi] [--serial FILE] [--serial-input FIFO]
 #                  [--timeout SECS] [--accel auto|kvm|tcg] [--gdb PORT]
-#                  [--no-screen] [--boot-disk] IMAGE [-- QEMU-ARGS...]
+#                  [--no-screen] [--boot-disk] [--drive FILE[,ro][;DEVOPTS]]... IMAGE [-- QEMU-ARGS...]
 #
 # The machine: q35, 256 MiB, no NIC, `-nographic`, COM1 to FILE (default
 # build/serial.log), `-no-reboot` (a triple fault ends the run instead of
@@ -23,6 +23,15 @@
 # `-boot d`: a GPT disk made by tools/mkdisk --gpt, Limine on its EFI
 # system partition and in its BIOS boot partition. The disk is written
 # in place (the kernel's `vda`): give a copy.
+#
+# --drive FILE[,ro][;DEVOPTS] (px79), repeatable: a further raw disk
+# image on a virtio block device of its own, `-drive file=FILE,if=none,
+# id=dK,format=raw[,readonly=on] -device virtio-blk-pci,drive=dK[,DEVOPTS]`
+# (DEVOPTS the device's own properties: `cyls=100,heads=4,secs=17`), in the
+# order given and after --boot-disk's (so QEMU gives them PCI slots in
+# that order and PAX, as the Linux guest, names them vda, vdb, … that
+# way: the boot disk is vda, the first --drive vdb). With no --boot-disk
+# the first --drive is vda. The images are written in place.
 #
 # --serial-input FIFO (px13) also gives COM1 an input: QEMU's file
 # character device with `input-path`, so what is written to FIFO is what
@@ -49,7 +58,7 @@
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
-firmware=bios serial=$PAX_BUILD/serial.log serial_in= timeout=30 accel=auto gdb_port= image= noscreen=0 bootdisk=0
+firmware=bios serial=$PAX_BUILD/serial.log serial_in= timeout=30 accel=auto gdb_port= image= noscreen=0 bootdisk=0 drives=()
 while [ $# -gt 0 ]; do
     case $1 in
         --firmware) firmware=$2; shift 2 ;;
@@ -60,6 +69,7 @@ while [ $# -gt 0 ]; do
         --gdb)      gdb_port=$2; shift 2 ;;
         --no-screen) noscreen=1; shift ;;
         --boot-disk) bootdisk=1; shift ;;
+        --drive)    drives+=("$2"); shift 2 ;;
         --)         shift; break ;;
         -h|--help)  sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
         -*)         die "unknown option: $1" ;;
@@ -92,6 +102,17 @@ if [ "$bootdisk" = 1 ]; then
 else
     cmd+=(-drive "file=$image,format=raw,media=cdrom,readonly=on" -boot d)
 fi
+# px79: the further disks, after the boot disk, in the order given.
+dk=$bootdisk
+for d in ${drives[@]+"${drives[@]}"}; do
+    dopts=
+    case $d in *';'*) dopts=,${d#*;}; d=${d%%;*} ;; esac
+    f=${d%,ro}; ro=
+    [ "$f" != "$d" ] && ro=,readonly=on
+    [ -f "$f" ] || die "no disk image: $f"
+    cmd+=(-drive "file=$f,if=none,id=d$dk,format=raw$ro" -device "virtio-blk-pci,drive=d$dk$dopts")
+    dk=$((dk + 1))
+done
 [ "$noscreen" = 0 ] || cmd+=(-vga none)
 
 if [ -n "$serial_in" ]; then
