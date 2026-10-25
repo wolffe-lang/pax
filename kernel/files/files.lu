@@ -1628,7 +1628,8 @@ fn pipe_put(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool, atomic
 /// is then moved instead), written to `out`: the console, `/dev/null`,
 /// a pipe, a socketpair, or (px27) another file at its offset, which
 /// moves (-EINVAL when that file was opened with O_APPEND: measured,
-/// `cat f >> g`). boreutils' `cat` copies a file to its output this
+/// `cat f >> g`), or (px79) a block device's node at its offset, which
+/// moves (`cat disk.img > /dev/vdb`: raw writes). boreutils' `cat` copies a file to its output this
 /// way (after `copy_file_range`). The count written, which may be less
 /// than asked: a pipe takes what it has room for, and a full one waits
 /// (WAIT) or answers -EAGAIN (O_NONBLOCK); -EPIPE with no reader
@@ -1686,6 +1687,23 @@ pub fn sendfile(a: u64, pml4: u64, out: u64, inf: u64, offp: u64, count: u64) ->
         set_pos(a, out, q + r)
         wrote(a, rf(node_of(a, out))) // px44
         done = r
+    } else if t == 9 {
+        // px79: onto a block device's node at its offset (a disk image
+        // copied by `cat`), each span of the file's frames written raw
+        var stop = false
+        while done < k && !stop {
+            let (src, c) = tree.span(i, off + done, k - done)
+            let r = blk_put_kernel(a, out, src, c)
+            if r >= 0x8000000000000000 {
+                if done == 0 {
+                    return r
+                }
+                stop = true
+            } else {
+                done += r
+                stop = r < c
+            }
+        }
     } else {
         if t == 3 {
             let p = tx_of(a, out)
@@ -1774,8 +1792,9 @@ fn ring_put(p: u64, src: u64, k: u64) {
 /// (`splice(2)`; -EINVAL when neither is, or when an offset is given
 /// for a pipe). boreutils' `cat` asks it when its input is no regular
 /// file (after `copy_file_range` and `sendfile` have said so). From a
-/// pipe: what it holds, up to `len`, to the console, `/dev/null` or
-/// another pipe; 0 at end of file; an empty pipe with a writer waits
+/// pipe: what it holds, up to `len`, to the console, `/dev/null`,
+/// another pipe, (px27) a file or (px79) a block device's node at its
+/// offset; 0 at end of file; an empty pipe with a writer waits
 /// (WAIT), or answers -EAGAIN under SPLICE_F_NONBLOCK (2) or
 /// O_NONBLOCK. Into a pipe from a file of the initramfs: `sendfile`'s
 /// way. The count moved; -EPIPE (`EPIPE_R`) into a pipe with no reader.
@@ -1844,6 +1863,19 @@ pub fn splice(a: u64, pml4: u64, inf: u64, offin: u64, out: u64, offout: u64, le
             console.put_kernel(src, c)
         } else if t == 3 {
             ring_put(tx_of(a, out), src, c)
+        } else if t == 9 {
+            // px79: onto a block device's node, at its offset
+            let r = blk_put_kernel(a, out, src, c)
+            if r >= 0x8000000000000000 {
+                if done == 0 {
+                    return r
+                }
+                c = 0
+                full = true
+            } else {
+                full = r < c
+                c = r
+            }
         } else if t == 4 {
             // px27: into a file, at its offset (pelt's `cat > f <<E`).
             let q = pos(a, out)
@@ -7344,6 +7376,8 @@ fn blk_in(pml4: u64, d: u64, off: u64, buf: u64, n: u64) -> u64 {
 /// (short across the end), -EPERM for a read-only disk (before anything,
 /// even a write of no bytes: measured), -ENOSPC at or past the end
 /// (measured), -EFAULT (checked whole first: nothing written), -EIO.
+/// `pml4` 0: `buf` is a kernel address (sendfile's and splice's source,
+/// a file's frame or a pipe's ring), copied as it is.
 fn blk_out(pml4: u64, d: u64, off: u64, buf: u64, n: u64) -> u64 {
     if d == block.DEVS {
         return neg(ENXIO)
@@ -7362,7 +7396,7 @@ fn blk_out(pml4: u64, d: u64, off: u64, buf: u64, n: u64) -> u64 {
     if k > 0x7ffff000 {
         k = 0x7ffff000
     }
-    if !uaccess.readable(pml4, buf, k) {
+    if pml4 != 0 && !uaccess.readable(pml4, buf, k) {
         return neg(EFAULT)
     }
     let bf = block.bounce()
@@ -7385,7 +7419,11 @@ fn blk_out(pml4: u64, d: u64, off: u64, buf: u64, n: u64) -> u64 {
                 return if done > 0 { done } else { neg(EIO) }
             }
         }
-        let _ok = uaccess.copy_in(pml4, bf + hh + (p - sa * 512), buf + done, piece)
+        if pml4 == 0 {
+            block.copy_bytes(bf + hh + (p - sa * 512), buf + done, piece)
+        } else {
+            let _ok = uaccess.copy_in(pml4, bf + hh + (p - sa * 512), buf + done, piece)
+        }
         if block.rw(d, block.T_OUT, sa, ns, bf) != 0 {
             return if done > 0 { done } else { neg(EIO) }
         }
@@ -7393,6 +7431,17 @@ fn blk_out(pml4: u64, d: u64, off: u64, buf: u64, n: u64) -> u64 {
         done += piece
     }
     done
+}
+
+/// px79: `n` bytes at kernel address `src` onto the block device's node
+/// `out` at its offset, which moves past what was written (sendfile's
+/// and splice's output): the count, or -errno when nothing was written.
+fn blk_put_kernel(a: u64, out: u64, src: u64, n: u64) -> u64 {
+    let r = blk_out(0, blk_dev(node_of(a, out)), pos(a, out), src, n)
+    if r < 0x8000000000000000 {
+        set_pos(a, out, pos(a, out) + r)
+    }
+    r
 }
 
 /// px79: `write(fd, buf, n)` to a block device's node (kernel/user's
