@@ -1207,3 +1207,29 @@ kernels: none consulted.
   -printf` returns 238 identical rows. No GNU or kernel implementation
   source was read. Linux strace records the formatters and the static
   Limine installer's calls; evidence is under `notes/px69/`.
+
+
+## px71 — guided installer
+
+- PAX's own px69 formatter interfaces, fixtures and `notes/px69/report.txt`;
+  px79's block-node/ioctl/mount-table evidence; px68's root-journal report;
+  `docs/BOOT.md`, `docs/CENSUS.md`, and the maintained `tools/e2tree` oracle.
+  The new code orchestrates those formatters and does not rewrite them.
+- Wolf 0.2.35 (`cf0c13d3`) `spec/04-abi.md`, `spec/11-os.md` and
+  `spec/prelude.json`, plus the Wolf guide. The raw membrane follows the
+  x86-64 syscall/structure ABI used by PAX's own probes and play membrane:
+  open, close, ioctl, fstat, fsync and getrusage. Third-party kernel, libc,
+  shell, formatter, bootloader and installer implementation sources were
+  not read.
+- Black-box binaries: Ubuntu-baseline static Limine 12.9.1, sgdisk/sfdisk,
+  dosfstools/mtools and e2fsprogs; QEMU TCG with SeaBIOS and OVMF. In
+  particular, the log-reservation proof is a byte diff before/after
+  `bios-install DEVICE 3`, a Linux/PAX equality check, and boots after
+  writing the log last, not an inference from Limine source.
+- The project's own pack repository, pinned at
+  `91d93ac38b1e99933ed15818bedc79d37eb98738`, source archive SHA256
+  `7cf8a1ed814ba26889840b16d9004951562a2304c416181f98b3e7bce217b73e`.
+  Its build flags (including the existing WOLF_MIDEND=0 setting) were
+  followed. The source archive includes pack's original GPL licence and
+  training-data policy and is installed beside the optional binary.
+  Pack is static glibc on Ubuntu 24.04, not a musl build.

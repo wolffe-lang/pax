@@ -876,3 +876,25 @@ python3 tools/census/report.py tools/census/out docs/CENSUS.md
 The two set runs above are
 `tools/census/census inject static set keep-mmap brk,munmap,…` and
 `… set keep-brk mmap,munmap,…`, then `tools/census/census inject static summary`.
+
+
+## Guided installer (px71)
+
+The QEMU installer sessions exercise read-only `open`, `fstat`, `ioctl`
+(BLKGETSIZE64, BLKSSZGET, BLKROGET, BLKGETDISKSEQ), `/sys/block` and
+`/proc/self/mountinfo` inventory; the latter identifies mounted devices
+without requiring a real `/dev/root` node. The raw descriptor is claimed
+with O_EXCL and adopted into Wolf's handle table before argv-only child
+spawns. Copying uses sorted lstat/getdents/readlink metadata, bounded reads,
+hard links, file creation and fsync. Target phases use the same static
+formatters and Limine measured above; each status and target fsync is
+checked. The line UI uses terminal-size queries without cursor-control or
+signal handlers of its own.
+
+One additional measured absence is **getrusage (98)**: self and children
+requests on PAX return **-ENOSYS (-38)**. The installer prints “unavailable”,
+not a zero peak RSS. Linux's reference copy reports real wait4 child
+resource usage (11884 KiB peak RSS); this is not a measurement of PAX and
+not QEMU's host RSS. The existing glibc set_robust_list/rseq startup
+fallbacks remain as in the disk-tool census. No new syscall implementation
+is claimed by this userspace lane.
