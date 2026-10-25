@@ -1,0 +1,74 @@
+//! Line-key navigation works with the served console, without cursor-control
+//! sequences. n/p and a number select, q/EOF cancel. Non-terminals get the
+//! same numbered plain-text flow. Geometry is sampled afresh on each page.
+
+fn answer(prompt: str) -> str ! {cancelled, io} {
+    print_raw(prompt)
+    let s = read_line() else |e| match e {
+        eof => { return cancelled },
+        _ => { return io },
+    }
+    if s == "q" { return cancelled }
+    s
+}
+
+fn pick_target(targets: List[Target]) -> Target ! {cancelled, io, invalid} {
+    if targets.len == 0 { return invalid }
+    var selected = 0
+    loop {
+        let tty = os_isatty(0) else |_| false
+        if tty {
+            let (rows, cols) = os_term_size(0) else |_| (0, 0)
+            print("PAX installer / target page ({cols}x{rows})")
+        } else {
+            print("PAX installer / plain-text target page")
+        }
+        for i in 0..targets.len {
+            let mark = if i == selected then ">" else " "
+            print("{mark} {i + 1}. {inventory_text(targets[i])}")
+        }
+        let s = answer("Target number, n/p then Enter, Enter selects, q cancels: ")?
+        if s == "n" { selected = (selected + 1) % targets.len; continue }
+        if s == "p" { selected = (selected + targets.len - 1) % targets.len; continue }
+        if s.len == 0 { return copy targets[selected] }
+        let n = s.to_int() else |_| { print("Enter an exact target number."); continue }
+        if n >= 1 && n <= targets.len { return copy targets[n - 1] }
+        print("No such target number.")
+    }
+}
+
+fn guided_plan(targets: List[Target], seed: str) -> Plan ! {
+    cancelled,
+    io,
+    invalid,
+    running_root,
+    mounted,
+    readonly,
+    sector_size,
+    too_small,
+    too_large,
+} {
+    let t = pick_target(targets)?
+    var user = ""
+    loop {
+        user = answer("New user name (uid/gid 1000, no password; q cancels): ")?
+        if valid_name(user) { break }
+        print("Use 1-32 lowercase letters, digits, _ or -; start with a letter or _. Not root.")
+    }
+    var games = ""
+    loop {
+        let s = answer("Install the lair, the wolf games? y/n (no default): ")?
+        if s == "y" { games = "yes"; break }
+        if s == "n" { games = "no"; break }
+        print("An explicit y or n is required.")
+    }
+    let p = make_plan(t, seed, user, games)?
+    print_raw(plan_text(p))
+    if answer("This is ext2 WITHOUT a journal. Type ext2-preview to continue: ")? !=
+        "ext2-preview" {
+        return cancelled
+    }
+    let token = answer("Type the complete confirmation line after 'confirmation ', or q: ")?
+    if token != p.token { return cancelled }
+    p
+}

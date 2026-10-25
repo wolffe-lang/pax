@@ -1,0 +1,203 @@
+//! A sorted lstat snapshot, not a live-filesystem snapshot service. Read-only
+//! maintenance/rescue input is recommended. Every source byte is hashed before
+//! copying and again afterward; detected mutation aborts before target writes.
+
+use std.x.crypto.sha2
+
+struct Entry {
+    path: str,
+    meta: List[int],
+    digest: str,
+    link: str,
+    primary: str,
+}
+
+fn excluded(path: str) -> bool {
+    path == "/dev" ||
+        path == "/proc" ||
+        path == "/sys" ||
+        path == "/tmp" ||
+        path == "/usr/share/pax-install"
+}
+
+fn metadata_equal(a: List[int], b: List[int]) -> bool {
+    // Reads can advance atime; all other identity/change fields must agree.
+    for i in [0, 1, 4, 5, 6, 7, 9, 10, 14, 15, 16, 17] {
+        if a[i] != b[i] { return false }
+    }
+    true
+}
+
+fn hash_file(path: str) -> str ! {io} {
+    let fd = fs_open(path) else |_| { return io }
+    defer fs_close(fd) else |_| {}
+    var hash = sha2.new256()
+    loop {
+        region chunk {
+            let data = fs_read_chunk(fd, 65536) else |e| match e {
+                eof => { break },
+                io => { return io },
+            }
+            // The pinned sha2 update replaces its buffer. Keep that scratch
+            // in this region and carry only scalar state back into storage
+            // the outer hash already owns (bounded memory across file size).
+            var next = copy hash
+            sha2.update256(mut next, data)
+            hash.h0 = next.h0
+            hash.h1 = next.h1
+            hash.h2 = next.h2
+            hash.h3 = next.h3
+            hash.h4 = next.h4
+            hash.h5 = next.h5
+            hash.h6 = next.h6
+            hash.h7 = next.h7
+            hash.total = next.total
+            (mut hash.buf).reset()
+            for b in next.buf { (mut hash.buf).push(b) }
+        }
+    }
+    sha2.to_hex(sha2.final256(take hash))
+}
+
+fn source_walk(
+    mut rows: List[Entry],
+    mut links: Map[str, str],
+    base: str,
+    path: str,
+    depth: int,
+) -> () ! {io, invalid, source_changed, recovered_files} {
+    if depth > 128 || rows.len > 100000 { return invalid }
+    let host = if path == "/" then base else "{base}{path}"
+    let st = fs_lstat(host) else |_| { return io }
+    if st[0] != 0 && st[0] != 1 && st[0] != 3 { return invalid }
+    // Metadata must be present, not absent fields interpreted as uid/mode 0.
+    for i in [4, 5, 6, 7, 9, 10, 12, 14, 16] {
+        if st[3] & 1 << i == 0 { return invalid }
+    }
+    var digest = ""
+    var link = ""
+    var primary = path
+    if st[0] == 0 {
+        digest = hash_file(host)?
+        let key = "{st[9]}:{st[10]}"
+        primary = links[key] else path
+        links[key] = primary
+    } else if st[0] == 3 {
+        let bytes = fs_read_link(host) else |_| { return io }
+        link = str_from_utf8(bytes) else |_| { return invalid }
+    }
+    let again = fs_lstat(host) else |_| { return source_changed }
+    if !metadata_equal(st, again) { return source_changed }
+    (mut rows).push(Entry {
+        path: path,
+        meta: copy st,
+        digest: digest,
+        link: link,
+        primary: primary,
+    })
+    if st[0] != 1 || excluded(path) { return }
+    let names = sorted_names(host)?
+    if path == "/lost+found" {
+        if names.len != 0 { return recovered_files }
+        return
+    }
+    for name in names {
+        if name.len == 0 ||
+            name == "." ||
+            name == ".." ||
+            name.contains("/") ||
+            name.contains("\n") ||
+            name.contains("\r") {
+            return invalid
+        }
+        let child = if path == "/" then "/{name}" else "{path}/{name}"
+        source_walk(mut rows, mut links, base, child, depth + 1)?
+    }
+}
+
+fn source_snapshot(base: str) -> List[Entry] ! {io, invalid, source_changed, recovered_files} {
+    var rows = List[Entry]()
+    var links = Map[str, str]()
+    source_walk(mut rows, mut links, base, "/", 0)?
+    rows
+}
+
+fn same_snapshot(a: List[Entry], b: List[Entry]) -> bool {
+    if a.len != b.len { return false }
+    for i in 0..a.len {
+        if a[i].path != b[i].path ||
+            a[i].digest != b[i].digest ||
+            a[i].link != b[i].link ||
+            a[i].primary != b[i].primary ||
+            !metadata_equal(a[i].meta, b[i].meta) {
+            return false
+        }
+    }
+    true
+}
+
+fn copy_regular(source: str, dest: str) -> () ! {io} {
+    let input = fs_open(source) else |_| { return io }
+    defer fs_close(input) else |_| {}
+    let out = fs_open_perm(dest, 4, 384) else |_| { return io }
+    defer fs_close(out) else |_| {}
+    loop {
+        region chunk {
+            let b = fs_read_chunk(input, 65536) else |e| match e {
+                eof => { break },
+                io => { return io },
+            }
+            fs_write_chunk(out, b) else |_| { return io }
+        }
+    }
+    fs_sync(out) else |_| { return io }
+}
+
+fn quoted(path: str) -> str {
+    "'" + path.replace("'", "'\\''") + "'"
+}
+
+fn octal_mode(mode: int) -> str {
+    let a = mode >> 9 & 7
+    let b = mode >> 6 & 7
+    let c = mode >> 3 & 7
+    let d = mode & 7
+    "{a}{b}{c}{d}"
+}
+
+fn attrs_line(path: str, st: List[int]) -> str {
+    "{quoted(path)} {octal_mode(st[4])} {st[6]} {st[7]} {st[14]} {st[12]} {st[16]}\n"
+}
+
+fn stage_snapshot(base: str, dest: str, attrs: str, rows: List[Entry]) -> () ! {
+    io,
+    source_changed,
+} {
+    fs_create_dir_mode(dest, 448) else |_| { return io }
+    let manifest = fs_open_perm(attrs, 4, 384) else |_| { return io }
+    defer fs_close(manifest) else |_| {}
+    for entry in rows {
+        let path = "{dest}{entry.path}"
+        if entry.path != "/" {
+            if entry.meta[0] == 1 {
+                fs_create_dir_mode(path, 448) else |_| { return io }
+            } else if entry.meta[0] == 3 {
+                fs_symlink(entry.link, path) else |_| { return io }
+            } else if entry.primary != entry.path {
+                fs_link("{dest}{entry.primary}", path) else |_| { return io }
+            } else {
+                copy_regular("{base}{entry.path}", path)?
+                if hash_file(path)? != entry.digest { return source_changed }
+            }
+        }
+        fs_write_chunk(manifest, attrs_line(entry.path, entry.meta).bytes()) else |_| { return io }
+    }
+    fs_sync(manifest) else |_| { return io }
+}
+
+fn durable_text(path: str, text: str) -> () ! {io} {
+    let fd = fs_open_perm(path, 1, 384) else |_| { return io }
+    defer fs_close(fd) else |_| {}
+    fs_write_chunk(fd, text.bytes()) else |_| { return io }
+    fs_sync(fd) else |_| { return io }
+}
