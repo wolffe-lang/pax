@@ -13,6 +13,7 @@ import time
 
 repo,lane,work=map(Path,sys.argv[1:4]);games,name=sys.argv[4:6]
 fault=os.environ.get('PAX_INSTALL_FAULT','')
+guided=os.environ.get('PAX_INSTALL_GUIDED','')=='1'
 full_tree=len(sys.argv)>6 and sys.argv[6]=='full'
 assert games in ['yes','no'] and name in ['vdb','vdc']
 work.mkdir(parents=True,exist_ok=True)
@@ -85,6 +86,9 @@ if fault=='wrong-token':token+='-WRONG'
 script=work/'install.sh'
 script.write_text(f'/bin/pax-install --install --ext2-preview --target {name} --seed {seed} --user pax --games {games} --source /source --payload /payload --confirm "{token}"\n'
                   'echo INSTALL-EXIT-$?\n')
+if guided:
+    script.write_text(f'/bin/pax-install --seed {seed} --source /source --payload /payload\necho INSTALL-EXIT-$?\n')
+    (work/'keys').write_text(('2' if name=='vdb' else '3')+'\npax\n'+('y' if games=='yes' else 'n')+'\next2-preview\n'+token+'\nno\n')
 if fault=='cancel':script.write_text("printf 'q\\n' | /bin/pax-install --seed test\necho INSTALL-EXIT-$?\n")
 if fault=='missing-tool':script.write_text(script.read_text().replace('--payload /payload','--payload /payload --tool-dir /missing'))
 (work/'run').write_text('/bin/sh /install.sh\n')
@@ -111,6 +115,7 @@ blank=sha(work/'target.img')
 cmd=[repo/'tools/qemu-halt','--accel','tcg','--firmware',os.environ.get('PAX_INSTALL_FIRMWARE','bios'),'--timeout','1200','--elf',kernel,
      '--serial',work/'install.serial','--marker','halt','--qemu','-m','--qemu','1536M','--drive',str(work/'source-guard.img')+',ro']
 if name=='vdc':cmd+=['--drive',str(work/'source-guard.img')+',ro']
+if guided:cmd+=['--type',work/'keys','--prompt','pax-install> ']
 cmd+=['--drive',str(work/'target.img')+(',ro' if fault=='readonly' else ''),work/'boot.iso']
 t=time.monotonic();p=run(cmd,False);(work/'install.boot').write_bytes(p.stdout+p.stderr)
 assert p.returncode==0,(p.returncode,p.stdout,p.stderr)

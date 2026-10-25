@@ -255,9 +255,11 @@ fn execute_plan(p: Plan, source: str, payload: str, tools: str) -> () ! {
     verify_failed,
 } {
     if (os_euid() else |_| -1) != 0 { return invalid }
+    let canonical_payload = fs_realpath(payload) else |_| { return io }
+    if !payload_location_ok(source, canonical_payload) { return invalid }
     let rows = source_snapshot(source)?
-    boot_assets(source, payload)?
-    let games = staged_games(payload)?
+    boot_assets(source, canonical_payload)?
+    let games = staged_games(canonical_payload)?
     let work = "/tmp/pax-install-{os_pid()}"
     fs_create_dir_mode(work, 448) else |_| { return io }
     let tree = "{work}/root"

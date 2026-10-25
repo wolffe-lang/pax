@@ -7,6 +7,13 @@ const INSTALL_EPOCH: int = 1700000000
 
 struct Game { name: str, source: str, digest: str, archive: str, archive_digest: str }
 
+fn payload_location_ok(source: str, payload: str) -> bool {
+    if source == "/" { return payload == "/usr/share/pax-install" }
+    if payload == source { return false }
+    if payload.starts_with("{source}/") { return payload == "{source}/usr/share/pax-install" }
+    true
+}
+
 fn require_dir(path: str) -> () ! {io, invalid} {
     let st = fs_lstat(path) else |_| { return io }
     if st[0] != 1 { return invalid }
