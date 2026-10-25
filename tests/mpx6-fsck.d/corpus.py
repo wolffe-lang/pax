@@ -157,7 +157,7 @@ def tree(path):
         blocks = [im.u(at + 40 + i * 4) for i in range(12)]
         data = b''.join(im.b[b * im.bs:(b + 1) * im.bs] if b else bytes(im.bs) for b in blocks)[:size]
         rows.append((name, ino, mode, im.u(at + 2, 2), im.u(at + 24, 2), size,
-                     im.u(at + 26, 2), hashlib.sha256(data).hexdigest() if kind != 0x4000 else 'directory'))
+                     im.u(at + 26, 2), im.u(at + 16) if ino <= 15 else 'new-directory-time', hashlib.sha256(data).hexdigest() if kind != 0x4000 else 'directory'))
         if kind == 0x4000:
             if ino in seen:
                 raise RuntimeError('directory cycle')
@@ -167,6 +167,38 @@ def tree(path):
                     visit(target, name.rstrip('/') + '/' + child)
     visit(2, '/')
     return sorted(rows)
+
+
+def byte_differences(name, oracle, wolf):
+    a, b = Image(oracle.read_bytes()), Image(wolf.read_bytes())
+    allowed = [(1072, 1076, 'check write time'), (1088, 1092, 'last-check time')]
+    if name == 'orphan':
+        at = a.ino(12) + 20
+        allowed.append((at, at + 4, 'orphan deletion time'))
+    if name == 'missing-lost-found':
+        ino, _ = a.named('lost+found')
+        at = a.ino(ino)
+        allowed += [(at + 8, at + 20, 'new directory times'),
+                    (at + 144, at + 148, 'new directory creation time')]
+    if name == 'cross-linked-block':
+        # The format does not select which claimant gets a clone or its
+        # free block. Require identical payload trees, and permit only
+        # those pointer/allocation locations and their data blocks.
+        allowed.append((a.u(a.gdt) * a.bs, (a.u(a.gdt) + 1) * a.bs, 'clone allocation map'))
+        for ino in (12, 13):
+            at = a.ino(ino)
+            for i in range(12):
+                off = at + 40 + i * 4
+                aa, bb = a.u(off), b.u(off)
+                if aa != bb:
+                    allowed.append((off, off + 4, 'clone pointer'))
+                    for block in (aa, bb):
+                        allowed.append((block * a.bs, (block + 1) * a.bs, 'clone payload location'))
+    differences = [i for i, (x, y) in enumerate(zip(a.b, b.b)) if x != y]
+    unexpected = [i for i in differences if not any(lo <= i < hi for lo, hi, _ in allowed)]
+    return {'byte_differences': len(differences), 'unexpected_offsets': unexpected[:32],
+            'permitted_differences': sorted({why for lo, hi, why in allowed
+                                           if any(lo <= i < hi for i in differences)})}
 
 
 def main():
@@ -206,11 +238,13 @@ def main():
             again = run([args.checker, '-fn', tested])
             for phase, p in [('report', n), ('repair', y), ('verify', v), ('again', again)]:
                 (args.work / f'{name}.wolf.{phase}.log').write_bytes(p.stdout)
+            byte_result = byte_differences(name, fixed, tested)
+            result.update(byte_result)
             same_tree = tree(tested) == tree(fixed) if v.returncode == 0 else False
             result.update(tree_equal=same_tree, wolf_report=n.returncode, wolf_repair=y.returncode,
                           wolf_verify=v.returncode, wolf_again=again.returncode,
                           report_unchanged=same)
-            okay = okay and same_tree and same and n.returncode == report.returncode and y.returncode == repair.returncode and v.returncode == 0 and again.returncode == 0
+            okay = okay and not byte_result['unexpected_offsets'] and same_tree and same and n.returncode == report.returncode and y.returncode == repair.returncode and v.returncode == 0 and again.returncode == 0
         expected_refusal = args.checker and name == 'bad-directory-record'
         if expected_refusal:
             refused_safely = (n.returncode == 4 and y.returncode == 4 and

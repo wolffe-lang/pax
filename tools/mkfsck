@@ -16,6 +16,9 @@ wolf=$("$PAX_ROOT/tools/fetch-wolf")
 if [ ! -d "$out/std/std" ]; then
     PAX_BUILD="$out/std-source" "$PAX_ROOT/tools/fetch-std" "$out/std" >&2
 fi
+. "$PAX_ROOT/user/std.pin"
+[ "$(cat "$out/std/STD-REV")" = "$STD_REV" ] || die "staged standard library pin changed; use a fresh OUTDIR"
+(cd "$out/std" && sha256sum -c std.sha256 >/dev/null)
 PATH="$out/cc-wrapper:$PATH" WOLF_STD="$out/std/std" "$wolf" build --release --no-cache --deny-warnings "$w/main.lu" -o "$out/fsck.ext2" >&2
 readelf -hW "$out/fsck.ext2" | grep -Eq 'Type: +EXEC' || die 'fsck.ext2 is not ET_EXEC'
 if readelf -lW "$out/fsck.ext2" | grep -q INTERP; then die 'fsck.ext2 is not static'; fi
