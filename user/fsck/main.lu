@@ -1,0 +1,575 @@
+//! Offline ext2/ext3 consistency checker. Layout: ext2-doc chapters 3–4.
+//! Policy: e2fsck(8) and recorded black-box prompts, never its source.
+//! All repairs are planned before writes; unsupported damage aborts the
+//! plan. The primary superblock is made dirty before any repair and made
+//! clean only after repaired metadata reaches stable storage.
+use diskio
+
+extern "c" fn px72_path_byte(index: int, value: int)
+extern "c" fn px72_open(flags: int) -> int
+extern "c" fn px72_close(fd: int)
+fn raw_close(fd: int) {
+    // # Safety: fd was returned by px72_open and is closed exactly once.
+    unsafe { px72_close(fd) }
+}
+
+struct Patch { at: int, bytes: List[byte] }
+struct Group { bb: int, ib: int, table: int, bitmap: List[byte], imap: List[byte] }
+struct Node { raw: List[byte], live: bool, kind: int, data: List[int], sectors: int, refs: int, parent: int, reached: bool }
+struct Claim { ino: int, block: int, pointer: int, leaf: bool }
+struct Volume {
+    fd: int, mode: int, bs: int, blocks: int, first: int, bpg: int,
+    ipg: int, isize: int, ninodes: int, firstino: int, compat: int,
+    filetype: bool, sb: List[byte], gd: List[byte], groups: List[Group],
+    nodes: List[Node], owner: List[int], claims: List[Claim], patches: List[Patch],
+    problems: int, fixed: int, left: int, soft: int, epoch: int,
+}
+
+fn u(b: List[byte], at: int, width: int) -> int { diskio.le(b, at, width) else |_| 0 - 1 }
+fn bit(b: List[byte], n: int) -> bool { b[n / 8] as int & (1 << n % 8) != 0 }
+fn mark(mut b: List[byte], n: int) { b[n / 8] = (b[n / 8] as int | (1 << n % 8)) as byte }
+fn ints(n: int, value: int) -> List[int] {
+    var out = List[int]()
+    for _ in 0..n { (mut out).push(value) }
+    out
+}
+fn has_super(g: int, sparse: bool) -> bool {
+    if !sparse || g == 0 || g == 1 { return true }
+    for p in [3, 5, 7] {
+        var n = g
+        while n % p == 0 { n /= p }
+        if n == 1 { return true }
+    }
+    false
+}
+fn report(mut v: Volume, text: str, automatic: bool) -> bool {
+    print("{text}")
+    v.problems += 1
+    if v.mode == 2 || (v.mode == 1 && automatic) { v.fixed += 1; return true }
+    v.left += 1
+    false
+}
+fn refuse(mut v: Volume, text: str) {
+    print("unsupported: {text}; no repair committed")
+    v.problems += 1
+    v.left += 1
+}
+fn patch(mut v: Volume, at: int, bytes: List[byte]) {
+    for i in 0..v.patches.len {
+        if v.patches[i].at == at && v.patches[i].bytes.len == bytes.len {
+            v.patches[i].bytes = copy bytes
+            return
+        }
+    }
+    (mut v.patches).push(copy Patch { at: at, bytes: bytes })
+}
+fn read_at(v: Volume, at: int, n: int) -> List[byte] ! {io} {
+    if at < 0 || n < 0 || at > v.blocks * v.bs || n > v.blocks * v.bs - at { return io }
+    var b = diskio.exact(v.fd, at, n)?
+    for p in v.patches {
+        let start = if at > p.at then at else p.at
+        let end = if at + n < p.at + p.bytes.len then at + n else p.at + p.bytes.len
+        for x in start..end { b[x - at] = p.bytes[x - p.at] }
+    }
+    b
+}
+fn inode_at(v: Volume, ino: int) -> int {
+    v.groups[(ino - 1) / v.ipg].table * v.bs + (ino - 1) % v.ipg * v.isize
+}
+fn pointer(mut v: Volume, at: int, block: int) {
+    var b = diskio.zeros(4)
+    diskio.put(mut b, 0, block, 4)
+    patch(mut v, at, b)
+}
+fn open_volume(fd: int, mode: int, epoch: int) -> Volume ! {io, invalid, unsupported} {
+    let sb = diskio.exact(fd, 1024, 1024)?
+    if u(sb, 56, 2) != 61267 { print("invalid: ext2 superblock magic"); return invalid }
+    let logbs = u(sb, 24, 4)
+    if logbs < 0 || logbs > 2 { print("unsupported: block size"); return unsupported }
+    let bs = 1024 << logbs
+    let blocks = u(sb, 4, 4)
+    let first = u(sb, 20, 4)
+    let bpg = u(sb, 32, 4)
+    let ipg = u(sb, 40, 4)
+    let ninodes = u(sb, 0, 4)
+    let rev = u(sb, 76, 4)
+    if rev > 1 { print("unsupported: filesystem revision"); return unsupported }
+    let isize = if rev == 0 then 128 else u(sb, 88, 2)
+    let firstino = if rev == 0 then 11 else u(sb, 84, 4)
+    let compat = if rev == 0 then 0 else u(sb, 92, 4)
+    let incompat = if rev == 0 then 0 else u(sb, 96, 4)
+    let ro = if rev == 0 then 0 else u(sb, 100, 4)
+    if incompat & 0xfffffff9 != 0 || ro & 0xfffffffc != 0 || compat & 0xffffffc3 != 0 {
+        print("unsupported: filesystem features compat={compat}, incompat={incompat}, ro_compat={ro}")
+        return unsupported
+    }
+    if first != (if bs == 1024 then 1 else 0) || blocks <= first || blocks > 4194304 ||
+        bpg < 8 || bpg > bs * 8 || bpg % 8 != 0 || ipg < 16 || ipg > bs * 8 ||
+        isize < 128 || isize > bs || bs % isize != 0 || ipg % (bs / isize) != 0 ||
+        firstino < 11 || firstino > ninodes || ninodes > 1048576 { return invalid }
+    let ng = (blocks - first + bpg - 1) / bpg
+    if ninodes != ng * ipg || ng > 512 { return invalid }
+    let size = fs_seek(fd, 0, 2) else |_| { return io }
+    if size < blocks * bs { print("invalid: truncated filesystem"); return invalid }
+    let gd = diskio.exact(fd, (first + 1) * bs, ng * 32)?
+    var groups = List[Group]()
+    var owner = ints(blocks, 0)
+    for b in 0..first { owner[b] = 0 - 1 }
+    let gdtblocks = (ng * 32 + bs - 1) / bs
+    let reserve = if compat & 16 != 0 then u(sb, 206, 2) else 0
+    for g in 0..ng {
+        let lo = first + g * bpg
+        let hi = if lo + bpg < blocks then lo + bpg else blocks
+        if has_super(g, ro & 1 != 0) {
+            if lo + 1 + gdtblocks + reserve > hi { return invalid }
+            for b in lo..lo + 1 + gdtblocks + reserve { owner[b] = 0 - 1 }
+        }
+        let bb = u(gd, g * 32, 4)
+        let ib = u(gd, g * 32 + 4, 4)
+        let table = u(gd, g * 32 + 8, 4)
+        let tables = ipg * isize / bs
+        if bb < lo || bb >= hi || ib < lo || ib >= hi || table < lo || table + tables > hi { return invalid }
+        for b in [bb, ib] {
+            if owner[b] != 0 { return invalid }
+            owner[b] = 0 - 1
+        }
+        for b in table..table + tables {
+            if owner[b] != 0 { return invalid }
+            owner[b] = 0 - 1
+        }
+        (mut groups).push(Group { bb: bb, ib: ib, table: table,
+            bitmap: diskio.exact(fd, bb * bs, bs)?, imap: diskio.exact(fd, ib * bs, bs)? })
+    }
+    Volume { fd: fd, mode: mode, bs: bs, blocks: blocks, first: first, bpg: bpg,
+        ipg: ipg, isize: isize, ninodes: ninodes, firstino: firstino, compat: compat,
+        filetype: incompat & 2 != 0, sb: sb, gd: gd, groups: groups,
+        nodes: List[Node](), owner: owner, claims: List[Claim](), patches: List[Patch](),
+        problems: 0, fixed: 0, left: 0, soft: 0, epoch: epoch }
+}
+fn alloc(mut v: Volume) -> int ! {full} {
+    for b in v.first..v.blocks {
+        if v.owner[b] == 0 {
+            let rel = b - v.first
+            if !bit(v.groups[rel / v.bpg].bitmap, rel % v.bpg) {
+                v.owner[b] = 0 - 2
+                return b
+            }
+        }
+    }
+    full
+}
+fn walk_blocks(mut v: Volume, ino: int, b: int, depth: int, at: int) -> () ! {io} {
+    if b == 0 { return }
+    if b < v.first || b >= v.blocks { refuse(mut v, "inode {ino}: block {b} outside volume"); return }
+    // Resize inode 7 intentionally names reserved GDT blocks; no other
+    // inode is allowed to claim filesystem metadata.
+    if v.owner[b] < 0 && !(ino == 7 && v.compat & 16 != 0) {
+        refuse(mut v, "inode {ino}: block {b} overlaps metadata")
+        return
+    }
+    let previous = v.owner[b]
+    if previous == 0 { v.owner[b] = ino }
+    (mut v.claims).push(Claim { ino: ino, block: b, pointer: at, leaf: depth == 0 })
+    v.nodes[ino].sectors += v.bs / 512
+    if depth == 0 { (mut v.nodes[ino].data).push(b); return }
+    if previous > 0 { refuse(mut v, "inode {ino}: shared or cyclic indirect block {b}"); return }
+    region indirect {
+        let bytes = read_at(v, b * v.bs, v.bs)?
+        for j in 0..v.bs / 4 {
+            let child = u(bytes, j * 4, 4)
+            walk_blocks(mut v, ino, child, depth - 1, b * v.bs + j * 4)?
+        }
+    }
+}
+fn pass1(mut v: Volume) -> () ! {io, full} {
+    print("Pass 1: Checking inodes, blocks, and sizes")
+    (mut v.nodes).push(copy Node { raw: List[byte](), live: false, kind: 0, data: List[int](), sectors: 0, refs: 0, parent: 0, reached: false })
+    for g in 0..v.groups.len {
+        region table {
+            let bytes = read_at(v, v.groups[g].table * v.bs, v.ipg * v.isize)?
+            for i in 0..v.ipg {
+                let ino = g * v.ipg + i + 1
+                let raw = bytes[i * v.isize..(i + 1) * v.isize]
+                let kind = u(raw, 0, 2) & 61440
+                let live = kind != 0 && u(raw, 20, 4) == 0
+                (mut v.nodes).push(copy Node { raw: copy raw, live: live, kind: kind,
+                    data: List[int](), sectors: 0, refs: 0, parent: 0, reached: false })
+                if live && ino >= v.firstino && u(raw, 26, 2) == 0 {
+                    if report(mut v, "Deleted inode {ino} has zero dtime", true) {
+                        diskio.put(mut v.nodes[ino].raw, 20, v.epoch, 4)
+                        v.nodes[ino].live = false
+                    }
+                }
+            }
+        }
+    }
+    for ino in 1..v.nodes.len {
+        if !v.nodes[ino].live && ino != 1 { continue }
+        region inode {
+            let kind = v.nodes[ino].kind
+            let raw = copy v.nodes[ino].raw
+            if u(raw, 104, 4) != 0 { refuse(mut v, "inode {ino}: external attribute block verification"); continue }
+            if u(raw, 32, 4) & 0x10080000 != 0 { refuse(mut v, "inode {ino}: inline data or extent map"); continue }
+            let size = u(raw, 4, 4)
+            if kind == 40960 && size <= 60 && u(raw, 28, 4) == 0 { continue }
+            if kind != 16384 && kind != 32768 && kind != 40960 && ino != 1 { continue }
+            for j in 0..15 {
+                walk_blocks(mut v, ino, u(raw, 40 + j * 4, 4), if j < 12 then 0 else j - 11, inode_at(v, ino) + 40 + j * 4)?
+            }
+            if u(raw, 28, 4) != v.nodes[ino].sectors {
+                let count = v.nodes[ino].sectors
+                if report(mut v, "Inode {ino}: i_blocks should be {count}", true) { diskio.put(mut v.nodes[ino].raw, 28, count, 4) }
+            }
+            if kind == 16384 && size != v.nodes[ino].data.len * v.bs {
+                let length = v.nodes[ino].data.len * v.bs
+                if report(mut v, "Directory inode {ino}: i_size should be {length}", true) { diskio.put(mut v.nodes[ino].raw, 4, length, 4) }
+            }
+        }
+    }
+    // All ownership is known before allocating a clone. A bitmap bit
+    // cleared by damage can never make a later inode's block available.
+    var seen = ints(v.blocks, 0)
+    for ci in 0..v.claims.len {
+        let c = copy v.claims[ci]
+        let duplicate = seen[c.block] != 0
+        seen[c.block] += 1
+        if c.leaf && v.owner[c.block] > 0 && duplicate {
+            let ino = c.ino, old = c.block
+            if report(mut v, "Inode {ino}: multiply-claimed block {old}; clone", false) {
+                let b = alloc(mut v)?
+                patch(mut v, b * v.bs, read_at(v, old * v.bs, v.bs)?)
+                let ia = inode_at(v, ino)
+                if c.pointer >= ia && c.pointer + 4 <= ia + v.isize {
+                    diskio.put(mut v.nodes[ino].raw, c.pointer - ia, b, 4)
+                } else { pointer(mut v, c.pointer, b) }
+                for j in 0..v.nodes[ino].data.len { if v.nodes[ino].data[j] == old { v.nodes[ino].data[j] = b; break } }
+                v.owner[b] = ino
+            }
+        }
+    }
+}
+fn dtype(kind: int) -> int {
+    match kind { 32768 => 1, 16384 => 2, 8192 => 3, 24576 => 4, 4096 => 5, 49152 => 6, 40960 => 7, _ => 0 }
+}
+fn name_is(b: List[byte], at: int, len: int, text: str) -> bool {
+    if len != text.len { return false }
+    for j in 0..len { if b[at + j] != text.bytes()[j] { return false } }
+    true
+}
+fn pass2(mut v: Volume) -> () ! {io} {
+    print("Pass 2: Checking directory structure")
+    for ino in 1..v.nodes.len {
+        if !v.nodes[ino].live || v.nodes[ino].kind != 16384 { continue }
+        for bi in 0..v.nodes[ino].data.len {
+            let block = v.nodes[ino].data[bi]
+            region directory {
+                var b = read_at(v, block * v.bs, v.bs)?
+                var at = 0
+                var changed = false
+                while at < v.bs {
+                    if at + 8 > v.bs { refuse(mut v, "directory {ino}: incomplete directory record"); break }
+                    let target = u(b, at, 4), length = u(b, at + 4, 2)
+                    let namelen = if v.filetype then b[at + 6] as int else u(b, at + 6, 2)
+                    if length < 8 || length % 4 != 0 || length > v.bs - at || namelen > 255 || namelen > length - 8 {
+                        refuse(mut v, "directory {ino}: malformed record at {at}; salvage has no unambiguous layout")
+                        break
+                    }
+                    if target != 0 {
+                        if target > v.ninodes || !v.nodes[target].live || (target < v.firstino && target != 2) {
+                            if report(mut v, "Directory {ino}: deleted/unused inode {target}", false) { diskio.put(mut b, at, 0, 4); changed = true }
+                        } else {
+                            let ty = dtype(v.nodes[target].kind)
+                            if v.filetype && b[at + 7] as int != ty {
+                                if report(mut v, "Directory {ino}: inode {target} has incorrect filetype", true) { b[at + 7] = ty as byte; changed = true }
+                            }
+                            if name_is(b, at + 8, namelen, ".") && target != ino { refuse(mut v, "directory {ino}: '.' names another inode") }
+                            for j in 0..namelen {
+                                if b[at + 8 + j] == 0 as byte || b[at + 8 + j] == 47 as byte { refuse(mut v, "directory {ino}: invalid name byte"); break }
+                            }
+                        }
+                    }
+                    at += length
+                }
+                if changed { patch(mut v, block * v.bs, b) }
+            }
+        }
+    }
+}
+fn links(mut v: Volume) -> () ! {io} {
+    for ino in 1..v.nodes.len { v.nodes[ino].refs = 0; v.nodes[ino].parent = 0; v.nodes[ino].reached = false }
+    for ino in 1..v.nodes.len {
+        if !v.nodes[ino].live || v.nodes[ino].kind != 16384 { continue }
+        for bi in 0..v.nodes[ino].data.len {
+            let block = v.nodes[ino].data[bi]
+            region directory {
+                let b = read_at(v, block * v.bs, v.bs)?
+                var at = 0
+                while at + 8 <= v.bs {
+                    let target = u(b, at, 4), length = u(b, at + 4, 2)
+                    let len = b[at + 6] as int
+                    if length < 8 || length % 4 != 0 || length > v.bs - at || len > length - 8 { break }
+                    if target > 0 && target <= v.ninodes && v.nodes[target].live {
+                        v.nodes[target].refs += 1
+                        if !name_is(b, at + 8, len, ".") && !name_is(b, at + 8, len, "..") {
+                            if v.nodes[target].kind == 16384 && v.nodes[target].parent != 0 { refuse(mut v, "directory {target}: multiple parent entries") }
+                            v.nodes[target].parent = ino
+                        }
+                    }
+                    at += length
+                }
+            }
+        }
+    }
+    v.nodes[2].reached = true
+    var changed = true
+    var turns = 0
+    while changed && turns < v.ninodes {
+        changed = false; turns += 1
+        for ino in v.firstino..v.nodes.len {
+            let parent = v.nodes[ino].parent
+            if !v.nodes[ino].reached && parent > 0 && v.nodes[parent].reached { v.nodes[ino].reached = true; changed = true }
+        }
+    }
+}
+fn find_name(v: Volume, dir: int, name: str) -> int ! {io} {
+    for bi in 0..v.nodes[dir].data.len {
+        let block = v.nodes[dir].data[bi]
+        region directory {
+            let b = read_at(v, block * v.bs, v.bs)?
+            var at = 0
+            while at + 8 <= v.bs {
+                let len = u(b, at + 4, 2), n = b[at + 6] as int
+                if len < 8 || len > v.bs - at || n > len - 8 { break }
+                if name_is(b, at + 8, n, name) { return u(b, at, 4) }
+                at += len
+            }
+        }
+    }
+    0
+}
+fn insert(mut v: Volume, dir: int, ino: int, name: str) -> () ! {io, full} {
+    let need = (8 + name.len + 3) / 4 * 4
+    for bi in 0..v.nodes[dir].data.len {
+        let block = v.nodes[dir].data[bi]
+        region directory {
+            var b = read_at(v, block * v.bs, v.bs)?
+            var at = 0
+            while at + 8 <= v.bs {
+                let len = u(b, at + 4, 2), n = b[at + 6] as int
+                if len < 8 || len > v.bs - at || n > len - 8 { return io }
+                let used = if u(b, at, 4) == 0 then 0 else (8 + n + 3) / 4 * 4
+                if len - used >= need {
+                    if used > 0 { diskio.put(mut b, at + 4, used, 2) }
+                    let pos = at + used
+                    diskio.put(mut b, pos, ino, 4)
+                    diskio.put(mut b, pos + 4, len - used, 2)
+                    diskio.put(mut b, pos + 6, name.len, 2)
+                    if v.filetype { b[pos + 7] = dtype(v.nodes[ino].kind) as byte }
+                    for j in 0..name.len { b[pos + 8 + j] = name.bytes()[j] }
+                    patch(mut v, block * v.bs, b)
+                    return
+                }
+                at += len
+            }
+        }
+    }
+    full
+}
+fn make_lost(mut v: Volume) -> int ! {io, full} {
+    var ino = 0
+    for n in v.firstino..v.nodes.len {
+        if !v.nodes[n].live && !bit(v.groups[(n - 1) / v.ipg].imap, (n - 1) % v.ipg) { ino = n; break }
+    }
+    if ino == 0 { return full }
+    let block = alloc(mut v)?
+    var raw = diskio.zeros(v.isize)
+    diskio.put(mut raw, 0, 16832, 2) // directory, 0700 (oracle prompt)
+    diskio.put(mut raw, 4, v.bs, 4)
+    for at in [8, 12, 16] { diskio.put(mut raw, at, v.epoch, 4) }
+    diskio.put(mut raw, 26, 2, 2)
+    diskio.put(mut raw, 28, v.bs / 512, 4)
+    diskio.put(mut raw, 40, block, 4)
+    if v.isize >= 160 {
+        diskio.put(mut raw, 128, 32, 2)
+        diskio.put(mut raw, 144, v.epoch, 4)
+    }
+    v.nodes[ino] = copy Node { raw: raw, live: true, kind: 16384, data: [block],
+        sectors: v.bs / 512, refs: 0, parent: 2, reached: true }
+    var b = diskio.zeros(v.bs)
+    diskio.put(mut b, 0, ino, 4); diskio.put(mut b, 4, 12, 2)
+    b[6] = 1 as byte; b[8] = 46 as byte
+    diskio.put(mut b, 12, 2, 4); diskio.put(mut b, 16, v.bs - 12, 2)
+    b[18] = 2 as byte; b[20] = 46 as byte; b[21] = 46 as byte
+    if v.filetype { b[7] = 2 as byte; b[19] = 2 as byte }
+    patch(mut v, block * v.bs, b)
+    v.owner[block] = ino
+    insert(mut v, 2, ino, "lost+found")?
+    ino
+}
+fn pass3(mut v: Volume) -> () ! {io, full} {
+    print("Pass 3: Checking directory connectivity")
+    if !v.nodes[2].live || v.nodes[2].kind != 16384 { refuse(mut v, "root inode is missing or not a directory"); return }
+    links(mut v)?
+    var lost = find_name(v, 2, "lost+found")?
+    if lost == 0 && v.mode == 2 {
+        var need = false
+        for ino in v.firstino..v.nodes.len { if v.nodes[ino].live && !v.nodes[ino].reached { need = true } }
+        if need {
+            let _yes = report(mut v, "/lost+found not found; create", false)
+            lost = make_lost(mut v)?
+        }
+    }
+    for ino in v.firstino..v.nodes.len {
+        if !v.nodes[ino].live || v.nodes[ino].reached { continue }
+        if v.nodes[ino].parent != 0 && v.nodes[ino].parent != ino { continue }
+        if lost == 0 || lost > v.ninodes || v.nodes[lost].kind != 16384 {
+            refuse(mut v, "lost+found missing; disconnected inode {ino}; directory allocation not yet supported")
+            continue
+        }
+        if report(mut v, "Unattached inode {ino}; connect to /lost+found", false) {
+            insert(mut v, lost, ino, "#{ino}")?
+            if v.nodes[ino].kind == 16384 {
+                let block = v.nodes[ino].data[0]
+                var b = read_at(v, block * v.bs, v.bs)?
+                let next = u(b, 4, 2)
+                if next < 8 || next + 12 > v.bs || !name_is(b, next + 8, b[next + 6] as int, "..") { refuse(mut v, "disconnected directory {ino}: missing '..'") }
+                else { diskio.put(mut b, next, lost, 4); patch(mut v, block * v.bs, b) }
+            }
+        }
+    }
+    links(mut v)?
+    for ino in v.firstino..v.nodes.len {
+        if v.nodes[ino].live && !v.nodes[ino].reached && v.nodes[ino].kind == 16384 { refuse(mut v, "directory {ino}: disconnected cycle") }
+    }
+}
+fn pass4(mut v: Volume) {
+    print("Pass 4: Checking reference counts")
+    for ino in 2..v.nodes.len {
+        if !v.nodes[ino].live || (ino < v.firstino && ino != 2) { continue }
+        let count = v.nodes[ino].refs
+        if count > 65535 { refuse(mut v, "inode {ino}: reference count overflows"); continue }
+        if u(v.nodes[ino].raw, 26, 2) != count {
+            if report(mut v, "Inode {ino}: ref count should be {count}", true) { diskio.put(mut v.nodes[ino].raw, 26, count, 2) }
+        }
+    }
+}
+fn pass5(mut v: Volume) {
+    print("Pass 5: Checking group summary information")
+    var free = 0, ifree = 0
+    for g in 0..v.groups.len {
+        region bitmap {
+            var bm = diskio.zeros(v.bs), im = diskio.zeros(v.bs)
+            var nb = 0, ni = 0, dirs = 0
+            for j in 0..v.bs * 8 {
+                let block = v.first + g * v.bpg + j
+                if j >= v.bpg || block >= v.blocks || v.owner[block] != 0 { mark(mut bm, j) } else { nb += 1 }
+                let ino = g * v.ipg + j + 1
+                if j >= v.ipg || ino > v.ninodes || ino < v.firstino || v.nodes[ino].live { mark(mut im, j) } else { ni += 1 }
+                if j < v.ipg && ino <= v.ninodes && v.nodes[ino].live && v.nodes[ino].kind == 16384 { dirs += 1 }
+            }
+            if !diskio.equal(bm, v.groups[g].bitmap) {
+                if report(mut v, "Block bitmap differences in group {g}", true) { patch(mut v, v.groups[g].bb * v.bs, bm) }
+            }
+            if !diskio.equal(im, v.groups[g].imap) {
+                if report(mut v, "Inode bitmap differences in group {g}", true) { patch(mut v, v.groups[g].ib * v.bs, im) }
+            }
+            for pair in [[12, nb], [14, ni], [16, dirs]] {
+                let field = pair[0], value = pair[1]
+                if u(v.gd, g * 32 + field, 2) != value {
+                    if report(mut v, "Group {g}: summary field {field} should be {value}", true) { diskio.put(mut v.gd, g * 32 + field, value, 2) }
+                }
+            }
+            free += nb; ifree += ni
+        }
+    }
+    for pair in [[12, free], [16, ifree]] {
+        let field = pair[0], value = pair[1]
+        if u(v.sb, field, 4) != value {
+            if report(mut v, "Superblock: free count field {field} should be {value}", true) { diskio.put(mut v.sb, field, value, 4) }
+            // e2fsck 1.47.0 reports only a primary-summary disagreement
+            // with -n but returns 0; the corpus records this exact case.
+            if v.mode == 0 { v.soft += 1 }
+        }
+    }
+}
+fn commit(mut v: Volume) -> () ! {io} {
+    var dirty = copy v.sb
+    diskio.put(mut dirty, 58, 0, 2)
+    diskio.write_at(v.fd, 1024, dirty)?
+    fs_sync(v.fd) else |_| { return io }
+    for p in v.patches { diskio.write_at(v.fd, p.at, p.bytes)? }
+    for ino in 1..v.nodes.len {
+        let at = inode_at(v, ino)
+        region inode {
+            let old = diskio.exact(v.fd, at, v.isize)?
+            if !diskio.equal(old, v.nodes[ino].raw) { diskio.write_at(v.fd, at, v.nodes[ino].raw)? }
+        }
+    }
+    diskio.write_at(v.fd, (v.first + 1) * v.bs, v.gd)?
+    fs_sync(v.fd) else |_| { return io }
+    diskio.put(mut v.sb, 58, 1, 2)
+    diskio.put(mut v.sb, 52, 0, 2)
+    diskio.put(mut v.sb, 64, v.epoch, 4)
+    diskio.write_at(v.fd, 1024, v.sb)?
+    fs_sync(v.fd) else |_| { return io }
+}
+fn check(fd: int, mode: int, epoch: int) -> int ! {io, invalid, unsupported, full} {
+    var v = open_volume(fd, mode, epoch)?
+    let recovered = replay(v) else |e| match e {
+        unsupported => { return 4 },
+        io => { return io },
+    }
+    if recovered { v = open_volume(fd, mode, epoch)? }
+    pass1(mut v)?
+    pass2(mut v)?
+    pass3(mut v)?
+    pass4(mut v)
+    pass5(mut v)
+    if mode != 0 && u(v.sb, 58, 2) != 1 { let _fixed = report(mut v, "Filesystem not clean", true) }
+    let problems = v.problems, fixed = v.fixed, left = v.left
+    print("fsck.ext2: {problems} findings, {fixed} planned repairs, {left} uncorrected")
+    if left != 0 { return if mode == 0 && left == v.soft then 0 else 4 }
+    if mode != 0 && fixed != 0 { commit(mut v)?; return 1 }
+    0
+}
+fn main() -> int {
+    let args = env_args()
+    var mode = 0, explicit = false, path = ""
+    for arg in args {
+        if arg.starts_with("-") && path.len == 0 {
+            for b in arg.bytes()[1..] {
+                if b == 102 as byte { continue }
+                let m = if b == 110 as byte then 0 else if b == 112 as byte then 1 else if b == 121 as byte then 2 else 0 - 1
+                if m < 0 || (explicit && m != mode) { eprint("usage: fsck.ext2 [-n|-p|-y] [-f] DEVICE"); return 16 }
+                mode = m; explicit = true
+            }
+        } else if path.len == 0 { path = arg }
+        else { return 16 }
+    }
+    if path.len == 0 || path.len > 4095 { return 16 }
+    for i in 0..path.len {
+        let c = path.bytes()[i] as int
+        if c == 0 { return 16 }
+        // # Safety: i is within the private 4096-byte pathname buffer.
+        unsafe { px72_path_byte(i, c) }
+    }
+    // # Safety: path.len <= 4095; this terminates the private buffer.
+    unsafe { px72_path_byte(path.len, 0) }
+    // O_EXCL without O_CREAT refuses mounted block devices on Linux and
+    // PAX. No create, no truncate; regular files also take an advisory lock.
+    // # Safety: the private pathname is terminated; flags never create or truncate.
+    let rawfd = unsafe { px72_open(if mode == 0 then 524288 else 524418) }
+    if rawfd < 0 { eprint("fsck.ext2: cannot open device, errno {0 - rawfd}"); return 8 }
+    defer raw_close(rawfd)
+    // Builtins use runtime handles, not native descriptor numbers. Reopen
+    // the held descriptor through procfs while retaining its exclusive claim.
+    let fd = fs_open_mode("/proc/self/fd/{rawfd}", if mode == 0 then 0 else 3) else |_| { eprint("fsck.ext2: cannot adopt held descriptor"); return 8 }
+    defer fs_close(fd) else |_| {}
+    let st = fs_fstat_record(fd) else |_| { return 8 }
+    if st[0] != 0 && st[0] != 7 { eprint("fsck.ext2: not a regular image or block device"); return 8 }
+    fs_lock(fd, if mode == 0 then 1 else 2) else |_| { eprint("fsck.ext2: cannot lock device"); return 8 }
+    let time = env_get("E2FSPROGS_FAKE_TIME") else |_| "{time_unix_ms() / 1000}"
+    let epoch = time.to_int() else |_| { return 16 }
+    if epoch < 1 || epoch > 4294967295 { return 16 }
+    check(fd, mode, epoch) else |e| { eprint("fsck.ext2: {e}"); return 8 }
+}
