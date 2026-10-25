@@ -1,0 +1,289 @@
+//! paxgpt: UEFI Specification 2.10 chapter 5 and Appendix A.
+//! Writes the backup before the primary, 128 entries of 128 bytes,
+//! 512-byte sectors, 1 MiB partition starts. No filesystem bytes touched.
+//! --seed is tools/mkgpt's label; SOURCE_DATE_EPOCH defaults to zero.
+//! paxgpt [--seed LABEL] [--size SIZE] IMAGE SLOT:TYPE:FIRST:LAST[:NAME]...
+//! paxgpt --dump IMAGE  (sfdisk --dump's text, checked primary AND backup)
+
+use diskio
+use std.x.crypto.sha2
+
+struct Part { slot: int, kind: str, first: int, last: int, name: str }
+
+fn guid(b: List[byte]) -> str {
+    let order = [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15]
+    var s = ""
+    for i in 0..16 {
+        if i == 4 || i == 6 || i == 8 || i == 10 { s += "-" }
+        s += diskio.hex_byte(b[order[i]])
+    }
+    s
+}
+
+fn guid_bytes(text: str) -> List[byte] ! {invalid} {
+    if text.len != 36 { return invalid }
+    var raw = List[byte]()
+    var i = 0
+    while i < 36 {
+        if i == 8 || i == 13 || i == 18 || i == 23 {
+            if text.bytes()[i] != 45 as byte { return invalid }
+            i += 1
+        } else {
+            let hi = diskio.hex_digit(text.bytes()[i])?
+            let lo = diskio.hex_digit(text.bytes()[i + 1])?
+            (mut raw).push((hi * 16 + lo) as byte)
+            i += 2
+        }
+    }
+    var out = diskio.zeros(16)
+    let order = [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15]
+    for j in 0..16 { out[j] = raw[order[j]] }
+    out
+}
+
+fn seeded(tag: str) -> List[byte] {
+    let digest = sha2.sum256(tag.bytes())
+    var out = diskio.zeros(16)
+    let order = [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15]
+    for i in 0..16 { out[i] = digest[order[i]] }
+    out
+}
+
+fn kind(text: str) -> str {
+    match text {
+        "esp" => "C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+        "bios" => "21686148-6449-6E6F-744E-656564454649",
+        "linux" => "0FC63DAF-8483-4772-8E79-3D69D8477DE4",
+        _ => text,
+    }
+}
+
+fn part(text: str) -> Part ! {invalid} {
+    let w = text.split(":")
+    if w.len < 4 { return invalid }
+    let slot = w[0].to_int() else |_| { return invalid }
+    let first = w[2].to_int() else |_| { return invalid }
+    let last = w[3].to_int() else |_| { return invalid }
+    var name = ""
+    for i in 4..w.len {
+        if i > 4 { name += ":" }
+        name += w[i]
+    }
+    Part { slot: slot, kind: kind(w[1]), first: first, last: last, name: name }
+}
+
+fn header(my: int, alt: int, sectors: int, disk: List[byte], array: int, crc: int) -> List[byte] {
+    var h = diskio.zeros(512)
+    diskio.paste(mut h, 0, "EFI PART".bytes())
+    diskio.put(mut h, 8, 65536, 4)
+    diskio.put(mut h, 12, 92, 4)
+    diskio.put(mut h, 24, my, 8)
+    diskio.put(mut h, 32, alt, 8)
+    diskio.put(mut h, 40, 34, 8)
+    diskio.put(mut h, 48, sectors - 34, 8)
+    diskio.paste(mut h, 56, disk)
+    diskio.put(mut h, 72, array, 8)
+    diskio.put(mut h, 80, 128, 4)
+    diskio.put(mut h, 84, 128, 4)
+    diskio.put(mut h, 88, crc, 4)
+    let hc = diskio.crc32(h[0..92])
+    diskio.put(mut h, 16, hc, 4)
+    h
+}
+
+fn make(path: str, bytes: int, seed: str, parts: List[Part]) -> () ! {invalid, io} {
+    if bytes < 1048576 || bytes % 512 != 0 { return invalid }
+    let sectors = bytes / 512
+    let epoch_text = env_get("SOURCE_DATE_EPOCH") else |_| "0"
+    let epoch = epoch_text.to_int() else |_| { return invalid }
+    if epoch < 0 { return invalid }
+    var a = diskio.zeros(16384)
+    for p in parts {
+        if p.slot < 1 ||
+            p.slot > 128 ||
+            p.first < 34 ||
+            p.last < p.first ||
+            p.last > sectors - 34 ||
+            p.first % 2048 != 0 {
+            return invalid
+        }
+        for q in parts {
+            if p.slot == q.slot {
+                // A duplicate slot is counted separately below, even with equal bounds.
+                continue
+            }
+            if p.first <= q.last && q.first <= p.last { return invalid }
+        }
+        var duplicates = 0
+        for q in parts { if p.slot == q.slot { duplicates += 1 } }
+        if duplicates != 1 { return invalid }
+        let at = (p.slot - 1) * 128
+        let typ = guid_bytes(p.kind)?
+        var nonzero = false
+        for b in typ { if b != 0 as byte { nonzero = true } }
+        if !nonzero { return invalid }
+        diskio.paste(mut a, at, typ)
+        diskio.paste(mut a, at + 16, seeded("pax-gpt-part:{seed}:{epoch}:{p.slot}"))
+        diskio.put(mut a, at + 32, p.first, 8)
+        diskio.put(mut a, at + 40, p.last, 8)
+        diskio.paste(mut a, at + 56, diskio.utf16(p.name, 36)?)
+    }
+    let disk = seeded("pax-gpt-disk:{seed}:{epoch}")
+    let crc = diskio.crc32(a)
+    let primary = header(1, sectors - 1, sectors, disk, 2, crc)
+    let backup = header(sectors - 1, 1, sectors, disk, sectors - 33, crc)
+    var mbr = diskio.zeros(512)
+    mbr[448] = 2 as byte
+    mbr[450] = 238 as byte
+    for i in 451..454 { mbr[i] = 255 as byte }
+    diskio.put(mut mbr, 454, 1, 4)
+    diskio.put(mut mbr, 458, if sectors - 1 > 4294967295 then 4294967295 else sectors - 1, 4)
+    mbr[510] = 85 as byte
+    mbr[511] = 170 as byte
+    // All input validation precedes a writable open. Existing payload is kept.
+    let fd = fs_open_mode(path, 3) else |_| { return io }
+    defer fs_close(fd) else |_| {}
+    let have = fs_seek(fd, 0, 2) else |_| { return io }
+    if have != bytes {
+        let st = fs_fstat_record(fd) else |_| { return io }
+        if st[0] != 0 { return invalid }
+        fs_truncate(fd, bytes) else |_| { return io }
+    }
+    diskio.write_at(fd, (sectors - 33) * 512, a)?
+    diskio.write_at(fd, (sectors - 1) * 512, backup)?
+    fs_sync(fd)?
+    diskio.write_at(fd, 1024, a)?
+    diskio.write_at(fd, 512, primary)?
+    diskio.write_at(fd, 0, mbr)?
+    fs_sync(fd)?
+}
+
+fn checked_header(fd: int, at: int, sectors: int) -> List[byte] ! {invalid, io} {
+    var h = diskio.exact(fd, at * 512, 512)?
+    if !diskio.equal(h[0..8], "EFI PART".bytes()) || diskio.le(h, 8, 4)? != 65536 { return invalid }
+    let n = diskio.le(h, 12, 4)?
+    if n < 92 || n > 512 || diskio.le(h, 20, 4)? != 0 { return invalid }
+    let crc = diskio.le(h, 16, 4)?
+    diskio.put(mut h, 16, 0, 4)
+    if diskio.crc32(h[0..n]) != crc { return invalid }
+    let alt = if at == 1 then sectors - 1 else 1
+    if diskio.le(h, 24, 8)? != at || diskio.le(h, 32, 8)? != alt { return invalid }
+    let first = diskio.le(h, 40, 8)?
+    let last = diskio.le(h, 48, 8)?
+    let array = diskio.le(h, 72, 8)?
+    if first < 34 || last < first || last >= sectors - 33 { return invalid }
+    if diskio.le(h, 80, 4)? != 128 || diskio.le(h, 84, 4)? != 128 { return invalid }
+    if at == 1 {
+        if array < 2 || array > first - 32 { return invalid }
+    } else if array <= last || array > sectors - 33 {
+        return invalid
+    }
+    let a = diskio.exact(fd, array * 512, 16384)?
+    if diskio.crc32(a) != diskio.le(h, 88, 4)? { return invalid }
+    h
+}
+
+fn padded(n: int) -> str {
+    let s = "{n}"
+    if s.len >= 12 { return s }
+    "{" ".repeat(12 - s.len)}{s}"
+}
+
+fn escaped(text: str) -> str {
+    var s = ""
+    for b in text.bytes() {
+        let c = b as int
+        if c == 34 || c == 92 || c < 32 || c >= 127 {
+            s += "\\x{diskio.hex_byte(c as byte).lower()}"
+        } else {
+            s += c as char
+        }
+    }
+    s
+}
+
+fn dump(path: str) -> () ! {invalid, io} {
+    let fd = fs_open(path) else |_| { return io }
+    defer fs_close(fd) else |_| {}
+    let bytes = fs_seek(fd, 0, 2) else |_| { return io }
+    if bytes < 1048576 || bytes % 512 != 0 { return invalid }
+    let sectors = bytes / 512
+    let mbr = diskio.exact(fd, 0, 512)?
+    if mbr[510] != 85 as byte || mbr[511] != 170 as byte || mbr[450] != 238 as byte {
+        return invalid
+    }
+    let h = checked_header(fd, 1, sectors)?
+    let back = checked_header(fd, sectors - 1, sectors)?
+    if !diskio.equal(h[40..72], back[40..72]) || !diskio.equal(h[80..92], back[80..92]) {
+        return invalid
+    }
+    let a = diskio.exact(fd, diskio.le(h, 72, 8)? * 512, 16384)?
+    let ab = diskio.exact(fd, diskio.le(back, 72, 8)? * 512, 16384)?
+    if !diskio.equal(a, ab) { return invalid }
+    let first = diskio.le(h, 40, 8)?
+    let last = diskio.le(h, 48, 8)?
+    var rows = List[str]()
+    var ranges = List[Part]()
+    let tail = path.bytes()[path.len - 1] as int
+    let sep = if tail >= 48 && tail <= 57 then "p" else ""
+    for i in 0..128 {
+        let at = i * 128
+        if diskio.equal(a[at..at + 16], diskio.zeros(16)) { continue }
+        let lo = diskio.le(a, at + 32, 8)?
+        let hi = diskio.le(a, at + 40, 8)?
+        if lo < first || hi < lo || hi > last { return invalid }
+        for p in ranges { if lo <= p.last && p.first <= hi { return invalid } }
+        (mut ranges).push(Part { slot: i, kind: "", first: lo, last: hi, name: "" })
+        if diskio.le(a, at + 48, 8)? != 0 { return invalid }
+        let name = diskio.from16(a[at + 56..at + 128])?
+        let suffix = if name.len == 0 then "" else ", name=\"{escaped(name)}\""
+        (mut rows).push(
+            "{path}{sep}{i + 1} : start={padded(lo)}, size={padded(hi - lo + 1)}, type={guid(a[at..at + 16])}, uuid={guid(a[at + 16..at + 32])}{suffix}",
+        )
+    }
+    print(
+        "label: gpt\nlabel-id: {guid(h[56..72])}\ndevice: {path}\nunit: sectors\nfirst-lba: {first}\nlast-lba: {last}\nsector-size: 512\n",
+    )
+    for row in rows { print(row) }
+}
+
+fn run(args: List[str]) -> () ! {invalid, io} {
+    if args.len == 2 && args[0] == "--dump" { return dump(args[1])? }
+    var seed = "pax"
+    var bytes: int = 0
+    var i = 0
+    while i < args.len && args[i].starts_with("--") {
+        if i + 1 >= args.len { return invalid }
+        match args[i] {
+            "--seed" => { seed = args[i + 1] },
+            "--size" => {
+                bytes = diskio.size(args[i + 1])?
+                if bytes == 0 { return invalid }
+            },
+            _ => { return invalid },
+        }
+        i += 2
+    }
+    if i >= args.len { return invalid }
+    let path = args[i]
+    if path.len == 0 { return invalid }
+    i += 1
+    var parts = List[Part]()
+    while i < args.len { (mut parts).push(part(args[i])?); i += 1 }
+    if bytes == 0 {
+        let fd = fs_open(path) else |_| { return io }
+        defer fs_close(fd) else |_| {}
+        bytes = fs_seek(fd, 0, 2) else |_| { return io }
+    }
+    make(path, bytes, seed, parts)?
+}
+
+fn main() -> int {
+    run(env_args()) else |e| {
+        eprint(
+            "paxgpt: {e}; expected [--seed LABEL] [--size SIZE] IMAGE SLOT:TYPE:FIRST:LAST[:NAME]... or --dump IMAGE",
+        )
+        return 1
+    }
+    0
+}

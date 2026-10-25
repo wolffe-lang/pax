@@ -1,0 +1,38 @@
+Item 1, paxgpt (Linux image differential and PAX regular-file leg)
+
+UEFI Specification 2.10 chapter 5, sections 5.2 and 5.3; Appendix A,
+Tables A.1 and A.2. Read at https://uefi.org/specs/UEFI/2.10/
+05_GUID_Partition_Table_Format.html and Apx_A_GUID_and_Time_Formats.html.
+Wolf's own spec/11-os.md for fs_seek/fs_read_at/fs_sync/fs_fstat_record;
+maintainer's tools/mkgpt supplies seed compatibility, not the external oracle.
+
+Linux: gpt-linux.log, 24 PASS, 0 SKIP. Six mkdisk geometries (33/64/192 MiB
+ESP; home, root, root plus separate home), exact metadata vs mkgpt's bytes,
+exact sfdisk dump, sgdisk clean, payload preserved. Cross-read sgdisk's
+GPT, Unicode/surrogate-pair names and escaped names. Malformed input and
+corrupt GPTs refused before output or writable open, respectively.
+
+PAX: gpt-pax.{serial,boot,compare}, same static executable writes and reads
+an 8 MiB image under /tmp; its dump equals Linux sfdisk byte-for-byte after
+normalizing the image pathname. Both commands exit 0; halt proved. This is
+NOT the raw-device leg: preflight.{serial,rows,boot} has three ENOENTs at
+/dev/vda, /dev/vda1 and /dev/vdb; with two virtio disks only vda is listed.
+Raw-device and second-disk work remains pax#144 (px79).
+
+Caught by the differential: sfdisk escapes non-ASCII UTF-8 bytes as \xNN.
+Caught in the harness: sgdisk -v may say "No problems found" and exit 0
+AFTER diagnosing a corrupt backup and regenerating it in memory. The gate
+therefore rejects its Warning! diagnostic too; never trust status alone.
+Two mistaken negative fixtures were corrected: header size 255 is valid
+(the invalid fixture now exceeds 512), and the corrupt-backup oracle must
+read stderr as well as stdout. No golden recording changed.
+
+Bounds: 512-byte sectors, exactly 128 entries of 128 bytes, partition
+starts 1 MiB aligned; reads reject other entry counts/sizes, nonzero
+attributes and either corrupt header, rather than pretending full sfdisk
+compatibility. These bounds cover mkdisk's layouts and the sgdisk cross-row.
+No repair/recovery mode. --size is explicit resizing; no --size retains the
+existing size. GPT writes backup array/header and fsync before primary.
+
+One exploratory PAX boot was CPU-pinned but accidentally outside the flock;
+it was repeated under the flock and only the repeated log is retained here.

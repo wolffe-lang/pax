@@ -1,0 +1,153 @@
+//! Shared disk bytes: bounded decoding, exact reads and positional writes.
+//! The builders stage this directory as each program's diskio module.
+
+/// Return n zero bytes; n must be nonnegative.
+pub fn zeros(n: int) -> List[byte] {
+    var out = List[byte]()
+    for _ in 0..n { (mut out).push(0 as byte) }
+    out
+}
+
+/// Store a nonnegative value little-endian; caller bounds the destination.
+pub fn put(mut b: List[byte], at: int, value: int, width: int) {
+    var v = value
+    for i in 0..width {
+        b[at + i] = (v & 255) as byte
+        v = v >> 8
+    }
+}
+
+/// Decode bounded little-endian bytes; invalid on bounds or signed overflow.
+pub fn le(b: List[byte], at: int, width: int) -> int ! {invalid} {
+    if at < 0 || width < 0 || at > b.len || width > b.len - at { return invalid }
+    var v: int = 0
+    var i = width
+    while i > 0 {
+        i -= 1
+        let x = b[at + i] as int
+        if v > (9223372036854775807 - x) / 256 { return invalid }
+        v = v * 256 + x
+    }
+    v
+}
+
+/// Copy bytes into an already bounded destination; bad bounds trap.
+pub fn paste(mut b: List[byte], at: int, src: List[byte]) {
+    for i in 0..src.len { b[at + i] = src[i] }
+}
+
+/// Read exactly n bytes at an offset; io on short input or read failure.
+pub fn exact(fd: int, at: int, n: int) -> List[byte] ! {io} {
+    var out = List[byte]()
+    while out.len < n {
+        region chunk {
+            let b = fs_read_at(fd, at + out.len, n - out.len) else |_| { return io }
+            if b.len == 0 { return io }
+            for x in b { (mut out).push(x) }
+        }
+    }
+    out
+}
+
+/// Write all bytes at an offset; io on seek or write failure.
+pub fn write_at(fd: int, at: int, b: List[byte]) -> () ! {io} {
+    let pos = fs_seek(fd, at, 0) else |_| { return io }
+    if pos != at { return io }
+    fs_write_chunk(fd, b) else |_| { return io }
+}
+
+/// Parse a nonnegative size, optional K/M/G; invalid on overflow or syntax.
+pub fn size(text: str) -> int ! {invalid} {
+    if text.len == 0 { return invalid }
+    var mult: int = 1
+    var end = text.len
+    let last = text.bytes()[end - 1] as int
+    if last == 75 || last == 107 { mult = 1024; end -= 1 }
+    if last == 77 || last == 109 { mult = 1048576; end -= 1 }
+    if last == 71 || last == 103 { mult = 1073741824; end -= 1 }
+    let n = text[0..end].to_int() else |_| { return invalid }
+    if n < 0 || n > 9223372036854775807 / mult { return invalid }
+    n * mult
+}
+
+/// IEEE CRC-32, reflected polynomial 0xEDB88320, init/final all ones.
+pub fn crc32(b: List[byte]) -> int {
+    var c: int = 4294967295
+    for x in b {
+        c = c ^ x as int
+        for _ in 0..8 {
+            let low = c & 1
+            c = c >> 1
+            if low != 0 { c = c ^ 3988292384 }
+        }
+    }
+    c ^ 4294967295
+}
+
+/// Render an octet as two uppercase hexadecimal digits.
+pub fn hex_byte(b: byte) -> str {
+    let digits = "0123456789ABCDEF"
+    let x = b as int
+    "{digits[x / 16..x / 16 + 1]}{digits[x % 16..x % 16 + 1]}"
+}
+
+/// Read one ASCII hex digit; invalid for any other byte.
+pub fn hex_digit(c: byte) -> int ! {invalid} {
+    let n = c as int
+    if n >= 48 && n <= 57 { return n - 48 }
+    if n >= 65 && n <= 70 { return n - 55 }
+    if n >= 97 && n <= 102 { return n - 87 }
+    invalid
+}
+
+/// Encode padded UTF-16LE; invalid on NUL or more than units code units.
+pub fn utf16(text: str, units: int) -> List[byte] ! {invalid} {
+    var b = List[byte]()
+    for ch in text.chars() {
+        let c = ch as int
+        if c == 0 { return invalid }
+        if c <= 65535 {
+            (mut b).push((c & 255) as byte)
+            (mut b).push((c >> 8) as byte)
+        } else {
+            let x = c - 65536
+            let hi = 55296 + (x >> 10)
+            let lo = 56320 + (x & 1023)
+            (mut b).push((hi & 255) as byte)
+            (mut b).push((hi >> 8) as byte)
+            (mut b).push((lo & 255) as byte)
+            (mut b).push((lo >> 8) as byte)
+        }
+    }
+    if b.len > units * 2 { return invalid }
+    while b.len < units * 2 { (mut b).push(0 as byte) }
+    b
+}
+
+/// Decode UTF-16LE up to NUL; invalid on an unpaired surrogate.
+pub fn from16(b: List[byte]) -> str ! {invalid} {
+    var out = ""
+    var i = 0
+    while i + 1 < b.len {
+        var c = le(b, i, 2)?
+        i += 2
+        if c == 0 { break }
+        if c >= 55296 && c <= 56319 {
+            let lo = le(b, i, 2)?
+            if lo < 56320 || lo > 57343 { return invalid }
+            c = 65536 + (c - 55296) * 1024 + lo - 56320
+            i += 2
+        } else if c >= 56320 && c <= 57343 {
+            return invalid
+        }
+        out += c as char
+    }
+    out
+}
+
+/// Compare byte sequences without allocation.
+pub fn equal(a: List[byte], b: List[byte]) -> bool {
+    if a.len != b.len { return false }
+    for i in 0..a.len { if a[i] != b[i] { return false } }
+    true
+}
