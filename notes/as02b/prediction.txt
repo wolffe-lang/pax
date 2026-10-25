@@ -1,0 +1,55 @@
+as02b — the image seam and the package: prediction, committed before the first change.
+
+Inputs at the time of writing (2026-10-25): pax trunk 77d7b00c (px80's note; the
+kernel's tree is 8d631040's, px80 §2), clef 996a3ccd (as01), wolf-lang 9f2cff44
+(as02a's merge: --assembler / WOLF_AS), wolf 0.2.35 (archive 4cc4045b..., read
+twice by clef's tools/fetch-toolchain on kasumi). Measured before this file, and
+not predicted: wolf 0.2.35 answers `wolf build --assembler X` with "wolf build:
+unknown flag `--assembler`", status 2; clef's own build line (`wolf build
+--deny-warnings src/clef.lu -o target/clef`, the native tier) in clef's pinned
+oracle image gives a 14,213,232-byte dynamic executable with three DT_NEEDED
+entries (libgcc_s.so.1, libc.so.6, ld-linux-x86-64.so.2) and a PT_INTERP.
+
+P1  The package: clef's own build line with the user tools' one difference (a
+    `cc` first on PATH that adds -static) gives ET_EXEC, no PT_INTERP, no
+    dynamic section, zero DT_NEEDED. Size 14.6-16.5 MB unstripped, point
+    15.2 MB (the host binary less its dynamic sections plus static glibc's
+    start-up, stdio and the symbol tables it drags in); dependency count 0
+    dynamic, 3 build inputs by digest (the wolf archive, the libwolf_rt.a in
+    it, the Ubuntu 24.04 glibc's libc.a), no std (clef's manifest has no deps).
+P2  Two builds in two checkouts at one path give one digest; at two paths they
+    differ, and only in debug sections (the native tier's DWARF names the build
+    directory, px80 §6), so the reproducibility row builds both at one path.
+P3  The seam: build-kernel gains one branch for boot/start.S and one argument
+    for wolf's object build; nothing else in the script moves. With WOLF_AS
+    absent or empty every command build-kernel runs is byte-identical to
+    trunk's (a traced build, diffed), and so is the kernel.
+P4  Assembly calls per tier through a selected assembler: 17 (wolf's manifest
+    seam 16, build-kernel's start.S 1); 0 assembly calls through cc or clang
+    while one is selected; the release tier's clang code-generation calls
+    unchanged in number and argv.
+P5  With wolf 0.2.35 (the image's and CI's compiler) and WOLF_AS set, the
+    kernel build is refused by name before any object is written (a mixed build
+    is never made); with wolf-lang 9f2cff44 it builds.
+P6  The kernel through the explicit seam (wolf-lang 9f2cff44, both tiers): the
+    WOLF_AS=clef kernel is byte-identical to the WOLF_AS=as (GNU as 2.42,
+    clef's pinned oracle) kernel, with identical non-assembly objects, at px80's
+    lld 18 head. 9f2cff44's non-assembly objects equal 0.2.35's on the native
+    tier and the release tier alike (60 %: the codegen moved for variadics and
+    lends, which the kernel does not use), so the seam kernels equal the
+    0.2.35 gas baseline re-derived at this head through as01's shims.
+P7  The stock-clang kernel differs from the gas baseline as at as01 (first
+    file difference near byte 96, both tiers).
+P8  Qualification on PAX: the packaged clef run on the image over the copied
+    corpus (43 x86-64 census sources), the ISR --expand and the CLI refusals
+    prints, at the first boot, exactly what the same package prints on Linux and
+    what the host clef writes: 43/43 objects byte-identical, the expansion
+    byte-identical, every refusal's text and status identical; 43/43
+    structurally equal to GNU as by clef's differ. clef asks PAX for nothing it
+    does not serve but set_robust_list and rseq (-ENOSYS, as every glibc
+    program).
+P9  Every boot leg (BIOS and UEFI, native and release) of mpx5-wolf on the
+    clef kernels and the fresh muzzle CRT witness: green at the first boot.
+P10 The plants: a wrong assembler choice red in the kernel-as suite naming the
+    assembler; a package linked against another runtime red at the
+    qualification's Q0 row naming both digests.
