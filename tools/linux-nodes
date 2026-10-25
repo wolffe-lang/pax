@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# linux-nodes — boot this host's Linux kernel under QEMU with one or more
+# disk images, each on a virtio block device of its own, and run
+# programs against their device nodes: the reference side of
+# tests/mpx6-nodes (px79), the Linux guest the block-node rows are held
+# to.
+#
+#   tools/linux-nodes [--kernel VMLINUZ] [--modules DIR] [--busybox FILE]
+#                     [--accel tcg|kvm] [--drive IMAGE[,ro][;DEVOPTS]]...
+#                     [--file SRC=DEST]... OUTDIR PROG... -- CMD...
+#
+# Builds an initramfs in OUTDIR from a static busybox (the px13-ubuntu
+# container's by default), the static programs PROG (each to
+# /bin/<basename>) and each --file SRC at DEST; boots VMLINUZ on q35 with
+# each --drive in the order given as `-drive file=IMAGE,if=none,id=dK,
+# format=raw[,readonly=on] -device virtio-blk-pci,drive=dK[,DEVOPTS]`
+# (DEVOPTS: the device's own properties, e.g. `cyls=100,heads=4,secs=17`; so QEMU puts
+# them in PCI slot order as PAX's tools do, and the guest names them vda,
+# vdb, … in that order); mounts proc, sysfs and devtmpfs (`mode=755`, as
+# a distribution's init mounts /dev) and runs each CMD (a shell line)
+# with PAX's environment (`env -i HOME=/ TERM=linux PAX=1 PATH=/bin`),
+# from /, between `linux-nodes: run <k>: <cmd>` and `linux-nodes: run <k>
+# status <s>` on the guest's serial console, OUTDIR/serial.log; then
+# `linux-nodes: end`, a sync and a power-off. The images are written in
+# place: give copies. The disk's modules (virtio_blk, and ext4 for an
+# ext2 mount) are loaded only where the kernel does not have them built
+# in (modules.builtin of --modules, by default the kernel image's own
+# directory).
+#
+# Exit 0 when the guest ran to its end line, 1 when not, 2 on a usage or
+# tool error. Black-box only: the kernel and its modules are run, never
+# read.
+set -euo pipefail
+die() { echo "linux-nodes: $*" >&2; exit 2; }
+kernel=/usr/lib/modules/$(uname -r)/vmlinuz
+modules=
+busybox=
+accel=tcg
+drives=()
+files=()
+while [ $# -gt 0 ]; do
+    case $1 in
+        --kernel) kernel=$2; shift 2 ;;
+        --modules) modules=$2; shift 2 ;;
+        --busybox) busybox=$2; shift 2 ;;
+        --accel) accel=$2; shift 2 ;;
+        --drive) drives+=("$2"); shift 2 ;;
+        --file) files+=("$2"); shift 2 ;;
+        --) shift; break ;;
+        -*) die "unknown option $1" ;;
+        *) break ;;
+    esac
+done
+[ $# -ge 1 ] || die "usage: linux-nodes [opts] OUTDIR PROG... -- CMD..."
+out=$1; shift
+progs=()
+while [ $# -gt 0 ] && [ "$1" != "--" ]; do progs+=("$1"); shift; done
+[ "${1:-}" = "--" ] && shift
+cmds=("$@")
+[ -r "$kernel" ] || die "cannot read the kernel $kernel"
+# The modules beside the kernel's image (a distribution's layout), unless named.
+[ -n "$modules" ] || modules=$(dirname "$kernel")
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+root=$out/root
+rm -rf "$root"
+mkdir -p "$root"/{bin,dev,proc,sys,lib/modules,tmp,etc,mnt}
+
+if [ -z "$busybox" ]; then
+    podman run --rm -v "$root/bin:/o" px13-ubuntu cp /usr/bin/busybox /o/busybox >/dev/null \
+        || die "busybox from px13-ubuntu"
+else
+    cp "$busybox" "$root/bin/busybox"
+fi
+for p in ${progs[@]+"${progs[@]}"}; do cp "$p" "$root/bin/$(basename "$p")"; done
+for f in ${files[@]+"${files[@]}"}; do
+    src=${f%%=*}; dst=${f#*=}
+    mkdir -p "$root$(dirname "$dst")"
+    cp "$src" "$root$dst"
+done
+
+# The disk's modules, where they are not built in, with their chains.
+order=()
+seen=" "
+add() {
+    local m=$1 line deps d
+    grep -Eq "/${m//-/[-_]}\.ko\$" "$modules/modules.builtin" 2>/dev/null && return
+    line=$(grep -E "/${m//-/[-_]}\.ko(\.zst|\.xz|\.gz)?:" "$modules/modules.dep" | head -n 1)
+    [ -n "$line" ] || die "module $m neither built in nor in modules.dep"
+    deps=${line#*:}
+    for d in $(echo $deps | tr ' ' '\n' | tac); do
+        local n=${d##*/}; n=${n%%.ko*}
+        add "$n"
+    done
+    local path=${line%%:*}
+    case $seen in *" $path "*) return ;; esac
+    seen="$seen$path "
+    order+=("$path")
+}
+for m in virtio_blk ext4; do add "$m"; done
+: > "$root/lib/modules/order"
+for path in ${order[@]+"${order[@]}"}; do
+    n=${path##*/}; n=${n%%.ko*}
+    case $path in
+        *.zst) zstd -q -d -c "$modules/$path" > "$root/lib/modules/$n.ko" ;;
+        *.xz) xz -d -c "$modules/$path" > "$root/lib/modules/$n.ko" ;;
+        *.gz) gzip -d -c "$modules/$path" > "$root/lib/modules/$n.ko" ;;
+        *) cp "$modules/$path" "$root/lib/modules/$n.ko" ;;
+    esac
+    echo "$n" >> "$root/lib/modules/order"
+done
+
+{
+    echo '#!/bin/busybox sh'
+    echo '/bin/busybox mkdir -p /usr/bin /sbin /usr/sbin'
+    echo '/bin/busybox --install -s /usr/bin'
+    echo 'export PATH=/usr/bin:/bin'
+    echo 'mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs -o mode=755 dev /dev'
+    echo 'for m in $(cat /lib/modules/order); do insmod /lib/modules/$m.ko || echo "linux-nodes: insmod $m failed"; done'
+    echo 'n=0; while [ ! -b /dev/vda ] && [ $n -lt 50 ]; do sleep 0.1; n=$((n + 1)); done'
+    echo 'sleep 0.5'
+    echo 'echo "linux-nodes: uname $(uname -r)"'
+    k=0
+    for c in ${cmds[@]+"${cmds[@]}"}; do
+        k=$((k + 1))
+        printf 'echo "linux-nodes: run %d: %s"\n' "$k" "${c//\"/\\\"}"
+        printf 'cd /; env -i HOME=/ TERM=linux PAX=1 PATH=/bin %s\n' "$c"
+        printf 'echo "linux-nodes: run %d status $?"\n' "$k"
+    done
+    echo 'echo "linux-nodes: end"'
+    echo 'sync; poweroff -f'
+} > "$root/init"
+chmod +x "$root/init"
+(cd "$root" && find . | cpio -o -H newc --quiet) > "$out/initramfs.cpio"
+
+qd=()
+k=0
+for d in ${drives[@]+"${drives[@]}"}; do
+    dopts=
+    case $d in *';'*) dopts=,${d#*;}; d=${d%%;*} ;; esac
+    img=${d%,ro}; ro=
+    [ "$img" != "$d" ] && ro=,readonly=on
+    [ -f "$img" ] || die "no image $img"
+    qd+=(-drive "file=$img,if=none,id=d$k,format=raw$ro" -device "virtio-blk-pci,drive=d$k$dopts")
+    k=$((k + 1))
+done
+acc=(-accel tcg -cpu max)
+[ "$accel" = kvm ] && acc=(-accel kvm -cpu host)
+set +e
+timeout 900 qemu-system-x86_64 -machine q35 "${acc[@]}" -m 1G -nographic -no-reboot \
+    -kernel "$kernel" -initrd "$out/initramfs.cpio" \
+    -append "console=ttyS0 quiet loglevel=3 panic=-1" \
+    ${qd[@]+"${qd[@]}"} -nic none > "$out/serial.log" 2>&1 < /dev/null
+rc=$?
+set -e
+echo "linux-nodes: qemu exit $rc" >> "$out/serial.log"
+{
+    printf 'kernel %s (%s)\n' "$kernel" "$(file -b "$kernel" 2>/dev/null | sed -n 's/.*version \([^ ]*\).*/\1/p')"
+    printf 'qemu %s\n' "$(qemu-system-x86_64 --version | head -n 1)"
+    printf 'drives %s\n' "${drives[*]:-none}"
+} > "$out/meta"
+grep -q '^linux-nodes: end' "$out/serial.log" || exit 1
+exit 0
