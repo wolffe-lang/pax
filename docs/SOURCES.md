@@ -1139,3 +1139,26 @@ licensed kernels: none consulted.
 | black-box Linux: kasumi's installed 7.3.0-4-cachyos image (the running 7.2.8's was gone after the 2026-10-24 upgrade) on QEMU (q35, TCG), its root on an ext3 partition (`tools/linux-root --fstype ext3`, `user/elf/mounts.c` its init) | — | GPL-2.0 (a program we run) | run, never read | measured, not guessed (notes/px68/guest.sh, `tests/mpx6-journal.d/linux/`, `tests/mpx6-root.d/linux/`): `mounting ext3 file system using the ext4 subsystem`, `mounted filesystem … r/w with ordered data mode`, `VFS: Mounted root (ext3 filesystem)`; /proc/mounts names it `ext3`, and `ext2` when `rootfstype=ext2` asks (the journal still used); a power cut leaves `clean` with needs_recovery (the state's VALID bit kept while mounted) and the log at a start; the next boot's one line `recovery complete`; a clean unmount clears needs_recovery and empties the log; an incompatible bit it does not know: `Couldn't mount because of unsupported optional features (80000000)`, then `couldn't mount as ext3 due to feature incompatibilities`, mount(2) -EINVAL; e2fsck -fy after its replay fixes the free counts the kernel keeps lazily |
 | QEMU's trace events `virtio_blk_handle_write`, `virtio_blk_handle_read`, `virtio_blk_req_complete` (`-trace`, the log backend, `-D`), their names read from `-trace help` | QEMU 11.1.2 (kasumi), 8.2.2 (Ubuntu 24.04's package, the CI runner's; the names found in its binary) | GPL-2.0 (a program we run) | run, never read | `tools/jorder`: the order the journal's writes and FLUSHes reached the disk (J2, J4) |
 | the OASIS VIRTIO specification 1.2 §5.2.6 (VIRTIO_BLK_T_FLUSH) | as px63 | OASIS | read | the commit's two FLUSHes and the checkpoint's |
+
+## px69 — disk tools
+
+- **UEFI Specification 2.10**, chapter 5, §§5.2–5.3 (protective MBR,
+  GPT headers, entry arrays, CRCs and backup-first updates); Appendix A,
+  Tables A.1–A.2 (GUID layout and text). `user/disktools/paxgpt` and its
+  independent sfdisk/sgdisk differential.
+  <https://uefi.org/specs/UEFI/2.10/05_GUID_Partition_Table_Format.html>
+  <https://uefi.org/specs/UEFI/2.10/Apx_A_GUID_and_Time_Formats.html>
+- **Microsoft FAT Specification, 30 August 2005**, §§3.3–3.6 (FAT32
+  BPB, geometry and backup), §4 (allocation table), §5 (FSInfo), §6
+  (directories and timestamps), §7.1–7.3 (VFAT order, checksum, UTF-16
+  names and padding), pages 11–16 and 17–33. The published specification,
+  not filesystem-tool source; retrieved from
+  <https://academy.cba.mit.edu/classes/networking_communications/SD/FAT.pdf>.
+  `user/disktools/paxfat` preserves UTF-16 surrogate pairs; the test names
+  mtools 4.0.49's observed supplementary-character truncation separately.
+- **Black-box programs:** e2fsprogs 1.47.4, dosfstools 4.2, mtools 4.0.49,
+  util-linux 2.42.4 and GPT fdisk 1.0.10, copied with their binary libraries
+  into the lane's Ubuntu build container; their implementation source was
+  not opened. Geometry, alias choice and diagnostic behaviour were measured.
+  The maintained `tools/mkgpt` is the seed-compatibility reference;
+  sfdisk and sgdisk supply the independent partition-table checks.
