@@ -1,14 +1,20 @@
-//! vblk — the virtio block device (px63).
+//! vblk — the virtio block devices (px63; px79: up to four).
 //!
-//! **The device** (VIRTIO 1.2 §5.2, device id 2; PCI `1af4:1001`, the
-//! transitional id, or `1af4:1042`, the 1.x one): `start` finds it in
-//! kernel/pci's table, attaches kernel/virtio's transport to it in
-//! transport words of its own (the first eight words of this driver's
-//! state frame, chosen with `virtio.use_words`; the network device keeps
-//! px20's, the sound device px30's) and windows 8-11 of the device slot,
-//! and brings it up in the specification's order: reset; ACKNOWLEDGE;
-//! DRIVER; the features; FEATURES_OK, read back; the queue; DRIVER_OK.
-//! The driver needs one feature bit and takes four more when they are
+//! **The devices** (VIRTIO 1.2 §5.2, device id 2; PCI `1af4:1001`, the
+//! transitional id, or `1af4:1042`, the 1.x one): `start` finds every one
+//! in kernel/pci's table, in its order (bus, device, function: QEMU's slot
+//! order, which is the order of its `-device` options), up to DISKS
+//! (px79: four, the guest's `vda` to `vdd`; px63 drove the first alone).
+//! Disk k (0 the first) has a state frame of its own, its transport words
+//! the first eight words of it (chosen with `virtio.use_words`; the
+//! network device keeps px20's, the sound device px30's) and windows
+//! 8 + 4k to 11 + 4k of the device slot, and is brought up in the
+//! specification's order: reset; ACKNOWLEDGE; DRIVER; the features;
+//! FEATURES_OK, read back; the queue; DRIVER_OK. A disk that is refused
+//! (one line says why) is skipped and the next one takes its number, as
+//! a device the guest's driver gives up on gets no name there. Every entry
+//! below names the disk (`k`) it is about.
+//! The driver needs one feature bit and takes five more when they are
 //! offered, each because it is served:
 //!
 //!     VIRTIO_F_VERSION_1     (32)  needed: the 1.x interface
@@ -20,8 +26,13 @@
 //!                                  protocol's unit stays 512 bytes)
 //!     VIRTIO_BLK_F_SEG_MAX    (2)  how many data segments a request may
 //!                                  have (`seg_max`): this driver's are one
+//!     VIRTIO_BLK_F_GEOMETRY   (4)  px79: the cylinders, heads and sectors
+//!                                  the device gives (`geometry`), which
+//!                                  HDIO_GETGEO answers (measured: the
+//!                                  guest's answer is the device's, QEMU's
+//!                                  `cyls=`, `heads=`, `secs=` when set)
 //!
-//! and declines the rest (SIZE_MAX, GEOMETRY, TOPOLOGY, CONFIG_WCE, MQ,
+//! and declines the rest (SIZE_MAX, TOPOLOGY, CONFIG_WCE, MQ,
 //! DISCARD, WRITE_ZEROES, the ring's indirect descriptors and event
 //! indices): each is a promise this driver would have to keep. With no
 //! device, or a refusal, nothing is printed (most machines PAX boots have
@@ -29,8 +40,9 @@
 //! without a disk; nothing here panics on what a machine lacks.
 //!
 //! **The configuration** (§5.2.4): `capacity`, le64 at 0, in 512-byte
-//! sectors whatever the block size; `seg_max`, le32 at 12; `blk_size`,
-//! le32 at 20. Read at their own widths (kernel/virtio's `device32`,
+//! sectors whatever the block size; `seg_max`, le32 at 12; `geometry`
+//! (px79) at 16: le16 cylinders, u8 heads, u8 sectors; `blk_size`, le32
+//! at 20. Read at their own widths (kernel/virtio's `device32`,
 //! `device64`).
 //!
 //! **A request** (§5.2.6) is three descriptors: the header
@@ -104,6 +116,7 @@ pub const S_LOST: u64 = 0x100
 // module `const` cannot be initialised from another module's,
 // wolf-lang#653).
 const F_SEG_MAX: u64 = 0x4
+const F_GEOMETRY: u64 = 0x10 // px79
 const F_RO: u64 = 0x20
 const F_BLK_SIZE: u64 = 0x40
 const F_FLUSH: u64 = 0x200
@@ -131,6 +144,9 @@ pub const RS_FREE: u64 = 0
 pub const RS_QUEUED: u64 = 1
 pub const RS_DONE: u64 = 2
 
+/// px79: the most disks (`vda` to `vdd`).
+pub const DISKS: u64 = 4
+
 // The state frame's words (0-7 are kernel/virtio's transport words).
 const W_UP: u64 = 8
 const W_PCI: u64 = 9
@@ -145,6 +161,7 @@ const W_HDR: u64 = 24 // the header frame (physical)
 const W_FREE: u64 = 25 // free slots, a bit each
 const W_STATE: u64 = 26 // what `start` answered
 const W_BUSY: u64 = 27 // slots with the device
+const W_GEOM: u64 = 28 // px79: the geometry, cylinders << 16 | heads << 8 | sectors (0 when not offered)
 const W_SLOT: u64 = 32 // slot k's request record (its kernel address) at W_SLOT + k
 // Counters, from word 64 (the C_* constants).
 const W_COUNT: u64 = 64
@@ -165,12 +182,45 @@ pub const C_POLLS: u64 = 7
 /// Times `submit` found every slot with the device and waited for one.
 pub const C_FULL: u64 = 8
 
-/// The state frame, through the HHDM; 0 before `start` found a device.
+/// The selected disk's state frame, through the HHDM; 0 before `start`
+/// found a device (px79: `sel` chooses which disk's; every entry selects
+/// its own before it reads a word).
 var state: u64 = 0
+/// px79: the disks' state frames (HHDM addresses), and how many are up
+/// (no frame more than px63's for one disk: four scalars, not a table).
+var disk0: u64 = 0
+var disk1: u64 = 0
+var disk2: u64 = 0
+var disk3: u64 = 0
+var ndisks: u64 = 0
 
 fn base() -> u64 {
     // # Safety: a scalar module var, read on one CPU with IF clear.
     unsafe { state }
+}
+
+/// px79: how many disks are up.
+pub fn count_disks() -> u64 {
+    // # Safety: a scalar module var, written at boot with IF clear.
+    unsafe { ndisks }
+}
+
+/// px79: select disk `k`'s state (0 when there is no such disk).
+fn sel(k: u64) {
+    // # Safety: scalar module vars, read and written on one CPU with IF clear.
+    unsafe {
+        if k >= ndisks {
+            state = 0
+        } else if k == 0 {
+            state = disk0
+        } else if k == 1 {
+            state = disk1
+        } else if k == 2 {
+            state = disk2
+        } else {
+            state = disk3
+        }
+    }
 }
 
 fn sw(i: u64) -> u64 {
@@ -219,37 +269,59 @@ fn bump(i: u64, by: u64) {
     put_sw(W_COUNT + i, sw(W_COUNT + i) + by)
 }
 
-/// Counter `i` (C_*); 0 with no device.
-pub fn count(i: u64) -> u64 {
+/// Disk `k`'s counter `i` (C_*); 0 with no device.
+pub fn count(k: u64, i: u64) -> u64 {
+    sel(k)
     if base() == 0 {
         return 0
     }
     sw(W_COUNT + i)
 }
 
-/// Whether the device is up.
-pub fn up() -> bool {
+/// Whether the selected device is up.
+fn up() -> bool {
     base() != 0 && sw(W_UP) == 1
 }
 
-/// The device's capacity, in 512-byte sectors.
-pub fn sectors() -> u64 {
+/// Disk `k`'s capacity, in 512-byte sectors.
+pub fn sectors(k: u64) -> u64 {
+    sel(k)
     if !up() { 0 } else { sw(W_SECTORS) }
 }
 
 /// Its logical block size (`blk_size`, 512 when not offered).
-pub fn block_size() -> u64 {
+pub fn block_size(k: u64) -> u64 {
+    sel(k)
     if !up() { 512 } else { sw(W_BLKSIZE) }
 }
 
 /// Whether it said it is read-only (VIRTIO_BLK_F_RO).
-pub fn read_only() -> bool {
+pub fn read_only(k: u64) -> bool {
+    sel(k)
     up() && sw(W_TAKEN) & F_RO != 0
 }
 
 /// Whether it takes FLUSH requests (VIRTIO_BLK_F_FLUSH).
-pub fn flushes() -> bool {
+pub fn flushes(k: u64) -> bool {
+    sel(k)
     up() && sw(W_TAKEN) & F_FLUSH != 0
+}
+
+/// px79: its geometry (VIRTIO_BLK_F_GEOMETRY): (cylinders, heads,
+/// sectors), (0, 0, 0) when the device offers none.
+pub fn geometry(k: u64) -> (u64, u64, u64) {
+    sel(k)
+    if !up() {
+        return (0, 0, 0)
+    }
+    let g = sw(W_GEOM)
+    (g >> 16, (g >> 8) & 0xff, g & 0xff)
+}
+
+/// px79: the PCI function disk `k` is (kernel/pci's index), pci.MAX when none.
+pub fn pci_index(k: u64) -> u64 {
+    sel(k)
+    if !up() { pci.MAX } else { sw(W_PCI) }
 }
 
 fn zeroed_frame() -> u64 {
@@ -273,17 +345,35 @@ fn refuse(what: str, v: u64) -> u64 {
     REFUSED
 }
 
-/// Find the device, bring it up on the paging structures at `pml4`.
-/// Call after `pci.scan`, IF clear. Answers UP, ABSENT (silent) or
-/// REFUSED (one line says why).
+/// Find the devices, in kernel/pci's order, and bring each one up on the
+/// paging structures at `pml4`, up to DISKS. Call after `pci.scan`, IF
+/// clear. Answers UP when at least one is up, ABSENT (silent) when the
+/// bus has none, REFUSED when every one was refused (one line each says
+/// why).
 pub fn start(pml4: u64) -> u64 {
-    var i = pci.find(virtio.VENDOR, 0x1001, 0x1001, 0)
-    if i == pci.MAX {
-        i = pci.find(virtio.VENDOR, 0x1042, 0x1042, 0)
+    if count_disks() != 0 {
+        return UP
     }
-    if i == pci.MAX {
+    var found: u64 = 0
+    var i: u64 = 0
+    while i < pci.count() && count_disks() < DISKS {
+        let dv = pci.device(i)
+        if pci.vendor(i) == virtio.VENDOR && (dv == 0x1001 || dv == 0x1042) {
+            found += 1
+            let _r = start_one(pml4, i)
+        }
+        i += 1
+    }
+    if found == 0 {
         return ABSENT
     }
+    if count_disks() == 0 { REFUSED } else { UP }
+}
+
+/// Bring up the device at PCI function `i` as the next disk: UP, or
+/// REFUSED (one line says why; its frames are kept, as px63's were).
+fn start_one(pml4: u64, i: u64) -> u64 {
+    let k = count_disks()
     let sf = zeroed_frame()
     if sf == 0 {
         log.put("blk: refused: no frame for the driver's state, frames free ")
@@ -292,21 +382,36 @@ pub fn start(pml4: u64) -> u64 {
         log.end()
         return REFUSED
     }
-    // # Safety: a scalar module var, written once at boot with IF clear.
+    // # Safety: a scalar module var, written at boot with IF clear.
     unsafe { state = sf + frames.hhdm() }
     put_sw(W_FRAMES, 1)
     let prev = virtio.use_words(base())
-    let r = bring_up(pml4, i)
+    let r = bring_up(pml4, i, 8 + 4 * k)
     let _p = virtio.use_words(prev)
+    if r == UP {
+        // # Safety: scalar module vars, written at boot with IF clear.
+        unsafe {
+            if k == 0 {
+                disk0 = state
+            } else if k == 1 {
+                disk1 = state
+            } else if k == 2 {
+                disk2 = state
+            } else {
+                disk3 = state
+            }
+            ndisks = k + 1
+        }
+    }
     r
 }
 
-fn bring_up(pml4: u64, i: u64) -> u64 {
+fn bring_up(pml4: u64, i: u64, window: u64) -> u64 {
     put_sw(W_PCI, i)
     let b = pci.bdf(i)
     // Memory decoding and bus mastering on; INTx off: completion is polled.
     pci.set_command(b, pci.command(b) | pci.CMD_MEMORY | pci.CMD_MASTER | pci.CMD_INTX_OFF)
-    let a = virtio.attach_at(pml4, i, 8)
+    let a = virtio.attach_at(pml4, i, window)
     if a != virtio.OK {
         log.put("blk: refused: ")
         log.put(if a == virtio.NO_COMMON { "the device has no virtio 1.x common configuration capability (a legacy-only device)" } else { if a == virtio.NO_MAP { "the device's registers could not be mapped" } else { "the device lacks a virtio 1.x notification, ISR or device capability" } })
@@ -325,7 +430,7 @@ fn bring_up(pml4: u64, i: u64) -> u64 {
     if offered & F_VERSION_1 == 0 {
         return refuse("the device lacks VIRTIO_F_VERSION_1 (bit 32), features", offered)
     }
-    let want = F_VERSION_1 | (offered & (F_FLUSH | F_RO | F_BLK_SIZE | F_SEG_MAX))
+    let want = F_VERSION_1 | (offered & (F_FLUSH | F_RO | F_BLK_SIZE | F_SEG_MAX | F_GEOMETRY))
     virtio.set_features(want)
     virtio.add_status(virtio.FEATURES_OK)
     if virtio.status() & virtio.FEATURES_OK == 0 {
@@ -362,6 +467,10 @@ fn bring_up(pml4: u64, i: u64) -> u64 {
     put_sw(W_SECTORS, cap)
     put_sw(W_BLKSIZE, if want & F_BLK_SIZE != 0 { virtio.device32(20) } else { 512 })
     put_sw(W_SEGMAX, if want & F_SEG_MAX != 0 { virtio.device32(12) } else { 0 })
+    if want & F_GEOMETRY != 0 {
+        // px79: le16 cylinders at 16, heads at 18, sectors at 19.
+        put_sw(W_GEOM, (virtio.device16(16) << 16) | (virtio.device8(18) << 8) | virtio.device8(19))
+    }
     if cap == 0 {
         return refuse("the device's capacity is 0 sectors:", cap)
     }
@@ -375,8 +484,10 @@ fn bring_up(pml4: u64, i: u64) -> u64 {
 /// R_PA filled; the data inside one frame) to the device: a free slot
 /// taken (waiting for one when all are with the device), the header and
 /// the descriptors written, the head offered, the device told. The
-/// record is RS_QUEUED until `poll` sees it back. IF clear.
-pub fn submit(r: u64) {
+/// record is RS_QUEUED until `poll` sees it back. IF clear. px79: to
+/// disk `k`.
+pub fn submit(k: u64, r: u64) {
+    sel(k)
     let prev = virtio.use_words(base())
     if sw(W_FREE) == 0 {
         bump(C_FULL, 1)
@@ -450,9 +561,10 @@ fn reap() {
     }
 }
 
-/// Take what the device has returned (`reap`), with the transport words
+/// Take what disk `k` has returned (`reap`), with the transport words
 /// selected for it.
-pub fn poll() {
+pub fn poll(k: u64) {
+    sel(k)
     if !up() {
         return
     }
@@ -463,8 +575,9 @@ pub fn poll() {
 
 /// Wait until request record `r` is done: the used ring looked at, a
 /// PAUSE between looks, at most SPIN looks (then the request is lost:
-/// S_LOST, counted). Its status.
-pub fn wait(r: u64) -> u64 {
+/// S_LOST, counted). Its status. px79: of disk `k`.
+pub fn wait(k: u64, r: u64) -> u64 {
+    sel(k)
     let prev = virtio.use_words(base())
     var k: u64 = 0
     while rw(r + R_STATE * 8) != RS_DONE && k < SPIN {
@@ -493,12 +606,13 @@ pub fn wait(r: u64) -> u64 {
     rw(r + R_STATUS * 8)
 }
 
-/// The device's lines, once it is up:
+/// Disk `k`'s lines, once it is up (px79: each disk's, in their order):
 ///
 ///     blk: virtio-blk <vvvv>:<dddd> at <bb>:<dd>.<f>, bar<n> 0x<pa>, 1.x interface, polled
-///     blk: features offered 0x<f>, taken 0x<t> (VERSION_1[, FLUSH][, RO][, BLK_SIZE][, SEG_MAX])
+///     blk: features offered 0x<f>, taken 0x<t> (VERSION_1[, FLUSH][, RO][, BLK_SIZE][, SEG_MAX][, GEOMETRY])
 ///     blk: request queue 0: 64 entries, 16 slots; capacity <s> sectors (<b> bytes), block size <k>, seg_max <m>, <n> frames held
-pub fn report() {
+pub fn report(k: u64) {
+    sel(k)
     if !up() {
         return
     }
@@ -539,6 +653,9 @@ pub fn report() {
     }
     if t & F_SEG_MAX != 0 {
         log.put(", SEG_MAX")
+    }
+    if t & F_GEOMETRY != 0 {
+        log.put(", GEOMETRY") // px79
     }
     log.put(")")
     log.end()
