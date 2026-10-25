@@ -5,9 +5,9 @@ import sys
 
 
 def actions(resize=False):
-    rows = [('line', 'stty size')]
+    rows = [('line', 'winsize')]
     if resize:
-        rows += [('line', 'stty cols 80 rows 24'), ('line', 'stty size')]
+        rows += [('line', 'stty cols 80 rows 24'), ('line', 'winsize')]
     rows += [
         ('line', 'set -o friendly -o suggest -o histsearch'),
         ('line', 'echo prefix_suffix'),

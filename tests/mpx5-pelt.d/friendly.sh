@@ -9,7 +9,7 @@ friendly_image() {
         args+=("${f#"$d/root"}=$f:$mode")
     done < <(find "$d/root" -type f -print0)
     # stty is the already-pinned, digest-checked BusyBox binary, run black-box.
-    args+=("/bin/stty=$d/bin/busybox:755")
+    args+=("/bin/stty=$d/bin/busybox:755" "/bin/winsize=$d/bin/winsize:755")
     echo '/bin/env HOME=/ TERM=linux /bin/sh -i +m' > "$d/friendly.run"
     "$PAX_ROOT/tools/mkinitramfs" "$d/friendly.cpio" "${args[@]}" \
         "/etc/pax-run=$d/friendly.run:644" > "$d/friendly.initramfs.txt" || return 1
