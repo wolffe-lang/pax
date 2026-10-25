@@ -12,6 +12,9 @@ Disk tools (px69): `paxgpt`, `paxfat` and `paxext2` are Wolf programs built as s
 
 The linker respin (px80): the dev image's static `ld.lld` is lld 18.1.8, built from LLVM's release tarball (sha256 `0b58557a…`, signed by LLVM's release key) with zlib and zstd (`notes/px80/build-lld.sh`); px60's lld 17.0.6 could not link the release tier's kernel (`R_X86_64_REX_GOTPCRELX out of range`, the image at the top of the address space, pax#172). On every kernel the tree builds, both tiers, 18.1.8 links byte for byte what Ubuntu's lld 18.1.3, CI's linker, links; at the dev console `ld.lld --version` says 18.1.8 and `wolf build hello.lu` links with it. `user/wolf-link.sums` moves one line, and CI now holds that record (W0 link: its shape, and the `cc` front end rebuilt to its bytes). The kernel is unchanged.
 
+Offline filesystem checking: `tools/mkfsck` builds `fsck.ext2` in Wolf for Linux and PAX. It checks inodes and blocks, directories, connectivity, references and allocation summaries; repairs counts, bitmaps, links, orphans and duplicate data blocks; and replays supported ext3 journals. A separate rescue archive can repair the unmounted `/dev/vda2` without Linux. The suite compares generated damage with e2fsck, then power-cuts a running root and verifies rescue repair and reboot persistence under BIOS and UEFI. Unsupported formats and ambiguous damage are refused, never marked clean; mounted-volume repair is refused. Existing disk images do not gain a rescue menu automatically. See `docs/BOOT.md`, “Checking a volume from rescue”.
+
+
 The block nodes and a second disk (px79): PAX drives up to four virtio disks, named `vda` to `vdd` in PCI slot order as Linux names them, and `/dev` holds a block special file for every disk and partition the block layer knows (`brw-------`, root's, Linux's numbers: 254:0, 254:1 … for `vda`, 254:16 for `vdb`, the extended major 259 past partition 15), made in memory at boot and as a table is read again, as devtmpfs makes them, never written into an image. A program opens a node and reads and writes it raw at any length and offset (the guest's answers: short across the end, ENOSPC past it, EPERM on a read-only disk; a write to `vda` while a partition of it is mounted is allowed, as on Linux), seeks it, fsyncs it, sends a file onto it by `sendfile` or `splice`, and asks the block ioctls (the sizes, the block sizes, BLKROGET, BLKFLSBUF, HDIO_GETGEO from the device's own geometry, BLKRRPART with Linux's EBUSY while a partition is open or mounted, BLKPG's add and delete); every other request is ENOTTY, named. `/proc/partitions`, `/sys/block` and `/sys/class/block` answer what lsblk and blkid read; `mount(2)` and `/etc/fstab` name a partition by its node (`/dev/vdb2`), and `/proc/mounts` prints the node. `tools/qemu-run` and `tools/qemu-halt` take `--drive FILE` (repeatable) for a second and third disk. Every row is held to Linux 7.3.0 on QEMU with the same disks and the same static probe (`tests/mpx6-nodes`), and a disk made blank on the host gets a GPT and an ext2 from PAX through its nodes.
 
 The journal (px68): `/` is ext3. `tools/mkdisk --gpt --root` makes the root partition with the pinned `mke2fs -t ext3` (`--no-journal` for px67's ext2), and kernel/journal writes every change to its metadata (the superblock, the group descriptors, both bitmaps, the inode tables, indirect and directory blocks) through the journal in ext3's own format, jbd2's v2 layout as the kernel's documentation describes it: a transaction's blocks go to the log, then a FLUSH, then its commit block, then a FLUSH, and only then home; a file's data is written before the commit that names it (data=ordered); commits come at the flusher's 5 s turn, at every sync point and the halt. A power cut leaves `/` clean with needs_recovery, as Linux 7.3.0 leaves its own ext3 root, and the next boot replays the log to its last commit before anything reads the volume (`ext2: vda2: recovering the journal: 1 transaction (sequence 1 to 1), 50 blocks written home, 0 revoked; recovery complete`): blocks revoked by a later transaction are passed over, a torn or missing commit drops its transaction whole, an escaped block is restored, as e2fsck's own replay does on thirteen crafted journals; a replay cut short by a failed write leaves the log as it was, and the next boot replays it whole. The crash row that px67 measured (24 kills at seeded points of a 1,500-operation write session) now gives no count, no orphan and nothing worse, where ext2 on the same kernel and seed gives four counts; every replayed tree is the one the last commit block on the disk names, no write before it lost, and the same tree e2fsck -fy's replay of a copy gives; the session costs what it cost on ext2 (30.13 to 30.53 s against 30.05 to 30.08 s). The order of every write a commit makes is read from QEMU's own trace of the disk (`tools/jorder`). `init=PATH` on Limine's command line runs one program as init. Every row is in `tests/mpx6-journal`, and `tests/mpx6-root` runs on the journalled root, held to the guest's ext3 root.
@@ -113,7 +116,7 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
               two wrappers); mkgpt, disktools and
               mkdisktools, mklimine-static (px69: the static formatters and
               unchanged Limine installer); mkinstall, mkpack and mkinstall-payload
-              (static installer and offline games/boot manifest); linux-part (px66: a GPT or MBR table written
+              (static installer and offline games/boot manifest); mkfsck (the offline checker); linux-part (px66: a GPT or MBR table written
               reproducibly; the partition and FAT tools from
               user/disktools.pin in the pinned container; the Linux
               guest's partitions, /proc/partitions and blkid on an
@@ -125,6 +128,8 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
               mpx2-sched, mpx3-user, mpx3-loader, mpx3-boreutils, mpx3-console,
               mpx3-screen, mpx3-speaker (px18), mpx3-threads (px26), mpx3-tree (px27), mpx3-sound (px30), mpx4-net (px20, px21), mpx4-udp (px22), mpx4-tcp (px23), mpx5-lope (px54), mpx6-blk and mpx6-ext2 (px63), mpx5-scent (px64), mpx6-part (px66), mpx5-bore (px65), mpx6-disktools (px69), mpx6-install (guided installation), gdb-attach,
               expect-serial-selftest
+              Additional QEMU and host-side entry points:
+              census, ci-plan, lobo-session-selftest, mpx2-heap, mpx3-maps, mpx3-orchestra, mpx3-shell, mpx4-lobo, mpx4-ready, mpx4-session, mpx4-unix, mpx5-accounts, mpx5-aspen, mpx5-jobs, mpx5-lupin, mpx5-pelt, mpx5-screen, mpx5-users, mpx5-wolf, mpx5-yew, mpx6-fsck, mpx6-journal, mpx6-nodes, mpx6-root, paxtcp-selftest, tour
     docs/     BOOT.md (the boot protocol, argued), SOURCES.md (the
               consulted-sources log), ABI notes as they come
     notes/    one note per lane: its contract and evidence
@@ -275,8 +280,8 @@ host repairs it: `e2fsck -fy` of partition 2, which starts at
 
 ## `/` on the disk (px67)
 
-The playground's `pax-disk.img` now holds the whole system on its ext2
-partition 2: `/` is the disk, so what you change anywhere lasts (`/etc`,
+The root-on-disk layout holds the whole system on partition 2
+(ext3 by default since the journal was added): `/` is the disk, so what you change anywhere lasts (`/etc`,
 `/root`, `/home/pax`, `/bin`), but for `/tmp`, which is memory. The
 terminal line is px66's, unchanged:
 
@@ -294,8 +299,9 @@ and marks it clean before the halt; on the host, `dumpe2fs -h` of
 partition 2 then says `clean`. **Closing QEMU without `exit` (Ctrl-A x,
 the window, the terminal) is still a power cut**, now for the whole
 system: what the last five seconds wrote may be lost, and the next boot
-says `not cleanly unmounted` until `e2fsck -fy` of partition 2 on the
-host repairs it.
+replays a journalled root before use. A non-journalled root remains
+unclean until an offline check repairs it: `fsck.ext2 -y /dev/vda2` from
+the rescue archive, or `e2fsck -fy` on the host.
 
 ## Friendly shell editing
 
