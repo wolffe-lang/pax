@@ -1,0 +1,163 @@
+//! Legacy inode block maps, packed directory blocks and streamed file data.
+
+use diskio
+
+fn dirent(mut b: List[byte], mut pos: int, mut previous: int, name: str, ino: int, kind: int) {
+    let need = (8 + name.len + 3) / 4 * 4
+    if pos + need > b.len {
+        diskio.put(mut b, previous + 4, b.len - previous, 2)
+        pos = b.len
+        for _ in 0..4096 { (mut b).push(0 as byte) }
+    }
+    diskio.put(mut b, pos, ino, 4)
+    diskio.put(mut b, pos + 4, need, 2)
+    b[pos + 6] = name.len as byte
+    b[pos + 7] = (if kind == 1 then 2 else if kind == 3 then 7 else 1) as byte
+    diskio.paste(mut b, pos + 8, name.bytes())
+    previous = pos
+    pos += need
+}
+
+fn dir_bytes(node: Node, nodes: List[Node]) -> List[byte] {
+    var b = diskio.zeros(4096)
+    var pos = 0, previous = 0
+    dirent(mut b, mut pos, mut previous, ".", node.ino, 1)
+    dirent(mut b, mut pos, mut previous, "..", node.parent, 1)
+    for n in nodes {
+        if n.path == "/" || n.parent != node.ino { continue }
+        let slash = n.path.rfind("/") else 0
+        dirent(mut b, mut pos, mut previous, n.path[slash + 1..], n.ino, n.kind)
+    }
+    diskio.put(mut b, previous + 4, b.len - previous, 2)
+    if node.ino == 11 {
+        while b.len < 16384 {
+            let at = b.len
+            for _ in 0..4096 { (mut b).push(0 as byte) }
+            diskio.put(mut b, at + 4, 4096, 2)
+        }
+    }
+    b
+}
+
+fn zero(bytes: List[byte]) -> bool {
+    for b in bytes { if b != 0 as byte { return false } }
+    true
+}
+
+fn pointer_block(mut fs: Fs, pointers: List[int]) -> int ! {io, full} {
+    var any = false
+    for p in pointers { if p != 0 { any = true } }
+    if !any { return 0 }
+    var b = diskio.zeros(4096)
+    for i in 0..pointers.len { diskio.put(mut b, i * 4, pointers[i], 4) }
+    let block = reserve(mut fs)?
+    block_write(fs, block, b)?
+    block
+}
+
+fn block_map(mut fs: Fs, data: List[int], mut inode: List[byte]) -> int ! {io, full, invalid} {
+    if data.len > 1049612 { return invalid }
+    var metadata = 0
+    let direct = if data.len < 12 then data.len else 12
+    for i in 0..direct { diskio.put(mut inode, 40 + i * 4, data[i], 4) }
+    if data.len > 12 {
+        let end = if data.len < 1036 then data.len else 1036
+        let block = pointer_block(mut fs, data[12..end])?
+        if block != 0 { metadata += 1 }
+        diskio.put(mut inode, 88, block, 4)
+    }
+    if data.len > 1036 {
+        var roots = List[int]()
+        var start = 1036
+        while start < data.len {
+            let end = if data.len - start < 1024 then data.len else start + 1024
+            let block = pointer_block(mut fs, data[start..end])?
+            if block != 0 { metadata += 1 }
+            (mut roots).push(block)
+            start = end
+        }
+        let block = pointer_block(mut fs, roots)?
+        if block != 0 { metadata += 1 }
+        diskio.put(mut inode, 92, block, 4)
+    }
+    metadata
+}
+
+fn inode_time(mut inode: List[byte], low: int, extra: int, time: int) {
+    let bits = time & 4294967295
+    let signed = if bits >= 2147483648 then bits - 4294967296 else bits
+    diskio.put(mut inode, low, bits, 4)
+    diskio.put(mut inode, extra, (time - signed) / 4294967296, 4)
+}
+
+fn write_node(mut fs: Fs, node: Node, nodes: List[Node]) -> () ! {invalid, io, full} {
+    let group = (node.ino - 1) / fs.ipg
+    let index = (node.ino - 1) % fs.ipg
+    if node.ino != 2 {
+        if used(fs.groups[group].imap, index) { return invalid }
+        mark(mut fs.groups[group].imap, index)
+        fs.groups[group].ifree -= 1
+        if node.kind == 1 { fs.groups[group].dirs += 1 }
+    }
+    var inode = diskio.zeros(256)
+    let meta = copy node.meta
+    let mode = meta.mode | if node.kind == 1 then 16384 else if node.kind == 3 then 40960 else 32768
+    diskio.put(mut inode, 0, mode, 2)
+    diskio.put(mut inode, 2, meta.uid & 65535, 2)
+    diskio.put(mut inode, 24, meta.gid & 65535, 2)
+    diskio.put(mut inode, 120, meta.uid >> 16, 2)
+    diskio.put(mut inode, 122, meta.gid >> 16, 2)
+    diskio.put(mut inode, 26, node.links, 2)
+    diskio.put(mut inode, 128, 32, 2)
+    inode_time(mut inode, 8, 140, meta.at)
+    inode_time(mut inode, 12, 132, meta.ct)
+    inode_time(mut inode, 16, 136, meta.mt)
+    inode_time(mut inode, 144, 148, meta.mt)
+    var size = node.size
+    var physical = 0
+    var pointers = List[int]()
+    if node.kind == 3 && size < 60 {
+        diskio.paste(mut inode, 40, node.target)
+    } else if node.kind != 0 {
+        let b = if node.kind == 1 then dir_bytes(node, nodes) else copy node.target
+        size = b.len
+        let count = (size + 4095) / 4096
+        for i in 0..count {
+            region chunk {
+                var data = diskio.zeros(4096)
+                let end = if b.len - i * 4096 < 4096 then b.len else (i + 1) * 4096
+                diskio.paste(mut data, 0, b[i * 4096..end])
+                let block = reserve(mut fs)?
+                block_write(fs, block, data)?
+                (mut pointers).push(block)
+                physical += 1
+            }
+        }
+    } else {
+        let fd = fs_open_mode(node.source, 5) else |_| { return io }
+        defer fs_close(fd) else |_| {}
+        let st = fs_fstat_record(fd) else |_| { return io }
+        if st[0] != 0 || st[1] != size { return invalid }
+        let count = (size + 4095) / 4096
+        for i in 0..count {
+            region chunk {
+                let amount = if size - i * 4096 < 4096 then size - i * 4096 else 4096
+                let bytes = diskio.exact(fd, i * 4096, amount)?
+                var block = 0
+                // debugfs write creates a hole for an all-zero block.
+                if !zero(bytes) {
+                    var data = diskio.zeros(4096)
+                    diskio.paste(mut data, 0, bytes)
+                    block = reserve(mut fs)?
+                    block_write(fs, block, data)?
+                    physical += 1
+                }
+                (mut pointers).push(block)
+            }
+        }
+    }
+    if pointers.len > 0 { physical += block_map(mut fs, pointers, mut inode)? }
+    diskio.put(mut inode, 4, size, 4)
+    diskio.put(mut inode, 28, physical * 8, 4)
+    diskio.write_at(fs.fd, fs.base + fs.groups[group].table * 4096 + index * 256, inode)?
+}

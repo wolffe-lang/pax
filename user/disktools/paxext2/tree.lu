@@ -1,0 +1,245 @@
+//! Tree input: stable name order, no symlink traversal, explicit metadata.
+//! --attrs has tools/mkdisk's PATH MODE UID GID [MTIME [ATIME [CTIME]]
+//! grammar, with shell-style quotes and backslash escapes but no evaluation.
+
+struct Meta { mode: int, uid: int, gid: int, mt: int, at: int, ct: int }
+
+struct Node {
+    path: str,
+    source: str,
+    ino: int,
+    parent: int,
+    kind: int,
+    size: int,
+    links: int,
+    meta: Meta,
+    target: List[byte],
+    primary: bool,
+}
+
+fn default_meta(mode: int, epoch: int) -> Meta {
+    Meta { mode: mode, uid: 0, gid: 0, mt: epoch, at: epoch, ct: epoch }
+}
+
+fn words(line: str) -> List[str] ! {invalid} {
+    var out = List[str]()
+    var word = ""
+    var quote = 0
+    var escape = false
+    var started = false
+    for c in line.chars() {
+        let n = c as int
+        if escape {
+            word += c
+            escape = false
+            started = true
+            continue
+        }
+        if n == 92 && quote != 39 { escape = true; continue }
+        if quote != 0 {
+            if n == quote { quote = 0 } else { word += c }
+            continue
+        }
+        if n == 34 || n == 39 {
+            quote = n
+            started = true
+            continue
+        }
+        if c == ' ' || c == '\t' {
+            if started {
+                (mut out).push(word)
+                word = ""
+                started = false
+            }
+        } else {
+            word += c
+            started = true
+        }
+    }
+    if escape || quote != 0 { return invalid }
+    if started { (mut out).push(word) }
+    out
+}
+
+fn octal(text: str) -> int ! {invalid} {
+    if text.len < 1 || text.len > 5 { return invalid }
+    var value = 0
+    for c in text.bytes() {
+        if c < 48 as byte || c > 55 as byte { return invalid }
+        value = value * 8 + c as int - 48
+    }
+    if value > 4095 { return invalid }
+    value
+}
+
+fn attributes(path: str, epoch: int) -> Map[str, Meta] ! {invalid, io} {
+    var out = Map[str, Meta]()
+    if path.len == 0 { return out }
+    let text = fs_read_text(path) else |_| { return io }
+    for line in text.lines() {
+        let s = line.trim()
+        if s.len == 0 || s.starts_with("#") { continue }
+        let w = words(s)?
+        if w.len < 4 || w.len > 7 || !w[0].starts_with("/") { return invalid }
+        let mode = octal(w[1])?
+        let uid = w[2].to_int() else |_| { return invalid }
+        let gid = w[3].to_int() else |_| { return invalid }
+        if uid < 0 || gid < 0 || uid > 4294967295 || gid > 4294967295 { return invalid }
+        let mt = if w.len > 4 then (w[4].to_int() else |_| { return invalid }) else epoch
+        let at = if w.len > 5 then (w[5].to_int() else |_| { return invalid }) else mt
+        let ct = if w.len > 6 then (w[6].to_int() else |_| { return invalid }) else mt
+        for t in [mt, at, ct] { if t < -2147483648 || t > 15032385535 { return invalid } }
+        out[w[0]] = Meta { mode: mode, uid: uid, gid: gid, mt: mt, at: at, ct: ct }
+    }
+    out
+}
+
+fn walk(
+    mut nodes: List[Node],
+    mut next: int,
+    mut identities: Map[str, int],
+    source: str,
+    path: str,
+    parent: int,
+    attrs: Map[str, Meta],
+    excludes: List[str],
+    epoch: int,
+    depth: int,
+) -> () ! {invalid, io} {
+    if depth > 128 { return invalid }
+    for x in excludes { if path == x { return } }
+    var names = fs_read_dir(source) else |_| { return io }
+    for i in 1..names.len {
+        let value = names[i]
+        var j = i
+        while j > 0 && names[j - 1] > value { names[j] = names[j - 1]; j -= 1 }
+        names[j] = value
+    }
+    for name in names {
+        if name == "." || name == ".." || name.len == 0 || name.len > 255 || name.contains("/") {
+            return invalid
+        }
+        let hp = "{source}/{name}"
+        let ip = if path == "/" then "/{name}" else "{path}/{name}"
+        if ip == "/lost+found" {
+            var omitted = false
+            for x in excludes { if x == ip { omitted = true } }
+            if omitted { continue }
+            let entries = fs_read_dir(hp) else |_| { return invalid }
+            if entries.len != 0 { return invalid }
+            continue
+        }
+        let st = fs_lstat(hp) else |_| { return io }
+        if st[0] != 0 && st[0] != 1 && st[0] != 3 { return invalid }
+        let kind = st[0]
+        var meta = copy attrs[ip] else default_meta(st[4], epoch)
+        var ino = next
+        var primary = true
+        var target = List[byte]()
+        var size = st[1]
+        if kind == 0 {
+            if size < 0 || size > 4294967295 { return invalid }
+            let key = "{st[9]}:{st[10]}"
+            let owner = identities[key] else -1
+            if owner >= 0 {
+                ino = nodes[owner].ino
+                nodes[owner].links += 1
+                if nodes[owner].links > 65535 { return invalid }
+                primary = false
+                if !has_attrs(attrs, nodes[owner].path) && has_attrs(attrs, ip) {
+                    nodes[owner].meta = copy meta
+                }
+            } else {
+                identities[key] = nodes.len
+            }
+        } else if kind == 3 {
+            target = fs_read_link(hp) else |_| { return io }
+            size = target.len
+            if size < 1 || size > 4095 { return invalid }
+            meta.mode = 511
+        } else {
+            size = 0
+        }
+        if primary { next += 1 }
+        (mut nodes).push(Node {
+            path: ip,
+            source: hp,
+            ino: ino,
+            parent: parent,
+            kind: kind,
+            size: size,
+            links: if kind == 1 then 2 else 1,
+            meta: meta,
+            target: target,
+            primary: primary,
+        })
+        if kind == 1 {
+            walk(
+                mut nodes,
+                mut next,
+                mut identities,
+                hp,
+                ip,
+                ino,
+                attrs,
+                excludes,
+                epoch,
+                depth + 1,
+            )?
+        }
+    }
+}
+
+fn collect(source: str, attrs: Map[str, Meta], excludes: List[str], epoch: int) -> List[Node] ! {
+    invalid,
+    io,
+} {
+    var nodes = List[Node]()
+    (mut nodes).push(Node {
+        path: "/",
+        source: "",
+        ino: 2,
+        parent: 2,
+        kind: 1,
+        size: 0,
+        links: 2,
+        meta: copy attrs["/"] else default_meta(493, epoch),
+        target: List[byte](),
+        primary: true,
+    })
+    (mut nodes).push(Node {
+        path: "/lost+found",
+        source: "",
+        ino: 11,
+        parent: 2,
+        kind: 1,
+        size: 16384,
+        links: 2,
+        meta: copy attrs["/lost+found"] else default_meta(448, epoch),
+        target: List[byte](),
+        primary: true,
+    })
+    var next = 12
+    var identities = Map[str, int]()
+    if source.len > 0 {
+        let st = fs_stat(source) else |_| { return io }
+        if st[0] != 1 { return invalid }
+        walk(mut nodes, mut next, mut identities, source, "/", 2, attrs, excludes, epoch, 0)?
+    }
+    for i in 0..nodes.len {
+        if nodes[i].kind == 1 {
+            var links = 2
+            for j in 1..nodes.len {
+                if nodes[j].kind == 1 && nodes[j].parent == nodes[i].ino { links += 1 }
+            }
+            if links > 65535 { return invalid }
+            nodes[i].links = links
+        }
+    }
+    nodes
+}
+
+fn has_attrs(attrs: Map[str, Meta], path: str) -> bool {
+    let _entry = attrs[path] else |_| { return false }
+    true
+}
