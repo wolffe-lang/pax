@@ -1233,3 +1233,26 @@ kernels: none consulted.
   followed. The source archive includes pack's original GPL licence and
   training-data policy and is installed beside the optional binary.
   Pack is static glibc on Ubuntu 24.04, not a musl build.
+
+## px80: the linker respin (pax#172)
+
+No kernel source and no libc source was read; the kernel is unchanged in
+this lane. LLVM's release tarball was compiled, never read: the lane's
+only contact with its tree was `tar` extracting five top-level
+directories, `cmake` and `ninja`, and copying out the licence files the
+bundle carries. lld's behaviour was observed only as a black box, its
+argv and its answers (the control on the kernel, the links of hello,
+loop and signal, the compressed-section rows). Permissively licensed
+kernels: none consulted.
+
+| source | version | licence | how | used for |
+|---|---|---|---|---|
+| `llvm-project-18.1.8.src.tar.xz` (LLVM's GitHub release `llvmorg-18.1.8`; sha256 `0b58557a…db2f2a`, 132,067,260 bytes, signed by LLVM's release key `474E2231 6ABF4785 A88C6E8E A2C794A9 86419D8A`, the key list at releases.llvm.org) | 18.1.8 | Apache-2.0 WITH LLVM-exception | compiled, never read (`notes/px80/build-lld.sh`); its `LICENSE.TXT` files and the Support library's third-party notices copied into the bundle | the dev ISO's static `ld.lld` |
+| Homebrew's `llvm@18` formula (formulae.brew.sh's JSON) | 18.1.8 | BSD-2-Clause (the formula) | read: its published sha256 of the same tarball | a second, independent record of the tarball's digest |
+| Alpine 3.20 (`alpine@sha256:d9e853e8…`) packages: clang17 17.0.6-r1, lld 17.0.6-r0, libc++ and compiler-rt 17.0.6-r1, llvm-libunwind 17.0.6-r1, llvm17 17.0.6-r2 (its `llvm-objcopy`), musl-dev 1.2.5-r4, zlib-static 1.3.2-r0, zstd-static 1.5.6-r0, cmake 3.29.3-r0 | as listed | as each package's | run: the build environment (`notes/px80/Containerfile.lld`); musl-dev's CRT and `libc.a` as shipped (zlib-compressed debug sections), decompressed by `llvm-objcopy` | the build; the compressed-sysroot rows; the bundle sysroot's provenance |
+| Ubuntu 24.04 `lld-18` 1:18.1.3-1ubuntu1, `clang-18`, binutils 2.42 (px65's container, `notes/px65/Containerfile`) | as listed | Apache-2.0 WITH LLVM-exception; GPL-3.0 | run | row (c) of the control, every link's reference in `notes/px80/lld-wrap`; the zlib and zstd test objects (`ld.lld -r --compress-debug-sections=`) |
+| the static lld 17.0.6 and the bundle's `cc` and sysroot, from the playground's `pax-dev.iso` (px65's, `02f979be…`) | 17.0.6 | as px60 | run, each file held to `user/wolf-link.sums` twice | row (a) of the control; the bundle's unchanged members |
+| Rust 1.97.1 (px57-rust) | 1.97.1 | MIT OR Apache-2.0 | run: cc rebuilt to its recorded bytes; its musl target's `libunwind.a` as shipped; its `share/doc/rust` licences copied into the bundle | W0 link; the provenance row; the bundle's licences |
+| musl 1.2.5's release tarball (musl.libc.org, its `.asc` against `musl.pub`) | 1.2.5 | MIT | its `COPYRIGHT` member alone extracted; no source member opened | the bundle's licence for the sysroot and for the musl inside `ld.lld` and `cc` |
+| zlib 1.3.2's and zstd 1.5.6's release tarballs (zlib.net, held to Alpine 3.20's APKBUILD sha512; GitHub's `facebook/zstd` release, its `.sha256`) | 1.3.2, 1.5.6 | Zlib; BSD-3-Clause | the `LICENSE` member alone extracted | the bundle's licences for the compression code inside `ld.lld` |
+| GnuPG 2.4.9 (kasumi), in a scratch keyring | 2.4.9 | GPL-3.0 | run | the two signature checks |
