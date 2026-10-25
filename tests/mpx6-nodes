@@ -72,7 +72,10 @@
 #   N5 raw writes: odd lengths and offsets read back, across the end
 #      short, at and past it -ENOSPC, a partition's window, a read-only
 #      disk -EPERM: the guest's; vdb's and vdc's images unchanged after
-#      (every byte written was put back).
+#      (every byte written was put back); on the gpt boot, a file sent
+#      onto vdb2 by sendfile(2) and through a pipe by splice(2), read
+#      back, both short across the end, and copy_file_range(2)'s answer:
+#      the guest's.
 #   N6 holds: BLKRRPART -EBUSY with a partition open or mounted, 0 with
 #      the disk open, -EINVAL on a partition; O_EXCL against O_EXCL and
 #      against a mount both ways (R-px79-3); a raw write to vda while
@@ -80,7 +83,9 @@
 #      clean after.
 #   N7 BLKPG: ADD_PARTITION and DEL_PARTITION, their refusals (a number in
 #      use, an overlap, past the end, a partition's node, a number no
-#      partition has, an open one) and the table read again: the guest's.
+#      partition has, an open one) and the table read again (vda3, added
+#      in the disk's free end, gone after it; vda1 and vda2 the table's
+#      again): the guest's.
 #   N8 the second disk: a pattern written to every sector of a third
 #      disk through its node and read back (the guest's lines), and the
 #      host reads it from the image: every sector the pattern
@@ -533,6 +538,7 @@ for leg in $legs; do
         cmp -s "$images/disks/gpt-head.bin" <(dd if="$dw/b.img" bs=512 count=34 status=none) || why+=" the first 34 sectors are not the table's;"
         cmp -s "$images/disks/gpt-tail.bin" <(dd if="$dw/b.img" bs=512 skip=32735 count=33 status=none) || why+=" the last 33 are not the table's;"
         [ -z "$why" ] && say "PASS N9 $id (the host): vdb's first 34 and last 33 sectors are tools/mkgpt's" || bad "N9 $id (the host):$why"
+        held N5 "$id" gpt send
         held N10 "$id" gpt mount
         if e2clean "$dw/b.img" 10240 16384; then
             say "PASS N10 $id (e2fsck): vdb2 clean after its mount by node: $(tail -n 1 "$dw/b.img.part.fsck")"

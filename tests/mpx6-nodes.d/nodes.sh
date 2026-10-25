@@ -58,6 +58,7 @@ echo "== blkpg"
 /bin/nodes add /dev/vda 5 1048576 1048576
 /bin/nodes add /dev/vda 6 67108864 512
 /bin/nodes add /dev/vda 7 512 512
+/bin/nodes add /dev/vda 3 52428800 1048576
 /bin/nodes add /dev/vda 1 1048576 1048576
 /bin/nodes add /dev/vda1 8 512 512
 /bin/nodes sys
