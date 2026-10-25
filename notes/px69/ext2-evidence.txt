@@ -1,0 +1,36 @@
+Item 3, formatter and explicit root leg
+
+ext2-linux.log: 13 PASS, 0 SKIP. Exact e2tree equality against tools/mkdisk
+--from (same source and attrs), covering 400-entry directory growth,
+sparse/direct/single/double-indirect maps, hard links, fast/slow symlinks,
+high owners and times past 2038. Default inode counts, group geometry and
+reserved blocks measured over 8-1024 MiB; UUID/hash seed match, repeat bytes
+match. A short final directory record is rejected by e2fsck (red control).
+
+ext2-root.log: all applicable mpx6-root rows pass on native/release and
+SeaBIOS/OVMF. R8e is live; the journal-only R8 is skipped explicitly on
+all four legs, aggregate 4 SKIP. R-px69-5 A: explicit --fstype ext2 and
+PAX_EXT2_WRITER; the independent Linux reference always unsets that writer.
+New Linux 7.3.0-4 recordings are in tests/mpx6-root.d/linux-ext2; no existing
+golden was edited. ext3-control.log: unchanged default, native BIOS, PASS,
+0 SKIP. The first control attempt lacked its Linux side; its recipe was
+fixed to record that side, then only the control and updated skip-counter
+legs were rerun. No kernel change was involved.
+
+R-px69-2 A: defaults measured, not guessed. 4 KiB blocks, 32768 blocks/group,
+256-byte inodes; inode ratio 4096 below 512 MiB, 16384 from 512 MiB, rounded
+to whole inode-table blocks per group. Reserved blocks floor(blocks/20).
+--inodes supports mkdisk's explicit root inode budget. Features filetype,
+sparse_super and large_file only: no resize inode or indexed directories.
+
+paxext2 remains ext2. px68's tools/mkdisk --gpt --root adds ext3 by default;
+--no-journal selects ext2. PAX_EXT2_WRITER rejects a journalled request.
+A future paxext2 --journal is a separate formatter feature, not a bit flip.
+
+Limits: 4 KiB blocks; 8 MiB-4 GiB volume; up to 4 GiB minus one per file;
+UTF-8 source names, files/directories/symlinks, no special file nodes;
+--exclude /PATH leaves that directory but omits its contents. Non-empty
+source lost+found is refused unless explicitly excluded. There is no
+incremental mutation interface or power-cut transaction. Images or raw
+partitions must be offline. The installed playground tree and Linux
+find -printf witness are subsequent rows, not implied by this unit fixture.

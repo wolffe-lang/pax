@@ -124,7 +124,7 @@ EPOCH=1700000000
 SIZE=128M
 work=$PAX_BUILD/mpx6-root
 runs=$PAX_BUILD/mpx6-root-runs.txt
-fail=0 ran=0
+fail=0 ran=0 skipped=0
 bad() { say "FAIL $*"; fail=1; }
 
 static_ok() {
@@ -363,6 +363,7 @@ for leg in $legs; do
             bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
         else
             say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+            skipped=$((skipped + 1))
         fi
         continue
     fi
@@ -566,6 +567,7 @@ for leg in $legs; do
 
         else
             say "SKIP R8 $id: ext2 has no journal; the ext2 crash contract is R8e"
+            skipped=$((skipped + 1))
         fi
 
         # --- R8e: px67's power cut on an ext2 root (--no-journal) ----------------------
@@ -620,6 +622,7 @@ for leg in $legs; do
     done
 done
 cat "$runs"
+say "mpx6-root: $skipped rows said SKIP (fstype=$fstype)"
 [ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
 [ "$fail" = 0 ] && say "mpx6-root: PASS" || say "mpx6-root: FAIL"
 exit "$fail"

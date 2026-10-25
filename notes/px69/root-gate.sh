@@ -48,6 +48,7 @@ INNER
 cp -a "$L/root/ext2/mpx6-root" "$L/root/control/mpx6-root"
 step linux-ext2 env PAX_BUILD="$L/root/ext2" "$P/tests/mpx6-root" --only linux --fstype ext2 --images "$L/root/ext2/mpx6-root" --record
 step root-ext2 env PAX_BUILD="$L/root/ext2" PAX_EXT2_WRITER="$L/bin/paxext2" "$P/tests/mpx6-root" --fstype ext2 --images "$L/root/ext2/mpx6-root" --tier both --firmware both --rows all
+step linux-ext3-control env PAX_BUILD="$L/root/control" "$P/tests/mpx6-root" --only linux --images "$L/root/control/mpx6-root"
 step root-ext3-control env PAX_BUILD="$L/root/control" "$P/tests/mpx6-root" --images "$L/root/control/mpx6-root" --tier native --firmware bios --rows all
 sha256sum -c "$L/root/source.sha256" > "$L/root/source.verify"
 du -sh "$L" "$L/root"
