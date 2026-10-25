@@ -1,7 +1,7 @@
 # px68 — the journal: `/` survives a power cut (pax#150)
 
 Crawl 54, Opus 5.5. Contract `sprints/pax/68-the-journal/px68-the-journal.md`
-(pax#150). The prediction was committed first (`a594343c`,
+(pax#150). The prediction was committed first (`fe2125ae`,
 `notes/px68/prediction.txt`). Branch `px68` from `origin/trunk`
 `54570380` (px67's merge). The final head, its `tier pr` run and the
 lane-audit line are the PR's; this note is the lane's record of what was
@@ -237,7 +237,7 @@ QEMU's trace with `-msg timestamp=on`; TCG, the host's clock): the three
 boots replayed 1 transaction of 44 blocks, 2 of 91 and 4 of 193, and each
 halted; `replay-time.py` found no line of the shape it reads (`PID@SEC.USEC:event`)
 in QEMU 11.1.2's trace, and the script had deleted each trace after
-reading it, so the span is not measured (`6116e79b` keeps an unread
+reading it, so the span is not measured (`b0cf48f9` keeps an unread
 trace and prints its first line: a re-run is a local job to schedule).
 The boots' own times, from qemu-halt's records: 1.73, 1.84 and 1.84 s
 from QEMU's start to the halt, against 1.71 s for J3's 50-block replay
@@ -249,28 +249,28 @@ and 1.91 s for J4's boot of the replay disk with an empty log (b1).
 | batch | suite | tree | result |
 |---|---|---|---|
 | b1 | mpx6-journal (Linux side recorded) | `e15979b9` | 20 PASS, 0 FAIL, 1,283 s (J7 the 12-kill row with the torn one: 12 lost writes, 0 counts, 0 orphans, 0 worse) |
-| b1 | mpx6-root (Linux side re-recorded) | `e15979b9` | 27 PASS, 2 rows red: R6 (the guest's ext3 remount prints `EXT4-fs (vda2): re-mounted <uuid> r/w.` on the console in the middle of the probe's `mount(…) = 0` line, which ext2 under 7.2.8 never did: `ba9fdaf4` takes such a message out of the probe's lines) and R8 (its recovery-line count was a basic expression with `+` and `?`: `90147bc9`) |
+| b1 | mpx6-root (Linux side re-recorded) | `e15979b9` | 27 PASS, 2 rows red: R6 (the guest's ext3 remount prints `EXT4-fs (vda2): re-mounted <uuid> r/w.` on the console in the middle of the probe's `mount(…) = 0` line, which ext2 under 7.2.8 never did: `4e327da4` takes such a message out of the probe's lines) and R8 (its recovery-line count was a basic expression with `+` and `?`: `5e5f18ad`) |
 | b1 | mpx6-ext2, mpx6-part, mpx6-blk | `e15979b9` | 18, 93 and 14 PASS, 0 FAIL |
-| b3 | mpx6-root (Linux side re-recorded again) | `ee3f153f` | 30 PASS, 0 FAIL, 199 s |
+| b3 | mpx6-root (Linux side re-recorded again) | `ee3f153f` (`d8db08b1` after the rebase) | 30 PASS, 0 FAIL, 199 s |
 
 **The guest's records.** `tests/mpx6-journal.d/linux/` (new: Linux
 7.3.0-4 with an ext3 root: the mount's lines, the table's `/`, a power
 cut's needs_recovery and `clean`, `recovery complete` at the next boot,
 the refusal of bit 0x80000000). `tests/mpx6-root.d/linux/` re-recorded
 by the suite's own `--record` (R-px68-5), never edited; its diff against
-px67's 7.2.8 ext2 record (`fbc8a057`):
+px67's 7.2.8 ext2 record (`5921c0ea`):
 - `meta`: `Linux 7.3.0-4-cachyos on QEMU (tools/linux-root --fstype ext3;
   notclean-ext2.txt: --fstype ext2)`;
 - `guest.session`: `/` is `ext3` in every table (mountinfo, mounts,
   mtab, the read-only and read-write turns); statfs `/` 4731 blocks, 4516
   free, 4209 available, against ext2's 5755, 5542, 5235 (the journal's
-  1,024 blocks out of f_blocks, as `44152b95` makes PAX's); mount ids
+  1,024 blocks out of f_blocks, as `510483ba` makes PAX's); mount ids
   and anonymous devices renumbered; devtmpfs' size 224412k; every
   call's answer the same;
 - `guest.kernel`: `mounting ext3 file system using the ext4 subsystem`,
   `r/w with ordered data mode`, `Mounted root (ext3 filesystem)`, the
   same five remounts. Taken from b3's guest serial by the suite's line
-  153 after `47d69b50` (a message inside a probe line taken from its
+  153 after `44054da6` (a message inside a probe line taken from its
   stamp); the line before it gave the record's first bytes from the same
   serial (sha `53c47ec8…`, two remount lines with the probe's text in
   front), and the session script gives `guest.session` byte for byte
@@ -301,6 +301,20 @@ clean, and debugfs reads the four files. At the merge the maintainer's
 `pax-disk.img` (R-px68-3, adopted; the orchestrator's step).
 
 ## 8. CI
+
+**The rebase.** px70 (pax#162, the framebuffer console) merged at
+`09471da4` after every run in this note, and the lane was rebased onto
+it: its change is kernel/console, kernel/screen, boot/screen.S and the
+screen suites, and of this lane's files only README.md and
+docs/SOURCES.md, where both lanes' sections stand. The commits this note
+cites are the rebased ones; a run's, a batch's or a snapshot's head is the
+sha it ran at, before the rebase, with its twin after it: `660656e3`
+(c1's kernel) `376af5e2`, `e15979b9` (b1, the playground's snapshot)
+`eae0c96d`, `6868cbfe` `28810963`, `39775f58` (the plants' base) `bb799389`,
+`ee3f153f` (b3, c2's kernel and probe) `d8db08b1`, and the PR's first head
+`fd01f6f5` `733605d7`. The PR's runs at the rebased head are the merge's
+evidence.
+
 
 Dispatches `-f tier=pr -f suites=mpx6-journal` (a partial run: the
 `all` rows, 12 kills of 1,500 operations and the torn row):
@@ -343,7 +357,7 @@ is read from QEMU's trace and why J10 cuts a replay on purpose.
   E, F, H, I: `jorder: replay: OUT OF ORDER: the log emptied before …`).
   The contract names the e2fsck row; a replay that runs to its end
   leaves the same disk whatever its order, so J3's e2fsck stays green
-  under this plant, and J10 was added (`39775f58`) to make the row the
+  under this plant, and J10 was added (`bb799389`) to make the row the
   contract names: a replay cut part-way by QEMU's blkdebug failing one
   block's write, then e2fsck -fn and the tree after the next boot.
 
