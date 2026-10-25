@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # disktools — run one of the partition and FAT tools (sfdisk, sgdisk,
-# mkfs.fat, fsck.fat, mcopy, mmd, mdir, blkid) on an image, from the
+# mkfs.fat, fsck.fat, mcopy, mmd, mdir, mtype, blkid) on an image, from the
 # container image tools/e2fs pins, with user/disktools.pin's packages
 # (px66): the host's own tools are never used, so every host (kasumi,
 # the CI runner) runs the same builds and an image's bytes and a dump's
@@ -19,6 +19,8 @@
 # own util-linux. The container has no network (but for the one fetch
 # run, which uses curl on the host) and runs as root inside its own user
 # namespace (rootless podman) or as the caller (CI's Docker).
+# PAX_DISKTOOLS_LOCALE selects the oracle locale (default C); UTF-8 name
+# differentials request C.UTF-8 explicitly.
 # SOURCE_DATE_EPOCH is passed through (mkfs.fat's --invariant and
 # mtools' times read it), TZ is UTC (FAT keeps local times). --version
 # prints the image, each package's version and its programs' sha256.
@@ -74,7 +76,7 @@ O=/opt/pax-disktools
 run=("$engine" run --rm --network none "${opts[@]}" -v "$store/root:$O:ro"
      -e "PATH=$O/usr/sbin:$O/usr/bin:$O/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
      -e "LD_LIBRARY_PATH=$O/usr/lib/x86_64-linux-gnu:$O/lib/x86_64-linux-gnu"
-     -e TZ=UTC -e MTOOLS_SKIP_CHECK=1)
+     -e TZ=UTC -e "LC_ALL=${PAX_DISKTOOLS_LOCALE:-C}" -e MTOOLS_SKIP_CHECK=1)
 [ -z "${SOURCE_DATE_EPOCH:-}" ] || run+=(-e "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH")
 
 if [ "${1:-}" = --version ]; then
@@ -85,7 +87,7 @@ fi
 [ $# -ge 2 ] || die "usage: disktools DIR PROGRAM [ARG...] | disktools --version"
 dir=$(cd "$1" && pwd); shift
 case $1 in
-    sfdisk|sgdisk|mkfs.fat|fsck.fat|mcopy|mmd|mdir|minfo|blkid) ;;
-    *) die "not one of sfdisk, sgdisk, mkfs.fat, fsck.fat, mcopy, mmd, mdir, minfo, blkid: $1" ;;
+    sfdisk|sgdisk|mkfs.fat|fsck.fat|mcopy|mmd|mdir|mtype|minfo|blkid) ;;
+    *) die "not one of sfdisk, sgdisk, mkfs.fat, fsck.fat, mcopy, mmd, mdir, mtype, minfo, blkid: $1" ;;
 esac
 exec "${run[@]}" -v "$dir:$dir" -w "$dir" "$IMAGE" "$@"
