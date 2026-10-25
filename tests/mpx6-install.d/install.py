@@ -19,7 +19,7 @@ work.mkdir(parents=True,exist_ok=True)
 source=work/'source'; source.mkdir()
 dt=lane/'build/disktools';full=lane/'build/full'
 kernel=Path((dt/(os.environ.get('PAX_INSTALL_TIER','native')+'.elf.path')).read_text().strip())
-cache=Path(os.environ.get('PAX_CACHE',lane/'cache'))
+cache=Path(os.environ.get('PAX_CACHE',repo/'.pax-cache'))
 
 def run(args,ok=True):
     p=subprocess.run([str(x) for x in args],capture_output=True)
