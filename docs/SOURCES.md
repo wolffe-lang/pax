@@ -1256,3 +1256,24 @@ kernels: none consulted.
 | musl 1.2.5's release tarball (musl.libc.org, its `.asc` against `musl.pub`) | 1.2.5 | MIT | its `COPYRIGHT` member alone extracted; no source member opened | the bundle's licence for the sysroot and for the musl inside `ld.lld` and `cc` |
 | zlib 1.3.2's and zstd 1.5.6's release tarballs (zlib.net, held to Alpine 3.20's APKBUILD sha512; GitHub's `facebook/zstd` release, its `.sha256`) | 1.3.2, 1.5.6 | Zlib; BSD-3-Clause | the `LICENSE` member alone extracted | the bundle's licences for the compression code inside `ld.lld` |
 | GnuPG 2.4.9 (kasumi), in a scratch keyring | 2.4.9 | GPL-3.0 | run | the two signature checks |
+
+## px81: friendly pelt at the consoles
+
+Pelt launch trunk `0b5eaa5394667c485de3a134f771c87024b68a3c` was read
+twice with `git ls-remote`. Only its `wolf-toolchain.toml`,
+`docs/FRIENDLY.md`, `docs/KEYS.md` and typed session inputs/expectations
+were consulted. No shell implementation, kernel, libc, grep, filesystem,
+bootloader or installer implementation from another project was read.
+Pelt is built unmodified by `tools/mkpelt` with its own wolf 0.2.35 pin.
+
+The typed fixture follows sh28's Alt-dot, sh29's history suffix, sh30's
+command/quote/shadow and sh31's Space abbreviation and history events.
+Default suggestions use SGR90 and resolving commands the default foreground.
+The separate custom palette `command=green:shadow=brblack+dim` exercises
+SGR2 explicitly, without changing the shipped defaults. PAX's own px70
+console rows are the framebuffer attribute reference. `stty` is the
+already-pinned BusyBox binary, used black-box solely for window dimensions.
+
+`tools/census/inside/pins.sh` now records this pelt launch tree; C4 in
+`tests/census` compares it with `user/pelt.pin`. Neither a later upstream
+commit nor a network failure changes this deterministic identity check.
