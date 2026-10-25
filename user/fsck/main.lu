@@ -208,8 +208,13 @@ fn pass1(mut v: Volume) -> () ! {io, full} {
         region inode {
             let kind = v.nodes[ino].kind
             let raw = copy v.nodes[ino].raw
+            if kind != 4096 && kind != 8192 && kind != 16384 && kind != 24576 && kind != 32768 && kind != 40960 && kind != 49152 && ino != 1 {
+                refuse(mut v, "inode {ino}: unknown inode type"); continue
+            }
+            if u(raw, 112, 4) != 0 { refuse(mut v, "inode {ino}: fragment address"); continue }
             if u(raw, 104, 4) != 0 { refuse(mut v, "inode {ino}: external attribute block verification"); continue }
             if u(raw, 32, 4) & 0x10080000 != 0 { refuse(mut v, "inode {ino}: inline data or extent map"); continue }
+            if kind == 16384 && u(raw, 32, 4) & 4096 != 0 { refuse(mut v, "inode {ino}: indexed directory validation"); continue }
             let size = u(raw, 4, 4)
             if kind == 40960 && size <= 60 && u(raw, 28, 4) == 0 { continue }
             if kind != 16384 && kind != 32768 && kind != 40960 && ino != 1 { continue }
@@ -429,6 +434,7 @@ fn pass3(mut v: Volume) -> () ! {io, full} {
         if report(mut v, "Unattached inode {ino}; connect to /lost+found", false) {
             insert(mut v, lost, ino, "#{ino}")?
             if v.nodes[ino].kind == 16384 {
+                if v.nodes[ino].data.len == 0 { refuse(mut v, "directory {ino}: no directory blocks"); continue }
                 let block = v.nodes[ino].data[0]
                 var b = read_at(v, block * v.bs, v.bs)?
                 let next = u(b, 4, 2)
@@ -438,8 +444,12 @@ fn pass3(mut v: Volume) -> () ! {io, full} {
         }
     }
     links(mut v)?
-    for ino in v.firstino..v.nodes.len {
-        if v.nodes[ino].live && !v.nodes[ino].reached && v.nodes[ino].kind == 16384 { refuse(mut v, "directory {ino}: disconnected cycle") }
+    for ino in 2..v.nodes.len {
+        if !v.nodes[ino].live || v.nodes[ino].kind != 16384 { continue }
+        if !v.nodes[ino].reached { refuse(mut v, "directory {ino}: disconnected cycle"); continue }
+        if find_name(v, ino, ".")? != ino { refuse(mut v, "directory {ino}: missing or incorrect '.'") }
+        let parent = if ino == 2 then 2 else v.nodes[ino].parent
+        if parent == 0 || find_name(v, ino, "..")? != parent { refuse(mut v, "directory {ino}: missing or incorrect '..'") }
     }
 }
 fn pass4(mut v: Volume) {
@@ -520,6 +530,7 @@ fn check(fd: int, mode: int, epoch: int) -> int ! {io, invalid, unsupported, ful
         io => { return io },
     }
     if recovered { v = open_volume(fd, mode, epoch)? }
+    if u(v.sb, 232, 4) != 0 { print("unsupported: nonempty on-disk orphan chain; no repair committed"); return 4 }
     pass1(mut v)?
     pass2(mut v)?
     pass3(mut v)?
@@ -558,12 +569,12 @@ fn main() -> int {
     // O_EXCL without O_CREAT refuses mounted block devices on Linux and
     // PAX. No create, no truncate; regular files also take an advisory lock.
     // # Safety: the private pathname is terminated; flags never create or truncate.
-    let rawfd = unsafe { px72_open(if mode == 0 then 524288 else 524418) }
+    let rawfd = unsafe { px72_open(if mode == 0 then 526336 else 524418) }
     if rawfd < 0 { eprint("fsck.ext2: cannot open device, errno {0 - rawfd}"); return 8 }
     defer raw_close(rawfd)
     // Builtins use runtime handles, not native descriptor numbers. Reopen
     // the held descriptor through procfs while retaining its exclusive claim.
-    let fd = fs_open_mode("/proc/self/fd/{rawfd}", if mode == 0 then 0 else 3) else |_| { eprint("fsck.ext2: cannot adopt held descriptor"); return 8 }
+    let fd = fs_open_mode("/proc/self/fd/{rawfd}", if mode == 0 then 5 else 3) else |_| { eprint("fsck.ext2: cannot adopt held descriptor"); return 8 }
     defer fs_close(fd) else |_| {}
     let st = fs_fstat_record(fd) else |_| { return 8 }
     if st[0] != 0 && st[0] != 7 { eprint("fsck.ext2: not a regular image or block device"); return 8 }

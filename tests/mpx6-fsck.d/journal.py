@@ -46,18 +46,22 @@ def main():
         oracle, wolf = a.work / (name + '.oracle.img'), a.work / (name + '.wolf.img')
         shutil.copyfile(damaged, oracle)
         shutil.copyfile(damaged, wolf)
+        original = damaged.read_bytes()
+        en = run(['e2fsck', '-fn', oracle])
+        wn = run([a.checker, '-fn', wolf])
+        unchanged = wolf.read_bytes() == original
         ep = run(['e2fsck', '-fy', oracle])
         wp = run([a.checker, '-fy', wolf])
         vp = run(['e2fsck', '-fn', wolf])
-        for phase, p in [('oracle', ep), ('wolf', wp), ('verify', vp)]:
+        for phase, p in [('oracle-report', en), ('wolf-report', wn), ('oracle', ep), ('wolf', wp), ('verify', vp)]:
             (a.work / (name + '.' + phase + '.log')).write_bytes(p.stdout)
         eb, wb = oracle.read_bytes(), wolf.read_bytes()
         diffs = [i for i in range(len(eb)) if eb[i] != wb[i]]
         # Only wall-clock check/write timestamps and the mount counter are
         # non-layout choices; retain every other differing offset as a RED.
         unexpected = [i for i in diffs if not (1072 <= i < 1078 or 1088 <= i < 1092)]
-        okay = ep.returncode == wp.returncode and vp.returncode == 0 and not unexpected
-        result = {'case': name, 'oracle_rc': ep.returncode, 'wolf_rc': wp.returncode,
+        okay = unchanged and en.returncode == wn.returncode and ep.returncode == wp.returncode and vp.returncode == 0 and not unexpected
+        result = {'case': name, 'report_unchanged': unchanged, 'oracle_report': en.returncode, 'wolf_report': wn.returncode, 'oracle_rc': ep.returncode, 'wolf_rc': wp.returncode,
                   'verify_rc': vp.returncode, 'byte_differences': len(diffs),
                   'unexpected_offsets': unexpected[:30], 'pass': okay}
         results.append(result)
