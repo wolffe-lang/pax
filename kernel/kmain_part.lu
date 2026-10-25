@@ -159,8 +159,10 @@ export fn kmain() {
     show_partitions(a)
     let ro = block.flags(0) & block.F_RO != 0
     let hh = frames.hhdm()
-    var d: u64 = 1
-    while d < block.count() {
+    // px79: disk vda's partitions by number (block.DPD records a disk,
+    // free ones among them)
+    var d = block.next_part(0, 0)
+    while d != block.DEVS {
         let st = block.start_of(d)
         let n = block.sectors(d)
         let bad = check(d, 0, b, st, 0) + check(d, n - 1, b, st + n - 1, 0)
@@ -195,7 +197,7 @@ export fn kmain() {
             log.dec((st + n - 1) as int)
         }
         log.end()
-        d += 1
+        d = block.next_part(0, block.partno(d))
     }
     if !ro {
         let _f = block.flush(0)

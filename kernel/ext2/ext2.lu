@@ -523,7 +523,7 @@ fn refuse(what: str, x: u64) -> u64 {
 /// -EINVAL (no ext2 volume there, or one refused by name), -EIO. `now`:
 /// the wall clock, seconds since the epoch (the mount time).
 pub fn mount(dev: u64, ro: bool, now: u64) -> u64 {
-    if dev >= block.count() {
+    if !block.present(dev) {
         return neg(ENODEV)
     }
     if !ready() {
@@ -1104,7 +1104,7 @@ pub fn recovered(v: u64) -> u64 {
 /// `LABEL=` (blkid(8)'s names for them). The buffer is forgotten again.
 /// A device of fewer than 4 sectors has none (nothing is asked).
 pub fn probe(dev: u64) -> (bool, u64, u64) {
-    if dev >= block.count() || block.sectors(dev) < 4 || !ready() {
+    if !block.present(dev) || block.sectors(dev) < 4 || !ready() {
         return (false, 0, 0)
     }
     let p = block.get(dev, 1, 1024)
@@ -1135,7 +1135,7 @@ pub fn probe(dev: u64) -> (bool, u64, u64) {
 /// px68: whether device `dev` holds an ext2 superblock with has_journal
 /// (an ext3 volume): the buffer forgotten again.
 pub fn has_journal(dev: u64) -> bool {
-    if dev >= block.count() || block.sectors(dev) < 4 || !ready() {
+    if !block.present(dev) || block.sectors(dev) < 4 || !ready() {
         return false
     }
     let p = block.get(dev, 1, 1024)
