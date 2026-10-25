@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# mkclef — build clef, the assembler in wolf (wolffe-lang/clef: GNU-as
+# AT&T x86-64 source to ELF relocatable objects; as01 held the kernel's
+# seventeen assembly objects per tier to GNU as's), as a fully static
+# x86-64 Linux executable, unmodified, from clef's own tree (as02b).
+#
+#   tools/mkclef OUTDIR
+#
+# The aspen and scent builders' twin (px57's, px64's). The tree is
+# user/clef.pin's commit of wolffe-lang/clef (public), fetched from
+# PAX_CLEF_REPO when it is set (a local clone or cache that holds the
+# commit) and from CLEF_REPO otherwise; HEAD is refused unless it is
+# CLEF_REV. Nothing of clef's tree is kept. The toolchain is the one THAT
+# tree pins in its wolf-toolchain.toml ([wolf] version and sha256, the
+# release archive for x86_64-unknown-linux-gnu), held to the image's: the
+# digest is refused unless it is kernel/wolf.pin's WOLF_SHA256 (the
+# archive every kernel and every user tool of the image is built from),
+# read twice, and `wolf --version` unless it is that pin's line; the
+# runtime (`libwolf_rt.a`) is left beside `wolf`, as the archive lays it
+# out, and its digest recorded: tests/mpx5-clef's Q0 holds it to the
+# image's. clef's manifest names no dependency, so no std is read (a
+# `deps` line in src/wolf.pkg is refused).
+#
+# clef is built as its own tools/gate builds it (`wolf build
+# --deny-warnings src/clef.lu -o target/clef`: the native tier, the
+# binary clef's gates measure), with the user tools' differences: a `cc`
+# first on PATH that adds `-static` (wolf has no `--static`), and
+# `--no-cache`. TWICE, each from a fresh checkout of its own at ONE path
+# (the native tier's DWARF names the directory it was built in, so two
+# paths differ in the debug sections alone: notes/as02b); the two digests
+# must agree. The binary is checked static (readelf: ET_EXEC, no
+# PT_INTERP, no dynamic section) and run once (`--version`).
+# `OUTDIR/sums.txt` gets `clef <sha256> <bytes>`, `libwolf_rt.a <sha256>
+# <bytes>` (the runtime it links) and `wolf-archive <sha256> <bytes>`;
+# the stripped size is printed (the binary installed is the unstripped
+# one: unmodified).
+#
+# Build on a baseline x86-64 glibc (the CI runner's Ubuntu; an Ubuntu
+# container on kasumi), never on kasumi's CachyOS x86-64-v4 glibc (px10).
+# Exit 0, 1 when the two builds differ, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkclef OUTDIR"
+out=$1
+need git curl tar readelf strip cc
+. "$PAX_ROOT/user/clef.pin"
+[ -n "${CLEF_REPO:-}" ] && printf '%s' "${CLEF_REV:-}" | grep -Eq '^[0-9a-f]{40}$' \
+    || die "user/clef.pin must set CLEF_REPO and CLEF_REV (a full 40-hex sha, never a branch)"
+load_wolf_pin
+[ "$WOLF_PIN_KIND" = release ] || die "kernel/wolf.pin is not a release pin; the package is held to the image's release archive"
+mkdir -p "$out" "$PAX_CACHE"
+out=$(cd "$out" && pwd)
+
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-clef.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+
+tree() { # repo rev dir
+    mkdir -p "$3"
+    git -C "$3" init -q
+    git -C "$3" fetch -q --depth 1 "$1" "$2" || die "cannot fetch $1 at $2"
+    git -C "$3" checkout -q --detach FETCH_HEAD
+    [ "$(git -C "$3" rev-parse HEAD)" = "$2" ] || die "$1: HEAD is not $2"
+}
+
+# clef at the pin, and what it pins.
+src=${PAX_CLEF_REPO:-$CLEF_REPO}
+tree "$src" "$CLEF_REV" "$w/src/clef"
+toml=$w/src/clef/wolf-toolchain.toml
+key() { # section key
+    awk -v s="[$1]" -v k="$2" '
+        /^\[/ { on = ($0 == s); next }
+        on && $1 == k { v = $0; sub(/^[^=]*= *"?/, "", v); sub(/"? *$/, "", v); print v; exit }' "$toml"
+}
+wv=$(key wolf version)
+wsha=$(key wolf sha256)
+[ -n "$wv" ] && [ -n "$wsha" ] || die "cannot read [wolf] version and sha256 from clef's wolf-toolchain.toml"
+[ "$wv" = "$WOLF_VERSION" ] && [ "$wsha" = "$WOLF_SHA256" ] \
+    || die "clef $CLEF_REV pins wolf $wv ($wsha); the image's is $WOLF_VERSION ($WOLF_SHA256, kernel/wolf.pin)"
+if grep -Eq '^[[:space:]]*deps[[:space:]]*:' "$w/src/clef/src/wolf.pkg"; then
+    die "clef's src/wolf.pkg names dependencies; this builder stages no std"
+fi
+wline="wolf $WOLF_VERSION (wolfgang, pin ${WOLF_PIN_COMMIT:0:7})"
+say "clef $CLEF_REV pins wolf $wv (${wsha:0:8}…), the image's archive; no std"
+
+# wolf, by that digest (cached by digest), read twice.
+arc=$PAX_CACHE/wolf-$wv-$wsha.tar.gz
+if [ ! -f "$arc" ] || [ "$(sha256_of "$arc")" != "$wsha" ]; then
+    curl -sSfL --retry 3 -o "$arc.part" "$WOLF_URL" || die "cannot download wolf $wv"
+    mv "$arc.part" "$arc"
+fi
+for k in 1 2; do
+    have=$(sha256_of "$arc")
+    [ "$have" = "$wsha" ] || die "wolf $wv archive, read $k: sha256 $have, the pin is $wsha"
+done
+say "wolf $wv archive: sha256 $wsha, read twice"
+mkdir -p "$w/wolf"
+tar -xzf "$arc" -C "$w/wolf" --strip-components=1
+wolf=$w/wolf/wolf
+rt=$w/wolf/libwolf_rt.a
+[ -x "$wolf" ] || die "the wolf $wv archive has no wolf"
+[ -f "$rt" ] || die "the wolf $wv archive has no libwolf_rt.a beside wolf"
+have=$("$wolf" --version | head -n 1)
+[ "$have" = "$wline" ] || die "wolf --version says '$have'; kernel/wolf.pin says '$wline'"
+say "$wline; libwolf_rt.a beside it ($(sha256_of "$rt"))"
+
+# The static `cc`.
+mkdir -p "$w/bin"
+real=$(command -v cc)
+printf '#!/bin/sh\nexec %s -static "$@"\n' "$real" > "$w/bin/cc"
+chmod +x "$w/bin/cc"
+
+# Two builds, each in a fresh checkout at the one path, the output path
+# as clef's own tools/gate gives it (relative, under the tree).
+for k in a b; do
+    if [ "$k" = b ]; then
+        rm -rf "$w/src/clef"
+        tree "$src" "$CLEF_REV" "$w/src/clef"
+    fi
+    (cd "$w/src/clef" && mkdir -p target && PATH="$w/bin:$PATH" \
+        "$wolf" build --no-cache --deny-warnings src/clef.lu -o target/clef) >&2 \
+        || die "wolf build of src/clef.lu (build $k)"
+    cp "$w/src/clef/target/clef" "$w/clef.$k"
+done
+one=$(sha256_of "$w/clef.a")
+two=$(sha256_of "$w/clef.b")
+if [ "$one" != "$two" ]; then
+    say "REFUSED: two builds differ: $one, then $two"
+    exit 1
+fi
+bin=$out/clef
+cp "$w/clef.a" "$bin"
+chmod 755 "$bin"
+readelf -hW "$bin" | grep -Eq 'Type: +EXEC' || die "clef is not ET_EXEC"
+! readelf -lW "$bin" | grep -q INTERP || die "clef has a PT_INTERP (not static)"
+readelf -dW "$bin" | grep -q "no dynamic section" || die "clef has a dynamic section"
+"$bin" --version >&2 || die "clef --version"
+: > "$out/sums.txt"
+printf '%s %s %s\n' clef "$(sha256_of "$bin")" "$(wc -c < "$bin" | tr -d ' ')" | tee -a "$out/sums.txt"
+printf '%s %s %s\n' libwolf_rt.a "$(sha256_of "$rt")" "$(wc -c < "$rt" | tr -d ' ')" | tee -a "$out/sums.txt"
+printf '%s %s %s\n' wolf-archive "$wsha" "$(wc -c < "$arc" | tr -d ' ')" | tee -a "$out/sums.txt"
+strip -o "$w/clef.stripped" "$bin"
+printf 'clef built twice, the same digest (%s); stripped: %s bytes, sha256 %s (not installed)\n' \
+    "$one" "$(wc -c < "$w/clef.stripped" | tr -d ' ')" "$(sha256_of "$w/clef.stripped")"
+printf 'linked against: %s\n' "$("$real" -print-file-name=libc.a)"
