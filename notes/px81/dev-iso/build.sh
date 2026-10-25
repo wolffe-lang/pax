@@ -18,3 +18,5 @@ for n in 1 2; do
  sha256sum "$W/base.iso" "$W/base.cpio" "$W/pelt" "$W/friendly.cpio" "$elf" "$W/pax-dev-pelt-friendly.iso" > "$W/readback-$n.sha256"
 done
 cmp "$W/readback-1.sha256" "$W/readback-2.sha256"
+
+bash notes/px81/dev-iso/boot.sh
