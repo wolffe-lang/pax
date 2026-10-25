@@ -6,7 +6,9 @@ PAX is a clean-room implementation of Linux's userspace ABI. It does not contain
 
 Users (P5, px38 to px47): PAX has accounts, root, `pax` (1000) and the service account `lobo` (990), in its image's `/etc/passwd` and `/etc/group`. There are no passwords yet and the image boots to root's shell; `su`, written in wolf (`user/su`), is root becoming a user, a user's `su` is refused as Linux refuses one who cannot authenticate, and a set-ID bit is not honoured, so privilege only drops. A process has Linux's real, effective, saved and file-system ids and a group list; a file has an owner, a group and a mode; and `open`, `exec`, every path walk, making, removing, renaming and linking a name, changing a mode, an owner or a time, signals, ports below 1024, raw sockets, the speaker, `/dev`'s nodes and `/proc`'s files are checked by Linux's rules, each rule measured against a real Linux (`tests/mpx5-users`, `tests/mpx5-accounts`). Since px47 every suite that runs programs on PAX — the tree, the shell, boreutils, Unix sockets, TCP, UDP, the speaker and lobo — runs them again as a user beside root, each run held byte for byte to the same binaries run as the same user on Linux. These checks are enforced for honest programs; not a boundary against an attacker: the kernel has never been fuzzed or audited, and it loads programs at fixed addresses. `login` waits for job control, and passwords for a memory-hard hash.
 
-Disk tools (px69): `paxgpt`, `paxfat` and `paxext2` are Wolf programs built as static Linux executables and run unchanged on PAX. They write GPT, FAT32/VFAT and an ext2 tree, including modes, owners, timestamps, symbolic links and hard links. The tests compare their output with sgdisk/sfdisk, dosfstools/mtools and e2fsprogs, then build a second disk entirely on PAX, written through its `/dev/vdb` node (px79), and boot it alone under SeaBIOS and OVMF. Limine's pinned installer is linked statically without changing its source; its Linux and PAX runs write identical bytes. `paxext2` does **not** add a journal: the existing host builder's ext3 default is unchanged. There is no guided installer yet. See `docs/BOOT.md`, “Writing a disk on PAX”, for the offline-disk interface and its bounds.
+Guided installation: `pax-install` inventories real block nodes, shows a read-only plan, and requires an exact target confirmation before writing. It offers an explicit **ext2 developer preview**, not a journalled installation: whole-disk fresh installs only, 512-byte sectors, root volumes up to 4 GiB. The running root's disk, mounted disks and read-only targets are refused. The flow asks for a user name and whether to install the games; pack is staged offline with its corresponding source and licences, and neither answer fetches anything. The installer and complete installed tree have been tested on separate QEMU virtio disks under BIOS and UEFI, including reboot persistence. This is not a claim about real-machine drivers or USB installation. See [Guided installation](docs/BOOT.md#guided-installation) for preparation, commands, logging and limits.
+
+Disk tools (px69): `paxgpt`, `paxfat` and `paxext2` are Wolf programs built as static Linux executables and run unchanged on PAX. They write GPT, FAT32/VFAT and an ext2 tree, including modes, owners, timestamps, symbolic links and hard links. The tests compare their output with sgdisk/sfdisk, dosfstools/mtools and e2fsprogs, then build a second disk entirely on PAX, written through its `/dev/vdb` node (px79), and boot it alone under SeaBIOS and OVMF. Limine's pinned installer is linked statically without changing its source; its Linux and PAX runs write identical bytes. `paxext2` does **not** add a journal: the existing host builder's ext3 default is unchanged. The guided installer calls these tools rather than embedding new formatters. See `docs/BOOT.md`, “Writing a disk on PAX”, for the offline-disk interface and its bounds.
 
 The block nodes and a second disk (px79): PAX drives up to four virtio disks, named `vda` to `vdd` in PCI slot order as Linux names them, and `/dev` holds a block special file for every disk and partition the block layer knows (`brw-------`, root's, Linux's numbers: 254:0, 254:1 … for `vda`, 254:16 for `vdb`, the extended major 259 past partition 15), made in memory at boot and as a table is read again, as devtmpfs makes them, never written into an image. A program opens a node and reads and writes it raw at any length and offset (the guest's answers: short across the end, ENOSPC past it, EPERM on a read-only disk; a write to `vda` while a partition of it is mounted is allowed, as on Linux), seeks it, fsyncs it, sends a file onto it by `sendfile` or `splice`, and asks the block ioctls (the sizes, the block sizes, BLKROGET, BLKFLSBUF, HDIO_GETGEO from the device's own geometry, BLKRRPART with Linux's EBUSY while a partition is open or mounted, BLKPG's add and delete); every other request is ENOTTY, named. `/proc/partitions`, `/sys/block` and `/sys/class/block` answer what lsblk and blkid read; `mount(2)` and `/etc/fstab` name a partition by its node (`/dev/vdb2`), and `/proc/mounts` prints the node. `tools/qemu-run` and `tools/qemu-halt` take `--drive FILE` (repeatable) for a second and third disk. Every row is held to Linux 7.3.0 on QEMU with the same disks and the same static probe (`tests/mpx6-nodes`), and a disk made blank on the host gets a GPT and an ext2 from PAX through its nodes.
 
@@ -74,6 +76,7 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
               /bin/egrep and /bin/fgrep); fstab-disk (px66: the
               table of the disk that boots, /home on /dev/vda2);
               disktools/ (px69: paxgpt, paxfat, paxext2, in Wolf);
+              install/ (guided installer, planner, UI, snapshot and executor);
               disktools.pin (px66: sfdisk, sgdisk, mkfs.fat, mtools,
               by digest); console/bore-files.keys and bore-text.keys
               (px65: boreutils' new utilities typed)
@@ -107,7 +110,8 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
               built twice to one digest by its own toolchain, and its
               two wrappers); mkgpt, disktools and
               mkdisktools, mklimine-static (px69: the static formatters and
-              unchanged Limine installer); linux-part (px66: a GPT or MBR table written
+              unchanged Limine installer); mkinstall, mkpack and mkinstall-payload
+              (static installer and offline games/boot manifest); linux-part (px66: a GPT or MBR table written
               reproducibly; the partition and FAT tools from
               user/disktools.pin in the pinned container; the Linux
               guest's partitions, /proc/partitions and blkid on an
@@ -117,7 +121,7 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
     tests/    scripted QEMU tests: proof, mkw (with M-KW's frozen kernels
               in mkw.d/), mpx1, mpx2-frames, mpx2-paging, mpx2-interrupts,
               mpx2-sched, mpx3-user, mpx3-loader, mpx3-boreutils, mpx3-console,
-              mpx3-screen, mpx3-speaker (px18), mpx3-threads (px26), mpx3-tree (px27), mpx3-sound (px30), mpx4-net (px20, px21), mpx4-udp (px22), mpx4-tcp (px23), mpx5-lope (px54), mpx6-blk and mpx6-ext2 (px63), mpx5-scent (px64), mpx6-part (px66), mpx5-bore (px65), mpx6-disktools (px69), gdb-attach,
+              mpx3-screen, mpx3-speaker (px18), mpx3-threads (px26), mpx3-tree (px27), mpx3-sound (px30), mpx4-net (px20, px21), mpx4-udp (px22), mpx4-tcp (px23), mpx5-lope (px54), mpx6-blk and mpx6-ext2 (px63), mpx5-scent (px64), mpx6-part (px66), mpx5-bore (px65), mpx6-disktools (px69), mpx6-install (guided installation), gdb-attach,
               expect-serial-selftest
     docs/     BOOT.md (the boot protocol, argued), SOURCES.md (the
               consulted-sources log), ABI notes as they come
@@ -163,6 +167,9 @@ PAX_WOLF=$(tools/fetch-wolf) tests/mpx6-blk    # px63: the virtio block device's
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx6-ext2   # px63: ext2 read, written and rebooted, held to Linux 7.2.8 on QEMU (live where the kernel is readable, else the record) and to e2fsck -fn (e2fsprogs in a container: docker or podman)
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx5-bore   # px65: boreutils' fourteen new utilities in /bin, a typed session per group as root and pax, held to the same binaries in a container and to their own rows
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx5-scent  # px64: scent as /bin/grep (an archive link), egrep and fgrep through pelt's #!, typed as root and pax, held to the same binaries in a container and to GNU 3.12's answers
+tools/mkinstall build/install                # static installer, Ubuntu 24.04 baseline
+tools/mkpack build/pack                      # pinned game and corresponding source/licences
+PAX_LOPE_REPO=/path/to/lope tests/mpx6-install --rows full --tier native --firmware bios
 tools/mkdisktools build/disktools             # px69: static paxgpt, paxfat and paxext2, baseline Linux
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx6-disktools --tier native --firmware bios  # format differentials and a disk built on PAX
 tools/mkdisk --home 128M pax-home.img          # px63: the disk an image mounts at /home (pax/ for the user pax), reproducible under SOURCE_DATE_EPOCH
