@@ -1,0 +1,50 @@
+$ mkdir /g/t && cd /g/t
+$ mkdir Script
+$ echo 'echo hi' > Script/greet.sh; chmod +x Script/greet.sh; ./Script/greet.sh
+hi
+$ echo st=$?
+st=0
+$ sh Script/greet.sh; echo st=$?
+hi
+st=0
+$ cp /bin/true t; ./t; echo st=$?
+st=0
+$ cp /bin/false f; ./f; echo st=$?
+st=1
+$ cat f > t; ./t; echo st=$?
+st=1
+$ printf '#!/bin/cat -n\nline two\n' > n.sh; chmod +x n.sh; ./n.sh; echo st=$?
+     1	#!/bin/cat -n
+     2	line two
+st=0
+$ printf '#!/bin/sh\necho "sh ran $0 with $# args: $*"\n' > s.sh; chmod +x s.sh;
+ ./s.sh one two; echo st=$?
+sh ran ./s.sh with 2 args: one two
+st=0
+$ printf '#!/g/t/n.sh\n' > d1; chmod +x d1; ./d1; echo st=$?
+     1	#!/bin/cat -n
+     2	line two
+     3	#!/g/t/n.sh
+st=0
+$ printf '#!/g/t/d1\n' > d2; printf '#!/g/t/d2\n' > d3; printf '#!/g/t/d3\n' > d
+4; printf '#!/g/t/d4\n' > d5; chmod +x d2 d3 d4 d5
+$ ./d4; echo st=$?
+     1	#!/bin/cat -n
+     2	line two
+     3	#!/g/t/n.sh
+     4	#!/g/t/d1
+     5	#!/g/t/d2
+     6	#!/g/t/d3
+st=0
+$ ./d5; echo st=$?
+pelt: line 14: ./d5: cannot be run
+st=126
+$ printf 'echo no x\n' > nx.sh; ./nx.sh; echo st=$?
+pelt: line 15: ./nx.sh: Permission denied
+st=126
+$ printf '#!/nope\n' > m.sh; chmod +x m.sh; ./m.sh; echo st=$?
+pelt: line 16: ./m.sh: not found
+st=127
+$ cd / && rm -r /g/t; echo st=$?
+st=0
+$ exit
