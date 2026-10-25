@@ -366,6 +366,41 @@ row uses to boot a killed disk once for its replay. An ext2 root
 (`--no-journal`) behaves as px67 measured: not clean after a cut, said
 once by the next boot, left for the host's `e2fsck -fy`.
 
+## The disks' nodes and a second disk (px79)
+
+kernel/vblk brings up every virtio block device on the bus, up to four,
+in kernel/pci's order (bus, device, function: QEMU's slot order, the
+order of its `-device` options), and kernel/block names them `vda`,
+`vdb`, `vdc`, `vdd` as the Linux guest does (254:0, 254:16, 254:32,
+254:48; each disk's partitions 254:N to 15 and the extended major 259
+past it, the lowest free minor across every disk: R-px79-1). Each disk
+says its lines in turn at boot, and its partition table's:
+
+    block: vda: 131072 sectors (67108864 bytes), 254:0, read-write, flush
+    block: vdb: 32768 sectors (16777216 bytes), 254:16, read-write, flush
+
+`/dev` holds a node for every disk and partition the block layer knows,
+made at boot and as a table is read again (BLKRRPART) or changed (BLKPG),
+in memory, as devtmpfs makes them (R-px79-2: never written into an
+image); `brw-------` and root's, as the guest's with no udev:
+
+    /dev/vda  /dev/vda1  /dev/vda2  /dev/vdb  /dev/vdc
+
+and `/sys/block/<disk>/…`, `/sys/class/block/<name>/dev` and
+`/proc/partitions` say what lsblk and blkid read. A tool writes a disk
+through its node (a GPT, a file system, Limine's BIOS stage), asks for
+its size and geometry by ioctl, and has the kernel read the table again;
+`mount` and `/etc/fstab` name a partition by its node (`/dev/vdb2`).
+The boot disk stays `vda` whatever else is given:
+`tools/qemu-run --boot-disk DISK --drive SECOND [--drive THIRD]` (and
+`tools/qemu-halt` the same) gives each further image a virtio device of
+its own after it, in order (`--drive FILE,ro` read-only, `--drive
+'FILE;cyls=…,heads=…,secs=…'` with the device's own properties), so a
+second, blank disk is `vdb`:
+
+    qemu-system-x86_64 … -drive file=pax-disk.img,if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0,bootindex=0 \
+        -drive file=blank.img,if=none,id=d1,format=raw -device virtio-blk-pci,drive=d1
+
 ## Measured
 
 The proof's runs, both firmwares, the same ISO on linux and macOS: see
