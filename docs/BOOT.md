@@ -479,6 +479,5 @@ Limine on `/dev/vdb`. It compares the resulting root tree, boots the target
 alone, and checks the playground's reboot persistence under each requested
 firmware. CI uses a compact installed tree with pelt, lope and the commands
 that session needs; the lane also tested the complete installed playground
-(239 final tree rows). Every missing prerequisite is a failure unless the
-explicit historical `PAX_DISKTOOLS_NOT_YET=144` mode names that one gap and
-counts its skip.
+(239 final tree rows). Every missing prerequisite is a failure; the suite
+has no skip mode (its raw-node prerequisite, pax#144, is px79's, served).

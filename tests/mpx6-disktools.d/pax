@@ -34,11 +34,8 @@ truncate -s 128M "$probe/a.img"; truncate -s 128M "$probe/b.img"
 "$PAX_ROOT/tools/qemu-halt" --firmware bios --elf "$elf" --serial "$probe/serial.log" --marker halt \
     --qemu -drive --qemu "file=$probe/a.img,if=none,id=dt0,format=raw" --qemu -device --qemu virtio-blk-pci,drive=dt0 \
     --qemu -drive --qemu "file=$probe/b.img,if=none,id=dt1,format=raw" --qemu -device --qemu virtio-blk-pci,drive=dt1 "$probe/boot.iso" > "$probe/boot.log" 2>&1
+# px79 serves the nodes (pax#144): an absent vdb is a failure, never a skip.
 if ! grep -aq 'disktools-preflight: /dev/vdb bytes=134217728' "$probe/serial.log"; then
-    if [ "${PAX_DISKTOOLS_NOT_YET:-}" = 144 ] && grep -aq 'disktools-preflight: /dev/vdb open errno=2' "$probe/serial.log"; then
-        say 'SKIP D-PAX: pax#144, raw second disk absent; 1 SKIP'
-        exit 0
-    fi
     cat "$probe/serial.log"
     die 'FAIL D-PAX: raw vdb prerequisite (pax#144)'
 fi
