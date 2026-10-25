@@ -828,6 +828,34 @@ the directories themselves (a named drift: what is read through them is
 the same). lsblk and blkid are dynamic glibc programs (px66) and do not
 run on PAX; the probe reads what they read.
 
+## Disk formatters and Limine (px69)
+
+Linux strace of the static binaries records 26 distinct calls for paxgpt
+(write and dump), 27 for paxfat (format, mkdir, copy, ls and cat), 28 for
+paxext2 (the full installed tree), and 17 for the unchanged static Limine
+installer. Exact per-program sets are in `notes/px69/census.txt`; the
+regular-file Limine trace is retained, not inferred from its source.
+
+All four use `arch_prctl`, `brk`, `close`, `execve`, `exit_group`, `fstat`,
+`getrandom`, `lseek`, `mprotect`, `openat`, `prlimit64`, `read`,
+`readlinkat`, `rseq`, `set_robust_list`, `set_tid_address` and `write`.
+The Wolf programs additionally use `fcntl`, `fsync`, `ftruncate`, `mmap`,
+`pread64`, `rt_sigaction`, `sched_getaffinity`, `sigaltstack` and `statx`.
+Paxfat also uses `munmap`; paxext2 uses `getdents64` and `readlink` for
+sorted traversal and symbolic links. These sets include runtime startup
+and image-file creation; an existing raw disk is not truncated.
+
+On PAX, the same executables finish all thirteen installation commands
+successfully. The only ENOSYS calls reported are glibc's existing
+`set_robust_list` (273) and `rseq` (334), whose fallback is already used by
+other static programs. The original preflight's `open` calls on `/dev/vda`,
+`/dev/vda1` and `/dev/vdb` returned ENOENT (pax#144). With px79's raw block
+nodes, positional I/O and end-relative seeks reach the disk; static
+Limine on `/dev/vda` writes a disk byte-identical to Linux's. The whole
+installation writes `/dev/vdb`, with zero block errors or refused requests,
+and its resulting disk boots alone. The formatters use offset windows,
+so they do not need `BLKRRPART` between writing GPT and the filesystems.
+
 ## Reproduce
 
 On a Linux host with rootless podman (kasumi, 2026-10-04; podman's

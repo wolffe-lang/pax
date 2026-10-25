@@ -1,0 +1,103 @@
+px69 — the disk tools (crawl 54)
+This is the evidence/report fallback: the lane wrapper prohibits writing
+report .md files. The PR carries the five canonical sections; this directory
+contains the evidence, and px71-installer.txt is the complete next-lane draft.
+
+Prediction
+Committed first as e0b0998e, before implementation.
+- First format disagreement predicted FAT FSInfo. Wrong: the first actual
+  mismatch was GPT's sfdisk text escaping of non-ASCII UTF-8. FAT FSInfo and
+  ext2's first empty filesystem passed their independent checkers immediately.
+- Limine on PAX predicted blocked by raw nodes. Correct at 105d0d1f: three
+  ENOENTs; with two attached disks only vda appeared. Also found the default
+  Limine build is dynamic PIE. Static unmodified Limine succeeds with px79.
+- Predicted 650/1500/1900 Wolf lines plus 300 shared. Measured before the last
+  FAT guard: 289 GPT, 621 FAT, 650 ext2, 153 shared. Final guards add
+  argument/alias validation and first-explicit hard-link attribute state.
+- Predicted the first from-PAX disk would fail both firmware boots. Wrong
+  once prerequisites were supplied: its first complete run booted both and
+  passed the whole persistent playground session.
+
+What was done
+Three Wolf formatters under user/disktools, a shared bounded byte layer and
+static builders. GPT seeds match mkgpt; FAT has mirrored tables, FSInfo,
+VFAT/CP850 aliases and streamed copies; ext2 has bitmaps, groups, backup
+superblocks, sparse file maps, metadata manifests and links. No kernel edit.
+The pinned Limine source is not opened or modified; a cc wrapper adds only
+-static -no-pie and the resulting Linux binary runs unchanged on PAX.
+The explicit alternate-writer ext2 root leg leaves ext3's default untouched.
+A portable CI suite includes independent Linux oracles, raw Limine equality,
+a disk built on the second PAX disk and the persistent playground session.
+
+Evidence
+- 24 GPT, 12 FAT and 13 ext2 Linux rows, all PASS, 0 SKIP, with host versions
+  and again with the existing repository-pinned Ubuntu oracle packages.
+- Four ext2 root legs (native/release, BIOS/UEFI) PASS; four explicit R8
+  journal-only skips, R8e live. Ext3 default native BIOS PASS, 0 SKIP.
+- Complete installed tree: 237 exact e2tree rows; real Linux 7.3.0-4 mounts
+  both images, GNU find -printf returns 238 exact rows.
+- On px79 99b3bf3b, static Limine on /dev/vda leaves every byte equal to its
+  Linux result. Thirteen PAX commands write a blank /dev/vdb, all exit 0;
+  target root equals Linux writer (239 rows); target alone boots both
+  firmwares, persists all playground edits across reboot, and finishes clean.
+- Portable CI fixture also green under both firmwares, rerun after the last
+  FAT alias/path guard and hard-link attribute-precedence fix. The latter
+  was first seen red against mkdisk: three linked names with attributes on
+  the second and third must keep the second name's first explicit metadata. It is deliberately smaller than the full local tree.
+- Three isolated local plants fail G-sgdisk-v, F-fsck-fat and E-e2fsck.
+  Draft PRs #169/#170/#171 preserve their CI evidence; run ids/verdicts are
+  recorded in the closeout once supplied, never guessed.
+- Runtime census: GPT 26 calls, FAT 27, ext2 28, static Limine 17. PAX's only
+  ENOSYS reports are the existing glibc set_robust_list/rseq fallbacks.
+
+Oracle findings
+- sgdisk -v can exit 0 and say 'No problems found' AFTER warning that the
+  backup CRC is bad and regenerating a backup in memory. Reject Warning! too.
+- fsck.fat -n can exit 0 after wrong LFN checksums and 'Not auto-correcting
+  this'. The gate accepts only its two clean output lines.
+- mtools 4.0.49 truncates a supplementary character to its low 16 bits. Keep
+  correct UTF-16 surrogate pairs, name the oracle's defect independently.
+- The oracle container needs its own binary gconv modules; setting their
+  path globally broke Ubuntu xorriso. Only oracle wrappers set that path.
+
+Departures
+R-px69-1/2 A recommended and implemented: measured FAT geometry and ext2
+inode/reserved-block defaults. R-px69-3 A: original Limine, not a rewrite.
+R-px69-4/5/6 A follow the orchestrator's directions: correct surrogate pairs;
+explicit ext2 root leg; unchanged static/no-PIE Limine with the dynamic
+build kept as an oracle. #144 was first a named not-yet, then exercised
+successfully using a separate px79 checkout. Its commits are not pushed as
+px69's; final rebase follows that lane's merge.
+The root-only layout has no initramfs module, matching px67. The tools can
+copy one when supplied, but no rescue image is invented or claimed.
+Bounds are explicit in BOOT and the per-tool evidence: 512-byte GPT/FAT
+sectors, FAT32 only, 4 KiB ext2 blocks, ext2 up to 4 GiB, no journal/resize/
+repair/incremental ext2 editing. No GUI installer, host install or public
+deployment. No maintainer playground file changed and no Mac build/QEMU.
+One exploratory early GPT PAX boot was CPU-pinned but outside the flock;
+it was repeated under the lock and only that repeated evidence retained.
+Two long-job estimates were high (baseline ~8 min; root gate ~11 min).
+
+Hand-off
+The PR is explicitly dependent on px79/pax#168, final head b3ae4be9. Raw
+proofs used its earlier 99b3bf3b checkout; they are not claims about px69's
+old-kernel head. Required seam: tools/qemu-run --drive FILE[,ro][;DEVOPTS],
+repeatable, and tools/qemu-halt forwarding it beside --boot-disk. Rebase
+and rerun raw/PAX gates immediately after px79 merges.
+
+px71-installer.txt is drafted in full, including target confirmation,
+metadata/source policy, journal and size prerequisites, fault rows and CI.
+Issues for the orchestrator, not filed here:
+- pax: add paxext2 --journal before claiming the installer preserves the
+  existing journalled-root default; setting has_journal alone is not enough.
+- pax: extend/test formatter volume/sector/block-size bounds for larger and
+  non-512-byte hardware; current explicit bounds are not hardware limits.
+- mtools/upstream: supplementary-character truncation (measured bytes and
+  independent row retained); report rather than emulate it.
+- pax: guided installer follow-on, as drafted; source metadata generator,
+  stable-source policy and fresh PARTUUID/configuration are its work.
+No claim to close #144 (px79), #164/#165/#166 (px68 follow-ups), or #118
+(blink timer). pax#152 is the disk-tool item for the orchestrator to reconcile.
+Prune only the lane's /home/mfwolffe/lanes/px69, its localhost/px69-ubuntu
+image, and /Users/mfwolffe/lanes/px69 worktrees/bundle once evidence is kept.
+Plant branches/PRs remain unmerged for the orchestrator to close and cite.

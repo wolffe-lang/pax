@@ -406,3 +406,79 @@ second, blank disk is `vdb`:
 The proof's runs, both firmwares, the same ISO on linux and macOS: see
 `notes/px00-the-harness.md` §4. Exit status 33 is the stub's `0x10` through
 `isa-debug-exit` (QEMU reports `(value << 1) | 1`).
+
+## Writing a disk on PAX (px69)
+
+`tools/mkdisktools OUTDIR` builds three static Linux programs from
+`user/disktools`, using the pinned Wolf compiler and standard library.
+`tools/mklimine-static OUTDIR` builds the pinned Limine installer with
+`-static -no-pie`, without changing its source. These same executables run
+on Linux and PAX. Block nodes and the second disk are provided by px79.
+
+**These are offline formatters, not a guided installer. Formatting destroys
+the selected disk's partition table or filesystem. Never use a mounted
+volume or the disk containing the running root.** The test selects a new,
+blank second virtio disk, `/dev/vdb`, and boots it alone afterward as `vda`.
+
+The interfaces are:
+
+```text
+paxgpt [--seed TEXT] [--size SIZE] IMAGE SLOT:TYPE:FIRST:LAST[:NAME]...
+paxgpt --dump IMAGE
+paxfat [--offset BYTES] [--seed TEXT] mkfs IMAGE SIZE [LABEL]
+paxfat [--offset BYTES] mkdir IMAGE /PATH
+paxfat [--offset BYTES] copy IMAGE SOURCE /PATH
+paxfat [--offset BYTES] ls IMAGE [/PATH]
+paxfat [--offset BYTES] cat IMAGE /PATH
+paxext2 [--from DIR] [--attrs FILE] [--label LABEL] [--seed TEXT]
+        [--inodes N] [--offset BYTES] [--exclude /DIR]... SIZE IMAGE
+limine bios-install IMAGE 3
+```
+
+`IMAGE` can be a regular image file or an existing block node. Without
+`--size`, paxgpt uses the existing device's capacity. Partition starts are
+1 MiB aligned. `--offset` is **bytes**, not sectors: the formatters work on
+the whole disk's windows without needing a partition-table rescan. For the
+512 MiB test disk the BIOS partition is sectors 2048–4095, the ESP is
+4096–135167 (64 MiB at 2 MiB), and root is 135168–1048535
+(467644416 bytes at 66 MiB). The last usable GPT sector is 1048542.
+
+The running system supplies `/boot/pax`, `/boot/EFI/BOOT/BOOTX64.EFI`,
+`/boot/limine/limine-bios.sys` and `/boot/limine/limine.conf`; these are copied
+to the ESP. The root-only boot has no initramfs module, as in px67. A rescue
+initramfs, if wanted, must be supplied separately and the ESP sized for it.
+The root configuration must name the **new** root partition. Tests fix the
+seed for reproducibility; a real installation should use a fresh seed and
+write the resulting PARTUUID into its configuration.
+
+`paxext2 --from /` needs an explicit metadata manifest and exclusions for
+`/dev`, `/proc`, `/sys` and `/tmp`. Exclusions preserve the named directory
+but omit its contents. `--attrs` is the host builder's format:
+`PATH MODE UID GID [MTIME [ATIME [CTIME]]]`, with quoted paths allowed.
+A non-empty source `lost+found` is refused unless explicitly excluded;
+it is not silently discarded. `SOURCE_DATE_EPOCH` controls generated
+timestamps and seeds. FAT timestamps are UTC, with two-second resolution,
+and must fit 1980–2107.
+
+Current bounds: GPT has 128 entries of 128 bytes and 512-byte sectors;
+FAT32 uses 512-byte clusters on 33 MiB–2 GiB volumes and supports CP850
+short aliases plus UTF-16 long names; ext2 uses 4 KiB blocks, 256-byte
+inodes and 8 MiB–4 GiB volumes. Files, directories and links are supported,
+not device-node creation. The tools do not resize or repair filesystems,
+provide power-failure transactions, or overwrite existing FAT files.
+
+The ext2 writer leaves `has_journal` clear. The host's `mkdisk --gpt --root`
+still creates ext3 by default; `--no-journal` selects ext2.
+`PAX_EXT2_WRITER=/path/to/paxext2` is an explicit host-builder override for
+ext2 only and rejects journalled requests. The root suite's `--fstype ext2`
+leg uses it without changing the default ext3 leg or its journal tests.
+
+`tests/mpx6-disktools` runs Linux differentials, compares static Limine on
+Linux with the same binary on PAX `/dev/vda`, then runs the three tools and
+Limine on `/dev/vdb`. It compares the resulting root tree, boots the target
+alone, and checks the playground's reboot persistence under each requested
+firmware. CI uses a compact installed tree with pelt, lope and the commands
+that session needs; the lane also tested the complete installed playground
+(239 final tree rows). Every missing prerequisite is a failure unless the
+explicit historical `PAX_DISKTOOLS_NOT_YET=144` mode names that one gap and
+counts its skip.

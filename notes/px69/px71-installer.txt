@@ -1,0 +1,133 @@
+px71 draft — a guided PAX installer
+
+Status: a draft implementation contract, not an installer shipped by px69.
+Start only after px69 and pax#144/px79 merge. Branch px71 from that trunk.
+Host/CPU block is assigned by the orchestrator at launch, under its flock.
+No package installation, host-disk formatting, Mac QEMU or playground writes.
+
+Goal
+A guided flow in the spirit of archinstall, written in Wolf: inventory,
+plan, explicit confirmation, partition, format, copy, install Limine,
+verify and offer reboot. It calls the same static programs tested by px69;
+it never embeds another formatter or rewrites Limine. First target is a
+second virtio disk under QEMU; real-device support is whatever the kernel
+actually enumerates, not an installer claim about NVMe/AHCI/USB drivers.
+
+Inputs, re-derived before implementation
+- user/disktools, tools/mkdisktools, tools/mklimine-static; their CLI bounds.
+- docs/BOOT.md's from-PAX path, docs/CENSUS.md, notes/px69 evidence and
+  tests/mpx6-disktools, including both zero-exit oracle traps.
+- px79's block-node/ioctl/sysfs contract, and px70's console handoff.
+- user/fstab-root, boot/limine-initramfs-quiet.conf, boot/limine.pin and
+  the installed /boot copies. PAX does not mount the ESP as a filesystem.
+- The Wolf guide, pinned language/OS interface spec, and RULES sections 1-10.
+- The metal campaign: the installer cannot stand in for missing drivers,
+  a bootable USB transport, or the ext3 formatter feature described below.
+
+Prediction, committed first
+Predict the first discrepancy in device inventory against Linux; the
+first destructive-operation refusal; whether the whole guided path succeeds
+under both firmwares on its first attempt; source line count; time and peak
+memory for copying the installed tree. Score each prediction in the report.
+
+Proposed rulings (recommendations, not decisions)
+R-px71-1 — root journal: recommend a small prerequisite adds
+paxext2 --journal, with e2fsck/Linux/PAX journal rows, before journalled root
+is the installer's default. Current paxext2 writes ext2. A developer-preview
+ext2 install may be an explicit, accurately labelled choice, never described
+as equivalent to mkdisk's current ext3 default. Do not set has_journal alone.
+R-px71-2 — initial scope: recommend whole-disk fresh installation only;
+no resize, dual-boot preservation, in-place migration or filesystem repair.
+R-px71-3 — boot layout: recommend the tested BIOS+UEFI layout (1 MiB BIOS
+boot, 64 MiB ESP for kernel/loader without rescue archive, root after it).
+Increase the ESP only when actual staged bytes need it; show all sizes.
+R-px71-4 — confirmation: recommend exact target identity and a typed
+confirmation token, after a read-only plan; no default 'yes', timeout or
+reused confirmation after the target identity/capacity changes.
+R-px71-5 — IDs and reproducibility: recommend one fresh seed per install,
+recorded in its plan/log; deterministic --seed is available for tests.
+R-px71-6 — large disks: recommend refusing layouts outside current formatter
+bounds until a separately tested extension lands. In particular ext2 volumes
+are capped at 4 GiB and require 512-byte sectors; do not silently discard
+capacity or pretend those limits are hardware limits.
+
+Items
+1. Read-only inventory and plan
+   Enumerate actual block nodes through px79's exported sysfs; read capacity,
+   logical sector size, partitions and mount table. Show model/serial only
+   where exported; unknown is explicit. Identify the running root's backing
+   disk and reject it, every mounted target and read-only target. Snapshot
+   identity/capacity and recheck immediately before the first write.
+   A --dry-run interface prints a stable plan, no raw writable open. Pure
+   planner tests cover alignment, exact boundaries, insufficient space,
+   unsupported sector sizes, overflow, two similar device names, and targets
+   that disappear/change while the user is considering the plan.
+
+2. Guided UI and cancellation
+   Wolf terminal UI with keyboard navigation, a plain-text fallback and a
+   complete plan page before confirmation. Use current console capabilities,
+   not unserved terminal sequences; dimension changes and EOF are tested.
+   Cancellation before the first write leaves every target byte unchanged.
+   After writes start, report exactly what completed and whether the disk is
+   bootable. Do not promise rollback of a partially formatted disk.
+   px70's timer-driven blink (#118) remains a separate kernel prerequisite
+   unless the launch contract explicitly grants it; do not fake its completion.
+
+3. Metadata manifest and source snapshot
+   Generate the --attrs manifest from a sorted lstat walk of the installed
+   source, preserving modes, numeric owners, hard-link equivalence and link
+   targets. Document the present whole-second timestamp precision. Exclude
+   /proc, /sys, /dev and /tmp contents while preserving their mount points.
+   Decide explicitly what to do with non-empty lost+found: abort or copy it
+   through an agreed path, never silently lose recovered files. Refuse source
+   mutation detected during copying; describe the maintenance/rescue boot
+   needed for a stable source rather than claiming a live snapshot exists.
+   Copy the kernel and pinned loader assets from the running system's /boot.
+   Write a new configuration naming the new root's PARTUUID, not the source's.
+   A rescue initramfs is optional and has its own size/read-back rows.
+
+4. Executor
+   One action at a time with arguments passed as an argv list, never shell
+   interpolation of device names or user text. Use paxgpt, paxfat --offset,
+   paxext2 --offset, then the unchanged static limine bios-install. Offset
+   units are bytes. A partition rescan is not required for these tools; if
+   the UI requests one, test its real ioctl path and failure behaviour.
+   Check every exit and diagnostic. Preserve a persistent per-phase log and
+   a machine-readable plan/result. fsync completion is required before saying
+   a phase is durable. Decide recovery/resume only from re-read on-disk state,
+   not a stale log flag. Installer progress may name phases; do not invent
+   percentage completion when a formatter does not expose it.
+
+5. Verification and end-to-end proof
+   Keep the target separate from the source. Host tools independently verify
+   the table, FAT and root; do not trust the three tools to certify themselves.
+   Compare file bytes and metadata against the source manifest; compare the
+   BIOS install bytes with the Linux oracle. Boot the target alone under
+   SeaBIOS and OVMF, reach the playground, edit motd and home/root notes, add
+   a lope entry, reboot, read them back, exit, and check a clean root. Run the
+   same workflow with the initial target name changed (not hardcoded vdb).
+   Test failure at each external command, ENOSPC, missing/corrupt boot assets,
+   read-only target, invalid manifest, interrupted copy, and a changed target
+   after confirmation. Every failure is named; no swallowed exit 2.
+   This remains QEMU evidence until a separate real-machine row is run.
+
+6. CI, plants, docs and hand-off
+   Add the smallest UI/executor gate to tier pr; put expensive full installed
+   tree and both-firmware sessions in the tier their measured cost allows.
+   Preserve px69's formatter gates and px68's ext3 default/control.
+   Plant a wrong target identity, a missing copied boot file and an ignored
+   formatter failure on separate authorized plant branches. Each must fail
+   its named independent row, never merely time out.
+   Update README, BOOT, CENSUS and SOURCES. Keep implementation clean-room;
+   specifications and black-box tools only. Use five canonical PR/report
+   sections, measured costs, explicit limits, ruling recommendations, issues
+   for the orchestrator, and a precise prune list. No merge/tag/label/issue
+   actions by the lane. Read CI once after pushes and hand back at the final
+   PR or a detached >20-minute job, under its launch contract.
+
+Done when
+The inventory cannot choose the running disk; unconfirmed/cancelled plans
+write nothing; the guided confirmed path creates a disk that boots alone
+under both firmwares and passes the persistent playground session; fault
+rows and plants fail correctly; CI and the audit meet the assigned footprint;
+all unresolved kernel/formatter prerequisites are explicit, not claimed done.

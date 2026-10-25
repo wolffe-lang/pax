@@ -1192,3 +1192,18 @@ kernels: none consulted.
   Only documentation was read, never filesystem or kernel implementation.
   `paxext2` leaves `has_journal` clear and does not claim resize-inode,
   indexed-directory, extent or metadata-checksum features.
+
+- **Limine 12.9.1 release**, archive SHA256
+  `5cdebc518daa3af30b22c2322ba0dba2e0e2046fa8b087b9e13071b8dbcdcff4`.
+  The existing fetch/build recipe consumes the archive unopened. The
+  `tools/mklimine-static` cc wrapper adds only `-static -no-pie`; no source
+  is opened or patched. On the Ubuntu baseline, the original dynamic
+  executable is SHA256 `0b90e40a23889a44b354608259bdbfd1ff14eef7e22643dc331ad931e036a324`,
+  the static executable `dad435d4797b51ad41f223e64c1b9d4f7f58800bf06f5576789774909603a700`.
+  Both write identical disk bytes on Linux; the latter runs unchanged on
+  PAX and writes the same bytes through `/dev/vda`.
+- **Linux 7.3.0-4-cachyos and GNU findutils 4.9.0**, binaries only:
+  the guest mounts both full installed-tree images read-only and `find
+  -printf` returns 238 identical rows. No GNU or kernel implementation
+  source was read. Linux strace records the formatters and the static
+  Limine installer's calls; evidence is under `notes/px69/`.
