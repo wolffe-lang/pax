@@ -62,12 +62,12 @@ def metadata(path):
 
 
 def verify(path):
+    v = oracle("sgdisk", "-v", path)
+    assert b"No problems found" in v.stdout + v.stderr, ("G-sgdisk-v", v.stdout, v.stderr)
+    assert b"Warning!" not in v.stdout + v.stderr, ("G-sgdisk-v", v.stdout, v.stderr)
     own = run([BIN, "--dump", path]).stdout
     ref = oracle("sfdisk", "--dump", path).stdout
     assert own == ref, (own, ref)
-    v = oracle("sgdisk", "-v", path)
-    assert b"No problems found" in v.stdout + v.stderr, v.stdout + v.stderr
-    assert b"Warning!" not in v.stdout + v.stderr, v.stdout + v.stderr
 
 
 for n, (size, esp, home, root) in enumerate([
@@ -77,8 +77,8 @@ for n, (size, esp, home, root) in enumerate([
     parts = layout(size, esp, home, root)
     run([BIN, "--seed", "px69", "--size", str(size) + "M", image, *parts])
     run([ROOT / "tools/mkgpt", "--label", "px69", "--size", str(size) + "M", ref, *parts])
-    assert metadata(image) == metadata(ref)
     verify(image)
+    assert metadata(image) == metadata(ref)
     before = metadata(image)
     # No --size: write into the existing image, preserving all payload bytes.
     with image.open("r+b") as f:

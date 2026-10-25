@@ -1,30 +1,67 @@
 #!/usr/bin/env bash
-# Disk-tool Linux differentials. Programs are built by tools/mkdisktools
-# and run unchanged; invoke inside the Linux oracle container.
-# --only names a format, --programs its executable directory.
+# GPT/FAT/ext2 Linux oracles, then unchanged binaries writing a disk on PAX.
+# --only build stages programs/kernels, --only linux runs all differentials,
+# --only pax runs staged images, or --only gpt|fat|ext2 selects one oracle.
+# The helpers read these inputs (explicit for the CI planner):
+# tools/mkdisktools tools/mklimine-static tools/mkpelt tools/mklope
+# tools/mkboreutils tools/mkdiskprobe tools/mkrootprobe tools/linux-root
+# tools/mkdisk tools/e2tree tools/e2fs tools/mkgpt tools/disktools
+# tools/mkinitramfs user/elf/disktools-preflight.c user/shrc user/fstab-root
+# boot/limine-initramfs.conf boot/limine-initramfs-quiet.conf
+# kernel/kmain_console.lu tests/mpx6-root.d
+# No option runs everything. Leg options follow the other PAX suites.
 set -euo pipefail
 . "$(dirname "$0")/../tools/lib.sh"
-only=gpt
-programs=$PAX_BUILD/disktools/bin
-work=$PAX_BUILD/disktools/rows
-oracle=
-executor=
+only=all
+programs=
+work=$PAX_BUILD/mpx6-disktools
+oracle= executor=
+tiers=both legs=both
 while [ $# -gt 0 ]; do
     case $1 in
         --only) only=$2; shift 2 ;;
         --programs) programs=$2; shift 2 ;;
-        --work) work=$2; shift 2 ;;
+        --work|--images) work=$2; shift 2 ;;
         --oracle-bin) oracle=$2; shift 2 ;;
         --executor) executor=$2; shift 2 ;;
-        *) die 'usage: mpx6-disktools --only gpt|fat|ext2 --programs DIR --work DIR [--oracle-bin DIR]' ;;
+        --tier) tiers=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        *) die 'usage: mpx6-disktools [--only build|linux|pax|gpt|fat|ext2] [--work DIR] [--programs DIR] [--tier native|release|both] [--firmware bios|uefi|both]' ;;
     esac
 done
-case $only in gpt|fat|ext2) ;; *) die "format not implemented yet: $only" ;; esac
-[ -x "$programs/pax$only" ] || die "build pax$only with tools/mkdisktools"
-args=()
-if [ "$only" = ext2 ]; then
-    [ -z "$executor" ] || args+=("$executor")
-else
-    [ -z "$oracle" ] || args+=("$oracle")
+case $only in all|build|linux|pax|gpt|fat|ext2) ;; *) die "unknown phase: $only" ;; esac
+case $tiers in both) tiers='native release' ;; native|release) ;; *) die 'bad tier' ;; esac
+case $legs in both) legs='bios uefi' ;; bios|uefi) ;; *) die 'bad firmware' ;; esac
+mkdir -p "$work"
+work=$(cd "$work" && pwd)
+programs=${programs:-$work/bin}
+D=$PAX_ROOT/tests/mpx6-disktools.d
+if [ "$only" = all ] || [ "$only" = build ]; then
+    "$D/pax" build "$work" "$tiers" "$legs"
+    [ "$only" != build ] || exit 0
 fi
-exec python3 -I "$PAX_ROOT/tests/mpx6-disktools.d/$only.py" "$programs/pax$only" "$work/$only" "${args[@]}"
+if [ "$only" != pax ]; then
+    # Host tools pinned by the existing disktools/e2fs wrappers in CI; a
+    # caller may instead provide its measured oracle binary directory.
+    if [ -z "$oracle" ]; then
+        oracle=$work/oracles; mkdir -p "$oracle"
+        for p in sgdisk sfdisk mkfs.fat fsck.fat mcopy mmd mdir mtype; do
+            printf '#!/bin/bash\nexec %q %q %q "$@"\n' "$PAX_ROOT/tools/disktools" "$work" "$p" > "$oracle/$p"
+            chmod +x "$oracle/$p"
+        done
+    fi
+    formats=$only
+    case $only in all|linux) formats='gpt fat ext2' ;; esac
+    for f in $formats; do
+        [ -x "$programs/pax$f" ] || die "build pax$f with tools/mkdisktools"
+        extra=()
+        if [ "$f" = ext2 ]; then
+            [ -z "$executor" ] || extra+=("$executor")
+        else extra=("$oracle"); fi
+        python3 -I "$D/$f.py" "$programs/pax$f" "$work/$f" "${extra[@]}"
+    done
+fi
+if [ "$only" = all ] || [ "$only" = pax ]; then
+    "$D/pax" run "$work" "$tiers" "$legs"
+fi
+say "mpx6-disktools $only: PASS"

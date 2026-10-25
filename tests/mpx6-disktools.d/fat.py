@@ -12,7 +12,7 @@ BIN = Path(sys.argv[1]).resolve()
 OUT = Path(sys.argv[2]).resolve()
 ORACLE = Path(sys.argv[3]) if len(sys.argv) > 3 else None
 OUT.mkdir(parents=True, exist_ok=True)
-os.environ.update(SOURCE_DATE_EPOCH="1700000000", TZ="UTC", LC_ALL="C.UTF-8")
+os.environ.update(SOURCE_DATE_EPOCH="1700000000", TZ="UTC", LC_ALL="C.UTF-8", PAX_DISKTOOLS_LOCALE="C.UTF-8")
 rows = 0
 
 
@@ -39,7 +39,7 @@ def passed(name):
 def fsck(image):
     p = oracle("fsck.fat", "-n", image)
     lines = (p.stdout + p.stderr).decode().splitlines()
-    assert len(lines) == 2, lines
+    assert len(lines) == 2, ("F-fsck-fat", lines)
     assert lines[0].startswith("fsck.fat "), lines
     assert re.fullmatch(re.escape(str(image)) + r": \d+ files, \d+/\d+ clusters", lines[1]), lines
 
@@ -88,6 +88,7 @@ for n, (name, data) in enumerate(files):
     os.utime(src, (1700000000, 1700000000))
     run([BIN, "copy", own, src, name])
     oracle("mcopy", "-m", "-i", ref, src, "::" + name)
+    fsck(own)
     assert oracle("mtype", "-i", own, "::" + name).stdout == data
     assert run([BIN, "cat", ref, name]).stdout == data
     assert run([BIN, "cat", own, name]).stdout == data
@@ -162,7 +163,7 @@ oracle("mcopy", "-m", "-i", other, source, "::/emoji-😀.txt")
 listing_bad = run([BIN, "ls", other]).stdout
 assert "emoji-\uf600.txt".encode() in listing_bad, listing_bad
 (OUT / "nonbmp-oracle-defect.txt").write_bytes(listing_bad)
-passed("R-px69-4: correct surrogate pair; mtools 4.0.49 truncation named independently")
+passed("R-px69-4: correct surrogate pair; pinned mtools truncation named independently")
 
 # Both long and short spellings address the same content.
 assert run([BIN, "cat", own, "/boot/limine/LIMINE~1.SYS"]).stdout == files[2][1]
