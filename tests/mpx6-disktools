@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Disk-tool Linux differentials. Programs are built by tools/mkdisktools
+# and run unchanged; invoke inside the Linux oracle container.
+# --only names a format, --programs its executable directory.
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+only=gpt
+programs=$PAX_BUILD/disktools/bin
+work=$PAX_BUILD/disktools/rows
+oracle=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --only) only=$2; shift 2 ;;
+        --programs) programs=$2; shift 2 ;;
+        --work) work=$2; shift 2 ;;
+        --oracle-bin) oracle=$2; shift 2 ;;
+        *) die 'usage: mpx6-disktools --only gpt --programs DIR --work DIR [--oracle-bin DIR]' ;;
+    esac
+done
+[ "$only" = gpt ] || die "format not implemented yet: $only"
+[ -x "$programs/paxgpt" ] || die "build paxgpt with tools/mkdisktools"
+args=()
+[ -z "$oracle" ] || args+=("$oracle")
+exec python3 -I "$PAX_ROOT/tests/mpx6-disktools.d/gpt.py" "$programs/paxgpt" "$work/gpt" "${args[@]}"

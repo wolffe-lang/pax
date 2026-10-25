@@ -1,0 +1,1 @@
+qemu-halt: HALTED in pax_halt (RIP ffffffff800001aa, unchanged a second later; IF clear; serial still at 2709 bytes; accel tcg; quit -> 0)
