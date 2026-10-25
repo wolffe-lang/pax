@@ -481,3 +481,133 @@ firmware. CI uses a compact installed tree with pelt, lope and the commands
 that session needs; the lane also tested the complete installed playground
 (239 final tree rows). Every missing prerequisite is a failure; the suite
 has no skip mode (its raw-node prerequisite, pax#144, is px79's, served).
+
+
+## Guided installation
+
+`pax-install` is a Wolf program with a small x86-64 syscall membrane. Build
+it with `tools/mkinstall build/install` on the Ubuntu 24.04 baseline. It
+calls the existing static `paxgpt`, `paxfat`, `paxext2` and unchanged Limine
+installer by argv lists, not shell commands. All offsets passed to the
+formatters are bytes.
+
+**This is a whole-disk, fresh-install ext2 developer preview. It destroys
+the selected target. It is not ext3, a resize tool, a migration service, a
+repair tool or an automatic recovery/resume mechanism.** The host builder's
+journalled-root default is unchanged. The first targets are separate QEMU
+virtio disks; real-device and USB transport support are separate work.
+
+### Prepare an offline payload
+
+Build `tools/mkpack build/pack`, then stage the payload:
+
+```sh
+tools/mkinstall-payload /path/to/source/boot build/pack build/install-payload
+```
+
+The boot directory supplies `pax`, `limine/limine-bios.sys` and
+`EFI/BOOT/BOOTX64.EFI`. The stager records their SHA256 digests, the pinned
+games table and pack's binary digest. Pack is **static glibc from the Ubuntu
+24.04 baseline**, not musl. Its original source archive, including its
+licences and notices, accompanies the executable. No network is used by
+the running installer. Copy the staged payload into the maintenance
+system's `/usr/share/pax-install`, the installer to `/bin/pax-install`, and
+the four existing disk tools to `/bin` before booting it.
+
+Use a stable maintenance/rescue source, preferably mounted read-only. The
+installer copies the source to its own private `/tmp` directory, records a
+sorted `lstat` manifest, preserves numeric modes/owners, hard-link
+equivalence and symlink targets, and checks hashes and metadata again.
+Detected source changes abort before target writes. This detects changes;
+it is **not** a filesystem snapshot or protection against an actively
+adversarial source. Reads may advance source atime on writable filesystems.
+Timestamps written into ext2 have whole-second precision. Source paths and
+link targets must be UTF-8; newline-containing paths and unsupported file
+kinds are refused. A non-empty `lost+found` is refused, never discarded.
+
+Contents of `/proc`, `/sys`, `/dev`, `/tmp` and the installer payload
+`/usr/share/pax-install` are excluded, with their directories preserved.
+The last exclusion prevents a “no games” answer from copying a hidden game
+payload elsewhere on the target. A later installation from that target
+needs a supplied payload again. `--source DIR`, `--payload DIR` and
+`--tool-dir DIR` support rescue layouts; a nonstandard payload directory
+must be outside the source tree. Existing `~/Games` at the chosen home is
+refused rather than overwritten or ambiguously retained.
+
+### Inventory, plan and confirmation
+
+Inside the PAX guest, `pax-install --inventory` reads `/sys/block`, the
+actual block nodes, block ioctls and `/proc/self/mountinfo`. It compares
+device numbers, not name prefixes, and reports unexported model/serial
+fields as unknown. It rejects the running root's backing disk, mounted
+members and read-only targets. Capacity, logical sector size, device
+identity, disk sequence and partition topology are checked again directly
+before writing, with an exclusive block-device claim against mounts.
+
+Run `pax-install` for the guided flow. Numbered choices and `n`/`p` followed
+by Enter work without cursor-control sequences; redirected input uses the
+plain-text flow. EOF or `q` before writing cancels. Terminal dimensions
+are sampled on each target page. The flow asks for a user name (uid/gid
+1000, no password yet), an explicit `y` or `n` for games, acknowledgement
+of the ext2 preview, and the complete confirmation token. Root's account
+line and shell are unchanged; an existing uid/gid-1000 account is replaced
+by the requested name, while other accounts are retained.
+
+A scripted invocation must supply both decisions and an exact token:
+
+```text
+pax-install --dry-run --target vdb --user pax --games no
+pax-install --install --ext2-preview --target vdb --user pax --games no   --seed SEED_FROM_PLAN --confirm 'EXACT_CONFIRMATION_FROM_PLAN'
+```
+
+The first command generates a fresh seed unless `--seed` is supplied.
+The same seed and exact identity token are required by the second command;
+there is no default yes, confirmation timeout or token reuse after a
+changed target. `--dry-run` opens no target for writing. Use deterministic
+seeds only when reproducibility is intended. Generated FAT/configuration
+metadata uses epoch 1700000000; copied ext2 metadata comes from the source
+manifest. New root PARTUUIDs derive from the recorded seed and that epoch.
+
+The layout is a 1 MiB BIOS boot partition at byte 1048576, a 64 MiB FAT32
+ESP at byte 2097152, and an ext2 root from byte 69206016. The plan accounts
+for GPT and alignment reservations. Unsupported sector sizes, a root
+smaller than 8 MiB or larger than 4 GiB, and boot assets that do not fit the
+fixed ESP are refused; spare capacity is never silently dropped to fit
+these formatter bounds. No rescue initramfs is added.
+
+### Durable phases and verification
+
+Every external exit, including exit 2, is checked. A phase becomes
+`durable` only after target `fsync` completes. Failure reports the phase
+and leaves the already-completed writes in place; there is no promise of
+rollback or bootability after a partial install.
+
+The persistent JSON-lines plan/result log occupies bytes **65536–131071**
+in the displayed pre-partition reservation. The exact command is
+`limine bios-install DEVICE 3`: stage 2 goes into the explicit BIOS boot
+partition, not the log reservation. With pinned Limine 12.9.1, independent
+before/after dumps and actual PAX reads show changed-byte envelopes
+`[0,423)` and `[1048576,1071464)`, identical for BIOS- and UEFI-origin
+installs. The executor rejects any Limine write into the log reservation.
+The tests reproduce Limine's bytes on Linux, write the log **last**, then
+boot that disk alone under both firmwares. A new loader pin must pass those
+rows again. Logs are evidence, never authority to resume a failed install;
+inspect the actual on-disk state before deciding recovery.
+
+The installer reads back GPT and every ESP boot file and checks the ext2
+superblock. Independent host tests additionally require strict sgdisk and
+fsck.fat output, clean e2fsck, exact file bytes and metadata, and persistence
+of motd, home/root notes and lope entries over a real reboot. The game's
+step is verified both ways, including bytes, mode 0755 and uid/gid 1000;
+its `source.tar.gz` is 0644 and owned by the same user. Whether pack plays
+correctly on PAX is separate from proving these installed bytes.
+
+`tests/mpx6-install` runs policy/UI/executor tests, compact installs and
+fault rows in the PR tier. `--rows full` adds the complete installed tree
+and both firmware sessions; the measured staged-input run on four assigned
+host CPUs took 5m52s, so these rows are in `tier full`, not nightly-only.
+PAX currently returns ENOSYS for `getrusage`: guest peak RSS is reported as
+unavailable, not zero and not replaced with QEMU's host RSS. Linux's same
+snapshot/copy reference measured 11884 KiB peak RSS. The missing guest
+measurement, the journalled formatter, timer-driven cursor blink, hardware
+drivers and USB transport remain separate prerequisites.
