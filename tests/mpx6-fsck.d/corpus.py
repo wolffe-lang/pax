@@ -70,7 +70,9 @@ def make(work, mke2fs, seed):
     (source / 'branch').mkdir(exist_ok=True)
     (source / 'branch' / 'leaf').write_bytes(b'leaf\n')
     for entry in sorted(source.rglob('*'), reverse=True):
+        entry.chmod(0o755 if entry.is_dir() else 0o644)
         os.utime(entry, (EPOCH, EPOCH))
+    source.chmod(0o755)
     os.utime(source, (EPOCH, EPOCH))
     base = work / 'base.img'
     with base.open('wb') as f:
@@ -88,6 +90,10 @@ def make(work, mke2fs, seed):
     for ino in range(1, canonical.u(1024) + 1):
         at = canonical.ino(ino)
         if canonical.u(at, 2):
+            # A pinned oracle container still sees the host uid/gid of
+            # a bind-mounted source. The seeded fixture fixes those too.
+            for off in (2, 24, 120, 122):
+                canonical.put(at + off, 0, 2)
             for off in (8, 12, 16):
                 canonical.put(at + off, EPOCH)
             if canonical.isize >= 160:
@@ -196,6 +202,8 @@ def byte_differences(name, oracle, wolf):
                         allowed.append((block * a.bs, (block + 1) * a.bs, 'clone payload location'))
     differences = [i for i, (x, y) in enumerate(zip(a.b, b.b)) if x != y]
     unexpected = [i for i in differences if not any(lo <= i < hi for lo, hi, _ in allowed)]
+    if len(a.b) != len(b.b):
+        unexpected.append(min(len(a.b), len(b.b)))
     return {'byte_differences': len(differences), 'unexpected_offsets': unexpected[:32],
             'permitted_differences': sorted({why for lo, hi, why in allowed
                                            if any(lo <= i < hi for i in differences)})}
