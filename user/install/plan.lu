@@ -1,0 +1,130 @@
+//! Pure whole-disk planner. No path opens, clocks or environment reads.
+//! GPT uses 512-byte sectors; ext2 uses 4096-byte blocks. Every otherwise
+//! unused byte is named in the plan, never hidden by a rounded capacity.
+
+const INSTALL_USER_ID: int = 1000
+
+const GAMES_REQUIRE_ANSWER: bool = true
+
+const ROOT_START: int = 69206016
+
+const ESP_START: int = 2097152
+
+const ESP_BYTES: int = 67108864
+
+const ROOT_MIN: int = 8388608
+
+const ROOT_MAX: int = 4294967296
+
+struct Target {
+    name: str,
+    identity: str,
+    bytes: int,
+    sector: int,
+    readonly: bool,
+    mounted: bool,
+    running_root: bool,
+}
+
+struct Plan {
+    target: Target,
+    seed: str,
+    user: str,
+    games: bool,
+    root_bytes: int,
+    tail_bytes: int,
+    token: str,
+}
+
+fn valid_name(s: str) -> bool {
+    if s.len < 1 || s.len > 32 { return false }
+    for i in 0..s.len {
+        let c = s.bytes()[i] as int
+        if c >= 97 && c <= 122 { continue }
+        if c == 95 { continue }
+        if i > 0 && (c == 45 || c >= 48 && c <= 57) { continue }
+        return false
+    }
+    s != "root"
+}
+
+fn valid_disk(s: str) -> bool {
+    if s.len < 1 || s.len > 128 { return false }
+    for c in s.bytes() {
+        let n = c as int
+        if n >= 48 && n <= 57 ||
+            n >= 65 && n <= 90 ||
+            n >= 97 && n <= 122 ||
+            n == 95 ||
+            n == 45 ||
+            n == 46 {
+            continue
+        }
+        return false
+    }
+    s != "." && s != ".."
+}
+
+fn make_plan(t: Target, seed: str, user: str, games: str) -> Plan ! {
+    invalid,
+    running_root,
+    mounted,
+    readonly,
+    sector_size,
+    too_small,
+    too_large,
+} {
+    if !valid_disk(t.name) || !valid_name(user) || seed.len < 1 || seed.len > 128 { return invalid }
+    for c in seed.bytes() {
+        let n = c as int
+        if n < 33 || n > 126 { return invalid }
+    }
+    if GAMES_REQUIRE_ANSWER && games != "yes" && games != "no" { return invalid }
+    if t.running_root { return running_root }
+    if t.mounted { return mounted }
+    if t.readonly { return readonly }
+    if t.sector != 512 || t.bytes % 512 != 0 { return sector_size }
+    if t.bytes < ROOT_START + ROOT_MIN + 33 * 512 { return too_small }
+    // Subtract before rounding or multiplying: even INT_MAX cannot overflow.
+    let end = (t.bytes - 33 * 512) / 4096 * 4096
+    let root = end - ROOT_START
+    if root < ROOT_MIN { return too_small }
+    if root > ROOT_MAX { return too_large }
+    let token = "ERASE /dev/{t.name} {t.identity} {t.bytes} {seed}"
+    Plan {
+        target: copy t,
+        seed: seed,
+        user: user,
+        games: games == "yes",
+        root_bytes: root,
+        tail_bytes: t.bytes - end,
+        token: token,
+    }
+}
+
+fn confirm_plan(p: Plan, current: Target, answer: str) -> () ! {unconfirmed, changed} {
+    if answer != p.token { return unconfirmed }
+    if current.name != p.target.name ||
+        current.identity != p.target.identity ||
+        current.bytes != p.target.bytes ||
+        current.sector != p.target.sector ||
+        current.readonly ||
+        current.mounted ||
+        current.running_root {
+        return changed
+    }
+}
+
+fn plan_text(p: Plan) -> str {
+    "PAX install plan v1\n" +
+        "format ext2-developer-preview (NO journal; not ext3)\n" +
+        "target /dev/{p.target.name}\nidentity {p.target.identity}\n" +
+        "capacity_bytes {p.target.bytes}\nlogical_sector_bytes {p.target.sector}\n" +
+        "partition 3 bios offset_bytes 1048576 length_bytes 1048576\n" +
+        "partition 1 esp offset_bytes {ESP_START} length_bytes {ESP_BYTES}\n" +
+        "partition 2 root offset_bytes {ROOT_START} length_bytes {p.root_bytes}\n" +
+        "prefix_reserved_bytes 1048576\ntail_reserved_bytes {p.tail_bytes} (GPT backup and block alignment)\n" +
+        "seed {p.seed}\nuser {p.user} uid {INSTALL_USER_ID} gid {INSTALL_USER_ID} no-password\n" +
+        "games {if p.games then "yes" else "no"}\n" +
+        "confirmation {p.token}\n"
+}

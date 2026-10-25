@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Initial read-only installer gate. Requires a staged console kernel for
+# --only inventory; no target writable open is reachable in this milestone.
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+only=planner
+work=$PAX_BUILD/mpx6-install
+kernel=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --only) only=$2; shift 2 ;;
+        --work) work=$2; shift 2 ;;
+        --kernel) kernel=$2; shift 2 ;;
+        *) die 'usage: mpx6-install [--only planner|inventory] [--work DIR] [--kernel ELF]' ;;
+    esac
+done
+mkdir -p "$work"
+work=$(cd "$work" && pwd)
+case $only in
+    planner)
+        "$PAX_ROOT/tools/mkinstall" "$work/bin" planner
+        "$work/bin/pax-planner"
+        ;;
+    inventory)
+        [ -f "$kernel" ] || die 'inventory needs --kernel ELF'
+        "$PAX_ROOT/tools/mkinstall" "$work/bin"
+        python3 -I "$PAX_ROOT/tests/mpx6-install.d/inventory.py" "$PAX_ROOT" "$work/inventory" "$work/bin" "$kernel"
+        ;;
+    *) die 'unknown suite selection' ;;
+esac

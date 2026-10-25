@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Build the Wolf installer or its pure planner witness, static on Ubuntu.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -ge 1 ] && [ $# -le 2 ] || die 'usage: mkinstall OUTDIR [planner]'
+out=$1; mode=${2:-install}
+case $mode in install|planner) ;; *) die 'mode is install or planner' ;; esac
+need cc clang readelf
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+wolf=$("$PAX_ROOT/tools/fetch-wolf")
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-install.XXXXXX")
+mkdir "$w/bin" "$w/src"
+printf '#!/bin/sh\nexec %s -static "$@"\n' "$(command -v cc)" > "$w/bin/cc"
+chmod 755 "$w/bin/cc"
+if [ "$mode" = planner ]; then
+    cp "$PAX_ROOT/user/install/plan.lu" "$w/src/plan.lu"
+    cp "$PAX_ROOT/tests/mpx6-install.d/planner.lu" "$w/src/main.lu"
+else
+    cp "$PAX_ROOT/user/install/"*.lu "$PAX_ROOT/user/install/"*.S "$PAX_ROOT/user/install/wolf.pkg" "$w/src/"
+fi
+# The entire verified archive is kept together; its bundled std is paired.
+PATH="$w/bin:$PATH" WOLF_STD="$(dirname "$wolf")/std" "$wolf" build --release --no-cache --deny-warnings \
+    "$w/src/main.lu" -o "$out/pax-$mode"
+readelf -hW "$out/pax-$mode" | grep -Eq 'Type: +EXEC' || die 'not ET_EXEC'
+if readelf -lW "$out/pax-$mode" | grep -q INTERP; then die 'not static'; fi
+printf '%s %s\n' "$(sha256_of "$out/pax-$mode")" "pax-$mode" > "$out/$mode.sha256"
+rm -rf "$w"

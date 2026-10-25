@@ -1,0 +1,32 @@
+//! The first installer milestone exposes inventory and a read-only plan.
+//! No destructive option is accepted until the executor is tested.
+
+fn main() -> int {
+    let args = env_args()
+    if args.len == 0 || args.len == 1 && args[0] == "--inventory" {
+        let ts = inventory() else |e| { eprint("pax-install: inventory: {e}"); return 1 }
+        for t in ts { print(inventory_text(t)) }
+        return 0
+    }
+    if args.len != 9 ||
+        args[0] != "--dry-run" ||
+        args[1] != "--target" ||
+        args[3] != "--seed" ||
+        args[5] != "--user" ||
+        args[7] != "--games" {
+        eprint(
+            "usage: pax-install --inventory | --dry-run --target NAME --seed TEXT --user NAME --games yes|no",
+        )
+        return 2
+    }
+    let t = inventory_one(args[2]) else |e| {
+        eprint("pax-install: target unavailable: {e}")
+        return 1
+    }
+    let p = make_plan(t, args[4], args[6], args[8]) else |e| {
+        eprint("pax-install: refused: {e}")
+        return 1
+    }
+    print_raw(plan_text(p))
+    0
+}

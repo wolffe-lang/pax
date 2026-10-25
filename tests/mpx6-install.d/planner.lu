@@ -1,0 +1,79 @@
+//! Planner's independent arithmetic and refusal witnesses; no devices opened.
+
+fn target(name: str, bytes: int) -> Target {
+    Target {
+        name: name,
+        identity: "254:16-seq2",
+        bytes: bytes,
+        sector: 512,
+        readonly: false,
+        mounted: false,
+        running_root: false,
+    }
+}
+
+fn verdict(t: Target, user: str, games: str) -> str {
+    let _p = make_plan(t, "test", user, games) else |e| { return "{e}" }
+    "ok"
+}
+
+fn confirmation_verdict(p: Plan, t: Target, token: str) -> str {
+    confirm_plan(p, t, token) else |e| { return "{e}" }
+    "ok"
+}
+
+fn main() {
+    let t = target("vdb", 536870912)
+    let p = make_plan(t, "test", "pax", "yes") else |_| { assert(false); return }
+    assert(p.root_bytes == 467644416)
+    assert(p.tail_bytes == 20480)
+    assert(ROOT_START + p.root_bytes + p.tail_bytes == t.bytes)
+    assert(plan_text(p).contains("NO journal"))
+    print("PASS I-layout: exact 512 MiB plan, no hidden capacity")
+    let minimum = ROOT_START + ROOT_MIN + 33 * 512
+    let maximum = ROOT_START + ROOT_MAX + 33 * 512
+    assert(verdict(target("vdb", minimum), "pax", "no") == "ok")
+    assert(verdict(target("vdb", minimum - 512), "pax", "no") == "too_small")
+    assert(verdict(target("vdb", maximum), "pax", "no") == "ok")
+    assert(verdict(target("vdb", maximum + 4096), "pax", "no") == "too_large")
+    assert(verdict(target("vdb", 9223372036854775296), "pax", "no") == "too_large")
+    assert(verdict(target("vdb", -512), "pax", "no") == "too_small")
+    assert(verdict(target("vdb", 536870913), "pax", "no") == "sector_size")
+    print("PASS I-bounds: exact min/max, tiny, large, signed overflow, alignment")
+    var other = copy t
+    other.sector = 4096
+    assert(verdict(other, "pax", "yes") == "sector_size")
+    other = copy t
+    other.running_root = true
+    assert(verdict(other, "pax", "yes") == "running_root")
+    other = copy t
+    other.mounted = true
+    assert(verdict(other, "pax", "yes") == "mounted")
+    other = copy t
+    other.readonly = true
+    assert(verdict(other, "pax", "yes") == "readonly")
+    print("PASS I-refusals: running root, mounted, read-only, unsupported sector")
+    assert(confirmation_verdict(p, t, "") == "unconfirmed")
+    assert(confirmation_verdict(p, t, "yes") == "unconfirmed")
+    assert(confirmation_verdict(p, t, p.token) == "ok")
+    other = copy t
+    other.name = "vdbb"
+    assert(confirmation_verdict(p, other, p.token) == "changed")
+    other = copy t
+    other.identity = "254:16-seq3"
+    assert(confirmation_verdict(p, other, p.token) == "changed")
+    other = copy t
+    other.bytes += 512
+    assert(confirmation_verdict(p, other, p.token) == "changed")
+    other = copy t
+    other.mounted = true
+    assert(confirmation_verdict(p, other, p.token) == "changed")
+    print("PASS I-identity: similar name, changed identity/capacity/mount, exact token")
+    assert(verdict(t, "pax", "") == "invalid")
+    assert(verdict(t, "pax", "y") == "invalid")
+    assert(verdict(t, "root", "no") == "invalid")
+    assert(verdict(t, "../escape", "yes") == "invalid")
+    assert(verdict(t, "name:0", "yes") == "invalid")
+    assert(verdict(t, "pax", "no") == "ok")
+    print("PASS I-answers: explicit games yes/no and bounded account name")
+}

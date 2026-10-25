@@ -1,0 +1,151 @@
+//! Read-only inventory from the block ABI, not lsblk or a guessed name.
+
+extern "c" fn install_path_byte(index: int, value: int)
+
+extern "c" fn install_open(flags: int) -> int
+
+extern "c" fn install_query(fd: int, request: int) -> int
+
+extern "c" fn install_rdev(fd: int) -> int
+
+extern "c" fn install_close(fd: int) -> int
+
+extern "c" fn install_sync(fd: int) -> int
+
+fn raw_open(path: str, flags: int) -> int ! {io, invalid} {
+    if path.len == 0 || path.len > 4095 { return invalid }
+    for i in 0..path.len {
+        let b = path.bytes()[i] as int
+        if b == 0 { return invalid }
+        // # Safety: i is below path.len, bounded to 4095; b is one non-NUL byte.
+        unsafe { install_path_byte(i, b) }
+    }
+    // # Safety: the terminating NUL fits the 4096-byte assembly buffer.
+    unsafe { install_path_byte(path.len, 0) }
+    // # Safety: the buffer now holds a complete C string; no concurrent callers.
+    let fd = unsafe { install_open(flags | 524288) }
+    if fd < 0 { return io }
+    fd
+}
+
+fn device_text(n: int) -> str {
+    let major = n >> 8 & 4095 | n >> 32 & 4294963200
+    let minor = n & 255 | n >> 12 & 4294967040
+    "{major}:{minor}"
+}
+
+fn sorted_names(path: str) -> List[str] ! {io} {
+    var names = fs_read_dir(path) else |_| { return io }
+    for i in 1..names.len {
+        let value = names[i]
+        var j = i
+        while j > 0 && names[j - 1] > value { names[j] = names[j - 1]; j -= 1 }
+        names[j] = value
+    }
+    names
+}
+
+fn number_file(path: str) -> int ! {io, invalid} {
+    let s = fs_read_text(path) else |_| { return io }
+    let n = s.trim().to_int() else |_| { return invalid }
+    if n < 0 { return invalid }
+    n
+}
+
+fn inventory_one(name: str) -> Target ! {io, invalid} {
+    if !valid_disk(name) { return invalid }
+    let base = "/sys/block/{name}"
+    let dev = "/dev/{name}"
+    let st = fs_lstat(dev) else |_| { return io }
+    if st[0] != 7 { return invalid }
+    let fd = raw_open(dev, 0)?
+    defer raw_close(fd)
+    // # Safety: fd is owned here; assembly supplies a 144-byte x86-64 stat buffer.
+    let rdev = unsafe { install_rdev(fd) }
+    if rdev < 0 || rdev != st[11] { return invalid }
+    let id = device_text(rdev)
+    let sysdev = fs_read_text("{base}/dev") else |_| { return io }
+    if sysdev.trim() != id { return invalid }
+    // # Safety: read-only block request; assembly owns the zeroed eight-byte result.
+    let bytes = unsafe { install_query(fd, 2148012658) } // BLKGETSIZE64
+    // # Safety: read-only block request; assembly owns the zeroed eight-byte result.
+    let sector = unsafe { install_query(fd, 4712) } // BLKSSZGET
+    // # Safety: read-only block request; assembly owns the zeroed eight-byte result.
+    let ro = unsafe { install_query(fd, 4702) } // BLKROGET
+    // # Safety: read-only block request; assembly owns the zeroed eight-byte result.
+    let seq = unsafe { install_query(fd, 2148012672) } // BLKGETDISKSEQ
+    if bytes < 0 || sector <= 0 || ro < 0 || seq < 0 { return io }
+    let sectors = number_file("{base}/size")?
+    if sectors > 18014398509481983 || sectors * 512 != bytes { return invalid }
+    if number_file("{base}/ro")? != ro { return invalid }
+    let root = fs_stat("/") else |_| { return io }
+    let root_id = device_text(root[9])
+    var root_disk = root_id == id
+    var members = [id]
+    var topology = ""
+    for child in sorted_names(base)? {
+        if !valid_disk(child) { return invalid }
+        let pp = "{base}/{child}"
+        if !fs_exists("{pp}/partition") { continue }
+        let part = number_file("{pp}/partition")?
+        let start = number_file("{pp}/start")?
+        let size = number_file("{pp}/size")?
+        let pd = fs_read_text("{pp}/dev") else |_| { return io }
+        let pid = pd.trim()
+        (mut members).push(pid)
+        if root_id == pid { root_disk = true }
+        topology += ";{child}:{pid}:{part}:{start}:{size}"
+    }
+    var mounted_disk = false
+    let mounts = fs_read_text("/proc/self/mounts") else |_| { return io }
+    for line in mounts.lines() {
+        let w = line.words()
+        if w.len < 4 { return invalid }
+        // The mounted source may be an alias: compare device numbers,
+        // never vdb prefixes (vdb and vdbb are different targets).
+        if w[0].starts_with("/") {
+            let ms = fs_stat(w[0]) else |_| { return io }
+            if ms[0] == 7 {
+                for member in members {
+                    if device_text(ms[11]) == member { mounted_disk = true }
+                }
+            }
+        }
+    }
+    Target {
+        name: name,
+        identity: "{id}-seq{seq}{topology}",
+        bytes: bytes,
+        sector: sector,
+        readonly: ro != 0,
+        mounted: mounted_disk,
+        running_root: root_disk,
+    }
+}
+
+fn inventory() -> List[Target] ! {io, invalid} {
+    var targets = List[Target]()
+    for name in sorted_names("/sys/block")? {
+        if !valid_disk(name) { return invalid }
+        // Container /sys can describe disks whose nodes are unavailable.
+        // Never synthesize those nodes or treat a regular image as a disk.
+        if !fs_exists("/dev/{name}") {
+            eprint("unavailable /dev/{name}: no block node")
+            continue
+        }
+        (mut targets).push(inventory_one(name)?)
+    }
+    targets
+}
+
+fn inventory_text(t: Target) -> str {
+    let model = (fs_read_text("/sys/block/{t.name}/device/model") else |_| "unknown").trim()
+    let serial = (fs_read_text("/sys/block/{t.name}/device/serial") else |_| "unknown").trim()
+    "/dev/{t.name} bytes={t.bytes} sector={t.sector} readonly={t.readonly} mounted={t.mounted} root={t.running_root}\n" +
+        "  identity={t.identity}\n  model={model} serial={serial}"
+}
+
+fn raw_close(fd: int) {
+    // # Safety: caller owns this raw descriptor and closes it exactly once.
+    let _closed = unsafe { install_close(fd) }
+}
