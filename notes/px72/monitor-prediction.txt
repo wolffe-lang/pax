@@ -1,0 +1,11 @@
+CI follow-up prediction, before changes (2026-10-25)
+Run 40222959493 reaches PX72_CRASH_READY before boot.py's communicate(20)
+times out; qemu-run eventually terminates QEMU at its 210-second limit.
+This is fixture shutdown, before fsck starts, not missing QEMU/KVM or a
+checker repair failure. The fixture explicitly uses TCG.
+Hypothesis: sending HMP quit and immediately closing the connection races
+command consumption. A delayed monitor peer should reject that premature
+close deterministically. Negotiate QMP, acknowledge quit, and keep the
+connection open until EOF; the same delayed-peer gate and real rescue /
+corpus boots should pass without increasing the process wait timeout.
+The checker and the pelt/chk-soak lanes are untouched.
