@@ -1,0 +1,153 @@
+use diskio
+
+//! Journal layout and replay, from the published JBD2 on-disk format and
+//! PAX's own kernel/journal (px68). No journal implementation source read.
+//! Validate the complete committed prefix before the first home write.
+//! Revocations suppress their own transaction and earlier ones. A torn
+//! final commit drops its entire transaction. Sequence arithmetic wraps.
+struct LogTag { home: int, logged: int, flags: int }
+struct Transaction { tags: List[LogTag], revokes: List[int] }
+fn be(b: List[byte], at: int, width: int) -> int {
+    var n = 0
+    for i in 0..width { n = n * 256 + b[at + i] as int }
+    n
+}
+fn put_be(mut b: List[byte], at: int, value: int) {
+    for i in 0..4 { b[at + 3 - i] = ((value >> (i * 8)) & 255) as byte }
+}
+fn jphysical(v: Volume, raw: List[byte], logical: int) -> int ! {io, unsupported} {
+    let per = v.bs / 4
+    var n = logical
+    var root = 0
+    var depth = 0
+    if n < 12 { root = u(raw, 40 + n * 4, 4) }
+    else {
+        n -= 12
+        if n < per { root = u(raw, 88, 4); depth = 1 }
+        else {
+            n -= per
+            if n < per * per { root = u(raw, 92, 4); depth = 2 }
+            else { n -= per * per; root = u(raw, 96, 4); depth = 3 }
+        }
+    }
+    while depth > 0 {
+        if root < v.first || root >= v.blocks { return unsupported }
+        region indirect {
+            let b = diskio.exact(v.fd, root * v.bs, v.bs)?
+            var stride = 1
+            for _ in 1..depth { stride *= per }
+            let index = n / stride
+            if index >= per { return unsupported }
+            root = u(b, index * 4, 4)
+            n %= stride
+            depth -= 1
+        }
+    }
+    if root < v.first || root >= v.blocks { return unsupported }
+    root
+}
+fn jnext(pos: int, first: int, count: int) -> int { if pos + 1 >= count then first else pos + 1 }
+fn replay(v: Volume) -> bool ! {io, unsupported} {
+    let recovery = u(v.sb, 96, 4) & 4 != 0
+    if v.compat & 4 == 0 {
+        if recovery { print("unsupported: needs_recovery without has_journal"); return unsupported }
+        return false
+    }
+    let ino = u(v.sb, 224, 4)
+    if ino == 0 || ino > v.ninodes || u(v.sb, 228, 4) != 0 {
+        print("unsupported: external journal"); return unsupported
+    }
+    let raw = diskio.exact(v.fd, inode_at(v, ino), v.isize)?
+    if u(raw, 0, 2) & 61440 != 32768 || u(raw, 4, 4) % v.bs != 0 { return unsupported }
+    let size = u(raw, 4, 4) / v.bs
+    if size < 2 || size > 131072 { return unsupported }
+    var map = List[int]()
+    for i in 0..size { (mut map).push(jphysical(v, raw, i)?) }
+    var sb = diskio.exact(v.fd, map[0] * v.bs, v.bs)?
+    let kind = be(sb, 4, 4)
+    if be(sb, 0, 4) != 0xc03b3998 || (kind != 3 && kind != 4) || be(sb, 12, 4) != v.bs {
+        print("unsupported: journal superblock"); return unsupported
+    }
+    if kind == 4 && (be(sb, 36, 4) != 0 || be(sb, 40, 4) & 0xfffffffe != 0 || be(sb, 44, 4) != 0) {
+        print("unsupported: journal checksums, 64-bit tags, asynchronous or fast commits"); return unsupported
+    }
+    let count = be(sb, 16, 4), first = be(sb, 20, 4), start = be(sb, 28, 4)
+    if count > size || first < 1 || first >= count || (start != 0 && (start < first || start >= count)) { return unsupported }
+    if !recovery { return false }
+    if v.mode == 0 { print("Journal needs recovery: report-only mode does not replay"); return unsupported }
+    var transactions = List[Transaction]()
+    var tags = List[LogTag](), revokes = List[int]()
+    var seq = be(sb, 24, 4)
+    var pos = start, steps = 0
+    while start != 0 && steps < count - first {
+        region header {
+            let b = diskio.exact(v.fd, map[pos] * v.bs, v.bs)?
+            if be(b, 0, 4) != 0xc03b3998 || be(b, 8, 4) != seq { break }
+            let ty = be(b, 4, 4)
+            if ty == 1 {
+                var at = 12, last = false
+                while !last {
+                    if at + 8 > v.bs { print("unsupported: journal descriptor has no last tag"); return unsupported }
+                    let home = be(b, at, 4), flags = be(b, at + 6, 2)
+                    if flags & 0xfff0 != 0 { print("unsupported: journal tag flags"); return unsupported }
+                    at += 8
+                    if flags & 2 == 0 { at += 16 }
+                    if at > v.bs { return unsupported }
+                    pos = jnext(pos, first, count); steps += 1
+                    if steps >= count - first { return unsupported }
+                    (mut tags).push(LogTag { home: home, logged: map[pos], flags: flags })
+                    last = flags & 8 != 0
+                }
+            } else if ty == 5 {
+                let length = be(b, 12, 4)
+                if length < 16 || length > v.bs || length % 4 != 0 {
+                    print("unsupported: malformed journal revocation length"); return unsupported
+                }
+                var at = 16
+                while at < length { (mut revokes).push(be(b, at, 4)); at += 4 }
+            } else if ty == 2 {
+                (mut transactions).push(copy Transaction { tags: copy tags, revokes: copy revokes })
+                tags = copy List[LogTag](); revokes = copy List[int]()
+                seq = (seq + 1) & 4294967295
+            } else { break }
+            pos = jnext(pos, first, count); steps += 1
+        }
+    }
+    // Preflight every home block, including journal overlap; a failed
+    // validation must never empty the log or write a partial transaction.
+    for tx in transactions {
+        for tag in tx.tags {
+            if tag.home < v.first || tag.home >= v.blocks { print("unsupported: journal tag outside volume"); return unsupported }
+            for b in map { if b == tag.home { print("unsupported: journal tag overwrites journal"); return unsupported } }
+        }
+    }
+    var written = 0, revoked = 0
+    for i in 0..transactions.len {
+        for tag in transactions[i].tags {
+            var skip = false
+            for j in i..transactions.len {
+                for b in transactions[j].revokes { if b == tag.home { skip = true } }
+            }
+            if skip { revoked += 1; continue }
+            region data {
+                var b = diskio.exact(v.fd, tag.logged * v.bs, v.bs)?
+                if tag.flags & 1 != 0 { put_be(mut b, 0, 0xc03b3998) }
+                diskio.write_at(v.fd, tag.home * v.bs, b)?
+                written += 1
+            }
+        }
+    }
+    fs_sync(v.fd) else |_| { return io }
+    // e2fsck also advances the sequence for needs_recovery with start=0.
+    put_be(mut sb, 24, (seq + 1) & 4294967295)
+    put_be(mut sb, 28, 0)
+    diskio.write_at(v.fd, map[0] * v.bs, sb)?
+    fs_sync(v.fd) else |_| { return io }
+    var home = diskio.exact(v.fd, 1024, 1024)?
+    diskio.put(mut home, 96, u(home, 96, 4) & 0xfffffffb, 4)
+    diskio.write_at(v.fd, 1024, home)?
+    fs_sync(v.fd) else |_| { return io }
+    let n = transactions.len
+    print("Journal recovery complete: {n} transactions, {written} blocks, {revoked} revoked")
+    true
+}
