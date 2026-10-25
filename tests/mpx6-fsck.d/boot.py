@@ -21,10 +21,17 @@ cmd = [repo + '/tools/qemu-run', '--boot-disk', '--accel', 'tcg', '--firmware', 
 if extra_drive:
     at = cmd.index(disk)
     cmd[at:at] = ['--drive', extra_drive]
+# Invalidate a previous run before the child can start asynchronously.
+serial.write_bytes(b'')
 p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 
 def quit_monitor():
+    end = time.monotonic() + 5
+    while not os.path.exists(monitor) and p.poll() is None and time.monotonic() < end:
+        time.sleep(0.05)
+    if p.poll() is not None:
+        return
     with socket.socket(socket.AF_UNIX) as s:
         s.settimeout(3)
         s.connect(monitor)
@@ -56,5 +63,9 @@ try:
     print('PASS boot-' + kind + '-' + firmware, flush=True)
 finally:
     if p.poll() is None:
-        quit_monitor()
-        p.wait(timeout=20)
+        try:
+            quit_monitor()
+        finally:
+            # The repo runner has its own bounded timeout; never leave it
+            # unwaited even when the monitor could not be opened.
+            p.wait(timeout=230)
