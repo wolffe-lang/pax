@@ -110,6 +110,10 @@
 # --home-size, and --gpt without --root) stay ext2, as their suites'
 # recordings are.
 #
+# PAX_EXT2_WRITER=/path/to/paxext2 selects the Wolf writer for plain ext2
+# volumes; it refuses journalled roots rather than dropping their journal.
+# The default remains the pinned e2fsprogs reference.
+#
 # Prints the commands' count, the e2fsck verdict, and
 # `OUT <bytes> bytes sha256 <hex>`. Exit 0, 1 when e2fsck (or, --gpt,
 # any oracle) finds a fault, 2 on a usage or tool error.
@@ -535,6 +539,28 @@ def main(argv):
     t = epoch()
     work = os.path.dirname(out)
     os.makedirs(work, exist_ok=True)
+    # px69: opt-in alternate ext2 writer for the disk-tool/root differential.
+    # The default path remains e2fsprogs, and a journal is never silently lost.
+    writer = os.environ.get("PAX_EXT2_WRITER")
+    if writer:
+        if journal or bs != 4096:
+            die("PAX_EXT2_WRITER supports ext2 with 4096-byte blocks only; use --no-journal for a root")
+        cmd = [writer, "--label", label, "--seed", label]
+        if src:
+            cmd += ["--from", src]
+        if attrs:
+            cmd += ["--attrs", attrs]
+        if inodes:
+            cmd += ["--inodes", str(inodes)]
+        run(cmd + [str(size), out], "paxext2", {"SOURCE_DATE_EPOCH": str(t)})
+        rc, so, se = e2fs(work, "e2fsck", "-fn", out)
+        if rc != 0:
+            die("oracle e2fsck -fn: %s%s" % (so, se), 1)
+        print("mkdisk: paxext2 writer; e2fsck -fn: " + so.strip().splitlines()[-1])
+        print("%s %d bytes sha256 %s" % (out, size, sha_of(out)))
+        if home:
+            shutil.rmtree(home, ignore_errors=True)
+        return
     with open(out, "wb") as f:
         f.truncate(size)
     mk = ["mke2fs" if journal else "mkfs.ext2", "-q", "-F", "-t", "ext3" if journal else "ext2", "-b", str(bs), "-L", label,

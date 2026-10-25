@@ -12,7 +12,7 @@
 # recovers it; R8e keeps px67's ext2 power cut on a --no-journal disk.
 #
 #   tests/mpx6-root [--images DIR | --no-boot | --only build | --only linux --images DIR [--record]]
-#                   [--rows pr|all] [--firmware bios|uefi|both] [--tier native|release|both]
+#                   [--rows pr|all] [--fstype ext2|ext3] [--firmware bios|uefi|both] [--tier native|release|both]
 #
 # The programs, static and unmodified: user/elf/mounts.c (the probe:
 # tools/mkrootprobe) and user/elf/reboot.S (/bin/reboot,
@@ -79,6 +79,11 @@
 #   R11 each boot: `block: vda: … 0 errors`, halted or reset as it
 #       should, no PANIC.
 #
+# --fstype ext2 is px69's explicit non-journalled root leg. It uses its
+# own Linux recording, keeps R8e, and says SKIP for journal-only R8.
+# PAX_EXT2_WRITER selects the alternate writer only for PAX's disks.
+# The independent Linux side always unsets it. Default ext3 is unchanged.
+#
 # The UEFI leg needs OVMF (SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1). Exit 0 when every row held, 1 otherwise, 2 on a
 # usage or tool error.
@@ -87,14 +92,16 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 grep() { command grep -a "$@"; }
 
+fstype=ext3
 images= legs=both tiers=both noboot=0 only= rows=${PAX_ROOT_ROWS:-all} record=0
-usage="usage: tests/mpx6-root [--images DIR | --no-boot | --only build | --only linux --images DIR [--record]] [--rows pr|all] [--firmware bios|uefi|both] [--tier native|release|both]"
+usage="usage: tests/mpx6-root [--images DIR | --no-boot | --only build | --only linux --images DIR [--record]] [--rows pr|all] [--fstype ext2|ext3] [--firmware bios|uefi|both] [--tier native|release|both]"
 while [ $# -gt 0 ]; do
     case $1 in
         --images)   images=$2; shift 2 ;;
         --no-boot)  noboot=1; shift ;;
         --only)     only=$2; shift 2 ;;
         --rows)     rows=$2; shift 2 ;;
+        --fstype)   fstype=$2; shift 2 ;;
         --record)   record=1; shift ;;
         --firmware) legs=$2; shift 2 ;;
         --tier)     tiers=$2; shift 2 ;;
@@ -104,12 +111,15 @@ done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
 case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+case $fstype in ext2|ext3) ;; *) die "--fstype takes ext2 or ext3" ;; esac
+[ -z "${PAX_EXT2_WRITER:-}" ] || [ "$fstype" = ext2 ] || die "PAX_EXT2_WRITER requires --fstype ext2"
 case $rows in pr|all) ;; *) die "--rows takes pr or all" ;; esac
 [ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
 need readelf python3
 
 D=$PAX_ROOT/tests/mpx6-root.d
 REC=$D/linux
+[ "$fstype" != ext2 ] || REC=$D/linux-ext2
 EPOCH=1700000000
 SIZE=128M
 work=$PAX_BUILD/mpx6-root
@@ -146,7 +156,7 @@ linux_side() { # dir -> reasons
         return
     fi
     [ -n "$k" ] || { printf ' PAX_LINUX=live and no readable kernel;'; return; }
-    "$PAX_ROOT/tools/linux-root" --kernel "$k" --fstype ext3 --append loglevel=7 "$w/linux/g" "$w/bin/mounts" > "$w/linux/g.txt" 2>&1 \
+    env -u PAX_EXT2_WRITER "$PAX_ROOT/tools/linux-root" --kernel "$k" --fstype "$fstype" --append loglevel=7 "$w/linux/g" "$w/bin/mounts" > "$w/linux/g.txt" 2>&1 \
         || printf ' tools/linux-root;'
     python3 "$D/session" linux "$w/linux/g/serial.log" > "$w/linux/g.all"
     guest_cut "$w/linux/g.all" > "$w/linux/guest.session"
@@ -160,9 +170,9 @@ linux_side() { # dir -> reasons
     for fs in ext3 ext2; do
         nc=$w/linux/notclean.txt
         [ "$fs" = ext2 ] && nc=$w/linux/notclean-ext2.txt
-        "$PAX_ROOT/tools/linux-root" --kernel "$k" --fstype "$fs" --append loglevel=7 --init-args "init /dev/vda4 /mnt tmpfs no-end" \
+        env -u PAX_EXT2_WRITER "$PAX_ROOT/tools/linux-root" --kernel "$k" --fstype "$fs" --append loglevel=7 --init-args "init /dev/vda4 /mnt tmpfs no-end" \
             "$w/linux/n1-$fs" "$w/bin/mounts" > "$w/linux/n1-$fs.txt" 2>&1 || printf ' tools/linux-root (no end, %s);' "$fs"
-        "$PAX_ROOT/tools/linux-root" --kernel "$k" --fstype "$fs" --append loglevel=7 --disk "$w/linux/n1-$fs/disk.img" \
+        env -u PAX_EXT2_WRITER "$PAX_ROOT/tools/linux-root" --kernel "$k" --fstype "$fs" --append loglevel=7 --disk "$w/linux/n1-$fs/disk.img" \
             "$w/linux/n2-$fs" "$w/bin/mounts" > "$w/linux/n2-$fs.txt" 2>&1 || printf ' tools/linux-root (after, %s);' "$fs"
         {
             echo "after a power-off with / read-write:"
@@ -179,7 +189,7 @@ linux_side() { # dir -> reasons
     if [ "$record" = 1 ]; then
         mkdir -p "$REC"
         cp "$w/linux/guest.session" "$w/linux/guest.kernel" "$w/linux/notclean.txt" "$w/linux/notclean-ext2.txt" "$REC/"
-        printf 'Linux %s on QEMU (tools/linux-root --fstype ext3; notclean-ext2.txt: --fstype ext2), recorded %s\n' "$(file -b "$k" | sed -n 's/.*version \([^ ]*\).*/\1/p')" "$(date -u +%Y-%m-%d)" > "$REC/meta"
+        printf 'Linux %s on QEMU (tools/linux-root --fstype %s; notclean-ext2.txt: --fstype ext2), recorded %s\n' "$(file -b "$k" | sed -n 's/.*version \([^ ]*\).*/\1/p')" "$fstype" "$(date -u +%Y-%m-%d)" > "$REC/meta"
         say "recorded the Linux side in $REC"
     fi
 }
@@ -189,7 +199,13 @@ linux_side() { # dir -> reasons
 # the first tier's main archive.
 make_disk() { # out archive conf label [more mkdisk args]
     local out=$1 cpio=$2 conf=$3 label=$4; shift 4
-    SOURCE_DATE_EPOCH=$EPOCH "$PAX_ROOT/tools/mkdisk" --gpt --kernel "$elf" --root "$cpio" --home-size 16M --conf "$conf" \
+    local fsargs=()
+    if [ "$fstype" = ext2 ]; then
+        fsargs=(--no-journal)
+        sed 's/rootfstype=ext3/rootfstype=ext2/g' "$conf" > "$out.conf"
+        conf=$out.conf
+    fi
+    SOURCE_DATE_EPOCH=$EPOCH "$PAX_ROOT/tools/mkdisk" --gpt "${fsargs[@]}" --kernel "$elf" --root "$cpio" --home-size 16M --conf "$conf" \
         --label "$label" "$@" "$SIZE" "$out" > "$out.mkdisk.txt" 2>&1
 }
 
@@ -338,6 +354,8 @@ halted() { # id rc
 
 mkdir -p "$PAX_BUILD"
 : > "$runs"
+policy=data=ordered
+[ "$fstype" != ext2 ] || policy=write-back
 first=1
 for leg in $legs; do
     if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
@@ -367,12 +385,16 @@ for leg in $legs; do
         hrc=0; halt_boot "$tier" "$leg" main "$disk" || hrc=$?
         g=$(sed -n 's/^mkdisk: root=//p' "$dk/main.img.mkdisk.txt")
         why=
-        sgrep -Eq "^root: $g \\(vda2\\) on /: ext3, read-write, data=ordered\$" || why+=" no root: line for $g;"
-        sgrep -Eq '^ext2: vda2: .*; clean, mount 1; read-write; journal of [0-9]+ blocks in [0-9]+ runs, data=ordered$' || why+=" no clean ext3 line for vda2;"
-        sgrep -Eq '^fstab: /dev/vda2 is /: ext3, read-write, data=ordered$' || why+=" no fstab line for /;"
+        sgrep -Eq "^root: $g \\(vda2\\) on /: $fstype, read-write, $policy\$" || why+=" no root: line for $g;"
+        if [ "$fstype" = ext3 ]; then
+            sgrep -Eq '^ext2: vda2: .*; clean, mount 1; read-write; journal of [0-9]+ blocks in [0-9]+ runs, data=ordered$' || why+=" no clean ext3 line for vda2;"
+        else
+            sgrep -Eq '^ext2: vda2: .*; clean, mount 1; read-write$' || why+=" no clean ext2 line for vda2;"
+        fi
+        sgrep -Eq "^fstab: /dev/vda2 is /: $fstype, read-write, $policy\$" || why+=" no fstab line for /;"
         sgrep -Eq '^fstab: tmpfs on /tmp: the memory'"'"'s, mode 1777$' || why+=" no tmpfs line;"
         ! sgrep -q 'refused:' || why+=" $(sgrep -m1 'refused:');"
-        [ -z "$why" ] && say "PASS R1 $id: root=$g mounted vda2 as / (ext3, read-write, data=ordered, clean, mount 1); /etc/fstab's / line and tmpfs /tmp" || bad "R1 $id:$why"
+        [ -z "$why" ] && say "PASS R1 $id: root=$g mounted vda2 as / ($fstype, read-write, $policy, clean, mount 1); /etc/fstab's / line and tmpfs /tmp" || bad "R1 $id:$why"
         out=$PAX_BUILD/mpx6-root-$tier-$leg-main.session
         python3 "$D/session" pax "$log" > "$out.all"
         sed -n '/^table: begin$/,/^user 1000: end, status 0$/p' "$out.all" > "$out"
@@ -427,8 +449,8 @@ for leg in $legs; do
                 why=
                 [ -n "$spec" ] || why+=" no root: line ($(sgrep -m1 '^root: ' || echo none));"
                 if [ "$v" = ro ]; then
-                    sgrep -Eq '^root: .* on /: ext3, read-only, data=ordered$' || why+=" not mounted read-only;"
-                    sgrep -Eq '^fstab: /dev/vda2 is /: ext3, read-write, data=ordered$' || why+=" the / line did not remount it read-write;"
+                    sgrep -Eq "^root: .* on /: $fstype, read-only, $policy\$" || why+=" not mounted read-only;"
+                    sgrep -Eq "^fstab: /dev/vda2 is /: $fstype, read-write, $policy\$" || why+=" the / line did not remount it read-write;"
                 fi
                 [ "$mi" = "$gm" ] || why+=" mountinfo's first line '$mi', the guest's '$gm';"
                 [ "$hrc" = 0 ] || why+=" not halted;"
@@ -506,6 +528,7 @@ for leg in $legs; do
         halted "$id twice2" "$hrc"
         rm -f "$disk"
 
+        if [ "$fstype" = ext3 ]; then
         # --- R8: a power cut ----------------------------------------------------------
         disk=$PAX_BUILD/mpx6-root-$tier-$leg-cut.img
         cp --sparse=always "$dk/cut.img" "$disk"
@@ -540,6 +563,10 @@ for leg in $legs; do
         [ -z "$why" ] && say "PASS R8 $id: killed after the table: clean with needs_recovery, mount 1 (the guest's power-off: clean, needs_recovery); the next boot: '$(sgrep -m1 '^ext2: vda2: recovering' | sed 's/^ext2: vda2: //')', read-write; its clean end: clean, mount 2, needs_recovery clear" || bad "R8 $id:$why"
         halted "$id cut2" "$hrc"
         rm -f "$disk"
+
+        else
+            say "SKIP R8 $id: ext2 has no journal; the ext2 crash contract is R8e"
+        fi
 
         # --- R8e: px67's power cut on an ext2 root (--no-journal) ----------------------
         vd=$dk/cut-ext2.img
