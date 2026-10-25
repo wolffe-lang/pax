@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Build the pinned Limine release's installer unchanged, for PAX's static
+# ELF loader. The ordinary fetch-limine result remains the Linux oracle.
+# No third-party implementation source is opened or patched by this tool.
+# Usage: tools/mklimine-static OUTDIR (baseline x86-64 Linux only).
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die 'usage: mklimine-static OUTDIR'
+need cc readelf
+out=$1; mkdir -p "$out"; out=$(cd "$out" && pwd)
+load_limine_pin
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-limine-static.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+mkdir -p "$w/bin"
+printf '#!/bin/sh\nexec %s -static -no-pie "$@"\n' "$(command -v cc)" > "$w/bin/cc"
+chmod +x "$w/bin/cc"
+PATH="$w/bin:$PATH" PAX_CACHE="$w/cache" "$PAX_ROOT/tools/fetch-limine" >&2
+cp "$w/cache/limine-$LIMINE_VERSION/limine" "$out/limine"
+readelf -hW "$out/limine" | grep -Eq 'Type: +EXEC' || die 'limine is not ET_EXEC'
+if readelf -lW "$out/limine" | grep -q INTERP; then die 'limine is not static'; fi
+printf 'limine %s %s\n' "$(sha256_of "$out/limine")" "$(wc -c < "$out/limine" | tr -d ' ')" | tee "$out/sums.txt"
