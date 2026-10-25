@@ -788,6 +788,46 @@ before the runtime's handler is in place (`tests/mpx5-jobs`' `~X:`;
 `notes/px65/probes/`: `pthread_getattr_np` of the main thread answers
 ENOENT on PAX, 0 on Linux). Listed to file (R-px65-5).
 
+## Served since px04: block device nodes (px79)
+
+The census reached no block device: px04's workloads open no `/dev/vd*`
+or `/dev/sd*` and ask no block ioctl. px79 serves them for what P6's
+installer and its tools ask (px69's disk tools, `limine bios-install`,
+sfdisk, lsblk and blkid as a distribution's installer runs them): a node
+in `/dev` for every disk and partition kernel/block knows (up to four
+virtio disks, `vda` to `vdd`, in PCI slot order; R-px79-1, R-px79-2), raw
+I/O through it, the block ioctls and the files lsblk and blkid read.
+Each row is held to Linux 7.3.0 (kasumi's installed image on QEMU, one
+to three disks) by `tests/mpx6-nodes`' probe, `user/elf/nodes.c`, and
+boreutils' `ls`.
+
+| nr | call | served on a block device's node | refused by name |
+|---:|---|---|---|
+| 2, 257 | `open`, `openat` | `/dev/vdX` and `/dev/vdXN` (0600, root's, as devtmpfs makes them with no udev: a user -EACCES by the class rule); O_RDONLY, O_WRONLY, O_RDWR (a read-only disk opens O_RDWR, its writes -EPERM, measured); O_EXCL without O_CREAT an exclusive open (-EBUSY while the device, its disk or a partition of it is mounted or held so: R-px79-3's rule, measured); O_DIRECT, O_SYNC and O_DSYNC taken and their writes on the device when they return (O_DIRECT's alignment rule is not enforced: PAX copies through its bounce frame, so an unaligned O_DIRECT buffer or offset is served where Linux's direct I/O may refuse it with -EINVAL; a named drift, the rows ask only the aligned read); O_TRUNC and O_CREAT change nothing; O_DIRECTORY -ENOTDIR | O_NOATIME, O_PATH (as on any node) |
+| 0, 17 | `read`, `pread64` | any length at any offset (R-px79-4: a 100-byte read at offset 3 answers 100, as the guest's buffered read), short across the end, 0 at and past it; pread at a negative offset -EINVAL; each piece read from the device through kernel/block's bounce frame (not cached) | |
+| 1, 18, 20 | `write`, `pwrite64`, `writev` | any length at any offset, a partial sector read, changed and written back; short across the end, -ENOSPC at and past it; -EPERM on a read-only disk (before anything, even a write of no bytes: measured); on the device before the call returns; a clean cached block of the disk it touched forgotten; allowed while a partition of the disk is mounted, as Linux allows it (a block that file system holds dirty is the user's to keep apart, as on Linux) | |
+| 8 | `lseek` | SEEK_SET, SEEK_CUR, SEEK_END to an offset from 0 to the size; -EINVAL outside it and for SEEK_DATA, SEEK_HOLE and any other whence (measured) | |
+| 74, 75 | `fsync`, `fdatasync` | what the cache holds of the device written, then a FLUSH to its disk; 0 on a read-only descriptor too | |
+| 4, 5, 6, 262, 332 | `stat`, `fstat`, `lstat`, `newfstatat`, `statx` | S_IFBLK 0600, st_rdev the guest's numbers (254:16k + N for vdX's partition N up to 15, 259:M past it, M the lowest free across every disk, as measured), st_size 0, st_blocks 0, st_blksize the logical block (512), owner 0:0, links 1; st_dev /dev's own (0:5); times 0 (devtmpfs stamps a node's birth: a named drift) | |
+| 217 | `getdents64` | `/dev` lists the block devices after its fixed names, DT_BLK, in /proc/partitions' order | |
+| 16 | `ioctl` | BLKGETSIZE64 (u64 bytes), BLKGETSIZE (unsigned long sectors), BLKSSZGET (int), BLKPBSZGET, BLKIOMIN (unsigned int: the logical block, 512), BLKIOOPT, BLKALIGNOFF, BLKDISCARDZEROES (0), BLKROGET (int, 1 on a read-only disk), BLKBSZGET (int: 4096 down to the largest block the size is a whole number of), BLKROTATIONAL (u16, 1), BLKGETDISKSEQ (u64: 1 for vda, 2 for vdb …), HDIO_GETGEO (`struct hd_geometry`: the device's heads, sectors and u16 cylinders through VIRTIO_BLK_F_GEOMETRY, the first sector as an unsigned long, the padding zero); for root: BLKFLSBUF (what the cache holds of the device written and forgotten), BLKRRPART (the disk's table read again, its partitions' nodes made and taken away; -EINVAL on a partition, -EBUSY while one of its partitions is open, mounted or held exclusively: R-px79-3, measured), BLKPG's BLKPG_ADD_PARTITION (-EBUSY for a number in use or an overlap, -EINVAL past the end, on a partition's node, for a number past 128 or a start or length that is no whole number of sectors) and BLKPG_DEL_PARTITION (-ENXIO for a number none has, -EBUSY while open or mounted); a user -EACCES for those three; -ENOTTY for a request of no block device's (TCGETS, FIONREAD, FS_IOC_GETFLAGS: measured) | BLKSECTGET, BLKRAGET, BLKFRAGET (the guest's block layer's tunables, no fact of the device), BLKRASET, BLKFRASET, BLKSECTSET, BLKBSZSET, BLKROSET, BLKDISCARD, BLKSECDISCARD, BLKZEROOUT, BLKTRACE*, BLKPG_RESIZE_PARTITION and the rest of the 0x12 and HDIO families: -ENOTTY (BLKPG's other operations -EINVAL), one line each call |
+| 165 | `mount` | the source walked: a block device's node (any path to it) is its disk or partition (px67's internal names before /dev had nodes are gone); -ENOTBLK for what is no block device, the walk's -ENOENT for a name not there (`vdb2` from `/`, measured); /proc/mounts names the node (`/dev/vdb2 /mnt ext2 rw,relatime 0 0`, as the guest's) | |
+| 9 | `mmap` | | a block device (-ENODEV: a named limit) |
+| 73 | `flock` | a block device's open file, as a file's (sfdisk locks the disk it writes) | |
+| 40, 275 | `sendfile`, `splice` | a file's bytes onto a block device's node at its offset, which moves (sendfile from a file, splice from a pipe: `cat disk.img > /dev/vdb`), short across the end and -ENOSPC past it, as the guest's (measured) | a node as their input (-EINVAL: a named limit; Linux reads a disk this way, PAX's readers use read(2)) |
+| 326 | `copy_file_range` | | onto a block device -EINVAL (measured: the guest's answer too) |
+
+And the files that answer for them, each in the guest's shape:
+`/proc/partitions` for every disk, each followed by its partitions by
+number; `/sys/block` (each disk's directory: `dev`, `size`, `ro`,
+`removable`, and a directory per partition with `dev`, `start`, `size`,
+`partition`, `ro`) and `/sys/class/block` (every device's, `dev` among
+the same attributes). Linux's `/sys/block/<disk>` and
+`/sys/class/block/<name>` are links into `/sys/devices/…`; PAX's are
+the directories themselves (a named drift: what is read through them is
+the same). lsblk and blkid are dynamic glibc programs (px66) and do not
+run on PAX; the probe reads what they read.
+
 ## Reproduce
 
 On a Linux host with rootless podman (kasumi, 2026-10-04; podman's
