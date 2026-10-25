@@ -6,6 +6,8 @@ PAX is a clean-room implementation of Linux's userspace ABI. It does not contain
 
 Users (P5, px38 to px47): PAX has accounts, root, `pax` (1000) and the service account `lobo` (990), in its image's `/etc/passwd` and `/etc/group`. There are no passwords yet and the image boots to root's shell; `su`, written in wolf (`user/su`), is root becoming a user, a user's `su` is refused as Linux refuses one who cannot authenticate, and a set-ID bit is not honoured, so privilege only drops. A process has Linux's real, effective, saved and file-system ids and a group list; a file has an owner, a group and a mode; and `open`, `exec`, every path walk, making, removing, renaming and linking a name, changing a mode, an owner or a time, signals, ports below 1024, raw sockets, the speaker, `/dev`'s nodes and `/proc`'s files are checked by Linux's rules, each rule measured against a real Linux (`tests/mpx5-users`, `tests/mpx5-accounts`). Since px47 every suite that runs programs on PAX — the tree, the shell, boreutils, Unix sockets, TCP, UDP, the speaker and lobo — runs them again as a user beside root, each run held byte for byte to the same binaries run as the same user on Linux. These checks are enforced for honest programs; not a boundary against an attacker: the kernel has never been fuzzed or audited, and it loads programs at fixed addresses. `login` waits for job control, and passwords for a memory-hard hash.
 
+Offline filesystem checking: `tools/mkfsck` builds `fsck.ext2` in Wolf for Linux and PAX. It checks inodes and blocks, directories, connectivity, references and allocation summaries; repairs counts, bitmaps, links, orphans and duplicate data blocks; and replays supported ext3 journals. A separate rescue archive can repair the unmounted `/dev/vda2` without Linux. The suite compares generated damage with e2fsck, then power-cuts a running root and verifies rescue repair and reboot persistence under BIOS and UEFI. Unsupported formats and ambiguous damage are refused, never marked clean; mounted-volume repair is refused. Existing disk images do not gain a rescue menu automatically. See `docs/BOOT.md`, “Checking a volume from rescue”.
+
 Disk tools (px69): `paxgpt`, `paxfat` and `paxext2` are Wolf programs built as static Linux executables and run unchanged on PAX. They write GPT, FAT32/VFAT and an ext2 tree, including modes, owners, timestamps, symbolic links and hard links. The tests compare their output with sgdisk/sfdisk, dosfstools/mtools and e2fsprogs, then build a second disk entirely on PAX, written through its `/dev/vdb` node (px79), and boot it alone under SeaBIOS and OVMF. Limine's pinned installer is linked statically without changing its source; its Linux and PAX runs write identical bytes. `paxext2` does **not** add a journal: the existing host builder's ext3 default is unchanged. There is no guided installer yet. See `docs/BOOT.md`, “Writing a disk on PAX”, for the offline-disk interface and its bounds.
 
 The block nodes and a second disk (px79): PAX drives up to four virtio disks, named `vda` to `vdd` in PCI slot order as Linux names them, and `/dev` holds a block special file for every disk and partition the block layer knows (`brw-------`, root's, Linux's numbers: 254:0, 254:1 … for `vda`, 254:16 for `vdb`, the extended major 259 past partition 15), made in memory at boot and as a table is read again, as devtmpfs makes them, never written into an image. A program opens a node and reads and writes it raw at any length and offset (the guest's answers: short across the end, ENOSPC past it, EPERM on a read-only disk; a write to `vda` while a partition of it is mounted is allowed, as on Linux), seeks it, fsyncs it, sends a file onto it by `sendfile` or `splice`, and asks the block ioctls (the sizes, the block sizes, BLKROGET, BLKFLSBUF, HDIO_GETGEO from the device's own geometry, BLKRRPART with Linux's EBUSY while a partition is open or mounted, BLKPG's add and delete); every other request is ENOTTY, named. `/proc/partitions`, `/sys/block` and `/sys/class/block` answer what lsblk and blkid read; `mount(2)` and `/etc/fstab` name a partition by its node (`/dev/vdb2`), and `/proc/mounts` prints the node. `tools/qemu-run` and `tools/qemu-halt` take `--drive FILE` (repeatable) for a second and third disk. Every row is held to Linux 7.3.0 on QEMU with the same disks and the same static probe (`tests/mpx6-nodes`), and a disk made blank on the host gets a GPT and an ext2 from PAX through its nodes.
@@ -107,18 +109,22 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
               built twice to one digest by its own toolchain, and its
               two wrappers); mkgpt, disktools and
               mkdisktools, mklimine-static (px69: the static formatters and
-              unchanged Limine installer); linux-part (px66: a GPT or MBR table written
+              unchanged Limine installer); mkfsck (the offline checker); linux-part (px66: a GPT or MBR table written
               reproducibly; the partition and FAT tools from
               user/disktools.pin in the pinned container; the Linux
               guest's partitions, /proc/partitions and blkid on an
               image); mkdisk --gpt (px66: the disk that boots)
     font/     the screen's font (px19): Spleen 8x16, BSD-2-Clause, with
               its licence
-    tests/    scripted QEMU tests: proof, mkw (with M-KW's frozen kernels
-              in mkw.d/), mpx1, mpx2-frames, mpx2-paging, mpx2-interrupts,
-              mpx2-sched, mpx3-user, mpx3-loader, mpx3-boreutils, mpx3-console,
-              mpx3-screen, mpx3-speaker (px18), mpx3-threads (px26), mpx3-tree (px27), mpx3-sound (px30), mpx4-net (px20, px21), mpx4-udp (px22), mpx4-tcp (px23), mpx5-lope (px54), mpx6-blk and mpx6-ext2 (px63), mpx5-scent (px64), mpx6-part (px66), mpx5-bore (px65), mpx6-disktools (px69), gdb-attach,
-              expect-serial-selftest
+    tests/    QEMU and host-side entry points:
+              census, ci-plan, expect-serial-selftest, gdb-attach, lobo-session-selftest, mkw, mpx1,
+              mpx2-frames, mpx2-heap, mpx2-interrupts, mpx2-paging, mpx2-sched, mpx3-boreutils,
+              mpx3-console, mpx3-loader, mpx3-maps, mpx3-orchestra, mpx3-screen, mpx3-shell,
+              mpx3-sound, mpx3-speaker, mpx3-threads, mpx3-tree, mpx3-user, mpx4-lobo, mpx4-net,
+              mpx4-ready, mpx4-session, mpx4-tcp, mpx4-udp, mpx4-unix, mpx5-accounts, mpx5-aspen,
+              mpx5-bore, mpx5-jobs, mpx5-lope, mpx5-lupin, mpx5-pelt, mpx5-scent, mpx5-screen,
+              mpx5-users, mpx5-wolf, mpx5-yew, mpx6-blk, mpx6-disktools, mpx6-ext2, mpx6-fsck,
+              mpx6-journal, mpx6-nodes, mpx6-part, mpx6-root, paxtcp-selftest, proof, tour
     docs/     BOOT.md (the boot protocol, argued), SOURCES.md (the
               consulted-sources log), ABI notes as they come
     notes/    one note per lane: its contract and evidence
@@ -266,8 +272,8 @@ host repairs it: `e2fsck -fy` of partition 2, which starts at
 
 ## `/` on the disk (px67)
 
-The playground's `pax-disk.img` now holds the whole system on its ext2
-partition 2: `/` is the disk, so what you change anywhere lasts (`/etc`,
+The root-on-disk layout holds the whole system on partition 2
+(ext3 by default since the journal was added): `/` is the disk, so what you change anywhere lasts (`/etc`,
 `/root`, `/home/pax`, `/bin`), but for `/tmp`, which is memory. The
 terminal line is px66's, unchanged:
 
@@ -285,8 +291,9 @@ and marks it clean before the halt; on the host, `dumpe2fs -h` of
 partition 2 then says `clean`. **Closing QEMU without `exit` (Ctrl-A x,
 the window, the terminal) is still a power cut**, now for the whole
 system: what the last five seconds wrote may be lost, and the next boot
-says `not cleanly unmounted` until `e2fsck -fy` of partition 2 on the
-host repairs it.
+replays a journalled root before use. A non-journalled root remains
+unclean until an offline check repairs it: `fsck.ext2 -y /dev/vda2` from
+the rescue archive, or `e2fsck -fy` on the host.
 
 ## The dev image (px60)
 
