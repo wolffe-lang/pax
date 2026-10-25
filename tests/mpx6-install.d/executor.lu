@@ -1,0 +1,17 @@
+//! Exercises the exact executor with a regular log fixture, never a device.
+
+fn main() -> int {
+    let args = env_args()
+    if args.len != 4 { return 2 }
+    let fd = fs_open_mode(args[0], 3) else |_| { return 2 }
+    defer fs_close(fd) else |_| {}
+    var used = 0
+    let action = Action {
+        phase: "witness",
+        exe: args[1],
+        args: [args[3], "literal; $(touch NEVER)", "two words"],
+        output_hash: "",
+    }
+    run_action(action, args[2], fd, mut used) else |e| { eprint("executor: {e}"); return 1 }
+    0
+}

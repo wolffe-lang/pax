@@ -1,32 +1,133 @@
-//! The first installer milestone exposes inventory and a read-only plan.
-//! No destructive option is accepted until the executor is tested.
+//! Guided or explicitly scripted fresh install. No yes/default confirmation.
+
+use std.x.crypto.sha2
+
+struct Options {
+    mode: str,
+    target: str,
+    seed: str,
+    user: str,
+    games: str,
+    confirm: str,
+    preview: bool,
+    source: str,
+    payload: str,
+    tools: str,
+}
+
+fn options(args: List[str]) -> Options ! {invalid} {
+    var o = Options {
+        mode: "guided",
+        target: "",
+        seed: "",
+        user: "",
+        games: "",
+        confirm: "",
+        preview: false,
+        source: "/",
+        payload: "/usr/share/pax-install",
+        tools: "/bin",
+    }
+    var seen = Map[str, bool]()
+    var i = 0
+    while i < args.len {
+        let key = args[i]
+        if seen[key] else false { return invalid }
+        seen[key] = true
+        i += 1
+        if key == "--inventory" || key == "--dry-run" || key == "--install" {
+            if o.mode != "guided" { return invalid }
+            o.mode = key
+            continue
+        }
+        if key == "--ext2-preview" { o.preview = true; continue }
+        if i == args.len { return invalid }
+        let value = args[i]
+        i += 1
+        match key {
+            "--target" => { o.target = value },
+            "--seed" => { o.seed = value },
+            "--user" => { o.user = value },
+            "--games" => { o.games = value },
+            "--confirm" => { o.confirm = value },
+            "--source" => { o.source = value },
+            "--payload" => { o.payload = value },
+            "--tool-dir" => { o.tools = value },
+            _ => { return invalid },
+        }
+    }
+    if o.target.starts_with("/dev/") { o.target = o.target[5..] }
+    if o.mode == "--install" && (!o.preview || o.confirm.len == 0 || o.seed.len == 0) {
+        return invalid
+    }
+    if o.mode == "guided" &&
+        (o.target.len != 0 || o.user.len != 0 || o.games.len != 0 || o.confirm.len != 0) {
+        return invalid
+    }
+    o
+}
+
+fn fresh_seed() -> str {
+    var bytes = List[byte]()
+    for n in os_random(32) { (mut bytes).push(n as byte) }
+    sha2.to_hex(bytes)
+}
 
 fn main() -> int {
-    let args = env_args()
-    if args.len == 0 || args.len == 1 && args[0] == "--inventory" {
+    let o = options(env_args()) else |_| {
+        eprint(
+            "usage: pax-install [--inventory | --dry-run | --install --ext2-preview --confirm TOKEN] [--target NAME --seed TEXT --user NAME --games yes|no] [--source DIR --payload DIR --tool-dir DIR]",
+        )
+        return 2
+    }
+    if o.mode == "--inventory" {
         let ts = inventory() else |e| { eprint("pax-install: inventory: {e}"); return 1 }
         for t in ts { print(inventory_text(t)) }
         return 0
     }
-    if args.len != 9 ||
-        args[0] != "--dry-run" ||
-        args[1] != "--target" ||
-        args[3] != "--seed" ||
-        args[5] != "--user" ||
-        args[7] != "--games" {
+    let seed = if o.seed.len == 0 then fresh_seed() else o.seed
+    let p = if o.mode == "guided" {
+        let ts = inventory() else |e| { eprint("pax-install: inventory: {e}"); return 1 }
+        guided_plan(ts, seed) else |e| {
+            eprint("pax-install: cancelled/refused before writes: {e}")
+            return 1
+        }
+    } else {
+        let t = inventory_one(o.target) else |e| {
+            eprint("pax-install: target unavailable: {e}")
+            return 1
+        }
+        make_plan(t, seed, o.user, o.games) else |e| {
+            eprint("pax-install: refused: {e}")
+            return 1
+        }
+    }
+    if o.mode == "--dry-run" { print_raw(plan_text(p)); return 0 }
+    if o.mode != "guided" {
+        confirm_plan(p, p.target, o.confirm) else |e| {
+            eprint("pax-install: before writes: {e}")
+            return 1
+        }
+    }
+    let source = fs_realpath(o.source) else |e| { eprint("pax-install: source: {e}"); return 1 }
+    execute_plan(p, source, o.payload, o.tools) else |e| {
         eprint(
-            "usage: pax-install --inventory | --dry-run --target NAME --seed TEXT --user NAME --games yes|no",
+            "pax-install: stopped: {e}; no rollback promised. If writes began, inspect the target's persistent phase log; bootability is NOT established.",
         )
-        return 2
-    }
-    let t = inventory_one(args[2]) else |e| {
-        eprint("pax-install: target unavailable: {e}")
         return 1
     }
-    let p = make_plan(t, args[4], args[6], args[8]) else |e| {
-        eprint("pax-install: refused: {e}")
-        return 1
+    if o.mode == "guided" {
+        let s = answer(
+            "Type reboot to reboot now; anything else leaves the running system up: ",
+        ) else |_| ""
+        if s == "reboot" {
+            let child = os_spawn(["/bin/reboot"]) else |e| {
+                eprint("pax-install: reboot: {e}")
+                return 1
+            }
+            let status = os_wait(child) else |e| { eprint("pax-install: reboot: {e}"); return 1 }
+            return status
+        }
     }
-    print_raw(plan_text(p))
     0
 }

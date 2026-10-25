@@ -23,7 +23,7 @@ fn raw_open(path: str, flags: int) -> int ! {io, invalid} {
     // # Safety: the terminating NUL fits the 4096-byte assembly buffer.
     unsafe { install_path_byte(path.len, 0) }
     // # Safety: the buffer now holds a complete C string; no concurrent callers.
-    let fd = unsafe { install_open(flags | 524288) }
+    let fd = unsafe { install_open(flags) }
     if fd < 0 { return io }
     fd
 }
@@ -58,7 +58,7 @@ fn inventory_one(name: str) -> Target ! {io, invalid} {
     let dev = "/dev/{name}"
     let st = fs_lstat(dev) else |_| { return io }
     if st[0] != 7 { return invalid }
-    let fd = raw_open(dev, 0)?
+    let fd = raw_open(dev, 524288)?
     defer raw_close(fd)
     // # Safety: fd is owned here; assembly supplies a 144-byte x86-64 stat buffer.
     let rdev = unsafe { install_rdev(fd) }

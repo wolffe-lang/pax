@@ -1,0 +1,271 @@
+//! Ordered argv-only executor. A 64 KiB JSON-lines log lives in the unused
+//! pre-partition gap at byte 65536; GPT and BIOS installation do not own it.
+//! Logs report completed phases, never authorize resume or assert rollback.
+
+use std.json
+
+extern "c" fn install_peak_kb(who: int) -> int
+
+fn measured_peak(who: int) -> str {
+    // # Safety: getrusage receives the assembly-owned Linux x86-64 buffer.
+    let kb = unsafe { install_peak_kb(who) }
+    if kb <= 0 { return "unavailable ({kb}); not zero memory" }
+    "{kb} KiB"
+}
+
+const LOG_OFFSET: int = 65536
+
+const LOG_CAPACITY: int = 65536
+
+struct Action { phase: str, exe: str, args: List[str], output_hash: str }
+
+fn json_string(s: str) -> str {
+    // A scalar string cannot exceed JSON's nesting bound.
+    json.stringify(json.from_str(s)) else |_| "null"
+}
+
+fn disk_log(fd: int, mut used: int, phase: str, state: str, detail: str) -> () ! {io, log_full} {
+    let line = "{{\"v\":1,\"phase\":{json_string(phase)},\"state\":{json_string(state)},\"detail\":{json_string(detail)}}}\n"
+    if line.len > LOG_CAPACITY - used { return log_full }
+    let _pos = fs_seek(fd, LOG_OFFSET + used, 0) else |_| { return io }
+    fs_write_chunk(fd, line.bytes()) else |_| { return io }
+    fs_sync(fd) else |_| { return io }
+    used += line.len
+    print("phase {phase}: {state}")
+}
+
+fn run_action(action: Action, work: str, fd: int, mut used: int) -> () ! {
+    io,
+    log_full,
+    command_failed,
+    verify_failed,
+} {
+    disk_log(fd, mut used, action.phase, "started", action.exe)?
+    let outpath = "{work}/{action.phase}.out"
+    let errpath = "{work}/{action.phase}.err"
+    let out = fs_open_perm(outpath, 4, 384) else |_| { return io }
+    defer fs_close(out) else |_| {}
+    let err = fs_open_perm(errpath, 4, 384) else |_| { return io }
+    defer fs_close(err) else |_| {}
+    let child = os_spawn_fds(action.exe, action.args, [1, out, 2, err]) else |e| {
+        disk_log(fd, mut used, action.phase, "failed", "spawn {e}")?
+        return command_failed
+    }
+    let status = os_wait(child) else |e| {
+        disk_log(fd, mut used, action.phase, "failed", "wait {e}")?
+        return command_failed
+    }
+    fs_sync(out) else |_| { return io }
+    fs_sync(err) else |_| { return io }
+    let stderr = fs_read_text(errpath) else |_| { return io }
+    if status != 0 {
+        disk_log(
+            fd,
+            mut used,
+            action.phase,
+            "failed",
+            "exit={status} {stderr[0..if stderr.len > 2048 then 2048 else stderr.len]}",
+        )?
+        eprint("pax-install: {action.phase}: exit {status}; {stderr}")
+        return command_failed
+    }
+    if stderr.lower().contains("error:") || stderr.lower().contains("failed") {
+        disk_log(fd, mut used, action.phase, "failed", "zero-exit stderr error; see phase output")?
+        return command_failed
+    }
+    if action.output_hash.len != 0 {
+        if hash_file(outpath)? != action.output_hash {
+            disk_log(fd, mut used, action.phase, "failed", "readback bytes differ")?
+            return verify_failed
+        }
+    } else {
+        let stdout = fs_read_text(outpath) else |_| { return io }
+        let diagnostic = "{stdout}\n{stderr}".lower()
+        if diagnostic.contains("error:") || diagnostic.contains("failed") {
+            disk_log(
+                fd,
+                mut used,
+                action.phase,
+                "failed",
+                "zero-exit error diagnostic; see phase output",
+            )?
+            return command_failed
+        }
+    }
+    fs_sync(fd) else |_| { return io }
+    disk_log(fd, mut used, action.phase, "durable", "exit=0; target fsync completed")?
+}
+
+fn actions(p: Plan, tree: str, attrs: str, tools: str) -> List[Action] ! {io} {
+    let dev = "/dev/{p.target.name}"
+    let last = (ROOT_START + p.root_bytes) / 512 - 1
+    var out = [
+        Action {
+            phase: "gpt",
+            exe: "{tools}/paxgpt",
+            args: [
+                "--seed",
+                p.seed,
+                dev,
+                "1:esp:4096:135167:esp",
+                "2:linux:135168:{last}:root",
+                "3:bios:2048:4095:bios",
+            ],
+            output_hash: "",
+        },
+        Action {
+            phase: "fat",
+            exe: "{tools}/paxfat",
+            args: ["--offset", "{ESP_START}", "--seed", p.seed, "mkfs", dev, "{ESP_BYTES}"],
+            output_hash: "",
+        },
+    ]
+    var index = 0
+    for dir in ["/EFI", "/EFI/BOOT", "/boot", "/boot/limine"] {
+        (mut out).push(Action {
+            phase: "mkdir-{index}",
+            exe: "{tools}/paxfat",
+            args: ["--offset", "{ESP_START}", "mkdir", dev, dir],
+            output_hash: "",
+        })
+        index += 1
+    }
+    let from = [
+        "/boot/pax",
+        "/boot/limine/limine-bios.sys",
+        "/boot/limine/limine.conf",
+        "/boot/EFI/BOOT/BOOTX64.EFI",
+    ]
+    let to = [
+        "/boot/pax",
+        "/boot/limine/limine-bios.sys",
+        "/boot/limine/limine.conf",
+        "/EFI/BOOT/BOOTX64.EFI",
+    ]
+    for i in 0..from.len {
+        (mut out).push(Action {
+            phase: "copy-boot-{i}",
+            exe: "{tools}/paxfat",
+            args: ["--offset", "{ESP_START}", "copy", dev, "{tree}{from[i]}", to[i]],
+            output_hash: "",
+        })
+    }
+    (mut out).push(Action {
+        phase: "root",
+        exe: "{tools}/paxext2",
+        args: [
+            "--from",
+            tree,
+            "--attrs",
+            attrs,
+            "--label",
+            "pax-root",
+            "--seed",
+            p.seed,
+            "--inodes",
+            "16384",
+            "--offset",
+            "{ROOT_START}",
+            "{p.root_bytes}",
+            dev,
+        ],
+        output_hash: "",
+    })
+    (mut out).push(Action {
+        phase: "limine",
+        exe: "{tools}/limine",
+        args: ["bios-install", dev, "3"],
+        output_hash: "",
+    })
+    (mut out).push(Action {
+        phase: "verify-gpt",
+        exe: "{tools}/paxgpt",
+        args: ["--dump", dev],
+        output_hash: "",
+    })
+    for i in 0..from.len {
+        (mut out).push(Action {
+            phase: "verify-boot-{i}",
+            exe: "{tools}/paxfat",
+            args: ["--offset", "{ESP_START}", "cat", dev, to[i]],
+            output_hash: hash_file("{tree}{from[i]}")?,
+        })
+    }
+    out
+}
+
+fn execute_plan(p: Plan, source: str, payload: str, tools: str) -> () ! {
+    io,
+    invalid,
+    corrupt_asset,
+    recovered_files,
+    source_changed,
+    changed,
+    unconfirmed,
+    log_full,
+    command_failed,
+    verify_failed,
+} {
+    if (os_euid() else |_| -1) != 0 { return invalid }
+    let rows = source_snapshot(source)?
+    boot_assets(source, payload)?
+    let games = staged_games(payload)?
+    let work = "/tmp/pax-install-{os_pid()}"
+    fs_create_dir_mode(work, 448) else |_| { return io }
+    let tree = "{work}/root"
+    let attrs = "{work}/attrs"
+    print("Staging source; no target writes. Scratch: {work}")
+    let start = os_clock_ns()
+    stage_snapshot(source, tree, attrs, rows)?
+    let after = source_snapshot(source)?
+    if !same_snapshot(rows, after) { return source_changed }
+    configure_tree(p, tree, attrs, games)?
+    let commands = actions(p, tree, attrs, tools)?
+    durable_text("{work}/plan.txt", plan_text(p))?
+    print("Source staged and rechecked in {(os_clock_ns() - start) / 1000000} ms")
+    print("Installer peak RSS through copy verification: {measured_peak(0)}")
+    let current = inventory_one(p.target.name) else |_| { return changed }
+    confirm_plan(p, current, p.token)?
+    // O_EXCL claims the block device against mounts for the whole operation.
+    // Adoption transfers ownership and sets CLOEXEC before any child starts.
+    let raw = raw_open("/dev/{p.target.name}", 130)?
+    let fd = fs_adopt(raw) else |_| { raw_close(raw); return io }
+    defer fs_close(fd) else |_| {}
+    let st = fs_fstat_record(fd) else |_| { return io }
+    if st[0] != 7 || !p.target.identity.starts_with("{device_text(st[11])}-") { return changed }
+    let last_check = inventory_one(p.target.name) else |_| { return changed }
+    confirm_plan(p, last_check, p.token)?
+    env_set("SOURCE_DATE_EPOCH", "{INSTALL_EPOCH}") else |_| { return invalid }
+    var zeros = List[byte]()
+    for _ in 0..LOG_CAPACITY { (mut zeros).push(0 as byte) }
+    let _logpos = fs_seek(fd, LOG_OFFSET, 0) else |_| { return io }
+    fs_write_chunk(fd, zeros) else |_| { return io }
+    fs_sync(fd) else |_| { return io }
+    var used = 0
+    disk_log(fd, mut used, "plan", "confirmed", plan_text(p))?
+    for action in commands { run_action(action, work, fd, mut used)? }
+    print("Formatter children peak RSS: {measured_peak(-1)}")
+    let dump = fs_read_text("{work}/verify-gpt.out") else |_| { return io }
+    if !dump.lower().contains(new_partuuid(p.seed)) {
+        disk_log(fd, mut used, "verify", "failed", "new root PARTUUID missing")?
+        return verify_failed
+    }
+    let super = fs_read_at(fd, ROOT_START + 1024, 1024) else |_| { return io }
+    if super.len != 1024 ||
+        super[56] != 83 as byte ||
+        super[57] != 239 as byte ||
+        super[92] as int & 4 != 0 {
+        return verify_failed
+    }
+    disk_log(
+        fd,
+        mut used,
+        "result",
+        "complete",
+        "ext2-preview; boot files read back; no rollback or automatic resume; reboot offered",
+    )?
+    print("Installation complete: ext2 developer preview. Reboot to test the target alone.")
+    print(
+        "Persistent phase log: /dev/{p.target.name}, bytes {LOG_OFFSET}..{LOG_OFFSET + LOG_CAPACITY}; not a resume authority.",
+    )
+}

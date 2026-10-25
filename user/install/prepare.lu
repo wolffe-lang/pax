@@ -1,0 +1,172 @@
+//! Preparation is off-target. The payload is excluded from the copied root:
+//! a 'no games' install must not carry a second hidden copy of the games.
+
+use std.x.crypto.sha2
+
+const INSTALL_EPOCH: int = 1700000000
+
+struct Game { name: str, source: str, digest: str }
+
+fn require_dir(path: str) -> () ! {io, invalid} {
+    let st = fs_lstat(path) else |_| { return io }
+    if st[0] != 1 { return invalid }
+}
+
+fn verify_file(path: str, digest: str) -> () ! {io, corrupt_asset} {
+    let st = fs_lstat(path) else |_| { return io }
+    if st[0] != 0 || digest.len != 64 { return corrupt_asset }
+    if hash_file(path)? != digest { return corrupt_asset }
+}
+
+fn boot_assets(source: str, payload: str) -> () ! {io, invalid, corrupt_asset} {
+    for dir in ["/etc", "/home", "/boot", "/boot/limine", "/boot/EFI", "/boot/EFI/BOOT"] {
+        require_dir("{source}{dir}")?
+    }
+    let conf = fs_lstat("{source}/boot/limine/limine.conf") else |_| { return io }
+    if conf[0] != 0 { return invalid }
+    let text = fs_read_text("{payload}/boot.sha256") else |_| { return io }
+    let needed = ["/boot/pax", "/boot/limine/limine-bios.sys", "/boot/EFI/BOOT/BOOTX64.EFI"]
+    var bytes: int = 0
+    for path in needed {
+        var count = 0
+        for line in text.lines() {
+            let w = line.words()
+            if w.len != 2 { return invalid }
+            if w[1] == path { verify_file("{source}{path}", w[0])?; count += 1 }
+        }
+        if count != 1 { return corrupt_asset }
+        let size = fs_size("{source}{path}") else |_| { return io }
+        if size < 1 || size > ESP_BYTES - 1048576 - bytes { return corrupt_asset }
+        bytes += size
+    }
+    if text.lines().len != 3 { return invalid }
+}
+
+fn staged_games(payload: str) -> List[Game] ! {io, invalid, corrupt_asset} {
+    let catalog = fs_read_text("{payload}/games.txt") else |_| { return io }
+    let sums = fs_read_text("{payload}/games.sha256") else |_| { return io }
+    var out = List[Game]()
+    for line in catalog.lines() {
+        if line.trim().len == 0 || line.starts_with("#") { continue }
+        let w = line.words()
+        if w.len != 5 ||
+            !valid_name(w[0]) ||
+            w[0] != w[3] ||
+            w[4] != "0755" ||
+            w[1].len != 40 ||
+            w[2].len != 64 {
+            return invalid
+        }
+        for g in out { if g.name == w[0] { return invalid } }
+        var digest = ""
+        var count = 0
+        for row in sums.lines() {
+            let s = row.words()
+            if s.len != 2 { return invalid }
+            if s[1] == w[0] { digest = s[0]; count += 1 }
+        }
+        if count != 1 { return invalid }
+        let source = "{payload}/games/{w[0]}"
+        verify_file(source, digest)?
+        (mut out).push(Game { name: w[0], source: source, digest: digest })
+    }
+    if out.len == 0 || sums.lines().len != out.len { return invalid }
+    out
+}
+
+fn new_partuuid(seed: str) -> str {
+    let hex = sha2.to_hex(sha2.sum256("pax-gpt-part:{seed}:{INSTALL_EPOCH}:2".bytes()))
+    "{hex[0..8]}-{hex[8..12]}-{hex[12..16]}-{hex[16..20]}-{hex[20..32]}"
+}
+
+fn new_config(seed: str) -> str {
+    "timeout: 0\nquiet: yes\n\n/PAX ext2 developer preview\n    protocol: limine\n" +
+        "    path: boot():/boot/pax\n    cmdline: quiet root=PARTUUID={new_partuuid(seed)} rootfstype=ext2 rw\n"
+}
+
+fn append_attrs(attrs: str, path: str, mode: str, uid: int, gid: int) -> () ! {io} {
+    let fd = fs_open_mode(attrs, 2) else |_| { return io }
+    defer fs_close(fd) else |_| {}
+    let row = "{quoted(path)} {mode} {uid} {gid} {INSTALL_EPOCH} {INSTALL_EPOCH} {INSTALL_EPOCH}\n"
+    fs_write_chunk(fd, row.bytes()) else |_| { return io }
+    fs_sync(fd) else |_| { return io }
+}
+
+fn replace_config(tree: str, attrs: str, path: str, text: str) -> () ! {io, invalid} {
+    if fs_exists("{tree}{path}") {
+        let st = fs_lstat("{tree}{path}") else |_| { return io }
+        if st[0] != 0 { return invalid }
+        // Break any copied hard link before changing one generated file.
+        fs_remove("{tree}{path}") else |_| { return io }
+    }
+    durable_text("{tree}{path}", text)?
+    append_attrs(attrs, path, "0644", 0, 0)?
+}
+
+fn account_table(text: str, name: str, group: bool) -> str ! {invalid} {
+    var out = ""
+    var root = false
+    var replaced = false
+    for line in text.lines() {
+        let f = line.split(":")
+        if f.len != (if group then 4 else 7) { return invalid }
+        let id = f[2].to_int() else |_| { return invalid }
+        if f[0] == "root" {
+            if id != 0 || root { return invalid }
+            root = true
+        }
+        if id == INSTALL_USER_ID {
+            if replaced { return invalid }
+            replaced = true
+            continue
+        }
+        if f[0] == name { return invalid }
+        out += "{line}\n"
+    }
+    if !root { return invalid }
+    if group {
+        out += "{name}:x:{INSTALL_USER_ID}:\n"
+    } else {
+        out += "{name}:x:{INSTALL_USER_ID}:{INSTALL_USER_ID}:{name}:/home/{name}:/bin/pelt\n"
+    }
+    out
+}
+
+fn prepared_dir(tree: str, attrs: str, path: str, uid: int) -> () ! {io, invalid} {
+    if fs_exists("{tree}{path}") {
+        require_dir("{tree}{path}")?
+    } else {
+        fs_create_dir_mode("{tree}{path}", 448) else |_| { return io }
+    }
+    append_attrs(attrs, path, "0755", uid, uid)?
+}
+
+fn configure_tree(p: Plan, tree: str, attrs: str, games: List[Game]) -> () ! {
+    io,
+    invalid,
+    corrupt_asset,
+} {
+    let passwd = fs_read_text("{tree}/etc/passwd") else |_| { return io }
+    let group = fs_read_text("{tree}/etc/group") else |_| { return io }
+    replace_config(tree, attrs, "/etc/passwd", account_table(passwd, p.user, false)?)?
+    replace_config(tree, attrs, "/etc/group", account_table(group, p.user, true)?)?
+    replace_config(
+        tree,
+        attrs,
+        "/etc/fstab",
+        "PARTUUID={new_partuuid(p.seed)} / ext2 rw 0 1\ntmpfs /tmp tmpfs nosuid,nodev 0 0\n",
+    )?
+    replace_config(tree, attrs, "/boot/limine/limine.conf", new_config(p.seed))?
+    prepared_dir(tree, attrs, "/home/{p.user}", INSTALL_USER_ID)?
+    if fs_exists("{tree}/home/{p.user}/Games") { return invalid }
+    if p.games {
+        prepared_dir(tree, attrs, "/home/{p.user}/Games", INSTALL_USER_ID)?
+        for g in games {
+            let dir = "/home/{p.user}/Games/{g.name}"
+            prepared_dir(tree, attrs, dir, INSTALL_USER_ID)?
+            copy_regular(g.source, "{tree}{dir}/{g.name}")?
+            verify_file("{tree}{dir}/{g.name}", g.digest)?
+            append_attrs(attrs, "{dir}/{g.name}", "0755", INSTALL_USER_ID, INSTALL_USER_ID)?
+        }
+    }
+}

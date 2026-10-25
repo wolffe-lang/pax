@@ -62,6 +62,20 @@ install_sync:
     syscall
     ret
 .size install_sync,.-install_sync
+.globl install_peak_kb
+.type install_peak_kb,@function
+install_peak_kb:
+    subq $144, %rsp
+    movq $0, 32(%rsp)
+    movq %rsp, %rsi
+    movl $98, %eax
+    syscall
+    testq %rax, %rax
+    js 1f
+    movq 32(%rsp), %rax
+1:  addq $144, %rsp
+    ret
+.size install_peak_kb,.-install_peak_kb
 .bss
 .align 16
 install_path: .zero 4096
