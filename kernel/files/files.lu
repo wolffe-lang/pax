@@ -316,6 +316,7 @@ const K_EPOLL: u64 = 11 // px24: an epoll object (kernel/event's)
 const K_DSP: u64 = 12 // px30: /dev/dsp, the sound device (kernel/sound's)
 const K_UNIX: u64 = 13 // px34: an AF_UNIX path socket (kernel/unix's record)
 const K_SYN: u64 = 14 // px34: a file of /proc or /sys (kernel/procfs's)
+const K_BLK: u64 = 15 // px79: a block device's node opened (kernel/block's device)
 
 // Nodes: a type in the top byte, a reference below (an entry's offset).
 const T_SHIFT: u64 = 56
@@ -344,6 +345,7 @@ const T_EPOLL: u64 = 13 // px24: an epoll object; the reference kernel/event's
 const T_DSP: u64 = 14 // px30: /dev/dsp
 const T_UNIX: u64 = 15 // px34: an AF_UNIX path socket; the reference kernel/unix's record
 const T_SYN: u64 = 16 // px34: a directory or file of /proc or /sys; the reference kernel/procfs's entry
+const T_BLK: u64 = 17 // px79: a block device in /dev; the reference kernel/block's device | its record's generation << 16
 const T_ERR: u64 = 0xff // an errno below
 const REF_MASK: u64 = 0x00ffffffffffffff
 
@@ -377,6 +379,7 @@ const EACCES: u64 = 13 // px14: execve of what is not an executable file
 const EPERM: u64 = 1 // px27
 const EBUSY: u64 = 16
 const ENOTBLK: u64 = 15 // px67: a mount's source that is no block device
+const EIO: u64 = 5 // px79: a block device's error
 const EXDEV: u64 = 18
 const ELOOP: u64 = 40
 const ENOTEMPTY: u64 = 39
@@ -449,10 +452,15 @@ const MODE_CONSOLE: u64 = 0x2180 // 020600 (020620 before px45)
 const MODE_LINK: u64 = 0xa1ff // 0120777: /dev/std*'s links (px52, measured)
 const MODE_NULL: u64 = 0x21b6 // 020666
 const MODE_DSP: u64 = 0x2180 // 020600 (020666 before px45; px30: one user here)
+// px79: a block device, devtmpfs's own mode with no udev (measured on
+// Linux 7.3.0: `brw-------`, root's; a distribution's udev gives the
+// disk group 0660 instead, which PAX has no rule for).
+const MODE_BLK: u64 = 0x6180 // 060600
 const MODE_FIFO: u64 = 0x1180 // 010600: a pipe's end (px17, measured)
 const MODE_SOCK: u64 = 0xc1ff // 0140777: a socketpair's end (px17, measured)
 const MODE_ANON: u64 = 0x180 // 0600 and no type: an eventfd, an epoll object (px24, measured)
 const DT_CHR: u64 = 2
+const DT_BLK: u64 = 6 // px79
 const DT_FIFO: u64 = 1 // px62
 const DT_DIR: u64 = 4
 const DT_REG: u64 = 8
@@ -476,7 +484,9 @@ const UTIME_NOW: u64 = 0x3fffffff // px36: (1 << 30) - 1, uapi linux/stat.h
 const UTIME_OMIT: u64 = 0x3ffffffe
 
 // Refusal codes for the area's word (kernel/vm uses 1-15).
-// 16 was px12's refusal of every write (the initramfs was read-only).
+// 16 was px12's refusal of every write (the initramfs was read-only);
+// px79 takes it for a block ioctl PAX does not serve.
+const R_BLKIOCTL: u64 = 16
 const R_DIRECT: u64 = 17 // px17
 const R_SOCKTYPE: u64 = 18 // px17
 const R_FCNTL: u64 = 19 // px17
@@ -515,7 +525,10 @@ pub fn why(r: u64) -> str {
         return unix.why(r) // px34: codes 20-22
     }
     if r == R_OFLAG {
-        return "an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE)"
+        return "an open flag PAX does not honour (O_DIRECT, O_SYNC, O_DSYNC, O_NOATIME, O_PATH, O_TMPFILE; px79: the first three are taken on a block device)"
+    }
+    if r == R_BLKIOCTL {
+        return "a block device ioctl PAX does not serve (BLKRAGET, BLKSECTGET, BLKDISCARD, BLKZEROOUT, BLKROSET, BLKPG_RESIZE_PARTITION and the rest of the 0x12 and HDIO families but those docs/CENSUS.md names served)"
     }
     if r == R_DEVRO {
         return "making or removing a name in /dev (PAX's /dev is fixed)"
@@ -723,6 +736,7 @@ fn of_drop(o: u64) {
     let n = ofw(i, O_NODE)
     let acc = ofw(i, O_FLAGS) & O_ACCMODE
     let exe = ofw(i, O_FLAGS) & O_EXE != 0
+    let excl = ofw(i, O_FLAGS) & O_EXCL != 0 // px79: a block device's exclusive open
     if locks(k) && ofw(i, O_LOCK) != 0 {
         put_ofw(i, O_LOCK, 0) // px62: the open file's lock goes with it
         sched.wake_pipes() // a waiting `flock` may have it now
@@ -764,11 +778,15 @@ fn of_drop(o: u64) {
     if k == K_DSP {
         sound.release() // px30: the last close of /dev/dsp
     }
+    if k == K_BLK {
+        // px79: the last close of an open block device (an O_EXCL open's hold goes with it)
+        block.close_dev(blk_dev(n), excl)
+    }
 }
 
 /// Whether a kind keeps an open file (an offset, a pipe end).
 fn has_of(k: u64) -> bool {
-    k == K_FILE || k == K_DIR || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_EVENT || k == K_EPOLL || k == K_DSP || k == K_UNIX || k == K_SYN
+    k == K_FILE || k == K_DIR || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_EVENT || k == K_EPOLL || k == K_DSP || k == K_UNIX || k == K_SYN || k == K_BLK
 }
 
 // --- descriptors -------------------------------------------------------------
@@ -861,7 +879,8 @@ pub fn is_open(a: u64, fd: u64) -> bool {
 /// them (/dev/null), 2 nothing writable (-EBADF), 3 a pipe or a socket
 /// (px17: `pipe_write`), 4 a file of the tree (px27: `file_write`),
 /// 5 an eventfd (px24: `event_write`), 6 an epoll object (px24: -EINVAL), 7
-/// /dev/dsp (px30: kernel/sound's `write`); px34: an AF_UNIX path socket
+/// /dev/dsp (px30: kernel/sound's `write`), 9 a block device's node (px79:
+/// `blk_write`); px34: an AF_UNIX path socket
 /// is 3 (`pipe_write` answers for a socket that is not connected), a file
 /// of /proc or /sys 6 (-EINVAL, as Linux answered a write to
 /// /proc/self/cgroup).
@@ -893,6 +912,9 @@ pub fn write_target(a: u64, fd: u64) -> u64 {
     }
     if k == K_DSP {
         return 7 // px30: kernel/sound's `write`
+    }
+    if k == K_BLK {
+        return 9 // px79: `blk_write`
     }
     2
 }
@@ -3069,6 +3091,13 @@ fn syn_child(d: u64, s: u64, n: u64) -> u64 {
         let r = if procfs.entry(d) == procfs.PFD { procfs.fd_entry(procfs.pid_of(d), v) } else { procfs.fi_entry(procfs.pid_of(d), v) }
         return (T_SYN << T_SHIFT) | r
     }
+    if procfs.searched(d) {
+        // px79: /sys/block, /sys/class/block and a block device's
+        // directory: their children are kernel/block's devices (procfs
+        // finds them by kernel/block's name) and a device's attributes
+        let c = procfs.dev_child(d, raw() + s, n)
+        return if c == procfs.NONE { err(ENOENT) } else { (T_SYN << T_SHIFT) | c }
+    }
     var e: u64 = 0
     while e < procfs.ENTRIES {
         if procfs.fixed(e) && procfs.parent(e) == d && comp_is(s, n, procfs.name(e)) {
@@ -3235,6 +3264,13 @@ fn child_named(d: u64, s: u64, n: u64) -> u64 {
         }
         if comp_is(s, n, "dsp") && sound.up() {
             return T_DSP << T_SHIFT // px30: only with the device, as Linux without a card
+        }
+        // px79: a disk or a partition kernel/block has, by its name (the
+        // nodes devtmpfs would have: made at boot and as a table is read
+        // again, never written into an image: R-px79-2)
+        let bd = block.by_name(raw() + s, n)
+        if bd != block.DEVS {
+            return blk_node(bd)
         }
         return err(ENOENT)
     }
@@ -3863,9 +3899,20 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
         refuse(a, R_OFLAG)
         return neg(EOPNOTSUPP)
     }
-    if flags & (O_DIRECT | O_DSYNC | O_SYNC_BIT | O_NOATIME | O_PATH) != 0 {
+    if flags & (O_NOATIME | O_PATH) != 0 {
         refuse(a, R_OFLAG)
         return neg(EINVAL)
+    }
+    // px79: O_DIRECT, O_SYNC and O_DSYNC are taken on a block device's
+    // node (its writes reach the device before they return: O_DIRECT's
+    // alignment rules are not asked, named in docs/CENSUS.md) and refused
+    // by name on anything else, as before.
+    if flags & (O_DIRECT | O_DSYNC | O_SYNC_BIT) != 0 {
+        let bn = resolve(a, pml4, dirfd, va, false, fol(flags & O_NOFOLLOW == 0))
+        if is_err(bn) || ty(bn) != T_BLK {
+            refuse(a, R_OFLAG)
+            return neg(EINVAL)
+        }
     }
     if flags & O_NOFOLLOW != 0 && is_proc_exe(pml4, va) {
         return neg(ELOOP)
@@ -3953,6 +4000,9 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
                 return neg(ENXIO)
             }
         }
+    }
+    if ty(n) == T_BLK {
+        return blk_open(a, n, flags, want) // px79
     }
     if ty(n) == T_CONSOLE {
         k = K_CONSOLE
@@ -4413,7 +4463,7 @@ fn fdinfo_of(ta: u64, fd: u64) -> (u64, u64) {
     if flags_of(ta, fd) & O_CLOEXEC != 0 {
         f = f | O_CLOEXEC
     }
-    if k == K_FILE || k == K_DIR || k == K_CONSOLE || k == K_NULL || k == K_SYN || k == K_DSP {
+    if k == K_FILE || k == K_DIR || k == K_CONSOLE || k == K_NULL || k == K_SYN || k == K_DSP || k == K_BLK {
         f = f | O_LARGEFILE
     }
     let extra: u64 = if k == K_EVENT { 1 } else if k == K_SOCK || k == K_UNIX { 2 } else { 0 }
@@ -4435,7 +4485,7 @@ fn mnt_of(n: u64) -> u64 {
     if t == T_SYN {
         return 22 + procfs.fs(rf(n))
     }
-    if t == T_DEV || t == T_NULL || t == T_CONSOLE || t == T_DSP || t == T_STD {
+    if t == T_DEV || t == T_NULL || t == T_CONSOLE || t == T_DSP || t == T_STD || t == T_BLK {
         return 24
     }
     if t == T_PIPE {
@@ -4581,6 +4631,14 @@ pub fn read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
     if k == K_EPOLL {
         return neg(EINVAL) // px24: epoll(7): an epoll descriptor is not read
     }
+    if k == K_BLK {
+        let d = blk_dev(node_of(a, fd)) // px79
+        let r = blk_in(pml4, d, pos(a, fd), buf, n)
+        if r < 0x8000000000000000 {
+            set_pos(a, fd, pos(a, fd) + r)
+        }
+        return r
+    }
     let r = file_read(pml4, node_of(a, fd), pos(a, fd), buf, n)
     if r < 0x8000000000000000 {
         set_pos(a, fd, pos(a, fd) + r)
@@ -4597,7 +4655,10 @@ pub fn pread(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, off: u64) -> u64 {
     if k == K_DIR {
         return neg(EISDIR)
     }
-    if k != K_FILE {
+    if k == K_BLK && off < 0x8000000000000000 {
+        return blk_in(pml4, blk_dev(node_of(a, fd)), off, buf, n) // px79
+    }
+    if k != K_FILE && k != K_BLK {
         return neg(ESPIPE)
     }
     if off >= 0x8000000000000000 {
@@ -4645,6 +4706,12 @@ pub fn pwrite(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, off: u64) -> u64 {
     if k == K_CLOSED || access(a, fd) == O_RDONLY || k == K_DIR {
         return neg(EBADF)
     }
+    if k == K_BLK {
+        if off >= 0x8000000000000000 {
+            return neg(EINVAL)
+        }
+        return blk_out(pml4, blk_dev(node_of(a, fd)), off, buf, n) // px79
+    }
     if k != K_FILE {
         return neg(ESPIPE)
     }
@@ -4680,6 +4747,9 @@ pub fn lseek(a: u64, fd: u64, off: u64, whence: u64) -> u64 {
     }
     if k == K_NULL || k == K_EPOLL || k == K_EVENT {
         return 0 // px24: Linux answers 0 on an epoll descriptor and on an eventfd (user/net/epollprobe.c, evprobe.c)
+    }
+    if k == K_BLK {
+        return blk_seek(a, fd, off, whence) // px79
     }
     var base: u64 = 0
     if whence == 1 {
@@ -4836,6 +4906,13 @@ pub fn fsync(a: u64, fd: u64) -> u64 {
         let n = node_of(a, fd)
         return if ty(n) == T_INO { tree.sync_of(rf(n)) } else { 0 } // px63: a volume's blocks written, its disk flushed
     }
+    if k == K_BLK {
+        // px79: a node's writes are on the device when they return; what
+        // the cache holds of it is written, then the disk flushed (measured:
+        // 0, opened read-only too)
+        let d = blk_dev(node_of(a, fd))
+        return if d == block.DEVS { neg(ENXIO) } else { block.sync(d) }
+    }
     neg(EINVAL)
 }
 
@@ -4944,6 +5021,9 @@ pub fn ioctl(a: u64, pml4: u64, fd: u64, req: u64, arg: u64) -> u64 {
     }
     if k == K_CONSOLE {
         return console.ioctl(a, pml4, req, arg)
+    }
+    if k == K_BLK {
+        return blk_ioctl(a, pml4, fd, req, arg) // px79
     }
     if k == K_DSP {
         // px30: OSS's requests (kernel/sound); SNDCTL_DSP_NONBLOCK sets
@@ -5394,11 +5474,11 @@ fn bytes_are(p: u64, n: u64, s: str) -> bool {
 /// directory -ENOTDIR; the type `ext2` (a volume) or `tmpfs` (a
 /// directory of the memory's, R-px67-1), any other -ENODEV (`proc`,
 /// `sysfs` and `devtmpfs`, mounted once at boot here, refused by name,
-/// -EINVAL); the source of an ext2 mount names a disk or a partition as
-/// kernel/fstab's lines do, `/dev/vda4` by its name (named drift: PAX's
-/// /dev has no block device nodes; Linux opens the node), else the path
-/// is walked: -ENOTBLK for what is there, its walk's error (-ENOENT) for
-/// what is not; then kernel/tree's `mount` (-EBUSY on a mount's root, a
+/// -EINVAL); the source of an ext2 mount is walked (px79: a block
+/// device's node, by any path to it, is its disk or partition, as Linux
+/// opens the node; px67's names before /dev had nodes are gone):
+/// -ENOTBLK for what is there and is no block device, its walk's error
+/// (-ENOENT) for what is not; then kernel/tree's `mount` (-EBUSY on a mount's root, a
 /// volume mounted already, a covered directory). MS_RDONLY mounts it
 /// read-only; MS_NOSUID, MS_NODEV, MS_NOEXEC are kept for its line, not
 /// acted on (as kernel/fstab's). `data` is not read.
@@ -5459,10 +5539,18 @@ pub fn mount_call(a: u64, pml4: u64, src: u64, tgt: u64, typ: u64, flags: u64, d
         if sl > PATH_MAX {
             r = neg(if sl == PATH_MAX + 2 { EFAULT } else { ENAMETOOLONG })
         } else {
-            let dev = block.by_name(sb, sl)
-            if dev == block.DEVS {
-                let sn = resolve(a, pml4, AT_FDCWD, src, false, F_YES)
-                r = if is_err(sn) { neg(rf(sn)) } else { neg(ENOTBLK) }
+            // px79: the source is walked: a block device's node (any path
+            // to one) is the device; what is no block device -ENOTBLK, what
+            // is not there its walk's error (measured: `vdb2` from / -ENOENT,
+            // /dev/null -ENOTBLK, /dev/vdz -ENOENT)
+            let sn = resolve(a, pml4, AT_FDCWD, src, false, F_YES)
+            let dev = if !is_err(sn) && ty(sn) == T_BLK { blk_dev(sn) } else { block.DEVS }
+            if is_err(sn) {
+                r = neg(rf(sn))
+            } else if ty(sn) != T_BLK {
+                r = neg(ENOTBLK)
+            } else if dev == block.DEVS {
+                r = neg(ENXIO)
             } else if ty(t) != T_INO {
                 refuse(a, R_MOUNT)
                 r = neg(EINVAL)
@@ -5769,6 +5857,10 @@ fn fd_text(ta: u64, fd: u64, pid: u64, base: u64, cap: u64) -> u64 {
     if t == T_NULL || t == T_DSP {
         let k = tstr(base, 0, cap, "/dev/")
         return tstr(base, k, cap, fixed_name(nd))
+    }
+    if t == T_BLK {
+        let k = tstr(base, 0, cap, "/dev/")
+        return block.name_into(rf(nd) & 0xffff, base, k, cap) // px79
     }
     if t == T_PIPE || t == T_SOCK || t == T_INET || t == T_TCP || t == T_UNIX {
         var k = tstr(base, 0, cap, if t == T_PIPE { "pipe:[" } else { "socket:[" })
@@ -6144,7 +6236,7 @@ pub fn faccessat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64, flags: u64) 
 /// (kernel/procfs's rules, in `syn_open`).
 fn checked(n: u64) -> bool {
     let t = ty(n)
-    t == T_INO || t == T_NULL || t == T_CONSOLE || t == T_DSP
+    t == T_INO || t == T_NULL || t == T_CONSOLE || t == T_DSP || t == T_BLK
 }
 
 // --- the changes after a file is made (px36) ----------------------------------------
@@ -6525,6 +6617,9 @@ fn n_mode(n: u64) -> u64 {
     if t == T_EVENT || t == T_EPOLL {
         return MODE_ANON // px24
     }
+    if t == T_BLK {
+        return MODE_BLK // px79
+    }
     MODE_DIR
 }
 
@@ -6596,6 +6691,9 @@ fn n_ino(n: u64) -> u64 {
     if t == T_SYN {
         return 0x700 + rf(n) // px34
     }
+    if t == T_BLK {
+        return 0x2000 + (rf(n) & 0xffff) // px79: one number per device record
+    }
     3 // the console
 }
 
@@ -6633,6 +6731,10 @@ fn n_rdev(n: u64, which: int) -> u64 {
     if t == T_DSP {
         return if which == 0 { 14 } else { 3 } // px30: OSS's dsp, 14:3
     }
+    if t == T_BLK {
+        let (ma, mi) = block.numbers(rf(n) & 0xffff) // px79: the guest's, 254:N and 259:N
+        return if which == 0 { ma } else { mi }
+    }
     0
 }
 
@@ -6647,7 +6749,7 @@ fn n_dev(n: u64) -> u64 {
         let (_ma, mi) = block.numbers(tree.disk_of(rf(n))) // px63
         return mi
     }
-    if t == T_DEV || t == T_NULL || t == T_STD || t == T_CONSOLE || t == T_DSP {
+    if t == T_DEV || t == T_NULL || t == T_STD || t == T_CONSOLE || t == T_DSP || t == T_BLK {
         return 5
     }
     if t == T_SYN {
@@ -6679,6 +6781,9 @@ fn dev_t(ma: u64, mi: u64) -> u64 {
 fn n_blksize(n: u64) -> u64 {
     if ty(n) == T_INO {
         return tree.io_size(rf(n))
+    }
+    if ty(n) == T_BLK {
+        return block.lbs(rf(n) & 0xffff) // px79: 512 for a virtio disk's node (measured)
     }
     PAGE
 }
@@ -6896,7 +7001,27 @@ fn dev_child(k: u64) -> u64 {
     if k == 13 && sound.up() {
         return T_DSP << T_SHIFT // px30: only with the device
     }
+    // px79: then the block devices, in /proc/partitions' order
+    if k >= 13 {
+        let b = block.nth_dev(if sound.up() { k - 14 } else { k - 13 })
+        if b != block.DEVS {
+            return blk_node(b)
+        }
+    }
     err(ENOENT)
+}
+
+/// px79: the node of block device `d` (its record's generation kept, so a
+/// record taken away and made again is not the node's).
+fn blk_node(d: u64) -> u64 {
+    (T_BLK << T_SHIFT) | (block.gen(d) << 16) | d
+}
+
+/// px79: the block device node `n` names, or block.DEVS when its record
+/// has been taken away (BLKRRPART, BLKPG) since the node was looked up.
+fn blk_dev(n: u64) -> u64 {
+    let d = rf(n) & 0xffff
+    if block.present(d) && block.gen(d) == rf(n) >> 16 { d } else { block.DEVS }
 }
 
 /// The name of a node that is not an inode: `/dev` itself and what is
@@ -6934,6 +7059,9 @@ fn fixed_len(c: u64) -> u64 {
     let t = ty(c)
     if t == T_DEV {
         return 3
+    }
+    if t == T_BLK {
+        return block.name_len(rf(c) & 0xffff) // px79
     }
     if t == T_NULL {
         let r = rf(c)
@@ -6979,6 +7107,9 @@ fn d_type(c: u64) -> u64 {
     }
     if ty(c) == T_INO || ty(c) == T_SYN {
         return DT_REG
+    }
+    if ty(c) == T_BLK {
+        return DT_BLK // px79
     }
     DT_CHR
 }
@@ -7098,6 +7229,12 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
                         uaccess.put(pml4, r + 19 + j, procfs.name_byte(rf(c), j), 1) // px25: a pid's digits too
                         j += 1
                     }
+                } else if ty(c) == T_BLK {
+                    var j: u64 = 0
+                    while j < nl {
+                        uaccess.put(pml4, r + 19 + j, block.name_byte(rf(c) & 0xffff, j), 1) // px79
+                        j += 1
+                    }
                 } else {
                     var j: u64 = 0
                     for b in fixed_name(c).bytes() {
@@ -7112,6 +7249,328 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
     }
     set_pos(a, fd, p)
     used
+}
+
+// --- px79: block devices' nodes ------------------------------------------------------
+//
+// A node of /dev names a device of kernel/block's (`blk_node`); opened, it
+// is K_BLK, an open file with an offset like a file's. Its I/O is raw: a
+// read or a write goes to the device in whole sectors through kernel/block's
+// bounce frame (up to eight at a time: a 4 KiB piece of the device), any
+// length at any offset (R-px79-4, recommended and implemented, not decided:
+// the guest's answers, measured on Linux 7.3.0: a 100-byte read at offset 3
+// answers 100; a read across the end is short and one at the end 0; a write
+// across the end is short, one at or past it -ENOSPC; lseek outside 0 to the
+// size -EINVAL, SEEK_DATA and SEEK_HOLE -EINVAL; a read-only disk's writes
+// -EPERM, even of no bytes). A partial sector is read, changed and written
+// back. Nothing is cached on the way: a raw write goes to the device before
+// it returns, and every clean cached block of the same disk it touched is
+// forgotten (kernel/block's `raw_wrote`), so a mount after it reads what it
+// wrote; a block a mounted file system holds dirty is left to the user, as
+// Linux leaves it (the note says so; no lock).
+
+/// px79: open block device node `n` (`openat`'s): the class rule (0600,
+/// root's), -ENOTDIR for O_DIRECTORY (measured), an O_EXCL open (without
+/// O_CREAT) exclusive (kernel/block's `open_dev`: -EBUSY while the device,
+/// its disk or a partition of it is mounted or held so); O_TRUNC and
+/// O_CREAT do nothing to a device (measured: the open answers).
+fn blk_open(a: u64, n: u64, flags: u64, want: u64) -> u64 {
+    let d = blk_dev(n)
+    if d == block.DEVS {
+        return neg(ENXIO)
+    }
+    if flags & O_DIRECTORY != 0 {
+        return neg(ENOTDIR)
+    }
+    if !may(a, cred.FS, n, want) {
+        return neg(EACCES)
+    }
+    let excl = flags & O_EXCL != 0 && flags & O_CREAT == 0
+    let r = block.open_dev(d, excl)
+    if r != 0 {
+        return r
+    }
+    let fl = (flags & !(O_CREAT | O_TRUNC | O_EXCL)) | (if excl { O_EXCL } else { 0 })
+    let fd = open_new(a, 0, K_BLK, n, fl)
+    if fd >= 0x8000000000000000 {
+        block.close_dev(d, excl)
+    }
+    fd
+}
+
+/// px79: `n` bytes at byte `off` of device `d` to user `buf`: the count
+/// (short at the end, 0 at or past it), -EFAULT (the whole of what would be
+/// read is checked first), -EIO (the device's error before anything was
+/// read; after, the count so far), -ENXIO for a device taken away.
+fn blk_in(pml4: u64, d: u64, off: u64, buf: u64, n: u64) -> u64 {
+    if d == block.DEVS {
+        return neg(ENXIO)
+    }
+    let size = block.sectors(d) * 512
+    if off >= size || n == 0 {
+        return if uaccess.in_user(buf, 0) { 0 } else { neg(EFAULT) }
+    }
+    var k = if n < size - off { n } else { size - off }
+    if k > 0x7ffff000 {
+        k = 0x7ffff000
+    }
+    if !uaccess.writable(pml4, buf, k) {
+        return neg(EFAULT)
+    }
+    let bf = block.bounce()
+    if bf == 0 {
+        return neg(ENOMEM)
+    }
+    let hh = frames.hhdm()
+    let total = block.sectors(d)
+    var done: u64 = 0
+    while done < k {
+        let p = off + done
+        let s0 = (p / 4096) * 8
+        let ns = if total - s0 < 8 { total - s0 } else { 8 }
+        if block.rw(d, block.T_IN, s0, ns, bf) != 0 {
+            return if done > 0 { done } else { neg(EIO) }
+        }
+        let inoff = p - s0 * 512
+        let room = ns * 512 - inoff
+        let piece = if k - done < room { k - done } else { room }
+        let _ok = uaccess.copy_out(pml4, buf + done, bf + hh + inoff, piece)
+        done += piece
+    }
+    done
+}
+
+/// px79: `n` bytes of user `buf` to byte `off` of device `d`: the count
+/// (short across the end), -EPERM for a read-only disk (before anything,
+/// even a write of no bytes: measured), -ENOSPC at or past the end
+/// (measured), -EFAULT (checked whole first: nothing written), -EIO.
+fn blk_out(pml4: u64, d: u64, off: u64, buf: u64, n: u64) -> u64 {
+    if d == block.DEVS {
+        return neg(ENXIO)
+    }
+    if block.flags(d) & block.F_RO != 0 {
+        return neg(EPERM)
+    }
+    if n == 0 {
+        return 0
+    }
+    let size = block.sectors(d) * 512
+    if off >= size {
+        return neg(ENOSPC)
+    }
+    var k = if n < size - off { n } else { size - off }
+    if k > 0x7ffff000 {
+        k = 0x7ffff000
+    }
+    if !uaccess.readable(pml4, buf, k) {
+        return neg(EFAULT)
+    }
+    let bf = block.bounce()
+    if bf == 0 {
+        return neg(ENOMEM)
+    }
+    let hh = frames.hhdm()
+    var done: u64 = 0
+    while done < k {
+        let p = off + done
+        let chunk_end = (p / 4096 + 1) * 4096
+        let piece = if k - done < chunk_end - p { k - done } else { chunk_end - p }
+        // The sectors the piece touches, the first and last read first
+        // when the piece does not cover them whole.
+        let sa = p / 512
+        let sb = (p + piece - 1) / 512
+        let ns = sb - sa + 1
+        if p % 512 != 0 || (p + piece) % 512 != 0 {
+            if block.rw(d, block.T_IN, sa, ns, bf) != 0 {
+                return if done > 0 { done } else { neg(EIO) }
+            }
+        }
+        let _ok = uaccess.copy_in(pml4, bf + hh + (p - sa * 512), buf + done, piece)
+        if block.rw(d, block.T_OUT, sa, ns, bf) != 0 {
+            return if done > 0 { done } else { neg(EIO) }
+        }
+        block.raw_wrote(d, sa, ns)
+        done += piece
+    }
+    done
+}
+
+/// px79: `write(fd, buf, n)` to a block device's node (kernel/user's
+/// `write`, for `write_target`'s 9): at the open file's offset, which
+/// moves past what was written.
+pub fn blk_write(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
+    let r = blk_out(pml4, blk_dev(node_of(a, fd)), pos(a, fd), buf, n)
+    if r < 0x8000000000000000 {
+        set_pos(a, fd, pos(a, fd) + r)
+    }
+    r
+}
+
+/// px79: `lseek` on a block device's node: SEEK_SET, SEEK_CUR, SEEK_END
+/// to an offset from 0 to the device's size, else -EINVAL; any other
+/// whence (SEEK_DATA, SEEK_HOLE included) -EINVAL (measured).
+fn blk_seek(a: u64, fd: u64, off: u64, whence: u64) -> u64 {
+    let d = blk_dev(node_of(a, fd))
+    if d == block.DEVS {
+        return neg(ENXIO)
+    }
+    let size = block.sectors(d) * 512
+    var base: u64 = 0
+    if whence == 1 {
+        base = pos(a, fd)
+    } else if whence == 2 {
+        base = size
+    } else if whence != 0 {
+        return neg(EINVAL)
+    }
+    var p: u64 = 0
+    if off < 0x8000000000000000 {
+        if off > size || base > size - off {
+            return neg(EINVAL)
+        }
+        p = base + off
+    } else {
+        let back = 0xffffffffffffffff - off + 1
+        if back > base {
+            return neg(EINVAL)
+        }
+        p = base - back
+    }
+    set_pos(a, fd, p)
+    p
+}
+
+// The block ioctls (uapi linux/fs.h, linux/hdreg.h, linux/blkpg.h).
+const BLKROGET: u64 = 0x125e
+const BLKRRPART: u64 = 0x125f
+const BLKGETSIZE: u64 = 0x1260
+const BLKFLSBUF: u64 = 0x1261
+const BLKSSZGET: u64 = 0x1268
+const BLKPG: u64 = 0x1269
+const BLKBSZGET: u64 = 0x80081270
+const BLKGETSIZE64: u64 = 0x80081272
+const BLKIOMIN: u64 = 0x1278
+const BLKIOOPT: u64 = 0x1279
+const BLKALIGNOFF: u64 = 0x127a
+const BLKPBSZGET: u64 = 0x127b
+const BLKDISCARDZEROES: u64 = 0x127c
+const BLKROTATIONAL: u64 = 0x127e
+const BLKGETDISKSEQ: u64 = 0x80081280
+const HDIO_GETGEO: u64 = 0x0301
+const BLKPG_ADD_PARTITION: u64 = 1
+const BLKPG_DEL_PARTITION: u64 = 2
+
+/// px79: write `v`'s `width` low bytes at user `arg`: 0 or -EFAULT.
+fn put_arg(pml4: u64, arg: u64, v: u64, width: u64) -> u64 {
+    if !uaccess.writable(pml4, arg, width) {
+        return neg(EFAULT)
+    }
+    uaccess.put(pml4, arg, v, width)
+    0
+}
+
+/// px79: `ioctl` on a block device's node, each answer and width measured
+/// on the guest (Linux 7.3.0, virtio-blk; tests/mpx6-nodes.d/linux/):
+/// BLKGETSIZE64 the bytes (u64), BLKGETSIZE the sectors (unsigned long),
+/// BLKSSZGET the logical block (int), BLKPBSZGET and BLKIOMIN the same
+/// (unsigned int: the device states no other), BLKIOOPT 0, BLKALIGNOFF 0,
+/// BLKDISCARDZEROES 0, BLKROGET 1 for a read-only disk (int), BLKBSZGET
+/// the soft block size (int: kernel/block's `soft_block`), BLKROTATIONAL 1
+/// (u16: virtio-blk states none), BLKGETDISKSEQ the disk's sequence (u64),
+/// HDIO_GETGEO the device's geometry (16 bytes: heads, sectors, the u16
+/// cylinders, then the first sector as an unsigned long, its padding
+/// written as zeros); for root: BLKFLSBUF (what the cache holds of the
+/// device written and forgotten), BLKRRPART (kernel/block's `rescan`),
+/// BLKPG's ADD_PARTITION and DEL_PARTITION (`blkpg_add`, `blkpg_del`), each
+/// -EACCES to a user (ioctl_list(2): CAP_SYS_ADMIN). Any other request of
+/// the block (0x12) and HDIO (0x03) families is refused by name, -ENOTTY;
+/// anything else -ENOTTY, as Linux answers (measured: TCGETS, FIONREAD,
+/// FS_IOC_GETFLAGS, 0x1234).
+fn blk_ioctl(a: u64, pml4: u64, fd: u64, req: u64, arg: u64) -> u64 {
+    let d = blk_dev(node_of(a, fd))
+    if d == block.DEVS {
+        return neg(ENXIO)
+    }
+    let lbs = block.lbs(d)
+    if req == BLKGETSIZE64 {
+        return put_arg(pml4, arg, block.sectors(d) * 512, 8)
+    }
+    if req == BLKGETSIZE {
+        return put_arg(pml4, arg, block.sectors(d), 8)
+    }
+    if req == BLKSSZGET || req == BLKPBSZGET || req == BLKIOMIN {
+        return put_arg(pml4, arg, lbs, 4)
+    }
+    if req == BLKIOOPT || req == BLKALIGNOFF || req == BLKDISCARDZEROES {
+        return put_arg(pml4, arg, 0, 4)
+    }
+    if req == BLKROGET {
+        return put_arg(pml4, arg, if block.flags(d) & block.F_RO != 0 { 1 } else { 0 }, 4)
+    }
+    if req == BLKBSZGET {
+        return put_arg(pml4, arg, block.soft_block(d), 4)
+    }
+    if req == BLKROTATIONAL {
+        return put_arg(pml4, arg, 1, 2)
+    }
+    if req == BLKGETDISKSEQ {
+        return put_arg(pml4, arg, block.diskseq(d), 8)
+    }
+    if req == HDIO_GETGEO {
+        let (h, sp, c) = block.geometry(d)
+        if h == 0 {
+            refuse(a, R_BLKIOCTL)
+            return neg(ENOTTY) // the device offers no geometry
+        }
+        if !uaccess.writable(pml4, arg, 16) {
+            return neg(EFAULT)
+        }
+        uaccess.zero(pml4, arg, 16)
+        uaccess.put(pml4, arg, h, 1)
+        uaccess.put(pml4, arg + 1, sp, 1)
+        uaccess.put(pml4, arg + 2, c & 0xffff, 2)
+        uaccess.put(pml4, arg + 8, block.start_of(d), 8)
+        return 0
+    }
+    if req == BLKFLSBUF || req == BLKRRPART || req == BLKPG {
+        if !cred.privileged(a) {
+            return neg(EACCES)
+        }
+        if req == BLKFLSBUF {
+            let e = block.sync(d)
+            block.forget(d)
+            return e
+        }
+        if req == BLKRRPART {
+            return block.rescan(d)
+        }
+        // struct blkpg_ioctl_arg { int op; int flags; int datalen; void *data; }
+        // and struct blkpg_partition { long long start, length; int pno; … }
+        if !uaccess.readable(pml4, arg, 24) {
+            return neg(EFAULT)
+        }
+        let op = uaccess.get(pml4, arg, 4)
+        let data = uaccess.get64(pml4, arg + 16)
+        if !uaccess.readable(pml4, data, 20) {
+            return neg(EFAULT)
+        }
+        let start = uaccess.get64(pml4, data)
+        let len = uaccess.get64(pml4, data + 8)
+        let pno = uaccess.get(pml4, data + 16, 4)
+        if op == BLKPG_ADD_PARTITION {
+            return block.blkpg_add(d, if pno >= 0x80000000 { 0 } else { pno }, start, len)
+        }
+        if op == BLKPG_DEL_PARTITION {
+            return block.blkpg_del(d, if pno >= 0x80000000 { 0 } else { pno })
+        }
+        refuse(a, R_BLKIOCTL) // BLKPG_RESIZE_PARTITION and the rest
+        return neg(EINVAL)
+    }
+    let fam = (req >> 8) & 0xff
+    if fam == 0x12 || fam == 0x03 {
+        refuse(a, R_BLKIOCTL)
+    }
+    neg(ENOTTY)
 }
 
 // --- px62: FIFOs, flock, and what a mapping maps -------------------------------------
@@ -7293,7 +7752,7 @@ pub fn fifo_abandon() {
 /// px62: whether an open file of kind `k` keeps a `flock` lock (word
 /// O_LOCK): a file's, a directory's, a pipe's or a FIFO's end.
 fn locks(k: u64) -> bool {
-    k == K_FILE || k == K_DIR || k == K_PIPE
+    k == K_FILE || k == K_DIR || k == K_PIPE || k == K_BLK // px79: sfdisk locks the disk it writes
 }
 
 /// px62: whether an open file other than `i` on `i`'s node holds a lock

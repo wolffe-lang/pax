@@ -688,8 +688,8 @@ fn remap_line() {
 /// `write(fd, buf, len)`: the result for %rax. The console's descriptors
 /// (0-2 and any opened on `/dev/stdout`, `/dev/stderr`, `/dev/stdin`)
 /// send the bytes to the serial console; `/dev/null` swallows them; a
-/// pipe, a socket and (px27) a file of the tree take them; anything
-/// else (closed, opened to read) is -EBADF.
+/// pipe, a socket, (px27) a file of the tree and (px79) a block device's
+/// node take them; anything else (closed, opened to read) is -EBADF.
 fn write(fd: u64, buf: u64, len: u64) -> u64 {
     if socket.is_inet(area(), fd) {
         return socket.sendto(area(), paging.live(), fd, buf, len, 0, 0, 0) // px22
@@ -730,6 +730,9 @@ fn write(fd: u64, buf: u64, len: u64) -> u64 {
     }
     if t == 8 {
         return NEG_ENOSPC // px45: /dev/full
+    }
+    if t == 9 {
+        return files.blk_write(area(), paging.live(), fd, buf, len) // px79: a block device's node
     }
     if t == 0 || len == 0 {
         return len
