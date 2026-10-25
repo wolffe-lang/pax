@@ -302,7 +302,7 @@ section below says what a journalled root does) a power cut (QEMU
 closed without `exit` or `reboot`) leaves `/` not clean; the next boot
 mounts it read-write, says `not cleanly unmounted` once, and leaves it
 not clean through its own clean end, as Linux's ext2 does (R-px67-5).
-PAX has no fsck: `e2fsck -fy` of partition 2 on the host repairs it.
+Repair it offline with `fsck.ext2 -y /dev/vda2` from the rescue archive described below, or with the host's `e2fsck -fy`. Never repair the mounted root.
 
 ## The journal (px68)
 
@@ -364,7 +364,7 @@ wrote before it is (`sync` first keeps it). `init=PATH` on Limine's
 command line runs PATH alone as init (bootparam(7)'s), which the crash
 row uses to boot a killed disk once for its replay. An ext2 root
 (`--no-journal`) behaves as px67 measured: not clean after a cut, said
-once by the next boot, left for the host's `e2fsck -fy`.
+once by the next boot, left for an offline check, from the rescue archive or the host.
 
 ## The disks' nodes and a second disk (px79)
 
@@ -611,3 +611,63 @@ unavailable, not zero and not replaced with QEMU's host RSS. Linux's same
 snapshot/copy reference measured 11884 KiB peak RSS. The missing guest
 measurement, the journalled formatter, timer-driven cursor blink, hardware
 drivers and USB transport remain separate prerequisites.
+
+## Checking a volume from rescue
+
+`tools/mkfsck OUTDIR` builds `OUTDIR/fsck.ext2` from `user/fsck`, using
+this repository's compiler and standard-library pins. It is a static Linux
+executable; the same binary runs on Linux and PAX.
+
+```text
+fsck.ext2 [-n|-p|-y] [-f] DEVICE
+```
+
+The default is report-only (`-n`). `-p` plans automatic count/bitmap and
+reference repairs; an operation needing a choice remains uncorrected.
+`-y` also clones duplicate data blocks and reconnects disconnected files
+and directories, creating `lost+found` when needed. All five passes run;
+`-f` is accepted. Exit status is 0 for no remaining error, 1 for completed
+repairs, 4 for uncorrected or unsupported damage, 8 for an operational
+failure, and 16 for bad arguments. As observed with e2fsck 1.47.0, `-n`
+reports a primary superblock count disagreement without setting status 4
+when no other inconsistency is found. Report-only mode never replays a
+journal or writes the image.
+
+**Use an unmounted volume.** Repair opens a block device with `O_EXCL`
+without `O_CREAT`, retains that descriptor for the whole check, and takes
+an advisory lock. A mounted PAX root is refused. A regular image file must
+also be offline; an advisory lock does not exclude an unrelated program
+that ignores it. There is no force-mounted option.
+
+The checker reads 1, 2 and 4 KiB legacy block maps, including indirect
+blocks. Supported ext3 journals are v1/v2 headers with 32-bit tags and
+optional revocations, without checksums. Committed transactions are
+validated before replay; revoked blocks, escapes, wrapped logs and torn
+commits follow the existing journal corpus. Home blocks are flushed before
+the log is emptied, then `needs_recovery` is cleared. Other repairs are
+staged until every pass finishes, the superblock made dirty first, and
+`clean` written only after metadata is flushed. This is not a transaction
+for an arbitrary power cut during repair; keep a copy of important images.
+
+Bounds and refusals are explicit: at most 512 groups, 4,194,304 blocks and
+1,048,576 inodes; external journals, journal checksum/64-bit features,
+external attribute blocks, indexed-directory validation, a nonempty
+orphan chain, cyclic/shared indirect blocks, and ambiguous malformed
+directory records are not repaired. A refusal is not a clean verdict.
+Lost writes absent from both the filesystem and journal cannot be restored.
+
+The normal disk still boots without an initramfs. The rescue fixture in
+`tests/mpx6-fsck` explicitly supplies a separate archive containing
+`/bin/fsck.ext2` and `/etc/pax-run` with:
+
+```text
+/bin/fsck.ext2 -fy /dev/vda2
+```
+
+Its Limine entry loads that archive and uses `root=/dev/vda9`, a missing
+root, so PAX stays on the in-memory archive and leaves `/dev/vda2`
+unmounted. The unattended test selects this entry after a real power cut,
+checks the repaired superblock before mounting it, then selects the normal
+root entry and verifies persistence across reboot. Both BIOS and UEFI are
+covered. This does not add a rescue menu to existing disks or alter any
+installed playground image; distributing that entry remains separate work.

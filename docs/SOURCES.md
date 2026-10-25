@@ -1279,3 +1279,21 @@ BusyBox stty prints a diagnostic instead of dimensions at0x0.
 `tools/census/inside/pins.sh` now records this pelt launch tree; C4 in
 `tests/census` compares it with `user/pelt.pin`. Neither a later upstream
 commit nor a network failure changes this deterministic identity check.
+## Offline ext2/ext3 checker
+
+- Dave Poirier, *The Second Extended File System: Internal Layout*,
+  https://www.nongnu.org/ext2-doc/ext2.html — superblock, group descriptor,
+  inode, bitmap and directory-entry layouts (chapters 3–4).
+- e2fsck(8), https://man7.org/linux/man-pages/man8/e2fsck.8.html — offline
+  operation, report-only/preen/yes modes and exit statuses. e2fsprogs
+  1.47.0 binaries are the black-box repair oracle; the corpus retains
+  each prompt and finding rather than editing a golden answer.
+- The published JBD2 on-disk journal layout, already recorded for the
+  kernel journal above; PAX's own `kernel/journal/journal.lu` and the
+  unchanged thirteen-case replay corpus are the replay reference.
+- open(2)'s Linux `O_EXCL`-without-`O_CREAT` block-device rule, and the
+  Linux x86-64 syscall ABI, for exclusive offline access. No libc source.
+
+No Linux kernel, e2fsprogs, util-linux, busybox or other filesystem-tool
+implementation source was consulted. Malformed-directory salvage remains
+an explicit unsupported row, not an inferred or copied algorithm.
