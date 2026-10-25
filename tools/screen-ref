@@ -4,8 +4,8 @@
 # and compare it with a screendump.
 #
 #   tools/screen-ref --from TEXT --size WxH [--upto N] [--font BDF]
-#                    [--out REF.ppm] [--compare DUMP.ppm] [--grid GRID.txt]
-#                    SERIAL.log
+#                    [--latin1] [--out REF.ppm] [--compare DUMP.ppm]
+#                    [--grid GRID.txt] SERIAL.log
 #
 # The serial console and the screen are fed the same bytes (kernel/serial
 # hands every byte to kernel/screen), so the screen's picture is a
@@ -14,16 +14,22 @@
 # before it never reached the screen) to its end, runs the bytes through
 # a terminal written here from kernel/screen's rules — not from its
 # code — and draws the grid with the font read straight from the BDF
-# (font/spleen-8x16.bdf by default; not boot/font.S). The rules, as
-# kernel/screen's header states them:
+# (font/spleen-8x16.bdf by default; not boot/font.S), and (gm01) the
+# code points above U+00FF that font/extent.txt names from the BDF its
+# line names: Spleen's own glyph for `spleen` and for `generated` (which
+# tools/mkfont holds equal to Spleen's), font/pax-extra.bdf's for `pax`;
+# --latin1 draws none of them (the font row withheld, as tools/mkfont
+# --latin1 builds the table). The rules, as kernel/screen's header
+# states them:
 #
 #   - a W x H framebuffer, black; a grid of min(W/8, 256) columns by
 #     min(H/16, 128) rows of 8x16 cells, top left;
 #   - printable ASCII and UTF-8 code points one cell each; below 256 the
-#     font's glyph, or `?`'s when the font has none; at or above 256, a
-#     malformed sequence's byte, a stray continuation byte and 0xf8-0xff
-#     as `?`; a sequence cut short by a C0 byte or another lead byte
-#     writes `?` first;
+#     font's glyph, or `?`'s when the font has none; at or above 256 the
+#     extent's glyph (gm01), any other code point, a malformed
+#     sequence's byte, a stray continuation byte and 0xf8-0xff as `?`; a
+#     sequence cut short by a C0 byte or another lead byte writes `?`
+#     first;
 #   - deferred wrap; LF down (scrolling, the new row blank in the
 #     current rendition, px59), CR to column 0, BS one left (px59: a
 #     pending wrap cleared too), TAB to the next multiple of 8 (at most
@@ -101,6 +107,49 @@ def read_bdf(path):
     return glyphs
 
 
+def read_extent(path):
+    """font/extent.txt: (code point, source) for each code point above
+    U+00FF the screen draws (gm01). Read here again, not tools/mkfont's."""
+    out = {}
+    with open(path, "r", encoding="ascii") as f:
+        for raw in f:
+            line = raw.split("#", 1)[0].split()
+            if not line:
+                continue
+            span = line[0].split("-")
+            first, last = int(span[0][2:], 16), int(span[-1][2:], 16)
+            for cp in range(first, last + 1):
+                out[cp] = line[1]
+    return out
+
+
+def font_glyphs(font=None, latin1=False):
+    """The glyphs the screen draws, by code point: the BDF's below 256
+    (font/spleen-8x16.bdf unless `font` names another), and, unless
+    `latin1`, the extent's above."""
+    import os
+    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "font")
+    spleen = read_bdf(font or os.path.join(here, "spleen-8x16.bdf"))
+    glyphs = {cp: g for cp, g in spleen.items() if cp < 256}
+    if not latin1:
+        extra = read_bdf(os.path.join(here, "pax-extra.bdf"))
+        for cp, src in read_extent(os.path.join(here, "extent.txt")).items():
+            g = (extra if src == "pax" else spleen).get(cp)
+            if g is not None:
+                glyphs[cp] = g
+    return glyphs
+
+
+_DRAWN = []
+
+
+def default_drawn():
+    """The extent's code points (font_glyphs' above U+00FF), read once."""
+    if not _DRAWN:
+        _DRAWN.append(frozenset(c for c in font_glyphs() if c >= 256))
+    return _DRAWN[0]
+
+
 def truecolour(red, green, blue, background=False):
     # Inferred from the VT, checked against 19683 RGB samples twice.
     r, g, b = red & 255, green & 255, blue & 255
@@ -112,8 +161,11 @@ def truecolour(red, green, blue, background=False):
 
 
 class Term:
-    def __init__(self, cols, rows):
+    def __init__(self, cols, rows, drawn=None):
         self.cols, self.rows = cols, rows
+        # gm01: the code points above U+00FF the screen draws; any other
+        # is kept as `?` (63), as kernel/screen keeps it.
+        self.drawn = default_drawn() if drawn is None else drawn
         self.top, self.end = 0, rows
         self.cells = [[(32, 7, 0)] * cols for _ in range(rows)]
         self.cx = self.cy = 0
@@ -412,7 +464,7 @@ class Term:
                 self.ucp = (self.ucp << 6) | (b & 0x3F)
                 self.un -= 1
                 if self.un == 0:
-                    self.glyph(self.ucp if self.ucp < 256 else 63)
+                    self.glyph(self.ucp if self.ucp < 256 or self.ucp in self.drawn else 63)
                 return
             self.un = 0
             self.glyph(63)
@@ -437,7 +489,7 @@ def render(term, glyphs, w, h):
             b &= 15  # blink recorded, drawn steady: needs the timer hook, px71
             if term.visible and y == term.cy and x == term.cx:
                 f, b = b, f
-            bits = glyphs.get(cp, q) if cp < 256 else q
+            bits = glyphs.get(cp, q)
             fr = term.palette[f].to_bytes(3, "big")
             br = term.palette[b].to_bytes(3, "big")
             for r in range(16):
@@ -477,9 +529,12 @@ def main():
     opts = {"--font": None, "--from": None, "--size": None, "--out": None, "--compare": None, "--grid": None,
             "--upto": None}
     log = None
+    latin1 = False
     while args:
         a = args.pop(0)
-        if a in opts:
+        if a == "--latin1":
+            latin1 = True
+        elif a in opts:
             if not args:
                 die("%s takes a value" % a)
             opts[a] = args.pop(0)
@@ -490,16 +545,12 @@ def main():
         else:
             die("one serial log only")
     if log is None or opts["--from"] is None or opts["--size"] is None:
-        die("usage: screen-ref --from TEXT --size WxH [--font BDF] [--out REF.ppm] [--compare DUMP.ppm] [--grid GRID.txt] SERIAL.log")
+        die("usage: screen-ref --from TEXT --size WxH [--upto N] [--font BDF] [--latin1] [--out REF.ppm] [--compare DUMP.ppm] [--grid GRID.txt] SERIAL.log")
     try:
         w, h = (int(v) for v in opts["--size"].split("x"))
     except ValueError:
         die("--size takes WxH")
-    font = opts["--font"]
-    if font is None:
-        import os
-        font = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "font", "spleen-8x16.bdf")
-    glyphs = read_bdf(font)
+    glyphs = font_glyphs(opts["--font"], latin1)
     try:
         with open(log, "rb") as f:
             data = f.read()
@@ -513,7 +564,7 @@ def main():
     at = data.find(opts["--from"].encode())
     if at < 0:
         die("%r is not in %s" % (opts["--from"], log))
-    term = Term(min(w // 8, 256), min(h // 16, 128))
+    term = Term(min(w // 8, 256), min(h // 16, 128), set(c for c in glyphs if c >= 256))
     for b in data[at:]:
         term.feed(b)
     px = render(term, glyphs, w, h)
