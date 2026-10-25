@@ -26,16 +26,21 @@ podman run --rm --cpuset-cpus 0-3 -v "$L:$L:Z" -e O="$O" localhost/px80-lld sh -
  printf "int px80_zstd(void) { return 42; }\n" > "$O/z.c"
  printf "int px80_zstd(void);\nint main(void) { return px80_zstd() == 42 ? 0 : 1; }\n" > "$O/zmain.c"
  clang -c "$O/zmain.c" -o "$O/zmain.o"
- for z in zstd zlib; do
-   clang -c -g -gz=$z "$O/z.c" -o "$O/z-$z.o" || echo "clang -gz=$z failed"
-   [ -f "$O/z-$z.o" ] && echo "z-$z.o: $(llvm-readelf -SW "$O/z-$z.o" | grep -c " C ") sections flagged C (compressed)"
- done
+ clang -c -g "$O/z.c" -o "$O/z-plain.o"
+ clang -c -g -gz=zlib "$O/z.c" -o "$O/z-clang-zlib.o"
 '
 podman run --rm -v "$L:$L:Z" localhost/px57-rust \
     cp /opt/rust/rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-musl/lib/self-contained/libunwind.a "$O/packed/"
 podman run --rm -v "$L:$L:Z" -e O="$O" localhost/px80-lld sh -c 'llvm-objcopy --decompress-debug-sections "$O/packed/libunwind.a" "$O/decomp/libunwind.a"'
-echo "== the packaged sysroot (compressed sections per file)"
-for f in "$O"/packed/*; do printf '%s %s %s\n' "${f##*/}" "$(sha256sum "$f" | cut -c1-16)" "$(readelf -SW "$f" 2>/dev/null | grep -c ' C ')"; done
+# zlib and zstd objects made by another producer than the lld under test:
+# Ubuntu's lld 18.1.3 (px65's container), a relocatable link of the same
+# object with its debug sections compressed (clang 17 on Alpine has no zstd:
+# its -gz=zstd leaves the sections as they were).
+podman run --rm -v "$L:$L:Z" -e O="$O" localhost/px80-ubuntu bash -c '
+ set -eu; ld.lld --version
+ for z in zlib zstd; do ld.lld -r --compress-debug-sections=$z "$O/z-plain.o" -o "$O/z-$z.o"; done'
+echo "== compressed sections by their headers (notes/px80/chdr.py)"
+python3 -I "$L/pax/notes/px80/chdr.py" "$O"/z-plain.o "$O"/z-clang-zlib.o "$O"/z-zlib.o "$O"/z-zstd.o "$O"/packed/* "$O"/decomp/*
 echo "== the packaged files decompressed (px60's decompress.sh) against user/wolf-link.sums"
 for k in 1 2; do
     while read -r n s b; do
@@ -74,7 +79,13 @@ taskset -c 0-3 podman run --rm --cpuset-cpus 0-3 --ulimit core=0:0 -v "$L:$L:Z" 
    b=$L/lld-out/ld.lld; [ "$which" = old ] && b=$L/link-old/ld.lld
    rc=0; $b -static $O/bundle-sysroot/crt1.o $O/bundle-sysroot/crti.o $O/zmain.o $O/z-$z.o $O/bundle-sysroot/libc.a $O/bundle-sysroot/crtn.o -o $O/z-$z-$which > $O/z-$z-$which.log 2>&1 || rc=$?
    r=-; [ "$rc" = 0 ] && { $O/z-$z-$which; r=$?; }
-   echo "$z $which lld: link rc=$rc run rc=$r $(head -c 300 $O/z-$z-$which.log | tr "\n" " ")"
+   echo "$z $which lld: link rc=$rc run rc=$r $(head -n 1 $O/z-$z-$which.log)"
  done; done
+ for which in new old; do
+   b=$L/lld-out/ld.lld; [ "$which" = old ] && b=$L/link-old/ld.lld
+   rc=0; $b -static $O/bundle-sysroot/crt1.o $O/bundle-sysroot/crti.o $O/zmain.o $O/z-plain.o $O/bundle-sysroot/libc.a $O/bundle-sysroot/crtn.o -o $O/z-plain-$which > $O/z-plain-$which.log 2>&1 || rc=$?
+   echo "plain $which lld: link rc=$rc"
+ done
+ for z in zlib zstd; do cmp -s $O/z-$z-new $O/z-plain-new && echo "$z: lld 18.1.8 output = the uncompressed input'"'"'s, byte for byte" || echo "$z: lld 18.1.8 output differs from the uncompressed input'"'"'s"; done
 '
 echo "m2-linux.sh done $(date -Is)"
