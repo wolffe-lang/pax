@@ -4,7 +4,8 @@ report .md files. The PR carries the five canonical sections; this directory
 contains the evidence, and px71-installer.txt is the complete next-lane draft.
 
 Prediction
-Committed first as e0b0998e, before implementation.
+Committed first as 0ad99b7e (e0b0998e before the rebase), before
+implementation.
 - First format disagreement predicted FAT FSInfo. Wrong: the first actual
   mismatch was GPT's sfdisk text escaping of non-ASCII UTF-8. FAT FSInfo and
   ext2's first empty filesystem passed their independent checkers immediately.
@@ -44,9 +45,14 @@ Evidence
   FAT alias/path guard and hard-link attribute-precedence fix. The latter
   was first seen red against mkdisk: three linked names with attributes on
   the second and third must keep the second name's first explicit metadata. It is deliberately smaller than the full local tree.
-- Three isolated local plants fail G-sgdisk-v, F-fsck-fat and E-e2fsck.
-  Draft PRs #169/#170/#171 preserve their CI evidence; run ids/verdicts are
-  recorded in the closeout once supplied, never guessed.
+- Three isolated plants fail G-sgdisk-v, F-fsck-fat and E-e2fsck, locally
+  and in CI, each red by name and closed unmerged by the orchestrator:
+  pax#169 2d936f89 run 40161517348 (G-sgdisk-v); pax#170 61f4d3e7 run
+  40161518853 (F-fsck-fat, 'Wrong checksum for long file name'); pax#171
+  72c77865 run 40161520873 (E-e2fsck).
+- The PR's first run, 40163022068 at 9c65fd62 (before px79), was red only
+  on D-PAX: 'FAIL D-PAX: raw vdb prerequisite (pax#144)', the expected gap;
+  every Linux row green there (24/12/13, 0 SKIP), every other suite green.
 - Runtime census: GPT 26 calls, FAT 27, ext2 28, static Limine 17. PAX's only
   ENOSYS reports are the existing glibc set_robust_list/rseq fallbacks.
 
@@ -78,12 +84,70 @@ One exploratory early GPT PAX boot was CPU-pinned but outside the flock;
 it was repeated under the lock and only that repeated evidence retained.
 Two long-job estimates were high (baseline ~8 min; root gate ~11 min).
 
+Rebase onto px79's merge (8d631040)
+px79 (pax#168, pax#144) merged with the seam this lane was written against:
+tools/qemu-run --drive FILE[,ro][;DEVOPTS], repeatable, forwarded by
+tools/qemu-halt beside --boot-disk. px69 changes no kernel file, so the
+kernel/files, /dev, procfs and fstab conflicts did not arise. Seven
+conflicts, each resolved to keep both lanes' lines:
+- docs/SOURCES.md, docs/CENSUS.md: both lanes appended a section; px79's
+  first, then px69's.
+- tools/ci-tiers.map: @disk now has mpx6-nodes and mpx6-disktools, with
+  both lanes' comments.
+- tests/ci-plan: the block-layer and GPT-writer expectations list the union
+  of both suites; px79's four nodes expectations and px69's formatter
+  expectation all kept.
+- .github/workflows/ci.yml: the gate job's needs list mpx6-nodes and
+  mpx6-disktools (the workflow parses; 51 jobs).
+- README.md: px69's paragraph above px79's (newest first), naming the
+  /dev/vdb node it writes through.
+px69's own sources (user/, tools/mkdisktools, tools/mklimine-static,
+tests/mpx6-disktools*) are byte-identical across the rebase. 078ee159
+retires the PAX_DISKTOOLS_NOT_YET=144 skip mode: with the nodes served it
+could only let D-PAX pass vacuously; a missing vdb is now always a FAIL.
+Old to new: e0b0998e 0ad99b7e, 7330e0e6 4db382e8, 78ce409a a126f1d0,
+9674c333 31de6e36, fe4f419d 3b392bcf, 7c2f78c9 3c247c8a, 08c8dea8
+66932460, 9e4607ff 28c25634, d8d42176 a55152e0, d22c7dcb cfd1843e,
+f415975b 08dbdc05, decf8e56 b7cc68bf, 604b8677 07cdd94d, 616a8692
+f825223f, 5e5403a2 fc09f1ea, 7dd88c10 c610abe0, 93ba6ec3 7a50c454,
+9c65fd62 c9a21423.
+
+Rerun at the rebased head 078ee159 (kasumi CPUs 0-3, the cores' lock per
+step; recipe rerun-a.sh and rerun-b.sh; evidence under rerun/):
+- tests/ci-plan: PASS, 265 lines (the merged expectations hold).
+- Build (px69-ubuntu, wolf 0.2.35, std manifest 06938b3f, Limine 12.9.1
+  by its pinned digest): both kernels and the static programs; sums in
+  rerun/dt-binaries.sha256 (paxgpt e65f93b9, paxfat 4584b375, paxext2
+  5c870486, static limine e5a117fa). Not compared with the first run's
+  binaries, which were built in another directory.
+- Linux, tools/disktools' pinned packages (CI's set): GPT 24, FAT 12, ext2
+  13 PASS, 0 SKIP. The image's own tools (oracles.versions): the same
+  24/12/13, 0 SKIP.
+- PAX, both tiers, both firmwares, TCG: D-PAX (vda and vdb raw nodes),
+  D-LIMINE (static Limine on PAX /dev/vda equals Linux, every byte),
+  D-DISK native and release (13 commands exit 0 on PAX writing vdb; the
+  root's e2tree equal to the Linux writer's; e2fsck -fn clean), D-BOOT
+  native/release x bios/uefi (the target alone; the playground persists;
+  root clean, mount count 2): 8 PASS, 0 SKIP, 0 FAIL. Each artefact's time
+  lies inside its step's window (05:57:34 to 05:59:36).
+- host-gpt began at 05:22:49 and its files date from 05:56: 33 minutes
+  waiting for the shared cores, not running.
+- mpx6-root --fstype ext2 with PAX_EXT2_WRITER=paxext2, native and
+  release, BIOS and UEFI, every row, against the live Linux 7.3.0-4 guest
+  (R0: 'the Linux side ran (live 7.3.0-4-cachyos)'): 80 PASS, 0 FAIL; the
+  4 SKIPs are the explicit journal-only R8 rows ('ext2 has no journal; the
+  ext2 crash contract is R8e'), and R8e passes on all four legs.
+- The ext3 default, the control (native BIOS, every row, live guest): 30
+  PASS, 0 FAIL, 0 rows SKIP.
+- px79's mpx6-nodes on this head (native BIOS, px79's order, live guest):
+  N0-N14 all PASS, 27 PASS lines, 0 FAIL, 0 SKIP; crash1's status 143 is
+  N14's planned kill, crash2 replays and halts.
+- Waits for the shared cores, not run time: nodes-build began 06:32:03 and
+  passed 07:00:32, and no file it wrote is older than 07:00:09 (host-gpt
+  likewise, above). Job A ran 05:14-05:59, job B 06:01-07:09.
+
 Hand-off
-The PR is explicitly dependent on px79/pax#168, final head b3ae4be9. Raw
-proofs used its earlier 99b3bf3b checkout; they are not claims about px69's
-old-kernel head. Required seam: tools/qemu-run --drive FILE[,ro][;DEVOPTS],
-repeatable, and tools/qemu-halt forwarding it beside --boot-disk. Rebase
-and rerun raw/PAX gates immediately after px79 merges.
+The PAX legs that waited on px79 are green at the rebased head (above).
 
 px71-installer.txt is drafted in full, including target confirmation,
 metadata/source policy, journal and size prerequisites, fault rows and CI.
@@ -96,8 +160,13 @@ Issues for the orchestrator, not filed here:
   independent row retained); report rather than emulate it.
 - pax: guided installer follow-on, as drafted; source metadata generator,
   stable-source policy and fresh PARTUUID/configuration are its work.
-No claim to close #144 (px79), #164/#165/#166 (px68 follow-ups), or #118
-(blink timer). pax#152 is the disk-tool item for the orchestrator to reconcile.
+- pax: README's tests/ list (line 120) is partial: it lacks mpx6-root,
+  mpx6-journal, mpx6-nodes and others. Not this lane's to fix.
+- pax: tools/__pycache__/ is not in .gitignore; the planner's imports
+  leave it in a clean tree.
+No claim to close #144 (px79's, closed at its merge), #164/#165/#166 (px68
+follow-ups), or #118 (blink timer). pax#152 is the disk-tool item for the
+orchestrator to reconcile.
 Prune only the lane's /home/mfwolffe/lanes/px69, its localhost/px69-ubuntu
 image, and /Users/mfwolffe/lanes/px69 worktrees/bundle once evidence is kept.
-Plant branches/PRs remain unmerged for the orchestrator to close and cite.
+Plant PRs #169-#171 closed unmerged; their branches stay as evidence.
