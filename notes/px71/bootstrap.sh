@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # kasumi only: build the existing compact fixture and complete playground
 # payload. No installer verdict is claimed by these prerequisite builds.
-# Caller: setsid -f bash bootstrap.sh > bootstrap-02.log 2>&1 < /dev/null
+# Caller: setsid -f bash bootstrap.sh > bootstrap-03.log 2>&1 < /dev/null
 # No signal handlers; the outer shell records the inner shell's exit.
 L=$HOME/lanes/px71
-mkdir -p "$L/logs-02" "$L/build" "$L/tmp" "$L/cache"
-printf '%s\n' "$$" > "$L/bootstrap-02.pid"
-printf 'px71 bootstrap-02 start %s\n' "$(date -Is)"
+mkdir -p "$L/logs-03" "$L/build" "$L/tmp" "$L/cache"
+printf '%s\n' "$$" > "$L/bootstrap-03.pid"
+printf 'px71 bootstrap-03 start %s\n' "$(date -Is)"
 bash -s <<'INNER'
 set -euo pipefail
 L=$HOME/lanes/px71
@@ -26,11 +26,18 @@ step() {
     podman run --rm --memory 8g --ulimit core=0:0 \
         -v "$L:$L:Z" -e PAX_CACHE -e PAX_BUILD -e TMPDIR -e PAX_LOPE_REPO \
         -e CARGO_INCREMENTAL -e SOURCE_DATE_EPOCH -e TZ=UTC -w "$P" \
-        localhost/px80-ubuntu taskset -c 8-11 "$@" 9>&- > "$L/logs-02/$name.log" 2>&1 || rc=$?
+        localhost/px80-ubuntu taskset -c 8-11 bash -c '
+            set -euo pipefail
+            PAX_WOLF=$(tools/fetch-wolf)
+            export PAX_WOLF
+            export PATH="$(dirname "$PAX_WOLF"):$PATH"
+            "$PAX_WOLF" --version
+            exec "$@"
+        ' px71-build "$@" 9>&- > "$L/logs-03/$name.log" 2>&1 || rc=$?
     flock -u 9
     exec 9>&-
     printf '%s exit=%s %s\n' "$name" "$rc" "$(date -Is)"
-    if [ "$rc" -ne 0 ]; then tail -40 "$L/logs-02/$name.log"; return "$rc"; fi
+    if [ "$rc" -ne 0 ]; then tail -40 "$L/logs-03/$name.log"; return "$rc"; fi
 }
 git -C "$PAX_LOPE_REPO" cat-file -e 'e6f623c778dd486436bcb0a7d481333e0463b906^{commit}'
 step pack tools/mkpack "$W/pack"
@@ -49,11 +56,11 @@ step zone tools/mkzone "$W/localtime"
 step probe tools/mkdiskprobe "$W/probe"
 step lupin tools/mklupin "$W/lupin"
 find "$W" -type f -executable -print0 | sort -z | xargs -0 sha256sum > "$L/build/full-binaries.sha256"
-sha256sum -c "$L/build/full-binaries.sha256" > "$L/logs-02/full-readback-1.log"
-sha256sum -c "$L/build/full-binaries.sha256" > "$L/logs-02/full-readback-2.log"
+sha256sum -c "$L/build/full-binaries.sha256" > "$L/logs-03/full-readback-1.log"
+sha256sum -c "$L/build/full-binaries.sha256" > "$L/logs-03/full-readback-2.log"
 printf 'prerequisite payload builds complete %s\n' "$(date -Is)"
 INNER
 rc=$?
-printf '%s\n' "$rc" > "$L/bootstrap-02.exit"
-printf 'px71 bootstrap-02 exit=%s %s\n' "$rc" "$(date -Is)"
+printf '%s\n' "$rc" > "$L/bootstrap-03.exit"
+printf 'px71 bootstrap-03 exit=%s %s\n' "$rc" "$(date -Is)"
 exit "$rc"
