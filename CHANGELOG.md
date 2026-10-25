@@ -7,6 +7,20 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The linker respin (px80, pax#172).** The dev ISO's static `ld.lld`
+  is lld 18.1.8, built from LLVM's release tarball (sha256 `0b58557a…`,
+  signed by LLVM's release key) by `notes/px80/build-lld.sh`: X86 only,
+  static, clang 17 with libc++, libc++abi, LLVM libunwind and compiler-rt,
+  and zlib and zstd built in, so it reads compressed debug sections.
+  px60's lld 17.0.6 could not link the release tier's kernel
+  (`R_X86_64_REX_GOTPCRELX out of range: -2147483652`, the high-half
+  image); 18.1.8 links it, byte for byte as Ubuntu's lld 18.1.3, which
+  CI uses, links it. `user/wolf-link.sums` moves one line
+  (`ld.lld`, `9fa7191f…`, 68,594,984 bytes); the `cc` front end and the
+  musl sysroot are unchanged. CI holds the record (W0 link,
+  `tests/mpx5-wolf.d/verify-link`: its shape, and `cc` rebuilt from
+  `notes/px60/cc.rs` to its recorded bytes). The kernel is unchanged.
+
 - **Block device nodes, the block ioctls and a second disk (px79,
   pax#144).** kernel/vblk drives up to four virtio disks in PCI slot
   order (and takes VIRTIO_BLK_F_GEOMETRY); kernel/block keeps a device
