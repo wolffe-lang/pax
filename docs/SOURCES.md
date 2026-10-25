@@ -1182,3 +1182,13 @@ kernels: none consulted.
   not opened. Geometry, alias choice and diagnostic behaviour were measured.
   The maintained `tools/mkgpt` is the seed-compatibility reference;
   sfdisk and sgdisk supply the independent partition-table checks.
+- **Linux ext4 on-disk documentation**, sparse allowed-documentation checkout
+  at `3b7cab693ba2bab63774bf5b988e8a61b2ef0f32`:
+  `Documentation/filesystems/ext4/{overview,blocks,super,group_descr,bitmaps,
+  inodes,blockmap,directory,special_inodes}.rst`. The ext2-compatible
+  superblock and 32-byte group descriptors, 256-byte inode records and
+  timestamp epochs, classic directory records, sparse-super placement,
+  bitmaps, reserved inodes and direct/single/double-indirect block maps.
+  Only documentation was read, never filesystem or kernel implementation.
+  `paxext2` leaves `has_journal` clear and does not claim resize-inode,
+  indexed-directory, extent or metadata-checksum features.
