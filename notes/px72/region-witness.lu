@@ -1,0 +1,18 @@
+//! Reduced candidate for the region diagnostic seen while building fsck.
+//! The aggregate needs `copy Node {...}` at the outer push, not merely
+//! `Node { raw: copy raw }`. This unsafe variant must be rejected.
+struct Node { raw: List[byte] }
+struct Holder { nodes: List[Node] }
+fn fill(mut h: Holder) {
+    region temporary {
+        var bytes = List[byte]()
+        for _ in 0..65536 { (mut bytes).push(7 as byte) }
+        let raw = bytes[0..65536]
+        (mut h.nodes).push(Node { raw: copy raw })
+    }
+}
+fn main() -> int {
+    var h = Holder { nodes: List[Node]() }
+    fill(mut h)
+    if h.nodes[0].raw[0] == 7 as byte { 0 } else { 1 }
+}
