@@ -1,0 +1,42 @@
+Item 2, paxfat
+
+R-px69-1 A recommended and implemented: the pinned mkfs.fat's 64 MiB
+FAT32 has 512-byte sectors/clusters, 32 reserved sectors, two FATs of
+1009 sectors and 129022 data clusters. The same one-sector clusters serve
+33/64/192 MiB ESPs, as tools/mkdisk explicitly requests with -s 1.
+
+fat-linux.log: 12 PASS, 0 SKIP. Recursive mdir of the ESP equals mtools'
+listing byte-for-byte, including aliases, dates, sizes and free space;
+every file reads back through mtype and paxfat reads mtools' files. Extended
+rows: directory-chain growth, CP850 accented short names, BMP long names,
+LFN lengths 13/26, alias collisions through ~23, empty files, out-of-space
+without writes, offset windows, invalid inputs and self-copy refusal.
+
+R-px69-4 A (orchestrator direction): preserve correct UTF-16 surrogate
+pairs, not mtools 4.0.49's supplementary-character truncation. The named
+row writes U+1F600 as D83D DE00, independently reads its bytes, and records
+mtools writing U+F600 instead. docs/SOURCES.md cites Microsoft FAT §7.
+
+fat-pax.{serial,boot,compare}: the unmodified Linux static binary formats,
+mkdirs, copies, lists and cats a regular-file image on PAX; 5 exits 0,
+name/size/content exact and halt proved. fat-boot.log: the actual Limine
+release and kernel on a paxfat-written ESP boot under SeaBIOS and OVMF,
+no ISO; the existing ext2 root probe runs and halts. boot-fat.sh records
+the recipe. This is not yet an ESP written on PAX to a raw disk (#144).
+
+Oracle trap: fsck.fat -n exits 0 even after a broken LFN checksum, saying
+"Checksum in long filename part wrong" and "Not auto-correcting this".
+The clean gate requires exactly its version and filesystem-summary lines;
+status 0 is insufficient. fat-lfn-checksum.red retains the diagnostic.
+
+Limits: FAT32 only, 512-byte clusters, 33 MiB through 2 GiB; the formatter
+and reader reject other BPBs. CP850 aliases, UTF-16 LFNs, UTC FAT times
+from SOURCE_DATE_EPOCH (1980-2107, two-second resolution). No overwrite,
+remove, rename, mounted-volume support, or power-failure atomicity. A
+format preserves bytes outside its specified window. Directory reads
+are bounded at 2048 clusters. Per-file data copy is streamed in regions.
+
+The host oracle image needed its gconv binary modules for mtools. Their
+GCONV_PATH is set only in the host-tool wrappers: setting it image-wide
+broke Ubuntu xorriso's charset conversion, so that environment mistake
+was corrected and the image/boot rerun. No host package was installed.
