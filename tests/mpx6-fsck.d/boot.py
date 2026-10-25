@@ -2,7 +2,7 @@
 """Bounded QEMU witness through tools/qemu-run; stop via monitor, no signals."""
 from pathlib import Path
 import os
-import runpy
+import socket
 import subprocess
 import sys
 import time
@@ -17,7 +17,7 @@ except FileNotFoundError:
     pass
 cmd = [repo + '/tools/qemu-run', '--boot-disk', '--accel', 'tcg', '--firmware', firmware,
        '--serial', str(serial), '--timeout', '210', disk, '--',
-       '-m', '512M', '-qmp', 'unix:' + monitor + ',server=on,wait=off']
+       '-m', '512M', '-monitor', 'unix:' + monitor + ',server=on,wait=off']
 if extra_drive:
     at = cmd.index(disk)
     cmd[at:at] = ['--drive', extra_drive]
@@ -32,8 +32,10 @@ def quit_monitor():
         time.sleep(0.05)
     if p.poll() is not None:
         return
-    quit_qmp = runpy.run_path(str(Path(__file__).with_name('monitor.py')))['quit_qmp']
-    quit_qmp(monitor, str(serial) + '.monitor.log')
+    with socket.socket(socket.AF_UNIX) as s:
+        s.settimeout(3)
+        s.connect(monitor)
+        s.sendall(b'quit\n')
 
 
 try:
