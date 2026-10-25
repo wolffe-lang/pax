@@ -1,0 +1,291 @@
+#!/usr/bin/env bash
+# kernel-as — the kernel's assembler seam (as02b; R-as02-1 A, R-as02-2 A):
+# tools/build-kernel's boot/start.S branch and wolf's manifest seam
+# (wolf-lang#957) honour ONE explicit WOLF_AS choice; absent or empty,
+# no command moves; a selected assembler's failure is final; a wolf
+# without the seam refuses rather than build half a kernel through it.
+#
+#   tests/kernel-as [--tier native|release|both] [--firmware F] [--src FILE.lu]
+#   tests/kernel-as --record [--tier ...]   (writes K1's calls as the record)
+#
+# Nothing boots (--firmware is taken for the plan's legs and ignored).
+# The kernel is kernel/kmain_console.lu (as01's, mpx5-wolf's), built by
+# tools/build-kernel (PAX_KAS_BUILD_KERNEL names another copy, for
+# --record) with every C-driver and assembler call traced: `cc`, `clang`
+# and the selected `sel` are links to tests/kernel-as.d/trace first on
+# PATH, `wolf` (PAX_WOLF) one too; WOLF_CLANG is unset, so wolf's legacy
+# driver is the traced clang. The package's cache (.lu-cache) is removed
+# before every build, so every row compiles.
+#
+# Inputs: PAX_WOLF, kernel/wolf.pin's release (tools/fetch-wolf when
+# unset; 0.2.35 has no `--assembler`); the seam wolf,
+# tests/kernel-as.d/wolf.pin built by tools/fetch-wolf's source shape
+# (PAX_SEAM_WOLF, a binary already built, skips the build) with the
+# release archive's libwolf_rt_none.a put beside it; the clef package,
+# tools/mkclef (PAX_CLEF_DIR, a package directory already built, skips
+# it); GNU as, cc, clang, ld.lld, nm, objdump on PATH.
+#
+# Rows (on every tier asked unless marked native):
+#   K0 the seam wolf's --version names its pin; its libwolf_rt_none.a is
+#      the release archive's, byte for byte.
+#   K1 absent: the seam wolf, WOLF_AS unset: wolf is given no
+#      --assembler; 17 assembly calls, 16 through clang and boot/start.S
+#      through cc, none through a selected tool; the whole trace is
+#      trunk's build-kernel's (tests/kernel-as.d/absent-TIER.calls, paths
+#      written @ROOT, @OUT and @BIN).
+#   K2 empty (native): WOLF_AS= is K1, the same trace and kernel bytes.
+#   K3 mixed (native): the release wolf with WOLF_AS set is refused by
+#      name, no kernel, no assembly call.
+#   K4 GNU as: WOLF_AS=sel (as): 17 calls through it, each `--64 -o OBJ
+#      SRC`, none through cc or clang; every other call K1's.
+#   K5 clef: WOLF_AS=sel (the package): the same 17 calls; the kernel
+#      K4's, byte for byte, and so is every non-assembly object (the wolf
+#      objects and the runtime archive).
+#   K6 failure (native): a WOLF_AS that exits 3 is refused naming it,
+#      after one call, with no second try through cc or clang, no kernel.
+#   K7 no tool (native): a WOLF_AS that names no file is refused by name
+#      before wolf runs.
+#   K8 not an object (native): boot/start.S answered with text: refused
+#      naming boot/start.S, and cc never called.
+#   K9 no output (native): boot/start.S answered with nothing, over K4's
+#      start.o: the stale object is gone first, so the build is refused.
+# The stock kernel (K1) and the GNU-as one (K4) are compared and their
+# first differing byte reported, never required equal (clang and GNU as
+# choose encodings differently: clef's as01).
+# Exit 0 when every row passes, 1 otherwise, 2 on a tool error.
+set -uo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+tiers=both src=$PAX_ROOT/kernel/kmain_console.lu record=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --tier) tiers=$2; shift 2 ;;
+        --firmware) shift 2 ;;
+        --src) src=$2; shift 2 ;;
+        --record) record=1; shift ;;
+        *) die "usage: kernel-as [--tier native|release|both] [--firmware F] [--src FILE.lu] [--record]" ;;
+    esac
+done
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "bad tier: $tiers" ;; esac
+[ -f "$src" ] || die "no source: $src"
+srcdir=$(cd "$(dirname "$src")" && pwd)
+need cc clang as ld.lld nm objdump od
+D=$PAX_ROOT/tests/kernel-as.d
+bk=${PAX_KAS_BUILD_KERNEL:-$PAX_ROOT/tools/build-kernel}
+work=$PAX_BUILD/kernel-as
+rm -rf "${work:?}"
+mkdir -p "$work/bin"
+fail=0
+bad() { say "FAIL $*"; fail=1; }
+ok() { say "PASS $*"; }
+
+# The tools, resolved before PATH changes; the trace's links.
+export KAS_REAL_cc KAS_REAL_clang
+KAS_REAL_cc=$(command -v cc) KAS_REAL_clang=$(command -v clang)
+gas=$(command -v as)
+unset WOLF_CLANG WOLF_AS
+for n in cc clang sel wolf; do ln -s "$D/trace" "$work/bin/$n"; done
+[ -n "${PAX_WOLF:-}" ] || PAX_WOLF=$("$PAX_ROOT/tools/fetch-wolf" | tail -n 1) || die "cannot stage kernel/wolf.pin's wolf"
+rel=$PAX_WOLF
+rtn=$(dirname "$rel")/libwolf_rt_none.a
+[ -f "$rtn" ] || die "no libwolf_rt_none.a beside kernel/wolf.pin's wolf ($rel)"
+if [ -n "${PAX_SEAM_WOLF:-}" ]; then
+    seam=$PAX_SEAM_WOLF
+else
+    seam=$(PAX_WOLF_PIN=$D/wolf.pin "$PAX_ROOT/tools/fetch-wolf" | tail -n 1) || die "cannot build the seam wolf ($D/wolf.pin)"
+fi
+cmp -s "$rtn" "$(dirname "$seam")/libwolf_rt_none.a" 2>/dev/null || cp "$rtn" "$(dirname "$seam")/libwolf_rt_none.a" || die "cannot stage libwolf_rt_none.a beside $seam"
+commit=$(. "$D/wolf.pin"; printf '%s' "$WOLF_LANG_COMMIT")
+v=$("$seam" --version | head -n 1)
+case $v in
+    *"pin ${commit:0:7}"*) ok "K0 the seam wolf: $v ($(sha256_of "$seam"))" ;;
+    *) bad "K0 the seam wolf says '$v', its pin ${commit:0:7}" ;;
+esac
+if cmp -s "$rtn" "$(dirname "$seam")/libwolf_rt_none.a"; then
+    ok "K0 the seam wolf's freestanding runtime is the release archive's: $(sha256_of "$rtn")"
+else
+    bad "K0 the seam wolf's libwolf_rt_none.a is not the release archive's"
+fi
+if [ "$record" = 0 ]; then
+    if [ -n "${PAX_CLEF_DIR:-}" ]; then
+        clefdir=$PAX_CLEF_DIR
+    else
+        "$PAX_ROOT/tools/mkclef" "$work/clef" > "$work/clef.txt" || die "tools/mkclef failed"
+        clefdir=$work/clef
+    fi
+    clef=$clefdir/clef
+    [ -x "$clef" ] || die "no clef package at $clefdir"
+fi
+
+# build ROW TIER WOLF [VAR=VALUE...]: one traced build-kernel, its status.
+build() {
+    local row=$1 tier=$2 w=$3 d rc=0 flag=()
+    shift 3
+    d=$work/$tier/$row
+    mkdir -p "$d"
+    : > "$d/trace.tsv"
+    rm -rf "${srcdir:?}/.lu-cache"
+    [ "$tier" = release ] && flag=(--release)
+    env -u WOLF_AS PATH="$work/bin:$PATH" KAS_TRACE="$d/trace.tsv" KAS_REAL_wolf="$w" PAX_WOLF="$work/bin/wolf" "$@" \
+        "$bk" ${flag[@]+"${flag[@]}"} --src "$src" "$d/out" > "$d/elf.path" 2> "$d/build.log" || rc=$?
+    printf '%s\n' "$rc" > "$d/rc"
+    return "$rc"
+}
+# The trace with this row's paths written @ROOT, @OUT and @BIN.
+norm() { # row tier
+    local d=$work/$2/$1
+    sed -e "s#$d/out#@OUT#g" -e "s#$work/bin#@BIN#g" -e "s#$PAX_ROOT#@ROOT#g" "$d/trace.tsv"
+}
+calls() { # row tier name kind
+    awk -F'\t' -v n="$3" -v k="$4" '$1 == n && $2 == k' "$work/$2/$1/trace.tsv" | wc -l | tr -d ' '
+}
+viacc() { # row tier: assembly calls through cc or clang
+    awk -F'\t' '($1 == "cc" || $1 == "clang") && $2 == "assembly"' "$work/$2/$1/trace.tsv" | wc -l | tr -d ' '
+}
+elf() { # row tier
+    printf '%s/%s/%s/out/%s.elf' "$work" "$2" "$1" "$(basename "$src" .lu)"
+}
+shows() { grep -Fq -- "$2" "$work/$3/$1/build.log"; } # row text tier
+
+for tier in $tiers; do
+    # K1: absent.
+    if build K1 "$tier" "$seam"; then
+        if [ "$record" = 1 ]; then
+            norm K1 "$tier" > "$D/absent-$tier.calls"
+            ok "K1 $tier: recorded $D/absent-$tier.calls ($(wc -l < "$D/absent-$tier.calls" | tr -d ' ') calls, from $bk)"
+            continue
+        fi
+        a=$(calls K1 "$tier" clang assembly) c=$(calls K1 "$tier" cc assembly) s=$(calls K1 "$tier" sel assembly)
+        if grep -q -- '--assembler' "$work/$tier/K1/trace.tsv"; then
+            bad "K1 $tier: WOLF_AS unset, and wolf was given --assembler"
+        elif [ "$a" = 16 ] && [ "$c" = 1 ] && [ "$s" = 0 ]; then
+            ok "K1 $tier: absent: 17 assembly calls, 16 through clang, boot/start.S through cc, none selected"
+        else
+            bad "K1 $tier: absent: clang $a, cc $c, selected $s assembly calls (16, 1, 0)"
+        fi
+        if [ -f "$D/absent-$tier.calls" ] && norm K1 "$tier" | cmp -s - "$D/absent-$tier.calls"; then
+            ok "K1 $tier: every call is trunk's ($(wc -l < "$D/absent-$tier.calls" | tr -d ' '), $D/absent-$tier.calls)"
+        else
+            bad "K1 $tier: the calls are not trunk's ($D/absent-$tier.calls)"
+            [ -f "$D/absent-$tier.calls" ] && norm K1 "$tier" | diff -u "$D/absent-$tier.calls" - | head -40 >&2
+        fi
+    else
+        bad "K1 $tier: the absent build failed ($(tail -n 1 "$work/$tier/K1/build.log"))"
+    fi
+    [ "$record" = 1 ] && continue
+
+    if [ "$tier" = native ]; then
+        # K2: empty is absent.
+        if build K2 "$tier" "$seam" WOLF_AS=; then
+            if [ "$(norm K2 "$tier")" = "$(norm K1 "$tier")" ] && cmp -s "$(elf K1 "$tier")" "$(elf K2 "$tier")"; then
+                ok "K2 $tier: WOLF_AS= is absent: the same calls, the same kernel"
+            else
+                bad "K2 $tier: WOLF_AS= moved a call or a byte"
+            fi
+        else
+            bad "K2 $tier: the empty build failed"
+        fi
+        # K3: the release wolf has no seam.
+        if build K3 "$tier" "$rel" WOLF_AS="$work/bin/sel" KAS_REAL_sel="$gas"; then
+            bad "K3 $tier: the release wolf built with WOLF_AS set"
+        elif shows K3 "has no assembler seam" "$tier" && [ ! -e "$(elf K3 "$tier")" ] &&
+            [ "$(awk -F'\t' '$2 == "assembly"' "$work/$tier/K3/trace.tsv" | wc -l | tr -d ' ')" = 0 ]; then
+            ok "K3 $tier: the release wolf ($("$rel" --version | head -n 1)) with WOLF_AS set: refused by name, no kernel, no assembly call"
+        else
+            bad "K3 $tier: refused, but not by name, or a kernel or an assembly call was made"
+        fi
+    fi
+
+    # K4: GNU as through the seam.
+    if build K4 "$tier" "$seam" WOLF_AS="$work/bin/sel" KAS_REAL_sel="$gas"; then
+        s=$(calls K4 "$tier" sel assembly) x=$(viacc K4 "$tier")
+        shaped=$(awk -F'\t' '$1 == "sel" && $3 !~ /^--64 -o [^ ]+\.o [^ ]+\.S $/' "$work/$tier/K4/trace.tsv" | wc -l | tr -d ' ')
+        if [ "$s" = 17 ] && [ "$x" = 0 ] && [ "$shaped" = 0 ]; then
+            ok "K4 $tier: GNU as ($("$gas" --version | head -n 1)): 17 calls through WOLF_AS, each --64 -o OBJ SRC, none through cc or clang"
+        else
+            bad "K4 $tier: $s calls through WOLF_AS ($shaped not --64 -o OBJ SRC), $x through cc or clang (17, 0)"
+        fi
+        if [ "$(norm K4 "$tier" | awk -F'\t' '$2 == "other"' | sed 's/ --assembler @BIN\/sel / /')" = "$(norm K1 "$tier" | awk -F'\t' '$2 == "other"')" ]; then
+            ok "K4 $tier: every other call is K1's (wolf's argv but --assembler; the release tier's code generation)"
+        else
+            bad "K4 $tier: a call other than assembly moved"
+            diff <(norm K1 "$tier" | awk -F'\t' '$2 == "other"') <(norm K4 "$tier" | awk -F'\t' '$2 == "other"') | head -20 >&2
+        fi
+        if [ -f "$(elf K1 "$tier")" ]; then
+            first=$(cmp "$(elf K1 "$tier")" "$(elf K4 "$tier")" 2>/dev/null | awk '{ print $5 }' | tr -d ,)
+            say "K4 $tier: the stock kernel $(sha256_of "$(elf K1 "$tier")") against GNU as's $(sha256_of "$(elf K4 "$tier")"): ${first:+first difference at byte $first}${first:-the same bytes} (reported, not required)"
+        fi
+    else
+        bad "K4 $tier: the GNU-as build failed ($(grep -m1 FAIL "$work/$tier/K4/build.log"))"
+    fi
+
+    # K5: clef through the seam.
+    if build K5 "$tier" "$seam" WOLF_AS="$work/bin/sel" KAS_REAL_sel="$clef"; then
+        s=$(calls K5 "$tier" sel assembly) x=$(viacc K5 "$tier")
+        if [ "$s" = 17 ] && [ "$x" = 0 ]; then
+            ok "K5 $tier: clef ($("$clef" --version | head -n 1)): 17 calls through WOLF_AS, none through cc or clang"
+        else
+            bad "K5 $tier: $s calls through WOLF_AS, $x through cc or clang (17, 0)"
+        fi
+        same=1 n=0
+        for f in "$work/$tier/K4/out/"*.o "$work/$tier/K4/out/"*.a; do
+            b=$(basename "$f")
+            case $b in *.asm-*.o|start.o) continue ;; esac
+            n=$((n + 1))
+            cmp -s "$f" "$work/$tier/K5/out/$b" || { same=0; bad "K5 $tier: the non-assembly input $b differs from K4's"; }
+        done
+        [ "$same" = 1 ] && [ "$n" -gt 0 ] && ok "K5 $tier: $n non-assembly inputs byte for byte K4's"
+        if [ -f "$(elf K4 "$tier")" ] && cmp -s "$(elf K4 "$tier")" "$(elf K5 "$tier")"; then
+            ok "K5 $tier: the clef kernel is byte for byte the GNU-as kernel: $(sha256_of "$(elf K5 "$tier")"), $(wc -c < "$(elf K5 "$tier")" | tr -d ' ') bytes"
+        else
+            bad "K5 $tier: the clef kernel differs from the GNU-as kernel ($(cmp "$(elf K4 "$tier")" "$(elf K5 "$tier")" 2>&1 | head -n 1))"
+        fi
+    else
+        bad "K5 $tier: the clef build failed ($(grep -m1 FAIL "$work/$tier/K5/build.log"))"
+    fi
+
+    [ "$tier" = native ] || continue
+    # K6: a failing choice is final.
+    if build K6 "$tier" "$seam" WOLF_AS="$work/bin/sel" KAS_REAL_sel="$D/fake-as" KAS_FAKE=fail; then
+        bad "K6 $tier: a WOLF_AS that exits 3 built a kernel"
+    else
+        s=$(calls K6 "$tier" sel assembly) x=$(viacc K6 "$tier")
+        if shows K6 "did not assemble" "$tier" && shows K6 "$work/bin/sel" "$tier" && [ "$s" = 1 ] && [ "$x" = 0 ] && [ ! -e "$(elf K6 "$tier")" ]; then
+            ok "K6 $tier: a failing WOLF_AS: refused naming it after one call, no second try, no kernel"
+        else
+            bad "K6 $tier: refused, but $s calls through it, $x through cc or clang, or not by name"
+        fi
+    fi
+    # K7: no such tool.
+    if build K7 "$tier" "$seam" WOLF_AS="$work/no-such-assembler"; then
+        bad "K7 $tier: a WOLF_AS that names no file built a kernel"
+    elif shows K7 "WOLF_AS=$work/no-such-assembler is not an executable file" "$tier" && [ ! -s "$work/$tier/K7/trace.tsv" ]; then
+        ok "K7 $tier: a WOLF_AS that names no file: refused by name, nothing run"
+    else
+        bad "K7 $tier: refused, but not by name, or something ran"
+    fi
+    # K8: boot/start.S answered with text.
+    if build K8 "$tier" "$seam" WOLF_AS="$work/bin/sel" KAS_REAL_sel="$D/fake-as" KAS_FAKE=start-garbage KAS_FAKE_AS="$gas"; then
+        bad "K8 $tier: a start.o that is not an object was linked"
+    elif shows K8 "did not make an ELF64 x86-64 relocatable object of boot/start.S" "$tier" &&
+        [ "$(calls K8 "$tier" cc assembly)" = 0 ] && [ "$(calls K8 "$tier" sel assembly)" = 17 ]; then
+        ok "K8 $tier: boot/start.S answered with text: refused by name, cc never called"
+    else
+        bad "K8 $tier: refused, but not by name, or cc was called"
+    fi
+    # K9: no output over a stale start.o.
+    if [ -f "$work/$tier/K4/out/start.o" ]; then
+        mkdir -p "$work/$tier/K9"
+        cp -R "$work/$tier/K4/out" "$work/$tier/K9/out"
+        if build K9 "$tier" "$seam" WOLF_AS="$work/bin/sel" KAS_REAL_sel="$D/fake-as" KAS_FAKE=start-none KAS_FAKE_AS="$gas"; then
+            bad "K9 $tier: a stale start.o was linked"
+        elif shows K9 "exited 0 on boot/start.S and wrote no start.o" "$tier" && [ ! -e "$work/$tier/K9/out/start.o" ]; then
+            ok "K9 $tier: boot/start.S answered with nothing over a stale start.o: removed first, refused by name"
+        else
+            bad "K9 $tier: refused, but not by name, or the stale start.o survived"
+        fi
+    else
+        bad "K9 $tier: no K4 start.o to stand stale"
+    fi
+done
+[ "$fail" = 0 ] && say "kernel-as: PASS" || say "kernel-as: FAIL"
+exit "$fail"
