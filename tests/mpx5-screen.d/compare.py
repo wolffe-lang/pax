@@ -41,7 +41,7 @@ def dumps(d):
 def cmp_ref(log, frm, d):
     data = pathlib.Path(log).read_bytes()
     at = data.find(frm.encode())
-    glyphs = ref['read_bdf'](str(root / 'font/spleen-8x16.bdf'))
+    glyphs = ref['font_glyphs']()
     term = None
     fed = at
     n = same = cells = good = 0
