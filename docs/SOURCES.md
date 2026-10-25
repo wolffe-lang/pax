@@ -1226,3 +1226,10 @@ kernels: none consulted.
 No Linux kernel, e2fsprogs, util-linux, busybox or other filesystem-tool
 implementation source was consulted. Malformed-directory salvage remains
 an explicit unsupported row, not an inferred or copied algorithm.
+
+The rescue monitor follow-up uses QEMU's published QMP specification,
+https://www.qemu.org/docs/master/interop/qmp-spec.html: greeting,
+`qmp_capabilities`, command IDs, responses and asynchronous events. The
+fixture acknowledges `quit` and retains its connection until closure;
+it does not infer command consumption from a successful socket write.
+No QEMU implementation source was read.
