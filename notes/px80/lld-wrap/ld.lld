@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# px80: the `ld.lld` first on PATH while the suites build (tools/build-kernel
+# calls ld.lld by name, and nothing else in the tree does). The link's output
+# is the bundle's static lld 18.1.8's ($PX80_LLD); the same argv is then run
+# through the distro's Ubuntu lld 18.1.3 ($PX80_LLD_REF) into OUT.ref and the
+# two files compared byte for byte; one line per link goes to $PX80_LLD_LOG:
+#   identical|DIFFER|ref-failed|lld18-failed  sha(lld18)  sha(ref)  bytes  OUT
+# A difference keeps OUT.ref beside OUT; an identical one removes it. The
+# exit status is the bundle lld's.
+real=${PX80_LLD:-/opt/px80/ld.lld}
+ref=${PX80_LLD_REF:-/usr/bin/ld.lld}
+log=${PX80_LLD_LOG:-/dev/null}
+"$real" "$@"
+rc=$?
+out= args=() next=0
+for a in "$@"; do
+    if [ "$next" = 1 ]; then out=$a; args+=("$a.ref"); next=0; continue; fi
+    [ "$a" = -o ] && next=1
+    args+=("$a")
+done
+[ -n "$out" ] || exit "$rc"
+s1=-; [ "$rc" = 0 ] && s1=$(sha256sum "$out" | cut -d' ' -f1)
+"$ref" "${args[@]}" 2>"$out.ref.err"
+rc2=$?
+s2=-; [ "$rc2" = 0 ] && s2=$(sha256sum "$out.ref" | cut -d' ' -f1)
+if [ "$rc" != 0 ]; then v=lld18-failed
+elif [ "$rc2" != 0 ]; then v=ref-failed
+elif cmp -s "$out" "$out.ref"; then v=identical; rm -f "$out.ref" "$out.ref.err"
+else v=DIFFER
+fi
+[ -s "$out.ref.err" ] || rm -f "$out.ref.err"
+printf '%s %s %s %s %s\n' "$v" "$s1" "$s2" "$( [ "$rc" = 0 ] && wc -c < "$out" | tr -d ' ' || echo -)" "$out" >> "$log"
+exit "$rc"
