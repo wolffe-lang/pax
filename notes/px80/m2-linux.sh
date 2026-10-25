@@ -25,10 +25,11 @@ podman run --rm --cpuset-cpus 0-3 -v "$L:$L:Z" -e O="$O" localhost/px80-lld sh -
  for f in crt1.o crti.o crtn.o libc.a; do llvm-objcopy --decompress-debug-sections "$O/packed/$f" "$O/decomp/$f"; done
  printf "int px80_zstd(void) { return 42; }\n" > "$O/z.c"
  printf "int px80_zstd(void);\nint main(void) { return px80_zstd() == 42 ? 0 : 1; }\n" > "$O/zmain.c"
- clang -c -g -gz=zstd "$O/z.c" -o "$O/z-zstd.o"
- clang -c -g -gz=zlib "$O/z.c" -o "$O/z-zlib.o"
  clang -c "$O/zmain.c" -o "$O/zmain.o"
- readelf -SW "$O/z-zstd.o" | grep -c " C " | sed "s/^/z-zstd.o compressed sections: /"
+ for z in zstd zlib; do
+   clang -c -g -gz=$z "$O/z.c" -o "$O/z-$z.o" || echo "clang -gz=$z failed"
+   [ -f "$O/z-$z.o" ] && echo "z-$z.o: $(llvm-readelf -SW "$O/z-$z.o" | grep -c " C ") sections flagged C (compressed)"
+ done
 '
 podman run --rm -v "$L:$L:Z" localhost/px57-rust \
     cp /opt/rust/rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-musl/lib/self-contained/libunwind.a "$O/packed/"
