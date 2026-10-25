@@ -3613,6 +3613,78 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px79: block device nodes, the block ioctls and a second disk
+  # (pax#144). kmain_console with up to three virtio disks: /dev's nodes,
+  # stat, /proc/partitions and /sys's block files, the ioctls, raw I/O,
+  # BLKRRPART and BLKPG, a pattern on every sector of a second disk, a
+  # GPT written through a node and read again, mount(2) and /etc/fstab by
+  # node, held to the Linux guest's answers recorded on kasumi
+  # (tests/mpx6-nodes.d/linux/: the runner's kernel is root's to read).
+  # The pr tier boots the nodes and gpt sessions; the full and all tiers
+  # the numbers past 15 and the fstab boot too.
+  mpx6-nodes:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-nodes')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+      PAX_NODES_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          qemu-system-x86_64 --version
+          gcc --version | head -n 1
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx6-nodes-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: e2fsprogs from the image pinned by digest
+        run: |
+          docker pull docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+          PAX_ENGINE=docker tools/e2fs --version
+
+      - name: the nodes, the ioctls, raw I/O, the rescan, a second disk, mount by node, against the guest's; the plan's legs
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+        run: tests/mpx6-nodes $PAX_LEGS
+
+      - name: keep the sessions, the transcripts and the halt probes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-nodes-linux
+          path: |
+            build/mpx6-nodes/*.txt
+            build/mpx6-nodes/linux/
+            build/mpx6-nodes/*/kmain_console.elf
+            build/mpx6-nodes/*/*.log
+            build/mpx6-nodes-*.session
+            build/mpx6-nodes-*.serial.log
+            build/mpx6-nodes-*.verdict
+            build/mpx6-nodes-*.part.fsck
+            build/mpx6-nodes-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   # px66: the partition table. kernel/block's GPT and MBR reading and its
   # windows, through kmain_part on eleven fixture disks (tools/mkgpt, the
   # same bytes everywhere; the oracles sfdisk and sgdisk from
@@ -3885,6 +3957,7 @@ jobs:
       - mpx6-part
       - mpx6-root
       - mpx6-journal
+      - mpx6-nodes
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # The issue step's token may write issues; nothing else.

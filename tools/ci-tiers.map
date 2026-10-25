@@ -67,7 +67,9 @@
 # kernel/tree's second store, kernel/files and kernel/process.
 # px68: and its journal (the commits' order, the replay, the crash row
 # gated); in @user too, for the same reason as mpx6-root.
-@disk    = mpx6-blk mpx6-ext2 mpx6-part mpx6-root mpx6-journal
+# px79: and its nodes (/dev's block devices, raw I/O, the ioctls, the
+# rescan, BLKPG, /sys's block files, several disks, mount by node).
+@disk    = mpx6-blk mpx6-ext2 mpx6-part mpx6-root mpx6-journal mpx6-nodes
 
 # --- the toolchain pins, and how the kernel is entered, linked, loaded: FULL --
 kernel/wolf.pin                 FULL
@@ -246,10 +248,10 @@ kernel/virtio/*                 @net mpx3-sound mpx3-orchestra @disk
 # which reads user/elf. (@disk is defined with the groups above.)
 kernel/vblk/*                   @disk
 kernel/block/*                  @disk
-kernel/ext2/*                   mpx6-ext2 mpx6-part mpx6-root mpx6-journal @user
-kernel/fstab/*                  mpx6-ext2 mpx6-part mpx6-root mpx6-journal @user
+kernel/ext2/*                   mpx6-ext2 mpx6-part mpx6-root mpx6-journal mpx6-nodes @user
+kernel/fstab/*                  mpx6-ext2 mpx6-part mpx6-root mpx6-journal mpx6-nodes @user
 # px68: the journal is kernel/ext2's, and reaches what ext2 reaches.
-kernel/journal/*                mpx6-ext2 mpx6-part mpx6-root mpx6-journal @user
+kernel/journal/*                mpx6-ext2 mpx6-part mpx6-root mpx6-journal mpx6-nodes @user
 tools/blk-pattern               mpx6-blk
 tools/e2fs                      mpx6-ext2
 tools/mkdisk                    mpx6-ext2
@@ -263,7 +265,7 @@ user/elf/reboot.S               mpx6-ext2
 # rows); the table's tools, the guest's questions and the disk that boots
 # are mpx6-part's (by the derivation too: tests/mpx6-part names them);
 # tools/mkdisk and its tools are mpx6-ext2's as well (it names them).
-kernel/procfs/*                 mpx6-part mpx6-root
+kernel/procfs/*                 mpx6-part mpx6-root mpx6-nodes
 tools/mkgpt                     mpx6-part
 tools/disktools                 mpx6-part
 tools/linux-part                mpx6-part
@@ -276,6 +278,15 @@ user/fstab-disk                 mpx6-part
 # tests/mpx6-journal's J7, whose script names it (and its tools,
 # tools/mkjournal and tools/jorder, by the derivation).
 tools/root-crash                mpx6-journal
+# px79: the block devices' nodes. kernel/files serves them (open, raw
+# I/O, the ioctls, mount(2) by node) and kernel/user sends a write to
+# one, so both reach mpx6-nodes beside @user; kernel/procfs's /sys block
+# files are its too (above). Its probe, the probe's builder and the
+# Linux guest's tool are its by the derivation (tests/mpx6-nodes names
+# them); it reads tests/mpx6-part's `full` fixture.
+kernel/files/*                  mpx6-nodes
+kernel/user/*                   mpx6-nodes
+tests/mpx6-part.d/fixtures      mpx6-nodes
 # px67: the root-on-disk legs. Ten suites' jobs boot their ISOs a second
 # time with `/` on a disk (tools/rootdisk-leg, through
 # tools/qemu-rootdisk, after the suite's own step): mpx3-boreutils,
