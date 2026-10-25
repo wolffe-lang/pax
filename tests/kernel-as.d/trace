@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# trace — tests/kernel-as's witness of every C-driver and assembler call
+# (as02b). Installed by the suite as `cc`, `clang` and `sel` in a
+# directory of links first on PATH (`sel` is the WOLF_AS the suite
+# selects): records one line, NAME<TAB>KIND<TAB>ARGV (each word %q
+# quoted), to $KAS_TRACE, then runs the real tool, KAS_REAL_<NAME>
+# (an absolute path the suite resolved before PATH changed), with the
+# same argv, never adding or dropping a word. KIND is `assembly` when an
+# argument ends in .S or .s, `other` otherwise (the release tier's
+# `clang -x ir` code generation, the hosted link's cc). Exit: the real
+# tool's, or 2 when its path is not set.
+set -uo pipefail
+name=${0##*/}
+kind=other
+for a in "$@"; do case $a in *.S|*.s) kind=assembly ;; esac; done
+printf '%s\t%s\t%s\n' "$name" "$kind" "$(printf '%q ' "$@")" >> "${KAS_TRACE:?KAS_TRACE is not set}"
+var=KAS_REAL_$name
+real=${!var:-}
+[ -n "$real" ] || { printf 'trace: %s is not set\n' "$var" >&2; exit 2; }
+exec "$real" "$@"
