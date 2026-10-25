@@ -82,6 +82,9 @@ tree.mkdir(exist_ok=True)
 (tree / "dir" / "child").mkdir(exist_ok=True)
 (tree / "a").write_bytes(b"linked content\0\xff")
 if not (tree / "z-hard").exists(): os.link(tree / "a", tree / "z-hard")
+(tree / "hard-a").write_bytes(b"three aliases")
+for n in ["hard-b", "hard-c"]:
+    if not (tree / n).exists(): os.link(tree / "hard-a", tree / n)
 (tree / "empty").write_bytes(b"")
 (tree / "block-boundary").write_bytes(bytes(range(256)) * 16)
 (tree / "double-indirect").write_bytes(bytes(range(256)) * 20001)
@@ -97,7 +100,7 @@ for i in range(400):
     (tree / "dir" / ("entry-%03d-name" % i)).write_bytes(b"row" + str(i).encode())
 (tree / "space name").write_text("space-name metadata\n")
 attrs = OUT / "attrs"
-attrs.write_text('/ 755 0 0 0\n/a 6751 70000 80000 2200000000 2200000001 2200000002\n/dir 2770 1000 1001 1700000100\n"/space name" 640 1000 1000 0\n/symlink61 777 70000 80000 2200000000\n')
+attrs.write_text('/ 755 0 0 0\n/a 6751 70000 80000 2200000000 2200000001 2200000002\n/dir 2770 1000 1001 1700000100\n"/space name" 640 1000 1000 0\n/symlink61 777 70000 80000 2200000000\n/hard-b 640 1001 1002 1700000200\n/hard-c 600 1003 1004 1700000300\n')
 for f in [own, ref]: f.unlink()
 wolf("--from", tree, "--attrs", attrs, "--label", "px69", "64M", own)
 run([ROOT / "tools/mkdisk", "--from", tree, "--attrs", attrs, "--label", "px69", "64M", ref])

@@ -15,6 +15,7 @@ struct Node {
     meta: Meta,
     target: List[byte],
     primary: bool,
+    explicit_meta: bool,
 }
 
 fn default_meta(mode: int, epoch: int) -> Meta {
@@ -146,8 +147,9 @@ fn walk(
                 nodes[owner].links += 1
                 if nodes[owner].links > 65535 { return invalid }
                 primary = false
-                if !has_attrs(attrs, nodes[owner].path) && has_attrs(attrs, ip) {
+                if !nodes[owner].explicit_meta && has_attrs(attrs, ip) {
                     nodes[owner].meta = copy meta
+                    nodes[owner].explicit_meta = true
                 }
             } else {
                 identities[key] = nodes.len
@@ -172,6 +174,7 @@ fn walk(
             meta: meta,
             target: target,
             primary: primary,
+            explicit_meta: has_attrs(attrs, ip),
         })
         if kind == 1 {
             walk(
@@ -206,6 +209,7 @@ fn collect(source: str, attrs: Map[str, Meta], excludes: List[str], epoch: int) 
         meta: copy attrs["/"] else default_meta(493, epoch),
         target: List[byte](),
         primary: true,
+        explicit_meta: true,
     })
     (mut nodes).push(Node {
         path: "/lost+found",
@@ -218,6 +222,7 @@ fn collect(source: str, attrs: Map[str, Meta], excludes: List[str], epoch: int) 
         meta: copy attrs["/lost+found"] else default_meta(448, epoch),
         target: List[byte](),
         primary: true,
+        explicit_meta: true,
     })
     var next = 12
     var identities = Map[str, int]()
