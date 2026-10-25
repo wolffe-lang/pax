@@ -18,7 +18,7 @@ def check(data, mode='framebuffer'):
         return friendly.check(data, mode)
 
 assert check(raw)
-for old, new in [(b'[90m', b'[37m'), (b'[90;2m', b'[90m'),
+for old, new in [(b'[0mecho', b'[31mecho'), (b'[90m', b'[37m'), (b'[90;2m', b'[90m'),
                  (b'[32m', b'[39m'), (b'px81_missing', b'missing'),
                  (b"[91m'", b"[33m'"), (b'\x1b[K', b''),
                  (b'PX81-ABBR', b'wrong'), (b'PX81-EVENT', b'wrong'),
