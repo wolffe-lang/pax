@@ -18,7 +18,7 @@ The journal (px68): `/` is ext3. `tools/mkdisk --gpt --root` makes the root part
 
 Root on the disk (px67): `/` is the root partition of the disk that boots (ext2 here; ext3 since px68, above). `tools/mkdisk --gpt --root` installs the system onto partition 2 at build time (the archive an ISO would carry, every mode, owner and time from its own headers), and the kernel mounts it as `/` from `root=` on Limine's command line, in Linux's spellings (`/dev/vda2`, `vda2`, `0xfe02`, `254:2`, `PARTUUID=` in either case, `UUID=`, `rootfstype=ext2`, `ro` and `rw`), with no initramfs; `..` at the root, getcwd, chroot and every absolute path resolve on the volume, and programs run from it. /dev, /proc and /sys are the kernel's, mounted over the disk's directories, and /tmp is a tmpfs; `/proc/self/mounts`, `/proc/self/mountinfo`, `/proc/mounts` and `/etc/mtab` read as Linux's do, and statfs and statvfs answer for `/`. `mount(2)` remounts `/` read-only and read-write and mounts and unmounts a volume at a directory, `umount2(2)` with Linux's errors, EPERM for users. The end sends every process SIGTERM, then SIGKILL after a 2 s grace, then writes every volume and unmounts it, `/` last, marked clean; a power cut leaves an ext2 root not clean and the next boot says so once (a journalled root is replayed: px68, above). Every row is held to Linux booted the same way under QEMU (7.2.8 with an ext2 root; since px68, 7.3.0 with an ext3 one) and to e2fsprogs (`tests/mpx6-root`).
 
-The pins at 0.2.35, and boreutils' new utilities (px65): the kernel is built from wolf 0.2.35 (lupin 0.1.56 for `tests/mkw`) with no source change, every kernel's `.text` 80 bytes longer and no other section moved (the freestanding runtime's new `__wolf_rt_list_reserve`, which every kernel links whole); every user program is of the 0.2.35 generation: pelt `70eec14`, lope `e6f623c`, aspen `3692cf5`, lobo `49ed870` (and its release image at v0.1.5), boreutils `575dc7b` (61 utilities), `su`, `sigwolf` and `edwolf` built by 0.2.35 with wolf-std `78b9d3c`, the base image's std tree at `78b9d3c`, lupin 0.1.56 taken from its release's own static musl archive by digest (R-px65-1), and the dev image's compiler the v0.2.35 tag built for musl unpatched, so it says the release's own line (R-px65-2). boreutils' fourteen new utilities are in `/bin` — bu30's `mkfifo`, `link`, `unlink`, `truncate`, `sync`, `mktemp`, `realpath` and `tty`, bu31's `base64`, `base32`, `comm`, `join`, `tsort` and `shuf` — and a typed session per group, as root and as `pax`, is byte-identical to the same binaries in a Linux container but for `tty`'s answer, the console's name (`/dev/ttyS0` on PAX, a pseudo-terminal in the container), and holds its own rows: POSIX's answers, RFC 4648's encodings computed from the fixture, the diagnostics' shape (`tests/mpx5-bore`). PAX serves every call the fourteen make (34 by name, `docs/CENSUS.md`) but glibc's `set_robust_list` and `rseq`; bare `sync` and `sync -f` are refused by boreutils itself, on Linux too (wolf has no `sync(2)` or `syncfs(2)`). The one thing they ask for that PAX does not serve is `/proc/self/maps`, which glibc's `pthread_getattr_np` reads for the main thread's stack and wolf 0.2.35's runtime asks for its main-thread guard: nothing the sessions print depends on it, but on PAX a wolf program's main-thread stack overflow ends by SIGSEGV where Linux prints `wolf-trap: stack-overflow`, and a program started with SIGSEGV ignored still reads it ignored at its start (`tests/mpx5-jobs`' `~X:` row, PAX's own until PAX serves the file).
+The pins at 0.2.35, and boreutils' new utilities (px65): the kernel is built from wolf 0.2.35 (lupin 0.1.56 for `tests/mkw`) with no source change, every kernel's `.text` 80 bytes longer and no other section moved (the freestanding runtime's new `__wolf_rt_list_reserve`, which every kernel links whole); every user program is of the 0.2.35 generation: pelt `0b5eaa5`, lope `e6f623c`, aspen `3692cf5`, lobo `49ed870` (and its release image at v0.1.5), boreutils `575dc7b` (61 utilities), `su`, `sigwolf` and `edwolf` built by 0.2.35 with wolf-std `78b9d3c`, the base image's std tree at `78b9d3c`, lupin 0.1.56 taken from its release's own static musl archive by digest (R-px65-1), and the dev image's compiler the v0.2.35 tag built for musl unpatched, so it says the release's own line (R-px65-2). boreutils' fourteen new utilities are in `/bin` — bu30's `mkfifo`, `link`, `unlink`, `truncate`, `sync`, `mktemp`, `realpath` and `tty`, bu31's `base64`, `base32`, `comm`, `join`, `tsort` and `shuf` — and a typed session per group, as root and as `pax`, is byte-identical to the same binaries in a Linux container but for `tty`'s answer, the console's name (`/dev/ttyS0` on PAX, a pseudo-terminal in the container), and holds its own rows: POSIX's answers, RFC 4648's encodings computed from the fixture, the diagnostics' shape (`tests/mpx5-bore`). PAX serves every call the fourteen make (34 by name, `docs/CENSUS.md`) but glibc's `set_robust_list` and `rseq`; bare `sync` and `sync -f` are refused by boreutils itself, on Linux too (wolf has no `sync(2)` or `syncfs(2)`). The one thing they ask for that PAX does not serve is `/proc/self/maps`, which glibc's `pthread_getattr_np` reads for the main thread's stack and wolf 0.2.35's runtime asks for its main-thread guard: nothing the sessions print depends on it, but on PAX a wolf program's main-thread stack overflow ends by SIGSEGV where Linux prints `wolf-trap: stack-overflow`, and a program started with SIGSEGV ignored still reads it ignored at its start (`tests/mpx5-jobs`' `~X:` row, PAX's own until PAX serves the file).
 
 The partition table, and a disk that boots (px66): `kernel/block` reads a GUID partition table by the UEFI specification 2.10 (the protective MBR, both headers and their CRC32s, the entry array; a failing primary replaced by a good backup, said once) and an MBR-only disk's primary records, every check a named refusal; each partition is a device of its own (`vda1` …, Linux's names and numbers, 254:N to 15, then 259:0 on), a window of sectors over its disk, every request offset by its start and refused past its end by name; a disk and its partitions never mount at once; `/proc/partitions` lists them as Linux does, and `/etc/fstab` names a volume by `/dev/vdaN`, `PARTUUID=`, `PARTLABEL=`, `UUID=` or `LABEL=`. On eleven fixture disks PAX answers as the Linux 7.2.8 guest does, but where Linux departs from the specification, by name (it reads a backup header only when booted with `gpt`, and no entry larger than 128 bytes) (`tests/mpx6-part`). `tools/mkdisk --gpt` makes one disk with an EFI system partition (Limine, the kernel, the initramfs), the ext2 `/home` and a BIOS boot partition for Limine's stage 2, and QEMU boots it with no CD-ROM under SeaBIOS and OVMF (below, "A disk that boots"). A mount now writes the mounted state to the disk at once and a halt the clean state last, so closing QEMU at any moment leaves `not clean`, and the next boot says so. `/` is still the initramfs in memory.
 
@@ -296,6 +296,33 @@ the window, the terminal) is still a power cut**, now for the whole
 system: what the last five seconds wrote may be lost, and the next boot
 says `not cleanly unmounted` until `e2fsck -fy` of partition 2 on the
 host repairs it.
+
+## Friendly shell editing
+
+Pelt `0b5eaa5` adds opt-in suggestions, syntax colours, abbreviations,
+history events and extra editing keys. At the prompt, type:
+
+```sh
+set -o friendly -o suggest -o histsearch
+```
+
+Try `echo prefix_suffix`, then type `echo prefix` to see the history suffix.
+Enter runs only the text you typed; Right accepts the suggestion. Add an
+abbreviation with `abbr add hi 'echo hello'`, then type `hi` and Space.
+`!!` repeats the previous command, `!$` recalls its last word, and Alt-.
+inserts the last argument while editing. Scripts retain POSIX behaviour.
+
+Suggestions default to bright black (SGR 90); resolving commands use the
+terminal's default foreground. For dim suggestions and green commands:
+
+```sh
+PELT_COLORS='command=green:shadow=brblack+dim'
+```
+
+`set +o friendly` disables the additions. The framebuffer console reports
+its 160×50 grid; a serial-only console starts with an unknown (0×0) size.
+`tests/mpx5-pelt` exercises both, plus an explicitly resized 80×24 serial
+console, preserving raw drawing bytes and PS/2 framebuffer screenshots.
 
 ## The dev image (px60)
 
