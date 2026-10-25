@@ -42,12 +42,35 @@
 #   ld.lld -T boot/kernel.ld start.o NAME.asm-*.o <wolf objects> [NAME.rt-none.a] -> OUTDIR/NAME.elf
 # (the archive after every kernel object, as kw12 asks).
 #
+# The assembler (as02b, R-as02-2 A): WOLF_AS, set and not empty, is ONE
+# explicit choice for every assembly source of the kernel, the same
+# variable wolf's manifest seam reads (wolf-lang#957: `--assembler` over
+# WOLF_AS over the legacy C driver; a selected assembler's failure is
+# final). It is resolved once, to an absolute path (a bare name through
+# PATH, as wolf's own spawn finds it; anything else from the caller's
+# directory, since wolf runs in the package's), and refused by name
+# unless it is an executable file. wolf gets it as `--assembler PATH`
+# for its object build, so a wolf without the seam (0.2.35 and older:
+# "unknown flag `--assembler`") refuses the build by name before any
+# object is written: never a kernel whose manifest sources went through
+# clang while boot/start.S went through the choice. boot/start.S is then
+# assembled by the as-shaped protocol wolf uses, `PATH --64 -o start.o
+# boot/start.S`, after any old start.o is removed; a nonzero status, no
+# output, or output that is not an ELF64 little-endian x86-64
+# relocatable object fails the build naming the assembler, with no
+# second try through cc or as. Absent or empty, nothing here moves: the
+# same commands as before (start.S through cc, else as; wolf's legacy
+# driver for the manifest's sources). The release tier's LLVM code
+# generation (wolf's `clang -x ir`) is not an assembly call and does not
+# move either way.
+#
 # `--hosted` drops `--target` (M-KW step 7's seen-red variant): the build
 # is then a hosted one, which this script expects to FAIL; it exits 0
 # only if wolf refused it for want of a `main`.
 #
 # wolf is $PAX_WOLF (default `wolf` on PATH); the toolchain is the host's
-# (nm, objdump, an x86-64 assembler through cc or as, ld.lld or ld).
+# (nm, objdump, an x86-64 assembler through cc or as, or WOLF_AS; ld.lld
+# or ld).
 # Exit 0 and the ELF's path on stdout, 1 on a failed assertion, 2 on a
 # usage or tool error.
 set -euo pipefail
@@ -78,6 +101,26 @@ fail() { printf 'build-kernel: FAIL %s (%s, %s)\n' "$*" "$name" "$tier" >&2; exi
 
 tierflag=()
 [ "$tier" = release ] && tierflag=(--release)
+
+# The explicit assembler (as02b; the header's paragraph).
+asm_sel= asflag=()
+if [ -n "${WOLF_AS:-}" ]; then
+    case $WOLF_AS in
+        */*) d=$(cd "$(dirname "$WOLF_AS")" 2>/dev/null && pwd) || d=
+             [ -n "$d" ] && asm_sel=$d/$(basename "$WOLF_AS") ;;
+        *)   asm_sel=$(command -v "$WOLF_AS" 2>/dev/null) || asm_sel= ;;
+    esac
+    [ -n "$asm_sel" ] && [ -f "$asm_sel" ] && [ -x "$asm_sel" ] \
+        || fail "the selected assembler WOLF_AS=$WOLF_AS is not an executable file; a selected assembler is never replaced"
+    asflag=(--assembler "$asm_sel")
+fi
+# An ELF64, little-endian, ET_REL, EM_X86_64 file (the ELF header's first
+# twenty bytes), as wolf holds every object its seam makes.
+elf_rel_x86_64() {
+    local h
+    h=$(od -An -tx1 -N20 "$1" 2>/dev/null | tr -d ' \n') || return 1
+    [ "${h:0:12}" = 7f454c460201 ] && [ "${h:32:8}" = 01003e00 ]
+}
 rm -f "$obj" "$out/$name".*.o "$out/$name.rt-none.a"
 
 if [ "$hosted" = 1 ]; then
@@ -98,10 +141,13 @@ fi
 # --- step 2: the object --------------------------------------------------
 rc=0
 (cd "$srcdir" && "$wolf" build "$name.lu" --target x86_64-unknown-none --emit=obj -o "$obj" \
-    ${tierflag[@]+"${tierflag[@]}"}) >"$out/$name.build.log" 2>&1 || rc=$?
+    ${tierflag[@]+"${tierflag[@]}"} ${asflag[@]+"${asflag[@]}"}) >"$out/$name.build.log" 2>&1 || rc=$?
 if [ "$rc" != 0 ]; then
     sed 's/^/  wolf: /' "$out/$name.build.log" >&2
-    fail "wolf build --target x86_64-unknown-none --emit=obj exited $rc"
+    if [ -n "$asm_sel" ] && grep -q 'unknown flag `--assembler`' "$out/$name.build.log"; then
+        fail "WOLF_AS=$asm_sel is set, and this wolf ($wolf) has no assembler seam (--assembler, wolf-lang#957); a kernel half through the choice and half through clang is never built"
+    fi
+    fail "wolf build --target x86_64-unknown-none --emit=obj${asm_sel:+ --assembler $asm_sel} exited $rc"
 fi
 for f in "$out/$name".asm-*.o; do [ -f "$f" ] && asmobjs+=("$f"); done
 [ ${#asmobjs[@]} -gt 0 ] || fail "wolf placed no $name.asm-*.o beside the object (the wolf.pkg lists no asm?)"
@@ -121,7 +167,20 @@ hooks=" wolf_trap memcpy memmove memset memcmp "
 # The link's own symbols wolf may name with `extern "c" let` (kw10):
 # start.S's globals and the linker script's assignments.
 start=$out/start.o
-if command -v cc >/dev/null 2>&1; then
+if [ -n "$asm_sel" ]; then
+    rm -f "$start"
+    rc=0
+    "$asm_sel" --64 -o "$start" "$PAX_ROOT/boot/start.S" >"$out/start.as.log" 2>&1 || rc=$?
+    if [ "$rc" != 0 ]; then
+        sed 's/^/  as: /' "$out/start.as.log" >&2
+        fail "the selected assembler WOLF_AS=$asm_sel exited $rc on boot/start.S; its failure is final (no cc, no as)"
+    fi
+    [ -f "$start" ] || fail "the selected assembler WOLF_AS=$asm_sel exited 0 on boot/start.S and wrote no start.o"
+    elf_rel_x86_64 "$start" \
+        || fail "the selected assembler WOLF_AS=$asm_sel did not make an ELF64 x86-64 relocatable object of boot/start.S"
+    printf 'build-kernel: ok: the assembler (%s, %s): WOLF_AS=%s, %d manifest source(s) through wolf --assembler, boot/start.S through %s --64\n' \
+        "$name" "$tier" "$asm_sel" ${#asmobjs[@]} "$asm_sel" >&2
+elif command -v cc >/dev/null 2>&1; then
     cc -c "$PAX_ROOT/boot/start.S" -o "$start"
 else
     need as
