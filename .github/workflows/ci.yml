@@ -4045,6 +4045,67 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  mpx6-fsck:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-fsck')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+      PAX_ROOT_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: qemu, firmware, compiler and tracing tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make strace e2fsprogs
+      - name: lope's pin
+        id: lope
+        run: |
+          . user/lope.pin
+          echo "rev=$LOPE_REV" >> "$GITHUB_OUTPUT"
+      - name: require the private lope checkout token
+        env:
+          TOKEN: ${{ secrets.WOLF_CI_TOKEN }}
+        run: |
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::error::WOLF_CI_TOKEN is required for the playground's lope binary"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          repository: wolffe-lang/lope
+          ref: ${{ steps.lope.outputs.rev }}
+          token: ${{ secrets.WOLF_CI_TOKEN }}
+          path: .lope
+          persist-credentials: false
+      - name: pinned compiler and oracles
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          docker pull docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+          PAX_ENGINE=docker tools/e2fs --version
+          PAX_ENGINE=docker tools/disktools --version
+      - name: fsck corpus and rescue boots; the plan's legs
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_LOPE_REPO: ${{ github.workspace }}/.lope
+        run: tests/mpx6-fsck $PAX_LEGS
+      - name: keep checker verdicts and rescue evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-fsck
+          path: |
+            build/mpx6-fsck/**/*.log
+            build/mpx6-fsck/**/*.serial
+            build/mpx6-fsck/**/results.json
+            build/mpx6-fsck/**/manifest.json
+            build/mpx6-fsck/**/sums.txt
+          retention-days: 14
+          if-no-files-found: error
+
   tier:
     name: tier ${{ needs.plan.outputs.tier || 'unplanned' }}
     if: ${{ !cancelled() }}
@@ -4100,6 +4161,7 @@ jobs:
       - mpx6-nodes
       - mpx6-disktools
       - mpx6-install
+      - mpx6-fsck
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # The issue step's token may write issues; nothing else.

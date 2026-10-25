@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Offline Wolf checker: seeded Linux differentials, then rescue power cuts.
+# Inputs: tools/mkfsck tools/mkjournal tools/e2fs tools/mkdisk tools/disktools
+# tools/mkpelt tools/mklope tools/mkboreutils tools/mkdiskprobe tools/mkinitramfs
+# tools/build-kernel kernel/kmain_console.lu user/fstab-root
+# tests/mpx6-journal.d/replays
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+work=$PAX_BUILD/mpx6-fsck
+only=all tiers=both firmware=both
+while [ $# -gt 0 ]; do
+    case $1 in
+        --work) work=$2; shift 2 ;;
+        --only) only=$2; shift 2 ;;
+        --tier) tiers=$2; shift 2 ;;
+        --firmware) firmware=$2; shift 2 ;;
+        *) die 'usage: mpx6-fsck [--work DIR] [--only build|linux|pax-corpus|rescue|all] [--tier native|release|both] [--firmware bios|uefi|both]' ;;
+    esac
+done
+case $tiers in both) tiers='native release' ;; native|release) ;; *) die 'invalid tier' ;; esac
+case $firmware in both) firmware=bios,uefi ;; bios|uefi) ;; *) die 'invalid firmware' ;; esac
+case $only in all|build|linux|pax-corpus|rescue) ;; *) die 'invalid phase' ;; esac
+mkdir -p "$work"
+work=$(cd "$work" && pwd)
+D=$PAX_ROOT/tests/mpx6-fsck.d
+export SOURCE_DATE_EPOCH=1700000000
+if [ "$only" = build ] || [ "$only" = all ]; then
+    "$PAX_ROOT/tools/mkfsck" "$work/bin"
+    "$PAX_ROOT/tools/mkpelt" "$work/pelt"
+    "$PAX_ROOT/tools/mklope" "$work/lope"
+    "$PAX_ROOT/tools/mkboreutils" "$work/bore" cat env
+    "$PAX_ROOT/tools/mkdiskprobe" "$work/probe"
+    "$PAX_ROOT/tools/fetch-limine"
+    export PAX_WOLF
+    PAX_WOLF=$("$PAX_ROOT/tools/fetch-wolf")
+    for tier in $tiers; do
+        flags=(); [ "$tier" != release ] || flags=(--release)
+        mkdir -p "$work/$tier"
+        "$PAX_ROOT/tools/build-kernel" "${flags[@]}" --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier/kernel" > "$work/$tier/kernel.path"
+        for dir in bin pelt lope bore probe; do
+            [ -e "$work/$tier/$dir" ] || ln -s "../$dir" "$work/$tier/$dir"
+        done
+    done
+fi
+if [ "$only" = linux ] || [ "$only" = all ]; then
+    need python3
+    if [ -n "${PAX_FSCK_ORACLE_BIN:-}" ]; then
+        export PATH="$PAX_FSCK_ORACLE_BIN:$PATH"
+    else
+        mkdir -p "$work/oracles"
+        for program in mke2fs e2fsck; do
+            printf '#!/bin/bash\nexec %q %q %q "$@"\n' "$PAX_ROOT/tools/e2fs" "$work" "$program" > "$work/oracles/$program"
+            chmod +x "$work/oracles/$program"
+        done
+        export PATH="$work/oracles:$PATH"
+    fi
+    e2fsck -V > "$work/oracle-version.log" 2>&1
+    python3 -I "$D/corpus.py" --checker "$work/bin/fsck.ext2" --work "$work/corpus"
+    python3 -I "$D/journal.py" "$work/bin/fsck.ext2" "$work/journal"
+    python3 -I "$D/refusals.py" "$work/bin/fsck.ext2" "$work/refusals"
+fi
+if [ "$only" = pax-corpus ] || [ "$only" = all ]; then
+    python3 -I "$D/pax-corpus.py" "$PAX_ROOT" "$work"
+fi
+if [ "$only" = rescue ] || [ "$only" = all ]; then
+    for tier in $tiers; do
+        python3 -I "$D/rescue.py" "$PAX_ROOT" "$work/$tier" "$firmware"
+    done
+fi
+say "mpx6-fsck $only: complete (unsupported corpus rows remain explicitly unsupported)"
