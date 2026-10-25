@@ -1,36 +1,67 @@
 #!/usr/bin/env python3
-# mkfont — turn font/spleen-8x16.bdf into boot/font.S, the screen's
-# glyph table (px19).
+# mkfont — turn the console's font into boot/font.S, the screen's glyph
+# table (px19; the rows above U+00FF, gm01).
 #
-#   tools/mkfont [--check] [BDF] [OUT.S]
+#   tools/mkfont [--check | --test | --latin1] [OUT.S]
 #
-# The table is `pax_font`: 256 glyphs, one per code point 0-255, 16
-# bytes each, one byte a pixel row from the top, the most significant
-# bit the leftmost pixel (BDF's own row order and bit order for an
-# 8-pixel-wide font). A code point the font has no glyph for gets the
-# glyph of `?` (0x3f), so the kernel can index the table with any code
-# point below 256 and draw something; kernel/screen draws `?` itself for
-# a code point at or above 256. Every glyph must be `BBX 8 16 0 -4`
-# (the font's bounding box): anything else is refused by name.
+# The inputs, relative to the repository: font/spleen-8x16.bdf (Spleen
+# 2.2.0, vendored unmodified), font/pax-extra.bdf (PAX's own rows) and
+# font/extent.txt (the code points above U+00FF the table carries, each
+# line naming its source: `generated`, `spleen` or `pax`).
 #
-# --check compares OUT.S (default boot/font.S) with what the BDF gives
-# and exits 1 when they differ, 0 when they are the same.
-# Defaults: BDF font/spleen-8x16.bdf, OUT boot/font.S, relative to the
-# repository. Exit 2 on a usage error or a malformed font.
+# The table is `pax_font`: glyph g at byte 16 g, one byte a pixel row
+# from the top, the most significant bit the leftmost pixel (BDF's own
+# row order and bit order for an 8-pixel-wide font). Glyphs 0-255 are
+# code points 0-255; a code point Spleen has no glyph for there gets the
+# glyph of `?` (0x3f), so the kernel can index the first 256 with any
+# code point below 256 and draw something. Glyphs 256 on are the
+# extent's code points in order, and `pax_font_ranges` maps them: pairs
+# of 32-bit words, the first code point of a run and `count | first
+# glyph << 16`, sorted, ended by a pair whose second word is 0;
+# `pax_font_glyphs` (32 bits) is how many glyphs the table holds.
+# kernel/screen draws `?` for a code point at or above 256 no range holds.
+#
+# `generated` glyphs come from two functions here, not from bitmaps:
+# `braille(cp)`, the eight dot bits of U+2800-U+28FF (bit k is dot k + 1:
+# dots 1-3 down the left column, 4-6 down the right, 7 and 8 the bottom
+# row) as two-pixel-square dots in columns 1-2 and 5-6 and rows 4i+1 and
+# 4i+2 (Spleen's own dot grid and stroke weight), and `block(cp)`, the
+# block elements U+2580-U+259F as filled rectangles (halves, eighths,
+# quadrants; the three shades are Spleen's dithers, `spleen` in the
+# extent). Each generated glyph must equal Spleen's glyph for the same
+# code point where Spleen has one, bit for bit, or the build is refused
+# by name: so the function and the vendored font agree, and the font's
+# unmodified glyphs are what the screen shows.
+#
+# Every glyph must be `BBX 8 16 0 -4` (the font's bounding box): anything
+# else is refused by name. A code point named twice in the extent, one
+# its named source lacks, or one below U+0100, is refused.
+#
+# --check compares OUT.S (default boot/font.S) with what the inputs give
+# and exits 1 when they differ, 0 when they are the same. --test runs the
+# generators' own rows (every braille pattern distinct, each one's dots
+# read back as its code point's bits, each block element the rectangle
+# its name says, the shades 25/50/75 % of the cell) and prints one line
+# each, exit 1 on any failure. --latin1 writes the table without the
+# extent (glyphs 0-255 alone, no ranges): the font row withheld, the
+# screen as px19 drew it, for tests/mpx6-games' plain-tier row. Exit 2 on
+# a usage error or a malformed font.
 import os
 import sys
 
 root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 args = sys.argv[1:]
-check = False
-if args and args[0] == "--check":
-    check = True
+mode = "write"
+if args and args[0] in ("--check", "--test", "--latin1"):
+    mode = args[0][2:]
     args = args[1:]
-if len(args) > 2 or any(a.startswith("-") for a in args):
-    sys.stderr.write("usage: mkfont [--check] [BDF] [OUT.S]\n")
+if len(args) > 1 or any(a.startswith("-") for a in args):
+    sys.stderr.write("usage: mkfont [--check | --test | --latin1] [OUT.S]\n")
     sys.exit(2)
-bdf = args[0] if len(args) > 0 else os.path.join(root, "font", "spleen-8x16.bdf")
-out = args[1] if len(args) > 1 else os.path.join(root, "boot", "font.S")
+SPLEEN = os.path.join(root, "font", "spleen-8x16.bdf")
+EXTRA = os.path.join(root, "font", "pax-extra.bdf")
+EXTENT = os.path.join(root, "font", "extent.txt")
+out = args[0] if args else os.path.join(root, "boot", "font.S")
 
 
 def die(msg):
@@ -38,55 +69,279 @@ def die(msg):
     sys.exit(2)
 
 
-glyphs = {}
-enc = None
-bbx = None
-rows = None
-with open(bdf, "rb") as f:
-    for raw in f:
-        line = raw.decode("ascii").strip()
-        if line.startswith("ENCODING "):
-            enc = int(line.split()[1])
-        elif line.startswith("BBX "):
-            bbx = line.split()[1:]
-        elif line == "BITMAP":
-            rows = []
-        elif line == "ENDCHAR":
-            if bbx != ["8", "16", "0", "-4"]:
-                die("glyph %s has BBX %s, not 8 16 0 -4" % (enc, " ".join(bbx or [])))
-            if rows is None or len(rows) != 16:
-                die("glyph %s has %s rows, not 16" % (enc, len(rows or [])))
-            if enc is not None and 0 <= enc < 256:
-                glyphs[enc] = rows
-            enc = bbx = rows = None
-        elif rows is not None:
-            rows.append(int(line, 16))
-if 0x3F not in glyphs:
-    die("the font has no '?' (0x3f)")
+def read_bdf(path):
+    glyphs = {}
+    enc = bbx = rows = None
+    with open(path, "rb") as f:
+        for raw in f:
+            line = raw.decode("ascii").strip()
+            if line.startswith("ENCODING "):
+                enc = int(line.split()[1])
+            elif line.startswith("BBX "):
+                bbx = line.split()[1:]
+            elif line == "BITMAP":
+                rows = []
+            elif line == "ENDCHAR":
+                if bbx != ["8", "16", "0", "-4"]:
+                    die("%s: glyph %s has BBX %s, not 8 16 0 -4" % (path, enc, " ".join(bbx or [])))
+                if rows is None or len(rows) != 16:
+                    die("%s: glyph %s has %s rows, not 16" % (path, enc, len(rows or [])))
+                if enc is not None:
+                    if enc in glyphs:
+                        die("%s: code point %d twice" % (path, enc))
+                    glyphs[enc] = rows
+                enc = bbx = rows = None
+            elif rows is not None:
+                rows.append(int(line, 16))
+    return glyphs
 
-lines = []
-lines.append("/* font.S — the screen's glyphs (px19), GENERATED by tools/mkfont from")
-lines.append("   font/spleen-8x16.bdf: Spleen 2.2.0 by Frederic Cambus, BSD 2-Clause")
-lines.append("   (font/LICENSE.spleen). Do not edit; run tools/mkfont.")
-lines.append("")
-lines.append("   pax_font: 256 glyphs, code points 0-255, 16 bytes each (rows from")
-lines.append("   the top, bit 7 the leftmost pixel); a code point the font has no")
-lines.append("   glyph for carries `?`'s. %d of the 256 are the font's own. */" % len(glyphs))
-lines.append("")
-lines.append("        .section .rodata")
-lines.append("        .p2align 4")
-lines.append("        .globl pax_font")
-lines.append("pax_font:")
-for cp in range(256):
-    g = glyphs.get(cp, glyphs[0x3F])
-    own = "" if cp in glyphs else " (?)"
-    lines.append("        .byte " + ", ".join("0x%02x" % b for b in g) + "   /* 0x%02x%s */" % (cp, own))
-lines.append("        .size pax_font, . - pax_font")
-lines.append("")
-lines.append('        .section .note.GNU-stack, "", @progbits')
-text = "\n".join(lines) + "\n"
 
-if check:
+# --- the generators ---------------------------------------------------------
+
+# Dot k + 1 of a braille cell is bit k of (cp - 0x2800): its column (0
+# left, 1 right) and its row (0 top .. 3 bottom), Unicode's numbering.
+BRAILLE_DOTS = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2), (0, 3), (1, 3)]
+
+
+def braille(cp):
+    """U+2800-U+28FF: the dot bits as two-pixel dots, columns 1-2 and 5-6,
+    rows 4i+1 and 4i+2."""
+    bits = cp - 0x2800
+    assert 0 <= bits < 256
+    rows = [0] * 16
+    for k, (col, row) in enumerate(BRAILLE_DOTS):
+        if bits >> k & 1:
+            mask = 0x60 if col == 0 else 0x06
+            rows[4 * row + 1] |= mask
+            rows[4 * row + 2] |= mask
+    return rows
+
+
+def braille_bits(rows):
+    """The inverse: the dot bits a glyph shows on braille's grid, or None
+    when it lights a pixel off the grid or half a dot."""
+    want = braille(0x28FF)
+    if any(r & ~w for r, w in zip(rows, want)):
+        return None
+    bits = 0
+    for k, (col, row) in enumerate(BRAILLE_DOTS):
+        mask = 0x60 if col == 0 else 0x06
+        a, b = rows[4 * row + 1] & mask, rows[4 * row + 2] & mask
+        if a != b or a not in (0, mask):
+            return None
+        if a:
+            bits |= 1 << k
+    return bits
+
+
+def rect(x0, x1, y0, y1):
+    """Pixels [x0, x1) x [y0, y1) lit, of the 8x16 cell."""
+    row = sum(0x80 >> x for x in range(x0, x1))
+    return [row if y0 <= y < y1 else 0 for y in range(16)]
+
+
+def union(*glyphs):
+    return [sum(t) for t in zip(*glyphs)]
+
+
+QUADRANT = {  # upper left, upper right, lower left, lower right
+    0x2596: (0, 0, 1, 0), 0x2597: (0, 0, 0, 1), 0x2598: (1, 0, 0, 0), 0x2599: (1, 0, 1, 1),
+    0x259A: (1, 0, 0, 1), 0x259B: (1, 1, 1, 0), 0x259C: (1, 1, 0, 1), 0x259D: (0, 1, 0, 0),
+    0x259E: (0, 1, 1, 0), 0x259F: (0, 1, 1, 1),
+}
+
+
+def block(cp):
+    """U+2580-U+259F but the shades: the rectangle the element names."""
+    if cp == 0x2580:
+        return rect(0, 8, 0, 8)                        # upper half
+    if 0x2581 <= cp <= 0x2588:
+        return rect(0, 8, 16 - 2 * (cp - 0x2580), 16)  # lower 1/8 .. full
+    if 0x2589 <= cp <= 0x258F:
+        return rect(0, 0x2590 - cp, 0, 16)             # left 7/8 .. 1/8
+    if cp == 0x2590:
+        return rect(4, 8, 0, 16)                       # right half
+    if cp == 0x2594:
+        return rect(0, 8, 0, 2)                        # upper 1/8
+    if cp == 0x2595:
+        return rect(7, 8, 0, 16)                       # right 1/8
+    if cp in QUADRANT:
+        ul, ur, ll, lr = QUADRANT[cp]
+        parts = [rect(0, 4, 0, 8)] * ul + [rect(4, 8, 0, 8)] * ur + [rect(0, 4, 8, 16)] * ll + [rect(4, 8, 8, 16)] * lr
+        return union(*parts)
+    raise ValueError("U+%04X is not a rectangle block element" % cp)
+
+
+def generated(cp):
+    if 0x2800 <= cp <= 0x28FF:
+        return braille(cp)
+    return block(cp)
+
+
+def lit(rows):
+    return sum(bin(r).count("1") for r in rows)
+
+
+# --- the inputs -------------------------------------------------------------
+
+def read_extent(path):
+    out = []
+    seen = set()
+    with open(path, "r", encoding="ascii") as f:
+        for n, raw in enumerate(f, 1):
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            w = line.split()
+            if len(w) != 2 or w[1] not in ("generated", "spleen", "pax"):
+                die("%s:%d: wants `U+XXXX[-U+YYYY] generated|spleen|pax`" % (path, n))
+            span = w[0].split("-")
+            try:
+                if len(span) > 2 or not all(s.startswith("U+") for s in span):
+                    raise ValueError
+                first = int(span[0][2:], 16)
+                last = int(span[-1][2:], 16)
+            except ValueError:
+                die("%s:%d: %r is not a code point or a range" % (path, n, w[0]))
+            if first < 0x100 or last < first or last > 0x10FFFF:
+                die("%s:%d: %s is below U+0100 or reversed" % (path, n, w[0]))
+            for cp in range(first, last + 1):
+                if cp in seen:
+                    die("%s:%d: U+%04X named twice" % (path, n, cp))
+                seen.add(cp)
+                out.append((cp, w[1]))
+    return sorted(out)
+
+
+def run_tests():
+    spleen = read_bdf(SPLEEN)
+    fails = 0
+
+    def row(ok, text):
+        nonlocal fails
+        print("%s %s" % ("PASS" if ok else "FAIL", text))
+        fails += not ok
+
+    pats = [tuple(braille(cp)) for cp in range(0x2800, 0x2900)]
+    row(len(set(pats)) == 256, "braille: the 256 patterns are 256 distinct glyphs")
+    back = [braille_bits(list(p)) for p in pats]
+    row(back == list(range(256)), "braille: every glyph's dots read back as its code point's eight bits")
+    row(all(lit(p) == 4 * bin(i).count("1") for i, p in enumerate(pats)),
+        "braille: each raised dot is four pixels (two by two), each unraised none")
+    row(pats[0] == (0,) * 16 and lit(pats[255]) == 32, "braille: U+2800 (no dots) is blank, U+28FF lights 32 pixels")
+    same = [cp for cp in range(0x2800, 0x2900) if cp in spleen and braille(cp) == spleen[cp]]
+    row(len(same) == 256, "braille: the generator equals Spleen 2.2.0's glyph for %d of 256 code points" % len(same))
+    rects = [cp for cp in range(0x2580, 0x25A0) if cp not in (0x2591, 0x2592, 0x2593)]
+    row(lit(block(0x2588)) == 128 and lit(block(0x2580)) == 64 and lit(block(0x2584)) == 64
+        and lit(block(0x258C)) == 64 and lit(block(0x2590)) == 64,
+        "block: full 128 pixels; upper, lower, left and right halves 64 each")
+    row(all(lit(block(0x2580 + k)) == 16 * k for k in range(1, 9)) and all(lit(block(0x2590 - k)) == 16 * k for k in range(1, 8)),
+        "block: the lower eighths 16 k pixels, the left eighths 16 k")
+    row(all(lit(block(cp)) == 32 * sum(QUADRANT[cp]) for cp in QUADRANT), "block: each quadrant element 32 pixels a quadrant")
+    row(len({tuple(block(cp)) for cp in rects}) == len(rects), "block: the %d rectangle elements are distinct" % len(rects))
+    same = [cp for cp in rects if cp in spleen and block(cp) == spleen[cp]]
+    row(len(same) == len(rects), "block: the generator equals Spleen 2.2.0's glyph for %d of %d" % (len(same), len(rects)))
+    shades = [lit(spleen[cp]) for cp in (0x2591, 0x2592, 0x2593)]
+    row(shades == [32, 64, 96], "shades: Spleen's light, medium and dark shade light %s of 128 pixels (25/50/75 %%)" % shades)
+    periodic = all(spleen[cp][y] == spleen[cp][y % 2] for cp in (0x2591, 0x2592, 0x2593) for y in range(16))
+    row(periodic, "shades: each is one two-row pattern repeated down the cell (an ordered dither, no band)")
+    return fails
+
+
+def table(latin1_only):
+    spleen = read_bdf(SPLEEN)
+    extra = read_bdf(EXTRA)
+    if 0x3F not in spleen:
+        die("the font has no '?' (0x3f)")
+    glyphs = [spleen.get(cp, spleen[0x3F]) for cp in range(256)]
+    notes = ["0x%02x%s" % (cp, "" if cp in spleen else " (?)") for cp in range(256)]
+    own = sum(1 for cp in range(256) if cp in spleen)
+    ext = [] if latin1_only else read_extent(EXTENT)
+    counts = {"generated": 0, "spleen": 0, "pax": 0}
+    for cp, src in ext:
+        if src == "generated":
+            try:
+                g = generated(cp)
+            except (AssertionError, ValueError):
+                die("U+%04X: no generator draws it (braille U+2800-U+28FF, the rectangle block elements)" % cp)
+            if cp in spleen and spleen[cp] != g:
+                die("U+%04X: the generated glyph is not Spleen's (refused: the function and the vendored font disagree)" % cp)
+        elif src == "spleen":
+            if cp not in spleen:
+                die("U+%04X: Spleen 2.2.0 has no glyph for it" % cp)
+            g = spleen[cp]
+        else:
+            if cp not in extra:
+                die("U+%04X: font/pax-extra.bdf has no glyph for it" % cp)
+            if cp in spleen:
+                die("U+%04X: Spleen has it; PAX's own rows are for what Spleen lacks" % cp)
+            g = extra[cp]
+        counts[src] += 1
+        glyphs.append(g)
+        notes.append("U+%04X %s" % (cp, src))
+    ranges = []
+    for i, (cp, _src) in enumerate(ext):
+        gi = 256 + i
+        if ranges and ranges[-1][0] + ranges[-1][1] == cp:
+            ranges[-1][1] += 1
+        else:
+            ranges.append([cp, 1, gi])
+    if len(glyphs) >= 1 << 16:
+        die("%d glyphs: the ranges hold 16-bit glyph numbers" % len(glyphs))
+    return glyphs, notes, ranges, own, counts
+
+
+def emit(glyphs, notes, ranges, own, counts, latin1_only):
+    lines = []
+    lines.append("/* font.S — the screen's glyphs (px19, gm01), GENERATED by tools/mkfont%s from" % (" --latin1" if latin1_only else ""))
+    lines.append("   font/spleen-8x16.bdf (Spleen 2.2.0 by Frederic Cambus, BSD 2-Clause,")
+    lines.append("   font/LICENSE.spleen), font/pax-extra.bdf (PAX's own rows) and")
+    lines.append("   font/extent.txt. Do not edit; run tools/mkfont.")
+    lines.append("")
+    lines.append("   pax_font: %d glyphs, 16 bytes each (rows from the top, bit 7 the" % len(glyphs))
+    lines.append("   leftmost pixel). Glyphs 0-255 are code points 0-255; %d of those" % own)
+    lines.append("   are Spleen's own, the rest carry `?`'s. Glyphs 256 on are the")
+    if latin1_only:
+        lines.append("   extent's: none here (the font row withheld, --latin1).")
+    else:
+        lines.append("   extent's: %d generated (held to Spleen's), %d Spleen's, %d PAX's." % (counts["generated"], counts["spleen"], counts["pax"]))
+    lines.append("   pax_font_ranges: (first code point, count | first glyph << 16)")
+    lines.append("   pairs, sorted, ended by a zero second word. */")
+    lines.append("")
+    lines.append("        .section .rodata")
+    lines.append("        .p2align 4")
+    lines.append("        .globl pax_font")
+    lines.append("pax_font:")
+    for g, note in zip(glyphs, notes):
+        lines.append("        .byte " + ", ".join("0x%02x" % b for b in g) + "   /* %s */" % note)
+    lines.append("        .size pax_font, . - pax_font")
+    lines.append("")
+    lines.append("        .p2align 3")
+    lines.append("        .globl pax_font_ranges")
+    lines.append("pax_font_ranges:")
+    for first, count, gi in ranges:
+        lines.append("        .long 0x%04x, 0x%08x   /* U+%04X-U+%04X: glyphs %d-%d */" % (first, count | gi << 16, first, first + count - 1, gi, gi + count - 1))
+    lines.append("        .long 0, 0")
+    lines.append("        .size pax_font_ranges, . - pax_font_ranges")
+    lines.append("")
+    lines.append("        .p2align 2")
+    lines.append("        .globl pax_font_glyphs")
+    lines.append("pax_font_glyphs:")
+    lines.append("        .long %d" % len(glyphs))
+    lines.append("        .size pax_font_glyphs, 4")
+    lines.append("")
+    lines.append('        .section .note.GNU-stack, "", @progbits')
+    return "\n".join(lines) + "\n"
+
+
+if mode == "test":
+    sys.exit(1 if run_tests() else 0)
+latin1_only = mode == "latin1"
+glyphs, notes, ranges, own, counts = table(latin1_only)
+text = emit(glyphs, notes, ranges, own, counts, latin1_only)
+summary = "%d glyphs: %d of the first 256 Spleen's own; above U+00FF %d generated, %d Spleen's, %d PAX's, in %d ranges" % (
+    len(glyphs), own, counts["generated"], counts["spleen"], counts["pax"], len(ranges))
+if mode == "check":
     try:
         with open(out, "r") as f:
             have = f.read()
@@ -94,10 +349,10 @@ if check:
         sys.stderr.write("mkfont: %s\n" % e)
         sys.exit(1)
     if have != text:
-        sys.stderr.write("mkfont: %s is not what %s gives\n" % (out, bdf))
+        sys.stderr.write("mkfont: %s is not what the font gives\n" % out)
         sys.exit(1)
-    print("mkfont: %s matches %s (%d glyphs of 256 the font's own)" % (out, bdf, len(glyphs)))
+    print("mkfont: %s matches the font (%s)" % (out, summary))
     sys.exit(0)
 with open(out, "w") as f:
     f.write(text)
-print("mkfont: wrote %s from %s (%d glyphs of 256 the font's own)" % (out, bdf, len(glyphs)))
+print("mkfont: wrote %s (%s)" % (out, summary))
