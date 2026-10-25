@@ -497,8 +497,9 @@ reference repairs; an operation needing a choice remains uncorrected.
 `-y` also clones duplicate data blocks and reconnects disconnected files
 and directories, creating `lost+found` when needed. All five passes run;
 `-f` is accepted. Exit status is 0 for no remaining error, 1 for completed
-repairs, 4 for uncorrected or unsupported damage, 8 for an operational
-failure, and 16 for bad arguments. As observed with e2fsck 1.47.0, `-n`
+repairs, 4 for uncorrected damage or an unsupported journal, 8 for an
+operational failure or unsupported filesystem geometry/features, and 16
+for bad arguments. Status 2 is not needed: mounted-volume repair is refused. As observed with e2fsck 1.47.0, `-n`
 reports a primary superblock count disagreement without setting status 4
 when no other inconsistency is found. Report-only mode never replays a
 journal or writes the image.
