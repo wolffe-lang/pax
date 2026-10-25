@@ -10,6 +10,8 @@ Guided installation: `pax-install` inventories real block nodes, shows a read-on
 
 Disk tools (px69): `paxgpt`, `paxfat` and `paxext2` are Wolf programs built as static Linux executables and run unchanged on PAX. They write GPT, FAT32/VFAT and an ext2 tree, including modes, owners, timestamps, symbolic links and hard links. The tests compare their output with sgdisk/sfdisk, dosfstools/mtools and e2fsprogs, then build a second disk entirely on PAX, written through its `/dev/vdb` node (px79), and boot it alone under SeaBIOS and OVMF. Limine's pinned installer is linked statically without changing its source; its Linux and PAX runs write identical bytes. `paxext2` does **not** add a journal: the existing host builder's ext3 default is unchanged. The guided installer calls these tools rather than embedding new formatters. See `docs/BOOT.md`, “Writing a disk on PAX”, for the offline-disk interface and its bounds.
 
+The linker respin (px80): the dev image's static `ld.lld` is lld 18.1.8, built from LLVM's release tarball (sha256 `0b58557a…`, signed by LLVM's release key) with zlib and zstd (`notes/px80/build-lld.sh`); px60's lld 17.0.6 could not link the release tier's kernel (`R_X86_64_REX_GOTPCRELX out of range`, the image at the top of the address space, pax#172). On every kernel the tree builds, both tiers, 18.1.8 links byte for byte what Ubuntu's lld 18.1.3, CI's linker, links; at the dev console `ld.lld --version` says 18.1.8 and `wolf build hello.lu` links with it. `user/wolf-link.sums` moves one line, and CI now holds that record (W0 link: its shape, and the `cc` front end rebuilt to its bytes). The kernel is unchanged.
+
 The block nodes and a second disk (px79): PAX drives up to four virtio disks, named `vda` to `vdd` in PCI slot order as Linux names them, and `/dev` holds a block special file for every disk and partition the block layer knows (`brw-------`, root's, Linux's numbers: 254:0, 254:1 … for `vda`, 254:16 for `vdb`, the extended major 259 past partition 15), made in memory at boot and as a table is read again, as devtmpfs makes them, never written into an image. A program opens a node and reads and writes it raw at any length and offset (the guest's answers: short across the end, ENOSPC past it, EPERM on a read-only disk; a write to `vda` while a partition of it is mounted is allowed, as on Linux), seeks it, fsyncs it, sends a file onto it by `sendfile` or `splice`, and asks the block ioctls (the sizes, the block sizes, BLKROGET, BLKFLSBUF, HDIO_GETGEO from the device's own geometry, BLKRRPART with Linux's EBUSY while a partition is open or mounted, BLKPG's add and delete); every other request is ENOTTY, named. `/proc/partitions`, `/sys/block` and `/sys/class/block` answer what lsblk and blkid read; `mount(2)` and `/etc/fstab` name a partition by its node (`/dev/vdb2`), and `/proc/mounts` prints the node. `tools/qemu-run` and `tools/qemu-halt` take `--drive FILE` (repeatable) for a second and third disk. Every row is held to Linux 7.3.0 on QEMU with the same disks and the same static probe (`tests/mpx6-nodes`), and a disk made blank on the host gets a GPT and an ext2 from PAX through its nodes.
 
 The journal (px68): `/` is ext3. `tools/mkdisk --gpt --root` makes the root partition with the pinned `mke2fs -t ext3` (`--no-journal` for px67's ext2), and kernel/journal writes every change to its metadata (the superblock, the group descriptors, both bitmaps, the inode tables, indirect and directory blocks) through the journal in ext3's own format, jbd2's v2 layout as the kernel's documentation describes it: a transaction's blocks go to the log, then a FLUSH, then its commit block, then a FLUSH, and only then home; a file's data is written before the commit that names it (data=ordered); commits come at the flusher's 5 s turn, at every sync point and the halt. A power cut leaves `/` clean with needs_recovery, as Linux 7.3.0 leaves its own ext3 root, and the next boot replays the log to its last commit before anything reads the volume (`ext2: vda2: recovering the journal: 1 transaction (sequence 1 to 1), 50 blocks written home, 0 revoked; recovery complete`): blocks revoked by a later transaction are passed over, a torn or missing commit drops its transaction whole, an escaped block is restored, as e2fsck's own replay does on thirteen crafted journals; a replay cut short by a failed write leaves the log as it was, and the next boot replays it whole. The crash row that px67 measured (24 kills at seeded points of a 1,500-operation write session) now gives no count, no orphan and nothing worse, where ext2 on the same kernel and seed gives four counts; every replayed tree is the one the last commit block on the disk names, no write before it lost, and the same tree e2fsck -fy's replay of a copy gives; the session costs what it cost on ext2 (30.13 to 30.53 s against 30.05 to 30.08 s). The order of every write a commit makes is read from QEMU's own trace of the disk (`tools/jorder`). `init=PATH` on Limine's command line runs one program as init. Every row is in `tests/mpx6-journal`, and `tests/mpx6-root` runs on the journalled root, held to the guest's ext3 root.
@@ -305,9 +307,13 @@ and recipe (since px65 the v0.2.35 tag unpatched: the release carries
 the musl fix px60's patch made, so the binary says the release's own
 line), and `user/wolf.sums` records the bytes.
 The shell environment selects the std tree through `WOLF_STD`. The full
-dev ISO also carries static lld 17, a link-only `cc` front end, and musl's
+dev ISO also carries a static `ld.lld`, a link-only `cc` front end, and musl's
 binary CRT/libc inputs (`user/wolf-link.sums`). It can build and run native
 wolf programs; the link front end is not a C or assembly compiler. Since
+px80 the linker is lld 18.1.8, built static from LLVM's release tarball with
+zlib and zstd (`notes/px80/build-lld.sh`; `ld.lld --version` at the dev
+console says so): px60's lld 17.0.6 could not link the release tier's kernel
+(pax#172), and 18.1.8 links it to the same bytes as the Ubuntu lld CI uses. Since
 px64 it also carries scent as `/bin/grep` (the unmodified `/bin/scent`,
 the link, `/bin/egrep` and `/bin/fgrep`) and `tests/mpx5-scent`'s
 fixture at `/usr/share/scent` (`cd /usr/share/scent; grep -n -C1 cat
@@ -335,10 +341,13 @@ remaining link requirements are recorded under `notes/px60/`.
 binaries on Linux. It also checks independent command/verdict witnesses,
 so agreement on a broken compiler or missing std tree cannot pass. Its
 fast CI root deliberately omits the native link bundle and checks the
-missing-tool errors. `--only native --images DIR` validates the separate
-live native probe's Linux/PAX recordings. The final dev ISO was tested
-with 2 GiB RAM; lld's file-mapping refusals are visible, but its read/write
-fallback links the measured programs successfully.
+missing-tool errors; `tests/mpx5-wolf.d/verify-link` holds the bundle's
+record (W0 link: `user/wolf-link.sums`' shape, and its `cc` rebuilt from
+`notes/px60/cc.rs` to the recorded bytes in CI; every file of a staged
+bundle where the bundle is). `--only native --images DIR` validates the separate
+live native probe's Linux/PAX recordings. The dev ISO is tested with 2 GiB
+RAM; since px62 lld's file-backed and shared mappings are served, so the
+native link runs with no mapping refused.
 
 ## Hosts
 
