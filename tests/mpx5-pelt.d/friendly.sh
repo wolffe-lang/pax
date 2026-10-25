@@ -19,6 +19,8 @@ friendly_image() {
 friendly_boot() {
     local d=$1 tier=$2 leg=$3 console=$4 rc=0 kp= krc=0
     local out=$PAX_BUILD/mpx5-pelt-friendly-$tier-$leg-$console
+    # A rerun must not append old screenshot offsets to the new transcript.
+    rm -rf "$out"
     mkdir -p "$out"
     local log=$out/serial.log sock=$out/monitor.sock
     python3 -I "$PAX_ROOT/tests/mpx5-pelt.d/friendly.py" generate "$out" "$console" || return 1
