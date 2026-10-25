@@ -1,0 +1,40 @@
+px79 — the prediction, written before the first change (2026-10-24, at
+pax trunk 105d0d1f, nothing measured on the guest yet).
+
+1. Kernel files that change: nine. kernel/block (several disks, the
+   device table per disk, the rescan, the ioctls' facts, raw sector
+   I/O), kernel/vblk (one state frame and window set per disk, up to
+   four), kernel/files (the S_IFBLK node type in /dev, open, read,
+   write, pread, pwrite, lseek, fsync, ioctl on it, mount(2) by node),
+   kernel/procfs (/sys/block, /sys/class/block and their attribute
+   files), kernel/ext2 and kernel/fstab (the device loops that assume
+   one dense table), kernel/user (the write dispatch for a node),
+   kmain_console and kmain_session (the report per disk). kernel/tree
+   and kernel/journal unchanged. About 1,400 kernel lines inserted:
+   block ~600, files ~350, procfs ~200, vblk ~120, the rest ~130.
+2. /dev nodes on the playground disk (px67/px68's `tools/mkdisk --gpt
+   --root`: the ESP, `/`, Limine's BIOS boot partition): four block
+   nodes, vda vda1 vda2 vda3.
+3. A raw write to /dev/vda while `/` (vda2) is mounted shows no
+   page-cache/journal disagreement in the crash row: the row's raw
+   writes are the GPT's sectors (LBA 0-33 and the last 33), outside
+   every partition's window, so no block the journal or the cache holds
+   is touched; e2fsck -fn clean, the table unchanged. The only way to a
+   disagreement is a raw write into a mounted partition's window, which
+   is the user's problem on Linux too and is not in the row.
+4. The ioctl the guest answers that PAX cannot: BLKDISCARD (and
+   BLKZEROOUT): QEMU's virtio-blk offers DISCARD and WRITE_ZEROES, the
+   guest takes them, PAX's driver declines both. Of the contract's
+   list, HDIO_GETGEO is the one likeliest to need a device feature PAX
+   now declines (GEOMETRY); I expect the guest's numbers to be
+   fabricated from the capacity, not QEMU's, so PAX matches it without
+   the feature.
+5. Two disks come up in the right order at the first try: yes. QEMU
+   places `-device virtio-blk-pci` in slot order as given, kernel/pci's
+   table is in bus/device/function order, and the guest names them
+   vda, vdb in the same order.
+6. R-px79-1..4: the guest's numbers are 254:0/254:16 (16 minors a
+   disk); the guest buffers odd-length raw I/O (a 100-byte read at
+   offset 3 answers 100); BLKRRPART is EBUSY with a partition mounted
+   and also with one merely open; a write past a partition's end is
+   -ENOSPC at the end and short across it.
