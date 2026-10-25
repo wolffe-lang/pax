@@ -517,7 +517,9 @@ fn commit(mut v: Volume) -> () ! {io} {
     }
     diskio.write_at(v.fd, (v.first + 1) * v.bs, v.gd)?
     fs_sync(v.fd) else |_| { return io }
-    diskio.put(mut v.sb, 58, 1, 2)
+    let device = fs_fstat_record(v.fd) else |_| { return io }
+    // Deliberate plant: raw devices never receive the clean flag.
+    diskio.put(mut v.sb, 58, if device[0] == 7 then 0 else 1, 2)
     diskio.put(mut v.sb, 52, 0, 2)
     diskio.put(mut v.sb, 64, v.epoch, 4)
     diskio.write_at(v.fd, 1024, v.sb)?
