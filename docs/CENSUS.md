@@ -891,8 +891,8 @@ calls: `arch_prctl`, `brk`, `close`, `execve`, `exit_group`, `flock`,
 `fstat`, `getrandom`, `lseek`, `mmap`, `mprotect`, `munmap`, `open`,
 `openat`, `pread64`, `prlimit64`, `read`, `readlinkat`, `rseq`,
 `rt_sigaction`, `sched_getaffinity`, `set_robust_list`, `set_tid_address`,
-`sigaltstack`, `statx` and `write`. Repair also uses `fsync` to order
-metadata and the clean flag. The PAX rescue witness reports only the
+`sigaltstack`, `statx` and `write`. A repair trace records 28 calls, adding `fcntl` and `fsync`; the latter
+orders metadata and the clean flag. The PAX rescue witness reports only the
 existing static-glibc fallbacks `set_robust_list` (273) and `rseq` (334)
 as ENOSYS. It repairs `/dev/vda2` while that partition is unmounted;
 the later root boot explicitly verifies that `-y` on the mounted root is

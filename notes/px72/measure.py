@@ -6,13 +6,13 @@ import runpy
 import subprocess
 import sys
 import time
+import tempfile
 
 repo, work = Path(sys.argv[1]), Path(sys.argv[2])
 p = work/'measure'
 p.mkdir(parents=True, exist_ok=True)
 api = runpy.run_path(str(repo/'tools/mkdisk'), run_name='px72_mkdisk')
-stage = p/'stage'
-stage.mkdir(exist_ok=True)
+stage = Path(tempfile.mkdtemp(prefix='stage-', dir=p))
 tree, _, _ = api['root_tree'](str(work/'native/rescue/root.cpio'), str(stage))
 rows = []
 for mib in [128, 448]:
