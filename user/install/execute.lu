@@ -34,6 +34,20 @@ fn disk_log(fd: int, mut used: int, phase: str, state: str, detail: str) -> () !
     print("phase {phase}: {state}")
 }
 
+fn read_window(fd: int, offset: int, count: int) -> List[byte] ! {io} {
+    var out = List[byte]()
+    while out.len < count {
+        region chunk {
+            let left = count - out.len
+            let n = if left > 65536 then 65536 else left
+            let b = fs_read_at(fd, offset + out.len, n) else |_| { return io }
+            if b.len == 0 { return io }
+            for x in b { (mut out).push(x) }
+        }
+    }
+    out
+}
+
 fn run_action(action: Action, work: str, fd: int, mut used: int) -> () ! {
     io,
     log_full,
@@ -47,6 +61,12 @@ fn run_action(action: Action, work: str, fd: int, mut used: int) -> () ! {
     defer fs_close(out) else |_| {}
     let err = fs_open_perm(errpath, 4, 384) else |_| { return io }
     defer fs_close(err) else |_| {}
+    var limine_before = List[byte]()
+    if action.phase == "limine" {
+        limine_before = read_window(fd, 0, ESP_START) else |_| { return io }
+        if limine_before.len != ESP_START { return io }
+        fs_write_bytes("{work}/limine-before.bin", limine_before) else |_| { return io }
+    }
     let child = os_spawn_fds(action.exe, action.args, [1, out, 2, err]) else |e| {
         disk_log(fd, mut used, action.phase, "failed", "spawn {e}")?
         return command_failed
@@ -64,7 +84,7 @@ fn run_action(action: Action, work: str, fd: int, mut used: int) -> () ! {
             mut used,
             action.phase,
             "failed",
-            "exit={status} {stderr[0..if stderr.len > 2048 then 2048 else stderr.len]}",
+            "exit={status} {if stderr.len > 2048 then "diagnostic retained in phase .err file (over 2048 bytes)" else stderr}",
         )?
         eprint("pax-install: {action.phase}: exit {status}; {stderr}")
         return command_failed
@@ -91,6 +111,34 @@ fn run_action(action: Action, work: str, fd: int, mut used: int) -> () ! {
             )?
             return command_failed
         }
+    }
+    if action.phase == "limine" {
+        let after = read_window(fd, 0, ESP_START) else |_| { return io }
+        if after.len != ESP_START { return io }
+        fs_write_bytes("{work}/limine-after.bin", after) else |_| { return io }
+        var mbr_first = ESP_START
+        var mbr_last = 0
+        var bios_first = ESP_START
+        var bios_last = 0
+        for i in 0..ESP_START {
+            if limine_before[i] == after[i] { continue }
+            if i >= LOG_OFFSET && i < LOG_OFFSET + LOG_CAPACITY {
+                eprint(
+                    "pax-install: Limine overlaps the log reservation at byte {i}; refusing further log writes",
+                )
+                return verify_failed
+            }
+            if i < 1048576 {
+                if i < mbr_first { mbr_first = i }
+                mbr_last = i + 1
+            } else {
+                if i < bios_first { bios_first = i }
+                bios_last = i + 1
+            }
+        }
+        print(
+            "Limine changed-byte envelopes: prefix [{mbr_first},{mbr_last}), BIOS partition [{bios_first},{bios_last}); log [65536,131072) unchanged",
+        )
     }
     fs_sync(fd) else |_| { return io }
     disk_log(fd, mut used, action.phase, "durable", "exit=0; target fsync completed")?

@@ -97,19 +97,14 @@ fn inventory_one(name: str) -> Target ! {io, invalid} {
         topology += ";{child}:{pid}:{part}:{start}:{size}"
     }
     var mounted_disk = false
-    let mounts = fs_read_text("/proc/self/mounts") else |_| { return io }
+    let mounts = fs_read_text("/proc/self/mountinfo") else |_| { return io }
     for line in mounts.lines() {
         let w = line.words()
-        if w.len < 4 { return invalid }
-        // The mounted source may be an alias: compare device numbers,
-        // never vdb prefixes (vdb and vdbb are different targets).
-        if w[0].starts_with("/") {
-            let ms = fs_stat(w[0]) else |_| { return io }
-            if ms[0] == 7 {
-                for member in members {
-                    if device_text(ms[11]) == member { mounted_disk = true }
-                }
-            }
+        if w.len < 7 || !w[2].contains(":") { return invalid }
+        // mountinfo carries the device number even when /dev/root is a
+        // synthetic source name or the original mount path has disappeared.
+        for member in members {
+            if w[2] == member { mounted_disk = true }
         }
     }
     Target {

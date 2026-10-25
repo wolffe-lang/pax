@@ -1,0 +1,20 @@
+fn main() -> int {
+    let a = env_args()
+    if a.len != 5 { return 2 }
+    let t = Target {
+        name: "vdb",
+        identity: "254:16-seq2",
+        bytes: 536870912,
+        sector: 512,
+        readonly: false,
+        mounted: false,
+        running_root: false,
+    }
+    let p = make_plan(t, "test", a[3], a[4]) else |e| { eprint("prepare: {e}"); return 1 }
+    boot_assets(a[0], a[1]) else |e| { eprint("prepare: {e}"); return 1 }
+    let games = staged_games(a[1]) else |e| { eprint("prepare: {e}"); return 1 }
+    let rows = source_snapshot(a[0]) else |e| { eprint("prepare: {e}"); return 1 }
+    stage_snapshot(a[0], a[2], "{a[2]}.attrs", rows) else |e| { eprint("prepare: {e}"); return 1 }
+    configure_tree(p, a[2], "{a[2]}.attrs", games) else |e| { eprint("prepare: {e}"); return 1 }
+    0
+}

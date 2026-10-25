@@ -18,7 +18,7 @@ with tempfile.TemporaryDirectory(dir=work,prefix='executor-') as tmp:
         d=w/status;d.mkdir();disk=d/'log.img';disk.write_bytes(bytes(131072))
         p=subprocess.run([program,disk,mock,d,status],capture_output=True,text=True)
         expected=0 if status=='0' else 1
-        assert p.returncode==expected,(status,p.stdout,p.stderr)
+        assert p.returncode==expected,('FAIL I-external-'+status,p.stdout,p.stderr)
         records=[json.loads(x) for x in disk.read_bytes()[65536:].split(b'\0',1)[0].splitlines()]
         assert records[0]['state']=='started'
         assert records[-1]['state']==('durable' if status=='0' else 'failed'),records

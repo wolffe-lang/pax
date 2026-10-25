@@ -13,7 +13,7 @@ import time
 
 work=Path(sys.argv[1]);firmware=sys.argv[2]
 image=work/('session-'+firmware+'.img');logpath=work/('session-'+firmware+'.serial')
-subprocess.run(['cp','--sparse=always',str(work/'target.img'),str(image)],check=True)
+subprocess.run(['cp','--sparse=always',str(Path(sys.argv[3]) if len(sys.argv)>3 else work/'target.img'),str(image)],check=True)
 mon=str(work/('session-'+firmware+'.mon'))
 if os.path.exists(mon):os.unlink(mon)
 cmd=['qemu-system-x86_64','-machine','q35,accel=tcg','-cpu','max','-smp','4','-m','512M',
@@ -42,7 +42,7 @@ def send(s,enter=True):
         p.stdin.write(bytes([b]));p.stdin.flush();time.sleep(.01)
     if enter:p.stdin.write(b'\r');p.stdin.flush()
 try:
-    commands=['echo hello > /etc/motd','lope add /usr/share/tunes','lope list','cd',
+    commands=['pax-install --dry-run --target vda --seed test --user pax --games no','echo hello > /etc/motd','lope add /usr/share/tunes','lope list','cd',
               'echo written on PAX, before the reboot > notes.txt','echo root wrote this in /root > /root/note','reboot']
     for i,line in enumerate(commands,1):prompt(1,i);send(line)
     wait(lambda s:b'marked clean; restarting' in s,'reboot completed')
@@ -66,6 +66,7 @@ for i,b in enumerate(boots,1):
     assert re.search(r'^root: PARTUUID=[0-9a-fA-F-]+ \(vda2\) on /: ext2, read-write, write-back$',b,re.M),b
     assert f'clean, mount {i};' in b,b
     assert re.search(r'fstab: PARTUUID=[0-9a-fA-F-]+ \(vda2\) is /: ext2, read-write, write-back',b),b
+assert 'pax-install: refused: running_root' in boots[0],boots[0]
 second=boots[1]
 for command,answer in [('cat /etc/motd','\nhello\n'),('lope list','/usr/share/tunes'),('cat notes.txt','written on PAX, before the reboot'),('cat /root/note','root wrote this in /root'),('cat /proc/self/mounts','/dev/root / ext2 rw,relatime 0 0')]:
     assert command in second and answer in second.split(command,1)[1].split('$ ',1)[0],(command,second)

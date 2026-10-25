@@ -5,7 +5,7 @@ use std.x.crypto.sha2
 
 const INSTALL_EPOCH: int = 1700000000
 
-struct Game { name: str, source: str, digest: str }
+struct Game { name: str, source: str, digest: str, archive: str, archive_digest: str }
 
 fn require_dir(path: str) -> () ! {io, invalid} {
     let st = fs_lstat(path) else |_| { return io }
@@ -68,7 +68,15 @@ fn staged_games(payload: str) -> List[Game] ! {io, invalid, corrupt_asset} {
         if count != 1 { return invalid }
         let source = "{payload}/games/{w[0]}"
         verify_file(source, digest)?
-        (mut out).push(Game { name: w[0], source: source, digest: digest })
+        let archive = "{payload}/games/{w[0]}.source.tar.gz"
+        verify_file(archive, w[2])?
+        (mut out).push(Game {
+            name: w[0],
+            source: source,
+            digest: digest,
+            archive: archive,
+            archive_digest: w[2],
+        })
     }
     if out.len == 0 || sums.lines().len != out.len { return invalid }
     out
@@ -164,6 +172,9 @@ fn configure_tree(p: Plan, tree: str, attrs: str, games: List[Game]) -> () ! {
         for g in games {
             let dir = "/home/{p.user}/Games/{g.name}"
             prepared_dir(tree, attrs, dir, INSTALL_USER_ID)?
+            copy_regular(g.archive, "{tree}{dir}/source.tar.gz")?
+            verify_file("{tree}{dir}/source.tar.gz", g.archive_digest)?
+            append_attrs(attrs, "{dir}/source.tar.gz", "0644", INSTALL_USER_ID, INSTALL_USER_ID)?
             copy_regular(g.source, "{tree}{dir}/{g.name}")?
             verify_file("{tree}{dir}/{g.name}", g.digest)?
             append_attrs(attrs, "{dir}/{g.name}", "0755", INSTALL_USER_ID, INSTALL_USER_ID)?

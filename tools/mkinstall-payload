@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Stage an offline installer payload from boot assets and tools/mkpack output.
+Usage: mkinstall-payload BOOT_DIRECTORY PACK_OUTPUT NEW_OUTPUT_DIRECTORY
+No network, target-device access or host installation.
+"""
+from pathlib import Path
+import hashlib
+import shutil
+import sys
+
+if len(sys.argv)!=4:raise SystemExit(__doc__)
+boot,game,out=map(Path,sys.argv[1:])
+repo=Path(__file__).resolve().parents[1]
+
+def digest(p):
+    if p.is_symlink() or not p.is_file():raise SystemExit('payload: not a regular file: '+str(p))
+    with p.open('rb') as f:return hashlib.file_digest(f,'sha256').hexdigest()
+
+catalog=(repo/'user/install/games.txt').read_text()
+rows=[x.split() for x in catalog.splitlines() if x and not x.startswith('#')]
+if len(rows)!=1 or rows[0][0]!='pack':raise SystemExit('payload builder needs a builder for each new game')
+row=rows[0]
+sums=(game/'games.sha256').read_text().split()
+if len(sums)!=2 or sums[1]!='pack' or digest(game/'pack')!=sums[0]:raise SystemExit('payload: pack digest mismatch')
+if digest(game/'pack.source.tar.gz')!=row[2]:raise SystemExit('payload: corresponding source digest mismatch')
+assets=['pax','limine/limine-bios.sys','EFI/BOOT/BOOTX64.EFI']
+boot_sums=''.join(digest(boot/x)+'  /boot/'+x+'\n' for x in assets)
+out.mkdir();(out/'games').mkdir()
+for name in ['pack','pack.source.tar.gz']:
+    shutil.copyfile(game/name,out/'games'/name)
+    (out/'games'/name).chmod(0o755 if name=='pack' else 0o644)
+    assert digest(game/name)==digest(out/'games'/name)==digest(out/'games'/name)
+(out/'games.txt').write_text(catalog)
+(out/'games.sha256').write_text((game/'games.sha256').read_text())
+(out/'boot.sha256').write_text(boot_sums)
+print('payload: static glibc pack, corresponding source/licences, and boot digest manifest staged')

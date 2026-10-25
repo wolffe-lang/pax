@@ -22,6 +22,13 @@ fn confirmation_verdict(p: Plan, t: Target, token: str) -> str {
     "ok"
 }
 
+fn identity_check(actual: str, expected: str) {
+    if actual != expected {
+        eprint("FAIL I-identity: expected {expected}, got {actual}")
+        os_exit(1)
+    }
+}
+
 fn main() {
     let t = target("vdb", 536870912)
     let p = make_plan(t, "test", "pax", "yes") else |_| { assert(false); return }
@@ -58,16 +65,16 @@ fn main() {
     assert(confirmation_verdict(p, t, p.token) == "ok")
     other = copy t
     other.name = "vdbb"
-    assert(confirmation_verdict(p, other, p.token) == "changed")
+    identity_check(confirmation_verdict(p, other, p.token), "changed")
     other = copy t
     other.identity = "254:16-seq3"
-    assert(confirmation_verdict(p, other, p.token) == "changed")
+    identity_check(confirmation_verdict(p, other, p.token), "changed")
     other = copy t
     other.bytes += 512
-    assert(confirmation_verdict(p, other, p.token) == "changed")
+    identity_check(confirmation_verdict(p, other, p.token), "changed")
     other = copy t
     other.mounted = true
-    assert(confirmation_verdict(p, other, p.token) == "changed")
+    identity_check(confirmation_verdict(p, other, p.token), "changed")
     print("PASS I-identity: similar name, changed identity/capacity/mount, exact token")
     assert(verdict(t, "pax", "") == "invalid")
     assert(verdict(t, "pax", "y") == "invalid")

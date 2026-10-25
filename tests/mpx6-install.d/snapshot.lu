@@ -5,8 +5,12 @@ fn main() -> int {
     if a.len != 3 && a.len != 4 { return 2 }
     let rows = source_snapshot(a[0]) else |e| { eprint("snapshot: {e}"); return 1 }
     if a.len == 4 {
-        let name = if a[3] == "bytes" then "/bin/tool" else "/new-file"
-        durable_text("{a[0]}{name}", "mutation witness") else |_| { return 2 }
+        if a[3] == "interrupt" {
+            fs_remove("{a[0]}/z-last") else |_| { return 2 }
+        } else {
+            let name = if a[3] == "bytes" then "/bin/tool" else "/new-file"
+            durable_text("{a[0]}{name}", "mutation witness") else |_| { return 2 }
+        }
     }
     stage_snapshot(a[0], a[1], a[2], rows) else |e| { eprint("stage: {e}"); return 1 }
     let again = source_snapshot(a[0]) else |e| { eprint("snapshot: {e}"); return 1 }

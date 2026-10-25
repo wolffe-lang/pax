@@ -68,6 +68,8 @@ if games=='yes':
     for path in ['/home/pax/Games','/home/pax/Games/pack','/home/pax/Games/pack/pack']:
         allowed.add(path);row=actual[path]
         assert int(row[2],8)==0o755 and row[3:5]==['1000','1000'],(path,row)
+    path='/home/pax/Games/pack/source.tar.gz';allowed.add(path);row=actual[path]
+    assert int(row[2],8)==0o644 and row[3:5]==['1000','1000'] and row[-1]==hashlib.sha256((work/'payload/games/pack.source.tar.gz').read_bytes()).hexdigest(),row
     digest=(work/'payload/games.sha256').read_text().split()[0]
     assert actual['/home/pax/Games/pack/pack'][-1]==digest
 else:assert not any('/Games' in x for x in actual)

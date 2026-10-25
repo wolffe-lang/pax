@@ -12,12 +12,14 @@ import sys
 import time
 
 repo,lane,work=map(Path,sys.argv[1:4]);games,name=sys.argv[4:6]
+fault=os.environ.get('PAX_INSTALL_FAULT','')
+full_tree=len(sys.argv)>6 and sys.argv[6]=='full'
 assert games in ['yes','no'] and name in ['vdb','vdc']
 work.mkdir(parents=True,exist_ok=True)
 source=work/'source'; source.mkdir()
 dt=lane/'build/disktools';full=lane/'build/full'
-kernel=Path((dt/'native.elf.path').read_text().strip())
-cache=lane/'cache'
+kernel=Path((dt/(os.environ.get('PAX_INSTALL_TIER','native')+'.elf.path')).read_text().strip())
+cache=Path(os.environ.get('PAX_CACHE',lane/'cache'))
 
 def run(args,ok=True):
     p=subprocess.run([str(x) for x in args],capture_output=True)
@@ -33,8 +35,21 @@ programs={n:dt/'bore'/n for n in ['cat','cp','env','ls']}
 programs.update(sh=full/'pelt/pelt',pelt=full/'pelt/pelt',lope=full/'lope/lope',reboot=full/'probe/reboot')
 programs.update({n:dt/'bin'/n for n in ['paxgpt','paxfat','paxext2']})
 programs.update(limine=dt/'limine/limine',**{'pax-install':lane/'build/install-gate/bin/pax-install'})
+if full_tree:
+    programs.update({p.name:p for p in (full/'bore').iterdir() if p.is_file() and os.access(p,os.X_OK)})
+    for n in ['aspen','yew','su','play','lupin']: programs[n]=full/n/n
+    for n in ['scent','egrep','fgrep']: programs[n]=full/'scent'/n
+    programs['as']=full/'bin/as'
 for n,p in programs.items():
-    run(['strip','-o',source/'bin'/n,p]);(source/'bin'/n).chmod(0o755)
+    if p.read_bytes()[:4]==b'\x7fELF':run(['strip','-o',source/'bin'/n,p])
+    else:shutil.copyfile(p,source/'bin'/n)
+    (source/'bin'/n).chmod(0o755)
+if full_tree:
+    shutil.copytree(full/'std/std',source/'usr/share/wolf/std')
+    shutil.copytree(repo/'user/lupin',source/'usr/share/lupin')
+    for p in (repo/'user/tunes').iterdir():shutil.copyfile(p,source/'usr/share/tunes'/p.name)
+    shutil.copyfile(full/'localtime',source/'etc/localtime')
+    os.symlink('scent',source/'bin/grep')
 shutil.copyfile(kernel,source/'boot/pax')
 for src,dst in [('BOOTX64.EFI','boot/EFI/BOOT/BOOTX64.EFI'),('limine-bios.sys','boot/limine/limine-bios.sys')]:
     shutil.copyfile(cache/'limine-12.9.1'/src,source/dst)
@@ -50,19 +65,33 @@ os.symlink('../proc/self/mounts',source/'etc/mtab')
 payload=work/'payload';(payload/'games').mkdir(parents=True)
 shutil.copyfile(repo/'user/install/games.txt',payload/'games.txt')
 shutil.copyfile(full/'pack/pack',payload/'games/pack')
+shutil.copyfile(full/'pack/pack.source.tar.gz',payload/'games/pack.source.tar.gz')
 shutil.copyfile(full/'pack/games.sha256',payload/'games.sha256')
 (payload/'boot.sha256').write_text(''.join(sha(source/p)+'  /'+p+'\n' for p in ['boot/pax','boot/limine/limine-bios.sys','boot/EFI/BOOT/BOOTX64.EFI']))
+if fault=='missing-boot':(source/'boot/pax').unlink()
+if fault=='corrupt-boot':
+    with (source/'boot/pax').open('ab') as f:f.write(b'corrupt')
+if fault in ['gpt','fat','root','limine']:
+    executable={'gpt':'paxgpt','fat':'paxfat','root':'paxext2','limine':'limine'}[fault]
+    (source/'bin'/executable).write_text('#!/bin/sh\nexit 2\n')
+if fault=='invalid-manifest':
+    shutil.copyfile(source/'bin/paxext2',source/'bin/paxext2.real')
+    (source/'bin/paxext2').write_text('#!/bin/sh\nprev=\nfor arg do\n if [ "$prev" = --attrs ]; then printf "not a manifest\\n" > "$arg"; fi\n prev=$arg\ndone\nexec /bin/paxext2.real "$@"\n')
 seed='px71-'+games+'-'+name
 minor,seq=(16,2) if name=='vdb' else (32,3)
-token=f'ERASE /dev/{name} 254:{minor}-seq{seq} 536870912 {seed}'
+capacity=77611520 if fault=='enospc' else 536870912
+token=f'ERASE /dev/{name} 254:{minor}-seq{seq} {capacity} {seed}'
+if fault=='wrong-token':token+='-WRONG'
 script=work/'install.sh'
 script.write_text(f'/bin/pax-install --install --ext2-preview --target {name} --seed {seed} --user pax --games {games} --source /source --payload /payload --confirm "{token}"\n'
                   'echo INSTALL-EXIT-$?\n')
+if fault=='cancel':script.write_text("printf 'q\\n' | /bin/pax-install --seed test\necho INSTALL-EXIT-$?\n")
+if fault=='missing-tool':script.write_text(script.read_text().replace('--payload /payload','--payload /payload --tool-dir /missing'))
 (work/'run').write_text('/bin/sh /install.sh\n')
 args=['/tmp/:1777','/bin/sh='+str(source/'bin/sh')+':755','/bin/pax-install='+str(source/'bin/pax-install')+':755',
       '/etc/pax-run='+str(work/'run')+':644','/install.sh='+str(script)+':644']
 # Formatters execute from the rescue environment, not the target.
-for n in ['paxgpt','paxfat','paxext2','limine']:args.append('/bin/'+n+'='+str(source/'bin'/n)+':755')
+for n in ['paxgpt','paxfat','paxext2','limine']+(['paxext2.real'] if fault=='invalid-manifest' else []):args.append('/bin/'+n+'='+str(source/'bin'/n)+':755')
 for base,prefix in [(source,'/source'),(payload,'/payload')]:
     for p in [base,*sorted(base.rglob('*'))]:
         rel=prefix+('/'+p.relative_to(base).as_posix() if p!=base else '')
@@ -76,16 +105,33 @@ for base,prefix in [(source,'/source'),(payload,'/payload')]:
 run([repo/'tools/mkinitramfs',work/'init.cpio',*args])
 run([repo/'tools/mkimage','--conf',repo/'boot/limine-initramfs.conf','--add',work/'init.cpio','initramfs.cpio',kernel,work/'boot.iso'])
 with (work/'source-guard.img').open('wb') as f:f.truncate(8*1024*1024)
-with (work/'target.img').open('wb') as f:f.truncate(512*1024*1024)
+with (work/'target.img').open('wb') as f:f.truncate(capacity)
 guard=sha(work/'source-guard.img')
-cmd=[repo/'tools/qemu-halt','--accel','tcg','--firmware','bios','--timeout','1200','--elf',kernel,
+blank=sha(work/'target.img')
+cmd=[repo/'tools/qemu-halt','--accel','tcg','--firmware',os.environ.get('PAX_INSTALL_FIRMWARE','bios'),'--timeout','1200','--elf',kernel,
      '--serial',work/'install.serial','--marker','halt','--qemu','-m','--qemu','1536M','--drive',str(work/'source-guard.img')+',ro']
 if name=='vdc':cmd+=['--drive',str(work/'source-guard.img')+',ro']
-cmd+=['--drive',work/'target.img',work/'boot.iso']
+cmd+=['--drive',str(work/'target.img')+(',ro' if fault=='readonly' else ''),work/'boot.iso']
 t=time.monotonic();p=run(cmd,False);(work/'install.boot').write_bytes(p.stdout+p.stderr)
 assert p.returncode==0,(p.returncode,p.stdout,p.stderr)
 s=(work/'install.serial').read_text(errors='replace')
-assert 'INSTALL-EXIT-0' in s,s[-18000:]
+if fault:
+    assert 'INSTALL-EXIT-1' in s,s[-8000:]
+    assert sha(work/'source-guard.img')==guard
+    if fault in ['missing-boot','corrupt-boot','readonly','cancel','wrong-token']:
+        assert sha(work/'target.img')==blank,'prewrite refusal changed target'
+        expected={'missing-boot':'stopped: io','corrupt-boot':'corrupt_asset','readonly':'refused: readonly','cancel':'cancelled','wrong-token':'unconfirmed'}[fault]
+        assert expected in s,s[-8000:]
+    else:
+        with (work/'target.img').open('rb') as f:f.seek(65536);raw=f.read(65536).split(b'\0',1)[0]
+        records=[json.loads(x) for x in raw.splitlines()]
+        phase='root' if fault in ['enospc','invalid-manifest'] else ('gpt' if fault=='missing-tool' else fault)
+        assert records[-1]['phase']==phase and records[-1]['state']=='failed',records
+        assert not any(x['state']=='complete' for x in records)
+        if fault in ['gpt','fat','root','limine']:assert 'exit=2' in records[-1]['detail']
+    print('PASS I-fault-'+fault+': named refusal, no swallowed exit or bootability claim; source guard unchanged',flush=True)
+    sys.exit(0)
+assert 'INSTALL-EXIT-0' in s,('FAIL I-boot-files' if 'phase verify-boot-' in s else 'FAIL I-install')+'\n'+s[-18000:]
 assert sha(work/'source-guard.img')==guard
 with (work/'target.img').open('rb') as f:
     f.seek(65536);log=f.read(65536).split(b'\0',1)[0]
