@@ -45,7 +45,10 @@ def passed(name):
 
 
 def fsck(image):
-    p = oracle("e2fsck", "-fn", image)
+    try:
+        p = oracle("e2fsck", "-fn", image)
+    except AssertionError as e:
+        raise AssertionError("E-e2fsck: " + str(e)) from e
     assert b"WARNING" not in p.stdout + p.stderr, p.stdout + p.stderr
     return p
 
