@@ -115,7 +115,7 @@ for fw in firmwares:
     repaired = partition(image, r/(fw+'.repaired.ext2'))
     with repaired.open('rb') as f:
         f.seek(1082)
-        assert f.read(2) == b'\x01\x00', 'rescue left the superblock dirty'
+        assert f.read(2) == b'\x01\x00', 'FAIL R-clean: rescue left the superblock dirty'
     run([repo/'tools/e2fs', r, 'e2fsck', '-fn', repaired], fw+'.repair-verify.log')
     configure(image, r/'root.conf')
     for phase in ['restart', 'halt']:
