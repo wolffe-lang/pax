@@ -8,7 +8,7 @@ cd "$L/pax"
 W=$L/dev-iso
 mkdir -p "$W"
 [ "$(sha256sum "$W/base.iso" | cut -d' ' -f1)" = 893ae1b90446a05e8e4d607d56a7eca956d15f8848d7495ce433e798041a50de ]
-xorriso -osirrox on -indev "$W/base.iso" -extract /initramfs.cpio "$W/base.cpio"
+xorriso -osirrox on -indev "$W/base.iso" -extract /boot/initramfs.cpio "$W/base.cpio"
 strip -o "$W/pelt" "$L/build/mpx5-pelt/pelt/pelt"
 python3 -I notes/px81/dev-iso/repack.py "$W/base.cpio" "$W/pelt" "$W/friendly.cpio" > "$W/payload-manifest.txt"
 elf=$L/build/mpx5-pelt/native/kmain_console.elf
