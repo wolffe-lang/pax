@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# mknodes — build px79's probe of the block device nodes, `nodes`
+# (user/elf/nodes.c: stat of the nodes, /dev's block devices, /proc and
+# /sys's block files, the block ioctls, raw reads and writes, a sector
+# pattern, BLKRRPART and BLKPG, mount by node), a static x86-64 Linux
+# executable, for tests/mpx6-nodes and the Linux guest it is held to
+# (tools/linux-nodes).
+#
+#   tools/mknodes OUTDIR
+#
+# mkdiskprobe's compiler line (`cc -static -no-pie -O1`, ET_EXEC with no
+# PT_INTERP, checked), its own tool so that a change to the probe reaches
+# only the suite that runs it (the CI map follows the tools a test
+# names). Build on a baseline x86-64 glibc (the CI runner's Ubuntu; an
+# Ubuntu container on kasumi), never on kasumi's own (px10). Prints
+# `nodes <sha256> <bytes>`. Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mknodes OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${CC:-cc}
+need "$cc" readelf
+"$cc" -static -no-pie -O1 -Wall -Wextra -Wno-unused-result -Wl,--build-id=none -Wl,-z,noexecstack \
+    -o "$out/nodes" "$PAX_ROOT/user/elf/nodes.c" || die "cc: nodes"
+readelf -hW "$out/nodes" | grep -Eq 'Type: +EXEC' || die "nodes is not ET_EXEC"
+! readelf -lW "$out/nodes" | grep -q INTERP || die "nodes has a PT_INTERP (not static)"
+printf 'nodes %s %s\n' "$(sha256_of "$out/nodes")" "$(wc -c < "$out/nodes" | tr -d ' ')"
