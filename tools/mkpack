@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Stage pack for the installer; no fetch occurs on the installed system.
+# Uses wolf 0.2.35's entire verified archive and its bundled std. Requires
+# an existing musl-gcc; installs nothing. No game or libc source is patched.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die 'usage: mkpack OUTDIR'
+need curl tar readelf file musl-gcc clang
+out=$1
+mkdir -p "$out" "$PAX_CACHE"
+out=$(cd "$out" && pwd)
+read -r name rev digest payload mode < <(awk '$1 == "pack" {print}' "$PAX_ROOT/user/install/games.txt")
+[ "$name" = pack ] && [ "$payload" = pack ] && [ "$mode" = 0755 ] || die 'invalid pack payload row'
+arc=$PAX_CACHE/pack-$rev.tar.gz
+if [ ! -f "$arc" ] || [ "$(sha256_of "$arc")" != "$digest" ]; then
+    curl -fsSL --retry 3 "https://codeload.github.com/wolffe-lang/pack/tar.gz/$rev" -o "$arc.part"
+    mv "$arc.part" "$arc"
+fi
+[ "$(sha256_of "$arc")" = "$digest" ] || die 'pack source archive digest mismatch'
+[ "$(sha256_of "$arc")" = "$digest" ] || die 'pack source archive changed'
+load_wolf_pin
+[ "$WOLF_VERSION" = 0.2.35 ] || die 'pack requires its own audited toolchain pin update'
+[ "$WOLF_SHA256" = 4cc4045bbbb605c07835bc4f32685953c784eeef4cd3139a48b457dfc90dad1a ] || die 'unexpected wolf archive'
+wolf=$("$PAX_ROOT/tools/fetch-wolf")
+[ "$("$wolf" --version | head -1)" = 'wolf 0.2.35 (wolfgang, pin cf0c13d)' ] || die 'unexpected wolf version'
+std=$(dirname "$wolf")/std
+[ -d "$std" ] || die 'whole wolf archive (including std) required'
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-pack.XXXXXX")
+# Keep a failed build for diagnosis; remove only this unique directory on success.
+mkdir "$w/src" "$w/bin"
+tar -xzf "$arc" -C "$w/src" --strip-components=1
+printf '#!/bin/bash\nexec %q -static -no-pie "$@"\n' "$(command -v musl-gcc)" > "$w/bin/cc"
+chmod 755 "$w/bin/cc"
+# pack's own tools/build disables the 0.2.35 mid-end for live input.
+PATH="$w/bin:$PATH" WOLF_STD="$std" WOLF_MIDEND=0 "$wolf" build --release --no-cache --deny-warnings \
+    "$w/src/src/pack.lu" -o "$out/pack" >&2
+readelf -hW "$out/pack" | grep -Eq 'Type: +EXEC' || die 'pack is not ET_EXEC'
+if readelf -lW "$out/pack" | grep -q INTERP; then die 'pack has an interpreter'; fi
+file "$out/pack" | tee "$out/pack.file"
+grep -q 'statically linked' "$out/pack.file" || die 'file does not report static linkage'
+chmod 755 "$out/pack"
+sha=$(sha256_of "$out/pack")
+[ "$(sha256_of "$out/pack")" = "$sha" ] || die 'pack changed during readback'
+printf '%s  pack\n' "$sha" > "$out/games.sha256"
+printf 'pack %s %s %s musl-static\n' "$rev" "$sha" "$(wc -c < "$out/pack" | tr -d ' ')" > "$out/sums.txt"
+cat "$out/sums.txt"
+rm -rf "$w"
