@@ -85,8 +85,12 @@ find_ovmf() {
 # Exactly one shape, never both. Both set LUPIN_VERSION / LUPIN_SHA256.
 # Sets WOLF_PIN_KIND (source | release) and the staged paths WOLF_DIR
 # and LUPIN_DIR (tools/fetch-wolf, tools/fetch-lupin).
+# PAX_WOLF_PIN (as02b) names another pin file of the same shapes: the
+# kernel-as suite's seam wolf (tests/kernel-as.d/wolf.pin), a source pin
+# of the wolf-lang commit that carries `--assembler` / WOLF_AS, while
+# kernel/wolf.pin stays the release every kernel is built with.
 load_wolf_pin() {
-    local pin=$PAX_ROOT/kernel/wolf.pin
+    local pin=${PAX_WOLF_PIN:-$PAX_ROOT/kernel/wolf.pin}
     [ -f "$pin" ] || die "no $pin"
     # shellcheck disable=SC1090
     . "$pin"
