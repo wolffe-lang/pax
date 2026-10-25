@@ -44,6 +44,12 @@
      nodes mark PATH OFF SEED     one 512-byte sector of the pattern (its
                              sector number OFF / 512) at OFF, fsync
      nodes rd PATH OFF LEN   LEN bytes at OFF: the count and their FNV-1a 64
+     nodes send PATH OFF FILE HOW  FILE's bytes onto PATH from byte OFF
+                             by sendfile(2) (HOW `sendfile`), through a
+                             pipe by splice(2) (`splice`: the file into
+                             the pipe, the pipe onto PATH) or by
+                             copy_file_range(2) (`cfr`), fsync: each
+                             call's last answer and the bytes moved
      nodes copy SRC DST      every byte of SRC written to DST from its start
                              (as much as both hold), fsync
      nodes sync              sync(2)
@@ -62,7 +68,8 @@
    Every answer is the call's value or `-errno NAME`. Built with the
    host's cc: `cc -static -O1` (tools/mkdiskprobe). Written from the man
    pages (ioctl(2), ioctl_list(2), sd(4), open(2), lseek(2), read(2),
-   write(2), mount(2), proc(5), sysfs(5)) and the uapi headers
+   write(2), mount(2), proc(5), sysfs(5), sendfile(2), splice(2),
+   copy_file_range(2)) and the uapi headers
    linux/fs.h, linux/blkpg.h and linux/hdreg.h for the requests' numbers
    and structures; no kernel's source, no libc's source, no util-linux
    source. */
@@ -80,6 +87,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
+#include <sys/sendfile.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
@@ -506,6 +514,50 @@ static void rdsum(const char *path, long off, long len) {
     close(fd);
 }
 
+static void send(const char *path, long off, const char *file, const char *how) {
+    int in = open(file, O_RDONLY);
+    if (in < 0) { say("send %s: open %s: %s\n", path, file, ans(-1)); return; }
+    int out = open(path, O_WRONLY);
+    if (out < 0) { say("send %s: %s\n", path, ans(-1)); close(in); return; }
+    struct stat st;
+    fstat(in, &st);
+    long at = lseek(out, off, SEEK_SET);
+    long total = 0, r = 0;
+    if (!strcmp(how, "sendfile")) {
+        while (total < st.st_size) {
+            r = sendfile(out, in, NULL, (size_t)(st.st_size - total));
+            if (r <= 0) break;
+            total += r;
+        }
+    } else if (!strcmp(how, "splice")) {
+        int p[2];
+        if (pipe(p) < 0) { say("send %s: pipe %s\n", path, ans(-1)); close(in); close(out); return; }
+        while (total < st.st_size) {
+            r = splice(in, NULL, p[1], NULL, 4096, 0);
+            if (r <= 0) break;
+            long got = r, moved = 0;
+            while (moved < got) {
+                r = splice(p[0], NULL, out, NULL, (size_t)(got - moved), 0);
+                if (r <= 0) break;
+                moved += r;
+            }
+            total += moved;
+            if (r <= 0) break;
+        }
+        close(p[0]);
+        close(p[1]);
+    } else {
+        r = copy_file_range(in, NULL, out, NULL, (size_t)st.st_size, 0);
+        if (r > 0) total = r;
+    }
+    const char *last = ans(r);
+    long f = fsync(out);
+    long pos = lseek(out, 0, SEEK_CUR);
+    say("send %s %s: lseek %s, last %s, %ld bytes, at %ld, fsync %s\n", how, path, ans(at), last, total, pos, ans(f));
+    close(in);
+    close(out);
+}
+
 static void blkpg(const char *path, int op, int pno, long long start, long long len) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) { say("blkpg %s: %s\n", path, ans(-1)); return; }
@@ -550,6 +602,7 @@ int main(int argc, char **argv) {
     if (!strcmp(c, "rewrite") && argc == 5) { rewrite(argv[2], strtol(argv[3], 0, 0), strtol(argv[4], 0, 0)); return 0; }
     if (!strcmp(c, "mark") && argc == 5) { mark(argv[2], strtol(argv[3], 0, 0), strtoull(argv[4], 0, 0)); return 0; }
     if (!strcmp(c, "rd") && argc == 5) { rdsum(argv[2], strtol(argv[3], 0, 0), strtol(argv[4], 0, 0)); return 0; }
+    if (!strcmp(c, "send") && argc == 6) { send(argv[2], strtol(argv[3], 0, 0), argv[4], argv[5]); return 0; }
     if (!strcmp(c, "copy") && argc == 4) { copy(argv[2], argv[3]); return 0; }
     if (!strcmp(c, "sync") && argc == 2) { sync(); say("sync: done\n"); return 0; }
     if (!strcmp(c, "add") && argc == 6) { blkpg(argv[2], BLKPG_ADD_PARTITION, atoi(argv[3]), strtoll(argv[4], 0, 0), strtoll(argv[5], 0, 0)); return 0; }
