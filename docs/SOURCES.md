@@ -1272,7 +1272,9 @@ Default suggestions use SGR90 and resolving commands the default foreground.
 The separate custom palette `command=green:shadow=brblack+dim` exercises
 SGR2 explicitly, without changing the shipped defaults. PAX's own px70
 console rows are the framebuffer attribute reference. `stty` is the
-already-pinned BusyBox binary, used black-box solely for window dimensions.
+already-pinned BusyBox binary, used black-box for the explicit resize.
+A small original C probe reads TIOCGWINSZ through its public ioctl ABI, since
+BusyBox stty prints a diagnostic instead of dimensions at0x0.
 
 `tools/census/inside/pins.sh` now records this pelt launch tree; C4 in
 `tests/census` compares it with `user/pelt.pin`. Neither a later upstream
