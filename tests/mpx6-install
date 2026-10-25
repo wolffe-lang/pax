@@ -1,34 +1,94 @@
 #!/usr/bin/env bash
-# Initial read-only installer gate. Requires a staged console kernel for
-# --only inventory; no target writable open is reachable in this milestone.
+# Installer gate: pure policy, UI, snapshot, external exits, then real disks.
+# Full adds the complete installed tree and both firmware sessions. Inputs:
+# tools/mkdisktools tools/mklimine-static tools/mkpelt tools/mklope tools/mkpack
+# tools/mkboreutils tools/mkdiskprobe tools/build-kernel tools/mkinitramfs
+# tools/mkimage tools/e2tree tools/e2fs tools/disktools tools/mkaspen tools/mkscent
+# tools/fetch-std tools/mkyew tools/mkas tools/mksu tools/mkplay tools/mkzone tools/mklupin
+# user/install user/shrc user/fstab-root kernel/kmain_console.lu
 set -euo pipefail
 . "$(dirname "$0")/../tools/lib.sh"
-only=planner
+only=ci rows=${PAX_INSTALL_ROWS:-smoke} tier=native firmware=bios
 work=$PAX_BUILD/mpx6-install
-kernel=
+kernel= inputs=
 while [ $# -gt 0 ]; do
     case $1 in
         --only) only=$2; shift 2 ;;
         --work) work=$2; shift 2 ;;
         --kernel) kernel=$2; shift 2 ;;
-        *) die 'usage: mpx6-install [--only planner|inventory|snapshot|ui|executor] [--work DIR] [--kernel ELF]' ;;
+        --inputs) inputs=$2; shift 2 ;;
+        --rows) rows=$2; shift 2 ;;
+        --tier) tier=$2; shift 2 ;;
+        --firmware) firmware=$2; shift 2 ;;
+        *) die 'usage: mpx6-install [--only ci|planner|inventory|snapshot|ui|executor|prepare] [--work DIR] [--inputs LANE] [--rows smoke|full] [--tier native|release|both] [--firmware bios|uefi|both]' ;;
     esac
 done
-mkdir -p "$work"
-work=$(cd "$work" && pwd)
+case $tier in native|release|both) ;; *) die 'bad tier' ;; esac
+case $firmware in bios|uefi|both) ;; *) die 'bad firmware' ;; esac
+case $rows in smoke|full) ;; *) die 'bad rows' ;; esac
+mkdir -p "$work"; work=$(cd "$work" && pwd)
+unit() {
+    local mode=$1
+    "$PAX_ROOT/tools/mkinstall" "$work/bin" "$mode"
+    if [ "$mode" = planner ]; then "$work/bin/pax-planner"
+    else python3 -I "$PAX_ROOT/tests/mpx6-install.d/$mode.py" "$work/bin/pax-$mode" "$work/$mode"; fi
+}
 case $only in
-    planner)
-        "$PAX_ROOT/tools/mkinstall" "$work/bin" planner
-        "$work/bin/pax-planner"
-        ;;
-    snapshot|ui|executor)
-        "$PAX_ROOT/tools/mkinstall" "$work/bin" "$only"
-        python3 -I "$PAX_ROOT/tests/mpx6-install.d/$only.py" "$work/bin/pax-$only" "$work/$only"
-        ;;
+    planner|snapshot|ui|executor|prepare) unit "$only"; exit ;;
     inventory)
         [ -f "$kernel" ] || die 'inventory needs --kernel ELF'
         "$PAX_ROOT/tools/mkinstall" "$work/bin"
         python3 -I "$PAX_ROOT/tests/mpx6-install.d/inventory.py" "$PAX_ROOT" "$work/inventory" "$work/bin" "$kernel"
-        ;;
+        exit ;;
+    ci) ;;
     *) die 'unknown suite selection' ;;
 esac
+for mode in planner ui snapshot executor prepare; do unit "$mode"; done
+export PAX_WOLF
+PAX_WOLF=$("$PAX_ROOT/tools/fetch-wolf")
+export SOURCE_DATE_EPOCH=1700000000
+if [ -z "$inputs" ]; then
+    inputs=$work/inputs
+    mkdir -p "$inputs/build/full"
+    "$PAX_ROOT/tests/mpx6-disktools" --only build --work "$inputs/build/disktools" --tier "$tier" --firmware "$firmware"
+    for n in pelt lope probe; do cp -R "$inputs/build/disktools/$n" "$inputs/build/full/$n"; done
+    "$PAX_ROOT/tools/mkpack" "$inputs/build/full/pack"
+    if [ "$rows" = full ]; then
+        w=$inputs/build/full
+        "$PAX_ROOT/tools/mkboreutils" "$w/bore" base32 base64 basename cat chgrp chmod chown comm cp cut dirname echo env expand false fold groups head id join kill link ln logname ls mkdir mkfifo mktemp mv nl nproc paste printenv printf pwd readlink realpath rm rmdir seq shuf sleep sort stat sync tac tail tee timeout touch tr true truncate tsort tty unexpand uniq unlink wc whoami yes
+        for tool in aspen scent yew su play lupin; do "$PAX_ROOT/tools/mk$tool" "$w/$tool"; done
+        "$PAX_ROOT/tools/fetch-std" "$w/std"
+        "$PAX_ROOT/tools/mkas" "$w/bin"
+        "$PAX_ROOT/tools/mkzone" "$w/localtime"
+    fi
+fi
+"$PAX_ROOT/tools/mkinstall" "$inputs/build/install-gate/bin"
+D=$PAX_ROOT/tests/mpx6-install.d
+first=$tier; [ "$tier" != both ] || first=native
+export PAX_INSTALL_TIER=$first
+python3 -I "$D/inventory.py" "$PAX_ROOT" "$work/inventory" "$inputs/build/install-gate/bin" "$(cat "$inputs/build/disktools/$first.elf.path")"
+# Both decisions and a different target name are unconditional smoke rows.
+for game in no yes; do
+    target=vdb; [ "$game" != yes ] || target=vdc
+    casework=$work/$game
+    python3 -I "$D/install.py" "$PAX_ROOT" "$inputs" "$casework" "$game" "$target"
+    python3 -I "$D/verify.py" "$PAX_ROOT" "$casework" "$game" "$target"
+    python3 -I "$D/gap.py" "$casework" "$inputs/build/disktools/limine/limine"
+    python3 -I "$D/session.py" "$casework" bios "$casework/log-last.img"
+done
+for fault in cancel wrong-token readonly missing-boot corrupt-boot missing-tool gpt fat root limine invalid-manifest enospc; do
+    PAX_INSTALL_FAULT=$fault python3 -I "$D/install.py" "$PAX_ROOT" "$inputs" "$work/fault-$fault" no vdb
+done
+if [ "$rows" = full ]; then
+    tiers=$tier; [ "$tier" != both ] || tiers='native release'
+    for t in $tiers; do
+        for fw in bios uefi; do
+            casework=$work/full-$t-$fw
+            PAX_INSTALL_TIER=$t PAX_INSTALL_FIRMWARE=$fw python3 -I "$D/install.py" "$PAX_ROOT" "$inputs" "$casework" yes vdc full
+            python3 -I "$D/verify.py" "$PAX_ROOT" "$casework" yes vdc
+            python3 -I "$D/gap.py" "$casework" "$inputs/build/disktools/limine/limine"
+            for boot in bios uefi; do python3 -I "$D/session.py" "$casework" "$boot" "$casework/log-last.img"; done
+        done
+    done
+fi
+say 'mpx6-install: PASS; 0 SKIP (PAX RSS unavailable is a named kernel prerequisite, not a test skip)'

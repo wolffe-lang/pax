@@ -3980,6 +3980,64 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  # px71: smallest policy/executor rows plus real second-disk installs.
+  mpx6-install:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-install')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+      PAX_INSTALL_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'smoke' || 'full' }}
+      PAX_LOPE_REPO: ${{ github.workspace }}/.lope
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ubuntu baseline compiler, QEMU, firmware and independent oracles
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make strace gdisk fdisk dosfstools mtools e2fsprogs
+      - name: lope's pin
+        id: lope
+        run: |
+          . user/lope.pin
+          echo "rev=$LOPE_REV" >> "$GITHUB_OUTPUT"
+      - name: require the private lope checkout token
+        env:
+          TOKEN: ${{ secrets.WOLF_CI_TOKEN }}
+        run: |
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::error::WOLF_CI_TOKEN is required for the installed playground"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          repository: wolffe-lang/lope
+          ref: ${{ steps.lope.outputs.rev }}
+          token: ${{ secrets.WOLF_CI_TOKEN }}
+          path: .lope
+          persist-credentials: false
+      - name: guided installer, independent readback and persistent target sessions
+        run: tests/mpx6-install $PAX_LEGS
+      - name: keep installer phase logs, byte-range proofs and oracle verdicts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-install
+          path: |
+            build/mpx6-install/**/*.log
+            build/mpx6-install/**/*.serial
+            build/mpx6-install/**/*.verify
+            build/mpx6-install/**/*.fsck
+            build/mpx6-install/**/*.tree
+            build/mpx6-install/**/*.json
+            build/mpx6-install/**/*.jsonl
+            build/mpx6-install/**/limine-*.bin
+            build/mpx6-install/**/sums.txt
+            build/mpx6-install/**/*.sha256
+          retention-days: 14
+          if-no-files-found: error
+
   tier:
     name: tier ${{ needs.plan.outputs.tier || 'unplanned' }}
     if: ${{ !cancelled() }}
@@ -4034,6 +4092,7 @@ jobs:
       - mpx6-journal
       - mpx6-nodes
       - mpx6-disktools
+      - mpx6-install
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # The issue step's token may write issues; nothing else.
