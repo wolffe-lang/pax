@@ -1159,3 +1159,26 @@ kernels: none consulted.
 | black-box Linux: kasumi's installed 7.3.0-4-cachyos image on QEMU 11.1.2 (q35, TCG), one to three virtio-blk disks (`tools/linux-nodes`, the probe `user/elf/nodes.c` and boreutils' `ls` run unmodified, pelt as the shell) | — | GPL-2.0 (a program we run) | run, never read | every expected answer of `tests/mpx6-nodes` (recorded in `tests/mpx6-nodes.d/linux/`; the lane's measurements in `notes/px79/guest.sh`): the nodes `brw-------` 0:0 with no udev, st_blksize 512, size 0; 254:0, 254:16, 254:32 for three disks in PCI slot order, 254:N to vdX15 and the extended major 259 from 0 for the rest across disks (vdb16 259:113 after vda's 113), the lowest free minor again after a rescan; /proc/partitions' and /sys's values (a disk's `dev`, `size`, `ro`, `removable`; a partition's `dev`, `start`, `size`, `partition`, `ro`; `/sys/block/vda` and `/sys/class/block/<name>` links into /sys/devices); each ioctl's value and the bytes it writes (BLKGETSIZE64 and BLKGETSIZE 8, BLKSSZGET, BLKPBSZGET, BLKIOMIN 512 in 4, BLKIOOPT, BLKALIGNOFF, BLKDISCARDZEROES 0 in 4, BLKROGET 1 on a read-only disk, BLKBSZGET 4096 or 512 (the largest block the size is a whole number of), BLKROTATIONAL 1 in 2, BLKGETDISKSEQ 1, 2, 3, HDIO_GETGEO the device's geometry, QEMU's 16/63 by default and its `cyls=`, `heads=`, `secs=` when set, the start as the unsigned long); TCGETS, FIONREAD, FS_IOC_GETFLAGS ENOTTY; lseek bounded to the size (EINVAL past it and before 0, SEEK_DATA EINVAL); reads short across the end and 0 at it; writes short across the end and ENOSPC at and past it; a read-only disk's writes EPERM even of no bytes, its O_RDWR open allowed; O_DIRECT, O_TRUNC accepted, O_DIRECTORY ENOTDIR; BLKRRPART EBUSY with a partition open or mounted, 0 with the disk open, EINVAL on a partition; O_EXCL against O_EXCL and against a mount, both ways and across the disk and its partitions; BLKPG: an overlapping range and a number in use EBUSY, a range past the end EINVAL, an open or mounted partition's deletion EBUSY; mount(2) from a node, ENOTBLK for /dev/null, ENOENT for a bare name |
 | QEMU 11.1.2's virtio-blk-pci device properties `cyls`, `heads`, `secs` | kasumi's | GPL-2.0 (a program we run) | run | the geometry row (the guest answers the device's) |
 | e2fsprogs 1.47.0 (`e2fsck -fn`), from the image tools/e2fs pins | as px63 | GPL-2.0 (programs we run) | run, never read | N6, N10, N14 |
+
+## px69 — disk tools
+
+- **UEFI Specification 2.10**, chapter 5, §§5.2–5.3 (protective MBR,
+  GPT headers, entry arrays, CRCs and backup-first updates); Appendix A,
+  Tables A.1–A.2 (GUID layout and text). `user/disktools/paxgpt` and its
+  independent sfdisk/sgdisk differential.
+  <https://uefi.org/specs/UEFI/2.10/05_GUID_Partition_Table_Format.html>
+  <https://uefi.org/specs/UEFI/2.10/Apx_A_GUID_and_Time_Formats.html>
+- **Microsoft FAT Specification, 30 August 2005**, §§3.3–3.6 (FAT32
+  BPB, geometry and backup), §4 (allocation table), §5 (FSInfo), §6
+  (directories and timestamps), §7.1–7.3 (VFAT order, checksum, UTF-16
+  names and padding), pages 11–16 and 17–33. The published specification,
+  not filesystem-tool source; retrieved from
+  <https://academy.cba.mit.edu/classes/networking_communications/SD/FAT.pdf>.
+  `user/disktools/paxfat` preserves UTF-16 surrogate pairs; the test names
+  mtools 4.0.49's observed supplementary-character truncation separately.
+- **Black-box programs:** e2fsprogs 1.47.4, dosfstools 4.2, mtools 4.0.49,
+  util-linux 2.42.4 and GPT fdisk 1.0.10, copied with their binary libraries
+  into the lane's Ubuntu build container; their implementation source was
+  not opened. Geometry, alias choice and diagnostic behaviour were measured.
+  The maintained `tools/mkgpt` is the seed-compatibility reference;
+  sfdisk and sgdisk supply the independent partition-table checks.
