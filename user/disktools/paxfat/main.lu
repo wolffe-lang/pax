@@ -156,9 +156,13 @@ fn format(path: str, base: int, size: int, label: str, seed: str) -> () ! {inval
 fn open_volume(path: str, base: int, write: bool) -> Volume ! {invalid, io} {
     if base < 0 || base % 512 != 0 { return invalid }
     let fd = if write {
-        (fs_open_mode(path, 3) else |_| { return io })
+        // Non-formatting commands require an existing volume. Mode 3 alone
+        // would create an empty file after a misspelled image pathname.
+        let existing = fs_open(path) else |_| { return io }
+        fs_close(existing) else |_| { return io }
+        fs_open_mode(path, 3) else |_| { return io }
     } else {
-        (fs_open(path) else |_| { return io })
+        fs_open(path) else |_| { return io }
     }
     errdefer fs_close(fd) else |_| {}
     let b = diskio.exact(fd, base, 512)?
@@ -349,7 +353,12 @@ fn lookup(v: Volume, path: List[str]) -> Entry ! {invalid, io, not_found} {
 }
 
 fn alias_of(name: str, es: List[Entry]) -> Alias ! {invalid, exists} {
-    for e in es { if e.name.lower() == name.lower() { return exists } }
+    for e in es {
+        let b = oem_text(e.alias[0..8]).trim()
+        let x = oem_text(e.alias[8..11]).trim()
+        let short = if x.len == 0 then b else "{b}.{x}"
+        if e.name.lower() == name.lower() || short.lower() == name.lower() { return exists }
+    }
     let dot = name.rfind(".") else -1
     let base = if dot > 0 then name[0..dot] else name
     let ext = if dot > 0 then name[dot + 1..] else ""
@@ -582,6 +591,9 @@ fn run(args: List[str]) -> () ! {invalid, io, full, exists, not_found} {
         )?
     }
     if cmd != "mkdir" && cmd != "copy" && cmd != "ls" && cmd != "cat" { return invalid }
+    if (cmd == "mkdir" || cmd == "cat") && i + 1 != args.len { return invalid }
+    if cmd == "copy" && i + 2 != args.len { return invalid }
+    if cmd == "ls" && i != args.len && i + 1 != args.len { return invalid }
     var v = open_volume(image, base, cmd == "mkdir" || cmd == "copy")?
     defer fs_close(v.fd) else |_| {}
     if cmd == "mkdir" {

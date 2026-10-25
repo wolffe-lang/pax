@@ -168,7 +168,16 @@ passed("R-px69-4: correct surrogate pair; pinned mtools truncation named indepen
 # Both long and short spellings address the same content.
 assert run([BIN, "cat", own, "/boot/limine/LIMINE~1.SYS"]).stdout == files[2][1]
 run([BIN, "copy", own, own, "/self.img"], ok=False)
-passed("8.3 alias lookup; self-copy refused before writes")
+before = hashlib.sha256(own.read_bytes()).digest()
+run([BIN, "copy", own, source, "/boot/limine/LIMINE~1.SYS"], ok=False)
+assert hashlib.sha256(own.read_bytes()).digest() == before
+missing = OUT / "missing-volume.img"
+if missing.exists(): missing.unlink()
+run([BIN, "mkdir", missing], ok=False)
+assert not missing.exists()
+run([BIN, "mkdir", missing, "/x"], ok=False)
+assert not missing.exists()
+passed("8.3 alias lookup/collision; self-copy and missing-volume commands refuse before writes")
 
 # More file clusters than are free: leave all metadata and payload untouched.
 small = OUT / "full.img"
