@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # px80 (px79's run-suite.sh, px67's, px63's), kasumi, CPUs 0-3: a suite built
 # in px65's container (localhost/px80-ubuntu) with notes/px80/lld-wrap first on
-# PATH, so every kernel it links is the bundle's lld 18.1.8's (each link also
-# compared with the container's lld 18.1.3: $B/lld.log), its Linux side on this
+# PATH, so every kernel it links is the bundle's lld 18.1.8's, and so is every
+# hosted program wolf links with -fuse-ld=lld (each link also compared with
+# the container's lld 18.1.3: $B/lld.log), its Linux side on this
 # host, then its images booted under TCG on the host on EVERY leg (both tiers,
 # both firmwares, PAX_REQUIRE_UEFI=1), as CI's `tier all` does, and the
 # root-on-disk leg (tools/rootdisk-leg, native BIOS) where CI runs one.
@@ -34,6 +35,8 @@ podman run --rm --privileged --cpuset-cpus 0-3 --ulimit core=0:0 -v "$L:$L:Z" -v
     -e PAX_CACHE -e PAX_BUILD -e TMPDIR -e CARGO_INCREMENTAL=0 -e PAX_LOPE_REPO=$L/lope "${extra[@]}" localhost/px80-ubuntu bash -c '
         set -euo pipefail; cd "$1"; git config --global --add safe.directory "*"
         export PAX_WOLF=$(tools/fetch-wolf | tail -1)
+        # CI fetches lupin by digest for a suite that runs it (mkw).
+        if grep -q PAX_LUPIN "tests/$2"; then export PAX_LUPIN=$(tools/fetch-lupin | tail -1); fi
         export PATH=$1/notes/px80/lld-wrap:$PATH PX80_LLD=/opt/px80/ld.lld PX80_LLD_REF=/usr/bin/ld.lld PX80_LLD_LOG=$PAX_BUILD/lld.log
         tests/"$2" $3
     ' px80 "$T" "$suite" "$how" > "$B.build.log" 2>&1
@@ -56,7 +59,12 @@ if grep -q "tools/rootdisk-leg $suite " "$T/.github/workflows/ci.yml"; then
     # shellcheck disable=SC2086
     PAX_BUILD=$B taskset -c 0-3 tools/rootdisk-leg "$suite" $dargs > "$B.disk.log" 2>&1 || drc=$?
 fi
-links=$(wc -l < "$B/lld.log" 2>/dev/null || echo 0)
-same=$(grep -c '^identical ' "$B/lld.log" 2>/dev/null || echo 0)
+links=0 same=0
+if [ -f "$B/lld.log" ]; then links=$(wc -l < "$B/lld.log"); same=$(grep -c '^identical ' "$B/lld.log"); fi
+# A PASS line may quote the refusal it expected (mpx1's A6: `qemu-halt: NOT
+# HALTED` for the spin kernel), so only a FAIL or NOT HALTED line with no
+# PASS on it counts against the run.
+pass=$(grep -c "PASS" "$B.boot.log")
+fails=$(grep -E "FAIL|NOT HALTED" "$B.boot.log" | grep -vc "PASS")
 printf '%s build rc=%s linux rc=%s boot rc=%s disk rc=%s %ss pass %s fail %s links %s identical %s\n' "$suite" "$brc" "$lrc" "$rc" "$drc" \
-    $(( $(date +%s) - t0 )) "$(grep -c 'PASS' "$B.boot.log")" "$(grep -c -E 'FAIL|NOT HALTED' "$B.boot.log")" "$links" "$same"
+    $(( $(date +%s) - t0 )) "$pass" "$fails" "$links" "$same"
