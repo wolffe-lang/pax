@@ -7,6 +7,31 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Block device nodes, the block ioctls and a second disk (px79,
+  pax#144).** kernel/vblk drives up to four virtio disks in PCI slot
+  order (and takes VIRTIO_BLK_F_GEOMETRY); kernel/block keeps a device
+  table per disk, names them `vda` to `vdd` with Linux's numbers
+  (254:16k+N to partition 15, 259 and the lowest free minor past it),
+  and reads each one's partition table. `/dev` lists a block special
+  file for every disk and partition, in memory, `brw-------` and root's
+  as devtmpfs makes them with no udev. kernel/files serves open (O_EXCL
+  an exclusive open, O_DIRECT, O_SYNC, O_DSYNC taken), read, write,
+  pread64, pwrite64, writev, lseek, fsync, fdatasync, flock, sendfile and
+  splice onto a node, raw through a bounce frame at any length and
+  offset, as the guest answers (short across the end, ENOSPC past it,
+  EPERM on a read-only disk); the ioctls BLKGETSIZE64, BLKGETSIZE,
+  BLKSSZGET, BLKPBSZGET, BLKIOMIN, BLKIOOPT, BLKALIGNOFF,
+  BLKDISCARDZEROES, BLKROGET, BLKBSZGET, BLKROTATIONAL, BLKGETDISKSEQ,
+  HDIO_GETGEO, and for root BLKFLSBUF, BLKRRPART (EBUSY while a partition
+  is open, mounted or held exclusively) and BLKPG's add and delete;
+  every other request ENOTTY with one line. kernel/procfs serves
+  `/sys/block` and `/sys/class/block` beside `/proc/partitions`.
+  `mount(2)` takes a node's path and `/proc/mounts` prints it; fstab's
+  `/dev/vdb2` mounts. `tools/qemu-run` and `tools/qemu-halt` take
+  `--drive FILE[,ro][;DEVOPTS]`, repeatable. `tests/mpx6-nodes` (new)
+  holds every row to Linux 7.3.0 on QEMU with the same disks and probe
+  (`user/elf/nodes.c`, `tools/mknodes`, `tools/linux-nodes`).
+
 - **The journal for `/` (px68, pax#150).** The root is ext3: `tools/mkdisk
   --gpt --root` makes it with the pinned `mke2fs -t ext3` (`--no-journal`
   for ext2; `--journal` for the plain path), and kernel/journal (new)
