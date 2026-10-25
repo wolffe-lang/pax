@@ -45,10 +45,13 @@ container file beside it.
 strip=symbols -C link-arg=-Wl,--build-id=none`); the same command gives the
 same bytes, which PAX's CI checks on every run of its `mpx5-wolf` suite.
 
-The four musl files are Alpine 3.20's `musl-dev` 1.2.5-r4, and `libunwind.a`
-is Rust 1.97.1's, each with its debug sections decompressed by `llvm-objcopy
---decompress-debug-sections` (the code and the debug content are unchanged;
-an earlier lld without zlib could not read them compressed).
+The four musl files are Alpine 3.20's `musl-dev` 1.2.5-r4 with their debug
+sections decompressed by `llvm-objcopy --decompress-debug-sections` (LLVM
+17's, Alpine's); the code and the debug content are unchanged. `libunwind.a`
+is Rust 1.97.1's, rewritten by the same command; it has no compressed
+section. They were decompressed because the lld this bundle replaces had no
+zlib. This `ld.lld` reads the packaged files as they ship, and the programs it
+links from them are the same bytes as from these.
 
 ## What links with it
 
