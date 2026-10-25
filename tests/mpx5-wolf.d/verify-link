@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# px80: W0 link, the dev ISO's native link bundle against its record,
+# user/wolf-link.sums (px60's bundle; px80's ld.lld 18.1.8):
+#
+#   verify-link --shape       the record itself: tools/mkdev's seven names, in
+#                             its order, each with a 64-digit sha256 and a size
+#   verify-link --cc RUST     the one member CI can rebuild: the link-only cc
+#                             front end, compiled from notes/px60/cc.rs by
+#                             notes/px60/build-m2.sh's line with the pinned Rust
+#                             (rustup's RUST toolchain, musl target, Ubuntu
+#                             24.04's gcc and GNU ld as the linker), its bytes
+#                             held to the record's cc line
+#   verify-link DIR           a staged bundle (DIR/ld.lld, DIR/cc,
+#                             DIR/sysroot/*): every file's sha256 and size
+#                             held to its line, as tools/mkdev holds them
+#
+# ld.lld (a 50-minute LLVM build, notes/px80/build-lld.sh) and the musl
+# sysroot are held by DIR, where the bundle is (kasumi, the dev ISO's
+# build); CI holds the record's shape and the cc line. Exit 0 on PASS, 1 on
+# a FAIL naming the line, 2 on a usage or tool error.
+set -euo pipefail
+. "$(dirname "$0")/../../tools/lib.sh"
+sums=${PAX_LINK_SUMS:-$PAX_ROOT/user/wolf-link.sums}
+names=(ld.lld cc sysroot/crt1.o sysroot/crti.o sysroot/crtn.o sysroot/libc.a sysroot/libunwind.a)
+fail() { say "FAIL W0 link: $*"; exit 1; }
+row() { awk -v key="$1" '$1 == key { print; n++ } END { exit n != 1 }' "$sums"; }
+[ $# -ge 1 ] || die "usage: verify-link --shape | --cc RUST | DIR"
+case $1 in
+    --shape)
+        [ "$(wc -l < "$sums" | tr -d ' ')" = ${#names[@]} ] || fail "$sums has $(wc -l < "$sums" | tr -d ' ') lines, not ${#names[@]}"
+        k=0
+        while read -r name sha bytes rest; do
+            [ "$name" = "${names[$k]}" ] || fail "line $((k + 1)) names '$name', not ${names[$k]}"
+            [[ $sha =~ ^[0-9a-f]{64}$ ]] || fail "$name: '$sha' is not a sha256"
+            [[ $bytes =~ ^[1-9][0-9]*$ ]] || fail "$name: '$bytes' is not a size"
+            [ -z "$rest" ] || fail "$name: a fourth field '$rest'"
+            k=$((k + 1))
+        done < "$sums"
+        say "PASS W0 link: $sums names the bundle's ${#names[@]} files, each with a sha256 and a size"
+        ;;
+    --cc)
+        [ $# -eq 2 ] || die "usage: verify-link --cc RUST"
+        need rustup sha256sum
+        w=$(mktemp -d "${TMPDIR:-/tmp}/verify-link.XXXXXX")
+        cp "$PAX_ROOT/notes/px60/cc.rs" "$w/cc.rs"
+        # build-m2.sh's line, from the source's own directory (rustc keeps
+        # the path it is given in panic locations; px60 built `cc.rs`).
+        (cd "$w" && rustup run "$2" rustc --edition=2024 --target x86_64-unknown-linux-musl \
+            -C relocation-model=static -C strip=symbols -C link-arg=-Wl,--build-id=none cc.rs -o cc) \
+            || die "rustc could not build cc.rs"
+        read -r _ sha bytes < <(row cc) || fail "no single cc line in $sums"
+        got=$(sha256_of "$w/cc") n=$(wc -c < "$w/cc" | tr -d ' ')
+        [ "$got" = "$sha" ] && [ "$n" = "$bytes" ] \
+            || fail "cc rebuilt from notes/px60/cc.rs is $got ($n bytes); $sums records $sha ($bytes bytes)"
+        say "PASS W0 link: cc rebuilt from notes/px60/cc.rs with rustc $2 is the recorded $sha ($bytes bytes)"
+        rm -rf "$w"
+        ;;
+    -*) die "usage: verify-link --shape | --cc RUST | DIR" ;;
+    *)
+        for name in "${names[@]}"; do
+            read -r _ sha bytes < <(row "$name") || fail "no single $name line in $sums"
+            f=$1/$name
+            [ -f "$f" ] || fail "$name: missing from $1"
+            got=$(sha256_of "$f") n=$(wc -c < "$f" | tr -d ' ')
+            [ "$got" = "$sha" ] && [ "$n" = "$bytes" ] || fail "$name in $1 is $got ($n bytes); $sums records $sha ($bytes bytes)"
+        done
+        say "PASS W0 link: the ${#names[@]} files in $1 are the recorded bytes"
+        ;;
+esac
