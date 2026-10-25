@@ -56,7 +56,7 @@ printf '/bin/limine bios-install /dev/vda 3\n' > "$lm/run"
 "$PAX_ROOT/tools/mkinitramfs" "$lm/init.cpio" /bin/limine="$work/limine/limine":755 /etc/pax-run="$lm/run":644 > "$lm/cpio.log"
 "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$lm/init.cpio" initramfs.cpio "$elf" "$lm/boot.iso" >/dev/null
 "$PAX_ROOT/tools/qemu-halt" --firmware bios --elf "$elf" --serial "$lm/serial.log" --marker halt \
-    --qemu -drive --qemu "file=$lm/pax.img,if=none,id=dt0,format=raw" --qemu -device --qemu virtio-blk-pci,drive=dt0 "$lm/boot.iso" > "$lm/boot.log" 2>&1
+    --drive "$lm/pax.img" "$lm/boot.iso" > "$lm/boot.log" 2>&1
 grep -aq 'user: limine pid 1 exit_group 0' "$lm/serial.log"
 cmp "$lm/pax.img" "$lm/linux.img"
 say 'PASS D-LIMINE: static installer on PAX /dev/vda equals Linux, every byte'
@@ -68,7 +68,7 @@ for tier in $tiers; do
     rm -f "$t/target.img"
     truncate -s 512M "$t/target.img"
     "$PAX_ROOT/tools/qemu-halt" --boot-disk --firmware bios --timeout 1200 --elf "$elf" --serial "$t/install.serial" --marker halt \
-        --qemu -m --qemu 1G --qemu -drive --qemu "file=$t/target.img,if=none,id=dt1,format=raw" --qemu -device --qemu virtio-blk-pci,drive=dt1 "$t/bootstrap.img" > "$t/install.boot" 2>&1
+        --qemu -m --qemu 1G --drive "$t/target.img" "$t/bootstrap.img" > "$t/install.boot" 2>&1
     python3 -I - "$t" <<'PY'
 from pathlib import Path
 import sys
