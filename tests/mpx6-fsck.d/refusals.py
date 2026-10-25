@@ -64,12 +64,14 @@ for name in ['tag-past-end', 'bad-revoke-count', 'csum3']:
     en = run(['e2fsck', '-fn', oracle])
     ey = run(['e2fsck', '-fy', oracle])
     before = image.read_bytes()
+    wn = run([checker, '-fn', image])
+    assert image.read_bytes() == before, (name, 'report-only changed image')
     wp = run([checker, '-fy', image])
     assert wp.returncode == 4 and image.read_bytes() == before and b'unsupported:' in wp.stdout, (name, wp.returncode, wp.stdout)
-    for label, p in [('oracle-report', en), ('oracle-repair', ey), ('wolf-repair', wp)]:
+    for label, p in [('oracle-report', en), ('oracle-repair', ey), ('wolf-report', wn), ('wolf-repair', wp)]:
         (work/(name+'.'+label+'.log')).write_bytes(p.stdout)
     row = {'case': name, 'oracle_report': en.returncode, 'oracle_repair': ey.returncode,
-           'wolf_repair': wp.returncode, 'unchanged': True, 'supported': False}
+           'wolf_report': wn.returncode, 'wolf_repair': wp.returncode, 'unchanged': True, 'supported': False}
     results.append(row)
     print('UNSUPPORTED journal-' + name + ': ' + json.dumps(row))
 (work/'results.json').write_text(json.dumps(results, indent=2)+'\n')

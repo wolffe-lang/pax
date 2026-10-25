@@ -62,7 +62,7 @@ for family in ['corpus', 'journal', 'refusals']:
             else:
                 a, b = (work/family/(name+'.oracle.img')).read_bytes(), target.read_bytes()
                 diff = [i for i,(x,y) in enumerate(zip(a,b)) if x != y and not (1072 <= i < 1078 or 1088 <= i < 1092)]
-                assert not diff, (name, diff[:32])
+                assert len(a) == len(b) and not diff, (name, len(a), len(b), diff[:32])
             row = {'case': family+'-'+name, 'supported': True, 'pax_status': code, 'oracle_verify': 0, 'pass': True}
             print('PASS PAX-' + family + '-' + name, flush=True)
         results.append(row)

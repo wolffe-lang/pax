@@ -60,7 +60,7 @@ def main():
         # Only wall-clock check/write timestamps and the mount counter are
         # non-layout choices; retain every other differing offset as a RED.
         unexpected = [i for i in diffs if not (1072 <= i < 1078 or 1088 <= i < 1092)]
-        okay = unchanged and en.returncode == wn.returncode and ep.returncode == wp.returncode and vp.returncode == 0 and not unexpected
+        okay = len(eb) == len(wb) and unchanged and en.returncode == wn.returncode and ep.returncode == wp.returncode and vp.returncode == 0 and not unexpected
         result = {'case': name, 'report_unchanged': unchanged, 'oracle_report': en.returncode, 'wolf_report': wn.returncode, 'oracle_rc': ep.returncode, 'wolf_rc': wp.returncode,
                   'verify_rc': vp.returncode, 'byte_differences': len(diffs),
                   'unexpected_offsets': unexpected[:30], 'pass': okay}
