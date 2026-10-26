@@ -4044,6 +4044,78 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  # gm01: the wolf games on PAX's console. The font row (font/extent.txt,
+  # tools/mkfont: braille and the block elements generated and held to
+  # Spleen's, PAX's own rows for what Spleen lacks), the three games the
+  # installer stages (tools/mkgames, user/install/games.txt), typed as
+  # `pax` at the PS/2 keyboard (tools/ps2-session): every code point the
+  # games draw one cell, each game's glyph probe, each game's title and
+  # one replayed scene held cell for cell to the same binaries' frames on
+  # the runner, a short run of each through the keyboard (the record
+  # names the keys; the terminal restored), and the font row withheld.
+  mpx6-games:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-games')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+          qemu-system-x86_64 --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx6-games-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the font row, the games, their frames on the runner and on PAX's screen; the plan's legs (all four in the all tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx6-games $PAX_LEGS
+
+      - name: keep the games' sums, the frames, the sessions, the screens, the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-games
+          path: |
+            build/mpx6-games/mkgames.txt
+            build/mpx6-games/mkgames.log
+            build/mpx6-games/games/sums.txt
+            build/mpx6-games/games/games.sha256
+            build/mpx6-games/golden/**
+            build/mpx6-games/linux/*.txt
+            build/mpx6-games-*.serial.log
+            build/mpx6-games-*.verdict
+            build/mpx6-games-*/*.ppm
+            build/mpx6-games-*/dumps.txt
+            build/mpx6-games-*/session.out
+            build/mpx6-games-*/ps2-session.log
+            build/mpx6-games-*/probe-*.txt
+            build/mpx6-games-runs.txt
+          retention-days: 14
+          if-no-files-found: error
+
   tier:
     name: tier ${{ needs.plan.outputs.tier || 'unplanned' }}
     if: ${{ !cancelled() }}
@@ -4099,6 +4171,7 @@ jobs:
       - mpx6-nodes
       - mpx6-disktools
       - mpx6-install
+      - mpx6-games
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # The issue step's token may write issues; nothing else.
