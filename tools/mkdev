@@ -1,9 +1,22 @@
 #!/usr/bin/env bash
 # Add the dev variant to a staging root. Never change the base image.
 # Inputs are tools/mkwolf output and tools/mkwolf-std output.
+# --clef CLEF-DIR (as02b, R-as02-3 A: opt-in, never the default) adds
+# the clef package (mkclef's OUTDIR) as /usr/bin/clef: refused unless the
+# file is its sums.txt's `clef` line, static (ET_EXEC, no PT_INTERP, no
+# dynamic section), and built from the image's archive (the
+# `wolf-archive` line is kernel/wolf.pin's WOLF_SHA256); the mpx5-clef
+# suite is its qualification on PAX. The kernel's own assembler stays the
+# build's choice (build-kernel's WOLF_AS), and nothing here selects it.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
-[ $# -eq 3 ] || [ $# -eq 4 ] || die "usage: mkdev ROOT WOLF-DIR STD-DIR [LINK-DIR]"
+clef=
+if [ "${1:-}" = --clef ]; then
+    [ $# -ge 2 ] || die "usage: mkdev [--clef CLEF-DIR] ROOT WOLF-DIR STD-DIR [LINK-DIR]"
+    clef=$2
+    shift 2
+fi
+[ $# -eq 3 ] || [ $# -eq 4 ] || die "usage: mkdev [--clef CLEF-DIR] ROOT WOLF-DIR STD-DIR [LINK-DIR]"
 . "$PAX_ROOT/user/wolf.pin"
 r=$1 bins=$2 std=$3
 [ "$(cat "$std/STD-REV")" = "$WOLF_STD_REV" ] || die "std revision differs from pin"
@@ -41,4 +54,22 @@ if [ $# -eq 4 ]; then
     say "native dev variant: static lld, link-only cc, musl binary CRT/libc and libunwind"
 else
     say "checked dev variant: no native linker"
+fi
+
+if [ -n "$clef" ]; then
+    load_wolf_pin
+    need readelf
+    row=$(awk '$1 == "clef" { print }' "$clef/sums.txt" 2>/dev/null) || row=
+    read -r name sha bytes <<< "$row"
+    [ "$name" = clef ] && [ -f "$clef/clef" ] && [ "$(sha256_of "$clef/clef")" = "$sha" ] && \
+        [ "$(wc -c < "$clef/clef" | tr -d " ")" = "$bytes" ] || die "clef differs from its sums.txt: $clef"
+    [ "$(awk '$1 == "wolf-archive" { print $2 }' "$clef/sums.txt")" = "$WOLF_SHA256" ] \
+        || die "clef was not built from the image's wolf archive ($WOLF_SHA256, kernel/wolf.pin)"
+    readelf -hW "$clef/clef" | grep -Eq 'Type: +EXEC' || die "clef is not ET_EXEC"
+    ! readelf -lW "$clef/clef" | grep -q INTERP || die "clef has a PT_INTERP"
+    readelf -dW "$clef/clef" | grep -q "no dynamic section" || die "clef has a dynamic section"
+    mkdir -p "$r/usr/bin"
+    cp "$clef/clef" "$r/usr/bin/clef"
+    chmod 755 "$r/usr/bin/clef"
+    say "clef (opt-in, as02b): /usr/bin/clef $sha, $bytes bytes"
 fi
