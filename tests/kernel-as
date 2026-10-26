@@ -32,7 +32,7 @@
 #      --assembler; 17 assembly calls, 16 through clang and boot/start.S
 #      through cc, none through a selected tool; the whole trace is
 #      trunk's build-kernel's (tests/kernel-as.d/absent-TIER.calls, paths
-#      written @ROOT, @OUT and @BIN).
+#      written @ROOT, @OUT, @BIN and @TMP, sorted).
 #   K2 empty (native): WOLF_AS= is K1, the same trace and kernel bytes.
 #   K3 mixed (native): the release wolf with WOLF_AS set is refused by
 #      name, no kernel, no assembly call.
@@ -130,10 +130,14 @@ build() {
     printf '%s\n' "$rc" > "$d/rc"
     return "$rc"
 }
-# The trace with this row's paths written @ROOT, @OUT and @BIN.
+# The trace with this row's paths written @ROOT, @OUT and @BIN, the
+# release tier's code-generation files @TMP/wolf-llvm-@-K (wolf names
+# them by its pid), sorted (wolf runs the eight code-generation units in
+# parallel, so their calls come in any order; the assembly calls do not).
 norm() { # row tier
-    local d=$work/$2/$1
-    sed -e "s#$d/out#@OUT#g" -e "s#$work/bin#@BIN#g" -e "s#$PAX_ROOT#@ROOT#g" "$d/trace.tsv"
+    local d=$work/$2/$1 t=${TMPDIR:-/tmp}
+    sed -e "s#$d/out#@OUT#g" -e "s#$work/bin#@BIN#g" -e "s#$PAX_ROOT#@ROOT#g" \
+        -e "s#${t%/}/wolf-llvm-[0-9]*-#@TMP/wolf-llvm-@-#g" "$d/trace.tsv" | LC_ALL=C sort
 }
 calls() { # row tier name kind
     awk -F'\t' -v n="$3" -v k="$4" '$1 == n && $2 == k' "$work/$2/$1/trace.tsv" | wc -l | tr -d ' '
