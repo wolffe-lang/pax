@@ -3336,6 +3336,160 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # as02b: the kernel's assembler seam (tools/build-kernel's boot/start.S
+  # branch and wolf's manifest seam honour ONE explicit WOLF_AS, R-as02-2
+  # A). tests/kernel-as builds kmain_console with every C-driver and
+  # assembler call traced: absent and empty move no call (trunk's calls,
+  # recorded), the release wolf (0.2.35, no --assembler) refuses a set
+  # WOLF_AS by name, GNU as and the clef package each take all 17
+  # assembly calls a tier makes and give one kernel byte for byte, and a
+  # failing, missing or wrong assembler is final. The seam wolf is
+  # wolf-lang 9f2cff44 built from source (tests/kernel-as.d/wolf.pin,
+  # tools/fetch-wolf's source shape), its binary cached by the pin; no
+  # release carries #957 yet. Nothing boots.
+  kernel-as:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'kernel-as')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends clang lld binutils gcc libc6-dev curl
+          clang --version | head -n 1
+          ld.lld --version
+          as --version | head -n 1
+          dpkg -s binutils | grep -E '^(Package|Version):'
+
+      - name: the seam wolf's Rust (wolf-lang's rust-toolchain.toml at the pin, rustup)
+        run: |
+          rustup --version
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
+          rustup run 1.97.1 rustc --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/wolf-9f2cff44c945697903e52ea7e5fdf05539b207ae/bin/wolf
+            .pax-cache/wolf-9f2cff44c945697903e52ea7e5fdf05539b207ae/.built
+          key: kernel-as-seam-wolf-${{ hashFiles('tests/kernel-as.d/wolf.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: the seam wolf (wolf-lang 9f2cff44, from source)
+        env:
+          PAX_WOLF_PIN: tests/kernel-as.d/wolf.pin
+          CARGO_INCREMENTAL: "0"
+        run: |
+          bin=$(tools/fetch-wolf | tail -n 1)
+          echo "PAX_SEAM_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: the seam, the plan's tiers (both in the all tier)
+        run: tests/kernel-as $PAX_LEGS
+
+      - name: keep the traces, the logs and the kernels
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-kernel-as
+          path: |
+            build/kernel-as/clef/sums.txt
+            build/kernel-as/*/*/trace.tsv
+            build/kernel-as/*/*/build.log
+            build/kernel-as/*/*/rc
+            build/kernel-as/*/K[145]/out/kmain_console.elf
+          retention-days: 14
+          if-no-files-found: warn
+
+  # as02b (R-as02-3 A): the static clef package (user/clef.pin,
+  # tools/mkclef: clef's own build line with the user tools' static cc,
+  # held to the image's wolf archive and runtime) qualified ON PAX: the
+  # packaged command over the copied census corpus (43 x86-64 sources),
+  # the ISR's --expand and --provenance and nine refusals, run by pelt as
+  # init; the transcript byte-identical to the same package in a
+  # throwaway container, every object and byte the host clef's, the
+  # objects GNU as's by clef's structural rule (tests/mpx5-clef).
+  mpx5-clef:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-clef')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+          qemu-system-x86_64 --version
+          gcc --version | head -n 1
+          as --version | head -n 1
+          dpkg -s binutils libc6 | grep -E '^(Package|Version):'
+          python3 --version
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-clef-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the image the Linux side's container is made from (by digest)
+        run: |
+          docker pull "$PAX_TREE_IMAGE"
+          docker image inspect --format '{{.Id}} {{.RepoDigests}}' "$PAX_TREE_IMAGE"
+        env:
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+      - name: clef on PAX against the container, the host clef and GNU as; the plan's legs (all four in the all tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+        run: tests/mpx5-clef $PAX_LEGS
+
+      - name: keep the package's sums, the Linux side, the transcripts, the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-clef
+          path: |
+            build/mpx5-clef/*.txt
+            build/mpx5-clef/clef/sums.txt
+            build/mpx5-clef/linux/
+            build/mpx5-clef/host/
+            build/mpx5-clef/*/kmain_console.elf
+            build/mpx5-clef/*/*.log
+            build/mpx5-clef-*.session
+            build/mpx5-clef-*.log
+            build/mpx5-clef-*.norm
+            build/mpx5-clef-*.meta
+            build/mpx5-clef-*.verdict
+            build/mpx5-clef-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   # px58: yew (user/yew.pin, tools/mkyew), the modal terminal editor in
   # wolf, on PAX's console: termwolf's rows (user/termwolf: the termios
   # bits, yew's three modes, the timed reads, the output processing, the
@@ -4089,6 +4243,8 @@ jobs:
       - mpx5-bore
       - mpx5-lupin
       - mpx5-wolf
+      - kernel-as
+      - mpx5-clef
       - mpx5-yew
       - mpx5-screen
       - mpx6-blk
