@@ -107,18 +107,19 @@ have=$("$wolf" --version | head -n 1)
 [ "$have" = "$wline" ] || die "wolf --version says '$have'; kernel/wolf.pin says '$wline'"
 say "$wline; libwolf_rt.a beside it ($(sha256_of "$rt"))"
 
-# PLANT (as02b-plant-runtime): the package links wolf 0.2.34's runtime
-# (its release archive by digest), not the image's; mkclef records the
-# runtime it linked, and the qualification's Q0 must refuse it by both
-# digests.
-old=$PAX_CACHE/wolf-0.2.34-88a9dd3da1c9a0e38c08eb6e2de9c1ef04d1ed93dcf51024d8dbbb76890c1821.tar.gz
-[ -f "$old" ] || curl -sSfL --retry 3 -o "$old" https://github.com/wolffe-lang/wolf-lang/releases/download/v0.2.34/wolf-0.2.34-x86_64-unknown-linux-gnu.tar.gz \
-    || die "cannot download wolf 0.2.34"
-[ "$(sha256_of "$old")" = 88a9dd3da1c9a0e38c08eb6e2de9c1ef04d1ed93dcf51024d8dbbb76890c1821 ] || die "wolf 0.2.34 archive digest"
-mkdir -p "$w/old"
-tar -xzf "$old" -C "$w/old" --strip-components=1
-cp "$w/old/libwolf_rt.a" "$rt"
-say "PLANT: libwolf_rt.a is wolf 0.2.34's ($(sha256_of "$rt"))"
+# PLANT (as02b-plant-runtime): the package links a runtime that is not
+# the image's: the archive's member that defines the hosted entry
+# (`__wolf_rt_main_start`, which every program links) gains one note
+# section, so the library's digest and the linked program both move.
+# (wolf 0.2.34's whole runtime cannot stand in: 0.2.35's objects need its
+# __wolf_rt_stack_start.) mkclef records the runtime it linked, and the
+# qualification's Q0 must refuse it by both digests.
+mem=$(nm -A --defined-only "$rt" 2>/dev/null | awk '$NF == "__wolf_rt_main_start" { n = split($1, a, ":"); print a[2]; exit }')
+[ -n "$mem" ] || die "PLANT: no member of libwolf_rt.a defines __wolf_rt_main_start"
+mkdir -p "$w/rtx"
+(cd "$w/rtx" && ar x "$rt" "$mem" && printf 'as02b plant\n' > plant.txt \
+    && objcopy --add-section .pax_plant=plant.txt "$mem" && ar r "$rt" "$mem") || die "PLANT: cannot rewrite $mem"
+say "PLANT: libwolf_rt.a's $mem carries .pax_plant ($(sha256_of "$rt"))"
 
 # The static `cc`.
 mkdir -p "$w/bin"
