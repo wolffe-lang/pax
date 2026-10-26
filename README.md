@@ -6,7 +6,7 @@ PAX is a clean-room implementation of Linux's userspace ABI. It does not contain
 
 Users (P5, px38 to px47): PAX has accounts, root, `pax` (1000) and the service account `lobo` (990), in its image's `/etc/passwd` and `/etc/group`. There are no passwords yet and the image boots to root's shell; `su`, written in wolf (`user/su`), is root becoming a user, a user's `su` is refused as Linux refuses one who cannot authenticate, and a set-ID bit is not honoured, so privilege only drops. A process has Linux's real, effective, saved and file-system ids and a group list; a file has an owner, a group and a mode; and `open`, `exec`, every path walk, making, removing, renaming and linking a name, changing a mode, an owner or a time, signals, ports below 1024, raw sockets, the speaker, `/dev`'s nodes and `/proc`'s files are checked by Linux's rules, each rule measured against a real Linux (`tests/mpx5-users`, `tests/mpx5-accounts`). Since px47 every suite that runs programs on PAX — the tree, the shell, boreutils, Unix sockets, TCP, UDP, the speaker and lobo — runs them again as a user beside root, each run held byte for byte to the same binaries run as the same user on Linux. These checks are enforced for honest programs; not a boundary against an attacker: the kernel has never been fuzzed or audited, and it loads programs at fixed addresses. `login` waits for job control, and passwords for a memory-hard hash.
 
-Guided installation: `pax-install` inventories real block nodes, shows a read-only plan, and requires an exact target confirmation before writing. It offers an explicit **ext2 developer preview**, not a journalled installation: whole-disk fresh installs only, 512-byte sectors, root volumes up to 4 GiB. The running root's disk, mounted disks and read-only targets are refused. The flow asks for a user name and whether to install the games; pack is staged offline with its corresponding source and licences, and neither answer fetches anything. The installer and complete installed tree have been tested on separate QEMU virtio disks under BIOS and UEFI, including reboot persistence. This is not a claim about real-machine drivers or USB installation. See [Guided installation](docs/BOOT.md#guided-installation) for preparation, commands, logging and limits.
+Guided installation: `pax-install` inventories real block nodes, shows a read-only plan, and requires an exact target confirmation before writing. It offers an explicit **ext2 developer preview**, not a journalled installation: whole-disk fresh installs only, 512-byte sectors, root volumes up to 4 GiB. The running root's disk, mounted disks and read-only targets are refused. The flow asks for a user name and whether to install the games; the three wolf games (pack, cub and trail, gm01) are staged offline, each with its corresponding source and its engine's, and neither answer fetches anything. The installer and complete installed tree have been tested on separate QEMU virtio disks under BIOS and UEFI, including reboot persistence. This is not a claim about real-machine drivers or USB installation. See [Guided installation](docs/BOOT.md#guided-installation) for preparation, commands, logging and limits.
 
 Disk tools (px69): `paxgpt`, `paxfat` and `paxext2` are Wolf programs built as static Linux executables and run unchanged on PAX. They write GPT, FAT32/VFAT and an ext2 tree, including modes, owners, timestamps, symbolic links and hard links. The tests compare their output with sgdisk/sfdisk, dosfstools/mtools and e2fsprogs, then build a second disk entirely on PAX, written through its `/dev/vdb` node (px79), and boot it alone under SeaBIOS and OVMF. Limine's pinned installer is linked statically without changing its source; its Linux and PAX runs write identical bytes. `paxext2` does **not** add a journal: the existing host builder's ext3 default is unchanged. The guided installer calls these tools rather than embedding new formatters. See `docs/BOOT.md`, “Writing a disk on PAX”, for the offline-disk interface and its bounds.
 
@@ -16,6 +16,7 @@ The linker respin (px80): the dev image's static `ld.lld` is lld 18.1.8, built f
 
 Offline filesystem checking: `tools/mkfsck` builds `fsck.ext2` in Wolf for Linux and PAX. It checks inodes and blocks, directories, connectivity, references and allocation summaries; repairs counts, bitmaps, links, orphans and duplicate data blocks; and replays supported ext3 journals. A separate rescue archive can repair the unmounted `/dev/vda2` without Linux. The suite compares generated damage with e2fsck, then power-cuts a running root and verifies rescue repair and reboot persistence under BIOS and UEFI. Unsupported formats and ambiguous damage are refused, never marked clean; mounted-volume repair is refused. Existing disk images do not gain a rescue menu automatically. See `docs/BOOT.md`, “Checking a volume from rescue”.
 
+The wolf games (gm01): pack, cub and trail run unmodified on PAX's console, installed by the guided installer into `~/Games/<game>/` with their source and their engine's. The console's font now draws every code point their rich tiers use (161: the braille block and the block elements generated by `tools/mkfont` and held to Spleen's own glyphs bit for bit, two glyphs Spleen lacks drawn for PAX), each one cell, as each game's `--probe-glyphs` measures on the console. Each game's title and one replayed scene equal the same binary's frame on Linux cell for cell under BIOS and UEFI, and a short run of each typed at the PS/2 keyboard (Shift+Down is pack's parry) reaches the game and leaves the terminal restored (`tests/mpx6-games`). The rich tier is the games' `--tier rich`: a bare start reads PAX's `TERM=linux` as a plain console, the engine's rule (R-gm01-4).
 
 The block nodes and a second disk (px79): PAX drives up to four virtio disks, named `vda` to `vdd` in PCI slot order as Linux names them, and `/dev` holds a block special file for every disk and partition the block layer knows (`brw-------`, root's, Linux's numbers: 254:0, 254:1 … for `vda`, 254:16 for `vdb`, the extended major 259 past partition 15), made in memory at boot and as a table is read again, as devtmpfs makes them, never written into an image. A program opens a node and reads and writes it raw at any length and offset (the guest's answers: short across the end, ENOSPC past it, EPERM on a read-only disk; a write to `vda` while a partition of it is mounted is allowed, as on Linux), seeks it, fsyncs it, sends a file onto it by `sendfile` or `splice`, and asks the block ioctls (the sizes, the block sizes, BLKROGET, BLKFLSBUF, HDIO_GETGEO from the device's own geometry, BLKRRPART with Linux's EBUSY while a partition is open or mounted, BLKPG's add and delete); every other request is ENOTTY, named. `/proc/partitions`, `/sys/block` and `/sys/class/block` answer what lsblk and blkid read; `mount(2)` and `/etc/fstab` name a partition by its node (`/dev/vdb2`), and `/proc/mounts` prints the node. `tools/qemu-run` and `tools/qemu-halt` take `--drive FILE` (repeatable) for a second and third disk. Every row is held to Linux 7.3.0 on QEMU with the same disks and the same static probe (`tests/mpx6-nodes`), and a disk made blank on the host gets a GPT and an ext2 from PAX through its nodes.
 
@@ -120,18 +121,23 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
               mkdisktools, mklimine-static (px69: the static formatters and
               unchanged Limine installer); mkclef (as02b: clef static
               from its own tree, held to the image's wolf archive and
-              runtime, one digest a host); mkinstall, mkpack and mkinstall-payload
-              (static installer and offline games/boot manifest); mkfsck (the offline checker); linux-part (px66: a GPT or MBR table written
+              runtime, one digest a host); mkinstall, mkgames and mkinstall-payload
+              (static installer; gm01: the three games built alike from
+              their source and engine archives by digest; the offline
+              games/boot manifest); mkfsck (the offline checker); linux-part (px66: a GPT or MBR table written
               reproducibly; the partition and FAT tools from
               user/disktools.pin in the pinned container; the Linux
               guest's partitions, /proc/partitions and blkid on an
               image); mkdisk --gpt (px66: the disk that boots)
     font/     the screen's font (px19): Spleen 8x16, BSD-2-Clause, with
-              its licence
+              its licence; gm01: extent.txt (the code points drawn above
+              U+00FF: braille, the block elements, the games' others),
+              pax-extra.bdf (PAX's own rows for two Spleen lacks) and
+              games-glyphs.txt (the wolf games' 161 code points)
     tests/    scripted QEMU tests: proof, mkw (with M-KW's frozen kernels
               in mkw.d/), mpx1, mpx2-frames, mpx2-paging, mpx2-interrupts,
               mpx2-sched, mpx3-user, mpx3-loader, mpx3-boreutils, mpx3-console,
-              mpx3-screen, mpx3-speaker (px18), mpx3-threads (px26), mpx3-tree (px27), mpx3-sound (px30), mpx4-net (px20, px21), mpx4-udp (px22), mpx4-tcp (px23), mpx5-lope (px54), mpx6-blk and mpx6-ext2 (px63), mpx5-scent (px64), mpx6-part (px66), mpx5-bore (px65), mpx6-disktools (px69), mpx6-install (guided installation), kernel-as and mpx5-clef (as02b: the kernel's WOLF_AS seam; the clef package qualified on PAX), gdb-attach,
+              mpx3-screen, mpx3-speaker (px18), mpx3-threads (px26), mpx3-tree (px27), mpx3-sound (px30), mpx4-net (px20, px21), mpx4-udp (px22), mpx4-tcp (px23), mpx5-lope (px54), mpx6-blk and mpx6-ext2 (px63), mpx5-scent (px64), mpx6-part (px66), mpx5-bore (px65), mpx6-disktools (px69), mpx6-install (guided installation), kernel-as and mpx5-clef (as02b: the kernel's WOLF_AS seam; the clef package qualified on PAX), mpx6-games (gm01: the wolf games on the console), gdb-attach,
               expect-serial-selftest
               Additional QEMU and host-side entry points:
               census, ci-plan, lobo-session-selftest, mpx2-heap, mpx3-maps, mpx3-orchestra, mpx3-shell, mpx4-lobo, mpx4-ready, mpx4-session, mpx4-unix, mpx5-accounts, mpx5-aspen, mpx5-jobs, mpx5-lupin, mpx5-pelt, mpx5-screen, mpx5-users, mpx5-wolf, mpx5-yew, mpx6-fsck, mpx6-journal, mpx6-nodes, mpx6-root, paxtcp-selftest, tour
@@ -180,7 +186,8 @@ PAX_WOLF=$(tools/fetch-wolf) tests/mpx6-ext2   # px63: ext2 read, written and re
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx5-bore   # px65: boreutils' fourteen new utilities in /bin, a typed session per group as root and pax, held to the same binaries in a container and to their own rows
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx5-scent  # px64: scent as /bin/grep (an archive link), egrep and fgrep through pelt's #!, typed as root and pax, held to the same binaries in a container and to GNU 3.12's answers
 tools/mkinstall build/install                # static installer, Ubuntu 24.04 baseline
-tools/mkpack build/pack                      # pinned game and corresponding source/licences
+tools/mkgames build/games                    # gm01: pack, cub and trail static, with their source and their engine's
+PAX_WOLF=$(tools/fetch-wolf) tests/mpx6-games --tier native --firmware bios  # gm01: the font row, the games' frames held cell for cell to Linux's, their keys
 PAX_LOPE_REPO=/path/to/lope tests/mpx6-install --rows full --tier native --firmware bios
 tools/mkdisktools build/disktools             # px69: static paxgpt, paxfat and paxext2, baseline Linux
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx6-disktools --tier native --firmware bios  # format differentials and a disk built on PAX
@@ -230,7 +237,10 @@ changes any of the sixteen palette entries, including text already displayed;
 OSC R restores the defaults. The keypad supplies navigation with NumLock off,
 digits with it on, and decimal entry with Alt or hexadecimal entry with AltGr.
 Blink attributes are recorded but displayed steadily until timer-driven drawing
-is available. DECSCUSR is consumed without switching shapes, as on the measured
+is available. Since gm01 the console also draws every braille pattern, the
+block elements and the other code points the wolf games use (551 glyphs;
+`font/extent.txt`); anything else above U+00FF is still `?`. The games run
+on it unmodified (`~/Games/<game>/<game> --tier rich`, docs/BOOT.md). DECSCUSR is consumed without switching shapes, as on the measured
 Linux VT; PAX's existing cursor remains a steady block.
 
 ## A disk that outlives the boot (px63)
