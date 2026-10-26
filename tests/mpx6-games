@@ -1,0 +1,390 @@
+#!/usr/bin/env bash
+# tests/mpx6-games — gm01: the wolf games on PAX's console, the same
+# experience as on Linux. The console's font row (font/extent.txt: the
+# braille block, the block elements and the other code points the games'
+# rich tiers draw) and the three games the installer stages (tools/mkgames,
+# user/install/games.txt), typed at PAX's PS/2 keyboard and held, screen
+# for screen, to the same binaries' frames on Linux.
+#
+#   tests/mpx6-games [--images DIR | --no-boot | --only build]
+#                    [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# The Linux side runs in this script's own host (the lane's Ubuntu 24.04
+# container on kasumi, the runner on CI): each game's headless frames
+# (`--headless --script CASE --frames N`), the committed goldens of the
+# pinned source archives, and three frames captured live on a 50 by 160
+# pseudo-terminal (tests/mpx6-games.d/capture.py: pack's title and its
+# death card, trail's bare start), read back through the game's own
+# terminal model (`--apply`).
+#
+# Two images, kmain_console with the archive (boot/limine-initramfs.conf:
+# the screen's 160 x 50 under BIOS and UEFI): pelt as /bin/sh, boreutils'
+# env and cat, /bin/as, the games at /home/pax/Games/<game>/<game> (0755,
+# 1000:1000, where the installer puts them), /home/pax/cases/ (the
+# replays: trail's title-80, cub's opening and walk-north, pack's
+# death-card from the pinned archives, and tests/mpx6-games.d/cases/
+# trail-natural-paused.pk), /home/pax/glyphs.txt (font/games-glyphs.txt's
+# code points, forty a line, a space between); the run list `/bin/as 1000
+# 1000 /bin/env HOME=/home/pax /bin/sh -i -m`. `games` boots kmain_console
+# and is typed user/console/games.keys; `withheld` boots kmain_console
+# built from a copy of the tree whose boot/font.S is `tools/mkfont
+# --latin1` (the font row withheld: code points 0-255 alone, as px19 drew)
+# and is typed user/console/games-withheld.keys. Each through
+# tools/ps2-session on a second monitor, its screens taken where the game
+# holds its frame.
+#
+# Assertions, per tier and firmware:
+#   G0 build: tools/mkfont's own rows (`--test`: every braille pattern
+#      generated distinct and read back as its bits, equal to Spleen's;
+#      the block elements rectangles, equal to Spleen's; the shades
+#      25/50/75 %) and `--check` (boot/font.S is the fonts' table);
+#      font/games-glyphs.txt is the union of the three docs/GLYPHS.md in
+#      the pinned archives; each of its code points is in PAX's font,
+#      its own glyph, none blank, no two alike; the games built static
+#      (tools/mkgames); the Linux side's frames, and its headless finals
+#      equal to the committed goldens for trail title-80, cub walk-north
+#      and pack death-card; both images built.
+#   G1 the glyph screen: after `cat glyphs.txt` every code point is one
+#      cell in the list's order, drawn as its own glyph, and the dump is
+#      tools/screen-ref's picture of the bytes.
+#   G2 each game's `--probe-glyphs` (the screen answers CSI 6 n): every
+#      code point of its docs/GLYPHS.md measured one cell wide.
+#   G3 the frames: trail's title and its paused natural run, cub's
+#      opening (one of its frames 1-89: it animates every 6 ticks) and its
+#      walk to the water, pack's title and its death card, rich, each
+#      equal to the Linux side's frame of the same run cell for cell,
+#      pixel for pixel (glyphs, and the 256 colours as a Linux VT maps
+#      them); every dump is screen-ref's picture of the serial bytes.
+#   G4 a short run of each through the keyboard: pack (Space, Left,
+#      Right, Shift+Down: the parry), cub (Space skips the opening, Up,
+#      Left, Shift+Right: sneak), trail (Enter starts, Up, Left, Down),
+#      quit by `q`; the game's `--record` file names each key as typed;
+#      after it the main screen is back with the cursor shown, and `cat`
+#      echoes a typed line and writes it back (canonical mode, echo).
+#   G5 per boot: -ENOSYS only for set_robust_list (273) and rseq (334);
+#      no `refused:` line; init ended, status 0; halted.
+#   G6 the tier PAX's console gets (R-gm01-3, R-gm01-4): a bare start of
+#      trail and pack picks the plain tier (TERM=linux, the engine's
+#      tier.detect) with the font row and without it; without it the
+#      glyph screen and trail's rich title draw `?` exactly where the
+#      golden's code point is above U+00FF and are otherwise the golden's,
+#      and trail's bare (plain) start is the Linux side's plain frame.
+#
+# --images DIR boots what this script built earlier (any host with QEMU
+# and python3); --only build (or --no-boot) stops after G0. The UEFI leg
+# needs OVMF: SKIPPED LOUDLY without it unless PAX_REQUIRE_UEFI=1 (CI
+# sets it), when it is a failure. Exit 0 when every assertion held, 1
+# otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0
+usage="usage: tests/mpx6-games [--images DIR | --no-boot | --only build] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     [ "${2:-}" = build ] || die "$usage"; noboot=1; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+need readelf python3 tar
+
+D=$PAX_ROOT/tests/mpx6-games.d
+GAMES="pack cub trail"
+RUN="/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m"
+BORE="env cat"
+work=$PAX_BUILD/mpx6-games
+runs=$PAX_BUILD/mpx6-games-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+cmp_py() { python3 -I "$D/compare.py" "$@"; }
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+# A row of the Linux side: the game's headless final frame of a case.
+headless() { # game case frames out
+    HOME=$work/linux/home "$work/games/$1" --headless --tier rich --script "$2" --frames "$3" --dump "$4" > "$4.out" 2>&1
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    s=$work/session
+    mkdir -p "$s/bin" "$work/bin" "$work/linux/home" "$work/golden" "$work/src"
+    why=
+    # --- G0: the font row --------------------------------------------------
+    if r=$(python3 -I "$PAX_ROOT/tools/mkfont" --test 2>&1); then
+        printf '%s\n' "$r" | sed 's/^/  /' >&2
+    else
+        printf '%s\n' "$r" >&2
+        why+=" tools/mkfont --test: $(printf '%s\n' "$r" | command grep -m1 '^FAIL');"
+    fi
+    if r=$(python3 -I "$PAX_ROOT/tools/mkfont" --check 2>&1); then say "  $r"; else why+=" $r;"; fi
+    if r=$(cmp_py table "$PAX_ROOT/font/games-glyphs.txt" 2>&1); then say "  $r"; else why+=" $r;"; fi
+    # --- the games, as the installer stages them -------------------------
+    "$PAX_ROOT/tools/mkgames" "$work/games" > "$work/mkgames.txt" 2> "$work/mkgames.log" \
+        || { tail -n 20 "$work/mkgames.log" >&2; why+=" tools/mkgames;"; }
+    for g in $GAMES; do
+        mkdir -p "$work/src/$g"
+        tar -xzf "$work/games/$g.source.tar.gz" -C "$work/src/$g" --strip-components=1 2>/dev/null || why+=" no $g source;"
+        x=$(static_ok "$work/games/$g") || why+=" $x;"
+        say "  game: $g $(sha256_of "$work/games/$g" 2>/dev/null) $(wc -c < "$work/games/$g" 2>/dev/null | tr -d ' ') bytes"
+    done
+    # font/games-glyphs.txt is the three lists, as the archives hold them
+    if r=$(python3 -I - "$PAX_ROOT/font/games-glyphs.txt" "$work/src" $GAMES <<'PY'
+import pathlib, re, sys
+lst, src, games = sys.argv[1], pathlib.Path(sys.argv[2]), sys.argv[3:]
+want = {}
+for g in games:
+    for m in re.findall(r'^\| U\+([0-9A-F]{4,6}) ', (src / g / 'docs/GLYPHS.md').read_text(encoding='utf-8'), re.M):
+        want.setdefault(int(m, 16), []).append(g)
+have = {}
+for l in pathlib.Path(lst).read_text().splitlines():
+    if l.startswith('U+'):
+        w = l.split()
+        have[int(w[0][2:], 16)] = w[1:]
+ok = have == want
+print('%s G0 games-glyphs: font/games-glyphs.txt %s the union of the pinned archives\' docs/GLYPHS.md (%d code points: %s)' % (
+    'PASS' if ok else 'FAIL', 'is' if ok else 'is NOT', len(want), ', '.join('%s %d' % (g, sum(1 for v in want.values() if g in v)) for g in games)))
+sys.exit(0 if ok else 1)
+PY
+    ); then say "  $r"; else why+=" $r;"; fi
+    # --- the Linux side: headless frames and the goldens ------------------
+    G=$work/golden C=$PAX_ROOT/tests/mpx6-games.d/cases
+    headless trail "$work/src/trail/tests/cases/title-80.pk" 1 "$G/trail-title" || why+=" headless trail title;"
+    headless trail "$C/trail-natural-paused.pk" 600 "$G/trail-scene" || why+=" headless trail scene;"
+    HOME=$work/linux/home "$work/games/cub" --headless --tier rich --script "$work/src/cub/tests/cases/opening.pk" \
+        --frames 90 --every 1 --dump "$G/cub-title" > "$G/cub-title.out" 2>&1 || why+=" headless cub opening;"
+    headless cub "$work/src/cub/tests/cases/walk-north.pk" 120 "$G/cub-scene" || why+=" headless cub walk-north;"
+    headless pack "$work/src/pack/tests/cases/death-card.pk" 1150 "$G/pack-death" || why+=" headless pack death-card;"
+    for row in trail-title:trail:title-80-rich cub-scene:cub:walk-north-rich pack-death:pack:death-card-rich; do
+        IFS=: read -r f g c <<< "$row"
+        if cmp -s "$G/$f/final.txt" "$work/src/$g/tests/goldens/$c/final.txt" && cmp -s "$G/$f/final.sty" "$work/src/$g/tests/goldens/$c/final.sty"; then
+            say "  PASS G0 golden $f: the Linux side's frame is $g's committed tests/goldens/$c/final"
+        else
+            why+=" $f: the headless frame is not $g's committed golden $c;"
+        fi
+    done
+    # Live frames: pack's title, trail's bare start, and pack's death card
+    # (a live replay's card says what the replay's score check found where
+    # the headless card offers `s` to save: one line, the game's own).
+    for row in "pack-title pack --tier rich" "trail-bare trail" \
+               "pack-scene pack --replay $work/src/pack/tests/cases/death-card.pk --ticks 100000"; do
+        read -r f g rest <<< "$row"
+        # shellcheck disable=SC2086 # the row's arguments
+        if python3 -I "$D/capture.py" "$work/linux/$f" 50 160 4 "$work/linux/home-$f" -- "$work/games/$g" $rest > "$work/linux/$f.txt" 2>&1 \
+            && "$work/games/$g" --apply "$work/linux/$f.frame" --size 160x50 > "$G/$f.apply"; then
+            say "  Linux $f: $(cat "$work/linux/$f.txt")"
+        else
+            why+=" the Linux capture $f ($(tail -n 1 "$work/linux/$f.txt"));"
+        fi
+    done
+    # --- the image -------------------------------------------------------
+    "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" || why+=" tools/mkpelt;"
+    "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
+    "$PAX_ROOT/tools/mkas" "$work/bin" > "$work/as.txt" || why+=" tools/mkas;"
+    cp "$work/pelt/pelt" "$s/bin/sh" 2>/dev/null || why+=" no pelt;"
+    for u in $BORE; do cp "$work/bore/$u" "$s/bin/$u" 2>/dev/null || why+=" no $u;"; done
+    cp "$work/bin/as" "$s/bin/as" 2>/dev/null || why+=" no as;"
+    for f in "$s"/bin/*; do x=$(static_ok "$f") || why+=" $x;"; done
+    python3 -I - "$PAX_ROOT/font/games-glyphs.txt" "$work/glyphs.txt" <<'PY'
+import sys
+cps = [int(l.split()[0][2:], 16) for l in open(sys.argv[1]) if l.startswith('U+')]
+with open(sys.argv[2], 'w', encoding='utf-8') as f:
+    f.write('gm01 glyphs: %d code points\n' % len(cps))
+    for i in range(0, len(cps), 40):
+        f.write(' '.join(chr(c) for c in cps[i:i + 40]) + '\n')
+PY
+    printf '%s\n' "$RUN" > "$work/pax-run"
+    args=(/home/pax/:755:1000:1000 /home/pax/Games/:755:1000:1000 /home/pax/cases/:755:1000:1000
+          /home/pax/glyphs.txt="$work/glyphs.txt":644:1000:1000 /etc/pax-run="$work/pax-run":644
+          /home/pax/cases/trail-title-80.pk="$work/src/trail/tests/cases/title-80.pk":644:1000:1000
+          /home/pax/cases/trail-natural-paused.pk="$C/trail-natural-paused.pk":644:1000:1000
+          /home/pax/cases/cub-opening.pk="$work/src/cub/tests/cases/opening.pk":644:1000:1000
+          /home/pax/cases/cub-walk-north.pk="$work/src/cub/tests/cases/walk-north.pk":644:1000:1000
+          /home/pax/cases/pack-death-card.pk="$work/src/pack/tests/cases/death-card.pk":644:1000:1000)
+    for g in $GAMES; do args+=("/home/pax/Games/$g/:755:1000:1000" "/home/pax/Games/$g/$g=$work/games/$g:755:1000:1000"); done
+    for f in "$s"/bin/*; do args+=("/bin/${f##*/}=$f:755"); done
+    "$PAX_ROOT/tools/mkinitramfs" "$work/games.cpio" "${args[@]}" > "$work/games.initramfs.txt" || why+=" tools/mkinitramfs;"
+    # The withheld tree: kernel/, boot/ and user/programs.S copied, the
+    # font table without its rows above U+00FF.
+    wt=$work/withheld-tree
+    mkdir -p "$wt/user"
+    cp -R "$PAX_ROOT/kernel" "$PAX_ROOT/boot" "$wt/" && cp "$PAX_ROOT/user/programs.S" "$wt/user/" \
+        && python3 -I "$PAX_ROOT/tools/mkfont" --latin1 "$wt/boot/font.S" >&2 || why+=" the withheld tree;"
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier/withheld"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log") \
+            && welf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$wt/kernel/kmain_console.lu" "$work/$tier/withheld" 2>"$log.withheld"); then
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                --add "$work/games.cpio" initramfs.cpio "$elf" "$work/$tier/games.iso" >/dev/null || why+=" $tier: mkimage games;"
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                --add "$work/games.cpio" initramfs.cpio "$welf" "$work/$tier/withheld.iso" >/dev/null || why+=" $tier: mkimage withheld;"
+            say "built $tier: elf $(sha256_of "$elf"), withheld elf $(sha256_of "$welf"), initramfs $(sha256_of "$work/games.cpio")"
+        else
+            cat "$log" "$log.withheld" >&2 2>/dev/null
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    [ -z "$why" ] && say "PASS G0: the font row's rows and table, games-glyphs the pinned lists, the games static, the Linux side's frames (three the committed goldens), both images built ($tiers)" || bad "G0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx6-games build (G0): PASS (no boot: --no-boot)" || say "mpx6-games build: FAIL"
+        exit "$fail"
+    fi
+fi
+G=$images/golden
+
+ends() { # norm init -> reasons on stdout
+    local ns rf why=
+    ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$1" | sort -un | paste -sd' ' -)
+    [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
+    rf=$(grep -c ': refused: ' "$1")
+    [ "$rf" = 0 ] || why+=" $rf refused lines ($(grep -m1 ': refused: ' "$1" | cut -c1-160));"
+    grep -qx "PAX: init $2 ended with status 0; nothing left to run" "$1" \
+        || why+=" no 'PAX: init $2 ended with status 0' ($(grep -m1 '^PAX: init ' "$1"));"
+    grep -q '^PANIC ' "$1" && why+=" the kernel panicked: $(grep -m1 '^PANIC ' "$1");"
+    printf '%s' "$why"
+}
+
+record() { # tier leg image halt-status
+    local serial dump
+    serial=$(sha256_of "$log" 2>/dev/null || echo none)
+    printf '%s %s %s halt-status=%s serial=%s dumps=%s\n' "$1" "$2" "$3" "$4" "$serial" \
+        "$(wc -l < "$out/dumps.txt" 2>/dev/null | tr -d ' ' || echo 0)" >> "$runs"
+    ran=$((ran + 1))
+}
+
+# boot IMAGE KEYS TIMEOUT: the machine halted, the session typed, its
+# screens in $out.
+boot() {
+    local img=$1 keys=$2 t=$3
+    iso=$images/$tier/$img.iso
+    elf=$images/$tier/kmain_console.elf
+    [ "$img" = withheld ] && elf=$images/$tier/withheld/kmain_console.elf
+    log=$PAX_BUILD/mpx6-games-$tier-$leg-$img.serial.log
+    out=$PAX_BUILD/mpx6-games-$tier-$leg-$img
+    sock=$PAX_BUILD/mpx6-games-$tier-$leg.mon2
+    rm -rf "$log" "$log.verdict" "$out" "$sock"
+    mkdir -p "$out"
+    hrc=0 krc=0
+    python3 "$PAX_ROOT/tools/ps2-session" --serial "$log" --monitor "$sock" --keys "$keys" --out "$out" --timeout 600 \
+        > "$out/session.out" 2>&1 &
+    local kp=$!
+    "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout "$t" --qemu -m --qemu 1024M \
+        --qemu -monitor --qemu "unix:$sock,server=on,wait=off" \
+        --elf "$elf" --marker 'halt|PANIC .*' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+    wait "$kp" || krc=$?
+    record "$tier" "$leg" "$img" "$hrc"
+    norm=$log.norm; serial_norm "$log" > "$norm"
+}
+
+offset() { # dump name -> its byte offset
+    sed -n "s/^$1 //p" "$out/dumps.txt"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        if [ ! -f "$images/$tier/games.iso" ] || [ ! -f "$images/$tier/withheld.iso" ]; then
+            for t in G1 G2 G3 G4 G5 G6; do bad "$t $tier $leg: no image"; done
+            continue
+        fi
+        id="$tier $leg"
+        # --- the games, the font row present ---------------------------
+        boot games "$PAX_ROOT/user/console/games.keys" 1500
+        [ "$krc" = 0 ] || bad "$id: the keys: $(tail -n 1 "$out/session.out")"
+        r=$(cmp_py glyphs "$out/glyphs.ppm" "$log" 'PAX: the console' "$(offset glyphs)" "$PAX_ROOT/font/games-glyphs.txt" 2>&1) \
+            && say "$r ($id)" || bad "$r ($id)"
+        for g in $GAMES; do
+            r=$(cmp_py probe "$log" "$g" "$PAX_ROOT/font/games-glyphs.txt" 2>&1) && say "$(printf '%s\n' "$r" | head -n 1) ($id)" \
+                || bad "$(printf '%s\n' "$r" | head -n 1) ($id)"
+            printf '%s\n' "$r" | tail -n +2 > "$out/probe-$g.txt"
+        done
+        if r=$(cmp_py ref "$log" 'PAX: the console' "$out" 2>&1); then
+            say "PASS G3 $id: $(printf '%s\n' "$r" | tail -n 1)"
+        else
+            printf '%s\n' "$r" | command grep -a '^FAIL' | head -n 5 >&2
+            bad "G3 $id: $(printf '%s\n' "$r" | tail -n 1)"
+        fi
+        for row in trail-title:frame:trail-title/final trail-scene:frame:trail-scene/final cub-title:oneof:cub-title \
+                   cub-scene:frame:cub-scene/final pack-title:frame:pack-title.apply pack-scene:frame:pack-scene.apply; do
+            IFS=: read -r name mode gold <<< "$row"
+            if [ "$mode" = oneof ]; then
+                r=$(cmp_py oneof "$name" "$out/$name.ppm" "$G/$gold" 1 89 2>&1)
+            else
+                r=$(cmp_py frame "$name" "$out/$name.ppm" "$G/$gold" 2>&1)
+            fi
+            [ $? = 0 ] && say "$(sed 's/^PASS /PASS G3 /' <<< "$r") ($id)" || bad "G3 $r ($id)"
+        done
+        for row in pack:left:right:parry cub:up:left:sneak-right trail:up:left:down; do
+            IFS=: read -r g w1 w2 w3 <<< "$row"
+            why=
+            r=$(cmp_py record "$log" "$g-run.pk" "$w1" "$w2" "$w3" 2>&1) || why+=" $r;"
+            a=$(cmp_py after "$log" 'PAX: the console' "$(offset "$g-after")" "$g-after" 2>&1) || why+=" $a;"
+            # `cat` typed after the game: the line echoed, then written back
+            n=$(python3 -I -c 'import sys; print(open(sys.argv[1],"rb").read().count(b"restored\r\nrestored\r\n"))' "$log")
+            [ "$n" -ge 1 ] || why+=" no canonical echo of a typed line after the games;"
+            [ -z "$why" ] && say "PASS G4 $id $g: $r; $a; cat echoes and writes back a typed line" || bad "G4 $id $g:$why"
+        done
+        n=$(python3 -I -c 'import sys; print(open(sys.argv[1],"rb").read().count(b"restored\r\nrestored\r\n"))' "$log")
+        [ "$n" = 3 ] && say "PASS G4 $id: the typed line echoed and written back after each of the three games" \
+            || bad "G4 $id: the typed line echoed and written back $n times, not 3"
+        for g in trail pack; do
+            r=$(cmp_py plain "$log" "\$ Games/$g/$g"$'\r' 2>&1) && say "$(sed 's/^PASS /PASS G6 /' <<< "$r") (a bare start, the font row present; $id)" \
+                || bad "G6 $r (a bare start, the font row present; $id)"
+        done
+        why=$(ends "$norm" /bin/as)
+        [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+        [ -z "$why" ] && say "PASS G5 $id games: -ENOSYS only 273 and 334, nothing refused, init ended 0, halted" || bad "G5 $id games:$why"
+
+        # --- the same image, the font row withheld ---------------------
+        boot withheld "$PAX_ROOT/user/console/games-withheld.keys" 900
+        [ "$krc" = 0 ] || bad "$id withheld: the keys: $(tail -n 1 "$out/session.out")"
+        if r=$(cmp_py ref "$log" 'PAX: the console' "$out" latin1 2>&1); then
+            say "PASS G6 $id withheld: $(printf '%s\n' "$r" | tail -n 1)"
+        else
+            printf '%s\n' "$r" | command grep -a '^FAIL' | head -n 5 >&2
+            bad "G6 $id withheld: $(printf '%s\n' "$r" | tail -n 1)"
+        fi
+        r=$(cmp_py withheld trail-title-withheld "$out/trail-title-withheld.ppm" "$G/trail-title/final" 2>&1) \
+            && say "$(sed 's/^PASS /PASS G6 /' <<< "$r") ($id)" || bad "G6 $r ($id)"
+        r=$(cmp_py frame trail-bare-withheld "$out/trail-bare-withheld.ppm" "$G/trail-bare.apply" 2>&1) \
+            && say "$(sed 's/^PASS /PASS G6 /' <<< "$r") (the plain tier needs no row; $id)" || bad "G6 $r ($id)"
+        for g in trail pack; do
+            r=$(cmp_py plain "$log" "\$ Games/$g/$g"$'\r' 2>&1) && say "$(sed 's/^PASS /PASS G6 /' <<< "$r") (a bare start, the font row withheld; $id)" \
+                || bad "G6 $r (a bare start, the font row withheld; $id)"
+        done
+        why=$(ends "$norm" /bin/as)
+        [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+        [ -z "$why" ] && say "PASS G5 $id withheld: -ENOSYS only 273 and 334, nothing refused, init ended 0, halted" || bad "G5 $id withheld:$why"
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx6-games: PASS" || say "mpx6-games: FAIL"
+exit "$fail"
