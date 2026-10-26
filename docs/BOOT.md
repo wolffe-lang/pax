@@ -611,3 +611,41 @@ unavailable, not zero and not replaced with QEMU's host RSS. Linux's same
 snapshot/copy reference measured 11884 KiB peak RSS. The missing guest
 measurement, the journalled formatter, timer-driven cursor blink, hardware
 drivers and USB transport remain separate prerequisites.
+
+## The kernel's assembler (as02b)
+
+Every kernel has seventeen assembly objects per tier: the sixteen sources
+`kernel/wolf.pkg` lists under `asm` (`boot/io.S` … `boot/unix.S`,
+`user/programs.S`), which wolf assembles for the kernel's target, and
+`boot/start.S`, which `tools/build-kernel` assembles itself for the link. By
+default nothing names the assembler: wolf's legacy driver runs `clang
+--target=x86_64-unknown-none-elf -c` for the sixteen and `build-kernel` runs
+`cc -c` for the entry. **`WOLF_AS`** is one explicit choice for all
+seventeen (R-as02-2 A, one variable rather than a PAX-only one): wolf-lang
+#957 (as02a) made it wolf's own (`wolf build --assembler PATH` over
+`WOLF_AS` over the legacy driver, a selected assembler's failure final), and
+`build-kernel` resolves it once to an absolute path, hands it to wolf as
+`--assembler PATH`, and assembles `boot/start.S` with it the way wolf calls
+it, `PATH --64 -o start.o boot/start.S`. A selected assembler that exits
+nonzero, writes nothing, or writes something that is not an ELF64 x86-64
+relocatable object fails the build naming it; nothing is retried through cc
+or clang. A `WOLF_AS` that names no executable file is refused before wolf
+runs. Unset or empty, every command `build-kernel` runs is the one it ran
+before (`tests/kernel-as` holds the traced calls of both tiers to trunk's).
+
+The pinned compiler is wolf 0.2.35, which has no `--assembler`: with
+`WOLF_AS` set it refuses the flag by name, and `build-kernel` says the wolf
+has no assembler seam, so a kernel half through the choice and half through
+clang is never built. The seam is measured with wolf-lang `9f2cff44` built
+from source (`tests/kernel-as.d/wolf.pin`); `kernel/wolf.pin` moves to the
+first release that carries #957. Through the seam, GNU as and clef (the
+static package, `tools/mkclef`) give the same kernel, byte for byte, on both
+tiers, and the release kernel the seam's compiler builds by default is the
+0.2.35 kernel CI boots (notes/as02b-the-image-seam.md).
+
+What this does not mean: clef assembling the kernel's `.S` files does not
+take the C toolchain out of the kernel's build or off the image. The link is
+still `ld.lld` (Ubuntu's lld 18.1.3 in CI, the dev image's 18.1.8, the same
+bytes: px80), the release tier's code generation is still wolf's `clang -x
+ir` through LLVM, and a hosted wolf program still links through `cc`. The
+linker's own package is ligature's milestone (ld02), not this one.
