@@ -19,12 +19,12 @@ wolf 0.2.35 answers `--assembler` with "unknown flag", status 2; clef's own buil
 | | predicted | measured | score |
 |---|---|---|---|
 | P1 | the package ET_EXEC, no PT_INTERP, no dynamic section, 0 DT_NEEDED; 14.6–16.5 MB, point 15.2 MB; three build inputs by digest, no std | 15,370,648 bytes (stripped 1,819,608, not installed), 0 DT_NEEDED (the host clef: 3); inputs the wolf archive `4cc4045b…`, its `libwolf_rt.a` `9efc68e1…`, Ubuntu 24.04's glibc `libc.a` (libc6-dev 2.39-0ubuntu8.9); no std | right |
-| P2 | two builds at one path one digest; at two paths only the debug sections differ | right at one path; at two paths `.debug_info`, `.debug_aranges` **and the build-id note** differ (`logs/e1.log` era measurement, explore2 on kasumi). Not predicted: with mktemp's path every run was a new digest (`6f171db0…`, then `29cd889d…`), so `d2cbceee` builds at one fixed path per pin; since then **one digest on kasumi's container and on CI's runner**: `a90a4ca8efc93c6e6d3343ea36d70d7003cd5c30e91ff1345b07c3febcdd3161` | right, but the build-id note and the fixed path |
+| P2 | two builds at one path one digest; at two paths only the debug sections differ | right at one path; at two paths `.debug_info`, `.debug_aranges` **and the build-id note** differ (measured on kasumi before `d2cbceee`, two checkouts at two paths). Not predicted: with mktemp's path every run was a new digest (`6f171db0…`, then `29cd889d…`), so `d2cbceee` builds at one fixed path per pin; since then **one digest on kasumi's container and on CI's runner**: `a90a4ca8efc93c6e6d3343ea36d70d7003cd5c30e91ff1345b07c3febcdd3161` | right, but the build-id note and the fixed path |
 | P3 | one branch for `boot/start.S`, one argument for wolf's object build; absent or empty, every command trunk's | right (`1c73e8db`; plus the one-time resolution and the ELF check the branch needs); K1 holds 18 native and 36 release traced calls to trunk's build-kernel's, K2 the empty value to the same calls and bytes | right |
 | P4 | 17 assembly calls per tier through a selected assembler (16 + 1), 0 through cc or clang, the release tier's code generation unchanged | right on both tiers (K4, K5; the release tier's 8 `clang -x ir` and 9 `clang --version` calls K1's) | right |
 | P5 | wolf 0.2.35 with WOLF_AS set refused by name before any object | right (K3: no kernel, no assembly call) | right |
 | P6 | clef kernel = GNU-as kernel through the seam, both tiers, identical non-assembly objects; 9f2cff44's non-assembly objects = 0.2.35's (60 %), so the seam kernels = the 0.2.35 GNU-as baseline through as01's shims | right on every count: 53 of 53 native and 9 of 9 release non-assembly inputs identical between the two compilers; six kernels per tier in two classes (below) | right |
-| P7 | the stock kernel's first difference from the GNU-as one near byte 96, both tiers | offset 96 on both tiers (`kernels.json`). The K4 line in `logs/e1.log` says "byte 9797": a display bug, cmp's 1-based 97 printed twice; `620923d0` prints the offset once (`logs/final` run: "offset 96") | right |
+| P7 | the stock kernel's first difference from the GNU-as one near byte 96, both tiers | offset 96 on both tiers (`kernels.json`). The K4 line in `logs/e1.log` says "byte 9797": a display bug, cmp's 1-based 97 printed twice; `620923d0` prints the offset once (rerun at `7ae9ca72` on kasumi: "their first difference at offset 96") | right |
 | P8 | on PAX, at the first boot: 43/43 objects, the expansion and every refusal identical to the host clef's and to the same package on Linux; 43/43 GNU as's by clef's rule; nothing unserved but 273 and 334 | right at the first boot (`logs/jobB.log`, native BIOS), then on every leg | right |
 | P9 | every leg of mpx5-wolf and the muzzle witness green at the first boot on the clef kernels | right (`logs/e3c.log`) | right |
 | P10 | the plants red by name: the wrong assembler at kernel-as, the runtime at Q0 naming both digests | right (below), though the runtime plant is not wolf 0.2.34's runtime: that one does not link (`__wolf_rt_stack_start` undefined) | right but its form |
@@ -118,8 +118,9 @@ naming the build directory):
 - **Through the explicit seam the clef kernel is byte for byte the GNU-as kernel on both tiers**,
   and so is every non-assembly input (53 native, 9 release); through as01's shims wolf 0.2.35 makes
   the same two kernels; the stock kernels differ from them first at offset 96, both tiers.
-- The same clef kernels are the ones mpx5-clef and mpx5-wolf built through the seam on their own
-  (`logs/e3b.log`): the seam is not a property of one suite's build.
+- The same clef kernels are the ones mpx5-clef (`logs/e3b.log`) and mpx5-wolf (sha256 of its two
+  `kmain_console.elf`, read on kasumi before the prune) built through the seam on their own: the
+  seam is not a property of one suite's build.
 
 **The package.** 15,370,648 bytes, `a90a4ca8…`, ET_EXEC, no PT_INTERP, no dynamic section, 0
 dynamic dependencies (the host clef: `libgcc_s.so.1`, `libc.so.6`, `ld-linux-x86-64.so.2`); links
