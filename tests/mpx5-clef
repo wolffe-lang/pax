@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+# tests/mpx5-clef — as02b (R-as02-3 A): the static clef package
+# (user/clef.pin, tools/mkclef) qualified ON THE IMAGE before any image
+# carries it by default: the packaged command, run by PAX over a copied
+# source corpus, prints byte for byte what the same package prints on
+# Linux, writes byte for byte what the host's clef writes, and its
+# objects are GNU as's by clef's own structural rule.
+#
+#   tests/mpx5-clef [--images DIR | --no-boot | --only build | --only linux --images DIR]
+#                   [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# One image, kmain_console with the archive: pelt as /bin/sh, boreutils'
+# base64, cat and mkdir (user/boreutils.pin), the package as
+# /usr/bin/clef; under /usr/share/clef the corpus (clef's census/sources
+# at the pin, every file: the 43 x86-64 census sources of PAX, muzzle and
+# wolf-lang its census/org-asm.json lists, and the AArch64 one it
+# excludes), corpus.list (the 43), bad/ (a C source and an unknown
+# mnemonic) and qualify.sh, written by tests/mpx5-clef.d/qualify.py from
+# its one list of cases: --version; each corpus source (`--64 -o`); the
+# ISR's --expand (the macro-heavy one) and --provenance; the C-driver
+# form (`-c … -o … --target=x86_64-unknown-none-elf`); nine refusals
+# (no operand, an unknown option, a C source, --target without -c,
+# --expand with -o, a foreign target, the output the input, a missing
+# source, an unknown mnemonic over an existing output, which must stay).
+# Its run list is the one line `/bin/sh /usr/share/clef/qualify.sh`, so
+# init is the script, and each case prints its status, what it printed
+# and its output file, in base64.
+#
+# The kernel is built by tools/build-kernel as the caller's environment
+# asks: the image's ordinary kernel by default (CI's); WOLF_AS and
+# PAX_WOLF name the seam (the kernel-as suite's), as the lane booted it with
+# clef's own kernel.
+#
+# **The Linux side** is the same run list over the same tree in a
+# throwaway container (tools/linux-tree --runlist): the same package, the
+# same pelt and boreutils. **The host's clef** is clef's own build line
+# (`wolf build --deny-warnings src/clef.lu`, dynamic) from the same tree
+# and archive, run over ROOT/usr/share/clef by qualify.py's `host`.
+# **GNU as** is the host's binutils (`as --64`), compared by clef's own
+# tools/elf.py (sections, relocation tuples, structural symbols: the
+# boundary clef's census gate holds).
+#
+# Assertions:
+#   Q0 build: the package ET_EXEC, no PT_INTERP, no dynamic section; the
+#      runtime it links (its sums.txt's libwolf_rt.a) is the image's: the
+#      libwolf_rt.a of kernel/wolf.pin's archive, the generation every
+#      user program of the image links, and its archive is that pin's
+#      digest; the image built; the Linux side ran.
+#   per tier and firmware:
+#   QT the transcript (run 1, serial_norm, the kernel's `user:` lines
+#      out) byte-identical to the container's;
+#   Q1 the corpus: every source's status, output and object identical to
+#      the host clef's (43);
+#   Q2 --expand, --provenance and the C-driver form identical to the
+#      host clef's;
+#   Q3 the refusals: every status and every byte printed identical to the
+#      host clef's, the existing output left as it was;
+#   Q4 the 43 objects structurally equal to GNU as's (clef's rule);
+#   Q5 -ENOSYS only for set_robust_list (273) and rseq (334) (glibc's
+#      start-up); nothing refused by name; `PAX: init /bin/sh ended with
+#      status 0; nothing left to run`; halted.
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 only=
+usage="usage: tests/mpx5-clef [--images DIR | --no-boot | --only build | --only linux --images DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+[ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
+need readelf python3 git tar
+
+Q=$here/mpx5-clef.d/qualify.py
+BORE="base64 cat mkdir" # boreutils in the image (user/boreutils.pin)
+RUN="/bin/sh /usr/share/clef/qualify.sh"
+work=$PAX_BUILD/mpx5-clef
+runs=$PAX_BUILD/mpx5-clef-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+linux_side() { # dir -> reasons on stdout
+    rm -rf "${1:?}/linux"
+    if "$PAX_ROOT/tools/linux-tree" --root "$1/root" --runlist "$1/root/etc/pax-run" --size 256m "$1/linux" >&2; then
+        say "  linux: $(wc -c < "$1/linux/1.out" | tr -d ' ') bytes, status $(cat "$1/linux/1.rc")"
+    else
+        printf ' tools/linux-tree --runlist;'
+    fi
+}
+
+if [ "$only" = linux ]; then
+    why=$(linux_side "$images")
+    [ -z "$why" ] && say "PASS Q0 (linux): the Linux side ran in a throwaway container" || bad "Q0 (linux):$why"
+    exit "$fail"
+fi
+
+if [ -z "$images" ]; then
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "${work:?}"
+    r=$work/root
+    mkdir -p "$r/bin" "$r/etc" "$r/usr/bin" "$r/usr/share/clef/bad" "$r/tmp" "$work/host"
+    why=
+    "$PAX_ROOT/tools/mkclef" "$work/clef" > "$work/clef.txt" || why+=" tools/mkclef;"
+    "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" || why+=" tools/mkpelt;"
+    "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
+    cp "$work/pelt/pelt" "$r/bin/sh" 2>/dev/null || why+=" no pelt;"
+    for u in $BORE; do cp "$work/bore/$u" "$r/bin/$u" 2>/dev/null || why+=" no $u;"; done
+    cp "$work/clef/clef" "$r/usr/bin/clef" 2>/dev/null || why+=" no clef;"
+    readelf -dW "$r/usr/bin/clef" 2>/dev/null | command grep -q 'no dynamic section' || why+=" clef has a dynamic section;"
+    for f in "$r"/bin/* "$r/usr/bin/clef"; do
+        x=$(static_ok "$f") || why+=" $x;"
+        say "  program: ${f#"$r"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+    done
+    # Q0's runtime: the package's against the image's (kernel/wolf.pin's archive).
+    load_wolf_pin
+    relw=$("$PAX_ROOT/tools/fetch-wolf" | tail -n 1) || why+=" tools/fetch-wolf;"
+    img_rt=$(dirname "$relw")/libwolf_rt.a
+    pkg_rt=$(awk '$1 == "libwolf_rt.a" { print $2 }' "$work/clef/sums.txt" 2>/dev/null)
+    pkg_arc=$(awk '$1 == "wolf-archive" { print $2 }' "$work/clef/sums.txt" 2>/dev/null)
+    if [ -f "$img_rt" ] && [ "$pkg_rt" = "$(sha256_of "$img_rt")" ] && [ "$pkg_arc" = "$WOLF_SHA256" ]; then
+        say "  runtime: the package links libwolf_rt.a $pkg_rt, the image's (wolf $WOLF_VERSION, archive ${WOLF_SHA256:0:12}…)"
+    else
+        why+=" the package's runtime is libwolf_rt.a ${pkg_rt:-none} from archive ${pkg_arc:-none}; the image's is $( [ -f "$img_rt" ] && sha256_of "$img_rt") from $WOLF_SHA256;"
+    fi
+    # The corpus, at the package's own pin, and the host's clef from the same tree and archive.
+    . "$PAX_ROOT/user/clef.pin"
+    cs=$work/clef-src
+    mkdir -p "$cs"
+    git -C "$cs" init -q && git -C "$cs" fetch -q --depth 1 "${PAX_CLEF_REPO:-$CLEF_REPO}" "$CLEF_REV" \
+        && git -C "$cs" checkout -q --detach FETCH_HEAD && [ "$(git -C "$cs" rev-parse HEAD)" = "$CLEF_REV" ] || why+=" clef at $CLEF_REV;"
+    cp -R "$cs/census/sources" "$r/usr/share/clef/corpus" || why+=" no census/sources;"
+    python3 -I -c 'import json,sys; [print(f["path"]) for f in json.load(open(sys.argv[1]))["files"] if f["architecture"] == "x86_64"]' \
+        "$cs/census/org-asm.json" > "$r/usr/share/clef/corpus.list" || why+=" no corpus list;"
+    cp "$here/mpx5-clef.d/main.c" "$here/mpx5-clef.d/unknown.S" "$r/usr/share/clef/bad/" || why+=" no bad/;"
+    python3 -I "$Q" gen "$r" > /dev/null || why+=" qualify.py gen;"
+    printf '%s\n' "$RUN" > "$r/etc/pax-run"
+    n=$(wc -l < "$r/usr/share/clef/corpus.list" | tr -d ' ')
+    [ "$n" = 43 ] || why+=" the corpus lists $n x86-64 sources, not 43;"
+    mkdir -p "$work/wolf"
+    tar -xzf "$PAX_CACHE/wolf-$WOLF_VERSION-$WOLF_SHA256.tar.gz" -C "$work/wolf" --strip-components=1 || why+=" the archive mkclef read;"
+    (cd "$cs" && mkdir -p target && "$work/wolf/wolf" build --no-cache --deny-warnings src/clef.lu -o target/clef) > "$work/host-clef.log" 2>&1 \
+        || why+=" the host clef (see $work/host-clef.log);"
+    say "  host clef: $(sha256_of "$cs/target/clef") $(wc -c < "$cs/target/clef" | tr -d ' ') bytes, $(readelf -dW "$cs/target/clef" | command grep -c NEEDED) DT_NEEDED"
+    python3 -I "$Q" host "$cs/target/clef" "$r" "$work/host" > /dev/null || why+=" qualify.py host;"
+    # The archive.
+    args=(/tmp/:1777)
+    while IFS= read -r -d '' f; do
+        mode=644; [ -x "$f" ] && mode=755
+        args+=("${f#"$r"}=$f:$mode")
+    done < <(find "$r" -type f -print0 | LC_ALL=C sort -z)
+    "$PAX_ROOT/tools/mkinitramfs" "$work/clef.cpio" "${args[@]}" > "$work/clef.initramfs.txt" || why+=" tools/mkinitramfs;"
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                --add "$work/clef.cpio" initramfs.cpio "$elf" "$work/$tier/clef.iso" >/dev/null || why+=" $tier: mkimage;"
+            say "built $tier clef: elf $(sha256_of "$elf")${WOLF_AS:+ (WOLF_AS=$WOLF_AS)}, iso $(sha256_of "$work/$tier/clef.iso"), initramfs $(sha256_of "$work/clef.cpio")"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    if [ "$only" = build ]; then
+        [ -z "$why" ] && say "PASS Q0 (build): the package static on the image's runtime, kmain_console built ($tiers), the image built" || bad "Q0 (build):$why"
+        exit "$fail"
+    fi
+    if [ "$(uname -s)" != Linux ]; then
+        why+=" the Linux side needs Linux (this is $(uname -s)): build on Linux, boot here with --images;"
+    else
+        why+=$(linux_side "$work")
+    fi
+    [ -z "$why" ] && say "PASS Q0: the package static on the image's runtime, kmain_console built ($tiers), the image built, the Linux side ran in a throwaway container" || bad "Q0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx5-clef build (Q0): PASS (no boot: --no-boot)" || say "mpx5-clef build: FAIL"
+        exit "$fail"
+    fi
+fi
+lx=$images/linux
+[ -f "$lx/1.out" ] && serial_norm "$lx/1.out" > "$lx/1.cmp" || bad "Q0 linux: no $lx/1.out (build first, and run the Linux side)"
+
+# Run k's transcript (the lupin suite's rule).
+run_part() { # norm k
+    awk -v k="$2" '
+        $0 ~ "^run " k ": " { on = 1; next }
+        on && /^run [0-9]+: |^run: [0-9]+ commands$|^user: frames free / { exit }
+        on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$1"
+}
+record() { # tier leg status
+    ran=$((ran + 1))
+    printf '%s kmain_console %s clef halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
+}
+group() { # layout-dir-a layout-dir-b ids... -> differences on stdout
+    local a=$1 b=$2 c e
+    shift 2
+    for c in "$@"; do
+        for e in rc out obj; do
+            if [ -e "$a/$c.$e" ] || [ -e "$b/$c.$e" ]; then
+                cmp -s "$a/$c.$e" "$b/$c.$e" 2>/dev/null || printf ' %s.%s' "$c" "$e"
+            fi
+        done
+    done
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        id="$tier $leg"
+        log=$PAX_BUILD/mpx5-clef-$tier-$leg.serial.log
+        elf=$images/$tier/kmain_console.elf iso=$images/$tier/clef.iso
+        rm -f "$log" "$log.verdict"
+        if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+            bad "Q5 $id: no image"
+            continue
+        fi
+        hrc=0
+        limit=()
+        if [ "$(uname -s)" = Linux ]; then need taskset; limit=(taskset -c "${PAX_TASKSET_CPUS:-0-3}"); fi
+        "${limit[@]}" "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 1200 --qemu -m --qemu 1024M \
+            --elf "$elf" --marker 'halt|PANIC .*' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+        record "$tier" "$leg" "$hrc"
+        norm=$log.norm; serial_norm "$log" > "$norm"
+        out=$PAX_BUILD/mpx5-clef-$tier-$leg.session
+        run_part "$norm" 1 > "$out"
+        # QT: the container's transcript.
+        if [ -f "$lx/1.cmp" ] && cmp -s "$lx/1.cmp" "$out"; then
+            say "PASS QT $id: $(wc -l < "$out" | tr -d ' ') lines byte-identical to the container's ($(sha256_of "$out" | cut -c1-12)…)"
+        else
+            bad "QT $id: the transcript differs from the container's: $(diff "$lx/1.cmp" "$out" 2>&1 | head -n 8 | cut -c1-200 | tr '\n' '|')"
+        fi
+        dec=$PAX_BUILD/mpx5-clef-$tier-$leg.cases
+        rm -rf "${dec:?}"
+        python3 -I "$Q" split "$out" "$dec" > /dev/null || bad "Q1 $id: the transcript does not split"
+        host=$images/host
+        ids=$(cat "$host/cases.txt" 2>/dev/null)
+        corpus=$(printf '%s\n' $ids | command grep -E '^c[0-9]+$')
+        if [ "$(cat "$dec/cases.txt" 2>/dev/null)" != "$ids" ]; then
+            bad "Q1 $id: the image ran $(wc -l < "$dec/cases.txt" 2>/dev/null | tr -d ' ') cases, the host $(printf '%s\n' $ids | wc -l | tr -d ' ')"
+        fi
+        # shellcheck disable=SC2086
+        d=$(group "$dec" "$host" $corpus)
+        nz=$(for c in $corpus; do [ "$(cat "$dec/$c.rc" 2>/dev/null)" = 0 ] || echo "$c"; done | wc -l | tr -d ' ')
+        [ -z "$d" ] && [ "$nz" = 0 ] && say "PASS Q1 $id: $(printf '%s\n' $corpus | wc -l | tr -d ' ') corpus sources: status 0, every object byte for byte the host clef's" \
+            || bad "Q1 $id: differs from the host clef:$d; $nz sources not status 0"
+        d=$(group "$dec" "$host" version expand provenance c-form)
+        [ -z "$d" ] && say "PASS Q2 $id: --version, the ISR's --expand ($(wc -c < "$dec/expand.out" | tr -d ' ') bytes), --provenance and the C-driver form, byte for byte the host clef's" \
+            || bad "Q2 $id: differs from the host clef:$d"
+        refs=$(printf '%s\n' $ids | command grep '^r-')
+        # shellcheck disable=SC2086
+        d=$(group "$dec" "$host" $refs)
+        kept=$(cat "$dec/r-source.obj" 2>/dev/null)
+        [ -z "$d" ] && [ "$kept" = previous ] && say "PASS Q3 $id: $(printf '%s\n' $refs | wc -l | tr -d ' ') refusals, every status and byte the host clef's ($(for c in $refs; do printf '%s=%s ' "$c" "$(cat "$dec/$c.rc")"; done)); the existing output kept" \
+            || bad "Q3 $id: differs from the host clef:$d; the existing output is '$kept'"
+        o=$(python3 -I "$Q" oracle "$images/clef-src/tools" "$images/root" "$dec" "$PAX_BUILD/mpx5-clef-$tier-$leg.gas" 2>&1)
+        [ $? = 0 ] && say "PASS Q4 $id: $(printf '%s' "$o" | tail -n 1) ($("${AS:-as}" --version | head -n 1))" || bad "Q4 $id: $(printf '%s' "$o" | tr '\n' '|' | cut -c1-600)"
+        # Q5: what PAX lacks; nothing refused; the end.
+        why=
+        ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
+        [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
+        rf=$(grep -c ': refused: ' "$norm")
+        [ "$rf" = 0 ] || why+=" $rf refused lines ($(grep -m1 ': refused: ' "$norm" | cut -c1-160));"
+        grep -qx "PAX: init /bin/sh ended with status 0; nothing left to run" "$norm" \
+            || why+=" no 'PAX: init /bin/sh ended with status 0' ($(grep -m1 '^PAX: init ' "$norm"));"
+        pn=$(grep -m1 '^PANIC ' "$norm")
+        [ -z "$pn" ] || why+=" the kernel panicked: $pn;"
+        [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+        [ -z "$why" ] && say "PASS Q5 $id: -ENOSYS only for 273 and 334; nothing refused by name; init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "Q5 $id:$why"
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx5-clef: PASS" || say "mpx5-clef: FAIL"
+exit "$fail"
