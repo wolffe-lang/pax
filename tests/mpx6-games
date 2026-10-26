@@ -41,9 +41,10 @@
 #      font/games-glyphs.txt is the union of the three docs/GLYPHS.md in
 #      the pinned archives; each of its code points is in PAX's font,
 #      its own glyph, none blank, no two alike; the games built static
-#      (tools/mkgames); the Linux side's frames, and its headless finals
-#      equal to the committed goldens for trail title-80, cub walk-north
-#      and pack death-card; both images built.
+#      (tools/mkgames), each binary the one games.sha256 names; the Linux
+#      side's frames, and its headless finals equal to the committed
+#      goldens for trail title-80, cub walk-north and pack death-card;
+#      both images built.
 #   G1 the glyph screen: after `cat glyphs.txt` every code point is one
 #      cell in the list's order, drawn as its own glyph, and the dump is
 #      tools/screen-ref's picture of the bytes.
@@ -141,7 +142,13 @@ if [ -z "$images" ]; then
         mkdir -p "$work/src/$g"
         tar -xzf "$work/games/$g.source.tar.gz" -C "$work/src/$g" --strip-components=1 2>/dev/null || why+=" no $g source;"
         x=$(static_ok "$work/games/$g") || why+=" $x;"
-        say "  game: $g $(sha256_of "$work/games/$g" 2>/dev/null) $(wc -c < "$work/games/$g" 2>/dev/null | tr -d ' ') bytes"
+        # the binary is the one games.sha256 names, read twice (what the
+        # installer's payload carries and verifies)
+        want=$(awk -v g="$g" '$2 == g { print $1 }' "$work/games/games.sha256" 2>/dev/null)
+        have=$(sha256_of "$work/games/$g" 2>/dev/null)
+        [ -n "$want" ] && [ "$have" = "$want" ] && [ "$(sha256_of "$work/games/$g" 2>/dev/null)" = "$want" ] \
+            || why+=" $g's sha256 $have is not games.sha256's ${want:-(none)};"
+        say "  game: $g $have $(wc -c < "$work/games/$g" 2>/dev/null | tr -d ' ') bytes, games.sha256's"
     done
     # font/games-glyphs.txt is the three lists, as the archives hold them
     if r=$(python3 -I - "$PAX_ROOT/font/games-glyphs.txt" "$work/src" $GAMES <<'PY'
