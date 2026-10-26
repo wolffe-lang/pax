@@ -215,8 +215,10 @@ for tier in $tiers; do
             diff <(norm K1 "$tier" | awk -F'\t' '$2 == "other"') <(norm K4 "$tier" | awk -F'\t' '$2 == "other"') | head -20 >&2
         fi
         if [ -f "$(elf K1 "$tier")" ]; then
-            first=$(cmp "$(elf K1 "$tier")" "$(elf K4 "$tier")" 2>/dev/null | awk '{ print $5 }' | tr -d ,)
-            say "K4 $tier: the stock kernel $(sha256_of "$(elf K1 "$tier")") against GNU as's $(sha256_of "$(elf K4 "$tier")"): ${first:+first difference at byte $first}${first:-the same bytes} (reported, not required)"
+            # cmp counts bytes from 1; the offset is from 0.
+            first=$(cmp "$(elf K1 "$tier")" "$(elf K4 "$tier")" 2>/dev/null | awk '{ sub(/,$/, "", $5); print $5 - 1 }')
+            if [ -n "$first" ]; then first="their first difference at offset $first"; else first="the same bytes"; fi
+            say "K4 $tier: the stock kernel $(sha256_of "$(elf K1 "$tier")") against GNU as's $(sha256_of "$(elf K4 "$tier")"): $first (reported, not required)"
         fi
     else
         bad "K4 $tier: the GNU-as build failed ($(grep -m1 FAIL "$work/$tier/K4/build.log"))"
