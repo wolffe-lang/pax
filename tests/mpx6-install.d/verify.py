@@ -64,14 +64,19 @@ for p in sorted(source.rglob('*')):
         assert row[-1]==hashlib.sha256(content).hexdigest(),(path,row)
     for i in [8,9,10]:assert row[i]==('1700000000.000000000' if path in changed_meta else '0.000000000'),(path,row)
 allowed=expected|{'/lost+found'}
+# gm01: every game of games.txt, its binary, its source and its engine's
+catalog=[r.split() for r in (repo/'user/install/games.txt').read_text().splitlines() if r.strip() and not r.startswith('#')]
+sums={w[1]:w[0] for w in (l.split() for l in (work/'payload/games.sha256').read_text().splitlines())}
 if games=='yes':
-    for path in ['/home/pax/Games','/home/pax/Games/pack','/home/pax/Games/pack/pack']:
-        allowed.add(path);row=actual[path]
-        assert int(row[2],8)==0o755 and row[3:5]==['1000','1000'],(path,row)
-    path='/home/pax/Games/pack/source.tar.gz';allowed.add(path);row=actual[path]
-    assert int(row[2],8)==0o644 and row[3:5]==['1000','1000'] and row[-1]==hashlib.sha256((work/'payload/games/pack.source.tar.gz').read_bytes()).hexdigest(),row
-    digest=(work/'payload/games.sha256').read_text().split()[0]
-    assert actual['/home/pax/Games/pack/pack'][-1]==digest
+    allowed.add('/home/pax/Games');row=actual['/home/pax/Games']
+    assert int(row[2],8)==0o755 and row[3:5]==['1000','1000'],row
+    for g,_rev,source,_name,_mode,_erev,engine in catalog:
+        d='/home/pax/Games/'+g
+        for path,mode,want in [(d,0o755,None),(d+'/'+g,0o755,sums[g]),(d+'/source.tar.gz',0o644,source),(d+'/engine.source.tar.gz',0o644,engine)]:
+            allowed.add(path);row=actual[path]
+            assert int(row[2],8)==mode and row[3:5]==['1000','1000'],(path,row)
+            if want:assert row[-1]==want,(path,row,want)
+    assert sorted(x for x in actual if x.startswith('/home/pax/Games/') and x.count('/')==4)==sorted('/home/pax/Games/'+r[0] for r in catalog)
 else:assert not any('/Games' in x for x in actual)
 assert set(actual)==allowed,(set(actual)-allowed,allowed-set(actual))
 for path in ['/boot/pax','/boot/limine/limine-bios.sys','/boot/limine/limine.conf','/EFI/BOOT/BOOTX64.EFI']:
@@ -79,5 +84,5 @@ for path in ['/boot/pax','/boot/limine/limine-bios.sys','/boot/limine/limine.con
     src='/boot'+path if path.startswith('/EFI') else path
     content=changes.get(src,(source/src.lstrip('/')).read_bytes())
     assert out==content,path
-print(f'PASS I-tree-{games}: every source path, byte, mode, owner, link target and whole-second time; games {games} bytes/modes/owners; no hidden game payload')
+print(f'PASS I-tree-{games}: every source path, byte, mode, owner, link target and whole-second time; games {games}'+(f' ({len(catalog)}: '+', '.join(r[0] for r in catalog)+', each with its source and its engine\'s)' if games=='yes' else '')+' bytes/modes/owners; no hidden game payload')
 print('PASS I-boot-files: independent FAT byte readback, new configuration and PARTUUID')
