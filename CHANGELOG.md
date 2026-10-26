@@ -7,6 +7,29 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The kernel's assembler seam and the clef package (as02b).**
+  `tools/build-kernel` honours one explicit `WOLF_AS` for all seventeen
+  assembly objects a kernel has per tier: wolf's own `--assembler` seam
+  (wolf-lang#957) for the sixteen `kernel/wolf.pkg` lists, and the same
+  as-shaped call, `PATH --64 -o start.o boot/start.S`, for the entry. A
+  selected assembler's failure, missing output or non-ELF64 output stops
+  the build by name with no second try; unset or empty, every call is the
+  one it was (`tests/kernel-as`, both tiers' traces held to trunk's). wolf
+  0.2.35 has no `--assembler`, so with `WOLF_AS` set it is refused by name
+  rather than build half a kernel through clang; the seam is measured with
+  wolf-lang `9f2cff44` from source (`tests/kernel-as.d/wolf.pin`). Through
+  it GNU as 2.42 and clef give one kernel byte for byte (native
+  `ca5d0e25…`, release `76f6e210…`), which wolf 0.2.35 builds too through
+  as01's shims. clef is packaged static for the image (`user/clef.pin`,
+  `tools/mkclef`: 15,370,648 bytes, `a90a4ca8…` on kasumi and on CI's
+  runner, ET_EXEC with no interpreter and no shared library, built from the
+  image's wolf archive and linked against its runtime) and qualified on PAX
+  (`tests/mpx5-clef`): over a copy of clef's 43-source census corpus, the
+  ISR's expansion and nine refusals it prints on PAX what it prints on
+  Linux and writes what the host's clef writes, byte for byte, and its
+  objects are GNU as's by clef's structural rule. Opt-in only (`tools/mkdev
+  --clef`); no default moves. New CI jobs `kernel-as` and `mpx5-clef`.
+
 - **The linker respin (px80, pax#172).** The dev ISO's static `ld.lld`
   is lld 18.1.8, built from LLVM's release tarball (sha256 `0b58557a…`,
   signed by LLVM's release key) by `notes/px80/build-lld.sh`: X86 only,
