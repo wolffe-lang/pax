@@ -65,9 +65,12 @@ os.symlink('../proc/self/mounts',source/'etc/mtab')
 (source/'usr/share/tunes/readme').write_text('persistent lope test directory\n')
 payload=work/'payload';(payload/'games').mkdir(parents=True)
 shutil.copyfile(repo/'user/install/games.txt',payload/'games.txt')
-shutil.copyfile(full/'pack/pack',payload/'games/pack')
-shutil.copyfile(full/'pack/pack.source.tar.gz',payload/'games/pack.source.tar.gz')
-shutil.copyfile(full/'pack/games.sha256',payload/'games.sha256')
+# gm01: every game tools/mkgames built, with its source and its engine's
+for row in (repo/'user/install/games.txt').read_text().splitlines():
+    if row.strip() and not row.startswith('#'):
+        g=row.split()[0]
+        for f in [g,g+'.source.tar.gz',g+'.engine.source.tar.gz']:shutil.copyfile(full/'games'/f,payload/'games'/f)
+shutil.copyfile(full/'games/games.sha256',payload/'games.sha256')
 (payload/'boot.sha256').write_text(''.join(sha(source/p)+'  /'+p+'\n' for p in ['boot/pax','boot/limine/limine-bios.sys','boot/EFI/BOOT/BOOTX64.EFI']))
 if fault=='missing-boot':(source/'boot/pax').unlink()
 if fault=='corrupt-boot':
