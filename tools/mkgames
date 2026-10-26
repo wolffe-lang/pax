@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# mkgames — build the wolf games for the installer's payload (gm01; px71's
+# tools/mkpack, made uniform over every row of user/install/games.txt).
+#
+#   tools/mkgames OUTDIR [NAME...]
+#
+# For each row (`name commit source-archive-sha256 payload-name mode
+# engine-commit engine-archive-sha256`; every row unless NAMEs are given):
+#   - the game's source archive (codeload.github.com, the commit's
+#     tarball) and the engine's (wolffe-lang/lair at engine-commit),
+#     each taken BY DIGEST from PAX_CACHE or fetched, read twice;
+#   - the game's tree from its archive; its `lair.pin` must name
+#     engine-commit (the row and the game agree, or the build stops);
+#   - the engine staged by the game's own `tools/fetch-lair` (the commit
+#     fetched is the pin's or it refuses), and that staged tree held to
+#     the engine's archive file by file, so the engine source shipped is
+#     the engine source compiled;
+#   - the toolchain by the engine's own `.lair/tools/fetch-toolchain`
+#     (wolf, lupin and std by the digests in the engine's
+#     wolf-toolchain.toml; the x86_64 Linux wolf digest is printed);
+#   - the binary by the engine's `.lair/tools/build --release` (LLVM,
+#     the mid-end off, warnings denied: the copy the games' maintainer
+#     runs), with `cc` on PATH wrapped to link `-static`: glibc, the
+#     Ubuntu 24.04 baseline, as tools/mkboreutils and px71's pack (never
+#     a host's other glibc);
+#   - refused unless ET_EXEC, no PT_INTERP and `file` says statically
+#     linked; its sha256 read twice.
+# OUTDIR/<name> (0755), OUTDIR/<name>.source.tar.gz and
+# OUTDIR/<name>.engine.source.tar.gz (the archives, byte for byte: the
+# complete corresponding source, licences and notices included),
+# OUTDIR/games.sha256 (`sha  name` a line, games.txt's order),
+# OUTDIR/sums.txt (name commit binary-sha bytes engine wolf-digest a
+# line) and OUTDIR/link-provenance.txt. Nothing is installed and no game,
+# engine or libc source is patched. Exit 0 when every named game built,
+# 2 otherwise.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -ge 1 ] || die 'usage: mkgames OUTDIR [NAME...]'
+need curl tar git readelf file cc diff
+out=$1; shift
+mkdir -p "$out" "$PAX_CACHE"
+out=$(cd "$out" && pwd)
+catalog=$PAX_ROOT/user/install/games.txt
+mapfile -t rows < <(grep -Ev '^[[:space:]]*(#|$)' "$catalog")
+[ "${#rows[@]}" -gt 0 ] || die "$catalog names no game"
+want=("$@")
+
+archive() { # repo rev digest -> path of the verified archive in PAX_CACHE
+    local repo=$1 rev=$2 digest=$3 arc
+    arc=$PAX_CACHE/$repo-$rev.tar.gz
+    if [ ! -f "$arc" ] || [ "$(sha256_of "$arc")" != "$digest" ]; then
+        curl -fsSL --retry 3 "https://codeload.github.com/wolffe-lang/$repo/tar.gz/$rev" -o "$arc.part"
+        mv "$arc.part" "$arc"
+    fi
+    [ "$(sha256_of "$arc")" = "$digest" ] || die "$repo $rev: source archive digest mismatch (want $digest)"
+    [ "$(sha256_of "$arc")" = "$digest" ] || die "$repo $rev: source archive changed between two reads"
+    printf '%s\n' "$arc"
+}
+
+: > "$out/games.sha256.part"
+: > "$out/sums.txt.part"
+{
+    printf 'static, glibc, Ubuntu 24.04 baseline\n'
+    printf 'compiler: %s\n' "$(command -v cc)"
+    cc --version | head -1
+    printf 'libc.a: %s\n' "$(cc -print-file-name=libc.a)"
+    sha256_of "$(cc -print-file-name=libc.a)"
+} > "$out/link-provenance.txt"
+built=0
+for row in "${rows[@]}"; do
+    read -r name rev digest payload mode erev edigest extra <<< "$row"
+    [ -z "${extra:-}" ] && [ -n "${edigest:-}" ] || die "games.txt row '$row': seven fields wanted"
+    [ "$name" = "$payload" ] && [ "$mode" = 0755 ] || die "games.txt row '$row': payload-name must be the name, mode 0755"
+    printf '%s' "$rev$erev" | grep -Eq '^[0-9a-f]{80}$' || die "games.txt row '$row': two 40-hex commits wanted"
+    if [ "${#want[@]}" -gt 0 ]; then
+        hit=0
+        for w in "${want[@]}"; do [ "$w" = "$name" ] && hit=1; done
+        [ "$hit" = 1 ] || continue
+    fi
+    say "$name $rev: engine lair $erev"
+    arc=$(archive "$name" "$rev" "$digest")
+    earc=$(archive lair "$erev" "$edigest")
+    w=$(mktemp -d "${TMPDIR:-/tmp}/pax-game-$name.XXXXXX")
+    # A failed build is kept for diagnosis; only this unique directory
+    # goes on success.
+    mkdir "$w/src" "$w/engine" "$w/bin"
+    tar -xzf "$arc" -C "$w/src" --strip-components=1
+    tar -xzf "$earc" -C "$w/engine" --strip-components=1
+    pin=$(sed -n 's/^\([0-9a-f]\{40\}\).*/\1/p' "$w/src/lair.pin" | head -1)
+    [ "$pin" = "$erev" ] || die "$name: its lair.pin names $pin, games.txt says $erev"
+    (cd "$w/src" && sh tools/fetch-lair) >&2
+    [ "$(cat "$w/src/.lair/LAIR-REV")" = "$erev" ] || die "$name: the staged engine is not $erev"
+    diff -r -x LAIR-REV "$w/engine" "$w/src/.lair" >&2 \
+        || die "$name: the engine fetch-lair staged differs from lair's archive at $erev"
+    (cd "$w/src" && sh .lair/tools/fetch-toolchain) >&2
+    wdig=$(sed -n '/^\[wolf\]/,/^\[/s/^x86_64-unknown-linux-gnu = "\([0-9a-f]\{64\}\)"/\1/p' "$w/src/.lair/wolf-toolchain.toml")
+    [ -n "$wdig" ] || die "$name: the engine's wolf-toolchain.toml pins no x86_64 Linux wolf"
+    say "$name: wolf $("$w/src/.wolf-bin/wolf" --version | head -1), archive sha256 $wdig"
+    printf '#!/bin/sh\nexec %s -static "$@"\n' "$(command -v cc)" > "$w/bin/cc"
+    chmod 755 "$w/bin/cc"
+    (cd "$w/src" && PATH="$w/bin:$PATH" sh .lair/tools/build --release) >&2
+    bin=$w/src/target/release/$name
+    [ -f "$bin" ] || die "$name: the engine's build left no target/release/$name"
+    readelf -hW "$bin" | grep -Eq 'Type: +EXEC' || die "$name is not ET_EXEC"
+    if readelf -lW "$bin" | grep -q INTERP; then die "$name has an interpreter"; fi
+    file "$bin" > "$out/$name.file"
+    grep -q 'statically linked' "$out/$name.file" || die "$name: file does not report static linkage"
+    cp "$bin" "$out/$name"
+    chmod 755 "$out/$name"
+    sha=$(sha256_of "$out/$name")
+    [ "$(sha256_of "$out/$name")" = "$sha" ] || die "$name changed between two reads"
+    cp "$arc" "$out/$name.source.tar.gz"
+    cp "$earc" "$out/$name.engine.source.tar.gz"
+    printf '%s  %s\n' "$sha" "$name" >> "$out/games.sha256.part"
+    printf '%s %s %s %s lair-%s wolf-%s static-glibc-ubuntu-24.04\n' "$name" "$rev" "$sha" \
+        "$(wc -c < "$out/$name" | tr -d ' ')" "$erev" "$wdig" >> "$out/sums.txt.part"
+    rm -rf "$w"
+    built=$((built + 1))
+done
+[ "$built" -gt 0 ] || die "no game in $catalog matched: ${want[*]}"
+[ "$built" = "${#want[@]}" ] || [ "${#want[@]}" = 0 ] || die "only $built of ${#want[@]} named games are in $catalog"
+mv "$out/games.sha256.part" "$out/games.sha256"
+mv "$out/sums.txt.part" "$out/sums.txt"
+cat "$out/sums.txt"
