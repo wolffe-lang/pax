@@ -70,9 +70,9 @@ sums={w[1]:w[0] for w in (l.split() for l in (work/'payload/games.sha256').read_
 if games=='yes':
     allowed.add('/home/pax/Games');row=actual['/home/pax/Games']
     assert int(row[2],8)==0o755 and row[3:5]==['1000','1000'],row
-    for g,_rev,source,_name,_mode,_erev,engine in catalog:
+    for g,_rev,game_src,_name,_mode,_erev,engine_src in catalog:
         d='/home/pax/Games/'+g
-        for path,mode,want in [(d,0o755,None),(d+'/'+g,0o755,sums[g]),(d+'/source.tar.gz',0o644,source),(d+'/engine.source.tar.gz',0o644,engine)]:
+        for path,mode,want in [(d,0o755,None),(d+'/'+g,0o755,sums[g]),(d+'/source.tar.gz',0o644,game_src),(d+'/engine.source.tar.gz',0o644,engine_src)]:
             allowed.add(path);row=actual[path]
             assert int(row[2],8)==mode and row[3:5]==['1000','1000'],(path,row)
             if want:assert row[-1]==want,(path,row,want)
