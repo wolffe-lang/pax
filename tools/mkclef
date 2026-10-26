@@ -109,13 +109,13 @@ say "$wline; libwolf_rt.a beside it ($(sha256_of "$rt"))"
 
 # PLANT (as02b-plant-runtime): the package links a runtime that is not
 # the image's: the archive's member that defines the hosted entry
-# (`__wolf_rt_main_start`, which every program links) gains one note
+# (`__wolf_rt_env_args`, which clef calls for its arguments) gains one
 # section, so the library's digest and the linked program both move.
 # (wolf 0.2.34's whole runtime cannot stand in: 0.2.35's objects need its
 # __wolf_rt_stack_start.) mkclef records the runtime it linked, and the
 # qualification's Q0 must refuse it by both digests.
-mem=$(nm -A --defined-only "$rt" 2>/dev/null | awk '$NF == "__wolf_rt_main_start" { n = split($1, a, ":"); print a[2]; exit }')
-[ -n "$mem" ] || die "PLANT: no member of libwolf_rt.a defines __wolf_rt_main_start"
+mem=$(nm -A --defined-only "$rt" 2>/dev/null | awk '$NF == "__wolf_rt_env_args" { n = split($1, a, ":"); print a[2]; exit }')
+[ -n "$mem" ] || die "PLANT: no member of libwolf_rt.a defines __wolf_rt_env_args"
 mkdir -p "$w/rtx"
 (cd "$w/rtx" && ar x "$rt" "$mem" && printf 'as02b plant\n' > plant.txt \
     && objcopy --add-section .pax_plant=plant.txt "$mem" && ar r "$rt" "$mem") || die "PLANT: cannot rewrite $mem"
