@@ -107,6 +107,19 @@ have=$("$wolf" --version | head -n 1)
 [ "$have" = "$wline" ] || die "wolf --version says '$have'; kernel/wolf.pin says '$wline'"
 say "$wline; libwolf_rt.a beside it ($(sha256_of "$rt"))"
 
+# PLANT (as02b-plant-runtime): the package links wolf 0.2.34's runtime
+# (its release archive by digest), not the image's; mkclef records the
+# runtime it linked, and the qualification's Q0 must refuse it by both
+# digests.
+old=$PAX_CACHE/wolf-0.2.34-88a9dd3da1c9a0e38c08eb6e2de9c1ef04d1ed93dcf51024d8dbbb76890c1821.tar.gz
+[ -f "$old" ] || curl -sSfL --retry 3 -o "$old" https://github.com/wolffe-lang/wolf-lang/releases/download/v0.2.34/wolf-0.2.34-x86_64-unknown-linux-gnu.tar.gz \
+    || die "cannot download wolf 0.2.34"
+[ "$(sha256_of "$old")" = 88a9dd3da1c9a0e38c08eb6e2de9c1ef04d1ed93dcf51024d8dbbb76890c1821 ] || die "wolf 0.2.34 archive digest"
+mkdir -p "$w/old"
+tar -xzf "$old" -C "$w/old" --strip-components=1
+cp "$w/old/libwolf_rt.a" "$rt"
+say "PLANT: libwolf_rt.a is wolf 0.2.34's ($(sha256_of "$rt"))"
+
 # The static `cc`.
 mkdir -p "$w/bin"
 real=$(command -v cc)
