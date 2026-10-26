@@ -326,10 +326,10 @@ for leg in $legs; do
         boot games "$PAX_ROOT/user/console/games.keys" 1500
         [ "$krc" = 0 ] || bad "$id: the keys: $(tail -n 1 "$out/session.out")"
         r=$(cmp_py glyphs "$out/glyphs.ppm" "$log" 'PAX: the console' "$(offset glyphs)" "$PAX_ROOT/font/games-glyphs.txt" 2>&1) \
-            && say "$r ($id)" || bad "$r ($id)"
+            && say "$r ($id)" || bad "${r#FAIL } ($id)"
         for g in $GAMES; do
             r=$(cmp_py probe "$log" "$g" "$PAX_ROOT/font/games-glyphs.txt" 2>&1) && say "$(printf '%s\n' "$r" | head -n 1) ($id)" \
-                || bad "$(printf '%s\n' "$r" | head -n 1) ($id)"
+                || bad "$(printf '%s\n' "$r" | head -n 1 | sed 's/^FAIL //') ($id)"
             printf '%s\n' "$r" | tail -n +2 > "$out/probe-$g.txt"
         done
         if r=$(cmp_py ref "$log" 'PAX: the console' "$out" 2>&1); then
@@ -346,7 +346,7 @@ for leg in $legs; do
             else
                 r=$(cmp_py frame "$name" "$out/$name.ppm" "$G/$gold" 2>&1)
             fi
-            [ $? = 0 ] && say "$(sed 's/^PASS /PASS G3 /' <<< "$r") ($id)" || bad "G3 $r ($id)"
+            [ $? = 0 ] && say "$(sed 's/^PASS /PASS G3 /' <<< "$r") ($id)" || bad "G3 ${r#FAIL } ($id)"
         done
         for row in pack:left:right:parry cub:up:left:sneak-right trail:up:left:down; do
             IFS=: read -r g w1 w2 w3 <<< "$row"
@@ -363,7 +363,7 @@ for leg in $legs; do
             || bad "G4 $id: the typed line echoed and written back $n times, not 3"
         for g in trail pack; do
             r=$(cmp_py plain "$log" "\$ Games/$g/$g"$'\r' 2>&1) && say "$(sed 's/^PASS /PASS G6 /' <<< "$r") (a bare start, the font row present; $id)" \
-                || bad "G6 $r (a bare start, the font row present; $id)"
+                || bad "G6 ${r#FAIL } (a bare start, the font row present; $id)"
         done
         why=$(ends "$norm" /bin/as)
         [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
@@ -379,12 +379,12 @@ for leg in $legs; do
             bad "G6 $id withheld: $(printf '%s\n' "$r" | tail -n 1)"
         fi
         r=$(cmp_py withheld trail-title-withheld "$out/trail-title-withheld.ppm" "$G/trail-title/final" 2>&1) \
-            && say "$(sed 's/^PASS /PASS G6 /' <<< "$r") ($id)" || bad "G6 $r ($id)"
+            && say "$(sed 's/^PASS /PASS G6 /' <<< "$r") ($id)" || bad "G6 ${r#FAIL } ($id)"
         r=$(cmp_py frame trail-bare-withheld "$out/trail-bare-withheld.ppm" "$G/trail-bare.apply" 2>&1) \
-            && say "$(sed 's/^PASS /PASS G6 /' <<< "$r") (the plain tier needs no row; $id)" || bad "G6 $r ($id)"
+            && say "$(sed 's/^PASS /PASS G6 /' <<< "$r") (the plain tier needs no row; $id)" || bad "G6 ${r#FAIL } ($id)"
         for g in trail pack; do
             r=$(cmp_py plain "$log" "\$ Games/$g/$g"$'\r' 2>&1) && say "$(sed 's/^PASS /PASS G6 /' <<< "$r") (a bare start, the font row withheld; $id)" \
-                || bad "G6 $r (a bare start, the font row withheld; $id)"
+                || bad "G6 ${r#FAIL } (a bare start, the font row withheld; $id)"
         done
         why=$(ends "$norm" /bin/as)
         [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
