@@ -898,3 +898,23 @@ resource usage (11884 KiB peak RSS); this is not a measurement of PAX and
 not QEMU's host RSS. The existing glibc set_robust_list/rseq startup
 fallbacks remain as in the disk-tool census. No new syscall implementation
 is claimed by this userspace lane.
+
+## The wolf games (gm01)
+
+pack, cub and trail (static glibc, Ubuntu 24.04 baseline, built by
+`tools/mkgames`) were traced once on a Linux pseudo-terminal of 50 by
+160 (`strace -f`, the title drawn, then `q`; kasumi's px80-ubuntu
+container, 2026-10-25; `notes/gm01/census/`). Their union is 34 calls:
+`arch_prctl`, `brk`, `clone3`, `close`, `execve`, `exit_group`, `fcntl`,
+`fstat`, `futex`, `getpid`, `getrandom`, `ioctl` (the terminal's modes
+and size), `mmap`, `mprotect`, `munmap`, `openat`, `pipe2`, `poll`,
+`prctl`, `prlimit64`, `read`, `readlinkat`, `rseq`, `rt_sigaction`,
+`rt_sigprocmask`, `sched_getaffinity`, `set_robust_list`,
+`set_tid_address`, `sigaltstack`, `write`, and cub's save
+(`fsync`, `mkdir`, `rename`, `statx`). On PAX every one is served but
+`set_robust_list` (273) and `rseq` (334), which answer -ENOSYS as for
+every glibc static program here, and glibc carries on: `tests/mpx6-games`
+G5 holds each session to exactly those two and no `refused:` line. The
+console calls are the ones yew made (px58): raw mode and back, the
+alternate screen, the window's size, `CSI 6 n` answered by the screen.
+No new system call was needed.
