@@ -24,7 +24,8 @@ with tempfile.TemporaryDirectory(dir=work,prefix='prepare-') as tmp:
     (p/'boot.sha256').write_text(''.join(h(s/x)+'  /'+x+'\n' for x in assets))
     (p/'games/pack').write_bytes(b'game bytes')
     (p/'games/pack.source.tar.gz').write_bytes(b'fixture corresponding source with original licences')
-    (p/'games.txt').write_text('pack '+'a'*40+' '+h(p/'games/pack.source.tar.gz')+' pack 0755\n')
+    (p/'games/pack.engine.source.tar.gz').write_bytes(b'fixture engine source with its licence')
+    (p/'games.txt').write_text('pack '+'a'*40+' '+h(p/'games/pack.source.tar.gz')+' pack 0755 '+'b'*40+' '+h(p/'games/pack.engine.source.tar.gz')+'\n')
     (p/'games.sha256').write_text(h(p/'games/pack')+'  pack\n')
     before={str(x):x.read_bytes() for x in s.rglob('*') if x.is_file()}
     for game in ['yes','no']:
@@ -41,12 +42,25 @@ with tempfile.TemporaryDirectory(dir=work,prefix='prepare-') as tmp:
             assert (out/'home/alice/Games/pack/pack').read_bytes()==b'game bytes'
             assert attrs['/home/alice/Games/pack/pack'][:3]==['0755','1000','1000']
             assert (out/'home/alice/Games/pack/source.tar.gz').read_bytes()==(p/'games/pack.source.tar.gz').read_bytes()
+            assert (out/'home/alice/Games/pack/engine.source.tar.gz').read_bytes()==(p/'games/pack.engine.source.tar.gz').read_bytes()
+            assert attrs['/home/alice/Games/pack/engine.source.tar.gz'][:3]==['0644','1000','1000']
         else:assert not (out/'home/alice/Games').exists()
         guid=str(uuid.UUID(bytes=hashlib.sha256(b'pax-gpt-part:test:1700000000:2').digest()[:16]))
         assert 'root=PARTUUID='+guid in (out/'boot/limine/limine.conf').read_text()
         assert (out/'etc/fstab').read_text().startswith('PARTUUID='+guid+' / ext2 rw')
-        print('PASS I-account-games-'+game+': named user, uid/gid 1000, root shell unchanged, payload omitted, complete game source on yes')
+        print('PASS I-account-games-'+game+': named user, uid/gid 1000, root shell unchanged, payload omitted, complete game and engine source on yes')
     assert {str(x):x.read_bytes() for x in s.rglob('*') if x.is_file()}==before
+    # gm01: the engine's source is held to its digest like the game's
+    good=(p/'games/pack.engine.source.tar.gz').read_bytes()
+    (p/'games/pack.engine.source.tar.gz').write_bytes(good+b'x')
+    r=subprocess.run([program,s,p,w/'engine','alice','yes'],capture_output=True,text=True)
+    assert r.returncode==1 and 'corrupt_asset' in r.stderr,(r.returncode,r.stderr)
+    (p/'games/pack.engine.source.tar.gz').write_bytes(good)
+    (p/'games.txt').write_text('pack '+'a'*40+' '+h(p/'games/pack.source.tar.gz')+' pack 0755\n')
+    r=subprocess.run([program,s,p,w/'five','alice','yes'],capture_output=True,text=True)
+    assert r.returncode==1 and 'invalid' in r.stderr,(r.returncode,r.stderr)
+    (p/'games.txt').write_text('pack '+'a'*40+' '+h(p/'games/pack.source.tar.gz')+' pack 0755 '+'b'*40+' '+h(p/'games/pack.engine.source.tar.gz')+'\n')
+    print('PASS I-engine-source: a changed engine archive refused (corrupt_asset), a row without the engine refused (invalid)')
     (s/'boot/pax').write_bytes(b'corrupt')
     r=subprocess.run([program,s,p,w/'corrupt','alice','no'],capture_output=True,text=True)
     assert r.returncode==1 and 'corrupt_asset' in r.stderr
