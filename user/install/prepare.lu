@@ -5,7 +5,18 @@ use std.x.crypto.sha2
 
 const INSTALL_EPOCH: int = 1700000000
 
-struct Game { name: str, source: str, digest: str, archive: str, archive_digest: str }
+// gm01: a game's engine (lair) is linked into its binary, so the engine's
+// source archive travels beside the game's: games.txt's sixth and
+// seventh words, the payload's `<name>.engine.source.tar.gz`.
+struct Game {
+    name: str,
+    source: str,
+    digest: str,
+    archive: str,
+    archive_digest: str,
+    engine: str,
+    engine_digest: str,
+}
 
 fn payload_location_ok(source: str, payload: str) -> bool {
     if source == "/" { return payload == "/usr/share/pax-install" }
@@ -56,12 +67,14 @@ fn staged_games(payload: str) -> List[Game] ! {io, invalid, corrupt_asset} {
     for line in catalog.lines() {
         if line.trim().len == 0 || line.starts_with("#") { continue }
         let w = line.words()
-        if w.len != 5 ||
+        if w.len != 7 ||
             !valid_name(w[0]) ||
             w[0] != w[3] ||
             w[4] != "0755" ||
             w[1].len != 40 ||
-            w[2].len != 64 {
+            w[2].len != 64 ||
+            w[5].len != 40 ||
+            w[6].len != 64 {
             return invalid
         }
         for g in out { if g.name == w[0] { return invalid } }
@@ -77,12 +90,16 @@ fn staged_games(payload: str) -> List[Game] ! {io, invalid, corrupt_asset} {
         verify_file(source, digest)?
         let archive = "{payload}/games/{w[0]}.source.tar.gz"
         verify_file(archive, w[2])?
+        let engine = "{payload}/games/{w[0]}.engine.source.tar.gz"
+        verify_file(engine, w[6])?
         (mut out).push(Game {
             name: w[0],
             source: source,
             digest: digest,
             archive: archive,
             archive_digest: w[2],
+            engine: engine,
+            engine_digest: w[6],
         })
     }
     if out.len == 0 || sums.lines().len != out.len { return invalid }
@@ -182,6 +199,9 @@ fn configure_tree(p: Plan, tree: str, attrs: str, games: List[Game]) -> () ! {
             copy_regular(g.archive, "{tree}{dir}/source.tar.gz")?
             verify_file("{tree}{dir}/source.tar.gz", g.archive_digest)?
             append_attrs(attrs, "{dir}/source.tar.gz", "0644", INSTALL_USER_ID, INSTALL_USER_ID)?
+            copy_regular(g.engine, "{tree}{dir}/engine.source.tar.gz")?
+            verify_file("{tree}{dir}/engine.source.tar.gz", g.engine_digest)?
+            append_attrs(attrs, "{dir}/engine.source.tar.gz", "0644", INSTALL_USER_ID, INSTALL_USER_ID)?
             copy_regular(g.source, "{tree}{dir}/{g.name}")?
             verify_file("{tree}{dir}/{g.name}", g.digest)?
             append_attrs(attrs, "{dir}/{g.name}", "0755", INSTALL_USER_ID, INSTALL_USER_ID)?
