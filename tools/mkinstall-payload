@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""Stage an offline installer payload from boot assets and tools/mkpack output.
-Usage: mkinstall-payload BOOT_DIRECTORY PACK_OUTPUT NEW_OUTPUT_DIRECTORY
+"""Stage an offline installer payload from boot assets and tools/mkgames output.
+Usage: mkinstall-payload BOOT_DIRECTORY GAMES_OUTPUT NEW_OUTPUT_DIRECTORY
+Every row of user/install/games.txt is staged the same way (gm01): the
+binary held to GAMES_OUTPUT/games.sha256, its source archive and its
+engine's held to the row's digests, each copied and read back.
 No network, target-device access or host installation.
 """
 from pathlib import Path
@@ -9,7 +12,7 @@ import shutil
 import sys
 
 if len(sys.argv)!=4:raise SystemExit(__doc__)
-boot,game,out=map(Path,sys.argv[1:])
+boot,games,out=map(Path,sys.argv[1:])
 repo=Path(__file__).resolve().parents[1]
 
 def digest(p):
@@ -17,20 +20,32 @@ def digest(p):
     with p.open('rb') as f:return hashlib.file_digest(f,'sha256').hexdigest()
 
 catalog=(repo/'user/install/games.txt').read_text()
-rows=[x.split() for x in catalog.splitlines() if x and not x.startswith('#')]
-if len(rows)!=1 or rows[0][0]!='pack':raise SystemExit('payload builder needs a builder for each new game')
-row=rows[0]
-sums=(game/'games.sha256').read_text().split()
-if len(sums)!=2 or sums[1]!='pack' or digest(game/'pack')!=sums[0]:raise SystemExit('payload: pack digest mismatch')
-if digest(game/'pack.source.tar.gz')!=row[2]:raise SystemExit('payload: corresponding source digest mismatch')
+rows=[x.split() for x in catalog.splitlines() if x.strip() and not x.startswith('#')]
+if not rows:raise SystemExit('payload: games.txt names no game')
+sums={}
+for line in (games/'games.sha256').read_text().splitlines():
+    w=line.split()
+    if len(w)!=2 or w[1] in sums:raise SystemExit('payload: games.sha256 line not "sha  name" once a game: '+line)
+    sums[w[1]]=w[0]
+names=[r[0] for r in rows]
+if len(rows)!=len(set(names)) or set(sums)!=set(names):raise SystemExit('payload: games.sha256 names %s, games.txt %s'%(sorted(sums),names))
+staged=[]
+for row in rows:
+    if len(row)!=7 or row[0]!=row[3] or row[4]!='0755':raise SystemExit('payload: bad games.txt row: '+' '.join(row))
+    name,source,engine=row[0],row[2],row[6]
+    files={name:sums[name],name+'.source.tar.gz':source,name+'.engine.source.tar.gz':engine}
+    for f,want in files.items():
+        if digest(games/f)!=want:raise SystemExit('payload: %s digest mismatch'%f)
+    staged.append(files)
 assets=['pax','limine/limine-bios.sys','EFI/BOOT/BOOTX64.EFI']
 boot_sums=''.join(digest(boot/x)+'  /boot/'+x+'\n' for x in assets)
 out.mkdir();(out/'games').mkdir()
-for name in ['pack','pack.source.tar.gz']:
-    shutil.copyfile(game/name,out/'games'/name)
-    (out/'games'/name).chmod(0o755 if name=='pack' else 0o644)
-    assert digest(game/name)==digest(out/'games'/name)==digest(out/'games'/name)
+for files in staged:
+    for f,want in files.items():
+        shutil.copyfile(games/f,out/'games'/f)
+        (out/'games'/f).chmod(0o644 if f.endswith('.tar.gz') else 0o755)
+        assert digest(games/f)==digest(out/'games'/f)==digest(out/'games'/f)==want
 (out/'games.txt').write_text(catalog)
-(out/'games.sha256').write_text((game/'games.sha256').read_text())
+(out/'games.sha256').write_text((games/'games.sha256').read_text())
 (out/'boot.sha256').write_text(boot_sums)
-print('payload: static glibc pack, corresponding source/licences, and boot digest manifest staged')
+print('payload: %d static glibc games (%s), each with its source and its engine\'s, and the boot digest manifest staged'%(len(staged),', '.join(names)))
