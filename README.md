@@ -10,6 +10,8 @@ Guided installation: `pax-install` inventories real block nodes, shows a read-on
 
 Disk tools (px69): `paxgpt`, `paxfat` and `paxext2` are Wolf programs built as static Linux executables and run unchanged on PAX. They write GPT, FAT32/VFAT and an ext2 tree, including modes, owners, timestamps, symbolic links and hard links. The tests compare their output with sgdisk/sfdisk, dosfstools/mtools and e2fsprogs, then build a second disk entirely on PAX, written through its `/dev/vdb` node (px79), and boot it alone under SeaBIOS and OVMF. Limine's pinned installer is linked statically without changing its source; its Linux and PAX runs write identical bytes. `paxext2` does **not** add a journal: the existing host builder's ext3 default is unchanged. The guided installer calls these tools rather than embedding new formatters. See `docs/BOOT.md`, “Writing a disk on PAX”, for the offline-disk interface and its bounds.
 
+The kernel's assembler and clef (as02b): a kernel has seventeen assembly objects per tier, the sixteen sources `kernel/wolf.pkg` lists and `boot/start.S`. `WOLF_AS` is one explicit choice for all of them: wolf's own seam (`--assembler`, wolf-lang#957) for the sixteen and `tools/build-kernel`'s branch for the entry, the same call each time (`PATH --64 -o OBJ SRC`); a selected assembler that fails, writes nothing or writes no ELF64 x86-64 object stops the build by name, with no second try; unset or empty, every call is the one it was before (`tests/kernel-as` holds both tiers' traced calls to trunk's). The pinned wolf 0.2.35 has no seam, so it refuses a set `WOLF_AS` by name rather than build half a kernel through clang; the seam is measured with wolf-lang `9f2cff44` built from source until a release carries it. Through it, GNU as 2.42 and clef give one kernel, byte for byte, on both tiers (native `ca5d0e25…`, release `76f6e210…`), the bytes wolf 0.2.35 makes through as01's shims too, and those kernels pass every leg of `tests/mpx5-wolf` and the muzzle CRT witness. clef is packaged for the image (`user/clef.pin`, `tools/mkclef`): clef's own build made static, 15,370,648 bytes with no interpreter and no shared library, from the image's wolf archive and runtime (`libwolf_rt.a` `9efc68e1…`), one digest on kasumi and on CI's runner (`a90a4ca8…`). On PAX, run by pelt over a copy of clef's 43-source census corpus, the ISR's expansion and nine refusals, it prints byte for byte what it prints on Linux and writes byte for byte what the host's clef writes, and its objects match GNU as's by clef's structural rule (`tests/mpx5-clef`, every leg). It is opt-in (`tools/mkdev --clef`): no image carries it by default and the kernel's default assembler is unchanged, both the maintainer's to rule. Assembling `.S` with clef does not take the C toolchain out of the build: the kernel still links with `ld.lld`, the release tier still generates code through clang, and hosted programs still link through `cc`.
+
 The linker respin (px80): the dev image's static `ld.lld` is lld 18.1.8, built from LLVM's release tarball (sha256 `0b58557a…`, signed by LLVM's release key) with zlib and zstd (`notes/px80/build-lld.sh`); px60's lld 17.0.6 could not link the release tier's kernel (`R_X86_64_REX_GOTPCRELX out of range`, the image at the top of the address space, pax#172). On every kernel the tree builds, both tiers, 18.1.8 links byte for byte what Ubuntu's lld 18.1.3, CI's linker, links; at the dev console `ld.lld --version` says 18.1.8 and `wolf build hello.lu` links with it. `user/wolf-link.sums` moves one line, and CI now holds that record (W0 link: its shape, and the `cc` front end rebuilt to its bytes). The kernel is unchanged.
 
 Offline filesystem checking: `tools/mkfsck` builds `fsck.ext2` in Wolf for Linux and PAX. It checks inodes and blocks, directories, connectivity, references and allocation summaries; repairs counts, bitmaps, links, orphans and duplicate data blocks; and replays supported ext3 journals. A separate rescue archive can repair the unmounted `/dev/vda2` without Linux. The suite compares generated damage with e2fsck, then power-cuts a running root and verifies rescue repair and reboot persistence under BIOS and UEFI. Unsupported formats and ambiguous damage are refused, never marked clean; mounted-volume repair is refused. Existing disk images do not gain a rescue menu automatically. See `docs/BOOT.md`, “Checking a volume from rescue”.
@@ -84,7 +86,8 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
               install/ (guided installer, planner, UI, snapshot and executor);
               disktools.pin (px66: sfdisk, sgdisk, mkfs.fat, mtools,
               by digest); console/bore-files.keys and bore-text.keys
-              (px65: boreutils' new utilities typed)
+              (px65: boreutils' new utilities typed); clef.pin (as02b:
+              the clef tree the image's opt-in assembler is built from)
     tools/    the harness: fetch-limine, fetch-wolf, fetch-lupin,
               build-stub, build-kernel, mkimage, qemu-run, qemu-halt
               (--type: a typed session, px13; --no-screen, px19; --qemu, px18),
@@ -115,7 +118,9 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
               built twice to one digest by its own toolchain, and its
               two wrappers); mkgpt, disktools and
               mkdisktools, mklimine-static (px69: the static formatters and
-              unchanged Limine installer); mkinstall, mkpack and mkinstall-payload
+              unchanged Limine installer); mkclef (as02b: clef static
+              from its own tree, held to the image's wolf archive and
+              runtime, one digest a host); mkinstall, mkpack and mkinstall-payload
               (static installer and offline games/boot manifest); mkfsck (the offline checker); linux-part (px66: a GPT or MBR table written
               reproducibly; the partition and FAT tools from
               user/disktools.pin in the pinned container; the Linux
@@ -126,7 +131,7 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
     tests/    scripted QEMU tests: proof, mkw (with M-KW's frozen kernels
               in mkw.d/), mpx1, mpx2-frames, mpx2-paging, mpx2-interrupts,
               mpx2-sched, mpx3-user, mpx3-loader, mpx3-boreutils, mpx3-console,
-              mpx3-screen, mpx3-speaker (px18), mpx3-threads (px26), mpx3-tree (px27), mpx3-sound (px30), mpx4-net (px20, px21), mpx4-udp (px22), mpx4-tcp (px23), mpx5-lope (px54), mpx6-blk and mpx6-ext2 (px63), mpx5-scent (px64), mpx6-part (px66), mpx5-bore (px65), mpx6-disktools (px69), mpx6-install (guided installation), gdb-attach,
+              mpx3-screen, mpx3-speaker (px18), mpx3-threads (px26), mpx3-tree (px27), mpx3-sound (px30), mpx4-net (px20, px21), mpx4-udp (px22), mpx4-tcp (px23), mpx5-lope (px54), mpx6-blk and mpx6-ext2 (px63), mpx5-scent (px64), mpx6-part (px66), mpx5-bore (px65), mpx6-disktools (px69), mpx6-install (guided installation), kernel-as and mpx5-clef (as02b: the kernel's WOLF_AS seam; the clef package qualified on PAX), gdb-attach,
               expect-serial-selftest
               Additional QEMU and host-side entry points:
               census, ci-plan, lobo-session-selftest, mpx2-heap, mpx3-maps, mpx3-orchestra, mpx3-shell, mpx4-lobo, mpx4-ready, mpx4-session, mpx4-unix, mpx5-accounts, mpx5-aspen, mpx5-jobs, mpx5-lupin, mpx5-pelt, mpx5-screen, mpx5-users, mpx5-wolf, mpx5-yew, mpx6-fsck, mpx6-journal, mpx6-nodes, mpx6-root, paxtcp-selftest, tour
@@ -350,7 +355,10 @@ console says so): px60's lld 17.0.6 could not link the release tier's kernel
 px64 it also carries scent as `/bin/grep` (the unmodified `/bin/scent`,
 the link, `/bin/egrep` and `/bin/fgrep`) and `tests/mpx5-scent`'s
 fixture at `/usr/share/scent` (`cd /usr/share/scent; grep -n -C1 cat
-words.txt`); its recipe is `notes/px64/dev-iso/`.
+words.txt`); its recipe is `notes/px64/dev-iso/`. `tools/mkdev --clef DIR`
+(as02b) adds clef, the assembler in wolf, at `/usr/bin/clef`: opt-in, the
+package `tests/mpx5-clef` qualifies on PAX (`clef --64 -o x.o x.S`,
+`clef --expand x.S`); no image carries it by default yet.
 
 At the dev console, write a program in your home directory and use:
 
