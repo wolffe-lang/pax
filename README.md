@@ -1,315 +1,104 @@
 # PAX
 
-A Linux-compatible operating system written in wolf: a kernel that runs Linux's userspace unmodified, and a userspace built in wolf.
+A Linux-compatible operating system written in wolf: a kernel that runs Linux's x86-64 userspace unmodified, and a
+userspace built in wolf.
 
-PAX is a clean-room implementation of Linux's userspace ABI. It does not contain, translate or derive from Linux kernel source. See `CLAUDE.md` for the rule and `docs/SOURCES.md` for what each part was written from.
-
-USB input: the kernel drives xHCI controllers over PCI INTx and USB 2 boot keyboards, directly or behind hubs. USB and PS/2 keys share the console's character and escape-sequence mapping, including modified arrows; unplugging a keyboard releases its held keys, and a replacement can be attached while the system runs. Repeat uses a 250 ms delay and 33 ms period, measured on Linux, with fractional scheduling over the kernel's 10 ms tick. `tools/qemu-run --usb-kbd`, `--usb-kbd=hub` and `--usb-kbd=nested` select the test topologies. `tests/mpx6-usb` checks Linux-recorded bytes, six-key reports, hotplug and ring wrap; the existing typing suites also replay through USB. The USB suite builds each kernel once per compiler tier and reuses its images for both firmwares. This is QEMU coverage, not a claim that a real motherboard has been tested. MSI-X, SuperSpeed class drivers, USB storage and keyboard LEDs are not implemented.
-## Current image
-
-The release and dev images include current yew, pelt, scent and boreutils,
-lupin 0.1.58, and three offline games. `pax-release` prints their exact
-input identities; the boot banner shows the kernel commit and the first
-eight digits of that file's SHA256. ELF processes receive a fixed 1 MiB
-initial stack, also reported by `RLIMIT_STACK`.
-
-| project | image pin |
-|---|---|
-| wolf (build compiler and dev compiler) | 0.2.35 |
-| lupin (installed interpreter) | 0.1.58, `6240efe5` |
-| base standard library | `78b9d3cb` |
-| yew | `0ccb2c67` |
-| boreutils | `0f7a57b6` — 107 command binaries; `df` remains unshipped |
-| pelt | `4683b3f5` |
-| scent | `81d761d6` |
-| lope / aspen / lobo | `e6f623c7` / `3692cf5d` / `49ed870e` |
-| pack | `27848095`, engine `aa6c4dc0` |
-| cub | `6a1db765`, engine `74b89744` |
-| trail | `24099a81`, engine `57870143` — held before the [glyph-probe mismatch](https://github.com/wolffe-lang/trail/issues/8) |
-
-`tools/mkdistribution VERIFIED_BASE.cpio BUILT_INPUTS NEW_OUT` assembles
-both variants at one clean commit. It rebuilds the kernel and installer,
-verifies the supplied program outputs, and retains only the unchanged
-compiler/linker support bundle from the digest-pinned prior dev payload.
-Every packed file has a build-time digest inventory. `/etc/pax-release`
-uses complete pin-file digests for user pin records, source-archive digests
-for games/engines, and the actual ELF digest for the kernel; it also records
-`SOURCE_DATE_EPOCH`. This describes build inputs, not later filesystem edits.
-
-The live images include `pax-install` and its offline payload. The marked
-live demo Games directory is not copied implicitly during installation:
-the selected games answer controls installation from the verified payload.
-Unmarked/custom source trees retain the existing refusal for a pre-existing
-Games directory. The dev compiler uses its own paired standard library at
-`/usr/share/wolf/compiler-std`; lupin uses `/usr/share/wolf/std`.
-
-The distribution USB stick preserves its input initramfs byte-for-byte,
-including its root-shell startup. The separate USB login fixture tests the
-passwordless root prompt; neither path provides authentication.
-
-The paragraphs below also record earlier milestones; the table above is
-the current pin list.
-
-Users (P5, px38 to px47): PAX has accounts, root, `pax` (1000) and the service account `lobo` (990), in its image's `/etc/passwd` and `/etc/group`. There are no passwords yet; existing installed/test images boot to root's shell, while the USB live entry below presents a root-only login prompt; `su`, written in wolf (`user/su`), is root becoming a user, a user's `su` is refused as Linux refuses one who cannot authenticate, and a set-ID bit is not honoured, so privilege only drops. A process has Linux's real, effective, saved and file-system ids and a group list; a file has an owner, a group and a mode; and `open`, `exec`, every path walk, making, removing, renaming and linking a name, changing a mode, an owner or a time, signals, ports below 1024, raw sockets, the speaker, `/dev`'s nodes and `/proc`'s files are checked by Linux's rules, each rule measured against a real Linux (`tests/mpx5-users`, `tests/mpx5-accounts`). Since px47 every suite that runs programs on PAX — the tree, the shell, boreutils, Unix sockets, TCP, UDP, the speaker and lobo — runs them again as a user beside root, each run held byte for byte to the same binaries run as the same user on Linux. These checks are enforced for honest programs; not a boundary against an attacker: the kernel has never been fuzzed or audited, and it loads programs at fixed addresses. Authenticated `login` and a memory-hard password hash remain future work.
-
-Live USB: `tools/mkdisk --usb --kernel K.elf --initramfs I.cpio OUT.img` makes a reproducible raw GPT image with one FAT32 ESP and a reserved Limine BIOS partition. `tools/qemu-run --usb-stick OUT.img` boots it through xHCI mass storage, with no CD-ROM or virtio disk. The console suite passes from the stick under SeaBIOS and OVMF; Linux mounts the same ESP and verifies its boot files. The live-only entry accepts `root` without a password and starts pelt; it does not change installed accounts or provide authentication. The supplied initramfs is preserved byte for byte, so the complete live system and any installer/games payload stay in memory. `tools/usb-write --dry-run` checks a prospective removable target on Linux or macOS; physical writes and real-machine boots are not tested here. See [The live USB stick](docs/BOOT.md#the-live-usb-stick).
-
-Guided installation: `pax-install` inventories real block nodes, shows a read-only plan, and requires an exact target confirmation before writing. It offers an explicit **ext2 developer preview**, not a journalled installation: whole-disk fresh installs only, 512-byte sectors, root volumes up to 4 GiB. The running root's disk, mounted disks and read-only targets are refused. The flow asks for a user name and whether to install the games; the three wolf games (pack, cub and trail, gm01) are staged offline, each with its corresponding source and its engine's, and neither answer fetches anything. The installer and complete installed tree have been tested on separate QEMU virtio disks under BIOS and UEFI, including reboot persistence. This is not a claim about real-machine drivers or USB installation. See [Guided installation](docs/BOOT.md#guided-installation) for preparation, commands, logging and limits.
-
-Disk tools (px69): `paxgpt`, `paxfat` and `paxext2` are Wolf programs built as static Linux executables and run unchanged on PAX. They write GPT, FAT32/VFAT and an ext2 tree, including modes, owners, timestamps, symbolic links and hard links. The tests compare their output with sgdisk/sfdisk, dosfstools/mtools and e2fsprogs, then build a second disk entirely on PAX, written through its `/dev/vdb` node (px79), and boot it alone under SeaBIOS and OVMF. Limine's pinned installer is linked statically without changing its source; its Linux and PAX runs write identical bytes. `paxext2` does **not** add a journal: the existing host builder's ext3 default is unchanged. The guided installer calls these tools rather than embedding new formatters. See `docs/BOOT.md`, “Writing a disk on PAX”, for the offline-disk interface and its bounds.
-
-The kernel's assembler and clef (as02b): a kernel has seventeen assembly objects per tier, the sixteen sources `kernel/wolf.pkg` lists and `boot/start.S`. `WOLF_AS` is one explicit choice for all of them: wolf's own seam (`--assembler`, wolf-lang#957) for the sixteen and `tools/build-kernel`'s branch for the entry, the same call each time (`PATH --64 -o OBJ SRC`); a selected assembler that fails, writes nothing or writes no ELF64 x86-64 object stops the build by name, with no second try; unset or empty, every call is the one it was before (`tests/kernel-as` holds both tiers' traced calls to trunk's). The pinned wolf 0.2.35 has no seam, so it refuses a set `WOLF_AS` by name rather than build half a kernel through clang; the seam is measured with wolf-lang `9f2cff44` built from source until a release carries it. Through it, GNU as 2.42 and clef give one kernel, byte for byte, on both tiers (native `ca5d0e25…`, release `76f6e210…`), the bytes wolf 0.2.35 makes through as01's shims too, and those kernels pass every leg of `tests/mpx5-wolf` and the muzzle CRT witness. clef is packaged for the image (`user/clef.pin`, `tools/mkclef`): clef's own build made static, 15,370,648 bytes with no interpreter and no shared library, from the image's wolf archive and runtime (`libwolf_rt.a` `9efc68e1…`), one digest on kasumi and on CI's runner (`a90a4ca8…`). On PAX, run by pelt over a copy of clef's 43-source census corpus, the ISR's expansion and nine refusals, it prints byte for byte what it prints on Linux and writes byte for byte what the host's clef writes, and its objects match GNU as's by clef's structural rule (`tests/mpx5-clef`, every leg). It is opt-in (`tools/mkdev --clef`): no image carries it by default and the kernel's default assembler is unchanged, both the maintainer's to rule. Assembling `.S` with clef does not take the C toolchain out of the build: the kernel still links with `ld.lld`, the release tier still generates code through clang, and hosted programs still link through `cc`.
-
-The linker respin (px80): the dev image's static `ld.lld` is lld 18.1.8, built from LLVM's release tarball (sha256 `0b58557a…`, signed by LLVM's release key) with zlib and zstd (`notes/px80/build-lld.sh`); px60's lld 17.0.6 could not link the release tier's kernel (`R_X86_64_REX_GOTPCRELX out of range`, the image at the top of the address space, pax#172). On every kernel the tree builds, both tiers, 18.1.8 links byte for byte what Ubuntu's lld 18.1.3, CI's linker, links; at the dev console `ld.lld --version` says 18.1.8 and `wolf build hello.lu` links with it. `user/wolf-link.sums` moves one line, and CI now holds that record (W0 link: its shape, and the `cc` front end rebuilt to its bytes). The kernel is unchanged.
-
-Offline filesystem checking: `tools/mkfsck` builds `fsck.ext2` in Wolf for Linux and PAX. It checks inodes and blocks, directories, connectivity, references and allocation summaries; repairs counts, bitmaps, links, orphans and duplicate data blocks; and replays supported ext3 journals. A separate rescue archive can repair the unmounted `/dev/vda2` without Linux. The suite compares generated damage with e2fsck, then power-cuts a running root and verifies rescue repair and reboot persistence under BIOS and UEFI. Unsupported formats and ambiguous damage are refused, never marked clean; mounted-volume repair is refused. Existing disk images do not gain a rescue menu automatically. See `docs/BOOT.md`, “Checking a volume from rescue”.
-
-The wolf games (gm01): pack, cub and trail run unmodified on PAX's console, installed by the guided installer into `~/Games/<game>/` with their source and their engine's. The console's font now draws every code point their rich tiers use (262: the braille block and the block elements generated by `tools/mkfont` and held to Spleen's own glyphs bit for bit, two glyphs Spleen lacks drawn for PAX), each one cell, as each game's `--probe-glyphs` measures on the console. Each game's title and one replayed scene equal the same binary's frame on Linux cell for cell under BIOS and UEFI, and a short run of each typed at the PS/2 keyboard (Shift+Down is pack's parry) reaches the game and leaves the terminal restored (`tests/mpx6-games`). The rich tier is the games' `--tier rich`: a bare start reads PAX's `TERM=linux` as a plain console, the engine's rule (R-gm01-4).
-
-The block nodes and a second disk (px79): PAX drives up to four virtio disks, named `vda` to `vdd` in PCI slot order as Linux names them, and `/dev` holds a block special file for every disk and partition the block layer knows (`brw-------`, root's, Linux's numbers: 254:0, 254:1 … for `vda`, 254:16 for `vdb`, the extended major 259 past partition 15), made in memory at boot and as a table is read again, as devtmpfs makes them, never written into an image. A program opens a node and reads and writes it raw at any length and offset (the guest's answers: short across the end, ENOSPC past it, EPERM on a read-only disk; a write to `vda` while a partition of it is mounted is allowed, as on Linux), seeks it, fsyncs it, sends a file onto it by `sendfile` or `splice`, and asks the block ioctls (the sizes, the block sizes, BLKROGET, BLKFLSBUF, HDIO_GETGEO from the device's own geometry, BLKRRPART with Linux's EBUSY while a partition is open or mounted, BLKPG's add and delete); every other request is ENOTTY, named. `/proc/partitions`, `/sys/block` and `/sys/class/block` answer what lsblk and blkid read; `mount(2)` and `/etc/fstab` name a partition by its node (`/dev/vdb2`), and `/proc/mounts` prints the node. `tools/qemu-run` and `tools/qemu-halt` take `--drive FILE` (repeatable) for a second and third disk. Every row is held to Linux 7.3.0 on QEMU with the same disks and the same static probe (`tests/mpx6-nodes`), and a disk made blank on the host gets a GPT and an ext2 from PAX through its nodes.
-
-The journal (px68): `/` is ext3. `tools/mkdisk --gpt --root` makes the root partition with the pinned `mke2fs -t ext3` (`--no-journal` for px67's ext2), and kernel/journal writes every change to its metadata (the superblock, the group descriptors, both bitmaps, the inode tables, indirect and directory blocks) through the journal in ext3's own format, jbd2's v2 layout as the kernel's documentation describes it: a transaction's blocks go to the log, then a FLUSH, then its commit block, then a FLUSH, and only then home; a file's data is written before the commit that names it (data=ordered); commits come at the flusher's 5 s turn, at every sync point and the halt. A power cut leaves `/` clean with needs_recovery, as Linux 7.3.0 leaves its own ext3 root, and the next boot replays the log to its last commit before anything reads the volume (`ext2: vda2: recovering the journal: 1 transaction (sequence 1 to 1), 50 blocks written home, 0 revoked; recovery complete`): blocks revoked by a later transaction are passed over, a torn or missing commit drops its transaction whole, an escaped block is restored, as e2fsck's own replay does on thirteen crafted journals; a replay cut short by a failed write leaves the log as it was, and the next boot replays it whole. The crash row that px67 measured (24 kills at seeded points of a 1,500-operation write session) now gives no count, no orphan and nothing worse, where ext2 on the same kernel and seed gives four counts; every replayed tree is the one the last commit block on the disk names, no write before it lost, and the same tree e2fsck -fy's replay of a copy gives; the session costs what it cost on ext2 (30.13 to 30.53 s against 30.05 to 30.08 s). The order of every write a commit makes is read from QEMU's own trace of the disk (`tools/jorder`). `init=PATH` on Limine's command line runs one program as init. Every row is in `tests/mpx6-journal`, and `tests/mpx6-root` runs on the journalled root, held to the guest's ext3 root.
-
-Root on the disk (px67): `/` is the root partition of the disk that boots (ext2 here; ext3 since px68, above). `tools/mkdisk --gpt --root` installs the system onto partition 2 at build time (the archive an ISO would carry, every mode, owner and time from its own headers), and the kernel mounts it as `/` from `root=` on Limine's command line, in Linux's spellings (`/dev/vda2`, `vda2`, `0xfe02`, `254:2`, `PARTUUID=` in either case, `UUID=`, `rootfstype=ext2`, `ro` and `rw`), with no initramfs; `..` at the root, getcwd, chroot and every absolute path resolve on the volume, and programs run from it. /dev, /proc and /sys are the kernel's, mounted over the disk's directories, and /tmp is a tmpfs; `/proc/self/mounts`, `/proc/self/mountinfo`, `/proc/mounts` and `/etc/mtab` read as Linux's do, and statfs and statvfs answer for `/`. `mount(2)` remounts `/` read-only and read-write and mounts and unmounts a volume at a directory, `umount2(2)` with Linux's errors, EPERM for users. The end sends every process SIGTERM, then SIGKILL after a 2 s grace, then writes every volume and unmounts it, `/` last, marked clean; a power cut leaves an ext2 root not clean and the next boot says so once (a journalled root is replayed: px68, above). Every row is held to Linux booted the same way under QEMU (7.2.8 with an ext2 root; since px68, 7.3.0 with an ext3 one) and to e2fsprogs (`tests/mpx6-root`).
-
-Historical 0.2.35 adoption and new utilities (px65; pins superseded above): the kernel is built from wolf 0.2.35 (lupin 0.1.56 for `tests/mkw`) with no source change, every kernel's `.text` 80 bytes longer and no other section moved (the freestanding runtime's new `__wolf_rt_list_reserve`, which every kernel links whole); every user program is of the 0.2.35 generation: pelt `0b5eaa5`, lope `e6f623c`, aspen `3692cf5`, lobo `49ed870` (and its release image at v0.1.5), boreutils `575dc7b` (61 utilities), `su`, `sigwolf` and `edwolf` built by 0.2.35 with wolf-std `78b9d3c`, the base image's std tree at `78b9d3c`, lupin 0.1.56 taken from its release's own static musl archive by digest (R-px65-1), and the dev image's compiler the v0.2.35 tag built for musl unpatched, so it says the release's own line (R-px65-2). boreutils' fourteen new utilities are in `/bin` — bu30's `mkfifo`, `link`, `unlink`, `truncate`, `sync`, `mktemp`, `realpath` and `tty`, bu31's `base64`, `base32`, `comm`, `join`, `tsort` and `shuf` — and a typed session per group, as root and as `pax`, is byte-identical to the same binaries in a Linux container but for `tty`'s answer, the console's name (`/dev/ttyS0` on PAX, a pseudo-terminal in the container), and holds its own rows: POSIX's answers, RFC 4648's encodings computed from the fixture, the diagnostics' shape (`tests/mpx5-bore`). PAX serves every call the fourteen make (34 by name, `docs/CENSUS.md`) but glibc's `set_robust_list` and `rseq`; bare `sync` and `sync -f` are refused by boreutils itself, on Linux too (wolf has no `sync(2)` or `syncfs(2)`). The one thing they ask for that PAX does not serve is `/proc/self/maps`, which glibc's `pthread_getattr_np` reads for the main thread's stack and wolf 0.2.35's runtime asks for its main-thread guard: nothing the sessions print depends on it, but on PAX a wolf program's main-thread stack overflow ends by SIGSEGV where Linux prints `wolf-trap: stack-overflow`, and a program started with SIGSEGV ignored can race runtime handler installation when reading its status. `tests/mpx5-jobs` now joins a runtime task before reading that disposition and requires the handler's zero ignored-mask result on both PAX and Linux.
-
-The partition table, and a disk that boots (px66): `kernel/block` reads a GUID partition table by the UEFI specification 2.10 (the protective MBR, both headers and their CRC32s, the entry array; a failing primary replaced by a good backup, said once) and an MBR-only disk's primary records, every check a named refusal; each partition is a device of its own (`vda1` …, Linux's names and numbers, 254:N to 15, then 259:0 on), a window of sectors over its disk, every request offset by its start and refused past its end by name; a disk and its partitions never mount at once; `/proc/partitions` lists them as Linux does, and `/etc/fstab` names a volume by `/dev/vdaN`, `PARTUUID=`, `PARTLABEL=`, `UUID=` or `LABEL=`. On eleven fixture disks PAX answers as the Linux 7.2.8 guest does, but where Linux departs from the specification, by name (it reads a backup header only when booted with `gpt`, and no entry larger than 128 bytes) (`tests/mpx6-part`). `tools/mkdisk --gpt` makes one disk with an EFI system partition (Limine, the kernel, the initramfs), the ext2 `/home` and a BIOS boot partition for Limine's stage 2, and QEMU boots it with no CD-ROM under SeaBIOS and OVMF (below, "A disk that boots"). A mount now writes the mounted state to the disk at once and a halt the clean state last, so closing QEMU at any moment leaves `not clean`, and the next boot says so. `/` is still the initramfs in memory.
-
-grep is scent (px64): `/bin/grep` is scent, grep in wolf (Track 15; `user/scent.pin`, `tools/mkscent`), byte-identical to GNU grep 3.12 (configured `--disable-perl-regexp`) in the C locale on its M1 options (the default syntax, `-E` and `-F` across the whole M1 interface) but for the differences rulings #115 to #117 publish and eight rows blocked upstream. `/bin/scent` is the unmodified static binary, built twice to one digest by scent's own toolchain (wolf 0.2.35, the std its archive bundles); `/bin/grep` is a symbolic link to it, which an image's archive can now carry (`tools/mkinitramfs`' `/PATH->TARGET`, cpio's link entry; the kernel's tree adopts it at boot as `symlink(2)` would make it); `/bin/egrep` and `/bin/fgrep` are scent's own wrappers, byte for byte, shell scripts run by `/bin/sh` (pelt) through the kernel's `#!`, which warn on standard error and run `grep -E` or `grep -F` from their own directory, so they work with `/bin` gone from `PATH`. A typed session of 52 commands (the default syntax with a backreference, `-E` classes and alternation, `-F` punctuation, `-i`, `-v`, `-c`, `-n`, `-b`, `-o`, `-w`, `-x`, merged context, `-m` with context, `-e` with `-f`, standard input and files, `-z`, the binary-file policy, statuses 1 and 2, the `-P` refusal, the wrappers' warnings and conflicts, `PATH` changes, the C locale with no `LANG` and no locale data, the three rulings' witnesses), as root and as `pax`, is byte-identical to the same binaries in a Linux container and holds 49 rows to GNU 3.12's answers, the pinned build's run as a black box (`tests/mpx5-scent`); every call scent makes (27 by name) PAX already served, but `set_robust_list` and `rseq`, -ENOSYS as for every glibc program. What a PAX user sees that GNU's grep would not show: `--help` and `--version` are scent's own prose; a diagnostic says `grep:` whatever name ran it (`/bin/grep --bad` says `grep:` where GNU says `/bin/grep:`; wolf-lang#899, #904); an argument that is not UTF-8 aborts in wolf's runtime with status 134 (wolf-lang#406), which pelt refuses before running the command (`a byte that is not UTF-8 cannot be carried yet`, pelt#65) but a `#!` line can; `-r` and colour are not yet (scent's M2), refused by name.
-
-The disk (px63): a virtio block device (`kernel/vblk`, on px20's transport), a block layer with a buffer cache (`kernel/block`), and ext2 read and written (`kernel/ext2`: the superblock, the groups, the bitmaps, inodes and their single, double and triple indirect blocks, directories, fast and slow symbolic links, owners past 65535 and times past 2038), mounted by the kernel from `/etc/fstab` (`user/fstab`: the disk at `/home`) as the tree's second store before the first program, write-back with a flusher every 5 seconds, written and marked clean at the halt and by root's `reboot(2)`, which resets the machine. `fsync`, `fdatasync`, `syncfs`, `sync`, `statfs` and `fstatfs` serve it. A host-made `mkfs.ext2` image reads on PAX as on Linux 7.2.8 line for line (`ls -l`, `stat`, `readlink`, `cat`, a 100 MiB file's sum, statfs), a write session leaves the tree Linux's does and `e2fsck -fn` finds it clean, and a note written before a reboot is read after it (`tests/mpx6-blk`, `tests/mpx6-ext2`). `/` is still the in-memory tree.
-
-Mappings, FIFOs and locks (px62): `mmap` of a file of the tree, private (the file's own frames mapped read-only and a page copied at its first write, so a page not yet written shows a later `write(2)` as on Linux) and shared (every mapping, a forked child's and `read` and `write` of the file are one set of bytes, so `msync` has nothing to write), and shared memory (`MAP_SHARED|MAP_ANONYMOUS`, `/dev/zero`) across `fork`, with SIGBUS for a page past a file's end and a file cut under its mappings unmapped past its new end in every process; `mremap` with `MREMAP_MAYMOVE`, grown in place or moved without copying a byte (`MREMAP_FIXED` and `MREMAP_DONTUNMAP` refused by name), so the musl wolf's allocator grows its blocks on PAX as on Linux; FIFOs made by `mkfifo` and `mknodat` and opened by fifo(7)'s rules; and `flock` on open files. Two static probes print the same lines on PAX and on Linux as root and as a user (`tests/mpx3-maps`), and pelt's FIFO row runs as on Linux, 22 of 22 (`tests/mpx5-pelt`).
-
-Job control (px48): process groups and sessions, the console as a controlling terminal (`TIOCSCTTY`, `TIOCNOTTY`, `TIOCGPGRP`, `TIOCSPGRP`, `TIOCGSID`), `kill` to a group, stops and continues and the waits that report them, Ctrl-C, Ctrl-\\ and Ctrl-Z for the console's foreground group only, the background rules (`SIGTTIN`, `TOSTOP`'s `SIGTTOU`), hangup and the orphaned group, and `/proc/<pid>/stat`, each measured against real Linux as root and as a user; a distribution's static Almquist shell (Ubuntu's `busybox-static`, `sh -i`) runs `sleep 100 &`, `jobs`, Ctrl-Z, `bg`, `fg`, `kill %2` and `wait` on PAX's console byte for byte as on Linux (`tests/mpx5-jobs`). The image's shell, pid 1, leads its session with the console as its terminal, as a getty would give it on Linux.
-
-The pins at 0.2.34, aspen and lupin (px57): the kernel is built from wolf 0.2.34 with no source change and no byte of any section moved; a probe of 0.2.34's calls (`user/edwolf`: the fork and its `busy` rule, one wait over several descriptors, the terminal restored at exit, the syncs and the exclusive create, `realpath`, the nanosecond clock) and of s253's (`user/elf/hostq.c`) answers as real Linux under QEMU as root and as `pax`, but for what PAX does differently by name (its monotonic clock ticks every 10 ms; it calls itself `PAX`; it refuses every set of a limit); aspen, tree(1) in wolf (`/bin/aspen`), and lupin, the reference interpreter for wolf, built static for musl (`/bin/lupin`, with programs in `/usr/share/lupin`; ruling #110), run at the console byte-identical to Linux (`tests/mpx5-aspen`, `tests/mpx5-lupin`).
-
-lope on PAX (px54, ruling #91 R4): lope, the directory jumper in wolf (the maintainer's gump ported and renamed; `user/lope.pin`, `tools/mklope`), is preinstalled as `/bin/lope`, and the console shell runs its hook before its first prompt: `/etc/pax-run` starts it as `/bin/env ENV=/etc/shrc /bin/sh -i -m`, and `/etc/shrc` (`user/shrc`) is `eval "$(lope init pelt)"`, run by pelt as POSIX's `$ENV` file, with pelt at `90d7c64` (sh21: `command_not_found_handle`). So `cd` records each directory, a word that names no command jumps to the directory lope knows by it (`etc` alone lands in `/etc`), `g -` goes back, `g` goes home and `gi` offers a numbered menu (PAX has no fzf); a typed session of all of it is byte-identical to the same binaries in a Linux container, as root and as `pax`, with no kernel change (`tests/mpx5-lope`). Every call lope makes is one PAX already served. **lope's store lives in memory**: `$HOME/.local/share/lope/store` (`/.local/share/lope/store` for root, whose `HOME` is `/`) in PAX's in-memory tree, kept while the machine runs and gone at reboot until PAX has storage. lope's repository is private for now, so pax's CI checks it out with the org's token.
-
-Exec from the tree, and `#!` (px56): `execve` and `execveat` run any program of the tree its mode allows — copied, written, rewritten in place or unlinked while open since boot — with the mode rule and every refusal (ETXTBSY included) as Linux answers; `#!` interpreter lines as Linux reads them (one argument, the script's path appended, five deep), and ENOEXEC for a file with neither, so pelt runs a script with no `#!` itself: the maintainer's `echo 'echo hi' > Script/greet.sh; chmod +x Script/greet.sh; ./Script/greet.sh` prints `hi` on PAX, as root and as `pax`, byte for byte as on real Linux under QEMU and in a container (`tests/mpx5-jobs`' execs image).
-
-The small fixes, two (px55): `/dev/fd` as Linux's link to `/proc/self/fd` (`readlink`, `lstat`, the listing, `ls -l /dev/fd/` and `cat /dev/fd/0`'s rows, as root and as `pax`, byte-identical to real Linux under QEMU and a container: `tests/mpx5-jobs`' fds image); `prlimit64`'s core limit soft 0 and hard unlimited, as Linux boots (PAX writes no core); `/proc/self/limits` (and `/proc/<pid>/limits`) in Linux's layout with PAX's values from the one table `prlimit64` reads, and `/proc/sys/kernel/core_pattern` reading `core` (`tests/mpx3-tree`'s tree probe: the layout held to Linux, the values to PAX's own text); mpx4-session's and lobo-session's host ports picked outside the ephemeral range (#86's race, in two more places); and mpx4-ready booting every way whatever an earlier one did, each its own verdict, with a CI dispatch that names its ways (`ways`).
-
-The pins at 0.2.33 (px53): the kernel is built from wolf 0.2.33 (lupin 0.1.54 unchanged), PAX runs boreutils `cc64f68` (bu28: `timeout -s SEGV`, `-s RTMIN` and a host number ignore the signal and send it to timeout's own group, a command dead of a signal leaves timeout dead of it, `kill -L`'s row 0) and pelt `be1a75d` (sh19's leak and `cd` join), and a probe of wolf 0.2.33's five new signal calls (`user/sigwolf`: one meaning ignored or defaulted in the sending shape, the end by a signal, the core siblings, `text(0)`) answers as on Linux, as root and as `pax`, with no kernel change: the groups session and the probe byte-identical to real Linux under QEMU at the first boot, every pelt session as recorded at 0.2.32 (`tests/mpx5-jobs`). PAX writes no core, as Linux writes none at its boot's `RLIMIT_CORE` of 0.
-
-The small fixes (px52): `eventfd` with `EFD_SEMAPHORE` as Linux serves it (a read takes 1 and leaves the rest; `tests/mpx4-ready`'s evprobe, held to the same binary on Linux); `/dev/stdin`, `/dev/stdout` and `/dev/stderr` as symbolic links to `/proc/self/fd/0`, `1` and `2` (`readlink`, `lstat`, the listing, and `stat` and `open` through each, as root and as `pax`, byte-identical to real Linux under QEMU and a container: `tests/mpx5-jobs`' fds image, and pelt's `> /dev/stderr` and boreutils' `readlink` and `cat /dev/stdin` in `tests/mpx3-tree`'s shell-inout sessions); a CI dispatch that names mpx5-jobs' images (`jobs_boots`), so a plant's red at a later image is seen in CI; and the one silent UEFI boot of mpx4-udp's user image (pax#86) found to be QEMU refusing its own port forward, the port taken in the host's ephemeral range between the probe and QEMU's bind: the network suites now pick ports outside that range.
-
-The pins at 0.2.32 (px51): the kernel is built from wolf 0.2.32 and lupin 0.1.54, and PAX runs pelt's own job control (sh18: `jobs`, `fg`, `bg`, job ids, Ctrl-Z and Ctrl-C reaching the job alone, a background reader stopped, a job's group killed) and boreutils' `kill` to a process group and `timeout` (bu27: the command in timeout's own group, the group sent to at expiry) as Linux does, as root and as `pax`: 26 typed job-control sessions and a session of group sends and timeouts, each byte-identical to real Linux under QEMU, with no kernel change (`tests/mpx5-jobs`).
-
-The descriptor table (px50): `/proc/<pid>/fd` and `/proc/<pid>/fdinfo` as Linux serves them — `readlink` of each kind of descriptor, `stat` and `open` through an entry, the listings, fdinfo's `pos`, `flags`, `mnt_id` and `ino`, who may read another process's — so boreutils' `cat` refuses an input that is its output on PAX exactly where it does on Linux, as root and as `pax`; a user's `rmdir` and `rename` of `/proc` and `/sys`; each measured against real Linux (`tests/mpx5-jobs`' fds image, `tests/mpx3-tree`'s shell-inout sessions).
-
-The small gaps (px49): `pause`, `rt_sigsuspend` across a stop and another thread's take, TIOCSTI, `tcflush`, `tcdrain` and `tcsendbreak` on the console, SIGTTOU for a background `sendfile` or `splice` under TOSTOP, a socket's owner to `fstat`, `faccessat2`'s AT_SYMLINK_NOFOLLOW and AT_EMPTY_PATH, `fallocate`'s KEEP_SIZE and PUNCH_HOLE, and a user's `unlink("/dev")`, each measured against real Linux as root and as a user (`tests/mpx5-jobs`' gaps image).
-
-Status: `/bin/play` plays an orchestra (px32): a part format of independent parts with dynamics, hairpins, articulation and 17 synthesised instrument timbres (`notes/px32-format.md`), 16+ voices in real time under TCG through the sound device (`tests/mpx3-orchestra`). Before that, PAX plays sampled sound (px30): QEMU's virtio sound device behind Linux's OSS `/dev/dsp`, so an unmodified static Linux program writes PCM and the capture holds exactly what it wrote, and `/bin/play` mixes a chord's pitches into one stream (`tests/mpx3-sound`). Before that, PAX waits for more than one descriptor (px24): `poll`, `epoll` (level- and edge-triggered, one-shot) and `eventfd` (`kernel/ready`, `kernel/event`), with `writev`, `sigaltstack`, `sched_getaffinity` and the rest of what wolf's hosted runtime and lobo were straced asking of Linux; a wolf server that serves twelve connections at once and a wolf client that waits run unmodified and print on PAX what they print on Linux, as do five probes and an echo server on `epoll` that holds 64 connections, is made ready on all of them at once and then serves 10,000 more (`tests/mpx4-ready`: over loopback, against `tools/net-peer --ready`, and through QEMU's user-mode network; the Linux side run by `tools/linux-net --ready`). A process has 128 descriptors, a machine 64 threads and 256 TCP connections. Before that, PAX's file tree is writable (px27): inodes in memory with the initramfs as their first contents, files that grow, shrink and have holes, directories that gain and lose entries, `rename` that replaces at once, a file that outlives its name while it is open, and a cap with `ENOSPC` at it — so boreutils' `mkdir`, `rmdir`, `rm`, `mv` and `cp` and pelt's `>` and `>>` run unmodified, a typed session that makes, copies, moves, lists and removes a tree (and is refused `rm -rf /`) is byte-identical to Linux, and one static glibc program prints on PAX what it prints on Linux's tmpfs about all of it, the Linux side in a throwaway container (`tests/mpx3-tree`). No disk. Since px36 a file also changes after it is made: hard and symbolic links, modes, times to the nanosecond and root's `chown`, so boreutils' `chmod`, `touch` and `ln` run unmodified and a typed session with them is byte-identical to Linux (`tests/mpx3-tree`'s `shell-changes`). Before that, PAX runs threads and delivers signals (px26): the current pelt and boreutils run unmodified — a second thread by `clone3` with `CLONE_THREAD`, `futex` wait and wake, handlers entered on a frame glibc expects and left by `rt_sigreturn` with every register and the x87/SSE/AVX state put back, `kill` and `tgkill`, Ctrl-C from the console as SIGINT for every process, `ls -l` with owners and dates from a wall clock — and one static glibc program prints on PAX what it prints on Linux about all of it (`tests/mpx3-threads`), with `ls -l /bin`, a `trap`, Ctrl-C on a running `sleep` and `exec` typed at pelt's prompt byte-identical to Linux (`tests/mpx3-shell`'s `shell-long` and `shell-sigs`). No job control, one CPU. Before that, PAX speaks TCP to Linux programs (px23): static Linux binaries — and two built by wolf — `listen`, `accept`, `connect`, read, write, `shutdown` and close stream sockets over `kernel/tcp` (RFC 9293's state machine, RFC 6298's retransmission timer, RFC 5681's congestion control, a bounded listen queue, time-wait), over the wire and over a loopback that is now below IP (`kernel/ip`), and an echo server, a client, 16 MiB transfers each way and 10,000 connections print on PAX what they print on Linux, and stay exact under loss, duplication, reordering and corruption injected by `tools/net-peer --tcp`, a TCP of the tools' own (`tests/mpx4-tcp`: against that script, against QEMU's user-mode network, and with no device at all; the Linux side run by `tools/linux-net --tcp`). No `poll` or `epoll` yet. Before that, PAX spoke UDP to Linux programs (px22): static Linux binaries call `socket`, `bind`, `connect`, `sendto`, `recvfrom`, `getsockname`, `getpeername` and the two option calls on AF_INET datagram sockets (`kernel/socket`) over `kernel/udp` — the pseudo-header checksum, a port table, a bounded receive queue a socket, a port unreachable for a datagram nobody takes, loopback that never touches the wire — and an echo server, a client, a resolver and four more witnesses (`user/net/`) print on PAX what they print on Linux (`tests/mpx4-udp`: against `tools/net-peer` and against QEMU's user-mode network, the Linux side run by `tools/linux-net`). No TCP, no `poll`. Before that, PAX answers ping (px21): it speaks IPv4 (`kernel/ip`: every received header held to RFC 791 and RFC 1122's rules with a counter per drop cause; a route that is on-link or by way of the gateway, from a boot-time address, netmask and gateway; DF set, a 1500-byte MTU, no fragments either way) over an ARP cache (`kernel/arp`: eight entries that age, a request retried three times a second apart, two frames kept per unresolved address), answers ICMP echo requests, sends its own and times the replies, and tells the sender of a protocol it does not speak so, at most once a second (`kernel/icmp`). An echo request reaches PAX from `tools/net-peer`, a script that is the whole network at the other end of a QEMU socket netdev; QEMU's capture is rebuilt byte by byte, every checksum recomputed, and held against the kernel's own counters (`tests/mpx4-net`). No UDP, no TCP and no sockets yet. Before it: PAX sends and receives Ethernet frames (px20): the kernel finds QEMU's virtio network device on the PCI bus (`kernel/pci`, configuration mechanism #1), drives it through the virtio 1.x interface (`kernel/virtio`, `kernel/net`: the capabilities' registers, two feature bits, two split virtqueues, INTx on the 8259) and, through a kernel-internal frame interface, speaks ARP with QEMU's user-mode gateway (`kernel/arp`): it answers a request for 10.0.2.15 and resolves 10.0.2.2, and QEMU's capture of the exchange is held to the expected frames byte by byte (`tests/mpx4-net`); no IP and no sockets yet. Before it: PAX plays music (px18): the PC speaker (the 8254's channel 2 gated through port 0x61, `kernel/speaker`) answers Linux's console ioctls KIOCSOUND and KDMKTONE, and `/bin/play`, a wolf program, sounds note files from `/usr/share/tunes` at pelt's prompt — `play mambo` (Paxito, an original mambo-flavoured tune), `play entertainer` (Joplin, 1902, public domain), `play scale`; a tone stops when the process that started it ends, and every halt silences the speaker; QEMU's speaker captured to a WAV file measures each note within 1% of its pitch (`tests/mpx3-speaker`). Before it: the console is drawn on the screen too (px19: the framebuffer Limine hands over, mapped write-combining through the PAT, a 160×50 text grid in Spleen 8×16 at QEMU's 1280×800, the common SGR colours, deferred wrap, scrolling and a steady cursor, fed the same bytes as the serial console and replayed from the first line; `TIOCGWINSZ` answers the grid when the screen is the console; every headless screendump equals a host-side reference renderer's picture of the same serial bytes, pixel for pixel; `tests/mpx3-screen`); pelt's pipelines, redirections and `cd` run on PAX as on Linux (px17: pelt `3e7516c`, whose spawn forks — a copy of the address space — and hears `execve` through a socketpair; pipes that block and end at their last writer, open files whose offset `dup` and a child share, `fcntl`, `chdir`/`fchdir`/`getcwd`, SIGPIPE's default; `ls /bin | wc -l`, `cat /etc/motd > /dev/null` and `cd /etc; cat motd` byte-identical to Linux in `tests/mpx3-shell`'s `shell-plumb`); the kernel builds from wolf 0.2.26 and lupin 0.1.49, the release archives by digest (px16, which also took out four workarounds 0.2.26 made unneeded: `m.K` for constants, `p[0].f = v` for a header's fields, `!` for masks, `-> never` for the panic path); the shell's image runs only programs built by wolf (px15: pelt and boreutils' `cat echo false head ls sleep tail true wc`, `ls` boreutils' own; `quiet` on the kernel command line keeps the per-program `user:` lines off the console; `tests/mpx3-shell`) on the console (px13: what a person types reaches a program — COM1's receive interrupt and the PS/2 keyboard (i8042, scancode set 1, a US layout) feed one line discipline, canonical and non-canonical, with echo, erase, kill, word erase and Ctrl-D, the settings a Linux pseudo-terminal starts with less ISIG and IXON; `read(0)` sleeps the thread until a line is ready; TCGETS, TCSETS, TIOCGWINSZ answered, other terminal ioctls refused by name; pelt, the POSIX shell in wolf, built static from its own tree, runs as PID 1 and answers its built-ins at a prompt, Ctrl-D ends it and the kernel halts; every typed session byte-identical to the same session on a Linux pseudo-terminal; `tests/mpx3-console`) on Linux programs (px12, M-PX3: boreutils' utilities, built from boreutils' own tree and linked static against a baseline glibc, run unmodified on PAX from the initramfs — `echo`, `cat` of a file, `wc`, `head`, `tail`, `pwd`, `sleep`, and `ls` of a directory (busybox-static's until px15) — their output and exit status byte-identical to the same binaries on Linux; `brk`, anonymous `mmap`/`munmap`/`mprotect`, `arch_prctl(ARCH_SET_FS)` with FS per thread, a descriptor table over the read-only initramfs and a synthetic `/dev`, `openat`/`read`/`pread64`/`lseek`/`fstat`/`statx`/`getdents64`, `getcwd`, `getrandom`, the clocks and `clock_nanosleep`; `tests/mpx3-boreutils`) on the loader (px10, M-PX3's next step: static x86-64 Linux executables, read from a `newc` initramfs Limine hands over as a module, run unmodified in ring 3 with the psABI's initial stack — argc, argv, envp and an auxiliary vector — and print what they print on Linux, byte for byte; `exit_group` 231; each thread's x87/SSE/AVX state saved and restored at every switch; a PIE, a dynamic program and a file that is not an x86-64 ELF are refused by name; wolf 0.2.25 and lupin 0.1.48 by archive digest; `tests/mpx3-loader`) on user mode (px09, M-PX3's first step: programs run in ring 3, each in an address space of its own with the kernel half shared, call the kernel through `syscall` with Linux's x86-64 numbers — `write` 1 to the serial console with every page of the buffer checked first, else -EFAULT; `exit` 60; anything else -ENOSYS — and return by `sysretq`; a page fault or a privileged instruction in ring 3 kills the program by name and the kernel goes on; SMEP and SMAP on; `tests/mpx3-user`) on preemptive kernel threads (px07, M-PX2's scheduler: the timer switches between threads, each on its own stack from frames above an unmapped guard; yield, sleep, exit; a spinlock on wolf's atomics; `tests/mpx2-sched`, wolf 0.2.24) and the kernel heap (px06: kernel code uses wolf's `List`, `Map`, string interpolation, capturing closures and `region`; wolf's freestanding runtime, `libwolf_rt_none.a` from the 0.2.24 archive, allocates through `wolf_alloc`/`wolf_free`, which PAX writes in wolf over its frames and paging, `kernel/heap`, PML4 slot 384: page runs and eight size classes; eight rounds of such code leave no block behind and the heap does not grow after the first, and a double free, a free outside the heap, running out and a page fault in the heap each panic by name, `tests/mpx2-heap`) on interrupts (kw10, M-PX2's interrupt and timer pieces) on paging (px03), physical frames (px02) and first light (M-PX1, px01). Every kernel loads its own GDT, TSS (with an IST1 stack for the double fault) and IDT before anything else (`kernel/gdt`, `kernel/idt`); all 32 exceptions and the 8259's 16 lines enter through `boot/isr.S`'s trampolines into wolf (`kernel/interrupts`, `[abi.interrupt]`), which panics by name (`PANIC page fault vector 14 error … cr2 …`), lets a breakpoint return, and counts the PIT's ticks (`kernel/timer`, through the local APIC's LINT0, `kernel/apic`) — each read back from the halted machine through QEMU's monitor (`tests/mpx2-interrupts`). wolf is the 0.2.23 release archive, fetched by digest (px05; kw08's packed structs and `offset_of`, kw09's module state and `extern "c" let`, all in a release), and `serial`, `frames` and `paging` use them: module `const`s, the allocator's state address in a module `var`, its header at `offset_of`. The kernel builds its own x86-64 four-level paging structures from its frame allocator (`kernel/paging`): its image mapped one permission per section (text read-execute, rodata read-only, data and bss read-write no-execute), Limine's HHDM kept for RAM (without a writable alias of the image), nothing in the lower half; it switches CR3 to them, maps and unmaps pages with INVLPG, and a write to its own text faults — each read back through QEMU's monitor (`tests/mpx2-paging`). The kernel's frame allocator (`kernel/frames`, two bitmaps over Limine's memory map, its state in frames it takes for itself) hands out every usable frame above 1 MiB exactly once and takes them back, and panics by name on a double free or a free of a frame never usable (`tests/mpx2-frames`). (From px02 to kw10 wolf was built from source, `eb955c3b` then `6a4e6151`, for features no release carried; px05 returned to the archive.) The wolf kernel owns the serial console (a 16550 driver in wolf), prints what Limine handed it (bootloader, firmware, memory map, HHDM offset) and halts; a trap reaches its panic path, which prints `PANIC <kind> <file>:<line>` and halts. Both of wolf's compiling tiers, under BIOS and UEFI (`tests/mpx1`). The harness's assembly proof (`tests/proof`) and M-KW's first wolf kernel (`tests/mkw`) still run. The plan lives in the wolf planning repository under `sprints/pax/`.
+PAX is a clean-room implementation of Linux's userspace ABI. It contains, translates and derives from no Linux kernel
+source; `CLAUDE.md` states the rule and `docs/SOURCES.md` lists what each part was written from. Every behaviour claim
+below is a scripted QEMU test that CI runs, and where the behaviour is Linux's, the test holds PAX byte for byte to a
+real Linux booted the same way.
 
 Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA`).
 
-## Layout
+## At a glance
 
-    kernel/   the wolf kernel (serial, log, boot_info, frames, paging, panic;
-              kernel/README.md), its wolf.pkg and the wolf/lupin pin
-    boot/     boot-protocol glue: the Limine pin and config, the kernel's
-              entry and requests, port I/O, the control registers, the
-              interrupt trampolines and the descriptor tables' storage
-              (start.S, io.S, cpu.S, isr.S, kernel.ld), and the assembly proof under
-              boot/stub/
-    user/     the first user programs (px09): flat assembly blobs the
-              kernel copies into each process (programs.S); elf/ (px10);
-              boreutils.pin and mpx3-boreutils.run (px12: the boreutils
-              tree M-PX3 runs and the commands it runs); pelt.pin and
-              console/ (px13: the shell PAX runs as PID 1, the typed
-              sessions); play/ (px18: the note-file player, wolf) and
-              tunes/ (its note files); net/ (px22: the eight UDP
-              witnesses, C; px23: the eight TCP ones, C, and two in
-              wolf) and mpx4-udp*.run, mpx4-tcp*.run (the commands
-              tests/mpx4-udp and tests/mpx4-tcp run); lope.pin and
-              shrc (px54: lope, preinstalled, and the console shell's
-              $ENV file, its hook); fstab (px63: the images' mount
-              table, the disk at /home); scent.pin (px64: the scent
-              tree PAX carries as /bin/scent, /bin/grep a link to it,
-              /bin/egrep and /bin/fgrep); fstab-disk (px66: the
-              table of the disk that boots, /home on /dev/vda2);
-              disktools/ (px69: paxgpt, paxfat, paxext2, in Wolf);
-              install/ (guided installer, planner, UI, snapshot and executor);
-              disktools.pin (px66: sfdisk, sgdisk, mkfs.fat, mtools,
-              by digest); console/bore-files.keys and bore-text.keys
-              (px65: boreutils' new utilities typed); clef.pin (as02b:
-              the clef tree the image's opt-in assembler is built from)
-    tools/    the harness: fetch-limine, fetch-wolf, fetch-lupin,
-              build-stub, build-kernel, mkimage, qemu-run, qemu-halt
-              (--type: a typed session, px13; --no-screen, px19; --qemu, px18),
-              qemu-fault, qemu-gdb, expect-serial, mkuser, mkboreutils,
-              mkpelt, linux-run, linux-tty, mkfont and screen-ref (px19:
-              the glyph table, the reference renderer), mkplay and
-              wav-notes (px18), mkbeep (px21a: Ubuntu's beep from its
-              source package, linked static), pcap-net (px20, px21: a capture held to
-              what PAX must send, byte by byte), net-peer (px21: the
-              other end of a socket netdev), gateway-probe (px21: what
-              QEMU's user-mode gateway answers on this host), paxnet.py
-              (px21: what the three share), mknet, linux-net and
-              udp-host (px22: the UDP witnesses built; their run list on
-              Linux in a namespace addressed as PAX is; the host's end
-              of QEMU's user-mode network), paxtcp.py and tcp-host
-              (px23: a TCP of the tools' own, with faults; the host's
-              end of QEMU's network for TCP), mkprobes (px26, px27: the
-              static C probes), linux-tree (px27: a session's Linux
-              side in a throwaway container, its root a tmpfs: for
-              programs that remove files), mklope (px54: lope static,
-              from a clone of its private tree), e2fs, mkdisk, e2tree,
-              linux-blk, mkdiskprobe and blk-pattern (px63: e2fsprogs
-              from a container pinned by digest; a reproducible ext2
-              image, empty, a home or a tree; an image's tree as debugfs
-              lists it; the host's Linux on QEMU with the image as its
-              disk; the disk probe and /bin/reboot; the self-test's
-              pattern read from the host), mkscent (px64: scent static,
-              built twice to one digest by its own toolchain, and its
-              two wrappers); mkgpt, disktools and
-              mkdisktools, mklimine-static (px69: the static formatters and
-              unchanged Limine installer); mkclef (as02b: clef static
-              from its own tree, held to the image's wolf archive and
-              runtime, one digest a host); mkinstall, mkgames and mkinstall-payload
-              (static installer; gm01: the three games built alike from
-              their source and engine archives by digest; the offline
-              games/boot manifest); mkfsck (the offline checker); linux-part (px66: a GPT or MBR table written
-              reproducibly; the partition and FAT tools from
-              user/disktools.pin in the pinned container; the Linux
-              guest's partitions, /proc/partitions and blkid on an
-              image); mkdisk --gpt (px66: the disk that boots);
-              mkdisk --usb, check-usb and usb-write (raw live stick,
-              independent boot-file checks, guarded manual writer);
-              fetch-usb-linux (two verified Ubuntu binary packages for the
-              TCG USB oracle, no kernel metapackage installation)
-    font/     the screen's font (px19): Spleen 8x16, BSD-2-Clause, with
-              its licence; gm01: extent.txt (the code points drawn above
-              U+00FF: braille, the block elements, the games' others),
-              pax-extra.bdf (PAX's own rows for four Spleen lacks) and
-              games-glyphs.txt (the wolf games' 262 code points)
-    tests/    scripted QEMU tests: proof, mkw (with M-KW's frozen kernels
-              in mkw.d/), mpx1, mpx2-frames, mpx2-paging, mpx2-interrupts,
-              mpx2-sched, mpx3-user, mpx3-loader, mpx3-boreutils, mpx3-console,
-              mpx3-screen, mpx3-speaker (px18), mpx3-threads (px26), mpx3-tree (px27), mpx3-sound (px30), mpx4-net (px20, px21), mpx4-udp (px22), mpx4-tcp (px23), mpx5-lope (px54), mpx6-blk and mpx6-ext2 (px63), mpx5-scent (px64), mpx6-part (px66), mpx5-bore (px65), mpx6-disktools (px69), mpx6-install (guided installation), kernel-as and mpx5-clef (as02b: the kernel's WOLF_AS seam; the clef package qualified on PAX), mpx6-games (gm01: the wolf games on the console), gdb-attach,
-              expect-serial-selftest, usb-tools and usb-stick (USB-only boot,
-              live login, image reproducibility and Linux ESP differential),
-              mpx6-usb and mpx6-usbcheck (USB keyboards)
-              Additional QEMU and host-side entry points:
-              census, ci-plan, lobo-session-selftest, mpx2-heap, mpx3-maps, mpx3-orchestra, mpx3-shell, mpx4-lobo, mpx4-ready, mpx4-session, mpx4-unix, mpx5-accounts, mpx5-aspen, mpx5-jobs, mpx5-lupin, mpx5-pelt, mpx5-screen, mpx5-users, mpx5-wolf, mpx5-yew, mpx6-fsck, mpx6-journal, mpx6-nodes, mpx6-root, paxtcp-selftest, tour
-    docs/     BOOT.md (the boot protocol, argued), SOURCES.md (the
-              consulted-sources log), ABI notes as they come
-    notes/    one note per lane: its contract and evidence
+| Area | What PAX does today | Held to |
+|---|---|---|
+| Boot | Limine 12.9.1 from one hybrid ISO (BIOS and UEFI), from a GPT disk, or from a live USB stick; a guided installer onto a disk | both firmwares under QEMU, every push |
+| Programs | Static x86-64 ELF run in ring 3 with Linux's syscall numbers; `fork`, `execve`, `#!` lines, threads (`clone3`, `futex`), signals with the full frame restored, job control and sessions; a fixed 1 MiB initial stack | the same binaries on Linux, byte for byte |
+| Users | `root`, `pax` and the service account `lobo`; real, effective, saved and file-system ids; every path walk, mode, owner and signal checked by Linux's rules; `su` in wolf; no passwords yet | Linux as root and as a user |
+| Files | A writable in-memory tree seeded from the initramfs: links, modes, times, holes, `rename`; `mmap` private and shared, `mremap`, FIFOs, `flock`; `/dev`, `/proc`, `/sys`, `/tmp` | Linux's tmpfs in a throwaway container |
+| Disks | Up to four virtio disks with GPT or MBR tables and `/dev` nodes; ext2 read and written; ext3's journal written and replayed; `/` on the disk, `mount(2)`, `/etc/fstab`; an offline `fsck.ext2` in wolf | Linux 7.3.0 under QEMU and e2fsprogs |
+| Network | virtio-net, ARP, IPv4, ICMP, UDP, TCP (RFC 9293, 6298, 5681), Unix sockets, `poll`, `epoll`, `eventfd`; 256 TCP connections | Linux in a namespace, and captures rebuilt byte by byte |
+| Console | A 16550 serial console, the PS/2 keyboard and USB keyboards over xHCI, one line discipline; a framebuffer console of 160×50 cells with the Linux VT's colours and 560 glyphs | typed sessions on a Linux pseudo-terminal; screendumps against a reference renderer |
+| Sound | The PC speaker through Linux's console ioctls; virtio sound behind OSS `/dev/dsp`; `/bin/play`, an orchestra of 17 timbres | QEMU's capture, every pitch within 1% |
+| Shipped programs | pelt (the shell, PID 1), boreutils (107 utilities), scent as `grep`, yew, lope, aspen, lupin, lobo, clef, three wolf games | the same binaries in a Linux container |
 
-## Booting it
+What PAX is not: a security boundary. The permission checks hold for honest programs; the kernel has never been fuzzed
+or audited, it loads programs at fixed addresses, and the live USB entry accepts `root` with no password.
 
-PAX boots through the **Limine** protocol from one hybrid ISO that boots under BIOS and UEFI (`docs/BOOT.md` says why). Limine itself is fetched from its release by sha256 digest, never built here.
+## Quick start
+
+On a Linux x86-64 host with binutils, cc, make, curl, xorriso and `qemu-system-x86_64` (the Hosts table below says what
+each machine can do):
 
 ```sh
-tools/fetch-limine                         # Limine 12.9.1, digest-checked, into .pax-cache/
-tests/proof                                # build the stub + ISO, boot it under BIOS and UEFI, assert
-tools/qemu-run --firmware uefi build/pax-stub.iso; echo $?    # 33 = the stub's success code
+tools/fetch-limine                          # Limine 12.9.1 by digest, into .pax-cache/
+tests/proof                                 # the harness's own proof: build the stub, boot it under BIOS and UEFI
+PAX_WOLF=$(tools/fetch-wolf) tests/mpx1     # first light: the wolf kernel on both compiler tiers, both firmwares
+PAX_WOLF=$(tools/fetch-wolf) tests/mpx3-shell   # pelt at a prompt, typed sessions held to Linux
+```
+
+Then, to use it rather than test it:
+
+1. Build the disk that boots: `tools/mkdisk --gpt --kernel K.elf --root I.cpio 512M pax-disk.img`.
+2. Boot it in a terminal with the SeaBIOS line under [A disk that boots](#a-disk-that-boots).
+3. Type at pelt's prompt; `reboot` restarts on the same disk, `exit` (or Ctrl-D) writes `/` and halts.
+
+The harness never installs anything: a missing tool is named and the tool stops. `tools/qemu-run` boots an image
+headless and returns QEMU's status, `(v << 1) | 1` when the kernel writes `v` to the exit port, 0 for a reset or
+triple fault, 124 for a timeout; `tools/qemu-halt` holds a kernel that halts to RIP inside `pax_halt` through QEMU's
+monitor. Each tool's header comment states its usage; `qemu-run` and `qemu-gdb` print it with `--help`.
+
+## What is in the image
+
+The release and dev images carry the programs below. `/etc/pax-release` prints their exact input identities (the pin
+files' digests, the games' source archives, the kernel's own ELF digest and `SOURCE_DATE_EPOCH`), and the boot banner
+shows the kernel commit and the first eight digits of that file's SHA256.
+
+| Program | What it is | Pin |
+|---|---|---|
+| wolf | the build compiler, and the dev image's compiler | 0.2.35 |
+| lupin | the reference interpreter for wolf, `/bin/lupin` | 0.1.58, `6240efe5` |
+| wolf-std | the standard library beside lupin, `/usr/share/wolf/std` | `78b9d3cb` |
+| pelt | the POSIX shell, PID 1 at the console | `4683b3f5` |
+| boreutils | coreutils in wolf, 107 command binaries in `/bin` (`df` not yet) | `0f7a57b6` |
+| scent | grep in wolf: `/bin/scent`, with `grep` a link to it and `egrep` and `fgrep` its wrappers | `81d761d6` |
+| yew | the editor | `0ccb2c67` |
+| lope, aspen, lobo | the directory jumper, tree(1), the web server | `e6f623c7`, `3692cf5d`, `49ed870e` |
+| clef | the assembler in wolf, opt-in at `/usr/bin/clef` of the dev image | `user/clef.pin` |
+| pack, cub, trail | three wolf games, installed by the installer into `~/Games/` with their source | `27848095`, `6a1db765`, `24099a81` (engines `aa6c4dc0`, `74b89744`, `57870143`) |
+
+Every program is built from its own tree, static, and pinned by commit or by digest (`user/*.pin`); `tools/mk*` builds
+each. `tools/mkdistribution VERIFIED_BASE.cpio BUILT_INPUTS NEW_OUT` assembles both image variants at one clean
+commit: it rebuilds the kernel and the installer, verifies the supplied program outputs, and keeps only the unchanged
+compiler and linker bundle from the digest-pinned prior dev payload. Every packed file has a build-time digest
+inventory. trail is held at its pin until the [glyph-probe mismatch](https://github.com/wolffe-lang/trail/issues/8)
+is resolved. Every ELF process starts with a fixed 1 MiB initial stack, which `RLIMIT_STACK` reports.
+
+Two things the shipped `grep` says that GNU's would not: `--help` and `--version` are scent's own prose, and a
+diagnostic names the program as `grep:` whatever path ran it. `-r` and colour are refused by name until scent's next
+milestone. Everything else on its first-milestone options is byte-identical to GNU grep 3.12 in the C locale.
+
+## Booting PAX
+
+PAX boots through the Limine protocol (`docs/BOOT.md` says why). Limine is fetched from its release by digest, never
+built here. There are four ways to boot, from least to most durable.
+
+### From the ISO
+
+The default: everything the image holds is in memory and gone at the next boot.
+
+```sh
+tools/qemu-run --firmware uefi build/mpx1/native/kmain.iso; echo $?
 tools/expect-serial build/serial.log PAX "firmware: uefi"
 tools/qemu-gdb build/pax-stub.iso build/stub/pax-stub.elf     # gdb, frozen at reset
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx1    # M-PX1: first light, both tiers, BIOS and UEFI
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx2-frames   # px02: the frame allocator, both tiers, BIOS and UEFI
-tests/mpx2-frames --images build/mpx2      # boot them elsewhere (hasu under KVM)
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx2-paging   # px03: paging, read back through QEMU's monitor
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx2-interrupts   # kw10: named panics, int3, #DF on IST1, the timer
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx2-sched   # px07: threads switched by the timer, sleep, exit, the lock, the guard
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx3-user   # px09: ring 3 — syscall write/exit, faults killed by name, SMEP/SMAP
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx3-boreutils   # px12, M-PX3: boreutils (ls too, px15) on PAX against Linux (sudo for the chroot)
-tests/mpx3-boreutils --images build/mpx3-boreutils  # boot them elsewhere (hasu under KVM), Linux's side carried along
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx3-console   # px13: typed sessions (ask, pelt as PID 1) through COM1 and PS/2, against Linux
-tests/mpx3-console --images build/mpx3-console    # boot them elsewhere (hasu under KVM)
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx6-usb     # xHCI, USB hubs, keyboard bytes and hotplug
-python3 -I tools/usb-typing mpx3-console --tier native --firmware bios # reuse its built images through USB
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx3-screen   # px19: screendumps against tools/screen-ref, the scroll's cost, winsize
-tests/mpx3-screen --images build/mpx3-screen      # boot them elsewhere (hasu under KVM)
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx3-speaker   # px18: play's scale through QEMU's speaker to a WAV, every pitch measured
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx3-sound     # px30: virtio sound and /dev/dsp; static OSS witnesses and play's mixed mode, captured at 48 kHz
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx3-orchestra # px32: play's part format, judged on the host (play -o) and from QEMU's capture
-tools/linux-sound OUT PROG -- 'CMD'              # px30: the same programs on this host's Linux under QEMU with a sound device
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx4-net   # px20, px21: virtio-net, ARP, IPv4 and ICMP echo; QEMU's gateway and tools/net-peer; the captures byte by byte
-tools/gateway-probe 127.0.0.1                # px21: what this host's QEMU gateway answers to ARP and ICMP echo, with no guest
-tests/mpx4-net --images build/mpx4-net --accel kvm   # boot them elsewhere (hasu under KVM)
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx4-udp   # px22: UDP and sockets; eight witnesses against tools/net-peer and QEMU's user network, each held to Linux (needs root for the Linux side: tools/linux-net)
-tests/mpx4-udp --images build/mpx4-udp --accel kvm   # boot them elsewhere (hasu under KVM)
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx4-tcp   # px23: TCP; ten witnesses against tools/net-peer --tcp (faults and all), QEMU's user network and no device, each held to Linux (needs root for the Linux side)
-tests/mpx4-tcp --images build/mpx4-tcp --accel kvm   # boot them elsewhere (hasu under KVM)
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx3-tree   # px27: the writable tree; a static probe and a typed session against Linux's tmpfs, a soak and a fill (the Linux side runs in a throwaway container: docker or podman; nothing under test runs on the host)
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx3-maps   # px62: mremap, file and shared mappings, FIFOs and flock; two static probes against Linux's tmpfs, root and a user (the Linux side in throwaway containers)
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx6-blk    # px63: the virtio block device's self-test: a pattern written, flushed, read back and read from the host; read-only; no disk
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx6-ext2   # px63: ext2 read, written and rebooted, held to Linux 7.2.8 on QEMU (live where the kernel is readable, else the record) and to e2fsck -fn (e2fsprogs in a container: docker or podman)
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx5-bore   # px65: boreutils' fourteen new utilities in /bin, a typed session per group as root and pax, held to the same binaries in a container and to their own rows
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx5-scent  # px64: scent as /bin/grep (an archive link), egrep and fgrep through pelt's #!, typed as root and pax, held to the same binaries in a container and to GNU 3.12's answers
-tools/mkinstall build/install                # static installer, Ubuntu 24.04 baseline
-tools/mkgames build/games                    # gm01: pack, cub and trail static, with their source and their engine's
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx6-games --tier native --firmware bios  # gm01: the font row, the games' frames held cell for cell to Linux's, their keys
-PAX_LOPE_REPO=/path/to/lope tests/mpx6-install --rows full --tier native --firmware bios
-tools/mkdisktools build/disktools             # px69: static paxgpt, paxfat and paxext2, baseline Linux
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx6-disktools --tier native --firmware bios  # format differentials and a disk built on PAX
-tools/mkdisk --home 128M pax-home.img          # px63: the disk an image mounts at /home (pax/ for the user pax), reproducible under SOURCE_DATE_EPOCH
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx6-part   # px66: GPT and MBR read, the windows, held to Linux 7.2.8 on QEMU (the record where the kernel is not readable); the fstab names, the disk booted under SeaBIOS and OVMF, the clean flag
-tools/mkdisk --gpt --kernel K.elf --initramfs I.cpio 512M pax-disk.img   # px66: a disk that boots: ESP (Limine, kernel, initramfs), ext2 /home, BIOS boot
-tools/mkdisk --gpt --kernel K.elf --root I.cpio 512M pax-disk.img         # px67: / on partition 2, the archive installed onto it, root=PARTUUID=… rw, no initramfs
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx6-root   # px67: / on the disk: root=, .. at the root, the mounts over it, mount(2), the tree, the end and the clean flag, held to Linux 7.2.8 on QEMU (the record where the kernel is not readable)
-PAX_QEMU=$PWD/tools/qemu-rootdisk tests/mpx3-shell --images build/mpx3-shell   # px67: a suite's ISOs booted again from a disk with / on it
-PAX_WOLF=$(tools/fetch-wolf) tests/mpx6-nodes  # px79: /dev's block nodes, raw I/O, the block ioctls, the rescan and BLKPG, /sys's block files, three disks, mount by node, held to Linux 7.3.0 on QEMU (the record where the kernel is not readable)
-tools/qemu-halt --elf K.elf --drive a.img --drive b.img --marker halt K.iso   # px79: two disks beside the ISO, vda and vdb in order (FILE,ro read-only); with --boot-disk the boot disk is vda and these follow
-tools/gateway-probe --dns dns.google         # px22: what this host's QEMU DNS server answers, with no guest
-tools/qemu-halt --elf K.elf --marker halt --cmd 'info tlb' K.iso   # monitor answers on the halted machine (K.log.cmd1)
-tools/qemu-fault --marker 'write: .*' K.iso                        # a kernel that must fault: CR2 from the stopped machine
-tests/mpx1 --images build/mpx1             # boot ISOs built elsewhere (any host with QEMU)
-tools/qemu-halt --elf build/mpx1/native/kmain.elf --marker halt build/mpx1/native/kmain.iso   # is it halted?
-PAX_WOLF=$(tools/fetch-wolf) PAX_LUPIN=$(tools/fetch-lupin) tests/mkw   # M-KW: the first wolf kernel, both tiers
-tests/mkw --images build/mkw               # boot ISOs built elsewhere (any host with QEMU)
-tools/mkdisk --usb --kernel K.elf --initramfs I.cpio --conf boot/limine-usb.conf pax-stick.img
-# I.cpio must already contain the desired live system; the wrapper adds no programs.
-tools/qemu-run --firmware uefi --usb-stick pax-stick.img
-tools/usb-write --dry-run pax-stick.img /dev/sdX  # inspect only; select the actual removable whole disk yourself
-PAX_WOLF=$(tools/fetch-wolf) tests/usb-stick --tier native  # BIOS + UEFI, live login, Linux guest; 0 skips
 ```
 
-`tools/qemu-run` runs QEMU headless (`-nographic`, COM1 to a file, `-no-reboot`, a timeout, `isa-debug-exit` at port `0xf4`) and returns QEMU's status: `(v << 1) | 1` when the kernel writes `v` to the exit port, 0 for a reset or triple fault, 124 for a timeout. A kernel that halts never exits QEMU, so `tools/qemu-halt` boots it with QEMU's monitor on a pipe and, after the kernel's last line, holds it to RIP inside `pax_halt`, IF clear and HLT=1 at two probes a second apart, with no further serial output. Each tool's header comment states its usage; `qemu-run` and `qemu-gdb` print it with `--help`.
+### A disk beside the image
 
-## Seeing the screen (px19)
-
-The harness boots headless; to see PAX's screen, give QEMU a window. On
-macOS (Homebrew's QEMU, TCG):
-
-```sh
-qemu-system-x86_64 -machine q35 -cpu max -m 256M -display cocoa \
-    -serial file:serial.log -nic none -no-reboot -cdrom IMAGE.iso
-```
-
-(`-display gtk` or `-display sdl` on Linux, where `-accel kvm` makes it
-fast.) The window is QEMU's display device: Limine hands PAX its
-framebuffer, PAX draws the console there from its first line, and the
-window's keyboard is the PS/2 keyboard px13's console reads, so a shell
-image (`tests/mpx3-console`'s `console-pelt.iso`, `tests/mpx3-shell`'s
-`console-shell.iso`) is typed into from the window; COM1 still gets
-every byte (`serial.log`). With `-display none` the screen is drawn
-where nobody sees it, and `-vga none` (`tools/qemu-run --no-screen`)
-boots a machine with no display at all: the console is serial only.
-
-The framebuffer console supports character and line insertion/deletion,
-erasing, scroll margins, sixteen CSI parameters, and the Linux VT's colour
-renditions: dim, italic, underline and RGB mapped to its small palette. OSC P
-changes any of the sixteen palette entries, including text already displayed;
-OSC R restores the defaults. The keypad supplies navigation with NumLock off,
-digits with it on, and decimal entry with Alt or hexadecimal entry with AltGr.
-Blink attributes are recorded but displayed steadily until timer-driven drawing
-is available. Since gm01 the console also draws every braille pattern, the
-block elements and the other code points the wolf games use (560 glyphs;
-`font/extent.txt`); anything else above U+00FF is still `?`. The games run
-on it unmodified (`~/Games/<game>/<game> --tier rich`, docs/BOOT.md). DECSCUSR is consumed without switching shapes, as on the measured
-Linux VT; PAX's existing cursor remains a steady block.
-
-## A disk that outlives the boot (px63)
-
-Everything an image holds is in memory and gone at the next boot, but
-for a disk: give QEMU an ext2 image as a virtio block device and the
-kernel mounts it where the image's `/etc/fstab` says (`user/fstab`,
-the playground's: `/home`):
+Give QEMU an ext2 image as a virtio block device and the kernel mounts it where the image's `/etc/fstab` says, the
+playground's at `/home`:
 
 ```sh
 tools/mkdisk --home 128M pax-home.img
@@ -318,25 +107,29 @@ qemu-system-x86_64 -machine q35 -cpu max -m 512M -display cocoa \
     -drive file=pax-home.img,if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0
 ```
 
-Without `-no-reboot`, root's `reboot` restarts the machine and the same
-disk boots again; `e2fsck -fn pax-home.img` and `debugfs` read it on the
-host between boots (the file is the file system: no partition table).
+Without `-no-reboot`, root's `reboot` restarts the machine and the same disk boots again. Between boots, `e2fsck -fn
+pax-home.img` and `debugfs` read it on the host: the file is the file system, with no partition table.
 
-## A disk that boots (px66)
+### A disk that boots
 
-One file, no ISO: `pax-disk.img` (`tools/mkdisk --gpt`) holds Limine, the
-kernel and the initramfs on its EFI system partition and `/home` on its
-ext2 partition 2, so QEMU boots it alone, in a terminal. Under BIOS
-(SeaBIOS):
+One file, no ISO. `tools/mkdisk --gpt` writes a GPT disk with an EFI system partition (Limine, the kernel, the
+initramfs), a BIOS boot partition for Limine's stage 2 and an ext2 partition 2; with `--root` the whole system is
+installed onto partition 2 at build time, every mode, owner and time from the archive's own headers, and the kernel
+mounts it as `/` from `root=` on Limine's command line (`/dev/vda2`, `PARTUUID=`, `UUID=`, `ro`, `rw`, in Linux's
+spellings) with no initramfs. The root is ext3 by default since the journal was added; `--no-journal` makes an ext2 one.
+
+```sh
+tools/mkdisk --gpt --kernel K.elf --root I.cpio 512M pax-disk.img
+```
+
+Under BIOS (SeaBIOS):
 
 ```sh
 qemu-system-x86_64 -machine q35 -cpu max -m 512M -nographic -nic none \
     -drive file=pax-disk.img,if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0,bootindex=0
 ```
 
-and under UEFI, with the edk2 firmware Homebrew's QEMU ships, as a
-read-only flash (`-bios` with this file is refused: `qemu: could not
-load PC BIOS`):
+Under UEFI, with the edk2 firmware Homebrew's QEMU ships as a read-only flash (`-bios` with this file is refused):
 
 ```sh
 qemu-system-x86_64 -machine q35 -cpu max -m 512M -nographic -nic none \
@@ -344,92 +137,113 @@ qemu-system-x86_64 -machine q35 -cpu max -m 512M -nographic -nic none \
     -drive file=pax-disk.img,if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0,bootindex=0
 ```
 
-`-nographic` puts COM1 and QEMU's monitor on the terminal: Ctrl-A x quits
-QEMU, Ctrl-A c switches to the monitor (and back), and Ctrl-C reaches
-PAX. `reboot` restarts on the same disk; `exit` (or Ctrl-D at the
-prompt) writes `/home`, marks it clean and halts. **Closing QEMU without
-`exit` (Ctrl-A x, the window, the terminal) is a power cut**: what the
-last five seconds wrote may be lost, and the next boot says `not cleanly
-unmounted` (and keeps saying it, as Linux would, until `e2fsck` on the
-host repairs it: `e2fsck -fy` of partition 2, which starts at
-`--esp` + 2 MiB). `cat /proc/partitions` shows the table PAX read.
+What to know at the prompt:
 
-## `/` on the disk (px67)
+- `-nographic` puts COM1 and QEMU's monitor on the terminal: Ctrl-A x quits QEMU, Ctrl-A c switches to the monitor
+  and back, and Ctrl-C reaches PAX.
+- `/` is the disk, so what you change anywhere lasts (`/etc`, `/root`, `/home/pax`, `/bin`), but for `/tmp`, which is
+  memory. Try `echo hello > /etc/motd`, `lope add /usr/share/tunes`, `cat > notes.txt`, then `reboot`: all three are
+  there on the next boot. `cat /proc/self/mounts` shows `/dev/root` at `/`; `cat /proc/partitions` shows the table
+  PAX read.
+- `exit` (or Ctrl-D at the prompt) sends every process SIGTERM, then SIGKILL after two seconds, writes every volume and
+  unmounts it, `/` last, marked clean. On the host, `dumpe2fs -h` of partition 2 then says `clean`.
+- **Closing QEMU without `exit` (Ctrl-A x, the window, the terminal) is a power cut.** What the last five seconds wrote
+  may be lost. A journalled root is replayed at the next boot before anything reads it; an ext2 root stays `not cleanly
+  unmounted` until an offline check repairs it: `fsck.ext2 -y /dev/vda2` from the rescue archive, or `e2fsck -fy` of
+  partition 2 on the host (it starts at `--esp` + 2 MiB).
+- A second and third disk: `tools/qemu-run --drive a.img --drive b.img` (repeatable; `FILE,ro` for read-only). PAX
+  names them `vdb` and `vdc` in PCI slot order, and `/dev` holds a node for every disk and partition.
 
-The root-on-disk layout holds the whole system on partition 2
-(ext3 by default since the journal was added): `/` is the disk, so what you change anywhere lasts (`/etc`,
-`/root`, `/home/pax`, `/bin`), but for `/tmp`, which is memory. The
-terminal line is px66's, unchanged:
+### The live USB stick
+
+`tools/mkdisk --usb` writes a reproducible raw GPT image with one FAT32 EFI system partition and a reserved Limine BIOS
+partition; the supplied initramfs is preserved byte for byte, so the whole live system and any installer or games
+payload stay in memory. The live entry accepts `root` with no password and starts pelt; it changes no installed
+account and provides no authentication.
 
 ```sh
-cd ~/pax-playground
-qemu-system-x86_64 -machine q35 -cpu max -m 512M -nographic -nic none \
-    -drive file=pax-disk.img,if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0,bootindex=0
+tools/mkdisk --usb --kernel K.elf --initramfs I.cpio --conf boot/limine-usb.conf pax-stick.img
+tools/qemu-run --firmware uefi --usb-stick pax-stick.img       # xHCI mass storage, no CD-ROM, no virtio disk
+tools/usb-write --dry-run pax-stick.img /dev/sdX               # inspect a removable target; the write is yours to do
+PAX_WOLF=$(tools/fetch-wolf) tests/usb-stick --tier native     # BIOS and UEFI, the live login, Linux mounting the ESP
 ```
 
-(the UEFI line above works the same way). Try `echo hello > /etc/motd`,
-`lope add /usr/share/tunes`, `cat > notes.txt`, then `reboot`: all three
-are there on the next boot. `cat /proc/self/mounts` shows `/dev/root`
-at `/`. `exit` (or Ctrl-D at the prompt) ends every process, writes `/`
-and marks it clean before the halt; on the host, `dumpe2fs -h` of
-partition 2 then says `clean`. **Closing QEMU without `exit` (Ctrl-A x,
-the window, the terminal) is still a power cut**, now for the whole
-system: what the last five seconds wrote may be lost, and the next boot
-replays a journalled root before use. A non-journalled root remains
-unclean until an offline check repairs it: `fsck.ext2 -y /dev/vda2` from
-the rescue archive, or `e2fsck -fy` on the host.
+Physical writes and real-machine boots are not tested here. See
+[The live USB stick](docs/BOOT.md#the-live-usb-stick).
+
+### The guided installer
+
+`pax-install` inventories the real block nodes, shows a read-only plan and requires an exact confirmation of the target
+before writing. It is an explicit ext2 developer preview, not a journalled installation:
+
+- whole-disk fresh installs only, 512-byte sectors, root volumes up to 4 GiB;
+- the running root's disk, mounted disks and read-only targets are refused;
+- it asks for a user name and whether to install the three games, staged offline with their source and their engine's;
+  neither answer fetches anything; the games answer alone decides the install from the verified payload (the live
+  demo's marked Games directory is never copied implicitly), and a custom source tree with a Games directory already
+  present is still refused;
+- it writes with `paxgpt`, `paxfat` and `paxext2`, PAX's own disk tools (below), not embedded formatters.
+
+The installer and the installed tree are tested on separate QEMU virtio disks under BIOS and UEFI, including reboot
+persistence; nothing here is a claim about real-machine drivers. See
+[Guided installation](docs/BOOT.md#guided-installation).
+
+## Seeing the screen
+
+The harness boots headless. To see PAX's screen, give QEMU a window; on macOS (Homebrew's QEMU, TCG):
+
+```sh
+qemu-system-x86_64 -machine q35 -cpu max -m 256M -display cocoa \
+    -serial file:serial.log -nic none -no-reboot -cdrom IMAGE.iso
+```
+
+(`-display gtk` or `-display sdl` on Linux, where `-accel kvm` makes it fast.) Limine hands PAX its framebuffer, PAX
+draws the console there from its first line, and the window's keyboard is the PS/2 keyboard the console reads, so a
+shell image is typed into from the window while COM1 still gets every byte. With `-display none` the screen is drawn
+where nobody sees it; `-vga none` (`tools/qemu-run --no-screen`) boots a machine with no display at all.
+
+The framebuffer console is a 160×50 grid in Spleen 8×16 at QEMU's 1280×800 and supports:
+
+- the Linux VT's colour renditions (dim, italic, underline, RGB mapped to its small palette), `OSC P` and `OSC R` for
+  the palette, sixteen CSI parameters, scroll margins, character and line insertion and deletion;
+- 560 glyphs: every braille pattern, the block elements and the other code points the wolf games use
+  (`font/extent.txt`); anything else above U+00FF is `?`;
+- the keypad's navigation with NumLock off and digits with it on, decimal entry with Alt and hexadecimal with AltGr;
+- USB keyboards over xHCI, directly or behind hubs, sharing the PS/2 keyboard's mapping; unplugging one releases its
+  held keys, and a replacement can be attached while the system runs; repeat at 250 ms then 33 ms, as measured on Linux.
+
+Blink attributes are recorded but drawn steadily, and `DECSCUSR` is consumed without changing the cursor's shape, as
+on the measured Linux VT.
 
 ## Friendly shell editing
 
-Pelt `4683b3f5` includes the friendly prompt and floating-point printf fixes, plus opt-in suggestions, syntax colours, abbreviations,
-history events and extra editing keys. At the prompt, type:
+Pelt adds opt-in suggestions, syntax colours, abbreviations, history events and extra editing keys. At the prompt:
 
 ```sh
 set -o friendly -o suggest -o histsearch
 ```
 
-Try `echo prefix_suffix`, then type `echo prefix` to see the history suffix.
-Enter runs only the text you typed; Right accepts the suggestion. Add an
-abbreviation with `abbr add hi 'echo hello'`, then type `hi` and Space.
-`!!` repeats the previous command, `!$` recalls its last word, and Alt-.
-inserts the last argument while editing. Scripts retain POSIX behaviour.
+1. Type `echo prefix_suffix`, then `echo prefix`: the history suffix appears. Enter runs only what you typed; Right
+   accepts the suggestion.
+2. `abbr add hi 'echo hello'`, then type `hi` and Space.
+3. `!!` repeats the previous command, `!$` recalls its last word, and Alt-. inserts the last argument while editing.
 
-Suggestions default to bright black (SGR 90); resolving commands use the
-terminal's default foreground. For dim suggestions and green commands:
+Scripts keep POSIX behaviour, and `set +o friendly` turns the additions off. Suggestions default to bright black
+(SGR 90); `PELT_COLORS='command=green:shadow=brblack+dim'` dims them and colours resolving commands green. The
+framebuffer console reports its 160×50 grid; a serial-only console starts with an unknown (0×0) size.
 
-```sh
-PELT_COLORS='command=green:shadow=brblack+dim'
-```
+## The dev image
 
-`set +o friendly` disables the additions. The framebuffer console reports
-its 160×50 grid; a serial-only console starts with an unknown (0×0) size.
-`tests/mpx5-pelt` exercises both, plus an explicitly resized 80×24 serial
-console, preserving raw drawing bytes and PS/2 framebuffer screenshots.
+The dev variant adds to the base image, which it leaves unchanged:
 
-## The dev image (px60)
-
-The dev variant adds a musl-static `wolf` at `/usr/bin/wolf` and its
-paired standard library at `/usr/share/wolf/compiler-std` in the distribution
-image, separately from lupin's `/usr/share/wolf/std`. `tools/mkwolf`, `tools/mkwolf-std` and `tools/mkdev`
-build and stage those additions; `user/wolf.pin` records the source
-and recipe (since px65 the v0.2.35 tag unpatched: the release carries
-the musl fix px60's patch made, so the binary says the release's own
-line), and `user/wolf.sums` records the bytes.
-The shell environment selects the std tree through `WOLF_STD`. The full
-dev ISO also carries a static `ld.lld`, a link-only `cc` front end, and musl's
-binary CRT/libc inputs (`user/wolf-link.sums`). It can build and run native
-wolf programs; the link front end is not a C or assembly compiler. Since
-px80 the linker is lld 18.1.8, built static from LLVM's release tarball with
-zlib and zstd (`notes/px80/build-lld.sh`; `ld.lld --version` at the dev
-console says so): px60's lld 17.0.6 could not link the release tier's kernel
-(pax#172), and 18.1.8 links it to the same bytes as the Ubuntu lld CI uses. Since
-px64 it also carries scent as `/bin/grep` (the unmodified `/bin/scent`,
-the link, `/bin/egrep` and `/bin/fgrep`) and `tests/mpx5-scent`'s
-fixture at `/usr/share/scent` (`cd /usr/share/scent; grep -n -C1 cat
-words.txt`); its recipe is `notes/px64/dev-iso/`. `tools/mkdev --clef DIR`
-(as02b) adds clef, the assembler in wolf, at `/usr/bin/clef`: opt-in, the
-package `tests/mpx5-clef` qualifies on PAX (`clef --64 -o x.o x.S`,
-`clef --expand x.S`); no image carries it by default yet.
+| Addition | Where | Notes |
+|---|---|---|
+| a musl-static `wolf` | `/usr/bin/wolf` | the v0.2.35 tag built unpatched, so it says the release's own line |
+| the compiler's paired standard library | `/usr/share/wolf/compiler-std` | lupin's own stays at `/usr/share/wolf/std`; the shell selects it through `WOLF_STD` |
+| a static `ld.lld` 18.1.8 and a link-only `cc` | `/usr/bin` | built from LLVM's release tarball with zlib and zstd (`notes/px80/build-lld.sh`); not a C or assembly compiler |
+| musl's binary CRT and libc inputs | | recorded in `user/wolf-link.sums` |
+| scent as `grep`, with its fixture | `/usr/share/scent` | `cd /usr/share/scent; grep -n -C1 cat words.txt` |
+| clef, the assembler in wolf (opt-in, `tools/mkdev --clef DIR`) | `/usr/bin/clef` | `clef --64 -o x.o x.S`, `clef --expand x.S` |
 
 At the dev console, write a program in your home directory and use:
 
@@ -442,43 +256,69 @@ wolf build hello.lu
 ./hello
 ```
 
-At 0.2.35, as at 0.2.34, there is no `wolf check` command. `wolf run --checked` is a
-native build, **not** the checked machine; it requires a native link
-step. `wolf build --no-cache --emit=obj hello.lu -o hello.o` emits a
-native object without a linker. The default backend is Cranelift;
-`--release` still needs external clang, which this image does not carry. The dev-image experiments and
-remaining link requirements are recorded under `notes/px60/`.
+Three things to know at 0.2.35: there is no `wolf check` command; `wolf run --checked` is a native build, not the
+checked machine, and needs the native link step; and `--release` still needs an external clang, which the image does
+not carry. `wolf build --no-cache --emit=obj hello.lu -o hello.o` emits a native object with no linker. The dev ISO is
+tested with 2 GiB of RAM. `tests/mpx5-wolf` holds root and `pax` sessions byte for byte to the same binaries on Linux
+and checks independent command and verdict witnesses, so agreement on a broken compiler cannot pass; its fast CI root
+omits the link bundle on purpose and checks the missing-tool errors.
 
-`tests/mpx5-wolf` holds root and `pax` sessions byte for byte to the same
-binaries on Linux. It also checks independent command/verdict witnesses,
-so agreement on a broken compiler or missing std tree cannot pass. Its
-fast CI root deliberately omits the native link bundle and checks the
-missing-tool errors; `tests/mpx5-wolf.d/verify-link` holds the bundle's
-record (W0 link: `user/wolf-link.sums`' shape, and its `cc` rebuilt from
-`notes/px60/cc.rs` to the recorded bytes in CI; every file of a staged
-bundle where the bundle is). `--only native --images DIR` validates the separate
-live native probe's Linux/PAX recordings. The dev ISO is tested with 2 GiB
-RAM; since px62 lld's file-backed and shared mappings are served, so the
-native link runs with no mapping refused.
+## Disks and rescue
+
+Three programs in wolf write disks, built as static Linux executables and run unchanged on PAX:
+
+| Tool | Writes | Compared with |
+|---|---|---|
+| `paxgpt` | a GPT | sgdisk, sfdisk |
+| `paxfat` | FAT32 and VFAT | dosfstools, mtools |
+| `paxext2` | an ext2 tree with modes, owners, times, symbolic and hard links (no journal) | e2fsprogs |
+
+The tests compare each tool's output with the host's, then build a second disk entirely on PAX through its `/dev/vdb`
+node and boot it alone under SeaBIOS and OVMF. Limine's pinned installer is linked statically with no source change,
+and its Linux and PAX runs write identical bytes. See `docs/BOOT.md`, "Writing a disk on PAX".
+
+`tools/mkfsck` builds `fsck.ext2` in wolf for Linux and PAX. It checks inodes, blocks, directories, connectivity,
+references and allocation summaries; repairs counts, bitmaps, links, orphans and duplicate data blocks; and replays
+supported ext3 journals. A separate rescue archive repairs an unmounted `/dev/vda2` without Linux. Unsupported formats
+and ambiguous damage are refused, never marked clean, and a mounted volume is never repaired. See `docs/BOOT.md`,
+"Checking a volume from rescue".
+
+## Tests
+
+Every suite is a script under `tests/` that builds images, boots them under QEMU and asserts the serial log, the exit
+status and, where the behaviour is Linux's, the same session on a real Linux. Each runs as
+`PAX_WOLF=$(tools/fetch-wolf) tests/NAME`; `--images DIR` boots images built elsewhere (a KVM host, a Mac under TCG),
+and `--tier native --firmware bios` picks one leg.
+
+| Group | Suites | What they hold |
+|---|---|---|
+| The harness's own proofs | `proof`, `expect-serial-selftest`, `paxtcp-selftest`, `lobo-session-selftest`, `gdb-attach`, `ci-plan`, `census`, `kernel-as`, `mkw` | that the harness can fail, that CI's plan covers the change, every syscall by name, both assemblers' identical kernels, the first wolf kernel |
+| The kernel's core | `mpx1`, `mpx2-frames`, `mpx2-paging`, `mpx2-interrupts`, `mpx2-sched`, `mpx2-heap` | first light, the frame allocator, paging, named panics and the timer, threads, the heap: read back through QEMU's monitor |
+| Programs and the console | `mpx3-user`, `mpx3-loader`, `mpx3-boreutils`, `mpx3-console`, `mpx3-shell`, `mpx3-screen`, `mpx3-threads`, `mpx3-tree`, `mpx3-maps`, `mpx3-speaker`, `mpx3-sound`, `mpx3-orchestra` | ring 3, the ELF loader, boreutils and pelt against the same binaries on Linux, screendumps against the reference renderer, threads and signals, the writable tree, mappings, sound captures |
+| The network | `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-unix`, `mpx4-session`, `mpx4-lobo` | captures rebuilt byte by byte, the witnesses against `tools/net-peer` and QEMU's user network (root for the Linux side), `poll` and `epoll`, Unix sockets, lobo serving |
+| Users and the shipped programs | `mpx5-users`, `mpx5-accounts`, `mpx5-jobs`, `mpx5-pelt`, `mpx5-bore`, `mpx5-scent`, `mpx5-lope`, `mpx5-aspen`, `mpx5-lupin`, `mpx5-yew`, `mpx5-wolf`, `mpx5-clef`, `mpx5-screen` | every rule as root and as `pax`, job control typed byte for byte, each program's typed session against the same binary in a container |
+| Disks | `mpx6-blk`, `mpx6-ext2`, `mpx6-part`, `mpx6-root`, `mpx6-journal`, `mpx6-nodes`, `mpx6-disktools`, `mpx6-fsck`, `mpx6-install`, `mpx6-games` | Linux 7.3.0 on QEMU with the same disks, e2fsprogs, the formatters' differentials, a power cut repaired, the installer, the games' frames cell for cell |
+| USB | `mpx6-usb`, `mpx6-usbcheck`, `usb-tools`, `usb-stick`, `usb-linux-fetch` | xHCI, hubs, keyboard bytes and hotplug; the stick's boot files, both firmwares, Linux mounting the ESP; the oracle's two pinned Ubuntu packages |
+
+Suites that need something of the host say so and stop: root for the Linux network side (`tools/linux-net`), docker or
+podman for the throwaway containers (`tools/linux-tree`, e2fsprogs), KVM for speed. `tools/mkimage` is reproducible:
+every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so one commit builds one digest.
 
 ## Continuous integration
 
-Pull requests run affected suites on native BIOS. The `full-matrix` label
-runs every suite on that merge leg; trunk pushes and the nightly run every
-compiler/firmware leg (`tier all`). `tools/ci-plan` selects and verifies the
-run's coverage. Timing-sensitive rows document their bounds and measured
-margins beside the tests. Long-job envelopes are 75 minutes for interrupts,
-90 for heap, and 210 each for pelt and users; the observed stage timings and
-headroom are in [CI budgets](tests/ci-budgets.d/README.md). Rootdisk
-`chk-soak` has 1200 seconds without reducing its 100000 rounds.
-
-One known Linux reference-shell stall, [#196](https://github.com/wolffe-lang/pax/issues/196)
-([pelt#98](https://github.com/wolffe-lang/pelt/issues/98)), gets one retry of
-its Linux leg only. The build and PAX boots are not repeated. CI emits an
-issue-naming warning and uploads the first log and transcripts alongside the
-retry; a second failure stays red. Unknown failures and build errors are
-never retried. This temporary exception lives in `tools/ci-retry` and is
-removed when the upstream fix is pinned and verified.
+- A pull request's push runs the suites its change can affect (`tools/ci-plan`, `tools/ci-tiers.map`) on one leg,
+  native BIOS; a change to the kernel's core or to CI itself runs every suite on that leg.
+- The `full-matrix` label runs every suite on the merge leg (`tier full`); a push to trunk, the nightly and a dispatch
+  run every suite on every compiler and firmware leg (`tier all`). Merging needs a green `tier full` or `tier all` run
+  at the head.
+- Long jobs have budgets: 75 minutes for interrupts, 90 for the heap, 210 each for pelt and users; the measured stage
+  timings and their headroom are in [CI budgets](tests/ci-budgets.d/README.md). The root-disk `chk-soak` has 1200
+  seconds for its 100,000 rounds.
+- A test is seen red before it is trusted: the break is planted in a commit and run of its own, then fixed.
+- One known stall of the Linux reference shell ([#196](https://github.com/wolffe-lang/pax/issues/196),
+  [pelt#98](https://github.com/wolffe-lang/pelt/issues/98)) gets one retry of its Linux leg only, with a warning that
+  names the issue and the first log uploaded beside the retry; a second failure stays red, and nothing else is ever
+  retried. The exception lives in `tools/ci-retry` and goes when the upstream fix is pinned.
 
 ## Hosts
 
@@ -487,19 +327,36 @@ removed when the upstream fix is pinned and verified.
 | linux x86-64 (CI's ubuntu, the pool) | yes: binutils, cc, make, curl, xorriso | yes: `qemu-system-x86_64`; OVMF for UEFI; KVM used when `/dev/kvm` is usable | yes: gdb |
 | macOS arm64 | **no**: no x86-64 ELF binutils or xorriso in the base system | **yes**, TCG: Homebrew's `qemu`, which ships its own UEFI firmware; CI's `macos-run` job boots the linux-built ISO on every push | no gdb in the base system; `tools/qemu-run --gdb 1234` and lldb's `gdb-remote 1234` by hand |
 
-Where each runs today (2026-10-02, px00):
-
-- **CI**: `ubuntu-latest` with QEMU 8.2.2, OVMF and xorriso from apt (TCG); the `macos-run` job boots the same ISO, checked by digest, with Homebrew's QEMU 11.1.1 (TCG).
-- **hasu** (NixOS): nothing system-wide is needed. QEMU and xorriso come from a nix-shell, and the UEFI firmware from nixpkgs' OVMF; use the **combined** `OVMF.fd` with no separate vars file, because split `OVMF_CODE.fd` + `OVMF_VARS.fd` hangs in the firmware under KVM there (5 of 6 boots):
+- **CI**: `ubuntu-latest` with QEMU 8.2.2, OVMF and xorriso from apt (TCG); the `macos-run` job boots the same ISO,
+  checked by digest, with Homebrew's QEMU 11.1.1 (TCG).
+- **NixOS**: nothing system-wide is needed. QEMU and xorriso come from a nix-shell and the UEFI firmware from nixpkgs'
+  OVMF; use the **combined** `OVMF.fd` with no separate vars file, because the split `OVMF_CODE.fd` + `OVMF_VARS.fd`
+  pair hangs in the firmware under KVM there:
 
   ```sh
   ovmf=$(nix-build --no-out-link '<nixpkgs>' -A OVMF.fd)/FV
   PAX_OVMF_CODE=$ovmf/OVMF.fd PAX_OVMF_VARS= \
     nix-shell -p qemu xorriso --run 'PAX_QEMU=$(command -v qemu-system-x86_64) tests/proof'
   ```
-- **kasumi** (CachyOS): QEMU 11.1.1, xorriso and OVMF since the 2026-10-02 upgrade; the kernel builds (wolf, the objects, the ISOs) and boots here (TCG); px01 booted the same ISOs on hasu under KVM (`tests/mpx1 --images`).
-- **macOS** (nomad-1, arm64): `tests/proof --image` on an ISO built elsewhere, as CI's `macos-run` does.
+- **Arch-family Linux**: QEMU 11.1.1, xorriso and OVMF from the repositories build and boot everything (TCG or KVM).
+- **macOS** (arm64): `tests/proof --image` on an ISO built elsewhere, as CI's `macos-run` does.
 
-The QEMU binary is `$PAX_QEMU` (default `qemu-system-x86_64` on `PATH`) and the UEFI firmware `$PAX_OVMF_CODE` / `$PAX_OVMF_VARS`, so every host supplies its own. `tools/mkimage` is reproducible: every date in the ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so one commit builds one digest.
+The QEMU binary is `$PAX_QEMU` (default `qemu-system-x86_64` on `PATH`) and the UEFI firmware `$PAX_OVMF_CODE` /
+`$PAX_OVMF_VARS`, so every host supplies its own. The UEFI leg looks for OVMF at the distro paths in `tools/lib.sh`;
+without it `tests/proof` skips that leg loudly, unless `PAX_REQUIRE_UEFI=1` (CI), when it fails.
 
-The harness never installs anything. A missing tool is named and the tool stops. The UEFI leg looks for OVMF at the distro paths in `tools/lib.sh`, or `PAX_OVMF_CODE` / `PAX_OVMF_VARS`; without it `tests/proof` skips that leg loudly, unless `PAX_REQUIRE_UEFI=1` (CI), when it fails.
+## Layout
+
+| Directory | Holds |
+|---|---|
+| `kernel/` | the wolf kernel, one module per subsystem (`kernel/README.md`), its `wolf.pkg` and the wolf and lupin pins |
+| `boot/` | the Limine pin and configs, the kernel's entry and requests, port I/O, the control registers, the interrupt trampolines and the descriptor tables' storage (`start.S`, `io.S`, `cpu.S`, `isr.S`, `kernel.ld`), and the harness's assembly proof under `boot/stub/` |
+| `user/` | what the images carry: the pins of every shipped program (`*.pin`), the typed sessions (`console/`), `su`, the probes (`elf/`, `net/`), `play/` and `tunes/`, `disktools/` (paxgpt, paxfat, paxext2), `install/` (the guided installer), the fstabs and the shell's `$ENV` file |
+| `tools/` | the harness: the fetchers by digest (`fetch-limine`, `fetch-wolf`, `fetch-lupin`, `fetch-usb-linux`), the builders (`build-kernel`, `mkimage`, `mkdisk`, `mkdistribution`, `mkinstall`, `mkgames`, `mkfsck`, `mk*` for each program), the QEMU drivers (`qemu-run`, `qemu-halt`, `qemu-fault`, `qemu-gdb`, `expect-serial`), the Linux sides (`linux-run`, `linux-net`, `linux-tree`, `linux-blk`, `linux-part`), the network tools (`net-peer`, `pcap-net`, `gateway-probe`, `paxnet.py`, `paxtcp.py`), the font tools (`mkfont`, `screen-ref`), the USB tools (`check-usb`, `usb-write`, `usb-typing`) and CI's planner (`ci-plan`, `ci-tiers.map`, `ci-retry`) |
+| `font/` | the screen's font: Spleen 8×16 (BSD-2-Clause, with its licence), `extent.txt` (the code points drawn above U+00FF), `pax-extra.bdf` (PAX's own rows for the glyphs Spleen lacks) and `games-glyphs.txt` |
+| `tests/` | the suites above, each with its fixtures in `NAME.d/`; `ci-budgets.d/` |
+| `docs/` | `BOOT.md` (the boot protocol, the disks, the installer and rescue, argued), `SOURCES.md` (the consulted-sources log), `CENSUS.md` (every system call PAX serves, by name), `HISTORY.md` (how PAX got here, lane by lane) |
+| `notes/` | one note per lane: its contract and evidence |
+
+The plan lives in the wolf planning repository under `sprints/pax/`. How PAX came to be, in the order it was built, is
+[docs/HISTORY.md](docs/HISTORY.md).
