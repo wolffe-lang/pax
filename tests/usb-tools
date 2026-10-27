@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""USB launcher contract. No firmware or physical devices are opened."""
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+class Launcher(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="pax-usb-test-")
+        self.addCleanup(self.tmp.cleanup)
+        self.work = Path(self.tmp.name)
+        self.image = self.work / "stick.img"
+        self.image.write_bytes(b"fixture")
+        qemu = self.work / "qemu"
+        qemu.write_text("#!/bin/sh\nexit 0\n")
+        qemu.chmod(0o755)
+        self.env = dict(os.environ, PAX_QEMU=str(qemu))
+
+    def run_qemu(self, *args):
+        return subprocess.run([str(ROOT / "tools/qemu-run"), "--accel", "tcg",
+                               "--serial", str(self.work / "serial"), *args],
+                              env=self.env, text=True, capture_output=True)
+
+    def test_usb_only_topology(self):
+        r = self.run_qemu("--usb-stick", str(self.image))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        command = (self.work / "serial.meta").read_text().splitlines()[0]
+        self.assertIn("qemu-xhci", command)
+        self.assertIn("usb-storage", command)
+        self.assertNotIn("virtio-blk", command)
+        self.assertNotIn("cdrom", command)
+        self.assertIn("readonly=on", command)
+
+    def test_conflicting_boot_media_refused(self):
+        r = self.run_qemu("--boot-disk", "--usb-stick", str(self.image))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("cannot combine", r.stderr)
+
+    def test_extra_disk_refused_for_live_usb(self):
+        r = self.run_qemu("--usb-stick", str(self.image), "--drive", str(self.image))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("cannot combine", r.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
