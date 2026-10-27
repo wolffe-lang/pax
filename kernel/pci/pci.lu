@@ -238,6 +238,25 @@ pub fn pin(i: u64) -> u64 {
     (rec(i, R_IRQ) >> 8) & 0xff
 }
 
+/// px75: function `i`'s class code, `class << 16 | subclass << 8 |
+/// programming interface` (01.08.02: an NVM Express I/O controller).
+pub fn class_code(i: u64) -> u64 {
+    (rec(i, R_CLASS) >> 8) & 0xffffff
+}
+
+/// px75: the first function from `from` on whose class code is `cc`
+/// (`class_code`'s form); `MAX` when there is none.
+pub fn find_class(cc: u64, from: u64) -> u64 {
+    var i = from
+    while i < count() {
+        if class_code(i) == cc {
+            return i
+        }
+        i += 1
+    }
+    MAX
+}
+
 /// The first function from `from` on whose vendor is `v` and whose
 /// device id lies in `lo..=hi`; `MAX` when there is none.
 pub fn find(v: u64, lo: u64, hi: u64, from: u64) -> u64 {
