@@ -16,6 +16,7 @@ use sched
 use sync
 use timer
 use usb_keys
+use usb_topology
 
 extern "c" fn pax_outb(port: u16, value: u8)
 extern "c" fn pax_inb(port: u16) -> u8
@@ -118,22 +119,6 @@ fn say_error(c: u64, why: str, detail: u64) {
     log.put("xhci "); log.dec(get(c, NUMBER) as int)
     log.put(": "); log.put(why); log.put(" "); log.hex(detail); log.end()
     sync.release(sync.console(), s)
-}
-
-/// USB3 §8.9; xHCI §6.2.2 requires this for every device speed.
-/// 0x100000 is an invalid route sentinel, never handed to the controller.
-pub fn route_child(route: u64, depth: u64, port: u64) -> u64 {
-    if depth >= 5 || port == 0 || port > 255 { return 0x100000 }
-    route | ((if port > 15 { 15 } else { port }) << (depth * 4))
-}
-
-/// xHCI §6.2.2: low/full-speed descendants inherit the closest high-speed
-/// transaction translator and its physical downstream port. High-speed
-/// devices themselves do not name a TT. Hubs use their default single-TT
-/// alternate setting; MTT remains clear.
-pub fn tt_route(speed: u64, parent_speed: u64, parent_slot: u64, port: u64, inherited: u64) -> u64 {
-    if speed != 1 && speed != 2 { return 0 }
-    if parent_speed == 3 { parent_slot | (port << 8) } else { inherited }
 }
 
 fn trb(a: u64, parameter: u64, status: u64, control: u64) {
@@ -362,6 +347,8 @@ fn control(d: u64, request_type: u64, request: u64, value: u64, index: u64, leng
     w32(get(c, DB) + get(d, SLOT) * 4, 1)
     sync.irq_restore(saved)
     let until = timer.ticks() + 200
+    var completed = false
+    var completion: u64 = 0
     while timer.ticks() < until {
         let s = sync.irq_save()
         drain(c)
@@ -369,15 +356,23 @@ fn control(d: u64, request_type: u64, request: u64, value: u64, index: u64, leng
         let code = get(d, COMPLETION)
         sync.irq_restore(s)
         if done != 0 {
-            let remaining = get(d, RESIDUE)
-            put(d, ACTUAL, if remaining <= length { length - remaining } else { 0 })
-            if code != 1 { say_error(c, "control transfer completion", code) }
-            return code == 1
+            completed = true
+            completion = code
+            break
         }
         let _n = sched.sleep(1)
     }
-    put(d, KIND, 4)
-    say_error(c, "control transfer timeout", get(d, SLOT))
+    if completed {
+        let remaining = get(d, RESIDUE)
+        put(d, ACTUAL, if remaining <= length { length - remaining } else { 0 })
+        if completion == 1 { return true }
+    } else {
+        put(d, KIND, 4)
+    }
+    // One formatter site for both failure paths; no change to timeout or
+    // completion handling, and successful transfers still report nothing.
+    say_error(c, if completed { "control transfer completion" } else { "control transfer timeout" },
+              if completed { completion } else { get(d, SLOT) })
     false
 }
 
@@ -553,26 +548,41 @@ fn discard_allocations(d: u64) {
     sync.irq_restore(saved)
 }
 
+// Keep diagnostic formatting outside the branch-heavy setup routine. Wolf
+// 0.2.35 inlines each small formatter loop before range analysis (#983).
+// One report site preserves every diagnostic without multiplying those loops.
 fn attach(c: u64, parent: u64, port: u64, speed: u64) {
+    let (why, detail) = try_attach(c, parent, port, speed)
+    if why == 0 { return }
+    let message = match why {
+        1 => "hub depth exceeds five",
+        2 => "enable slot failed",
+        3 => "no device record memory",
+        4 => "no DMA memory",
+        _ => "device enumeration failed",
+    }
+    say_error(c, message, detail)
+}
+
+fn try_attach(c: u64, parent: u64, port: u64, speed: u64) -> (u64, u64) {
     var route: u64 = 0
     var depth: u64 = 0
     var root = port
     var tt: u64 = 0
     if parent != 0 {
         depth = get(parent, DEPTH) + 1
-        route = route_child(get(parent, ROUTE), get(parent, DEPTH), port)
-        if route > 0xfffff { say_error(c, "hub depth exceeds five", port); return }
+        route = usb_topology.route_child(get(parent, ROUTE), get(parent, DEPTH), port)
+        if route > 0xfffff { return (1, port) }
         root = get(parent, ROOT)
-        tt = tt_route(speed, get(parent, SPEED), get(parent, SLOT), port, get(parent, TT))
+        tt = usb_topology.tt_route(speed, get(parent, SPEED), get(parent, SLOT), port, get(parent, TT))
     }
     let result = command(c, 0, 9 << 10)
     let slot = result >> 24
-    if result & 255 != 1 || slot == 0 || slot > get(c, NSLOT) { say_error(c, "enable slot failed", result); return }
+    if result & 255 != 1 || slot == 0 || slot > get(c, NSLOT) { return (2, result) }
     let d = page()
     if d == 0 {
         let _disabled = command(c, 0, (10 << 10) | (slot << 24))
-        say_error(c, "no device record memory", slot)
-        return
+        return (3, slot)
     }
     put(d, SLOT, slot); put(d, HOST, c); put(d, PARENT, parent)
     put(d, PORT, port); put(d, ROOT, root); put(d, ROUTE, route)
@@ -584,8 +594,7 @@ fn attach(c: u64, parent: u64, port: u64, speed: u64) {
             if a == 0 {
                 let _disabled = command(c, 0, (10 << 10) | (slot << 24))
                 discard_allocations(d)
-                say_error(c, "no DMA memory", slot)
-                return
+                return (4, slot)
             }
             put(d, word, a)
         }
@@ -602,8 +611,9 @@ fn attach(c: u64, parent: u64, port: u64, speed: u64) {
     let result2 = command(c, pa(input), (11 << 10) | (slot << 24))
     if result2 & 255 != 1 || !configure(d) {
         put(d, KIND, 4)
-        say_error(c, "device enumeration failed", slot)
+        return (5, slot)
     }
+    (0, 0)
 }
 
 fn child(c: u64, parent: u64, port: u64) -> u64 {
