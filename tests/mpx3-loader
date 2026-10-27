@@ -115,7 +115,7 @@ loader_ok() { # elf
 ramfs_args() { # userdir
     local u=$1
     printf '%s\n' "/bin/hello=$u/hello" "/bin/hello-pie=$u/hello-pie" "/bin/hello-dyn=$u/hello-dyn" \
-        "/bin/hello32=$u/hello32" "/bin/hello-arm=$u/hello-arm" "/etc/motd=$u/motd"
+        "/bin/hello32=$u/hello32" "/bin/hello-arm=$u/hello-arm" "/etc/motd=$u/motd" "/bin/stack-probe=$u/stack-probe"
     [ -z "$wolfhello" ] || printf '%s\n' "/bin/wolf-hello=$u/wolf-hello"
 }
 
@@ -372,6 +372,14 @@ for leg in $legs; do
         "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'user: ticks in ring 3 [0-9]+' 'halt' >/dev/null \
             || why+=" the log does not end with the ticks line and halt;"
         [ -z "$why" ] && say "PASS L7 $id: $tk ticks in ring 3; $(tail -n 1 "$log.verdict")" || bad "L7 $id:$why"
+
+        # L9: actual stack pages, beyond the former 128 KiB, and matching rlimit.
+        if grep -qx 'stack-probe: touched 262144 bytes; limit 1048576 1048576' "$norm" && \
+            grep -Eq '^user: stack-probe pid [0-9]+ exit_group 0 after ' "$norm"; then
+            say "PASS L9 $id: 256 KiB automatic object touched; 1 MiB soft/hard stack limit"
+        else
+            bad "L9 $id: stack-probe did not touch its pages and exit 0 with the declared limit"
+        fi
 
         # L8
         if [ -n "$wolfhello" ]; then
