@@ -68,8 +68,10 @@ use timer
 use tree
 use udp
 use user
+use xhci
 
 extern "c" let pax_user_thread: *u8
+extern "c" let pax_usbd: *u8
 extern "c" let pax_flushd: *u8 // px67: kernel/fstab's flusher
 extern "c" let pax_netd: *u8
 extern "c" let pax_net_clock: *u8
@@ -258,7 +260,9 @@ export fn kmain() {
     }
     console.start()
     console.report()
+    floor += xhci.start(pml4, unsafe { pax_usbd as u64 })
     sync.enable()
+    xhci.wait_ready()
     let l1 = ping_self(ip.LOOPBACK, 1)
     let l2 = ping_self(OWN_IP, 2)
     let sl = sync.acquire(sync.console())

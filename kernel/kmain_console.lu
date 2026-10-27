@@ -67,8 +67,10 @@ use sync
 use timer
 use tree
 use user
+use xhci
 
 extern "c" let pax_user_thread: *u8
+extern "c" let pax_usbd: *u8
 extern "c" let pax_flushd: *u8 // px63: kernel/fstab's flusher
 
 const ENV: str = "HOME=/ TERM=linux PAX=1 PATH=/bin" // px14: PATH, for a shell's commands
@@ -224,6 +226,8 @@ export fn kmain() {
     // silent when it has none, so no existing session's serial moves.
     let _pci = pci.scan()
     let _snd = sound.start(pml4)
+    let usb_threads = xhci.start(pml4, unsafe { pax_usbd as u64 })
+    unsafe { kernel_threads = usb_threads }
     // px63: the disk, when the machine has one, and what /etc/fstab mounts.
     if block.start(pml4) != 0 {
         block.report()
@@ -236,9 +240,10 @@ export fn kmain() {
         let fl = unsafe { pax_flushd as u64 }
         let _t = sched.create(fl, 0) // px63: a write-back volume's blocks written every 5 s
         // # Safety: a scalar module var, written once at boot with IF clear.
-        unsafe { kernel_threads = 1 }
+        unsafe { kernel_threads = kernel_threads + 1 }
     }
     sync.enable()
+    xhci.wait_ready()
 
     // px67: the run list is the tree's (`/` on the disk when it is there,
     // else the initramfs's), read whole into a frame of its own. px68:

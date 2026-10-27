@@ -88,6 +88,7 @@ use sound
 use speaker
 use timer
 use user
+use xhci
 
 extern "c" fn pax_cr2() -> u64
 
@@ -270,6 +271,10 @@ fn route(f: *Frame) -> *Frame {
     if v == timer.MASTER_BASE {
         timer.tick()
         speaker.tick(timer.ticks()) // px18: a KDMKTONE tone's end
+        xhci.tick()
+        let sg = console.take_signals()
+        if sg != 0 { signal.tty(sg) }
+        if console.started() && console.readable() { let _n = sched.wake_input() }
         // # Safety: the frame's address; nothing is read here.
         if user.from_user(unsafe { f as u64 }) {
             user.count_tick() // px09: a tick that landed in ring 3
@@ -304,25 +309,20 @@ fn route(f: *Frame) -> *Frame {
     if (v == 39 || v == 47) && timer.spurious(v) {
         return f
     }
-    if sound.vector() != 0 && v == sound.vector() {
-        // px30: the sound device's periods back and its events taken;
-        // its line may be the network device's too (INTx is shared), so
-        // net's handler runs as well when it is, and acknowledges.
-        let _back = sound.irq()
-        if net.vector() != 0 && v == net.vector() {
-            net.irq(v)
-            let _m = sched.wake_net()
-        } else {
-            timer.eoi(v)
+    let usb = xhci.irq(v)
+    let snd = sound.vector() != 0 && v == sound.vector()
+    let network = net.vector() != 0 && v == net.vector()
+    if usb || snd || network {
+        // INTx is shared: drain every device before one PIC EOI. net.irq
+        // already acknowledges, so do not acknowledge a second time.
+        if snd { let _back = sound.irq(); sched.wake_pipes() }
+        if network { net.irq(v); let _n = sched.wake_net() }
+        else { timer.eoi(v) }
+        if usb {
+            let sg = console.take_signals()
+            if sg != 0 { signal.tty(sg) }
+            if console.readable() { let _n = sched.wake_input() }
         }
-        sched.wake_pipes() // writers, SYNC and close waiting on the device
-        // # Safety: as above.
-        return unsafe { sched.kick(f as u64) as *Frame }
-    }
-    if net.vector() != 0 && v == net.vector() {
-        net.irq(v) // px20: the cause read and noted, the 8259 acknowledged
-        let _n = sched.wake_net()
-        // # Safety: as above.
         return unsafe { sched.kick(f as u64) as *Frame }
     }
     // # Safety: the frame's address; nothing is read here.

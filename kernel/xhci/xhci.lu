@@ -1,0 +1,842 @@
+//! xHCI 1.2 host controller, USB 2 hubs and HID boot keyboards (px74).
+//! Written from xHCI 1.2 §§4.2–4.3, 4.9, 4.17, 4.20, 5–7; USB 2.0
+//! §§9,11; USB 3.2 §8.9; HID 1.11 §§7.2 and appendices B/C. No driver
+//! source consulted. One event ring/interrupter per controller, INTx.
+//! Enumeration runs in a kernel thread; IRQs allocate nothing. All DMA
+//! accesses are volatile; x86 coherent memory and ordered stores publish
+//! a TRB's cycle word last. A timeout quarantines DMA memory, never frees
+//! a buffer the controller might still own. Bounds: four controllers,
+//! 32 slots each, five hub hops, one boot keyboard interface per device.
+use console
+use frames
+use log
+use paging
+use pci
+use sched
+use sync
+use timer
+use usb_keys
+
+var first: u64 = 0
+var initialized: u64 = 0
+var held: u64 = 0
+
+const BASE: u64 = 0xffffb00004000000
+const WINDOW: u64 = 0x100000
+const SLOTS: u64 = 32
+// Controller words; slot pointers begin at byte 512.
+const NEXT: u64 = 0
+const CAP: u64 = 1
+const OP: u64 = 2
+const RT: u64 = 3
+const DB: u64 = 4
+const PORTS: u64 = 5
+const NSLOT: u64 = 6
+const CSZ: u64 = 7
+const CMD: u64 = 8
+const CI: u64 = 9
+const CC: u64 = 10
+const EVENT: u64 = 11
+const EI: u64 = 12
+const EC: u64 = 13
+const DCBAA: u64 = 14
+const VECTOR: u64 = 15
+const DONE: u64 = 16
+const WAIT: u64 = 17
+const RESULT: u64 = 18
+const LIVE: u64 = 19
+const NUMBER: u64 = 20
+// Device words; controller owns a page per slot, reused only after Disable Slot.
+const SLOT: u64 = 0
+const HOST: u64 = 1
+const PARENT: u64 = 2
+const PORT: u64 = 3
+const ROOT: u64 = 4
+const ROUTE: u64 = 5
+const DEPTH: u64 = 6
+const SPEED: u64 = 7
+const OUTPUT: u64 = 8
+const INPUT: u64 = 9
+const CTRL: u64 = 10
+const TI: u64 = 11
+const TC: u64 = 12
+const INTR: u64 = 13
+const II: u64 = 14
+const IC: u64 = 15
+const BUFFER: u64 = 16
+const ENDPOINT: u64 = 17
+const PACKET: u64 = 18
+const INTERVAL: u64 = 19
+const KIND: u64 = 20 // 1 keyboard, 2 USB2 hub, 3 not driven, 4 failed
+const PREVIOUS: u64 = 21
+const REPEAT: u64 = 22
+const DEADLINE: u64 = 23
+const TDONE: u64 = 24
+const COMPLETION: u64 = 25
+const EXPECT: u64 = 26
+const HUBPORTS: u64 = 27
+const TT: u64 = 28
+const ACTIVE: u64 = 29
+const RESIDUE: u64 = 30
+const ACTUAL: u64 = 31
+
+fn r8(a: u64) -> u64 { unsafe { (a as *u8).read_volatile() as u64 } }
+fn r32(a: u64) -> u64 { unsafe { (a as *u32).read_volatile() as u64 } }
+fn r64(a: u64) -> u64 { unsafe { (a as *u64).read_volatile() } }
+fn w8(a: u64, v: u64) { unsafe { (a as *u8).write_volatile((v & 255) as u8) } }
+fn w32(a: u64, v: u64) { unsafe { (a as *u32).write_volatile((v & 0xffffffff) as u32) } }
+fn w64(a: u64, v: u64) { unsafe { (a as *u64).write_volatile(v) } }
+fn get(a: u64, i: u64) -> u64 { r64(a + i * 8) }
+fn put(a: u64, i: u64, v: u64) { w64(a + i * 8, v) }
+fn pa(a: u64) -> u64 { a - frames.hhdm() }
+fn zero(a: u64, n: u64) {
+    var i: u64 = 0
+    while i < n { w64(a + i, 0); i += 8 }
+}
+fn page() -> u64 {
+    let saved = sync.irq_save()
+    let p = frames.alloc() else 0
+    if p == 0 { sync.irq_restore(saved); return 0 }
+    // A common low-DMA allocation policy also covers AC64=0 controllers.
+    // The allocator currently hands out low frames first. Never truncate.
+    if p >= 0x100000000 { frames.free(p); sync.irq_restore(saved); return 0 }
+    let a = p + frames.hhdm()
+    zero(a, 4096)
+    sync.irq_restore(saved)
+    a
+}
+fn head() -> u64 { unsafe { first } }
+fn device(c: u64, slot: u64) -> u64 {
+    if slot == 0 || slot > get(c, NSLOT) { return 0 }
+    r64(c + 512 + slot * 8)
+}
+fn say_error(c: u64, why: str, detail: u64) {
+    let s = sync.acquire(sync.console())
+    log.put("xhci "); log.dec(get(c, NUMBER) as int)
+    log.put(": "); log.put(why); log.put(" "); log.hex(detail); log.end()
+    sync.release(sync.console(), s)
+}
+
+/// USB3 §8.9; xHCI §6.2.2 requires this for every device speed.
+/// 0x100000 is an invalid route sentinel, never handed to the controller.
+pub fn route_child(route: u64, depth: u64, port: u64) -> u64 {
+    if depth >= 5 || port == 0 || port > 255 { return 0x100000 }
+    route | ((if port > 15 { 15 } else { port }) << (depth * 4))
+}
+
+fn trb(a: u64, parameter: u64, status: u64, control: u64) {
+    w64(a, parameter)
+    w32(a + 8, status)
+    w32(a + 12, control)
+}
+
+// 255 payload TRBs plus a Link TRB. At most one TD outstanding on a ring;
+// no full-ring ambiguity. The link toggles the consumer cycle (TC=1).
+fn enqueue(owner: u64, ringword: u64, indexword: u64, cycleword: u64,
+           parameter: u64, status: u64, control: u64) -> u64 {
+    let ring = get(owner, ringword)
+    var index = get(owner, indexword)
+    var cycle = get(owner, cycleword)
+    if index == 255 {
+        trb(ring + 255 * 16, pa(ring), 0, (6 << 10) | 2 | cycle)
+        index = 0
+        cycle ^= 1
+        put(owner, cycleword, cycle)
+    }
+    let at = ring + index * 16
+    trb(at, parameter, status, control | cycle)
+    put(owner, indexword, index + 1)
+    pa(at)
+}
+
+fn key(usage: u64, down: bool) {
+    let a = unsafe { held }
+    let code = usb_keys.code(usage)
+    if a == 0 || usage > 255 || code == 0 { return }
+    let count = r64(a + usage * 8)
+    if down {
+        w64(a + usage * 8, count + 1)
+        if count == 0 { console.key_event(code, true, true) }
+    } else if count > 0 {
+        w64(a + usage * 8, count - 1)
+        if count == 1 { console.key_event(code, false, true) }
+    }
+}
+
+fn report(d: u64, value: u64) {
+    if !usb_keys.valid(value) { return }
+    let old = get(d, PREVIOUS)
+    var i: u64 = 0
+    // Releases first; modifiers before new ordinary keys. Reordered arrays
+    // and duplicate usages do not generate repeated presses.
+    while i < 6 {
+        let usage = usb_keys.key_at(old, i)
+        if usage != 0 && !usb_keys.contains(value, usage) {
+            var earlier = false
+            var j: u64 = 0
+            while j < i { if usb_keys.key_at(old, j) == usage { earlier = true }; j += 1 }
+            if !earlier { key(usage, false) }
+        }
+        i += 1
+    }
+    i = 0
+    while i < 8 {
+        let mask: u64 = 1 << i
+        if old & mask != value & mask { key(0xe0 + i, value & mask != 0) }
+        i += 1
+    }
+    if !usb_keys.contains(value, get(d, REPEAT)) { put(d, REPEAT, 0) }
+    i = 0
+    while i < 6 {
+        let usage = usb_keys.key_at(value, i)
+        if usage != 0 && !usb_keys.contains(old, usage) {
+            var earlier = false
+            var j: u64 = 0
+            while j < i { if usb_keys.key_at(value, j) == usage { earlier = true }; j += 1 }
+            if !earlier {
+                key(usage, true)
+                if usb_keys.repeats(usage) {
+                    put(d, REPEAT, usage)
+                    put(d, DEADLINE, timer.ticks() * 10 + 250)
+                }
+            }
+        }
+        i += 1
+    }
+    put(d, PREVIOUS, value)
+}
+
+fn arm(d: u64) {
+    let c = get(d, HOST)
+    let at = enqueue(d, INTR, II, IC, pa(get(d, BUFFER) + 2048), 8, (1 << 10) | 32 | 4)
+    put(d, EXPECT, at)
+    w32(get(c, DB) + get(d, SLOT) * 4, get(d, ENDPOINT))
+}
+
+/// Drain events with IF clear, both from IRQ and command waiter. The ERDP
+/// write clears Event Handler Busy; USBSTS.EINT precedes IMAN.IP (RW1C).
+fn drain(c: u64) {
+    if get(c, LIVE) == 0 { return }
+    var count: u64 = 0
+    var index = get(c, EI)
+    var cycle = get(c, EC)
+    while count < 256 {
+        let e = get(c, EVENT) + index * 16
+        let control = r32(e + 12)
+        if control & 1 != cycle { break }
+        let param = r64(e)
+        let status = r32(e + 8)
+        let kind = (control >> 10) & 63
+        let code = status >> 24
+        if kind == 33 && param & !15 == get(c, WAIT) {
+            put(c, RESULT, (control & 0xff000000) | code)
+            put(c, DONE, 1)
+        } else if kind == 32 {
+            let d = device(c, control >> 24)
+            if d != 0 && get(d, ACTIVE) != 0 {
+                let ep = (control >> 16) & 31
+                if ep == 1 {
+                    if code == 13 { put(d, RESIDUE, status & 0xffffff) }
+                    else if code != 1 || param & !15 == get(d, COMPLETION) {
+                        put(d, COMPLETION, code)
+                        put(d, TDONE, 1)
+                    }
+                } else if ep == get(d, ENDPOINT) && param & !15 == get(d, EXPECT) {
+                    if get(d, KIND) == 1 && (code == 1 || code == 13) && status & 0xffffff == 0 {
+                        report(d, r64(get(d, BUFFER) + 2048))
+                    }
+                    if get(d, KIND) == 1 && (code == 1 || code == 13) { arm(d) }
+                }
+            }
+        }
+        // Port Status Change events are consumed here; the enumeration
+        // thread reads PORTSC and hub status, so no sleeping in an IRQ.
+        index += 1
+        if index == 256 { index = 0; cycle ^= 1 }
+        count += 1
+    }
+    put(c, EI, index); put(c, EC, cycle)
+    w32(get(c, OP) + 4, 8)
+    w32(get(c, RT), 3)
+    w64(get(c, RT) + 24, pa(get(c, EVENT) + index * 16) | 8)
+}
+
+pub fn irq(v: u64) -> bool {
+    var matched = false
+    var c = head()
+    while c != 0 {
+        if get(c, LIVE) != 0 && get(c, VECTOR) == v { drain(c); matched = true }
+        c = get(c, NEXT)
+    }
+    matched
+}
+
+/// 100 Hz tick: software repeat, not repeated identical HID reports.
+pub fn tick() {
+    var c = head()
+    while c != 0 {
+        if get(c, LIVE) != 0 {
+            var slot: u64 = 1
+            while slot <= get(c, NSLOT) {
+                let d = device(c, slot)
+                if d != 0 && get(d, ACTIVE) != 0 && get(d, KIND) == 1 {
+                    let usage = get(d, REPEAT)
+                    let now = timer.ticks() * 10
+                    if usage != 0 && now >= get(d, DEADLINE) {
+                        console.key_event(usb_keys.code(usage), true, true)
+                        // Linux's measured 33ms setting, on a 10ms clock:
+                        // carry the fractional tick rather than round to 30.
+                        // Never emit a burst to catch up after a long stall.
+                        let next = get(d, DEADLINE) + 33
+                        put(d, DEADLINE, if next <= now { now + 33 } else { next })
+                    }
+                }
+                slot += 1
+            }
+        }
+        c = get(c, NEXT)
+    }
+}
+
+fn command(c: u64, parameter: u64, control: u64) -> u64 {
+    if get(c, LIVE) == 0 { return 0 }
+    let saved = sync.irq_save()
+    put(c, DONE, 0)
+    let at = enqueue(c, CMD, CI, CC, parameter, 0, control)
+    put(c, WAIT, at)
+    w32(get(c, DB), 0)
+    sync.irq_restore(saved)
+    let until = timer.ticks() + 200
+    while timer.ticks() < until {
+        let s = sync.irq_save()
+        drain(c)
+        let done = get(c, DONE)
+        let result = get(c, RESULT)
+        sync.irq_restore(s)
+        if done != 0 { return result }
+        let _n = sched.sleep(1)
+    }
+    // Stop submissions on a command timeout: a late completion must never
+    // be confused with another command, nor may DMA memory be recycled.
+    put(c, LIVE, 0)
+    w32(get(c, OP), 0)
+    say_error(c, "command timeout; controller quarantined", control)
+    0
+}
+
+fn control(d: u64, request_type: u64, request: u64, value: u64, index: u64, length: u64) -> bool {
+    let c = get(d, HOST)
+    if length > 1024 || get(c, LIVE) == 0 || get(d, ACTIVE) == 0 { return false }
+    let buffer = get(d, BUFFER)
+    zero(buffer, 1024)
+    let saved = sync.irq_save()
+    put(d, TDONE, 0); put(d, RESIDUE, 0)
+    let setup = request_type | (request << 8) | (value << 16) | (index << 32) | (length << 48)
+    let direction = request_type & 128 != 0
+    let trt: u64 = if length == 0 { 0 } else { if direction { 3 } else { 2 } }
+    let _setup = enqueue(d, CTRL, TI, TC, setup, 8, (2 << 10) | 64 | (trt << 16))
+    if length != 0 {
+        let _data = enqueue(d, CTRL, TI, TC, pa(buffer), length, (3 << 10) | 4 | (if direction { 1 << 16 } else { 0 }))
+    }
+    let end = enqueue(d, CTRL, TI, TC, 0, 0, (4 << 10) | 32 | (if length == 0 || !direction { 1 << 16 } else { 0 }))
+    put(d, COMPLETION, end)
+    w32(get(c, DB) + get(d, SLOT) * 4, 1)
+    sync.irq_restore(saved)
+    let until = timer.ticks() + 200
+    while timer.ticks() < until {
+        let s = sync.irq_save()
+        drain(c)
+        let done = get(d, TDONE)
+        let code = get(d, COMPLETION)
+        sync.irq_restore(s)
+        if done != 0 {
+            let remaining = get(d, RESIDUE)
+            put(d, ACTUAL, if remaining <= length { length - remaining } else { 0 })
+            if code != 1 { say_error(c, "control transfer completion", code) }
+            return code == 1
+        }
+        let _n = sched.sleep(1)
+    }
+    put(d, KIND, 4)
+    say_error(c, "control transfer timeout", get(d, SLOT))
+    false
+}
+
+fn copy_context(dst: u64, src: u64, n: u64) {
+    var i: u64 = 0
+    while i < n { w64(dst + i, r64(src + i)); i += 8 }
+}
+fn input_slot(d: u64, entries: u64) {
+    let c = get(d, HOST)
+    let at = get(d, INPUT) + get(c, CSZ)
+    w32(at, get(d, ROUTE) | (get(d, SPEED) << 20) | (entries << 27))
+    w32(at + 4, get(d, ROOT) << 16)
+    w32(at + 8, get(d, TT))
+}
+fn endpoint(at: u64, ring: u64, size: u64, kind: u64, interval: u64) {
+    w32(at, interval << 16)
+    w32(at + 4, (size << 16) | (kind << 3) | 6)
+    w64(at + 8, pa(ring) | 1)
+    w32(at + 16, if kind == 4 { 8 } else { (size << 16) | size })
+}
+fn path(d: u64) {
+    let c = get(d, HOST)
+    log.put("usb"); log.dec(get(c, NUMBER) as int); log.put("-")
+    log.dec(get(d, ROOT) as int)
+    var i: u64 = 0
+    while i < get(d, DEPTH) {
+        log.put("."); log.dec(((get(d, ROUTE) >> (i * 4)) & 15) as int)
+        i += 1
+    }
+}
+
+fn configure(d: u64) -> bool {
+    let c = get(d, HOST)
+    let buf = get(d, BUFFER)
+    if !control(d, 128, 6, 0x100, 0, 8) || get(d, ACTUAL) < 8 { return false }
+    let mps = r8(buf + 7)
+    if get(d, SPEED) == 1 && (mps == 8 || mps == 16 || mps == 32 || mps == 64) {
+        let input = get(d, INPUT)
+        zero(input, 4096)
+        w32(input + 4, 2)
+        let ep = input + get(c, CSZ) * 2
+        copy_context(ep, get(d, OUTPUT) + get(c, CSZ), get(c, CSZ))
+        w32(ep + 4, (r32(ep + 4) & 0xffff) | (mps << 16))
+        if command(c, pa(input), (13 << 10) | (get(d, SLOT) << 24)) & 255 != 1 { return false }
+    }
+    if !control(d, 128, 6, 0x100, 0, 18) || get(d, ACTUAL) < 18 { return false }
+    let device_class = r8(buf + 4)
+    let product = r8(buf + 15)
+    // String 0 supplies a language, then iProduct is fetched in that
+    // language. Optional string failures are not silently recovered by
+    // writing a halted endpoint; unsupported strings are simply not asked
+    // for when the device advertises iProduct = 0.
+    if product != 0 {
+        if !control(d, 128, 6, 0x300, 0, 255) { return false }
+        if get(d, ACTUAL) >= 4 && r8(buf + 1) == 3 {
+            let language = r8(buf + 2) | (r8(buf + 3) << 8)
+            if !control(d, 128, 6, 0x300 | product, language, 255) { return false }
+        }
+    }
+    if get(d, SPEED) >= 4 {
+        put(d, KIND, 3)
+        let s = sync.acquire(sync.console())
+        log.put("xhci: "); path(d); log.line(" SuperSpeed enumerated, not driven")
+        sync.release(sync.console(), s)
+        return true
+    }
+    if !control(d, 128, 6, 0x200, 0, 9) || get(d, ACTUAL) < 9 { return false }
+    let total = r8(buf + 2) | (r8(buf + 3) << 8)
+    if total < 9 || total > 1024 { return false }
+    if !control(d, 128, 6, 0x200, 0, total) || get(d, ACTUAL) != total { return false }
+    let config = r8(buf + 5)
+    var interface: u64 = 0
+    var selected: u64 = 0
+    var kind: u64 = 0
+    var at: u64 = 0
+    var ep: u64 = 0
+    var packet: u64 = 0
+    var interval: u64 = 0
+    while at + 2 <= total {
+        let length = r8(buf + at)
+        let dtype = r8(buf + at + 1)
+        if length < 2 || at + length > total { return false }
+        if dtype == 4 && length >= 9 {
+            selected = 0
+            if r8(buf + at + 3) == 0 {
+                if r8(buf + at + 5) == 9 || device_class == 9 { selected = 2 }
+                if r8(buf + at + 5) == 3 && r8(buf + at + 6) == 1 && r8(buf + at + 7) == 1 { selected = 1 }
+                if selected != 0 && kind == 0 { interface = r8(buf + at + 2) }
+            }
+        } else if dtype == 5 && length >= 7 && selected != 0 && kind == 0 {
+            let address = r8(buf + at + 2)
+            if address & 128 != 0 && address & 15 != 0 && r8(buf + at + 3) & 3 == 3 {
+                ep = (address & 15) * 2 + 1
+                packet = r8(buf + at + 4) | (r8(buf + at + 5) << 8)
+                interval = r8(buf + at + 6)
+                kind = selected
+            }
+        }
+        at += length
+    }
+    if kind == 0 { put(d, KIND, 3); return true }
+    if interval == 0 || packet == 0 || (kind == 1 && packet < 8) || packet > 1024 { return false }
+    if !control(d, 0, 9, config, 0, 0) { return false }
+    var ports: u64 = 0
+    var think: u64 = 0
+    var power: u64 = 0
+    if kind == 2 {
+        if !control(d, 0xa0, 6, 0x2900, 0, 9) || get(d, ACTUAL) < 7 { return false }
+        ports = r8(buf + 2)
+        if ports == 0 || ports > 31 { return false }
+        think = (r8(buf + 3) >> 5) & 3
+        power = r8(buf + 5)
+        put(d, HUBPORTS, ports)
+    }
+    let input = get(d, INPUT)
+    zero(input, 4096)
+    w32(input + 4, 1 | (1 << ep))
+    input_slot(d, ep)
+    let slot = input + get(c, CSZ)
+    if kind == 2 {
+        w32(slot, r32(slot) | (1 << 26))
+        w32(slot + 4, r32(slot + 4) | (ports << 24))
+        if get(d, SPEED) == 3 { w32(slot + 8, r32(slot + 8) | (think << 16)) }
+    }
+    var exponent: u64 = 3
+    if get(d, SPEED) == 3 {
+        if interval > 16 { return false }
+        exponent = interval - 1
+    } else {
+        var n: u64 = 1
+        while n * 2 <= interval { n *= 2; exponent += 1 }
+    }
+    endpoint(input + (ep + 1) * get(c, CSZ), get(d, INTR), packet, 7, exponent)
+    if command(c, pa(input), (12 << 10) | (get(d, SLOT) << 24)) & 255 != 1 { return false }
+    put(d, ENDPOINT, ep); put(d, PACKET, packet); put(d, INTERVAL, exponent)
+    if kind == 1 {
+        if !control(d, 0x21, 11, 0, interface, 0) { return false }
+        if !control(d, 0x21, 10, 0, interface, 0) { return false }
+        let s = sync.irq_save()
+        put(d, KIND, 1)
+        arm(d)
+        sync.irq_restore(s)
+        let saved = sync.acquire(sync.console())
+        log.put("xhci: keyboard "); path(d); log.put(" speed ")
+        log.dec(get(d, SPEED) as int); log.line(" boot report 8")
+        sync.release(sync.console(), saved)
+    } else {
+        put(d, KIND, 2)
+        var p: u64 = 1
+        while p <= ports {
+            if !control(d, 0x23, 3, 8, p, 0) { return false }
+            p += 1
+        }
+        let _n = sched.sleep((power * 2 + 9) / 10 + 1)
+        let saved = sync.acquire(sync.console())
+        log.put("xhci: hub "); path(d); log.put(" ports "); log.dec(ports as int); log.end()
+        sync.release(sync.console(), saved)
+    }
+    true
+}
+
+fn attach(c: u64, parent: u64, port: u64, speed: u64) {
+    var route: u64 = 0
+    var depth: u64 = 0
+    var root = port
+    var tt: u64 = 0
+    if parent != 0 {
+        depth = get(parent, DEPTH) + 1
+        route = route_child(get(parent, ROUTE), get(parent, DEPTH), port)
+        if route > 0xfffff { say_error(c, "hub depth exceeds five", port); return }
+        root = get(parent, ROOT)
+        if speed == 1 || speed == 2 {
+            tt = if get(parent, SPEED) == 3 { get(parent, SLOT) | (port << 8) } else { get(parent, TT) }
+        }
+    }
+    let result = command(c, 0, 9 << 10)
+    let slot = result >> 24
+    if result & 255 != 1 || slot == 0 || slot > get(c, NSLOT) { say_error(c, "enable slot failed", result); return }
+    let d = page()
+    if d == 0 { return }
+    put(d, SLOT, slot); put(d, HOST, c); put(d, PARENT, parent)
+    put(d, PORT, port); put(d, ROOT, root); put(d, ROUTE, route)
+    put(d, DEPTH, depth); put(d, SPEED, speed); put(d, TT, tt)
+    var word = OUTPUT
+    while word <= BUFFER {
+        if word == OUTPUT || word == INPUT || word == CTRL || word == INTR || word == BUFFER {
+            let a = page()
+            if a == 0 { say_error(c, "no DMA memory", slot); return }
+            put(d, word, a)
+        }
+        word += 1
+    }
+    put(d, TC, 1); put(d, IC, 1); put(d, ACTIVE, 1)
+    w64(c + 512 + slot * 8, d)
+    w64(get(c, DCBAA) + slot * 8, pa(get(d, OUTPUT)))
+    let input = get(d, INPUT)
+    w32(input + 4, 3)
+    input_slot(d, 1)
+    let packet: u64 = if speed >= 4 { 512 } else { if speed == 3 { 64 } else { 8 } }
+    endpoint(input + get(c, CSZ) * 2, get(d, CTRL), packet, 4, 0)
+    let result2 = command(c, pa(input), (11 << 10) | (slot << 24))
+    if result2 & 255 != 1 || !configure(d) {
+        put(d, KIND, 4)
+        say_error(c, "device enumeration failed", slot)
+    }
+}
+
+fn child(c: u64, parent: u64, port: u64) -> u64 {
+    var slot: u64 = 1
+    while slot <= get(c, NSLOT) {
+        let d = device(c, slot)
+        if d != 0 && get(d, ACTIVE) != 0 && get(d, PARENT) == parent && get(d, PORT) == port { return d }
+        slot += 1
+    }
+    0
+}
+
+fn detach(d: u64) {
+    let c = get(d, HOST)
+    var slot: u64 = 1
+    while slot <= get(c, NSLOT) {
+        let other = device(c, slot)
+        if other != 0 && get(other, ACTIVE) != 0 && get(other, PARENT) == d { detach(other) }
+        slot += 1
+    }
+    let saved = sync.irq_save()
+    report(d, 0)
+    put(d, KIND, 3)
+    sync.irq_restore(saved)
+    let result = command(c, 0, (10 << 10) | (get(d, SLOT) << 24))
+    if result & 255 != 1 { say_error(c, "disable slot failed; DMA quarantined", result); return }
+    let s = sync.irq_save()
+    drain(c)
+    put(d, ACTIVE, 0)
+    w64(c + 512 + get(d, SLOT) * 8, 0)
+    w64(get(c, DCBAA) + get(d, SLOT) * 8, 0)
+    // Disable Slot completion proves these DMA buffers are no longer owned.
+    frames.free(pa(get(d, OUTPUT))); frames.free(pa(get(d, INPUT)))
+    frames.free(pa(get(d, CTRL))); frames.free(pa(get(d, INTR)))
+    frames.free(pa(get(d, BUFFER))); frames.free(pa(d))
+    sync.irq_restore(s)
+}
+
+fn root_scan(c: u64) {
+    var port: u64 = 1
+    while port <= get(c, PORTS) && get(c, LIVE) != 0 {
+        let address = get(c, OP) + 0x400 + (port - 1) * 16
+        var status = r32(address)
+        let existing = child(c, 0, port)
+        if existing != 0 && (status & 1 == 0 || status & 0x20000 != 0) { detach(existing) }
+        // PORTSC has mixed RW/RW1C semantics. Preserve PP only; never
+        // echo PED=1 (write-one-disable) or a link-state strobe.
+        w32(address, (status & 0x200) | (status & 0xfe0000))
+        if status & 1 != 0 && child(c, 0, port) == 0 {
+            let _debounce = sched.sleep(11)
+            status = r32(address)
+            if status & 1 != 0 {
+                if status & 2 == 0 {
+                    w32(address, (status & 0x200) | 16)
+                    let until = timer.ticks() + 100
+                    while timer.ticks() < until && r32(address) & 16 != 0 { let _n = sched.sleep(1) }
+                }
+                status = r32(address)
+                w32(address, (status & 0x200) | (status & 0xfe0000))
+                if status & 3 == 3 {
+                    let _recovery = sched.sleep(2)
+                    attach(c, 0, port, (status >> 10) & 15)
+                }
+            }
+        }
+        port += 1
+    }
+}
+
+fn hub_scan(d: u64) {
+    let c = get(d, HOST)
+    var port: u64 = 1
+    while port <= get(d, HUBPORTS) && get(c, LIVE) != 0 {
+        if !control(d, 0xa3, 0, 0, port, 4) || get(d, ACTUAL) < 4 { return }
+        var status = r32(get(d, BUFFER))
+        let existing = child(c, d, port)
+        if existing != 0 && (status & 1 == 0 || status & 0x10000 != 0) { detach(existing) }
+        var bit: u64 = 0
+        while bit < 5 {
+            if status & (1 << (bit + 16)) != 0 {
+                if !control(d, 0x23, 1, 16 + bit, port, 0) { return }
+            }
+            bit += 1
+        }
+        if status & 1 != 0 && child(c, d, port) == 0 {
+            let _debounce = sched.sleep(11)
+            if !control(d, 0x23, 3, 4, port, 0) { return }
+            let until = timer.ticks() + 100
+            while timer.ticks() < until {
+                let _n = sched.sleep(1)
+                if !control(d, 0xa3, 0, 0, port, 4) { return }
+                status = r32(get(d, BUFFER))
+                if status & 16 == 0 && status & 2 != 0 { break }
+            }
+            if status & 3 == 3 && status & 16 == 0 {
+                if !control(d, 0x23, 1, 20, port, 0) { return }
+                let _recovery = sched.sleep(2)
+                let speed: u64 = if status & 0x200 != 0 { 2 } else { if status & 0x400 != 0 { 3 } else { 1 } }
+                attach(c, d, port, speed)
+            }
+        }
+        port += 1
+    }
+}
+
+export fn pax_usbd(_arg: u64) {
+    while true {
+        var c = head()
+        while c != 0 {
+            if get(c, LIVE) != 0 {
+                root_scan(c)
+                // Slots are assigned in order by QEMU, but not required to
+                // be: five passes find every allowed hub depth at startup.
+                var pass: u64 = 0
+                while pass < 5 {
+                    var slot: u64 = 1
+                    while slot <= get(c, NSLOT) {
+                        let d = device(c, slot)
+                        if d != 0 && get(d, ACTIVE) != 0 && get(d, KIND) == 2 && get(d, DEPTH) == pass { hub_scan(d) }
+                        slot += 1
+                    }
+                    pass += 1
+                }
+            }
+            c = get(c, NEXT)
+        }
+        unsafe { initialized = 1 }
+        let _n = sched.sleep(10)
+    }
+}
+
+fn wait_bits(a: u64, mask: u64, value: u64) -> bool {
+    // Bootstrap has IF clear: bounded MMIO polls, no scheduler/tick dependency.
+    var n: u64 = 0
+    while n < 10000000 {
+        if r32(a) & mask == value { return true }
+        n += 1
+    }
+    false
+}
+
+fn controller(pml4: u64, index: u64, number: u64) -> u64 {
+    let bdf = pci.bdf(index)
+    let (kind, physical) = pci.bar(bdf, 0)
+    if (kind != pci.BAR_MEM32 && kind != pci.BAR_MEM64) || physical == 0 { return 0 }
+    let line = pci.line(index)
+    if pci.pin(index) == 0 || line < 3 || line > 15 || line == 4 || line == 8 || line == 13 { return 0 }
+    let base = BASE + (number - 1) * WINDOW
+    var off: u64 = 0
+    while off < WINDOW {
+        let answer = paging.map(pml4, base + off, (physical & !4095) + off, paging.NX | paging.RW | 24) else 9
+        if answer == 9 { return 0 }
+        off += 4096
+    }
+    let cap = base + (physical & 4095)
+    // HCRST does not reset PCI MSI/MSI-X enables left by firmware.
+    var capability = pci.next_cap(bdf, 0)
+    var hops: u64 = 0
+    while capability != 0 && hops < 48 {
+        let id = pci.read8(bdf, capability)
+        if id == 5 { pci.write32(bdf, capability, pci.read32(bdf, capability) & !(1 << 16)) }
+        if id == 0x11 { pci.write32(bdf, capability, pci.read32(bdf, capability) & !(1 << 31)) }
+        capability = pci.next_cap(bdf, capability)
+        hops += 1
+    }
+    pci.set_command(bdf, (pci.command(bdf) | pci.CMD_MEMORY | pci.CMD_MASTER) & !pci.CMD_INTX_OFF)
+    let c = page()
+    if c == 0 { return 0 }
+    put(c, NUMBER, number); put(c, CAP, cap)
+    let op = cap + r8(cap)
+    let runtime = r32(cap + 0x18) & !31
+    let doorbell = r32(cap + 0x14) & !3
+    if runtime + 64 >= WINDOW || doorbell + 1024 >= WINDOW { return 0 }
+    put(c, OP, op); put(c, RT, cap + runtime + 32); put(c, DB, cap + doorbell)
+    put(c, PORTS, r32(cap + 4) >> 24)
+    let maxslots = r32(cap + 4) & 255
+    put(c, NSLOT, if maxslots > SLOTS { SLOTS } else { maxslots })
+    let hcc = r32(cap + 0x10)
+    put(c, CSZ, if hcc & 4 != 0 { 64 } else { 32 })
+    put(c, VECTOR, timer.MASTER_BASE + line)
+    var extended = (hcc >> 16) * 4
+    var guard: u64 = 0
+    while extended != 0 && extended + 16 < WINDOW && guard < 256 {
+        let header = r32(cap + extended)
+        if header & 255 == 1 {
+            w8(cap + extended + 3, 1)
+            if !wait_bits(cap + extended, 0x1010000, 0x1000000) { say_error(c, "firmware ownership timeout", header); return 0 }
+            let legacy = r32(cap + extended + 4)
+            w32(cap + extended + 4, (legacy & 0x1fee) | 0xe0000000)
+        }
+        let next = (header >> 8) & 255
+        if next == 0 { break }
+        extended += next * 4
+        guard += 1
+    }
+    if !wait_bits(op + 4, 0x800, 0) { return 0 }
+    w32(op, r32(op) & !1)
+    if !wait_bits(op + 4, 1, 1) { return 0 }
+    w32(op, 2)
+    if !wait_bits(op, 2, 0) || !wait_bits(op + 4, 0x800, 0) { return 0 }
+    if r32(op + 8) & 1 == 0 { say_error(c, "4KiB pages unsupported", r32(op + 8)); return 0 }
+    let dcbaa = page(); let cmd = page(); let event = page(); let erst = page()
+    if dcbaa == 0 || cmd == 0 || event == 0 || erst == 0 { return 0 }
+    put(c, DCBAA, dcbaa); put(c, CMD, cmd); put(c, EVENT, event)
+    put(c, CC, 1); put(c, EC, 1)
+    let hcs2 = r32(cap + 8)
+    let scratch = ((hcs2 >> 27) & 31) | (((hcs2 >> 21) & 31) << 5)
+    if scratch > 512 { say_error(c, "scratchpad bound exceeded", scratch); return 0 }
+    if scratch != 0 {
+        let array = page()
+        if array == 0 { return 0 }
+        w64(dcbaa, pa(array))
+        var i: u64 = 0
+        while i < scratch {
+            let buffer = page()
+            if buffer == 0 { return 0 }
+            w64(array + i * 8, pa(buffer)); i += 1
+        }
+    }
+    // AC64=0 controllers may only DMA below 4GiB; never truncate a pointer.
+    if hcc & 1 == 0 && (pa(dcbaa) >> 32 != 0 || pa(erst) >> 32 != 0) {
+        say_error(c, "32-bit DMA controller needs low memory", pa(dcbaa)); return 0
+    }
+    w64(op + 0x30, pa(dcbaa)); w64(op + 0x18, pa(cmd) | 1)
+    w32(op + 0x38, get(c, NSLOT))
+    let rt = get(c, RT)
+    w64(erst, pa(event)); w32(erst + 8, 256)
+    w32(rt + 8, 1); w64(rt + 24, pa(event)); w64(rt + 16, pa(erst))
+    w32(rt + 4, 0); w32(rt, 3)
+    timer.level(line); timer.unmask_line(line)
+    put(c, LIVE, 1)
+    w32(op, 5)
+    if !wait_bits(op + 4, 1, 0) { put(c, LIVE, 0); return 0 }
+    var port: u64 = 1
+    while port <= get(c, PORTS) {
+        let address = op + 0x400 + (port - 1) * 16
+        w32(address, 0x200)
+        port += 1
+    }
+    log.put("xhci "); log.dec(number as int); log.put(": ports ")
+    log.dec(get(c, PORTS) as int); log.put(" INTx "); log.dec(line as int)
+    log.put(" context "); log.dec(get(c, CSZ) as int); log.put(" speeds")
+    port = 1
+    while port <= get(c, PORTS) {
+        let st = r32(op + 0x400 + (port - 1) * 16)
+        if st & 1 != 0 { log.put(" "); log.dec(port as int); log.put("="); log.dec(((st >> 10) & 15) as int) }
+        port += 1
+    }
+    log.end()
+    c
+}
+
+/// After PCI scan, scheduler/timer/console start, with IF clear. Returns
+/// the number of immortal kernel threads created (zero when no controller).
+pub fn start(pml4: u64, entry: u64) -> u64 {
+    var index: u64 = 0
+    var number: u64 = 0
+    while index < pci.count() && number < 4 {
+        if pci.read32(pci.bdf(index), 8) >> 8 == 0x0c0330 {
+            let c = controller(pml4, index, number + 1)
+            if c != 0 { put(c, NEXT, head()); unsafe { first = c }; number += 1 }
+        }
+        index += 1
+    }
+    if head() == 0 { unsafe { initialized = 1 }; return 0 }
+    let keys = page()
+    if keys == 0 { return 0 }
+    unsafe { held = keys }
+    let id = sched.create(entry, 0)
+    if id == 0 { return 0 }
+    1
+}
+
+pub fn wait_ready() {
+    while unsafe { initialized == 0 } { let _n = sched.sleep(1) }
+}
