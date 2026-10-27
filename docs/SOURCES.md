@@ -1369,3 +1369,23 @@ lock holder. No third-party implementation was used as source for a fix.
 | ELF symbol table of the lane-built sigwolf | wolf 0.2.35, pinned archive | `readelf -sW`, no disassembly or library source | assert the overflow PC belongs to the current `_Wdeep$…` function |
 | QEMU speaker capture and guest event ring | same native-BIOS image before/after | black-box output | separate host capture duration from guest ticks |
 
+
+## px73: the live USB image
+
+No bootloader, firmware, kernel, driver or disk-tool implementation source
+was read. Limine, firmware, Linux and its modules are binary inputs. The
+new host-image path reuses PAX's own `tools/mkdisk` and `tools/mkgpt`;
+module staging follows PAX's own `tools/linux-nodes`. The kernel's existing
+Limine media report is unchanged. Consulted on 2026-10-27:
+
+| source | version / clauses read | use |
+|---|---|---|
+| [UEFI GPT disk layout](https://uefi.org/specs/UEFI/2.10/05_GUID_Partition_Table_Format.html) | 2.10, §§5.2.3–5.3: protective partition at LBA 1 with size disk-minus-one, both GPT headers and entry arrays | raw-image layout and independent coverage/CRC checks |
+| [UEFI media access](https://uefi.org/specs/UEFI/2.10/13_Protocols_Media_Access.html) | 2.10, §§13.3.1.3, 13.3.2, 13.3.4.1: removable-media directory, GPT discovery and FAT | ESP and removable boot path |
+| [Limine usage documentation](https://github.com/Limine-Bootloader/Limine/blob/v12.9.1/USAGE.md) | v12.9.1, UEFI, BIOS/GPT and hybrid ISO sections | BOOTX64.EFI and the explicit BIOS boot partition; existing ISO kept unchanged |
+| [Limine boot protocol](https://github.com/Limine-Bootloader/limine-protocol/blob/3a0526b700e356f0eac1b71a77697b3fd1c707a3/PROTOCOL.md) | File Structure: media_type, partition_index, mbr_disk_id, GPT UUIDs | existing `boot:` line; generic media is not evidence of a USB transport |
+| [El Torito bootable CD-ROM specification](https://pdos.csail.mit.edu/6.828/2018/readings/boot-cdrom.pdf) | 1.0, §5.3 no-emulation booting | distinguish the unchanged optical ISO path from the raw-disk USB path |
+| [Intel xHCI requirements specification](https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/extensible-host-controler-interface-usb-xhci.pdf) | 1.2, May 2019, §§1.1–1.2 and §3 architectural overview | host-controller versus class-driver boundary; QEMU xHCI topology, no driver implemented |
+| [USB mass-storage bulk-only transport](https://www.usb.org/sites/default/files/usbmassbulk_10.pdf) | 1.0, §1.1 scope, §2 terms | command/data/status transport over bulk endpoints; firmware-owned storage during boot |
+| QEMU, SeaBIOS, OVMF; Linux with xHCI, usb-storage and vfat | installed binary versions recorded with the gate | black-box USB boots and Linux ESP file differential |
+| `lsblk --json`, `findmnt`, `diskutil` plist inventory shapes | Linux/macOS tool interfaces; synthetic inventories in tests | fail-closed removable-disk plan and dry-run writer policy, no real-device writes |

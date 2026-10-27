@@ -140,6 +140,100 @@ then runs `xorriso -as mkisofs` with Limine's documented hybrid flags and
 under SeaBIOS, from a cdrom under OVMF, and (later) written raw to a USB
 stick.
 
+## The live USB stick
+
+`tools/mkdisk --usb` wraps an existing kernel ELF and initramfs without
+changing either. It is a second artifact, not a replacement for the ISO:
+
+```sh
+SOURCE_DATE_EPOCH=1700000000 tools/mkdisk --usb \
+    --kernel KERNEL.elf --initramfs LIVE.cpio \
+    --conf boot/limine-usb.conf --kernel-commit FULL_KERNEL_COMMIT pax-stick.img
+tools/check-usb pax-stick.img
+tools/qemu-run --firmware uefi --usb-stick pax-stick.img
+```
+
+`--kernel-commit` is optional provenance supplied by the caller who built
+the ELF, not inferred from the checkout wrapping it. Omitted, it is
+`unknown`. `pax-stick.img.inputs.json` records that value, the kernel,
+initramfs and image SHA256 digests, the size and the epoch. The configuration
+is copied as supplied; the default remains `boot/limine-initramfs.conf`.
+Use `boot/limine-usb.conf` for the live menu. A configuration naming a disk
+root (`root=`) is refused.
+
+The raw, 512-byte-sector image has a protective MBR, primary and backup
+GPT, and two partitions:
+
+| slot | location | contents |
+|---|---|---|
+| 3 | sectors 2048–4095 | Limine BIOS stage 2, in a reserved BIOS boot partition |
+| 1 | from sector 4096 | one FAT32 ESP: `/EFI/BOOT/BOOTX64.EFI`, `/boot/pax`, `/boot/initramfs.cpio`, `/boot/limine/limine.conf`, `/boot/limine/limine-bios.sys` |
+
+There is no disk root or home partition. Limine's BIOS installer writes
+its boot code into the protective MBR and its second stage into partition
+3. It does **not** overwrite the GPT headers or arrays in the MBR gap.
+UEFI loads the removable-media path `\EFI\BOOT\BOOTX64.EFI`; no saved boot
+entry is required. The pinned EFI executable is not a Secure Boot signing
+or key-enrollment solution.
+
+Without an explicit size, the ESP is at least 64 MiB, or twice the kernel
+and archive sizes plus 16 MiB rounded up to a MiB; the disk adds 3 MiB for
+alignment, BIOS and backup GPT. The small console fixture is therefore
+67 MiB, not a fixed size for every distribution payload. An explicit
+`[SIZE] OUT.img` and `--esp SIZE` retain the GPT builder's sizing controls.
+The FAT tools come from `tools/disktools`' pinned packages. Same inputs,
+configuration, label and epoch produce the same image bytes.
+
+The **entire live system remains in the initramfs**, including any offline
+installer and games payload. Firmware reads USB storage before entering
+PAX; running the live system requires no PAX USB-storage driver. Keyboard
+support on real USB-only hardware is a separate requirement. The image
+builder neither adds nor removes programs from the supplied archive.
+
+For the live image only, place `user/usb-login.sh` at `/etc/pax-live-login`,
+include `/bin/pelt` and `/root`, and set `/etc/pax-run` to
+`/bin/pelt /etc/pax-live-login`. This presents `login:` and accepts only
+`root`, without a password, before starting interactive pelt. It is not an
+authentication boundary. **Do not use this live entry in the installed
+system:** installed accounts and startup remain unchanged.
+
+The existing `boot:` line reports Limine's generic-disk media type,
+partition index and GPT disk/partition UUIDs. Limine does not distinguish
+USB from other generic storage, so PAX does not invent that information.
+The image's banner and `/etc/pax-release` are separate archive contents
+(px82); this builder preserves them byte for byte and leaves their kernel
+printing separate from the medium line.
+
+`tests/usb-stick` runs inside the console CI job in full/all tiers and
+explicit partial dispatches. It requires both SeaBIOS and OVMF, replays all
+five console sessions from both the ISO and USB (50 assertions per medium
+per compiler tier), checks the live login, rejects missing BOOTX64.EFI and
+short protective-MBR coverage, and compares two image builds. Its Linux
+oracle is `tools/linux-part --usb-stick`, a real xHCI guest which lists the
+GPT, mounts the ESP read-only and checks all five files against their host
+inputs. `tools/linux-run` is a host chroot, not that guest. The USB topology
+has no CD-ROM or virtio disk, and OVMF starts with a fresh variable store.
+
+### Writing the stick
+
+**Writing destroys the selected device's contents. Inspect the device's
+model and capacity yourself. Never select a system or data disk.**
+`tools/usb-write --dry-run IMAGE DEVICE` inventories without opening a
+device for writing; use a whole-disk `/dev/sdX` on Linux or `/dev/diskN` on
+macOS, not a partition. It requires removable USB media, refuses mounted
+members and the root disk, and prints the model, size and exact confirmation
+token. Missing inventory information fails closed. macOS targets backing
+APFS containers are refused rather than guessing about synthesized mounts.
+
+Only a manual invocation without `--dry-run`, with appropriate privileges
+and an interactive terminal, can proceed after that complete token is
+retyped. The helper rechecks identity, claims the device exclusively, uses
+`dd` through the retained descriptor, and flushes it. It never unmounts
+anything automatically. The tests use synthetic Linux/macOS inventories
+and dry runs only; no physical device has been written or booted by this
+gate. A larger physical stick retains an image-sized GPT; extending it to
+consume spare capacity is not part of the live-image builder.
+
 ## The disk beside the image (px63)
 
 The ISO is read-only and its initramfs lives in memory, so nothing
