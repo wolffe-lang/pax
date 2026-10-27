@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# mknvme — build px75's probe of an NVMe namespace's node, `nvme`
+# (user/elf/nvme.c: writes of many lengths and offsets read back, the
+# 1 GiB throughput, a checksum of a range), a static x86-64 Linux
+# executable, for tests/mpx6-nvme and the Linux guest it is held to
+# (tools/linux-nodes --nvme).
+#
+#   tools/mknvme OUTDIR
+#
+# tools/mknodes' compiler line (`cc -static -no-pie -O1`, ET_EXEC with no
+# PT_INTERP, checked), its own tool so that a change to the probe reaches
+# only the suite that runs it. Build on a baseline x86-64 glibc (the CI
+# runner's Ubuntu; an Ubuntu container on the pool). Prints `nvme
+# <sha256> <bytes>`. Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mknvme OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${CC:-cc}
+need "$cc" readelf
+"$cc" -static -no-pie -O1 -Wall -Wextra -Wno-unused-result -Wl,--build-id=none -Wl,-z,noexecstack \
+    -o "$out/nvme" "$PAX_ROOT/user/elf/nvme.c" || die "cc: nvme"
+readelf -hW "$out/nvme" | grep -Eq 'Type: +EXEC' || die "nvme is not ET_EXEC"
+! readelf -lW "$out/nvme" | grep -q INTERP || die "nvme has a PT_INTERP (not static)"
+printf 'nvme %s %s\n' "$(sha256_of "$out/nvme")" "$(wc -c < "$out/nvme" | tr -d ' ')"
