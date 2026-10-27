@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""Assemble px82's distribution payload from verified, built inputs.
+Usage: distribution-root BASE.cpio INPUTS IDENTITY_DIR OUT.cpio dev|release
+The old payload supplies only unchanged support files and the pinned native
+compiler/linker bundle. Every current org binary and the base std are replaced.
+"""
+from pathlib import Path
+import hashlib
+import os
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+BASE_SHA = '098b918ecfe7fae1b1c05c1a92b0bbde33cbc88fab0b63b3737941590f8a35c4'
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+def read_cpio(blob):
+    rows = {}; offset = 0
+    while True:
+        h = blob[offset:offset+110]
+        assert h[:6] == b'070701', 'base is not newc'
+        f = [int(h[i:i+8], 16) for i in range(6, 110, 8)]
+        name = blob[offset+110:offset+110+f[11]-1].decode()
+        start = (offset+110+f[11]+3) & ~3
+        data = blob[start:start+f[6]]
+        assert len(data) == f[6]
+        offset = (start+f[6]+3) & ~3
+        if name == 'TRAILER!!!':
+            break
+        assert name not in rows
+        rows[name] = (f[1], f[2], f[3], data)
+    assert not blob[offset:].strip(b'\0')
+    return rows
+
+def write_cpio(rows, output):
+    with output.open('wb') as out:
+        for ino, (name, (mode, uid, gid, data)) in enumerate(sorted(rows.items()) + [('TRAILER!!!', (0, 0, 0, b''))], 1):
+            encoded = name.encode() + b'\0'
+            fields = [ino, mode, uid, gid, 2 if mode & 0o170000 == 0o040000 else 1, 0, len(data), 0, 0, 0, 0, len(encoded), 0]
+            out.write(b'070701' + b''.join(f'{n:08x}'.encode() for n in fields) + encoded)
+            out.write(b'\0' * (-out.tell() % 4))
+            out.write(data)
+            out.write(b'\0' * (-out.tell() % 4))
+
+def main():
+    base, inputs, identity, output = map(Path, sys.argv[1:5])
+    variant = sys.argv[5]
+    assert variant in ('dev', 'release')
+    blob = base.read_bytes()
+    assert sha(blob) == BASE_SHA, 'baseline payload digest mismatch'
+    rows = read_cpio(blob)
+    # Validate the retained compiler/linker individually, not only the container.
+    for line in (ROOT / 'user/wolf.sums').read_text().splitlines():
+        name, digest, size = line.split()
+        data = rows['usr/bin/'+name][3]
+        assert (sha(data), len(data)) == (digest, int(size)), 'compiler input mismatch: '+name
+    for line in (ROOT / 'user/wolf-link.sums').read_text().splitlines():
+        name, digest, size = line.split()
+        path = 'usr/lib/wolf-musl/'+name[8:] if name.startswith('sysroot/') else 'usr/bin/'+name
+        data = rows[path][3]
+        assert (sha(data), len(data)) == (digest, int(size)), 'link input mismatch: '+name
+    def put(name, data, mode=0o644, uid=0, gid=0):
+        for parent in reversed(Path(name).parents):
+            if parent.as_posix() != '.':
+                rows.setdefault(parent.as_posix(), (0o40755, uid, gid, b''))
+        rows[name] = (0o100000 | mode, uid, gid, data)
+    # The compiler keeps its own std, while lupin gets user/std.pin in BOTH images.
+    for name in list(rows):
+        if name.startswith('usr/share/wolf/std/'):
+            if variant == 'dev':
+                rows[name.replace('usr/share/wolf/std/', 'usr/share/wolf/compiler-std/', 1)] = rows[name]
+            del rows[name]
+    if variant == 'dev':
+        rows['usr/share/wolf/compiler-std'] = (0o40755, 0, 0, b'')
+        assert rows['usr/share/wolf/compiler-std/STD-REV'][3].strip() == b'2386522eb059cca5a84108562c2c0a0e72345d34'
+    else:
+        for name in list(rows):
+            if name == 'usr/bin' or name.startswith('usr/bin/') or name == 'usr/lib/wolf-musl' or name.startswith('usr/lib/wolf-musl/'):
+                del rows[name]
+    for source in sorted((inputs/'base-std/std').rglob('*')):
+        assert not source.is_symlink(), 'base std symlink'
+        if source.is_file():
+            put('usr/share/wolf/std/'+source.relative_to(inputs/'base-std/std').as_posix(), source.read_bytes())
+    # Each original binary must still match its builder's sums before stripping.
+    with tempfile.TemporaryDirectory(prefix='px82-strip-') as scratch:
+        for project in ('bore', 'pelt', 'yew', 'scent', 'lope', 'aspen', 'lupin'):
+            for line in (inputs/project/'sums.txt').read_text().splitlines():
+                name, digest, size = line.split()
+                source = inputs/project/name
+                data = source.read_bytes()
+                assert (sha(data), len(data)) == (digest, int(size)), 'built input mismatch: '+name
+                # scent and its wrappers remain byte-for-byte upstream builds.
+                if project != 'scent':
+                    stripped = Path(scratch)/name
+                    subprocess.run(['strip', '-o', str(stripped), str(source)], check=True)
+                    data = stripped.read_bytes()
+                put('bin/'+name, data, 0o755)
+                if project == 'pelt':
+                    put('bin/sh', data, 0o755)
+    put('bin/pax-release', (ROOT/'user/pax-release').read_bytes(), 0o755)
+    put('etc/pax-release', (identity/'pax-release').read_bytes())
+    put('etc/pax-banner', (identity/'pax-banner').read_bytes())
+    shrc = (ROOT/'user/shrc').read_text()
+    if variant == 'dev':
+        shrc += '\nexport PATH=/usr/bin:/bin\nexport WOLF_STD=/usr/share/wolf/compiler-std\n'
+    put('etc/shrc', shrc.encode())
+    put('etc/motd', (f'PAX {variant}: run pax-release for exact pins and image identity.\n'
+        'pelt is pid 1; friendly editing: set -o friendly -o suggest -o histsearch\n'
+        'yew edits files; yew fl starts the Fletch prompt. Files live in memory.\n'
+        'Games: ~/Games/pack/pack --tier rich (cub and trail likewise; q quits).\n'
+        'Run cd /home/pax first; exit halts the machine.\n').encode())
+    put('etc/pax-run', b'/bin/env ENV=/etc/shrc /bin/sh -i -m\n')
+    for line in (ROOT/'user/install/games.txt').read_text().splitlines():
+        if not line or line.startswith('#'):
+            continue
+        name, rev, source_sha, _, _, engine, engine_sha = line.split()
+        binary_sha = dict((b, a) for a,b in (l.split() for l in (inputs/'games/games.sha256').read_text().splitlines()))[name]
+        for dest, source, want, mode in ((name, name, binary_sha, 0o755), ('source.tar.gz', name+'.source.tar.gz', source_sha, 0o644), ('engine.source.tar.gz', name+'.engine.source.tar.gz', engine_sha, 0o644)):
+            data = (inputs/'games'/source).read_bytes()
+            assert sha(data) == want, 'game input mismatch: '+source
+            put('home/pax/Games/'+name+'/'+dest, data, mode, 1000, 1000)
+    inventory = ''.join(f'{sha(data)}  {name}\n' for name,(mode,uid,gid,data) in sorted(rows.items()) if mode & 0o170000 != 0o040000)
+    put('etc/pax-files.sha256', inventory.encode())
+    write_cpio(rows, output)
+    print(f'distribution: {variant} {output.stat().st_size} bytes, {len(rows)} entries')
+
+if __name__ == '__main__':
+    main()
