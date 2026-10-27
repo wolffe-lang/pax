@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# USB live-stick gate, run by the mpx3-console CI job in full/all/partial.
+# tests/usb-stick [--images DIR] [--tier native|release|both] [--firmware VALUE]
+# --images reuses console build fixtures (not its boot results). Both firmware
+# paths are unconditional: a BIOS-only plan must not hide removable-media UEFI.
+# PAX_LINUX_KERNEL / PAX_LINUX_MODULES select the real Linux oracle's binaries.
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+images= tiers=native
+started=$SECONDS
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images) images=$2; shift 2 ;;
+        --tier) tiers=$2; shift 2 ;;
+        --firmware) shift 2 ;; # both required for USB, regardless of the ISO's leg
+        *) die 'usage: usb-stick [--images DIR] [--tier native|release|both]' ;;
+    esac
+done
+case $tiers in native|release|both) ;; *) die 'invalid tier' ;; esac
+export PAX_REQUIRE_UEFI=1 SOURCE_DATE_EPOCH=1700000000
+python3 "$PAX_ROOT/tests/usb-tools"
+if [ -z "$images" ]; then
+    "$PAX_ROOT/tests/mpx3-console" --tier "$tiers" --no-boot
+    images=$PAX_BUILD/mpx3-console
+fi
+images=$(cd "$images" && pwd)
+work=$PAX_BUILD/usb-stick
+mkdir -p "$work"
+work=$(cd "$work" && pwd)
+load_limine_pin
+commit=$(git -C "$PAX_ROOT" rev-parse HEAD)
+[ "$tiers" != both ] || tiers='native release'
+for tier in $tiers; do
+    elf=$images/$tier/kmain_console.elf
+    for p in ask pelt; do
+        img=$images/$tier/console-$p.img
+        "$PAX_ROOT/tools/mkdisk" --usb --kernel "$elf" --initramfs "$images/$p.cpio" \
+            --kernel-commit "$commit" "$img" > "$work/$tier-$p.build.log"
+        expected=(--expect "/boot/pax=$elf" --expect "/boot/initramfs.cpio=$images/$p.cpio"
+                  --expect "/EFI/BOOT/BOOTX64.EFI=$LIMINE_DIR/BOOTX64.EFI"
+                  --expect "/boot/limine/limine-bios.sys=$LIMINE_DIR/limine-bios.sys"
+                  --expect "/boot/limine/limine.conf=$PAX_ROOT/boot/limine-initramfs.conf")
+        "$PAX_ROOT/tools/check-usb" "$img" "${expected[@]}" | tee "$work/$tier-$p.check.log"
+    done
+    "$PAX_ROOT/tools/mkdisk" --usb --kernel "$elf" --initramfs "$images/pelt.cpio" \
+        --kernel-commit "$commit" "$work/repeat.img" > "$work/$tier-repeat.build.log"
+    cmp "$img" "$work/repeat.img" || die 'FAIL U3: stick builds differ'
+    say "PASS U3: two builds, one digest $(sha256_of "$img") ($(wc -c < "$img") bytes)"
+    for fault in efi mbr; do
+        cp "$img" "$work/broken.img"
+        python3 "$PAX_ROOT/tests/usb-stick.d/corrupt.py" "$work/broken.img" "$fault"
+        if "$PAX_ROOT/tools/check-usb" "$work/broken.img" > "$work/$tier-$fault.red.log" 2>&1; then
+            die "FAIL U4: $fault corruption accepted"
+        fi
+        case $fault in
+            efi) grep -F 'required boot file missing: /EFI/BOOT/BOOTX64.EFI' "$work/$tier-$fault.red.log" ;;
+            mbr) grep -F 'protective MBR must cover the disk' "$work/$tier-$fault.red.log" ;;
+        esac
+        say "PASS U4: $fault rejected by name"
+    done
+    rm "$work/broken.img" "$work/repeat.img"
+    # Hold the exact same five sessions to their original Linux transcripts,
+    # first from the ISO, then USB. Separate result directories retain both.
+    PAX_BUILD=$work/$tier-iso "$PAX_ROOT/tests/mpx3-console" --images "$images" --tier "$tier" --firmware both \
+        > "$work/$tier-iso.log" 2>&1
+    PAX_BUILD=$work/$tier-usb "$PAX_ROOT/tests/mpx3-console" --images "$images" --tier "$tier" --firmware both --usb-stick \
+        > "$work/$tier-usb.log" 2>&1
+    for medium in iso usb; do
+        [ "$(grep -c 'PASS T[1-5] ' "$work/$tier-$medium.log")" -eq 50 ] || die "FAIL U5: $medium did not run 50 assertions"
+        ! grep -q SKIP "$work/$tier-$medium.log" || die 'FAIL U5: skipped console leg'
+    done
+    for log in "$work/$tier-usb"/*.serial.log; do
+        grep -aEq '^boot: /boot/initramfs.cpio from a disk: partition 1, GPT disk [0-9a-f-]+, partition [0-9a-f-]+' "$log" \
+            || die "FAIL U6: no Limine disk identity in $log"
+        grep -q qemu-xhci "$log.meta" && grep -q usb-storage "$log.meta" || die 'FAIL U6: not USB'
+        ! grep -Eq 'virtio-blk|cdrom' "$log.meta" || die 'FAIL U6: alternate boot device present'
+    done
+    say "PASS U5/U6: $tier ISO 50/50, USB 50/50; 10 sessions each, 0 SKIP; Limine medium and USB-only topology"
+    # A live-only root login. No installed account or login file is changed.
+    printf '/bin/pelt /etc/pax-live-login\n' > "$work/live.run"
+    "$PAX_ROOT/tools/mkinitramfs" "$work/live.cpio" /root/:700 /tmp/:1777 \
+        "/bin/pelt=$images/pelt/root/bin/pelt:755" "/etc/pax-live-login=$PAX_ROOT/user/usb-login.sh:644" \
+        "/etc/pax-run=$work/live.run:644" > "$work/live.initramfs.log"
+    "$PAX_ROOT/tools/mkdisk" --usb --kernel "$elf" --initramfs "$work/live.cpio" \
+        --conf "$PAX_ROOT/boot/limine-usb.conf" --kernel-commit "$commit" "$work/live-$tier.img" > "$work/live-$tier.build.log"
+    printf 'nobody\nroot\n^~echo USB-LIVE-ROOT\n^~exit\n' > "$work/login.keys"
+    for fw in bios uefi; do
+        "$PAX_ROOT/tools/qemu-halt" --usb-stick --firmware "$fw" --timeout 120 --elf "$elf" \
+            --serial "$work/login-$tier-$fw.serial" --marker halt --type "$work/login.keys" --prompt 'login: ' \
+            "$work/live-$tier.img" > "$work/login-$tier-$fw.verdict" 2>&1
+        tr -d '\r' < "$work/login-$tier-$fw.serial" > "$work/login-$tier-$fw.norm"
+        grep -q '^Only root is available on the live medium\.' "$work/login-$tier-$fw.norm"
+        grep -qx USB-LIVE-ROOT "$work/login-$tier-$fw.norm"
+        say "PASS U7: $tier $fw live login rejects nobody, root reaches pelt, echo and exit complete"
+    done
+    # Linux sees the same image as an actual xHCI mass-storage device, mounts
+    # its ESP and compares all five files to the host inputs, byte for byte.
+    "$PAX_ROOT/tools/fetch-busybox" "$work/bin" > "$work/busybox.log"
+    linuxargs=()
+    [ -z "${PAX_LINUX_KERNEL:-}" ] || linuxargs+=(--kernel "$PAX_LINUX_KERNEL")
+    [ -z "${PAX_LINUX_MODULES:-}" ] || linuxargs+=(--modules "$PAX_LINUX_MODULES")
+    "$PAX_ROOT/tools/linux-part" --usb-stick --busybox "$work/bin/busybox" \
+        "${linuxargs[@]}" "${expected[@]}" "$work/linux-$tier" "$img" > "$work/linux-$tier.log" 2>&1
+    grep -q '^linux-part: USB ESP files identical$' "$work/linux-$tier/guest.txt"
+    grep -q '^PTTYPE=gpt$' "$work/linux-$tier/guest.txt"
+    grep -q '^TYPE=vfat$' "$work/linux-$tier/guest.txt"
+    say "PASS U8: Linux xHCI lists the GPT, mounts the ESP read-only, all five file digests identical"
+done
+say "usb-stick: PASS; 0 SKIP; $((SECONDS - started)) seconds"

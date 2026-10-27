@@ -990,6 +990,29 @@ jobs:
           PAX_REQUIRE_UEFI: "1"
         run: tests/mpx3-console $PAX_LEGS
 
+      - name: USB launcher and physical-writer dry-run policy
+        run: python3 tests/usb-tools
+
+      - name: Linux guest binary and modules for the USB differential
+        if: needs.plan.outputs.tier != 'pr'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends linux-image-generic cpio zstd
+          kernel=$(find /boot -maxdepth 1 -name 'vmlinuz-*-generic' | sort -V | tail -1)
+          test -n "$kernel"
+          mkdir -p build/usb-linux
+          sudo cp "$kernel" build/usb-linux/vmlinuz
+          sudo chmod a+r build/usb-linux/vmlinuz
+          echo "PAX_LINUX_KERNEL=$PWD/build/usb-linux/vmlinuz" >> "$GITHUB_ENV"
+          echo "PAX_LINUX_MODULES=/lib/modules/${kernel##*/vmlinuz-}" >> "$GITHUB_ENV"
+
+      - name: live USB stick, both firmwares, full console suite and Linux ESP differential
+        if: needs.plan.outputs.tier != 'pr'
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+        run: tests/usb-stick --images "$PWD/build/mpx3-console" $PAX_LEGS
+
       - name: the same suite with / on a disk, native BIOS (px67, tools/rootdisk-leg; every tier it runs in)
         env:
           PAX_REQUIRE_UEFI: "1"
@@ -1022,6 +1045,13 @@ jobs:
             build/mpx3-console-*.verdict
             build/mpx3-console-*.typed
             build/mpx3-console-runs.txt
+            build/usb-stick/**/*.log
+            build/usb-stick/**/*.serial
+            build/usb-stick/**/*.meta
+            build/usb-stick/**/*.verdict
+            build/usb-stick/**/*.norm
+            build/usb-stick/**/*.txt
+            build/mpx3-console/*/*.inputs.json
           retention-days: 14
           if-no-files-found: warn
 

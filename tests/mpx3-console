@@ -73,9 +73,10 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 grep() { command grep -a "$@"; }
 
-images= legs=both tiers=both noboot=0 peltdir=
+images= legs=both tiers=both noboot=0 peltdir= usb=() suffix=iso
 while [ $# -gt 0 ]; do
     case $1 in
+        --usb-stick) usb=(--usb-stick); suffix=img; shift ;;
         --images)   images=$2; shift 2 ;;
         --no-boot)  noboot=1; shift ;;
         --pelt)     peltdir=$2; shift 2 ;;
@@ -84,6 +85,9 @@ while [ $# -gt 0 ]; do
         *)          die "usage: tests/mpx3-console [--images DIR | --no-boot] [--pelt DIR] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
     esac
 done
+if [ "$suffix" = img ] && [ -z "$images" ]; then
+    die "--usb-stick requires --images (tests/mpx6-usb builds the stick fixtures)"
+fi
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
 need readelf python3
@@ -211,7 +215,7 @@ for leg in $legs; do
             p=$(image_of "$s") kb=$(kbd_of "$s") pr=$(prompt_of "$s")
             id="$tier $leg $s"
             log=$PAX_BUILD/mpx3-console-$tier-$leg-$s.serial.log
-            elf=$images/$tier/kmain_console.elf iso=$images/$tier/console-$p.iso
+            elf=$images/$tier/kmain_console.elf iso=$images/$tier/console-$p.$suffix
             rm -f "$log" "$log.verdict" "$log.typed"
             if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
                 for t in T1 T2 T3 T4 T5; do bad "$t $id: no image"; done
@@ -221,7 +225,7 @@ for leg in $legs; do
             screen=(); [ "$p" = ask ] && screen=(--no-screen) # px19: serial only, winsize 0 0
             "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 120 \
                 --elf "$elf" --marker 'halt' --type "$PAX_ROOT/user/console/$(keys_of "$s").keys" \
-                --prompt "$pr" --keyboard "$kb" ${screen[@]+"${screen[@]}"} "$iso" >"$log.verdict" 2>&1 || hrc=$?
+                --prompt "$pr" --keyboard "$kb" ${screen[@]+"${screen[@]}"} ${usb[@]+"${usb[@]}"} "$iso" >"$log.verdict" 2>&1 || hrc=$?
             record "$tier" "$leg" "$s" "$hrc"
             norm=$log.norm; serial_norm "$log" > "$norm"
 
