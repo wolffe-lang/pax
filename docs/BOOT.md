@@ -213,6 +213,19 @@ oracle is `tools/linux-part --usb-stick`, a real xHCI guest which lists the
 GPT, mounts the ESP read-only and checks all five files against their host
 inputs. `tools/linux-run` is a host chroot, not that guest. The USB topology
 has no CD-ROM or virtio disk, and OVMF starts with a fresh variable store.
+All USB-suite boots explicitly select TCG, including the Linux oracle. The
+suite has a 20-minute process-tree deadline; individual image builds,
+checks, console replays, login boots and the Linux oracle have shorter
+named deadlines and log elapsed times. A timeout fails the gate, not skips it.
+
+CI stages its Linux oracle with `tools/fetch-usb-linux`: exactly the
+versioned Ubuntu kernel and matching core-modules binary packages selected
+from authenticated apt metadata, verified by SHA256 and size, then
+extracted without installation or maintainer scripts. It fetches no
+`linux-image-generic` dependency closure, firmware or microcode. Downloads
+use the main Ubuntu archive rather than the runner's slow Azure mirror;
+each command is bounded and provisioning has a separate 12-minute CI
+limit. `build/usb-linux/inputs.json` records package versions and digests.
 
 ### Writing the stick
 
