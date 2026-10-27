@@ -297,6 +297,8 @@ const D_DRV: u64 = 51 // px75: the disk's driver (DRV_*)
 const D_UNIT: u64 = 52 // px75: the driver's own number for the disk
 const D_CTRL: u64 = 53 // px75: an NVMe disk's controller, c of nvme<c>n<k>
 const D_NSO: u64 = 54 // px75: k of nvme<c>n<k>
+const D_STEM: u64 = 55 // px75: a disk's name, 16 bytes in two words (make_stem)
+const D_STEMLEN: u64 = 57 // px75: its length
 const DW: u64 = 64
 /// Device kinds.
 pub const KIND_DISK: u64 = 0
@@ -538,6 +540,7 @@ pub fn start(pml4: u64) -> u64 {
             put_dw(d, D_MAJOR, 259)
             put_dw(d, D_MINOR, m)
         }
+        make_stem(d)
         put_st(S_GEN, st(S_GEN) + 1)
         put_dw(d, D_GEN, st(S_GEN))
         put_st(S_DISKS, k + 1)
@@ -627,87 +630,129 @@ fn digits(v: u64) -> u64 {
     n
 }
 
-/// px75: digit `i` (from the left) of `v` in decimal, as a byte.
-fn digit(v: u64, i: u64) -> u64 {
-    var x = v
-    var k = digits(v) - 1
-    while k > i {
-        x = x / 10
-        k -= 1
+// px75: a disk's name (`vda`, `nvme0n1`) is made once, when its record
+// is (`make_stem`), and read back below without a loop. The names are
+// inlined wherever a device is named (the partition table's report,
+// kernel/ext2's mount lines, …), and the release tier's range pass
+// re-seeds a function's every branch once for each loop it might
+// version: decimal loops at every one of those sites doubled a
+// release kernel build (pax#215's CI; notes/px75-nvme.md).
+
+/// Byte `i` of disk record `d`'s name set to `b` (16 bytes at most).
+fn stem_set(d: u64, i: u64, b: u64) {
+    if i < 16 {
+        let w = D_STEM + i / 8
+        put_dw(d, w, dw(d, w) | ((b & 0xff) << ((i % 8) * 8)))
     }
-    48 + x % 10
+}
+
+/// `v` in decimal into disk record `d`'s name from byte `at`: the end.
+fn stem_dec(d: u64, at: u64, v: u64) -> u64 {
+    var p: u64 = 1
+    var k: u64 = 1
+    while k < digits(v) {
+        p = p * 10
+        k += 1
+    }
+    var i = at
+    while p > 0 {
+        stem_set(d, i, 48 + v / p % 10)
+        i += 1
+        p = p / 10
+    }
+    i
+}
+
+/// Disk record `d`'s name, from its driver and numbers: `vd` and the
+/// virtio disk's letter, or `nvme<c>n<k>`.
+fn make_stem(d: u64) {
+    put_dw(d, D_STEM, 0)
+    put_dw(d, D_STEM + 1, 0)
+    var n: u64 = 3
+    if dw(d, D_DRV) == DRV_NVME {
+        stem_set(d, 0, 110) // n
+        stem_set(d, 1, 118) // v
+        stem_set(d, 2, 109) // m
+        stem_set(d, 3, 101) // e
+        n = stem_dec(d, 4, dw(d, D_CTRL))
+        stem_set(d, n, 110) // n
+        n = stem_dec(d, n + 1, dw(d, D_NSO))
+    } else {
+        stem_set(d, 0, 118) // v
+        stem_set(d, 1, 100) // d
+        stem_set(d, 2, 97 + dw(d, D_UNIT)) // a, b, … (the virtio disk's own number)
+    }
+    put_dw(d, D_STEMLEN, if n > 16 { 16 } else { n })
+}
+
+/// The length of device `d`'s disk's name (3, `vd` and a letter, for a
+/// device with no record).
+fn stem_len(d: u64) -> u64 {
+    if d >= count() {
+        return 3
+    }
+    let n = dw(disk_of(d), D_STEMLEN)
+    if n == 0 { 3 } else { n }
+}
+
+/// Byte `i` (below `stem_len(d)`) of device `d`'s disk's name.
+fn stem_byte(d: u64, i: u64) -> u64 {
+    if d >= count() || dw(disk_of(d), D_STEMLEN) == 0 {
+        return if i == 0 { 118 } else if i == 1 { 100 } else { 97 + d / DPD }
+    }
+    (dw(disk_of(d), D_STEM + i / 8) >> ((i % 8) * 8)) & 0xff
+}
+
+/// 1 when device `d`'s partitions take a `p` before their number
+/// (Linux's rule: the disk's name ends in a digit, as an NVMe one does).
+fn psep(d: u64) -> u64 {
+    if d < count() && dw(disk_of(d), D_DRV) == DRV_NVME { 1 } else { 0 }
+}
+
+/// The decimal digits of partition number `p` (1 to DPD - 1 = 128).
+fn pdigits(p: u64) -> u64 {
+    if p < 10 { 1 } else if p < 100 { 2 } else { 3 }
 }
 
 /// The length of device `d`'s name (`vda`: 3, `vda12`: 5; px75:
 /// `nvme0n1`: 7, `nvme0n1p12`: 10).
 pub fn name_len(d: u64) -> u64 {
     let p = partno(d)
-    let disk = disk_of(d)
-    if d < count() && dw(disk, D_DRV) == DRV_NVME {
-        let n = 5 + digits(dw(disk, D_CTRL)) + digits(dw(disk, D_NSO))
-        return if p == 0 { n } else { n + 1 + digits(p) }
-    }
-    if p == 0 { 3 } else { 3 + digits(p) }
+    if p == 0 { stem_len(d) } else { stem_len(d) + psep(d) + pdigits(p) }
 }
 
 /// Byte `i` of device `d`'s name (`vda`, `vda2`; px75: `nvme0n1`,
 /// `nvme0n1p2`: Linux's names, the `p` because the disk's name ends in a
 /// digit), 0 past the end.
 pub fn name_byte(d: u64, i: u64) -> u64 {
-    if i >= name_len(d) {
+    let s = stem_len(d)
+    if i < s {
+        return stem_byte(d, i)
+    }
+    let p = partno(d)
+    if p == 0 {
         return 0
     }
-    let disk = disk_of(d)
-    let p = partno(d)
-    if d < count() && dw(disk, D_DRV) == DRV_NVME {
-        if i == 0 {
-            return 110 // n
-        }
-        if i == 1 {
-            return 118 // v
-        }
-        if i == 2 {
-            return 109 // m
-        }
-        if i == 3 {
-            return 101 // e
-        }
-        let c = dw(disk, D_CTRL)
-        let ns = dw(disk, D_NSO)
-        var j = i - 4
-        if j < digits(c) {
-            return digit(c, j)
-        }
-        j -= digits(c)
-        if j == 0 {
-            return 110 // n
-        }
-        j -= 1
-        if j < digits(ns) {
-            return digit(ns, j)
-        }
-        j -= digits(ns)
+    var j = i - s
+    if psep(d) == 1 {
         if j == 0 {
             return 112 // p
         }
-        return digit(p, j - 1)
+        j -= 1
     }
-    if i == 0 {
-        return 118 // v
+    let w = pdigits(p)
+    if j >= w {
+        return 0
     }
-    if i == 1 {
-        return 100 // d
-    }
-    if i == 2 {
-        return 97 + dw(disk, D_UNIT) // a, b, … (px75: the virtio disk's own number)
-    }
-    digit(p, i - 3)
+    let r = w - 1 - j
+    48 + (p / (if r == 0 { 1 } else if r == 1 { 10 } else { 100 })) % 10
 }
 
 /// Write device `d`'s name to the log.
 pub fn put_name(d: u64) {
+    let n = name_len(d)
     var i: u64 = 0
-    while i < name_len(d) {
+    while i < n {
         log.put_byte(name_byte(d, i) as int)
         i += 1
     }
@@ -716,9 +761,10 @@ pub fn put_name(d: u64) {
 /// px67: device `d`'s name written at `base + at` (at most `cap` bytes
 /// in all): the end (kernel/files' mount table).
 pub fn name_into(d: u64, base: u64, at: u64, cap: u64) -> u64 {
+    let n = name_len(d)
     var k = at
     var i: u64 = 0
-    while i < name_len(d) {
+    while i < n {
         if k < cap {
             // # Safety: the caller's frame through the HHDM, `cap` bytes; k < cap.
             unsafe { ((base + k) as *u8).write_volatile((name_byte(d, i) & 0xff) as u8) }
