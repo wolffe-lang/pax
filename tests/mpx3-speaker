@@ -67,11 +67,9 @@
 #      status 2, hold's line, `playing …`, status 0.
 #   K2 the scale (speaker): the capture's last eight tones are C4 D4
 #      E4 F4 G4 A4 B4 C5, each within 1% of the equal-tempered table
-#      (A4 = 440 Hz) and each sounding 480 ms within 20%, a sanity
-#      bound only (QEMU's `wav` backend renders about 3% short, its
-#      buffers jitter, and a cut at a semitone can land a few periods
-#      off: 449-524 ms measured on CI, kasumi and hasu; the kernel's
-#      timeline below is the timing claim); and in the
+#      (A4 = 440 Hz). Capture durations are printed, not used as a
+#      guest-clock assertion: a shared host can stretch them while
+#      guest ticks stay regular (#202). The timing claim is in the
 #      kernel's own timeline (kernel/speaker's ring, read from the
 #      halted machine through the monitor) the last eight tones start 50
 #      ticks apart within 3, span 350 ticks within 3, and each is held
@@ -167,6 +165,7 @@ done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
 need readelf python3
+python3 -I "$here/mpx3-speaker.d/scale-selftest.py" || exit 1
 
 PROMPT='$ '
 # The equal-tempered scale, C4 to C5, A4 = 440 Hz.
@@ -442,56 +441,7 @@ PY
             if [ "$s" = speaker ] || [ "$s" = speaker-user ]; then
                 # K2: the scale: frequencies from the capture, time from the kernel.
                 why=
-                k2=$(python3 - "$notes" "$timeline" $SCALE_HZ <<'PY'
-import sys
-tones = [l.split() for l in open(sys.argv[1]) if l.startswith("tone ")]
-ev = [l.split() for l in open(sys.argv[2]) if l.startswith("event ")]
-want = [float(x) for x in sys.argv[3:]]
-bad = []
-if len(tones) < len(want):
-    print("FAIL only %d tones in the capture" % len(tones)); sys.exit()
-sc = tones[-len(want):]
-hz = [float(t[9]) for t in sc]
-ln = [float(t[7]) for t in sc]
-for i, (h, w) in enumerate(zip(hz, want)):
-    if abs(h - w) / w > 0.01:
-        bad.append("note %d %.2f Hz, table %.2f (%.2f%%)" % (i + 1, h, w, 100 * (h - w) / w))
-for i, l in enumerate(ln):
-    if abs(l - 480) > 96:
-        bad.append("note %d sounded %.1f ms in the capture" % (i + 1, l))
-# The kernel's timeline: the scale is the last eight tones started.
-ons = [(int(e[3]), int(e[5])) for e in ev if e[4] == "on"]
-# How long each tone was held: from its event to the next event (an off
-# or another tone), in the ring's order, not by tick (play's first
-# KIOCSOUND 0 and its first tone can share a tick).
-nxt = {}
-for a, b in zip(ev, ev[1:]):
-    if a[4] == "on":
-        nxt[int(a[1])] = int(b[3]) - int(a[3])
-on_ids = [int(e[1]) for e in ev if e[4] == "on"]
-if len(ons) < 8:
-    print("FAIL the kernel's timeline has %d tones: %s" % (len(ons), open(sys.argv[2]).read()[:200])); sys.exit()
-on8 = ons[-8:]
-starts = [t for t, _ in on8]
-gaps = [b - a for a, b in zip(starts, starts[1:])]
-for i, g in enumerate(gaps):
-    if abs(g - 50) > 3:
-        bad.append("onset %d is %d ticks after the one before" % (i + 2, g))
-span = starts[-1] - starts[0]
-if abs(span - 350) > 3:
-    bad.append("the onsets span %d ticks" % span)
-held = [nxt.get(i, -1) for i in on_ids[-8:]]
-for i, h in enumerate(held):
-    if abs(h - 48) > 3:
-        bad.append("note %d held %d ticks" % (i + 1, h))
-dev = max(abs(h - w) / w for h, w in zip(hz, want)) * 100
-summary = ("Hz " + " ".join("%.2f" % h for h in hz) + " (worst %.3f%%)" % dev
-           + "; sounded " + " ".join("%.0f" % l for l in ln) + " ms"
-           + "; kernel onsets every " + " ".join(str(g) for g in gaps) + " ticks, span %d, held " % span
-           + " ".join(str(h) for h in held) + " ticks; counts " + " ".join(str(c) for _, c in on8))
-print(("FAIL " + "; ".join(bad) + " | " if bad else "PASS ") + summary)
-PY
-)
+                k2=$(python3 -I "$here/mpx3-speaker.d/scale.py" "$notes" "$timeline" $SCALE_HZ)
                 case $k2 in PASS*) say "PASS K2 $id: ${k2#PASS }" ;; *) bad "K2 $id: ${k2#FAIL }" ;; esac
 
                 # K3: hold's tone, stopped at its end.
