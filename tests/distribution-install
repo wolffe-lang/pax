@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# End-to-end install from the delivered live ISO, then boot the target alone.
+# Only a NEW lane-owned regular image file is written; no host block device.
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+[ $# -eq 1 ] || die 'usage: distribution-install IMAGE_DIRECTORY'
+out=$(realpath "$1")
+head=$(cat "$out/commit")
+disk=$out/installed.img
+[ ! -e "$disk" ] || die 'installed.img already exists; use a fresh image directory'
+truncate -s 1073741824 "$disk"
+cat > "$out/install.keys" <<'KEYS'
+pax-install --install --ext2-preview --target vda --seed px82-image --user pax --games yes --confirm 'ERASE /dev/vda 254:0-seq1 1073741824 px82-image'
+echo PX82-INSTALL=$?
+exit 0
+KEYS
+"$PAX_ROOT/tools/qemu-halt" --firmware bios --serial "$out/install.serial.log" --timeout 1800 \
+    --qemu -m --qemu 4096M --elf "$out/kernel/kmain_console.elf" --drive "$disk" \
+    --type "$out/install.keys" --prompt '$ ' --marker 'halt|PANIC .*' \
+    "$out/pax-${head:0:8}.iso" > "$out/install.halt.log" 2>&1
+serial_norm "$out/install.serial.log" > "$out/install.norm"
+grep -qx 'PX82-INSTALL=0' "$out/install.norm" || { tail -70 "$out/install.norm"; die 'live ISO installation did not succeed'; }
+python3 -I - "$disk" "$out/installed-root.img" <<'PY'
+from pathlib import Path
+import struct,sys
+source,dest=map(Path,sys.argv[1:])
+with source.open('rb') as f:
+    f.seek(512); header=f.read(512)
+    assert header[:8]==b'EFI PART'
+    table=struct.unpack_from('<Q',header,72)[0]
+    width=struct.unpack_from('<I',header,84)[0]
+    assert width>=128
+    f.seek(table*512+width)  # root is GPT partition 2
+    entry=f.read(width)
+    start,end=struct.unpack_from('<QQ',entry,32)
+    assert 0<start<=end and (end+1)*512<=source.stat().st_size
+    f.seek(start*512)
+    with dest.open('wb') as out:
+        remaining=(end-start+1)*512
+        while remaining:
+            chunk=f.read(min(remaining,1024*1024));assert chunk
+            out.write(chunk);remaining-=len(chunk)
+PY
+e2fsck -fn "$out/installed-root.img" > "$out/installed-root.fsck.log" 2>&1
+printf 'pax-release\nls /home/pax/Games\nexit 0\n' > "$out/installed.keys"
+for firmware in bios uefi; do
+    "$PAX_ROOT/tools/qemu-halt" --boot-disk --firmware "$firmware" --serial "$out/installed-$firmware.serial.log" \
+        --timeout 300 --qemu -m --qemu 2048M --elf "$out/kernel/kmain_console.elf" \
+        --type "$out/installed.keys" --prompt '$ ' --marker 'halt|PANIC .*' \
+        "$disk" > "$out/installed-$firmware.halt.log" 2>&1
+    python3 -I - "$out/installed-$firmware.serial.log" "$out/pax-release" <<'PY'
+from pathlib import Path
+import re,sys
+raw=Path(sys.argv[1]).read_bytes(); text=re.sub(rb'\x1b\[[0-9;?]*[A-Za-z]',b'',raw).replace(b'\r',b'')
+for line in Path(sys.argv[2]).read_bytes().splitlines(): assert line in text.splitlines(),line
+assert b'root: PARTUUID=' in text
+for game in [b'cub',b'pack',b'trail']: assert game in text
+assert b'PAX: init /bin/env ended with status 0; nothing left to run' in text
+print('I3 PASS live ISO installed, target-alone boot and release identity:',sys.argv[1])
+PY
+done
