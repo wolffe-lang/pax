@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""The USB Linux oracle downloads two binary packages, never dependencies."""
+import hashlib
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import tempfile
+import subprocess
+import os
+import unittest
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+class Fetch(unittest.TestCase):
+    def setUp(self):
+        loader = importlib.machinery.SourceFileLoader('fetch_usb_linux', str(ROOT / 'tools/fetch-usb-linux'))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        self.api = importlib.util.module_from_spec(spec)
+        loader.exec_module(self.api)
+
+    def test_select_only_versioned_kernel(self):
+        deps = '  Depends: linux-image-6.8.0-147-generic\n  Depends: linux-firmware\n  Depends: linux-modules-extra-6.8.0-147-generic\n'
+        self.assertEqual(self.api.packages(deps), ['linux-image-6.8.0-147-generic', 'linux-modules-6.8.0-147-generic'])
+        for bad in ['', 'Depends: linux-image-generic', 'Depends: linux-image-1-generic\nDepends: linux-image-2-generic']:
+            with self.assertRaises(ValueError):
+                self.api.packages(bad)
+
+    def test_metadata_is_bound_to_package_and_archive(self):
+        text = 'Package: linux-image-6.8.0-147-generic\nVersion: 6.8.0-147.147\nFilename: pool/main/l/linux/kernel.deb\nSize: 4\nSHA256: ' + 'a' * 64 + '\n'
+        record = self.api.metadata('linux-image-6.8.0-147-generic', text)
+        self.assertEqual(record['Size'], 4)
+        for bad in [text.replace('Package: linux-image-6.8.0-147-generic', 'Package: linux-firmware'),
+                    text.replace('pool/main/l/linux/kernel.deb', '../escape.deb'),
+                    text.replace('Size: 4', 'Size: 900000000'), text.replace('a' * 64, 'invalid')]:
+            with self.assertRaises(ValueError):
+                self.api.metadata('linux-image-6.8.0-147-generic', bad)
+
+    def test_download_rejects_bad_bytes(self):
+        with tempfile.TemporaryDirectory() as d:
+            record = {'Package': 'kernel', 'Version': '1', 'Filename': 'pool/kernel.deb',
+                      'Size': 4, 'SHA256': hashlib.sha256(b'good').hexdigest()}
+            def fake(argv, **kwargs):
+                Path(argv[argv.index('-o') + 1]).write_bytes(b'evil')
+                return ''
+            with patch.object(self.api, 'run', side_effect=fake):
+                with self.assertRaisesRegex(ValueError, 'digest'):
+                    self.api.download(record, Path(d))
+
+    def test_timeout_is_not_a_success_or_skip(self):
+        with patch.object(self.api.subprocess, 'run', side_effect=subprocess.TimeoutExpired('fixture', 3)):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.api.run(['fixture'], seconds=3)
+
+    def test_suite_deadline_is_active_and_exit_is_preserved(self):
+        with tempfile.TemporaryDirectory() as d:
+            timeout = Path(d) / 'timeout'
+            timeout.write_text('#!/bin/sh\nprintf "%s\\n" "$*"\nexit 124\n')
+            timeout.chmod(0o755)
+            env = dict(os.environ, PATH=d + ':' + os.environ['PATH'])
+            env.pop('PAX_USB_BOUNDED', None)
+            result = subprocess.run(['bash', str(ROOT / 'tests/usb-stick'), '--images', '/does-not-exist'],
+                                    env=env, text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 124, result.stderr)
+            self.assertIn('--kill-after=10s 1200', result.stdout)
+
+    def test_every_external_command_has_deadline(self):
+        with patch.object(self.api.subprocess, 'run') as command:
+            command.return_value.stdout = ''
+            self.api.run(['example'], seconds=3)
+            self.assertEqual(command.call_args.kwargs['timeout'], 3)
+            self.assertTrue(command.call_args.kwargs['check'])
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Stage only an Ubuntu kernel and matching modules for the USB oracle.
+
+fetch-usb-linux OUTDIR
+Uses the runner's authenticated apt metadata, downloads exactly two .debs
+from archive.ubuntu.com, verifies SHA256/size, and extracts binary files.
+No package is installed and no maintainer script or firmware is fetched.
+Every child has a deadline; CI also bounds this whole step to 12 minutes.
+"""
+import hashlib
+import json
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+def run(argv, seconds=60):
+    print('fetch-usb-linux:', ' '.join(map(str, argv)), flush=True)
+    return subprocess.run(list(map(str, argv)), check=True, text=True,
+                          stdout=subprocess.PIPE, timeout=seconds).stdout
+
+
+def packages(deps):
+    names = re.findall(r'^\s*Depends:\s+(linux-image-([0-9][A-Za-z0-9.+-]*-generic))\s*$', deps, re.M)
+    if len(names) != 1:
+        raise ValueError('expected exactly one versioned generic kernel dependency')
+    image, version = names[0]
+    return [image, 'linux-modules-' + version]
+
+
+def metadata(package, text):
+    first = text.strip().split('\n\n', 1)[0]
+    record = dict(line.split(': ', 1) for line in first.splitlines() if ': ' in line and not line.startswith(' '))
+    if record.get('Package') != package:
+        raise ValueError('package metadata mismatch')
+    if not re.fullmatch(r'pool/[A-Za-z0-9_+./%-]+\.deb', record.get('Filename', '')) or '..' in record['Filename']:
+        raise ValueError('not an Ubuntu pool binary package')
+    if not re.fullmatch(r'[0-9a-f]{64}', record.get('SHA256', '')):
+        raise ValueError('missing SHA256')
+    record['Size'] = int(record.get('Size', '0'))
+    if not 0 < record['Size'] <= 256 * 1024 * 1024 or not record.get('Version'):
+        raise ValueError('invalid binary package size or version')
+    return {k: record[k] for k in ['Package', 'Version', 'Filename', 'Size', 'SHA256']}
+
+
+def sha(path):
+    with path.open('rb') as f:
+        return hashlib.file_digest(f, 'sha256').hexdigest()
+
+
+def download(record, cache):
+    cache.mkdir(parents=True, exist_ok=True)
+    dest = cache / (record['SHA256'] + '.deb')
+    if not dest.exists() or dest.stat().st_size != record['Size'] or sha(dest) != record['SHA256']:
+        part = dest.with_suffix('.part')
+        run(['curl', '--fail', '--location', '--silent', '--show-error', '--connect-timeout', '15',
+             '--max-time', '240', '--retry', '1', '--retry-max-time', '300',
+             '-o', part, 'https://archive.ubuntu.com/ubuntu/' + record['Filename']], seconds=320)
+        if part.stat().st_size != record['Size'] or sha(part) != record['SHA256']:
+            raise ValueError('binary package size/digest mismatch: ' + record['Package'])
+        part.replace(dest)
+    return dest
+
+
+def main():
+    if len(sys.argv) != 2:
+        raise ValueError('usage: fetch-usb-linux OUTDIR')
+    out = Path(sys.argv[1]).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    names = packages(run(['apt-cache', 'depends', 'linux-image-generic']))
+    records = [metadata(p, run(['apt-cache', 'show', '--no-all-versions', p])) for p in names]
+    version = names[0].removeprefix('linux-image-')
+    # Each downloaded package has its own cache directory; extraction never
+    # runs its contents and all host tools run outside the extracted tree.
+    with tempfile.TemporaryDirectory(prefix='stage-', dir=out) as stage:
+        stage = Path(stage)
+        for record in records:
+            package = download(record, out / 'downloads' / record['Package'])
+            run(['dpkg-deb', '--extract', package, stage], seconds=120)
+        run(['depmod', '-b', stage, version], seconds=60)
+        kernel = stage / 'boot' / ('vmlinuz-' + version)
+        modules = stage / 'lib/modules' / version
+        if not kernel.is_file() or not (modules / 'modules.dep').is_file():
+            raise ValueError('binary packages lack matching kernel/modules')
+        root = out / 'root'
+        if root.exists():
+            shutil.rmtree(root)
+        shutil.copytree(stage, root, symlinks=True)
+    manifest = {'kernel': str(root / 'boot' / kernel.name),
+                'modules': str(root / 'lib/modules' / version), 'packages': records}
+    (out / 'inputs.json').write_text(json.dumps(manifest, indent=2) + '\n')
+    print('PASS fetch-usb-linux: two verified binary packages, no install, no firmware')
+    print(json.dumps(manifest, sort_keys=True))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
+        print('FAIL fetch-usb-linux:', error, file=sys.stderr)
+        raise SystemExit(1)

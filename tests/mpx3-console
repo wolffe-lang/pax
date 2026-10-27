@@ -8,6 +8,7 @@
 #
 #   tests/mpx3-console [--images DIR | --no-boot] [--pelt DIR]
 #                      [--firmware bios|uefi|both] [--tier native|release|both]
+#                      [--accel auto|tcg|kvm] [--usb-stick]
 #
 # The programs: user/elf/ask.S (tools/mkuser: prompts, makes one read,
 # says what it read; `ask tty` first asks the terminal, reads a line
@@ -73,9 +74,10 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 grep() { command grep -a "$@"; }
 
-images= legs=both tiers=both noboot=0 peltdir= usb=() suffix=iso
+images= legs=both tiers=both noboot=0 peltdir= usb=() suffix=iso accel=auto
 while [ $# -gt 0 ]; do
     case $1 in
+        --accel) accel=$2; shift 2 ;;
         --usb-stick) usb=(--usb-stick); suffix=img; shift ;;
         --images)   images=$2; shift 2 ;;
         --no-boot)  noboot=1; shift ;;
@@ -224,7 +226,7 @@ for leg in $legs; do
             fi
             hrc=0
             screen=(); [ "$p" = ask ] && screen=(--no-screen) # px19: serial only, winsize 0 0
-            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 120 \
+            "$PAX_ROOT/tools/qemu-halt" --accel "$accel" --firmware "$leg" --serial "$log" --timeout 120 \
                 --elf "$elf" --marker 'halt' --type "$PAX_ROOT/user/console/$(keys_of "$s").keys" \
                 --prompt "$pr" --keyboard "$kb" ${screen[@]+"${screen[@]}"} ${usb[@]+"${usb[@]}"} "$iso" >"$log.verdict" 2>&1 || hrc=$?
             record "$tier" "$leg" "$s" "$hrc"
