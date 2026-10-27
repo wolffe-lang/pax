@@ -2562,6 +2562,14 @@ jobs:
           tools/disktools --version
           tools/rootdisk-leg mpx5-users --tier native --firmware bios
 
+      - name: the same suite with / on an NVMe disk, native BIOS (px75, tools/rootdisk-leg with PAX_ROOTDISK_BUS=nvme; the full and all tiers)
+        if: needs.plan.outputs.tier != 'pr'
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_ROOTDISK_BUS: nvme
+        run: tools/rootdisk-leg mpx5-users --tier native --firmware bios
+
       - name: keep the programs' sums, the sessions, the logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -2579,6 +2587,7 @@ jobs:
             build/mpx5-users-*.halt
             build/mpx5-users-*.verdict
             build/mpx5-users-runs.txt
+            build/disk-nvme/mpx5-users.out
           retention-days: 14
           if-no-files-found: warn
 
@@ -3929,6 +3938,81 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px75: NVMe, the desktops' disks. kernel/nvme behind kernel/block with
+  # QEMU's `nvme` device beside a virtio disk: names and numbers (nvme0n1
+  # 259:0 …), /proc and /sys, the ioctls, raw reads, 22 writes of 512
+  # bytes to 1 MiB (PRP1, PRP2, PRP lists) read back and the image the
+  # guest's byte for byte, a namespace of 4096-byte blocks, a media error
+  # by name (QEMU's blkdebug), the smallest queue, two controllers, 1 GiB
+  # with its throughput, /etc/fstab by PARTUUID= and `/` on an NVMe
+  # partition booted from the controller; the boot lines held to
+  # tests/mpx6-nvme.d/boot.golden; every row held to the Linux guest's
+  # answers recorded on hasu (tests/mpx6-nvme.d/linux/: the runner's kernel
+  # is root's to read). The pr tier boots names, four, error and depth;
+  # the full and all tiers every session.
+  mpx6-nvme:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-nvme')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+      PAX_NVME_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          qemu-system-x86_64 --version
+          gcc --version | head -n 1
+          docker --version
+          df -h . | tail -n 1
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx6-nvme-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: e2fsprogs from the image pinned by digest
+        run: |
+          docker pull docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+          PAX_ENGINE=docker tools/e2fs --version
+
+      - name: NVMe against the guest's answers; the plan's legs
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+        run: tests/mpx6-nvme $PAX_LEGS
+
+      - name: keep the sessions, the transcripts and the halt probes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-nvme-linux
+          path: |
+            build/mpx6-nvme/*.txt
+            build/mpx6-nvme/*/kmain_console.elf
+            build/mpx6-nvme/*/*.log
+            build/mpx6-nvme-*.session
+            build/mpx6-nvme-*.serial.log
+            build/mpx6-nvme-*.verdict
+            build/mpx6-nvme-*.boot
+            build/mpx6-nvme-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   # px66: the partition table. kernel/block's GPT and MBR reading and its
   # windows, through kmain_part on eleven fixture disks (tools/mkgpt, the
   # same bytes everywhere; the oracles sfdisk and sgdisk from
@@ -4505,6 +4589,7 @@ jobs:
       - mpx6-root
       - mpx6-journal
       - mpx6-nodes
+      - mpx6-nvme
       - mpx6-disktools
       - mpx6-install
       - mpx6-fsck
