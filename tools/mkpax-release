@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Write /etc/pax-release and its banner from this image's inputs.
+
+Usage: tools/mkpax-release KERNEL.elf OUT/pax-release
+Rows are name revision digest. User .pin digests hash the complete pin
+record, including any archive/binary/toolchain digests it names (not a
+claim to hash a built program). Games and their engines use the catalog's
+source-archive digests. The kernel row hashes the actual ELF. The epoch
+row has no digest. The output has no clock-dependent values.
+Run from the same clean commit that built KERNEL.elf; image assembly must
+pass the same SOURCE_DATE_EPOCH to this tool and tools/mkimage.
+"""
+from pathlib import Path
+import hashlib
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+
+def sha(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+def git(*args):
+    return subprocess.check_output(['git', '-C', str(ROOT), *args], text=True).strip()
+
+def main():
+    if len(sys.argv) != 3:
+        raise ValueError('usage: mkpax-release KERNEL.elf OUT/pax-release')
+    kernel, output = map(Path, sys.argv[1:])
+    commit = git('rev-parse', 'HEAD')
+    epoch = os.environ.get('SOURCE_DATE_EPOCH', git('log', '-1', '--format=%ct'))
+    if not re.fullmatch(r'[0-9]+', epoch):
+        raise ValueError('SOURCE_DATE_EPOCH must be a nonnegative integer')
+    rows = {'kernel': (commit, sha(kernel)), 'source-date-epoch': (epoch, '-')}
+    keys = {'boreutils': 'BORE_REV', 'lupin': 'LUPIN_SRC_REV',
+            'wolf': 'WOLF_SRC_REV', 'busybox': 'BUSYBOX_VERSION'}
+    for pin in sorted((ROOT / 'user').glob('*.pin')):
+        values = {}
+        for line in pin.read_text().splitlines():
+            if not line.strip() or line.lstrip().startswith('#'):
+                continue
+            key, value = line.split('=', 1)
+            parts = shlex.split(value, comments=True)
+            values[key] = ' '.join(parts)
+        key = keys.get(pin.stem, pin.stem.upper() + '_REV')
+        rev = 'packages' if pin.stem == 'disktools' else values[key]
+        if not rev or any(c.isspace() for c in rev):
+            raise ValueError(f'{pin}: revision is not one word')
+        rows[pin.stem] = (rev, sha(pin))
+    for line in (ROOT / 'user/install/games.txt').read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        name, rev, digest, payload, mode, engine, engine_digest = line.split()
+        if name != payload or mode != '0755':
+            raise ValueError('games catalog payload or mode mismatch')
+        if not re.fullmatch(r'[0-9a-f]{80}', rev + engine):
+            raise ValueError('games catalog commits must be 40 hex digits')
+        if not re.fullmatch(r'[0-9a-f]{128}', digest + engine_digest):
+            raise ValueError('games catalog digests must be 64 hex digits')
+        for label, identity in ((name, (rev, digest)), ('lair-' + name, (engine, engine_digest))):
+            if label in rows:
+                raise ValueError('duplicate release identity: ' + label)
+            rows[label] = identity
+    data = ''.join(f'{name} {rev} {digest}\n' for name, (rev, digest) in sorted(rows.items()))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(data)
+    output.with_name('pax-banner').write_text(f'PAX: kernel {commit}; release {sha(output)[:8]}\n')
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+        sys.exit('mkpax-release: ' + str(error))
