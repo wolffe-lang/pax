@@ -1372,8 +1372,8 @@ lock holder. No third-party implementation was used as source for a fix.
 
 ## px73: the live USB image
 
-No bootloader, firmware, kernel, driver or disk-tool implementation source
-was read. Limine, firmware, Linux and its modules are binary inputs. The
+No third-party bootloader, firmware, kernel, driver or disk-tool implementation
+source was read. PAX's own sources were read. Limine, firmware, Linux and its modules are binary inputs. The
 new host-image path reuses PAX's own `tools/mkdisk` and `tools/mkgpt`;
 module staging follows PAX's own `tools/linux-nodes`. The kernel's existing
 Limine media report is unchanged. Consulted on 2026-10-27:
