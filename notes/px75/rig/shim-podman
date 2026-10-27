@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# px75 rig shim: inside the rig there is no container engine, and the rig IS
+# the pinned image's release (Ubuntu 24.04, e2fsprogs 1.47.0-2.4~exp1ubuntu4.1),
+# so tools/e2fs's and tools/disktools' `podman run --rm --network none [opts]
+# [-e K=V] [-v S:D[:ro]] [-w D] IMAGE PROG ARGS` runs PROG here: each -e exported,
+# each -v whose two sides differ a symbolic link D -> S (the container's own
+# root may make one), -w its directory. Anything else is refused.
+set -eu
+[ "${1:-}" = run ] || { echo "rig podman shim: only 'run' ($*)" >&2; exit 2; }
+shift
+dir=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --rm) shift ;;
+    --network|--security-opt|--user) shift 2 ;;
+    -e) export "$2"; shift 2 ;;
+    -v) src=${2%%:*}; rest=${2#*:}; dst=${rest%%:*}
+        if [ "$src" != "$dst" ] && [ ! -e "$dst" ]; then mkdir -p "$(dirname "$dst")"; ln -sfn "$src" "$dst"; fi
+        shift 2 ;;
+    -w) dir=$2; shift 2 ;;
+    -*) echo "rig podman shim: unknown option $1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+shift # the image
+[ -n "$dir" ] && cd "$dir"
+exec "$@"
