@@ -1351,3 +1351,11 @@ maintainer's own repositories (RULES §1), read and run, never changed.
 | Ubuntu 24.04's gcc and glibc (`libc.a`), the lane's `px80-ubuntu` container on kasumi and CI's `ubuntu-24.04` runner | as installed | GPL-3.0; LGPL-2.1 | run (`cc -static` as the link) | the games' static link, as px71's pack |
 | QEMU's monitor `sendkey` names (`shift-down`, `shift-right`, `spc`, `ret`, `ctrl-d`) and `screendump` | 8.2.2 (CI), 11.1.1 (kasumi) | — | read (the monitor's `help`) and run | `user/console/games.keys`, `games-withheld.keys` through `tools/ps2-session` |
 
+
+## px82: yew launch pin
+
+The org-owned yew tree moves from `77c108391242dac8ff3be0087e52bc153a2d75a2` to `0ccb2c67661a2dd789b5ce86180d592370a79c31` (1066 commits).
+Launch `git ls-remote` read twice with identical results; the codeload
+archive SHA256 `d2ef6674865306bf5bc910b0541814210069c981a70bdbefdbf7a11e6f54ef15` read twice on hasu.
+Built unmodified with its own wolf-toolchain.toml; no third-party source
+consulted. The image snapshot is separate from px04 historical traces.
