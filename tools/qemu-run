@@ -3,7 +3,8 @@
 #
 #   tools/qemu-run [--firmware bios|uefi] [--serial FILE] [--serial-input FIFO]
 #                  [--timeout SECS] [--accel auto|kvm|tcg] [--gdb PORT]
-#                  [--no-screen] [--boot-disk] [--drive FILE[,ro][;DEVOPTS]]... IMAGE [-- QEMU-ARGS...]
+#                  [--no-screen] [--boot-disk | --boot-nvme] [--drive FILE[,ro][;DEVOPTS]]...
+#                  [--nvme FILE[,ro][;DEVOPTS]]... IMAGE [-- QEMU-ARGS...]
 #
 # The machine: q35, 256 MiB, no NIC, `-nographic`, COM1 to FILE (default
 # build/serial.log), `-no-reboot` (a triple fault ends the run instead of
@@ -33,6 +34,20 @@
 # way: the boot disk is vda, the first --drive vdb). With no --boot-disk
 # the first --drive is vda. The images are written in place.
 #
+# --nvme FILE[,ro][;DEVOPTS] (px75), repeatable: a raw disk image on an
+# NVMe controller of its own, QEMU's `-drive file=FILE,if=none,id=dK,
+# format=raw[,readonly=on] -device nvme,serial=paxnvmeN,drive=dK[,DEVOPTS]`
+# (N counts the --nvme options from 0, so the controller's serial number
+# says which it is; DEVOPTS the device's own properties, e.g.
+# `logical_block_size=4096,physical_block_size=4096`), in the order given
+# among the --drive options: QEMU gives PCI slots in command-line order,
+# and PAX, as the Linux guest, numbers the controllers nvme0, nvme1, …
+# that way. The images are written in place.
+#
+# --boot-nvme (px75): --boot-disk's IMAGE on an NVMe controller instead
+# (`-device nvme,serial=paxboot,drive=d0,bootindex=0`): the firmware boots
+# it (SeaBIOS and OVMF both drive NVMe), and the kernel's disk is nvme0n1.
+#
 # --serial-input FIFO (px13) also gives COM1 an input: QEMU's file
 # character device with `input-path`, so what is written to FIFO is what
 # the guest's UART receives (tools/qemu-halt --type opens FIFO read-write
@@ -58,7 +73,7 @@
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
-firmware=bios serial=$PAX_BUILD/serial.log serial_in= timeout=30 accel=auto gdb_port= image= noscreen=0 bootdisk=0 drives=()
+firmware=bios serial=$PAX_BUILD/serial.log serial_in= timeout=30 accel=auto gdb_port= image= noscreen=0 bootdisk=0 bootnvme=0 drives=()
 while [ $# -gt 0 ]; do
     case $1 in
         --firmware) firmware=$2; shift 2 ;;
@@ -69,7 +84,9 @@ while [ $# -gt 0 ]; do
         --gdb)      gdb_port=$2; shift 2 ;;
         --no-screen) noscreen=1; shift ;;
         --boot-disk) bootdisk=1; shift ;;
-        --drive)    drives+=("$2"); shift 2 ;;
+        --boot-nvme) bootdisk=1; bootnvme=1; shift ;;
+        --drive)    drives+=("v:$2"); shift 2 ;;
+        --nvme)     drives+=("n:$2"); shift 2 ;;
         --)         shift; break ;;
         -h|--help)  sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
         -*)         die "unknown option: $1" ;;
@@ -97,20 +114,28 @@ cmd=("$qemu"
      -nographic -monitor none -parallel none -nic none
      -no-reboot
      -device isa-debug-exit,iobase=0xf4,iosize=0x04)
-if [ "$bootdisk" = 1 ]; then
+if [ "$bootnvme" = 1 ]; then
+    cmd+=(-drive "file=$image,if=none,id=d0,format=raw" -device nvme,serial=paxboot,drive=d0,bootindex=0)
+elif [ "$bootdisk" = 1 ]; then
     cmd+=(-drive "file=$image,if=none,id=d0,format=raw" -device virtio-blk-pci,drive=d0,bootindex=0)
 else
     cmd+=(-drive "file=$image,format=raw,media=cdrom,readonly=on" -boot d)
 fi
 # px79: the further disks, after the boot disk, in the order given.
-dk=$bootdisk
-for d in ${drives[@]+"${drives[@]}"}; do
+dk=$bootdisk nv=0
+for e in ${drives[@]+"${drives[@]}"}; do
+    kind=${e%%:*}; d=${e#?:}
     dopts=
     case $d in *';'*) dopts=,${d#*;}; d=${d%%;*} ;; esac
     f=${d%,ro}; ro=
     [ "$f" != "$d" ] && ro=,readonly=on
     [ -f "$f" ] || die "no disk image: $f"
-    cmd+=(-drive "file=$f,if=none,id=d$dk,format=raw$ro" -device "virtio-blk-pci,drive=d$dk$dopts")
+    if [ "$kind" = n ]; then
+        cmd+=(-drive "file=$f,if=none,id=d$dk,format=raw$ro" -device "nvme,serial=paxnvme$nv,drive=d$dk$dopts")
+        nv=$((nv + 1))
+    else
+        cmd+=(-drive "file=$f,if=none,id=d$dk,format=raw$ro" -device "virtio-blk-pci,drive=d$dk$dopts")
+    fi
     dk=$((dk + 1))
 done
 [ "$noscreen" = 0 ] || cmd+=(-vga none)
