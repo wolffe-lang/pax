@@ -54,6 +54,8 @@ PY
 "$cc" "${common[@]}" -static -no-pie -O1 -ffreestanding -fno-builtin -fno-stack-protector \
     -fno-asynchronous-unwind-tables -o "$out/procs" "$PAX_ROOT/user/elf/procs.c" || die "cc: procs"
 "$cc" "${common[@]}" -static -no-pie -o "$out/hold" "$PAX_ROOT/user/elf/hold.S" || die "cc: hold"
-for f in hello hello-pie hello-dyn hello32 hello-arm ask procs hold; do
+"$cc" -static -no-pie -O1 -Wall -Wextra -Werror -Wl,--build-id=none -Wl,-z,noexecstack \
+    -o "$out/stack-probe" "$PAX_ROOT/user/elf/stack.c" || die "cc: stack-probe"
+for f in hello hello-pie hello-dyn hello32 hello-arm ask procs hold stack-probe; do
     printf '%s %s %s\n' "$f" "$(sha256_of "$out/$f")" "$(wc -c < "$out/$f" | tr -d ' ')"
 done
