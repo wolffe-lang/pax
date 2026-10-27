@@ -1351,3 +1351,21 @@ maintainer's own repositories (RULES §1), read and run, never changed.
 | Ubuntu 24.04's gcc and glibc (`libc.a`), the lane's `px80-ubuntu` container on kasumi and CI's `ubuntu-24.04` runner | as installed | GPL-3.0; LGPL-2.1 | run (`cc -static` as the link) | the games' static link, as px71's pack |
 | QEMU's monitor `sendkey` names (`shift-down`, `shift-right`, `spc`, `ret`, `ctrl-d`) and `screendump` | 8.2.2 (CI), 11.1.1 (kasumi) | — | read (the monitor's `help`) and run | `user/console/games.keys`, `games-withheld.keys` through `tools/ps2-session` |
 
+## px83: deterministic observations and measured CI budgets
+
+No shell, libc or kernel source was read. Pelt and the existing static
+probe binaries were run as black boxes in dedicated Linux containers or
+QEMU; only PAX's own test/harness source was changed. F0 process-state
+snapshots came from the test container's `/proc`, never the host process
+table. Host process metadata was read only to identify the shared CPU-block
+lock holder. No third-party implementation was used as source for a fix.
+
+| source | version | how | used for |
+|---|---|---|---|
+| [POSIX exec, DESCRIPTION](https://pubs.opengroup.org/onlinepubs/9799919799/functions/exec.html) | POSIX.1-2024 | prose read | ignored dispositions at exec, distinguished from later runtime initialization in `user/sigwolf/sigwolf.lu` |
+| [POSIX sigaction, DESCRIPTION](https://pubs.opengroup.org/onlinepubs/9799919799/functions/sigaction.html) | POSIX.1-2024 | prose read | subsequent handler installation may replace an inherited ignore |
+| PAX tests, workflow and CI logs | base `187aafdf`; run IDs in `tests/ci-budgets.d/` and `notes/px83-evidence/` | own source and recorded output read | ordered J4 witness, K2 clock distinction, bounds and retry policy |
+| Pelt binary at `user/pelt.pin` | unchanged pin | built by the existing digest-checked builder; black-box replay only | Linux F0 futex/zombie symptom, pelt#98 |
+| ELF symbol table of the lane-built sigwolf | wolf 0.2.35, pinned archive | `readelf -sW`, no disassembly or library source | assert the overflow PC belongs to the current `_Wdeep$…` function |
+| QEMU speaker capture and guest event ring | same native-BIOS image before/after | black-box output | separate host capture duration from guest ticks |
+
