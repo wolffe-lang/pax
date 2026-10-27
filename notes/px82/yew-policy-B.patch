@@ -1,0 +1,129 @@
+diff --git a/user/yew.pin b/user/yew.pin
+--- a/user/yew.pin
++++ b/user/yew.pin
+@@ -18,8 +18,8 @@
+ # localhost/px13-ubuntu (image ad8964505189: Ubuntu 24.04.5, libc6-dev
+ # 2.39-0ubuntu8.9), its digest is in notes/px58-yew-on-pax.md §B.
+ YEW_REPO=https://github.com/wolffe-lang/yew
+-YEW_REV=0ccb2c67661a2dd789b5ce86180d592370a79c31
++YEW_REV=7249ff86a6bbad1d4f3a739f636bd3d43aa2403f
+ 
+ # px82: launch trunk, 1066 commits after the preceding pin.
+ # Codeload source archive sha256, read twice on hasu.
+-YEW_SOURCE_SHA256=d2ef6674865306bf5bc910b0541814210069c981a70bdbefdbf7a11e6f54ef15
++YEW_SOURCE_SHA256=9915eeaf3abc676d37d4b66889ab4a13c18d86bb857f87f23b90158c7ff9ae29
+diff --git a/tools/census/inside/pins.sh b/tools/census/inside/pins.sh
+--- a/tools/census/inside/pins.sh
++++ b/tools/census/inside/pins.sh
+@@ -29,7 +29,7 @@
+ PELT_REV=4683b3f5faf46cd393ec2632f345f8cd483a4f1f
+ 
+ # px82 current-image snapshot; px04 trace inputs above remain historical.
+-IMAGE_YEW_REV=0ccb2c67661a2dd789b5ce86180d592370a79c31
++IMAGE_YEW_REV=7249ff86a6bbad1d4f3a739f636bd3d43aa2403f
+ 
+ # px82 current-image snapshot; px04 trace inputs above remain historical.
+ IMAGE_BORE_REV=0f7a57b68829765f60c39ced01edb7ea75265eb8
+diff --git a/kernel/procfs/procfs.lu b/kernel/procfs/procfs.lu
+--- a/kernel/procfs/procfs.lu
++++ b/kernel/procfs/procfs.lu
+@@ -252,7 +252,7 @@
+ /// One policy for the eagerly mapped initial ELF stack and RLIMIT_STACK.
+ /// px82: 256 pages (1 MiB); yew's value/temporary call frames exceed 128 KiB.
+ /// Relative to 32 pages this costs 224 additional frames per address-space.
+-pub const USER_STACK_PAGES: u64 = 256
++pub const USER_STACK_PAGES: u64 = 32
+ const STACK_LIMIT: u64 = USER_STACK_PAGES * 4096
+ 
+ pub fn user_stack_pages() -> u64 { USER_STACK_PAGES }
+diff --git a/user/elf/stack.c b/user/elf/stack.c
+--- a/user/elf/stack.c
++++ b/user/elf/stack.c
+@@ -4,19 +4,19 @@
+ #include <sys/resource.h>
+ 
+ __attribute__((noinline)) static int touch_stack(void) {
+-    volatile unsigned char bytes[256 * 1024];
++    volatile unsigned char bytes[64 * 1024];
+     unsigned int sum = 0;
+     for (unsigned int i = 0; i < sizeof bytes; i += 4096) bytes[i] = (unsigned char)(i / 4096);
+-    bytes[sizeof bytes - 1] = 63;
++    bytes[sizeof bytes - 1] = 15;
+     for (unsigned int i = 0; i < sizeof bytes; i += 4096) sum += bytes[i];
+-    return sum == 2016 && bytes[sizeof bytes - 1] == 63;
++    return sum == 120 && bytes[sizeof bytes - 1] == 15;
+ }
+ 
+ int main(void) {
+     struct rlimit limit;
+     if (getrlimit(RLIMIT_STACK, &limit) != 0) return 2;
+     if (!touch_stack()) return 3;
+-    printf("stack-probe: touched 262144 bytes; limit %llu %llu\n",
++    printf("stack-probe: touched 65536 bytes; limit %llu %llu\n",
+            (unsigned long long)limit.rlim_cur, (unsigned long long)limit.rlim_max);
+-    return limit.rlim_cur == 1048576 && limit.rlim_max == 1048576 ? 0 : 4;
++    return limit.rlim_cur == 131072 && limit.rlim_max == 131072 ? 0 : 4;
+ }
+diff --git a/tests/mpx3-loader b/tests/mpx3-loader
+--- a/tests/mpx3-loader
++++ b/tests/mpx3-loader
+@@ -392,9 +392,9 @@
+         [ -z "$why" ] && say "PASS L7 $id: $tk ticks in ring 3; $(tail -n 1 "$log.verdict")" || bad "L7 $id:$why"
+ 
+         # L9: actual stack pages, beyond the former 128 KiB, and matching rlimit.
+-        if grep -qx 'stack-probe: touched 262144 bytes; limit 1048576 1048576' "$norm" && \
++        if grep -qx 'stack-probe: touched 65536 bytes; limit 131072 131072' "$norm" && \
+             grep -Eq '^user: stack-probe pid [0-9]+ exit_group 0 after ' "$norm"; then
+-            say "PASS L9 $id: 256 KiB automatic object touched; 1 MiB soft/hard stack limit"
++            say "PASS L9 $id: 64 KiB automatic object touched; 128 KiB soft/hard stack limit"
+         else
+             bad "L9 $id: stack-probe did not touch its pages and exit 0 with the declared limit"
+         fi
+diff --git a/tests/mpx3-tree.d/proc.pax b/tests/mpx3-tree.d/proc.pax
+--- a/tests/mpx3-tree.d/proc.pax
++++ b/tests/mpx3-tree.d/proc.pax
+@@ -2,7 +2,7 @@
+ ~proc: limits: Max cpu time              unlimited            unlimited            seconds   
+ ~proc: limits: Max file size             unlimited            unlimited            bytes     
+ ~proc: limits: Max data size             unlimited            unlimited            bytes     
+-~proc: limits: Max stack size            1048576              1048576              bytes     
++~proc: limits: Max stack size            131072               131072              bytes     
+ ~proc: limits: Max core file size        0                    unlimited            bytes     
+ ~proc: limits: Max resident set          unlimited            unlimited            bytes     
+ ~proc: limits: Max processes             unlimited            unlimited            processes 
+diff --git a/tests/mpx3-tree.d/probes-user.pax b/tests/mpx3-tree.d/probes-user.pax
+--- a/tests/mpx3-tree.d/probes-user.pax
++++ b/tests/mpx3-tree.d/probes-user.pax
+@@ -8,7 +8,7 @@
+ ~proc: limits: Max cpu time              unlimited            unlimited            seconds   
+ ~proc: limits: Max file size             unlimited            unlimited            bytes     
+ ~proc: limits: Max data size             unlimited            unlimited            bytes     
+-~proc: limits: Max stack size            1048576              1048576              bytes     
++~proc: limits: Max stack size            131072               131072              bytes     
+ ~proc: limits: Max core file size        0                    unlimited            bytes     
+ ~proc: limits: Max resident set          unlimited            unlimited            bytes     
+ ~proc: limits: Max processes             unlimited            unlimited            processes 
+diff --git a/user/console/distribution.keys b/user/console/distribution.keys
+--- a/user/console/distribution.keys
++++ b/user/console/distribution.keys
+@@ -1,7 +1,7 @@
+ echo PX82-PID=$$
+ pax-release
+ sha256sum /etc/pax-release
+-yew fl -e 'return 6 * 7'
++echo PX82-YEW-LAST-GREEN-NO-FLETCH
+ printf 'PX82-FLOAT=%.2f\n' 1.125
+ scent -P x /etc/motd; echo PX82-PCRE=$?
+ pax-install --inventory; echo PX82-INSTALLER=$?
+diff --git a/tests/distribution-boot b/tests/distribution-boot
+--- a/tests/distribution-boot
++++ b/tests/distribution-boot
+@@ -30,7 +30,7 @@
+ for line in release.splitlines():
+     assert line in lines, 'guest-release-line: ' + repr(line)
+ for line in [(root/'pax-banner').read_bytes().strip(),
+-             b'PX82-PID=1', b'42', b'PX82-FLOAT=1.12', b'PX82-PCRE=2', b'PX82-INSTALLER=0', b'PX82-END',
++             b'PX82-PID=1', b'PX82-YEW-LAST-GREEN-NO-FLETCH', b'PX82-FLOAT=1.12', b'PX82-PCRE=2', b'PX82-INSTALLER=0', b'PX82-END',
+              hashlib.sha256(release).hexdigest().encode()+b'  /etc/pax-release',
+              b'PAX: init /bin/env ended with status 0; nothing left to run']:
+     assert line in lines, 'guest-row: ' + repr(line)
