@@ -20,10 +20,13 @@ and log delivery; they are not guest CPU times. They span several heads.
 | sample | minimum | median | maximum |
 |---|---:|---:|---:|
 | 11 CI disk sessions | 423.142 s | 622.884 s | 860.145 s |
-| 20 local disk sessions | 456 s | 460.5 s | 472 s |
+| 20 local disk sessions before | 456 s | 460.5 s | 472 s |
+| 20 local disk sessions after | 455 s | 464 s | 475 s |
 
 The old 900 s bound left **39.855 s** above the observed CI maximum. The new
-1200 s bound leaves **339.855 s** (locally, at least 728 s). Issue
+1200 s bound leaves **339.855 s** above that CI maximum. The 20 post-change
+local takes all passed, each with one disk boot; their maximum leaves
+**725 s**. Issue
 [#197](https://github.com/wolffe-lang/pax/issues/197) also records a failed
 900 s run; that censored observation is not counted as a successful timing.
 The larger bound does not retry a failed permission assertion or shorten
