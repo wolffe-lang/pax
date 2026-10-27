@@ -7,6 +7,23 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **NVMe disks (px75).** `kernel/nvme` drives NVM Express controllers
+  (PCI class 01.08.02), written from the NVM Express Base 2.0c, PCIe
+  Transport 1.0c and NVM Command Set 1.0c specifications: reset (firmware
+  leaves a controller it probed enabled), the admin pair, Identify, one
+  I/O queue pair of up to 64 entries, polled; READ, WRITE and FLUSH in
+  512-byte sectors through kernel/block, up to 128 KiB a command (PRP1,
+  PRP2, a PRP list); 4096-byte namespaces in their own blocks; the
+  controller's errors as -EIO with the specification's names; a normal
+  shutdown at the end. Each namespace is `nvme0n1`, its partitions
+  `nvme0n1p1` …, all on major 259, as the Linux guest names them; nodes,
+  `/proc/partitions`, `/sys/block`, the ioctls, raw I/O, `/etc/fstab` by
+  `PARTUUID=` and `/` on an NVMe partition booted from the controller. One
+  boot line a controller (PCI ids and slot, Identify, the queue depth and
+  grant) for a photograph of a real machine's screen. `tools/qemu-run
+  --nvme` and `--boot-nvme`; `tests/mpx6-nvme`, every row held to Linux
+  7.2.4 on QEMU, the disks the two leave byte for byte the same; CI's
+  full tier runs mpx5-users with `/` on NVMe.
 - **The kernel's assembler seam and the clef package (as02b).**
   `tools/build-kernel` honours one explicit `WOLF_AS` for all seventeen
   assembly objects a kernel has per tier: wolf's own `--assembler` seam
