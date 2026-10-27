@@ -101,6 +101,17 @@ def main():
                 if project == 'pelt':
                     put('bin/sh', data, 0o755)
     put('bin/pax-release', (ROOT/'user/pax-release').read_bytes(), 0o755)
+    for name, source in [('pax-install', identity/'installer/pax-install'),
+                         ('limine', identity/'limine/limine'), ('reboot', identity/'diskprobe/reboot')]:
+        put('bin/'+name, source.read_bytes(), 0o755)
+    for name in ('paxgpt', 'paxfat', 'paxext2'):
+        put('bin/'+name, (identity/'disktools'/name).read_bytes(), 0o755)
+    for tree, prefix in ((identity/'boot', 'boot/'), (identity/'payload', 'usr/share/pax-install/')):
+        for source in sorted(tree.rglob('*')):
+            if source.is_file():
+                put(prefix+source.relative_to(tree).as_posix(), source.read_bytes(),
+                    0o755 if source.parent.name == 'games' and not source.name.endswith('.tar.gz') else 0o644)
+    put('etc/pax-live', b'pax-live-games-v1\n')
     put('etc/pax-release', (identity/'pax-release').read_bytes())
     put('etc/pax-banner', (identity/'pax-banner').read_bytes())
     shrc = (ROOT/'user/shrc').read_text()
@@ -111,6 +122,7 @@ def main():
         'pelt is pid 1; friendly editing: set -o friendly -o suggest -o histsearch\n'
         'yew edits files; yew fl starts the Fletch prompt. Files live in memory.\n'
         'Games: ~/Games/pack/pack --tier rich (cub and trail likewise; q quits).\n'
+        'Installer: pax-install (ext2 developer preview; inspect the target before confirming).\n'
         'Run cd /home/pax first; exit halts the machine.\n').encode())
     put('etc/pax-run', b'/bin/env ENV=/etc/shrc /bin/sh -i -m\n')
     for line in (ROOT/'user/install/games.txt').read_text().splitlines():

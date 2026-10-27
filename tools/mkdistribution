@@ -15,6 +15,18 @@ export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$PAX_ROOT" log -1 --form
 elf=$("$PAX_ROOT/tools/build-kernel" --release --src "$PAX_ROOT/kernel/kmain_console.lu" "$out/kernel")
 [ "$(git -C "$PAX_ROOT" rev-parse HEAD)" = "$head" ] || die 'checkout moved while building kernel'
 "$PAX_ROOT/tools/mkpax-release" "$elf" "$out/pax-release"
+# Installer and formatters are built from this same checkout, not the old ISO.
+"$PAX_ROOT/tools/mkinstall" "$out/installer"
+"$PAX_ROOT/tools/mkdisktools" "$out/disktools"
+"$PAX_ROOT/tools/mklimine-static" "$out/limine"
+"$PAX_ROOT/tools/mkdiskprobe" "$out/diskprobe"
+load_limine_pin
+mkdir -p "$out/boot/limine" "$out/boot/EFI/BOOT"
+cp "$elf" "$out/boot/pax"
+cp "$LIMINE_DIR/limine-bios.sys" "$out/boot/limine/"
+cp "$LIMINE_DIR/BOOTX64.EFI" "$out/boot/EFI/BOOT/"
+cp "$PAX_ROOT/boot/limine-initramfs-quiet.conf" "$out/boot/limine/limine.conf"
+"$PAX_ROOT/tools/mkinstall-payload" "$out/boot" "$inputs/games" "$out/payload"
 for variant in release dev; do
     python3 -I "$PAX_ROOT/tools/distribution-root" "$base" "$inputs" "$out" "$out/$variant.cpio" "$variant"
     python3 -I "$PAX_ROOT/tests/distribution" "$out/$variant.cpio" "$elf" "$inputs" "$out" "$variant"
