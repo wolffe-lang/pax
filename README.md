@@ -406,8 +406,10 @@ Pull requests run affected suites on native BIOS. The `full-matrix` label
 runs every suite on that merge leg; trunk pushes and the nightly run every
 compiler/firmware leg (`tier all`). `tools/ci-plan` selects and verifies the
 run's coverage. Timing-sensitive rows document their bounds and measured
-margins beside the tests; the heap job has a measured 90-minute envelope,
-and rootdisk `chk-soak` has 1200 seconds without reducing its 100000 rounds.
+margins beside the tests. Long-job envelopes are 75 minutes for interrupts,
+90 for heap, and 210 each for pelt and users; the observed stage timings and
+headroom are in [CI budgets](tests/ci-budgets.d/README.md). Rootdisk
+`chk-soak` has 1200 seconds without reducing its 100000 rounds.
 
 One known Linux reference-shell stall, [#196](https://github.com/wolffe-lang/pax/issues/196)
 ([pelt#98](https://github.com/wolffe-lang/pelt/issues/98)), gets one retry of
