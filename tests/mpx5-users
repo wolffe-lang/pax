@@ -728,6 +728,13 @@ for leg in $legs; do
             # R-px60-2 raises only ident's user soak; every count stays.
             deadline=900
             [ "$s" != soak-user ] || deadline=1200
+            # px83 (#197): rootdisk chk-soak reached 860.145 s on CI
+            # (eleven completed samples), versus 456–472 s in 20 local
+            # four-CPU takes. Keep every call; give only this disk row
+            # 339.855 s margin above that observed CI maximum.
+            if [ "${PAX_ROOTDISK:-0}" = 1 ] && [ "$s" = chk-soak ]; then
+                deadline=1200
+            fi
             hrc=0
             "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout "$deadline" --qemu -m --qemu 256M \
                 --elf "$elf" --marker 'halt|PANIC .*' "$iso" >"$log.verdict" 2>&1 || hrc=$?
