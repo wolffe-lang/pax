@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+# session — a session's own lines from a serial log (px75,
+# tests/mpx6-nvme; tests/mpx6-nodes.d/session's rule, with kernel/nvme's
+# lines among the kernel's own):
+#
+#   session pax SERIAL         PAX's: between `user: exec pid 1 ` and
+#                              init's `user: <name> pid 1 exit_group|exit`,
+#                              the kernel's own lines cut out (kernel/user's
+#                              `user: …`, kernel/block's `block: …`,
+#                              kernel/ext2's `ext2: …`, kernel/journal's,
+#                              kernel/fstab's, and kernel/nvme's
+#                              `nvme<c>: …` and `nvme<c>n<k>: …`, which an
+#                              error prints while a program runs), and a
+#                              kernel line that landed inside a line a
+#                              process had not finished cut from it
+#   session linux SERIAL RUN   tools/linux-nodes's: between `linux-nodes:
+#                              run RUN:` and `linux-nodes: run RUN status`,
+#                              QEMU's own lines (`qemu-system-x86_64: …`,
+#                              its stderr, in the same log) left out
+#
+# Carriage returns and terminal escapes are removed first (lib.sh's
+# serial_norm). The lines go to standard output.
+import re
+import sys
+
+# kernel/nvme's lines are known by their shapes (a controller's line, a
+# command's failure, a refusal), never by the `nvme0n1: ` a program's own
+# line may start with (px79's probe prints `nvme0n1: dev 259:0 …`); the
+# other modules' by their prefixes, at the start of a line or inside one
+# (a kernel line that landed while a process had not finished its line).
+NVME = r"nvme[0-9]+: [0-9a-f]{4}:[0-9a-f]{4} at |nvme[0-9]+n[0-9]+: (READ|WRITE|FLUSH|refused|a request) |nvme: refused"
+KERNEL = re.compile(r"(user: |block: |ext2: |journal: |blk: |fstab: |%s)" % NVME)
+INSIDE = KERNEL
+
+
+def lines(path):
+    b = open(path, "rb").read().replace(b"\r", b"")
+    b = re.sub(rb"\x1b\[[0-9;?=<>]*[A-Za-z]", b"", b)
+    b = re.sub(rb"\x1b[()][A-Za-z0-9]", b"", b)
+    b = re.sub(rb"\x1b[c78DEHM=>]", b"", b)
+    return b.decode("utf-8", "surrogateescape").split("\n")
+
+
+def pax(ls):
+    out, on = [], False
+    for l in ls:
+        if l.startswith("user: exec pid 1 "):
+            on = True
+            continue
+        if on and re.match(r"^user: [^ ]+ pid 1 (exit_group|exit) [0-9]+ after ", l):
+            break
+        if on:
+            if KERNEL.match(l):
+                continue
+            m = [x.start() for x in INSIDE.finditer(l) if x.start() > 0]
+            if m:
+                l = l[:m[0]]
+            out.append(l)
+    return out
+
+
+def linux(ls, run):
+    out, on = [], False
+    for l in ls:
+        if l.startswith("linux-nodes: run %s:" % run):
+            on = True
+            continue
+        if on and l.startswith("linux-nodes: run %s status" % run):
+            break
+        if on and not l.startswith("qemu-system-x86_64: "):
+            out.append(l)  # QEMU's own stderr (blkdebug's `aio failed`) shares the guest's log
+    return out
+
+
+if len(sys.argv) < 3 or sys.argv[1] not in ("pax", "linux") or (sys.argv[1] == "linux" and len(sys.argv) != 4):
+    sys.stderr.write("usage: session pax SERIAL | session linux SERIAL RUN\n")
+    sys.exit(2)
+got = pax(lines(sys.argv[2])) if sys.argv[1] == "pax" else linux(lines(sys.argv[2]), sys.argv[3])
+sys.stdout.buffer.write(("\n".join(got) + "\n").encode("utf-8", "surrogateescape"))

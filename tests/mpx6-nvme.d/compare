@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+# compare — hold PAX's session to the Linux guest's, section by section
+# (px75, tests/mpx6-nvme; tests/mpx6-nodes.d/compare's rule): each `==
+# <name>` line of the session scripts starts a section, and each section
+# must be the guest's line for line, but for what is named here:
+#
+#   ioctl   BLKSECTGET, BLKRAGET and BLKFRAGET, which the guest answers
+#           (its request queue's limit and read-ahead, tunables of its
+#           block layer) and PAX refuses by name: PAX's line must be
+#           `-25 ENOTTY` with the buffer untouched (docs/CENSUS.md);
+#   mounts  the guest's ext2 module's own mount options after
+#           `rw,relatime` (`errors=continue,user_xattr,acl`: hasu's NixOS
+#           kernel mounts ext2 with ext2.ko, where kasumi's ext4 serves it
+#           and says `rw,relatime` alone, as PAX does) left out;
+#   NAME~   a section whose name ends in `~` holds the devices on major
+#           259 whose minors the guest gives in the order its probes
+#           finish (several controllers: a race, measured): the minors
+#           are folded to `M` on both sides, the lines compared as sets
+#           (the guest's /proc/partitions lists them in that order too),
+#           and the minors each side gave compared as a set apart.
+#
+#   compare PAX.session GUEST.session SECTION...
+#
+# Prints `PASS <section>: …` or `FAIL <section>: …` with the first
+# differences, for each SECTION asked (or every one the guest has when
+# none is), and exits 0 when each holds, 1 otherwise.
+import re
+import sys
+
+REFUSED = ("BLKSECTGET", "BLKRAGET", "BLKFRAGET")
+MINOR = re.compile(r"(rdev 259:|dev 259:|^ 259 +)(\d+)")
+
+
+def sections(path):
+    out, cur = {}, None
+    for l in open(path, encoding="utf-8", errors="surrogateescape").read().split("\n"):
+        m = re.match(r"^== (\S+)$", l)
+        if m:
+            cur = m.group(1)
+            out.setdefault(cur, [])
+            continue
+        if cur is not None:
+            out[cur].append(l)
+    for k in out:
+        while out[k] and out[k][-1] == "":
+            out[k].pop()
+    return out
+
+
+def want_pax(gl):
+    if gl.startswith("mounts: "):
+        gl = gl.replace(" rw,relatime,errors=continue,user_xattr,acl ", " rw,relatime ")
+    if gl.startswith("ioctl "):
+        m = re.match(r"^ioctl (\S+): ", gl)
+        if m and m.group(1) in REFUSED:
+            width = len(gl.split(" bytes ")[1]) if " bytes " in gl else 16
+            return "ioctl %s: -25 ENOTTY bytes %s" % (m.group(1), "a5" * (width // 2))
+    return gl
+
+
+def fold(ls):
+    minors, out = [], []
+    for l in ls:
+        minors += [int(m.group(2)) for m in MINOR.finditer(l)]
+        out.append(MINOR.sub(lambda m: m.group(1) + "M", l))
+    return sorted(out), sorted(set(minors))
+
+
+def main(argv):
+    if len(argv) < 3:
+        sys.stderr.write("usage: compare PAX.session GUEST.session [SECTION...]\n")
+        return 2
+    p, g = sections(argv[1]), sections(argv[2])
+    names = argv[3:] or [k for k in g]
+    ok = True
+    for sec in names:
+        if sec not in g:
+            print("FAIL %s: the guest's session has no such section" % sec)
+            ok = False
+            continue
+        if sec not in p:
+            print("FAIL %s: PAX's session has no such section" % sec)
+            ok = False
+            continue
+        gl = [want_pax(l) for l in g[sec]]
+        pl = list(p[sec])
+        note = ""
+        if sec.endswith("~"):
+            (gl, gm), (pl, pm) = fold(gl), fold(pl)
+            if gm != pm:
+                print("FAIL %s: the minors on 259: the guest's %s, PAX's %s" % (sec, gm, pm))
+                ok = False
+                continue
+            note = " (the minors folded, %d on major 259 on both sides: %s)" % (len(pm), ",".join(str(x) for x in pm))
+        if gl == pl:
+            n = sum(1 for l in g[sec] if re.match(r"^ioctl (%s): 0 " % "|".join(REFUSED), l))
+            if n:
+                note += " (%d named refusals: %s)" % (n, ", ".join(REFUSED))
+            print("PASS %s: %d lines, the guest's%s" % (sec, len(pl), note))
+            continue
+        ok = False
+        diffs = []
+        for i in range(max(len(gl), len(pl))):
+            a = gl[i] if i < len(gl) else "<none>"
+            b = pl[i] if i < len(pl) else "<none>"
+            if a != b:
+                diffs.append("line %d: guest '%s' | PAX '%s'" % (i + 1, a, b))
+            if len(diffs) == 6:
+                break
+        print("FAIL %s: %d lines against the guest's %d; %s" % (sec, len(pl), len(gl), "; ".join(diffs)))
+    return 0 if ok else 1
+
+
+sys.exit(main(sys.argv))
