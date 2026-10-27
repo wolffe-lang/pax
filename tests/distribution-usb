@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Qualify the full distribution pair through px73's raw USB path.
+# build runs with the rootless oracle wrapper; boot/linux run in the lane container.
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+[ $# -eq 2 ] || die 'usage: distribution-usb build|boot|linux IMAGE_DIRECTORY'
+phase=$1; out=$(realpath "$2")
+head=$(cat "$out/commit")
+export SOURCE_DATE_EPOCH=$(cat "$out/source-date-epoch")
+elf=$out/kernel/kmain_console.elf
+cpio=$out/release.cpio
+stick=$out/pax-stick-${head:0:8}.img
+conf=$PAX_ROOT/boot/limine-initramfs-quiet.conf
+load_limine_pin
+expected=(--expect "/boot/pax=$elf" --expect "/boot/initramfs.cpio=$cpio"
+          --expect "/EFI/BOOT/BOOTX64.EFI=$LIMINE_DIR/BOOTX64.EFI"
+          --expect "/boot/limine/limine-bios.sys=$LIMINE_DIR/limine-bios.sys"
+          --expect "/boot/limine/limine.conf=$conf")
+case $phase in
+build)
+    [ ! -e "$stick" ] || die 'use a fresh output directory for the stick'
+    python3 -I "$PAX_ROOT/tests/usb-tools"
+    python3 -I "$PAX_ROOT/tests/usb-linux-fetch"
+    "$PAX_ROOT/tools/mkdisk" --usb --kernel "$elf" --initramfs "$cpio" --conf "$conf" --kernel-commit "$head" "$stick" > "$out/usb-build.log"
+    "$PAX_ROOT/tools/check-usb" "$stick" "${expected[@]}" > "$out/usb-check.log"
+    cat "$out/usb-check.log"
+    repeat=$out/usb-repeat.img
+    "$PAX_ROOT/tools/mkdisk" --usb --kernel "$elf" --initramfs "$cpio" --conf "$conf" --kernel-commit "$head" "$repeat" > "$out/usb-repeat.log"
+    cmp "$stick" "$repeat"
+    printf 'U3 PASS repeated full-payload stick is byte-identical\n'
+    for fault in efi mbr; do
+        broken=$out/usb-$fault-red.img
+        cp --sparse=always "$stick" "$broken"
+        python3 -I "$PAX_ROOT/tests/usb-stick.d/corrupt.py" "$broken" "$fault"
+        if "$PAX_ROOT/tools/check-usb" "$broken" > "$out/usb-$fault-red.log" 2>&1; then
+            die "U4 $fault corruption was accepted"
+        fi
+        case $fault in
+            efi) grep -F 'required boot file missing: /EFI/BOOT/BOOTX64.EFI' "$out/usb-$fault-red.log" ;;
+            mbr) grep -F 'protective MBR must cover the disk' "$out/usb-$fault-red.log" ;;
+        esac
+    done
+    sha256sum "$stick" > "$out/usb.sha256"
+    sha256sum -c "$out/usb.sha256"
+    ;;
+boot)
+    for firmware in bios uefi; do
+        log=$out/usb-$firmware.serial.log
+        "$PAX_ROOT/tools/qemu-halt" --accel tcg --usb-stick --firmware "$firmware" --serial "$log" --timeout 600 \
+            --qemu -m --qemu 2048M --elf "$elf" --type "$PAX_ROOT/user/console/distribution.keys" --prompt '$ ' \
+            --marker 'halt|PANIC .*' "$stick" > "$out/usb-$firmware.halt.log" 2>&1
+        grep -qx 'accel: tcg' "$log.meta"
+        grep -q qemu-xhci "$log.meta" && grep -q usb-storage "$log.meta"
+        ! grep -Eq 'virtio-blk|cdrom' "$log.meta"
+        python3 -I - "$log" "$out" <<'PY'
+from pathlib import Path
+import hashlib,re,sys
+log,out=map(Path,sys.argv[1:]);data=log.read_bytes()
+text=re.sub(rb'\x1b\[[0-9;?]*[A-Za-z]',b'',data).replace(b'\r',b'')
+lines=text.splitlines(); release=(out/'pax-release').read_bytes()
+for line in release.splitlines():assert line in lines,('USB release row',line)
+for line in [(out/'pax-banner').read_bytes().strip(),b'PX82-PID=1',b'42',b'PX82-FLOAT=1.12',b'PX82-PCRE=2',b'PX82-INSTALLER=0',b'PX82-END',hashlib.sha256(release).hexdigest().encode()+b'  /etc/pax-release',b'PAX: init /bin/env ended with status 0; nothing left to run']:
+    assert line in lines,('USB command row',line)
+assert re.search(rb'(?m)^boot: /boot/initramfs.cpio from a disk: partition 1, GPT disk [0-9a-f-]+, partition [0-9a-f-]+$',text)
+assert b'PANIC ' not in text
+print('U5/U6 PASS full distribution USB-only topology, Limine identity, guest release and commands:',log.name)
+PY
+    done
+    sha256sum -c "$out/usb.sha256"
+    ;;
+linux)
+    : "${PAX_LINUX_KERNEL:?binary Linux kernel required}"
+    : "${PAX_LINUX_MODULES:?matching binary modules required}"
+    : "${PAX_USB_BUSYBOX:?verified static BusyBox required}"
+    "$PAX_ROOT/tools/linux-part" --accel tcg --usb-stick --kernel "$PAX_LINUX_KERNEL" --modules "$PAX_LINUX_MODULES" \
+        --busybox "$PAX_USB_BUSYBOX" "${expected[@]}" "$out/usb-linux" "$stick" > "$out/usb-linux.log" 2>&1
+    grep -qx 'accel: tcg' "$out/usb-linux/qemu.meta"
+    grep -q '^linux-part: USB ESP files identical$' "$out/usb-linux/guest.txt"
+    grep -q '^PTTYPE=gpt$' "$out/usb-linux/guest.txt"
+    grep -q '^TYPE=vfat$' "$out/usb-linux/guest.txt"
+    sha256sum -c "$out/usb.sha256"
+    printf 'U8 PASS Linux xHCI mounts the full-payload ESP read-only; all five boot files match\n'
+    ;;
+*) die 'phase is build, boot or linux' ;;
+esac
