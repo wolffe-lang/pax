@@ -7,6 +7,7 @@
 #
 #   tools/linux-nodes [--kernel VMLINUZ] [--modules DIR] [--busybox FILE]
 #                     [--accel tcg|kvm] [--drive IMAGE[,ro][;DEVOPTS]]...
+#                     [--nvme IMAGE[,ro][;DEVOPTS]]... [--qemu ARG]...
 #                     [--file SRC=DEST]... OUTDIR PROG... -- CMD...
 #
 # Builds an initramfs in OUTDIR from a static busybox (the px13-ubuntu
@@ -22,10 +23,25 @@
 # from /, between `linux-nodes: run <k>: <cmd>` and `linux-nodes: run <k>
 # status <s>` on the guest's serial console, OUTDIR/serial.log; then
 # `linux-nodes: end`, a sync and a power-off. The images are written in
-# place: give copies. The disk's modules (virtio_blk, and ext4 for an
-# ext2 mount) are loaded only where the kernel does not have them built
+# place: give copies. The disk's modules (virtio_pci and virtio_blk, and
+# ext4 for an ext2 mount; px75: virtio_pci too, a module on hasu's
+# NixOS kernel where kasumi's builds it in, and ext2 where it is a module
+# of its own) are loaded only where the kernel does not have them built
 # in (modules.builtin of --modules, by default the kernel image's own
 # directory).
+#
+# --nvme IMAGE[,ro][;DEVOPTS] (px75), repeatable: the image on an NVMe
+# controller of its own, `-drive file=IMAGE,if=none,id=dK,format=raw
+# [,readonly=on] -device nvme,serial=paxnvmeN,drive=dK[,DEVOPTS]` (N
+# counts the --nvme options from 0; DEVOPTS the device's properties,
+# e.g. `logical_block_size=4096,physical_block_size=4096`), in the order
+# given among the --drive options, so PCI slots follow the command line
+# as tools/qemu-run gives them; the nvme module (and its chain) is then
+# loaded too, and the shell waits for /dev/nvme0n1 as it waits for
+# /dev/vda. --qemu ARG (px75), repeatable: ARG given to QEMU as it is,
+# after the disks (a controller with namespaces of its own: `-device
+# nvme,id=c0,…` and `-device nvme-ns,bus=c0,nsid=…`); an ARG naming nvme
+# loads the module as --nvme does.
 #
 # Exit 0 when the guest ran to its end line, 1 when not, 2 on a usage or
 # tool error. Black-box only: the kernel and its modules are run, never
@@ -38,13 +54,17 @@ busybox=
 accel=tcg
 drives=()
 files=()
+extra=()
+nvme=0
 while [ $# -gt 0 ]; do
     case $1 in
         --kernel) kernel=$2; shift 2 ;;
         --modules) modules=$2; shift 2 ;;
         --busybox) busybox=$2; shift 2 ;;
         --accel) accel=$2; shift 2 ;;
-        --drive) drives+=("$2"); shift 2 ;;
+        --drive) drives+=("v:$2"); shift 2 ;;
+        --nvme) drives+=("n:$2"); nvme=1; shift 2 ;;
+        --qemu) extra+=("$2"); case $2 in *nvme*) nvme=1 ;; esac; shift 2 ;;
         --file) files+=("$2"); shift 2 ;;
         --) shift; break ;;
         -*) die "unknown option $1" ;;
@@ -97,7 +117,13 @@ add() {
     seen="$seen$path "
     order+=("$path")
 }
-for m in virtio_blk ext4; do add "$m"; done
+mods="virtio_pci virtio_blk ext4"
+[ "$nvme" = 0 ] || mods="$mods nvme"
+for m in $mods; do add "$m"; done
+# px75: ext2 is a module of its own where ext4 does not serve it (hasu's
+# NixOS kernel: `mount -t ext2` ENODEV with ext4 alone); loaded when the
+# kernel has one, built in or not.
+grep -Eq "/ext2\.ko(\.zst|\.xz|\.gz)?:" "$modules/modules.dep" 2>/dev/null && add ext2
 : > "$root/lib/modules/order"
 for path in ${order[@]+"${order[@]}"}; do
     n=${path##*/}; n=${n%%.ko*}
@@ -117,7 +143,8 @@ done
     echo 'export PATH=/usr/bin:/bin'
     echo 'mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs -o mode=755 dev /dev'
     echo 'for m in $(cat /lib/modules/order); do insmod /lib/modules/$m.ko || echo "linux-nodes: insmod $m failed"; done'
-    echo 'n=0; while [ ! -b /dev/vda ] && [ $n -lt 50 ]; do sleep 0.1; n=$((n + 1)); done'
+    case " ${drives[*]-} " in *" v:"*) echo 'n=0; while [ ! -b /dev/vda ] && [ $n -lt 50 ]; do sleep 0.1; n=$((n + 1)); done' ;; esac
+    [ "$nvme" = 0 ] || echo 'n=0; while [ ! -b /dev/nvme0n1 ] && [ $n -lt 100 ]; do sleep 0.1; n=$((n + 1)); done'
     echo 'sleep 0.5'
     echo 'echo "linux-nodes: uname $(uname -r)"'
     k=0
@@ -135,15 +162,23 @@ chmod +x "$root/init"
 
 qd=()
 k=0
-for d in ${drives[@]+"${drives[@]}"}; do
+nv=0
+for e in ${drives[@]+"${drives[@]}"}; do
+    kind=${e%%:*}; d=${e#?:}
     dopts=
     case $d in *';'*) dopts=,${d#*;}; d=${d%%;*} ;; esac
     img=${d%,ro}; ro=
     [ "$img" != "$d" ] && ro=,readonly=on
     [ -f "$img" ] || die "no image $img"
-    qd+=(-drive "file=$img,if=none,id=d$k,format=raw$ro" -device "virtio-blk-pci,drive=d$k$dopts")
+    if [ "$kind" = n ]; then
+        qd+=(-drive "file=$img,if=none,id=d$k,format=raw$ro" -device "nvme,serial=paxnvme$nv,drive=d$k$dopts")
+        nv=$((nv + 1))
+    else
+        qd+=(-drive "file=$img,if=none,id=d$k,format=raw$ro" -device "virtio-blk-pci,drive=d$k$dopts")
+    fi
     k=$((k + 1))
 done
+qd+=(${extra[@]+"${extra[@]}"})
 acc=(-accel tcg -cpu max)
 [ "$accel" = kvm ] && acc=(-accel kvm -cpu host)
 set +e
@@ -157,7 +192,9 @@ echo "linux-nodes: qemu exit $rc" >> "$out/serial.log"
 {
     printf 'kernel %s (%s)\n' "$kernel" "$(file -b "$kernel" 2>/dev/null | sed -n 's/.*version \([^ ]*\).*/\1/p')"
     printf 'qemu %s\n' "$(qemu-system-x86_64 --version | head -n 1)"
-    printf 'drives %s\n' "${drives[*]:-none}"
+    shown=(); for e in ${drives[@]+"${drives[@]}"}; do case $e in v:*) shown+=("${e#v:}") ;; *) shown+=("nvme:${e#n:}") ;; esac; done
+    printf 'drives %s\n' "${shown[*]:-none}"
+    [ ${#extra[@]} -eq 0 ] || printf 'qemu %s\n' "${extra[*]}"
 } > "$out/meta"
 grep -q '^linux-nodes: end' "$out/serial.log" || exit 1
 exit 0
