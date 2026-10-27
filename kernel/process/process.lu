@@ -22,7 +22,7 @@
 //! whatever wrote it, read through kernel/tree; px10 to px55: the
 //! initramfs's), checked and loaded by kernel/elf into a fresh address
 //! space; a stack
-//! of ELF_STACK_PAGES pages below STACK_TOP (the page below them the
+//! of elf_stack_pages() pages below STACK_TOP (the page below them the
 //! guard) holding what the psABI puts on a process's initial stack,
 //! from the top down: eight zero bytes; the strings (argv's, envp's,
 //! then the path, AT_EXECFN's), each with its NUL; sixteen random bytes
@@ -162,7 +162,8 @@ extern "c" let pax_argbuf: *u8
 
 const PAGE: u64 = 4096
 const STACK_TOP: u64 = 0x00007ffffffff000
-const ELF_STACK_PAGES: u64 = procfs.USER_STACK_PAGES // px82: allocation and rlimit share one policy
+// wolf 0.2.35 cannot resolve an imported const at comptime.
+fn elf_stack_pages() -> u64 { procfs.user_stack_pages() }
 const CPUID1_RDRAND: u64 = 0x40000000 // ECX bit 30
 
 // pax_argbuf: the strings at [0, ARG_BYTES), the path at [PATH_AT, +4096).
@@ -579,13 +580,13 @@ fn fresh() -> u64 {
     pa
 }
 
-/// The stack of the space at `pml4`: ELF_STACK_PAGES pages below
+/// The stack of the space at `pml4`: elf_stack_pages() pages below
 /// STACK_TOP, read-write, no-execute; the page below them never mapped.
 /// False when frames ran out (what was mapped stays in the space, for
 /// `free_user`).
 fn map_stack(pml4: u64) -> bool {
     var k: u64 = 0
-    while k < ELF_STACK_PAGES {
+    while k < elf_stack_pages() {
         let pa = fresh()
         if pa == 0 {
             return false
@@ -836,7 +837,7 @@ fn describe_elf(file: u64, pid: u64, cr3: u64, entry: u64, sp: u64, argc: u64, e
         k += 1
     }
     log.put(", stack ")
-    log.dec(ELF_STACK_PAGES as int)
+    log.dec(elf_stack_pages() as int)
     log.put(" pages below ")
     log.hex(STACK_TOP)
     log.end()
