@@ -1,0 +1,59 @@
+px75 — the prediction, written before the first change (2026-10-27 02:05
+UTC, at pax trunk 187aafdf, nothing measured on the guest or under QEMU's
+NVMe device yet; the specifications read: NVM Express Base 2.0c, NVMe
+over PCIe Transport 1.0c, NVM Command Set 1.0c).
+
+1. Kernel files that change: six. kernel/nvme (new, ~900 lines: the
+   controller's reset and enable, the admin pair, Identify, Number of
+   Queues, one I/O pair, READ/WRITE/FLUSH, PRP lists, the status names),
+   kernel/block (a disk's driver, its unit and its name: `nvme0n1`,
+   `nvme0n1p1`; every NVMe device on major 259; the request path asks
+   the disk's own driver; a request of more than one page; ~250 lines),
+   kernel/pci (the class code; ~15), kernel/files (raw I/O in pieces as
+   large as the disk's driver takes; ~40), kernel/wolf.pkg (the module),
+   and kmain_console/kmain_session unchanged (block.start brings up both
+   drivers). kernel/procfs, kernel/fstab and kernel/ext2 unchanged: they
+   ask kernel/block for names and numbers.
+2. QEMU's NVMe controller (`-device nvme,serial=…`) identifies as PCI
+   1b36:0010, class 01.08.02, BAR0 64-bit memory; CAP: MQES 2047 (2048
+   entries), DSTRD 0, TO 15 (7.5 s), MPSMIN 0 (4 KiB), CSS bit 0 set;
+   Identify Controller: MN "QEMU NVMe Ctrl", SN the `serial=` given, FR
+   QEMU's own version string, MDTS 7 (512 KiB), NN 256, VWC bit 0 set,
+   version 1.4.0. One active namespace, NSID 1, LBA format 0 of 512
+   bytes, no metadata. Number of Queues: 64 SQ and 64 CQ granted
+   (`max_ioqpairs` 64). The first try at 64 entries per I/O queue
+   succeeds, so no fallback is seen under QEMU; the fallback is a planted
+   row (a depth past MQES), not a measured one.
+3. Under SeaBIOS and OVMF the firmware has left the controller enabled
+   (CC.EN 1, CSTS.RDY 1) when an NVMe disk is the boot disk, and disabled
+   otherwise; the driver's reset (EN to 0, RDY to 0, within CAP.TO) is
+   exercised only by the root-on-NVMe boots.
+4. The Linux guest (hasu's installed Linux 7.2.4, nvme as a module):
+   with vda (a GPT of two partitions) and one NVMe disk with the same
+   table, /dev has vda 254:0, vda1 254:1, vda2 254:2, nvme0n1 259:0,
+   nvme0n1p1 259:1, nvme0n1p2 259:2; /proc/partitions lists vda's three
+   first, then nvme0n1's (the NVMe probe is asynchronous and finishes
+   later). With two controllers, nvme0 is the lower PCI slot and its
+   disk and partitions take 259:0-2 before nvme1n1 takes 259:3. With
+   namespaces 1 and 3 on one controller the guest names them nvme0n1 and
+   nvme0n2 (its own instance count, not the NSID).
+5. A 4096-byte LBA namespace (`logical_block_size=4096`): the guest's
+   /sys/block/nvme0n1/size is NSZE × 8 (512-byte units), BLKSSZGET 4096,
+   BLKGETSIZE64 NSZE × 4096; a GPT written for 512-byte sectors is not
+   found there (as px66 measured on virtio).
+6. Bytes: a pattern written through /dev/nvme0n1 by PAX and by the guest
+   leaves byte-identical images, and each reads the other's image back
+   with identical checksums. QEMU's blkdebug read error comes back from
+   the controller as Media and Data Integrity Errors / Unrecovered Read
+   Error (SCT 2h, SC 81h) and both systems answer read(2) with EIO.
+7. Throughput, 1 GiB sequential through /dev/nvme0n1 on hasu (KVM, 128
+   KiB requests on PAX): PAX writes at 150-400 MB/s and reads at 200-500
+   MB/s (one request at a time, polled, a bounce copy each way); the
+   guest is faster on both (its page cache and many requests in flight),
+   500-1500 MB/s. Under TCG on a CI runner both fall by about ten.
+8. Plants: (a) a PRP list that omits the second page: the guest-image
+   row (bytes) goes red, PAX's own read-back of its own writes does NOT
+   (the same omission on the way back cancels out), so the row that
+   catches it is the differential one; (b) a capacity read in the
+   namespace's own block size: red only on the 4096-byte namespace's
+   rows (size, BLKGETSIZE64), green on every 512-byte one.
