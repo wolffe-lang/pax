@@ -103,7 +103,7 @@ static const char *tname(unsigned char t) {
 }
 
 /* Every name under DIR, depth first, each directory's names sorted. The
-   names are kept on the heap: PAX gives a process 128 KiB of stack
+   names are kept on the heap: PAX originally gave a process 128 KiB of stack
    (kernel/process's ELF_STACK_PAGES), Linux 8 MiB. */
 struct ent { char *name; unsigned char type; };
 static int cmpent(const void *a, const void *b) { return strcmp(((const struct ent *)a)->name, ((const struct ent *)b)->name); }
