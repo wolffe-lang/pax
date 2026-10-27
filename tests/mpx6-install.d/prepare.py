@@ -61,6 +61,22 @@ with tempfile.TemporaryDirectory(dir=work,prefix='prepare-') as tmp:
     assert r.returncode==1 and 'invalid' in r.stderr,(r.returncode,r.stderr)
     (p/'games.txt').write_text('pack '+'a'*40+' '+h(p/'games/pack.source.tar.gz')+' pack 0755 '+'b'*40+' '+h(p/'games/pack.engine.source.tar.gz')+'\n')
     print('PASS I-engine-source: a changed engine archive refused (corrupt_asset), a row without the engine refused (invalid)')
+    # A marked live image carries demo games already; install them only
+    # through the selected, verified payload, never by copying the demo home.
+    demo=s/'home/pax/Games/demo'; demo.mkdir(parents=True)
+    (demo/'save').write_text('source bytes must not be changed')
+    r=subprocess.run([program,s,p,w/'unmarked','pax','no'],capture_output=True,text=True)
+    assert r.returncode==1 and 'invalid' in r.stderr, 'unmarked source must still refuse an existing Games directory'
+    (s/'etc/pax-live').write_text('pax-live-games-v1\n')
+    for game in ['yes','no']:
+        out=w/('live-'+game)
+        r=subprocess.run([program,s,p,out,'pax',game],capture_output=True,text=True)
+        assert r.returncode==0,('live source',game,r.stdout,r.stderr)
+        assert not (out/'home/pax/Games/demo').exists()
+        assert (out/'home/pax/Games').exists()==(game=='yes')
+        if game=='yes': assert (out/'home/pax/Games/pack/pack').read_bytes()==b'game bytes'
+        assert (demo/'save').read_text()=='source bytes must not be changed'
+    print('PASS I-live-games: marked demo tree omitted, payload decision respected, unmarked source still refused, source untouched')
     (s/'boot/pax').write_bytes(b'corrupt')
     r=subprocess.run([program,s,p,w/'corrupt','alice','no'],capture_output=True,text=True)
     assert r.returncode==1 and 'corrupt_asset' in r.stderr
