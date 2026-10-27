@@ -547,7 +547,7 @@ SeaBIOS and OVMF boot, and its `root=PARTUUID=` finds `/` on
     qemu-system-x86_64 … -drive file=pax-disk.img,if=none,id=d0,format=raw -device nvme,serial=paxboot,drive=d0,bootindex=0
 
 `tools/rootdisk-leg` with `PAX_ROOTDISK_BUS=nvme` boots a whole suite's
-images that way (CI: mpx5-users, in the full and all tiers).
+images that way (CI: mpx5-users, in the full tier, the merge gate).
 
 ## Measured
 
