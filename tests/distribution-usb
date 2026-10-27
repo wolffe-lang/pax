@@ -72,7 +72,9 @@ linux)
     : "${PAX_LINUX_KERNEL:?binary Linux kernel required}"
     : "${PAX_LINUX_MODULES:?matching binary modules required}"
     : "${PAX_USB_BUSYBOX:?verified static BusyBox required}"
-    "$PAX_ROOT/tools/linux-part" --accel tcg --usb-stick --kernel "$PAX_LINUX_KERNEL" --modules "$PAX_LINUX_MODULES" \
+    userland=()
+    [ -z "${PAX_USB_USERLAND:-}" ] || userland=(--userland "$PAX_USB_USERLAND")
+    "$PAX_ROOT/tools/linux-part" "${userland[@]}" --accel tcg --usb-stick --kernel "$PAX_LINUX_KERNEL" --modules "$PAX_LINUX_MODULES" \
         --busybox "$PAX_USB_BUSYBOX" "${expected[@]}" "$out/usb-linux" "$stick" > "$out/usb-linux.log" 2>&1
     grep -qx 'accel: tcg' "$out/usb-linux/qemu.meta"
     grep -q '^linux-part: USB ESP files identical$' "$out/usb-linux/guest.txt"

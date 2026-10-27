@@ -7,6 +7,7 @@
 #                    [--accel tcg|kvm] [--device-opts OPTS] [--append ARGS]
 #                    OUTDIR IMAGE
 #
+# --userland DIR uses a pre-staged lsblk/blkid/library root, without an engine.
 # --usb-stick (px73) uses xHCI plus USB bulk-only mass storage instead
 # of virtio. Give all five --expect /ESP/PATH=HOSTFILE boot files: the
 # Linux guest mounts sda1 read-only and compares their SHA256 digests.
@@ -46,6 +47,7 @@ die() { echo "linux-part: $*" >&2; exit 2; }
 kernel=/usr/lib/modules/$(uname -r)/vmlinuz
 modules=/usr/lib/modules/$(uname -r)
 busybox=
+userland=
 accel=tcg
 devopts=
 append=
@@ -62,6 +64,7 @@ while [ $# -gt 0 ]; do
         --kernel) kernel=$2; shift 2 ;;
         --modules) modules=$2; shift 2 ;;
         --busybox) busybox=$2; shift 2 ;;
+        --userland) userland=$2; shift 2 ;;
         --accel) accel=$2; shift 2 ;;
         --device-opts) devopts=,$2; shift 2 ;;
         --append) append=" $2"; shift 2 ;;
@@ -85,6 +88,14 @@ if [ -z "$busybox" ]; then
 else
     cp "$busybox" "$root/bin/busybox"
 fi
+# A contained caller can stage these exact binary tools before launching us,
+# avoiding a nested engine/socket. The default host staging path is unchanged.
+if [ -n "$userland" ]; then
+    for file in usr/bin/lsblk usr/sbin/blkid; do
+        [ -x "$userland/$file" ] || die "pre-staged userland lacks executable $file"
+    done
+    cp -a "$userland/." "$root/"
+else
 # lsblk and blkid with their libraries, at their own paths.
 opts=()
 [ "$engine" = podman ] && opts=(--security-opt label=disable) || opts=(--user "$(id -u):$(id -g)")
@@ -96,6 +107,8 @@ opts=()
             r=$(readlink -f "$l"); mkdir -p "/o$(dirname "$l")"; cp "$r" "/o$l"
         done
     done' || die "lsblk and blkid from $image"
+
+fi
 
 # Stage binary modules and their documented modules.dep dependency lists.
 # The recursive ordering follows the existing linux-nodes recipe.

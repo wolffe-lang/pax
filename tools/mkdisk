@@ -316,6 +316,13 @@ def root_conf(conf, partuuid, fsuuid, keep_module):
     return "\n".join(out) + "\n"
 
 
+def fat_geometry_args(usb):
+    # mkfs.fat uses sectors-per-track to round its total sector count.
+    # A raw USB image has no physical CHS geometry: 1/1 preserves the
+    # exact ESP extent at every size. Keep the legacy disk recipe unchanged.
+    return ["-g", "1/1"] if usb else []
+
+
 def gpt_main(args, usb=False):
     kernel = initramfs = None
     kernel_commit = "unknown"
@@ -467,7 +474,7 @@ def gpt_main(args, usb=False):
         # mkfs.fat's own choice for a 192 MiB volume (4 KiB clusters, 49,047
         # of them) is below it (fsck.fat -n warns; measured): with 512-byte
         # clusters every ESP of 33 MiB or more clears it.
-        run([dt, work, "mkfs.fat", "-F", "32", "-s", "1", "-n", "PAX-ESP", "-i", volid, "--invariant", "--mbr=n", "-S", "512",
+        run([dt, work, "mkfs.fat"] + fat_geometry_args(usb) + ["-F", "32", "-s", "1", "-n", "PAX-ESP", "-i", volid, "--invariant", "--mbr=n", "-S", "512",
              "-h", str(e0), "--offset", str(e0), rel, str(esp // 1024)], "mkfs.fat", env)
         lim = limine_dir()
         files = [(os.path.join(lim, "BOOTX64.EFI"), "::/EFI/BOOT/BOOTX64.EFI"),
