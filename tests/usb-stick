@@ -15,7 +15,7 @@ fi
 bounded() {
     local name=$1 limit=$2 begin=$SECONDS rc=0; shift 2
     say "USB phase $name start (limit ${limit}s)"
-    timeout --kill-after=10s "$limit" "$@" || rc=$?
+    timeout --foreground --kill-after=10s "$limit" "$@" || rc=$?
     say "USB phase $name exit=$rc elapsed=$((SECONDS - begin))s"
     return "$rc"
 }
@@ -119,6 +119,7 @@ for tier in $tiers; do
     [ -z "${PAX_LINUX_MODULES:-}" ] || linuxargs+=(--modules "$PAX_LINUX_MODULES")
     bounded linux-usb 300 "$PAX_ROOT/tools/linux-part" --accel tcg --usb-stick --busybox "$work/bin/busybox" \
         "${linuxargs[@]}" "${expected[@]}" "$work/linux-$tier" "$img" > "$work/linux-$tier.log" 2>&1
+    grep -qx 'accel: tcg' "$work/linux-$tier/qemu.meta"
     grep -q '^linux-part: USB ESP files identical$' "$work/linux-$tier/guest.txt"
     grep -q '^PTTYPE=gpt$' "$work/linux-$tier/guest.txt"
     grep -q '^TYPE=vfat$' "$work/linux-$tier/guest.txt"

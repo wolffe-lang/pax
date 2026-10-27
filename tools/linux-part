@@ -199,8 +199,14 @@ if [ "$usbstick" = 1 ]; then
 else
     qd+=(-device "virtio-blk-pci,drive=d0$devopts")
 fi
+deadline=()
+# Stay in the USB suite's outer timeout group; this guest also has its
+# own bounded TERM/KILL path. Preserve the older virtio invocation.
+[ "$usbstick" = 0 ] || deadline=(--foreground --kill-after=10s)
+printf 'accel: %s\nmemory: 1G\nkernel: %s\n' "$accel" "$kernel" > "$out/qemu.meta"
+qstart=$SECONDS
 set +e
-timeout 600 qemu-system-x86_64 -machine q35 "${acc[@]}" -m 1G -nographic -no-reboot \
+timeout "${deadline[@]}" 600 qemu-system-x86_64 -machine q35 "${acc[@]}" -m 1G -nographic -no-reboot \
     -kernel "$kernel" -initrd "$out/initramfs.cpio" \
     -append "console=ttyS0 quiet loglevel=1 panic=-1$append" \
     "${qd[@]}" \
@@ -208,6 +214,8 @@ timeout 600 qemu-system-x86_64 -machine q35 "${acc[@]}" -m 1G -nographic -no-reb
 rc=$?
 set -e
 echo "linux-part: qemu exit $rc" >> "$out/serial.log"
+printf 'status: %s\nelapsed: %ss\n' "$rc" "$((SECONDS - qstart))" >> "$out/qemu.meta"
+[ "$usbstick" = 0 ] || [ "$rc" = 0 ] || exit 1
 tr -d '\r' < "$out/serial.log" | sed -n 's/^.*\(linux-part: uname\)/\1/; /^linux-part: uname/,/^linux-part: end$/p' > "$out/guest.txt"
 grep -q '^linux-part: end$' "$out/guest.txt" || exit 1
 exit 0
