@@ -8,54 +8,62 @@ import sys
 
 cpio, kernel, inputs, identity = map(Path, sys.argv[1:5])
 variant = sys.argv[5]
+def check(blob):
+    rows = {}
+    o = 0
+    while True:
+        header = blob[o:o+110]
+        assert header[:6] == b'070701', 'image-newc-header'
+        fields = [int(header[i:i+8], 16) for i in range(6, 110, 8)]
+        name = blob[o+110:o+110+fields[11]-1].decode()
+        start = (o+110+fields[11]+3) & ~3
+        data = blob[start:start+fields[6]]
+        assert len(data) == fields[6], 'image-short-entry'
+        o = (start+fields[6]+3) & ~3
+        if name == 'TRAILER!!!':
+            break
+        assert name not in rows, 'image-duplicate-' + name
+        rows[name] = (fields, data)
+    assert not blob[o:].strip(b'\0'), 'image-trailing-data'
+    sha = lambda b: hashlib.sha256(b).hexdigest()
+    release = rows['etc/pax-release'][1]
+    assert release == (identity / 'pax-release').read_bytes(), 'image-release-pins'
+    release_rows = {line.split()[0]: line.split()[1:] for line in release.decode().splitlines()}
+    assert release_rows['kernel'][1] == sha(kernel.read_bytes()), 'image-kernel'
+    assert rows['etc/pax-banner'][1] == (identity / 'pax-banner').read_bytes(), 'image-banner'
+    assert sha(release)[:8].encode() in rows['etc/pax-banner'][1], 'image-banner-digest'
+    assert rows['bin/pax-release'][0][1] == 0o100755, 'image-release-command'
+    for line in rows['etc/pax-files.sha256'][1].decode().splitlines():
+        digest, name = line.split('  ', 1)
+        assert sha(rows[name][1]) == digest, 'image-file-digest-' + name
+    expected = {name for name, (fields, _) in rows.items() if fields[1] & 0o170000 != 0o040000}
+    listed = {line.split('  ', 1)[1] for line in rows['etc/pax-files.sha256'][1].decode().splitlines()}
+    assert listed == expected - {'etc/pax-files.sha256'}, 'image-file-inventory'
+    for game in ('pack', 'cub', 'trail'):
+        for dest, source in ((game, game), ('source.tar.gz', game+'.source.tar.gz'), ('engine.source.tar.gz', game+'.engine.source.tar.gz')):
+            fields, data = rows[f'home/pax/Games/{game}/{dest}']
+            assert data == (inputs / 'games' / source).read_bytes(), 'image-game-' + game
+            assert fields[2:4] == [1000, 1000], 'image-game-owner-' + game
+        assert rows[f'home/pax/Games/{game}/{game}'][0][1] == 0o100755
+    for source in (inputs / 'base-std/std').rglob('*'):
+        if source.is_file():
+            assert rows['usr/share/wolf/std/'+source.relative_to(inputs/'base-std/std').as_posix()][1] == source.read_bytes(), 'image-base-std'
+    assert ('usr/bin/wolf' in rows) == (variant == 'dev'), 'image-variant'
+    if variant == 'dev':
+        assert 'usr/bin/ld.lld' in rows and 'usr/share/wolf/compiler-std/STD-REV' in rows, 'image-dev-stack'
+    return release, len(listed)
+
 blob = cpio.read_bytes()
-rows = {}
-o = 0
-while True:
-    header = blob[o:o+110]
-    assert header[:6] == b'070701', 'image-newc-header'
-    fields = [int(header[i:i+8], 16) for i in range(6, 110, 8)]
-    name = blob[o+110:o+110+fields[11]-1].decode()
-    start = (o+110+fields[11]+3) & ~3
-    data = blob[start:start+fields[6]]
-    assert len(data) == fields[6], 'image-short-entry'
-    o = (start+fields[6]+3) & ~3
-    if name == 'TRAILER!!!':
-        break
-    assert name not in rows, 'image-duplicate-' + name
-    rows[name] = (fields, data)
-assert not blob[o:].strip(b'\0'), 'image-trailing-data'
-sha = lambda b: hashlib.sha256(b).hexdigest()
-release = rows['etc/pax-release'][1]
-assert release == (identity / 'pax-release').read_bytes(), 'image-release-pins'
-release_rows = {line.split()[0]: line.split()[1:] for line in release.decode().splitlines()}
-assert release_rows['kernel'][1] == sha(kernel.read_bytes()), 'image-kernel'
-assert rows['etc/pax-banner'][1] == (identity / 'pax-banner').read_bytes(), 'image-banner'
-assert sha(release)[:8].encode() in rows['etc/pax-banner'][1], 'image-banner-digest'
-assert rows['bin/pax-release'][0][1] == 0o100755, 'image-release-command'
-for line in rows['etc/pax-files.sha256'][1].decode().splitlines():
-    digest, name = line.split('  ', 1)
-    assert sha(rows[name][1]) == digest, 'image-file-digest-' + name
-expected = {name for name, (fields, _) in rows.items() if fields[1] & 0o170000 != 0o040000}
-listed = {line.split('  ', 1)[1] for line in rows['etc/pax-files.sha256'][1].decode().splitlines()}
-assert listed == expected - {'etc/pax-files.sha256'}, 'image-file-inventory'
-for game in ('pack', 'cub', 'trail'):
-    for dest, source in ((game, game), ('source.tar.gz', game+'.source.tar.gz'), ('engine.source.tar.gz', game+'.engine.source.tar.gz')):
-        fields, data = rows[f'home/pax/Games/{game}/{dest}']
-        assert data == (inputs / 'games' / source).read_bytes(), 'image-game-' + game
-        assert fields[2:4] == [1000, 1000], 'image-game-owner-' + game
-    assert rows[f'home/pax/Games/{game}/{game}'][0][1] == 0o100755
-for source in (inputs / 'base-std/std').rglob('*'):
-    if source.is_file():
-        assert rows['usr/share/wolf/std/'+source.relative_to(inputs/'base-std/std').as_posix()][1] == source.read_bytes(), 'image-base-std'
-assert ('usr/bin/wolf' in rows) == (variant == 'dev'), 'image-variant'
-if variant == 'dev':
-    assert 'usr/bin/ld.lld' in rows and 'usr/share/wolf/compiler-std/STD-REV' in rows, 'image-dev-stack'
-print(f'I0 PASS actual {variant} initramfs: identity, {len(listed)} file digests, three games/source/owners, base std and variant')
-# A named negative proves the actual-image comparator is not a generator echo.
+release, count = check(blob)
+print(f'I0 PASS actual {variant} initramfs: identity, {count} file digests, games/source/owners, base std and variant')
 bad = bytearray(blob)
 position = blob.find(release)
 assert position >= 0
 bad[position] ^= 1
-assert bytes(bad[position:position+len(release)]) != (identity/'pax-release').read_bytes()
-print('I1 PASS actual-image release corruption differs from expected pins')
+try:
+    check(bytes(bad))
+except AssertionError as error:
+    assert str(error) == 'image-release-pins', error
+    print('I1 PASS actual-image release corruption rejected by name')
+else:
+    raise AssertionError('actual-image corruption accepted')

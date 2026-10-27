@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Build both distribution ISOs at one clean commit; no writes outside OUT.
+# tools/mkdistribution VERIFIED_BASE.cpio BUILT_INPUTS NEW_OUT
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 3 ] || die 'usage: mkdistribution BASE.cpio INPUTS NEW_OUT'
+base=$(realpath "$1"); inputs=$(realpath "$2"); out=$3
+[ ! -e "$out" ] || die 'use a new output directory'
+[ -z "$(git -C "$PAX_ROOT" status --porcelain --untracked-files=no)" ] || die 'tracked build inputs are dirty'
+head=$(git -C "$PAX_ROOT" rev-parse HEAD)
+mkdir -p "$out"
+out=$(realpath "$out")
+export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$PAX_ROOT" log -1 --format=%ct)}
+"$PAX_ROOT/tools/fetch-limine" >&2
+elf=$("$PAX_ROOT/tools/build-kernel" --release --src "$PAX_ROOT/kernel/kmain_console.lu" "$out/kernel")
+[ "$(git -C "$PAX_ROOT" rev-parse HEAD)" = "$head" ] || die 'checkout moved while building kernel'
+"$PAX_ROOT/tools/mkpax-release" "$elf" "$out/pax-release"
+for variant in release dev; do
+    python3 -I "$PAX_ROOT/tools/distribution-root" "$base" "$inputs" "$out" "$out/$variant.cpio" "$variant"
+    python3 -I "$PAX_ROOT/tests/distribution" "$out/$variant.cpio" "$elf" "$inputs" "$out" "$variant"
+    name=pax-${head:0:8}.iso
+    [ "$variant" = dev ] && name=pax-dev-${head:0:8}.iso
+    "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs-quiet.conf" \
+        --add "$out/$variant.cpio" initramfs.cpio "$elf" "$out/$name"
+done
+[ "$(git -C "$PAX_ROOT" rev-parse HEAD)" = "$head" ] || die 'checkout moved while packing image'
+[ -z "$(git -C "$PAX_ROOT" status --porcelain --untracked-files=no)" ] || die 'tracked inputs changed while packing image'
+printf '%s\n' "$head" > "$out/commit"
+printf '%s\n' "$SOURCE_DATE_EPOCH" > "$out/source-date-epoch"
+sha256sum "$elf" "$out"/*.cpio "$out"/*.iso | tee "$out/sha256.txt"
+sha256sum -c "$out/sha256.txt"
