@@ -132,7 +132,9 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
               guest's partitions, /proc/partitions and blkid on an
               image); mkdisk --gpt (px66: the disk that boots);
               mkdisk --usb, check-usb and usb-write (raw live stick,
-              independent boot-file checks, guarded manual writer)
+              independent boot-file checks, guarded manual writer);
+              fetch-usb-linux (two verified Ubuntu binary packages for the
+              TCG USB oracle, no kernel metapackage installation)
     font/     the screen's font (px19): Spleen 8x16, BSD-2-Clause, with
               its licence; gm01: extent.txt (the code points drawn above
               U+00FF: braille, the block elements, the games' others),
