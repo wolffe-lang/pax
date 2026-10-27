@@ -193,7 +193,10 @@ tests/ci-plan's expectations; the tier job's needs): V0-V12 (§8).
   NVMe root in one CI leg, kept to the tier full": mpx5-users (it boots
   kmain_console, which mounts `/` from `root=`; mpx3-boreutils' kernel
   keeps its tree in memory, so its disk leg would not run kernel/nvme
-  for `/`), a step after its virtio root leg, `tier != 'pr'`.
+  for `/`), a step after its virtio root leg, `tier == 'full'` (`c8d04c17`:
+  first `tier != 'pr'`, but the all tier's mpx5-users job is at its 130
+  minutes on trunk without the step: 129 in 40208110580, cancelled at the
+  bound in 40326263858 and 40394044200; the step took 28 to 53 more).
 - **R-px75-7, the queue-depth fallback's evidence.** QEMU 8.2 (CI's) has
   no `mqes`; the CI row is the single-pair grant (`max_ioqpairs=1`, V8).
   The halving on Invalid Queue Size cannot be provoked from QEMU (it
@@ -210,6 +213,26 @@ tests/ci-plan's expectations; the tier job's needs): V0-V12 (§8).
   (ACS-3, INCITS 522, or its later revision; T13's public drafts).
   Recommended: px75b's contract names ACS beside AHCI 1.3.1 and SATA's
   FIS definitions (the AHCI specification reproduces the register FIS).
+- **R-px75-10, the release build.** pax#215's labelled run (40445676996,
+  attempts 1 to 3) overran mpx2-interrupts and mpx2-heap at their 60
+  minutes in the release kernel builds (`I0`, `H1`), before any boot:
+  each 1.3 to 2.7 times trunk's, the native builds unchanged. On hasu (4
+  CPUs, `--no-cache`) kmain_ud2's release object took 167 s at trunk
+  `187aafdf` and 310 s at `ba76abff`, codegen 3.1 and 3.4 s of them: the
+  serial mid-end. 100 gdb samples of it: 78 in rangeopt's loop versioning
+  (`version_one`, `with_hypo`, `seed_pi`), which re-seeds every branch
+  of a function for each loop it might version, and whose `incoming`
+  walks every block: loops times branches squared, a function. By that
+  measure over the release IR `block.table_report` was 52% at trunk and
+  68% at `ba76abff` (loops 135 to 263, branches 756 to 1,040): the
+  decimal loops px75 put in `name_len` and `name_byte`, inlined at every
+  `put_name` there and in kernel/ext2's mount lines. Recommended and
+  implemented (`f57d3770`): a disk's name written into its record once
+  (`make_stem`), read back without a loop; a partition's number is three
+  digits at most. The boot is not it: kmain_blk to `halt` under TCG,
+  native BIOS, 1.53 s at trunk and at `ba76abff` with no NVMe controller
+  (three boots each). Owed to wolf-lang: the range pass's re-seed per
+  candidate loop.
 
 ## 6. The boot line (item 3, for px77)
 
@@ -334,9 +357,10 @@ line): 110 of 110 rows PASS on all four legs, `mpx6-nvme: PASS`.
 
 `mpx6-nvme`'s job (the pr tier: names, four, error, single; the full and
 all: every session), `PAX_NVME_ROWS` from the plan; mpx5-users' job gains
-the NVMe-root step outside `tier pr`; tools/ci-tiers.map's rules and
-tests/ci-plan's expectations (287, every one PASS). This PR touches CI, so its `tier
-pr` runs every suite on the PR leg. Run ids: in the PR and the report.
+the NVMe-root step in `tier full` (R-px75-6); tools/ci-tiers.map's rules and
+tests/ci-plan's expectations (287, every one PASS). This PR touches
+tools/qemu-run and tools/qemu-halt, FULL paths, so its plan is the all
+tier: every suite on every leg. Run ids: in the PR and the report.
 
 ## 10. Seen red
 
