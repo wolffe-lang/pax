@@ -33,6 +33,12 @@
 # way: the boot disk is vda, the first --drive vdb). With no --boot-disk
 # the first --drive is vda. The images are written in place.
 #
+# --usb-kbd[=root|hub|nested|empty] (px74): an xHCI controller and a USB
+# boot keyboard, directly or one/two hubs deep. empty leaves the controller
+# ready for monitor device_add. The keyboard id is pax-usb-kbd; the bus is
+# pax-usb.0. QEMU sendkey selects the USB keyboard (tests verify zero i8042
+# scancodes); the i8042 itself is retained for firmware compatibility.
+#
 # --serial-input FIFO (px13) also gives COM1 an input: QEMU's file
 # character device with `input-path`, so what is written to FIFO is what
 # the guest's UART receives (tools/qemu-halt --type opens FIFO read-write
@@ -59,6 +65,7 @@ set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
 firmware=bios serial=$PAX_BUILD/serial.log serial_in= timeout=30 accel=auto gdb_port= image= noscreen=0 bootdisk=0 drives=()
+usbkbd=${PAX_USB_KBD:-} # typing suites keep their exact keystroke stream
 while [ $# -gt 0 ]; do
     case $1 in
         --firmware) firmware=$2; shift 2 ;;
@@ -69,6 +76,8 @@ while [ $# -gt 0 ]; do
         --gdb)      gdb_port=$2; shift 2 ;;
         --no-screen) noscreen=1; shift ;;
         --boot-disk) bootdisk=1; shift ;;
+        --usb-kbd) usbkbd=root; shift ;;
+        --usb-kbd=*) usbkbd=${1#*=}; shift ;;
         --drive)    drives+=("$2"); shift 2 ;;
         --)         shift; break ;;
         -h|--help)  sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
@@ -114,6 +123,17 @@ for d in ${drives[@]+"${drives[@]}"}; do
     dk=$((dk + 1))
 done
 [ "$noscreen" = 0 ] || cmd+=(-vga none)
+if [ -n "$usbkbd" ]; then
+    cmd+=(-device qemu-xhci,id=pax-usb)
+    case $usbkbd in
+        root|empty) usbport=1 ;;
+        hub) cmd+=(-device usb-hub,id=pax-hub1,bus=pax-usb.0,port=1); usbport=1.3 ;;
+        nested) cmd+=(-device usb-hub,id=pax-hub1,bus=pax-usb.0,port=1
+                       -device usb-hub,id=pax-hub2,bus=pax-usb.0,port=1.3); usbport=1.3.2 ;;
+        *) die "--usb-kbd takes root, hub, nested or empty" ;;
+    esac
+    [ "$usbkbd" = empty ] || cmd+=(-device "usb-kbd,id=pax-usb-kbd,bus=pax-usb.0,port=$usbport")
+fi
 
 if [ -n "$serial_in" ]; then
     [ -p "$serial_in" ] || die "--serial-input $serial_in is not a FIFO"
