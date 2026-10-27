@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Validate a live stick independently of mkdisk's writer.
+
+check-usb IMAGE [--expect /PATH=HOSTFILE]...
+Checks both GPT copies, protective coverage, one ESP plus BIOS reservation,
+and all five boot files through pinned mtools. Never opens a block device.
+"""
+import argparse
+import hashlib
+from pathlib import Path
+import stat
+import struct
+import subprocess
+import tempfile
+import uuid
+import zlib
+
+TOOLS = Path(__file__).resolve().parent
+ESP = uuid.UUID("c12a7328-f81f-11d2-ba4b-00a0c93ec93b").bytes_le
+BIOS = uuid.UUID("21686148-6449-6e6f-744e-656564454649").bytes_le
+FILES = ("/EFI/BOOT/BOOTX64.EFI", "/boot/pax", "/boot/initramfs.cpio",
+         "/boot/limine/limine.conf", "/boot/limine/limine-bios.sys")
+
+
+def require(ok, message):
+    if not ok:
+        raise ValueError(message)
+
+
+def digest(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1048576), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def table(image):
+    require(stat.S_ISREG(image.stat().st_mode), "regular image required")
+    size = image.stat().st_size
+    require(size >= 4 * 1048576 and size % 512 == 0, "image size")
+    sectors = size // 512
+    with image.open("rb") as f:
+        mbr = f.read(512)
+        require(mbr[510:] == b"\x55\xaa", "protective MBR signature")
+        record = mbr[446:462]
+        require(record[4] == 0xee and struct.unpack_from("<II", record, 8) ==
+                (1, min(sectors - 1, 0xffffffff)), "protective MBR must cover the disk")
+        require(mbr[462:510] == bytes(48), "no hybrid MBR entries")
+        require(any(mbr[:440]), "BIOS boot code missing")
+        copies = []
+        for at, alternate, array_at in ((1, sectors - 1, 2), (sectors - 1, 1, sectors - 33)):
+            f.seek(at * 512)
+            h = bytearray(f.read(512))
+            require(h[:8] == b"EFI PART", "GPT signature")
+            revision, length, crc, reserved = struct.unpack_from("<IIII", h, 8)
+            require((revision, length, reserved) == (0x10000, 92, 0), "GPT header shape")
+            h[16:20] = bytes(4)
+            require(zlib.crc32(h[:length]) == crc, "GPT header CRC")
+            my, other, first, last = struct.unpack_from("<QQQQ", h, 24)
+            require((my, other, first, last) == (at, alternate, 34, sectors - 34), "GPT bounds")
+            pos, count, esize, acrc = struct.unpack_from("<QIII", h, 72)
+            require((pos, count, esize) == (array_at, 128, 128), "GPT entry array shape")
+            f.seek(pos * 512)
+            entries = f.read(count * esize)
+            require(zlib.crc32(entries) == acrc, "GPT entry array CRC")
+            copies.append((bytes(h[56:72]), entries))
+        require(copies[0] == copies[1], "GPT copies disagree")
+        parts = []
+        for off in range(0, 16384, 128):
+            e = copies[0][1][off:off + 128]
+            if e[:16] == bytes(16):
+                continue
+            lo, hi = struct.unpack_from("<QQ", e, 32)
+            require(34 <= lo <= hi <= sectors - 34, "partition bounds")
+            parts.append((e[:16], lo, hi, off // 128 + 1))
+        require(len(parts) == 2 and {p[0] for p in parts} == {ESP, BIOS}, "one ESP and one BIOS reservation required")
+        parts.sort(key=lambda p: p[1])
+        require(parts[0][2] < parts[1][1], "partition overlap")
+        esp = next(p for p in parts if p[0] == ESP)
+        bios = next(p for p in parts if p[0] == BIOS)
+        require(esp[3] == 1 and bios[3] == 3, "ESP slot 1 and BIOS slot 3 required")
+        f.seek(esp[1] * 512)
+        bpb = f.read(512)
+        bps = struct.unpack_from("<H", bpb, 11)[0]
+        reserved = struct.unpack_from("<H", bpb, 14)[0]
+        fat16 = struct.unpack_from("<H", bpb, 22)[0]
+        total, fat32 = struct.unpack_from("<II", bpb, 32)
+        cluster, fats = bpb[13], bpb[16]
+        require(bps == 512 and cluster > 0 and cluster & (cluster - 1) == 0 and
+                fat16 == 0 and fat32 > 0 and fats == 2 and reserved >= 1 and
+                total == esp[2] - esp[1] + 1 and bpb[510:] == b"\x55\xaa", "FAT32 ESP geometry")
+        require((total - reserved - fats * fat32) // cluster >= 65525, "ESP is not FAT32 by cluster count")
+        f.seek(bios[1] * 512)
+        require(any(f.read(min(32768, (bios[2] - bios[1] + 1) * 512))), "BIOS stage missing")
+    return esp[1] * 512
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("image", type=Path)
+    parser.add_argument("--expect", action="append", default=[])
+    args = parser.parse_args()
+    image = args.image.resolve()
+    try:
+        offset = table(image)
+        print("PASS U1: protective MBR covers the disk; both GPT copies agree")
+        expected = dict(x.split("=", 1) for x in args.expect)
+        require(set(expected).issubset(FILES), "unknown expected file")
+        with tempfile.TemporaryDirectory(prefix="pax-usb-check-", dir=image.parent) as work:
+            for n, path in enumerate(FILES):
+                out = Path(work) / str(n)
+                r = subprocess.run([str(TOOLS / "disktools"), str(image.parent), "mcopy", "-i",
+                                    f"{image.name}@@{offset}", "::" + path, str(out)],
+                                   capture_output=True, text=True)
+                require(r.returncode == 0 and out.is_file() and out.stat().st_size > 0,
+                        "required boot file missing: " + path + " " + r.stderr.strip())
+                sha = digest(out)
+                if path in expected:
+                    require(sha == digest(expected[path]), "boot file differs: " + path)
+                print("PASS U2: %s sha256 %s" % (path, sha))
+    except (ValueError, OSError) as e:
+        print("FAIL USB: " + str(e))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

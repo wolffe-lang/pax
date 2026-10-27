@@ -76,6 +76,14 @@
 #   tools/mkdisk --gpt --kernel ELF --initramfs CPIO [--conf LIMINE.conf]
 #                [--esp SIZE] [--label NAME] SIZE OUT.img
 #
+# --usb (px73) uses the same GPT/FAT32/BIOS construction without a
+# root or home partition. The complete live tree stays in the initramfs.
+#   tools/mkdisk --usb --kernel ELF --initramfs CPIO [--conf FILE]
+#                [--esp SIZE] [--label NAME] [SIZE] OUT.img
+# Without SIZE, size the ESP for twice the payload plus 16 MiB (at least
+# 64 MiB), and reserve 3 MiB for BIOS, alignment and backup GPT. BIOS
+# uses partition 3, not GPT's header/array sectors. The ISO is unchanged.
+#
 # --root CPIO (px67) makes partition 2 the root file system instead of
 # /home: an ext2 volume holding the archive's whole tree (tools/
 # mkinitramfs' output: every directory, file and symbolic link, read
@@ -118,6 +126,7 @@
 # `OUT <bytes> bytes sha256 <hex>`. Exit 0, 1 when e2fsck (or, --gpt,
 # any oracle) finds a fault, 2 on a usage or tool error.
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -307,8 +316,9 @@ def root_conf(conf, partuuid, fsuuid, keep_module):
     return "\n".join(out) + "\n"
 
 
-def gpt_main(args):
+def gpt_main(args, usb=False):
     kernel = initramfs = None
+    kernel_commit = "unknown"
     root_cpio = None
     home_size = 0
     conf = os.path.join(ROOT, "boot", "limine-initramfs.conf")
@@ -324,7 +334,11 @@ def gpt_main(args):
             die("%s takes a value" % args[0])
         k, v = args[0], args[1]
         args = args[2:]
-        if k == "--kernel":
+        if k == "--kernel-commit" and usb:
+            if not re.fullmatch(r"[0-9a-f]{40}", v):
+                die("--kernel-commit takes the full lowercase git commit")
+            kernel_commit = v
+        elif k == "--kernel":
             kernel = v
         elif k == "--initramfs":
             initramfs = v
@@ -340,6 +354,18 @@ def gpt_main(args):
             home_size = size_of(v)
         else:
             die("unknown option %s" % k)
+    if usb:
+        if root_cpio or home_size or journal is not None:
+            die("--usb keeps the whole live root in the initramfs; no --root, --home-size or journal options")
+        if len(args) == 1 and kernel and initramfs:
+            for path in (kernel, initramfs):
+                if not os.path.isfile(path):
+                    die("no file %s" % path)
+            # FAT32 metadata and generous free space, rounded up to a MiB.
+            payload = sum(os.path.getsize(p) for p in (kernel, initramfs))
+            esp = max(esp, ((payload * 2 + (16 << 20) + (1 << 20) - 1) >> 20) << 20)
+            args.insert(0, str(esp + (3 << 20)))
+        label = "pax-stick" if label == "pax-disk" else label
     if journal is None:
         journal = root_cpio is not None  # px68 (R-px68-3): the root is journalled unless --no-journal
     if journal and not root_cpio:
@@ -349,8 +375,16 @@ def gpt_main(args):
     for f in [kernel, conf] + [x for x in (initramfs, root_cpio) if x]:
         if not os.path.isfile(f):
             die("no file %s" % f)
+    if usb and re.search(r"(?:^|\s)root=", open(conf).read()):
+        die("USB configuration must keep the root in memory (no root=)")
     size = size_of(args[0])
     out = os.path.abspath(args[1])
+    if usb:
+        if os.path.lexists(out) and not stat.S_ISREG(os.lstat(out).st_mode):
+            die("--usb output must be a regular image, never a device or symlink")
+        if any(os.path.realpath(out) == os.path.realpath(p) or
+               (os.path.exists(out) and os.path.samefile(out, p)) for p in (kernel, initramfs, conf)):
+            die("--usb output must not overwrite an input")
     S = 512
     if size % (1 << 20) or esp % (1 << 20) or esp < (33 << 20):
         die("the size and --esp are whole MiB, the ESP at least 33 MiB (FAT32's least)")
@@ -371,7 +405,9 @@ def gpt_main(args):
         if hm[1] > last_usable:
             hm = (hm0 - 2048, hm0 - 2048 + home_size // S - 1)
         h1 = hm[0] - 1
-    if h1 - h0 + 1 < (8 << 20) // S:
+    if usb and e1 > last_usable:
+        die("no room for the ESP and backup GPT")
+    if not usb and h1 - h0 + 1 < (8 << 20) // S:
         die("no room for partition 2 (at least 8 MiB after the ESP)")
     t = epoch()
     work = os.path.dirname(out)
@@ -385,8 +421,9 @@ def gpt_main(args):
         env = {"SOURCE_DATE_EPOCH": str(t)}
         # px67: the table first, so the root's PARTUUID is read back for the
         # configuration (the file systems are written into its windows after).
-        parts = ["1:esp:%d:%d:esp" % (e0, e1), "2:linux:%d:%d:%s" % (h0, h1, "root" if root_cpio else "home"),
-                 "3:bios:%d:%d:bios" % bios]
+        parts = ["1:esp:%d:%d:esp" % (e0, e1), "3:bios:%d:%d:bios" % bios]
+        if not usb:
+            parts.append("2:linux:%d:%d:%s" % (h0, h1, "root" if root_cpio else "home"))
         if hm:
             parts.append("4:linux:%d:%d:home" % hm)
         print(run([os.path.join(HERE, "mkgpt"), "--label", label, out] + parts, "mkgpt", env).strip())
@@ -414,7 +451,7 @@ def gpt_main(args):
                 f.write(root_conf(conf, uniq[0], uuid_of("pax-disk:pax-root:%d" % t), initramfs is not None))
             conf = confp
             print("mkdisk: root=PARTUUID=%s" % uniq[0])
-        if not root_cpio or hm:
+        if not usb and (not root_cpio or hm):
             # Partition 2 (or 4, px67's --home-size): the --home volume, made by this tool's own path and copied in.
             lo, hi = hm if hm else (h0, h1)
             home = os.path.join(stage, "home.img")
@@ -464,7 +501,7 @@ def gpt_main(args):
             die("oracle fsck.fat -n: %s" % fv, 1)
         print("mkdisk: fsck.fat -n: " + [l for l in fv.strip().splitlines() if " files, " in l][-1].strip())
         os.unlink(espf)
-        for pn, (lo, hi) in [(2, (h0, h1))] + ([(4, hm)] if hm else []):
+        for pn, (lo, hi) in ([] if usb else [(2, (h0, h1))]) + ([(4, hm)] if hm else []):
             homef = os.path.join(stage, "p%d.img" % pn)
             copy_range(out, homef, lo * S, (hi - lo + 1) * S)
             rc, so, se = e2fs(work, "e2fsck", "-fn", os.path.relpath(homef, work))
@@ -474,6 +511,15 @@ def gpt_main(args):
             os.unlink(homef)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
+    if usb:
+        # Host-side identity; px82 owns the archive's /etc/pax-banner.
+        identity = {"kernel_commit": kernel_commit, "kernel_sha256": sha_of(kernel),
+                    "initramfs_sha256": sha_of(initramfs), "image_sha256": sha_of(out),
+                    "bytes": size, "source_date_epoch": t}
+        with open(out + ".inputs.json", "w") as f:
+            json.dump(identity, f, sort_keys=True, indent=2)
+            f.write("\n")
+        print("mkdisk: USB inputs " + json.dumps(identity, sort_keys=True))
     print("%s %d bytes sha256 %s" % (out, size, sha_of(out)))
 
 
@@ -499,8 +545,8 @@ def main(argv):
     journal = False
     args = argv[1:]
     home = None
-    if args and args[0] == "--gpt":
-        gpt_main(args[1:])
+    if args and args[0] in ("--gpt", "--usb"):
+        gpt_main(args[1:], usb=args[0] == "--usb")
         return
     if args and args[0] == "--home":
         args = args[1:]
