@@ -18,11 +18,13 @@ if [ "$tier" = both ] || [ "$firmware" = both ]; then
     [ "$tier" != both ] || tiers='native release'
     [ "$firmware" != both ] || legs='bios uefi'
     for t in $tiers; do
+        reuse=$images
         for f in $legs; do
             extra=()
-            [ -z "$images" ] || extra+=(--images "$images")
+            [ -z "$reuse" ] || extra+=(--images "$reuse")
             [ -z "$linux_kernel" ] || extra+=(--linux-kernel "$linux_kernel")
             "$0" --tier "$t" --firmware "$f" --topology "$topology" "${extra[@]}"
+            [ -n "$reuse" ] || reuse=$PAX_BUILD/mpx6-usb/$t
         done
     done
     exit 0
