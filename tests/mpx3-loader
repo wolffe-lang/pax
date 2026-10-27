@@ -305,12 +305,30 @@ for leg in $legs; do
 
         # L3
         why=
-        want=$(readelf -lW "$user/hello" | awk '$1 == "LOAD" { va = strtonum($3); ms = strtonum($6); f = $7; if ($8 != "" && $8 !~ /^0x/) f = f $8; r = (f ~ /R/) ? "r" : "-"; w = (f ~ /W/) ? "w" : "-"; x = (f ~ /E/) ? "x" : "-"; printf " 0x%016x-0x%016x %s%s%s", va, va + ms, r, w, x; n++ } END { printf "|%d", n }')
+        want=$(python3 -I - "$user/hello" <<'ELF'
+import subprocess, sys
+text = subprocess.check_output(['readelf', '-lW', sys.argv[1]], text=True)
+segments = []
+for line in text.splitlines():
+    fields = line.split()
+    if fields and fields[0] == 'LOAD':
+        va, size = int(fields[2], 16), int(fields[5], 16)
+        flags = ''.join(fields[6:-1])
+        perms = ''.join(letter if flag in flags else '-' for flag, letter in [('R','r'),('W','w'),('E','x')])
+        segments.append(f' 0x{va:016x}-0x{va+size:016x} {perms}')
+header = subprocess.check_output(['readelf', '-hW', sys.argv[1]], text=True)
+entry = next(int(line.split(':',1)[1].strip(),16) for line in header.splitlines() if 'Entry point address:' in line)
+assert segments, 'readelf reports no loadable segments'
+print(''.join(segments) + f'|{len(segments)}|0x{entry:016x}')
+ELF
+        )
+        entry=${want##*|}; want=${want%|*}
         segs=${want%|*} nseg=${want##*|}
-        entry=$(readelf -hW "$user/hello" | awk '/Entry point address/ { printf "0x%016x", strtonum($4) }')
+        stack_pages=$(sed -nE 's/^pub const USER_STACK_PAGES: u64 = ([0-9]+).*$/\1/p' "$PAX_ROOT/kernel/procfs/procfs.lu")
+        [ -n "$stack_pages" ] || die 'cannot read the fixed user-stack policy'
         hl=$(grep -E "^user: exec pid $hpid cr3 $HEX entry " "$norm" | head -n 1)
         case $hl in
-            *" entry $entry rsp "*", $nseg PT_LOAD:$segs, stack 256 pages below 0x00007ffffffff000") ;;
+            *" entry $entry rsp "*", $nseg PT_LOAD:$segs, stack $stack_pages pages below 0x00007ffffffff000") ;;
             *) why+=" the exec line '$hl' does not name entry $entry and$segs;" ;;
         esac
         case $segs in *rwx*) why+=" a segment is both w and x;" ;; esac
