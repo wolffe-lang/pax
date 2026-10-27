@@ -14,6 +14,13 @@ was read only to confirm built-in xHCI and HID support. The test program
 includes the installed Linux uapi `linux/input.h` for `EVIOCGREP` (250 ms
 and 33 ms, measured), not a driver header. Existing PAX PCI, virtio,
 interrupt, console and px70 keyboard-test code are this project's own.
+The release-build follow-up also read the project's own wolf compiler
+`crates/wolf_wir/src/midend/rangeopt.rs` and
+`crates/wolf_codegen_llvm/src/lib.rs` (range analysis and the documented
+`WOLF_CLANG` seam), and px75's `f57d3770` change description. The measured
+compiler remains the pinned 0.2.35 archive; the capture wrapper preserves
+clang's arguments. `kernel/usb_topology` contains the same specification-
+derived helpers extracted from `kernel/xhci`, not a second implementation.
 
 | source | version | consulted for |
 |---|---|---|
