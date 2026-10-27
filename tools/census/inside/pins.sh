@@ -33,3 +33,6 @@ IMAGE_YEW_REV=0ccb2c67661a2dd789b5ce86180d592370a79c31
 
 # px82 current-image snapshot; px04 trace inputs above remain historical.
 IMAGE_BORE_REV=0f7a57b68829765f60c39ced01edb7ea75265eb8
+
+# px82 current-image snapshot; px04 trace inputs above remain historical.
+IMAGE_SCENT_REV=81d761d6d3b3c32f83a7b54801728088afea245a
