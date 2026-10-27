@@ -13,6 +13,11 @@ while [ $# -gt 0 ]; do
         *) die 'usage: mpx6-usb [--tier native|release] [--firmware bios|uefi] [--images DIR] [--linux-kernel FILE] [--topology root|hub|nested|all]';;
     esac
 done
+# One supplied image cannot prove two compiler tiers. Internal firmware
+# reuse always passes a single explicit tier.
+if [ -n "$images" ] && [ "$tier" = both ]; then
+    die '--images needs --tier native or release'
+fi
 if [ "$tier" = both ] || [ "$firmware" = both ]; then
     tiers=$tier; legs=$firmware
     [ "$tier" != both ] || tiers='native release'
