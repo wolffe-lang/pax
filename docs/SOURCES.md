@@ -6,6 +6,24 @@ entries: what it consulted, at which version, for which file, and how
 **Linux kernel source is never an entry**: the allowed Linux material is the
 uapi headers, the syscall tables, `Documentation/`, and black-box behaviour.
 
+## px74 — xHCI and USB keyboards (2026-10-27)
+
+No kernel, firmware, hypervisor or USB driver's implementation source was
+read. The Linux guest is an unmodified kernel binary; `modules.builtin`
+was read only to confirm built-in xHCI and HID support. The test program
+includes the installed Linux uapi `linux/input.h` for `EVIOCGREP` (250 ms
+and 33 ms, measured), not a driver header. Existing PAX PCI, virtio,
+interrupt, console and px70 keyboard-test code are this project's own.
+
+| source | version | consulted for |
+|---|---|---|
+| [Intel xHCI Requirements Specification](https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/extensible-host-controler-interface-usb-xhci.pdf) | 1.2, May 2019 | Read §§4.2–4.3, 4.9, 4.17, 4.20; operational/runtime registers; §6.2 slot and endpoint contexts; §6.4 TRBs; §7.1 legacy ownership. `kernel/xhci`: rings, context sizes, root ports, routing and TT fields, scratchpads, INTx. |
+| [USB 2.0 specification bundle](https://www.usb.org/sites/default/files/usb_20_20250603.zip), `usb_20.pdf` | 2.0 | Read chapter 9's device/configuration/interface/endpoint descriptors and requests; chapter 11's hub descriptor, power, reset, status and change acknowledgement. `kernel/xhci`: bounded descriptor walking and USB2 hubs. |
+| [USB 3.2 specification bundle](https://usb.org/sites/default/files/usb_32_202206_0.zip), `USB 3.2 Revision 1.1.pdf` | 1.1, June 2022 | Read §8.9 route nibbles, §9.1.2 enumeration and §10.16 hub requests. Hubs are chapter 10 in this revision, not chapter 11. SuperSpeed devices are enumerated but not driven. |
+| [Device Class Definition for HID](https://www.usb.org/sites/default/files/documents/hid1_11.pdf) | 1.11 | Read §7.2.4 SET_IDLE, §7.2.6 SET_PROTOCOL, appendices B/C/F: eight-byte boot reports, six unordered usages, rollover, host repeat and lock state. |
+| [HID Usage Tables](https://www.usb.org/sites/default/files/hut1_7.pdf) | 1.7, §10 | Read the keyboard/keypad usage table. `kernel/usb_keys` maps usages to PAX's physical-key identifiers, not a second character table. |
+| Linux guest, QEMU and the original `user/elf/usbkeys.c` probe | Linux 7.3.0-4-cachyos; QEMU 8.2.2 | Black-box key bytes, repeat settings/timestamps, hot-unplug and replug. Kernel binary digest and raw records in `notes/px74/`; no Linux implementation source read. |
+
 ## px00 — the harness (2026-10-02)
 
 **Linux: nothing.** `wolf/refs/repos/linux` was not opened; no Linux file of
