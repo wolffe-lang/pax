@@ -401,6 +401,47 @@ second, blank disk is `vdb`:
     qemu-system-x86_64 … -drive file=pax-disk.img,if=none,id=d0,format=raw -device virtio-blk-pci,drive=d0,bootindex=0 \
         -drive file=blank.img,if=none,id=d1,format=raw -device virtio-blk-pci,drive=d1
 
+## NVMe disks (px75)
+
+kernel/nvme drives every NVM Express controller on the bus (PCI class
+01.08.02, in kernel/pci's order, up to four), each with one I/O queue
+pair, polled, and kernel/block names each active namespace as the Linux
+guest does: `nvme0n1`, `nvme0n2` (the controller's namespaces counted,
+not numbered by NSID), `nvme1n1` for the next controller, and the
+partitions `nvme0n1p1` …, every one on major 259 (`nvme0n1` 259:0 when it
+is the first; every NVMe disk takes its minor before any partition does).
+Virtio disks come first in kernel/block's table and keep their names;
+four disks in all. At boot each controller says, in one line, what a
+photograph of a real machine's screen should show:
+
+    nvme0: 1b36:0010 at 00:03.0, NVMe 1.4.0 "QEMU NVMe Ctrl" serial "paxnvme0" firmware "8.2.2"; MDTS 512 KiB, 256 namespaces, 1 active, a volatile write cache; nvme0n1 (namespace 1): 131072 blocks of 512 bytes; the I/O queue pair: 64 entries (asked 64, MQES 2048), 64 SQ and 64 CQ granted, a single pair, polled; the firmware left it enabled
+    block: nvme0n1: 131072 sectors (67108864 bytes), 259:0, read-write, flush
+
+(the PCI vendor and device ids and the slot are `lspci -nn`'s; "asked"
+is the depth the driver asked for, `min(64, MQES + 1)`, halved while the
+controller answers Invalid Queue Size; "granted" is Set Features, Number
+of Queues; "the firmware left it enabled" when CC.EN was set: SeaBIOS
+and OVMF both leave a controller they probed so). A controller that is
+refused says why on the same kind of line (`nvme0: <vvvv>:<dddd> at
+<bb>:<dd>.<f>: refused: …; no disk`), and the boot goes on. At the end, after
+the volumes are written and flushed, each controller is shut down
+normally (CC.SHN) and says its books:
+
+    nvme0: 1b36:0010 at 00:03.0: 245 commands (136 reads, 104 writes, 5 flushes; 23294 and 22525 sectors), 0 errors, 6 admin; shut down
+
+`tools/qemu-run --nvme FILE` (and `tools/qemu-halt` the same) gives an
+image an NVMe controller of its own, `-device nvme,serial=paxnvmeN`, in
+the order given among the `--drive` options (`--nvme 'FILE;
+logical_block_size=4096,physical_block_size=4096'` with the device's
+own properties); `--boot-nvme` puts the boot disk itself on one, which
+SeaBIOS and OVMF boot, and its `root=PARTUUID=` finds `/` on
+`nvme0n1p2`:
+
+    qemu-system-x86_64 … -drive file=pax-disk.img,if=none,id=d0,format=raw -device nvme,serial=paxboot,drive=d0,bootindex=0
+
+`tools/rootdisk-leg` with `PAX_ROOTDISK_BUS=nvme` boots a whole suite's
+images that way (CI: mpx5-users, in the full and all tiers).
+
 ## Measured
 
 The proof's runs, both firmwares, the same ISO on linux and macOS: see
