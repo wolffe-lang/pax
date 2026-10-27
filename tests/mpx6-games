@@ -176,6 +176,11 @@ PY
     HOME=$work/linux/home "$work/games/cub" --headless --tier rich --script "$work/src/cub/tests/cases/opening.pk" \
         --frames 90 --every 1 --dump "$G/cub-title" > "$G/cub-title.out" 2>&1 || why+=" headless cub opening;"
     headless cub "$work/src/cub/tests/cases/walk-north.pk" 120 "$G/cub-scene" || why+=" headless cub walk-north;"
+    # The refreshed cub scene animates after the recorded walk. Keep the
+    # authored 120-frame golden check above, and capture its later trajectory.
+    HOME=$work/linux/home "$work/games/cub" --headless --tier rich --script "$work/src/cub/tests/cases/walk-north.pk" \
+        --frames 600 --every 1 --dump "$G/cub-motion" > "$G/cub-motion.out" 2>&1 || why+=" headless cub animated scene;"
+
     headless pack "$work/src/pack/tests/cases/death-card.pk" 1150 "$G/pack-death" || why+=" headless pack death-card;"
     for row in trail-title:trail:title-80-rich cub-scene:cub:walk-north-rich pack-death:pack:death-card-rich; do
         IFS=: read -r f g c <<< "$row"
@@ -339,10 +344,11 @@ for leg in $legs; do
             bad "G3 $id: $(printf '%s\n' "$r" | tail -n 1)"
         fi
         for row in trail-title:frame:trail-title/final trail-scene:frame:trail-scene/final cub-title:oneof:cub-title \
-                   cub-scene:frame:cub-scene/final pack-title:frame:pack-title.apply pack-scene:frame:pack-scene.apply; do
+                   cub-scene:oneof:cub-motion pack-title:frame:pack-title.apply pack-scene:frame:pack-scene.apply; do
             IFS=: read -r name mode gold <<< "$row"
             if [ "$mode" = oneof ]; then
-                r=$(cmp_py oneof "$name" "$out/$name.ppm" "$G/$gold" 1 89 2>&1)
+                last=89; [ "$name" != cub-scene ] || last=599
+                r=$(cmp_py oneof "$name" "$out/$name.ppm" "$G/$gold" 1 "$last" 2>&1)
             else
                 r=$(cmp_py frame "$name" "$out/$name.ppm" "$G/$gold" 2>&1)
             fi
