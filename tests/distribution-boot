@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Boot the actual release and dev ISOs, both firmwares; inspect guest output.
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+[ $# -eq 1 ] || die 'usage: distribution-boot IMAGE_DIRECTORY'
+out=$(realpath "$1")
+head=$(cat "$out/commit")
+for variant in release dev; do
+    name=pax-${head:0:8}.iso
+    [ "$variant" = dev ] && name=pax-dev-${head:0:8}.iso
+    # Read the ISO back: validation of an input cpio alone is insufficient.
+    extracted=$out/$variant.iso.cpio
+    xorriso -osirrox on -indev "$out/$name" -extract /boot/initramfs.cpio "$extracted" > "$out/$variant.extract.log" 2>&1
+    cmp "$out/$variant.cpio" "$extracted"
+    rm "$extracted"
+    for firmware in bios uefi; do
+        log=$out/$variant-$firmware.serial.log
+        PAX_TYPE_PAUSE=2 "$PAX_ROOT/tools/qemu-halt" --firmware "$firmware" --serial "$log" \
+            --timeout 300 --qemu -m --qemu 2048M --elf "$out/kernel/kmain_console.elf" \
+            --type "$PAX_ROOT/user/console/distribution.keys" --prompt '$ ' --marker 'halt|PANIC .*' \
+            "$out/$name" > "$out/$variant-$firmware.halt.log" 2>&1
+        python3 -I - "$log" "$out" <<'PY'
+from pathlib import Path
+import hashlib, re, sys
+log, root = map(Path, sys.argv[1:])
+raw = log.read_bytes()
+normal = re.sub(rb'\x1b\[[0-9;?]*[A-Za-z]', b'', raw).replace(b'\r', b'')
+lines = normal.splitlines()
+release = (root/'pax-release').read_bytes()
+for line in release.splitlines():
+    assert line in lines, 'guest-release-line: ' + repr(line)
+for line in [(root/'pax-banner').read_bytes().strip(),
+             b'PX82-PID=1', b'42', b'PX82-FLOAT=1.12', b'PX82-PCRE=2', b'PX82-END',
+             hashlib.sha256(release).hexdigest().encode()+b'  /etc/pax-release',
+             b'PAX: init /bin/env ended with status 0; nothing left to run']:
+    assert line in lines, 'guest-row: ' + repr(line)
+assert b'PANIC ' not in normal
+print('I2 PASS', log.name, 'pid1, complete release, guest SHA256, Fletch, printf, phased -P, clean halt')
+PY
+    done
+done
