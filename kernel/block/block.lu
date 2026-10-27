@@ -2428,6 +2428,15 @@ fn put_why(w: u64, val: u64) {
     }
 }
 
+// px75: the report is five functions, each called once, not one. The
+// release tier's range pass re-seeds a function's every branch once for
+// each loop it might version, so its cost grows with the square of a
+// function's branches. As one function the report took 14 of 83 gdb
+// samples of a release kernel's mid-end at trunk, and 42 of 107 once
+// px75's code moved kernel/serial's put into its codegen cluster and the
+// cross-cluster phase inlined it 114 times (pax#215; notes/px75-nvme.md,
+// R-px75-10).
+
 fn table_report() {
     let k = pt(S_PT_KIND)
     let disk = cur_disk()
@@ -2435,6 +2444,21 @@ fn table_report() {
     if k == PT_NONE || k == PT_NOTMBR {
         return
     }
+    if k == PT_IO || k == PT_LBS || k == PT_GPTBAD {
+        table_refused(k, disk, last)
+        return
+    }
+    table_header(k, last)
+    table_refusals()
+    var d = next_part(st(S_CUR), 0)
+    while d != DEVS {
+        part_line(d)
+        d = next_part(st(S_CUR), partno(d))
+    }
+}
+
+/// The table read refused whole (PT_IO, PT_LBS, PT_GPTBAD): its line.
+fn table_refused(k: u64, disk: u64, last: u64) {
     if k == PT_IO {
         disk_says("the partition table: LBA 0 could not be read; ")
         put_name(disk)
@@ -2464,6 +2488,10 @@ fn table_report() {
         log.end()
         return
     }
+}
+
+/// The table's own line (GPT or MBR), and a GPT header's notes before it.
+fn table_header(k: u64, last: u64) {
     if k == PT_GPT {
         let h = if pt(S_PT_USED) == 1 { H_P } else { H_B }
         if pt(S_PT_USED) == 2 {
@@ -2514,6 +2542,10 @@ fn table_report() {
     log.dec(np as int)
     log.put(if np == 1 { " partition" } else { " partitions" })
     log.end()
+}
+
+/// The table's entries refused: an extended partition, bad entries, too many.
+fn table_refusals() {
     if pt(S_PT_EXT) != 0 {
         disk_says("refused: an extended partition (type 0x")
         log.hex_n(pt(S_PT_EXT) >> 8, 2)
@@ -2540,45 +2572,45 @@ fn table_report() {
         log.put(")")
         log.end()
     }
-    var d = next_part(st(S_CUR), 0)
-    while d != DEVS {
-        log.put("block: ")
-        put_name(d)
-        log.put(": ")
-        log.dec(dw(d, D_MAJOR) as int)
-        log.put(":")
-        log.dec(dw(d, D_MINOR) as int)
-        log.put(", sectors ")
-        log.dec(dw(d, D_START) as int)
-        log.put("-")
-        log.dec((dw(d, D_START) + dw(d, D_SECTORS) - 1) as int)
-        log.put(" (")
-        log.dec(dw(d, D_SECTORS) as int)
-        log.put(" sectors, ")
-        log.dec((dw(d, D_SECTORS) * 512) as int)
-        log.put(" bytes), type ")
-        if dw(d, D_KIND) == KIND_GPT {
-            put_guid(dw(d, D_TYPE), dw(d, D_TYPE + 1))
-        } else {
-            log.put("0x")
-            log.hex_n(dw(d, D_TYPE), 2)
-        }
-        log.put(", PARTUUID ")
-        put_partuuid(d)
-        if dw(d, D_KIND) == KIND_GPT {
-            log.put(", name ")
-            log.put_byte(34)
-            let p = rec(d) + D_NAME * 8
-            var i: u64 = 0
-            while i < dw(d, D_NAMELEN) {
-                log.put_byte(b8(p + i) as int)
-                i += 1
-            }
-            log.put_byte(34)
-        }
-        log.end()
-        d = next_part(st(S_CUR), partno(d))
+}
+
+/// Partition `d`'s line.
+fn part_line(d: u64) {
+    log.put("block: ")
+    put_name(d)
+    log.put(": ")
+    log.dec(dw(d, D_MAJOR) as int)
+    log.put(":")
+    log.dec(dw(d, D_MINOR) as int)
+    log.put(", sectors ")
+    log.dec(dw(d, D_START) as int)
+    log.put("-")
+    log.dec((dw(d, D_START) + dw(d, D_SECTORS) - 1) as int)
+    log.put(" (")
+    log.dec(dw(d, D_SECTORS) as int)
+    log.put(" sectors, ")
+    log.dec((dw(d, D_SECTORS) * 512) as int)
+    log.put(" bytes), type ")
+    if dw(d, D_KIND) == KIND_GPT {
+        put_guid(dw(d, D_TYPE), dw(d, D_TYPE + 1))
+    } else {
+        log.put("0x")
+        log.hex_n(dw(d, D_TYPE), 2)
     }
+    log.put(", PARTUUID ")
+    put_partuuid(d)
+    if dw(d, D_KIND) == KIND_GPT {
+        log.put(", name ")
+        log.put_byte(34)
+        let p = rec(d) + D_NAME * 8
+        var i: u64 = 0
+        while i < dw(d, D_NAMELEN) {
+            log.put_byte(b8(p + i) as int)
+            i += 1
+        }
+        log.put_byte(34)
+    }
+    log.end()
 }
 
 /// The books' line, and one for each partition a request was made to:
