@@ -7,6 +7,11 @@
 #                    [--accel tcg|kvm] [--device-opts OPTS] [--append ARGS]
 #                    OUTDIR IMAGE
 #
+# --usb-stick (px73) uses xHCI plus USB bulk-only mass storage instead
+# of virtio. Give all five --expect /ESP/PATH=HOSTFILE boot files: the
+# Linux guest mounts sda1 read-only and compares their SHA256 digests.
+# This is a real Linux guest; linux-run is a host chroot, not one.
+#
 # Builds an initramfs in OUTDIR from a static busybox (the px13-ubuntu
 # container's by default), util-linux's lsblk and blkid with the
 # libraries they link (from tools/e2fs's pinned image, the CI runner's
@@ -44,6 +49,7 @@ busybox=
 accel=tcg
 devopts=
 append=
+usbstick=0 expects=()
 image=${PAX_E2FS_IMAGE:-docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55}
 engine=${PAX_ENGINE:-}
 if [ -z "$engine" ]; then
@@ -51,6 +57,8 @@ if [ -z "$engine" ]; then
 fi
 while [ $# -gt 0 ]; do
     case $1 in
+        --usb-stick) usbstick=1; shift ;;
+        --expect) expects+=("$2"); shift 2 ;;
         --kernel) kernel=$2; shift 2 ;;
         --modules) modules=$2; shift 2 ;;
         --busybox) busybox=$2; shift 2 ;;
@@ -89,18 +97,51 @@ opts=()
         done
     done' || die "lsblk and blkid from $image"
 
-# The disk's module, when it is not built in.
-if ! grep -Eq '/virtio[-_]blk\.ko$' "$modules/modules.builtin" 2>/dev/null; then
-    line=$(grep -E '/virtio[-_]blk\.ko(\.zst|\.xz|\.gz)?:' "$modules/modules.dep" | head -n 1)
-    [ -n "$line" ] || die "virtio_blk neither built in nor in modules.dep"
+# Stage binary modules and their documented modules.dep dependency lists.
+# The recursive ordering follows the existing linux-nodes recipe.
+order=()
+seen=" "
+add_module() {
+    local m=$1 line deps d path n
+    grep -Eq "/${m//-/[-_]}\\.ko\$" "$modules/modules.builtin" 2>/dev/null && return
+    line=$(grep -E "/${m//-/[-_]}\\.ko(\\.zst|\\.xz|\\.gz)?:" "$modules/modules.dep" | head -n 1)
+    [ -n "$line" ] || die "module $m neither built in nor in modules.dep"
     path=${line%%:*}
-    case $path in
-        *.zst) zstd -q -d -c "$modules/$path" > "$root/lib/modules/virtio_blk.ko" ;;
-        *.xz) xz -d -c "$modules/$path" > "$root/lib/modules/virtio_blk.ko" ;;
-        *.gz) gzip -d -c "$modules/$path" > "$root/lib/modules/virtio_blk.ko" ;;
-        *) cp "$modules/$path" "$root/lib/modules/virtio_blk.ko" ;;
-    esac
+    case $seen in *" $path "*) return ;; esac
+    seen="$seen$path "
+    deps=${line#*:}
+    for d in $(echo "$deps" | tr ' ' '\n' | tac); do
+        n=${d##*/}; n=${n%%.ko*}; add_module "$n"
+    done
+    order+=("$path")
+}
+if [ "$usbstick" = 1 ]; then
+    [ -z "$devopts" ] || die "--device-opts is not a USB option"
+    for m in xhci-pci usb-storage sd_mod vfat nls_cp437 nls_iso8859-1; do add_module "$m"; done
+    printf 'disk=sda\nusb=1\n' > "$root/etc/disk"
+else
+    add_module virtio_blk
+    printf 'disk=vda\nusb=0\n' > "$root/etc/disk"
 fi
+: > "$root/lib/modules/order"
+for path in ${order[@]+"${order[@]}"}; do
+    n=${path##*/}; n=${n%%.ko*}
+    case $path in
+        *.zst) zstd -q -d -c "$modules/$path" > "$root/lib/modules/$n.ko" ;;
+        *.xz) xz -d -c "$modules/$path" > "$root/lib/modules/$n.ko" ;;
+        *.gz) gzip -d -c "$modules/$path" > "$root/lib/modules/$n.ko" ;;
+        *) cp "$modules/$path" "$root/lib/modules/$n.ko" ;;
+    esac
+    echo "$n" >> "$root/lib/modules/order"
+done
+: > "$root/etc/usb.sha256"
+for e in ${expects[@]+"${expects[@]}"}; do
+    dest=${e%%=*}; src=${e#*=}
+    case $dest in /EFI/BOOT/BOOTX64.EFI|/boot/pax|/boot/initramfs.cpio|/boot/limine/limine.conf|/boot/limine/limine-bios.sys) ;; *) die "unexpected boot file $dest" ;; esac
+    [ -f "$src" ] || die "no expected file $src"
+    printf '%s  /mnt%s\n' "$(sha256sum "$src" | cut -d' ' -f1)" "$dest" >> "$root/etc/usb.sha256"
+done
+[ "$usbstick" = 0 ] || [ "${#expects[@]}" -eq 5 ] || die "USB oracle needs all five --expect boot files"
 
 cat > "$root/init" <<'INIT'
 #!/bin/busybox sh
@@ -108,13 +149,14 @@ cat > "$root/init" <<'INIT'
 /bin/busybox --install -s /bin
 export PATH=/usr/sbin:/usr/bin:/bin
 mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev
-[ -f /lib/modules/virtio_blk.ko ] && insmod /lib/modules/virtio_blk.ko
-n=0; while [ ! -b /dev/vda ] && [ $n -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
+. /etc/disk
+for m in $(cat /lib/modules/order); do insmod /lib/modules/$m.ko || echo "linux-part: insmod $m failed"; done
+n=0; while [ ! -b /dev/$disk ] && [ $n -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
 sleep 0.5
 echo "linux-part: uname $(uname -r)"
 echo "linux-part: begin partitions"; cat /proc/partitions; echo "linux-part: end partitions"
 echo "linux-part: begin sysfs"
-for d in /sys/block/vda /sys/block/vda/vda*; do
+for d in /sys/block/$disk /sys/block/$disk/$disk*; do
     [ -e "$d/dev" ] || continue
     n=${d##*/}
     printf '%s dev %s start %s size %s partition %s ro %s\n' "$n" "$(cat $d/dev)" "$(cat $d/start 2>/dev/null || echo -)" \
@@ -122,16 +164,27 @@ for d in /sys/block/vda /sys/block/vda/vda*; do
 done | sort -V
 echo "linux-part: end sysfs"
 echo "linux-part: begin lsblk"
-/usr/bin/lsblk -b -o NAME,START,SIZE,PARTUUID /dev/vda
-/usr/bin/lsblk -b -n -l -o NAME,MAJ:MIN,PARTLABEL,PARTTYPE,PARTUUID,UUID,LABEL /dev/vda
+/usr/bin/lsblk -b -o NAME,START,SIZE,PARTUUID /dev/$disk
+/usr/bin/lsblk -b -n -l -o NAME,MAJ:MIN,PARTLABEL,PARTTYPE,PARTUUID,UUID,LABEL /dev/$disk
 echo "linux-part: end lsblk"
 echo "linux-part: begin blkid"
-for b in /dev/vda /dev/vda[0-9]*; do [ -b "$b" ] || continue; echo "== $b"; /usr/sbin/blkid -p -o export "$b"; echo "status $?"; done
-/usr/sbin/blkid -c /dev/null /dev/vda /dev/vda[0-9]* | sort -V
+for b in /dev/$disk /dev/$disk[0-9]*; do [ -b "$b" ] || continue; echo "== $b"; /usr/sbin/blkid -p -o export "$b"; echo "status $?"; done
+/usr/sbin/blkid -c /dev/null /dev/$disk /dev/$disk[0-9]* | sort -V
 echo "linux-part: end blkid"
 echo "linux-part: begin dmesg"
 dmesg | sed 's/^\[[ 0-9.]*\] //' | grep -E 'GPT|vda|[Pp]artition|Alternate|Primary|EFI'
 echo "linux-part: end dmesg"
+if [ "$usb" = 1 ]; then
+    mkdir -p /mnt
+    if mount -t vfat -o ro /dev/sda1 /mnt && sha256sum -c /etc/usb.sha256; then
+        echo 'linux-part: USB ESP files identical'
+    else
+        echo 'linux-part: USB ESP verification failed'
+        poweroff -f
+        exit 1
+    fi
+    umount /mnt || { poweroff -f; exit 1; }
+fi
 echo "linux-part: end"
 poweroff -f
 INIT
@@ -140,11 +193,17 @@ chmod +x "$root/init"
 
 acc=(-accel tcg -cpu max)
 [ "$accel" = kvm ] && acc=(-accel kvm -cpu host)
+qd=(-drive "file=$img,if=none,id=d0,format=raw,readonly=on")
+if [ "$usbstick" = 1 ]; then
+    qd+=(-device qemu-xhci,id=xhci -device usb-storage,bus=xhci.0,drive=d0)
+else
+    qd+=(-device "virtio-blk-pci,drive=d0$devopts")
+fi
 set +e
 timeout 600 qemu-system-x86_64 -machine q35 "${acc[@]}" -m 1G -nographic -no-reboot \
     -kernel "$kernel" -initrd "$out/initramfs.cpio" \
     -append "console=ttyS0 quiet loglevel=1 panic=-1$append" \
-    -drive "file=$img,if=none,id=d0,format=raw,readonly=on" -device "virtio-blk-pci,drive=d0$devopts" \
+    "${qd[@]}" \
     -nic none > "$out/serial.log" 2>&1 < /dev/null
 rc=$?
 set -e
