@@ -1460,3 +1460,10 @@ The org-owned cub tree moves from `6153d97555b3e1ae7406b9405df0e2cd10033af9` to 
 Launch head read twice; codeload archive SHA256 `e1f71ea009b0c4710309edf68c0d57f025c04fe384eabfc4ab71e0a14a55cfd3`
 read twice on hasu. Its unmodified lair.pin selects `57870143ebbb4806b8bee40379e8c6e781f50842`;
 the engine column follows that pin, not an unrelated lair trunk.
+
+## px82: trail launch pin
+
+The org-owned trail tree moves from `6dbe253fad3c73225c547a036aa8ec786abd91dc` to `59050227e82d7d97401f4747207c0acef9e99afd` (16 commits).
+Launch head read twice; codeload archive SHA256 `352cc3bd10ba7b1ec3840c7e058b9a675b5a3477d5d355629c2f556658676202`
+read twice on hasu. Its unmodified lair.pin selects `57870143ebbb4806b8bee40379e8c6e781f50842`;
+the engine column follows that pin, not an unrelated lair trunk.
