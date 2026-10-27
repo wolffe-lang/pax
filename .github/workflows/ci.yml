@@ -134,7 +134,9 @@ jobs:
           fetch-depth: 0
 
       - name: the planner can say no (tests/ci-plan)
-        run: tests/ci-plan
+        run: |
+          tests/ci-plan
+          python3 -I tests/ci-retry.py
 
       - name: the plan
         id: plan
@@ -2874,7 +2876,10 @@ jobs:
           PAX_REQUIRE_UEFI: "1"
           PAX_ENGINE: docker
           PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
-        run: tests/mpx5-pelt $PAX_LEGS
+        run: |
+          tests/mpx5-pelt --only build $PAX_LEGS
+          tools/ci-retry mpx5-pelt-linux --keep build/mpx5-pelt/linux -- tests/mpx5-pelt --only linux --images build/mpx5-pelt
+          tests/mpx5-pelt --images build/mpx5-pelt $PAX_LEGS
 
       - name: the same suite with / on a disk, native BIOS (px67, tools/rootdisk-leg; the full and all tiers, a long suite)
         if: needs.plan.outputs.tier != 'pr'
@@ -2900,6 +2905,7 @@ jobs:
             build/mpx5-pelt/run-names
             build/mpx5-pelt-*.log*
             build/mpx5-pelt-friendly-*/
+            build/ci-attempts/
           retention-days: 14
           if-no-files-found: warn
 

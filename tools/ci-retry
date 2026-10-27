@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""One retry for an explicitly identified open flake, never a build error.
+
+ci-retry LABEL [--logs DIR] [--keep DIR] -- COMMAND [ARG...]
+The workflow uploads the log directory even on failure. Attempt one is
+immutable across attempt two, including its transcript snapshot. Removing
+an entry from KNOWN retires its retry; unknown labels still run once.
+"""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+
+# R-px83-1(A). Only #196 remains: the unchanged Linux reference shell
+# waits on a futex with an unreaped child after the background-true row.
+KNOWN = {
+    'mpx5-pelt-linux': (196, [
+        r"linux-tty: prompt 24 .* did not come for step 24:",
+        r"mpx5-pelt: FAIL F0 Linux replay",
+    ]),
+}
+
+
+def fingerprint(directory):
+    return {str(p.relative_to(directory)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(directory.rglob('*')) if p.is_file()}
+
+
+def attempt(command, directory, number):
+    path = directory / ('attempt-%d.log' % number)
+    with path.open('xb') as log:
+        try:
+            proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        except OSError as e:
+            log.write((str(e) + '\n').encode())
+            return 2
+        while True:
+            chunk = proc.stdout.read1(65536)
+            if not chunk:
+                break
+            log.write(chunk)
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+        code = proc.wait()
+    return code if code >= 0 else 128 - code
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('label')
+    ap.add_argument('--logs', type=Path)
+    ap.add_argument('--keep', type=Path)
+    # Split at -- so command arguments never become wrapper options.
+    if '--' not in sys.argv:
+        ap.error('command must follow --')
+    split = sys.argv.index('--')
+    args = ap.parse_args(sys.argv[1:split])
+    command = sys.argv[split + 1:]
+    if not command:
+        ap.error('empty command')
+    logs = args.logs or Path('build/ci-attempts') / args.label
+    logs.mkdir(parents=True, exist_ok=True)
+    if any(logs.iterdir()):
+        ap.error('refusing to overwrite previous attempts in ' + str(logs))
+    rc = attempt(command, logs, 1)
+    (logs / 'attempt-1.json').write_text(json.dumps({'exit': rc}) + '\n')
+    known = KNOWN.get(args.label)
+    text = (logs / 'attempt-1.log').read_text(errors='replace')
+    # Suite failures are 1; usage/build/tool errors (2) are never retried.
+    if rc != 1 or known is None or not all(re.search(p, text) for p in known[1]):
+        return rc
+    if args.keep:
+        if not args.keep.is_dir():
+            print('::error::known-flake first-attempt evidence directory missing')
+            return 1
+        shutil.copytree(args.keep, logs / 'first-evidence')
+    first = fingerprint(logs)
+    (logs / 'first-sha256.json').write_text(json.dumps(first, sort_keys=True) + '\n')
+    print('::warning::flaky-known:pax#%d: retry %s once; first attempt retained in %s' %
+          (known[0], args.label, logs), flush=True)
+    rc = attempt(command, logs, 2)
+    (logs / 'attempt-2.json').write_text(json.dumps({'exit': rc}) + '\n')
+    current = fingerprint(logs)
+    if any(current.get(name) != digest for name, digest in first.items()):
+        print('::error::ci-retry-first-log-loss: first-attempt evidence was removed or changed')
+        return 1
+    return rc
+
+
+if __name__ == '__main__':
+    sys.exit(main())
