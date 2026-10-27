@@ -216,23 +216,41 @@ tests/ci-plan's expectations; the tier job's needs): V0-V12 (§8).
 - **R-px75-10, the release build.** pax#215's labelled run (40445676996,
   attempts 1 to 3) overran mpx2-interrupts and mpx2-heap at their 60
   minutes in the release kernel builds (`I0`, `H1`), before any boot:
-  each 1.3 to 2.7 times trunk's, the native builds unchanged. On hasu (4
-  CPUs, `--no-cache`) kmain_ud2's release object took 167 s at trunk
-  `187aafdf` and 310 s at `ba76abff`, codegen 3.1 and 3.4 s of them: the
-  serial mid-end. 100 gdb samples of it: 78 in rangeopt's loop versioning
-  (`version_one`, `with_hypo`, `seed_pi`), which re-seeds every branch
-  of a function for each loop it might version, and whose `incoming`
-  walks every block: loops times branches squared, a function. By that
-  measure over the release IR `block.table_report` was 52% at trunk and
-  68% at `ba76abff` (loops 135 to 263, branches 756 to 1,040): the
-  decimal loops px75 put in `name_len` and `name_byte`, inlined at every
-  `put_name` there and in kernel/ext2's mount lines. Recommended and
-  implemented (`f57d3770`): a disk's name written into its record once
-  (`make_stem`), read back without a loop; a partition's number is three
-  digits at most. The boot is not it: kmain_blk to `halt` under TCG,
-  native BIOS, 1.53 s at trunk and at `ba76abff` with no NVMe controller
-  (three boots each). Owed to wolf-lang: the range pass's re-seed per
-  candidate loop.
+  each 1.3 to 2.7 times trunk's, the native builds unchanged. The boot is
+  not it: kmain_blk to `halt` under TCG, native BIOS, took 1.53 s at
+  trunk and at `ba76abff` with no NVMe controller (three boots each).
+  kmain_ud2's release object on hasu (CPUs 6-9, `--no-cache`; codegen is
+  the 3 s of each, the rest the serial mid-end):
+
+  | tree | `--emit=obj` | codegen | `--emit=llvm-ir` (no clang) |
+  |---|---|---|---|
+  | trunk `187aafdf` | 167.4 s, again 167.2 s | 3.1 s, 3.2 s | 163.8 s |
+  | `ba76abff` | 310.1 s | 3.4 s | 307.7 s |
+  | `f57d3770` (the names) | 230.1 s | 3.5 s | 224.6 s |
+  | `14dedced` (the report split) | 146.8 s | 3.2 s | 143.2 s |
+
+  Where it went. 100 gdb samples of the mid-end at `ba76abff`: 78 in
+  rangeopt's loop versioning (`version_one`, `with_hypo`, `seed_pi`),
+  which re-seeds every branch of a function for each loop it might
+  version, its `incoming` walking every block, so a function's cost grows
+  as its loops times its branches squared; the codegen report says it
+  versions no loop in this kernel (`0 loop(s) versioned`). The decimal
+  loops px75 put in `name_len` and `name_byte`, inlined at every
+  `put_name`, were the first part: `f57d3770` writes a disk's name into
+  its record once (`make_stem`) and reads it back without a loop (a
+  partition's number is three digits at most), 80 s back. The rest was
+  one function. Samples named by the function being optimized: block's
+  `table_report` was 14 of 83 at trunk and 42 of 107 at `f57d3770`. px75's
+  code changed the codegen clusters, and the report's cluster (c01) now
+  imports kernel/serial's `put` where trunk's imported log's; the
+  cross-cluster phase inlined it 114 times (4,512 WIR instructions to
+  7,192, 1,860 blocks to 3,150). `14dedced` makes the report five
+  functions, each called once (the refusals, the header, the entries
+  refused, a partition's line): 20 s under trunk. The disk suites at
+  `f57d3770` and at `14dedced` (mpx6-nvme both tiers BIOS; mpx6-blk,
+  -nodes, -part, -ext2, -root native BIOS): every one PASS. Owed to
+  wolf-lang: the versioning pass's re-seed per candidate loop, and its
+  cost on a kernel where it versions nothing.
 
 ## 6. The boot line (item 3, for px77)
 
