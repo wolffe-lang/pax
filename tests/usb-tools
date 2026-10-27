@@ -52,6 +52,30 @@ class Launcher(unittest.TestCase):
 
 
 class Builder(unittest.TestCase):
+    def test_usb_geometry_covers_every_sector_at_large_sizes(self):
+        api = runpy.run_path(str(ROOT / "tools/mkdisk"))
+        self.assertEqual(api["fat_geometry_args"](False), [])
+        self.assertEqual(api["fat_geometry_args"](True), ["-g", "1/1"])
+        # mkfs.fat documents rounding the total down to sectors-per-track.
+        for mib in (64, 755, 2048):
+            sectors = mib * 2048
+            track = int(api["fat_geometry_args"](True)[1].split('/')[1])
+            self.assertEqual(sectors // track * track, sectors)
+
+    def test_explicit_userland_is_required_before_linux_boot(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            for name in ('kernel', 'image', 'busybox'):
+                (d / name).write_bytes(b'fixture')
+            (d / 'userland').mkdir()
+            result = subprocess.run([str(ROOT / 'tools/linux-part'), '--usb-stick',
+                '--kernel', str(d / 'kernel'), '--busybox', str(d / 'busybox'),
+                '--userland', str(d / 'userland'), str(d / 'out'), str(d / 'image')],
+                capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('pre-staged userland lacks', result.stderr)
+            self.assertNotIn('docker: command not found', result.stderr)
+
     def test_invalid_usb_inputs_fail_before_writing(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
