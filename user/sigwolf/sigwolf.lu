@@ -33,8 +33,8 @@
 //   ignored-sent-segv   the same under `os_signal_ignore_one`: lives
 //   ignored-rt          ignores host 34, sends it to itself: lives
 //   defaulted-rt        ignores host 34, defaults it again, sends it
-//   masks               prints its own SigIgn (started while the parent
-//                       ignores SEGMENT_FAULT: the ignore crosses exec)
+//   masks               joins a runtime task, then prints its SigIgn;
+//                       the runtime has replaced the inherited ignore
 //   overflow-ignored    ignores SEGMENT_FAULT, then a task overflows its
 //                       stack: a REAL fault is still the runtime's (its
 //                       report, exit 134)
@@ -104,17 +104,17 @@ fn lead(exe: str) -> !int {
 }
 
 fn masks() -> !int {
+    // POSIX exec preserves an ignored disposition; sigaction permits the
+    // new runtime to replace it. This is a post-runtime read, not an
+    // observation at exec entry. Joining a task orders handler installation
+    // before the read on PAX as well as Linux (pax#174).
+    a_task()
+    print("~X: runtime task joined")
     let text = fs_read_text("/proc/self/status")?
     for line in text.split("\n") {
         if line.starts_with("SigIgn:") {
             let l = line.replace("\t", " ")
-            // px65: `~X:`, PAX's own row while PAX serves no
-            // /proc/<pid>/maps: glibc's pthread_getattr_np of the main
-            // thread reads it, so at 0.2.35 the runtime registers no
-            // main-thread guard there and installs its SEGV/BUS handler
-            // only when a runtime thread starts, after this read; on
-            // Linux the handler is in place first (SigIgn without SEGV).
-            print("~X: a child started under the fault ignore: {l}")
+            print("~X: after a joined runtime task: {l}")
         }
     }
     0

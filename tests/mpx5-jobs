@@ -197,16 +197,13 @@
 #      guest's boot and PAX's; the container's hard limit is
 #      tools/linux-tree's `--ulimit core=0:0`, so that row is left out of
 #      the container's comparisons (named); its witness both rows.
-#      px65: sigwolf built by 0.2.35, whose runtime installs a SEGV and
-#      BUS handler at start (s256's stack-overflow report: `wolf-trap:
-#      stack-overflow`, the fault's pc): the row of a child started
-#      under the fault ignore is `~X:`, PAX's own and left out of both
-#      comparisons by name: on Linux the handler is in place when the
-#      child reads its SigIgn (none ignored); PAX serves no
-#      /proc/<pid>/maps, so glibc's pthread_getattr_np of the main
-#      thread fails, the runtime registers no main-thread guard and
-#      installs the handler only when a runtime thread starts, after the
-#      read (SEGV still ignored); J11 holds the row to each side's answer.
+#      px83 (#174): the `~X:` row joins a runtime task before reading
+#      SigIgn, with a preceding task-joined event in the transcript.
+#      Both PAX and Linux must then read zero; a read before that event
+#      is rejected. The historical recording's zero remains checked,
+#      while every fresh Linux replay must also show the ordering.
+#      POSIX exec preserves SIG_IGN, but sigaction lets the new runtime
+#      replace it: this row observes the latter, not exec entry.
 #   J12 px56 (pax#95, #96): execs and execs-user, xsh and xsh-user (the
 #      typed sessions) byte-identical to real root's recordings
 #      (tests/mpx5-jobs.d/linux/execs*.tty, xsh*.tty: notes/px52/vmjob.c's
@@ -272,6 +269,7 @@ case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier
 case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
 [ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
 need readelf python3
+python3 -I "$here/mpx5-jobs.d/sigign-selftest.py" || exit 1
 
 SOAK=${PAX_JOBS_SOAK:-3000} # the soak's rounds a run (CI: 3000; PAX_JOBS_SOAK for a longer one)
 REC=$here/mpx5-jobs.d/linux
@@ -772,7 +770,11 @@ for n in $UTYPED; do
         bad "J0 linux $n: no $lx/$n.tty (build first, and run the Linux side)"
         continue
     fi
-    norm_session "$lx/$n.tty" | host_rows "$n" /dev/stdin | pax_own "$n" /dev/stdin > "$lx/$n.cmp"
+    norm_session "$lx/$n.tty" > "$lx/$n.full"
+    if [ "$n" = sigs-user ]; then
+        python3 -I "$here/mpx5-jobs.d/sigign.py" "$lx/$n.full" || bad 'J4 Linux SigIgn ordered probe'
+    fi
+    host_rows "$n" "$lx/$n.full" | pax_own "$n" /dev/stdin > "$lx/$n.cmp"
     host_rows "$n" "$images/rec-$n.cmp" > "$images/rec-$n.host.cmp"
     hn=; [ "$n" = gaps-user ] && [ "$STI" != 0 ] && hn=" (this host's dev.tty.legacy_tiocsti is $STI: its TIOCSTI rows left out)"
     [ "$n" = fds-user ] && hn=" (its zombie row left out: the host kernel's)"
@@ -937,11 +939,11 @@ for leg in $legs; do
                                          'wolf-trap: stack-overflow'; do # px55: the two L rows; px65: 0.2.35's report
                                     grep -qxF "$w" "$out.cmp" || why+=" no '$w';"
                                 done
-                                # px65: `~X:`, PAX's own while it serves no /proc/<pid>/maps
-                                # (the runtime's handler not yet in place: SEGV still
-                                # ignored), Linux's the handler's (none ignored).
-                                w='~X: a child started under the fault ignore: SigIgn: 0000000000000400'
-                                grep -qxF "$w" "$out.full" || why+=" PAX's own row '$w' not there ($(grep -m1 '^~X: ' "$out.full"));"
+                                # px83 (#174): the joined-task event orders the runtime's
+                                # handler installation before the read on both systems.
+                                if ! sx=$(python3 -I "$here/mpx5-jobs.d/sigign.py" "$out.full"); then
+                                    why+=" $sx;"
+                                fi
                                 w='~X: a child started under the fault ignore: SigIgn: 0000000000000000'
                                 grep -qxF "$w" "$images/rec-$n.full" || why+=" the recording's row '$w' not there;" ;;
                             gaps-user) grep -qx "gaps: px49's probe, as a user" "$out.cmp" || why+=" not a user's;"
