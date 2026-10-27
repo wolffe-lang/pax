@@ -5,7 +5,17 @@ Scope
   PS/2; hotplug; software repeat. No USB storage driver, SuperSpeed class
   driver, MSI/MSI-X route, LED report, or claim of a metal boot.
 
-Validated source
+Release-build correction
+  performance/README.txt is the latest build/validation record. Cold release
+  objects: old invariant kernel 321.787s, isolated shared-helper kernel
+  0.920s (trunk control 165.148s); full console 210.332s vs trunk 227.117s.
+  The new complete matrix passed in 814s, without raising the CI timeout
+  or dropping any invariant, compiler, firmware or topology leg. Full IR
+  function censuses, timings, a new compile-count CI plant and transcripts
+  are in performance/. Earlier typing records below remain identified as
+  the original feature validation; CI reruns typing at the corrected head.
+
+Initial feature validation (4bc5a08e)
   final/final-validation.inputs records the five exact source hashes used
   by the detached final gate. The Mac worktree and pax-final snapshot were
   independently re-hashed and matched before commits d2a8eecd, 31a6449f and

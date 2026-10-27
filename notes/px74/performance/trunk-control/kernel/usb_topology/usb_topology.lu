@@ -1,0 +1,14 @@
+pub fn route_child(route: u64, depth: u64, port: u64) -> u64 {
+    if depth >= 5 || port == 0 || port > 255 { return 0x100000 }
+    route | ((if port > 15 { 15 } else { port }) << (depth * 4))
+}
+
+/// xHCI §6.2.2: low/full-speed descendants inherit the closest high-speed
+/// transaction translator and its physical downstream port. High-speed
+/// devices themselves do not name a TT. Hubs use their default single-TT
+/// alternate setting; MTT remains clear.
+pub fn tt_route(speed: u64, parent_speed: u64, parent_slot: u64, port: u64, inherited: u64) -> u64 {
+    if speed != 1 && speed != 2 { return 0 }
+    if parent_speed == 3 { parent_slot | (port << 8) } else { inherited }
+}
+

@@ -1,0 +1,41 @@
+//! member: false
+// px74: specification-derived invariants used by the live driver.
+use serial
+use log
+use panic
+use usb_keys
+use usb_topology
+use interrupts
+
+extern "c" fn pax_exit(v: u8)
+
+fn check(ok: bool, name: str) {
+    if !ok { log.put("FAIL USB "); log.line(name); panic.halt() }
+    log.put("PASS USB "); log.line(name)
+}
+
+export fn kmain() {
+    serial.init()
+    interrupts.start()
+    log.end() // separate UEFI's cursor escapes from the first assertion
+    check(usb_topology.route_child(0, 0, 3) == 3, "hub route first port")
+    check(usb_topology.route_child(3, 1, 4) == 0x43, "hub route second port")
+    check(usb_topology.route_child(0, 0, 16) == 15, "hub route saturated port")
+    check(usb_topology.route_child(0x54321, 5, 1) == 0x100000, "hub route depth bound")
+    check(usb_topology.tt_route(1, 3, 2, 4, 0) == 0x402, "hub TT immediate high speed parent")
+    check(usb_topology.tt_route(2, 1, 7, 3, 0x402) == 0x402, "hub TT inherited through full speed hub")
+    check(usb_topology.tt_route(3, 3, 2, 4, 0x402) == 0, "hub high speed device has no TT")
+    let report: u64 = 0x0908070605040002
+    check(usb_keys.key_at(report, 5) == 9, "boot report sixth key")
+    check(usb_keys.contains(report, 9), "boot report sixth key membership")
+    check(!usb_keys.contains(report, 10), "boot report absent key")
+    check(usb_keys.valid(report), "boot report six keys valid")
+    check(!usb_keys.valid(0x0101010101010000), "boot report rollover ignored")
+    check(usb_keys.code(4) == 0x1e, "usage A shares set1 key")
+    check(usb_keys.code(0x52) == 0x148, "usage arrow shares extended key")
+    check(usb_keys.code(0xe5) == 0x36, "usage right shift")
+    check(usb_keys.code(0) == 0, "usage reserved ignored")
+    log.line("PASS USB invariants")
+    unsafe { pax_exit(0x10) }
+    panic.halt()
+}
