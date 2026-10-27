@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# sh32/sh33 on both real PAX console paths, with explicitly sized serial.
+set -euo pipefail
+. "$(dirname "$0")/../../tools/lib.sh"
+[ $# -eq 5 ] || die 'usage: prompt IMAGES TIER FIRMWARE CONSOLE OUT'
+d=$1 tier=$2 leg=$3 console=$4 out=$5
+mkdir -p "$out"
+keys=$out/keys
+if [ "$console" = serial ]; then
+    printf 'stty cols 80 rows 24\n^~export USER=pax HOSTNAME=pax-test\n' > "$keys"
+    args=(--no-screen --keyboard serial)
+else
+    printf 'export USER=pax HOSTNAME=pax-test\n' > "$keys"
+    args=(--keyboard ps2)
+fi
+cat >> "$keys" <<'KEYS'
+^~set -o friendly -o prompt_friendly
+^~prompt_right() { printf rightmark; }
+^~false
+^~printf 'PX82-FLOAT=%.2f\n' 1.125
+^~sh -c 'set -n; echo MUST-NOT-RUN'; echo PX82-NOEXEC=$?
+^~set +o friendly
+^~echo PX82-PROMPT-END
+^~exit 0
+KEYS
+PAX_TYPE_PAUSE=2 "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$out/serial.log" --timeout 240 \
+    --qemu -m --qemu 1024M --elf "$d/$tier/kmain_console.elf" --type "$keys" --prompt '$ ' \
+    --marker 'halt|PANIC .*' "${args[@]}" "$d/$tier/friendly.iso" > "$out/halt.log" 2>&1
+python3 -I - "$out/serial.log" <<'PY'
+from pathlib import Path
+import re,sys
+raw=Path(sys.argv[1]).read_bytes()
+text=re.sub(rb'\x1b\[[0-9;?]*[A-Za-z]',b'',raw).replace(b'\r',b'')
+assert b'pax@pax-test' in text, 'F5 friendly identity absent'
+assert b'[1]' in text, 'F5 failed-command status absent'
+for line in [b'PX82-FLOAT=1.12',b'PX82-NOEXEC=0',b'PX82-PROMPT-END',b'PAX: init /bin/env ended with status 0; nothing left to run']:
+    assert line in text.splitlines(), ('F5 output absent',line)
+assert b'MUST-NOT-RUN' not in text.splitlines(), 'F5 noexec executed its command'
+tail=text.split(b'PX82-FLOAT=1.12\n',1)[1]
+assert b'rightmark' in tail.split(b'sh -c',1)[0], 'F5 right prompt absent after command output'
+print('PASS F5 friendly identity/status/right prompt, float rounding, noexec and clean halt')
+PY
