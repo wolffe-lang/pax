@@ -28,14 +28,17 @@ work=$PAX_BUILD/usb-stick
 mkdir -p "$work"
 work=$(cd "$work" && pwd)
 load_limine_pin
-commit=$(git -C "$PAX_ROOT" rev-parse HEAD)
+provenance=()
+if [ -f "$images/kernel.commit" ]; then
+    provenance=(--kernel-commit "$(cat "$images/kernel.commit")")
+fi
 [ "$tiers" != both ] || tiers='native release'
 for tier in $tiers; do
     elf=$images/$tier/kmain_console.elf
     for p in ask pelt; do
         img=$images/$tier/console-$p.img
         "$PAX_ROOT/tools/mkdisk" --usb --kernel "$elf" --initramfs "$images/$p.cpio" \
-            --kernel-commit "$commit" "$img" > "$work/$tier-$p.build.log"
+            "${provenance[@]}" "$img" > "$work/$tier-$p.build.log"
         expected=(--expect "/boot/pax=$elf" --expect "/boot/initramfs.cpio=$images/$p.cpio"
                   --expect "/EFI/BOOT/BOOTX64.EFI=$LIMINE_DIR/BOOTX64.EFI"
                   --expect "/boot/limine/limine-bios.sys=$LIMINE_DIR/limine-bios.sys"
@@ -43,7 +46,7 @@ for tier in $tiers; do
         "$PAX_ROOT/tools/check-usb" "$img" "${expected[@]}" | tee "$work/$tier-$p.check.log"
     done
     "$PAX_ROOT/tools/mkdisk" --usb --kernel "$elf" --initramfs "$images/pelt.cpio" \
-        --kernel-commit "$commit" "$work/repeat.img" > "$work/$tier-repeat.build.log"
+        "${provenance[@]}" "$work/repeat.img" > "$work/$tier-repeat.build.log"
     cmp "$img" "$work/repeat.img" || die 'FAIL U3: stick builds differ'
     say "PASS U3: two builds, one digest $(sha256_of "$img") ($(wc -c < "$img") bytes)"
     for fault in efi mbr; do
@@ -82,7 +85,7 @@ for tier in $tiers; do
         "/bin/pelt=$images/pelt/root/bin/pelt:755" "/etc/pax-live-login=$PAX_ROOT/user/usb-login.sh:644" \
         "/etc/pax-run=$work/live.run:644" > "$work/live.initramfs.log"
     "$PAX_ROOT/tools/mkdisk" --usb --kernel "$elf" --initramfs "$work/live.cpio" \
-        --conf "$PAX_ROOT/boot/limine-usb.conf" --kernel-commit "$commit" "$work/live-$tier.img" > "$work/live-$tier.build.log"
+        --conf "$PAX_ROOT/boot/limine-usb.conf" "${provenance[@]}" "$work/live-$tier.img" > "$work/live-$tier.build.log"
     printf 'nobody\nroot\n^~echo USB-LIVE-ROOT\n^~exit\n' > "$work/login.keys"
     for fw in bios uefi; do
         "$PAX_ROOT/tools/qemu-halt" --usb-stick --firmware "$fw" --timeout 120 --elf "$elf" \
