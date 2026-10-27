@@ -88,4 +88,17 @@ else
     echo "C4 FAIL pelt image pin differs from launch-trunk census: $image_pelt != $census_pelt"
     fail=1
 fi
+# px82: current-image snapshots are separate from px04's historical trace
+# inputs. New BORE_REV on the historical wolf 0.2.22 is not that census.
+for project in yew boreutils scent; do
+    case $project in yew) key=YEW ;; boreutils) key=BORE ;; scent) key=SCENT ;; esac
+    image=$(sed -n "s/^${key}_REV=//p" "user/$project.pin")
+    census=$(sed -n "s/^IMAGE_${key}_REV=//p" tools/census/inside/pins.sh)
+    if [ "$image" = "$census" ]; then
+        echo "C5 PASS $project image pin matches launch-trunk census: $image"
+    else
+        echo "C5 FAIL $project image pin differs from launch-trunk census: $image != $census"
+        fail=1
+    fi
+done
 exit $fail
