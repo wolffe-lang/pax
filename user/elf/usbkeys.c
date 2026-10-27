@@ -19,7 +19,8 @@
 static const char *labels[] = {
     "first-a", "shift-a", "shift-up", "ctrl-left", "six-keys",
     "caps-on", "caps-a", "caps-off", "keypad-enter", "alt-x",
-    "repeat-a", "after-unplug", "after-replug", "ring-wrap", "finish"
+    "repeat-a", "after-unplug", "after-replug", "ring-wrap",
+    "shift-down", "shift-left", "shift-right", "finish"
 };
 static long long now(void) {
     struct timespec t;
