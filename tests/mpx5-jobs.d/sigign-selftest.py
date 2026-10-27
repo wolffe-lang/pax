@@ -17,4 +17,12 @@ for name, text in {
 }.items():
     assert m.check(text), name
     print('PASS J4 rejects ' + name)
+symbols = '3888: 000000000024cf10 60 FUNC GLOBAL DEFAULT 8 _Wdeep$test\n'
+assert m.check_fault('  at pc=0x000000000024cf1b', symbols) is None
+assert m.check_fault('  at pc=0x000000000024cceb', symbols)
+assert m.check_fault('  at pc=0x000000000024cf4c', symbols)
+assert m.check_fault('  at pc=0x000000000024cf1b', '')
+assert m.check_fault('', symbols)
+assert m.check_fault('  at pc=0x24cf1b\n  at pc=0x24cf1b', symbols)
+print('PASS J4 overflow PC belongs to the current executable')
 print('PASS J4 ordered-probe selftest')

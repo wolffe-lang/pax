@@ -755,7 +755,9 @@ host_rows() { # name file -> the file, the host's rows left out
 pax_own() { # name file -> the file, its `~` rows left out where they are PAX's own
     case $1 in
         eds|eds-user|hostq|hostq-user) command grep -v -e '^~N: ' -e '^~H: ' "$2" ;;
-        sigs|sigs-user) command grep -v -e '^~X: ' "$2" ;; # px65: J11's `~X:`
+        # px83: a changed probe moves deep's address; J4 checks the live
+        # PC against its ELF symbol before the comparison masks the number.
+        sigs|sigs-user) command grep -v -e '^~X: ' "$2" | sed -E 's/^  at pc=0x[0-9a-f]+$/  at pc=DEEP/' ;;
         *) cat "$2" ;;
     esac
 }
@@ -772,7 +774,7 @@ for n in $UTYPED; do
     fi
     norm_session "$lx/$n.tty" > "$lx/$n.full"
     if [ "$n" = sigs-user ]; then
-        python3 -I "$here/mpx5-jobs.d/sigign.py" "$lx/$n.full" || bad 'J4 Linux SigIgn ordered probe'
+        python3 -I "$here/mpx5-jobs.d/sigign.py" "$lx/$n.full" "$images/sroot/bin/sigwolf" || bad 'J4 Linux SigIgn ordered probe'
     fi
     host_rows "$n" "$lx/$n.full" | pax_own "$n" /dev/stdin > "$lx/$n.cmp"
     host_rows "$n" "$images/rec-$n.cmp" > "$images/rec-$n.host.cmp"
@@ -941,7 +943,7 @@ for leg in $legs; do
                                 done
                                 # px83 (#174): the joined-task event orders the runtime's
                                 # handler installation before the read on both systems.
-                                if ! sx=$(python3 -I "$here/mpx5-jobs.d/sigign.py" "$out.full"); then
+                                if ! sx=$(python3 -I "$here/mpx5-jobs.d/sigign.py" "$out.full" "$images/sroot/bin/sigwolf"); then
                                     why+=" $sx;"
                                 fi
                                 w='~X: a child started under the fault ignore: SigIgn: 0000000000000000'
