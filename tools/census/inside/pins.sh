@@ -30,3 +30,6 @@ PELT_REV=0b5eaa5394667c485de3a134f771c87024b68a3c
 
 # px82 current-image snapshot; px04 trace inputs above remain historical.
 IMAGE_YEW_REV=0ccb2c67661a2dd789b5ce86180d592370a79c31
+
+# px82 current-image snapshot; px04 trace inputs above remain historical.
+IMAGE_BORE_REV=0f7a57b68829765f60c39ced01edb7ea75265eb8
