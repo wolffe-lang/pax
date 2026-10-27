@@ -1478,3 +1478,11 @@ twice on hasu. The binary reports lupin 0.1.58 at mirror pin a5378e3.
 Neither this archive nor v0.1.57 carries a std tree or STD-PIN. PAX keeps
 user/std.pin at 78b9d3c, never downgrading to the mirror's older 2386522e.
 Release metadata and the org's own STD-PIN were read; no external source.
+
+### px82 cub checkpoint refresh
+
+Cub trunk moved to f6a50a58781d4209cee93b9822276f6efedf2b39 (128 commits
+after the launch pin; cb04b's source merge plus the note). Its own lair.pin
+now selects 74b89744e8f8a4ed01539b2fe814daf819b9abfc. Both source archives
+were fetched and hashed twice on hasu, matching the new games.txt row.
+Neither project was modified.
