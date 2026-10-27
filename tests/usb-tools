@@ -3,8 +3,12 @@
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
+import copy
+import runpy
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -45,6 +49,109 @@ class Launcher(unittest.TestCase):
         r = self.run_qemu("--usb-stick", str(self.image), "--drive", str(self.image))
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("cannot combine", r.stderr)
+
+
+class Builder(unittest.TestCase):
+    def test_invalid_usb_inputs_fail_before_writing(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            kernel, cpio, conf, out = [d / x for x in ("kernel", "cpio", "conf", "out")]
+            kernel.write_bytes(b"kernel-input")
+            cpio.write_bytes(b"cpio-input")
+            conf.write_text("/PAX\n    path: boot():/boot/pax\n")
+            args = [str(ROOT / "tools/mkdisk"), "--usb", "--kernel", str(kernel),
+                    "--initramfs", str(cpio), "--conf", str(conf)]
+            for extra, target, expected in [
+                (["--root", str(cpio)], out, "whole live root"),
+                (["--home-size", "8M"], out, "whole live root"),
+                (["--journal"], out, "whole live root"),
+                (["32M"], out, "no room"),
+                ([], kernel, "overwrite an input"),
+            ]:
+                with self.subTest(expected=expected, extra=extra):
+                    r = subprocess.run([*args, *extra, str(target)], capture_output=True, text=True)
+                    self.assertNotEqual(r.returncode, 0)
+                    self.assertIn(expected, r.stderr)
+                    self.assertFalse(out.exists())
+                    self.assertEqual(kernel.read_bytes(), b"kernel-input")
+            out.symlink_to(kernel)
+            r = subprocess.run([*args, str(out)], capture_output=True, text=True)
+            self.assertIn("never a device or symlink", r.stderr)
+            self.assertEqual(kernel.read_bytes(), b"kernel-input")
+
+
+class Writer(unittest.TestCase):
+    def setUp(self):
+        self.api = runpy.run_path(str(ROOT / "tools/usb-write"))
+        self.disk = dict(path="/dev/sdz", type="disk", rm=True, ro=False,
+                         tran="usb", model="Fixture Stick", serial="TEST-ONLY", size=1048576,
+                         mountpoints=[None], **{"maj:min": "8:240", "log-sec": 512})
+        self.root = dict(path="/dev/nvme0n1p1", type="part", mountpoints=["/"], **{"maj:min": "259:1"})
+
+    def linux(self, disk=None, root_id="259:1"):
+        return self.api["linux_plan"]("/dev/sdz", {"blockdevices": [self.root, disk or self.disk]}, root_id)
+
+    def test_linux_valid(self):
+        self.assertEqual(self.linux()["model"], "Fixture Stick")
+
+    def test_linux_refusals(self):
+        for field, value in (("rm", False), ("ro", True), ("tran", "sata"),
+                             ("type", "part"), ("serial", None), ("log-sec", 4096),
+                             ("mountpoints", ["/mnt/stick"])):
+            with self.subTest(field=field):
+                d = dict(self.disk, **{field: value})
+                with self.assertRaises(ValueError):
+                    self.linux(d)
+        with self.assertRaisesRegex(ValueError, "running root"):
+            self.linux(root_id="8:240")
+        with self.assertRaisesRegex(ValueError, "identify running root"):
+            self.linux(root_id="999:9")
+
+    def test_linux_mounted_descendant(self):
+        d = dict(self.disk, children=[dict(type="part", mountpoints=["/mnt/data"], **{"maj:min": "8:241"})])
+        with self.assertRaisesRegex(ValueError, "mounted"):
+            self.linux(d)
+
+    def test_linux_unknown_mount_status_refused(self):
+        d = dict(self.disk)
+        del d["mountpoints"]
+        with self.assertRaisesRegex(ValueError, "mount status"):
+            self.linux(d)
+
+    def mac(self, target=None, members=None, root=None, containers=None):
+        target = target or dict(DeviceIdentifier="disk9", Whole=True, RemovableMedia=True,
+                                Internal=False, BusProtocol="USB", Writable=True, DeviceBlockSize=512,
+                                MediaName="Fixture Stick", DiskSize=1048576)
+        return self.api["mac_plan"]("/dev/disk9", target, members or [], root or {"ParentWholeDisk": "disk0"}, containers or {})
+
+    def test_mac_valid(self):
+        self.assertEqual(self.mac()["size"], 1048576)
+
+    def test_mac_root_apfs_refused(self):
+        containers = {"Containers": [{"ContainerReference": "disk3", "PhysicalStores": [{"DeviceIdentifier": "disk9s2"}]}]}
+        with self.assertRaisesRegex(ValueError, "running root"):
+            self.mac(root={"APFSContainerReference": "disk3"}, containers=containers)
+        with self.assertRaisesRegex(ValueError, "physical stores"):
+            self.mac(root={"APFSContainerReference": "disk3"})
+        with self.assertRaisesRegex(ValueError, "APFS container"):
+            self.mac(containers=containers)
+
+    def test_mac_mounted_refused(self):
+        with self.assertRaisesRegex(ValueError, "mounted"):
+            self.mac(members=[{"Mounted": True, "MountPoint": "/Volumes/USB"}])
+
+    def test_dry_run_never_writes_on_either_platform(self):
+        with tempfile.TemporaryDirectory() as d:
+            image = Path(d) / "fixture.img"
+            image.write_bytes(bytes(512))
+            for plan in (self.linux(), self.mac()):
+                main = self.api["main"]
+                with patch.dict(main.__globals__, inventory=lambda device: copy.deepcopy(plan)), \
+                     patch.object(sys, "argv", ["usb-write", "--dry-run", str(image), plan["device"]]), \
+                     patch("os.open", side_effect=AssertionError("device open forbidden")), \
+                     patch("subprocess.run", side_effect=AssertionError("dd forbidden")), \
+                     patch("builtins.input", side_effect=AssertionError("prompt forbidden")):
+                    self.assertEqual(main(), 0)
 
 
 if __name__ == "__main__":

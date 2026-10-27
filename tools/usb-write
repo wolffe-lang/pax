@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Write a PAX image to an explicitly confirmed removable whole disk.
+
+usb-write [--dry-run] IMAGE /dev/DEVICE
+Dry run inventories and prints the plan, never opens a device for writing.
+Run manually with appropriate privileges. Never unmounts anything for you.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import platform
+import plistlib
+import re
+import stat
+import subprocess
+import sys
+
+
+def require(ok, why):
+    if not ok:
+        raise ValueError(why)
+
+
+def output(*cmd):
+    return subprocess.check_output(cmd)
+
+
+def descendants(node):
+    yield node
+    for child in node.get("children", []):
+        yield from descendants(child)
+
+
+def linux_plan(device, tree, root_id):
+    all_nodes = [n for top in tree["blockdevices"] for n in descendants(top)]
+    require(any(n.get("maj:min") == root_id for n in all_nodes), "cannot identify running root disk")
+    candidates = [n for n in all_nodes if n.get("path") == device]
+    require(len(candidates) == 1, "target must identify one whole disk")
+    d = candidates[0]
+    require(d.get("type") == "disk", "target is not a whole disk")
+    require(d.get("rm") is True and d.get("tran") == "usb", "target is not removable USB media")
+    require(d.get("ro") is False, "target is read-only or its status is unknown")
+    for n in descendants(d):
+        require(n.get("maj:min") != root_id, "target contains the running root")
+        require(isinstance(n.get("mountpoints"), list), "target mount status is unknown")
+        require(not any(n["mountpoints"]), "target or a descendant is mounted")
+    require(d.get("model") and d.get("serial"), "target model and serial are required")
+    require(int(d.get("log-sec", 0)) == 512, "only 512-byte logical sectors are supported")
+    return {"device": device, "model": d["model"].strip(), "serial": d["serial"].strip(),
+            "size": int(d["size"]), "id": d["maj:min"]}
+
+
+def mac_plan(device, target, members, root, containers):
+    require(re.fullmatch(r"/dev/disk[0-9]+", device), "target must be /dev/diskN, not a partition or alias")
+    name = device.removeprefix("/dev/")
+    require(target.get("DeviceIdentifier") == name and target.get("Whole") is True, "target is not a whole disk")
+    require(target.get("RemovableMedia") is True and target.get("Internal") is False and target.get("BusProtocol") == "USB",
+            "target is not external removable USB media")
+    require(target.get("Writable") is True, "target is read-only or its status is unknown")
+    root_disks = set()
+    if root.get("ParentWholeDisk"):
+        root_disks.add(root["ParentWholeDisk"])
+    if root.get("Whole") and root.get("DeviceIdentifier"):
+        root_disks.add(root["DeviceIdentifier"])
+    container = root.get("APFSContainerReference")
+    if container:
+        matches = [c for c in containers.get("Containers", []) if c.get("ContainerReference") == container]
+        require(len(matches) == 1 and matches[0].get("PhysicalStores"), "cannot resolve root APFS physical stores")
+        for store in matches[0]["PhysicalStores"]:
+            part = store.get("DeviceIdentifier", "")
+            match = re.fullmatch(r"(disk[0-9]+)s[0-9]+", part)
+            require(match is not None, "cannot resolve root physical disk")
+            root_disks.add(match[1])
+    require(root_disks, "cannot identify running root disk")
+    require(name not in root_disks, "target contains the running root")
+    # Reject a target backing any APFS container, mounted or otherwise: do
+    # not infer the absence of mounted synthesized volumes from its slices.
+    for c in containers.get("Containers", []):
+        for store in c.get("PhysicalStores", []):
+            require(not store.get("DeviceIdentifier", "").startswith(name + "s"), "target backs an APFS container")
+    for member in [target, *members]:
+        require(not member.get("Mounted") and not member.get("MountPoint"), "target or a partition is mounted")
+    require(target.get("DeviceBlockSize") == 512, "only 512-byte logical sectors are supported")
+    require(target.get("MediaName") and target.get("DiskSize"), "target model and size are required")
+    return {"device": device, "model": target["MediaName"], "serial": target.get("SerialNumber", "not reported"),
+            "size": target["DiskSize"], "id": name}
+
+
+def inventory(device):
+    system = platform.system()
+    if system == "Linux":
+        tree = json.loads(output("lsblk", "--json", "--bytes", "--output",
+                                 "PATH,TYPE,MAJ:MIN,RM,RO,SIZE,MODEL,SERIAL,TRAN,MOUNTPOINTS,LOG-SEC"))
+        root_id = output("findmnt", "-n", "-o", "MAJ:MIN", "/").decode().strip()
+        return linux_plan(device, tree, root_id)
+    if system == "Darwin":
+        info = lambda d: plistlib.loads(output("diskutil", "info", "-plist", d))
+        listing = plistlib.loads(output("diskutil", "list", "-plist", device))
+        target, root = info(device), info("/")
+        containers = plistlib.loads(output("diskutil", "apfs", "list", "-plist"))
+        members = [info(d) for d in listing.get("AllDisks", []) if d != target.get("DeviceIdentifier")]
+        require("AllDisks" in listing, "cannot inventory target partitions")
+        return mac_plan(device, target, members, root, containers)
+    raise ValueError("only Linux and macOS are supported")
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("image", type=Path)
+    p.add_argument("device")
+    args = p.parse_args()
+    try:
+        require(args.image.is_file(), "image must be a regular file")
+        require(re.fullmatch(r"/dev/[A-Za-z0-9]+", args.device), "use a canonical /dev whole-disk path")
+        plan = inventory(args.device)
+        size = args.image.stat().st_size
+        require(size > 0 and size % 512 == 0 and size <= plan["size"], "image does not fit or is not sector aligned")
+        token = "ERASE {device} {id} {size} {model} {serial}".format(**plan)
+        print(json.dumps(plan, sort_keys=True))
+        print(f"Write {size} bytes from {args.image.resolve()}; all target contents will be lost.")
+        print("Confirmation: " + token)
+        if args.dry_run:
+            print("DRY RUN: no device opened for writing; no dd executed")
+            return 0
+        require(sys.stdin.isatty(), "confirmation requires an interactive terminal")
+        require(input("Type the complete confirmation: ") == token, "confirmation did not match")
+        require(inventory(args.device) == plan, "device identity changed; inspect again")
+        st = os.stat(args.device, follow_symlinks=False)
+        require(stat.S_ISBLK(st.st_mode), "target is not a block device")
+        # Retain an exclusive claim while dd writes through its stdout.
+        # dd never opens a pathname for output; no truncation or creation.
+        fd = os.open(args.device, os.O_WRONLY | os.O_EXCL | os.O_NOFOLLOW)
+        try:
+            require(os.fstat(fd).st_rdev == st.st_rdev, "device changed while opening")
+            require(inventory(args.device) == plan, "device changed before writing")
+            with args.image.open("rb") as image:
+                require(os.fstat(image.fileno()).st_size == size, "image size changed")
+                subprocess.run(["dd", "bs=1048576"], stdin=image, stdout=fd, check=True)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        print("Write complete and flushed. Eject the device before removing it.")
+        return 0
+    except (ValueError, OSError, subprocess.SubprocessError, EOFError) as e:
+        print("usb-write: " + str(e), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
