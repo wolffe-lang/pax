@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""Drive a black-box USB keyboard session; no driver internals consulted."""
+import argparse
+import json
+import os
+from pathlib import Path
+import socket
+import subprocess
+import time
+
+KEYS = ['a', 'shift-a', 'shift-up', 'ctrl-left', 'a-b-c-d-e-f',
+        'caps_lock', 'a', 'caps_lock', 'kp_enter', 'alt-x', 'a', None, None, None, 'q']
+
+
+def run(args):
+    out = Path(args.output).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    for result in ('rows.txt', 'repeat.txt'):
+        (out / result).unlink(missing_ok=True)
+    serial = out / 'serial.log'
+    sock = out / 'qmp.sock'
+    if sock.exists():
+        sock.unlink()
+    root = Path(__file__).resolve().parents[1]
+    cmd = [str(root / 'tools/qemu-run'), '--firmware', args.firmware,
+           '--usb-kbd=' + args.topology, '--serial', str(serial),
+           '--timeout', '120', str(Path(args.image).resolve()), '--',
+           '-qmp', f'unix:{sock},server=on,wait=off']
+    if args.linux_kernel:
+        # Direct boot of an unmodified binary Linux kernel. The ISO is not
+        # booted; keeping the same qemu-run gives both guests identical USB.
+        cmd += ['-kernel', args.linux_kernel, '-initrd', args.initrd,
+                '-append', 'console=ttyS0 quiet loglevel=0 panic=-1 rdinit=/usbkeys']
+    with (out / 'runner.log').open('wb') as log:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+        conn = None
+        start = time.monotonic()
+        reader = None
+        try:
+            while not sock.exists():
+                if proc.poll() is not None or time.monotonic()-start > 15:
+                    raise RuntimeError('QMP did not start')
+                time.sleep(.02)
+            conn = socket.socket(socket.AF_UNIX)
+            conn.settimeout(5)
+            conn.connect(str(sock))
+            reader = conn.makefile('rb')
+            json.loads(reader.readline())
+
+            def execute(name, arguments=None):
+                payload = {'execute': name}
+                if arguments is not None:
+                    payload['arguments'] = arguments
+                conn.sendall(json.dumps(payload).encode() + b'\n')
+                while True:
+                    reply = json.loads(reader.readline())
+                    if 'error' in reply:
+                        raise RuntimeError(reply)
+                    if 'return' in reply:
+                        return reply['return']
+
+            def monitor(command):
+                result = execute('human-monitor-command', {'command-line': command})
+                if result:
+                    raise RuntimeError(f'{command}: {result}')
+
+            execute('qmp_capabilities')
+            sent = 0
+            while time.monotonic() - start < 110:
+                text = serial.read_bytes() if serial.exists() else b''
+                if b'USBDONE' in text:
+                    break
+                if b'PANIC' in text or proc.poll() is not None:
+                    raise RuntimeError('guest ended before USBDONE')
+                if f'USBREADY {sent} '.encode() in text and sent < len(KEYS):
+                    if sent == 11:
+                        # Remove a keyboard with Shift held; then another
+                        # keyboard must type lowercase, not inherit Shift.
+                        execute('input-send-event', {'events':[{'type':'key', 'data':{
+                            'down':True, 'key':{'type':'qcode','data':'shift'}}}]})
+                        time.sleep(.05)
+                        execute('device_del', {'id': 'pax-usb-kbd'})
+                        time.sleep(.4)
+                        execute('device_add', {'driver':'usb-kbd', 'id':'usb-spare',
+                                              'bus':'pax-usb.0', 'port':'2'})
+                        time.sleep(1.0)
+                        execute('input-send-event', {'events':[{'type':'key', 'data':{
+                            'down':False, 'key':{'type':'qcode','data':'shift'}}}]})
+                        monitor('sendkey b 50')
+                    elif sent == 12:
+                        execute('device_del', {'id': 'usb-spare'})
+                        time.sleep(.4)
+                        port = {'root':'1', 'hub':'1.3', 'nested':'1.3.2'}[args.topology]
+                        execute('device_add', {'driver':'usb-kbd', 'id':'pax-usb-kbd',
+                                              'bus':'pax-usb.0', 'port':port})
+                        time.sleep(1.0)
+                        monitor('sendkey c 50')
+                    elif sent == 13:
+                        for _ in range(300):
+                            for down in (True, False):
+                                execute('input-send-event', {'events':[{'type':'key', 'data':{
+                                    'down':down, 'key':{'type':'qcode','data':'a'}}}]})
+                                time.sleep(.020)
+                    else:
+                        monitor(f'sendkey {KEYS[sent]} {1000 if sent == 10 else 50}')
+                    sent += 1
+                time.sleep(.01)
+            else:
+                raise RuntimeError('USB session deadline')
+            if sent != len(KEYS):
+                raise RuntimeError(f'only {sent} rows sent')
+            # PAX exits the probe, prints its books, then halts.
+            if not args.linux_kernel:
+                until = time.monotonic() + 8
+                while b'\nhalt\r\n' not in serial.read_bytes() and time.monotonic() < until:
+                    time.sleep(.02)
+                text = serial.read_bytes()
+                if b'\nhalt\r\n' not in text:
+                    raise RuntimeError('PAX did not reach halt')
+                summary = [x for x in text.splitlines() if x.startswith(b'console: ') and b'scancodes' in x]
+                if len(summary) != 1 or b'(0 scancodes)' not in summary[0] or b'console: 0 bytes from com1,' not in summary[0]:
+                    raise RuntimeError('USB path contaminated by PS/2 or serial: '+repr(summary))
+                if b'xhci: keyboard usb1-' not in text or b'enumeration failed' in text or b'timeout' in text:
+                    raise RuntimeError('USB enumeration did not complete cleanly')
+                execute('quit')
+            proc.wait(timeout=10)
+        finally:
+            if reader is not None:
+                reader.close()
+            if conn is not None:
+                conn.close()
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=10)
+    lines = serial.read_text(errors='replace').splitlines()
+    rows = [line for line in lines if line.startswith('USBROW ')]
+    times = [line for line in lines if line.startswith('USBTIMES ')]
+    if len(rows) != len(KEYS) or len(times) != 1:
+        raise RuntimeError('missing result rows or repeat measurement')
+    expected_edges = {
+        0:'USBROW first-a 61', 4:'USBROW six-keys 61 62 63 64 65 66',
+        11:'USBROW after-unplug 62', 12:'USBROW after-replug 63',
+        13:'USBROW ring-wrap' + ' 61'*300,
+        14:'USBROW finish 71'}
+    for index, expected in expected_edges.items():
+        if rows[index] != expected:
+            raise RuntimeError(f'USB required edge missing: {rows[index]!r}, expected {expected!r}')
+    # Repeat counts depend on scheduling; compare byte values separately.
+    normalized = ['USBROW repeat-a 61' if line.startswith('USBROW repeat-a ') else line for line in rows]
+    repeat = rows[10].split()[2:]
+    if len(repeat) < 15 or any(v != '61' for v in repeat):
+        raise RuntimeError('repeat lost, stuck modifier, or wrong key')
+    stamps = list(map(int, times[0].split()[1:]))
+    if len(stamps) != len(repeat) or stamps[0] != 0:
+        raise RuntimeError('repeat timestamp shape')
+    delay = stamps[1] / 1e6
+    intervals = [(b-a)/1e6 for a,b in zip(stamps[1:], stamps[2:])]
+    median = sorted(intervals)[len(intervals)//2]
+    mean = sum(intervals)/len(intervals)
+    if not 220 <= delay <= 320 or not 20 <= median <= 45 or not 31 <= mean <= 37:
+        raise RuntimeError(f'repeat outside measured tolerance: {delay=} {median=} {mean=}')
+    (out / 'rows.txt').write_text('\n'.join(normalized)+'\n')
+    (out / 'repeat.txt').write_text(f'delay_ms {delay:.3f}\nmedian_period_ms {median:.3f}\nmean_period_ms {mean:.3f}\nreports {len(repeat)}\n')
+    if args.reference:
+        expected = Path(args.reference).read_text().splitlines()
+        if normalized != expected:
+            raise RuntimeError(f'Linux differential mismatch\nexpected={expected!r}\nactual={normalized!r}')
+    print(f'PASS USB {args.topology} {args.firmware}: {len(rows)} rows, delay {delay:.3f}ms, period {median:.3f}ms', flush=True)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--image', required=True)
+    parser.add_argument('--output', required=True)
+    parser.add_argument('--firmware', choices=['bios','uefi'], default='bios')
+    parser.add_argument('--topology', choices=['root','hub','nested'], default='root')
+    parser.add_argument('--linux-kernel')
+    parser.add_argument('--initrd')
+    parser.add_argument('--reference')
+    run(parser.parse_args())

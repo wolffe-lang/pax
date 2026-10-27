@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# px74: USB keyboards through real rings, hubs, hotplug and read(0).
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+tier=both firmware=both images= linux_kernel= topology=all
+while [ $# -gt 0 ]; do
+    case $1 in
+        --tier) tier=$2; shift 2;;
+        --firmware) firmware=$2; shift 2;;
+        --images) images=$2; shift 2;;
+        --linux-kernel) linux_kernel=$2; shift 2;;
+        --topology) topology=$2; shift 2;;
+        *) die 'usage: mpx6-usb [--tier native|release] [--firmware bios|uefi] [--images DIR] [--linux-kernel FILE] [--topology root|hub|nested|all]';;
+    esac
+done
+if [ "$tier" = both ] || [ "$firmware" = both ]; then
+    tiers=$tier; legs=$firmware
+    [ "$tier" != both ] || tiers='native release'
+    [ "$firmware" != both ] || legs='bios uefi'
+    for t in $tiers; do
+        for f in $legs; do
+            extra=()
+            [ -z "$images" ] || extra+=(--images "$images")
+            [ -z "$linux_kernel" ] || extra+=(--linux-kernel "$linux_kernel")
+            "$0" --tier "$t" --firmware "$f" --topology "$topology" "${extra[@]}"
+        done
+    done
+    exit 0
+fi
+case $tier in native) flags=();; release) flags=(--release);; *) die 'bad tier';; esac
+case $firmware in bios|uefi) ;; *) die 'bad firmware';; esac
+"$PAX_ROOT/tests/mpx6-usbcheck" --tier "$tier" --firmware "$firmware"
+case $topology in all) topologies='root hub nested';; root|hub|nested) topologies=$topology;; *) die 'bad topology';; esac
+work=$PAX_BUILD/mpx6-usb/$tier
+if [ -z "$images" ]; then
+    mkdir -p "$work"
+    cc -static -O1 -Wall -Wextra -o "$work/usbkeys" "$PAX_ROOT/user/elf/usbkeys.c"
+    printf '/bin/usbkeys\n' > "$work/run"
+    "$PAX_ROOT/tools/mkinitramfs" "$work/probe.cpio" "/bin/usbkeys=$work/usbkeys" "/etc/pax-run=$work/run" "/usbkeys=$work/usbkeys"
+    "$PAX_ROOT/tools/fetch-limine"
+    "$PAX_ROOT/tools/build-kernel" "${flags[@]}" --src "$PAX_ROOT/kernel/kmain_console.lu" "$work"
+    "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$work/probe.cpio" initramfs.cpio "$work/kmain_console.elf" "$work/probe.iso"
+    images=$work
+fi
+reference=$PAX_ROOT/notes/px74/linux.rows
+if [ -n "$linux_kernel" ]; then
+    python3 -I "$PAX_ROOT/tools/usb-session" --image "$images/probe.iso" --initrd "$images/probe.cpio" \
+        --linux-kernel "$linux_kernel" --output "$work/linux" --topology root --firmware bios
+    reference=$work/linux/rows.txt
+fi
+[ -s "$reference" ] || die 'missing measured Linux rows'
+for topology in $topologies; do
+    python3 -I "$PAX_ROOT/tools/usb-session" --image "$images/probe.iso" --reference "$reference" \
+        --output "$work/$firmware-$topology" --topology "$topology" --firmware "$firmware"
+done
