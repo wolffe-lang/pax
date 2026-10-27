@@ -2,20 +2,28 @@
 # px74: run the live driver's pure invariants in a freestanding QEMU kernel.
 set -euo pipefail
 . "$(dirname "$0")/../tools/lib.sh"
-firmware=bios tier=native
+firmware=bios tier=native images=
 while [ $# -gt 0 ]; do
     case $1 in
         --firmware) firmware=$2; shift 2;;
+        --images) images=$2; shift 2;;
         --tier) tier=$2; shift 2;;
         *) die "usage: tests/mpx6-usbcheck [--firmware bios|uefi] [--tier native|release]";;
     esac
 done
 case $tier in native) flags=();; release) flags=(--release);; *) die "invalid tier";; esac
-work=$PAX_BUILD/mpx6-usbcheck/$tier
-mkdir -p "$work"
-"$PAX_ROOT/tools/fetch-limine"
-"$PAX_ROOT/tools/build-kernel" "${flags[@]}" --src "$PAX_ROOT/kernel/kmain_usbcheck.lu" "$work"
-"$PAX_ROOT/tools/mkimage" "$work/kmain_usbcheck.elf" "$work/check.iso"
+work=${images:-$PAX_BUILD/mpx6-usbcheck/$tier}
+if [ -z "$images" ]; then
+    mkdir -p "$work"
+    "$PAX_ROOT/tools/fetch-limine"
+    "$PAX_ROOT/tools/build-kernel" "${flags[@]}" --src "$PAX_ROOT/kernel/kmain_usbcheck.lu" "$work"
+    "$PAX_ROOT/tools/mkimage" "$work/kmain_usbcheck.elf" "$work/check.iso"
+    printf '%s\n' "$tier" > "$work/tier.txt"
+else
+    [ -f "$work/kmain_usbcheck.elf" ] && [ -f "$work/check.iso" ] && [ -f "$work/tier.txt" ] \
+        || die 'missing cached invariant kernel; rebuild the USB image bundle'
+    [ "$(cat "$work/tier.txt")" = "$tier" ] || die 'cached invariant compiler tier mismatch'
+fi
 rc=0
 "$PAX_ROOT/tools/qemu-run" --firmware "$firmware" --serial "$work/$firmware.log" "$work/check.iso" || rc=$?
 [ "$rc" = 33 ] || { cat "$work/$firmware.log"; die "USB invariants: exit $rc, expected 33"; }

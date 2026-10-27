@@ -36,7 +36,9 @@ if [ "$tier" = both ] || [ "$firmware" = both ]; then
 fi
 case $tier in native) flags=();; release) flags=(--release);; *) die 'bad tier';; esac
 case $firmware in bios|uefi) ;; *) die 'bad firmware';; esac
-"$PAX_ROOT/tests/mpx6-usbcheck" --tier "$tier" --firmware "$firmware"
+check_args=()
+[ -z "$images" ] || check_args=(--images "$images/invariants")
+"$PAX_ROOT/tests/mpx6-usbcheck" --tier "$tier" --firmware "$firmware" "${check_args[@]}"
 case $topology in all) topologies='root hub nested';; root|hub|nested) topologies=$topology;; *) die 'bad topology';; esac
 work=$PAX_BUILD/mpx6-usb/$tier
 if [ -z "$images" ]; then
@@ -47,6 +49,9 @@ if [ -z "$images" ]; then
     "$PAX_ROOT/tools/fetch-limine"
     "$PAX_ROOT/tools/build-kernel" "${flags[@]}" --src "$PAX_ROOT/kernel/kmain_console.lu" "$work"
     "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$work/probe.cpio" initramfs.cpio "$work/kmain_console.elf" "$work/probe.iso"
+    mkdir -p "$work/invariants"
+    cp "$PAX_BUILD/mpx6-usbcheck/$tier/check.iso" "$PAX_BUILD/mpx6-usbcheck/$tier/kmain_usbcheck.elf" \
+        "$PAX_BUILD/mpx6-usbcheck/$tier/tier.txt" "$work/invariants/"
     images=$work
 fi
 reference=$PAX_ROOT/notes/px74/linux.rows
