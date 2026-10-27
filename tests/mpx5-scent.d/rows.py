@@ -23,7 +23,7 @@ What a row holds, and from where (no row is read from scent's output):
     on an argument that is not UTF-8, here passed by the kernel from a
     `#!` line (pelt refuses the byte in ANSI-C quoting before invoking scent);
   - scent's own prose where GNU's is not asked for (--help's first line,
-    --version, the M2 refusal of -r), and what PAX and the image are:
+    --version), and recursive matching of the fixed fixture, and what PAX and the image are:
     the link, the wrappers' warnings, /bin/sh, no locale, pelt's words.
 """
 import re
@@ -85,7 +85,7 @@ ROWS = [
     ("-E with -F: conflicting matchers", s("grep -E -F x words.txt", 2, err=["grep: conflicting matchers specified"])),
     ("egrep's warning even for --help", ["$ egrep --help >/dev/null", W]),
     ("fgrep's warning even for --help, then scent's own usage line",
-     ["$ fgrep --help | head -n 1", F, "Usage: scent [OPTION]... PATTERNS [FILE]..."]),
+     ["$ fgrep --help | head -n 1", F, "Usage: grep [OPTION]... PATTERNS [FILE]..."]),
     ("egrep -F: the warning, then the conflict, status 2", s("egrep -F x words.txt", 2, err=[W, "grep: conflicting matchers specified"])),
     ("fgrep -E: the warning, then the conflict, status 2", s("fgrep -E x words.txt", 2, err=[F, "grep: conflicting matchers specified"])),
     ("egrep is grep -E", s("egrep -c 'cat|dog' words.txt", 0, ["5"], [W])),
@@ -117,8 +117,9 @@ ROWS = [
     ("pelt refuses byte FF before invoking scent (pelt#65)",
      ["$ s grep -F x $'\\377'",
       "pelt: line 50: $'\\377': a byte that is not UTF-8 cannot be carried yet (pelt#65)"]),
-    ("-r is M2: refused by name", s("grep -r cat .", 2, err=["scent: not yet implemented: r (M2)"])),
-    ("--version is scent's own", ["$ grep --version | head -n 1", "scent 0.1.0"]),
+    ("-r: recursive matching of the fixed directory", s("grep -r cat .", 0,
+        out=["./words.txt:cat", "./words.txt:concatenate", "./words.txt:the cat sat", "./words.txt:category"])),
+    ("--version is scent's own", ["$ grep --version | head -n 1", "scent 0.2.0"]),
 ]
 
 
