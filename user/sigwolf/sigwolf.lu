@@ -104,12 +104,7 @@ fn lead(exe: str) -> !int {
 }
 
 fn masks() -> !int {
-    // POSIX exec preserves an ignored disposition; sigaction permits the
-    // new runtime to replace it. This is a post-runtime read, not an
-    // observation at exec entry. Joining a task orders handler installation
-    // before the read on PAX as well as Linux (pax#174).
-    a_task()
-    print("~X: runtime task joined")
+    // Deliberate px83 plant: read before the event that orders the state.
     let text = fs_read_text("/proc/self/status")?
     for line in text.split("\n") {
         if line.starts_with("SigIgn:") {
@@ -117,6 +112,8 @@ fn masks() -> !int {
             print("~X: after a joined runtime task: {l}")
         }
     }
+    a_task()
+    print("~X: runtime task joined")
     0
 }
 
