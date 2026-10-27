@@ -53,7 +53,11 @@ elif name=='qemu-run':
     assert builds==expected, f'kernel builds {dict(builds)}, expected {dict(expected)}'
     assert sum(n=='qemu-run' for n,a in records)==4, 'invariant boots were dropped'
     assert sum(n=='usb-session' for n,a in records)==12, 'topology/firmware/tier sessions were dropped'
-    print('PASS USB build-once: four builds, four invariant boots, twelve sessions')
+    sessions=collections.Counter((Path(a[a.index('--image')+1]).parent.name,
+        a[a.index('--firmware')+1],a[a.index('--topology')+1]) for n,a in records if n=='usb-session')
+    assert sessions==collections.Counter({(t,f,p):1 for t in ('native','release')
+        for f in ('bios','uefi') for p in ('root','hub','nested')}), 'matrix legs were duplicated or dropped'
+    print('PASS USB build-once: four builds, four invariant boots, twelve distinct sessions')
     bundle=tree/'build/mpx6-usb/native'
     (bundle/'invariants/tier.txt').write_text('release\n')
     result=subprocess.run([str(tree/'tests/mpx6-usb'),'--tier','native','--firmware','uefi','--images',str(bundle)],
