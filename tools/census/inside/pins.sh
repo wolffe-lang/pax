@@ -27,3 +27,6 @@ BASE_IMAGE_DIGEST=sha256:8185e444e45ba166146b244b41f1cba2d7d91f3eddce533a839cc95
 # the image pin and this census input together. This is not a live-head gate.
 PELT_REPO=https://github.com/wolffe-lang/pelt
 PELT_REV=0b5eaa5394667c485de3a134f771c87024b68a3c
+
+# px82 current-image snapshot; px04 trace inputs above remain historical.
+IMAGE_YEW_REV=0ccb2c67661a2dd789b5ce86180d592370a79c31

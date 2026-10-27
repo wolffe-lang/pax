@@ -1414,3 +1414,11 @@ Limine media report is unchanged. Consulted on 2026-10-27:
 | [USB mass-storage bulk-only transport](https://www.usb.org/sites/default/files/usbmassbulk_10.pdf) | 1.0, §1.1 scope, §2 terms | command/data/status transport over bulk endpoints; firmware-owned storage during boot |
 | QEMU, SeaBIOS, OVMF; Linux with xHCI, usb-storage and vfat | installed binary versions recorded with the gate | black-box USB boots and Linux ESP file differential |
 | `lsblk --json`, `findmnt`, `diskutil` plist inventory shapes | Linux/macOS tool interfaces; synthetic inventories in tests | fail-closed removable-disk plan and dry-run writer policy, no real-device writes |
+
+## px82: yew launch pin
+
+The org-owned yew tree moves from `77c108391242dac8ff3be0087e52bc153a2d75a2` to `0ccb2c67661a2dd789b5ce86180d592370a79c31` (1066 commits).
+Launch `git ls-remote` read twice with identical results; the codeload
+archive SHA256 `d2ef6674865306bf5bc910b0541814210069c981a70bdbefdbf7a11e6f54ef15` read twice on hasu.
+Built unmodified with its own wolf-toolchain.toml; no third-party source
+consulted. The image snapshot is separate from px04 historical traces.
