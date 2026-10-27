@@ -86,14 +86,14 @@ def main():
             put('usr/share/wolf/std/'+source.relative_to(inputs/'base-std/std').as_posix(), source.read_bytes())
     # Each original binary must still match its builder's sums before stripping.
     with tempfile.TemporaryDirectory(prefix='px82-strip-') as scratch:
-        for project in ('bore', 'pelt', 'yew', 'scent', 'lope', 'aspen', 'lupin'):
+        for project in ('bore', 'pelt', 'yew', 'scent', 'lope', 'aspen', 'lupin', 'lobo'):
             for line in (inputs/project/'sums.txt').read_text().splitlines():
                 name, digest, size = line.split()
                 source = inputs/project/name
                 data = source.read_bytes()
                 assert (sha(data), len(data)) == (digest, int(size)), 'built input mismatch: '+name
-                # scent and its wrappers remain byte-for-byte upstream builds.
-                if project != 'scent':
+                # scent/wrappers and the published lupin remain byte-for-byte inputs.
+                if project not in ('scent', 'lupin'):
                     stripped = Path(scratch)/name
                     subprocess.run(['strip', '-o', str(stripped), str(source)], check=True)
                     data = stripped.read_bytes()
