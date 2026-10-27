@@ -257,11 +257,14 @@ fn execute_plan(p: Plan, source: str, payload: str, tools: str) -> () ! {
     if (os_euid() else |_| -1) != 0 { return invalid }
     let canonical_payload = fs_realpath(payload) else |_| { return io }
     if !payload_location_ok(source, canonical_payload) { return invalid }
+    // Reserve scratch before the snapshot: on a live source "/", creating
+    // this child changes /tmp's retained metadata even though its contents
+    // are excluded. Subsequent staging changes only descendants of work.
+    let work = "/tmp/pax-install-{os_pid()}"
+    fs_create_dir_mode(work, 448) else |_| { return io }
     let rows = source_snapshot(source)?
     boot_assets(source, canonical_payload)?
     let games = staged_games(canonical_payload)?
-    let work = "/tmp/pax-install-{os_pid()}"
-    fs_create_dir_mode(work, 448) else |_| { return io }
     let tree = "{work}/root"
     let attrs = "{work}/attrs"
     print("Staging source; no target writes. Scratch: {work}")

@@ -9,6 +9,7 @@ head=$(cat "$out/commit")
 disk=$out/installed.img
 [ ! -e "$disk" ] || die 'installed.img already exists; use a fresh image directory'
 truncate -s 1073741824 "$disk"
+blank=$(sha256_of "$disk")
 cat > "$out/install.keys" <<'KEYS'
 pax-install --install --ext2-preview --target vda --seed px82-image --user pax --games yes --confirm 'ERASE /dev/vda 254:0-seq1 1073741824 px82-image'
 echo PX82-INSTALL=$?
@@ -19,7 +20,13 @@ KEYS
     --type "$out/install.keys" --prompt '$ ' --marker 'halt|PANIC .*' \
     "$out/pax-${head:0:8}.iso" > "$out/install.halt.log" 2>&1
 serial_norm "$out/install.serial.log" > "$out/install.norm"
-grep -qx 'PX82-INSTALL=0' "$out/install.norm" || { tail -70 "$out/install.norm"; die 'live ISO installation did not succeed'; }
+status=$(sed -n 's/^PX82-INSTALL=//p' "$out/install.norm")
+[ -n "$status" ] || die 'installer command completion marker missing; inspect install.keys and the typed receipt'
+if [ "$(sha256_of "$disk")" = "$blank" ]; then
+    grep -E 'Staging source|pax-install:|PX82-INSTALL=|block: vda:' "$out/install.norm" >&2 || true
+    die "target image unchanged (zero effective writes); installer exited $status"
+fi
+[ "$status" = 0 ] || { tail -70 "$out/install.norm"; die "live ISO installer exited $status after target writes"; }
 python3 -I - "$disk" "$out/installed-root.img" <<'PY'
 from pathlib import Path
 import struct,sys

@@ -48,10 +48,10 @@ with tempfile.TemporaryDirectory(dir=work, prefix='snapshot-') as tmp:
     for d in ['dev','proc','sys','tmp']: assert list((w/'copy'/d).iterdir())==[]
     print('PASS I-metadata: bytes, numeric ids, modes, hard links, symlinks, quoted names, whole-second times')
     print('PASS I-exclusions: mountpoints preserved, runtime contents omitted')
-    for mode in ['bytes','tree']:
+    for mode in ['bytes','tree','runtime-dir']:
         out=subprocess.run([program,src,w/('changed-'+mode),w/('attrs-'+mode),mode],capture_output=True,text=True)
         assert out.returncode==1 and 'source_changed' in out.stderr,(out.stdout,out.stderr)
-    print('PASS I-source-mutation: changed bytes and changed directory entries refused')
+    print('PASS I-source-mutation: changed bytes, tree entries and excluded runtime-directory metadata refused')
     (src/'z-last').write_text('last source file')
     out=subprocess.run([program,src,w/'interrupted',w/'attrs-interrupted','interrupt'],capture_output=True,text=True)
     assert out.returncode==1 and 'stage: io' in out.stderr,(out.stdout,out.stderr)
