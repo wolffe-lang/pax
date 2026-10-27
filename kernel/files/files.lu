@@ -7297,7 +7297,12 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
 // across the end is short, one at or past it -ENOSPC; lseek outside 0 to the
 // size -EINVAL, SEEK_DATA and SEEK_HOLE -EINVAL; a read-only disk's writes
 // -EPERM, even of no bytes). A partial sector is read, changed and written
-// back. Nothing is cached on the way: a raw write goes to the device before
+// back. px75: to a disk whose driver takes requests of more than a page
+// (kernel/nvme: up to 128 KiB, or its controller's MDTS), a piece is that
+// long, through kernel/block's bounce pages, one request each, and the
+// read-modify-write of a partial piece is in the namespace's own logical
+// blocks (512 or 4096 bytes); a virtio disk's pieces are px79's. Nothing
+// is cached on the way: a raw write goes to the device before
 // it returns, and every clean cached block of the same disk it touched is
 // forgotten (kernel/block's `raw_wrote`), so a mount after it reads what it
 // wrote; a block a mounted file system holds dirty is left to the user, as
@@ -7351,7 +7356,9 @@ fn blk_in(pml4: u64, d: u64, off: u64, buf: u64, n: u64) -> u64 {
     if !uaccess.writable(pml4, buf, k) {
         return neg(EFAULT)
     }
-    let bf = block.bounce()
+    let most = block.max_sectors(d)
+    let big = most > 8
+    let bf = if big { block.bounce_list() } else { block.bounce() }
     if bf == 0 {
         return neg(ENOMEM)
     }
@@ -7361,17 +7368,77 @@ fn blk_in(pml4: u64, d: u64, off: u64, buf: u64, n: u64) -> u64 {
     while done < k {
         let p = off + done
         let s0 = (p / 4096) * 8
-        let ns = if total - s0 < 8 { total - s0 } else { 8 }
-        if block.rw(d, block.T_IN, s0, ns, bf) != 0 {
+        var ns = if total - s0 < 8 { total - s0 } else { 8 }
+        if big {
+            // px75: as far as the piece wants, in whole pages, at most `most`
+            let want = (p + (k - done) - s0 * 512 + 4095) / 4096 * 8
+            ns = if want < most { want } else { most }
+            if ns > total - s0 {
+                ns = total - s0
+            }
+        }
+        let e = if big { block.rw_pages(d, block.T_IN, s0, ns, bf) } else { block.rw(d, block.T_IN, s0, ns, bf) }
+        if e != 0 && !big {
             return if done > 0 { done } else { neg(EIO) }
         }
         let inoff = p - s0 * 512
+        if e != 0 {
+            // px75: a piece that failed is read again a page at a time, and
+            // what came before the page that failed is the answer (measured:
+            // the guest answers 4096 for 8192 bytes across a bad sector).
+            var good: u64 = 0
+            while good < ns {
+                let m = if ns - good < 8 { ns - good } else { 8 }
+                // # Safety: the list frame kernel/block holds, BOUNCE_PAGES words.
+                let page = unsafe { ((bf + (good / 8) * 8) as *u64).read_volatile() }
+                if block.rw(d, block.T_IN, s0 + good, m, page) != 0 {
+                    break
+                }
+                good += m
+            }
+            if good * 512 <= inoff {
+                return if done > 0 { done } else { neg(EIO) }
+            }
+            let short = if k - done < good * 512 - inoff { k - done } else { good * 512 - inoff }
+            pages_copy(pml4, bf, inoff, buf + done, short, false)
+            return done + short
+        }
         let room = ns * 512 - inoff
         let piece = if k - done < room { k - done } else { room }
-        let _ok = uaccess.copy_out(pml4, buf + done, bf + hh + inoff, piece)
+        if big {
+            pages_copy(pml4, bf, inoff, buf + done, piece, false)
+        } else {
+            let _ok = uaccess.copy_out(pml4, buf + done, bf + hh + inoff, piece)
+        }
         done += piece
     }
     done
+}
+
+/// px75: copy `len` bytes between `buf` (a user address in `pml4`'s
+/// space, or with `pml4` 0 a kernel one) and byte `at` of the bounce
+/// pages listed at `bl` (kernel/block's `bounce_list`): into the pages
+/// when `inward`, out of them otherwise; a page's piece at a time.
+fn pages_copy(pml4: u64, bl: u64, at: u64, buf: u64, len: u64, inward: bool) {
+    let hh = frames.hhdm()
+    var x: u64 = 0
+    while x < len {
+        let q = at + x
+        // # Safety: the list frame kernel/block holds, BOUNCE_PAGES words.
+        let page = unsafe { ((bl + (q / 4096) * 8) as *u64).read_volatile() }
+        let o = q % 4096
+        let m = if len - x < 4096 - o { len - x } else { 4096 - o }
+        if inward {
+            if pml4 == 0 {
+                block.copy_bytes(page + hh + o, buf + x, m)
+            } else {
+                let _ok = uaccess.copy_in(pml4, page + hh + o, buf + x, m)
+            }
+        } else {
+            let _ok = uaccess.copy_out(pml4, buf + x, page + hh + o, m)
+        }
+        x += m
+    }
 }
 
 /// px79: `n` bytes of user `buf` to byte `off` of device `d`: the count
@@ -7401,32 +7468,42 @@ fn blk_out(pml4: u64, d: u64, off: u64, buf: u64, n: u64) -> u64 {
     if pml4 != 0 && !uaccess.readable(pml4, buf, k) {
         return neg(EFAULT)
     }
-    let bf = block.bounce()
+    let most = block.max_sectors(d)
+    let big = most > 8
+    let bf = if big { block.bounce_list() } else { block.bounce() }
     if bf == 0 {
         return neg(ENOMEM)
     }
     let hh = frames.hhdm()
+    // px75: the unit a partial piece is read and written back in: the
+    // namespace's own logical block on an NVMe disk, px79's sector else.
+    let unit = if block.driver(d) == block.DRV_NVME { block.lbs(d) } else { 512 }
+    let per = unit / 512
     var done: u64 = 0
     while done < k {
         let p = off + done
-        let chunk_end = (p / 4096 + 1) * 4096
+        let chunk_end = (p / 4096) * 4096 + (if big { most * 512 } else { 4096 })
         let piece = if k - done < chunk_end - p { k - done } else { chunk_end - p }
-        // The sectors the piece touches, the first and last read first
+        // The units the piece touches, the first and last read first
         // when the piece does not cover them whole.
-        let sa = p / 512
-        let sb = (p + piece - 1) / 512
-        let ns = sb - sa + 1
-        if p % 512 != 0 || (p + piece) % 512 != 0 {
-            if block.rw(d, block.T_IN, sa, ns, bf) != 0 {
+        let sa = (p / unit) * per
+        let sb = ((p + piece + unit - 1) / unit) * per
+        let ns = sb - sa
+        if p % unit != 0 || (p + piece) % unit != 0 {
+            let e = if big { block.rw_pages(d, block.T_IN, sa, ns, bf) } else { block.rw(d, block.T_IN, sa, ns, bf) }
+            if e != 0 {
                 return if done > 0 { done } else { neg(EIO) }
             }
         }
-        if pml4 == 0 {
+        if big {
+            pages_copy(pml4, bf, p - sa * 512, buf + done, piece, true)
+        } else if pml4 == 0 {
             block.copy_bytes(bf + hh + (p - sa * 512), buf + done, piece)
         } else {
             let _ok = uaccess.copy_in(pml4, bf + hh + (p - sa * 512), buf + done, piece)
         }
-        if block.rw(d, block.T_OUT, sa, ns, bf) != 0 {
+        let w = if big { block.rw_pages(d, block.T_OUT, sa, ns, bf) } else { block.rw(d, block.T_OUT, sa, ns, bf) }
+        if w != 0 {
             return if done > 0 { done } else { neg(EIO) }
         }
         block.raw_wrote(d, sa, ns)
@@ -7562,7 +7639,7 @@ fn blk_ioctl(a: u64, pml4: u64, fd: u64, req: u64, arg: u64) -> u64 {
         return put_arg(pml4, arg, block.soft_block(d), 4)
     }
     if req == BLKROTATIONAL {
-        return put_arg(pml4, arg, 1, 2)
+        return put_arg(pml4, arg, block.rotational(d), 2) // px75: an NVMe namespace's 0
     }
     if req == BLKGETDISKSEQ {
         return put_arg(pml4, arg, block.diskseq(d), 8)
