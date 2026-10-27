@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Replay existing typing suites over USB; refuse accidental PS/2 success."""
+import argparse
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import time
+
+parser = argparse.ArgumentParser()
+parser.add_argument('suite', choices=['mpx3-console','mpx3-shell','mpx5-pelt'])
+parser.add_argument('--tier', choices=['native','release','both'], default='both')
+parser.add_argument('--firmware', choices=['bios','uefi','both'], default='both')
+args = parser.parse_args()
+root = Path(__file__).resolve().parents[1]
+build = Path(os.environ.get('PAX_BUILD', root/'build'))
+legs = ['--tier', args.tier, '--firmware', args.firmware]
+expected = (2 if args.suite != 'mpx5-pelt' else 1)
+expected *= 2 if args.tier == 'both' else 1
+expected *= 2 if args.firmware == 'both' else 1
+for topology in ('root','hub'):
+    start = time.time()
+    env = dict(os.environ, PAX_USB_KBD=topology)
+    cmd = [str(root/'tests'/args.suite), '--images', str(build/args.suite)] + legs
+    if args.suite == 'mpx5-pelt':
+        cmd += ['--only','friendly']
+    result = subprocess.run(cmd, env=env)
+    if result.returncode:
+        raise SystemExit(result.returncode)
+    pattern = ('mpx5-pelt-friendly-*-framebuffer/serial.log' if args.suite == 'mpx5-pelt'
+               else args.suite+'-*-ps2.serial.log')
+    logs = [p for p in build.glob(pattern) if p.stat().st_mtime >= start]
+    if len(logs) != expected:
+        raise SystemExit(f'FAIL USB typing: {len(logs)} fresh logs, expected {expected}')
+    destination = build/('usb-typing-'+args.suite)/topology
+    destination.mkdir(parents=True, exist_ok=True)
+    for path in logs:
+        text = path.read_text(errors='replace')
+        summary = re.findall(r'^console: 0 bytes from com1, ([0-9]+) keys \(0 scancodes\)', text, re.M)
+        if len(summary) != 1 or int(summary[0]) == 0 or 'xhci: keyboard usb1-' not in text:
+            raise SystemExit(f'FAIL USB typing path: {path}')
+        if 'device enumeration failed' in text or 'command timeout' in text:
+            raise SystemExit(f'FAIL USB enumeration: {path}')
+        name = path.name if path.name != 'serial.log' else path.parent.name+'.log'
+        shutil.copy2(path, destination/name)
+        print(f'PASS USB typing {args.suite} {topology}: {name}, {summary[0]} keys, zero i8042 bytes', flush=True)
