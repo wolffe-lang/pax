@@ -1,0 +1,1469 @@
+//! nvme — NVM Express controllers on PCI Express (px75, P6: the
+//! desktops' disks).
+//!
+//! **The controllers.** `start` finds every function in kernel/pci's
+//! table whose class code is 01.08.02 (mass storage, non-volatile memory,
+//! NVM Express: NVMe over PCIe Transport 1.0c §3.8, the class code
+//! register), in its order (bus, device, function: QEMU's slot order, a
+//! machine's enumeration order), up to CTRLS. Controller c (0 the first
+//! found, refused or not) is `nvme<c>`; its namespaces are its disks,
+//! named `nvme<c>n<k>`, k counting the controller's active namespaces
+//! from 1 in the order the controller lists them (measured: the Linux
+//! guest names namespaces 1 and 3 `nvme0n1` and `nvme0n2`, not by the
+//! NSID). Each controller has a state frame of its own and window 24 + c
+//! of the device slot (kernel/virtio's windows end at 23).
+//!
+//! **Bring-up** (NVMe Base 2.0c §3.5.1, memory-based transport):
+//!
+//! 1. PCI: memory decoding and bus mastering on; INTx off in the command
+//!    register, MSI and MSI-X off in their capabilities (completion is
+//!    polled, below); BAR0 (with BAR1 when it is 64-bit) is the
+//!    registers (Transport §3.1.2), mapped uncached: the properties page
+//!    and the doorbells of queues 0 and 1 (`1000h + (2y [+ 1]) × (4 <<
+//!    CAP.DSTRD)`, Transport Figure 4). Every register is read and written
+//!    at 32 bits, aligned (Transport §3.1.2: native width or aligned 32-bit
+//!    accesses), a 64-bit one low half first.
+//! 2. CAP (Base §3.1.3.1): MQES (15:0, 0's based), TO (31:24, 500 ms
+//!    units), DSTRD (35:32), CSS (44:37: bit 0, the NVM Command Set, is
+//!    required here), MPSMIN (51:48: 0, 4 KiB, required here: the host's
+//!    page). A controller that asks for anything else is refused by name.
+//! 3. Reset: when CC.EN (CC bit 0, §3.1.3.5) is set (firmware that booted
+//!    from the controller leaves it so) it is cleared, and CSTS.RDY (CSTS
+//!    bit 0, §3.1.3.6) is waited for to read 0, within CAP.TO; INTMS bit 0
+//!    masks the pin interrupt (§3.1.3.3).
+//! 4. The admin queue pair: AQ entries each (AQA, §3.1.3.8, 0's based),
+//!    ASQ and ACQ a zeroed frame each (§3.1.3.9-10, 4 KiB aligned).
+//! 5. CC: I/O SQ entries of 2^6 = 64 bytes (IOSQES, 19:16), CQ entries
+//!    2^4 = 16 (IOCQES, 23:20), round-robin arbitration (AMS 000b), a
+//!    memory page of 4 KiB (MPS 0), the NVM Command Set (CSS 000b: §3.5.1
+//!    step 3 says 110b when CAP.CSS bit 6 is set, for a host that drives
+//!    the other I/O command sets; this one drives the NVM Command Set
+//!    alone, which CSS 000b selects on every controller that has it); then
+//!    EN, and CSTS.RDY waited for, within CAP.TO; CSTS.CFS (bit 1) is a
+//!    refusal by name.
+//! 6. Identify (§5.17): the controller (CNS 01h, Figure 275: SN 23:04, MN
+//!    63:24, FR 71:64, MDTS 77, VER 83:80, SQES 512, CQES 513, NN 519:516,
+//!    VWC 525), the active namespace list (CNS 02h, §5.17.2.2; a
+//!    controller that refuses it is asked for namespaces 1 to NSMAX one by
+//!    one), each namespace (CNS 00h, NVM Command Set 1.0c §4.1.5.1: NSZE
+//!    7:0, FLBAS 26, NSATTR 99, LBAF k at 128 + 4k with MS 15:0 and LBADS
+//!    23:16). A namespace with metadata, or with logical blocks of fewer
+//!    than 512 or more than 4096 bytes, is refused by name; one marked
+//!    write protected (NSATTR bit 0) is read-only.
+//! 7. Set Features, Number of Queues (FID 07h, §5.27.1.5): one SQ and one
+//!    CQ asked (0's based 0); the counts granted kept for the boot line.
+//! 8. Create I/O Completion Queue (§5.4: QID 1, PC 1, IEN 0: no
+//!    interrupt) then Create I/O Submission Queue (§5.5: QID 1, CQID 1,
+//!    PC 1), DEPTH entries each or MQES + 1 when that is smaller; when
+//!    the controller says Invalid Queue Size (command specific 02h) the
+//!    depth is halved and both are made again, down to 2 (the fallback the
+//!    boot line names).
+//!
+//! One I/O queue pair per controller: PAX runs on one CPU, and
+//! kernel/block asks for one request at a time and waits for it.
+//!
+//! **A request** is kernel/block's record (8 words: the type, the first
+//! 512-byte sector, the sectors, the data's physical address, the status,
+//! the state, and word 6: 0, or the kernel address of a list of physical
+//! page addresses the data runs across, page after page). `submit` takes
+//! a free slot (its command identifier), turns sectors into the
+//! namespace's logical blocks (a request that is not a whole number of
+//! them is refused by name), writes a 64-byte submission entry (Base
+//! §3.3.3.1, Figure 87: CDW0 the opcode and the identifier, NSID, PRP1,
+//! PRP2; NVM Command Set §3.2.4 and §3.2.6: CDW10-11 the starting LBA,
+//! CDW12 the blocks, 0's based) and rings the SQ 1 tail doorbell. READ is
+//! 02h, WRITE 01h, FLUSH 00h (Base §7.1, the namespace's NSID).
+//!
+//! **PRPs** (Base Figure 87, PRP Entry 2): PRP1 is the first page (its
+//! offset kept); a transfer that crosses one page boundary has the second
+//! page in PRP2; one that crosses more has in PRP2 a PRP list, a page of
+//! the slot's own holding the second page's address and every one after
+//! it, page aligned. The largest request is MAXSEC sectors (128 KiB: 32
+//! pages, one list page of 31 entries, never chained), or less when the
+//! controller's MDTS (2^MDTS pages of 4 KiB) says so.
+//!
+//! **Completion is polled**, as kernel/vblk's is and for its reason: a
+//! request is made inside a system call with IF clear and waited for in
+//! place. The I/O CQ has no interrupt (IEN 0), the admin CQ's vector is
+//! masked (INTMS) and INTx is off. `wait` looks at the CQ entry at the
+//! head (Base §3.3.3.2: DW3's phase tag, bit 16, inverted at every pass
+//! of the queue, §3.3.3.2.2) with a PAUSE between looks, at most SPIN
+//! looks (then the request is lost: an I/O error, counted, never a
+//! hang); each entry taken moves the head and is said to the controller
+//! by the CQ 1 head doorbell. The status (DW3 31:17, Figure 92: SC 7:0,
+//! SCT 10:8, DNR 14) of a failed command is a block error (-EIO in
+//! kernel/block) and a line that names it by the specification's own
+//! words (Figures 94, 95, 98, 99, and the NVM Command Set's command
+//! specific values), at most SAY lines a controller.
+//!
+//! **The end** (`shutdown`, from kernel/block's `summary`, after the
+//! volumes are written and flushed): CC.SHN 01b, a normal shutdown, and
+//! CSTS.SHST waited for to read 10b, complete (§3.6.1), within CAP.TO;
+//! one line says how it ended.
+//!
+//! Every entry runs with IF clear (a system call, or a kernel's start).
+//! No region, no heap: the state is one frame a controller, its address
+//! in module `var`s (scalars).
+//!
+//! Written from the NVM Express Base Specification 2.0c (2022-10-04), the
+//! NVMe over PCIe Transport Specification 1.0c (2022-10-03) and the NVM
+//! Express NVM Command Set Specification 1.0c (2022-10-03), each section
+//! named where it is used; the PCI Local Bus specification's command
+//! register and the MSI and MSI-X capabilities' message control (enable
+//! bits); black-box runs of QEMU's `nvme` device and of the Linux guest
+//! (`notes/px75/`). No Linux source; no other kernel's, firmware's,
+//! emulator's or driver's source.
+
+use frames
+use log
+use paging
+use pci
+use sync
+
+extern "c" fn pax_tree_zero(dst: u64, n: u64)
+
+const PAGE: u64 = 4096
+/// The most controllers driven.
+pub const CTRLS: u64 = 4
+/// The most namespaces a controller gives disks (and kernel/block's
+/// four disks bound them all).
+pub const NSMAX: u64 = 4
+/// The most disks (namespaces) in all: kernel/block's DISKS.
+pub const UNITS: u64 = 4
+const AQ: u64 = 32 // admin queue entries
+const DEPTH: u64 = 64 // I/O queue entries asked
+/// Requests a controller may hold at once.
+pub const SLOTS: u64 = 8
+const MAXSEC: u64 = 256 // the largest request, 512-byte sectors (128 KiB)
+const SPIN: u64 = 400000000 // `wait`'s bound, in looks (about 10 s under TCG)
+const LOOKS: u64 = 2000000 // register looks a CAP.TO unit (500 ms) is given
+const SAY: u64 = 8 // error lines a controller
+
+/// The NVMe class code (pci.class_code's form).
+pub const CLASS: u64 = 0x010802
+
+/// `start`'s answers, as kernel/vblk's: a disk is up.
+pub const UP: u64 = 0
+/// No controller on the bus.
+pub const ABSENT: u64 = 1
+/// Every controller refused (a line each says why).
+pub const REFUSED: u64 = 2
+
+// kernel/block's request types and record (kernel/vblk's layout, with
+// word 6 the page list).
+const T_IN: u64 = 0
+const T_OUT: u64 = 1
+const T_FLUSH: u64 = 4
+const R_OP: u64 = 0
+const R_SECTOR: u64 = 1
+const R_COUNT: u64 = 2
+const R_PA: u64 = 3
+const R_STATUS: u64 = 4
+const R_STATE: u64 = 5
+const R_LIST: u64 = 6
+const RS_QUEUED: u64 = 1
+const RS_DONE: u64 = 2
+/// Statuses kernel/block reads: 0 is success; a completion's status
+/// field is kept as it came (non-zero); the rest are the driver's own.
+pub const S_OK: u64 = 0
+/// A request that never completed (`wait`'s bound).
+pub const S_LOST: u64 = 0x10000
+/// A request that is not a whole number of the namespace's blocks.
+pub const S_ALIGN: u64 = 0x10001
+/// A request to a disk that is not up.
+pub const S_DOWN: u64 = 0x10002
+
+// Controller properties (Base §3.1.3), byte offsets in BAR0.
+const CAP: u64 = 0x00
+const VS: u64 = 0x08
+const INTMS: u64 = 0x0c
+const CC: u64 = 0x14
+const CSTS: u64 = 0x1c
+const AQA: u64 = 0x24
+const ASQ: u64 = 0x28
+const ACQ: u64 = 0x30
+const DOORBELLS: u64 = 0x1000
+
+// Opcodes: admin (Base Figure 141) and NVM (NVM Command Set Figure 18).
+const A_DELETE_CQ: u64 = 0x04
+const A_CREATE_SQ: u64 = 0x01
+const A_CREATE_CQ: u64 = 0x05
+const A_IDENTIFY: u64 = 0x06
+const A_SET_FEATURES: u64 = 0x09
+const N_FLUSH: u64 = 0x00
+const N_WRITE: u64 = 0x01
+const N_READ: u64 = 0x02
+
+// Where the windows go: kernel/virtio's slot, from window 24.
+const WINDOWS: u64 = 0xffffb00000100000
+const WINDOW: u64 = 0x100000
+const FIRST_WINDOW: u64 = 24
+const UNCACHED: u64 = 24 // PWT (bit 3), PCD (bit 4)
+
+// The state frame's words.
+const W_UP: u64 = 0 // 1 once its I/O queue pair is live
+const W_PCI: u64 = 1 // kernel/pci's index
+const W_REGS: u64 = 2 // the registers' kernel address
+const W_BAR: u64 = 3 // BAR0's physical address
+const W_CAPLO: u64 = 4
+const W_CAPHI: u64 = 5
+const W_VS: u64 = 6
+const W_STRIDE: u64 = 7 // doorbell stride, bytes
+const W_ASQ: u64 = 8 // the admin SQ frame (physical)
+const W_ACQ: u64 = 9
+const W_ASQT: u64 = 10 // admin SQ tail
+const W_ACQH: u64 = 11 // admin CQ head
+const W_ACQP: u64 = 12 // the phase the next admin completion carries
+const W_ISQ: u64 = 13
+const W_ICQ: u64 = 14
+const W_ISQT: u64 = 15
+const W_ICQH: u64 = 16
+const W_ICQP: u64 = 17
+const W_DEPTH: u64 = 18 // I/O queue entries
+const W_ID: u64 = 19 // the Identify frame (physical)
+const W_MDTS: u64 = 20
+const W_NN: u64 = 21
+const W_VWC: u64 = 22
+const W_NSQA: u64 = 23 // SQs granted (a count)
+const W_NCQA: u64 = 24
+const W_MAXSEC: u64 = 25 // the largest request, sectors
+const W_NNS: u64 = 26 // namespaces taken
+const W_FREE: u64 = 27 // free slots, a bit each
+const W_CID: u64 = 28 // the next admin command identifier
+const W_ASKED: u64 = 29 // the depth first asked
+const W_TRIES: u64 = 30 // depths refused before one held
+const W_INST: u64 = 31 // the instance number: nvme<inst>
+const W_ADM: u64 = 32 // admin commands made
+const W_SAID: u64 = 33 // error lines said
+const W_ACTIVE: u64 = 34 // active namespaces the controller listed
+const W_ENABLED: u64 = 35 // CC.EN was set when found (1), CSTS.RDY (2)
+const W_NOTAKEN: u64 = 36 // namespaces not given a disk (PAX's four)
+const W_FRAMES: u64 = 37 // frames held
+const W_SHUT: u64 = 38 // shut down at the end (1)
+const W_SLOT: u64 = 40 // slot s's request record (its kernel address), SLOTS of them
+const W_PRPL: u64 = 48 // slot s's PRP list frame (physical)
+const W_SN: u64 = 56 // the serial number, 20 bytes (three words)
+const W_MN: u64 = 59 // the model number, 40 bytes (five words)
+const W_FR: u64 = 64 // the firmware revision, 8 bytes
+const W_NS: u64 = 72 // namespace j's NSW words, NSMAX of them (to 103)
+const W_SLOTJ: u64 = 104 // slot s's namespace (its j), SLOTS of them
+const NSW: u64 = 8
+const N_ID: u64 = 0 // its NSID
+const N_NSZE: u64 = 1 // its size in its own logical blocks
+const N_LBADS: u64 = 2 // log2 of its logical block size
+const N_SECTORS: u64 = 3 // its size in 512-byte sectors
+const N_RO: u64 = 4 // write protected
+const N_ORD: u64 = 5 // k of nvme<c>n<k>
+const W_COUNT: u64 = 160 // the counters (C_*)
+
+/// Counters: commands handed to the I/O queue.
+pub const C_REQS: u64 = 0
+/// Of them, reads.
+pub const C_IN: u64 = 1
+/// Writes.
+pub const C_OUT: u64 = 2
+/// Flushes.
+pub const C_FLUSH: u64 = 3
+/// Completions with a status other than success, or none.
+pub const C_ERR: u64 = 4
+/// Sectors read.
+pub const C_SIN: u64 = 5
+/// Sectors written.
+pub const C_SOUT: u64 = 6
+/// Looks at the CQ that found nothing.
+pub const C_POLLS: u64 = 7
+
+/// The selected controller's state frame (HHDM); 0 none.
+var cur: u64 = 0
+/// The controllers' state frames, and how many were found.
+var ctl0: u64 = 0
+var ctl1: u64 = 0
+var ctl2: u64 = 0
+var ctl3: u64 = 0
+var nctl: u64 = 0
+/// The disks: unit u is `ctrl << 8 | namespace slot`.
+var unit0: u64 = 0
+var unit1: u64 = 0
+var unit2: u64 = 0
+var unit3: u64 = 0
+var nunits: u64 = 0
+
+fn base() -> u64 {
+    // # Safety: a scalar module var, read on one CPU with IF clear.
+    unsafe { cur }
+}
+
+/// How many disks (namespaces) are up.
+pub fn count_disks() -> u64 {
+    // # Safety: a scalar module var, written at boot with IF clear.
+    unsafe { nunits }
+}
+
+/// How many controllers were found (refused ones too).
+pub fn controllers() -> u64 {
+    // # Safety: as `count_disks`.
+    unsafe { nctl }
+}
+
+fn sel_ctl(c: u64) {
+    // # Safety: scalar module vars, read and written on one CPU with IF clear.
+    unsafe {
+        if c >= nctl {
+            cur = 0
+        } else if c == 0 {
+            cur = ctl0
+        } else if c == 1 {
+            cur = ctl1
+        } else if c == 2 {
+            cur = ctl2
+        } else {
+            cur = ctl3
+        }
+    }
+}
+
+fn unit_word(u: u64) -> u64 {
+    // # Safety: as `sel_ctl`.
+    unsafe { if u == 0 { unit0 } else if u == 1 { unit1 } else if u == 2 { unit2 } else { unit3 } }
+}
+
+/// Select unit `u`'s controller: its namespace slot (NSMAX when there is
+/// no such unit, `cur` then 0).
+fn sel(u: u64) -> u64 {
+    if u >= count_disks() {
+        sel_ctl(CTRLS)
+        return NSMAX
+    }
+    let w = unit_word(u)
+    sel_ctl(w >> 8)
+    w & 0xff
+}
+
+fn sw(i: u64) -> u64 {
+    // # Safety: i < 512, a word of the state frame this driver owns.
+    unsafe { ((base() + i * 8) as *u64).read_volatile() }
+}
+
+fn put_sw(i: u64, v: u64) {
+    // # Safety: as `sw`.
+    unsafe { ((base() + i * 8) as *u64).write_volatile(v) }
+}
+
+fn bump(i: u64, by: u64) {
+    put_sw(W_COUNT + i, sw(W_COUNT + i) + by)
+}
+
+fn nsw(j: u64, w: u64) -> u64 {
+    sw(W_NS + j * NSW + w)
+}
+
+fn put_nsw(j: u64, w: u64, v: u64) {
+    put_sw(W_NS + j * NSW + w, v)
+}
+
+// --- the registers ------------------------------------------------------------
+
+fn rr(off: u64) -> u64 {
+    // # Safety: a 32-bit property of the mapped register window, 4-aligned.
+    let v = unsafe { ((sw(W_REGS) + off) as *u32).read_volatile() }
+    v as u64
+}
+
+fn wr(off: u64, v: u64) {
+    // # Safety: as `rr`; `v` is masked to 32 bits.
+    unsafe { ((sw(W_REGS) + off) as *u32).write_volatile((v & 0xffffffff) as u32) }
+}
+
+/// A 64-bit property written as two aligned 32-bit halves, low first.
+fn wr64(off: u64, v: u64) {
+    wr(off, v & 0xffffffff)
+    wr(off + 4, v >> 32)
+}
+
+/// The tail doorbell of SQ `y`, or the head doorbell of CQ `y`.
+fn ring_sq(y: u64, tail: u64) {
+    wr(DOORBELLS + 2 * y * sw(W_STRIDE), tail)
+}
+
+fn ring_cq(y: u64, head: u64) {
+    wr(DOORBELLS + (2 * y + 1) * sw(W_STRIDE), head)
+}
+
+// --- memory the controller reads and writes -------------------------------------
+
+fn m8(a: u64) -> u64 {
+    // # Safety: a byte of a frame this driver owns, through the HHDM.
+    let v = unsafe { (a as *u8).read_volatile() }
+    v as u64
+}
+
+fn m32(a: u64) -> u64 {
+    // # Safety: as `m8`; `a` is 4-aligned.
+    let v = unsafe { (a as *u32).read_volatile() }
+    v as u64
+}
+
+fn put_m32(a: u64, v: u64) {
+    // # Safety: as `m32`; `v` is masked.
+    unsafe { (a as *u32).write_volatile((v & 0xffffffff) as u32) }
+}
+
+fn m64(a: u64) -> u64 {
+    // # Safety: as `m8`; `a` is 8-aligned.
+    unsafe { (a as *u64).read_volatile() }
+}
+
+fn put_m64(a: u64, v: u64) {
+    // # Safety: as `m64`.
+    unsafe { (a as *u64).write_volatile(v) }
+}
+
+fn le16(a: u64) -> u64 {
+    m8(a) | (m8(a + 1) << 8)
+}
+
+fn le32(a: u64) -> u64 {
+    le16(a) | (le16(a + 2) << 16)
+}
+
+fn le64(a: u64) -> u64 {
+    le32(a) | (le32(a + 4) << 32)
+}
+
+fn hh() -> u64 {
+    frames.hhdm()
+}
+
+fn zeroed_frame() -> u64 {
+    let pa = frames.alloc() else 0
+    if pa != 0 {
+        // # Safety: the frame just taken, through the HHDM.
+        unsafe { pax_tree_zero(pa + hh(), PAGE) }
+        put_sw(W_FRAMES, sw(W_FRAMES) + 1)
+    }
+    pa
+}
+
+/// Map the pages holding `len` bytes from `pa` at `va` (page aligned
+/// both, the pages not mapped yet), uncached; false when one cannot be.
+fn map_pages(pml4: u64, va: u64, pa: u64, len: u64) -> bool {
+    var off: u64 = 0
+    while off < len {
+        let n = paging.map(pml4, va + off, pa + off, paging.NX | paging.RW | UNCACHED) else 9
+        if n == 9 {
+            return false
+        }
+        off += PAGE
+    }
+    true
+}
+
+// --- the admin queue --------------------------------------------------------------
+
+/// Write the 64-byte submission entry at `e` (zeroed first): CDW0, NSID,
+/// PRP1, PRP2, CDW10-12.
+fn entry(e: u64, cdw0: u64, nsid: u64, prp1: u64, prp2: u64, c10: u64, c11: u64, c12: u64) {
+    var k: u64 = 0
+    while k < 64 {
+        put_m64(e + k, 0)
+        k += 8
+    }
+    put_m32(e, cdw0)
+    put_m32(e + 4, nsid)
+    put_m64(e + 24, prp1)
+    put_m64(e + 32, prp2)
+    put_m32(e + 40, c10)
+    put_m32(e + 44, c11)
+    put_m32(e + 48, c12)
+}
+
+/// One admin command, waited for: (its status field, 0 success, or
+/// S_LOST; CQE DW0).
+fn admin(opc: u64, nsid: u64, prp1: u64, c10: u64, c11: u64) -> (u64, u64) {
+    let cid = sw(W_CID) & 0xffff
+    put_sw(W_CID, cid + 1)
+    let t = sw(W_ASQT)
+    entry(sw(W_ASQ) + hh() + t * 64, opc | (cid << 16), nsid, prp1, 0, c10, c11, 0)
+    put_sw(W_ASQT, (t + 1) % AQ)
+    put_sw(W_ADM, sw(W_ADM) + 1)
+    ring_sq(0, sw(W_ASQT))
+    var k: u64 = 0
+    while k < SPIN {
+        let e = sw(W_ACQ) + hh() + sw(W_ACQH) * 16
+        let d3 = m32(e + 12)
+        if (d3 >> 16) & 1 == sw(W_ACQP) {
+            let d0 = m32(e)
+            let h = sw(W_ACQH) + 1
+            if h == AQ {
+                put_sw(W_ACQH, 0)
+                put_sw(W_ACQP, sw(W_ACQP) ^ 1)
+            } else {
+                put_sw(W_ACQH, h)
+            }
+            ring_cq(0, sw(W_ACQH))
+            if d3 & 0xffff == cid {
+                return ((d3 >> 17) & 0x7fff, d0)
+            }
+        } else {
+            sync.relax()
+        }
+        k += 1
+    }
+    (S_LOST, 0)
+}
+
+// --- bring-up -----------------------------------------------------------------------
+
+/// Wait until CSTS.RDY reads `want`, within CAP.TO (LOOKS looks a unit,
+/// at least one unit). Whether it did.
+fn ready_is(want: u64) -> bool {
+    let to = (sw(W_CAPLO) >> 24) & 0xff
+    let bound = (if to == 0 { 1 } else { to }) * LOOKS
+    var k: u64 = 0
+    while k < bound {
+        let s = rr(CSTS)
+        if s & 1 == want {
+            return true
+        }
+        if want == 1 && s & 2 != 0 {
+            return false // CFS: the controller has failed
+        }
+        sync.relax()
+        k += 1
+    }
+    false
+}
+
+fn put_bdf(b: u64) {
+    log.hex_n(b >> 16, 2)
+    log.put(":")
+    log.hex_n((b >> 8) & 0x1f, 2)
+    log.put(".")
+    log.hex_n(b & 7, 1)
+}
+
+/// `nvme<c>: <vvvv>:<dddd> at <bb>:<dd>.<f>`, the start of each line
+/// about the selected controller.
+fn tag() {
+    log.put("nvme")
+    log.dec(sw(W_INST) as int)
+    log.put(": ")
+    let i = sw(W_PCI)
+    log.hex_n(pci.vendor(i), 4)
+    log.put(":")
+    log.hex_n(pci.device(i), 4)
+    log.put(" at ")
+    put_bdf(pci.bdf(i))
+}
+
+fn refuse(what: str, v: u64) -> u64 {
+    tag()
+    log.put(": refused: ")
+    log.put(what)
+    log.put(" ")
+    log.hex(v)
+    log.put("; no disk")
+    log.end()
+    REFUSED
+}
+
+/// Turn off MSI (capability 05h, message control bit 0) and MSI-X (11h,
+/// bit 15) of the function at `b`: the controller interrupts nothing.
+fn interrupts_off(b: u64) {
+    var cap = pci.next_cap(b, 0)
+    var guard: u64 = 0
+    while cap != 0 && guard < 48 {
+        let id = pci.read8(b, cap)
+        let d = pci.read32(b, cap)
+        if id == 0x05 && (d >> 16) & 1 != 0 {
+            pci.write32(b, cap, d & !(1 << 16))
+        }
+        if id == 0x11 && (d >> 31) & 1 != 0 {
+            pci.write32(b, cap, d & !(1 << 31))
+        }
+        cap = pci.next_cap(b, cap)
+        guard += 1
+    }
+}
+
+/// Find the controllers, in kernel/pci's order, and bring each one up on
+/// the paging structures at `pml4`, its namespaces disks up to `room` in
+/// all (kernel/block's free disks). Call after `pci.scan`, IF clear.
+/// UP when a disk is up, ABSENT (silent) when the bus has no controller,
+/// REFUSED when none gave a disk (a line each says why).
+pub fn start(pml4: u64, room: u64) -> u64 {
+    if controllers() != 0 {
+        return if count_disks() != 0 { UP } else { REFUSED }
+    }
+    var i = pci.find_class(CLASS, 0)
+    while i != pci.MAX && controllers() < CTRLS {
+        let c = controllers()
+        let sf = frames.alloc() else 0
+        if sf == 0 {
+            log.put("nvme: refused: no frame for the driver's state, frames free ")
+            log.dec(frames.free_count() as int)
+            log.put("; no disk")
+            log.end()
+            return if count_disks() != 0 { UP } else { REFUSED }
+        }
+        // # Safety: the frame just taken, through the HHDM; scalar module
+        // vars written at boot with IF clear.
+        unsafe {
+            pax_tree_zero(sf + hh(), PAGE)
+            cur = sf + hh()
+            if c == 0 {
+                ctl0 = cur
+            } else if c == 1 {
+                ctl1 = cur
+            } else if c == 2 {
+                ctl2 = cur
+            } else {
+                ctl3 = cur
+            }
+            nctl = c + 1
+        }
+        put_sw(W_FRAMES, 1)
+        put_sw(W_INST, c)
+        put_sw(W_PCI, i)
+        let r = bring_up(pml4, i, FIRST_WINDOW + c)
+        if r == UP {
+            give_disks(c, room)
+        }
+        i = pci.find_class(CLASS, i + 1)
+    }
+    if controllers() == 0 {
+        return ABSENT
+    }
+    if count_disks() != 0 { UP } else { REFUSED }
+}
+
+/// The selected controller's namespaces as disks, while there is room.
+fn give_disks(c: u64, room: u64) {
+    var j: u64 = 0
+    while j < sw(W_NNS) {
+        if count_disks() < room && count_disks() < UNITS {
+            let w = c << 8 | j
+            // # Safety: scalar module vars, written at boot with IF clear.
+            unsafe {
+                let u = nunits
+                if u == 0 {
+                    unit0 = w
+                } else if u == 1 {
+                    unit1 = w
+                } else if u == 2 {
+                    unit2 = w
+                } else {
+                    unit3 = w
+                }
+                nunits = u + 1
+            }
+        } else {
+            put_sw(W_NOTAKEN, sw(W_NOTAKEN) + 1)
+        }
+        j += 1
+    }
+}
+
+fn bring_up(pml4: u64, i: u64, window: u64) -> u64 {
+    let b = pci.bdf(i)
+    pci.set_command(b, pci.command(b) | pci.CMD_MEMORY | pci.CMD_MASTER | pci.CMD_INTX_OFF)
+    interrupts_off(b)
+    let (kind, bar) = pci.bar(b, 0)
+    if kind != pci.BAR_MEM64 && kind != pci.BAR_MEM32 {
+        return refuse("BAR0 is not memory: its kind", kind)
+    }
+    if bar % PAGE != 0 {
+        return refuse("BAR0 is not page aligned:", bar)
+    }
+    put_sw(W_BAR, bar)
+    let va = WINDOWS + window * WINDOW
+    if !map_pages(pml4, va, bar, PAGE) {
+        return refuse("its registers could not be mapped at", va)
+    }
+    put_sw(W_REGS, va)
+    put_sw(W_CAPLO, rr(CAP))
+    put_sw(W_CAPHI, rr(CAP + 4))
+    put_sw(W_VS, rr(VS))
+    let hi = sw(W_CAPHI)
+    let stride: u64 = 4 << (hi & 0xf)
+    put_sw(W_STRIDE, stride)
+    // The doorbells of queues 0 and 1, past the properties' page.
+    let bells = (DOORBELLS + 4 * stride + PAGE - 1) / PAGE * PAGE
+    if bells > WINDOW || !map_pages(pml4, va + PAGE, bar + PAGE, bells - PAGE) {
+        return refuse("its doorbells could not be mapped, stride", stride)
+    }
+    if (hi >> 16) & 0xf != 0 {
+        return refuse("its smallest memory page is not 4 KiB (CAP.MPSMIN)", (hi >> 16) & 0xf)
+    }
+    if (hi >> 5) & 1 == 0 {
+        return refuse("it lacks the NVM Command Set (CAP.CSS bit 0), CAP", hi << 32 | sw(W_CAPLO))
+    }
+    // §3.5.1 step 1: any reset the firmware's use left done.
+    let cc0 = rr(CC)
+    put_sw(W_ENABLED, (cc0 & 1) | ((rr(CSTS) & 1) << 1))
+    if cc0 & 1 != 0 {
+        wr(CC, cc0 & !1)
+    }
+    if !ready_is(0) {
+        return refuse("it did not reset (CSTS.RDY stayed 1 after CC.EN 0 for CAP.TO), CSTS", rr(CSTS))
+    }
+    wr(INTMS, 1)
+    let asq = zeroed_frame()
+    let acq = zeroed_frame()
+    let isq = zeroed_frame()
+    let icq = zeroed_frame()
+    let idf = zeroed_frame()
+    if asq == 0 || acq == 0 || isq == 0 || icq == 0 || idf == 0 {
+        return refuse("no frame for its queues, frames free", frames.free_count())
+    }
+    put_sw(W_ASQ, asq)
+    put_sw(W_ACQ, acq)
+    put_sw(W_ISQ, isq)
+    put_sw(W_ICQ, icq)
+    put_sw(W_ID, idf)
+    var s: u64 = 0
+    while s < SLOTS {
+        let f = zeroed_frame()
+        if f == 0 {
+            return refuse("no frame for its PRP lists, frames free", frames.free_count())
+        }
+        put_sw(W_PRPL + s, f)
+        s += 1
+    }
+    put_sw(W_ASQT, 0)
+    put_sw(W_ACQH, 0)
+    put_sw(W_ACQP, 1)
+    wr(AQA, ((AQ - 1) << 16) | (AQ - 1))
+    wr64(ASQ, asq)
+    wr64(ACQ, acq)
+    let cc = (4 << 20) | (6 << 16)
+    wr(CC, cc)
+    wr(CC, cc | 1)
+    if !ready_is(1) {
+        return refuse("it did not become ready (CSTS.RDY 0 or CSTS.CFS 1 after CC.EN 1), CSTS", rr(CSTS))
+    }
+    let idv = idf + hh()
+    let (s1, _d1) = admin(A_IDENTIFY, 0, idf, 0x01, 0)
+    if s1 != 0 {
+        return refuse("Identify Controller failed, status", s1)
+    }
+    let sqes = m8(idv + 512)
+    let cqes = m8(idv + 513)
+    if sqes & 0xf > 6 || (sqes >> 4) < 6 || cqes & 0xf > 4 || (cqes >> 4) < 4 {
+        return refuse("it takes no 64-byte SQ or 16-byte CQ entries (SQES, CQES)", sqes << 8 | cqes)
+    }
+    put_sw(W_SN, m64(idv + 4))
+    put_sw(W_SN + 1, m64(idv + 12))
+    put_sw(W_SN + 2, m32(idv + 20))
+    var w: u64 = 0
+    while w < 5 {
+        put_sw(W_MN + w, m64(idv + 24 + w * 8))
+        w += 1
+    }
+    put_sw(W_FR, m64(idv + 64))
+    put_sw(W_MDTS, m8(idv + 77))
+    put_sw(W_NN, le32(idv + 516))
+    put_sw(W_VWC, m8(idv + 525))
+    let md = sw(W_MDTS)
+    put_sw(W_MAXSEC, if md == 0 || md >= 6 { MAXSEC } else { (1 << md) * 8 })
+    namespaces(idf)
+    // Set Features, Number of Queues: one SQ, one CQ (0's based).
+    let (s7, d7) = admin(A_SET_FEATURES, 0, 0, 0x07, 0)
+    if s7 != 0 {
+        return refuse("Set Features (Number of Queues) failed, status", s7)
+    }
+    put_sw(W_NSQA, (d7 & 0xffff) + 1)
+    put_sw(W_NCQA, (d7 >> 16) + 1)
+    let mqes = (sw(W_CAPLO) & 0xffff) + 1
+    var depth = if mqes < DEPTH { mqes } else { DEPTH }
+    put_sw(W_ASKED, depth)
+    while true {
+        let (sc, _dc) = admin(A_CREATE_CQ, 0, icq, ((depth - 1) << 16) | 1, 1)
+        var ok = sc == 0
+        var why = sc
+        if ok {
+            let (ss, _ds) = admin(A_CREATE_SQ, 0, isq, ((depth - 1) << 16) | 1, (1 << 16) | 1)
+            if ss != 0 {
+                let (_x, _dx) = admin(A_DELETE_CQ, 0, 0, 1, 0)
+                ok = false
+                why = ss
+            }
+        }
+        if ok {
+            break
+        }
+        // Invalid Queue Size: command specific (SCT 1h), 02h.
+        if why & 0x7ff != 0x102 || depth <= 2 {
+            return refuse("the I/O queue pair could not be made, status", why)
+        }
+        depth = depth / 2
+        put_sw(W_TRIES, sw(W_TRIES) + 1)
+    }
+    put_sw(W_DEPTH, depth)
+    put_sw(W_ISQT, 0)
+    put_sw(W_ICQH, 0)
+    put_sw(W_ICQP, 1)
+    let slots = if depth - 1 < SLOTS { depth - 1 } else { SLOTS }
+    put_sw(W_FREE, (1 << slots) - 1)
+    if sw(W_NNS) == 0 {
+        tag()
+        log.put(": no namespace it lists could be a disk; no disk")
+        log.end()
+        return REFUSED
+    }
+    put_sw(W_UP, 1)
+    UP
+}
+
+/// The active namespaces, Identify'd one by one into `idf`, each that can
+/// be a disk kept (NSMAX at most).
+fn namespaces(idf: u64) {
+    let idv = idf + hh()
+    let (sl, _dl) = admin(A_IDENTIFY, 0, idf, 0x02, 0)
+    var list0: u64 = 0
+    var list1: u64 = 0
+    var list2: u64 = 0
+    var list3: u64 = 0
+    var n: u64 = 0
+    if sl == 0 {
+        var k: u64 = 0
+        var seen: u64 = 0
+        while k < 1024 {
+            let id = le32(idv + k * 4)
+            if id == 0 {
+                break
+            }
+            seen += 1
+            if n < NSMAX {
+                if n == 0 {
+                    list0 = id
+                } else if n == 1 {
+                    list1 = id
+                } else if n == 2 {
+                    list2 = id
+                } else {
+                    list3 = id
+                }
+                n += 1
+            }
+            k += 1
+        }
+        put_sw(W_ACTIVE, seen)
+    } else {
+        // A controller before NVMe 1.1 has no list: namespaces 1 to NSMAX.
+        let nn = sw(W_NN)
+        n = if nn < NSMAX { nn } else { NSMAX }
+        list0 = 1
+        list1 = 2
+        list2 = 3
+        list3 = 4
+        put_sw(W_ACTIVE, n)
+    }
+    var j: u64 = 0
+    while j < n {
+        let id = if j == 0 { list0 } else if j == 1 { list1 } else if j == 2 { list2 } else { list3 }
+        namespace(idf, id)
+        j += 1
+    }
+}
+
+/// Identify Namespace `id` into `idf`: kept as the next disk, or refused
+/// by name (one line).
+fn namespace(idf: u64, id: u64) {
+    let idv = idf + hh()
+    let (s, _d) = admin(A_IDENTIFY, id, idf, 0x00, 0)
+    if s != 0 {
+        tag()
+        log.put(": namespace ")
+        log.dec(id as int)
+        log.put(": Identify failed, status ")
+        log.hex_n(s, 4)
+        log.put("; not a disk")
+        log.end()
+        return
+    }
+    let nsze = le64(idv)
+    if nsze == 0 {
+        return // inactive: Identify answers zeroes
+    }
+    let nlbaf = m8(idv + 25)
+    let flbas = m8(idv + 26)
+    var fmt = flbas & 0xf
+    if nlbaf >= 16 {
+        fmt = fmt | (((flbas >> 5) & 3) << 4)
+    }
+    let lbaf = le32(idv + 128 + fmt * 4)
+    let ms = lbaf & 0xffff
+    let lbads = (lbaf >> 16) & 0xff
+    if ms != 0 || lbads < 9 || lbads > 12 {
+        tag()
+        log.put(": namespace ")
+        log.dec(id as int)
+        log.put(": refused: LBA format ")
+        log.dec(fmt as int)
+        log.put(" has ")
+        log.dec(ms as int)
+        log.put(" metadata bytes and blocks of 2^")
+        log.dec(lbads as int)
+        log.put(" bytes (PAX takes no metadata and blocks of 512 to 4096 bytes); not a disk")
+        log.end()
+        return
+    }
+    let j = sw(W_NNS)
+    if j >= NSMAX {
+        return
+    }
+    put_nsw(j, N_ID, id)
+    put_nsw(j, N_NSZE, nsze)
+    put_nsw(j, N_LBADS, lbads)
+    // The capacity in 512-byte sectors, the unit kernel/block counts in.
+    put_nsw(j, N_SECTORS, nsze << (lbads - 9))
+    put_nsw(j, N_RO, m8(idv + 99) & 1)
+    put_nsw(j, N_ORD, j + 1)
+    put_sw(W_NNS, j + 1)
+}
+
+// --- the disks' facts (kernel/block's) ------------------------------------------------
+
+fn up() -> bool {
+    base() != 0 && sw(W_UP) == 1
+}
+
+/// Unit `u`'s capacity, in 512-byte sectors.
+pub fn sectors(u: u64) -> u64 {
+    let j = sel(u)
+    if j == NSMAX || !up() { 0 } else { nsw(j, N_SECTORS) }
+}
+
+/// Its logical block size.
+pub fn block_size(u: u64) -> u64 {
+    let j = sel(u)
+    if j == NSMAX || !up() { 512 } else { 1 << nsw(j, N_LBADS) }
+}
+
+/// Whether the namespace is write protected (NSATTR bit 0).
+pub fn read_only(u: u64) -> bool {
+    let j = sel(u)
+    j != NSMAX && up() && nsw(j, N_RO) != 0
+}
+
+/// Whether FLUSH means anything: a volatile write cache (VWC bit 0). A
+/// controller with none has its writes on the medium when they complete.
+pub fn flushes(u: u64) -> bool {
+    let j = sel(u)
+    j != NSMAX && up() && sw(W_VWC) & 1 != 0
+}
+
+/// The largest request it takes, in sectors.
+pub fn max_sectors(u: u64) -> u64 {
+    let j = sel(u)
+    if j == NSMAX || !up() { 8 } else { sw(W_MAXSEC) }
+}
+
+/// Its controller's instance number (`nvme<c>`), and k of `nvme<c>n<k>`.
+pub fn name_of(u: u64) -> (u64, u64) {
+    let j = sel(u)
+    if j == NSMAX || base() == 0 { (0, 0) } else { (sw(W_INST), nsw(j, N_ORD)) }
+}
+
+/// Its controller's PCI function (kernel/pci's index).
+pub fn pci_index(u: u64) -> u64 {
+    let j = sel(u)
+    if j == NSMAX || base() == 0 { pci.MAX } else { sw(W_PCI) }
+}
+
+/// Unit `u`'s controller's counter `i` (C_*).
+pub fn count(u: u64, i: u64) -> u64 {
+    let j = sel(u)
+    if j == NSMAX || base() == 0 { 0 } else { sw(W_COUNT + i) }
+}
+
+/// Whether unit `u` is the first disk of its controller (kernel/block
+/// writes the controller's line before it).
+pub fn first_of_ctrl(u: u64) -> bool {
+    let j = sel(u)
+    j == 0
+}
+
+// --- requests -------------------------------------------------------------------------------
+
+fn rw(a: u64) -> u64 {
+    // # Safety: a word of a request record kernel/block owns, through
+    // the HHDM, 8-aligned.
+    unsafe { (a as *u64).read_volatile() }
+}
+
+fn put_rw(a: u64, v: u64) {
+    // # Safety: as `rw`.
+    unsafe { (a as *u64).write_volatile(v) }
+}
+
+fn finish(r: u64, st: u64) {
+    put_rw(r + R_STATUS * 8, st)
+    put_rw(r + R_STATE * 8, RS_DONE)
+    bump(C_ERR, 1)
+}
+
+/// Hand request record `r` (kernel/block's) to unit `u`'s controller: a
+/// free slot taken (waiting for one while all are out), its PRPs, the
+/// submission entry, the tail doorbell. RS_QUEUED until `poll` or `wait`
+/// sees it back; a request the driver refuses is done at once with its
+/// own status (S_ALIGN, S_DOWN). IF clear.
+pub fn submit(u: u64, r: u64) {
+    let j = sel(u)
+    if j == NSMAX || !up() {
+        finish(r, S_DOWN)
+        return
+    }
+    if sw(W_FREE) == 0 {
+        var k: u64 = 0
+        while sw(W_FREE) == 0 && k < SPIN {
+            reap()
+            sync.relax()
+            k += 1
+        }
+    }
+    let free = sw(W_FREE)
+    var s: u64 = 0
+    while s < SLOTS && free & (1 << s) == 0 {
+        s += 1
+    }
+    if s == SLOTS {
+        finish(r, S_LOST)
+        return
+    }
+    let op = rw(r + R_OP * 8)
+    let shift = nsw(j, N_LBADS) - 9
+    let per: u64 = 1 << shift
+    let sector = rw(r + R_SECTOR * 8)
+    let n = rw(r + R_COUNT * 8)
+    if op != T_FLUSH && (sector % per != 0 || n % per != 0 || n == 0) {
+        if sw(W_SAID) < SAY {
+            put_sw(W_SAID, sw(W_SAID) + 1)
+            name_unit(j)
+            log.put(": refused: ")
+            log.dec(n as int)
+            log.put(" sectors from ")
+            log.dec(sector as int)
+            log.put(" are not a whole number of its ")
+            log.dec((per * 512) as int)
+            log.put("-byte blocks, -EIO")
+            log.end()
+        }
+        finish(r, S_ALIGN)
+        return
+    }
+    put_sw(W_FREE, free & !(1 << s))
+    put_sw(W_SLOT + s, r)
+    put_sw(W_SLOTJ + s, j)
+    var prp1: u64 = 0
+    var prp2: u64 = 0
+    var opc = N_FLUSH
+    if op != T_FLUSH {
+        opc = if op == T_IN { N_READ } else { N_WRITE }
+        let bytes = n * 512
+        let list = rw(r + R_LIST * 8)
+        if list == 0 {
+            let pa = rw(r + R_PA * 8)
+            prp1 = pa
+            if pa % PAGE + bytes > PAGE {
+                prp2 = (pa / PAGE + 1) * PAGE
+            }
+        } else {
+            let pages = (bytes + PAGE - 1) / PAGE
+            prp1 = rw(list)
+            if pages == 2 {
+                prp2 = rw(list + 8)
+            } else if pages > 2 {
+                // The PRP list: the second page's address and every one after.
+                let pl = sw(W_PRPL + s)
+                var k: u64 = 1
+                while k < pages {
+                    put_m64(pl + hh() + (k - 1) * 8, rw(list + k * 8))
+                    k += 1
+                }
+                prp2 = pl
+            }
+        }
+        bump(if op == T_IN { C_SIN } else { C_SOUT }, n)
+    }
+    let t = sw(W_ISQT)
+    let lba = if op == T_FLUSH { 0 } else { sector >> shift }
+    let nlb = if op == T_FLUSH { 0 } else { (n >> shift) - 1 }
+    let at = sw(W_ISQ) + hh() + t * 64
+    entry(at, opc | (s << 16), nsw(j, N_ID), prp1, prp2, lba & 0xffffffff, lba >> 32, nlb)
+    put_rw(r + R_STATE * 8, RS_QUEUED)
+    put_rw(r + R_STATUS * 8, 0xff)
+    bump(C_REQS, 1)
+    bump(if op == T_IN { C_IN } else { if op == T_OUT { C_OUT } else { C_FLUSH } }, 1)
+    put_sw(W_ISQT, (t + 1) % sw(W_DEPTH))
+    ring_sq(1, sw(W_ISQT))
+}
+
+/// Take every completion the I/O CQ holds: its status into its record,
+/// the record done, the slot free; the head doorbell told once.
+fn reap() {
+    var took: u64 = 0
+    while true {
+        let e = sw(W_ICQ) + hh() + sw(W_ICQH) * 16
+        let d3 = m32(e + 12)
+        if (d3 >> 16) & 1 != sw(W_ICQP) {
+            break
+        }
+        let st = (d3 >> 17) & 0x7fff
+        let s = (d3 & 0xffff) % SLOTS
+        let r = sw(W_SLOT + s)
+        if r != 0 {
+            put_rw(r + R_STATUS * 8, st)
+            put_rw(r + R_STATE * 8, RS_DONE)
+            if st & 0x7ff != 0 {
+                bump(C_ERR, 1)
+                say_error(sw(W_SLOTJ + s), r, st)
+            }
+        }
+        put_sw(W_SLOT + s, 0)
+        put_sw(W_FREE, sw(W_FREE) | (1 << s))
+        let h = sw(W_ICQH) + 1
+        if h == sw(W_DEPTH) {
+            put_sw(W_ICQH, 0)
+            put_sw(W_ICQP, sw(W_ICQP) ^ 1)
+        } else {
+            put_sw(W_ICQH, h)
+        }
+        took += 1
+    }
+    if took != 0 {
+        ring_cq(1, sw(W_ICQH))
+    }
+}
+
+/// Take what unit `u`'s controller has completed.
+pub fn poll(u: u64) {
+    let j = sel(u)
+    if j == NSMAX || !up() {
+        return
+    }
+    reap()
+}
+
+/// Wait until request record `r` is done: the CQ looked at, a PAUSE
+/// between looks, at most SPIN looks (then the request is lost: S_LOST,
+/// counted). Its status.
+pub fn wait(u: u64, r: u64) -> u64 {
+    let j = sel(u)
+    if j == NSMAX || !up() {
+        if rw(r + R_STATE * 8) != RS_DONE {
+            finish(r, S_DOWN)
+        }
+        return rw(r + R_STATUS * 8)
+    }
+    var k: u64 = 0
+    while rw(r + R_STATE * 8) != RS_DONE && k < SPIN {
+        reap()
+        if rw(r + R_STATE * 8) != RS_DONE {
+            bump(C_POLLS, 1)
+            sync.relax()
+        }
+        k += 1
+    }
+    if rw(r + R_STATE * 8) != RS_DONE {
+        // Never answered: the slot stays the controller's (it may still
+        // write the buffer), the record is given back as lost.
+        var s: u64 = 0
+        while s < SLOTS {
+            if sw(W_SLOT + s) == r {
+                put_sw(W_SLOT + s, 0)
+            }
+            s += 1
+        }
+        finish(r, S_LOST)
+        if sw(W_SAID) < SAY {
+            put_sw(W_SAID, sw(W_SAID) + 1)
+            name_unit(j)
+            log.put(": a request never completed (")
+            log.dec(SPIN as int)
+            log.put(" looks), -EIO")
+            log.end()
+        }
+    }
+    rw(r + R_STATUS * 8)
+}
+
+// --- lines ------------------------------------------------------------------------------------
+
+/// `nvme<c>n<k>` of the selected controller's namespace slot `j`.
+fn name_unit(j: u64) {
+    log.put("nvme")
+    log.dec(sw(W_INST) as int)
+    log.put("n")
+    log.dec(nsw(j, N_ORD) as int)
+}
+
+fn generic_name(sc: u64) -> str {
+    if sc == 0x01 { return "Invalid Command Opcode" }
+    if sc == 0x02 { return "Invalid Field in Command" }
+    if sc == 0x03 { return "Command ID Conflict" }
+    if sc == 0x04 { return "Data Transfer Error" }
+    if sc == 0x05 { return "Commands Aborted due to Power Loss Notification" }
+    if sc == 0x06 { return "Internal Error" }
+    if sc == 0x07 { return "Command Abort Requested" }
+    if sc == 0x08 { return "Command Aborted due to SQ Deletion" }
+    if sc == 0x0b { return "Invalid Namespace or Format" }
+    if sc == 0x0c { return "Command Sequence Error" }
+    if sc == 0x13 { return "PRP Offset Invalid" }
+    if sc == 0x15 { return "Operation Denied" }
+    if sc == 0x20 { return "Namespace is Write Protected" }
+    if sc == 0x21 { return "Command Interrupted" }
+    if sc == 0x22 { return "Transient Transport Error" }
+    if sc == 0x80 { return "LBA Out of Range" }
+    if sc == 0x81 { return "Capacity Exceeded" }
+    if sc == 0x82 { return "Namespace Not Ready" }
+    if sc == 0x83 { return "Reservation Conflict" }
+    if sc == 0x84 { return "Format In Progress" }
+    "(a generic status this driver has no name for)"
+}
+
+fn specific_name(sc: u64) -> str {
+    if sc == 0x80 { return "Conflicting Attributes" }
+    if sc == 0x81 { return "Invalid Protection Information" }
+    if sc == 0x82 { return "Attempted Write to Read Only Range" }
+    if sc == 0x83 { return "Command Size Limit Exceeded" }
+    "(a command specific status this driver has no name for)"
+}
+
+fn media_name(sc: u64) -> str {
+    if sc == 0x80 { return "Write Fault" }
+    if sc == 0x81 { return "Unrecovered Read Error" }
+    if sc == 0x82 { return "End-to-end Guard Check Error" }
+    if sc == 0x83 { return "End-to-end Application Tag Check Error" }
+    if sc == 0x84 { return "End-to-end Reference Tag Check Error" }
+    if sc == 0x85 { return "Compare Failure" }
+    if sc == 0x86 { return "Access Denied" }
+    if sc == 0x87 { return "Deallocated or Unwritten Logical Block" }
+    "(a media status this driver has no name for)"
+}
+
+fn path_name(sc: u64) -> str {
+    if sc == 0x00 { return "Internal Path Error" }
+    if sc == 0x01 { return "Asymmetric Access Persistent Loss" }
+    if sc == 0x02 { return "Asymmetric Access Inaccessible" }
+    if sc == 0x03 { return "Asymmetric Access Transition" }
+    if sc == 0x60 { return "Controller Pathing Error" }
+    if sc == 0x70 { return "Host Pathing Error" }
+    if sc == 0x71 { return "Command Aborted By Host" }
+    "(a path status this driver has no name for)"
+}
+
+/// The words of a status field (Base Figure 92: SCT 10:8, SC 7:0, DNR
+/// 14), as the specification names them (Figures 94, 95, 98 and 99; the
+/// NVM Command Set's command specific values for READ and WRITE).
+fn put_status(st: u64) {
+    let sct = (st >> 8) & 7
+    let sc = st & 0xff
+    log.put("status ")
+    log.hex_n(sct, 1)
+    log.put("h/")
+    log.hex_n(sc, 2)
+    log.put("h ")
+    if sct == 0 {
+        log.put(generic_name(sc))
+        log.put(" (generic)")
+    } else if sct == 1 {
+        log.put(specific_name(sc))
+        log.put(" (command specific)")
+    } else if sct == 2 {
+        log.put(media_name(sc))
+        log.put(" (media and data integrity)")
+    } else if sct == 3 {
+        log.put(path_name(sc))
+        log.put(" (path related)")
+    } else if sct == 7 {
+        log.put("(vendor specific)")
+    } else {
+        log.put("(a reserved status code type)")
+    }
+    if (st >> 14) & 1 != 0 {
+        log.put(", do not retry")
+    }
+}
+
+/// One line for a failed command (SAY at most a controller), on the
+/// selected controller's namespace slot `j`:
+///
+///     nvme<c>n<k>: READ of <n> sectors from <s>: status <t>h/<cc>h <name> (<type>)[, do not retry], -EIO
+fn say_error(j: u64, r: u64, st: u64) {
+    if sw(W_SAID) >= SAY {
+        return
+    }
+    put_sw(W_SAID, sw(W_SAID) + 1)
+    let op = rw(r + R_OP * 8)
+    name_unit(j)
+    log.put(": ")
+    log.put(if op == T_IN { "READ" } else if op == T_OUT { "WRITE" } else { "FLUSH" })
+    if op != T_FLUSH {
+        log.put(" of ")
+        log.dec(rw(r + R_COUNT * 8) as int)
+        log.put(" sectors from ")
+        log.dec(rw(r + R_SECTOR * 8) as int)
+    }
+    log.put(": ")
+    put_status(st)
+    log.put(", -EIO")
+    log.end()
+}
+
+fn put_ascii(w: u64, bytes: u64) {
+    // Trailing spaces dropped (Base §1.4.2: ASCII strings are padded with spaces).
+    var last: u64 = 0
+    var k: u64 = 0
+    while k < bytes {
+        let c = (sw(w + k / 8) >> ((k % 8) * 8)) & 0xff
+        if c != 32 && c != 0 {
+            last = k + 1
+        }
+        k += 1
+    }
+    log.put_byte(34)
+    k = 0
+    while k < last {
+        let c = (sw(w + k / 8) >> ((k % 8) * 8)) & 0xff
+        log.put_byte(if c >= 32 && c < 127 { c as int } else { 63 })
+        k += 1
+    }
+    log.put_byte(34)
+}
+
+/// Unit `u`'s controller's line, once (before its first disk's), for the
+/// photograph of a real machine's screen:
+///
+///     nvme<c>: <vvvv>:<dddd> at <bb>:<dd>.<f>, NVMe <v>.<r>.<t> "<model>" serial "<sn>" firmware "<fr>";
+///       MDTS <m> KiB, <nn> namespaces, <a> active[, a volatile write cache]; nvme<c>n<k> (namespace <id>):
+///       <nsze> blocks of <b> bytes[, write protected] …; the I/O queue pair: <d> entries (asked <a>[, <t>
+///       refused], MQES <q>), <s> SQ and <c> CQ granted, a single pair, polled[; the firmware left it enabled]
+///
+/// (one line).
+pub fn report(u: u64) {
+    let j = sel(u)
+    if j != 0 || !up() {
+        return
+    }
+    tag()
+    log.put(", NVMe ")
+    let vs = sw(W_VS)
+    log.dec((vs >> 16) as int)
+    log.put(".")
+    log.dec(((vs >> 8) & 0xff) as int)
+    log.put(".")
+    log.dec((vs & 0xff) as int)
+    log.put(" ")
+    put_ascii(W_MN, 40)
+    log.put(" serial ")
+    put_ascii(W_SN, 20)
+    log.put(" firmware ")
+    put_ascii(W_FR, 8)
+    log.put("; MDTS ")
+    if sw(W_MDTS) == 0 {
+        log.put("none")
+    } else {
+        log.dec(((1 << sw(W_MDTS)) * 4) as int)
+        log.put(" KiB")
+    }
+    log.put(", ")
+    log.dec(sw(W_NN) as int)
+    log.put(" namespaces, ")
+    log.dec(sw(W_ACTIVE) as int)
+    log.put(" active")
+    if sw(W_VWC) & 1 != 0 {
+        log.put(", a volatile write cache")
+    }
+    var k: u64 = 0
+    while k < sw(W_NNS) {
+        log.put(if k == 0 { "; " } else { ", " })
+        name_unit(k)
+        log.put(" (namespace ")
+        log.dec(nsw(k, N_ID) as int)
+        log.put("): ")
+        log.dec(nsw(k, N_NSZE) as int)
+        log.put(" blocks of ")
+        log.dec((1 << nsw(k, N_LBADS)) as int)
+        log.put(" bytes")
+        if nsw(k, N_RO) != 0 {
+            log.put(", write protected")
+        }
+        k += 1
+    }
+    if sw(W_NOTAKEN) != 0 {
+        log.put(" (")
+        log.dec(sw(W_NOTAKEN) as int)
+        log.put(" more not taken: PAX drives four disks)")
+    }
+    log.put("; the I/O queue pair: ")
+    log.dec(sw(W_DEPTH) as int)
+    log.put(" entries (asked ")
+    log.dec(sw(W_ASKED) as int)
+    if sw(W_TRIES) != 0 {
+        log.put(", ")
+        log.dec(sw(W_TRIES) as int)
+        log.put(" refused")
+    }
+    log.put(", MQES ")
+    log.dec(((sw(W_CAPLO) & 0xffff) + 1) as int)
+    log.put("), ")
+    log.dec(sw(W_NSQA) as int)
+    log.put(" SQ and ")
+    log.dec(sw(W_NCQA) as int)
+    log.put(" CQ granted, a single pair, polled")
+    if sw(W_ENABLED) != 0 {
+        log.put("; the firmware left it enabled")
+    }
+    log.end()
+}
+
+/// Each controller's books and its normal shutdown (CC.SHN 01b, then
+/// CSTS.SHST waited for to read 10b within CAP.TO), the end's last
+/// words about it:
+///
+///     nvme<c>: <r> commands (<i> reads, <o> writes, <f> flushes; <si> and <so> sectors), <e> errors, <a> admin; shut down
+pub fn shutdown() {
+    var c: u64 = 0
+    while c < controllers() {
+        sel_ctl(c)
+        if up() && sw(W_SHUT) == 0 {
+            put_sw(W_SHUT, 1)
+            wr(CC, (rr(CC) & !(3 << 14)) | (1 << 14))
+            let to = (sw(W_CAPLO) >> 24) & 0xff
+            let bound = (if to == 0 { 1 } else { to }) * LOOKS
+            var k: u64 = 0
+            var done = false
+            while k < bound && !done {
+                if (rr(CSTS) >> 2) & 3 == 2 {
+                    done = true
+                } else {
+                    sync.relax()
+                }
+                k += 1
+            }
+            tag()
+            log.put(": ")
+            log.dec(sw(W_COUNT + C_REQS) as int)
+            log.put(" commands (")
+            log.dec(sw(W_COUNT + C_IN) as int)
+            log.put(" reads, ")
+            log.dec(sw(W_COUNT + C_OUT) as int)
+            log.put(" writes, ")
+            log.dec(sw(W_COUNT + C_FLUSH) as int)
+            log.put(" flushes; ")
+            log.dec(sw(W_COUNT + C_SIN) as int)
+            log.put(" and ")
+            log.dec(sw(W_COUNT + C_SOUT) as int)
+            log.put(" sectors), ")
+            log.dec(sw(W_COUNT + C_ERR) as int)
+            log.put(" errors, ")
+            log.dec(sw(W_ADM) as int)
+            log.put(" admin; ")
+            log.put(if done { "shut down" } else { "not shut down (CSTS.SHST never read complete)" })
+            log.end()
+        }
+        c += 1
+    }
+}
