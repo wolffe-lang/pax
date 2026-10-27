@@ -1404,3 +1404,14 @@ The org-owned trail tree moves from `6dbe253fad3c73225c547a036aa8ec786abd91dc` t
 Launch head read twice; codeload archive SHA256 `352cc3bd10ba7b1ec3840c7e058b9a675b5a3477d5d355629c2f556658676202`
 read twice on hasu. Its unmodified lair.pin selects `57870143ebbb4806b8bee40379e8c6e781f50842`;
 the engine column follows that pin, not an unrelated lair trunk.
+
+## px82: lupin v0.1.58
+
+The published musl archive at tag `6240efe5570dba1a33ba6269e3ba44bae33dd972`
+has SHA256 `6ad6e008f97bce36b875e102906e2a949df5fd5d6f5cc693ae70fa19e376b533`;
+its lupin binary is `b4f0f23c4028a4e37fb650dff1d417e90522a408de4b3a8ca3b8e80387676195`.
+Tag and archive API digest read twice; downloaded archive and binary read
+twice on hasu. The binary reports lupin 0.1.58 at mirror pin a5378e3.
+Neither this archive nor v0.1.57 carries a std tree or STD-PIN. PAX keeps
+user/std.pin at 78b9d3c, never downgrading to the mirror's older 2386522e.
+Release metadata and the org's own STD-PIN were read; no external source.
