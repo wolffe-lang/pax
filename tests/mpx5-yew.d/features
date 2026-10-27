@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Additional visible features in the same unmodified yew session image.
+set -euo pipefail
+. "$(dirname "$0")/../../tools/lib.sh"
+[ $# -eq 4 ] || die 'usage: features IMAGES TIER FIRMWARE OUT'
+images=$1 tier=$2 firmware=$3 out=$4
+mkdir -p "$out"
+: > "$out/dumps.txt"
+: > "$out/ps2-session.log"
+log=$out/serial.log
+sock=$out/monitor.sock
+rm -f "$sock"
+python3 -I "$PAX_ROOT/tools/ps2-session" --serial "$log" --monitor "$sock" \
+    --keys "$PAX_ROOT/user/console/yew-features.keys" --out "$out" --timeout 300 > "$out/keys.log" 2>&1 &
+keys_pid=$!
+boot=0; typed=0
+"$PAX_ROOT/tools/qemu-halt" --firmware "$firmware" --serial "$log" --timeout 360 \
+    --qemu -m --qemu 512M --qemu -monitor --qemu "unix:$sock,server=on,wait=off" \
+    --elf "$images/$tier/kmain_console.elf" --marker 'halt|PANIC .*' \
+    "$images/$tier/session.iso" > "$out/halt.log" 2>&1 || boot=$?
+wait "$keys_pid" || typed=$?
+[ "$boot" = 0 ] && [ "$typed" = 0 ] || { cat "$out/keys.log" "$out/halt.log"; exit 1; }
+python3 -I "$PAX_ROOT/tests/mpx5-yew.d/features.py" "$log" "$out"
