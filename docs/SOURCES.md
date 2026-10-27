@@ -1375,3 +1375,11 @@ Launch `git ls-remote` read twice with identical results; the codeload
 archive SHA256 `15f4b5261a623fe3c7470965483c63c9a30b6f908a6f274da0d0040c450da9fa` read twice on hasu.
 Built unmodified with its own wolf-toolchain.toml; no third-party source
 consulted. The image snapshot is separate from px04 historical traces.
+
+## px82: pelt launch pin
+
+The org-owned pelt tree moves from `0b5eaa5394667c485de3a134f771c87024b68a3c` to `4683b3f5faf46cd393ec2632f345f8cd483a4f1f` (25 commits).
+Launch `git ls-remote` read twice with identical results; the codeload
+archive SHA256 `19645879b4401ee8f1d93fdac3b5169ca057afeea179268f6811352cdc96aee8` read twice on hasu.
+Built unmodified with its own wolf-toolchain.toml; no third-party source
+consulted. The image snapshot is separate from px04 historical traces.
