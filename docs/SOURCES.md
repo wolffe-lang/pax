@@ -1422,3 +1422,11 @@ Launch `git ls-remote` read twice with identical results; the codeload
 archive SHA256 `d2ef6674865306bf5bc910b0541814210069c981a70bdbefdbf7a11e6f54ef15` read twice on hasu.
 Built unmodified with its own wolf-toolchain.toml; no third-party source
 consulted. The image snapshot is separate from px04 historical traces.
+
+## px82: boreutils launch pin
+
+The org-owned boreutils tree moves from `575dc7b94b3aea8cb2c5d92d5263465b4a72c4c2` to `0f7a57b68829765f60c39ced01edb7ea75265eb8` (347 commits).
+Launch `git ls-remote` read twice with identical results; the codeload
+archive SHA256 `ee30f43a304b7b5029daf1bc4dcb9b24f6183644c95e2436ca4c5fb311a81bd8` read twice on hasu.
+Built unmodified with its own wolf-toolchain.toml; no third-party source
+consulted. The image snapshot is separate from px04 historical traces.
