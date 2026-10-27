@@ -73,7 +73,7 @@
 # rescan, BLKPG, /sys's block files, several disks, mount by node).
 # px69: and the disk tools (a whole disk written on PAX's vdb through
 # px79's nodes, booted alone; in @user too, as mpx6-root).
-@disk    = mpx6-blk mpx6-ext2 mpx6-part mpx6-root mpx6-journal mpx6-nodes mpx6-disktools mpx6-install mpx6-fsck
+@disk    = mpx6-blk mpx6-ext2 mpx6-part mpx6-root mpx6-journal mpx6-nodes mpx6-disktools mpx6-install mpx6-fsck mpx6-nvme
 
 boot/limine-usb.conf            mpx3-console
 user/usb-login.sh               mpx3-console
@@ -286,7 +286,7 @@ user/elf/reboot.S               mpx6-ext2
 # rows); the table's tools, the guest's questions and the disk that boots
 # are mpx6-part's (by the derivation too: tests/mpx6-part names them);
 # tools/mkdisk and its tools are mpx6-ext2's as well (it names them).
-kernel/procfs/*                 mpx6-part mpx6-root mpx6-nodes
+kernel/procfs/*                 mpx6-part mpx6-root mpx6-nodes mpx6-nvme
 tools/mkgpt                     mpx6-part
 tools/disktools                 mpx6-part
 tools/linux-part                mpx6-part
@@ -305,9 +305,19 @@ tools/root-crash                mpx6-journal
 # files are its too (above). Its probe, the probe's builder and the
 # Linux guest's tool are its by the derivation (tests/mpx6-nodes names
 # them); it reads tests/mpx6-part's `full` fixture.
-kernel/files/*                  mpx6-nodes
+kernel/files/*                  mpx6-nodes mpx6-nvme
 kernel/user/*                   mpx6-nodes
 tests/mpx6-part.d/fixtures      mpx6-nodes
+# px75: NVMe. kernel/nvme is run by mpx6-nvme alone (no other suite's
+# machine has an NVMe controller) and by the NVMe-root leg of
+# mpx5-users' job, which runs outside `tier pr` (its own `if`); it rides
+# kernel/block's requests (@disk, which now holds mpx6-nvme) and
+# kernel/files' raw I/O (above, the 128 KiB pieces). Its probe, the
+# probe's builder, px79's probe and the guest's tool are its by the
+# derivation (tests/mpx6-nvme names them); it reads px79's record of
+# a.img's sha256.
+kernel/nvme/*                   mpx6-nvme
+tests/mpx6-nodes.d/disks.sha256 mpx6-nodes mpx6-nvme
 # px67: the root-on-disk legs. Ten suites' jobs boot their ISOs a second
 # time with `/` on a disk (tools/rootdisk-leg, through
 # tools/qemu-rootdisk, after the suite's own step): mpx3-boreutils,
