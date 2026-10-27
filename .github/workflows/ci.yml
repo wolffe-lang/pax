@@ -1010,6 +1010,20 @@ jobs:
           PAX_ENGINE: docker
         run: tests/usb-stick --images "$PWD/build/mpx3-console" $PAX_LEGS
 
+      - name: the same typing rows through USB root ports and hubs
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: python3 -I tools/usb-typing mpx3-console $PAX_LEGS
+
+      - name: keep USB typing path evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-usb-typing-mpx3-console
+          path: build/usb-typing-mpx3-console/
+          retention-days: 14
+          if-no-files-found: warn
+
       - name: the same suite with / on a disk, native BIOS (px67, tools/rootdisk-leg; every tier it runs in)
         env:
           PAX_REQUIRE_UEFI: "1"
@@ -1180,6 +1194,20 @@ jobs:
         env:
           PAX_REQUIRE_UEFI: "1"
         run: tests/mpx3-shell $PAX_LEGS
+
+      - name: the same typing rows through USB root ports and hubs
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: python3 -I tools/usb-typing mpx3-shell $PAX_LEGS
+
+      - name: keep USB typing path evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-usb-typing-mpx3-shell
+          path: build/usb-typing-mpx3-shell/
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: the same suite with / on a disk, native BIOS (px67, tools/rootdisk-leg; every tier it runs in)
         env:
@@ -2916,6 +2944,20 @@ jobs:
           tools/ci-retry mpx5-pelt-linux --keep build/mpx5-pelt/linux -- tests/mpx5-pelt --only linux --images build/mpx5-pelt
           tests/mpx5-pelt --images build/mpx5-pelt $PAX_LEGS
 
+      - name: the same typing rows through USB root ports and hubs
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: python3 -I tools/usb-typing mpx5-pelt $PAX_LEGS
+
+      - name: keep USB typing path evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-usb-typing-mpx5-pelt
+          path: build/usb-typing-mpx5-pelt/
+          retention-days: 14
+          if-no-files-found: warn
+
       - name: the same suite with / on a disk, native BIOS (px67, tools/rootdisk-leg; the full and all tiers, a long suite)
         if: needs.plan.outputs.tier != 'pr'
         env:
@@ -4373,6 +4415,39 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  mpx6-usb:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-usb')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+      PAX_REQUIRE_UEFI: "1"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU, firmware and baseline compiler
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make
+      - name: pinned wolf archive
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+      - name: USB topology, boot reports, repeat, hotplug and ring wrap
+        run: tests/mpx6-usb $PAX_LEGS
+      - name: keep USB device and console transcripts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-usb
+          path: |
+            build/mpx6-usb/**/*.log*
+            build/mpx6-usb/**/*.txt
+            build/mpx6-usbcheck/**/*.log*
+            build/mpx6-usbcheck/**/*.norm
+          retention-days: 14
+          if-no-files-found: error
+
   tier:
     name: tier ${{ needs.plan.outputs.tier || 'unplanned' }}
     if: ${{ !cancelled() }}
@@ -4432,6 +4507,7 @@ jobs:
       - mpx6-install
       - mpx6-fsck
       - mpx6-games
+      - mpx6-usb
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # The issue step's token may write issues; nothing else.
