@@ -17,6 +17,9 @@ use sync
 use timer
 use usb_keys
 
+extern "c" fn pax_outb(port: u16, value: u8)
+extern "c" fn pax_inb(port: u16) -> u8
+
 var first: u64 = 0
 var initialized: u64 = 0
 var held: u64 = 0
@@ -122,6 +125,15 @@ fn say_error(c: u64, why: str, detail: u64) {
 pub fn route_child(route: u64, depth: u64, port: u64) -> u64 {
     if depth >= 5 || port == 0 || port > 255 { return 0x100000 }
     route | ((if port > 15 { 15 } else { port }) << (depth * 4))
+}
+
+/// xHCI §6.2.2: low/full-speed descendants inherit the closest high-speed
+/// transaction translator and its physical downstream port. High-speed
+/// devices themselves do not name a TT. Hubs use their default single-TT
+/// alternate setting; MTT remains clear.
+pub fn tt_route(speed: u64, parent_speed: u64, parent_slot: u64, port: u64, inherited: u64) -> u64 {
+    if speed != 1 && speed != 2 { return 0 }
+    if parent_speed == 3 { parent_slot | (port << 8) } else { inherited }
 }
 
 fn trb(a: u64, parameter: u64, status: u64, control: u64) {
@@ -246,6 +258,10 @@ fn drain(c: u64) {
                         report(d, r64(get(d, BUFFER) + 2048))
                     }
                     if get(d, KIND) == 1 && (code == 1 || code == 13) { arm(d) }
+                    else if get(d, KIND) == 1 {
+                        report(d, 0)
+                        put(d, KIND, 4) // no repeat or stuck modifier after a halted endpoint
+                    }
                 }
             }
         }
@@ -255,6 +271,9 @@ fn drain(c: u64) {
         if index == 256 { index = 0; cycle ^= 1 }
         count += 1
     }
+    // §5.5.2.3.3 forbids consecutive identical ERDP writes unless a
+    // complete ring was consumed. A polling waiter often finds no event.
+    if count == 0 { return }
     put(c, EI, index); put(c, EC, cycle)
     w32(get(c, OP) + 4, 8)
     w32(get(c, RT), 3)
@@ -520,6 +539,20 @@ fn configure(d: u64) -> bool {
     true
 }
 
+fn discard_allocations(d: u64) {
+    // Only before Address Device, or after successful Disable Slot.
+    let saved = sync.irq_save()
+    var word = OUTPUT
+    while word <= BUFFER {
+        if word == OUTPUT || word == INPUT || word == CTRL || word == INTR || word == BUFFER {
+            if get(d, word) != 0 { frames.free(pa(get(d, word))) }
+        }
+        word += 1
+    }
+    frames.free(pa(d))
+    sync.irq_restore(saved)
+}
+
 fn attach(c: u64, parent: u64, port: u64, speed: u64) {
     var route: u64 = 0
     var depth: u64 = 0
@@ -530,15 +563,17 @@ fn attach(c: u64, parent: u64, port: u64, speed: u64) {
         route = route_child(get(parent, ROUTE), get(parent, DEPTH), port)
         if route > 0xfffff { say_error(c, "hub depth exceeds five", port); return }
         root = get(parent, ROOT)
-        if speed == 1 || speed == 2 {
-            tt = if get(parent, SPEED) == 3 { get(parent, SLOT) | (port << 8) } else { get(parent, TT) }
-        }
+        tt = tt_route(speed, get(parent, SPEED), get(parent, SLOT), port, get(parent, TT))
     }
     let result = command(c, 0, 9 << 10)
     let slot = result >> 24
     if result & 255 != 1 || slot == 0 || slot > get(c, NSLOT) { say_error(c, "enable slot failed", result); return }
     let d = page()
-    if d == 0 { return }
+    if d == 0 {
+        let _disabled = command(c, 0, (10 << 10) | (slot << 24))
+        say_error(c, "no device record memory", slot)
+        return
+    }
     put(d, SLOT, slot); put(d, HOST, c); put(d, PARENT, parent)
     put(d, PORT, port); put(d, ROOT, root); put(d, ROUTE, route)
     put(d, DEPTH, depth); put(d, SPEED, speed); put(d, TT, tt)
@@ -546,7 +581,12 @@ fn attach(c: u64, parent: u64, port: u64, speed: u64) {
     while word <= BUFFER {
         if word == OUTPUT || word == INPUT || word == CTRL || word == INTR || word == BUFFER {
             let a = page()
-            if a == 0 { say_error(c, "no DMA memory", slot); return }
+            if a == 0 {
+                let _disabled = command(c, 0, (10 << 10) | (slot << 24))
+                discard_allocations(d)
+                say_error(c, "no DMA memory", slot)
+                return
+            }
             put(d, word, a)
         }
         word += 1
@@ -596,9 +636,7 @@ fn detach(d: u64) {
     w64(c + 512 + get(d, SLOT) * 8, 0)
     w64(get(c, DCBAA) + get(d, SLOT) * 8, 0)
     // Disable Slot completion proves these DMA buffers are no longer owned.
-    frames.free(pa(get(d, OUTPUT))); frames.free(pa(get(d, INPUT)))
-    frames.free(pa(get(d, CTRL))); frames.free(pa(get(d, INTR)))
-    frames.free(pa(get(d, BUFFER))); frames.free(pa(d))
+    discard_allocations(d)
     sync.irq_restore(s)
 }
 
@@ -695,11 +733,29 @@ export fn pax_usbd(_arg: u64) {
     }
 }
 
-fn wait_bits(a: u64, mask: u64, value: u64) -> bool {
-    // Bootstrap has IF clear: bounded MMIO polls, no scheduler/tick dependency.
+fn pit_count() -> u64 {
+    // Same 8254 latch operation as PAX's tour; timer.start has programmed
+    // channel 0 for 100Hz. IF is clear, so its two-byte read cannot interleave.
+    unsafe {
+        pax_outb(0x43, 0)
+        let lo = pax_inb(0x40)
+        let hi = pax_inb(0x40)
+        (lo as u64) | ((hi as u64) << 8)
+    }
+}
+
+fn wait_bits(a: u64, mask: u64, value: u64, ticks: u64) -> bool {
+    // Bootstrap has IF clear: count real PIT reloads, not CPU-speed-dependent
+    // iterations. A second bound refuses a broken/nonadvancing PIT too.
+    if r32(a) & mask == value { return true }
+    var previous = pit_count()
+    var elapsed: u64 = 0
     var n: u64 = 0
-    while n < 10000000 {
+    while elapsed < ticks && n < 10000000 {
         if r32(a) & mask == value { return true }
+        let current = pit_count()
+        if current > previous { elapsed += 1 }
+        previous = current
         n += 1
     }
     false
@@ -745,12 +801,14 @@ fn controller(pml4: u64, index: u64, number: u64) -> u64 {
     put(c, CSZ, if hcc & 4 != 0 { 64 } else { 32 })
     put(c, VECTOR, timer.MASTER_BASE + line)
     var extended = (hcc >> 16) * 4
+    var legacy_found = false
     var guard: u64 = 0
     while extended != 0 && extended + 16 < WINDOW && guard < 256 {
         let header = r32(cap + extended)
         if header & 255 == 1 {
-            w8(cap + extended + 3, 1)
-            if !wait_bits(cap + extended, 0x1010000, 0x1000000) { say_error(c, "firmware ownership timeout", header); return 0 }
+            legacy_found = true
+            w8(cap + extended + 3, r8(cap + extended + 3) | 1)
+            if !wait_bits(cap + extended, 0x1010000, 0x1000000, 500) { say_error(c, "firmware ownership timeout", header); return 0 }
             let legacy = r32(cap + extended + 4)
             w32(cap + extended + 4, (legacy & 0x1fee) | 0xe0000000)
         }
@@ -759,11 +817,11 @@ fn controller(pml4: u64, index: u64, number: u64) -> u64 {
         extended += next * 4
         guard += 1
     }
-    if !wait_bits(op + 4, 0x800, 0) { return 0 }
+    if !wait_bits(op + 4, 0x800, 0, 100) { return 0 }
     w32(op, r32(op) & !1)
-    if !wait_bits(op + 4, 1, 1) { return 0 }
+    if !wait_bits(op + 4, 1, 1, 100) { return 0 }
     w32(op, 2)
-    if !wait_bits(op, 2, 0) || !wait_bits(op + 4, 0x800, 0) { return 0 }
+    if !wait_bits(op, 2, 0, 100) || !wait_bits(op + 4, 0x800, 0, 100) { return 0 }
     if r32(op + 8) & 1 == 0 { say_error(c, "4KiB pages unsupported", r32(op + 8)); return 0 }
     let dcbaa = page(); let cmd = page(); let event = page(); let erst = page()
     if dcbaa == 0 || cmd == 0 || event == 0 || erst == 0 { return 0 }
@@ -796,7 +854,7 @@ fn controller(pml4: u64, index: u64, number: u64) -> u64 {
     timer.level(line); timer.unmask_line(line)
     put(c, LIVE, 1)
     w32(op, 5)
-    if !wait_bits(op + 4, 1, 0) { put(c, LIVE, 0); return 0 }
+    if !wait_bits(op + 4, 1, 0, 100) { put(c, LIVE, 0); return 0 }
     var port: u64 = 1
     while port <= get(c, PORTS) {
         let address = op + 0x400 + (port - 1) * 16
@@ -805,7 +863,9 @@ fn controller(pml4: u64, index: u64, number: u64) -> u64 {
     }
     log.put("xhci "); log.dec(number as int); log.put(": ports ")
     log.dec(get(c, PORTS) as int); log.put(" INTx "); log.dec(line as int)
-    log.put(" context "); log.dec(get(c, CSZ) as int); log.put(" speeds")
+    log.put(" context "); log.dec(get(c, CSZ) as int)
+    log.put(if legacy_found { " legacy owned" } else { " legacy absent" })
+    log.put(" speeds")
     port = 1
     while port <= get(c, PORTS) {
         let st = r32(op + 0x400 + (port - 1) * 16)
@@ -830,10 +890,10 @@ pub fn start(pml4: u64, entry: u64) -> u64 {
     }
     if head() == 0 { unsafe { initialized = 1 }; return 0 }
     let keys = page()
-    if keys == 0 { return 0 }
+    if keys == 0 { unsafe { initialized = 1 }; return 0 }
     unsafe { held = keys }
     let id = sched.create(entry, 0)
-    if id == 0 { return 0 }
+    if id == 0 { unsafe { initialized = 1 }; return 0 }
     1
 }
 
