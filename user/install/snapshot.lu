@@ -67,6 +67,14 @@ fn source_walk(
     depth: int,
 ) -> () ! {io, invalid, source_changed, recovered_files} {
     if depth > 128 || rows.len > 100000 { return invalid }
+    // Distribution images carry runnable demo games, but installation's
+    // games yes/no choice must come only from the verified payload. This
+    // explicit build marker never changes an unmarked/custom source tree.
+    if path == "/home/pax/Games" {
+        let marker = if base == "/" then "/etc/pax-live" else "{base}/etc/pax-live"
+        let text = fs_read_text(marker) else |_| { "" }
+        if text == "pax-live-games-v1\n" { return }
+    }
     let host = if path == "/" then base else "{base}{path}"
     let st = fs_lstat(host) else |_| { return io }
     if st[0] != 0 && st[0] != 1 && st[0] != 3 { return invalid }
