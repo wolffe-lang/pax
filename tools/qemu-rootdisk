@@ -38,6 +38,14 @@
 # first boot of an ISO would otherwise spend tools/mkdisk's time (its
 # containers) inside tools/qemu-run's timeout. Exit 0 when every ISO
 # has a disk or is one this leaves as it is, 1 when tools/mkdisk failed.
+#
+# PAX_ROOTDISK_BUS=nvme (px75): the copy goes on QEMU's NVMe controller
+# instead (`-device nvme,serial=paxroot,drive=rd0,bootindex=0`), so the
+# firmware boots NVMe and `/` is nvme0n1p2 (`root=PARTUUID=` finds it by
+# its partition's GUID, whatever the bus); a run that gives QEMU an NVMe
+# controller of its own is then left as it is (its rows name it nvme0),
+# and one that brings only virtio disks is not (their names do not
+# move). The default, `virtio`, is px67's.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 real=${PAX_QEMU_REAL:-qemu-system-x86_64}
@@ -48,6 +56,8 @@ note() { printf 'qemu-rootdisk: %s\n' "$*" >&2; }
 booked() { mkdir -p "$cache" && printf '%s\t%s\n' "$1" "$2" >> "$cache/boots.log"; }
 
 cache=${PAX_ROOTDISK_CACHE:-${PAX_BUILD:-$here/../build}/rootdisk}
+bus=${PAX_ROOTDISK_BUS:-virtio}
+case $bus in virtio|nvme) ;; *) note "PAX_ROOTDISK_BUS is virtio or nvme, not $bus"; exit 2 ;; esac
 
 # The disk for ISO $1 into $disk: 0 made or cached, 1 tools/mkdisk
 # failed, 2 an ISO this leaves as it is (the reason on stderr).
@@ -115,15 +125,16 @@ for i in "${!args[@]}"; do
         file=*,format=raw,media=cdrom,readonly=on)
             iso=${a#file=}; iso=${iso%,format=raw,media=cdrom,readonly=on}; di=$i ;;
         -boot) bi=$i ;;
-        virtio-blk-pci*) own=1 ;;
+        virtio-blk-pci*) [ "$bus" = virtio ] && own=1 ;;
+        nvme,*|nvme) [ "$bus" = nvme ] && own=1 ;;
     esac
 done
 if [ -z "$iso" ]; then
     exec "$real" "$@"
 fi
 if [ "$own" = 1 ]; then
-    note "left as it is: the run gives QEMU a virtio disk of its own (its rows name it vda)"
-    booked left "$iso: a virtio disk of its own"
+    note "left as it is: the run gives QEMU a $bus disk of its own (its rows name it $( [ "$bus" = nvme ] && echo nvme0n1 || echo vda ))"
+    booked left "$iso: a $bus disk of its own"
     exec "$real" "$@"
 fi
 mkdir -p "$cache"
@@ -146,7 +157,11 @@ for i in "${!args[@]}"; do
         continue
     fi
     if [ "$i" = "$di" ]; then
-        new+=(-drive "file=$copy,if=none,id=rd0,format=raw" -device "virtio-blk-pci,drive=rd0,bootindex=0")
+        if [ "$bus" = nvme ]; then
+            new+=(-drive "file=$copy,if=none,id=rd0,format=raw" -device "nvme,serial=paxroot,drive=rd0,bootindex=0")
+        else
+            new+=(-drive "file=$copy,if=none,id=rd0,format=raw" -device "virtio-blk-pci,drive=rd0,bootindex=0")
+        fi
         continue
     fi
     if [ "$i" = "$bi" ] || [ "$i" = "$((bi + 1))" ]; then
@@ -155,5 +170,5 @@ for i in "${!args[@]}"; do
     new+=("${args[i]}")
 done
 booked disk "$iso $copy"
-note "$iso as a disk with / on partition 2 ($(sed -n 's/^mkdisk: root=//p' "$disk.mkdisk.log")): $copy"
+note "$iso as a $bus disk with / on partition 2 ($(sed -n 's/^mkdisk: root=//p' "$disk.mkdisk.log")): $copy"
 exec "$real" "${new[@]}"
