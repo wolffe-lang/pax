@@ -681,6 +681,7 @@ pub fn read(pml4: u64, buf: u64, n: u64, nonblock: bool, until: u64) -> (u64, u6
         j += 1
     }
     put_sv(C_R, r + k)
+    if sv(31) != 0 && sv(32) == 0 { put_sv(32, timer.ticks() + 1) }
     bump(C_READS)
     (k, 0)
 }
@@ -1202,8 +1203,23 @@ fn scancode(b: u64) {
     if ext {
         keys = keys - K_E0
     }
-    let brk = b & 0x80 != 0
-    let k = b & 0x7f
+    put_sv(C_KEYS, keys)
+    key_event((b & 0x7f) | (if ext { 0x100 } else { 0 }), b & 0x80 == 0, false)
+}
+
+/// One physical key through the shared character/sequence table. USB input
+/// never manufactures i8042 bytes or increments its scancode counter.
+/// The adapters retain separate modifier state; unplugging USB cannot release
+/// a Shift still held on PS/2. Caller holds IF clear.
+pub fn key_event(code: u64, pressed: bool, usb: bool) {
+    if sv(C_STARTED) == 0 || code == 0 { return }
+    typed_at(2)
+    if usb && pressed && sv(31) == 0 { put_sv(31, timer.ticks() + 1) }
+    let state = if usb { 30 } else { C_KEYS }
+    var keys = sv(state)
+    let ext = code & 0x100 != 0
+    let brk = !pressed
+    let k = code & 0x7f
     var bit: u64 = 0
     if k == 0x2a && !ext {
         bit = K_LSHIFT
@@ -1222,23 +1238,19 @@ fn scancode(b: u64) {
         } else {
             keys = keys | bit
         }
-        put_sv(C_KEYS, keys)
+        put_sv(state, keys)
         if brk && (bit == K_LALT || bit == K_RALT) { finish_entry() }
         return
     }
+    keys = sv(C_KEYS) | sv(30)
     if k == 0x45 && !ext {
-        if !brk { keys ^= K_NUM }
-        put_sv(C_KEYS, keys)
+        if !brk { put_sv(C_KEYS, sv(C_KEYS) ^ K_NUM) }
         return
     }
     if k == 0x3a && !ext {
-        if !brk {
-            keys = if keys & K_CAPS != 0 { keys - K_CAPS } else { keys | K_CAPS }
-        }
-        put_sv(C_KEYS, keys)
+        if !brk { put_sv(C_KEYS, sv(C_KEYS) ^ K_CAPS) }
         return
     }
-    put_sv(C_KEYS, keys)
     if brk {
         return
     }
@@ -1545,6 +1557,11 @@ pub fn summary() {
     log.dec((sv(C_DROPPED)) as int)
     log.put(" dropped")
     log.end()
+    if sv(31) != 0 && sv(32) != 0 {
+        log.put("console: usb first read latency ")
+        log.dec((sv(32) - sv(31)) as int)
+        log.line(" ticks (10ms resolution)")
+    }
 }
 
 /// `0x` and the hex digits of `v`, at least two, no other leading zeros.
