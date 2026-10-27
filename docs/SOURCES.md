@@ -1367,3 +1367,11 @@ Launch `git ls-remote` read twice with identical results; the codeload
 archive SHA256 `ee30f43a304b7b5029daf1bc4dcb9b24f6183644c95e2436ca4c5fb311a81bd8` read twice on hasu.
 Built unmodified with its own wolf-toolchain.toml; no third-party source
 consulted. The image snapshot is separate from px04 historical traces.
+
+## px82: scent launch pin
+
+The org-owned scent tree moves from `b6f63a4892cca631475cd0b87a0b648ce9b532a9` to `81d761d6d3b3c32f83a7b54801728088afea245a` (102 commits).
+Launch `git ls-remote` read twice with identical results; the codeload
+archive SHA256 `15f4b5261a623fe3c7470965483c63c9a30b6f908a6f274da0d0040c450da9fa` read twice on hasu.
+Built unmodified with its own wolf-toolchain.toml; no third-party source
+consulted. The image snapshot is separate from px04 historical traces.
