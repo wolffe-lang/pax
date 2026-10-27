@@ -4,7 +4,9 @@ A Linux-compatible operating system written in wolf: a kernel that runs Linux's 
 
 PAX is a clean-room implementation of Linux's userspace ABI. It does not contain, translate or derive from Linux kernel source. See `CLAUDE.md` for the rule and `docs/SOURCES.md` for what each part was written from.
 
-Users (P5, px38 to px47): PAX has accounts, root, `pax` (1000) and the service account `lobo` (990), in its image's `/etc/passwd` and `/etc/group`. There are no passwords yet and the image boots to root's shell; `su`, written in wolf (`user/su`), is root becoming a user, a user's `su` is refused as Linux refuses one who cannot authenticate, and a set-ID bit is not honoured, so privilege only drops. A process has Linux's real, effective, saved and file-system ids and a group list; a file has an owner, a group and a mode; and `open`, `exec`, every path walk, making, removing, renaming and linking a name, changing a mode, an owner or a time, signals, ports below 1024, raw sockets, the speaker, `/dev`'s nodes and `/proc`'s files are checked by Linux's rules, each rule measured against a real Linux (`tests/mpx5-users`, `tests/mpx5-accounts`). Since px47 every suite that runs programs on PAX — the tree, the shell, boreutils, Unix sockets, TCP, UDP, the speaker and lobo — runs them again as a user beside root, each run held byte for byte to the same binaries run as the same user on Linux. These checks are enforced for honest programs; not a boundary against an attacker: the kernel has never been fuzzed or audited, and it loads programs at fixed addresses. `login` waits for job control, and passwords for a memory-hard hash.
+Users (P5, px38 to px47): PAX has accounts, root, `pax` (1000) and the service account `lobo` (990), in its image's `/etc/passwd` and `/etc/group`. There are no passwords yet; existing installed/test images boot to root's shell, while the USB live entry below presents a root-only login prompt; `su`, written in wolf (`user/su`), is root becoming a user, a user's `su` is refused as Linux refuses one who cannot authenticate, and a set-ID bit is not honoured, so privilege only drops. A process has Linux's real, effective, saved and file-system ids and a group list; a file has an owner, a group and a mode; and `open`, `exec`, every path walk, making, removing, renaming and linking a name, changing a mode, an owner or a time, signals, ports below 1024, raw sockets, the speaker, `/dev`'s nodes and `/proc`'s files are checked by Linux's rules, each rule measured against a real Linux (`tests/mpx5-users`, `tests/mpx5-accounts`). Since px47 every suite that runs programs on PAX — the tree, the shell, boreutils, Unix sockets, TCP, UDP, the speaker and lobo — runs them again as a user beside root, each run held byte for byte to the same binaries run as the same user on Linux. These checks are enforced for honest programs; not a boundary against an attacker: the kernel has never been fuzzed or audited, and it loads programs at fixed addresses. Authenticated `login` and a memory-hard password hash remain future work.
+
+Live USB: `tools/mkdisk --usb --kernel K.elf --initramfs I.cpio OUT.img` makes a reproducible raw GPT image with one FAT32 ESP and a reserved Limine BIOS partition. `tools/qemu-run --usb-stick OUT.img` boots it through xHCI mass storage, with no CD-ROM or virtio disk. The console suite passes from the stick under SeaBIOS and OVMF; Linux mounts the same ESP and verifies its boot files. The live-only entry accepts `root` without a password and starts pelt; it does not change installed accounts or provide authentication. The supplied initramfs is preserved byte for byte, so the complete live system and any installer/games payload stay in memory. `tools/usb-write --dry-run` checks a prospective removable target on Linux or macOS; physical writes and real-machine boots are not tested here. See [The live USB stick](docs/BOOT.md#the-live-usb-stick).
 
 Guided installation: `pax-install` inventories real block nodes, shows a read-only plan, and requires an exact target confirmation before writing. It offers an explicit **ext2 developer preview**, not a journalled installation: whole-disk fresh installs only, 512-byte sectors, root volumes up to 4 GiB. The running root's disk, mounted disks and read-only targets are refused. The flow asks for a user name and whether to install the games; the three wolf games (pack, cub and trail, gm01) are staged offline, each with its corresponding source and its engine's, and neither answer fetches anything. The installer and complete installed tree have been tested on separate QEMU virtio disks under BIOS and UEFI, including reboot persistence. This is not a claim about real-machine drivers or USB installation. See [Guided installation](docs/BOOT.md#guided-installation) for preparation, commands, logging and limits.
 
@@ -128,7 +130,9 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
               reproducibly; the partition and FAT tools from
               user/disktools.pin in the pinned container; the Linux
               guest's partitions, /proc/partitions and blkid on an
-              image); mkdisk --gpt (px66: the disk that boots)
+              image); mkdisk --gpt (px66: the disk that boots);
+              mkdisk --usb, check-usb and usb-write (raw live stick,
+              independent boot-file checks, guarded manual writer)
     font/     the screen's font (px19): Spleen 8x16, BSD-2-Clause, with
               its licence; gm01: extent.txt (the code points drawn above
               U+00FF: braille, the block elements, the games' others),
@@ -138,7 +142,8 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
               in mkw.d/), mpx1, mpx2-frames, mpx2-paging, mpx2-interrupts,
               mpx2-sched, mpx3-user, mpx3-loader, mpx3-boreutils, mpx3-console,
               mpx3-screen, mpx3-speaker (px18), mpx3-threads (px26), mpx3-tree (px27), mpx3-sound (px30), mpx4-net (px20, px21), mpx4-udp (px22), mpx4-tcp (px23), mpx5-lope (px54), mpx6-blk and mpx6-ext2 (px63), mpx5-scent (px64), mpx6-part (px66), mpx5-bore (px65), mpx6-disktools (px69), mpx6-install (guided installation), kernel-as and mpx5-clef (as02b: the kernel's WOLF_AS seam; the clef package qualified on PAX), mpx6-games (gm01: the wolf games on the console), gdb-attach,
-              expect-serial-selftest
+              expect-serial-selftest, usb-tools and usb-stick (USB-only boot,
+              live login, image reproducibility and Linux ESP differential)
               Additional QEMU and host-side entry points:
               census, ci-plan, lobo-session-selftest, mpx2-heap, mpx3-maps, mpx3-orchestra, mpx3-shell, mpx4-lobo, mpx4-ready, mpx4-session, mpx4-unix, mpx5-accounts, mpx5-aspen, mpx5-jobs, mpx5-lupin, mpx5-pelt, mpx5-screen, mpx5-users, mpx5-wolf, mpx5-yew, mpx6-fsck, mpx6-journal, mpx6-nodes, mpx6-root, paxtcp-selftest, tour
     docs/     BOOT.md (the boot protocol, argued), SOURCES.md (the
@@ -206,6 +211,11 @@ tests/mpx1 --images build/mpx1             # boot ISOs built elsewhere (any host
 tools/qemu-halt --elf build/mpx1/native/kmain.elf --marker halt build/mpx1/native/kmain.iso   # is it halted?
 PAX_WOLF=$(tools/fetch-wolf) PAX_LUPIN=$(tools/fetch-lupin) tests/mkw   # M-KW: the first wolf kernel, both tiers
 tests/mkw --images build/mkw               # boot ISOs built elsewhere (any host with QEMU)
+tools/mkdisk --usb --kernel K.elf --initramfs I.cpio --conf boot/limine-usb.conf pax-stick.img
+# I.cpio must already contain the desired live system; the wrapper adds no programs.
+tools/qemu-run --firmware uefi --usb-stick pax-stick.img
+tools/usb-write --dry-run pax-stick.img /dev/sdX  # inspect only; select the actual removable whole disk yourself
+PAX_WOLF=$(tools/fetch-wolf) tests/usb-stick --tier native  # BIOS + UEFI, live login, Linux guest; 0 skips
 ```
 
 `tools/qemu-run` runs QEMU headless (`-nographic`, COM1 to a file, `-no-reboot`, a timeout, `isa-debug-exit` at port `0xf4`) and returns QEMU's status: `(v << 1) | 1` when the kernel writes `v` to the exit port, 0 for a reset or triple fault, 124 for a timeout. A kernel that halts never exits QEMU, so `tools/qemu-halt` boots it with QEMU's monitor on a pipe and, after the kernel's last line, holds it to RIP inside `pax_halt`, IF clear and HLT=1 at two probes a second apart, with no further serial output. Each tool's header comment states its usage; `qemu-run` and `qemu-gdb` print it with `--help`.
