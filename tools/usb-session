@@ -26,6 +26,13 @@ def run(args):
            '--usb-kbd=' + args.topology, '--serial', str(serial),
            '--timeout', '120', str(Path(args.image).resolve()), '--',
            '-qmp', f'unix:{sock},server=on,wait=off']
+    # A blank virtual USB3 disk proves that non-keyboard SuperSpeed
+    # enumeration is logged without claiming a storage driver.
+    disk = out / 'superspeed.img'
+    with disk.open('wb') as stream:
+        stream.truncate(8 * 1024 * 1024)
+    cmd += ['-drive', f'file={disk},if=none,id=usb-ignored,format=raw',
+            '-device', 'usb-storage,bus=pax-usb.0,port=3,drive=usb-ignored']
     if args.linux_kernel:
         # Direct boot of an unmodified binary Linux kernel. The ISO is not
         # booted; keeping the same qemu-run gives both guests identical USB.
@@ -120,6 +127,8 @@ def run(args):
                 summary = [x for x in text.splitlines() if x.startswith(b'console: ') and b'scancodes' in x]
                 if len(summary) != 1 or b'(0 scancodes)' not in summary[0] or b'console: 0 bytes from com1,' not in summary[0]:
                     raise RuntimeError('USB path contaminated by PS/2 or serial: '+repr(summary))
+                if b'SuperSpeed enumerated, not driven' not in text:
+                    raise RuntimeError('SuperSpeed enumeration/logging row missing')
                 if b'xhci: keyboard usb1-' not in text or b'enumeration failed' in text or b'timeout' in text:
                     raise RuntimeError('USB enumeration did not complete cleanly')
                 execute('quit')
