@@ -70,3 +70,22 @@ with tempfile.TemporaryDirectory(prefix='px82-release-') as tmp:
         print('R2 PASS release-kernel rejects changed ELF bytes')
     else:
         raise AssertionError('release-kernel accepted changed ELF bytes')
+
+# Exercise the production archive codec without the historical dev payload.
+import runpy
+codec = runpy.run_path(str(ROOT / 'tools/distribution-root'))
+with tempfile.TemporaryDirectory(prefix='px82-cpio-') as tmp:
+    path = Path(tmp) / 'fixture.cpio'
+    records = {'bin': (0o40755, 0, 0, b''),
+               'bin/check': (0o100755, 1000, 1000, b'fixture bytes\n'),
+               'bin/link': (0o120777, 0, 0, b'check'),
+               'tmp': (0o41777, 0, 0, b'')}
+    codec['write_cpio'](records, path)
+    assert codec['read_cpio'](path.read_bytes()) == records, 'distribution-newc-roundtrip'
+    try:
+        codec['read_cpio'](path.read_bytes()[:-80])
+    except (AssertionError, ValueError):
+        pass
+    else:
+        raise AssertionError('distribution-newc-short-archive-accepted')
+    print('R3 PASS distribution archive modes, owners, links, bytes and truncation refusal')

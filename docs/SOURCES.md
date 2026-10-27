@@ -1486,3 +1486,36 @@ after the launch pin; cb04b's source merge plus the note). Its own lair.pin
 now selects 74b89744e8f8a4ed01539b2fe814daf819b9abfc. Both source archives
 were fetched and hashed twice on hasu, matching the new games.txt row.
 Neither project was modified.
+
+## px82: image identity, stack policy and refreshed games
+
+The identity and image builders read this repository's pin records, kernel
+ELF and deterministic build epoch. The unchanged native compiler/linker
+bundle is copied from the previous verified dev initramfs (SHA256
+098b918ecfe7fae1b1c05c1a92b0bbde33cbc88fab0b63b3737941590f8a35c4), with
+its members independently checked against user/wolf.sums and wolf-link.sums.
+The installer is built from this checkout; no source of another installer,
+filesystem tool, kernel or libc was read. The marked live demo Games tree
+is omitted from its source snapshot so the payload decision remains explicit.
+
+Yew's own d53daaea diff adds JobTable and ShSession value fields to Ed.
+Built-function prologues of this owned code measure ed_new +160 bytes and
+ed_run +9136 bytes across that first bad commit. At trunk the two reserve
+137232 bytes before saved registers and deeper calls, beyond the former
+128 KiB initial stack. The single policy in procfs now grants 256 pages
+(1 MiB), with allocation and RLIMIT_STACK derived from it. No yew source
+was changed. The alternate pin/policy is an unapplied patch in notes/px82.
+
+Cub c8e5cf15 follows f6a50a58 by 39 commits and keeps lair74b89744. Its HUD
+adds U+259A, already covered by the generated block range. The earlier
+refresh added U+2735 and U+2736; their Unicode names were read with Python's
+unicodedata, and the two 8x16 glyphs were drawn originally for PAX. Spleen
+remains unmodified. The pinned union now has252 code points.
+
+Trail's 59050227 probe omits U+259B despite its18-row GLYPHS.md; trail#8
+records the mismatch. 24099a81 is the pre-scatter campaign boundary selected
+for qualification (eight commits after the original pin). The modified
+paused replay no longer asserts the original run's stale score metadata.
+Cub's animated scene is compared to an explicitly generated trajectory,
+while its authored120-frame golden remains a separate check. Source and
+engine trees are built unmodified.
