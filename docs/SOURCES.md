@@ -1446,3 +1446,10 @@ Launch `git ls-remote` read twice with identical results; the codeload
 archive SHA256 `19645879b4401ee8f1d93fdac3b5169ca057afeea179268f6811352cdc96aee8` read twice on hasu.
 Built unmodified with its own wolf-toolchain.toml; no third-party source
 consulted. The image snapshot is separate from px04 historical traces.
+
+## px82: pack launch pin
+
+The org-owned pack tree moves from `e10835f2818ada427bc2d74f1171653af3ffdce1` to `278480955f7c088b40b9f2cdd57565ece8f4a865` (1 commits).
+Launch head read twice; codeload archive SHA256 `0be030da1a9c5fcfef0b34a762a3cff7e8bba924f6fe8e0300d393621fdf67e6`
+read twice on hasu. Its unmodified lair.pin selects `aa6c4dc0bc5071d3c07121451d913a8837cd2a6a`;
+the engine column follows that pin, not an unrelated lair trunk.
