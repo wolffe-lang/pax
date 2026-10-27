@@ -3,7 +3,8 @@
 //!
 //! **The devices.** A table of DEVMAX (129) records, one per disk a
 //! driver brought up and one per partition its table names: the disk's
-//! driver (kernel/vblk, the only one), its capacity in 512-byte sectors
+//! driver (kernel/vblk's virtio disks first, then kernel/nvme's
+//! namespaces, px75), its capacity in 512-byte sectors
 //! (the unit every request is in, whatever the disk's own block size),
 //! whether it is read-only and whether it takes a FLUSH, its name (`vda`,
 //! `vdb`, …: Linux's names for virtio disks, so an `/etc/fstab` line
@@ -12,6 +13,15 @@
 //! disk, 254:N for its partition N up to 15 and the extended major 259
 //! from 0 up for the rest, in order: measured on the Linux guest, where
 //! virtio_blk's dynamic major is 254 and each disk takes 16 minors).
+//! px75: an NVMe namespace is `nvme<c>n<k>` and its partitions
+//! `nvme<c>n<k>p<N>`, every one on the extended major 259 (measured on
+//! the Linux guest: nvme0n1 259:0, nvme0n1p1 259:1 beside vda's 254:N);
+//! the minors are given as the guest gives them where it is
+//! deterministic: every NVMe disk its minor before any partition does
+//! (one controller with namespaces 1 and 3: nvme0n1 259:0, nvme0n2
+//! 259:1, nvme0n1p1 259:2), then the partitions disk by disk. With
+//! several controllers the guest's order is its probes' race (three
+//! runs, three orders); PAX's is the one above, in PCI order.
 //! `start` brings up what is there; a machine with no disk has none, and
 //! nothing is printed.
 //!
@@ -72,11 +82,17 @@
 //!   (measured: Linux on the same image and device finds no partitions
 //!   either, since its table is at LBA 1 of 512 bytes).
 //!
-//! **A request** is a record of 8 words (kernel/vblk reads and writes
-//! them): its type (IN, OUT, FLUSH), its first sector, its sectors, the
-//! data's physical address (inside one frame), the status the device
-//! wrote, and its state: free, with the device, done. `rw` and `flush`
-//! fill one, hand it to the driver and wait for its completion. The
+//! **A request** is a record of 8 words (kernel/vblk and kernel/nvme
+//! read and write them): its type (IN, OUT, FLUSH), its first sector,
+//! its sectors, the data's physical address (inside one frame), the
+//! status the device wrote, its state: free, with the device, done; and
+//! (px75) 0, or the kernel address of a list of the physical pages a
+//! longer request's data runs across. `rw` and `flush` fill one, hand it
+//! to the disk's own driver and wait for its completion. `rw_pages`
+//! (px75) is one request of up to `max_sectors` (kernel/nvme's 256, 128
+//! KiB, or its controller's MDTS) through the page list; to a virtio
+//! disk, whose requests are one frame each here, it is one request a
+//! page. The
 //! completion is the record's state word, written by the driver when it
 //! takes the request back from the used ring; the wait looks for it
 //! (polled: kernel/vblk says why) and a request that never comes back is
@@ -135,6 +151,7 @@
 
 use frames
 use log
+use nvme
 use vblk
 
 extern "c" fn pax_tree_copy(dst: u64, src: u64, n: u64)
@@ -183,6 +200,7 @@ const PTW: u64 = 40
 const S_CUR: u64 = 105 // px79: the disk the table words are about
 const S_GEN: u64 = 106 // px79: the last generation given a device record
 const S_BOUNCE: u64 = 107 // px79: raw I/O's bounce frame (physical), 0 until first asked
+const S_BLIST: u64 = 108 // px75: raw I/O's bounce pages' list frame (physical), 0 until first asked
 const S_PT_KIND: u64 = 0 // PT_*
 const S_PT_USED: u64 = 1 // the header used: 1 primary, 2 backup
 const S_PT_WHYP: u64 = 2 // why the primary was refused (W_*), 0 it holds
@@ -275,6 +293,10 @@ const NAME_MAX: u64 = 128 // bytes: the 16 words from D_NAME (36 UTF-16 units ar
 const D_OPENS: u64 = 48 // px79: open files on its node
 const D_EXCL: u64 = 49 // px79: held by an O_EXCL open
 const D_GEN: u64 = 50 // px79: the generation it was made in (a node names it with this)
+const D_DRV: u64 = 51 // px75: the disk's driver (DRV_*)
+const D_UNIT: u64 = 52 // px75: the driver's own number for the disk
+const D_CTRL: u64 = 53 // px75: an NVMe disk's controller, c of nvme<c>n<k>
+const D_NSO: u64 = 54 // px75: k of nvme<c>n<k>
 const DW: u64 = 64
 /// Device kinds.
 pub const KIND_DISK: u64 = 0
@@ -283,6 +305,12 @@ pub const KIND_MBR: u64 = 2
 /// px79: a partition BLKPG_ADD_PARTITION made (no table entry: no type,
 /// no PARTUUID, no name).
 pub const KIND_ADDED: u64 = 3
+/// px75: the drivers: kernel/vblk's virtio disks.
+pub const DRV_VIRTIO: u64 = 0
+/// kernel/nvme's namespaces.
+pub const DRV_NVME: u64 = 1
+/// px75: raw I/O's bounce pages (128 KiB).
+pub const BOUNCE_PAGES: u64 = 32
 /// Device flags.
 pub const F_RO: u64 = 1
 pub const F_FLUSH: u64 = 2
@@ -432,7 +460,10 @@ pub fn start(pml4: u64) -> u64 {
         return st(S_DISKS)
     }
     let r = vblk.start(pml4)
-    if r != vblk.UP {
+    let nv = vblk.count_disks()
+    // px75: the NVMe namespaces, in what room the virtio disks leave.
+    let rn = nvme.start(pml4, if nv < DISKS { DISKS - nv } else { 0 })
+    if r != vblk.UP && rn != nvme.UP {
         return 0
     }
     let sf = zeroed()
@@ -464,8 +495,11 @@ pub fn start(pml4: u64) -> u64 {
         return 0
     }
     put_st(S_SCR, sc)
+    // px75: every disk first (each NVMe disk's minor before any
+    // partition's, as the guest gives them), then each one's table.
+    let all = nv + nvme.count_disks()
     k = 0
-    while k < vblk.count_disks() && k < DISKS {
+    while k < all && k < DISKS {
         var j: u64 = 0
         while j < DEVF {
             let f = zeroed()
@@ -479,16 +513,38 @@ pub fn start(pml4: u64) -> u64 {
         }
         let d = k * DPD
         put_dw(d, D_PRESENT, 1)
-        put_dw(d, D_SECTORS, vblk.sectors(k))
-        put_dw(d, D_LBS, vblk.block_size(k))
-        put_dw(d, D_FLAGS, (if vblk.read_only(k) { F_RO } else { 0 }) | (if vblk.flushes(k) { F_FLUSH } else { 0 }))
         put_dw(d, D_DISK, d)
-        put_dw(d, D_MAJOR, 254)
-        put_dw(d, D_MINOR, k * 16)
         put_dw(d, D_KIND, KIND_DISK)
+        if k < nv {
+            put_dw(d, D_DRV, DRV_VIRTIO)
+            put_dw(d, D_UNIT, k)
+            put_dw(d, D_SECTORS, vblk.sectors(k))
+            put_dw(d, D_LBS, vblk.block_size(k))
+            put_dw(d, D_FLAGS, (if vblk.read_only(k) { F_RO } else { 0 }) | (if vblk.flushes(k) { F_FLUSH } else { 0 }))
+            put_dw(d, D_MAJOR, 254)
+            put_dw(d, D_MINOR, k * 16)
+        } else {
+            let u = k - nv
+            let (c, ns) = nvme.name_of(u)
+            put_dw(d, D_DRV, DRV_NVME)
+            put_dw(d, D_UNIT, u)
+            put_dw(d, D_CTRL, c)
+            put_dw(d, D_NSO, ns)
+            put_dw(d, D_SECTORS, nvme.sectors(u))
+            put_dw(d, D_LBS, nvme.block_size(u))
+            put_dw(d, D_FLAGS, (if nvme.read_only(u) { F_RO } else { 0 }) | (if nvme.flushes(u) { F_FLUSH } else { 0 }))
+            // the lowest free minor, asked before this record says 259
+            let m = ext_minor()
+            put_dw(d, D_MAJOR, 259)
+            put_dw(d, D_MINOR, m)
+        }
         put_st(S_GEN, st(S_GEN) + 1)
         put_dw(d, D_GEN, st(S_GEN))
         put_st(S_DISKS, k + 1)
+        k += 1
+    }
+    k = 0
+    while k < disks() {
         read_table(k)
         k += 1
     }
@@ -571,14 +627,71 @@ fn digits(v: u64) -> u64 {
     n
 }
 
-/// The length of device `d`'s name (`vda`: 3, `vda12`: 5).
+/// px75: digit `i` (from the left) of `v` in decimal, as a byte.
+fn digit(v: u64, i: u64) -> u64 {
+    var x = v
+    var k = digits(v) - 1
+    while k > i {
+        x = x / 10
+        k -= 1
+    }
+    48 + x % 10
+}
+
+/// The length of device `d`'s name (`vda`: 3, `vda12`: 5; px75:
+/// `nvme0n1`: 7, `nvme0n1p12`: 10).
 pub fn name_len(d: u64) -> u64 {
     let p = partno(d)
+    let disk = disk_of(d)
+    if d < count() && dw(disk, D_DRV) == DRV_NVME {
+        let n = 5 + digits(dw(disk, D_CTRL)) + digits(dw(disk, D_NSO))
+        return if p == 0 { n } else { n + 1 + digits(p) }
+    }
     if p == 0 { 3 } else { 3 + digits(p) }
 }
 
-/// Byte `i` of device `d`'s name (`vda`, `vda2`), 0 past the end.
+/// Byte `i` of device `d`'s name (`vda`, `vda2`; px75: `nvme0n1`,
+/// `nvme0n1p2`: Linux's names, the `p` because the disk's name ends in a
+/// digit), 0 past the end.
 pub fn name_byte(d: u64, i: u64) -> u64 {
+    if i >= name_len(d) {
+        return 0
+    }
+    let disk = disk_of(d)
+    let p = partno(d)
+    if d < count() && dw(disk, D_DRV) == DRV_NVME {
+        if i == 0 {
+            return 110 // n
+        }
+        if i == 1 {
+            return 118 // v
+        }
+        if i == 2 {
+            return 109 // m
+        }
+        if i == 3 {
+            return 101 // e
+        }
+        let c = dw(disk, D_CTRL)
+        let ns = dw(disk, D_NSO)
+        var j = i - 4
+        if j < digits(c) {
+            return digit(c, j)
+        }
+        j -= digits(c)
+        if j == 0 {
+            return 110 // n
+        }
+        j -= 1
+        if j < digits(ns) {
+            return digit(ns, j)
+        }
+        j -= digits(ns)
+        if j == 0 {
+            return 112 // p
+        }
+        return digit(p, j - 1)
+    }
     if i == 0 {
         return 118 // v
     }
@@ -586,20 +699,9 @@ pub fn name_byte(d: u64, i: u64) -> u64 {
         return 100 // d
     }
     if i == 2 {
-        return 97 + d / DPD // a, b, …
+        return 97 + dw(disk, D_UNIT) // a, b, … (px75: the virtio disk's own number)
     }
-    let p = partno(d)
-    if p == 0 || i >= name_len(d) {
-        return 0
-    }
-    // The number's digit i - 3 from the left.
-    var x = p
-    var k = name_len(d) - 1
-    while k > i {
-        x = x / 10
-        k -= 1
-    }
-    48 + x % 10
+    digit(p, i - 3)
 }
 
 /// Write device `d`'s name to the log.
@@ -627,12 +729,49 @@ pub fn name_into(d: u64, base: u64, at: u64, cap: u64) -> u64 {
     k
 }
 
+/// px75: the decimal number in the `n` bytes at `a` (no leading zero but
+/// `0` itself), or 0x8000000000000000 when they are none.
+fn dec_at(a: u64, n: u64) -> u64 {
+    if n == 0 || n > 6 || (n > 1 && b8(a) == 48) {
+        return 0x8000000000000000
+    }
+    var v: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        let c = b8(a + k)
+        if c < 48 || c > 57 {
+            return 0x8000000000000000
+        }
+        v = v * 10 + (c - 48)
+        k += 1
+    }
+    v
+}
+
+/// px75: disk `k`'s partition numbered `p` (`p` 0: the disk), or DEVS.
+fn part_of(k: u64, p: u64) -> u64 {
+    if p == 0 {
+        return k * DPD
+    }
+    var d = k * DPD + 1
+    while d < (k + 1) * DPD {
+        if present(d) && partno(d) == p {
+            return d
+        }
+        d += 1
+    }
+    DEVS
+}
+
 /// The device whose name is the `n` bytes at `a` (`vda`, `vda2`, or
-/// `/dev/vda2`), or DEVS.
+/// `/dev/vda2`; px75: `nvme0n1`, `nvme0n1p2`, `/dev/nvme0n1p2`), or DEVS.
 pub fn by_name(a: u64, n: u64) -> u64 {
     var o: u64 = 0
     if n > 5 && b8(a) == 47 && b8(a + 1) == 100 && b8(a + 2) == 101 && b8(a + 3) == 118 && b8(a + 4) == 47 {
         o = 5
+    }
+    if n >= o + 7 && b8(a + o) == 110 && b8(a + o + 1) == 118 && b8(a + o + 2) == 109 && b8(a + o + 3) == 101 {
+        return by_nvme_name(a + o + 4, n - o - 4)
     }
     if n < o + 3 || b8(a + o) != 118 || b8(a + o + 1) != 100 {
         return DEVS
@@ -652,21 +791,72 @@ pub fn by_name(a: u64, n: u64) -> u64 {
         p = p * 10 + (c - 48)
         k += 1
     }
-    let k = letter - 97
-    if k >= disks() {
-        return DEVS
-    }
-    if p == 0 {
-        return k * DPD
-    }
-    var d = k * DPD + 1
-    while d < (k + 1) * DPD {
-        if present(d) && partno(d) == p {
-            return d
+    var x: u64 = 0
+    while x < disks() {
+        if dw(x * DPD, D_DRV) == DRV_VIRTIO && dw(x * DPD, D_UNIT) == letter - 97 {
+            return part_of(x, p)
         }
-        d += 1
+        x += 1
     }
     DEVS
+}
+
+/// px75: `<c>n<k>[p<N>]`, the `n` bytes at `a` after `nvme`.
+fn by_nvme_name(a: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while i < n && b8(a + i) != 110 {
+        i += 1
+    }
+    if i == n {
+        return DEVS
+    }
+    let c = dec_at(a, i)
+    var j = i + 1
+    while j < n && b8(a + j) != 112 {
+        j += 1
+    }
+    let ns = dec_at(a + i + 1, j - i - 1)
+    var p: u64 = 0
+    if j < n {
+        p = dec_at(a + j + 1, n - j - 1)
+        if p == 0 {
+            return DEVS
+        }
+    }
+    if c >= 0x8000000000000000 || ns >= 0x8000000000000000 || p >= 0x8000000000000000 || ns == 0 {
+        return DEVS
+    }
+    var x: u64 = 0
+    while x < disks() {
+        let d = x * DPD
+        if dw(d, D_DRV) == DRV_NVME && dw(d, D_CTRL) == c && dw(d, D_NSO) == ns {
+            return part_of(x, p)
+        }
+        x += 1
+    }
+    DEVS
+}
+
+/// px75: device `d`'s disk's driver (DRV_*).
+pub fn driver(d: u64) -> u64 {
+    if !present(d) { DRV_VIRTIO } else { dw(disk_of(d), D_DRV) }
+}
+
+/// px75: the largest request `rw_pages` makes to device `d`'s disk as
+/// one, in sectors: kernel/nvme's (its controller's MDTS, 256 at most),
+/// 8 for a virtio disk (one frame a request here).
+pub fn max_sectors(d: u64) -> u64 {
+    if !present(d) {
+        return 8
+    }
+    let disk = disk_of(d)
+    if dw(disk, D_DRV) == DRV_NVME { nvme.max_sectors(dw(disk, D_UNIT)) } else { 8 }
+}
+
+/// px75: BLKROTATIONAL's answer (measured on the guest: 1 for a virtio
+/// disk, 0 for an NVMe namespace).
+pub fn rotational(d: u64) -> u64 {
+    if driver(d) == DRV_NVME { 0 } else { 1 }
 }
 
 /// Linux's device numbers for device `d`: (major, minor).
@@ -683,6 +873,25 @@ fn said(d: u64, bit: u64) -> bool {
     s & bit != 0
 }
 
+/// px75: hand request record `r` to disk device `disk`'s own driver.
+fn hand(disk: u64, r: u64) {
+    if dw(disk, D_DRV) == DRV_NVME {
+        nvme.submit(dw(disk, D_UNIT), r)
+    } else {
+        vblk.submit(dw(disk, D_UNIT), r)
+    }
+}
+
+/// px75: wait for record `r` on disk device `disk`'s driver: its status
+/// (0 success).
+fn waited(disk: u64, r: u64) -> u64 {
+    if dw(disk, D_DRV) == DRV_NVME {
+        nvme.wait(dw(disk, D_UNIT), r)
+    } else {
+        vblk.wait(dw(disk, D_UNIT), r)
+    }
+}
+
 /// One request to device `d`, waited for: type `op` (vblk.T_IN, T_OUT),
 /// `n` sectors from `sector` (of the device: a partition's from its own
 /// first sector), the data at physical `pa` (inside one frame: n <= 8).
@@ -690,11 +899,38 @@ fn said(d: u64, bit: u64) -> bool {
 /// refusal: past the capacity, a write to a read-only disk), each
 /// counted.
 pub fn rw(d: u64, op: u64, sector: u64, n: u64, pa: u64) -> u64 {
+    request(d, op, sector, n, pa, 0, 8)
+}
+
+/// px75: one request of `n` sectors whose data runs across the pages
+/// listed at kernel address `list` (physical addresses, one a page, the
+/// data page after page), to device `d`: up to `max_sectors(d)` as one
+/// request; to a virtio disk, one request a page. 0 or -EIO, as `rw`.
+pub fn rw_pages(d: u64, op: u64, sector: u64, n: u64, list: u64) -> u64 {
+    if !present(d) {
+        return neg(EIO)
+    }
+    if dw(disk_of(d), D_DRV) == DRV_NVME {
+        return request(d, op, sector, n, rd(list), list, max_sectors(d))
+    }
+    var done: u64 = 0
+    while done < n {
+        let k = if n - done < 8 { n - done } else { 8 }
+        let e = rw(d, op, sector + done, k, rd(list + (done / 8) * 8))
+        if e != 0 {
+            return e
+        }
+        done += k
+    }
+    0
+}
+
+fn request(d: u64, op: u64, sector: u64, n: u64, pa: u64, list: u64, most: u64) -> u64 {
     if !present(d) {
         return neg(EIO)
     }
     let cap = dw(d, D_SECTORS)
-    if n == 0 || n > 8 || n > cap || sector > cap - n {
+    if n == 0 || n > most || n > cap || sector > cap - n {
         bump_dw(d, D_REFUSED, 1)
         if !said(d, 1) {
             log.put("block: refused: a request past the end of ")
@@ -710,24 +946,25 @@ pub fn rw(d: u64, op: u64, sector: u64, n: u64, pa: u64) -> u64 {
         }
         return neg(EIO)
     }
+    let disk = dw(d, D_DISK)
     if op == vblk.T_OUT && dw(d, D_FLAGS) & F_RO != 0 {
         bump_dw(d, D_REFUSED, 1)
         if !said(d, 2) {
             log.put("block: refused: a write to ")
             put_name(d)
-            log.put(", which the device says is read-only (VIRTIO_BLK_F_RO), -EIO")
+            log.put(if dw(disk, D_DRV) == DRV_NVME { ", which the controller says is write protected (NSATTR), -EIO" } else { ", which the device says is read-only (VIRTIO_BLK_F_RO), -EIO" })
             log.end()
         }
         return neg(EIO)
     }
-    let disk = dw(d, D_DISK)
     let r = base() + S_REQ * 8
     wr(r, op)
     wr(r + 8, dw(d, D_START) + sector)
     wr(r + 16, n)
     wr(r + 24, pa)
-    vblk.submit(disk / DPD, r)
-    let s = vblk.wait(disk / DPD, r)
+    wr(r + 48, list)
+    hand(disk, r)
+    let s = waited(disk, r)
     wr(r + 40, vblk.RS_FREE)
     var x = d
     while true {
@@ -768,8 +1005,9 @@ pub fn flush(d: u64) -> u64 {
     wr(r + 8, 0)
     wr(r + 16, 0)
     wr(r + 24, 0)
-    vblk.submit(disk / DPD, r)
-    let s = vblk.wait(disk / DPD, r)
+    wr(r + 48, 0)
+    hand(disk, r)
+    let s = waited(disk, r)
     wr(r + 40, vblk.RS_FREE)
     bump_dw(disk, D_FLUSHES, 1)
     kbump(K_FLUSHES, 1)
@@ -1126,10 +1364,11 @@ fn add_part_on(k: u64, partno: u64, first: u64, n: u64, kind: u64) -> u64 {
     put_dw(d, D_START, first)
     put_dw(d, D_PARTNO, partno)
     put_dw(d, D_KIND, kind)
-    if partno <= 15 {
+    if partno <= 15 && dw(disk, D_DRV) == DRV_VIRTIO {
         put_dw(d, D_MAJOR, 254)
-        put_dw(d, D_MINOR, k * 16 + partno)
+        put_dw(d, D_MINOR, dw(disk, D_UNIT) * 16 + partno)
     } else {
+        // px75: every NVMe partition, and a virtio one past 15:
         // the lowest free minor, asked before this record says 259
         let m = ext_minor()
         put_dw(d, D_MAJOR, 259)
@@ -2039,14 +2278,21 @@ pub fn buffers() -> u64 {
 pub fn report() {
     var k: u64 = 0
     while k < disks() {
-        // px79: each disk's lines in turn, kernel/vblk's first
-        vblk.report(k)
+        // px79: each disk's lines in turn, its driver's first (px75:
+        // kernel/nvme's controller line before its first namespace's)
         let d = k * DPD
+        if dw(d, D_DRV) == DRV_NVME {
+            nvme.report(dw(d, D_UNIT))
+        } else {
+            vblk.report(dw(d, D_UNIT))
+        }
         tag(d)
         log.dec(dw(d, D_SECTORS) as int)
         log.put(" sectors (")
         log.dec((dw(d, D_SECTORS) * 512) as int)
-        log.put(" bytes), 254:")
+        log.put(" bytes), ")
+        log.dec(dw(d, D_MAJOR) as int)
+        log.put(":")
         log.dec(dw(d, D_MINOR) as int)
         log.put(if dw(d, D_FLAGS) & F_RO != 0 { ", read-only" } else { ", read-write" })
         if dw(d, D_FLAGS) & F_FLUSH != 0 {
@@ -2302,6 +2548,7 @@ pub fn summary() {
         books_of(k)
         k += 1
     }
+    nvme.shutdown() // px75: each controller's books and its normal shutdown, last
 }
 
 /// px79: disk `k`'s lines of the books (vda's with the cache's numbers,
@@ -2329,7 +2576,7 @@ fn books_of(k: u64) {
         part_books(k)
         return
     }
-    log.put("block: vda: ")
+    tag(0)
     log.dec(dw(0, D_READS) as int)
     log.put(" reads (")
     log.dec(dw(0, D_SIN) as int)
@@ -2401,6 +2648,33 @@ pub fn bounce() -> u64 {
         put_st(S_BOUNCE, zeroed())
     }
     st(S_BOUNCE)
+}
+
+/// px75: the list (its kernel address) of BOUNCE_PAGES frames (physical
+/// addresses) raw I/O reads and writes by when a disk takes requests of
+/// more than a page (kernel/nvme's), taken at its first use; 0 with no
+/// frames.
+pub fn bounce_list() -> u64 {
+    if base() == 0 {
+        return 0
+    }
+    if st(S_BLIST) == 0 {
+        let l = zeroed()
+        if l == 0 {
+            return 0
+        }
+        var k: u64 = 0
+        while k < BOUNCE_PAGES {
+            let f = zeroed()
+            if f == 0 {
+                return 0
+            }
+            wr(l + hh() + k * 8, f)
+            k += 1
+        }
+        put_st(S_BLIST, l)
+    }
+    st(S_BLIST) + hh()
 }
 
 /// After a raw write of `n` sectors from `sector` of device `d` (a node's
@@ -2618,7 +2892,14 @@ pub fn diskseq(d: u64) -> u64 {
 /// first sector (a partition's start); none (0, 0, 0) when the device
 /// offers no geometry.
 pub fn geometry(d: u64) -> (u64, u64, u64) {
-    let (c, h, s) = vblk.geometry(d / DPD)
+    let disk = disk_of(d)
+    if d < count() && dw(disk, D_DRV) == DRV_NVME {
+        // px75: measured, the guest's for an NVMe namespace: 64 heads, 32
+        // sectors, the capacity's cylinders (sectors / 2048), whatever
+        // the logical block.
+        return (64, 32, dw(disk, D_SECTORS) / 2048)
+    }
+    let (c, h, s) = vblk.geometry(dw(disk, D_UNIT))
     (h, s, c)
 }
 
