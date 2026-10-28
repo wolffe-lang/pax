@@ -7,8 +7,8 @@ carries each controller's PCI vendor:device beside its Identify summary,
 and the AHCI paragraph, §7, is written for its Intel 500-series
 `8086:43d2` and ASMedia ASM1061 `1b21:0612`). Branch `px75` from trunk
 `187aafdf` (gm01's record). The prediction was committed first
-(`38ee56fa`, `notes/px75/prediction.txt`), before the guest was measured
-and before the first kernel change (`1c3ffd4d`). The final head, its
+(`dd5f0ccd`, `notes/px75/prediction.txt`), before the guest was measured
+and before the first kernel change (`d1b33ccb`). The final head, its
 `tier pr` run and the lane-audit line are the PR's; this note is the
 lane's record of what was built, measured and seen red.
 
@@ -193,7 +193,7 @@ tests/ci-plan's expectations; the tier job's needs): V0-V12 (§8).
   NVMe root in one CI leg, kept to the tier full": mpx5-users (it boots
   kmain_console, which mounts `/` from `root=`; mpx3-boreutils' kernel
   keeps its tree in memory, so its disk leg would not run kernel/nvme
-  for `/`), a step after its virtio root leg, `tier == 'full'` (`786859d4`:
+  for `/`), a step after its virtio root leg, `tier == 'full'` (`979f7164`:
   first `tier != 'pr'`, but the all tier's mpx5-users job is at its 130
   minutes on trunk without the step: 129 in 40208110580, cancelled at the
   bound in 40326263858 and 40394044200; the step took 28 to 53 more).
@@ -218,7 +218,7 @@ tests/ci-plan's expectations; the tier job's needs): V0-V12 (§8).
   minutes in the release kernel builds (`I0`, `H1`), before any boot:
   each 1.3 to 2.7 times trunk's, the native builds unchanged. The boot is
   not it: kmain_blk to `halt` under TCG, native BIOS, took 1.53 s at
-  trunk and at `373f4a00` with no NVMe controller (three boots each).
+  trunk and at `c527669f` with no NVMe controller (three boots each).
   kmain_ud2's release object on hasu (CPUs 6-9, `--no-cache`; codegen is
   the 3 s of each, the rest the serial mid-end), measured before the
   rebases onto trunk `3481e980` (no file under kernel/ or boot/
@@ -229,9 +229,9 @@ tests/ci-plan's expectations; the tier job's needs): V0-V12 (§8).
   | tree | `--emit=obj` | codegen | `--emit=llvm-ir` (no clang) |
   |---|---|---|---|
   | trunk `187aafdf` | 167.4 s, again 167.2 s | 3.1 s, 3.2 s | 163.8 s |
-  | `373f4a00` | 310.1 s | 3.4 s | 307.7 s |
-  | `821ad6b5` (the names) | 230.1 s | 3.5 s | 224.6 s |
-  | `7b766b3c` (the report split) | 146.8 s | 3.2 s | 143.2 s |
+  | `c527669f` | 310.1 s | 3.4 s | 307.7 s |
+  | `4b0e4be4` (the names) | 230.1 s | 3.5 s | 224.6 s |
+  | `6cc8aa95` (the report split) | 146.8 s | 3.2 s | 143.2 s |
   | trunk `86fb3bec` (px74, px73, px82 merged) | 288.2 s, 292.5 s | 3.7 s, 3.5 s | |
   | the head on `86fb3bec` | 207.9 s, 208.2 s | 3.5 s, 3.6 s | |
 
@@ -239,27 +239,30 @@ tests/ci-plan's expectations; the tier job's needs): V0-V12 (§8).
   changes no kernel file) to 290 s at `86fb3bec`, where px74, px73 and
   px82 changed 14 kernel files (kernel/xhci among them, none of px75's).
   Not measured further here: the head is 80 s under that trunk, the
-  report split counted.
+  report split counted. Those two rows, and the suites below at the head
+  on `86fb3bec`, were run at `48b6df9a`; the rebase onto `22bc8e38`
+  (pax#225) changes README.md and docs/HISTORY.md alone, so they stand
+  for the head on it.
 
-  Where it went. 100 gdb samples of the mid-end at `373f4a00`: 78 in
+  Where it went. 100 gdb samples of the mid-end at `c527669f`: 78 in
   rangeopt's loop versioning (`version_one`, `with_hypo`, `seed_pi`),
   which re-seeds every branch of a function for each loop it might
   version, its `incoming` walking every block, so a function's cost grows
   as its loops times its branches squared; the codegen report says it
   versions no loop in this kernel (`0 loop(s) versioned`). The decimal
   loops px75 put in `name_len` and `name_byte`, inlined at every
-  `put_name`, were the first part: `821ad6b5` writes a disk's name into
+  `put_name`, were the first part: `4b0e4be4` writes a disk's name into
   its record once (`make_stem`) and reads it back without a loop (a
   partition's number is three digits at most), 80 s back. The rest was
   one function. Samples named by the function being optimized: block's
-  `table_report` was 14 of 83 at trunk and 42 of 107 at `821ad6b5`. px75's
+  `table_report` was 14 of 83 at trunk and 42 of 107 at `4b0e4be4`. px75's
   code changed the codegen clusters, and the report's cluster (c01) now
   imports kernel/serial's `put` where trunk's imported log's; the
   cross-cluster phase inlined it 114 times (4,512 WIR instructions to
-  7,192, 1,860 blocks to 3,150). `7b766b3c` makes the report five
+  7,192, 1,860 blocks to 3,150). `6cc8aa95` makes the report five
   functions, each called once (the refusals, the header, the entries
   refused, a partition's line): 20 s under trunk. The disk suites at
-  `821ad6b5` and at `7b766b3c` (mpx6-nvme both tiers BIOS; mpx6-blk,
+  `4b0e4be4` and at `6cc8aa95` (mpx6-nvme both tiers BIOS; mpx6-blk,
   -nodes, -part, -ext2, -root native BIOS), and again at the head
   on `86fb3bec` (its first mpx6-nvme run lost tools/mkpelt to a GitHub
   fetch reset; the rerun): every one PASS. Owed to
@@ -331,7 +334,7 @@ Local runs on hasu's rig (QEMU 8.2.2, KVM, `logs/` under
 `hasu:~/lanes/px75/`): run4, every leg (native and release, BIOS and
 UEFI), 109 of 110 rows, the one red the guest-side pattern check's
 ordering (fixed in `tests/mpx6-nvme`, then the guest re-recorded alone,
-lin5: `PASS V0 (linux)`); final, at `ad0a8b67` (the code of the final
+lin5: `PASS V0 (linux)`); final, at `d9e203b4` (the code of the final
 head) against the record, as CI runs it (no readable kernel, the LOUD
 line): 110 of 110 rows PASS on all four legs, `mpx6-nvme: PASS`.
 
@@ -438,10 +441,10 @@ ext2 module shows its own mount options (folded in V10).
 ## 12. Done-when
 
 - [x] items 1-4 as §4-§10; the boot line and the AHCI paragraph (§6, §7)
-- [x] the prediction first (`38ee56fa`), scored (§3)
+- [x] the prediction first (`dd5f0ccd`), scored (§3)
 - [x] every row against the guest; the images byte for byte (V4, V6, V9)
 - [x] two plants red by name locally, their draft PRs' runs cited (§10)
-- [x] README's status paragraph (`e19294e9`, README only), docs/BOOT.md,
+- [x] README's status paragraph (`df330023`, README only), docs/BOOT.md,
   docs/SOURCES.md
 - [x] the PR, `Footprint: cross-cutting`; the audit run once
 - [ ] the full tier at the head (the orchestrator labels and watches)
