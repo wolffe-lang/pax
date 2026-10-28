@@ -91,6 +91,10 @@ case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
 need readelf python3
 
 UTILS="echo cat head wc tail pwd sleep ls cksum sum md5sum sha1sum sha224sum sha256sum sha384sum sha512sum b2sum basenc expr factor numfmt test"
+# The expanded unstripped user archive is 326,878,784 bytes in CI: it cannot
+# fit the old 256 MiB reference tmpfs. Keep that quota and the guest's
+# already-raised memory budget together; this does not change ELF stack size.
+ROOT_MIB=512
 work=$PAX_BUILD/mpx3-boreutils
 runs=$PAX_BUILD/mpx3-boreutils-runs.txt
 fail=0 ran=0
@@ -105,7 +109,7 @@ USER_OWNERS='/etc/secret 600 0 0
 linux_user_side() { # dir -> reasons on stdout
     rm -rf "$1/linux-user"
     printf '%s\n' "$USER_OWNERS" > "$1/user.owners"
-    if "$PAX_ROOT/tools/linux-tree" --root "$1/root-user" --runlist "$1/root-user/etc/pax-run" --size 256m --owners "$1/user.owners" "$1/linux-user"; then
+    if "$PAX_ROOT/tools/linux-tree" --root "$1/root-user" --runlist "$1/root-user/etc/pax-run" --size "${ROOT_MIB}m" --owners "$1/user.owners" "$1/linux-user"; then
         sed 's/^/  linux user: /' "$1/linux-user/runs.txt" >&2
     else
         printf ' tools/linux-tree --runlist (the user run);'
@@ -263,7 +267,7 @@ for leg in $legs; do
             continue
         fi
         hrc=0
-        "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 600 --qemu -m --qemu 512M \
+        "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 600 --qemu -m --qemu "${ROOT_MIB}M" \
             --elf "$elf" --marker 'halt' "$iso" >"$log.verdict" 2>&1 || hrc=$?
         record "$tier" "$leg" "$hrc"
         norm=$log.norm; serial_norm "$log" > "$norm"
