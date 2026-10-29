@@ -1218,7 +1218,11 @@ pub fn bytes() -> u64 {
 }
 
 /// Before any allocator, using only the mapping Limine already installed.
+/// Once only: after an attach, or after `pause_early` (PAX's page tables,
+/// where Limine's framebuffer address is not mapped), a later
+/// serial.init() draws nothing here (mpx1 A6 calls it in a loop).
 pub fn early_start() {
+    if sv(S_ON) != 0 || sv(S_BOOT) != 0 { return }
     if boot_info.fb_count() == 0 || boot_info.fb_bpp() != 32 || boot_info.fb_model() != 1 { return }
     if boot_info.fb_mask(0, false) != 8 || boot_info.fb_mask(1, false) != 8 || boot_info.fb_mask(2, false) != 8 { return }
     if attach(boot_info.fb_address(), boot_info.fb_width(), boot_info.fb_height(), boot_info.fb_pitch(),
