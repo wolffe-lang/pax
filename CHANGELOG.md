@@ -7,6 +7,28 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **SATA disks (px75b).** `kernel/ahci` drives AHCI controllers (PCI
+  class 01.06.01), written from the Serial ATA AHCI 1.3.1 specification,
+  ATA Command Set 4 and Serial ATA 1.0a's FIS layouts: the BIOS/OS
+  handoff, each implemented port idled (no global reset), a COMRESET when
+  the link is down, ATA disks driven and ATAPI and port multipliers named
+  and skipped; IDENTIFY DEVICE's model, serial and firmware in ATA's byte
+  order, LBA48, 512-byte logical sectors (4Kn refused by name, 512e's
+  physical size reported); READ and WRITE DMA EXT up to 128 KiB a command
+  (32 PRDT entries of one page, bounce pages below 4 GiB when the
+  controller has no 64-bit addressing), FLUSH CACHE EXT, task-file errors
+  and timeouts as -EIO by name; one slot, polled. Disks are `sda`, `sdb` …
+  in controller and port order, major 8, as the Linux guest names them,
+  with nodes, `/sys/block`, the ioctls, `/etc/fstab` by `PARTUUID=` and `/`
+  on an AHCI partition. `/sys/block/<disk>/device/model` and `serial` for
+  AHCI and NVMe disks, from IDENTIFY and Identify Controller (the
+  installer's inventory reads them). One boot line a controller and one a
+  disk for a photograph. Until px76's clock merges the waits run on the
+  PIT; where it does not count, each controller is refused by name.
+  `tools/qemu-run --ahci` and `--boot-ahci`; `tests/mpx6-ahci`, every row
+  held to Linux 7.2.4 on QEMU; CI runs mpx5-users with `/` on AHCI in a
+  job of its own.
+
 - **NVMe disks (px75).** `kernel/nvme` drives NVM Express controllers
   (PCI class 01.08.02), written from the NVM Express Base 2.0c, PCIe
   Transport 1.0c and NVM Command Set 1.0c specifications: reset (firmware
