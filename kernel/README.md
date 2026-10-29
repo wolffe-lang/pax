@@ -1057,6 +1057,7 @@ to F9); `notes/px76-uefi-on-metal.md` has the measurements.
 | `msi/` | the message an MSI writes (Intel SDM vol. 3A §11.11): `address(apic_id)` and `data(vector)`, fixed delivery, edge; `edge_fixed`, the read-back check |
 | `power/` | `reboot`: the FADT's reset register, then port 0xCF9, then a triple fault, each logged; `power_off`: ACPI S5, its SLP_TYP values from the DSDT's one literal `\_S5` package (found by its AML encoding; no interpreter), with SLP_EN to PM1a and PM1b |
 | `timer/` (px76 change) | the tick is the local APIC timer, periodic at 100 Hz on vector 32, its count calibrated against `clock` over 20 ms (divide by 16); one line names the clock and the rate; the PIT's line stays masked; `eoi` acknowledges vectors 80-83 at the local APIC |
+| `apic/` (px76 change) | `id`; a local APIC the firmware hands over in x2APIC mode (IA32_APIC_BASE's EXTD) is reached by MSR (0x800 + offset / 16), its line then followed by `apic: x2APIC mode …` (R-px76-7) |
 | `idt/` (px76 change) | vectors 80-83 routed (the MSI vectors): 52 gates |
 | `pci/` (px76 change) | `capability` (the list walked, bounded), `interrupts_off` (MSI, MSI-X and INTx off), `enable_msi` (one message of either layout, INTx off first, read back enabled), `write8` |
 | `xhci/` (px76 change) | a controller with an MSI capability is put on it (vector 79 + its number; `xhci N: ports P MSI vector V …`), else on its INTx line as before; its bootstrap waits are `clock` deadlines; its BAR0 on a line |
