@@ -131,7 +131,8 @@ if sparse_zeroes:
     cmd+=['--qemu','-drive','--qemu',f'file={work/"target.img"},if=none,id=bigroot,format=raw,detect-zeroes=unmap,discard=unmap',
           '--qemu','-device','--qemu','virtio-blk-pci,drive=bigroot']
 else:
-    cmd+=['--drive',str(work/'target.img')+(',ro' if fault=='readonly' else '')]
+    # px84 (R-px84-1 A): a 4Kn target, 4096-byte logical sectors, refused by name.
+    cmd+=['--drive',str(work/'target.img')+(',ro' if fault=='readonly' else '')+(';logical_block_size=4096,physical_block_size=4096' if fault=='4kn' else '')]
 cmd+=[work/'boot.iso']
 t=time.monotonic();p=run(cmd,False);install_seconds=time.monotonic()-t
 (work/'install.boot').write_bytes(p.stdout+p.stderr)
@@ -141,10 +142,14 @@ s=(work/'install.serial').read_text(errors='replace')
 if fault:
     assert 'INSTALL-EXIT-1' in s,s[-8000:]
     assert sha(work/'source-guard.img')==guard
-    if fault in ['missing-boot','corrupt-boot','readonly','cancel','wrong-token']:
+    if fault in ['missing-boot','corrupt-boot','readonly','cancel','wrong-token','4kn']:
         assert sha(work/'target.img')==blank,'prewrite refusal changed target'
-        expected={'missing-boot':'stopped: io','corrupt-boot':'corrupt_asset','readonly':'refused: readonly','cancel':'cancelled','wrong-token':'unconfirmed'}[fault]
+        expected={'missing-boot':'stopped: io','corrupt-boot':'corrupt_asset','readonly':'refused: readonly','cancel':'cancelled','wrong-token':'unconfirmed','4kn':'pax-install: refused: sector_size'}[fault]
         assert expected in s,s[-8000:]
+        if fault=='4kn':
+            # The kernel names the device's 4096-byte blocks; the planner refuses the target.
+            assert 'refused: a partition table on logical blocks of 4096 bytes' in s and 'vdb is the whole disk' in s,s[-8000:]
+            print('PASS I-4kn-refused: 4096-byte logical sectors named sector_size before any write; target byte-identical',flush=True)
     else:
         with (work/'target.img').open('rb') as f:f.seek(65536);raw=f.read(65536).split(b'\0',1)[0]
         records=[json.loads(x) for x in raw.splitlines()]
