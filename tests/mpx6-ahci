@@ -5,7 +5,7 @@ set -euo pipefail
 . "$(dirname "$0")/../tools/lib.sh"
 D=$PAX_ROOT/tests/mpx6-ahci.d
 W=$PAX_BUILD/mpx6-ahci
-firmware=bios tier=native record=0 only= rows=pr
+firmware=both tier=both record=0 only= rows=${PAX_AHCI_ROWS:-all}
 while [ $# -gt 0 ]; do
     case $1 in
         --firmware) firmware=$2; shift 2 ;;
@@ -16,6 +16,17 @@ while [ $# -gt 0 ]; do
         *) die "unknown option $1" ;;
     esac
 done
+if [ "$tier" = both ] || [ "$firmware" = both ]; then
+    tiers=$tier; legs=$firmware
+    [ "$tier" != both ] || tiers='native release'
+    [ "$firmware" != both ] || legs='bios uefi'
+    extra=(); [ "$record" = 0 ] || extra+=(--record)
+    [ -z "$only" ] || extra+=(--only "$only")
+    for t in $tiers; do
+        for f in $legs; do "$0" --tier "$t" --firmware "$f" --rows "$rows" "${extra[@]}"; done
+    done
+    exit 0
+fi
 case $firmware in bios|uefi) ;; *) die 'firmware: bios or uefi' ;; esac
 case $tier in native|release) ;; *) die 'tier: native or release' ;; esac
 mkdir -p "$W/bin" "$W/$tier" "$W/linux"
@@ -30,7 +41,7 @@ devices() {
     for letter in a b c; do
         case $letter in
             a) ctl=ca port=1 model=PX75B-SATA-A serial=PX75B-A1 ;;
-            b) ctl=ca port=4 model=PX75B-SATA-B serial=PX75B-B2 ;;
+            b) ctl=ca port=4 model=PX75B-SATA-B serial="PX75B B2 INNER" ;;
             c) ctl=cb port=2 model=PX75B-SATA-C serial=PX75B-C3 ;;
         esac
         printf '%s\n' --qemu -drive --qemu "file=$w/$letter.img,if=none,id=d$letter,format=raw" \
@@ -43,6 +54,8 @@ disks() {
     for n in a b c n; do
         rm -f "$1/$n.img"
         truncate -s 64M "$1/$n.img"
+        printf 'PX75B-preserve-%s' "$n" | dd of="$1/$n.img" bs=1 seek=4096 conv=notrunc status=none
+        printf 'PX75B-end-%s' "$n" | dd of="$1/$n.img" bs=1 seek=67108352 conv=notrunc status=none
     done
 }
 sums() {
@@ -108,4 +121,33 @@ if ! diff -u "$W/linux/images.sha256" "$W/$tier/$firmware/images.sha256"; then
     echo 'FAIL A5-image-differential'; exit 1
 fi
 echo 'PASS A5-image-differential: all four images byte-identical to Linux'
+# A live boot does not own these disks: login and read-only inventory must
+# leave all images unchanged, including the NVMe controller beside SATA.
+tools/mkinstall "$W/bin" > "$W/install.build.log"
+printf '/bin/pelt /etc/pax-live-login\n' > "$W/live.run"
+tools/mkinitramfs "$W/live.cpio" /root/:700 /tmp/:1777 \
+    "/bin/pelt=$W/bin/sh:755" "/bin/pax-install=$W/bin/pax-install:755" \
+    "/etc/pax-live-login=$PAX_ROOT/user/usb-login.sh:644" "/etc/pax-run=$W/live.run:644" > "$W/live.archive.log"
+tools/mkimage --conf boot/limine-initramfs.conf --add "$W/live.cpio" initramfs.cpio \
+    "$W/$tier/kmain_console.elf" "$W/$tier/live.iso" > "$W/$tier/live.image.log"
+disks "$W/$tier/$firmware/no-write"
+sums "$W/$tier/$firmware/no-write" > "$W/$tier/$firmware/no-write.before.sha256"
+mapfile -t args < <(devices "$W/$tier/$firmware/no-write")
+printf 'root\n^~/bin/pax-install --inventory\n^~echo AHCI-NO-WRITE-END\n^~exit\n' > "$W/live.keys"
+log=$W/$tier/$firmware/no-write.serial.log
+tools/qemu-halt --firmware "$firmware" --accel "${PAX_AHCI_ACCEL:-auto}" --timeout 180 \
+    --serial "$log" --elf "$W/$tier/kmain_console.elf" --marker halt --type "$W/live.keys" --prompt 'login: ' \
+    --qemu -m --qemu 1G "${args[@]}" "$W/$tier/live.iso" > "$W/$tier/$firmware/no-write.halt.log" 2>&1
+serial_norm "$log" > "$log.norm"
+for identity in PX75B-A1 "PX75B B2 INNER" PX75B-C3 paxnvme0; do
+    grep -F "serial=$identity" "$log.norm" || { echo "FAIL A6-no-write: missing $identity"; exit 1; }
+done
+grep -x AHCI-NO-WRITE-END "$log.norm" || { echo 'FAIL A6-no-write: inventory session incomplete'; exit 1; }
+sums "$W/$tier/$firmware/no-write" > "$W/$tier/$firmware/no-write.after.sha256"
+diff -u "$W/$tier/$firmware/no-write.before.sha256" "$W/$tier/$firmware/no-write.after.sha256" || {
+    echo 'FAIL A6-no-write: a disk changed'; exit 1;
+}
+cat "$W/$tier/$firmware/no-write.after.sha256"
+echo 'PASS A6-no-write: live login and installer inventory; three AHCI and one NVMe images unchanged'
+. "$D/extended"
 echo 'mpx6-ahci: PASS'
