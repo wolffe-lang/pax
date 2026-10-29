@@ -44,6 +44,7 @@
 use log
 use sync
 
+extern "c" fn pax_outb(port: u16, v: u8)
 extern "c" fn pax_outl(port: u16, v: u32)
 extern "c" fn pax_inl(port: u16) -> u32
 
@@ -139,6 +140,14 @@ pub fn write32(bdf: u64, off: u64, v: u64) {
         pax_outl(DATA, (v & 0xffffffff) as u32)
     }
     sync.irq_restore(saved)
+}
+
+/// Byte configuration write without touching adjacent write-one-clear bits.
+pub fn write8(bdf: u64, off: u64, value: u64) {
+    let address = ENABLE | ((bdf >> 16) & 255) << 16 | ((bdf >> 8) & 31) << 11 | (bdf & 7) << 8 | (off & 0xfc)
+    let flags = sync.irq_save()
+    unsafe { pax_outl(ADDRESS, address as u32); pax_outb((0xcfc + (off & 3)) as u16, value as u8) }
+    sync.irq_restore(flags)
 }
 
 /// The 16-bit field at `off` (even).

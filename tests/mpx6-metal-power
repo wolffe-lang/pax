@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+w=$PAX_BUILD/mpx6-metal-power
+mkdir -p "$w"
+"$PAX_ROOT/tools/fetch-limine"
+"$PAX_ROOT/tools/build-kernel" --src "$PAX_ROOT/kernel/kmain_metal_power.lu" "$w"
+for action in reboot poweroff; do
+    cp "$PAX_ROOT/boot/limine.conf" "$w/$action.conf"
+    [ "$action" != poweroff ] || printf '\n    cmdline: metal_poweroff\n' >> "$w/$action.conf"
+    "$PAX_ROOT/tools/mkimage" --conf "$w/$action.conf" "$w/kmain_metal_power.elf" "$w/$action.iso"
+    for fw in bios uefi; do
+        rc=0
+        "$PAX_ROOT/tools/qemu-run" --timeout 15 --firmware "$fw" --serial "$w/$action-$fw.log" "$w/$action.iso" || rc=$?
+        cat "$w/$action-$fw.log"
+        [ "$rc" = 0 ] || die "FAIL METAL $action $fw exit $rc"
+        if [ "$action" = poweroff ]; then
+            grep -aF 'poweroff: ACPI S5 types ' "$w/$action-$fw.log"
+        else
+            grep -aF 'reboot: FADT reset register' "$w/$action-$fw.log"
+        fi
+        if grep -aEq 'PANIC|triple fault|did not power down' "$w/$action-$fw.log"; then die "FAIL METAL $action $fw fallback"; fi
+        echo "PASS METAL $action $fw"
+    done
+done

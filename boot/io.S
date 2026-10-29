@@ -78,6 +78,39 @@ pax_inl:
         ret
         .size pax_inl, . - pax_inl
 
+        .globl pax_inw
+        .type pax_inw, @function
+pax_inw:
+        movl %edi, %edx
+        xorl %eax, %eax
+        inw %dx, %ax
+        ret
+        .size pax_inw, . - pax_inw
+
+        .globl pax_outw
+        .type pax_outw, @function
+pax_outw:
+        movl %edi, %edx
+        movl %esi, %eax
+        outw %ax, %dx
+        ret
+        .size pax_outw, . - pax_outw
+
+        /* A zero-limit IDT cannot service INT3 or the following #GP/#DF.
+           Intel SDM vol.3A §6.15: shutdown after failed double-fault delivery. */
+        .globl pax_triple_fault
+        .type pax_triple_fault, @function
+pax_triple_fault:
+        cli
+        subq $16, %rsp
+        xorq %rax, %rax
+        movq %rax, (%rsp)
+        movq %rax, 8(%rsp)
+        lidt (%rsp)
+        int3
+        jmp pax_halt
+        .size pax_triple_fault, . - pax_triple_fault
+
         .globl pax_halt
         .type pax_halt, @function
 pax_halt:

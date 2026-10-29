@@ -250,6 +250,7 @@ use futex
 use log
 use netd
 use paging
+use power
 use panic
 use process
 use procfs
@@ -1910,6 +1911,7 @@ pub fn the_end() -> never {
     if end_asked() == 1 {
         end_reset()
     }
+    if unsafe { end_cmd } == CMD_POWER_OFF { power.power_off() }
     timer.stop()
     log.line("halt")
     panic.halt()
@@ -1957,12 +1959,7 @@ pub fn end_line(e: u64) {
 /// Intel's ICH9 datasheet §13.7.5, q35's), then the keyboard
 /// controller's reset line (port 0x64, 0xfe), then a triple fault.
 pub fn end_reset() -> never {
-    outb(0xcf9, 0x02)
-    outb(0xcf9, 0x06)
-    outb(0x64, 0xfe)
-    // Neither reset the machine: a triple fault does (an interrupt with
-    // no descriptor table to take it).
-    panic.fail("reboot: the machine did not reset, by port", 0xcf9)
+    power.reboot()
 }
 
 /// Every call that answers in place: the result for %rax.
