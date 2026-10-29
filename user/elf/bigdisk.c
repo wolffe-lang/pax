@@ -42,10 +42,10 @@ int main(int argc, char **argv) {
     printf("PASS B-high-read: %zu bytes seed %d\n", length, expected);
     if (next >= 0) {
         for (size_t i = 0; i < sizeof b; ++i) b[i] = pattern(i, next);
-        if (pwrite(fd, b, sizeof b, 0) != sizeof b) fail("write");
+        if (pwrite(fd, b, sizeof b, 0) != (ssize_t)sizeof b) fail("write");
         if (fsync(fd) != 0) fail("fsync");
         memset(b, 0, sizeof b);
-        if (pread(fd, b, sizeof b, 0) != sizeof b) fail("readback");
+        if (pread(fd, b, sizeof b, 0) != (ssize_t)sizeof b) fail("readback");
         for (size_t i = 0; i < sizeof b; ++i) if (b[i] != pattern(i, next)) fail("readback bytes");
         printf("PASS B-high-write: %zu bytes seed %d\n", sizeof b, next);
     }

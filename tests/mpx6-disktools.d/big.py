@@ -80,6 +80,7 @@ for requested in a.sizes:
     extra = [] if a.density else ['--inodes', '16']
     try:
         run(name + '-format', [a.binary, *extra, str(size), image])
+        run(name + '-e2fsck', ['e2fsck', '-fn', image])
         with image.open('rb') as f:
             sb = read(f, 1024, 1024)
             blocks, bpg, ipg = u32(sb, 4), u32(sb, 32), u32(sb, 40)
@@ -108,7 +109,6 @@ for requested in a.sizes:
             bm = read(f, u32(gd, (groups - 1) * 32) * 4096, 4096)
             for bit in range(blocks - (groups - 1) * bpg, 32768):
                 assert bm[bit // 8] & (1 << (bit % 8)), ('B-partial-padding', bit)
-        run(name + '-e2fsck', ['e2fsck', '-fn', image])
         run(name + '-dumpe2fs', ['dumpe2fs', '-h', image])
         print('PASS', name, 'geometry', blocks, groups, ipg, 'allocated_bytes', image.stat().st_blocks * 512, flush=True)
     finally:
