@@ -40,7 +40,7 @@ for name, blocks, inodes, bpg in [('blocks',4194305,16,32768),
     image.write_bytes(before)
     for mode in ['-n','-y','-p']:
         result=run([checker,mode,image])
-        assert result.returncode==4 and b'unsupported: volume exceeds checker capacity' in result.stdout,(name,mode,result.returncode,result.stdout)
+        assert result.returncode==8 and b'unsupported: volume exceeds checker capacity' in result.stdout,(name,mode,result.returncode,result.stdout)
         assert image.read_bytes()==before,(name,mode,'modified refused image')
         (work/('capacity-'+name+mode+'.log')).write_bytes(result.stdout)
     print('PASS F-capacity-'+name+': named, byte-unchanged refusal before allocation')
