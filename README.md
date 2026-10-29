@@ -18,7 +18,7 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
 | Programs | Static x86-64 ELF run in ring 3 with Linux's syscall numbers; `fork`, `execve`, `#!` lines, threads (`clone3`, `futex`), signals with the full frame restored, job control and sessions; a fixed 1 MiB initial stack | the same binaries on Linux, byte for byte |
 | Users | `root`, `pax` and the service account `lobo`; real, effective, saved and file-system ids; every path walk, mode, owner and signal checked by Linux's rules; `su` in wolf; no passwords yet | Linux as root and as a user |
 | Files | A writable in-memory tree seeded from the initramfs: links, modes, times, holes, `rename`; `mmap` private and shared, `mremap`, FIFOs, `flock`; `/dev`, `/proc`, `/sys`, `/tmp` | Linux's tmpfs in a throwaway container |
-| Disks | Up to four disks, virtio or NVMe (`nvme0n1`, major 259, read, written and flushed through PRP lists), with GPT or MBR tables and `/dev` nodes; ext2 read and written; ext3's journal written and replayed; `/` on the disk, `mount(2)`, `/etc/fstab`; an offline `fsck.ext2` in wolf | Linux 7.3.0 under QEMU (NVMe: 7.2.4) and e2fsprogs |
+| Disks | Up to four disks, virtio or NVMe (`nvme0n1`, major 259, read, written and flushed through PRP lists), with GPT or MBR tables and `/dev` nodes; ext2 read and written, file data past 2 TiB on either bus; ext3's journal written and replayed; `/` on the disk, `mount(2)`, `/etc/fstab`; an offline `fsck.ext2` in wolf | Linux 7.3.0 under QEMU (NVMe: 7.2.4) and e2fsprogs |
 | Network | virtio-net, ARP, IPv4, ICMP, UDP, TCP (RFC 9293, 6298, 5681), Unix sockets, `poll`, `epoll`, `eventfd`; 256 TCP connections | Linux in a namespace, and captures rebuilt byte by byte |
 | Console | A 16550 serial console, the PS/2 keyboard and USB keyboards over xHCI, one line discipline; a framebuffer console of 160×50 cells with the Linux VT's colours and 560 glyphs | typed sessions on a Linux pseudo-terminal; screendumps against a reference renderer |
 | Sound | The PC speaker through Linux's console ioctls; virtio sound behind OSS `/dev/dsp`; `/bin/play`, an orchestra of 17 timbres | QEMU's capture, every pitch within 1% |
@@ -181,7 +181,7 @@ before writing. It is an explicit ext2 developer preview, not a journalled insta
 
 - whole-disk fresh installs only, 512-byte sectors, root volumes up to 16 TiB less one 4 KiB block;
   larger targets keep that root size and name the remaining space as unused in the plan;
-- the running root's disk, mounted disks and read-only targets are refused;
+- the running root's disk, mounted disks, read-only targets and disks of 4096-byte logical sectors are refused by name;
 - it asks for a user name and whether to install the three games, staged offline with their source and their engine's;
   neither answer fetches anything; the games answer alone decides the install from the verified payload (the live
   demo's marked Games directory is never copied implicitly), and a custom source tree with a Games directory already
@@ -189,7 +189,8 @@ before writing. It is an explicit ext2 developer preview, not a journalled insta
 - it writes with `paxgpt`, `paxfat` and `paxext2`, PAX's own disk tools (below), not embedded formatters.
 
 The installer and the installed tree are tested on separate QEMU virtio disks under BIOS and UEFI, including reboot
-persistence; nothing here is a claim about real-machine drivers. See
+persistence. The merge gate (`tier full`) also installs onto a sparse 500 GB disk and `tier all` onto 4 TB, each
+target then booted alone under both firmwares. Nothing here is a claim about real-machine drivers. See
 [Guided installation](docs/BOOT.md#guided-installation).
 
 ## Seeing the screen
@@ -320,9 +321,9 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
 - The `full-matrix` label runs every suite on the merge leg (`tier full`); a push to trunk, the nightly and a dispatch
   run every suite on every compiler and firmware leg (`tier all`). Merging needs a green `tier full` or `tier all` run
   at the head.
-- Long jobs have budgets: 75 minutes for interrupts, 90 for the heap, 210 each for pelt and users; the measured stage
-  timings and their headroom are in [CI budgets](tests/ci-budgets.d/README.md). The root-disk `chk-soak` has 1200
-  seconds for its 100,000 rounds.
+- Long jobs have budgets: 75 minutes for interrupts, 90 for the heap, 210 each for pelt and users, 120 for the installer
+  in `tier all` (its 4 TB install); the measured stage timings and their headroom are in
+  [CI budgets](tests/ci-budgets.d/README.md). The root-disk `chk-soak` has 1200 seconds for its 100,000 rounds.
 - A test is seen red before it is trusted: the break is planted in a commit and run of its own, then fixed.
 - One known stall of the Linux reference shell ([#196](https://github.com/wolffe-lang/pax/issues/196),
   [pelt#98](https://github.com/wolffe-lang/pelt/issues/98)) gets one retry of its Linux leg only, with a warning that
