@@ -78,6 +78,10 @@
 #
 # --usb (px73) uses the same GPT/FAT32/BIOS construction without a
 # root or home partition. The complete live tree stays in the initramfs.
+# px78: the ESP also holds /pax/install-targets (boot/install-targets: the
+# install allow-list, naming no disk) and an empty /pax/logs, where
+# pax-install writes install-<n>.txt; both are FAT, so any OS edits and
+# reads them.
 #   tools/mkdisk --usb --kernel ELF --initramfs CPIO [--conf FILE]
 #                [--esp SIZE] [--label NAME] [SIZE] OUT.img
 # Without SIZE, size the ESP for twice the payload plus 16 MiB (at least
@@ -483,8 +487,12 @@ def gpt_main(args, usb=False):
                  (kernel, "::/boot/pax")]
         if initramfs:
             files.append((initramfs, "::/boot/initramfs.cpio"))
+        dirs = ["::/EFI", "::/EFI/BOOT", "::/boot", "::/boot/limine"]
+        if usb:
+            files.append((os.path.join(ROOT, "boot", "install-targets"), "::/pax/install-targets"))
+            dirs += ["::/pax", "::/pax/logs"]
         img = "%s@@%d" % (rel, e0 * S)
-        run([dt, work, "mmd", "-i", img, "::/EFI", "::/EFI/BOOT", "::/boot", "::/boot/limine"], "mmd", env)
+        run([dt, work, "mmd", "-i", img] + dirs, "mmd", env)
         for k, (src, dst) in enumerate(files):
             sp = os.path.join(stage, "f%d" % k)
             shutil.copyfile(src, sp)
