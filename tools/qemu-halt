@@ -202,12 +202,13 @@ mirror() { # --no-serial: FILE := the kernel's in-memory transcript
     local n
     rm -f "$serial.count" "$serial.raw"
     # Before the kernel runs its symbols are unmapped: no answer, no file.
-    mon_cmd "memsave $cnt_addr 8 $serial.count" "$serial.mirror" || return 0
+    # HMP's ADDR and SIZE are expressions: an unquoted /path would divide.
+    mon_cmd "memsave $cnt_addr 8 \"$serial.count\"" "$serial.mirror" || return 0
     [ -s "$serial.count" ] || return 0
     n=$(od -An -tu8 -N8 "$serial.count" | tr -d ' ')
     [ "$n" -le 65536 ] || no "the in-memory transcript overflowed its 64 KiB ($n bytes)"
     [ "$n" -gt 0 ] || return 0
-    mon_cmd "memsave $log_addr $n $serial.raw" "$serial.mirror" || return 0
+    mon_cmd "memsave $log_addr $n \"$serial.raw\"" "$serial.mirror" || return 0
     [ ! -s "$serial.raw" ] || cp "$serial.raw" "$serial"
     return 0
 }
