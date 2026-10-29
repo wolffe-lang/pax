@@ -1,5 +1,20 @@
 #!/usr/bin/env bash
-# px76: every machine variant must boot and pass the independent tick rate row.
+# tests/mpx6-metal — the clocks a firmware may or may not give (px76, run
+# by tests/mpx6-firmware as its F1).
+#
+# kernel/kmain_metal.lu on five machines per firmware: q35 as it is (the
+# HPET), --no-hpet (the ACPI PM timer), --no-pit (q35's pit=off: QEMU 8.2
+# and 11.1 both offer it), --no-hpet --no-pit, and -m 8G (memory above
+# 4 GiB). On each the kernel reads ACPI (at least one table checked),
+# chooses its clock (`clock: HPET …, checked against the PM timer` on
+# the HPET's machines, `clock: PM 3579545 Hz` without one), calibrates
+# the local APIC tick against that clock (`timer: LAPIC calibrated by
+# HPET|PM …`, the same name), and 20 of its ticks take 150-300 ms by the
+# PM timer read independently (`PASS METAL LAPIC tick rate …`).
+#
+# PAX_METAL_TIER (native, release) and PAX_METAL_FIRMWARE ("bios uefi")
+# choose the build and the firmwares (tests/mpx6-firmware sets both).
+# A failing machine prints its `FAIL METAL`/`PANIC` lines by name.
 set -euo pipefail
 flags=()
 [ "${PAX_METAL_TIER:-native}" != release ] || flags=(--release)
@@ -9,24 +24,29 @@ mkdir -p "$work"
 "$PAX_ROOT/tools/fetch-limine"
 "$PAX_ROOT/tools/build-kernel" "${flags[@]}" --src "$PAX_ROOT/kernel/kmain_metal.lu" "$work"
 "$PAX_ROOT/tools/mkimage" "$work/kmain_metal.elf" "$work/check.iso"
+fail() { # leg why
+    grep -aE '^(FAIL METAL|PANIC|clock:|timer:)' "$work/$1.log" | tr -d '\r' >&2 || true
+    echo "FAIL METAL firmware $1: $2" >&2
+    exit 1
+}
 for fw in ${PAX_METAL_FIRMWARE:-bios uefi}; do
     for leg in hpet pm pitless pm-pitless ram8; do
-        args=()
+        args=() qargs=()
         source=HPET
         case $leg in
-            pm) args=(-machine hpet=off); source=PM;;
-            pitless) args=(-machine pit=off);;
-            pm-pitless) args=(-machine hpet=off,pit=off); source=PM;;
-            ram8) args=(-m 8G);;
+            pm) args=(--no-hpet); source=PM;;
+            pitless) args=(--no-pit);;
+            pm-pitless) args=(--no-hpet --no-pit); source=PM;;
+            ram8) qargs=(-m 8G);;
         esac
         rc=0
-        "$PAX_ROOT/tools/qemu-run" --timeout 30 --firmware "$fw" --serial "$work/$fw-$leg.log" "$work/check.iso" -- "${args[@]}" || rc=$?
-        if [ "$rc" != 33 ]; then
-            cat "$work/$fw-$leg.log"
-            echo "FAIL METAL firmware $fw $leg: exit $rc" >&2; exit 1
-        fi
-        grep -aF 'PASS METAL LAPIC tick rate' "$work/$fw-$leg.log"
-        grep -aF "clock: $source" "$work/$fw-$leg.log"
+        "$PAX_ROOT/tools/qemu-run" --timeout 30 --firmware "$fw" --serial "$work/$fw-$leg.log" ${args[@]+"${args[@]}"} "$work/check.iso" -- ${qargs[@]+"${qargs[@]}"} || rc=$?
+        [ "$rc" = 33 ] || fail "$fw-$leg" "exit $rc, not 33"
+        grep -aqF 'PASS METAL LAPIC tick rate' "$work/$fw-$leg.log" || fail "$fw-$leg" "no tick rate row"
+        grep -aq "^clock: $source " "$work/$fw-$leg.log" || fail "$fw-$leg" "the clock is not the $source"
+        grep -aq "^timer: LAPIC calibrated by $source " "$work/$fw-$leg.log" || fail "$fw-$leg" "the tick was not calibrated by the $source"
+        [ "$source" != HPET ] || grep -aq '^clock: HPET .*, checked against the PM timer' "$work/$fw-$leg.log" || fail "$fw-$leg" "the HPET was not checked against the PM timer"
+        tr -d '\r' < "$work/$fw-$leg.log" | grep -aE '^(clock|timer): |^PASS METAL LAPIC tick rate'
         echo "PASS METAL firmware $fw $leg"
     done
 done
