@@ -380,8 +380,10 @@ bound; the third is of their size.
   pull request that changes kernel/ahci or its clock (`tools/ci-tiers.map`,
   `5d7775e5`), the users suite's script or the root-disk tools (by the
   derivation: its job's block names them), proven by tests/ci-plan's rows
-  (`1d8bd48c`; 297 PASS at `ddda81b3` and again at `5bcb6cad`,
-  `logs/b4a-ci-plan.log`, `logs/final-ci-plan.log`). Bound 90
+  (`1d8bd48c`; 297 PASS at `ddda81b3` and `5bcb6cad`, and after the
+  rebase onto px84's trunk 300 PASS at `1d9c600a`, `logs/b4a-ci-plan.log`,
+  `logs/final-ci-plan.log`, with `tests/ci-budgets.py` PASS there for
+  every bound, px84's installer at 60/110/175 minutes among them). Bound 90
   minutes: floor 3666 s (build 50 + CI's leg 3436, above the scaled 3432,
   + 180), 40% above it 5132 s (scaling the newer full-tier 3432 s instead:
   a 3442 s leg, a 3672 s floor, 5141 s); `tests/ci-budgets.py` holds it there from
