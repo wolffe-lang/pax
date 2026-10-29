@@ -94,8 +94,9 @@ fn write_node(mut fs: Fs, node: Node, nodes: List[Node]) -> () ! {invalid, io, f
     let group = (node.ino - 1) / fs.ipg
     let index = (node.ino - 1) % fs.ipg
     if node.ino != 2 {
-        if used(fs.groups[group].imap, index) { return invalid }
-        mark(mut fs.groups[group].imap, index)
+        // collect assigns primary inodes consecutively after reserved 1..10.
+        // Keep this explicit: finish synthesizes the inode bitmap's prefix.
+        if index != fs.ipg - fs.groups[group].ifree { return invalid }
         fs.groups[group].ifree -= 1
         if node.kind == 1 { fs.groups[group].dirs += 1 }
     }
