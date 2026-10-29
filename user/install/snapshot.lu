@@ -188,14 +188,16 @@ fn stage_snapshot(base: str, dest: str, attrs: str, rows: List[Entry]) -> () ! {
     for entry in rows {
         let path = "{dest}{entry.path}"
         if entry.path != "/" {
+            // px78: a stop here names the source path (no serial port on
+            // metal: the screen is the only record besides the stick's log).
             if entry.meta[0] == 1 {
-                fs_create_dir_mode(path, 448) else |_| { return io }
+                fs_create_dir_mode(path, 448) else |e| { eprint("pax-install: staging {entry.path}: mkdir: {e}"); return io }
             } else if entry.meta[0] == 3 {
-                fs_symlink(entry.link, path) else |_| { return io }
+                fs_symlink(entry.link, path) else |e| { eprint("pax-install: staging {entry.path}: symlink: {e}"); return io }
             } else if entry.primary != entry.path {
-                fs_link("{dest}{entry.primary}", path) else |_| { return io }
+                fs_link("{dest}{entry.primary}", path) else |e| { eprint("pax-install: staging {entry.path}: link: {e}"); return io }
             } else {
-                copy_regular("{base}{entry.path}", path)?
+                copy_regular("{base}{entry.path}", path) else |e| { eprint("pax-install: staging {entry.path}: copy: {e}"); return io }
                 if hash_file(path)? != entry.digest { return source_changed }
             }
         }
