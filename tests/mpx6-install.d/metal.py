@@ -39,7 +39,8 @@ length and bytes) before the first boot and after each boot: identical,
 or FAIL. The stick's install log is read back from its ESP and held to
 the inventory, the plan, every phase's verdict and the first MiB of each
 written partition, hashed again here from the target image; the stick's
-ESP is checked by fsck.fat -n and the target's root by e2fsck -fn.
+ESP is checked by fsck.fat -n, the target's root by e2fsck -fn, its
+table by sgdisk -v and its ESP by fsck.fat -n.
 Results: WORK/result.json (the wall times, the witnesses' sha256s).
 Exit 0 with PASS lines, 1 with a FAIL line naming the row.
 """
@@ -670,7 +671,23 @@ def main():
     root.unlink()
     if r.returncode != 0 or b'WARNING' in r.stdout + r.stderr:
         fail('M10-target-fsck', (r.stdout + r.stderr).decode(errors='replace')[-3000:])
-    print('PASS M10-target-fsck: the installed root, e2fsck -fn clean', flush=True)
+    # The table and the ESP PAX wrote, by the host's own oracles (pax#139's):
+    # sgdisk -v over the image (it reads the two tables, not the holes) and
+    # fsck.fat -n over the ESP's 64 MiB at byte 2097152.
+    r = run(['sgdisk', '-v', d/'target.img'], ok=False)
+    (work/'target-gpt.log').write_bytes(r.stdout + r.stderr)
+    if r.returncode != 0 or b'No problems found' not in r.stdout:
+        fail('M10-target-fsck', 'sgdisk -v: ' + (r.stdout + r.stderr).decode(errors='replace')[-3000:])
+    espf = work/'target-esp.img'
+    with open(d/'target.img', 'rb') as f, open(espf, 'wb') as o:
+        f.seek(2097152)
+        o.write(f.read(67108864))
+    r = run(['fsck.fat', '-n', espf], ok=False)
+    (work/'target-esp.fsck').write_bytes(r.stdout + r.stderr)
+    espf.unlink()
+    if r.returncode != 0 or b'arning' in r.stdout + r.stderr:
+        fail('M10-target-fsck', 'fsck.fat -n of the target ESP: ' + (r.stdout + r.stderr).decode(errors='replace'))
+    print('PASS M10-target-fsck: the installed root e2fsck -fn clean; its GPT sgdisk -v clean; its ESP fsck.fat -n clean', flush=True)
     result['leg_seconds'] = round(time.monotonic() - t_leg, 2)
     result['stick_sha256'] = sha(stick)
     (work/'result.json').write_text(json.dumps(result, indent=2) + '\n')
