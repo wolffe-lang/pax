@@ -1024,6 +1024,12 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+      - name: the same typing rows with the xHCI on MSI only, then INTx only (px76, nec-usb-xhci; the all tier)
+        if: needs.plan.outputs.tier == 'all'
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx6-firmware.d/typing-irq mpx3-console $PAX_LEGS
+
       - name: the same suite with / on a disk, native BIOS (px67, tools/rootdisk-leg; every tier it runs in)
         env:
           PAX_REQUIRE_UEFI: "1"
@@ -1208,6 +1214,12 @@ jobs:
           path: build/usb-typing-mpx3-shell/
           retention-days: 14
           if-no-files-found: warn
+
+      - name: the same typing rows with the xHCI on MSI only, then INTx only (px76, nec-usb-xhci; the all tier)
+        if: needs.plan.outputs.tier == 'all'
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx6-firmware.d/typing-irq mpx3-shell $PAX_LEGS
 
       - name: the same suite with / on a disk, native BIOS (px67, tools/rootdisk-leg; every tier it runs in)
         env:
@@ -4072,6 +4084,14 @@ jobs:
           PAX_ENGINE: docker
         run: tests/mpx6-nvme $PAX_LEGS
 
+      - name: the pr rows with the controller's BAR above 4 GiB, native UEFI (px76, tools/qemu-run --high-bar; the all tier)
+        if: needs.plan.outputs.tier == 'all'
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_HIGH_BAR: "1"
+        run: tests/mpx6-nvme --images "$PWD/build/mpx6-nvme" --rows pr --tier native --firmware uefi
+
       - name: keep the sessions, the transcripts and the halt probes
         if: always()
         uses: actions/upload-artifact@v4
@@ -4674,6 +4694,55 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  # px76: the firmware's machine as kasumi has it. tests/mpx6-firmware:
+  # the clocks with and without the HPET and the PIT (F1), COM1 present
+  # and absent (F2), the FADT's reset and ACPI S5 (F3), a padded
+  # framebuffer (F4), the serial-less early panic at 1280x800 and at
+  # 3840x2160 read from the pixels (F5), MSI's 32- and 64-bit layouts
+  # (F6), the USB suite on MSI only and on INTx only (F7; nec-usb-xhci,
+  # R-px76-5), kasumi's shape (F8: no COM1, no PIT, MSI, BAR0 above 4 GiB
+  # by OVMF's 64-bit window, a 4K GOP; the transcript read from PAX's
+  # memory) and the timer and scheduler suites without the HPET, the PIT
+  # and both (F9, native). F5 and F8 are UEFI on every leg.
+  mpx6-firmware:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-firmware')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+      PAX_REQUIRE_UEFI: "1"
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make
+          qemu-system-x86_64 --version
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: the firmware's machine, the plan's legs (all four in the all tier)
+        run: tests/mpx6-firmware $PAX_LEGS
+
+      - name: keep the transcripts, the screens and the monitors' answers
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-firmware
+          path: |
+            build/firmware/**/*.log*
+            build/firmware/**/*.txt
+            build/firmware/**/*.ppm
+            build/firmware/**/*.meta
+          retention-days: 14
+          if-no-files-found: error
+
   tier:
     name: tier ${{ needs.plan.outputs.tier || 'unplanned' }}
     if: ${{ !cancelled() }}
@@ -4737,6 +4806,7 @@ jobs:
       - mpx6-fsck
       - mpx6-games
       - mpx6-usb
+      - mpx6-firmware
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # The issue step's token may write issues; nothing else.
