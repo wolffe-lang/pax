@@ -4,7 +4,9 @@
 #   tools/qemu-run [--firmware bios|uefi] [--serial FILE] [--serial-input FIFO]
 #                  [--timeout SECS] [--accel auto|kvm|tcg] [--gdb PORT]
 #                  [--no-screen] [--boot-disk | --boot-nvme | --boot-ahci] [--drive FILE[,ro][;DEVOPTS]]...
-#                  [--nvme FILE[,ro][;DEVOPTS]]... [--ahci FILE[,serial=S,model=M]]... IMAGE [-- QEMU-ARGS...]
+#                  [--nvme FILE[,ro][;DEVOPTS]]... [--ahci FILE[,serial=S,model=M]]...
+#                  [--no-serial] [--no-hpet] [--no-pit] [--usb-irq=msi|intx] [--high-bar]
+#                  [--display-mode=WxH] IMAGE [-- QEMU-ARGS...]
 #
 # The machine: q35, 256 MiB, no NIC, `-nographic`, COM1 to FILE (default
 # build/serial.log), `-no-reboot` (a triple fault ends the run instead of
@@ -67,6 +69,36 @@
 # serial paxahciN and model PAX-SATA-disk (options given replace both).
 # q35's built-in controller remains for the CD-ROM.
 # Images are written in place. --qemu arguments can express gaps in ports.
+# px76, the firmware's machine as kasumi has it, not as QEMU draws it:
+#
+# --no-serial: no COM1 at all (`-serial none`), not merely its output
+# discarded: kernel/serial's probe finds no UART, so FILE stays empty and
+# a kernel's lines go to the screen and to its in-memory transcript
+# (boot/io.S's pax_serial_log, which tools/usb-session reads by QMP).
+# Cannot be combined with --serial-input.
+#
+# --no-hpet, --no-pit: q35's `hpet=off` and `pit=off` (both offered by
+# QEMU 8.2 and 11.1), so kernel/clock falls back to the ACPI PM timer
+# and the tick must not need the 8254. PAX_NO_HPET=1 and PAX_NO_PIT=1 in
+# the environment say the same for every boot a suite makes.
+#
+# --usb-irq=msi|intx (or PAX_USB_IRQ): the xHCI of --usb-kbd and
+# --usb-stick on MSI only (`msi=on,msix=off`, as kasumi's controller:
+# MSI x8, no MSI-X, no legacy line) or on INTx only (`msi=off,msix=off`).
+# QEMU 8.2's qemu-xhci has neither property, so such a leg uses
+# nec-usb-xhci, which has both (R-px76-5); without the option the device
+# is qemu-xhci as it comes (on 8.2: no MSI capability, so INTx).
+#
+# --high-bar (or PAX_HIGH_BAR=1), UEFI only (R-px76-6): OVMF's 64-bit
+# PCI window made 64 GiB (`-fw_cfg name=opt/ovmf/X-PciMmio64Mb,
+# string=65536`), so OVMF places the 64-bit BARs above 4 GiB (kasumi's
+# xHCI BAR0 is at 0x485a200000), with 8 GiB of memory unless the caller's
+# own `-m` follows.
+#
+# --display-mode=WxH: a VGA device whose largest mode is WxH (`-device
+# VGA,vgamem_mb=64,xres=W,yres=H`, `-vga none` for q35's own); Limine's
+# `resolution:` in the image's configuration picks it (tests/mpx6-firmware
+# uses 1280x800 and 3840x2160).
 #
 # --serial-input FIFO (px13) also gives COM1 an input: QEMU's file
 # character device with `input-path`, so what is written to FIFO is what
@@ -96,7 +128,8 @@ set -euo pipefail
 firmware=bios serial=$PAX_BUILD/serial.log serial_in= timeout=30 accel=auto gdb_port= image= noscreen=0 bootdisk=0 usbstick=0 bootnvme=0 bootahci=0 drives=()
 usbkbd=${PAX_USB_KBD:-} # typing suites keep their exact keystroke stream
 noserial=0 # px76: omit COM1 entirely, not merely its output backend
-usbirq=${PAX_USB_IRQ:-} nohpet=0 nopit=0 displaymode=
+usbirq=${PAX_USB_IRQ:-} nohpet=${PAX_NO_HPET:-0} nopit=${PAX_NO_PIT:-0} displaymode=
+highbar=${PAX_HIGH_BAR:-0} memory=256M
 while [ $# -gt 0 ]; do
     case $1 in
         --firmware) firmware=$2; shift 2 ;;
@@ -110,6 +143,7 @@ while [ $# -gt 0 ]; do
         --usb-irq=*) usbirq=${1#*=}; shift ;;
         --no-hpet) nohpet=1; shift ;;
         --no-pit) nopit=1; shift ;;
+        --high-bar) highbar=1; shift ;;
         --display-mode=*) displaymode=${1#*=}; shift ;;
         --boot-disk) bootdisk=1; shift ;;
         --usb-stick) usbstick=1; shift ;;
@@ -160,11 +194,16 @@ case $usbirq in
     intx) irqopts=,msi=off,msix=off ;;
     *) die '--usb-irq takes msi or intx' ;;
 esac
+case $nohpet$nopit$highbar in *[!01]*) die "PAX_NO_HPET, PAX_NO_PIT and PAX_HIGH_BAR take 0 or 1" ;; esac
+if [ "$highbar" = 1 ]; then
+    [ "$firmware" = uefi ] || die "--high-bar is OVMF's 64-bit window: --firmware uefi"
+    memory=8G
+fi
 machine=q35
 [ "$nohpet" = 0 ] || machine+=,hpet=off
 [ "$nopit" = 0 ] || machine+=,pit=off
 cmd=("$qemu"
-     -machine "$machine" -cpu max -m 256M -accel "$accel"
+     -machine "$machine" -cpu max -m "$memory" -accel "$accel"
      -nographic -monitor none -parallel none -nic none
      -no-reboot
      -device isa-debug-exit,iobase=0xf4,iosize=0x04)
@@ -251,6 +290,7 @@ case $firmware in
         ;;
     *) die "--firmware takes bios or uefi" ;;
 esac
+[ "$highbar" = 0 ] || cmd+=(-fw_cfg name=opt/ovmf/X-PciMmio64Mb,string=65536)
 [ -z "$gdb_port" ] || cmd+=(-gdb "tcp:127.0.0.1:$gdb_port" -S)
 cmd+=("$@")
 
