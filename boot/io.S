@@ -103,7 +103,10 @@ pax_outw:
 pax_triple_fault:
         cli
         subq $16, %rsp
-        xorq %rax, %rax
+        /* xorl, not xorq: a 32-bit result is zero-extended into %rax
+           (Intel SDM vol.1 §3.4.1.1), and clef (user/clef.pin) knows
+           xorl but has no xorq. */
+        xorl %eax, %eax
         movq %rax, (%rsp)
         movq %rax, 8(%rsp)
         lidt (%rsp)
