@@ -161,6 +161,9 @@ Witnesses (sha256 over the allocated extents, before = after):
 - `tests/mpx6-usb --tier native --firmware bios`: root, hub and nested topologies, 18 rows each, PASS, after px74's
   SuperSpeed row was changed to expect the disk driven (`febb4ace`; before it, `SuperSpeed enumeration/logging row
   missing`).
+- `tests/mpx6-firmware --tier native --firmware bios`: F1–F9 PASS, F8 among them (kasumi's shape: no COM1, no PIT,
+  the `nec-usb-xhci` on MSI above 4 GiB, 3840x2160, the session read from PAX's memory), with the SuperSpeed disk on
+  the same controller now driven, since `tools/usb-session` attaches one to every session.
 - pax#241, on hasu: each of `mpx6-{ext2,nodes,nvme,root}`'s parsers given a missing log ends
   `FAIL the guest left no log: …` with exit 1; `kernel_readable` under `PAX_LINUX=recorded` returns nothing in
   all six disk suites while a kernel is readable.
