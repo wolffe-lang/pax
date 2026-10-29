@@ -542,10 +542,15 @@ pub fn sectors(u: u64) -> u64 { let p = disk(u); if p == 0 { 0 } else { word(p, 
 pub fn physical_size(u: u64) -> u64 { let p = disk(u); if p == 0 { 512 } else { word(p, P_PHYSICAL) } }
 /// Linux BLKROTATIONAL: zero for IDENTIFY word 217 equal to one.
 pub fn rotational(u: u64) -> u64 { let p = disk(u); if p == 0 { 1 } else { word(p, P_ROT) } }
-/// Trimmed ATA serial or model length, preserving internal spaces.
+/// Trimmed ATA serial or model length, preserving internal spaces. px78
+/// (R-px78-5): the model is Linux's spelling, SCSI INQUIRY's 16-byte
+/// product field that libata makes of the ATA model's first 16 bytes
+/// (measured on Linux 7.2.4: "Samsung SSD 870 EVO 500GB" reads
+/// "Samsung SSD 870 "), so an allow-list line copied from Linux's
+/// `device/model` is PAX's; the boot line keeps all 40 bytes.
 pub fn identity_len(u: u64, serial_number: bool) -> u64 {
     let p = disk(u)
-    if p == 0 { 0 } else { string_len(p, if serial_number { P_SN } else { P_MN }, if serial_number { 20 } else { 40 }) }
+    if p == 0 { 0 } else { string_len(p, if serial_number { P_SN } else { P_MN }, if serial_number { 20 } else { 16 }) }
 }
 /// Exact decoded identity byte, zero outside identity_len.
 pub fn identity_byte(u: u64, serial_number: bool, i: u64) -> u64 {
