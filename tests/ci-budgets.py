@@ -68,11 +68,34 @@ def envelope(job, extra):
     return main + observed + extra + 180
 
 
+def ahci_root_floor():
+    """px75b (R-px75b-6): mpx5-users-ahci builds mpx5-users' native BIOS
+    images and boots all 25 again with / on AHCI. Its leg is sized from
+    two things, the larger kept: its own CI observations, and the users
+    job's virtio root leg (the same boots on another bus) scaled by the
+    two legs' ratio measured side by side on one host under TCG, as CI
+    boots."""
+    ahci = json.loads((DATA / 'ahci-root.json').read_text())
+    users_root = max(r['rootdisk']['seconds'] for r in runs
+                     if r['job'] == 'mpx5-users' and r['rootdisk']
+                     and r['rootdisk']['conclusion'] in ('success', 'cancelled'))
+    tcg = ahci['host_tcg_seconds']
+    scaled = -(-users_root * tcg['ahci'] // tcg['virtio'])
+    observed = [r for r in ahci['ci'] if r['leg']['conclusion'] in ('success', 'cancelled')]
+    leg = max([scaled] + [r['leg']['seconds'] for r in observed])
+    build = max(r['build']['seconds'] for r in ahci['ci'])
+    print('mpx5-users-ahci: users root observed floor=%ds x tcg %d/%d = %ds, ci leg peak=%s, build peak=%ds, setup/artifacts=180s' %
+          (users_root, tcg['ahci'], tcg['virtio'], scaled,
+           max((r['leg']['seconds'] for r in observed), default='none'), build))
+    return build + leg + 180
+
+
 floors = {
     'mpx2-interrupts': max(r['seconds'] for r in interrupts if r['conclusion'] == 'success'),
     'mpx2-heap': max(heap),
     'mpx5-pelt': envelope('mpx5-pelt', 600),  # one Linux replay, measured <=504s plus timeout handling
     'mpx5-users': envelope('mpx5-users', 300),  # rootdisk chk-soak deadline delta
+    'mpx5-users-ahci': ahci_root_floor(),  # px75b, R-px75b-6
 }
 failed = False
 for job, floor in floors.items():
