@@ -1,0 +1,24 @@
+px76 prediction, before implementation
+
+QEMU qemu-xhci should expose a 64-bit MSI capability with msix=off;
+msi=off,msix=off should retain INTx. I predict one message suffices for
+interrupter zero and vectors 80-83 can be reserved for four controllers.
+The QEMU LAPIC timer should count near 62.5 MHz with divide-by-16 (1 GHz
+before division); measure rather than hard-code. A q35 pit=off property
+likely exists on QEMU 8.2 and 11; hpet=off should select ACPI PM timing.
+OVMF will probably need a large PCI MMIO64 aperture and RAM above 4 GiB
+to place an xHCI BAR above 4 GiB; the exact property is to be measured.
+A 4K GOP mode should come from VGA xres/yres plus a Limine resolution;
+padding may require a synthetic framebuffer witness rather than a GOP
+mode QEMU actually offers. Expect roughly 40 boot lines before login,
+with every line mirrored before heap setup and readable at 2x on 4K.
+
+Source inspection already found serial.receive_on's unbounded drain on
+an absent UART (reads 0xff), and xHCI bootstrap polls PIT reloads. Both
+must use absence-aware or clock-independent paths in the serial-less,
+PIT-less legs. No experimental result is claimed in this prediction.
+
+Recommendations to implement, not dispositions: R-px76-1 A (LAPIC tick,
+HPET then PM then PIT calibration), R-px76-2 A (storage polled), R-px76-3
+B (2x above 2560 pixels), R-px76-4 use only memory the protocol reports
+usable, retaining bootloader-reclaimable memory while responses live.
