@@ -55,7 +55,7 @@ accel=tcg
 drives=()
 files=()
 extra=()
-nvme=0
+nvme=0 ahci=0
 while [ $# -gt 0 ]; do
     case $1 in
         --kernel) kernel=$2; shift 2 ;;
@@ -64,7 +64,8 @@ while [ $# -gt 0 ]; do
         --accel) accel=$2; shift 2 ;;
         --drive) drives+=("v:$2"); shift 2 ;;
         --nvme) drives+=("n:$2"); nvme=1; shift 2 ;;
-        --qemu) extra+=("$2"); case $2 in *nvme*) nvme=1 ;; esac; shift 2 ;;
+        --ahci) drives+=("a:$2"); ahci=1; shift 2 ;;
+        --qemu) extra+=("$2"); case $2 in *nvme*) nvme=1 ;; *ahci*|*ide-hd*) ahci=1 ;; esac; shift 2 ;;
         --file) files+=("$2"); shift 2 ;;
         --) shift; break ;;
         -*) die "unknown option $1" ;;
@@ -119,6 +120,7 @@ add() {
 }
 mods="virtio_pci virtio_blk ext4"
 [ "$nvme" = 0 ] || mods="$mods nvme"
+[ "$ahci" = 0 ] || mods="$mods ahci sd_mod"
 for m in $mods; do add "$m"; done
 # px75: ext2 is a module of its own where ext4 does not serve it (hasu's
 # NixOS kernel: `mount -t ext2` ENODEV with ext4 alone); loaded when the
@@ -145,6 +147,7 @@ done
     echo 'for m in $(cat /lib/modules/order); do insmod /lib/modules/$m.ko || echo "linux-nodes: insmod $m failed"; done'
     case " ${drives[*]-} " in *" v:"*) echo 'n=0; while [ ! -b /dev/vda ] && [ $n -lt 50 ]; do sleep 0.1; n=$((n + 1)); done' ;; esac
     [ "$nvme" = 0 ] || echo 'n=0; while [ ! -b /dev/nvme0n1 ] && [ $n -lt 100 ]; do sleep 0.1; n=$((n + 1)); done'
+    [ "$ahci" = 0 ] || echo 'n=0; while [ ! -b /dev/sda ] && [ $n -lt 100 ]; do sleep 0.1; n=$((n + 1)); done'
     echo 'sleep 0.5'
     echo 'echo "linux-nodes: uname $(uname -r)"'
     k=0
@@ -162,9 +165,17 @@ chmod +x "$root/init"
 
 qd=()
 k=0
-nv=0
+nv=0 ah=0
 for e in ${drives[@]+"${drives[@]}"}; do
     kind=${e%%:*}; d=${e#?:}
+    if [ "$kind" = a ]; then
+        img=${d%%,*}; opts=serial=paxahci$ah,model=PAX-SATA-disk
+        case $d in *,*) opts=${d#*,} ;; esac
+        [ -f "$img" ] || die "no image $img"
+        qd+=(-device "ahci,id=paxahci$ah" -drive "file=$img,if=none,id=d$k,format=raw"
+             -device "ide-hd,bus=paxahci$ah.0,drive=d$k,$opts")
+        ah=$((ah + 1)); k=$((k + 1)); continue
+    fi
     dopts=
     case $d in *';'*) dopts=,${d#*;}; d=${d%%;*} ;; esac
     img=${d%,ro}; ro=

@@ -3,8 +3,8 @@
 #
 #   tools/qemu-run [--firmware bios|uefi] [--serial FILE] [--serial-input FIFO]
 #                  [--timeout SECS] [--accel auto|kvm|tcg] [--gdb PORT]
-#                  [--no-screen] [--boot-disk | --boot-nvme] [--drive FILE[,ro][;DEVOPTS]]...
-#                  [--nvme FILE[,ro][;DEVOPTS]]... IMAGE [-- QEMU-ARGS...]
+#                  [--no-screen] [--boot-disk | --boot-nvme | --boot-ahci] [--drive FILE[,ro][;DEVOPTS]]...
+#                  [--nvme FILE[,ro][;DEVOPTS]]... [--ahci FILE[,serial=S,model=M]]... IMAGE [-- QEMU-ARGS...]
 #
 # The machine: q35, 256 MiB, no NIC, `-nographic`, COM1 to FILE (default
 # build/serial.log), `-no-reboot` (a triple fault ends the run instead of
@@ -55,9 +55,17 @@
 # and PAX, as the Linux guest, numbers the controllers nvme0, nvme1, …
 # that way. The images are written in place.
 #
+# --boot-ahci (px75b): boot IMAGE on a separate AHCI controller, port 0,
+# serial paxboot. The kernel names it sda; root=PARTUUID finds its partition.
+#
 # --boot-nvme (px75): --boot-disk's IMAGE on an NVMe controller instead
 # (`-device nvme,serial=paxboot,drive=d0,bootindex=0`): the firmware boots
 # it (SeaBIOS and OVMF both drive NVMe), and the kernel's disk is nvme0n1.
+#
+# --ahci FILE[,serial=S,model=M] (px75b), repeatable: each disk on port 0
+# of a separate QEMU ahci controller, ide-hd, default serial paxahciN and
+# model "PAX SATA disk". q35's built-in controller remains for the CD-ROM.
+# Images are written in place. --qemu arguments can express gaps in ports.
 #
 # --serial-input FIFO (px13) also gives COM1 an input: QEMU's file
 # character device with `input-path`, so what is written to FIFO is what
@@ -84,7 +92,7 @@
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
-firmware=bios serial=$PAX_BUILD/serial.log serial_in= timeout=30 accel=auto gdb_port= image= noscreen=0 bootdisk=0 usbstick=0 bootnvme=0 drives=()
+firmware=bios serial=$PAX_BUILD/serial.log serial_in= timeout=30 accel=auto gdb_port= image= noscreen=0 bootdisk=0 usbstick=0 bootnvme=0 bootahci=0 drives=()
 usbkbd=${PAX_USB_KBD:-} # typing suites keep their exact keystroke stream
 while [ $# -gt 0 ]; do
     case $1 in
@@ -100,8 +108,10 @@ while [ $# -gt 0 ]; do
         --usb-kbd) usbkbd=root; shift ;;
         --usb-kbd=*) usbkbd=${1#*=}; shift ;;
         --boot-nvme) bootdisk=1; bootnvme=1; shift ;;
+        --boot-ahci) bootdisk=1; bootahci=1; shift ;;
         --drive)    drives+=("v:$2"); shift 2 ;;
         --nvme)     drives+=("n:$2"); shift 2 ;;
+        --ahci)     drives+=("a:$2"); shift 2 ;;
         --)         shift; break ;;
         -h|--help)  sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
         -*)         die "unknown option: $1" ;;
@@ -136,6 +146,9 @@ if [ "$usbstick" = 1 ]; then
     cmd+=(-device qemu-xhci,id=xhci
           -drive "file=$image,if=none,id=stick,format=raw,readonly=on"
           -device usb-storage,bus=xhci.0,drive=stick,bootindex=0)
+elif [ "$bootahci" = 1 ]; then
+    cmd+=(-device ahci,id=paxbootahci -drive "file=$image,if=none,id=d0,format=raw"
+          -device ide-hd,bus=paxbootahci.0,drive=d0,serial=paxboot,bootindex=0)
 elif [ "$bootnvme" = 1 ]; then
     cmd+=(-drive "file=$image,if=none,id=d0,format=raw" -device nvme,serial=paxboot,drive=d0,bootindex=0)
 elif [ "$bootdisk" = 1 ]; then
@@ -144,9 +157,17 @@ else
     cmd+=(-drive "file=$image,format=raw,media=cdrom,readonly=on" -boot d)
 fi
 # px79: the further disks, after the boot disk, in the order given.
-dk=$bootdisk nv=0
+dk=$bootdisk nv=0 ah=0
 for e in ${drives[@]+"${drives[@]}"}; do
     kind=${e%%:*}; d=${e#?:}
+    if [ "$kind" = a ]; then
+        f=${d%%,*}; opts=serial=paxahci$ah,model=PAX-SATA-disk
+        case $d in *,*) opts=${d#*,} ;; esac
+        [ -f "$f" ] || die "no disk image: $f"
+        cmd+=(-device "ahci,id=paxahci$ah" -drive "file=$f,if=none,id=d$dk,format=raw"
+              -device "ide-hd,bus=paxahci$ah.0,drive=d$dk,$opts")
+        ah=$((ah + 1)); dk=$((dk + 1)); continue
+    fi
     dopts=
     case $d in *';'*) dopts=,${d#*;}; d=${d%%;*} ;; esac
     f=${d%,ro}; ro=

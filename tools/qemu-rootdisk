@@ -57,7 +57,7 @@ booked() { mkdir -p "$cache" && printf '%s\t%s\n' "$1" "$2" >> "$cache/boots.log
 
 cache=${PAX_ROOTDISK_CACHE:-${PAX_BUILD:-$here/../build}/rootdisk}
 bus=${PAX_ROOTDISK_BUS:-virtio}
-case $bus in virtio|nvme) ;; *) note "PAX_ROOTDISK_BUS is virtio or nvme, not $bus"; exit 2 ;; esac
+case $bus in virtio|nvme|ahci) ;; *) note "PAX_ROOTDISK_BUS is virtio, nvme or ahci, not $bus"; exit 2 ;; esac
 
 # The disk for ISO $1 into $disk: 0 made or cached, 1 tools/mkdisk
 # failed, 2 an ISO this leaves as it is (the reason on stderr).
@@ -127,6 +127,7 @@ for i in "${!args[@]}"; do
         -boot) bi=$i ;;
         virtio-blk-pci*) [ "$bus" = virtio ] && own=1 ;;
         nvme,*|nvme) [ "$bus" = nvme ] && own=1 ;;
+        ahci,*|ahci|ide-hd,*) [ "$bus" = ahci ] && own=1 ;;
     esac
 done
 if [ -z "$iso" ]; then
@@ -157,7 +158,9 @@ for i in "${!args[@]}"; do
         continue
     fi
     if [ "$i" = "$di" ]; then
-        if [ "$bus" = nvme ]; then
+        if [ "$bus" = ahci ]; then
+            new+=(-device ahci,id=rdahci -drive "file=$copy,if=none,id=rd0,format=raw" -device "ide-hd,bus=rdahci.0,drive=rd0,serial=paxroot,bootindex=0")
+        elif [ "$bus" = nvme ]; then
             new+=(-drive "file=$copy,if=none,id=rd0,format=raw" -device "nvme,serial=paxroot,drive=rd0,bootindex=0")
         else
             new+=(-drive "file=$copy,if=none,id=rd0,format=raw" -device "virtio-blk-pci,drive=rd0,bootindex=0")
