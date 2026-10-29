@@ -6,6 +6,32 @@ entries: what it consulted, at which version, for which file, and how
 **Linux kernel source is never an entry**: the allowed Linux material is the
 uapi headers, the syscall tables, `Documentation/`, and black-box behaviour.
 
+## px78 — install on metal: USB mass storage, the allow-list, RST refused (2026-10-29)
+
+No kernel, firmware, hypervisor, driver, bootloader or partition-tool
+implementation source was read. `kernel/usb_storage` (Bulk-Only Transport
+and the SCSI commands a USB disk answers), the xHCI bulk path in
+`kernel/xhci`, the virtio-blk serial, the RAID-mode refusal in
+`kernel/ahci`, the root's single `dev` entry in `kernel/files`, the
+installer's allow-list and stick log (`user/install`) and `paxfat append`
+are this project's own, written from the documents below, none copied.
+Where a row says "knowledge", the lane worked from its own knowledge of
+the published document, not from a copy opened during the lane.
+
+| source | version | consulted for |
+|---|---|---|
+| USB Mass Storage Class, Bulk-Only Transport | 1.0, 1999 | knowledge: the 31-byte CBW (`USBC`, tag, transfer length, direction, LUN, CDB) and the 13-byte CSW (`USBS`, residue, status 0/1/2), Bulk-Only Mass Storage Reset (class request `FFh`), the reset recovery order (reset, then CLEAR_FEATURE on both bulk endpoints). `kernel/usb_storage` |
+| USB Mass Storage Class Specification Overview | 1.4, 2010 | knowledge: interface class 08h, subclass 06h (SCSI transparent command set), protocol 50h (Bulk-Only). `kernel/xhci`'s `storage_interface` |
+| SCSI Primary Commands (SPC-4) and Block Commands (SBC-3), T10 drafts | SPC-4 r37, SBC-3 r36 | knowledge: INQUIRY's standard data (peripheral type, RMB, the 16-byte product identification), TEST UNIT READY, REQUEST SENSE (fixed format, sense key, ASC/ASCQ), MODE SENSE(6)'s WP bit, READ CAPACITY(10), READ(10), WRITE(10), SYNCHRONIZE CACHE(10). `kernel/usb_storage` |
+| Intel xHCI Requirements Specification | 1.2, May 2019 | as px74, plus knowledge of §4.11.2's Normal TRB (IOC, ISP, CH, TD Size), §4.6.6 Configure Endpoint for bulk endpoints, §4.6.8 Reset Endpoint, §4.6.10 Set TR Dequeue Pointer and §6.2.3's Max Burst Size. The Link TRB's cycle rule (an early link leaves entries a lap old that match the current cycle) was found by a measured stall and fixed in `kernel/xhci`'s `room` |
+| USB 3.2 specification bundle | 1.1, June 2022 | as px74, plus §9.6.7 SuperSpeed Endpoint Companion's `bMaxBurst` |
+| USB 2.0 specification | 2.0 | as px74, plus §9.4.1 CLEAR_FEATURE(ENDPOINT_HALT) |
+| Virtual I/O Device (VIRTIO) | 1.2 | knowledge: virtio-blk's `VIRTIO_BLK_T_GET_ID` (type 8, a 20-byte device ID string). `kernel/vblk` |
+| PCI Code and ID Assignment Specification | 1.x | knowledge: class 01h mass storage, subclass 04h RAID, subclass 06h SATA with programming interface 01h AHCI. `kernel/ahci`'s `raid_kind` |
+| Microsoft FAT specification (FAT32 FSInfo) | 2005 | as px69, plus FSInfo's free count and next-free hint, kept by an append that never rewrites the whole FAT. `user/disktools/paxfat` |
+| man-pages `reboot(2)` | 6.x | `LINUX_REBOOT_CMD_POWER_OFF` (`0x4321fedc`) for `reboot -p`. `user/elf/reboot.S` |
+| Linux 7.2.4 (hasu's `/nix/store/j66ih4hz…-linux-7.2.4/bzImage`) under QEMU 8.2.2 | black box | `tools/linux-nodes` with `xhci-pci usb-storage sd_mod` loaded: what `/sys/block/*/device/{model,serial}`, `removable` and `ro` read for NVMe, two SATA disks with models longer than 16 bytes, and two USB disks. Recorded in `notes/px78/linux-ident.txt` (`notes/px78/ident.sh`): a SATA model is the 16-byte SCSI product, trimmed; a USB disk with no serial string has an unreadable `serial`; `removable` is the stick's RMB |
+
 ## px84 — large ext2 volumes
 
 No kernel, e2fsprogs, partition-tool, FAT-tool or bootloader implementation
