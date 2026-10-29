@@ -1,0 +1,76 @@
+//! member: false
+// kmain_metal_msi.lu — MSI's two address layouts on real PCI functions
+// (px76, tests/mpx6-firmware F6). kasumi's AHCI offers 32-bit MSI and its
+// xHCI 64-bit (the orchestrator's read of its lspci); QEMU's ioh3420 root
+// port offers the 32-bit layout and nec-usb-xhci,msi=on the 64-bit one.
+// For every function with an MSI capability (PCI Local Bus 3.0 §6.8):
+// kernel/pci's `enable_msi` with vector 80 to APIC 0, then read back
+// the message address (kernel/msi's: 0xfee00000), the data (edge, fixed,
+// the vector alone), one message enabled, INTx off, a 64-bit layout's
+// upper address zero; then `interrupts_off`, and MSI is off again. The
+// verdict goes to isa-debug-exit: 0x10 when both layouts were seen and
+// every row held, 0x11 at the first row that did not (`FAIL METAL …`).
+// First, each function's memory BAR0 on a line (`bar: vvvv:dddd BAR0
+// 64-bit 0x…`), which F8's companion row holds above 4 GiB.
+use clock
+use frames
+use paging
+use log
+use msi
+use panic
+use pci
+use serial
+extern "c" fn pax_exit(v: u8)
+export fn pax_interrupt(_frame: u64) -> u64 { panic.halt() }
+export fn pax_thread_exit() { panic.halt() }
+fn check(ok: bool, name: str) {
+    log.put(if ok { "PASS METAL " } else { "FAIL METAL " }); log.line(name)
+    if !ok { unsafe { pax_exit(0x11) }; panic.halt() }
+}
+export fn kmain() {
+    serial.init()
+    frames.start()
+    paging.start()
+    clock.start()
+    let n = pci.scan()
+    // Every function's BAR0 where it is memory (F8's companion row reads
+    // these under tools/qemu-run --high-bar: OVMF's 64-bit window).
+    var j: u64 = 0
+    while j < n {
+        let (kind, physical) = pci.bar(pci.bdf(j), 0)
+        if (kind == pci.BAR_MEM32 || kind == pci.BAR_MEM64) && physical != 0 {
+            log.put("bar: "); log.hex_n(pci.vendor(j), 4); log.put(":"); log.hex_n(pci.device(j), 4)
+            log.put(if kind == pci.BAR_MEM64 { " BAR0 64-bit " } else { " BAR0 32-bit " }); log.hex(physical); log.end()
+        }
+        j += 1
+    }
+    var narrow = false
+    var wide = false
+    var i: u64 = 0
+    while i < n {
+        let b = pci.bdf(i)
+        let c = pci.capability(b, 5)
+        if c != 0 {
+            let control = pci.read16(b, c + 2)
+            let iswide = control & 128 != 0
+            log.put("msi: "); log.hex_n(pci.vendor(i), 4); log.put(":"); log.hex_n(pci.device(i), 4)
+            log.put(if iswide { " 64-bit" } else { " 32-bit" }); log.put(" capability at 0x"); log.hex_n(c, 2)
+            log.put(", "); log.dec((1 << ((control >> 1) & 7)) as int); log.line(" messages offered")
+            check(pci.enable_msi(b, 0, 80), "MSI enabled")
+            check(pci.read32(b, c + 4) == msi.address(0), "MSI physical destination")
+            let data = c + (if iswide { 12 } else { 8 })
+            check(msi.edge_fixed(pci.read16(b, data), 80), "MSI edge fixed data")
+            check(pci.read16(b, c + 2) & 0x71 == 1, "MSI one message enabled")
+            check(pci.command(b) & pci.CMD_INTX_OFF != 0, "MSI disables INTx")
+            if iswide { check(pci.read32(b, c + 8) == 0, "MSI upper address zero"); wide = true }
+            else { narrow = true }
+            pci.interrupts_off(b)
+            check(pci.read16(b, c + 2) & 1 == 0, "MSI disabled for polled driver")
+        }
+        i += 1
+    }
+    check(narrow, "MSI 32-bit layout present")
+    check(wide, "MSI 64-bit layout present")
+    unsafe { pax_exit(0x10) }
+    panic.halt()
+}
