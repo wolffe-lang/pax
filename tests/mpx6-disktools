@@ -8,7 +8,7 @@
 # tools/mkdisk tools/e2tree tools/e2fs tools/mkgpt tools/disktools
 # tools/mkinitramfs user/elf/disktools-preflight.c user/shrc user/fstab-root
 # boot/limine-initramfs.conf boot/limine-initramfs-quiet.conf
-# kernel/kmain_console.lu tests/mpx6-root.d
+# kernel/kmain_console.lu tests/mpx6-root.d user/elf/bigdisk.c tools/linux-blk
 # No option runs everything. Leg options follow the other PAX suites.
 set -euo pipefail
 . "$(dirname "$0")/../tools/lib.sh"
@@ -59,9 +59,18 @@ if [ "$only" != pax ]; then
             [ -z "$executor" ] || extra+=("$executor")
         else extra=("$oracle"); fi
         python3 -I "$D/$f.py" "$programs/pax$f" "$work/$f" "${extra[@]}"
+        if [ "$f" = ext2 ]; then
+            python3 -I "$D/big.py" "$programs/paxext2" "$work/big"
+        fi
     done
+    if [ "$only" = all ] || [ "$only" = linux ]; then
+        python3 -I "$D/bounds.py" "$programs" "$work/bounds" "$oracle"
+    fi
 fi
 if [ "$only" = all ] || [ "$only" = pax ]; then
     "$D/pax" run "$work" "$tiers" "$legs"
+    for tier in $tiers; do
+        python3 -I "$D/high.py" "$PAX_ROOT" "$work/high-$tier" "$programs/paxext2" "$(cat "$work/$tier.elf.path")"
+    done
 fi
 say "mpx6-disktools $only: PASS"
