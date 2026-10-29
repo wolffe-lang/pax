@@ -1,4 +1,8 @@
 //! member: false
+// kmain_metal_power.lu — reboot and power-off (px76, tests/mpx6-metal-power,
+// F3): kernel/power's reboot from its first way, or entered at port 0xCF9
+// (`metal_reboot_cf9`) or at the triple fault (`metal_reboot_triple`), or
+// ACPI S5 (`metal_poweroff`). QEMU's -no-reboot ends the run on a reset.
 use boot_info
 use clock
 use fb
@@ -16,5 +20,7 @@ export fn kmain() {
     let _fb = fb.start(pml4)
     clock.start()
     if boot_info.cmdline_has("metal_poweroff") { power.power_off() }
+    if boot_info.cmdline_has("metal_reboot_cf9") { power.reboot_from(1) }
+    if boot_info.cmdline_has("metal_reboot_triple") { power.reboot_from(2) }
     power.reboot()
 }
