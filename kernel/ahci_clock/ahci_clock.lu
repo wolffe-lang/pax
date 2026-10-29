@@ -1,0 +1,36 @@
+//! Temporary px75b bootstrap clock shim, removed on px76's clock merge.
+//! The PIT is programmed by timer.start before block.start on this base.
+//! IF-clear reads latch channel zero, like kernel/xhci's bootstrap wait.
+//! This is not the no-PIT metal clock: px76 owns that shared implementation.
+extern "c" fn pax_outb(port: u16, value: u8)
+extern "c" fn pax_inb(port: u16) -> u8
+var previous: u64 = 0
+var elapsed: u64 = 0
+var started: bool = false
+fn count() -> u64 {
+    // # Safety: latch and read PIT channel zero with IF clear.
+    unsafe {
+        pax_outb(0x43, 0)
+        let lo = pax_inb(0x40)
+        let hi = pax_inb(0x40)
+        (lo as u64) | ((hi as u64) << 8)
+    }
+}
+pub fn now_ns() -> u64 {
+    let c = count()
+    // # Safety: single CPU, all callers hold IF clear.
+    unsafe {
+        if started {
+            elapsed += if previous >= c { previous - c } else { previous + 11932 - c }
+        }
+        previous = c
+        started = true
+        elapsed * 1000000000 / 1193182
+    }
+}
+pub fn deadline_us(us: u64) -> u64 { now_ns() + us * 1000 }
+pub fn expired(d: u64) -> bool { now_ns() >= d }
+pub fn wait_us(us: u64) {
+    let d = deadline_us(us)
+    while !expired(d) {}
+}
