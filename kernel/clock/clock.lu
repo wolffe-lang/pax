@@ -1,8 +1,31 @@
-//! Monotonic bootstrap time with interrupts masked (px76).
-//! HPET 1.0a §§2.3.4,2.3.6,2.3.8: femtoseconds/tick, enable, main
-//! counter. ACPI 6.5 §4.8.3.3: PM timer 3579545 Hz, 24/32-bit wrap.
-//! PIT fallback: 8254 mode 2 channel 0, divisor 65535. Its 54.9ms wrap
-//! requires frequent samples; the LAPIC interrupt samples it every tick.
+//! clock — monotonic nanoseconds from the firmware's counters, callable
+//! with interrupts masked (px76; its API agreed with px75b's AHCI).
+//!
+//! `start()` once, early (every device kernel calls it before pci.scan;
+//! kernel/timer calls it before calibrating the tick; a second call does
+//! nothing); then `now_ns()`, `wait_us(us)` (a busy wait),
+//! `deadline_us(us)` and `expired(d)`. A read before `start` panics by
+//! name (no source has a period yet).
+//!
+//! The source, in order (R-px76-1 A; kasumi's Linux lists `tsc hpet
+//! acpi_pm` and no `pit`):
+//! - the HPET's main counter (IA-PC HPET 1.0a §2.3.4 the capabilities:
+//!   COUNTER_CLK_PERIOD in femtoseconds in bits 63:32, COUNT_SIZE_CAP bit
+//!   13; §2.3.6 ENABLE_CNF set and LEG_RT_CNF clear; §2.3.8 the main
+//!   counter), at the address the ACPI HPET table gives, mapped at
+//!   HPET_VA. It must advance, and where the FADT names an ACPI PM timer
+//!   that advances it must agree with it: 10 ms of the PM timer (35795
+//!   ticks) must read between 5 and 20 ms on the HPET, or the HPET is
+//!   refused on a line of its own (a wrong-unit period or a lying table
+//!   on metal, px76's HPET plant, never a hang);
+//! - else the ACPI PM timer (ACPI 6.5 §4.8.3.3: 3.579545 MHz, 24 or 32
+//!   bits by the FADT's TMR_VAL_EXT flag), if it advances;
+//! - else the PIT's channel 0 read back (8254 mode 2, divisor 65535): its
+//!   54.9 ms wrap needs a sample at least that often, which kernel/timer's
+//!   tick takes.
+//! One line names the choice: `clock: HPET <fs> fs/tick, checked against
+//! the PM timer` (or `, unchecked: no PM timer`), `clock: PM 3579545 Hz`
+//! or `clock: PIT 1193182 Hz`. No Linux source; no other kernel's source.
 use acpi
 use log
 use paging
@@ -55,31 +78,72 @@ fn try_hpet() -> bool {
     write32(a + 0x10, (read32(a + 0x10) | 1) & !2)
     advances()
 }
+fn pm() -> u64 { unsafe { pax_inl(acpi.pm_port() as u16) as u64 } & acpi.pm_mask() }
+
+/// The PM timer counts (100,000 reads see it move).
+fn pm_advances() -> bool {
+    let first = pm()
+    var n: u64 = 0
+    while n < 100000 { if pm() != first { return true }; n += 1 }
+    false
+}
+
+/// The HPET's nanoseconds across 35795 PM ticks (10.000 ms, ACPI 6.5
+/// §4.8.3.3), the window opened on a PM edge; 0 when the PM timer stops
+/// moving inside it (no verdict).
+fn hpet_ns_per_10ms() -> u64 {
+    let m = acpi.pm_mask()
+    let first = pm()
+    var a = pm()
+    var n: u64 = 0
+    while a == first && n < 1000000 { a = pm(); n += 1 }
+    let t0 = now_ns()
+    var b = a
+    n = 0
+    while ((b + m + 1 - a) & m) < 35795 && n < 100000000 { b = pm(); n += 1 }
+    let t1 = now_ns()
+    if ((b + m + 1 - a) & m) < 35795 { 0 } else { t1 - t0 }
+}
+
+fn begin() { unsafe { previous = raw(); elapsed = 0; fraction = 0 } }
+
+fn say() {
+    log.put("clock: "); log.put(name()); log.put(" ")
+    log.dec(unsafe { period } as int)
+    log.put(if unsafe { source } == 1 { " fs/tick" } else { " Hz" })
+}
+
 pub fn start() {
     if unsafe { source } != 0 { return }
     acpi.start()
-    if !try_hpet() {
-        unsafe { source = 2; period = 3579545; mask = acpi.pm_mask() }
-        if acpi.pm_port() == 0 || !advances() {
-            unsafe {
-                source = 3; period = 1193182; mask = 0
-                pax_outb(0x43, 0x34)
-                pax_outb(0x40, 0xff)
-                pax_outb(0x40, 0xff)
-            }
-            if !advances() { panic.fail("clock: HPET, PM and PIT do not advance", 0) }
+    if try_hpet() {
+        begin()
+        if acpi.pm_port() == 0 || !pm_advances() {
+            say(); log.line(", unchecked: no PM timer")
+            return
         }
+        let ns = hpet_ns_per_10ms()
+        if ns >= 5000000 && ns <= 20000000 {
+            say(); log.line(", checked against the PM timer")
+            return
+        }
+        say(); log.put(" read "); log.dec(ns as int)
+        log.line(" ns across 10 ms of the PM timer; refused")
+        unsafe { source = 0 }
     }
-    unsafe { previous = raw(); elapsed = 0; fraction = 0 }
-    log.put("clock: "); log.put(name()); log.put(" ")
-    log.dec(unsafe { period } as int)
-    log.line(if unsafe { source } == 1 { " fs/tick" } else { " Hz" })
+    unsafe { source = 2; period = 3579545; mask = acpi.pm_mask() }
+    if acpi.pm_port() == 0 || !advances() {
+        unsafe {
+            source = 3; period = 1193182; mask = 0
+            pax_outb(0x43, 0x34)
+            pax_outb(0x40, 0xff)
+            pax_outb(0x40, 0xff)
+        }
+        if !advances() { panic.fail("clock: HPET, PM and PIT do not advance", 0) }
+    }
+    begin()
+    say(); log.end()
 }
-pub fn name() -> str {
-    let src = unsafe { source }
-    if src == 1 { "HPET" } else { if src == 2 { "PM" } else { "PIT" } }
-}
-/// Whether `start` has chosen a source.
 pub fn started() -> bool { unsafe { source } != 0 }
 
 pub fn now_ns() -> u64 {
