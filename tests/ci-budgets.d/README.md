@@ -84,3 +84,42 @@ another's timeout. Users' ISO and rootdisk legs are the next split if growth
 continues. No split or fixture-transfer dependency is introduced here:
 the measured sums plus reserves fit the 210-minute envelope, subject to the
 final all-tier validation.
+
+## The installer (px84, R-px84-6)
+
+`mpx6-install`'s limit is tiered: **60 min** in `tier pr`, **110 min** in
+`tier full` and any partial run, **175 min** in `tier all`. The full tier
+adds a full-density install onto a sparse 500 GB target, and `tier all`
+adds one onto 4 TB. `install.json` keeps each run's phases, read from the
+job log's timestamps. A phase's floor is its peak over the runs. Seconds:
+
+| run | tier | units | inputs (yew alone) | smoke | faults | faults tail | full rows |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 40817980461 | full, cut at 60 min | 18 | 3141 (1701) | 151 | 267 | not reached | not reached |
+| 40620130831 | full | 18 | 2122 (1123) | 99 | 126 | 40 | 277 |
+| 40532219747 | full | 20 | 502 (99) | 100 | 152 | 45 | 334 |
+| 40690748340 | all | 21 | 2541 (1450) | 128 | 199 | 58 | 412 |
+| 40634374652 | all | 15 | 2580 (1488) | 131 | 202 | 59 | 418 |
+
+The phases sum to 4057 s at their peaks. No runner has finished a big row
+yet. Each row is therefore its whole kasumi wall time scaled by 1.669, the
+larger runner/kasumi ratio of the same smoke installs in run 40817980461
+(I-install-yes-vdc: 43.80 s on the runner against 26.24 s on kasumi):
+
+- 500 GB: 262 s on kasumi, 438 s scaled;
+- 4 TB: 1655 s on kasumi, 2763 s scaled.
+
+| tier | measured sizing floor | allowance included | bound | margin above floor |
+|---|---:|---|---:|---:|
+| pr | 642 s | the one completed pr-tier job (run 40817751644) | 3600 s | 2958 s |
+| full | 4675 s | phases 4057 + 500 GB 438 + overhead 180 | 6600 s | 1925 s |
+| all | 7438 s | full 4675 + 4 TB 2763 | 10500 s | 3062 s |
+
+At the old limits (60 and 120 minutes) the check fails for both full and
+all. The full tier misses even without the 500 GB row: its floor would
+still be 4237 s against 3600 s. The inputs phase is mostly building the
+installed tree's programs, and yew's build alone has ranged from 99 s to
+1701 s on the runner. That build, not px84's rows, is what pushed run
+40817980461 past 60 minutes before its full rows began. 175 minutes is
+below the 6-hour per-job ceiling. It holds one of the org's 20 slots for
+up to three hours in each trunk push and nightly run.
