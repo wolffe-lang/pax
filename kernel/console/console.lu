@@ -1517,10 +1517,16 @@ fn typed_at(src: u64) {
 }
 
 /// `console: com1 irq 4 vector 36, i8042 0x<cfg> -> 0x<cfg> irq 1 vector
-/// 33, 8259 master mask 0x<m>; ICANON ECHO, iflag … lflag …`.
+/// 33, 8259 master mask 0x<m>; ICANON ECHO, iflag … lflag …`; with no
+/// UART (px76: kernel/serial's probe found none, so line 4 stays masked)
+/// `console: com1 absent, i8042 …`.
 pub fn report() {
-    log.put("console: com1 irq 4 vector ")
-    log.dec((com1_vector()) as int)
+    if serial.available() {
+        log.put("console: com1 irq 4 vector ")
+        log.dec((com1_vector()) as int)
+    } else {
+        log.put("console: com1 absent")
+    }
     log.put(", i8042 ")
     put_hex8(sv(C_KBD_BEFORE))
     log.put(" -> ")
