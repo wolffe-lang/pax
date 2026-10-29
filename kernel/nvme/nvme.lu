@@ -1467,3 +1467,24 @@ pub fn shutdown() {
         c += 1
     }
 }
+
+/// Identify Controller strings for /sys/block/<disk>/device, same trimming
+/// and control-byte sanitization as the boot report (NVMe Base §1.4.2).
+pub fn identity_len(u: u64, serial_number: bool) -> u64 {
+    let j = sel(u)
+    if j == NSMAX || base() == 0 { return 0 }
+    let w = if serial_number { W_SN } else { W_MN }
+    var k: u64 = if serial_number { 20 } else { 40 }
+    while k > 0 {
+        let c = (sw(w + (k - 1) / 8) >> (((k - 1) % 8) * 8)) & 255
+        if c != 32 && c != 0 { break }
+        k -= 1
+    }
+    k
+}
+pub fn identity_byte(u: u64, serial_number: bool, i: u64) -> u64 {
+    if i >= identity_len(u, serial_number) { return 0 }
+    let w = if serial_number { W_SN } else { W_MN }
+    let c = (sw(w + i / 8) >> ((i % 8) * 8)) & 255
+    if c >= 32 && c <= 126 { c } else { 63 }
+}
