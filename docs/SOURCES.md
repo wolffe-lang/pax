@@ -1592,3 +1592,26 @@ Permissively licensed kernels: none consulted.
 | PCI Local Bus specification (the command register's memory, bus master and INTx-disable bits; the MSI and MSI-X capabilities' enable bits) | as px20 | PCI-SIG | the author's own knowledge, as px20 | kernel/nvme's `interrupts_off`, kernel/pci's `class_code` |
 | QEMU's `nvme` and `nvme-ns` devices (`serial=`, `logical_block_size=`, `physical_block_size=`, `max_ioqpairs=`, `id=`, `bus=`, `nsid=`; `-device nvme,help`), blkdebug's `inject-error` (`event`, `errno`, `sector`, `once`) | 8.2.2 (Ubuntu 24.04, CI's and the rig's), 11.1.0 (hasu's own, `mqes=`) | GPL-2.0 (a program we run) | run, never read | the test controllers; what the controller answers: 1b36:0010, NVMe 1.4.0, "QEMU NVMe Ctrl", the firmware revision QEMU's version, MDTS 7, 256 namespaces, MQES 2047, a volatile write cache, 64 queue pairs; SeaBIOS and OVMF leaving it enabled; blkdebug's EIO answered as Unrecovered Read Error (2h/81h) |
 | black-box Linux: hasu's installed 7.2.4 (NixOS) on the rig's QEMU 8.2.2 (q35, KVM), one or two NVMe controllers beside a virtio disk (`tools/linux-nodes --nvme`, the probes `user/elf/nodes.c` and `user/elf/nvme.c`, boreutils' `ls`, pelt as the shell; the nvme module and its chain loaded from the kernel's own modules) | — | GPL-2.0 (a program we run) | run, never read | every expected answer of `tests/mpx6-nvme` (recorded in `tests/mpx6-nvme.d/linux/`; the lane's measurements in `notes/px75/guest.sh`): nvme0n1 259:0 and its partitions nvme0n1p1 259:1, nvme0n1p2 259:2 beside vda's 254:N; every NVMe disk numbered before any partition; namespaces 1 and 3 named nvme0n1 and nvme0n2; two controllers numbered in PCI order, their minors in their probes' order (a race: three runs, three orders); /proc/partitions in registration order; the ioctls' answers for a namespace (BLKROTATIONAL 0, BLKGETDISKSEQ in disk order, HDIO_GETGEO 64 heads, 32 sectors, the capacity's cylinders, BLKSSZGET and BLKPBSZGET the namespace's block); a 4096-byte namespace's size in 512-byte units and no table for a 512-byte GPT; EIO for a read of a failing sector and 4096 of 8192 bytes across it; the bytes every write leaves |
+
+## px75b — AHCI and disk identity
+
+No kernel, firmware, emulator or driver's source was consulted. The FIS layouts
+come from the publicly released Serial ATA 1.0a, **not SATA 3.x** (the current
+SATA-IO specifications were not publicly retrievable). AHCI and ACS define the
+controller and command behavior used here. Only the documents below and PAX's
+own `kernel/{nvme,vblk,block,pci,procfs,files}` were read.
+
+| source | revision / digest | sections read and use |
+|---|---|---|
+| [Serial ATA AHCI](https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/serial-ata-ahci-spec-rev1-3-1.pdf) | 1.3.1; SHA256 `3bbd4b7fc7dbef60948f3e56575d860ffc02a4d3571a20cd757aa2b22fa8e56a` | §§3.1, 3.3 (registers), 4.2.1–4.2.3 (received FIS, command list/table, zero-based DBC), 10.1.2 (per-port initialization; global reset optional), 10.3 (ST/CR then FRE/FR), 10.4 (reset), 10.6.3 (BIOS ownership: 25 ms, at least 2 s when busy), 10.7 (interrupt masks) |
+| [ATA Command Set 4, official T13 draft archived](https://web.archive.org/web/20181123105648if_/http://t13.org:80/Documents/UploadedDocuments/docs2017/di529r18-ATAATAPI_Command_Set_-_4.pdf) | ACS-4 revision 18, 2017-08-04; SHA256 `26aaf3ef3d34d890c4b471c3af653c999c5d96a9a4e705e345f442f911cc3da9` | §§7.11 (FLUSH CACHE EXT, may exceed 30 s), 7.13 (IDENTIFY DEVICE; words 10–19, 23–26, 27–46, 83, 100–103, 106, 117–118, 217), 7.21 (READ DMA EXT), 7.57 (WRITE DMA EXT); LBA48 and sector counts |
+| [Serial ATA: High Speed Serialized AT Attachment](https://storusint.com/pdf/storage_protocols/sata/serialata10a.pdf) | 1.0a, 2003-01-07; SHA256 `be534520e6b28e4b122280c5943b24a6cec58b5796788b9f1f9437af90872940` | §§8.5.2, 8.5.3, 8.5.6, 8.5.8; H2D Register FIS 27h (five DWORDs, command bit, six LBA bytes and two count bytes), D2H Register FIS 34h, DMA Setup 41h, PIO Setup 5Fh |
+| [PCI Local Bus Specification](https://lekensteyn.nl/files/docs/PCI_SPEV_V3_0.pdf) | 3.0, 2004-02-03; SHA256 `74d05cd79ae9cb1c38e89669c5f5735e521d7e209f03eef11168a5c2f6771019` | §6.2.2 (memory decode, bus master, INTx disable), §6.8.1.3 (MSI enable), §6.8.2.3 (MSI-X enable). The kernel performs initial system configuration, not per-command interrupt masking through PCI enable bits. AHCI GHC.IE and PxIE stay clear. |
+
+Black-box references: QEMU 8.2.2 from Ubuntu 24.04 (`ahci`, `ide-hd`,
+`blkdebug`) and hasu's installed Linux kernel and modules in a QEMU guest,
+never their source. `tests/mpx6-ahci.d/linux` holds that guest's recorded
+answers; `meta` names its kernel and emulator. PAX's existing static probes
+`user/elf/{nodes,nvme}.c`, the new bounded `user/elf/ahci.c`, pelt, boreutils'
+`cat`, and the installer are run unmodified. `tools/linux-nodes` loads
+`ahci` and `sd_mod` only from that kernel's own module tree.
