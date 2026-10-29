@@ -1,0 +1,18 @@
+px75b prediction, before the first source change or guest measurement
+
+QEMU 8.2's AHCI will report CAP2.BOH clear; the handoff will therefore
+need a synthetic register witness as well as the real QEMU initialization.
+The driver will issue at most 128 KiB (256 sectors) per command, with up
+to 32 PRDT entries of one page each. Each DBC is bytes minus one. A
+single PRDT entry in this design carries 4096 bytes, though AHCI permits
+4 MiB. One command slot, polled, no NCQ.
+Against px75's native 684 MB/s write and 706 MB/s read, predict AHCI
+400-700 MB/s write and 400-800 MB/s read with the same tmpfs-backed 1 GiB
+image, below NVMe due to the PRDT and command engine overhead.
+Predict Linux names disks in controller PCI order, then implemented
+port order, ignoring holes and ATAPI for sd letters: controller A ports
+1 and 4 -> sda, sdb; controller B port 2 -> sdc. Probe parallelism may
+make controller order unstable, which must be measured, not assumed.
+R-px75b-1: recommend polled completion with controller/port interrupts
+masked, like px75. R-px75b-3: recommend generic AHCI for ASM1061; no
+unmeasured quirk. R-px75b-2 awaits the initialization specification.
