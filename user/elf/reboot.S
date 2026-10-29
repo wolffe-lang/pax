@@ -4,7 +4,9 @@
    volume, marks it clean and resets the machine. Root's alone: a user
    is told -EPERM and the program exits 1 (it says nothing: PAX's own
    kernel line names the reboot). With an argument it halts instead
-   (LINUX_REBOOT_CMD_HALT), `reboot -h` or any word.
+   (LINUX_REBOOT_CMD_HALT), `reboot -h` or any word; px78: `reboot -p`
+   powers off (LINUX_REBOOT_CMD_POWER_OFF; reboot(8)'s -p, --poweroff),
+   the end pax-install offers on a machine with no serial console.
 
    Built by tools/mkdiskprobe: cc -nostdlib -static -no-pie, ET_EXEC
    with no PT_INTERP. */
@@ -17,6 +19,16 @@ _start:
         cmpq    $1, (%rsp)              /* argc */
         je      1f
         movl    $0xcdef0123, %edx       /* LINUX_REBOOT_CMD_HALT */
+        cmpq    $2, (%rsp)              /* no argv[1]: halt */
+        jb      1f
+        movq    16(%rsp), %rcx          /* argv[1] */
+        cmpb    $'-', (%rcx)
+        jne     1f
+        cmpb    $'p', 1(%rcx)
+        jne     1f
+        cmpb    $0, 2(%rcx)
+        jne     1f
+        movl    $0x4321fedc, %edx       /* LINUX_REBOOT_CMD_POWER_OFF */
 1:      movl    $169, %eax              /* reboot */
         movl    $0xfee1dead, %edi
         movl    $672274793, %esi
