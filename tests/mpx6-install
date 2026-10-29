@@ -21,7 +21,7 @@ while [ $# -gt 0 ]; do
         --rows) rows=$2; shift 2 ;;
         --tier) tier=$2; shift 2 ;;
         --firmware) firmware=$2; shift 2 ;;
-        *) die 'usage: mpx6-install [--only ci|planner|allow|inventory|snapshot|ui|executor|prepare|noserial] [--work DIR] [--inputs LANE] [--rows smoke|full] [--tier native|release|both] [--firmware bios|uefi|both]' ;;
+        *) die 'usage: mpx6-install [--only ci|inputs|planner|allow|inventory|snapshot|ui|executor|prepare|noserial|metal] [--work DIR] [--inputs LANE] [--rows smoke|full] [--tier native|release|both] [--firmware bios|uefi|both]' ;;
     esac
 done
 case $tier in native|release|both) ;; *) die 'bad tier' ;; esac
@@ -61,15 +61,31 @@ case $only in
         python3 -I "$D/session.py" "$casework" uefi "$casework/log-last.img"
         say 'mpx6-install: PASS I-noserial: the unattended install with no serial port, its transcript from PAX memory, the target verified and booted'
         exit ;;
-    ci) ;;
+    metal)
+        # px78: the whole path in QEMU shaped like kasumi (the full and all
+        # tiers): the live stick built and booted under OVMF with no serial
+        # port, the install through the USB keyboard to the one disk on the
+        # stick's allow-list, the stick removed, the disk booted alone; the
+        # other disks byte-identical. Inputs as noserial's. PAX_METAL_MODE
+        # (build or run) splits it for a host whose container engine and
+        # QEMU live apart.
+        [ -n "$inputs" ] && [ -d "$inputs/build/disktools" ] || die 'metal needs --inputs DIR of a finished run'
+        export PAX_WOLF SOURCE_DATE_EPOCH=1700000000
+        PAX_WOLF=$("$PAX_ROOT/tools/fetch-wolf")
+        "$PAX_ROOT/tools/fetch-limine"
+        mode=${PAX_METAL_MODE:-all}
+        [ "$mode" = run ] || rm -rf "$work/metal"
+        python3 -I "$PAX_ROOT/tests/mpx6-install.d/metal.py" "$PAX_ROOT" "$inputs" "$work/metal" "$mode"
+        exit ;;
+    ci|inputs) ;; # px78: inputs builds the --inputs directory (to --inputs DIR, else WORK/inputs) and stops
     *) die 'unknown suite selection' ;;
 esac
-for mode in planner allow ui snapshot executor prepare; do unit "$mode"; done
+[ "$only" = inputs ] || for mode in planner allow ui snapshot executor prepare; do unit "$mode"; done
 export PAX_WOLF
 PAX_WOLF=$("$PAX_ROOT/tools/fetch-wolf")
 export SOURCE_DATE_EPOCH=1700000000
-if [ -z "$inputs" ]; then
-    inputs=$work/inputs
+build_inputs() { # the inputs directory: disk tools, programs, games, the installer
+    rm -rf "$inputs/build/full" # px78: --only inputs may rebuild a finished directory
     mkdir -p "$inputs/build/full"
     "$PAX_ROOT/tests/mpx6-disktools" --only build --work "$inputs/build/disktools" --tier "$tier" --firmware "$firmware"
     for n in pelt lope probe; do cp -R "$inputs/build/disktools/$n" "$inputs/build/full/$n"; done
@@ -82,8 +98,20 @@ if [ -z "$inputs" ]; then
         "$PAX_ROOT/tools/mkas" "$w/bin"
         "$PAX_ROOT/tools/mkzone" "$w/localtime"
     fi
+    "$PAX_ROOT/tools/mkinstall" "$inputs/build/install-gate/bin"
+}
+if [ "$only" = inputs ]; then
+    inputs=${inputs:-$work/inputs}
+    build_inputs
+    say "mpx6-install: inputs built in $inputs"
+    exit 0
 fi
-"$PAX_ROOT/tools/mkinstall" "$inputs/build/install-gate/bin"
+if [ -z "$inputs" ]; then
+    inputs=$work/inputs
+    build_inputs
+else
+    "$PAX_ROOT/tools/mkinstall" "$inputs/build/install-gate/bin"
+fi
 D=$PAX_ROOT/tests/mpx6-install.d
 first=$tier; [ "$tier" != both ] || first=native
 export PAX_INSTALL_TIER=$first
