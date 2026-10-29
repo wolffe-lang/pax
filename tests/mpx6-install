@@ -21,7 +21,7 @@ while [ $# -gt 0 ]; do
         --rows) rows=$2; shift 2 ;;
         --tier) tier=$2; shift 2 ;;
         --firmware) firmware=$2; shift 2 ;;
-        *) die 'usage: mpx6-install [--only ci|planner|inventory|snapshot|ui|executor|prepare|noserial] [--work DIR] [--inputs LANE] [--rows smoke|full] [--tier native|release|both] [--firmware bios|uefi|both]' ;;
+        *) die 'usage: mpx6-install [--only ci|planner|allow|inventory|snapshot|ui|executor|prepare|noserial] [--work DIR] [--inputs LANE] [--rows smoke|full] [--tier native|release|both] [--firmware bios|uefi|both]' ;;
     esac
 done
 case $tier in native|release|both) ;; *) die 'bad tier' ;; esac
@@ -31,11 +31,11 @@ mkdir -p "$work"; work=$(cd "$work" && pwd)
 unit() {
     local mode=$1
     "$PAX_ROOT/tools/mkinstall" "$work/bin" "$mode"
-    if [ "$mode" = planner ]; then "$work/bin/pax-planner"
+    if [ "$mode" = planner ] || [ "$mode" = allow ]; then "$work/bin/pax-$mode"
     else python3 -I "$PAX_ROOT/tests/mpx6-install.d/$mode.py" "$work/bin/pax-$mode" "$work/$mode"; fi
 }
 case $only in
-    planner|snapshot|ui|executor|prepare) unit "$only"; exit ;;
+    planner|allow|snapshot|ui|executor|prepare) unit "$only"; exit ;;
     inventory)
         [ -f "$kernel" ] || die 'inventory needs --kernel ELF'
         "$PAX_ROOT/tools/mkinstall" "$work/bin"
@@ -64,7 +64,7 @@ case $only in
     ci) ;;
     *) die 'unknown suite selection' ;;
 esac
-for mode in planner ui snapshot executor prepare; do unit "$mode"; done
+for mode in planner allow ui snapshot executor prepare; do unit "$mode"; done
 export PAX_WOLF
 PAX_WOLF=$("$PAX_ROOT/tools/fetch-wolf")
 export SOURCE_DATE_EPOCH=1700000000
