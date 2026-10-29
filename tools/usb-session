@@ -28,10 +28,14 @@ def run(args):
            '--usb-kbd=' + args.topology, '--serial', str(serial),
            '--timeout', '120', str(Path(args.image).resolve()), '--',
            '-qmp', f'unix:{sock},server=on,wait=off']
+    # px76: tools/qemu-run's own flags (--no-pit, --usb-irq=msi,
+    # --high-bar, --display-mode=WxH), before the image.
+    for flag in reversed(args.flag):
+        cmd.insert(1, flag)
     if args.no_serial:
         if args.linux_kernel: raise RuntimeError('--no-serial is the PAX memory-log witness only')
         cmd.insert(1, '--no-serial')
-        elf=Path(args.image).resolve().parent/'kmain_console.elf'
+        elf=Path(args.elf).resolve() if args.elf else Path(args.image).resolve().parent/'kmain_console.elf'
         symbols=subprocess.check_output(['nm',str(elf)],text=True)
         addresses={name:int(address,16)-(1<<64) for address,kind,name in
                    (line.split() for line in symbols.splitlines() if len(line.split())==3)
@@ -221,4 +225,6 @@ if __name__ == '__main__':
     parser.add_argument('--reference')
     parser.add_argument('--no-serial', action='store_true')
     parser.add_argument('--qemu', action='append', default=[], help='one extra QEMU argument, repeatable')
+    parser.add_argument('--flag', action='append', default=[], help='one tools/qemu-run flag, repeatable (px76)')
+    parser.add_argument('--elf', help='--no-serial: the kernel whose symbols place the transcript (default: kmain_console.elf beside the image)')
     run(parser.parse_args())
