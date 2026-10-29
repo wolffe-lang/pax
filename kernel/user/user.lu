@@ -1735,8 +1735,10 @@ fn outb(port: u64, v: u64) {
 /// SIGKILL: R-px67-4), the volumes written, marked clean and flushed in
 /// the reverse of the order they were mounted, `/` last (kernel/tree's
 /// `halt_volumes`), this module's `end_line`, and the reset
-/// (`end_reset`) or the halt (PAX has no ACPI, so QEMU is not powered
-/// off). CAD_ON and CAD_OFF answer 0 and change nothing (no
+/// (`end_reset`: kernel/power's FADT reset register, then port 0xCF9,
+/// then a triple fault; px76), ACPI S5 for CMD_POWER_OFF (kernel/power,
+/// px76: the machine powers off) or the halt for CMD_HALT. CAD_ON and
+/// CAD_OFF answer 0 and change nothing (no
 /// Ctrl-Alt-Del is seen); any other command -EINVAL. A user is -EPERM
 /// and a bad magic -EINVAL first (kernel/process's `root_call`, px45's
 /// rows).
@@ -1954,10 +1956,12 @@ pub fn end_line(e: u64) {
     log.end()
 }
 
-/// px63: the reset reboot(2) asks (px67: kmain_console's, at the end):
-/// the reset control register (port 0xcf9: 0x02 then 0x06, a hard reset,
-/// Intel's ICH9 datasheet §13.7.5, q35's), then the keyboard
-/// controller's reset line (port 0x64, 0xfe), then a triple fault.
+/// px63: the reset reboot(2) asks (px67: kmain_console's, at the end).
+/// px76: kernel/power's, each step logged: the FADT's reset register
+/// (ACPI 6.5 §4.8.3.6), then the reset control register (port 0xcf9:
+/// 0x02 then 0x06, Intel's ICH9 datasheet §13.7.5, q35's), then a triple
+/// fault. The keyboard controller's reset line is gone: kasumi has no
+/// 8042 to pulse.
 pub fn end_reset() -> never {
     power.reboot()
 }
