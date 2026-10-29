@@ -18,7 +18,7 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
 | Programs | Static x86-64 ELF run in ring 3 with Linux's syscall numbers; `fork`, `execve`, `#!` lines, threads (`clone3`, `futex`), signals with the full frame restored, job control and sessions; a fixed 1 MiB initial stack | the same binaries on Linux, byte for byte |
 | Users | `root`, `pax` and the service account `lobo`; real, effective, saved and file-system ids; every path walk, mode, owner and signal checked by Linux's rules; `su` in wolf; no passwords yet | Linux as root and as a user |
 | Files | A writable in-memory tree seeded from the initramfs: links, modes, times, holes, `rename`; `mmap` private and shared, `mremap`, FIFOs, `flock`; `/dev`, `/proc`, `/sys`, `/tmp` | Linux's tmpfs in a throwaway container |
-| Disks | Up to four disks: virtio, NVMe (`nvme0n1`, major 259), or SATA AHCI (`sda`, major 8, LBA48), with GPT or MBR tables and `/dev` nodes; ext2 read and written, file data past 2 TiB on virtio and NVMe; ext3's journal written and replayed; `/` on the disk, `mount(2)`, `/etc/fstab`; an offline `fsck.ext2` in wolf | Linux 7.3.0 under QEMU (NVMe and AHCI: 7.2.4) and e2fsprogs |
+| Disks | Up to four disks: virtio, NVMe (`nvme0n1`, major 259), or SATA AHCI (`sda`, major 8, LBA48), with GPT or MBR tables and `/dev` nodes; ext2 read and written, file data past 2 TiB on every bus; ext3's journal written and replayed; `/` on the disk, `mount(2)`, `/etc/fstab`; an offline `fsck.ext2` in wolf | Linux 7.3.0 under QEMU (NVMe and AHCI: 7.2.4) and e2fsprogs |
 | Network | virtio-net, ARP, IPv4, ICMP, UDP, TCP (RFC 9293, 6298, 5681), Unix sockets, `poll`, `epoll`, `eventfd`; 256 TCP connections | Linux in a namespace, and captures rebuilt byte by byte |
 | Console | A 16550 serial console, the PS/2 keyboard and USB keyboards over xHCI, one line discipline; a framebuffer console of 160×50 cells with the Linux VT's colours and 560 glyphs | typed sessions on a Linux pseudo-terminal; screendumps against a reference renderer |
 | Sound | The PC speaker through Linux's console ioctls; virtio sound behind OSS `/dev/dsp`; `/bin/play`, an orchestra of 17 timbres | QEMU's capture, every pitch within 1% |
@@ -292,7 +292,7 @@ Three programs in wolf write disks, built as static Linux executables and run un
 
 `paxext2` formats volumes through 16 TiB less one 4 KiB block, with fully initialized inode tables and sparse
 superblock backups. Its large-volume inode density follows Linux's defaults. File data beyond 2 TiB is written and
-read back through both virtio and NVMe, with the same bytes read by a Linux guest.
+read back through virtio, NVMe and AHCI, with the same bytes read by a Linux guest.
 
 The tests compare each tool's output with the host's, then build a second disk entirely on PAX through its `/dev/vdb`
 node and boot it alone under SeaBIOS and OVMF. Limine's pinned installer is linked statically with no source change,
