@@ -1,0 +1,39 @@
+PHOTOS
+0. Take a phone VIDEO from the Limine menu to the login prompt. Without a serial port the screen is the only
+   record, and about 380 lines scroll past; the firmware, ACPI, clock, xHCI and disk lines will have
+   scrolled off by the login prompt. Then the photos below.
+1. The Limine menu before its countdown ends: 101e7761/01-limine-menu.png ("Limine 12.9.1 (x86-64, UEFI)",
+   "PAX live (root, no password)", "Booting automatically in 3..."). Let the default boot. Do not press E
+   (the qualification used Limine's editor only to test another screen mode).
+2. The last boot screen before the login, and the video's frames of the early lines.
+   101e7761/02-last-boot-line.png is the moment the first program starts: firmware:, memory:, the acpi:
+   lines, clock:, timer:, console: com1 absent, xhci N: BAR0 ... / ports 8 MSI vector 8N ..., ahci0:,
+   nvme0:, block:, "PAX: kernel 101e7761...; release 98bbabc6", "xhci: keyboard ...", "run 1: /bin/pelt".
+   On kasumi expect instead: its board vendor on firmware:; its own ACPI tables (not BOCHS); clock: HPET
+   ... checked against the PM timer; timer: LAPIC calibrated by HPET; perhaps "apic: x2APIC mode ..."
+   (the first witness of that path); screen: <the mode kasumi's firmware left> (at 2x if wider than 2560);
+   console: com1 absent; for each xHCI a BAR0 above 4 GiB and "ports N MSI vector 8N"; "ahci0: 8086:43d2
+   at 00:17.0, ..." and "ahci1: 1b21:0612 at 6e:00.0, ..."; "sda model "Samsung SSD 870 EVO 4TB" serial
+   ..." and sdb the SanDisk; nvme0: 144d:a80c ...; their block: lines. Photograph any line that says
+   refused, INTx, timeout, FAIL or PANIC, or that a controller has no line at all (an Intel controller in
+   RST/RAID mode prints none). If the boot stops, photograph the whole screen: its last line names where.
+3. The login prompt before typing: 101e7761/03-login.png (1280x800) and 03-login-3840x2160.png (a 4K mode):
+   "PAX live medium: log in as root (no password)." then "login:".
+4. Type root and Enter. NEW: the keyboard is expected to work (MSI). If nothing appears, photograph the
+   screen and note which USB port the keyboard is in. The video tells the next lane which failure it is:
+   no "xhci: keyboard ..." line means the keyboard was never found; the line present but no typing means
+   its interrupts do not arrive.
+5. Type, in order: uname -a (exits 1, wolf-lang#907, expected), cat /etc/pax-release (kernel 101e7761...),
+   ls /dev (NEW: sda and sdb beside nvme0n1). Photograph: 101e7761/04-after-commands.png.
+   Then pax-install --inventory and photograph: 101e7761/05-disk-listing.png (05-disk-listing-3840x2160.png
+   at 4K). NEW: one row per disk with "model=... serial=...": /dev/nvme0n1 (the CachyOS NVMe), /dev/sda (the
+   Samsung 870 EVO 4TB), /dev/sdb (the SanDisk 512G), each "mounted=false root=false". It only reads.
+6. The end. There is no `poweroff` on this image ("pelt: line 104: poweroff: not found"): PAX's only end
+   command is `reboot`, which asks for a restart, or a halt given any argument. The kernel's S5 path works
+   (101e7761/06-poweroff.png, "poweroff: ACPI S5 types 0/0", reached under a debugger) but nothing typed
+   can ask for it yet. So type: reboot -h
+   The end summary stays on the screen (101e7761/07-halt.png): one block: line per disk with
+   "0 writes (0 sectors), 0 flushes", the NVMe "shut down", then "halt". PHOTOGRAPH IT: it is the
+   no-write witness on metal. Then hold the power button to turn kasumi off.
+   (`reboot` alone restarts at once through the FADT reset register; its summary is gone before it can be
+   photographed.) If any block: line shows writes above 0, photograph it and stop.
