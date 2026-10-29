@@ -201,6 +201,24 @@ past-2-TiB leg on AHCI is owed by whichever lane lands after both. The
   SSD's speed: 62.5 GB is about two minutes at 500 MB/s.
 - **R-px84-4** was withdrawn on 2026-10-28: the installer writes no
   journal.
+- **R-px84-6 (A): size the installer's limit, do not move the row.**
+  The labelled run 40817980461 was not red on any row. Its mpx6-install
+  job was cancelled by the 60-minute `tier full` limit at 05:32:40Z,
+  25 s after `PASS I-fault-limine`. Not yet reached were I-fault-invalid-manifest and
+  I-fault-enospc (40–59 s on runners), the full rows (277–418 s) and the
+  500 GB row (438 s, scaled from kasumi's 262 s by the runner's 1.669).
+  Most of that hour was the inputs build: 3141 s, 1701 s of it yew's
+  build alone, against 99–1488 s for yew in four earlier runs.
+  - (A), implemented: limits of 110 min in `tier full`, 175 in `tier
+    all` and 60 in `tier pr`. These are 40% over sizing floors of
+    4675 s, 7438 s and 642 s (`tests/ci-budgets.d/install.json`, checked
+    by `tests/ci-budgets.py` in the plan job).
+  - (B), moving the 500 GB row to `tier all` and keeping 60, fails on
+    the same numbers: without the row the full floor is still 4237 s,
+    past 3600 s even with no headroom.
+  - The old `tier all` limit of 120 was short too: 7438 s against 7200 s.
+  - The check was red at the old limits and green at the new
+    (`notes/px84/regress/r10-budget-red.log`, `r10-budget-green.log`).
 - **R-px84-5: fsck at size goes to a second PR.** That PR is a
   bitmap-based checker: one bit per block for ownership, 128 MiB at
   4 TB. Meanwhile the checker refuses big volumes by name (§4.1). Item
@@ -243,16 +261,15 @@ past-2-TiB leg on AHCI is owed by whichever lane lands after both. The
     and real `e2fsck`; the Linux round trip is the lane's local evidence.
 - **mpx6-install**: `PAX_INSTALL_BIG_ROWS` is `none` in `tier pr`,
   `500gb` in `tier full` (the merge gate), and both 500 GB and 4 TB in
-  `tier all`. The job's budget is 120 minutes in `tier all`, 60
-  otherwise. The big installs use QEMU's
+  `tier all`. The job's budget is 60 minutes in `tier pr`, 110 in
+  `tier full` and 175 in `tier all` (R-px84-6). The big installs use QEMU's
   `detect-zeroes=unmap,discard=unmap` on the sparse backing file. That
   bounds the runner's disk, not the guest's writes: every inode table is
   still written by the guest.
-- **Headroom.** The merge gate's mpx6-install took 19.5 and 45 minutes in
-  the last two `tier full` runs (40532219747, 40620130831). The 500 GB
-  row adds about 4–5 minutes on kasumi and more on a runner. If the
-  merge gate ever passes 60 minutes, the full tier's budget is the line
-  to move.
+- **Headroom.** Before px84, the merge gate's mpx6-install took 19.5 and
+  45 minutes (40532219747, 40620130831). px84's first labelled run
+  needed more than 60 and was cut (R-px84-6). The phase table is in
+  `tests/ci-budgets.d/README.md`.
 
 ### 4.6 The final regression, at `09f8fd3d` (kasumi, cores 4–7)
 
@@ -282,6 +299,7 @@ scripts are in `notes/px84/regress/rig/`.
 | r7 | the 4Kn row against the planted planner | red as planted (§4.4) |
 | r8 | `mke2fs -n` density probe | R-px84-2's table (§4.3) |
 | r9 | `mpx6-root --fstype ext2` with `PAX_EXT2_WRITER` set to paxext2, CI's step in the same job | PASS; 1 SKIP by design (R8: ext2 has no journal; R8e is its crash row) |
+| r10 | `tests/ci-budgets.py` against the old and the new workflow (R-px84-6; on the Mac, pure Python) | old: full and all FAIL (3600 s < 6545 s, 7200 s < 10414 s); new: PASS on all three tiers |
 
 r2's ext2 step (`r2-disktools.log`), r4 (`r4-fsck.log`) and r5
 (`r5-install.log`) failed on the rig, not the code: no engine for
@@ -316,6 +334,8 @@ All of it is under `notes/px84/`:
 - [x] The prediction committed first and scored (§3).
 - [x] The final regression of the storage suites and the installer at
   the head's code (§4.6).
+- [x] R-px84-6: the installer's limits sized from the cut run's phases;
+  the budget check seen red at the old limits, green at the new.
 - [ ] The PR's `tier pr` run green at the head; the orchestrator labels
   `full-matrix` and watches `tier full`.
 
