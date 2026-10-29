@@ -4470,7 +4470,9 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-install')
     runs-on: ubuntu-24.04
     # px84 (R-px84-6): sizing floors pr 642 s, full 4675 s (with the 500 GB
-    # row), all 7438 s (with 4 TB), 40% headroom; see ci-budgets.
+    # row), all 7438 s (with 4 TB), 40% headroom; see ci-budgets. px76's
+    # serial-less install (all tier only) is a step of its own, bounded at
+    # 15 minutes, inside the all tier's 175.
     timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 175 || needs.plan.outputs.tier == 'pr' && 60 || 110 }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
@@ -4506,6 +4508,10 @@ jobs:
           persist-credentials: false
       - name: guided installer, independent readback and persistent target sessions
         run: tests/mpx6-install $PAX_LEGS
+      - name: the unattended install with no serial port, native UEFI (px76, tools/qemu-halt --no-serial; the all tier)
+        if: needs.plan.outputs.tier == 'all'
+        timeout-minutes: 15
+        run: tests/mpx6-install --only noserial --inputs "$PWD/build/mpx6-install/inputs"
       - name: keep installer phase logs, byte-range proofs and oracle verdicts
         if: always()
         uses: actions/upload-artifact@v4
