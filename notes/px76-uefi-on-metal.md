@@ -2,7 +2,7 @@
 
 Contract: `wolf/sprints/pax/76-uefi-on-metal/px76-uefi-on-metal.md` (P6, crawl 54), with its
 2026-10-28 addendum on `kernel/clock`. Started by a Codex lane (GPT-6-Astra) on base `6ccfe3fe`,
-which stopped at `8cad05e4` with uncommitted work when its weekly limit ran out (2026-10-29
+which stopped at `8cad05e4` (`5f0f847a` after the rebase) with uncommitted work when its weekly limit ran out (2026-10-29
 ~03:00Z); finished by Opus from that state. Footprint: cross-cutting (the kernel's core, CI, the
 harness's `tools/qemu-run`).
 
@@ -19,9 +19,16 @@ attribution trailers.
 
 ## Inputs, verified
 
-- Base `6ccfe3fe` (pax trunk at launch). Trunk has since gained only px77a's notes (`a86fdca6`,
-  `a39732a4`, `96b7f90f`: `notes/px77a*` alone); no rebase was made without the orchestrator's
-  merge head, so the branch is not yet a fast-forward of trunk.
+- Base `6ccfe3fe` (pax trunk at launch); rebased once, on the orchestrator's merge head, onto
+  `10a27451` (px75b's merge, after px84's `ad732049` and px77a's notes). Every branch sha in this
+  note is the rebased commit; the kasumi runs before the rebase (`broad1`, `fw1b`, `final`, `inst2`,
+  `ka`, the plants) ran at their pre-rebase twins, paired by subject in
+  `notes/px76/rebase-map.txt`; `verify` ran at the rebased head (below). The rebase's conflicts:
+  `tools/qemu-run`'s header (px75b's `--ahci`/`--boot-ahci` beside px76's flags), the tier map, the
+  planner's proof, `docs/BOOT.md` and `docs/SOURCES.md` (both sections kept), the installer's
+  `install.py` (px84's 4Kn and sparse targets, then `PAX_INSTALL_NOSERIAL`'s `--no-serial`) and
+  `mpx6-install`'s job bound (px84's 60/110/175 kept; the serial-less step's own 15 minutes fit
+  inside the all tier's 175).
 - wolf 0.2.35 (`cf0c13d38479f444b69bb8356ad5709d07eff323`), archive SHA256
   `4cc4045bbbb605c07835bc4f32685953c784eeef4cd3139a48b457dfc90dad1a` (`kernel/wolf.pin`; the
   staged archive's `.verified` digest in `/mnt/steamlib/lanes/px76/cache/wolf-0.2.35/`, read
@@ -32,7 +39,7 @@ attribution trailers.
   `taskset -c 12-15`; everything under `/mnt/steamlib/lanes/px76/` (`job.sh`, `jobw.sh`,
   `batch.sh`, `steps.sh`, `measure.sh`, `runs/`). No build on the Mac (git only). `lope` at its
   pin `e6f623c7` copied from px84's clone (copy only).
-- **The takeover.** At `8cad05e4` the Codex lane left 27 modified and 5 untracked files. Every one
+- **The takeover.** At `5f0f847a` the Codex lane left 27 modified and 5 untracked files. Every one
   was read before it was committed or set aside; the kasumi clone matched the Mac tree file for
   file (sha256 of 5,554 paths) but for the notes, README, `docs/SOURCES.md` and one comment. Its
   push-triggered plant workflow (`.github/workflows/px76-plants.yml`) was set aside, not committed:
@@ -42,19 +49,19 @@ attribution trailers.
   - the tour triple-faulted at its first pause (`tour` R1-R7): `stage_boot` still called
     `timer.start()`, which now calibrates the LAPIC against a clock that needs paging and the
     APIC, and `pause_early` read a clock never started (a division by its zero period).
-    `fa0d4224`, `5747428f`; R1-R7 pass (headings 3.0 s apart).
+    `3c5fe778`, `e5e8136e`; R1-R7 pass (headings 3.0 s apart).
   - `mpx1` A6: `serial.init()` re-attached the early screen through Limine's framebuffer mapping on
     every call, which page-faults once PAX's paging runs (the spin variant calls it in a loop).
-    `24b9cf2c`.
+    `cb0a2a7d`.
   - `mpx3-screen` V4: the serial log of a screen boot and a screenless one now differ in the
     `memory:` line (Limine lists the framebuffer), the DSDT's length (QEMU's VGA adds AML) and the
-    calibrated rate. `5f225d35` folds exactly those.
+    calibrated rate. `9f107e17` folds exactly those.
   and two it would have made in CI: `kmain_timer` and the tour printed the timer line twice, and
-  `mpx2-interrupts` I5's four-line tail had the ACPI lines inside it (`3ee9148c`).
+  `mpx2-interrupts` I5's four-line tail had the ACPI lines inside it (`b781e3fd`).
 
 ## Prediction
 
-Committed before the first change in `b0cf8206` (`notes/px76-prediction.txt`), scored:
+Committed before the first change in `e7437080` (`notes/px76-prediction.txt`), scored:
 
 | predicted | measured |
 |---|---|
@@ -66,7 +73,7 @@ Committed before the first change in `b0cf8206` (`notes/px76-prediction.txt`), s
 | OVMF needs a large 64-bit window and RAM above 4 GiB for a high BAR | **wrong**: Ubuntu's OVMF already places QEMU's 64-bit BARs above 4 GiB (the xHCI's at `0xc020000000` with 256 MiB or 8 GiB); the window (`opt/ovmf/X-PciMmio64Mb`) only moves them (`0x1010000000` at any memory size) and RAM plays no part; SeaBIOS keeps them below 4 GiB (`measure.sh`, `docs/SOURCES.md`) |
 | 4K from VGA `xres`/`yres` and Limine's `resolution:`; padding needs a synthetic framebuffer | right (F5, F8 at 3840x2160; F4's synthetic 68-byte pitch) |
 | about 40 boot lines before login | wrong by an order: px77a's live stick drew **358** rendered lines before `login:` (309 scrolls and 49 rows); F8's console probe draws 40 lines before its first program (`run 1: /bin/usbkeys` is line 41 of its 93): the kernel's own boot is the predicted size |
-| the absent UART's receive drain hangs; xHCI's bootstrap polls PIT reloads | right, both: `f1f8137b` (px77a: stock trunk stalls at `user: syscall star` with `-serial none`; this commit alone reaches `login:`), `10b460f8` |
+| the absent UART's receive drain hangs; xHCI's bootstrap polls PIT reloads | right, both: `05a27531` (px77a: stock trunk stalls at `user: syscall star` with `-serial none`; this commit alone reaches `login:`), `317a52d0` |
 
 ## Evidence index
 
@@ -111,12 +118,13 @@ Committed before the first change in `b0cf8206` (`notes/px76-prediction.txt`), s
   memory map's numbers to `<n>`, the BGRT's line left out, every other line (PAX's own) compared
   byte for byte; (B) leave every `firmware:`, `memory:` and `acpi:` line out of V4; (C) record a
   golden with CI's pinned OVMF (does not apply: no golden exists, and both boots already share the
-  firmware). Recommended and implemented: **A** (`68d753ab`): it keeps each line's presence and
-  shape, and a PAX line that changes is still named in the row's diff.
+  firmware). Recommended and implemented: **A** (`466ebfec`): it keeps each line's presence and
+  shape, and a PAX line that changes is still named in the row's diff. **Ruled A** (the
+  orchestrator, with px75b's merge head).
 - **R-px76-10, the 16-bit port instructions clef lacks** (the first `tier all` run's `kernel-as`
   K5 red, below). `kernel/power` reads and writes the 16-bit PM1 control registers (ACPI 6.5
   §4.8.3; `power_off` requires the FADT's PM1_CNT_LEN, byte 89, to be at least 2) through
-  `pax_inw` and `pax_outw` (`b924da22`, the Codex lane's), `inw %dx, %ax` and
+  `pax_inw` and `pax_outw` (`2d99836c`, the Codex lane's), `inw %dx, %ax` and
   `outw %ax, %dx` (Intel SDM vol. 2 IN and OUT with the 66h operand-size prefix; GNU as encodes them
   `66 ed` and `66 ef`). clef at `user/clef.pin` (`996a3ccd`) has `inb`, `inl`, `outb` and `outl`
   but neither word form (`unknown_mnemonic inw`, `unknown_mnemonic outw`: `runs/clefprobe.log`),
@@ -124,8 +132,24 @@ Committed before the first change in `b0cf8206` (`notes/px76-prediction.txt`), s
   user/clef.pin moves; (B) spell the two as `.byte` in `boot/io.S` (papers over the gap: not
   recommended); (C) reach PM1 control a byte at a time (changes the register's access width on
   metal: not recommended without a citation that allows it). Recommended: **A**; the instructions
-  are kept. `xorq %rax, %rax` (also unknown to clef) was not needed: `e42d2e39` writes `xorl %eax,
-  %eax`, the same zeroed `%rax` (SDM vol. 1 §3.4.1.1).
+  are kept. `xorq %rax, %rax` (also unknown to clef) was not needed: `4935e753` writes `xorl %eax,
+  %eax`, the same zeroed `%rax` (SDM vol. 1 §3.4.1.1). **Ruled A**: clef fixed (clef#10, as02c,
+  merged at `b71b43f4`), never spelled in bytes; `user/clef.pin` moves there (`e9cf674b`).
+- **px75b's clock shim, deleted at the merge** (px76 merges second; the 2026-10-28 addendum).
+  `kernel/ahci`'s waits move from `kernel/ahci_clock` (the 8254's channel 0) to `kernel/clock`,
+  the same five names (`a9a05e2f`), and the shim is deleted (`47a9e70a`; its map rule `9cb8da27`,
+  the planner's row `0a9ab24a`). R-px75b-7's refusal is narrowed, not dropped: a controller is refused by name
+  only where no clock source advances at all (no HPET, no PM timer, no counting PIT), which
+  `clock.start` now reports as `clock: none: the HPET, the PM timer and the PIT do not advance`
+  instead of panicking (`a5edeeec`); kernel/timer then stops by name (`36bf3e94`), since no tick
+  can be calibrated, so only a disk-only kernel boots on to the refusal. A gated or absent 8254
+  alone no longer stops AHCI. px75b's row A13 (`pit=off`) now asserts the opposite of its old
+  refusal, on both firmwares: `clock: HPET …`, `sda` named, no refusal, the session ran; the new
+  row A14 keeps the refusal witnessed on the one machine QEMU can make with no clock (OVMF under
+  `-machine acpi=off,pit=off`: no HPET table, no FADT, no counting PIT), with `kmain_blk`
+  (`10cbc5f0`). A14 runs on UEFI on every leg (SeaBIOS supplies its own ACPI tables under
+  `acpi=off`). `kernel/kmain_blk.lu`'s map rule does not name `mpx6-ahci`; a change to it reaches
+  A14 in the all tier.
 
 ### Regression (the mpx suites at the branch, native BIOS, kasumi)
 
@@ -136,7 +160,7 @@ a `BATCH` line), after the three fixes above:
 |---|---|
 | `mpx1`, `mpx2-frames`, `mpx2-paging`, `mpx2-interrupts`, `mpx2-sched`, `mpx2-heap`, `tour` | pass |
 | `mpx3-user`, `mpx3-speaker`, `mpx3-sound`, `mpx3-orchestra`, `mpx5-screen`, `mpx6-blk`, `mpx4-net` | pass |
-| `mpx3-screen` | V4 red before `5f225d35` (the diff in `broad1.log`), then every row passes (`fw1b`) |
+| `mpx3-screen` | V4 red before `9f107e17` (the diff in `broad1.log`), then every row passes (`fw1b`) |
 | `mpx6-games`, `mpx6-usb`, `census` | pass |
 | `mkw`, `kernel-as` | not run in these batches: the container has no `lupin` and no `cargo` (exit 2, a missing tool). `kernel-as` was run after the first `tier all` run's K5 red, with the seam wolf copied from as02b's cache and clef built by `tools/mkclef` (below) |
 | `mpx4-udp`, `mpx4-ready` | not run here: their Linux side needs root for a network namespace (T0/U0: `unshare(CLONE_NEWNET)` refused in the rootless container), so every row compares against nothing; CI runs them as root |
@@ -146,7 +170,7 @@ the users and jobs, the disks' differentials) are CI's, on the PR's own all-tier
 
 ### CI wiring
 
-- The `mpx6-firmware` job (`a15d4175`): `tests/mpx6-firmware $PAX_LEGS`, 90 minutes, its
+- The `mpx6-firmware` job (`04746422`): `tests/mpx6-firmware $PAX_LEGS`, 90 minutes, its
   transcripts, screens and `.meta` kept. In `tier pr` and `tier full` it runs native BIOS (F5 and
   F8 UEFI regardless); in `tier all` both compiler tiers and both firmwares.
 - The long legs in `tier all` only, after each job's own steps, so px83's measured budgets for
@@ -156,18 +180,18 @@ the users and jobs, the disks' differentials) are CI's, on the PR's own all-tier
   and the installer's serial-less row (`mpx6-install --only noserial`, its step 15 minutes, the
   job's bound 60 to 80: 56 minutes in the nightly 40690748340). The clock-less timer and scheduler
   legs (F9) are in the firmware job itself, not in those suites' jobs, for the same budgets.
-- `tools/ci-tiers.map` (`f10a7e02`): `kernel/acpi/*` and `kernel/clock/*` ALL; `kernel/msi/*` the
+- `tools/ci-tiers.map` (`f06c5318`): `kernel/acpi/*` and `kernel/clock/*` ALL; `kernel/msi/*` the
   firmware and USB suites; `kernel/power/*` the six suites whose sessions reboot and the firmware
-  suite; the metal scripts and kernels the firmware suite's. `tests/ci-plan` (`0c807d88`) holds each
+  suite; the metal scripts and kernels the firmware suite's. `tests/ci-plan` (`1bf8e168`) holds each
   rule; the whole proof passes at the head (`final`'s second step: `ci-plan: PASS`).
 - This PR touches FULL paths (`boot/start.S`, `tools/qemu-run`, `tools/qemu-halt`), so its own run is
   `tier all`, every suite on every leg, labelled or not.
 
 ### tests/mpx6-firmware at the head (native, BIOS and UEFI; `final`)
 
-`/mnt/steamlib/lanes/px76/runs/final.log` (copied to `notes/px76/runs/`), at `9b9e4301`, which
+`/mnt/steamlib/lanes/px76/runs/final.log` (copied to `notes/px76/runs/`), at the pre-rebase `9b9e4301` (`c87bea00` after it), which
 the docs and notes commits after it do not touch; the transcripts named below are copied into
-`notes/px76/`. The same rows (F1 without its PIT-only machine) passed at `8dfc0c6b` in `fw1b`, but
+`notes/px76/`. The same rows (F1 without its PIT-only machine) passed at the pre-rebase `8dfc0c6b` in `fw1b`, but
 F9 (below).
 
 - **F1 the clocks**, 11 machines: `clock: HPET 10000000 fs/tick, checked against the PM timer` on
@@ -181,7 +205,7 @@ F9 (below).
   the HPET at 0xfed00000 read directly (`metal: 20 ticks took 194669730 ns by the HPET read
   directly`). `notes/px76/f1/`.
 - **F2** COM1 present and absent on both firmwares: the probe says which; the absent UART's
-  receive setup returns (the drain bounded, `f1f8137b`) and makes no input.
+  receive setup returns (the drain bounded, `05a27531`) and makes no input.
 - **F3** each reboot way alone ends the machine, logged first: `reboot: FADT reset register`
   (q35's register is I/O 0xCF9, value 6), `reboot: port 0xCF9` (entered there),
   `reboot: triple fault` (entered there); `poweroff: ACPI S5 types 0/0` (q35's `\_S5`), QEMU exiting
@@ -212,14 +236,14 @@ F9 (below).
 - **F9** `tests/mpx2-interrupts` and `tests/mpx2-sched` whole, with `--no-hpet` on both firmwares
   and, on UEFI, `--no-pit` and both: every row passes. On BIOS the PIT-less variants are not run:
   SeaBIOS leaves its `Booting from DVD/CD..` unfinished on a PIT-less q35, so the kernel's first
-  line is glued to it and I2's exact first line cannot match (`636f2fab`; red in `fw1b`, the
+  line is glued to it and I2's exact first line cannot match (`e68e2905`; red in `fw1b`, the
   firmware suite's only red there).
 
 ### Plants (contract item 8), red by name
 
-Each is one commit on `ec38768a`, the branch's last code and docs commit (the notes commits after
-it change nothing a suite reads; `plants/cut.sh`'s shape: the plant alone, the worktree
-untouched), pushed as `px76-plant-*` and opened as a draft PR on the px76 branch, so its run is the
+Each is one commit on `ec38768a`, before the rebase (`84f6e008` after it), the branch's last code and
+docs commit then (the notes commits after it change nothing a suite reads; `plants/cut.sh`'s
+shape: the plant alone, the worktree untouched), pushed as `px76-plant-*` and opened as a draft PR on the px76 branch, so its run is the
 planner's `tier pr` for the plant's one path. Both were first run locally in copies of the tree
 (`/mnt/steamlib/lanes/px76/plant-{msi,hpet}/`, logs `runs/plantmsi.log`, `runs/planthpet.log`):
 
@@ -229,19 +253,25 @@ planner's `tier pr` for the plant's one path. Both were first run locally in cop
   it does not: the level-triggered fixed message is delivered as an edge one would be, and
   `PAX_USB_IRQ=msi tests/mpx6-usb --topology root` passes its 18 rows with the plant in
   (`plantmsi.log`'s second step). F6's read-back row is the gate that sees it. CI: draft PR #233
-  (`px76-plant-msi`, `de26eda8` on `ec38768a`), run 40828277795, in progress when read.
+  (`px76-plant-msi`, `de26eda8` on the pre-rebase `ec38768a`), run 40828277795: red in `mpx6-firmware` alone, by name (`FAIL METAL MSI edge fixed data`,
+  `mpx6-firmware: FAIL F6 native bios: MSI layouts exit 35`).
 - **The HPET's period taken as nanoseconds** (`kernel/clock`'s `now_ns`, the femtosecond divisor
   1): `clock: HPET 10000000 fs/tick read 9968790000000 ns across 10 ms of the PM timer; refused`,
   `clock: PM 3579545 Hz`, then `FAIL METAL firmware bios-hpet: the tick was not calibrated by the
-  HPET`. The contract predicted the rate row; the clock's PM check (`544d2858`) refuses the HPET
+  HPET`. The contract predicted the rate row; the clock's PM check (`db3ae0aa`) refuses the HPET
   first, so the row that names it is the calibration's source. `mpx2-interrupts` and `mpx2-sched`
   pass with the plant in (`planthpet.log`): no kernel's tick storms, so the plant's ALL-suite
-  `tier pr` run (R-px76-8) should be red in `mpx6-firmware` alone. CI: draft PR #234
-  (`px76-plant-hpet`, `17efb01c` on `ec38768a`), run 40828281531, in progress when read.
+  `tier pr` run (R-px76-8) was predicted red in `mpx6-firmware` alone; V4 saw it too. CI: draft PR
+  #234
+  (`px76-plant-hpet`, `17efb01c` on the pre-rebase `ec38768a`), run 40828281531: red by name in `mpx6-firmware` (`clock: HPET 10000000 fs/tick read 9964530000000
+  ns across 10 ms of the PM timer; refused`, `FAIL METAL firmware bios-hpet: the tick was not
+  calibrated by the HPET`) and in `mpx3-screen` V4 (the refusal's line carries a measurement, so
+  the screen and screenless boots differ in it: `9960340000000` against `9956400000000`), and in
+  `kernel-as` K5, the branch's own clef gap then (below), not the plant's.
 
 ### The rest at the head (`final`, `inst2`)
 
-- **The serial-less halt** (`tools/qemu-halt --no-serial`, `8b9fc827`'s quoting): `kernel/kmain.lu`
+- **The serial-less halt** (`tools/qemu-halt --no-serial`, `123f670f`'s quoting): `kernel/kmain.lu`
   on UEFI with `-serial none`: `qemu-halt: HALTED in pax_halt (… serial still at 547 bytes …)`, its
   11 lines read from `pax_serial_log` through the monitor's `memsave`, from `PAX first light` to
   `halt` (`notes/px76/noserial/kmain-uefi.transcript.log`). Before the quoting fix the monitor
@@ -265,7 +295,33 @@ planner's `tier pr` for the plant's one path. Both were first run locally in cop
   BAR placement, the window, `-m 34G`, the GOP pitches, `acpi=off` per firmware, SeaBIOS's
   PIT-less line, and TCG's x2APIC refusal.
 
-### The first `tier all` run (40832410617, at `f4fd3449`)
+### The rebased head (`verify`, at `da72fbf9`)
+
+`/mnt/steamlib/lanes/px76/runs/verify.log` (copied to `notes/px76/runs/`), kasumi in
+`localhost/px76-ubuntu`, after the rebase onto `10a27451`, the shim's deletion and the clef pin
+(the commits after it are notes and `kernel/README.md`):
+
+- `tests/ci-plan`: PASS (307 rows); `python3 tests/ci-budgets.py`: every budget passes, px84's
+  `mpx6-install` bounds among them (pr 3600 s, full 6600 s, all 10500 s against their floors).
+- `tests/kernel-as` (the seam wolf copied from as02b's cache, `162cc4b4…`, its runtime the release
+  archive's `6b9c4852…`; clef built by `tools/mkclef` at `b71b43f4`): every row passes; K5 on both
+  tiers: 17 calls through clef, and the clef kernel byte for byte the GNU-as one (native
+  `1865e0b4…`, 3,174,528 bytes; release `60eacc6c…`, 2,463,288 bytes).
+- `tests/mpx6-ahci --tier native --rows pr`, BIOS and UEFI: A0-A10, A13 and A14 pass on both (A11
+  and A12 are the full tier's). A13: `clock: HPET 10000000 fs/tick, checked against the PM timer`,
+  `ahci0: 8086:2922 at 00:02.0 port 0: sda model "QEMU HARDDISK" serial "PX75B-NOPIT" …`, the
+  session ran. A14: `clock: none: the HPET, the PM timer and the PIT do not advance`, then
+  `ahci0: 8086:2922 at 00:02.0: refused: no clock advances (HPET, PM timer or PIT), so no AHCI wait
+  could end` and the same for `ahci1` at 00:1f.2, `disk: no virtio block device among 6 PCI
+  functions`, `halt`.
+- `tests/mpx3-screen --tier native --firmware both`: PASS, V4 on BIOS and UEFI (436 lines).
+- `tests/mpx6-firmware --tier native --firmware both`: F1-F9 pass.
+- `tests/mpx6-install` (the pr rows, with px84's) and `--only noserial`: PASS (`I-noserial`).
+- `tests/mpx5-clef` (the pin selects it): Q1-Q5 pass on all four legs, the package built at the new
+  pin (`usr/bin/clef d11d60f0…`); Q0 and QT need the Linux side's container engine
+  (`linux-tree: no container engine`), which the rootless container does not nest: CI's.
+
+### The first `tier all` run (40832410617, at the pre-rebase `f4fd3449`)
 
 Two reds were the branch's; the plants' runs carried the same two because they sit on it.
 
@@ -274,21 +330,25 @@ Two reds were the branch's; the plants' runs carried the same two because they s
   from the run's `pax-mpx3-screen` artifact, those are the only two differences on either tier:
   the screen boot's OVMF has a GOP and installs a BGRT, the screenless one does not. Every local
   run of `mpx3-screen` had been native BIOS (`broad1`, `fw1b`, `final`), where SeaBIOS's tables do
-  not change, so the UEFI legs were never run here. Fixed by R-px76-9 A (`68d753ab`); on the
+  not change, so the UEFI legs were never run here. Fixed by R-px76-9 A (`466ebfec`); on the
   artifact's own logs the new comparison passes on both tiers and firmwares (436 lines), and a
   changed `clock:` line, a changed FACP length or a missing XSDT line are each named in its diff.
-  The local run of `tests/mpx3-screen --tier both --firmware both` at `e42d2e39` was still running at
-  the hand-back (kasumi job `ka`, `runs/ka.log`, its first suite).
+  At the pre-rebase `e42d2e39` (kasumi job `ka`, `runs/ka.log`) `tests/mpx3-screen --tier both
+  --firmware both` passes every row, V4 on all four legs (436 lines; BIOS `fa75de06…`, UEFI
+  `59e0da3f…`).
 - `kernel-as` K5, both tiers: `clef: Assembly(Failure { … file: ../boot/io.S, line: 86 … reason:
   unknown_mnemonic inw … })` (the run's `pax-kernel-as` artifact, `native/K5/build.log`). clef,
   built here by `tools/mkclef` at `user/clef.pin` (`runs/clefprobe.log`), assembles every other
   `boot/*.S` and refuses three mnemonics the branch added: `inw`, `outw` and `xorq`; each other new
   construct (`subq $16, %rsp`, `movq %rax, (%rsp)` and `8(%rsp)`, `lidt (%rsp)`, `int3`, `jmp` to a
-  global, `xorl`, `movzwl`) encodes as GNU as encodes it. `xorq` is replaced (`e42d2e39`); `inw`
-  and `outw` are kept (R-px76-10). `tests/kernel-as` at the head (K5 expected red at `inw`, line 86)
-  and on a scratch copy with only those two instructions spelled as GNU as's bytes
-  (`/mnt/steamlib/lanes/px76/pax-k5bytes`, never committed: it shows whether anything else stands
-  between K5 and green) were queued in the same job at the hand-back.
+  global, `xorl`, `movzwl`) encodes as GNU as encodes it. `xorq` is replaced (`4935e753`); `inw`
+  and `outw` are kept (R-px76-10). In `ka`, `tests/kernel-as` at `e42d2e39` failed K5 alone on
+  both tiers (at `inw`); on a scratch copy with only those two instructions spelled as GNU as's
+  bytes (`/mnt/steamlib/lanes/px76/pax-k5bytes`, never committed) every row passed, the clef kernels
+  byte for byte the GNU-as ones (native `b964845a…`, 3,122,696 bytes; release `a25142cc…`,
+  2,454,272 bytes): the two word ports were the only gap. R-px76-10 was ruled A: clef#10 (as02c)
+  added `inw`, `outw` and `xorq` at clef `b71b43f4`, with this `boot/io.S` as its fixture, and
+  `user/clef.pin` moves there (`e9cf674b`).
 
 ### Follow-ons (for the orchestrator to file or drop)
 
@@ -308,9 +368,10 @@ Two reds were the branch's; the plants' runs carried the same two because they s
 - [x] `tools/ci-tiers.map` and `tests/ci-plan` carry px76's paths; the planner's proof green.
 - [x] README and `kernel/README.md` refreshed (README-only commits); `docs/SOURCES.md` cites each
   specification.
-- [x] Two plants red by name locally (above), pushed as draft PRs #233 and #234 on the px76 branch;
-  their CI runs read once, in progress (the orchestrator reads their reds).
-- [x] The PR: `Footprint: cross-cutting`; its run read once and the audit run once at the
-  hand-back (their ids and the audit's last line are in the hand-back: this note is committed
-  before the PR exists). The orchestrator labels, watches the full run, rebases or asks for the
-  rebase, and merges; px75b's `kernel/ahci_clock` shim is deleted by whichever lane merges second.
+- [x] Two plants red by name locally and in CI (above), draft PRs #233 and #234 on the px76 branch
+  before the rebase (their diffs are stale against the rebased branch; their runs are read).
+- [x] The PR, #236: `Footprint: cross-cutting`; each head's run id read once and the audit run once
+  at each hand-back (their ids and the audit's last line are in the hand-back, not here). The
+  orchestrator labels, watches the full run and merges.
+- [x] px75b's `kernel/ahci_clock` deleted (px76 merges second), kernel/ahci on kernel/clock, A13 on
+  the firmware clock and A14 the no-clock refusal; clef pinned at as02c's merge, K5 green.
