@@ -276,7 +276,10 @@ AHCI uses one polled command slot per disk, with reads and writes up to 128 KiB 
 Logical sectors must be 512 bytes; 512e disks report their physical sector size through the block ioctls.
 Disk names follow controller and port order, not identity: adding a disk on a lower port can rename later disks.
 AHCI and NVMe expose hardware model and serial strings under `/sys/block/<disk>/device/`; internal spaces in serials
-are preserved. The boot log prints each SATA controller and each disk's port, model, serial, capacity and sector sizes.
+are preserved. A SATA disk's `model` is its whole ATA model, where Linux shows the first 16 characters (its SCSI
+product field). The boot log prints each SATA controller and each disk's port, model, serial, capacity and sector sizes.
+AHCI's waits run on the 8254 PIT until the shared clock lands; on a machine whose PIT does not count, each AHCI
+controller is refused by name and the boot goes on without its disks.
 No SATA hotplug, NCQ or interrupt-driven completion is implemented.
 
 Three programs in wolf write disks, built as static Linux executables and run unchanged on PAX:
