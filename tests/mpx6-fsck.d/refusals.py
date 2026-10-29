@@ -26,6 +26,24 @@ for args, code in [([], 16), (['-ny', missing], 16), (['-y', missing], 8),
     p = run([checker, *args])
     assert p.returncode == code and not missing.exists(), (args, p.returncode, p.stdout)
 print('PASS usage: exact statuses, missing repair target not created')
+# Capacity is a named resource refusal before any owner map allocation,
+# journal replay or repair. These bounded superblock witnesses must not
+# require a multi-terabyte backing file merely to reject its geometry.
+for name, blocks, inodes, bpg in [('blocks',4194305,16,32768),
+                                 ('inodes',2048,1048577,32768),
+                                 ('groups',4104,8208,8)]:
+    image=work/('capacity-'+name+'.img')
+    before=bytearray(4096)
+    for off,value,width in [(56,61267,2),(24,2,4),(4,blocks,4),(0,inodes,4),
+                            (32,bpg,4),(40,16,4),(76,1,4),(88,256,2),(84,11,4)]:
+        struct.pack_into('<H' if width==2 else '<I',before,1024+off,value)
+    image.write_bytes(before)
+    for mode in ['-n','-y','-p']:
+        result=run([checker,mode,image])
+        assert result.returncode==4 and b'unsupported: volume exceeds checker capacity' in result.stdout,(name,mode,result.returncode,result.stdout)
+        assert image.read_bytes()==before,(name,mode,'modified refused image')
+        (work/('capacity-'+name+mode+'.log')).write_bytes(result.stdout)
+    print('PASS F-capacity-'+name+': named, byte-unchanged refusal before allocation')
 for name in ['group-free-count', 'block-bit-cleared', 'link-count', 'cross-linked-block']:
     initial = work.parent/'corpus'/(name+'.img')
     a, b = work/(name+'.oracle'), work/(name+'.wolf')
