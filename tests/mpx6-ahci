@@ -99,7 +99,8 @@ if [ "$record" = 1 ] || [ "${PAX_LINUX:-}" = live ]; then
     sums "$W/linux/disks" > "$W/linux/images.sha256"
     if [ "$record" = 1 ]; then
         mkdir -p "$D/linux"
-        awk '/^AHCI BEGIN inventory$/{on=1} on{print} /^AHCI SESSION END$/{exit}' "$W/linux/session.log" > "$D/linux/session.log"
+        serial_norm "$W/linux/session.log" | awk '/^AHCI BEGIN inventory$/{on=1} on{print} /^AHCI SESSION END$/{exit}' > "$D/linux/session.log"
+        grep -qx 'AHCI SESSION END' "$D/linux/session.log" || die "incomplete recorded inventory session"
         cp "$W/linux/images.sha256" "$D/linux/"
         cp "$W/linux/guest/meta" "$D/linux/meta"
     fi
