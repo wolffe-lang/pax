@@ -29,6 +29,7 @@ if [ "$tier" = both ] || [ "$firmware" = both ]; then
 fi
 case $firmware in bios|uefi) ;; *) die 'firmware: bios or uefi' ;; esac
 case $tier in native|release) ;; *) die 'tier: native or release' ;; esac
+echo "mpx6-ahci: leg $tier $firmware, rows $rows"
 mkdir -p "$W/bin" "$W/$tier" "$W/linux"
 
 # Separate controllers, holes in both port maps, plus NVMe. Every device
@@ -105,7 +106,7 @@ if [ "$record" = 1 ] || [ "${PAX_LINUX:-}" = live ]; then
         cp "$W/linux/guest/meta" "$D/linux/meta"
     fi
 else
-    echo 'LOUD: using recorded Linux guest (no readable host kernel); see tests/mpx6-ahci.d/linux/meta'
+    echo "LOUD: the Linux side is the recorded guest ($(head -n 1 "$D/linux/meta")); PAX_LINUX=live or --record boots one"
     cp "$D/linux/session.log" "$D/linux/images.sha256" "$W/linux/"
 fi
 [ "$only" != linux ] || exit 0
@@ -152,4 +153,4 @@ diff -u "$W/$tier/$firmware/no-write.before.sha256" "$W/$tier/$firmware/no-write
 cat "$W/$tier/$firmware/no-write.after.sha256"
 echo 'PASS A6-no-write: live login and installer inventory; three AHCI and one NVMe images unchanged'
 . "$D/extended"
-echo 'mpx6-ahci: PASS'
+echo "mpx6-ahci: PASS ($tier $firmware)"
