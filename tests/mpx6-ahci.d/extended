@@ -120,6 +120,17 @@ grep -x 'PASS ahci-check: command timeout, stale task-file, TFES and completion'
 grep -x 'PASS ahci-check: 4Kn refused; 512e sector sizes decoded' "$E/reset.norm"
 echo 'PASS A10-HBA-reset: optional HR and the default per-port initialization both boot'
 
+# R-px75b-7: every AHCI wait is a deadline on kernel/ahci_clock's PIT. On a
+# machine whose 8254 does not count (QEMU's pit=off here; px76's contract:
+# kasumi's PCH can gate it) each controller is refused by name, no disk is
+# named, and the boot goes on to the session instead of waiting forever.
+make_session nopit $'echo AHCI-ROW-END'
+pax_row nopit --qemu -machine --qemu pit=off --ahci "$E/sector.img,serial=PX75B-NOPIT"
+n=$(grep -cE '^ahci[0-9]+: 8086:2922 at [0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: refused: the 8254 PIT does not count, so no AHCI wait could end$' "$E/nopit.norm" || true)
+[ "$n" = 2 ] || { echo "FAIL A13-no-pit: $n controllers refused by name, not 2 (the disk's and q35's own)"; exit 1; }
+! grep -E '^(block: sd|ahci[0-9]+: .* port )' "$E/nopit.norm" || { echo 'FAIL A13-no-pit: a port was driven without a clock'; exit 1; }
+echo 'PASS A13-no-pit: both controllers refused by name without a counting PIT; the session ran'
+
 if [ "$rows" = all ]; then
     make_session speed $'/bin/nvme speed /dev/sda 1024\necho AHCI-ROW-END'
     ram=${PAX_AHCI_RAM:-$E}
