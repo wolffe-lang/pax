@@ -164,7 +164,7 @@ Witnesses (sha256 over the allocated extents, before = after):
 - pax#241, on hasu: each of `mpx6-{ext2,nodes,nvme,root}`'s parsers given a missing log ends
   `FAIL the guest left no log: …` with exit 1; `kernel_readable` under `PAX_LINUX=recorded` returns nothing in
   all six disk suites while a kernel is readable.
-- `python3 tests/ci-plan`: PASS (310 checks), with the kasumi leg's rows; `python3 tests/ci-budgets.py`: PASS.
+- `python3 tests/ci-plan`: PASS (310 rows), with the kasumi leg's rows; `python3 tests/ci-budgets.py`: PASS.
 
 ### 4.4 Seen red
 
@@ -197,8 +197,9 @@ Witnesses (sha256 over the allocated extents, before = after):
   booted to the live login under TCG on a GitHub runner four minutes after the job started, then M2 went red as
   planted. It keeps the screens, the stick's log, `result.json` and the oracles' output as the `pax-mpx6-kasumi`
   artifact.
-- `tests/ci-plan` holds the planner to it (two px78 rows; the installer's, the disk tools', AHCI's and the lope rows
-  now reach it); `tools/ci-plan`'s P4 checks pass (`PAX_LEGS`, `--tier`/`--firmware` taken and said).
+- `tests/ci-plan` holds the planner to it (three px78 rows, `kernel/usb_storage` reaching `mpx6-firmware` too, whose
+  `tools/usb-session` now drives a disk; the installer's, the disk tools', AHCI's and the lope rows now reach it);
+  `tools/ci-plan`'s P4 checks pass (`PAX_LEGS`, `--tier`/`--firmware` taken and said).
 - The PR's own run and the `tier full` at its final head are the orchestrator's to read (the hand-back names the run
   id read once at opening).
 
