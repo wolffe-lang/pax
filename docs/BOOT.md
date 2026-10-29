@@ -593,8 +593,8 @@ driver then takes, §10.6; "ports idled" is R-px75b-2's default, "HBA
 reset" the test-only `ahci-reset` word of the command line; a GB is 10^9
 bytes). A refusal says why on the same kind of line and the boot goes
 on: for a controller `refused: BAR5 is not 32-bit memory`, `BIOS/OS
-handoff timeout (BOS/BB)`, `HBA reset timeout` or `the 8254 PIT does not
-count, so no AHCI wait could end`; for a port `refused: LBA48 not
+handoff timeout (BOS/BB)`, `HBA reset timeout` or `no clock advances
+(HPET, PM timer or PIT), so no AHCI wait could end`; for a port `refused: LBA48 not
 supported`, `logical sector size 4096 bytes (only 512 supported)`,
 `FLUSH CACHE EXT not supported`, `COMRESET link active timeout
 (DET/IPM)`, `device ready timeout (BSY/DRQ)` or `block disk table full`.
@@ -604,12 +604,14 @@ A command that fails is named with its port and the error bits:
 
 and one that does not finish says `command timeout; -EIO`. No command
 the driver sends writes the medium unless a program or a volume asked for
-the write or the flush; discovery and IDENTIFY only read. Until px76's
-kernel/clock merges, every wait above (BOH's 25 ms and 2 s, CR and FR's
-500 ms, COMRESET's 1 ms, a command's 30 s, a flush's 120 s) is a deadline
-on kernel/ahci_clock, the 8254's channel 0; on a machine whose PIT does
-not count each controller gets the refusal above instead of a hang
-(R-px75b-7, measured under QEMU's `pit=off`).
+the write or the flush; discovery and IDENTIFY only read. Every wait above
+(BOH's 25 ms and 2 s, CR and FR's 500 ms, COMRESET's 1 ms, a command's
+30 s, a flush's 120 s) is a deadline on kernel/clock (px76: the HPET, else
+the ACPI PM timer, else the 8254 read back), so under QEMU's `pit=off` the
+disks are driven on the HPET (tests/mpx6-ahci A13); only on a machine
+where none of the three advances does each controller get the refusal
+above instead of a hang (R-px75b-7 as narrowed at px76's merge; A14: OVMF
+under `acpi=off,pit=off`). px75b's PIT shim, kernel/ahci_clock, is gone.
 
 `tools/qemu-run --ahci FILE[,serial=S,model=M]` (repeatable; `tools/qemu-halt`
 the same) gives each image an `ahci` controller of its own with the disk
