@@ -1616,4 +1616,8 @@ never their source. `tests/mpx6-ahci.d/linux` holds that guest's recorded
 answers; `meta` names its kernel and emulator. PAX's existing static probes
 `user/elf/{nodes,nvme}.c`, the new bounded `user/elf/ahci.c`, pelt, boreutils'
 `cat`, and the installer are run unmodified. `tools/linux-nodes` loads
-`ahci` and `sd_mod` only from that kernel's own module tree.
+`ahci` and `sd_mod` only from that kernel's own module tree. The same guest (hasu's 7.2.4,
+through `tools/linux-blk`, which now loads `virtio_pci` and `ext2` where
+that kernel has them as modules) wrote the file px84's high-offset row
+reads past 2 TiB and read back what PAX wrote there through AHCI, and
+through virtio and NVMe again (R-px75b-8).
