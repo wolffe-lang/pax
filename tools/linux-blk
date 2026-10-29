@@ -20,9 +20,10 @@
 # on the guest's serial console, OUTDIR/serial.log. Then it unmounts (the
 # guest's own sync), says `linux-blk: unmount <status>` and powers off.
 # The disk's own modules are loaded only where the kernel does not have
-# them built in (modules.builtin): virtio_blk, and ext4 (Linux 7.2.8
-# mounts ext2 through it, CONFIG_EXT4_USE_FOR_EXT2) with its chain from
-# modules.dep (decompressed: zstd, xz or gzip).
+# them built in (modules.builtin): virtio_pci, virtio_blk, and ext4 (Linux
+# 7.2.8 mounts ext2 through it, CONFIG_EXT4_USE_FOR_EXT2), with their chains
+# from modules.dep (decompressed: zstd, xz or gzip), and ext2 where it is a
+# module (px75b: hasu's NixOS 7.2.4 needs all of these).
 #
 # Exit 0 when the guest ran to its end line, 1 when not, 2 on a usage or
 # tool error. Black-box only: the kernel and its modules are run, never
@@ -95,7 +96,13 @@ add() {
     seen="$seen$path "
     order+=("$path")
 }
-for m in virtio_blk ext4; do add "$m"; done
+# px75b: virtio_pci too, the transport (hasu's NixOS kernel has it as a
+# module, kasumi's builds it in), and ext2 where the kernel has it, built
+# in or not (hasu's: `mount -t ext2` is ENODEV with ext4 alone), as
+# tools/linux-nodes does; a built-in module is skipped, so kasumi's
+# guest is as before.
+for m in virtio_pci virtio_blk ext4; do add "$m"; done
+grep -Eq "/ext2\.ko(\.zst|\.xz|\.gz)?:" "$modules/modules.dep" 2>/dev/null && add ext2
 : > "$root/lib/modules/order"
 for path in ${order[@]+"${order[@]}"}; do
     n=${path##*/}; n=${n%%.ko*}
