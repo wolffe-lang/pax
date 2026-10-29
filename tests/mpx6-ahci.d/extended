@@ -125,7 +125,14 @@ echo 'PASS A10-HBA-reset: optional HR and the default per-port initialization bo
 # kasumi's PCH can gate it) each controller is refused by name, no disk is
 # named, and the boot goes on to the session instead of waiting forever.
 make_session nopit $'echo AHCI-ROW-END'
-pax_row nopit --qemu -machine --qemu pit=off --ahci "$E/sector.img,serial=PX75B-NOPIT"
+# Its own boot, not pax_row's: a wait that never ends must fail this row by
+# name within the main session's 240 s, not pax_row's 900.
+tools/qemu-halt --firmware "$firmware" --accel "${PAX_AHCI_ACCEL:-auto}" --timeout 240 \
+    --serial "$E/nopit.log" --elf "$W/$tier/kmain_console.elf" --marker 'halt|PANIC .*' \
+    --qemu -m --qemu 1G --qemu -machine --qemu pit=off --ahci "$E/sector.img,serial=PX75B-NOPIT" \
+    "$E/nopit.iso" > "$E/nopit.halt.log" 2>&1 || true
+serial_norm "$E/nopit.log" > "$E/nopit.norm"
+grep -qx AHCI-ROW-END "$E/nopit.norm" || { echo 'FAIL A13-no-pit: the boot never reached its session (a wait on a PIT that does not count)'; exit 1; }
 n=$(grep -cE '^ahci[0-9]+: 8086:2922 at [0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: refused: the 8254 PIT does not count, so no AHCI wait could end$' "$E/nopit.norm" || true)
 [ "$n" = 2 ] || { echo "FAIL A13-no-pit: $n controllers refused by name, not 2 (the disk's and q35's own)"; exit 1; }
 ! grep -E '^(block: sd|ahci[0-9]+: .* port )' "$E/nopit.norm" || { echo 'FAIL A13-no-pit: a port was driven without a clock'; exit 1; }
