@@ -72,7 +72,9 @@
 # and on the boot disk. Where this host's kernel cannot be read (the CI
 # runner's is root's) the reference is the record made on kasumi
 # (tests/mpx6-part.d/linux/, `--record` writes it), said loudly;
-# PAX_LINUX=live insists on a live one.
+# PAX_LINUX=live insists on a live one. pax#241 (px78):
+# PAX_LINUX=recorded takes the record whatever kernel is readable, and a
+# guest that left no log is a named failure.
 #
 # The UEFI legs need OVMF (SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1); P8 boots under OVMF whatever --firmware says.
@@ -231,6 +233,8 @@ disk_of() { # tier name cpio -> reasons
 # --- the Linux side ----------------------------------------------------------------
 
 kernel_readable() {
+    # pax#241 (px78): PAX_LINUX=recorded takes the record, whatever kernel is readable
+    [ "${PAX_LINUX:-}" != recorded ] || return 1
     local k=${PAX_LINUX_KERNEL:-/usr/lib/modules/$(uname -r)/vmlinuz}
     [ -r "$k" ] && printf '%s\n' "$k"
 }
@@ -240,7 +244,7 @@ linux_side() { # dir -> reasons
     mkdir -p "$w/linux"
     k=$(kernel_readable || true)
     if [ -z "$k" ] && [ "${PAX_LINUX:-}" != live ]; then
-        say "LOUD: no readable Linux kernel on this host: the Linux side is the record made on kasumi ($(head -n 1 "$REC/meta"))"
+        say "LOUD: $([ "${PAX_LINUX:-}" = recorded ] && echo PAX_LINUX=recorded || echo no readable Linux kernel on this host): the Linux side is the record made on kasumi ($(head -n 1 "$REC/meta"))"
         cp "$REC"/*.txt "$w/linux/" || printf ' no record in %s;' "$REC"
         echo recorded > "$w/linux/how"
         return

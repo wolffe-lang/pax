@@ -133,6 +133,8 @@ static_ok() {
 }
 
 kernel_readable() {
+    # pax#241 (px78): PAX_LINUX=recorded takes the record, whatever kernel is readable
+    [ "${PAX_LINUX:-}" != recorded ] || return 1
     local k=${PAX_LINUX_KERNEL:-/usr/lib/modules/$(uname -r)/vmlinuz}
     # px68: the installed image when the running kernel's is gone (an upgrade)
     [ -r "$k" ] || k=$(command ls -1 /usr/lib/modules/*/vmlinuz 2>/dev/null | command grep -v lts | tail -n 1)
@@ -150,7 +152,7 @@ linux_side() { # dir -> reasons
     mkdir -p "$w/linux"
     k=$(kernel_readable || true)
     if [ -z "$k" ] && [ "${PAX_LINUX:-}" != live ]; then
-        say "LOUD: no readable Linux kernel on this host: the Linux side is the record made on kasumi ($(head -n 1 "$REC/meta"))"
+        say "LOUD: $([ "${PAX_LINUX:-}" = recorded ] && echo PAX_LINUX=recorded || echo no readable Linux kernel on this host): the Linux side is the record made on kasumi ($(head -n 1 "$REC/meta"))"
         cp "$REC/guest.session" "$REC/guest.kernel" "$REC/notclean.txt" "$REC/notclean-ext2.txt" "$w/linux/" || printf ' no record in %s;' "$REC"
         echo recorded > "$w/linux/how"
         return
