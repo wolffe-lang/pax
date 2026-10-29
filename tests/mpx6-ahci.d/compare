@@ -25,13 +25,21 @@ def main():
         raise ValueError("usage: compare PAX-LOG LINUX-LOG")
     pax, linux = map(normalized, sys.argv[1:])
     failed = False
-    for row, name in (("A1-identify-inventory", "identity"),
+    for row, name in (("A1-identify-inventory", "inventory"),
+                      ("A1-identify-files", "identity"),
                       ("A2-linux-name-order", "names"),
                       ("A3-before-differential", "before"),
                       ("A4-prdt-readback", "bytes"),
                       ("A5-after-differential", "after")):
         try:
             got, want = section(pax, name), section(linux, name)
+            if name == "inventory":
+                # Identity/sequence metadata differs by probe order, but these
+                # exact lines come from the real installer on both guests.
+                got = "\n".join(x.strip() for x in got.splitlines() if x.lstrip().startswith("model="))
+                want = "\n".join(x.strip() for x in want.splitlines() if x.lstrip().startswith("model="))
+                if len(got.splitlines()) != 4 or "serial=PX75B B2 INNER" not in got:
+                    raise ValueError("installer did not preserve all four hardware identities")
             if name == "identity":
                 # R-px75b-4: sysfs presentation padding differs, not identity.
                 # The fixture's ATA models fit Linux's 16-byte SCSI field.

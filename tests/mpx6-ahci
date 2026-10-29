@@ -72,13 +72,14 @@ if [ ! -f "$W/bin/cat" ]; then
     cp "$W/bore/cat" "$W/bin/cat"
 fi
 tools/mknvme "$W/bin" > "$W/probe.build.log"
+tools/mkinstall "$W/bin" > "$W/install.build.log"
 # Build and guest failures are failures, never skipped exit 2.
 if [ "$only" != linux ]; then
     flags=(); [ "$tier" != release ] || flags=(--release)
     tools/build-kernel "${flags[@]}" --src "$PAX_ROOT/kernel/kmain_console.lu" "$W/$tier" > "$W/$tier/kernel.path"
     printf '/bin/sh /etc/ahci.sh\n' > "$W/run"
     tools/mkinitramfs "$W/session.cpio" /tmp/:1777 /mnt/:755 \
-        "/bin/sh=$W/bin/sh:755" "/bin/cat=$W/bin/cat:755" "/bin/nvme=$W/bin/nvme:755" \
+        "/bin/sh=$W/bin/sh:755" "/bin/cat=$W/bin/cat:755" "/bin/nvme=$W/bin/nvme:755" "/bin/pax-install=$W/bin/pax-install:755" \
         "/etc/ahci.sh=$D/session.sh:644" "/etc/pax-run=$W/run:644" > "$W/archive.log"
     tools/mkimage --conf boot/limine-initramfs.conf --add "$W/session.cpio" initramfs.cpio \
         "$W/$tier/kmain_console.elf" "$W/$tier/session.iso" > "$W/$tier/image.log"
@@ -93,12 +94,12 @@ if [ "$record" = 1 ] || [ "${PAX_LINUX:-}" = live ]; then
     tools/linux-nodes --kernel "$PAX_LINUX_KERNEL" --modules "$PAX_LINUX_MODULES" \
         --busybox "${PAX_BUSYBOX:?set PAX_BUSYBOX}" --accel "${PAX_LINUX_ACCEL:-kvm}" \
         "${args[@]}" --file "$D/session.sh=/etc/ahci.sh" \
-        "$W/linux/guest" "$W/bin/sh" "$W/bin/cat" "$W/bin/nvme" -- '/bin/sh /etc/ahci.sh'
+        "$W/linux/guest" "$W/bin/sh" "$W/bin/cat" "$W/bin/nvme" "$W/bin/pax-install" -- '/bin/sh /etc/ahci.sh'
     cp "$W/linux/guest/serial.log" "$W/linux/session.log"
     sums "$W/linux/disks" > "$W/linux/images.sha256"
     if [ "$record" = 1 ]; then
         mkdir -p "$D/linux"
-        awk '/^AHCI BEGIN identity$/{on=1} on{print} /^AHCI SESSION END$/{exit}' "$W/linux/session.log" > "$D/linux/session.log"
+        awk '/^AHCI BEGIN inventory$/{on=1} on{print} /^AHCI SESSION END$/{exit}' "$W/linux/session.log" > "$D/linux/session.log"
         cp "$W/linux/images.sha256" "$D/linux/"
         cp "$W/linux/guest/meta" "$D/linux/meta"
     fi
@@ -124,7 +125,6 @@ fi
 echo 'PASS A5-image-differential: all four images byte-identical to Linux'
 # A live boot does not own these disks: login and read-only inventory must
 # leave all images unchanged, including the NVMe controller beside SATA.
-tools/mkinstall "$W/bin" > "$W/install.build.log"
 printf '/bin/pelt /etc/pax-live-login\n' > "$W/live.run"
 tools/mkinitramfs "$W/live.cpio" /root/:700 /tmp/:1777 \
     "/bin/pelt=$W/bin/sh:755" "/bin/pax-install=$W/bin/pax-install:755" \

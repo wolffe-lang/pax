@@ -1,5 +1,8 @@
 #!/bin/sh
 # Same static programs and commands on PAX and the Linux guest.
+echo 'AHCI BEGIN inventory'
+/bin/pax-install --inventory
+echo 'AHCI END inventory'
 echo 'AHCI BEGIN identity'
 cat /sys/block/sda/device/model
 cat /sys/block/sda/device/serial
