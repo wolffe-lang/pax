@@ -53,11 +53,15 @@
 #      sets a display mode, so its CR3 differs) and the pattern's two
 #      full-width rows (`[===…]` and `---…+`, as wide as the grid: 80
 #      without one); and (px76) the firmware's own description of the
-#      machine where the display device is part of it: `memory:` (Limine
-#      lists the framebuffer as a memory map entry) and `acpi: DSDT`
-#      (QEMU's VGA device adds its AML, so the table's length moves);
-#      the calibrated tick's rate (`timer: LAPIC … divide16 <rate> Hz`) is
-#      a measurement of each boot, so it is folded to `<rate>`.
+#      machine where the display device is part of it, folded to its
+#      shape (R-px76-9 A): `memory:`'s numbers (Limine lists the
+#      framebuffer as a memory map entry), the length of `acpi: DSDT`
+#      (QEMU's VGA device adds its AML) and of the root table (`acpi:
+#      RSDT`/`XSDT`: OVMF adds a BGRT, UEFI's boot graphics table, only
+#      when it has a GOP, so the XSDT holds one entry more; the BGRT's own
+#      line is left out); the calibrated tick's rate (`timer: LAPIC …
+#      divide16 <rate> Hz`) is a measurement of each boot, so it is folded
+#      to `<rate>`. Every other line is PAX's own and compared as it is.
 #   V5 a shell on the screen: pelt-ps2 halts after `PAX: init /bin/pelt
 #      ended with status 0`, and its screendump equals tools/screen-ref's
 #      image of its serial log from `PAX: the console` on, pixel for
@@ -293,7 +297,13 @@ for leg in $legs; do
         boot screen-serial "$selft" "$images/$tier/kmain_screen.iso" --no-screen
         why=
         grep -qx 'screen: off, no framebuffer' "$norm" || why+=" no 'screen: off, no framebuffer' ($(grep -m1 '^screen: ' "$norm"));"
-        strip() { awk '/^PAX: the screen$/ { on = 1 } on && !/^screen: / && !/^scroll: / && !/^paging: / && !/^memory: / && !/^acpi: DSDT / && !/^\[=+\]$/ && !/^-+\+.?Z$/ { sub(/ divide16 [0-9]+ Hz,/, " divide16 <rate> Hz,"); print }' "$1"; }
+        # The firmware's description of the machine is folded where the
+        # display device is part of it (R-px76-9 A): the root table's and
+        # the DSDT's lengths and the memory map's numbers become <n>, and
+        # UEFI's boot graphics table (BGRT: OVMF installs it only when it
+        # has a GOP to draw on) is left out; every other line, PAX's own,
+        # is compared byte for byte.
+        strip() { awk '/^PAX: the screen$/ { on = 1 } on && !/^screen: / && !/^scroll: / && !/^paging: / && !/^acpi: BGRT / && !/^\[=+\]$/ && !/^-+\+.?Z$/ { sub(/ divide16 [0-9]+ Hz,/, " divide16 <rate> Hz,"); if ($0 ~ /^acpi: (RSDT|XSDT|DSDT) OEM .* length [0-9]+$/) sub(/ length [0-9]+$/, " length <n>"); if ($0 ~ /^memory: /) gsub(/[0-9]+/, "<n>"); print }' "$1"; }
         strip "$sn" > "$log.cut"; strip "$norm" > "$log.cut.other"
         cmp -s "$log.cut" "$log.cut.other" || why+=" the serial differs: $(diff "$log.cut" "$log.cut.other" | head -n 6 | tr '\n' '|');"
         [ "$(wc -l < "$log.cut" | tr -d ' ')" -gt 400 ] || why+=" a short log;"
