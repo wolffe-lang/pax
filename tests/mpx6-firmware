@@ -8,14 +8,17 @@
 #
 # Per compiler tier, on the firmwares asked (PAX_METAL_TIER and
 # PAX_METAL_FIRMWARE for the scripts it runs):
-#   F1 the clocks (tests/mpx6-metal): q35, --no-hpet, --no-pit, both, and
-#      -m 8G; ACPI read, the clock named and the tick calibrated by it,
-#      20 ticks in 150-300 ms by the PM timer read independently.
+#   F1 the clocks (tests/mpx6-metal): q35, --no-hpet, --no-pit, both,
+#      -m 8G, and the local APIC in x2APIC mode before the kernel starts it
+#      (R-px76-7); ACPI read, the clock named and the tick calibrated by
+#      it, 20 ticks in 150-300 ms by the PM timer read independently.
 #   F2 COM1 present and absent (tests/mpx6-metal-serial): the probe says
 #      which, an absent UART's receive setup neither hangs nor makes input.
 #   F3 reboot and power-off (tests/mpx6-metal-power): the FADT's reset
-#      register, then port 0xCF9, then the triple fault, logged in that
-#      order; S5 from the DSDT's \_S5 package with SLP_EN to PM1a/PM1b.
+#      register resets the machine before port 0xCF9 is tried; entered at
+#      port 0xCF9 it resets before the triple fault; entered at the triple
+#      fault that resets; each logged first; S5 from the DSDT's \_S5
+#      package with SLP_EN to PM1a/PM1b powers it off.
 #   F4 a padded framebuffer (kernel/kmain_metal_screen.lu): a pitch of 68
 #      bytes for 16 pixels and red at shift 0 drawn where the masks say;
 #      a short pitch and overlapping masks refused.
@@ -39,8 +42,9 @@
 #      xHCI: both BAR0s above 4 GiB (`bar: … BAR0 64-bit 0x…`).
 #   F9 the timer and scheduler suites (tests/mpx2-interrupts,
 #      tests/mpx2-sched) on machines without the HPET, without the PIT and
-#      without both (PAX_NO_HPET, PAX_NO_PIT), native tier, on the
-#      firmwares asked.
+#      without both (PAX_NO_HPET, PAX_NO_PIT), native tier, on UEFI; on
+#      BIOS without the HPET only (SeaBIOS needs the 8254: on a PIT-less
+#      q35 its boot line is left unfinished, glued to the kernel's first).
 # F5 and F8 are UEFI whatever --firmware says (the mode is OVMF's GOP,
 # the window OVMF's), once per tier. Exit 0 when every row held.
 set -euo pipefail
@@ -168,10 +172,16 @@ PY
     # compiler tiers are F1's; the first variant builds, the others boot
     # its images.
     if [ "$t" = native ]; then
-        for f in $legs; do
-            for suite in mpx2-interrupts mpx2-sched; do
-                reuse=()
-                for clocks in hpet pit both; do
+        for suite in mpx2-interrupts mpx2-sched; do
+            reuse=()
+            for f in $legs; do
+                # SeaBIOS leaves its boot line unfinished on a PIT-less q35
+                # (`Booting from DVD/CD..` and no newline), gluing the
+                # kernel's first line to it: a PIT-less PC is a UEFI one
+                # (kasumi is), so BIOS takes the HPET-less machine alone.
+                variants='hpet pit both'
+                [ "$f" = uefi ] || variants=hpet
+                for clocks in $variants; do
                     nohpet=0 nopit=0
                     case $clocks in hpet) nohpet=1;; pit) nopit=1;; both) nohpet=1 nopit=1;; esac
                     PAX_NO_HPET=$nohpet PAX_NO_PIT=$nopit "$PAX_ROOT/tests/$suite" ${reuse[@]+"${reuse[@]}"} --tier native --firmware "$f" \
@@ -180,7 +190,7 @@ PY
                 done
             done
         done
-        row "F9 native: tests/mpx2-interrupts and tests/mpx2-sched without the HPET, the PIT and both, on $legs"
+        row "F9 native: tests/mpx2-interrupts and tests/mpx2-sched without the HPET (and on UEFI without the PIT, and without both), on $legs"
     fi
     echo "PASS mpx6-firmware $t"
 done
