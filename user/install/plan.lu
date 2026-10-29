@@ -14,7 +14,7 @@ const ESP_BYTES: int = 67108864
 
 const ROOT_MIN: int = 8388608
 
-const ROOT_MAX: int = 4294967296
+const ROOT_MAX: int = 17592186040320 // (2^32 - 1) ext2 blocks of 4096 bytes
 
 struct Target {
     name: str,
@@ -33,6 +33,7 @@ struct Plan {
     games: bool,
     root_bytes: int,
     tail_bytes: int,
+    unused_bytes: int,
     token: str,
 }
 
@@ -72,7 +73,6 @@ fn make_plan(t: Target, seed: str, user: str, games: str) -> Plan ! {
     readonly,
     sector_size,
     too_small,
-    too_large,
 } {
     if !valid_disk(t.name) || !valid_name(user) || seed.len < 1 || seed.len > 128 { return invalid }
     for c in seed.bytes() {
@@ -87,9 +87,9 @@ fn make_plan(t: Target, seed: str, user: str, games: str) -> Plan ! {
     if t.bytes < ROOT_START + ROOT_MIN + 33 * 512 { return too_small }
     // Subtract before rounding or multiplying: even INT_MAX cannot overflow.
     let end = (t.bytes - 33 * 512) / 4096 * 4096
-    let root = end - ROOT_START
-    if root < ROOT_MIN { return too_small }
-    if root > ROOT_MAX { return too_large }
+    let available = end - ROOT_START
+    if available < ROOT_MIN { return too_small }
+    let root = if available < ROOT_MAX then available else ROOT_MAX
     let token = "ERASE /dev/{t.name} {t.identity} {t.bytes} {seed}"
     Plan {
         target: copy t,
@@ -98,6 +98,7 @@ fn make_plan(t: Target, seed: str, user: str, games: str) -> Plan ! {
         games: games == "yes",
         root_bytes: root,
         tail_bytes: t.bytes - end,
+        unused_bytes: available - root,
         token: token,
     }
 }
@@ -124,6 +125,7 @@ fn plan_text(p: Plan) -> str {
         "partition 1 esp offset_bytes {ESP_START} length_bytes {ESP_BYTES}\n" +
         "partition 2 root offset_bytes {ROOT_START} length_bytes {p.root_bytes}\n" +
         "prefix_reserved_bytes 1048576 (persistent log: offset 65536 length 65536)\ntail_reserved_bytes {p.tail_bytes} (GPT backup and block alignment)\n" +
+        "unused_bytes {p.unused_bytes} (capacity beyond the ext2 block-number limit)\n" +
         "seed {p.seed}\nuser {p.user} uid {INSTALL_USER_ID} gid {INSTALL_USER_ID} no-password\n" +
         "games {if p.games then "yes" else "no"}\n" +
         "confirmation {p.token}\n"
