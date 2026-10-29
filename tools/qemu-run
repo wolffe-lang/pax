@@ -208,6 +208,13 @@ for e in ${drives[@]+"${drives[@]}"}; do
     dk=$((dk + 1))
 done
 [ "$noscreen" = 0 ] || cmd+=(-vga none)
+if [ -n "$displaymode" ]; then
+    [ "$noscreen" = 0 ] || die '--display-mode conflicts with --no-screen'
+    [[ "$displaymode" =~ ^([0-9]+)x([0-9]+)$ ]] || die '--display-mode takes WxH'
+    width=${BASH_REMATCH[1]} height=${BASH_REMATCH[2]}
+    [ "$width" -gt 0 ] && [ "$width" -le 8192 ] && [ "$height" -gt 0 ] && [ "$height" -le 8192 ] || die 'display mode outside 1..8192'
+    cmd+=(-vga none -device "VGA,vgamem_mb=64,xres=$width,yres=$height")
+fi
 if [ -n "$usbkbd" ]; then
     cmd+=(-device "$xhcimodel,id=pax-usb$irqopts")
     case $usbkbd in

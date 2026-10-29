@@ -115,6 +115,8 @@
 //! its /dev/vcsa1 read after each case: notes/px59). No Linux source; no
 //! other kernel's source.
 
+use boot_info
+
 extern "c" fn pax_irq_save() -> u64
 extern "c" fn pax_irq_restore(flags: u64)
 extern "c" fn pax_fb_copy(dst: u64, src: u64, bytes: u64)
@@ -172,6 +174,8 @@ const S_REPLY: u64 = 63 // the answers' ring: its first byte | its count << 8
 const S_TOP: u64 = 64 // inclusive scroll-region first row
 const S_END: u64 = 65 // exclusive scroll-region last row
 const S_FORMAT: u64 = 66 // framebuffer channel shifts: red | green<<8 | blue<<16
+const S_SCALE: u64 = 67
+const S_BOOT: u64 = 68 // draw and retain until PAX paging takes over
 const RQ_BYTES: u64 = 32
 
 const MAX_COLS: u64 = 256
@@ -391,15 +395,16 @@ fn draw(x: u64, y: u64, cursor: bool) {
     let pf = pal(f)
     let pb = pal(b)
     let pitch = sv(S_PITCH)
-    let base = sv(S_VA) + y * GH * pitch + x * GW * 4
+    let scale = sv(S_SCALE)
+    let base = sv(S_VA) + y * GH * scale * pitch + x * GW * scale * 4
     var r: u64 = 0
-    while r < GH {
-        let bits = font_row(g, r)
+    while r < GH * scale {
+        let bits = font_row(g, r / scale)
         let row = base + r * pitch
         var k: u64 = 0
-        while k < 4 {
-            let lo = if bits & (0x80 >> (2 * k)) != 0 { pf } else { pb }
-            let hi = if bits & (0x40 >> (2 * k)) != 0 { pf } else { pb }
+        while k < 4 * scale {
+            let lo = if bits & (0x80 >> ((2 * k) / scale)) != 0 { pf } else { pb }
+            let hi = if bits & (0x80 >> ((2 * k + 1) / scale)) != 0 { pf } else { pb }
             store(row + k * 8, lo | (hi << 32))
             k += 1
         }
@@ -433,7 +438,7 @@ fn scroll() {
     let first = sv(S_TOP)
     let rows = sv(S_END) - first
     let pitch = sv(S_PITCH)
-    let band = GH * pitch
+    let band = GH * sv(S_SCALE) * pitch
     let va = sv(S_VA) + first * band
     let base = first * cols
     // px59: the new row is blank in the current rendition, as the
@@ -1047,7 +1052,7 @@ fn feed(b: u64) {
 /// One byte the console wrote (kernel/serial's `put`): drawn when the
 /// screen is attached, kept for the replay before.
 pub fn put(b: u8) {
-    if sv(S_ON) == 0 {
+    if sv(S_ON) == 0 || sv(S_BOOT) != 0 {
         let n = sv(S_EARLY)
         if n < EARLY {
             // # Safety: n < 16384, inside boot/screen.S's pax_screen_early.
@@ -1056,7 +1061,7 @@ pub fn put(b: u8) {
         } else {
             bump(S_LOST)
         }
-        return
+        if sv(S_ON) == 0 { return }
     }
     // # Safety: sched.S's PUSHFQ/POP/CLI; restored below.
     let flags = unsafe { pax_irq_save() }
@@ -1076,9 +1081,12 @@ pub fn put(b: u8) {
 /// background, replays the early buffer, draws the cursor. False (and
 /// nothing drawn) when not even one cell fits.
 pub fn attach(va: u64, w: u64, h: u64, pitch: u64, rs: u64, gs: u64, bs: u64) -> bool {
-    var cols = w / GW
-    var rows = h / GH
-    if cols == 0 || rows == 0 || va % 8 != 0 || pitch % 8 != 0 {
+    let scale: u64 = if w > 2560 { 2 } else { 1 }
+    var cols = w / (GW * scale)
+    var rows = h / (GH * scale)
+    if w > 32768 || h > 32768 || pitch > 1048576 || pitch < w * 4 || rs > 24 || gs > 24 || bs > 24 { return false }
+    if ((255 << rs) & (255 << gs)) != 0 || ((255 << rs) & (255 << bs)) != 0 || ((255 << gs) & (255 << bs)) != 0 { return false }
+    if cols == 0 || rows == 0 || va % 4 != 0 || pitch % 4 != 0 {
         return false
     }
     if cols > MAX_COLS {
@@ -1090,6 +1098,8 @@ pub fn attach(va: u64, w: u64, h: u64, pitch: u64, rs: u64, gs: u64, bs: u64) ->
     // # Safety: as `put`.
     let flags = unsafe { pax_irq_save() }
     put_sv(S_BUSY, 1)
+    put_sv(S_SCALE, scale)
+    put_sv(S_BOOT, 0)
     put_sv(S_VA, va)
     put_sv(S_W, w)
     put_sv(S_H, h)
@@ -1125,6 +1135,7 @@ pub fn attach(va: u64, w: u64, h: u64, pitch: u64, rs: u64, gs: u64, bs: u64) ->
     // (pitch * h bytes from va, a multiple of 8: pitch % 8 == 0),
     // mapped by kernel/fb.
     unsafe { pax_fb_fill(va, p0 | (p0 << 32), pitch * h / 8) }
+    if (pitch * h) % 8 != 0 { unsafe { ((va + pitch * h - 4) as *u32).write_volatile(p0 as u32) } }
     i = 0
     while i < cols * rows {
         put_cell(i, BLANK)
@@ -1205,3 +1216,14 @@ pub fn lost() -> u64 {
 pub fn bytes() -> u64 {
     sv(S_BYTES)
 }
+
+/// Before any allocator, using only the mapping Limine already installed.
+pub fn early_start() {
+    if boot_info.fb_count() == 0 || boot_info.fb_bpp() != 32 || boot_info.fb_model() != 1 { return }
+    if boot_info.fb_mask(0, false) != 8 || boot_info.fb_mask(1, false) != 8 || boot_info.fb_mask(2, false) != 8 { return }
+    if attach(boot_info.fb_address(), boot_info.fb_width(), boot_info.fb_height(), boot_info.fb_pitch(),
+              boot_info.fb_mask(0, true), boot_info.fb_mask(1, true), boot_info.fb_mask(2, true)) { put_sv(S_BOOT, 1) }
+}
+/// Pause direct writes across the CR3 switch; retain the transcript for fb.start.
+pub fn pause_early() { if sv(S_BOOT) != 0 { put_sv(S_ON, 0) } }
+pub fn scale() -> u64 { sv(S_SCALE) }
