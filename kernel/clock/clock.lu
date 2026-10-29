@@ -4,8 +4,12 @@
 //! `start()` once, early (every device kernel calls it before pci.scan;
 //! kernel/timer calls it before calibrating the tick; a second call does
 //! nothing); then `now_ns()`, `wait_us(us)` (a busy wait),
-//! `deadline_us(us)` and `expired(d)`. A read before `start` panics by
-//! name (no source has a period yet).
+//! `deadline_us(us)` and `expired(d)`. A read with no source (before
+//! `start`, or after a `start` that found none) panics by name.
+//! Where none advances, `start` says `clock: none: …` and returns with
+//! `started()` false: kernel/timer then stops by name (no tick can be
+//! calibrated) and kernel/ahci refuses each controller by name (no wait
+//! of its could end); a disk-only kernel boots on without them.
 //!
 //! The source, in order (R-px76-1 A; kasumi's Linux lists `tsc hpet
 //! acpi_pm` and no `pit`):
@@ -24,8 +28,9 @@
 //!   54.9 ms wrap needs a sample at least that often, which kernel/timer's
 //!   tick takes.
 //! One line names the choice: `clock: HPET <fs> fs/tick, checked against
-//! the PM timer` (or `, unchecked: no PM timer`), `clock: PM 3579545 Hz`
-//! or `clock: PIT 1193182 Hz`. No Linux source; no other kernel's source.
+//! the PM timer` (or `, unchecked: no PM timer`), `clock: PM 3579545 Hz`,
+//! `clock: PIT 1193182 Hz` or `clock: none: the HPET, the PM timer and the
+//! PIT do not advance`. No Linux source; no other kernel's source.
 use acpi
 use log
 use paging
@@ -36,6 +41,7 @@ extern "c" fn pax_inb(port: u16) -> u8
 extern "c" fn pax_outb(port: u16, value: u8)
 const HPET_VA: u64 = 0xffffb00000001000
 var source: u64 = 0
+var tried: bool = false
 var address: u64 = 0
 var period: u64 = 0
 var mask: u64 = 0
@@ -120,7 +126,8 @@ fn say() {
 }
 
 pub fn start() {
-    if unsafe { source } != 0 { return }
+    if unsafe { source } != 0 || unsafe { tried } { return }
+    unsafe { tried = true }
     acpi.start()
     if try_hpet() {
         begin()
@@ -145,7 +152,11 @@ pub fn start() {
             pax_outb(0x40, 0xff)
             pax_outb(0x40, 0xff)
         }
-        if !advances() { panic.fail("clock: HPET, PM and PIT do not advance", 0) }
+        if !advances() {
+            unsafe { source = 0; period = 0 }
+            log.line("clock: none: the HPET, the PM timer and the PIT do not advance")
+            return
+        }
     }
     begin()
     say(); log.end()
@@ -155,8 +166,8 @@ pub fn started() -> bool { unsafe { source } != 0 }
 
 pub fn now_ns() -> u64 {
     let src = unsafe { source }
-    // No source has a period yet: a loud stop, never a division by zero.
-    if src == 0 { panic.fail("clock: now_ns before clock.start", 0) }
+    // No source has a period: a loud stop, never a division by zero.
+    if src == 0 { panic.fail("clock: now_ns with no source (before clock.start, or none advances)", 0) }
     let flags = sync.irq_save()
     let current = raw()
     let prev = unsafe { previous }
