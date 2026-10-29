@@ -1,5 +1,6 @@
 //! Temporary px75b bootstrap clock shim, removed on px76's clock merge.
-//! The PIT is programmed by timer.start before block.start on this base.
+//! First use programs channel zero to timer.start's divisor (the disk-only
+//! kmain_blk/part have not called timer.start). This happens before scheduling.
 //! IF-clear reads latch channel zero, like kernel/xhci's bootstrap wait.
 //! This is not the no-PIT metal clock: px76 owns that shared implementation.
 extern "c" fn pax_outb(port: u16, value: u8)
@@ -10,12 +11,18 @@ var started: bool = false
 fn count() -> u64 {
     // # Safety: latch and read PIT channel zero with IF clear.
     unsafe {
+        if !started {
+            pax_outb(0x43, 0x34)
+            pax_outb(0x40, 0x9c) // 11932 low byte
+            pax_outb(0x40, 0x2e)
+        }
         pax_outb(0x43, 0)
         let lo = pax_inb(0x40)
         let hi = pax_inb(0x40)
         (lo as u64) | ((hi as u64) << 8)
     }
 }
+/// Monotonic PIT-derived wait clock; callers poll within each PIT period.
 pub fn now_ns() -> u64 {
     let c = count()
     // # Safety: single CPU, all callers hold IF clear.
@@ -28,8 +35,11 @@ pub fn now_ns() -> u64 {
         elapsed * 1000000000 / 1193182
     }
 }
+/// A relative microsecond deadline in this shim's clock.
 pub fn deadline_us(us: u64) -> u64 { now_ns() + us * 1000 }
+/// Whether deadline d has been reached.
 pub fn expired(d: u64) -> bool { now_ns() >= d }
+/// Busy wait with IF clear, at least the specified microseconds.
 pub fn wait_us(us: u64) {
     let d = deadline_us(us)
     while !expired(d) {}
