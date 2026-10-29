@@ -2591,6 +2591,80 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px75b (R-px75b-6): mpx5-users once more with / on a SATA disk
+  # (tools/rootdisk-leg with PAX_ROOTDISK_BUS=ahci: sda2 on an `ahci`
+  # controller of its own, through tools/qemu-rootdisk), every row of
+  # the suite with its root read and written through kernel/ahci. A job
+  # of its own beside mpx5-users, not a third root step in it: that job's
+  # 210 minutes hold its sessions, the virtio root leg and (the full
+  # tier) the NVMe one, and a third leg would leave px83's margin. It
+  # builds mpx5-users' native BIOS images itself (tests/mpx5-users
+  # --only build) and boots them from the disk. Planned as every suite:
+  # the full and all tiers, and a pull request for kernel/ahci, its
+  # clock, the suite's script or the root-disk tools.
+  mpx5-users-ahci:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-users-ahci')
+    runs-on: ubuntu-latest
+    # R-px75b-6: provisional; set from the measured leg (notes/px75b-ahci.md).
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          qemu-system-x86_64 --version
+          gcc --version | head -n 1
+          uname -sr
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-users-ahci-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: mpx5-users' images, native BIOS (the suite's own build, no session)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx5-users --only build --tier native --firmware bios
+
+      - name: the suite with / on an AHCI disk, native BIOS (tools/rootdisk-leg with PAX_ROOTDISK_BUS=ahci)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_ROOTDISK_BUS: ahci
+        run: |
+          docker pull docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+          tools/e2fs --version
+          tools/disktools --version
+          tools/rootdisk-leg mpx5-users --tier native --firmware bios
+
+      - name: keep the leg's sessions and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-users-ahci-linux
+          path: |
+            build/disk-ahci/mpx5-users.out
+            build/disk-ahci/mpx5-users-*.session
+            build/disk-ahci/mpx5-users-*.log
+            build/disk-ahci/mpx5-users-*.halt
+            build/disk-ahci/mpx5-users-*.verdict
+            build/rootdisk/boots.log
+          retention-days: 14
+          if-no-files-found: warn
+
   # px46: the accounts (P5 U6). An image with root, pax and lobo, pelt
   # as pid 1, boreutils' identity tools and PAX's own su (user/su,
   # tools/mksu: wolf 0.2.35 by digest, px65); one typed session against the
@@ -4634,6 +4708,7 @@ jobs:
       - mpx4-unix
       - mpx4-lobo
       - mpx5-users
+      - mpx5-users-ahci
       - mpx5-accounts
       - mpx5-jobs
       - mpx5-lope
