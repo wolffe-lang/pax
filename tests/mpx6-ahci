@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# AHCI black-box differential. CI may consume the recorded Linux guest;
+# --record regenerates it only from a real kernel boot, never from PAX.
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+D=$PAX_ROOT/tests/mpx6-ahci.d
+W=$PAX_BUILD/mpx6-ahci
+firmware=bios tier=native record=0 only= rows=pr
+while [ $# -gt 0 ]; do
+    case $1 in
+        --firmware) firmware=$2; shift 2 ;;
+        --tier) tier=$2; shift 2 ;;
+        --record) record=1; shift ;;
+        --only) only=$2; shift 2 ;;
+        --rows) rows=$2; shift 2 ;;
+        *) die "unknown option $1" ;;
+    esac
+done
+case $firmware in bios|uefi) ;; *) die 'firmware: bios or uefi' ;; esac
+case $tier in native|release) ;; *) die 'tier: native or release' ;; esac
+mkdir -p "$W/bin" "$W/$tier" "$W/linux"
+
+# Separate controllers, holes in both port maps, plus NVMe. Every device
+# option names only a lane-owned regular image, never a host device.
+devices() {
+    local w=$1
+    printf '%s\n' --qemu -device --qemu ahci,id=ca \
+        --qemu -device --qemu ahci,id=cb
+    local letter port ctl model serial
+    for letter in a b c; do
+        case $letter in
+            a) ctl=ca port=1 model=PX75B-SATA-A serial=PX75B-A1 ;;
+            b) ctl=ca port=4 model=PX75B-SATA-B serial=PX75B-B2 ;;
+            c) ctl=cb port=2 model=PX75B-SATA-C serial=PX75B-C3 ;;
+        esac
+        printf '%s\n' --qemu -drive --qemu "file=$w/$letter.img,if=none,id=d$letter,format=raw" \
+            --qemu -device --qemu "ide-hd,bus=$ctl.$port,drive=d$letter,model=$model,serial=$serial"
+    done
+    printf '%s\n' --nvme "$w/n.img"
+}
+disks() {
+    mkdir -p "$1"
+    for n in a b c n; do
+        rm -f "$1/$n.img"
+        truncate -s 64M "$1/$n.img"
+    done
+}
+sums() {
+    local n
+    for n in a b c n; do printf '%s %s\n' "$n" "$(sha256_of "$1/$n.img")"; done
+}
+
+if [ ! -f "$W/bin/sh" ]; then
+    tools/mkpelt "$W/pelt" > "$W/pelt.build.log"
+    cp "$W/pelt/pelt" "$W/bin/sh"
+fi
+if [ ! -f "$W/bin/cat" ]; then
+    tools/mkboreutils "$W/bore" cat > "$W/bore.build.log"
+    cp "$W/bore/cat" "$W/bin/cat"
+fi
+tools/mknvme "$W/bin" > "$W/probe.build.log"
+# Build and guest failures are failures, never skipped exit 2.
+if [ "$only" != linux ]; then
+    flags=(); [ "$tier" != release ] || flags=(--release)
+    tools/build-kernel "${flags[@]}" --src "$PAX_ROOT/kernel/kmain_console.lu" "$W/$tier" > "$W/$tier/kernel.path"
+    printf '/bin/sh /etc/ahci.sh\n' > "$W/run"
+    tools/mkinitramfs "$W/session.cpio" /tmp/:1777 /mnt/:755 \
+        "/bin/sh=$W/bin/sh:755" "/bin/cat=$W/bin/cat:755" "/bin/nvme=$W/bin/nvme:755" \
+        "/etc/ahci.sh=$D/session.sh:644" "/etc/pax-run=$W/run:644" > "$W/archive.log"
+    tools/mkimage --conf boot/limine-initramfs.conf --add "$W/session.cpio" initramfs.cpio \
+        "$W/$tier/kmain_console.elf" "$W/$tier/session.iso" > "$W/$tier/image.log"
+    echo 'PASS A0-build'
+fi
+[ "$only" != build ] || exit 0
+
+if [ "$record" = 1 ] || [ "${PAX_LINUX:-}" = live ]; then
+    [ -r "${PAX_LINUX_KERNEL:-/missing}" ] || die 'no readable Linux kernel for live reference'
+    disks "$W/linux/disks"
+    mapfile -t args < <(devices "$W/linux/disks")
+    tools/linux-nodes --kernel "$PAX_LINUX_KERNEL" --modules "$PAX_LINUX_MODULES" \
+        --busybox "${PAX_BUSYBOX:?set PAX_BUSYBOX}" --accel "${PAX_LINUX_ACCEL:-kvm}" \
+        "${args[@]}" --file "$D/session.sh=/etc/ahci.sh" \
+        "$W/linux/guest" "$W/bin/sh" "$W/bin/cat" "$W/bin/nvme" -- '/bin/sh /etc/ahci.sh'
+    cp "$W/linux/guest/serial.log" "$W/linux/session.log"
+    sums "$W/linux/disks" > "$W/linux/images.sha256"
+    if [ "$record" = 1 ]; then
+        mkdir -p "$D/linux"
+        cp "$W/linux/session.log" "$W/linux/images.sha256" "$D/linux/"
+        cp "$W/linux/guest/meta" "$D/linux/meta"
+    fi
+else
+    echo 'LOUD: using recorded Linux guest (no readable host kernel); see tests/mpx6-ahci.d/linux/meta'
+    cp "$D/linux/session.log" "$D/linux/images.sha256" "$W/linux/"
+fi
+[ "$only" != linux ] || exit 0
+
+disks "$W/$tier/$firmware/disks"
+mapfile -t args < <(devices "$W/$tier/$firmware/disks")
+log=$W/$tier/$firmware/serial.log
+rc=0
+tools/qemu-halt --firmware "$firmware" --accel "${PAX_AHCI_ACCEL:-auto}" --serial "$log" --timeout 240 \
+    --qemu -m --qemu 1G --elf "$W/$tier/kmain_console.elf" --marker 'halt|PANIC .*' \
+    "${args[@]}" "$W/$tier/session.iso" > "$W/$tier/$firmware/halt.log" 2>&1 || rc=$?
+if [ "$rc" != 0 ]; then cat "$W/$tier/$firmware/halt.log"; echo 'FAIL A0-boot'; exit 1; fi
+python3 -I "$D/compare" "$log" "$W/linux/session.log"
+sums "$W/$tier/$firmware/disks" > "$W/$tier/$firmware/images.sha256"
+if ! diff -u "$W/linux/images.sha256" "$W/$tier/$firmware/images.sha256"; then
+    echo 'FAIL A5-image-differential'; exit 1
+fi
+echo 'PASS A5-image-differential: all four images byte-identical to Linux'
+echo 'mpx6-ahci: PASS'
