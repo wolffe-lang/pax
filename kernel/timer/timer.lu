@@ -1,17 +1,15 @@
 //! timer — the 8259 interrupt controllers and the 8254 interval timer
 //! (kw10, M-PX2's timer).
 //!
-//! **Why the PIT, not the local APIC timer.** The PIT's input clock is
-//! fixed (1.193182 MHz), so a divisor is a rate with no calibration; it
-//! is reached by port I/O, which the kernel already has (boot/io.S),
-//! with nothing to map. The local APIC timer counts the bus or core
-//! clock, whose rate is unknown until it is calibrated against a timer
-//! of known rate (this one) or read from CPUID leaf 0x15 where a CPU
-//! reports it; its registers are a 4 KiB MMIO page at 0xfee00000 that
-//! PAX's paging does not map (reserved memory is outside its HHDM,
-//! kernel/paging); and it is per-CPU, which matters only once there is
-//! more than one. The scheduler lane wants the per-CPU timer and can
-//! calibrate it with this one; the first tick does not need it.
+//! **The tick is the local APIC timer (px76, R-px76-1 A).** kw10 ticked
+//! the 8254 PIT through the 8259, which needs no calibration; a real
+//! board may gate the 8254's clock in S0 (the Intel 500-series PCH can),
+//! so the tick no longer depends on it. `start` calibrates the local
+//! APIC timer against kernel/clock's monotonic nanoseconds (the HPET's
+//! main counter, else the ACPI PM timer, else the PIT read back, in that
+//! order) and runs it periodic at 100 Hz on vector 32. The 8259s stay
+//! for the legacy lines that still use them (COM1's 4, the i8042's 1,
+//! an INTx device's level line); the PIT's line 0 stays masked.
 //!
 //! `start`:
 //! - the two 8259s are re-initialised (ICW1-ICW4: edge-triggered,
@@ -19,14 +17,24 @@
 //!   vector bases at 32 and 40, off the exception vectors 0-31 (the
 //!   PC's power-on bases, 8 and 0x70, put IRQ 0-7 on vectors 8-15), and
 //!   every line masked (OCW1 0xff on both);
-//! - the PIT's channel 0 is programmed in mode 2 (rate generator,
-//!   binary, low byte then high byte) with divisor 11932: 1193182 /
-//!   11932 = 99.998 Hz, one tick every 10.0002 ms;
-//! - line 0 alone is unmasked on the master: vector 32.
-//! `tick` (kernel/interrupts, vector 32) counts and sends the master a
-//! non-specific end of interrupt (OCW2 0x20). `stop` masks every line.
-//! `wait` sleeps until one interrupt has been handled (boot/isr.S's
-//! STI; HLT; CLI): the kernel otherwise runs with interrupts off.
+//! - kernel/clock is started (a no-op when a kernel started it first);
+//! - the local APIC timer is masked one-shot with divide-by-16 (DCR 3)
+//!   and an initial count of 0xffffffff, counted down across 20 ms of
+//!   the clock, and the rate (counts per second) is that difference over
+//!   the elapsed nanoseconds; a count that did not move, or a rate under
+//!   100 Hz, panics by name;
+//! - the LVT timer is set periodic, vector 32, unmasked, with an initial
+//!   count of rate / 100: one tick every 10 ms;
+//! - one line names the clock and the rate: `timer: LAPIC calibrated by
+//!   HPET|PM|PIT divide16 <rate> Hz, tick 100 Hz vector 32; PIT IRQ
+//!   masked`.
+//! `tick` (kernel/interrupts, vector 32) counts, samples the clock (so a
+//! PIT-backed clock never misses its 54.9 ms wrap) and sends the local
+//! APIC its end of interrupt. `eoi` acknowledges an 8259 line at the
+//! 8259s and an MSI vector (80-83) at the local APIC. `stop` masks every
+//! 8259 line and the LVT timer. `wait` sleeps until one interrupt has
+//! been handled (boot/isr.S's STI; HLT; CLI): the kernel otherwise runs
+//! with interrupts off.
 //! `spurious` reads a controller's in-service register (OCW3 0x0b): a
 //! line-7 (vector 39) or line-15 (vector 47) request whose in-service
 //! bit is clear was withdrawn before it was acknowledged and must not be
@@ -41,7 +49,9 @@
 //! 0xa0/0xa1, PIT 0x40-0x43); the edge/level control registers are
 //! Intel's ICH9 data sheet's (ELCR1 and ELCR2, I/O ports 0x4d0 and
 //! 0x4d1; px20); the local APIC timer's description is
-//! the Intel SDM vol. 3A §11.5.4 ("APIC Timer") and §11.4.1. No Linux
+//! the Intel SDM vol. 3A §11.5.4 ("APIC Timer": the divide
+//! configuration, the initial and current counts, one-shot and periodic
+//! modes) and §11.4.1, and its EOI register §11.8.5 (px76). No Linux
 //! source; no other kernel's source.
 
 use apic
@@ -59,21 +69,19 @@ const MASTER_CMD: u16 = 0x20
 const MASTER_DATA: u16 = 0x21
 const SLAVE_CMD: u16 = 0xa0
 const SLAVE_DATA: u16 = 0xa1
-const PIT_CH0: u16 = 0x40
-const PIT_CTRL: u16 = 0x43
 const ELCR_MASTER: u16 = 0x4d0 // px20
 const ELCR_SLAVE: u16 = 0x4d1
 
-// The master 8259's vector base after `start` (line 0, the PIT, is
-// 32), the slave's, and the PIT's divisor (1193182 / 11932 = 99.998
-// Hz). Other modules read them as `timer.MASTER_BASE` and so on (wolf
-// 0.2.26, wolf-lang#579; px16 retired the `pub fn`s that returned them).
-/// The master 8259's vector base after `start`: 32, so the PIT is vector 32.
+// The master 8259's vector base after `start` (its line 0, the PIT's,
+// is 32, which the local APIC timer's tick also takes while line 0
+// stays masked; px76) and the slave's. Other modules read them as
+// `timer.MASTER_BASE` and so on (wolf 0.2.26, wolf-lang#579; px16
+// retired the `pub fn`s that returned them; px76 retired the PIT's
+// divisor with the PIT's tick).
+/// The master 8259's vector base after `start`: 32, the tick's vector.
 pub const MASTER_BASE: u64 = 32
 /// The slave 8259's vector base after `start`: 40.
 pub const SLAVE_BASE: u64 = 40
-/// The PIT's divisor: 11932, 1193182 / 11932 = 99.998 Hz.
-pub const DIVISOR: u64 = 11932
 
 // Timer interrupts handled since `start`: boot/isr.S's `pax_tick_count`,
 // read and written volatile (px07, #598). It was a module `var`; wolf
@@ -106,7 +114,8 @@ fn inp(port: u16) -> u64 {
     v as u64
 }
 
-/// Remap and mask the 8259s, start the PIT at 99.998 Hz, unmask line 0.
+/// Remap and mask the 8259s, calibrate the local APIC timer against
+/// kernel/clock, tick at 100 Hz on vector 32 and say so.
 pub fn start() {
     set_count(0) // #598
     // # Safety: the counter is touched with interrupts off.
