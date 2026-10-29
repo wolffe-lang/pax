@@ -4333,7 +4333,9 @@ jobs:
     needs: plan
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-install')
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # px76: 56 minutes in the nightly 40690748340, and the all tier now adds
+    # the serial-less install (its own 15-minute step bound).
+    timeout-minutes: 80
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_INSTALL_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'smoke' || 'full' }}
@@ -4367,6 +4369,10 @@ jobs:
           persist-credentials: false
       - name: guided installer, independent readback and persistent target sessions
         run: tests/mpx6-install $PAX_LEGS
+      - name: the unattended install with no serial port, native UEFI (px76, tools/qemu-halt --no-serial; the all tier)
+        if: needs.plan.outputs.tier == 'all'
+        timeout-minutes: 15
+        run: tests/mpx6-install --only noserial --inputs "$PWD/build/mpx6-install/inputs"
       - name: keep installer phase logs, byte-range proofs and oracle verdicts
         if: always()
         uses: actions/upload-artifact@v4
