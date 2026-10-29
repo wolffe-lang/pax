@@ -1579,9 +1579,11 @@ own `kernel/{nvme,vblk,block,pci,procfs,files}` were read.
 | [ATA Command Set 4, official T13 draft archived](https://web.archive.org/web/20181123105648if_/http://t13.org:80/Documents/UploadedDocuments/docs2017/di529r18-ATAATAPI_Command_Set_-_4.pdf) | ACS-4 revision 18, 2017-08-04; SHA256 `26aaf3ef3d34d890c4b471c3af653c999c5d96a9a4e705e345f442f911cc3da9` | §§7.11 (FLUSH CACHE EXT, may exceed 30 s), 7.13 (IDENTIFY DEVICE; words 10–19, 23–26, 27–46, 83, 100–103, 106, 117–118, 217), 7.21 (READ DMA EXT), 7.57 (WRITE DMA EXT); LBA48 and sector counts |
 | [Serial ATA: High Speed Serialized AT Attachment](https://storusint.com/pdf/storage_protocols/sata/serialata10a.pdf) | 1.0a, 2003-01-07; SHA256 `be534520e6b28e4b122280c5943b24a6cec58b5796788b9f1f9437af90872940` | §§8.5.2, 8.5.3, 8.5.6, 8.5.8; H2D Register FIS 27h (five DWORDs, command bit, six LBA bytes and two count bytes), D2H Register FIS 34h, DMA Setup 41h, PIO Setup 5Fh |
 | [PCI Local Bus Specification](https://lekensteyn.nl/files/docs/PCI_SPEV_V3_0.pdf) | 3.0, 2004-02-03; SHA256 `74d05cd79ae9cb1c38e89669c5f5735e521d7e209f03eef11168a5c2f6771019` | §6.2.2 (memory decode, bus master, INTx disable), §6.8.1.3 (MSI enable), §6.8.2.3 (MSI-X enable). The kernel performs initial system configuration, not per-command interrupt masking through PCI enable bits. AHCI GHC.IE and PxIE stay clear. |
+| Intel 8254 programmable interval timer data sheet | as `kernel/timer` (the author's own knowledge) | the control word (channel 0, low then high byte, mode 2), the counter-latch command, mode 2's count from N down to 1 and its reload: `kernel/ahci_clock`'s `count`, `now_ns`, and `counting`, which takes a counter that never changes over 100000 latched reads as a PIT that does not count |
 
 Black-box references: QEMU 8.2.2 from Ubuntu 24.04 (`ahci`, `ide-hd`,
-`blkdebug`) and hasu's installed Linux kernel and modules in a QEMU guest,
+`blkdebug`, and q35's `pit=off` machine property for a machine whose PIT
+does not count) and hasu's installed Linux kernel and modules in a QEMU guest,
 never their source. `tests/mpx6-ahci.d/linux` holds that guest's recorded
 answers; `meta` names its kernel and emulator. PAX's existing static probes
 `user/elf/{nodes,nvme}.c`, the new bounded `user/elf/ahci.c`, pelt, boreutils'
