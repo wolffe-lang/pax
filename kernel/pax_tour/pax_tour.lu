@@ -35,6 +35,7 @@
 //! No Linux source; no other kernel's source.
 
 use apic
+use clock
 use boot_info
 use frames
 use interrupts
@@ -69,30 +70,8 @@ const LINES: u64 = 6
 
 /// Channel 0's current count (the counter-latch command, then the low
 /// and the high byte).
-fn pit_count() -> u64 {
-    // # Safety: io.S's OUT to the 8254's control port: latch channel 0.
-    unsafe { pax_outb(PIT_CTRL, 0) }
-    // # Safety: io.S's IN of the latched count, low byte then high.
-    let lo = unsafe { pax_inb(PIT_CH0) }
-    // # Safety: as above.
-    let hi = unsafe { pax_inb(PIT_CH0) }
-    (lo as u64) | ((hi as u64) * 256)
-}
-
-/// PAUSE, before the timer interrupt is live: `cs`
-/// hundredths of a second, counted as channel 0's reloads. `timer.start`
-/// must have run (it programs channel 0); interrupts are off.
-pub fn pause_early(cs: u64) {
-    var seen: u64 = 0
-    var last = pit_count()
-    while seen < cs {
-        let c = pit_count()
-        if c > last {
-            seen += 1
-        }
-        last = c
-    }
-}
+/// Pause with interrupts masked, using the same monotonic clock as devices.
+pub fn pause_early(cs: u64) { clock.wait_us(cs * 10000) }
 
 /// PAUSE, the timer interrupt live and the scheduler not yet
 /// started: until `n` more ticks have been handled (interrupts on
