@@ -1,0 +1,113 @@
+//! px78: the install allow-list's pure witnesses over inventory records;
+//! no device opened, no child run. Each row prints PASS by name or exits 1
+//! with FAIL and the row's name (the two plants turn I-allow-serial and
+//! I-allow-root red).
+
+fn target(name: str) -> Target {
+    Target {
+        name: name,
+        identity: "8:16-seq3",
+        bytes: 536870912000,
+        sector: 512,
+        readonly: false,
+        mounted: false,
+        running_root: false,
+    }
+}
+
+fn fail(row: str, why: str) {
+    eprint("FAIL {row}: {why}")
+    os_exit(1)
+}
+
+fn expect(row: str, actual: str, wanted: str) {
+    if actual != wanted { fail(row, "expected '{wanted}', got '{actual}'") }
+}
+
+fn main() -> int {
+    // The file's grammar: comments, blanks, CRLF, spaces inside a model or
+    // a serial (PX75B's internal-space serial), each value trimmed.
+    let good = parse_allow_list(
+        "# the stick's default\n\n  model=Samsung SSD 870 serial=S6PXNM0T612345A  \r\nmodel=PX75B-SATA-B serial=PX75B B2 INNER\nmodel= serial=PX71-VDB\n",
+        "witness",
+    )
+    expect("I-allow-parse", good.refusal, "")
+    if good.entries.len != 3 { fail("I-allow-parse", "{good.entries.len} entries") }
+    expect("I-allow-parse", good.entries[0].model, "Samsung SSD 870")
+    expect("I-allow-parse", good.entries[0].serial, "S6PXNM0T612345A")
+    expect("I-allow-parse", good.entries[1].serial, "PX75B B2 INNER")
+    expect("I-allow-parse", good.entries[2].model, "")
+    print("PASS I-allow-parse: comments, blanks, CRLF, inner spaces, an empty model")
+    // A bad line refuses the whole list, by its number; so does an empty one.
+    for bad in ["serial=X model=Y\n", "model=A serial=B serial=C\n", "model=A serial=\n", "model=A\n", "# ok\nmodel=A serial=B\nnonsense\n"] {
+        let l = parse_allow_list(bad, "bad")
+        if l.refusal.len == 0 || l.entries.len != 0 { fail("I-allow-bad-line", "accepted '{bad}'") }
+        if !l.refusal.contains("line ") { fail("I-allow-bad-line", "no line named: {l.refusal}") }
+    }
+    expect("I-allow-empty", parse_allow_list("", "f").refusal, "f names no disk")
+    expect("I-allow-empty", parse_allow_list("# only comments\n\n", "f").refusal, "f names no disk")
+    print("PASS I-allow-bad-line: a malformed line or an empty list refuses every disk, named")
+    // Model AND serial: the right model with the wrong serial is refused
+    // (px78-plant-serial compares the model alone and is red here).
+    let list = parse_allow_list("model=Samsung SSD 870 serial=PX78-TARGET-0001\n", "stick")
+    let sdb = target("sdb")
+    expect("I-allow-serial", judge(sdb, "Samsung SSD 870", "PX78-TARGET-0001", false, list), "")
+    expect("I-allow-serial", judge(sdb, "Samsung SSD 870", "PX78-OTHER-0002", false, list), "not on the install allow-list")
+    expect("I-allow-serial", judge(sdb, "Samsung SSD 860", "PX78-TARGET-0001", false, list), "not on the install allow-list")
+    expect("I-allow-serial", judge(sdb, "Samsung SSD 870", "", false, list), "no serial number, so it cannot be on the install allow-list")
+    print("PASS I-allow-serial: model and serial both; the right model with another serial refused")
+    // Refused before the list is read, in order, even when listed (the
+    // running root must win: px78-plant-root lets the list win and is red).
+    var t = target("nvme0n1")
+    let listed = parse_allow_list("model=Samsung SSD 990 PRO 1TB serial=S6Z1NJ0W000001\n", "stick")
+    let m = "Samsung SSD 990 PRO 1TB"
+    let sn = "S6Z1NJ0W000001"
+    expect("I-allow-root", judge(t, m, sn, false, listed), "")
+    t.running_root = true
+    t.mounted = true
+    expect("I-allow-root", judge(t, m, sn, false, listed), "the running root")
+    t.running_root = false
+    expect("I-allow-root", judge(t, m, sn, false, listed), "mounted")
+    t.mounted = false
+    t.readonly = true
+    expect("I-allow-root", judge(t, m, sn, false, listed), "read-only")
+    t.readonly = false
+    expect("I-allow-root", judge(t, m, sn, true, listed), "a PAX live medium (the boot stick, or a copy of it)")
+    print("PASS I-allow-root: running root, mounted, read-only and the stick refused before the list")
+    // No list: every disk refused, and the page says how to add one.
+    let none = parse_allow_list("", "/dev/sdd1:/pax/install-targets")
+    let why = judge(sdb, "Samsung SSD 870", "PX78-TARGET-0001", false, none)
+    if !why.starts_with("no usable install allow-list") { fail("I-allow-none", why) }
+    if !how_to_allow().contains("/sys/block/sdX/device/model") { fail("I-allow-none", "no way to add one") }
+    print("PASS I-allow-none: an empty list refuses every disk and says how to add one")
+    // The refusal names the disk and its identity, and the line to copy.
+    let d = Disk {
+        target: copy sdb,
+        model: "Samsung SSD 870",
+        serial: "PX78-OTHER-0002",
+        part1: "",
+        part1_at: 0,
+        live: false,
+        layout: "no partitions",
+        reason: "not on the install allow-list",
+    }
+    let text = disk_text(d)
+    if !text.contains("not on the install allow-list: /dev/sdb model=Samsung SSD 870 serial=PX78-OTHER-0002") { fail("I-allow-text", text) }
+    if !text.contains("model=Samsung SSD 870 serial=PX78-OTHER-0002)") { fail("I-allow-text", text) }
+    print("PASS I-allow-text: a refusal names /dev/<disk> model=... serial=... and the line that would allow it")
+    // R-px78-4: the layout in words, from inventory's topology.
+    var p = target("sda")
+    p.identity = "8:0-seq2;sda1:8:1:1:4096:131072;sda2:8:2:2:135168:4000;sda3:8:3:3:2048:2048"
+    let (p1, at, layout) = partitions_of(p)
+    expect("I-allow-layout", p1, "sda1")
+    if at != 4096 * 512 { fail("I-allow-layout", "partition 1 at {at}") }
+    expect("I-allow-layout", layout, "PAX's install layout")
+    p.identity = "259:0-seq1;nvme0n1p1:259:1:1:2048:2097152;nvme0n1p2:259:2:2:2099200:9000000"
+    let (_q1, _qa, foreign) = partitions_of(p)
+    expect("I-allow-layout", foreign, "2 partitions PAX did not write")
+    p.identity = "8:32-seq4"
+    let (_r1, _ra, blank) = partitions_of(p)
+    expect("I-allow-layout", blank, "no partitions")
+    print("PASS I-allow-layout: PAX's layout, foreign partitions and a blank disk told apart")
+    0
+}

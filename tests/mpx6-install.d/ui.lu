@@ -19,7 +19,26 @@ fn main() -> int {
             running_root: false,
         },
     ]
-    let p = guided_plan(targets, "test") else |e| { print("UI result {e}"); return 1 }
+    // px78: the page judges each disk; vda (the running root) is refused
+    // before the list is read, vdb is on it.
+    let list = parse_allow_list("model= serial=PX71-VDB\n", "ui witness")
+    var disks = List[Disk]()
+    let serials = ["PX71-VDA", "PX71-VDB"]
+    for i in 0..targets.len {
+        let t = copy targets[i]
+        (mut disks).push(Disk {
+            target: copy t,
+            model: "",
+            serial: serials[i],
+            part1: "",
+            part1_at: 0,
+            live: false,
+            layout: "no partitions",
+            reason: judge(t, "", serials[i], false, list),
+        })
+    }
+    var lg = no_log("ui witness: no stick")
+    let p = guided_plan(mut lg, disks, "test") else |e| { print("UI result {e}"); return 1 }
     print("UI confirmed {p.target.name} {p.user} {p.games}")
     0
 }
