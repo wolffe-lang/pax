@@ -18,7 +18,7 @@ mon=str(work/('session-'+firmware+'.mon'))
 if os.path.exists(mon):os.unlink(mon)
 cmd=['qemu-system-x86_64','-machine','q35,accel=tcg','-cpu','max','-smp','4','-m','512M',
      '-display','none','-serial','stdio','-monitor','unix:'+mon+',server=on,wait=off','-nic','none',
-     '-drive',f'file={image},if=none,id=d0,format=raw','-device','virtio-blk-pci,drive=d0,bootindex=0']
+     '-drive',f'file={image},if=none,id=d0,format=raw','-device','virtio-blk-pci,drive=d0,bootindex=0,serial=PX71-ROOT']
 if firmware=='uefi':cmd+=['-drive','if=pflash,format=raw,unit=0,readonly=on,file='+os.environ.get('PAX_OVMF_CODE','/usr/share/OVMF/OVMF_CODE_4M.fd')]
 p=subprocess.Popen(cmd,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
 buf=bytearray();lock=threading.Lock();log=logpath.open('wb')
@@ -42,7 +42,10 @@ def send(s,enter=True):
         p.stdin.write(bytes([b]));p.stdin.flush();time.sleep(.01)
     if enter:p.stdin.write(b'\r');p.stdin.flush()
 try:
-    commands=['pax-install --dry-run --target vda --seed test --user pax --games no','echo hello > /etc/motd','lope add /usr/share/tunes','lope list','cd',
+    # px78: the running root is refused before the allow-list is read,
+    # even when the list names it (px78-plant-root lets the list win).
+    commands=["echo 'model= serial=PX71-ROOT' > /tmp/allow",
+              'pax-install --dry-run --target vda --seed test --user pax --games no --allow-list /tmp/allow','echo hello > /etc/motd','lope add /usr/share/tunes','lope list','cd',
               'echo written on PAX, before the reboot > notes.txt','echo root wrote this in /root > /root/note','reboot']
     for i,line in enumerate(commands,1):prompt(1,i);send(line)
     wait(lambda s:b'marked clean; restarting' in s,'reboot completed')
@@ -66,7 +69,7 @@ for i,b in enumerate(boots,1):
     assert re.search(r'^root: PARTUUID=[0-9a-fA-F-]+ \(vda2\) on /: ext2, read-write, write-back$',b,re.M),b
     assert f'clean, mount {i};' in b,b
     assert re.search(r'fstab: PARTUUID=[0-9a-fA-F-]+ \(vda2\) is /: ext2, read-write, write-back',b),b
-assert 'pax-install: refused: running_root' in boots[0],boots[0]
+assert 'pax-install: refused: the running root: /dev/vda' in boots[0],boots[0]
 second=boots[1]
 for command,answer in [('cat /etc/motd','\nhello\n'),('lope list','/usr/share/tunes'),('cat notes.txt','written on PAX, before the reboot'),('cat /root/note','root wrote this in /root'),('cat /proc/self/mounts','/dev/root / ext2 rw,relatime 0 0')]:
     assert command in second and answer in second.split(command,1)[1].split('$ ',1)[0],(command,second)

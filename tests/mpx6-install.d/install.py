@@ -94,16 +94,21 @@ assert shutil.disk_usage(work).free > needed + (2<<30), 'insufficient space for 
 token=f'ERASE /dev/{name} 254:{minor}-seq{seq} {capacity} {seed}'
 if fault=='wrong-token':token+='-WRONG'
 script=work/'install.sh'
-script.write_text(f'/bin/pax-install --install --ext2-preview --target {name} --seed {seed} --user pax --games {games} --source /source --payload /payload --confirm "{token}"\n'
+# px78: the target is named on an install allow-list by its serial (the
+# virtio disk's GET_ID string, QEMU's serial=; a virtio disk shows no model).
+serial='PX71-'+name.upper()
+(work/'allow-list').write_text(f'# px71 rig: the target alone\nmodel= serial={serial}\n')
+allow='--allow-list /etc/pax-install-targets'
+script.write_text(f'/bin/pax-install --install --ext2-preview --target {name} --seed {seed} --user pax --games {games} --source /source --payload /payload {allow} --confirm "{token}"\n'
                   'echo INSTALL-EXIT-$?\n')
 if guided:
-    script.write_text(f'/bin/pax-install --seed {seed} --source /source --payload /payload\necho INSTALL-EXIT-$?\n')
+    script.write_text(f'/bin/pax-install --seed {seed} --source /source --payload /payload {allow}\necho INSTALL-EXIT-$?\n')
     (work/'keys').write_text(('2' if name=='vdb' else '3')+'\npax\n'+('y' if games=='yes' else 'n')+'\next2-preview\n'+token+'\nno\n')
-if fault=='cancel':script.write_text("printf 'q\\n' | /bin/pax-install --seed test\necho INSTALL-EXIT-$?\n")
+if fault=='cancel':script.write_text(f"printf 'q\\n' | /bin/pax-install --seed test {allow}\necho INSTALL-EXIT-$?\n")
 if fault=='missing-tool':script.write_text(script.read_text().replace('--payload /payload','--payload /payload --tool-dir /missing'))
 (work/'run').write_text('/bin/sh /install.sh\n')
 args=['/tmp/:1777','/bin/sh='+str(source/'bin/sh')+':755','/bin/pax-install='+str(source/'bin/pax-install')+':755',
-      '/etc/pax-run='+str(work/'run')+':644','/install.sh='+str(script)+':644']
+      '/etc/pax-run='+str(work/'run')+':644','/install.sh='+str(script)+':644','/etc/pax-install-targets='+str(work/'allow-list')+':644']
 # Formatters execute from the rescue environment, not the target.
 for n in ['paxgpt','paxfat','paxext2','limine']+(['paxext2.real'] if fault=='invalid-manifest' else []):args.append('/bin/'+n+'='+str(source/'bin'/n)+':755')
 for base,prefix in [(source,'/source'),(payload,'/payload')]:
@@ -133,10 +138,10 @@ if os.environ.get('PAX_INSTALL_NOSERIAL','')=='1':
 if sparse_zeroes:
     assert not fault, 'sparse backing optimization is only a positive install fixture'
     cmd+=['--qemu','-drive','--qemu',f'file={work/"target.img"},if=none,id=bigroot,format=raw,detect-zeroes=unmap,discard=unmap',
-          '--qemu','-device','--qemu','virtio-blk-pci,drive=bigroot']
+          '--qemu','-device','--qemu',f'virtio-blk-pci,drive=bigroot,serial={serial}']
 else:
     # px84 (R-px84-1 A): a 4Kn target, 4096-byte logical sectors, refused by name.
-    cmd+=['--drive',str(work/'target.img')+(',ro' if fault=='readonly' else '')+(';logical_block_size=4096,physical_block_size=4096' if fault=='4kn' else '')]
+    cmd+=['--drive',str(work/'target.img')+(',ro' if fault=='readonly' else '')+';serial='+serial+(',logical_block_size=4096,physical_block_size=4096' if fault=='4kn' else '')]
 cmd+=[work/'boot.iso']
 t=time.monotonic();p=run(cmd,False);install_seconds=time.monotonic()-t
 (work/'install.boot').write_bytes(p.stdout+p.stderr)
@@ -148,7 +153,8 @@ if fault:
     assert sha(work/'source-guard.img')==guard
     if fault in ['missing-boot','corrupt-boot','readonly','cancel','wrong-token','4kn']:
         assert sha(work/'target.img')==blank,'prewrite refusal changed target'
-        expected={'missing-boot':'stopped: io','corrupt-boot':'corrupt_asset','readonly':'refused: readonly','cancel':'cancelled','wrong-token':'unconfirmed','4kn':'pax-install: refused: sector_size'}[fault]
+        # px78: a read-only disk is refused before the allow-list is read, by name.
+        expected={'missing-boot':'stopped: io','corrupt-boot':'corrupt_asset','readonly':'refused: read-only: /dev/vdb','cancel':'cancelled','wrong-token':'unconfirmed','4kn':'pax-install: refused: sector_size'}[fault]
         assert expected in s,s[-8000:]
         if fault=='4kn':
             # The kernel names the device's 4096-byte blocks; the planner refuses the target.

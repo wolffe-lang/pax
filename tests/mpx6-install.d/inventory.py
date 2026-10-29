@@ -23,22 +23,27 @@ for n in ['a', 'b']:
     p = work / (n + '.img')
     with p.open('wb') as f: f.truncate(128 * 1024 * 1024)
 before = [digest(work / (n + '.img')) for n in ['a', 'b']]
+# px78: vda is named on the allow-list by its serial (GET_ID); vdb is
+# read-only (refused before the list); vdc is not there.
+(work / 'allow').write_text('model= serial=PX71-INV-A\nmodel= serial=PX71-INV-B\n')
+a = '--allow-list /etc/pax-install-targets'
 (work / 'run').write_text('/bin/pax-install --inventory\n'
-    '/bin/pax-install --dry-run --target vda --seed test --user pax --games no\n'
-    '/bin/pax-install --dry-run --target vdb --seed test --user pax --games yes\n'
-    '/bin/pax-install --dry-run --target vdc --seed test --user pax --games no\n')
+    f'/bin/pax-install --dry-run --target vda --seed test --user pax --games no {a}\n'
+    f'/bin/pax-install --dry-run --target vdb --seed test --user pax --games yes {a}\n'
+    f'/bin/pax-install --dry-run --target vdc --seed test --user pax --games no {a}\n')
 run(repo/'tools/mkinitramfs', work/'init.cpio', '/bin/pax-install='+str(programs/'pax-install')+':755',
-    '/etc/pax-run='+str(work/'run')+':644')
+    '/etc/pax-run='+str(work/'run')+':644', '/etc/pax-install-targets='+str(work/'allow')+':644',
+    '/tmp/:1777')
 run(repo/'tools/mkimage', '--conf', repo/'boot/limine-initramfs.conf', '--add', work/'init.cpio',
     'initramfs.cpio', kernel, work/'boot.iso')
 (work/'boot.log').write_bytes(run(repo/'tools/qemu-halt', '--firmware', 'bios', '--elf', kernel,
-    '--serial', work/'serial.log', '--marker', 'halt', '--drive', work/'a.img',
-    '--drive', str(work/'b.img')+',ro', work/'boot.iso'))
+    '--serial', work/'serial.log', '--marker', 'halt', '--drive', str(work/'a.img')+';serial=PX71-INV-A',
+    '--drive', str(work/'b.img')+',ro;serial=PX71-INV-B', work/'boot.iso'))
 s=(work/'serial.log').read_text(errors='replace')
 assert '/dev/vda bytes=134217728 sector=512 readonly=false mounted=false root=false' in s, s
 assert '/dev/vdb bytes=134217728 sector=512 readonly=true mounted=false root=false' in s, s
 assert 'capacity_bytes 134217728' in s and 'games no' in s, s
-assert 'pax-install: refused: readonly' in s, s
-assert 'pax-install: target unavailable: io' in s, s
+assert 'pax-install: refused: read-only: /dev/vdb' in s, s
+assert 'pax-install: refused: no such disk: /dev/vdc' in s, s
 assert [digest(work/(n+'.img')) for n in ['a','b']] == before
 print('PASS I-inventory: QEMU nodes, ioctl sizes, readonly and vanished target; dry-run bytes unchanged')
