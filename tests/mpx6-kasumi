@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# tests/mpx6-kasumi — px78: the whole install path in QEMU shaped
+# like kasumi (contract item 5; the full and all tiers' merge evidence):
+# tests/mpx6-install's inputs built (--only inputs: the disk tools, pelt,
+# lope, the probes, the games, the installer), then its metal leg
+# (--only metal, tests/mpx6-install.d/metal.py): the live stick under OVMF
+# with no serial port, the install through the USB keyboard to the one
+# disk the stick's allow-list names, the stick removed, the disk booted
+# alone, the file written before the reboot read back, the NVMe and the
+# other SATA disks byte-identical over their allocated extents.
+#
+#   tests/mpx6-kasumi [--work DIR] [--tier native|release|both] [--firmware bios|uefi|both]
+#
+# The leg is native and UEFI's, whatever the plan's legs name (kasumi
+# boots UEFI only, so OVMF; the stick's kernel is the disk tools' native
+# build): --tier and --firmware are taken as the plan passes them, and a
+# value other than native or uefi is said, not silently dropped.
+#
+# Rows: M0-stick, M1-live-login, M2-check, M4-install, M6-stick-log, M7-disk-boot,
+# M8-witness-read, M9-running-root, M10-target-fsck, M5-witness, then
+# I-metal with the leg's and the install's wall times (WORK/metal/
+# result.json keeps them, with the witnesses' sha256s). A failure is a
+# FAIL line naming its row; nothing is skipped.
+#
+# Inputs: tools/mkgames, tools/mkinstall, tools/mkdisk, tools/check-usb,
+# tools/mkinitramfs, tools/mkgpt, user/install, user/disktools,
+# kernel/usb_storage, kernel/xhci, kernel/ahci, kernel/block.
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+work=$PAX_BUILD/mpx6-kasumi tier=native firmware=uefi
+while [ $# -gt 0 ]; do
+    case $1 in
+        --work) work=$2; shift 2 ;;
+        --tier) tier=$2; shift 2 ;;
+        --firmware) firmware=$2; shift 2 ;;
+        *) die 'usage: mpx6-kasumi [--work DIR] [--tier native|release|both] [--firmware bios|uefi|both]' ;;
+    esac
+done
+case $tier in native) ;; release|both) say "mpx6-kasumi: the leg's kernel is the native tier's; --tier $tier does not change it"; tier=native ;; *) die 'bad tier' ;; esac
+case $firmware in bios|uefi|both) [ "$firmware" = uefi ] || say "mpx6-kasumi: the leg boots OVMF (UEFI), as kasumi does; --firmware $firmware does not change it" ;; *) die 'bad firmware' ;; esac
+mkdir -p "$work"; work=$(cd "$work" && pwd)
+"$PAX_ROOT/tests/mpx6-install" --only inputs --work "$work" --inputs "$work/inputs" --tier "$tier" --firmware bios
+"$PAX_ROOT/tests/mpx6-install" --only metal --work "$work" --inputs "$work/inputs"
