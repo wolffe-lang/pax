@@ -145,6 +145,7 @@ fn parse(a: u64) {
 pub fn start() {
     if unsafe { started } { return }
     unsafe { started = true }
+    platform_report()
     let r = boot_info.rsdp()
     let h = boot_info.hhdm()
     if r < h || mapped(r - h, 20) == 0 || integer(r, 8) != 0x2052545020445352 || !checksum(r, 20) {
@@ -182,3 +183,40 @@ pub fn pm_port() -> u64 { unsafe { timer_port } }
 pub fn pm_mask() -> u64 { unsafe { timer_mask } }
 pub fn fadt_table() -> u64 { unsafe { fadt_address } }
 pub fn dsdt() -> u64 { unsafe { dsdt_address } }
+
+// UEFI 2.10 §4.3: system-table header, CHAR16 vendor and UINT32 revision.
+fn platform_report() {
+    log.put("firmware: "); log.put(boot_info.firmware_name(boot_info.firmware()))
+    let e = boot_info.efi_system_table()
+    let h = boot_info.hhdm()
+    if e >= h && mapped(e - h, 36) != 0 && integer(e, 8) == 0x5453595320494249 {
+        log.put(" vendor ")
+        let p = integer(e + 24, 8)
+        var i: u64 = 0
+        while i < 128 {
+            let v = mapped(p + i * 2, 2)
+            if v == 0 { break }
+            let c = integer(v, 2)
+            if c == 0 { break }
+            log.put_byte((if c >= 32 && c < 127 { c } else { 63 }) as int)
+            i += 1
+        }
+        log.put(" revision "); log.hex(integer(e + 32, 4))
+    }
+    log.end()
+    var total: u64 = 0
+    var previous_end: u64 = 0
+    var hole: u64 = 0
+    var i = 0
+    while i < boot_info.memmap_count() {
+        let base = boot_info.memmap_base(i)
+        let length = boot_info.memmap_length(i)
+        if base > previous_end && base - previous_end > hole { hole = base - previous_end }
+        previous_end = base + length
+        total += length
+        i += 1
+    }
+    log.put("memory: "); log.dec(boot_info.memmap_count()); log.put(" entries, total "); log.dec(total as int)
+    log.put(" bytes, usable "); log.dec(boot_info.usable_bytes() as int)
+    log.put(", largest unmapped hole "); log.dec(hole as int); log.end()
+}
