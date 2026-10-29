@@ -1,0 +1,418 @@
+//! usb_storage — USB mass-storage disks: SCSI over the Bulk-Only
+//! Transport (px78). Written from the USB Mass Storage Class Bulk-Only
+//! Transport 1.0 (§§5.1-5.3, 6.2-6.7: the CBW, the CSW, the thirteen
+//! cases' host side and reset recovery), the USB Mass Storage Class
+//! Specification Overview 1.4 (subclass 06h, SCSI transparent), SPC-4
+//! (INQUIRY, REQUEST SENSE, TEST UNIT READY, MODE SENSE(6), the sense
+//! keys) and SBC-3 (READ CAPACITY(10), READ(10), WRITE(10), SYNCHRONIZE
+//! CACHE(10)); Linux 7.2.4 as a black box for what its sysfs shows of
+//! such a disk (`notes/px78/linux-ident.txt`). No driver source read.
+//!
+//! The pipes are kernel/xhci's (`bulk`, `clear_halt`, `bot_reset`): each
+//! command is one CBW out, its data in or out, one CSW in, polled with IF
+//! clear to a deadline as kernel/ahci's commands are, one command at a
+//! time on the kernel's single CPU. LUN 0 only (Get Max LUN is never
+//! asked: many one-LUN devices stall it). 512-byte logical blocks only,
+//! at most 2^32 of them (READ CAPACITY(16) is not sent; a larger disk is
+//! refused by name), 240 blocks a command (Linux's usb-storage's
+//! `max_sectors`, measured: `notes/px78/linux-ident.txt`).
+//!
+//! What the disk shows (kernel/block, kernel/procfs): `device/model` is
+//! INQUIRY's product field, its padding trimmed, as Linux's `model` is
+//! (16 bytes, padded); `device/serial` is empty: Linux answers its read
+//! with ENXIO for a USB disk (no VPD page 80h), so no serial is invented;
+//! `removable` is INQUIRY's RMB bit. A disk with no serial cannot be put
+//! on pax-install's allow-list (px78, R-px78-1), so the stick never can.
+use clock
+use frames
+use log
+use sync
+
+// kernel/xhci's pipes: its exports, called by address through boot/io.S's
+// pax_call5 (kernel/xhci uses kernel/console, which sits above
+// kernel/block: importing it here would close a cycle wolf refuses).
+extern "c" fn pax_call5(target: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64
+extern "c" let pax_xhci_storage_count: *u8
+extern "c" let pax_xhci_storage_dev: *u8
+extern "c" let pax_xhci_storage_live: *u8
+extern "c" let pax_xhci_put_path: *u8
+extern "c" let pax_xhci_dma_page: *u8
+extern "c" let pax_xhci_bulk: *u8
+extern "c" let pax_xhci_clear_halt: *u8
+extern "c" let pax_xhci_bot_reset: *u8
+
+fn live(d: u64) -> bool {
+    // # Safety: kernel/xhci's export reads its own device record.
+    unsafe { pax_call5(pax_xhci_storage_live as u64, d, 0, 0, 0, 0) } != 0
+}
+fn storage_count() -> u64 {
+    // # Safety: kernel/xhci's export reads its storage table.
+    unsafe { pax_call5(pax_xhci_storage_count as u64, 0, 0, 0, 0, 0) }
+}
+fn storage_dev(i: u64) -> u64 {
+    // # Safety: as storage_count.
+    unsafe { pax_call5(pax_xhci_storage_dev as u64, i, 0, 0, 0, 0) }
+}
+fn put_path(d: u64) {
+    // # Safety: kernel/xhci's export writes the log.
+    let _n = unsafe { pax_call5(pax_xhci_put_path as u64, d, 0, 0, 0, 0) }
+}
+fn dma_page() -> u64 {
+    // # Safety: kernel/xhci's export takes a frame for this module.
+    unsafe { pax_call5(pax_xhci_dma_page as u64, 0, 0, 0, 0, 0) }
+}
+fn bulk(d: u64, inward: bool, list: u64, at: u64, n: u64, us: u64) -> (u64, u64) {
+    // # Safety: kernel/xhci's export; the buffers are this module's DMA
+    // page or kernel/block's request pages, held across the call.
+    let v = unsafe { pax_call5(pax_xhci_bulk as u64, d, (us << 1) | (if inward { 1 } else { 0 }), list, at, n) }
+    (v & 255, v >> 8)
+}
+fn clear_halt(d: u64, inward: bool) -> bool {
+    // # Safety: kernel/xhci's export on its own device record.
+    unsafe { pax_call5(pax_xhci_clear_halt as u64, d, if inward { 1 } else { 0 }, 0, 0, 0) } != 0
+}
+fn bot_reset(d: u64) -> bool {
+    // # Safety: as clear_halt.
+    unsafe { pax_call5(pax_xhci_bot_reset as u64, d, 0, 0, 0, 0) } != 0
+}
+
+const MAXU: u64 = 4
+/// The most 512-byte blocks one READ(10) or WRITE(10) moves.
+pub const MAX_SECTORS: u64 = 240
+// The units, a page: count at 0, unit records (kernel addresses) from 1.
+var table: u64 = 0
+var probed: u64 = 0
+
+// A unit's record, a page of its own; its DMA page beside it.
+const U_DEV: u64 = 0 // kernel/xhci's device record
+const U_UP: u64 = 1 // 1 while I/O is taken
+const U_TAG: u64 = 2 // the last CBW's tag
+const U_SECTORS: u64 = 3
+const U_RO: u64 = 4 // MODE SENSE's WP bit
+const U_RMB: u64 = 5 // INQUIRY's RMB bit
+const U_FLUSH: u64 = 6 // 0 once SYNCHRONIZE CACHE was refused (ILLEGAL REQUEST)
+const U_ERRS: u64 = 7 // commands failed
+const U_REQS: u64 = 8 // block requests taken
+const U_SENSE: u64 = 9 // the last sense: key << 16 | ASC << 8 | ASCQ
+const U_DMA: u64 = 10 // its DMA page: the CBW at 0, the CSW at 64, replies at 512
+const U_SAID: u64 = 11 // errors named on the log (the first eight)
+const U_BYTES: u64 = 12 // bytes moved
+const U_INQ: u64 = 16 // INQUIRY's first 36 bytes, from byte 128
+
+const CBW_SIG: u64 = 0x43425355 // "USBC"
+const CSW_SIG: u64 = 0x53425355 // "USBS"
+// What `bot` answers.
+const OK: u64 = 0
+const FAILED: u64 = 1 // the CSW's status 1: the command failed (a sense to read)
+const TRANSPORT: u64 = 2 // the transport failed: the unit was reset or is down
+
+fn r8(a: u64) -> u64 { unsafe { (a as *u8).read_volatile() as u64 } }
+fn w8(a: u64, v: u64) { unsafe { (a as *u8).write_volatile((v & 255) as u8) } }
+fn r32(a: u64) -> u64 { unsafe { (a as *u32).read_volatile() as u64 } }
+fn w32(a: u64, v: u64) { unsafe { (a as *u32).write_volatile((v & 0xffffffff) as u32) } }
+fn get(a: u64, i: u64) -> u64 { unsafe { ((a + i * 8) as *u64).read_volatile() } }
+fn put(a: u64, i: u64, v: u64) { unsafe { ((a + i * 8) as *u64).write_volatile(v) } }
+fn be32(a: u64) -> u64 { (r8(a) << 24) | (r8(a + 1) << 16) | (r8(a + 2) << 8) | r8(a + 3) }
+fn zero(a: u64, n: u64) {
+    var i: u64 = 0
+    while i < n { w8(a + i, 0); i += 1 }
+}
+
+fn unit(u: u64) -> u64 {
+    let t = unsafe { table }
+    if t == 0 || u >= get(t, 0) { 0 } else { get(t, 1 + u) }
+}
+
+/// How many units are disks (probed and up or refused: kernel/block
+/// registers those `up` says).
+pub fn count() -> u64 {
+    let t = unsafe { table }
+    if t == 0 { 0 } else { get(t, 0) }
+}
+
+/// Whether unit `u` takes I/O.
+pub fn up(u: u64) -> bool {
+    let p = unit(u)
+    p != 0 && get(p, U_UP) == 1 && live(get(p, U_DEV))
+}
+
+pub fn sectors(u: u64) -> u64 { let p = unit(u); if p == 0 { 0 } else { get(p, U_SECTORS) } }
+pub fn read_only(u: u64) -> bool { let p = unit(u); p != 0 && get(p, U_RO) != 0 }
+pub fn removable(u: u64) -> bool { let p = unit(u); p != 0 && get(p, U_RMB) != 0 }
+
+fn dma(p: u64) -> u64 { get(p, U_DMA) }
+fn phys(a: u64) -> u64 { a - frames.hhdm() }
+
+fn tag(p: u64) {
+    log.put("usb-storage: ")
+    put_path(get(p, U_DEV))
+}
+
+/// One command: the CDB already in the CBW's bytes 15.. (`len` of them),
+/// `n` bytes of data in (`inward`) or out over `list` (a kernel/block
+/// page list) or the physical range `at`, the whole bounded by `us`.
+/// BOT §6.7's host side: a stalled data stage is cleared and the CSW
+/// read; a stalled CSW is cleared and read once more; a CSW that is not
+/// valid or meaningful (§6.3), a phase error or a pipe that will not
+/// clear is reset recovery (§5.3.4) and TRANSPORT.
+fn bot(p: u64, len: u64, inward: bool, list: u64, at: u64, n: u64, us: u64) -> u64 {
+    let d = get(p, U_DEV)
+    let b = dma(p)
+    let t = (get(p, U_TAG) + 1) & 0xffffffff
+    put(p, U_TAG, t)
+    w32(b, CBW_SIG); w32(b + 4, t); w32(b + 8, n)
+    w8(b + 12, if inward && n > 0 { 0x80 } else { 0 })
+    w8(b + 13, 0); w8(b + 14, len)
+    zero(b + 64, 16)
+    let (c1, m1) = bulk(d, false, 0, phys(b), 31, us)
+    if c1 != 1 || m1 != 31 { return recover(p, "CBW", c1) }
+    if n > 0 {
+        let (c2, _m2) = bulk(d, inward, list, at, n, us)
+        if c2 == 6 {
+            if !clear_halt(d, inward) { return recover(p, "data stage", c2) }
+        } else if c2 != 1 && !(c2 == 13 && inward) {
+            return recover(p, "data stage", c2)
+        }
+    }
+    let (first_code, first_moved) = bulk(d, true, 0, phys(b + 64), 13, us)
+    var c3 = first_code
+    var m3 = first_moved
+    if c3 == 6 {
+        if !clear_halt(d, true) { return recover(p, "CSW", c3) }
+        let (c4, m4) = bulk(d, true, 0, phys(b + 64), 13, us)
+        c3 = c4
+        m3 = m4
+    }
+    if (c3 != 1 && c3 != 13) || m3 != 13 || r32(b + 64) != CSW_SIG || r32(b + 68) != t || r8(b + 76) > 2 {
+        return recover(p, "CSW", c3)
+    }
+    if r8(b + 76) == 2 { return recover(p, "phase error", 2) }
+    if r8(b + 76) == 1 { return FAILED }
+    OK
+}
+
+/// Reset recovery after a transport failure; the unit down if even that
+/// fails (its writes are then refused, never retried blindly).
+fn recover(p: u64, stage: str, code: u64) -> u64 {
+    put(p, U_ERRS, get(p, U_ERRS) + 1)
+    let reset = bot_reset(get(p, U_DEV))
+    if get(p, U_SAID) < 8 {
+        put(p, U_SAID, get(p, U_SAID) + 1)
+        let s = sync.acquire(sync.console())
+        tag(p)
+        log.put(": "); log.put(stage); log.put(" failed, completion code "); log.dec(code as int)
+        log.put(if reset { "; reset recovery done" } else { "; reset recovery failed, the disk is down" })
+        log.end()
+        sync.release(sync.console(), s)
+    }
+    if !reset { put(p, U_UP, 0) }
+    TRANSPORT
+}
+
+fn cdb(p: u64, i: u64, v: u64) { w8(dma(p) + 15 + i, v) }
+fn cdb_clear(p: u64) { zero(dma(p) + 15, 16) }
+
+/// REQUEST SENSE (fixed format, 18 bytes): (key, ASC, ASCQ), recorded.
+fn sense(p: u64) -> (u64, u64, u64) {
+    cdb_clear(p)
+    cdb(p, 0, 0x03); cdb(p, 4, 18)
+    let r = dma(p) + 512
+    zero(r, 18)
+    if bot(p, 6, true, 0, phys(r), 18, 2000000) != OK { return (0xff, 0, 0) }
+    let key = r8(r + 2) & 15
+    let asc = r8(r + 12)
+    let ascq = r8(r + 13)
+    put(p, U_SENSE, (key << 16) | (asc << 8) | ascq)
+    (key, asc, ascq)
+}
+
+fn simple(p: u64, op: u64, alloc: u64, page: u64) -> u64 {
+    cdb_clear(p)
+    cdb(p, 0, op)
+    if op == 0x1a { cdb(p, 2, page); cdb(p, 4, alloc) }
+    if op == 0x12 { cdb(p, 4, alloc) }
+    let r = dma(p) + 512
+    zero(r, 256)
+    let len = if op == 0x25 { 10 } else { 6 }
+    bot(p, len, true, 0, phys(r), alloc, 5000000)
+}
+
+fn refuse(p: u64, why: str) -> bool {
+    let s = sync.acquire(sync.console())
+    tag(p); log.put(": refused: "); log.put(why); log.end()
+    sync.release(sync.console(), s)
+    false
+}
+
+/// TEST UNIT READY until ready (10 s): UNIT ATTENTION is asked again at
+/// once; NOT READY becoming ready waits 100 ms; no medium is refused.
+fn ready(p: u64) -> bool {
+    let deadline = clock.deadline_us(10000000)
+    while !clock.expired(deadline) {
+        let st = simple(p, 0x00, 0, 0)
+        if st == OK { return true }
+        if st == TRANSPORT && get(p, U_UP) == 0 { return refuse(p, "the transport failed at TEST UNIT READY") }
+        let (key, asc, _q) = sense(p)
+        if key == 2 && asc == 0x3a { return refuse(p, "no medium (NOT READY, ASC 3Ah)") }
+        if key != 6 { clock.wait_us(100000) }
+    }
+    refuse(p, "not ready after 10 s (TEST UNIT READY)")
+}
+
+fn probe(p: u64) -> bool {
+    put(p, U_UP, 1)
+    put(p, U_FLUSH, 1)
+    if !ready(p) { put(p, U_UP, 0); return false }
+    if simple(p, 0x12, 36, 0) != OK { put(p, U_UP, 0); return refuse(p, "INQUIRY failed") }
+    let r = dma(p) + 512
+    var i: u64 = 0
+    while i < 36 { w8(p + U_INQ * 8 + i, r8(r + i)); i += 1 }
+    if r8(r) & 0x1f != 0 { put(p, U_UP, 0); return refuse(p, "not a direct-access block device (INQUIRY peripheral type)") }
+    put(p, U_RMB, (r8(r + 1) >> 7) & 1)
+    if simple(p, 0x25, 8, 0) != OK { put(p, U_UP, 0); return refuse(p, "READ CAPACITY(10) failed") }
+    let last = be32(r)
+    let block = be32(r + 4)
+    if last == 0xffffffff { put(p, U_UP, 0); return refuse(p, "more than 2^32 blocks (READ CAPACITY(16) is not sent)") }
+    if block != 512 { put(p, U_UP, 0); return refuse(p, "a logical block that is not 512 bytes (only 512 supported)") }
+    put(p, U_SECTORS, last + 1)
+    // MODE SENSE(6)'s header: byte 2 bit 7 is WP. A device that refuses
+    // the command is taken as writable.
+    if simple(p, 0x1a, 4, 0x3f) == OK { put(p, U_RO, (r8(r + 2) >> 7) & 1) } else { let _s = sense(p) }
+    true
+}
+
+/// Probe every storage device kernel/xhci enumerated (once, after its
+/// first pass, with IF clear): TEST UNIT READY, INQUIRY, READ
+/// CAPACITY(10), MODE SENSE(6). How many units were made (up or not).
+pub fn start() -> u64 {
+    if unsafe { probed } != 0 { return count() }
+    unsafe { probed = 1 }
+    let n = storage_count()
+    if n == 0 { return 0 }
+    let t = dma_page()
+    if t == 0 { return 0 }
+    unsafe { table = t }
+    var i: u64 = 0
+    while i < n && i < MAXU {
+        let p = dma_page()
+        let b = dma_page()
+        if p == 0 || b == 0 { break }
+        put(p, U_DEV, storage_dev(i)); put(p, U_DMA, b)
+        let _ok = probe(p)
+        put(t, 1 + i, p)
+        put(t, 0, i + 1)
+        i += 1
+    }
+    count()
+}
+
+/// Unit `u`'s line, with kernel/block's name for it written by the caller
+/// first:
+///
+///     usb-storage: usb1-1: "QEMU    " "QEMU HARDDISK   " rev "2.5+": 67108864 bytes (0 GB), 512-byte blocks, removable, write-protect off
+pub fn report(u: u64) {
+    let p = unit(u)
+    if p == 0 { return }
+    tag(p)
+    log.put(": \"")
+    var i: u64 = 8
+    while i < 36 {
+        if i == 16 { log.put("\" \"") }
+        if i == 32 { log.put("\" rev \"") }
+        let b = r8(p + U_INQ * 8 + i)
+        log.put_byte((if b >= 32 && b <= 126 { b } else { 63 }) as int)
+        i += 1
+    }
+    log.put("\": ")
+    if get(p, U_UP) == 0 { log.put("refused"); log.end(); return }
+    log.dec((get(p, U_SECTORS) * 512) as int)
+    log.put(" bytes (")
+    log.dec((get(p, U_SECTORS) * 512 / 1000000000) as int)
+    log.put(" GB), 512-byte blocks")
+    log.put(if get(p, U_RMB) != 0 { ", removable" } else { ", not removable" })
+    log.put(if get(p, U_RO) != 0 { ", write-protect on" } else { ", write-protect off" })
+    log.end()
+}
+
+/// The length of unit `u`'s model (INQUIRY's product, 16 bytes, its
+/// trailing spaces trimmed) or serial (none: 0).
+pub fn identity_len(u: u64, serial_number: bool) -> u64 {
+    let p = unit(u)
+    if p == 0 || serial_number { return 0 }
+    var k: u64 = 16
+    while k > 0 && r8(p + U_INQ * 8 + 16 + k - 1) == 32 { k -= 1 }
+    k
+}
+
+/// Byte `i` of unit `u`'s model, 0 outside `identity_len`.
+pub fn identity_byte(u: u64, serial_number: bool, i: u64) -> u64 {
+    let p = unit(u)
+    if p == 0 || i >= identity_len(u, serial_number) { 0 } else { r8(p + U_INQ * 8 + 16 + i) }
+}
+
+fn rw10(p: u64, write: bool, lba: u64, n: u64) {
+    cdb_clear(p)
+    cdb(p, 0, if write { 0x2a } else { 0x28 })
+    cdb(p, 2, lba >> 24); cdb(p, 3, lba >> 16); cdb(p, 4, lba >> 8); cdb(p, 5, lba)
+    cdb(p, 7, n >> 8); cdb(p, 8, n)
+}
+
+fn failed(p: u64, what: str) {
+    put(p, U_ERRS, get(p, U_ERRS) + 1)
+    let (key, asc, ascq) = sense(p)
+    if get(p, U_SAID) >= 8 { return }
+    put(p, U_SAID, get(p, U_SAID) + 1)
+    let s = sync.acquire(sync.console())
+    tag(p); log.put(": "); log.put(what); log.put(" failed: sense key "); log.hex(key)
+    log.put(" ASC "); log.hex(asc); log.put(" ASCQ "); log.hex(ascq); log.put("; -EIO")
+    log.end()
+    sync.release(sync.console(), s)
+}
+
+/// Complete one kernel/block request (its record: op at 0, LBA at 1,
+/// count at 2, the physical buffer at 3 or the page list at 6; status at
+/// 4, state at 5) synchronously: READ(10), WRITE(10) or SYNCHRONIZE
+/// CACHE(10). A device that refuses SYNCHRONIZE CACHE as an ILLEGAL
+/// REQUEST is asked no more and its flushes succeed (it has no cache it
+/// will name); every other failure is the record's error.
+pub fn submit(u: u64, r: u64) {
+    let p = unit(u)
+    var result: u64 = 0x10001
+    if p != 0 && up(u) {
+        put(p, U_REQS, get(p, U_REQS) + 1)
+        let op = get(r, 0)
+        let lba = get(r, 1)
+        let n = get(r, 2)
+        if op == 4 {
+            if get(p, U_FLUSH) == 0 { result = 0 } else {
+                cdb_clear(p)
+                cdb(p, 0, 0x35)
+                let st = bot(p, 10, false, 0, 0, 0, 60000000)
+                if st == OK { result = 0 } else if st == FAILED {
+                    let (key, _a, _q) = sense(p)
+                    if key == 5 { put(p, U_FLUSH, 0); result = 0 } else { failed(p, "SYNCHRONIZE CACHE(10)") }
+                }
+            }
+        } else if (op == 0 || op == 1) && n > 0 && n <= MAX_SECTORS && lba < get(p, U_SECTORS) && n <= get(p, U_SECTORS) - lba {
+            if op == 1 && get(p, U_RO) != 0 {
+                result = 0x10002
+            } else {
+                rw10(p, op == 1, lba, n)
+                let st = bot(p, 10, op == 0, get(r, 6), get(r, 3), n * 512, 30000000)
+                if st == OK {
+                    result = 0
+                    put(p, U_BYTES, get(p, U_BYTES) + n * 512)
+                } else if st == FAILED {
+                    failed(p, if op == 1 { "WRITE(10)" } else { "READ(10)" })
+                }
+            }
+        } else {
+            result = 0x10002
+        }
+    }
+    put(r, 4, result)
+    put(r, 5, 2)
+}
+
+/// The status of the request `submit` completed (0 success).
+pub fn wait(u: u64, r: u64) -> u64 { get(r, 4) }
