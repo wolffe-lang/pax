@@ -86,6 +86,7 @@ set -euo pipefail
 
 firmware=bios serial=$PAX_BUILD/serial.log serial_in= timeout=30 accel=auto gdb_port= image= noscreen=0 bootdisk=0 usbstick=0 bootnvme=0 drives=()
 usbkbd=${PAX_USB_KBD:-} # typing suites keep their exact keystroke stream
+noserial=0 # px76: omit COM1 entirely, not merely its output backend
 while [ $# -gt 0 ]; do
     case $1 in
         --firmware) firmware=$2; shift 2 ;;
@@ -95,6 +96,7 @@ while [ $# -gt 0 ]; do
         --accel)    accel=$2; shift 2 ;;
         --gdb)      gdb_port=$2; shift 2 ;;
         --no-screen) noscreen=1; shift ;;
+        --no-serial) noserial=1; shift ;;
         --boot-disk) bootdisk=1; shift ;;
         --usb-stick) usbstick=1; shift ;;
         --usb-kbd) usbkbd=root; shift ;;
@@ -173,7 +175,10 @@ if [ -n "$usbkbd" ]; then
     [ "$usbkbd" = empty ] || cmd+=(-device "usb-kbd,id=pax-usb-kbd,bus=pax-usb.0,port=$usbport")
 fi
 
-if [ -n "$serial_in" ]; then
+if [ "$noserial" = 1 ]; then
+    [ -z "$serial_in" ] || die "cannot combine --no-serial and --serial-input"
+    cmd+=(-serial none)
+elif [ -n "$serial_in" ]; then
     [ -p "$serial_in" ] || die "--serial-input $serial_in is not a FIFO"
     cmd+=(-chardev "file,id=com1,path=$serial,input-path=$serial_in" -serial chardev:com1)
 else

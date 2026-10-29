@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# px76: exit-port verdict works even with no serial hardware.
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+work=$PAX_BUILD/mpx6-metal-serial
+mkdir -p "$work"
+"$PAX_ROOT/tools/fetch-limine"
+"$PAX_ROOT/tools/build-kernel" --src "$PAX_ROOT/kernel/kmain_metal_serial.lu" "$work"
+for presence in present absent; do
+    cp "$PAX_ROOT/boot/limine.conf" "$work/$presence.conf"
+    args=()
+    if [ "$presence" = absent ]; then
+        printf '\n    cmdline: serial_absent\n' >> "$work/$presence.conf"
+        args=(--no-serial)
+    fi
+    "$PAX_ROOT/tools/mkimage" --conf "$work/$presence.conf" "$work/kmain_metal_serial.elf" "$work/$presence.iso"
+    for fw in bios uefi; do
+        rc=0
+        "$PAX_ROOT/tools/qemu-run" --timeout 15 --firmware "$fw" --serial "$work/$presence-$fw.log" "${args[@]}" "$work/$presence.iso" || rc=$?
+        if [ "$rc" != 33 ]; then
+            echo "FAIL METAL serial $presence $fw: exit $rc, expected 33" >&2
+            exit 1
+        fi
+        echo "PASS METAL serial $presence $fw"
+    done
+done
