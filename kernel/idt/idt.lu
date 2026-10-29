@@ -34,6 +34,7 @@ extern "c" fn pax_lidt(idtr: *Idtr)
 extern "c" let pax_idt: *Gate
 extern "c" let pax_idtr: *Idtr
 extern "c" let pax_isr_table: *u64
+extern "c" let pax_msi_isr_table: *u64
 
 /// A 64-bit IDT gate.
 #[repr(c)]
@@ -89,6 +90,12 @@ pub fn start() {
         // # Safety: pax_isr_table holds the 48 trampolines' addresses.
         let at = unsafe { pax_isr_table[v] }
         set(v, at, if v == 8 { 1 } else { 0 })
+        v += 1
+    }
+    // MSI vectors are disjoint from PIC and the software-switch vector 0x81.
+    v = 0
+    while v < 4 {
+        set(80 + v, unsafe { pax_msi_isr_table[v] }, 0)
         v += 1
     }
     // # Safety: pax_idtr is boot/isr.S's 16 bytes; the table it names

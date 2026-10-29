@@ -149,6 +149,11 @@ pax_isr\v:
         ISR_NOERR 45
         ISR_NOERR 46
         ISR_NOERR 47
+        /* px76: four independently routed PCI MSI vectors. */
+        ISR_NOERR 80
+        ISR_NOERR 81
+        ISR_NOERR 82
+        ISR_NOERR 83
 
         .globl pax_isr_common
         .type pax_isr_common, @function
@@ -310,6 +315,10 @@ pax_isr_table:
         .irp v, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47
         .quad pax_isr\v
         .endr
+
+        .globl pax_msi_isr_table
+pax_msi_isr_table:
+        .quad pax_isr80, pax_isr81, pax_isr82, pax_isr83
 
         .section .bss
         .p2align 12

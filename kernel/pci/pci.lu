@@ -305,6 +305,49 @@ pub fn next_cap(bdf: u64, after: u64) -> u64 {
     read8(bdf, after + 1) & 0xfc
 }
 
+/// Find a conventional capability, rejecting malformed offsets and bounding cycles.
+pub fn capability(bdf: u64, id: u64) -> u64 {
+    var at = next_cap(bdf, 0)
+    var hops: u64 = 0
+    while at >= 0x40 && at <= 0xfc && hops < 48 {
+        if read8(bdf, at) == id { return at }
+        at = next_cap(bdf, at)
+        hops += 1
+    }
+    0
+}
+
+/// Shut off all PCI interrupt transports (polled drivers and reinitialization).
+pub fn interrupts_off(bdf: u64) {
+    let msi = capability(bdf, 5)
+    if msi != 0 { write32(bdf, msi, read32(bdf, msi) & !(1 << 16)) }
+    let msix = capability(bdf, 0x11)
+    if msix != 0 { write32(bdf, msix, read32(bdf, msix) & !(1 << 31)) }
+    set_command(bdf, command(bdf) | CMD_INTX_OFF)
+}
+
+/// PCI Local Bus 3.0 §6.8: exactly one MSI, either address layout.
+/// Intel SDM vol.3A §11.11: physical APIC destination, fixed edge delivery.
+pub fn enable_msi(bdf: u64, destination: u64, vector: u64) -> bool {
+    let at = capability(bdf, 5)
+    if at == 0 || destination > 255 || vector < 32 || vector > 254 { return false }
+    let control = read16(bdf, at + 2)
+    let wide = control & 128 != 0
+    let data = at + (if wide { 12 } else { 8 })
+    let end = data + (if control & 256 != 0 { 12 } else { 4 })
+    if end > 256 { return false }
+    interrupts_off(bdf)
+    // Disable before changing any message field. MME=0 allocates one message.
+    let header = read32(bdf, at) & !0x00710000
+    write32(bdf, at, header)
+    write32(bdf, at + 4, 0xfee00000 | (destination << 12))
+    if wide { write32(bdf, at + 8, 0) }
+    write32(bdf, data, (read32(bdf, data) & 0xffff0000) | vector)
+    if control & 256 != 0 { write32(bdf, data + 4, read32(bdf, data + 4) & !1) }
+    write32(bdf, at, header | (1 << 16))
+    read16(bdf, at + 2) & 0x71 == 1
+}
+
 fn put_bdf(b: u64) {
     log.put("pci ")
     log.hex_n(b >> 16, 2)
