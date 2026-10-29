@@ -119,6 +119,10 @@ cmd=[repo/'tools/qemu-halt','--accel','tcg','--firmware',os.environ.get('PAX_INS
      '--serial',work/'install.serial','--marker','halt','--qemu','-m','--qemu','1536M','--drive',str(work/'source-guard.img')+',ro']
 if name=='vdc':cmd+=['--drive',str(work/'source-guard.img')+',ro']
 if guided:cmd+=['--type',work/'keys','--prompt','pax-install> ']
+# px76: no COM1 (kasumi has none); the transcript is PAX's own, from memory.
+if os.environ.get('PAX_INSTALL_NOSERIAL','')=='1':
+    assert not guided,'the serial-less row is the unattended install'
+    cmd.insert(1,'--no-serial')
 cmd+=['--drive',str(work/'target.img')+(',ro' if fault=='readonly' else ''),work/'boot.iso']
 t=time.monotonic();p=run(cmd,False);(work/'install.boot').write_bytes(p.stdout+p.stderr)
 assert p.returncode==0,(p.returncode,p.stdout,p.stderr)
