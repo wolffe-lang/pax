@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+# tests/mpx6-metal-power — reboot and power-off as a firmware offers them
+# (px76, contract item 6; run by tests/mpx6-firmware as its F3).
+#
+# kernel/kmain_metal_power.lu, per firmware (PAX_METAL_FIRMWARE), each boot
+# ending QEMU with status 0 (-no-reboot: a reset ends the run):
+#   reboot         the FADT's reset register resets the machine: its line is
+#                  the kernel's last, and port 0xCF9's is never reached;
+#   reboot-cf9     entered at port 0xCF9 (`metal_reboot_cf9`): its line the
+#                  last, the triple fault never reached;
+#   reboot-triple  entered at the triple fault (`metal_reboot_triple`): its
+#                  line the last (a zero-limit IDT, then INT3);
+#   poweroff       ACPI S5 (`metal_poweroff`): `poweroff: ACPI S5 types a/b`
+#                  the last line, never `did not power down`.
+# PAX_METAL_TIER chooses the compiler tier (tests/mpx6-firmware sets it).
 set -euo pipefail
 flags=()
 [ "${PAX_METAL_TIER:-native}" != release ] || flags=(--release)
@@ -7,21 +21,22 @@ w=$PAX_BUILD/mpx6-metal-power
 mkdir -p "$w"
 "$PAX_ROOT/tools/fetch-limine"
 "$PAX_ROOT/tools/build-kernel" "${flags[@]}" --src "$PAX_ROOT/kernel/kmain_metal_power.lu" "$w"
-for action in reboot poweroff; do
+for action in reboot reboot-cf9 reboot-triple poweroff; do
     cp "$PAX_ROOT/boot/limine.conf" "$w/$action.conf"
-    [ "$action" != poweroff ] || printf '\n    cmdline: metal_poweroff\n' >> "$w/$action.conf"
+    case $action in
+        reboot) last='reboot: FADT reset register' ;;
+        reboot-cf9) printf '\n    cmdline: metal_reboot_cf9\n' >> "$w/$action.conf"; last='reboot: port 0xCF9' ;;
+        reboot-triple) printf '\n    cmdline: metal_reboot_triple\n' >> "$w/$action.conf"; last='reboot: triple fault' ;;
+        poweroff) printf '\n    cmdline: metal_poweroff\n' >> "$w/$action.conf"; last='poweroff: ACPI S5 types [0-7]/[0-7]' ;;
+    esac
     "$PAX_ROOT/tools/mkimage" --conf "$w/$action.conf" "$w/kmain_metal_power.elf" "$w/$action.iso"
     for fw in ${PAX_METAL_FIRMWARE:-bios uefi}; do
         rc=0
         "$PAX_ROOT/tools/qemu-run" --timeout 15 --firmware "$fw" --serial "$w/$action-$fw.log" "$w/$action.iso" || rc=$?
-        cat "$w/$action-$fw.log"
-        [ "$rc" = 0 ] || die "FAIL METAL $action $fw exit $rc"
-        if [ "$action" = poweroff ]; then
-            grep -aF 'poweroff: ACPI S5 types ' "$w/$action-$fw.log"
-        else
-            grep -aF 'reboot: FADT reset register' "$w/$action-$fw.log"
-        fi
-        if grep -aEq 'PANIC|triple fault|did not power down' "$w/$action-$fw.log"; then die "FAIL METAL $action $fw fallback"; fi
-        echo "PASS METAL $action $fw"
+        got=$(tr -d '\r' < "$w/$action-$fw.log" | grep -aE '^(reboot|poweroff): ' | tail -n 1 || true)
+        [ "$rc" = 0 ] || die "FAIL METAL $action $fw: exit $rc (last: '$got')"
+        printf '%s\n' "$got" | grep -Eqx -- "$last" || die "FAIL METAL $action $fw: the last line is '$got', not /$last/"
+        if grep -aEq 'PANIC|did not power down' "$w/$action-$fw.log"; then die "FAIL METAL $action $fw: a panic or S5's failure"; fi
+        echo "PASS METAL $action $fw: $got"
     done
 done
