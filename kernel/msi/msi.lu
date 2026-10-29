@@ -1,0 +1,40 @@
+//! msi — the message a PCI function writes to interrupt the CPU (px76).
+//!
+//! An MSI is a memory write the function makes: kernel/pci's
+//! `enable_msi` puts this module's address and data in the function's
+//! MSI capability (PCI Local Bus 3.0 §6.8), and the write, landing in the
+//! local APIC's window, is the interrupt. What the two words mean is the
+//! CPU's, not PCI's (Intel SDM vol. 3A §11.11, "Message Signalled
+//! Interrupts"):
+//!
+//! - the address (§11.11.1): 0xFEE in bits 31:20, the destination APIC
+//!   ID in bits 19:12, the redirection hint (bit 3) and the destination
+//!   mode (bit 2) clear: one CPU, named by its physical APIC ID; the
+//!   upper 32 bits of a 64-bit capability's address zero;
+//! - the data (§11.11.2): the vector in bits 7:0, the delivery mode in
+//!   10:8 (000, fixed), the level (bit 14) and the trigger mode (bit 15)
+//!   clear: an edge, which the handler acknowledges with one local APIC
+//!   EOI (kernel/timer's `eoi`) and which never needs deasserting.
+//!
+//! PAX's MSI users today: kernel/xhci (vectors 80-83, one a controller).
+//! kernel/nvme and px75b's AHCI stay polled (R-px76-2 A). No Linux
+//! source; no other kernel's source.
+
+/// The local APIC's message window (SDM vol. 3A §11.11.1).
+pub const WINDOW: u64 = 0xfee00000
+
+/// The address word for physical destination `apic_id` (0-255).
+pub fn address(apic_id: u64) -> u64 {
+    WINDOW | ((apic_id & 0xff) << 12)
+}
+
+/// The data word for `vector`: fixed delivery, edge-triggered.
+pub fn data(vector: u64) -> u64 {
+    vector & 0xff
+}
+
+/// Whether `d` is a data word `data` makes: no delivery mode, level or
+/// trigger bit set, only the vector (kmain_metal_msi reads it back).
+pub fn edge_fixed(d: u64, vector: u64) -> bool {
+    d & 0xffff == vector & 0xff
+}
