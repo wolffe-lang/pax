@@ -188,6 +188,11 @@ fn partitions_of(t: Target) -> (str, int, str) {
 fn tool(exe: str, args: List[str], work: str, name: str) -> (int, str) {
     let outpath = "{work}/{name}.out"
     let errpath = "{work}/{name}.err"
+    // A name runs more than once (the log's append, at every step): the
+    // last run's files go first, so the exclusive create below is this
+    // run's (the leg's first install stopped its log at the second append).
+    if fs_exists(outpath) { fs_remove(outpath) else |_| { return (-1, "") } }
+    if fs_exists(errpath) { fs_remove(errpath) else |_| { return (-1, "") } }
     let out = fs_open_perm(outpath, 4, 384) else |_| { return (-1, "") }
     let err = fs_open_perm(errpath, 4, 384) else |_| {
         fs_close(out) else |_| {}

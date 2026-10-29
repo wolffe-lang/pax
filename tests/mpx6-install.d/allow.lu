@@ -1,5 +1,6 @@
 //! px78: the install allow-list's pure witnesses over inventory records;
-//! no device opened, no child run. Each row prints PASS by name or exits 1
+//! no device opened; one child run (I-allow-tool: /bin/sh, twice under one
+//! name, as the log's append runs at every step). Each row prints PASS by name or exits 1
 //! with FAIL and the row's name (the two plants turn I-allow-serial and
 //! I-allow-root red).
 
@@ -109,5 +110,17 @@ fn main() -> int {
     let (_r1, _ra, blank) = partitions_of(p)
     expect("I-allow-layout", blank, "no partitions")
     print("PASS I-allow-layout: PAX's layout, foreign partitions and a blank disk told apart")
+    // One name run twice (flush_log's "log-append" at every step): the
+    // second run is not refused by the first's files.
+    let work = "/tmp/px78-allow-{os_pid()}"
+    fs_create_dir_mode(work, 448) else |_| { fail("I-allow-tool", "scratch {work}") }
+    for k in 0..2 {
+        let (status, text) = tool("/bin/sh", ["-c", "echo run{k}; echo err{k} >&2"], work, "twice")
+        if status != 0 || text != "run{k}\n" { fail("I-allow-tool", "run {k}: status {status}, output '{text}'") }
+        let err = fs_read_text("{work}/twice.err") else |_| ""
+        expect("I-allow-tool", err, "err{k}\n")
+    }
+    fs_remove_dir_all(work) else |_| {}
+    print("PASS I-allow-tool: one tool name run twice, each run's own output")
     0
 }
