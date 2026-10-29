@@ -1621,3 +1621,110 @@ through `tools/linux-blk`, which now loads `virtio_pci` and `ext2` where
 that kernel has them as modules) wrote the file px84's high-offset row
 reads past 2 TiB and read back what PAX wrote there through AHCI, and
 through virtio and NVMe again (R-px75b-8).
+
+## px76: firmware clocks, PCI MSI and the early framebuffer
+
+No kernel, firmware, bootloader or emulator implementation source was read.
+PAX's existing code and its specification citations were read; QEMU and OVMF
+were executed as black boxes. The consulted specification sections were:
+
+- [Limine protocol, revision 3a0526b7](https://github.com/limine-bootloader/limine-protocol/blob/3a0526b7/PROTOCOL.md):
+  RSDP and EFI system-table request IDs and layouts, base-revision-6 virtual
+  HHDM pointers, framebuffer pitch/masks, and boot-services memory reported
+  as bootloader-reclaimable. Those pages are retained, not allocated as usable.
+- [ACPI 6.5, chapter 5](https://uefi.org/specs/ACPI/6.5/05_ACPI_Software_Programming_Model.html):
+  GAS, RSDP/XSDT checksums, FADT fields and MADT types 0, 1, 2, 4, 5, 9 and 10.
+  [Chapter 4](https://uefi.org/specs/ACPI/6.5/04_ACPI_Hardware_Specification.html)
+  supplies the 3.579545 MHz PM timer and PM1 sleep-control fields;
+  [chapter 20](https://uefi.org/specs/ACPI/6.5/20_AML_Specification.html)
+  supplies NameOp, RootChar, PackageOp, PkgLength and literal integers.
+  S5 recognizes a unique literal package; it is not an AML interpreter.
+- [UEFI 2.10, chapter 4](https://uefi.org/specs/UEFI/2.10/04_EFI_System_Table.html):
+  the x64 system table's firmware vendor at byte 24 and revision at byte 32,
+  still valid after ExitBootServices. No firmware service is called.
+- [IA-PC HPET 1.0a](https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/software-developers-hpet-spec-1-0a.pdf),
+  §§2.3.4, 2.3.6, 2.3.8: capabilities, femtoseconds per tick, counter width,
+  main-counter enable and the main counter. The period field's indexed
+  specification excerpt was consulted; no HPET driver was read.
+- [Intel SDM volume 3A](https://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-software-developer-vol-3a-part-1-manual.pdf),
+  APIC timer and MSI formats (chapter 11 in the edition cited by kernel/apic):
+  divide configuration, periodic LVT, initial/current counts, EOI, physical
+  destination bits 19:12, vector bits 7:0, fixed delivery, edge trigger.
+  Indexed specification excerpts and PAX's prior specification-derived APIC
+  code were consulted. The planted level/deassert message sets data bit 15.
+- PCI Local Bus 3.0 §6.8, MSI capability: control bit 7 selects the 64-bit
+  address layout, bit 8 per-vector masks, bits 6:4 the allocated message
+  count; data at capability+8 or +12. Consulted indexed excerpts of the
+  [specification mirror](https://dokumen.pub/pci-local-bus-specification-revision-30-4950262536.html)
+  (the full-page fetch returned HTTP 403), alongside PAX's existing PCI
+  configuration mechanism. No PCIe implementation source was consulted.
+
+QEMU 8.2.2's `qemu-xhci` exposes neither `msi` nor `msix` properties;
+`nec-usb-xhci` exposes both. QEMU 11.1's `qemu-xhci` exposes both. Both
+versions expose q35 `hpet` and `pit`. The explicit CI interrupt legs use
+NEC's PCI identity; the default remains `qemu-xhci`. OVMF with 8 GiB RAM
+and `opt/ovmf/X-PciMmio64Mb=65536` placed the xHCI BAR at `0x1000000000`.
+VGA's `xres`, `yres`, `vgamem_mb` and Limine's matching `resolution` gave
+3840×2160. A synthetic mapped framebuffer supplies the padded-pitch test;
+that is not described as a padded GOP mode observed in OVMF.
+
+The second half of px76 (the takeover from the Codex lane at `8cad05e4`)
+consulted, beyond the sections above:
+
+- Intel SDM volume 3A §11.11.1 (the message address: 0xFEE in bits 31:20,
+  the destination ID in 19:12, RH and DM) and §11.11.2 (the message data:
+  the vector in 7:0, the delivery mode in 10:8, level in 14, trigger mode
+  in 15): `kernel/msi`, written from the sections alone. The MSI plant sets
+  bit 15.
+- Intel SDM volume 3A §11.12.1 (IA32_APIC_BASE's EN and EXTD: x2APIC
+  mode, where the MMIO page is not decoded), Table 11-6 (the x2APIC
+  registers' MSR addresses, 0x800 + the xAPIC offset / 16) and §11.12.5.1
+  (the 32-bit x2APIC ID in MSR 0x802): `kernel/apic`'s MSR path (R-px76-7),
+  and §11.5.4 with CPUID.06H:EAX bit 2 (ARAT: the timer runs in every
+  C-state; without it it may stop in deep C-states, which PAX's HLT does
+  not enter). kasumi's CPU lists `x2apic` and `arat` (its /proc/cpuinfo).
+- ACPI 6.5 §4.8.3.3 (the PM timer's 3.579545 MHz, TMR_VAL_EXT): the clock's
+  check that the HPET reads 5-20 ms across 35795 PM ticks before it is
+  trusted; the HPET plant (COUNTER_CLK_PERIOD, HPET 1.0a §2.3.4, taken as
+  nanoseconds) is refused by it on its own line. §4.8.3.6 (the reset
+  register) for `kernel/user`'s description of `end_reset`.
+- The Limine protocol's RSDP and EFI system-table responses: an address
+  below the HHDM is now taken as physical and offset, so either reading of
+  the pointer finds the table (Limine 12.9.1 at base revision 6 hands HHDM
+  pointers, measured on both firmwares).
+- px77a's note (`notes/px77a-the-smoke-stick.md`, PAX's own): trunk at
+  `6ccfe3fe` stalls under OVMF with `-serial none` at `user: syscall star`,
+  and `f1f8137b` alone reaches `login:`; 358 rendered boot lines on the
+  live stick.
+
+QEMU 8.2.2 and OVMF (Ubuntu's `ovmf` package), run as black boxes in the
+`localhost/px80-ubuntu` container on kasumi (cores 12-15, TCG): `-device
+ioh3420` (8086:3420) offers MSI's 32-bit layout with 2 messages, the layout
+kasumi's AHCI has; `e1000e`, `intel-hda`, `edu`, `pci-serial`,
+`pcie-root-port` and q35's own functions offer none of it (q35's ICH9 AHCI,
+8086:2922, is 64-bit with 1 message); `nec-usb-xhci,msi=on,msix=off`
+(1033:0194) is 64-bit with 16; QEMU's `nvme` (1b36:0010) has a 64-bit BAR0.
+
+Measured on the same machines (`/mnt/steamlib/lanes/px76/measure.sh`, its `MEASURE` lines in
+`runs/fw1b.log`, both firmwares unless named):
+
+- OVMF already places QEMU's 64-bit BARs above 4 GiB by default: the NEC xHCI's BAR0 at
+  `0xc020000000` and the NVMe's at `0xc020004000` with 256 MiB or 8 GiB of memory. With
+  `opt/ovmf/X-PciMmio64Mb=65536` they move to `0x1010000000` and `0x1010004000`, whatever the
+  memory (256 MiB, 1 GiB, 8 GiB). SeaBIOS places them below 4 GiB. So `--high-bar` names the
+  window (64 GiB, the size class of kasumi's `0x485a200000`) rather than enabling anything.
+- `-m 34G` boots on both firmwares in the container's 12 GiB (QEMU's memory is allocated as it is
+  touched): 36,495,921,152 usable bytes on SeaBIOS, 36,453,502,976 on OVMF.
+- OVMF's GOP gives no padded pitch: 1366x768 has a 5464-byte pitch, 1400x1050 5600, 1920x1080 7680,
+  1024x600 4096 (width x 4 each time). SeaBIOS's VBE has no 1366x768 or 1024x600 mode (Limine falls
+  back to 1024x768). F4's synthetic mapping stays the padded-pitch witness.
+- `-machine acpi=off`: SeaBIOS supplies its own tables (an RSDT with FACP, APIC, HPET, MCFG, an
+  SSDT and the DSDT), so its clock is still the HPET; OVMF leaves only its own XSDT and BGRT, no
+  HPET table and no FADT, so the clock is the PIT (`clock: PIT 1193182 Hz`, the tick calibrated at
+  62,195,356-62,208,113 Hz): the PIT-only machine is OVMF's.
+- SeaBIOS on a PIT-less q35 leaves its `Booting from DVD/CD..` line unfinished (no newline), so a
+  kernel's first line is glued to it; OVMF's boot is unaffected.
+- `-cpu max,+x2apic` and `-cpu max,x2apic=on`: QEMU 8.2.2's TCG (CI's) refuses the bit (`TCG
+  doesn't support requested feature: CPUID.01H:ECX.x2apic [bit 21]`) on both firmwares, so
+  kmain_metal's x2apic leg stops by name (`FAIL METAL x2APIC offered by CPUID`) and kernel/apic's
+  MSR path has no QEMU witness on these machines (`runs/x2probe.log`).
