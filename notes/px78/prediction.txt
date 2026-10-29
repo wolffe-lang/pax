@@ -1,0 +1,30 @@
+px78 prediction, written 2026-10-29 before the first change (base 10a27451,
+px76 101e7761 read but not yet merged).
+
+1. Install wall time onto the sparse 512 GB AHCI target, guided, under TCG
+   (QEMU 8.2.2, OVMF, -serial none), from the first typed answer to
+   "Installation complete": 270 s (px84's 500 GB virtio row took 232 s
+   under TCG; AHCI's 128 KiB commands save per-request cost, the stick's
+   per-step log appends and the AHCI polling cost some back). Range
+   150-450 s. The whole leg (build excluded: two boots, the typing, the
+   power-off, the second boot and the login) 15 min.
+
+2. OVMF boots the installed AHCI disk with no boot entry of its own:
+   yes. With the stick removed its Boot#### entry no longer resolves, and
+   OVMF's boot manager falls through to the removable-media path
+   \EFI\BOOT\BOOTX64.EFI on the disk's ESP, which px71's installer writes.
+
+3. The first refusal the leg trips on: the stick itself is not a disk.
+   QEMU's usb-storage enumerates SuperSpeed on qemu-xhci and px74's driver
+   logs it "enumerated, not driven" (px77a's transcript line 18), so PAX
+   cannot read /pax/install-targets from the stick or write a log to it:
+   the installer, given an allow-list it cannot read, refuses every disk
+   ("no allow-list"). Once a mass-storage driver exists, the next one is
+   the disk table: kernel/block holds four disks, and kasumi with its
+   target plugged has five (nvme0n1, three SATA disks, the stick).
+
+4. Not asked, predicted anyway: Linux's /sys/block/sdX/device/model for
+   a SATA disk is the SCSI INQUIRY product field, 16 bytes, so an
+   allow-list line copied from CachyOS for a model longer than 16
+   characters (an 870 EVO's "Samsung SSD 870 EVO 500GB") will not match
+   PAX's full ATA model without a rule for it.
