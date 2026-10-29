@@ -1,0 +1,26 @@
+px77b prediction, written 2026-10-29T21:43Z before the first build
+Base: pax trunk 101e7761 (px76's merge, pax#236); px77a's recipe, the same boot/limine-usb.conf.
+
+Image size: 794,820,608 bytes (758 MiB), the same as px77a's stick.
+  Why: mkdisk --usb sizes the ESP as twice the kernel plus initramfs plus 16 MiB,
+  rounded up to a whole MiB, plus 3 MiB. px77a's payload left about 126 KB before
+  the next MiB; the release kernel grows by about 14 KB (px76's K5 numbers) and
+  the installer and disk tools by tens of KB. If it crosses: 795,869,184 (759 MiB).
+
+MSI keyboard at the login, under QEMU, first try: yes. The keyboard's xHCI is
+  nec-usb-xhci with msi=on,msix=off (qemu-xhci on QEMU 8.2.2 has no MSI), and
+  the boot line reads "xhci 1: ports 8 MSI vector 80 ..."; root and every command
+  typed through it on the first boot.
+
+Boot lines before the login prompt, beside px77a's 358 rendered lines at 1280x800
+  (309 scrolls + 49 rows): about 390 at the same mode. px76 adds the firmware,
+  memory, about twenty acpi lines, the clock, the xHCI BAR0 lines; px75b adds the
+  AHCI controller, port and block lines for the SATA disk. At 3840x2160 (240
+  columns, 2x glyphs) fewer lines wrap, so a few fewer.
+
+Also expected: the SATA disk is listed by pax-install --inventory as /dev/sda with
+QEMU's model and the serial given; both disk images unchanged (sha256 before and
+after). Read before this file was written: the image's only end command is
+user/elf/reboot.S, which asks reboot(2) for RESTART, or HALT given any argument,
+never POWER_OFF; so `poweroff` at the shell is predicted "not found", and S5 is
+reached from the stick's kernel only when CMD_POWER_OFF is asked of it.
