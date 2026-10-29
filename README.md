@@ -333,9 +333,10 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
 - The `full-matrix` label runs every suite on the merge leg (`tier full`); a push to trunk, the nightly and a dispatch
   run every suite on every compiler and firmware leg (`tier all`). Merging needs a green `tier full` or `tier all` run
   at the head.
-- Long jobs have budgets: 75 minutes for interrupts, 90 for the heap, 210 each for pelt and users, and for the
-  installer 110 in `tier full` and 175 in `tier all` (its 500 GB and 4 TB installs); the measured stage timings and
-  their headroom are in [CI budgets](tests/ci-budgets.d/README.md). The root-disk `chk-soak` has 1200 seconds for its 100,000 rounds.
+- Long jobs have budgets: 75 minutes for interrupts, 90 for the heap, 210 each for pelt and users, 90 for users again
+  with `/` on AHCI (`mpx5-users-ahci`, a job of its own), and for the installer 110 in `tier full` and 175 in `tier all`
+  (its 500 GB and 4 TB installs); the measured stage timings and their headroom are in
+  [CI budgets](tests/ci-budgets.d/README.md). The root-disk `chk-soak` has 1200 seconds for its 100,000 rounds.
 - A test is seen red before it is trusted: the break is planted in a commit and run of its own, then fixed.
 - One known stall of the Linux reference shell ([#196](https://github.com/wolffe-lang/pax/issues/196),
   [pelt#98](https://github.com/wolffe-lang/pelt/issues/98)) gets one retry of its Linux leg only, with a warning that
