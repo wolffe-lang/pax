@@ -167,7 +167,7 @@ GPT, and two partitions:
 | slot | location | contents |
 |---|---|---|
 | 3 | sectors 2048–4095 | Limine BIOS stage 2, in a reserved BIOS boot partition |
-| 1 | from sector 4096 | one FAT32 ESP: `/EFI/BOOT/BOOTX64.EFI`, `/boot/pax`, `/boot/initramfs.cpio`, `/boot/limine/limine.conf`, `/boot/limine/limine-bios.sys` |
+| 1 | from sector 4096 | one FAT32 ESP: `/EFI/BOOT/BOOTX64.EFI`, `/boot/pax`, `/boot/initramfs.cpio`, `/boot/limine/limine.conf`, `/boot/limine/limine-bios.sys`; px78: `/pax/install-targets` (the install allow-list, `boot/install-targets`: comments only, naming no disk) and an empty `/pax/logs/` |
 
 There is no disk root or home partition. Limine's BIOS installer writes
 its boot code into the protective MBR and its second stage into partition
@@ -186,16 +186,27 @@ configuration, label and epoch produce the same image bytes.
 
 The **entire live system remains in the initramfs**, including any offline
 installer and games payload. Firmware reads USB storage before entering
-PAX; running the live system requires no PAX USB-storage driver. Keyboard
-support on real USB-only hardware is a separate requirement. The image
-builder neither adds nor removes programs from the supplied archive.
+PAX; running the live system requires no PAX USB-storage driver. The
+installer needs one (px78): it reads the allow-list from the stick and
+writes its log there, and it must see the stick to refuse it as a target.
+`kernel/usb_storage` drives a USB mass-storage device on the xHCI
+controller (Bulk-Only Transport, SCSI transparent; READ(10) and WRITE(10)
+of up to 240 sectors, SYNCHRONIZE CACHE, a write-protect bit read by MODE
+SENSE) as `sdX` after the SATA disks, with `removable` from INQUIRY's RMB
+and the model from its 16-byte product field, as Linux shows them. The
+keyboard and the stick share the controller, as on kasumi's 00:14.0. The
+image builder neither adds nor removes programs from the supplied archive.
 
 For the live image only, place `user/usb-login.sh` at `/etc/pax-live-login`,
 include `/bin/pelt` and `/root`, and set `/etc/pax-run` to
 `/bin/pelt /etc/pax-live-login`. This presents `login:` and accepts only
 `root`, without a password, before starting interactive pelt. It is not an
 authentication boundary. **Do not use this live entry in the installed
-system:** installed accounts and startup remain unchanged.
+system:** installed accounts remain unchanged, and an install made from a
+tree that carries `/etc/pax-live-login` gets a console login instead
+(px78, R-px78-6): its `/etc/pax-run` becomes `/bin/pelt /etc/pax-login`,
+which accepts `root` or an account `/etc/passwd` names (by `su`), still
+with no passwords in this preview.
 
 The existing `boot:` line reports Limine's generic-disk media type,
 partition index and GPT disk/partition UUIDs. Limine does not distinguish
@@ -518,7 +529,7 @@ not numbered by NSID), `nvme1n1` for the next controller, and the
 partitions `nvme0n1p1` …, every one on major 259 (`nvme0n1` 259:0 when it
 is the first; every NVMe disk takes its minor before any partition does).
 Virtio disks come first in kernel/block's table and keep their names;
-four disks in all. At boot each controller says, in one line, what a
+eight disks in all since px78 (four before), every driver together. At boot each controller says, in one line, what a
 photograph of a real machine's screen should show:
 
     nvme0: 1b36:0010 at 00:03.0, NVMe 1.4.0 "QEMU NVMe Ctrl" serial "paxnvme0" firmware "8.2.2"; MDTS 512 KiB, 256 namespaces, 1 active, a volatile write cache; nvme0n1 (namespace 1): 131072 blocks of 512 bytes; the I/O queue pair: 64 entries (asked 64, MQES 2048), 64 SQ and 64 CQ granted, a single pair, polled; the firmware left it enabled
@@ -576,8 +587,12 @@ two controllers, ports 1 and 4 of the first and port 2 of the second:
 8:1, `sdb` 8:16). A name is not an identity: a disk added on a lower port
 renames every disk after it, on Linux and on PAX. The identity is
 `/sys/block/<disk>/device/model` and `…/serial` (an NVMe disk's from
-Identify Controller): the model without its padding, the serial byte for
-byte, inner spaces kept. At boot, one line a controller and one a disk,
+Identify Controller): the serial byte for byte, inner spaces kept; an NVMe
+model without its padding, and a SATA model as Linux shows it (px78,
+R-px78-5): its first 16 bytes, the SCSI product field libata reports,
+trimmed (`Samsung SSD 870 EVO 500GB` reads `Samsung SSD 870`; measured on
+Linux 7.2.4, `notes/px78/linux-ident.txt`), so an allow-list line copied
+from Linux matches PAX. The boot line keeps the whole IDENTIFY model. At boot, one line a controller and one a disk,
 which a photograph of a real machine's screen should show:
 
     ahci0: 8086:2922 at 00:03.0, CAP.NP=5 CAP.NCS=31 S64A=1 PI=0x000000000000003f BOH=0; ports idled; one slot, polled
@@ -612,6 +627,18 @@ disks are driven on the HPET (tests/mpx6-ahci A13); only on a machine
 where none of the three advances does each controller get the refusal
 above instead of a hang (R-px75b-7 as narrowed at px76's merge; A14: OVMF
 under `acpi=off,pit=off`). px75b's PIT shim, kernel/ahci_clock, is gone.
+
+A SATA controller in RAID mode (PCI class 01.04, an Intel controller set
+to RST in the firmware) is attached by nothing and named at boot, with the
+fix (px78, pax#240):
+
+    AHCI: Intel RST/RAID mode at 00:17.0: switch the firmware to AHCI
+
+and another vendor's RAID controller `AHCI: a RAID controller VVVV:DDDD at
+BB:DD.F (class 01.04) is not driven`. The class check is a unit row over
+the configuration bytes (`ahci-check`, tests/mpx6-ahci A15: kasumi's
+`8086:43d2` at 00:17.0 read as RAID), since QEMU offers no RST; A15 also
+boots a `megasas` controller, class 01.04, beside an AHCI disk.
 
 `tools/qemu-run --ahci FILE[,serial=S,model=M]` (repeatable; `tools/qemu-halt`
 the same) gives each image an `ahci` controller of its own with the disk
@@ -794,8 +821,8 @@ formatters are bytes.
 **This is a whole-disk, fresh-install ext2 developer preview. It destroys
 the selected target. It is not ext3, a resize tool, a migration service, a
 repair tool or an automatic recovery/resume mechanism.** The host builder's
-journalled-root default is unchanged. The first targets are separate QEMU
-virtio disks; real-device and USB transport support are separate work.
+journalled-root default is unchanged. The targets are QEMU disks (virtio,
+NVMe and SATA); `docs/INSTALL-METAL.md` is the runbook for a real one.
 
 ### Prepare an offline payload
 
@@ -883,6 +910,41 @@ refused. The root is capped at 17,592,186,040,320 bytes; any remaining
 capacity is listed separately as `unused_bytes`, not hidden in GPT's
 tail reservation. No rescue initramfs is added.
 
+### The install allow-list and the stick's log (px78)
+
+The installer writes only to a disk named, by its model and serial, in an
+allow-list: `/pax/install-targets` on the boot stick's ESP (found as the
+one disk whose first partition holds `/boot/initramfs.cpio`), or the file
+`--allow-list FILE` names. One line a disk, `model=<model> serial=<serial>`
+(both as `/sys/block/<disk>/device/{model,serial}` read, trimmed; a virtio
+disk's serial is `/sys/block/vdX/serial`); `#` starts a comment. A line
+that is anything else refuses every disk and names the line; so does an
+empty or missing list, and the inventory then says how to add one. Every
+disk is listed with its identity and its layout (no partitions, PAX's
+install layout, or how many partitions PAX did not write), and every disk
+but a listed one is refused by name:
+
+```text
+/dev/sda bytes=4000787030016 sector=512 model=Samsung SSD 870 serial=S6PXNM0T700001
+    1 partitions PAX did not write
+    refused: not on the install allow-list: /dev/sda model=Samsung SSD 870 serial=S6PXNM0T700001
+    (its allow-list line would be: model=Samsung SSD 870 serial=S6PXNM0T700001)
+```
+
+Four refusals come first and no list overrides them: the running root,
+a mounted disk, a read-only disk, and a PAX live medium (the stick, or a
+copy of it). A disk with no serial cannot be listed. The model and serial
+both have to match: two disks of one model are told apart by the serial.
+`pax-install --check` prints the inventory and writes nothing; it exits 0
+when one disk may be a target.
+
+With the stick present, the installer appends its transcript to
+`/pax/logs/install-<n>.txt` on the stick's ESP (the next free `n`) by
+`paxfat append`, after each step: the inventory, the refusals, the plan,
+what was typed, every phase's verdict and, at the end, the SHA-256 of the
+first MiB of each partition it wrote. A failed append stops the log, says
+so once (`install log: stopped: …`), and never stops the install.
+
 ### Durable phases and verification
 
 Every external exit, including exit 2, is checked. A phase becomes
@@ -924,8 +986,22 @@ refused as `sector_size` before any write, the target byte-identical.
 PAX currently returns ENOSYS for `getrusage`: guest peak RSS is reported as
 unavailable, not zero and not replaced with QEMU's host RSS. Linux's same
 snapshot/copy reference measured 11884 KiB peak RSS. The missing guest
-measurement, the journalled formatter, timer-driven cursor blink, hardware
-drivers and USB transport remain separate prerequisites.
+measurement, the journalled formatter and timer-driven cursor blink remain
+separate prerequisites.
+
+`tests/mpx6-kasumi` (px78, `tier full`) runs the whole path on a QEMU
+machine shaped like kasumi: OVMF with a fresh variable store, no serial
+port, the stick and the USB keyboard on one xHCI controller, an NVMe disk
+with a foreign GPT standing in for CachyOS, and three SATA disks on the
+AHCI controller (two of one model, told apart by serial; the target a
+sparse 500 GB disk). It boots the stick, logs in through the keyboard,
+writes a file, checks the list, installs through the guided flow with the
+confirmation read off PAX's own screen cells, powers off, boots the disk
+with the stick removed (the disk first in QEMU's boot order, as the
+firmware boot menu's choice; PAX writes no boot entry, and OVMF left to
+boot 1's variable store with no order went to its UEFI shell), logs in at
+the installed console login and reads the file back. The NVMe and the other SATA images are hashed over
+their allocated extents before and after: identical, or the row fails.
 
 ## Checking a volume from rescue
 
