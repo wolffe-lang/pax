@@ -1468,8 +1468,8 @@ pub fn shutdown() {
     }
 }
 
-/// Identify Controller strings for /sys/block/<disk>/device, same trimming
-/// and control-byte sanitization as the boot report (NVMe Base §1.4.2).
+/// Identify Controller strings for /sys/block/<disk>/device. Trim padding
+/// as the boot report does, but preserve identity bytes (NVMe Base §1.4.2).
 pub fn identity_len(u: u64, serial_number: bool) -> u64 {
     let j = sel(u)
     if j == NSMAX || base() == 0 { return 0 }
@@ -1486,5 +1486,5 @@ pub fn identity_byte(u: u64, serial_number: bool, i: u64) -> u64 {
     if i >= identity_len(u, serial_number) { return 0 }
     let w = if serial_number { W_SN } else { W_MN }
     let c = (sw(w + i / 8) >> ((i % 8) * 8)) & 255
-    if c >= 32 && c <= 126 { c } else { 63 }
+    c // sysfs identity is byte-exact; only the boot report sanitizes display.
 }
