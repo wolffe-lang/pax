@@ -1,44 +1,62 @@
 //! Line-key navigation works with the served console, without cursor-control
 //! sequences. n/p and a number select, q/EOF cancel. Non-terminals get the
 //! same numbered plain-text flow. Geometry is sampled afresh on each page.
+//! px78: every disk is on the page with its identity, the refused ones with
+//! their reason; only a disk on the install allow-list can be chosen. What
+//! is printed and what is typed go to the install log (allow.lu).
 
-fn answer(prompt: str) -> str ! {cancelled, io} {
+fn answer(mut lg: Log, prompt: str) -> str ! {cancelled, io} {
     print_raw(prompt)
     print_raw("pax-install> ")
+    lg.pending += prompt + "pax-install> "
     let s = read_line() else |e| match e {
-        eof => { return cancelled },
+        eof => { note(mut lg, "(end of input)"); return cancelled },
         _ => { return io },
     }
+    note(mut lg, s)
     if s == "q" { return cancelled }
     s
 }
 
-fn pick_target(targets: List[Target]) -> Target ! {cancelled, io, invalid} {
-    if targets.len == 0 { return invalid }
+fn pick_target(mut lg: Log, disks: List[Disk]) -> Target ! {cancelled, io, invalid} {
+    if disks.len == 0 { return invalid }
     var selected = 0
+    while selected < disks.len && disks[selected].reason.len != 0 { selected += 1 }
+    if selected == disks.len { return invalid }
     loop {
         let tty = os_isatty(0) else |_| false
         if tty {
             let (rows, cols) = os_term_size(0) else |_| (0, 0)
-            print("PAX installer / target page ({cols}x{rows})")
+            say(mut lg, "PAX installer / target page ({cols}x{rows})")
         } else {
-            print("PAX installer / plain-text target page")
+            say(mut lg, "PAX installer / plain-text target page")
         }
-        for i in 0..targets.len {
+        for i in 0..disks.len {
             let mark = if i == selected then ">" else " "
-            print("{mark} {i + 1}. {inventory_text(targets[i])}")
+            say(mut lg, "{mark} {i + 1}. {disk_text(disks[i])}")
         }
-        let s = answer("Target number, n/p then Enter, Enter selects, q cancels: ")?
-        if s == "n" { selected = (selected + 1) % targets.len; continue }
-        if s == "p" { selected = (selected + targets.len - 1) % targets.len; continue }
-        if s.len == 0 { return copy targets[selected] }
-        let n = s.to_int() else |_| { print("Enter an exact target number."); continue }
-        if n >= 1 && n <= targets.len { return copy targets[n - 1] }
-        print("No such target number.")
+        let s = answer(mut lg, "Target number, n/p then Enter, Enter selects, q cancels: ")?
+        if s == "n" || s == "p" {
+            var k = selected
+            loop {
+                k = if s == "n" then (k + 1) % disks.len else (k + disks.len - 1) % disks.len
+                if disks[k].reason.len == 0 { break }
+            }
+            selected = k
+            continue
+        }
+        if s.len == 0 { return copy disks[selected].target }
+        let n = s.to_int() else |_| { say(mut lg, "Enter an exact target number."); continue }
+        if n >= 1 && n <= disks.len {
+            if disks[n - 1].reason.len == 0 { return copy disks[n - 1].target }
+            say(mut lg, "Disk {n} is refused: {disks[n - 1].reason}.")
+            continue
+        }
+        say(mut lg, "No such target number.")
     }
 }
 
-fn guided_plan(targets: List[Target], seed: str) -> Plan ! {
+fn guided_plan(mut lg: Log, disks: List[Disk], seed: str) -> Plan ! {
     cancelled,
     io,
     invalid,
@@ -49,27 +67,34 @@ fn guided_plan(targets: List[Target], seed: str) -> Plan ! {
     too_small,
     too_large,
 } {
-    let t = pick_target(targets)?
+    let t = pick_target(mut lg, disks)?
     var user = ""
     loop {
-        user = answer("New user name (uid/gid 1000, no password; q cancels): ")?
+        user = answer(mut lg, "New user name (uid/gid 1000, no password; q cancels): ")?
         if valid_name(user) { break }
-        print("Use 1-32 lowercase letters, digits, _ or -; start with a letter or _. Not root.")
+        say(mut lg, "Use 1-32 lowercase letters, digits, _ or -; start with a letter or _. Not root.")
     }
     var games = ""
     loop {
-        let s = answer("Install the lair, the wolf games? y/n (no default): ")?
+        let s = answer(mut lg, "Install the lair, the wolf games? y/n (no default): ")?
         if s == "y" { games = "yes"; break }
         if s == "n" { games = "no"; break }
-        print("An explicit y or n is required.")
+        say(mut lg, "An explicit y or n is required.")
     }
     let p = make_plan(t, seed, user, games)?
     print_raw(plan_text(p))
-    if answer("This is ext2 WITHOUT a journal. Type ext2-preview to continue: ")? !=
+    lg.pending += plan_text(p)
+    for d in disks {
+        if d.target.name == t.name && d.layout != "no partitions" {
+            say(mut lg, "This install erases /dev/{t.name}'s {d.layout}.")
+        }
+    }
+    flush_log(mut lg)
+    if answer(mut lg, "This is ext2 WITHOUT a journal. Type ext2-preview to continue: ")? !=
         "ext2-preview" {
         return cancelled
     }
-    let token = answer("Type the complete confirmation line after 'confirmation ', or q: ")?
+    let token = answer(mut lg, "Type the complete confirmation line after 'confirmation ', or q: ")?
     if token != p.token { return cancelled }
     p
 }

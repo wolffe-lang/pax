@@ -1,8 +1,12 @@
 //! Ordered argv-only executor. A 64 KiB JSON-lines log lives in the unused
 //! pre-partition gap at byte 65536; GPT and BIOS installation do not own it.
 //! Logs report completed phases, never authorize resume or assert rollback.
+//! px78: each phase's verdict also goes to the install log on the stick
+//! (allow.lu), appended and fsynced at every step, and the end names the
+//! sha256 of each written partition's first MiB.
 
 use std.json
+use std.x.crypto.sha2
 
 extern "c" fn install_peak_kb(who: int) -> int
 
@@ -24,14 +28,16 @@ fn json_string(s: str) -> str {
     json.stringify(json.from_str(s)) else |_| "null"
 }
 
-fn disk_log(fd: int, mut used: int, phase: str, state: str, detail: str) -> () ! {io, log_full} {
+fn disk_log(mut lg: Log, fd: int, mut used: int, phase: str, state: str, detail: str) -> () ! {io, log_full} {
     let line = "{{\"v\":1,\"phase\":{json_string(phase)},\"state\":{json_string(state)},\"detail\":{json_string(detail)}}}\n"
     if line.len > LOG_CAPACITY - used { return log_full }
     let _pos = fs_seek(fd, LOG_OFFSET + used, 0) else |_| { return io }
     fs_write_chunk(fd, line.bytes()) else |_| { return io }
     fs_sync(fd) else |_| { return io }
     used += line.len
-    print("phase {phase}: {state}")
+    say(mut lg, "phase {phase}: {state}")
+    if state == "failed" || phase == "plan" { note(mut lg, "  {detail}") }
+    flush_log(mut lg)
 }
 
 fn read_window(fd: int, offset: int, count: int) -> List[byte] ! {io} {
@@ -48,13 +54,13 @@ fn read_window(fd: int, offset: int, count: int) -> List[byte] ! {io} {
     out
 }
 
-fn run_action(action: Action, work: str, fd: int, mut used: int) -> () ! {
+fn run_action(mut lg: Log, action: Action, work: str, fd: int, mut used: int) -> () ! {
     io,
     log_full,
     command_failed,
     verify_failed,
 } {
-    disk_log(fd, mut used, action.phase, "started", action.exe)?
+    disk_log(mut lg, fd, mut used, action.phase, "started", action.exe)?
     let outpath = "{work}/{action.phase}.out"
     let errpath = "{work}/{action.phase}.err"
     let out = fs_open_perm(outpath, 4, 384) else |_| { return io }
@@ -68,11 +74,11 @@ fn run_action(action: Action, work: str, fd: int, mut used: int) -> () ! {
         fs_write_bytes("{work}/limine-before.bin", limine_before) else |_| { return io }
     }
     let child = os_spawn_fds(action.exe, action.args, [1, out, 2, err]) else |e| {
-        disk_log(fd, mut used, action.phase, "failed", "spawn {e}")?
+        disk_log(mut lg, fd, mut used, action.phase, "failed", "spawn {e}")?
         return command_failed
     }
     let status = os_wait(child) else |e| {
-        disk_log(fd, mut used, action.phase, "failed", "wait {e}")?
+        disk_log(mut lg, fd, mut used, action.phase, "failed", "wait {e}")?
         return command_failed
     }
     fs_sync(out) else |_| { return io }
@@ -80,6 +86,7 @@ fn run_action(action: Action, work: str, fd: int, mut used: int) -> () ! {
     let stderr = fs_read_text(errpath) else |_| { return io }
     if status != 0 {
         disk_log(
+            mut lg,
             fd,
             mut used,
             action.phase,
@@ -90,12 +97,12 @@ fn run_action(action: Action, work: str, fd: int, mut used: int) -> () ! {
         return command_failed
     }
     if stderr.lower().contains("error:") || stderr.lower().contains("failed") {
-        disk_log(fd, mut used, action.phase, "failed", "zero-exit stderr error; see phase output")?
+        disk_log(mut lg, fd, mut used, action.phase, "failed", "zero-exit stderr error; see phase output")?
         return command_failed
     }
     if action.output_hash.len != 0 {
         if hash_file(outpath)? != action.output_hash {
-            disk_log(fd, mut used, action.phase, "failed", "readback bytes differ")?
+            disk_log(mut lg, fd, mut used, action.phase, "failed", "readback bytes differ")?
             return verify_failed
         }
     } else {
@@ -103,6 +110,7 @@ fn run_action(action: Action, work: str, fd: int, mut used: int) -> () ! {
         let diagnostic = "{stdout}\n{stderr}".lower()
         if diagnostic.contains("error:") || diagnostic.contains("failed") {
             disk_log(
+                mut lg,
                 fd,
                 mut used,
                 action.phase,
@@ -136,12 +144,13 @@ fn run_action(action: Action, work: str, fd: int, mut used: int) -> () ! {
                 bios_last = i + 1
             }
         }
-        print(
+        say(
+            mut lg,
             "Limine changed-byte envelopes: prefix [{mbr_first},{mbr_last}), BIOS partition [{bios_first},{bios_last}); log [65536,131072) unchanged",
         )
     }
     fs_sync(fd) else |_| { return io }
-    disk_log(fd, mut used, action.phase, "durable", "exit=0; target fsync completed")?
+    disk_log(mut lg, fd, mut used, action.phase, "durable", "exit=0; target fsync completed")?
 }
 
 fn actions(p: Plan, tree: str, attrs: str, tools: str) -> List[Action] ! {io} {
@@ -240,7 +249,21 @@ fn actions(p: Plan, tree: str, attrs: str, tools: str) -> List[Action] ! {io} {
     out
 }
 
-fn execute_plan(p: Plan, source: str, payload: str, tools: str) -> () ! {
+/// px78: the sha256 of the first MiB of each partition the install wrote:
+/// the ESP (1), the root (2) and the BIOS boot partition (3), read back
+/// from the target after the last phase.
+fn first_mib_sums(fd: int, name: str) -> str ! {io} {
+    var out = ""
+    let last = name.bytes()[name.len - 1] as int
+    let sep = if last >= 48 && last <= 57 then "p" else ""
+    for row in [[1, ESP_START], [2, ROOT_START], [3, 1048576]] {
+        let b = read_window(fd, row[1], 1048576)?
+        out += "sha256 /dev/{name}{sep}{row[0]} first MiB (byte {row[1]}): {sha2.to_hex(sha2.sum256(b))}\n"
+    }
+    out
+}
+
+fn execute_plan(mut lg: Log, p: Plan, source: str, payload: str, tools: str, work: str) -> () ! {
     io,
     invalid,
     corrupt_asset,
@@ -255,17 +278,16 @@ fn execute_plan(p: Plan, source: str, payload: str, tools: str) -> () ! {
     if (os_euid() else |_| -1) != 0 { return invalid }
     let canonical_payload = fs_realpath(payload) else |_| { return io }
     if !payload_location_ok(source, canonical_payload) { return invalid }
-    // Reserve scratch before the snapshot: on a live source "/", creating
-    // this child changes /tmp's retained metadata even though its contents
-    // are excluded. Subsequent staging changes only descendants of work.
-    let work = "/tmp/pax-install-{os_pid()}"
-    fs_create_dir_mode(work, 448) else |_| { return io }
+    // Scratch is reserved before the snapshot (px78: by main, before the
+    // inventory): on a live source "/", creating this child changes /tmp's
+    // retained metadata even though its contents are excluded. Subsequent
+    // staging, and the install log's chunks, change only descendants of work.
     let rows = source_snapshot(source)?
     boot_assets(source, canonical_payload)?
     let games = staged_games(canonical_payload)?
     let tree = "{work}/root"
     let attrs = "{work}/attrs"
-    print("Staging source; no target writes. Scratch: {work}")
+    say(mut lg, "Staging source; no target writes. Scratch: {work}")
     let start = os_clock_ns()
     stage_snapshot(source, tree, attrs, rows)?
     let after = source_snapshot(source)?
@@ -273,8 +295,9 @@ fn execute_plan(p: Plan, source: str, payload: str, tools: str) -> () ! {
     configure_tree(p, tree, attrs, games)?
     let commands = actions(p, tree, attrs, tools)?
     durable_text("{work}/plan.txt", plan_text(p))?
-    print("Source staged and rechecked in {(os_clock_ns() - start) / 1000000} ms")
-    print("Installer peak RSS through copy verification: {measured_peak(0)}")
+    say(mut lg, "Source staged and rechecked in {(os_clock_ns() - start) / 1000000} ms")
+    say(mut lg, "Installer peak RSS through copy verification: {measured_peak(0)}")
+    flush_log(mut lg)
     let current = inventory_one(p.target.name) else |_| { return changed }
     confirm_plan(p, current, p.token)?
     // O_EXCL claims the block device against mounts for the whole operation.
@@ -293,12 +316,12 @@ fn execute_plan(p: Plan, source: str, payload: str, tools: str) -> () ! {
     fs_write_chunk(fd, zeros) else |_| { return io }
     fs_sync(fd) else |_| { return io }
     var used = 0
-    disk_log(fd, mut used, "plan", "confirmed", plan_text(p))?
-    for action in commands { run_action(action, work, fd, mut used)? }
-    print("Formatter children peak RSS: {measured_peak(-1)}")
+    disk_log(mut lg, fd, mut used, "plan", "confirmed", plan_text(p))?
+    for action in commands { run_action(mut lg, action, work, fd, mut used)? }
+    say(mut lg, "Formatter children peak RSS: {measured_peak(-1)}")
     let dump = fs_read_text("{work}/verify-gpt.out") else |_| { return io }
     if !dump.lower().contains(new_partuuid(p.seed)) {
-        disk_log(fd, mut used, "verify", "failed", "new root PARTUUID missing")?
+        disk_log(mut lg, fd, mut used, "verify", "failed", "new root PARTUUID missing")?
         return verify_failed
     }
     let super = fs_read_at(fd, ROOT_START + 1024, 1024) else |_| { return io }
@@ -308,15 +331,22 @@ fn execute_plan(p: Plan, source: str, payload: str, tools: str) -> () ! {
         super[92] as int & 4 != 0 {
         return verify_failed
     }
+    let sums = first_mib_sums(fd, p.target.name)?
+    print_raw(sums)
+    lg.pending += sums
     disk_log(
+        mut lg,
         fd,
         mut used,
         "result",
         "complete",
         "ext2-preview; boot files read back; no rollback or automatic resume; reboot offered",
     )?
-    print("Installation complete: ext2 developer preview. Reboot to test the target alone.")
-    print(
+    say(mut lg, "Installation complete: ext2 developer preview. Reboot to test the target alone.")
+    say(
+        mut lg,
         "Persistent phase log: /dev/{p.target.name}, bytes {LOG_OFFSET}..{LOG_OFFSET + LOG_CAPACITY}; not a resume authority.",
     )
+    say(mut lg, "Install log: {log_place(lg)}")
+    flush_log(mut lg)
 }

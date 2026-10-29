@@ -1,4 +1,7 @@
 //! Guided or explicitly scripted fresh install. No yes/default confirmation.
+//! px78: only a disk on the install allow-list is ever a target (allow.lu);
+//! `--check` prints every disk's verdict and writes nothing; the stick's
+//! install log records the run.
 
 use std.x.crypto.sha2
 
@@ -13,6 +16,7 @@ struct Options {
     source: str,
     payload: str,
     tools: str,
+    allow: str,
 }
 
 fn options(args: List[str]) -> Options ! {invalid} {
@@ -27,6 +31,7 @@ fn options(args: List[str]) -> Options ! {invalid} {
         source: "/",
         payload: "/usr/share/pax-install",
         tools: "/bin",
+        allow: "",
     }
     var seen = Map[str, bool]()
     var i = 0
@@ -35,7 +40,7 @@ fn options(args: List[str]) -> Options ! {invalid} {
         if seen[key] else false { return invalid }
         seen[key] = true
         i += 1
-        if key == "--inventory" || key == "--dry-run" || key == "--install" {
+        if key == "--inventory" || key == "--dry-run" || key == "--install" || key == "--check" {
             if o.mode != "guided" { return invalid }
             o.mode = key
             continue
@@ -53,6 +58,7 @@ fn options(args: List[str]) -> Options ! {invalid} {
             "--source" => { o.source = value },
             "--payload" => { o.payload = value },
             "--tool-dir" => { o.tools = value },
+            "--allow-list" => { o.allow = value },
             _ => { return invalid },
         }
     }
@@ -60,7 +66,7 @@ fn options(args: List[str]) -> Options ! {invalid} {
     if o.mode == "--install" && (!o.preview || o.confirm.len == 0 || o.seed.len == 0) {
         return invalid
     }
-    if o.mode == "guided" &&
+    if (o.mode == "guided" || o.mode == "--check") &&
         (o.target.len != 0 || o.user.len != 0 || o.games.len != 0 || o.confirm.len != 0) {
         return invalid
     }
@@ -73,10 +79,36 @@ fn fresh_seed() -> str {
     sha2.to_hex(bytes)
 }
 
+/// The release's first line, for the log's head ("" without one).
+fn release_line() -> str {
+    let s = fs_read_text("/etc/pax-release") else |_| { return "" }
+    let lines = s.lines()
+    if lines.len == 0 then "" else lines[0]
+}
+
+/// The page every flow but the inventory begins with: each disk and its
+/// verdict, the list's source, and how to add a disk when none may be one.
+fn report_disks(mut lg: Log, disks: List[Disk], list: AllowList) {
+    let state = if list.refusal.len == 0 then ", {list.entries.len} line(s)" else ": {list.refusal}"
+    say(mut lg, "Disks ({disks.len}); install allow-list {list.source}{state}")
+    for d in disks { say(mut lg, disk_text(d)) }
+    if eligible(disks).len == 0 {
+        say(mut lg, "No disk may be a target, so nothing will be written.")
+        say(mut lg, how_to_allow())
+    }
+}
+
+fn stop(mut lg: Log, line: str) -> int {
+    say(mut lg, line)
+    flush_log(mut lg)
+    eprint(line)
+    1
+}
+
 fn main() -> int {
     let o = options(env_args()) else |_| {
         eprint(
-            "usage: pax-install [--inventory | --dry-run | --install --ext2-preview --confirm TOKEN] [--target NAME --seed TEXT --user NAME --games yes|no] [--source DIR --payload DIR --tool-dir DIR]",
+            "usage: pax-install [--inventory | --check | --dry-run | --install --ext2-preview --confirm TOKEN] [--target NAME --seed TEXT --user NAME --games yes|no] [--allow-list FILE] [--source DIR --payload DIR --tool-dir DIR]",
         )
         return 2
     }
@@ -85,47 +117,70 @@ fn main() -> int {
         for t in ts { print(inventory_text(t)) }
         return 0
     }
+    // Scratch before the inventory and the snapshot (execute_plan's note).
+    let work = "/tmp/pax-install-{os_pid()}"
+    fs_create_dir_mode(work, 448) else |_| { eprint("pax-install: scratch {work}"); return 1 }
+    let ts = inventory() else |e| { eprint("pax-install: inventory: {e}"); return 1 }
+    let (disks, list) = judge_all(ts, o.allow, o.tools, work)
+    var lg = if o.mode == "--check" then no_log("--check writes nothing") else open_log(disks, o.tools, work)
+    note(mut lg, "PAX install log {lg.path}")
+    note(mut lg, "release {release_line()}")
+    note(mut lg, "mode {o.mode}")
+    say(mut lg, "Install log: {log_place(lg)}")
+    report_disks(mut lg, disks, list)
+    flush_log(mut lg)
+    if o.mode == "--check" { return if eligible(disks).len == 0 then 1 else 0 }
     let seed = if o.seed.len == 0 then fresh_seed() else o.seed
-    let p = if o.mode == "guided" {
-        let ts = inventory() else |e| { eprint("pax-install: inventory: {e}"); return 1 }
-        guided_plan(ts, seed) else |e| {
-            eprint("pax-install: cancelled/refused before writes: {e}")
-            return 1
+    var p = Plan {
+        target: Target { name: "", identity: "", bytes: 0, sector: 0, readonly: false, mounted: false, running_root: false },
+        seed: "",
+        user: "",
+        games: false,
+        root_bytes: 0,
+        tail_bytes: 0,
+        unused_bytes: 0,
+        token: "",
+    }
+    if o.mode == "guided" {
+        if eligible(disks).len == 0 {
+            return stop(mut lg, "pax-install: refused before writes: no disk is on the install allow-list")
+        }
+        p = guided_plan(mut lg, disks, seed) else |e| {
+            return stop(mut lg, "pax-install: cancelled/refused before writes: {e}")
         }
     } else {
-        let t = inventory_one(o.target) else |e| {
-            eprint("pax-install: target unavailable: {e}")
-            return 1
+        var why = "no such disk"
+        var t = p.target
+        for d in disks {
+            if d.target.name == o.target { why = d.reason; t = copy d.target }
         }
-        make_plan(t, seed, o.user, o.games) else |e| {
-            eprint("pax-install: refused: {e}")
-            return 1
-        }
+        if why.len != 0 { return stop(mut lg, "pax-install: refused: {why}: /dev/{o.target}") }
+        p = make_plan(t, seed, o.user, o.games) else |e| { return stop(mut lg, "pax-install: refused: {e}") }
     }
     if o.mode == "--dry-run" { print_raw(plan_text(p)); return 0 }
     if o.mode != "guided" {
-        confirm_plan(p, p.target, o.confirm) else |e| {
-            eprint("pax-install: before writes: {e}")
-            return 1
-        }
+        confirm_plan(p, p.target, o.confirm) else |e| { return stop(mut lg, "pax-install: before writes: {e}") }
     }
-    let source = fs_realpath(o.source) else |e| { eprint("pax-install: source: {e}"); return 1 }
-    execute_plan(p, source, o.payload, o.tools) else |e| {
-        eprint(
+    let source = fs_realpath(o.source) else |e| { return stop(mut lg, "pax-install: source: {e}") }
+    execute_plan(mut lg, p, source, o.payload, o.tools, work) else |e| {
+        return stop(
+            mut lg,
             "pax-install: stopped: {e}; no rollback promised. If writes began, inspect the target's persistent phase log; bootability is NOT established.",
         )
-        return 1
     }
     if o.mode == "guided" {
         let s = answer(
-            "Type reboot to reboot now; anything else leaves the running system up: ",
+            mut lg,
+            "Type reboot to reboot now or poweroff to power off; anything else leaves the running system up: ",
         ) else |_| ""
-        if s == "reboot" {
-            let child = os_spawn(["/bin/reboot"]) else |e| {
-                eprint("pax-install: reboot: {e}")
+        flush_log(mut lg)
+        if s == "reboot" || s == "poweroff" {
+            let argv = if s == "reboot" then ["/bin/reboot"] else ["/bin/reboot", "-p"]
+            let child = os_spawn(argv) else |e| {
+                eprint("pax-install: {s}: {e}")
                 return 1
             }
-            let status = os_wait(child) else |e| { eprint("pax-install: reboot: {e}"); return 1 }
+            let status = os_wait(child) else |e| { eprint("pax-install: {s}: {e}"); return 1 }
             return status
         }
     }
