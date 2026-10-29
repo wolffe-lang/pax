@@ -549,6 +549,84 @@ SeaBIOS and OVMF boot, and its `root=PARTUUID=` finds `/` on
 `tools/rootdisk-leg` with `PAX_ROOTDISK_BUS=nvme` boots a whole suite's
 images that way (CI: mpx5-users, in the full tier, the merge gate).
 
+## SATA disks (px75b)
+
+kernel/ahci drives every AHCI controller on the bus (PCI class 01.06.01,
+in kernel/pci's order, up to four), one command slot a disk, completion
+polled with the controller's interrupts masked (GHC.IE and PxIE clear,
+INTx disabled, MSI and MSI-X off). For each port the PI register
+implements it idles the port (ST, then CR; FRE, then FR), gives it a
+command list and a received-FIS area (above 4 GiB only with CAP.S64A),
+sets FRE, links it up (a COMRESET through PxSCTL when PxSSTS is not
+DET 3, IPM 1) and reads the signature: an ATA disk (`0x00000101`) is
+driven; ATAPI (`0xEB140101`, q35's own CD-ROM on its ICH9 controller in
+every ISO boot), a port multiplier and anything else are named and
+skipped. IDENTIFY DEVICE gives the model, serial and firmware strings
+(ATA's byte order), the LBA48 capacity and the sector sizes; a logical
+sector of any size but 512 bytes is refused by name. Reads and writes are
+READ and WRITE DMA EXT of up to 128 KiB (32 PRDT entries of one page,
+each byte count encoded as the bytes less one), a flush FLUSH CACHE EXT.
+With CAP.S64A clear every transfer goes through 32 bounce pages below
+4 GiB.
+
+The names are the Linux guest's: `sda`, `sdb`, … in controller order and
+then port order, a skipped or empty port taking no letter (measured with
+two controllers, ports 1 and 4 of the first and port 2 of the second:
+`sda`, `sdb`, `sdc`), major 8 and 16 minors a disk (`sda` 8:0, `sda1`
+8:1, `sdb` 8:16). A name is not an identity: a disk added on a lower port
+renames every disk after it, on Linux and on PAX. The identity is
+`/sys/block/<disk>/device/model` and `…/serial` (an NVMe disk's from
+Identify Controller): the model without its padding, the serial byte for
+byte, inner spaces kept. At boot, one line a controller and one a disk,
+which a photograph of a real machine's screen should show:
+
+    ahci0: 8086:2922 at 00:03.0, CAP.NP=5 CAP.NCS=31 S64A=1 PI=0x000000000000003f BOH=0; ports idled; one slot, polled
+    ahci2: 8086:2922 at 00:1f.2 port 0: ATAPI skipped (0x00000000eb140101)
+    ahci0: 8086:2922 at 00:03.0 port 1: sda model "PX75B-SATA-A" serial "PX75B-A1" firmware "2.5+"; 67108864 bytes (0 GB); logical 512 physical 512 bytes
+    block: sda: 131072 sectors (67108864 bytes), 8:0, read-write, flush
+
+(the vendor and device ids and the slot are `lspci -nn`'s; CAP.NP and
+CAP.NCS are the register's fields as the specification writes them, one
+less than the count: 5 is six ports, 31 is 32 slots; PI the implemented
+ports; BOH=1 when the firmware offers the BIOS/OS handoff, which the
+driver then takes, §10.6; "ports idled" is R-px75b-2's default, "HBA
+reset" the test-only `ahci-reset` word of the command line; a GB is 10^9
+bytes). A refusal says why on the same kind of line and the boot goes
+on: for a controller `refused: BAR5 is not 32-bit memory`, `BIOS/OS
+handoff timeout (BOS/BB)`, `HBA reset timeout` or `the 8254 PIT does not
+count, so no AHCI wait could end`; for a port `refused: LBA48 not
+supported`, `logical sector size 4096 bytes (only 512 supported)`,
+`FLUSH CACHE EXT not supported`, `COMRESET link active timeout
+(DET/IPM)`, `device ready timeout (BSY/DRQ)` or `block disk table full`.
+A command that fails is named with its port and the error bits:
+
+    ahci0: 8086:2922 at 00:02.0 port 0: READ DMA EXT failed: task-file error (TFES) command aborted (ABRT) PxTFD=0x0000000000000441; -EIO
+
+and one that does not finish says `command timeout; -EIO`. No command
+the driver sends writes the medium unless a program or a volume asked for
+the write or the flush; discovery and IDENTIFY only read. Until px76's
+kernel/clock merges, every wait above (BOH's 25 ms and 2 s, CR and FR's
+500 ms, COMRESET's 1 ms, a command's 30 s, a flush's 120 s) is a deadline
+on kernel/ahci_clock, the 8254's channel 0; on a machine whose PIT does
+not count each controller gets the refusal above instead of a hang
+(R-px75b-7, measured under QEMU's `pit=off`).
+
+`tools/qemu-run --ahci FILE[,serial=S,model=M]` (repeatable; `tools/qemu-halt`
+the same) gives each image an `ahci` controller of its own with the disk
+an `ide-hd` on port 0 (serial `paxahciN` and model `PAX-SATA-disk` when
+FILE has no options; options given replace both); q35's ICH9 controller
+keeps the CD-ROM. Gaps in the ports, two
+disks on one controller and other device properties go through `--qemu`
+(tests/mpx6-ahci's machine: `-device ahci,id=ca … -device
+ide-hd,bus=ca.4,…`). `--boot-ahci` puts the boot disk on a controller of
+its own, which SeaBIOS and OVMF boot, and its `root=PARTUUID=` finds `/`
+on `sda2`:
+
+    qemu-system-x86_64 … -device ahci,id=paxbootahci -drive file=pax-disk.img,if=none,id=d0,format=raw -device ide-hd,bus=paxbootahci.0,drive=d0,serial=paxboot,bootindex=0
+
+`tools/rootdisk-leg` with `PAX_ROOTDISK_BUS=ahci` boots a whole suite's
+images that way (CI: the `mpx5-users-ahci` job, R-px75b-6).
+
 ## Measured
 
 The proof's runs, both firmwares, the same ISO on linux and macOS: see
