@@ -173,6 +173,41 @@ fn prepared_dir(tree: str, attrs: str, path: str, uid: int) -> () ! {io, invalid
     append_attrs(attrs, path, "0755", uid, uid)?
 }
 
+// px78 (R-px78-6, recommended and implemented, not decided): an install
+// made from the live medium (its tree has /etc/pax-live-login) must not
+// boot into the live medium's passwordless-root entry (BOOT.md: "Do not
+// use this live entry in the installed system"). Its /etc/pax-run becomes
+// this console login instead: root, or the account pax-install made (by
+// su(1), root dropping to the user: px46), no passwords in this preview.
+const INSTALLED_RUN: str = "/bin/pelt /etc/pax-login\n"
+
+fn installed_login() -> str {
+    "#!/bin/pelt\n" +
+    "# The installed system's console login, written by pax-install (px78):\n" +
+    "# root, or an account /etc/passwd names; no passwords in this preview.\n" +
+    "printf 'PAX: log in as root or as the user pax-install made.\\n'\n" +
+    "while :; do\n" +
+    "    printf 'login: '\n" +
+    "    IFS= read -r account || exit 0\n" +
+    "    [ -n \"$account\" ] || continue\n" +
+    "    export PATH=/bin TERM=linux\n" +
+    "    [ ! -f /etc/shrc ] || export ENV=/etc/shrc\n" +
+    "    if [ \"$account\" = root ]; then\n" +
+    "        export HOME=/root USER=root LOGNAME=root\n" +
+    "        cd /root 2>/dev/null || cd /\n" +
+    "        exec /bin/pelt -i -m\n" +
+    "    fi\n" +
+    "    found=\n" +
+    "    while IFS=: read -r name pw uid gid gecos home shell; do\n" +
+    "        [ \"$name\" != \"$account\" ] || found=$uid\n" +
+    "    done < /etc/passwd\n" +
+    "    if [ -n \"$found\" ] && [ -x /bin/su ]; then\n" +
+    "        exec /bin/su \"$account\" -c 'cd; exec /bin/pelt -i -m'\n" +
+    "    fi\n" +
+    "    printf 'Login incorrect\\n'\n" +
+    "done\n"
+}
+
 fn configure_tree(p: Plan, tree: str, attrs: str, games: List[Game]) -> () ! {
     io,
     invalid,
@@ -180,6 +215,10 @@ fn configure_tree(p: Plan, tree: str, attrs: str, games: List[Game]) -> () ! {
 } {
     let passwd = fs_read_text("{tree}/etc/passwd") else |_| { return io }
     let group = fs_read_text("{tree}/etc/group") else |_| { return io }
+    if fs_exists("{tree}/etc/pax-live-login") {
+        replace_config(tree, attrs, "/etc/pax-run", INSTALLED_RUN)?
+        replace_config(tree, attrs, "/etc/pax-login", installed_login())?
+    }
     replace_config(tree, attrs, "/etc/passwd", account_table(passwd, p.user, false)?)?
     replace_config(tree, attrs, "/etc/group", account_table(group, p.user, true)?)?
     replace_config(
