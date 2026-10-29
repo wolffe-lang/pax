@@ -4532,6 +4532,71 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  # px78: the whole install path in QEMU shaped like kasumi: the live stick
+  # (USB mass storage on xHCI) under OVMF with no serial port, the install
+  # to the one disk the stick's allow-list names, the stick removed and the
+  # disk booted alone; the NVMe and the other SATA disks byte-identical.
+  # Its own job, beside mpx6-install's (whose budget it would double): the
+  # installer's smoke inputs (no yew), then the one leg.
+  mpx6-kasumi:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-kasumi')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+      PAX_LOPE_REPO: ${{ github.workspace }}/.lope
+      CARGO_INCREMENTAL: "0"
+      PAX_ENGINE: docker
+      # TCG, named: the runner's /dev/kvm is not the job's, and a leg that
+      # took KVM when it happened to be there would time differently.
+      PAX_METAL_ACCEL: tcg
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ubuntu baseline compiler, QEMU, firmware and independent oracles
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make strace gdisk fdisk dosfstools mtools e2fsprogs
+          qemu-system-x86_64 --version
+          df -h . | tail -n 1
+      - name: the disk tools' image, pinned by digest
+        run: docker pull docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+      - name: lope's pin
+        id: lope
+        run: |
+          . user/lope.pin
+          echo "rev=$LOPE_REV" >> "$GITHUB_OUTPUT"
+      - name: require the private lope checkout token
+        env:
+          TOKEN: ${{ secrets.WOLF_CI_TOKEN }}
+        run: |
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::error::WOLF_CI_TOKEN is required for the installer's inputs"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          repository: wolffe-lang/lope
+          ref: ${{ steps.lope.outputs.rev }}
+          token: ${{ secrets.WOLF_CI_TOKEN }}
+          path: .lope
+          persist-credentials: false
+      - name: the stick, the install, the disk alone; the other disks unchanged
+        run: tests/mpx6-kasumi $PAX_LEGS
+      - name: keep the leg's screens, the stick's install log and the witnesses
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-kasumi
+          path: |
+            build/mpx6-kasumi/metal/**/*.json
+            build/mpx6-kasumi/metal/**/*.txt
+            build/mpx6-kasumi/metal/**/*.png
+            build/mpx6-kasumi/metal/**/*.log
+            build/mpx6-kasumi/metal/**/*.fsck
+          retention-days: 14
+          if-no-files-found: error
+
   mpx6-fsck:
     needs: plan
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-fsck')
@@ -4809,6 +4874,7 @@ jobs:
       - mpx6-ahci
       - mpx6-disktools
       - mpx6-install
+      - mpx6-kasumi
       - mpx6-fsck
       - mpx6-games
       - mpx6-usb
