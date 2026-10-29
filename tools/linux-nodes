@@ -41,7 +41,10 @@
 # /dev/vda. --qemu ARG (px75), repeatable: ARG given to QEMU as it is,
 # after the disks (a controller with namespaces of its own: `-device
 # nvme,id=c0,…` and `-device nvme-ns,bus=c0,nsid=…`); an ARG naming nvme
-# loads the module as --nvme does.
+# loads the module as --nvme does. px78: an ARG naming usb-storage loads
+# xhci_pci, usb_storage and sd_mod (with their chains), and the shell
+# waits for a disk under a USB device to appear in /sys/block, then a
+# second more for its partitions.
 #
 # Exit 0 when the guest ran to its end line, 1 when not, 2 on a usage or
 # tool error. Black-box only: the kernel and its modules are run, never
@@ -55,7 +58,7 @@ accel=tcg
 drives=()
 files=()
 extra=()
-nvme=0 ahci=0
+nvme=0 ahci=0 usb=0
 while [ $# -gt 0 ]; do
     case $1 in
         --kernel) kernel=$2; shift 2 ;;
@@ -65,7 +68,7 @@ while [ $# -gt 0 ]; do
         --drive) drives+=("v:$2"); shift 2 ;;
         --nvme) drives+=("n:$2"); nvme=1; shift 2 ;;
         --ahci) drives+=("a:$2"); ahci=1; shift 2 ;;
-        --qemu) extra+=("$2"); case $2 in *nvme*) nvme=1 ;; *ahci*|*ide-hd*) ahci=1 ;; esac; shift 2 ;;
+        --qemu) extra+=("$2"); case $2 in *nvme*) nvme=1 ;; *ahci*|*ide-hd*) ahci=1 ;; *usb-storage*) usb=1 ;; esac; shift 2 ;;
         --file) files+=("$2"); shift 2 ;;
         --) shift; break ;;
         -*) die "unknown option $1" ;;
@@ -121,6 +124,7 @@ add() {
 mods="virtio_pci virtio_blk ext4"
 [ "$nvme" = 0 ] || mods="$mods nvme"
 [ "$ahci" = 0 ] || mods="$mods ahci sd_mod"
+[ "$usb" = 0 ] || mods="$mods xhci-pci usb-storage sd_mod"
 for m in $mods; do add "$m"; done
 # px75: ext2 is a module of its own where ext4 does not serve it (hasu's
 # NixOS kernel: `mount -t ext2` ENODEV with ext4 alone); loaded when the
@@ -148,6 +152,7 @@ done
     case " ${drives[*]-} " in *" v:"*) echo 'n=0; while [ ! -b /dev/vda ] && [ $n -lt 50 ]; do sleep 0.1; n=$((n + 1)); done' ;; esac
     [ "$nvme" = 0 ] || echo 'n=0; while [ ! -b /dev/nvme0n1 ] && [ $n -lt 100 ]; do sleep 0.1; n=$((n + 1)); done'
     [ "$ahci" = 0 ] || echo 'n=0; while [ ! -b /dev/sda ] && [ $n -lt 100 ]; do sleep 0.1; n=$((n + 1)); done'
+    [ "$usb" = 0 ] || echo 'n=0; while ! ls -l /sys/block/ | grep -q usb && [ $n -lt 100 ]; do sleep 0.1; n=$((n + 1)); done; sleep 1'
     echo 'sleep 0.5'
     echo 'echo "linux-nodes: uname $(uname -r)"'
     k=0
