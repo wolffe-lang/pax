@@ -20,7 +20,8 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
 | Files | A writable in-memory tree seeded from the initramfs: links, modes, times, holes, `rename`; `mmap` private and shared, `mremap`, FIFOs, `flock`; `/dev`, `/proc`, `/sys`, `/tmp` | Linux's tmpfs in a throwaway container |
 | Disks | Up to four disks: virtio, NVMe (`nvme0n1`, major 259), or SATA AHCI (`sda`, major 8, LBA48), with GPT or MBR tables and `/dev` nodes; ext2 read and written, file data past 2 TiB on every bus; ext3's journal written and replayed; `/` on the disk, `mount(2)`, `/etc/fstab`; an offline `fsck.ext2` in wolf | Linux 7.3.0 under QEMU (NVMe and AHCI: 7.2.4) and e2fsprogs |
 | Network | virtio-net, ARP, IPv4, ICMP, UDP, TCP (RFC 9293, 6298, 5681), Unix sockets, `poll`, `epoll`, `eventfd`; 256 TCP connections | Linux in a namespace, and captures rebuilt byte by byte |
-| Console | A 16550 serial console, the PS/2 keyboard and USB keyboards over xHCI, one line discipline; a framebuffer console of 160×50 cells with the Linux VT's colours and 560 glyphs | typed sessions on a Linux pseudo-terminal; screendumps against a reference renderer |
+| Console | A 16550 serial console when present, PS/2 and USB keyboards over xHCI with MSI or INTx, one line discipline; a firmware-sized framebuffer with the Linux VT's colours and 560 glyphs | typed sessions on a Linux pseudo-terminal; screendumps against a reference renderer |
+| Firmware | Checksummed ACPI tables; a local APIC tick calibrated against HPET, the ACPI PM timer or the PIT; ACPI reset and static S5 power-off | QEMU BIOS and UEFI, including PIT-less machines |
 | Sound | The PC speaker through Linux's console ioctls; virtio sound behind OSS `/dev/dsp`; `/bin/play`, an orchestra of 17 timbres | QEMU's capture, every pitch within 1% |
 | Shipped programs | pelt (the shell, PID 1), boreutils (107 utilities), scent as `grep`, yew, lope, aspen, lupin, lobo, clef, three wolf games | the same binaries in a Linux container |
 
@@ -209,7 +210,9 @@ draws the console there from its first line, and the window's keyboard is the PS
 shell image is typed into from the window while COM1 still gets every byte. With `-display none` the screen is drawn
 where nobody sees it; `-vga none` (`tools/qemu-run --no-screen`) boots a machine with no display at all.
 
-The framebuffer console is a 160×50 grid in Spleen 8×16 at QEMU's 1280×800 and supports:
+The framebuffer uses the firmware's width, height, row pitch and RGB masks. It draws before the allocator starts, even
+without COM1. Spleen's 8×16 glyphs give 160×50 cells at 1280×800; above 2560 pixels wide they are doubled, giving
+240×67 cells at 3840×2160. The console supports:
 
 - the Linux VT's colour renditions (dim, italic, underline, RGB mapped to its small palette), `OSC P` and `OSC R` for
   the palette, sixteen CSI parameters, scroll margins, character and line insertion and deletion;
@@ -221,6 +224,11 @@ The framebuffer console is a 160×50 grid in Spleen 8×16 at QEMU's 1280×800 an
 
 Blink attributes are recorded but drawn steadily, and `DECSCUSR` is consumed without changing the cursor's shape, as
 on the measured Linux VT.
+
+`tools/qemu-run` accepts `--usb-irq=msi|intx`, `--no-hpet`, `--no-pit`, `--no-serial` and
+`--display-mode=3840x2160`. A display mode also needs the matching `resolution:` in the image's Limine configuration.
+Explicit interrupt tests use `nec-usb-xhci` on QEMU 8.2, whose `qemu-xhci` lacks MSI configuration properties;
+QEMU 11.1 uses `qemu-xhci`. Neither substitutes a claim about a physical controller.
 
 ## Friendly shell editing
 
@@ -237,7 +245,7 @@ set -o friendly -o suggest -o histsearch
 
 Scripts keep POSIX behaviour, and `set +o friendly` turns the additions off. Suggestions default to bright black
 (SGR 90); `PELT_COLORS='command=green:shadow=brblack+dim'` dims them and colours resolving commands green. The
-framebuffer console reports its 160×50 grid; a serial-only console starts with an unknown (0×0) size.
+framebuffer console reports its current grid; a serial-only console starts with an unknown (0×0) size.
 
 ## The dev image
 
@@ -321,6 +329,7 @@ and `--tier native --firmware bios` picks one leg.
 | Users and the shipped programs | `mpx5-users`, `mpx5-accounts`, `mpx5-jobs`, `mpx5-pelt`, `mpx5-bore`, `mpx5-scent`, `mpx5-lope`, `mpx5-aspen`, `mpx5-lupin`, `mpx5-yew`, `mpx5-wolf`, `mpx5-clef`, `mpx5-screen` | every rule as root and as `pax`, job control typed byte for byte, each program's typed session against the same binary in a container |
 | Disks | `mpx6-blk`, `mpx6-ext2`, `mpx6-part`, `mpx6-root`, `mpx6-journal`, `mpx6-nodes`, `mpx6-nvme`, `mpx6-ahci`, `mpx6-disktools`, `mpx6-fsck`, `mpx6-install`, `mpx6-games` | Linux 7.3.0 on QEMU with the same disks, e2fsprogs, the formatters' differentials, a power cut repaired, the installer, the games' frames cell for cell |
 | USB | `mpx6-usb`, `mpx6-usbcheck`, `usb-tools`, `usb-stick`, `usb-linux-fetch` | xHCI, hubs, keyboard bytes and hotplug; the stick's boot files, both firmwares, Linux mounting the ESP; the oracle's two pinned Ubuntu packages |
+| Firmware and display | `mpx6-firmware` | independent tick-rate checks, MSI and INTx keyboard sessions, above-4-GiB BARs, reset and S5, padded pitch, serial-less early panic pixels at 1280×800 and 4K |
 
 Suites that need something of the host say so and stop: root for the Linux network side (`tools/linux-net`), docker or
 podman for the throwaway containers (`tools/linux-tree`, e2fsprogs), KVM for speed. `tools/mkimage` is reproducible:
