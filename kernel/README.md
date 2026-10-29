@@ -16,8 +16,8 @@ own text after the switch, which must fault and, since kw10, panics
 kernel loads its own GDT, TSS and IDT first (`interrupts.start()`), so
 any exception panics by name; `kmain_int3.lu` takes a breakpoint and
 goes on, `kmain_ud2.lu` panics `invalid opcode`, `kmain_double_fault.lu`
-double-faults onto IST1, and `kmain_timer.lu` counts 20 PIT ticks
-(`tests/mpx2-interrupts`). Since px07 `kmain_sched.lu` starts the
+double-faults onto IST1, and `kmain_timer.lu` counts 20 ticks (the PIT's
+until px76, the local APIC timer's since) (`tests/mpx2-interrupts`). Since px07 `kmain_sched.lu` starts the
 scheduler and runs rounds of threads (three that only spin and are
 switched by the timer alone, three sleepers, two counting under the
 spinlock and two without it), and `kmain_sched_overflow.lu` runs a
@@ -1041,3 +1041,24 @@ of Linux the moment a call must wait (`notes/px24-readiness.md`).
   hundred waiting threads the wake-everyone rule would cost); memory
   taken when a page is first touched (a wolf task's 8 MiB stack costs
   2,072 frames at its `mmap`); AF_UNIX path sockets.
+
+## The firmware's machine (px76)
+
+The kernel reads what the firmware gives instead of assuming QEMU's
+habits: kasumi has no serial port, may gate its 8254, gives its xHCI MSI
+x8 with no legacy line and BAR0 above 4 GiB, and hands over whatever GOP
+mode its monitor takes. `tests/mpx6-firmware` holds each piece (rows F1
+to F9); `notes/px76-uefi-on-metal.md` has the measurements.
+
+| module | what |
+|---|---|
+| `acpi/` | read-only ACPI 6.5: the RSDP from Limine's request, the XSDT (the RSDT without one), every table checksummed inside the memory map's ACPI and reserved ranges before it is read, one line a table (`acpi: <sig> OEM <id> length <n>`); the MADT's local APICs, I/O APICs, overrides and NMI entries, the HPET table's address, the FADT's PM timer, PM1a/PM1b, SCI and reset register, the MCFG logged (kernel/pci keeps mechanism #1); first the firmware's line (UEFI's vendor and revision from the system table) and the memory map's (entries, total, usable, the largest hole) |
+| `clock/` | monotonic nanoseconds with IF clear: `start`, `now_ns`, `wait_us`, `deadline_us`, `expired` (the API agreed with px75b). The HPET's main counter, refused unless 10 ms of the ACPI PM timer read 5 to 20 ms on it; else the PM timer; else the PIT read back. A read before `start` panics by name |
+| `msi/` | the message an MSI writes (Intel SDM vol. 3A §11.11): `address(apic_id)` and `data(vector)`, fixed delivery, edge; `edge_fixed`, the read-back check |
+| `power/` | `reboot`: the FADT's reset register, then port 0xCF9, then a triple fault, each logged; `power_off`: ACPI S5, its SLP_TYP values from the DSDT's one literal `\_S5` package (found by its AML encoding; no interpreter), with SLP_EN to PM1a and PM1b |
+| `timer/` (px76 change) | the tick is the local APIC timer, periodic at 100 Hz on vector 32, its count calibrated against `clock` over 20 ms (divide by 16); one line names the clock and the rate; the PIT's line stays masked; `eoi` acknowledges vectors 80-83 at the local APIC |
+| `idt/` (px76 change) | vectors 80-83 routed (the MSI vectors): 52 gates |
+| `pci/` (px76 change) | `capability` (the list walked, bounded), `interrupts_off` (MSI, MSI-X and INTx off), `enable_msi` (one message of either layout, INTx off first, read back enabled), `write8` |
+| `xhci/` (px76 change) | a controller with an MSI capability is put on it (vector 79 + its number; `xhci N: ports P MSI vector V …`), else on its INTx line as before; its bootstrap waits are `clock` deadlines; its BAR0 on a line |
+| `screen/`, `fb/` (px76 change) | any width, height, pitch and channel shifts Limine reports (an invalid pitch or overlapping masks refused); glyphs doubled above 2560 pixels wide (R-px76-3 B: 240x67 cells at 3840x2160); drawn from `serial.init`'s first line through Limine's own mapping until PAX's paging takes over, then replayed; `fb.report`'s mode line in the console and session kernels |
+| `serial/` (px76 change) | an absent UART (its registers read all ones) is never polled; the lines go to the screen and to a 64 KiB transcript in memory (`boot/io.S`'s `pax_serial_log`) |
