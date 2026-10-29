@@ -55,6 +55,10 @@ const LOOPBACK_BYTE: int = 0xae
 // poll succeeds). `init`'s loopback wait has the same bound.
 const POLLS: int = 1048576
 
+// Absent hardware reads all ones. Never poll it as a ready UART.
+var present: bool = false
+pub fn available() -> bool { unsafe { present } }
+
 fn out(reg: int, v: int) {
     // # Safety: io.S's `outb` on a COM1 register; the port and the value
     // are in range by construction (the narrowing casts trap otherwise).
@@ -97,6 +101,7 @@ pub fn init() -> int {
         status = status + 2
     }
     out(MCR, MCR_NORMAL)
+    unsafe { present = status == 3 }
     status
 }
 
@@ -109,6 +114,7 @@ pub fn init() -> int {
 /// loses the byte rather than hang the kernel. It never traps.
 pub fn put(b: u8) {
     screen.put(b)
+    if !available() { return }
     var spins = 0
     while spins < POLLS {
         let lsr = inp(LSR)
@@ -133,16 +139,19 @@ const FCR_RX1: int = 0x07 // FIFOs on, both cleared, receive trigger 1 byte
 /// UART's interrupt line, is already up (`init`). The 8259 line (4) is
 /// kernel/console's to unmask.
 pub fn receive_on() {
+    if !available() { return }
     out(FCR, FCR_RX1)
-    while inp(LSR) & LSR_DATA_READY != 0 {
+    var n = 0
+    while n < POLLS && inp(LSR) & LSR_DATA_READY != 0 {
         let _b = inp(THR) // RBR: whatever arrived before
+        n += 1
     }
     out(IER, IER_RX)
 }
 
 /// Whether a received byte is waiting (LSR bit 0).
 pub fn ready() -> bool {
-    inp(LSR) & LSR_DATA_READY != 0
+    available() && inp(LSR) & LSR_DATA_READY != 0
 }
 
 /// The received byte (RBR); call after `ready` (`take` is a keyword).
