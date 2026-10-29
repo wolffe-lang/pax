@@ -15,9 +15,13 @@
 //! - vector 8, the double fault, with IST 1: the CPU switches to the
 //!   TSS's IST1 stack (kernel/gdt) before it pushes the frame, whatever
 //!   %rsp was — a #DF on a broken stack still runs;
-//! - 48-255 not present (zero): a stray vector there is #NP with the
-//!   IDT bit set in its error code, which kernel/interrupts panics by
-//!   name.
+//! - vectors 80-83 (px76), the PCI MSI messages kernel/pci programs
+//!   (kernel/xhci takes 79 + its controller's number): the same gate,
+//!   their trampolines boot/isr.S's pax_msi_isr_table, acknowledged at
+//!   the local APIC (kernel/timer's `eoi`);
+//! - every other vector from 48 not present (zero): a stray vector there
+//!   is #NP with the IDT bit set in its error code, which
+//!   kernel/interrupts panics by name.
 //!
 //! A gate (Intel SDM vol. 3A §6.14.1, Figure 6-8; AMD64 APM vol. 2
 //! §4.8.4, §8.9.1): offset 15:0, the selector, the IST index (bits
@@ -58,6 +62,11 @@ struct Idtr {
 /// Vectors with a trampoline: the 32 exceptions and the 8259's 16 lines.
 const ROUTED: int = 48
 
+/// px76: the PCI MSI vectors, one per xHCI controller (four at most),
+/// disjoint from the 8259's 32-47 and the scheduler's software 0x81.
+const MSI_BASE: int = 80
+const MSI_ROUTED: int = 4
+
 /// The table's gates.
 const GATES: int = 256
 
@@ -83,7 +92,7 @@ fn set(v: int, at: u64, ist: u8) {
     }
 }
 
-/// Fill gates 0-47 (8 on IST1) and load the table.
+/// Fill gates 0-47 (8 on IST1) and 80-83 and load the table.
 pub fn start() {
     var v = 0
     while v < ROUTED {
@@ -92,10 +101,10 @@ pub fn start() {
         set(v, at, if v == 8 { 1 } else { 0 })
         v += 1
     }
-    // MSI vectors are disjoint from PIC and the software-switch vector 0x81.
     v = 0
-    while v < 4 {
-        set(80 + v, unsafe { pax_msi_isr_table[v] }, 0)
+    while v < MSI_ROUTED {
+        // # Safety: pax_msi_isr_table holds the four MSI trampolines.
+        set(MSI_BASE + v, unsafe { pax_msi_isr_table[v] }, 0)
         v += 1
     }
     // # Safety: pax_idtr is boot/isr.S's 16 bytes; the table it names
@@ -113,14 +122,14 @@ pub fn base() -> u64 {
     unsafe { pax_idt as u64 }
 }
 
-/// Write the table's line: `idt: 0x<base>, 256 gates, 48 routed, #DF on ist1`.
+/// Write the table's line: `idt: 0x<base>, 256 gates, 52 routed, #DF on ist1`.
 pub fn report() {
     log.put("idt: ")
     log.hex(base())
     log.put(", ")
     log.dec(GATES)
     log.put(" gates, ")
-    log.dec(ROUTED)
+    log.dec(ROUTED + MSI_ROUTED)
     log.put(" routed, #DF on ist1")
     log.end()
 }
