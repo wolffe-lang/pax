@@ -41,7 +41,9 @@
 # this host's kernel cannot be read (the CI runner's is root's), the
 # reference is the one recorded on hasu (tests/mpx6-nvme.d/linux/,
 # `--record` writes it), said loudly; PAX_LINUX=live insists on a live
-# one. PAX_LINUX_KERNEL and PAX_LINUX_MODULES name the guest's kernel and
+# one. pax#241 (px78):
+# PAX_LINUX=recorded takes the record whatever kernel is readable, and a
+# guest that left no log is a named failure. PAX_LINUX_KERNEL and PAX_LINUX_MODULES name the guest's kernel and
 # its modules' directory; PAX_LINUX_ACCEL its accelerator (tcg, kvm).
 # PAX_NVME_RAM names a directory in memory (a tmpfs) for the 1 GiB disk,
 # so the throughput is the driver's and QEMU's, not a host disk's.
@@ -207,6 +209,8 @@ disks_of() { # session dir
 # --- the Linux side -------------------------------------------------------------
 
 kernel_readable() {
+    # pax#241 (px78): PAX_LINUX=recorded takes the record, whatever kernel is readable
+    [ "${PAX_LINUX:-}" != recorded ] || return 1
     local k=${PAX_LINUX_KERNEL:-}
     if [ -z "$k" ]; then
         k=/usr/lib/modules/$(uname -r)/vmlinuz
@@ -220,7 +224,7 @@ linux_side() { # dir -> reasons
     mkdir -p "$w/linux"
     k=$(kernel_readable || true)
     if [ -z "$k" ] && [ "${PAX_LINUX:-}" != live ]; then
-        say "LOUD: no readable Linux kernel on this host: the Linux side is the record made on hasu ($(head -n 1 "$REC/meta"))"
+        say "LOUD: $([ "${PAX_LINUX:-}" = recorded ] && echo PAX_LINUX=recorded || echo no readable Linux kernel on this host): the Linux side is the record made on hasu ($(head -n 1 "$REC/meta"))"
         for s in $GUEST; do cp "$REC/$s.session" "$w/linux/" || printf ' no %s record in %s;' "$s" "$REC"; done
         cp "$REC/images.sha256" "$w/linux/" || printf ' no images.sha256 in %s;' "$REC"
         echo recorded > "$w/linux/how"

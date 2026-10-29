@@ -34,7 +34,9 @@
 # the write disk's tree (tools/e2tree) are the reference. Where this
 # host's kernel cannot be read (the CI runner's is root's) the reference
 # is the one recorded on kasumi (tests/mpx6-ext2.d/linux/, `--record`
-# writes it), said loudly; PAX_LINUX=live insists on a live one.
+# writes it), said loudly; PAX_LINUX=live insists on a live one. pax#241 (px78):
+# PAX_LINUX=recorded takes the record whatever kernel is readable, and a
+# guest that left no log is a named failure.
 #
 # Assertions, per tier and firmware (--rows read, or PAX_EXT2_ROWS=read,
 # CI's pr tier: E0-E3, E8, E9 on the read boot; --rows all, the default
@@ -140,6 +142,8 @@ check_disks() { # dir -> reasons
 }
 
 kernel_readable() {
+    # pax#241 (px78): PAX_LINUX=recorded takes the record, whatever kernel is readable
+    [ "${PAX_LINUX:-}" != recorded ] || return 1
     local k=${PAX_LINUX_KERNEL:-/usr/lib/modules/$(uname -r)/vmlinuz}
     [ -r "$k" ] && printf '%s\n' "$k"
 }
@@ -150,7 +154,7 @@ linux_side() { # dir -> reasons
     mkdir -p "$w/linux"
     k=$(kernel_readable || true)
     if [ -z "$k" ] && [ "${PAX_LINUX:-}" != live ]; then
-        say "LOUD: no readable Linux kernel on this host: the Linux side is the record made on kasumi ($(head -n 1 "$REC/meta"))"
+        say "LOUD: $([ "${PAX_LINUX:-}" = recorded ] && echo PAX_LINUX=recorded || echo no readable Linux kernel on this host): the Linux side is the record made on kasumi ($(head -n 1 "$REC/meta"))"
         cp "$REC/read.session" "$REC/write.session" "$REC/write.tree" "$w/linux/" || printf ' no record in %s;' "$REC"
         echo recorded > "$w/linux/how"
         return
