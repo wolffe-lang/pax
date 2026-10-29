@@ -253,6 +253,13 @@ Each plant's other rows stayed green (the strings plant's A2–A5, the
 PRDT plant's A1 and A2). Both of the first lane's were seen red on hasu
 before CI (`logs/plant-strings.log`, `logs/plant-prdt.log`, raw exit 1).
 
+The budget row, seen red on hasu (a check with no QEMU, so no CI run of
+its own): `tests/ci-budgets.py` against a copy of the workflow whose
+`mpx5-users-ahci` bound is 85 minutes, `FAIL CI budget mpx5-users-ahci:
+bound=5100s sizing-floor=3666s margin=1434s`, exit 1
+(`logs/final-ci-budgets-red85.log`); at the head's 90, PASS
+(`logs/final-ci-budgets.log`).
+
 ### 4.6 R-px75b-6, measured
 
 The first lane took the AHCI-root pass out of mpx5-users' job
@@ -324,7 +331,8 @@ its four legs whole in CI: this PR's run is the first.
   pull request that changes kernel/ahci or its clock (`tools/ci-tiers.map`,
   `a9c9f626`), the users suite's script or the root-disk tools (by the
   derivation: its job's block names them), proven by tests/ci-plan's rows
-  (`457f921a`; 297 PASS at `ddda81b3`, `logs/b4a-ci-plan.log`). Bound 90
+  (`457f921a`; 297 PASS at `ddda81b3` and again at `5bcb6cad`,
+  `logs/b4a-ci-plan.log`, `logs/final-ci-plan.log`). Bound 90
   minutes: floor 3666 s (build 50 + CI's leg 3436, above the scaled 3432,
   + 180), 40% above it 5132 s (scaling the newer full-tier 3432 s instead:
   a 3442 s leg, a 3672 s floor, 5141 s); `tests/ci-budgets.py` holds it there from
