@@ -88,7 +88,9 @@ assert capacity >= 77611520 and capacity % 512 == 0
 assert not fault or capacity in (77611520,536870912), 'large-image faults need a bounded guard, never a full-hole hash'
 root_bytes=min(17592186040320,(capacity-33*512)//4096*4096-69206016)
 ratio=4096 if root_bytes < 536870912 else 16384 if root_bytes < 4398046511104 else 32768
-assert shutil.disk_usage(work).free > root_bytes//ratio*256 + (2<<30), 'insufficient space for initialized inode tables'
+sparse_zeroes=os.environ.get('PAX_INSTALL_SPARSE_ZEROES','')=='1'
+needed=1<<30 if sparse_zeroes else root_bytes//ratio*256
+assert shutil.disk_usage(work).free > needed + (2<<30), 'insufficient space for initialized inode tables'
 token=f'ERASE /dev/{name} 254:{minor}-seq{seq} {capacity} {seed}'
 if fault=='wrong-token':token+='-WRONG'
 script=work/'install.sh'
@@ -124,10 +126,16 @@ cmd=[repo/'tools/qemu-halt','--accel','tcg','--firmware',os.environ.get('PAX_INS
      '--serial',work/'install.serial','--marker','halt','--qemu','-m','--qemu','1536M','--drive',str(work/'source-guard.img')+',ro']
 if name=='vdc':cmd+=['--drive',str(work/'source-guard.img')+',ro']
 if guided:cmd+=['--type',work/'keys','--prompt','pax-install> ']
-cmd+=['--drive',str(work/'target.img')+(',ro' if fault=='readonly' else ''),work/'boot.iso']
+if sparse_zeroes:
+    assert not fault, 'sparse backing optimization is only a positive install fixture'
+    cmd+=['--qemu','-drive','--qemu',f'file={work/"target.img"},if=none,id=bigroot,format=raw,detect-zeroes=unmap,discard=unmap',
+          '--qemu','-device','--qemu','virtio-blk-pci,drive=bigroot']
+else:
+    cmd+=['--drive',str(work/'target.img')+(',ro' if fault=='readonly' else '')]
+cmd+=[work/'boot.iso']
 t=time.monotonic();p=run(cmd,False);install_seconds=time.monotonic()-t
 (work/'install.boot').write_bytes(p.stdout+p.stderr)
-(work/'install-timing.json').write_text(json.dumps({'capacity_bytes':capacity,'root_bytes':root_bytes,'install_seconds':install_seconds})+'\n')
+(work/'install-timing.json').write_text(json.dumps({'capacity_bytes':capacity,'root_bytes':root_bytes,'install_seconds':install_seconds,'qemu_zero_unmap':sparse_zeroes})+'\n')
 assert p.returncode==0,(p.returncode,p.stdout,p.stderr)
 s=(work/'install.serial').read_text(errors='replace')
 if fault:

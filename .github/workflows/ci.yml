@@ -4313,10 +4313,11 @@ jobs:
     needs: plan
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-install')
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 120 || 60 }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_INSTALL_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'smoke' || 'full' }}
+      PAX_INSTALL_BIG_ROWS: ${{ needs.plan.outputs.tier == 'all' && 'all' || needs.plan.outputs.tier == 'full' && '500gb' || 'none' }}
       PAX_LOPE_REPO: ${{ github.workspace }}/.lope
       CARGO_INCREMENTAL: "0"
     steps:
@@ -4357,6 +4358,7 @@ jobs:
             build/mpx6-install/**/*.serial
             build/mpx6-install/**/*.verify
             build/mpx6-install/**/*.fsck
+            build/mpx6-install/**/*.geometry
             build/mpx6-install/**/*.tree
             build/mpx6-install/**/*.json
             build/mpx6-install/**/*.jsonl

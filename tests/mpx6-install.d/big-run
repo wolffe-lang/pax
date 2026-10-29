@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# A positive, full-density installation on a sparse backing image.
+# Every inode table is written by the guest. QEMU recognizes zero writes
+# and unmaps backing-file extents so CI need not allocate 62 GB of zeroes.
+# Usage: big-run REPO INPUTS WORK CAPACITY_BYTES
+set -euo pipefail
+repo=$1 inputs=$2 work=$3 bytes=$4
+case $bytes in 500000000000|4000000000000) ;; *) echo 'unsupported big-install fixture size' >&2; exit 2 ;; esac
+mkdir -p "$work"
+df -h "$work"
+export PAX_INSTALL_TIER=native PAX_INSTALL_FIRMWARE=bios
+PAX_INSTALL_CAPACITY=$bytes PAX_INSTALL_TIMEOUT=7200 PAX_INSTALL_SPARSE_ZEROES=1 \
+    python3 -I "$repo/tests/mpx6-install.d/install.py" "$repo" "$inputs" "$work" no vdb
+kernel=$(cat "$inputs/build/disktools/native.elf.path")
+for fw in bios uefi; do
+    python3 -I "$repo/tests/mpx6-install.d/big-boot.py" "$repo" "$work" "$kernel" --firmware "$fw"
+done
+# The geometry, timing, phase log, fsck verdict and both boot transcripts
+# are durable before reclaiming these two exact lane-owned image paths.
+rm "$work/target.img" "$work/root.img"
+printf 'PASS I-big-install: %s bytes; both firmwares; images reclaimed\n' "$bytes"

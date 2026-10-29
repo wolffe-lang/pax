@@ -92,4 +92,15 @@ if [ "$rows" = full ]; then
         done
     done
 fi
+# px84: the 500 GB row is the full merge gate's; 4 TB is all-tier only.
+# CI sets the selection explicitly. The existing smoke rows never grow.
+case ${PAX_INSTALL_BIG_ROWS:-none} in
+    none) ;;
+    500gb|all)
+        bash "$D/big-run" "$PAX_ROOT" "$inputs" "$work/big-500gb" 500000000000
+        if [ "$PAX_INSTALL_BIG_ROWS" = all ]; then
+            bash "$D/big-run" "$PAX_ROOT" "$inputs" "$work/big-4tb" 4000000000000
+        fi ;;
+    *) die 'PAX_INSTALL_BIG_ROWS takes none, 500gb or all' ;;
+esac
 say 'mpx6-install: PASS; 0 SKIP (PAX RSS unavailable is a named kernel prerequisite, not a test skip)'
