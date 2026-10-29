@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import socket
 import subprocess
@@ -27,6 +28,17 @@ def run(args):
            '--usb-kbd=' + args.topology, '--serial', str(serial),
            '--timeout', '120', str(Path(args.image).resolve()), '--',
            '-qmp', f'unix:{sock},server=on,wait=off']
+    if args.no_serial:
+        if args.linux_kernel: raise RuntimeError('--no-serial is the PAX memory-log witness only')
+        cmd.insert(1, '--no-serial')
+        elf=Path(args.image).resolve().parent/'kmain_console.elf'
+        symbols=subprocess.check_output(['nm',str(elf)],text=True)
+        addresses={name:int(address,16)-(1<<64) for address,kind,name in
+                   (line.split() for line in symbols.splitlines() if len(line.split())==3)
+                   if name in ('pax_serial_log_count','pax_serial_log')}
+        if len(addresses)!=2: raise RuntimeError('missing bounded serial-less log symbols')
+        (out/'capture.txt').write_text('No UART. Transcript read from PAX memory through QMP; framebuffer drawn normally.\n')
+    cmd += args.qemu
     # A blank virtual USB3 disk proves that non-keyboard SuperSpeed
     # enumeration is logged without claiming a storage driver.
     disk = out / 'superspeed.img'
@@ -73,9 +85,25 @@ def run(args):
                     raise RuntimeError(f'{command}: {result}')
 
             execute('qmp_capabilities')
+            def transcript():
+                if not args.no_serial: return serial.read_bytes() if serial.exists() else b''
+                # Before Limine enters the kernel its high-half symbols are
+                # unmapped. The bounded boot deadline still applies.
+                try:
+                    execute('memsave', {'val':addresses['pax_serial_log_count'],'size':8,'filename':str(out/'count.bin')})
+                except RuntimeError as error:
+                    (out/'capture-error.txt').write_text(str(error))
+                    return b''
+                count=int.from_bytes((out/'count.bin').read_bytes(),'little')
+                if count>65536: raise RuntimeError('serial-less transcript overflow')
+                if count==0:return b''
+                execute('memsave', {'val':addresses['pax_serial_log'],'size':count,'filename':str(out/'capture.bin')})
+                data=(out/'capture.bin').read_bytes()
+                serial.write_bytes(data)
+                return data
             sent = 0
             while time.monotonic() - start < 110:
-                text = serial.read_bytes() if serial.exists() else b''
+                text = transcript()
                 if b'USBDONE' in text:
                     break
                 if b'PANIC' in text or proc.poll() is not None:
@@ -120,9 +148,9 @@ def run(args):
             # PAX exits the probe, prints its books, then halts.
             if not args.linux_kernel:
                 until = time.monotonic() + 8
-                while b'\nhalt\r\n' not in serial.read_bytes() and time.monotonic() < until:
+                while b'\nhalt\r\n' not in transcript() and time.monotonic() < until:
                     time.sleep(.02)
-                text = serial.read_bytes()
+                text = transcript()
                 if b'\nhalt\r\n' not in text:
                     raise RuntimeError('PAX did not reach halt')
                 summary = [x for x in text.splitlines() if x.startswith(b'console: ') and b'scancodes' in x]
@@ -132,6 +160,7 @@ def run(args):
                     raise RuntimeError('SuperSpeed enumeration/logging row missing')
                 if b'xhci: keyboard usb1-' not in text or b'enumeration failed' in text or b'timeout' in text:
                     raise RuntimeError('USB enumeration did not complete cleanly')
+                if args.no_serial: execute('screendump', {'filename':str(out/'screen.ppm')})
                 execute('quit')
             proc.wait(timeout=10)
         finally:
@@ -190,4 +219,6 @@ if __name__ == '__main__':
     parser.add_argument('--linux-kernel')
     parser.add_argument('--initrd')
     parser.add_argument('--reference')
+    parser.add_argument('--no-serial', action='store_true')
+    parser.add_argument('--qemu', action='append', default=[], help='one extra QEMU argument, repeatable')
     run(parser.parse_args())
