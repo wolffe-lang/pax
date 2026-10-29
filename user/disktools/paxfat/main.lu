@@ -3,8 +3,17 @@
 //! paxfat [--offset BYTES] [--seed TEXT] mkfs IMAGE SIZE [LABEL]
 //! paxfat [--offset BYTES] mkdir IMAGE /PATH
 //! paxfat [--offset BYTES] copy IMAGE SOURCE /PATH
+//! paxfat [--offset BYTES] append IMAGE SOURCE /PATH
 //! paxfat [--offset BYTES] ls IMAGE [/PATH]
 //! paxfat [--offset BYTES] cat IMAGE /PATH
+//! px78: `append` adds SOURCE's bytes to the end of /PATH (made as `copy`
+//! makes it when absent): the last cluster's slack filled, new clusters
+//! chained after it (§4: the FAT entry of the old last cluster), the
+//! directory entry's size and first cluster rewritten (§6), the changed
+//! FAT sectors written in both FATs and FSInfo's free count and next free
+//! cluster moved by what was taken (§5), then fsync: a log grown a step
+//! at a time, each step durable. Volumes up to 2 GiB with one sector a
+//! cluster, as every command here (pax-install's boot stick: px78).
 
 use diskio
 use std.x.crypto.sha2
@@ -19,7 +28,7 @@ struct Volume {
     next: int,
 }
 
-struct Entry { name: str, alias: List[byte], cluster: int, size: int, attr: int }
+struct Entry { name: str, alias: List[byte], cluster: int, size: int, attr: int, slot: int }
 
 struct Alias { bytes: List[byte], flags: int, long_name: bool }
 
@@ -312,6 +321,7 @@ fn entries(data: List[byte]) -> List[Entry] ! {invalid} {
             cluster: diskio.le(e, 26, 2)? + diskio.le(e, 20, 2)? * 65536,
             size: diskio.le(e, 28, 4)?,
             attr: attr,
+            slot: slot,
         })
     }
     if expected != 0 || units.len != 0 { return invalid }
@@ -332,7 +342,7 @@ fn components(path: str) -> List[str] ! {invalid} {
 }
 
 fn lookup(v: Volume, path: List[str]) -> Entry ! {invalid, io, not_found} {
-    var current = Entry { name: "/", alias: List[byte](), cluster: 2, size: 0, attr: 16 }
+    var current = Entry { name: "/", alias: List[byte](), cluster: 2, size: 0, attr: 16, slot: -1 }
     for name in path {
         if current.attr & 16 == 0 { return invalid }
         let es = entries(directory(v, current.cluster)?)?
@@ -439,6 +449,12 @@ fn allocate(mut v: Volume, n: int) -> List[int] ! {full, invalid} {
     while c < v.clusters + 2 && out.len < n {
         if diskio.le(v.fat, c * 4, 4)? & 268435455 == 0 { (mut out).push(c) }
         c += 1
+    }
+    // px78: a search begun at FSInfo's hint looks below it last.
+    var low = 3
+    while low < v.next && out.len < n {
+        if diskio.le(v.fat, low * 4, 4)? & 268435455 == 0 { (mut out).push(low) }
+        low += 1
     }
     if out.len != n { return full }
     for i in 0..n {
@@ -563,6 +579,119 @@ fn add(mut v: Volume, path: str, source: str, dir: bool) -> () ! {
     fs_sync(v.fd)?
 }
 
+/// px78: SOURCE's bytes after /PATH's own (see the module's header).
+fn append(mut v: Volume, path: str, source: str) -> () ! {
+    invalid,
+    io,
+    full,
+    exists,
+    not_found,
+} {
+    let paths = components(path)?
+    if paths.len == 0 { return invalid }
+    let parent = lookup(v, paths[0..paths.len - 1])?
+    if parent.attr & 16 == 0 { return invalid }
+    var bytes = directory(v, parent.cluster)?
+    let name = paths[paths.len - 1]
+    var slot = -1
+    var cluster = 0
+    var size = 0
+    for e in entries(bytes)? {
+        let abase = oem_text(e.alias[0..8]).trim()
+        let aext = oem_text(e.alias[8..11]).trim()
+        let aname = if aext.len == 0 then abase else "{abase}.{aext}"
+        if e.name.lower() == name.lower() || aname.lower() == name.lower() {
+            if e.attr & 16 != 0 { return invalid }
+            slot = e.slot
+            cluster = e.cluster
+            size = e.size
+        }
+    }
+    if slot < 0 { return add(mut v, path, source, false)? }
+    let input = fs_open_mode(source, 5) else |_| { return io }
+    defer fs_close(input) else |_| {}
+    let src = fs_fstat_record(input) else |_| { return io }
+    let dst = fs_fstat_record(v.fd) else |_| { return io }
+    if src[0] != 0 || src[9] == dst[9] && src[10] == dst[10] { return invalid }
+    let n = src[1]
+    if n < 0 || n > 4294967295 - size { return invalid }
+    if n == 0 { return }
+    var cs = if cluster == 0 then List[int]() else chain(v, cluster)?
+    if cs.len != (size + 511) / 512 { return invalid }
+    var done = 0
+    var touched = List[int]()
+    if size % 512 != 0 {
+        let last = cs[cs.len - 1]
+        let off = size % 512
+        let k = if 512 - off < n then 512 - off else n
+        region chunk {
+            var b = diskio.exact(v.fd, offset(v, last)?, 512)?
+            diskio.paste(mut b, off, diskio.exact(input, 0, k)?)
+            diskio.write_at(v.fd, offset(v, last)?, b)?
+        }
+        done = k
+    }
+    var first = cluster
+    if done < n {
+        let fresh = allocate(mut v, (n - done + 511) / 512)?
+        for c in fresh { (mut touched).push(c) }
+        if cs.len == 0 {
+            first = fresh[0]
+        } else {
+            diskio.put(mut v.fat, cs[cs.len - 1] * 4, fresh[0], 4)
+            (mut touched).push(cs[cs.len - 1])
+        }
+        for i in 0..fresh.len {
+            region chunk {
+                var b = diskio.zeros(512)
+                let amount = if n - done < 512 then n - done else 512
+                diskio.paste(mut b, 0, diskio.exact(input, done, amount)?)
+                diskio.write_at(v.fd, offset(v, fresh[i])?, b)?
+                done += amount
+            }
+        }
+        save_part(v, touched, fresh.len)?
+    }
+    let at = slot * 32
+    diskio.put(mut bytes, at + 20, first >> 16, 2)
+    diskio.put(mut bytes, at + 26, first & 65535, 2)
+    diskio.put(mut bytes, at + 28, size + n, 4)
+    var e = bytes[at..at + 32]
+    stamp(mut e)?
+    diskio.paste(mut bytes, at, e)
+    let dcs = chain(v, parent.cluster)?
+    let k = at / 512
+    diskio.write_at(v.fd, offset(v, dcs[k])?, bytes[k * 512..(k + 1) * 512])?
+    fs_sync(v.fd)?
+}
+
+/// px78: the FAT sectors holding the entries of `touched` written to both
+/// FATs, and FSInfo's free count (when it holds one) less `taken`, its
+/// next free hint the cluster after the last one taken: `append`'s save,
+/// which never rewrites a whole FAT for a few clusters.
+fn save_part(v: Volume, touched: List[int], taken: int) -> () ! {invalid, io} {
+    var written = Map[int, bool]()
+    var highest = 0
+    for c in touched {
+        if c > highest { highest = c }
+        let sector = c * 4 / 512
+        if written[sector] else false { continue }
+        written[sector] = true
+        let piece = v.fat[sector * 512..(sector + 1) * 512]
+        diskio.write_at(v.fd, v.base + (32 + sector) * 512, piece)?
+        diskio.write_at(v.fd, v.base + (32 + v.fats + sector) * 512, piece)?
+    }
+    let fsinfo = diskio.exact(v.fd, v.base + 512, 512)?
+    var free = diskio.le(fsinfo, 488, 4)?
+    if free != 4294967295 {
+        if free < taken { return invalid }
+        free -= taken
+    }
+    let next = if highest + 1 < v.clusters + 2 then highest + 1 else 4294967295
+    diskio.write_at(v.fd, v.base + 512, info(free, next))?
+    diskio.write_at(v.fd, v.base + 7 * 512, info(free, next))?
+}
+
 fn run(args: List[str]) -> () ! {invalid, io, full, exists, not_found} {
     var i = 0
     var base: int = 0
@@ -590,11 +719,11 @@ fn run(args: List[str]) -> () ! {invalid, io, full, exists, not_found} {
             seed,
         )?
     }
-    if cmd != "mkdir" && cmd != "copy" && cmd != "ls" && cmd != "cat" { return invalid }
+    if cmd != "mkdir" && cmd != "copy" && cmd != "append" && cmd != "ls" && cmd != "cat" { return invalid }
     if (cmd == "mkdir" || cmd == "cat") && i + 1 != args.len { return invalid }
-    if cmd == "copy" && i + 2 != args.len { return invalid }
+    if (cmd == "copy" || cmd == "append") && i + 2 != args.len { return invalid }
     if cmd == "ls" && i != args.len && i + 1 != args.len { return invalid }
-    var v = open_volume(image, base, cmd == "mkdir" || cmd == "copy")?
+    var v = open_volume(image, base, cmd == "mkdir" || cmd == "copy" || cmd == "append")?
     defer fs_close(v.fd) else |_| {}
     if cmd == "mkdir" {
         if i + 1 != args.len { return invalid }
@@ -603,6 +732,15 @@ fn run(args: List[str]) -> () ! {invalid, io, full, exists, not_found} {
     if cmd == "copy" {
         if i + 2 != args.len { return invalid }
         return add(mut v, args[i + 1], args[i], false)?
+    }
+    if cmd == "append" {
+        if i + 2 != args.len { return invalid }
+        // FSInfo's next-free hint starts the search (§5.2), past the
+        // clusters a stick's payload already holds.
+        let fsinfo = diskio.exact(v.fd, v.base + 512, 512)?
+        let hint = diskio.le(fsinfo, 492, 4)?
+        if hint >= 3 && hint < v.clusters + 2 { v.next = hint }
+        return append(mut v, args[i + 1], args[i])?
     }
     if i != args.len && i + 1 != args.len { return invalid }
     let entry = lookup(v, components(if i == args.len then "/" else args[i])?)?
