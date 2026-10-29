@@ -447,3 +447,27 @@ user/console/distribution.keys  census mpx6-install
 user/elf/stack.c                mpx3-loader
 user/console/yew-features.keys   mpx5-yew
 tests/distribution-usb          mpx3-console census mpx6-install
+
+# px76: the firmware's machine. kernel/acpi and kernel/clock are read by
+# every kernel that starts the tick (kernel/timer calibrates the local
+# APIC against the clock, which reads ACPI first), so a change can move
+# every suite: ALL, as kernel/timer. kernel/power is the end of every
+# session that reboots or powers off (kernel/user's `end_reset` and
+# `the_end`): the disk suites whose sessions end in reboot(2), the
+# installer's, and mpx6-firmware's F3. kernel/msi is the message an MSI
+# carries, used only where a function is put on MSI: kernel/xhci on a
+# controller with the capability (mpx6-firmware's legs; mpx6-usb's
+# machines when their QEMU's qemu-xhci has it, 11.1's). The modules the
+# firmware suite runs beyond the map's earlier rules (pci, xhci, screen,
+# fb) are its as well; tests/mpx6-metal* are its scripts (not suites of
+# their own) and kernel/kmain_metal* its kernels.
+kernel/acpi/*                  ALL
+kernel/clock/*                 ALL
+kernel/power/*                 mpx6-firmware mpx6-root mpx6-install mpx6-ext2 mpx6-part mpx6-disktools mpx6-fsck
+kernel/msi/*                   mpx6-firmware mpx6-usb
+kernel/pci/*                   mpx6-firmware
+kernel/xhci/*                  mpx6-firmware
+kernel/screen/*                mpx6-firmware
+kernel/fb/*                    mpx6-firmware
+tests/mpx6-metal*              mpx6-firmware
+kernel/kmain_metal*            mpx6-firmware
