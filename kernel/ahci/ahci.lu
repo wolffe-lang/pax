@@ -1,0 +1,515 @@
+//! AHCI 1.3.1, §§3.1,3.3,4.2,6.2,10.1–10.6; ACS-4 rev18
+//! §§7.11,7.13,7.21,7.57. Clean-room: no driver or emulator source.
+//! One slot per SATA disk, non-NCQ DMA EXT, synchronous polled completion.
+//! 32 page PRDT entries, DBC = bytes - 1, at most 128 KiB per command.
+//! Commands never write a disk except a block request for WRITE or FLUSH.
+//! IDENTIFY is read-only. No automatic mount, TRIM, standby or sanitize.
+//! R-px75b-2: §10.1.2 makes HR optional; idle each port instead. A test
+//! command-line flag ahci-reset exercises the optional whole-HBA reset.
+//! All entry points run with IF clear on the kernel's single CPU.
+use ahci_clock
+use boot_info
+use frames
+use log
+use paging
+use pci
+use serial
+use sync
+
+extern "c" fn pax_tree_zero(dst: u64, n: u64)
+const PAGE: u64 = 4096
+pub const UP: u64 = 0
+pub const ABSENT: u64 = 1
+pub const REFUSED: u64 = 2
+const MAXDISKS: u64 = 4
+const MAXCTLS: u64 = 4
+// Root frame: controller states at 0..3, disk states at 8..11.
+var root: u64 = 0
+var nctl: u64 = 0
+var ndisk: u64 = 0
+const C_PCI: u64 = 0
+const C_REG: u64 = 1
+const C_CAP: u64 = 2
+const C_PI: u64 = 3
+const C_UP: u64 = 4
+const C_ID: u64 = 5
+const P_CTL: u64 = 0
+const P_REG: u64 = 1
+const P_NO: u64 = 2
+const P_UP: u64 = 3
+const P_CL: u64 = 4
+const P_RF: u64 = 5
+const P_CT: u64 = 6
+const P_ID: u64 = 7
+const P_SIZE: u64 = 8
+const P_PHYSICAL: u64 = 9
+const P_ROT: u64 = 10
+const P_FLUSH: u64 = 11
+const P_REQ: u64 = 12
+const P_ERR: u64 = 13
+const P_BYTES: u64 = 14
+const P_NAME: u64 = 15
+const P_SN: u64 = 20
+const P_MN: u64 = 23
+const P_FW: u64 = 28
+const P_BOUNCE: u64 = 32 // 32 driver-owned low DMA pages for !S64A
+const CAP: u64 = 0
+const GHC: u64 = 4
+const IS: u64 = 8
+const PI: u64 = 12
+const CAP2: u64 = 0x24
+const BOHC: u64 = 0x28
+const CLB: u64 = 0
+const FB: u64 = 8
+const PIS: u64 = 0x10
+const IE: u64 = 0x14
+const CMD: u64 = 0x18
+const TFD: u64 = 0x20
+const SIG: u64 = 0x24
+const SSTS: u64 = 0x28
+const SCTL: u64 = 0x2c
+const SERR: u64 = 0x30
+const CI: u64 = 0x38
+const ERRORS: u64 = 0x7d000000 // TFES, HBFS, HBDS, IFS, OFS
+const LOST: u64 = 0x10000
+const DOWN: u64 = 0x10001
+const BAD: u64 = 0x10002
+
+fn word(a: u64, i: u64) -> u64 {
+    // # Safety: a frame or request owned by this driver or kernel/block.
+    unsafe { ((a + i * 8) as *u64).read_volatile() }
+}
+fn put(a: u64, i: u64, v: u64) {
+    // # Safety: as word, aligned within the caller-owned frame/record.
+    unsafe { ((a + i * 8) as *u64).write_volatile(v) }
+}
+fn r32(a: u64) -> u64 {
+    // # Safety: a mapped aligned register or owned DMA structure.
+    (unsafe { (a as *u32).read_volatile() }) as u64
+}
+fn w32(a: u64, v: u64) {
+    // # Safety: as r32, the low 32 bits of v.
+    unsafe { (a as *u32).write_volatile((v & 0xffffffff) as u32) }
+}
+fn byte(a: u64) -> u64 {
+    // # Safety: a byte in an owned frame.
+    (unsafe { (a as *u8).read_volatile() }) as u64
+}
+fn w8(a: u64, v: u64) {
+    // # Safety: a byte in an owned frame, v masked.
+    unsafe { (a as *u8).write_volatile((v & 255) as u8) }
+}
+fn zero(a: u64, n: u64) {
+    // # Safety: the caller provides an owned writable range.
+    unsafe { pax_tree_zero(a, n) }
+}
+fn table() -> u64 { unsafe { root } }
+pub fn count_disks() -> u64 { unsafe { ndisk } }
+fn controllers() -> u64 { unsafe { nctl } }
+fn disk(u: u64) -> u64 { if u < count_disks() { word(table(), 8 + u) } else { 0 } }
+fn alloc() -> u64 {
+    let f = frames.alloc() else 0
+    if f != 0 { zero(f + frames.hhdm(), PAGE) }
+    f
+}
+fn dma(c: u64) -> u64 {
+    let f = alloc()
+    if f >= 0x100000000 && word(c, C_CAP) & (1 << 31) == 0 {
+        frames.free(f)
+        return 0
+    }
+    f
+}
+fn rr(p: u64, off: u64) -> u64 { r32(word(p, P_REG) + off) }
+fn wr(p: u64, off: u64, v: u64) { w32(word(p, P_REG) + off, v) }
+fn addr(p: u64, off: u64, pa: u64) {
+    wr(p, off, pa)
+    // Upper registers are reserved on a 32-bit-only HBA (§3.3).
+    if word(word(p, P_CTL), C_CAP) & (1 << 31) != 0 { wr(p, off + 4, pa >> 32) }
+}
+fn wait_bits(a: u64, mask: u64, value: u64, us: u64) -> bool {
+    let end = ahci_clock.deadline_us(us)
+    while r32(a) & mask != value {
+        if ahci_clock.expired(end) { return false }
+        sync.relax()
+    }
+    true
+}
+fn tag(c: u64) {
+    let i = word(c, C_PCI)
+    let b = pci.bdf(i)
+    log.put("ahci")
+    log.dec(word(c, C_ID) as int)
+    log.put(": ")
+    log.hex_n(pci.vendor(i), 4)
+    log.put(":")
+    log.hex_n(pci.device(i), 4)
+    log.put(" at ")
+    log.hex_n(b >> 16, 2)
+    log.put(":")
+    log.hex_n((b >> 8) & 31, 2)
+    log.put(".")
+    log.hex_n(b & 7, 1)
+}
+fn port_tag(p: u64) {
+    tag(word(p, P_CTL))
+    log.put(" port ")
+    log.dec(word(p, P_NO) as int)
+}
+fn refused(p: u64, why: str) -> bool {
+    port_tag(p)
+    log.put(": refused: ")
+    log.put(why)
+    log.end()
+    false
+}
+// Kept local per coordination: px76 owns the future PCI helper.
+fn interrupts_off(b: u64) {
+    var cap = pci.next_cap(b, 0)
+    var guard: u64 = 0
+    while cap != 0 && guard < 48 {
+        let id = pci.read8(b, cap)
+        let d = pci.read32(b, cap)
+        if id == 5 { pci.write32(b, cap, d & !(1 << 16)) }
+        if id == 0x11 { pci.write32(b, cap, d & !(1 << 31)) }
+        cap = pci.next_cap(b, cap)
+        guard += 1
+    }
+}
+fn idle(p: u64) -> bool {
+    // §10.1.2: ST then CR, FRE only after CR clear; 500 ms each.
+    wr(p, CMD, rr(p, CMD) & !1)
+    if !wait_bits(word(p, P_REG) + CMD, 1 << 15, 0, 500000) { return refused(p, "command engine stop timeout (CR)") }
+    wr(p, CMD, rr(p, CMD) & !(1 << 4))
+    if !wait_bits(word(p, P_REG) + CMD, 1 << 14, 0, 500000) { return refused(p, "FIS engine stop timeout (FR)") }
+    true
+}
+fn disable(c: u64) {
+    // A stuck DMA engine must not retain access to a caller's recycled pages.
+    // Disabling PCI bus mastering fences the whole controller; all its units
+    // are marked down. DMA structures stay allocated, never repurposed.
+    let b = pci.bdf(word(c, C_PCI))
+    pci.set_command(b, pci.command(b) & !pci.CMD_MASTER)
+    let _readback = pci.command(b)
+    put(c, C_UP, 0)
+}
+fn stop_error(p: u64) {
+    if !idle(p) { disable(word(p, P_CTL)); return }
+    wr(p, SERR, 0xffffffff)
+    wr(p, PIS, 0xffffffff)
+    // Clear ST drains CI (§3.3.7). A device still busy needs a later reset;
+    // never silently resume it or submit a command on an uncertain link.
+    if rr(p, TFD) & 0x88 != 0 { put(p, P_UP, 0); return }
+    wr(p, CMD, rr(p, CMD) | 0x10)
+    wr(p, CMD, rr(p, CMD) | 1)
+}
+fn idword(p: u64, n: u64) -> u64 {
+    let a = word(p, P_ID) + frames.hhdm() + n * 2
+    byte(a) | byte(a + 1) << 8
+}
+fn id_string(p: u64, dest: u64, source: u64, bytes: u64) {
+    var k: u64 = 0
+    while k < bytes {
+        let v = byte(word(p, P_ID) + frames.hhdm() + source * 2 + (k ^ 1))
+        // Sanitize control characters for both sysfs and the photographed log.
+        w8(p + dest * 8 + k, if v >= 32 && v <= 126 { v } else { 63 })
+        k += 1
+    }
+}
+fn string_len(p: u64, w: u64, n: u64) -> u64 {
+    var k = n
+    while k > 0 && byte(p + w * 8 + k - 1) == 32 { k -= 1 }
+    k
+}
+fn print_string(p: u64, w: u64, n: u64) {
+    let len = string_len(p, w, n)
+    var k: u64 = 0
+    while k < len { serial.put(byte(p + w * 8 + k) as u8); k += 1 }
+}
+fn error(p: u64, opcode: u64, status: u64, pis: u64) {
+    put(p, P_ERR, word(p, P_ERR) + 1)
+    if word(p, P_ERR) > 8 { return }
+    port_tag(p)
+    log.put(": ")
+    log.put(if opcode == 0x25 { "READ DMA EXT" } else if opcode == 0x35 { "WRITE DMA EXT" } else if opcode == 0xea { "FLUSH CACHE EXT" } else { "IDENTIFY DEVICE" })
+    log.put(" failed: ")
+    if status == LOST { log.put("command timeout") }
+    else {
+        if pis & (1 << 30) != 0 { log.put("task-file error (TFES) ") }
+        if pis & (1 << 29) != 0 { log.put("host bus fatal error ") }
+        if pis & (1 << 28) != 0 { log.put("host bus data error ") }
+        if pis & (1 << 27) != 0 { log.put("interface fatal error ") }
+        if pis & (1 << 24) != 0 { log.put("overflow ") }
+        if status & 0x20 != 0 { log.put("device fault ") }
+        if status & 0x4000 != 0 { log.put("uncorrectable data (UNC) ") }
+        if status & 0x1000 != 0 { log.put("ID not found (IDNF) ") }
+        if status & 0x400 != 0 { log.put("command aborted (ABRT) ") }
+        log.put("PxTFD="); log.hex(status)
+    }
+    log.put("; -EIO")
+    log.end()
+}
+// Issue one command. For a block request: list is a page list, or pa a
+// single frame's physical subrange. IDENTIFY uses its own 512-byte buffer.
+fn command(p: u64, opcode: u64, lba: u64, sectors: u64, pa: u64, list: u64) -> u64 {
+    let c = word(p, P_CTL)
+    if word(c, C_UP) == 0 { return DOWN }
+    let bytes = if opcode == 0xec { 512 } else if opcode == 0xea { 0 } else { sectors * 512 }
+    if bytes > 131072 || lba > 0xffffffffffff || (list == 0 && bytes > PAGE - pa % PAGE) { return BAD }
+    if !wait_bits(word(p, P_REG) + TFD, 0x88, 0, 30000000) {
+        error(p, opcode, LOST, rr(p, PIS)); stop_error(p); return LOST
+    }
+    let ct = word(p, P_CT) + frames.hhdm()
+    let cl = word(p, P_CL) + frames.hhdm()
+    zero(ct, 128 + 32 * 16)
+    zero(cl, 32)
+    w8(ct, 0x27); w8(ct + 1, 0x80); w8(ct + 2, opcode)
+    w8(ct + 4, lba); w8(ct + 5, lba >> 8); w8(ct + 6, lba >> 16)
+    w8(ct + 7, 0x40)
+    w8(ct + 8, lba >> 24); w8(ct + 9, lba >> 32); w8(ct + 10, lba >> 40)
+    w8(ct + 12, sectors); w8(ct + 13, sectors >> 8)
+    var left = bytes
+    var k: u64 = 0
+    while left > 0 {
+        let original = if list == 0 { pa } else { word(list, k) }
+        let n = if left < PAGE { left } else { PAGE }
+        if original % 2 != 0 || n > PAGE - original % PAGE { return BAD }
+        let bounce = word(c, C_CAP) & (1 << 31) == 0 && opcode != 0xec
+        let physical = if bounce { word(p, P_BOUNCE + k) } else { original }
+        if physical == 0 || (physical >= 0x100000000 && word(c, C_CAP) & (1 << 31) == 0) { return BAD }
+        if bounce && opcode == 0x35 {
+            var j: u64 = 0
+            while j < n { w8(physical + frames.hhdm() + j, byte(original + frames.hhdm() + j)); j += 1 }
+        }
+        let prd = ct + 128 + k * 16
+        w32(prd, physical); w32(prd + 4, physical >> 32)
+        w32(prd + 12, n - 1) // AHCI §4.2.3.3: DBC is zero-based.
+        left -= n; k += 1
+    }
+    w32(cl, 5 | (if opcode == 0x35 { 1 << 6 } else { 0 }) | k << 16)
+    w32(cl + 8, word(p, P_CT)); w32(cl + 12, word(p, P_CT) >> 32)
+    wr(p, SERR, 0xffffffff); wr(p, PIS, 0xffffffff)
+    wr(p, CI, 1)
+    // ACS-4 §7.11: FLUSH may exceed 30 s. Bound it at 120 s, other
+    // commands at 30 s. No CPU-speed-dependent iteration deadlines.
+    let deadline = ahci_clock.deadline_us(if opcode == 0xea { 120000000 } else { 30000000 })
+    var status: u64 = 0
+    while true {
+        let pis = rr(p, PIS)
+        let tfd = rr(p, TFD)
+        if pis & ERRORS != 0 || tfd & 0x21 != 0 { status = if tfd == 0 { BAD } else { tfd }; break }
+        if rr(p, CI) & 1 == 0 { break }
+        if ahci_clock.expired(deadline) { status = LOST; break }
+        sync.relax()
+    }
+    if status != 0 {
+        error(p, opcode, status, rr(p, PIS)); stop_error(p); return status
+    }
+    // A short DMA is not success even if the device cleared CI.
+    if r32(cl + 4) != bytes { error(p, opcode, BAD, rr(p, PIS)); return BAD }
+    if word(c, C_CAP) & (1 << 31) == 0 && opcode == 0x25 {
+        left = bytes; k = 0
+        while left > 0 {
+            let original = if list == 0 { pa } else { word(list, k) }
+            let n = if left < PAGE { left } else { PAGE }
+            let source = word(p, P_BOUNCE + k) + frames.hhdm()
+            var j: u64 = 0
+            while j < n { w8(original + frames.hhdm() + j, byte(source + j)); j += 1 }
+            left -= n; k += 1
+        }
+    }
+    put(p, P_BYTES, word(p, P_BYTES) + bytes)
+    0
+}
+fn identify(p: u64) -> bool {
+    if command(p, 0xec, 0, 0, word(p, P_ID), 0) != 0 { return false }
+    id_string(p, P_SN, 10, 20); id_string(p, P_MN, 27, 40); id_string(p, P_FW, 23, 8)
+    let w83 = idword(p, 83)
+    if w83 & 0xc000 != 0x4000 || w83 & (1 << 10) == 0 { return refused(p, "LBA48 not supported") }
+    let size = idword(p, 100) | idword(p, 101) << 16 | idword(p, 102) << 32 | idword(p, 103) << 48
+    if size == 0 || size > 0xffffffffffff { return refused(p, "invalid LBA48 capacity") }
+    put(p, P_SIZE, size)
+    var logical: u64 = 512
+    var physical: u64 = 512
+    let w106 = idword(p, 106)
+    if w106 & 0xc000 == 0x4000 {
+        if w106 & 0x1000 != 0 { logical = (idword(p, 117) | idword(p, 118) << 16) * 2 }
+        physical = logical
+        if w106 & 0x2000 != 0 { physical = logical << (w106 & 15) }
+    }
+    put(p, P_PHYSICAL, physical)
+    if logical != 512 {
+        port_tag(p); log.put(": refused: logical sector size "); log.dec(logical as int); log.put(" bytes (only 512 supported)"); log.end()
+        return false
+    }
+    if w83 & (1 << 13) == 0 { return refused(p, "FLUSH CACHE EXT not supported") }
+    put(p, P_FLUSH, 1)
+    put(p, P_ROT, if idword(p, 217) == 1 { 0 } else { 1 })
+    true
+}
+fn port_start(c: u64, port: u64) -> u64 {
+    let f = alloc()
+    if f == 0 { return 0 }
+    let p = f + frames.hhdm()
+    put(p, P_CTL, c); put(p, P_REG, word(c, C_REG) + 0x100 + port * 0x80); put(p, P_NO, port)
+    wr(p, IE, 0)
+    if !idle(p) { return 0 }
+    let cl = dma(c); let rf = dma(c); let ct = dma(c); let id = dma(c)
+    if cl == 0 || rf == 0 || ct == 0 || id == 0 { let _r = refused(p, "no addressable DMA frames"); return 0 }
+    put(p, P_CL, cl); put(p, P_RF, rf); put(p, P_CT, ct); put(p, P_ID, id)
+    addr(p, CLB, cl); addr(p, FB, rf)
+    wr(p, CMD, rr(p, CMD) | 0x10)
+    // POD and SUD only while idle (§10.3); preserve all other policy bits.
+    var cmd = rr(p, CMD) | (1 << 2)
+    if word(c, C_CAP) & (1 << 27) != 0 { cmd |= 2 }
+    wr(p, CMD, cmd)
+    if rr(p, SSTS) & 0xf0f != 0x103 {
+        // §10.4.2: assert DET=1 at least 1 ms, then deassert it.
+        let sctl = rr(p, SCTL)
+        wr(p, SCTL, (sctl & !15) | 1)
+        ahci_clock.wait_us(1000)
+        wr(p, SCTL, sctl & !15)
+        ahci_clock.wait_us(10000) // SATA presence debounce before declaring an empty port.
+        if rr(p, SSTS) & 15 == 0 { let _s = idle(p); return 0 }
+        if !wait_bits(word(p, P_REG) + SSTS, 0xf0f, 0x103, 1000000) { return 0 }
+    }
+    wr(p, SERR, 0xffffffff)
+    if !wait_bits(word(p, P_REG) + TFD, 0x88, 0, 30000000) { let _r = refused(p, "device ready timeout (BSY/DRQ)"); return 0 }
+    let signature = rr(p, SIG)
+    if signature != 0x101 {
+        port_tag(p)
+        log.put(if signature == 0xeb140101 { ": ATAPI skipped" } else if signature == 0x96690101 { ": port multiplier skipped" } else { ": unsupported signature skipped" })
+        log.put(" ("); log.hex(signature); log.put(")"); log.end()
+        let _stopped = idle(p)
+        return 0
+    }
+    wr(p, PIS, 0xffffffff); w32(word(c, C_REG) + IS, 1 << port)
+    wr(p, CMD, rr(p, CMD) | 1)
+    if !identify(p) { let _stopped = idle(p); return 0 }
+    if word(c, C_CAP) & (1 << 31) == 0 {
+        var k: u64 = 0
+        while k < 32 {
+            let b = dma(c)
+            if b == 0 { let _r = refused(p, "no low bounce frames for 32-bit DMA"); let _s = idle(p); return 0 }
+            put(p, P_BOUNCE + k, b); k += 1
+        }
+    }
+    put(p, P_UP, 1)
+    p
+}
+fn controller(pml4: u64, i: u64, number: u64) -> u64 {
+    let f = alloc()
+    if f == 0 { return 0 }
+    let c = f + frames.hhdm()
+    put(c, C_PCI, i); put(c, C_ID, number)
+    let b = pci.bdf(i)
+    let (kind, bar) = pci.bar(b, 5)
+    if kind != pci.BAR_MEM32 || bar == 0 { tag(c); log.put(": refused: BAR5 is not 32-bit memory"); log.end(); return 0 }
+    pci.set_command(b, pci.command(b) | pci.CMD_MEMORY | pci.CMD_MASTER | pci.CMD_INTX_OFF)
+    interrupts_off(b)
+    let window: u64 = 0xffffb00000100000 + (28 + number) * 0x100000
+    // ABAR can be only 1 KiB aligned (§3.1): map its containing pages.
+    var off: u64 = 0
+    while off < 0x2000 {
+        let result = paging.map(pml4, window + off, (bar & !4095) + off, paging.NX | paging.RW | 24) else 9
+        if result == 9 { return 0 }
+        off += PAGE
+    }
+    let regs = window + bar % PAGE
+    put(c, C_REG, regs); put(c, C_CAP, r32(regs + CAP)); put(c, C_PI, r32(regs + PI))
+    if r32(regs + CAP2) & 1 != 0 {
+        // §10.6.3: request ownership, allow 25ms for BB; if busy allow
+        // at least 2s. Refuse rather than reset hardware firmware still owns.
+        w32(regs + BOHC, (r32(regs + BOHC) & !8) | 2)
+        ahci_clock.wait_us(25000)
+        if r32(regs + BOHC) & 0x11 != 0 && !wait_bits(regs + BOHC, 0x11, 0, 2000000) {
+            tag(c); log.put(": refused: BIOS/OS handoff timeout (BOS/BB)"); log.end(); return 0
+        }
+    }
+    w32(regs + GHC, (r32(regs + GHC) | 0x80000000) & !2)
+    // Optional reset is a test-only kernel command-line policy switch.
+    if boot_info.cmdline_has("ahci-reset") {
+        w32(regs + GHC, 0x80000001)
+        if !wait_bits(regs + GHC, 1, 0, 1000000) { tag(c); log.put(": refused: HBA reset timeout"); log.end(); return 0 }
+        w32(regs + GHC, 0x80000000)
+    }
+    put(c, C_UP, 1)
+    tag(c)
+    log.put(", CAP.NP="); log.dec((word(c, C_CAP) & 31) as int)
+    log.put(" CAP.NCS="); log.dec(((word(c, C_CAP) >> 8) & 31) as int)
+    log.put(" S64A="); log.dec(((word(c, C_CAP) >> 31) & 1) as int)
+    log.put(" PI="); log.hex(word(c, C_PI))
+    log.put(" BOH="); log.dec((r32(regs + CAP2) & 1) as int)
+    log.put("; one slot, polled"); log.end()
+    c
+}
+pub fn start(pml4: u64, room: u64) -> u64 {
+    if table() != 0 { return if count_disks() != 0 { UP } else { ABSENT } }
+    let f = alloc()
+    if f == 0 { return REFUSED }
+    unsafe { root = f + frames.hhdm() }
+    var i = pci.find_class(0x010601, 0)
+    while i != pci.MAX && controllers() < MAXCTLS {
+        let number = controllers()
+        let c = controller(pml4, i, number)
+        put(table(), number, c)
+        unsafe { nctl += 1 }
+        if c != 0 {
+            var port: u64 = 0
+            while port < 32 {
+                if word(c, C_PI) & (1 << port) != 0 {
+                    let p = port_start(c, port)
+                    if p != 0 {
+                        let u = count_disks()
+                        if u < room && u < MAXDISKS {
+                            put(p, P_NAME, u); put(table(), 8 + u, p)
+                            unsafe { ndisk += 1 }
+                        } else { let _r = refused(p, "block disk table full"); let _s = idle(p) }
+                    }
+                }
+                port += 1
+            }
+        }
+        i = pci.find_class(0x010601, i + 1)
+    }
+    if count_disks() != 0 { UP } else if controllers() != 0 { REFUSED } else { ABSENT }
+}
+pub fn sectors(u: u64) -> u64 { let p = disk(u); if p == 0 { 0 } else { word(p, P_SIZE) } }
+pub fn physical_size(u: u64) -> u64 { let p = disk(u); if p == 0 { 512 } else { word(p, P_PHYSICAL) } }
+pub fn rotational(u: u64) -> u64 { let p = disk(u); if p == 0 { 1 } else { word(p, P_ROT) } }
+pub fn identity_len(u: u64, serial_number: bool) -> u64 {
+    let p = disk(u)
+    if p == 0 { 0 } else { string_len(p, if serial_number { P_SN } else { P_MN }, if serial_number { 20 } else { 40 }) }
+}
+pub fn identity_byte(u: u64, serial_number: bool, i: u64) -> u64 {
+    let p = disk(u)
+    if p == 0 || i >= identity_len(u, serial_number) { 0 } else { byte(p + (if serial_number { P_SN } else { P_MN }) * 8 + i) }
+}
+pub fn submit(u: u64, r: u64) {
+    let p = disk(u)
+    var result = DOWN
+    if p != 0 && word(p, P_UP) == 1 {
+        let op = word(r, 0)
+        let lba = word(r, 1)
+        let n = word(r, 2)
+        if op == 4 || ((op == 0 || op == 1) && n > 0 && n <= 256 && lba < word(p, P_SIZE) && n <= word(p, P_SIZE) - lba) {
+            put(p, P_REQ, word(p, P_REQ) + 1)
+            result = command(p, if op == 0 { 0x25 } else if op == 1 { 0x35 } else { 0xea }, lba, n, word(r, 3), word(r, 6))
+        } else { result = BAD }
+    }
+    put(r, 4, result); put(r, 5, 2)
+}
+pub fn wait(u: u64, r: u64) -> u64 { word(r, 4) }
+pub fn report(u: u64) {
+    let p = disk(u)
+    if p == 0 { return }
+    port_tag(p)
+    log.put(": sd"); serial.put((97 + u) as u8)
+    log.put(" model \""); print_string(p, P_MN, 40)
+    log.put("\" serial \""); print_string(p, P_SN, 20)
+    log.put("\" firmware \""); print_string(p, P_FW, 8)
+    log.put("\"; "); log.dec((word(p, P_SIZE) * 512) as int)
+    log.put(" bytes ("); log.dec((word(p, P_SIZE) * 512 / 1000000000) as int)
+    log.put(" GB); logical 512 physical "); log.dec(word(p, P_PHYSICAL) as int)
+    log.put(" bytes"); log.end()
+}
