@@ -280,6 +280,25 @@ expect("P2 the users suite's script reaches its job and the AHCI-root job, which
        plan(["tests/mpx5-users"], **pr), "pr", ["mpx5-users", "mpx5-users-ahci"])
 expect("P2 AHCI fixtures and recordings reach their gate",
        plan(["tests/mpx6-ahci.d/extended", "tests/mpx6-ahci.d/linux/session.log"], **pr), "pr", ["mpx6-ahci"])
+# px76: the firmware's machine. ACPI and the clock are read by every kernel
+# that starts the tick, so they reach every suite on the pr leg, as the
+# core does; the MSI message only the suites whose xHCI can be on MSI; the
+# power module the suites whose sessions reboot and the firmware suite;
+# the metal scripts and kernels the firmware suite alone; its typing
+# helper the two jobs that run it in the all tier.
+expect("P2 kernel/acpi and kernel/clock reach every suite, on the pr leg (px76)",
+       plan(["kernel/acpi/acpi.lu", "kernel/clock/clock.lu"], **pr), "pr", SUITES)
+expect("P2 kernel/msi reaches the firmware and USB suites alone (px76)",
+       plan(["kernel/msi/msi.lu"], **pr), "pr", ["mpx6-usb", "mpx6-firmware"])
+expect("P2 kernel/power reaches the suites whose sessions reboot and the firmware suite (px76)",
+       plan(["kernel/power/power.lu"], **pr), "pr", ["mpx6-ext2", "mpx6-part", "mpx6-root", "mpx6-disktools", "mpx6-install", "mpx6-fsck", "mpx6-firmware"])
+expect("P2 the metal scripts and kernels are the firmware suite's alone (px76)",
+       plan(["tests/mpx6-metal", "tests/mpx6-metal-power", "tests/mpx6-metal-serial", "tests/mpx6-metal.d/panic-screen.py",
+             "kernel/kmain_metal.lu", "kernel/kmain_metal_msi.lu", "tests/mpx6-firmware"], **pr), "pr", ["mpx6-firmware"])
+expect("P2 the MSI and INTx typing helper is the firmware suite's and the two typing jobs' (px76)",
+       plan(["tests/mpx6-firmware.d/typing-irq"], **pr), "pr", ["mpx3-console", "mpx3-shell", "mpx6-firmware"])
+expect("P2 the USB session driver reaches the USB and firmware suites (px74, px76)",
+       plan(["tools/usb-session"], **pr), "pr", ["mpx6-usb", "mpx6-firmware"])
 expect("P2 kernel/files and kernel/user reach mpx6-nodes beside the user suites (px79)",
        plan(["kernel/files/files.lu", "kernel/user/user.lu"], **pr), "pr", has=["mpx6-nodes", "mpx3-tree", "mpx5-users"], lacks=["mpx6-blk", "mpx2-heap"])
 expect("P2 the GPT writer and the disk tools reach the file-system suites, through tools/mkdisk (px66, px67; px79: mpx6-nodes, which makes its disks with both; px69: mpx6-disktools; px75: mpx6-nvme likewise)",
