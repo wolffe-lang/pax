@@ -140,6 +140,25 @@ pax_big:
         ret
         .size pax_big, . - pax_big
 
+        /* px78: pax_call5(target, a, b, c, d, e): the routine at `target`
+           called with the next five arguments (x86-64 psABI §3.2.3: each
+           moves down one register; a tail jump leaves the stack as the
+           caller's call left it, so the callee returns to the caller).
+           For a module that cannot import the one it calls (wolf refuses
+           an import cycle): kernel/usb_storage reaching kernel/xhci's
+           exports. */
+        .globl pax_call5
+        .type pax_call5, @function
+pax_call5:
+        movq    %rdi, %rax
+        movq    %rsi, %rdi
+        movq    %rdx, %rsi
+        movq    %rcx, %rdx
+        movq    %r8, %rcx
+        movq    %r9, %r8
+        jmp     *%rax
+        .size pax_call5, . - pax_call5
+
         /* px76: bounded diagnostic transcript when no UART exists.
            QEMU qualification reads these bytes through its monitor. */
         .section .bss
