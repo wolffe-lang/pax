@@ -69,6 +69,31 @@ with final conclusion `cancelled`. Last green all-tier run 40208110580 took
 **2 h 10 min 23 s**, 15:41:12Z–17:51:35Z on 2026-10-25. Neither is a prediction
 of the post-change workflow's total wall time, which includes queueing.
 
+## The AHCI-root job (px75b, R-px75b-6)
+
+`mpx5-users-ahci` builds mpx5-users' native BIOS images (`tests/mpx5-users
+--only build`) and boots all 25 again with `/` on AHCI. It is a job of its
+own because the users job could not hold a third root leg: its all-tier
+floor is 8920 s against 12600 s, and another 3436 s would need 289 minutes
+at the 40% rule; in the full tier it already holds its native BIOS
+sessions (1678 s in run 40620130831), the virtio leg (up to 3422 s) and
+the NVMe leg (28 to 53 minutes, px75), about 8460 s, and the AHCI leg
+would put it near 11900 s, past the 9000 s that 40% below 210 minutes
+allows. Its floor is the larger of
+its own CI leg and the users job's virtio root floor scaled by the two legs'
+ratio, measured side by side on one host under TCG (`ahci-root.json`):
+
+| job | measured sizing floor | allowance included | bound | margin above floor |
+|---|---:|---|---:|---:|
+| users-ahci | 3666 s | build 50 + leg 3436 (CI; 3422 x 1733/1728 = 3432 scaled) + overhead 180 | 5400 s | 1734 s |
+
+One CI observation so far (run 40818748481, a plant's `tier pr` run:
+3510 s whole, the leg 3436 s); the next budget lane adds the rest. The
+workflow now has 58 suite jobs: px75b adds `mpx6-ahci` and this one, so
+one more of the org's 20 slots is held for about an hour in each full and
+all run, and in a pull request that changes kernel/ahci, its clock, the
+users suite's script or the root-disk tools.
+
 ## Capacity and follow-up
 
 210 min is **3.5 hours**, below the hosted **6-hour per-job ceiling**. The
