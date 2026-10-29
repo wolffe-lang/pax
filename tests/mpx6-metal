@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # px76: every machine variant must boot and pass the independent tick rate row.
 set -euo pipefail
+flags=()
+[ "${PAX_METAL_TIER:-native}" != release ] || flags=(--release)
 . "$(dirname "$0")/../tools/lib.sh"
 work=$PAX_BUILD/mpx6-metal
 mkdir -p "$work"
 "$PAX_ROOT/tools/fetch-limine"
-"$PAX_ROOT/tools/build-kernel" --src "$PAX_ROOT/kernel/kmain_metal.lu" "$work"
+"$PAX_ROOT/tools/build-kernel" "${flags[@]}" --src "$PAX_ROOT/kernel/kmain_metal.lu" "$work"
 "$PAX_ROOT/tools/mkimage" "$work/kmain_metal.elf" "$work/check.iso"
-for fw in bios uefi; do
+for fw in ${PAX_METAL_FIRMWARE:-bios uefi}; do
     for leg in hpet pm pitless pm-pitless ram8; do
         args=()
         source=HPET

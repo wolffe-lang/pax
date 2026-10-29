@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
+flags=()
+[ "${PAX_METAL_TIER:-native}" != release ] || flags=(--release)
 . "$(dirname "$0")/../tools/lib.sh"
 w=$PAX_BUILD/mpx6-metal-power
 mkdir -p "$w"
 "$PAX_ROOT/tools/fetch-limine"
-"$PAX_ROOT/tools/build-kernel" --src "$PAX_ROOT/kernel/kmain_metal_power.lu" "$w"
+"$PAX_ROOT/tools/build-kernel" "${flags[@]}" --src "$PAX_ROOT/kernel/kmain_metal_power.lu" "$w"
 for action in reboot poweroff; do
     cp "$PAX_ROOT/boot/limine.conf" "$w/$action.conf"
     [ "$action" != poweroff ] || printf '\n    cmdline: metal_poweroff\n' >> "$w/$action.conf"
     "$PAX_ROOT/tools/mkimage" --conf "$w/$action.conf" "$w/kmain_metal_power.elf" "$w/$action.iso"
-    for fw in bios uefi; do
+    for fw in ${PAX_METAL_FIRMWARE:-bios uefi}; do
         rc=0
         "$PAX_ROOT/tools/qemu-run" --timeout 15 --firmware "$fw" --serial "$w/$action-$fw.log" "$w/$action.iso" || rc=$?
         cat "$w/$action-$fw.log"
