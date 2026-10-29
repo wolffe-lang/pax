@@ -137,4 +137,15 @@ pax_big:
         ret
         .size pax_big, . - pax_big
 
+        /* px76: bounded diagnostic transcript when no UART exists.
+           QEMU qualification reads these bytes through its monitor. */
+        .section .bss
+        .p2align 3
+        .globl pax_serial_log_count
+pax_serial_log_count:
+        .zero 8
+        .globl pax_serial_log
+pax_serial_log:
+        .zero 65536
+
         .section .note.GNU-stack, "", @progbits

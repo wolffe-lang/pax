@@ -20,6 +20,10 @@ use screen
 
 extern "c" fn pax_outb(port: u16, v: u8)
 extern "c" fn pax_inb(port: u16) -> u8
+extern "c" fn pax_irq_save() -> u64
+extern "c" fn pax_irq_restore(flags: u64)
+extern "c" let pax_serial_log_count: *u64
+extern "c" let pax_serial_log: *u8
 
 // COM1's I/O base and its registers, as offsets from it (PC16550D).
 // Module `const`s since px05 (wolf 0.2.23; 0.2.22 refused them,
@@ -115,7 +119,16 @@ pub fn init() -> int {
 /// loses the byte rather than hang the kernel. It never traps.
 pub fn put(b: u8) {
     screen.put(b)
-    if !available() { return }
+    if !available() {
+        let flags = unsafe { pax_irq_save() }
+        let n = unsafe { pax_serial_log_count.read_volatile() }
+        if n < 65536 {
+            unsafe { ((pax_serial_log as u64 + n) as *u8).write_volatile(b) }
+        }
+        if n <= 65536 { unsafe { pax_serial_log_count.write_volatile(n + 1) } }
+        unsafe { pax_irq_restore(flags) }
+        return
+    }
     var spins = 0
     while spins < POLLS {
         let lsr = inp(LSR)
