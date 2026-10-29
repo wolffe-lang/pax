@@ -2570,6 +2570,14 @@ jobs:
           PAX_ROOTDISK_BUS: nvme
         run: tools/rootdisk-leg mpx5-users --tier native --firmware bios
 
+      - name: the same suite with AHCI root, native BIOS (px75b; full tier only)
+        if: needs.plan.outputs.tier == 'full'
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_ROOTDISK_BUS: ahci
+        run: tools/rootdisk-leg mpx5-users --tier native --firmware bios
+
       - name: keep the programs' sums, the sessions, the logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -4022,6 +4030,66 @@ jobs:
   # the fstab spellings, a GPT disk (tools/mkdisk --gpt) booted with no
   # CD-ROM under SeaBIOS and OVMF, the ISO with a bare disk, and the ext2
   # clean flag after an exit, a reboot and a power cut.
+  mpx6-ahci:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-ahci')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+      PAX_AHCI_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          qemu-system-x86_64 --version
+          gcc --version | head -n 1
+          docker --version
+          df -h . | tail -n 1
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx6-ahci-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: e2fsprogs from the image pinned by digest
+        run: |
+          docker pull docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+          PAX_ENGINE=docker tools/e2fs --version
+
+      - name: AHCI against the guest's answers; the plan's legs
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+        run: tests/mpx6-ahci $PAX_LEGS
+
+      - name: keep the sessions, the transcripts and the halt probes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-ahci-linux
+          path: |
+            build/mpx6-ahci/**/*.log
+            build/mpx6-ahci/**/*.norm
+            build/mpx6-ahci/**/*.sha256
+            build/mpx6-ahci/**/*.sums
+            build/mpx6-ahci/**/*.rows
+          retention-days: 14
+          if-no-files-found: warn
+
   mpx6-part:
     needs: plan
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-part')
@@ -4594,6 +4662,7 @@ jobs:
       - mpx6-journal
       - mpx6-nodes
       - mpx6-nvme
+      - mpx6-ahci
       - mpx6-disktools
       - mpx6-install
       - mpx6-fsck
