@@ -14,7 +14,10 @@ def section(text, name):
 
 def normalized(path):
     text = pathlib.Path(path).read_text(errors="replace").replace("\r", "")
-    return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
+    text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
+    # PAX's process narration is not program output; preserve every other
+    # line, including AHCI errors and panics, so extra diagnostics fail.
+    return "\n".join(line for line in text.split("\n") if not line.startswith("user: "))
 
 
 def main():
@@ -29,13 +32,18 @@ def main():
                       ("A5-after-differential", "after")):
         try:
             got, want = section(pax, name), section(linux, name)
+            if name == "identity":
+                # R-px75b-4: sysfs presentation padding differs, not identity.
+                # The fixture's ATA models fit Linux's 16-byte SCSI field.
+                got = "\n".join(x.rstrip(" ") for x in got.split("\n"))
+                want = "\n".join(x.rstrip(" ") for x in want.split("\n"))
             if not want.strip() or got != want:
                 raise ValueError(f"guest {want!r}; PAX {got!r}")
             if name == "bytes":
                 reads = re.findall(r"(\d+) bytes differ", got)
                 if len(reads) != 22 or any(int(x) for x in reads):
                     raise ValueError("expected all 22 readbacks and zero differing bytes")
-            if name == "identity" and ("PX75B-A1" not in got or "PX75B-C3" not in got):
+            if name == "identity" and ("PX75B-A1" not in got or "PX75B-C3" not in got or "PX75B B2 INNER\n" not in got):
                 raise ValueError("not the specified serials")
             print(f"PASS {row}: {len(got.splitlines())} lines match Linux")
         except ValueError as exc:

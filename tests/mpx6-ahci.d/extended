@@ -1,0 +1,169 @@
+# Sourced by tests/mpx6-ahci. Its variables identify only this lane's images.
+# Extra protocol rows run even on the PR leg; throughput/root are full tier.
+tools/mknodes "$W/bin" > "$W/nodes.build.log"
+cc -static -no-pie -O1 -Wall -Wextra -o "$W/bin/ahci" "$PAX_ROOT/user/elf/ahci.c"
+E=$W/$tier/$firmware/extended
+mkdir -p "$E"
+
+make_session() { # name, script text, optional fstab
+    local name=$1 text=$2
+    printf '%s\n' "$text" > "$E/$name.sh"
+    printf '/bin/sh /etc/ahci-row.sh\n' > "$E/$name.run"
+    local files=() f
+    for f in "$W"/bin/{sh,cat,nvme,nodes,ahci}; do files+=("/bin/${f##*/}=$f:755"); done
+    [ $# -lt 3 ] || files+=("/etc/fstab=$3:644")
+    tools/mkinitramfs "$E/$name.cpio" /dev/:755 /proc/:555 /sys/:555 /tmp/:1777 /mnt/:755 \
+        "${files[@]}" "/etc/ahci-row.sh=$E/$name.sh:644" "/etc/pax-run=$E/$name.run:644" > "$E/$name.archive.log"
+    tools/mkimage --conf boot/limine-initramfs.conf --add "$E/$name.cpio" initramfs.cpio \
+        "$W/$tier/kmain_console.elf" "$E/$name.iso" > "$E/$name.image.log"
+}
+pax_row() { # name, qemu-halt disk arguments
+    local name=$1; shift
+    tools/qemu-halt --firmware "$firmware" --accel "${PAX_AHCI_ACCEL:-auto}" --timeout 900 \
+        --serial "$E/$name.log" --elf "$W/$tier/kmain_console.elf" --marker 'halt|PANIC .*' \
+        --qemu -m --qemu 1G "$@" "$E/$name.iso" > "$E/$name.halt.log" 2>&1
+    serial_norm "$E/$name.log" > "$E/$name.norm"
+    grep -x AHCI-ROW-END "$E/$name.norm" || { echo "FAIL $name: incomplete session"; exit 1; }
+}
+linux_row() { # name, linux-nodes disk arguments; script was made by make_session
+    local name=$1; shift
+    if [ "$record" = 1 ] || [ "${PAX_LINUX:-}" = live ]; then
+        tools/linux-nodes --kernel "$PAX_LINUX_KERNEL" --modules "$PAX_LINUX_MODULES" \
+            --busybox "$PAX_BUSYBOX" --accel "${PAX_LINUX_ACCEL:-kvm}" "$@" \
+            --file "$E/$name.sh=/etc/ahci-row.sh" "$E/linux-$name" \
+            "$W/bin/sh" "$W/bin/cat" "$W/bin/nvme" "$W/bin/nodes" "$W/bin/ahci" -- '/bin/sh /etc/ahci-row.sh'
+        serial_norm "$E/linux-$name/serial.log" > "$E/linux-$name.norm"
+        [ "$record" = 0 ] || cp "$E/linux-$name.norm" "$D/linux/$name.log"
+    else
+        cp "$D/linux/$name.log" "$E/linux-$name.norm"
+    fi
+}
+
+# LBA48, sparse 3 TiB: low and high ranges have independent patterns.
+make_session lba48 $'/bin/ahci /dev/sda\necho AHCI-ROW-END'
+truncate -s 3298534883328 "$E/high.img"
+truncate -s 3298534883328 "$E/linux-high.img"
+pax_row lba48 --ahci "$E/high.img,serial=PX75B-HIGH,model=PX75B-LBA48"
+linux_row lba48 --ahci "$E/linux-high.img,serial=PX75B-HIGH,model=PX75B-LBA48"
+for log in "$E/lba48.norm" "$E/linux-lba48.norm"; do
+    grep -x 'PASS LBA48: 128 KiB above sector 2^32; low sentinel intact' "$log" || { echo 'FAIL A7-LBA48'; exit 1; }
+done
+# Compare only the two bounded written ranges, not 3 TiB of sparse zeros.
+python3 -I - "$E/high.img" "$E/high.sums" <<'PY'
+import hashlib, sys
+with open(sys.argv[1], 'rb') as f, open(sys.argv[2], 'w') as out:
+    for off in (17*512, (1 << 41) + 17*512):
+        f.seek(off)
+        b = f.read(131072)
+        assert len(b) == 131072
+        out.write(f'{off} {hashlib.sha256(b).hexdigest()}\n')
+PY
+if [ "$record" = 1 ] || [ "${PAX_LINUX:-}" = live ]; then
+    python3 -I - "$E/linux-high.img" "$E/linux-high.sums" <<'PY'
+import hashlib, sys
+with open(sys.argv[1], 'rb') as f, open(sys.argv[2], 'w') as out:
+    for off in (17*512, (1 << 41) + 17*512):
+        f.seek(off)
+        b = f.read(131072)
+        assert len(b) == 131072
+        out.write(f'{off} {hashlib.sha256(b).hexdigest()}\n')
+PY
+    [ "$record" = 0 ] || cp "$E/linux-high.sums" "$D/linux/high.sums"
+else cp "$D/linux/high.sums" "$E/linux-high.sums"; fi
+diff -u "$E/linux-high.sums" "$E/high.sums"
+rm "$E/high.img" "$E/linux-high.img"
+echo 'PASS A7-LBA48: bounded high and low regions byte-identical to Linux'
+
+# One persistent media error; recovery must permit the following good read.
+make_session error $'/bin/nodes rd /dev/sda 0 4096\n/bin/nodes rd /dev/sda 2097152 512\n/bin/nodes rd /dev/sda 2093056 8192\n/bin/nodes rd /dev/sda 4194304 4096\necho AHCI-ROW-END'
+printf '[inject-error]\nevent = "read_aio"\nerrno = "5"\nsector = "4096"\nonce = "off"\n' > "$E/blkdebug.cfg"
+truncate -s 64M "$E/error.img"
+error_args=(--qemu -device --qemu ahci,id=errorhba --qemu -drive --qemu "file=blkdebug:$E/blkdebug.cfg:$E/error.img,if=none,id=error,format=raw" \
+    --qemu -device --qemu ide-hd,bus=errorhba.0,drive=error,serial=PX75B-ERROR)
+pax_row error "${error_args[@]}"
+linux_row error "${error_args[@]}"
+grep '^rd ' "$E/error.norm" > "$E/error.rows"
+grep '^rd ' "$E/linux-error.norm" > "$E/linux-error.rows"
+[ "$(wc -l < "$E/error.rows")" -eq 4 ]
+diff -u "$E/linux-error.rows" "$E/error.rows"
+grep -F 'task-file error (TFES)' "$E/error.norm"
+echo 'PASS A8-taskfile-error: read errors and subsequent recovery match Linux'
+
+# QEMU 8.2 refuses 4Kn ide-hd before boot (R-px75b-5); the ahci-check
+# boot below uses synthetic IDENTIFY words for that rejection. This is a
+# real 512e device and its block ioctls, held to the Linux guest.
+make_session sector $'/bin/nodes ioctl /dev/sda\necho AHCI-ROW-END'
+truncate -s 64M "$E/sector.img"
+pax_row sector --ahci "$E/sector.img,serial=PX75B-512E,logical_block_size=512,physical_block_size=4096"
+linux_row sector --ahci "$E/sector.img,serial=PX75B-512E,logical_block_size=512,physical_block_size=4096"
+python3 -I - "$E/sector.norm" "$E/linux-sector.norm" <<'PYIO'
+import pathlib, sys
+# These three refusals are inherited from the block ABI, not AHCI.
+refused = ('BLKSECTGET', 'BLKRAGET', 'BLKFRAGET')
+def rows(p):
+    return [s for s in pathlib.Path(p).read_text().splitlines() if s.startswith('ioctl ') and not any(s.startswith('ioctl '+x+':') for x in refused)]
+a, b = map(rows, sys.argv[1:])
+assert len(a) >= 18 and len(a) == len(b), (a, b)
+for x, y in zip(a, b):
+    assert x == y, (x, y)
+print('PASS A9-512e-ioctls: logical 512 physical 4096 and block ABI match Linux')
+PYIO
+
+# Exercise both initialization choices under the same emulated controller.
+sed '/protocol: limine/a\    cmdline: ahci-reset ahci-check' boot/limine-initramfs.conf > "$E/reset.conf"
+tools/mkimage --conf "$E/reset.conf" --add "$E/sector.cpio" initramfs.cpio \
+    "$W/$tier/kmain_console.elf" "$E/reset.iso" > "$E/reset.image.log"
+pax_row reset --ahci "$E/sector.img,serial=PX75B-RESET"
+grep -q '^block: sda:' "$E/reset.norm"
+grep -F '; HBA reset; one slot, polled' "$E/reset.norm"
+grep -x 'PASS ahci-check: command timeout, stale task-file, TFES and completion' "$E/reset.norm"
+grep -x 'PASS ahci-check: 4Kn refused; 512e sector sizes decoded' "$E/reset.norm"
+echo 'PASS A10-HBA-reset: optional HR and the default per-port initialization both boot'
+
+if [ "$rows" = all ]; then
+    make_session speed $'/bin/nvme speed /dev/sda 1024\necho AHCI-ROW-END'
+    ram=${PAX_AHCI_RAM:-$E}
+    mkdir -p "$ram"
+    speed=$ram/px75b-$tier-$firmware-speed.img
+    truncate -s 1G "$speed"
+    pax_row speed --ahci "$speed,serial=PX75B-SPEED"
+    sha256_of "$speed" > "$E/speed.sha256"
+    grep -F 'wrote 1024 MiB' "$E/speed.norm"
+    grep -F 'read back 1024 MiB in 1 MiB reads, 0 sectors differ' "$E/speed.norm"
+    grep '^speed .*time:' "$E/speed.norm"
+    rm "$speed"; truncate -s 1G "$speed"
+    linux_row speed --ahci "$speed,serial=PX75B-SPEED"
+    if [ "$record" = 1 ] || [ "${PAX_LINUX:-}" = live ]; then
+        sha256_of "$speed" > "$E/linux-speed.sha256"
+        [ "$record" = 0 ] || cp "$E/linux-speed.sha256" "$D/linux/speed.sha256"
+    else cp "$D/linux/speed.sha256" "$E/linux-speed.sha256"; fi
+    diff -u "$E/linux-speed.sha256" "$E/speed.sha256"
+    grep '^speed .*time:' "$E/linux-speed.norm"
+    rm "$speed"
+    echo 'PASS A11-throughput: 1 GiB write/read/check; image byte-identical to Linux'
+
+    # Independent AHCI root and fstab partition, both addressed by PARTUUID.
+    SOURCE_DATE_EPOCH=1700000000 tools/mkdisk --home 32M "$E/home.part" > "$E/home.log"
+    truncate -s 64M "$E/home.img"
+    dd if="$E/home.part" of="$E/home.img" bs=512 seek=2048 conv=notrunc status=none
+    SOURCE_DATE_EPOCH=1700000000 tools/mkgpt --label px75b-home "$E/home.img" 1:linux:2048:67583:home > "$E/home.gpt"
+    uuid=$(python3 -I - "$E/home.img" <<'PY'
+import sys, uuid
+with open(sys.argv[1], 'rb') as f:
+    f.seek(1024 + 16)
+    print(uuid.UUID(bytes_le=f.read(16)))
+PY
+)
+    printf 'PARTUUID=%s /mnt ext2 defaults 0 2\n' "$uuid" > "$E/fstab"
+    make_session root $'/bin/cat /proc/mounts\necho px75b-root > /etc/px75b-root\necho px75b-home > /mnt/px75b-home\n/bin/cat /etc/px75b-root\n/bin/cat /mnt/px75b-home\necho AHCI-ROW-END' "$E/fstab"
+    SOURCE_DATE_EPOCH=1700000000 tools/mkdisk --gpt --kernel "$W/$tier/kmain_console.elf" --root "$E/root.cpio" \
+        --label px75b-root 128M "$E/root.img" > "$E/root.build.log" 2>&1
+    tools/qemu-halt --firmware "$firmware" --accel "${PAX_AHCI_ACCEL:-auto}" --timeout 900 --boot-ahci \
+        --serial "$E/root.log" --elf "$W/$tier/kmain_console.elf" --marker 'halt|PANIC .*' \
+        --qemu -m --qemu 1G --ahci "$E/home.img,serial=PX75B-HOME" "$E/root.img" > "$E/root.halt.log" 2>&1
+    serial_norm "$E/root.log" > "$E/root.norm"
+    grep -E '^root: PARTUUID=.* \(sda2\) on /: ext3, read-write,' "$E/root.norm"
+    grep -E '^fstab: PARTUUID=.* \(sdb1\) on /mnt: ext2, read-write,' "$E/root.norm"
+    grep -x px75b-root "$E/root.norm"; grep -x px75b-home "$E/root.norm"; grep -x AHCI-ROW-END "$E/root.norm"
+    echo 'PASS A12-root-fstab: AHCI root and second disk mount by PARTUUID, files written and read'
+fi
