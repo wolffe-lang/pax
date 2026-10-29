@@ -2,20 +2,24 @@
 // kmain_timer.lu — the timer ticks (kw10, tests/mpx2-interrupts I5).
 // The kernel switches to PAX's paging structures, loads its GDT, TSS
 // and IDT, maps the local APIC and unmasks its LINT0 as ExtINT
-// (kernel/apic: Limine leaves it masked, so no 8259 request would
-// arrive), remaps and masks the 8259s and starts the PIT at 99.998 Hz
-// with line 0 alone unmasked (kernel/timer), then sleeps with
-// interrupts enabled only inside each wait (boot/isr.S's STI; HLT; CLI)
-// until 20 ticks have been handled, masks every line again and halts
-// with interrupts off:
+// (kernel/apic: Limine leaves it masked), remaps and masks the 8259s,
+// and (px76) starts the firmware's clock first (kernel/clock: the HPET,
+// else the ACPI PM timer, else the PIT read back; its ACPI and clock
+// lines come before the APIC's), then calibrates the local APIC timer
+// against it and ticks at 100 Hz on vector 32 (kernel/timer), then
+// sleeps with interrupts enabled only inside each wait (boot/isr.S's
+// STI; HLT; CLI) until 20 ticks have been handled, stops the tick and
+// halts with interrupts off:
 //
 //     PAX interrupts: timer
 //     paging: limine cr3 0x<A>, pax cr3 0x<B>, <P> table frames
+//     firmware: …, memory: …, acpi: … (a line a table), clock: …
 //     apic: 0x00000000fee00000 at 0xffffb00000000000, id 0, svr 0x<s>, lint0 0x<old> -> 0x0000000000008700
-//     timer: pit divisor 11932 (99.998 Hz), 8259 at 32 and 40, line 0 unmasked
+//     timer: LAPIC calibrated by HPET|PM|PIT divide16 <rate> Hz, tick 100 Hz vector 32; PIT IRQ masked
 //     timer: 20 ticks on vector 32, 0 spurious
 //     halt
 use apic
+use clock
 use frames
 use interrupts
 use log
@@ -33,17 +37,10 @@ export fn kmain() {
     let pml4 = paging.start()
     paging.report(limine, before)
     interrupts.start()
+    clock.start() // px76: its lines before the APIC's; timer.start reuses it
     apic.start(pml4)
     apic.report()
     timer.start()
-    log.put("timer: pit divisor ")
-    log.dec(timer.DIVISOR as int)
-    log.put(" (99.998 Hz), 8259 at ")
-    log.dec(timer.MASTER_BASE as int)
-    log.put(" and ")
-    log.dec(timer.SLAVE_BASE as int)
-    log.put(", line 0 unmasked")
-    log.end()
     while timer.ticks() < 20 {
         timer.wait()
     }
