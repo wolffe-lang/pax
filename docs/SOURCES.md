@@ -1373,7 +1373,7 @@ Permissively licensed kernels: none consulted.
 
 | source | version | licence | how | used for |
 |---|---|---|---|---|
-| clef (`wolffe-lang/clef`, `user/clef.pin`) | `996a3ccd` (as01's merge) | GPL-3.0-only with the wolf Training Data Permission | built (`tools/mkclef`; clef's own line, native tier, static); its census sources copied as the corpus; its `tools/elf.py` run; its as01 driver shims run as controls | the package, the qualification's corpus and oracle comparison, item 3's 0.2.35 control |
+| clef (`wolffe-lang/clef`, `user/clef.pin`) | `996a3ccd` (as01's merge); `b71b43f4` (as02c's merge, the word ports, px76) | GPL-3.0-only with the wolf Training Data Permission | built (`tools/mkclef`; clef's own line, native tier, static); its census sources copied as the corpus; its `tools/elf.py` run; its as01 driver shims run as controls | the package, the qualification's corpus and oracle comparison, item 3's 0.2.35 control |
 | wolf-lang | `9f2cff44` (as02a's merge, wolf-lang#957) | GPL-3.0 with the wolf Training Data Permission | built from source (`tests/kernel-as.d/wolf.pin`, `tools/fetch-wolf`'s source shape), `--version` `wolf 0.2.35+dev.9f2cff44` | the seam wolf: `--assembler` / `WOLF_AS` |
 | wolf 0.2.35 release archive (`4cc4045b…`, kernel/wolf.pin) | 0.2.35 | as wolf-lang | run; its `libwolf_rt.a` (`9efc68e1…`) linked into the package, its `libwolf_rt_none.a` (`6b9c4852…`) staged beside the seam wolf | the image's compiler and runtime |
 | GNU binutils 2.42 (`as`), Ubuntu 24.04 `2.42-4ubuntu2.10` (clef's `ci/oracle-lock.json`, by sha256); CI: the runner's 2.42 | 2.42 | GPL-3.0 | run (`as --64 -o OUT SRC`) | the GNU-as kernels, the qualification's oracle objects |
