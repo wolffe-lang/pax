@@ -79,11 +79,16 @@ pub fn name() -> str {
     let src = unsafe { source }
     if src == 1 { "HPET" } else { if src == 2 { "PM" } else { "PIT" } }
 }
+/// Whether `start` has chosen a source.
+pub fn started() -> bool { unsafe { source } != 0 }
+
 pub fn now_ns() -> u64 {
+    let src = unsafe { source }
+    // No source has a period yet: a loud stop, never a division by zero.
+    if src == 0 { panic.fail("clock: now_ns before clock.start", 0) }
     let flags = sync.irq_save()
     let current = raw()
     let prev = unsafe { previous }
-    let src = unsafe { source }
     var delta: u64 = 0
     if src == 3 { delta = if current >= prev { current - prev } else { current + 65535 - prev } }
     else {
