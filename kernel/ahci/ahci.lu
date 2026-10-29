@@ -7,8 +7,8 @@
 //! R-px75b-2: §10.1.2 makes HR optional; idle each port instead. A test
 //! command-line flag ahci-reset exercises the optional whole-HBA reset.
 //! All entry points run with IF clear on the kernel's single CPU.
-use ahci_clock
 use boot_info
+use clock
 use frames
 use log
 use paging
@@ -132,9 +132,9 @@ fn addr(p: u64, off: u64, pa: u64) {
     if word(word(p, P_CTL), C_CAP) & (1 << 31) != 0 { wr(p, off + 4, pa >> 32) }
 }
 fn wait_bits(a: u64, mask: u64, value: u64, us: u64) -> bool {
-    let end = ahci_clock.deadline_us(us)
+    let end = clock.deadline_us(us)
     while r32(a) & mask != value {
-        if ahci_clock.expired(end) { return false }
+        if clock.expired(end) { return false }
         sync.relax()
     }
     true
@@ -261,7 +261,7 @@ fn error(p: u64, opcode: u64, status: u64, pis: u64) {
 // Testable completion polling: real registers in command(), owned memory
 // in the ahci-check boot. PxIS is cleared before every real submission.
 fn completion(p: u64, us: u64) -> u64 {
-    let deadline = ahci_clock.deadline_us(us)
+    let deadline = clock.deadline_us(us)
     while true {
         let pis = rr(p, PIS)
         let tfd = rr(p, TFD)
@@ -272,7 +272,7 @@ fn completion(p: u64, us: u64) -> u64 {
             let completed = rr(p, TFD)
             return if completed & 0x21 != 0 { completed } else { 0 }
         }
-        if ahci_clock.expired(deadline) { return LOST }
+        if clock.expired(deadline) { return LOST }
         sync.relax()
     }
     LOST
@@ -295,9 +295,9 @@ fn check_completion() {
     let p = f + frames.hhdm()
     put(p, P_REG, rf + frames.hhdm())
     wr(p, CI, 1)
-    let before = ahci_clock.now_ns()
+    let before = clock.now_ns()
     let timeout = completion(p, 2000)
-    let elapsed = ahci_clock.now_ns() - before
+    let elapsed = clock.now_ns() - before
     wr(p, TFD, 0x441)
     let stale = completion(p, 1000)
     wr(p, PIS, 1 << 30)
@@ -416,9 +416,9 @@ fn port_start(c: u64, port: u64) -> u64 {
         // §10.4.2: assert DET=1 at least 1 ms, then deassert it.
         let sctl = rr(p, SCTL)
         wr(p, SCTL, (sctl & !15) | 1)
-        ahci_clock.wait_us(1000)
+        clock.wait_us(1000)
         wr(p, SCTL, sctl & !15)
-        ahci_clock.wait_us(10000) // SATA presence debounce before declaring an empty port.
+        clock.wait_us(10000) // SATA presence debounce before declaring an empty port.
         if rr(p, SSTS) & 15 == 0 { let _s = idle(p); return 0 }
         if !wait_bits(word(p, P_REG) + SSTS, 0xf0f, 0x103, 1000000) {
             let _r = refused(p, "COMRESET link active timeout (DET/IPM)")
@@ -455,9 +455,11 @@ fn controller(pml4: u64, i: u64, number: u64) -> u64 {
     if f == 0 { return 0 }
     let c = f + frames.hhdm()
     put(c, C_PCI, i); put(c, C_ID, number)
-    // Every wait below is a deadline on ahci_clock: refuse by name rather
-    // than wait forever on a PIT that does not count (R-px75b-7).
-    if !ahci_clock.counting() { tag(c); log.put(": refused: the 8254 PIT does not count, so no AHCI wait could end"); log.end(); return 0 }
+    // Every wait below is a deadline on kernel/clock (the HPET, else the
+    // ACPI PM timer, else the PIT). Refuse by name only where none of them
+    // advances (R-px75b-7, narrowed at px76's merge): a gated 8254 alone
+    // no longer stops a controller.
+    if !clock.started() { tag(c); log.put(": refused: no clock advances (HPET, PM timer or PIT), so no AHCI wait could end"); log.end(); return 0 }
     let b = pci.bdf(i)
     let (kind, bar) = pci.bar(b, 5)
     if kind != pci.BAR_MEM32 || bar == 0 { tag(c); log.put(": refused: BAR5 is not 32-bit memory"); log.end(); return 0 }
@@ -477,7 +479,7 @@ fn controller(pml4: u64, i: u64, number: u64) -> u64 {
         // §10.6.3: request ownership, allow 25ms for BB; if busy allow
         // at least 2s. Refuse rather than reset hardware firmware still owns.
         w32(regs + BOHC, (r32(regs + BOHC) & !8) | 2)
-        ahci_clock.wait_us(25000)
+        clock.wait_us(25000)
         if r32(regs + BOHC) & 0x11 != 0 && !wait_bits(regs + BOHC, 0x11, 0, 2000000) {
             tag(c); log.put(": refused: BIOS/OS handoff timeout (BOS/BB)"); log.end(); return 0
         }
