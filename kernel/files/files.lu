@@ -7151,6 +7151,39 @@ fn d_type(c: u64) -> u64 {
 /// The position in the root past its last entry and past `dev`.
 const DEV_DONE: u64 = 0x4000000000000000
 
+/// px78: whether the memory's root has a `dev` entry of its own (a live
+/// medium's initramfs carries the directory, as a distribution's root
+/// does under its devtmpfs mount): that entry is then `/dev`'s line in
+/// the root's listing, once, as Linux lists the directory a mount covers
+/// (the walk still leads to the devices), and the root's own `dev` is
+/// not listed a second time (pax-install staged `/` with two `dev` names
+/// and stopped at the second).
+fn root_lists_dev() -> bool {
+    var at: u64 = 0
+    loop {
+        let (di, _dt, name, len, next) = tree.dirent(tree.ROOT, at)
+        if di == 0 {
+            return false
+        }
+        if len == 3 {
+            var same = true
+            var j: u64 = 0
+            for b in "dev".bytes() {
+                // # Safety: a byte of the root's directory record, the
+                // name tree.dirent returned with its length.
+                if unsafe { ((name + j) as *u8).read_volatile() as u64 } != b as int as u64 {
+                    same = false
+                }
+                j += 1
+            }
+            if same {
+                return true
+            }
+        }
+        at = next
+    }
+}
+
 /// `getdents64(fd, buf, count)`: as many `struct linux_dirent64` as fit
 /// (d_ino, d_off the next position, d_reclen a multiple of 8, d_type,
 /// the name and its NUL), "." and ".." first; 0 at the end; -EINVAL
@@ -7158,8 +7191,8 @@ const DEV_DONE: u64 = 0x4000000000000000
 /// records in their order (a position is 2 plus a record's offset, so
 /// an entry that is there for the whole of a reading is returned
 /// exactly once whatever is made or removed meanwhile), and the root
-/// lists `dev` after them; a directory that has been removed is
-/// -ENOENT (measured).
+/// lists `dev` after them unless one of them is named `dev` (px78); a
+/// directory that has been removed is -ENOENT (measured).
 pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
     let k = kind(a, fd)
     if k == K_CLOSED {
@@ -7228,7 +7261,7 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
                 na = addr
                 nl = l
                 next = nx + 2
-            } else if rf(d) == tree.ROOT {
+            } else if rf(d) == tree.ROOT && !root_lists_dev() {
                 c = T_DEV << T_SHIFT
                 nl = 3
                 next = DEV_DONE
