@@ -37,13 +37,25 @@ fn reset_register() -> bool {
     }
     false
 }
-pub fn reboot() -> never {
-    log.line("reboot: FADT reset register")
-    let _sent = reset_register()
-    clock.wait_us(100000)
-    log.line("reboot: port 0xCF9")
-    out(0xcf9, 2); out(0xcf9, 6)
-    clock.wait_us(100000)
+/// Reset the machine: the FADT's reset register (ACPI 6.5 §4.8.3.6),
+/// then the reset control register (port 0xCF9: 0x02 then 0x06), then a
+/// triple fault, each on its line before it is tried, 100 ms apart.
+pub fn reboot() -> never { reboot_from(0) }
+
+/// `reboot` entered at step `step` (0 the FADT's register, 1 port 0xCF9,
+/// 2 the triple fault): tests/mpx6-metal-power's fallback legs, on a
+/// machine whose first ways work.
+pub fn reboot_from(step: u64) -> never {
+    if step == 0 {
+        log.line("reboot: FADT reset register")
+        let _sent = reset_register()
+        clock.wait_us(100000)
+    }
+    if step <= 1 {
+        log.line("reboot: port 0xCF9")
+        out(0xcf9, 2); out(0xcf9, 6)
+        clock.wait_us(100000)
+    }
     log.line("reboot: triple fault")
     unsafe { pax_triple_fault() }
     panic.halt()
