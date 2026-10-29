@@ -779,6 +779,12 @@ as on Linux, is `tests/mpx6-games` (gm01, the next section).
 fault rows in the PR tier. `--rows full` adds the complete installed tree
 and both firmware sessions; the measured staged-input run on four assigned
 host CPUs took 5m52s, so these rows are in `tier full`, not nightly-only.
+`PAX_INSTALL_BIG_ROWS` (px84) adds a full-density install onto a sparse
+500 GB target in `tier full` and onto 4 TB in `tier all`
+(`tests/mpx6-install.d/big-run`; 232 s and 1,626 s under TCG on kasumi),
+each target then booted alone under BIOS and UEFI. One fault row gives
+the installer a 4Kn target (virtio `logical_block_size=4096`): it is
+refused as `sector_size` before any write, the target byte-identical.
 PAX currently returns ENOSYS for `getrusage`: guest peak RSS is reported as
 unavailable, not zero and not replaced with QEMU's host RSS. Linux's same
 snapshot/copy reference measured 11884 KiB peak RSS. The missing guest
