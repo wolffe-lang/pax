@@ -102,6 +102,30 @@ Committed before the first change in `b0cf8206` (`notes/px76-prediction.txt`), s
   (`-f tier=pr -f suites=mpx6-firmware`, RULES §7's smallest run, one job). Recommended and
   implemented: **A**, the brief's form; the clock's PM check keeps every other suite green (no
   storming tick, no timeouts), so the run costs a native-BIOS sweep, not hours of timeouts.
+- **R-px76-9, what V4 compares of the firmware's lines** (the first `tier all` run's
+  `mpx3-screen` red, below). V4 compares two boots of one run on one firmware, the screen's and the
+  screenless one; there is no recorded golden. On UEFI the display device changes the firmware's
+  own tables: OVMF installs a BGRT (UEFI's boot graphics table) only when it has a GOP, so the
+  screen boot's XSDT holds one entry more (84 bytes against 76) and lists `acpi: BGRT`. (A) fold
+  the firmware's display-dependent lines to their shape: the RSDT/XSDT and DSDT lengths and the
+  memory map's numbers to `<n>`, the BGRT's line left out, every other line (PAX's own) compared
+  byte for byte; (B) leave every `firmware:`, `memory:` and `acpi:` line out of V4; (C) record a
+  golden with CI's pinned OVMF (does not apply: no golden exists, and both boots already share the
+  firmware). Recommended and implemented: **A** (`68d753ab`): it keeps each line's presence and
+  shape, and a PAX line that changes is still named in the row's diff.
+- **R-px76-10, the 16-bit port instructions clef lacks** (the first `tier all` run's `kernel-as`
+  K5 red, below). `kernel/power` reads and writes the 16-bit PM1 control registers (ACPI 6.5
+  §4.8.3; `power_off` requires the FADT's PM1_CNT_LEN, byte 89, to be at least 2) through
+  `pax_inw` and `pax_outw` (`b924da22`, the Codex lane's), `inw %dx, %ax` and
+  `outw %ax, %dx` (Intel SDM vol. 2 IN and OUT with the 66h operand-size prefix; GNU as encodes them
+  `66 ed` and `66 ef`). clef at `user/clef.pin` (`996a3ccd`) has `inb`, `inl`, `outb` and `outl`
+  but neither word form (`unknown_mnemonic inw`, `unknown_mnemonic outw`: `runs/clefprobe.log`),
+  since no census source used one. (A) a clef issue to add `inw`/`outw` (and `xorq`), K5 red until
+  user/clef.pin moves; (B) spell the two as `.byte` in `boot/io.S` (papers over the gap: not
+  recommended); (C) reach PM1 control a byte at a time (changes the register's access width on
+  metal: not recommended without a citation that allows it). Recommended: **A**; the instructions
+  are kept. `xorq %rax, %rax` (also unknown to clef) was not needed: `e42d2e39` writes `xorl %eax,
+  %eax`, the same zeroed `%rax` (SDM vol. 1 §3.4.1.1).
 
 ### Regression (the mpx suites at the branch, native BIOS, kasumi)
 
@@ -114,7 +138,7 @@ a `BATCH` line), after the three fixes above:
 | `mpx3-user`, `mpx3-speaker`, `mpx3-sound`, `mpx3-orchestra`, `mpx5-screen`, `mpx6-blk`, `mpx4-net` | pass |
 | `mpx3-screen` | V4 red before `5f225d35` (the diff in `broad1.log`), then every row passes (`fw1b`) |
 | `mpx6-games`, `mpx6-usb`, `census` | pass |
-| `mkw`, `kernel-as` | not run here: the container has no `lupin` and no `cargo` (exit 2, a missing tool); CI runs both |
+| `mkw`, `kernel-as` | not run in these batches: the container has no `lupin` and no `cargo` (exit 2, a missing tool). `kernel-as` was run after the first `tier all` run's K5 red, with the seam wolf copied from as02b's cache and clef built by `tools/mkclef` (below) |
 | `mpx4-udp`, `mpx4-ready` | not run here: their Linux side needs root for a network namespace (T0/U0: `unshare(CLONE_NEWNET)` refused in the rootless container), so every row compares against nothing; CI runs them as root |
 
 The suites whose Linux side needs a container engine (the `PAX_ENGINE` jobs: the shell, the tree,
@@ -240,6 +264,31 @@ planner's `tier pr` for the plant's one path. Both were first run locally in cop
 - **Measurements** (`measure.sh`, `x2probe.sh`; `docs/SOURCES.md` has each): OVMF's default 64-bit
   BAR placement, the window, `-m 34G`, the GOP pitches, `acpi=off` per firmware, SeaBIOS's
   PIT-less line, and TCG's x2APIC refusal.
+
+### The first `tier all` run (40832410617, at `f4fd3449`)
+
+Two reds were the branch's; the plants' runs carried the same two because they sit on it.
+
+- `mpx3-screen` V4 on UEFI, both tiers: `the serial differs: 3c3|< acpi: XSDT OEM BOCHS  length
+  84|---|> acpi: XSDT OEM BOCHS  length 76|20d19|< acpi: BGRT OEM INTEL  length 56|`. Read in full
+  from the run's `pax-mpx3-screen` artifact, those are the only two differences on either tier:
+  the screen boot's OVMF has a GOP and installs a BGRT, the screenless one does not. Every local
+  run of `mpx3-screen` had been native BIOS (`broad1`, `fw1b`, `final`), where SeaBIOS's tables do
+  not change, so the UEFI legs were never run here. Fixed by R-px76-9 A (`68d753ab`); on the
+  artifact's own logs the new comparison passes on both tiers and firmwares (436 lines), and a
+  changed `clock:` line, a changed FACP length or a missing XSDT line are each named in its diff.
+  The local run of `tests/mpx3-screen --tier both --firmware both` at `e42d2e39` was still running at
+  the hand-back (kasumi job `ka`, `runs/ka.log`, its first suite).
+- `kernel-as` K5, both tiers: `clef: Assembly(Failure { … file: ../boot/io.S, line: 86 … reason:
+  unknown_mnemonic inw … })` (the run's `pax-kernel-as` artifact, `native/K5/build.log`). clef,
+  built here by `tools/mkclef` at `user/clef.pin` (`runs/clefprobe.log`), assembles every other
+  `boot/*.S` and refuses three mnemonics the branch added: `inw`, `outw` and `xorq`; each other new
+  construct (`subq $16, %rsp`, `movq %rax, (%rsp)` and `8(%rsp)`, `lidt (%rsp)`, `int3`, `jmp` to a
+  global, `xorl`, `movzwl`) encodes as GNU as encodes it. `xorq` is replaced (`e42d2e39`); `inw`
+  and `outw` are kept (R-px76-10). `tests/kernel-as` at the head (K5 expected red at `inw`, line 86)
+  and on a scratch copy with only those two instructions spelled as GNU as's bytes
+  (`/mnt/steamlib/lanes/px76/pax-k5bytes`, never committed: it shows whether anything else stands
+  between K5 and green) were queued in the same job at the hand-back.
 
 ### Follow-ons (for the orchestrator to file or drop)
 
