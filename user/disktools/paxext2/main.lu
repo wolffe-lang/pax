@@ -7,8 +7,6 @@ use diskio
 use std.x.crypto.sha2
 
 struct Group {
-    bitmap: List[byte],
-    imap: List[byte],
     bb: int,
     ib: int,
     table: int,
@@ -17,7 +15,9 @@ struct Group {
     dirs: int,
 }
 
-struct Fs { fd: int, base: int, blocks: int, ipg: int, groups: List[Group], next: int }
+const EXT2_MAX: int = 17592186040320 // (2^32 - 1) blocks of 4096 bytes
+
+struct Fs { fd: int, base: int, blocks: int, bpg: int, ipg: int, groups: List[Group], next: int }
 
 fn has_super(group: int) -> bool {
     if group == 0 || group == 1 { return true }
@@ -33,18 +33,45 @@ fn mark(mut bitmap: List[byte], n: int) {
     bitmap[n / 8] = (bitmap[n / 8] as int | 1 << n % 8) as byte
 }
 
-fn used(bitmap: List[byte], n: int) -> bool { bitmap[n / 8] as int & 1 << n % 8 != 0 }
+fn mark_range(mut bitmap: List[byte], start: int, end: int) {
+    var at = start
+    while at < end && at % 8 != 0 { mark(mut bitmap, at); at += 1 }
+    while at + 8 <= end { bitmap[at / 8] = 255 as byte; at += 8 }
+    while at < end { mark(mut bitmap, at); at += 1 }
+}
+
+// Allocations are monotonically increasing, never freed while formatting.
+// Keep the used prefix length as the free count; materialize maps transiently.
+// Inode allocation checks the same invariant before advancing its prefix.
+fn block_bitmap(fs: Fs, g: int) -> List[byte] {
+    var b = diskio.zeros(4096)
+    let first = g * fs.bpg
+    let n = if fs.blocks - first < fs.bpg then fs.blocks - first else fs.bpg
+    mark_range(mut b, 0, n - fs.groups[g].free)
+    mark_range(mut b, n, 32768)
+    b
+}
+
+fn inode_bitmap(fs: Fs, g: int) -> List[byte] {
+    var b = diskio.zeros(4096)
+    mark_range(mut b, fs.ipg, 32768)
+    mark_range(mut b, 0, fs.ipg - fs.groups[g].ifree)
+    b
+}
 
 fn reserve(mut fs: Fs) -> int ! {full} {
     while fs.next < fs.blocks {
-        let n = fs.next
-        fs.next += 1
-        let g = n / 32768
-        if !used(fs.groups[g].bitmap, n % 32768) {
-            mark(mut fs.groups[g].bitmap, n % 32768)
+        let g = fs.next / fs.bpg
+        let data = fs.groups[g].table + fs.ipg / 16
+        if fs.next < data { fs.next = data }
+        if fs.next >= fs.blocks { return full }
+        if fs.groups[g].free > 0 {
+            let n = fs.next
+            fs.next += 1
             fs.groups[g].free -= 1
             return n
         }
+        fs.next = (g + 1) * fs.bpg
     }
     full
 }
@@ -57,7 +84,7 @@ fn zero_blocks(fs: Fs, start: int, count: int) -> () ! {io} {
     var at = 0
     while at < count {
         region chunk {
-            let n = if count - at > 16 then 16 else count - at
+            let n = if count - at > 256 then 256 else count - at
             block_write(fs, start + at, diskio.zeros(n * 4096))?
             at += n
         }
@@ -66,32 +93,38 @@ fn zero_blocks(fs: Fs, start: int, count: int) -> () ! {io} {
 
 fn layout(fd: int, base: int, bytes: int, requested: int) -> Fs ! {invalid} {
     let blocks = bytes / 4096
-    let count = (blocks + 32767) / 32768
-    let want = if requested > 0 {
-        requested
-    } else {
-        bytes / (if bytes < 536870912 then 4096 else 16384)
-    }
-    let ipg = ((want + count - 1) / count + 15) / 16 * 16
+    // mke2fs 1.47.0: small below 512 MiB, default below 4 TiB,
+    // big (32 KiB/inode) from 4 TiB through this format's 16 TiB bound.
+    let ratio = if bytes < 536870912 then 4096 else if bytes < 4398046511104 then 16384 else 32768
+    let want = if requested > 0 then requested else bytes / ratio
+    if want > 4294967295 { return invalid }
+    var bpg = 32768
+    var count = (blocks + bpg - 1) / bpg
+    var ipg = ((want + count - 1) / count + 15) / 16 * 16
     if ipg < 16 || ipg > 32768 { return invalid }
+    // Do not silently drop a final group which is too short for its
+    // metadata. A slightly smaller, bitmap-aligned group size preserves
+    // every requested block. Usually the conventional 32768 fits as-is.
+    while true {
+        let last = blocks - (count - 1) * bpg
+        let prefix = if has_super(count - 1) then 1 + (count * 32 + 4095) / 4096 else 0
+        if last > prefix + 2 + ipg / 16 { break }
+        bpg -= 8
+        if bpg < 2048 { return invalid }
+        count = (blocks + bpg - 1) / bpg
+        ipg = ((want + count - 1) / count + 15) / 16 * 16
+    }
+    if count * ipg > 4294967295 { return invalid }
     let tables = ipg / 16
     let gdt = (count * 32 + 4095) / 4096
     var groups = List[Group]()
     for g in 0..count {
-        let first = g * 32768
-        let n = if blocks - first < 32768 then blocks - first else 32768
+        let first = g * bpg
+        let n = if blocks - first < bpg then blocks - first else bpg
         let prefix = if has_super(g) then 1 + gdt else 0
         let taken = prefix + 2 + tables
         if taken >= n { return invalid }
-        var bitmap = diskio.zeros(4096)
-        var imap = diskio.zeros(4096)
-        for b in 0..taken { mark(mut bitmap, b) }
-        for b in n..32768 { mark(mut bitmap, b) }
-        for b in ipg..32768 { mark(mut imap, b) }
-        if g == 0 { for b in 0..10 { mark(mut imap, b) } }
         (mut groups).push(Group {
-            bitmap: bitmap,
-            imap: imap,
             bb: first + prefix,
             ib: first + prefix + 1,
             table: first + prefix + 2,
@@ -100,7 +133,7 @@ fn layout(fd: int, base: int, bytes: int, requested: int) -> Fs ! {invalid} {
             dirs: if g == 0 then 1 else 0,
         })
     }
-    Fs { fd: fd, base: base, blocks: blocks, ipg: ipg, groups: groups, next: 0 }
+    Fs { fd: fd, base: base, blocks: blocks, bpg: bpg, ipg: ipg, groups: groups, next: 0 }
 }
 
 fn finish(fs: Fs, epoch: int, label: str, seed: str) -> () ! {io} {
@@ -108,17 +141,21 @@ fn finish(fs: Fs, epoch: int, label: str, seed: str) -> () ! {io} {
     var gd = diskio.zeros((count * 32 + 4095) / 4096 * 4096)
     var free = 0, ifree = 0
     for g in 0..count {
-        let group = copy fs.groups[g]
-        diskio.put(mut gd, g * 32, group.bb, 4)
-        diskio.put(mut gd, g * 32 + 4, group.ib, 4)
-        diskio.put(mut gd, g * 32 + 8, group.table, 4)
-        diskio.put(mut gd, g * 32 + 12, group.free, 2)
-        diskio.put(mut gd, g * 32 + 14, group.ifree, 2)
-        diskio.put(mut gd, g * 32 + 16, group.dirs, 2)
-        free += group.free
-        ifree += group.ifree
-        block_write(fs, group.bb, group.bitmap)?
-        block_write(fs, group.ib, group.imap)?
+        region maps {
+            let group = copy fs.groups[g]
+            diskio.put(mut gd, g * 32, group.bb, 4)
+            diskio.put(mut gd, g * 32 + 4, group.ib, 4)
+            diskio.put(mut gd, g * 32 + 8, group.table, 4)
+            diskio.put(mut gd, g * 32 + 12, group.free, 2)
+            diskio.put(mut gd, g * 32 + 14, group.ifree, 2)
+            diskio.put(mut gd, g * 32 + 16, group.dirs, 2)
+            free += group.free
+            ifree += group.ifree
+            let bm = block_bitmap(fs, g)
+            let im = inode_bitmap(fs, g)
+            block_write(fs, group.bb, bm)?
+            block_write(fs, group.ib, im)?
+        }
     }
     var sb = diskio.zeros(1024)
     diskio.put(mut sb, 0, count * fs.ipg, 4)
@@ -128,8 +165,8 @@ fn finish(fs: Fs, epoch: int, label: str, seed: str) -> () ! {io} {
     diskio.put(mut sb, 16, ifree, 4)
     diskio.put(mut sb, 24, 2, 4)
     diskio.put(mut sb, 28, 2, 4)
-    diskio.put(mut sb, 32, 32768, 4)
-    diskio.put(mut sb, 36, 32768, 4)
+    diskio.put(mut sb, 32, fs.bpg, 4)
+    diskio.put(mut sb, 36, fs.bpg, 4)
     diskio.put(mut sb, 40, fs.ipg, 4)
     diskio.put(mut sb, 48, epoch, 4)
     diskio.put(mut sb, 54, 65535, 2)
@@ -157,14 +194,14 @@ fn finish(fs: Fs, epoch: int, label: str, seed: str) -> () ! {io} {
         g -= 1
         if has_super(g) {
             diskio.put(mut sb, 90, g, 2)
-            diskio.write_at(fs.fd, fs.base + g * 32768 * 4096 + if g == 0 then 1024 else 0, sb)?
-            block_write(fs, g * 32768 + 1, gd)?
+            diskio.write_at(fs.fd, fs.base + g * fs.bpg * 4096 + if g == 0 then 1024 else 0, sb)?
+            block_write(fs, g * fs.bpg + 1, gd)?
         }
     }
     fs_sync(fs.fd)?
 }
 
-fn run(args: List[str]) -> () ! {invalid, io, full} {
+fn run(args: List[str]) -> () ! {invalid, io, full, too_large} {
     var source = "", attrs_path = "", label = "pax", seed = ""
     var inodes: int = 0, base: int = 0
     var excludes = List[str]()
@@ -190,9 +227,9 @@ fn run(args: List[str]) -> () ! {invalid, io, full} {
     if i + 2 != args.len { return invalid }
     let bytes = diskio.size(args[i])?
     let path = args[i + 1]
+    if bytes > EXT2_MAX { return too_large }
     if label.len > 16 ||
         bytes < 8388608 ||
-        bytes > 4294967296 ||
         bytes % 4096 != 0 ||
         base % 512 != 0 ||
         base > 9223372036854775807 - bytes {
@@ -205,8 +242,8 @@ fn run(args: List[str]) -> () ! {invalid, io, full} {
     let attrs = attributes(attrs_path, epoch)?
     let nodes = collect(source, attrs, excludes, epoch)?
     // Validate the geometry and inode budget before opening the destination.
-    let planned = layout(-1, base, bytes, inodes)?
-    for n in nodes { if n.ino > planned.groups.len * planned.ipg { return full } }
+    var fs = layout(-1, base, bytes, inodes)?
+    for n in nodes { if n.ino > fs.groups.len * fs.ipg { return full } }
     let fd = fs_open_mode(path, 3) else |_| { return io }
     defer fs_close(fd) else |_| {}
     let dst = fs_fstat_record(fd) else |_| { return io }
@@ -222,10 +259,10 @@ fn run(args: List[str]) -> () ! {invalid, io, full} {
         if dst[0] != 0 || base != 0 { return invalid }
         fs_truncate(fd, bytes) else |_| { return io }
     }
-    var fs = layout(fd, base, bytes, inodes)?
+    fs.fd = fd
     for g in 0..fs.groups.len {
         zero_blocks(fs, fs.groups[g].table, fs.ipg / 16)?
-        if has_super(g) { zero_blocks(fs, g * 32768, 1 + (fs.groups.len * 32 + 4095) / 4096)? }
+        if has_super(g) { zero_blocks(fs, g * fs.bpg, 1 + (fs.groups.len * 32 + 4095) / 4096)? }
     }
     for n in nodes {
         if !n.primary { continue }
