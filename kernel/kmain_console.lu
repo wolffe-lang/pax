@@ -265,6 +265,11 @@ export fn kmain() {
     }
     sync.enable()
     xhci.wait_ready()
+    // px78: the USB disks (a boot stick) once xHCI's first pass is done,
+    // before init: kernel/usb_storage probes each, kernel/block names it.
+    let usb_saved = sync.irq_save()
+    let _usb = block.attach_usb()
+    sync.irq_restore(usb_saved)
 
     // px67: the run list is the tree's (`/` on the disk when it is there,
     // else the initramfs's), read whole into a frame of its own. px68:
