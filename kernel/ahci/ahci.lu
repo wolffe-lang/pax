@@ -7,6 +7,10 @@
 //! R-px75b-2: §10.1.2 makes HR optional; idle each port instead. A test
 //! command-line flag ahci-reset exercises the optional whole-HBA reset.
 //! All entry points run with IF clear on the kernel's single CPU.
+//! px78 (pax#240): a SATA controller the firmware set to RAID mode (PCI
+//! class 01.04, a RAID bus controller: PCI Local Bus 3.0 Appendix D), as
+//! Intel's RST is, is named on the boot log and attached by nothing; the
+//! line says what to change. Only class 01.06.01 (AHCI 1.0) is driven.
 use boot_info
 use clock
 use frames
@@ -288,6 +292,46 @@ fn sector_sizes(w106: u64, w117: u64, w118: u64) -> (u64, u64) {
     (logical, physical)
 }
 fn supported_logical(logical: u64) -> bool { logical == 512 }
+/// px78: what a function's vendor and 24-bit class code (`pci.class_code`)
+/// say of its storage mode: 1 an Intel controller in RST/RAID mode (class
+/// 01.04), 2 another vendor's RAID controller, 0 neither.
+pub fn raid_kind(vendor: u64, class: u64) -> u64 {
+    if class >> 8 != 0x0104 { 0 } else if vendor == 0x8086 { 1 } else { 2 }
+}
+fn put_bdf(b: u64) {
+    log.hex_n(b >> 16, 2); log.put(":"); log.hex_n((b >> 8) & 31, 2); log.put("."); log.hex_n(b & 7, 1)
+}
+/// The line a RAID-mode controller gets: kasumi's would read
+/// `AHCI: Intel RST/RAID mode at 00:17.0: switch the firmware to AHCI`.
+fn raid_line(b: u64, vendor: u64, device: u64, kind: u64) {
+    if kind == 1 {
+        log.put("AHCI: Intel RST/RAID mode at "); put_bdf(b)
+        log.put(": switch the firmware to AHCI")
+    } else {
+        log.put("AHCI: a RAID controller "); log.hex_n(vendor, 4); log.put(":"); log.hex_n(device, 4)
+        log.put(" at "); put_bdf(b); log.put(" (class 01.04) is not driven")
+    }
+    log.end()
+}
+/// px78: every RAID-mode function on the bus named (once, at start).
+fn raid_report() {
+    var i: u64 = 0
+    while i < pci.count() {
+        let kind = raid_kind(pci.vendor(i), pci.class_code(i))
+        if kind != 0 { raid_line(pci.bdf(i), pci.vendor(i), pci.device(i), kind) }
+        i += 1
+    }
+}
+/// px78: the class check over synthetic configuration bytes (a QEMU leg
+/// cannot present Intel's RST) and the line kasumi's 00:17.0 would get.
+fn check_raid() {
+    let ok = raid_kind(0x8086, 0x010400) == 1 && raid_kind(0x1000, 0x010400) == 2 &&
+        raid_kind(0x8086, 0x010601) == 0 && raid_kind(0x1b21, 0x010601) == 0 &&
+        raid_kind(0x8086, 0x010700) == 0 && raid_kind(0x8086, 0x010000) == 0
+    log.put("ahci-check: kasumi's 00:17.0 in RAID mode reads: ")
+    raid_line(0x17 << 8, 0x8086, 0x43d2, raid_kind(0x8086, 0x010400))
+    log.line(if ok { "PASS ahci-check: class 01.04 refused by name (Intel RST and other RAID), 01.06.01 driven" } else { "FAIL ahci-check: RAID class" })
+}
 fn check_completion() {
     let f = alloc()
     let rf = alloc()
@@ -509,7 +553,8 @@ pub fn start(pml4: u64, room: u64) -> u64 {
     let f = alloc()
     if f == 0 { return REFUSED }
     unsafe { root = f + frames.hhdm() }
-    if boot_info.cmdline_has("ahci-check") { check_completion() }
+    if boot_info.cmdline_has("ahci-check") { check_completion(); check_raid() }
+    raid_report()
     var i = pci.find_class(0x010601, 0)
     while i != pci.MAX && controllers() < MAXCTLS {
         let number = controllers()
