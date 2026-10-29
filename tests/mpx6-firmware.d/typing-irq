@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# tests/mpx6-firmware.d/typing-irq — px74's typing rows through USB with
+# the xHCI on MSI only, then on INTx only (px76, contract item 3).
+#
+#   tests/mpx6-firmware.d/typing-irq mpx3-console|mpx3-shell [--tier T] [--firmware F]
+#
+# Runs tools/usb-typing SUITE (the suite's typing rows on a USB keyboard
+# at a root port and behind a hub, its images reused) once under
+# PAX_USB_IRQ=msi and once under PAX_USB_IRQ=intx (tools/qemu-run: QEMU
+# 8.2's qemu-xhci has neither property, so nec-usb-xhci, R-px76-5), and
+# holds every fresh session log to the transport it was given: `xhci 1:
+# ports N MSI vector 80 …` or `xhci 1: ports N INTx <line> …`. CI runs it
+# in the all tier, after the suite's own typing step.
+set -euo pipefail
+. "$(dirname "$0")/../../tools/lib.sh"
+suite=${1:-}
+case $suite in mpx3-console|mpx3-shell) shift ;; *) die "usage: typing-irq mpx3-console|mpx3-shell [--tier T] [--firmware F]" ;; esac
+out=$PAX_BUILD/usb-typing-$suite
+for irq in msi intx; do
+    rm -rf "$out"
+    PAX_USB_IRQ=$irq python3 -I "$PAX_ROOT/tools/usb-typing" "$suite" "$@"
+    want='MSI vector 80 '
+    [ "$irq" = msi ] || want='INTx [0-9]+ '
+    n=0
+    for f in "$out"/*/*; do
+        grep -aqE "^xhci 1: ports [0-9]+ $want" "$f" || die "FAIL typing-irq $suite $irq: $f was not on $irq"
+        n=$((n + 1))
+    done
+    [ "$n" -gt 0 ] || die "FAIL typing-irq $suite $irq: no session logs"
+    mkdir -p "$PAX_BUILD/usb-typing-irq/$suite-$irq"
+    cp -R "$out"/. "$PAX_BUILD/usb-typing-irq/$suite-$irq/"
+    echo "PASS typing-irq $suite $irq: $n sessions, every one on $irq"
+done
