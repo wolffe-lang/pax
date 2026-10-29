@@ -4,17 +4,25 @@ Crawl 54. Contract `sprints/pax/75b-ahci/px75b-ahci.md`, with its
 2026-10-28 addendum (the waits are deadlines on px76's clock API, behind
 a local PIT shim until px76 merges; R-px75b-2 recommends B). Branch
 `px75b` from trunk `6ccfe3fe`, rebased onto trunk `96b7f90f` (px77a's
-merge, notes only) before the PR. Two models wrote it: a Codex lane
+merge, notes only) before the PR, and onto `ad732049` (px84's merge) when
+the orchestrator announced it. That rebase met two conflicts, both kept
+whole: README's Disks row (SATA beside px84's file data past 2 TiB) and
+its budget line (the AHCI-root job beside the installer's tiered bound),
+and tests/ci-plan's kernel/nvme row, which now reaches mpx6-nvme, px84's
+mpx6-disktools and mpx6-ahci. `tests/ci-budgets.py` merged cleanly (px84's
+`tier_bound` and `install_floors` beside `ahci_root_floor`). The shas
+below are the final branch's; a run names the head it ran at. Two models wrote it: a Codex lane
 (GPT-6-Astra) built the driver, the harness, the rows and the plants and
-handed back at `9355a03f` (rebased `44f86075`) with a detached
+handed back at `9355a03f` (rebased `e3596f53`) with a detached
 qualification job running; it then hit its weekly limit. A Claude lane
 (Opus 5.5) took over from that head: it found the cause of that job's
 red, reviewed the source against the specifications, fixed two defects
 in the clock shim (R-px75b-7), strengthened one row, measured and wired
-R-px75b-6, ran the remaining legs and regressions, and wrote this note.
-The prediction was committed first (`c50e8b75`,
+R-px75b-6, ran the remaining legs and regressions, added px84's
+past-2-TiB row on AHCI (R-px75b-8), and wrote this note.
+The prediction was committed first (`66da28a0`,
 `notes/px75b/prediction.txt`), before the first source change
-(`2a56dbb5`) and before the guest was measured.
+(`6157166b`) and before the guest was measured.
 
 ## 1. Forbidden, and what was read
 
@@ -74,7 +82,7 @@ only; kasumi never touched.
 
 ## 3. Prediction, scored
 
-`notes/px75b/prediction.txt` (`c50e8b75`), written before the first
+`notes/px75b/prediction.txt` (`66da28a0`), written before the first
 source change:
 
 | prediction | measured | |
@@ -101,7 +109,7 @@ QEMU 8.2.2, recorded by the first lane in `logs/test8.log` with
 | row | holds |
 |---|---|
 | A0-build | kmain_console on the leg's tier; a build or guest failure is a FAIL, never exit 2 |
-| A1-identify-inventory | the real installer's `--inventory` (`user/install`), every line of its report the guest's: device, size, sector, state, identity numbers, model and serial; four identities, the internal-space serial `PX75B B2 INNER` among them (strengthened at `217bff07` from the model lines alone) |
+| A1-identify-inventory | the real installer's `--inventory` (`user/install`), every line of its report the guest's: device, size, sector, state, identity numbers, model and serial; four identities, the internal-space serial `PX75B B2 INNER` among them (strengthened at `0d3dfc8d` from the model lines alone) |
 | A1-identify-files | `/sys/block/{sda,sdb,sdc,nvme0n1}/device/{model,serial}` the guest's (R-px75b-4: padding trimmed, the serial byte for byte) |
 | A2-linux-name-order | `sda` 8:0, `sdb` 8:16, `sdc` 8:32 across the two controllers and their gaps, `sda`'s size, its `ro` |
 | A3/A5-before/after-differential | each disk's 64 MiB read whole, FNV the guest's, before and after the writes |
@@ -116,7 +124,7 @@ QEMU 8.2.2, recorded by the first lane in `logs/test8.log` with
 | A11-throughput | 1 GiB written, read back and checked on a tmpfs image, byte-identical to the guest's; the times printed, no bar (the full and all tiers; the pr tier says SKIP by name) |
 | A12-root-fstab | `--boot-ahci`: `/` from `root=PARTUUID=` on `sda2`, `/etc/fstab` by PARTUUID mounting `sdb1`, files written and read (the full and all tiers) |
 
-At `5ae7388c` (the code's final head; later commits are notes, docs and CI budgets), `logs/b4b.sum` and `logs/b4b-ahci-*.log`, every row PASS, 0 FAIL, the pr tier's SKIP line absent (`--rows all`):
+At `5ae7388c` (rebased `2d22fe6d`: the driver and the rows as they stand, before the rebase onto px84's trunk and R-px75b-8), `logs/b4b.sum` and `logs/b4b-ahci-*.log`, every row PASS, 0 FAIL, the pr tier's SKIP line absent (`--rows all`):
 
 | leg | seconds (KVM; the build included) | PASS lines |
 |---|---:|---:|
@@ -130,9 +138,11 @@ and the guest's), A10's two `ahci-check` lines and the suite's own
 `mpx6-ahci: PASS (tier firmware)`; the one LOUD line
 names the recorded guest. The pr tier's rows alone (A11 and A12 said
 SKIP by name) at `ddda81b3` (`b5358c83` rebased), both firmwares:
-`logs/b4a-ahci-native-{bios,uefi}.log`.
+`logs/b4a-ahci-native-{bios,uefi}.log`. After the rebase onto `ad732049`, at
+`e756cbb8`: native BIOS again, every row PASS in 104 s
+(`logs/b5-ahci-native-bios.log`).
 
-The first lane's three legs at `9355a03f` (`44f86075`), before this
+The first lane's three legs at `9355a03f` (`e3596f53`), before this
 pass's changes: native BIOS `logs/test8.log` (the record), native UEFI
 `logs/ahci-native-uefi.log`, release BIOS and UEFI `logs/ahci-release.log`,
 all PASS.
@@ -234,6 +244,10 @@ on the missing `sgdisk` alone (its rows before the oracle PASS). At
 | mpx6-disktools | 205 | 53 | 0 |
 | mpx6-fsck | 247 | 77 | 0 |
 
+After the rebase, at `e756cbb8` (`logs/b5.sum`): mpx6-disktools native BIOS
+PASS in 218 s, its high rows now three (`B-high-virtio`, `B-high-nvme`,
+`B-high-ahci`, CI's shape: PAX's bytes, the byte oracle and e2fsck).
+
 Every one against its committed Linux record (LOUD by name) or its own
 oracles; no row said SKIP. The kernel's change reaches all of them: every
 q35 boot now passes kernel/ahci's discovery of the ICH9 controller and
@@ -260,10 +274,19 @@ bound=5100s sizing-floor=3666s margin=1434s`, exit 1
 (`logs/final-ci-budgets-red85.log`); at the head's 90, PASS
 (`logs/final-ci-budgets.log`).
 
+`B-high-ahci`, seen red on hasu: a scratch clone at `14551755` with the
+command FIS's LBA bits 32 to 47 written as zero (`kernel/ahci`'s
+`command`), `tests/mpx6-disktools.d/high.py` gave `PASS B-high-virtio`,
+`PASS B-high-nvme`, then on AHCI `FAIL B-high-file: open: No such file or
+directory` (the high inode's reads wrapped below 2 TiB), exit 1
+(`logs/b7-plant-lba-high.log`). The same break would also redden
+mpx6-ahci's A7-LBA48; neither lane planted it before, so this is the
+break's first red.
+
 ### 4.6 R-px75b-6, measured
 
 The first lane took the AHCI-root pass out of mpx5-users' job
-(`01ab23c4`) after measuring it on hasu (`logs/users-ahci-root.log`, `.rc`
+(`e0e750c3`) after measuring it on hasu (`logs/users-ahci-root.log`, `.rc`
 0: 25 boots through tools/qemu-rootdisk, 28 rows SKIP for the disk by
 px67's rule, the suite's exit 0; 219 s with the disks' first making).
 Measured since:
@@ -294,6 +317,32 @@ and checked), the plant run's `pr` rows reached A10 in 194 s with the
 build in CI, and the release legs' LLVM build (about 370 s each on hasu)
 is the larger part of the all tier's four legs. The job has not yet run
 its four legs whole in CI: this PR's run is the first.
+
+### 4.7 Past 2 TiB on AHCI (R-px75b-8)
+
+px84's high-offset witness (`tests/mpx6-disktools.d/high.py`: a sparse
+ext2 volume past 2 TiB whose file's inode and both data blocks lie beyond
+2 TiB, written and read by PAX's `/bin/bigdisk`, checked by the byte
+oracle and `e2fsck -fn`) runs a third transport, `('ahci', 'sda')` on
+`--ahci`, beside virtio and NVMe (`797fbd54`); `tools/ci-tiers.map` and
+tests/ci-plan send kernel/ahci and its clock to mpx6-disktools
+(`7711c7b4`, `e756cbb8`). With hasu's Linux 7.2.4 as the guest
+(`logs/b6-high-live.log`, at `14551755`, 35 s for all three):
+
+    PASS B-high-linux-ahci: Linux writes/PAX reads; PAX writes/Linux reads
+    PASS B-high-ahci: inode, both data blocks and readback beyond 2 TiB; e2fsck clean
+
+and the same two lines for virtio and NVMe, `HIGH DISK: PASS; 0 SKIP; live
+Linux=True`. That needed one fix to px63's guest tool: `tools/linux-blk`
+loaded `virtio_blk` and `ext4` but not the `virtio_pci` transport, which
+hasu's NixOS kernel has as a module (kasumi's builds it in), nor `ext2`,
+which it needs for `mount -t ext2`; it now loads both where they are
+modules, as the nodes suite's guest tool does, and skips built-ins, so
+kasumi's guest is unchanged (`14551755`). Its first live run here, before
+the fix, failed for that reason (`logs/b5-high-live.log`: `stat: can't
+stat '/dev/vda'`). The cost in CI: px84's two high rows took 7 s and 8 s
+of mpx6-disktools' 518 s job in run 40833734979, against its 90-minute
+bound; the third is of their size.
 
 ## 5. Done-when
 
@@ -326,17 +375,17 @@ its four legs whole in CI: this PR's run is the first.
   A10) and a real 512e disk's sizes against the guest (A9). px84 owns the
   bound itself.
 - **R-px75b-6, the AHCI-root leg.** (A) its own job, `mpx5-users-ahci`
-  (`56b52f77`): it builds mpx5-users' native BIOS images and boots all 25
+  (`fbc4a304`): it builds mpx5-users' native BIOS images and boots all 25
   with `/` on AHCI, planned as every suite: the full and all tiers, and a
   pull request that changes kernel/ahci or its clock (`tools/ci-tiers.map`,
-  `a9c9f626`), the users suite's script or the root-disk tools (by the
+  `5d7775e5`), the users suite's script or the root-disk tools (by the
   derivation: its job's block names them), proven by tests/ci-plan's rows
-  (`457f921a`; 297 PASS at `ddda81b3` and again at `5bcb6cad`,
+  (`1d8bd48c`; 297 PASS at `ddda81b3` and again at `5bcb6cad`,
   `logs/b4a-ci-plan.log`, `logs/final-ci-plan.log`). Bound 90
   minutes: floor 3666 s (build 50 + CI's leg 3436, above the scaled 3432,
   + 180), 40% above it 5132 s (scaling the newer full-tier 3432 s instead:
   a 3442 s leg, a 3672 s floor, 5141 s); `tests/ci-budgets.py` holds it there from
-  `tests/ci-budgets.d/ahci-root.json` (`751489a7`). Its cost: about 59
+  `tests/ci-budgets.d/ahci-root.json` (`43896c88`). Its cost: about 59
   job-minutes in each full and all run, in parallel, so the merge gate's
   wall time is still the users job's (85 minutes before px75's NVMe step,
   plus that step). (B), the all tier plus a smoke in the full tier, has
@@ -346,6 +395,11 @@ its four legs whole in CI: this PR's run is the first.
   save the full tier's 59 job-minutes and lose the merge gate's 25-boot
   AHCI root: a module merge would first meet it on the trunk push.
   Recommended (A), implemented.
+- **R-px75b-8 (new), px84's past-2-TiB AHCI leg.** (A) a third
+  transport in mpx6-disktools' high row, with the same Linux round trip
+  locally, CI's byte oracle and e2fsck in CI; (B) a follow-on. The row
+  costs seconds against a 90-minute bound and kasumi's install target is a
+  SATA disk, so recommended (A), implemented (§4.7).
 - **R-px75b-7 (new), the bootstrap clock.** Every AHCI wait is a
   deadline on `kernel/ahci_clock`, the PIT shim, until px76's clock
   merges. Two defects found in review: (1) `now_ns` computed
@@ -358,7 +412,7 @@ its four legs whole in CI: this PR's run is the first.
   (A) split the product (seconds and remainder) and refuse each AHCI
   controller by name when 100000 latched reads never change; (B) fall
   back to a loop count, a CPU-speed deadline the contract forbids; (C)
-  wait for px76. Recommended (A), implemented (`03f27937`, `090614a3`),
+  wait for px76. Recommended (A), implemented (`07b09066`, `8b66b71a`),
   witnessed by A13 on q35's `pit=off` under both firmwares and planted
   red (§4.5). The boot then goes on without SATA disks and the
   photograph names why.
@@ -367,8 +421,9 @@ its four legs whole in CI: this PR's run is the first.
 
 - [x] The driver, the names, the nodes and the identity files; `--ahci`
       and `--boot-ahci` (§4.1, docs/BOOT.md "SATA disks").
-- [x] Every row of tests/mpx6-ahci on all four legs at the final head
-      (§4.1); the first lane's legs at `9355a03f`.
+- [x] Every row of tests/mpx6-ahci on all four legs at `5ae7388c` and
+      native BIOS again after the rebase (`e756cbb8`) (§4.1); the first
+      lane's legs at `9355a03f`.
 - [x] The no-write row: three AHCI disks and an NVMe disk through login
       and the installer's inventory, every sha256 unchanged (A6).
 - [x] LBA48 past sector 2^32 (A7); 1 GiB both ways with its throughput
@@ -377,7 +432,10 @@ its four legs whole in CI: this PR's run is the first.
       `sdc` (A2).
 - [x] The boot lines for px77 (§4.3, docs/BOOT.md).
 - [x] The nodes regression found and the disk suites run (§4.4).
-- [x] Three plants red by name (§4.5).
+- [x] Three plants red by name in CI, the budget row and `B-high-ahci`
+      red on hasu (§4.5).
+- [x] px84's past-2-TiB row on AHCI, the Linux round trip both ways
+      (§4.7, R-px75b-8).
 - [x] R-px75b-6 measured and wired: `.github/workflows/ci.yml`
       (`mpx5-users-ahci`), `tools/ci-tiers.map`, `tests/ci-plan`
       (PASS, `logs/b4a-ci-plan.log`), `tests/ci-budgets.py` (§4.6).
@@ -420,7 +478,6 @@ its four legs whole in CI: this PR's run is the first.
 - pax: the AHCI-root job's budget rests on one CI observation and a scaled
   one; the next CI budget lane adds the rest to `tests/ci-budgets.d`.
 - After px76 merges: delete `kernel/ahci_clock` (the second to merge).
-- px84's past-2-TiB AHCI leg waits on this merge.
 
 ### 5.5 To prune
 
