@@ -205,6 +205,9 @@ const A_START: u64 = 4
 const A_PARTITION: u64 = 5
 const A_MODEL: u64 = 6
 const A_SERIAL: u64 = 7
+/// px78: a virtio disk's `serial` (GET_ID's string), in the disk's own
+/// directory as Linux's virtio disks have it, not under `device/`.
+const A_DSERIAL: u64 = 8
 pub const FDENT: u64 = 0x1000
 pub const FIENT: u64 = 0x1400
 const FDS_MAX: u64 = 1024 // kernel/files' FDS
@@ -402,11 +405,11 @@ fn abyte(a: u64) -> u64 {
 }
 
 /// px79: attribute `i` of a device's directory, or NONE past the last:
-/// a disk's dev, size, ro, removable; a partition's dev, start, size,
+/// a disk's dev, size, ro, removable (px78: and a virtio disk's serial); a partition's dev, start, size,
 /// partition, ro.
 fn attr_at(d: u64, i: u64) -> u64 {
     if block.partno(d) == 0 {
-        if i < 4 { i } else { NONE }
+        if i < 4 { i } else if i == 4 && block.driver(d) == block.DRV_VIRTIO { A_DSERIAL } else { NONE }
     } else {
         if i == 0 { A_DEV } else if i == 1 { A_START } else if i == 2 { A_SIZE } else if i == 3 { A_PARTITION } else if i == 4 { A_RO } else { NONE }
     }
@@ -568,7 +571,7 @@ pub fn name(e: u64) -> str {
     if e == BATTR + A_PARTITION { return "partition" }
     if e == BIDENT { return "device" }
     if e == BATTR + A_MODEL { return "model" }
-    if e == BATTR + A_SERIAL { return "serial" }
+    if e == BATTR + A_SERIAL || e == BATTR + A_DSERIAL { return "serial" }
     "online"
 }
 
@@ -640,7 +643,7 @@ pub fn parent(r: u64) -> u64 {
         return if block.partno(d) == 0 { SYSBLOCK } else { dev_ref(block.disk_of(d), BDEV) }
     }
     if e == BIDENT { return dev_ref(dev_of(r), BDEV) }
-    if e >= BATTR && e < BATTR + 8 { return dev_ref(dev_of(r), if e >= BATTR + A_MODEL { BIDENT } else { BDEV }) }
+    if e >= BATTR && e < BATTR + 9 { return dev_ref(dev_of(r), if e == BATTR + A_MODEL || e == BATTR + A_SERIAL { BIDENT } else { BDEV }) }
     if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR || e == PARTITIONS || e == MOUNTSLINK { return 0 }
     if e == 2 || e == 3 || e == 21 || e == SCMDLINE || e == SENVIRON || e == SSTAT || e == SLIMITS || e == SMOUNTS || e == SMOUNTINFO { return 1 }
     if e == KERNEL { return 4 } // px55
@@ -685,7 +688,7 @@ fn gen(r: u64) -> u64 {
     if e == SMOUNTS || e == PMOUNTS { return G_MOUNTS } // px67
     if e == SMOUNTINFO || e == PMOUNTINFO { return G_MOUNTINFO }
     if e == MOUNTSLINK { return G_LINK }
-    if e >= BATTR && e < BATTR + 8 { return G_BATTR } // px79
+    if e >= BATTR && e < BATTR + 9 { return G_BATTR } // px79; px78's A_DSERIAL
     let (isfd, _n) = fd_of(r)
     if isfd { return G_CMDLINE } // px45: not a directory (px50: a link kernel/files follows; never opened itself)
     let (isfi, _m) = fi_of(r)
@@ -786,7 +789,7 @@ pub fn size(r: u64) -> u64 {
 /// Which file system reference `r` is in: 0 `/proc`, 1 `/sys`.
 pub fn fs(r: u64) -> u64 {
     let e = entry(r)
-    if e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK || e == BDEV || e == CBDEV || e == BIDENT || (e >= BATTR && e < BATTR + 8) {
+    if e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK || e == BDEV || e == CBDEV || e == BIDENT || (e >= BATTR && e < BATTR + 9) {
         return 1 // px79: /sys's
     }
     if e <= 6 || e >= 16 { 0 } else { 1 } // px45's entries (26 and up) are /proc's
@@ -886,8 +889,8 @@ fn battr(base: u64, r: u64) -> u64 {
     }
     let a = entry(r) - BATTR
     var n: u64 = 0
-    if a == A_MODEL || a == A_SERIAL {
-        let sn = a == A_SERIAL
+    if a == A_MODEL || a == A_SERIAL || a == A_DSERIAL {
+        let sn = a != A_MODEL
         let len = block.identity_len(d, sn)
         while n < len { let b = block.identity_byte(d, sn, n); n = put_b(base, n, b) }
     } else if a == A_DEV {
