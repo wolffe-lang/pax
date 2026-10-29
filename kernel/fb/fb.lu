@@ -148,6 +148,10 @@ pub fn start(pml4: u64) -> bool {
         set_why(W_FORMAT)
         return false
     }
+    if w == 0 || h == 0 || w > 32768 || h > 32768 || pitch > 1048576 || pitch < w * 4 || pitch % 4 != 0 {
+        set_why(W_FORMAT)
+        return false
+    }
     let hhdm = frames.hhdm()
     if va < hhdm || va % PAGE != 0 {
         set_why(W_HHDM)
@@ -237,7 +241,7 @@ pub fn report() {
     log.dec(get_pages() as int)
     log.put(" pages ")
     log.dec(get_tables() as int)
-    log.put(" tables; font spleen 8x16, ")
+    log.put(if screen.scale() == 2 { " tables; font spleen 8x16 at 2x, " } else { " tables; font spleen 8x16, " })
     log.dec(screen.cols() as int)
     log.put("x")
     log.dec(screen.rows() as int)

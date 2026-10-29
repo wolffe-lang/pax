@@ -1,0 +1,35 @@
+//! member: false
+// px76: same renderer on a padded, non-8-byte pitch and non-default masks.
+use frames
+use log
+use paging
+use panic
+use screen
+use serial
+extern "c" fn pax_exit(v: u8)
+export fn pax_interrupt(_frame: u64) -> u64 { panic.halt() }
+export fn pax_thread_exit() { panic.halt() }
+fn read(a: u64) -> u64 { unsafe { (a as *u32).read_volatile() as u64 } }
+fn check(ok: bool, name: str) {
+    log.put(if ok { "PASS METAL " } else { "FAIL METAL " }); log.line(name)
+    if !ok { unsafe { pax_exit(0x11) }; panic.halt() }
+}
+export fn kmain() {
+    serial.init()
+    frames.start()
+    let pml4 = paging.start()
+    let p = frames.alloc() else 0
+    check(p != 0, "screen scratch page")
+    let va: u64 = 0xffffa10000000000
+    let mapped = paging.map(pml4, va, p, paging.RW | paging.NX) else 9
+    check(mapped != 9, "screen scratch mapping")
+    // 16x32 pixels, 68 bytes per row: four padding bytes.
+    check(screen.attach(va, 16, 32, 68, 0, 8, 16), "padded pitch accepted")
+    for b in "\x1b[?25l\x1b[2J\x1b[H\x1b[41m \r\n ".bytes() { screen.put((b as int) as u8) }
+    // Red background uses the supplied red shift 0, not assumed BGR.
+    check(read(va) == 0xaa && read(va + 16 * 68) == 0xaa, "padded rows and RGB masks")
+    check(!screen.attach(va, 16, 32, 60, 0, 8, 16), "short pitch refused")
+    check(!screen.attach(va, 16, 32, 68, 0, 4, 16), "overlapping masks refused")
+    unsafe { pax_exit(0x10) }
+    panic.halt()
+}
