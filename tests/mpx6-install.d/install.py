@@ -83,7 +83,12 @@ if fault=='invalid-manifest':
     (source/'bin/paxext2').write_text('#!/bin/sh\nprev=\nfor arg do\n if [ "$prev" = --attrs ]; then printf "not a manifest\\n" > "$arg"; fi\n prev=$arg\ndone\nexec /bin/paxext2.real "$@"\n')
 seed='px71-'+games+'-'+name
 minor,seq=(16,2) if name=='vdb' else (32,3)
-capacity=77611520 if fault=='enospc' else 536870912
+capacity=77611520 if fault=='enospc' else int(os.environ.get('PAX_INSTALL_CAPACITY','536870912'))
+assert capacity >= 77611520 and capacity % 512 == 0
+assert not fault or capacity in (77611520,536870912), 'large-image faults need a bounded guard, never a full-hole hash'
+root_bytes=min(17592186040320,(capacity-33*512)//4096*4096-69206016)
+ratio=4096 if root_bytes < 536870912 else 16384 if root_bytes < 4398046511104 else 32768
+assert shutil.disk_usage(work).free > root_bytes//ratio*256 + (2<<30), 'insufficient space for initialized inode tables'
 token=f'ERASE /dev/{name} 254:{minor}-seq{seq} {capacity} {seed}'
 if fault=='wrong-token':token+='-WRONG'
 script=work/'install.sh'
@@ -114,13 +119,15 @@ run([repo/'tools/mkimage','--conf',repo/'boot/limine-initramfs.conf','--add',wor
 with (work/'source-guard.img').open('wb') as f:f.truncate(8*1024*1024)
 with (work/'target.img').open('wb') as f:f.truncate(capacity)
 guard=sha(work/'source-guard.img')
-blank=sha(work/'target.img')
-cmd=[repo/'tools/qemu-halt','--accel','tcg','--firmware',os.environ.get('PAX_INSTALL_FIRMWARE','bios'),'--timeout','1200','--elf',kernel,
+blank=sha(work/'target.img') if fault else None
+cmd=[repo/'tools/qemu-halt','--accel','tcg','--firmware',os.environ.get('PAX_INSTALL_FIRMWARE','bios'),'--timeout',os.environ.get('PAX_INSTALL_TIMEOUT','1200'),'--elf',kernel,
      '--serial',work/'install.serial','--marker','halt','--qemu','-m','--qemu','1536M','--drive',str(work/'source-guard.img')+',ro']
 if name=='vdc':cmd+=['--drive',str(work/'source-guard.img')+',ro']
 if guided:cmd+=['--type',work/'keys','--prompt','pax-install> ']
 cmd+=['--drive',str(work/'target.img')+(',ro' if fault=='readonly' else ''),work/'boot.iso']
-t=time.monotonic();p=run(cmd,False);(work/'install.boot').write_bytes(p.stdout+p.stderr)
+t=time.monotonic();p=run(cmd,False);install_seconds=time.monotonic()-t
+(work/'install.boot').write_bytes(p.stdout+p.stderr)
+(work/'install-timing.json').write_text(json.dumps({'capacity_bytes':capacity,'root_bytes':root_bytes,'install_seconds':install_seconds})+'\n')
 assert p.returncode==0,(p.returncode,p.stdout,p.stderr)
 s=(work/'install.serial').read_text(errors='replace')
 if fault:
@@ -147,10 +154,34 @@ records=[json.loads(x) for x in log.splitlines()]
 assert records[-1]['phase']=='result' and records[-1]['state']=='complete',records
 assert {x['phase'] for x in records if x['state']=='durable'}=={'gpt','fat',*[f'mkdir-{i}' for i in range(4)],*[f'copy-boot-{i}' for i in range(4)],'root','limine','verify-gpt',*[f'verify-boot-{i}' for i in range(4)]},records
 (work/'phases.jsonl').write_bytes(log)
+# Extract only allocated extents, retaining holes. A multi-terabyte target
+# must never be scanned or hashed from byte zero to its logical end.
 with (work/'target.img').open('rb') as f,(work/'root.img').open('wb') as out:
-    f.seek(69206016);left=467644416
-    while left:
-        b=f.read(min(left,1048576));assert b;out.write(b);left-=len(b)
+    start,end=69206016,69206016+root_bytes
+    out.truncate(root_bytes)
+    at=start
+    while at < end:
+        try: data=os.lseek(f.fileno(),at,os.SEEK_DATA)
+        except OSError as e:
+            if e.errno == 6: break # ENXIO: no more allocated data
+            raise
+        if data >= end: break
+        hole=min(os.lseek(f.fileno(),data,os.SEEK_HOLE),end)
+        f.seek(data)
+        while data < hole:
+            b=f.read(min(hole-data,1048576));assert b
+            if b.count(0) != len(b):out.seek(data-start);out.write(b)
+            data+=len(b)
+        at=hole
 p=run(['e2fsck','-fn',work/'root.img']);(work/'root.fsck').write_bytes(p.stdout+p.stderr)
 assert b'WARNING' not in p.stdout+p.stderr,p.stdout+p.stderr
-print(f'PASS I-install-{games}-{name}: guest executor complete, durable phase log, source guard unchanged, e2fsck clean; {time.monotonic()-t:.2f}s',flush=True)
+p=run(['dumpe2fs','-h',work/'root.img']);(work/'root.geometry').write_bytes(p.stdout+p.stderr)
+with (work/'root.img').open('rb') as f:
+    import struct
+    f.seek(1024);sb=f.read(1024)
+    blocks,bpg,ipg=(struct.unpack_from('<I',sb,o)[0] for o in (4,32,40))
+    groups=(blocks+bpg-1)//bpg
+    expected_ipg=((root_bytes//ratio+groups-1)//groups+15)//16*16
+    assert ipg==expected_ipg and struct.unpack_from('<I',sb,0)[0]==groups*expected_ipg,'I-density'
+print(f'PASS I-density: root {root_bytes} bytes; {groups*ipg} inodes; ratio {ratio}',flush=True)
+print(f'PASS I-install-{games}-{name}: guest executor complete, durable phase log, source guard unchanged, e2fsck clean; install {install_seconds:.2f}s; with verification {time.monotonic()-t:.2f}s',flush=True)
