@@ -28,7 +28,17 @@
 //!
 //! Registers used (offsets from the base, SDM vol. 3A Table 11-1): 0x20
 //! the local APIC ID (bits 31:24), 0xf0 the spurious-interrupt vector
-//! register (bit 8: software enable), 0x350 LVT LINT0. No Linux source;
+//! register (bit 8: software enable), 0x350 LVT LINT0; px76's tick
+//! (kernel/timer) 0x320, 0x380, 0x390, 0x3e0 and the EOI 0xb0.
+//!
+//! **x2APIC at the handover (px76, R-px76-7 A).** A firmware may hand
+//! over with IA32_APIC_BASE's EXTD (bit 10) set beside EN (bit 11): x2APIC
+//! mode, where the MMIO page is not decoded and the same registers are
+//! MSRs 0x800 + offset / 16 (SDM vol. 3A §11.12.1, Table 11-6), the ID
+//! the whole of MSR 0x802 (§11.12.5.1) and the EOI a write of 0 to
+//! 0x80b. `start` reads the mode once and `read`, `write` and `id` follow
+//! it, so the tick and the MSI destination work in either; the APIC's
+//! line is the same and x2APIC adds one line of its own. No Linux source;
 //! no other kernel's source.
 
 use log
@@ -36,6 +46,8 @@ use panic
 use paging
 
 extern "c" fn pax_apic_base() -> u64
+extern "c" fn pax_rdmsr(msr: u64) -> u64
+extern "c" fn pax_wrmsr(msr: u64, v: u64)
 
 /// Where `start` maps the local APIC's page: PML4 slot 352's first page.
 const DEVICE_VA: u64 = 0xffffb00000000000
@@ -46,6 +58,9 @@ const LINT0_EXTINT: u32 = 0x8700
 
 /// LINT0's value as Limine left it (`start` records it).
 var lint0_before: u64 = 0
+
+/// px76: x2APIC mode, as `start` found it (IA32_APIC_BASE bits 10 and 11).
+var x2mode: bool = false
 
 /// The local APIC's physical base (IA32_APIC_BASE bits 51:12).
 pub fn phys() -> u64 {
@@ -61,8 +76,21 @@ pub fn enabled() -> bool {
     ((b >> 11) & 1) == 1
 }
 
-/// The register at `offset`.
+/// Whether IA32_APIC_BASE says x2APIC mode (EXTD and EN, SDM vol. 3A
+/// §11.12.1).
+pub fn x2apic() -> bool {
+    // # Safety: as `phys`.
+    let b = unsafe { pax_apic_base() }
+    (b >> 10) & 3 == 3
+}
+
+/// The register at `offset`: its MMIO word, or in x2APIC mode its MSR
+/// (0x800 + offset / 16, the low 32 bits).
 pub fn read(offset: u64) -> u64 {
+    if unsafe { x2mode } {
+        // # Safety: cpu.S's RDMSR of an x2APIC register (0x802-0x83f).
+        return unsafe { pax_rdmsr(0x800 + offset / 16) } & 0xffffffff
+    }
     // # Safety: DEVICE_VA maps the APIC's page once `start` has run;
     // offset < 4096, 16-aligned; one 32-bit access.
     let v = unsafe { ((DEVICE_VA + offset) as *u32).read_volatile() }
@@ -70,8 +98,19 @@ pub fn read(offset: u64) -> u64 {
 }
 
 pub fn write(offset: u64, v: u32) {
+    if unsafe { x2mode } {
+        // # Safety: cpu.S's WRMSR of an x2APIC register (EOI: 0 only).
+        unsafe { pax_wrmsr(0x800 + offset / 16, v as u64) }
+        return
+    }
     // # Safety: as `read`.
     unsafe { ((DEVICE_VA + offset) as *u32).write_volatile(v) }
+}
+
+/// This CPU's APIC ID: bits 31:24 of 0x20 in xAPIC mode, the whole MSR
+/// 0x802 in x2APIC mode (SDM vol. 3A §11.12.5.1).
+pub fn id() -> u64 {
+    if unsafe { x2mode } { read(0x20) } else { read(0x20) >> 24 }
 }
 
 /// Map the APIC's page at DEVICE_VA in the structures at `pml4` (from
@@ -81,6 +120,8 @@ pub fn start(pml4: u64) {
     if !enabled() {
         panic.fail("apic: the local APIC is globally disabled; IA32_APIC_BASE", phys())
     }
+    // # Safety: written once, interrupts off.
+    unsafe { x2mode = x2apic() }
     let uncached: u64 = 24 // PWT (bit 3), PCD (bit 4)
     let n = paging.map(pml4, DEVICE_VA, phys(), paging.NX | paging.RW | uncached) else 9
     if n == 9 {
@@ -101,7 +142,7 @@ pub fn report() {
     log.put(" at ")
     log.hex(DEVICE_VA)
     log.put(", id ")
-    log.dec((read(0x20) >> 24) as int)
+    log.dec(id() as int)
     log.put(", svr ")
     log.hex(read(0xf0))
     log.put(", lint0 ")
@@ -110,4 +151,7 @@ pub fn report() {
     log.put(" -> ")
     log.hex(read(0x350))
     log.end()
+    if unsafe { x2mode } {
+        log.line("apic: x2APIC mode (IA32_APIC_BASE EXTD set at the handover): its registers by MSR")
+    }
 }
