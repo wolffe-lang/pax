@@ -5,12 +5,24 @@
 # kernel/kmain_metal.lu on five machines per firmware: q35 as it is (the
 # HPET), --no-hpet (the ACPI PM timer), --no-pit (q35's pit=off: QEMU 8.2
 # and 11.1 both offer it), --no-hpet --no-pit, and -m 8G (memory above
-# 4 GiB). On each the kernel reads ACPI (at least one table checked),
+# 4 GiB); and on UEFI a sixth, `-machine acpi=off`, where OVMF leaves
+# only its own XSDT and BGRT (no HPET table, no FADT, so no PM timer) and
+# the clock is the PIT (`metal_pitonly`: the 20 ticks timed by q35's HPET
+# read directly at 0xfed00000; SeaBIOS supplies its own tables under
+# acpi=off, so its machine is the first one again). On each the kernel
+# reads ACPI (at least one table checked, but on the PIT-only machine),
 # chooses its clock (`clock: HPET …, checked against the PM timer` on
 # the HPET's machines, `clock: PM 3579545 Hz` without one), calibrates
 # the local APIC tick against that clock (`timer: LAPIC calibrated by
-# HPET|PM …`, the same name), and 20 of its ticks take 150-300 ms by the
-# PM timer read independently (`PASS METAL LAPIC tick rate …`).
+# HPET|PM|PIT …`, the same name), and 20 of its ticks take 150-300 ms by
+# a reference read independently (`PASS METAL LAPIC tick rate …`).
+#
+# PAX_METAL_X2APIC=1 adds the x2apic leg (R-px76-7): the kernel switches
+# the local APIC to x2APIC mode before starting it (`metal_x2apic`, as a
+# firmware may hand it over), under `-cpu max,+x2apic`. It is a hand leg:
+# QEMU 8.2.2's TCG (CI's) refuses the CPUID bit (`TCG doesn't support
+# requested feature: CPUID.01H:ECX.x2apic`), and the kernel then stops by
+# name (`FAIL METAL x2APIC offered by CPUID`).
 #
 # PAX_METAL_TIER (native, release) and PAX_METAL_FIRMWARE ("bios uefi")
 # choose the build and the firmwares (tests/mpx6-firmware sets both).
@@ -24,29 +36,41 @@ mkdir -p "$work"
 "$PAX_ROOT/tools/fetch-limine"
 "$PAX_ROOT/tools/build-kernel" "${flags[@]}" --src "$PAX_ROOT/kernel/kmain_metal.lu" "$work"
 "$PAX_ROOT/tools/mkimage" "$work/kmain_metal.elf" "$work/check.iso"
+cp "$PAX_ROOT/boot/limine.conf" "$work/x2apic.conf"
+printf '\n    cmdline: metal_x2apic\n' >> "$work/x2apic.conf"
+"$PAX_ROOT/tools/mkimage" --conf "$work/x2apic.conf" "$work/kmain_metal.elf" "$work/x2apic.iso"
+cp "$PAX_ROOT/boot/limine.conf" "$work/pitonly.conf"
+printf '\n    cmdline: metal_pitonly\n' >> "$work/pitonly.conf"
+"$PAX_ROOT/tools/mkimage" --conf "$work/pitonly.conf" "$work/kmain_metal.elf" "$work/pitonly.iso"
 fail() { # leg why
     grep -aE '^(FAIL METAL|PANIC|clock:|timer:)' "$work/$1.log" | tr -d '\r' >&2 || true
     echo "FAIL METAL firmware $1: $2" >&2
     exit 1
 }
 for fw in ${PAX_METAL_FIRMWARE:-bios uefi}; do
-    for leg in hpet pm pitless pm-pitless ram8; do
-        args=() qargs=()
+    legs='hpet pm pitless pm-pitless ram8'
+    [ "$fw" != uefi ] || legs="$legs pitonly"
+    [ "${PAX_METAL_X2APIC:-0}" != 1 ] || legs="$legs x2apic"
+    for leg in $legs; do
+        args=() qargs=() iso=$work/check.iso
         source=HPET
         case $leg in
+            x2apic) iso=$work/x2apic.iso; qargs=(-cpu max,+x2apic);;
+            pitonly) iso=$work/pitonly.iso; qargs=(-machine acpi=off); source=PIT;;
             pm) args=(--no-hpet); source=PM;;
             pitless) args=(--no-pit);;
             pm-pitless) args=(--no-hpet --no-pit); source=PM;;
             ram8) qargs=(-m 8G);;
         esac
         rc=0
-        "$PAX_ROOT/tools/qemu-run" --timeout 30 --firmware "$fw" --serial "$work/$fw-$leg.log" ${args[@]+"${args[@]}"} "$work/check.iso" -- ${qargs[@]+"${qargs[@]}"} || rc=$?
+        "$PAX_ROOT/tools/qemu-run" --timeout 30 --firmware "$fw" --serial "$work/$fw-$leg.log" ${args[@]+"${args[@]}"} "$iso" -- ${qargs[@]+"${qargs[@]}"} || rc=$?
         [ "$rc" = 33 ] || fail "$fw-$leg" "exit $rc, not 33"
         grep -aqF 'PASS METAL LAPIC tick rate' "$work/$fw-$leg.log" || fail "$fw-$leg" "no tick rate row"
         grep -aq "^clock: $source " "$work/$fw-$leg.log" || fail "$fw-$leg" "the clock is not the $source"
         grep -aq "^timer: LAPIC calibrated by $source " "$work/$fw-$leg.log" || fail "$fw-$leg" "the tick was not calibrated by the $source"
         [ "$source" != HPET ] || grep -aq '^clock: HPET .*, checked against the PM timer' "$work/$fw-$leg.log" || fail "$fw-$leg" "the HPET was not checked against the PM timer"
-        tr -d '\r' < "$work/$fw-$leg.log" | grep -aE '^(clock|timer): |^PASS METAL LAPIC tick rate'
+        [ "$leg" != x2apic ] || grep -aq '^apic: x2APIC mode ' "$work/$fw-$leg.log" || fail "$fw-$leg" "the tick did not run in x2APIC mode"
+        tr -d '\r' < "$work/$fw-$leg.log" | grep -aE '^(clock|timer|metal): |^apic: x2APIC|^PASS METAL LAPIC tick rate'
         echo "PASS METAL firmware $fw $leg"
     done
 done
