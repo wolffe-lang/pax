@@ -102,6 +102,16 @@ limine_framebuffer_request:             /* px19: the screen */
         .quad LIMINE_MAGIC_0, LIMINE_MAGIC_1, 0x9d5827dcd881dd75, 0xa3148604f6fab11b
         .quad 0, 0
 
+        .globl limine_rsdp_request
+limine_rsdp_request:
+        .quad LIMINE_MAGIC_0, LIMINE_MAGIC_1, 0xc5e77b6b397e7b43, 0x27637845accdcf3c
+        .quad 0, 0
+
+        .globl limine_efi_system_table_request
+limine_efi_system_table_request:
+        .quad LIMINE_MAGIC_0, LIMINE_MAGIC_1, 0x5ceba5163eaaf6d6, 0x0a6981610cf65fcc
+        .quad 0, 0
+
         .globl limine_base_revision
         .set limine_base_revision, base_revision
 
