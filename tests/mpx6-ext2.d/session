@@ -18,7 +18,12 @@ import sys
 
 
 def lines(path):
-    b = open(path, "rb").read().replace(b"\r", b"")
+    try:
+        raw = open(path, "rb").read()
+    except OSError as e:
+        # pax#241 (px78): a guest that left no log is a named failure, not a traceback
+        sys.exit("FAIL the guest left no log: %s (%s)" % (path, e.strerror))
+    b = raw.replace(b"\r", b"")
     b = re.sub(rb"\x1b\[[0-9;?=<>]*[A-Za-z]", b"", b)
     b = re.sub(rb"\x1b[()][A-Za-z0-9]", b"", b)
     b = re.sub(rb"\x1b[c78DEHM=>]", b"", b)
