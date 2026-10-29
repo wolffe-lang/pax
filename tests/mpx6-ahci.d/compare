@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Named AHCI rows. Whole bounded sections, never greps that pass vacuously."""
+import pathlib
+import re
+import sys
+
+
+def section(text, name):
+    begin, end = f"AHCI BEGIN {name}\n", f"AHCI END {name}\n"
+    if text.count(begin) != 1 or text.count(end) != 1:
+        raise ValueError(f"missing or repeated {name} markers")
+    return text.split(begin, 1)[1].split(end, 1)[0]
+
+
+def normalized(path):
+    text = pathlib.Path(path).read_text(errors="replace").replace("\r", "")
+    return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
+
+
+def main():
+    if len(sys.argv) != 3:
+        raise ValueError("usage: compare PAX-LOG LINUX-LOG")
+    pax, linux = map(normalized, sys.argv[1:])
+    failed = False
+    for row, name in (("A1-identify-inventory", "identity"),
+                      ("A2-linux-name-order", "names"),
+                      ("A3-before-differential", "before"),
+                      ("A4-prdt-readback", "bytes"),
+                      ("A5-after-differential", "after")):
+        try:
+            got, want = section(pax, name), section(linux, name)
+            if not want.strip() or got != want:
+                raise ValueError(f"guest {want!r}; PAX {got!r}")
+            if name == "bytes":
+                reads = re.findall(r"(\d+) bytes differ", got)
+                if len(reads) != 22 or any(int(x) for x in reads):
+                    raise ValueError("expected all 22 readbacks and zero differing bytes")
+            if name == "identity" and ("PX75B-A1" not in got or "PX75B-C3" not in got):
+                raise ValueError("not the specified serials")
+            print(f"PASS {row}: {len(got.splitlines())} lines match Linux")
+        except ValueError as exc:
+            print(f"FAIL {row}: {exc}")
+            failed = True
+    if "AHCI SESSION END" not in pax or "AHCI SESSION END" not in linux:
+        print("FAIL A0-session-complete")
+        failed = True
+    return int(failed)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (OSError, ValueError) as exc:
+        print(f"FAIL A0-input: {exc}")
+        sys.exit(1)
