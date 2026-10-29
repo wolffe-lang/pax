@@ -1,0 +1,19 @@
+//! member: false
+// px76: absent UART must neither hang receive setup nor manufacture input.
+use serial
+use boot_info
+use log
+use panic
+extern "c" fn pax_exit(v: u8)
+export fn pax_interrupt(_frame: u64) -> u64 { panic.halt() }
+export fn pax_thread_exit() { panic.halt() }
+export fn kmain() {
+    let status = serial.init()
+    let absent = boot_info.cmdline_has("serial_absent")
+    if (status == 3) == absent { unsafe { pax_exit(0x11) }; panic.halt() }
+    serial.receive_on()
+    if absent && serial.ready() { unsafe { pax_exit(0x12) }; panic.halt() }
+    log.line("PASS METAL serial presence and bounded receive")
+    unsafe { pax_exit(0x10) }
+    panic.halt()
+}
