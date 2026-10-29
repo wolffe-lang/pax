@@ -6,7 +6,7 @@
 #                   [--cmd MONITOR-COMMAND]... [--type KEYS --prompt TEXT
 #                   [--keyboard serial|ps2]] [--no-screen] [--boot-disk] [--drive FILE[,ro][;DEVOPTS]]...
 #                   [--nvme FILE[,ro][;DEVOPTS]]... [--boot-nvme]
-#                   [--qemu ARG]... --marker ERE IMAGE
+#                   [--no-serial] [--qemu ARG]... --marker ERE IMAGE
 #
 # A kernel that ends in `cli; hlt` never exits QEMU, so its end cannot
 # be read from QEMU's status (tools/qemu-run's isa-debug-exit) and a
@@ -52,6 +52,13 @@
 # what was typed, step by step. Each prompt is waited for at most the
 # timeout; a missing one is NOT HALTED (the reason names the step).
 #
+# --no-serial (px76) passes tools/qemu-run's --no-serial: no COM1 at
+# all. FILE is then the kernel's own transcript, kept in its memory when
+# it finds no UART (boot/io.S's pax_serial_log, 64 KiB) and read through
+# the monitor (`memsave` at the ELF's symbols) before each look at FILE:
+# the marker, a typed step's prompt (--keyboard ps2), the size after the
+# probes. Every check below holds as it does with a UART.
+#
 # --no-screen (px19) passes tools/qemu-run's --no-screen: no display
 # device, so no framebuffer and a serial-only console. A --cmd of
 # `screendump FILE` (px19) saves the halted machine's screen.
@@ -89,7 +96,7 @@ set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
 pause=${PAX_TYPE_PAUSE:-2}
-firmware=bios serial=$PAX_BUILD/serial.log timeout=60 accel=auto elf= sym=pax_halt marker= image= cmds=() keys= prompt= keyboard=serial noscreen=() bootdisk=() qargs=() drives=()
+firmware=bios serial=$PAX_BUILD/serial.log timeout=60 accel=auto elf= sym=pax_halt marker= image= cmds=() keys= prompt= keyboard=serial noscreen=() bootdisk=() qargs=() drives=() noserial=()
 while [ $# -gt 0 ]; do
     case $1 in
         --firmware) firmware=$2; shift 2 ;;
@@ -104,6 +111,7 @@ while [ $# -gt 0 ]; do
         --prompt)   prompt=$2; shift 2 ;;
         --keyboard) keyboard=$2; shift 2 ;;
         --no-screen) noscreen=(--no-screen); shift ;;
+        --no-serial) noserial=(--no-serial); shift ;;
         --boot-disk) bootdisk+=(--boot-disk); shift ;;
         --usb-stick) bootdisk+=(--usb-stick); shift ;;
         --drive)    drives+=(--drive "$2"); shift 2 ;;
@@ -124,6 +132,7 @@ if [ -n "$keys" ]; then
     [ -n "$prompt" ] || die "--type needs --prompt"
 fi
 case $keyboard in serial|ps2) ;; *) die "--keyboard takes serial or ps2" ;; esac
+[ "${#noserial[@]}" = 0 ] || [ -z "$keys" ] || [ "$keyboard" = ps2 ] || die "--no-serial types with --keyboard ps2"
 case $timeout in ''|*[!0-9]*) die "--timeout takes whole seconds" ;; esac
 need nm mkfifo
 
@@ -152,6 +161,16 @@ mkdir -p "$(dirname "$serial")"
 # Empty the log before QEMU starts: a previous run's log at the same
 # path must never satisfy the marker.
 : > "$serial"
+# px76: --no-serial. The kernel keeps its transcript in memory when it
+# finds no UART (boot/io.S's pax_serial_log and pax_serial_log_count,
+# 64 KiB); FILE is rebuilt from it through the monitor (`memsave` of the
+# two symbols' addresses) before each look at FILE below.
+cnt_addr= log_addr=
+if [ "${#noserial[@]}" = 1 ]; then
+    cnt_addr=$(nm "$elf" | awk '$3 == "pax_serial_log_count" { print "0x" $1; exit }')
+    log_addr=$(nm "$elf" | awk '$3 == "pax_serial_log" { print "0x" $1; exit }')
+    [ -n "$cnt_addr" ] && [ -n "$log_addr" ] || die "--no-serial: $elf has no pax_serial_log symbols"
+fi
 mon=$serial.mon
 rm -f "$mon.in" "$mon.out" "$serial".cmd[0-9]* "$serial.in" "$serial.typed"
 mkfifo "$mon.in" "$mon.out"
@@ -173,10 +192,25 @@ trap cleanup EXIT
 exec 3<>"$mon.in" 4<>"$mon.out"
 [ "${#sin[@]}" = 0 ] || exec 5<>"$serial.in"
 "$PAX_ROOT/tools/qemu-run" --firmware "$firmware" --serial "$serial" --timeout $((timeout + 30)) \
-    --accel "$accel" ${sin[@]+"${sin[@]}"} ${noscreen[@]+"${noscreen[@]}"} ${bootdisk[@]+"${bootdisk[@]}"} ${drives[@]+"${drives[@]}"} "$image" -- -monitor "pipe:$mon" ${qargs[@]+"${qargs[@]}"} &
+    --accel "$accel" ${sin[@]+"${sin[@]}"} ${noscreen[@]+"${noscreen[@]}"} ${noserial[@]+"${noserial[@]}"} ${bootdisk[@]+"${bootdisk[@]}"} ${drives[@]+"${drives[@]}"} "$image" -- -monitor "pipe:$mon" ${qargs[@]+"${qargs[@]}"} &
 qpid=$!
 
 no() { printf 'qemu-halt: NOT HALTED: %s\n' "$*" | tee -a "$rec" >&2; exit 1; }
+
+mirror() { # --no-serial: FILE := the kernel's in-memory transcript
+    [ "${#noserial[@]}" = 1 ] || return 0
+    local n
+    rm -f "$serial.count" "$serial.raw"
+    # Before the kernel runs its symbols are unmapped: no answer, no file.
+    mon_cmd "memsave $cnt_addr 8 $serial.count" "$serial.mirror" || return 0
+    [ -s "$serial.count" ] || return 0
+    n=$(od -An -tu8 -N8 "$serial.count" | tr -d ' ')
+    [ "$n" -le 65536 ] || no "the in-memory transcript overflowed its 64 KiB ($n bytes)"
+    [ "$n" -gt 0 ] || return 0
+    mon_cmd "memsave $log_addr $n $serial.raw" "$serial.mirror" || return 0
+    [ ! -s "$serial.raw" ] || cp "$serial.raw" "$serial"
+    return 0
+}
 
 # --type: the session (px13).
 prompts() { # how many times the prompt has appeared since the first exec line
@@ -248,7 +282,7 @@ if [ -n "$keys" ]; then
             *)
                 want=$((want + 1))
                 t0=$SECONDS
-                until [ "$(prompts)" -ge "$want" ]; do
+                until mirror; [ "$(prompts)" -ge "$want" ]; do
                     kill -0 "$qpid" 2>/dev/null || no "QEMU ended before prompt $want ('$prompt') for step $k: $line"
                     if [ $((SECONDS - t0)) -ge "$timeout" ]; then
                         [ "$want" != 1 ] || { mkdir -p "$PAX_BUILD"; printf '%s\n%s\n' "$caller" "$image" > "$missed"; }
@@ -278,6 +312,7 @@ fi
 # Wait for the marker (or QEMU's end, or the timeout).
 start=$SECONDS
 while :; do
+    mirror
     # The marker's line must be whole: a log that ends `halt` + CR, its LF
     # still to come, would be measured one byte short and then seen to
     # "grow" (px22: once in a gauntlet's 240 boots, mpx3-shell S5).
@@ -337,6 +372,7 @@ d2=$(probe) || no "probe 2: the monitor did not answer: $d2"
 printf -- '--- probe 2 ---\n%s\n' "$d2" >> "$rec"
 rip2=$(check 2 "$d2")
 kill -0 "$qpid" 2>/dev/null || no "QEMU ended during the probes"
+mirror
 size1=$(wc -c < "$serial")
 [ "$size1" = "$size0" ] || no "the serial log grew from $size0 to $size1 bytes after the marker"
 n=0
