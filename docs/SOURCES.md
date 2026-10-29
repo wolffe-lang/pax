@@ -6,6 +6,34 @@ entries: what it consulted, at which version, for which file, and how
 **Linux kernel source is never an entry**: the allowed Linux material is the
 uapi headers, the syscall tables, `Documentation/`, and black-box behaviour.
 
+## px84 — large ext2 volumes
+
+No kernel, e2fsprogs, partition-tool, FAT-tool or bootloader implementation
+source was read. The prior ext2 layout references below, in particular
+`Documentation/filesystems/ext4/group_descr.rst` and `blockgroup.rst`,
+were read from the allowed sparse documentation checkout. PAX's own
+formatter, installer, checker and block drivers were audited.
+
+- e2fsprogs 1.47.0 in `localhost/px80-ubuntu` ran as a black box:
+  `mke2fs -n -F -t ext2 -b 4096` and the documented `/etc/mke2fs.conf`
+  established 16 KiB/inode below 4 TiB and 32 KiB/inode at 4 TiB through
+  the legacy 32-bit-block maximum. `e2fsck -fn` and `dumpe2fs -h` checked
+  8 GiB, 64 GiB, 500 GB, 4 TB and 16 TiB less one 4 KiB block.
+- The UEFI GPT and Microsoft FAT layout references already cited for px69
+  underpin the bounded independent checks: the saturated protective MBR,
+  both GPT CRCs and 64-bit LBAs, and an unchanged 64 MiB FAT32 ESP.
+  `user/disktools.pin`'s gdisk 1.0.10 and dosfstools 4.2 packages were
+  digest-checked and extracted without package scripts, then run only.
+- Linux 7.3.0-4-cachyos ran under QEMU 8.2.2, using `tools/linux-blk`
+  and the same static `user/elf/bigdisk.c` as PAX. Linux-written bytes
+  were read on PAX through virtio and NVMe; PAX-written bytes were read
+  by Linux. The file's inode and both data blocks were beyond 2 TiB.
+  Only kernel/module binaries and module dependency manifests were used.
+- The large-install fixture uses QEMU's `detect-zeroes=unmap,discard=unmap`
+  on its sparse host backing file. It does not omit any guest inode-table
+  write or enable ext4's lazy initialization. Local timings name whether
+  this backing-file optimization was enabled.
+
 ## px74 — xHCI and USB keyboards (2026-10-27)
 
 No kernel, firmware, hypervisor or USB driver's implementation source was

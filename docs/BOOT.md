@@ -611,9 +611,25 @@ and must fit 1980–2107.
 Current bounds: GPT has 128 entries of 128 bytes and 512-byte sectors;
 FAT32 uses 512-byte clusters on 33 MiB–2 GiB volumes and supports CP850
 short aliases plus UTF-16 long names; ext2 uses 4 KiB blocks, 256-byte
-inodes and 8 MiB–4 GiB volumes. Files, directories and links are supported,
-not device-node creation. The tools do not resize or repair filesystems,
-provide power-failure transactions, or overwrite existing FAT files.
+inodes and volumes from 8 MiB through 17,592,186,040,320 bytes (16 TiB less
+one block). The limit is the on-disk 32-bit block count, not a 32-bit byte
+or sector offset. Group descriptors span as many blocks as needed; all
+sparse-super copies and the final partial group's bitmap are written.
+If the conventional 32,768-block groups would leave a final group too
+short for metadata, the writer reduces the bitmap-aligned group size
+rather than discarding capacity. Every inode table is initialized.
+
+Default bytes per inode are 4096 below 512 MiB, 16384 below 4 TiB and
+32768 from 4 TiB through the volume limit, measured against mke2fs 1.47.0.
+`--inodes` remains an explicit override; the installer uses the defaults.
+GPT's protective MBR size saturates at 0xffffffff sectors above 2 TiB;
+its headers and partition bounds remain 64-bit. The FAT ESP remains
+64 MiB, and FAT's hidden-sector offset must fit 32 bits.
+
+Files, directories and links are supported, not device-node creation.
+Source regular files remain limited to 0xffffffff bytes. The tools do
+not resize or repair filesystems, provide power-failure transactions,
+or overwrite existing FAT files.
 
 The ext2 writer leaves `has_journal` clear. The host's `mkdisk --gpt --root`
 still creates ext3 by default; `--no-journal` selects ext2.
@@ -726,9 +742,10 @@ manifest. New root PARTUUIDs derive from the recorded seed and that epoch.
 The layout is a 1 MiB BIOS boot partition at byte 1048576, a 64 MiB FAT32
 ESP at byte 2097152, and an ext2 root from byte 69206016. The plan accounts
 for GPT and alignment reservations. Unsupported sector sizes, a root
-smaller than 8 MiB or larger than 4 GiB, and boot assets that do not fit the
-fixed ESP are refused; spare capacity is never silently dropped to fit
-these formatter bounds. No rescue initramfs is added.
+smaller than 8 MiB, and boot assets that do not fit the fixed ESP are
+refused. The root is capped at 17,592,186,040,320 bytes; any remaining
+capacity is listed separately as `unused_bytes`, not hidden in GPT's
+tail reservation. No rescue initramfs is added.
 
 ### Durable phases and verification
 
@@ -807,7 +824,11 @@ staged until every pass finishes, the superblock made dirty first, and
 for an arbitrary power cut during repair; keep a copy of important images.
 
 Bounds and refusals are explicit: at most 512 groups, 4,194,304 blocks and
-1,048,576 inodes; external journals, journal checksum/64-bit features,
+1,048,576 inodes. Exceeding these checker resource limits returns 8 with
+`volume exceeds checker capacity`, before allocation, replay or writes.
+They are not ext2 format limits. Large installed volumes currently need
+Linux's e2fsck for offline checks; boot does not run this checker.
+External journals, journal checksum/64-bit features,
 external attribute blocks, indexed-directory validation, a nonempty
 orphan chain, cyclic/shared indirect blocks, and ambiguous malformed
 directory records are not repaired. A refusal is not a clean verdict.
