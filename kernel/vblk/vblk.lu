@@ -53,6 +53,11 @@
 //! one frame: device-writable for a read, readable for a write), and the
 //! status byte (device-writable: 0 OK, 1 IOERR, 2 UNSUPP). Types: IN 0,
 //! OUT 1, FLUSH 4 (no data; its sector 0, as the specification asks).
+//! px78: GET_ID 8, once at bring-up: 20 device-writable bytes, the
+//! device's ID string (QEMU's `serial=`), NUL-padded when shorter; kept as
+//! the disk's serial (Linux shows it at `/sys/block/<disk>/serial`), the
+//! identity pax-install's allow-list names a virtio disk by. A device
+//! that answers UNSUPP (or not at all) has an empty serial.
 //! The queue (0, the only one: no MQ) is made 64 entries, its three
 //! parts in one frame; SLOTS (16) requests may be with the device at
 //! once, slot k's descriptors 3k, 3k + 1, 3k + 2 and its header and
@@ -105,6 +110,8 @@ const SPIN: u64 = 400000000 // `wait`'s bound, in looks (about 10 s under TCG)
 pub const T_IN: u64 = 0
 pub const T_OUT: u64 = 1
 pub const T_FLUSH: u64 = 4
+/// px78: GET_ID, the device's ID string (bring-up only).
+pub const T_GET_ID: u64 = 8
 /// Statuses: the device's three, and this driver's own for a request
 /// that never came back (`wait`'s bound).
 pub const S_OK: u64 = 0
@@ -163,6 +170,8 @@ const W_STATE: u64 = 26 // what `start` answered
 const W_BUSY: u64 = 27 // slots with the device
 const W_GEOM: u64 = 28 // px79: the geometry, cylinders << 16 | heads << 8 | sectors (0 when not offered)
 const W_SLOT: u64 = 32 // slot k's request record (its kernel address) at W_SLOT + k
+const W_ID: u64 = 48 // px78: GET_ID's 20 bytes, words 48-50
+const W_IDLEN: u64 = 51 // px78: their length before the first NUL
 // Counters, from word 64 (the C_* constants).
 const W_COUNT: u64 = 64
 
@@ -477,7 +486,53 @@ fn bring_up(pml4: u64, i: u64, window: u64) -> u64 {
     virtio.add_status(virtio.DRIVER_OK)
     put_sw(W_UP, 1)
     put_sw(W_STATE, UP)
+    get_id(q, hdr)
     UP
+}
+
+/// px78: the device's ID string by one GET_ID request on slot 0's
+/// descriptors (before any other request; they are rewritten by each
+/// `submit`), its 20 bytes into the frame at the header frame's byte
+/// 3072 and from there into W_ID; at most SPIN looks for its return.
+fn get_id(q: u64, hdr: u64) {
+    let h = hdr + frames.hhdm()
+    var i: u64 = 0
+    while i < 24 { w8(h + 3072 + i, 0); i += 1 }
+    w32(h, T_GET_ID)
+    w32(h + 4, 0)
+    w64(h + 8, 0)
+    w8(h + 16, 0xff)
+    virtio.set_desc(q, 1, hdr + 3072, 20, virtio.DESC_NEXT | virtio.DESC_WRITE, 2)
+    virtio.set_desc_next(q, 0, 1)
+    virtio.offer(q, 0)
+    let _told = virtio.notify(q)
+    var k: u64 = 0
+    while !virtio.returned(q) && k < SPIN { sync.relax(); k += 1 }
+    if !virtio.returned(q) { return } // the slot is kept: the device may still write it
+    let (_head, _len) = virtio.collect(q)
+    if r8(h + 16) != S_OK { return }
+    var n: u64 = 0
+    while n < 20 && r8(h + 3072 + n) != 0 { n += 1 }
+    i = 0
+    while i < 3 {
+        // # Safety: the header frame this driver owns, 8-aligned words.
+        put_sw(W_ID + i, unsafe { ((h + 3072 + i * 8) as *u64).read_volatile() })
+        i += 1
+    }
+    put_sw(W_IDLEN, n)
+}
+
+/// px78: the length of disk `k`'s serial (GET_ID's string), 0 for none.
+pub fn identity_len(k: u64) -> u64 {
+    sel(k)
+    if !up() { 0 } else { sw(W_IDLEN) }
+}
+
+/// px78: byte `i` of disk `k`'s serial, 0 outside its length.
+pub fn identity_byte(k: u64, i: u64) -> u64 {
+    sel(k)
+    if !up() || i >= sw(W_IDLEN) { return 0 }
+    (sw(W_ID + i / 8) >> ((i % 8) * 8)) & 0xff
 }
 
 /// Hand request record `r` (kernel/block's: R_OP, R_SECTOR, R_COUNT,
