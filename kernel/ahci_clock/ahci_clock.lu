@@ -3,6 +3,8 @@
 //! kmain_blk/part have not called timer.start). This happens before scheduling.
 //! IF-clear reads latch channel zero, like kernel/xhci's bootstrap wait.
 //! This is not the no-PIT metal clock: px76 owns that shared implementation.
+//! Where the PIT does not count, counting() says so before any wait, and
+//! kernel/ahci refuses its controllers by name instead of hanging the boot.
 extern "c" fn pax_outb(port: u16, value: u8)
 extern "c" fn pax_inb(port: u16) -> u8
 var previous: u64 = 0
@@ -32,7 +34,34 @@ pub fn now_ns() -> u64 {
         }
         previous = c
         started = true
-        elapsed * 1000000000 / 1193182
+        // Whole seconds and the remainder apart: elapsed * 10^9 would trap
+        // (wolf traps on overflow) past 1.8e10 ticks, 4.3 hours of waits.
+        (elapsed / 1193182) * 1000000000 + (elapsed % 1193182) * 1000000000 / 1193182
+    }
+}
+var verdict: u64 = 0 // 0 not yet asked, 1 counting, 2 not counting
+/// Whether channel zero counts at all. A gated or absent 8254 (px76's
+/// contract: the Intel 500-series PCH can gate its clock in S0) reads one
+/// value forever, and no deadline here would ever expire. Each latched read
+/// is three port accesses, far longer than the 838 ns count period, so
+/// 100000 reads that never change mean the PIT does not count.
+pub fn counting() -> bool {
+    // # Safety: as count(), single CPU with IF clear.
+    unsafe {
+        if verdict == 0 {
+            let _first_use = now_ns()
+            let first = count()
+            verdict = 2
+            var k: u64 = 0
+            while k < 100000 {
+                if count() != first {
+                    verdict = 1
+                    break
+                }
+                k += 1
+            }
+        }
+        verdict == 1
     }
 }
 /// A relative microsecond deadline in this shim's clock.
