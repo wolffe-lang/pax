@@ -42,8 +42,23 @@ fn main() {
     assert(verdict(target("vdb", minimum), "pax", "no") == "ok")
     assert(verdict(target("vdb", minimum - 512), "pax", "no") == "too_small")
     assert(verdict(target("vdb", maximum), "pax", "no") == "ok")
-    assert(verdict(target("vdb", maximum + 4096), "pax", "no") == "too_large")
-    assert(verdict(target("vdb", 9223372036854775296), "pax", "no") == "too_large")
+    assert(verdict(target("vdb", maximum + 4096), "pax", "no") == "ok")
+    assert(verdict(target("vdb", 9223372036854775296), "pax", "no") == "ok")
+    for bytes in [8589934592, 68719476736, 500000000000, 4000000000000, 18691697672192, 9223372036854775296] {
+        let large = make_plan(target("vdb", bytes), "big", "pax", "no") else |e| {
+            eprint("FAIL I-big-plan: {bytes}: {e}"); os_exit(1)
+        }
+        let end = (bytes - 33 * 512) / 4096 * 4096
+        let available = end - ROOT_START
+        let expected = if available < 17592186040320 then available else 17592186040320
+        assert(large.root_bytes == expected)
+        assert(large.root_bytes % 4096 == 0)
+        assert(large.unused_bytes == available - expected)
+        assert(large.tail_bytes == bytes - end)
+        assert(ROOT_START + large.root_bytes + large.unused_bytes + large.tail_bytes == bytes)
+        assert(plan_text(large).contains("unused_bytes {large.unused_bytes}"))
+        print("PASS I-big-plan: {bytes} bytes; root {expected}; unused {large.unused_bytes}")
+    }
     assert(verdict(target("vdb", -512), "pax", "no") == "too_small")
     assert(verdict(target("vdb", 536870913), "pax", "no") == "sector_size")
     print("PASS I-bounds: exact min/max, tiny, large, signed overflow, alignment")
