@@ -44,6 +44,11 @@
 //! the Intel SDM vol. 3A §11.5.4 ("APIC Timer") and §11.4.1. No Linux
 //! source; no other kernel's source.
 
+use apic
+use clock
+use log
+use panic
+
 extern "c" fn pax_outb(port: u16, v: u8)
 extern "c" fn pax_inb(port: u16) -> u8
 extern "c" fn pax_wait()
@@ -87,6 +92,8 @@ fn set_count(v: u64) {
 
 /// Spurious requests seen (vectors 39 and 47).
 var spurious_seen: u64 = 0
+var lapic_started: bool = false
+var measured_hz: u64 = 0
 
 fn out(port: u16, v: u64) {
     // # Safety: io.S's OUT to an 8259 or 8254 port; v < 256.
@@ -116,10 +123,29 @@ pub fn start() {
     out(SLAVE_DATA, 1)
     out(MASTER_DATA, 0xff) // OCW1: every line masked
     out(SLAVE_DATA, 0xff)
-    out(PIT_CTRL, 0x34) // channel 0, low then high byte, mode 2, binary
-    out(PIT_CH0, DIVISOR & 0xff)
-    out(PIT_CH0, DIVISOR >> 8)
-    out(MASTER_DATA, 0xfe) // OCW1: line 0 (the PIT) alone unmasked
+    clock.start()
+    // Intel SDM vol.3A §11.5.4: masked one-shot, divide by 16 (DCR=3).
+    apic.write(0x320, (0x10000 | MASTER_BASE) as u32)
+    apic.write(0x3e0, 3)
+    apic.write(0x380, 0xffffffff)
+    let begin = clock.now_ns()
+    let before = apic.read(0x390)
+    clock.wait_us(20000)
+    let after = apic.read(0x390)
+    let duration = clock.now_ns() - begin
+    if duration == 0 || after >= before { panic.fail("timer: LAPIC calibration did not count", after) }
+    let rate = (before - after) * 1000000000 / duration
+    if rate < 100 || rate / 100 > 0xffffffff { panic.fail("timer: LAPIC calibration rate", rate) }
+    unsafe { measured_hz = rate; lapic_started = true }
+    apic.write(0x320, (0x20000 | MASTER_BASE) as u32)
+    apic.write(0x380, (rate / 100) as u32)
+    report()
+}
+
+pub fn report() {
+    log.put("timer: LAPIC calibrated by "); log.put(clock.name())
+    log.put(" divide16 "); log.dec(unsafe { measured_hz } as int)
+    log.line(" Hz, tick 100 Hz vector 32; PIT IRQ masked")
 }
 
 /// Unmask master line `line` (px13: kernel/console's 1 and 4): a
@@ -172,6 +198,7 @@ pub fn master_mask() -> u64 {
 /// Acknowledge vector `v` (px13): a non-specific EOI to the master, and
 /// to the slave first for one of its lines (40-47).
 pub fn eoi(v: u64) {
+    if v >= 80 && v < 84 { apic.write(0xb0, 0); return }
     if v >= SLAVE_BASE {
         out(SLAVE_CMD, 0x20)
     }
@@ -182,12 +209,14 @@ pub fn eoi(v: u64) {
 pub fn stop() {
     out(MASTER_DATA, 0xff)
     out(SLAVE_DATA, 0xff)
+    if unsafe { lapic_started } { apic.write(0x320, (0x10000 | MASTER_BASE) as u32) }
 }
 
 /// Vector 32: count the tick and acknowledge it (non-specific EOI).
 pub fn tick() {
     set_count(count() + 1) // #598
-    out(MASTER_CMD, 0x20)
+    let _now = clock.now_ns() // sample wrapping counters at every tick
+    apic.write(0xb0, 0)
 }
 
 /// Timer interrupts handled since `start`.

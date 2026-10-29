@@ -1,0 +1,43 @@
+//! member: false
+// px76: real ACPI discovery and an independently timed scheduler tick.
+use acpi
+use apic
+use clock
+use fb
+use frames
+use interrupts
+use log
+use paging
+use panic
+use serial
+use timer
+extern "c" fn pax_exit(v: u8)
+extern "c" fn pax_inl(port: u16) -> u32
+fn check(ok: bool, name: str) {
+    log.put(if ok { "PASS METAL " } else { "FAIL METAL " }); log.line(name)
+    if !ok { unsafe { pax_exit(0x11) }; panic.halt() }
+}
+export fn kmain() {
+    serial.init()
+    frames.start()
+    let pml4 = paging.start()
+    let _screen = fb.start(pml4)
+    interrupts.start()
+    apic.start(pml4)
+    clock.start()
+    timer.start()
+    fb.report()
+    check(acpi.tables() > 0, "ACPI checked tables")
+    let port = acpi.pm_port()
+    check(port != 0, "independent PM rate reference")
+    let before = unsafe { pax_inl(port as u16) as u64 } & 0xffffff
+    let first = timer.ticks()
+    while timer.ticks() - first < 20 { timer.wait() }
+    let after = unsafe { pax_inl(port as u16) as u64 } & 0xffffff
+    let elapsed = (after + 0x1000000 - before) & 0xffffff
+    check(elapsed >= 536931 && elapsed <= 1073864, "LAPIC tick rate 20 ticks in 150..300ms")
+    timer.stop()
+    log.line("PASS METAL firmware and clock")
+    unsafe { pax_exit(0x10) }
+    panic.halt()
+}

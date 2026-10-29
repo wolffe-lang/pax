@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# px76: every machine variant must boot and pass the independent tick rate row.
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+work=$PAX_BUILD/mpx6-metal
+mkdir -p "$work"
+"$PAX_ROOT/tools/fetch-limine"
+"$PAX_ROOT/tools/build-kernel" --src "$PAX_ROOT/kernel/kmain_metal.lu" "$work"
+"$PAX_ROOT/tools/mkimage" "$work/kmain_metal.elf" "$work/check.iso"
+for fw in bios uefi; do
+    for leg in hpet pm pitless pm-pitless ram8; do
+        args=()
+        source=HPET
+        case $leg in
+            pm) args=(-machine hpet=off); source=PM;;
+            pitless) args=(-machine pit=off);;
+            pm-pitless) args=(-machine hpet=off,pit=off); source=PM;;
+            ram8) args=(-m 8G);;
+        esac
+        rc=0
+        "$PAX_ROOT/tools/qemu-run" --timeout 30 --firmware "$fw" --serial "$work/$fw-$leg.log" "$work/check.iso" -- "${args[@]}" || rc=$?
+        if [ "$rc" != 33 ]; then
+            cat "$work/$fw-$leg.log"
+            echo "FAIL METAL firmware $fw $leg: exit $rc" >&2; exit 1
+        fi
+        grep -aF 'PASS METAL LAPIC tick rate' "$work/$fw-$leg.log"
+        grep -aF "clock: $source" "$work/$fw-$leg.log"
+        echo "PASS METAL firmware $fw $leg"
+    done
+done

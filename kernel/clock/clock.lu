@@ -1,0 +1,116 @@
+//! Monotonic bootstrap time with interrupts masked (px76).
+//! HPET 1.0a §§2.3.4,2.3.6,2.3.8: femtoseconds/tick, enable, main
+//! counter. ACPI 6.5 §4.8.3.3: PM timer 3579545 Hz, 24/32-bit wrap.
+//! PIT fallback: 8254 mode 2 channel 0, divisor 11932. Its 10ms wrap
+//! requires frequent samples; the LAPIC interrupt samples it every tick.
+use acpi
+use log
+use paging
+use panic
+use sync
+extern "c" fn pax_inl(port: u16) -> u32
+extern "c" fn pax_inb(port: u16) -> u8
+extern "c" fn pax_outb(port: u16, value: u8)
+const HPET_VA: u64 = 0xffffb00000001000
+var source: u64 = 0
+var address: u64 = 0
+var period: u64 = 0
+var mask: u64 = 0
+var previous: u64 = 0
+var elapsed: u64 = 0
+var fraction: u64 = 0
+fn read32(a: u64) -> u64 { unsafe { (a as *u32).read_volatile() as u64 } }
+fn write32(a: u64, v: u64) { unsafe { (a as *u32).write_volatile(v as u32) } }
+fn raw() -> u64 {
+    let src = unsafe { source }
+    if src == 1 {
+        let a = unsafe { address }
+        return unsafe { ((a + 0xf0) as *u64).read_volatile() } & unsafe { mask }
+    }
+    if src == 2 { return unsafe { pax_inl(acpi.pm_port() as u16) as u64 } & acpi.pm_mask() }
+    unsafe {
+        pax_outb(0x43, 0)
+        let lo = pax_inb(0x40) as u64
+        let hi = pax_inb(0x40) as u64
+        let count = lo | (hi << 8)
+        if count <= 11932 { 11932 - count } else { 0 }
+    }
+}
+fn advances() -> bool {
+    let first = raw()
+    var n: u64 = 0
+    while n < 100000 { if raw() != first { return true }; n += 1 }
+    false
+}
+fn try_hpet() -> bool {
+    let physical = acpi.hpet()
+    if physical == 0 || physical & 4095 > 0xf00 { return false }
+    let mapped = paging.map(paging.cr3(), HPET_VA, physical & !4095, paging.NX | paging.RW | 24) else 9
+    if mapped == 9 { return false }
+    let a = HPET_VA + (physical & 4095)
+    let fs = read32(a + 4)
+    if fs == 0 || fs > 100000000 { return false }
+    unsafe { address = a; period = fs; mask = if read32(a) & 8192 != 0 { 0xffffffffffffffff } else { 0xffffffff }; source = 1 }
+    // Main counter only: no comparator interrupt, no legacy replacement.
+    write32(a + 0x10, (read32(a + 0x10) | 1) & !2)
+    advances()
+}
+pub fn start() {
+    if unsafe { source } != 0 { return }
+    acpi.start()
+    if !try_hpet() {
+        unsafe { source = 2; period = 3579545; mask = acpi.pm_mask() }
+        if acpi.pm_port() == 0 || !advances() {
+            unsafe {
+                source = 3; period = 1193182; mask = 0
+                pax_outb(0x43, 0x34)
+                pax_outb(0x40, 0x9c)
+                pax_outb(0x40, 0x2e)
+            }
+            if !advances() { panic.fail("clock: HPET, PM and PIT do not advance", 0) }
+        }
+    }
+    unsafe { previous = raw(); elapsed = 0; fraction = 0 }
+    log.put("clock: "); log.put(name()); log.put(" ")
+    log.dec(unsafe { period } as int)
+    log.line(if unsafe { source } == 1 { " fs/tick" } else { " Hz" })
+}
+pub fn name() -> str {
+    let src = unsafe { source }
+    if src == 1 { "HPET" } else { if src == 2 { "PM" } else { "PIT" } }
+}
+pub fn now_ns() -> u64 {
+    let flags = sync.irq_save()
+    let current = raw()
+    let prev = unsafe { previous }
+    let src = unsafe { source }
+    var delta: u64 = 0
+    if src == 3 { delta = if current >= prev { current - prev } else { current + 11932 - prev } }
+    else {
+        let m = unsafe { mask }
+        delta = if current >= prev { current - prev } else { (m - prev) + current + 1 }
+    }
+    let unit = unsafe { period }
+    let denominator = if src == 1 { 1000000 } else { unit }
+    let multiplier = if src == 1 { unit } else { 1000000000 }
+    // Split before multiplication: a long-lived 64-bit HPET need not wrap
+    // its femtosecond product. Preserve the fractional nanosecond.
+    let remainder = (delta % denominator) * multiplier + unsafe { fraction }
+    unsafe {
+        previous = current
+        elapsed += (delta / denominator) * multiplier + remainder / denominator
+        fraction = remainder % denominator
+    }
+    let answer = unsafe { elapsed }
+    sync.irq_restore(flags)
+    answer
+}
+pub fn deadline_us(us: u64) -> u64 {
+    let now = now_ns()
+    if us > (0xffffffffffffffff - now) / 1000 { 0xffffffffffffffff } else { now + us * 1000 }
+}
+pub fn expired(d: u64) -> bool { now_ns() >= d }
+pub fn wait_us(us: u64) {
+    let end = deadline_us(us)
+    while !expired(end) {}
+}
