@@ -120,10 +120,11 @@ grep -x 'PASS ahci-check: command timeout, stale task-file, TFES and completion'
 grep -x 'PASS ahci-check: 4Kn refused; 512e sector sizes decoded' "$E/reset.norm"
 echo 'PASS A10-HBA-reset: optional HR and the default per-port initialization both boot'
 
-# R-px75b-7: every AHCI wait is a deadline on kernel/ahci_clock's PIT. On a
-# machine whose 8254 does not count (QEMU's pit=off here; px76's contract:
-# kasumi's PCH can gate it) each controller is refused by name, no disk is
-# named, and the boot goes on to the session instead of waiting forever.
+# R-px75b-7, narrowed at px76's merge: every AHCI wait is a deadline on
+# kernel/clock (the HPET, else the ACPI PM timer, else the PIT read back).
+# On a machine whose 8254 does not count (QEMU's pit=off here; px76's
+# contract: kasumi's PCH can gate it) the clock is the HPET, so the disk is
+# driven and named, nothing is refused, and the boot goes on to the session.
 make_session nopit $'echo AHCI-ROW-END'
 # Its own boot, not pax_row's: a wait that never ends must fail this row by
 # name within the main session's 240 s, not pax_row's 900.
@@ -132,11 +133,32 @@ tools/qemu-halt --firmware "$firmware" --accel "${PAX_AHCI_ACCEL:-auto}" --timeo
     --qemu -m --qemu 1G --qemu -machine --qemu pit=off --ahci "$E/sector.img,serial=PX75B-NOPIT" \
     "$E/nopit.iso" > "$E/nopit.halt.log" 2>&1 || true
 serial_norm "$E/nopit.log" > "$E/nopit.norm"
-grep -qx AHCI-ROW-END "$E/nopit.norm" || { echo 'FAIL A13-no-pit: the boot never reached its session (a wait on a PIT that does not count)'; exit 1; }
-n=$(grep -cE '^ahci[0-9]+: 8086:2922 at [0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: refused: the 8254 PIT does not count, so no AHCI wait could end$' "$E/nopit.norm" || true)
-[ "$n" = 2 ] || { echo "FAIL A13-no-pit: $n controllers refused by name, not 2 (the disk's and q35's own)"; exit 1; }
-! grep -E '^(block: sd|ahci[0-9]+: .* port )' "$E/nopit.norm" || { echo 'FAIL A13-no-pit: a port was driven without a clock'; exit 1; }
-echo 'PASS A13-no-pit: both controllers refused by name without a counting PIT; the session ran'
+grep -qx AHCI-ROW-END "$E/nopit.norm" || { echo 'FAIL A13-no-pit: the boot never reached its session (a wait on a clock that does not count)'; exit 1; }
+grep -q '^clock: HPET ' "$E/nopit.norm" || { echo "FAIL A13-no-pit: the clock is not the HPET ($(grep -m1 '^clock: ' "$E/nopit.norm"))"; exit 1; }
+! grep -E '^ahci[0-9]+: .*: refused: no clock advances' "$E/nopit.norm" || { echo 'FAIL A13-no-pit: a controller was refused though the HPET counts'; exit 1; }
+grep -q '^block: sda:' "$E/nopit.norm" || { echo 'FAIL A13-no-pit: the disk was not named'; exit 1; }
+echo 'PASS A13-no-pit: no counting PIT: the AHCI waits on the HPET clock, sda named, the session ran'
+
+# A14: no clock at all, the one machine where the refusal stays. OVMF under
+# -machine acpi=off leaves no HPET table and no FADT (no PM timer), and
+# pit=off stops the 8254, so kernel/clock says `clock: none: …`; the
+# disk-only kernel (no tick to calibrate) boots on and each controller is
+# refused by name, no port driven. UEFI on every leg: SeaBIOS supplies its
+# own ACPI tables under acpi=off, so its machine still has an HPET.
+tools/build-kernel "${flags[@]}" --src "$PAX_ROOT/kernel/kmain_blk.lu" "$W/$tier" > "$E/noclock.build.log"
+tools/mkimage "$W/$tier/kmain_blk.elf" "$E/noclock.iso" > "$E/noclock.image.log"
+tools/qemu-halt --firmware uefi --accel "${PAX_AHCI_ACCEL:-auto}" --timeout 120 \
+    --serial "$E/noclock.log" --elf "$W/$tier/kmain_blk.elf" --marker 'halt|PANIC .*' \
+    --qemu -m --qemu 1G --qemu -machine --qemu acpi=off,pit=off --ahci "$E/sector.img,serial=PX75B-NOCLOCK" \
+    "$E/noclock.iso" > "$E/noclock.halt.log" 2>&1 || true
+serial_norm "$E/noclock.log" > "$E/noclock.norm"
+grep -qx 'clock: none: the HPET, the PM timer and the PIT do not advance' "$E/noclock.norm" || { echo "FAIL A14-no-clock: the clock found a source ($(grep -m1 '^clock: ' "$E/noclock.norm"))"; exit 1; }
+n=$(grep -cE '^ahci[0-9]+: 8086:2922 at [0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: refused: no clock advances \(HPET, PM timer or PIT\), so no AHCI wait could end$' "$E/noclock.norm" || true)
+[ "$n" = 2 ] || { echo "FAIL A14-no-clock: $n controllers refused by name, not 2 (the disk's and q35's own)"; exit 1; }
+! grep -E '^(block: sd|ahci[0-9]+: .* port )' "$E/noclock.norm" || { echo 'FAIL A14-no-clock: a port was driven without a clock'; exit 1; }
+grep -qx halt "$E/noclock.norm" || { echo 'FAIL A14-no-clock: the disk kernel did not boot on to its halt'; exit 1; }
+! grep -q PANIC "$E/noclock.norm" || { echo "FAIL A14-no-clock: $(grep -m1 PANIC "$E/noclock.norm")"; exit 1; }
+echo 'PASS A14-no-clock: no HPET, PM timer or PIT: both controllers refused by name; the disk kernel halted'
 
 if [ "$rows" = all ]; then
     make_session speed $'/bin/nvme speed /dev/sda 1024\necho AHCI-ROW-END'
