@@ -1,0 +1,20 @@
+//! member: false
+use boot_info
+use clock
+use fb
+use frames
+use paging
+use panic
+use power
+use serial
+export fn pax_interrupt(_frame: u64) -> u64 { panic.halt() }
+export fn pax_thread_exit() { panic.halt() }
+export fn kmain() {
+    serial.init()
+    frames.start()
+    let pml4 = paging.start()
+    let _fb = fb.start(pml4)
+    clock.start()
+    if boot_info.cmdline_has("metal_poweroff") { power.power_off() }
+    power.reboot()
+}

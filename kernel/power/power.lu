@@ -1,0 +1,126 @@
+//! ACPI 6.5 §§4.8.3,5.2.9,7.4.5,20.2: reset and static DSDT S5.
+//! No AML execution. Accept one unambiguous literal Name(_S5, Package(...))
+//! with two integer sleep types; reject computed packages and duplicates.
+use acpi
+use clock
+use log
+use paging
+use panic
+use pci
+extern "c" fn pax_outb(port: u16, value: u8)
+extern "c" fn pax_inw(port: u16) -> u16
+extern "c" fn pax_outw(port: u16, value: u16)
+extern "c" fn pax_triple_fault()
+const RESET_VA: u64 = 0xffffb00000002000
+fn out(port: u64, value: u64) { unsafe { pax_outb(port as u16, value as u8) } }
+fn control(port: u64) -> u64 { unsafe { pax_inw(port as u16) as u64 } }
+fn put_control(port: u64, value: u64) { unsafe { pax_outw(port as u16, value as u16) } }
+fn reset_register() -> bool {
+    let f = acpi.fadt_table()
+    if f == 0 || acpi.integer(f + 4, 4) < 129 || acpi.integer(f + 112, 4) & 0x400 == 0 { return false }
+    if acpi.byte(f + 117) != 8 || acpi.byte(f + 118) != 0 { return false }
+    let space = acpi.byte(f + 116)
+    let address = acpi.integer(f + 120, 8)
+    let value = acpi.byte(f + 128)
+    if space == 1 && address < 65536 { out(address, value); return true }
+    if space == 0 && address != 0 {
+        let result = paging.map(paging.cr3(), RESET_VA, address & !4095, paging.NX | paging.RW | 24) else 9
+        if result == 9 { return false }
+        unsafe { ((RESET_VA + (address & 4095)) as *u8).write_volatile(value as u8) }
+        return true
+    }
+    if space == 2 && address >> 48 == 0 {
+        let dev = (address >> 32) & 0xffff
+        let func = (address >> 16) & 0xffff
+        let off = address & 0xffff
+        if dev < 32 && func < 8 && off < 256 { pci.write8((dev << 8) | func, off, value); return true }
+    }
+    false
+}
+pub fn reboot() -> never {
+    log.line("reboot: FADT reset register")
+    let _sent = reset_register()
+    clock.wait_us(100000)
+    log.line("reboot: port 0xCF9")
+    out(0xcf9, 2); out(0xcf9, 6)
+    clock.wait_us(100000)
+    log.line("reboot: triple fault")
+    unsafe { pax_triple_fault() }
+    panic.halt()
+}
+fn constant(a: u64, end: u64) -> (bool, u64, u64) {
+    if a >= end { return (false, 0, a) }
+    let op = acpi.byte(a)
+    if op == 0 || op == 1 { return (true, op, a + 1) }
+    let n: u64 = if op == 10 { 1 } else { if op == 11 { 2 } else { if op == 12 { 4 } else { if op == 14 { 8 } else { 0 } } } }
+    if n == 0 || n + 1 > end - a { return (false, 0, a) }
+    (true, acpi.integer(a + 1, n), a + 1 + n)
+}
+fn sleep_types() -> (bool, u64, u64) {
+    let d = acpi.mapped(acpi.dsdt(), 36)
+    if d == 0 { return (false, 0, 0) }
+    let n = acpi.integer(d + 4, 4)
+    let end = d + n
+    var at = d + 36
+    var found: u64 = 0
+    var ta: u64 = 0
+    var tb: u64 = 0
+    while at + 8 < end {
+        if acpi.byte(at) == 8 {
+            let name = at + (if acpi.byte(at + 1) == 0x5c { 2 } else { 1 })
+            if acpi.integer(name, 4) == 0x5f35535f && acpi.byte(name + 4) == 0x12 {
+                let p = name + 5
+                let lead = acpi.byte(p)
+                let extra = lead >> 6
+                if p + extra + 1 < end {
+                    var length = lead & (if extra == 0 { 63 } else { 15 })
+                    var i: u64 = 0
+                    while i < extra { length |= acpi.byte(p + 1 + i) << (4 + 8 * i); i += 1 }
+                    let elements = p + 1 + extra
+                    if length > extra + 1 && length <= end - p && acpi.byte(elements) >= 2 {
+                        let (oka, a, next) = constant(elements + 1, p + length)
+                        let (okb, b, _next) = constant(next, p + length)
+                        if oka && okb && a < 8 && b < 8 { found += 1; ta = a; tb = b }
+                    }
+                }
+            }
+        }
+        at += 1
+    }
+    (found == 1, ta, tb)
+}
+fn pm_control(f: u64, extended: u64, legacy: u64) -> u64 {
+    let n = acpi.integer(f + 4, 4)
+    var port = acpi.integer(f + legacy, 4)
+    if n >= extended + 12 && acpi.integer(f + extended + 4, 8) != 0 {
+        if acpi.byte(f + extended) != 1 || acpi.byte(f + extended + 2) != 0 { return 0 }
+        port = acpi.integer(f + extended + 4, 8)
+    }
+    if port >= 65535 { 0 } else { port }
+}
+pub fn power_off() -> never {
+    let f = acpi.fadt_table()
+    let (ok, a, b) = sleep_types()
+    if f == 0 || !ok { log.line("poweroff: no unique static ACPI S5 package"); panic.halt() }
+    let pa = pm_control(f, 172, 64)
+    let pb = pm_control(f, 184, 68)
+    if pa == 0 || acpi.byte(f + 89) < 2 || acpi.integer(f + 112, 4) & 0x100000 != 0 {
+        log.line("poweroff: unsupported PM1 controls"); panic.halt()
+    }
+    if control(pa) & 1 == 0 {
+        let smi = acpi.integer(f + 48, 4)
+        let enable = acpi.byte(f + 52)
+        if smi != 0 && smi < 65536 && enable != 0 {
+            out(smi, enable)
+            let end = clock.deadline_us(3000000)
+            while control(pa) & 1 == 0 && !clock.expired(end) {}
+        }
+        if control(pa) & 1 == 0 { log.line("poweroff: ACPI enable timeout"); panic.halt() }
+    }
+    log.put("poweroff: ACPI S5 types "); log.dec(a as int); log.put("/"); log.dec(b as int); log.end()
+    put_control(pa, (control(pa) & !0x3c00) | (a << 10) | 0x2000)
+    if pb != 0 { put_control(pb, (control(pb) & !0x3c00) | (b << 10) | 0x2000) }
+    clock.wait_us(100000)
+    log.line("poweroff: S5 did not power down")
+    panic.halt()
+}
