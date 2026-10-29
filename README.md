@@ -179,7 +179,8 @@ Physical writes and real-machine boots are not tested here. See
 `pax-install` inventories the real block nodes, shows a read-only plan and requires an exact confirmation of the target
 before writing. It is an explicit ext2 developer preview, not a journalled installation:
 
-- whole-disk fresh installs only, 512-byte sectors, root volumes up to 4 GiB;
+- whole-disk fresh installs only, 512-byte sectors, root volumes up to 16 TiB less one 4 KiB block;
+  larger targets keep that root size and name the remaining space as unused in the plan;
 - the running root's disk, mounted disks and read-only targets are refused;
 - it asks for a user name and whether to install the three games, staged offline with their source and their engine's;
   neither answer fetches anything; the games answer alone decides the install from the verified payload (the live
@@ -276,6 +277,10 @@ Three programs in wolf write disks, built as static Linux executables and run un
 | `paxfat` | FAT32 and VFAT | dosfstools, mtools |
 | `paxext2` | an ext2 tree with modes, owners, times, symbolic and hard links (no journal) | e2fsprogs |
 
+`paxext2` formats volumes through 16 TiB less one 4 KiB block, with fully initialized inode tables and sparse
+superblock backups. Its large-volume inode density follows Linux's defaults. File data beyond 2 TiB is written and
+read back through both virtio and NVMe, with the same bytes read by a Linux guest.
+
 The tests compare each tool's output with the host's, then build a second disk entirely on PAX through its `/dev/vdb`
 node and boot it alone under SeaBIOS and OVMF. Limine's pinned installer is linked statically with no source change,
 and its Linux and PAX runs write identical bytes. See `docs/BOOT.md`, "Writing a disk on PAX".
@@ -283,8 +288,9 @@ and its Linux and PAX runs write identical bytes. See `docs/BOOT.md`, "Writing a
 `tools/mkfsck` builds `fsck.ext2` in wolf for Linux and PAX. It checks inodes, blocks, directories, connectivity,
 references and allocation summaries; repairs counts, bitmaps, links, orphans and duplicate data blocks; and replays
 supported ext3 journals. A separate rescue archive repairs an unmounted `/dev/vda2` without Linux. Unsupported formats
-and ambiguous damage are refused, never marked clean, and a mounted volume is never repaired. See `docs/BOOT.md`,
-"Checking a volume from rescue".
+and ambiguous damage are refused, never marked clean, and a mounted volume is never repaired. The current checker
+also refuses more than 4,194,304 blocks, 1,048,576 inodes or 512 groups by name; large installed volumes need Linux's
+`e2fsck` until the checker is extended. See `docs/BOOT.md`, "Checking a volume from rescue".
 
 ## Tests
 
