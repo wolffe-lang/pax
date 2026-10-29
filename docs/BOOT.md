@@ -549,6 +549,62 @@ SeaBIOS and OVMF boot, and its `root=PARTUUID=` finds `/` on
 `tools/rootdisk-leg` with `PAX_ROOTDISK_BUS=nvme` boots a whole suite's
 images that way (CI: mpx5-users, in the full tier, the merge gate).
 
+## The firmware's machine (px76)
+
+Every kernel that starts the tick (and every device kernel, before its PCI
+scan) reads what the firmware handed over and says so, a line each, so a
+photograph of a real machine's screen lists it: the firmware, the memory map,
+every ACPI table (checksummed; its signature, OEM ID and length), the MADT's
+entries, the FADT's PM timer and PM1 blocks, the HPET's address, the MCFG's
+windows (logged; PCI stays on mechanism #1), the clock chosen and the tick
+calibrated against it; the console and session kernels add the screen's mode,
+and an xHCI its BAR0 and its interrupt. On kasumi's shape (UEFI, no COM1, no
+PIT, the xHCI on MSI at a BAR above 4 GiB, a 3840x2160 GOP: tests/mpx6-firmware
+F8) the lines are:
+
+    firmware: uefi64 vendor Ubuntu distribution of EDK II revision 0x0000000000010000
+    memory: 33 entries, total 21780250624 bytes, usable 8533975040, largest unmapped hole 1075889307648
+    acpi: XSDT OEM BOCHS  length 84
+    acpi: FACP OEM BOCHS  length 244
+    acpi: SCI 9 PM timer 0x0000000000000608 mask 0x0000000000ffffff PM1a 0x0000000000000604 PM1b 0x0000000000000000
+    acpi: APIC OEM BOCHS  length 120
+    acpi: LAPIC id 0 flags 0x0000000000000001
+    acpi: IOAPIC id 0 address 0x00000000fec00000 GSI 0
+    acpi: ISO bus 0 IRQ 0 GSI 2 flags 0x0000000000000000
+    acpi: NMI UID 255 LINT 1 flags 0x0000000000000000
+    acpi: HPET OEM BOCHS  length 56
+    acpi: HPET address 0x00000000fed00000
+    acpi: MCFG OEM BOCHS  length 60
+    acpi: MCFG base 0x00000000e0000000 segment 0 buses 0..255
+    acpi: DSDT OEM BOCHS  length 8286
+    clock: HPET 10000000 fs/tick, checked against the PM timer
+    timer: LAPIC calibrated by HPET divide16 62462316 Hz, tick 100 Hz vector 32; PIT IRQ masked
+    screen: 3840x2160 32 bpp pitch 15360 rgb 8:16 8:8 8:0 at 0xffff800080000000, wc (pat 0x0000010500070406), 8100 pages 17 tables; font spleen 8x16 at 2x, 240x67 cells; 102 bytes replayed, 0 lost
+    xhci 1: BAR0 0x0000001000000000
+    xhci 1: ports 8 MSI vector 80 context 32 legacy absent speeds 3=4 5=3
+
+(four more `acpi: ISO` lines, WAET and BGRT omitted here; `notes/px76/f8/` has the whole
+transcript). `memory:` totals every map entry (QEMU's map has a 12 GiB reserved range near
+1012 GiB, counted too) and names the largest gap between entries (here the one below that range);
+`usable` is what the frame allocator may take (R-px76-4: what Limine marks USABLE, never its own
+reclaimable memory). On a machine with a serial port the console's line says `com1 irq 4 vector
+36`, without one `com1 absent`.
+
+`clock:` names the HPET only after 10 ms of the ACPI PM timer read 5 to 20 ms
+on it (else `…; refused` and `clock: PM 3579545 Hz`); with neither, `clock:
+PIT 1193182 Hz`. `timer:` is the local APIC timer's rate at divide 16, measured
+over 20 ms of that clock, ticking at 100 Hz on vector 32. A local APIC handed
+over in x2APIC mode adds `apic: x2APIC mode …` and is reached by MSR.
+
+With no serial port the kernel draws every line on the screen from the first
+(through Limine's own framebuffer mapping until its paging takes over, then
+again from its early buffer) and keeps a 64 KiB transcript in memory, which
+`tools/qemu-halt --no-serial` and `tools/usb-session --no-serial` read back
+through QEMU's monitor. Above 2560 pixels wide the glyphs are doubled (240x67
+cells at 3840x2160). Reboot tries the FADT's reset register, then port 0xCF9,
+then a triple fault, each on its line first; power-off is ACPI S5 from the
+DSDT's `\_S5` package (`poweroff: ACPI S5 types a/b`).
+
 ## Measured
 
 The proof's runs, both firmwares, the same ISO on linux and macOS: see
