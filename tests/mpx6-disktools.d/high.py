@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PAX file I/O above 2 TiB through virtio and NVMe; Linux round trip optional.
+"""PAX file I/O above 2 TiB through virtio, NVMe and AHCI (px75b); Linux round trip optional.
 The local lane requires a live Linux kernel. CI uses the same deterministic
 byte oracle and real e2fsck, never a checksum of terabytes of holes.
 """
@@ -29,7 +29,7 @@ def run(name, args):
 
 probe = a.work / 'bigdisk'
 run('compile', ['cc', '-static', '-no-pie', '-O1', '-Wall', '-Wextra', '-Werror', a.repo / 'user/elf/bigdisk.c', '-o', probe])
-for transport, dev in [('virtio', 'vda'), ('nvme', 'nvme0n1')]:
+for transport, dev in [('virtio', 'vda'), ('nvme', 'nvme0n1'), ('ahci', 'sda')]:
     image = a.work / (transport + '.img')
     try:
         run(transport + '-fixture', ['python3', '-I', a.repo / 'tests/mpx6-disktools.d/high-fixture.py', a.formatter, image])
@@ -52,7 +52,7 @@ for transport, dev in [('virtio', 'vda'), ('nvme', 'nvme0n1')]:
         run(transport + '-iso', [a.repo / 'tools/mkimage', '--conf', a.repo / 'boot/limine-initramfs.conf',
             '--add', archive, 'initramfs.cpio', a.kernel, iso])
         serial = a.work / (transport + '.serial')
-        drive = '--drive' if transport == 'virtio' else '--nvme'
+        drive = {'virtio': '--drive', 'nvme': '--nvme', 'ahci': '--ahci'}[transport]
         run(transport + '-boot', [a.repo / 'tools/qemu-halt', '--firmware', 'bios', '--timeout', '180',
             '--elf', a.kernel, '--serial', serial, '--marker', 'halt', drive, image, iso])
         text = serial.read_text(errors='replace')
