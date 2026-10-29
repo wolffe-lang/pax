@@ -7,6 +7,16 @@
 //! a TRB's cycle word last. A timeout quarantines DMA memory, never frees
 //! a buffer the controller might still own. Bounds: four controllers,
 //! 32 slots each, five hub hops, one boot keyboard interface per device.
+//! px78: USB mass storage's transport, the Bulk-Only Transport's pipes
+//! (USB Mass Storage Class Bulk-Only Transport 1.0 §§3, 5, 6; xHCI 1.2
+//! §§4.6.6, 4.6.8, 4.6.10, 4.11.2.1, 4.11.5.1, 6.2.3 and 6.4.1.1; USB 3.2
+//! §9.6.7): an interface of class 08h, subclass 06h (SCSI transparent),
+//! protocol 50h at any speed, SuperSpeed included, its bulk IN and OUT
+//! endpoints configured (the SuperSpeed companion's bMaxBurst), one TD
+//! at a time a pipe, polled to a kernel/clock deadline with IF clear as
+//! kernel/ahci's commands are; the SCSI commands are kernel/usb_storage's.
+//! At most four storage devices, found at enumeration; a halted pipe is
+//! reset (Reset Endpoint, Set TR Dequeue Pointer, CLEAR_FEATURE).
 use apic
 use clock
 use console
@@ -73,7 +83,7 @@ const BUFFER: u64 = 16
 const ENDPOINT: u64 = 17
 const PACKET: u64 = 18
 const INTERVAL: u64 = 19
-const KIND: u64 = 20 // 1 keyboard, 2 USB2 hub, 3 not driven, 4 failed
+const KIND: u64 = 20 // 1 keyboard, 2 USB2 hub, 3 not driven, 4 failed, 5 mass storage (px78), 6 storage gone
 const PREVIOUS: u64 = 21
 const REPEAT: u64 = 22
 const DEADLINE: u64 = 23
@@ -85,6 +95,35 @@ const TT: u64 = 28
 const ACTIVE: u64 = 29
 const RESIDUE: u64 = 30
 const ACTUAL: u64 = 31
+// px78: a mass-storage device's words (KIND 5). The bulk IN pipe's DCI,
+// ring, enqueue index and cycle, max packet; the OUT pipe's; the TD in
+// flight: its pipe's DCI, the physical TRB its event names, done, the
+// event's completion code and residue; the interface; the endpoint
+// addresses (CLEAR_FEATURE's index); the configuration value.
+const BIN: u64 = 32
+const BIRING: u64 = 33
+const BII: u64 = 34
+const BIC: u64 = 35
+const BIMPS: u64 = 36
+const BOUT: u64 = 37
+const BORING: u64 = 38
+const BOI: u64 = 39
+const BOC: u64 = 40
+const BOMPS: u64 = 41
+const BEP: u64 = 42
+const BFIRST: u64 = 43 // the TD's first TRB (physical)
+const BEXPECT: u64 = 44 // the TD's last TRB (physical)
+const BDONE: u64 = 45
+const BCODE: u64 = 46
+const BREST: u64 = 47
+const IFACE: u64 = 48
+const BIADDR: u64 = 49
+const BOADDR: u64 = 50
+const BBURST: u64 = 51 // bulk IN burst << 8 | bulk OUT burst
+// px78: the storage devices found (at most four), a page: count at 0,
+// device records from 1.
+var storage: u64 = 0
+const STORAGE_MAX: u64 = 4
 
 fn r8(a: u64) -> u64 { unsafe { (a as *u8).read_volatile() as u64 } }
 fn r32(a: u64) -> u64 { unsafe { (a as *u32).read_volatile() as u64 } }
@@ -240,6 +279,8 @@ fn drain(c: u64) {
                         put(d, COMPLETION, code)
                         put(d, TDONE, 1)
                     }
+                } else if get(d, KIND) == 5 && ep == get(d, BEP) && get(d, BDONE) == 0 {
+                    bulk_event(d, param & !15, code, status & 0xffffff)
                 } else if ep == get(d, ENDPOINT) && param & !15 == get(d, EXPECT) {
                     if get(d, KIND) == 1 && (code == 1 || code == 13) && status & 0xffffff == 0 {
                         report(d, r64(get(d, BUFFER) + 2048))
@@ -434,6 +475,14 @@ fn configure(d: u64) -> bool {
             if !control(d, 128, 6, 0x300 | product, language, 255) { return false }
         }
     }
+    if !control(d, 128, 6, 0x200, 0, 9) || get(d, ACTUAL) < 9 { return false }
+    let total = r8(buf + 2) | (r8(buf + 3) << 8)
+    if total < 9 || total > 1024 { return false }
+    if !control(d, 128, 6, 0x200, 0, total) || get(d, ACTUAL) != total { return false }
+    let config = r8(buf + 5)
+    // px78: a mass-storage interface is driven at every speed.
+    let (is_storage, iface, ia, im, oa, om, bursts) = storage_interface(buf, total)
+    if is_storage { return drive_storage(d, config, iface, ia, im, oa, om, bursts) }
     if get(d, SPEED) >= 4 {
         put(d, KIND, 3)
         let s = sync.acquire(sync.console())
@@ -441,11 +490,6 @@ fn configure(d: u64) -> bool {
         sync.release(sync.console(), s)
         return true
     }
-    if !control(d, 128, 6, 0x200, 0, 9) || get(d, ACTUAL) < 9 { return false }
-    let total = r8(buf + 2) | (r8(buf + 3) << 8)
-    if total < 9 || total > 1024 { return false }
-    if !control(d, 128, 6, 0x200, 0, total) || get(d, ACTUAL) != total { return false }
-    let config = r8(buf + 5)
     var interface: u64 = 0
     var selected: u64 = 0
     var kind: u64 = 0
@@ -535,6 +579,349 @@ fn configure(d: u64) -> bool {
     }
     true
 }
+
+// --- px78: mass storage's pipes ------------------------------------------
+
+/// The TD in flight on a storage device's pipe ends at its last TRB's
+/// event (success, or a short packet there) or at an error event on any
+/// of its TRBs (a stall, babble or transaction error halts the pipe,
+/// xHCI §4.10.2). TDs never cross the ring's link (`room`), so the TD's
+/// TRBs are BFIRST..BEXPECT in order.
+fn bulk_event(d: u64, trb: u64, code: u64, residue: u64) {
+    if trb < get(d, BFIRST) || trb > get(d, BEXPECT) { return }
+    if trb == get(d, BEXPECT) || code != 1 {
+        put(d, BCODE, code)
+        put(d, BREST, residue)
+        put(d, BDONE, 1)
+    }
+}
+
+/// Make room for `n` TRBs before the ring's end: when they would not fit
+/// before entry 255, a Link TRB (TC set) at the enqueue index sends the
+/// controller back to the ring's start now, so no TD crosses a link
+/// (xHCI §4.11.5.1 would need the chain bit on it). The entries after
+/// that link are written empty with this lap's cycle bit: the next lap's
+/// cycle is the other one, so none of them (TRBs two laps old, whose bit
+/// would match it again) can ever be taken for a new TRB (§4.9.2).
+fn room(owner: u64, ringword: u64, indexword: u64, cycleword: u64, n: u64) {
+    let index = get(owner, indexword)
+    if index + n <= 255 { return }
+    let ring = get(owner, ringword)
+    let cycle = get(owner, cycleword)
+    var k = index + 1
+    while k <= 255 { trb(ring + k * 16, 0, 0, cycle); k += 1 }
+    trb(ring + index * 16, pa(ring), 0, (6 << 10) | 2 | cycle)
+    put(owner, indexword, 0)
+    put(owner, cycleword, cycle ^ 1)
+}
+
+/// Whether `d` is a storage device whose pipes take transfers.
+fn storage_live(d: u64) -> bool {
+    d != 0 && get(d, ACTIVE) != 0 && get(d, KIND) == 5 && get(get(d, HOST), LIVE) != 0
+}
+
+/// How many storage devices enumeration found (each a device record).
+fn storage_count() -> u64 {
+    let t = unsafe { storage }
+    if t == 0 { 0 } else { get(t, 0) }
+}
+
+/// Storage device `i`'s record, 0 past the last.
+fn storage_dev(i: u64) -> u64 {
+    if i >= storage_count() { 0 } else { get(unsafe { storage }, 1 + i) }
+}
+
+/// One bulk transfer on storage device `d`: `n` bytes in (`inward`) or
+/// out, over the pages listed at kernel address `list` (physical
+/// addresses, the data page after page), or with `list` 0 the physical
+/// range at `at` inside one page. Normal TRBs, one a page piece, chained,
+/// the last with IOC (and ISP inward), TD Size counting the packets left
+/// (xHCI §4.11.2.4); the doorbell names the pipe's DCI. Polled with IF
+/// clear to a kernel/clock deadline `us` microseconds away. (completion
+/// code, bytes moved): 1 success, 13 short packet, 6 stall, any other
+/// code the controller's; 0 a timeout, a dead controller or a bad buffer.
+fn bulk(d: u64, inward: bool, list: u64, at: u64, n: u64, us: u64) -> (u64, u64) {
+    if !storage_live(d) || n == 0 || n > 0x100000 { return (0, 0) }
+    let c = get(d, HOST)
+    let ring = if inward { BIRING } else { BORING }
+    let index = if inward { BII } else { BOI }
+    let cycle = if inward { BIC } else { BOC }
+    let dci = get(d, if inward { BIN } else { BOUT })
+    let mps = get(d, if inward { BIMPS } else { BOMPS })
+    // kernel/block's pieces, as kernel/ahci takes them: a page each (the
+    // last the rest), each inside its page; with no list, one range.
+    if list == 0 && n > 4096 - at % 4096 { return (0, 0) }
+    let pieces = if list == 0 { 1 } else { (n + 4095) / 4096 }
+    if pieces > 64 { return (0, 0) }
+    var left = n
+    var p: u64 = 0
+    while p < pieces {
+        let a = if list == 0 { at } else { r64(list + p * 8) }
+        let k = if left < 4096 { left } else { 4096 }
+        if a == 0 || k > 4096 - a % 4096 { return (0, 0) }
+        if a >= 0x100000000 && r32(get(c, CAP) + 0x10) & 1 == 0 { return (0, 0) }
+        left -= k
+        p += 1
+    }
+    let saved = sync.irq_save()
+    room(d, ring, index, cycle, pieces)
+    put(d, BDONE, 0); put(d, BCODE, 0); put(d, BREST, 0); put(d, BEP, dci)
+    left = n
+    var i: u64 = 0
+    var last: u64 = 0
+    while i < pieces {
+        let a = if list == 0 { at } else { r64(list + i * 8) }
+        let k = if left < 4096 { left } else { 4096 }
+        let after = left - k
+        let packets = (after + mps - 1) / mps
+        let size = if packets > 31 { 31 } else { packets }
+        let end = i + 1 == pieces
+        let flags = (1 << 10) | (if end { 32 | (if inward { 4 } else { 0 }) } else { 16 })
+        let t = enqueue(d, ring, index, cycle, a, k | (size << 17), flags)
+        if i == 0 { put(d, BFIRST, t) }
+        last = t
+        left = after
+        i += 1
+    }
+    put(d, BEXPECT, last)
+    w32(get(c, DB) + get(d, SLOT) * 4, dci)
+    let deadline = clock.deadline_us(us)
+    while get(d, BDONE) == 0 && !clock.expired(deadline) && get(c, LIVE) != 0 {
+        drain(c)
+        if get(d, BDONE) == 0 { sync.relax() }
+    }
+    let done = get(d, BDONE) != 0
+    let code = get(d, BCODE)
+    let residue = get(d, BREST)
+    // A late event for this TD must never complete the next one.
+    put(d, BEP, 0)
+    if !done {
+        // The endpoint's output context names its state and dequeue
+        // pointer (xHCI §6.2.3): what a timeout's line reports.
+        let ctx = get(d, OUTPUT) + dci * get(c, CSZ)
+        log.put("xhci: storage "); path(d)
+        log.put(if get(c, LIVE) == 0 { ": controller quarantined" } else { ": bulk transfer timeout" })
+        log.put(", DCI "); log.dec(dci as int)
+        log.put(" state "); log.dec((r32(ctx) & 7) as int)
+        log.put(" dequeue "); log.hex(r64(ctx + 8))
+        log.put(" TD "); log.hex(get(d, BFIRST)); log.put(".."); log.hex(get(d, BEXPECT))
+        log.put(" USBSTS "); log.hex(r32(get(c, OP) + 4))
+        log.end()
+    }
+    sync.irq_restore(saved)
+    if !done { return (0, 0) }
+    // The event's length is the last TRB's residue (xHCI §4.10.1.1); a
+    // short TD of one piece moved its length less that; a short TD of
+    // several pieces is refused as a whole by kernel/usb_storage.
+    let moved = if code == 1 { n } else if code == 13 && pieces == 1 && residue <= n { n - residue } else { 0 }
+    (code, moved)
+}
+
+/// A command on the command ring, polled with IF clear to a kernel/clock
+/// deadline (`command` sleeps between looks, which a system call with IF
+/// clear cannot). Its completion's (slot << 24 | code), 0 on a timeout,
+/// which quarantines the controller as `command`'s does.
+fn command_now(c: u64, parameter: u64, control: u64) -> u64 {
+    if get(c, LIVE) == 0 { return 0 }
+    let saved = sync.irq_save()
+    put(c, DONE, 0)
+    let at = enqueue(c, CMD, CI, CC, parameter, 0, control)
+    put(c, WAIT, at)
+    w32(get(c, DB), 0)
+    let deadline = clock.deadline_us(2000000)
+    while get(c, DONE) == 0 && !clock.expired(deadline) { drain(c); sync.relax() }
+    let done = get(c, DONE) != 0
+    let result = get(c, RESULT)
+    sync.irq_restore(saved)
+    if done { return result }
+    put(c, LIVE, 0)
+    w32(get(c, OP), 0)
+    say_error(c, "command timeout; controller quarantined", control)
+    0
+}
+
+/// A control request with no data stage, polled with IF clear to a
+/// kernel/clock deadline (CLEAR_FEATURE, the Bulk-Only reset): whether it
+/// completed with success.
+fn control_now(d: u64, request_type: u64, request: u64, value: u64, index: u64) -> bool {
+    let c = get(d, HOST)
+    if get(c, LIVE) == 0 || get(d, ACTIVE) == 0 { return false }
+    let saved = sync.irq_save()
+    put(d, TDONE, 0); put(d, RESIDUE, 0)
+    let setup = request_type | (request << 8) | (value << 16) | (index << 32)
+    let _setup = enqueue(d, CTRL, TI, TC, setup, 8, (2 << 10) | 64)
+    let end = enqueue(d, CTRL, TI, TC, 0, 0, (4 << 10) | 32 | (1 << 16))
+    put(d, COMPLETION, end)
+    w32(get(c, DB) + get(d, SLOT) * 4, 1)
+    let deadline = clock.deadline_us(2000000)
+    while get(d, TDONE) == 0 && !clock.expired(deadline) { drain(c); sync.relax() }
+    let ok = get(d, TDONE) != 0 && get(d, COMPLETION) == 1
+    sync.irq_restore(saved)
+    ok
+}
+
+/// Clear a halted pipe of storage device `d` (BOT §6.6.2 and §5.3.4): the
+/// controller's Reset Endpoint (xHCI §4.6.8, TSP 0), its dequeue moved to
+/// the ring's enqueue position with the ring's cycle (Set TR Dequeue
+/// Pointer, §4.6.10), then the device's CLEAR_FEATURE(ENDPOINT_HALT)
+/// (USB 2.0 §9.4.1). Whether all three completed.
+fn clear_halt(d: u64, inward: bool) -> bool {
+    if !storage_live(d) { return false }
+    let c = get(d, HOST)
+    let dci = get(d, if inward { BIN } else { BOUT })
+    let slot = get(d, SLOT)
+    let reset = command_now(c, 0, (14 << 10) | (dci << 16) | (slot << 24))
+    // A pipe that was not halted answers Context State Error (19): go on.
+    if reset & 255 != 1 && reset & 255 != 19 { return false }
+    let ring = get(d, if inward { BIRING } else { BORING })
+    let index = get(d, if inward { BII } else { BOI })
+    let cycle = get(d, if inward { BIC } else { BOC })
+    let moved = command_now(c, pa(ring + index * 16) | cycle, (16 << 10) | (dci << 16) | (slot << 24))
+    if moved & 255 != 1 { return false }
+    control_now(d, 2, 1, 0, get(d, if inward { BIADDR } else { BOADDR }))
+}
+
+/// The Bulk-Only Mass Storage Reset (BOT §3.1: class request FFh to the
+/// interface), then both pipes cleared (§5.3.4's reset recovery).
+fn bot_reset(d: u64) -> bool {
+    if !storage_live(d) { return false }
+    if !control_now(d, 0x21, 0xff, 0, get(d, IFACE)) { return false }
+    clear_halt(d, true) && clear_halt(d, false)
+}
+
+/// The bulk pipes of a storage interface, configured (xHCI §4.6.6, the
+/// Configure Endpoint command first, then SET_CONFIGURATION, §4.3.5),
+/// and the device recorded among the storage devices. Each endpoint's
+/// context: Bulk OUT 2 or Bulk IN 6, CErr 3, its max packet, the
+/// SuperSpeed companion's bMaxBurst, Average TRB Length 3 KiB (§4.14.1.1).
+fn bulk_context(at: u64, ring: u64, mps: u64, kind: u64, burst: u64) {
+    w32(at, 0)
+    w32(at + 4, (mps << 16) | (burst << 8) | (kind << 3) | 6)
+    w64(at + 8, pa(ring) | 1)
+    w32(at + 16, 3072)
+}
+
+fn drive_storage(d: u64, config: u64, iface: u64, inaddr: u64, inmps: u64, outaddr: u64, outmps: u64, bursts: u64) -> bool {
+    let c = get(d, HOST)
+    if storage_count() >= STORAGE_MAX { return false }
+    let ir = page()
+    let orr = page()
+    if ir == 0 || orr == 0 { return false }
+    let ind = (inaddr & 15) * 2 + 1
+    let outd = (outaddr & 15) * 2
+    put(d, BIRING, ir); put(d, BII, 0); put(d, BIC, 1); put(d, BIN, ind); put(d, BIMPS, inmps); put(d, BIADDR, inaddr)
+    put(d, BORING, orr); put(d, BOI, 0); put(d, BOC, 1); put(d, BOUT, outd); put(d, BOMPS, outmps); put(d, BOADDR, outaddr)
+    put(d, IFACE, iface); put(d, BBURST, bursts)
+    let input = get(d, INPUT)
+    zero(input, 4096)
+    w32(input + 4, 1 | (1 << ind) | (1 << outd))
+    input_slot(d, if ind > outd { ind } else { outd })
+    let csz = get(c, CSZ)
+    bulk_context(input + (ind + 1) * csz, ir, inmps, 6, bursts >> 8)
+    bulk_context(input + (outd + 1) * csz, orr, outmps, 2, bursts & 255)
+    if command(c, pa(input), (12 << 10) | (get(d, SLOT) << 24)) & 255 != 1 { return false }
+    if !control(d, 0, 9, config, 0, 0) { return false }
+    let t0 = unsafe { storage }
+    if t0 == 0 {
+        let t = page()
+        if t == 0 { return false }
+        unsafe { storage = t }
+    }
+    let t = unsafe { storage }
+    let k = get(t, 0)
+    put(t, 1 + k, d)
+    put(t, 0, k + 1)
+    put(d, KIND, 5)
+    let saved = sync.acquire(sync.console())
+    log.put("xhci: storage "); path(d); log.put(" speed "); log.dec(get(d, SPEED) as int)
+    log.put(" interface "); log.dec(iface as int)
+    log.put(" bulk in "); log.hex_n(inaddr, 2); log.put("/"); log.dec(inmps as int)
+    log.put(" out "); log.hex_n(outaddr, 2); log.put("/"); log.dec(outmps as int)
+    log.put(" burst "); log.dec((bursts >> 8) as int); log.put("/"); log.dec((bursts & 255) as int)
+    log.line(" Bulk-Only")
+    sync.release(sync.console(), saved)
+    true
+}
+
+/// px78: the configuration descriptor at `buf` (`total` bytes) as a
+/// storage device's: the first interface (alternate setting 0) of class
+/// 08h, subclass 06h, protocol 50h, its bulk IN and OUT endpoints and
+/// each one's SuperSpeed companion's bMaxBurst. (found, interface, in
+/// address, in max packet, out address, out max packet, bursts in << 8
+/// | out).
+fn storage_interface(buf: u64, total: u64) -> (bool, u64, u64, u64, u64, u64, u64) {
+    var at: u64 = 0
+    var inside = false
+    var found = false
+    var iface: u64 = 0
+    var ia: u64 = 0
+    var im: u64 = 0
+    var oa: u64 = 0
+    var om: u64 = 0
+    var bursts: u64 = 0
+    var last: u64 = 0 // 1 the previous descriptor was the IN endpoint, 2 the OUT
+    while at + 2 <= total {
+        let length = r8(buf + at)
+        let dtype = r8(buf + at + 1)
+        if length < 2 || at + length > total { return (false, 0, 0, 0, 0, 0, 0) }
+        if dtype == 4 && length >= 9 {
+            inside = !found && r8(buf + at + 3) == 0 && r8(buf + at + 5) == 8 && r8(buf + at + 6) == 6 && r8(buf + at + 7) == 0x50
+            if inside { found = true; iface = r8(buf + at + 2) }
+            last = 0
+        } else if dtype == 5 && length >= 7 && inside {
+            let address = r8(buf + at + 2)
+            let mps = (r8(buf + at + 4) | (r8(buf + at + 5) << 8)) & 0x7ff
+            last = 0
+            if r8(buf + at + 3) & 3 == 2 && address & 15 != 0 {
+                if address & 128 != 0 && ia == 0 { ia = address; im = mps; last = 1 }
+                if address & 128 == 0 && oa == 0 { oa = address; om = mps; last = 2 }
+            }
+        } else if dtype == 48 && length >= 6 && inside && last != 0 {
+            let burst = r8(buf + at + 2) & 15
+            bursts = bursts | (if last == 1 { burst << 8 } else { burst })
+            last = 0
+        } else {
+            last = 0
+        }
+        at += length
+    }
+    (found && ia != 0 && oa != 0 && im != 0 && om != 0, iface, ia, im, oa, om, bursts)
+}
+
+// px78: kernel/usb_storage's way in, called by address through boot/io.S's
+// pax_call5: kernel/block, which kernel/usb_storage serves, sits below
+// kernel/console, which this module uses, so kernel/usb_storage cannot
+// import this one (wolf refuses the cycle). Each takes and gives words:
+// booleans are 0 or 1; `bulk`'s pair is code | moved << 8.
+
+/// How many storage devices enumeration found.
+export fn pax_xhci_storage_count() -> u64 { storage_count() }
+
+/// Storage device `i`'s record, 0 past the last.
+export fn pax_xhci_storage_dev(i: u64) -> u64 { storage_dev(i) }
+
+/// 1 while device `d`'s pipes take transfers.
+export fn pax_xhci_storage_live(d: u64) -> u64 { if storage_live(d) { 1 } else { 0 } }
+
+/// Device `d`'s path on the log (`usb1-1`, `usb1-3.2`); 0.
+export fn pax_xhci_put_path(d: u64) -> u64 { path(d); 0 }
+
+/// A zeroed page below 4 GiB (its kernel address) for a storage device's
+/// own DMA (its CBW, CSW and short replies), 0 with none.
+export fn pax_xhci_dma_page() -> u64 { page() }
+
+/// `bulk` with `mode` the deadline in microseconds << 1 | 1 inward:
+/// code | moved << 8.
+export fn pax_xhci_bulk(d: u64, mode: u64, list: u64, at: u64, n: u64) -> u64 {
+    let (code, moved) = bulk(d, mode & 1 != 0, list, at, n, mode >> 1)
+    code | (moved << 8)
+}
+
+/// `clear_halt`: 1 when the pipe is clear.
+export fn pax_xhci_clear_halt(d: u64, inward: u64) -> u64 { if clear_halt(d, inward != 0) { 1 } else { 0 } }
+
+/// `bot_reset`: 1 when the reset recovery completed.
+export fn pax_xhci_bot_reset(d: u64) -> u64 { if bot_reset(d) { 1 } else { 0 } }
 
 fn discard_allocations(d: u64) {
     // Only before Address Device, or after successful Disable Slot.
@@ -637,9 +1024,16 @@ fn detach(d: u64) {
         slot += 1
     }
     let saved = sync.irq_save()
+    let was_storage = get(d, KIND) == 5
     report(d, 0)
-    put(d, KIND, 3)
+    put(d, KIND, if was_storage { 6 } else { 3 })
     sync.irq_restore(saved)
+    if was_storage {
+        // px78: kernel/usb_storage keeps this record; it refuses I/O now.
+        let s = sync.acquire(sync.console())
+        log.put("xhci: storage "); path(d); log.line(" removed; its disk refuses I/O")
+        sync.release(sync.console(), s)
+    }
     let result = command(c, 0, (10 << 10) | (get(d, SLOT) << 24))
     if result & 255 != 1 { say_error(c, "disable slot failed; DMA quarantined", result); return }
     let s = sync.irq_save()
@@ -648,7 +1042,8 @@ fn detach(d: u64) {
     w64(c + 512 + get(d, SLOT) * 8, 0)
     w64(get(c, DCBAA) + get(d, SLOT) * 8, 0)
     // Disable Slot completion proves these DMA buffers are no longer owned.
-    discard_allocations(d)
+    // px78: a storage device's record is kept (named by kernel/usb_storage).
+    if !was_storage { discard_allocations(d) }
     sync.irq_restore(s)
 }
 
