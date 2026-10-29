@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# tests/mpx6-firmware — the firmware's machine as it is, not as QEMU draws
+# it (px76: kasumi has no serial port, may gate its 8254, gives its xHCI
+# MSI x8 and no legacy line with BAR0 above 4 GiB, and a GOP mode Limine
+# hands over as it finds it).
+#
+#   tests/mpx6-firmware [--tier native|release|both] [--firmware bios|uefi|both]
+#
+# Per compiler tier, on the firmwares asked (PAX_METAL_TIER and
+# PAX_METAL_FIRMWARE for the scripts it runs):
+#   F1 the clocks (tests/mpx6-metal): q35, --no-hpet, --no-pit, both, and
+#      -m 8G; ACPI read, the clock named and the tick calibrated by it,
+#      20 ticks in 150-300 ms by the PM timer read independently.
+#   F2 COM1 present and absent (tests/mpx6-metal-serial): the probe says
+#      which, an absent UART's receive setup neither hangs nor makes input.
+#   F3 reboot and power-off (tests/mpx6-metal-power): the FADT's reset
+#      register, then port 0xCF9, then the triple fault, logged in that
+#      order; S5 from the DSDT's \_S5 package with SLP_EN to PM1a/PM1b.
+#   F4 a padded framebuffer (kernel/kmain_metal_screen.lu): a pitch of 68
+#      bytes for 16 pixels and red at shift 0 drawn where the masks say;
+#      a short pitch and overlapping masks refused.
+#   F5 the early panic with no UART, on the screen alone (UEFI, OVMF's GOP
+#      at the mode Limine's `resolution:` asks): 1280x800 at 1x and
+#      3840x2160 at 2x (R-px76-3 B), every glyph pixel read back from
+#      QEMU's screendump (tests/mpx6-metal.d/panic-screen.py).
+#   F6 MSI's two address layouts (kernel/kmain_metal_msi.lu): ioh3420's
+#      32-bit capability and nec-usb-xhci's 64-bit one, each enabled,
+#      read back (kernel/msi's address and edge data) and disabled again.
+#   F7 the USB suite with its xHCI on MSI only, then on INTx only
+#      (tests/mpx6-usb under PAX_USB_IRQ; nec-usb-xhci by R-px76-5): its
+#      18 rows on root, hub and nested, each boot's line `xhci 1: ports 8
+#      MSI vector 80 …` or `… INTx <line> …`.
+#   F8 kasumi's shape (UEFI, R-px76-6): no COM1, no PIT, the xHCI on MSI
+#      only with BAR0 above 4 GiB (--high-bar), a 3840x2160 GOP: the
+#      console's 18 USB rows, the transcript read from PAX's memory
+#      (tools/usb-session --no-serial), the clock the HPET, BAR0 >= 4 GiB,
+#      `MSI vector 80`, and the screen saved (screen.ppm). Before it, F6's
+#      witness under --high-bar with an NVMe controller beside the NEC
+#      xHCI: both BAR0s above 4 GiB (`bar: … BAR0 64-bit 0x…`).
+#   F9 the timer and scheduler suites (tests/mpx2-interrupts,
+#      tests/mpx2-sched) on machines without the HPET, without the PIT and
+#      without both (PAX_NO_HPET, PAX_NO_PIT), native tier, on the
+#      firmwares asked.
+# F5 and F8 are UEFI whatever --firmware says (the mode is OVMF's GOP,
+# the window OVMF's), once per tier. Exit 0 when every row held.
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+tier=both firmware=both
+while [ $# -gt 0 ]; do
+    case $1 in
+        --tier) tier=$2; shift 2;;
+        --firmware) firmware=$2; shift 2;;
+        *) die 'usage: mpx6-firmware [--tier native|release|both] [--firmware bios|uefi|both]';;
+    esac
+done
+case $tier in both) tiers='native release';; native|release) tiers=$tier;; *) die 'bad tier';; esac
+case $firmware in both) legs='bios uefi';; bios|uefi) legs=$firmware;; *) die 'bad firmware';; esac
+base=$PAX_BUILD
+row() { echo "PASS $*"; }
+for t in $tiers; do
+    export PAX_BUILD=$base/firmware/$t PAX_METAL_TIER=$t PAX_METAL_FIRMWARE=$legs
+    flags=(); [ "$t" != release ] || flags=(--release)
+
+    "$PAX_ROOT/tests/mpx6-metal"; row "F1 $t: clocks on $legs"
+    "$PAX_ROOT/tests/mpx6-metal-serial"; row "F2 $t: COM1 present and absent on $legs"
+    "$PAX_ROOT/tests/mpx6-metal-power"; row "F3 $t: reboot and power-off on $legs"
+
+    w=$PAX_BUILD/screens
+    mkdir -p "$w"
+    "$PAX_ROOT/tools/build-kernel" ${flags[@]+"${flags[@]}"} --src "$PAX_ROOT/kernel/kmain_metal_screen.lu" "$w"
+    "$PAX_ROOT/tools/mkimage" "$w/kmain_metal_screen.elf" "$w/padding.iso"
+    rc=0
+    "$PAX_ROOT/tools/qemu-run" --serial "$w/padding.log" "$w/padding.iso" || rc=$?
+    [ "$rc" = 33 ] || { cat "$w/padding.log"; die "FAIL F4 $t: padded framebuffer exit $rc"; }
+    grep -aF 'PASS METAL padded rows and RGB masks' "$w/padding.log" >/dev/null
+    row "F4 $t: a 68-byte pitch for 16 pixels and red at shift 0; a short pitch and overlapping masks refused"
+
+    "$PAX_ROOT/tools/build-kernel" ${flags[@]+"${flags[@]}"} --src "$PAX_ROOT/kernel/kmain_metal_panic.lu" "$w"
+    for mode in 1280x800 3840x2160; do
+        cp "$PAX_ROOT/boot/limine.conf" "$w/$mode.conf"
+        printf '\n    resolution: %s\n' "$mode" >> "$w/$mode.conf"
+        "$PAX_ROOT/tools/mkimage" --conf "$w/$mode.conf" "$w/kmain_metal_panic.elf" "$w/$mode.iso"
+        python3 -I "$PAX_ROOT/tests/mpx6-metal.d/panic-screen.py" --image "$w/$mode.iso" --elf "$w/kmain_metal_panic.elf" --mode "$mode" --output "$w/$mode" \
+            || die "FAIL F5 $t $mode: the early panic is not on the screen"
+    done
+    row "F5 $t: the serial-less early panic legible at 1280x800 (1x) and 3840x2160 (2x)"
+
+    m=$PAX_BUILD/msi
+    mkdir -p "$m"
+    "$PAX_ROOT/tools/build-kernel" ${flags[@]+"${flags[@]}"} --src "$PAX_ROOT/kernel/kmain_metal_msi.lu" "$m"
+    "$PAX_ROOT/tools/mkimage" "$m/kmain_metal_msi.elf" "$m/msi.iso"
+    for f in $legs; do
+        rc=0
+        "$PAX_ROOT/tools/qemu-run" --firmware "$f" --usb-irq=msi --usb-kbd --serial "$m/$f.log" "$m/msi.iso" -- -device ioh3420 || rc=$?
+        [ "$rc" = 33 ] || { grep -aE '^(msi:|FAIL METAL|PANIC)' "$m/$f.log" >&2 || true; die "FAIL F6 $t $f: MSI layouts exit $rc"; }
+        grep -aE '^msi: ' "$m/$f.log" | tr -d '\r'
+    done
+    row "F6 $t: MSI's 32-bit (ioh3420) and 64-bit (nec-usb-xhci) layouts enabled, read back and disabled on $legs"
+
+    reuse=()
+    for irq in msi intx; do
+        PAX_USB_IRQ=$irq "$PAX_ROOT/tests/mpx6-usb" --tier "$t" --firmware "$firmware" ${reuse[@]+"${reuse[@]}"}
+        images=$PAX_BUILD/mpx6-usb/$t
+        for f in $legs; do
+            for topology in root hub nested; do
+                log=$images/$f-$topology/serial.log
+                if [ "$irq" = msi ]; then
+                    grep -aqE '^xhci 1: ports [0-9]+ MSI vector 80 ' "$log" || die "FAIL F7 $t $f $topology: no 'MSI vector 80' line"
+                else
+                    grep -aqE '^xhci 1: ports [0-9]+ INTx [0-9]+ ' "$log" || die "FAIL F7 $t $f $topology: no 'INTx' line"
+                fi
+                mkdir -p "$PAX_BUILD/usb-$irq/$f-$topology"
+                cp "$images/$f-$topology/"*.log* "$images/$f-$topology/"*.txt "$PAX_BUILD/usb-$irq/$f-$topology/"
+            done
+        done
+        row "F7 $t: the USB suite's 18 rows on root, hub and nested with the xHCI on $irq only, on $legs"
+        reuse=(--images "$images")
+    done
+
+    # F8: kasumi's shape. First where OVMF puts the BARs (F6's witness,
+    # an NVMe controller beside the NEC xHCI), then the probe's image
+    # again, at 3840x2160.
+    k=$PAX_BUILD/kasumi
+    mkdir -p "$k"
+    truncate -s 1M "$k/nvme.img"
+    rc=0
+    "$PAX_ROOT/tools/qemu-run" --firmware uefi --high-bar --usb-irq=msi --usb-kbd --nvme "$k/nvme.img" \
+        --serial "$k/bars.log" "$m/msi.iso" -- -device ioh3420 || rc=$?
+    [ "$rc" = 33 ] || { grep -aE '^(bar:|msi:|FAIL METAL|PANIC)' "$k/bars.log" >&2 || true; die "FAIL F8 $t: the high-BAR witness exit $rc"; }
+    python3 -I - "$k/bars.log" <<'PY'
+import re, sys
+s = open(sys.argv[1], errors='replace').read().replace('\r', '')
+bars = dict(re.findall(r'^bar: ([0-9a-f]{4}:[0-9a-f]{4}) BAR0 64-bit (0x[0-9a-f]{16})$', s, re.M))
+for name, pid in (('nec-usb-xhci', '1033:0194'), ('nvme', '1b36:0010')):
+    assert pid in bars, 'FAIL F8: no 64-bit BAR0 line for %s (%s): %r' % (name, pid, bars)
+    assert int(bars[pid], 16) >= 1 << 32, 'FAIL F8: %s BAR0 %s is below 4 GiB' % (name, bars[pid])
+    print('  bar: %s %s BAR0 %s' % (name, pid, bars[pid]))
+PY
+    cp "$PAX_ROOT/boot/limine-initramfs.conf" "$k/limine.conf"
+    printf '\n    resolution: 3840x2160\n' >> "$k/limine.conf"
+    "$PAX_ROOT/tools/mkimage" --conf "$k/limine.conf" --add "$images/probe.cpio" initramfs.cpio "$images/kmain_console.elf" "$k/kasumi.iso"
+    python3 -I "$PAX_ROOT/tools/usb-session" --image "$k/kasumi.iso" --elf "$images/kmain_console.elf" \
+        --output "$k/session" --firmware uefi --topology root --reference "$PAX_ROOT/notes/px74/linux.rows" --no-serial \
+        --flag=--no-pit --flag=--usb-irq=msi --flag=--high-bar --flag=--display-mode=3840x2160 \
+        || die "FAIL F8 $t: the serial-less session"
+    python3 -I - "$k/session/serial.log" "$k/session/screen.ppm" <<'PY'
+import re, sys
+s = open(sys.argv[1], errors='replace').read().replace('\r', '')
+bar = re.search(r'^xhci 1: BAR0 (0x[0-9a-f]+)$', s, re.M)
+assert bar and int(bar[1], 16) >= 1 << 32, 'FAIL F8: xHCI BAR0 not above 4 GiB: %r' % (bar and bar[1])
+assert re.search(r'^xhci 1: ports [0-9]+ MSI vector 80 ', s, re.M), 'FAIL F8: no MSI vector 80 line'
+assert re.search(r'^clock: HPET [0-9]+ fs/tick, checked against the PM timer$', s, re.M), 'FAIL F8: the clock is not the checked HPET'
+assert re.search(r'^timer: LAPIC calibrated by HPET ', s, re.M), 'FAIL F8: the tick is not the HPET\'s'
+screen = re.search(r'^screen: 3840x2160 32 bpp .* font spleen 8x16 at 2x, 240x67 cells', s, re.M)
+assert screen, 'FAIL F8: the screen line is not 3840x2160 at 2x'
+header = open(sys.argv[2], 'rb').read(20).split(b'\n')
+assert header[0] == b'P6' and header[1] == b'3840 2160', 'FAIL F8: the screendump is not 3840x2160: %r' % header[:2]
+for line in s.splitlines():
+    if re.match(r'^(firmware|memory|acpi: (XSDT|RSDT|FACP|APIC|HPET|MCFG)|clock|timer|screen|xhci 1): ', line):
+        print('  ' + line)
+print('PASS F8: no COM1, no PIT, the xHCI on MSI at BAR0 %s, 3840x2160 at 2x' % bar[1])
+PY
+    row "F8 $t: kasumi's shape, the session's 18 rows with no serial port"
+
+    # F9: the timer and scheduler suites on machines without the HPET,
+    # without the PIT, and without both (tools/qemu-run's environment
+    # forms). The native tier only: the clock is the machine's, the
+    # compiler tiers are F1's; the first variant builds, the others boot
+    # its images.
+    if [ "$t" = native ]; then
+        for f in $legs; do
+            for suite in mpx2-interrupts mpx2-sched; do
+                reuse=()
+                for clocks in hpet pit both; do
+                    nohpet=0 nopit=0
+                    case $clocks in hpet) nohpet=1;; pit) nopit=1;; both) nohpet=1 nopit=1;; esac
+                    PAX_NO_HPET=$nohpet PAX_NO_PIT=$nopit "$PAX_ROOT/tests/$suite" ${reuse[@]+"${reuse[@]}"} --tier native --firmware "$f" \
+                        || die "FAIL F9 $f $suite: without the $clocks"
+                    reuse=(--images "$PAX_BUILD/$suite")
+                done
+            done
+        done
+        row "F9 native: tests/mpx2-interrupts and tests/mpx2-sched without the HPET, the PIT and both, on $legs"
+    fi
+    echo "PASS mpx6-firmware $t"
+done
