@@ -42,6 +42,7 @@
 //! firmware's source.
 
 use log
+use msi
 use sync
 
 extern "c" fn pax_outb(port: u16, v: u8)
@@ -335,8 +336,13 @@ pub fn interrupts_off(bdf: u64) {
     set_command(bdf, command(bdf) | CMD_INTX_OFF)
 }
 
-/// PCI Local Bus 3.0 §6.8: exactly one MSI, either address layout.
-/// Intel SDM vol.3A §11.11: physical APIC destination, fixed edge delivery.
+/// PCI Local Bus 3.0 §6.8: exactly one MSI, either address layout
+/// (control bit 7: a 64-bit address, the data at +12, else at +8; bit 8:
+/// per-vector masking, its mask word after the data, cleared). The
+/// message is kernel/msi's (Intel SDM vol. 3A §11.11): physical APIC
+/// `destination`, `vector`, fixed delivery, edge. INTx is turned off
+/// first and MSI enabled last, with one message (MME 0) whatever MMC the
+/// function offers; true when the function reads back enabled with one.
 pub fn enable_msi(bdf: u64, destination: u64, vector: u64) -> bool {
     let at = capability(bdf, 5)
     if at == 0 || destination > 255 || vector < 32 || vector > 254 { return false }
@@ -349,9 +355,9 @@ pub fn enable_msi(bdf: u64, destination: u64, vector: u64) -> bool {
     // Disable before changing any message field. MME=0 allocates one message.
     let header = read32(bdf, at) & !0x00710000
     write32(bdf, at, header)
-    write32(bdf, at + 4, 0xfee00000 | (destination << 12))
+    write32(bdf, at + 4, msi.address(destination))
     if wide { write32(bdf, at + 8, 0) }
-    write32(bdf, data, (read32(bdf, data) & 0xffff0000) | vector)
+    write32(bdf, data, (read32(bdf, data) & 0xffff0000) | msi.data(vector))
     if control & 256 != 0 { write32(bdf, data + 4, read32(bdf, data + 4) & !1) }
     write32(bdf, at, header | (1 << 16))
     read16(bdf, at + 2) & 0x71 == 1
