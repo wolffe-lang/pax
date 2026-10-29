@@ -21,7 +21,7 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
 | Disks | Up to four disks, virtio or NVMe (`nvme0n1`, major 259, read, written and flushed through PRP lists), with GPT or MBR tables and `/dev` nodes; ext2 read and written; ext3's journal written and replayed; `/` on the disk, `mount(2)`, `/etc/fstab`; an offline `fsck.ext2` in wolf | Linux 7.3.0 under QEMU (NVMe: 7.2.4) and e2fsprogs |
 | Network | virtio-net, ARP, IPv4, ICMP, UDP, TCP (RFC 9293, 6298, 5681), Unix sockets, `poll`, `epoll`, `eventfd`; 256 TCP connections | Linux in a namespace, and captures rebuilt byte by byte |
 | Console | A 16550 serial console when present, PS/2 and USB keyboards over xHCI with MSI or INTx, one line discipline; a firmware-sized framebuffer with the Linux VT's colours and 560 glyphs | typed sessions on a Linux pseudo-terminal; screendumps against a reference renderer |
-| Firmware | Checksummed ACPI tables; a local APIC tick calibrated against HPET, the ACPI PM timer or the PIT; ACPI reset and static S5 power-off | QEMU BIOS and UEFI, including PIT-less machines |
+| Firmware | Checksummed ACPI tables, one boot line each; a local APIC tick calibrated against the HPET (checked against the ACPI PM timer), else the PM timer, else the PIT; the xHCI on MSI where it offers it; ACPI reset and static S5 power-off; every boot line on the screen with no serial port | QEMU BIOS and UEFI, including machines with no HPET, no PIT, no COM1, a 3840×2160 GOP and BARs above 4 GiB |
 | Sound | The PC speaker through Linux's console ioctls; virtio sound behind OSS `/dev/dsp`; `/bin/play`, an orchestra of 17 timbres | QEMU's capture, every pitch within 1% |
 | Shipped programs | pelt (the shell, PID 1), boreutils (107 utilities), scent as `grep`, yew, lope, aspen, lupin, lobo, clef, three wolf games | the same binaries in a Linux container |
 
@@ -221,10 +221,13 @@ without COM1. Spleen's 8×16 glyphs give 160×50 cells at 1280×800; above 2560 
 Blink attributes are recorded but drawn steadily, and `DECSCUSR` is consumed without changing the cursor's shape, as
 on the measured Linux VT.
 
-`tools/qemu-run` accepts `--usb-irq=msi|intx`, `--no-hpet`, `--no-pit`, `--no-serial` and
-`--display-mode=3840x2160`. A display mode also needs the matching `resolution:` in the image's Limine configuration.
-Explicit interrupt tests use `nec-usb-xhci` on QEMU 8.2, whose `qemu-xhci` lacks MSI configuration properties;
-QEMU 11.1 uses `qemu-xhci`. Neither substitutes a claim about a physical controller.
+`tools/qemu-run` accepts `--usb-irq=msi|intx`, `--no-hpet`, `--no-pit`, `--no-serial`, `--high-bar` (UEFI: OVMF's
+64-bit window, so 64-bit BARs land above 4 GiB) and `--display-mode=3840x2160`; `PAX_USB_IRQ`, `PAX_NO_HPET=1`,
+`PAX_NO_PIT=1` and `PAX_HIGH_BAR=1` say the same for every boot of a suite. A display mode also needs the matching
+`resolution:` in the image's Limine configuration. Explicit interrupt tests use `nec-usb-xhci` on QEMU 8.2, whose
+`qemu-xhci` lacks MSI configuration properties; QEMU 11.1 uses `qemu-xhci`. Neither substitutes a claim about a
+physical controller. With no COM1 the kernel keeps its transcript in memory (64 KiB), which `tools/usb-session
+--no-serial` reads back through QEMU's monitor.
 
 ## Friendly shell editing
 
@@ -310,7 +313,7 @@ and `--tier native --firmware bios` picks one leg.
 | Users and the shipped programs | `mpx5-users`, `mpx5-accounts`, `mpx5-jobs`, `mpx5-pelt`, `mpx5-bore`, `mpx5-scent`, `mpx5-lope`, `mpx5-aspen`, `mpx5-lupin`, `mpx5-yew`, `mpx5-wolf`, `mpx5-clef`, `mpx5-screen` | every rule as root and as `pax`, job control typed byte for byte, each program's typed session against the same binary in a container |
 | Disks | `mpx6-blk`, `mpx6-ext2`, `mpx6-part`, `mpx6-root`, `mpx6-journal`, `mpx6-nodes`, `mpx6-nvme`, `mpx6-disktools`, `mpx6-fsck`, `mpx6-install`, `mpx6-games` | Linux 7.3.0 on QEMU with the same disks, e2fsprogs, the formatters' differentials, a power cut repaired, the installer, the games' frames cell for cell |
 | USB | `mpx6-usb`, `mpx6-usbcheck`, `usb-tools`, `usb-stick`, `usb-linux-fetch` | xHCI, hubs, keyboard bytes and hotplug; the stick's boot files, both firmwares, Linux mounting the ESP; the oracle's two pinned Ubuntu packages |
-| Firmware and display | `mpx6-firmware` | independent tick-rate checks, MSI and INTx keyboard sessions, above-4-GiB BARs, reset and S5, padded pitch, serial-less early panic pixels at 1280×800 and 4K |
+| Firmware and display | `mpx6-firmware` | independent tick-rate checks with and without the HPET and the PIT, the timer and scheduler suites on those machines, MSI and INTx keyboard sessions, both MSI layouts, BARs above 4 GiB, reset and S5, a padded pitch, serial-less early panic pixels at 1280×800 and 4K, a serial-less 4K session shaped like the target machine |
 
 Suites that need something of the host say so and stop: root for the Linux network side (`tools/linux-net`), docker or
 podman for the throwaway containers (`tools/linux-tree`, e2fsprogs), KVM for speed. `tools/mkimage` is reproducible:
