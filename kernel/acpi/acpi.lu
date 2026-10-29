@@ -34,6 +34,14 @@ pub fn mapped(pa: u64, n: u64) -> u64 {
     }
     0
 }
+/// A Limine response's table address as an HHDM pointer: Limine 12.9.1
+/// at base revision 6 hands HHDM pointers for the RSDP and the EFI
+/// system table (measured, px76); one below the HHDM is taken as
+/// physical, so either reading of the protocol finds the table.
+fn hhdm_pointer(a: u64) -> u64 {
+    let h = boot_info.hhdm()
+    if a != 0 && a < h { a + h } else { a }
+}
 pub fn checksum(a: u64, n: u64) -> bool {
     var sum: u64 = 0
     var i: u64 = 0
@@ -146,8 +154,8 @@ pub fn start() {
     if unsafe { started } { return }
     unsafe { started = true }
     platform_report()
-    let r = boot_info.rsdp()
     let h = boot_info.hhdm()
+    let r = hhdm_pointer(boot_info.rsdp())
     if r < h || mapped(r - h, 20) == 0 || integer(r, 8) != 0x2052545020445352 || !checksum(r, 20) {
         log.line("acpi: no valid RSDP"); return
     }
@@ -187,7 +195,7 @@ pub fn dsdt() -> u64 { unsafe { dsdt_address } }
 // UEFI 2.10 §4.3: system-table header, CHAR16 vendor and UINT32 revision.
 fn platform_report() {
     log.put("firmware: "); log.put(boot_info.firmware_name(boot_info.firmware()))
-    let e = boot_info.efi_system_table()
+    let e = hhdm_pointer(boot_info.efi_system_table())
     let h = boot_info.hhdm()
     if e >= h && mapped(e - h, 36) != 0 && integer(e, 8) == 0x5453595320494249 {
         log.put(" vendor ")
