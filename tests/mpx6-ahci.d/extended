@@ -120,6 +120,22 @@ grep -x 'PASS ahci-check: command timeout, stale task-file, TFES and completion'
 grep -x 'PASS ahci-check: 4Kn refused; 512e sector sizes decoded' "$E/reset.norm"
 echo 'PASS A10-HBA-reset: optional HR and the default per-port initialization both boot'
 
+# px78 (pax#240): a SATA controller in RAID mode is named and attached by
+# nothing. QEMU cannot present Intel's RST, so the class check is the
+# ahci-check unit row over synthetic configuration bytes and the line
+# kasumi's 00:17.0 would print; the scan itself meets a RAID bus
+# controller QEMU does have (LSI's MegaRAID, class 01.04) beside a SATA disk.
+grep -x "ahci-check: kasumi's 00:17.0 in RAID mode reads: AHCI: Intel RST/RAID mode at 00:17.0: switch the firmware to AHCI" "$E/reset.norm" \
+    || { echo 'FAIL A15-RST: the RST line over synthetic configuration bytes'; exit 1; }
+grep -x 'PASS ahci-check: class 01.04 refused by name (Intel RST and other RAID), 01.06.01 driven' "$E/reset.norm" \
+    || { echo 'FAIL A15-RST: the class check'; exit 1; }
+make_session raid $'echo AHCI-ROW-END'
+pax_row raid --qemu -device --qemu megasas --ahci "$E/sector.img,serial=PX78-RAID"
+grep -Ex 'AHCI: a RAID controller 1000:[0-9a-f]{4} at [0-9a-f]{2}:[0-9a-f]{2}\.[0-7] \(class 01\.04\) is not driven' "$E/raid.norm" \
+    || { echo 'FAIL A15-RST: the RAID bus controller was not named'; exit 1; }
+grep -q '^block: sda:' "$E/raid.norm" || { echo 'FAIL A15-RST: the SATA disk beside it was not driven'; exit 1; }
+echo 'PASS A15-RST: RAID class 01.04 named and not attached (Intel RST by its line, a RAID bus controller on the bus); AHCI driven beside it'
+
 # R-px75b-7, narrowed at px76's merge: every AHCI wait is a deadline on
 # kernel/clock (the HPET, else the ACPI PM timer, else the PIT read back).
 # On a machine whose 8254 does not count (QEMU's pit=off here; px76's
