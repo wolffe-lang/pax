@@ -1,0 +1,184 @@
+//! ACPI 6.5 §§5.2.3,5.2.5–5.2.12; checked read-only firmware tables.
+//! Only physical ranges Limine maps as ACPI/reclaimable/reserved-mapped are
+//! dereferenced. Every SDT is length-bounded and checksummed before parsing.
+use boot_info
+use log
+
+var started: bool = false
+var table_count: u64 = 0
+var hpet_address: u64 = 0
+var timer_port: u64 = 0
+var timer_mask: u64 = 0xffffff
+var fadt_address: u64 = 0
+var dsdt_address: u64 = 0
+
+pub fn byte(a: u64) -> u64 { unsafe { (a as *u8).read_volatile() as u64 } }
+pub fn integer(a: u64, n: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < n { v |= byte(a + i) << (i * 8); i += 1 }
+    v
+}
+// Firmware physical addresses, not pointers provided by the boot protocol.
+pub fn mapped(pa: u64, n: u64) -> u64 {
+    if pa == 0 || n == 0 || n > 0x100000 || pa > 0x0000ffffffffffff - n { return 0 }
+    var i = 0
+    while i < boot_info.memmap_count() {
+        let t = boot_info.memmap_type(i)
+        let b = boot_info.memmap_base(i)
+        let len = boot_info.memmap_length(i)
+        if (t == 2 || t == 3 || t == 5 || t == 8) && pa >= b && n <= len && pa - b <= len - n {
+            return boot_info.hhdm() + pa
+        }
+        i += 1
+    }
+    0
+}
+pub fn checksum(a: u64, n: u64) -> bool {
+    var sum: u64 = 0
+    var i: u64 = 0
+    while i < n { sum = (sum + byte(a + i)) & 255; i += 1 }
+    sum == 0
+}
+fn signature(a: u64) -> u64 { integer(a, 4) }
+fn chars(a: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        let b = byte(a + i)
+        log.put_byte((if b >= 32 && b < 127 { b } else { 63 }) as int)
+        i += 1
+    }
+}
+fn table(pa: u64) -> u64 {
+    let a = mapped(pa, 36)
+    if a == 0 { log.line("acpi: table header outside mapped firmware memory"); return 0 }
+    let n = integer(a + 4, 4)
+    if n < 36 || mapped(pa, n) == 0 || !checksum(a, n) {
+        log.put("acpi: rejected "); chars(a, 4); log.line(" length/checksum"); return 0
+    }
+    log.put("acpi: "); chars(a, 4); log.put(" OEM "); chars(a + 10, 6)
+    log.put(" length "); log.dec(n as int); log.end()
+    unsafe { table_count += 1 }
+    a
+}
+fn madt_entry(a: u64, kind: u64, n: u64) {
+    if kind == 0 && n >= 8 {
+        log.put("acpi: LAPIC id "); log.dec(byte(a + 3) as int)
+        log.put(" flags "); log.hex(integer(a + 4, 4)); log.end()
+    } else if kind == 1 && n >= 12 {
+        log.put("acpi: IOAPIC id "); log.dec(byte(a + 2) as int)
+        log.put(" address "); log.hex(integer(a + 4, 4))
+        log.put(" GSI "); log.dec(integer(a + 8, 4) as int); log.end()
+    } else if kind == 2 && n >= 10 {
+        log.put("acpi: ISO bus "); log.dec(byte(a + 2) as int)
+        log.put(" IRQ "); log.dec(byte(a + 3) as int)
+        log.put(" GSI "); log.dec(integer(a + 4, 4) as int)
+        log.put(" flags "); log.hex(integer(a + 8, 2)); log.end()
+    } else if kind == 4 && n >= 6 {
+        log.put("acpi: NMI UID "); log.dec(byte(a + 2) as int)
+        log.put(" LINT "); log.dec(byte(a + 5) as int)
+        log.put(" flags "); log.hex(integer(a + 3, 2)); log.end()
+    } else if kind == 5 && n >= 12 {
+        log.put("acpi: LAPIC address override "); log.hex(integer(a + 4, 8)); log.end()
+    } else if kind == 9 && n >= 16 {
+        log.put("acpi: x2APIC id "); log.dec(integer(a + 4, 4) as int)
+        log.put(" flags "); log.hex(integer(a + 8, 4)); log.end()
+    } else if kind == 10 && n >= 12 {
+        log.put("acpi: x2APIC NMI UID "); log.dec(integer(a + 4, 4) as int)
+        log.put(" LINT "); log.dec(byte(a + 8) as int)
+        log.put(" flags "); log.hex(integer(a + 2, 2)); log.end()
+    }
+}
+fn madt(a: u64, n: u64) {
+    if n < 44 { return }
+    var off: u64 = 44
+    while off + 2 <= n {
+        let size = byte(a + off + 1)
+        if size < 2 || size > n - off { log.line("acpi: malformed MADT entry"); return }
+        madt_entry(a + off, byte(a + off), size)
+        off += size
+    }
+}
+// GAS System I/O with no bit offset, and an address representable by IN/OUT.
+fn io_gas(a: u64) -> u64 {
+    let p = integer(a + 4, 8)
+    if byte(a) == 1 && byte(a + 2) == 0 && p != 0 && p <= 65532 { p } else { 0 }
+}
+fn fadt(a: u64, n: u64) {
+    if n < 116 { return }
+    unsafe {
+        fadt_address = a
+        timer_port = integer(a + 76, 4)
+        if timer_port > 65532 || byte(a + 91) != 4 { timer_port = 0 }
+        if n >= 220 && integer(a + 212, 8) != 0 { timer_port = io_gas(a + 208) }
+        timer_mask = if integer(a + 112, 4) & 0x100 != 0 { 0xffffffff } else { 0xffffff }
+        dsdt_address = integer(a + 40, 4)
+        if n >= 148 && integer(a + 140, 8) != 0 { dsdt_address = integer(a + 140, 8) }
+    }
+    log.put("acpi: SCI "); log.dec(integer(a + 46, 2) as int)
+    log.put(" PM timer "); log.hex(pm_port()); log.put(" mask "); log.hex(pm_mask())
+    log.put(" PM1a "); log.hex(integer(a + 64, 4))
+    log.put(" PM1b "); log.hex(integer(a + 68, 4)); log.end()
+}
+fn parse(a: u64) {
+    let sig = signature(a)
+    let n = integer(a + 4, 4)
+    if sig == 0x43495041 { madt(a, n) } // APIC
+    if sig == 0x50434146 { fadt(a, n) } // FACP
+    if sig == 0x54455048 && n >= 56 { // HPET GAS at 40
+        if byte(a + 40) == 0 && byte(a + 42) == 0 {
+            unsafe { hpet_address = integer(a + 44, 8) }
+        }
+        log.put("acpi: HPET address "); log.hex(hpet()); log.end()
+    }
+    if sig == 0x4746434d && n >= 44 { // MCFG, PCI firmware spec
+        var off: u64 = 44
+        while off + 16 <= n {
+            log.put("acpi: MCFG base "); log.hex(integer(a + off, 8))
+            log.put(" segment "); log.dec(integer(a + off + 8, 2) as int)
+            log.put(" buses "); log.dec(byte(a + off + 10) as int)
+            log.put(".."); log.dec(byte(a + off + 11) as int); log.end()
+            off += 16
+        }
+    }
+}
+pub fn start() {
+    if unsafe { started } { return }
+    unsafe { started = true }
+    let r = boot_info.rsdp()
+    let h = boot_info.hhdm()
+    if r < h || mapped(r - h, 20) == 0 || integer(r, 8) != 0x2052545020445352 || !checksum(r, 20) {
+        log.line("acpi: no valid RSDP"); return
+    }
+    var root = integer(r + 16, 4)
+    var stride: u64 = 4
+    if byte(r + 15) >= 2 {
+        if mapped(r - h, 36) == 0 { log.line("acpi: short RSDP"); return }
+        let length = integer(r + 20, 4)
+        if length < 36 || mapped(r - h, length) == 0 || !checksum(r, length) { log.line("acpi: bad extended RSDP"); return }
+        let xsdt = integer(r + 24, 8)
+        if xsdt != 0 { root = xsdt; stride = 8 }
+    }
+    let a = table(root)
+    if a == 0 { return }
+    let expected: u64 = if stride == 8 { 0x54445358 } else { 0x54445352 }
+    let n = integer(a + 4, 4)
+    if signature(a) != expected || (n - 36) % stride != 0 { log.line("acpi: invalid root table"); return }
+    var off: u64 = 36
+    while off + stride <= n {
+        let child = table(integer(a + off, stride))
+        if child != 0 { parse(child) }
+        off += stride
+    }
+    let dsdt = unsafe { dsdt_address }
+    if dsdt != 0 {
+        let d = table(dsdt)
+        if d == 0 || signature(d) != 0x54445344 { unsafe { dsdt_address = 0 } }
+    }
+}
+pub fn tables() -> u64 { unsafe { table_count } }
+pub fn hpet() -> u64 { unsafe { hpet_address } }
+pub fn pm_port() -> u64 { unsafe { timer_port } }
+pub fn pm_mask() -> u64 { unsafe { timer_mask } }
+pub fn fadt_table() -> u64 { unsafe { fadt_address } }
+pub fn dsdt() -> u64 { unsafe { dsdt_address } }

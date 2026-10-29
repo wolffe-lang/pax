@@ -52,6 +52,8 @@ extern "c" let limine_executable_address_request: *u64
 extern "c" let limine_module_request: *u64
 extern "c" let limine_executable_cmdline_request: *u64
 extern "c" let limine_framebuffer_request: *u64
+extern "c" let limine_rsdp_request: *u64
+extern "c" let limine_efi_system_table_request: *u64
 extern "c" let __pax_image_start: *u8
 extern "c" let __pax_image_end: *u8
 
@@ -89,6 +91,8 @@ fn request(which: int) -> u64 {
         if which == 8 {
             return limine_framebuffer_request as u64
         }
+        if which == 9 { return limine_rsdp_request as u64 }
+        if which == 10 { return limine_efi_system_table_request as u64 }
     }
     0
 }
@@ -244,6 +248,16 @@ pub fn cmdline_value(key: str) -> (u64, u64) {
 pub fn revision_ok() -> bool {
     let tag = request(0)
     tag != 0 && word(tag + 16) == 0
+}
+
+/// Base revision 6 gives virtual HHDM pointers for these two responses.
+pub fn rsdp() -> u64 {
+    let r = response(9)
+    if r == 0 { 0 } else { word(r + 8) }
+}
+pub fn efi_system_table() -> u64 {
+    let r = response(10)
+    if r == 0 { 0 } else { word(r + 8) }
 }
 
 /// The firmware type: 0 x86 BIOS, 1 32-bit UEFI, 2 64-bit UEFI, 3 SBI;
