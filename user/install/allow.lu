@@ -1,0 +1,377 @@
+//! The install allow-list, the boot stick and its install log (px78).
+//!
+//! pax-install writes only to a disk whose model and serial, as sysfs
+//! gives them (`/sys/block/<disk>/device/{model,serial}`, a virtio disk's
+//! serial at `/sys/block/<disk>/serial`, each trimmed), match a line of
+//! the allow-list: `/pax/install-targets` on the boot stick's ESP
+//! (R-px78-2 A: written from any OS before the boot), or a file named by
+//! `--allow-list`. A line is `model=<model> serial=<serial>`; blank lines
+//! and lines that start with `#` say nothing; any other line refuses the
+//! whole list, named by its number. An empty, missing or refused list
+//! refuses every disk and says how to add one. A disk with no serial can
+//! never be listed (a USB disk shows none: Linux's answer, R-px78-1).
+//!
+//! Refused before the list is read, in this order: the running root, a
+//! mounted disk, a read-only disk and a PAX live medium (a disk whose
+//! partition 1 is a FAT32 volume holding /boot/initramfs.cpio: the stick
+//! this runs from, or a copy of it). R-px78-4: a disk holding partitions
+//! PAX did not write is refused unless listed, and when it is listed the
+//! plan names the partitions the install erases; the stick's default list
+//! names no disk, so kasumi's NVMe (CachyOS) is never a target unless its
+//! serial is typed into the file by hand.
+//!
+//! The install log (R-px78-3 A): with no serial console on metal, every
+//! line the installer prints, its answers, the plan, each phase's verdict
+//! and the sha256 of each written partition's first MiB go to the stick's
+//! ESP as `/pax/logs/install-<n>.txt` (n one more than the highest there),
+//! appended and fsynced at every step by `paxfat append`, so the file and
+//! a photo of the screen tell the same story after the boot.
+
+/// One allow-list entry.
+struct Allowed { model: str, serial: str }
+
+/// The allow-list as read: its entries, where it came from, and why it
+/// refuses every disk ("" when it does not).
+struct AllowList { entries: List[Allowed], source: str, refusal: str }
+
+/// A disk as the installer judges it: its record, its sysfs identity, its
+/// first partition (the name and its first byte, "" with none), whether
+/// it is a PAX live medium, its partitions in words, and the reason it
+/// is refused ("" when it may be a target).
+struct Disk {
+    target: Target,
+    model: str,
+    serial: str,
+    part1: str,
+    part1_at: int,
+    live: bool,
+    layout: str,
+    reason: str,
+}
+
+/// The install log on the stick. `on` while it is written; `why` the
+/// reason it is not; `pending` the lines since the last append.
+struct Log {
+    on: bool,
+    dev: str,
+    at: int,
+    path: str,
+    tools: str,
+    work: str,
+    pending: str,
+    why: str,
+}
+
+const ALLOW_FILE: str = "/pax/install-targets"
+
+const LOG_DIR: str = "/pax/logs"
+
+/// How to put a disk on the list: printed whenever none is on it.
+fn how_to_allow() -> str {
+    "To allow a disk, add one line to " + ALLOW_FILE + " on the boot stick's EFI partition,\n" +
+        "from any OS, before booting the stick:\n" +
+        "  model=<model> serial=<serial>\n" +
+        "with the disk's model and serial exactly as Linux shows them:\n" +
+        "  cat /sys/block/sdX/device/model /sys/block/sdX/device/serial\n" +
+        "(the refusals above print each disk's own line to copy)."
+}
+
+/// The list in `text` from `source`: its entries, or every disk refused
+/// with the first bad line named.
+fn parse_allow_list(text: str, source: str) -> AllowList {
+    var out = List[Allowed]()
+    var n = 0
+    for raw in text.lines() {
+        n += 1
+        let line = raw.trim()
+        if line.len == 0 || line.starts_with("#") { continue }
+        let refused = AllowList {
+            entries: List[Allowed](),
+            source: source,
+            refusal: "{source} line {n} is not `model=<model> serial=<serial>`; the list refuses every disk",
+        }
+        if !line.starts_with("model=") { return refused }
+        var cut = -1
+        var count = 0
+        var i = 0
+        while i + 8 <= line.len {
+            if line[i..i + 8] == " serial=" { cut = i; count += 1 }
+            i += 1
+        }
+        if count != 1 { return refused }
+        for b in line.bytes() { if (b as int) < 32 && b as int != 9 { return refused } }
+        let model = line[6..cut].trim()
+        let serial = line[cut + 8..].trim()
+        if serial.len == 0 { return refused }
+        (mut out).push(Allowed { model: model, serial: serial })
+    }
+    if out.len == 0 {
+        return AllowList { entries: out, source: source, refusal: "{source} names no disk" }
+    }
+    AllowList { entries: out, source: source, refusal: "" }
+}
+
+/// Whether model and serial are a line of the list (each exact, the
+/// serial never empty): the model alone never is (px78's first plant).
+fn on_list(list: AllowList, model: str, serial: str) -> bool {
+    if list.refusal.len != 0 || serial.len == 0 { return false }
+    for e in list.entries {
+        if e.model == model && e.serial == serial { return true }
+    }
+    false
+}
+
+/// The line that would put this disk on the list.
+fn allow_line(model: str, serial: str) -> str { "model={model} serial={serial}" }
+
+/// Why disk `d` may not be a target, "" when it may: the four refusals
+/// that never read the list first, in their order, then the list's.
+fn judge(t: Target, model: str, serial: str, live: bool, list: AllowList) -> str {
+    if t.running_root { return "the running root" }
+    if t.mounted { return "mounted" }
+    if t.readonly { return "read-only" }
+    if live { return "a PAX live medium (the boot stick, or a copy of it)" }
+    if list.refusal.len != 0 { return "no usable install allow-list ({list.refusal})" }
+    if serial.len == 0 { return "no serial number, so it cannot be on the install allow-list" }
+    if !on_list(list, model, serial) { return "not on the install allow-list" }
+    ""
+}
+
+/// A sysfs identity file's text, trimmed; "" when it is not there.
+fn sys_text(path: str) -> str {
+    let s = fs_read_text(path) else |_| { return "" }
+    s.trim()
+}
+
+/// Disk `name`'s model and serial as sysfs gives them (a virtio disk's
+/// serial is `/sys/block/<disk>/serial`, Linux's place for it).
+fn identity_of(name: str) -> (str, str) {
+    let model = sys_text("/sys/block/{name}/device/model")
+    var serial = sys_text("/sys/block/{name}/device/serial")
+    if serial.len == 0 { serial = sys_text("/sys/block/{name}/serial") }
+    (model, serial)
+}
+
+/// The partitions in `t`'s identity (`;child:dev:part:start:size` each):
+/// partition 1's name and first byte ("" and 0 with none), and the layout
+/// in words: none, PAX's install layout, or how many PAX did not write.
+fn partitions_of(t: Target) -> (str, int, str) {
+    var p1 = ""
+    var at = 0
+    var count = 0
+    var pax = 0
+    let parts = t.identity.split(";")
+    for k in 1..parts.len {
+        let f = parts[k].split(":")
+        if f.len != 6 { continue }
+        let part = f[3].to_int() else |_| -1
+        let start = f[4].to_int() else |_| -1
+        let size = f[5].to_int() else |_| -1
+        count += 1
+        if part == 1 { p1 = f[0]; at = start * 512 }
+        if part == 1 && start == 4096 && size == 131072 { pax += 1 }
+        if part == 2 && start == 135168 { pax += 1 }
+        if part == 3 && start == 2048 && size == 2048 { pax += 1 }
+    }
+    let layout = if count == 0 {
+        "no partitions"
+    } else if count == 3 && pax == 3 {
+        "PAX's install layout"
+    } else {
+        "{count} partitions PAX did not write"
+    }
+    (p1, at, layout)
+}
+
+/// Run `exe` with `args`, its output in `work/<name>.out`: (exit status,
+/// output), status -1 when it could not run.
+fn tool(exe: str, args: List[str], work: str, name: str) -> (int, str) {
+    let outpath = "{work}/{name}.out"
+    let errpath = "{work}/{name}.err"
+    let out = fs_open_perm(outpath, 4, 384) else |_| { return (-1, "") }
+    let err = fs_open_perm(errpath, 4, 384) else |_| {
+        fs_close(out) else |_| {}
+        return (-1, "")
+    }
+    let child = os_spawn_fds(exe, args, [1, out, 2, err]) else |_| {
+        fs_close(out) else |_| {}
+        fs_close(err) else |_| {}
+        return (-1, "")
+    }
+    let status = os_wait(child) else |_| -1
+    fs_close(out) else |_| {}
+    fs_close(err) else |_| {}
+    let text = fs_read_text(outpath) else |_| ""
+    (status, text)
+}
+
+/// Whether the FAT32 volume at byte `at` of /dev/`name` holds
+/// /boot/initramfs.cpio: a PAX live medium (tools/mkdisk --usb's stick).
+fn live_medium(name: str, at: int, tools: str, work: str) -> bool {
+    if at <= 0 { return false }
+    let (status, text) = tool("{tools}/paxfat", ["--offset", "{at}", "ls", "/dev/{name}", "/boot"], work, "live-{name}")
+    if status != 0 { return false }
+    for line in text.lines() {
+        let w = line.split("\t")
+        if w.len == 3 && w[0] == "f" && w[2].lower() == "initramfs.cpio" { return true }
+    }
+    false
+}
+
+/// Every disk judged: the stick found by its content, the list read
+/// (`--allow-list FILE` when given, else the one PAX live medium's
+/// /pax/install-targets), each disk's reason.
+fn judge_all(targets: List[Target], file: str, tools: str, work: str) -> (List[Disk], AllowList) {
+    var disks = List[Disk]()
+    var lives = 0
+    for t in targets {
+        let (model, serial) = identity_of(t.name)
+        let (p1, at, layout) = partitions_of(t)
+        let live = live_medium(t.name, at, tools, work)
+        if live { lives += 1 }
+        (mut disks).push(Disk {
+            target: copy t,
+            model: model,
+            serial: serial,
+            part1: p1,
+            part1_at: at,
+            live: live,
+            layout: layout,
+            reason: "",
+        })
+    }
+    var list = AllowList { entries: List[Allowed](), source: ALLOW_FILE, refusal: "" }
+    if file.len != 0 {
+        let text = fs_read_text(file) else |_| {
+            list = AllowList { entries: List[Allowed](), source: file, refusal: "{file} cannot be read" }
+            ""
+        }
+        if list.refusal.len == 0 { list = parse_allow_list(text, file) }
+    } else if lives == 0 {
+        list.refusal = "no PAX boot stick among the disks, so no " + ALLOW_FILE
+    } else if lives > 1 {
+        list.refusal = "{lives} PAX live media are plugged in; unplug all but the boot stick"
+    } else {
+        for d in disks {
+            if !d.live { continue }
+            let (status, text) = tool("{tools}/paxfat", ["--offset", "{d.part1_at}", "cat", "/dev/{d.target.name}", ALLOW_FILE], work, "allow-list")
+            let source = "/dev/{d.part1}:{ALLOW_FILE}"
+            list = if status != 0 {
+                AllowList { entries: List[Allowed](), source: source, refusal: "{source} is not there" }
+            } else {
+                parse_allow_list(text, source)
+            }
+        }
+    }
+    var judged = List[Disk]()
+    for d in disks {
+        var j = copy d
+        j.reason = judge(d.target, d.model, d.serial, d.live, list)
+        (mut judged).push(j)
+    }
+    (judged, list)
+}
+
+/// One disk's lines on the page and in the log.
+fn disk_text(d: Disk) -> str {
+    let t = d.target
+    let head = "/dev/{t.name} bytes={t.bytes} sector={t.sector} model={d.model} serial={d.serial}\n" +
+        "    {d.layout}"
+    if d.reason.len == 0 {
+        return head + "; on the install allow-list"
+    }
+    if d.reason == "not on the install allow-list" {
+        return head + "\n    refused: not on the install allow-list: /dev/{t.name} model={d.model} serial={d.serial}" +
+            "\n    (its allow-list line would be: {allow_line(d.model, d.serial)})"
+    }
+    head + "\n    refused: {d.reason}: /dev/{t.name}"
+}
+
+/// The disks that may be targets.
+fn eligible(disks: List[Disk]) -> List[Disk] {
+    var out = List[Disk]()
+    for d in disks { if d.reason.len == 0 { (mut out).push(copy d) } }
+    out
+}
+
+/// A log that is not written (no stick, or a check that writes nothing).
+fn no_log(why: str) -> Log {
+    Log { on: false, dev: "", at: 0, path: "", tools: "", work: "", pending: "", why: why }
+}
+
+/// The log on the one PAX live medium among `disks`: /pax/logs made when
+/// it is not there, the next free install-<n>.txt chosen. Not written
+/// (and why) when there is no stick or its volume refuses.
+fn open_log(disks: List[Disk], tools: str, work: str) -> Log {
+    var found = 0
+    var dev = ""
+    var at = 0
+    var part = ""
+    for d in disks {
+        if d.live { found += 1; dev = "/dev/{d.target.name}"; at = d.part1_at; part = d.part1 }
+    }
+    if found != 1 { return no_log(if found == 0 { "no PAX boot stick among the disks" } else { "more than one PAX live medium" }) }
+    let (status, listed) = tool("{tools}/paxfat", ["--offset", "{at}", "ls", dev, LOG_DIR], work, "logs-ls")
+    var text = listed
+    if status != 0 {
+        let (_s1, _t1) = tool("{tools}/paxfat", ["--offset", "{at}", "mkdir", dev, "/pax"], work, "logs-mkdir-pax")
+        let (s2, _t2) = tool("{tools}/paxfat", ["--offset", "{at}", "mkdir", dev, LOG_DIR], work, "logs-mkdir")
+        if s2 != 0 { return no_log("{LOG_DIR} could not be made on /dev/{part}") }
+        text = ""
+    }
+    var highest = 0
+    for line in text.lines() {
+        let w = line.split("\t")
+        if w.len != 3 { continue }
+        let name = w[2].lower()
+        if !name.starts_with("install-") || !name.ends_with(".txt") { continue }
+        let n = name[8..name.len - 4].to_int() else |_| 0
+        if n > highest { highest = n }
+    }
+    Log {
+        on: true,
+        dev: dev,
+        at: at,
+        path: "{LOG_DIR}/install-{highest + 1}.txt",
+        tools: tools,
+        work: work,
+        pending: "",
+        why: "",
+    }
+}
+
+/// Print `text` and keep it for the log.
+fn say(mut lg: Log, text: str) {
+    print(text)
+    lg.pending += text + "\n"
+}
+
+/// Keep `text` for the log without printing it (what was typed).
+fn note(mut lg: Log, text: str) {
+    lg.pending += text + "\n"
+}
+
+/// Append what is pending to the stick's log and fsync it (paxfat does):
+/// once per step. A failure stops the log, never the install, and is
+/// said once on the screen.
+fn flush_log(mut lg: Log) {
+    if !lg.on || lg.pending.len == 0 { return }
+    let chunk = "{lg.work}/log-chunk"
+    fs_write_bytes(chunk, lg.pending.bytes()) else |_| {
+        lg.on = false
+        print("install log: stopped: the scratch copy could not be written")
+        return
+    }
+    let (status, _out) = tool("{lg.tools}/paxfat", ["--offset", "{lg.at}", "append", lg.dev, chunk, lg.path], lg.work, "log-append")
+    if status != 0 {
+        lg.on = false
+        print("install log: stopped: paxfat append exited {status} ({lg.dev} {lg.path})")
+        return
+    }
+    lg.pending = ""
+}
+
+/// The log's place, for the screen.
+fn log_place(lg: Log) -> str {
+    if lg.on { "{lg.dev} partition 1 (FAT32) {lg.path}" } else { "not written: {lg.why}" }
+}
