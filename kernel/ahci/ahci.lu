@@ -1,5 +1,5 @@
 //! AHCI 1.3.1, §§3.1,3.3,4.2,6.2,10.1–10.6; ACS-4 rev18
-//! §§7.11,7.13,7.21,7.57. Clean-room: no driver or emulator source.
+//! §§3.4.9,7.11,7.13,7.21,7.57; SATA 1.0a §§8.5.2/3/6/8. Clean-room: no driver or emulator source.
 //! One slot per SATA disk, non-NCQ DMA EXT, synchronous polled completion.
 //! 32 page PRDT entries, DBC = bytes - 1, at most 128 KiB per command.
 //! Commands never write a disk except a block request for WRITE or FLUSH.
@@ -18,8 +18,11 @@ use sync
 
 extern "c" fn pax_tree_zero(dst: u64, n: u64)
 const PAGE: u64 = 4096
+/// start found at least one supported ATA disk.
 pub const UP: u64 = 0
+/// No AHCI controller was discovered.
 pub const ABSENT: u64 = 1
+/// Controllers were found, but none supplied a supported disk.
 pub const REFUSED: u64 = 2
 const MAXDISKS: u64 = 4
 const MAXCTLS: u64 = 4
@@ -70,7 +73,7 @@ const SSTS: u64 = 0x28
 const SCTL: u64 = 0x2c
 const SERR: u64 = 0x30
 const CI: u64 = 0x38
-const ERRORS: u64 = 0x7d000000 // TFES, HBFS, HBDS, IFS, OFS
+const ERRORS: u64 = 0x79000000 // TFES, HBFS, HBDS, IFS, OFS
 const LOST: u64 = 0x10000
 const DOWN: u64 = 0x10001
 const BAD: u64 = 0x10002
@@ -104,6 +107,7 @@ fn zero(a: u64, n: u64) {
     unsafe { pax_tree_zero(a, n) }
 }
 fn table() -> u64 { unsafe { root } }
+/// Number of supported disks assigned units in controller/port order.
 pub fn count_disks() -> u64 { unsafe { ndisk } }
 fn controllers() -> u64 { unsafe { nctl } }
 fn disk(u: u64) -> u64 { if u < count_disks() { word(table(), 8 + u) } else { 0 } }
@@ -211,8 +215,9 @@ fn id_string(p: u64, dest: u64, source: u64, bytes: u64) {
     var k: u64 = 0
     while k < bytes {
         let v = byte(word(p, P_ID) + frames.hhdm() + source * 2 + (k ^ 1))
-        // Sanitize control characters for both sysfs and the photographed log.
-        w8(p + dest * 8 + k, if v >= 32 && v <= 126 { v } else { 63 })
+        // Keep identity bytes exact after ATA word swapping. The boot log
+        // sanitizes its display separately; sysfs must not invent a serial.
+        w8(p + dest * 8 + k, v)
         k += 1
     }
 }
@@ -224,7 +229,11 @@ fn string_len(p: u64, w: u64, n: u64) -> u64 {
 fn print_string(p: u64, w: u64, n: u64) {
     let len = string_len(p, w, n)
     var k: u64 = 0
-    while k < len { serial.put(byte(p + w * 8 + k) as u8); k += 1 }
+    while k < len {
+        let b = byte(p + w * 8 + k)
+        serial.put((if b >= 32 && b <= 126 { b } else { 63 }) as u8)
+        k += 1
+    }
 }
 fn error(p: u64, opcode: u64, status: u64, pis: u64) {
     put(p, P_ERR, word(p, P_ERR) + 1)
@@ -248,6 +257,62 @@ fn error(p: u64, opcode: u64, status: u64, pis: u64) {
     }
     log.put("; -EIO")
     log.end()
+}
+// Testable completion polling: real registers in command(), owned memory
+// in the ahci-check boot. PxIS is cleared before every real submission.
+fn completion(p: u64, us: u64) -> u64 {
+    let deadline = ahci_clock.deadline_us(us)
+    while true {
+        let pis = rr(p, PIS)
+        let tfd = rr(p, TFD)
+        if pis & ERRORS != 0 { return if tfd == 0 { BAD } else { tfd } }
+        if rr(p, CI) & 1 == 0 {
+            // TFD belongs to this command only after completion; before
+            // then ERR can be left over from the previous command.
+            let completed = rr(p, TFD)
+            return if completed & 0x21 != 0 { completed } else { 0 }
+        }
+        if ahci_clock.expired(deadline) { return LOST }
+        sync.relax()
+    }
+    LOST
+}
+fn sector_sizes(w106: u64, w117: u64, w118: u64) -> (u64, u64) {
+    var logical: u64 = 512
+    var physical: u64 = 512
+    if w106 & 0xc000 == 0x4000 {
+        if w106 & 0x1000 != 0 { logical = (w117 | w118 << 16) * 2 }
+        physical = logical
+        if w106 & 0x2000 != 0 { physical = logical << (w106 & 15) }
+    }
+    (logical, physical)
+}
+fn supported_logical(logical: u64) -> bool { logical == 512 }
+fn check_completion() {
+    let f = alloc()
+    let rf = alloc()
+    if f == 0 || rf == 0 { log.line("FAIL ahci-check: no frames"); return }
+    let p = f + frames.hhdm()
+    put(p, P_REG, rf + frames.hhdm())
+    wr(p, CI, 1)
+    let before = ahci_clock.now_ns()
+    let timeout = completion(p, 2000)
+    let elapsed = ahci_clock.now_ns() - before
+    wr(p, TFD, 0x441)
+    let stale = completion(p, 1000)
+    wr(p, PIS, 1 << 30)
+    let taskfile = completion(p, 1000)
+    wr(p, PIS, 0); wr(p, TFD, 0x50); wr(p, CI, 0)
+    let done = completion(p, 1000)
+    log.line(if timeout == LOST && elapsed >= 2000000 && stale == LOST && taskfile == 0x441 && done == 0 {
+        "PASS ahci-check: command timeout, stale task-file, TFES and completion"
+    } else { "FAIL ahci-check: completion state or deadline" })
+    let (logical4k, physical4k) = sector_sizes(0x5000, 2048, 0)
+    let (logical512, physical512e) = sector_sizes(0x6003, 0, 0)
+    log.line(if !supported_logical(logical4k) && logical4k == 4096 && physical4k == 4096 && supported_logical(logical512) && physical512e == 4096 {
+        "PASS ahci-check: 4Kn refused; 512e sector sizes decoded"
+    } else { "FAIL ahci-check: IDENTIFY sector sizes" })
+    frames.free(rf); frames.free(f)
 }
 // Issue one command. For a block request: list is a page list, or pa a
 // single frame's physical subrange. IDENTIFY uses its own 512-byte buffer.
@@ -292,16 +357,7 @@ fn command(p: u64, opcode: u64, lba: u64, sectors: u64, pa: u64, list: u64) -> u
     wr(p, CI, 1)
     // ACS-4 §7.11: FLUSH may exceed 30 s. Bound it at 120 s, other
     // commands at 30 s. No CPU-speed-dependent iteration deadlines.
-    let deadline = ahci_clock.deadline_us(if opcode == 0xea { 120000000 } else { 30000000 })
-    var status: u64 = 0
-    while true {
-        let pis = rr(p, PIS)
-        let tfd = rr(p, TFD)
-        if pis & ERRORS != 0 || tfd & 0x21 != 0 { status = if tfd == 0 { BAD } else { tfd }; break }
-        if rr(p, CI) & 1 == 0 { break }
-        if ahci_clock.expired(deadline) { status = LOST; break }
-        sync.relax()
-    }
+    let status = completion(p, if opcode == 0xea { 120000000 } else { 30000000 })
     if status != 0 {
         error(p, opcode, status, rr(p, PIS)); stop_error(p); return status
     }
@@ -329,16 +385,9 @@ fn identify(p: u64) -> bool {
     let size = idword(p, 100) | idword(p, 101) << 16 | idword(p, 102) << 32 | idword(p, 103) << 48
     if size == 0 || size > 0xffffffffffff { return refused(p, "invalid LBA48 capacity") }
     put(p, P_SIZE, size)
-    var logical: u64 = 512
-    var physical: u64 = 512
-    let w106 = idword(p, 106)
-    if w106 & 0xc000 == 0x4000 {
-        if w106 & 0x1000 != 0 { logical = (idword(p, 117) | idword(p, 118) << 16) * 2 }
-        physical = logical
-        if w106 & 0x2000 != 0 { physical = logical << (w106 & 15) }
-    }
+    let (logical, physical) = sector_sizes(idword(p, 106), idword(p, 117), idword(p, 118))
     put(p, P_PHYSICAL, physical)
-    if logical != 512 {
+    if !supported_logical(logical) {
         port_tag(p); log.put(": refused: logical sector size "); log.dec(logical as int); log.put(" bytes (only 512 supported)"); log.end()
         return false
     }
@@ -371,7 +420,11 @@ fn port_start(c: u64, port: u64) -> u64 {
         wr(p, SCTL, sctl & !15)
         ahci_clock.wait_us(10000) // SATA presence debounce before declaring an empty port.
         if rr(p, SSTS) & 15 == 0 { let _s = idle(p); return 0 }
-        if !wait_bits(word(p, P_REG) + SSTS, 0xf0f, 0x103, 1000000) { return 0 }
+        if !wait_bits(word(p, P_REG) + SSTS, 0xf0f, 0x103, 1000000) {
+            let _r = refused(p, "COMRESET link active timeout (DET/IPM)")
+            let _s = idle(p)
+            return 0
+        }
     }
     wr(p, SERR, 0xffffffff)
     if !wait_bits(word(p, P_REG) + TFD, 0x88, 0, 30000000) { let _r = refused(p, "device ready timeout (BSY/DRQ)"); return 0 }
@@ -440,14 +493,18 @@ fn controller(pml4: u64, i: u64, number: u64) -> u64 {
     log.put(" S64A="); log.dec(((word(c, C_CAP) >> 31) & 1) as int)
     log.put(" PI="); log.hex(word(c, C_PI))
     log.put(" BOH="); log.dec((r32(regs + CAP2) & 1) as int)
+    log.put(if boot_info.cmdline_has("ahci-reset") { "; HBA reset" } else { "; ports idled" })
     log.put("; one slot, polled"); log.end()
     c
 }
+/// Discover up to four controllers; assign at most room (and four) disks.
+/// Run once at boot with IF clear; no command writes media during discovery.
 pub fn start(pml4: u64, room: u64) -> u64 {
     if table() != 0 { return if count_disks() != 0 { UP } else { ABSENT } }
     let f = alloc()
     if f == 0 { return REFUSED }
     unsafe { root = f + frames.hhdm() }
+    if boot_info.cmdline_has("ahci-check") { check_completion() }
     var i = pci.find_class(0x010601, 0)
     while i != pci.MAX && controllers() < MAXCTLS {
         let number = controllers()
@@ -474,17 +531,24 @@ pub fn start(pml4: u64, room: u64) -> u64 {
     }
     if count_disks() != 0 { UP } else if controllers() != 0 { REFUSED } else { ABSENT }
 }
+/// Unit capacity in 512-byte sectors, zero for an invalid unit.
 pub fn sectors(u: u64) -> u64 { let p = disk(u); if p == 0 { 0 } else { word(p, P_SIZE) } }
+/// IDENTIFY physical sector size; 512 for an invalid unit.
 pub fn physical_size(u: u64) -> u64 { let p = disk(u); if p == 0 { 512 } else { word(p, P_PHYSICAL) } }
+/// Linux BLKROTATIONAL: zero for IDENTIFY word 217 equal to one.
 pub fn rotational(u: u64) -> u64 { let p = disk(u); if p == 0 { 1 } else { word(p, P_ROT) } }
+/// Trimmed ATA serial or model length, preserving internal spaces.
 pub fn identity_len(u: u64, serial_number: bool) -> u64 {
     let p = disk(u)
     if p == 0 { 0 } else { string_len(p, if serial_number { P_SN } else { P_MN }, if serial_number { 20 } else { 40 }) }
 }
+/// Exact decoded identity byte, zero outside identity_len.
 pub fn identity_byte(u: u64, serial_number: bool, i: u64) -> u64 {
     let p = disk(u)
     if p == 0 || i >= identity_len(u, serial_number) { 0 } else { byte(p + (if serial_number { P_SN } else { P_MN }) * 8 + i) }
 }
+/// Complete one kernel/block request synchronously; status/state in words 4/5.
+/// One slot, IF clear; reads/writes are at most 256 sectors, LBA48 checked.
 pub fn submit(u: u64, r: u64) {
     let p = disk(u)
     var result = DOWN
@@ -499,7 +563,9 @@ pub fn submit(u: u64, r: u64) {
     }
     put(r, 4, result); put(r, 5, 2)
 }
+/// Status of the request already completed by submit (zero means success).
 pub fn wait(u: u64, r: u64) -> u64 { word(r, 4) }
+/// Disk identity and capacity for serial and framebuffer boot logs.
 pub fn report(u: u64) {
     let p = disk(u)
     if p == 0 { return }
