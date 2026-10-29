@@ -1,7 +1,7 @@
 //! Monotonic bootstrap time with interrupts masked (px76).
 //! HPET 1.0a §§2.3.4,2.3.6,2.3.8: femtoseconds/tick, enable, main
 //! counter. ACPI 6.5 §4.8.3.3: PM timer 3579545 Hz, 24/32-bit wrap.
-//! PIT fallback: 8254 mode 2 channel 0, divisor 11932. Its 10ms wrap
+//! PIT fallback: 8254 mode 2 channel 0, divisor 65535. Its 54.9ms wrap
 //! requires frequent samples; the LAPIC interrupt samples it every tick.
 use acpi
 use log
@@ -33,7 +33,7 @@ fn raw() -> u64 {
         let lo = pax_inb(0x40) as u64
         let hi = pax_inb(0x40) as u64
         let count = lo | (hi << 8)
-        if count <= 11932 { 11932 - count } else { 0 }
+        if count <= 65535 { 65535 - count } else { 0 }
     }
 }
 fn advances() -> bool {
@@ -64,8 +64,8 @@ pub fn start() {
             unsafe {
                 source = 3; period = 1193182; mask = 0
                 pax_outb(0x43, 0x34)
-                pax_outb(0x40, 0x9c)
-                pax_outb(0x40, 0x2e)
+                pax_outb(0x40, 0xff)
+                pax_outb(0x40, 0xff)
             }
             if !advances() { panic.fail("clock: HPET, PM and PIT do not advance", 0) }
         }
@@ -85,7 +85,7 @@ pub fn now_ns() -> u64 {
     let prev = unsafe { previous }
     let src = unsafe { source }
     var delta: u64 = 0
-    if src == 3 { delta = if current >= prev { current - prev } else { current + 11932 - prev } }
+    if src == 3 { delta = if current >= prev { current - prev } else { current + 65535 - prev } }
     else {
         let m = unsafe { mask }
         delta = if current >= prev { current - prev } else { (m - prev) + current + 1 }
