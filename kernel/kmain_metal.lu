@@ -1,7 +1,13 @@
 //! member: false
 // px76: real ACPI discovery and an independently timed scheduler tick.
+// With `metal_x2apic` on its command line (tests/mpx6-metal's x2apic leg,
+// R-px76-7) the kernel first switches the local APIC to x2APIC mode
+// itself, as a firmware may hand it over (IA32_APIC_BASE EXTD, SDM vol.
+// 3A §11.12.1; only where CPUID.1:ECX bit 21 says the CPU has it), so the
+// tick and the rate row run through kernel/apic's MSR path.
 use acpi
 use apic
+use boot_info
 use clock
 use fb
 use frames
@@ -13,9 +19,38 @@ use serial
 use timer
 extern "c" fn pax_exit(v: u8)
 extern "c" fn pax_inl(port: u16) -> u32
+extern "c" fn pax_cpuid(leaf: u64, sub: u64, reg: u64) -> u64
+extern "c" fn pax_rdmsr(msr: u64) -> u64
+extern "c" fn pax_wrmsr(msr: u64, v: u64)
 fn check(ok: bool, name: str) {
     log.put(if ok { "PASS METAL " } else { "FAIL METAL " }); log.line(name)
     if !ok { unsafe { pax_exit(0x11) }; panic.halt() }
+}
+// The PIT-only leg (OVMF under `-machine acpi=off`: its own XSDT with no
+// HPET table and no FADT, so no PM timer): the clock must fall to the
+// PIT read back (tests/mpx6-metal holds its `clock: PIT` line), and the
+// 20 ticks are timed by q35's HPET at its fixed 0xfed00000 read directly
+// (HPET 1.0a §2.3.4 the period in femtoseconds, §2.3.6 the enable, §2.3.8
+// the main counter), a reference the kernel's clock cannot be using here.
+fn pit_only(pml4: u64) -> never {
+    check(clock.started(), "the clock started")
+    let va: u64 = 0xffffb00000004000
+    let mapped = paging.map(pml4, va, 0xfed00000, paging.NX | paging.RW | 24) else 9
+    check(mapped != 9, "the HPET reference mapped")
+    let fs = unsafe { ((va + 4) as *u32).read_volatile() } as u64
+    check(fs != 0 && fs <= 100000000, "the HPET reference's period")
+    unsafe { ((va + 0x10) as *u32).write_volatile(((va + 0x10) as *u32).read_volatile() | 1) }
+    let before = unsafe { ((va + 0xf0) as *u64).read_volatile() }
+    let first = timer.ticks()
+    while timer.ticks() - first < 20 { timer.wait() }
+    let after = unsafe { ((va + 0xf0) as *u64).read_volatile() }
+    let ns = (after - before) * fs / 1000000
+    log.put("metal: 20 ticks took "); log.dec(ns as int); log.line(" ns by the HPET read directly")
+    check(ns >= 150000000 && ns <= 300000000, "LAPIC tick rate 20 ticks in 150..300ms")
+    timer.stop()
+    log.line("PASS METAL firmware and clock")
+    unsafe { pax_exit(0x10) }
+    panic.halt()
 }
 export fn kmain() {
     serial.init()
@@ -23,10 +58,20 @@ export fn kmain() {
     let pml4 = paging.start()
     let _screen = fb.start(pml4)
     interrupts.start()
+    if boot_info.cmdline_has("metal_x2apic") {
+        check(unsafe { pax_cpuid(1, 0, 2) } & (1 << 21) != 0, "x2APIC offered by CPUID")
+        let base = unsafe { pax_rdmsr(0x1b) }
+        unsafe { pax_wrmsr(0x1b, base | 0xc00) } // EN and EXTD: xAPIC to x2APIC
+        check(apic.x2apic(), "x2APIC mode set")
+    }
     apic.start(pml4)
+    apic.report()
     clock.start()
     timer.start()
     fb.report()
+    if boot_info.cmdline_has("metal_pitonly") {
+        pit_only(pml4)
+    }
     check(acpi.tables() > 0, "ACPI checked tables")
     let port = acpi.pm_port()
     check(port != 0, "independent PM rate reference")
