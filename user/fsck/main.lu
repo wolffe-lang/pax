@@ -103,12 +103,22 @@ fn open_volume(fd: int, mode: int, epoch: int) -> Volume ! {io, invalid, unsuppo
         print("unsupported: filesystem features compat={compat}, incompat={incompat}, ro_compat={ro}")
         return unsupported
     }
-    if first != (if bs == 1024 then 1 else 0) || blocks <= first || blocks > 4194304 ||
+    // R-px84-5: the dense owner's/inode's memory bounds are checker
+    // limits, not format limits. Refuse before allocating or replaying.
+    if blocks > 4194304 || ninodes > 1048576 {
+        print("unsupported: volume exceeds checker capacity (4194304 blocks, 1048576 inodes); no repair committed")
+        return unsupported
+    }
+    if first != (if bs == 1024 then 1 else 0) || blocks <= first ||
         bpg < 8 || bpg > bs * 8 || bpg % 8 != 0 || ipg < 16 || ipg > bs * 8 ||
         isize < 128 || isize > bs || bs % isize != 0 || ipg % (bs / isize) != 0 ||
-        firstino < 11 || firstino > ninodes || ninodes > 1048576 { return invalid }
+        firstino < 11 || firstino > ninodes { return invalid }
     let ng = (blocks - first + bpg - 1) / bpg
-    if ninodes != ng * ipg || ng > 512 { return invalid }
+    if ng > 512 {
+        print("unsupported: volume exceeds checker capacity (512 groups); no repair committed")
+        return unsupported
+    }
+    if ninodes != ng * ipg { return invalid }
     let size = fs_seek(fd, 0, 2) else |_| { return io }
     if size < blocks * bs { print("invalid: truncated filesystem"); return invalid }
     let gd = diskio.exact(fd, (first + 1) * bs, ng * 32)?
