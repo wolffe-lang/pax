@@ -18,7 +18,7 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
 | Programs | Static x86-64 ELF run in ring 3 with Linux's syscall numbers; `fork`, `execve`, `#!` lines, threads (`clone3`, `futex`), signals with the full frame restored, job control and sessions; a fixed 1 MiB initial stack | the same binaries on Linux, byte for byte |
 | Users | `root`, `pax` and the service account `lobo`; real, effective, saved and file-system ids; every path walk, mode, owner and signal checked by Linux's rules; `su` in wolf; no passwords yet | Linux as root and as a user |
 | Files | A writable in-memory tree seeded from the initramfs: links, modes, times, holes, `rename`; `mmap` private and shared, `mremap`, FIFOs, `flock`; `/dev`, `/proc`, `/sys`, `/tmp` | Linux's tmpfs in a throwaway container |
-| Disks | Up to four disks, virtio or NVMe (`nvme0n1`, major 259, read, written and flushed through PRP lists), with GPT or MBR tables and `/dev` nodes; ext2 read and written; ext3's journal written and replayed; `/` on the disk, `mount(2)`, `/etc/fstab`; an offline `fsck.ext2` in wolf | Linux 7.3.0 under QEMU (NVMe: 7.2.4) and e2fsprogs |
+| Disks | Up to four disks: virtio, NVMe (`nvme0n1`, major 259), or SATA AHCI (`sda`, major 8, LBA48), with GPT or MBR tables and `/dev` nodes; ext2 read and written; ext3's journal written and replayed; `/` on the disk, `mount(2)`, `/etc/fstab`; an offline `fsck.ext2` in wolf | Linux 7.3.0 under QEMU (NVMe and AHCI: 7.2.4) and e2fsprogs |
 | Network | virtio-net, ARP, IPv4, ICMP, UDP, TCP (RFC 9293, 6298, 5681), Unix sockets, `poll`, `epoll`, `eventfd`; 256 TCP connections | Linux in a namespace, and captures rebuilt byte by byte |
 | Console | A 16550 serial console, the PS/2 keyboard and USB keyboards over xHCI, one line discipline; a framebuffer console of 160×50 cells with the Linux VT's colours and 560 glyphs | typed sessions on a Linux pseudo-terminal; screendumps against a reference renderer |
 | Sound | The PC speaker through Linux's console ioctls; virtio sound behind OSS `/dev/dsp`; `/bin/play`, an orchestra of 17 timbres | QEMU's capture, every pitch within 1% |
@@ -38,8 +38,10 @@ tests/proof                                 # the harness's own proof: build the
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx1     # first light: the wolf kernel on both compiler tiers, both firmwares
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx3-shell   # pelt at a prompt, typed sessions held to Linux
 PAX_WOLF=$(tools/fetch-wolf) tests/mpx6-nvme    # NVMe disks held to Linux on QEMU: names, bytes, errors, / on NVMe
+PAX_WOLF=$(tools/fetch-wolf) tests/mpx6-ahci    # SATA identity, DMA, large LBAs, no-write live boot, / on AHCI
 tools/qemu-halt --elf K.elf --drive a.img --nvme n.img --marker halt K.iso   # vda and nvme0n1 beside the ISO; --boot-nvme boots from NVMe
 PAX_ROOTDISK_BUS=nvme tools/rootdisk-leg mpx5-users --tier native --firmware bios   # a suite again with / on nvme0n1p2
+tools/qemu-run --ahci disk.img,serial=MY-SATA-DISK,model=Test-SSD K.iso  # a SATA disk beside the ISO; --boot-ahci boots from SATA
 ```
 
 Then, to use it rather than test it:
@@ -268,6 +270,13 @@ omits the link bundle on purpose and checks the missing-tool errors.
 
 ## Disks and rescue
 
+AHCI uses one polled command slot per disk, with reads and writes up to 128 KiB and explicit cache flushes.
+Logical sectors must be 512 bytes; 512e disks report their physical sector size through the block ioctls.
+Disk names follow controller and port order, not identity: adding a disk on a lower port can rename later disks.
+AHCI and NVMe expose hardware model and serial strings under `/sys/block/<disk>/device/`; internal spaces in serials
+are preserved. The boot log prints each SATA controller and each disk's port, model, serial, capacity and sector sizes.
+No SATA hotplug, NCQ or interrupt-driven completion is implemented.
+
 Three programs in wolf write disks, built as static Linux executables and run unchanged on PAX:
 
 | Tool | Writes | Compared with |
@@ -300,7 +309,7 @@ and `--tier native --firmware bios` picks one leg.
 | Programs and the console | `mpx3-user`, `mpx3-loader`, `mpx3-boreutils`, `mpx3-console`, `mpx3-shell`, `mpx3-screen`, `mpx3-threads`, `mpx3-tree`, `mpx3-maps`, `mpx3-speaker`, `mpx3-sound`, `mpx3-orchestra` | ring 3, the ELF loader, boreutils and pelt against the same binaries on Linux, screendumps against the reference renderer, threads and signals, the writable tree, mappings, sound captures |
 | The network | `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-unix`, `mpx4-session`, `mpx4-lobo` | captures rebuilt byte by byte, the witnesses against `tools/net-peer` and QEMU's user network (root for the Linux side), `poll` and `epoll`, Unix sockets, lobo serving |
 | Users and the shipped programs | `mpx5-users`, `mpx5-accounts`, `mpx5-jobs`, `mpx5-pelt`, `mpx5-bore`, `mpx5-scent`, `mpx5-lope`, `mpx5-aspen`, `mpx5-lupin`, `mpx5-yew`, `mpx5-wolf`, `mpx5-clef`, `mpx5-screen` | every rule as root and as `pax`, job control typed byte for byte, each program's typed session against the same binary in a container |
-| Disks | `mpx6-blk`, `mpx6-ext2`, `mpx6-part`, `mpx6-root`, `mpx6-journal`, `mpx6-nodes`, `mpx6-nvme`, `mpx6-disktools`, `mpx6-fsck`, `mpx6-install`, `mpx6-games` | Linux 7.3.0 on QEMU with the same disks, e2fsprogs, the formatters' differentials, a power cut repaired, the installer, the games' frames cell for cell |
+| Disks | `mpx6-blk`, `mpx6-ext2`, `mpx6-part`, `mpx6-root`, `mpx6-journal`, `mpx6-nodes`, `mpx6-nvme`, `mpx6-ahci`, `mpx6-disktools`, `mpx6-fsck`, `mpx6-install`, `mpx6-games` | Linux 7.3.0 on QEMU with the same disks, e2fsprogs, the formatters' differentials, a power cut repaired, the installer, the games' frames cell for cell |
 | USB | `mpx6-usb`, `mpx6-usbcheck`, `usb-tools`, `usb-stick`, `usb-linux-fetch` | xHCI, hubs, keyboard bytes and hotplug; the stick's boot files, both firmwares, Linux mounting the ESP; the oracle's two pinned Ubuntu packages |
 
 Suites that need something of the host say so and stop: root for the Linux network side (`tools/linux-net`), docker or
