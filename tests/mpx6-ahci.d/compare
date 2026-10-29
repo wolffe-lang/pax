@@ -34,11 +34,13 @@ def main():
         try:
             got, want = section(pax, name), section(linux, name)
             if name == "inventory":
-                # Identity/sequence metadata differs by probe order, but these
-                # exact lines come from the real installer on both guests.
-                got = "\n".join(x.strip() for x in got.splitlines() if x.lstrip().startswith("model="))
-                want = "\n".join(x.strip() for x in want.splitlines() if x.lstrip().startswith("model="))
-                if len(got.splitlines()) != 4 or "serial=PX75B B2 INNER" not in got:
+                # The real installer's whole report on both guests: each
+                # device line (name, size, sector, state), its identity
+                # numbers and its model/serial line, held line for line.
+                got = "\n".join(x.rstrip() for x in got.splitlines())
+                want = "\n".join(x.rstrip() for x in want.splitlines())
+                models = [x.strip() for x in got.splitlines() if x.lstrip().startswith("model=")]
+                if len(models) != 4 or "model=PX75B-SATA-B serial=PX75B B2 INNER" not in models:
                     raise ValueError("installer did not preserve all four hardware identities")
             if name == "identity":
                 # R-px75b-4: sysfs presentation padding differs, not identity.
