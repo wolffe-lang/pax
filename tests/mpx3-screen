@@ -41,7 +41,8 @@
 #   V3 the scroll's cost: `scroll: 400 lines in <a> ticks without
 #      scrolling, 400 in <b> with <s> scrolls`, 0 < s <= 400 (fewer than
 #      400 when rows were still free as they began), b >= a; the cost of
-#      one scroll, (b - a) * 10 ms / s (the PIT ticks at 99.998 Hz), is
+#      one scroll, (b - a) * 10 ms / s (the tick is 100 Hz: px76's
+#      local APIC timer, calibrated against the firmware's clock), is
 #      printed: a measurement, no bound.
 #   V4 serial unchanged by the screen: with no display device the third
 #      line is `screen: off, no framebuffer`, and every line of the serial
@@ -51,7 +52,12 @@
 #      report), `paging:` (Limine's own page tables sit elsewhere when it
 #      sets a display mode, so its CR3 differs) and the pattern's two
 #      full-width rows (`[===…]` and `---…+`, as wide as the grid: 80
-#      without one).
+#      without one); and (px76) the firmware's own description of the
+#      machine where the display device is part of it: `memory:` (Limine
+#      lists the framebuffer as a memory map entry) and `acpi: DSDT`
+#      (QEMU's VGA device adds its AML, so the table's length moves);
+#      the calibrated tick's rate (`timer: LAPIC … divide16 <rate> Hz`) is
+#      a measurement of each boot, so it is folded to `<rate>`.
 #   V5 a shell on the screen: pelt-ps2 halts after `PAX: init /bin/pelt
 #      ended with status 0`, and its screendump equals tools/screen-ref's
 #      image of its serial log from `PAX: the console` on, pixel for
@@ -287,7 +293,7 @@ for leg in $legs; do
         boot screen-serial "$selft" "$images/$tier/kmain_screen.iso" --no-screen
         why=
         grep -qx 'screen: off, no framebuffer' "$norm" || why+=" no 'screen: off, no framebuffer' ($(grep -m1 '^screen: ' "$norm"));"
-        strip() { awk '/^PAX: the screen$/ { on = 1 } on && !/^screen: / && !/^scroll: / && !/^paging: / && !/^\[=+\]$/ && !/^-+\+.?Z$/ { print }' "$1"; }
+        strip() { awk '/^PAX: the screen$/ { on = 1 } on && !/^screen: / && !/^scroll: / && !/^paging: / && !/^memory: / && !/^acpi: DSDT / && !/^\[=+\]$/ && !/^-+\+.?Z$/ { sub(/ divide16 [0-9]+ Hz,/, " divide16 <rate> Hz,"); print }' "$1"; }
         strip "$sn" > "$log.cut"; strip "$norm" > "$log.cut.other"
         cmp -s "$log.cut" "$log.cut.other" || why+=" the serial differs: $(diff "$log.cut" "$log.cut.other" | head -n 6 | tr '\n' '|');"
         [ "$(wc -l < "$log.cut" | tr -d ' ')" -gt 400 ] || why+=" a short log;"
