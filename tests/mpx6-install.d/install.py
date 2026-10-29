@@ -126,6 +126,10 @@ cmd=[repo/'tools/qemu-halt','--accel','tcg','--firmware',os.environ.get('PAX_INS
      '--serial',work/'install.serial','--marker','halt','--qemu','-m','--qemu','1536M','--drive',str(work/'source-guard.img')+',ro']
 if name=='vdc':cmd+=['--drive',str(work/'source-guard.img')+',ro']
 if guided:cmd+=['--type',work/'keys','--prompt','pax-install> ']
+# px76: no COM1 (kasumi has none); the transcript is PAX's own, from memory.
+if os.environ.get('PAX_INSTALL_NOSERIAL','')=='1':
+    assert not guided,'the serial-less row is the unattended install'
+    cmd.insert(1,'--no-serial')
 if sparse_zeroes:
     assert not fault, 'sparse backing optimization is only a positive install fixture'
     cmd+=['--qemu','-drive','--qemu',f'file={work/"target.img"},if=none,id=bigroot,format=raw,detect-zeroes=unmap,discard=unmap',

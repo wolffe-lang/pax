@@ -21,7 +21,7 @@ while [ $# -gt 0 ]; do
         --rows) rows=$2; shift 2 ;;
         --tier) tier=$2; shift 2 ;;
         --firmware) firmware=$2; shift 2 ;;
-        *) die 'usage: mpx6-install [--only ci|planner|inventory|snapshot|ui|executor|prepare] [--work DIR] [--inputs LANE] [--rows smoke|full] [--tier native|release|both] [--firmware bios|uefi|both]' ;;
+        *) die 'usage: mpx6-install [--only ci|planner|inventory|snapshot|ui|executor|prepare|noserial] [--work DIR] [--inputs LANE] [--rows smoke|full] [--tier native|release|both] [--firmware bios|uefi|both]' ;;
     esac
 done
 case $tier in native|release|both) ;; *) die 'bad tier' ;; esac
@@ -40,6 +40,26 @@ case $only in
         [ -f "$kernel" ] || die 'inventory needs --kernel ELF'
         "$PAX_ROOT/tools/mkinstall" "$work/bin"
         python3 -I "$PAX_ROOT/tests/mpx6-install.d/inventory.py" "$PAX_ROOT" "$work/inventory" "$work/bin" "$kernel"
+        exit ;;
+    noserial)
+        # px76: the installer's flow with no serial port, as on kasumi: the
+        # unattended install (the `no` games case onto vdb) on UEFI with
+        # QEMU's -serial none, its transcript PAX's own, read from its
+        # memory (tools/qemu-halt --no-serial); the target verified, its gap
+        # checked and the installed disk booted, as the smoke rows do. The
+        # inputs are a finished run's (--inputs DIR: its inputs/ directory).
+        [ -n "$inputs" ] && [ -d "$inputs/build/disktools" ] || die 'noserial needs --inputs DIR of a finished run'
+        D=$PAX_ROOT/tests/mpx6-install.d
+        export PAX_WOLF SOURCE_DATE_EPOCH=1700000000 PAX_INSTALL_TIER=native
+        PAX_WOLF=$("$PAX_ROOT/tools/fetch-wolf")
+        casework=$work/noserial-uefi
+        rm -rf "$casework"
+        PAX_INSTALL_NOSERIAL=1 PAX_INSTALL_FIRMWARE=uefi python3 -I "$D/install.py" "$PAX_ROOT" "$inputs" "$casework" no vdb
+        [ ! -s "$casework/install.serial.meta" ] || grep -q -- '-serial none' "$casework/install.serial.meta" || die 'FAIL I-noserial: the install booted with a UART'
+        python3 -I "$D/verify.py" "$PAX_ROOT" "$casework" no vdb
+        python3 -I "$D/gap.py" "$casework" "$inputs/build/disktools/limine/limine"
+        python3 -I "$D/session.py" "$casework" uefi "$casework/log-last.img"
+        say 'mpx6-install: PASS I-noserial: the unattended install with no serial port, its transcript from PAX memory, the target verified and booted'
         exit ;;
     ci) ;;
     *) die 'unknown suite selection' ;;
