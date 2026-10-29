@@ -195,6 +195,7 @@ const SYSCLASS: u64 = 51
 const SYSCLASSBLOCK: u64 = 52
 const BDEV: u64 = 0x1800
 const CBDEV: u64 = 0x1801
+const BIDENT: u64 = 0x1802 // disk/device directory (IDENTIFY strings)
 const BATTR: u64 = 0x1810
 const A_DEV: u64 = 0
 const A_SIZE: u64 = 1
@@ -202,6 +203,8 @@ const A_RO: u64 = 2
 const A_REMOVABLE: u64 = 3
 const A_START: u64 = 4
 const A_PARTITION: u64 = 5
+const A_MODEL: u64 = 6
+const A_SERIAL: u64 = 7
 pub const FDENT: u64 = 0x1000
 pub const FIENT: u64 = 0x1400
 const FDS_MAX: u64 = 1024 // kernel/files' FDS
@@ -334,7 +337,7 @@ fn dev_of(r: u64) -> u64 {
 /// fixed table: `/sys/block`, `/sys/class/block` and the devices'.
 pub fn searched(r: u64) -> bool {
     let e = entry(r)
-    r != ROOT && (e == SYSBLOCK || e == SYSCLASSBLOCK || e == BDEV || e == CBDEV)
+    r != ROOT && (e == SYSBLOCK || e == SYSCLASSBLOCK || e == BDEV || e == CBDEV || e == BIDENT)
 }
 
 /// px79: the child of `/sys/block`, `/sys/class/block` or a block
@@ -353,6 +356,20 @@ pub fn dev_child(d: u64, a: u64, n: u64) -> u64 {
         return dev_ref(b, if e == SYSBLOCK { BDEV } else { CBDEV })
     }
     let dv = dev_of(d)
+    // Identity names are a tiny fixed set; reuse child_at to keep listing
+    // and lookup identical, while the partition lookup stays indexed.
+    if e == BIDENT || (block.partno(dv) == 0 && block.driver(dv) != block.DRV_VIRTIO) {
+        var k: u64 = 0
+        let limit: u64 = if e == BIDENT { 2 } else { 1 }
+        while k < limit {
+            let c = if e == BIDENT { dev_ref(dv, BATTR + A_MODEL + k) } else { dev_ref(dv, BIDENT) }
+            var j: u64 = 0
+            while j < n && j < name_len(c) && name_byte(c, j) == abyte(a + j) { j += 1 }
+            if j == n && j == name_len(c) { return c }
+            k += 1
+        }
+        if e == BIDENT { return NONE }
+    }
     var i: u64 = 0
     while attr_at(dv, i) != NONE {
         let c = dev_ref(dv, BATTR + attr_at(dv, i))
@@ -549,6 +566,9 @@ pub fn name(e: u64) -> str {
     if e == BATTR + A_REMOVABLE { return "removable" }
     if e == BATTR + A_START { return "start" }
     if e == BATTR + A_PARTITION { return "partition" }
+    if e == BIDENT { return "device" }
+    if e == BATTR + A_MODEL { return "model" }
+    if e == BATTR + A_SERIAL { return "serial" }
     "online"
 }
 
@@ -619,7 +639,8 @@ pub fn parent(r: u64) -> u64 {
         let d = dev_of(r)
         return if block.partno(d) == 0 { SYSBLOCK } else { dev_ref(block.disk_of(d), BDEV) }
     }
-    if e >= BATTR && e < BATTR + 6 { return dev_ref(dev_of(r), BDEV) }
+    if e == BIDENT { return dev_ref(dev_of(r), BDEV) }
+    if e >= BATTR && e < BATTR + 8 { return dev_ref(dev_of(r), if e >= BATTR + A_MODEL { BIDENT } else { BDEV }) }
     if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR || e == PARTITIONS || e == MOUNTSLINK { return 0 }
     if e == 2 || e == 3 || e == 21 || e == SCMDLINE || e == SENVIRON || e == SSTAT || e == SLIMITS || e == SMOUNTS || e == SMOUNTINFO { return 1 }
     if e == KERNEL { return 4 } // px55
@@ -664,7 +685,7 @@ fn gen(r: u64) -> u64 {
     if e == SMOUNTS || e == PMOUNTS { return G_MOUNTS } // px67
     if e == SMOUNTINFO || e == PMOUNTINFO { return G_MOUNTINFO }
     if e == MOUNTSLINK { return G_LINK }
-    if e >= BATTR && e < BATTR + 6 { return G_BATTR } // px79
+    if e >= BATTR && e < BATTR + 8 { return G_BATTR } // px79
     let (isfd, _n) = fd_of(r)
     if isfd { return G_CMDLINE } // px45: not a directory (px50: a link kernel/files follows; never opened itself)
     let (isfi, _m) = fi_of(r)
@@ -765,7 +786,7 @@ pub fn size(r: u64) -> u64 {
 /// Which file system reference `r` is in: 0 `/proc`, 1 `/sys`.
 pub fn fs(r: u64) -> u64 {
     let e = entry(r)
-    if e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK || e == BDEV || e == CBDEV || (e >= BATTR && e < BATTR + 6) {
+    if e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK || e == BDEV || e == CBDEV || e == BIDENT || (e >= BATTR && e < BATTR + 8) {
         return 1 // px79: /sys's
     }
     if e <= 6 || e >= 16 { 0 } else { 1 } // px45's entries (26 and up) are /proc's
@@ -785,6 +806,9 @@ pub fn child_at(d: u64, k: u64) -> u64 {
         let b = block.nth_dev(k)
         return if b == block.DEVS { NONE } else { dev_ref(b, CBDEV) }
     }
+    if d != ROOT && entry(d) == BIDENT {
+        return if k < 2 { dev_ref(dev_of(d), BATTR + A_MODEL + k) } else { NONE }
+    }
     if d != ROOT && (entry(d) == BDEV || entry(d) == CBDEV) {
         let dv = dev_of(d)
         var i: u64 = 0
@@ -796,6 +820,10 @@ pub fn child_at(d: u64, k: u64) -> u64 {
         }
         if block.partno(dv) != 0 {
             return NONE
+        }
+        if block.driver(dv) != block.DRV_VIRTIO {
+            if k == i { return dev_ref(dv, BIDENT) }
+            i += 1
         }
         // a disk's directory: then its partitions', by number
         var p = block.next_part(block.disk_no(dv), 0)
@@ -858,7 +886,11 @@ fn battr(base: u64, r: u64) -> u64 {
     }
     let a = entry(r) - BATTR
     var n: u64 = 0
-    if a == A_DEV {
+    if a == A_MODEL || a == A_SERIAL {
+        let sn = a == A_SERIAL
+        let len = block.identity_len(d, sn)
+        while n < len { let b = block.identity_byte(d, sn, n); n = put_b(base, n, b) }
+    } else if a == A_DEV {
         let (ma, mi) = block.numbers(d)
         n = put_dec(base, 0, ma)
         n = put_b(base, n, 58)

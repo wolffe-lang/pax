@@ -152,6 +152,7 @@
 use frames
 use log
 use nvme
+use ahci
 use vblk
 
 extern "c" fn pax_tree_copy(dst: u64, src: u64, n: u64)
@@ -311,6 +312,8 @@ pub const KIND_ADDED: u64 = 3
 pub const DRV_VIRTIO: u64 = 0
 /// kernel/nvme's namespaces.
 pub const DRV_NVME: u64 = 1
+/// SATA ATA disks behind AHCI.
+pub const DRV_AHCI: u64 = 2
 /// px75: raw I/O's bounce pages (128 KiB).
 pub const BOUNCE_PAGES: u64 = 32
 /// Device flags.
@@ -465,7 +468,9 @@ pub fn start(pml4: u64) -> u64 {
     let nv = vblk.count_disks()
     // px75: the NVMe namespaces, in what room the virtio disks leave.
     let rn = nvme.start(pml4, if nv < DISKS { DISKS - nv } else { 0 })
-    if r != vblk.UP && rn != nvme.UP {
+    let used = nv + nvme.count_disks()
+    let ra = ahci.start(pml4, if used < DISKS { DISKS - used } else { 0 })
+    if r != vblk.UP && rn != nvme.UP && ra != ahci.UP {
         return 0
     }
     let sf = zeroed()
@@ -499,7 +504,7 @@ pub fn start(pml4: u64) -> u64 {
     put_st(S_SCR, sc)
     // px75: every disk first (each NVMe disk's minor before any
     // partition's, as the guest gives them), then each one's table.
-    let all = nv + nvme.count_disks()
+    let all = used + ahci.count_disks()
     k = 0
     while k < all && k < DISKS {
         var j: u64 = 0
@@ -525,7 +530,7 @@ pub fn start(pml4: u64) -> u64 {
             put_dw(d, D_FLAGS, (if vblk.read_only(k) { F_RO } else { 0 }) | (if vblk.flushes(k) { F_FLUSH } else { 0 }))
             put_dw(d, D_MAJOR, 254)
             put_dw(d, D_MINOR, k * 16)
-        } else {
+        } else if k < used {
             let u = k - nv
             let (c, ns) = nvme.name_of(u)
             put_dw(d, D_DRV, DRV_NVME)
@@ -539,6 +544,15 @@ pub fn start(pml4: u64) -> u64 {
             let m = ext_minor()
             put_dw(d, D_MAJOR, 259)
             put_dw(d, D_MINOR, m)
+        } else {
+            let u = k - used
+            put_dw(d, D_DRV, DRV_AHCI)
+            put_dw(d, D_UNIT, u)
+            put_dw(d, D_SECTORS, ahci.sectors(u))
+            put_dw(d, D_LBS, 512)
+            put_dw(d, D_FLAGS, F_FLUSH)
+            put_dw(d, D_MAJOR, 8)
+            put_dw(d, D_MINOR, u * 16)
         }
         make_stem(d)
         put_st(S_GEN, st(S_GEN) + 1)
@@ -678,7 +692,7 @@ fn make_stem(d: u64) {
         stem_set(d, n, 110) // n
         n = stem_dec(d, n + 1, dw(d, D_NSO))
     } else {
-        stem_set(d, 0, 118) // v
+        stem_set(d, 0, if dw(d, D_DRV) == DRV_AHCI { 115 } else { 118 }) // s or v
         stem_set(d, 1, 100) // d
         stem_set(d, 2, 97 + dw(d, D_UNIT)) // a, b, … (the virtio disk's own number)
     }
@@ -819,9 +833,10 @@ pub fn by_name(a: u64, n: u64) -> u64 {
     if n >= o + 7 && b8(a + o) == 110 && b8(a + o + 1) == 118 && b8(a + o + 2) == 109 && b8(a + o + 3) == 101 {
         return by_nvme_name(a + o + 4, n - o - 4)
     }
-    if n < o + 3 || b8(a + o) != 118 || b8(a + o + 1) != 100 {
+    if n < o + 3 || (b8(a + o) != 118 && b8(a + o) != 115) || b8(a + o + 1) != 100 {
         return DEVS
     }
+    let wanted = if b8(a + o) == 115 { DRV_AHCI } else { DRV_VIRTIO }
     let letter = b8(a + o + 2)
     if letter < 97 || letter > 122 {
         return DEVS
@@ -839,7 +854,7 @@ pub fn by_name(a: u64, n: u64) -> u64 {
     }
     var x: u64 = 0
     while x < disks() {
-        if dw(x * DPD, D_DRV) == DRV_VIRTIO && dw(x * DPD, D_UNIT) == letter - 97 {
+        if dw(x * DPD, D_DRV) == wanted && dw(x * DPD, D_UNIT) == letter - 97 {
             return part_of(x, p)
         }
         x += 1
@@ -896,13 +911,13 @@ pub fn max_sectors(d: u64) -> u64 {
         return 8
     }
     let disk = disk_of(d)
-    if dw(disk, D_DRV) == DRV_NVME { nvme.max_sectors(dw(disk, D_UNIT)) } else { 8 }
+    if dw(disk, D_DRV) == DRV_NVME { nvme.max_sectors(dw(disk, D_UNIT)) } else if dw(disk, D_DRV) == DRV_AHCI { 256 } else { 8 }
 }
 
 /// px75: BLKROTATIONAL's answer (measured on the guest: 1 for a virtio
 /// disk, 0 for an NVMe namespace).
 pub fn rotational(d: u64) -> u64 {
-    if driver(d) == DRV_NVME { 0 } else { 1 }
+    if driver(d) == DRV_NVME { 0 } else if driver(d) == DRV_AHCI { ahci.rotational(dw(disk_of(d), D_UNIT)) } else { 1 }
 }
 
 /// Linux's device numbers for device `d`: (major, minor).
@@ -923,6 +938,8 @@ fn said(d: u64, bit: u64) -> bool {
 fn hand(disk: u64, r: u64) {
     if dw(disk, D_DRV) == DRV_NVME {
         nvme.submit(dw(disk, D_UNIT), r)
+    } else if dw(disk, D_DRV) == DRV_AHCI {
+        ahci.submit(dw(disk, D_UNIT), r)
     } else {
         vblk.submit(dw(disk, D_UNIT), r)
     }
@@ -933,6 +950,8 @@ fn hand(disk: u64, r: u64) {
 fn waited(disk: u64, r: u64) -> u64 {
     if dw(disk, D_DRV) == DRV_NVME {
         nvme.wait(dw(disk, D_UNIT), r)
+    } else if dw(disk, D_DRV) == DRV_AHCI {
+        ahci.wait(dw(disk, D_UNIT), r)
     } else {
         vblk.wait(dw(disk, D_UNIT), r)
     }
@@ -956,7 +975,7 @@ pub fn rw_pages(d: u64, op: u64, sector: u64, n: u64, list: u64) -> u64 {
     if !present(d) {
         return neg(EIO)
     }
-    if dw(disk_of(d), D_DRV) == DRV_NVME {
+    if dw(disk_of(d), D_DRV) != DRV_VIRTIO {
         return request(d, op, sector, n, rd(list), list, max_sectors(d))
     }
     var done: u64 = 0
@@ -1410,8 +1429,8 @@ fn add_part_on(k: u64, partno: u64, first: u64, n: u64, kind: u64) -> u64 {
     put_dw(d, D_START, first)
     put_dw(d, D_PARTNO, partno)
     put_dw(d, D_KIND, kind)
-    if partno <= 15 && dw(disk, D_DRV) == DRV_VIRTIO {
-        put_dw(d, D_MAJOR, 254)
+    if partno <= 15 && dw(disk, D_DRV) != DRV_NVME {
+        put_dw(d, D_MAJOR, if dw(disk, D_DRV) == DRV_AHCI { 8 } else { 254 })
         put_dw(d, D_MINOR, dw(disk, D_UNIT) * 16 + partno)
     } else {
         // px75: every NVMe partition, and a virtio one past 15:
@@ -2329,6 +2348,8 @@ pub fn report() {
         let d = k * DPD
         if dw(d, D_DRV) == DRV_NVME {
             nvme.report(dw(d, D_UNIT))
+        } else if dw(d, D_DRV) == DRV_AHCI {
+            ahci.report(dw(d, D_UNIT))
         } else {
             vblk.report(dw(d, D_UNIT))
         }
@@ -2987,4 +3008,24 @@ pub fn copy_bytes(dst: u64, src: u64, n: u64) {
     // # Safety: both ranges inside frames the callers hold, through the
     // HHDM; they do not overlap.
     unsafe { pax_tree_copy(dst, src, n) }
+}
+
+/// Disk identity from hardware, never inferred from the name.
+pub fn identity_len(d: u64, serial_number: bool) -> u64 {
+    if !present(d) { return 0 }
+    let disk = disk_of(d)
+    let u = dw(disk, D_UNIT)
+    if driver(d) == DRV_NVME { nvme.identity_len(u, serial_number) }
+    else if driver(d) == DRV_AHCI { ahci.identity_len(u, serial_number) }
+    else { 0 }
+}
+pub fn identity_byte(d: u64, serial_number: bool, i: u64) -> u64 {
+    if !present(d) { return 0 }
+    let u = dw(disk_of(d), D_UNIT)
+    if driver(d) == DRV_NVME { nvme.identity_byte(u, serial_number, i) }
+    else if driver(d) == DRV_AHCI { ahci.identity_byte(u, serial_number, i) }
+    else { 0 }
+}
+pub fn physical_size(d: u64) -> u64 {
+    if driver(d) == DRV_AHCI { ahci.physical_size(dw(disk_of(d), D_UNIT)) } else { lbs(d) }
 }
