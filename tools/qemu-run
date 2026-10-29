@@ -96,6 +96,7 @@ set -euo pipefail
 firmware=bios serial=$PAX_BUILD/serial.log serial_in= timeout=30 accel=auto gdb_port= image= noscreen=0 bootdisk=0 usbstick=0 bootnvme=0 bootahci=0 drives=()
 usbkbd=${PAX_USB_KBD:-} # typing suites keep their exact keystroke stream
 noserial=0 # px76: omit COM1 entirely, not merely its output backend
+usbirq=${PAX_USB_IRQ:-} nohpet=0 nopit=0 displaymode=
 while [ $# -gt 0 ]; do
     case $1 in
         --firmware) firmware=$2; shift 2 ;;
@@ -106,6 +107,10 @@ while [ $# -gt 0 ]; do
         --gdb)      gdb_port=$2; shift 2 ;;
         --no-screen) noscreen=1; shift ;;
         --no-serial) noserial=1; shift ;;
+        --usb-irq=*) usbirq=${1#*=}; shift ;;
+        --no-hpet) nohpet=1; shift ;;
+        --no-pit) nopit=1; shift ;;
+        --display-mode=*) displaymode=${1#*=}; shift ;;
         --boot-disk) bootdisk=1; shift ;;
         --usb-stick) usbstick=1; shift ;;
         --usb-kbd) usbkbd=root; shift ;;
@@ -140,13 +145,31 @@ mkdir -p "$(dirname "$serial")"
 work=$(mktemp -d "${TMPDIR:-/tmp}/pax-qemu.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
+irqopts=
+xhcimodel=qemu-xhci
+if [ -n "$usbirq" ]; then
+    "$qemu" -device qemu-xhci,help > "$work/xhci-properties" 2>&1
+    if ! grep -Eq '^[[:space:]]+msi=' "$work/xhci-properties"; then
+        xhcimodel=nec-usb-xhci
+        say 'qemu-xhci has no MSI property; explicit interrupt leg uses nec-usb-xhci'
+    fi
+fi
+case $usbirq in
+    '') ;;
+    msi) irqopts=,msi=on,msix=off ;;
+    intx) irqopts=,msi=off,msix=off ;;
+    *) die '--usb-irq takes msi or intx' ;;
+esac
+machine=q35
+[ "$nohpet" = 0 ] || machine+=,hpet=off
+[ "$nopit" = 0 ] || machine+=,pit=off
 cmd=("$qemu"
-     -machine q35 -cpu max -m 256M -accel "$accel"
+     -machine "$machine" -cpu max -m 256M -accel "$accel"
      -nographic -monitor none -parallel none -nic none
      -no-reboot
      -device isa-debug-exit,iobase=0xf4,iosize=0x04)
 if [ "$usbstick" = 1 ]; then
-    cmd+=(-device qemu-xhci,id=xhci
+    cmd+=(-device "$xhcimodel,id=xhci$irqopts"
           -drive "file=$image,if=none,id=stick,format=raw,readonly=on"
           -device usb-storage,bus=xhci.0,drive=stick,bootindex=0)
 elif [ "$bootahci" = 1 ]; then
@@ -186,7 +209,7 @@ for e in ${drives[@]+"${drives[@]}"}; do
 done
 [ "$noscreen" = 0 ] || cmd+=(-vga none)
 if [ -n "$usbkbd" ]; then
-    cmd+=(-device qemu-xhci,id=pax-usb)
+    cmd+=(-device "$xhcimodel,id=pax-usb$irqopts")
     case $usbkbd in
         root|empty) usbport=1 ;;
         hub) cmd+=(-device usb-hub,id=pax-hub1,bus=pax-usb.0,port=1); usbport=1.3 ;;

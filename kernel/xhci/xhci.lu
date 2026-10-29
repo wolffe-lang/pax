@@ -7,6 +7,8 @@
 //! a TRB's cycle word last. A timeout quarantines DMA memory, never frees
 //! a buffer the controller might still own. Bounds: four controllers,
 //! 32 slots each, five hub hops, one boot keyboard interface per device.
+use apic
+use clock
 use console
 use frames
 use log
@@ -743,32 +745,12 @@ export fn pax_usbd(_arg: u64) {
     }
 }
 
-fn pit_count() -> u64 {
-    // Same 8254 latch operation as PAX's tour; timer.start has programmed
-    // channel 0 for 100Hz. IF is clear, so its two-byte read cannot interleave.
-    unsafe {
-        pax_outb(0x43, 0)
-        let lo = pax_inb(0x40)
-        let hi = pax_inb(0x40)
-        (lo as u64) | ((hi as u64) << 8)
-    }
-}
-
 fn wait_bits(a: u64, mask: u64, value: u64, ticks: u64) -> bool {
-    // Bootstrap has IF clear: count real PIT reloads, not CPU-speed-dependent
-    // iterations. A second bound refuses a broken/nonadvancing PIT too.
-    if r32(a) & mask == value { return true }
-    var previous = pit_count()
-    var elapsed: u64 = 0
-    var n: u64 = 0
-    while elapsed < ticks && n < 10000000 {
+    let deadline = clock.deadline_us(ticks * 10000)
+    while !clock.expired(deadline) {
         if r32(a) & mask == value { return true }
-        let current = pit_count()
-        if current > previous { elapsed += 1 }
-        previous = current
-        n += 1
     }
-    false
+    r32(a) & mask == value
 }
 
 fn controller(pml4: u64, index: u64, number: u64) -> u64 {
@@ -776,7 +758,8 @@ fn controller(pml4: u64, index: u64, number: u64) -> u64 {
     let (kind, physical) = pci.bar(bdf, 0)
     if (kind != pci.BAR_MEM32 && kind != pci.BAR_MEM64) || physical == 0 { return 0 }
     let line = pci.line(index)
-    if pci.pin(index) == 0 || line < 3 || line > 15 || line == 4 || line == 8 || line == 13 { return 0 }
+    let has_msi = pci.capability(bdf, 5) != 0
+    if !has_msi && (pci.pin(index) == 0 || line < 3 || line > 15 || line == 4 || line == 8 || line == 13) { return 0 }
     let base = BASE + (number - 1) * WINDOW
     var off: u64 = 0
     while off < WINDOW {
@@ -785,17 +768,9 @@ fn controller(pml4: u64, index: u64, number: u64) -> u64 {
         off += 4096
     }
     let cap = base + (physical & 4095)
-    // HCRST does not reset PCI MSI/MSI-X enables left by firmware.
-    var capability = pci.next_cap(bdf, 0)
-    var hops: u64 = 0
-    while capability != 0 && hops < 48 {
-        let id = pci.read8(bdf, capability)
-        if id == 5 { pci.write32(bdf, capability, pci.read32(bdf, capability) & !(1 << 16)) }
-        if id == 0x11 { pci.write32(bdf, capability, pci.read32(bdf, capability) & !(1 << 31)) }
-        capability = pci.next_cap(bdf, capability)
-        hops += 1
-    }
-    pci.set_command(bdf, (pci.command(bdf) | pci.CMD_MEMORY | pci.CMD_MASTER) & !pci.CMD_INTX_OFF)
+    // HCRST does not reset firmware's PCI interrupt enables.
+    pci.interrupts_off(bdf)
+    pci.set_command(bdf, pci.command(bdf) | pci.CMD_MEMORY | pci.CMD_MASTER)
     let c = page()
     if c == 0 { return 0 }
     put(c, NUMBER, number); put(c, CAP, cap)
@@ -809,7 +784,7 @@ fn controller(pml4: u64, index: u64, number: u64) -> u64 {
     put(c, NSLOT, if maxslots > SLOTS { SLOTS } else { maxslots })
     let hcc = r32(cap + 0x10)
     put(c, CSZ, if hcc & 4 != 0 { 64 } else { 32 })
-    put(c, VECTOR, timer.MASTER_BASE + line)
+    put(c, VECTOR, if has_msi { 79 + number } else { timer.MASTER_BASE + line })
     var extended = (hcc >> 16) * 4
     var legacy_found = false
     var guard: u64 = 0
@@ -861,7 +836,12 @@ fn controller(pml4: u64, index: u64, number: u64) -> u64 {
     w64(erst, pa(event)); w32(erst + 8, 256)
     w32(rt + 8, 1); w64(rt + 24, pa(event)); w64(rt + 16, pa(erst))
     w32(rt + 4, 0); w32(rt, 3)
-    timer.level(line); timer.unmask_line(line)
+    if has_msi {
+        if !pci.enable_msi(bdf, apic.read(0x20) >> 24, get(c, VECTOR)) { say_error(c, "MSI setup failed", bdf); return 0 }
+    } else {
+        pci.set_command(bdf, pci.command(bdf) & !pci.CMD_INTX_OFF)
+        timer.level(line); timer.unmask_line(line)
+    }
     put(c, LIVE, 1)
     w32(op, 5)
     if !wait_bits(op + 4, 1, 0, 100) { put(c, LIVE, 0); return 0 }
@@ -872,7 +852,9 @@ fn controller(pml4: u64, index: u64, number: u64) -> u64 {
         port += 1
     }
     log.put("xhci "); log.dec(number as int); log.put(": ports ")
-    log.dec(get(c, PORTS) as int); log.put(" INTx "); log.dec(line as int)
+    log.dec(get(c, PORTS) as int)
+    log.put(if has_msi { " MSI vector " } else { " INTx " })
+    log.dec((if has_msi { get(c, VECTOR) } else { line }) as int)
     log.put(" context "); log.dec(get(c, CSZ) as int)
     log.put(if legacy_found { " legacy owned" } else { " legacy absent" })
     log.put(" speeds")
