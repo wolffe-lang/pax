@@ -262,7 +262,7 @@ for leg in $legs; do
             [ "$hrc" = 0 ] || why+=" not halted ($(not_halted));"
             "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
                 "gdt: $HEX, 7 descriptors, tss 0x28 at $HEX, ist1 $HEX to $HEX" \
-                "idt: $HEX, 256 gates, 48 routed, #DF on ist1" \
+                "idt: $HEX, 256 gates, 52 routed, #DF on ist1" \
                 "int3: breakpoint vector 3, rip $HEX" 'int3: returned, 1 breakpoint' 'halt' >/dev/null \
                 || why+=" the log does not end gdt, idt, int3: breakpoint …, int3: returned, 1 breakpoint, halt;"
             [ -n "$r" ] && [ -n "$i" ] && [ $((r)) = $((i + 1)) ] || why+=" rip '$r' is not pax_int3 + 1 ($i + 1);"
@@ -302,7 +302,7 @@ for leg in $legs; do
             why=
             [ "$hrc" = 0 ] || why+=" not halted ($(not_halted));"
             "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
-                "idt: $HEX, 256 gates, 48 routed, #DF on ist1" \
+                "idt: $HEX, 256 gates, 52 routed, #DF on ist1" \
                 "PANIC double fault vector 8 error 0x0000000000000000 rip $HEX rsp 0x0000000000001000 frame $HEX" >/dev/null \
                 || why+=" the log does not end idt …, PANIC double fault vector 8 … rsp 0x…1000 …;"
             [ -n "$f" ] && [ $((f)) -ge $((lo)) ] && [ $((f)) -lt $((hi)) ] || why+=" frame '$f' outside IST1 [$lo, $hi);"
@@ -323,7 +323,7 @@ for leg in $legs; do
             [ "$hrc" = 0 ] || why+=" not halted ($(not_halted));"
             "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
                 "apic: 0x00000000fee00000 at 0xffffb00000000000, id 0, svr $HEX, lint0 $HEX -> 0x0000000000008700" \
-                'timer: pit divisor 11932 \(99\.998 Hz\), 8259 at 32 and 40, line 0 unmasked' \
+                'timer: LAPIC calibrated by (HPET|PM|PIT) divide16 [0-9]+ Hz, tick 100 Hz vector 32; PIT IRQ masked' \
                 'timer: 20 ticks on vector 32, 0 spurious' 'halt' >/dev/null \
                 || why+=" the log does not end apic …, timer: pit …, timer: 20 ticks on vector 32, 0 spurious, halt;"
             if [ -z "$why" ]; then
