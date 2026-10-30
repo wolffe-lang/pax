@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# tests/mpx6-nmi — an NMI or a machine check anywhere in the boot (px77d).
+#
+#   tests/mpx6-nmi [--tier native|release] [--firmware bios|uefi|both]
+#
+# kasumi reset at boot once in two plain boots of the same stick, and
+# never under `triage`, whose first act loads an IDT. Limine hands over
+# with an empty IDT and CR4.MCE clear (docs/BOOT.md clause 7), so until
+# PAX loaded its own tables an NMI or an exception was a triple fault and
+# a machine check a shutdown: a reset with nothing on the screen, and on
+# kasumi that window held 337 console lines scrolled through the GPU's
+# BAR. kernel/interrupts' `early` now loads the tables and sets CR4.MCE as
+# kmain_console's first act; the NMI's gate is on IST2 and logged and
+# survived, the machine check's on IST3 and a named panic with its banks.
+#
+# kernel/kmain_console with an initramfs whose /etc/pax-run holds no
+# command (it runs every step and halts), no `triage`. Each row boots it
+# frozen under QEMU's gdb stub, runs to a hardware breakpoint at one
+# kernel function, injects there and resumes (tests/mpx6-nmi.d/inject.py):
+#   N1 an NMI (an MSI with delivery mode NMI, as a device's or the
+#      chipset's message: QEMU's inject-nmi goes through LINT1, which
+#      Limine hands over masked) at serial.init, frames.start,
+#      paging.switch_to, fb.start and initramfs.report (each before the
+#      old IDT), apic.start and pci.scan (after it): the boot survives to
+#      its end, `nmi: 1 at rip … reason …, continuing` in its transcript.
+#   N2 a machine check (the monitor's mce: bank 1, VAL|UC|EN|PCC) at
+#      frames.start, initramfs.report and pci.scan: `mce: bank 1 status …`,
+#      `PANIC machine check vector 18 …`, halted, not reset.
+# N1 needs KVM (under TCG QEMU drops the NMI's message): without a usable
+# /dev/kvm its rows are skipped, each by name, and counted. N2 runs under
+# either. On the tree before px77d's fix every N1 row before apic.start
+# resets, every later one is a `PANIC nmi`, and every N2 row resets
+# (notes/px77d, the rows seen red).
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+tier=${PAX_NMI_TIER:-native} firmware=${PAX_NMI_FIRMWARE:-both}
+while [ $# -gt 0 ]; do
+    case $1 in
+        --tier) tier=$2; shift 2;;
+        --firmware) firmware=$2; shift 2;;
+        *) die 'usage: mpx6-nmi [--tier native|release] [--firmware bios|uefi|both]';;
+    esac
+done
+case $firmware in both) legs='bios uefi';; bios|uefi) legs=$firmware;; *) die 'bad firmware';; esac
+flags=(); [ "$tier" != release ] || flags=(--release)
+work=$PAX_BUILD/mpx6-nmi/$tier
+mkdir -p "$work"
+"$PAX_ROOT/tools/fetch-limine"
+elf=$("$PAX_ROOT/tools/build-kernel" ${flags[@]+"${flags[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work")
+printf '# px77d: no command; the boot runs every step and halts\n' > "$work/pax-run"
+"$PAX_ROOT/tools/mkinitramfs" "$work/nmi.cpio" "/etc/pax-run=$work/pax-run" > "$work/initramfs.txt"
+"$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$work/nmi.cpio" initramfs.cpio "$elf" "$work/nmi.iso" > /dev/null
+row() { # firmware kind function expect
+    python3 -I "$PAX_ROOT/tests/mpx6-nmi.d/inject.py" --image "$work/nmi.iso" --elf "$elf" \
+        --output "$work/$1/$2-$3" --firmware "$1" --kind "$2" --at "$3" --expect "$4" \
+        || die "FAIL mpx6-nmi $1 $2 at $3"
+}
+kvm=0
+[ -r /dev/kvm ] && [ -w /dev/kvm ] && kvm=1
+skips=0
+for fw in $legs; do
+    for at in serial.init frames.start paging.switch_to fb.start initramfs.report apic.start pci.scan; do
+        if [ "$kvm" = 1 ]; then
+            row "$fw" nmi "$at" survive
+        else
+            echo "SKIP N1 $fw nmi at $at: no usable /dev/kvm (TCG drops the NMI's MSI; inject-nmi needs LINT1, masked)"
+            skips=$((skips + 1))
+        fi
+    done
+    [ "$kvm" = 0 ] || echo "PASS N1 $fw: an NMI at seven points from the first step to the PCI scan, survived each time"
+    for at in frames.start initramfs.report pci.scan; do
+        row "$fw" mce "$at" panic
+    done
+    echo "PASS N2 $fw: a machine check at three points, a named panic with its bank each time, never a reset"
+done
+echo "PASS mpx6-nmi $tier ($skips rows skipped for want of KVM)"
