@@ -1754,3 +1754,24 @@ Measured on the same machines (`/mnt/steamlib/lanes/px76/measure.sh`, its `MEASU
   doesn't support requested feature: CPUID.01H:ECX.x2apic [bit 21]`) on both firmwares, so
   kmain_metal's x2apic leg stops by name (`FAIL METAL x2APIC offered by CPUID`) and kernel/apic's
   MSR path has no QEMU witness on these machines (`runs/x2probe.log`).
+
+## px77d — the metal triage
+
+- **Intel SDM vol. 3A §2.5** (CR4.MCE: with it clear a machine check shuts the processor down), **§3.4.5 and §7.2**
+  (code, data and 64-bit TSS descriptors; the 64-bit TSS, its IST1 at byte 36 and the I/O map base at 102),
+  **§6.10-§6.14** (the IDT, 64-bit interrupt gates, the IST, the frame an exception pushes, which vectors push an
+  error code; a vector past the IDT's limit raises #GP naming it), **ch. 15** (IA32_MCG_CAP 0x179, IA32_MCG_STATUS
+  0x17A, IA32_MCi_STATUS 0x401 + 4i, IA32_MCi_ADDR 0x402 + 4i, VAL bit 63, ADDRV bit 58), **§11.11-§11.12**
+  (IA32_MTRR_DEF_TYPE 0x2FF, IA32_PAT 0x277), **§11.11.9** (a large page over two MTRR types is undefined: the hazard
+  table's H5); **vol. 2** (CPUID leaves 0, 1 and 16H, RDMSR, RDTSC, LGDT, LIDT, LTR, MOV CR). `boot/triage.S`,
+  `kernel/triage`.
+- **Limine's protocol** as `docs/BOOT.md` records it (the executable command line, framebuffer, HHDM and memory map
+  responses' layouts; the machine state at entry: an empty IDT, CR4 beyond PAE clear). Limine's answer to an entry
+  with no `cmdline:` was measured, not read: a pointer to a NUL in its own bootloader-reclaimable image
+  (`notes/px77d/logs/cmdprobe.txt`).
+- **clef's mnemonic table** (`wolffe-lang/clef` at `b71b43f4`, the org's own assembler, `src/x86table/rows.lu` and
+  `aliases.lu`): `boot/triage.S` uses only mnemonics and operand forms it lists, for `tests/kernel-as` K5.
+- **QEMU 8.2.2 and OVMF as black boxes** (`info pci`, `-device …,help`, `info registers`, `x`, `screendump`): no
+  display device OVMF drives gives a 64-bit framebuffer BAR, so the target machine's framebuffer at 256 GiB is not
+  reproducible here (`notes/px77d-the-metal-triage.md`).
+- No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source.
