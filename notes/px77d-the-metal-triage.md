@@ -39,7 +39,7 @@ mnemonic table only. No kernel's, firmware's, bootloader's, emulator's or driver
 (the maintainer booted it); hasu's :9364 server and the maintainer's data were not touched; no label, no merge, no
 issue filed or closed; no attribution trailers.
 
-**Inputs.** Base pax trunk `56b9f554` (px78's head), wolf 0.2.35 (`4cc4045b…`, read twice: `notes/px77d/archive-reads.txt`),
+**Inputs.** Base pax trunk `56b9f554` (px78's head; the branch rebased once onto `3958c5a0`, px77c's notes and `docs/INSTALL-METAL.md` only: every branch sha this note cites is the pre-rebase one, paired with its rebased twin in `notes/px77d/rebase-map.txt`), wolf 0.2.35 (`4cc4045b…`, read twice: `notes/px77d/archive-reads.txt`),
 Limine 12.9.1 (`5cdebc51…`, `limine-read-{1,2}.sha256`). hasu block A (CPUs 0-5) under
 `flock /home/mfwolffe/lanes/hasu-block-A.lock`, `localhost/px75-ubuntu:2`, `/dev/kvm` passed in; every job's
 script is under `notes/px77d/hasu/` (`session.sh` holds the lock). One deviation: the first session's wrapper
