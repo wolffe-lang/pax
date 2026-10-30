@@ -156,12 +156,19 @@ pax-install
    chosen. Type its number and Enter.
 2. Type a user name (uid 1000, no password in this preview).
 3. Answer `y` or `n` for the games.
-4. The plan appears (`04-plan.png`): the target, its size, the partitions, the seed and a line starting with
-   `confirmation ERASE /dev/…`. **Photo 2: the plan, before typing anything else.**
-5. Type `ext2-preview` (the root is ext2 without a journal) and Enter.
-6. Type the whole confirmation line after the word `confirmation `, exactly as shown, and Enter. It is long: the disk
-   name, its identity, its size in bytes and 64 hex digits. A typing mistake cancels with nothing written; run
-   `pax-install` again.
+4. The plan appears (`04-plan.png`): the target, its size, the partitions and the seed, then one summary naming the
+   disk, for example:
+
+   ```text
+   Erase Samsung SSD 870, serial PX78-TARGET-0001 (500.1 GB, /dev/sdc), and install PAX?
+   The root file system is ext2 without a journal.
+   Type yes to install; anything else cancels: pax-install>
+   ```
+
+   **Photo 2: the plan and the summary, before typing anything else.** Check that the model and serial are the
+   target's (the size is in decimal GB or TB, as on the disk's label).
+5. Type `yes` (lowercase) and Enter. Anything else (`y`, `YES`, `q`, an empty line) cancels with nothing written;
+   run `pax-install` again.
 
 The installer stages the live system, then writes the partition table, the EFI partition, the root and Limine,
 saying `durable` after each phase. In the QEMU rehearsal onto a 500 GB disk it took 24 s from the confirmation
