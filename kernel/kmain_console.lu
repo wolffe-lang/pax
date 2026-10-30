@@ -220,6 +220,14 @@ export fn kmain() {
     // CR4.MCE and band first (box 1), then a numbered box at each step
     // below; without it every triage call returns at once.
     triage.start()
+    if !triage.on() {
+        // px77d: PAX's GDT, TSS and IDT (the NMI and the machine check each
+        // on a stack of its own) and CR4.MCE before anything else: until
+        // they are loaded an NMI or an exception is a reset, and on kasumi
+        // that window held 337 console lines scrolled through the GPU's
+        // BAR. Under `triage` its own tables cover the window instead.
+        interrupts.early()
+    }
     triage.step(2)
     serial.init()
     triage.step(3) // the early screen attached (or `nofb`)
@@ -245,7 +253,7 @@ export fn kmain() {
         initramfs.require() // px67: with `root=` the programs may all be on the disk
     }
     triage.step(8)
-    interrupts.start()
+    interrupts.start() // with `triage` the first load; otherwise `early` loaded them
     triage.step(9) // PAX's GDT and IDT live
     apic.start(pml4)
     triage.step(10)
