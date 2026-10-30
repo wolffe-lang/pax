@@ -208,5 +208,11 @@ picture.
 - [x] Item 2: reproduction attempted on hasu block A with KVM, 32 GiB, 16 CPUs, OVMF, no serial, the 64-bit window,
   an x2APIC-ID machine: no reset. A GOP framebuffer above 4 GiB and AVX-512 cannot be made here (above).
 - [x] Item 3: the triage stick staged with TRIAGE.txt, four reads agreeing; it booted kasumi.
-- [ ] Item 4: the fix, when the cause is named (below).
+- [x] Item 4: the fix for the intermittent reset (above): the IDT, the NMI and the machine check on their own stacks
+  and CR4.MCE as kmain_console's first act; its mpx rows (`tests/mpx6-nmi`, N1 and N2) red on the tree before it
+  and green with it; the fix stick `~/pax-smoke/pax-fix-9db67a66.img`, 794,820,608 bytes, sha256
+  `40f4dadddeb8765360d3ed6f053c9fa9352b7f18f048378eef37d93b05072eb6` (two reads on hasu, two on nomad), px77b's
+  recipe at `9db67a66` with `boot/limine-fix.conf` (entry 1, the default, the plain boot with the fix; 2 and 3 the
+  triage), `FIX.txt`; under KVM entries 1 and 2 reach `login:`, and entry 1 at 32 GiB, 16 CPUs, no serial port.
+  Whether kasumi's resets were NMIs, machine checks or neither is the fix stick's to show (FIX.txt).
 - [x] Item 5: the suite (T0-T8) and its plant; the note; the PR and the audit (the hand-back).

@@ -1,0 +1,33 @@
+PAX FIX STICK  (px77d)                              pax-fix-9db67a66.img
+====================================================================
+  file    ~/pax-smoke/pax-fix-9db67a66.img, 794,820,608 bytes (branch px77d at 9db67a66, px77b's recipe)
+  sha256  40f4dadddeb8765360d3ed6f053c9fa9352b7f18f048378eef37d93b05072eb6
+          (read twice on hasu after the build, twice here on nomad: all four agree)
+
+WHAT CHANGED: the plain boot reset kasumi once in two tries (entry 11), the triage boot never.
+The difference that can come and go: until now the plain kernel ran its first seconds with no
+exception table and machine checks switched off, so an NMI or a machine check arriving then
+reset the board silently. On kasumi those seconds are long: the boot draws its whole file
+listing (about 340 lines) before loading the table, and every scroll reads the screen back
+through the RTX 4090's PCIe BAR (about 6 GB of reads at 2560x1440). This kernel loads its
+exception table and turns machine checks on as its very first act:
+  * an NMI is now printed as a line starting "nmi: 1 at rip ..." and the boot carries on;
+  * a machine check now prints "mce: bank ..." lines and "PANIC machine check ..." and stops
+    there, on screen, instead of resetting.
+
+ENTRY 1 (the default) boots by itself after 5 seconds: the live system with the fix.
+Entries 2 and 3 are the triage, as on the triage stick, in case.
+
+PLEASE
+  1. Boot it five times (power on, let entry 1 start by itself). For each boot write down:
+     login prompt, or reset (and roughly when).
+  2. Time one boot: from the moment the PAX text starts to the login prompt, and how long the
+     "initramfs: file ..." lines take to scroll by. That time is the window the old kernel
+     had no exception table.
+  3. If any line starting "nmi:" or "mce:" or "PANIC" appears, photograph it (a phone video of a
+     boot catches lines that scroll away).
+  4. If a boot resets anyway: boot entry 2 (triage) right after and photograph the bottom panel
+     (the MC lines may hold the reset's machine check: banks survive a warm reset).
+  5. Same firmware settings as the last boots (ReBAR / Above 4G on).
+
+SEND BACK: the five outcomes, the timing, any photos, the firmware settings.
