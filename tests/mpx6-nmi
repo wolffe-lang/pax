@@ -17,14 +17,22 @@
 # command (it runs every step and halts), no `triage`. Each row boots it
 # frozen under QEMU's gdb stub, runs to a hardware breakpoint at one
 # kernel function, injects there and resumes (tests/mpx6-nmi.d/inject.py):
+#   N0 every injection point below is one symbol in the tier's kernel,
+#      before anything boots, whatever the accelerator (so a point the
+#      tier inlines is red by name even where N1 is skipped). The scan's
+#      point is pci.scan_bus, the walk itself: pci.scan is set_count(0),
+#      scan_bus(0), count(), and the release tier inlines that wrapper
+#      into kmain (pax#252's run 41014032632, `no single symbol for
+#      pci.scan`); scan_bus calls itself behind a bridge, so it stays a
+#      function in both tiers, and its first entry is the scan's start.
 #   N1 an NMI (an MSI with delivery mode NMI, as a device's or the
 #      chipset's message: QEMU's inject-nmi goes through LINT1, which
 #      Limine hands over masked) at serial.init, frames.start,
 #      paging.switch_to, fb.start and initramfs.report (each before the
-#      old IDT), apic.start and pci.scan (after it): the boot survives to
+#      old IDT), apic.start and pci.scan_bus (after it): the boot survives to
 #      its end, `nmi: 1 at rip … reason …, continuing` in its transcript.
 #   N2 a machine check (the monitor's mce: bank 1, VAL|UC|EN|PCC) at
-#      frames.start, initramfs.report and pci.scan: `mce: bank 1 status …`,
+#      frames.start, initramfs.report and pci.scan_bus: `mce: bank 1 status …`,
 #      `PANIC machine check vector 18 …`, halted, not reset.
 # N1 needs KVM (under TCG QEMU drops the NMI's message): without a usable
 # /dev/kvm its rows are skipped, each by name, and counted. N2 runs under
@@ -50,6 +58,15 @@ elf=$("$PAX_ROOT/tools/build-kernel" ${flags[@]+"${flags[@]}"} --src "$PAX_ROOT/
 printf '# px77d: no command; the boot runs every step and halts\n' > "$work/pax-run"
 "$PAX_ROOT/tools/mkinitramfs" "$work/nmi.cpio" "/etc/pax-run=$work/pax-run" > "$work/initramfs.txt"
 "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$work/nmi.cpio" initramfs.cpio "$elf" "$work/nmi.iso" > /dev/null
+n1='serial.init frames.start paging.switch_to fb.start initramfs.report apic.start pci.scan_bus'
+n2='frames.start initramfs.report pci.scan_bus'
+missing=
+for at in $n1 $n2; do
+    n=$(nm "$elf" | grep -c -E " _W$(printf '%s' "$at" | sed 's/\./\\./g')\\\$[0-9a-f]+$" || true)
+    [ "$n" = 1 ] || missing="$missing $at($n)"
+done
+[ -z "$missing" ] || die "FAIL N0 $tier: injection points that are not one symbol in $elf:$missing"
+echo "PASS N0 $tier: every injection point is one symbol in the kernel ($(printf '%s\n' $n1 $n2 | sort -u | wc -l | tr -d ' ') points)"
 row() { # firmware kind function expect
     python3 -I "$PAX_ROOT/tests/mpx6-nmi.d/inject.py" --image "$work/nmi.iso" --elf "$elf" \
         --output "$work/$1/$2-$3" --firmware "$1" --kind "$2" --at "$3" --expect "$4" \
@@ -59,7 +76,7 @@ kvm=0
 [ -r /dev/kvm ] && [ -w /dev/kvm ] && kvm=1
 skips=0
 for fw in $legs; do
-    for at in serial.init frames.start paging.switch_to fb.start initramfs.report apic.start pci.scan; do
+    for at in $n1; do
         if [ "$kvm" = 1 ]; then
             row "$fw" nmi "$at" survive
         else
@@ -68,7 +85,7 @@ for fw in $legs; do
         fi
     done
     [ "$kvm" = 0 ] || echo "PASS N1 $fw: an NMI at seven points from the first step to the PCI scan, survived each time"
-    for at in frames.start initramfs.report pci.scan; do
+    for at in $n2; do
         row "$fw" mce "$at" panic
     done
     echo "PASS N2 $fw: a machine check at three points, a named panic with its bank each time, never a reset"
