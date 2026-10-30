@@ -1001,8 +1001,9 @@ port, the stick and the USB keyboard on one xHCI controller, an NVMe disk
 with a foreign GPT standing in for CachyOS, and three SATA disks on the
 AHCI controller (two of one model, told apart by serial; the target a
 sparse 500 GB disk). It boots the stick, logs in through the keyboard,
-writes a file, checks the list, installs through the guided flow with the
-confirmation read off PAX's own screen cells, powers off, boots the disk
+writes a file, checks the list, installs through the guided flow (the
+summary naming the target read off PAX's own screen cells, then `yes`;
+px78b), powers off, boots the disk
 with the stick removed (the disk first in QEMU's boot order, as the
 firmware boot menu's choice; PAX writes no boot entry, and OVMF left to
 boot 1's variable store with no order went to its UEFI shell), logs in at
