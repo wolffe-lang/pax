@@ -1,0 +1,32 @@
+px77d prediction (committed after the triage code's commits e4b86d8a..401125cc and before the
+first boot of a triage kernel; the lane's first change was code, not this file: stated, not hidden).
+
+Reproduction already measured before this file (no kernel change; the px77b stick 598d3439…):
+  KVM -cpu host (i7-12700KF), 32 GiB, -smp 16, OVMF, -serial none/file, pit=off, nec-usb-xhci MSI,
+  X-PciMmio64Mb=262144 (xHCI BARs at 0x40_0000_0000), VGA / bochs-display / virtio-vga (all three
+  framebuffers are 32-bit BARs below 4 GiB): every boot reaches `login:`. An x2APIC-ID machine
+  (APIC ID 256 present, intel-iommu eim=on, kernel-irqchip=split) also reaches `login:`.
+  => QEMU does not reproduce kasumi's reboot. AVX-512 (Rocket Lake) cannot be offered on hasu.
+
+Predictions, QEMU (the triage stick):
+  P1 entry 1 (`triage`) boots to `login:` under OVMF/KVM, with boxes 01-26 and the panel drawn in
+     the band and the console above it; the band survives the console's ~390 lines of scrolling.
+  P2 entry 3 (`stop=6`) halts with the green banner and boxes 01-06.
+  P3 entry 10 (`fault=3`) draws FAULT 00, STEP 03, VEC 06, RIP inside pax_ud2, and stays halted
+     (QEMU still running, no reset); `fault=12` (after PAX's IDT) draws FAULT 01 and PAX's PANIC line.
+  P4 entry 11 (no `triage`) boots exactly as the px77b stick does (no band, the same transcript
+     but for the kernel line).
+
+Predictions, kasumi (ranked; the photo decides):
+  K1 (most likely) a machine check: Limine (base revision >= 5) clears CR4.MCE and PAX never sets
+     it, so any machine check before or after PAX's IDT is a shutdown, i.e. an instant reboot with
+     nothing drawn. Under `triage` it would be drawn: FAULT 00/01 with VEC 12 and an MC bank line;
+     a previous boot's MCE may also show in the panel's MC lines (banks survive a warm reset).
+  K2 a fault before PAX's IDT (boxes 02-08): the early screen at the GOP's mode, PAX's page-table
+     build or switch, kernel/fb's mapping: drawn as FAULT 00 with the step.
+  K3 a fault after PAX's IDT that kills the handler (the panic path drawing through a mapping the
+     real framebuffer does not have): FAULT 01, or a triple fault the triage IDT cannot see (then
+     `slow` names the last box).
+  Not expected: XSAVE (PAX enables only x87|SSE|AVX; the area comes from CPUID.0DH:EBX after
+  XSETBV and is a page), x2APIC (KVM's x2APIC-ID run reached login), the ReBAR framebuffer by
+  itself (PAX maps it 4 KiB by 4 KiB at Limine's HHDM address, wherever it is).
