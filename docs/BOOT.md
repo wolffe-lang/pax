@@ -1077,14 +1077,14 @@ installed playground image; distributing that entry remains separate work.
 
 ## The kernel's assembler (as02b)
 
-Every kernel has seventeen assembly objects per tier: the sixteen sources
+Every kernel has eighteen assembly objects per tier: the seventeen sources
 `kernel/wolf.pkg` lists under `asm` (`boot/io.S` … `boot/unix.S`,
-`user/programs.S`), which wolf assembles for the kernel's target, and
-`boot/start.S`, which `tools/build-kernel` assembles itself for the link. By
-default nothing names the assembler: wolf's legacy driver runs `clang
---target=x86_64-unknown-none-elf -c` for the sixteen and `build-kernel` runs
-`cc -c` for the entry. **`WOLF_AS`** is one explicit choice for all
-seventeen (R-as02-2 A, one variable rather than a PAX-only one): wolf-lang
+`boot/triage.S` since px77d, `user/programs.S`), which wolf assembles for the
+kernel's target, and `boot/start.S`, which `tools/build-kernel` assembles
+itself for the link. By default nothing names the assembler: wolf's legacy
+driver runs `clang --target=x86_64-unknown-none-elf -c` for the seventeen and
+`build-kernel` runs `cc -c` for the entry. **`WOLF_AS`** is one explicit
+choice for all eighteen (R-as02-2 A, one variable rather than a PAX-only one): wolf-lang
 #957 (as02a) made it wolf's own (`wolf build --assembler PATH` over
 `WOLF_AS` over the legacy driver, a selected assembler's failure final), and
 `build-kernel` resolves it once to an absolute path, hands it to wolf as
