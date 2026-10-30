@@ -1,0 +1,104 @@
+PAX TRIAGE STICK  (px77d)                      pax-triage-fedb6f5f.img
+====================================================================
+  file    ~/pax-smoke/pax-triage-fedb6f5f.img, 794,820,608 bytes (the same size as the last stick)
+  sha256  f7c5f7529ac131d88002aff0e7150271a76d167caa51a372dabc74ead8cbf76a
+          (read twice on hasu after the build, twice here on nomad after the copy: all four agree)
+  kernel  pax branch px77d at fedb6f5f (trunk 56b9f554 + the triage), release pair built by px77b's
+          recipe; the live system is trunk 56b9f554's (px78's head; the last stick was 101e7761).
+  what to expect, as QEMU drew it: ~/pax-smoke/fedb6f5f/*.png (the menu, entry 1 at the login,
+          entry 3's green stop, entry 10's red fault screen).
+
+WHY: the last stick (pax-stick-101e7761.img) rebooted kasumi the moment PAX was picked.
+PAX's own panics halt and print, so a reboot means the CPU gave up before PAX could say
+anything: a fault before PAX's interrupt table is loaded, a fault inside a handler, or a
+machine check while the firmware's handover leaves machine checks switched off (CR4.MCE).
+QEMU never shows it, even shaped like kasumi (KVM, 32 GiB, 16 CPUs, no serial port, MSI-only
+xHCI, 64-bit BARs above 4 GiB, x2APIC IDs).
+
+WHAT THIS STICK DOES: the same live system, but with the word `triage` on the kernel's command
+line the kernel (1) installs its own exception table as its very first act, (2) turns machine
+checks on so one is drawn instead of resetting, and (3) draws its progress, what the firmware
+handed over, and any fault straight onto the screen, then halts forever. It never reboots by
+itself in triage mode. Entry 11 is the unchanged boot.
+
+WRITE IT exactly as before (balenaEtcher, the whole .img). Same firmware setup as last time:
+UEFI, every drive removed except the spare SATA target.
+
+WHAT YOU WILL SEE IN TRIAGE MODE
+  * Bottom part of the screen = the triage band:
+      - a row of coloured boxes numbered 01, 02, 03 ... one per boot step (the list below);
+      - under them, grey text lines: APIC / CR0 / CR4, EFER / PAT, CPUID / MTRR / MMAP,
+        FB (the framebuffer's physical address, width X height, pitch), MCG / STATUS, then the
+        machine-check banks ("MC nn status address", or "MC BANKS CLEAN").
+  * Above the band: PAX's usual console text, a little shorter than before.
+  * A FAULT: the top part turns DARK RED with big white hex:
+        PAX TRIAGE FAULT 00 / 01
+        STEP nn   VEC nn
+        ERR / RIP / CR2 / RSP / CR3 / CR4 CS / RFLAGS   (+ MC lines for vector 12 = machine check)
+    The machine then stays exactly like that. That photo is the answer.
+  * A kernel halt of its own (a named panic): a YELLOW line "HALT AT STEP nn" at the very bottom;
+    the panic text is the last console line above the band.
+  * Entry 3: a GREEN bar "PAX TRIAGE STOP AT STEP 06": it got at least that far, by design.
+
+THE ORDER TO TRY (stop as soon as one gives a photo that explains it)
+  1. Entry 1 "1 PAX triage" (the default; 15 s countdown).
+       red screen      -> photograph the whole screen, close enough to read every digit. Done.
+       login prompt    -> triage itself changed the outcome; photograph the band, then try 11.
+       it reboots      -> count the boxes you saw if you can; go on to 2.
+     Photograph Limine's text right after you pick the entry too (verbose: it says what it
+     loads; if the reboot comes before Limine finishes loading, PAX never ran).
+  2. Entry 2 "slow": every box is held about one second. Film it (phone video). The LAST box
+     number on screen before the reboot is the step that kills the machine.
+  3. Entry 10 "fault test": a deliberate fault at box 03. It must show the red screen with
+     STEP 03 VEC 06. If it does, the fault screen works on this GPU (photograph it once).
+     If even this reboots, say so: the screen itself is the problem (try entry 4 next).
+  4. Entry 3 "stop at box 6": green bar = the machine survives PAX's own page tables.
+  5. Entries 4 to 9, each with one suspect off (all slow): note which ones reach the login
+     prompt and which reboot, and film the last box of each that reboots.
+        4 nofb      the console never draws on the screen (the band still does)
+        5 fxsave    no XSAVE (the FPU saved the old way)
+        6 low4g     no memory above 4 GiB is used
+        7 keeplint0 the APIC's LINT0 left as the firmware set it
+        8 noxhci noblock nosound   no USB, disk or sound drivers (no keyboard at the login)
+        9 everything above off at once
+  6. Entry 11: the old boot, unchanged (expected to reboot as before).
+
+WHAT TO SEND BACK
+  * Which entry, and what happened (red / yellow / green screen, login, or reboot after box nn).
+  * Photos: the red/yellow/green screen if any; the band's text lines (APIC, CR4, MTRR, FB, MC
+    lines) from ANY entry that holds still long enough (entry 3 is the easy one); the Limine
+    text after picking the entry.
+  * Your firmware settings for that boot (ReBAR / Above 4G / VT-d on or off).
+
+THE BOXES (step numbers)
+  01 kernel entered: triage table, machine checks on, band drawn
+  02 main kernel entry          14 user mode set up
+  03 early screen attached      15 console input
+  04 physical memory allocator  16 clock (HPET / PM timer)
+  05 PAX page tables built      17 PCI scan
+  06 PAX page tables LIVE       18 sound device
+  07 framebuffer mapped by PAX  19 xHCI (USB) started
+  08 live archive checked       20 disks (AHCI / NVMe)
+  09 PAX's own GDT/IDT live     21 file systems mounted
+  10 local APIC                 22 flusher thread
+  11 timer calibrated           23 interrupts ON
+  12 FPU / XSAVE                24 USB ready
+  13 scheduler                  25 USB disks attached
+                                26 run list read: the login next
+  Boxes 01-08 are drawn before PAX's own exception table; a fault there shows FAULT 00.
+  From box 09 on, PAX's own handler reports (FAULT 01) and prints its PANIC line as well.
+
+READING THE PANEL (all hex)
+  APIC  ...FEE00900 = local APIC in xAPIC mode (bit 11 on, bit 10 off); ...FEE00D00 = the firmware
+        handed over in x2APIC mode (bit 10 on).
+  CR4   as Limine handed it over; 00000020 = only PAE, so machine checks were OFF (triage turns
+        them on right after reading it).
+  MTRR  the MTRR default type: 0C00 = uncached by default, 0C06 = write-back by default.
+  FB    the framebuffer's physical address: above 0000000100000000 means above 4 GiB (ReBAR /
+        Above 4G); then width X height and pitch: 0500X0320 = 1280x800, 0780X0438 = 1920x1080,
+        0A00X05A0 = 2560x1440, 0F00X0870 = 3840x2160.
+  MCG   machine-check capability (low two digits = how many banks) and status.
+  MC nn status address: a machine-check bank holding an error (it can be the PREVIOUS boot's:
+        banks survive a warm reset). "MC BANKS CLEAN" = none.
+  On the red screen: VEC 0E = page fault (CR2 is the address), 0D = general protection,
+  06 = invalid opcode, 08 = double fault, 12 = machine check (MC lines follow), 02 = NMI.
