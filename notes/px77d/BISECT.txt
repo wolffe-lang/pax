@@ -1,0 +1,30 @@
+PAX BISECTION STICK  (px77d)                     pax-bisect-089896db.img
+====================================================================
+  file    ~/pax-smoke/pax-bisect-089896db.img, 794,820,608 bytes (branch px77d at 089896db)
+  sha256  9cc54e8463b17fd019a38d6d75a8159733b4dec6029fbc40094663bcc8f1332b
+          (read twice on hasu after the build, twice here on nomad: all four agree)
+
+ONLY NEEDED IF entry 11 of the triage stick (no triage) resets kasumi while entry 1 boots.
+Then one of triage's own effects is what lets kasumi boot. This stick turns them off one at a
+time. Same firmware settings as the boot where entry 1 reached the login.
+
+What triage changes, besides drawing the panel:
+  idt   its own exception table from the first instruction (Limine leaves none)
+  mce   machine checks switched on (CR4.MCE; Limine hands over with them off)
+  draw  a box per step, each drawn by switching to Limine's page tables and back
+  fullh the console stops above the band (70 rows at 2560x1440 instead of 90)
+
+THE ENTRIES (each boot: say "login" or "reset after box nn" if any box shows)
+  1 PAX triage                                    the control: it booted kasumi
+  2 PAX triage nodraw    no boxes during the boot (the band still shows on a fault or halt)
+  3 PAX triage fullh     the console uses the whole screen again
+  4 PAX triage nomce     machine checks left off
+  5 PAX triage noidt     no triage exception table (a fault resets, as without triage)
+  6 PAX triage with all four effects off           should behave like entry 8
+  7 PAX triage nodraw fullh                        both screen effects off
+  8 PAX live, no triage                            the plain boot
+
+ORDER: 8 first (does it still reset?), then 6. If 8 and 6 reset and 1 boots: try 2, 3, 4, 5
+(and 7). The entry that resets names the effect kasumi needs. Run 1 and 8 twice each if
+you can: a reset that comes and goes says the cause is not in the boot path at all.
+Red, green or yellow screens: photograph them as before (TRIAGE.txt).
