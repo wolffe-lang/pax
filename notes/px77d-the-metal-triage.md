@@ -149,6 +149,36 @@ triage`; `px77d-plant-early` (kmain_console without `early`, on `9db67a66`), run
 F10 passing, N1's seven rows skipped by name (TCG), `FAIL NMI bios mce@frames.start: expected panic, got reset`,
 `FAIL F11 native: an NMI or a machine check in the boot`.
 
+*The labelled run's two rows* (run 41014032632 at `23d25bfa`, tier all; the coordinator's addendum to the
+contract). Both are this lane's; the third red, mpx6-install noserial, is trunk's since px78 (pax#254, px78b's).
+- **kernel-as K1, K4, K5 (both tiers) and K8 (native).** `boot/triage.S` joined `kernel/wolf.pkg`'s roster, so a
+  tier makes 18 assembly calls (17 through clang, boot/start.S through cc), and the suite still counted trunk's 17
+  and held trunk's traces. CI's own K1 traces (the run's `pax-kernel-as` artifact), normalised as the suite does,
+  differ from `tests/kernel-as.d/absent-{native,release}.calls` by that one call in each tier and nothing else; they
+  are the new records (`909f5201`), so the whole-trace comparison is as strict as it was. K8, read on its own from the
+  artifact (`native/K8/{rc,build.log,trace.tsv}`): rc 1, refused by name, no call through cc, 18 through the
+  selected tool, so the count was its only failing clause; its message ("not by name, or cc was called") folded
+  three clauses into one and named the two that held. Every row now holds one `want=` that its condition and its
+  messages both read (`6bd46302`, `bcc006c6`), so a red prints the expectation it was held to.
+- **mpx6-firmware F11, release.** `pci.scan` is `set_count(0)`, `scan_bus(0)`, `count()`, and the release tier
+  inlines it into kmain (`no single symbol for pci.scan: []`). The point is now `pci.scan_bus`, the walk itself and
+  the same instant; it calls itself behind a bridge, so it stays a function in both tiers. A new row, N0, resolves
+  every injection point to one symbol in the tier's kernel before anything boots, under either accelerator: under
+  CI's TCG the N1 points were never resolved at all, so an inlined one could not go red there (`82330140`). Every
+  other point is kept.
+
+| run (hasu, block A; `logs/s12/`, `logs/s13/`; `hasu/s12.sh`, `hasu/s13.sh`) | tree | result |
+|---|---|---|
+| J1 kernel-as, both tiers | `23d25bfa` | **red** as CI: K1 x2, K4, K5 native and release, K8 native (`kas-red.log`) |
+| J2 kernel-as, both tiers | `82330140` | green, every row (`kas-green.log`) |
+| J3 K8 plant (the condition alone at 17) | `82330140` | **red**, K8 alone (`kas-plant-k8.log`); its message printed the unplanted 18: the count was written twice, hence `want=` |
+| J4 mpx6-nmi release, bios, KVM | `23d25bfa` | **red**: `FAIL NMI bios nmi@pci.scan: no single symbol for pci.scan: []` (`nmi-red-release.log`) |
+| J5 mpx6-nmi both tiers, both firmwares, KVM | `82330140` | green: N0, N1 (seven points), N2, release and native, 0 skipped (`nmi-green.log`) |
+| J6 mpx6-nmi release, bios, no KVM (CI's TCG) | `82330140` | green: N0, N2; N1's seven rows skipped by name (`nmi-tcg-release.log`) |
+| J7 the old kernel at pci.scan_bus, both tiers, UEFI | `1ced6284` | **red** at the new point, as at the old one: the NMI `PANIC nmi vector 2`, the machine check a reset, in each tier (`nmi-old-scan-bus.log`) |
+| J8 kernel-as, both tiers | `bcc006c6` | green, every row, both tiers (`s13/kas-head.log`) |
+| J9 K8 plant (K8's `want=` alone at 17) | `bcc006c6` | **red**, K8 alone, printing the planted expectation: `18 through WOLF_AS (17)` (`s13/kas-plant-k8-want.log`) |
+
 ## Reproduction
 
 Every boot of the px77b stick (`598d3439…`) under OVMF reached `login:` (`runs/` on hasu, `notes/px77d/hasu/repro.py`):
@@ -218,3 +248,5 @@ picture.
   triage), `FIX.txt`; under KVM entries 1 and 2 reach `login:`, and entry 1 at 32 GiB, 16 CPUs, no serial port.
   Whether kasumi's resets were NMIs, machine checks or neither is the fix stick's to show (FIX.txt).
 - [x] Item 5: the suite (T0-T8) and its plant; the note; the PR and the audit (the hand-back).
+- [x] The addendum (2026-10-30): the labelled run's kernel-as and F11 release rows, each red at `23d25bfa` and green
+  at the head on hasu (above, J1-J9); mpx6-install noserial left to px78b.
