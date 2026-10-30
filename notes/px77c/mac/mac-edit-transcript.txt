@@ -1,0 +1,40 @@
+px77c: the allow-list line written on macOS (nomad, see sw_vers.txt), 2026-10-30 02:23-02:24Z, on a COPY of the
+install stick (copy-legB-mac.img, sha256 e520d515... before, the exact image), never on the staged file.
+The line is the one b-new's `pax-install --inventory` screen showed for the target (line-from-b-new-screen.txt).
+
+$ hdiutil attach -imagekey diskimage-class=CRawDiskImage copy-legB-mac.img
+hdiutil: attach failed - no mountable file systems            (seen red: macOS never mounts an EFI partition by itself)
+$ hdiutil attach -nomount -imagekey diskimage-class=CRawDiskImage copy-legB-mac.img
+/dev/disk4          	GUID_partition_scheme
+/dev/disk4s1        	EFI
+/dev/disk4s3        	Bios Boot Partition
+$ diskutil list /dev/disk4
+   0:      GUID_partition_scheme                        +795.9 MB   disk4
+   1:        Bios Boot Partition                         1.0 MB     disk4s3
+   2:                        EFI PAX-ESP                 792.7 MB   disk4s1
+$ diskutil mount /dev/disk4s1                                 (no sudo)
+Volume PAX-ESP on /dev/disk4s1 mounted
+$ line=$(cat line-from-b-new-screen.txt); echo "$line" >> /Volumes/PAX-ESP/pax/install-targets
+                                                              (the line: model=Samsung SSD 870 serial=S6PXNM0T612345A)
+$ tail -n 2 /Volumes/PAX-ESP/pax/install-targets
+# prints, for each disk it refuses, the line that would allow it.
+model=Samsung SSD 870 serial=S6PXNM0T612345A
+$ grep -c '^model=' /Volumes/PAX-ESP/pax/install-targets
+1
+$ ls -la@ /Volumes/PAX-ESP/ /Volumes/PAX-ESP/pax/             (what macOS added: .fseventsd/ and pax/._install-targets)
+/Volumes/PAX-ESP/:
+drwx------  1 mfwolffe  staff  512 Oct 29 22:23 .fseventsd
+drwx------  1 mfwolffe  staff  512 Oct 29  2026 boot
+drwx------  1 mfwolffe  staff  512 Oct 29  2026 EFI
+drwx------  1 mfwolffe  staff  512 Oct 29 22:23 pax
+/Volumes/PAX-ESP/pax/:
+-rwx------  1 mfwolffe  staff  4096 Oct 29 22:23 ._install-targets
+-rwx------@ 1 mfwolffe  staff   894 Oct 29 22:23 install-targets       (xattr com.apple.provenance)
+drwx------  1 mfwolffe  staff   512 Oct 29  2026 logs
+$ diskutil eject /Volumes/PAX-ESP
+Disk /Volumes/PAX-ESP ejected                                  (the image detached with it: hdiutil info lists it no more)
+$ shasum -a 256 copy-legB-mac.img
+f37aaf3dbf42cdee36a616754c121f88765d61438400c71b56e7b2753ab2dc56  copy-legB-mac.img
+
+Then on hasu: esp-check-legB-mac.txt (fsck.fat -n exit 0; mtools lists .fseventsd and ._install-targets; the
+stick's paxfat reads one entry) and leg B (metal-onedisk.py, the line not appended again) M0-M10 PASS.
