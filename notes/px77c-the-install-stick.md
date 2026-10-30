@@ -207,8 +207,7 @@ target on `ide.0` as `/dev/sda`, the stick `/dev/sdb`, the needles renamed to ma
   `[Samsung SSD 870 ]`, the line written `model=Samsung SSD 870 serial=PX78-TARGET-0001`
   (`esp-check-legC-linux.txt`: `fsck.fat -n` exit 0, one entry). Leg C installed from it.
 
-### Seen red
-
+### Seen red (each with its artifact under notes/px77c/)
 - **macOS's mount** (`mac/hdiutil-attach.log`, `mac/mac-edit-transcript.txt`): `hdiutil: attach failed - no mountable
   file systems` on the copy: macOS never mounts an EFI partition by itself; `diskutil mount` does. INSTALL.txt and the
   runbook say so.
