@@ -46,6 +46,10 @@
 #      without both (PAX_NO_HPET, PAX_NO_PIT), native tier, on UEFI; on
 #      BIOS without the HPET only (SeaBIOS needs the 8254: on a PIT-less
 #      q35 its boot line is left unfinished, glued to the kernel's first).
+#   F10 the metal triage (tests/mpx6-triage, px77d): `triage`'s boxes,
+#      stop and fault screens, its IDT (a fault drawn, not a reset), its
+#      CR4.MCE, the bisection words and a kasumi-shaped boot, per firmware;
+#      without `triage` the boot unchanged, line for line.
 # F5 and F8 are UEFI whatever --firmware says (the mode is OVMF's GOP,
 # the window OVMF's), once per tier. Exit 0 when every row held.
 set -euo pipefail
@@ -193,5 +197,8 @@ PY
         done
         row "F9 native: tests/mpx2-interrupts and tests/mpx2-sched without the HPET (and on UEFI without the PIT, and without both), on $legs"
     fi
+    PAX_TRIAGE_TIER=$t PAX_TRIAGE_FIRMWARE=$firmware "$PAX_ROOT/tests/mpx6-triage" \
+        || die "FAIL F10 $t: the metal triage"
+    row "F10 $t: the metal triage on $legs"
     echo "PASS mpx6-firmware $t"
 done
