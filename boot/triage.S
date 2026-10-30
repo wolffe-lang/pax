@@ -251,8 +251,9 @@ t_tables:
         movq    %rax, tg_idtr+2(%rip)
         leaq    tg_idtr(%rip), %rdi
         call    pax_lidt
-        movq    %cr4, %rax              /* CR4.MCE: a machine check is drawn */
-        orq     $0x40, %rax
+        movq    %cr4, %rax              /* CR4 as Limine handed it over, */
+        movq    %rax, tg_e_cr4(%rip)
+        orq     $0x40, %rax             /* then CR4.MCE: a machine check is drawn */
         movq    %rax, %cr4
         ret
 
@@ -415,8 +416,6 @@ t_facts:
         movq    %rax, tg_e_apic(%rip)
         movq    %cr0, %rax
         movq    %rax, tg_e_cr0(%rip)
-        movq    %cr4, %rax
-        movq    %rax, tg_e_cr4(%rip)
         movl    $0xc0000080, %ecx
         rdmsr
         movl    %eax, %eax
