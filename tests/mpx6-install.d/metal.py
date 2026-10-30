@@ -26,8 +26,9 @@ whose /etc/pax-run is the live login; the allow-list line is appended to
 the stick's /pax/install-targets from the host by paxfat (as the
 maintainer would add it from CachyOS); boot the stick, log in as root
 through the USB keyboard, write a witness file, `pax-install --check`,
-then the guided install to the listed disk, the confirmation read off the
-screen and typed back; power off (ACPI S5); remove the stick; boot the
+then the guided install to the listed disk, the summary naming it by
+model, serial, size and node read off the screen and `yes` typed (px78b,
+R-P6-confirm: no token, no separate ext2-preview prompt); power off (ACPI S5); remove the stick; boot the
 disk, chosen as from the firmware boot menu, with no boot entry of its own; log in; read the witness file written
 before the reboot; ask --check of the running root; power off. The screens
 are read from PAX's own exported terminal cells (px77a's way: QMP memsave
@@ -210,11 +211,13 @@ def esp_range(img):
 
 # --- the disks --------------------------------------------------------------
 
-TARGET = {'model': 'Samsung SSD 870 EVO 500GB', 'serial': 'PX78-TARGET-0001', 'bytes': 500107862016}
+TARGET = {'model': 'Samsung SSD 870 EVO 500GB', 'serial': 'PX78-TARGET-0001', 'bytes': 500107862016, 'size': '500.1 GB'}
 STEAM = {'model': 'Samsung SSD 870 EVO 4TB', 'serial': 'S6PXNM0T700001', 'bytes': 4000787030016}
 SANDISK = {'model': 'SanDisk SDSSDH3 512G', 'serial': '2104AB401234', 'bytes': 512110190592}
 NVME = {'serial': 'S6Z1NJ0W000001', 'bytes': 1000204886016}
 LINUX_MODEL = 'Samsung SSD 870'  # what CachyOS's /sys/block/sdX/device/model shows (16 bytes, trimmed)
+# px78b: the one confirmation's summary, as PAX names the target.
+SUMMARY = f'Erase {LINUX_MODEL}, serial {TARGET["serial"]} ({TARGET["size"]}, /dev/sdc), and install PAX?'
 
 
 def foreign_disk(path, spec, parts):
@@ -559,14 +562,17 @@ def main():
         m.type('wolf\n')
         m.wait(r'Install the lair', 'M3-guided', 120, bad=STOPPED)
         m.type('n\n')
-        plan = m.wait(r'Type ext2-preview to continue', 'M3-guided', 300, bad=STOPPED)
+        plan = m.wait(r'Type yes to install; anything else cancels: pax-install> *$', 'M3-guided', 300, bad=STOPPED)
         m.shot('plan')
-        tok = re.search(r'^confirmation (ERASE /dev/sdc \S+ \d+ [0-9a-f]{64})$', m.unwrapped(plan), re.M)
-        if not tok:
-            fail('M3-guided', 'no confirmation line on the screen:\n' + plan)
-        m.type('ext2-preview\n')
-        m.wait(r'Type the complete confirmation line', 'M3-guided', 120, bad=STOPPED)
-        m.type(tok.group(1) + '\n')
+        # px78b: one summary names the allow-listed disk; one word installs.
+        flat = m.unwrapped(plan)
+        need(flat, SUMMARY, 'M3-summary')
+        need(flat, 'The root file system is ext2 without a journal.', 'M3-summary')
+        for gone in ('confirmation ERASE', 'ext2-preview', 'Type the complete confirmation'):
+            if gone in flat:
+                fail('M3-summary', f'{gone!r} on the screen:\n' + plan)
+        print(f'PASS M3-summary: {SUMMARY!r}, the ext2 notice, one word asked; no token on the screen', flush=True)
+        m.type('yes\n')
         t_confirm = time.monotonic()
         m.wait(r'^Installation complete', 'M4-install', 3600, bad=STOPPED)
         t_done = time.monotonic()
@@ -593,7 +599,8 @@ def main():
     for needle in ['PAX install log /pax/logs/install-1.txt', 'install allow-list /dev/sdd1:/pax/install-targets, 1 line(s)',
                    f'refused: not on the install allow-list: /dev/sda model={LINUX_MODEL} serial={STEAM["serial"]}',
                    'refused: a PAX live medium (the boot stick, or a copy of it): /dev/sdd',
-                   'confirmation ERASE /dev/sdc', 'phase gpt: durable', 'phase root: durable', 'phase limine: durable',
+                   'confirmation ERASE /dev/sdc', SUMMARY, 'Type yes to install; anything else cancels: pax-install> yes\n',
+                   'phase gpt: durable', 'phase root: durable', 'phase limine: durable',
                    'phase result: complete', 'Installation complete', 'poweroff']:
         need(logtext, needle, 'M6-stick-log')
     with open(d/'target.img', 'rb') as f:
