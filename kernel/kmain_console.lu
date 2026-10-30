@@ -61,12 +61,14 @@ use paging
 use panic
 use pci
 use sched
+use screen
 use serial
 use sound
 use speaker
 use sync
 use timer
 use tree
+use triage
 use user
 use xhci
 
@@ -214,14 +216,26 @@ fn release_identity() {
 }
 
 export fn kmain() {
+    // px77d: with `triage` on the command line, boot/triage.S's IDT,
+    // CR4.MCE and band first (box 1), then a numbered box at each step
+    // below; without it every triage call returns at once.
+    triage.start()
+    triage.step(2)
     serial.init()
+    triage.step(3) // the early screen attached (or `nofb`)
     log.line("PAX: the console")
     frames.start()
+    triage.step(4)
     let limine = paging.cr3()
     let before = frames.free_count()
-    let pml4 = paging.start()
+    let pml4 = paging.build() // paging.start's three steps, a box between each
+    triage.step(5)
+    screen.pause_early()
+    paging.switch_to(pml4)
+    triage.step(6) // PAX's page tables live
     paging.report(limine, before)
-    let _screen = fb.start(pml4) // px19: the screen, when there is one
+    let _screen = if triage.off("nofb") { false } else { fb.start(pml4) } // px19: the screen, when there is one
+    triage.step(7)
     // px76: its mode on a line (`screen: WxH …` or `screen: off, <why>`), for a photo
     fb.report()
     if initramfs.bytes() != 0 || !fstab.root_asked() {
@@ -230,31 +244,46 @@ export fn kmain() {
     if !fstab.root_asked() {
         initramfs.require() // px67: with `root=` the programs may all be on the disk
     }
+    triage.step(8)
     interrupts.start()
+    triage.step(9) // PAX's GDT and IDT live
     apic.start(pml4)
+    triage.step(10)
     timer.start()
+    triage.step(11)
     fpu.start()
     fpu.report()
+    triage.step(12)
     sched.start(pml4)
     sched.report()
+    triage.step(13)
     user.start()
     user.report()
+    triage.step(14)
     console.start()
     console.report()
+    triage.step(15)
     // px30: the sound device, when the machine has one (`/dev/dsp`);
     // silent when it has none, so no existing session's serial moves.
     clock.start() // bootstrap deadlines also work without a scheduler
+    triage.step(16)
     let _pci = pci.scan()
-    let _snd = sound.start(pml4)
-    let usb_threads = xhci.start(pml4, unsafe { pax_usbd as u64 })
+    triage.step(17)
+    let _snd = if triage.off("nosound") { 0 } else { sound.start(pml4) }
+    triage.step(18)
+    let usb = !triage.off("noxhci")
+    let usb_threads = if usb { xhci.start(pml4, unsafe { pax_usbd as u64 }) } else { 0 }
     unsafe { kernel_threads = usb_threads }
+    triage.step(19)
     // px63: the disk, when the machine has one, and what /etc/fstab mounts.
-    if block.start(pml4) != 0 {
+    if !triage.off("noblock") && block.start(pml4) != 0 {
         block.report()
     }
+    triage.step(20)
     boot_media() // px66: where Limine found the initramfs, when not on an optical disc
     let _root = fstab.mount_root() // px67: `/` on the disk, when the command line says `root=`
     let _mounted = fstab.mount_all()
+    triage.step(21)
     release_identity() // px82: separate from the boot-medium line
     if fstab.wants_flusher() {
         // # Safety: the address of kernel/fstab's export; nothing is read.
@@ -263,13 +292,21 @@ export fn kmain() {
         // # Safety: a scalar module var, written once at boot with IF clear.
         unsafe { kernel_threads = kernel_threads + 1 }
     }
+    triage.step(22)
     sync.enable()
-    xhci.wait_ready()
+    triage.step(23) // interrupts on
+    if usb {
+        xhci.wait_ready()
+    }
+    triage.step(24)
     // px78: the USB disks (a boot stick) once xHCI's first pass is done,
     // before init: kernel/usb_storage probes each, kernel/block names it.
-    let usb_saved = sync.irq_save()
-    let _usb = block.attach_usb()
-    sync.irq_restore(usb_saved)
+    if usb {
+        let usb_saved = sync.irq_save()
+        let _usb = block.attach_usb()
+        sync.irq_restore(usb_saved)
+    }
+    triage.step(25)
 
     // px67: the run list is the tree's (`/` on the disk when it is there,
     // else the initramfs's), read whole into a frame of its own. px68:
@@ -297,6 +334,7 @@ export fn kmain() {
         }
         c = j + 1
     }
+    triage.step(26) // the run list read: init next
     var k: u64 = 0
     var i: u64 = 0
     var init_at: u64 = 0
