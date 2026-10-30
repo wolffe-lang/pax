@@ -145,7 +145,9 @@ machine check is the monitor's `mce` (bank 1, VAL|UC|EN|PCC), under either accel
 Before: `logs/nmi-old.log` (UEFI, KVM). After: `logs/nmi-new.log`, every row on BIOS and UEFI (KVM, 21 s). The CI
 plants: `px77d-plant-mce` (triage without CR4.MCE), run 41006095926: red in `mpx6-firmware` alone, F1-F9 passing,
 `FAIL TRIAGE triage: triage sets CR4.MCE {… "tg_e_cr4": "0x20", "cr4": "0x340620" …}`, `FAIL F10 native: the metal
-triage`; `px77d-plant-early` (kmain_console without `early`), run 41012527472 (N2 must reset under CI's TCG).
+triage`; `px77d-plant-early` (kmain_console without `early`, on `9db67a66`), run 41012527472: red in `mpx6-firmware` alone,
+F10 passing, N1's seven rows skipped by name (TCG), `FAIL NMI bios mce@frames.start: expected panic, got reset`,
+`FAIL F11 native: an NMI or a machine check in the boot`.
 
 ## Reproduction
 
