@@ -9,6 +9,12 @@
 //! thread's saved frame to switch (kernel/sched). Interrupts are off
 //! throughout (every gate is an interrupt gate, kernel/idt).
 //!
+//! - vector 2, the NMI (px77d; its gate on IST2): one line for each of
+//!   the first eight, `nmi: <n> at rip 0x<r> reason 0x<p>, continuing`,
+//!   and the interrupted code resumes, whatever ring it was in; nothing
+//!   else runs on its way out. A machine check (vector 18, on IST3) is
+//!   still a named panic, its banks printed first (`mce: …`). `early`
+//!   loads the tables and sets CR4.MCE as a kernel's first act;
 //! - vector 3, the breakpoint (`int3`, a trap: the saved RIP is the next
 //!   instruction): one line, `int3: breakpoint vector 3, rip 0x<rip>`,
 //!   and it returns — the kernel continues after the `int3`;
@@ -92,6 +98,11 @@ use user
 use xhci
 
 extern "c" fn pax_cr2() -> u64
+extern "c" fn pax_cr4() -> u64
+extern "c" fn pax_set_cr4(v: u64)
+extern "c" fn pax_cpuid(leaf: u64, sub: u64, reg: u64) -> u64
+extern "c" fn pax_rdmsr(msr: u64) -> u64
+extern "c" fn pax_inb(port: u16) -> u8
 
 /// What boot/isr.S hands `pax_interrupt`.
 #[repr(c)]
@@ -122,6 +133,16 @@ struct Frame {
 
 /// Breakpoints taken (vector 3).
 var breakpoint_count: u64 = 0
+
+/// px77d: NMIs taken (vector 2), and whether the tables are loaded.
+var nmi_count: u64 = 0
+var loaded: bool = false
+
+/// NMIs logged one line each; later ones are only counted.
+const NMI_LINES: u64 = 8
+const CR4_MCE: u64 = 0x40 // CR4 bit 6
+const CPUID1_MCE: u64 = 0x80 // EDX bit 7
+const CPUID1_MCA: u64 = 0x4000 // EDX bit 14
 
 /// kernel/heap's PML4 slot, 384 (px06), as an address range: a page
 /// fault there is named ` (heap)` after CR2. kernel/heap is not
@@ -167,8 +188,109 @@ pub fn name(v: u64) -> str {
 /// calls this first: boot/isr.S is on the package's `asm` list, so every
 /// kernel links the trampolines, and they call this module.
 pub fn start() {
+    // # Safety: a scalar module var, read and written with IF clear.
+    if unsafe { loaded } {
+        return // px77d: `early` loaded them already
+    }
     gdt.start()
     idt.start()
+    // # Safety: as above.
+    unsafe { loaded = true }
+}
+
+/// px77d: the tables (`start`) and CR4.MCE as a kernel's first act,
+/// before any page table, framebuffer or memory map is touched. Limine
+/// hands over with an empty IDT and CR4.MCE clear (docs/BOOT.md clause
+/// 7, base revision 5 and later), so until `start` ran an NMI or any
+/// exception was a triple fault and a machine check a shutdown: a reset
+/// with nothing on the screen (kasumi, px77/px77d, once in two plain
+/// boots, with the window 337 console lines long). From here an NMI is
+/// logged and survived (`nmi`), a machine check is a named panic with
+/// its banks, and every exception is named. `start` later does nothing.
+pub fn early() {
+    start()
+    // # Safety: CPUID reads nothing; CR4 gains only MCE, which CPUID
+    // says the processor has (SDM vol. 3A §2.5).
+    unsafe {
+        if pax_cpuid(1, 0, 3) & CPUID1_MCE != 0 {
+            pax_set_cr4(pax_cr4() | CR4_MCE)
+        }
+    }
+}
+
+/// px77d: an NMI (vector 2, on IST2): one line, `nmi: <n> at rip 0x<r>
+/// reason 0x<p>` (port 0x61's bits 7 and 6, the PC's SERR# and IOCHK
+/// NMI sources), for the first eight, and the interrupted code resumes.
+/// The firmware leaves LINT1 an NMI line and the chipset may raise one
+/// (SERR#, IOCHK, a watchdog); PAX enables no NMI source itself.
+fn nmi(f: *Frame) {
+    // # Safety: the counter is touched with NMIs blocked (until IRETQ).
+    let n = unsafe {
+        nmi_count += 1
+        nmi_count
+    }
+    if n > NMI_LINES {
+        return
+    }
+    // # Safety: io.S's `inb` of the NMI status port; a read changes nothing.
+    let reason = unsafe { pax_inb(0x61) } as u64
+    log.put("nmi: ")
+    log.dec(n as int)
+    log.put(" at rip ")
+    // # Safety: `f` is the trampoline's frame, live for this call.
+    log.hex(unsafe { f[0].rip })
+    log.put(" reason ")
+    log.hex(reason & 0xc0)
+    log.put(if n == NMI_LINES { ", continuing (later NMIs only counted)" } else { ", continuing" })
+    log.end()
+}
+
+/// NMIs taken since boot (px77d).
+pub fn nmis() -> u64 {
+    // # Safety: a read of the counter.
+    unsafe { nmi_count }
+}
+
+/// px77d: a machine check's banks, one line each that holds a valid
+/// error, before its named panic (SDM vol. 3A ch. 15: IA32_MCG_CAP's
+/// count, IA32_MCG_STATUS, each IA32_MCi_STATUS with VAL, and its ADDR
+/// and MISC when ADDRV and MISCV say they are valid).
+fn machine_check_banks() {
+    // # Safety: CPUID reads nothing.
+    if unsafe { pax_cpuid(1, 0, 3) } & CPUID1_MCA == 0 {
+        return
+    }
+    // # Safety: cpu.S's RDMSR of the architectural MCA registers, which
+    // CPUID.1:EDX's MCA bit says exist; bank i < IA32_MCG_CAP's count.
+    unsafe {
+        let cap = pax_rdmsr(0x179)
+        log.put("mce: MCG_CAP ")
+        log.hex(cap)
+        log.put(" MCG_STATUS ")
+        log.hex(pax_rdmsr(0x17a))
+        log.end()
+        let banks = if cap & 0xff > 32 { 32 } else { cap & 0xff }
+        var i: u64 = 0
+        while i < banks {
+            let status = pax_rdmsr(0x401 + 4 * i)
+            if status >> 63 != 0 {
+                log.put("mce: bank ")
+                log.dec(i as int)
+                log.put(" status ")
+                log.hex(status)
+                if (status >> 58) & 1 != 0 {
+                    log.put(" addr ")
+                    log.hex(pax_rdmsr(0x402 + 4 * i))
+                }
+                if (status >> 59) & 1 != 0 {
+                    log.put(" misc ")
+                    log.hex(pax_rdmsr(0x403 + 4 * i))
+                }
+                log.end()
+            }
+            i += 1
+        }
+    }
 }
 
 /// Write the tables' two lines (kernel/gdt's and kernel/idt's).
@@ -214,6 +336,9 @@ fn fatal(f: *Frame) {
             overflow(t - 1, a)
         }
     }
+    if v == 18 {
+        machine_check_banks() // px77d: what the hardware logged, first
+    }
     log.put("PANIC ")
     log.put(name(v))
     log.put(" vector ")
@@ -250,6 +375,14 @@ fn fatal(f: *Frame) {
 /// signal to take, points it at a handler or ends the process and hands
 /// back the next thread's.
 export fn pax_interrupt(f: *Frame) -> *Frame {
+    // px77d: an NMI resumes where it landed, whatever ring, and nothing
+    // else is done on its way out (it can land anywhere, even inside the
+    // scheduler with IF clear).
+    // # Safety: `f` is the trampoline's frame, live for this call.
+    if unsafe { f[0].vector } == 2 {
+        nmi(f)
+        return f
+    }
     let g = route(f)
     // # Safety: the frame `route` returned is this one or a saved frame
     // on a live thread's stack; what kernel/signal returns is one too.
