@@ -13,7 +13,7 @@ import time
 
 repo,lane,work=map(Path,sys.argv[1:4]);games,name=sys.argv[4:6]
 fault=os.environ.get('PAX_INSTALL_FAULT','')
-guided=os.environ.get('PAX_INSTALL_GUIDED','')=='1'
+guided=os.environ.get('PAX_INSTALL_GUIDED','')=='1' or fault=='cancel-words'
 full_tree=len(sys.argv)>6 and sys.argv[6]=='full'
 assert games in ['yes','no'] and name in ['vdb','vdc']
 work.mkdir(parents=True,exist_ok=True)
@@ -103,7 +103,13 @@ script.write_text(f'/bin/pax-install --install --ext2-preview --target {name} --
                   'echo INSTALL-EXIT-$?\n')
 if guided:
     script.write_text(f'/bin/pax-install --seed {seed} --source /source --payload /payload {allow}\necho INSTALL-EXIT-$?\n')
-    (work/'keys').write_text(('2' if name=='vdb' else '3')+'\npax\n'+('y' if games=='yes' else 'n')+'\next2-preview\n'+token+'\nno\n')
+    (work/'keys').write_text(('2' if name=='vdb' else '3')+'\npax\n'+('y' if games=='yes' else 'n')+'\nyes\nno\n')
+# px78b (R-P6-confirm): every answer but yes cancels at the one
+# confirmation, the target byte-identical: one boot, one guided run each.
+words=['y','YES','q','',token]
+if fault=='cancel-words':
+    script.write_text(''.join(f'/bin/pax-install --seed {seed} --source /source --payload /payload {allow}\necho CANCEL-EXIT-$?\n' for _ in words)+'echo INSTALL-EXIT-1\n')
+    (work/'keys').write_text(''.join(('2' if name=='vdb' else '3')+'\npax\nn\n'+w+'\n' for w in words))
 if fault=='cancel':script.write_text(f"printf 'q\\n' | /bin/pax-install --seed test {allow}\necho INSTALL-EXIT-$?\n")
 if fault=='missing-tool':script.write_text(script.read_text().replace('--payload /payload','--payload /payload --tool-dir /missing'))
 (work/'run').write_text('/bin/sh /install.sh\n')
@@ -151,11 +157,20 @@ s=(work/'install.serial').read_text(errors='replace')
 if fault:
     assert 'INSTALL-EXIT-1' in s,s[-8000:]
     assert sha(work/'source-guard.img')==guard
-    if fault in ['missing-boot','corrupt-boot','readonly','cancel','wrong-token','4kn']:
+    if fault in ['missing-boot','corrupt-boot','readonly','cancel','cancel-words','wrong-token','4kn']:
         assert sha(work/'target.img')==blank,'prewrite refusal changed target'
         # px78: a read-only disk is refused before the allow-list is read, by name.
-        expected={'missing-boot':'stopped: io','corrupt-boot':'corrupt_asset','readonly':'refused: read-only: /dev/vdb','cancel':'cancelled','wrong-token':'unconfirmed','4kn':'pax-install: refused: sector_size'}[fault]
+        expected={'missing-boot':'stopped: io','corrupt-boot':'corrupt_asset','readonly':'refused: read-only: /dev/vdb','cancel':'cancelled','cancel-words':'cancelled','wrong-token':'unconfirmed','4kn':'pax-install: refused: sector_size'}[fault]
         assert expected in s,s[-8000:]
+        if fault=='cancel-words':
+            # A virtio disk shows no model (allow.lu); its serial is QEMU's serial=.
+            flat=s.replace('\r','')
+            for line in [f'Erase (no model), serial {serial} (0.5 GB, /dev/{name}), and install PAX?\n','The root file system is ext2 without a journal.\n','Type yes to install; anything else cancels: ']:
+                assert flat.count(line)==len(words),'FAIL I-cancel-words: the summary: '+line+'\n'+flat[-8000:]
+            assert flat.count('pax-install: cancelled/refused before writes: cancelled')==len(words),'FAIL I-cancel-words: a word did not cancel\n'+flat[-8000:]
+            assert flat.count('CANCEL-EXIT-1')==len(words) and 'CANCEL-EXIT-0' not in flat,'FAIL I-cancel-words: an exit\n'+flat[-8000:]
+            assert 'phase gpt' not in flat and 'Type ext2-preview' not in flat,'FAIL I-cancel-words: a write began or the old prompt\n'+flat[-8000:]
+            print('PASS I-cancel-words: y, YES, q, empty and the old token each cancel at the summary naming the disk; target byte-identical',flush=True)
         if fault=='4kn':
             # The kernel names the device's 4096-byte blocks; the planner refuses the target.
             assert 'refused: a partition table on logical blocks of 4096 bytes' in s and 'vdb is the whole disk' in s,s[-8000:]
