@@ -135,7 +135,17 @@ while time.monotonic() < end:
     if m and 'HLT=1' in r and halt[0] <= int(m[1], 16) < halt[1]:
         outcome = 'halted'; (out / 'registers.txt').write_text(r); break
     time.sleep(0.25)
+early = b''
 if outcome == 'halted':
+    # An NMI before serial.init's UART logs into kernel/screen's early buffer (replayed on the screen
+    # at its attach), not to the port: read the buffer too.
+    if 'pax_screen_early' in syms:
+        try:
+            va = syms['pax_screen_early'][0]  # QMP's `val` is a signed 64-bit integer
+            qmp('memsave', {'val': va - (1 << 64) if va >= 1 << 63 else va, 'size': 16384, 'filename': str(out / 'screen-early.bin')})
+            early = (out / 'screen-early.bin').read_bytes()
+        except Exception as e:
+            (out / 'screen-early.error').write_text(repr(e) + '\n')
     try:
         qmp('quit')
     except Exception:
@@ -152,7 +162,8 @@ if outcome == 'halted':
         outcome = 'panic'
     elif re.search(r'^halt$', t, re.M):
         outcome = 'survive'
-seen = {'survive': bool(re.search(r'^nmi: 1 at rip 0x[0-9a-f]+ reason 0x[0-9a-f]+, continuing', t, re.M)),
+nmi_line = r'nmi: 1 at rip 0x[0-9a-f]+ reason 0x[0-9a-f]+, continuing'
+seen = {'survive': bool(re.search('^' + nmi_line, t, re.M) or re.search(nmi_line.encode(), early)),
         'mce': bool(re.search(r'^mce: bank 1 status 0x', t, re.M)),
         'panic': (re.search(r'^PANIC .*$', t, re.M) or [''])[0]}
 (out / 'outcome.json').write_text(json.dumps({'outcome': outcome, 'at': a.at, 'rip': hex(rip)} | seen, indent=1) + '\n')
