@@ -136,7 +136,7 @@ four, 7 `nodraw fullh`, 8 no triage; `BISECT.txt` (`notes/px77d/BISECT.txt`) say
 6 and 8 reach `login:`. Only needed if entry 11 resets.
 
 **Tests** (`tests/mpx6-triage`, run by `tests/mpx6-firmware` as F10; rows T0-T8 in its header): on hasu under KVM,
-native tier, both firmwares, every row passes (`PASS mpx6-triage native`, 19 s); the planted break (triage without
+native tier, both firmwares, every row passes at `1ced6284` (`PASS mpx6-triage native`, 19 s; `logs/mpx6-triage-kvm.log`); the planted break (triage without
 CR4.MCE) red by name: `FAIL TRIAGE triage: triage sets CR4.MCE {… "tg_e_cr4": "0x20", "cr4": "0x340620" …}`. T5
 witnesses the triage IDT itself: `noidt fault=3` is a reset (QEMU ends under `-no-reboot`) where `fault=3` is a
 picture.
