@@ -48,6 +48,7 @@ use frames
 use log
 use panic
 use paging
+use triage
 
 extern "c" fn pax_set_cr0(v: u64)
 extern "c" fn pax_set_cr4(v: u64)
@@ -126,7 +127,8 @@ fn page() -> u64 {
 /// thread's area is reset too), IF clear.
 pub fn start() {
     let cr0 = paging.cr0()
-    let ecx1 = cpuid(1, 0, 2)
+    // px77d: `triage fxsave` takes FXSAVE's area, as a CPU without XSAVE.
+    let ecx1 = if triage.off("fxsave") { cpuid(1, 0, 2) & !CPUID1_XSAVE } else { cpuid(1, 0, 2) }
     var cr4 = paging.cr4() | CR4_OSFXSR | CR4_OSXMMEXCPT
     var mode = FXSAVE
     var size: u64 = 512
