@@ -882,12 +882,18 @@ Run `pax-install` for the guided flow. Numbered choices and `n`/`p` followed
 by Enter work without cursor-control sequences; redirected input uses the
 plain-text flow. EOF or `q` before writing cancels. Terminal dimensions
 are sampled on each target page. The flow asks for a user name (uid/gid
-1000, no password yet), an explicit `y` or `n` for games, acknowledgement
-of the ext2 preview, and the complete confirmation token. Root's account
+1000, no password yet) and an explicit `y` or `n` for games, prints the
+plan, then one summary naming the target by model, serial, size (decimal GB,
+or TB from 1000.0 GB) and node with the ext2-without-a-journal notice, and
+asks for the word `yes`; anything else, `y`, `YES`, `q` or an empty line
+included, cancels with nothing written. The guided flow never asks for the
+plan's confirmation token; the install log keeps the plan's `confirmation`
+line as its record of what was erased. Root's account
 line and shell are unchanged; an existing uid/gid-1000 account is replaced
 by the requested name, while other accounts are retained.
 
-A scripted invocation must supply both decisions and an exact token:
+A scripted invocation must supply both decisions and the plan's exact token
+(the non-interactive path the tests use):
 
 ```text
 pax-install --dry-run --target vdb --user pax --games no
