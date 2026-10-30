@@ -215,8 +215,8 @@ pax_isr_common:
    maps; the check costs one compare. Interrupts are off from here to
    SYSRETQ (every path into pax_isr_common clears IF), which loads IF
    from %r11 with the rest of RFLAGS. An NMI between the stack load
-   and SYSRETQ would run on the user's stack in ring 0: PAX enables no
-   NMI source, and an NMI gate on an IST is the fix when one exists. */
+   and SYSRETQ would run on the user's stack in ring 0: px77d puts the
+   NMI's gate on IST2 (kernel/idt), so it lands on its own stack. */
         .globl pax_sysret
         .type pax_sysret, @function
 pax_sysret:
@@ -347,5 +347,18 @@ pax_ist1_stack:
         .zero 16384
         .globl pax_ist1_top
 pax_ist1_top:
+        /* px77d: IST2 for the NMI and IST3 for the machine check (kernel/idt),
+           so either lands on a known stack whatever the interrupted code's
+           (a bad stack, the window before a thread's, SYSRETQ's user stack). */
+        .globl pax_ist2_stack
+pax_ist2_stack:
+        .zero 16384
+        .globl pax_ist2_top
+pax_ist2_top:
+        .globl pax_ist3_stack
+pax_ist3_stack:
+        .zero 16384
+        .globl pax_ist3_top
+pax_ist3_top:
 
         .section .note.GNU-stack, "", @progbits
