@@ -29,7 +29,9 @@
 //! stack for a change to CPL 0 (0 until kernel/sched's first switch;
 //! px09 sets it per thread), and one interrupt stack: IST1, the top of a 16 KiB .bss stack, where kernel/idt sends
 //! the double fault, so a #DF on a broken stack still has one to run
-//! on. Its I/O permission map base is 104, the TSS's size: no bitmap,
+//! on; px77d adds IST2 (the NMI's) and IST3 (the machine check's), each
+//! 16 KiB of .bss, since either arrives whatever IF says and whatever
+//! stack the interrupted code is on. Its I/O permission map base is 104, the TSS's size: no bitmap,
 //! so ring 3 has no port access.
 //!
 //! A descriptor (Intel SDM vol. 3A §3.4.5, Figure 3-8; AMD64 APM vol. 2
@@ -53,6 +55,8 @@ extern "c" let pax_tss: *Tss
 extern "c" let pax_gdtr: *Gdtr
 extern "c" let pax_ist1_stack: *u8
 extern "c" let pax_ist1_top: *u8
+extern "c" let pax_ist2_top: *u8 // px77d: the NMI's (kernel/idt)
+extern "c" let pax_ist3_top: *u8 // px77d: the machine check's
 
 /// LGDT's operand.
 #[repr(c, packed)]
@@ -109,8 +113,8 @@ pub fn start() {
             rsp2: 0,
             reserved1: 0,
             ist1: pax_ist1_top as u64,
-            ist2: 0,
-            ist3: 0,
+            ist2: pax_ist2_top as u64,
+            ist3: pax_ist3_top as u64,
             ist4: 0,
             ist5: 0,
             ist6: 0,
