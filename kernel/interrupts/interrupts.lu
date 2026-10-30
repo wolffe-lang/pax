@@ -87,6 +87,7 @@ use signal
 use sound
 use speaker
 use timer
+use triage
 use user
 use xhci
 
@@ -236,6 +237,9 @@ fn fatal(f: *Frame) {
         }
     }
     log.end()
+    // px77d: in triage mode the fault in large hex too, then the halt.
+    // # Safety: the frame's CS; cpu.S's MOV from CR2.
+    triage.fatal(v, e, rip, rsp, unsafe { pax_cr2() }, unsafe { f[0].cs })
     panic.halt()
 }
 
