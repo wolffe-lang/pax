@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# tests/mpx6-triage — the metal triage (px77d): boot/triage.S and
+# kernel/triage, behind the command-line word `triage`.
+#
+#   tests/mpx6-triage [--tier native|release] [--firmware bios|uefi|both]
+#
+# kasumi reset the moment Limine handed it the px77b stick's kernel; the
+# triage stick (pax-triage-fedb6f5f) booted it to `login:`. Each leg is
+# kernel/kmain_console with an initramfs whose /etc/pax-run holds no
+# command, so the boot runs every box (1 to 26) and halts; Limine's
+# `resolution: 1280x800`, the `cmdline:` the leg names. The rows
+# (tests/mpx6-triage.d/leg.py reads the halted registers, triage.S's
+# words by their symbols and the screendump):
+#   T0 boot/limine-triage.conf and boot/limine-bisect.conf (the two sticks):
+#      every entry's words are triage's own, one entry without `triage`.
+#   T1 plain (no `triage`): halts in pax_halt, tg_on 0, CR4.MCE clear, no
+#      box drawn, the console the whole height.
+#   T2 `triage`: halts in t_halt (kernel/panic's halt marks its step),
+#      boxes 1-26 and no 27, CR4.MCE set (clear at the handover), the
+#      boxes drawn on Limine's CR3, the console above the band; and its
+#      serial transcript is T1's but for the `screen:` line and the
+#      clock's measured numbers: triage changes no line PAX prints.
+#   T3 `triage stop=6`: the green banner, boxes 1-6, halted.
+#   T4 `triage fault=3`: #UD at step 3 drawn through the triage IDT
+#      (FAULT 00, RIP pax_ud2), halted; T5 the same with `noidt`: Limine's
+#      empty IDT, so the fault is a reset (QEMU ends under -no-reboot):
+#      the triage IDT is what turns a reset into a picture.
+#   T6 `triage fault=12`: after PAX's IDT (box 9): kernel/interrupts'
+#      fatal draws it (FAULT 01) and prints its PANIC line.
+#   T7 the bisection words: `nomce` leaves CR4.MCE clear, `nodraw` never
+#      switches CR3 to draw, `fullh` gives the console the whole height;
+#      each boots to box 26.
+#   T8 (UEFI) kasumi's shape: no COM1 (--no-serial), no PIT, OVMF's
+#      64-bit window (--high-bar), 2560x1440: `triage` boots to box 26.
+# PAX_TRIAGE_TIER and PAX_TRIAGE_FIRMWARE stand in for the flags.
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+tier=${PAX_TRIAGE_TIER:-native} firmware=${PAX_TRIAGE_FIRMWARE:-both}
+while [ $# -gt 0 ]; do
+    case $1 in
+        --tier) tier=$2; shift 2;;
+        --firmware) firmware=$2; shift 2;;
+        *) die 'usage: mpx6-triage [--tier native|release] [--firmware bios|uefi|both]';;
+    esac
+done
+case $firmware in both) legs='bios uefi';; bios|uefi) legs=$firmware;; *) die 'bad firmware';; esac
+flags=(); [ "$tier" != release ] || flags=(--release)
+work=$PAX_BUILD/mpx6-triage/$tier
+mkdir -p "$work"
+d=$PAX_ROOT/tests/mpx6-triage.d
+
+# T0: the stick's entries use only words kernel/triage and boot/triage.S read.
+for conf in limine-triage.conf limine-bisect.conf; do
+python3 -I - "$PAX_ROOT/boot/$conf" <<'EOF' || die "FAIL T0: boot/$conf"
+import re, sys
+known = {'triage', 'slow', 'nofb', 'fxsave', 'low4g', 'keeplint0', 'noxhci', 'noblock', 'nosound',
+         'noidt', 'nomce', 'nodraw', 'fullh'}
+lines = open(sys.argv[1]).read().splitlines()
+n = 0
+for line in lines:
+    m = re.match(r'\s+cmdline:\s*(.*)$', line)
+    if not m:
+        continue
+    n += 1
+    words = m[1].split()
+    assert words and words[0] == 'triage', line
+    for w in words:
+        assert w in known or re.fullmatch(r'(stop|fault)=[1-9][0-9]?', w), 'unknown word %r in %r' % (w, line)
+entries = [l for l in lines if l.startswith('/')]
+assert n == len(entries) - 1, (n, len(entries))
+print('PASS T0: %s: %d triage entries, every word known, one plain entry' % (sys.argv[1].rsplit('/', 1)[-1], n))
+EOF
+done
+
+"$PAX_ROOT/tools/fetch-limine"
+elf=$("$PAX_ROOT/tools/build-kernel" ${flags[@]+"${flags[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work")
+printf '# px77d: no command; the boot runs every box and halts\n' > "$work/pax-run"
+"$PAX_ROOT/tools/mkinitramfs" "$work/triage.cpio" "/etc/pax-run=$work/pax-run" > "$work/initramfs.txt"
+image() { # name words... -> $work/name.iso
+    local name=$1; shift
+    cp "$PAX_ROOT/boot/limine-initramfs.conf" "$work/$name.conf"
+    printf '    resolution: %s\n' "${MODE:-1280x800}" >> "$work/$name.conf"
+    [ $# -eq 0 ] || printf '    cmdline: %s\n' "$*" >> "$work/$name.conf"
+    "$PAX_ROOT/tools/mkimage" --conf "$work/$name.conf" --add "$work/triage.cpio" initramfs.cpio "$elf" "$work/$name.iso" > /dev/null
+}
+image plain
+image triage triage
+image stop6 triage stop=6
+image fault3 triage fault=3
+image fault3-noidt triage noidt fault=3
+image fault12 triage fault=12
+image nomce triage nomce
+image nodraw triage nodraw
+image fullh triage fullh
+MODE=2560x1440 image kasumi triage
+
+leg() { # firmware name image [leg.py args...]
+    local fw=$1 name=$2 iso=$3; shift 3
+    python3 -I "$d/leg.py" --leg "$name" --image "$work/$iso.iso" --elf "$elf" --output "$work/$fw/$name" --firmware "$fw" "$@" \
+        || die "FAIL mpx6-triage $fw $name"
+}
+mask() { # the transcript without the screen's line, numbers masked where Limine or a clock decides them
+    # (a conf with a `cmdline:` is another file, so Limine places its tables and the module elsewhere:
+    # `paging: limine cr3`, `initramfs: module`, the map's usable bytes, the frame counts)
+    tr -d '\r' < "$1" | grep -av '^screen: ' | sed -E '/^(timer|clock|paging|memory|frames|initramfs: module|user: frames)/s/(0x)?[0-9a-f]*[0-9][0-9a-f]*/N/g'
+}
+for fw in $legs; do
+    leg "$fw" plain plain
+    leg "$fw" triage triage
+    if ! diff <(mask "$work/$fw/plain/serial.log") <(mask "$work/$fw/triage/serial.log") > "$work/$fw/transcript.diff"; then
+        cat "$work/$fw/transcript.diff" >&2
+        die "FAIL T2 $fw: triage changed a line PAX prints"
+    fi
+    echo "PASS T1/T2 $fw: plain and triage, the same transcript but for the screen line ($(mask "$work/$fw/plain/serial.log" | wc -l) lines)"
+    leg "$fw" stop6 stop6
+    leg "$fw" fault3 fault3
+    leg "$fw" fault3-reset fault3-noidt
+    leg "$fw" fault12 fault12
+    leg "$fw" nomce nomce
+    leg "$fw" nodraw nodraw
+    leg "$fw" fullh fullh
+    if [ "$fw" = uefi ]; then
+        leg "$fw" kasumi kasumi --mode 2560x1440 --no-serial --no-pit --high-bar
+    fi
+    echo "PASS mpx6-triage $fw"
+done
+echo "PASS mpx6-triage $tier"
