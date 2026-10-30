@@ -67,6 +67,7 @@
 use boot_info
 use log
 use panic
+use triage
 
 /// The allocator's header, at the start of its state (above).
 #[repr(c)]
@@ -157,6 +158,23 @@ fn clear_bit(map: u64, f: u64) {
     wr(a, rd(a) ^ (one << (f % WORD_BITS)))
 }
 
+/// px77d: under `triage low4g` no frame at or above 4 GiB is handed out.
+const LOW_4G: u64 = 0x100000000
+
+/// The end of memory-map entry `i`, clipped at 4 GiB when `clip` (an
+/// entry wholly above it ends where it begins: no frames).
+fn entry_end(i: int, clip: bool) -> u64 {
+    let b = boot_info.memmap_base(i)
+    let e = b + boot_info.memmap_length(i)
+    if clip && e > LOW_4G {
+        if b >= LOW_4G {
+            return b
+        }
+        return LOW_4G
+    }
+    e
+}
+
 /// Why `init` can fail: Limine gave no HHDM response, no memory-map
 /// response, or no usable run at or above 1 MiB holds the state.
 pub error InitError = {no_hhdm, no_memory_map, no_room}
@@ -175,11 +193,12 @@ pub fn init() -> u64 ! InitError {
         return no_memory_map
     }
     // The span: one past the highest usable frame.
+    let clip = triage.off("low4g")
     var top: u64 = 0
     var i = 0
     while i < n {
         if boot_info.memmap_type(i) == USABLE {
-            let end = boot_info.memmap_base(i) + boot_info.memmap_length(i)
+            let end = entry_end(i, clip)
             if end > top {
                 top = end
             }
@@ -197,7 +216,7 @@ pub fn init() -> u64 ! InitError {
     while i < n && spa == 0 {
         if boot_info.memmap_type(i) == USABLE {
             var b = boot_info.memmap_base(i)
-            let e = b + boot_info.memmap_length(i)
+            let e = entry_end(i, clip)
             if b < LOW_END {
                 b = LOW_END
             }
@@ -235,7 +254,7 @@ pub fn init() -> u64 ! InitError {
         if boot_info.memmap_type(i) == USABLE {
             let base = boot_info.memmap_base(i)
             var f = base / FRAME
-            let fe = (base + boot_info.memmap_length(i)) / FRAME
+            let fe = entry_end(i, clip) / FRAME
             while f < fe {
                 set_bit(umap, f)
                 usable += 1
