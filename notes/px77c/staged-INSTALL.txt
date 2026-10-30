@@ -1,0 +1,233 @@
+NOT YET: PAX does not boot on kasumi yet (px77d); do not install from this stick.
+
+PAX INSTALL STICK (candidate): pax trunk 56b9f554 (px78, pax#245), built by px77c, 2026-10-30
+==============================================================================================
+
+The first metal boot on kasumi (2026-10-29) restarted the moment PAX started, after Limine's menu.
+px77d is finding why. This stick has the same kernel line of work and will be REBUILT once that fix
+lands; the rebuilt image will have its own name and SHA256. Everything below carries over to it.
+Until then, use this file to get the allow-list line ready, and nothing else.
+
+Which file is which
+-------------------
+  pax-install-candidate-56b9f554.img   THIS stick, the install stick (not yet usable: see the top).
+      795869184 bytes (759 MiB)
+      SHA256 e520d515ff5ceb27c526b07627043ab894ac81f21378bc51fb28897271c8996e
+      Its allow-list /pax/install-targets names NO disk, so as shipped it writes nothing anywhere.
+  pax-stick-101e7761.img               the SMOKE stick (README.txt). NEVER install from it: it predates
+      px78, has no allow-list, and carries two faults px78 fixed (the copy stops with `stopped: io`;
+      the install log stops after its first line).
+  pax-stick-6ccfe3fe+f1f8137b.img      the older smoke stick (README-6ccfe3fe+f1f8137b.txt).
+  56b9f554-candidate/                  reference screens for this stick (names below).
+
+Check the file before flashing (it must print the SHA256 above):
+  shasum -a 256 ~/pax-smoke/pax-install-candidate-56b9f554.img
+
+What the installer will and will not write
+------------------------------------------
+pax-install writes to ONE disk: the disk whose model AND serial match a line `model=... serial=...` in
+/pax/install-targets on the stick. Every other disk is listed and refused. Before it even reads that
+file it refuses the disk / is on, a mounted disk, a read-only disk, and the stick itself. With the
+file as shipped (comments only) it refuses every disk and writes nothing.
+
+kasumi as it is now: every drive is out except the spare target SATA SSD. Under PAX that SSD is
+/dev/sda and the stick is /dev/sdb (SATA disks first, by port, then USB disks). The line matches
+model and serial, never the name.
+
+The steps, in order
+-------------------
+  1. Get the target's line (A from tonight's photo, or B from the install stick itself).
+  2. Flash the stick, write the line on it from the Mac.
+  3. Firmware settings (nothing to change, normally).
+  4. Boot the stick: `pax-install --check` must show the target on the list.
+  5. Install.
+  6. Read the install log off the stick (optional, for the record).
+  7. Remove the stick; boot the SSD from the F8 menu.
+  8. Back to CachyOS.
+
+1. The target's line
+--------------------
+The line is exactly:
+
+  model=<model> serial=<serial>
+
+one line, no quotes, one space before `serial=`, nothing after the serial. Case matters (S6PX is
+not s6px). Never copy the model from the drive's label: Samsung's label "MODEL" is a part number
+(like MZ-77E500), not what the disk reports.
+
+A. From tonight's photo of the smoke stick's `pax-install --inventory` (101e7761).
+   That inventory prints the target as three lines like:
+
+     /dev/sda bytes=500107862016 sector=512 readonly=false mounted=false root=false
+       identity=8:0-seq1
+       model=Samsung SSD 870 EVO 500GB serial=S6PXNM0T612345A
+
+   The smoke stick prints the WHOLE model. The install stick matches only the model's FIRST 16
+   CHARACTERS (Linux's spelling, R-px78-5). The rule that turns the photo's line into the line:
+
+     model:  take the first 16 characters of what follows `model=`, counting every letter, digit,
+             space and punctuation mark as one, case unchanged; then drop any spaces at the end of
+             those 16. A model of 16 characters or fewer stays whole.
+     serial: copy everything after `serial=` exactly, all of it (up to 20 characters, never cut).
+             Both sticks have already removed spaces before and after it.
+
+   Measured in QEMU, the same four SATA disks under both sticks (and under Linux 7.2.4):
+
+     smoke stick (101e7761) prints               the install stick's line (56b9f554)
+     model=Samsung SSD 870 EVO 500GB serial=S6PXNM0T612345A
+                                                 model=Samsung SSD 870 serial=S6PXNM0T612345A
+     model=CT500MX500SSD1 serial=ABCDEFGHIJ0123456789
+                                                 model=CT500MX500SSD1 serial=ABCDEFGHIJ0123456789
+     model=WDC WDS500G2B0A-00SM50 serial=21021X801234
+                                                 model=WDC WDS500G2B0A- serial=21021X801234
+     model=SanDisk SDSSDH3 512G serial=2104AB401234
+                                                 model=SanDisk SDSSDH3 serial=2104AB401234
+
+   Count with care:  S a m s u n g _ S S D _ 8 7 0 _  is 16 (the 16th is the space after 870,
+   dropped). "WDC WDS500G2B0A-00SM50" is cut inside a word: the dash is the 16th and stays.
+   (One rare case: if the boot line `ahci0: ... sda model "..."` shows a space right after the
+   opening quote, the 16 are counted from the quote, spaces included.)
+
+   A Samsung 870 EVO or QVO of any size gives `model=Samsung SSD 870`. If any character of the
+   serial is unclear in the photo (0 or O, 1 or I or l, 5 or S, 8 or B), use B.
+
+B. From the install stick itself (once PAX boots on kasumi). With its allow-list empty the stick
+   writes nothing, so it is safe to boot just to read the line:
+     - flash the stick (step 2, without the line), boot it (step 4's boot), log in as root;
+     - type  pax-install --inventory
+       under /dev/sda the indented line `model=... serial=...` IS the line, already in the install
+       stick's spelling (compare 56b9f554-candidate/b-new-05-inventory-empty-list.png);
+     - photograph it, then type  reboot -p  (it powers off);
+     - write that line on the stick from the Mac (step 2), boot again (step 4).
+   `pax-install --check` at this point refuses every disk with "no usable install allow-list (...
+   names no disk)"; that is expected (b-new-06-check-empty-list.png).
+
+C. If kasumi can boot CachyOS again (its NVMe back in), docs/INSTALL-METAL.md steps 1-2 read the line
+   with `cat /sys/block/sdX/device/model /sys/block/sdX/device/serial` and write it with `tee -a`; px77c
+   ran those exact commands under Linux 7.2.4 against a copy of this image and the installer read the
+   line they wrote. Never read the SSD's identity through a USB enclosure on the Mac: a USB-SATA
+   bridge reports its own.
+
+2. Flash the stick and write the line on it (macOS)
+---------------------------------------------------
+Flash pax-install-candidate-56b9f554.img with balenaEtcher, as for the smoke stick. Then unplug the
+stick and plug it in again. If macOS says the disk is not readable, click Ignore (NEVER Initialize).
+macOS never mounts an EFI partition by itself, so mount it by hand in Terminal (no sudo needed):
+
+  diskutil list external
+      find the stick: a /dev/diskN whose partition 1 reads "EFI PAX-ESP" (about 792.7 MB)
+  diskutil mount diskNs1
+      prints "Volume PAX-ESP on /dev/diskNs1 mounted"
+  echo 'model=Samsung SSD 870 serial=S6PXNM0T612345A' >> /Volumes/PAX-ESP/pax/install-targets
+      (your line from step 1, in single quotes; `>>` appends: never a single `>`)
+  grep '^model=' /Volumes/PAX-ESP/pax/install-targets
+      must print exactly one line: yours
+  diskutil eject /Volumes/PAX-ESP
+
+Use Terminal, not TextEdit. macOS leaves `.fseventsd/` and `pax/._install-targets` on the stick;
+PAX ignores both (tested: fsck.fat clean, the install read the line). Leave /pax/logs/ alone: the
+installer writes its log there. To redo the line: mount again, open the file in `nano`, fix the last
+line, save, eject. A line that is not exactly `model=... serial=...` makes the installer refuse every
+disk and say which line, so a typo writes nothing.
+
+3. The firmware settings (from docs/INSTALL-METAL.md)
+-----------------------------------------------------
+kasumi is an ASUS ROG Maximus XIII Extreme: Delete at power-on for setup, F8 for the boot menu.
+  SATA mode: AHCI (it already is). If it were Intel RST, PAX attaches no SATA disk and prints early
+    `AHCI: Intel RST/RAID mode at 00:17.0: switch the firmware to AHCI`; set it back to AHCI.
+  Secure Boot: as it was for the smoke boot. If the firmware skips the stick or shows a security
+    violation, turn enforcement off (Boot, Secure Boot, OS Type: Other OS). If CachyOS unlocks its disk
+    through the TPM, it will ask for the passphrase or recovery key on its next boot: have it to hand.
+  Boot order: change nothing. PAX writes no firmware boot entries.
+
+4. Boot the stick and check the list
+------------------------------------
+Stick and SSD both in. Power on, F8, pick the stick's UEFI entry. Limine's menu: let the default
+boot (do not press E). At `login:` type root (no password). Then:
+
+  pax-install --check
+
+Expected (56b9f554-candidate/B-02-check.png, kasumi's shape in QEMU):
+
+  Install log: not written: --check writes nothing
+  Disks (2); install allow-list /dev/sdb1:/pax/install-targets, 1 line(s)
+  /dev/sda bytes=<its size> sector=512 model=Samsung SSD 870 serial=<its serial>
+      no partitions; on the install allow-list
+  /dev/sdb bytes=<the stick's size> sector=512 model=<the stick's name> serial=
+      2 partitions PAX did not write
+      refused: a PAX live medium (the boot stick, or a copy of it): /dev/sdb
+
+(The SSD may say "N partitions PAX did not write" instead of "no partitions": the install erases
+them, and the plan names them.) PHOTO 1: this screen.
+If /dev/sda says `refused: not on the install allow-list`, the next line prints the exact line that
+would allow it: compare it with the file, type  reboot -p , fix the line on the Mac (step 2), boot
+again. The same if the `Disks` line does not end `1 line(s)` or says a line is not
+`model=<model> serial=<serial>`.
+
+5. Install
+----------
+  pax-install
+  - the target page (B-03-target-page.png): `> 1. /dev/sda ... on the install allow-list` and
+    `2. /dev/sdb ... refused`; type 1 and Enter;
+  - a user name (uid 1000, no password in this preview), Enter;
+  - the games: y or n, Enter;
+  - the plan (B-04-plan.png): `target /dev/sda`, its size, three partitions, the seed, and a last line
+    `confirmation ERASE /dev/sda 8:0-seq1 <size> <64 hex digits>`. PHOTO 2: the plan.
+  - type  ext2-preview  and Enter (the root is ext2 without a journal);
+  - type everything after the word `confirmation ` on that line, exactly, and Enter. A typing mistake
+    cancels with nothing written; run pax-install again.
+It stages the live system, writes the partition table, the EFI partition, the root and Limine, and
+says `durable` after each phase. In QEMU onto a 500 GB disk: 129 s under full emulation, 23 s under
+KVM; a real SSD should be near the second. `Installation complete` (B-05-complete.png): PHOTO 3.
+Then type  poweroff  at its prompt.
+
+6. The install log (optional)
+-----------------------------
+The installer appended its whole transcript to the stick after every step: on the Mac, mount the
+stick as in step 2, then
+  cat /Volumes/PAX-ESP/pax/logs/install-1.txt
+  cp /Volumes/PAX-ESP/pax/logs/install-*.txt ~/pax-smoke/
+  diskutil eject /Volumes/PAX-ESP
+If the screen ever said `install log: stopped: ...`, the install went on without it; the photos are
+then the record.
+
+7. Boot the installed SSD
+-------------------------
+Remove the stick. Power on, press F8, and pick the SSD's UEFI entry (listed by its model). Choose it:
+in QEMU, left alone with the stick gone, the firmware went to its UEFI shell instead of the disk.
+The login prompt (B-06-disk-login.png):
+  PAX: log in as root or as the user pax-install made.
+  login:
+PHOTO 4. Log in as root or your user; `ls /home`, `cat /etc/pax-release`. `pax-install --check` now
+refuses this disk as `the running root: /dev/sda` (B-07-disk-check.png). Power off with  reboot -p .
+
+8. Back to CachyOS
+------------------
+Power off. Put the CachyOS NVMe (and the other drives) back. Power on, F8, pick CachyOS (it is where it
+always was: PAX wrote only the target SSD and the stick's log, and no firmware variables). If the
+firmware moved the new SSD to the top of its boot order, set Boot Option #1 back to CachyOS in setup
+(Boot, Boot Option Priorities), or unplug the SSD.
+
+If something goes wrong
+-----------------------
+  The boot stops or restarts before `login:`: photograph the last screen (a phone video from the
+    Limine menu is best), power off, and send it.
+  `pax-install: stopped: ...` or `pax-install: staging ...`: photograph, then read the stick's log
+    (step 6). Nothing is rolled back; only the target may be partly written. Running pax-install
+    again on the same target starts over.
+  The SSD does not boot: photograph, boot the stick, run `pax-install --check`: the SSD should show
+    `PAX's install layout`.
+
+Reference screens (56b9f554-candidate/, QEMU, kasumi's shape: OVMF, no serial port, both xHCIs on MSI)
+------------------------------------------------------------------------------------------------------
+  b-old-05-inventory-smoke-stick.png   what tonight's smoke-stick photo should look like (whole model)
+  b-new-05-inventory-empty-list.png    the install stick's inventory before the line (16-char model)
+  b-new-06-check-empty-list.png        --check before the line: every disk refused, nothing written
+  B-01-live-login.png .. B-05-complete.png   boot 1 (the line written on macOS, then the install)
+  B-06-disk-login.png, B-07-disk-check.png   boot 2 (the SSD alone, chosen as from F8)
+  c-new-03-login-3840x2160.png         the login at a 4K mode (glyphs at 2x)
+
+Qualified by px77c on hasu (notes/px77c-the-install-stick.md on pax): px78's kasumi leg M0-M10 on a
+copy of this exact image (TCG); the same leg with the line written on macOS on a copy, on a machine
+with the target alone; and with the line written by the Linux commands; every disk not the target
+byte-identical. None of it ran on kasumi.
