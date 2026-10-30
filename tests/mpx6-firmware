@@ -50,6 +50,11 @@
 #      stop and fault screens, its IDT (a fault drawn, not a reset), its
 #      CR4.MCE, the bisection words and a kasumi-shaped boot, per firmware;
 #      without `triage` the boot unchanged, line for line.
+#   F11 an NMI or a machine check anywhere in the boot (tests/mpx6-nmi,
+#      px77d): kmain_console's first act loads PAX's IDT and sets CR4.MCE,
+#      so an NMI injected at seven points from the first step to the PCI
+#      scan is survived and a machine check at three is a named panic with
+#      its bank, never a reset (TCG: QEMU's gdb stub and QMP).
 # F5 and F8 are UEFI whatever --firmware says (the mode is OVMF's GOP,
 # the window OVMF's), once per tier. Exit 0 when every row held.
 set -euo pipefail
@@ -200,5 +205,8 @@ PY
     PAX_TRIAGE_TIER=$t PAX_TRIAGE_FIRMWARE=$firmware "$PAX_ROOT/tests/mpx6-triage" \
         || die "FAIL F10 $t: the metal triage"
     row "F10 $t: the metal triage on $legs"
+    PAX_NMI_TIER=$t PAX_NMI_FIRMWARE=$firmware "$PAX_ROOT/tests/mpx6-nmi" \
+        || die "FAIL F11 $t: an NMI or a machine check in the boot"
+    row "F11 $t: an NMI survived and a machine check named, anywhere in the boot, on $legs"
     echo "PASS mpx6-firmware $t"
 done
