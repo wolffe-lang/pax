@@ -29,6 +29,8 @@ cmd = ['qemu-system-x86_64', '-machine', machine, '-cpu', cpu, '-m', mem, '-smp'
 if disp == 'vga': cmd += ['-device', 'VGA,vgamem_mb=64,xres=3840,yres=2160']
 elif disp == 'bochs': cmd += ['-device', 'bochs-display,vgamem=64M,xres=3840,yres=2160']
 elif disp == 'virtio': cmd += ['-device', 'virtio-vga,xres=3840,yres=2160']
+elif disp == 'ramfb': cmd += ['-device', 'ramfb']
+elif disp == 'vgpu': cmd += ['-device', 'virtio-gpu-pci,xres=2560,yres=1440']
 cmd += ['-serial', f'file:{O}/serial.log'] if serial == 'file' else ['-serial', 'none']
 cmd += extra
 (O/'command.json').write_text(json.dumps(cmd, indent=1)+'\n')

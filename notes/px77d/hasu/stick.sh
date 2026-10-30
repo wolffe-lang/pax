@@ -12,7 +12,7 @@ export PAX_CACHE=$L/cache PAX_BUILD=$L/build TMPDIR=$L/tmp PAX_ENGINE=podman PAX
 O=${OUTDIR:-$L/base-out}
 export SOURCE_DATE_EPOCH=$(cat "$O/source-date-epoch")
 cpio=$O/release.cpio
-conf=$L/pax/boot/limine-triage.conf
+conf=${CONF:-$L/pax/boot/limine-triage.conf}
 load_limine_pin
 expected=(--expect "/boot/pax=$elf" --expect "/boot/initramfs.cpio=$cpio"
  --expect "/EFI/BOOT/BOOTX64.EFI=$LIMINE_DIR/BOOTX64.EFI"
