@@ -44,6 +44,7 @@
 use log
 use panic
 use paging
+use triage
 
 extern "c" fn pax_apic_base() -> u64
 extern "c" fn pax_rdmsr(msr: u64) -> u64
@@ -130,6 +131,9 @@ pub fn start(pml4: u64) {
     // # Safety: the counter is written once, interrupts off.
     unsafe {
         lint0_before = read(0x350)
+    }
+    if triage.off("keeplint0") {
+        return // px77d: LINT0 as the firmware left it
     }
     write(0x350, LINT0_EXTINT)
 }
