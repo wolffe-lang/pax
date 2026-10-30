@@ -102,7 +102,9 @@ leg() { # firmware name image [leg.py args...]
 mask() { # the transcript without the screen's line, numbers masked where Limine or a clock decides them
     # (a conf with a `cmdline:` is another file, so Limine places its tables and the module elsewhere:
     # `paging: limine cr3`, `initramfs: module`, the map's usable bytes, the frame counts)
-    tr -d '\r' < "$1" | grep -av '^screen: ' | sed -E '/^(timer|clock|paging|memory|frames|initramfs: module|user: frames)/s/(0x)?[0-9a-f]*[0-9][0-9a-f]*/N/g'
+    # (the firmware's and Limine's own bytes before PAX's first line, escape sequences among them, vary: from it on)
+    tr -d '\r' < "$1" | sed -E 's/\x1b\[[0-9;=?]*[A-Za-z]//g' | sed -n '/PAX: the console/,$p' | sed -E '1s/.*(PAX: the console)/\1/' \
+        | grep -av '^screen: ' | sed -E '/^(timer|clock|paging|memory|frames|initramfs: module|user: frames)/s/(0x)?[0-9a-f]*[0-9][0-9a-f]*/N/g'
 }
 for fw in $legs; do
     leg "$fw" plain plain
