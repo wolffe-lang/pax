@@ -1,0 +1,33 @@
+px77c prediction, written 2026-10-30T02:10Z before the first build
+Base: pax trunk 56b9f554 (px78, pax#245); px77b's recipe (px77a's, px82's container), the same
+boot/limine-usb.conf (px78 changed no conf: boot/ moved only install-targets and io.S).
+
+1. The image: 795,869,184 bytes (759 MiB), one MiB more than px77b's 794,820,608. mkdisk --usb sizes
+   the ESP as twice the payload plus 16 MiB rounded up to a MiB; px77b left 97,236 bytes, so 48,618
+   bytes of payload growth crosses it, and px78 adds kernel/usb_storage, xHCI bulk pipes, eight disks,
+   the allow-list and the log to the kernel and the installer. Kernel /boot/pax 2,500,000-2,560,000
+   bytes (px77b: 2,463,288). A second build byte-identical (cmp).
+2. The allow-list on the image: /pax/install-targets byte-identical to boot/install-targets (19 lines,
+   every one a comment, no entry); an empty /pax/logs. check-usb passes with six expectations.
+3. The leg (tests/mpx6-install --only metal, PAX_METAL_MODE=run) on a copy of the exact image, the
+   target's line appended by paxfat as the leg does: M0-M10 all PASS on the first run, TCG. The
+   install from the confirmation 300 s (180-600; px78's tree took 161 s, the release tree is ~385 MB
+   of files to stage and copy), the leg 8 min (5-15). Risk named: 2 GiB of guest memory holds the
+   385 MB archive, its unpacked root and the staged copy; if it does not, the leg stops in staging
+   with a named io/nomem stop, not a hang.
+4. The spelling (the coordinator's addition): on one ide-hd disk with model "Samsung SSD 870 EVO
+   500GB", 101e7761's `pax-install --inventory` prints model=Samsung SSD 870 EVO 500GB (the whole ATA
+   model, trailing spaces trimmed) and 56b9f554's prints model=Samsung SSD 870 (its first 16 bytes,
+   trailing spaces trimmed, as Linux's device/model); the serial is the same on both (ATA's 20 bytes,
+   trimmed). Rule: keep the first 16 characters of the old model, counting spaces, drop trailing
+   spaces; case and the serial unchanged. With the list empty, 56b9f554's --check names the target
+   refused with no allow line printed (the hint prints only for "not on the install allow-list").
+5. macOS: hdiutil attaches a copy, the ESP mounts under /Volumes, a printf append adds the line, and
+   macOS leaves its own entries on the FAT (.fseventsd at least); after detach fsck.fat -n is clean
+   and the leg (its append removed, the line already there) passes M0-M10 reading the Mac's line.
+6. CachyOS: the runbook's step-2 commands, run in Linux 7.2.4 (busybox) against a copy on usb-storage
+   with the target on AHCI, write `model=Samsung SSD 870 serial=PX78-TARGET-0001`; the leg reads it.
+7. The smoke qualify on the unmodified image (kasumi's shape now: the one SATA disk, both xHCIs on
+   MSI): the keyboard types first try; NEW since px77b: the stick itself is a driven disk (/dev/sdb,
+   read-only under QEMU's readonly=on, refused as a live medium); `reboot -p` reaches S5 with QEMU
+   exit 0 and no debugger; 3840x2160 by Limine's editor as px77b; the SATA file byte-identical.
