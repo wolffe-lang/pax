@@ -116,7 +116,21 @@ fn confirm_plan(p: Plan, current: Target, answer: str) -> () ! {unconfirmed, cha
     }
 }
 
-fn plan_text(p: Plan) -> str {
+/// A disk's size for the guided install's one confirmation (px78b):
+/// decimal gigabytes, terabytes from 1000.0 GB, one decimal, the nearest
+/// tenth, as a disk's label counts. Divide before rounding: no overflow.
+fn size_text(bytes: int) -> str {
+    var tenths = bytes / 100000000
+    if bytes % 100000000 >= 50000000 { tenths += 1 }
+    if tenths < 10000 { return "{tenths / 10}.{tenths % 10} GB" }
+    tenths = bytes / 100000000000
+    if bytes % 100000000000 >= 50000000000 { tenths += 1 }
+    "{tenths / 10}.{tenths % 10} TB"
+}
+
+/// The plan as the guided install shows it: no confirmation line, since
+/// one word confirms (px78b, R-P6-confirm).
+fn plan_body(p: Plan) -> str {
     "PAX install plan v1\n" +
         "format ext2-developer-preview (NO journal; not ext3)\n" +
         "target /dev/{p.target.name}\nidentity {p.target.identity}\n" +
@@ -127,6 +141,10 @@ fn plan_text(p: Plan) -> str {
         "prefix_reserved_bytes 1048576 (persistent log: offset 65536 length 65536)\ntail_reserved_bytes {p.tail_bytes} (GPT backup and block alignment)\n" +
         "unused_bytes {p.unused_bytes} (capacity beyond the ext2 block-number limit)\n" +
         "seed {p.seed}\nuser {p.user} uid {INSTALL_USER_ID} gid {INSTALL_USER_ID} no-password\n" +
-        "games {if p.games then "yes" else "no"}\n" +
-        "confirmation {p.token}\n"
+        "games {if p.games then "yes" else "no"}\n"
 }
+
+/// The plan with its confirmation line: what --dry-run prints (the token
+/// the scripted `--install --confirm` takes) and the install log's record
+/// of what was erased. The guided install never asks for it.
+fn plan_text(p: Plan) -> str { plan_body(p) + "confirmation {p.token}\n" }

@@ -4,6 +4,16 @@
 //! px78: every disk is on the page with its identity, the refused ones with
 //! their reason; only a disk on the install allow-list can be chosen. What
 //! is printed and what is typed go to the install log (allow.lu).
+//! px78b (R-P6-confirm): after the plan, one summary names the disk by
+//! model, serial, size and node with the ext2 notice, and the word `yes`,
+//! exactly, installs; anything else cancels with nothing written.
+
+/// The one confirmation's summary (no model: a virtio disk shows none).
+fn summary_text(p: Plan, model: str, serial: str) -> str {
+    let m = if model.len == 0 then "(no model)" else model
+    "Erase {m}, serial {serial} ({size_text(p.target.bytes)}, /dev/{p.target.name}), and install PAX?\n" +
+        "The root file system is ext2 without a journal."
+}
 
 fn answer(mut lg: Log, prompt: str) -> str ! {cancelled, io} {
     print_raw(prompt)
@@ -82,19 +92,20 @@ fn guided_plan(mut lg: Log, disks: List[Disk], seed: str) -> Plan ! {
         say(mut lg, "An explicit y or n is required.")
     }
     let p = make_plan(t, seed, user, games)?
-    print_raw(plan_text(p))
+    print_raw(plan_body(p))
+    // The log keeps the confirmation line as its record of what was erased.
     lg.pending += plan_text(p)
+    var model = ""
+    var serial = ""
     for d in disks {
-        if d.target.name == t.name && d.layout != "no partitions" {
-            say(mut lg, "This install erases /dev/{t.name}'s {d.layout}.")
+        if d.target.name == t.name {
+            model = d.model
+            serial = d.serial
+            if d.layout != "no partitions" { say(mut lg, "This install erases /dev/{t.name}'s {d.layout}.") }
         }
     }
+    say(mut lg, summary_text(p, model, serial))
     flush_log(mut lg)
-    if answer(mut lg, "This is ext2 WITHOUT a journal. Type ext2-preview to continue: ")? !=
-        "ext2-preview" {
-        return cancelled
-    }
-    let token = answer(mut lg, "Type the complete confirmation line after 'confirmation ', or q: ")?
-    if token != p.token { return cancelled }
+    if answer(mut lg, "Type yes to install; anything else cancels: ")? != "yes" { return cancelled }
     p
 }
