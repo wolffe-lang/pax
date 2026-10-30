@@ -1774,4 +1774,12 @@ Measured on the same machines (`/mnt/steamlib/lanes/px76/measure.sh`, its `MEASU
 - **QEMU 8.2.2 and OVMF as black boxes** (`info pci`, `-device …,help`, `info registers`, `x`, `screendump`): no
   display device OVMF drives gives a 64-bit framebuffer BAR, so the target machine's framebuffer at 256 GiB is not
   reproducible here (`notes/px77d-the-metal-triage.md`).
+- **The fix** (`kernel/interrupts`' `early`, `kernel/{idt,gdt}`, `boot/isr.S`): Intel SDM vol. 3A §6.7 (NMI
+  handling and blocking until IRET), §6.14.5 (the IST), §11.5.1 (the LVT, LINT1 as an NMI line), §11.11.2 (an MSI's
+  data, delivery mode 100b: NMI), ch. 15 (the banks a machine check prints: IA32_MCi_MISC at 0x403 + 4i, MISCV bit
+  59); the PC's NMI status port 61h (bit 7 SERR#, bit 6 IOCHK), as the PCH datasheets name it (NMI_SC).
+- **QEMU's NMI paths, measured as a black box**: `inject-nmi` arrives through LINT1, which Limine hands over masked
+  (`info lapic`); the gdb stub's physical-memory mode (`Qqemu.PhyMemMode:1`) writing 0x400 at 0xFEE00000 is an MSI
+  with delivery mode NMI under KVM, lost under TCG; the monitor's `mce` injects a machine check under either
+  (`tests/mpx6-nmi.d/inject.py`).
 - No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source.
