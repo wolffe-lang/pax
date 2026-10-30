@@ -40,6 +40,11 @@
      interrupts off, forever; `pax_triage_stop(n)` (the command line's
      `stop=N`) halts the same way at step N, by design.
 
+   The bisection words `noidt`, `nomce`, `nodraw` and `fullh` (after
+   kasumi booted under `triage` where the plain boot reset) each turn one
+   of these effects off: the triage tables, CR4.MCE, the per-step drawing
+   (and its CR3 switches), the console's shorter height (kernel/triage).
+
    Without `triage` the entry returns at once and nothing here runs:
    the normal boot is unchanged. kernel/gdt and kernel/idt replace the
    triage tables at interrupts.start, as in every boot.
@@ -138,12 +143,34 @@ pax_triage_entry:
         leaq    word_slow(%rip), %rdi
         call    pax_triage_word
         movq    %rax, tg_slow(%rip)
+        leaq    word_noidt(%rip), %rdi  /* px77d's bisection words: each turns */
+        call    pax_triage_word         /* one of triage's own effects off */
+        movq    %rax, tg_noidt(%rip)
+        leaq    word_nomce(%rip), %rdi
+        call    pax_triage_word
+        movq    %rax, tg_nomce(%rip)
+        leaq    word_nodraw(%rip), %rdi
+        call    pax_triage_word
+        movq    %rax, tg_nodraw(%rip)
+        leaq    word_fullh(%rip), %rdi
+        call    pax_triage_word
+        movq    %rax, tg_fullh(%rip)
         movq    %cr3, %rax
         movq    %rax, tg_cr3(%rip)
+        cmpq    $0, tg_noidt(%rip)
+        jne     1f
         call    t_tables                /* the IDT first: a fault below is drawn */
-        call    t_fb_setup
+1:      movq    %cr4, %rax              /* CR4 as Limine handed it over */
+        movq    %rax, tg_e_cr4(%rip)
+        cmpq    $0, tg_nomce(%rip)
+        jne     2f
+        orq     $0x40, %rax             /* CR4.MCE: a machine check is drawn */
+        movq    %rax, %cr4
+2:      call    t_fb_setup
         call    t_delay_setup
         call    t_facts
+        cmpq    $0, tg_nodraw(%rip)
+        jne     9f
         call    t_panel
         movl    $1, %edi
         call    pax_triage_stripe
@@ -172,6 +199,8 @@ pax_triage_console_h:
         movq    %rdi, %rax
         cmpq    $0, tg_ok(%rip)
         je      1f
+        cmpq    $0, tg_fullh(%rip)      /* `fullh`: the console's whole height */
+        jne     1f
         movq    tg_band_y(%rip), %rcx
         cmpq    %rcx, %rax
         jb      1f
@@ -251,10 +280,6 @@ t_tables:
         movq    %rax, tg_idtr+2(%rip)
         leaq    tg_idtr(%rip), %rdi
         call    pax_lidt
-        movq    %cr4, %rax              /* CR4 as Limine handed it over, */
-        movq    %rax, tg_e_cr4(%rip)
-        orq     $0x40, %rax             /* then CR4.MCE: a machine check is drawn */
-        movq    %rax, %cr4
         ret
 
 /* --- the framebuffer ----------------------------------------------------- */
@@ -959,7 +984,9 @@ pax_triage_stripe:
         addq    %rdi, %rax
         movl    $1, %ecx
         movb    %cl, (%rax)
-1:      pushq   %rbx
+1:      cmpq    $0, tg_nodraw(%rip)     /* `nodraw`: the step kept, nothing drawn */
+        jne     2f
+        pushq   %rbx
         pushq   %rbp
         pushq   %r12
         pushq   %r13
@@ -1245,6 +1272,10 @@ box_colours:                            /* 0xRRGGBB, by step & 7 */
 
 word_triage:    .asciz "triage"
 word_slow:      .asciz "slow"
+word_noidt:     .asciz "noidt"
+word_nomce:     .asciz "nomce"
+word_nodraw:    .asciz "nodraw"
+word_fullh:     .asciz "fullh"
 s_apic:         .asciz "APIC "
 s_cr0:          .asciz " CR0 "
 s_cr4:          .asciz "CR4 "
@@ -1353,6 +1384,10 @@ pax_triage_font:
 pax_triage_on:
 tg_on:          .zero 8
 tg_slow:        .zero 8
+tg_noidt:       .zero 8
+tg_nomce:       .zero 8
+tg_nodraw:      .zero 8
+tg_fullh:       .zero 8
 tg_ok:          .zero 8
 tg_cr3:         .zero 8
 tg_fb:          .zero 8
