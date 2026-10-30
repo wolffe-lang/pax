@@ -12,19 +12,31 @@ import time
 
 program=sys.argv[1]
 token='ERASE /dev/vdb 254:16-seq2 536870912 test'
-for prefix in ['', '2\n', '2\nalice\n', '2\nalice\ny\n', '2\nalice\ny\next2-preview\n']:
-    p=subprocess.run([program],input=prefix,text=True,capture_output=True)
+# px78b (R-P6-confirm): after the plan, one summary naming the disk by
+# model, serial, size and node, the ext2 notice folded in, and one word.
+summary=('Erase Samsung SSD 860, serial PX71-VDB (0.5 GB, /dev/vdb), and install PAX?\n'
+         'The root file system is ext2 without a journal.\n'
+         'Type yes to install; anything else cancels: pax-install> ')
+def ui(keys):
+    return subprocess.run([program],input=keys,text=True,capture_output=True)
+for prefix in ['', '2\n', '2\nalice\n', '2\nalice\ny\n']:
+    p=ui(prefix)
     assert p.returncode==1 and 'UI result cancelled' in p.stdout,(prefix,p.stdout,p.stderr)
 print('PASS I-ui-eof: EOF at every prewrite prompt cancels')
 for game,expected in [('y','true'),('n','false')]:
-    p=subprocess.run([program],input=f'n\np\n2\nalice\n\n{game}\next2-preview\n{token}\n',text=True,capture_output=True)
+    p=ui(f'n\np\n2\nalice\n\n{game}\nyes\n')
     assert p.returncode==0 and f'UI confirmed vdb alice {expected}' in p.stdout,(p.stdout,p.stderr)
     assert 'An explicit y or n is required.' in p.stdout
     assert 'NO journal' in p.stdout and 'capacity_bytes 536870912' in p.stdout
-print('PASS I-ui-answers: navigation, full plan, both games answers and no blank default')
-p=subprocess.run([program],input='2\nalice\ny\next2-preview\nyes\n',text=True,capture_output=True)
-assert p.returncode==1 and 'UI result cancelled' in p.stdout
-print('PASS I-ui-confirmation: yes is not the exact target token')
+    assert summary in p.stdout,p.stdout
+    for gone in ['confirmation ', 'ext2-preview', token]:
+        assert gone not in p.stdout,(gone,p.stdout)
+print('PASS I-ui-answers: navigation, full plan, both games answers, no blank default; the summary names the disk and yes installs')
+for word in ['y', 'YES', 'Yes', 'q', '', token, 'ext2-preview', 'confirmation '+token]:
+    p=ui(f'2\nalice\ny\n{word}\n')
+    assert p.returncode==1 and 'UI result cancelled' in p.stdout and summary in p.stdout,(word,p.stdout,p.stderr)
+    assert 'UI confirmed' not in p.stdout,(word,p.stdout)
+print('PASS I-ui-confirmation: only yes installs; y, YES, Yes, q, empty, the old token, ext2-preview and the old confirmation line each cancel')
 master,slave=pty.openpty()
 fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',24,80,0,0))
 p=subprocess.Popen([program],stdin=slave,stdout=slave,stderr=slave,close_fds=True)
