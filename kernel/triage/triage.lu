@@ -1,0 +1,151 @@
+//! triage — the metal triage (px77d), behind the command-line word
+//! `triage`: boot/triage.S's stripes, fault screen and halts, and the
+//! words that turn one suspect off at a time.
+//!
+//! kasumi rebooted the moment Limine handed it the stick's kernel
+//! (px77): PAX's panic path halts, so the reboot was a triple fault or a
+//! machine check with CR4.MCE clear, and nothing reached the screen.
+//! With `triage` on the command line, `start` (kmain_console's first
+//! statement) takes boot/triage.S's entry: an IDT of its own on an IST,
+//! CR4.MCE set, the handover's facts drawn in a band at the bottom of
+//! the screen; then `step(n)` draws box n of the band at each early
+//! step, so the photo of a machine that stopped says how far it came,
+//! and every fault before or after PAX's IDT is drawn in large hex and
+//! halts, never rebooting. Without `triage` every function here returns
+//! at once: the normal boot is unchanged.
+//!
+//! The suspects (each a word after `triage`, each read by its module):
+//!
+//! - `nofb`: kernel/screen never attaches (no early screen, no
+//!   kernel/fb mapping), the console serial only; the band still draws
+//!   through Limine's own mapping;
+//! - `fxsave`: kernel/fpu takes FXSAVE's 512 bytes, no XSAVE, XCR0 left
+//!   alone;
+//! - `low4g`: kernel/frames hands out no frame at or above 4 GiB;
+//! - `keeplint0`: kernel/apic leaves LVT LINT0 as the firmware set it;
+//! - `noxhci`, `noblock`, `nosound`: kmain_console starts no xHCI (and
+//!   waits for none), no disk, no sound device;
+//! - `slow`: each box held about a second (boot/triage.S);
+//! - `stop=N`: at step N a green banner, then a halt by design: the
+//!   boot got that far;
+//! - `fault=N`: at step N an `ud2` (#UD, vector 6), the fault screen's
+//!   own witness: before step 9 through boot/triage.S's IDT, from step 9
+//!   through PAX's (kernel/interrupts' `fatal`).
+//!
+//! Written from the Limine protocol's executable command line feature
+//! (the words are kernel/boot_info's); boot/triage.S cites the SDM. No
+//! Linux source; no other kernel's source.
+
+use boot_info
+
+extern "c" fn pax_triage_entry()
+extern "c" fn pax_triage_enabled() -> u64
+extern "c" fn pax_triage_stripe(n: u64)
+extern "c" fn pax_triage_stop(n: u64) -> never
+extern "c" fn pax_triage_halted()
+extern "c" fn pax_triage_fatal(vector: u64, error: u64, rip: u64, rsp: u64, cr2: u64, cs: u64) -> never
+extern "c" fn pax_triage_console_h(h: u64) -> u64
+extern "c" fn pax_ud2()
+
+/// boot/triage.S's entry: with `triage` on the command line, the IDT,
+/// CR4.MCE, the band and box 1; otherwise nothing.
+pub fn start() {
+    // # Safety: boot/triage.S reads Limine's responses, loads its own
+    // GDT, TSS and IDT (PAX's layout: kernel/gdt and kernel/idt replace
+    // them) and sets CR4.MCE, only when `triage` is on the command line.
+    unsafe { pax_triage_entry() }
+}
+
+/// Whether the command line said `triage`.
+pub fn on() -> bool {
+    // # Safety: a read of boot/triage.S's flag.
+    unsafe { pax_triage_enabled() } != 0
+}
+
+/// Whether suspect `w` is turned off: `triage` and `w` both on the
+/// command line.
+pub fn off(w: str) -> bool {
+    on() && boot_info.cmdline_has(w)
+}
+
+fn byte(a: u64) -> u64 {
+    // # Safety: a byte of Limine's command line (bootloader-reclaimable
+    // memory, mapped in the HHDM throughout), inside the value
+    // kernel/boot_info's `cmdline_value` measured.
+    unsafe { (a as *u8).read_volatile() as u64 }
+}
+
+/// `stop=N`'s N (decimal, at most four digits), 0 without one.
+pub fn stop_at() -> u64 {
+    number("stop")
+}
+
+/// `fault=N`'s N, as `stop_at`.
+pub fn fault_at() -> u64 {
+    number("fault")
+}
+
+/// The decimal value of `key=` on the command line, 0 without one.
+fn number(key: str) -> u64 {
+    let (a, n) = boot_info.cmdline_value(key)
+    if n == 0 || n > 4 {
+        return 0
+    }
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let b = byte(a + i)
+        if b < 48 || b > 57 {
+            return 0
+        }
+        v = v * 10 + (b - 48)
+        i += 1
+    }
+    v
+}
+
+/// Step `n` reached: its box drawn (and every earlier one redrawn);
+/// at `stop=N`'s step, the banner and the halt.
+pub fn step(n: u64) {
+    if !on() {
+        return
+    }
+    // # Safety: boot/triage.S draws with interrupts off, on Limine's CR3
+    // and its own stack, and restores both.
+    unsafe { pax_triage_stripe(n) }
+    if fault_at() == n {
+        // # Safety: isr.S's `ud2`: the #UD the fault screen draws.
+        unsafe { pax_ud2() }
+    }
+    if stop_at() == n {
+        // # Safety: as above; it never returns.
+        unsafe { pax_triage_stop(n) }
+    }
+}
+
+/// kernel/panic's halt in triage mode: `HALT AT STEP nn` in the band,
+/// then boot/triage.S's own halt. Returns at once otherwise.
+pub fn halted() {
+    if !on() {
+        return
+    }
+    // # Safety: as `step`; in triage mode it never returns.
+    unsafe { pax_triage_halted() }
+}
+
+/// kernel/interrupts' fatal exception in triage mode: drawn in large hex
+/// and halted. Returns at once otherwise.
+pub fn fatal(vector: u64, error: u64, rip: u64, rsp: u64, cr2: u64, cs: u64) {
+    if !on() {
+        return
+    }
+    // # Safety: as `step`; it never returns.
+    unsafe { pax_triage_fatal(vector, error, rip, rsp, cr2, cs) }
+}
+
+/// The height kernel/screen's console may use: `h`, or in triage mode
+/// the top of the band (which the console's scrolling never moves).
+pub fn console_height(h: u64) -> u64 {
+    // # Safety: a read of boot/triage.S's band; nothing is written.
+    unsafe { pax_triage_console_h(h) }
+}
