@@ -92,13 +92,16 @@ fn set(v: int, at: u64, ist: u8) {
     }
 }
 
-/// Fill gates 0-47 (8 on IST1) and 80-83 and load the table.
+/// Fill gates 0-47 (8 on IST1, 2 on IST2, 18 on IST3) and 80-83 and
+/// load the table.
 pub fn start() {
     var v = 0
     while v < ROUTED {
         // # Safety: pax_isr_table holds the 48 trampolines' addresses.
         let at = unsafe { pax_isr_table[v] }
-        set(v, at, if v == 8 { 1 } else { 0 })
+        // px77d: the NMI on IST2 and the machine check on IST3 (kernel/gdt):
+        // either can arrive anywhere, on any stack, even with IF clear.
+        set(v, at, if v == 8 { 1 } else if v == 2 { 2 } else if v == 18 { 3 } else { 0 })
         v += 1
     }
     v = 0
@@ -122,7 +125,8 @@ pub fn base() -> u64 {
     unsafe { pax_idt as u64 }
 }
 
-/// Write the table's line: `idt: 0x<base>, 256 gates, 52 routed, #DF on ist1`.
+/// Write the table's line: `idt: 0x<base>, 256 gates, 52 routed, #DF on
+/// ist1, NMI on ist2, #MC on ist3`.
 pub fn report() {
     log.put("idt: ")
     log.hex(base())
@@ -130,6 +134,6 @@ pub fn report() {
     log.dec(GATES)
     log.put(" gates, ")
     log.dec(ROUTED + MSI_ROUTED)
-    log.put(" routed, #DF on ist1")
+    log.put(" routed, #DF on ist1, NMI on ist2, #MC on ist3")
     log.end()
 }
