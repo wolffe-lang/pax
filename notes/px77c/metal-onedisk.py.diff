@@ -1,0 +1,141 @@
+--- tests/mpx6-install.d/metal.py
++++ metal-onedisk.py
+@@ -210,7 +210,7 @@
+ 
+ # --- the disks --------------------------------------------------------------
+ 
+-TARGET = {'model': 'Samsung SSD 870 EVO 500GB', 'serial': 'PX78-TARGET-0001', 'bytes': 500107862016}
++TARGET = {'model': 'Samsung SSD 870 EVO 500GB', 'serial': 'S6PXNM0T612345A', 'bytes': 500107862016}
+ STEAM = {'model': 'Samsung SSD 870 EVO 4TB', 'serial': 'S6PXNM0T700001', 'bytes': 4000787030016}
+ SANDISK = {'model': 'SanDisk SDSSDH3 512G', 'serial': '2104AB401234', 'bytes': 512110190592}
+ NVME = {'serial': 'S6Z1NJ0W000001', 'bytes': 1000204886016}
+@@ -242,17 +242,14 @@
+         shutil.rmtree(d)
+     d.mkdir()
+     gib = 2097152  # sectors
+-    foreign_disk(d/'nvme.img', NVME, [('esp', 2048, 2048 + gib - 1), ('linux', 2048 + gib, None)])
+-    foreign_disk(d/'steam.img', STEAM, [('linux', 2048, None)])
+-    q = SANDISK['bytes'] // 512 // 4
+-    foreign_disk(d/'sandisk.img', SANDISK, [('linux', 2048, q - 1), ('linux', q, 2 * q - 1), ('linux', 2 * q, 3 * q - 1), ('linux', 3 * q, None)])
++    # px77c: kasumi on 2026-10-29: the target alone.
+     with open(d/'target.img', 'wb') as f:
+         f.truncate(TARGET['bytes'])
+     return d
+ 
+ 
+ def witnesses(d):
+-    return {n: extents_sha(d/(n + '.img')) for n in ('nvme', 'steam', 'sandisk')}
++    return {}  # px77c: no disk but the target
+ 
+ 
+ # --- QEMU, QMP, the screen and the keyboard ----------------------------------
+@@ -470,13 +467,8 @@
+         a += ['-drive', f'file={stick},if=none,id=stick,format=raw',
+               '-device', 'usb-storage,bus=xhci.0,drive=stick,removable=on,bootindex=0']
+     a += ['-device', 'usb-kbd,bus=xhci.0',
+-          '-drive', f'file={d/"nvme.img"},if=none,id=nv,format=raw', '-device', f'nvme,serial={NVME["serial"]},drive=nv',
+-          '-drive', f'file={d/"steam.img"},if=none,id=sa,format=raw',
+-          '-device', f'ide-hd,bus=ide.0,drive=sa,model={STEAM["model"]},serial={STEAM["serial"]}',
+-          '-drive', f'file={d/"sandisk.img"},if=none,id=sb,format=raw',
+-          '-device', f'ide-hd,bus=ide.1,drive=sb,model={SANDISK["model"]},serial={SANDISK["serial"]}',
+           '-drive', f'file={d/"target.img"},if=none,id=sc,format=raw,discard=unmap,detect-zeroes=unmap',
+-          '-device', f'ide-hd,bus=ide.2,drive=sc,model={TARGET["model"]},serial={TARGET["serial"]}'
++          '-device', f'ide-hd,bus=ide.0,drive=sc,model={TARGET["model"]},serial={TARGET["serial"]}'
+           # With the stick gone, the target is the firmware boot menu's
+           # choice (F8 on kasumi; QEMU's boot order here, bootindex 0): the
+           # firmware makes the option for the device and boots its
+@@ -508,7 +500,7 @@
+     # The maintainer's step, from CachyOS: the target's line on the stick.
+     line = work/'allow-line'
+     line.write_text(f'model={LINUX_MODEL} serial={TARGET["serial"]}\n')
+-    run([paxfat, '--offset', esp, 'append', stick, line, '/pax/install-targets'])
++    # px77c: the copy already carries the line (macOS or Linux wrote it); no append here.
+     listed = run([paxfat, '--offset', esp, 'cat', stick, '/pax/install-targets']).stdout.decode()
+     need(listed, f'model={LINUX_MODEL} serial={TARGET["serial"]}', 'M0-stick')
+     d = make_disks()
+@@ -541,17 +533,16 @@
+         check = m.command('pax-install --check', 'M2-check', 600)
+         m.shot('check')
+         flat = m.unwrapped(check)
+-        need(flat, f'refused: not on the install allow-list: /dev/sda model={LINUX_MODEL} serial={STEAM["serial"]}', 'M2-right-model-wrong-serial')
+-        need(flat, f'refused: not on the install allow-list: /dev/nvme0n1 model=QEMU NVMe Ctrl serial={NVME["serial"]}', 'M2-nvme-refused')
+-        need(flat, f'refused: not on the install allow-list: /dev/sdb model={SANDISK["model"][:16].rstrip()} serial={SANDISK["serial"]}', 'M2-sdb-refused')
+-        need(flat, 'refused: a PAX live medium (the boot stick, or a copy of it): /dev/sdd', 'M2-stick-refused')
+-        need(flat, f'/dev/sdc bytes={TARGET["bytes"]} sector=512 model={LINUX_MODEL} serial={TARGET["serial"]}', 'M2-target-listed')
+-        print('PASS M2-check: the target alone on the list; sda (the right model, the wrong serial), sdb and the NVMe refused by name; the stick refused before the list', flush=True)
++        need(flat, 'install allow-list /dev/sdb1:/pax/install-targets, 1 line(s)', 'M2-list-read')
++        need(flat, 'refused: a PAX live medium (the boot stick, or a copy of it): /dev/sdb', 'M2-stick-refused')
++        need(flat, f'/dev/sda bytes={TARGET["bytes"]} sector=512 model={LINUX_MODEL} serial={TARGET["serial"]}', 'M2-target-listed')
++        need(flat, 'on the install allow-list', 'M2-target-allowed')
++        print('PASS M2-check: the one disk, the target, on the list; the stick refused before the list', flush=True)
+         t_guided = time.monotonic()
+         m.type('pax-install\n')
+         page = m.wait(r'pax-install> *$', 'M3-guided', 600, bad=STOPPED)
+         m.shot('target-page')
+-        num = re.search(r'^[> ] (\d+)\. /dev/sdc ', m.unwrapped(page), re.M)
++        num = re.search(r'^[> ] (\d+)\. /dev/sda ', m.unwrapped(page), re.M)
+         if not num:
+             fail('M3-guided', 'the target is not on the page:\n' + page)
+         m.type(num.group(1) + '\n')
+@@ -561,7 +552,7 @@
+         m.type('n\n')
+         plan = m.wait(r'Type ext2-preview to continue', 'M3-guided', 300, bad=STOPPED)
+         m.shot('plan')
+-        tok = re.search(r'^confirmation (ERASE /dev/sdc \S+ \d+ [0-9a-f]{64})$', m.unwrapped(plan), re.M)
++        tok = re.search(r'^confirmation (ERASE /dev/sda \S+ \d+ [0-9a-f]{64})$', m.unwrapped(plan), re.M)
+         if not tok:
+             fail('M3-guided', 'no confirmation line on the screen:\n' + plan)
+         m.type('ext2-preview\n')
+@@ -582,7 +573,7 @@
+             fail('M4-poweroff', f'QEMU exit {rc}')
+     finally:
+         m.kill()
+-    print(f'PASS M4-install: guided, to the listed /dev/sdc; installed in {result["install_seconds"]} s; ACPI power-off', flush=True)
++    print(f'PASS M4-install: guided, to the listed /dev/sda; installed in {result["install_seconds"]} s; ACPI power-off', flush=True)
+     after1 = witnesses(d)
+     if after1 != before:
+         fail('M5-witness', f'a disk not the target changed in boot 1: {after1} vs {before}')
+@@ -590,17 +581,16 @@
+     # The stick's install log, held to the run.
+     logtext = run([paxfat, '--offset', esp, 'cat', stick, '/pax/logs/install-1.txt']).stdout.decode(errors='replace')
+     (work/'install-1.txt').write_text(logtext)
+-    for needle in ['PAX install log /pax/logs/install-1.txt', 'install allow-list /dev/sdd1:/pax/install-targets, 1 line(s)',
+-                   f'refused: not on the install allow-list: /dev/sda model={LINUX_MODEL} serial={STEAM["serial"]}',
+-                   'refused: a PAX live medium (the boot stick, or a copy of it): /dev/sdd',
+-                   'confirmation ERASE /dev/sdc', 'phase gpt: durable', 'phase root: durable', 'phase limine: durable',
++    for needle in ['PAX install log /pax/logs/install-1.txt', 'install allow-list /dev/sdb1:/pax/install-targets, 1 line(s)',
++                   'refused: a PAX live medium (the boot stick, or a copy of it): /dev/sdb',
++                   'confirmation ERASE /dev/sda', 'phase gpt: durable', 'phase root: durable', 'phase limine: durable',
+                    'phase result: complete', 'Installation complete', 'poweroff']:
+         need(logtext, needle, 'M6-stick-log')
+     with open(d/'target.img', 'rb') as f:
+         for k, at in ((1, 2097152), (2, 69206016), (3, 1048576)):
+             f.seek(at)
+             want = hashlib.sha256(f.read(1 << 20)).hexdigest()
+-            need(logtext, f'sha256 /dev/sdc{k} first MiB (byte {at}): {want}', 'M6-stick-log')
++            need(logtext, f'sha256 /dev/sda{k} first MiB (byte {at}): {want}', 'M6-stick-log')
+     espf = work/'stick-esp.img'
+     with open(stick, 'rb') as f, open(espf, 'wb') as o:
+         f.seek(esp)
+@@ -628,7 +618,7 @@
+         m.command(f"echo 'model={LINUX_MODEL} serial={TARGET['serial']}' > /tmp/allow", 'M9-running-root')
+         s = m.command('pax-install --check --allow-list /tmp/allow', 'M9-running-root', 600)
+         m.shot('disk-after')
+-        need(m.unwrapped(s), 'refused: the running root: /dev/sdc', 'M9-running-root')
++        need(m.unwrapped(s), 'refused: the running root: /dev/sda', 'M9-running-root')
+         m.type('reboot -p\n')
+         rc, secs = m.ended('M9-poweroff', 300)
+         result['boot2_seconds'] = round(secs, 2)
+@@ -691,10 +681,9 @@
+     result['leg_seconds'] = round(time.monotonic() - t_leg, 2)
+     result['stick_sha256'] = sha(stick)
+     (work/'result.json').write_text(json.dumps(result, indent=2) + '\n')
+-    print('PASS M5-witness: the NVMe, the Steam and the SanDisk images byte-identical over their allocated extents before and after both boots: '
+-          + ', '.join(f'{k} {v}' for k, v in result['witness_after'].items()), flush=True)
++    print('PASS M5-witness: no disk but the target on this machine (kasumi on 2026-10-29): nothing to hold', flush=True)
+     print(f'PASS I-metal: the whole path in {result["leg_seconds"]} s; the install {result["install_seconds"]} s ({result["accel"]})', flush=True)
+-    for n in ('nvme', 'steam', 'sandisk', 'target'):
++    for n in ('target',):
+         (d/(n + '.img')).unlink()
+ 
+ 
