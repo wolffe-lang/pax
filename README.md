@@ -183,7 +183,10 @@ checks on as its first act, draws a numbered box at each early step and the firm
 console, and draws any fault in large hex and halts instead of resetting; further words turn one suspect off at a
 time (`nofb`, `fxsave`, `low4g`, `keeplint0`, `noxhci`, `noblock`, `nosound`) or one of triage's own effects
 (`noidt`, `nomce`, `nodraw`, `fullh`, `boot/limine-bisect.conf`). Without the word nothing of it runs.
-`tests/mpx6-triage` (the firmware suite's F10) boots every word under QEMU.
+`tests/mpx6-triage` (the firmware suite's F10) boots every word under QEMU. Since px77d the live kernel loads its own
+exception table, with the NMI and the machine check on stacks of their own, and turns machine checks on as its first
+act, so an NMI arriving during the boot is logged and survived and a machine check is a named panic with its banks,
+never a silent reset (`tests/mpx6-nmi`, F11; `boot/limine-fix.conf` builds the stick that carries it).
 
 ### The guided installer
 
@@ -354,7 +357,7 @@ and `--tier native --firmware bios` picks one leg.
 | Users and the shipped programs | `mpx5-users`, `mpx5-accounts`, `mpx5-jobs`, `mpx5-pelt`, `mpx5-bore`, `mpx5-scent`, `mpx5-lope`, `mpx5-aspen`, `mpx5-lupin`, `mpx5-yew`, `mpx5-wolf`, `mpx5-clef`, `mpx5-screen` | every rule as root and as `pax`, job control typed byte for byte, each program's typed session against the same binary in a container |
 | Disks | `mpx6-blk`, `mpx6-ext2`, `mpx6-part`, `mpx6-root`, `mpx6-journal`, `mpx6-nodes`, `mpx6-nvme`, `mpx6-ahci`, `mpx6-disktools`, `mpx6-fsck`, `mpx6-install`, `mpx6-games` | Linux 7.3.0 on QEMU with the same disks, e2fsprogs, the formatters' differentials, a power cut repaired, the installer, the games' frames cell for cell |
 | USB | `mpx6-usb`, `mpx6-usbcheck`, `usb-tools`, `usb-stick`, `usb-linux-fetch` | xHCI, hubs, keyboard bytes and hotplug; the stick's boot files, both firmwares, Linux mounting the ESP; the oracle's two pinned Ubuntu packages |
-| Firmware and display | `mpx6-firmware` | independent tick-rate checks with and without the HPET and the PIT, the timer and scheduler suites on those machines, MSI and INTx keyboard sessions, both MSI layouts, BARs above 4 GiB, reset and S5, a padded pitch, serial-less early panic pixels at 1280×800 and 4K, a serial-less 4K session shaped like the target machine, the metal triage's boxes, fault screens and words |
+| Firmware and display | `mpx6-firmware` | independent tick-rate checks with and without the HPET and the PIT, the timer and scheduler suites on those machines, MSI and INTx keyboard sessions, both MSI layouts, BARs above 4 GiB, reset and S5, a padded pitch, serial-less early panic pixels at 1280×800 and 4K, a serial-less 4K session shaped like the target machine, the metal triage's boxes, fault screens and words, an NMI survived and a machine check named anywhere in the boot (`tests/mpx6-nmi`) |
 
 Suites that need something of the host say so and stop: root for the Linux network side (`tools/linux-net`), docker or
 podman for the throwaway containers (`tools/linux-tree`, e2fsprogs), KVM for speed. `tools/mkimage` is reproducible:
