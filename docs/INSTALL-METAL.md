@@ -70,6 +70,31 @@ The file's last line should read like `model=Samsung SSD 870 serial=S6PXNM0T6123
 comments. A line that is not exactly `model=… serial=…` makes the installer refuse every disk and name the line, so
 nothing is written by mistake. Leave `/pax/logs/` alone: the installer writes its logs there.
 
+### From macOS (px77c)
+
+macOS never mounts an EFI system partition by itself (after flashing, Finder shows nothing; if macOS calls the disk
+unreadable, choose Ignore, never Initialize). Mount it by hand; no `sudo` is needed. `diskutil list external` names
+the stick as the disk whose partition 1 reads `EFI PAX-ESP`:
+
+```sh
+diskutil mount diskNs1
+echo 'model=Samsung SSD 870 serial=S6PXNM0T612345A' >> /Volumes/PAX-ESP/pax/install-targets
+grep '^model=' /Volumes/PAX-ESP/pax/install-targets
+diskutil eject /Volumes/PAX-ESP
+```
+
+The `grep` must print one line, yours. macOS leaves `.fseventsd/` and `pax/._install-targets` on the stick; PAX
+ignores both (px77c's leg B installed from a copy written this way, its ESP `fsck.fat -n` clean).
+
+### Without CachyOS: the line from an inventory (px77c)
+
+Linux is not the only place to read the line. The install stick's own `pax-install --inventory`, booted with its list
+still empty (it writes nothing then), prints under each disk the indented line `model=… serial=…`: that is the line,
+in this spelling. An older stick (101e7761, before R-px78-5) prints the whole ATA model instead; its line becomes this
+one by keeping the model's first 16 characters (spaces count, case unchanged) and dropping the spaces at the end of
+those 16, with the serial copied whole. Measured on one QEMU disk under both sticks and Linux 7.2.4: `Samsung SSD 870
+EVO 500GB` becomes `Samsung SSD 870`; `WDC WDS500G2B0A-00SM50` becomes `WDC WDS500G2B0A-`; `CT500MX500SSD1` stays.
+
 ## 3. The firmware settings
 
 kasumi is an ASUS ROG Maximus XIII Extreme. Press Delete at power-on for setup and F8 for the one-time boot menu (the
