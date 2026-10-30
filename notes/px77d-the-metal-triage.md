@@ -39,7 +39,7 @@ mnemonic table only. No kernel's, firmware's, bootloader's, emulator's or driver
 (the maintainer booted it); hasu's :9364 server and the maintainer's data were not touched; no label, no merge, no
 issue filed or closed; no attribution trailers.
 
-**Inputs.** Base pax trunk `56b9f554` (px78's head; the branch rebased once onto `3958c5a0`, px77c's notes and `docs/INSTALL-METAL.md` only: every branch sha this note cites is the pre-rebase one, paired with its rebased twin in `notes/px77d/rebase-map.txt`), wolf 0.2.35 (`4cc4045b…`, read twice: `notes/px77d/archive-reads.txt`),
+**Inputs.** Base pax trunk `56b9f554` (px78's head; the branch rebased twice: onto `3958c5a0`, px77c's notes and `docs/INSTALL-METAL.md` only, and onto `e6f6acf7`, px78b's pax#255, with no conflict: every branch sha this note cites is the one current when it was written, paired with its rebased twins in `notes/px77d/rebase-map.txt`), wolf 0.2.35 (`4cc4045b…`, read twice: `notes/px77d/archive-reads.txt`),
 Limine 12.9.1 (`5cdebc51…`, `limine-read-{1,2}.sha256`). hasu block A (CPUs 0-5) under
 `flock /home/mfwolffe/lanes/hasu-block-A.lock`, `localhost/px75-ubuntu:2`, `/dev/kvm` passed in; every job's
 script is under `notes/px77d/hasu/` (`session.sh` holds the lock). One deviation: the first session's wrapper
@@ -167,7 +167,7 @@ contract). Both are this lane's; the third red, mpx6-install noserial, is trunk'
   CI's TCG the N1 points were never resolved at all, so an inlined one could not go red there (`82330140`). Every
   other point is kept.
 
-| run (hasu, block A; `logs/s12/`, `logs/s13/`; `hasu/s12.sh`, `hasu/s13.sh`) | tree | result |
+| run (hasu, block A; `logs/s12/`, `logs/s13/`, `logs/s14/`; `hasu/s12.sh`, `hasu/s13.sh`, `hasu/s14.sh`) | tree | result |
 |---|---|---|
 | J1 kernel-as, both tiers | `23d25bfa` | **red** as CI: K1 x2, K4, K5 native and release, K8 native (`kas-red.log`) |
 | J2 kernel-as, both tiers | `82330140` | green, every row (`kas-green.log`) |
@@ -178,6 +178,16 @@ contract). Both are this lane's; the third red, mpx6-install noserial, is trunk'
 | J7 the old kernel at pci.scan_bus, both tiers, UEFI | `1ced6284` | **red** at the new point, as at the old one: the NMI `PANIC nmi vector 2`, the machine check a reset, in each tier (`nmi-old-scan-bus.log`) |
 | J8 kernel-as, both tiers | `bcc006c6` | green, every row, both tiers (`s13/kas-head.log`) |
 | J9 K8 plant (K8's `want=` alone at 17) | `bcc006c6` | **red**, K8 alone, printing the planted expectation: `18 through WOLF_AS (17)` (`s13/kas-plant-k8-want.log`) |
+| J10 kernel-as, both tiers | `69b49fed` (rebased onto `e6f6acf7`) | green, every row, both tiers: 18 calls a tier (`s14/kas-rebased.log`) |
+| J11 mpx6-nmi both tiers, both firmwares, KVM | `69b49fed` | green: N0, N1 (seven points), N2, release and native, 0 skipped (`s14/nmi-green.log`) |
+| J12 mpx6-nmi both tiers, bios, no KVM (CI's TCG) | `69b49fed` | green: N0, N2 in each tier; N1's seven rows skipped by name in each (`s14/nmi-tcg.log`) |
+
+The rebase onto `e6f6acf7` (px78b's pax#255: `tools/qemu-halt`'s `sym()` reads nm to the end, the pax#254 fix, and
+the installer's one-word `yes`) met no conflict; only README.md's context moved in one commit. Neither side's
+change touches the other's files: the branch changes no line of `tools/qemu-halt` or of `tests/mpx6-install*` and
+`tests/mpx6-kasumi`, and trunk none of `tests/mpx6-{firmware,triage,nmi}*` or `tests/kernel-as*` (`tests/mpx1`,
+`mpx2-interrupts` and `tour`, whose IDT line the branch changed, call `tools/qemu-halt` and get its fix). s14
+(`hasu/s14.sh`) is the two rows' gates at the rebased head.
 
 ## Reproduction
 
@@ -249,4 +259,5 @@ picture.
   Whether kasumi's resets were NMIs, machine checks or neither is the fix stick's to show (FIX.txt).
 - [x] Item 5: the suite (T0-T8) and its plant; the note; the PR and the audit (the hand-back).
 - [x] The addendum (2026-10-30): the labelled run's kernel-as and F11 release rows, each red at `23d25bfa` and green
-  at the head on hasu (above, J1-J9); mpx6-install noserial left to px78b.
+  at the head on hasu (above, J1-J9); mpx6-install noserial left to px78b, whose fix (pax#255) the branch is
+  rebased onto, the two rows' gates green again there (J10-J12).
