@@ -84,7 +84,68 @@ kernel diff is all after box 9 (`kernel/{xhci,usb_storage,block,ahci,vblk,files,
 kmain_console's `block.attach_usb`), none of it reset-shaped. Entry 11 of the triage stick (56b9f554's kernel plus
 the inert hooks, the triage stick's Limine conf, no `cmdline:`) separates (1)-(3) from (4)-(5): if it boots, the
 reset was the old stick's kernel, its conf, or a one-off (one boot each so far); if it resets, the bisection stick
-(below) names which of triage's effects kasumi needs. Entry 11's result was not in at this hand-back.
+(below) names which of triage's effects kasumi needs.
+
+**Entry 11, and the intermittent reset** (the maintainer, 2026-10-30 ~01:40 EDT): "It booted. I chose option 11 and got
+into the login and shell. the first time i tried it rebooted on its own". So the plain 56b9f554 kernel resets *at
+times*: one reset and one boot; triage one boot in one; the 101e7761 stick one reset in one. A reset that comes and
+goes is not a fault in the boot's code (that would fault every time, and triage would have drawn it): it is something
+that **arrives** while the plain kernel cannot take it.
+
+*The window.* Until `interrupts.start` (box 9) the plain kernel runs with IF clear on Limine's empty IDT and CR4.MCE
+clear. Measured on hasu (KVM, the release kernel with TSC stamps, never committed: `notes/px77d/hasu/measure.py`,
+`logs/measure.txt`), at kasumi's 2560x1440 with the live stick's 333-entry archive, 32 GiB, 16 CPUs: the window is
+**876.8 M TSC ticks, 0.244 s** at 3.6 GHz: the early screen 4.6 ms, the frame allocator over 34 GiB 18 ms, the page
+tables 1.5 ms, kernel/fb 2.7 ms, and **the initramfs listing 217 ms (89%): 337 console lines and 248 scrolls**. A
+scroll moves the console's rows up through the framebuffer (`pax_fb_copy`, REP MOVSQ: a read and a write of every
+row). On kasumi's console (90 rows, pitch 16384) each scroll reads 89 x 16 x 16384 = 23.3 MB back from the RTX 4090's
+BAR and writes it again: **about 5.8 GB read and 5.8 GB written through PCIe before PAX's IDT exists**. QEMU's VGA is
+host RAM (about 17 GB/s here); a GPU's BAR read is uncached, so on kasumi the window is the listing's time on the
+screen: about 12 s at 500 MB/s, about 58 s at 100 MB/s. Triage loads its IDT before any of it.
+
+*What can arrive in it with IF clear* (an interrupt request waits for IF; these do not):
+- an **NMI**: LINT1 if the firmware leaves it an unmasked NMI line (virtual-wire mode; QEMU's handover has it
+  masked, `info lapic`: `LVT1 0x00010400 … masked NMI`, and PAX never unmasks it), or an NMI message (an MSI or IPI
+  with delivery mode NMI: the chipset's SERR#/IOCHK/TCO NMI routing, an SMI handler signalling an error, another
+  CPU). With Limine's IDT: #GP, #DF, triple fault, a reset. Triage: drawn (VEC 02) and halted. The fix: logged and
+  survived.
+- a **machine check** (an uncorrected error: a PCIe completion timeout or poisoned read on the GPU's BAR under that
+  read load, memory, the uncore): with CR4.MCE clear the SDM's shutdown, a reset. Triage and the fix: CR4.MCE set,
+  vector 18 on its own stack: drawn (triage) or a named panic with its banks (the fix), never a reset.
+- an **SMI**: taken in SMM whatever PAX does (no IDT involved); its side effects (an SMM handler resetting the
+  platform, the firmware's USB legacy keyboard emulation) are not the kernel's to catch.
+- **INIT**, a TCO watchdog's second expiry, a write to 0xCF9 by SMM: platform resets no IDT can catch.
+- an exception from the code itself: deterministic (the same code and data every boot), so not intermittent; triage
+  would have drawn one.
+So the triage boot's first-act IDT and CR4.MCE turn the two CPU-level causes (NMI, machine check) from a reset into a
+picture, and its 1-in-1 boot neither proves nor rules them out; the plain kernel's 1-in-2 fits either, arriving in a
+window seconds long. It does not fit a code fault.
+
+*The fix* (`022d7dfa`..`9de0d79f`): `interrupts.early()`, kmain_console's first act unless `triage` is on: PAX's GDT,
+TSS and IDT, the NMI's gate on a new IST2 and the machine check's on a new IST3 (16 KiB of .bss each: either can land
+on any stack), and CR4.MCE. The NMI is logged (`nmi: <n> at rip 0x… reason 0x…, continuing`, port 0x61's SERR#/IOCHK
+bits; the first eight) and the interrupted code resumes, whatever ring it was in; a machine check prints `mce:
+MCG_CAP …` and each valid bank (`mce: bank <i> status … addr … misc …`) before its named panic. `interrupts.start`
+does nothing once `early` ran. The IDT's line now names the stacks (`#DF on ist1, NMI on ist2, #MC on ist3`;
+tests/mpx1, mpx2-interrupts and tour follow).
+
+*Proved in QEMU* (`tests/mpx6-nmi`, F11 of the firmware suite; `tests/mpx6-nmi.d/inject.py`): the plain kernel
+frozen under QEMU's gdb stub, a hardware breakpoint at a kernel function, the injection there, the run resumed.
+QMP's `inject-nmi` never reaches the guest (QEMU delivers it through LINT1, masked); the NMI is instead a message, as
+a device's or the chipset's is: the stub, in its physical-memory mode, writes 0x00000400 at 0xFEE00000, an MSI to
+APIC 0 with delivery mode NMI (under KVM; TCG loses the write, so N1 needs KVM and is a counted skip without it). The
+machine check is the monitor's `mce` (bank 1, VAL|UC|EN|PCC), under either accelerator.
+
+| injected at | before the fix (`1ced6284`'s kernel) | with the fix |
+|---|---|---|
+| NMI at serial.init, frames.start, paging.switch_to, fb.start, initramfs.report | **reset** (QEMU ends under -no-reboot), each | survived: `nmi: 1 at rip …, continuing` (before the UART, in the screen's early buffer), the boot to its end |
+| NMI at apic.start, pci.scan | `PANIC nmi vector 2 …`, halted | survived |
+| machine check at frames.start, initramfs.report, pci.scan | **reset**, each | `mce: bank 1 status 0xb2…`, `PANIC machine check vector 18 …` (its frame on IST3), halted |
+
+Before: `logs/nmi-old.log` (UEFI, KVM). After: `logs/nmi-new.log`, every row on BIOS and UEFI (KVM, 21 s). The CI
+plants: `px77d-plant-mce` (triage without CR4.MCE), run 41006095926: red in `mpx6-firmware` alone, F1-F9 passing,
+`FAIL TRIAGE triage: triage sets CR4.MCE {… "tg_e_cr4": "0x20", "cr4": "0x340620" …}`, `FAIL F10 native: the metal
+triage`; `px77d-plant-early` (kmain_console without `early`), run 41012527472 (N2 must reset under CI's TCG).
 
 ## Reproduction
 
