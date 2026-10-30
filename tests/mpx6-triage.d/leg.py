@@ -175,7 +175,7 @@ kind = leg.split('-')[0]
 if kind == 'plain':
     expect(halted == 'pax_halt', 'without triage the kernel halts in pax_halt')
     expect(w['tg_on'] == 0, 'without triage tg_on stays 0')
-    expect(cr4 & MCE == 0, 'without triage CR4.MCE stays clear')
+    expect(cr4 & MCE != 0, 'without triage kernel/interrupts\' early sets CR4.MCE (px77d\'s fix)')
     expect(not has_box(1), 'without triage no box is drawn')
 elif kind in ('triage', 'kasumi'):
     expect(halted == 't_halt', 'triage halts in t_halt (kernel/panic -> triage.halted)')
