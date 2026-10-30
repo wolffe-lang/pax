@@ -116,6 +116,7 @@
 //! other kernel's source.
 
 use boot_info
+use triage
 
 extern "c" fn pax_irq_save() -> u64
 extern "c" fn pax_irq_restore(flags: u64)
@@ -1080,7 +1081,9 @@ pub fn put(b: u8) {
 /// blue 8 bits each at bit `rs`, `gs`, `bs`. Clears it to the default
 /// background, replays the early buffer, draws the cursor. False (and
 /// nothing drawn) when not even one cell fits.
-pub fn attach(va: u64, w: u64, h: u64, pitch: u64, rs: u64, gs: u64, bs: u64) -> bool {
+pub fn attach(va: u64, w: u64, full_h: u64, pitch: u64, rs: u64, gs: u64, bs: u64) -> bool {
+    // px77d: in triage mode the console stops above kernel/triage's band.
+    let h = triage.console_height(full_h)
     let scale: u64 = if w > 2560 { 2 } else { 1 }
     var cols = w / (GW * scale)
     var rows = h / (GH * scale)
@@ -1223,6 +1226,7 @@ pub fn bytes() -> u64 {
 /// serial.init() draws nothing here (mpx1 A6 calls it in a loop).
 pub fn early_start() {
     if sv(S_ON) != 0 || sv(S_BOOT) != 0 { return }
+    if triage.off("nofb") { return } // px77d: the console serial only
     if boot_info.fb_count() == 0 || boot_info.fb_bpp() != 32 || boot_info.fb_model() != 1 { return }
     if boot_info.fb_mask(0, false) != 8 || boot_info.fb_mask(1, false) != 8 || boot_info.fb_mask(2, false) != 8 { return }
     if attach(boot_info.fb_address(), boot_info.fb_width(), boot_info.fb_height(), boot_info.fb_pitch(),
