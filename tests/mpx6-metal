@@ -30,7 +30,10 @@
 # since both clocks count on through it: 30 ms inside the measured window
 # (stall-window), 30 ms between the window's last PM read and its HPET
 # read (stall-edge), 5 s inside it, past the 24-bit PM timer's wrap
-# (stall-long); each still ends `checked against the PM timer`. And it
+# (stall-long); each still ends `checked against the PM timer`, and the
+# kernel's `metal: the HPET's check measured …` line shows the stall was
+# met where it was put: stall-edge took a bracket again, stall-long
+# measured a second window (a first one over 2 s is no verdict). And it
 # must still refuse an HPET whose period lies by a quarter or a fifth
 # (hpet-fast: read 1.25 times, hpet-slow: 0.8 times), which the old
 # 5-20 ms band let through: `clock: HPET … refused`, then the PM timer.
@@ -89,6 +92,12 @@ for fw in ${PAX_METAL_FIRMWARE:-bios uefi}; do
         [ "$source" != HPET ] || grep -aq '^clock: HPET .*, checked against the PM timer' "$work/$fw-$leg.log" || fail "$fw-$leg" "the HPET was not checked against the PM timer"
         [ "$leg" != x2apic ] || grep -aq '^apic: x2APIC mode ' "$work/$fw-$leg.log" || fail "$fw-$leg" "the tick did not run in x2APIC mode"
         case $leg in hpet-*) grep -aq '^clock: HPET .*; refused' "$work/$fw-$leg.log" || fail "$fw-$leg" "the lying HPET was not refused by name";; esac
+        case $leg in
+            stall-edge) grep -aqE "^metal: the HPET's check measured 1 window\(s\) and took [1-9][0-9]* bracket\(s\) again" "$work/$fw-$leg.log" \
+                || fail "$fw-$leg" "the stall inside the closing bracket did not make the check take it again";;
+            stall-long) grep -aqE "^metal: the HPET's check measured 2 window\(s\)" "$work/$fw-$leg.log" \
+                || fail "$fw-$leg" "the 5 s window was not measured again";;
+        esac
         tr -d '\r' < "$work/$fw-$leg.log" | grep -aE '^(clock|timer|metal): |^apic: x2APIC|^PASS METAL LAPIC tick rate'
         echo "PASS METAL firmware $fw $leg"
     done
