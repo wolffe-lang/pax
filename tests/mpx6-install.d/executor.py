@@ -95,4 +95,4 @@ with tempfile.TemporaryDirectory(dir=work,prefix='wipe-') as tmp:
             for r in records:
                 if r['state']=='started':assert r['detail']=='zero '+' '.join(f'[{a},{b})' for a,b in ranges[r['phase']]),r
             disk.unlink()
-            print(f'PASS I-{only}: {n} bytes: '+'; '.join(f'{k} '+' '.join(f'[{a},{b})' for a,b in ranges[k]) for k in names)+' zeroed and nothing else; the log holds its records alone',flush=True)
+            print(f'PASS I-{"zero-all" if only == "all" else only}: {n} bytes: '+'; '.join(f'{k} '+' '.join(f'[{a},{b})' for a,b in ranges[k]) for k in names)+' zeroed and nothing else; the log holds its records alone',flush=True)
