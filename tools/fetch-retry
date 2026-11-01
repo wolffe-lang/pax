@@ -1,0 +1,104 @@
+#!/bin/sh
+# tools/fetch-retry — fetch one pinned source revision with git, trying
+# again a bounded number of times when the network drops it (px85,
+# pax#259). Every source fetch of the harness goes through it: the tree()
+# helpers of tools/mk{aspen,boreutils,clef,lobo,lope,pelt,scent,yew}, the
+# std fetches of tools/mk{edwolf,sigwolf,su}, tools/mklupin, tools/mkwolf,
+# tools/mkwolf-std, tools/fetch-wolf and the census's
+# tools/census/inside/stage.sh (tests/fetch-retry-selftest checks all 16).
+#
+#   tools/fetch-retry DIR REPO REFSPEC [SHA]
+#
+# Runs `git -C DIR fetch -q --depth 1 REPO REFSPEC` at most 3 times, 10 s
+# after the first failure and 30 s after the second, with the transfer
+# held to a floor (http.lowSpeedLimit 1000 bytes/s over http.lowSpeedTime
+# 60 s), so a transfer that stalls ends as a timeout and is tried again
+# instead of hanging to the job's own limit. It tries again only on these
+# classes, read from git's and curl's own words on stderr:
+#   reset    the connection reset or dropped mid-transfer (`Connection
+#            reset by peer`, `unexpected disconnect`, `early EOF`, `the
+#            remote end hung up unexpectedly`, `transfer closed with
+#            outstanding read data`, `Empty reply from server`, curl 18,
+#            52, 55, 56, 92: pax#259's `curl 56 Recv failure`)
+#   connect  no connection made (`Could not resolve host`, `Failed to
+#            connect to`, `Couldn't connect to server`, `Connection
+#            refused`, `Network is unreachable`, `Temporary failure in name
+#            resolution`, curl 6 and 7)
+#   timeout  `Operation timed out`, `Connection timed out`, `Operation too
+#            slow` (the floor above), curl 28
+#   tls      the TLS session dropped (`GnuTLS recv error`,
+#            `gnutls_handshake() failed`, `SSL_read`, `SSL_ERROR_SYSCALL`,
+#            `OpenSSL SSL_connect`, curl 35)
+#   server   GitHub's own failure (an HTTP 5xx) or its rate limit (429)
+# Anything else stops at the first attempt and says so (`not retried`):
+# a revision the server does not have (`not our ref`, `couldn't find
+# remote ref`, an unadvertised object), a repository that is not there, a
+# refusal (any other HTTP 4xx), a local error. Those are checked first,
+# so a refusal is never retried whatever else its message says.
+#
+# With SHA, the commit fetched (FETCH_HEAD) is compared with it after the
+# fetch that succeeded: another commit is refused (`refused: fetched …`)
+# and never fetched again, since the pin is the digest. Each caller still
+# checks out and compares HEAD with its pin as before.
+#
+# Each failed attempt is said on stderr with its class and the wait:
+# `fetch-retry: REPO REFSPEC: attempt 1 of 3 failed (reset); again in 10 s`.
+# Exit 0 fetched (and the commit is SHA's); 3 the network failed every
+# attempt; 4 not retried; 5 the wrong commit; 2 usage.
+#
+# POSIX sh (the census container's stage.sh runs it under /bin/sh); it
+# needs git and sleep, nothing else.
+set -u
+[ $# -ge 3 ] && [ $# -le 4 ] || { echo 'usage: fetch-retry DIR REPO REFSPEC [SHA]' >&2; exit 2; }
+dir=$1 repo=$2 ref=$3 want=${4:-}
+attempts=3
+err=$(mktemp "${TMPDIR:-/tmp}/fetch-retry.XXXXXX") || exit 2
+trap 'rm -f "$err"' EXIT
+
+# The class of a failed attempt's stderr, or nothing: not retried.
+classify() {
+    if grep -Eq "not our ref|couldn.t find remote ref|unadvertised object|[Rr]epository not found|repository '.*' not found|returned error: 4([0-1][0-9]|2[0-8]|[3-9][0-9])|HTTP 4([0-1][0-9]|2[0-8]|[3-9][0-9])|Authentication failed|could not read Username|invalid refspec|not a git repository" "$1"; then
+        return 0
+    fi
+    if grep -Eq "Connection reset by peer|unexpected disconnect|early EOF|remote end hung up unexpectedly|transfer closed with outstanding read data|Empty reply from server|curl (18|52|55|56|92)[^0-9]" "$1"; then
+        echo reset
+    elif grep -Eq "Could not resolve host|Failed to connect to|Couldn.t connect to server|Connection refused|Network is unreachable|Temporary failure in name resolution|curl (6|7)[^0-9]" "$1"; then
+        echo connect
+    elif grep -Eq "Operation timed out|Connection timed out|Operation too slow|curl 28[^0-9]" "$1"; then
+        echo timeout
+    elif grep -Eq "GnuTLS recv error|gnutls_handshake\(\) failed|SSL_read|SSL_ERROR_SYSCALL|OpenSSL SSL_connect|curl 35[^0-9]" "$1"; then
+        echo tls
+    elif grep -Eq "returned error: (5[0-9][0-9]|429)|HTTP (5[0-9][0-9]|429)" "$1"; then
+        echo server
+    fi
+}
+
+n=1
+while :; do
+    status=0
+    git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 -C "$dir" fetch -q --depth 1 "$repo" "$ref" 2>"$err" || status=$?
+    cat "$err" >&2
+    [ "$status" = 0 ] && break
+    class=$(classify "$err")
+    if [ -z "$class" ]; then
+        echo "fetch-retry: $repo $ref: attempt $n of $attempts failed (git exit $status), not a network error: not retried" >&2
+        exit 4
+    fi
+    if [ "$n" -ge "$attempts" ]; then
+        echo "fetch-retry: $repo $ref: gave up after $attempts attempts, the last one $class (git exit $status)" >&2
+        exit 3
+    fi
+    if [ "$n" = 1 ]; then pause=10; else pause=30; fi
+    echo "fetch-retry: $repo $ref: attempt $n of $attempts failed ($class); again in $pause s" >&2
+    sleep "$pause"
+    n=$((n + 1))
+done
+if [ -n "$want" ]; then
+    got=$(git -C "$dir" rev-parse -q --verify 'FETCH_HEAD^{commit}' 2>/dev/null || true)
+    if [ "$got" != "$want" ]; then
+        echo "fetch-retry: $repo $ref: refused: fetched ${got:-nothing}, the pin says $want" >&2
+        exit 5
+    fi
+fi
+[ "$n" = 1 ] || echo "fetch-retry: $repo $ref: fetched on attempt $n of $attempts" >&2
+exit 0
