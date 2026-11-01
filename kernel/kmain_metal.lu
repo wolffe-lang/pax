@@ -66,6 +66,15 @@ export fn kmain() {
     }
     apic.start(pml4)
     apic.report()
+    // px85 (pax#260): the HPET's check under a stall, and with a period
+    // that lies (tests/mpx6-metal's stall-* and hpet-* legs). 107386 PM
+    // ticks are 30 ms of 3.579545 MHz; 17897725 are 5 s, past the 24-bit
+    // PM timer's 4.69 s wrap.
+    if boot_info.cmdline_has("metal_stall_window") { clock.test_stall(1, 107386) }
+    if boot_info.cmdline_has("metal_stall_edge") { clock.test_stall(2, 107386) }
+    if boot_info.cmdline_has("metal_stall_long") { clock.test_stall(1, 17897725) }
+    if boot_info.cmdline_has("metal_hpet_fast") { clock.test_period(1250) }
+    if boot_info.cmdline_has("metal_hpet_slow") { clock.test_period(800) }
     clock.start()
     timer.start()
     fb.report()
