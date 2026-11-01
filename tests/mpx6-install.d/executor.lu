@@ -1,7 +1,26 @@
 //! Exercises the exact executor with a regular log fixture, never a device.
 
+/// px86: the plan's zero phases (all, or the one named), run by the
+/// executor's own zero_ranges on a regular file of BYTES bytes standing in
+/// for the target, its log reservation the phase log as on a disk.
+fn wipe_witness(path: str, bytes: str, only: str) -> int {
+    let n = bytes.to_int() else |_| { return 2 }
+    let t = Target { name: "vdb", identity: "254:16-seq2", bytes: n, sector: 512, readonly: false, mounted: false, running_root: false }
+    let p = make_plan(t, "test", "pax", "no") else |e| { eprint("executor: plan {e}"); return 2 }
+    let fd = fs_open_mode(path, 3) else |_| { return 2 }
+    defer fs_close(fd) else |_| {}
+    var used = 0
+    var lg = no_log("executor wipe witness: no stick")
+    for w in wipes(p) {
+        if only != "all" && w.phase != only { continue }
+        zero_ranges(mut lg, fd, mut used, w) else |e| { eprint("executor: {e}"); return 1 }
+    }
+    0
+}
+
 fn main() -> int {
     let args = env_args()
+    if args.len == 4 && args[0] == "--wipe" { return wipe_witness(args[1], args[2], args[3]) }
     if args.len != 4 { return 2 }
     let fd = fs_open_mode(args[0], 3) else |_| { return 2 }
     defer fs_close(fd) else |_| {}
