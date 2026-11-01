@@ -18,10 +18,24 @@
 //!   13; §2.3.6 ENABLE_CNF set and LEG_RT_CNF clear; §2.3.8 the main
 //!   counter), at the address the ACPI HPET table gives, mapped at
 //!   HPET_VA. It must advance, and where the FADT names an ACPI PM timer
-//!   that advances it must agree with it: 10 ms of the PM timer (35795
-//!   ticks) must read between 5 and 20 ms on the HPET, or the HPET is
-//!   refused on a line of its own (a wrong-unit period or a lying table
-//!   on metal, px76's HPET plant, never a hang);
+//!   that advances it must agree with it over one interval both clocks
+//!   measured (px85, pax#260): each end of a window of at least 10 ms of
+//!   the PM timer (35795 ticks) is pinned between two PM reads with the
+//!   HPET read between them (a bracket, taken again until its PM reads lie
+//!   at most 36 ticks, 10 us, apart), and the HPET's time across the
+//!   window must lie within 1% of the PM interval those brackets bound
+//!   (R-px85-1). A stall anywhere, a vCPU's on a shared host or an SMI on
+//!   metal, lengthens both clocks' counts alike, so it refuses neither:
+//!   inside the window it is measured, inside a bracket the bracket is
+//!   taken again, and a window longer than 2 s (the 24-bit PM timer wraps
+//!   at 4.69 s) is measured again, three windows at most. Why 1%: IA-PC
+//!   HPET 1.0a §2.4.1 rule 1 allows the HPET 0.05% over any interval of
+//!   1 ms or more; ACPI 6.5 §4.8.2.1 calls the PM timer accurate and
+//!   gives no figure; the brackets add at most 72 PM ticks, 0.2% of the
+//!   window. 1% is five times the brackets' error and twenty times the
+//!   HPET's own, and refuses a period that lies by a quarter or a fifth
+//!   (or reads 14.318 MHz for 24 MHz) as well as a wrong unit (px76's
+//!   HPET plant), each on a line of its own, never a hang;
 //! - else the ACPI PM timer (ACPI 6.5 §4.8.3.3: 3.579545 MHz, 24 or 32
 //!   bits by the FADT's TMR_VAL_EXT flag), if it advances;
 //! - else the PIT's channel 0 read back (8254 mode 2, divisor 65535): its
@@ -60,6 +74,19 @@ var fraction: u64 = 0
 var stall_at: u64 = 0
 var stall_ticks: u64 = 0
 var period_scale: u64 = 1000
+// px85: the HPET's check against the PM timer (the header; R-px85-1).
+const WINDOW: u64 = 35795 // 10.000 ms of 3.579545 MHz (ACPI 6.5 §4.8.2.1)
+const BRACKET: u64 = 36 // a bracket's two PM reads at most 10 us apart
+const BRACKET_TRIES: u64 = 64 // brackets taken at one end before no verdict
+const WINDOWS: u64 = 3 // windows measured before the HPET is refused unmeasured
+const LONGEST_NS: u64 = 2000000000 // a longer window may hide a PM wrap
+const PERMILLE: u64 = 10 // R-px85-1: 1% either way
+// The last window's numbers, for the line that refuses, and how many
+// windows and retaken brackets the check needed (kernel/kmain_metal).
+var check_hpet_ns: u64 = 0
+var check_pm_ns: u64 = 0
+var check_windows: u64 = 0
+var check_retaken: u64 = 0
 fn read32(a: u64) -> u64 { unsafe { (a as *u32).read_volatile() as u64 } }
 fn write32(a: u64, v: u64) { unsafe { (a as *u32).write_volatile(v as u32) } }
 fn raw() -> u64 {
@@ -124,24 +151,66 @@ fn pm_advances() -> bool {
     false
 }
 
-/// The HPET's nanoseconds across 35795 PM ticks (10.000 ms, ACPI 6.5
-/// §4.8.3.3), the window opened on a PM edge; 0 when the PM timer stops
-/// moving inside it (no verdict).
-fn hpet_ns_per_10ms() -> u64 {
+/// PM ticks from `a` to `b`, across the counter's wrap.
+fn pm_since(a: u64, b: u64) -> u64 {
     let m = acpi.pm_mask()
-    let first = pm()
-    var a = pm()
-    var n: u64 = 0
-    while a == first && n < 1000000 { a = pm(); n += 1 }
-    let t0 = now_ns()
-    stall(1)
-    var b = a
-    n = 0
-    while ((b + m + 1 - a) & m) < 35795 && n < 100000000 { b = pm(); n += 1 }
-    stall(2)
-    let t1 = now_ns()
-    if ((b + m + 1 - a) & m) < 35795 { 0 } else { t1 - t0 }
+    (b + m + 1 - a) & m
 }
+
+/// PM ticks as nanoseconds (3.579545 MHz).
+fn pm_ns(ticks: u64) -> u64 { ticks * 1000000000 / 3579545 }
+
+/// One end of the measured interval: a PM read, the HPET's main counter,
+/// a PM read, taken again until the two PM reads lie at most BRACKET
+/// ticks apart (the HPET's reading then lies between them). `at` is the
+/// test words' stall point (0: none). (tight, first PM, HPET, last PM).
+fn bracket(at: u64) -> (bool, u64, u64, u64) {
+    var n: u64 = 0
+    while n < BRACKET_TRIES {
+        let p = pm()
+        stall(at)
+        let h = raw()
+        let q = pm()
+        if pm_since(p, q) <= BRACKET { return (true, p, h, q) }
+        unsafe { check_retaken += 1 }
+        n += 1
+    }
+    (false, 0, 0, 0)
+}
+
+/// One window (px85, pax#260): the HPET's time and the PM timer's across
+/// the same interval, at least WINDOW PM ticks long, each end bracketed.
+/// 0: they agree within PERMILLE thousandths; 1: they do not
+/// (`check_hpet_ns` and `check_pm_ns` say by how much); 2: no verdict (a
+/// bracket never tight, the PM timer stopped, or the window too long to
+/// trust the PM count across its wrap).
+fn measure() -> u64 {
+    let (ok0, p0, h0, q0) = bracket(0)
+    if !ok0 { return 2 }
+    stall(1)
+    var b = q0
+    var n: u64 = 0
+    while pm_since(p0, b) < WINDOW && n < 100000000 { b = pm(); n += 1 }
+    if pm_since(p0, b) < WINDOW { return 2 }
+    let (ok1, p1, h1, q1) = bracket(2)
+    if !ok1 { return 2 }
+    let m = unsafe { mask }
+    let ticks = if h1 >= h0 { h1 - h0 } else { (m - h0) + h1 + 1 }
+    let fs = unsafe { period }
+    let hns = (ticks / 1000000) * fs + (ticks % 1000000) * fs / 1000000
+    // The PM interval the HPET's two readings lie within: from the opening
+    // bracket's last PM read to the closing one's first, at the least; from
+    // its first to the closing one's last, at the most.
+    let lo = pm_ns(pm_since(q0, p1))
+    let hi = pm_ns(pm_since(p0, q1))
+    unsafe { check_hpet_ns = hns; check_pm_ns = (lo + hi) / 2 }
+    if hns > LONGEST_NS || hi > LONGEST_NS { return 2 }
+    if hns * 1000 >= lo * (1000 - PERMILLE) && hns * 1000 <= hi * (1000 + PERMILLE) { 0 } else { 1 }
+}
+
+/// How many windows the HPET's check measured and how many brackets it
+/// took again (kernel/kmain_metal prints them for tests/mpx6-metal).
+pub fn check_counts() -> (u64, u64) { (unsafe { check_windows }, unsafe { check_retaken }) }
 
 fn begin() { unsafe { previous = raw(); elapsed = 0; fraction = 0 } }
 
@@ -167,13 +236,23 @@ pub fn start() {
             say(); log.line(", unchecked: no PM timer")
             return
         }
-        let ns = hpet_ns_per_10ms()
-        if ns >= 5000000 && ns <= 20000000 {
+        var verdict: u64 = 2
+        while verdict == 2 && unsafe { check_windows } < WINDOWS {
+            verdict = measure()
+            unsafe { check_windows += 1 }
+        }
+        if verdict == 0 {
             say(); log.line(", checked against the PM timer")
             return
         }
-        say(); log.put(" read "); log.dec(ns as int)
-        log.line(" ns across 10 ms of the PM timer; refused")
+        say()
+        if verdict == 1 {
+            log.put(" read "); log.dec(unsafe { check_hpet_ns } as int)
+            log.put(" ns across "); log.dec(unsafe { check_pm_ns } as int)
+            log.line(" ns of the PM timer, more than 1% apart; refused")
+        } else {
+            log.line(": no window measured cleanly against the PM timer in 3; refused")
+        }
         unsafe { source = 0 }
     }
     unsafe { source = 2; period = 3579545; mask = acpi.pm_mask() }
