@@ -1783,3 +1783,25 @@ Measured on the same machines (`/mnt/steamlib/lanes/px76/measure.sh`, its `MEASU
   with delivery mode NMI under KVM, lost under TCG; the monitor's `mce` injects a machine check under either
   (`tests/mpx6-nmi.d/inject.py`).
 - No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source.
+
+## px85 — the flakes
+
+- **IA-PC HPET 1.0a** (the same Intel document px76 cites; read again, sha256 `93d98386…` of the PDF as fetched
+  2026-11-01): §2.2 (the minimum recommended implementation: the drift `+- .05 % (500 ppm)` over any interval of
+  1 ms or more, `+- .2 %` within 100 us), §2.3.4 (COUNTER_CLK_PERIOD at most 10^8 fs), §2.4.1 rule 1 (accurate to
+  within 0.05% over any 1 ms period) and rule 2 (up to 2 ticks early or late within 100 us). `kernel/clock`'s bound,
+  R-px85-1: 1% of the measured PM interval.
+- **ACPI 6.5** [chapter 4](https://uefi.org/specs/ACPI/6.5/04_ACPI_Hardware_Specification.html) §4.8.2.1 (the PM
+  timer "provides an accurate time value", a 24- or 32-bit count of a 3.579545 MHz clock; no tolerance is given) and
+  §4.8.3.3 (TMR_VAL, TMR_VAL_EXT): the window's 35795 ticks, the 24-bit wrap at 4.69 s behind the 2 s bound.
+- **QEMU 8.2.2 as a black box**: the HPET and the PM timer keep counting through a host stall of the vCPU, while
+  the guest's LAPIC ticks coalesce (F8's transcripts from CI run 41153232393 and from `tests/mpx6-firmware.d/stall`:
+  the guest's repeat stamps and its clock line).
+- **QMP** (QEMU's documented machine protocol): `memsave` of boot/isr.S's `pax_tick_count` to hold the repeat row
+  for 100 guest ticks; `input-send-event` for the press and the release.
+- **git's documented options** (`git-config(1)`: `http.lowSpeedLimit`, `http.lowSpeedTime`) and the error words
+  git and curl print, as observed (pax#259's `curl 56 Recv failure`) and as the selftest's local `file://` fetch
+  prints them; `tools/fetch-retry`.
+- **The pipe shape** (pax#256): POSIX's awk `exit` and SIGPIPE on a write to a closed pipe, as px78b measured them
+  (`notes/px78b-the-one-word-confirmation.md` §4); no awk's or nm's source.
+- No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source.
