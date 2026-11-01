@@ -697,9 +697,11 @@ transcript). `memory:` totals every map entry (QEMU's map has a 12 GiB reserved 
 reclaimable memory). On a machine with a serial port the console's line says `com1 irq 4 vector
 36`, without one `com1 absent`.
 
-`clock:` names the HPET only after 10 ms of the ACPI PM timer read 5 to 20 ms
-on it (else `…; refused` and `clock: PM 3579545 Hz`); with neither, `clock:
-PIT 1193182 Hz`. `timer:` is the local APIC timer's rate at divide 16, measured
+`clock:` names the HPET only after it agrees with the ACPI PM timer within 1%
+across one interval both clocks measured, at least 10 ms of the PM timer, each
+end pinned between two PM reads (px85, R-px85-1: a stall inside the interval,
+a vCPU's or an SMI's, lengthens both and refuses neither); else `…; refused`
+and `clock: PM 3579545 Hz`; with neither, `clock: PIT 1193182 Hz`. `timer:` is the local APIC timer's rate at divide 16, measured
 over 20 ms of that clock, ticking at 100 Hz on vector 32. A local APIC handed
 over in x2APIC mode adds `apic: x2APIC mode …` and is reached by MSR.
 
