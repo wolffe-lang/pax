@@ -13,11 +13,49 @@ KEYS = ['a', 'shift-a', 'shift-up', 'ctrl-left', 'a-b-c-d-e-f',
         'caps_lock', 'a', 'caps_lock', 'kp_enter', 'alt-x', 'a', None, None, None,
         'shift-down', 'shift-left', 'shift-right', 'q']
 
+# px85 (pax#261): row 10 holds `a` for 100 ticks of the guest's own 10 ms
+# clock, read from PAX's memory (boot/isr.S's pax_tick_count) through QMP,
+# not for a second of the host's: PAX's software repeat, its poll timeout
+# and its CLOCK_MONOTONIC all count those ticks, and a stalled vCPU loses
+# ticks while the host's clock runs on, so a wall-clock hold shortened the
+# hold the guest saw (run 41153232393 attempt 2: 6 reports). At 250 ms
+# then 33 ms a report, 100 ticks give 24 or 25; at least 15 are wanted.
+# The Linux guest (no symbols to read) keeps the 1000 ms wall-clock hold.
+HOLD_TICKS = 100
+HOLD_WALL_SECONDS = 30
+MIN_REPORTS = 15
+# Bytes that are `a` with a modifier still applied (the console's own
+# encodings: Shift or Caps Lock, Ctrl, Alt's ESC prefix).
+MODIFIED_A = {'41': 'Shift or Caps Lock', '01': 'Ctrl', '1b': 'Alt (an ESC prefix)'}
+
+
+def repeat_verdict(row, hold):
+    """The repeat row's verdict, by name (px85: three ways it can fail).
+
+    `row` is the guest's `USBROW repeat-a …` line; `hold` says how long the
+    key was held (`100 guest ticks`, or `1000 ms of wall clock`). Raises
+    RuntimeError naming the fault: `stuck modifier`, `wrong key` or
+    `repeat lost`; returns the reports otherwise."""
+    values = row.split()[2:]
+    if values == ['none']:
+        values = []
+    for v in values:
+        if v in MODIFIED_A:
+            raise RuntimeError(f'stuck modifier: {MODIFIED_A[v]} survived into the repeat row '
+                               f'(byte {v} where 61 is `a`): {row!r}')
+    for v in values:
+        if v != '61':
+            raise RuntimeError(f'wrong key: byte {v} in the repeat row, where only 61 (`a`) was held: {row!r}')
+    if len(values) < MIN_REPORTS:
+        raise RuntimeError(f'repeat lost: {len(values)} reports in a hold of {hold}, '
+                           f'at least {MIN_REPORTS} wanted: {row!r}')
+    return values
+
 
 def run(args):
     out = Path(args.output).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    for result in ('rows.txt', 'repeat.txt'):
+    for result in ('rows.txt', 'repeat.txt', 'ticks.bin'):
         (out / result).unlink(missing_ok=True)
     serial = out / 'serial.log'
     sock = out / 'qmp.sock'
@@ -32,15 +70,22 @@ def run(args):
     # --high-bar, --display-mode=WxH), before the image.
     for flag in reversed(args.flag):
         cmd.insert(1, flag)
-    if args.no_serial:
-        if args.linux_kernel: raise RuntimeError('--no-serial is the PAX memory-log witness only')
-        cmd.insert(1, '--no-serial')
+    addresses = {}
+    if not args.linux_kernel:
+        # PAX's own words, read through QMP: the repeat row's hold counts
+        # pax_tick_count (px85); --no-serial's transcript is pax_serial_log.
         elf=Path(args.elf).resolve() if args.elf else Path(args.image).resolve().parent/'kmain_console.elf'
         symbols=subprocess.check_output(['nm',str(elf)],text=True)
         addresses={name:int(address,16)-(1<<64) for address,kind,name in
                    (line.split() for line in symbols.splitlines() if len(line.split())==3)
-                   if name in ('pax_serial_log_count','pax_serial_log')}
-        if len(addresses)!=2: raise RuntimeError('missing bounded serial-less log symbols')
+                   if name in ('pax_serial_log_count','pax_serial_log','pax_tick_count')}
+        if 'pax_tick_count' not in addresses:
+            raise RuntimeError(f'no pax_tick_count in {elf}: the repeat row is held for the guest\'s ticks (--elf)')
+    if args.no_serial:
+        if args.linux_kernel: raise RuntimeError('--no-serial is the PAX memory-log witness only')
+        cmd.insert(1, '--no-serial')
+        if 'pax_serial_log_count' not in addresses or 'pax_serial_log' not in addresses:
+            raise RuntimeError('missing bounded serial-less log symbols')
         (out/'capture.txt').write_text('No UART. Transcript read from PAX memory through QMP; framebuffer drawn normally.\n')
     cmd += args.qemu
     # A blank virtual USB3 disk beside the keyboard: px74 logged it as
@@ -106,6 +151,33 @@ def run(args):
                 data=(out/'capture.bin').read_bytes()
                 serial.write_bytes(data)
                 return data
+
+            def guest_ticks():
+                execute('memsave', {'val':addresses['pax_tick_count'],'size':8,'filename':str(out/'ticks.bin')})
+                return int.from_bytes((out/'ticks.bin').read_bytes(),'little')
+
+            def hold_for_ticks(execute):
+                # px85 (pax#261): press, wait for HOLD_TICKS of the guest's
+                # own ticks, release; a stall lengthens the wall-clock hold
+                # with the ticks it costs the guest.
+                def key(down):
+                    execute('input-send-event', {'events':[{'type':'key', 'data':{
+                        'down':down, 'key':{'type':'qcode','data':'a'}}}]})
+                first = guest_ticks()
+                key(True)
+                until = time.monotonic() + HOLD_WALL_SECONDS
+                while True:
+                    now = guest_ticks()
+                    if now - first >= HOLD_TICKS:
+                        break
+                    if time.monotonic() > until:
+                        key(False)
+                        raise RuntimeError(f'repeat hold: the guest counted {now - first} of {HOLD_TICKS} ticks '
+                                           f'in {HOLD_WALL_SECONDS} s of wall clock')
+                    time.sleep(.01)
+                key(False)
+                return now - first
+            hold = None
             sent = 0
             while time.monotonic() - start < 110:
                 text = transcript()
@@ -142,6 +214,8 @@ def run(args):
                                 execute('input-send-event', {'events':[{'type':'key', 'data':{
                                     'down':down, 'key':{'type':'qcode','data':'a'}}}]})
                                 time.sleep(.020)
+                    elif sent == 10 and not args.linux_kernel:
+                        hold = hold_for_ticks(execute)
                     else:
                         monitor(f'sendkey {KEYS[sent]} {1000 if sent == 10 else 50}')
                     sent += 1
@@ -194,9 +268,7 @@ def run(args):
             raise RuntimeError(f'USB required edge missing: {rows[index]!r}, expected {expected!r}')
     # Repeat counts depend on scheduling; compare byte values separately.
     normalized = ['USBROW repeat-a 61' if line.startswith('USBROW repeat-a ') else line for line in rows]
-    repeat = rows[10].split()[2:]
-    if len(repeat) < 15 or any(v != '61' for v in repeat):
-        raise RuntimeError('repeat lost, stuck modifier, or wrong key')
+    repeat = repeat_verdict(rows[10], f'{hold} guest ticks' if hold is not None else '1000 ms of wall clock')
     stamps = list(map(int, times[0].split()[1:]))
     if len(stamps) != len(repeat) or stamps[0] != 0:
         raise RuntimeError('repeat timestamp shape')
@@ -207,7 +279,8 @@ def run(args):
     if not 220 <= delay <= 320 or not 20 <= median <= 45 or not 31 <= mean <= 37:
         raise RuntimeError(f'repeat outside measured tolerance: {delay=} {median=} {mean=}')
     (out / 'rows.txt').write_text('\n'.join(normalized)+'\n')
-    (out / 'repeat.txt').write_text(f'delay_ms {delay:.3f}\nmedian_period_ms {median:.3f}\nmean_period_ms {mean:.3f}\nreports {len(repeat)}\n')
+    held = f'hold_ticks {hold}\n' if hold is not None else 'hold_wall_ms 1000\n'
+    (out / 'repeat.txt').write_text(f'delay_ms {delay:.3f}\nmedian_period_ms {median:.3f}\nmean_period_ms {mean:.3f}\nreports {len(repeat)}\n{held}')
     if args.reference:
         expected = Path(args.reference).read_text().splitlines()
         if normalized != expected:
