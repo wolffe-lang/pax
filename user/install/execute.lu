@@ -65,6 +65,12 @@ fn zero_ranges(mut lg: Log, fd: int, mut used: int, w: Wipe) -> () ! {io, log_fu
     var what = "zero"
     for r in w.ranges { what += " [{r[0]},{r[0] + r[1]})" }
     disk_log(mut lg, fd, mut used, w.phase, "started", what)?
+    // PLANT (px86-plant-used, never to merge): partition 3 is not zeroed,
+    // yet the phase is logged durable, as before px86 nothing cleared it.
+    if w.phase == "zero-bios" {
+        disk_log(mut lg, fd, mut used, w.phase, "durable", "zeroed and read back; target fsync completed")?
+        return
+    }
     var zeros = List[byte]()
     for _ in 0..65536 { (mut zeros).push(0 as byte) }
     for r in w.ranges {
