@@ -164,8 +164,9 @@ def run(args):
                     execute('input-send-event', {'events':[{'type':'key', 'data':{
                         'down':down, 'key':{'type':'qcode','data':'a'}}}]})
                 first = guest_ticks()
+                began = time.monotonic()
                 key(True)
-                until = time.monotonic() + HOLD_WALL_SECONDS
+                until = began + HOLD_WALL_SECONDS
                 while True:
                     now = guest_ticks()
                     if now - first >= HOLD_TICKS:
@@ -176,8 +177,8 @@ def run(args):
                                            f'in {HOLD_WALL_SECONDS} s of wall clock')
                     time.sleep(.01)
                 key(False)
-                return now - first
-            hold = None
+                return now - first, time.monotonic() - began
+            hold = hold_wall = None
             sent = 0
             while time.monotonic() - start < 110:
                 text = transcript()
@@ -215,7 +216,7 @@ def run(args):
                                     'down':down, 'key':{'type':'qcode','data':'a'}}}]})
                                 time.sleep(.020)
                     elif sent == 10 and not args.linux_kernel:
-                        hold = hold_for_ticks(execute)
+                        hold, hold_wall = hold_for_ticks(execute)
                     else:
                         monitor(f'sendkey {KEYS[sent]} {1000 if sent == 10 else 50}')
                     sent += 1
@@ -279,7 +280,7 @@ def run(args):
     if not 220 <= delay <= 320 or not 20 <= median <= 45 or not 31 <= mean <= 37:
         raise RuntimeError(f'repeat outside measured tolerance: {delay=} {median=} {mean=}')
     (out / 'rows.txt').write_text('\n'.join(normalized)+'\n')
-    held = f'hold_ticks {hold}\n' if hold is not None else 'hold_wall_ms 1000\n'
+    held = f'hold_ticks {hold}\nhold_wall_s {hold_wall:.3f}\n' if hold is not None else 'hold_wall_ms 1000\n'
     (out / 'repeat.txt').write_text(f'delay_ms {delay:.3f}\nmedian_period_ms {median:.3f}\nmean_period_ms {mean:.3f}\nreports {len(repeat)}\n{held}')
     if args.reference:
         expected = Path(args.reference).read_text().splitlines()
