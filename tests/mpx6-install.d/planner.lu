@@ -115,4 +115,37 @@ fn main() {
     assert(!plan_body(p).contains("confirmation"))
     assert(plan_text(p) == plan_body(p) + "confirmation ERASE /dev/vdb 254:16-seq2 536870912 test\n")
     print("PASS I-plan-record: the screen's plan asks nothing; the record keeps the token")
+    // px86: the zero phases, after the table and before any formatter or
+    // Limine, each named by the plan: partition 3 whole (where the 860's
+    // old file system made Limine refuse), the first and last MiB of 1 and
+    // 2, the first MiB outside the table and the log, the tail before the
+    // backup table. Exact on the 512 MiB plan; on every size disjoint, and
+    // clear of the tables, the log and the backup.
+    let w = wipes(p)
+    assert(w.len == 4)
+    assert(w[0].phase == "zero-bios" && w[1].phase == "zero-esp" && w[2].phase == "zero-root" && w[3].phase == "zero-gap")
+    assert(wipe_text(w[0]) == "zero-bios [1048576,2097152)")
+    assert(wipe_text(w[1]) == "zero-esp [2097152,3145728) [68157440,69206016)")
+    assert(wipe_text(w[2]) == "zero-root [69206016,70254592) [535801856,536850432)")
+    assert(wipe_text(w[3]) == "zero-gap [17408,65536) [131072,1048576) [536850432,536854016)")
+    for x in w { assert(plan_body(p).contains(wipe_text(x) + " (")) }
+    // A disk whose tail is the backup table alone has no slack range.
+    let snug = make_plan(target("vdb", 536850432 + 16896), "test", "pax", "no") else |_| { assert(false); return }
+    assert(wipe_text(wipes(snug)[3]) == "zero-gap [17408,65536) [131072,1048576)")
+    for bytes in [ROOT_START + ROOT_MIN + 33 * 512, 536867328, 1000204886016, 4000787030016, 18691697672192] {
+        let q = make_plan(target("vdb", bytes), "big", "pax", "no") else |_| { assert(false); return }
+        var spans = List[List[int]]()
+        for x in wipes(q) { for r in x.ranges { (mut spans).push(copy r) } }
+        for i in 0..spans.len {
+            let a = spans[i]
+            assert(a[1] > 0)
+            assert(a[0] >= 17408 && a[0] + a[1] <= bytes - 16896)
+            assert(a[0] + a[1] <= 65536 || a[0] >= 131072)
+            for j in 0..spans.len {
+                if i != j { assert(a[0] + a[1] <= spans[j][0] || spans[j][0] + spans[j][1] <= a[0]) }
+            }
+        }
+        print("PASS I-wipe-span: {bytes} bytes: {spans.len} disjoint ranges clear of the tables, the log and the backup")
+    }
+    print("PASS I-wipe-plan: the zero phases' exact ranges, each named by the plan")
 }
