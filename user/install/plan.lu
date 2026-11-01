@@ -128,9 +128,58 @@ fn size_text(bytes: int) -> str {
     "{tenths / 10}.{tenths % 10} TB"
 }
 
+/// px86: bytes the installer zeroes itself, after the new table and before
+/// any formatter or Limine writes: what a used disk left where PAX's layout
+/// puts a file system or where a tool looks for a signature. A range is
+/// [offset, length].
+struct Wipe { phase: str, ranges: List[List[int]], why: str }
+
+/// The zero phases, in order. zero-bios is partition 3 whole: the 860's
+/// old partition 1 began at sector 2048, so its file system's first
+/// sectors lay exactly there, and Limine's bios-install refused a BIOS
+/// boot partition holding a recognised file system (2026-10-31).
+/// R-px86-1: also the first and last MiB of partitions 1 and 2 (an old
+/// signature at either end of a partition is what a probe reads), the
+/// first MiB outside the primary table and the log (an old ISO 9660
+/// descriptor at byte 32768 made Limine take the disk for an isohybrid
+/// and try to convert its table), and the tail before the backup table
+/// (an old partition's last sector), with the last MiB before it when
+/// the ext2 bound leaves capacity unused.
+fn wipes(p: Plan) -> List[Wipe] {
+    let mib = 1048576
+    let root_end = ROOT_START + p.root_bytes
+    let end = p.target.bytes - p.tail_bytes
+    let backup = p.target.bytes - 33 * 512
+    var gap = [[17408, 65536 - 17408], [131072, mib - 131072]]
+    if root_end < end {
+        let start = if end - mib > root_end then end - mib else root_end
+        (mut gap).push([start, end - start])
+    }
+    if end < backup { (mut gap).push([end, backup - end]) }
+    [
+        Wipe { phase: "zero-bios", ranges: [[mib, mib]], why: "partition 3 whole, before Limine" },
+        Wipe {
+            phase: "zero-esp",
+            ranges: [[ESP_START, mib], [ESP_START + ESP_BYTES - mib, mib]],
+            why: "partition 1's first and last MiB",
+        },
+        Wipe { phase: "zero-root", ranges: [[ROOT_START, mib], [root_end - mib, mib]], why: "partition 2's first and last MiB" },
+        Wipe { phase: "zero-gap", ranges: gap, why: "the first MiB outside the table and the log; the tail before the backup" },
+    ]
+}
+
+/// One zero phase as the plan names it: the phase and its byte ranges.
+fn wipe_text(w: Wipe) -> str {
+    var s = w.phase
+    for r in w.ranges { s += " [{r[0]},{r[0] + r[1]})" }
+    s
+}
+
 /// The plan as the guided install shows it: no confirmation line, since
 /// one word confirms (px78b, R-P6-confirm).
 fn plan_body(p: Plan) -> str {
+    var zero = ""
+    for w in wipes(p) { zero += "{wipe_text(w)} ({w.why})\n" }
     "PAX install plan v1\n" +
         "format ext2-developer-preview (NO journal; not ext3)\n" +
         "target /dev/{p.target.name}\nidentity {p.target.identity}\n" +
@@ -140,6 +189,7 @@ fn plan_body(p: Plan) -> str {
         "partition 2 root offset_bytes {ROOT_START} length_bytes {p.root_bytes}\n" +
         "prefix_reserved_bytes 1048576 (persistent log: offset 65536 length 65536)\ntail_reserved_bytes {p.tail_bytes} (GPT backup and block alignment)\n" +
         "unused_bytes {p.unused_bytes} (capacity beyond the ext2 block-number limit)\n" +
+        zero +
         "seed {p.seed}\nuser {p.user} uid {INSTALL_USER_ID} gid {INSTALL_USER_ID} no-password\n" +
         "games {if p.games then "yes" else "no"}\n"
 }
