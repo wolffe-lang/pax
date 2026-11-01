@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # px85: run CMD in a container on hasu block A (CPUs 0-5), both of the
 # block's locks held for this command alone, the block name outside
-# (the lane rules of 2026-10-31), every wait printed at least each minute.
+# (the lane rules of 2026-10-31), each wait a blocking flock (queued by the
+# kernel, so a lane that polls never loses every race) printed every 4 minutes.
 #
 #   ctr.sh NAME WORKDIR [KVM=0|1] -- CMD...
 #
@@ -20,9 +21,9 @@ case ${1:-} in KVM=1) kvm=1; shift;; KVM=0) shift;; esac
 stamp() { date -u +%FT%TZ; }
 exec 9>/home/mfwolffe/lanes/hasu-block-A.lock
 echo "$(stamp) px85 $N: acquiring hasu-block-A.lock"
-until flock -n 9; do echo "$(stamp) hasu-block-A.lock held by another lane; waiting"; sleep 60; done
+until flock -w 240 9; do echo "$(stamp) hasu-block-A.lock held by another lane; waiting"; done
 exec 8>/home/mfwolffe/lanes/hasu-A.lock
-until flock -n 8; do echo "$(stamp) hasu-A.lock held by another lane; waiting"; sleep 60; done
+until flock -w 240 8; do echo "$(stamp) hasu-A.lock held by another lane; waiting"; done
 echo "$(stamp) block A acquired (both locks)"
 dev=(); [ "$kvm" = 1 ] && dev=(--device /dev/kvm)
 rc=0
