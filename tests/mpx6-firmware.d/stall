@@ -5,7 +5,8 @@
 # and pax#261, the two stall-sensitive checks that reddened trunk 8495bdc0).
 #
 #   stall --tree DIR --out DIR [--runs N] [--cpus "1 2 3 4 5"]
-#         [--tier release|native] [--load BUSY/IDLE | --no-load] [--images DIR]
+#         [--tier release|native] [--load BUSY/IDLE | --no-load | --external DESC]
+#         [--images DIR]
 #
 # The leg is the tree's own. The F8 block of TREE/tests/mpx6-firmware,
 # from its copy of boot/limine-initramfs.conf to its `row "F8 …"`, is cut
@@ -27,6 +28,12 @@
 # ticks coalesce. The harness itself (usb-session, qemu-run) runs on CPU 0.
 # One run per CPU at once; N runs take ceil(N / CPUs) rounds. --no-load
 # runs the same pinning without the busy processes (the control).
+# --external DESC runs it without them too, under a load applied from
+# outside the container (px85's freeze: notes/px85/hasu/freeze.sh pauses
+# the whole container with podman's cgroup freezer, as a hypervisor
+# deschedules a runner: the guest, QEMU's main loop and the harness all
+# stop while the host's clock runs); DESC names it in the log. OUT/rounds.started
+# and OUT/rounds.done mark the runs' span for such a load.
 #
 # OUT/runs.tsv: one line a run, its exit status, its time, and from its
 # own transcript which check broke: the clock line, the repeat row's
@@ -34,7 +41,7 @@
 # leg's failing line. Exit 0 when every run's leg exited 0.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
-tree= out= runs=20 cpus='1 2 3 4 5' tier=release busy=50 idle=50 load=1 images=
+tree= out= runs=20 cpus='1 2 3 4 5' tier=release busy=50 idle=50 load=1 images= external=
 while [ $# -gt 0 ]; do
     case $1 in
         --tree) tree=$(cd "$2" && pwd); shift 2;;
@@ -44,8 +51,9 @@ while [ $# -gt 0 ]; do
         --tier) tier=$2; shift 2;;
         --load) busy=${2%/*} idle=${2#*/}; shift 2;;
         --no-load) load=0; shift;;
+        --external) load=0 external=$2; shift 2;;
         --images) images=$2; shift 2;;
-        *) echo "usage: stall --tree DIR --out DIR [--runs N] [--cpus LIST] [--tier release|native] [--load BUSY/IDLE | --no-load] [--images DIR]" >&2; exit 2;;
+        *) echo "usage: stall --tree DIR --out DIR [--runs N] [--cpus LIST] [--tier release|native] [--load BUSY/IDLE | --no-load | --external DESC] [--images DIR]" >&2; exit 2;;
     esac
 done
 [ -n "$tree" ] && [ -n "$out" ] || { echo 'stall: --tree and --out are required' >&2; exit 2; }
@@ -112,9 +120,13 @@ while not os.path.exists(stop):
         hogs+=($!)
     done
     log "load: ${#hogs[@]} busy processes (nice 0), ${busy} ms busy / ${idle} ms asleep, on CPUs $cpus; QEMU nice 19 on the same CPU"
+elif [ -n "$external" ]; then
+    log "external load: $external; QEMU nice 19 alone on each of CPUs $cpus"
 else
     log "no load (the control): QEMU nice 19 alone on each of CPUs $cpus"
 fi
+rm -f "$out/rounds.done"
+touch "$out/rounds.started"
 
 n=1 pids=()
 while [ "$n" -le "$runs" ]; do
@@ -128,12 +140,12 @@ while [ "$n" -le "$runs" ]; do
     for p in "${pids[@]}"; do wait "$p" || true; done
     log "round done: $((n - 1)) of $runs"
 done
-touch "$stop"
+touch "$stop" "$out/rounds.done"
 for p in ${hogs[@]+"${hogs[@]}"}; do wait "$p" || true; done
 
 # The record.
 fails=0
-printf 'run\trc\tseconds\tclock\treports\thold\tfailure\n' > "$out/runs.tsv"
+printf 'run\trc\tseconds\tclock\treports\thold\thold_wall_s\tfailure\n' > "$out/runs.tsv"
 for d in "$out"/run-*; do
     read -r rc secs < "$d/rc"
     s=$d/session/serial.log
@@ -145,12 +157,13 @@ for d in "$out"/run-*; do
     esac
     reports=$(tr -d '\r' < "$s" 2>/dev/null | awk '/^USBROW repeat-a / { n = NF - 2 } END { print n + 0 }')
     hold=$(sed -n 's/^hold_ticks //p' "$d/session/repeat.txt" 2>/dev/null || true)
+    wall=$(sed -n 's/^hold_wall_s //p' "$d/session/repeat.txt" 2>/dev/null || true)
     why=
     if [ "$rc" != 0 ]; then
         fails=$((fails + 1))
         why=$(grep -a -E 'Error: |FAIL ' "$d/leg.log" | head -n 2 | tr '\n' ' ' | sed 's/\t/ /g')
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${d##*/}" "$rc" "$secs" "$clock" "$reports" "${hold:--}" "$why" >> "$out/runs.tsv"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${d##*/}" "$rc" "$secs" "$clock" "$reports" "${hold:--}" "${wall:--}" "$why" >> "$out/runs.tsv"
 done
 cat "$out/runs.tsv"
 log "$((runs - fails)) of $runs green"
