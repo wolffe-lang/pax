@@ -21,7 +21,9 @@ fetch() { # fetch <url> <sha256> <out>
 tree() { # tree <repo> <rev> <dir> [path]
     rm -rf "$3" "$3.git"; mkdir -p "$3"
     git init -q "$3.git"
-    git -C "$3.git" fetch -q --depth 1 "$1" "$2"
+    # px85 (pax#259): tools/fetch-retry, mounted by tools/census/census;
+    # the commit fetched must be the pin (every *_REV in pins.sh is one).
+    sh /census-tools/fetch-retry "$3.git" "$1" "$2" "$2"
     git -C "$3.git" archive "FETCH_HEAD${4:+:$4}" | tar -x -C "$3"
     echo "stage: $1 at $(git -C "$3.git" rev-parse FETCH_HEAD)"
     rm -rf "$3.git"
