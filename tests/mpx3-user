@@ -114,7 +114,7 @@ fail=0 ran=0
 bad() { say "FAIL $*"; fail=1; }
 HEX='0x[0-9a-f]{16}'
 
-sym() { nm "$1" | awk -v s="$2" '$3 == s { print "0x" $1; exit }'; }
+sym() { nm "$1" | awk -v s="$2" '$3 == s && !f { print "0x" $1; f = 1 }'; } # pax#256: nm read to its end
 
 # U0's ELF half. Prints the reason on failure.
 user_ok() { # elf
@@ -126,11 +126,11 @@ user_ok() { # elf
         || { echo "pax_interrupt is not a global function (T)"; return 1; }
     objdump -d --no-show-raw-insn "$elf" > "$elf.dis" || { echo "objdump -d"; return 1; }
     body() { awk -v f="<$1>:" '$2 == f { on = 1; next } on && NF == 0 { exit } on { sub(/^[^\t]*\t/, ""); print }' "$elf.dis" | tr -s ' '; }
-    after=$(body pax_isr_common | awk 'seen { print; exit } /^call.*<pax_interrupt>/ { seen = 1 }')
+    after=$(body pax_isr_common | awk 'seen && !d { print; d = 1 } /^call.*<pax_interrupt>/ { seen = 1 }')
     [ "$after" = 'mov %rax,%rsp' ] || { echo "pax_isr_common: after the call to pax_interrupt comes '$after', not 'mov %rax,%rsp'"; return 1; }
     last=$(body pax_isr_common | tail -n 1)
     [ "$last" = iretq ] || { echo "pax_isr_common ends '$last', not iretq"; return 1; }
-    cmp=$(body pax_isr_common | awk 'seen && /^cmpq \$0x100,0x78\(%rsp\)/ { c = 1; next } c { print; exit } /^mov %rax,%rsp/ { seen = 1 }')
+    cmp=$(body pax_isr_common | awk 'seen && /^cmpq \$0x100,0x78\(%rsp\)/ { c = 1; next } c && !d { print; d = 1 } /^mov %rax,%rsp/ { seen = 1 }')
     case $cmp in je*'<pax_sysret>') ;; *) echo "pax_isr_common does not compare the vector (0x78(%rsp)) with 0x100 and je <pax_sysret> after resuming (got '$cmp')"; return 1 ;; esac
     sys=$(body pax_sysret | tail -n 1)
     [ "$sys" = sysretq ] || [ "$sys" = 'sysretq ' ] || { echo "pax_sysret ends '$sys', not sysretq"; return 1; }
