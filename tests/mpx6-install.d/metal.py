@@ -44,6 +44,17 @@ ESP is checked by fsck.fat -n, the target's root by e2fsck -fn, its
 table by sgdisk -v and its ESP by fsck.fat -n.
 Results: WORK/result.json (the wall times, the witnesses' sha256s).
 Exit 0 with PASS lines, 1 with a FAIL line naming the row.
+
+px86, the used disk: PAX_METAL_TARGET=860 makes the target kasumi's own
+SSD as the maintainer's inventory read it (ide-hd "Samsung SSD 860 EVO
+1TB", 1,000,204,886,016 bytes, which PAX and Linux show as "Samsung SSD
+860"); PAX_METAL_USED=fat32|ext4 lays an older install on it first
+(tools/used-disk: an old GPT, the first file system at sector 2048, where
+PAX's BIOS boot partition goes); M11-signatures holds every leg's target to
+no old signature (tools/used-disk check). For a stick that already carries
+its line (the maintainer's stick, qualified on a copy in run mode):
+PAX_METAL_TARGET_SERIAL names the target's serial and PAX_METAL_LISTED=1
+appends nothing, asserting the line is on the stick once.
 """
 from pathlib import Path
 import hashlib
@@ -212,12 +223,20 @@ def esp_range(img):
 # --- the disks --------------------------------------------------------------
 
 TARGET = {'model': 'Samsung SSD 870 EVO 500GB', 'serial': 'PX78-TARGET-0001', 'bytes': 500107862016, 'size': '500.1 GB'}
+# px86: kasumi's own target, the 860 (pax-install --inventory on metal, 2026-10-31: 1 TB, two old partitions).
+SHAPES = {'870': TARGET, '860': {'model': 'Samsung SSD 860 EVO 1TB', 'serial': 'PX86-USED-0001', 'bytes': 1000204886016, 'size': '1.0 TB'}}
+TARGET = dict(SHAPES[os.environ.get('PAX_METAL_TARGET', '870')])
+TARGET['serial'] = os.environ.get('PAX_METAL_TARGET_SERIAL', TARGET['serial'])
+USED = os.environ.get('PAX_METAL_USED', '')
+assert USED in ('', 'fat32', 'ext4'), USED
+LISTED = os.environ.get('PAX_METAL_LISTED', '') == '1'
 STEAM = {'model': 'Samsung SSD 870 EVO 4TB', 'serial': 'S6PXNM0T700001', 'bytes': 4000787030016}
 SANDISK = {'model': 'SanDisk SDSSDH3 512G', 'serial': '2104AB401234', 'bytes': 512110190592}
 NVME = {'serial': 'S6Z1NJ0W000001', 'bytes': 1000204886016}
 LINUX_MODEL = 'Samsung SSD 870'  # what CachyOS's /sys/block/sdX/device/model shows (16 bytes, trimmed)
+TARGET_MODEL = TARGET['model'][:16].rstrip()  # the target's, the same rule (px86: the 860's "Samsung SSD 860")
 # px78b: the one confirmation's summary, as PAX names the target.
-SUMMARY = f'Erase {LINUX_MODEL}, serial {TARGET["serial"]} ({TARGET["size"]}, /dev/sdc), and install PAX?'
+SUMMARY = f'Erase {TARGET_MODEL}, serial {TARGET["serial"]} ({TARGET["size"]}, /dev/sdc), and install PAX?'
 
 
 def foreign_disk(path, spec, parts):
@@ -251,6 +270,10 @@ def make_disks():
     foreign_disk(d/'sandisk.img', SANDISK, [('linux', 2048, q - 1), ('linux', q, 2 * q - 1), ('linux', 2 * q, 3 * q - 1), ('linux', 3 * q, None)])
     with open(d/'target.img', 'wb') as f:
         f.truncate(TARGET['bytes'])
+    if USED:
+        out = run([repo/'tools/used-disk', 'make', d/'target.img', USED])
+        log(out.stdout.decode().strip())
+        result['used'] = USED
     return d
 
 
@@ -382,6 +405,12 @@ class Machine:
                 return text
             if bad and re.search(bad, self.unwrapped(text), re.M):
                 self.shot('bad')
+                flat = self.unwrapped(text)
+                # px86: the 860's stop, Limine's bios-install refusing partition 3, named first.
+                lim = [l.strip() for l in flat.split('\n') if 'pax-install: limine:' in l or 'recognised filesystem' in l
+                       or 'Install failed' in l]
+                if lim:
+                    fail(row, 'Limine refused the BIOS boot partition: ' + ' | '.join(lim) + f'; screen:\n{text}')
                 fail(row, f'/{bad}/ on the screen before /{pattern}/; screen:\n{text}')
             time.sleep(.3)
         self.shot('timeout')
@@ -510,10 +539,14 @@ def main():
     paxfat = dt/'bin/paxfat'
     # The maintainer's step, from CachyOS: the target's line on the stick.
     line = work/'allow-line'
-    line.write_text(f'model={LINUX_MODEL} serial={TARGET["serial"]}\n')
-    run([paxfat, '--offset', esp, 'append', stick, line, '/pax/install-targets'])
+    line.write_text(f'model={TARGET_MODEL} serial={TARGET["serial"]}\n')
+    if not LISTED:
+        run([paxfat, '--offset', esp, 'append', stick, line, '/pax/install-targets'])
     listed = run([paxfat, '--offset', esp, 'cat', stick, '/pax/install-targets']).stdout.decode()
-    need(listed, f'model={LINUX_MODEL} serial={TARGET["serial"]}', 'M0-stick')
+    need(listed, f'model={TARGET_MODEL} serial={TARGET["serial"]}', 'M0-stick')
+    if LISTED and listed.splitlines().count(f'model={TARGET_MODEL} serial={TARGET["serial"]}') != 1:
+        fail('M0-stick', 'the stick does not list the target exactly once:\n' + listed)
+    result['target'] = {k: TARGET[k] for k in ('model', 'bytes', 'size')}
     d = make_disks()
     before = witnesses(d)
     result['witness_before'] = {k: v[0] for k, v in before.items()}
@@ -548,8 +581,9 @@ def main():
         need(flat, f'refused: not on the install allow-list: /dev/nvme0n1 model=QEMU NVMe Ctrl serial={NVME["serial"]}', 'M2-nvme-refused')
         need(flat, f'refused: not on the install allow-list: /dev/sdb model={SANDISK["model"][:16].rstrip()} serial={SANDISK["serial"]}', 'M2-sdb-refused')
         need(flat, 'refused: a PAX live medium (the boot stick, or a copy of it): /dev/sdd', 'M2-stick-refused')
-        need(flat, f'/dev/sdc bytes={TARGET["bytes"]} sector=512 model={LINUX_MODEL} serial={TARGET["serial"]}', 'M2-target-listed')
-        print('PASS M2-check: the target alone on the list; sda (the right model, the wrong serial), sdb and the NVMe refused by name; the stick refused before the list', flush=True)
+        need(flat, f'/dev/sdc bytes={TARGET["bytes"]} sector=512 model={TARGET_MODEL} serial={TARGET["serial"]}', 'M2-target-listed')
+        same = 'the right model, the wrong serial' if TARGET_MODEL == LINUX_MODEL else 'another model'
+        print(f'PASS M2-check: the target alone on the list; sda ({same}), sdb and the NVMe refused by name; the stick refused before the list', flush=True)
         t_guided = time.monotonic()
         m.type('pax-install\n')
         page = m.wait(r'pax-install> *$', 'M3-guided', 600, bad=STOPPED)
@@ -600,7 +634,8 @@ def main():
                    f'refused: not on the install allow-list: /dev/sda model={LINUX_MODEL} serial={STEAM["serial"]}',
                    'refused: a PAX live medium (the boot stick, or a copy of it): /dev/sdd',
                    'confirmation ERASE /dev/sdc', SUMMARY, 'Type yes to install; anything else cancels: pax-install> yes\n',
-                   'phase gpt: durable', 'phase root: durable', 'phase limine: durable',
+                   'phase gpt: durable', 'phase zero-bios: durable', 'phase zero-esp: durable',
+                   'phase zero-root: durable', 'phase zero-gap: durable', 'phase root: durable', 'phase limine: durable',
                    'phase result: complete', 'Installation complete', 'poweroff']:
         need(logtext, needle, 'M6-stick-log')
     with open(d/'target.img', 'rb') as f:
@@ -632,7 +667,7 @@ def main():
         need(s, nonce, 'M8-witness-read')
         s = m.command('ls /home', 'M8-witness-read')
         need(s, 'wolf', 'M8-witness-read')
-        m.command(f"echo 'model={LINUX_MODEL} serial={TARGET['serial']}' > /tmp/allow", 'M9-running-root')
+        m.command(f"echo 'model={TARGET_MODEL} serial={TARGET['serial']}' > /tmp/allow", 'M9-running-root')
         s = m.command('pax-install --check --allow-list /tmp/allow', 'M9-running-root', 600)
         m.shot('disk-after')
         need(m.unwrapped(s), 'refused: the running root: /dev/sdc', 'M9-running-root')
@@ -695,6 +730,13 @@ def main():
     if r.returncode != 0 or b'arning' in r.stdout + r.stderr:
         fail('M10-target-fsck', 'fsck.fat -n of the target ESP: ' + (r.stdout + r.stderr).decode(errors='replace'))
     print('PASS M10-target-fsck: the installed root e2fsck -fn clean; its GPT sgdisk -v clean; its ESP fsck.fat -n clean', flush=True)
+    # px86: the target carries PAX's signatures alone, whatever it held before.
+    r = run([repo/'tools/used-disk', 'check', d/'target.img', 'M11-signatures'], ok=False)
+    (work/'target-signatures.log').write_bytes(r.stdout + r.stderr)
+    if r.returncode != 0:
+        print((r.stdout + r.stderr).decode(errors='replace').strip(), flush=True)
+        fail('M11-signatures', 'tools/used-disk check exited %d' % r.returncode)
+    print(r.stdout.decode().strip(), flush=True)
     result['leg_seconds'] = round(time.monotonic() - t_leg, 2)
     result['stick_sha256'] = sha(stick)
     (work/'result.json').write_text(json.dumps(result, indent=2) + '\n')
