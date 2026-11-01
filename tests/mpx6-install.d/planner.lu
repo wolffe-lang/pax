@@ -137,12 +137,15 @@ fn main() {
         var spans = List[List[int]]()
         for x in wipes(q) { for r in x.ranges { (mut spans).push(copy r) } }
         for i in 0..spans.len {
-            let a = spans[i]
-            assert(a[1] > 0)
-            assert(a[0] >= 17408 && a[0] + a[1] <= bytes - 16896)
-            assert(a[0] + a[1] <= 65536 || a[0] >= 131072)
+            let at = spans[i][0]
+            let len = spans[i][1]
+            assert(len > 0)
+            assert(at >= 17408 && at + len <= bytes - 16896)
+            assert(at + len <= 65536 || at >= 131072)
             for j in 0..spans.len {
-                if i != j { assert(a[0] + a[1] <= spans[j][0] || spans[j][0] + spans[j][1] <= a[0]) }
+                let other = spans[j][0]
+                let other_len = spans[j][1]
+                if i != j { assert(at + len <= other || other + other_len <= at) }
             }
         }
         print("PASS I-wipe-span: {bytes} bytes: {spans.len} disjoint ranges clear of the tables, the log and the backup")
