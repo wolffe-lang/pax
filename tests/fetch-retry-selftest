@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# tests/fetch-retry-selftest — tools/fetch-retry tries again only what the
+# network dropped, a bounded number of times, and still checks the commit
+# (px85, pax#259). No network: a local repository fetched through file://,
+# a fake `git` ahead of the real one that fails the first N fetches with
+# the words a real failure prints, and a fake `sleep` that records the
+# waits instead of sleeping them.
+#
+#   R1  a reset on attempt 1 (pax#259's own `curl 56 Recv failure`), then
+#       fetched: exit 0, attempt 2 of 3, one wait of 10 s, the commit
+#       pinned.
+#   R2  a reset on every attempt: exit 3, `gave up after 3 attempts`,
+#       three fetches, waits of 10 and 30 s.
+#   R3  GitHub's answer for a revision it does not have (`not our ref`):
+#       exit 4, `not retried`, one fetch, no wait.
+#   R4  the real git's own answer for an unknown revision: exit 4, one
+#       fetch.
+#   R5  a refusal (HTTP 403): exit 4, one fetch, even beside a message
+#       that would otherwise read as a dropped connection.
+#   R6  a server error (HTTP 503) on attempt 1: tried again, fetched.
+#   R7  a stalled transfer (curl 28, `Operation too slow`, the floor): tried
+#       again, fetched.
+#   R8  the commit fetched is not the pin: exit 5, `refused: fetched …`,
+#       one fetch.
+#   R9  every source fetch of the harness goes through tools/fetch-retry:
+#       no `git … fetch` outside it in tools/ or the census's stage.sh,
+#       and each of the 16 sites calls it.
+# Exit 0 when every row held; each failing row is named.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+root=$(cd "$here/.." && pwd)
+helper=$root/tools/fetch-retry
+w=$(mktemp -d "${TMPDIR:-/tmp}/fetch-retry-selftest.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+fail=0
+bad() { echo "FAIL $*"; fail=1; }
+ok() { echo "PASS $*"; }
+
+real_git=$(command -v git) || { echo 'fetch-retry-selftest: no git' >&2; exit 2; }
+mkdir -p "$w/bin" "$w/state"
+cat > "$w/bin/git" <<'EOF'
+#!/bin/sh
+case " $* " in
+    *" fetch "*)
+        n=$(cat "$FAKE_STATE/fetches" 2>/dev/null || echo 0)
+        n=$((n + 1))
+        echo "$n" > "$FAKE_STATE/fetches"
+        if [ "$n" -le "${FAKE_FAILS:-0}" ]; then cat "$FAKE_ERR" >&2; exit 128; fi
+        ;;
+esac
+exec "$REAL_GIT" "$@"
+EOF
+cat > "$w/bin/sleep" <<'EOF'
+#!/bin/sh
+printf '%s ' "$1" >> "$FAKE_STATE/sleeps"
+EOF
+chmod +x "$w/bin/git" "$w/bin/sleep"
+
+# The source: two commits; the pin is the second.
+src=$w/src
+"$real_git" init -q "$src"
+"$real_git" -C "$src" config uploadpack.allowAnySHA1InWant true
+for i in 1 2; do
+    echo "$i" > "$src/f"
+    "$real_git" -C "$src" add f
+    "$real_git" -C "$src" -c user.name=px85 -c user.email=px85@invalid commit -q -m "commit $i"
+done
+pin=$("$real_git" -C "$src" rev-parse HEAD)
+other=$("$real_git" -C "$src" rev-parse HEAD~1)
+url=file://$src
+
+# run NAME FAILS ERRTEXT REF [SHA]: one fetch-retry into a fresh repo.
+run() {
+    local name=$1 fails=$2 text=$3 ref=$4 want=${5:-}
+    rm -rf "$w/dst" "$w/state"; mkdir -p "$w/state"
+    "$real_git" init -q "$w/dst"
+    printf '%s\n' "$text" > "$w/err.txt"
+    rc=0
+    PATH=$w/bin:$PATH REAL_GIT=$real_git FAKE_STATE=$w/state FAKE_FAILS=$fails FAKE_ERR=$w/err.txt \
+        sh "$helper" "$w/dst" "$url" "$ref" ${want:+"$want"} > "$w/$name.out" 2> "$w/$name.err" || rc=$?
+    fetches=$(cat "$w/state/fetches" 2>/dev/null || echo 0)
+    sleeps=$(sed 's/ $//' "$w/state/sleeps" 2>/dev/null || true)
+    head=$("$real_git" -C "$w/dst" rev-parse -q --verify 'FETCH_HEAD^{commit}' 2>/dev/null || echo none)
+    sed "s/^/  $name: /" "$w/$name.err"
+}
+reset='error: RPC failed; curl 56 Recv failure: Connection reset by peer
+fetch-pack: unexpected disconnect while reading sideband packet'
+
+run R1 1 "$reset" "$pin" "$pin"
+if [ "$rc" = 0 ] && [ "$fetches" = 2 ] && [ "$sleeps" = 10 ] && [ "$head" = "$pin" ] \
+    && grep -q 'attempt 1 of 3 failed (reset); again in 10 s' "$w/R1.err" && grep -q 'fetched on attempt 2 of 3' "$w/R1.err"; then
+    ok "R1: a reset, then fetched on attempt 2 (wait 10 s), the commit the pin"
+else bad "R1: rc $rc, $fetches fetches, waits '$sleeps', head $head"; fi
+
+run R2 99 "$reset" "$pin" "$pin"
+if [ "$rc" = 3 ] && [ "$fetches" = 3 ] && [ "$sleeps" = '10 30' ] && grep -q 'gave up after 3 attempts, the last one reset' "$w/R2.err"; then
+    ok "R2: a reset every time stops after 3 attempts by name (waits 10 and 30 s)"
+else bad "R2: rc $rc, $fetches fetches, waits '$sleeps'"; fi
+
+run R3 1 "fatal: remote error: upload-pack: not our ref 0123456789abcdef0123456789abcdef01234567" "$pin" "$pin"
+if [ "$rc" = 4 ] && [ "$fetches" = 1 ] && [ -z "$sleeps" ] && grep -q 'not a network error: not retried' "$w/R3.err"; then
+    ok "R3: GitHub's 'not our ref' stops at once, not retried"
+else bad "R3: rc $rc, $fetches fetches, waits '$sleeps'"; fi
+
+run R4 0 "" 0123456789abcdef0123456789abcdef01234567 0123456789abcdef0123456789abcdef01234567
+if [ "$rc" = 4 ] && [ "$fetches" = 1 ] && [ -z "$sleeps" ]; then
+    ok "R4: the real git's answer for an unknown revision stops at once, not retried"
+else bad "R4: rc $rc, $fetches fetches, waits '$sleeps'"; fi
+
+run R5 99 "error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403
+fatal: the remote end hung up unexpectedly" "$pin" "$pin"
+if [ "$rc" = 4 ] && [ "$fetches" = 1 ] && [ -z "$sleeps" ]; then
+    ok "R5: a 403 is a refusal, not retried, beside 'the remote end hung up'"
+else bad "R5: rc $rc, $fetches fetches, waits '$sleeps'"; fi
+
+run R6 1 "error: RPC failed; HTTP 503 curl 22 The requested URL returned error: 503" "$pin" "$pin"
+if [ "$rc" = 0 ] && [ "$fetches" = 2 ] && grep -q 'failed (server)' "$w/R6.err" && [ "$head" = "$pin" ]; then
+    ok "R6: a 503 is tried again (server), fetched"
+else bad "R6: rc $rc, $fetches fetches, waits '$sleeps'"; fi
+
+run R7 1 "error: RPC failed; curl 28 Operation too slow. Less than 1000 bytes/sec transferred the last 60 seconds" "$pin" "$pin"
+if [ "$rc" = 0 ] && [ "$fetches" = 2 ] && grep -q 'failed (timeout)' "$w/R7.err"; then
+    ok "R7: a stalled transfer (the floor's curl 28) is tried again (timeout), fetched"
+else bad "R7: rc $rc, $fetches fetches, waits '$sleeps'"; fi
+
+run R8 0 "" "$other" "$pin"
+if [ "$rc" = 5 ] && [ "$fetches" = 1 ] && grep -q "refused: fetched $other, the pin says $pin" "$w/R8.err"; then
+    ok "R8: another commit than the pin is refused by name, never fetched again"
+else bad "R8: rc $rc, $fetches fetches"; fi
+
+# R9: the sites.
+sites='tools/mkaspen tools/mkboreutils tools/mkclef tools/mkedwolf tools/mklobo tools/mklope tools/mklupin
+tools/mkpelt tools/mkscent tools/mksigwolf tools/mksu tools/mkwolf tools/mkwolf-std tools/mkyew tools/fetch-wolf
+tools/census/inside/stage.sh'
+stray=$(cd "$root" && grep -nE 'git( -c [^ ]+)*( -C [^ ]+)? fetch' tools/* tools/census/inside/stage.sh 2>/dev/null | grep -v '^tools/fetch-retry:' || true)
+missing=
+for s in $sites; do grep -q 'fetch-retry' "$root/$s" || missing="$missing $s"; done
+n=$(echo $sites | wc -w | tr -d ' ')
+if [ -z "$stray" ] && [ -z "$missing" ] && [ "$n" = 16 ]; then
+    ok "R9: all $n source fetches go through tools/fetch-retry; no other git fetch in tools/"
+else
+    [ -z "$stray" ] || printf '  a git fetch outside tools/fetch-retry:\n%s\n' "$(echo "$stray" | sed 's/^/    /')"
+    [ -z "$missing" ] || echo "  sites not calling tools/fetch-retry:$missing"
+    bad "R9: the harness's fetches are not all the helper's"
+fi
+[ "$fail" = 0 ] && echo "PASS fetch-retry-selftest"
+exit $fail
