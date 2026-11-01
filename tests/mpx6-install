@@ -4,7 +4,7 @@
 # tools/mkdisktools tools/mklimine-static tools/mkpelt tools/mklope tools/mkgames
 # tools/mkboreutils tools/mkdiskprobe tools/build-kernel tools/mkinitramfs
 # tools/mkimage tools/e2tree tools/e2fs tools/disktools tools/mkaspen tools/mkscent
-# tools/fetch-std tools/mkyew tools/mkas tools/mksu tools/mkplay tools/mkzone tools/mklupin
+# tools/fetch-std tools/mkyew tools/mkas tools/mksu tools/mkplay tools/mkzone tools/mklupin tools/used-disk
 # user/install user/shrc user/fstab-root kernel/kmain_console.lu
 set -euo pipefail
 . "$(dirname "$0")/../tools/lib.sh"
@@ -129,6 +129,19 @@ done
 python3 -I "$D/root-nvme.py" "$work/no" "$work/no/log-last.img"
 for fault in cancel cancel-words wrong-token readonly 4kn missing-boot corrupt-boot missing-tool gpt fat root limine invalid-manifest enospc; do
     PAX_INSTALL_FAULT=$fault python3 -I "$D/install.py" "$PAX_ROOT" "$inputs" "$work/fault-$fault" no vdb
+done
+# px86: a used target, as the 860 came to it (tools/used-disk): an old GPT
+# and old file systems where PAX's partitions go, the first at sector 2048
+# (bytes [1 MiB, 2 MiB) are PAX's BIOS boot partition, where Limine's
+# bios-install refused the old file system), and an old live image written
+# at byte 0. Each installs, verifies as a blank target does, and leaves no
+# old signature (tools/used-disk check: wipefs and blkid -p).
+for used in fat32 ext4 iso; do
+    casework=$work/used-$used
+    PAX_INSTALL_USED=$used python3 -I "$D/install.py" "$PAX_ROOT" "$inputs" "$casework" no vdb
+    python3 -I "$D/verify.py" "$PAX_ROOT" "$casework" no vdb
+    python3 -I "$D/gap.py" "$casework" "$inputs/build/disktools/limine/limine"
+    "$PAX_ROOT/tools/used-disk" check "$casework/target.img" "I-used-signatures-$used"
 done
 if [ "$rows" = full ]; then
     tiers=$tier; [ "$tier" != both ] || tiers='native release'

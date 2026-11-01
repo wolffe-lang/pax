@@ -131,6 +131,12 @@ run([repo/'tools/mkinitramfs',work/'init.cpio',*args])
 run([repo/'tools/mkimage','--conf',repo/'boot/limine-initramfs.conf','--add',work/'init.cpio','initramfs.cpio',kernel,work/'boot.iso'])
 with (work/'source-guard.img').open('wb') as f:f.truncate(8*1024*1024)
 with (work/'target.img').open('wb') as f:f.truncate(capacity)
+# px86: a used target (tools/used-disk): an old GPT and old file systems
+# where PAX's partitions go, the first at sector 2048, as the 860 was.
+used=os.environ.get('PAX_INSTALL_USED','')
+if used:
+    assert not fault and not guided,'a used target is the unattended install'
+    print(run([repo/'tools/used-disk','make',work/'target.img',used,work/'boot.iso']).stdout.decode(),end='',flush=True)
 guard=sha(work/'source-guard.img')
 blank=sha(work/'target.img') if fault else None
 cmd=[repo/'tools/qemu-halt','--accel','tcg','--firmware',os.environ.get('PAX_INSTALL_FIRMWARE','bios'),'--timeout',os.environ.get('PAX_INSTALL_TIMEOUT','1200'),'--elf',kernel,
@@ -184,13 +190,18 @@ if fault:
         if fault in ['gpt','fat','root','limine']:assert 'exit=2' in records[-1]['detail']
     print('PASS I-fault-'+fault+': named refusal, no swallowed exit or bootability claim; source guard unchanged',flush=True)
     sys.exit(0)
+if used and 'INSTALL-EXIT-0' not in s:
+    # The 860's stop (2026-10-31): Limine's bios-install refused partition 3.
+    why=[l.strip() for l in s.replace('\r','').splitlines() if 'pax-install:' in l or 'recognised filesystem' in l or 'Install failed' in l]
+    print(f'FAIL I-used-{used}: the install onto the used disk stopped: '+' | '.join(why)[-3000:],flush=True)
+    sys.exit(1)
 assert 'INSTALL-EXIT-0' in s,('FAIL I-boot-files' if 'phase verify-boot-' in s else 'FAIL I-install')+'\n'+s[-18000:]
 assert sha(work/'source-guard.img')==guard
 with (work/'target.img').open('rb') as f:
     f.seek(65536);log=f.read(65536).split(b'\0',1)[0]
 records=[json.loads(x) for x in log.splitlines()]
 assert records[-1]['phase']=='result' and records[-1]['state']=='complete',records
-assert {x['phase'] for x in records if x['state']=='durable'}=={'gpt','fat',*[f'mkdir-{i}' for i in range(4)],*[f'copy-boot-{i}' for i in range(4)],'root','limine','verify-gpt',*[f'verify-boot-{i}' for i in range(4)]},records
+assert {x['phase'] for x in records if x['state']=='durable'}=={'gpt','zero-bios','zero-esp','zero-root','zero-gap','fat',*[f'mkdir-{i}' for i in range(4)],*[f'copy-boot-{i}' for i in range(4)],'root','limine','verify-gpt',*[f'verify-boot-{i}' for i in range(4)]},records
 (work/'phases.jsonl').write_bytes(log)
 # Extract only allocated extents, retaining holes. A multi-terabyte target
 # must never be scanned or hashed from byte zero to its logical end.
@@ -223,3 +234,4 @@ with (work/'root.img').open('rb') as f:
     assert ipg==expected_ipg and struct.unpack_from('<I',sb,0)[0]==groups*expected_ipg,'I-density'
 print(f'PASS I-density: root {root_bytes} bytes; {groups*ipg} inodes; ratio {ratio}',flush=True)
 print(f'PASS I-install-{games}-{name}: guest executor complete, durable phase log, source guard unchanged, e2fsck clean; install {install_seconds:.2f}s; with verification {time.monotonic()-t:.2f}s',flush=True)
+if used:print(f'PASS I-used-{used}: the install onto an old {used} layout complete, every phase durable',flush=True)
