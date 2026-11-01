@@ -24,6 +24,17 @@
 # requested feature: CPUID.01H:ECX.x2apic`), and the kernel then stops by
 # name (`FAIL METAL x2APIC offered by CPUID`).
 #
+# px85 (pax#260): five more legs on q35 as it is, each a word on the
+# kernel's command line (kernel/clock's test words). The HPET's check
+# against the PM timer must survive a stall, as of a vCPU or an SMI,
+# since both clocks count on through it: 30 ms inside the measured window
+# (stall-window), 30 ms between the window's last PM read and its HPET
+# read (stall-edge), 5 s inside it, past the 24-bit PM timer's wrap
+# (stall-long); each still ends `checked against the PM timer`. And it
+# must still refuse an HPET whose period lies by a quarter or a fifth
+# (hpet-fast: read 1.25 times, hpet-slow: 0.8 times), which the old
+# 5-20 ms band let through: `clock: HPET … refused`, then the PM timer.
+#
 # PAX_METAL_TIER (native, release) and PAX_METAL_FIRMWARE ("bios uefi")
 # choose the build and the firmwares (tests/mpx6-firmware sets both).
 # A failing machine prints its `FAIL METAL`/`PANIC` lines by name.
@@ -42,13 +53,18 @@ printf '\n    cmdline: metal_x2apic\n' >> "$work/x2apic.conf"
 cp "$PAX_ROOT/boot/limine.conf" "$work/pitonly.conf"
 printf '\n    cmdline: metal_pitonly\n' >> "$work/pitonly.conf"
 "$PAX_ROOT/tools/mkimage" --conf "$work/pitonly.conf" "$work/kmain_metal.elf" "$work/pitonly.iso"
+for word in stall_window stall_edge stall_long hpet_fast hpet_slow; do
+    cp "$PAX_ROOT/boot/limine.conf" "$work/$word.conf"
+    printf '\n    cmdline: metal_%s\n' "$word" >> "$work/$word.conf"
+    "$PAX_ROOT/tools/mkimage" --conf "$work/$word.conf" "$work/kmain_metal.elf" "$work/$word.iso"
+done
 fail() { # leg why
     grep -aE '^(FAIL METAL|PANIC|clock:|timer:)' "$work/$1.log" | tr -d '\r' >&2 || true
     echo "FAIL METAL firmware $1: $2" >&2
     exit 1
 }
 for fw in ${PAX_METAL_FIRMWARE:-bios uefi}; do
-    legs='hpet pm pitless pm-pitless ram8'
+    legs='hpet pm pitless pm-pitless ram8 stall-window stall-edge stall-long hpet-fast hpet-slow'
     [ "$fw" != uefi ] || legs="$legs pitonly"
     [ "${PAX_METAL_X2APIC:-0}" != 1 ] || legs="$legs x2apic"
     for leg in $legs; do
@@ -61,6 +77,8 @@ for fw in ${PAX_METAL_FIRMWARE:-bios uefi}; do
             pitless) args=(--no-pit);;
             pm-pitless) args=(--no-hpet --no-pit); source=PM;;
             ram8) qargs=(-m 8G);;
+            stall-*) iso=$work/stall_${leg#stall-}.iso;;
+            hpet-*) iso=$work/hpet_${leg#hpet-}.iso; source=PM;;
         esac
         rc=0
         "$PAX_ROOT/tools/qemu-run" --timeout 30 --firmware "$fw" --serial "$work/$fw-$leg.log" ${args[@]+"${args[@]}"} "$iso" -- ${qargs[@]+"${qargs[@]}"} || rc=$?
@@ -70,6 +88,7 @@ for fw in ${PAX_METAL_FIRMWARE:-bios uefi}; do
         grep -aq "^timer: LAPIC calibrated by $source " "$work/$fw-$leg.log" || fail "$fw-$leg" "the tick was not calibrated by the $source"
         [ "$source" != HPET ] || grep -aq '^clock: HPET .*, checked against the PM timer' "$work/$fw-$leg.log" || fail "$fw-$leg" "the HPET was not checked against the PM timer"
         [ "$leg" != x2apic ] || grep -aq '^apic: x2APIC mode ' "$work/$fw-$leg.log" || fail "$fw-$leg" "the tick did not run in x2APIC mode"
+        case $leg in hpet-*) grep -aq '^clock: HPET .*; refused' "$work/$fw-$leg.log" || fail "$fw-$leg" "the lying HPET was not refused by name";; esac
         tr -d '\r' < "$work/$fw-$leg.log" | grep -aE '^(clock|timer|metal): |^apic: x2APIC|^PASS METAL LAPIC tick rate'
         echo "PASS METAL firmware $fw $leg"
     done
