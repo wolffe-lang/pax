@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""tests/pipe-shape-selftest — no tool or test pipes a writer into an awk
+that exits before its input ends (px85, pax#256).
+
+The shape px78b fixed in tools/qemu-halt (44fb33ea, pax#254): in
+`nm ELF | awk '$3 == s { print; exit }'` awk stops reading at its match,
+and a writer with more to write dies of SIGPIPE; under `set -o pipefail`
+the pipeline's status is then 141, and under `set -e` the script ends
+there with nothing said. Whether it happens depends on where the match
+falls in the writer's last pipe buffer and on which awk runs (GNU awk
+acts at once; mawk holds the record), so it is a race, not a bug that
+shows every time. The fix keeps the first match and reads to the end
+(`… && !f { print; f = 1 }`).
+
+R-px85-3 B: the scan covers every writer, not nm alone: any
+`| awk '…'` whose program has an `exit` outside an `END { … }` block,
+across tools/ and tests/ (shell and the shell inside Python). A file read
+by awk itself (`awk '…{ exit }' FILE`) is not the shape: no writer is
+left behind. A line may opt out with `# pipe-shape: ok (why)`.
+
+  S1  the scan finds nothing in tools/ or tests/.
+  S2  the scan is not blind: it finds the shape in a planted line (nm's
+      and another writer's, one line and two), and passes the fixed form,
+      an END-only exit and a file-reading awk.
+Exit 0 when both held.
+"""
+from pathlib import Path
+import re
+import sys
+
+root = Path(__file__).resolve().parents[1]
+SELF = Path(__file__).resolve()
+
+
+def awk_programs(text):
+    """(line number, program) for each `| awk … '<program>'` in text."""
+    for m in re.finditer(r"\|\s*awk\b((?:\s+-[vF]\s*\S+|\s+-\S+)*)\s+'", text):
+        start = m.end()
+        end = text.find("'", start)
+        if end < 0:
+            continue
+        line = text.count('\n', 0, m.start()) + 1
+        yield line, text[start:end]
+
+
+def exits_early(program):
+    """Whether the program exits in an action other than END's."""
+    body = re.sub(r'\bEND\s*\{[^{}]*\}', '', program)
+    return re.search(r'\bexit\b', body) is not None
+
+
+def scan(text):
+    lines = text.splitlines()
+    for line, program in awk_programs(text):
+        if exits_early(program) and 'pipe-shape: ok' not in lines[line - 1]:
+            yield line, lines[line - 1].strip()
+
+
+def files():
+    for top in ('tools', 'tests'):
+        for p in sorted((root / top).rglob('*')):
+            if not p.is_file() or p.resolve() == SELF or p.suffix in ('.log', '.tsv', '.txt', '.md', '.json'):
+                continue
+            try:
+                yield p, p.read_text()
+            except (UnicodeDecodeError, OSError):
+                continue
+
+
+found = [(p.relative_to(root), line, src) for p, text in files() for line, src in scan(text)]
+if found:
+    for path, line, src in found:
+        print(f'  {path}:{line}: {src}')
+    sys.exit(f'FAIL S1: {len(found)} pipes into an awk that exits early (the pax#254 shape)')
+print('PASS S1: no writer in tools/ or tests/ is piped into an awk that exits before its input ends')
+
+planted = {
+    """sym() { nm "$1" | awk -v s="$2" '$3 == s { print "0x" $1; exit }'; }""": 1,
+    """x=$(body f | awk 'seen { print; exit } /^call/ { seen = 1 }')""": 1,
+    """serial_norm "$f" | awk '/^B$/{on=1}
+on{print} /^E$/{exit}' > out""": 1,
+    """sym() { nm "$1" | awk -v s="$2" '$3 == s && !f { print "0x" $1; f = 1 }'; }""": 0,
+    """nm "$elf" | awk '$3 == "k" { f = 1 } END { exit !f }'""": 0,
+    """awk '/^E$/{exit} {print}' "$file" > out""": 0,
+}
+for text, want in planted.items():
+    got = len(list(scan(text)))
+    if got != want:
+        sys.exit(f'FAIL S2: {got} found in {text!r}, {want} wanted')
+print('PASS S2: the scan finds the shape behind nm and other writers, and passes the fixed forms')
+print('PASS pipe-shape-selftest')
