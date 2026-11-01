@@ -17,13 +17,19 @@
 # value other than native or uefi is said, not silently dropped.
 #
 # Rows: M0-stick, M1-live-login, M2-check, M3-summary, M4-install, M6-stick-log, M7-disk-boot,
-# M8-witness-read, M9-running-root, M10-target-fsck, M5-witness, then
+# M8-witness-read, M9-running-root, M10-target-fsck, M11-signatures, M5-witness, then
 # I-metal with the leg's and the install's wall times (WORK/metal/
 # result.json keeps them, with the witnesses' sha256s). A failure is a
 # FAIL line naming its row; nothing is skipped.
 #
+# px86: then the same leg again onto a used disk shaped like kasumi's own
+# target, the 860 (PAX_METAL_TARGET=860 PAX_METAL_USED=fat32: an old GPT,
+# an old ESP at sector 2048 where PAX's BIOS boot partition goes, an old
+# ext4 to the end), its work under WORK/metal/used-fat32/ (so CI's
+# artifact keeps it), the same rows.
+#
 # Inputs: tools/mkgames, tools/mkinstall, tools/mkdisk, tools/check-usb,
-# tools/mkinitramfs, tools/mkgpt, user/install, user/disktools,
+# tools/mkinitramfs, tools/mkgpt, tools/used-disk, user/install, user/disktools,
 # kernel/usb_storage, kernel/xhci, kernel/ahci, kernel/block.
 set -euo pipefail
 . "$(dirname "$0")/../tools/lib.sh"
@@ -41,3 +47,4 @@ case $firmware in bios|uefi|both) [ "$firmware" = uefi ] || say "the leg boots O
 mkdir -p "$work"; work=$(cd "$work" && pwd)
 "$PAX_ROOT/tests/mpx6-install" --only inputs --work "$work" --inputs "$work/inputs" --tier "$tier" --firmware bios
 "$PAX_ROOT/tests/mpx6-install" --only metal --work "$work" --inputs "$work/inputs"
+PAX_METAL_TARGET=860 PAX_METAL_USED=fat32 "$PAX_ROOT/tests/mpx6-install" --only metal --work "$work/metal/used-fat32" --inputs "$work/inputs"
