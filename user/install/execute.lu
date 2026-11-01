@@ -4,6 +4,9 @@
 //! px78: each phase's verdict also goes to the install log on the stick
 //! (allow.lu), appended and fsynced at every step, and the end names the
 //! sha256 of each written partition's first MiB.
+//! px86: after the table, the zero phases (plan.lu's wipes): a used disk's
+//! old bytes where PAX puts a file system or a tool looks for a signature,
+//! partition 3 first of all, which Limine refuses to hold a file system.
 
 use std.json
 use std.x.crypto.sha2
@@ -52,6 +55,42 @@ fn read_window(fd: int, offset: int, count: int) -> List[byte] ! {io} {
         }
     }
     out
+}
+
+/// px86: one zero phase (plan.lu's wipes) by the installer itself, through
+/// the target's own descriptor: logged like the others, each range written
+/// with zeros, the target fsynced, every range read back as zeros before
+/// the phase is durable.
+fn zero_ranges(mut lg: Log, fd: int, mut used: int, w: Wipe) -> () ! {io, log_full, verify_failed} {
+    var what = "zero"
+    for r in w.ranges { what += " [{r[0]},{r[0] + r[1]})" }
+    disk_log(mut lg, fd, mut used, w.phase, "started", what)?
+    var zeros = List[byte]()
+    for _ in 0..65536 { (mut zeros).push(0 as byte) }
+    for r in w.ranges {
+        var at = 0
+        while at < r[1] {
+            let n = if r[1] - at > 65536 then 65536 else r[1] - at
+            let _pos = fs_seek(fd, r[0] + at, 0) else |_| { return io }
+            if n == 65536 {
+                fs_write_chunk(fd, zeros) else |_| { return io }
+            } else {
+                fs_write_chunk(fd, zeros[0..n]) else |_| { return io }
+            }
+            at += n
+        }
+    }
+    fs_sync(fd) else |_| { return io }
+    for r in w.ranges {
+        let back = read_window(fd, r[0], r[1])?
+        for b in back {
+            if b != 0 as byte {
+                disk_log(mut lg, fd, mut used, w.phase, "failed", "readback not zero in [{r[0]},{r[0] + r[1]})")?
+                return verify_failed
+            }
+        }
+    }
+    disk_log(mut lg, fd, mut used, w.phase, "durable", "zeroed and read back; target fsync completed")?
 }
 
 fn run_action(mut lg: Log, action: Action, work: str, fd: int, mut used: int) -> () ! {
@@ -317,7 +356,12 @@ fn execute_plan(mut lg: Log, p: Plan, source: str, payload: str, tools: str, wor
     fs_sync(fd) else |_| { return io }
     var used = 0
     disk_log(mut lg, fd, mut used, "plan", "confirmed", plan_text(p))?
-    for action in commands { run_action(mut lg, action, work, fd, mut used)? }
+    for action in commands {
+        run_action(mut lg, action, work, fd, mut used)?
+        // px86: the new table first, then the zero phases, before any
+        // formatter or Limine writes (a used disk's old bytes, plan.lu).
+        if action.phase == "gpt" { for w in wipes(p) { zero_ranges(mut lg, fd, mut used, w)? } }
+    }
     say(mut lg, "Formatter children peak RSS: {measured_peak(-1)}")
     let dump = fs_read_text("{work}/verify-gpt.out") else |_| { return io }
     if !dump.lower().contains(new_partuuid(p.seed)) {
