@@ -201,6 +201,11 @@ and writes only after the word `yes` (anything else cancels). It is an explicit 
   demo's marked Games directory is never copied implicitly), and a custom source tree with a Games directory already
   present is still refused;
 - it writes with `paxgpt`, `paxfat` and `paxext2`, PAX's own disk tools (below), not embedded formatters;
+- a used disk is fine: after the new table and before any formatter or Limine, it zeroes the BIOS boot partition
+  whole (an older install's first partition at sector 2048 leaves its file system there, and Limine refuses to
+  install over one), the first and last MiB of the EFI partition and the root, the first MiB outside the table and
+  the log, and the sectors before the backup table, each a phase of the plan and the log
+  ([A used disk](docs/BOOT.md#a-used-disk-px86));
 - it writes only to a disk whose model and serial are on the install allow-list, `/pax/install-targets` on the boot
   stick (shipped naming no disk; one `model=… serial=…` line a disk, copied from Linux's
   `/sys/block/sdX/device/{model,serial}`); every other disk is listed and refused by name, and the running root, a
@@ -212,12 +217,14 @@ and writes only after the word `yes` (anything else cancels). It is an explicit 
   passwordless entry.
 
 The installer and the installed tree are tested on separate QEMU virtio disks under BIOS and UEFI, including reboot
-persistence. The merge gate (`tier full`) also installs onto a sparse 500 GB disk and `tier all` onto 4 TB, each
-target then booted alone under both firmwares. `tests/mpx6-kasumi` (`tier full`) runs the whole path on a QEMU
-machine shaped like kasumi: OVMF, no serial port, the stick and the keyboard on one xHCI controller, an NVMe disk for
-CachyOS and three SATA disks; it installs to the listed disk through the keyboard, boots it alone, logs in and reads
-back a file written before the reboot, and holds every other disk byte-identical. Nothing here is a claim about a
-real machine: [docs/INSTALL-METAL.md](docs/INSTALL-METAL.md) is the runbook for kasumi. See
+persistence, and on used ones (an old ESP and root, an old root and swap, an old live image; `tools/used-disk`), each
+left with no signature but PAX's. The merge gate (`tier full`) also installs onto a sparse 500 GB disk and `tier all`
+onto 4 TB, each target then booted alone under both firmwares. `tests/mpx6-kasumi` (`tier full`) runs the whole path
+on a QEMU machine shaped like kasumi: OVMF, no serial port, the stick and the keyboard on one xHCI controller, an NVMe
+disk for CachyOS and three SATA disks; it installs to the listed disk through the keyboard, boots it alone, logs in
+and reads back a file written before the reboot, and holds every other disk byte-identical, then does it all again
+onto a used 1 TB disk shaped like kasumi's own target. Nothing here is a claim about a real machine:
+[docs/INSTALL-METAL.md](docs/INSTALL-METAL.md) is the runbook for kasumi. See
 [Guided installation](docs/BOOT.md#guided-installation).
 
 ## Seeing the screen
@@ -412,7 +419,7 @@ without it `tests/proof` skips that leg loudly, unless `PAX_REQUIRE_UEFI=1` (CI)
 | `kernel/` | the wolf kernel, one module per subsystem (`kernel/README.md`), its `wolf.pkg` and the wolf and lupin pins |
 | `boot/` | the Limine pin and configs, the kernel's entry and requests, port I/O, the control registers, the interrupt trampolines and the descriptor tables' storage (`start.S`, `io.S`, `cpu.S`, `isr.S`, `kernel.ld`), and the harness's assembly proof under `boot/stub/` |
 | `user/` | what the images carry: the pins of every shipped program (`*.pin`), the typed sessions (`console/`), `su`, the probes (`elf/`, `net/`), `play/` and `tunes/`, `disktools/` (paxgpt, paxfat, paxext2), `install/` (the guided installer), the fstabs and the shell's `$ENV` file |
-| `tools/` | the harness: the fetchers by digest (`fetch-limine`, `fetch-wolf`, `fetch-lupin`, `fetch-usb-linux`), the builders (`build-kernel`, `mkimage`, `mkdisk`, `mkdistribution`, `mkinstall`, `mkgames`, `mkfsck`, `mk*` for each program), the QEMU drivers (`qemu-run`, `qemu-halt`, `qemu-fault`, `qemu-gdb`, `expect-serial`), the Linux sides (`linux-run`, `linux-net`, `linux-tree`, `linux-blk`, `linux-part`), the network tools (`net-peer`, `pcap-net`, `gateway-probe`, `paxnet.py`, `paxtcp.py`), the font tools (`mkfont`, `screen-ref`), the USB tools (`check-usb`, `usb-write`, `usb-typing`) and CI's planner (`ci-plan`, `ci-tiers.map`, `ci-retry`) |
+| `tools/` | the harness: the fetchers by digest (`fetch-limine`, `fetch-wolf`, `fetch-lupin`, `fetch-usb-linux`), the builders (`build-kernel`, `mkimage`, `mkdisk`, `mkdistribution`, `mkinstall`, `mkgames`, `mkfsck`, `mk*` for each program), the QEMU drivers (`qemu-run`, `qemu-halt`, `qemu-fault`, `qemu-gdb`, `expect-serial`), the Linux sides (`linux-run`, `linux-net`, `linux-tree`, `linux-blk`, `linux-part`), the network tools (`net-peer`, `pcap-net`, `gateway-probe`, `paxnet.py`, `paxtcp.py`), the font tools (`mkfont`, `screen-ref`), the USB tools (`check-usb`, `usb-write`, `usb-typing`), the installer tests' used disks (`used-disk`) and CI's planner (`ci-plan`, `ci-tiers.map`, `ci-retry`) |
 | `font/` | the screen's font: Spleen 8×16 (BSD-2-Clause, with its licence), `extent.txt` (the code points drawn above U+00FF), `pax-extra.bdf` (PAX's own rows for the glyphs Spleen lacks) and `games-glyphs.txt` |
 | `tests/` | the suites above, each with its fixtures in `NAME.d/`; `ci-budgets.d/` |
 | `docs/` | `BOOT.md` (the boot protocol, the disks, the installer and rescue, argued), `SOURCES.md` (the consulted-sources log), `CENSUS.md` (every system call PAX serves, by name), `HISTORY.md` (how PAX got here, lane by lane) |
