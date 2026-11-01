@@ -48,6 +48,18 @@ var mask: u64 = 0
 var previous: u64 = 0
 var elapsed: u64 = 0
 var fraction: u64 = 0
+// px85: test words. kernel/kmain_metal.lu sets them from its command line
+// (`metal_stall_*`, `metal_hpet_*`) for tests/mpx6-metal's F1 legs; no
+// other kernel calls `test_stall` or `test_period`, so everywhere else
+// they stay inert. A stall spins `stall_ticks` PM ticks, once, at point
+// `stall_at` of the HPET's check (1 inside the measured window, 2 between
+// the window's closing PM read and its HPET read): to the two clocks the
+// same as a vCPU stall or an SMI there, since both count on through it.
+// `period_scale` misreports the HPET's period in thousandths (a lying
+// table: 1250 says each tick is 1.25 times what it is).
+var stall_at: u64 = 0
+var stall_ticks: u64 = 0
+var period_scale: u64 = 1000
 fn read32(a: u64) -> u64 { unsafe { (a as *u32).read_volatile() as u64 } }
 fn write32(a: u64, v: u64) { unsafe { (a as *u32).write_volatile(v as u32) } }
 fn raw() -> u64 {
@@ -77,7 +89,7 @@ fn try_hpet() -> bool {
     let mapped = paging.map(paging.cr3(), HPET_VA, physical & !4095, paging.NX | paging.RW | 24) else 9
     if mapped == 9 { return false }
     let a = HPET_VA + (physical & 4095)
-    let fs = read32(a + 4)
+    let fs = read32(a + 4) * unsafe { period_scale } / 1000
     if fs == 0 || fs > 100000000 { return false }
     unsafe { address = a; period = fs; mask = if read32(a) & 8192 != 0 { 0xffffffffffffffff } else { 0xffffffff }; source = 1 }
     // Main counter only: no comparator interrupt, no legacy replacement.
@@ -85,6 +97,24 @@ fn try_hpet() -> bool {
     advances()
 }
 fn pm() -> u64 { unsafe { pax_inl(acpi.pm_port() as u16) as u64 } & acpi.pm_mask() }
+
+/// px85's test words (above): a stall of `ticks` PM ticks at check point
+/// `at`, once; the HPET's period read as `permille` thousandths of itself.
+pub fn test_stall(at: u64, ticks: u64) { unsafe { stall_at = at; stall_ticks = ticks } }
+pub fn test_period(permille: u64) { unsafe { period_scale = permille } }
+fn stall(at: u64) {
+    if unsafe { stall_at } != at || unsafe { stall_ticks } == 0 { return }
+    var left = unsafe { stall_ticks }
+    unsafe { stall_ticks = 0 }
+    let m = acpi.pm_mask()
+    var last = pm()
+    while left > 0 {
+        let now = pm()
+        let d = (now + m + 1 - last) & m
+        last = now
+        left = if d >= left { 0 } else { left - d }
+    }
+}
 
 /// The PM timer counts (100,000 reads see it move).
 fn pm_advances() -> bool {
@@ -104,9 +134,11 @@ fn hpet_ns_per_10ms() -> u64 {
     var n: u64 = 0
     while a == first && n < 1000000 { a = pm(); n += 1 }
     let t0 = now_ns()
+    stall(1)
     var b = a
     n = 0
     while ((b + m + 1 - a) & m) < 35795 && n < 100000000 { b = pm(); n += 1 }
+    stall(2)
     let t1 = now_ns()
     if ((b + m + 1 - a) & m) < 35795 { 0 } else { t1 - t0 }
 }
