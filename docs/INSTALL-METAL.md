@@ -26,6 +26,14 @@ kasumi's own disks are never to appear in the file:
 Under PAX the disk names can differ from CachyOS's (PAX names SATA disks in port order, then USB disks). The model and
 serial are what the list matches, never the name.
 
+The target may hold anything: an older install's partitions and file systems are fine, and all of it is erased. After
+writing the new partition table and before anything else, the installer zeroes the old disk's bytes where they would
+still be read: all of the BIOS boot partition (partition 3, bytes 1 MiB to 2 MiB), the first and last MiB of the EFI
+partition and of the root, the first MiB outside the partition table and the phase log, and the few sectors before
+the backup table. The install log names these phases `zero-bios`, `zero-esp`, `zero-root` and `zero-gap`. (Before
+px86 nothing cleared partition 3, and on kasumi's 860, whose old first partition began at sector 2048, Limine found
+the old file system there and refused; see the end of this page.)
+
 ## What you need
 
 - The stick, written from the PAX image with balenaEtcher (or `tools/usb-write`), as for px77.
@@ -170,10 +178,11 @@ pax-install
 5. Type `yes` (lowercase) and Enter. Anything else (`y`, `YES`, `q`, an empty line) cancels with nothing written;
    run `pax-install` again.
 
-The installer stages the live system, then writes the partition table, the EFI partition, the root and Limine,
-saying `durable` after each phase. In the QEMU rehearsal onto a 500 GB disk it took 24 s from the confirmation
-under KVM and 161 s under full emulation (the root's 7.8 GB of inode tables are written in full); a real SSD over
-SATA should be nearer the first. When it says `Installation complete` (`05-complete.png`), **photo 3**, then type `poweroff`.
+The installer stages the live system, then writes the partition table, zeroes the old disk's bytes where PAX's
+partitions go (`zero-bios`, `zero-esp`, `zero-root`, `zero-gap`: about 6 MiB in all), then writes the EFI
+partition, the root and Limine, saying `durable` after each phase. In the QEMU rehearsal onto a 500 GB disk it took
+24 s from the confirmation under KVM and 161 s under full emulation (the root's 7.8 GB of inode tables are written in
+full); a real SSD over SATA should be nearer the first. When it says `Installation complete` (`05-complete.png`), **photo 3**, then type `poweroff`.
 
 ## 6. The install log
 
@@ -220,3 +229,18 @@ order by itself, set Boot Option #1 back to CachyOS in setup (Boot, Boot Option 
   other disk. Running the installer again on the same target starts over.
 - The installed disk does not boot: photograph the screen, then boot the stick again and run `pax-install --check`;
   the target should now show `PAX's install layout`.
+- The install stops at the `limine` phase with Limine's own text:
+
+  ```text
+  error: The partition selected to install the BIOS boot code to contains
+         a recognised filesystem.
+         Pass `--force` to override these checks.
+         **ONLY DO THIS AT YOUR OWN RISK, DATA LOSS MAY OCCUR!**
+  Install failed, undoing work...
+  ```
+
+  That is a stick from before px86 (197330ad and older) on a used disk: nothing cleared partition 3, and the old
+  disk's first file system began there. A stick from px86 on zeroes it first (`phase zero-bios: durable` in the log),
+  so the message cannot come from the old disk. `pax-install` has no `--force`, and Limine's is never the answer: its
+  other checks stay on. Write a px86 stick (or later) and install again; the partly written target is simply erased
+  again.
