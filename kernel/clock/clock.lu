@@ -81,12 +81,18 @@ const BRACKET_TRIES: u64 = 64 // brackets taken at one end before no verdict
 const WINDOWS: u64 = 3 // windows measured before the HPET is refused unmeasured
 const LONGEST_NS: u64 = 2000000000 // a longer window may hide a PM wrap
 const PERMILLE: u64 = 10 // R-px85-1: 1% either way
-// The last window's numbers, for the line that refuses, and how many
-// windows and retaken brackets the check needed (kernel/kmain_metal).
+// The last window's numbers, for the line that refuses, and what the
+// check needed (kernel/kmain_metal prints it): windows measured, those of
+// them too long to trust, brackets taken again, and those of them a test
+// word's stall widened. Under TCG a plain boot retakes its first bracket
+// once: QEMU translating the loop the first time costs host time while
+// both clocks run.
 var check_hpet_ns: u64 = 0
 var check_pm_ns: u64 = 0
 var check_windows: u64 = 0
+var check_long: u64 = 0
 var check_retaken: u64 = 0
+var check_stall_retaken: u64 = 0
 fn read32(a: u64) -> u64 { unsafe { (a as *u32).read_volatile() as u64 } }
 fn write32(a: u64, v: u64) { unsafe { (a as *u32).write_volatile(v as u32) } }
 fn raw() -> u64 {
@@ -129,8 +135,8 @@ fn pm() -> u64 { unsafe { pax_inl(acpi.pm_port() as u16) as u64 } & acpi.pm_mask
 /// `at`, once; the HPET's period read as `permille` thousandths of itself.
 pub fn test_stall(at: u64, ticks: u64) { unsafe { stall_at = at; stall_ticks = ticks } }
 pub fn test_period(permille: u64) { unsafe { period_scale = permille } }
-fn stall(at: u64) {
-    if unsafe { stall_at } != at || unsafe { stall_ticks } == 0 { return }
+fn stall(at: u64) -> bool {
+    if unsafe { stall_at } != at || unsafe { stall_ticks } == 0 { return false }
     var left = unsafe { stall_ticks }
     unsafe { stall_ticks = 0 }
     let m = acpi.pm_mask()
@@ -141,6 +147,7 @@ fn stall(at: u64) {
         last = now
         left = if d >= left { 0 } else { left - d }
     }
+    true
 }
 
 /// The PM timer counts (100,000 reads see it move).
@@ -168,11 +175,12 @@ fn bracket(at: u64) -> (bool, u64, u64, u64) {
     var n: u64 = 0
     while n < BRACKET_TRIES {
         let p = pm()
-        stall(at)
+        let stalled = stall(at)
         let h = raw()
         let q = pm()
         if pm_since(p, q) <= BRACKET { return (true, p, h, q) }
         unsafe { check_retaken += 1 }
+        if stalled { unsafe { check_stall_retaken += 1 } }
         n += 1
     }
     (false, 0, 0, 0)
@@ -187,7 +195,7 @@ fn bracket(at: u64) -> (bool, u64, u64, u64) {
 fn measure() -> u64 {
     let (ok0, p0, h0, q0) = bracket(0)
     if !ok0 { return 2 }
-    stall(1)
+    let _stalled = stall(1)
     var b = q0
     var n: u64 = 0
     while pm_since(p0, b) < WINDOW && n < 100000000 { b = pm(); n += 1 }
@@ -204,13 +212,19 @@ fn measure() -> u64 {
     let lo = pm_ns(pm_since(q0, p1))
     let hi = pm_ns(pm_since(p0, q1))
     unsafe { check_hpet_ns = hns; check_pm_ns = (lo + hi) / 2 }
-    if hns > LONGEST_NS || hi > LONGEST_NS { return 2 }
+    if hns > LONGEST_NS || hi > LONGEST_NS {
+        unsafe { check_long += 1 }
+        return 2
+    }
     if hns * 1000 >= lo * (1000 - PERMILLE) && hns * 1000 <= hi * (1000 + PERMILLE) { 0 } else { 1 }
 }
 
-/// How many windows the HPET's check measured and how many brackets it
-/// took again (kernel/kmain_metal prints them for tests/mpx6-metal).
-pub fn check_counts() -> (u64, u64) { (unsafe { check_windows }, unsafe { check_retaken }) }
+/// What the HPET's check needed: (windows, windows too long, brackets
+/// taken again, brackets a test word's stall widened); kernel/kmain_metal
+/// prints them for tests/mpx6-metal.
+pub fn check_counts() -> (u64, u64, u64, u64) {
+    (unsafe { check_windows }, unsafe { check_long }, unsafe { check_retaken }, unsafe { check_stall_retaken })
+}
 
 fn begin() { unsafe { previous = raw(); elapsed = 0; fraction = 0 } }
 
