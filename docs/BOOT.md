@@ -916,6 +916,42 @@ refused. The root is capped at 17,592,186,040,320 bytes; any remaining
 capacity is listed separately as `unused_bytes`, not hidden in GPT's
 tail reservation. No rescue initramfs is added.
 
+### A used disk (px86)
+
+A target that held an older install is erased like a blank one, but the
+formatters write only what they own, so the old disk's bytes survive
+wherever PAX's layout leaves a byte unwritten. One place mattered at once:
+an old first partition at sector 2048, the usual 1 MiB alignment, puts its
+file system's first sectors exactly in PAX's BIOS boot partition, and
+Limine's `bios-install` refuses a partition holding a recognised file
+system (`error: The partition selected to install the BIOS boot code to
+contains a recognised filesystem.`, then `Install failed, undoing work...`;
+kasumi's 860, 2026-10-31). Limine's `--force` is never passed: its other
+checks stay live. So after the new table and before any formatter or
+Limine writes, the installer zeroes four ranges itself, through the
+target's own claimed descriptor, each a phase in the disk log and a line
+of the plan (`wipes` in `plan.lu`, `zero_ranges` in `execute.lu`), each
+fsynced and read back as zeros:
+
+| phase | bytes | why |
+|---|---|---|
+| `zero-bios` | partition 3 whole, `[1048576, 2097152)` | Limine refuses an old file system there |
+| `zero-esp` | partition 1's first and last MiB | a probe reads a signature at either end |
+| `zero-root` | partition 2's first and last MiB | the same; an old partition that ran to the disk's end left its end-of-volume metadata here |
+| `zero-gap` | `[17408, 65536)`, `[131072, 1048576)`, the sectors between the root's end and the backup table (and the last MiB before them when the ext2 bound leaves capacity unused) | an old ISO 9660 descriptor at byte 32768 made Limine take the disk for an isohybrid and try to convert its table; an old partition's last sector |
+
+The log's `[65536, 131072)` and the primary and backup tables are never in
+a range (`planner.lu` holds every size to that). What stays: the old bytes
+inside the partitions, which no tool reads as PAX's (an old ext4's backup
+superblocks inside the new root, an old FAT's clusters inside the new
+ESP). Erasing those is a whole-disk wipe (at a SATA SSD's 500 MB/s, an
+estimated half hour for 1 TB), which the installer does not do; the four
+phases write 6,212,096 bytes on the 860's 1 TB. `tools/used-disk` lays
+the tests' used disks down and is their oracle: after an install, `wipefs`
+and `blkid -p` find the protective MBR and the two GPT headers on the whole
+disk, `vfat` alone in partition 1, `ext2` alone in partition 2 and nothing
+in partition 3.
+
 ### The install allow-list and the stick's log (px78)
 
 The installer writes only to a disk named, by its model and serial, in an
