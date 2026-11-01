@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# tests/mpx6-firmware.d/stall — F8, kasumi's shape (UEFI, 3840x2160, no
+# COM1, no PIT, the NEC xHCI on MSI behind a high BAR, the transcript read
+# from PAX's memory), run N times under a forced vCPU stall (px85: pax#260
+# and pax#261, the two stall-sensitive checks that reddened trunk 8495bdc0).
+#
+#   stall --tree DIR --out DIR [--runs N] [--cpus "1 2 3 4 5"]
+#         [--tier release|native] [--load BUSY/IDLE | --no-load]
+#
+# The leg is the tree's own. The F8 block of TREE/tests/mpx6-firmware,
+# from its copy of boot/limine-initramfs.conf to its `row "F8 …"`, is cut
+# out and run as it stands, with TREE's tools/lib.sh, tools/usb-session
+# and kernel: a run of trunk's tree is trunk's F8, a run of the branch's
+# is the branch's (the high-BAR witness before it is left out: it does not
+# depend on time). The images are built as tests/mpx6-usb builds them
+# (the probe, its initramfs, TREE/kernel/kmain_console.lu at the tier).
+#
+# The stall. Each run's QEMU, every thread of it, is pinned to one CPU of
+# the list at nice 19 (PAX_QEMU, tools/qemu-run's own hook), beside one
+# busy process at nice 0 pinned to the same CPU, which spins BUSY ms and
+# sleeps IDLE ms (default 50/50: a 50% duty cycle). While it spins, the
+# scheduler gives QEMU the share of weight 15 against 1024 (about 1.4%),
+# so the vCPU stalls for most of each busy phase, as on a contended runner:
+# the guest's HPET and PM timer count on through the stall, its LAPIC
+# ticks coalesce. The harness itself (usb-session, qemu-run) runs on CPU 0.
+# One run per CPU at once; N runs take ceil(N / CPUs) rounds. --no-load
+# runs the same pinning without the busy processes (the control).
+#
+# OUT/runs.tsv: one line a run, its exit status, its time, and from its
+# own transcript which check broke: the clock line, the repeat row's
+# report count (and the guest's hold where usb-session recorded one), the
+# leg's failing line. Exit 0 when every run's leg exited 0.
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+tree= out= runs=20 cpus='1 2 3 4 5' tier=release busy=50 idle=50 load=1
+while [ $# -gt 0 ]; do
+    case $1 in
+        --tree) tree=$(cd "$2" && pwd); shift 2;;
+        --out) out=$2; shift 2;;
+        --runs) runs=$2; shift 2;;
+        --cpus) cpus=$2; shift 2;;
+        --tier) tier=$2; shift 2;;
+        --load) busy=${2%/*} idle=${2#*/}; shift 2;;
+        --no-load) load=0; shift;;
+        *) echo "usage: stall --tree DIR --out DIR [--runs N] [--cpus LIST] [--tier release|native] [--load BUSY/IDLE | --no-load]" >&2; exit 2;;
+    esac
+done
+[ -n "$tree" ] && [ -n "$out" ] || { echo 'stall: --tree and --out are required' >&2; exit 2; }
+case $tier in release) bflags=(--release);; native) bflags=();; *) echo 'stall: bad tier' >&2; exit 2;; esac
+case $busy$idle in *[!0-9]*|'') echo 'stall: --load takes BUSY/IDLE in ms' >&2; exit 2;; esac
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+export PAX_BUILD=$out/build
+images=$out/images
+log() { printf '%s stall: %s\n' "$(date -u +%FT%TZ)" "$*"; }
+
+# The tree's F8 block, cut out by its first and last lines.
+block=$out/f8-block.sh
+awk '/^    cp "\$PAX_ROOT\/boot\/limine-initramfs\.conf" "\$k\/limine\.conf"$/ { on = 1 }
+     on { print }
+     /^    row "F8 \$t: / { on = 0 }' "$tree/tests/mpx6-firmware" > "$block"
+grep -q 'tools/usb-session' "$block" && grep -q '^    row "F8 ' "$block" \
+    || { echo "stall: no F8 block in $tree/tests/mpx6-firmware" >&2; exit 2; }
+log "tree $(git -C "$tree" rev-parse HEAD 2>/dev/null || echo '?'), F8 block $(wc -l < "$block") lines, sha256 $(sha256sum "$block" | cut -d' ' -f1)"
+
+# The images, as tests/mpx6-usb builds them.
+if [ ! -f "$images/kmain_console.elf" ] || [ ! -f "$images/probe.cpio" ]; then
+    mkdir -p "$images"
+    cc -static -O1 -Wall -Wextra -o "$images/usbkeys" "$tree/user/elf/usbkeys.c"
+    printf '/bin/usbkeys\n' > "$images/run"
+    "$tree/tools/mkinitramfs" "$images/probe.cpio" "/bin/usbkeys=$images/usbkeys" "/etc/pax-run=$images/run" "/usbkeys=$images/usbkeys"
+    "$tree/tools/fetch-limine"
+    "$tree/tools/build-kernel" ${bflags[@]+"${bflags[@]}"} --src "$tree/kernel/kmain_console.lu" "$images"
+fi
+log "images: kmain_console.elf sha256 $(sha256sum "$images/kmain_console.elf" | cut -d' ' -f1), tier $tier"
+
+# One run: the block in a shell of its own, QEMU through the lane's wrapper.
+run_one() { # n cpu
+    local n=$1 cpu=$2 d=$out/run-$(printf %02d "$1") t0 rc=0
+    rm -rf "$d"; mkdir -p "$d"
+    printf '#!/bin/sh\nexec nice -n 19 taskset -c %s qemu-system-x86_64 "$@"\n' "$cpu" > "$d/qemu"
+    chmod +x "$d/qemu"
+    { printf 'set -euo pipefail\n. "%s/tools/lib.sh"\nrow() { echo "PASS $*"; }\nt=%s k=%s images=%s\n' \
+        "$tree" "$tier" "$d" "$images"; cat "$block"; } > "$d/leg.sh"
+    t0=$(date +%s)
+    PAX_QEMU=$d/qemu taskset -c 0 bash "$d/leg.sh" > "$d/leg.log" 2>&1 || rc=$?
+    echo "$rc $(( $(date +%s) - t0 ))" > "$d/rc"
+    # Keep the transcripts; drop the bulky inputs and the screen.
+    rm -f "$d/kasumi.iso" "$d/session/screen.ppm" "$d/session/superspeed.img" "$d/session/capture.bin" "$d/session/count.bin"
+}
+
+# The load: one busy process per CPU, ended by the stop file, never killed.
+stop=$out/stop
+rm -f "$stop"
+hogs=()
+if [ "$load" = 1 ]; then
+    for c in $cpus; do
+        taskset -c "$c" python3 -I -c '
+import os, sys, time
+busy, idle, stop = int(sys.argv[1]) / 1000, int(sys.argv[2]) / 1000, sys.argv[3]
+while not os.path.exists(stop):
+    end = time.monotonic() + busy
+    while time.monotonic() < end:
+        pass
+    time.sleep(idle)
+' "$busy" "$idle" "$stop" &
+        hogs+=($!)
+    done
+    log "load: ${#hogs[@]} busy processes (nice 0), ${busy} ms busy / ${idle} ms asleep, on CPUs $cpus; QEMU nice 19 on the same CPU"
+else
+    log "no load (the control): QEMU nice 19 alone on each of CPUs $cpus"
+fi
+
+n=1 pids=()
+while [ "$n" -le "$runs" ]; do
+    pids=()
+    for c in $cpus; do
+        [ "$n" -le "$runs" ] || break
+        run_one "$n" "$c" &
+        pids+=($!)
+        n=$((n + 1))
+    done
+    for p in "${pids[@]}"; do wait "$p" || true; done
+    log "round done: $((n - 1)) of $runs"
+done
+touch "$stop"
+for p in ${hogs[@]+"${hogs[@]}"}; do wait "$p" || true; done
+
+# The record.
+fails=0
+printf 'run\trc\tseconds\tclock\treports\thold\tfailure\n' > "$out/runs.tsv"
+for d in "$out"/run-*; do
+    read -r rc secs < "$d/rc"
+    s=$d/session/serial.log
+    clock=$(tr -d '\r' < "$s" 2>/dev/null | grep -a -m1 '^clock: ' || true)
+    case $clock in
+        *'checked against the PM timer') clock=HPET-checked;;
+        *refused*) clock="HPET-refused: ${clock#clock: }";;
+        '') clock=none;;
+    esac
+    reports=$(tr -d '\r' < "$s" 2>/dev/null | awk '/^USBROW repeat-a / { n = NF - 2 } END { print n + 0 }')
+    hold=$(sed -n 's/^hold_ticks //p' "$d/session/repeat.txt" 2>/dev/null || true)
+    why=
+    if [ "$rc" != 0 ]; then
+        fails=$((fails + 1))
+        why=$(grep -a -E 'Error: |FAIL ' "$d/leg.log" | head -n 2 | tr '\n' ' ' | sed 's/\t/ /g')
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${d##*/}" "$rc" "$secs" "$clock" "$reports" "${hold:--}" "$why" >> "$out/runs.tsv"
+done
+cat "$out/runs.tsv"
+log "$((runs - fails)) of $runs green"
+[ "$fails" = 0 ]
